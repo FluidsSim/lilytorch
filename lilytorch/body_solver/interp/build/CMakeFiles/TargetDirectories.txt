@@ -1,0 +1,3 @@
+/data/andreaferrario/navier_stokes/lilytorch/body_solver/interp/build/CMakeFiles/interp.dir
+/data/andreaferrario/navier_stokes/lilytorch/body_solver/interp/build/CMakeFiles/edit_cache.dir
+/data/andreaferrario/navier_stokes/lilytorch/body_solver/interp/build/CMakeFiles/rebuild_cache.dir

@@ -1,0 +1,503 @@
+
+import torch
+from pytorch_interp import RegularGridInterpolator
+
+class AdvDiffSolver:
+    """
+    Solver class for the advection-diffusion equation
+    """
+
+    def __init__(self,
+                 device,
+                 dt,
+                 x,
+                 y,
+                 nu,
+                 BC_type_u=["D","D","D","D"], # w,o,s,n
+                 BC_values_u=[0,0,0,0],
+                 BC_type_v=["D","D","D","D"], # w,o,s,n
+                 BC_values_v=[0,0,0,0],
+                 method="implicit"
+                 ):
+        """
+        x        : x-domain
+        y        : y-domain
+        dt       : time step
+        nu       : diffusion coefficient
+        type     : quick or explicit solver
+        """
+
+        self.device=device
+
+        self.dt = dt
+        dx=x[1]-x[0]
+        dy=y[1]-y[0]
+        self.dx = dx
+        self.dy = dy
+        self.dtdx = dt / dx
+        self.dtdy = dt / dy
+        self.dtdx2 = self.dtdx/dx
+        self.dtdy2 = self.dtdy/dy
+        self.nu = nu
+
+        self.C = 0.1
+        self.C2 = self.C**2
+
+        self.x = x
+        self.y = y
+        self.nx = len(x)
+        self.ny = len(y)
+        self.nm2 = self.nx-2
+        self.ADBzeros = torch.zeros(self.nm2,self.nm2, device=self.device)
+        self.ADBones = torch.ones(self.nm2,self.nm2, device=self.device)
+
+        self.X, self.Y = torch.meshgrid(x,y, indexing="ij")
+        self.X = self.X.to(device)
+        self.Y = self.Y.to(device)
+        self.xflat = self.X.flatten()
+        self.yflat = self.Y.flatten()
+
+        # dummy initialization for the implicit solver
+        self.gu = RegularGridInterpolator((x,y), torch.zeros_like(self.X, device=self.device), fill_value=None)
+        self.gv = RegularGridInterpolator((x,y), torch.zeros_like(self.X, device=self.device), fill_value=None)
+
+        self.BC_type_u   = BC_type_u
+        self.BC_values_u = BC_values_u
+        self.BC_type_v   = BC_type_v
+        self.BC_values_v = BC_values_v
+
+        if method == "implicit":
+            self.solve = self.solve_implicit
+        elif method == "explicit":
+            self.solve = self.solve_explicit
+        elif method == "quick":
+            self.solve = self.solve_FLUXLMT
+        elif method == "abdquickest":
+            self.solve = self.solve_ADBQUICKEST
+        else:
+            raise("Error: the convection solver method {} does not exist".format(method))
+
+        print("Using the {} method for the adv-diff equation".format(method))
+
+    def clf(self, u, v):
+        vel_max = torch.max(
+            torch.max(torch.abs(u)),
+            torch.max(torch.abs(v))
+            )
+        self.dt = self.dx/(vel_max*+3*self.nu)
+
+
+    def solve_explicit(self, u, v):
+        """
+        explicit solver
+        """
+
+        u[1:-1, 1:-1] = (
+            u[1:-1, 1:-1]-
+            self.dtdx*u[1:-1,1:-1]*(u[1:-1,1:-1]-u[:-2,1:-1]) -
+            self.dtdy*v[1:-1,1:-1]*(u[1:-1,1:-1]-u[1:-1,:-2]) +
+            self.nu*self.dtdx2*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
+            self.nu*self.dtdx2*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
+        )
+        v[1:-1, 1:-1] = (
+            v[1:-1, 1:-1]-
+            self.dtdx*u[1:-1,1:-1]*(v[1:-1,1:-1]-v[:-2,1:-1]) -
+            self.dtdy*v[1:-1,1:-1]*(v[1:-1,1:-1]-v[1:-1,:-2]) +
+            self.nu*self.dtdx2*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1]) +
+            self.nu*self.dtdx2*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])
+        )
+
+        return (u,v)
+
+    def med(self, a, b, c):
+        return torch.max(torch.min(a,b), torch.min(torch.max(a,b), c))
+
+    def FLUXLMT_rule(self, bf, phiU, phiD, phiR): # correspond to (C,D,U) in LilyPad notation
+        bf -= (phiD-2*phiU+phiR)/6
+        b1 = phiR+10*(phiU-phiR)
+        return self.med(bf, phiU, self.med(phiU, phiD, b1))
+
+    def phi_wLMT(self, F, phi):
+        bf=0.5*(phi[:-2,1:-1]+phi[1:-1,1:-1])
+        bf[1:-1,1:-1] = torch.where(
+            F[1:-1,1:-1]>0,
+            self.FLUXLMT_rule(bf[1:-1,1:-1], phi[1:-3,2:-2],phi[2:-2,2:-2],phi[:-4,2:-2]),
+            self.FLUXLMT_rule(bf[1:-1,1:-1], phi[2:-2,2:-2],phi[1:-3,2:-2],phi[3:-1,2:-2]),
+        )
+        return bf
+
+    def phi_sLMT(self, F, phi):
+        bf=0.5*(phi[1:-1,:-2]+phi[1:-1,1:-1])
+        bf[1:-1,1:-1] = torch.where(
+            F[1:-1,1:-1]>0,
+            self.FLUXLMT_rule(bf[1:-1,1:-1], phi[2:-2,1:-3],phi[2:-2,2:-2],phi[2:-2,:-4]),
+            self.FLUXLMT_rule(bf[1:-1,1:-1], phi[2:-2,2:-2],phi[1:-3,2:-2],phi[2:-2,3:-1]),
+        )
+        return bf
+
+    def phi_eLMT(self, F, phi):
+        bf=0.5*(phi[2:,1:-1]+phi[1:-1,1:-1])
+        bf[1:-1,1:-1] = torch.where(
+            F[1:-1,1:-1]>0,
+            self.FLUXLMT_rule(bf[1:-1,1:-1], phi[2:-2,2:-2],phi[3:-1,2:-2],phi[1:-3,2:-2]),
+            self.FLUXLMT_rule(bf[1:-1,1:-1], phi[3:-1,2:-2],phi[2:-2,2:-2],phi[4:,2:-2]),
+        )
+        return bf
+
+    def phi_nLMT(self, F, phi):
+        bf=0.5*(phi[1:-1,2:]+phi[1:-1,1:-1])
+        bf[1:-1,1:-1] = torch.where(
+            F[1:-1,1:-1]>0,
+            self.FLUXLMT_rule(bf[1:-1,1:-1], phi[2:-2,2:-2],phi[2:-2,3:-1],phi[2:-2,1:-3]),
+            self.FLUXLMT_rule(bf[1:-1,1:-1], phi[2:-2,3:-1],phi[2:-2,2:-2],phi[2:-2,4:]),
+        )
+        return bf
+
+    def solve_FLUXLMT(self, u, v):
+
+        uw = 0.5*(u[:-2,1:-1]+u[1:-1,1:-1])
+        ue = 0.5*(u[2:,1:-1]+u[1:-1,1:-1])
+        vs = 0.5*(v[1:-1,:-2]+v[1:-1,1:-1])
+        vn = 0.5*(v[1:-1,2:]+v[1:-1,1:-1])
+
+        u[1:-1,1:-1] = (
+                        u[1:-1,1:-1]+
+                        self.dtdx*(uw*self.phi_wLMT(uw,u)-ue*self.phi_eLMT(ue,u))+
+                        self.dtdy*(vs*self.phi_sLMT(vs,u)-vn*self.phi_nLMT(vn,u))+
+                        self.nu*self.dtdx2*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
+                        self.nu*self.dtdx2*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
+                        )
+
+        v[1:-1,1:-1] = (
+                        v[1:-1,1:-1]+
+                        self.dtdx*(uw*self.phi_wLMT(uw,v)-ue*self.phi_eLMT(ue,v))+
+                        self.dtdy*(vs*self.phi_sLMT(vs,v)-vn*self.phi_nLMT(vn,v))+
+                        self.nu*self.dtdx2*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1]) +
+                        self.nu*self.dtdx2*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])
+                        )
+
+        return (u,v)
+
+
+
+    def psi(self, rf):
+        # ADBQUICKEST
+        return torch.max(
+            torch.zeros_like(rf, device=self.device),
+            torch.min(
+                2.0*rf*(1.0-self.C),
+                torch.min(
+                    (2.0+self.C2-3.0*self.C+(1.0-self.C2)*rf)/(3.0-3.0*self.C),
+                    2.0*(1.0-self.C)*torch.ones_like(rf, device=self.device)
+                    )
+                )
+            )
+        # # CUBISTA
+        # return torch.max(
+        #     torch.zeros_like(rf),
+        #     torch.min(
+        #         (3/2)*rf,
+        #         torch.min(
+        #             (3/4)*rf+1/4,
+        #             (3/2)*torch.ones_like(rf)
+        #             )
+        #         )
+        #     )
+
+    def ADBQUICKEST_rule(self, phiU, phiD, phiR):
+        return torch.where(
+            phiD==phiU,
+            phiU,
+            phiU+0.5*(phiD-phiU)*self.psi((phiU-phiR)/(phiD-phiU))
+        )
+
+    def phi_w(self, F, phi):
+        out = torch.zeros((self.nm2,self.nm2), device=self.device)
+        out[1:,:]=torch.where(
+            F[1:,:]>0,
+            self.ADBQUICKEST_rule(phi[1:-2,1:-1], phi[2:-1,1:-1], phi[:-3,1:-1]),
+            self.ADBQUICKEST_rule(phi[2:-1,1:-1], phi[1:-2,1:-1], phi[3:,1:-1])
+        )
+        out[0,:]=torch.where(
+            F[0,:]>0,
+            0.5*(phi[0,1:-1]+phi[1,1:-1]),
+            self.ADBQUICKEST_rule(phi[1,1:-1], phi[0,1:-1], phi[2,1:-1])
+        )
+        return out
+
+    def phi_s(self, F, phi):
+        out = torch.zeros((self.nm2,self.nm2), device=self.device)
+        out[:,1:]=torch.where(
+            F[:,1:]>0,
+            self.ADBQUICKEST_rule(phi[1:-1,1:-2], phi[1:-1,2:-1], phi[1:-1,:-3]),
+            self.ADBQUICKEST_rule(phi[1:-1,2:-1], phi[1:-1,1:-2], phi[1:-1,3:])
+        )
+        out[:,0]=torch.where(
+            F[:,0]>0,
+            0.5*(phi[1:-1,0]+phi[1:-1,1]),
+            self.ADBQUICKEST_rule(phi[1:-1,1], phi[1:-1,0], phi[1:-1,2])
+        )
+        return out
+
+    def phi_e(self, F, phi):
+        out = torch.zeros((self.nm2,self.nm2), device=self.device)
+        out[:-1,:]=torch.where(
+            F[:-1,:]>0,
+            self.ADBQUICKEST_rule(phi[1:-2,1:-1], phi[2:-1,1:-1], phi[:-3,1:-1]),
+            self.ADBQUICKEST_rule(phi[2:-1,1:-1], phi[1:-2,1:-1], phi[3:,1:-1])
+        )
+        out[-1,:]=torch.where(
+            F[0,:]<0,
+            0.5*(phi[-1,1:-1]+phi[-2,1:-1]),
+            self.ADBQUICKEST_rule(phi[-2,1:-1], phi[-1,1:-1], phi[-3,1:-1])
+        )
+        return out
+
+    def phi_n(self, F, phi):
+        out = torch.zeros((self.nm2,self.nm2), device=self.device)
+        out[:,:-1]=torch.where(
+            F[:,:-1]>0,
+            self.ADBQUICKEST_rule(phi[1:-1,1:-2], phi[1:-1,2:-1], phi[1:-1,:-3]),
+            self.ADBQUICKEST_rule(phi[1:-1,2:-1], phi[1:-1,1:-2], phi[1:-1,3:])
+        )
+        out[:,-1]=torch.where(
+            F[:,0]<0,
+            0.5*(phi[1:-1,-1]+phi[1:-1,-2]),
+            self.ADBQUICKEST_rule(phi[1:-1,-2], phi[1:-1,-1], phi[1:-1,-3])
+        )
+        return out
+
+    def solve_ADBQUICKEST(self, u, v):
+
+        uw = 0.5*(u[:-2,1:-1]+u[1:-1,1:-1])
+        ue = 0.5*(u[2:,1:-1]+u[1:-1,1:-1])
+        vs = 0.5*(v[1:-1,:-2]+v[1:-1,1:-1])
+        vn = 0.5*(v[1:-1,2:]+v[1:-1,1:-1])
+
+        u[1:-1,1:-1] = (
+                        u[1:-1,1:-1]+
+                        self.dtdx*(uw*self.phi_w(uw,u)-ue*self.phi_e(ue,u))+
+                        self.dtdy*(vs*self.phi_s(vs,u)-vn*self.phi_n(vn,u))+
+                        self.nu*self.dtdx2*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
+                        self.nu*self.dtdx2*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
+                        )
+        v[1:-1,1:-1] = (
+                        v[1:-1,1:-1]+
+                        self.dtdx*(uw*self.phi_w(uw,v)-ue*self.phi_e(ue,v))+
+                        self.dtdy*(vs*self.phi_s(vs,v)-vn*self.phi_n(vn,v))+
+                        self.nu*self.dtdx2*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1]) +
+                        self.nu*self.dtdx2*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])
+                        )
+
+        return (u,v)
+
+
+
+    def solve_implicit(self, u, v):
+        """
+        Implicit solver based on Staam, 1999 where
+        u_new(x,y) = u(x-dt*u(x,y), y-dt*v(x,y)) [linearly interpolated]
+        """
+        xold = self.xflat-u.flatten()*self.dt
+        yold = self.yflat-v.flatten()*self.dt
+
+        self.gu.F = u
+        self.gv.F = v
+        u = self.gu(xold, yold).reshape(self.X.shape).clone().detach()
+        v = self.gv(xold, yold).reshape(self.X.shape).clone().detach()
+
+        u[1:-1,1:-1] += (
+                        self.nu*self.dtdx2*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
+                        self.nu*self.dtdx2*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
+                        )
+        v[1:-1,1:-1] += (
+                        self.nu*self.dtdx2*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1]) +
+                        self.nu*self.dtdx2*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])
+                        )
+
+        return (u,v)
+
+    def Neumann_BC(self, u, v):
+        u[0, :]  = u[1, :]
+        u[-1, :] = u[-2, :]
+        u[:, 0]  = u[:, 1]
+        u[:, -1] = u[:, -2]
+        v[0, :]  = v[1, :]
+        v[-1, :] = v[-2, :]
+        v[:, 0]  = v[:, 1]
+        v[:, -1] = v[:, -2]
+
+    def Dirichlet_BC(self, u, v):
+        u[0, :]  = 0
+        u[-1, :] = 0
+        u[:, 0]  = 0
+        u[:, -1] = 0
+        v[0, :]  = 0
+        v[-1, :] = 0
+        v[:, 0]  = 0
+        v[:, -1] = 0
+
+
+
+    def set_BCs(self, u, v):
+
+        # u
+        if self.BC_type_u[1]=="D":
+            u[-1,:]=self.BC_values_u[1]
+        elif self.BC_type_u[1]=="N":
+            u[-1,:] = u[-2,:]
+
+        if self.BC_type_u[2]=="D":
+            u[:,0]=self.BC_values_u[2]
+        elif self.BC_type_u[2]=="N":
+            u[:,0] = u[:,1]
+
+        if self.BC_type_u[3]=="D":
+            u[:,-1]=self.BC_values_u[3]
+        elif self.BC_type_u[3]=="N":
+            u[:,-1] = u[:,-2]
+
+        if self.BC_type_u[0]=="D":
+            u[0,:]=self.BC_values_u[0]
+        elif self.BC_type_u[0]=="N":
+            u[0,:] = u[1,:]
+
+        # v
+        if self.BC_type_v[1]=="D":
+            v[-1,:]=self.BC_values_v[1]
+        elif self.BC_type_v[1]=="N":
+            v[-1,:] = v[-2,:]
+
+        if self.BC_type_v[2]=="D":
+            v[:,0]=self.BC_values_v[2]
+        elif self.BC_type_v[2]=="N":
+            v[:,0] = v[:,1]
+
+        if self.BC_type_v[3]=="D":
+            v[:,-1]=self.BC_values_v[3]
+        elif self.BC_type_v[3]=="N":
+            v[:,-1] = v[:,-2]
+
+        if self.BC_type_v[0]=="D":
+            v[0,:]=self.BC_values_v[0]
+        elif self.BC_type_v[0]=="N":
+            v[0,:] = v[1,:]
+
+if __name__ == "__main__":
+
+    use_gpu=True
+
+    if torch.cuda.is_available() and use_gpu:
+        print(f"Using GPU: {torch.cuda.get_device_name(0)} is available.")
+        device = torch.device("cuda")
+    else:
+        print("Using the CPU.")
+        device = torch.device("cpu")
+        torch.set_num_threads(8)
+
+    N      = 2**8
+    nt      = 1300
+    nu      = 0.01
+    dt      = 0.01
+    x=torch.linspace(-60,180,N)
+    y=torch.linspace(-60,180,N)
+
+    dx      = x[1]-x[0]
+    dy      = y[1]-y[0]
+    X, Y = torch.meshgrid(x, y, indexing="ij")
+    print("dt={}s, dx={}, N={}".format(dt, dx, N))
+
+    def initial_conditions():
+        u = torch.zeros((N,N))
+        v = torch.zeros((N,N))
+        nm=int(N/2)-int(30 / dy)
+        np=int(N/2)+int(30 / dy)
+        u[nm:np,nm:np] = 1
+        v[nm:np,nm:np] = 1
+        # Z=(-X**2-Y**2)/0.5
+        # u = torch.exp(Z/500-50)
+        # v = torch.exp(Z/500-50)
+        return (u,v)
+    (u0,v0) = initial_conditions()
+
+    x = x.to(device)
+    y = y.to(device)
+    u0 = u0.to(device)
+    v0 = v0.to(device)
+
+    solver = AdvDiffSolver(
+        device,
+        dt,
+        x,
+        y,
+        nu,
+        BC_type_u=["D","D","D","D"],
+        BC_values_u=[1,0,0,0],
+        BC_type_v=["D","D","D","D"],
+        BC_values_v=[0,0,0,0],
+        )
+
+    from matplotlib import pyplot
+    import time
+    fig, (ax_1, ax_2, ax_3, ax_4, ax_5) = pyplot.subplots(1, 5, figsize=(25,5))
+
+    CS1=ax_1.contourf(X, Y, u0.cpu(), 20)
+    ax_1.set_title("Initial")
+    fig.colorbar(CS1)
+
+    u=u0.clone().detach()
+    v=v0.clone().detach()
+    start = time.time()
+    for n in range(nt + 1):
+        (u,v) = solver.solve_explicit(u,v)
+        solver.set_BCs(u,v)
+    print("Upwind solver took {}s".format(time.time()-start))
+
+
+    CS2=ax_2.contourf(X, Y, u.cpu(), 20)
+    ax_2.set_title("Upwind")
+    fig.colorbar(CS2)
+
+
+    u=u0.clone().detach()
+    v=v0.clone().detach()
+    start = time.time()
+    for n in range(nt + 1):
+        (u,v) = solver.solve_implicit(u,v)
+        solver.set_BCs(u,v)
+    print("Implicit solver took {}s".format(time.time()-start))
+
+
+    CS3=ax_3.contourf(X, Y, u.cpu(), 20)
+    ax_3.set_title("implicit")
+    fig.colorbar(CS3)
+
+    u=u0.clone().detach()
+    v=v0.clone().detach()
+    start = time.time()
+    for n in range(nt + 1):
+        (u,v) = solver.solve_ADBQUICKEST(u,v)
+        solver.set_BCs(u,v)
+    print("ADBquickest solver took {}s".format(time.time()-start))
+
+
+    CS4=ax_4.contourf(X, Y, u.cpu(), 20)
+    ax_4.set_title("ADBquickest")
+    fig.colorbar(CS4)
+
+
+    # re-set initial conditions and solve using the quick method
+    u=u0.clone().detach()
+    v=v0.clone().detach()
+    start = time.time()
+    for n in range(nt + 1):
+        (u,v) = solver.solve_FLUXLMT(u,v)
+        solver.set_BCs(u,v)
+    print("Flux-LMT solver took {}s".format(time.time()-start))
+
+
+    CS5=ax_5.contourf(X, Y, u.cpu(), 20)
+    ax_5.set_title("Flux LMT")
+    fig.colorbar(CS5)
+
+    pyplot.show()

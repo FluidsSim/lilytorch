@@ -1,0 +1,315 @@
+
+import torch
+import numpy as np
+
+"""
+2d functions and solutions of the poisson equation
+"""
+
+def sincos_f(N):
+
+    x=torch.linspace(0,1,N)
+    y=torch.linspace(-0.5,0.5,N)
+    [X,Y]=torch.meshgrid(x,y)
+    c=torch.ones((N,N))
+    f=torch.sin(np.pi*X)*torch.cos(np.pi*Y)+torch.sin(5*np.pi*X)*torch.cos(5*np.pi*Y)
+    f[0,:]=0
+    f[-1,:]=0
+    f[:,0]=0
+    f[:,-1]=0
+
+    u_exact = (1/(2*np.pi*np.pi))*torch.sin(np.pi*X)*torch.cos(np.pi*Y)+(1/(50*np.pi*np.pi))*torch.sin(5*np.pi*X)*torch.cos(5*np.pi*Y)
+    return X, Y, u_exact, f, c, c, c
+
+
+def sine_f(N):
+
+    x=torch.linspace(0,1,N)
+    y=torch.linspace(-0.5,0.5,N)
+    [X,Y]=torch.meshgrid(x,y)
+    c=torch.ones((N,N))
+    f=2*(np.pi**2)*torch.sin(np.pi*X)*torch.cos(np.pi*Y)
+    f[0,:]=0
+    f[-1,:]=0
+    f[:,0]=0
+    f[:,-1]=0
+
+    u_exact = torch.sin(np.pi*X)*torch.cos(np.pi*Y)
+    return X, Y, u_exact, f, c, c, c
+
+
+def quadratic(N):
+
+    x=torch.linspace(0,1,N)
+    y=torch.linspace(0,1,N)
+    [X,Y]=torch.meshgrid(x,y)
+    c=torch.ones((N,N))
+
+    u_exact = X*Y*(1-X)*(1-Y)
+
+    f=-2*X*(X-1)-2*Y*(Y-1)
+    f[0,:]=0
+    f[-1,:]=0
+    f[:,0]=0
+    f[:,-1]=0
+
+    return X, Y, u_exact, f, c, c, c
+
+
+def exp_f(N):
+    """
+    Care: this is with diriclet BCs!!!
+    """
+
+    x=torch.linspace(0,1,N)
+    y=torch.linspace(-1,1,N)
+    [X,Y]=torch.meshgrid(x,y)
+    c=torch.ones((N,N))
+
+    xhat=0.25
+    yhat=-0.5
+    u_exact = torch.exp(-(X-xhat)**2-(Y-yhat)**2)
+
+    f=-4*((X-xhat)**2+(Y-yhat)**2)*u_exact+2*u_exact
+    f[0,:]=0
+    f[-1,:]=0
+    f[:,0]=0
+    f[:,-1]=0
+
+    return X, Y, u_exact, f, c, c, c
+
+
+
+def pyro(N):
+
+    x=torch.linspace(0,1,N)
+    y=torch.linspace(0,1,N)
+    [X,Y]=torch.meshgrid(x,y)
+    c=torch.ones((N,N))
+
+
+    f=-(-2.0 * ((1.0 - 6.0 * X**2) * Y**2 * (1.0 - Y**2) +
+                   (1.0 - 6.0 * Y**2) * X**2 * (1.0 - X**2)))
+    f[0,:]=0
+    f[-1,:]=0
+    f[:,0]=0
+    f[:,-1]=0
+
+    u_exact = (X**2-X**4)*(Y**4-Y**2)
+
+    return X, Y, u_exact, f, c, c, c
+
+
+def lilypad(N):
+    x=torch.linspace(0,N,N+1)
+    y=torch.linspace(0,N,N+1)
+    [X,Y]=torch.meshgrid(x,y)
+
+    u = torch.ones((N,N))
+    v = -0.5*torch.ones((N,N))
+    c = torch.ones((N,N))
+
+    u[40:50,40:75]=0
+
+    def compute_dpdx(p, dx):
+        dpdx = torch.zeros_like(p)
+        dpdx[1:-1,:] = (p[2:,:]-p[1:-1,:])/dx
+        return dpdx
+
+    def compute_dpdy(p, dy):
+        dpdy = torch.zeros_like(p)
+        dpdy[:,1:-1] = (p[:,2:]-p[:,1:-1])/dy
+        return dpdy
+
+    def divergence(u, v, dx, dy):
+        return compute_dpdx(u, dx)+compute_dpdy(v, dy)
+
+    f=divergence(u, v, 1, 1)
+
+    return X, Y, f, f, c, c, c
+
+def lilypad2(N):
+    x=torch.linspace(0,N,N+1)
+    y=torch.linspace(0,N,N+1)
+    [X,Y]=torch.meshgrid(x,y)
+
+    u = torch.ones((N,N))
+    v = -0.5*torch.ones((N,N))
+    c=torch.ones((N,N))
+
+    u[40:50,40:75]=0
+    c[40:50,40:75]=0
+
+    def compute_dpdx(p, dx):
+        dpdx = torch.zeros_like(p)
+        dpdx[1:-1,:] = (p[2:,:]-p[1:-1,:])/dx
+        return dpdx
+
+    def compute_dpdy(p, dy):
+        dpdy = torch.zeros_like(p)
+        dpdy[:,1:-1] = (p[:,2:]-p[:,1:-1])/dy
+        return dpdy
+
+    def divergence(u, v, dx, dy):
+        return compute_dpdx(u, dx)+compute_dpdy(v, dy)
+
+    f=divergence(u, v, 1, 1)
+
+    return X, Y, f, f, c, c, c
+
+
+def variable_coeff(N,device=torch.device("cuda"),create_box=False):
+
+    x=torch.linspace(-1,1,N,device=device)
+    y=torch.linspace(-1,1,N,device=device)
+    [X,Y]=torch.meshgrid(x,y, indexing="ij")
+
+    from body import BodyMesh, BodyAnalytical, circle
+    import sdf
+    import trimesh
+    from matplotlib import pyplot
+
+    name="box.obj"
+    if create_box:
+        # f=sdf.sphere((0.5))
+        f=sdf.box((0.5, 0.5, 2))
+        f.save(name, samples=2**16)
+        mesh = trimesh.load_mesh(name)
+        fig = pyplot.figure()
+        ax = fig.add_subplot(111, projection='3d')
+        ax.plot_trisurf(mesh.vertices[:, 0], mesh.vertices[:,1], triangles=mesh.faces, Z=mesh.vertices[:,2])
+        ax.set_xlabel("x")
+        ax.set_ylabel("y")
+        pyplot.show()
+
+
+    # body = BodyMesh( device, x, y, name, (lambda t: 0,(lambda t: 0,lambda t: 0)),eps=2/N,nsamples=2**12, msamples=2**12)
+    # body.initialize()
+    # sdf_fun=body.sdf_interp
+
+    body = BodyAnalytical( device, x, y, lambda x, y: circle(x,y,xt=0.5,yt=0.5,r=0.25), (lambda t: 0,(lambda t: 0,lambda t: 0)),eps=1/N)
+    body.initialize()
+    sdf_fun =body.sdf_fun
+
+    d, normal_x, normal_y, curv = body.update(0)[0]
+    (mu0, mu1) = body.mu_funcs(d)
+
+    var=mu0
+    pyplot.figure()
+    pyplot.imshow(
+        var.cpu().T,
+        extent = (
+            torch.min(x.cpu()), torch.max(x.cpu()),
+            torch.min(y.cpu()), torch.max(y.cpu())
+        ),
+        origin = "lower",
+        cmap = "Greys"
+    )
+    pyplot.contour(X.cpu(),Y.cpu(),var.cpu(), colors='k', levels=[0], linestyles='-')
+    pyplot.show()
+
+    c=mu0
+    f=torch.ones_like(c)
+    u_exact = None
+
+    xmid = (x[1:]+x[:-1])/2
+    ymid = (y[1:]+y[:-1])/2
+    [X_h,Y_h]=torch.meshgrid(xmid,y,indexing="ij")
+    [X_v,Y_v]=torch.meshgrid(x,ymid,indexing="ij")
+
+    d_h=sdf_fun(X_h,Y_h)
+    d_v=sdf_fun(X_v,Y_v)
+
+    c_h=body.mu_funcs(d_h)[0]
+    c_v=body.mu_funcs(d_v)[0]
+
+
+    return X, Y, f, f, c, c_h, c_v
+
+
+def variable_coeff_c_hat(N,device=torch.device("cuda"),create_box=False):
+
+    x=torch.linspace(0,1,N,device=device)
+    y=torch.linspace(0,1,N,device=device)
+    [X,Y]=torch.meshgrid(x,y, indexing="ij")
+
+    from body import BodyMesh, BodyAnalytical, circle
+    import sdf
+    import trimesh
+    from matplotlib import pyplot
+
+    name="box.obj"
+    if create_box:
+        f=sdf.sphere((0.5))
+        # f=sdf.box((0.5, 0.5, 2))
+        f.save(name, samples=2**16)
+        mesh = trimesh.load_mesh(name)
+        fig = pyplot.figure()
+        ax = fig.add_subplot(111, projection='3d')
+        ax.plot_trisurf(mesh.vertices[:, 0], mesh.vertices[:,1], triangles=mesh.faces, Z=mesh.vertices[:,2])
+        ax.set_xlabel("x")
+        ax.set_ylabel("y")
+        pyplot.show()
+
+    # body = BodyMesh( device, x, y, name, (lambda t: 0,(lambda t: 0,lambda t: 0)),eps=2/N,nsamples=2**12, msamples=2**12)
+    # body.initialize()
+    # sdf_fun=body.sdf_interp
+
+    body = BodyAnalytical( device, x, y, lambda x, y: circle(x,y,xt=0.5,yt=0.5,r=0.25), (lambda t: 0,(lambda t: 0,lambda t: 0)),eps=2/N)
+    body.initialize()
+    sdf_fun =body.sdf_fun
+
+    d, normal_x, normal_y, curv = body.update(0)[0]
+    (mu0, mu1) = body.mu_funcs(d)
+
+
+    # c=mu0
+
+    ks=100
+    kg=1
+    sigma=100
+    c=ks+(kg-ks)*(torch.tanh(sigma*d)+1)/2
+
+    var=c
+    pyplot.figure()
+    pyplot.imshow(
+        var.cpu().T,
+        extent = (
+            torch.min(x.cpu()), torch.max(x.cpu()),
+            torch.min(y.cpu()), torch.max(y.cpu())
+        ),
+        origin = "lower",
+        cmap = "Greys"
+    )
+    pyplot.contour(X.cpu(),Y.cpu(),var.cpu(), colors='k', levels=[0], linestyles='-')
+    pyplot.show()
+
+
+
+
+    f=torch.ones_like(c)
+    u_exact = None
+
+    xmid = (x[1:]+x[:-1])/2
+    ymid = (y[1:]+y[:-1])/2
+    [X_h,Y_h]=torch.meshgrid(xmid,y,indexing="ij")
+    [X_v,Y_v]=torch.meshgrid(x,ymid,indexing="ij")
+
+    d_h=sdf_fun(X_h,Y_h)
+    d_v=sdf_fun(X_v,Y_v)
+
+    c_h=ks+(kg-ks)*(torch.tanh(sigma*d_h)+1)/2
+    c_v=ks+(kg-ks)*(torch.tanh(sigma*d_v)+1)/2
+
+
+
+    R=0.25
+    circle=torch.sqrt((X-0.5)**2+(Y-0.5)**2)
+    u_exact = torch.where(
+        circle<R,
+        (1/8-R**2*(1-1/ks)/4)-(1/(4*ks))*(circle**2),
+        1/8-circle**2/4
+    )
+
+
+    return X, Y, u_exact, f, c, c_h, c_v

@@ -1,0 +1,58 @@
+
+solver : 
+  use_gpu: True
+  nthreads: 16
+  N      : 512
+  xmin   : -400
+  xmax   : 400
+  ymin   : -400
+  ymax   : 400
+  dt     : 0.1
+  nt     : 8000
+  nu     : 1.0e-1
+  rho    : 1.0e+0
+  convection_method : "implicit"
+  poisson_tol       : 1.0e-2
+  poisson_max_cycles: 2
+  poisson_nsmoothing: 5
+  poisson_verbose   : False
+
+boundary_conditions:
+  BC_type_u:
+  - "D"
+  - "D"
+  - "D"
+  - "D"
+  BC_values_u: 
+  - 0
+  - 0
+  - 0
+  - 0
+  BC_type_v:
+  - "D"
+  - "D"
+  - "D"
+  - "D"
+  BC_values_v: 
+  - 0
+  - 0
+  - 0
+  - 0
+
+body:
+  type: analytical
+  sdf: "lambda x, y: box(x,y,xb=10,yb=60)"
+  update_maps: 
+    rotation: "lambda t: 100*math.sin(t/100)"
+    translation: 
+      - "lambda t: 100*math.cos(t/10)"
+      - "lambda t: 100*math.sin(t/10)"
+
+output: 
+  save_path: "/data/andreaferrario/ns_data/"
+  save_frames: True
+  save_every : 20
+  vmin: -0.5
+  vmax: 0.5
+  save_uv: False
+  

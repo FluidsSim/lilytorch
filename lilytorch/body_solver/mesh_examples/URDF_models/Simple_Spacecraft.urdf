@@ -1,0 +1,110 @@
+<?xml version="1.0" ?>
+
+<robot name="Chaser">
+
+  <!-- Colors -->
+  <material name="Grey">
+    <color rgba="0.2 0.2 0.2 1.0"/>
+  </material>
+  <material name="Orange">
+    <color rgba="1.0 0.423529411765 0.0392156862745 1.0"/>
+  </material>
+  <material name="Blue">
+  <color rgba="0.5 0.7 1.0 1.0"/>      
+  </material>
+  <material name="Red">
+    <color rgba="1 0 0 1.0"/>      
+  </material>
+
+
+
+  <!--Spacecraft-->
+  <link name="Spacecraft">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <mass value="100"/>
+      <inertia ixx="0" ixy="0" ixz="0" iyy="0" iyz="0" izz="0"/>
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <geometry>
+        <box size="1.25 1.5 2" />
+      </geometry>
+      <material name="Grey"/>
+    </visual>
+  </link>
+  <!-- Joint to Left Solar Panel -->
+  <joint name="Spacecraft_Left_Panel" type="fixed">
+    <parent link="Spacecraft"/>
+    <child link="Left_Panel"/>
+    <origin rpy="0 0 0" xyz="0 -0.75 0"/>
+    <axis xyz="0 0 1"/>
+  </joint>
+  <!-- Joint to Right Solar Panel -->
+  <joint name="Spacecraft_Right_Panel" type="fixed">
+    <parent link="Spacecraft"/>
+    <child link="Right_Panel"/>
+    <origin rpy="0 0 0" xyz="0 0.75 0"/>
+    <axis xyz="0 0 1"/>
+  </joint>
+
+  <!-- Joint to Grappling fixture -->
+  <joint name="Spacecraft_Fixture" type="fixed">
+    <parent link="Spacecraft"/>
+    <child link="Fixture"/>
+    <origin rpy="0 0 0" xyz="0 0 1"/>
+    <axis xyz="0 0 1"/>
+  </joint>
+
+
+  <!-- Left Solar Panel-->
+  <link name="Left_Panel">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 -1.5 0"/>
+      <mass value="20"/>
+      <inertia ixx="0" ixy="0" ixz="0" iyy="0" iyz="0" izz="0"/>
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 -1.5 0"/>
+      <geometry>
+        <box size="0.25 3 1.5"/>
+      </geometry>
+      <material name="Blue"/>
+    </visual>
+  </link>
+
+  <!-- Right Solar Panel-->
+  <link name="Right_Panel">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 1.5 0"/>
+      <mass value="20"/>
+      <inertia ixx="0" ixy="0" ixz="0" iyy="0" iyz="0" izz="0"/>
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 1.5 0"/>
+      <geometry>
+        <box size="0.25 3 1.5"/>
+      </geometry>
+      <material name="Blue"/>
+    </visual>
+  </link>
+
+  <!-- Grappling Fixture-->
+  <link name="Fixture">
+    <inertial>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <mass value="20"/>
+      <inertia ixx="0" ixy="0" ixz="0" iyy="0" iyz="0" izz="0"/>
+    </inertial>
+    <visual>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <geometry>
+        <sphere radius="0.1"/>
+      </geometry>
+      <material name="Red"/>
+    </visual>
+  </link>
+  
+  
+</robot>
+
