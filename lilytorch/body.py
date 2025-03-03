@@ -1106,65 +1106,65 @@ class CompositeSegmentBody:
 
 
         # ==== plotting ====
-        if plotting:
-            import matplotlib.pyplot as plt
-            X=self.body.X.cpu()
-            Y=self.body.Y.cpu()
-            x=self.body.x.cpu()
-            y=self.body.y.cpu()
-            var=self.sdf.cpu()
-            pcpu=p.cpu()
-            plt.figure()
-            plt.imshow(
-                    var.T,
-                    extent = (
-                        torch.min(x.cpu()), torch.max(x.cpu()),
-                        torch.min(y.cpu()), torch.max(y.cpu())
-                    ),
-                    origin = "lower",
-                    cmap = "Greys"
-                )
-            plt.colorbar()
-            plt.contour(X,Y,var, colors='k', levels=[0], linestyles='-')
-            cset1 = plt.contourf(X,Y, var, levels=20, cmap="Greys")
-            plt.plot(pcpu[:,0],pcpu[:,1],'r',marker='o')
-            # plt.plot(p_new[:,0],p_new[:,1],'g',marker='o')
-            subsample_n = 2**3
-            plt.quiver(
-                X[::subsample_n,::subsample_n],
-                Y[::subsample_n,::subsample_n],
-                self.body_u[::subsample_n,::subsample_n].cpu(),
-                self.body_v[::subsample_n,::subsample_n].cpu(),
-                color='g',
-                scale=dt, scale_units='xy'
-            )
+        # if plotting:
+        #     import matplotlib.pyplot as plt
+        #     X=self.body.X.cpu()
+        #     Y=self.body.Y.cpu()
+        #     x=self.body.x.cpu()
+        #     y=self.body.y.cpu()
+        #     var=self.sdf.cpu()
+        #     pcpu=p.cpu()
+        #     plt.figure()
+        #     plt.imshow(
+        #             var.T,
+        #             extent = (
+        #                 torch.min(x.cpu()), torch.max(x.cpu()),
+        #                 torch.min(y.cpu()), torch.max(y.cpu())
+        #             ),
+        #             origin = "lower",
+        #             cmap = "Greys"
+        #         )
+        #     plt.colorbar()
+        #     plt.contour(X,Y,var, colors='k', levels=[0], linestyles='-')
+        #     cset1 = plt.contourf(X,Y, var, levels=20, cmap="Greys")
+        #     plt.plot(pcpu[:,0],pcpu[:,1],'r',marker='o')
+        #     # plt.plot(p_new[:,0],p_new[:,1],'g',marker='o')
+        #     subsample_n = 2**3
+        #     plt.quiver(
+        #         X[::subsample_n,::subsample_n],
+        #         Y[::subsample_n,::subsample_n],
+        #         self.body_u[::subsample_n,::subsample_n].cpu(),
+        #         self.body_v[::subsample_n,::subsample_n].cpu(),
+        #         color='g',
+        #         scale=dt, scale_units='xy'
+        #     )
 
-            # dp2=p_new[2]-p[2]
-            # plt.quiver(
-            #     p[2][0],
-            #     p[2][1],
-            #     dp2[0],
-            #     dp2[1],
-            #     color='r',
-            #     scale=dt, scale_units='xy'
-            # )
+        #     # dp2=p_new[2]-p[2]
+        #     # plt.quiver(
+        #     #     p[2][0],
+        #     #     p[2][1],
+        #     #     dp2[0],
+        #     #     dp2[1],
+        #     #     color='r',
+        #     #     scale=dt, scale_units='xy'
+        #     # )
 
 
-            # ==== plotting ====
-            var=self.body_u.cpu()
-            plt.figure()
-            plt.imshow(
-                    var.T,
-                    extent = (
-                        torch.min(x.cpu()), torch.max(x.cpu()),
-                        torch.min(y.cpu()), torch.max(y.cpu())
-                    ),
-                    origin = "lower",
-                    cmap = "Greys"
-                )
-            plt.colorbar()
-            plt.contour(X,Y,self.sdf.cpu(), colors='k', levels=[0], linestyles='-')
-            plt.show()
+        #     # ==== plotting ====
+        #     var=self.body_u.cpu()
+        #     plt.figure()
+        #     plt.imshow(
+        #             var.T,
+        #             extent = (
+        #                 torch.min(x.cpu()), torch.max(x.cpu()),
+        #                 torch.min(y.cpu()), torch.max(y.cpu())
+        #             ),
+        #             origin = "lower",
+        #             cmap = "Greys"
+        #         )
+        #     plt.colorbar()
+        #     plt.contour(X,Y,self.sdf.cpu(), colors='k', levels=[0], linestyles='-')
+        #     plt.show()
 
 
 

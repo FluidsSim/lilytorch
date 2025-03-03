@@ -1,12 +1,4 @@
-#: Ignore .DS_STORE
-.DS_STORE
-.DS_Store
-._.DS_Store
 
-#: Webots
-*.cache
-*.wbproj
-\#*
 
 #: Python
 *.orig
@@ -23,33 +15,8 @@
 *.pickle
 *.csv
 
-#: Latex
-*.bak
-*.log
-*.eps
-*.pdf
-*.ps
-*.svg
-*.aux
-*.out
-*.synctex.gz
-auto/
-*.eps
-_region_.tex
-_region_.log
-*.dvi
-*.org
-*.npz
-Assignment
-Corrections
-*.directory
-*.bbl
-*.blg
-*.toc
-*.fdb_latexmk
-*.fls
-lilytorch.egg-info
-__pycache__
+*.egg-info
+__pycache__/*
 
 #: Do not ignore figures folder
 !figures/*

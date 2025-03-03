@@ -15,7 +15,8 @@ Follow the following instruction in the right order (the order is important):
 # example scripts
 1. Test the correct farms installation by running the file `lilytorch/lilytorch/zebrafish/example_single.py`:
 > python lilytorch/lilytorch/zebrafish/example_single.py
-2.
+2. Test the correct integration with FARMS by running `lilytorch/lilytorch/zebrafish/example_fluid.py`:
+> python example_fluid.py
 
 
 
