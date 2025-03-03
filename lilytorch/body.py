@@ -276,7 +276,6 @@ class COMPOSITEmesh2sdf():
 
 
 
-
 class Body:
 
     def __init__(self, device, x, y, eps=0.05, **kwargs):
@@ -306,8 +305,7 @@ class Body:
         # body velocities
         self.body_u = torch.zeros((self.nx,self.ny),device=self.device)
         self.body_v = torch.zeros((self.nx,self.ny),device=self.device)
-        self.old_points = torch.stack((torch.zeros((self.nx,self.ny),device=self.device).flatten(),torch.zeros((self.nx,self.ny),device=self.device).flatten()))
-
+        self.old_points = self.stacked_xy.clone().detach()
         self.rad_conv = (torch.pi/180)
 
 
@@ -407,9 +405,8 @@ class Body:
         # self.oldpos_u = newpos_u
         # self.oldpos_v = newpos_v
 
-        sdf_val = fun(newpos_u, newpos_v)
+        return fun(newpos_u, newpos_v)
 
-        return self.compute_sdf_properties(sdf_val)
 
 
 class BodyAnalytical(Body):
@@ -419,7 +416,9 @@ class BodyAnalytical(Body):
         self.sdf_fun = sdf_fun
         self.update_theta = update_maps[0]
         self.update_translation = update_maps[1]
-        self.bodies = [self]
+        # self.bodies = [self]
+        self.body=self
+        self.update(0)
 
     def initialize(self):
         """
@@ -431,7 +430,7 @@ class BodyAnalytical(Body):
         """
         Apply rototranslation and update the sdf properties
         """
-        return [self.update_body(
+        self.sdf=self.update_body(
             self.sdf_fun,
             self.update_theta(t),
             (
@@ -439,7 +438,17 @@ class BodyAnalytical(Body):
                 self.update_translation[1](t)
             ),
             dt=dt
-        )]
+        )
+
+        # return [self.update_body(
+        #     self.sdf_fun,
+        #     self.update_theta(t),
+        #     (
+        #         self.update_translation[0](t),
+        #         self.update_translation[1](t)
+        #     ),
+        #     dt=dt
+        # )]
 
 class BodyFishAnalytical(Body):
 
@@ -1602,7 +1611,6 @@ def test_composite_mesh():
         plt.colorbar(cset1)
         c=c+1
     plt.show()
-
 
 
 def test_fish_mesh():

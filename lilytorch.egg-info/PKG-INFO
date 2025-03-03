@@ -19,7 +19,6 @@ It is strongly recommended to set up a virtual environment to use this repositor
 1. Install torch following the instructions at https://pytorch.org/get-started/locally/
 2. Install the requirements via
 >>> pip install -r requirements.txt
-
-
+3. Install the necessary FARMS packages for the
 
 

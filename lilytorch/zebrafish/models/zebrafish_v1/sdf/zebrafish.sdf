@@ -1,0 +1,762 @@
+<?xml version="1.0" ?>
+<sdf version="1.6">
+  <world name="world">
+    <model name="zebrafish">
+      <pose>0 0 0 0 0 0</pose>
+      <link name="link_0">
+        <pose>0.0 0.0 0.0 0 0 0</pose>
+        <inertial>
+          <pose>0.001525255253894182 1.365008519797692e-06 1.6594825355189447e-05 0.0 0.0 0.0</pose>
+          <mass>3.2734375504999984e-06</mass>
+          <inertia>
+            <ixx>1.3763417454214432e-12</ixx>
+            <ixy>9.234946158467514e-15</ixy> <!--  -->
+            <ixz>6.832597463673331e-14</ixz> <!--  -->
+            <iyy>1.5327467802419943e-12</iyy>
+            <iyz>3.6742706916272953e-16</iyz> <!--  -->
+            <izz>1.2178145752787549e-12</izz>
+          </inertia>
+        </inertial>
+        <collision name="link_0_collision">
+          <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
+          <geometry>
+            <mesh>
+              <uri>meshes_zebrafish/link_0.obj</uri>
+              <scale>1.0 1.0 1.0</scale>
+            </mesh>
+          </geometry>
+        </collision>
+        <visual name="link_0_visual">
+          <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
+          <geometry>
+            <mesh>
+              <uri>meshes_zebrafish/link_0.obj</uri>
+              <scale>1.0 1.0 1.0</scale>
+            </mesh>
+          </geometry>
+          <material/>
+        </visual>
+      </link>
+      <link name="link_1">
+        <pose>0.003000000026077032 0.0 0.0 0 0 0</pose>
+        <inertial>
+          <pose>-0.0002732492240615168 -1.97994288919193e-08 -5.650116857951326e-05 0.0 0.0 0.0</pose>
+          <mass>4.0521463491666665e-06</mass>
+          <inertia>
+            <ixx>2.8087038294161773e-12</ixx>
+            <ixy>2.59860681584197e-16</ixy>
+            <ixz>7.53613830741763e-14</ixz>
+            <iyy>2.3503783406325966e-12</iyy>
+            <iyz>4.2333460592653663e-16</iyz>
+            <izz>1.4029470401400248e-12</izz>
+          </inertia>
+        </inertial>
+        <collision name="link_1_collision">
+          <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
+          <geometry>
+            <mesh>
+              <uri>meshes_zebrafish/link_1.obj</uri>
+              <scale>1.0 1.0 1.0</scale>
+            </mesh>
+          </geometry>
+        </collision>
+        <visual name="link_1_visual">
+          <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
+          <geometry>
+            <mesh>
+              <uri>meshes_zebrafish/link_1.obj</uri>
+              <scale>1.0 1.0 1.0</scale>
+            </mesh>
+          </geometry>
+          <material/>
+        </visual>
+      </link>
+      <link name="link_2">
+        <pose>0.004000000189989805 0.0 0.0 0 0 0</pose>
+        <inertial>
+          <pose>-0.00022717678486607507 -8.219959851907085e-08 -6.289915105203633e-05 0.0 0.0 0.0</pose>
+          <mass>4.854872365333333e-06</mass>
+          <inertia>
+            <ixx>4.054950923692486e-12</ixx>
+            <ixy>-1.1484001297372617e-16</ixy>
+            <ixz>1.1419704220898796e-13</ixz>
+            <iyy>3.3781171583254866e-12</iyy>
+            <iyz>6.818633027387787e-16</iyz>
+            <izz>1.981751379253991e-12</izz>
+          </inertia>
+        </inertial>
+        <collision name="link_2_collision">
+          <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
+          <geometry>
+            <mesh>
+              <uri>meshes_zebrafish/link_2.obj</uri>
+              <scale>1.0 1.0 1.0</scale>
+            </mesh>
+          </geometry>
+        </collision>
+        <visual name="link_2_visual">
+          <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
+          <geometry>
+            <mesh>
+              <uri>meshes_zebrafish/link_2.obj</uri>
+              <scale>1.0 1.0 1.0</scale>
+            </mesh>
+          </geometry>
+          <material/>
+        </visual>
+      </link>
+      <link name="link_3">
+        <pose>0.004999999888241291 0.0 0.0 0 0 0</pose>
+        <inertial>
+          <pose>-0.0002226231496408773 3.3757354961996367e-07 -3.5049441185557767e-06 0.0 0.0 0.0</pose>
+          <mass>5.157439432833333e-06</mass>
+          <inertia>
+            <ixx>4.67697383062243e-12</ixx>
+            <ixy>-9.074877137566703e-16</ixy>
+            <ixz>3.6481284000477364e-14</ixz>
+            <iyy>3.9454530406174475e-12</iyy>
+            <iyz>-5.468168704910777e-16</iyz>
+            <izz>2.0510055572515746e-12</izz>
+          </inertia>
+        </inertial>
+        <collision name="link_3_collision">
+          <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
+          <geometry>
+            <mesh>
+              <uri>meshes_zebrafish/link_3.obj</uri>
+              <scale>1.0 1.0 1.0</scale>
+            </mesh>
+          </geometry>
+        </collision>
+        <visual name="link_3_visual">
+          <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
+          <geometry>
+            <mesh>
+              <uri>meshes_zebrafish/link_3.obj</uri>
+              <scale>1.0 1.0 1.0</scale>
+            </mesh>
+          </geometry>
+          <material/>
+        </visual>
+      </link>
+      <link name="link_4">
+        <pose>0.006000000052154064 0.0 0.0 0 0 0</pose>
+        <inertial>
+          <pose>-0.00019477319484265197 2.3520952322439315e-07 4.5153454879482645e-05 0.0 0.0 0.0</pose>
+          <mass>5.498348945e-06</mass>
+          <inertia>
+            <ixx>5.301401349493594e-12</ixx>
+            <ixy>-7.594792361230709e-16</ixy>
+            <ixz>-1.2919244220334572e-14</ixz>
+            <iyy>4.518545556789769e-12</iyy>
+            <iyz>-1.913852691484321e-15</iyz>
+            <izz>2.349854946278564e-12</izz>
+          </inertia>
+        </inertial>
+        <collision name="link_4_collision">
+          <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
+          <geometry>
+            <mesh>
+              <uri>meshes_zebrafish/link_4.obj</uri>
+              <scale>1.0 1.0 1.0</scale>
+            </mesh>
+          </geometry>
+        </collision>
+        <visual name="link_4_visual">
+          <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
+          <geometry>
+            <mesh>
+              <uri>meshes_zebrafish/link_4.obj</uri>
+              <scale>1.0 1.0 1.0</scale>
+            </mesh>
+          </geometry>
+          <material/>
+        </visual>
+      </link>
+      <link name="link_5">
+        <pose>0.007000000216066837 0.0 0.0 0 0 0</pose>
+        <inertial>
+          <pose>-0.00020395735361605007 -8.842410672844107e-08 4.337361965129497e-05 0.0 0.0 0.0</pose>
+          <mass>5.479874165666666e-06</mass>
+          <inertia>
+            <ixx>5.300408358361644e-12</ixx>
+            <ixy>2.2081984687633257e-16</ixy>
+            <ixz>2.5655783521762258e-14</ixz>
+            <iyy>4.488854231172425e-12</iyy>
+            <iyz>5.337128725014414e-16</iyz>
+            <izz>2.2795643807420016e-12</izz>
+          </inertia>
+        </inertial>
+        <collision name="link_5_collision">
+          <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
+          <geometry>
+            <mesh>
+              <uri>meshes_zebrafish/link_5.obj</uri>
+              <scale>1.0 1.0 1.0</scale>
+            </mesh>
+          </geometry>
+        </collision>
+        <visual name="link_5_visual">
+          <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
+          <geometry>
+            <mesh>
+              <uri>meshes_zebrafish/link_5.obj</uri>
+              <scale>1.0 1.0 1.0</scale>
+            </mesh>
+          </geometry>
+          <material/>
+        </visual>
+      </link>
+      <link name="link_6">
+        <pose>0.00800000037997961 0.0 0.0 0 0 0</pose>
+        <inertial>
+          <pose>-0.00024221163159728412 -1.9450732335945777e-07 3.207300392264691e-05 0.0 0.0 0.0</pose>
+          <mass>5.159457690333333e-06</mass>
+          <inertia>
+            <ixx>4.939246005196555e-12</ixx>
+            <ixy>6.053666353726204e-16</ixy>
+            <ixz>9.647922195089838e-15</ixz>
+            <iyy>4.24538394961568e-12</iyy>
+            <iyz>-1.9796288817279288e-16</iyz>
+            <izz>1.849075636047097e-12</izz>
+          </inertia>
+        </inertial>
+        <collision name="link_6_collision">
+          <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
+          <geometry>
+            <mesh>
+              <uri>meshes_zebrafish/link_6.obj</uri>
+              <scale>1.0 1.0 1.0</scale>
+            </mesh>
+          </geometry>
+        </collision>
+        <visual name="link_6_visual">
+          <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
+          <geometry>
+            <mesh>
+              <uri>meshes_zebrafish/link_6.obj</uri>
+              <scale>1.0 1.0 1.0</scale>
+            </mesh>
+          </geometry>
+          <material/>
+        </visual>
+      </link>
+      <link name="link_7">
+        <pose>0.008999999612569809 0.0 0.0 0 0 0</pose>
+        <inertial>
+          <pose>-0.0003052042318265614 -2.714426844606979e-07 0.00015843392122992753 0.0 0.0 0.0</pose>
+          <mass>4.249855453833333e-06</mass>
+          <inertia>
+            <ixx>3.3009859429267404e-12</ixx>
+            <ixy>3.1379057053656826e-16</ixy>
+            <ixz>-1.649673957428002e-13</ixz>
+            <iyy>2.8409817451483943e-12</iyy>
+            <iyz>7.12045864460346e-16</iyz>
+            <izz>1.293106339839356e-12</izz>
+          </inertia>
+        </inertial>
+        <collision name="link_7_collision">
+          <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
+          <geometry>
+            <mesh>
+              <uri>meshes_zebrafish/link_7.obj</uri>
+              <scale>1.0 1.0 1.0</scale>
+            </mesh>
+          </geometry>
+        </collision>
+        <visual name="link_7_visual">
+          <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
+          <geometry>
+            <mesh>
+              <uri>meshes_zebrafish/link_7.obj</uri>
+              <scale>1.0 1.0 1.0</scale>
+            </mesh>
+          </geometry>
+          <material/>
+        </visual>
+      </link>
+      <link name="link_8">
+        <pose>0.009999999776482582 0.0 0.0 0 0 0</pose>
+        <inertial>
+          <pose>-0.00034258391490533507 1.496806484415186e-07 0.00023371407774293266 0.0 0.0 0.0</pose>
+          <mass>3.4060886698333332e-06</mass>
+          <inertia>
+            <ixx>2.3861448209304844e-12</ixx>
+            <ixy>4.119826686591595e-17</ixy>
+            <ixz>-1.9282902344368923e-13</ixz>
+            <iyy>2.2293678879472307e-12</iyy>
+            <iyz>2.0877097769727913e-16</iyz>
+            <izz>8.426788781595641e-13</izz>
+          </inertia>
+        </inertial>
+        <collision name="link_8_collision">
+          <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
+          <geometry>
+            <mesh>
+              <uri>meshes_zebrafish/link_8.obj</uri>
+              <scale>1.0 1.0 1.0</scale>
+            </mesh>
+          </geometry>
+        </collision>
+        <visual name="link_8_visual">
+          <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
+          <geometry>
+            <mesh>
+              <uri>meshes_zebrafish/link_8.obj</uri>
+              <scale>1.0 1.0 1.0</scale>
+            </mesh>
+          </geometry>
+          <material/>
+        </visual>
+      </link>
+      <link name="link_9">
+        <pose>0.010999999940395355 0.0 0.0 0 0 0</pose>
+        <inertial>
+          <pose>-0.00037563688475628207 -1.148331642662189e-08 0.00019189624898692601 0.0 0.0 0.0</pose>
+          <mass>2.650774316333333e-06</mass>
+          <inertia>
+            <ixx>1.7882286047325874e-12</ixx>
+            <ixy>7.268954042952895e-17</ixy>
+            <ixz>-7.176690563395181e-14</ixz>
+            <iyy>1.787960335865206e-12</iyy>
+            <iyz>3.481599167776466e-16</iyz>
+            <izz>5.124582731408049e-13</izz>
+          </inertia>
+        </inertial>
+        <collision name="link_9_collision">
+          <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
+          <geometry>
+            <mesh>
+              <uri>meshes_zebrafish/link_9.obj</uri>
+              <scale>1.0 1.0 1.0</scale>
+            </mesh>
+          </geometry>
+        </collision>
+        <visual name="link_9_visual">
+          <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
+          <geometry>
+            <mesh>
+              <uri>meshes_zebrafish/link_9.obj</uri>
+              <scale>1.0 1.0 1.0</scale>
+            </mesh>
+          </geometry>
+          <material/>
+        </visual>
+      </link>
+      <link name="link_10">
+        <pose>0.012000000104308128 0.0 0.0 0 0 0</pose>
+        <inertial>
+          <pose>-0.00046854741347974294 -3.6455166203015647e-09 0.0001884940614548451 0.0 0.0 0.0</pose>
+          <mass>1.7336472188333334e-06</mass>
+          <inertia>
+            <ixx>9.598222582454625e-13</ixx>
+            <ixy>-1.7845489451076185e-17</ixy>
+            <ixz>-3.397423168103433e-14</ixz>
+            <iyy>9.577834588823694e-13</iyy>
+            <iyz>-1.816592266281531e-16</iyz>
+            <izz>2.4242768853153455e-13</izz>
+          </inertia>
+        </inertial>
+        <collision name="link_10_collision">
+          <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
+          <geometry>
+            <mesh>
+              <uri>meshes_zebrafish/link_10.obj</uri>
+              <scale>1.0 1.0 1.0</scale>
+            </mesh>
+          </geometry>
+        </collision>
+        <visual name="link_10_visual">
+          <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
+          <geometry>
+            <mesh>
+              <uri>meshes_zebrafish/link_10.obj</uri>
+              <scale>1.0 1.0 1.0</scale>
+            </mesh>
+          </geometry>
+          <material/>
+        </visual>
+      </link>
+      <link name="link_11">
+        <pose>0.013000000268220901 0.0 0.0 0 0 0</pose>
+        <inertial>
+          <pose>-0.0004722302698571837 -1.2239207432138651e-07 0.00025506297429544507 0.0 0.0 0.0</pose>
+          <mass>1.1791477706666665e-06</mass>
+          <inertia>
+            <ixx>3.149351261365448e-13</ixx>
+            <ixy>2.7370846875597328e-17</ixy>
+            <ixz>-2.577821194729109e-14</ixz>
+            <iyy>3.590729662203847e-13</iyy>
+            <iyz>8.518592623941355e-17</iyz>
+            <izz>1.4821632513420026e-13</izz>
+          </inertia>
+        </inertial>
+        <collision name="link_11_collision">
+          <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
+          <geometry>
+            <mesh>
+              <uri>meshes_zebrafish/link_11.obj</uri>
+              <scale>1.0 1.0 1.0</scale>
+            </mesh>
+          </geometry>
+        </collision>
+        <visual name="link_11_visual">
+          <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
+          <geometry>
+            <mesh>
+              <uri>meshes_zebrafish/link_11.obj</uri>
+              <scale>1.0 1.0 1.0</scale>
+            </mesh>
+          </geometry>
+          <material/>
+        </visual>
+      </link>
+      <link name="link_12">
+        <pose>0.014000000432133675 0.0 0.0 0 0 0</pose>
+        <inertial>
+          <pose>-0.0004680786036944516 2.4572440914844884e-09 0.0003116856744471307 0.0 0.0 0.0</pose>
+          <mass>8.259051296666667e-07</mass>
+          <inertia>
+            <ixx>1.6659794843056764e-13</ixx>
+            <ixy>-5.52908293444439e-18</ixy>
+            <ixz>-1.230842217162236e-14</ixz>
+            <iyy>2.1634131199119703e-13</iyy>
+            <iyz>-2.650283382113267e-17</iyz>
+            <izz>9.15907887298476e-14</izz>
+          </inertia>
+        </inertial>
+        <collision name="link_12_collision">
+          <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
+          <geometry>
+            <mesh>
+              <uri>meshes_zebrafish/link_12.obj</uri>
+              <scale>1.0 1.0 1.0</scale>
+            </mesh>
+          </geometry>
+        </collision>
+        <visual name="link_12_visual">
+          <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
+          <geometry>
+            <mesh>
+              <uri>meshes_zebrafish/link_12.obj</uri>
+              <scale>1.0 1.0 1.0</scale>
+            </mesh>
+          </geometry>
+          <material/>
+        </visual>
+      </link>
+      <link name="link_13">
+        <pose>0.014999999664723873 0.0 0.0 0 0 0</pose>
+        <inertial>
+          <pose>-0.00041943335924235335 1.3966242424337377e-07 0.00029419906843552914 0.0 0.0 0.0</pose>
+          <mass>9.194377328333334e-07</mass>
+          <inertia>
+            <ixx>2.931650313086033e-13</ixx>
+            <ixy>1.3054547149348963e-17</ixy>
+            <ixz>-1.9068711707594266e-14</ixz>
+            <iyy>3.574669230539107e-13</iyy>
+            <iyz>-2.6636393507519912e-18</iyz>
+            <izz>9.93681235325705e-14</izz>
+          </inertia>
+        </inertial>
+        <collision name="link_13_collision">
+          <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
+          <geometry>
+            <mesh>
+              <uri>meshes_zebrafish/link_13.obj</uri>
+              <scale>1.0 1.0 1.0</scale>
+            </mesh>
+          </geometry>
+        </collision>
+        <visual name="link_13_visual">
+          <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
+          <geometry>
+            <mesh>
+              <uri>meshes_zebrafish/link_13.obj</uri>
+              <scale>1.0 1.0 1.0</scale>
+            </mesh>
+          </geometry>
+          <material/>
+        </visual>
+      </link>
+      <link name="link_14">
+        <pose>0.01600000075995922 0.0 0.0 0 0 0</pose>
+        <inertial>
+          <pose>-0.0004105011887446809 3.835307992705615e-07 0.00020645375017189194 0.0 0.0 0.0</pose>
+          <mass>9.366918884999999e-07</mass>
+          <inertia>
+            <ixx>6.055769405013031e-13</ixx>
+            <ixy>1.0627794034772965e-16</ixy>
+            <ixz>-2.7850183836831907e-14</ixz>
+            <iyy>6.919667416777767e-13</iyy>
+            <iyz>-2.384716694942919e-16</iyz>
+            <izz>1.0533700069188133e-13</izz>
+          </inertia>
+        </inertial>
+        <collision name="link_14_collision">
+          <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
+          <geometry>
+            <mesh>
+              <uri>meshes_zebrafish/link_14.obj</uri>
+              <scale>1.0 1.0 1.0</scale>
+            </mesh>
+          </geometry>
+        </collision>
+        <visual name="link_14_visual">
+          <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
+          <geometry>
+            <mesh>
+              <uri>meshes_zebrafish/link_14.obj</uri>
+              <scale>1.0 1.0 1.0</scale>
+            </mesh>
+          </geometry>
+          <material/>
+        </visual>
+      </link>
+      <link name="link_15">
+        <pose>0.017000000923871994 0.0 0.0 0 0 0</pose>
+        <inertial>
+          <pose>-0.00024512117801505035 5.541966191362484e-08 0.00016953894222371095 0.0 0.0 0.0</pose>
+          <mass>8.46120548e-07</mass>
+          <inertia>
+            <ixx>9.91941296499222e-13</ixx>
+            <ixy>1.1063760766064692e-17</ixy>
+            <ixz>-5.749952933899053e-14</ixz>
+            <iyy>1.1526827694033881e-12</iyy>
+            <iyz>9.530338058318321e-17</iyz>
+            <izz>1.6645844722995796e-13</izz>
+          </inertia>
+        </inertial>
+        <collision name="link_15_collision">
+          <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
+          <geometry>
+            <mesh>
+              <uri>meshes_zebrafish/link_15.obj</uri>
+              <scale>1.0 1.0 1.0</scale>
+            </mesh>
+          </geometry>
+        </collision>
+        <visual name="link_15_visual">
+          <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
+          <geometry>
+            <mesh>
+              <uri>meshes_zebrafish/link_15.obj</uri>
+              <scale>1.0 1.0 1.0</scale>
+            </mesh>
+          </geometry>
+          <material/>
+        </visual>
+      </link>
+      <joint name="joint_0" type="revolute">
+        <parent>link_0</parent>
+        <child>link_1</child>
+        <pose>0 0 0 0 0 0</pose>
+        <axis>
+          <xyz>0 0 1</xyz>
+          <limit>
+            <lower>-1.5707963267948966</lower>
+            <upper>1.5707963267948966</upper>
+            <effort>100</effort>
+            <velocity>100</velocity>
+          </limit>
+        </axis>
+      </joint>
+      <joint name="joint_1" type="revolute">
+        <parent>link_1</parent>
+        <child>link_2</child>
+        <pose>0 0 0 0 0 0</pose>
+        <axis>
+          <xyz>0 0 1</xyz>
+          <limit>
+            <lower>-1.5707963267948966</lower>
+            <upper>1.5707963267948966</upper>
+            <effort>100</effort>
+            <velocity>100</velocity>
+          </limit>
+        </axis>
+      </joint>
+      <joint name="joint_2" type="revolute">
+        <parent>link_2</parent>
+        <child>link_3</child>
+        <pose>0 0 0 0 0 0</pose>
+        <axis>
+          <xyz>0 0 1</xyz>
+          <limit>
+            <lower>-1.5707963267948966</lower>
+            <upper>1.5707963267948966</upper>
+            <effort>100</effort>
+            <velocity>100</velocity>
+          </limit>
+        </axis>
+      </joint>
+      <joint name="joint_3" type="revolute">
+        <parent>link_3</parent>
+        <child>link_4</child>
+        <pose>0 0 0 0 0 0</pose>
+        <axis>
+          <xyz>0 0 1</xyz>
+          <limit>
+            <lower>-1.5707963267948966</lower>
+            <upper>1.5707963267948966</upper>
+            <effort>100</effort>
+            <velocity>100</velocity>
+          </limit>
+        </axis>
+      </joint>
+      <joint name="joint_4" type="revolute">
+        <parent>link_4</parent>
+        <child>link_5</child>
+        <pose>0 0 0 0 0 0</pose>
+        <axis>
+          <xyz>0 0 1</xyz>
+          <limit>
+            <lower>-1.5707963267948966</lower>
+            <upper>1.5707963267948966</upper>
+            <effort>100</effort>
+            <velocity>100</velocity>
+          </limit>
+        </axis>
+      </joint>
+      <joint name="joint_5" type="revolute">
+        <parent>link_5</parent>
+        <child>link_6</child>
+        <pose>0 0 0 0 0 0</pose>
+        <axis>
+          <xyz>0 0 1</xyz>
+          <limit>
+            <lower>-1.5707963267948966</lower>
+            <upper>1.5707963267948966</upper>
+            <effort>100</effort>
+            <velocity>100</velocity>
+          </limit>
+        </axis>
+      </joint>
+      <joint name="joint_6" type="revolute">
+        <parent>link_6</parent>
+        <child>link_7</child>
+        <pose>0 0 0 0 0 0</pose>
+        <axis>
+          <xyz>0 0 1</xyz>
+          <limit>
+            <lower>-1.5707963267948966</lower>
+            <upper>1.5707963267948966</upper>
+            <effort>100</effort>
+            <velocity>100</velocity>
+          </limit>
+        </axis>
+      </joint>
+      <joint name="joint_7" type="revolute">
+        <parent>link_7</parent>
+        <child>link_8</child>
+        <pose>0 0 0 0 0 0</pose>
+        <axis>
+          <xyz>0 0 1</xyz>
+          <limit>
+            <lower>-1.5707963267948966</lower>
+            <upper>1.5707963267948966</upper>
+            <effort>100</effort>
+            <velocity>100</velocity>
+          </limit>
+        </axis>
+      </joint>
+      <joint name="joint_8" type="revolute">
+        <parent>link_8</parent>
+        <child>link_9</child>
+        <pose>0 0 0 0 0 0</pose>
+        <axis>
+          <xyz>0 0 1</xyz>
+          <limit>
+            <lower>-1.5707963267948966</lower>
+            <upper>1.5707963267948966</upper>
+            <effort>100</effort>
+            <velocity>100</velocity>
+          </limit>
+        </axis>
+      </joint>
+      <joint name="joint_9" type="revolute">
+        <parent>link_9</parent>
+        <child>link_10</child>
+        <pose>0 0 0 0 0 0</pose>
+        <axis>
+          <xyz>0 0 1</xyz>
+          <limit>
+            <lower>-1.5707963267948966</lower>
+            <upper>1.5707963267948966</upper>
+            <effort>100</effort>
+            <velocity>100</velocity>
+          </limit>
+        </axis>
+      </joint>
+      <joint name="joint_10" type="revolute">
+        <parent>link_10</parent>
+        <child>link_11</child>
+        <pose>0 0 0 0 0 0</pose>
+        <axis>
+          <xyz>0 0 1</xyz>
+          <limit>
+            <lower>-1.5707963267948966</lower>
+            <upper>1.5707963267948966</upper>
+            <effort>100</effort>
+            <velocity>100</velocity>
+          </limit>
+        </axis>
+      </joint>
+      <joint name="joint_11" type="revolute">
+        <parent>link_11</parent>
+        <child>link_12</child>
+        <pose>0 0 0 0 0 0</pose>
+        <axis>
+          <xyz>0 0 1</xyz>
+          <limit>
+            <lower>-1.5707963267948966</lower>
+            <upper>1.5707963267948966</upper>
+            <effort>100</effort>
+            <velocity>100</velocity>
+          </limit>
+        </axis>
+      </joint>
+      <joint name="joint_12" type="revolute">
+        <parent>link_12</parent>
+        <child>link_13</child>
+        <pose>0 0 0 0 0 0</pose>
+        <axis>
+          <xyz>0 0 1</xyz>
+          <limit>
+            <lower>-1.5707963267948966</lower>
+            <upper>1.5707963267948966</upper>
+            <effort>100</effort>
+            <velocity>100</velocity>
+          </limit>
+        </axis>
+      </joint>
+      <joint name="joint_13" type="revolute">
+        <parent>link_13</parent>
+        <child>link_14</child>
+        <pose>0 0 0 0 0 0</pose>
+        <axis>
+          <xyz>0 0 1</xyz>
+          <limit>
+            <lower>-1.5707963267948966</lower>
+            <upper>1.5707963267948966</upper>
+            <effort>100</effort>
+            <velocity>100</velocity>
+          </limit>
+        </axis>
+      </joint>
+      <joint name="joint_14" type="revolute">
+        <parent>link_14</parent>
+        <child>link_15</child>
+        <pose>0 0 0 0 0 0</pose>
+        <axis>
+          <xyz>0 0 1</xyz>
+          <limit>
+            <lower>-1.5707963267948966</lower>
+            <upper>1.5707963267948966</upper>
+            <effort>100</effort>
+            <velocity>100</velocity>
+          </limit>
+        </axis>
+      </joint>
+    </model>
+  </world>
+</sdf>

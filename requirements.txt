@@ -6,4 +6,7 @@ setuptools
 scipy
 matplotlib
 pytorch_interpolation @ git+https://github.com/ferrarioa5/pytorch_interpolation.git
-
+strenum
+pywavefront
+mujoco==3.2.3
+dm-control==1.0.23
