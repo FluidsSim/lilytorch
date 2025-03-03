@@ -48,7 +48,8 @@ Corrections
 *.toc
 *.fdb_latexmk
 *.fls
-*.egg-info 
+lilytorch.egg-info
+__pycache__
 
 #: Do not ignore figures folder
 !figures/*
