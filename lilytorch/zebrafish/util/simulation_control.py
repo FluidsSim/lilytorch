@@ -42,7 +42,7 @@ import sys
 def run_experiment(pars):
 
     """Main"""
-    prepath = "lilytorch/zebrafish/models/zebrafish_v1_triangulated/"
+    prepath = "models/zebrafish_v1_triangulated/"
     args = [
         '--simulator',
         'MUJOCO',

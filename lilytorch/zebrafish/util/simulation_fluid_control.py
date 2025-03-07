@@ -132,7 +132,9 @@ def run_experiment(pars):
         options['callbacks']+=[camera]
 
     # load fluid solver
-    animat_network = ZebrafishFluidSegmentController(animat_data, controller, options['callbacks'][0])
+    animat_network = ZebrafishFluidController(animat_data, controller, options['callbacks'][0])
+
+    # animat_network = ZebrafishFluidSegmentController(animat_data, controller, options['callbacks'][0])
 
     # Generic controller (OK)
     animat_controller: Union[GenericController, KinematicsController] = (

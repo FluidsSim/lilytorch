@@ -4,7 +4,7 @@ import numpy
 
 def update_muscle_param(animat_options, pars):
 
-    with open('lilytorch/zebrafish/muscle_parameters/muscle_parameters_optimization_FN_10000_ZC_1000_G0_419_gen_99.csv', newline='') as csvfile:
+    with open('muscle_parameters/muscle_parameters_optimization_FN_10000_ZC_1000_G0_419_gen_99.csv', newline='') as csvfile:
         reader = csv.DictReader(csvfile)
         for row in reader:
             joint_i = int(row[''])

@@ -13,7 +13,7 @@ def exercise_single(**kwargs):
     """
     log_path = './logs/example_single/' # path for logging the simulation data
     os.makedirs(log_path, exist_ok=True)
-    
+
     all_pars = SimulationParameters(
         n_iterations    = 5001,
         n_joints        = 15,
@@ -22,7 +22,7 @@ def exercise_single(**kwargs):
         return_network  = True,
         **kwargs
     )
-    
+
     pylog.info("Running the simulation")
     controller = run_single(
         all_pars

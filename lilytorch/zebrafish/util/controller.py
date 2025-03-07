@@ -43,12 +43,14 @@ class ZebrafishFluidController(AnimatNetwork):
         self.controller   = controller
         self.callback = callback
 
-        pars = yaml2pyobject("lilytorch/scripts/zebrafish_fluid.yaml")
+        pars = yaml2pyobject("../scripts/zebrafish_fluid.yaml")
 
         self.fluid_solver = FluidSolver(pars, costum_update=self.bodies_update)
         self.device = self.fluid_solver.device
         self.fluid_solver.composite_body.update = self.update # modify the update rule
         self.fluid_solver.sdf_properties = self.initialize()
+
+        self.n_bodies=len(self.fluid_solver.composite_body.bodies)
 
         # enforce fluid timestep
         animat_data.timestep = self.fluid_solver.dt
@@ -80,18 +82,18 @@ class ZebrafishFluidController(AnimatNetwork):
 
     def update(self,t,dt=1):
         iteration = int(t/dt)
-        pos_global = torch.from_numpy(np.array(self.data.sensors.links.urdf_positions()[iteration,:, :2]))
-        lin_vel = torch.from_numpy(np.array(self.data.sensors.links.com_lin_velocities()[iteration,:,:2]))
-        ang_vel = torch.from_numpy(np.array([self.data.sensors.links.com_ang_velocity(iteration, link)[2] for link in range(self.nlinks)])) # only the z ang velocity in 2d
-        orientation = torch.from_numpy(np.array(self.data.sensors.links.urdf_orientations()[iteration]))
+        pos_global = torch.from_numpy(np.array(self.data.sensors.links.urdf_positions()[iteration,:, :2]).astype(np.float32)).to(self.device)
+        # lin_vel = torch.from_numpy(np.array(self.data.sensors.links.com_lin_velocities()[iteration,:,:2]))
+        # ang_vel = torch.from_numpy(np.array([self.data.sensors.links.com_ang_velocity(iteration, link)[2] for link in range(self.nlinks)])) # only the z ang velocity in 2d
+        orientation = torch.from_numpy(np.array(self.data.sensors.links.urdf_orientations()[iteration]).astype(np.float32))
         r = torch.from_numpy(R.from_quat(orientation).as_matrix()[:,:2,:2].astype(np.float32)).to(self.device) #R.from_quat(self.urdf_orientations[:,[3,0,1,2]])
 
-        sdf_properties = []
-        for body_i, body in enumerate(self.fluid_solver.composite_body.bodies):
+        uvels=[]
+        vvels=[]
+        for i, body in enumerate(self.fluid_solver.composite_body.bodies):
 
-            trans = torch.stack((pos_global[body_i][0]*body.ones_stacked, pos_global[body_i][1]*body.ones_stacked))
-            pos_trans = (body.stacked_xy-trans)
-            pos_trans = r[body_i].T@pos_trans
+            # trans = torch.stack((pos_global[body_i][0]*body.ones_stacked, pos_global[body_i][1]*body.ones_stacked))
+            pos_trans = r[i].T@(body.stacked_xy-pos_global[i][:,None])
 
             # pos_trans = r[body_i].T@pos_trans
             xpos = pos_trans[0].reshape(body.nx, body.ny)
@@ -100,7 +102,10 @@ class ZebrafishFluidController(AnimatNetwork):
                 xpos,
                 ypos
             )
-            sdf_properties.append(body.compute_sdf_properties(sdf_val))
+            self.fluid_solver.composite_body.sdf_vals[i]=sdf_val
+
+
+            # sdf_properties.append(body.compute_sdf_properties(sdf_val))
 
             # pos_rot_glob = r[body_i] @ pos_trans
             # ang_v = ang_vel[body_i]
@@ -115,13 +120,33 @@ class ZebrafishFluidController(AnimatNetwork):
             # body.body_u = (vel[body_i][0]-ang_v*ypos)
             # body.body_v = (vel[body_i][1]+ang_v*xpos)
 
-            velocity = - r[body_i]@(pos_trans-body.old_points) / dt
-            body.body_u= velocity[0].reshape(body.nx, body.ny)
-            body.body_v= velocity[1].reshape(body.nx, body.ny)
+            velocity = - r[i]@(pos_trans-body.old_points) / dt
+
+            uvels.append(velocity[0].reshape(body.nx, body.ny))
+            vvels.append(velocity[1].reshape(body.nx, body.ny))
+
+            # body.body_u= velocity[0].reshape(body.nx, body.ny)
+            # body.body_v= velocity[1].reshape(body.nx, body.ny)
             body.old_points = pos_trans
 
 
-        return sdf_properties
+
+        # self.sdf_val = torch.min(torch.stack([prop for idx, prop in enumerate(sdf_properties)]),axis=0)[0]
+
+        uvels=torch.stack(uvels)
+        vvels=torch.stack(vvels)
+
+        idx=self.fluid_solver.composite_body.sdf_vals.argmin(0).unsqueeze(0).expand(self.fluid_solver.composite_body.sdf_vals.shape)
+
+        self.fluid_solver.composite_body.sdf_val=self.fluid_solver.composite_body.sdf_vals.gather(0,idx)[0].reshape(self.fluid_solver.nx,self.fluid_solver.ny)-self.fluid_solver.composite_body.suit
+        self.fluid_solver.composite_body.body_u=uvels.gather(0,idx)[0].reshape(self.fluid_solver.nx,self.fluid_solver.ny)
+        self.fluid_solver.composite_body.body_v=vvels.gather(0,idx)[0].reshape(self.fluid_solver.nx,self.fluid_solver.ny)
+
+        # self.body_u=self.uv[:,0,:].gather(0,idx)[0].reshape(self.body.nx,self.body.ny)
+        # self.body_v=self.uv[:,1,:].gather(0,idx)[0].reshape(self.body.nx,self.body.ny)
+
+
+        # return sdf_properties
 
     def bodies_update(self, t):
         r = R.from_quat(self.urdf_orientations[:,[3,0,1,2]])
@@ -166,8 +191,8 @@ class ZebrafishFluidController(AnimatNetwork):
 
         # from IPython import embed; embed()
 
-        # self.callback.force_x = -(self.fluid_solver.force_x).cpu().numpy()
-        # self.callback.force_y = -(self.fluid_solver.force_y).cpu().numpy()
+        self.callback.force_x = -(self.fluid_solver.force_x).cpu().numpy()
+        self.callback.force_y = -(self.fluid_solver.force_y).cpu().numpy()
 
         # print(self.fluid_solver.force_y)
         # self.animat_data.senso
@@ -193,12 +218,11 @@ class ZebrafishFluidSegmentController(AnimatNetwork):
         self.controller   = controller
         self.callback = callback
 
-        pars = yaml2pyobject("lilytorch/scripts/zebrafish_fluid.yaml")
+        pars = yaml2pyobject("../scripts/zebrafish_fluid.yaml")
 
-        self.fluid_solver = FluidSolver(pars, costum_update=None)
+        self.fluid_solver = FluidSolver(pars, costum_update=True)
         self.device = self.fluid_solver.device
         self.fluid_solver.composite_body.update = self.update # modify the update rule
-        # self.fluid_solver.sdf_properties = self.initialize()
 
         # enforce fluid timestep
         animat_data.timestep = self.fluid_solver.dt
@@ -206,12 +230,14 @@ class ZebrafishFluidSegmentController(AnimatNetwork):
 
     def update(self,t,dt=1):
         iteration = int(t/dt)
-        links_pos=torch.from_numpy(np.array(self.data.sensors.links.urdf_positions()[iteration,:, :2])).to(self.device) #16
-        lin_vel = torch.from_numpy(np.array(self.data.sensors.links.com_lin_velocities()[iteration,:-1,:2])).to(self.device) #16
-        ang_vel = torch.from_numpy(np.array([self.data.sensors.links.com_ang_velocity(iteration, link)[2] for link in range(self.nlinks-1)])).to(self.device) #16
-        self.fluid_solver.composite_body.compute_sdf_and_velocities(links_pos, lin_vel, ang_vel, dt=1)
+        links_pos = torch.from_numpy(np.array(self.data.sensors.links.urdf_positions()[iteration,:, :2])).to(self.device) #16
+        lin_vel   = torch.from_numpy(np.array(self.data.sensors.links.com_lin_velocities()[iteration,:,:2])).to(self.device) #16
+        ang_vel   = torch.from_numpy(np.array([self.data.sensors.links.com_ang_velocity(iteration, link)[2]*np.pi/180.0 for link in range(self.nlinks)])).to(self.device) #16
 
-        # sdf_properties = []
+        self.fluid_solver.composite_body.compute_sdf_and_velocities(links_pos, lin_vel, ang_vel, dt=dt)
+
+
+       # sdf_properties = []
         # for body_i, body in enumerate(self.fluid_solver.composite_body.bodies):
 
         #     trans = torch.stack((pos_global[body_i][0]*body.ones_stacked, pos_global[body_i][1]*body.ones_stacked))
@@ -249,8 +275,11 @@ class ZebrafishFluidSegmentController(AnimatNetwork):
         # return sdf_properties
 
 
+    def bodies_update(self, t):
+        return
 
     def step(self, iteration, time, timestep):
+        print(iteration)
         """Control step"""
         if iteration>=self.n_iterations-1:
             return

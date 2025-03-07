@@ -158,10 +158,10 @@ class FluidCallback(TaskCallback):
         indices = task.maps['sensors']['data2xfrc']
         # from IPython import embed; embed()
         # print(self.force_x)
-        
-        
+
+
         # physics.data.xfrc_applied[indices[0], sc.xfrc_force_x] = 0.0001 * task.units.newtons * 1
         # physics.data.xfrc_applied[indices[0], sc.xfrc_force_y] = 0.0001 * task.units.newtons * 1
 
-        physics.data.xfrc_applied[indices, 0] = self.force_x * task.units.newtons * 1
-        physics.data.xfrc_applied[indices, 1] = self.force_y * task.units.newtons * 1
+        physics.data.xfrc_applied[indices, 0] = self.force_x * task.units.newtons * 30
+        physics.data.xfrc_applied[indices, 1] = self.force_y * task.units.newtons * 30
