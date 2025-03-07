@@ -268,7 +268,6 @@ class AdvDiffSolver:
         return out
 
     def solve_ADBQUICKEST(self, u, v):
-
         uw = 0.5*(u[:-2,1:-1]+u[1:-1,1:-1])
         ue = 0.5*(u[2:,1:-1]+u[1:-1,1:-1])
         vs = 0.5*(v[1:-1,:-2]+v[1:-1,1:-1])

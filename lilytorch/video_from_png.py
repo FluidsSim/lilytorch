@@ -3,13 +3,13 @@
 import cv2
 import os
 
-dir         = "/data/andreaferrario/ns_data/2025-01-31T11:54:47.011723/"
+dir         = "/data/andreaferrario/ns_data/2025-03-06T15:33:04.800966/curl/"
 name        = "video"
 format      = ".mp4"
-img_name    = "curluv"
+img_name    = "curl"
 dt          = 0.001
 slow_factor =   1
-save_every    = 500
+save_every    = 100
 
 video_name = dir+name+format
 
@@ -23,19 +23,19 @@ height, width, layers = frame.shape
 _fourcc = cv2.VideoWriter_fourcc(*'avc1')
 
 video = cv2.VideoWriter(video_name, _fourcc, fps, (width,height))
-font = cv2.FONT_HERSHEY_SIMPLEX  
+font = cv2.FONT_HERSHEY_SIMPLEX
 for idx, image in enumerate(images_sorted):
     frame = cv2.imread(os.path.join(dir, image))
     time  = idx*save_every*dt*slow_factor
-    cv2.putText(frame,  
-                'Time = {}, {}X '.format(round(time,1),round(slow_factor,2)),  
-                (int(width/2), 50),  
-                font, 1,  
-                (0, 0, 0),  
-                2,  
-                cv2.LINE_4) 
+    cv2.putText(frame,
+                'Time = {}, {}X '.format(round(time,1),round(slow_factor,2)),
+                (int(width/2), 50),
+                font, 1,
+                (0, 0, 0),
+                2,
+                cv2.LINE_4)
     video.write(frame)
-  
+
 cv2.destroyAllWindows()
 video.release()
 

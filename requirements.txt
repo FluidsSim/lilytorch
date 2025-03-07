@@ -10,3 +10,4 @@ strenum
 pywavefront
 mujoco==3.2.3
 dm-control==1.0.23
+opencv-python

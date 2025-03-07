@@ -44,19 +44,15 @@ def make_video(
 
 def main():
 
-    dir_path  = "/data/pazzagli/simulation_results/fluid_solver"
+    dir_path  = "/data/andreaferrario/ns_data/2025-03-06T15:56:06.822587/"
     dir_names = [
-        dir
-        for dir in os.listdir(dir_path)
-        if dir not in [
-            "saved_simulations",
-        ]
+        ""
     ]
 
     for dir_name in dir_names:
         make_video(
             results_path  = f"{dir_path}/{dir_name}",
-            quantity_name = "curluv",
+            quantity_name = "pressure",
             video_speed   = 1.0,
         )
 

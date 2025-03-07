@@ -6,7 +6,9 @@ import open3d as o3d
 from farms_core.io.sdf import ModelSDF
 from pytorch_interp import RegularGridInterpolator
 import skfmm
-import math # important to keep this for evaluating math operations for sdfs
+import math # important to keep this for evaluating math operations for sdfs even if it appears as not used
+import matplotlib.pyplot as plt
+import cv2
 
 from lilytorch.scripts.zebrafish_files.load_data import get_experimental_signal
 
@@ -153,7 +155,7 @@ class mesh2sdf():
         self._mesh = o3d.io.read_triangle_mesh(self.mesh_file)
         self.update_mesh()
 
-    def update_mesh(self, convexify=True):
+    def update_mesh(self, convexify=False):
         if convexify:
             self._mesht = o3d.t.geometry.TriangleMesh.from_legacy(self._mesh.compute_convex_hull()[0])
         else:
@@ -210,6 +212,8 @@ class mesh2sdf():
         return ranges
 
     def visualize(self, wireframe=True):
+
+        print("Visualizing the mesh file: {}".format(self.mesh_file))
 
         viewer = o3d.visualization.Visualizer()
         viewer.create_window()
@@ -312,8 +316,18 @@ class Body:
     def compute_sdf_properties(self, sdf_val):
 
         (gradx, grady) = torch.gradient(sdf_val, spacing=[self.dx, self.dy])
-
         norm = torch.sqrt(gradx**2+grady**2)
+
+        curvature=torch.where(
+            norm>0,
+            (torch.gradient(gradx, spacing=self.dx, axis=0)[0]*grady-
+             torch.gradient(grady, spacing=self.dy, axis=1)[0]*gradx)/
+            norm**3,
+            0
+        )
+
+        # curvature = (d2x_dt2 * dy_dt - dx_dt * d2y_dt2) / (dx_dt * dx_dt + dy_dt * dy_dt)**1.5
+
 
         # compute curvature
         numerator = (
@@ -322,15 +336,34 @@ class Body:
             -2*gradx*grady*torch.gradient(grady, spacing=self.dx, axis=0)[0]
         )
         denominator = norm**3
+        curvature = torch.where(denominator>0, numerator/denominator, 0)
+
+
+
+        # # compute curvature
+        # numerator = (
+        #     (grady**2)*torch.gradient(gradx, spacing=self.dx, axis=0)[0]+
+        #     (gradx**2)*torch.gradient(grady, spacing=self.dy, axis=1)[0]+
+        #     -2*gradx*grady*torch.gradient(grady, spacing=self.dx, axis=0)[0]
+        # )
+        # denominator = norm**3
+        # curvature = torch.where(denominator>0, numerator/denominator, 0)
+
+
+        # dx_dt   = np.gradient(com_x)
+        # dy_dt   = np.gradient(com_y)
+        # d2x_dt2 = np.gradient(dx_dt)
+        # d2y_dt2 = np.gradient(dy_dt)
+        # curvature = (d2x_dt2 * dy_dt - dx_dt * d2y_dt2) / (dx_dt * dx_dt + dy_dt * dy_dt)**1.5
+
 
         # numerator = torch.gradient(gradx, dim=0, spacing=self.dx)[0]+torch.gradient(grady, dim=1, spacing=self.dy)[0]
         # denominator = (gradx**2+grady**2)**1.5
 
-        curvature = torch.where(denominator>0, numerator/denominator, 0)
-
         # normalize gradients
         gradx=torch.where(norm>0, gradx/norm, 0)
         grady=torch.where(norm>0, grady/norm, 0)
+
 
         return (
             sdf_val,
@@ -404,6 +437,8 @@ class Body:
 
         # self.oldpos_u = newpos_u
         # self.oldpos_v = newpos_v
+
+        # from IPython import embed; embed()
 
         return fun(newpos_u, newpos_v)
 
@@ -758,7 +793,7 @@ class BodyFishExperimental(Body):
 class BodyMesh(Body):
     """
     """
-    def __init__(self, device, x, y, mesh_file, update_maps, eps=0.05, compute_interp=True, nsamples=2**12, msamples=2**12, suit=0):
+    def __init__(self, device, x, y, mesh_file, update_maps, eps=0.05, compute_interp=True, nsamples=2**12, msamples=2**12, suit=0, **kwargs):
         super().__init__(device, x, y, eps=eps)
         self.mesh_file = mesh_file
         self.compute_interp = compute_interp
@@ -767,11 +802,12 @@ class BodyMesh(Body):
         self.update_theta = update_maps[0]
         self.update_translation = update_maps[1]
         self.suit = suit
+        self.plotting = kwargs.pop("plotting", False)
+        self.apply_closing_morph = kwargs.pop("apply_closing_morph", False)
 
         self.m2s = mesh2sdf(self.mesh_file)
         self.initialize_sdfs()
         del self.m2s
-
         self.bodies = [self]
 
 
@@ -780,23 +816,25 @@ class BodyMesh(Body):
         Initialize the sdf interpolation function
         """
         if self.compute_interp:
-            bb = self.m2s.bounding_box(self.suit)
+            bb = self.m2s.bounding_box()
+            # bb = self.m2s.bounding_box(self.suit)
 
-            # (1) use open3d to determine sdf on downsampled data
-            diag = torch.sqrt((self.x[-1]-self.x[0])**2+(self.y[-1]-self.y[0])**2).detach().numpy()
-            xnp = np.linspace(-2*diag,2*diag,self.nsamples)
-            ynp = np.linspace(-2*diag,2*diag,self.msamples)
+            diag = torch.sqrt((self.x[-1]-self.x[0])**2+(self.y[-1]-self.y[0])**2).cpu().detach().numpy()
+            xnp = np.linspace(-diag,diag,self.nsamples)
+            ynp = np.linspace(-diag,diag,self.msamples)
 
             cx_bb = (bb[0,1]+bb[0,0])/2
             cy_bb = (bb[1,1]+bb[1,0])/2
-            dx_bb = bb[0,1]-bb[0,0]
-            dy_bb = bb[1,1]-bb[1,0]
+            # dx_bb = bb[0,1]-bb[0,0]
+            # dy_bb = bb[1,1]-bb[1,0]
+            diag_bb=np.sqrt((bb[0,0]-bb[0,1])**2+(bb[1,0]-bb[1,1])**2)
+
             idownsampled = np.where(
-                np.logical_and(xnp>cx_bb-dx_bb, xnp<cx_bb+dx_bb)
+                np.logical_and(xnp>cx_bb-diag_bb, xnp<cx_bb+diag_bb)
             )[0]
             xdownsampled = xnp[idownsampled]
             jdownsampled = np.where(
-                np.logical_and(ynp>cy_bb-dy_bb, ynp<cy_bb+dy_bb)
+                np.logical_and(ynp>cy_bb-diag_bb, ynp<cy_bb+diag_bb)
             )[0]
             ydownsampled = xnp[jdownsampled]
             X,Y=np.meshgrid(xdownsampled,ydownsampled,indexing="ij")
@@ -804,31 +842,131 @@ class BodyMesh(Body):
             yflat = Y.flatten()
             zflat = np.zeros_like(xflat)
             xyz   = np.stack([xflat,yflat,zflat],axis=1)
-
             query_pts=np.array(xyz.astype(np.float32))
+
 
             sdf_val, _=self.m2s(query_pts)
             binary_2d = np.ones((self.nsamples,self.msamples))
-            binary_2d = np.ones((self.nsamples,self.msamples))
             binary_2d[idownsampled[0]:(idownsampled[-1]+1),jdownsampled[0]:(jdownsampled[-1]+1)][sdf_val.reshape(X.shape)<0]=-1
 
-            # (2) use skfmm to determine sdf on the full domain
-            sdf_val = skfmm.distance(binary_2d, dx=[self.dx,self.dy])-self.suit
 
-            # import matplotlib.pyplot as plt
-            # plt.figure()
-            # plt.contourf(
-            #     sdf_val
-            # )
-            # plt.colorbar()
-            # plt.contour(sdf_val, colors='k', levels=[0], linestyles='dashed')
-            # plt.show()
+
+
+
+
+
+            # xnp = np.linspace(cx_bb-diag,cx_bb+diag,self.nsamples)
+            # ynp = np.linspace(cy_bb-diag,cy_bb+diag,self.msamples)
+
+            # binary_2d = np.ones((self.nsamples,self.msamples))
+
+            # X,Y=np.meshgrid(xnp,ynp,indexing="ij")
+            # xflat = X.flatten()
+            # yflat = Y.flatten()
+            # zflat = 0.0*np.ones_like(xflat)
+            # xyz   = np.stack([xflat,yflat,zflat],axis=1)
+            # query_pts=np.array(xyz.astype(np.float32))
+
+            # sdf_val_o3d, _=self.m2s(query_pts)
+            # binary_2d=np.zeros((self.nsamples,self.msamples))
+            # binary_2d[sdf_val_o3d.reshape(X.shape)<0]=1
+
+            # if self.apply_closing_morph:
+            #     gray = (255*binary_2d).astype('uint8')
+            #     im = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+            #     im = cv2.morphologyEx(im, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2)))
+            #     if self.plotting:
+            #         cv2.imshow("window_name", im)
+            #         cv2.waitKey(0)
+            #         cv2.destroyAllWindows()
+            #     im=im[:,:,0]
+            # else:
+            #     im=binary_2d
+
+            # binary_2d=np.where(im==0,1,-1)
+
+
+            # from IPython import embed; embed()
+
+            # (2) use skfmm to determine sdf on the full domain
+            print("Computing the sdf for {}, with space steps ({},{})".format(self.mesh_file,xnp[1]-xnp[0],ynp[1]-ynp[0]))
+            sdf_val = skfmm.distance(binary_2d, dx=[xnp[1]-xnp[0],ynp[1]-ynp[0]])#-self.suit
+
+            if self.plotting:
+                var=binary_2d #sdf_val_o3d.reshape(X.shape)
+                plt.figure()
+                plt.contourf(
+                    var
+                )
+                plt.colorbar()
+                plt.contour(var, colors='k', levels=[0], linestyles='dashed')
+                plt.show()
+                self.m2s.visualize()
 
             print("Computing the interpolation functions for {}".format(self.mesh_file))
 
             np.save("interp_data/xnp_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy",xnp)
             np.save("interp_data/ynp_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy",ynp)
             np.save("interp_data/sdf_val_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy",sdf_val)
+
+
+        # if self.compute_interp:
+        #     bb = self.m2s.bounding_box()
+        #     # bb = self.m2s.bounding_box(self.suit)
+
+        #     # (1) use open3d to determine sdf on downsampled data
+        #     diag = torch.sqrt((self.x[-1]-self.x[0])**2+(self.y[-1]-self.y[0])**2).cpu().detach().numpy()
+        #     xnp = np.linspace(-2*diag,2*diag,self.nsamples)
+        #     ynp = np.linspace(-2*diag,2*diag,self.msamples)
+
+        #     cx_bb = (bb[0,1]+bb[0,0])/2
+        #     cy_bb = (bb[1,1]+bb[1,0])/2
+        #     dx_bb = bb[0,1]-bb[0,0]
+        #     dy_bb = bb[1,1]-bb[1,0]
+        #     idownsampled = np.where(
+        #         np.logical_and(xnp>cx_bb-dx_bb, xnp<cx_bb+dx_bb)
+        #     )[0]
+        #     xdownsampled = xnp[idownsampled]
+        #     jdownsampled = np.where(
+        #         np.logical_and(ynp>cy_bb-dy_bb, ynp<cy_bb+dy_bb)
+        #     )[0]
+        #     ydownsampled = xnp[jdownsampled]
+        #     X,Y=np.meshgrid(xdownsampled,ydownsampled,indexing="ij")
+        #     xflat = X.flatten()
+        #     yflat = Y.flatten()
+        #     zflat = np.zeros_like(xflat)
+        #     xyz   = np.stack([xflat,yflat,zflat],axis=1)
+
+        #     query_pts=np.array(xyz.astype(np.float32))
+
+        #     sdf_val_o3d, _=self.m2s(query_pts)
+        #     binary_2d = np.ones((self.nsamples,self.msamples))
+        #     binary_2d = np.ones((self.nsamples,self.msamples))
+        #     binary_2d[idownsampled[0]:(idownsampled[-1]+1),jdownsampled[0]:(jdownsampled[-1]+1)][sdf_val_o3d.reshape(X.shape)<0]=-1
+
+
+        #     var=sdf_val_o3d.reshape(X.shape)
+        #     plt.figure()
+        #     plt.contourf(
+        #         var
+        #     )
+        #     plt.colorbar()
+        #     plt.contour(var, colors='k', levels=[0], linestyles='dashed')
+        #     plt.show()
+
+
+        #     # from IPython import embed; embed()
+
+        #     # (2) use skfmm to determine sdf on the full domain
+        #     print("Computing the sdf for {}, with space steps ({},{})".format(self.mesh_file,xnp[1]-xnp[0],ynp[1]-ynp[0]))
+        #     sdf_val = skfmm.distance(binary_2d, dx=[xnp[1]-xnp[0],ynp[1]-ynp[0]])#-self.suit
+
+
+        #     print("Computing the interpolation functions for {}".format(self.mesh_file))
+
+        #     np.save("interp_data/xnp_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy",xnp)
+        #     np.save("interp_data/ynp_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy",ynp)
+        #     np.save("interp_data/sdf_val_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy",sdf_val)
 
     def initialize(self):
         xnp = np.load("interp_data/xnp_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy")
@@ -841,7 +979,7 @@ class BodyMesh(Body):
                 torch.from_numpy(ynp).type(self.dtype).to(self.device)
             ),
             torch.from_numpy(sdf_val).type(self.dtype).to(self.device),
-            fill_value=0.0
+            fill_value="nearest"
         )
         return self.update(0)
 
@@ -870,6 +1008,8 @@ class CompositeBodyMesh:
         self.sdf_folder = sdf_folder
         self.sdf = ModelSDF.read(sdf_folder+sdf_name)[0]
         self.bodies = []
+        self.suit=suit
+        self.plotting = kwargs.pop("plotting", True)
         for link_i, link in enumerate(self.sdf.links):
             mesh_name = link["visuals"][0]["geometry"]["uri"]
             mesh_gpath = sdf_folder+mesh_name
@@ -881,6 +1021,11 @@ class CompositeBodyMesh:
                     lambda t, initial_pose=initial_pose: initial_pose[1],
                 ]
                 )
+            # if link_i == 14:
+            #     compute_interp = True
+            # else:
+            #     compute_interp = False
+
             body = BodyMesh(
                     device, x, y,
                     mesh_gpath,
@@ -894,12 +1039,49 @@ class CompositeBodyMesh:
             self.bodies.append(body)
         self.costum_update = costum_update
 
+        self.mu_funcs               = self.bodies[0].mu_funcs
+        self.compute_sdf_properties = self.bodies[0].compute_sdf_properties
+        nbodies                     = len(self.sdf.links)
+        self.sdf_vals               = torch.zeros((nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
+        self.initialize() # initialize the sdf interpolation functions
+
+
     def initialize(self):
-        sdf_prop = []
-        for body in self.bodies:
-            prop = body.initialize()[0]
-            sdf_prop.append(prop)
-        return sdf_prop
+
+        for i, body in enumerate(self.bodies):
+            self.sdf_vals[i]=body.initialize()[0]
+
+            # plt.contour(self.bodies[i].sdf_interp.F.cpu(), colors='k', levels=[0], linestyles='dashed')
+            # plt.show()
+
+        self.sdf_val = torch.min(self.sdf_vals,axis=0)[0]-self.suit
+
+        if self.plotting:
+            var=self.sdf_val.cpu()
+            extent = (
+                torch.min(self.bodies[0].x.cpu()), torch.max(self.bodies[0].x.cpu()),
+                torch.min(self.bodies[0].y.cpu()), torch.max(self.bodies[0].y.cpu())
+            )
+
+            plt.figure(figsize=(20,10))
+            plt.imshow(
+                var.T,
+                extent = extent,
+                origin = "lower",
+                interpolation=None
+            )
+            plt.contour(self.bodies[0].X.cpu(),self.bodies[0].Y.cpu(),var, colors='k', levels=[0])
+            plt.show()
+
+
+
+
+
+
+        self.body_u=torch.zeros_like(self.bodies[0].X)
+        self.body_v=torch.zeros_like(self.bodies[0].X)
+
+
 
     def update(self, t, dt=1):
         (angles, translations) = self.costum_update(t)
@@ -916,7 +1098,10 @@ class CompositeBodyMesh:
                     dt=dt
                 )
             )
-        return sdf_properties
+        self.sdf_val = torch.min(torch.stack([prop[0] for idx, prop in enumerate(sdf_properties)]),axis=0)[0]
+
+
+        # return sdf_properties
 
 
     def visualize(self):
@@ -1069,8 +1254,8 @@ class CompositeSegmentBody:
         self.body            = Body(device,x,y,eps=0.05)
         self.nlinks          = len(self.sdf.links)
         self.initial_poses   = torch.tensor([link.pose[:2] for link in self.sdf.links],device=device)
-        self.initial_lin_vel = torch.zeros((self.initial_poses.shape[0]-1),2,device=device)
-        self.initial_ang_vel = torch.zeros(self.initial_poses.shape[0]-1,device=device)
+        self.initial_lin_vel = torch.zeros((self.initial_poses.shape[0]),2,device=device)
+        self.initial_ang_vel = torch.zeros(self.initial_poses.shape[0],device=device)
 
         self.ds=torch.zeros((self.n-1,self.body.stacked_xy.shape[1]),device=device)
         self.us=torch.zeros((self.n-1,self.body.X.shape[0],self.body.X.shape[1]),device=device)
@@ -1079,12 +1264,13 @@ class CompositeSegmentBody:
 
         self.compute_sdf_and_velocities(-self.initial_poses, self.initial_lin_vel, self.initial_ang_vel, dt=1)
 
-    def compute_sdf_and_velocities(self, p, com_lin_vel, com_ang_vel, dt=1, plotting=True):
+    def compute_sdf_and_velocities(self, p, com_lin_vel, com_ang_vel, dt=1, plotting=False):
         """
         p: link poses - dim n
-        com_lin_vel: com linear vel - dim n-1 (remove the last one)
-        com_ang_vel: com ang vel - dim n-1 (remove the last one)
+        com_lin_vel: com linear vel - dim n
+        com_ang_vel: com ang vel - dim n
         """
+
         for i in range(self.n-1):
             e=p[i+1]-p[i]
             p_o=self.body.stacked_xy-p[i][:,None]
@@ -1094,9 +1280,18 @@ class CompositeSegmentBody:
 
             c=torch.cos(com_ang_vel[i])
             s=torch.sin(com_ang_vel[i])
-            R=torch.tensor([[c,-s],[s,c]],device=self.device)
+            R1=torch.tensor([[c,-s],[s,c]],device=self.device)
+            c=torch.cos(com_ang_vel[i+1])
+            s=torch.sin(com_ang_vel[i+1])
+            R2=torch.tensor([[c,-s],[s,c]],device=self.device)
+
             line_point=e[:,None]*h+p[i][:,None]
-            self.uv[i]=(com_lin_vel[i][:,None]+R@line_point-line_point) #/dt
+            self.uv[i]=(
+                (1-h)*(0*com_lin_vel[i][:,None]+R1@line_point)+
+                h*(0*com_lin_vel[i+1][:,None]+R2@line_point)+
+                -line_point
+            ) #/ dt
+
 
         idx=self.ds.argmin(0).unsqueeze(0).expand(self.ds.shape)
         self.sdf=self.ds.gather(0,idx)[0].reshape(self.body.nx,self.body.ny)
@@ -1106,65 +1301,65 @@ class CompositeSegmentBody:
 
 
         # ==== plotting ====
-        # if plotting:
-        #     import matplotlib.pyplot as plt
-        #     X=self.body.X.cpu()
-        #     Y=self.body.Y.cpu()
-        #     x=self.body.x.cpu()
-        #     y=self.body.y.cpu()
-        #     var=self.sdf.cpu()
-        #     pcpu=p.cpu()
-        #     plt.figure()
-        #     plt.imshow(
-        #             var.T,
-        #             extent = (
-        #                 torch.min(x.cpu()), torch.max(x.cpu()),
-        #                 torch.min(y.cpu()), torch.max(y.cpu())
-        #             ),
-        #             origin = "lower",
-        #             cmap = "Greys"
-        #         )
-        #     plt.colorbar()
-        #     plt.contour(X,Y,var, colors='k', levels=[0], linestyles='-')
-        #     cset1 = plt.contourf(X,Y, var, levels=20, cmap="Greys")
-        #     plt.plot(pcpu[:,0],pcpu[:,1],'r',marker='o')
-        #     # plt.plot(p_new[:,0],p_new[:,1],'g',marker='o')
-        #     subsample_n = 2**3
-        #     plt.quiver(
-        #         X[::subsample_n,::subsample_n],
-        #         Y[::subsample_n,::subsample_n],
-        #         self.body_u[::subsample_n,::subsample_n].cpu(),
-        #         self.body_v[::subsample_n,::subsample_n].cpu(),
-        #         color='g',
-        #         scale=dt, scale_units='xy'
-        #     )
+        if plotting:
+            import matplotlib.pyplot as plt
+            X=self.body.X.cpu()
+            Y=self.body.Y.cpu()
+            x=self.body.x.cpu()
+            y=self.body.y.cpu()
+            var=self.sdf.cpu()
+            pcpu=p.cpu()
+            plt.figure()
+            plt.imshow(
+                    var.T,
+                    extent = (
+                        torch.min(x.cpu()), torch.max(x.cpu()),
+                        torch.min(y.cpu()), torch.max(y.cpu())
+                    ),
+                    origin = "lower",
+                    cmap = "Greys"
+                )
+            plt.colorbar()
+            plt.contour(X,Y,var, colors='k', levels=[0], linestyles='-')
+            cset1 = plt.contourf(X,Y, var, levels=20, cmap="Greys")
+            plt.plot(pcpu[:,0],pcpu[:,1],'r',marker='o')
+            # plt.plot(p_new[:,0],p_new[:,1],'g',marker='o')
+            subsample_n = 2**3
+            plt.quiver(
+                X[::subsample_n,::subsample_n],
+                Y[::subsample_n,::subsample_n],
+                self.body_u[::subsample_n,::subsample_n].cpu(),
+                self.body_v[::subsample_n,::subsample_n].cpu(),
+                color='g',
+                scale=dt, scale_units='xy'
+            )
 
-        #     # dp2=p_new[2]-p[2]
-        #     # plt.quiver(
-        #     #     p[2][0],
-        #     #     p[2][1],
-        #     #     dp2[0],
-        #     #     dp2[1],
-        #     #     color='r',
-        #     #     scale=dt, scale_units='xy'
-        #     # )
+            # dp2=p_new[2]-p[2]
+            # plt.quiver(
+            #     p[2][0],
+            #     p[2][1],
+            #     dp2[0],
+            #     dp2[1],
+            #     color='r',
+            #     scale=dt, scale_units='xy'
+            # )
 
 
-        #     # ==== plotting ====
-        #     var=self.body_u.cpu()
-        #     plt.figure()
-        #     plt.imshow(
-        #             var.T,
-        #             extent = (
-        #                 torch.min(x.cpu()), torch.max(x.cpu()),
-        #                 torch.min(y.cpu()), torch.max(y.cpu())
-        #             ),
-        #             origin = "lower",
-        #             cmap = "Greys"
-        #         )
-        #     plt.colorbar()
-        #     plt.contour(X,Y,self.sdf.cpu(), colors='k', levels=[0], linestyles='-')
-        #     plt.show()
+            # # ==== plotting ====
+            # var=self.body_u.cpu()
+            # plt.figure()
+            # plt.imshow(
+            #         var.T,
+            #         extent = (
+            #             torch.min(x.cpu()), torch.max(x.cpu()),
+            #             torch.min(y.cpu()), torch.max(y.cpu())
+            #         ),
+            #         origin = "lower",
+            #         cmap = "Greys"
+            #     )
+            # plt.colorbar()
+            # plt.contour(X,Y,self.sdf.cpu(), colors='k', levels=[0], linestyles='-')
+            plt.show()
 
 
 

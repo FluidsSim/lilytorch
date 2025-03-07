@@ -95,9 +95,9 @@ class FluidSolver:
             starting_time=self.starting_time
         )
         # self.sdf_properties = self.composite_body.initialize()
-        # self.n_bodies=len(self.composite_body.bodies)
-        # self.force_x = torch.zeros(self.n_bodies)
-        # self.force_y = torch.zeros(self.n_bodies)
+        self.n_bodies=len(self.composite_body.bodies)
+        self.force_x = torch.zeros(self.n_bodies)
+        self.force_y = torch.zeros(self.n_bodies)
 
         # Parameters for the Gaussian kernel
         # kernel_dx=0.005
@@ -232,14 +232,22 @@ class FluidSolver:
         dudx, dudy = torch.gradient(u, spacing=[self.dx, self.dy])
         dvdx, dvdy = torch.gradient(v, spacing=[self.dx, self.dy])
         upper = self.visc*(dudy+dvdx)
-        # return [
-        #     [2*self.visc*dudx, upper],
-        #     [upper, 2*self.visc*dvdy]
-        # ]
         return [
-            [2*self.visc*dudx-p, upper],
-            [upper, 2*self.visc*dvdy-p]
+            [2*self.visc*dudx, upper],
+            [upper, 2*self.visc*dvdy]
         ]
+
+        # dudx, dudy = torch.gradient(u, spacing=[self.dx, self.dy])
+        # dvdx, dvdy = torch.gradient(v, spacing=[self.dx, self.dy])
+        # upper = self.visc*(dudy+dvdx)
+        # # return [
+        # #     [2*self.visc*dudx, upper],
+        # #     [upper, 2*self.visc*dvdy]
+        # # ]
+        # return [
+        #     [2*self.visc*dudx-p, upper],
+        #     [upper, 2*self.visc*dvdy-p]
+        # ]
 
     def solver_iteration_old(self,u,v,p):
         """
@@ -363,13 +371,14 @@ class FluidSolver:
 
     def step_(self, u, v, p, iteration, t):
 
-
-        (self.mu0_all, self.mu1_all) = self.composite_body.body.mu_funcs(self.composite_body.sdf)
+        (self.mu0_all, self.mu1_all) = self.composite_body.mu_funcs(self.composite_body.sdf_val)
         self.m_m0_all = (1-self.mu0_all)
         self.body_u=self.composite_body.body_u
         self.body_v=self.composite_body.body_v
-        (_, self.normal_x, self.normal_y, self.curvature) = self.composite_body.body.compute_sdf_properties(self.composite_body.sdf)
-        self.sdf_properties=[[self.composite_body.sdf]]
+        (_, self.normal_x, self.normal_y, self.curvature) = self.composite_body.compute_sdf_properties(self.composite_body.sdf_val)
+
+        self.sdf_properties=[[self.composite_body.sdf_val]] # just for plotting
+
 
         self.composite_body.update(t, dt=self.dt)
         # sdf_properties = self.composite_body.update(t, dt=self.dt)
@@ -511,15 +520,28 @@ class FluidSolver:
         # # self.body_vn       = self.normal_derivative(self.body_v,self.normal_x,self.normal_y) * self.mu1_all
         # # self.divergence_uv = self.divergence(self.body_u,self.body_v) * self.m_m0_all
 
-        # # ======= compute forces ======
+        # ======= compute forces ======
         # stress = self.stress_tensor(u,v,p)
-        # for i, body in enumerate(self.composite_body.bodies):
-        #     (di, normal_x, normal_y, _) = self.sdf_properties[i]
-        #     delta = self.composite_body.bodies[0].phi(di)*self.eps
-        #     xstress_tensor = normal_x*(stress[0][0]+stress[0][1])*delta
-        #     ystress_tensor = normal_y*(stress[0][1]+stress[1][1])*delta
-        #     self.force_x[i] = torch.trapz(torch.trapz(xstress_tensor, dx=self.dy), dx=self.dx)
-        #     self.force_y[i] = torch.trapz(torch.trapz(ystress_tensor, dx=self.dy), dx=self.dx)
+
+        dudx, dudy = torch.gradient(u, spacing=[self.dx, self.dy])
+        dvdx, dvdy = torch.gradient(v, spacing=[self.dx, self.dy])
+        ss_diag = (dudy+dvdx)
+        ss_11 = 2*dudx
+        ss_22 = 2*dvdy
+
+        for i, body in enumerate(self.composite_body.bodies):
+
+            (d, normal_x, normal_y, R) = self.composite_body.compute_sdf_properties(self.composite_body.sdf_vals[i])
+            delta = self.composite_body.bodies[0].phi(d)/(1+d/R)
+
+            xstress_tensor = d*(normal_x*ss_11+normal_y*ss_diag)*delta
+            ystress_tensor = d*(normal_x*ss_diag+normal_y*ss_22)*delta
+
+            # delta = self.composite_body.bodies[0].phi(d)*self.eps
+            # xstress_tensor = normal_x*(stress[0][0]+stress[0][1])*delta
+            # ystress_tensor = normal_y*(stress[0][1]+stress[1][1])*delta
+            self.force_x[i] = self.visc*torch.trapz(torch.trapz(xstress_tensor, dx=self.dy), dx=self.dx)
+            self.force_y[i] = self.visc*torch.trapz(torch.trapz(ystress_tensor, dx=self.dy), dx=self.dx)
 
         # # if iteration>100:
         # #     from IPython import embed; embed()
@@ -541,10 +563,12 @@ class FluidSolver:
                 # copy u from device to host
                 X,Y = self.X.cpu(), self.Y.cpu()
                 curl = self.vorticity(u,v).cpu()
-                d_min = self.composite_body.sdf.cpu()
+                d_min = self.composite_body.sdf_val.cpu()
                 # d_min = self.d_min.cpu()
                 pressure = p.cpu()
                 curl_body = (self.vorticity(self.body_u,self.body_v)).cpu()
+                vec_x=0*self.body_u.cpu()
+                vec_y=0*self.body_v.cpu()
                 # curvature = self.composite_body.bodies[0].phi(self.d_min)*self.eps
 
 
@@ -556,8 +580,8 @@ class FluidSolver:
 
                 # plotting.plot2d_imshow(X,Y,(self.vorticity(u,v)/(self.composite_body.bodies[0].L)).cpu(),d_min,self.extent,iteration,self.save_path,"curl",self.vmin,self.vmax)
 
-                plotting.plot2d_imshow_composite_quiver(X,Y,curl,self.sdf_properties,self.body_u.cpu(),self.body_v.cpu(),self.extent,iteration,self.save_path,"curl",self.vmin,self.vmax,subsample_n = self.n_quiver_spacing, scale=self.save_every*self.dt)
-                plotting.plot2d_imshow_composite_quiver(X,Y,curl_body,self.sdf_properties,self.body_u.cpu(),self.body_v.cpu(),self.extent,iteration,self.save_path,"curlbody",self.vmin,self.vmax,subsample_n = self.n_quiver_spacing, scale=self.save_every*self.dt)
+                plotting.plot2d_imshow_composite_quiver(X,Y,curl,self.sdf_properties,vec_x,vec_y,self.extent,iteration,self.save_path,"curl",self.vmin,self.vmax,subsample_n = self.n_quiver_spacing, scale=self.save_every*self.dt)
+                plotting.plot2d_imshow_composite_quiver(X,Y,curl_body,self.sdf_properties,vec_x,vec_y,self.extent,iteration,self.save_path,"curlbody",self.vmin,self.vmax,subsample_n = self.n_quiver_spacing, scale=self.save_every*self.dt)
 
                 # plotting.plot2d_imshow_simple((self.mu1_all/self.eps).cpu(),self.extent,iteration,self.save_path,"mu1",-0.2,0.2)
                 # plotting.plot2d_imshow_simple((self.mu0_all).cpu(),self.extent,iteration,self.save_path,"mu0",0,1)
@@ -565,19 +589,20 @@ class FluidSolver:
                 plotting.plot2d_imshow_composite(X,Y,v.cpu(),self.sdf_properties,self.extent,iteration,self.save_path,"v",None, None)
 
 
-                plotting.plot2d_imshow_composite(X,Y,self.body_u.cpu(),self.sdf_properties,self.extent,iteration,self.save_path,"bodyu",None, None)
-                plotting.plot2d_imshow_composite(X,Y,self.body_v.cpu(),self.sdf_properties,self.extent,iteration,self.save_path,"bodyv",None, None)
+                plotting.plot2d_imshow_composite(X,Y,vec_x,self.sdf_properties,self.extent,iteration,self.save_path,"bodyu",None, None)
+                plotting.plot2d_imshow_composite(X,Y,vec_y,self.sdf_properties,self.extent,iteration,self.save_path,"bodyv",None, None)
+
                 # plotting.plot2d_imshow(X,Y,self.divergence_uv.cpu(),d_min,self.extent,iteration,self.save_path,"divbody",None, None)
                 # plotting.plot2d_imshow(X,Y,pressure,d_min,self.extent,iteration,self.save_path,"pressure",None, None)
                 plotting.plot2d_imshow_only(pressure,self.extent,iteration,self.save_path,"pressure",None, None)
 
-                plotting.plot2d_imshow_quiver(X,Y,d_min,d_min,self.body_u.cpu(),self.body_v.cpu(),self.extent,iteration,self.save_path,"sdf",None,None,subsample_n = self.n_quiver_spacing, scale=self.save_every*self.dt)
+                plotting.plot2d_imshow_quiver(X,Y,d_min,d_min,vec_x,vec_y,self.extent,iteration,self.save_path,"sdf",None,None,subsample_n = self.n_quiver_spacing, scale=self.save_every*self.dt)
 
-                plotting.plot2d_imshow_quiver(X,Y,curl,d_min,self.body_u.cpu(),self.body_v.cpu(),self.extent,iteration,self.save_path,"curluv",self.vmin,self.vmax,subsample_n = self.n_quiver_spacing, scale=self.save_every*self.dt)
+                plotting.plot2d_imshow_quiver(X,Y,curl,d_min,vec_x,vec_y,self.extent,iteration,self.save_path,"curluv",self.vmin,self.vmax,subsample_n = self.n_quiver_spacing, scale=self.save_every*self.dt)
 
-                # plotting.plot2d_imshow_only(
-                #     (self.normal_x*(stress[0][0])*self.composite_body.bodies[0].phi(self.d_min)*self.eps).cpu(),
-                #     self.extent,iteration,self.save_path,"forces0",None, None)
+                plotting.plot2d_imshow_only(
+                    delta.cpu(),
+                    self.extent,iteration,self.save_path,"forces0",-10000, 10000)
 
 
             if self.save_uv:
@@ -611,7 +636,6 @@ class FluidSolver:
 
 if __name__ == "__main__":
 
-    import math
     solver = FluidSolver()
     solver.run_sim()
 
