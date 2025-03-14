@@ -180,7 +180,7 @@ class mesh2sdf():
         gradient[has_direction] = gradient[has_direction] / distance[has_direction, None]
 
         # ensure ray destination is outside the object
-        ray_destination = np.repeat(self.bounding_box(padding=1.0)[None, :, 1], points_in_object_frame.shape[0], axis=0)
+        ray_destination = np.repeat(self.bounding_box(padding=0.0)[None, :, 1], points_in_object_frame.shape[0], axis=0)
         ray_destination = ray_destination.astype(np.float32)
 
         # check if point is inside the object
@@ -197,6 +197,24 @@ class mesh2sdf():
         on_surface = np.abs(distance) < 1e-3
         surface_normals = self._face_normals[face_ids.numpy()[on_surface]]
         gradient[on_surface] = surface_normals
+
+        # from IPython import embed; embed()
+
+
+
+        # plt.figure()
+        # plt.imshow(
+        #     intersection_counts.reshape((1024,1024))
+        # )
+        # plt.contour(
+        #     distance.reshape((1024,1024)),
+        #     levels=[0]
+        # )
+        # plt.show()
+
+
+
+
 
         return distance, gradient
 
@@ -802,8 +820,8 @@ class BodyMesh(Body):
         self.update_theta = update_maps[0]
         self.update_translation = update_maps[1]
         self.suit = suit
-        self.plotting = kwargs.pop("plotting", False)
-        self.apply_closing_morph = kwargs.pop("apply_closing_morph", False)
+        self.plotting = kwargs.pop("plotting", True)
+        self.apply_closing_morph = kwargs.pop("apply_closing_morph", True)
 
         self.m2s = mesh2sdf(self.mesh_file)
         self.initialize_sdfs()
@@ -816,74 +834,86 @@ class BodyMesh(Body):
         Initialize the sdf interpolation function
         """
         if self.compute_interp:
-            bb = self.m2s.bounding_box()
-            # bb = self.m2s.bounding_box(self.suit)
+            # bb = self.m2s.bounding_box()
+            # # bb = self.m2s.bounding_box(self.suit)
 
-            diag = torch.sqrt((self.x[-1]-self.x[0])**2+(self.y[-1]-self.y[0])**2).cpu().detach().numpy()
-            xnp = np.linspace(-diag,diag,self.nsamples)
-            ynp = np.linspace(-diag,diag,self.msamples)
+            # diag = torch.sqrt((self.x[-1]-self.x[0])**2+(self.y[-1]-self.y[0])**2).cpu().detach().numpy()
+            # xnp = np.linspace(-diag,diag,self.nsamples)
+            # ynp = np.linspace(-diag,diag,self.msamples)
 
-            cx_bb = (bb[0,1]+bb[0,0])/2
-            cy_bb = (bb[1,1]+bb[1,0])/2
-            # dx_bb = bb[0,1]-bb[0,0]
-            # dy_bb = bb[1,1]-bb[1,0]
-            diag_bb=np.sqrt((bb[0,0]-bb[0,1])**2+(bb[1,0]-bb[1,1])**2)
+            # cx_bb = (bb[0,1]+bb[0,0])/2
+            # cy_bb = (bb[1,1]+bb[1,0])/2
+            # # dx_bb = bb[0,1]-bb[0,0]
+            # # dy_bb = bb[1,1]-bb[1,0]
+            # diag_bb=np.sqrt((bb[0,0]-bb[0,1])**2+(bb[1,0]-bb[1,1])**2)
 
-            idownsampled = np.where(
-                np.logical_and(xnp>cx_bb-diag_bb, xnp<cx_bb+diag_bb)
-            )[0]
-            xdownsampled = xnp[idownsampled]
-            jdownsampled = np.where(
-                np.logical_and(ynp>cy_bb-diag_bb, ynp<cy_bb+diag_bb)
-            )[0]
-            ydownsampled = xnp[jdownsampled]
-            X,Y=np.meshgrid(xdownsampled,ydownsampled,indexing="ij")
-            xflat = X.flatten()
-            yflat = Y.flatten()
-            zflat = np.zeros_like(xflat)
-            xyz   = np.stack([xflat,yflat,zflat],axis=1)
-            query_pts=np.array(xyz.astype(np.float32))
-
-
-            sdf_val, _=self.m2s(query_pts)
-            binary_2d = np.ones((self.nsamples,self.msamples))
-            binary_2d[idownsampled[0]:(idownsampled[-1]+1),jdownsampled[0]:(jdownsampled[-1]+1)][sdf_val.reshape(X.shape)<0]=-1
-
-
-
-
-
-
-
-            # xnp = np.linspace(cx_bb-diag,cx_bb+diag,self.nsamples)
-            # ynp = np.linspace(cy_bb-diag,cy_bb+diag,self.msamples)
-
-            # binary_2d = np.ones((self.nsamples,self.msamples))
-
-            # X,Y=np.meshgrid(xnp,ynp,indexing="ij")
+            # idownsampled = np.where(
+            #     np.logical_and(xnp>cx_bb-diag_bb, xnp<cx_bb+diag_bb)
+            # )[0]
+            # xdownsampled = xnp[idownsampled]
+            # jdownsampled = np.where(
+            #     np.logical_and(ynp>cy_bb-diag_bb, ynp<cy_bb+diag_bb)
+            # )[0]
+            # ydownsampled = xnp[jdownsampled]
+            # X,Y=np.meshgrid(xdownsampled,ydownsampled,indexing="ij")
             # xflat = X.flatten()
             # yflat = Y.flatten()
-            # zflat = 0.0*np.ones_like(xflat)
+            # zflat = np.zeros_like(xflat)
             # xyz   = np.stack([xflat,yflat,zflat],axis=1)
             # query_pts=np.array(xyz.astype(np.float32))
 
-            # sdf_val_o3d, _=self.m2s(query_pts)
-            # binary_2d=np.zeros((self.nsamples,self.msamples))
-            # binary_2d[sdf_val_o3d.reshape(X.shape)<0]=1
 
-            # if self.apply_closing_morph:
-            #     gray = (255*binary_2d).astype('uint8')
-            #     im = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-            #     im = cv2.morphologyEx(im, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2)))
-            #     if self.plotting:
-            #         cv2.imshow("window_name", im)
-            #         cv2.waitKey(0)
-            #         cv2.destroyAllWindows()
-            #     im=im[:,:,0]
-            # else:
-            #     im=binary_2d
+            # sdf_val, _=self.m2s(query_pts)
+            # binary_2d = np.ones((self.nsamples,self.msamples))
+            # binary_2d[idownsampled[0]:(idownsampled[-1]+1),jdownsampled[0]:(jdownsampled[-1]+1)][sdf_val.reshape(X.shape)<0]=-1
 
-            # binary_2d=np.where(im==0,1,-1)
+
+
+
+
+
+            bb = self.m2s.bounding_box()
+            cx_bb = (bb[0,1]+bb[0,0])/2
+            cy_bb = (bb[1,1]+bb[1,0])/2
+            diag = np.sqrt((bb[0,1]-bb[0,0])**2+(bb[1,1]-bb[1,0])**2)
+
+            xnp = np.linspace(cx_bb-2*diag,cx_bb+2*diag,self.nsamples)
+            ynp = np.linspace(cy_bb-2*diag,cy_bb+2*diag,self.msamples)
+
+            binary_2d = np.ones((self.nsamples,self.msamples))
+
+            X,Y=np.meshgrid(xnp,ynp,indexing="ij")
+            xflat = X.flatten()
+            yflat = Y.flatten()
+            zflat = 0.0*np.ones_like(xflat)
+            xyz   = np.stack([xflat,yflat,zflat],axis=1)
+            query_pts=np.array(xyz.astype(np.float32))
+
+            sdf_val_o3d, _=self.m2s(query_pts)
+            binary_2d=np.zeros((self.nsamples,self.msamples))
+            binary_2d[sdf_val_o3d.reshape(X.shape)<0]=1
+
+            if self.apply_closing_morph:
+                gray = (255*binary_2d).astype('uint8')
+                im = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+                # im = cv2.morphologyEx(im, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (2,2)))
+                element = cv2.getStructuringElement(cv2.MORPH_RECT, (2,2))
+
+                # im = cv2.erode(im, element, iterations = 1)
+                im = cv2.dilate(im, element, iterations = 1)
+                im = cv2.erode(im, element, iterations = 1)
+                im = cv2.erode(im, element, iterations = 1)
+
+
+                if self.plotting:
+                    cv2.imshow("window_name", im)
+                    cv2.waitKey(0)
+                    cv2.destroyAllWindows()
+                im=im[:,:,0]
+            else:
+                im=binary_2d
+
+            binary_2d=np.where(im==0,1,-1)
 
 
             # from IPython import embed; embed()
@@ -893,7 +923,8 @@ class BodyMesh(Body):
             sdf_val = skfmm.distance(binary_2d, dx=[xnp[1]-xnp[0],ynp[1]-ynp[0]])#-self.suit
 
             if self.plotting:
-                var=binary_2d #sdf_val_o3d.reshape(X.shape)
+                self.m2s.visualize()
+                var=sdf_val #sdf_val_o3d.reshape(X.shape)
                 plt.figure()
                 plt.contourf(
                     var
@@ -901,7 +932,7 @@ class BodyMesh(Body):
                 plt.colorbar()
                 plt.contour(var, colors='k', levels=[0], linestyles='dashed')
                 plt.show()
-                self.m2s.visualize()
+
 
             print("Computing the interpolation functions for {}".format(self.mesh_file))
 
@@ -1015,13 +1046,13 @@ class CompositeBodyMesh:
             mesh_gpath = sdf_folder+mesh_name
             initial_pose = np.array(link.pose).astype(np.float32)
             update_funcs = (
-                lambda t: 0,
+                lambda t: 180,
                 [
-                    lambda t, initial_pose=initial_pose: initial_pose[0],
-                    lambda t, initial_pose=initial_pose: initial_pose[1],
+                    lambda t, initial_pose=initial_pose: -initial_pose[0],
+                    lambda t, initial_pose=initial_pose: -initial_pose[1],
                 ]
                 )
-            # if link_i == 14:
+            # if link_i == 7:
             #     compute_interp = True
             # else:
             #     compute_interp = False
@@ -1038,11 +1069,15 @@ class CompositeBodyMesh:
                 )
             self.bodies.append(body)
         self.costum_update = costum_update
+        self.compute_interp = compute_interp
 
         self.mu_funcs               = self.bodies[0].mu_funcs
         self.compute_sdf_properties = self.bodies[0].compute_sdf_properties
         nbodies                     = len(self.sdf.links)
         self.sdf_vals               = torch.zeros((nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
+        self.u_vals               = torch.zeros((nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
+        self.v_vals               = torch.zeros((nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
+
         self.initialize() # initialize the sdf interpolation functions
 
 
@@ -1063,6 +1098,10 @@ class CompositeBodyMesh:
                 torch.min(self.bodies[0].y.cpu()), torch.max(self.bodies[0].y.cpu())
             )
 
+        # if self.compute_interp:
+            """
+            visualize computed interpolation functions over the domain
+            """
             plt.figure(figsize=(20,10))
             plt.imshow(
                 var.T,
@@ -1072,11 +1111,6 @@ class CompositeBodyMesh:
             )
             plt.contour(self.bodies[0].X.cpu(),self.bodies[0].Y.cpu(),var, colors='k', levels=[0])
             plt.show()
-
-
-
-
-
 
         self.body_u=torch.zeros_like(self.bodies[0].X)
         self.body_v=torch.zeros_like(self.bodies[0].X)

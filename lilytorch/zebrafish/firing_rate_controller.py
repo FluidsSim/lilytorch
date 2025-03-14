@@ -9,7 +9,7 @@ class FiringRateController:
     """zebrafish controller"""
 
     def __init__(
-            self, 
+            self,
             pars
             ):
         super().__init__()
@@ -81,13 +81,13 @@ class FiringRateController:
             self.step = self.step_euler_maruyama
             self.noise_vec = np.zeros(self.n_neurons*2) # vector of noise for the CPG voltage equations (2*n_neurons)
 
-        # zero vector activations to make first and last joints passive 
+        # zero vector activations to make first and last joints passive
         self.zeros8 = np.zeros(8) # pre-computed zero activity for the first 4 joints
         self.zeros2 = np.zeros(2) # pre-computed zero activity for the tail joint
 
     def get_ou_noise_process_dw(self, timestep, x_prev, sigma):
         """
-        Implement here the integration of the Ornstein-Uhlenbeck processes 
+        Implement here the integration of the Ornstein-Uhlenbeck processes
         dx_t = -0.5*x_t*dt+sigma*dW_t
         Parameters
         ----------
@@ -102,7 +102,7 @@ class FiringRateController:
         x_t{n+1}: <np.array>
             The solution x_t{n+1} of the Euler Maruyama scheme
             x_new = x_prev-0.1*x_prev*dt+sigma*sqrt(dt)*Wiener
-        """ 
+        """
 
         # _C0
         n_processes = len(x_prev)
@@ -120,7 +120,7 @@ class FiringRateController:
             self.motor_output(iteration), # the active joints
             self.zeros2 # the last (tail) passive joint
             ])
-        
+
 
     def step_euler_maruyama(self, iteration, time, timestep, pos=None, urdf_positions=None):
         """Euler Maruyama step"""
@@ -133,17 +133,17 @@ class FiringRateController:
             self.motor_output(iteration), # the active joints
             self.zeros2 # the last (tail) passive joint
             ])
-    
+
     def motor_output(self, iteration):
         """
-        Here you have to final muscle activations for the 10 active joints. 
+        Here you have to final muscle activations for the 10 active joints.
         It should return an array of 2*n_muscle_cells=20 elements,
         even indexes (0,2,4,...) = left muscle activations
         odd indexes (1,3,5,...) = right muscle activations
         """
         return self.pars.act_strength*self.state[iteration+1,self.all_muscles] # _C
         # return np.zeros(2*self.n_muscle_cells) # here you have to final active muscle equations for the 10 joints  # _S # _u
-    
+
     def ode_rhs(self,  _time, state, pos=None, urdf_positions=None):
         """Network_ODE
         You should implement here the right hand side of the system of equations
@@ -157,15 +157,15 @@ class FiringRateController:
         -------
         dstate: <np.array>
             Returns derivative of state
-        """ 
+        """
         self.inputs[self.all_v] = self.pars.I-self.pars.b*state[self.all_a]
 
         self.inputs[self.left_v]  += + self.pars.Idiff \
                                     - self.A_V0d2V0d @ state[self.right_v]  \
-                                    - self.pars.w_stretch*self.A_src2cpg @ state[self.sensors_r] 
+                                    - self.pars.w_stretch*self.A_src2cpg @ state[self.sensors_r]
         self.inputs[self.right_v] += - self.pars.Idiff \
                                     - self.A_V0d2V0d @ state[self.left_v] \
-                                    - self.pars.w_stretch*self.A_src2cpg @ state[self.sensors_l] 
+                                    - self.pars.w_stretch*self.A_src2cpg @ state[self.sensors_l]
 
         # voltage neural equations
         self.dstate[self.all_v] = ( -state[self.all_v] + self.S( self.inputs[self.all_v] ) ) / self.pars.tau
@@ -201,7 +201,7 @@ class FiringRateController:
                 elif i>j and i-j<=asc_n: # ascending
                     A[i,j]=1/(i-j+1)
         return A
-    
+
     def V2a2muscle(self, n_neurons, n_muscles):
         """
         A[i,j] = connection from i to j
@@ -213,7 +213,7 @@ class FiringRateController:
                 raise Exception("n_neurons/n_muscles is not an integer")
             for j in range(n_muscles):
                 for i in range(int(n_size)*j,int(n_size)*(j+1)):
-                    A_V2a2muscle[i, j]=1 
+                    A_V2a2muscle[i, j]=1
         return A_V2a2muscle
 
     def S(self,x):

@@ -571,7 +571,7 @@ def plot_composite_countour(X,Y,properties,iteration,save_path,name):
 
 def plot2d_imshow_only(u,extent,iteration,save_path,name,vmin,vmax):
     if vmin is None:
-        limit = max(abs(u.min()), abs(u.max()))/2
+        limit = max(abs(u.min()), abs(u.max()))
         vmin = -limit
         vmax = limit
     plt.figure(figsize=(20,10))

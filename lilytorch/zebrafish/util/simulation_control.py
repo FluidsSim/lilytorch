@@ -42,7 +42,7 @@ import sys
 def run_experiment(pars):
 
     """Main"""
-    prepath = "models/zebrafish_v1_triangulated/"
+    prepath = "models/zebrafish_v1_triangulated_scale_x_80/"
     args = [
         '--simulator',
         'MUJOCO',

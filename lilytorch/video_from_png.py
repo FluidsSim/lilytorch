@@ -3,13 +3,13 @@
 import cv2
 import os
 
-dir         = "/data/andreaferrario/ns_data/2025-03-06T15:33:04.800966/curl/"
+dir         = "/data/andreaferrario/ns_data/2025-03-12T16:22:28.898327/curl/"
 name        = "video"
 format      = ".mp4"
 img_name    = "curl"
 dt          = 0.001
 slow_factor =   1
-save_every    = 100
+save_every    = 131
 
 video_name = dir+name+format
 

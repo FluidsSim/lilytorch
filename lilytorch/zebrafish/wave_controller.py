@@ -16,7 +16,10 @@ class WaveController:
         self.muscle_l = 2*self.active_joints # indexes of the left muscle activations (optional)
         self.muscle_r = self.muscle_l+1 # indexes of the right muscle activations (optional)
 
-    def step(self, iteration, time, timestep, pos=None, urdf_positions=None): 
+        self.pars.amplitudes_left = pars.amp+pars.bias
+        self.pars.amplitudes_right = pars.amp-pars.bias
+
+    def step(self, iteration, time, timestep, pos=None, urdf_positions=None):
         """
         Step function. This function passes the activation functions of the muscle model
         Inputs:
@@ -33,21 +36,26 @@ class WaveController:
         In addition to returning the activation functions, store
         them in self.state for later use offline
         """
-    
-        time     = iteration * timestep
-        aux_sine = np.sin(
-            2*np.pi * ( self.pars.freq*time - self.pars.wavefrequency*self.active_joints/self.n_joints )
-        )
-        aux_signal = self.sine2square(aux_sine)
 
-        self.state[iteration+1, self.muscle_l]  = 0.5 + self.pars.amp * aux_signal/2
-        self.state[iteration+1, self.muscle_r]  = 0.5 - self.pars.amp * aux_signal/2
+        time     = iteration * timestep
+        # aux_sine = np.sin(
+        #     2*np.pi * ( self.pars.freq*time - self.pars.wavefrequency*self.active_joints/self.n_joints )
+        # )
+        left_signal = 1+np.cos(
+                2*np.pi * ( self.pars.freq*time - self.pars.wavefrequency*self.active_joints/self.n_joints )
+            )
+        right_signal = 1+np.cos(
+                2*np.pi * ( self.pars.freq*(time+0.5) - self.pars.wavefrequency*self.active_joints/self.n_joints )
+            )
+
+        self.state[iteration+1, self.muscle_l]  = self.pars.amplitudes_left * left_signal
+        self.state[iteration+1, self.muscle_r]  = self.pars.amplitudes_right * right_signal
 
         return self.state[iteration,:]
-    
+
     def sine2square(self, x):
         if self.pars.controller=="square":
             return 2*(1/(1+np.exp(-self.pars.scale*x))-0.5)
-        else:   
+        else:
             return x
 

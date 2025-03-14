@@ -146,22 +146,20 @@ class FluidCallback(TaskCallback):
         self.animat_options = animat_options
         self.arena_options = arena_options
         self.nfrc = len(self.animat_options['control']['sensors']['xfrc'])
-        self.force_x = np.zeros(self.nfrc)
-        self.force_y = np.zeros(self.nfrc)
+        self.friction_force_x = np.zeros(self.nfrc)
+        self.friction_force_y = np.zeros(self.nfrc)
+        self.pressure_force_x = np.zeros(self.nfrc)
+        self.pressure_force_y = np.zeros(self.nfrc)
+        self.force_constant = 1
 
     def initialize_episode(self, task, physics):
         """Initialize episode"""
         pass
 
+    # def after_step(self, task, physics):
     def before_step(self, task, action, physics):
         """Step hydrodynamics"""
         indices = task.maps['sensors']['data2xfrc']
-        # from IPython import embed; embed()
-        # print(self.force_x)
 
-
-        # physics.data.xfrc_applied[indices[0], sc.xfrc_force_x] = 0.0001 * task.units.newtons * 1
-        # physics.data.xfrc_applied[indices[0], sc.xfrc_force_y] = 0.0001 * task.units.newtons * 1
-
-        physics.data.xfrc_applied[indices, 0] = self.force_x * task.units.newtons * 30
-        physics.data.xfrc_applied[indices, 1] = self.force_y * task.units.newtons * 30
+        physics.data.xfrc_applied[indices, 0] = self.force_constant*(0*self.friction_force_x + self.pressure_force_x)* task.units.newtons
+        physics.data.xfrc_applied[indices, 1] = self.force_constant*(0*self.friction_force_y + self.pressure_force_y)* task.units.newtons

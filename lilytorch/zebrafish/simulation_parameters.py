@@ -17,8 +17,9 @@ class SimulationParameters:
         # pars for the sine controller
         self.swimming_mode = "drag"
         self.amp           = 0.4*np.ones(15)
+        self.bias           = 0.*np.ones(15)
         self.wavefrequency = 0.8
-        self.freq          = 3
+        self.freq          = 1
         self.slope         = 100 # square scaling factor
 
         # simulation parameters
@@ -46,7 +47,7 @@ class SimulationParameters:
         self.random_spine = False # if True, initialize the joints angles in a random position
 
         # parameters of the firing rate controller
-        self.controller     = "firing_rate" # "sine" for using the WaveController (Project 1), "firing_rate" for using the FiringRateController (Project 2)
+        self.controller     = "sine" # "sine" for using the WaveController (Project 1), "firing_rate" for using the FiringRateController (Project 2)
         self.n_neurons      = 50 # number of CPG/sensory neurons
         self.n_muscle_cells = 10 # number of muscle cells
         self.method         = "euler" # integration method (euler or noise)
@@ -59,7 +60,7 @@ class SimulationParameters:
 
         # CPG pars
         self.I      = 10 # connstant input
-        self.Idiff  = 0. # left-right input difference
+        self.Idiff  = 3. # left-right input difference
         self.n_asc  = 1 # number of ascending CPG connections
         self.n_desc = 2 # number of descending CPG connections
         self.tau    = 0.002 # neuron timescale
@@ -76,7 +77,7 @@ class SimulationParameters:
 
         self.spawn = {
             'loader': 0,
-            'mode': "FIXED",
+            'mode': "TRANSVERSE",
             'pose': [0.0, 0.0, -0.03, 0.0, 0.0, 3.141592653589793],
             'velocity': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             'extras': {}

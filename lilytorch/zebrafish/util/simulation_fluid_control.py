@@ -38,7 +38,7 @@ import sys
 def run_experiment(pars):
 
     """Main"""
-    prepath = "models/zebrafish_v1_triangulated/"
+    prepath = "models/zebrafish_v1_triangulated_scale_x_80/"
     args = [
         '--simulator',
         'MUJOCO',
@@ -152,6 +152,8 @@ def run_experiment(pars):
 
 
     controller.mujoco_error = False
+    sim_options["timestep"]=controller.timestep
+
     try:
         run_simulation(
             animat_data=animat_data,

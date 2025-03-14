@@ -88,7 +88,7 @@ def pyro(N):
     c=torch.ones((N,N))
 
 
-    f=-(-2.0 * ((1.0 - 6.0 * X**2) * Y**2 * (1.0 - Y**2) +
+    f=(-2.0 * ((1.0 - 6.0 * X**2) * Y**2 * (1.0 - Y**2) +
                    (1.0 - 6.0 * Y**2) * X**2 * (1.0 - X**2)))
     f[0,:]=0
     f[-1,:]=0
@@ -183,15 +183,15 @@ def variable_coeff(N,device=torch.device("cuda"),create_box=False):
         pyplot.show()
 
 
-    # body = BodyMesh( device, x, y, name, (lambda t: 0,(lambda t: 0,lambda t: 0)),eps=2/N,nsamples=2**12, msamples=2**12)
-    # body.initialize()
-    # sdf_fun=body.sdf_interp
-
-    body = BodyAnalytical( device, x, y, lambda x, y: circle(x,y,xt=0.5,yt=0.5,r=0.25), (lambda t: 0,(lambda t: 0,lambda t: 0)),eps=1/N)
+    body = BodyMesh( device, x, y, name, (lambda t: 0,(lambda t: 0,lambda t: 0)),eps=2/N,nsamples=2**12, msamples=2**12,compute_interp=True)
     body.initialize()
-    sdf_fun =body.sdf_fun
+    sdf_fun=body.sdf_interp
 
-    d, normal_x, normal_y, curv = body.update(0)[0]
+    # body = BodyAnalytical( device, x, y, lambda x, y: circle(x,y,xt=0.5,yt=0.5,r=0.25), (lambda t: 0,(lambda t: 0,lambda t: 0)),eps=1/N)
+    # body.initialize()
+    # sdf_fun =body.sdf_fun
+
+    d = sdf_fun(X,Y)
     (mu0, mu1) = body.mu_funcs(d)
 
     var=mu0
@@ -229,8 +229,8 @@ def variable_coeff(N,device=torch.device("cuda"),create_box=False):
 
 def variable_coeff_c_hat(N,device=torch.device("cuda"),create_box=False):
 
-    x=torch.linspace(0,1,N,device=device)
-    y=torch.linspace(0,1,N,device=device)
+    x=torch.linspace(-1,1,N,device=device)
+    y=torch.linspace(-1,1,N,device=device)
     [X,Y]=torch.meshgrid(x,y, indexing="ij")
 
     from body import BodyMesh, BodyAnalytical, circle
@@ -255,17 +255,18 @@ def variable_coeff_c_hat(N,device=torch.device("cuda"),create_box=False):
     # body.initialize()
     # sdf_fun=body.sdf_interp
 
-    body = BodyAnalytical( device, x, y, lambda x, y: circle(x,y,xt=0.5,yt=0.5,r=0.25), (lambda t: 0,(lambda t: 0,lambda t: 0)),eps=2/N)
+    body = BodyAnalytical( device, x, y, lambda x, y: circle(x,y,xt=0.,yt=0.,r=0.5), (lambda t: 0,(lambda t: 0,lambda t: 0)),eps=2/N)
     body.initialize()
     sdf_fun =body.sdf_fun
 
-    d, normal_x, normal_y, curv = body.update(0)[0]
+    d = sdf_fun(X,Y)
     (mu0, mu1) = body.mu_funcs(d)
+
 
 
     # c=mu0
 
-    ks=100
+    ks=10
     kg=1
     sigma=100
     c=ks+(kg-ks)*(torch.tanh(sigma*d)+1)/2

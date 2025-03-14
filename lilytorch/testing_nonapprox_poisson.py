@@ -11,7 +11,7 @@ class PoissonSolver:
         """
         self.h2         = h*h
         self.device     = device
-        self.n_switch   = 2**20
+        self.n_switch   = 2**6
         self.BC         = self.Neumann_BC
         self.tol        = tol
         self.max_cycles = max_cycles
@@ -207,13 +207,17 @@ class PoissonSolver:
         """
         n  = f.shape[0]-1
 
+        if n==2:
+            u, r = self.CG_jacobi_cond(f, u, c, c_h, c_v, h2, maxit=100)
+            self.BC(u)
+
         # if n==2:
         #     u[1,1] = 0.25*f[1,1]*h2/(c[1,1]+1e-12)
         #     r = 0
 
-        if n==2:
-            u, r = self.CG_jacobi_cond(f, u, c, c_h, c_v, h2, maxit=100)
-            self.BC(u)
+        # if n==2:
+        #     u, r = self.CG_jacobi_cond(f, u, c, c_h, c_v, h2, maxit=100)
+        #     self.BC(u)
 
         else:
 
@@ -301,7 +305,7 @@ def test_solvers():
     from matplotlib import pyplot
     import time
 
-    X, Y, u_exact, f, c, c_h, c_v = poisson_solvers.solutions2d.variable_coeff(N)
+    X, Y, u_exact, f, c, c_h, c_v = poisson_solvers.solutions2d.variable_coeff_c_hat(N)
 
     h = X[1,0]-X[0,0]
     print("Number of elements:{}, h={}".format(N, h))

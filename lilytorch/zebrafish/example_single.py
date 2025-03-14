@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 import os
 from plotting_common import plot_left_right, plot_trajectory, plot_time_histories, plot_time_histories_multiple_windows
 import farms_pylog as pylog
+import numpy as np
 
 
 def exercise_single(**kwargs):
@@ -14,9 +15,21 @@ def exercise_single(**kwargs):
     log_path = './logs/example_single/' # path for logging the simulation data
     os.makedirs(log_path, exist_ok=True)
 
+
+    amps=np.ones(15)*0.2
+    amps[:5]=0
+    bias=0.*np.ones(15)
+    bias[:5]=0
+
+
     all_pars = SimulationParameters(
         n_iterations    = 5001,
         n_joints        = 15,
+        controller      = "sine",
+        amp             = amps,
+        bias            = bias,
+        wavefrequency   = 1,
+        freq            = 5,
         log_path        = log_path,
         compute_metrics = 3,
         return_network  = True,

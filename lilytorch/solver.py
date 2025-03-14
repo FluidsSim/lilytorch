@@ -43,11 +43,14 @@ class FluidSolver:
         ymax            = solver["ymax"]
         x               = torch.linspace(xmin,xmax,self.N).to(self.device)
         y               = torch.linspace(ymin,ymax,self.N).to(self.device)
+
         [self.X,self.Y] = torch.meshgrid(x,y, indexing="ij")
         self.nx         = len(x)
         self.ny         = len(y)
         self.dx         = float(x[1]-x[0])
         self.dy         = float(y[1]-y[0])
+        assert abs(self.dx-self.dy)<1e-7, "dx and dy must be equal"
+
         self.h2         = self.dx**2
         self.dt         = solver["dt"]
         self.nt         = solver["nt"]
@@ -96,14 +99,19 @@ class FluidSolver:
         )
         # self.sdf_properties = self.composite_body.initialize()
         self.n_bodies=len(self.composite_body.bodies)
-        self.force_x = torch.zeros(self.n_bodies)
-        self.force_y = torch.zeros(self.n_bodies)
+        self.friction_force_x = torch.zeros(self.n_bodies)
+        self.friction_force_y = torch.zeros(self.n_bodies)
+
+        self.pressure_force_x = torch.zeros(self.n_bodies)
+        self.pressure_force_y = torch.zeros(self.n_bodies)
+
 
         # Parameters for the Gaussian kernel
-        # kernel_dx=0.005
-        # self.kernel_size = round(kernel_dx/self.dx)  # Example kernel size
-        # sigma = 0.2  # Standard deviation for Gaussian
-        # self.kernel = self.composite_body.gaussian_kernel(self.kernel_size, sigma).view(1, 1, self.kernel_size, self.kernel_size).to(self.device)
+        kernel_dx=0.005
+        self.kernel_size = round(kernel_dx/self.dx)  # Example kernel size
+        self.kernel_size += 1-self.kernel_size%2
+        sigma = 10  # Standard deviation for Gaussian
+        self.kernel = self.composite_body.gaussian_kernel(self.kernel_size, sigma).view(1, 1, self.kernel_size, self.kernel_size).to(self.device)
 
         # ===== set initial conditions =====
         self.set_initial_conditions()
@@ -120,7 +128,7 @@ class FluidSolver:
         self.save_uv     = output["save_uv"]
         self.vmin        = output["vmin"]
         self.vmax        = output["vmax"]
-        self.n_quiver_spacing = 2**4
+        self.n_quiver_spacing = 2**3
 
         if self.save_frames or self.save_uv:
             path           = output["save_path"]
@@ -291,6 +299,32 @@ class FluidSolver:
 
         return (u,v,p)
 
+    def solver_free(self,u,v,p):
+        """
+        BDIM2 iteration
+        """
+
+        # ====== convection solver ======
+        (u_ext,v_ext) = self.adv_diff_solver.solve(u,v)
+
+        # ====== solve the pressure poisson equation and project ======
+        coeff = self.dt/self.rho*torch.ones_like(u)
+        # p = torch.zeros_like(u)
+        p_ext = self.poisson_solver.solve_multigrid( # f, u, c
+            self.divergence(u_ext,v_ext),
+            p,
+            coeff,
+            coeff,
+            coeff
+        )
+        (p_x, p_y) = self.gradient(p_ext)
+        u_ext = u_ext-coeff*p_x
+        v_ext = v_ext-coeff*p_y
+
+        self.adv_diff_solver.set_BCs(u_ext,v_ext)
+
+        return (u_ext,v_ext,p)
+
     def solver_iteration(self,u,v,p):
         """
         BDIM2 iteration
@@ -321,21 +355,17 @@ class FluidSolver:
 
         return (u,v,p)
 
-    def solve_heun_old(self, u, v, p):
-        (u1,v1,p) = self.solver_iteration_old(u,v,p)
-        (u2,v2,p) = self.solver_iteration_old(u1,v1,p)
+    def solve_euler(self, u, v, p):
+        return self.solver_iteration(u,v,p)
+
+    def solve_heun(self, u, v, p):
+        (u1,v1,p) = self.solver_iteration(u,v,p)
+        (u2,v2,p) = self.solver_iteration(u1,v1,p)
         u=0.5*(u1+u2)
         v=0.5*(v1+v2)
         return (u,v,p)
-
-    def solve_heun(self, u, v, p):
         # (u1,v1,p) = self.solver_iteration(u,v,p)
-        # (u2,v2,p) = self.solver_iteration(u1,v1,p)
-        # u=0.5*(u1+u2)
-        # v=0.5*(v1+v2)
-        # return (u,v,p)
-        (u1,v1,p) = self.solver_iteration(u,v,p)
-        return (u1,v1,p)
+        # return (u1,v1,p)
 
 
     def step(self, u, v, p, iteration, t):
@@ -377,157 +407,32 @@ class FluidSolver:
         self.body_v=self.composite_body.body_v
         (_, self.normal_x, self.normal_y, self.curvature) = self.composite_body.compute_sdf_properties(self.composite_body.sdf_val)
 
-        self.sdf_properties=[[self.composite_body.sdf_val]] # just for plotting
+        # # smoothen velocities
+        # self.body_u = F.conv2d(
+        #     self.body_u.view(1, 1, self.N, self.N),
+        #     self.kernel,
+        #     padding=self.kernel_size//2
+        # )[0,0]
+        # self.body_v = F.conv2d(
+        #     self.body_v.view(1, 1, self.N, self.N),
+        #     self.kernel,
+        #     padding=self.kernel_size//2
+        # )[0,0]
 
+        ##### just for plotting
+        self.sdf_properties=[[self.composite_body.sdf_val]]
 
         self.composite_body.update(t, dt=self.dt)
-        # sdf_properties = self.composite_body.update(t, dt=self.dt)
 
-        # ============= run iteration ========
-        # sdf_properties = self.composite_body.update(t, dt=self.dt)
-
-        # self.d_min = torch.min(torch.stack([prop[0] for idx, prop in enumerate(self.sdf_properties)]),axis=0)[0]
-        # (_, self.normal_x, self.normal_y, self.curvature) = self.composite_body.bodies[0].compute_sdf_properties(self.d_min)
-        # (self.mu0_all, self.mu1_all) = self.composite_body.bodies[0].mu_funcs(self.d_min)
-        # self.m_m0_all = (1-self.mu0_all)
-
-        # # # ===== update body velocities and their normals ====
-        # # self.body_u = 0
-        # # self.body_v = 0
-        # # for i, body in enumerate(self.composite_body.bodies):
-        # #     d1 = self.sdf_properties[i][0]
-        # #     mu0i, _ = body.mu_funcs(d1)
-        # #     mu0i_B = (1-mu0i)
-        # #     if i==0:
-        # #         self.body_u += body.body_u * mu0i_B
-        # #         self.body_v += body.body_v * mu0i_B
-        # #     else:
-        # #         d2, _, _, _ = self.sdf_properties[i-1]
-        # #         mu0ip, mu1ip = body.mu_funcs(d2)
-        # #         mu0ip_B = (1-mu0ip)
-        # #         mu_B_diff = mu0i_B-mu0ip_B*mu0i_B
-        # #         self.body_u += body.body_u * mu_B_diff
-        # #         self.body_v += body.body_v * mu_B_diff
-
-
-        # # # ===== update body velocities and their normals ====
-        # # self.body_u = 0
-        # # self.body_v = 0
-        # # self.divergence_uv = 0
-        # # for i, body in enumerate(self.composite_body.bodies):
-        # #     di, _, _, _ = self.sdf_properties[i]
-        # #     mu0i_B = torch.where(di<0, self.m_m0_all,0)
-        # #     # mu0i, m1i = body.mu_funcs(d1)
-        # #     # mu0i_B = (1-mu0i)
-        # #     if i==0:
-        # #         self.body_u += body.body_u * mu0i_B
-        # #         self.body_v += body.body_v * mu0i_B
-        # #     else:
-        # #         dim, _, _, _ = self.sdf_properties[i-1]
-        # #         mu0im_B = torch.where(dim<0, self.m_m0_all,0)
-        # #         mu_B_diff = mu0i_B-mu0im_B*mu0i_B
-        # #         self.body_u += body.body_u * mu_B_diff
-        # #         self.body_v += body.body_v * mu_B_diff
-
-
-        # # ===== update body velocities ====
-        # self.body_u = 0
-        # self.body_v = 0
-        # self.divergence_uv = 0
-        # for i in range(self.n_bodies):
-        #     body = self.composite_body.bodies[-i-1]
-        #     di, _, _, _ = self.sdf_properties[-i-1]
-        #     mu0i, _ = body.mu_funcs(di)
-        #     mu0i_B = (1-mu0i)
-        #     # int_i = torch.where(di<0,1,0)
-        #     if i==0:
-        #         # self.body_u += body.body_u * int_i
-        #         # self.body_v += body.body_v * int_i
-        #         self.body_u += body.body_u * mu0i_B
-        #         self.body_v += body.body_v * mu0i_B
-        #     else:
-        #         mu0_diff = mu0i_B - mu0im_B*mu0i_B
-        #         # int_diff = int_i - int_im*int_i
-        #         self.body_u += body.body_u * mu0_diff
-        #         self.body_v += body.body_v * mu0_diff
-        #         # self.body_u += body.body_u * int_diff
-        #         # self.body_v += body.body_v * int_diff
-        #     # int_im = int_i
-        #     mu0im_B = mu0i_B
-
-
-        # # self.body_u = F.conv2d(
-        # #     self.body_u.view(1, 1, self.N, self.N),
-        # #     self.kernel,
-        # #     padding=self.kernel_size//2
-        # # )[0,0]
-        # # self.body_v = F.conv2d(
-        # #     self.body_v.view(1, 1, self.N, self.N),
-        # #     self.kernel,
-        # #     padding=self.kernel_size//2
-        # # )[0,0]
-        # # self.body_u *= self.m_m0_all
-        # # self.body_v *= self.m_m0_all
-
-
-
-        # # # ===== update body velocities and their normals ====
-        # # self.body_u = 0
-        # # self.body_v = 0
-        # # self.divergence_uv = 0
-        # # for i in range(self.n_bodies-1):
-        # #     body1 = self.composite_body.bodies[-i-1]
-        # #     body2 = self.composite_body.bodies[-i-2]
-        # #     d1, _, _, _ = self.sdf_properties[-i-1]
-        # #     d2, _, _, _ = self.sdf_properties[-i-2]
-
-        # #     int1 = torch.where(d1<0,1,0)
-        # #     int2 = torch.where(d2<0,1,0)
-        # #     intC = int1*int2
-
-        # #     self.body_u += body1.body_u*(int1-intC)
-        # #     self.body_u += body2.body_u*(int2-intC)
-        # #     self.body_u += (body1.body_u+body2.body_u)*intC/2
-
-        # #     self.body_v += body1.body_v*(int1-intC)
-        # #     self.body_v += body2.body_v*(int2-intC)
-        # #     self.body_v += (body1.body_v+body2.body_v)*intC/2
-
-
-        # # for i, body in enumerate(self.composite_body.bodies):
-        # #     di, _, _, _ = self.sdf_properties[i]
-        # #     # mu0i_B = torch.where(di<0, self.m_m0_all,0)
-        # #     int_i = torch.where(di<0,1,0)
-        # #     # mu0i, m1i = body.mu_funcs(d1)
-        # #     # mu0i_B = (1-mu0i)
-        # #     if i==self.n_bodies-1:
-        # #         self.body_u += body.body_u * int_i
-        # #         self.body_v += body.body_v * int_i
-        # #     else:
-        # #         dim, _, _, _ = self.sdf_properties[i-1]
-        # #         int_im = torch.where(dim<0,1,0)
-        # #         int_diff = int_im-int_im*int_i
-        # #         self.body_u += body.body_u * int_diff
-        # #         self.body_v += body.body_v * int_diff
-
-
-
-        # # if iteration>100:
-        # #     from IPython import embed; embed()
-
-
-        # # self.body_un       = self.normal_derivative(self.body_u,self.normal_x,self.normal_y) * self.mu1_all
-        # # self.body_vn       = self.normal_derivative(self.body_v,self.normal_x,self.normal_y) * self.mu1_all
-        # # self.divergence_uv = self.divergence(self.body_u,self.body_v) * self.m_m0_all
-
-        # ======= compute forces ======
+        # ======= compute stress tensor ======
         # stress = self.stress_tensor(u,v,p)
-
-        dudx, dudy = torch.gradient(u, spacing=[self.dx, self.dy])
-        dvdx, dvdy = torch.gradient(v, spacing=[self.dx, self.dy])
+        (u_ext, v_ext, p_ext) = self.solver_free(u,v,p)
+        dudx, dudy = torch.gradient(u_ext, spacing=[self.dx, self.dy])
+        dvdx, dvdy = torch.gradient(v_ext, spacing=[self.dx, self.dy])
         ss_diag = (dudy+dvdx)
         ss_11 = 2*dudx
         ss_22 = 2*dvdy
+
 
         for i, body in enumerate(self.composite_body.bodies):
 
@@ -540,16 +445,13 @@ class FluidSolver:
             # delta = self.composite_body.bodies[0].phi(d)*self.eps
             # xstress_tensor = normal_x*(stress[0][0]+stress[0][1])*delta
             # ystress_tensor = normal_y*(stress[0][1]+stress[1][1])*delta
-            self.force_x[i] = self.visc*torch.trapz(torch.trapz(xstress_tensor, dx=self.dy), dx=self.dx)
-            self.force_y[i] = self.visc*torch.trapz(torch.trapz(ystress_tensor, dx=self.dy), dx=self.dx)
+            self.friction_force_x[i] = self.visc*torch.trapz(torch.trapz(xstress_tensor, dx=self.dy), dx=self.dx)
+            self.friction_force_y[i] = self.visc*torch.trapz(torch.trapz(ystress_tensor, dx=self.dy), dx=self.dx)
 
-        # # if iteration>100:
-        # #     from IPython import embed; embed()
+            p_force_par=p_ext-d*self.normal_derivative(p_ext,self.normal_x,self.normal_y)
 
-        # # plt.subplot(1,2,1)
-        # # plt.imshow(stress[0][0].cpu())
-        # # plt.subplot(1,2,2)
-        # # plt.imshow(self.vorticity(u,v).cpu())
+            self.pressure_force_x[i] = self.visc*torch.trapz(torch.trapz(p_force_par*normal_x*delta, dx=self.dy), dx=self.dx)
+            self.pressure_force_y[i] = self.visc*torch.trapz(torch.trapz(p_force_par*normal_y*delta, dx=self.dy), dx=self.dx)
 
 
         # (u,v,p) = self.solver_iteration(u,v,p)
@@ -563,24 +465,18 @@ class FluidSolver:
                 # copy u from device to host
                 X,Y = self.X.cpu(), self.Y.cpu()
                 curl = self.vorticity(u,v).cpu()
+                divergence = self.divergence(u,v).cpu()
                 d_min = self.composite_body.sdf_val.cpu()
                 # d_min = self.d_min.cpu()
                 pressure = p.cpu()
                 curl_body = (self.vorticity(self.body_u,self.body_v)).cpu()
-                vec_x=0*self.body_u.cpu()
-                vec_y=0*self.body_v.cpu()
-                # curvature = self.composite_body.bodies[0].phi(self.d_min)*self.eps
-
-
-                # self.pressure_force = (
-                #     p-self.d_min*self.normal_derivative(p,self.normal_x,self.normal_y)
-                #     )*self.normal_x*self.composite_body.bodies[0].phi(self.d_min)/(1+self.d_min/self.curvature)
-                # print(self.pressure_force.sum())
+                vec_x=self.body_u.cpu()
+                vec_y=self.body_v.cpu()
 
 
                 # plotting.plot2d_imshow(X,Y,(self.vorticity(u,v)/(self.composite_body.bodies[0].L)).cpu(),d_min,self.extent,iteration,self.save_path,"curl",self.vmin,self.vmax)
 
-                plotting.plot2d_imshow_composite_quiver(X,Y,curl,self.sdf_properties,vec_x,vec_y,self.extent,iteration,self.save_path,"curl",self.vmin,self.vmax,subsample_n = self.n_quiver_spacing, scale=self.save_every*self.dt)
+                plotting.plot2d_imshow_composite_quiver(X,Y,curl,self.sdf_properties,0*vec_x,0*vec_y,self.extent,iteration,self.save_path,"curl",self.vmin,self.vmax,subsample_n = self.n_quiver_spacing, scale=self.save_every*self.dt)
                 plotting.plot2d_imshow_composite_quiver(X,Y,curl_body,self.sdf_properties,vec_x,vec_y,self.extent,iteration,self.save_path,"curlbody",self.vmin,self.vmax,subsample_n = self.n_quiver_spacing, scale=self.save_every*self.dt)
 
                 # plotting.plot2d_imshow_simple((self.mu1_all/self.eps).cpu(),self.extent,iteration,self.save_path,"mu1",-0.2,0.2)
@@ -592,17 +488,21 @@ class FluidSolver:
                 plotting.plot2d_imshow_composite(X,Y,vec_x,self.sdf_properties,self.extent,iteration,self.save_path,"bodyu",None, None)
                 plotting.plot2d_imshow_composite(X,Y,vec_y,self.sdf_properties,self.extent,iteration,self.save_path,"bodyv",None, None)
 
-                # plotting.plot2d_imshow(X,Y,self.divergence_uv.cpu(),d_min,self.extent,iteration,self.save_path,"divbody",None, None)
+                plotting.plot2d_imshow(X,Y,divergence,d_min,self.extent,iteration,self.save_path,"divergence",None, None)
+
                 # plotting.plot2d_imshow(X,Y,pressure,d_min,self.extent,iteration,self.save_path,"pressure",None, None)
                 plotting.plot2d_imshow_only(pressure,self.extent,iteration,self.save_path,"pressure",None, None)
+
+
+                plotting.plot2d_imshow_only((self.m_m0_all).cpu(),self.extent,iteration,self.save_path,"tmp",None, None)
 
                 plotting.plot2d_imshow_quiver(X,Y,d_min,d_min,vec_x,vec_y,self.extent,iteration,self.save_path,"sdf",None,None,subsample_n = self.n_quiver_spacing, scale=self.save_every*self.dt)
 
                 plotting.plot2d_imshow_quiver(X,Y,curl,d_min,vec_x,vec_y,self.extent,iteration,self.save_path,"curluv",self.vmin,self.vmax,subsample_n = self.n_quiver_spacing, scale=self.save_every*self.dt)
 
                 plotting.plot2d_imshow_only(
-                    delta.cpu(),
-                    self.extent,iteration,self.save_path,"forces0",-10000, 10000)
+                    xstress_tensor.cpu(),
+                    self.extent,iteration,self.save_path,"xstress_tensor", None, None)
 
 
             if self.save_uv:
