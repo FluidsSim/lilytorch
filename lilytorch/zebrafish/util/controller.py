@@ -80,8 +80,8 @@ class ZebrafishFluidController(AnimatNetwork):
         return sdf_properties
 
 
-    def update(self,t,dt=1):
-        iteration = int(t/dt)
+    def update(self,t,iteration,dt=1):
+        # iteration = int(t/dt)
         pos_global = torch.from_numpy(np.array(self.data.sensors.links.urdf_positions()[iteration,:, :2]).astype(np.float32)).to(self.device)
         # lin_vel = torch.from_numpy(np.array(self.data.sensors.links.com_lin_velocities()[iteration,:,:2]))
         # ang_vel = torch.from_numpy(np.array([self.data.sensors.links.com_ang_velocity(iteration, link)[2] for link in range(self.nlinks)])) # only the z ang velocity in 2d
@@ -119,14 +119,18 @@ class ZebrafishFluidController(AnimatNetwork):
 
             velocity = - r[i]@(pos_trans-body.old_points) / dt
 
-            idx=sdf_val<0
-            self.fluid_solver.composite_body.u_vals[i]=torch.where(idx,velocity[0].reshape(body.nx, body.ny),0)
-            self.fluid_solver.composite_body.v_vals[i]=torch.where(idx,velocity[1].reshape(body.nx, body.ny),0)
+            self.fluid_solver.composite_body.u_vals[i]=velocity[0].reshape(body.nx, body.ny)
+            self.fluid_solver.composite_body.v_vals[i]=velocity[1].reshape(body.nx, body.ny)
 
+            # idx=sdf_val<0
+            # self.fluid_solver.composite_body.u_vals[i]=torch.where(idx,velocity[0].reshape(body.nx, body.ny),0)
+            # self.fluid_solver.composite_body.v_vals[i]=torch.where(idx,velocity[1].reshape(body.nx, body.ny),0)
 
             # body.body_u= velocity[0].reshape(body.nx, body.ny)
             # body.body_v= velocity[1].reshape(body.nx, body.ny)
             body.old_points = pos_trans
+
+            self.fluid_solver.composite_body.com_pos[i]=pos_global[i]
 
 
         # self.sdf_val = torch.min(torch.stack([prop for idx, prop in enumerate(sdf_properties)]),axis=0)[0]
@@ -138,8 +142,8 @@ class ZebrafishFluidController(AnimatNetwork):
 
         # (self.mu0_all, self.mu1_all) = self.fluid_solver.composite_body.mu_funcs(self.composite_body.sdf_val)
 
-        self.fluid_solver.composite_body.body_u=self.fluid_solver.composite_body.u_vals.gather(0,idx)[0].reshape(self.fluid_solver.nx,self.fluid_solver.ny)
-        self.fluid_solver.composite_body.body_v=self.fluid_solver.composite_body.v_vals.gather(0,idx)[0].reshape(self.fluid_solver.nx,self.fluid_solver.ny)
+        self.fluid_solver.body_u=self.fluid_solver.composite_body.u_vals.gather(0,idx)[0].reshape(self.fluid_solver.nx,self.fluid_solver.ny)
+        self.fluid_solver.body_v=self.fluid_solver.composite_body.v_vals.gather(0,idx)[0].reshape(self.fluid_solver.nx,self.fluid_solver.ny)
 
 
         # self.body_u=self.uv[:,0,:].gather(0,idx)[0].reshape(self.body.nx,self.body.ny)
@@ -191,8 +195,8 @@ class ZebrafishFluidController(AnimatNetwork):
 
         # from IPython import embed; embed()
 
-        self.callback.friction_force_x = -(self.fluid_solver.friction_force_x).cpu().numpy()
-        self.callback.friction_force_y = -(self.fluid_solver.friction_force_y).cpu().numpy()
+        self.callback.friction_force_lin_x = -(self.fluid_solver.friction_force_lin_x).cpu().numpy()
+        self.callback.friction_force_lin_y = -(self.fluid_solver.friction_force_lin_y).cpu().numpy()
 
         self.callback.pressure_force_x = -(self.fluid_solver.pressure_force_x).cpu().numpy()
         self.callback.pressure_force_y = -(self.fluid_solver.pressure_force_y).cpu().numpy()

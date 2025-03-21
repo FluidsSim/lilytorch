@@ -146,8 +146,9 @@ class FluidCallback(TaskCallback):
         self.animat_options = animat_options
         self.arena_options = arena_options
         self.nfrc = len(self.animat_options['control']['sensors']['xfrc'])
-        self.friction_force_x = np.zeros(self.nfrc)
-        self.friction_force_y = np.zeros(self.nfrc)
+        self.friction_force_lin_x = np.zeros(self.nfrc)
+        self.friction_force_lin_y = np.zeros(self.nfrc)
+        self.friction_force_ang_z = np.zeros(self.nfrc)
         self.pressure_force_x = np.zeros(self.nfrc)
         self.pressure_force_y = np.zeros(self.nfrc)
         self.force_constant = 1
@@ -161,5 +162,6 @@ class FluidCallback(TaskCallback):
         """Step hydrodynamics"""
         indices = task.maps['sensors']['data2xfrc']
 
-        physics.data.xfrc_applied[indices, 0] = self.force_constant*(0*self.friction_force_x + self.pressure_force_x)* task.units.newtons
-        physics.data.xfrc_applied[indices, 1] = self.force_constant*(0*self.friction_force_y + self.pressure_force_y)* task.units.newtons
+        physics.data.xfrc_applied[indices, 0] = self.force_constant*(self.friction_force_lin_x + self.pressure_force_x)* task.units.newtons
+        physics.data.xfrc_applied[indices, 1] = self.force_constant*(self.friction_force_lin_y + self.pressure_force_y)* task.units.newtons
+        physics.data.xfrc_applied[indices, 5] = self.friction_force_ang_z* task.units.newtons

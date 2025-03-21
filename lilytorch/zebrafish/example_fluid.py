@@ -16,9 +16,9 @@ def exercise_single(**kwargs):
     os.makedirs(log_path, exist_ok=True)
 
     amps=np.ones(15)*0.3
-    amps[:5]=0
+    # amps[:5]=0
     bias=0.*np.ones(15)
-    bias[:5]=0
+    # bias[:5]=0
 
     all_pars = SimulationParameters(
         controller      = "sine",

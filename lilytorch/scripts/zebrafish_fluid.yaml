@@ -32,9 +32,9 @@ solver :
   nu                : 1.0e-6
   rho               : 1.0e+3
   convection_method : "implicit"
-  poisson_tol       : 1.0e-2
+  poisson_tol       : 1.0e-5
   poisson_max_cycles: 1
-  poisson_nsmoothing: 15
+  poisson_nsmoothing: 10
   poisson_verbose   : False
 
 
@@ -76,7 +76,7 @@ body:
 output:
   save_path: "/data/andreaferrario/ns_data/"
   save_frames: True
-  save_every : 100
-  vmin: -5
-  vmax: 5
+  save_every : 50
+  vmin: -60
+  vmax: 60
   save_uv: False

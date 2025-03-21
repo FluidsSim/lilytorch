@@ -820,7 +820,7 @@ class BodyMesh(Body):
         self.update_theta = update_maps[0]
         self.update_translation = update_maps[1]
         self.suit = suit
-        self.plotting = kwargs.pop("plotting", True)
+        self.plotting = kwargs.pop("plotting", False)
         self.apply_closing_morph = kwargs.pop("apply_closing_morph", True)
 
         self.m2s = mesh2sdf(self.mesh_file)
@@ -1075,8 +1075,9 @@ class CompositeBodyMesh:
         self.compute_sdf_properties = self.bodies[0].compute_sdf_properties
         nbodies                     = len(self.sdf.links)
         self.sdf_vals               = torch.zeros((nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
-        self.u_vals               = torch.zeros((nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
-        self.v_vals               = torch.zeros((nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
+        self.u_vals                 = torch.zeros((nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
+        self.v_vals                 = torch.zeros((nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
+        self.com_pos                = torch.zeros((nbodies,2),device=device)
 
         self.initialize() # initialize the sdf interpolation functions
 

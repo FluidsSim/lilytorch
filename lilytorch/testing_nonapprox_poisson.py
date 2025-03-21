@@ -11,7 +11,7 @@ class PoissonSolver:
         """
         self.h2         = h*h
         self.device     = device
-        self.n_switch   = 2**6
+        self.n_switch   = 2**20
         self.BC         = self.Neumann_BC
         self.tol        = tol
         self.max_cycles = max_cycles
@@ -82,7 +82,6 @@ class PoissonSolver:
             res[1:-1,1:-1] += c_h[:-1,1:-1]*p[:-2,1:-1]
             res[1:-1,1:-1] += c_v[1:-1,1:]*p[1:-1,2:]
             res[1:-1,1:-1] += c_v[1:-1,:-1]*p[1:-1,:-2]
-
             return res
 
         # build A*U operator
@@ -212,12 +211,9 @@ class PoissonSolver:
             self.BC(u)
 
         # if n==2:
-        #     u[1,1] = 0.25*f[1,1]*h2/(c[1,1]+1e-12)
+        #     u[1,1] = 0.25*f[1,1]*h2/(c[1,1]+1e-15)
         #     r = 0
 
-        # if n==2:
-        #     u, r = self.CG_jacobi_cond(f, u, c, c_h, c_v, h2, maxit=100)
-        #     self.BC(u)
 
         else:
 
@@ -235,6 +231,7 @@ class PoissonSolver:
                     # u = (f*h2)*Jdiag_inv
                     # u=-(LU(u)-f*h2)*Jdiag_inv
                 self.BC(u)
+
                 return u
 
             # Jacobi relaxation
@@ -243,6 +240,7 @@ class PoissonSolver:
             # compute residual
             # r=f-Au(u)
             r = torch.where(Jdiag_inv==0,0,(f-Au(u)))
+            r = r-r.mean()
 
             if self.verbose:
                 print("Multigrid - Steps: {}, Residual: {}".format(n, torch.max(torch.abs(r))))
@@ -286,7 +284,7 @@ class PoissonSolver:
 
             # Jacobi relaxation
             u = smooth(u)
-            # self.BC(u)
+            self.BC(u)
             r = (f-Au(u))
 
             if self.verbose:
@@ -298,19 +296,8 @@ class PoissonSolver:
 
 
 def test_solvers():
-    use_gpu=True
+    use_gpu=False
     N=2**8+1
-
-    import poisson_solvers.solutions2d
-    from matplotlib import pyplot
-    import time
-
-    X, Y, u_exact, f, c, c_h, c_v = poisson_solvers.solutions2d.variable_coeff_c_hat(N)
-
-    h = X[1,0]-X[0,0]
-    print("Number of elements:{}, h={}".format(N, h))
-
-    u0=torch.zeros((N,N))
 
     if torch.cuda.is_available() and use_gpu:
         print(f"Using GPU: {torch.cuda.get_device_name(0)} is available.")
@@ -319,6 +306,19 @@ def test_solvers():
         print("Using the CPU.")
         device = torch.device("cpu")
         torch.set_num_threads(8)
+
+
+    import poisson_solvers.solutions2d
+    from matplotlib import pyplot
+    import time
+
+    X, Y, u_exact, f, c, c_h, c_v = poisson_solvers.solutions2d.variable_coeff_c_hat(N,device=device)
+
+    h = X[1,0]-X[0,0]
+    print("Number of elements:{}, h={}".format(N, h))
+
+    u0=torch.zeros((N,N))
+
 
     solver = PoissonSolver(
         device,

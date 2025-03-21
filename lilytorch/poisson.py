@@ -37,10 +37,6 @@ class PoissonSolver:
         c*p=-f <=> nabla(c*nabla(p))=-f
         where c=c(x,y) are linearly interpolated coefficients values at midpoints
         """
-        # c_hat_L = (c[1:,:]+c[:-1,:])/2 # N x (N+1) - assume that u is (N+1)x(N+1)
-        # c_hat_R = (c[:,1:]+c[:,:-1])/2 # (N+1) x N
-
-        # J_diag = c_hat_L[1:,1:-1]+c_hat_L[:-1,1:-1]+c_hat_R[1:-1,1:]+c_hat_R[1:-1,:-1]
 
         c_hat_L = (c[1:,:]+c[:-1,:])/2 # N x (N+1) - assume that u is (N+1)x(N+1)
         c_hat_R = (c[:,1:]+c[:,:-1])/2 # (N+1) x N
@@ -50,34 +46,16 @@ class PoissonSolver:
         # build diagonal Jacobi preconditioner matrix
         J_el = torch.zeros_like(c) # diagonal Jacobi elements
         J_el[1:-1,1:-1] = J_diag
-        # J_el[0,:]       = 2*c[0,:]
-        # J_el[-1,:]      = 2*c[-1,:]
-        # J_el[:,0]       = 2*c[:,0]
-        # J_el[:,-1]      = 2*c[:,-1]
         J_el_inv = torch.where(J_el<self.jcap_tol,0,1/J_el)
 
         # build lower-upper matrices (note: this is NOT the LU factorization)
         def LU(u):
-            # res=torch.zeros_like(u)
-            # res[:-1,1:-1] += c_hat_L[:,1:-1]*u[1:,1:-1]
-            # res[1:,1:-1]  += c_hat_L[:,1:-1]*u[:-1,1:-1]
-            # res[1:-1,:-1] += c_hat_R[1:-1,:]*u[1:-1,1:]
-            # res[1:-1,1:]  += c_hat_R[1:-1,:]*u[1:-1,:-1]
-
             res=torch.zeros_like(u)
-            res[:-1,:] += c_hat_L[:,:]*u[1:,:]
-            res[1:,:]  += c_hat_L[:,:]*u[:-1,:]
-            res[:,:-1] += c_hat_R[:,:]*u[:,1:]
-            res[:,1:]  += c_hat_R[:,:]*u[:,:-1]
-
-            # c_hat_star_L = c_hat_L[1:-1,1:-1] # (N-2)x(N-1)
-            # c_hat_star_R = c_hat_R[1:-1,1:-1] # (N-1)x(N-2)
-
-            # res[1:-2,1:-1]+=c_hat_star_L*u[2:-1,1:-1]
-            # res[2:-1,1:-1]+=c_hat_star_L*u[1:-2,1:-1]
-            # res[1:-1,1:-2]+=c_hat_star_R*u[1:-1,2:-1]
-            # res[1:-1,2:-1]+=c_hat_star_R*u[1:-1,1:-2]
-            # self.BC(res)
+            res[:-1,1:-1] += c_hat_L[:,1:-1]*u[1:,1:-1]
+            res[1:,1:-1]  += c_hat_L[:,1:-1]*u[:-1,1:-1]
+            res[1:-1,:-1] += c_hat_R[1:-1,:]*u[1:-1,1:]
+            res[1:-1,1:]  += c_hat_R[1:-1,:]*u[1:-1,:-1]
+            self.BC(res)
 
             return res
 

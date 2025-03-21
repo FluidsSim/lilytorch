@@ -589,7 +589,7 @@ def plot2d_imshow_only(u,extent,iteration,save_path,name,vmin,vmax):
 
 def plot2d_imshow_composite(X,Y,u,properties,extent,iteration,save_path,name,vmin,vmax):
     if vmin is None:
-        limit = max(abs(u.min()), abs(u.max()))/2
+        limit = max(abs(u.min()), abs(u.max())) #/2
         vmin = -limit
         vmax = limit
     plt.figure(figsize=(20,10))
