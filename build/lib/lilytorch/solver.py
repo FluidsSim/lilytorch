@@ -405,9 +405,9 @@ class FluidSolver:
         # vprime += self.m_m0_all*self.body_v + self.mu1_all*self.normal_derivative(v-self.body_v,self.normal_x,self.normal_y)
 
         # # ====== solve the pressure poisson equation and project ======
-        coeff = self.dt*self.mu0_all
+        coeff = self.dt*self.mu0_all/self.rho
         # rhs = (self.divergence(uprime,vprime)-self.m_m0_all*self.divergence(self.body_u,self.body_v))
-        rhs = self.rho*(self.divergence(uprime,vprime)-self.div_body)
+        rhs = (self.divergence(uprime,vprime)-self.div_body)
         p = torch.zeros_like(u)
         p = self.poisson_solver.solve_multigrid( # f, u, c
             rhs,

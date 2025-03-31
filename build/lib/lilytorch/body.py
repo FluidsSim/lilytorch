@@ -493,15 +493,15 @@ class BodyAnalytical(Body):
             dt=dt
         )
 
-        return [self.update_body(
-            self.sdf_fun,
-            self.update_theta(t),
-            (
-                self.update_translation[0](t),
-                self.update_translation[1](t)
-            ),
-            dt=dt
-        )]
+        # return [self.update_body(
+        #     self.sdf_fun,
+        #     self.update_theta(t),
+        #     (
+        #         self.update_translation[0](t),
+        #         self.update_translation[1](t)
+        #     ),
+        #     dt=dt
+        # )]
 
 class BodyFishAnalytical(Body):
 
@@ -1412,16 +1412,15 @@ def test_single_mesh():
 
     x=torch.linspace(-0.002,0.002,N)
     y=torch.linspace(-0.002,0.002,N)
-    mesh_file = "/data/andreaferrario/zebrafish/models/zebrafish_v1_triangulated/sdf/meshes_zebrafish/link_4.obj"
+    mesh_file = "/data/andreaferrario/zebrafish/models/zebrafish_v1_triangulated/sdf/meshes_zebrafish/link_10.obj"
 
     m2s = mesh2sdf(mesh_file)
 
-    m2s.visualize(wireframe=False)
+    m2s.visualize()
 
 
-    body = BodyMesh("cpu", x, y, mesh_file, (lambda t: 0, [lambda t:0, lambda t:0]),eps=2*(x[1]-x[0]), compute_interp=False,suit=0.0)
-    sdf_val = body.initialize()[0]
-    sdf_val, du, dv, curv = body.compute_sdf_properties(sdf_val)
+    body = BodyMesh("cpu", x, y, mesh_file, (lambda t: 0, [lambda t:0, lambda t:0]),eps=2*(x[1]-x[0]),suit=0.0)
+    sdf_val, du, dv, curv = body.initialize()[0]
 
     dtype = np.float32
 
@@ -1477,7 +1476,6 @@ def test_single_mesh():
         dv[::subsample_n,::subsample_n],
         color='g'
     )
-    plt.savefig("mesh_body_example.pdf")
 
 
     plt.figure()
@@ -1758,8 +1756,7 @@ def test_body():
 
     body = Body(device,x,y,eps=2*(x[1]-x[0]))
 
-    d = body.sdf_from_obj(mesh_file="cylinder.obj")
-    d, nx, ny, curv = body.compute_sdf_properties(d)
+    d, nx, ny, curv = body.sdf_from_obj(mesh_file="cylinder.obj")
     (mu0, mu1) = body.mu_funcs(d)
 
     import matplotlib.pyplot as plt
@@ -1997,18 +1994,17 @@ def test_overlapping_bodies():
 def test_curvature():
 
     N=2**10
-    x=torch.linspace(-0.001,0.001,N)
-    y=torch.linspace(-0.001,0.001,N)
+    x=torch.linspace(-0.002,0.002,N)
+    y=torch.linspace(-0.002,0.002,N)
 
-    # mesh_file = "/data/andreaferrario/zebrafish/models/zebrafish_v1_triangulated/sdf/meshes_zebrafish/link_10.obj"
-    # body = BodyMesh("cpu", x, y, mesh_file, (lambda t: 0, [lambda t:0, lambda t:0]),eps=2*(x[1]-x[0]),suit=0.0)
+    mesh_file = "/data/andreaferrario/zebrafish/models/zebrafish_v1_triangulated/sdf/meshes_zebrafish/link_10.obj"
+    body = BodyMesh("cpu", x, y, mesh_file, (lambda t: 0, [lambda t:0, lambda t:0]),eps=2*(x[1]-x[0]),suit=0.0)
 
-    sdf = lambda x,y : circle (x,y,xt=0,yt=0,r=0.0007)
-    update = (lambda i : torch.tensor(1)*i, [lambda i : 0*math.cos(i/10),lambda i : 0*math.sin(i/10)])
-    body = BodyAnalytical("cpu",x,y,sdf,update,eps=2*(x[1]-x[0]))
+    # sdf = lambda x,y : circle (x,y,xt=0,yt=0,r=0.0003)
+    # update = (lambda i : torch.tensor(1)*i, [lambda i : 0*math.cos(i/10),lambda i : 0*math.sin(i/10)])
+    # body = BodyAnalytical("cpu",x,y,sdf,update,eps=2*(x[1]-x[0]))
 
-    sdf_val = body.initialize()[0]
-    sdf_val, du, dv, curv = body.compute_sdf_properties(sdf_val)
+    sdf_val, du, dv, curv = body.initialize()[0]
     R = torch.where(curv>0,1/curv,0)
 
 
@@ -2034,7 +2030,6 @@ def test_curvature():
         dv[::subsample_n,::subsample_n],
         color='g'
     )
-    plt.savefig("sphere_body_example.pdf")
 
 
     plt.figure()
@@ -2054,7 +2049,7 @@ def test_curvature():
 
 
 if __name__ == "__main__":
-    test_curvature()
+    test_fish_mesh()
 
 
 
