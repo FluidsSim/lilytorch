@@ -18,6 +18,63 @@ class PoissonSolver:
         self.verbose    = verbose
         self.jcap_tol   = 1e-12
 
+    def BC(self, q):
+        q[0, :]    = q[1, :]
+        q[-1, :]   = q[-2, :]
+        q[:, 0]    = q[:, 1]
+        q[:, -1]   = q[:, -2]
+
+    def CG_jacobi_cond(self, f, u, c, c_h, c_v, h2, maxit=100):
+
+        ch=(c[1:,:]+c[:-1,:])/2 # N x (N+1)
+        cv=(c[:,1:]+c[:,:-1])/2 # (N+1) x N
+
+        J=torch.zeros_like(f)
+        J[1:-1,1:-1]+=(ch[1:,1:-1]+ch[:-1,1:-1]+cv[1:-1,1:]+cv[1:-1,:-1])
+        J[0,:]+=1+ch[0,:]
+        J[-1,:]+=1+ch[-1,:]
+        J[:,0]+=1+cv[:,0]
+        J[:,-1]+=1+cv[:,-1]
+        Jinv=torch.where(J<self.jcap_tol,0,1/J)
+
+        def LU(p):
+            res=torch.zeros_like(f)
+
+            res[:-1,:]+=ch*p[1:,:]
+            res[1:,:]+=ch*p[:-1,:]
+            res[:,:-1]+=cv*p[:,1:]
+            res[:,1:]+=cv*p[:,:-1]
+
+            res[0,:]=J[0,:]*p[1,:]
+            res[-1,:]=J[-1,:]*p[-2,:]
+            res[:,0]=J[:,0]*p[:,1]
+            res[:,-1]=J[:,-1]*p[:,-2]
+            return res
+
+        def Au(p):
+            return (LU(p)-J*p)/h2
+
+        Jinv=Jinv/h2
+        r=f-Au(u)
+        z=r*Jinv
+        d=z
+        old_norm=torch.tensordot(r,z)
+        it=0
+        while old_norm>self.tol:
+            if it>maxit:
+                break
+            Ad=Au(d)
+            alpha=old_norm/torch.tensordot(d,Ad)
+            u=u+alpha*d
+            r=r-alpha*Ad
+            z=r*Jinv
+            new_norm=torch.tensordot(r,z)
+            beta=new_norm/old_norm
+            d=z+beta*d
+            old_norm=new_norm
+            it=it+1
+        return u, r
+
     def smoothing(self, f, p, c, h2):
         """
         2nd order smoothing with Neumann conditions
@@ -26,35 +83,76 @@ class PoissonSolver:
         ch=(c[1:,:]+c[:-1,:])/2 # N x (N+1)
         cv=(c[:,1:]+c[:,:-1])/2 # (N+1) x N
 
-        J=torch.zeros_like(f)
-        J[1:-1,1:-1]+=(ch[1:,1:-1]+ch[:-1,1:-1]+cv[1:-1,1:]+cv[1:-1,:-1])
-        J[0,:]+=1+ch[0]
-        J[-1,:]+=1+ch[-1]
-        J[:,0]+=1+cv[:,0]
-        J[:,-1]+=1+cv[:,-1]
+        J=torch.zeros_like(f) # J_{i,j}=c_{i-0.5,j}+c_{i+0.5,j}+c_{i,j-0.5}+c_{i,j+0.5}
+        J[:-1,:]+=ch
+        J[1:,:]+=ch
+        J[:,:-1]+=cv
+        J[:,1:]+=cv
+        J[0,:]+=1
+        J[-1,:]+=1
+        J[:,0]+=1
+        J[:,-1]+=1
+        
+        # J[1:-1,1:-1]+=(ch[1:,1:-1]+ch[:-1,1:-1]+cv[1:-1,1:]+cv[1:-1,:-1])
+        # J[0,:]+=1+ch[0,:]
+        # J[-1,:]+=1+ch[-1,:]
+        # J[:,0]+=1+cv[:,0]
+        # J[:,-1]+=1+cv[:,-1]
+
         Jinv=torch.where(J<self.jcap_tol,0,1/J)
+
+        def LU(p):
+            res=torch.zeros_like(f)
+
+            res[1:-1,1:-1]+=ch[1:,1:-1]*p[2:,1:-1]
+            res[1:-1,1:-1]+=ch[:-1,1:-1]*p[:-2,1:-1]
+            res[1:-1,1:-1]+=cv[1:-1,1:]*p[1:-1,2:]
+            res[1:-1,1:-1]+=cv[1:-1,:-1]*p[1:-1,:-2]
+
+            # res[:-1,:]+=ch*p[1:,:]
+            # res[1:,:]+=ch*p[:-1,:]
+            # res[:,:-1]+=cv*p[:,1:]
+            # res[:,1:]+=cv*p[:,:-1]
+
+            # res[0,:]+=p[1,:]
+            # res[-1,:]+=p[-2,:]
+            # res[:,0]+=p[:,1]
+            # res[:,-1]+=p[:,-2]
+
+            res[0,:]+=J[0,:]*p[1,:]
+            res[-1,:]+=J[-1,:]*p[-2,:]
+            res[:,0]+=J[:,0]*p[:,1]
+            res[:,-1]+=J[:,-1]*p[:,-2]
+
+            # self.BC(res)
+
+            return res
+
 
         # smoothing
         for _ in range(self.nsmoothing):
-            res=torch.zeros_like(f)
-            res[:-1,:]+=ch*p[1:,:]
-            res[1:,:]+=ch*p[1:,:]
-            res[0,:]+=p[1,:]
-            res[-1,:]+=p[-2,:]
-
-            res[:,:-1]+=cv*p[:,1:]
-            res[:,1:]+=cv*p[:,1:]
-            res[:,0]+=p[:,1]
-            res[:,-1]+=p[:,-2]
-
-            p=(res-f*h2)*Jinv
-
+            p=(LU(p)-f*h2)*Jinv
 
         # compute residual
-        Au=(res-J*p)/h2
+        Au=(LU(p)-J*p)/h2
         r=torch.where(Jinv==0,0,(f-Au))
 
+        # p=p-p.mean()
+
         return p, r
+
+    def restrict(self, r, n):
+        r_restrict = torch.zeros(int(n/2)+1, int(n/2)+1, device=self.device)
+        r_restrict[1:-1, 1:-1] = (
+            0.0625*(r[1:-2:2,1:-2:2]+r[1:-2:2,3:-1:2]+r[3:-1:2,1:-2:2]+r[3:-1:2,3:-1:2])+
+            0.125*(r[2:-2:2,1:-2:2]+r[1:-2:2,2:-2:2]+r[3:-1:2,2:-2:2]+r[2:-2:2,3:-1:2])+
+            0.25*r[2:-2:2,2:-2:2]
+        )
+        r_restrict[0,:]  = r[0, ::2]
+        r_restrict[-1,:] = r[-1, ::2]
+        r_restrict[:,0]  = r[::2, 0]
+        r_restrict[:,-1] = r[::2, -1]
+        return r_restrict
 
     def restrict_simple(self, r):
         return r[::2, ::2]
@@ -72,7 +170,7 @@ class PoissonSolver:
         r_err = 1.e33
         while r_err>self.tol and cycle<self.max_cycles:
             u, r = self.multigrid(f, u, c, c_h, c_v, self.h2)
-            r_err_new = torch.max(torch.abs(r[1:-1,1:-1]))
+            r_err_new = torch.max(torch.abs(r))
             if self.verbose:
                 print("Cycle number = {} - residual = {} \n".format(cycle, r_err_new))
             # if r_err_new>=r_err:
@@ -85,7 +183,7 @@ class PoissonSolver:
             r_err=r_err_new
         if self.verbose:
             print("Multigrid residual = {}, ncycles = {} \n".format(r_err_new, cycle))
-        return u
+        return u, r
 
     def multigrid(self, f, p, c, c_h, c_v, h2):
         """
@@ -98,8 +196,8 @@ class PoissonSolver:
         #     self.BC(p)
 
         if n==2:
-            p[1,1] = 0.25*f[1,1]*h2/(c[1,1]+1e-15)
-            r = 0
+            p[1,1]=0.25*f[1,1]*h2/(c[1,1]+1e-15)
+            r=0
 
         else:
 
@@ -113,10 +211,10 @@ class PoissonSolver:
             if self.verbose:
                 print("Multigrid - Steps: {}, Residual: {}".format(n, torch.max(torch.abs(r))))
 
-            coarse_residual = r[::2,::2]
-            c_coarse  = c[::2,::2]
-            ch_coarse = c_h[::2,::2]
-            cv_coarse = c_v[::2,::2]
+            coarse_residual = self.restrict_simple(r)
+            c_coarse  = self.restrict_simple(c)
+            ch_coarse = self.restrict_simple(c_h)
+            cv_coarse = self.restrict_simple(c_v)
 
             # computes the coarse error via relaxation
             err_coarse, _ = self.multigrid(
@@ -166,7 +264,7 @@ def test_solvers():
     from matplotlib import pyplot
     import time
 
-    X, Y, u_exact, f, c, c_h, c_v = poisson_solvers.solutions2d.variable_coeff_c_hat(N,device=device)
+    X, Y, u_exact, f, c, c_h, c_v = poisson_solvers.solutions2d.lilypad(N,device=device)
 
     h = X[1,0]-X[0,0]
     print("Number of elements:{}, h={}".format(N, h))
@@ -194,42 +292,28 @@ def test_solvers():
     u0      = u0.to(device)
     u_exact = u_exact.to(device)
 
-
-    # ==== COMPUTE THE SOLUTION ======
-
-    # start = time.time()
-
-    # u_cg = solver.CG(f, u0, c, c_h, c_v , h**2, maxit=100).cpu()
-    # print("CG method took {}s".format(time.time()-start))
-
-    # start = time.time()
-    # u_cg_jac = solver.CG_jacobi_cond(f, u0, c, c_h, c_v , h**2, maxit=15000)[0].cpu()
-    # print("CG-PREC method took {}s".format(time.time()-start))
-
     start = time.time()
-    u_multigrid = solver.solve_multigrid(f, u0, c, c_h, c_v).cpu()
+    u, r = solver.solve_multigrid(f, u0, c, c_h, c_v)
+    # u, r = solver.CG_jacobi_cond(f, u0, c, c_h, c_v, h**2, maxit=10000)
     print("Multigrid method took {}s".format(time.time()-start))
 
 
-    fig, (ax_1, ax_2, ax_3, ax_4) = pyplot.subplots(1, 4, figsize=(20,5))
+    fig, (ax_1, ax_2, ax_3) = pyplot.subplots(1, 3, figsize=(20,5))
 
-    # CS1=ax_1.imshow(u_cg.T,origin = "lower")
-    # ax_1.set_title("CG")
-    # fig.colorbar(CS1)
+    CS1=ax_1.imshow(u.T,origin = "lower")
+    ax_1.set_title("pressure")
+    fig.colorbar(CS1)
 
-    # CS2=ax_2.imshow(u_cg_jac.T,origin = "lower")
-    # ax_2.set_title("CG Jac")
-    # fig.colorbar(CS2)
 
-    CS3=ax_3.imshow(u_multigrid.T,origin = "lower")
-    ax_3.set_title("Multigrid")
-    fig.colorbar(CS3)
+    CS2=ax_2.imshow(r.T,origin = "lower")
+    ax_2.set_title("residual")
+    fig.colorbar(CS2)
 
 
     if u_exact is not None:
-        CS4=ax_4.imshow(u_exact.cpu().T,origin = "lower")
-        ax_4.set_title("Exact")
-        fig.colorbar(CS4)
+        CS3=ax_3.imshow(u_exact.cpu().T,origin = "lower")
+        ax_3.set_title("Exact")
+        fig.colorbar(CS3)
 
     pyplot.show()
 

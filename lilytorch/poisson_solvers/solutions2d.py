@@ -80,12 +80,12 @@ def exp_f(N):
 
 
 
-def pyro(N):
+def pyro(N,device=torch.device("cuda")):
 
-    x=torch.linspace(0,1,N)
-    y=torch.linspace(0,1,N)
+    x=torch.linspace(0,1,N,device=device)
+    y=torch.linspace(0,1,N,device=device)
     [X,Y]=torch.meshgrid(x,y)
-    c=torch.ones((N,N))
+    c=torch.ones((N,N),device=device)
 
 
     f=(-2.0 * ((1.0 - 6.0 * X**2) * Y**2 * (1.0 - Y**2) +
@@ -100,14 +100,14 @@ def pyro(N):
     return X, Y, u_exact, f, c, c, c
 
 
-def lilypad(N):
-    x=torch.linspace(0,N,N+1)
-    y=torch.linspace(0,N,N+1)
+def lilypad(N,device=torch.device("cuda")):
+    x=torch.linspace(0,N,N+1,device=device)
+    y=torch.linspace(0,N,N+1,device=device)
     [X,Y]=torch.meshgrid(x,y)
 
-    u = torch.ones((N,N))
-    v = -0.5*torch.ones((N,N))
-    c = torch.ones((N,N))
+    u = torch.ones((N,N),device=device)
+    v = -0.5*torch.ones((N,N),device=device)
+    c = torch.ones((N,N),device=device)
 
     u[40:50,40:75]=0
 
@@ -128,14 +128,14 @@ def lilypad(N):
 
     return X, Y, f, f, c, c, c
 
-def lilypad2(N):
-    x=torch.linspace(0,N,N+1)
-    y=torch.linspace(0,N,N+1)
+def lilypad2(N,device=torch.device("cuda")):
+    x=torch.linspace(0,N,N+1,device=device)
+    y=torch.linspace(0,N,N+1,device=device)
     [X,Y]=torch.meshgrid(x,y)
 
-    u = torch.ones((N,N))
-    v = -0.5*torch.ones((N,N))
-    c=torch.ones((N,N))
+    u = torch.ones((N,N),device=device)
+    v = -0.5*torch.ones((N,N),device=device)
+    c=torch.ones((N,N),device=device)
 
     u[40:50,40:75]=0
     c[40:50,40:75]=0
@@ -268,7 +268,7 @@ def variable_coeff_c_hat(N,device=torch.device("cuda"),create_box=False):
 
     ks=10
     kg=1
-    sigma=100
+    sigma=30
     c=ks+(kg-ks)*(torch.tanh(sigma*d)+1)/2
 
     var=c
@@ -305,7 +305,7 @@ def variable_coeff_c_hat(N,device=torch.device("cuda"),create_box=False):
 
 
     R=0.25
-    circle=torch.sqrt((X-0.5)**2+(Y-0.5)**2)
+    circle=torch.sqrt((X)**2+(Y)**2)
     u_exact = torch.where(
         circle<R,
         (1/8-R**2*(1-1/ks)/4)-(1/(4*ks))*(circle**2),

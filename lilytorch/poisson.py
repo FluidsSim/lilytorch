@@ -280,18 +280,12 @@ def test_poisson_multiplication():
 
 
 def test_solvers():
-    use_gpu=True
+    use_gpu=False
     N=2**12+1
 
     import poisson_solvers.solutions2d
     from matplotlib import pyplot
     import time
-
-    X, Y, u_exact, f, c = poisson_solvers.solutions2d.variable_coeff(N)
-    h = X[1,0]-X[0,0]
-    print("Number of elements:{}, h={}".format(N, h))
-
-    u0=torch.zeros((N,N))
 
     if torch.cuda.is_available() and use_gpu:
         print(f"Using GPU: {torch.cuda.get_device_name(0)} is available.")
@@ -300,6 +294,12 @@ def test_solvers():
         print("Using the CPU.")
         device = torch.device("cpu")
         torch.set_num_threads(8)
+
+    X, Y, u_exact, f, c = poisson_solvers.solutions2d.variable_coeff_c_hat(N,device=device)
+    h = X[1,0]-X[0,0]
+    print("Number of elements:{}, h={}".format(N, h))
+
+    u0=torch.zeros((N,N))
 
     solver = PoissonSolver(
         device,

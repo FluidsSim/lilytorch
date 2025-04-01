@@ -3,7 +3,10 @@ import os
 import torch
 import numpy as np
 import open3d as o3d
-from farms_core.io.sdf import ModelSDF
+try: 
+    from farms_core.io.sdf import ModelSDF
+except:
+    print("farms_core not installed")
 from pytorch_interp import RegularGridInterpolator
 import skfmm
 import math # important to keep this for evaluating math operations for sdfs even if it appears as not used
