@@ -6,7 +6,7 @@ class PoissonSolver:
     Solver class for the Poisson equation with variable coefficients
     """
 
-    def __init__(self, device, h, n, tol=1e-2, max_cycles=2, nsmoothing=5, verbose=True):
+    def __init__(self, device, h, tol=1e-2, max_cycles=2, nsmoothing=5, verbose=True):
         """
         """
         self.h2         = h*h
@@ -92,7 +92,7 @@ class PoissonSolver:
         J[-1,:]+=1
         J[:,0]+=1
         J[:,-1]+=1
-        
+
         # J[1:-1,1:-1]+=(ch[1:,1:-1]+ch[:-1,1:-1]+cv[1:-1,1:]+cv[1:-1,:-1])
         # J[0,:]+=1+ch[0,:]
         # J[-1,:]+=1+ch[-1,:]
@@ -104,25 +104,25 @@ class PoissonSolver:
         def LU(p):
             res=torch.zeros_like(f)
 
-            res[1:-1,1:-1]+=ch[1:,1:-1]*p[2:,1:-1]
-            res[1:-1,1:-1]+=ch[:-1,1:-1]*p[:-2,1:-1]
-            res[1:-1,1:-1]+=cv[1:-1,1:]*p[1:-1,2:]
-            res[1:-1,1:-1]+=cv[1:-1,:-1]*p[1:-1,:-2]
+            # res[1:-1,1:-1]+=ch[1:,1:-1]*p[2:,1:-1]
+            # res[1:-1,1:-1]+=ch[:-1,1:-1]*p[:-2,1:-1]
+            # res[1:-1,1:-1]+=cv[1:-1,1:]*p[1:-1,2:]
+            # res[1:-1,1:-1]+=cv[1:-1,:-1]*p[1:-1,:-2]
 
-            # res[:-1,:]+=ch*p[1:,:]
-            # res[1:,:]+=ch*p[:-1,:]
-            # res[:,:-1]+=cv*p[:,1:]
-            # res[:,1:]+=cv*p[:,:-1]
+            res[:-1,:]+=ch*p[1:,:]
+            res[1:,:]+=ch*p[:-1,:]
+            res[:,:-1]+=cv*p[:,1:]
+            res[:,1:]+=cv*p[:,:-1]
 
-            # res[0,:]+=p[1,:]
-            # res[-1,:]+=p[-2,:]
-            # res[:,0]+=p[:,1]
-            # res[:,-1]+=p[:,-2]
+            res[0,:]+=p[1,:]
+            res[-1,:]+=p[-2,:]
+            res[:,0]+=p[:,1]
+            res[:,-1]+=p[:,-2]
 
-            res[0,:]+=J[0,:]*p[1,:]
-            res[-1,:]+=J[-1,:]*p[-2,:]
-            res[:,0]+=J[:,0]*p[:,1]
-            res[:,-1]+=J[:,-1]*p[:,-2]
+            # res[0,:]+=J[0,:]*p[1,:]
+            # res[-1,:]+=J[-1,:]*p[-2,:]
+            # res[:,0]+=J[:,0]*p[:,1]
+            # res[:,-1]+=J[:,-1]*p[:,-2]
 
             # self.BC(res)
 
@@ -137,7 +137,7 @@ class PoissonSolver:
         Au=(LU(p)-J*p)/h2
         r=torch.where(Jinv==0,0,(f-Au))
 
-        # p=p-p.mean()
+        p=p-p.mean()
 
         return p, r
 
@@ -275,7 +275,6 @@ def test_solvers():
     solver = PoissonSolver(
         device,
         h,
-        N,
         verbose=True,
         max_cycles=10,
         nsmoothing=100,

@@ -1,6 +1,6 @@
 
 from lilytorch.adv_diff import AdvDiffSolver
-from lilytorch.testing_nonapprox_poisson import PoissonSolver
+from lilytorch.poisson_2nd_order import PoissonSolver
 from lilytorch.body import body_from_yaml
 from lilytorch import plotting
 from lilytorch.util.yaml_operations import yaml2pyobject, pyobject2yaml
@@ -314,7 +314,7 @@ class FluidSolver:
         # ====== solve the pressure poisson equation and project ======
         coeff = self.dt/self.rho*torch.ones_like(u)
         # p = torch.zeros_like(u)
-        p_ext = self.poisson_solver.solve_multigrid( # f, u, c
+        p_ext, _ = self.poisson_solver.solve_multigrid( # f, u, c
             self.divergence(u_ext,v_ext),
             p,
             coeff,
@@ -443,7 +443,7 @@ class FluidSolver:
         coeff = self.dt*self.mu0_all/self.rho
         rhs = (self.divergence(uprime,vprime)-self.m_m0_all*self.divergence(self.body_u,self.body_v))
         p = torch.zeros_like(u)
-        p = self.poisson_solver.solve_multigrid( # f, u, c
+        p, _ = self.poisson_solver.solve_multigrid( # f, u, c
             rhs,
             p,
             coeff,
@@ -531,8 +531,8 @@ class FluidSolver:
 
 
         if self.compute_forces:
-            # (u_ext, v_ext, p_ext) = (u,v,p)
-            (u_ext, v_ext, p_ext) = self.solver_free(u,v,p)
+            (u_ext, v_ext, p_ext) = (u,v,p)
+            # (u_ext, v_ext, p_ext) = self.solver_free(u,v,p)
 
             # ======= compute stress tensor ======
             dudx, dudy = torch.gradient(u_ext, spacing=[self.dx, self.dy])

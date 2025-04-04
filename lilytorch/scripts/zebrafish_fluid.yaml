@@ -34,26 +34,26 @@ solver :
   convection_method : "implicit"
   poisson_tol       : 1.0e-5
   poisson_max_cycles: 1
-  poisson_nsmoothing: 10
+  poisson_nsmoothing: 5
   poisson_verbose   : False
 
 
 boundary_conditions:
   BC_type_u:
-  - "N"
-  - "N"
-  - "N"
-  - "N"
+  - "D"
+  - "D"
+  - "D"
+  - "D"
   BC_values_u:
   - 0
   - 0
   - 0
   - 0
   BC_type_v:
-  - "N"
-  - "N"
-  - "N"
-  - "N"
+  - "D"
+  - "D"
+  - "D"
+  - "D"
   BC_values_v:
   - 0
   - 0
