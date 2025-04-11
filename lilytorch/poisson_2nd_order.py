@@ -24,38 +24,39 @@ class PoissonSolver:
         q[:, 0]    = q[:, 1]
         q[:, -1]   = q[:, -2]
 
-    def CG_jacobi_cond(self, f, u, c, c_h, c_v, h2, maxit=100):
+    def CG_jacobi_cond(self, f, u, c, h2, maxit=100):
 
         ch=(c[1:,:]+c[:-1,:])/2 # N x (N+1)
         cv=(c[:,1:]+c[:,:-1])/2 # (N+1) x N
 
-        J=torch.zeros_like(f)
-        J[1:-1,1:-1]+=(ch[1:,1:-1]+ch[:-1,1:-1]+cv[1:-1,1:]+cv[1:-1,:-1])
-        J[0,:]+=1+ch[0,:]
-        J[-1,:]+=1+ch[-1,:]
-        J[:,0]+=1+cv[:,0]
-        J[:,-1]+=1+cv[:,-1]
+        J=torch.zeros_like(f) # J_{i,j}=c_{i-0.5,j}+c_{i+0.5,j}+c_{i,j-0.5}+c_{i,j+0.5}
+        J[:-1,:]+=ch
+        J[1:,:]+=ch
+        J[:,:-1]+=cv
+        J[:,1:]+=cv
+        J[0,:]+=1
+        J[-1,:]+=1
+        J[:,0]+=1
+        J[:,-1]+=1
         Jinv=torch.where(J<self.jcap_tol,0,1/J)
 
         def LU(p):
             res=torch.zeros_like(f)
-
             res[:-1,:]+=ch*p[1:,:]
             res[1:,:]+=ch*p[:-1,:]
             res[:,:-1]+=cv*p[:,1:]
             res[:,1:]+=cv*p[:,:-1]
-
-            res[0,:]=J[0,:]*p[1,:]
-            res[-1,:]=J[-1,:]*p[-2,:]
-            res[:,0]=J[:,0]*p[:,1]
-            res[:,-1]=J[:,-1]*p[:,-2]
+            res[0,:]+=p[1,:]
+            res[-1,:]+=p[-2,:]
+            res[:,0]+=p[:,1]
+            res[:,-1]+=p[:,-2]
             return res
 
         def Au(p):
             return (LU(p)-J*p)/h2
 
         Jinv=Jinv/h2
-        r=f-Au(u)
+        r=torch.where(Jinv==0,0,(f-Au(u)))
         z=r*Jinv
         d=z
         old_norm=torch.tensordot(r,z)
@@ -137,7 +138,7 @@ class PoissonSolver:
         Au=(LU(p)-J*p)/h2
         r=torch.where(Jinv==0,0,(f-Au))
 
-        p=p-p.mean()
+        p=(p-p.mean())
 
         return p, r
 
@@ -191,12 +192,11 @@ class PoissonSolver:
         """
         n=f.shape[0]-1
 
-        # if n==2:
-        #     p, r = self.CG_jacobi_cond(f, p, c, c_h, c_v, h2, maxit=100)
-        #     self.BC(p)
+        # if n==128:
+        #     p, r = self.CG_jacobi_cond(f, p, c, h2, maxit=100)
 
         if n==2:
-            p[1,1]=0.25*f[1,1]*h2/(c[1,1]+1e-15)
+            p[1,1]=f[1,1]*h2/(c[1,1]+1e-15)
             r=0
 
         else:
@@ -211,8 +211,8 @@ class PoissonSolver:
             if self.verbose:
                 print("Multigrid - Steps: {}, Residual: {}".format(n, torch.max(torch.abs(r))))
 
-            coarse_residual = self.restrict_simple(r)
-            c_coarse  = self.restrict_simple(c)
+            coarse_residual = self.restrict(r,n)
+            c_coarse  = self.restrict(c,n)
             ch_coarse = self.restrict_simple(c_h)
             cv_coarse = self.restrict_simple(c_v)
 

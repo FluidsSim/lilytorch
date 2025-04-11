@@ -3,7 +3,7 @@ import os
 import torch
 import numpy as np
 import open3d as o3d
-try: 
+try:
     from farms_core.io.sdf import ModelSDF
 except:
     print("farms_core not installed")
@@ -200,24 +200,6 @@ class mesh2sdf():
         on_surface = np.abs(distance) < 1e-3
         surface_normals = self._face_normals[face_ids.numpy()[on_surface]]
         gradient[on_surface] = surface_normals
-
-        # from IPython import embed; embed()
-
-
-
-        # plt.figure()
-        # plt.imshow(
-        #     intersection_counts.reshape((1024,1024))
-        # )
-        # plt.contour(
-        #     distance.reshape((1024,1024)),
-        #     levels=[0]
-        # )
-        # plt.show()
-
-
-
-
 
         return distance, gradient
 
@@ -816,17 +798,16 @@ class BodyMesh(Body):
     """
     def __init__(self, device, x, y, mesh_file, update_maps, eps=0.05, compute_interp=True, nsamples=2**12, msamples=2**12, suit=0, **kwargs):
         super().__init__(device, x, y, eps=eps)
-        self.mesh_file = mesh_file
-        self.compute_interp = compute_interp
-        self.nsamples = nsamples
-        self.msamples = msamples
-        self.update_theta = update_maps[0]
-        self.update_translation = update_maps[1]
-        self.suit = suit
-        self.plotting = kwargs.pop("plotting", False)
+        self.mesh_file           = mesh_file
+        self.compute_interp      = compute_interp
+        self.nsamples            = nsamples
+        self.msamples            = msamples
+        self.update_theta        = update_maps[0]
+        self.update_translation  = update_maps[1]
+        self.suit                = suit
+        self.plotting            = kwargs.pop("plotting", False)
         self.apply_closing_morph = kwargs.pop("apply_closing_morph", True)
-
-        self.m2s = mesh2sdf(self.mesh_file)
+        self.m2s                 = mesh2sdf(self.mesh_file)
         self.initialize_sdfs()
         del self.m2s
         self.bodies = [self]
@@ -836,6 +817,7 @@ class BodyMesh(Body):
         """
         Initialize the sdf interpolation function
         """
+        self.bb = self.m2s.bounding_box()
         if self.compute_interp:
             # bb = self.m2s.bounding_box()
             # # bb = self.m2s.bounding_box(self.suit)
@@ -871,14 +853,10 @@ class BodyMesh(Body):
             # binary_2d[idownsampled[0]:(idownsampled[-1]+1),jdownsampled[0]:(jdownsampled[-1]+1)][sdf_val.reshape(X.shape)<0]=-1
 
 
+            cx_bb = (self.bb[0,1]+self.bb[0,0])/2
+            cy_bb = (self.bb[1,1]+self.bb[1,0])/2
 
-
-
-
-            bb = self.m2s.bounding_box()
-            cx_bb = (bb[0,1]+bb[0,0])/2
-            cy_bb = (bb[1,1]+bb[1,0])/2
-            diag = np.sqrt((bb[0,1]-bb[0,0])**2+(bb[1,1]-bb[1,0])**2)
+            diag = np.sqrt((self.bb[0,1]-self.bb[0,0])**2+(self.bb[1,1]-self.bb[1,0])**2)
 
             xnp = np.linspace(cx_bb-2*diag,cx_bb+2*diag,self.nsamples)
             ynp = np.linspace(cy_bb-2*diag,cy_bb+2*diag,self.msamples)
@@ -917,9 +895,6 @@ class BodyMesh(Body):
                 im=binary_2d
 
             binary_2d=np.where(im==0,1,-1)
-
-
-            # from IPython import embed; embed()
 
             # (2) use skfmm to determine sdf on the full domain
             print("Computing the sdf for {}, with space steps ({},{})".format(self.mesh_file,xnp[1]-xnp[0],ynp[1]-ynp[0]))

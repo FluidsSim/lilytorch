@@ -37,11 +37,13 @@ class ZebrafishFluidController(AnimatNetwork):
     def __init__(self, animat_data, controller, callback):
         self.n_iterations = np.shape(animat_data.state.array)[0]
         super().__init__(data=animat_data, n_iterations=self.n_iterations)
-        self.offsets      = np.zeros(controller.n_joints) # zero offsets
-        self.nlinks = len(animat_data.sensors.links.names)
-        self.animat_data  = animat_data
-        self.controller   = controller
-        self.callback = callback
+        self.offsets                   = np.zeros(controller.n_joints) # zero offsets
+        self.nlinks                    = len(animat_data.sensors.links.names)
+        self.animat_data               = animat_data
+        self.controller                = controller
+        self.controller.exit_iteration = self.n_iterations
+        self.callback                  = callback
+        self.continue_sim              = True
 
         pars = yaml2pyobject("../scripts/zebrafish_fluid.yaml")
 
@@ -55,6 +57,10 @@ class ZebrafishFluidController(AnimatNetwork):
         # enforce fluid timestep
         animat_data.timestep = self.fluid_solver.dt
         controller.timestep = self.fluid_solver.dt
+
+        _3d_2d_scaling=3
+        # scale forces by the z-bounding box size
+        self.callback.force_scaling = np.array([np.diff(body.bb[2])[0]/_3d_2d_scaling for body in self.fluid_solver.composite_body.bodies])
 
     def initialize(self):
         r = torch.tensor([[-1.0,0.0],[0.0,-1.0]]).to(self.device)
@@ -78,7 +84,6 @@ class ZebrafishFluidController(AnimatNetwork):
             body.old_points = pos_trans
 
         return sdf_properties
-
 
     def update(self,t,iteration,dt=1):
         # iteration = int(t/dt)
@@ -128,6 +133,7 @@ class ZebrafishFluidController(AnimatNetwork):
 
             # body.body_u= velocity[0].reshape(body.nx, body.ny)
             # body.body_v= velocity[1].reshape(body.nx, body.ny)
+
             body.old_points = pos_trans
 
             self.fluid_solver.composite_body.com_pos[i]=pos_global[i]
@@ -161,18 +167,19 @@ class ZebrafishFluidController(AnimatNetwork):
             torch.from_numpy(translations)
         )
 
-
     def step(self, iteration, time, timestep):
         """Control step"""
+
         if iteration>=self.n_iterations-1:
             return
+
+        if not self.continue_sim: # stop sim is the fluid solver return an exit condition
+            self.controller.exit_iteration = iteration
+            return
+
         self.pos = np.array(self.data.sensors.joints.positions(iteration)[4:-1])
         self.urdf_positions = np.array(self.data.sensors.links.urdf_positions()[iteration])
         self.urdf_orientations = np.array(self.data.sensors.links.urdf_orientations()[iteration])
-
-        # amplitudes=np.zeros(30)
-        # amplitudes[-1]=5
-        # amplitudes[-2]=5
 
         # === stepping the controller ===
         self.data.state.array[iteration] = np.concatenate([
@@ -184,7 +191,8 @@ class ZebrafishFluidController(AnimatNetwork):
         (
         self.fluid_solver.u0,
         self.fluid_solver.v0,
-        self.fluid_solver.p0
+        self.fluid_solver.p0,
+        self.continue_sim,
         ) = self.fluid_solver.step_(
             self.fluid_solver.u0,
             self.fluid_solver.v0,
@@ -193,22 +201,11 @@ class ZebrafishFluidController(AnimatNetwork):
             time
         )
 
-        # from IPython import embed; embed()
+        self.callback.friction_force_lin_x = (self.fluid_solver.friction_force_lin_x).cpu().numpy()
+        self.callback.friction_force_lin_y = (self.fluid_solver.friction_force_lin_y).cpu().numpy()
 
-        self.callback.friction_force_lin_x = -(self.fluid_solver.friction_force_lin_x).cpu().numpy()
-        self.callback.friction_force_lin_y = -(self.fluid_solver.friction_force_lin_y).cpu().numpy()
-
-        self.callback.pressure_force_x = -(self.fluid_solver.pressure_force_x).cpu().numpy()
-        self.callback.pressure_force_y = -(self.fluid_solver.pressure_force_y).cpu().numpy()
-
-        # print(self.fluid_solver.force_y)
-        # self.animat_data.senso
-
-        # self.xfrc_indices = np.array([
-        #     self.xfrc.names.index(link.name)
-        #     for link in links
-        # ], dtype=np.uintc)
-
+        self.callback.pressure_force_x = (self.fluid_solver.pressure_force_x).cpu().numpy()
+        self.callback.pressure_force_y = (self.fluid_solver.pressure_force_y).cpu().numpy()
 
 
 
@@ -294,10 +291,6 @@ class ZebrafishFluidSegmentController(AnimatNetwork):
         self.urdf_positions = np.array(self.data.sensors.links.urdf_positions()[iteration])
         self.urdf_orientations = np.array(self.data.sensors.links.urdf_orientations()[iteration])
 
-        # amplitudes=np.zeros(30)
-        # amplitudes[-1]=5
-        # amplitudes[-2]=5
-
         # === stepping the controller ===
         self.data.state.array[iteration] = np.concatenate([
             self.controller.step(iteration, time, timestep, pos=self.pos, urdf_positions=self.urdf_positions),
@@ -316,20 +309,6 @@ class ZebrafishFluidSegmentController(AnimatNetwork):
             iteration,
             time
         )
-
-        # from IPython import embed; embed()
-
-        # self.callback.force_x = -(self.fluid_solver.force_x).cpu().numpy()
-        # self.callback.force_y = -(self.fluid_solver.force_y).cpu().numpy()
-
-        # print(self.fluid_solver.force_y)
-        # self.animat_data.senso
-
-        # self.xfrc_indices = np.array([
-        #     self.xfrc.names.index(link.name)
-        #     for link in links
-        # ], dtype=np.uintc)
-
 
 
 

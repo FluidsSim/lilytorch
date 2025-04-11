@@ -8,6 +8,32 @@ import numpy as np
 from scipy.signal import butter, filtfilt, find_peaks, fftconvolve
 import sys
 
+
+POINTS_POS = np.array(
+    [
+        0.000,
+        0.003, 0.004, 0.005,
+        0.006, 0.007, 0.008,
+        0.009, 0.010, 0.011,
+        0.012, 0.013, 0.014,
+        0.015, 0.016, 0.017,
+        0.018,
+    ]
+)
+
+BODY_LENGTH   = POINTS_POS[-1] - POINTS_POS[0]
+JOINTS_POS    = POINTS_POS[1:-1]
+LINKS_COM_POS = ( POINTS_POS[1:] + POINTS_POS[:-1] ) / 2
+
+LINKS_MASSES = np.array(
+    [
+        3.27e-06, 4.05e-06, 4.85e-06, 5.15e-06,
+        5.49e-06, 5.47e-06, 5.15e-06, 4.24e-06,
+        3.40e-06, 2.65e-06, 1.73e-06, 1.17e-06,
+        8.25e-07, 9.19e-07, 9.36e-07, 8.46e-07,
+    ]
+)
+
 def travel_distance(links_data, sim_fraction=1.0):
     """Compute total travel distance, regardless of its curvature"""
     nsteps = links_data.shape[0]
@@ -342,13 +368,15 @@ def compute_controller(
     n_iterations      = network.pars.n_iterations
     sim_fraction      = 0.6
     nsteps_considered = round(n_iterations * sim_fraction)
+    exit_iteration    = network.exit_iteration
 
     # consider sim_fraction number of steps, for the difference between left and right muscle cells
-    times   = network.times[-nsteps_considered:]
+    times   = network.times[-nsteps_considered:exit_iteration]
 
     njoints_total = 15
     idxs = range(8) # 10 considered muscle pairs (no muscles for the first 5 joints)
-    signals = network.state[-nsteps_considered:,network.muscle_r[idxs]]-network.state[-nsteps_considered:,network.muscle_l[idxs]]
+
+    signals = network.state[-nsteps_considered:exit_iteration,network.muscle_r[idxs]]-network.state[-nsteps_considered:exit_iteration,network.muscle_l[idxs]]
     fraction_considered = njoints_total/len(idxs)
 
     frequency, iplss = compute_frequency_treshold_crossings(
@@ -384,11 +412,11 @@ def compute_mechanical(
     sim_fraction = 0.6
 
 
+    network.exit_iteration=3300
     # ------ COMPUTE FORWARD AND LATERAL SPEEDS ------
-    links_positions       = network.links_positions
-    link_velocities       = network.links_velocities
-    joints_active_torques = network.joints_active_torques
-
+    links_positions       = network.links_positions[:network.exit_iteration]
+    link_velocities       = network.links_velocities[:network.exit_iteration]
+    joints_active_torques = network.joints_active_torques[:network.exit_iteration]
 
     # method 1
     (fspeed, lspeed) = compute_speed_PCA(
@@ -397,8 +425,8 @@ def compute_mechanical(
         sim_fraction = sim_fraction
         )
 
-    metrics["fspeed_PCA"] = np.median(fspeed)
-    metrics["lspeed_PCA"] = np.median(lspeed)
+    metrics["fspeed_PCA"] = np.median(fspeed/BODY_LENGTH)
+    metrics["lspeed_PCA"] = np.median(lspeed/BODY_LENGTH)
 
     # method 2
     (fspeed, lspeed) = compute_speed_cycle(

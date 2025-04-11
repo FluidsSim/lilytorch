@@ -2,12 +2,10 @@
 
 import numpy as np
 from imageio import imread
-
 from farms_core.sensors.sensor_convention import sc
 from farms_mujoco.simulation.task import TaskCallback
 from farms_mujoco.swimming.drag import SwimmingHandler
-
-from farms_amphibious.model.options import AmphibiousOptions, AmphibiousArenaOptions
+from farms_amphibious.model.options import AmphibiousOptions, AmphibiousArenaOptions, AnimatOptions
 
 def water_velocity_from_maps(position, water_maps):
     """Water velocity from maps"""
@@ -38,7 +36,6 @@ def water_velocity_from_maps(position, water_maps):
         ]
     # vel[1] *= -1
     return vel
-
 
 class DragCallback(TaskCallback):
     """Swimming callback"""
@@ -132,7 +129,6 @@ class DragCallback(TaskCallback):
         physics.data.xfrc_applied[indices, :3] *= task.units.newtons
         physics.data.xfrc_applied[indices, 3:] *= task.units.torques
 
-
 class FluidCallback(TaskCallback):
     """Swimming callback"""
 
@@ -143,25 +139,21 @@ class FluidCallback(TaskCallback):
             substep=True,
     ):
         super().__init__(substep=substep)
-        self.animat_options = animat_options
-        self.arena_options = arena_options
-        self.nfrc = len(self.animat_options['control']['sensors']['xfrc'])
+        self.animat_options       = animat_options
+        self.arena_options        = arena_options
+        self.nfrc                 = len(self.animat_options['control']['sensors']['xfrc'])
         self.friction_force_lin_x = np.zeros(self.nfrc)
         self.friction_force_lin_y = np.zeros(self.nfrc)
         self.friction_force_ang_z = np.zeros(self.nfrc)
-        self.pressure_force_x = np.zeros(self.nfrc)
-        self.pressure_force_y = np.zeros(self.nfrc)
-        self.force_constant = 1
-
-    def initialize_episode(self, task, physics):
-        """Initialize episode"""
-        pass
+        self.pressure_force_x     = np.zeros(self.nfrc)
+        self.pressure_force_y     = np.zeros(self.nfrc)
+        self.force_scaling        = 0
 
     # def after_step(self, task, physics):
     def before_step(self, task, action, physics):
         """Step hydrodynamics"""
         indices = task.maps['sensors']['data2xfrc']
 
-        physics.data.xfrc_applied[indices, 0] = self.force_constant*(self.friction_force_lin_x + self.pressure_force_x)* task.units.newtons
-        physics.data.xfrc_applied[indices, 1] = self.force_constant*(self.friction_force_lin_y + self.pressure_force_y)* task.units.newtons
+        physics.data.xfrc_applied[indices, 0] = (self.friction_force_lin_x + self.pressure_force_x) * self.force_scaling * task.units.newtons
+        physics.data.xfrc_applied[indices, 1] = (self.friction_force_lin_y + self.pressure_force_y) * self.force_scaling * task.units.newtons
         physics.data.xfrc_applied[indices, 5] = self.friction_force_ang_z* task.units.newtons
