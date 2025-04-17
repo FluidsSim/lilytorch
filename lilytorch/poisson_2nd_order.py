@@ -16,13 +16,18 @@ class PoissonSolver:
         self.max_cycles = max_cycles
         self.nsmoothing = nsmoothing
         self.verbose    = verbose
-        self.jcap_tol   = 1e-12
+        self.jcap_tol   = 1e-5
 
     def BC(self, q):
         q[0, :]    = q[1, :]
         q[-1, :]   = q[-2, :]
         q[:, 0]    = q[:, 1]
         q[:, -1]   = q[:, -2]
+        # q[0, :]    = 0
+        # q[-1, :]   = 0
+        # q[:, 0]    = 0
+        # q[:, -1]   = 0
+
 
     def CG_jacobi_cond(self, f, u, c, h2, maxit=100):
 
@@ -74,6 +79,7 @@ class PoissonSolver:
             d=z+beta*d
             old_norm=new_norm
             it=it+1
+        u=u-u.mean()
         return u, r
 
     def smoothing(self, f, p, c, h2):
@@ -99,6 +105,9 @@ class PoissonSolver:
         # J[-1,:]+=1+ch[-1,:]
         # J[:,0]+=1+cv[:,0]
         # J[:,-1]+=1+cv[:,-1]
+
+        # self.BC(J)
+
 
         Jinv=torch.where(J<self.jcap_tol,0,1/J)
 
@@ -130,13 +139,19 @@ class PoissonSolver:
             return res
 
 
+        # Au=(LU(p)-J*p)/h2
+        # for _ in range(self.nsmoothing):
+        #     r=f-Au
+        #     p+=Jinv*r
+
+
         # smoothing
         for _ in range(self.nsmoothing):
             p=(LU(p)-f*h2)*Jinv
 
         # compute residual
         Au=(LU(p)-J*p)/h2
-        r=torch.where(Jinv==0,0,(f-Au))
+        r=f-Au
 
         p=(p-p.mean())
 
@@ -149,14 +164,22 @@ class PoissonSolver:
             0.125*(r[2:-2:2,1:-2:2]+r[1:-2:2,2:-2:2]+r[3:-1:2,2:-2:2]+r[2:-2:2,3:-1:2])+
             0.25*r[2:-2:2,2:-2:2]
         )
-        r_restrict[0,:]  = r[0, ::2]
-        r_restrict[-1,:] = r[-1, ::2]
-        r_restrict[:,0]  = r[::2, 0]
-        r_restrict[:,-1] = r[::2, -1]
+        # r_restrict[1:-1, 1:-1] = (
+        #     (r[2:-2:2,1:-2:2]+r[1:-2:2,2:-2:2]+r[3:-1:2,2:-2:2]+r[2:-2:2,3:-1:2])
+        # )
+
         return r_restrict
 
     def restrict_simple(self, r):
         return r[::2, ::2]
+
+    def prolong_simple(self, err_coarse, n):
+        err = torch.zeros((n+1,n+1), device=self.device)
+        err[::2, ::2]  = err_coarse
+        err[1::2,::2]  = err_coarse[:-1,:]
+        err[::2,1::2]  = err_coarse[:,:-1]
+        err[1::2,1::2] = err_coarse[:-1,:-1]
+        return err
 
     def prolong(self, err_coarse, n):
         err = torch.zeros((n+1,n+1), device=self.device)
@@ -192,12 +215,15 @@ class PoissonSolver:
         """
         n=f.shape[0]-1
 
-        # if n==128:
+        if n==2:
+            p,r=self.smoothing(f, p, c, h2)
+
+        # if n==2:
         #     p, r = self.CG_jacobi_cond(f, p, c, h2, maxit=100)
 
-        if n==2:
-            p[1,1]=f[1,1]*h2/(c[1,1]+1e-15)
-            r=0
+        # if n==2:
+        #     p[1,1]=f[1,1]*h2/(c[1,1]+1e-15)
+        #     r=0
 
         else:
 
@@ -206,13 +232,15 @@ class PoissonSolver:
                 p=p.cpu()
                 c=c.cpu()
 
-            p, r = self.smoothing(f, p, c, h2)
+            p,r=self.smoothing(f, p, c, h2)
 
             if self.verbose:
                 print("Multigrid - Steps: {}, Residual: {}".format(n, torch.max(torch.abs(r))))
 
             coarse_residual = self.restrict(r,n)
             c_coarse  = self.restrict(c,n)
+            # self.BC(coarse_residual)
+            # self.BC(c_coarse)
             ch_coarse = self.restrict_simple(c_h)
             cv_coarse = self.restrict_simple(c_v)
 
@@ -249,7 +277,7 @@ class PoissonSolver:
 
 def test_solvers():
     use_gpu=False
-    N=2**8+1
+    N=2**7+1
 
     if torch.cuda.is_available() and use_gpu:
         print(f"Using GPU: {torch.cuda.get_device_name(0)} is available.")
@@ -264,7 +292,7 @@ def test_solvers():
     from matplotlib import pyplot
     import time
 
-    X, Y, u_exact, f, c, c_h, c_v = poisson_solvers.solutions2d.lilypad(N,device=device)
+    X, Y, u_exact, f, c, c_h, c_v = poisson_solvers.solutions2d.sine_f(N,device=device)
 
     h = X[1,0]-X[0,0]
     print("Number of elements:{}, h={}".format(N, h))
@@ -276,9 +304,9 @@ def test_solvers():
         device,
         h,
         verbose=True,
-        max_cycles=10,
-        nsmoothing=100,
-        tol=1e-4
+        max_cycles=12,
+        nsmoothing=50,
+        tol=1e-14
     )
 
     # c_h = c[1:,:]
@@ -292,8 +320,14 @@ def test_solvers():
     u_exact = u_exact.to(device)
 
     start = time.time()
+
+
+    # u, r = solver.smoothing(f, u0, c, h**2)
+
     u, r = solver.solve_multigrid(f, u0, c, c_h, c_v)
-    # u, r = solver.CG_jacobi_cond(f, u0, c, c_h, c_v, h**2, maxit=10000)
+
+    # u, r = solver.CG_jacobi_cond(f, u0, c, h**2, maxit=100)
+
     print("Multigrid method took {}s".format(time.time()-start))
 
 

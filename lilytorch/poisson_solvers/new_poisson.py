@@ -60,8 +60,8 @@ class PoissonSolver:
             res[1:-1,1:-1]+=J_diag*u[1:-1,1:-1] # add diagonals
             self.Neumann_BC(res)
             return res/h2
-        return J_el_inv, LU, Au 
-    
+        return J_el_inv, LU, Au
+
     def restrict(self, r, n):
         r_restrict = torch.zeros(int(n/2)+1, int(n/2)+1, device=self.device)
         r_restrict[1:-1, 1:-1] = (
@@ -78,7 +78,7 @@ class PoissonSolver:
     def restrict_simple(self, r):
         r_restrict=r[::2, ::2]
         return r_restrict
-    
+
     def prolong(self, err_coarse, n):
         err = torch.zeros((n+1,n+1), device=self.device)
         err[::2, ::2] = err_coarse
@@ -90,13 +90,13 @@ class PoissonSolver:
         # err[1::2,::2] = 0.5*(err[:-2:2,::2]+err[2::2,::2])
         # err[:,1::2] = 0.5*(err[:,:-2:2]+err[:,2::2])
         return err
-    
+
     def solve_multigrid(self, f, u, c, h2, m1=20, tol=1e-4, max_cycles=7):
         cycle=0
         r_err = 1.e33
         while r_err>tol and cycle<max_cycles:
             u, r = self.multigrid(f, u, c, h2, m1=m1)
-            r_err_new = torch.max(torch.abs(r)) #torch.linalg.norm(r, ord=2) 
+            r_err_new = torch.max(torch.abs(r)) #torch.linalg.norm(r, ord=2)
             from matplotlib import pyplot
             pyplot.imshow(r)
             pyplot.show()
@@ -107,8 +107,8 @@ class PoissonSolver:
             #     if self.verbose:
             #         print("Multigrid method cannot get any better!")
             #     break
-            # 
-            
+            #
+
             cycle+=1
             r_err=r_err_new
 
@@ -120,24 +120,24 @@ class PoissonSolver:
         """
         n  = f.shape[0]-1
         f = f-torch.mean(f)
-        
+
         if n>2:
 
             J_el_inv, LU, Au = self.build_operators(c, h2)
-                
+
 
             def smooth(u):
-                for _ in range(m1): 
+                for _ in range(m1):
                     u = (f*h2+LU(u))*J_el_inv
                 return u
-            
+
             # Jacobi relaxation
             u=smooth(u)
 
             # compute residual
             if r is None:
                 r = (f-Au(u))
-            else: 
+            else:
                 r = r
 
             # if self.verbose:
@@ -150,13 +150,13 @@ class PoissonSolver:
             # computes the coarse error via relaxation
             err_coarse = torch.zeros_like(coarse_residual)
             err_coarse, _ = self.multigrid(
-                coarse_residual, 
-                err_coarse, 
-                c_coarse, 
-                4*h2, 
-                r=coarse_residual, 
+                coarse_residual,
+                err_coarse,
+                c_coarse,
+                4*h2,
+                r=coarse_residual,
                 m1=m1
-            ) 
+            )
 
             # prolong error
             err = self.prolong(err_coarse, n)
@@ -166,7 +166,7 @@ class PoissonSolver:
 
             # Jacobi relaxation
             u = smooth(u)
-        
+
         else:
             u[1,1] = -0.25*f[1,1]*h2/c[1,1]
 
@@ -177,7 +177,7 @@ class PoissonSolver:
         q[-1, :] = q[-2, :]
         q[:, 0]  = q[:, 1]
         q[:, -1] = q[:, -2]
-        
+
     def Dirichlet_BC(self, q):
         q[0, :]  = 0
         q[-1, :] = 0
@@ -211,10 +211,10 @@ def test_poisson_multiplication():
             verbose=True
         )
     J_el_inv, LU, Au = solver.build_operators(c, 1)
-    
+
     res = Au(u).T
     print("Max ={}, idx={}".format(torch.max(res), torch.unravel_index(res.argmax(), res.shape)))
-    
+
     from matplotlib import pyplot
     pyplot.imshow(res, origin = "lower")
     pyplot.colorbar()
@@ -228,11 +228,11 @@ def test_solvers():
     use_gpu=False
     N=2**7+1
 
-    import poisson_solvers.solutions2d
+    import solutions2d
     from matplotlib import pyplot
     import time
 
-    X, Y, u_exact, f, c = poisson_solvers.solutions2d.lilypad2(N)
+    X, Y, u_exact, f, c, c, c = solutions2d.sincos_f(N)
     h = X[1,0]-X[0,0]
     print("Number of elements:{}, h={}".format(N, h))
 
@@ -257,20 +257,20 @@ def test_solvers():
     f = f.to(device)
     u0 = u0.to(device)
 
-        
+
     # ==== COMPUTE THE SOLUTION ======
 
     start = time.time()
     u_multigrid = solver.solve_multigrid(f, u0, c, h**2, m1=4).cpu()
     print("Multigrid method took {}s".format(time.time()-start))
-    
+
 
     fig, (ax_1, ax_2, ax_3, ax_4) = pyplot.subplots(1, 4, figsize=(20,5))
-    
+
     CS3=ax_3.imshow(u_multigrid.T,origin = "lower")
     ax_3.set_title("Multigrid")
     fig.colorbar(CS3)
-    
+
     if u_exact is not None:
         CS4=ax_4.imshow(u_exact.T,origin = "lower")
         ax_4.set_title("Exact")

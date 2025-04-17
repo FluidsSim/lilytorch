@@ -78,30 +78,19 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, costum_update=None, starti
         sdf_folder = body_pars["sdf_folder"]
         (nsamples,msamples) = eval(body_pars["n_samples"])
         compute_interp = body_pars["compute_interp"]
+        plotting= body_pars["plotting"]
+        plotting_meshes = body_pars["plotting_meshes"]
         return CompositeBodyMesh(
             device, x, y,
             sdf_folder, sdf_name,
             costum_update,
-            eps=eps,
-            compute_interp = compute_interp,
-            nsamples=nsamples, msamples=msamples,
-            suit = body_pars["suit"],
-            **kwargs
-        )
-
-    elif type == "composite_mesh":
-        sdf_name = body_pars["sdf_name"]
-        sdf_folder = body_pars["sdf_folder"]
-        (nsamples,msamples) = eval(body_pars["n_samples"])
-        compute_interp = body_pars["compute_interp"]
-        return CompositeBodyMesh(
-            device, x, y,
-            sdf_folder, sdf_name,
-            costum_update,
-            eps=eps,
-            compute_interp = compute_interp,
-            nsamples=nsamples, msamples=msamples,
-            suit = body_pars["suit"],
+            eps             = eps,
+            compute_interp  = compute_interp,
+            nsamples        = nsamples,
+            msamples        = msamples,
+            plotting        = plotting,
+            plotting_meshes = plotting_meshes,
+            suit            = body_pars["suit"],
             **kwargs
         )
 
@@ -796,7 +785,7 @@ class BodyFishExperimental(Body):
 class BodyMesh(Body):
     """
     """
-    def __init__(self, device, x, y, mesh_file, update_maps, eps=0.05, compute_interp=True, nsamples=2**12, msamples=2**12, suit=0, **kwargs):
+    def __init__(self, device, x, y, mesh_file, update_maps, eps=0.05, compute_interp=True, nsamples=2**12, msamples=2**12, suit=0, plotting_meshes=False, **kwargs):
         super().__init__(device, x, y, eps=eps)
         self.mesh_file           = mesh_file
         self.compute_interp      = compute_interp
@@ -805,7 +794,7 @@ class BodyMesh(Body):
         self.update_theta        = update_maps[0]
         self.update_translation  = update_maps[1]
         self.suit                = suit
-        self.plotting            = kwargs.pop("plotting", False)
+        self.plotting            = plotting_meshes
         self.apply_closing_morph = kwargs.pop("apply_closing_morph", True)
         self.m2s                 = mesh2sdf(self.mesh_file)
         self.initialize_sdfs()
@@ -882,8 +871,7 @@ class BodyMesh(Body):
 
                 # im = cv2.erode(im, element, iterations = 1)
                 im = cv2.dilate(im, element, iterations = 1)
-                im = cv2.erode(im, element, iterations = 1)
-                im = cv2.erode(im, element, iterations = 1)
+                im = cv2.erode(im, element, iterations = 3)
 
 
                 if self.plotting:
@@ -1009,16 +997,17 @@ class BodyMesh(Body):
 
 class CompositeBodyMesh:
 
-    def __init__(self, device, x, y, sdf_folder, sdf_name, costum_update, eps=0.05, compute_interp=True, nsamples=2**12, msamples=2**12, suit=0.0, **kwargs):
+    def __init__(self, device, x, y, sdf_folder, sdf_name, costum_update, eps=0.05, compute_interp=True, nsamples=2**12, msamples=2**12, plotting=False, plotting_meshes=False, suit=0.0, **kwargs):
         """
         sdf_folder = folder of the sdf file
         sdf_name = name of the sdf file
         """
-        self.sdf_folder = sdf_folder
-        self.sdf = ModelSDF.read(sdf_folder+sdf_name)[0]
-        self.bodies = []
-        self.suit=suit
-        self.plotting = kwargs.pop("plotting", True)
+        self.sdf_folder      = sdf_folder
+        self.sdf             = ModelSDF.read(sdf_folder+sdf_name)[0]
+        self.bodies          = []
+        self.suit            = suit
+        self.plotting        = plotting
+        self.plotting_meshes = plotting_meshes
         for link_i, link in enumerate(self.sdf.links):
             mesh_name = link["visuals"][0]["geometry"]["uri"]
             mesh_gpath = sdf_folder+mesh_name
@@ -1043,6 +1032,7 @@ class CompositeBodyMesh:
                     compute_interp=compute_interp,
                     nsamples=nsamples, msamples=msamples,
                     suit=suit,
+                    plotting_meshes=plotting_meshes,
                     **kwargs
                 )
             self.bodies.append(body)

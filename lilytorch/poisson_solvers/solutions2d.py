@@ -6,13 +6,13 @@ import numpy as np
 2d functions and solutions of the poisson equation
 """
 
-def sincos_f(N):
+def sincos_f(N,device=torch.device("cpu")):
 
-    x=torch.linspace(0,1,N)
-    y=torch.linspace(-0.5,0.5,N)
+    x=torch.linspace(0,1,N,device=device)
+    y=torch.linspace(-0.5,0.5,N,device=device)
     [X,Y]=torch.meshgrid(x,y)
-    c=torch.ones((N,N))
-    f=torch.sin(np.pi*X)*torch.cos(np.pi*Y)+torch.sin(5*np.pi*X)*torch.cos(5*np.pi*Y)
+    c=torch.ones((N,N),device=device)
+    f=-(torch.sin(np.pi*X)*torch.cos(np.pi*Y)+torch.sin(5*np.pi*X)*torch.cos(5*np.pi*Y))
     f[0,:]=0
     f[-1,:]=0
     f[:,0]=0
@@ -22,13 +22,13 @@ def sincos_f(N):
     return X, Y, u_exact, f, c, c, c
 
 
-def sine_f(N):
+def sine_f(N,device=torch.device("cpu")):
 
-    x=torch.linspace(0,1,N)
-    y=torch.linspace(-0.5,0.5,N)
+    x=torch.linspace(0,1,N,device=device)
+    y=torch.linspace(-0.5,0.5,N,device=device)
     [X,Y]=torch.meshgrid(x,y)
-    c=torch.ones((N,N))
-    f=2*(np.pi**2)*torch.sin(np.pi*X)*torch.cos(np.pi*Y)
+    c=torch.ones((N,N),device=device)
+    f=-2*(np.pi**2)*torch.sin(np.pi*X)*torch.cos(np.pi*Y)
     f[0,:]=0
     f[-1,:]=0
     f[:,0]=0
@@ -38,12 +38,12 @@ def sine_f(N):
     return X, Y, u_exact, f, c, c, c
 
 
-def quadratic(N):
+def quadratic(N,device=torch.device("cpu")):
 
-    x=torch.linspace(0,1,N)
-    y=torch.linspace(0,1,N)
+    x=torch.linspace(0,1,N,device=device)
+    y=torch.linspace(0,1,N,device=device)
     [X,Y]=torch.meshgrid(x,y)
-    c=torch.ones((N,N))
+    c=torch.ones((N,N),device=device)
 
     u_exact = X*Y*(1-X)*(1-Y)
 
@@ -56,21 +56,21 @@ def quadratic(N):
     return X, Y, u_exact, f, c, c, c
 
 
-def exp_f(N):
+def exp_f(N,device=torch.device("cpu")):
     """
     Care: this is with diriclet BCs!!!
     """
 
-    x=torch.linspace(0,1,N)
-    y=torch.linspace(-1,1,N)
+    x=torch.linspace(-1,1,N,device=device)
+    y=torch.linspace(-1,1,N,device=device)
     [X,Y]=torch.meshgrid(x,y)
-    c=torch.ones((N,N))
+    c=torch.ones((N,N),device=device)
 
     xhat=0.25
     yhat=-0.5
     u_exact = torch.exp(-(X-xhat)**2-(Y-yhat)**2)
 
-    f=-4*((X-xhat)**2+(Y-yhat)**2)*u_exact+2*u_exact
+    f=-(4*((X-xhat)**2+(Y-yhat)**2)*u_exact+2*u_exact)
     f[0,:]=0
     f[-1,:]=0
     f[:,0]=0
@@ -80,7 +80,7 @@ def exp_f(N):
 
 
 
-def pyro(N,device=torch.device("cuda")):
+def pyro(N,device=torch.device("cpu")):
 
     x=torch.linspace(0,1,N,device=device)
     y=torch.linspace(0,1,N,device=device)
@@ -88,7 +88,7 @@ def pyro(N,device=torch.device("cuda")):
     c=torch.ones((N,N),device=device)
 
 
-    f=(-2.0 * ((1.0 - 6.0 * X**2) * Y**2 * (1.0 - Y**2) +
+    f=-(-2.0 * ((1.0 - 6.0 * X**2) * Y**2 * (1.0 - Y**2) +
                    (1.0 - 6.0 * Y**2) * X**2 * (1.0 - X**2)))
     f[0,:]=0
     f[-1,:]=0
@@ -99,8 +99,7 @@ def pyro(N,device=torch.device("cuda")):
 
     return X, Y, u_exact, f, c, c, c
 
-
-def lilypad(N,device=torch.device("cuda")):
+def lilypad(N,device=torch.device("cpu")):
     x=torch.linspace(0,N,N+1,device=device)
     y=torch.linspace(0,N,N+1,device=device)
     [X,Y]=torch.meshgrid(x,y)
@@ -128,37 +127,7 @@ def lilypad(N,device=torch.device("cuda")):
 
     return X, Y, f, f, c, c, c
 
-def lilypad2(N,device=torch.device("cuda")):
-    x=torch.linspace(0,N,N+1,device=device)
-    y=torch.linspace(0,N,N+1,device=device)
-    [X,Y]=torch.meshgrid(x,y)
-
-    u = torch.ones((N,N),device=device)
-    v = -0.5*torch.ones((N,N),device=device)
-    c=torch.ones((N,N),device=device)
-
-    u[40:50,40:75]=0
-    c[40:50,40:75]=0
-
-    def compute_dpdx(p, dx):
-        dpdx = torch.zeros_like(p)
-        dpdx[1:-1,:] = (p[2:,:]-p[1:-1,:])/dx
-        return dpdx
-
-    def compute_dpdy(p, dy):
-        dpdy = torch.zeros_like(p)
-        dpdy[:,1:-1] = (p[:,2:]-p[:,1:-1])/dy
-        return dpdy
-
-    def divergence(u, v, dx, dy):
-        return compute_dpdx(u, dx)+compute_dpdy(v, dy)
-
-    f=divergence(u, v, 1, 1)
-
-    return X, Y, f, f, c, c, c
-
-
-def variable_coeff(N,device=torch.device("cuda"),create_box=False):
+def variable_coeff(N,device=torch.device("cpu"),create_box=False):
 
     x=torch.linspace(-1,1,N,device=device)
     y=torch.linspace(-1,1,N,device=device)
@@ -226,8 +195,7 @@ def variable_coeff(N,device=torch.device("cuda"),create_box=False):
 
     return X, Y, f, f, c, c_h, c_v
 
-
-def variable_coeff_c_hat(N,device=torch.device("cuda"),create_box=False):
+def variable_coeff_c_hat(N,device=torch.device("cpu"),create_box=False):
 
     x=torch.linspace(-1,1,N,device=device)
     y=torch.linspace(-1,1,N,device=device)
@@ -255,7 +223,7 @@ def variable_coeff_c_hat(N,device=torch.device("cuda"),create_box=False):
     # body.initialize()
     # sdf_fun=body.sdf_interp
 
-    body = BodyAnalytical( device, x, y, lambda x, y: circle(x,y,xt=0.,yt=0.,r=0.5), (lambda t: 0,(lambda t: 0,lambda t: 0)),eps=2/N)
+    body = BodyAnalytical( device, x, y, lambda x, y: circle(x,y,xt=0.,yt=0.,r=0.5), (lambda t: 0,(lambda t: 0,lambda t: 0)),eps=1/N)
     body.initialize()
     sdf_fun =body.sdf_fun
 
@@ -264,9 +232,9 @@ def variable_coeff_c_hat(N,device=torch.device("cuda"),create_box=False):
 
 
 
-    # c=mu0
+    c=mu0
 
-    ks=10
+    ks=0
     kg=1
     sigma=30
     c=ks+(kg-ks)*(torch.tanh(sigma*d)+1)/2
@@ -289,7 +257,6 @@ def variable_coeff_c_hat(N,device=torch.device("cuda"),create_box=False):
 
 
     f=torch.ones_like(c)
-    u_exact = None
 
     xmid = (x[1:]+x[:-1])/2
     ymid = (y[1:]+y[:-1])/2
@@ -306,11 +273,13 @@ def variable_coeff_c_hat(N,device=torch.device("cuda"),create_box=False):
 
     R=0.25
     circle=torch.sqrt((X)**2+(Y)**2)
-    u_exact = torch.where(
-        circle<R,
-        (1/8-R**2*(1-1/ks)/4)-(1/(4*ks))*(circle**2),
-        1/8-circle**2/4
-    )
+    # u_exact = torch.where(
+    #     circle<R,
+    #     (1/8-R**2*(1-1/ks)/4)-(1/(4*ks))*(circle**2),
+    #     1/8-circle**2/4
+    # )
+
+    u_exact = c
 
 
     return X, Y, u_exact, f, c, c_h, c_v

@@ -281,7 +281,7 @@ def test_poisson_multiplication():
 
 def test_solvers():
     use_gpu=False
-    N=2**12+1
+    N=2**8+1
 
     import poisson_solvers.solutions2d
     from matplotlib import pyplot
@@ -295,8 +295,9 @@ def test_solvers():
         device = torch.device("cpu")
         torch.set_num_threads(8)
 
-    X, Y, u_exact, f, c = poisson_solvers.solutions2d.variable_coeff_c_hat(N,device=device)
+    X, Y, u_exact, f, c, _, _ = poisson_solvers.solutions2d.sincos_f(N,device=device)
     h = X[1,0]-X[0,0]
+
     print("Number of elements:{}, h={}".format(N, h))
 
     u0=torch.zeros((N,N))
@@ -304,8 +305,8 @@ def test_solvers():
     solver = PoissonSolver(
         device,
         h,
-        verbose=False,
-        nsmoothing=15
+        verbose=True,
+        nsmoothing=50
     )
 
     c       = c.to(device)
