@@ -47,7 +47,7 @@ def quadratic(N,device=torch.device("cpu")):
 
     u_exact = X*Y*(1-X)*(1-Y)
 
-    f=-2*X*(X-1)-2*Y*(Y-1)
+    f=2*X*(X-1)+2*Y*(Y-1)
     f[0,:]=0
     f[-1,:]=0
     f[:,0]=0
