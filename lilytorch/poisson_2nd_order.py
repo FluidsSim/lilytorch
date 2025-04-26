@@ -6,7 +6,7 @@ class PoissonSolver:
     Solver class for the Poisson equation with variable coefficients
     """
 
-    def __init__(self, device, h, tol=1e-2, max_cycles=2, nsmoothing=5, w=0.6, verbose=True):
+    def __init__(self, device, h, tol=1e-2, max_cycles=2, nsmoothing=5, w=1, verbose=True):
         """
         """
         self.h2         = h*h
@@ -17,17 +17,20 @@ class PoissonSolver:
         self.nsmoothing = nsmoothing
         self.verbose    = verbose
         self.jcap_tol   = 1e-5
-        self.w = w
+        self.w          = w
+
+    def l2_norm(self, r):
+        return torch.sqrt((r[1:-1,1:-1]**2).mean())
 
     def BC(self, q):
-        q[0, :]    = q[1, :]
-        q[-1, :]   = q[-2, :]
-        q[:, 0]    = q[:, 1]
-        q[:, -1]   = q[:, -2]
-        # q[0, :]    = 0
-        # q[-1, :]   = 0
-        # q[:, 0]    = 0
-        # q[:, -1]   = 0
+        # q[0, :]    = q[1, :]
+        # q[-1, :]   = q[-2, :]
+        # q[:, 0]    = q[:, 1]
+        # q[:, -1]   = q[:, -2]
+        q[0, :]    = 0
+        q[-1, :]   = 0
+        q[:, 0]    = 0
+        q[:, -1]   = 0
 
 
     def CG_jacobi_cond(self, f, u, c, h2, maxit=100):
@@ -92,14 +95,27 @@ class PoissonSolver:
         cv=(c[:,1:]+c[:,:-1])/2 # (N+1) x N
 
         J=torch.zeros_like(f) # J_{i,j}=c_{i-0.5,j}+c_{i+0.5,j}+c_{i,j-0.5}+c_{i,j+0.5}
-        J[:-1,:]+=ch
-        J[1:,:]+=ch
-        J[:,:-1]+=cv
-        J[:,1:]+=cv
-        J[0,:]+=1
-        J[-1,:]+=1
-        J[:,0]+=1
-        J[:,-1]+=1
+
+        J[1:-1,1:-1]+=(ch[1:,1:-1]+ch[:-1,1:-1]+cv[1:-1,1:]+cv[1:-1,:-1])
+
+        # J[0,:]=(ch[0,:]+
+
+        # f[0,:]/=2
+        # f[-1,:]/=2
+        # f[:,0]/=2
+        # f[:,-1]/=2
+
+
+        # J[:-1,:]+=ch
+        # J[1:,:]+=ch
+        # J[:,:-1]+=cv
+        # J[:,1:]+=cv
+        # J[0,:]+=1
+        # J[-1,:]+=1
+        # J[:,0]+=1
+        # J[:,-1]+=1
+
+
 
         # J[1:-1,1:-1]+=(ch[1:,1:-1]+ch[:-1,1:-1]+cv[1:-1,1:]+cv[1:-1,:-1])
         # J[0,:]+=1+ch[0,:]
@@ -110,25 +126,26 @@ class PoissonSolver:
         # self.BC(J)
 
 
+
         Jinv=torch.where(J<self.jcap_tol,0,1/J)
 
         def LU(p):
             res=torch.zeros_like(f)
 
-            # res[1:-1,1:-1]+=ch[1:,1:-1]*p[2:,1:-1]
-            # res[1:-1,1:-1]+=ch[:-1,1:-1]*p[:-2,1:-1]
-            # res[1:-1,1:-1]+=cv[1:-1,1:]*p[1:-1,2:]
-            # res[1:-1,1:-1]+=cv[1:-1,:-1]*p[1:-1,:-2]
+            res[1:-1,1:-1]+=ch[1:,1:-1]*p[2:,1:-1]
+            res[1:-1,1:-1]+=ch[:-1,1:-1]*p[:-2,1:-1]
+            res[1:-1,1:-1]+=cv[1:-1,1:]*p[1:-1,2:]
+            res[1:-1,1:-1]+=cv[1:-1,:-1]*p[1:-1,:-2]
 
-            res[:-1,:]+=ch*p[1:,:]
-            res[1:,:]+=ch*p[:-1,:]
-            res[:,:-1]+=cv*p[:,1:]
-            res[:,1:]+=cv*p[:,:-1]
+            # res[:-1,:]+=ch*p[1:,:]
+            # res[1:,:]+=ch*p[:-1,:]
+            # res[:,:-1]+=cv*p[:,1:]
+            # res[:,1:]+=cv*p[:,:-1]
 
-            res[0,:]+=p[1,:]
-            res[-1,:]+=p[-2,:]
-            res[:,0]+=p[:,1]
-            res[:,-1]+=p[:,-2]
+            # res[0,:]+=p[1,:]
+            # res[-1,:]+=p[-2,:]
+            # res[:,0]+=p[:,1]
+            # res[:,-1]+=p[:,-2]
 
             # res[0,:]+=J[0,:]*p[1,:]
             # res[-1,:]+=J[-1,:]*p[-2,:]
@@ -139,24 +156,15 @@ class PoissonSolver:
 
             return res
 
-
-        # Au=(LU(p)-J*p)/h2
-        # for _ in range(self.nsmoothing):
-        #     r=f-Au
-        #     p+=Jinv*r
-
-
         # smoothing
         for _ in range(self.nsmoothing):
-            g=(LU(p)-f*h2)*Jinv
-            p=p+self.w*(g-p)
+            Au=(LU(p)-J*p)/h2
+            r=f-Au
+            p-=r*h2*Jinv
+            # self.BC(p)
+            # p=(p-p.mean())
 
-        # compute residual
-        Au=(LU(p)-J*p)/h2
-        r=Au-f
-
-
-        p=(p-p.mean())
+        # r=f-(LU(p)-J*p)/h2
 
         return p, r
 
@@ -167,10 +175,6 @@ class PoissonSolver:
             0.125*(r[2:-2:2,1:-2:2]+r[1:-2:2,2:-2:2]+r[3:-1:2,2:-2:2]+r[2:-2:2,3:-1:2])+
             0.25*r[2:-2:2,2:-2:2]
         )
-        # r_restrict[1:-1, 1:-1] = (
-        #     (r[2:-2:2,1:-2:2]+r[1:-2:2,2:-2:2]+r[3:-1:2,2:-2:2]+r[2:-2:2,3:-1:2])
-        # )
-
         return r_restrict
 
     def restrict_simple(self, r):
@@ -182,6 +186,7 @@ class PoissonSolver:
         err[1::2,::2]  = err_coarse[:-1,:]
         err[::2,1::2]  = err_coarse[:,:-1]
         err[1::2,1::2] = err_coarse[:-1,:-1]
+        # self.BC(err)
         return err
 
     def prolong(self, err_coarse, n):
@@ -190,6 +195,7 @@ class PoissonSolver:
         err[1::2,::2]  = 0.5*(err_coarse[1:,:]+err_coarse[:-1,:])
         err[::2,1::2]  = 0.5*(err_coarse[:,1:]+err_coarse[:,:-1])
         err[1::2,1::2] = 0.25*(err_coarse[:-1,:-1]+err_coarse[1:,:-1]+err_coarse[:-1,1:]+err_coarse[1:,1:])
+        # self.BC(err)
         return err
 
     def solve_multigrid(self, f, u, c, c_h, c_v):
@@ -197,7 +203,7 @@ class PoissonSolver:
         r_err = 1.e33
         while r_err>self.tol and cycle<self.max_cycles:
             u, r = self.multigrid(f, u, c, c_h, c_v, self.h2)
-            r_err_new = torch.max(torch.abs(r))
+            r_err_new = self.l2_norm(r)
             if self.verbose:
                 print("Cycle number = {} - residual = {} \n".format(cycle, r_err_new))
             # if r_err_new>=r_err:
@@ -208,8 +214,6 @@ class PoissonSolver:
 
             cycle+=1
             r_err=r_err_new
-        if self.verbose:
-            print("Multigrid residual = {}, ncycles = {} \n".format(r_err_new, cycle))
         return u, r
 
     def multigrid(self, f, p, c, c_h, c_v, h2):
@@ -217,6 +221,8 @@ class PoissonSolver:
         2D multigrid solver, assume same grid spacing (n=m), where (n,m)=u.shape with hybrid cpu-gpu implementation
         """
         n=f.shape[0]-1
+
+        # f-=f.mean()
 
         if n==2:
             p,r=self.smoothing(f, p, c, h2)
@@ -269,9 +275,11 @@ class PoissonSolver:
             p+=err
 
             # Jacobi relaxation
-            # p,r=self.smoothing(f, p, c, h2)
+            p,r=self.smoothing(f, p, c, h2)
+
             if self.verbose:
-                print("Multigrid - Steps: {}, Residual: {}".format(n, torch.max(torch.abs(r[1:-1,1:-1]))))
+                err_l2 = self.l2_norm(r)
+                print("Multigrid - Steps: {}, Residual: {}".format(n,err_l2))
 
         return p,r
 
@@ -280,7 +288,7 @@ class PoissonSolver:
 
 def test_solvers():
     use_gpu=False
-    N=2**7+1
+    N=2**8+1
 
     if torch.cuda.is_available() and use_gpu:
         print(f"Using GPU: {torch.cuda.get_device_name(0)} is available.")
@@ -295,7 +303,7 @@ def test_solvers():
     from matplotlib import pyplot
     import time
 
-    X, Y, u_exact, f, c, c_h, c_v = poisson_solvers.solutions2d.quadratic(N,device=device)
+    X, Y, u_exact, f, c, c_h, c_v = poisson_solvers.solutions2d.variable_coeff_c_hat(N,device=device)
 
     h = X[1,0]-X[0,0]
     print("Number of elements:{}, h={}".format(N, h))
@@ -307,8 +315,8 @@ def test_solvers():
         device,
         h,
         verbose=True,
-        max_cycles=12,
-        nsmoothing=150,
+        max_cycles=30,
+        nsmoothing=6,
         tol=1e-14
     )
 

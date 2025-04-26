@@ -6,7 +6,7 @@ class PoissonSolver:
     Solver class for the Poisson equation with variable coefficients
     """
 
-    def __init__(self, device, h, tol=1e-2, max_cycles=2, nsmoothing=5, verbose=True):
+    def __init__(self, device, h, tol=1e-2, max_cycles=2, nsmoothing=5, w=1, verbose=True):
         """
         """
         self.h2         = h*h
@@ -17,16 +17,17 @@ class PoissonSolver:
         self.nsmoothing = nsmoothing
         self.verbose    = verbose
         self.jcap_tol   = 1e-5
+        self.w          = w
 
     def BC(self, q):
-        q[0, :]    = q[1, :]
-        q[-1, :]   = q[-2, :]
-        q[:, 0]    = q[:, 1]
-        q[:, -1]   = q[:, -2]
-        # q[0, :]    = 0
-        # q[-1, :]   = 0
-        # q[:, 0]    = 0
-        # q[:, -1]   = 0
+        # q[0, :]    = q[1, :]
+        # q[-1, :]   = q[-2, :]
+        # q[:, 0]    = q[:, 1]
+        # q[:, -1]   = q[:, -2]
+        q[0, :]    = 0
+        q[-1, :]   = 0
+        q[:, 0]    = 0
+        q[:, -1]   = 0
 
 
     def CG_jacobi_cond(self, f, u, c, h2, maxit=100):
@@ -95,10 +96,10 @@ class PoissonSolver:
         J[1:,:]+=ch
         J[:,:-1]+=cv
         J[:,1:]+=cv
-        J[0,:]+=1
-        J[-1,:]+=1
-        J[:,0]+=1
-        J[:,-1]+=1
+        # J[0,:]+=1
+        # J[-1,:]+=1
+        # J[:,0]+=1
+        # J[:,-1]+=1
 
         # J[1:-1,1:-1]+=(ch[1:,1:-1]+ch[:-1,1:-1]+cv[1:-1,1:]+cv[1:-1,:-1])
         # J[0,:]+=1+ch[0,:]
@@ -114,20 +115,20 @@ class PoissonSolver:
         def LU(p):
             res=torch.zeros_like(f)
 
-            # res[1:-1,1:-1]+=ch[1:,1:-1]*p[2:,1:-1]
-            # res[1:-1,1:-1]+=ch[:-1,1:-1]*p[:-2,1:-1]
-            # res[1:-1,1:-1]+=cv[1:-1,1:]*p[1:-1,2:]
-            # res[1:-1,1:-1]+=cv[1:-1,:-1]*p[1:-1,:-2]
+            res[1:-1,1:-1]+=ch[1:,1:-1]*p[2:,1:-1]
+            res[1:-1,1:-1]+=ch[:-1,1:-1]*p[:-2,1:-1]
+            res[1:-1,1:-1]+=cv[1:-1,1:]*p[1:-1,2:]
+            res[1:-1,1:-1]+=cv[1:-1,:-1]*p[1:-1,:-2]
 
-            res[:-1,:]+=ch*p[1:,:]
-            res[1:,:]+=ch*p[:-1,:]
-            res[:,:-1]+=cv*p[:,1:]
-            res[:,1:]+=cv*p[:,:-1]
+            # res[:-1,:]+=ch*p[1:,:]
+            # res[1:,:]+=ch*p[:-1,:]
+            # res[:,:-1]+=cv*p[:,1:]
+            # res[:,1:]+=cv*p[:,:-1]
 
-            res[0,:]+=p[1,:]
-            res[-1,:]+=p[-2,:]
-            res[:,0]+=p[:,1]
-            res[:,-1]+=p[:,-2]
+            # res[0,:]+=p[1,:]
+            # res[-1,:]+=p[-2,:]
+            # res[:,0]+=p[:,1]
+            # res[:,-1]+=p[:,-2]
 
             # res[0,:]+=J[0,:]*p[1,:]
             # res[-1,:]+=J[-1,:]*p[-2,:]
@@ -138,22 +139,19 @@ class PoissonSolver:
 
             return res
 
-
-        # Au=(LU(p)-J*p)/h2
-        # for _ in range(self.nsmoothing):
-        #     r=f-Au
-        #     p+=Jinv*r
-
-
         # smoothing
         for _ in range(self.nsmoothing):
+            # g=(LU(p)-f*h2)*Jinv
+            # p=p+self.w*(g-p)
             p=(LU(p)-f*h2)*Jinv
+            self.BC(p)
 
         # compute residual
         Au=(LU(p)-J*p)/h2
         r=f-Au
+        self.BC(r)
 
-        p=(p-p.mean())
+        # p=(p-p.mean())
 
         return p, r
 
@@ -237,8 +235,8 @@ class PoissonSolver:
             if self.verbose:
                 print("Multigrid - Steps: {}, Residual: {}".format(n, torch.max(torch.abs(r))))
 
-            coarse_residual = self.restrict(r,n)
-            c_coarse  = self.restrict(c,n)
+            coarse_residual = self.restrict_simple(r)
+            c_coarse  = self.restrict_simple(c)
             # self.BC(coarse_residual)
             # self.BC(c_coarse)
             ch_coarse = self.restrict_simple(c_h)
@@ -266,7 +264,7 @@ class PoissonSolver:
             p+=err
 
             # Jacobi relaxation
-            p,r=self.smoothing(f, p, c, h2)
+            # p,r=self.smoothing(f, p, c, h2)
             if self.verbose:
                 print("Multigrid - Steps: {}, Residual: {}".format(n, torch.max(torch.abs(r[1:-1,1:-1]))))
 
@@ -292,7 +290,7 @@ def test_solvers():
     from matplotlib import pyplot
     import time
 
-    X, Y, u_exact, f, c, c_h, c_v = poisson_solvers.solutions2d.sine_f(N,device=device)
+    X, Y, u_exact, f, c, c_h, c_v = poisson_solvers.solutions2d.sincos_f(N,device=device)
 
     h = X[1,0]-X[0,0]
     print("Number of elements:{}, h={}".format(N, h))
@@ -305,7 +303,7 @@ def test_solvers():
         h,
         verbose=True,
         max_cycles=12,
-        nsmoothing=50,
+        nsmoothing=15,
         tol=1e-14
     )
 

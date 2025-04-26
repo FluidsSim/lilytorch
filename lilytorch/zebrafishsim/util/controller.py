@@ -328,7 +328,6 @@ class ZebrafishFluidSegmentController(AnimatNetwork):
         return
 
     def step(self, iteration, time, timestep):
-        print(iteration)
         """Control step"""
         if iteration>=self.n_iterations-1:
             return

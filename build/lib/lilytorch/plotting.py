@@ -566,7 +566,7 @@ def plot_composite_countour(X,Y,properties,iteration,save_path,name):
     plt.figure(figsize=(20,10))
     for prop in properties:
         d = prop[0].cpu()
-        plt.contour(X,Y,d, colors='k', levels=[0])
+        plt.contour(X,Y,d, colors='k', levels=[0],linewidths=0.3)
     save_fig_to_dedicated_folder(save_path, name, iteration)
 
 def plot2d_imshow_only(u,extent,iteration,save_path,name,vmin,vmax):
@@ -595,7 +595,7 @@ def plot2d_imshow_composite(X,Y,u,properties,extent,iteration,save_path,name,vmi
     plt.figure(figsize=(20,10))
     for prop in properties:
         d = prop[0].cpu()
-        plt.contour(X,Y,d, colors='k', levels=[0])
+        plt.contour(X,Y,d, colors='k', levels=[0],linewidths=0.3)
     plt.imshow(
         u.T,
         vmin   = vmin,
@@ -618,7 +618,7 @@ def plot2d_imshow_composite_quiver(X,Y,u,properties,normal_x,normal_y,extent,ite
     plt.figure(figsize=(20,10))
     for prop in properties:
         d = prop[0].cpu()
-        plt.contour(X,Y,d, colors='k', levels=[0])
+        plt.contour(X,Y,d, colors='k', levels=[0],linewidths=0.3)
     plt.imshow(
         u.T,
         vmin   = vmin,
@@ -645,7 +645,7 @@ def plot2d_imshow(X,Y,u,d,extent,iteration,save_path,name,vmin,vmax):
         vmin = -limit
         vmax = limit
     plt.figure(figsize=(20,10))
-    ctr = plt.contour(X,Y,d, colors='k', levels=[0])
+    ctr = plt.contour(X,Y,d, colors='k', levels=[0],linewidths=0.3)
     plt.imshow(
         np.where(d<0,0,u).T,
         vmin   = vmin,
@@ -670,7 +670,7 @@ def plot2d_imshow_quiver(X,Y,u,d,normal_x,normal_y,extent,iteration,save_path,na
     if scale:
         scale=1/scale
     plt.figure(figsize=(20,10))
-    ctr = plt.contour(X,Y,d, colors='k', levels=[0])
+    ctr = plt.contour(X,Y,d, colors='k', levels=[0],linewidths=0.3)
     plt.imshow(
         u.T,
         vmin   = vmin,
@@ -693,7 +693,7 @@ def plot2d_imshow_quiver(X,Y,u,d,normal_x,normal_y,extent,iteration,save_path,na
 def plot2d_imshow_simple(d,extent,iteration,save_path,name,vmin= -0.001,vmax= 0.001):
     plt.figure(figsize=(20,10))
     if vmin is None:
-        limit = max(abs(u.min()), abs(u.max()))/2
+        limit = max(abs(d.min()), abs(d.max()))/2
         vmin = -limit
         vmax = limit
     plt.imshow(

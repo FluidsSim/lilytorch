@@ -21,7 +21,6 @@ def sincos_f(N,device=torch.device("cpu")):
     u_exact = (1/(2*np.pi*np.pi))*torch.sin(np.pi*X)*torch.cos(np.pi*Y)+(1/(50*np.pi*np.pi))*torch.sin(5*np.pi*X)*torch.cos(5*np.pi*Y)
     return X, Y, u_exact, f, c, c, c
 
-
 def sine_f(N,device=torch.device("cpu")):
 
     x=torch.linspace(0,1,N,device=device)
@@ -36,7 +35,6 @@ def sine_f(N,device=torch.device("cpu")):
 
     u_exact = torch.sin(np.pi*X)*torch.cos(np.pi*Y)
     return X, Y, u_exact, f, c, c, c
-
 
 def quadratic(N,device=torch.device("cpu")):
 
@@ -54,7 +52,6 @@ def quadratic(N,device=torch.device("cpu")):
     f[:,-1]=0
 
     return X, Y, u_exact, f, c, c, c
-
 
 def exp_f(N,device=torch.device("cpu")):
     """
@@ -78,8 +75,6 @@ def exp_f(N,device=torch.device("cpu")):
 
     return X, Y, u_exact, f, c, c, c
 
-
-
 def pyro(N,device=torch.device("cpu")):
 
     x=torch.linspace(0,1,N,device=device)
@@ -88,7 +83,7 @@ def pyro(N,device=torch.device("cpu")):
     c=torch.ones((N,N),device=device)
 
 
-    f=-(-2.0 * ((1.0 - 6.0 * X**2) * Y**2 * (1.0 - Y**2) +
+    f=(-2.0 * ((1.0 - 6.0 * X**2) * Y**2 * (1.0 - Y**2) +
                    (1.0 - 6.0 * Y**2) * X**2 * (1.0 - X**2)))
     f[0,:]=0
     f[-1,:]=0
@@ -223,7 +218,7 @@ def variable_coeff_c_hat(N,device=torch.device("cpu"),create_box=False):
     # body.initialize()
     # sdf_fun=body.sdf_interp
 
-    body = BodyAnalytical( device, x, y, lambda x, y: circle(x,y,xt=0.,yt=0.,r=0.5), (lambda t: 0,(lambda t: 0,lambda t: 0)),eps=1/N)
+    body = BodyAnalytical( device, x, y, lambda x, y: circle(x,y,xt=0.1,yt=0.,r=0.5), (lambda t: 0,(lambda t: 0,lambda t: 0)),eps=1/N)
     body.initialize()
     sdf_fun =body.sdf_fun
 
@@ -234,9 +229,9 @@ def variable_coeff_c_hat(N,device=torch.device("cpu"),create_box=False):
 
     c=mu0
 
-    ks=0
-    kg=1
-    sigma=30
+    ks=1
+    kg=2
+    sigma=100
     c=ks+(kg-ks)*(torch.tanh(sigma*d)+1)/2
 
     var=c
@@ -256,7 +251,7 @@ def variable_coeff_c_hat(N,device=torch.device("cpu"),create_box=False):
 
 
 
-    f=torch.ones_like(c)
+    f=-torch.ones_like(c)
 
     xmid = (x[1:]+x[:-1])/2
     ymid = (y[1:]+y[:-1])/2
@@ -283,3 +278,36 @@ def variable_coeff_c_hat(N,device=torch.device("cpu"),create_box=False):
 
 
     return X, Y, u_exact, f, c, c_h, c_v
+
+def multigrid_course(N,device=torch.device("cpu")):
+    """
+    Multigrid course
+    """
+
+    from poisson_2nd_order_2 import PoissonSolver
+    dtype=torch.float64
+    h=1/(N-1) # because xh=xl=yh=yl=1 (grid is [0,1]x[0,1])
+    h2=h*h
+    x=torch.linspace(0,1,N,device=device,dtype=dtype)
+    y=torch.linspace(0,1,N,device=device,dtype=dtype)
+
+
+    [X,Y]=torch.meshgrid(x,y, indexing="ij")
+
+    u_exact=torch.zeros((N+2,N+2),device=device,dtype=dtype)
+    u_exact[1:-1,1:-1]=torch.exp(torch.sin(2.0*torch.pi*X)*torch.sin(2.0*torch.pi*Y))-1
+
+    c=torch.ones((N,N),device=device,dtype=dtype)
+    solver = PoissonSolver(
+        dtype,
+        device,
+        h,
+        verbose=True,
+        max_cycles=100,
+        nsmoothing=3,
+        tol=1e-14,
+        w=0.6
+    )
+    solver.BC(u_exact)
+    f, _=solver.FD_operator(u_exact, c, h2)
+    return X, Y, u_exact, f, c, c, c

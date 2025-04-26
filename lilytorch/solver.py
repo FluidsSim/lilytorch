@@ -1,6 +1,7 @@
 
 from lilytorch.adv_diff import AdvDiffSolver
-from lilytorch.poisson_2nd_order import PoissonSolver as PoissonSolver2nd
+from lilytorch.poisson_2nd_order_2 import PoissonSolver
+# from lilytorch.poisson_2nd_order import PoissonSolver as PoissonSolver2nd
 # from lilytorch.testing_nonapprox_poisson import PoissonSolver as PoissonSolver
 from lilytorch.body import body_from_yaml
 from lilytorch import plotting
@@ -37,7 +38,7 @@ class FluidSolver:
             self.device = torch.device("cpu")
             torch.set_num_threads(solver["nthreads"])
 
-        self.N    = solver["N"]+1
+        self.N    = solver["N"]
         self.xmin = solver["xmin"]
         self.xmax = solver["xmax"]
         self.ymin = solver["ymin"]
@@ -82,12 +83,14 @@ class FluidSolver:
         )
 
         # =============  poisson solver =============
-        self.poisson_solver  = PoissonSolver2nd(
+        self.poisson_solver  = PoissonSolver(
+            torch.float32,
             self.device,
             self.dx,
             tol=solver["poisson_tol"],
             max_cycles=solver["poisson_max_cycles"],
             nsmoothing=solver["poisson_nsmoothing"],
+            w=0.6,
             verbose=solver["poisson_verbose"]
         )
 
@@ -218,7 +221,7 @@ class FluidSolver:
         else:
             self.u0 = torch.zeros((self.nx,self.ny),device=self.device)
         self.v0 = torch.zeros((self.nx,self.ny),device=self.device)
-        self.p0 = torch.zeros((self.nx,self.ny),device=self.device)
+        self.p0 = torch.zeros((self.nx+2,self.ny+2),device=self.device)
 
         return
 
@@ -499,7 +502,7 @@ class FluidSolver:
         # ====== solve the pressure poisson equation and project ======
         coeff = self.dt/self.rho
         rhs = (self.divergence(uprime,vprime)-self.m_m0_all*self.divergence(self.body_u,self.body_v))/coeff
-        # p = torch.zeros_like(u)
+        # p = torch.zeros_like(p)
         p, _ = self.poisson_solver.solve_multigrid( # f, u, c
             rhs,
             p,
@@ -507,11 +510,10 @@ class FluidSolver:
             self.mu0_all,
             self.mu0_all,
         )
-        (p_x, p_y) = self.gradient(p)
+        (p_x, p_y) = self.gradient(p[1:-1,1:-1])
         u = uprime-coeff*self.mu0_all*p_x
         v = vprime-coeff*self.mu0_all*p_y
         self.adv_diff_solver.set_BCs(u,v)
-
 
         return (u,v,p)
 
@@ -629,10 +631,10 @@ class FluidSolver:
                 # plotting.plot2d_imshow_composite(X,Y,u.cpu(),self.sdf_properties,self.extent,iteration,self.save_path,"u",None, None)
                 # plotting.plot2d_imshow_composite(X,Y,v.cpu(),self.sdf_properties,self.extent,iteration,self.save_path,"v",None, None)
 
-                # plotting.plot2d_imshow_composite(X,Y,vec_x,self.sdf_properties,self.extent,iteration,self.save_path,"bodyu",None, None)
-                # plotting.plot2d_imshow_composite(X,Y,vec_y,self.sdf_properties,self.extent,iteration,self.save_path,"bodyv",None, None)
+                plotting.plot2d_imshow_composite(X,Y,vec_x,self.sdf_properties,self.extent,iteration,self.save_path,"bodyu",None, None)
+                plotting.plot2d_imshow_composite(X,Y,vec_y,self.sdf_properties,self.extent,iteration,self.save_path,"bodyv",None, None)
 
-                # plotting.plot2d_imshow_only(divergence,self.extent,iteration,self.save_path,"divergence",None, None)
+                plotting.plot2d_imshow_only(divergence,self.extent,iteration,self.save_path,"divergence",None, None)
 
                 # plotting.plot2d_imshow(X,Y,pressure,d_min,self.extent,iteration,self.save_path,"pressure",None, None)
                 plotting.plot2d_imshow_only(pressure,self.extent,iteration,self.save_path,"pressure",None, None)

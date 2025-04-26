@@ -136,7 +136,6 @@ class PoissonSolver:
             alpha=old_norm/torch.tensordot(d,Ad)
             u=u+alpha*d
             r=r-alpha*Ad
-            r-=r.mean()
             z=r*Jdiag_inv
             new_norm=torch.tensordot(r,z)
             beta=new_norm/old_norm
@@ -206,13 +205,13 @@ class PoissonSolver:
         """
         n  = f.shape[0]-1
 
-        if n==2:
-            u, r = self.CG_jacobi_cond(f, u, c, c_h, c_v, h2, maxit=100)
-            self.BC(u)
-
         # if n==2:
-        #     u[1,1] = 0.25*f[1,1]*h2/(c[1,1]+1e-15)
-        #     r = 0
+        #     u, r = self.CG_jacobi_cond(f, u, c, c_h, c_v, h2, maxit=100)
+        #     self.BC(u)
+
+        if n==2:
+            u[1,1] = 0.25*f[1,1]*h2/(c[1,1]+1e-15)
+            r = 0
 
 
         else:
@@ -284,7 +283,6 @@ class PoissonSolver:
 
             # Jacobi relaxation
             u = smooth(u)
-            self.BC(u)
             r = (f-Au(u))
 
             if self.verbose:
@@ -348,7 +346,7 @@ def test_solvers():
     print("CG method took {}s".format(time.time()-start))
 
     start = time.time()
-    u_cg_jac = solver.CG_jacobi_cond(f, u0, c, c_h, c_v , h**2, maxit=15000)[0].cpu()
+    u_cg_jac = solver.CG_jacobi_cond(f, u0, c, c_h, c_v , h**2, maxit=1000)[0].cpu()
     print("CG-PREC method took {}s".format(time.time()-start))
 
     start = time.time()

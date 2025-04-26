@@ -197,7 +197,7 @@ class PoissonSolver:
             r_err=r_err_new
         if self.verbose:
             print("Multigrid residual = {}, ncycles = {} \n".format(r_err_new, cycle))
-        return u
+        return u, r_err_new
 
     def multigrid(self, f, u, c, c_h, c_v, h2):
         """
