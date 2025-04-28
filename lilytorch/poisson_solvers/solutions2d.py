@@ -1,10 +1,12 @@
 
+from tkinter import E
 import torch
 import numpy as np
 
 """
 2d functions and solutions of the poisson equation
 """
+dtype=torch.float64
 
 def sincos_f(N,device=torch.device("cpu")):
 
@@ -192,8 +194,8 @@ def variable_coeff(N,device=torch.device("cpu"),create_box=False):
 
 def variable_coeff_c_hat(N,device=torch.device("cpu"),create_box=False):
 
-    x=torch.linspace(-1,1,N,device=device)
-    y=torch.linspace(-1,1,N,device=device)
+    x=torch.linspace(-1,1,N,device=device,dtype=dtype)
+    y=torch.linspace(-1,1,N,device=device,dtype=dtype)
     [X,Y]=torch.meshgrid(x,y, indexing="ij")
 
     from body import BodyMesh, BodyAnalytical, circle
@@ -201,27 +203,28 @@ def variable_coeff_c_hat(N,device=torch.device("cpu"),create_box=False):
     import trimesh
     from matplotlib import pyplot
 
-    name="box.obj"
-    if create_box:
-        f=sdf.sphere((0.5))
-        # f=sdf.box((0.5, 0.5, 2))
-        f.save(name, samples=2**16)
-        mesh = trimesh.load_mesh(name)
-        fig = pyplot.figure()
-        ax = fig.add_subplot(111, projection='3d')
-        ax.plot_trisurf(mesh.vertices[:, 0], mesh.vertices[:,1], triangles=mesh.faces, Z=mesh.vertices[:,2])
-        ax.set_xlabel("x")
-        ax.set_ylabel("y")
-        pyplot.show()
+    # name="box.obj"
+    # if create_box:
+    #     f=sdf.sphere((0.5))
+    #     # f=sdf.box((0.5, 0.5, 2))
+    #     f.save(name, samples=2**16)
+    #     mesh = trimesh.load_mesh(name)
+    #     fig = pyplot.figure()
+    #     ax = fig.add_subplot(111, projection='3d')
+    #     ax.plot_trisurf(mesh.vertices[:, 0], mesh.vertices[:,1], triangles=mesh.faces, Z=mesh.vertices[:,2])
+    #     ax.set_xlabel("x")
+    #     ax.set_ylabel("y")
+    #     pyplot.show()
 
     # body = BodyMesh( device, x, y, name, (lambda t: 0,(lambda t: 0,lambda t: 0)),eps=2/N,nsamples=2**12, msamples=2**12)
     # body.initialize()
     # sdf_fun=body.sdf_interp
 
-    body = BodyAnalytical( device, x, y, lambda x, y: circle(x,y,xt=0.1,yt=0.,r=0.5), (lambda t: 0,(lambda t: 0,lambda t: 0)),eps=1/N)
+    body = BodyAnalytical( device, x, y, lambda x, y: circle(x,y,xt=0.1,yt=0.,r=0.5), (lambda t: 0,(lambda t: 0,lambda t: 0)),eps=5/N)
     body.initialize()
     sdf_fun =body.sdf_fun
 
+    
     d = sdf_fun(X,Y)
     (mu0, mu1) = body.mu_funcs(d)
 
@@ -229,9 +232,10 @@ def variable_coeff_c_hat(N,device=torch.device("cpu"),create_box=False):
 
     c=mu0
 
-    ks=1
-    kg=2
-    sigma=100
+    print(c.dtype)
+    ks=0
+    kg=1
+    sigma=1000
     c=ks+(kg-ks)*(torch.tanh(sigma*d)+1)/2
 
     var=c
@@ -251,7 +255,7 @@ def variable_coeff_c_hat(N,device=torch.device("cpu"),create_box=False):
 
 
 
-    f=-torch.ones_like(c)
+    f=torch.ones_like(c)
 
     xmid = (x[1:]+x[:-1])/2
     ymid = (y[1:]+y[:-1])/2
@@ -285,7 +289,6 @@ def multigrid_course(N,device=torch.device("cpu")):
     """
 
     from poisson_2nd_order_2 import PoissonSolver
-    dtype=torch.float64
     h=1/(N-1) # because xh=xl=yh=yl=1 (grid is [0,1]x[0,1])
     h2=h*h
     x=torch.linspace(0,1,N,device=device,dtype=dtype)

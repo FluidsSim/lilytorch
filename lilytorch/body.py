@@ -289,11 +289,12 @@ class Body:
         self.dx = float(x[1]-x[0])
         self.dy = float(y[1]-y[0])
         self.eps = eps
+        self.dtype = x.dtype
 
         self.xflat = self.X.flatten()
         self.yflat = self.Y.flatten()
         self.stacked_xy = torch.stack((self.xflat,self.yflat))
-        self.ones_stacked=torch.ones(self.nx*self.ny).to(self.device)
+        self.ones_stacked=torch.ones((self.nx*self.ny),device=self.device,dtype=self.dtype)
 
         self.oldpos_u = torch.zeros((self.nx,self.ny),device=self.device)
         self.oldpos_v = torch.zeros((self.nx,self.ny),device=self.device)
@@ -397,11 +398,11 @@ class Body:
         """
         Update sdf properties from analytical rototranslation map
         """
-        theta = torch.tensor(theta*self.rad_conv, device=self.device).clone().detach()
+        theta = torch.tensor(theta*self.rad_conv, device=self.device, dtype=self.dtype).clone().detach()
         s = torch.sin(theta)
         c = torch.cos(theta)
         rot = torch.stack([torch.stack([c, s]),
-                        torch.stack([-s, c])]).to(self.device)
+                        torch.stack([-s, c])])
         trans = torch.stack((transl[0]*self.ones_stacked, transl[1]*self.ones_stacked))
 
         # newpoints=rot.T@self.stacked_xy-trans
@@ -445,7 +446,7 @@ class BodyAnalytical(Body):
         self.update_translation = update_maps[1]
         # self.bodies = [self]
         self.body=self
-        self.update(0)
+        self.initialize()
 
     def initialize(self):
         """

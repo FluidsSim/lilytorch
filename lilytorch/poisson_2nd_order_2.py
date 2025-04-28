@@ -17,7 +17,7 @@ class PoissonSolver:
         self.max_cycles = max_cycles
         self.nsmoothing = nsmoothing
         self.verbose    = verbose
-        self.jcap_tol   = 1e-10
+        self.jcap_tol   = 1e-3
         self.w          = w # smoothing factor
 
     def l2_norm(self, r):
@@ -33,14 +33,10 @@ class PoissonSolver:
         q[:, 0]    = -q[:, 1]
         q[:, -1]   = -q[:, -2]
 
-    def FD_operator(self, p, c, h2):
+    def FD_operator(self, p, ch, cv, h2):
         """
         2nd order finite difference operator
         """
-        zc=torch.ones((1,c.shape[0]), device=self.device, dtype=self.dtype)
-        zr=torch.ones((c.shape[1],1), device=self.device, dtype=self.dtype)
-        ch = torch.vstack((zc,(c[1:,:]+c[:-1,:])/2,zc))
-        cv = torch.hstack((zr,(c[:,1:]+c[:,:-1])/2,zr))
         J=(ch[1:,:]+ch[:-1,:]+cv[:,1:]+cv[:,:-1]) # J_{i,j}=c_{i-0.5,j}+c_{i+0.5,j}+c_{i,j-0.5}+c_{i,j+0.5}
         Au=ch[1:,:]*p[2:,1:-1]+ch[:-1,:]*p[:-2,1:-1]+cv[:,1:]*p[1:-1,2:]+cv[:,:-1]*p[1:-1,:-2]-J*p[1:-1,1:-1]
         return Au/h2, torch.where(J<self.jcap_tol,0,h2/J)  # returns Au and Jinv
@@ -49,17 +45,17 @@ class PoissonSolver:
         # Au = (p[2:,1:-1]+p[:-2,1:-1]+p[1:-1,2:]+p[1:-1,:-2]-J*p[1:-1,1:-1])
         # return Au/h2, h2/J # returns Au and Jinv
 
-    def Jacobi(self, f, p, c, h2):
+    def Jacobi(self, f, p, ch ,cv, h2):
         """
         Jacobi method
         """
         self.BC(p)
         for i in range(self.nsmoothing):
-            Au, Jinv = self.FD_operator(p, c, h2)
+            Au, Jinv = self.FD_operator(p, ch ,cv, h2)
             r = f-Au # compute residual
             p[1:-1,1:-1] -= self.w*r*Jinv # following A Multigrid Tutorial, 2nd Edition from Briggs, Henson, and McCormick, 2000
             self.BC(p)
-        Au, Jinv = self.FD_operator(p, c, h2)
+        Au, Jinv = self.FD_operator(p, ch ,cv, h2)
         r = f-Au # compute residual
         return p, r
 
@@ -101,17 +97,46 @@ class PoissonSolver:
         err[::2, ::2]  = err_coarse
         err[1::2,::2]  = 0.5*(err_coarse[1:,:]+err_coarse[:-1,:])
         err[::2,1::2]  = 0.5*(err_coarse[:,1:]+err_coarse[:,:-1])
-        err[1::2,1::2] = 0.25*(err_coarse[:-1,:-1]+err_coarse[1:,:-1]+err_coarse[:-1,1:]+err_coarse[1:,1:])
+        err[1::2,1
+        ::2] = 0.25*(err_coarse[:-1,:-1]+err_coarse[1:,:-1]+err_coarse[:-1,1:]+err_coarse[1:,1:])
         return err
-
-    def MPCG(self, f, p, c, c_h, c_v):
-
-        Ap,Jinv=self.FD_operator(p, c, self.h2)
+    
+    def PCG(self, f, p, ch, cv):
+        Ap,Jinv=self.FD_operator(p, ch, cv, self.h2)
         ri=f-Ap
         z=torch.zeros_like(p)
         z[1:-1,1:-1]=ri*Jinv
         self.BC(z)
-        # z,r =self.multigrid(f, p, c, c_h, c_v, self.h2)
+
+        d=z
+        old_norm=self.l2_norm(ri)
+        cycle=0
+        while old_norm>self.tol and cycle<self.max_cycles:
+
+            Ad,Jinv=self.FD_operator(d, ch, cv, self.h2)
+            tdot=torch.tensordot(z[1:-1,1:-1],ri)
+            alpha=tdot/torch.tensordot(d[1:-1,1:-1],Ad)
+            p+=alpha*d
+            ri+=-alpha*Ad
+
+            z[1:-1,1:-1]=ri*Jinv
+            self.BC(z)
+
+            beta=torch.tensordot(z[1:-1,1:-1],ri)/tdot
+            d=z+beta*d
+
+            old_norm=self.l2_norm(ri)
+            if self.verbose:
+                print("Cycle number = {} - residual = {} \n".format(cycle, old_norm))
+            cycle=cycle+1
+
+        return p, ri
+
+
+
+    def MPCG(self, f, p, c, c_h, c_v):
+
+        z,ri =self.multigrid(f, p, c, c_h, c_v, self.h2)
 
         d=z
         old_norm=self.l2_norm(ri)
@@ -124,9 +149,7 @@ class PoissonSolver:
             p+=alpha*d
             ri+=-alpha*Ad
 
-            z[1:-1,1:-1]=ri*Jinv
-            # z,_ =self.multigrid(ri, torch.zeros_like(z), c, c_h, c_v, self.h2)
-            # z, _ = self.Jacobi(ri, torch.zeros_like(z), c, self.h2)
+            z,_ =self.multigrid(ri, torch.zeros_like(z), c, c_h, c_v, self.h2)
 
             beta=torch.tensordot(z[1:-1,1:-1],ri)/tdot
             d=z+beta*d
@@ -150,22 +173,33 @@ class PoissonSolver:
             cycle+=1
         return u, r
 
-    def multigrid(self, f, p, c, c_h, c_v, h2):
+    def multigrid(self, f, p, c, ch, cv, h2):
         """
         2D multigrid solver, assume same grid spacing (n=m), where (n,m)=u.shape with hybrid cpu-gpu implementation
         """
 
+        zc=torch.ones((1,c.shape[0]), device=self.device, dtype=self.dtype)
+        zr=torch.ones((c.shape[1],1), device=self.device, dtype=self.dtype)
+        ch = torch.vstack((zc,(c[1:,:]+c[:-1,:])/2,zc))
+        cv = torch.hstack((zr,(c[:,1:]+c[:,:-1])/2,zr))
+
         # smoothing
-        p, r = self.Jacobi(f, p, c, h2)
+        p, r = self.Jacobi(f, p, ch, cv, h2)
 
         n=f.shape[0]
 
-        if n!=8:
+        if n!=2:
 
             # if self.verbose:
             #     print("Multigrid - Steps: {}, Residual: {}".format(n, torch.max(torch.abs(r))))
 
-            r_coarse = self.restrict(r)
+            r_coarse = 0.25*(
+                r[::2, ::2] +
+                r[1::2, ::2] +
+                r[::2, 1::2] +
+                r[1::2, 1::2]
+            )
+            
             c_coarse = self.restrict(c)
 
             # computes the coarse error via relaxation
@@ -182,7 +216,7 @@ class PoissonSolver:
             p[1:-1,1:-1]+=self.prolong_simple(err_coarse[1:-1,1:-1])
 
             # Jacobi relaxation
-            p, r = self.Jacobi(f, p, c, h2)
+            p, r = self.Jacobi(f, p, ch, cv, h2)
 
             # if self.verbose:
             #     err_l2 = self.l2_norm(r)
@@ -208,26 +242,27 @@ def test_solvers():
     from matplotlib import pyplot
     import poisson_solvers.solutions2d as examples
 
-    X, Y, u_exact, f, c, _, _ = examples.multigrid_course(N, device=device)
+    X, Y, u_exact, f, c, _, _ = examples.variable_coeff_c_hat(N, device=device)
 
     dtype=f.dtype
     u0 = torch.zeros((N+2,N+2),device=device,dtype=dtype)
     h=X[1,0]-X[0,0]
-    h2=h*h
 
     solver = PoissonSolver(
         dtype,
         device,
         h,
         verbose=True,
-        max_cycles=100,
-        nsmoothing=10,
-        tol=1e-14,
+        max_cycles=10,
+        nsmoothing=100,
+        tol=1e-7,
         w=0.6
     )
 
-    # u, r = solver.solve_multigrid(f, u0, c, c, c)
-    u, r = solver.MPCG(f, u0, c, c, c)
+    u, r = solver.solve_multigrid(f, u0, c, c, c)
+    # u, r = solver.PCG(f, u0, c, c, c)
+
+    # u, r = solver.Jacobi(f, u0, c, h*h)
 
 
     f       = f.cpu()
@@ -251,6 +286,8 @@ def test_solvers():
     if u_exact is not None:
         CS3=ax_3.imshow(u_exact.cpu().T,origin = "lower",cmap=cmap)
         ax_3.set_title("Exact")
+
+        # print("L2 norm diff of exact and approx is {}".format(solver.l2_norm(u_exact-u)))
         fig.colorbar(CS3)
 
     pyplot.show()
