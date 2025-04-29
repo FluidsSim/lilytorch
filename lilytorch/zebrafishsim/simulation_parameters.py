@@ -28,7 +28,7 @@ class SimulationParameters:
         self.n_iterations = 4001 # number of integration time steps
 
         # gui/recording parameters
-        self.headless        = True # For headless mode (No GUI, could be faster)
+        self.headless        = False # For headless mode (No GUI, could be faster)
         self.fast            = False # For fast mode (not real-time)
         self.video_record    = False # For saving the video
         self.video_speed     = 0.25 # video speed

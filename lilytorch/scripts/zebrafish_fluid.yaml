@@ -37,9 +37,9 @@ solver :
   nu                : 1.0e-6
   rho               : 1.0e+3
   poisson_tol       : 1.0e-5
-  poisson_max_cycles: 10
-  poisson_nsmoothing: 10
-  poisson_verbose   : True
+  poisson_max_cycles: 5
+  poisson_nsmoothing: 5
+  poisson_verbose   : False
 
 
 boundary_conditions:

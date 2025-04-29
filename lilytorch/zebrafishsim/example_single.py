@@ -16,7 +16,7 @@ def exercise_single(**kwargs):
     os.makedirs(log_path, exist_ok=True)
 
 
-    amps=np.ones(15)*0.
+    amps=np.ones(15)*0.3
     amps[:5]=0
     bias=0.*np.ones(15)
     bias[:5]=0
@@ -29,7 +29,7 @@ def exercise_single(**kwargs):
         amp             = amps,
         bias            = bias,
         wavefrequency   = 1,
-        freq            = 5,
+        freq            = 2,
         log_path        = log_path,
         compute_metrics = 3,
         return_network  = True,
@@ -63,6 +63,17 @@ def exercise_single(**kwargs):
         offset=-0.4,
         colors="green",
         ylabel="joint positions",
+        lw=1
+        )
+
+
+    # example plot using plot_time_histories
+    plt.figure("left-right muscles")
+    plot_time_histories(
+        controller.times,
+        controller.state[:,left_idx]-controller.state[:,right_idx],
+        offset=-0.,
+        colors="green",
         lw=1
         )
 

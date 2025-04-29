@@ -89,14 +89,13 @@ def run_experiment(pars):
         for joint in joints:
             joint["initial"]=[0.2*np.random.randn(),0]
 
-    elif pars.controller == "sine" or pars.controller == "square":
-        controller = WaveController(pars)
-
     # load controller
     if pars.controller == "firing_rate":
         controller = FiringRateController(
             pars
             )
+    elif pars.controller == "sine" or pars.controller == "square":
+        controller = WaveController(pars)
 
     # load animat data
     animat_data: Union[GenericData, AmphibiousKinematicsData] = (

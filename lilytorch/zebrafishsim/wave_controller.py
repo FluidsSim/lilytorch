@@ -9,10 +9,10 @@ class WaveController:
         self.pars     = pars
         self.timestep = pars.timestep
         self.times    = np.linspace(0, pars.n_iterations*pars.timestep, pars.n_iterations)
-        self.n_joints = pars.n_joints
-        self.state    = np.zeros((pars.n_iterations, 2*self.n_joints)) # state array for recording all the variables
+        self.n_total_joints = pars.n_joints
+        self.state    = np.zeros((pars.n_iterations, 2*self.n_total_joints)) # state array for recording all the variables
         self.remove_first  = 0
-        self.active_joints = np.arange(self.remove_first, self.n_joints)
+        self.active_joints = np.arange(self.remove_first, self.n_total_joints)
         self.muscle_l = 2*self.active_joints # indexes of the left muscle activations (optional)
         self.muscle_r = self.muscle_l+1 # indexes of the right muscle activations (optional)
 
@@ -38,24 +38,14 @@ class WaveController:
         """
 
         time     = iteration * timestep
-        # aux_sine = np.sin(
-        #     2*np.pi * ( self.pars.freq*time - self.pars.wavefrequency*self.active_joints/self.n_joints )
-        # )
-        left_signal = 1+np.cos(
-                2*np.pi * ( self.pars.freq*time - self.pars.wavefrequency*self.active_joints/self.n_joints )
-            )
-        right_signal = 1+np.cos(
-                2*np.pi * ( self.pars.freq*(time+0.5) - self.pars.wavefrequency*self.active_joints/self.n_joints )
-            )
+        aux_sine = np.sin(
+            2*np.pi * ( self.pars.freq*time - self.pars.wavefrequency*np.arange(self.n_total_joints)/self.n_total_joints )
+        )
 
-        self.state[iteration+1, self.muscle_l]  = self.pars.amplitudes_left * left_signal
-        self.state[iteration+1, self.muscle_r]  = self.pars.amplitudes_right * right_signal
+        # New motor output
+        self.state[iteration, self.muscle_l]  = 0.5 + self.pars.amplitudes_left * aux_sine/2
+        self.state[iteration, self.muscle_r]  = 0.5 - self.pars.amplitudes_left * aux_sine/2
 
         return self.state[iteration,:]
 
-    def sine2square(self, x):
-        if self.pars.controller=="square":
-            return 2*(1/(1+np.exp(-self.pars.scale*x))-0.5)
-        else:
-            return x
 

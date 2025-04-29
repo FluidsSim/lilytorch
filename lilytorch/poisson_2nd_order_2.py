@@ -17,7 +17,7 @@ class PoissonSolver:
         self.max_cycles = max_cycles
         self.nsmoothing = nsmoothing
         self.verbose    = verbose
-        self.jcap_tol   = 1e-3
+        self.jcap_tol   = 1e-12
         self.w          = w # smoothing factor
 
     def l2_norm(self, r):
@@ -37,6 +37,15 @@ class PoissonSolver:
         """
         2nd order finite difference operator
         """
+
+        # print(ch.shape, cv.shape)
+        # from IPython import embed;  embed()
+        # J=(ch[1:-1,:]+ch[:-2,:]+cv[:,1:-1]+cv[:,:-2]) # J_{i,j}=c_{i-0.5,j}+c_{i+0.5,j}+c_{i,j-0.5}+c_{i,j+0.5}
+        # Au=ch[2:,:]*p[2:,1:-1]+ch[:-2,:]*p[:-2,1:-1]+cv[:,2:]*p[1:-1,2:]+cv[:,:-2]*p[1:-1,:-2]-J*p[1:-1,1:-1]
+
+        # J=(ch[1:,:]+ch[:-1,:]+cv[:,1:]+cv[:,:-1]) # J_{i,j}=c_{i-0.5,j}+c_{i+0.5,j}+c_{i,j-0.5}+c_{i,j+0.5}
+        # Au=ch[1:,:]*p[2:,1:-1]+ch[:-1,:]*p[:-2,1:-1]+cv[:,1:]*p[1:-1,2:]+cv[:,:-1]*p[1:-1,:-2]-J*p[1:-1,1:-1]
+
         J=(ch[1:,:]+ch[:-1,:]+cv[:,1:]+cv[:,:-1]) # J_{i,j}=c_{i-0.5,j}+c_{i+0.5,j}+c_{i,j-0.5}+c_{i,j+0.5}
         Au=ch[1:,:]*p[2:,1:-1]+ch[:-1,:]*p[:-2,1:-1]+cv[:,1:]*p[1:-1,2:]+cv[:,:-1]*p[1:-1,:-2]-J*p[1:-1,1:-1]
         return Au/h2, torch.where(J<self.jcap_tol,0,h2/J)  # returns Au and Jinv
@@ -59,24 +68,22 @@ class PoissonSolver:
         r = f-Au # compute residual
         return p, r
 
+    def restrict_complex(self, r):
+        r_coarse=torch.zeros((r.shape[0]//2,r.shape[1]//2), device=self.device, dtype=self.dtype)
+        r_coarse[1::,1::]=(
+            0.0625*(r[1:-2:2,1:-2:2]+r[1:-2:2,3::2]+r[3::2,1:-2:2]+r[3::2,3::2])+
+            0.125*(r[2:-1:2,1:-2:2]+r[1:-2:2,2:-1:2]+r[3::2,2:-1:2]+r[2:-1:2,3::2])+
+            0.25*r[2:-1:2,2:-1:2]
+        )
+        return r_coarse
+
     def restrict(self, r):
-        # r_restrict = 0.25*(u(2:2:nf(1)  ,2:2:nf(2)  )...
-        #                         + u(1:2:nf(1)-1,2:2:nf(2)  )...
-        #                         + u(2:2:nf(1)  ,1:2:nf(2)-1)...
-        #                         + u(1:2:nf(1)-1,1:2:nf(2)-1));
         r_restrict = 0.25*(
             r[::2, ::2] +
             r[1::2, ::2] +
             r[::2, 1::2] +
             r[1::2, 1::2]
         )
-
-
-        # r_restrict = (
-        #     0.0625*(r[1:-2:2,1:-2:2]+r[1:-2:2,3:-1:2]+r[3:-1:2,1:-2:2]+r[3:-1:2,3:-1:2])+
-        #     0.125*(r[2:-2:2,1:-2:2]+r[1:-2:2,2:-2:2]+r[3:-1:2,2:-2:2]+r[2:-2:2,3:-1:2])+
-        #     0.25*r[2:-2:2,2:-2:2]
-        # )
         return r_restrict
 
     def restrict_simple(self, r):
@@ -95,13 +102,39 @@ class PoissonSolver:
         n=err_coarse.shape[0]
         err = torch.zeros((2*n,2*n), device=self.device)
         err[::2, ::2]  = err_coarse
-        err[1::2,::2]  = 0.5*(err_coarse[1:,:]+err_coarse[:-1,:])
-        err[::2,1::2]  = 0.5*(err_coarse[:,1:]+err_coarse[:,:-1])
-        err[1::2,1
-        ::2] = 0.25*(err_coarse[:-1,:-1]+err_coarse[1:,:-1]+err_coarse[:-1,1:]+err_coarse[1:,1:])
+        err[1:-1:2,::2]  = 0.5*(err_coarse[1:,:]+err_coarse[:-1,:])
+        err[::2,1:-1:2]  = 0.5*(err_coarse[:,1:]+err_coarse[:,:-1])
+        err[1:-1:2,1:-1:2] = 0.25*(err_coarse[:-1,:-1]+err_coarse[1:,:-1]+err_coarse[:-1,1:]+err_coarse[1:,1:])
+
         return err
-    
-    def PCG(self, f, p, ch, cv):
+
+    def extend_cs(self, ch, cv):
+
+        zc=torch.ones((1,ch.shape[1]), device=self.device, dtype=self.dtype)
+        zr=torch.ones((cv.shape[0],1), device=self.device, dtype=self.dtype)
+        ch_ext=torch.vstack((zc,ch,zc))
+        cv_ext=torch.hstack((zr,cv,zr))
+
+
+        # # expand c to the size of p
+        # zc=torch.ones((1,c.shape[0]), device=self.device, dtype=self.dtype)
+        # zr=torch.ones((c.shape[1]+2,1), device=self.device, dtype=self.dtype)
+
+        # c_exp=torch.vstack((zc,c,zc))
+        # c_exp=torch.hstack((zr,c_exp,zr))
+
+        # # linearly interpolate to find c_{i-0.5,j} and c_{i,j-0.5}
+        # ch = (c_exp[1:,:]+c_exp[:-1,:])/2
+        # cv = (c_exp[:,1:]+c_exp[:,:-1])/2
+        return ch_ext, cv_ext
+
+    def PCG(self, f, p0, c, ch, cv):
+
+        p=p0.clone()
+
+        ch, cv = self.extend_cs(c)
+
+
         Ap,Jinv=self.FD_operator(p, ch, cv, self.h2)
         ri=f-Ap
         z=torch.zeros_like(p)
@@ -132,45 +165,53 @@ class PoissonSolver:
 
         return p, ri
 
+    def MPCG(self, f, p0, c, ch, cv):
 
+        p=p0.clone()
 
-    def MPCG(self, f, p, c, c_h, c_v):
+        ch, cv = self.extend_cs(c)
 
-        z,ri =self.multigrid(f, p, c, c_h, c_v, self.h2)
+        z,ri =self.multigrid(f, p, c, ch, cv, self.h2)
 
         d=z
         old_norm=self.l2_norm(ri)
         cycle=0
         while old_norm>self.tol and cycle<self.max_cycles:
 
-            Ad,Jinv=self.FD_operator(d, c, self.h2)
+            Ad,Jinv=self.FD_operator(d, ch, cv, self.h2)
             tdot=torch.tensordot(z[1:-1,1:-1],ri)
             alpha=tdot/torch.tensordot(d[1:-1,1:-1],Ad)
             p+=alpha*d
             ri+=-alpha*Ad
 
-            z,_ =self.multigrid(ri, torch.zeros_like(z), c, c_h, c_v, self.h2)
+            z,_ =self.multigrid(ri, torch.zeros_like(z), c, ch, cv, self.h2)
 
             beta=torch.tensordot(z[1:-1,1:-1],ri)/tdot
             d=z+beta*d
 
             old_norm=self.l2_norm(ri)
-            if self.verbose:
-                print("Cycle number = {} - residual = {} \n".format(cycle, old_norm))
+            # if self.verbose:
+            #     print("Cycle number = {} - residual = {} \n".format(cycle, old_norm))
             cycle=cycle+1
+        if self.verbose:
+            print("Poisson equation residual = {}/{} reached with {}/{} cycles \n".format(old_norm,self.tol, cycle, self.max_cycles))
 
         return p, ri
 
-    def solve_multigrid(self, f, u, c, c_h, c_v):
+    def solve_multigrid(self, f, p0, c, c_h, c_v):
+        u=p0.clone()
         cycle=0
         r_err = 1.e33
         while r_err>self.tol and cycle<self.max_cycles:
             u, r = self.multigrid(f, u, c, c_h, c_v, self.h2)
             r_err_new = self.l2_norm(r)
-            if self.verbose:
-                print("Cycle number = {} - residual = {} \n".format(cycle, r_err_new))
+            # if self.verbose:
+            #     print("Cycle number = {} - residual = {} \n".format(cycle, r_err_new))
             r_err=r_err_new
             cycle+=1
+        # u-=u.mean()
+        if self.verbose:
+            print("Poisson equation residual = {}/{} reached with {}/{} cycles \n".format(r_err_new,self.tol, cycle, self.max_cycles))
         return u, r
 
     def multigrid(self, f, p, c, ch, cv, h2):
@@ -178,37 +219,43 @@ class PoissonSolver:
         2D multigrid solver, assume same grid spacing (n=m), where (n,m)=u.shape with hybrid cpu-gpu implementation
         """
 
+        ch = (c[1:,:]+c[:-1,:])/2
+        cv = (c[:,1:]+c[:,:-1])/2
+
+        # ch_ext, cv_ext = self.extend_cs(ch,cv)
+
         zc=torch.ones((1,c.shape[0]), device=self.device, dtype=self.dtype)
         zr=torch.ones((c.shape[1],1), device=self.device, dtype=self.dtype)
-        ch = torch.vstack((zc,(c[1:,:]+c[:-1,:])/2,zc))
-        cv = torch.hstack((zr,(c[:,1:]+c[:,:-1])/2,zr))
+        ch_ext=torch.vstack((zc,ch,zc))
+        cv_ext=torch.hstack((zr,cv,zr))
 
         # smoothing
-        p, r = self.Jacobi(f, p, ch, cv, h2)
+        p, r = self.Jacobi(f, p, ch_ext, cv_ext, h2)
 
         n=f.shape[0]
 
-        if n!=2:
+        if n>8:
 
             # if self.verbose:
             #     print("Multigrid - Steps: {}, Residual: {}".format(n, torch.max(torch.abs(r))))
 
-            r_coarse = 0.25*(
-                r[::2, ::2] +
-                r[1::2, ::2] +
-                r[::2, 1::2] +
-                r[1::2, 1::2]
-            )
-            
+            r_coarse = self.restrict(r)
             c_coarse = self.restrict(c)
+            ch_coarse = 0.5*(ch[1::2,::2]+ch[:-1:2,::2])
+            cv_coarse = 0.5*(cv[::2,1::2]+cv[::2,:-1:2])
+
+            # import matplotlib.pyplot as plt
+
+            # plt.imshow(cv_coarse.cpu())
+            # plt.show()
 
             # computes the coarse error via relaxation
             err_coarse, _ = self.multigrid(
                 r_coarse,
                 torch.zeros((n//2+2,n//2+2), device=self.device, dtype=self.dtype),
                 c_coarse,
-                c_coarse,
-                c_coarse,
+                ch_coarse,
+                cv_coarse,
                 4*h2
                 )
 
@@ -216,7 +263,7 @@ class PoissonSolver:
             p[1:-1,1:-1]+=self.prolong_simple(err_coarse[1:-1,1:-1])
 
             # Jacobi relaxation
-            p, r = self.Jacobi(f, p, ch, cv, h2)
+            p, r = self.Jacobi(f, p, ch_ext, cv_ext, h2)
 
             # if self.verbose:
             #     err_l2 = self.l2_norm(r)
@@ -242,7 +289,7 @@ def test_solvers():
     from matplotlib import pyplot
     import poisson_solvers.solutions2d as examples
 
-    X, Y, u_exact, f, c, _, _ = examples.variable_coeff_c_hat(N, device=device)
+    X, Y, u_exact, f, c, ch, cv = examples.raeli(N, device=device)
 
     dtype=f.dtype
     u0 = torch.zeros((N+2,N+2),device=device,dtype=dtype)
@@ -253,16 +300,20 @@ def test_solvers():
         device,
         h,
         verbose=True,
-        max_cycles=10,
-        nsmoothing=100,
+        max_cycles=20,
+        nsmoothing=30,
         tol=1e-7,
-        w=0.6
+        w=0.7
     )
 
-    u, r = solver.solve_multigrid(f, u0, c, c, c)
+    print("#############")
+    u, r = solver.solve_multigrid(f, u0, c, ch, cv)
+
+    # print("#############")
     # u, r = solver.PCG(f, u0, c, c, c)
 
-    # u, r = solver.Jacobi(f, u0, c, h*h)
+    # print("#############")
+    # u, r = solver.MPCG(f, u0, c, c, c)
 
 
     f       = f.cpu()

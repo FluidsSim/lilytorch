@@ -368,7 +368,10 @@ def compute_controller(
     n_iterations      = network.pars.n_iterations
     sim_fraction      = 0.6
     nsteps_considered = round(n_iterations * sim_fraction)
-    exit_iteration    = network.exit_iteration
+    if hasattr(network, 'exit_iteration'):
+        exit_iteration    = network.exit_iteration
+    else:
+        exit_iteration    = n_iterations
 
     # consider sim_fraction number of steps, for the difference between left and right muscle cells
     times   = network.times[-nsteps_considered:exit_iteration]
@@ -410,14 +413,18 @@ def compute_mechanical(
     compute all mechanical metrics
     """
 
+    if hasattr(network, 'exit_iteration'):
+        exit_iteration    = network.exit_iteration
+    else:
+        exit_iteration    = network.pars.n_iterations
 
     metrics = {}
     sim_fraction = 0.6
 
     # ------ COMPUTE FORWARD AND LATERAL SPEEDS ------
-    links_positions       = network.links_positions[:network.exit_iteration]
-    link_velocities       = network.links_velocities[:network.exit_iteration]
-    joints_active_torques = network.joints_active_torques[:network.exit_iteration]
+    links_positions       = network.links_positions[:exit_iteration]
+    link_velocities       = network.links_velocities[:exit_iteration]
+    joints_active_torques = network.joints_active_torques[:exit_iteration]
 
     # method 1
     (fspeed, lspeed) = compute_speed_PCA(

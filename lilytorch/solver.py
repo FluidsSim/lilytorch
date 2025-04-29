@@ -498,22 +498,30 @@ class FluidSolver:
         vprime = self.mu0_all*v + self.m_m0_all*self.body_v + self.mu1_all*self.normal_derivative(v-self.body_v,self.normal_x,self.normal_y)
         self.adv_diff_solver.set_BCs(uprime,vprime)
 
-
-        # ====== solve the pressure poisson equation and project ======
+        # ====== solve the pressure poisson equation ======
         coeff = self.dt/self.rho
-        rhs = (self.divergence(uprime,vprime)-self.m_m0_all*self.divergence(self.body_u,self.body_v))/coeff
+        self.div_body=self.divergence(uprime,vprime)-self.m_m0_all*self.divergence(self.body_u,self.body_v)
+        rhs = self.div_body/self.dt
         # p = torch.zeros_like(p)
         p, _ = self.poisson_solver.solve_multigrid( # f, u, c
             rhs,
             p,
-            self.mu0_all,
+            self.mu0_all/self.rho,
             self.mu0_all,
             self.mu0_all,
         )
+
+        # ====== projection step ======
         (p_x, p_y) = self.gradient(p[1:-1,1:-1])
         u = uprime-coeff*self.mu0_all*p_x
         v = vprime-coeff*self.mu0_all*p_y
         self.adv_diff_solver.set_BCs(u,v)
+
+        # if iteration==4:
+        #     from IPython import embed; embed()
+
+        #     u[1]=u
+
 
         return (u,v,p)
 
@@ -604,7 +612,7 @@ class FluidSolver:
                 # copy u from device to host
                 X,Y = self.X.cpu(), self.Y.cpu()
                 curl = self.vorticity(u,v).cpu()
-                divergence = self.divergence(u,v).cpu()
+                divergence = self.div_body.cpu()
                 # d_min = self.composite_body.sdf_val.cpu()
                 # d_min = self.d_min.cpu()
                 sdf=self.composite_body.sdf_val.cpu()

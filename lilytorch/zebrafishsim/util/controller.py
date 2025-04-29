@@ -37,10 +37,11 @@ class ZebrafishFluidController(AnimatNetwork):
     def __init__(self, animat_data, controller, callback):
         self.n_iterations = np.shape(animat_data.state.array)[0]
         super().__init__(data=animat_data, n_iterations=self.n_iterations)
-        self.offsets                   = np.zeros(controller.n_joints) # zero offsets
+        self.offsets                   = np.zeros(controller.n_total_joints) # zero offsets
         self.nlinks                    = len(animat_data.sensors.links.names)
         self.animat_data               = animat_data
         self.controller                = controller
+        self.controller.exit_iteration = self.n_iterations
         self.callback                  = callback
         self.continue_sim              = True
 
@@ -108,8 +109,10 @@ class ZebrafishFluidController(AnimatNetwork):
             )
             self.fluid_solver.composite_body.sdf_vals[i]=sdf_val
 
+            # v = v_lin_com + <v_ang_com, x-x_com>
             self.fluid_solver.composite_body.u_vals[i]=lin_vel[i][0]-ang_vel[i]*(r_com_p[1]).reshape(body.nx, body.ny)
             self.fluid_solver.composite_body.v_vals[i]=lin_vel[i][1]+ang_vel[i]*(r_com_p[0]).reshape(body.nx, body.ny)
+
 
             # store com positions for fluid->body force computation
             self.fluid_solver.composite_body.com_pos[i]=pos_global[i]
@@ -239,9 +242,11 @@ class ZebrafishFluidController(AnimatNetwork):
             time
         )
 
-        if not continue_sim and not self.controller.exit_iteration in locals(): # stop sim is the fluid solver return an exit condition
-            self.controller.exit_iteration = iteration
+        if not continue_sim: # stop sim is the fluid solver return an exit condition
+            if self.controller.exit_iteration==self.n_iterations:
+                self.controller.exit_iteration = iteration
             return
+
 
 
         self.callback.friction_force_lin_x = (self.fluid_solver.friction_force_lin_x).cpu().numpy()

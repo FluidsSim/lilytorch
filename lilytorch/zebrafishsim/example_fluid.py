@@ -29,7 +29,7 @@ def exercise_single(**kwargs):
     """
     Exercise example, running a single simulation and plotting the results
     """
-    amps=np.ones(15)*0.3
+    amps=np.ones(15)*0.6
     # amps[:5]=0
     bias=0.*np.ones(15)
     # bias[:5]=0
