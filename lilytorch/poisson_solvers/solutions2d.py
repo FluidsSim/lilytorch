@@ -233,24 +233,24 @@ def variable_coeff_c_hat(N,device=torch.device("cpu"),create_box=False):
 
     # c=mu0
 
-    ks=0.00001
+    ks=0.0000
     kg=1
-    sigma=100
+    sigma=10
     c=ks+(kg-ks)*(torch.tanh(sigma*d)+1)/2
 
     var=c
-    pyplot.figure()
-    pyplot.imshow(
-        var.cpu().T,
-        extent = (
-            torch.min(x.cpu()), torch.max(x.cpu()),
-            torch.min(y.cpu()), torch.max(y.cpu())
-        ),
-        origin = "lower",
-        cmap = "Greys"
-    )
-    pyplot.contour(X.cpu(),Y.cpu(),var.cpu(), colors='k', levels=[0], linestyles='-')
-    pyplot.show()
+    # pyplot.figure()
+    # pyplot.imshow(
+    #     var.cpu().T,
+    #     extent = (
+    #         torch.min(x.cpu()), torch.max(x.cpu()),
+    #         torch.min(y.cpu()), torch.max(y.cpu())
+    #     ),
+    #     origin = "lower",
+    #     cmap = "Greys"
+    # )
+    # pyplot.contour(X.cpu(),Y.cpu(),var.cpu(), colors='k', levels=[0], linestyles='-')
+    # pyplot.show()
 
     xmid = (x[1:]+x[:-1])/2
     ymid = (y[1:]+y[:-1])/2
@@ -265,13 +265,13 @@ def variable_coeff_c_hat(N,device=torch.device("cpu"),create_box=False):
 
     R=0.25
     circle=torch.sqrt((X-xt)**2+(Y-yt)**2)
-    u_exact = -torch.where(
-        circle<R,
-        (1/8-R**2*(1-1/ks)/4)-(1/(4*ks))*(circle**2),
-        1/8-circle**2/4
-    )
+    # u_exact = -torch.where(
+    #     circle<R,
+    #     (1/8-R**2*(1-1/ks)/4)-(1/(4*ks))*(circle**2),
+    #     1/8-circle**2/4
+    # )
 
-    # u_exact = c
+    u_exact = c
 
 
 
@@ -315,8 +315,8 @@ def raeli(N,device=torch.device("cpu"),create_box=False):
     R=0.5
     d=circle(X,Y,xt=xt,yt=yt,r=R)
 
-    beta=10
-    alpha=1
+    beta=1
+    alpha=0
     sigma=10
 
     ks=alpha
@@ -349,12 +349,12 @@ def raeli(N,device=torch.device("cpu"),create_box=False):
     # ch = (c_exp[1:,:]+c_exp[:-1,:])/2
     # cv = (c_exp[:,1:]+c_exp[:,:-1])/2
 
-    u_exact = torch.where(
-        d<R,
-        (1/8-(R**2)*(1-1/ks)/4)-(d**2)/(4*ks),
-        1/8-d**2/4
-    )
-    # u_exact = c
+    # u_exact = torch.where(
+    #     d<R,
+    #     (1/8-(R**2)*(1-1/ks)/4)-(d**2)/(4*ks),
+    #     1/8-d**2/4
+    # )
+    u_exact = c
 
     f=-torch.ones_like(c)
 
