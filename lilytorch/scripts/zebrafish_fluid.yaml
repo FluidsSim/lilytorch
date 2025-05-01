@@ -36,10 +36,10 @@ solver :
   nt                : 80000
   nu                : 1.0e-6
   rho               : 1.0e+3
-  poisson_tol       : 1.0e-5
-  poisson_max_cycles: 5
-  poisson_nsmoothing: 5
-  poisson_verbose   : False
+  poisson_tol       : 1.0e-4
+  poisson_max_cycles: 30
+  poisson_nsmoothing: 10
+  poisson_verbose   : True
 
 
 boundary_conditions:
@@ -71,7 +71,7 @@ body:
   plotting: False
   compute_interp: False
   plotting_meshes: False
-  n_samples: (1000, 1000)
+  n_samples: (500, 500)
   update_maps:
     rotation: "None"
     translation:

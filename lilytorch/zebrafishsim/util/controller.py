@@ -54,6 +54,8 @@ class ZebrafishFluidController(AnimatNetwork):
 
         self.n_bodies=len(self.fluid_solver.composite_body.bodies)
 
+        self.dtype=self.fluid_solver.X.dtype
+
         # enforce fluid timestep
         animat_data.timestep = self.fluid_solver.dt
         controller.timestep = self.fluid_solver.dt
@@ -109,7 +111,7 @@ class ZebrafishFluidController(AnimatNetwork):
             )
             self.fluid_solver.composite_body.sdf_vals[i]=sdf_val
 
-            # v = v_lin_com + <v_ang_com, x-x_com>
+            ###### compute v = v_lin_com + <v_ang_com, x-x_com>
             self.fluid_solver.composite_body.u_vals[i]=lin_vel[i][0]-ang_vel[i]*(r_com_p[1]).reshape(body.nx, body.ny)
             self.fluid_solver.composite_body.v_vals[i]=lin_vel[i][1]+ang_vel[i]*(r_com_p[0]).reshape(body.nx, body.ny)
 
@@ -123,12 +125,12 @@ class ZebrafishFluidController(AnimatNetwork):
 
         idx=self.fluid_solver.composite_body.sdf_vals.argmin(0).unsqueeze(0).expand(self.fluid_solver.composite_body.sdf_vals.shape)
 
-        self.fluid_solver.composite_body.sdf_val=self.fluid_solver.composite_body.sdf_vals.gather(0,idx)[0].reshape(self.fluid_solver.nx,self.fluid_solver.ny)-self.fluid_solver.composite_body.suit
+        self.fluid_solver.composite_body.sdf_val=self.fluid_solver.composite_body.sdf_vals.gather(0,idx)[0].reshape(self.fluid_solver.nx+2,self.fluid_solver.ny+2)-self.fluid_solver.composite_body.suit
 
         # (self.mu0_all, self.mu1_all) = self.fluid_solver.composite_body.mu_funcs(self.composite_body.sdf_val)
 
-        self.fluid_solver.body_u=self.fluid_solver.composite_body.u_vals.gather(0,idx)[0].reshape(self.fluid_solver.nx,self.fluid_solver.ny)
-        self.fluid_solver.body_v=self.fluid_solver.composite_body.v_vals.gather(0,idx)[0].reshape(self.fluid_solver.nx,self.fluid_solver.ny)
+        self.fluid_solver.body_u=self.fluid_solver.composite_body.u_vals.gather(0,idx)[0].reshape(self.fluid_solver.nx+2,self.fluid_solver.ny+2)
+        self.fluid_solver.body_v=self.fluid_solver.composite_body.v_vals.gather(0,idx)[0].reshape(self.fluid_solver.nx+2,self.fluid_solver.ny+2)
 
     def update_old(self,t,iteration,dt=1):
         # iteration = int(t/dt)

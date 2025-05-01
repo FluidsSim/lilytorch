@@ -296,12 +296,12 @@ class Body:
         self.stacked_xy = torch.stack((self.xflat,self.yflat))
         self.ones_stacked=torch.ones((self.nx*self.ny),device=self.device,dtype=self.dtype)
 
-        self.oldpos_u = torch.zeros((self.nx,self.ny),device=self.device)
-        self.oldpos_v = torch.zeros((self.nx,self.ny),device=self.device)
+        self.oldpos_u = torch.zeros((self.nx,self.ny),device=self.device,dtype=self.dtype)
+        self.oldpos_v = torch.zeros((self.nx,self.ny),device=self.device,dtype=self.dtype)
 
         # body velocities
-        self.body_u = torch.zeros((self.nx,self.ny),device=self.device)
-        self.body_v = torch.zeros((self.nx,self.ny),device=self.device)
+        self.body_u = torch.zeros((self.nx,self.ny),device=self.device,dtype=self.dtype)
+        self.body_v = torch.zeros((self.nx,self.ny),device=self.device,dtype=self.dtype)
         self.old_points = self.stacked_xy.clone().detach()
         self.rad_conv = (torch.pi/180)
 
@@ -452,9 +452,9 @@ class BodyAnalytical(Body):
         """
         Initialize sdf properties at time 0
         """
-        return self.update(0)
+        return self.update(0,0)
 
-    def update(self, t, dt=1):
+    def update(self, iteration, t, dt=1):
         """
         Apply rototranslation and update the sdf properties
         """
@@ -809,39 +809,6 @@ class BodyMesh(Body):
         """
         self.bb = self.m2s.bounding_box()
         if self.compute_interp:
-            # bb = self.m2s.bounding_box()
-            # # bb = self.m2s.bounding_box(self.suit)
-
-            # diag = torch.sqrt((self.x[-1]-self.x[0])**2+(self.y[-1]-self.y[0])**2).cpu().detach().numpy()
-            # xnp = np.linspace(-diag,diag,self.nsamples)
-            # ynp = np.linspace(-diag,diag,self.msamples)
-
-            # cx_bb = (bb[0,1]+bb[0,0])/2
-            # cy_bb = (bb[1,1]+bb[1,0])/2
-            # # dx_bb = bb[0,1]-bb[0,0]
-            # # dy_bb = bb[1,1]-bb[1,0]
-            # diag_bb=np.sqrt((bb[0,0]-bb[0,1])**2+(bb[1,0]-bb[1,1])**2)
-
-            # idownsampled = np.where(
-            #     np.logical_and(xnp>cx_bb-diag_bb, xnp<cx_bb+diag_bb)
-            # )[0]
-            # xdownsampled = xnp[idownsampled]
-            # jdownsampled = np.where(
-            #     np.logical_and(ynp>cy_bb-diag_bb, ynp<cy_bb+diag_bb)
-            # )[0]
-            # ydownsampled = xnp[jdownsampled]
-            # X,Y=np.meshgrid(xdownsampled,ydownsampled,indexing="ij")
-            # xflat = X.flatten()
-            # yflat = Y.flatten()
-            # zflat = np.zeros_like(xflat)
-            # xyz   = np.stack([xflat,yflat,zflat],axis=1)
-            # query_pts=np.array(xyz.astype(np.float32))
-
-
-            # sdf_val, _=self.m2s(query_pts)
-            # binary_2d = np.ones((self.nsamples,self.msamples))
-            # binary_2d[idownsampled[0]:(idownsampled[-1]+1),jdownsampled[0]:(jdownsampled[-1]+1)][sdf_val.reshape(X.shape)<0]=-1
-
 
             cx_bb = (self.bb[0,1]+self.bb[0,0])/2
             cy_bb = (self.bb[1,1]+self.bb[1,0])/2
@@ -907,65 +874,6 @@ class BodyMesh(Body):
             np.save("interp_data/ynp_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy",ynp)
             np.save("interp_data/sdf_val_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy",sdf_val)
 
-
-        # if self.compute_interp:
-        #     bb = self.m2s.bounding_box()
-        #     # bb = self.m2s.bounding_box(self.suit)
-
-        #     # (1) use open3d to determine sdf on downsampled data
-        #     diag = torch.sqrt((self.x[-1]-self.x[0])**2+(self.y[-1]-self.y[0])**2).cpu().detach().numpy()
-        #     xnp = np.linspace(-2*diag,2*diag,self.nsamples)
-        #     ynp = np.linspace(-2*diag,2*diag,self.msamples)
-
-        #     cx_bb = (bb[0,1]+bb[0,0])/2
-        #     cy_bb = (bb[1,1]+bb[1,0])/2
-        #     dx_bb = bb[0,1]-bb[0,0]
-        #     dy_bb = bb[1,1]-bb[1,0]
-        #     idownsampled = np.where(
-        #         np.logical_and(xnp>cx_bb-dx_bb, xnp<cx_bb+dx_bb)
-        #     )[0]
-        #     xdownsampled = xnp[idownsampled]
-        #     jdownsampled = np.where(
-        #         np.logical_and(ynp>cy_bb-dy_bb, ynp<cy_bb+dy_bb)
-        #     )[0]
-        #     ydownsampled = xnp[jdownsampled]
-        #     X,Y=np.meshgrid(xdownsampled,ydownsampled,indexing="ij")
-        #     xflat = X.flatten()
-        #     yflat = Y.flatten()
-        #     zflat = np.zeros_like(xflat)
-        #     xyz   = np.stack([xflat,yflat,zflat],axis=1)
-
-        #     query_pts=np.array(xyz.astype(np.float32))
-
-        #     sdf_val_o3d, _=self.m2s(query_pts)
-        #     binary_2d = np.ones((self.nsamples,self.msamples))
-        #     binary_2d = np.ones((self.nsamples,self.msamples))
-        #     binary_2d[idownsampled[0]:(idownsampled[-1]+1),jdownsampled[0]:(jdownsampled[-1]+1)][sdf_val_o3d.reshape(X.shape)<0]=-1
-
-
-        #     var=sdf_val_o3d.reshape(X.shape)
-        #     plt.figure()
-        #     plt.contourf(
-        #         var
-        #     )
-        #     plt.colorbar()
-        #     plt.contour(var, colors='k', levels=[0], linestyles='dashed')
-        #     plt.show()
-
-
-        #     # from IPython import embed; embed()
-
-        #     # (2) use skfmm to determine sdf on the full domain
-        #     print("Computing the sdf for {}, with space steps ({},{})".format(self.mesh_file,xnp[1]-xnp[0],ynp[1]-ynp[0]))
-        #     sdf_val = skfmm.distance(binary_2d, dx=[xnp[1]-xnp[0],ynp[1]-ynp[0]])#-self.suit
-
-
-        #     print("Computing the interpolation functions for {}".format(self.mesh_file))
-
-        #     np.save("interp_data/xnp_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy",xnp)
-        #     np.save("interp_data/ynp_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy",ynp)
-        #     np.save("interp_data/sdf_val_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy",sdf_val)
-
     def initialize(self):
         xnp = np.load("interp_data/xnp_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy")
         ynp = np.load("interp_data/ynp_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy")
@@ -1012,7 +920,7 @@ class CompositeBodyMesh:
         for link_i, link in enumerate(self.sdf.links):
             mesh_name = link["visuals"][0]["geometry"]["uri"]
             mesh_gpath = sdf_folder+mesh_name
-            initial_pose = np.array(link.pose).astype(np.float32)
+            initial_pose = np.array(link.pose).astype(x.cpu().numpy().dtype)
             update_funcs = (
                 lambda t: 180,
                 [
@@ -1234,12 +1142,6 @@ class CompositeBodyMesh:
 
 
     #     return new_sdf, new_nx, new_ny, new_curv
-
-
-
-
-
-
 
 
 class CompositeSegmentBody:

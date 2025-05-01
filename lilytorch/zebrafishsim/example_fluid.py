@@ -42,7 +42,7 @@ def exercise_single(**kwargs):
         wavefrequency   = 1,
         freq            = 5,
         n_iterations    = 80000,
-        timestep        = 0.001,
+        timestep        = 0.0001,
         compute_metrics = 3,
         n_joints        = 15,
         return_network  = True,

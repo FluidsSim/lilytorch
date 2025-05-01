@@ -1,6 +1,6 @@
 
 from lilytorch.adv_diff import AdvDiffSolver
-from lilytorch.poisson_2nd_order_2 import PoissonSolver
+from lilytorch.poisson import PoissonSolver
 # from lilytorch.poisson_2nd_order import PoissonSolver as PoissonSolver2nd
 # from lilytorch.testing_nonapprox_poisson import PoissonSolver as PoissonSolver
 from lilytorch.body import body_from_yaml
@@ -19,7 +19,7 @@ class FluidSolver:
     Solver class
     """
 
-    def __init__(self, pars, costum_update=None, comute_force=True):
+    def __init__(self, pars, dtype=torch.float32, costum_update=None, comute_force=True):
         """
         BDIM2 solver for fluid structure interaction
         """
@@ -38,15 +38,24 @@ class FluidSolver:
             self.device = torch.device("cpu")
             torch.set_num_threads(solver["nthreads"])
 
+        self.dtype = dtype
         self.N    = solver["N"]
         self.xmin = solver["xmin"]
         self.xmax = solver["xmax"]
         self.ymin = solver["ymin"]
         self.ymax = solver["ymax"]
-        x         = torch.linspace(self.xmin,self.xmax,self.N).to(self.device)
-        y         = torch.linspace(self.ymin,self.ymax,self.N).to(self.device)
 
-        [self.X,self.Y] = torch.meshgrid(x,y, indexing="ij")
+        self.dx         = (self.xmax-self.xmin)/self.N
+        self.dy         = (self.ymax-self.ymin)/self.N
+
+        x = torch.arange(self.xmin,self.xmax,self.dx,device=self.device,dtype=self.dtype)
+        y = torch.arange(self.ymin,self.ymax,self.dy,device=self.device,dtype=self.dtype)
+
+        x_ext = torch.arange(self.xmin-self.dx,self.xmax+self.dx,self.dx,device=self.device,dtype=self.dtype)
+        y_ext = torch.arange(self.ymin-self.dy,self.ymax+self.dy,self.dy,device=self.device,dtype=self.dtype)
+
+        [self.X,self.Y] = torch.meshgrid(x_ext,y_ext, indexing="ij")
+
         self.nx         = len(x)
         self.ny         = len(y)
         self.dx         = float(x[1]-x[0])
@@ -76,7 +85,7 @@ class FluidSolver:
         # ============= convection solver =============
         self.adv_diff_solver = AdvDiffSolver(
             self.device,
-            self.dt,x,y,self.nu,
+            self.dt,x_ext,y_ext,self.nu,
             BC_type_u=self.bcs_u_type, BC_values_u=self.bcs_u_val,
             BC_type_v=self.bcs_v_type, BC_values_v=self.bcs_v_val,
             method=solver["convection_method"]
@@ -84,7 +93,7 @@ class FluidSolver:
 
         # =============  poisson solver =============
         self.poisson_solver  = PoissonSolver(
-            torch.float32,
+            self.dtype,
             self.device,
             self.dx,
             tol=solver["poisson_tol"],
@@ -96,31 +105,43 @@ class FluidSolver:
 
         self.composite_body = body_from_yaml(
             self.device,
-            x, y,
+            x_ext, y_ext,
             body_pars,
             eps=self.eps,
             costum_update=costum_update,
             starting_time=self.starting_time
         )
 
+        if not hasattr(self.composite_body, 'bodies'): # check if its a single body
+            self.composite_body.bodies = [self.composite_body.body]
+            self.composite_body.sdf_vals = [self.composite_body.body.sdf]
+            # self.composite_body.u_vals = [self.composite_body.body.body_u]
+            # self.composite_body.v_vals = [self.composite_body.body.body_v]
+            self.composite_body.sdf_val = self.composite_body.body.sdf
+            self.composite_body.com_pos = torch.tensor([self.xmin+(self.xmax-self.xmin)/2, self.ymin+(self.ymax-self.ymin)/2], device=self.device, dtype=self.dtype).view(1,2)
+
+
         # self.sdf_properties = self.composite_body.initialize()
         self.n_bodies=len(self.composite_body.bodies)
-        self.friction_force_lin_x = torch.zeros(self.n_bodies)
-        self.friction_force_lin_y = torch.zeros(self.n_bodies)
-        self.friction_force_ang_z = torch.zeros(self.n_bodies)
+        self.friction_force_lin_x = torch.zeros(self.n_bodies,device=self.device,dtype=self.dtype)
+        self.friction_force_lin_y = torch.zeros(self.n_bodies,device=self.device,dtype=self.dtype)
+        self.friction_force_ang_z = torch.zeros(self.n_bodies,device=self.device,dtype=self.dtype)
 
-        self.pressure_force_x = torch.zeros(self.n_bodies)
-        self.pressure_force_y = torch.zeros(self.n_bodies)
+        self.pressure_force_x = torch.zeros(self.n_bodies,device=self.device,dtype=self.dtype)
+        self.pressure_force_y = torch.zeros(self.n_bodies,device=self.device,dtype=self.dtype)
 
-        self.body_u = torch.zeros(self.nx, self.ny).to(self.device)
-        self.body_v = torch.zeros(self.nx, self.ny).to(self.device)
+        self.body_u = torch.zeros(self.nx+2, self.ny+2,device=self.device,dtype=self.dtype)
+        self.body_v = torch.zeros(self.nx+2, self.ny+2,device=self.device,dtype=self.dtype)
 
-        # Parameters for the Gaussian kernel
-        kernel_dx=0.005
-        self.kernel_size = round(kernel_dx/self.dx)  # Example kernel size
-        self.kernel_size += 1-self.kernel_size%2
-        sigma = 10  # Standard deviation for Gaussian
-        self.kernel = self.composite_body.gaussian_kernel(self.kernel_size, sigma).view(1, 1, self.kernel_size, self.kernel_size).to(self.device)
+        self.zc=torch.ones((1,self.N),device=self.device,dtype=self.dtype)
+        self.zr=torch.ones((self.N,1),device=self.device,dtype=self.dtype)
+
+        # # Parameters for the Gaussian kernel
+        # kernel_dx=0.005
+        # self.kernel_size = round(kernel_dx/self.dx)  # Example kernel size
+        # self.kernel_size += 1-self.kernel_size%2
+        # sigma = 10  # Standard deviation for Gaussian
+        # self.kernel = self.composite_body.gaussian_kernel(self.kernel_size, sigma).view(1, 1, self.kernel_size, self.kernel_size).to(self.device)
 
         # ===== set initial conditions =====
         self.set_initial_conditions()
@@ -217,11 +238,11 @@ class FluidSolver:
 
         # Set initial conditions
         if self.bcs_u_type[0]=="D":
-            self.u0 = self.bcs_u_val[0]*torch.ones((self.nx,self.ny),device=self.device)
+            self.u0 = self.bcs_u_val[0]*torch.ones((self.nx+2,self.ny+2),device=self.device,dtype=self.dtype)
         else:
-            self.u0 = torch.zeros((self.nx,self.ny),device=self.device)
-        self.v0 = torch.zeros((self.nx,self.ny),device=self.device)
-        self.p0 = torch.zeros((self.nx+2,self.ny+2),device=self.device)
+            self.u0 = torch.zeros((self.nx+2,self.ny+2),device=self.device,dtype=self.dtype)
+        self.v0 = torch.zeros((self.nx+2,self.ny+2),device=self.device,dtype=self.dtype)
+        self.p0 = torch.zeros((self.nx+2,self.ny+2),device=self.device,dtype=self.dtype)
 
         return
 
@@ -297,6 +318,23 @@ class FluidSolver:
         #     [2*self.visc*dudx-p, upper],
         #     [upper, 2*self.visc*dvdy-p]
         # ]
+
+    def project(self, rhs, p):
+        mult_factor = self.dt/self.rho
+        coeff = mult_factor*self.mu0_all[1:-1,1:-1]
+        coeff_horizontal = (coeff[1:,:]+coeff[:-1,:])/2
+        coeff_vertical = (coeff[:,1:]+coeff[:,:-1])/2
+        coeff_horizontal=torch.vstack((mult_factor*self.zc,coeff_horizontal,mult_factor*self.zc))
+        coeff_vertical=torch.hstack((mult_factor*self.zr,coeff_vertical,mult_factor*self.zr))
+        p = torch.zeros_like(p)
+        p, _ = self.poisson_solver.solve_multigrid( # f, u, c
+            rhs,
+            p,
+            coeff,
+            coeff_horizontal,
+            coeff_vertical,
+        )
+        return p
 
     def solver_iteration_old(self,u,v,p):
         """
@@ -398,16 +436,11 @@ class FluidSolver:
 
         # ====== solve the pressure poisson equation and project ======
         coeff = self.dt/self.rho
-        rhs = (self.divergence(uprime,vprime)-self.div_body)/coeff
-        p = torch.zeros_like(u)
-        p, _ = self.poisson_solver.solve_multigrid( # f, u, c
-            rhs,
-            p,
-            self.mu0_all,
-            self.mu0_all,
-            self.mu0_all,
-        )
+        self.div_body=self.divergence(uprime,vprime)-self.div_body
+        rhs = self.div_body[1:-1,1:-1]
+        p=self.project(rhs, p)
         (p_x, p_y) = self.gradient(p)
+
         u = uprime-coeff*self.mu0_all*p_x
         v = vprime-coeff*self.mu0_all*p_y
 
@@ -469,22 +502,18 @@ class FluidSolver:
 
         # ====== solve the pressure poisson equation and project ======
         coeff = self.dt/self.rho
-        rhs = (self.divergence(uprime,vprime)-self.div_body)/coeff
-        # p = torch.zeros_like(u)
-        p, _ = self.poisson_solver.solve_multigrid( # f, u, c
-            rhs,
-            p,
-            self.mu0_all,
-            self.mu0_all,
-            self.mu0_all,
-        )
+        self.div_body=self.divergence(uprime,vprime)-self.div_body
+        rhs = self.div_body[1:-1,1:-1]
+        p=self.project(rhs, p)
         (p_x, p_y) = self.gradient(p)
+
         u = uprime-coeff*self.mu0_all*p_x
         v = vprime-coeff*self.mu0_all*p_y
         self.adv_diff_solver.set_BCs(u,v)
 
-
         return (u,v,p)
+
+
 
 
     def solver_iteration(self,u,v,p,iteration):
@@ -499,23 +528,17 @@ class FluidSolver:
         self.adv_diff_solver.set_BCs(uprime,vprime)
 
         # ====== solve the pressure poisson equation ======
-        coeff = self.dt/self.rho
         self.div_body=self.divergence(uprime,vprime)-self.m_m0_all*self.divergence(self.body_u,self.body_v)
-        rhs = self.div_body/self.dt
-        # p = torch.zeros_like(p)
-        p, _ = self.poisson_solver.solve_multigrid( # f, u, c
-            rhs,
-            p,
-            self.mu0_all/self.rho,
-            self.mu0_all,
-            self.mu0_all,
-        )
+        rhs = self.div_body[1:-1,1:-1]
+        p=self.project(rhs, p)
 
         # ====== projection step ======
-        (p_x, p_y) = self.gradient(p[1:-1,1:-1])
-        u = uprime-coeff*self.mu0_all*p_x
-        v = vprime-coeff*self.mu0_all*p_y
-        self.adv_diff_solver.set_BCs(u,v)
+        (p_x, p_y) = self.gradient(p)
+        u = uprime-self.dt/self.rho*self.mu0_all*p_x
+        v = vprime-self.dt/self.rho*self.mu0_all*p_y
+
+
+        # self.adv_diff_solver.set_BCs(u,v)
 
         # if iteration==4:
         #     from IPython import embed; embed()
@@ -568,8 +591,8 @@ class FluidSolver:
 
             for i, body in enumerate(self.composite_body.bodies):
 
-                d=self.composite_body.sdf_vals[i]#-self.eps
-                dall=self.composite_body.sdf_val#-self.eps
+                d=self.composite_body.sdf_vals[i] #-self.eps/3
+                # dall=self.composite_body.sdf_val #-self.eps/3
 
 
                 # self.delta = self.composite_body.bodies[0].phi(d)*self.composite_body.bodies[0].phi(dall)*self.eps*self.eps
@@ -580,8 +603,8 @@ class FluidSolver:
                 xstress_tensor = (normal_x*ss_11+normal_y*ss_diag)*self.delta
                 ystress_tensor = (normal_x*ss_diag+normal_y*ss_22)*self.delta
 
-                self.friction_force_lin_x[i] = -self.visc*torch.trapz(torch.trapz(xstress_tensor, dx=self.dy), dx=self.dx)
-                self.friction_force_lin_y[i] = -self.visc*torch.trapz(torch.trapz(ystress_tensor, dx=self.dy), dx=self.dx)
+                # self.friction_force_lin_x[i] = -self.visc*torch.trapz(torch.trapz(xstress_tensor, dx=self.dy), dx=self.dx)
+                # self.friction_force_lin_y[i] = -self.visc*torch.trapz(torch.trapz(ystress_tensor, dx=self.dy), dx=self.dx)
 
                 # self.friction_force_ang_z[i] = -self.visc*torch.trapz(torch.trapz(
                 #     xstress_tensor*(self.X-self.composite_body.com_pos[i,0])+
@@ -639,8 +662,8 @@ class FluidSolver:
                 # plotting.plot2d_imshow_composite(X,Y,u.cpu(),self.sdf_properties,self.extent,iteration,self.save_path,"u",None, None)
                 # plotting.plot2d_imshow_composite(X,Y,v.cpu(),self.sdf_properties,self.extent,iteration,self.save_path,"v",None, None)
 
-                plotting.plot2d_imshow_composite(X,Y,vec_x,self.sdf_properties,self.extent,iteration,self.save_path,"bodyu",None, None)
-                plotting.plot2d_imshow_composite(X,Y,vec_y,self.sdf_properties,self.extent,iteration,self.save_path,"bodyv",None, None)
+                # plotting.plot2d_imshow_composite(X,Y,vec_x,self.sdf_properties,self.extent,iteration,self.save_path,"bodyu",None, None)
+                # plotting.plot2d_imshow_composite(X,Y,vec_y,self.sdf_properties,self.extent,iteration,self.save_path,"bodyv",None, None)
 
                 plotting.plot2d_imshow_only(divergence,self.extent,iteration,self.save_path,"divergence",None, None)
 

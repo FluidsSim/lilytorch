@@ -49,14 +49,27 @@ class PoissonSolver:
 
         # J=(ch[1:,:]+ch[:-1,:]+cv[:,1:]+cv[:,:-1]) # J_{i,j}=c_{i-0.5,j}+c_{i+0.5,j}+c_{i,j-0.5}+c_{i,j+0.5}
         # Au=ch[1:,:]*p[2:,1:-1]+ch[:-1,:]*p[:-2,1:-1]+cv[:,1:]*p[1:-1,2:]+cv[:,:-1]*p[1:-1,:-2]-J*p[1:-1,1:-1]
-        
+
+        J=(ch[1:,:]+ch[:-1,:]+cv[:,1:]+cv[:,:-1]) # J_{i,j}=c_{i-0.5,j}+c_{i+0.5,j}+c_{i,j-0.5}+c_{i,j+0.5}
+
+        # feW=torch.zeros_like(ch)
+        # feW[:-1,:] = ch[:-1]*(p[2:,1:-1]-p[1:-1,2:])
+        # fnS=torch.zeros_like(cv)
+        # fnS[:,:-1] = cv[:,:-1]*(p[1:-1,2:]-p[:-2,1:-1])
+        # Au=feW[1:,:]-feW[:-1]+fnS[:,1:]-fnS[:,:-1]
+
+
+        # Au=ch[:-1,:]*p[2:,1:-1]+ch[:-1,:]*p[:-2,1:-1]+cv[:,1:]*p[1:-1,2:]+cv[:,:-1]*p[1:-1,:-2]-J*p[1:-1,1:-1]
+
+
+        Au=ch[1:,:]*p[2:,1:-1]+ch[:-1,:]*p[:-2,1:-1]+cv[:,1:]*p[1:-1,2:]+cv[:,:-1]*p[1:-1,:-2]-J*p[1:-1,1:-1]
+
         # from IPython import embed; embed()
-        J=(ch[1:,1:-1]+ch[:-1,1:-1]+cv[1:-1,1:]+cv[1:-1,:-1]) # J_{i,j}=c_{i-0.5,j}+c_{i+0.5,j}+c_{i,j-0.5}+c_{i,j+0.5}
-        Au=torch.zeros_like(p)
-        Au[1:-1,:]=ch[1:,:]*p[2:,:]+ch[:-1,:]*p[:-2,:]-(ch[1:,:]+ch[:-1,:])*p[1:-1,:]
-        Au[:,1:-1]+=cv[:,1:]*p[:,2:]+cv[:,:-1]*p[:,:-2]-(cv[:,1:]+cv[:,:-1])*p[:,1:-1]
-        
-        return Au[1:-1,1:-1]/h2, torch.where(J<self.jcap_tol,0,h2/J)  # returns Au and Jinv
+        # Au=torch.zeros_like(p)
+        # Au[1:-1,:]=ch[1:,:]*p[2:,1:-1]+ch[:-1,:]*p[:-2,:]-(ch[1:,:]+ch[:-1,:])*p[1:-1,:]
+        # Au[:,1:-1]+=cv[:,1:]*p[:,2:]+cv[:,:-1]*p[:,:-2]-(cv[:,1:]+cv[:,:-1])*p[:,1:-1]
+
+        return Au/h2, torch.where(J<self.jcap_tol,0,h2/J)  # returns Au and Jinv
 
         # J  = 4
         # Au = (p[2:,1:-1]+p[:-2,1:-1]+p[1:-1,2:]+p[1:-1,:-2]-J*p[1:-1,1:-1])
@@ -70,12 +83,18 @@ class PoissonSolver:
         for i in range(self.nsmoothing):
             Au, Jinv = self.FD_operator(p, ch ,cv, h2)
             r = self.compute_residual(Au,f) # compute residual
+            # tmp = (-h2*f+(ch[1:,:]*p[2:,1:-1]+ch[:-1,:]*p[:-2,1:-1]+cv[:,1:]*p[1:-1,2:]+cv[:,:-1]*p[1:-1,:-2]))/(ch[1:,:]+ch[:-1,:]+cv[:,1:]+cv[:,:-1])
+
+            # tmp = (-h2*f+(p[2:,1:-1]+p[:-2,1:-1]+p[1:-1,2:]+p[1:-1,:-2]))/4
+
+            # p[1:-1,1:-1] = self.w*tmp + (1-self.w)*p[1:-1,1:-1]
+
             p[1:-1,1:-1] -= self.w*r*Jinv # following A Multigrid Tutorial, 2nd Edition from Briggs, Henson, and McCormick, 2000
             self.BC(p)
         Au, Jinv = self.FD_operator(p, ch ,cv, h2)
         r = self.compute_residual(Au,f) # compute residual
         return p, r
-    
+
     def compute_residual(self,Au,f):
         r=f-Au
         # r-=r.mean()
@@ -248,18 +267,15 @@ class PoissonSolver:
         # ch_ext = (c_ext[1:,:]+c_ext[:-1,:])/2
         # cv_ext = (c_ext[:,1:]+c_ext[:,:-1])/2
 
-        zc=torch.ones((1,c.shape[0]), device=self.device, dtype=self.dtype)
-        zr=torch.ones((c.shape[1]+1,1), device=self.device, dtype=self.dtype)
-        ch_ext=torch.vstack((zc,ch,zc))
-        ch_ext=torch.hstack((zr,ch_ext,zr))
+        # zc=torch.ones((1,c.shape[0]),device=self.device, dtype=self.dtype)
+        # zr=torch.ones((c.shape[1],1),device=self.device, dtype=self.dtype)
+        # ch=torch.vstack((zc,ch,zc))
+        # cv=torch.hstack((zr,cv,zr))
 
-        zc=torch.ones((1,c.shape[0]+1), device=self.device, dtype=self.dtype)
-        zr=torch.ones((c.shape[1],1), device=self.device, dtype=self.dtype)
-        cv_ext=torch.hstack((zr,cv,zr))
-        cv_ext=torch.vstack((zc,cv_ext,zc))
+        # print(ch.shape, cv.shape)
 
         # smoothing
-        p, r = self.Jacobi(f, p, ch_ext, cv_ext, h2)
+        p, r = self.Jacobi(f, p, ch, cv, h2)
 
         n=f.shape[0]
 
@@ -270,8 +286,10 @@ class PoissonSolver:
 
             r_coarse = self.restrict_simple(r)
             c_coarse = self.restrict_simple(c)
-            ch_coarse = 0.5*(ch[1::2,::2]+ch[:-1:2,::2])
-            cv_coarse = 0.5*(cv[::2,1::2]+cv[::2,:-1:2])
+            # ch_coarse = 0.5*(ch[::2,1::2]+ch[::2,:-1:2])
+            # cv_coarse = 0.5*(cv[1::2,::2]+cv[:-1:2,::2])
+            ch_coarse = 0.5*(ch[::2,1::2]+ch[::2,:-1:2])
+            cv_coarse = 0.5*(cv[1::2,::2]+cv[:-1:2,::2])
 
             # import matplotlib.pyplot as plt
 
@@ -292,7 +310,7 @@ class PoissonSolver:
             p[1:-1,1:-1]+=self.prolong_simple(err_coarse[1:-1,1:-1])
 
             # Jacobi relaxation
-            p, r = self.Jacobi(f, p, ch_ext, cv_ext, h2)
+            p, r = self.Jacobi(f, p, ch, cv, h2)
 
             # if self.verbose:
             #     err_l2 = self.l2_norm(r)
@@ -318,7 +336,7 @@ def test_solvers():
     from matplotlib import pyplot
     import poisson_solvers.solutions2d as examples
 
-    X, Y, u_exact, f, c, ch, cv = examples.variable_coeff_c_hat(N, device=device)
+    X, Y, u_exact, f, c, ch, cv = examples.multigrid_course(N, device=device)
 
     dtype=f.dtype
     u0 = torch.zeros((N+2,N+2),device=device,dtype=dtype)
@@ -332,8 +350,17 @@ def test_solvers():
         max_cycles=20,
         nsmoothing=10,
         tol=1e-5,
-        w=0.7
+        w=0.8
     )
+
+
+    # print("#############")
+    # zc=torch.ones((1,c.shape[0]),device=device, dtype=dtype)
+    # zr=torch.ones((c.shape[1],1),device=device, dtype=dtype)
+    # ch=torch.vstack((zc,ch,zc))
+    # cv=torch.hstack((zr,cv,zr))
+
+    # u, r = solver.Jacobi(f, u0, ch, cv, h**2)
 
     print("#############")
     u, r = solver.solve_multigrid(f, u0, c, ch, cv)

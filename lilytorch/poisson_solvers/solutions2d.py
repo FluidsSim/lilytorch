@@ -5,7 +5,16 @@ import numpy as np
 """
 2d functions and solutions of the poisson equation
 """
-dtype=torch.float64
+dtype=torch.float32
+
+def expand_c(c,ch,cv,device=torch.device("cpu")):
+
+    zc=torch.ones((1,c.shape[0]),device=device,dtype=dtype)
+    zr=torch.ones((c.shape[1],1),device=device,dtype=dtype)
+    ch=torch.vstack((zc,ch,zc))
+    cv=torch.hstack((zr,cv,zr))
+    return ch, cv
+
 
 def sincos_f(N,device=torch.device("cpu")):
 
@@ -82,7 +91,11 @@ def pyro(N,device=torch.device("cpu")):
     y=torch.linspace(0,1,N,device=device,dtype=dtype)
     [X,Y]=torch.meshgrid(x,y, indexing="ij")
     c=torch.ones((N,N),device=device,dtype=dtype)
+    ch = 0.5*(c[1::,]+c[:-1,:])
+    cv = 0.5*(c[:,1::]+c[:,:-1])
+    ch, cv = expand_c(c,ch,cv,device=device)
 
+    print(ch.shape, cv.shape)
 
     f=(-2.0 * ((1.0 - 6.0 * X**2) * Y**2 * (1.0 - Y**2) +
                    (1.0 - 6.0 * Y**2) * X**2 * (1.0 - X**2)))
@@ -93,7 +106,7 @@ def pyro(N,device=torch.device("cpu")):
 
     u_exact = (X**2-X**4)*(Y**4-Y**2)
 
-    return X, Y, u_exact, f, c, c, c
+    return X, Y, u_exact, f, c, ch, cv
 
 def lilypad(N,device=torch.device("cpu")):
     x=torch.linspace(0,N,N+1,device=device,dtype=dtype)
@@ -317,7 +330,7 @@ def raeli(N,device=torch.device("cpu"),create_box=False):
 
     beta=1
     alpha=0
-    sigma=10
+    sigma=30
 
     ks=alpha
     kg=beta
@@ -334,6 +347,12 @@ def raeli(N,device=torch.device("cpu"),create_box=False):
 
     c_h=alpha+(beta-alpha)*(torch.tanh(sigma*d_h)+1)/2
     c_v=alpha+(beta-alpha)*(torch.tanh(sigma*d_v)+1)/2
+
+    zc=torch.ones((1,c.shape[0]),device=device,dtype=dtype)
+    c_h=torch.vstack((zc,c_h,zc))
+
+    zr=torch.ones((c.shape[1],1),device=device,dtype=dtype)
+    c_v=torch.hstack((zr,c_v,zr))
 
     print(c_v.shape)
 
@@ -366,7 +385,87 @@ def multigrid_course(N,device=torch.device("cpu")):
     Multigrid course
     """
 
-    from poisson_2nd_order_2 import PoissonSolver
+    from lilytorch.poisson_solvers.poisson_2nd_order_2 import PoissonSolver
+
+    xlim=[0,3.2]
+    ylim=[0,3.2]
+    h=(xlim[1]-xlim[0])/N
+    h2=h*h
+
+    x=torch.arange(xlim[0],xlim[1],h,device=device,dtype=dtype)
+    y=torch.arange(ylim[0],ylim[1],h,device=device,dtype=dtype)
+    x_ext=torch.arange(xlim[0]-h/2,xlim[1]+h/2,h,device=device,dtype=dtype)
+    y_ext=torch.arange(ylim[0]-h/2,ylim[1]+h/2,h,device=device,dtype=dtype)
+
+
+    [X,Y]=torch.meshgrid(x,y, indexing="ij")
+    # [X_h,Y_h]=torch.meshgrid(x_ext,y,indexing="ij")
+    # [X_v,Y_v]=torch.meshgrid(x,y_ext,indexing="ij")
+    # ch = 5.0+0.5*torch.exp(torch.sin(2.0*torch.pi*X_h)*torch.sin(2.0*torch.pi*Y_h))
+    # cv = 5.0+0.5*torch.exp(torch.sin(2.0*torch.pi*X_v)*torch.sin(2.0*torch.pi*Y_v))
+
+    c=5.0+0.5*torch.exp(torch.sin(2.0*torch.pi*X)*torch.sin(2.0*torch.pi*Y))
+    ch = (c[1:,:]+c[:-1,:])/2
+    cv = (c[:,1:]+c[:,:-1])/2
+    zc=torch.ones((1,c.shape[0]),device=device,dtype=dtype)
+    zr=torch.ones((c.shape[1],1),device=device,dtype=dtype)
+    ch=torch.vstack((zc,ch,zc))
+    cv=torch.hstack((zr,cv,zr))
+
+
+    # c=torch.ones((N,N),device=device,dtype=dtype)
+    # solver = PoissonSolver(
+    #     dtype,
+    #     device,
+    #     h
+    # )
+
+
+    # c=torch.exp(torch.sin(2.0*torch.pi*X)*torch.sin(2.0*torch.pi*Y))
+    # ch = torch.exp(torch.sin(2.0*torch.pi*X_h)*torch.sin(2.0*torch.pi*Y_h))
+    # cv = torch.exp(torch.sin(2.0*torch.pi*X_v)*torch.sin(2.0*torch.pi*Y_v))
+    # zc=torch.ones((1,c.shape[0]),device=device,dtype=dtype)
+    # zr=torch.ones((c.shape[1],1),device=device,dtype=dtype)
+    # ch=torch.vstack((zc,ch,zc))
+    # cv=torch.hstack((zr,cv,zr))
+    # ch=torch.vstack((zc,ch,zc))
+    # cv=torch.hstack((zr,cv,zr))
+
+    # c=torch.ones((N,N),device=device,dtype=dtype)
+
+
+
+    u_exact=torch.zeros((N+2,N+2),device=device,dtype=dtype)
+    u_exact[1:-1,1:-1]=torch.exp(torch.cos(2.0*torch.pi*X)*torch.cos(2.0*torch.pi*Y))
+
+    c=torch.ones((N,N),device=device,dtype=dtype)
+    solver = PoissonSolver(
+        dtype,
+        device,
+        h
+    )
+
+    #     # expand c to the size of p
+    # zc=torch.ones((1,c.shape[0]),device=device,dtype=dtype)
+    # zr=torch.ones((c.shape[1]+2,1),device=device,dtype=dtype)
+
+    # c_exp=torch.vstack((zc,c,zc))
+    # c_exp=torch.hstack((zr,c_exp,zr))
+
+    solver.BC(u_exact)
+    solver.BC(ch)
+    solver.BC(cv)
+    f, _=solver.FD_operator(u_exact, ch, cv, h2)
+    return X, Y, u_exact, f, c, ch, cv
+
+
+
+def multigrid_course2(N,device=torch.device("cpu")):
+    """
+    Multigrid course
+    """
+
+    from lilytorch.poisson_solvers.poisson_2nd_order_2 import PoissonSolver
     h=1/(N-1) # because xh=xl=yh=yl=1 (grid is [0,1]x[0,1])
     h2=h*h
     x=torch.linspace(0,1,N,device=device,dtype=dtype)
@@ -376,7 +475,8 @@ def multigrid_course(N,device=torch.device("cpu")):
     [X,Y]=torch.meshgrid(x,y, indexing="ij")
 
     u_exact=torch.zeros((N+2,N+2),device=device,dtype=dtype)
-    u_exact[1:-1,1:-1]=torch.exp(torch.sin(2.0*torch.pi*X)*torch.sin(2.0*torch.pi*Y))-1
+    u_exact[1:-1,1:-1]=torch.exp(torch.cos(2.0*torch.pi*X)*torch.cos(2.0*torch.pi*Y))-1
+
 
     c=torch.ones((N,N),device=device,dtype=dtype)
     solver = PoissonSolver(
@@ -387,14 +487,16 @@ def multigrid_course(N,device=torch.device("cpu")):
 
         # expand c to the size of p
     zc=torch.ones((1,c.shape[0]),device=device,dtype=dtype)
-    zr=torch.ones((c.shape[1]+2,1),device=device,dtype=dtype)
+    zr=torch.ones((c.shape[1],1),device=device,dtype=dtype)
 
-    c_exp=torch.vstack((zc,c,zc))
-    c_exp=torch.hstack((zr,c_exp,zr))
+    ch = (c[1:,:]+c[:-1,:])/2
+    cv = (c[:,1:]+c[:,:-1])/2
 
-    ch = (c_exp[1:,:]+c_exp[:-1,:])/2
-    cv = (c_exp[:,1:]+c_exp[:,:-1])/2
+
+    ch=torch.vstack((zc,ch,zc))
+    cv=torch.hstack((zr,cv,zr))
+
 
     solver.BC(u_exact)
     f, _=solver.FD_operator(u_exact, ch, cv, h2)
-    return X, Y, u_exact, f, c, c, c
+    return X, Y, u_exact, f, c, ch, cv

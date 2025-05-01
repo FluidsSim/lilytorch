@@ -159,4 +159,4 @@ class FluidCallback(TaskCallback):
         physics.data.xfrc_applied[indices, 1] = (self.friction_force_lin_y + self.pressure_force_y) * self.force_scaling * task.units.newtons
         physics.data.xfrc_applied[indices, 5] = self.friction_force_ang_z * self.force_scaling * task.units.newtons
 
-        print(physics.data.xfrc_applied[indices, 0])
+        # print(physics.data.xfrc_applied[indices, 0])

@@ -28,6 +28,7 @@ class AdvDiffSolver:
         """
 
         self.device=device
+        self.dtype=x.dtype
 
         self.dt = dt
         dx=x[1]-x[0]
@@ -48,8 +49,8 @@ class AdvDiffSolver:
         self.nx = len(x)
         self.ny = len(y)
         self.nm2 = self.nx-2
-        self.ADBzeros = torch.zeros(self.nm2,self.nm2, device=self.device)
-        self.ADBones = torch.ones(self.nm2,self.nm2, device=self.device)
+        self.ADBzeros = torch.zeros(self.nm2,self.nm2, device=self.device,dtype=self.dtype)
+        self.ADBones = torch.ones(self.nm2,self.nm2, device=self.device,dtype=self.dtype)
 
         self.X, self.Y = torch.meshgrid(x,y, indexing="ij")
         self.X = self.X.to(device)
@@ -58,8 +59,8 @@ class AdvDiffSolver:
         self.yflat = self.Y.flatten()
 
         # dummy initialization for the implicit solver
-        self.gu = RegularGridInterpolator((x,y), torch.zeros_like(self.X, device=self.device), fill_value=None)
-        self.gv = RegularGridInterpolator((x,y), torch.zeros_like(self.X, device=self.device), fill_value=None)
+        self.gu = RegularGridInterpolator((x,y), torch.zeros_like(self.X, device=self.device,dtype=self.dtype), fill_value=None)
+        self.gv = RegularGridInterpolator((x,y), torch.zeros_like(self.X, device=self.device,dtype=self.dtype), fill_value=None)
 
         self.BC_type_u   = BC_type_u
         self.BC_values_u = BC_values_u
