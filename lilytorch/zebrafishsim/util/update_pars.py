@@ -156,10 +156,7 @@ def update_muscle_param(animat_options, pars):
         animat_options["control"]["muscles"][joint_i]["delta"] = muscle_pars[1]['delta']
 
         animat_options["control"]["muscles"][joint_i]["delta"] *= pars.damping_factor
-<<<<<<< HEAD
         animat_options["control"]["muscles"][joint_i]["alpha"] *= pars.stiffness_factor
-=======
->>>>>>> cb21b7af07e09156fd8c754d1e4dcd698ed77036
 
 
 

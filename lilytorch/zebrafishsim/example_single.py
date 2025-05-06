@@ -16,7 +16,6 @@ def exercise_single(**kwargs):
     os.makedirs(log_path, exist_ok=True)
 
 
-<<<<<<< HEAD
     amps=np.ones(15)*0.5
     # amps[:5]=0
     bias=0.*np.ones(15)
@@ -36,25 +35,6 @@ def exercise_single(**kwargs):
         compute_metrics = 3,
         return_network  = True,
         gravity        = [0,0,0],
-=======
-    amps=np.ones(15)*0.3
-    amps[:5]=0
-    bias=0.*np.ones(15)
-    bias[:5]=0
-
-
-    all_pars = SimulationParameters(
-        n_iterations    = 5001,
-        n_joints        = 15,
-        controller      = "sine",
-        amp             = amps,
-        bias            = bias,
-        wavefrequency   = 1,
-        freq            = 2,
-        log_path        = log_path,
-        compute_metrics = 3,
-        return_network  = True,
->>>>>>> cb21b7af07e09156fd8c754d1e4dcd698ed77036
         **kwargs
     )
 

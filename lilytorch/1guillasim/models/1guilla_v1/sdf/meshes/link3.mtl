@@ -1,6 +1,5 @@
 # Blender 4.3.2 MTL File: '1guilla.blend'
 # www.blender.org
-<<<<<<< HEAD
 
 newmtl Material
 Ns 250.000000
@@ -11,5 +10,3 @@ Ke 0.000000 0.000000 0.000000
 Ni 1.500000
 d 1.000000
 illum 2
-=======
->>>>>>> cb21b7af07e09156fd8c754d1e4dcd698ed77036

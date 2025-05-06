@@ -1,8 +1,4 @@
-<<<<<<< HEAD
 sdf: models/zebrafish_v1_triangulated_scale_x_80/sdf/zebrafish.sdf
-=======
-sdf: zebrafish_v1_triangulated_scale_x_80/sdf/zebrafish.sdf
->>>>>>> cb21b7af07e09156fd8c754d1e4dcd698ed77036
 spawn:
   loader: 0
   mode: !!python/object/apply:farms_core.model.options.SpawnMode
@@ -1195,11 +1191,7 @@ control:
 
 name: Animat
 show_xfrc: false
-<<<<<<< HEAD
 scale_xfrc: 1
-=======
-scale_xfrc: 10
->>>>>>> cb21b7af07e09156fd8c754d1e4dcd698ed77036
 mujoco:
   solref:
   - -80000.0

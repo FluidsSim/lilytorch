@@ -47,11 +47,7 @@ class ZebrafishFluidController(AnimatNetwork):
 
         pars = yaml2pyobject("../scripts/zebrafish_fluid.yaml")
 
-<<<<<<< HEAD
         self.fluid_solver = FluidSolver(pars, dtype=torch.float32, costum_update=self.bodies_update)
-=======
-        self.fluid_solver = FluidSolver(pars, costum_update=self.bodies_update)
->>>>>>> cb21b7af07e09156fd8c754d1e4dcd698ed77036
         self.device = self.fluid_solver.device
         self.fluid_solver.composite_body.update = self.update # modify the update rule
         # self.fluid_solver.sdf_properties = self.initialize()
@@ -66,13 +62,8 @@ class ZebrafishFluidController(AnimatNetwork):
 
         _3d_2d_scaling=1
         # scale forces by the z-bounding box size
-<<<<<<< HEAD
         # self.callback.force_scaling = 1/_3d_2d_scaling
         self.callback.force_scaling = 1 #np.array([np.diff(body.bb[2])[0]/_3d_2d_scaling for body in self.fluid_solver.composite_body.bodies])
-=======
-        self.callback.force_scaling = 1/_3d_2d_scaling
-        # self.callback.force_scaling = np.array([np.diff(body.bb[2])[0]/_3d_2d_scaling for body in self.fluid_solver.composite_body.bodies])
->>>>>>> cb21b7af07e09156fd8c754d1e4dcd698ed77036
 
     def initialize(self):
         r = torch.tensor([[-1.0,0.0],[0.0,-1.0]]).to(self.device)
@@ -235,11 +226,7 @@ class ZebrafishFluidController(AnimatNetwork):
 
         # === stepping the controller ===
         self.data.state.array[iteration] = np.concatenate([
-<<<<<<< HEAD
             self.controller.step(iteration, time.cpu().numpy(), timestep.cpu().numpy(), pos=self.pos, urdf_positions=self.urdf_positions),
-=======
-            self.controller.step(iteration, time, timestep, pos=self.pos, urdf_positions=self.urdf_positions),
->>>>>>> cb21b7af07e09156fd8c754d1e4dcd698ed77036
             self.offsets
             ])
 
