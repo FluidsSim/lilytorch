@@ -8,12 +8,20 @@ import numpy as np
 from farms_core import pylog
 pylog.set_level('warning')
 from farms_core.simulation.options import Simulator
+<<<<<<< HEAD
+from farms_core.model.options import SpawnMode
+=======
+>>>>>>> cb21b7af07e09156fd8c754d1e4dcd698ed77036
 from farms_mujoco.sensors.camera import CameraCallback
 import util.callbacks as callbacks
 from farms_sim.simulation import (
     setup_from_clargs,
     run_simulation,
 )
+<<<<<<< HEAD
+from util.rw import Dict2Class
+=======
+>>>>>>> cb21b7af07e09156fd8c754d1e4dcd698ed77036
 
 from farms_amphibious.model.options import GenericOptions
 from farms_amphibious.data.data import (
@@ -76,6 +84,13 @@ def run_experiment(pars):
 
     animat_options['muscle_parameters_tag'] = pars.muscle_parameters_tag
 
+<<<<<<< HEAD
+    animat_options["spawn"]         = Dict2Class(pars.spawn)
+
+    animat_options.spawn.mode = SpawnMode(pars.spawn["mode"])
+
+=======
+>>>>>>> cb21b7af07e09156fd8c754d1e4dcd698ed77036
     # update muscle and drag parameters
     util.update_pars.update_muscle_param(animat_options, pars)
     # util.update_pars.update_drag_param(animat_options)
@@ -120,6 +135,10 @@ def run_experiment(pars):
             ]
     else:
         print("No swimming mode selected")
+<<<<<<< HEAD
+
+=======
+>>>>>>> cb21b7af07e09156fd8c754d1e4dcd698ed77036
     if sim_options.video:
         camera = CameraCallback(
             camera_id=sim_options.camera_id,
@@ -132,11 +151,18 @@ def run_experiment(pars):
         )
         options['callbacks']+=[camera]
 
+<<<<<<< HEAD
+
+    # load fluid solver
+    animat_network = ZebrafishFluidController(animat_data, controller, options['callbacks'][0])
+
+=======
     # load fluid solver
     animat_network = ZebrafishFluidController(animat_data, controller, options['callbacks'][0])
 
     # animat_network = ZebrafishFluidSegmentController(animat_data, controller, options['callbacks'][0])
 
+>>>>>>> cb21b7af07e09156fd8c754d1e4dcd698ed77036
     # Generic controller (OK)
     animat_controller: Union[GenericController, KinematicsController] = (
         get_generic_controller(

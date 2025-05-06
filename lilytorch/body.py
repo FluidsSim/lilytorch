@@ -3,6 +3,11 @@ import os
 import torch
 import numpy as np
 import open3d as o3d
+<<<<<<< HEAD
+o3d.utility.set_verbosity_level(o3d.utility.VerbosityLevel.Error) # exclusevely show errors
+
+=======
+>>>>>>> cb21b7af07e09156fd8c754d1e4dcd698ed77036
 try:
     from farms_core.io.sdf import ModelSDF
 except:

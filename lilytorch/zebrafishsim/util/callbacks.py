@@ -148,7 +148,11 @@ class FluidCallback(TaskCallback):
         self.friction_force_ang_z = np.zeros(self.nfrc)
         self.pressure_force_x     = np.zeros(self.nfrc)
         self.pressure_force_y     = np.zeros(self.nfrc)
+<<<<<<< HEAD
+        self.force_scaling        = 0
+=======
         self.force_scaling        = 1
+>>>>>>> cb21b7af07e09156fd8c754d1e4dcd698ed77036
 
     # def after_step(self, task, physics):
     def before_step(self, task, action, physics):

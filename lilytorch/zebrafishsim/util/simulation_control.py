@@ -14,6 +14,10 @@ from farms_sim.simulation import (
     setup_from_clargs,
     run_simulation,
 )
+<<<<<<< HEAD
+import util.callbacks as callbacks
+=======
+>>>>>>> cb21b7af07e09156fd8c754d1e4dcd698ed77036
 
 from farms_amphibious.callbacks import setup_callbacks
 from farms_amphibious.model.options import GenericOptions
@@ -42,7 +46,11 @@ import sys
 def run_experiment(pars):
 
     """Main"""
+<<<<<<< HEAD
+    prepath = "models/zebrafish_v1_triangulated_scale_x_80/"
+=======
     prepath = "models/zebrafish_v1/"
+>>>>>>> cb21b7af07e09156fd8c754d1e4dcd698ed77036
     args = [
         '--simulator',
         'MUJOCO',
@@ -101,9 +109,12 @@ def run_experiment(pars):
     util.update_drag_param(animat_options)
     util.update_swimming_mode(arena_options,swimming_mode=swimming_mode)
 
+<<<<<<< HEAD
+=======
     # load the correct sdf files depending on the version
     animat_options["sdf"] = prepath+"sdf/zebrafish.sdf"
 
+>>>>>>> cb21b7af07e09156fd8c754d1e4dcd698ed77036
     if pars.random_spine==True:
         joints = animat_options["morphology"]["joints"]
         for joint in joints:
@@ -141,7 +152,20 @@ def run_experiment(pars):
     # Additional engine-specific options
     options = {}
     camera=None
+<<<<<<< HEAD
+
+    options = {}
+    options['callbacks'] = []
+    camera=None
     assert simulator == Simulator.MUJOCO
+    if pars.swimming_mode=="drag":
+        options['callbacks'] += [
+                callbacks.DragCallback(animat_options, arena_options),
+            ]
+
+=======
+    assert simulator == Simulator.MUJOCO
+>>>>>>> cb21b7af07e09156fd8c754d1e4dcd698ed77036
     if sim_options.video:
         camera = CameraCallback(
             camera_id=sim_options.camera_id,
@@ -153,11 +177,14 @@ def run_experiment(pars):
             height=sim_options.video_resolution[1],
             skips=sim_options.skips
         )
+<<<<<<< HEAD
+=======
     options['callbacks'] = setup_callbacks(
         animat_options=animat_options,
         arena_options=arena_options,
         camera=camera,
     )
+>>>>>>> cb21b7af07e09156fd8c754d1e4dcd698ed77036
 
     # Simulation
     pylog.info('Creating simulation environment')

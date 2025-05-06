@@ -36,10 +36,20 @@ solver :
   nt                : 80000
   nu                : 1.0e-6
   rho               : 1.0e+3
+<<<<<<< HEAD
+
+  poisson_tol       : 1.0e-4
+  poisson_max_cycles: 30
+  jacobi_weight     : 0.8
+  poisson_nsmoothing: 10
+  poisson_verbose   : True
+  poisson_filename : "data/"
+=======
   poisson_tol       : 1.0e-4
   poisson_max_cycles: 30
   poisson_nsmoothing: 10
   poisson_verbose   : True
+>>>>>>> cb21b7af07e09156fd8c754d1e4dcd698ed77036
 
 
 boundary_conditions:
@@ -71,7 +81,11 @@ body:
   plotting: False
   compute_interp: False
   plotting_meshes: False
+<<<<<<< HEAD
+  n_samples: (1000, 1000)
+=======
   n_samples: (500, 500)
+>>>>>>> cb21b7af07e09156fd8c754d1e4dcd698ed77036
   update_maps:
     rotation: "None"
     translation:

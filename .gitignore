@@ -34,5 +34,7 @@ make.bat
 *.vscode
 
 # FARMS
-FARMS/farms_*
-FARMS/dm_control
+lilytorch/FARMS/
+
+lilytorch/zebrafishsim/data/*
+lilytorch/1guillasim/data/*

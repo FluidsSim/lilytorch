@@ -25,14 +25,14 @@ class PoissonSolver:
         return torch.sqrt((r**2).mean())
 
     def BC(self, q):
-        q[0, :]    = q[1, :]
-        q[-1, :]   = q[-2, :]
-        q[:, 0]    = q[:, 1]
-        q[:, -1]   = q[:, -2]
-        # q[0, :]    = -q[1, :]
-        # q[-1, :]   = -q[-2, :]
-        # q[:, 0]    = -q[:, 1]
-        # q[:, -1]   = -q[:, -2]
+        # q[0, :]    = q[1, :]
+        # q[-1, :]   = q[-2, :]
+        # q[:, 0]    = q[:, 1]
+        # q[:, -1]   = q[:, -2]
+        q[0, :]    = -q[1, :]
+        q[-1, :]   = -q[-2, :]
+        q[:, 0]    = -q[:, 1]
+        q[:, -1]   = -q[:, -2]
 
     def FD_operator(self, p, ch, cv, h2):
         """
@@ -235,11 +235,6 @@ class PoissonSolver:
             ch_coarse = 0.5*(ch[::2,1::2]+ch[::2,:-1:2])
             cv_coarse = 0.5*(cv[1::2,::2]+cv[:-1:2,::2])
 
-            # import matplotlib.pyplot as plt
-
-            # plt.imshow(cv_coarse.cpu())
-            # plt.show()
-
             # computes the coarse error via relaxation
             err_coarse, _ = self.multigrid(
                 r_coarse,
@@ -294,7 +289,7 @@ def test_solvers():
         max_cycles=20,
         nsmoothing=10,
         tol=1e-5,
-        w=0.8
+        w=0.9
     )
 
     # u, r = solver.Jacobi(f, u0, ch, cv, h**2)

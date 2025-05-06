@@ -4,6 +4,20 @@
 		<model name="1guilla">
 			<pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
 			<link name="link0">
+<<<<<<< HEAD
+				<pose>0 0 0 0 0 0</pose>
+				<inertial>
+					<pose>0.0895944 0.000191419 0.00284499 0 0 0</pose>
+					<mass>0.0980593</mass>
+					<density>800.0</density>
+					<inertia>
+						<ixx>6.14036e-05</ixx>
+						<ixy>9.24116e-08</ixy>
+						<ixz>1.37203e-06</ixz>
+						<iyy>0.000234707</iyy>
+						<iyz>2.0817e-08</iyz>
+						<izz>0.000227299</izz>
+=======
 				<pose>1.14362 1.55095e-05 0 0 0 3.141592264175415</pose>
 				<inertial>
 					<pose>-89.5942 -0.261623 2.84499 0 0 0</pose>
@@ -16,14 +30,20 @@
 						<iyy>234.707</iyy>
 						<iyz>-0.0218913</iyz>
 						<izz>227.299</izz>
+>>>>>>> cb21b7af07e09156fd8c754d1e4dcd698ed77036
 					</inertia>
 				</inertial>
 				<collision name="link0_collision">
 					<pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
 					<geometry>
 						<mesh>
+<<<<<<< HEAD
+							<uri>meshes/link0_collision.stl</uri>
+							<scale>0.001 0.001 0.001</scale>
+=======
 							<uri>../sdf/meshes/link0_collision.stl</uri>
 							<scale>1.0 1.0 1.0</scale>
+>>>>>>> cb21b7af07e09156fd8c754d1e4dcd698ed77036
 						</mesh>
 					</geometry>
 				</collision>
@@ -31,6 +51,33 @@
 					<pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
 					<geometry>
 						<mesh>
+<<<<<<< HEAD
+							<uri>meshes/link0.obj</uri>
+							<scale>0.001 0.001 0.001</scale>
+						</mesh>
+					</geometry>
+					<material>
+						<ambient>0 0 0 1</ambient>
+						<diffuse>0 0 0 1</diffuse>
+						<specular>0 0 0 1</specular>
+						<emissive>0 0 0 1</emissive>
+					</material>
+				</visual>
+			</link>
+			<link name="link1">
+				<pose>0.17701 0 0 0 0 0</pose>
+				<inertial>
+					<pose>0.0162399 0.000150088 -0.000959668 0 0 0</pose>
+					<mass>0.0481586</mass>
+					<density>800.0</density>
+					<inertia>
+						<ixx>1.07487e-05</ixx>
+						<ixy>8.49341e-09</ixy>
+						<ixz>-5.71315e-08</ixz>
+						<iyy>1.86563e-05</iyy>
+						<iyz>6.58905e-09</iyz>
+						<izz>1.57947e-05</izz>
+=======
 							<uri>../sdf/meshes/link0.obj</uri>
 							<scale>1.0 1.0 1.0</scale>
 						</mesh>
@@ -50,14 +97,20 @@
 						<iyy>18.4066</iyy>
 						<iyz>0.0154876</iyz>
 						<izz>15.7937</izz>
+>>>>>>> cb21b7af07e09156fd8c754d1e4dcd698ed77036
 					</inertia>
 				</inertial>
 				<collision name="link1_collision">
 					<pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
 					<geometry>
 						<mesh>
+<<<<<<< HEAD
+							<uri>meshes/link1_collision.stl</uri>
+							<scale>0.001 0.001 0.001</scale>
+=======
 							<uri>../sdf/meshes/link1_collision.stl</uri>
 							<scale>1.0 1.0 1.0</scale>
+>>>>>>> cb21b7af07e09156fd8c754d1e4dcd698ed77036
 						</mesh>
 					</geometry>
 				</collision>
@@ -65,6 +118,33 @@
 					<pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
 					<geometry>
 						<mesh>
+<<<<<<< HEAD
+							<uri>meshes/link1.obj</uri>
+							<scale>0.001 0.001 0.001</scale>
+						</mesh>
+					</geometry>
+					<material>
+						<ambient>0 0 0 1</ambient>
+						<diffuse>0 0 0 1</diffuse>
+						<specular>0 0 0 1</specular>
+						<emissive>0 0 0 1</emissive>
+					</material>
+				</visual>
+			</link>
+			<link name="link2">
+				<pose>0.23711 0 0 0 0 0</pose>
+				<inertial>
+					<pose>0.0163231 0.000134718 -0.00105285 0 0 0</pose>
+					<mass>0.048158</mass>
+					<density>800.0</density>
+					<inertia>
+						<ixx>1.07495e-05</ixx>
+						<ixy>-1.83974e-08</ixy>
+						<ixz>-9.17935e-08</ixz>
+						<iyy>1.8656e-05</iyy>
+						<iyz>2.18508e-09</iyz>
+						<izz>1.57934e-05</izz>
+=======
 							<uri>../sdf/meshes/link1.obj</uri>
 							<scale>1.0 1.0 1.0</scale>
 						</mesh>
@@ -84,14 +164,20 @@
 						<iyy>17.5233</iyy>
 						<iyz>0.0357155</iyz>
 						<izz>15.7928</izz>
+>>>>>>> cb21b7af07e09156fd8c754d1e4dcd698ed77036
 					</inertia>
 				</inertial>
 				<collision name="link2_collision">
 					<pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
 					<geometry>
 						<mesh>
+<<<<<<< HEAD
+							<uri>meshes/link2_collision.stl</uri>
+							<scale>0.001 0.001 0.001</scale>
+=======
 							<uri>../sdf/meshes/link2_collision.stl</uri>
 							<scale>1.0 1.0 1.0</scale>
+>>>>>>> cb21b7af07e09156fd8c754d1e4dcd698ed77036
 						</mesh>
 					</geometry>
 				</collision>
@@ -99,6 +185,33 @@
 					<pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
 					<geometry>
 						<mesh>
+<<<<<<< HEAD
+							<uri>meshes/link2.obj</uri>
+							<scale>0.001 0.001 0.001</scale>
+						</mesh>
+					</geometry>
+					<material>
+						<ambient>0 0 0 1</ambient>
+						<diffuse>0 0 0 1</diffuse>
+						<specular>0 0 0 1</specular>
+						<emissive>0 0 0 1</emissive>
+					</material>
+				</visual>
+			</link>
+			<link name="link3">
+				<pose>0.29711 0 0 0 0 0</pose>
+				<inertial>
+					<pose>0.0163448 0.000213778 -0.000714938 0 0 0</pose>
+					<mass>0.0481587</mass>
+					<density>800.0</density>
+					<inertia>
+						<ixx>1.07497e-05</ixx>
+						<ixy>-2.36821e-08</ixy>
+						<ixz>-9.18173e-08</ixz>
+						<iyy>1.86562e-05</iyy>
+						<iyz>2.07655e-09</iyz>
+						<izz>1.57936e-05</izz>
+=======
 							<uri>../sdf/meshes/link2.obj</uri>
 							<scale>1.0 1.0 1.0</scale>
 						</mesh>
@@ -118,14 +231,20 @@
 						<iyy>15.082</iyy>
 						<iyz>0.0654121</iyz>
 						<izz>15.7915</izz>
+>>>>>>> cb21b7af07e09156fd8c754d1e4dcd698ed77036
 					</inertia>
 				</inertial>
 				<collision name="link3_collision">
 					<pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
 					<geometry>
 						<mesh>
+<<<<<<< HEAD
+							<uri>meshes/link3_collision.stl</uri>
+							<scale>0.001 0.001 0.001</scale>
+=======
 							<uri>../sdf/meshes/link3_collision.stl</uri>
 							<scale>1.0 1.0 1.0</scale>
+>>>>>>> cb21b7af07e09156fd8c754d1e4dcd698ed77036
 						</mesh>
 					</geometry>
 				</collision>
@@ -133,6 +252,33 @@
 					<pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
 					<geometry>
 						<mesh>
+<<<<<<< HEAD
+							<uri>meshes/link3.obj</uri>
+							<scale>0.001 0.001 0.001</scale>
+						</mesh>
+					</geometry>
+					<material>
+						<ambient>0 0 0 1</ambient>
+						<diffuse>0 0 0 1</diffuse>
+						<specular>0 0 0 1</specular>
+						<emissive>0 0 0 1</emissive>
+					</material>
+				</visual>
+			</link>
+			<link name="link4">
+				<pose>0.35701 0 0 0 0 0</pose>
+				<inertial>
+					<pose>0.0163425 0.000173746 -0.000345787 0 0 0</pose>
+					<mass>0.0481588</mass>
+					<density>800.0</density>
+					<inertia>
+						<ixx>1.07497e-05</ixx>
+						<ixy>1.7624e-08</ixy>
+						<ixz>-9.18544e-08</ixz>
+						<iyy>1.86563e-05</iyy>
+						<iyz>2.56942e-09</iyz>
+						<izz>1.57937e-05</izz>
+=======
 							<uri>../sdf/meshes/link3.obj</uri>
 							<scale>1.0 1.0 1.0</scale>
 						</mesh>
@@ -152,14 +298,20 @@
 						<iyy>13.7127</iyy>
 						<iyz>0.0772906</iyz>
 						<izz>15.7913</izz>
+>>>>>>> cb21b7af07e09156fd8c754d1e4dcd698ed77036
 					</inertia>
 				</inertial>
 				<collision name="link4_collision">
 					<pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
 					<geometry>
 						<mesh>
+<<<<<<< HEAD
+							<uri>meshes/link4_collision.stl</uri>
+							<scale>0.001 0.001 0.001</scale>
+=======
 							<uri>../sdf/meshes/link4_collision.stl</uri>
 							<scale>1.0 1.0 1.0</scale>
+>>>>>>> cb21b7af07e09156fd8c754d1e4dcd698ed77036
 						</mesh>
 					</geometry>
 				</collision>
@@ -167,6 +319,33 @@
 					<pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
 					<geometry>
 						<mesh>
+<<<<<<< HEAD
+							<uri>meshes/link4.obj</uri>
+							<scale>0.001 0.001 0.001</scale>
+						</mesh>
+					</geometry>
+					<material>
+						<ambient>0 0 0 1</ambient>
+						<diffuse>0 0 0 1</diffuse>
+						<specular>0 0 0 1</specular>
+						<emissive>0 0 0 1</emissive>
+					</material>
+				</visual>
+			</link>
+			<link name="link5">
+				<pose>0.41691 0 0 0 0 0</pose>
+				<inertial>
+					<pose>0.0163839 3.93012e-05 3.78499e-05 0 0 0</pose>
+					<mass>0.0481587</mass>
+					<density>800.0</density>
+					<inertia>
+						<ixx>1.07496e-05</ixx>
+						<ixy>-6.20888e-09</ixy>
+						<ixz>-9.1879e-08</ixz>
+						<iyy>1.86563e-05</iyy>
+						<iyz>2.37553e-09</iyz>
+						<izz>1.57936e-05</izz>
+=======
 							<uri>../sdf/meshes/link4.obj</uri>
 							<scale>1.0 1.0 1.0</scale>
 						</mesh>
@@ -186,14 +365,20 @@
 						<iyy>13.7126</iyy>
 						<iyz>0.0775163</iyz>
 						<izz>15.7912</izz>
+>>>>>>> cb21b7af07e09156fd8c754d1e4dcd698ed77036
 					</inertia>
 				</inertial>
 				<collision name="link5_collision">
 					<pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
 					<geometry>
 						<mesh>
+<<<<<<< HEAD
+							<uri>meshes/link5_collision.stl</uri>
+							<scale>0.001 0.001 0.001</scale>
+=======
 							<uri>../sdf/meshes/link5_collision.stl</uri>
 							<scale>1.0 1.0 1.0</scale>
+>>>>>>> cb21b7af07e09156fd8c754d1e4dcd698ed77036
 						</mesh>
 					</geometry>
 				</collision>
@@ -201,6 +386,33 @@
 					<pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
 					<geometry>
 						<mesh>
+<<<<<<< HEAD
+							<uri>meshes/link5.obj</uri>
+							<scale>0.001 0.001 0.001</scale>
+						</mesh>
+					</geometry>
+					<material>
+						<ambient>0 0 0 1</ambient>
+						<diffuse>0 0 0 1</diffuse>
+						<specular>0 0 0 1</specular>
+						<emissive>0 0 0 1</emissive>
+					</material>
+				</visual>
+			</link>
+			<link name="link6">
+				<pose>0.47711 0 0 0 0 0</pose>
+				<inertial>
+					<pose>0.0161487 -1.3187e-05 0.000373086 0 0 0</pose>
+					<mass>0.0481586</mass>
+					<density>800.0</density>
+					<inertia>
+						<ixx>1.07496e-05</ixx>
+						<ixy>-2.67476e-08</ixy>
+						<ixz>-9.18993e-08</ixz>
+						<iyy>1.86561e-05</iyy>
+						<iyz>2.17302e-09</iyz>
+						<izz>1.57936e-05</izz>
+=======
 							<uri>../sdf/meshes/link5.obj</uri>
 							<scale>1.0 1.0 1.0</scale>
 						</mesh>
@@ -220,14 +432,20 @@
 						<iyy>15.082</iyy>
 						<iyz>0.0658543</iyz>
 						<izz>15.7916</izz>
+>>>>>>> cb21b7af07e09156fd8c754d1e4dcd698ed77036
 					</inertia>
 				</inertial>
 				<collision name="link6_collision">
 					<pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
 					<geometry>
 						<mesh>
+<<<<<<< HEAD
+							<uri>meshes/link6_collision.stl</uri>
+							<scale>0.001 0.001 0.001</scale>
+=======
 							<uri>../sdf/meshes/link6_collision.stl</uri>
 							<scale>1.0 1.0 1.0</scale>
+>>>>>>> cb21b7af07e09156fd8c754d1e4dcd698ed77036
 						</mesh>
 					</geometry>
 				</collision>
@@ -235,6 +453,33 @@
 					<pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
 					<geometry>
 						<mesh>
+<<<<<<< HEAD
+							<uri>meshes/link6.obj</uri>
+							<scale>0.001 0.001 0.001</scale>
+						</mesh>
+					</geometry>
+					<material>
+						<ambient>0 0 0 1</ambient>
+						<diffuse>0 0 0 1</diffuse>
+						<specular>0 0 0 1</specular>
+						<emissive>0 0 0 1</emissive>
+					</material>
+				</visual>
+			</link>
+			<link name="link7">
+				<pose>0.53711 0 0 0 0 0</pose>
+				<inertial>
+					<pose>0.0161536 7.84303e-05 0.000820795 0 0 0</pose>
+					<mass>0.0481588</mass>
+					<density>800.0</density>
+					<inertia>
+						<ixx>1.07494e-05</ixx>
+						<ixy>1.24606e-08</ixy>
+						<ixz>-9.16646e-08</ixz>
+						<iyy>1.8656e-05</iyy>
+						<iyz>2.44047e-09</iyz>
+						<izz>1.5793e-05</izz>
+=======
 							<uri>../sdf/meshes/link6.obj</uri>
 							<scale>1.0 1.0 1.0</scale>
 						</mesh>
@@ -254,14 +499,20 @@
 						<iyy>16.4049</iyy>
 						<iyz>0.0520646</iyz>
 						<izz>15.7917</izz>
+>>>>>>> cb21b7af07e09156fd8c754d1e4dcd698ed77036
 					</inertia>
 				</inertial>
 				<collision name="link7_collision">
 					<pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
 					<geometry>
 						<mesh>
+<<<<<<< HEAD
+							<uri>meshes/link7_collision.stl</uri>
+							<scale>0.001 0.001 0.001</scale>
+=======
 							<uri>../sdf/meshes/link7_collision.stl</uri>
 							<scale>1.0 1.0 1.0</scale>
+>>>>>>> cb21b7af07e09156fd8c754d1e4dcd698ed77036
 						</mesh>
 					</geometry>
 				</collision>
@@ -269,6 +520,33 @@
 					<pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
 					<geometry>
 						<mesh>
+<<<<<<< HEAD
+							<uri>meshes/link7.obj</uri>
+							<scale>0.001 0.001 0.001</scale>
+						</mesh>
+					</geometry>
+					<material>
+						<ambient>0 0 0 1</ambient>
+						<diffuse>0 0 0 1</diffuse>
+						<specular>0 0 0 1</specular>
+						<emissive>0 0 0 1</emissive>
+					</material>
+				</visual>
+			</link>
+			<link name="link8">
+				<pose>0.59691 0 0 0 0 0</pose>
+				<inertial>
+					<pose>0.0593017 8.91005e-05 0.0020319 0 0 0</pose>
+					<mass>0.103076</mass>
+					<density>800.0</density>
+					<inertia>
+						<ixx>2.86394e-05</ixx>
+						<ixy>-1.94067e-06</ixy>
+						<ixz>-1.36704e-06</ixz>
+						<iyy>0.000383855</iyy>
+						<iyz>8.95519e-09</iyz>
+						<izz>0.000375543</izz>
+=======
 							<uri>../sdf/meshes/link7.obj</uri>
 							<scale>1.0 1.0 1.0</scale>
 						</mesh>
@@ -288,14 +566,20 @@
 						<iyy>371.527</iyy>
 						<iyz>0.238632</iyz>
 						<izz>375.544</izz>
+>>>>>>> cb21b7af07e09156fd8c754d1e4dcd698ed77036
 					</inertia>
 				</inertial>
 				<collision name="link8_collision">
 					<pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
 					<geometry>
 						<mesh>
+<<<<<<< HEAD
+							<uri>meshes/link8_collision.stl</uri>
+							<scale>0.001 0.001 0.001</scale>
+=======
 							<uri>../sdf/meshes/link8_collision.stl</uri>
 							<scale>1.0 1.0 1.0</scale>
+>>>>>>> cb21b7af07e09156fd8c754d1e4dcd698ed77036
 						</mesh>
 					</geometry>
 				</collision>
@@ -303,10 +587,23 @@
 					<pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
 					<geometry>
 						<mesh>
+<<<<<<< HEAD
+							<uri>meshes/link8.obj</uri>
+							<scale>0.001 0.001 0.001</scale>
+						</mesh>
+					</geometry>
+					<material>
+						<ambient>0 0 0 1</ambient>
+						<diffuse>0 0 0 1</diffuse>
+						<specular>0 0 0 1</specular>
+						<emissive>0 0 0 1</emissive>
+					</material>
+=======
 							<uri>../sdf/meshes/link8.obj</uri>
 							<scale>1.0 1.0 1.0</scale>
 						</mesh>
 					</geometry>
+>>>>>>> cb21b7af07e09156fd8c754d1e4dcd698ed77036
 				</visual>
 			</link>
 			<joint name="joint_body_00" type="revolute">
@@ -406,7 +703,11 @@
 				</axis>
 			</joint>
 			<linkend name="link8">
+<<<<<<< HEAD
+				<pose>0.8133 0 0</pose>
+=======
 				<pose>814.156 -1.55095e-05 0</pose>
+>>>>>>> cb21b7af07e09156fd8c754d1e4dcd698ed77036
 			</linkend>
 		</model>
 	</world>

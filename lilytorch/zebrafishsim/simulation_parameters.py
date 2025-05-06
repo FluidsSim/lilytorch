@@ -75,11 +75,19 @@ class SimulationParameters:
         self.n_desc_str = 0 # number of descending stretch connections
         self.tau_str    = 0.005 # stretch time scale
 
+<<<<<<< HEAD
+        self.muscle_parameters_tag = 'FN_5500_ZC_1000_G0_419' # muscle param file
+        self.spawn = {
+            'loader': 0,
+            'mode': "TRANSVERSE",
+            'pose': [0.0, 0.0, -0.03, 0.0, 0.0, 3.141592653589793],
+=======
         self.muscle_parameters_tag = 'FN_6000_ZC_1000_G0_419' # muscle param file
         self.spawn = {
             'loader': 0,
             'mode': "TRANSVERSE",
             'pose': [0.0, 0.0, -0.003, 0.0, 0.0, 3.141592653589793],
+>>>>>>> cb21b7af07e09156fd8c754d1e4dcd698ed77036
             'velocity': [0.0, 0., 0.0, 0.0, 0.0, 0.0],
             'extras': {}
             }
@@ -88,7 +96,11 @@ class SimulationParameters:
         self.water = True
         self.joint_poses=np.zeros(15)
 
+<<<<<<< HEAD
+        self.stiffness_factor = 0.5
+=======
         self.stiffness_factor = 1
+>>>>>>> cb21b7af07e09156fd8c754d1e4dcd698ed77036
         self.damping_factor = 1
 
         # noise pars

@@ -345,43 +345,43 @@ class AdvDiffSolver:
         if self.BC_type_u[1]=="D":
             u[-1,:]=self.BC_values_u[1]
         elif self.BC_type_u[1]=="N":
-            u[-1,:] = u[-2,:]
+            u[-1,1:-1] = u[-2,1:-1]
 
         if self.BC_type_u[2]=="D":
             u[:,0]=self.BC_values_u[2]
         elif self.BC_type_u[2]=="N":
-            u[:,0] = u[:,1]
+            u[1:-1,0] = u[1:-1,1]
 
         if self.BC_type_u[3]=="D":
             u[:,-1]=self.BC_values_u[3]
         elif self.BC_type_u[3]=="N":
-            u[:,-1] = u[:,-2]
+            u[1:-1,-1] = u[1:-1,-2]
 
         if self.BC_type_u[0]=="D":
             u[0,:]=self.BC_values_u[0]
         elif self.BC_type_u[0]=="N":
-            u[0,:] = u[1,:]
+            u[0,1:-1] = u[1,1:-1]
 
         # v
         if self.BC_type_v[1]=="D":
             v[-1,:]=self.BC_values_v[1]
         elif self.BC_type_v[1]=="N":
-            v[-1,:] = v[-2,:]
+            v[-1,1:-1] = v[-2,1:-1]
 
         if self.BC_type_v[2]=="D":
             v[:,0]=self.BC_values_v[2]
         elif self.BC_type_v[2]=="N":
-            v[:,0] = v[:,1]
+            v[1:-1,0] = v[1:-1,1]
 
         if self.BC_type_v[3]=="D":
             v[:,-1]=self.BC_values_v[3]
         elif self.BC_type_v[3]=="N":
-            v[:,-1] = v[:,-2]
+            v[1:-1,-1] = v[1:-1,-2]
 
         if self.BC_type_v[0]=="D":
             v[0,:]=self.BC_values_v[0]
         elif self.BC_type_v[0]=="N":
-            v[0,:] = v[1,:]
+            v[0,1:-1] = v[1,1:-1]
 
 if __name__ == "__main__":
 
