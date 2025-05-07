@@ -7,23 +7,21 @@
 *.*~
 *_flymake.py
 *.ipynb
+*.pt
 
-#: Results
+#: File types
 *.mp4
 *.html
 *.h5
 *.pickle
 *.csv
-
+*.so
 *.egg-info
-__pycache__/*
+__pycache__
 
 #: Do not ignore figures folder
 !figures/*
 
-#: Docs
-docs/build
-docs/source/_build
 logs/
 interp_data/
 results/*
@@ -35,6 +33,6 @@ make.bat
 
 # FARMS
 lilytorch/FARMS/
+data/
+build/
 
-lilytorch/zebrafishsim/data/*
-lilytorch/1guillasim/data/*

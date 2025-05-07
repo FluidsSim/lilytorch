@@ -3,7 +3,7 @@ import trimesh
 import matplotlib.pyplot as plt
 import os
 
-path = "lilytorch/1guillasim/models/1guilla_v1/sdf/meshes/"
+path = "1guilla_v1/sdf/meshes/"
 
 scale = [0.001, 0.001, 0.001]
 density = 800 # kg/m^3
