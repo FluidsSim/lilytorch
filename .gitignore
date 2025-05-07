@@ -17,22 +17,21 @@
 *.csv
 *.so
 *.egg-info
-__pycache__
 
 #: Do not ignore figures folder
-!figures/*
 
-logs/
-interp_data/
-results/*
 make.bat
 *.txt
 
 # VS Code
 *.vscode
 
-# FARMS
-lilytorch/FARMS/
+# folders
+FARMS/
 data/
 build/
-
+logs/
+interp_data/
+results/
+__pycache__
+figures/
