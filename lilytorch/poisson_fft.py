@@ -68,7 +68,7 @@ class PoissonSolverFFT:
                 eps = max(float(self.dx),float(self.dy))*2
                 G = torch.from_numpy(self.hej_fun(R, eps=eps)).to(self.device)
             elif self.free_space_method == "chat":
-                G = torch.from_numpy(self.chatelain_fun(R).to(self.device))
+                G = torch.from_numpy(self.chatelain_fun(R)).to(self.device)
             else:
                 raise("Wrong method to compute the Green function!!")
             Gfft = torch.fft.fftn(-self.dx*self.dy*G)
@@ -93,7 +93,7 @@ class PoissonSolverFFT:
         G = numpy.zeros((2*self.nx,2*self.ny))
         G = -(numpy.log(x))/(2*numpy.pi)
         print("Python will give an error of 0 division. Ignore it.")
-        req = numpy.sqrt(self.dx*self.dy/numpy.pi)
+        req = numpy.sqrt(float(self.dx*self.dy)/numpy.pi)
         G[0,0] = -(req**2) * (numpy.log(req)-1/2)/2 # integral over spherical area equivalent to a rectangle of dimension [dx,dy]
         G[-1,-1] = G[0,0]
         G[0,-1] = G[0,0]

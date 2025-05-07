@@ -40,7 +40,6 @@ def box(x,y,xb=20,yb=20):
         torch.maximum(qy,torch.zeros_like(y))**2
     )+torch.minimum(torch.maximum(qx,qy),torch.zeros_like(x))
 
-
 def body_from_yaml(device, x, y, body_pars, eps=0.05, costum_update=None, starting_time=0, **kwargs):
 
     if costum_update is not None:
@@ -93,6 +92,7 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, costum_update=None, starti
             plotting        = plotting,
             plotting_meshes = plotting_meshes,
             suit            = body_pars["suit"],
+            convexify       = body_pars["convexify"],
             **kwargs
         )
 
@@ -144,16 +144,19 @@ class mesh2sdf():
     """
     It is assumed that all vector inputs are numpy arrays
     """
-    def __init__(self, mesh_file):
+    def __init__(self, mesh_file, convexify=True, scale=1):
         self.mesh_file = mesh_file
         self._mesh = o3d.io.read_triangle_mesh(self.mesh_file)
-        self.update_mesh()
+        self.update_mesh(convexify=convexify, scale=scale)
 
-    def update_mesh(self, convexify=False):
+    def update_mesh(self, convexify, scale):
+        self._mesh = self._mesh.scale(scale, (0,0,0)) #self._mesh.get_center())
+
         if convexify:
             self._mesht = o3d.t.geometry.TriangleMesh.from_legacy(self._mesh.compute_convex_hull()[0])
         else:
             self._mesht = o3d.t.geometry.TriangleMesh.from_legacy(self._mesh)
+
         self._raycasting_scene = o3d.t.geometry.RaycastingScene()
         self._ = self._raycasting_scene.add_triangles(self._mesht)
         self._mesh.compute_triangle_normals()
@@ -268,11 +271,6 @@ class COMPOSITEmesh2sdf():
         opt.background_color = np.asarray([0.5, 0.5, 0.5])
         viewer.run()
         viewer.destroy_window()
-
-
-
-
-
 
 class Body:
 
@@ -437,8 +435,6 @@ class Body:
 
         return fun(newpos_u, newpos_v)
 
-
-
 class BodyAnalytical(Body):
 
     def __init__(self, device, x, y, sdf_fun, update_maps, eps=0.05):
@@ -601,7 +597,6 @@ class BodyFishAnalytical(Body):
         Initialize sdf properties at time 0
         """
         return self.update(0)
-
 
 class BodyFishExperimental(Body):
 
@@ -784,7 +779,6 @@ class BodyFishExperimental(Body):
             index = False,
         )
 
-
 class BodyMesh(Body):
     """
     """
@@ -799,7 +793,11 @@ class BodyMesh(Body):
         self.suit                = suit
         self.plotting            = plotting_meshes
         self.apply_closing_morph = kwargs.pop("apply_closing_morph", True)
-        self.m2s                 = mesh2sdf(self.mesh_file)
+        self.m2s                 = mesh2sdf(
+            self.mesh_file,
+            convexify=kwargs.pop("convexify", False),
+            scale=kwargs.pop("scale", 0.001)
+            )
         self.initialize_sdfs()
         del self.m2s
         self.bodies = [self]
@@ -830,6 +828,9 @@ class BodyMesh(Body):
             query_pts=np.array(xyz.astype(np.float32))
 
             sdf_val_o3d, _=self.m2s(query_pts)
+            if self.plotting:
+                self.m2s.visualize()
+
             binary_2d=np.zeros((self.nsamples,self.msamples))
             binary_2d[sdf_val_o3d.reshape(X.shape)<0]=1
 
@@ -859,8 +860,7 @@ class BodyMesh(Body):
             sdf_val = skfmm.distance(binary_2d, dx=[xnp[1]-xnp[0],ynp[1]-ynp[0]])#-self.suit
 
             if self.plotting:
-                self.m2s.visualize()
-                var=sdf_val #sdf_val_o3d.reshape(X.shape)
+                var=sdf_val_o3d.reshape(X.shape)
                 plt.figure()
                 plt.contourf(
                     var
@@ -913,6 +913,7 @@ class CompositeBodyMesh:
         sdf_folder = folder of the sdf file
         sdf_name = name of the sdf file
         """
+
         self.sdf_folder      = sdf_folder
         self.sdf             = ModelSDF.read(sdf_folder+sdf_name)[0]
         self.bodies          = []
@@ -930,10 +931,6 @@ class CompositeBodyMesh:
                     lambda t, initial_pose=initial_pose: -initial_pose[1],
                 ]
                 )
-            # if link_i == 7:
-            #     compute_interp = True
-            # else:
-            #     compute_interp = False
 
             body = BodyMesh(
                     device, x, y,
@@ -966,9 +963,6 @@ class CompositeBodyMesh:
         for i, body in enumerate(self.bodies):
             self.sdf_vals[i]=body.initialize()[0]
 
-            # plt.contour(self.bodies[i].sdf_interp.F.cpu(), colors='k', levels=[0], linestyles='dashed')
-            # plt.show()
-
         self.sdf_val = torch.min(self.sdf_vals,axis=0)[0]-self.suit
 
         if self.plotting:
@@ -978,10 +972,7 @@ class CompositeBodyMesh:
                 torch.min(self.bodies[0].y.cpu()), torch.max(self.bodies[0].y.cpu())
             )
 
-        # if self.compute_interp:
-            """
-            visualize computed interpolation functions over the domain
-            """
+            # visualize computed interpolation functions over the domain
             plt.figure(figsize=(20,10))
             plt.imshow(
                 var.T,
