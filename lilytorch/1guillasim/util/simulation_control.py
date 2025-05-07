@@ -2,7 +2,7 @@
 """Run salamander simulation"""
 
 from typing import Union
-import util.update_pars_old as util
+import util.update_pars as util
 import numpy as np
 
 from farms_core import pylog
@@ -31,7 +31,7 @@ from util.rw import Dict2Class
 
 from controllers.wave_controller import WaveController
 from controllers.empty_controller import EmptyController
-from util.controller import GenericFluidController
+from util.controller import *
 
 from dm_control.rl.control import PhysicsError
 
@@ -80,10 +80,8 @@ def run_experiment(pars):
     sim_options["video_fps"]      = 10
     sim_options["skips"]          = 10
 
-
     animat_options["spawn"]         = Dict2Class(pars.spawn)
     animat_options.spawn.mode = SpawnMode(pars.spawn["mode"])
-
 
     # update muscle and drag parameters
     util.update_muscle_param(animat_options)
@@ -111,18 +109,6 @@ def run_experiment(pars):
     else:
         raise ValueError(f"Unknown controller: {pars.controller}")
 
-    animat_network = GenericFluidController(animat_data, controller)
-
-    # Generic controller (OK)
-    animat_controller: Union[GenericController, KinematicsController] = (
-        get_generic_controller(
-            animat_data=animat_data,
-            animat_network=animat_network,
-            animat_options=animat_options,
-            sim_options=sim_options,
-        )
-    )
-
     # Additional engine-specific options
     options = {}
     camera=None
@@ -131,10 +117,22 @@ def run_experiment(pars):
     options['callbacks'] = []
     camera=None
     assert simulator == Simulator.MUJOCO
-    if pars.swimming_mode=="drag":
+    if pars.swimming_mode=="-":
+        print('Using swimming mode: -')
+    elif pars.swimming_mode=="drag":
+        print('Using drag swimming mode')
         options['callbacks'] += [
                 callbacks.DragCallback(animat_options, arena_options),
             ]
+        animat_network = DragController(animat_data, controller)
+    elif pars.swimming_mode=="bdim":
+        print('Using bdim swimming mode')
+        options['callbacks'] += [
+                callbacks.FluidCallback(animat_options, arena_options),
+            ]
+        animat_network = BDIMController(animat_data, controller, options['callbacks'][-1])
+    else:
+        raise ValueError(f"Unknown swimming mode: {pars.swimming_mode}")
 
     if sim_options.video:
         camera = CameraCallback(
@@ -148,6 +146,16 @@ def run_experiment(pars):
             skips=sim_options.skips
         )
         options['callbacks'] += [camera]
+
+    # Generic controller (OK)
+    animat_controller: Union[GenericController, KinematicsController] = (
+        get_generic_controller(
+            animat_data=animat_data,
+            animat_network=animat_network,
+            animat_options=animat_options,
+            sim_options=sim_options,
+        )
+    )
 
     # Simulation
     pylog.info('Creating simulation environment')

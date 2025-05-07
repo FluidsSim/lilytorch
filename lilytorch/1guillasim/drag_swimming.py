@@ -15,28 +15,25 @@ def main(**kwargs):
     log_path = './logs/example_single/' # path for logging the simulation data
     os.makedirs(log_path, exist_ok=True)
 
-    amps = np.ones(8)*1
-    # amps[6:]= 0.0
-
     all_pars = SimulationParameters(
         n_iterations    = 15001,
-        n_joints        = 8,
         controller      = "sine",
         swimming_mode   = "drag",
-        amp             = amps,
-        bias            = 0,
+        amp             = np.ones(8),
+        bias            = 0.3,
         timestep        = 0.001,
-        twl             = 0.8,
+        twl             = 1,
         freq            = 2,
         log_path        = log_path,
         compute_metrics = 3,
+        headless        = False,
         return_network  = True,
         gravity         = [0,0,-9.81],
-        video_record    = True,
+        video_record    = False,
         video_name      = "swimming_example",
         spawn           = {
             'loader': 0,
-            'mode': "TRANSVERSE",
+            'mode': "FREE",
             'pose': [0.0, 0.0, -0.3, 0.0, 0.0, 3.141592653589793],
             'velocity': [0.0, 0., 0.0, 0.0, 0.0, 0.0],
             'extras': {}

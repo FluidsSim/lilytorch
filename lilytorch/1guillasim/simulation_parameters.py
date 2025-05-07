@@ -20,7 +20,6 @@ class SimulationParameters:
         self.bias          = 0.*np.ones(15)
         self.twl           = 0.8
         self.freq          = 1
-        self.slope         = 100 # square scaling factor
 
         # simulation parameters
         self.n_joints     = 15 # number of joints
