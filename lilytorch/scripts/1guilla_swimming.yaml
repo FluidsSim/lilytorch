@@ -10,11 +10,11 @@ solver :
   ymin              : -1.5
   ymax              : 1.5
 
-  convection_method : "implicit"
-  dt                : 0.001
+  # convection_method : "implicit"
+  # dt                : 0.001
 
-  # convection_method : "abdquickest"
-  # dt                : 0.0001
+  convection_method : "abdquickest"
+  dt                : 0.0001
 
   nt                : 80000
   nu                : 1.0e-6
@@ -24,7 +24,7 @@ solver :
   poisson_max_cycles: 30
   jacobi_weight     : 0.8
   poisson_nsmoothing: 10
-  poisson_verbose   : True
+  poisson_verbose   : False
   poisson_filename : "data/"
 
 

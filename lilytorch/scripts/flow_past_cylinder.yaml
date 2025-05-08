@@ -8,34 +8,28 @@ solver:
   ymin              : -1.0
   ymax              : 1.0
   nt                : 30000
-  # xmin              : -0.004
-  # xmax              : 0.1
-  # ymin              : -0.052
-  # ymax              : 0.052
-  # dt                : 0.0001
-  # nt                : 80000
-  nu                : 1.0e-4
+  nu                : 1.0e-6
   rho               : 1.0e+3
 
   poisson_tol       : 1.0e-5
   jacobi_weight     : 0.8
   poisson_max_cycles: 10
-  poisson_nsmoothing: 15
+  poisson_nsmoothing: 5
   poisson_verbose   : True
   poisson_filename : "lilytorch/data/"
 
-  dt                : 0.1
-  convection_method : "implicit"
+  # dt                : 0.1
+  # convection_method : "implicit"
 
-  # convection_method : "abdquickest"
-  # dt                : 0.0001
+  convection_method : "abdquickest"
+  dt                : 0.01
 
 # 2*R*U/nu
 
 boundary_conditions:
   BC_type_u:
   - "D"
-  - "-"
+  - "N"
   - "N"
   - "N"
   BC_values_u:
@@ -45,7 +39,7 @@ boundary_conditions:
   - 0
   BC_type_v:
   - "D"
-  - "-"
+  - "N"
   - "N"
   - "N"
   BC_values_v:
@@ -55,10 +49,11 @@ boundary_conditions:
   - 0
 
 body:
-  type: analytical
-  sdf: "lambda x, y: circle(x,y,xt=0,yt=0,r=0.1)"
+  type: composite_analytical
+  sdf:
+  - "lambda x, y: circle(x,y,xt=0,yt=0,r=0.1)"
   update_maps:
-    rotation: "lambda t: 0"
+  - rotation: "lambda t: 0"
     translation:
       - "lambda t: 0"
       - "lambda t: 0"

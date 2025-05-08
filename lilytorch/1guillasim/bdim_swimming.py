@@ -23,7 +23,7 @@ def main(**kwargs):
         bias            = 0,
         timestep        = 0.001,
         twl             = 1,
-        freq            = 1,
+        freq            = 2,
         log_path        = log_path,
         compute_metrics = 3,
         headless        = True,

@@ -21,7 +21,7 @@ class FluidSolver:
     Solver class
     """
 
-    def __init__(self, pars, dtype=torch.float32, costum_update=None, comute_force=False):
+    def __init__(self, pars, dtype=torch.float32, costum_update=None, comute_forces=True):
         """
         BDIM2 solver for fluid structure interaction
         """
@@ -62,6 +62,7 @@ class FluidSolver:
         self.ny         = len(y)
         self.dx         = x[1]-x[0]
         self.dy         = y[1]-y[0]
+        self.dxdy = [float(self.dx), float(self.dy)]
         assert abs(self.dx-self.dy)<1e-7, "dx and dy must be equal"
 
         self.h2   = self.dx**2
@@ -156,7 +157,7 @@ class FluidSolver:
             torch.min(y.cpu()), torch.max(y.cpu())
         )
 
-        self.compute_forces = comute_force
+        self.compute_forces = comute_forces
 
         # ===== create folder for frames' storage ====
         self.save_frames = output["save_frames"]
@@ -256,13 +257,13 @@ class FluidSolver:
         """
         Compute dp/dx
         """
-        return torch.gradient(p, spacing=self.dx, dim=0)[0]
+        return torch.gradient(p, spacing=self.dx, dim=0, edge_order=2)[0]
 
     def compute_dpdy(self,p):
         """
         Compute dp/dy
         """
-        return torch.gradient(p, spacing=self.dy, dim=1)[0]
+        return torch.gradient(p, spacing=self.dy, dim=1, edge_order=2)[0]
 
     def gradient(self, var):
         """
@@ -356,8 +357,8 @@ class FluidSolver:
         # (u_ext, v_ext, p_ext) = self.solver_free(u,v,p)
 
         # ======= compute stress tensor ======
-        dudx, dudy = torch.gradient(u_ext)
-        dvdx, dvdy = torch.gradient(v_ext)
+        dudx, dudy = torch.gradient(u_ext, edge_order=2)
+        dvdx, dvdy = torch.gradient(v_ext, edge_order=2)
 
         ss_diag = dudy/self.dy+dvdx/self.dx
         ss_11 = 2*dudx/self.dx
@@ -572,48 +573,65 @@ class FluidSolver:
         self.adv_diff_solver.set_BCs(uprime,vprime)
 
 
-        # mult_factor = self.dt/self.rho
-        # self.div=(self.divergence(uprime,vprime)-self.div_body)/mult_factor
-        # p=self.poisson_solverFFT.solve(self.div)
-
-        # ====== solve the pressure poisson equation ======
-        self.div=(self.divergence(uprime,vprime))[1:-1,1:-1]
         mult_factor = self.dt/self.rho
-        coeff = mult_factor*torch.ones((self.nx,self.ny),device=self.device) #self.mu0_all[1:-1,1:-1]
-        coeff_horizontal = (coeff[1:,:]+coeff[:-1,:])/2
-        coeff_vertical = (coeff[:,1:]+coeff[:,:-1])/2
-        coeff_horizontal=torch.vstack((mult_factor*self.zc,coeff_horizontal,mult_factor*self.zc))
-        coeff_vertical=torch.hstack((mult_factor*self.zr,coeff_vertical,mult_factor*self.zr))
-        p, _ = self.poisson_solver.solve_multigrid( # f, u, c
-            self.div,
-            p,
-            coeff,
-            coeff_horizontal,
-            coeff_vertical,
-        )
+        self.div=(self.divergence(uprime,vprime)-self.div_body)/mult_factor
+        p=self.poisson_solverFFT.solve(self.div)
 
         # ====== projection step ======
         (p_x, p_y) = self.gradient(p)
-        (u,v)=(uprime-self.dt/self.rho*p_x, vprime-self.dt/self.rho*p_y)
+        (u,v)=(uprime-mult_factor*p_x, vprime-mult_factor*p_y)
 
 
-        # ======= compute stress tensor ======
-        dudx, dudy = torch.gradient(u)
-        dvdx, dvdy = torch.gradient(v)
 
-        ss_diag = dudy/self.dy+dvdx/self.dx
-        ss_11 = 2*dudx/self.dx
-        ss_22 = 2*dvdy/self.dy
+        # # ====== solve the pressure poisson equation ======
+        # self.div=(self.divergence(uprime,vprime))[1:-1,1:-1]
+        # mult_factor = self.dt/self.rho
+        # coeff = mult_factor*self.mu0_all[1:-1,1:-1] #torch.ones((self.nx,self.ny),device=self.device) #self.mu0_all[1:-1,1:-1]
+        # coeff_horizontal = (coeff[1:,:]+coeff[:-1,:])/2
+        # coeff_vertical = (coeff[:,1:]+coeff[:,:-1])/2
+        # coeff_horizontal=torch.vstack((mult_factor*self.zc,coeff_horizontal,mult_factor*self.zc))
+        # coeff_vertical=torch.hstack((mult_factor*self.zr,coeff_vertical,mult_factor*self.zr))
+        # p, _ = self.poisson_solver.solve_multigrid( # f, u, c
+        #     self.div,
+        #     p,
+        #     coeff,
+        #     coeff_horizontal,
+        #     coeff_vertical,
+        # )
+        # # ====== projection step ======
+        # (p_x, p_y) = self.gradient(p)
+        # (u,v)=(uprime-mult_factor*self.mu0_all*p_x, vprime-mult_factor*self.mu0_all*p_y)
+
+
+        self.adv_diff_solver.set_BCs(u,v)
+
+
+
+
+        # if iteration==100:
+        #     from IPython import embed;  embed()
+        #     tmp = (torch.gradient(p,spacing=self.dxdy,edge_order=2)[0]-self.gradient(p)[0])
+
+
 
         if self.compute_forces:
+
+            # ======= compute stress tensor ======
+            dudx, dudy = self.gradient(u)
+            dvdx, dvdy = self.gradient(v)
+
+            ss_diag = dudy+dvdx
+            ss_11 = 2*dudx
+            ss_22 = 2*dvdy
+
             for i, body in enumerate(self.composite_body.bodies):
 
                 d=self.composite_body.sdf_vals[i] #-self.eps
-                # dall=self.composite_body.sdf_val-self.eps
+                dall=self.composite_body.sdf_val#-self.eps
 
 
-                # self.delta = self.composite_body.bodies[0].phi(d)*self.composite_body.bodies[0].phi(dall)*self.eps*self.eps
-                self.delta = self.composite_body.bodies[0].phi(d)*self.eps
+                self.delta = self.composite_body.bodies[0].phi(d)*self.composite_body.bodies[0].phi(dall)*self.eps*self.eps
+                # self.delta = self.composite_body.bodies[0].phi(d)*self.eps
 
                 (d, normal_x, normal_y, R) = self.composite_body.compute_sdf_properties(d)
 
@@ -703,7 +721,7 @@ class FluidSolver:
                 vec_x=(self.m_m0_all*self.body_u).cpu()
                 vec_y=(self.m_m0_all*self.body_v).cpu()
 
-                tmp=self.m_m0_all.cpu()
+                tmp=self.delta.cpu()
                 # tmp = (self.div_body).cpu()
                 # tmp = (self.m_m0_all*self.divergence(self.body_u,self.body_v)).cpu() #(self.tmp).cpu()
 

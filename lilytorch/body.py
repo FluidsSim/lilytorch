@@ -44,21 +44,34 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, costum_update=None, starti
 
     if costum_update is not None:
         update_map = costum_update
-    else:
-        update_maps = body_pars["update_maps"]
-        update_map = (
-            eval(update_maps["rotation"]),
-            (eval(update_maps["translation"][0]),eval(update_maps["translation"][1]))
-        )
 
     type = body_pars["type"]
     if type == "analytical":
         sdf_fun = eval(body_pars["sdf"])
+        update_map = (
+            eval(update_maps["rotation"]),
+            (eval(update_maps["translation"][0]),eval(update_maps["translation"][1]))
+        )
         return BodyAnalytical(
             device,
             x, y,
             sdf_fun,
             update_map,
+            eps=eps
+        )
+
+    elif type == "composite_analytical":
+        sdf_funs = body_pars["sdf"]
+        update_maps = body_pars["update_maps"]
+        return CompositeBodyAnalytical(
+            device, x, y,
+            [eval(sdf_fun) for sdf_fun in sdf_funs],
+            [
+                (
+                    eval(update_map["rotation"]),
+                    (eval(update_map["translation"][0]),eval(update_map["translation"][1]))
+                ) for update_map in update_maps
+            ],
             eps=eps
         )
 
@@ -308,24 +321,24 @@ class Body:
 
     def compute_sdf_properties(self, sdf_val):
 
-        (gradx, grady) = torch.gradient(sdf_val, spacing=[self.dx, self.dy])
+        (gradx, grady) = torch.gradient(sdf_val, spacing=[self.dx, self.dy], edge_order=2)
         norm = torch.sqrt(gradx**2+grady**2)
 
-        curvature=torch.where(
-            norm>0,
-            (torch.gradient(gradx, spacing=self.dx, axis=0)[0]*grady-
-             torch.gradient(grady, spacing=self.dy, axis=1)[0]*gradx)/
-            norm**3,
-            0
-        )
+        # curvature=torch.where(
+        #     norm>0,
+        #     (torch.gradient(gradx, spacing=self.dx, axis=0, edge_order=2)[0]*grady-
+        #      torch.gradient(grady, spacing=self.dy, axis=1, edge_order=2)[0]*gradx)/
+        #     norm**3,
+        #     0
+        # )
 
         # curvature = (d2x_dt2 * dy_dt - dx_dt * d2y_dt2) / (dx_dt * dx_dt + dy_dt * dy_dt)**1.5
 
 
         # compute curvature
         numerator = (
-            (grady**2)*torch.gradient(gradx, spacing=self.dx, axis=0)[0]+
-            (gradx**2)*torch.gradient(grady, spacing=self.dy, axis=1)[0]+
+            (grady**2)*torch.gradient(gradx, spacing=self.dx, axis=0, edge_order=2)[0]+
+            (gradx**2)*torch.gradient(grady, spacing=self.dy, axis=1, edge_order=2)[0]+
             -2*gradx*grady*torch.gradient(grady, spacing=self.dx, axis=0)[0]
         )
         denominator = norm**3
@@ -452,7 +465,7 @@ class BodyAnalytical(Body):
         """
         return self.update(0,0)
 
-    def update(self, iteration, t, dt=1):
+    def update(self, t, iteration, dt=1):
         """
         Apply rototranslation and update the sdf properties
         """
@@ -475,6 +488,57 @@ class BodyAnalytical(Body):
             ),
             dt=dt
         )]
+
+
+class CompositeBodyAnalytical(Body):
+
+    def __init__(self, device, x, y, sdf_funs, update_maps, **kwargs):
+        """
+        sdf_folder = folder of the sdf file
+        sdf_name = name of the sdf file
+        """
+        super().__init__(device, x, y, **kwargs)
+        self.nbodies = len(sdf_funs)
+        assert self.nbodies == len(update_maps), "Number of sdf functions and update maps must be the same"
+
+        self.bodies=[
+            BodyAnalytical(
+                device, x, y,
+                sdf_funs[i],
+                update_maps[i],
+                **kwargs
+            ) for i in range(self.nbodies)
+        ]
+
+        self.mu_funcs = self.bodies[0].mu_funcs
+        self.sdf_vals = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
+        self.u_vals   = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
+        self.v_vals   = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
+        self.com_pos  = torch.zeros((self.nbodies,2),device=device)
+        self.initialize()
+
+    def initialize(self):
+        """
+        Initialize sdf properties at time 0
+        """
+        for i, body in enumerate(self.bodies):
+            body.initialize()
+            self.sdf_vals[i] = body.sdf
+            self.u_vals[i]   = body.body_u
+            self.v_vals[i]   = body.body_v
+            self.sdf_val = torch.min(self.sdf_vals,axis=0)[0]
+
+    def update(self, t, iteration, dt=1):
+        for i, body in enumerate(self.bodies):
+            body.update(t, iteration, dt=dt)
+            self.sdf_vals[i] = body.sdf
+            self.u_vals[i]   = body.body_u
+            self.v_vals[i]   = body.body_v
+            self.sdf_val = torch.min(self.sdf_vals,axis=0)[0]
+
+
+
+
 
 class BodyFishAnalytical(Body):
 
@@ -798,12 +862,12 @@ class BodyMesh(Body):
             convexify=kwargs.pop("convexify", False),
             scale=kwargs.pop("scale", 0.001)
             )
-        self.initialize_sdfs()
+        self.compute_sdfs()
         del self.m2s
         self.bodies = [self]
 
 
-    def initialize_sdfs(self):
+    def compute_sdfs(self):
         """
         Initialize the sdf interpolation function
         """

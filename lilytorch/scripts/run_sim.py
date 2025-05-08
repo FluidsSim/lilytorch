@@ -12,7 +12,7 @@ pars = yaml2pyobject("lilytorch/scripts/flow_past_cylinder.yaml")
 # pars["output"]["save_uv"]     = False
 # pars["output"]["save_path"]   = "/data/andreaferrario/ns_data/"
 
-solver = FluidSolver(pars, dtype=torch.float32, comute_force=False)
+solver = FluidSolver(pars, dtype=torch.float32, comute_forces=False)
 solver.run_sim()
 
 

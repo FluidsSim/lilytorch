@@ -33,7 +33,7 @@ gravity: !!python/tuple
 - 0
 - 0
 - -9.81
-num_sub_steps: 1
+num_sub_steps: 100
 n_solver_iters: 10000
 residual_threshold: 1.0e-16
 visual_scale: 1.0
