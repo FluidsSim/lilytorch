@@ -32,7 +32,7 @@ class DragController(AnimatNetwork):
 
 class BDIMController(AnimatNetwork):
 
-    def __init__(self, animat_data, controller, callback):
+    def __init__(self, animat_data, sim_options, controller, callback):
         self.n_iterations = np.shape(animat_data.state.array)[0]
         super().__init__(data=animat_data, n_iterations=self.n_iterations)
         self.offsets                   = np.zeros(controller.n_total_joints) # zero offsets
@@ -46,6 +46,7 @@ class BDIMController(AnimatNetwork):
         pars = yaml2pyobject("../scripts/1guilla_swimming.yaml")
 
         self.fluid_solver = FluidSolver(pars, dtype=torch.float32, costum_update=self.update)
+
         self.device = self.fluid_solver.device
         self.fluid_solver.composite_body.update = self.update # modify the update rule
         # self.fluid_solver.sdf_properties = self.initialize()
@@ -54,14 +55,15 @@ class BDIMController(AnimatNetwork):
 
         self.dtype=self.fluid_solver.X.dtype
 
-        # enforce fluid timestep
+        # enforce fluid timestep by overriding the one in the animat data
         animat_data.timestep = self.fluid_solver.dt
-        controller.timestep = self.fluid_solver.dt
+        sim_options["timestep"] = float(self.fluid_solver.dt)
 
         _3d_2d_scaling=1
         # scale forces by the z-bounding box size
         # self.callback.force_scaling = 1/_3d_2d_scaling
-        self.callback.force_scaling = 300 #np.array([np.diff(body.bb[2])[0]/_3d_2d_scaling for body in self.fluid_solver.composite_body.bodies])
+        self.callback.force_scaling = _3d_2d_scaling*1000*np.array([np.diff(body.bb[2])[0] for body in self.fluid_solver.composite_body.bodies])
+        print("Force scaling: ", self.callback.force_scaling)
 
     def update(self,t,iteration,dt=1):
         # iteration = int(t/dt)
@@ -146,10 +148,10 @@ class BDIMController(AnimatNetwork):
             time
         )
 
-        if not continue_sim: # stop sim is the fluid solver return an exit condition
-            if self.controller.exit_iteration==self.n_iterations:
-                self.controller.exit_iteration = iteration
-            return
+        # if not continue_sim: # stop sim is the fluid solver return an exit condition
+        #     if self.controller.exit_iteration==self.n_iterations:
+        #         self.controller.exit_iteration = iteration
+        #     return
 
 
 

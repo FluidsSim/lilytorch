@@ -16,7 +16,7 @@ def main(**kwargs):
     os.makedirs(log_path, exist_ok=True)
 
     all_pars = SimulationParameters(
-        n_iterations    = 15001,
+        n_iterations    = 100001,
         controller      = "sine",
         swimming_mode   = "bdim",
         amp             = np.ones(8),

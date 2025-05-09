@@ -7,6 +7,7 @@ import numpy as np
 
 from farms_core import pylog
 pylog.set_level('warning')
+
 from farms_core.simulation.options import Simulator
 from farms_core.model.options import SpawnMode
 from farms_mujoco.sensors.camera import CameraCallback
@@ -130,7 +131,7 @@ def run_experiment(pars):
         options['callbacks'] += [
                 callbacks.FluidCallback(animat_options, arena_options),
             ]
-        animat_network = BDIMController(animat_data, controller, options['callbacks'][-1])
+        animat_network = BDIMController(animat_data, sim_options, controller, options['callbacks'][-1])
     else:
         raise ValueError(f"Unknown swimming mode: {pars.swimming_mode}")
 

@@ -7,7 +7,6 @@ class WaveController:
     """Test controller"""
     def __init__(self, pars):
         self.pars     = pars
-        self.timestep = pars.timestep
         self.times    = np.linspace(0, pars.n_iterations*pars.timestep, pars.n_iterations)
         self.n_total_joints = 8
         self.state    = np.zeros((pars.n_iterations, 2*self.n_total_joints)) # state array for recording all the variables
