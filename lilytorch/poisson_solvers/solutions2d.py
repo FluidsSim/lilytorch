@@ -385,11 +385,7 @@ def multigrid_course(N,device=torch.device("cpu")):
     Multigrid course
     """
 
-<<<<<<< HEAD
-    from lilytorch.poisson import PoissonSolver
-=======
     from lilytorch.poisson_solvers.poisson_2nd_order_2 import PoissonSolver
->>>>>>> cb21b7af07e09156fd8c754d1e4dcd698ed77036
 
     xlim=[0,3.2]
     ylim=[0,3.2]
@@ -408,13 +404,6 @@ def multigrid_course(N,device=torch.device("cpu")):
     # ch = 5.0+0.5*torch.exp(torch.sin(2.0*torch.pi*X_h)*torch.sin(2.0*torch.pi*Y_h))
     # cv = 5.0+0.5*torch.exp(torch.sin(2.0*torch.pi*X_v)*torch.sin(2.0*torch.pi*Y_v))
 
-<<<<<<< HEAD
-
-    # x=torch.arange(xlim[0]-h,xlim[1]+h,h,device=device,dtype=dtype)
-    # y=torch.arange(ylim[0]-h,ylim[1]+h,h,device=device,dtype=dtype)
-    # [X,Y]=torch.meshgrid(x,y, indexing="ij")
-=======
->>>>>>> cb21b7af07e09156fd8c754d1e4dcd698ed77036
     c=5.0+0.5*torch.exp(torch.sin(2.0*torch.pi*X)*torch.sin(2.0*torch.pi*Y))
     ch = (c[1:,:]+c[:-1,:])/2
     cv = (c[:,1:]+c[:,:-1])/2
@@ -447,11 +436,7 @@ def multigrid_course(N,device=torch.device("cpu")):
 
 
     u_exact=torch.zeros((N+2,N+2),device=device,dtype=dtype)
-<<<<<<< HEAD
-    # u_exact=torch.exp(torch.cos(2.0*torch.pi*X)*torch.cos(2.0*torch.pi*Y))
-=======
     u_exact[1:-1,1:-1]=torch.exp(torch.cos(2.0*torch.pi*X)*torch.cos(2.0*torch.pi*Y))
->>>>>>> cb21b7af07e09156fd8c754d1e4dcd698ed77036
 
     c=torch.ones((N,N),device=device,dtype=dtype)
     solver = PoissonSolver(
@@ -470,10 +455,6 @@ def multigrid_course(N,device=torch.device("cpu")):
     solver.BC(u_exact)
     solver.BC(ch)
     solver.BC(cv)
-<<<<<<< HEAD
-    # from  IPython import embed; embed()
-=======
->>>>>>> cb21b7af07e09156fd8c754d1e4dcd698ed77036
     f, _=solver.FD_operator(u_exact, ch, cv, h2)
     return X, Y, u_exact, f, c, ch, cv
 

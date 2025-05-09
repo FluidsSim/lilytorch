@@ -106,6 +106,7 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, costum_update=None, starti
             plotting_meshes = plotting_meshes,
             suit            = body_pars["suit"],
             convexify       = body_pars["convexify"],
+            scale           = body_pars["scale"],
             **kwargs
         )
 
@@ -164,7 +165,6 @@ class mesh2sdf():
 
     def update_mesh(self, convexify, scale):
         self._mesh = self._mesh.scale(scale, (0,0,0)) #self._mesh.get_center())
-
         if convexify:
             self._mesht = o3d.t.geometry.TriangleMesh.from_legacy(self._mesh.compute_convex_hull()[0])
         else:
@@ -313,6 +313,7 @@ class Body:
         self.oldpos_v = torch.zeros((self.nx,self.ny),device=self.device,dtype=self.dtype)
 
         # body velocities
+        self.sdf = torch.zeros((self.nx,self.ny),device=self.device,dtype=self.dtype)
         self.body_u = torch.zeros((self.nx,self.ny),device=self.device,dtype=self.dtype)
         self.body_v = torch.zeros((self.nx,self.ny),device=self.device,dtype=self.dtype)
         self.old_points = self.stacked_xy.clone().detach()
@@ -440,13 +441,7 @@ class Body:
         self.body_v= vel[1].reshape(self.nx, self.ny)
 
         self.old_points = newpoints
-
-        # self.oldpos_u = newpos_u
-        # self.oldpos_v = newpos_v
-
-        # from IPython import embed; embed()
-
-        return fun(newpos_u, newpos_v)
+        self.sdf = fun(newpos_u, newpos_v)
 
 class BodyAnalytical(Body):
 
@@ -455,7 +450,6 @@ class BodyAnalytical(Body):
         self.sdf_fun = sdf_fun
         self.update_theta = update_maps[0]
         self.update_translation = update_maps[1]
-        # self.bodies = [self]
         self.body=self
         self.initialize()
 
@@ -463,13 +457,24 @@ class BodyAnalytical(Body):
         """
         Initialize sdf properties at time 0
         """
+        self.body_u = torch.zeros((self.nx,self.ny),device=self.device,dtype=self.dtype)
+        self.body_v = torch.zeros((self.nx,self.ny),device=self.device,dtype=self.dtype)
         return self.update(0,0)
 
     def update(self, t, iteration, dt=1):
         """
         Apply rototranslation and update the sdf properties
         """
-        self.sdf=self.update_body(
+        # self.sdf=self.update_body(
+        #     self.sdf_fun,
+        #     self.update_theta(t),
+        #     (
+        #         self.update_translation[0](t),
+        #         self.update_translation[1](t)
+        #     ),
+        #     dt=dt
+        # )
+        self.update_body(
             self.sdf_fun,
             self.update_theta(t),
             (
@@ -478,16 +483,6 @@ class BodyAnalytical(Body):
             ),
             dt=dt
         )
-
-        return [self.update_body(
-            self.sdf_fun,
-            self.update_theta(t),
-            (
-                self.update_translation[0](t),
-                self.update_translation[1](t)
-            ),
-            dt=dt
-        )]
 
 
 class CompositeBodyAnalytical(Body):
@@ -534,9 +529,7 @@ class CompositeBodyAnalytical(Body):
             self.sdf_vals[i] = body.sdf
             self.u_vals[i]   = body.body_u
             self.v_vals[i]   = body.body_v
-            self.sdf_val = torch.min(self.sdf_vals,axis=0)[0]
-
-
+        self.sdf_val = torch.min(self.sdf_vals,axis=0)[0]
 
 
 
@@ -846,7 +839,7 @@ class BodyFishExperimental(Body):
 class BodyMesh(Body):
     """
     """
-    def __init__(self, device, x, y, mesh_file, update_maps, eps=0.05, compute_interp=True, nsamples=2**12, msamples=2**12, suit=0, plotting_meshes=False, **kwargs):
+    def __init__(self, device, x, y, mesh_file, update_maps, eps=0.05, compute_interp=True, nsamples=500, msamples=500, suit=0, plotting_meshes=False, **kwargs):
         super().__init__(device, x, y, eps=eps)
         self.mesh_file           = mesh_file
         self.compute_interp      = compute_interp
@@ -857,10 +850,11 @@ class BodyMesh(Body):
         self.suit                = suit
         self.plotting            = plotting_meshes
         self.apply_closing_morph = kwargs.pop("apply_closing_morph", True)
+
         self.m2s                 = mesh2sdf(
             self.mesh_file,
             convexify=kwargs.pop("convexify", False),
-            scale=kwargs.pop("scale", 0.001)
+            scale=kwargs.pop("scale", 1)
             )
         self.compute_sdfs()
         del self.m2s
@@ -995,7 +989,6 @@ class CompositeBodyMesh:
                     lambda t, initial_pose=initial_pose: -initial_pose[1],
                 ]
                 )
-
             body = BodyMesh(
                     device, x, y,
                     mesh_gpath,
@@ -1025,7 +1018,8 @@ class CompositeBodyMesh:
     def initialize(self):
 
         for i, body in enumerate(self.bodies):
-            self.sdf_vals[i]=body.initialize()[0]
+            body.initialize()
+            self.sdf_vals[i]=body.sdf
 
         self.sdf_val = torch.min(self.sdf_vals,axis=0)[0]-self.suit
 
@@ -1668,6 +1662,8 @@ def test_body():
 
     use_gpu=True
 
+    mesh_file = "/data/andreaferrario/lilytorch/lilytorch/1guillasim/models/1guilla_v1/sdf/meshes/link0.obj"
+
     if torch.cuda.is_available() and use_gpu:
         print(f"Using GPU: {torch.cuda.get_device_name(0)} is available.")
         device = torch.device("cuda")
@@ -1676,18 +1672,17 @@ def test_body():
         device = torch.device("cpu")
         torch.set_num_threads(8)
 
-    N=2**7+1
-    x=torch.linspace(-60,180,N)
-    y=torch.linspace(-60,180,N)
+    N=2**8
+    x=torch.linspace(-0.02,0.3,N)
+    y=torch.linspace(-0.05,0.05,N)
     X,Y=torch.meshgrid(x,y,indexing="ij")
 
     x = x.to(device)
     y = y.to(device)
 
-    body = Body(device,x,y,eps=2*(x[1]-x[0]))
-
-    d = body.sdf_from_obj(mesh_file="cylinder.obj")
-    d, nx, ny, curv = body.compute_sdf_properties(d)
+    body = BodyMesh(device, x, y, mesh_file, (lambda t: 0, [lambda t:0, lambda t:0]), eps=2*(x[1]-x[0]), compute_interp=True, convexify=True, plotting_meshes=False)
+    body.initialize()
+    d, nx, ny, curv = body.compute_sdf_properties(body.sdf)
     (mu0, mu1) = body.mu_funcs(d)
 
     import matplotlib.pyplot as plt
@@ -1982,7 +1977,7 @@ def test_curvature():
 
 
 if __name__ == "__main__":
-    test_curvature()
+    test_body()
 
 
 

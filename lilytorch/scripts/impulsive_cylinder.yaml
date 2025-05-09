@@ -12,10 +12,14 @@ solver:
   nu                : 1.0e-5
   rho               : 1.0e+3
   convection_method : "abdquickest"
-  poisson_tol       : 1.0e-2
-  poisson_max_cycles: 1
+
+  poisson_tol       : 1.0e-5
+  jacobi_weight     : 0.8
+  poisson_max_cycles: 10
   poisson_nsmoothing: 5
   poisson_verbose   : True
+  poisson_filename : "lilytorch/data/"
+
 
 boundary_conditions:
   BC_type_u:
@@ -40,12 +44,13 @@ boundary_conditions:
   - 0
 
 body:
-  type: analytical
-  sdf: "lambda x, y: circle(x,y,xt=0,yt=0,r=0.1)"
+  type: composite_analytical
+  sdf:
+  - "lambda x, y: circle(x,y,xt=0,yt=0,r=0.1)"
   update_maps:
-    rotation: "lambda t: 0"
+  - rotation: "lambda t: 0"
     translation:
-      - "lambda t: 0.01*t"
+      - "lambda t: 0.01"
       - "lambda t: 0"
 
 output:

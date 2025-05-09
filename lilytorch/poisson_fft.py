@@ -60,7 +60,7 @@ class PoissonSolverFFT:
             xshift_ext = torch.hstack((xshift, torch.hstack((torch.tensor([-xshift[-1]-self.dx],dtype=self.dtype,device=self.device),-torch.flip(xshift,dims=(0,))[:-1]))))
             yshift_ext = torch.hstack((yshift, torch.hstack((torch.tensor([-yshift[-1]-self.dy],dtype=self.dtype,device=self.device),-torch.flip(yshift,dims=(0,))[:-1]))))
 
-            Xshift, Yshift = torch.meshgrid(xshift_ext, yshift_ext)
+            Xshift, Yshift = torch.meshgrid(xshift_ext, yshift_ext, indexing='ij')
 
             R = torch.sqrt(Xshift**2+Yshift**2).cpu().numpy()
 

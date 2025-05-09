@@ -21,15 +21,15 @@ solver:
   # dt                : 0.1
   # convection_method : "implicit"
 
-  convection_method : "abdquickest"
-  dt                : 0.01
+  # convection_method : "abdquickest"
+  # dt                : 0.01
 
 # 2*R*U/nu
 
 boundary_conditions:
   BC_type_u:
   - "D"
-  - "N"
+  - "-"
   - "N"
   - "N"
   BC_values_u:
@@ -39,7 +39,7 @@ boundary_conditions:
   - 0
   BC_type_v:
   - "D"
-  - "N"
+  - "-"
   - "N"
   - "N"
   BC_values_v:
@@ -47,6 +47,7 @@ boundary_conditions:
   - 0
   - 0
   - 0
+
 
 body:
   type: composite_analytical

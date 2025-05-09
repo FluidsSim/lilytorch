@@ -3,11 +3,11 @@
 import cv2
 import os
 
-dir         = "/data/andreaferrario/ns_data/2025-05-01T22:28:47.010218/curl/"
+dir         = "/data/andreaferrario/ns_data/2025-05-09T13:51:09.194590/curl/"
 name        = "video"
 format      = ".mp4"
 img_name    = "curl"
-dt          = 0.1
+dt          = 0.01
 slow_factor =   1
 save_every    = 50
 
