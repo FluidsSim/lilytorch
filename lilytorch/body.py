@@ -11,6 +11,7 @@ except:
     print("farms_core not installed")
 from pytorch_interp import RegularGridInterpolator
 import skfmm
+from skimage import measure
 import math # important to keep this for evaluating math operations for sdfs even if it appears as not used
 import matplotlib.pyplot as plt
 import cv2
@@ -917,14 +918,28 @@ class BodyMesh(Body):
             print("Computing the sdf for {}, with space steps ({},{})".format(self.mesh_file,xnp[1]-xnp[0],ynp[1]-ynp[0]))
             sdf_val = skfmm.distance(binary_2d, dx=[xnp[1]-xnp[0],ynp[1]-ynp[0]])#-self.suit
 
+            # find contour lines
+            cnt = np.array(measure.find_contours(sdf_val, 0)[0]).T
+            cnt[0]=xnp[0]+cnt[0]*(xnp[1]-xnp[0])
+            cnt[1]=ynp[0]+cnt[1]*(ynp[1]-ynp[0])
+
+            dx = np.diff(cnt[0])
+            dy = np.diff(cnt[1])
+            curv_coord = np.sqrt(dx**2 + dy**2)
+
+            # curv_coord = np.cumsum(np.sqrt(np.sum(np.diff(cnt, axis=1)**2, axis=0)))
+            print(curv_coord)
+
             if self.plotting:
-                var=sdf_val_o3d.reshape(X.shape)
+                var=sdf_val
                 plt.figure()
                 plt.contourf(
+                    X,
+                    Y,
                     var
                 )
+                plt.plot(cnt[0], cnt[1], 'r', linewidth=2)
                 plt.colorbar()
-                plt.contour(var, colors='k', levels=[0], linestyles='dashed')
                 plt.show()
 
 
@@ -933,11 +948,15 @@ class BodyMesh(Body):
             np.save("interp_data/xnp_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy",xnp)
             np.save("interp_data/ynp_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy",ynp)
             np.save("interp_data/sdf_val_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy",sdf_val)
+            np.save("interp_data/cnt_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy", cnt)
+            np.save("interp_data/curv_coord_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy", curv_coord)
 
     def initialize(self):
         xnp = np.load("interp_data/xnp_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy")
         ynp = np.load("interp_data/ynp_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy")
         sdf_val = np.load("interp_data/sdf_val_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy")
+        cnt = np.load("interp_data/cnt_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy")
+        curv_coord = np.load("interp_data/curv_coord_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy")
 
         self.sdf_interp = RegularGridInterpolator(
             (
@@ -947,6 +966,11 @@ class BodyMesh(Body):
             torch.from_numpy(sdf_val).type(self.dtype).to(self.device),
             fill_value="nearest"
         )
+
+        self.curv_coord = torch.from_numpy(curv_coord).type(self.dtype).to(self.device)
+        self.cnt        = torch.from_numpy(cnt).type(self.dtype).to(self.device)
+        self.cnt_update = self.cnt.clone().detach()
+
         return self.update(0)
 
     def update(self, t, dt=1):

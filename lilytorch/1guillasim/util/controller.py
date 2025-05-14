@@ -32,7 +32,7 @@ class DragController(AnimatNetwork):
 
 class BDIMController(AnimatNetwork):
 
-    def __init__(self, animat_data, sim_options, controller, callback):
+    def __init__(self, animat_data, sim_options, controller, callback, yaml_file):
         self.n_iterations = np.shape(animat_data.state.array)[0]
         super().__init__(data=animat_data, n_iterations=self.n_iterations)
         self.offsets                   = np.zeros(controller.n_total_joints) # zero offsets
@@ -43,7 +43,7 @@ class BDIMController(AnimatNetwork):
         self.callback                  = callback
         self.continue_sim              = True
 
-        pars = yaml2pyobject("../scripts/1guilla_swimming.yaml")
+        pars = yaml2pyobject(yaml_file)
 
         self.fluid_solver = FluidSolver(pars, dtype=torch.float32, costum_update=self.update)
 
@@ -62,7 +62,7 @@ class BDIMController(AnimatNetwork):
         _3d_2d_scaling=1
         # scale forces by the z-bounding box size
         # self.callback.force_scaling = 1/_3d_2d_scaling
-        self.callback.force_scaling = _3d_2d_scaling*1000*np.array([np.diff(body.bb[2])[0] for body in self.fluid_solver.composite_body.bodies])
+        self.callback.force_scaling = _3d_2d_scaling *np.array([np.diff(body.bb[2])[0] for body in self.fluid_solver.composite_body.bodies])
         print("Force scaling: ", self.callback.force_scaling)
 
     def update(self,t,iteration,dt=1):
@@ -88,15 +88,53 @@ class BDIMController(AnimatNetwork):
             )
             self.fluid_solver.composite_body.sdf_vals[i]=sdf_val
 
-            ###### compute v = v_lin_com + <v_ang_com, x-x_com>
+            # compute v = v_lin_com + <v_ang_com, x-x_com>
             self.fluid_solver.composite_body.u_vals[i]=lin_vel[i][0]-ang_vel[i]*(r_com_p[1]).reshape(body.nx, body.ny)
             self.fluid_solver.composite_body.v_vals[i]=lin_vel[i][1]+ang_vel[i]*(r_com_p[0]).reshape(body.nx, body.ny)
 
             # store com positions for fluid->body force computation
             self.fluid_solver.composite_body.com_pos[i]=pos_global[i]
 
+            # update the contour position
+            body.cnt_update = r[i] @ body.cnt+pos_global[i][:,None]
 
-        # self.sdf_val = torch.min(torch.stack([prop for idx, prop in enumerate(sdf_properties)]),axis=0)[0]
+
+            # if iteration==30:
+            # # trans = torch.stack((pos_global[body_i][0]*body.ones_stacked, pos_global[body_i][1]*body.ones_stacked))
+
+            #     r_com_p = body.stacked_xy-pos_global[i][:,None]
+            #     pos_trans = r[i].T@r_com_p
+
+            #     # pos_trans = r[body_i].T@pos_trans
+            #     xpos = pos_trans[0].reshape(body.nx, body.ny)
+            #     ypos = pos_trans[1].reshape(body.nx, body.ny)
+            #     sdf_val = body.sdf_interp(
+            #         xpos,
+            #         ypos
+            #     )
+
+            #     body.cnt_update = r[i] @ body.cnt+pos_global[i][:,None]
+
+
+
+            #     # if i==0:
+
+            #     import matplotlib.pyplot as plt
+
+            #     plt.plot(body.cnt_update[0].cpu(), body.cnt_update[1].cpu(), 'r-')
+            #     plt.contourf(self.fluid_solver.X.cpu(),self.fluid_solver.Y.cpu(),sdf_val.cpu())
+
+            #     plt.show()
+
+
+
+
+
+
+
+
+
+
 
 
         idx=self.fluid_solver.composite_body.sdf_vals.argmin(0).unsqueeze(0).expand(self.fluid_solver.composite_body.sdf_vals.shape)

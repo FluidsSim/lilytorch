@@ -131,7 +131,7 @@ def run_experiment(pars):
         options['callbacks'] += [
                 callbacks.FluidCallback(animat_options, arena_options),
             ]
-        animat_network = BDIMController(animat_data, sim_options, controller, options['callbacks'][-1])
+        animat_network = BDIMController(animat_data, sim_options, controller, options['callbacks'][-1], controller.pars.yaml_file)
     else:
         raise ValueError(f"Unknown swimming mode: {pars.swimming_mode}")
 

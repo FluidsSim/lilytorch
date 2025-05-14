@@ -608,7 +608,7 @@ def plot2d_imshow_composite(X,Y,u,properties,extent,iteration,save_path,name,vmi
     plt.colorbar()
     save_fig_to_dedicated_folder(save_path, name, iteration)
 
-def plot2d_imshow_composite_quiver(X,Y,u,properties,normal_x,normal_y,extent,iteration,save_path,name,vmin,vmax,subsample_n = 2**4, scale=None):
+def plot2d_imshow_composite_quiver(X,Y,u,bodies,normal_x,normal_y,extent,iteration,save_path,name,vmin,vmax,subsample_n = 2**4, scale=None):
     if vmin is None:
         limit = max(abs(u.min()), abs(u.max()))/2
         vmin = -limit
@@ -616,9 +616,10 @@ def plot2d_imshow_composite_quiver(X,Y,u,properties,normal_x,normal_y,extent,ite
     if scale:
         scale=1/scale
     plt.figure(figsize=(20,10))
-    for prop in properties:
-        d = prop[0].cpu()
-        plt.contour(X,Y,d, colors='k', levels=[0],linewidths=0.3)
+    for i, body in enumerate(bodies):
+        # d = body.sdf.cpu()
+        # plt.contour(X,Y,d, colors='k', levels=[0],linewidths=0.3)
+        plt.plot(body.cnt_update[0].cpu(), body.cnt_update[1].cpu(), 'k',linewidth=0.5)
     plt.imshow(
         u.T,
         vmin   = vmin,
