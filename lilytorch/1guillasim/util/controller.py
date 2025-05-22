@@ -62,8 +62,10 @@ class BDIMController(AnimatNetwork):
         _3d_2d_scaling=1
         # scale forces by the z-bounding box size
         # self.callback.force_scaling = 1/_3d_2d_scaling
-        self.callback.force_scaling = _3d_2d_scaling *np.array([np.diff(body.bb[2])[0] for body in self.fluid_solver.composite_body.bodies])
+        self.callback.force_scaling = _3d_2d_scaling #*np.array([np.diff(body.bb[2])[0] for body in self.fluid_solver.composite_body.bodies])
         print("Force scaling: ", self.callback.force_scaling)
+
+
 
     def update(self,t,iteration,dt=1):
         # iteration = int(t/dt)
@@ -98,63 +100,14 @@ class BDIMController(AnimatNetwork):
             # update the contour position
             body.cnt_update = r[i] @ body.cnt+pos_global[i][:,None]
 
-
-            # if iteration==30:
-            # # trans = torch.stack((pos_global[body_i][0]*body.ones_stacked, pos_global[body_i][1]*body.ones_stacked))
-
-            #     r_com_p = body.stacked_xy-pos_global[i][:,None]
-            #     pos_trans = r[i].T@r_com_p
-
-            #     # pos_trans = r[body_i].T@pos_trans
-            #     xpos = pos_trans[0].reshape(body.nx, body.ny)
-            #     ypos = pos_trans[1].reshape(body.nx, body.ny)
-            #     sdf_val = body.sdf_interp(
-            #         xpos,
-            #         ypos
-            #     )
-
-            #     body.cnt_update = r[i] @ body.cnt+pos_global[i][:,None]
-
-
-
-            #     # if i==0:
-
-            #     import matplotlib.pyplot as plt
-
-            #     plt.plot(body.cnt_update[0].cpu(), body.cnt_update[1].cpu(), 'r-')
-            #     plt.contourf(self.fluid_solver.X.cpu(),self.fluid_solver.Y.cpu(),sdf_val.cpu())
-
-            #     plt.show()
-
-
-
-
-
-
-
-
-
-
-
-
         idx=self.fluid_solver.composite_body.sdf_vals.argmin(0).unsqueeze(0).expand(self.fluid_solver.composite_body.sdf_vals.shape)
 
         self.fluid_solver.composite_body.sdf_val=self.fluid_solver.composite_body.sdf_vals.gather(0,idx)[0].reshape(self.fluid_solver.nx+2,self.fluid_solver.ny+2)-self.fluid_solver.composite_body.suit
 
         # (self.mu0_all, self.mu1_all) = self.fluid_solver.composite_body.mu_funcs(self.composite_body.sdf_val)
 
-        self.fluid_solver.body_u=self.fluid_solver.composite_body.u_vals.gather(0,idx)[0].reshape(self.fluid_solver.nx+2,self.fluid_solver.ny+2)
-        self.fluid_solver.body_v=self.fluid_solver.composite_body.v_vals.gather(0,idx)[0].reshape(self.fluid_solver.nx+2,self.fluid_solver.ny+2)
-
-
-    def bodies_update(self, t):
-        r = R.from_quat(self.urdf_orientations[:,[3,0,1,2]])
-        angles = -r.as_euler("xyz",degrees=True)[:,0].astype(np.float32)
-        translations = -self.urdf_positions[:,:2].astype(np.float32)
-        return (
-            torch.from_numpy(angles),
-            torch.from_numpy(translations)
-        )
+        self.fluid_solver.composite_body.body_u=self.fluid_solver.composite_body.u_vals.gather(0,idx)[0].reshape(self.fluid_solver.nx+2,self.fluid_solver.ny+2)
+        self.fluid_solver.composite_body.body_v=self.fluid_solver.composite_body.v_vals.gather(0,idx)[0].reshape(self.fluid_solver.nx+2,self.fluid_solver.ny+2)
 
     def step(self, iteration, time, timestep):
         """Control step"""
@@ -165,12 +118,6 @@ class BDIMController(AnimatNetwork):
         self.pos = np.array(self.data.sensors.joints.positions(iteration)[4:-1])
         self.urdf_positions = np.array(self.data.sensors.links.urdf_positions()[iteration])
         self.urdf_orientations = np.array(self.data.sensors.links.urdf_orientations()[iteration])
-
-        # === stepping the controller ===
-        self.data.state.array[iteration] = np.concatenate([
-            self.controller.step(iteration, time, timestep, pos=self.pos, urdf_positions=self.urdf_positions),
-            self.offsets
-            ])
 
         # === stepping the fluid solver ===
         (
@@ -191,13 +138,16 @@ class BDIMController(AnimatNetwork):
         #         self.controller.exit_iteration = iteration
         #     return
 
+        self.callback.friction_force_lin_x = self.callback.force_scaling*(self.fluid_solver.friction_force_lin_x).cpu().numpy()
+        self.callback.friction_force_lin_y = self.callback.force_scaling*(self.fluid_solver.friction_force_lin_y).cpu().numpy()
 
+        self.callback.friction_force_ang_z = self.callback.force_scaling*(self.fluid_solver.friction_force_ang_z).cpu().numpy()
 
-        self.callback.friction_force_lin_x = (self.fluid_solver.friction_force_lin_x).cpu().numpy()
-        self.callback.friction_force_lin_y = (self.fluid_solver.friction_force_lin_y).cpu().numpy()
+        self.callback.pressure_force_x = self.callback.force_scaling*(self.fluid_solver.pressure_force_x).cpu().numpy()
+        self.callback.pressure_force_y = self.callback.force_scaling*(self.fluid_solver.pressure_force_y).cpu().numpy()
 
-        self.callback.friction_force_ang_z = (self.fluid_solver.friction_force_ang_z).cpu().numpy()
-
-        self.callback.pressure_force_x = (self.fluid_solver.pressure_force_x).cpu().numpy()
-        self.callback.pressure_force_y = (self.fluid_solver.pressure_force_y).cpu().numpy()
-
+        # === stepping the controller ===
+        self.data.state.array[iteration] = np.concatenate([
+            self.controller.step(iteration, time, timestep, pos=self.pos, urdf_positions=self.urdf_positions),
+            self.offsets
+            ])

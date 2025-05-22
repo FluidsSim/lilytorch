@@ -42,7 +42,7 @@ import sys
 def run_experiment(pars):
 
     """Main"""
-    prepath = "models/1guilla_v1/"
+    prepath = pars.yaml_path
     args = [
         '--simulator',
         'MUJOCO',

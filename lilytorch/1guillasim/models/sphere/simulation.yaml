@@ -3,7 +3,7 @@ units:
   seconds: 1.0
   kilograms: 1.0
 timestep: 0.001
-n_iterations: 30001
+n_iterations: 3001
 play: false
 rtl: 1.0
 fast: false

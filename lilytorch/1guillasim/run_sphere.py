@@ -8,9 +8,6 @@ import farms_pylog as pylog
 import numpy as np
 
 
-amps=1*np.ones(8)
-amps[:5]=0
-
 def main(**kwargs):
     """
     Exercise example, running a single simulation and plotting the results
@@ -22,7 +19,7 @@ def main(**kwargs):
         n_iterations    = 100001,
         controller      = "sine",
         swimming_mode   = "bdim",
-        amp             = amps,
+        amp             = 0*np.ones(8),
         bias            = 0,
         timestep        = 0.001,
         twl             = 1,

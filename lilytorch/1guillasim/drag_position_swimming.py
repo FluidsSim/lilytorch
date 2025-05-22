@@ -8,9 +8,6 @@ import farms_pylog as pylog
 import numpy as np
 
 
-amps=1*np.ones(8)
-amps[:5]=0
-
 def main(**kwargs):
     """
     Exercise example, running a single simulation and plotting the results
@@ -19,30 +16,29 @@ def main(**kwargs):
     os.makedirs(log_path, exist_ok=True)
 
     all_pars = SimulationParameters(
-        n_iterations    = 100001,
+        n_iterations    = 15001,
         controller      = "sine",
-        swimming_mode   = "bdim",
-        amp             = amps,
-        bias            = 0,
+        swimming_mode   = "drag",
+        amp             = np.ones(8),
+        bias            = 0.3,
         timestep        = 0.001,
         twl             = 1,
         freq            = 2,
         log_path        = log_path,
         compute_metrics = 3,
-        headless        = True,
+        headless        = False,
         return_network  = True,
         gravity         = [0,0,-9.81],
         video_record    = False,
         video_name      = "swimming_example",
-        yaml_file      = "/data/andreaferrario/lilytorch/lilytorch/scripts/1guilla_swimming.yaml",
+        yaml_path = "models/1guilla_v1_position/",
         spawn           = {
             'loader': 0,
-            'mode': "TRANSVERSE",
+            'mode': "FREE",
             'pose': [0.0, 0.0, -0.3, 0.0, 0.0, 3.141592653589793],
             'velocity': [0.0, 0., 0.0, 0.0, 0.0, 0.0],
             'extras': {}
             },
-        yaml_path = "models/1guilla_v1/",
         **kwargs
     )
 
@@ -50,7 +46,6 @@ def main(**kwargs):
     controller = run_single(
         all_pars
     )
-
 
 if __name__ == '__main__':
     main()

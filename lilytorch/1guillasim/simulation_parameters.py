@@ -48,6 +48,7 @@ class SimulationParameters:
 
         # parameters of the firing rate controller
         self.controller     = "sine" # "sine" for using the WaveController (Project 1), "firing_rate" for using the FiringRateController (Project 2)
+        self.yaml_path = "models/1guilla_v1/"
 
         self.spawn = {
             'loader': 0,
