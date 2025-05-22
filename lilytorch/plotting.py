@@ -5,7 +5,7 @@ import matplotlib as mpl
 import numpy as np
 from scipy.interpolate import griddata
 from matplotlib import cm
-
+import matplotlib.colors as colors
 
 def plot_time_histories(
     time: np.array,
@@ -606,6 +606,7 @@ def plot2d_imshow_composite(X,Y,u,properties,extent,iteration,save_path,name,vmi
         interpolation=None
     )
     plt.colorbar()
+    plt.axis(extent)
     save_fig_to_dedicated_folder(save_path, name, iteration)
 
 def plot2d_imshow_composite_quiver(X,Y,u,bodies,normal_x,normal_y,extent,iteration,save_path,name,vmin,vmax,subsample_n = 2**4, scale=None):
@@ -638,6 +639,7 @@ def plot2d_imshow_composite_quiver(X,Y,u,bodies,normal_x,normal_y,extent,iterati
         color='g',
         scale=scale, scale_units='xy'
     )
+    plt.axis(extent)
     save_fig_to_dedicated_folder(save_path, name, iteration)
 
 def plot2d_imshow(X,Y,u,d,extent,iteration,save_path,name,vmin,vmax):
@@ -660,6 +662,7 @@ def plot2d_imshow(X,Y,u,d,extent,iteration,save_path,name,vmin,vmax):
     # plt.xlim([0.58,1.13])
     ax = plt.gca()
     ax.set_aspect('equal', adjustable='box')
+    plt.axis(extent)
     save_fig_to_dedicated_folder(save_path, name, iteration)
 
 def plot2d_imshow_quiver(X,Y,u,d,normal_x,normal_y,extent,iteration,save_path,name,vmin,vmax,subsample_n = 2**4, scale=None):
@@ -689,6 +692,7 @@ def plot2d_imshow_quiver(X,Y,u,d,normal_x,normal_y,extent,iteration,save_path,na
         color='g',
         scale=scale, scale_units='xy'
     )
+    plt.axis(extent)
     save_fig_to_dedicated_folder(save_path, name, iteration)
 
 def plot2d_imshow_simple(d,extent,iteration,save_path,name,vmin= -0.001,vmax= 0.001):
@@ -706,8 +710,17 @@ def plot2d_imshow_simple(d,extent,iteration,save_path,name,vmin= -0.001,vmax= 0.
         cmap = cm.RdBu
     )
     plt.colorbar()
+    plt.axis(extent)
     save_fig_to_dedicated_folder(save_path, name, iteration)
 
 
 
 
+def plot_ctrs(vars,bodies, extent, save_path, name, iteration,vmin= -0.001,vmax= 0.001, cmap = cm.get_cmap('viridis')):
+
+    norm = colors.Normalize(vmin=vmin, vmax=vmax)
+    for i, body in enumerate(bodies):
+        plt.scatter(body.cnt_update[0].cpu(), body.cnt_update[1].cpu(), c=vars[i].cpu(), cmap=cmap, norm=norm)
+    plt.colorbar()
+    plt.axis(extent)
+    save_fig_to_dedicated_folder(save_path, name, iteration)

@@ -387,6 +387,7 @@ class Body:
             0
         )
 
+
     def mu_funcs(self, d):
         s=torch.sin(torch.pi*d/self.eps)
         c=torch.cos(torch.pi*d/self.eps)
@@ -409,40 +410,7 @@ class Body:
 
 
 
-    def update_body(self, fun, theta, transl, dt=1):
-        """
-        Update sdf properties from analytical rototranslation map
-        """
-        theta = torch.tensor(theta*self.rad_conv, device=self.device, dtype=self.dtype).clone().detach()
-        s = torch.sin(theta)
-        c = torch.cos(theta)
-        rot = torch.stack([torch.stack([c, s]),
-                        torch.stack([-s, c])])
-        trans = torch.stack((transl[0]*self.ones_stacked, transl[1]*self.ones_stacked))
 
-        # newpoints=rot.T@self.stacked_xy-trans
-
-        newpoints=self.stacked_xy-trans
-        newpoints=rot@newpoints
-
-        # newpos = self.stacked_xy+trans
-        # newpos = rot@newpos
-
-        # newpos=rot@self.stacked_xy+trans
-
-        vel = - rot.T @ (newpoints - self.old_points) / dt
-
-        newpos_u = newpoints[0].reshape(self.nx, self.ny)
-        newpos_v = newpoints[1].reshape(self.nx, self.ny)
-
-        # self.body_uprev = self.body_u
-        # self.body_vprev = self.body_v
-
-        self.body_u= vel[0].reshape(self.nx, self.ny)
-        self.body_v= vel[1].reshape(self.nx, self.ny)
-
-        self.old_points = newpoints
-        self.sdf = fun(newpos_u, newpos_v)
 
 class BodyAnalytical(Body):
 
@@ -453,6 +421,7 @@ class BodyAnalytical(Body):
         self.update_translation = update_maps[1]
         self.body=self
         self.initialize()
+        self.rad_conv = (torch.pi/180)
 
     def initialize(self):
         """
@@ -460,30 +429,76 @@ class BodyAnalytical(Body):
         """
         self.body_u = torch.zeros((self.nx,self.ny),device=self.device,dtype=self.dtype)
         self.body_v = torch.zeros((self.nx,self.ny),device=self.device,dtype=self.dtype)
-        return self.update(0,0)
+        pos_u = self.stacked_xy[0].reshape(self.nx, self.ny)
+        pos_v = self.stacked_xy[1].reshape(self.nx, self.ny)
+        self.sdf = self.sdf_fun(pos_u, pos_v)
+
+        # find contour lines
+        sdf_np=self.sdf.cpu().numpy()
+        xnp = self.x.cpu().numpy()
+        ynp = self.y.cpu().numpy()
+        cnt = np.array(measure.find_contours(sdf_np, self.eps)[0]).T
+        cnt[0]=xnp[0]+cnt[0]*(xnp[1]-xnp[0])
+        cnt[1]=ynp[0]+cnt[1]*(ynp[1]-ynp[0])
+        curv_coord = np.cumsum(np.sqrt(np.sum(np.diff(cnt, axis=1)**2, axis=0)))
+
+        self.curv_coord = torch.from_numpy(curv_coord).type(self.dtype).to(self.device)
+        self.cnt        = torch.from_numpy(cnt).type(self.dtype).to(self.device)
+        self.cnt_update = self.cnt.clone().detach()
+
+        self.update(torch.tensor(0.0),0)
+
+        return
+
 
     def update(self, t, iteration, dt=1):
         """
         Apply rototranslation and update the sdf properties
         """
-        # self.sdf=self.update_body(
-        #     self.sdf_fun,
-        #     self.update_theta(t),
-        #     (
-        #         self.update_translation[0](t),
-        #         self.update_translation[1](t)
-        #     ),
-        #     dt=dt
-        # )
-        self.update_body(
-            self.sdf_fun,
-            self.update_theta(t),
-            (
-                self.update_translation[0](t),
-                self.update_translation[1](t)
-            ),
-            dt=dt
-        )
+        transl = torch.tensor([
+            self.update_translation[0](t),
+            self.update_translation[1](t)
+        ], device=self.device, dtype=self.dtype)
+        theta = self.rad_conv*(self.update_theta(t).clone().detach().to(self.device))
+        s = torch.sin(theta)
+        c = torch.cos(theta)
+        rot = torch.stack([torch.stack([c, -s]),
+                        torch.stack([s, c])])
+        trans = torch.stack((transl[0]*self.ones_stacked, transl[1]*self.ones_stacked))
+
+        # compute sdf
+        translpoints=self.stacked_xy-trans
+        newpoints=rot.T@translpoints
+        newpos_u = newpoints[0].reshape(self.nx, self.ny)
+        newpos_v = newpoints[1].reshape(self.nx, self.ny)
+        self.sdf = self.sdf_fun(newpos_u, newpos_v)
+
+        t_vx=t.clone().detach()
+        t_vy=t.clone().detach()
+        t_w=t.clone().detach()
+        t_vx.requires_grad_()
+        t_vy.requires_grad_()
+        t_w.requires_grad_()
+
+        vx =  self.update_translation[0](t_vx)
+        vy =  self.update_translation[1](t_vy)
+        w =  self.update_theta(t_w)*self.rad_conv
+
+        vx.backward()
+        vy.backward()
+        w.backward()
+
+        self.body_u = (t_vx.grad -t_w.grad*translpoints[1]).reshape(self.nx, self.ny)
+        self.body_v = (t_vy.grad +t_w.grad*translpoints[0]).reshape(self.nx, self.ny)
+
+
+
+        # compute contour lines
+        self.cnt_update = rot @ self.cnt
+        self.cnt_update[0]+=transl[0]
+        self.cnt_update[1]+=transl[1]
+
+
 
 
 class CompositeBodyAnalytical(Body):
@@ -517,12 +532,7 @@ class CompositeBodyAnalytical(Body):
         """
         Initialize sdf properties at time 0
         """
-        for i, body in enumerate(self.bodies):
-            body.initialize()
-            self.sdf_vals[i] = body.sdf
-            self.u_vals[i]   = body.body_u
-            self.v_vals[i]   = body.body_v
-            self.sdf_val = torch.min(self.sdf_vals,axis=0)[0]
+        self.update(torch.tensor(0.0,device=self.device,dtype=self.dtype), 0)
 
     def update(self, t, iteration, dt=1):
         for i, body in enumerate(self.bodies):
@@ -531,7 +541,10 @@ class CompositeBodyAnalytical(Body):
             self.u_vals[i]   = body.body_u
             self.v_vals[i]   = body.body_v
         self.sdf_val = torch.min(self.sdf_vals,axis=0)[0]
-
+        idx=self.sdf_vals.argmin(0).unsqueeze(0).expand(self.sdf_vals.shape)
+        self.sdf_val=self.sdf_vals.gather(0,idx)[0].reshape(self.nx,self.ny)
+        self.body_u =self.u_vals.gather(0,idx)[0].reshape(self.nx,self.ny)
+        self.body_v =self.v_vals.gather(0,idx)[0].reshape(self.nx,self.ny)
 
 
 class BodyFishAnalytical(Body):
@@ -919,16 +932,10 @@ class BodyMesh(Body):
             sdf_val = skfmm.distance(binary_2d, dx=[xnp[1]-xnp[0],ynp[1]-ynp[0]])#-self.suit
 
             # find contour lines
-            cnt = np.array(measure.find_contours(sdf_val, 0)[0]).T
+            cnt = np.array(measure.find_contours(sdf_val, self.eps)[0]).T
             cnt[0]=xnp[0]+cnt[0]*(xnp[1]-xnp[0])
             cnt[1]=ynp[0]+cnt[1]*(ynp[1]-ynp[0])
-
-            dx = np.diff(cnt[0])
-            dy = np.diff(cnt[1])
-            curv_coord = np.sqrt(dx**2 + dy**2)
-
-            # curv_coord = np.cumsum(np.sqrt(np.sum(np.diff(cnt, axis=1)**2, axis=0)))
-            print(curv_coord)
+            curv_coord = np.cumsum(np.sqrt(np.sum(np.diff(cnt, axis=1)**2, axis=0)))
 
             if self.plotting:
                 var=sdf_val
@@ -971,18 +978,18 @@ class BodyMesh(Body):
         self.cnt        = torch.from_numpy(cnt).type(self.dtype).to(self.device)
         self.cnt_update = self.cnt.clone().detach()
 
-        return self.update(0)
+        # return self.update(0)
 
-    def update(self, t, dt=1):
-        return [self.update_body(
-            self.sdf_interp,
-            self.update_theta(t),
-            (
-                self.update_translation[0](t),
-                self.update_translation[1](t)
-            ),
-            dt=dt
-        )]
+    # def update(self, t, dt=1):
+    #     return [self.update_body(
+    #         self.sdf_interp,
+    #         self.update_theta(t),
+    #         (
+    #             self.update_translation[0](t),
+    #             self.update_translation[1](t)
+    #         ),
+    #         dt=dt
+    #     )]
 
     def visualize(self):
         self.m2s.visualize()

@@ -11,11 +11,11 @@ solver :
   nu     : 1.0e-6
   rho    : 1.0e+3
 
-  # convection_method : "implicit"
-  # dt     : 0.1
+  convection_method : "implicit"
+  dt     : 0.1
 
-  convection_method : "abdquickest"
-  dt                : 0.01
+  # convection_method : "abdquickest"
+  # dt                : 0.01
 
   poisson_tol       : 1.0e-5
   jacobi_weight     : 0.8
@@ -51,9 +51,9 @@ body:
   sdf:
   - "lambda x, y: circle(x,y,xt=0,yt=0,r=10)"
   update_maps:
-    - rotation: "lambda t: 0*math.sin(t/100)"
+    - rotation: "lambda t: 90*math.cos(t/10)"
       translation:
-        - "lambda t: 100*math.cos(t/20)"
+        - "lambda t: 120+100*math.cos(t/20)"
         - "lambda t: 0"
 
 output:
