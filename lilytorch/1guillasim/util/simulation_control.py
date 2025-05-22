@@ -85,7 +85,10 @@ def run_experiment(pars):
     animat_options.spawn.mode = SpawnMode(pars.spawn["mode"])
 
     # update muscle and drag parameters
-    util.update_muscle_param(animat_options)
+    control_type = animat_options["control"]["motors"][0]["control_types"]=="torque"
+    if control_type:
+        util.update_muscle_param(animat_options)
+
     util.update_drag_param(animat_options)
     # util.update_swimming_mode(arena_options,swimming_mode=swimming_mode)
 
@@ -125,7 +128,10 @@ def run_experiment(pars):
         options['callbacks'] += [
                 callbacks.DragCallback(animat_options, arena_options),
             ]
-        animat_network = DragController(animat_data, controller)
+        if control_type:
+            animat_network = DragMuscleController(animat_data, controller, sim_options.n_iterations)
+        else:
+            animat_network = DragPositionController(animat_data, controller, sim_options.n_iterations)
     elif pars.swimming_mode=="bdim":
         print('Using bdim swimming mode')
         options['callbacks'] += [

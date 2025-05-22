@@ -3,7 +3,7 @@ units:
   seconds: 1.0
   kilograms: 1.0
 timestep: 0.001
-n_iterations: 30001
+n_iterations: 10001
 play: false
 rtl: 1.0
 fast: false
@@ -33,7 +33,7 @@ gravity: !!python/tuple
 - 0
 - 0
 - -9.81
-num_sub_steps: 100
+num_sub_steps: 1
 n_solver_iters: 10000
 residual_threshold: 1.0e-16
 visual_scale: 1.0

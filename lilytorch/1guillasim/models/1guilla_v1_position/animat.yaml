@@ -577,7 +577,6 @@ control:
       stiffness_coefficient: 0.0002
       damping_coefficient: 1.0e-05
       friction_coefficient: 0
-  muscles: []
   kinematics_file: positions.csv
   kinematics_sampling: 0.001
   kinematics_indices:

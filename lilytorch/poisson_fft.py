@@ -81,7 +81,6 @@ class PoissonSolverFFT:
             #     torch.pi*torch.linspace(-ky/2, ky/2, self.ny, dtype=self.dtype, device=self.device),
             #     indexing='ij'
             # )
-            # from IPython import embed; embed()
 
             # K = torch.meshgrid(
             #     torch.pi*torch.arange(-int(self.nx/2),int(self.nx/2), dtype=self.dtype, device=self.device)/(self.x[-1]-self.x[0]),

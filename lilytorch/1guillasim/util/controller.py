@@ -8,12 +8,21 @@ import torch
 from lilytorch.util.yaml_operations import yaml2pyobject
 
 
-class DragController(AnimatNetwork):
 
-    def __init__(self, animat_data, controller):
-        self.n_iterations = np.shape(animat_data.state.array)[0]
+class DragPositionController(AnimatNetwork):
+
+    def __init__(self, animat_data, controller, n_iterations):
+        super().__init__(data=animat_data, n_iterations=n_iterations)
+
+    def step(self, iteration, time, timestep):
+        pass
+
+
+class DragMuscleController(AnimatNetwork):
+
+    def __init__(self, animat_data, controller, n_iterations):
+        super().__init__(data=animat_data, n_iterations=n_iterations)
         self.njoints=8
-        super().__init__(data=animat_data, n_iterations=self.n_iterations)
         self.offsets=np.zeros(self.njoints) # zero offsets
         self.controller = controller
 

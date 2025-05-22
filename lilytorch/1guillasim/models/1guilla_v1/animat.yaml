@@ -610,64 +610,64 @@ control:
     osc1: osc_body_0_L
     osc2: osc_body_0_R
     alpha: 0.9
-    beta: 1e-06
-    gamma: 1.6e6
+    beta: 1.0e-06
+    gamma: 1.6e+06
     delta: 0.1
     epsilon: 0
   - joint_name: joint_body_01
     osc1: osc_body_1_L
     osc2: osc_body_1_R
     alpha: 0.9
-    beta: 1e-06
-    gamma: 1.6e6
+    beta: 1.0e-06
+    gamma: 1.6e+06
     delta: 0.1
     epsilon: 0
   - joint_name: joint_body_02
     osc1: osc_body_2_L
     osc2: osc_body_2_R
     alpha: 0.9
-    beta: 1e-06
-    gamma: 1.6e6
+    beta: 1.0e-06
+    gamma: 1.6e+06
     delta: 0.1
     epsilon: 0
   - joint_name: joint_body_03
     osc1: osc_body_3_L
     osc2: osc_body_3_R
     alpha: 0.9
-    beta: 1e-06
-    gamma: 1.6e6
+    beta: 1.0e-06
+    gamma: 1.6e+06
     delta: 0.1
     epsilon: 0
   - joint_name: joint_body_04
     osc1: osc_body_4_L
     osc2: osc_body_4_R
     alpha: 0.9
-    beta: 1e-06
-    gamma: 1.6e6
+    beta: 1.0e-06
+    gamma: 1.6e+06
     delta: 0.1
     epsilon: 0
   - joint_name: joint_body_05
     osc1: osc_body_5_L
     osc2: osc_body_5_R
     alpha: 0.9
-    beta: 1e-06
-    gamma: 1.6e6
+    beta: 1.0e-06
+    gamma: 1.6e+06
     delta: 0.1
     epsilon: 0
   - joint_name: joint_body_06
     osc1: osc_body_6_L
     osc2: osc_body_6_R
     alpha: 0.9
-    beta: 1e-06
-    gamma: 1.6e6
+    beta: 1.0e-06
+    gamma: 1.6e+06
     delta: 0.1
     epsilon: 0
   - joint_name: joint_body_07
     osc1: osc_body_7_L
     osc2: osc_body_7_R
     alpha: 0.9
-    beta: 1e-06
-    gamma: 1.6e6
+    beta: 1.0e-06
+    gamma: 1.6e+06
     delta: 0.1
     epsilon: 0
 

@@ -1869,8 +1869,6 @@ def test_fish_mesh():
     # plt.show()
 
 
-    # from IPython import embed; embed()
-
 
 
 

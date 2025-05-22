@@ -31,6 +31,7 @@ def main(**kwargs):
         gravity         = [0,0,-9.81],
         video_record    = False,
         video_name      = "swimming_example",
+        yaml_path = "models/1guilla_v1/",
         spawn           = {
             'loader': 0,
             'mode': "FREE",
