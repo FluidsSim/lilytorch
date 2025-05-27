@@ -85,9 +85,11 @@ def run_experiment(pars):
     animat_options.spawn.mode = SpawnMode(pars.spawn["mode"])
 
     # update muscle and drag parameters
-    control_type = animat_options["control"]["motors"][0]["control_types"]=="torque"
-    if control_type:
+    control_type=animat_options["control"]["motors"][0]["control_types"][0]
+    if control_type=="torque":
         util.update_muscle_param(animat_options)
+    elif control_type=="position":
+        util.update_pd_gains(animat_options)
 
     util.update_drag_param(animat_options)
     # util.update_swimming_mode(arena_options,swimming_mode=swimming_mode)
@@ -128,10 +130,12 @@ def run_experiment(pars):
         options['callbacks'] += [
                 callbacks.DragCallback(animat_options, arena_options),
             ]
-        if control_type:
+        if control_type=="torque":
             animat_network = DragMuscleController(animat_data, controller, sim_options.n_iterations)
-        else:
+        elif control_type=="position":
             animat_network = DragPositionController(animat_data, controller, sim_options.n_iterations)
+        else:
+            raise ValueError(f"Unknown control type: {control_type}, need position or torque")
     elif pars.swimming_mode=="bdim":
         print('Using bdim swimming mode')
         options['callbacks'] += [

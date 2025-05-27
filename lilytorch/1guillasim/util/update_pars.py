@@ -1,4 +1,13 @@
 
+
+
+def update_pd_gains(animat_options):
+    for joint in animat_options["control"]["motors"]:
+        joint["gains"] = [
+            10, 0.01
+        ]
+
+
 def update_muscle_param(animat_options):
     for joint in animat_options["control"]["muscles"]:
         joint["alpha"] = 0.9
@@ -10,9 +19,16 @@ def update_drag_param(animat_options):
     # return
     for link in animat_options["morphology"]["links"]:
 
-        link["drag_coefficients"][0][0] = -0.0
-        link["drag_coefficients"][0][1] = -0.8
-        link["drag_coefficients"][0][2] = -0.8
-        link["drag_coefficients"][1][0] = -0.01
-        link["drag_coefficients"][1][1] = -0.01
-        link["drag_coefficients"][1][2] = -0.01
+        link["drag_coefficients"][0][0] = -0.01
+        link["drag_coefficients"][0][1] = -1.0
+        link["drag_coefficients"][0][2] = -1.0
+        link["drag_coefficients"][1][0] = -0.001
+        link["drag_coefficients"][1][1] = -0.001
+        link["drag_coefficients"][1][2] = -0.001
+
+        # link["drag_coefficients"][0][0] = -0.0
+        # link["drag_coefficients"][0][1] = -0.0
+        # link["drag_coefficients"][0][2] = -0.0
+        # link["drag_coefficients"][1][0] = -0.00
+        # link["drag_coefficients"][1][1] = -0.00
+        # link["drag_coefficients"][1][2] = -0.00

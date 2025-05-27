@@ -12,7 +12,7 @@ def main(**kwargs):
     """
     Exercise example, running a single simulation and plotting the results
     """
-    log_path = './logs/example_single/' # path for logging the simulation data
+    log_path = './logs/drag_position_control/' # path for logging the simulation data
     os.makedirs(log_path, exist_ok=True)
 
     all_pars = SimulationParameters(
@@ -29,12 +29,12 @@ def main(**kwargs):
         headless        = False,
         return_network  = True,
         gravity         = [0,0,-9.81],
-        video_record    = False,
+        video_record    = True,
         video_name      = "swimming_example",
-        yaml_path = "models/1guilla_v1_position/",
+        yaml_path       = "models/1guilla_v1_position/",
         spawn           = {
             'loader': 0,
-            'mode': "FREE",
+            'mode': "TRANSVERSE",
             'pose': [0.0, 0.0, -0.3, 0.0, 0.0, 3.141592653589793],
             'velocity': [0.0, 0., 0.0, 0.0, 0.0, 0.0],
             'extras': {}
@@ -46,6 +46,20 @@ def main(**kwargs):
     controller = run_single(
         all_pars
     )
+
+    # example plot using plot_time_histories_multiple_windows
+    plt.figure("joint positions_single")
+    plot_time_histories(
+        controller.times,
+        controller.joints_positions,
+        offset=0.0,
+        colors=plt.cm.jet( np.linspace( 0, 1, controller.joints_positions.shape[1])).tolist(),
+        ylabel="joint positions",
+        savepath=log_path+"joint_positions.png",
+        lw=1
+        )
+
+
 
 if __name__ == '__main__':
     main()

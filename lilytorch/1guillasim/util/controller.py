@@ -71,7 +71,7 @@ class BDIMController(AnimatNetwork):
         _3d_2d_scaling=1
         # scale forces by the z-bounding box size
         # self.callback.force_scaling = 1/_3d_2d_scaling
-        self.callback.force_scaling = _3d_2d_scaling #*np.array([np.diff(body.bb[2])[0] for body in self.fluid_solver.composite_body.bodies])
+        self.callback.force_scaling = _3d_2d_scaling*np.array([np.diff(body.bb[2])[0] for body in self.fluid_solver.composite_body.bodies])
         print("Force scaling: ", self.callback.force_scaling)
 
 

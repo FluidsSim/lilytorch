@@ -9,7 +9,7 @@ import numpy as np
 
 
 amps=1*np.ones(8)
-amps[:5]=0
+# amps[:5]=0
 
 def main(**kwargs):
     """
