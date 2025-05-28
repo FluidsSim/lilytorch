@@ -7,19 +7,20 @@ class PoissonSolver:
     Solver class for the Poisson equation with variable coefficients
     """
 
-    def __init__(self, dtype, device, h, tol=1e-2, max_cycles=2, nsmoothing=5, w=1, verbose=True):
+    def __init__(self, dtype, device, h, tol=1e-2, max_cycles=2, max_vcycles=3, nsmoothing=5, w=1, verbose=True):
         """
         """
-        self.dtype      = dtype
-        self.h2         = h*h
-        self.device     = device
-        self.n_switch   = 2**20
-        self.tol        = tol
-        self.max_cycles = max_cycles
-        self.nsmoothing = nsmoothing
-        self.verbose    = verbose
-        self.jcap_tol   = 1e-12
-        self.w          = w # smoothing factor
+        self.dtype       = dtype
+        self.h2          = h*h
+        self.device      = device
+        self.n_switch    = 2**20
+        self.tol         = tol
+        self.max_cycles  = max_cycles
+        self.max_vcycles = max_vcycles
+        self.nsmoothing  = nsmoothing
+        self.verbose     = verbose
+        self.jcap_tol    = 1e-12
+        self.w           = w # smoothing factor
 
     def l2_norm(self, r):
         return torch.sqrt((r**2).mean())/(r.shape[0]*r.shape[1])  # L2 norm of the residual
@@ -61,14 +62,14 @@ class PoissonSolver:
         p=p0.clone()
         cycle=0
         r_err = 1.e33
-        while r_err>self.tol and cycle<self.max_cycles:
+        while r_err>self.tol and cycle<self.max_vcycles:
             p, r = self.vcycle(f, p, c, self.h2, **kwargs)
             r_err_new = self.l2_norm(r)
             r_err=r_err_new
             cycle+=1
             p-=p.mean()
             if self.verbose:
-                print("Poisson equation residual = {}/{} reached with {}/{} cycles \n".format(r_err_new,self.tol, cycle, self.max_cycles))
+                print("Poisson equation residual = {}/{} reached with {}/{} cycles \n".format(r_err_new,self.tol, cycle, self.max_vcycles))
         return p, r
 
     def vcycle(self, f, p, c, h2, **kwargs):
@@ -115,12 +116,81 @@ class PoissonSolver:
 
         return p, r
 
+    def CG(self, f, p, c, **kwargs):
+
+        ch=kwargs.pop("ch", (c[1:,1:-1]+c[:-1,1:-1])/2)
+        cv=kwargs.pop("cv", (c[1:-1,1:]+c[1:-1,:-1])/2)
+
+        Au,_=self.FD_operator(p, ch, cv, self.h2)
+        r=torch.zeros_like(p)
+        r[1:-1,1:-1]=f-Au
+        d=r
+
+        old_norm=torch.tensordot(r,r)
+        cycle=0
+        while old_norm>self.tol and cycle<3000:
+            Ad=torch.zeros_like(p)
+            Ad[1:-1,1:-1],_=self.FD_operator(d, ch, cv, self.h2)
+            alpha=old_norm/torch.tensordot(d,Ad)
+
+            p=p+alpha*d
+            r=r-alpha*Ad
+
+            self.BC(p)
+            new_norm=torch.tensordot(r,r)
+            beta=new_norm/old_norm
+            d=r+d*beta
+            
+            old_norm=new_norm
+            cycle=cycle+1
+            if self.verbose:
+                print("Cycle number = {} - residual = {} \n".format(cycle, old_norm))
+
+        return p, r
+
+
+    def PCG(self, f, p, c, **kwargs):
+
+        ch=kwargs.pop("ch", (c[1:,1:-1]+c[:-1,1:-1])/2)
+        cv=kwargs.pop("cv", (c[1:-1,1:]+c[1:-1,:-1])/2)
+
+        Au,Jinv=self.FD_operator(p, ch, cv, self.h2)
+        ri=f-Au
+        z, _ = self.solve_multigrid(ri, torch.zeros_like(p), c, ch=ch, cv=cv)
+        # z=torch.zeros_like(p)
+        # z[1:-1,1:-1]=ri*Jinv
+        # self.BC(z)
+
+        d=z
+        old_norm=self.l2_norm(ri)
+        cycle=0
+        while old_norm>self.tol and cycle<self.max_cycles:
+
+            Ad,Jinv=self.FD_operator(d, ch, cv, self.h2)
+            tdot = torch.tensordot(z[1:-1,1:-1],ri)
+            alpha=tdot/torch.tensordot(d[1:-1,1:-1],Ad)
+            p+=alpha*d
+            ri+=-alpha*Ad
+
+            z, _ = self.solve_multigrid(ri, z, c, ch=ch, cv=cv)
+            # z[1:-1,1:-1]=ri*Jinv
+            # self.BC(z)
+
+            beta=torch.tensordot(z[1:-1,1:-1],ri)/tdot
+            d=z+beta*d
+
+            old_norm=self.l2_norm(ri)
+            if self.verbose:
+                print("Cycle number = {} - residual = {} \n".format(cycle, old_norm))
+            cycle=cycle+1
+
+        return p, ri
 
 
 
 def test_solvers():
-    use_gpu=True
-    dtype=torch.float32
+    use_gpu=False
+    dtype=torch.float64
     N=2**9
 
     if torch.cuda.is_available() and use_gpu:
@@ -167,16 +237,21 @@ def test_solvers():
         device,
         h,
         verbose=True,
-        max_cycles=100,
+        max_cycles=10,
+        max_vcycles=30,
         nsmoothing=3,
-        tol=1e-7,
+        tol=1e-13,
         w=0.7
     )
 
-    # print("#############")
-    u, r = solver.solve_multigrid(f, u0, c)
-    # u=u0.clone()
-    # r=torch.zeros_like(u, device=device, dtype=dtype)
+
+
+    u, r = solver.solve_multigrid(f, u0, c, ch=ch, cv=cv)
+
+    # u, r = solver.PCG(f, u0, c, ch=ch, cv=cv)
+
+    # u, r = solver.CG(f, u0, c, ch=ch, cv=cv)
+
 
     f       = f.cpu()
     u_exact = u_exact.cpu()
@@ -198,7 +273,7 @@ def test_solvers():
 
 
     if u_exact is not None:
-        CS3=ax_3.imshow(c.cpu().T,origin = "lower",cmap=cmap)
+        CS3=ax_3.imshow(u_exact.cpu().T,origin = "lower",cmap=cmap)
         ax_3.set_title("Exact")
         fig.colorbar(CS3)
 

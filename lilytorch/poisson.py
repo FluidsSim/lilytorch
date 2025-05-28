@@ -295,7 +295,6 @@ def test_solvers():
         w=0.6
     )
 
-    # u, r = solver.Jacobi(f, u0, ch, cv, h**2)
 
     print("#############")
     u, r = solver.solve_multigrid(f, u0, c, ch, cv)
