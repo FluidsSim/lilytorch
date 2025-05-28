@@ -36,7 +36,7 @@ solver :
 
 
   convection_method : "implicit"
-  dt                : 0.01
+  dt                : 0.001
 
   # convection_method : "abdquickest"
   # dt                : 0.001

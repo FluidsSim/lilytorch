@@ -404,7 +404,7 @@ def multigrid_course(N,device=torch.device("cpu")):
     # ch = 5.0+0.5*torch.exp(torch.sin(2.0*torch.pi*X_h)*torch.sin(2.0*torch.pi*Y_h))
     # cv = 5.0+0.5*torch.exp(torch.sin(2.0*torch.pi*X_v)*torch.sin(2.0*torch.pi*Y_v))
 
-    c=5.0+0.5*torch.exp(torch.sin(2.0*torch.pi*X)*torch.sin(2.0*torch.pi*Y))
+    c=1.0+0.5*torch.exp(torch.sin(2.0*torch.pi*X/xlim[1])*torch.cos(2.0*torch.pi*Y/ylim[1]))
     ch = (c[1:,:]+c[:-1,:])/2
     cv = (c[:,1:]+c[:,:-1])/2
     zc=torch.ones((1,c.shape[0]),device=device,dtype=dtype)
@@ -436,7 +436,7 @@ def multigrid_course(N,device=torch.device("cpu")):
 
 
     u_exact=torch.zeros((N+2,N+2),device=device,dtype=dtype)
-    u_exact[1:-1,1:-1]=torch.exp(torch.cos(2.0*torch.pi*X)*torch.cos(2.0*torch.pi*Y))
+    u_exact[1:-1,1:-1]=torch.exp(torch.cos(2.0*torch.pi*X/xlim[1])*torch.cos(2.0*torch.pi*Y/ylim[1]))
 
     c=torch.ones((N,N),device=device,dtype=dtype)
     solver = PoissonSolver(
@@ -453,8 +453,6 @@ def multigrid_course(N,device=torch.device("cpu")):
     # c_exp=torch.hstack((zr,c_exp,zr))
 
     solver.BC(u_exact)
-    solver.BC(ch)
-    solver.BC(cv)
     f, _=solver.FD_operator(u_exact, ch, cv, h2)
     return X, Y, u_exact, f, c, ch, cv
 

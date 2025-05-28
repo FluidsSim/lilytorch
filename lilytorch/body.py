@@ -437,7 +437,7 @@ class BodyAnalytical(Body):
         sdf_np=self.sdf.cpu().numpy()
         xnp = self.x.cpu().numpy()
         ynp = self.y.cpu().numpy()
-        cnt = np.array(measure.find_contours(sdf_np, self.eps)[0]).T
+        cnt = np.array(measure.find_contours(sdf_np, 0)[0]).T
         cnt[0]=xnp[0]+cnt[0]*(xnp[1]-xnp[0])
         cnt[1]=ynp[0]+cnt[1]*(ynp[1]-ynp[0])
         curv_coord = np.cumsum(np.sqrt(np.sum(np.diff(cnt, axis=1)**2, axis=0)))
@@ -932,7 +932,7 @@ class BodyMesh(Body):
             sdf_val = skfmm.distance(binary_2d, dx=[xnp[1]-xnp[0],ynp[1]-ynp[0]])#-self.suit
 
             # find contour lines
-            cnt = np.array(measure.find_contours(sdf_val, self.eps)[0]).T
+            cnt = np.array(measure.find_contours(sdf_val, 0)[0]).T
             cnt[0]=xnp[0]+cnt[0]*(xnp[1]-xnp[0])
             cnt[1]=ynp[0]+cnt[1]*(ynp[1]-ynp[0])
             curv_coord = np.cumsum(np.sqrt(np.sum(np.diff(cnt, axis=1)**2, axis=0)))

@@ -6,6 +6,9 @@ import numpy as np
 from scipy.interpolate import griddata
 from matplotlib import cm
 import matplotlib.colors as colors
+import matplotlib
+matplotlib.rc('font', **{"size":20})
+plt.rcParams["figure.figsize"] = (15,15)
 
 def plot_time_histories(
     time: np.array,
@@ -631,14 +634,14 @@ def plot2d_imshow_composite_quiver(X,Y,u,bodies,normal_x,normal_y,extent,iterati
         interpolation=None
     )
     plt.colorbar()
-    q = plt.quiver(
-        X[::subsample_n,::subsample_n].cpu(),
-        Y[::subsample_n,::subsample_n].cpu(),
-        normal_x[::subsample_n,::subsample_n].cpu(),
-        normal_y[::subsample_n,::subsample_n].cpu(),
-        color='g',
-        scale=scale, scale_units='xy'
-    )
+    # q = plt.quiver(
+    #     X[::subsample_n,::subsample_n].cpu(),
+    #     Y[::subsample_n,::subsample_n].cpu(),
+    #     normal_x[::subsample_n,::subsample_n].cpu(),
+    #     normal_y[::subsample_n,::subsample_n].cpu(),
+    #     color='g',
+    #     scale=scale, scale_units='xy'
+    # )
     plt.axis(extent)
     save_fig_to_dedicated_folder(save_path, name, iteration)
 

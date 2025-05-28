@@ -1,13 +1,13 @@
 
 solver:
-  use_gpu           : False
+  use_gpu           : True
   nthreads          : 16
   N                 : 256
   xmin              : -0.4
   xmax              : 1.6
   ymin              : -1.0
   ymax              : 1.0
-  nt                : 350
+  nt                : 520
   nu                : 1.0e-6
   rho               : 1.0e+3
 
@@ -33,15 +33,15 @@ boundary_conditions:
   - "N"
   - "N"
   BC_values_u:
-  - 0.0025
-  - 0
-  - 0
-  - 0
+  - 0.00275
+  - 0.0
+  - 0.0
+  - 0.0
   BC_type_v:
   - "D"
   - "N"
-  - "N"
-  - "N"
+  - "D"
+  - "D"
   BC_values_v:
   - 0
   - 0
@@ -62,6 +62,6 @@ output:
   save_path: "/data/andreaferrario/ns_data/"
   save_frames: True
   save_every : 50
-  vmin: -0.1
-  vmax: 0.1
+  vmin: -0.05
+  vmax: 0.05
   save_uv: False
