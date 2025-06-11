@@ -22,17 +22,21 @@ pars["solver"]["ymax"] = 1
 pars["solver"]["N"]    = 256
 pars["body"]["sdf"]    = ["lambda x, y: circle(x,y,xt={},yt=0,r={})".format(pars["solver"]["xmin"]+7*R,R)]
 
-dx=1/pars["solver"]["N"]
+pars["output"]["save_every"]=50
+
+dx=(pars["solver"]["xmax"]-pars["solver"]["xmin"])/pars["solver"]["N"]
 t_clf=dx/pars["boundary_conditions"]["BC_values_u"][0]
 
 
-pars["solver"]["dt"]                = t_clf
-pars["solver"]["convection_method"] = "implicit"
-pars["solver"]["nt"]                = 520
+# pars["solver"]["dt"]                = t_clf
+# pars["solver"]["convection_method"] = "implicit"
+# pars["solver"]["nt"]                = 520
 
-# pars["solver"]["dt"]                = 0.1*t_clf
-# pars["solver"]["convection_method"] = "abdquickest"
-# pars["solver"]["nt"]                = 5200
+pars["solver"]["dt"]                = 0.1*t_clf
+pars["solver"]["convection_method"] = "abdquickest"
+pars["solver"]["nt"]                = 5200
+
+pars["solver"]["poisson_verbose"] = False
 
 # =========== Run simulation ===========
 solver = FluidSolver(pars, dtype=torch.float32, compute_forces=True)
@@ -56,7 +60,7 @@ viscous_drag_coeff = 2*viscous_forces[0,0,:]/(pars["solver"]["rho"]*D*U**2)
 pressure_drag_coeff = 2*pressure_forces[0,0,:]/(pars["solver"]["rho"]*D*U**2)
 total_drag_coeff = viscous_drag_coeff + pressure_drag_coeff
 
-convective_time = time*U/R
+convective_time = time*U/D
 
 
 data=np.genfromtxt('data/koumoutsatokos_keonard_1995.csv', delimiter=',')
@@ -73,7 +77,7 @@ plt.ylim([0,2])
 plt.xlim([0,7])
 plt.ylabel("Drag Coefficient")
 plt.legend()
-plt.savefig("figures/drag_force_flow_past_cylinder_"+pars["solver"]["convection_method"]+".pdf")
+plt.savefig("figures/drag_force_flow_past_cylinder_"+pars["solver"]["convection_method"]+".png")
 plt.show()
 
 

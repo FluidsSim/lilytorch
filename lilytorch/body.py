@@ -310,9 +310,6 @@ class Body:
         self.stacked_xy = torch.stack((self.xflat,self.yflat))
         self.ones_stacked=torch.ones((self.nx*self.ny),device=self.device,dtype=self.dtype)
 
-        self.oldpos_u = torch.zeros((self.nx,self.ny),device=self.device,dtype=self.dtype)
-        self.oldpos_v = torch.zeros((self.nx,self.ny),device=self.device,dtype=self.dtype)
-
         # body velocities
         self.sdf = torch.zeros((self.nx,self.ny),device=self.device,dtype=self.dtype)
         self.body_u = torch.zeros((self.nx,self.ny),device=self.device,dtype=self.dtype)
@@ -459,7 +456,13 @@ class BodyAnalytical(Body):
             self.update_translation[0](t),
             self.update_translation[1](t)
         ], device=self.device, dtype=self.dtype)
-        theta = self.rad_conv*(self.update_theta(t).clone().detach().to(self.device))
+
+        theta = self.rad_conv*(
+            torch.tensor(
+                self.update_theta(t),
+                device=self.device, dtype=self.dtype
+            )
+        )
         s = torch.sin(theta)
         c = torch.cos(theta)
         rot = torch.stack([torch.stack([c, -s]),
@@ -488,10 +491,9 @@ class BodyAnalytical(Body):
         vy.backward()
         w.backward()
 
+
         self.body_u = (t_vx.grad -t_w.grad*translpoints[1]).reshape(self.nx, self.ny)
         self.body_v = (t_vy.grad +t_w.grad*translpoints[0]).reshape(self.nx, self.ny)
-
-
 
         # compute contour lines
         self.cnt_update = rot @ self.cnt
@@ -610,6 +612,11 @@ class BodyFishAnalytical(Body):
         else:
             self.thk = self.thk_nonconst
 
+        self.oldpos_u = torch.zeros((self.nx,self.ny),device=self.device,dtype=self.dtype)
+        self.oldpos_v = torch.zeros((self.nx,self.ny),device=self.device,dtype=self.dtype)
+
+        self.initialize()
+
     def envelope(self, s):
         """
         width lower in the tail
@@ -648,7 +655,7 @@ class BodyFishAnalytical(Body):
         sdf = torch.sqrt((x-s)**2+y**2)
         return sdf-self.thk(s)
 
-    def update(self, t, dt=1):
+    def update(self, t, iteration, dt=1):
         """
         Update sdf properties from analytical rototranslation map
         """
@@ -656,18 +663,30 @@ class BodyFishAnalytical(Body):
         new_x = self.XC
         new_y = self.YC+self.A*self.envelope(s/self.L)*torch.sin(2*torch.pi*(self.wavefrequency*s/self.L-self.f*t))
 
-        self.body_u=0
+        self.body_u=-(new_x-self.oldpos_u)/dt
         self.body_v=-(new_y-self.oldpos_v)/dt
 
+        self.oldpos_u=new_x
         self.oldpos_v=new_y
 
-        return [self.compute_sdf_properties(self.sdf_fun(new_x,new_y))]
+        self.sdf_val=self.sdf_fun(new_x,new_y)
+
+        self.sdf_vals=[self.sdf_fun(new_x,new_y)]
+
+        # return [self.compute_sdf_properties(self.sdf_fun(new_x,new_y))]
 
     def initialize(self):
         """
         Initialize sdf properties at time 0
         """
-        return self.update(0)
+        self.cnt        = torch.zeros((2,1),device=self.device,dtype=self.dtype)
+        self.cnt_update = self.cnt.clone().detach()
+        self.curv_coord = torch.tensor([0,1],device=self.device,dtype=self.dtype)
+        self.com_pos    = torch.tensor([[0,0]],device=self.device,dtype=self.dtype)
+        self.update(0,0)
+
+        self.body_u=torch.zeros((self.nx,self.ny),device=self.device,dtype=self.dtype)
+        self.body_v=torch.zeros((self.nx,self.ny),device=self.device,dtype=self.dtype)
 
 class BodyFishExperimental(Body):
 
@@ -993,7 +1012,6 @@ class BodyMesh(Body):
 
     def visualize(self):
         self.m2s.visualize()
-
 
 class CompositeBodyMesh:
 

@@ -18,7 +18,7 @@ def l_infty_norm(a, b):
     """Compute the L-infinity norm of the difference between two arrays."""
     return np.max(np.abs(a - b))
 
-maindir="/data/andreaferrario/ns_data/flow_past_cylinder_error_tests/implicit/"
+maindir="/data/andreaferrario/ns_data/flow_past_cylinder_error_tests/abdquickest/"
 
 dirs = [ name for name in os.listdir(maindir) if os.path.isdir(os.path.join(maindir, name)) ]
 
@@ -89,35 +89,40 @@ plt.savefig(maindir+"u_velocity_field_error_flow_past_cylinder.pdf")
 
 plt.figure(3)
 ms=10
+xlim=[10**(-4), 10**(-1)]
 x_axis = 1/grid_n[:-1]
 plt.subplot(2,2,1)
 plt.loglog(x_axis,l2_errs_u,'ko-',markersize=ms)
-plt.loglog(x_axis,100*np.float32(x_axis)**(2),'r--')
-plt.loglog(x_axis,10*np.float32(x_axis)**(1),'b--')
+plt.loglog(xlim,np.float32(xlim)**(2),'r--')
+plt.loglog(xlim,np.float32(xlim)**(1),'b--')
 plt.xlabel("Grid size")
+plt.xlim(xlim)
 plt.ylabel("L2 error - u")
 
 plt.subplot(2,2,2)
 plt.loglog(x_axis,l_infty_errs_u,'ko-',markersize=ms)
-plt.loglog(x_axis,10*np.float32(x_axis)**(2),'r--')
-plt.loglog(x_axis,2*np.float32(x_axis)**(1),'b--')
+plt.loglog(xlim,np.float32(xlim)**(2),'r--')
+plt.loglog(xlim,np.float32(xlim)**(1),'b--')
 plt.xlabel("Grid size")
 plt.ylabel("L-infty error - u")
+plt.xlim(xlim)
 plt.tight_layout()
 
 plt.subplot(2,2,3)
 plt.loglog(x_axis,l2_errs_p,'go-',markersize=ms)
-plt.loglog(x_axis,100*np.float32(x_axis)**(2),'r--')
-plt.loglog(x_axis,10*np.float32(x_axis)**(1),'b--')
+plt.loglog(xlim,np.float32(xlim)**(2),'r--')
+plt.loglog(xlim,np.float32(xlim)**(1),'b--')
+plt.xlim(xlim)
 plt.xlabel("Grid size")
 
 plt.ylabel("L2 error - p")
 plt.subplot(2,2,4)
 plt.loglog(x_axis,l_infty_errs_p,'go-',markersize=ms)
-plt.loglog(x_axis,10*np.float32(x_axis)**(2),'r--')
-plt.loglog(x_axis,2*np.float32(x_axis)**(1),'b--')
+plt.loglog(xlim,np.float32(xlim)**(2),'r--')
+plt.loglog(xlim,np.float32(xlim)**(1),'b--')
 plt.xlabel("Grid size")
 plt.ylabel("L-infty error - p")
+plt.xlim(xlim)
 plt.tight_layout()
 
 plt.savefig(maindir+"flow_past_cylinder_error_analysis.pdf")

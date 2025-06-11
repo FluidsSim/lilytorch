@@ -336,7 +336,7 @@ def test_solvers():
     from matplotlib import pyplot
     import poisson_solvers.solutions2d as examples
 
-    X, Y, u_exact, f, c, ch, cv = examples.multigrid_course(N, device=device)
+    X, Y, u_exact, f, c, ch, cv = examples.variable_coeff_c_hat(N, device=device)
 
     dtype=f.dtype
     u0 = torch.zeros((N+2,N+2),device=device,dtype=dtype)

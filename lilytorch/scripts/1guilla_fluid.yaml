@@ -85,7 +85,7 @@ body:
 output:
   save_path: "/data/andreaferrario/ns_data/"
   save_frames: True
-  save_every : 50
+  save_every : 10
   vmin: -60
   vmax: 60
   save_uv: False

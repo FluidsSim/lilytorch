@@ -7,15 +7,23 @@ solver:
   xmax              : 5.5
   ymin              : -3.0
   ymax              : 3.
-  dt                : 0.001
+
   nt                : 80000
   nu                : 1.0e-6
   rho               : 1.0e+3
+
+  dt                : 0.001
   convection_method : "abdquickest"
-  poisson_tol       : 1.0e-4
-  poisson_max_cycles: 2
-  poisson_nsmoothing: 5
-  poisson_verbose   : False
+
+  # dt                : 0.01
+  # convection_method : "implicit"
+
+  poisson_tol       : 1.0e-7
+  poisson_max_cycles: 10
+  jacobi_weight     : 0.7
+  poisson_nsmoothing: 2
+  poisson_verbose   : True
+  poisson_filename : "data/"
 
 body:
   type: fish_analytical
@@ -34,35 +42,27 @@ body:
     c3: 0
     sb: 0.1
     wh: 0.1
-    wt: 0.
-    st: 0.95
+    wt: 0.1
+    st: 0.5
     xshift: 0.0
     yshift: 0.0
     thk: false
 
 
-output:
-  save_path: "/data/andreaferrario/ns_data/"
-  save_frames: True
-  save_every : 50
-  vmin: -10
-  vmax: 10
-  save_uv: False
-
 boundary_conditions:
   BC_type_u:
   - "D"
-  - "-"
+  - "N"
   - "N"
   - "N"
   BC_values_u:
-  - 1
+  - 0.5
   - 0
   - 0
   - 0
   BC_type_v:
   - "D"
-  - "-"
+  - "N"
   - "N"
   - "N"
   BC_values_v:
@@ -72,4 +72,12 @@ boundary_conditions:
   - 0
 
 
+
+output:
+  save_path: "/data/andreaferrario/ns_data/"
+  save_frames: True
+  save_every : 100
+  vmin: -10
+  vmax: 10
+  save_uv: False
 

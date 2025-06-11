@@ -1,5 +1,4 @@
 
-from tkinter import E
 import torch
 
 class PoissonSolver:
@@ -39,8 +38,8 @@ class PoissonSolver:
         2nd order finite difference operator
         """
         J=(ch[1:,:]+ch[:-1,:]+cv[:,1:]+cv[:,:-1]) # J_{i,j}=c_{i-0.5,j}+c_{i+0.5,j}+c_{i,j-0.5}+c_{i,j+0.5}
-        Au=ch[1:,:]*p[2:,1:-1]+ch[:-1,:]*p[:-2,1:-1]+cv[:,1:]*p[1:-1,2:]+cv[:,:-1]*p[1:-1,:-2]-J*p[1:-1,1:-1]
-        return Au/h2, J/h2  # returns Au and Jinv
+        Au=(ch[1:,:]*p[2:,1:-1]+ch[:-1,:]*p[:-2,1:-1]+cv[:,1:]*p[1:-1,2:]+cv[:,:-1]*p[1:-1,:-2])-J*p[1:-1,1:-1]
+        return Au/h2, torch.where(J<self.jcap_tol,0,h2/J)  # returns Au and Jinv
 
     def Jacobi(self, f, p, ch ,cv, h2):
         """
@@ -48,17 +47,15 @@ class PoissonSolver:
         """
         self.BC(p)
         for i in range(self.nsmoothing):
-            Au, J = self.FD_operator(p, ch ,cv, h2)
-            Jinv=torch.where(J<self.jcap_tol,0,1/J)
-            r = f-Au
+            Au, Jinv = self.FD_operator(p, ch ,cv, h2)
+            r = self.compute_residual(Au,f) # compute residual
             p[1:-1,1:-1] -= self.w*r*Jinv # following A Multigrid Tutorial, 2nd Edition from Briggs, Henson, and McCormick, 2000
             self.BC(p)
-        Au, J = self.FD_operator(p, ch ,cv, h2)
-        Jinv=torch.where(J<self.jcap_tol,0,1/J)
-        r = f-Au
+        Au, Jinv = self.FD_operator(p, ch ,cv, h2)
+        r = self.compute_residual(Au,f) # compute residual
         return p, r
 
-    def compute_residual(self,Au,f,J):
+    def compute_residual(self,Au,f):
         r=f-Au
         return r
 
@@ -211,8 +208,7 @@ class PoissonSolver:
             #     print("Cycle number = {} - residual = {} \n".format(cycle, r_err_new))
             r_err=r_err_new
             cycle+=1
-        print(u.max(), u.min(), u.mean())
-        # u-=(u.max()-u.min())/2 #u.mean()
+        u-=u.mean()
         if self.verbose:
             print("Poisson equation residual = {}/{} reached with {}/{} cycles \n".format(r_err_new,self.tol, cycle, self.max_cycles))
         return u, r
@@ -232,7 +228,7 @@ class PoissonSolver:
             #     print("Multigrid - Steps: {}, Residual: {}".format(n, torch.max(torch.abs(r))))
 
             r_coarse = self.restrict_simple(r)
-            c_coarse = self.restrict_simple(c)
+            c_coarse = c #self.restrict_simple(c)
             # ch_coarse = 0.5*(ch[::2,1::2]+ch[::2,:-1:2])
             # cv_coarse = 0.5*(cv[1::2,::2]+cv[:-1:2,::2])
             ch_coarse = 0.5*(ch[::2,1::2]+ch[::2,:-1:2])
@@ -249,7 +245,7 @@ class PoissonSolver:
                 )
 
             # correct u by the error
-            # p[1:-1,1:-1]+=self.prolong_simple(err_coarse[1:-1,1:-1])
+            p[1:-1,1:-1]+=self.prolong_simple(err_coarse[1:-1,1:-1])
 
             # Jacobi relaxation
             p, r = self.Jacobi(f, p, ch, cv, h2)
@@ -265,7 +261,7 @@ class PoissonSolver:
 
 def test_solvers():
     use_gpu=False
-    N=2**9
+    N=2**8
 
     if torch.cuda.is_available() and use_gpu:
         print(f"Using GPU: {torch.cuda.get_device_name(0)} is available.")
@@ -289,12 +285,13 @@ def test_solvers():
         device,
         h,
         verbose=True,
-        max_cycles=100,
-        nsmoothing=3,
+        max_cycles=20,
+        nsmoothing=10,
         tol=1e-5,
-        w=0.6
+        w=0.9
     )
 
+    # u, r = solver.Jacobi(f, u0, ch, cv, h**2)
 
     print("#############")
     u, r = solver.solve_multigrid(f, u0, c, ch, cv)

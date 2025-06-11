@@ -13,7 +13,7 @@ import os
 
 
 # nxs=[4096, 2048, 1024, 512, 256, 128] # grid sizes to test
-nxs=[2048, 1024, 512, 256, 128] # grid sizes to test
+nxs=[2048, 1024, 512, 256, 128, 64] # grid sizes to test
 
 
 for nx in nxs:
@@ -40,16 +40,16 @@ for nx in nxs:
     t_clf=dx/pars["boundary_conditions"]["BC_values_u"][0]
 
 
-    pars["solver"]["dt"]                = 0.8*t_clf
-    pars["solver"]["convection_method"] = "implicit"
-    pars["solver"]["nt"]                = int(time_stop/pars["solver"]["dt"])+1
-
-    # pars["solver"]["dt"]                = 0.1*t_clf
-    # pars["solver"]["convection_method"] = "abdquickest"
+    # pars["solver"]["dt"]                = 0.8*t_clf
+    # pars["solver"]["convection_method"] = "implicit"
     # pars["solver"]["nt"]                = int(time_stop/pars["solver"]["dt"])+1
 
-    pars["output"]["save_frames"]=True
-    pars["output"]["save_every"]=200
+    pars["solver"]["dt"]                = 0.1*t_clf
+    pars["solver"]["convection_method"] = "abdquickest"
+    pars["solver"]["nt"]                = int(time_stop/pars["solver"]["dt"])+1
+
+    pars["output"]["save_frames"] = True
+    pars["output"]["save_every"]  = 200
 
 
     # =========== Run simulation ===========

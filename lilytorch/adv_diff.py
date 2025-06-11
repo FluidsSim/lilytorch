@@ -13,6 +13,7 @@ class AdvDiffSolver:
                  x,
                  y,
                  nu,
+                 rho,
                  BC_type_u=["D","D","D","D"], # w,o,s,n
                  BC_values_u=[0,0,0,0],
                  BC_type_v=["D","D","D","D"], # w,o,s,n
@@ -40,6 +41,7 @@ class AdvDiffSolver:
         self.dtdx2 = self.dtdx/dx
         self.dtdy2 = self.dtdy/dy
         self.nu = nu
+        self.re = rho/self.nu
 
         self.C = 0.1
         self.C2 = self.C**2
@@ -97,15 +99,15 @@ class AdvDiffSolver:
             u[1:-1, 1:-1]-
             self.dtdx*u[1:-1,1:-1]*(u[1:-1,1:-1]-u[:-2,1:-1]) -
             self.dtdy*v[1:-1,1:-1]*(u[1:-1,1:-1]-u[1:-1,:-2]) +
-            self.nu*self.dtdx2*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
-            self.nu*self.dtdx2*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
+            (1/self.re)*self.dtdx2*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
+            (1/self.re)*self.dtdx2*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
         )
         v[1:-1, 1:-1] = (
             v[1:-1, 1:-1]-
             self.dtdx*u[1:-1,1:-1]*(v[1:-1,1:-1]-v[:-2,1:-1]) -
             self.dtdy*v[1:-1,1:-1]*(v[1:-1,1:-1]-v[1:-1,:-2]) +
-            self.nu*self.dtdx2*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1]) +
-            self.nu*self.dtdx2*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])
+            (1/self.re)*self.dtdx2*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1]) +
+            (1/self.re)*self.dtdx2*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])
         )
 
         return (u,v)
@@ -165,16 +167,16 @@ class AdvDiffSolver:
                         u[1:-1,1:-1]+
                         self.dtdx*(uw*self.phi_wLMT(uw,u)-ue*self.phi_eLMT(ue,u))+
                         self.dtdy*(vs*self.phi_sLMT(vs,u)-vn*self.phi_nLMT(vn,u))+
-                        self.nu*self.dtdx2*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
-                        self.nu*self.dtdx2*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
+                        (1/self.re)*self.dtdx2*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
+                        (1/self.re)*self.dtdx2*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
                         )
 
         v[1:-1,1:-1] = (
                         v[1:-1,1:-1]+
                         self.dtdx*(uw*self.phi_wLMT(uw,v)-ue*self.phi_eLMT(ue,v))+
                         self.dtdy*(vs*self.phi_sLMT(vs,v)-vn*self.phi_nLMT(vn,v))+
-                        self.nu*self.dtdx2*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1]) +
-                        self.nu*self.dtdx2*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])
+                        (1/self.re)*self.dtdx2*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1]) +
+                        (1/self.re)*self.dtdx2*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])
                         )
 
         return (u,v)
@@ -278,15 +280,15 @@ class AdvDiffSolver:
                         u[1:-1,1:-1]+
                         self.dtdx*(uw*self.phi_w(uw,u)-ue*self.phi_e(ue,u))+
                         self.dtdy*(vs*self.phi_s(vs,u)-vn*self.phi_n(vn,u))+
-                        self.nu*self.dtdx2*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
-                        self.nu*self.dtdx2*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
+                        (1/self.re)*self.dtdx2*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
+                        (1/self.re)*self.dtdx2*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
                         )
         v[1:-1,1:-1] = (
                         v[1:-1,1:-1]+
                         self.dtdx*(uw*self.phi_w(uw,v)-ue*self.phi_e(ue,v))+
                         self.dtdy*(vs*self.phi_s(vs,v)-vn*self.phi_n(vn,v))+
-                        self.nu*self.dtdx2*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1]) +
-                        self.nu*self.dtdx2*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])
+                        (1/self.re)*self.dtdx2*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1]) +
+                        (1/self.re)*self.dtdx2*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])
                         )
 
         return (u,v)
@@ -307,12 +309,12 @@ class AdvDiffSolver:
         v = self.gv(xold, yold).reshape(self.X.shape).clone().detach()
 
         u[1:-1,1:-1] += (
-                        self.nu*self.dtdx2*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
-                        self.nu*self.dtdx2*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
+                        (1/self.re)*self.dtdx2*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
+                        (1/self.re)*self.dtdx2*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
                         )
         v[1:-1,1:-1] += (
-                        self.nu*self.dtdx2*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1]) +
-                        self.nu*self.dtdx2*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])
+                        (1/self.re)*self.dtdx2*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1]) +
+                        (1/self.re)*self.dtdx2*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])
                         )
         return (u,v)
 
@@ -320,7 +322,6 @@ class AdvDiffSolver:
 
     def set_BCs(self, u, v):
 
-        # print("none")
         if self.BC_type_u[1]=="D":
             u[-1,:]=self.BC_values_u[1]
         elif self.BC_type_u[1]=="N":
@@ -337,7 +338,7 @@ class AdvDiffSolver:
             u[:,-1] = u[:,-2]
 
         if self.BC_type_u[0]=="D":
-            u[0,:]=self.BC_values_u[0]
+            u[0,:]=-u[1,:]+self.BC_values_u[0]
         elif self.BC_type_u[0]=="N":
             u[0,:] = u[1,:]
 
@@ -358,7 +359,7 @@ class AdvDiffSolver:
             v[:,-1] = v[:,-2]
 
         if self.BC_type_v[0]=="D":
-            v[0,:]=self.BC_values_v[0]
+            v[0,:]=-v[1,:]+self.BC_values_v[0]
         elif self.BC_type_v[0]=="N":
             v[0,:] = v[1,:]
 

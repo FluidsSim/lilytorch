@@ -234,57 +234,68 @@ def variable_coeff_c_hat(N,device=torch.device("cpu"),create_box=False):
 
     xt=0.4
     yt=0.0
-    body = BodyAnalytical( device, x, y, lambda x, y: circle(x,y,xt=xt,yt=yt,r=0.3), (lambda t: 0,(lambda t: 0,lambda t: 0)),eps=2*(x[1]-x[0]))
+    body = BodyAnalytical( device, x, y, lambda x, y: circle(x,y,xt=xt,yt=yt,r=0.3), (lambda t: 0*t,(lambda t: 0*t,lambda t: 0*t)),eps=2*(x[1]-x[0]))
     body.initialize()
     sdf_fun =body.sdf_fun
 
+    d=circle(X,Y,xt=xt,yt=yt,r=0.3)
 
     d = sdf_fun(X,Y)
-    # (mu0, mu1) = body.mu_funcs(d)
+    (mu0, mu1) = body.mu_funcs(d)
 
 
 
-    # c=mu0
+    c=mu0
 
-    ks=0.0000
-    kg=1
-    sigma=10
-    c=ks+(kg-ks)*(torch.tanh(sigma*d)+1)/2
 
-    var=c
-    # pyplot.figure()
-    # pyplot.imshow(
-    #     var.cpu().T,
-    #     extent = (
-    #         torch.min(x.cpu()), torch.max(x.cpu()),
-    #         torch.min(y.cpu()), torch.max(y.cpu())
-    #     ),
-    #     origin = "lower",
-    #     cmap = "Greys"
-    # )
-    # pyplot.contour(X.cpu(),Y.cpu(),var.cpu(), colors='k', levels=[0], linestyles='-')
-    # pyplot.show()
 
-    xmid = (x[1:]+x[:-1])/2
-    ymid = (y[1:]+y[:-1])/2
-    [X_h,Y_h]=torch.meshgrid(xmid,y,indexing="ij")
-    [X_v,Y_v]=torch.meshgrid(x,ymid,indexing="ij")
+    ch = (c[1:,:]+c[:-1,:])/2
+    cv = (c[:,1:]+c[:,:-1])/2
+    zc=torch.ones((1,c.shape[0]),device=device,dtype=dtype)
+    zr=torch.ones((c.shape[1],1),device=device,dtype=dtype)
+    ch=torch.vstack((zc,ch,zc))
+    cv=torch.hstack((zr,cv,zr))
 
-    d_h=sdf_fun(X_h,Y_h)
-    d_v=sdf_fun(X_v,Y_v)
 
-    c_h=ks+(kg-ks)*(torch.tanh(sigma*d_h)+1)/2
-    c_v=ks+(kg-ks)*(torch.tanh(sigma*d_v)+1)/2
+    # ks=0.0000
+    # kg=1
+    # sigma=10
+    # # c=ks+(kg-ks)*(torch.tanh(sigma*d)+1)/2
 
-    R=0.25
-    circle=torch.sqrt((X-xt)**2+(Y-yt)**2)
-    # u_exact = -torch.where(
-    #     circle<R,
-    #     (1/8-R**2*(1-1/ks)/4)-(1/(4*ks))*(circle**2),
-    #     1/8-circle**2/4
-    # )
+    # var=c
+    # # pyplot.figure()
+    # # pyplot.imshow(
+    # #     var.cpu().T,
+    # #     extent = (
+    # #         torch.min(x.cpu()), torch.max(x.cpu()),
+    # #         torch.min(y.cpu()), torch.max(y.cpu())
+    # #     ),
+    # #     origin = "lower",
+    # #     cmap = "Greys"
+    # # )
+    # # pyplot.contour(X.cpu(),Y.cpu(),var.cpu(), colors='k', levels=[0], linestyles='-')
+    # # pyplot.show()
 
-    u_exact = c
+    # xmid = (x[1:]+x[:-1])/2
+    # ymid = (y[1:]+y[:-1])/2
+    # [X_h,Y_h]=torch.meshgrid(xmid,y,indexing="ij")
+    # [X_v,Y_v]=torch.meshgrid(x,ymid,indexing="ij")
+
+    # d_h=sdf_fun(X_h,Y_h)
+    # d_v=sdf_fun(X_v,Y_v)
+
+    # c_h=ks+(kg-ks)*(torch.tanh(sigma*d_h)+1)/2
+    # c_v=ks+(kg-ks)*(torch.tanh(sigma*d_v)+1)/2
+
+    # R=0.25
+    # circle=torch.sqrt((X-xt)**2+(Y-yt)**2)
+    # # u_exact = -torch.where(
+    # #     circle<R,
+    # #     (1/8-R**2*(1-1/ks)/4)-(1/(4*ks))*(circle**2),
+    # #     1/8-circle**2/4
+    # # )
+
+    # u_exact = c
 
 
 
@@ -309,10 +320,10 @@ def variable_coeff_c_hat(N,device=torch.device("cpu"),create_box=False):
 
     # f=divergence(u, v, x[1]-x[0], y[1]-y[0])
 
+    dx=(x[1]-x[0])
     f=torch.ones_like(c)
-    # c[:,:]=1
 
-    return X, Y, u_exact, f, c, c_h, c_v
+    return X, Y, c, f, c, ch, cv
 
 def raeli(N,device=torch.device("cpu"),create_box=False):
 
@@ -385,7 +396,7 @@ def multigrid_course(N,device=torch.device("cpu")):
     Multigrid course
     """
 
-    from lilytorch.poisson_solvers.poisson_2nd_order_2 import PoissonSolver
+    from poisson import PoissonSolver
 
     xlim=[0,3.2]
     ylim=[0,3.2]
@@ -405,6 +416,16 @@ def multigrid_course(N,device=torch.device("cpu")):
     # cv = 5.0+0.5*torch.exp(torch.sin(2.0*torch.pi*X_v)*torch.sin(2.0*torch.pi*Y_v))
 
     c=1.0+0.5*torch.exp(torch.sin(2.0*torch.pi*X/xlim[1])*torch.cos(2.0*torch.pi*Y/ylim[1]))
+    ch = (c[1:,:]+c[:-1,:])/2
+    cv = (c[:,1:]+c[:,:-1])/2
+    zc=torch.ones((1,c.shape[0]),device=device,dtype=dtype)
+    zr=torch.ones((c.shape[1],1),device=device,dtype=dtype)
+    ch=torch.vstack((zc,ch,zc))
+    cv=torch.hstack((zr,cv,zr))
+
+
+    c=torch.ones((N,N),device=device,dtype=dtype)
+
     ch = (c[1:,:]+c[:-1,:])/2
     cv = (c[:,1:]+c[:,:-1])/2
     zc=torch.ones((1,c.shape[0]),device=device,dtype=dtype)
@@ -438,7 +459,7 @@ def multigrid_course(N,device=torch.device("cpu")):
     u_exact=torch.zeros((N+2,N+2),device=device,dtype=dtype)
     u_exact[1:-1,1:-1]=torch.exp(torch.cos(2.0*torch.pi*X/xlim[1])*torch.cos(2.0*torch.pi*Y/ylim[1]))
 
-    c=torch.ones((N,N),device=device,dtype=dtype)
+
     solver = PoissonSolver(
         dtype,
         device,
@@ -463,7 +484,7 @@ def multigrid_course2(N,device=torch.device("cpu")):
     Multigrid course
     """
 
-    from lilytorch.poisson_solvers.poisson_2nd_order_2 import PoissonSolver
+    from poisson_solvers.poisson_2nd_order_2 import PoissonSolver
     h=1/(N-1) # because xh=xl=yh=yl=1 (grid is [0,1]x[0,1])
     h2=h*h
     x=torch.linspace(0,1,N,device=device,dtype=dtype)
