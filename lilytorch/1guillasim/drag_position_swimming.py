@@ -29,12 +29,12 @@ def main(**kwargs):
         headless        = False,
         return_network  = True,
         gravity         = [0,0,-9.81],
-        video_record    = True,
-        video_name      = "swimming_example",
+        video_record    = False,
+        video_name      = "",
         yaml_path       = "models/1guilla_v1_position/",
         spawn           = {
             'loader': 0,
-            'mode': "TRANSVERSE",
+            'mode': "FIXED",
             'pose': [0.0, 0.0, -0.3, 0.0, 0.0, 3.141592653589793],
             'velocity': [0.0, 0., 0.0, 0.0, 0.0, 0.0],
             'extras': {}

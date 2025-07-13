@@ -25,7 +25,7 @@ import matplotlib.pyplot as plt
 tstop         = 10 # im seconds
 sampling_rate = 1000 # 1ms
 wlength       = 1 # wavelength in body lengths (BL)
-amp           = 20.0*(np.pi/180.0) # amplitude in radians (?)
+amp           = 10.0*(np.pi/180.0) # amplitude in radians (?)
 freq          = 1 # frequency in Hz
 nmotors       = 8  # number of motors
 
