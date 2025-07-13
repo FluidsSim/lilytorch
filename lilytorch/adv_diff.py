@@ -280,15 +280,15 @@ class AdvDiffSolver:
                         u[1:-1,1:-1]+
                         self.dtdx*(uw*self.phi_w(uw,u)-ue*self.phi_e(ue,u))+
                         self.dtdy*(vs*self.phi_s(vs,u)-vn*self.phi_n(vn,u))+
-                        (1/self.re)*self.dtdx2*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
-                        (1/self.re)*self.dtdx2*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
+                        self.nu*self.dtdx2*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
+                        self.nu*self.dtdx2*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
                         )
         v[1:-1,1:-1] = (
                         v[1:-1,1:-1]+
                         self.dtdx*(uw*self.phi_w(uw,v)-ue*self.phi_e(ue,v))+
                         self.dtdy*(vs*self.phi_s(vs,v)-vn*self.phi_n(vn,v))+
-                        (1/self.re)*self.dtdx2*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1]) +
-                        (1/self.re)*self.dtdx2*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])
+                        self.nu*self.dtdx2*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1]) +
+                        self.nu*self.dtdx2*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])
                         )
 
         return (u,v)

@@ -764,28 +764,28 @@ class FluidSolver:
         # p_fc=self.poisson_solverFFT.solve(self.div/(self.dt/self.rho))
         # p=self.fc2cc(p_fc)
 
-        # self.div_body=self.divergence(self.composite_body.body_u,self.composite_body.body_v)
-        # self.div=(self.divergence(uprime,vprime)-self.m_m0_all*self.div_body)
+        self.div_body=self.divergence(self.composite_body.body_u,self.composite_body.body_v)
+        self.div=(self.divergence(uprime,vprime)-self.m_m0_all*self.div_body)
 
-        # c = self.mu0_all*self.dt
-        # ch = (c[1:,1:-1]+c[:-1,1:-1])/2
-        # cv = (c[1:-1,1:]+c[1:-1,:-1])/2
-        # p, _ = self.poisson_solver.solve_multigrid( # f, u, c
-        #     self.div[1:-1,1:-1],
-        #     p,
-        #     c,
-        #     ch=ch,
-        #     cv=cv,
-        # )
-        # # p/=(self.dt)
-        # # ====== projection step ======
-        # (p_x, p_y) = torch.gradient(p,spacing=self.dxdy,edge_order=2)
-        # (u,v)=(uprime-self.mu0_all*self.dt*p_x, vprime-self.mu0_all*self.dt*p_y)
+        c = self.mu0_all
+        ch = (c[1:,1:-1]+c[:-1,1:-1])/2
+        cv = (c[1:-1,1:]+c[1:-1,:-1])/2
+        p, _ = self.poisson_solver.solve_multigrid( # f, u, c
+            self.div[1:-1,1:-1], #/(self.dt/self.rho),
+            p,
+            c,
+            ch=ch,
+            cv=cv,
+        )
+        # p/=(self.dt)
+        # ====== projection step ======
+        (p_x, p_y) = torch.gradient(p,spacing=self.dxdy,edge_order=2)
+        (u,v)=(uprime-self.mu0_all*p_x, vprime-self.mu0_all*p_y)
 
 
-        p=self.poisson_solverFFT.solve(self.div/(self.dt/self.rho))
-        (p_x, p_y) = self.gradient(p)
-        (u,v)=(uprime-(self.dt/self.rho)*p_x, vprime-(self.dt/self.rho)*p_y)
+        # p=self.poisson_solverFFT.solve(self.div/(self.dt/self.rho))
+        # (p_x, p_y) = self.gradient(p)
+        # (u,v)=(uprime-(self.dt/self.rho)*p_x, vprime-(self.dt/self.rho)*p_y)
 
         # self.adv_diff_solver.set_BCs(u,v)
 
