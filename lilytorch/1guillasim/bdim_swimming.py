@@ -8,7 +8,7 @@ import farms_pylog as pylog
 import numpy as np
 
 
-amps=1*np.ones(8)
+amps=0.8*np.ones(8)
 # amps[:5]=0
 
 def main(**kwargs):
@@ -25,8 +25,8 @@ def main(**kwargs):
         amp             = amps,
         bias            = 0,
         timestep        = 0.001,
-        twl             = 1,
-        freq            = 2,
+        twl             = 0.6,
+        freq            = 1,
         log_path        = log_path,
         compute_metrics = 3,
         headless        = True,

@@ -15,6 +15,7 @@ from skimage import measure
 import math # important to keep this for evaluating math operations for sdfs even if it appears as not used
 import matplotlib.pyplot as plt
 import cv2
+import matplotlib.cm as cm
 
 from lilytorch.scripts.zebrafish_files.load_data import get_experimental_signal
 
@@ -77,6 +78,7 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, costum_update=None, starti
         )
 
     elif type == "mesh":
+        update_map = [None,None]
         mesh_file = body_pars["mesh_file"]
         (nsamples,msamples) = eval(body_pars["n_samples"])
         return BodyMesh(
@@ -85,6 +87,8 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, costum_update=None, starti
             mesh_file,
             update_map,
             eps=eps,
+            plotting_meshes=body_pars["plotting_meshes"],
+            compute_interp=body_pars["compute_interp"],
             nsamples=nsamples, msamples=msamples
         )
 
@@ -812,6 +816,7 @@ class BodyFishExperimental(Body):
         sdf = torch.sqrt((x-s)**2+y**2)
         return sdf-self.thk(s)
 
+
     def update(self, t, dt=1):
         """
         Update sdf properties from analytical rototranslation map
@@ -891,7 +896,77 @@ class BodyMesh(Body):
             )
         self.compute_sdfs()
         del self.m2s
+        self.initialize()
         self.bodies = [self]
+
+
+    def resample_contour(self, x, y, spacing, closed=True):
+        if closed:
+            if x[0] != x[-1] or y[0] != y[-1]:
+                x = np.r_[x, x[0]]
+                y = np.r_[y, y[0]]
+        dx = np.diff(x)
+        dy = np.diff(y)
+        ds = np.sqrt(dx**2 + dy**2)
+        s = np.concatenate(([0], np.cumsum(ds)))
+        s_uniform = np.arange(0, s[-1], spacing)
+        x_new = np.interp(s_uniform, s, x)
+        y_new = np.interp(s_uniform, s, y)
+        return x_new, y_new, s_uniform
+
+
+    def resample_closed_contour(self, points, spacing, keep_duplicate_endpoint=True):
+        """
+        Resample a closed contour for (approximately) uniform spacing.
+        - points: (M,2) numpy array of (x,y). Can be closed (first==last) or open; treated as closed.
+        - spacing: desired spacing between resampled points (float > 0).
+        - keep_duplicate_endpoint: if True, return N+1 points with last == first (explicit closure).
+                                if False, return N points (no duplicate at end).
+        Returns:
+        - new_pts: (N+1,2) or (N,2) array of resampled points.
+        - actual_spacing: total_length / N  (the spacing actually used)
+        """
+        pts = np.asarray(points, dtype=float)
+        if pts.ndim != 2 or pts.shape[1] < 2:
+            raise ValueError("points must be an (M,2) array-like")
+
+        if spacing <= 0:
+            raise ValueError("spacing must be positive")
+
+        # If not already closed, append first point for segment math
+        if not np.allclose(pts[0], pts[-1]):
+            pts_closed = np.vstack([pts, pts[0]])
+        else:
+            pts_closed = pts.copy()
+
+        # segment vectors and lengths
+        segs = pts_closed[1:] - pts_closed[:-1]
+        seg_lens = np.hypot(segs[:,0], segs[:,1])
+        total_length = seg_lens.sum()
+        if total_length == 0:
+            raise ValueError("zero-length contour")
+
+        # choose number of equal intervals such that spacing ~ requested spacing
+        N = max(3, int(round(total_length / spacing)))
+        actual_spacing = total_length / N
+
+        # cumulative distances along the closed polyline (start at 0, last = total_length)
+        s = np.concatenate(([0.0], np.cumsum(seg_lens)))
+        # x,y coordinates corresponding to s
+        x = pts_closed[:,0]
+        y = pts_closed[:,1]
+
+        # target sample locations: include the final total_length so last interpolates to first point
+        target_s = np.linspace(0.0, total_length, N+1)
+
+        # np.interp requires strictly increasing x; s is non-decreasing
+        xi = np.interp(target_s, s, x)
+        yi = np.interp(target_s, s, y)
+        new_pts = np.vstack([xi, yi]).T
+
+        if not keep_duplicate_endpoint:
+            return new_pts[:-1], actual_spacing  # return N points
+        return new_pts, actual_spacing      # return N+1 points where last==first
 
 
     def compute_sdfs(self):
@@ -936,38 +1011,125 @@ class BodyMesh(Body):
                 im = cv2.erode(im, element, iterations = 3)
 
 
-                if self.plotting:
-                    cv2.imshow("window_name", im)
-                    cv2.waitKey(0)
-                    cv2.destroyAllWindows()
                 im=im[:,:,0]
             else:
                 im=binary_2d
-
+            if self.plotting:
+                cv2.imshow("window_name", im)
+                cv2.waitKey(0)
+                cv2.destroyAllWindows()
             binary_2d=np.where(im==0,1,-1)
 
             # (2) use skfmm to determine sdf on the full domain
             print("Computing the sdf for {}, with space steps ({},{})".format(self.mesh_file,xnp[1]-xnp[0],ynp[1]-ynp[0]))
             sdf_val = skfmm.distance(binary_2d, dx=[xnp[1]-xnp[0],ynp[1]-ynp[0]])#-self.suit
 
+            # sdf_val = cv2.GaussianBlur(sdf_val, (5, 5), 0)
+
             # find contour lines
             cnt = np.array(measure.find_contours(sdf_val, 0)[0]).T
             cnt[0]=xnp[0]+cnt[0]*(xnp[1]-xnp[0])
             cnt[1]=ynp[0]+cnt[1]*(ynp[1]-ynp[0])
-            curv_coord = np.cumsum(np.sqrt(np.sum(np.diff(cnt, axis=1)**2, axis=0)))
+            curv_coord = np.concatenate(([0], np.cumsum(np.sqrt(np.sum(np.diff(cnt, axis=1)**2, axis=0)))))
+
+            def signed_area(contour):
+                x = contour[0,:]
+                y = contour[1,:]
+                return 0.5 * np.sum(x * np.roll(y, -1) - np.roll(x, -1) * y)
+
+            def ensure_clockwise(contour):
+                A = signed_area(contour)
+                if A > 0:  # currently CCW
+                    contour = contour[:,::-1]
+                return contour
+
+
+            cnt=ensure_clockwise(cnt)
+
+            # ensure starting point is at the middle of the bounding box
+            start_point = np.array([self.bb[0,0], 0]) # assuming y=0 is the centerline
+            dists = np.sqrt((cnt[0]-start_point[0])**2+(cnt[1]-start_point[1])**2)
+            # Find the closest point to start_point with positive y
+            valid_indices = np.where(cnt[1] > 0)[0]
+            if len(valid_indices) > 0:
+                idx = valid_indices[np.argmin(dists[valid_indices])]
+            else:
+                idx = np.argmin(dists)
+            cnt = np.concatenate((cnt[:, idx:], cnt[:, :idx]), axis=1)
+
+            # # resample contour lines for uniform spacing with spacing self.dx
+            ds=0.5*torch.sqrt(torch.tensor(self.dx**2+self.dy**2))
+            # x, y, s_uniform = self.resample_contour(cnt[0], cnt[1], spacing=ds, closed=True)
+            x, y, s_uniform = self.resample_contour(cnt[0], cnt[1], spacing=ds, closed=True)
+            del cnt
+            cnt=np.array([x, y])
+            curv_coord = s_uniform
+
+            # Create a vector where points in cnt above y=0 are 1, below are -1
+            sign_vec = np.where(cnt[1] > 0, 1, -1)
+
 
             if self.plotting:
-                var=sdf_val
+
+                # var=sdf_val
+                # plt.figure()
+                # plt.contourf(
+                #     X,
+                #     Y,
+                #     var
+                # )
+                # plt.plot(cnt[0], cnt[1], 'r', linewidth=2)
+                # plt.colorbar()
+                # plt.show()
+
                 plt.figure()
-                plt.contourf(
-                    X,
-                    Y,
-                    var
-                )
-                plt.plot(cnt[0], cnt[1], 'r', linewidth=2)
-                plt.colorbar()
+
+                # Plot cnt as scatter with color given by a colormap
+                cmap = cm.get_cmap('RdBu')
+                n_points = cnt.shape[1]
+                colors = cmap(np.linspace(0, 1, n_points))
+                plt.scatter(cnt[0], cnt[1], c=colors, cmap=cmap, s=10)
                 plt.show()
 
+
+
+
+
+
+
+            # # Set cnt to be a circle using sin/cos with spacing ds in [0, 2*pi]
+            # theta = np.linspace(0, 2 * np.pi, 1000)[:-1]  # remove duplicate endpoint
+            # cnt = np.array([
+            #     -0.7 + 0.1 * np.cos(theta),
+            #     0 + 0.1 * np.sin(theta)
+            # ])
+            # curv_coord = np.concatenate(([0], np.cumsum(np.sqrt(np.sum(np.diff(cnt, axis=1)**2, axis=0)))))
+
+
+
+
+
+            # # Use resample_closed_contour to resample the contour for uniform spacing
+            # cnt_points = np.stack([cnt[0], cnt[1]], axis=-1).T  # shape (N,2)
+            # cnt_resampled, curv_coord = self.resample_closed_contour(cnt_points.T, spacing=ds, keep_duplicate_endpoint=True)
+            # cnt = cnt_resampled.T  # shape (2, N)
+
+            # # Compute curvilinear coordinate (arc length) of cnt
+            # diffs = np.diff(cnt, axis=1)
+            # curv_coord = np.concatenate(([0], np.cumsum(np.sqrt(np.sum(diffs**2, axis=0)))))
+
+            # from IPython import embed; embed()
+
+
+            # plt.scatter(cnt[0], cnt[1])
+            # plt.show()
+
+            # # Compute curvilinear coordinate (arc length) of cnt
+            # diffs = np.diff(cnt, axis=1)
+            # curv_coord = np.concatenate(([0], np.cumsum(np.sqrt(np.sum(diffs**2, axis=0)))))
+
+
+            # from IPython import embed; embed()
 
             print("Computing the interpolation functions for {}".format(self.mesh_file))
 
@@ -976,6 +1138,9 @@ class BodyMesh(Body):
             np.save("interp_data/sdf_val_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy",sdf_val)
             np.save("interp_data/cnt_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy", cnt)
             np.save("interp_data/curv_coord_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy", curv_coord)
+            np.save("interp_data/sign_vec_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy", sign_vec)
+
+
 
     def initialize(self):
         xnp = np.load("interp_data/xnp_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy")
@@ -983,6 +1148,7 @@ class BodyMesh(Body):
         sdf_val = np.load("interp_data/sdf_val_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy")
         cnt = np.load("interp_data/cnt_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy")
         curv_coord = np.load("interp_data/curv_coord_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy")
+        sign_vec = np.load("interp_data/sign_vec_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy")
 
         self.sdf_interp = RegularGridInterpolator(
             (
@@ -993,9 +1159,25 @@ class BodyMesh(Body):
             fill_value="nearest"
         )
 
+        self.sdf = self.sdf_interp(
+            self.stacked_xy[0],
+            self.stacked_xy[1]
+        ).reshape(self.nx, self.ny)
+
         self.curv_coord = torch.from_numpy(curv_coord).type(self.dtype).to(self.device)
         self.cnt        = torch.from_numpy(cnt).type(self.dtype).to(self.device)
         self.cnt_update = self.cnt.clone().detach()
+        self.cnt_u=torch.zeros_like(self.cnt_update[0])
+        self.cnt_v=torch.zeros_like(self.cnt_update[1])
+        self.cnt_f_u=torch.zeros_like(self.cnt_update[0])
+        self.cnt_f_v=torch.zeros_like(self.cnt_update[1])
+        self.cnt_int_f_u=torch.zeros_like(self.cnt_update[0])
+        self.cnt_int_f_v=torch.zeros_like(self.cnt_update[1])
+        self.r_com=torch.zeros_like(self.cnt_update)
+        self.ds = self.curv_coord[1]-self.curv_coord[0]
+        # self.ds = np.diff(self.curv_coord)
+        self.mask = torch.arange(len(self.curv_coord), device=self.device)
+        self.sign_vec = torch.from_numpy(sign_vec).type(self.dtype).to(self.device)
 
         # return self.update(0)
 
@@ -1009,6 +1191,9 @@ class BodyMesh(Body):
     #         ),
     #         dt=dt
     #     )]
+
+    def update(self, iteration, t, dt=1):
+        pass
 
     def visualize(self):
         self.m2s.visualize()

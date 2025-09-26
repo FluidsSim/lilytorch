@@ -1,34 +1,55 @@
 
-solver : 
-  use_gpu: True
+solver :
+  use_gpu: False
   nthreads: 16
-  N      : 1024
-  xmin   : -100
-  xmax   : 100
-  ymin   : -100
-  ymax   : 100
-  dt     : 0.01
-  nt     : 8000
+  N      : 512
+  xmin   : -1
+  xmax   : 1
+  ymin   : -1
+  ymax   : 1
+
+  nt     : 20000
   nu     : 1.0e-6
   rho    : 1.0e+3
 
+
+  # convection_method : "implicit"
+  # dt     : 1
+
+  convection_method : "abdquickest"
+  dt                : 0.1
+
+  poisson_tol       : 1.0e-7
+  poisson_max_cycles: 5
+  jacobi_weight     : 0.8
+  poisson_nsmoothing: 10
+  poisson_verbose   : False
+  poisson_filename : "data/"
+
+
+
 boundary_conditions:
   BC_type_u:
+  - "D"
   - "N"
   - "N"
   - "N"
-  - "N"
-  BC_values_u: 
-  - 0
+  BC_values_u:
+  - 0.005
   - 0
   - 0
   - 0
   BC_type_v:
+  - "D"
   - "N"
   - "N"
   - "N"
-  - "N"
-  BC_values_v: 
+  BC_values_v:
+  - 0
+  - 0
+  - 0
+  - 0
+  BC_values_v:
   - 0
   - 0
   - 0
@@ -36,16 +57,24 @@ boundary_conditions:
 
 body:
   type: mesh
-  mesh_file: "lilytorch/test_obj/cylinder.obj"
-  n_samples: (4096, 4096)
-  update_maps: 
-    rotation: "lambda t: 30*t"
-    translation: 
-      - "lambda t: 0*math.cos(t/10)"
-      - "lambda t: 0*math.sin(t/10)"
+  mesh_file: "cylinder.obj"
+  n_samples: (1000, 1000)
+  compute_interp: True
+  plotting_meshes: False
+  update_maps:
+    rotation: "None"
+    translation:
+      - None
+      - None
+  suit: 0.0
+  convexify: False
+  scale: 1
 
-output: 
+
+output:
+  save_path: "/data/andreaferrario/ns_data/"
   save_frames: True
-  save_every : 1
-  vmin: -0.5
-  vmax: 0.5
+  save_every : 50
+  vmin: -0.05
+  vmax: 0.05
+  save_uv: False
