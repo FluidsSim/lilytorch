@@ -1,0 +1,2435 @@
+sdf: ../models/zebrafish_v1/sdf/zebrafish.sdf
+spawn:
+  loader: 0
+  mode: !!python/object/apply:farms_core.model.options.SpawnMode
+  - transverse
+  pose:
+  - 0
+  - 0
+  - -0.1
+  - 0
+  - 0
+  - 3.141592653589793
+  velocity:
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+  extras: {}
+morphology:
+  links:
+  - name: link_0
+    collisions: true
+    friction:
+    - 0.7
+    - 0
+    - 0
+    extras:
+      restitution: 0.5
+      linearDamping: 0
+      angularDamping: 0
+    swimming: true
+    density: 1000.0
+    drag_coefficients:
+    - - -0.001
+      - -0.1
+      - -0.1
+    - - 0
+      - 0
+      - 0
+    mass_multiplier: 1
+  - name: link_1
+    collisions: true
+    friction:
+    - 0.7
+    - 0
+    - 0
+    extras:
+      restitution: 0.5
+      linearDamping: 0
+      angularDamping: 0
+    swimming: true
+    density: 1000.0
+    drag_coefficients:
+    - - -0.001
+      - -0.1
+      - -0.1
+    - - 0
+      - 0
+      - 0
+    mass_multiplier: 1
+  - name: link_2
+    collisions: true
+    friction:
+    - 0.7
+    - 0
+    - 0
+    extras:
+      restitution: 0.5
+      linearDamping: 0
+      angularDamping: 0
+    swimming: true
+    density: 1000.0
+    drag_coefficients:
+    - - -0.001
+      - -0.1
+      - -0.1
+    - - 0
+      - 0
+      - 0
+    mass_multiplier: 1
+  - name: link_3
+    collisions: true
+    friction:
+    - 0.7
+    - 0
+    - 0
+    extras:
+      restitution: 0.5
+      linearDamping: 0
+      angularDamping: 0
+    swimming: true
+    density: 1000.0
+    drag_coefficients:
+    - - -0.001
+      - -0.1
+      - -0.1
+    - - 0
+      - 0
+      - 0
+    mass_multiplier: 1
+  - name: link_4
+    collisions: true
+    friction:
+    - 0.7
+    - 0
+    - 0
+    extras:
+      restitution: 0.5
+      linearDamping: 0
+      angularDamping: 0
+    swimming: true
+    density: 1000.0
+    drag_coefficients:
+    - - -0.001
+      - -0.1
+      - -0.1
+    - - 0
+      - 0
+      - 0
+    mass_multiplier: 1
+  - name: link_5
+    collisions: true
+    friction:
+    - 0.7
+    - 0
+    - 0
+    extras:
+      restitution: 0.5
+      linearDamping: 0
+      angularDamping: 0
+    swimming: true
+    density: 1000.0
+    drag_coefficients:
+    - - -0.001
+      - -0.1
+      - -0.1
+    - - 0
+      - 0
+      - 0
+    mass_multiplier: 1
+  - name: link_6
+    collisions: true
+    friction:
+    - 0.7
+    - 0
+    - 0
+    extras:
+      restitution: 0.5
+      linearDamping: 0
+      angularDamping: 0
+    swimming: true
+    density: 1000.0
+    drag_coefficients:
+    - - -0.001
+      - -0.1
+      - -0.1
+    - - 0
+      - 0
+      - 0
+    mass_multiplier: 1
+  - name: link_7
+    collisions: true
+    friction:
+    - 0.7
+    - 0
+    - 0
+    extras:
+      restitution: 0.5
+      linearDamping: 0
+      angularDamping: 0
+    swimming: true
+    density: 1000.0
+    drag_coefficients:
+    - - -0.001
+      - -0.1
+      - -0.1
+    - - 0
+      - 0
+      - 0
+    mass_multiplier: 1
+  - name: link_8
+    collisions: true
+    friction:
+    - 0.7
+    - 0
+    - 0
+    extras:
+      restitution: 0.5
+      linearDamping: 0
+      angularDamping: 0
+    swimming: true
+    density: 1000.0
+    drag_coefficients:
+    - - -0.001
+      - -0.1
+      - -0.1
+    - - 0
+      - 0
+      - 0
+    mass_multiplier: 1
+  - name: link_9
+    collisions: true
+    friction:
+    - 0.7
+    - 0
+    - 0
+    extras:
+      restitution: 0.5
+      linearDamping: 0
+      angularDamping: 0
+    swimming: true
+    density: 1000.0
+    drag_coefficients:
+    - - -0.001
+      - -0.1
+      - -0.1
+    - - 0
+      - 0
+      - 0
+    mass_multiplier: 1
+  - name: link_10
+    collisions: true
+    friction:
+    - 0.7
+    - 0
+    - 0
+    extras:
+      restitution: 0.5
+      linearDamping: 0
+      angularDamping: 0
+    swimming: true
+    density: 1000.0
+    drag_coefficients:
+    - - -0.001
+      - -0.1
+      - -0.1
+    - - 0
+      - 0
+      - 0
+    mass_multiplier: 1
+  - name: link_11
+    collisions: true
+    friction:
+    - 0.7
+    - 0
+    - 0
+    extras:
+      restitution: 0.5
+      linearDamping: 0
+      angularDamping: 0
+    swimming: true
+    density: 1000.0
+    drag_coefficients:
+    - - -0.001
+      - -0.1
+      - -0.1
+    - - 0
+      - 0
+      - 0
+    mass_multiplier: 1
+  - name: link_12
+    collisions: true
+    friction:
+    - 0.7
+    - 0
+    - 0
+    extras:
+      restitution: 0.5
+      linearDamping: 0
+      angularDamping: 0
+    swimming: true
+    density: 1000.0
+    drag_coefficients:
+    - - -0.001
+      - -0.1
+      - -0.1
+    - - 0
+      - 0
+      - 0
+    mass_multiplier: 1
+  - name: link_13
+    collisions: true
+    friction:
+    - 0.7
+    - 0
+    - 0
+    extras:
+      restitution: 0.5
+      linearDamping: 0
+      angularDamping: 0
+    swimming: true
+    density: 1000.0
+    drag_coefficients:
+    - - -0.001
+      - -0.1
+      - -0.1
+    - - 0
+      - 0
+      - 0
+    mass_multiplier: 1
+  - name: link_14
+    collisions: true
+    friction:
+    - 0.7
+    - 0
+    - 0
+    extras:
+      restitution: 0.5
+      linearDamping: 0
+      angularDamping: 0
+    swimming: true
+    density: 1000.0
+    drag_coefficients:
+    - - -0.001
+      - -0.1
+      - -0.1
+    - - 0
+      - 0
+      - 0
+    mass_multiplier: 1
+  - name: link_15
+    collisions: true
+    friction:
+    - 0.7
+    - 0
+    - 0
+    extras:
+      restitution: 0.5
+      linearDamping: 0
+      angularDamping: 0
+    swimming: true
+    density: 1000.0
+    drag_coefficients:
+    - - -0.001
+      - -0.1
+      - -0.1
+    - - 0
+      - 0
+      - 0
+    mass_multiplier: 1
+  self_collisions: []
+  joints:
+  - name: joint_0
+    initial:
+    - 0
+    - 0
+    limits:
+    - - -.inf
+      - .inf
+    - - -.inf
+      - .inf
+    stiffness: 0
+    springref: 0
+    damping: 0
+    extras: {}
+  - name: joint_1
+    initial:
+    - 0
+    - 0
+    limits:
+    - - -.inf
+      - .inf
+    - - -.inf
+      - .inf
+    stiffness: 0
+    springref: 0
+    damping: 0
+    extras: {}
+  - name: joint_2
+    initial:
+    - 0
+    - 0
+    limits:
+    - - -.inf
+      - .inf
+    - - -.inf
+      - .inf
+    stiffness: 0
+    springref: 0
+    damping: 0
+    extras: {}
+  - name: joint_3
+    initial:
+    - 0
+    - 0
+    limits:
+    - - -.inf
+      - .inf
+    - - -.inf
+      - .inf
+    stiffness: 0
+    springref: 0
+    damping: 0
+    extras: {}
+  - name: joint_4
+    initial:
+    - 0
+    - 0
+    limits:
+    - - -.inf
+      - .inf
+    - - -.inf
+      - .inf
+    stiffness: 0
+    springref: 0
+    damping: 0
+    extras: {}
+  - name: joint_5
+    initial:
+    - 0
+    - 0
+    limits:
+    - - -.inf
+      - .inf
+    - - -.inf
+      - .inf
+    stiffness: 0
+    springref: 0
+    damping: 0
+    extras: {}
+  - name: joint_6
+    initial:
+    - 0
+    - 0
+    limits:
+    - - -.inf
+      - .inf
+    - - -.inf
+      - .inf
+    stiffness: 0
+    springref: 0
+    damping: 0
+    extras: {}
+  - name: joint_7
+    initial:
+    - 0
+    - 0
+    limits:
+    - - -.inf
+      - .inf
+    - - -.inf
+      - .inf
+    stiffness: 0
+    springref: 0
+    damping: 0
+    extras: {}
+  - name: joint_8
+    initial:
+    - 0
+    - 0
+    limits:
+    - - -.inf
+      - .inf
+    - - -.inf
+      - .inf
+    stiffness: 0
+    springref: 0
+    damping: 0
+    extras: {}
+  - name: joint_9
+    initial:
+    - 0
+    - 0
+    limits:
+    - - -.inf
+      - .inf
+    - - -.inf
+      - .inf
+    stiffness: 0
+    springref: 0
+    damping: 0
+    extras: {}
+  - name: joint_10
+    initial:
+    - 0
+    - 0
+    limits:
+    - - -.inf
+      - .inf
+    - - -.inf
+      - .inf
+    stiffness: 0
+    springref: 0
+    damping: 0
+    extras: {}
+  - name: joint_11
+    initial:
+    - 0
+    - 0
+    limits:
+    - - -.inf
+      - .inf
+    - - -.inf
+      - .inf
+    stiffness: 0
+    springref: 0
+    damping: 0
+    extras: {}
+  - name: joint_12
+    initial:
+    - 0
+    - 0
+    limits:
+    - - -.inf
+      - .inf
+    - - -.inf
+      - .inf
+    stiffness: 0
+    springref: 0
+    damping: 0
+    extras: {}
+  - name: joint_13
+    initial:
+    - 0
+    - 0
+    limits:
+    - - -.inf
+      - .inf
+    - - -.inf
+      - .inf
+    stiffness: 0
+    springref: 0
+    damping: 0
+    extras: {}
+  - name: joint_14
+    initial:
+    - 0
+    - 0
+    limits:
+    - - -.inf
+      - .inf
+    - - -.inf
+      - .inf
+    stiffness: 0
+    springref: 0
+    damping: 0
+    extras: {}
+  n_joints_body: 15
+  n_dof_legs: 0
+  n_legs: 0
+  n_joints_passive: 0
+control:
+  controller_loader: farms_amphibious.control.amphibious.AmphibiousController
+  sensors:
+    links:
+    - link_0
+    - link_1
+    - link_2
+    - link_3
+    - link_4
+    - link_5
+    - link_6
+    - link_7
+    - link_8
+    - link_9
+    - link_10
+    - link_11
+    - link_12
+    - link_13
+    - link_14
+    - link_15
+    joints:
+    - joint_0
+    - joint_1
+    - joint_2
+    - joint_3
+    - joint_4
+    - joint_5
+    - joint_6
+    - joint_7
+    - joint_8
+    - joint_9
+    - joint_10
+    - joint_11
+    - joint_12
+    - joint_13
+    - joint_14
+    contacts:
+    - - link_0
+      - ''
+    - - link_1
+      - ''
+    - - link_2
+      - ''
+    - - link_3
+      - ''
+    - - link_4
+      - ''
+    - - link_5
+      - ''
+    - - link_6
+      - ''
+    - - link_7
+      - ''
+    - - link_8
+      - ''
+    - - link_9
+      - ''
+    - - link_10
+      - ''
+    - - link_11
+      - ''
+    - - link_12
+      - ''
+    - - link_13
+      - ''
+    - - link_14
+      - ''
+    - - link_15
+      - ''
+    xfrc:
+    - link_0
+    - link_1
+    - link_2
+    - link_3
+    - link_4
+    - link_5
+    - link_6
+    - link_7
+    - link_8
+    - link_9
+    - link_10
+    - link_11
+    - link_12
+    - link_13
+    - link_14
+    - link_15
+    muscles: []
+    adhesions: []
+    visuals: []
+  motors:
+  - joint_name: joint_0
+    control_types:
+    - velocity
+    - torque
+    limits_torque:
+    - -.inf
+    - .inf
+    gains:
+    - 0
+    - 0
+    - 0
+    equation: ekeberg_muscle
+    transform:
+      gain: 1
+      bias: 0
+    offsets:
+      gain: 0
+      bias: 0
+      low: 1
+      high: 5
+      saturation_low: 0
+      saturation_high: 0
+      rate: 3
+    passive:
+      is_passive: false
+      stiffness_coefficient: 0
+      damping_coefficient: 0
+      friction_coefficient: 0
+  - joint_name: joint_1
+    control_types:
+    - velocity
+    - torque
+    limits_torque:
+    - -.inf
+    - .inf
+    gains:
+    - 0
+    - 0
+    - 0
+    equation: ekeberg_muscle
+    transform:
+      gain: 1
+      bias: 0
+    offsets:
+      gain: 0
+      bias: 0
+      low: 1
+      high: 5
+      saturation_low: 0
+      saturation_high: 0
+      rate: 3
+    passive:
+      is_passive: false
+      stiffness_coefficient: 0
+      damping_coefficient: 0
+      friction_coefficient: 0
+  - joint_name: joint_2
+    control_types:
+    - velocity
+    - torque
+    limits_torque:
+    - -.inf
+    - .inf
+    gains:
+    - 0
+    - 0
+    - 0
+    equation: ekeberg_muscle
+    transform:
+      gain: 1
+      bias: 0
+    offsets:
+      gain: 0
+      bias: 0
+      low: 1
+      high: 5
+      saturation_low: 0
+      saturation_high: 0
+      rate: 3
+    passive:
+      is_passive: false
+      stiffness_coefficient: 0
+      damping_coefficient: 0
+      friction_coefficient: 0
+  - joint_name: joint_3
+    control_types:
+    - velocity
+    - torque
+    limits_torque:
+    - -.inf
+    - .inf
+    gains:
+    - 0
+    - 0
+    - 0
+    equation: ekeberg_muscle
+    transform:
+      gain: 1
+      bias: 0
+    offsets:
+      gain: 0
+      bias: 0
+      low: 1
+      high: 5
+      saturation_low: 0
+      saturation_high: 0
+      rate: 3
+    passive:
+      is_passive: false
+      stiffness_coefficient: 0
+      damping_coefficient: 0
+      friction_coefficient: 0
+  - joint_name: joint_4
+    control_types:
+    - velocity
+    - torque
+    limits_torque:
+    - -.inf
+    - .inf
+    gains:
+    - 0
+    - 0
+    - 0
+    equation: ekeberg_muscle
+    transform:
+      gain: 1
+      bias: 0
+    offsets:
+      gain: 0
+      bias: 0
+      low: 1
+      high: 5
+      saturation_low: 0
+      saturation_high: 0
+      rate: 3
+    passive:
+      is_passive: false
+      stiffness_coefficient: 0
+      damping_coefficient: 0
+      friction_coefficient: 0
+  - joint_name: joint_5
+    control_types:
+    - velocity
+    - torque
+    limits_torque:
+    - -.inf
+    - .inf
+    gains:
+    - 0
+    - 0
+    - 0
+    equation: ekeberg_muscle
+    transform:
+      gain: 1
+      bias: 0
+    offsets:
+      gain: 0
+      bias: 0
+      low: 1
+      high: 5
+      saturation_low: 0
+      saturation_high: 0
+      rate: 3
+    passive:
+      is_passive: false
+      stiffness_coefficient: 0
+      damping_coefficient: 0
+      friction_coefficient: 0
+  - joint_name: joint_6
+    control_types:
+    - velocity
+    - torque
+    limits_torque:
+    - -.inf
+    - .inf
+    gains:
+    - 0
+    - 0
+    - 0
+    equation: ekeberg_muscle
+    transform:
+      gain: 1
+      bias: 0
+    offsets:
+      gain: 0
+      bias: 0
+      low: 1
+      high: 5
+      saturation_low: 0
+      saturation_high: 0
+      rate: 3
+    passive:
+      is_passive: false
+      stiffness_coefficient: 0
+      damping_coefficient: 0
+      friction_coefficient: 0
+  - joint_name: joint_7
+    control_types:
+    - velocity
+    - torque
+    limits_torque:
+    - -.inf
+    - .inf
+    gains:
+    - 0
+    - 0
+    - 0
+    equation: ekeberg_muscle
+    transform:
+      gain: 1
+      bias: 0
+    offsets:
+      gain: 0
+      bias: 0
+      low: 1
+      high: 5
+      saturation_low: 0
+      saturation_high: 0
+      rate: 3
+    passive:
+      is_passive: false
+      stiffness_coefficient: 0
+      damping_coefficient: 0
+      friction_coefficient: 0
+  - joint_name: joint_8
+    control_types:
+    - velocity
+    - torque
+    limits_torque:
+    - -.inf
+    - .inf
+    gains:
+    - 0
+    - 0
+    - 0
+    equation: ekeberg_muscle
+    transform:
+      gain: 1
+      bias: 0
+    offsets:
+      gain: 0
+      bias: 0
+      low: 1
+      high: 5
+      saturation_low: 0
+      saturation_high: 0
+      rate: 3
+    passive:
+      is_passive: false
+      stiffness_coefficient: 0
+      damping_coefficient: 0
+      friction_coefficient: 0
+  - joint_name: joint_9
+    control_types:
+    - velocity
+    - torque
+    limits_torque:
+    - -.inf
+    - .inf
+    gains:
+    - 0
+    - 0
+    - 0
+    equation: ekeberg_muscle
+    transform:
+      gain: 1
+      bias: 0
+    offsets:
+      gain: 0
+      bias: 0
+      low: 1
+      high: 5
+      saturation_low: 0
+      saturation_high: 0
+      rate: 3
+    passive:
+      is_passive: false
+      stiffness_coefficient: 0
+      damping_coefficient: 0
+      friction_coefficient: 0
+  - joint_name: joint_10
+    control_types:
+    - velocity
+    - torque
+    limits_torque:
+    - -.inf
+    - .inf
+    gains:
+    - 0
+    - 0
+    - 0
+    equation: ekeberg_muscle
+    transform:
+      gain: 1
+      bias: 0
+    offsets:
+      gain: 0
+      bias: 0
+      low: 1
+      high: 5
+      saturation_low: 0
+      saturation_high: 0
+      rate: 3
+    passive:
+      is_passive: false
+      stiffness_coefficient: 0
+      damping_coefficient: 0
+      friction_coefficient: 0
+  - joint_name: joint_11
+    control_types:
+    - velocity
+    - torque
+    limits_torque:
+    - -.inf
+    - .inf
+    gains:
+    - 0
+    - 0
+    - 0
+    equation: ekeberg_muscle
+    transform:
+      gain: 1
+      bias: 0
+    offsets:
+      gain: 0
+      bias: 0
+      low: 1
+      high: 5
+      saturation_low: 0
+      saturation_high: 0
+      rate: 3
+    passive:
+      is_passive: false
+      stiffness_coefficient: 0
+      damping_coefficient: 0
+      friction_coefficient: 0
+  - joint_name: joint_12
+    control_types:
+    - velocity
+    - torque
+    limits_torque:
+    - -.inf
+    - .inf
+    gains:
+    - 0
+    - 0
+    - 0
+    equation: ekeberg_muscle
+    transform:
+      gain: 1
+      bias: 0
+    offsets:
+      gain: 0
+      bias: 0
+      low: 1
+      high: 5
+      saturation_low: 0
+      saturation_high: 0
+      rate: 3
+    passive:
+      is_passive: false
+      stiffness_coefficient: 0
+      damping_coefficient: 0
+      friction_coefficient: 0
+  - joint_name: joint_13
+    control_types:
+    - velocity
+    - torque
+    limits_torque:
+    - -.inf
+    - .inf
+    gains:
+    - 0
+    - 0
+    - 0
+    equation: ekeberg_muscle
+    transform:
+      gain: 1
+      bias: 0
+    offsets:
+      gain: 0
+      bias: 0
+      low: 1
+      high: 5
+      saturation_low: 0
+      saturation_high: 0
+      rate: 3
+    passive:
+      is_passive: false
+      stiffness_coefficient: 0
+      damping_coefficient: 0
+      friction_coefficient: 0
+  - joint_name: joint_14
+    control_types:
+    - velocity
+    - torque
+    limits_torque:
+    - -.inf
+    - .inf
+    gains:
+    - 0
+    - 0
+    - 0
+    equation: ekeberg_muscle
+    transform:
+      gain: 1
+      bias: 0
+    offsets:
+      gain: 0
+      bias: 0
+      low: 1
+      high: 5
+      saturation_low: 0
+      saturation_high: 0
+      rate: 3
+    passive:
+      is_passive: false
+      stiffness_coefficient: 0
+      damping_coefficient: 0
+      friction_coefficient: 0
+  hill_muscles: []
+  network:
+    drive_loader: ''
+    drive_config: ''
+    drives:
+    - name: drive_brain_L
+      initial_value: 4
+      kind: !!python/object/apply:farms_amphibious.model.options.DriveKind
+      - brain_left
+      contacts: []
+    - name: drive_brain_R
+      initial_value: 4
+      kind: !!python/object/apply:farms_amphibious.model.options.DriveKind
+      - brain_right
+      contacts: []
+    - name: drive_body_0_L
+      initial_value: 4
+      kind: !!python/object/apply:farms_amphibious.model.options.DriveKind
+      - spine_left
+      contacts: []
+    - name: drive_body_0_R
+      initial_value: 4
+      kind: !!python/object/apply:farms_amphibious.model.options.DriveKind
+      - spine_right
+      contacts: []
+    - name: drive_body_1_L
+      initial_value: 4
+      kind: !!python/object/apply:farms_amphibious.model.options.DriveKind
+      - spine_left
+      contacts: []
+    - name: drive_body_1_R
+      initial_value: 4
+      kind: !!python/object/apply:farms_amphibious.model.options.DriveKind
+      - spine_right
+      contacts: []
+    - name: drive_body_2_L
+      initial_value: 4
+      kind: !!python/object/apply:farms_amphibious.model.options.DriveKind
+      - spine_left
+      contacts: []
+    - name: drive_body_2_R
+      initial_value: 4
+      kind: !!python/object/apply:farms_amphibious.model.options.DriveKind
+      - spine_right
+      contacts: []
+    - name: drive_body_3_L
+      initial_value: 4
+      kind: !!python/object/apply:farms_amphibious.model.options.DriveKind
+      - spine_left
+      contacts: []
+    - name: drive_body_3_R
+      initial_value: 4
+      kind: !!python/object/apply:farms_amphibious.model.options.DriveKind
+      - spine_right
+      contacts: []
+    - name: drive_body_4_L
+      initial_value: 4
+      kind: !!python/object/apply:farms_amphibious.model.options.DriveKind
+      - spine_left
+      contacts: []
+    - name: drive_body_4_R
+      initial_value: 4
+      kind: !!python/object/apply:farms_amphibious.model.options.DriveKind
+      - spine_right
+      contacts: []
+    - name: drive_body_5_L
+      initial_value: 4
+      kind: !!python/object/apply:farms_amphibious.model.options.DriveKind
+      - spine_left
+      contacts: []
+    - name: drive_body_5_R
+      initial_value: 4
+      kind: !!python/object/apply:farms_amphibious.model.options.DriveKind
+      - spine_right
+      contacts: []
+    - name: drive_body_6_L
+      initial_value: 4
+      kind: !!python/object/apply:farms_amphibious.model.options.DriveKind
+      - spine_left
+      contacts: []
+    - name: drive_body_6_R
+      initial_value: 4
+      kind: !!python/object/apply:farms_amphibious.model.options.DriveKind
+      - spine_right
+      contacts: []
+    - name: drive_body_7_L
+      initial_value: 4
+      kind: !!python/object/apply:farms_amphibious.model.options.DriveKind
+      - spine_left
+      contacts: []
+    - name: drive_body_7_R
+      initial_value: 4
+      kind: !!python/object/apply:farms_amphibious.model.options.DriveKind
+      - spine_right
+      contacts: []
+    - name: drive_body_8_L
+      initial_value: 4
+      kind: !!python/object/apply:farms_amphibious.model.options.DriveKind
+      - spine_left
+      contacts: []
+    - name: drive_body_8_R
+      initial_value: 4
+      kind: !!python/object/apply:farms_amphibious.model.options.DriveKind
+      - spine_right
+      contacts: []
+    - name: drive_body_9_L
+      initial_value: 4
+      kind: !!python/object/apply:farms_amphibious.model.options.DriveKind
+      - spine_left
+      contacts: []
+    - name: drive_body_9_R
+      initial_value: 4
+      kind: !!python/object/apply:farms_amphibious.model.options.DriveKind
+      - spine_right
+      contacts: []
+    - name: drive_body_10_L
+      initial_value: 4
+      kind: !!python/object/apply:farms_amphibious.model.options.DriveKind
+      - spine_left
+      contacts: []
+    - name: drive_body_10_R
+      initial_value: 4
+      kind: !!python/object/apply:farms_amphibious.model.options.DriveKind
+      - spine_right
+      contacts: []
+    - name: drive_body_11_L
+      initial_value: 4
+      kind: !!python/object/apply:farms_amphibious.model.options.DriveKind
+      - spine_left
+      contacts: []
+    - name: drive_body_11_R
+      initial_value: 4
+      kind: !!python/object/apply:farms_amphibious.model.options.DriveKind
+      - spine_right
+      contacts: []
+    - name: drive_body_12_L
+      initial_value: 4
+      kind: !!python/object/apply:farms_amphibious.model.options.DriveKind
+      - spine_left
+      contacts: []
+    - name: drive_body_12_R
+      initial_value: 4
+      kind: !!python/object/apply:farms_amphibious.model.options.DriveKind
+      - spine_right
+      contacts: []
+    - name: drive_body_13_L
+      initial_value: 4
+      kind: !!python/object/apply:farms_amphibious.model.options.DriveKind
+      - spine_left
+      contacts: []
+    - name: drive_body_13_R
+      initial_value: 4
+      kind: !!python/object/apply:farms_amphibious.model.options.DriveKind
+      - spine_right
+      contacts: []
+    - name: drive_body_14_L
+      initial_value: 4
+      kind: !!python/object/apply:farms_amphibious.model.options.DriveKind
+      - spine_left
+      contacts: []
+    - name: drive_body_14_R
+      initial_value: 4
+      kind: !!python/object/apply:farms_amphibious.model.options.DriveKind
+      - spine_right
+      contacts: []
+    oscillators:
+    - name: osc_body_0_L
+      initial_phase: 1.0489005911736253
+      initial_amplitude: 0.0
+      frequency_gain: 6.283185307179586
+      frequency_bias: 12.566370614359172
+      frequency_low: 1
+      frequency_high: 5
+      frequency_saturation_low: 0
+      frequency_saturation_high: 0
+      amplitude_gain: 0.1
+      amplitude_bias: 0.0
+      amplitude_low: 0.9
+      amplitude_high: 5
+      amplitude_saturation_low: 0
+      amplitude_saturation_high: 0.5
+      rate: 3.0
+      modular_phase: 0.0
+      modular_amplitude: 0.0
+    - name: osc_body_0_R
+      initial_phase: 1.2337115749736818
+      initial_amplitude: 0.0
+      frequency_gain: 6.283185307179586
+      frequency_bias: 12.566370614359172
+      frequency_low: 1
+      frequency_high: 5
+      frequency_saturation_low: 0
+      frequency_saturation_high: 0
+      amplitude_gain: 0.1
+      amplitude_bias: 0.0
+      amplitude_low: 0.9
+      amplitude_high: 5
+      amplitude_saturation_low: 0
+      amplitude_saturation_high: 0.5
+      rate: 3.0
+      modular_phase: 0.0
+      modular_amplitude: 0.0
+    - name: osc_body_1_L
+      initial_phase: 4.747766515832612
+      initial_amplitude: 0.0
+      frequency_gain: 6.283185307179586
+      frequency_bias: 12.566370614359172
+      frequency_low: 1
+      frequency_high: 5
+      frequency_saturation_low: 0
+      frequency_saturation_high: 0
+      amplitude_gain: 0.1
+      amplitude_bias: 0.0
+      amplitude_low: 0.9
+      amplitude_high: 5
+      amplitude_saturation_low: 0
+      amplitude_saturation_high: 0.5
+      rate: 3.0
+      modular_phase: 0.0
+      modular_amplitude: 0.0
+    - name: osc_body_1_R
+      initial_phase: 4.572819680058671
+      initial_amplitude: 0.0
+      frequency_gain: 6.283185307179586
+      frequency_bias: 12.566370614359172
+      frequency_low: 1
+      frequency_high: 5
+      frequency_saturation_low: 0
+      frequency_saturation_high: 0
+      amplitude_gain: 0.1
+      amplitude_bias: 0.0
+      amplitude_low: 0.9
+      amplitude_high: 5
+      amplitude_saturation_low: 0
+      amplitude_saturation_high: 0.5
+      rate: 3.0
+      modular_phase: 0.0
+      modular_amplitude: 0.0
+    - name: osc_body_2_L
+      initial_phase: 5.529666057064743
+      initial_amplitude: 0.0
+      frequency_gain: 6.283185307179586
+      frequency_bias: 12.566370614359172
+      frequency_low: 1
+      frequency_high: 5
+      frequency_saturation_low: 0
+      frequency_saturation_high: 0
+      amplitude_gain: 0.1
+      amplitude_bias: 0.0
+      amplitude_low: 0.9
+      amplitude_high: 5
+      amplitude_saturation_low: 0
+      amplitude_saturation_high: 0.5
+      rate: 3.0
+      modular_phase: 0.0
+      modular_amplitude: 0.0
+    - name: osc_body_2_R
+      initial_phase: 0.9464964111636742
+      initial_amplitude: 0.0
+      frequency_gain: 6.283185307179586
+      frequency_bias: 12.566370614359172
+      frequency_low: 1
+      frequency_high: 5
+      frequency_saturation_low: 0
+      frequency_saturation_high: 0
+      amplitude_gain: 0.1
+      amplitude_bias: 0.0
+      amplitude_low: 0.9
+      amplitude_high: 5
+      amplitude_saturation_low: 0
+      amplitude_saturation_high: 0.5
+      rate: 3.0
+      modular_phase: 0.0
+      modular_amplitude: 0.0
+    - name: osc_body_3_L
+      initial_phase: 1.721650741802697
+      initial_amplitude: 0.0
+      frequency_gain: 6.283185307179586
+      frequency_bias: 12.566370614359172
+      frequency_low: 1
+      frequency_high: 5
+      frequency_saturation_low: 0
+      frequency_saturation_high: 0
+      amplitude_gain: 0.1
+      amplitude_bias: 0.0
+      amplitude_low: 0.9
+      amplitude_high: 5
+      amplitude_saturation_low: 0
+      amplitude_saturation_high: 0.5
+      rate: 3.0
+      modular_phase: 0.0
+      modular_amplitude: 0.0
+    - name: osc_body_3_R
+      initial_phase: 5.5584513332392405
+      initial_amplitude: 0.0
+      frequency_gain: 6.283185307179586
+      frequency_bias: 12.566370614359172
+      frequency_low: 1
+      frequency_high: 5
+      frequency_saturation_low: 0
+      frequency_saturation_high: 0
+      amplitude_gain: 0.1
+      amplitude_bias: 0.0
+      amplitude_low: 0.9
+      amplitude_high: 5
+      amplitude_saturation_low: 0
+      amplitude_saturation_high: 0.5
+      rate: 3.0
+      modular_phase: 0.0
+      modular_amplitude: 0.0
+    - name: osc_body_4_L
+      initial_phase: 4.262488416591463
+      initial_amplitude: 0.0
+      frequency_gain: 6.283185307179586
+      frequency_bias: 12.566370614359172
+      frequency_low: 1
+      frequency_high: 5
+      frequency_saturation_low: 0
+      frequency_saturation_high: 0
+      amplitude_gain: 0.1
+      amplitude_bias: 0.0
+      amplitude_low: 0.9
+      amplitude_high: 5
+      amplitude_saturation_low: 0
+      amplitude_saturation_high: 0.5
+      rate: 3.0
+      modular_phase: 0.0
+      modular_amplitude: 0.0
+    - name: osc_body_4_R
+      initial_phase: 2.5290135370566857
+      initial_amplitude: 0.0
+      frequency_gain: 6.283185307179586
+      frequency_bias: 12.566370614359172
+      frequency_low: 1
+      frequency_high: 5
+      frequency_saturation_low: 0
+      frequency_saturation_high: 0
+      amplitude_gain: 0.1
+      amplitude_bias: 0.0
+      amplitude_low: 0.9
+      amplitude_high: 5
+      amplitude_saturation_low: 0
+      amplitude_saturation_high: 0.5
+      rate: 3.0
+      modular_phase: 0.0
+      modular_amplitude: 0.0
+    - name: osc_body_5_L
+      initial_phase: 3.7024196032113244
+      initial_amplitude: 0.0
+      frequency_gain: 6.283185307179586
+      frequency_bias: 12.566370614359172
+      frequency_low: 1
+      frequency_high: 5
+      frequency_saturation_low: 0
+      frequency_saturation_high: 0
+      amplitude_gain: 0.1
+      amplitude_bias: 0.0
+      amplitude_low: 0.9
+      amplitude_high: 5
+      amplitude_saturation_low: 0
+      amplitude_saturation_high: 0.5
+      rate: 3.0
+      modular_phase: 0.0
+      modular_amplitude: 0.0
+    - name: osc_body_5_R
+      initial_phase: 2.072024457537818
+      initial_amplitude: 0.0
+      frequency_gain: 6.283185307179586
+      frequency_bias: 12.566370614359172
+      frequency_low: 1
+      frequency_high: 5
+      frequency_saturation_low: 0
+      frequency_saturation_high: 0
+      amplitude_gain: 0.1
+      amplitude_bias: 0.0
+      amplitude_low: 0.9
+      amplitude_high: 5
+      amplitude_saturation_low: 0
+      amplitude_saturation_high: 0.5
+      rate: 3.0
+      modular_phase: 0.0
+      modular_amplitude: 0.0
+    - name: osc_body_6_L
+      initial_phase: 2.679816490638252
+      initial_amplitude: 0.0
+      frequency_gain: 6.283185307179586
+      frequency_bias: 12.566370614359172
+      frequency_low: 1
+      frequency_high: 5
+      frequency_saturation_low: 0
+      frequency_saturation_high: 0
+      amplitude_gain: 0.1
+      amplitude_bias: 0.0
+      amplitude_low: 0.9
+      amplitude_high: 5
+      amplitude_saturation_low: 0
+      amplitude_saturation_high: 0.5
+      rate: 3.0
+      modular_phase: 0.0
+      modular_amplitude: 0.0
+    - name: osc_body_6_R
+      initial_phase: 1.5368773160954263
+      initial_amplitude: 0.0
+      frequency_gain: 6.283185307179586
+      frequency_bias: 12.566370614359172
+      frequency_low: 1
+      frequency_high: 5
+      frequency_saturation_low: 0
+      frequency_saturation_high: 0
+      amplitude_gain: 0.1
+      amplitude_bias: 0.0
+      amplitude_low: 0.9
+      amplitude_high: 5
+      amplitude_saturation_low: 0
+      amplitude_saturation_high: 0.5
+      rate: 3.0
+      modular_phase: 0.0
+      modular_amplitude: 0.0
+    - name: osc_body_7_L
+      initial_phase: 4.961373390012836
+      initial_amplitude: 0.0
+      frequency_gain: 6.283185307179586
+      frequency_bias: 12.566370614359172
+      frequency_low: 1
+      frequency_high: 5
+      frequency_saturation_low: 0
+      frequency_saturation_high: 0
+      amplitude_gain: 0.1
+      amplitude_bias: 0.0
+      amplitude_low: 0.9
+      amplitude_high: 5
+      amplitude_saturation_low: 0
+      amplitude_saturation_high: 0.5
+      rate: 3.0
+      modular_phase: 0.0
+      modular_amplitude: 0.0
+    - name: osc_body_7_R
+      initial_phase: 6.171646600468776
+      initial_amplitude: 0.0
+      frequency_gain: 6.283185307179586
+      frequency_bias: 12.566370614359172
+      frequency_low: 1
+      frequency_high: 5
+      frequency_saturation_low: 0
+      frequency_saturation_high: 0
+      amplitude_gain: 0.1
+      amplitude_bias: 0.0
+      amplitude_low: 0.9
+      amplitude_high: 5
+      amplitude_saturation_low: 0
+      amplitude_saturation_high: 0.5
+      rate: 3.0
+      modular_phase: 0.0
+      modular_amplitude: 0.0
+    - name: osc_body_8_L
+      initial_phase: 1.5913984596024344
+      initial_amplitude: 0.0
+      frequency_gain: 6.283185307179586
+      frequency_bias: 12.566370614359172
+      frequency_low: 1
+      frequency_high: 5
+      frequency_saturation_low: 0
+      frequency_saturation_high: 0
+      amplitude_gain: 0.1
+      amplitude_bias: 0.0
+      amplitude_low: 0.9
+      amplitude_high: 5
+      amplitude_saturation_low: 0
+      amplitude_saturation_high: 0.5
+      rate: 3.0
+      modular_phase: 0.0
+      modular_amplitude: 0.0
+    - name: osc_body_8_R
+      initial_phase: 2.0651600442432243
+      initial_amplitude: 0.0
+      frequency_gain: 6.283185307179586
+      frequency_bias: 12.566370614359172
+      frequency_low: 1
+      frequency_high: 5
+      frequency_saturation_low: 0
+      frequency_saturation_high: 0
+      amplitude_gain: 0.1
+      amplitude_bias: 0.0
+      amplitude_low: 0.9
+      amplitude_high: 5
+      amplitude_saturation_low: 0
+      amplitude_saturation_high: 0.5
+      rate: 3.0
+      modular_phase: 0.0
+      modular_amplitude: 0.0
+    - name: osc_body_9_L
+      initial_phase: 0.4284779578146891
+      initial_amplitude: 0.0
+      frequency_gain: 6.283185307179586
+      frequency_bias: 12.566370614359172
+      frequency_low: 1
+      frequency_high: 5
+      frequency_saturation_low: 0
+      frequency_saturation_high: 0
+      amplitude_gain: 0.1
+      amplitude_bias: 0.0
+      amplitude_low: 0.9
+      amplitude_high: 5
+      amplitude_saturation_low: 0
+      amplitude_saturation_high: 0.5
+      rate: 3.0
+      modular_phase: 0.0
+      modular_amplitude: 0.0
+    - name: osc_body_9_R
+      initial_phase: 3.9264701097265498
+      initial_amplitude: 0.0
+      frequency_gain: 6.283185307179586
+      frequency_bias: 12.566370614359172
+      frequency_low: 1
+      frequency_high: 5
+      frequency_saturation_low: 0
+      frequency_saturation_high: 0
+      amplitude_gain: 0.1
+      amplitude_bias: 0.0
+      amplitude_low: 0.9
+      amplitude_high: 5
+      amplitude_saturation_low: 0
+      amplitude_saturation_high: 0.5
+      rate: 3.0
+      modular_phase: 0.0
+      modular_amplitude: 0.0
+    - name: osc_body_10_L
+      initial_phase: 1.915526209028368
+      initial_amplitude: 0.0
+      frequency_gain: 6.283185307179586
+      frequency_bias: 12.566370614359172
+      frequency_low: 1
+      frequency_high: 5
+      frequency_saturation_low: 0
+      frequency_saturation_high: 0
+      amplitude_gain: 0.1
+      amplitude_bias: 0.0
+      amplitude_low: 0.9
+      amplitude_high: 5
+      amplitude_saturation_low: 0
+      amplitude_saturation_high: 0.5
+      rate: 3.0
+      modular_phase: 0.0
+      modular_amplitude: 0.0
+    - name: osc_body_10_R
+      initial_phase: 4.987788954995468
+      initial_amplitude: 0.0
+      frequency_gain: 6.283185307179586
+      frequency_bias: 12.566370614359172
+      frequency_low: 1
+      frequency_high: 5
+      frequency_saturation_low: 0
+      frequency_saturation_high: 0
+      amplitude_gain: 0.1
+      amplitude_bias: 0.0
+      amplitude_low: 0.9
+      amplitude_high: 5
+      amplitude_saturation_low: 0
+      amplitude_saturation_high: 0.5
+      rate: 3.0
+      modular_phase: 0.0
+      modular_amplitude: 0.0
+    - name: osc_body_11_L
+      initial_phase: 2.4833375498664045
+      initial_amplitude: 0.0
+      frequency_gain: 6.283185307179586
+      frequency_bias: 12.566370614359172
+      frequency_low: 1
+      frequency_high: 5
+      frequency_saturation_low: 0
+      frequency_saturation_high: 0
+      amplitude_gain: 0.1
+      amplitude_bias: 0.0
+      amplitude_low: 0.9
+      amplitude_high: 5
+      amplitude_saturation_low: 0
+      amplitude_saturation_high: 0.5
+      rate: 3.0
+      modular_phase: 0.0
+      modular_amplitude: 0.0
+    - name: osc_body_11_R
+      initial_phase: 2.369161635171092
+      initial_amplitude: 0.0
+      frequency_gain: 6.283185307179586
+      frequency_bias: 12.566370614359172
+      frequency_low: 1
+      frequency_high: 5
+      frequency_saturation_low: 0
+      frequency_saturation_high: 0
+      amplitude_gain: 0.1
+      amplitude_bias: 0.0
+      amplitude_low: 0.9
+      amplitude_high: 5
+      amplitude_saturation_low: 0
+      amplitude_saturation_high: 0.5
+      rate: 3.0
+      modular_phase: 0.0
+      modular_amplitude: 0.0
+    - name: osc_body_12_L
+      initial_phase: 5.226146514055936
+      initial_amplitude: 0.0
+      frequency_gain: 6.283185307179586
+      frequency_bias: 12.566370614359172
+      frequency_low: 1
+      frequency_high: 5
+      frequency_saturation_low: 0
+      frequency_saturation_high: 0
+      amplitude_gain: 0.1
+      amplitude_bias: 0.0
+      amplitude_low: 0.9
+      amplitude_high: 5
+      amplitude_saturation_low: 0
+      amplitude_saturation_high: 0.5
+      rate: 3.0
+      modular_phase: 0.0
+      modular_amplitude: 0.0
+    - name: osc_body_12_R
+      initial_phase: 2.8749552093930255
+      initial_amplitude: 0.0
+      frequency_gain: 6.283185307179586
+      frequency_bias: 12.566370614359172
+      frequency_low: 1
+      frequency_high: 5
+      frequency_saturation_low: 0
+      frequency_saturation_high: 0
+      amplitude_gain: 0.1
+      amplitude_bias: 0.0
+      amplitude_low: 0.9
+      amplitude_high: 5
+      amplitude_saturation_low: 0
+      amplitude_saturation_high: 0.5
+      rate: 3.0
+      modular_phase: 0.0
+      modular_amplitude: 0.0
+    - name: osc_body_13_L
+      initial_phase: 1.228081188004756
+      initial_amplitude: 0.0
+      frequency_gain: 6.283185307179586
+      frequency_bias: 12.566370614359172
+      frequency_low: 1
+      frequency_high: 5
+      frequency_saturation_low: 0
+      frequency_saturation_high: 0
+      amplitude_gain: 0.1
+      amplitude_bias: 0.0
+      amplitude_low: 0.9
+      amplitude_high: 5
+      amplitude_saturation_low: 0
+      amplitude_saturation_high: 0.5
+      rate: 3.0
+      modular_phase: 0.0
+      modular_amplitude: 0.0
+    - name: osc_body_13_R
+      initial_phase: 2.1929384223994504
+      initial_amplitude: 0.0
+      frequency_gain: 6.283185307179586
+      frequency_bias: 12.566370614359172
+      frequency_low: 1
+      frequency_high: 5
+      frequency_saturation_low: 0
+      frequency_saturation_high: 0
+      amplitude_gain: 0.1
+      amplitude_bias: 0.0
+      amplitude_low: 0.9
+      amplitude_high: 5
+      amplitude_saturation_low: 0
+      amplitude_saturation_high: 0.5
+      rate: 3.0
+      modular_phase: 0.0
+      modular_amplitude: 0.0
+    - name: osc_body_14_L
+      initial_phase: 1.355538178495735
+      initial_amplitude: 0.0
+      frequency_gain: 6.283185307179586
+      frequency_bias: 12.566370614359172
+      frequency_low: 1
+      frequency_high: 5
+      frequency_saturation_low: 0
+      frequency_saturation_high: 0
+      amplitude_gain: 0.1
+      amplitude_bias: 0.0
+      amplitude_low: 0.9
+      amplitude_high: 5
+      amplitude_saturation_low: 0
+      amplitude_saturation_high: 0.5
+      rate: 3.0
+      modular_phase: 0.0
+      modular_amplitude: 0.0
+    - name: osc_body_14_R
+      initial_phase: 2.0683606705897652
+      initial_amplitude: 0.0
+      frequency_gain: 6.283185307179586
+      frequency_bias: 12.566370614359172
+      frequency_low: 1
+      frequency_high: 5
+      frequency_saturation_low: 0
+      frequency_saturation_high: 0
+      amplitude_gain: 0.1
+      amplitude_bias: 0.0
+      amplitude_low: 0.9
+      amplitude_high: 5
+      amplitude_saturation_low: 0
+      amplitude_saturation_high: 0.5
+      rate: 3.0
+      modular_phase: 0.0
+      modular_amplitude: 0.0
+    single_osc_body: false
+    single_osc_legs: false
+    osc2osc:
+    - in: osc_body_0_R
+      out: osc_body_0_L
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 3.141592653589793
+    - in: osc_body_0_L
+      out: osc_body_0_R
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 3.141592653589793
+    - in: osc_body_1_R
+      out: osc_body_1_L
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 3.141592653589793
+    - in: osc_body_1_L
+      out: osc_body_1_R
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 3.141592653589793
+    - in: osc_body_2_R
+      out: osc_body_2_L
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 3.141592653589793
+    - in: osc_body_2_L
+      out: osc_body_2_R
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 3.141592653589793
+    - in: osc_body_3_R
+      out: osc_body_3_L
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 3.141592653589793
+    - in: osc_body_3_L
+      out: osc_body_3_R
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 3.141592653589793
+    - in: osc_body_4_R
+      out: osc_body_4_L
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 3.141592653589793
+    - in: osc_body_4_L
+      out: osc_body_4_R
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 3.141592653589793
+    - in: osc_body_5_R
+      out: osc_body_5_L
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 3.141592653589793
+    - in: osc_body_5_L
+      out: osc_body_5_R
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 3.141592653589793
+    - in: osc_body_6_R
+      out: osc_body_6_L
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 3.141592653589793
+    - in: osc_body_6_L
+      out: osc_body_6_R
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 3.141592653589793
+    - in: osc_body_7_R
+      out: osc_body_7_L
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 3.141592653589793
+    - in: osc_body_7_L
+      out: osc_body_7_R
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 3.141592653589793
+    - in: osc_body_8_R
+      out: osc_body_8_L
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 3.141592653589793
+    - in: osc_body_8_L
+      out: osc_body_8_R
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 3.141592653589793
+    - in: osc_body_9_R
+      out: osc_body_9_L
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 3.141592653589793
+    - in: osc_body_9_L
+      out: osc_body_9_R
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 3.141592653589793
+    - in: osc_body_10_R
+      out: osc_body_10_L
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 3.141592653589793
+    - in: osc_body_10_L
+      out: osc_body_10_R
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 3.141592653589793
+    - in: osc_body_11_R
+      out: osc_body_11_L
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 3.141592653589793
+    - in: osc_body_11_L
+      out: osc_body_11_R
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 3.141592653589793
+    - in: osc_body_12_R
+      out: osc_body_12_L
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 3.141592653589793
+    - in: osc_body_12_L
+      out: osc_body_12_R
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 3.141592653589793
+    - in: osc_body_13_R
+      out: osc_body_13_L
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 3.141592653589793
+    - in: osc_body_13_L
+      out: osc_body_13_R
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 3.141592653589793
+    - in: osc_body_14_R
+      out: osc_body_14_L
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 3.141592653589793
+    - in: osc_body_14_L
+      out: osc_body_14_R
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 3.141592653589793
+    - in: osc_body_1_L
+      out: osc_body_0_L
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 0.20943951023931953
+    - in: osc_body_0_L
+      out: osc_body_1_L
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 6.073745796940266
+    - in: osc_body_1_R
+      out: osc_body_0_R
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 0.20943951023931953
+    - in: osc_body_0_R
+      out: osc_body_1_R
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 6.073745796940266
+    - in: osc_body_2_L
+      out: osc_body_1_L
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 0.20943951023931953
+    - in: osc_body_1_L
+      out: osc_body_2_L
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 6.073745796940266
+    - in: osc_body_2_R
+      out: osc_body_1_R
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 0.20943951023931953
+    - in: osc_body_1_R
+      out: osc_body_2_R
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 6.073745796940266
+    - in: osc_body_3_L
+      out: osc_body_2_L
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 0.20943951023931953
+    - in: osc_body_2_L
+      out: osc_body_3_L
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 6.073745796940266
+    - in: osc_body_3_R
+      out: osc_body_2_R
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 0.20943951023931953
+    - in: osc_body_2_R
+      out: osc_body_3_R
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 6.073745796940266
+    - in: osc_body_4_L
+      out: osc_body_3_L
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 0.20943951023931953
+    - in: osc_body_3_L
+      out: osc_body_4_L
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 6.073745796940266
+    - in: osc_body_4_R
+      out: osc_body_3_R
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 0.20943951023931953
+    - in: osc_body_3_R
+      out: osc_body_4_R
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 6.073745796940266
+    - in: osc_body_5_L
+      out: osc_body_4_L
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 0.20943951023931953
+    - in: osc_body_4_L
+      out: osc_body_5_L
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 6.073745796940266
+    - in: osc_body_5_R
+      out: osc_body_4_R
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 0.20943951023931953
+    - in: osc_body_4_R
+      out: osc_body_5_R
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 6.073745796940266
+    - in: osc_body_6_L
+      out: osc_body_5_L
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 0.20943951023931953
+    - in: osc_body_5_L
+      out: osc_body_6_L
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 6.073745796940266
+    - in: osc_body_6_R
+      out: osc_body_5_R
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 0.20943951023931953
+    - in: osc_body_5_R
+      out: osc_body_6_R
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 6.073745796940266
+    - in: osc_body_7_L
+      out: osc_body_6_L
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 0.20943951023931953
+    - in: osc_body_6_L
+      out: osc_body_7_L
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 6.073745796940266
+    - in: osc_body_7_R
+      out: osc_body_6_R
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 0.20943951023931953
+    - in: osc_body_6_R
+      out: osc_body_7_R
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 6.073745796940266
+    - in: osc_body_8_L
+      out: osc_body_7_L
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 0.20943951023931953
+    - in: osc_body_7_L
+      out: osc_body_8_L
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 6.073745796940266
+    - in: osc_body_8_R
+      out: osc_body_7_R
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 0.20943951023931953
+    - in: osc_body_7_R
+      out: osc_body_8_R
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 6.073745796940266
+    - in: osc_body_9_L
+      out: osc_body_8_L
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 0.20943951023931953
+    - in: osc_body_8_L
+      out: osc_body_9_L
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 6.073745796940266
+    - in: osc_body_9_R
+      out: osc_body_8_R
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 0.20943951023931953
+    - in: osc_body_8_R
+      out: osc_body_9_R
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 6.073745796940266
+    - in: osc_body_10_L
+      out: osc_body_9_L
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 0.20943951023931953
+    - in: osc_body_9_L
+      out: osc_body_10_L
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 6.073745796940266
+    - in: osc_body_10_R
+      out: osc_body_9_R
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 0.20943951023931953
+    - in: osc_body_9_R
+      out: osc_body_10_R
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 6.073745796940266
+    - in: osc_body_11_L
+      out: osc_body_10_L
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 0.20943951023931953
+    - in: osc_body_10_L
+      out: osc_body_11_L
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 6.073745796940266
+    - in: osc_body_11_R
+      out: osc_body_10_R
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 0.20943951023931953
+    - in: osc_body_10_R
+      out: osc_body_11_R
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 6.073745796940266
+    - in: osc_body_12_L
+      out: osc_body_11_L
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 0.20943951023931953
+    - in: osc_body_11_L
+      out: osc_body_12_L
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 6.073745796940266
+    - in: osc_body_12_R
+      out: osc_body_11_R
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 0.20943951023931953
+    - in: osc_body_11_R
+      out: osc_body_12_R
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 6.073745796940266
+    - in: osc_body_13_L
+      out: osc_body_12_L
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 0.20943951023931953
+    - in: osc_body_12_L
+      out: osc_body_13_L
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 6.073745796940266
+    - in: osc_body_13_R
+      out: osc_body_12_R
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 0.20943951023931953
+    - in: osc_body_12_R
+      out: osc_body_13_R
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 6.073745796940266
+    - in: osc_body_14_L
+      out: osc_body_13_L
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 0.20943951023931953
+    - in: osc_body_13_L
+      out: osc_body_14_L
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 6.073745796940266
+    - in: osc_body_14_R
+      out: osc_body_13_R
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 0.20943951023931953
+    - in: osc_body_13_R
+      out: osc_body_14_R
+      type: OSC2OSC
+      weight: 1e1
+      phase_bias: 6.073745796940266
+    joint2osc: []
+    contact2osc: []
+    xfrc2osc: []
+    drive2osc:
+    - drive: drive_body_0_L
+      oscillator: osc_body_0_L
+    - drive: drive_body_0_R
+      oscillator: osc_body_0_R
+    - drive: drive_body_1_L
+      oscillator: osc_body_1_L
+    - drive: drive_body_1_R
+      oscillator: osc_body_1_R
+    - drive: drive_body_2_L
+      oscillator: osc_body_2_L
+    - drive: drive_body_2_R
+      oscillator: osc_body_2_R
+    - drive: drive_body_3_L
+      oscillator: osc_body_3_L
+    - drive: drive_body_3_R
+      oscillator: osc_body_3_R
+    - drive: drive_body_4_L
+      oscillator: osc_body_4_L
+    - drive: drive_body_4_R
+      oscillator: osc_body_4_R
+    - drive: drive_body_5_L
+      oscillator: osc_body_5_L
+    - drive: drive_body_5_R
+      oscillator: osc_body_5_R
+    - drive: drive_body_6_L
+      oscillator: osc_body_6_L
+    - drive: drive_body_6_R
+      oscillator: osc_body_6_R
+    - drive: drive_body_7_L
+      oscillator: osc_body_7_L
+    - drive: drive_body_7_R
+      oscillator: osc_body_7_R
+    - drive: drive_body_8_L
+      oscillator: osc_body_8_L
+    - drive: drive_body_8_R
+      oscillator: osc_body_8_R
+    - drive: drive_body_9_L
+      oscillator: osc_body_9_L
+    - drive: drive_body_9_R
+      oscillator: osc_body_9_R
+    - drive: drive_body_10_L
+      oscillator: osc_body_10_L
+    - drive: drive_body_10_R
+      oscillator: osc_body_10_R
+    - drive: drive_body_11_L
+      oscillator: osc_body_11_L
+    - drive: drive_body_11_R
+      oscillator: osc_body_11_R
+    - drive: drive_body_12_L
+      oscillator: osc_body_12_L
+    - drive: drive_body_12_R
+      oscillator: osc_body_12_R
+    - drive: drive_body_13_L
+      oscillator: osc_body_13_L
+    - drive: drive_body_13_R
+      oscillator: osc_body_13_R
+    - drive: drive_body_14_L
+      oscillator: osc_body_14_L
+    - drive: drive_body_14_R
+      oscillator: osc_body_14_R
+    drive2joint:
+    - drive0: drive_body_0_L
+      drive1: drive_body_0_R
+      joint: joint_0
+    - drive0: drive_body_1_L
+      drive1: drive_body_1_R
+      joint: joint_1
+    - drive0: drive_body_2_L
+      drive1: drive_body_2_R
+      joint: joint_2
+    - drive0: drive_body_3_L
+      drive1: drive_body_3_R
+      joint: joint_3
+    - drive0: drive_body_4_L
+      drive1: drive_body_4_R
+      joint: joint_4
+    - drive0: drive_body_5_L
+      drive1: drive_body_5_R
+      joint: joint_5
+    - drive0: drive_body_6_L
+      drive1: drive_body_6_R
+      joint: joint_6
+    - drive0: drive_body_7_L
+      drive1: drive_body_7_R
+      joint: joint_7
+    - drive0: drive_body_8_L
+      drive1: drive_body_8_R
+      joint: joint_8
+    - drive0: drive_body_9_L
+      drive1: drive_body_9_R
+      joint: joint_9
+    - drive0: drive_body_10_L
+      drive1: drive_body_10_R
+      joint: joint_10
+    - drive0: drive_body_11_L
+      drive1: drive_body_11_R
+      joint: joint_11
+    - drive0: drive_body_12_L
+      drive1: drive_body_12_R
+      joint: joint_12
+    - drive0: drive_body_13_L
+      drive1: drive_body_13_R
+      joint: joint_13
+    - drive0: drive_body_14_L
+      drive1: drive_body_14_R
+      joint: joint_14
+  muscles:
+  - joint_name: joint_0
+    osc1: osc_body_0_L
+    osc2: osc_body_0_R
+    alpha: 4.0e-07
+    beta: 1.0e-08
+    gamma: 100.0
+    delta: 1.0e-08
+    epsilon: 0
+  - joint_name: joint_1
+    osc1: osc_body_1_L
+    osc2: osc_body_1_R
+    alpha: 4.0e-07
+    beta: 1.0e-08
+    gamma: 100.0
+    delta: 1.0e-08
+    epsilon: 0
+  - joint_name: joint_2
+    osc1: osc_body_2_L
+    osc2: osc_body_2_R
+    alpha: 4.0e-07
+    beta: 1.0e-08
+    gamma: 100.0
+    delta: 1.0e-08
+    epsilon: 0
+  - joint_name: joint_3
+    osc1: osc_body_3_L
+    osc2: osc_body_3_R
+    alpha: 4.0e-07
+    beta: 1.0e-08
+    gamma: 100.0
+    delta: 1.0e-08
+    epsilon: 0
+  - joint_name: joint_4
+    osc1: osc_body_4_L
+    osc2: osc_body_4_R
+    alpha: 4.0e-07
+    beta: 1.0e-08
+    gamma: 100.0
+    delta: 1.0e-08
+    epsilon: 0
+  - joint_name: joint_5
+    osc1: osc_body_5_L
+    osc2: osc_body_5_R
+    alpha: 4.0e-07
+    beta: 1.0e-08
+    gamma: 100.0
+    delta: 1.0e-08
+    epsilon: 0
+  - joint_name: joint_6
+    osc1: osc_body_6_L
+    osc2: osc_body_6_R
+    alpha: 4.0e-07
+    beta: 1.0e-08
+    gamma: 100.0
+    delta: 1.0e-08
+    epsilon: 0
+  - joint_name: joint_7
+    osc1: osc_body_7_L
+    osc2: osc_body_7_R
+    alpha: 4.0e-07
+    beta: 1.0e-08
+    gamma: 100.0
+    delta: 1.0e-08
+    epsilon: 0
+  - joint_name: joint_8
+    osc1: osc_body_8_L
+    osc2: osc_body_8_R
+    alpha: 4.0e-07
+    beta: 1.0e-08
+    gamma: 100.0
+    delta: 1.0e-08
+    epsilon: 0
+  - joint_name: joint_9
+    osc1: osc_body_9_L
+    osc2: osc_body_9_R
+    alpha: 4.0e-07
+    beta: 1.0e-08
+    gamma: 100.0
+    delta: 1.0e-08
+    epsilon: 0
+  - joint_name: joint_10
+    osc1: osc_body_10_L
+    osc2: osc_body_10_R
+    alpha: 4.0e-07
+    beta: 1.0e-08
+    gamma: 100.0
+    delta: 1.0e-08
+    epsilon: 0
+  - joint_name: joint_11
+    osc1: osc_body_11_L
+    osc2: osc_body_11_R
+    alpha: 4.0e-07
+    beta: 1.0e-08
+    gamma: 100.0
+    delta: 1.0e-08
+    epsilon: 0
+  - joint_name: joint_12
+    osc1: osc_body_12_L
+    osc2: osc_body_12_R
+    alpha: 4.0e-07
+    beta: 1.0e-08
+    gamma: 100.0
+    delta: 1.0e-08
+    epsilon: 0
+  - joint_name: joint_13
+    osc1: osc_body_13_L
+    osc2: osc_body_13_R
+    alpha: 4.0e-07
+    beta: 1.0e-08
+    gamma: 100.0
+    delta: 1.0e-08
+    epsilon: 0
+  - joint_name: joint_14
+    osc1: osc_body_14_L
+    osc2: osc_body_14_R
+    alpha: 4.0e-07
+    beta: 1.0e-08
+    gamma: 100.0
+    delta: 1.0e-08
+    epsilon: 0
+  adhesions: []
+  visuals: []
+extensions:
+- loader: farms_amphibious.callbacks.SwimmingCallback
+  config:
+    water_properties: null
+show_xfrc: false
+scale_xfrc: 10
+mujoco:
+  solref:
+  - -80000.0
+  - -800.0
