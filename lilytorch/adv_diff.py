@@ -34,17 +34,14 @@ class AdvDiffSolver:
         self.dt = dt
         dx=x[1]-x[0]
         dy=y[1]-y[0]
-        self.dx = dx
-        self.dy = dy
+        self.dx = float(dx)
+        self.dy = float(dy)
         self.dtdx = dt / dx
         self.dtdy = dt / dy
         self.dtdx2 = self.dtdx/dx
         self.dtdy2 = self.dtdy/dy
         self.nu = nu
         self.re = rho/self.nu
-
-        self.C = 0.1
-        self.C2 = self.C**2
 
         self.x = x
         self.y = y
@@ -60,10 +57,6 @@ class AdvDiffSolver:
         self.xflat = self.X.flatten()
         self.yflat = self.Y.flatten()
 
-        # dummy initialization for the implicit solver
-        self.gu = RegularGridInterpolator((x,y), torch.zeros_like(self.X, device=self.device,dtype=self.dtype), fill_value=None)
-        self.gv = RegularGridInterpolator((x,y), torch.zeros_like(self.X, device=self.device,dtype=self.dtype), fill_value=None)
-
         self.BC_type_u   = BC_type_u
         self.BC_values_u = BC_values_u
         self.BC_type_v   = BC_type_v
@@ -71,12 +64,23 @@ class AdvDiffSolver:
 
         if method == "implicit":
             self.solve = self.solve_implicit
+            # dummy initialization for the implicit solver
+            self.gu = RegularGridInterpolator((x,y), torch.zeros_like(self.X, device=self.device,dtype=self.dtype), fill_value=None)
+            self.gv = RegularGridInterpolator((x,y), torch.zeros_like(self.X, device=self.device,dtype=self.dtype), fill_value=None)
         elif method == "explicit":
             self.solve = self.solve_explicit
         elif method == "quick":
             self.solve = self.solve_FLUXLMT
         elif method == "abdquickest":
             self.solve = self.solve_ADBQUICKEST
+            # dummy initialization for the abdquickest solver
+            self.C = 0.1
+            self.C2 = self.C**2
+        elif method == "adams-bashforth":
+            self.solve = self.solve_adam_bashford
+            # dummy initialization for the adams-bashforth solver
+            self.HU_prec = torch.zeros((self.nm2,self.nm2), device=self.device,dtype=self.dtype)
+            self.HV_prec = torch.zeros((self.nm2,self.nm2), device=self.device,dtype=self.dtype)
         else:
             raise("Error: the convection solver method {} does not exist".format(method))
 
@@ -90,7 +94,7 @@ class AdvDiffSolver:
         self.dt = self.dx/(vel_max*+3*self.nu)
 
 
-    def solve_explicit(self, u, v):
+    def solve_explicit(self, u, v, iteration=0):
         """
         explicit solver
         """
@@ -99,15 +103,15 @@ class AdvDiffSolver:
             u[1:-1, 1:-1]-
             self.dtdx*u[1:-1,1:-1]*(u[1:-1,1:-1]-u[:-2,1:-1]) -
             self.dtdy*v[1:-1,1:-1]*(u[1:-1,1:-1]-u[1:-1,:-2]) +
-            (1/self.re)*self.dtdx2*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
-            (1/self.re)*self.dtdx2*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
+            self.nu*self.dtdx2*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
+            self.nu*self.dtdx2*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
         )
         v[1:-1, 1:-1] = (
             v[1:-1, 1:-1]-
             self.dtdx*u[1:-1,1:-1]*(v[1:-1,1:-1]-v[:-2,1:-1]) -
             self.dtdy*v[1:-1,1:-1]*(v[1:-1,1:-1]-v[1:-1,:-2]) +
-            (1/self.re)*self.dtdx2*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1]) +
-            (1/self.re)*self.dtdx2*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])
+            self.nu*self.dtdx2*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1]) +
+            self.nu*self.dtdx2*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])
         )
 
         return (u,v)
@@ -156,7 +160,7 @@ class AdvDiffSolver:
         )
         return bf
 
-    def solve_FLUXLMT(self, u, v):
+    def solve_FLUXLMT(self, u, v, iteration=0):
 
         uw = 0.5*(u[:-2,1:-1]+u[1:-1,1:-1])
         ue = 0.5*(u[2:,1:-1]+u[1:-1,1:-1])
@@ -270,7 +274,7 @@ class AdvDiffSolver:
         )
         return out
 
-    def solve_ADBQUICKEST(self, u, v):
+    def solve_ADBQUICKEST(self, u, v, iteration=0):
         uw = 0.5*(u[:-2,1:-1]+u[1:-1,1:-1])
         ue = 0.5*(u[2:,1:-1]+u[1:-1,1:-1])
         vs = 0.5*(v[1:-1,:-2]+v[1:-1,1:-1])
@@ -295,7 +299,7 @@ class AdvDiffSolver:
 
 
 
-    def solve_implicit(self, u, v):
+    def solve_implicit(self, u, v, iteration=0):
         """
         Implicit solver based on Staam, 1999 where
         u_new(x,y) = u(x-dt*u(x,y), y-dt*v(x,y)) [linearly interpolated]
@@ -316,6 +320,45 @@ class AdvDiffSolver:
                         self.nu*self.dtdx2*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1]) +
                         self.nu*self.dtdx2*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])
                         )
+        return (u,v)
+
+    def solve_adam_bashford(self, u, v, iteration=0):
+
+        if iteration==0:
+            # advection-diffusion term
+            dudx, dudy = torch.gradient(u, spacing=(self.dx, self.dy), dim=(0,1), edge_order=2)
+            HU_new = -self.dt*(u[1:-1,1:-1]*dudx[1:-1,1:-1]+v[1:-1,1:-1]*dudy[1:-1,1:-1]) + (
+                self.nu*self.dtdx2*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
+                self.nu*self.dtdx2*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
+                )
+            dvdx, dvdy = torch.gradient(v, spacing=(self.dx, self.dy), dim=(0,1), edge_order=2)
+            HV_new = -self.dt*(u[1:-1,1:-1]*dvdx[1:-1,1:-1]+v[1:-1,1:-1]*dvdy[1:-1,1:-1]) + (
+                self.nu*self.dtdx2*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1]) +
+                self.nu*self.dtdx2*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])
+                )
+            u[1:-1,1:-1] += HU_new
+            v[1:-1,1:-1] += HV_new
+
+        else:
+
+            # advection-diffusion term
+            dudx, dudy = torch.gradient(u, spacing=(self.dx, self.dy), dim=(0,1), edge_order=2)
+            HU_new = -self.dt*(u[1:-1,1:-1]*dudx[1:-1,1:-1]+v[1:-1,1:-1]*dudy[1:-1,1:-1]) + (
+                self.nu*self.dtdx2*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
+                self.nu*self.dtdx2*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
+                )
+            dvdx, dvdy = torch.gradient(v, spacing=(self.dx, self.dy), dim=(0,1), edge_order=2)
+            HV_new = -self.dt*(u[1:-1,1:-1]*dvdx[1:-1,1:-1]+v[1:-1,1:-1]*dvdy[1:-1,1:-1]) + (
+                self.nu*self.dtdx2*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1]) +
+                self.nu*self.dtdx2*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])
+                )
+            u[1:-1,1:-1] += 0.5*(3*HU_new - self.HU_prec)
+            v[1:-1,1:-1] += 0.5*(3*HV_new - self.HV_prec)
+
+
+        self.HU_prec = HU_new.clone().detach()
+        self.HV_prec = HV_new.clone().detach()
+
         return (u,v)
 
 

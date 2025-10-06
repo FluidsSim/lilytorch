@@ -592,7 +592,7 @@ control:
   kinematics_invert: false
   kinematics_degrees: false
   kinematics_start: 0.0
-  kinematics_end: 10.0
+  kinematics_end: 1000.0
 name: Animat
 show_xfrc: false
 scale_xfrc: 1

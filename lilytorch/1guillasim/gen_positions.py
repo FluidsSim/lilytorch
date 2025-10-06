@@ -15,49 +15,55 @@ ms mpt   A(deg) lambda(BL) f(Hz)   U(m/s)  Atail(m) tailRigidity
 74   2 0.857143         25     1 0.408155  0.133501            5
 79   2        1         25     1 0.418715  0.139161            5
 '''
-
-
 import numpy as np
 import sys
 import os
 import matplotlib.pyplot as plt
 
-tstop         = 10 # im seconds
-sampling_rate = 1000 # 1ms
-wlength       = 1 # wavelength in body lengths (BL)
-amp           = 10.0*(np.pi/180.0) # amplitude in radians (?)
-freq          = 1 # frequency in Hz
-nmotors       = 8  # number of motors
+def generate_positions(
+    tstop=10,
+    sampling_rate=1000,
+    wlength=1,
+    amp_deg=20.0,
+    freq=0.5,
+    nmotors=8,
+    TWL=14,
+    save_path=None,
+    plot=True
+):
+    amp = amp_deg * (np.pi / 180.0)
+    times = np.expand_dims(np.arange(0, tstop, 1 / sampling_rate), axis=1)
+    times_expanded = np.repeat(times, nmotors, axis=1)
 
-times = np.expand_dims(np.arange(0,tstop,1/sampling_rate),axis=1)
-times_expanded=np.repeat(
-    times,
-    nmotors,
-    axis=1
-)
+    idxs = np.arange(nmotors)
+    x = (idxs + 1) / nmotors
+    factor = (1 + 0.323 * (x - 1) + 0.31 * (x ** 2 - 1))
+    # factor[:-1] *= 0
+    # factor[-1] = 4
 
-idxs=np.arange(0,8)  # motor indices
-x=(idxs+1)/nmotors  # convert motor index to x value
-
-factor=(1+0.323*(x-1)+0.31*(x**2-1))
-
-thetas = amp*factor*np.sin(
-    2*np.pi*(
-        wlength*idxs/14.0-freq*times_expanded  # 14 because of body length = 14 times the joint length
+    thetas = amp * factor * np.sin(
+        2 * np.pi * (
+            wlength * idxs / TWL - freq * times_expanded
+        )
     )
-)
 
-data=np.column_stack([times,thetas])
+    data = np.column_stack([times, thetas])
 
-x=data[:,0]
-y=data[:,1:]
-colors =  plt.cm.jet( np.linspace( 0, 1, y.shape[1]) )
-for i in range(y.shape[1]):
-    plt.plot(x,y[:,i],color=colors[i],label=f'Motor {i+1}')
-plt.legend()
-plt.show()
+    if plot:
+        x_plot = data[:, 0]
+        y_plot = data[:, 1:]
+        colors = plt.cm.jet(np.linspace(0, 1, y_plot.shape[1]))
+        for i in range(y_plot.shape[1]):
+            plt.plot(x_plot, y_plot[:, i], color=colors[i], label=f'Motor {i+1}')
+        plt.legend()
+        plt.show()
 
+    if save_path is None:
+        save_path = os.path.join(os.path.dirname(__file__), "positions.csv")
+    np.savetxt(save_path, data, delimiter=',')
 
-path = os.path.join(os.path.dirname(__file__), "positions.csv") if len(sys.argv) == 1 else sys.argv[1]
-np.savetxt(path, data,delimiter=',')
+    return data
 
+if __name__ == "__main__":
+    path = sys.argv[1] if len(sys.argv) > 1 else None
+    generate_positions(save_path=path)

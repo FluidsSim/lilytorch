@@ -7,7 +7,10 @@ import torch
 # pars = yaml2pyobject("lilytorch/scripts/fish_analytical.yaml")
 
 # pars = yaml2pyobject("lilytorch/scripts/flow_past_cylinder.yaml")
-pars = yaml2pyobject("lilytorch/scripts/moving_cylinder_mesh.yaml")
+# pars = yaml2pyobject("lilytorch/scripts/moving_cylinder_mesh.yaml")
+
+pars = yaml2pyobject("lilytorch/scripts/moving_stick.yaml")
+
 
 # modify parameters
 # pars["body"]["control"]["f"]  = 10
@@ -15,7 +18,7 @@ pars = yaml2pyobject("lilytorch/scripts/moving_cylinder_mesh.yaml")
 # pars["output"]["save_uv"]     = False
 # pars["output"]["save_path"]   = "/data/andreaferrario/ns_data/"
 
-solver = FluidSolver(pars, dtype=torch.float32, compute_forces=True)
+solver = FluidSolver(pars, dtype=torch.float32, compute_forces=False)
 solver.run_sim()
 
 

@@ -8,7 +8,7 @@ import farms_pylog as pylog
 import numpy as np
 
 
-amps=0.8*np.ones(8)
+amps=0.*np.ones(8)
 # amps[:5]=0
 
 def main(**kwargs):
@@ -23,9 +23,9 @@ def main(**kwargs):
         controller      = "sine",
         swimming_mode   = "bdim",
         amp             = amps,
-        bias            = 0,
+        bias            = 0.,
         timestep        = 0.001,
-        twl             = 0.6,
+        twl             = 0.7,
         freq            = 1,
         log_path        = log_path,
         compute_metrics = 3,

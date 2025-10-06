@@ -91,7 +91,8 @@ def run_experiment(pars):
     elif control_type=="position":
         util.update_pd_gains(animat_options)
 
-    util.update_drag_param(animat_options)
+    if pars.swimming_mode=="drag":
+        util.update_drag_param(animat_options)
     # util.update_swimming_mode(arena_options,swimming_mode=swimming_mode)
 
 
@@ -141,9 +142,10 @@ def run_experiment(pars):
         options['callbacks'] += [
                 callbacks.FluidCallback(animat_options, arena_options),
             ]
-        animat_network = BDIMController(animat_data, sim_options, controller, options['callbacks'][-1], controller.pars.yaml_file)
+        animat_network = BDIMController(animat_data, sim_options, controller, options['callbacks'][-1], controller.pars.yaml_file, sim_options.n_iterations, control_type)
     else:
         raise ValueError(f"Unknown swimming mode: {pars.swimming_mode}")
+
 
     if sim_options.video:
         camera = CameraCallback(
@@ -206,8 +208,6 @@ def run_experiment(pars):
                 iteration=sim_options.n_iterations,
                 writer='ffmpeg',
             )
-
-
 
     return animat_data, controller
 

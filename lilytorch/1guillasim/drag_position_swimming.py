@@ -6,40 +6,51 @@ import os
 from util.plotting_common import plot_left_right, plot_trajectory, plot_time_histories, plot_time_histories_multiple_windows
 import farms_pylog as pylog
 import numpy as np
+from gen_positions import generate_positions
 
-
-def main(**kwargs):
+def main(amp,freq,twl):
     """
     Exercise example, running a single simulation and plotting the results
     """
     log_path = './logs/drag_position_control/' # path for logging the simulation data
     os.makedirs(log_path, exist_ok=True)
 
+    generate_positions(
+        tstop=100,
+        sampling_rate=1000,
+        wlength=1,
+        amp_deg=amp,
+        freq=freq,
+        nmotors=8,
+        TWL=twl,
+        save_path=None,
+        plot=False
+    )
+
     all_pars = SimulationParameters(
-        n_iterations    = 10001,
-        controller      = "sine",
-        swimming_mode   = "drag",
-        amp             = np.ones(8),
-        bias            = 0.3,
+        n_iterations    = 20001,
+        controller      = "empty",
+        swimming_mode   = "bdim",
         timestep        = 0.001,
-        twl             = 1,
-        freq            = 2,
         log_path        = log_path,
-        compute_metrics = 3,
-        headless        = False,
+        compute_metrics = 0,
+        headless        = True,
         return_network  = True,
+        amp             = amp,
+        freq            = freq,
+        twl             = twl,
         gravity         = [0,0,-9.81],
         video_record    = False,
-        video_name      = "",
+        video_name      = "swimming_example",
         yaml_path       = "models/1guilla_v1_position/",
+        yaml_file       = "/data/andreaferrario/lilytorch/lilytorch/scripts/1guilla_swimming.yaml",
         spawn           = {
             'loader': 0,
-            'mode': "FIXED",
+            'mode': "TRANSVERSE",
             'pose': [0.0, 0.0, -0.3, 0.0, 0.0, 3.141592653589793],
             'velocity': [0.0, 0., 0.0, 0.0, 0.0, 0.0],
             'extras': {}
             },
-        **kwargs
     )
 
     pylog.info("Running the simulation")
@@ -62,7 +73,9 @@ def main(**kwargs):
 
 
 if __name__ == '__main__':
-    main()
-
-
+    # main()
+    freq=0.5
+    twl=12
+    for amp in [60]: #np.arange(20,60,10):
+        main(amp,freq,twl)
 

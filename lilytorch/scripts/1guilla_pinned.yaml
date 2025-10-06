@@ -42,7 +42,7 @@ solver :
   jacobi_weight     : 0.8
   poisson_nsmoothing: 3
   poisson_verbose   : False
-  poisson_filename : "data/"
+  poisson_folder : "data/"
 
 
 boundary_conditions:

@@ -6,6 +6,7 @@ import os
 from util.plotting_common import plot_left_right, plot_trajectory, plot_time_histories, plot_time_histories_multiple_windows
 import farms_pylog as pylog
 import numpy as np
+from gen_positions import generate_positions
 
 
 def main(**kwargs):
@@ -14,6 +15,8 @@ def main(**kwargs):
     """
     log_path = './logs/example_single/' # path for logging the simulation data
     os.makedirs(log_path, exist_ok=True)
+
+
 
     all_pars = SimulationParameters(
         n_iterations    = 15001,

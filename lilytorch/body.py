@@ -401,7 +401,6 @@ class Body:
                 0.5*( 1 + d/self.eps + s/torch.pi )
             )
         )
-
         mu_1_eps = torch.where(
             torch.abs(d)>=self.eps,
             0,
@@ -494,7 +493,6 @@ class BodyAnalytical(Body):
         vx.backward()
         vy.backward()
         w.backward()
-
 
         self.body_u = (t_vx.grad -t_w.grad*translpoints[1]).reshape(self.nx, self.ny)
         self.body_v = (t_vy.grad +t_w.grad*translpoints[0]).reshape(self.nx, self.ny)
@@ -889,6 +887,7 @@ class BodyMesh(Body):
         self.plotting            = plotting_meshes
         self.apply_closing_morph = kwargs.pop("apply_closing_morph", True)
 
+
         self.m2s                 = mesh2sdf(
             self.mesh_file,
             convexify=kwargs.pop("convexify", False),
@@ -1022,12 +1021,13 @@ class BodyMesh(Body):
 
             # (2) use skfmm to determine sdf on the full domain
             print("Computing the sdf for {}, with space steps ({},{})".format(self.mesh_file,xnp[1]-xnp[0],ynp[1]-ynp[0]))
-            sdf_val = skfmm.distance(binary_2d, dx=[xnp[1]-xnp[0],ynp[1]-ynp[0]])#-self.suit
+            sdf_val = skfmm.distance(binary_2d, dx=[xnp[1]-xnp[0],ynp[1]-ynp[0]])-self.suit
 
             # sdf_val = cv2.GaussianBlur(sdf_val, (5, 5), 0)
 
             # find contour lines
-            cnt = np.array(measure.find_contours(sdf_val, 0)[0]).T
+
+            cnt = np.array(measure.find_contours(sdf_val-0*0.01, 0)[0]).T
             cnt[0]=xnp[0]+cnt[0]*(xnp[1]-xnp[0])
             cnt[1]=ynp[0]+cnt[1]*(ynp[1]-ynp[0])
             curv_coord = np.concatenate(([0], np.cumsum(np.sqrt(np.sum(np.diff(cnt, axis=1)**2, axis=0)))))
@@ -1058,31 +1058,30 @@ class BodyMesh(Body):
             cnt = np.concatenate((cnt[:, idx:], cnt[:, :idx]), axis=1)
 
             # # resample contour lines for uniform spacing with spacing self.dx
-            ds=0.5*torch.sqrt(torch.tensor(self.dx**2+self.dy**2))
+            ds=self.dx #0.5*torch.sqrt(torch.tensor(self.dx**2+self.dy**2))
             # x, y, s_uniform = self.resample_contour(cnt[0], cnt[1], spacing=ds, closed=True)
             x, y, s_uniform = self.resample_contour(cnt[0], cnt[1], spacing=ds, closed=True)
             del cnt
             cnt=np.array([x, y])
             curv_coord = s_uniform
 
-            # Create a vector where points in cnt above y=0 are 1, below are -1
-            sign_vec = np.where(cnt[1] > 0, 1, -1)
+            # Create a vector where points in cnt above the first point
+            sign_vec = np.where(cnt[1] >= cnt[1][0], 1, -1)
 
 
             if self.plotting:
 
-                # var=sdf_val
-                # plt.figure()
-                # plt.contourf(
-                #     X,
-                #     Y,
-                #     var
-                # )
-                # plt.plot(cnt[0], cnt[1], 'r', linewidth=2)
-                # plt.colorbar()
-                # plt.show()
-
+                var=sdf_val
                 plt.figure()
+                plt.contourf(
+                    X,
+                    Y,
+                    var
+                )
+                plt.plot(cnt[0], cnt[1], 'r', linewidth=2)
+                plt.colorbar()
+                plt.show()
+
 
                 # Plot cnt as scatter with color given by a colormap
                 cmap = cm.get_cmap('RdBu')
@@ -1255,7 +1254,7 @@ class CompositeBodyMesh:
             body.initialize()
             self.sdf_vals[i]=body.sdf
 
-        self.sdf_val = torch.min(self.sdf_vals,axis=0)[0]-self.suit
+        self.sdf_val = torch.min(self.sdf_vals,axis=0)[0] #-self.suit
 
         if self.plotting:
             var=self.sdf_val.cpu()

@@ -6,8 +6,6 @@ from scipy.spatial.transform import Rotation as R
 from lilytorch.solver import FluidSolver
 import torch
 from lilytorch.util.yaml_operations import yaml2pyobject
-import matplotlib.pyplot as plt
-
 
 class DragPositionController(AnimatNetwork):
 
@@ -41,10 +39,12 @@ class DragMuscleController(AnimatNetwork):
 
 class BDIMController(AnimatNetwork):
 
-    def __init__(self, animat_data, sim_options, controller, callback, yaml_file):
-        self.n_iterations = np.shape(animat_data.state.array)[0]
+    def __init__(self, animat_data, sim_options, controller, callback, yaml_file, n_iterations, control_type):
+        self.n_iterations = n_iterations
         super().__init__(data=animat_data, n_iterations=self.n_iterations)
-        self.offsets                   = np.zeros(controller.n_total_joints) # zero offsets
+        self.control_type = control_type
+        if control_type == "torque":
+            self.offsets                   = np.zeros(controller.n_total_joints) # zero offsets
         self.nlinks                    = len(animat_data.sensors.links.names)
         self.animat_data               = animat_data
         self.controller                = controller
@@ -57,14 +57,21 @@ class BDIMController(AnimatNetwork):
         self.fluid_solver = FluidSolver(pars, dtype=torch.float32, costum_update=None)
 
         self.device = self.fluid_solver.device
+        self.dtype=self.fluid_solver.X.dtype
+
         self.fluid_solver.composite_body.update = self.update_ib # modify the update rule
         self.fluid_stepper = self.fluid_solver.step_pb_direct_forcing
+
+
+        # self.fluid_solver.composite_body.update = self.update # modify the update rule
         # self.fluid_stepper = self.fluid_solver.step_
-        # self.fluid_solver.sdf_properties = self.initialize()
+
+
+        controller.pars.log_path = self.fluid_solver.save_path
+
 
         self.n_bodies=len(self.fluid_solver.composite_body.bodies)
-
-        self.dtype=self.fluid_solver.X.dtype
+        self.terminate=False
 
         # enforce fluid timestep by overriding the one in the animat data
         animat_data.timestep = self.fluid_solver.dt
@@ -73,8 +80,8 @@ class BDIMController(AnimatNetwork):
         _3d_2d_scaling=1
         # scale forces by the z-bounding box size
         # self.callback.force_scaling = 1/_3d_2d_scaling
-        # self.callback.force_scaling = _3d_2d_scaling*np.array([np.diff(body.bb[2])[0] for body in self.fluid_solver.composite_body.bodies])
-        self.callback.force_scaling=0.0455
+        self.callback.force_scaling = _3d_2d_scaling*np.array([np.diff(body.bb[2])[0] for body in self.fluid_solver.composite_body.bodies])
+        # self.callback.force_scaling=0.0455
 
         print("Force scaling: ", self.callback.force_scaling)
 
@@ -103,8 +110,8 @@ class BDIMController(AnimatNetwork):
             self.fluid_solver.composite_body.sdf_vals[i]=sdf_val
 
             # compute v = v_lin_com + <v_ang_com, x-x_com>
-            self.fluid_solver.composite_body.u_vals[i]=lin_vel[i][0]-ang_vel[i]*(self.fluid_solver.X-com_pos[i][0])
-            self.fluid_solver.composite_body.v_vals[i]=lin_vel[i][1]+ang_vel[i]*(self.fluid_solver.Y-com_pos[i][1])
+            self.fluid_solver.composite_body.u_vals[i]=lin_vel[i][0]-ang_vel[i]*(self.fluid_solver.Y-com_pos[i][1])
+            self.fluid_solver.composite_body.v_vals[i]=lin_vel[i][1]+ang_vel[i]*(self.fluid_solver.X-com_pos[i][0])
 
             # store com positions for fluid->body force computation
             self.fluid_solver.composite_body.com_pos[i]=com_pos[i]
@@ -113,7 +120,7 @@ class BDIMController(AnimatNetwork):
             # update the contour position
             body.cnt_update = r[i] @ body.cnt+urdf_pos[i][:,None]
 
-            # compute the mask (points inside the body)
+            # compute the mask for the contour points
             x_cnt=body.cnt_update[0]
             y_cnt=body.cnt_update[1]
             if i==0:
@@ -136,23 +143,31 @@ class BDIMController(AnimatNetwork):
                 mask=(sdf_m >= 0) & (sdf_p >= 0)
 
 
-            moment_arm = body.cnt_update-com_pos[i][:,None] # momment arm
-            body.cnt_u = lin_vel[i][0]-ang_vel[i]*(moment_arm[1])
-            body.cnt_v = lin_vel[i][1]+ang_vel[i]*(moment_arm[0])
-            body.r_com = moment_arm
+            body.cnt_u = lin_vel[i][0]-ang_vel[i]*(y_cnt-com_pos[i][1])
+            body.cnt_v = lin_vel[i][1]+ang_vel[i]*(x_cnt-com_pos[i][0])
+            body.r_com = body.cnt_update-com_pos[i][:,None] # moment arm
             body.mask=mask
             body.com_pos=com_pos[i]
 
-        # print(body.cnt_update.mean(axis=1), pos_global[i])
 
         idx=self.fluid_solver.composite_body.sdf_vals.argmin(0).unsqueeze(0).expand(self.fluid_solver.composite_body.sdf_vals.shape)
 
         self.fluid_solver.composite_body.sdf_val=self.fluid_solver.composite_body.sdf_vals.gather(0,idx)[0].reshape(self.fluid_solver.nx,self.fluid_solver.ny)-self.fluid_solver.composite_body.suit
 
-        # (self.mu0_all, self.mu1_all) = self.fluid_solver.composite_body.mu_funcs(self.composite_body.sdf_val)
-
         self.fluid_solver.composite_body.body_u=self.fluid_solver.composite_body.u_vals.gather(0,idx)[0].reshape(self.fluid_solver.nx,self.fluid_solver.ny)
         self.fluid_solver.composite_body.body_v=self.fluid_solver.composite_body.v_vals.gather(0,idx)[0].reshape(self.fluid_solver.nx,self.fluid_solver.ny)
+
+
+
+    def interp(self, x: torch.Tensor, xp: torch.Tensor, fp: torch.Tensor) -> torch.Tensor:
+
+        m = (fp[1:] - fp[:-1]) / (xp[1:] - xp[:-1])
+        b = fp[:-1] - (m * xp[:-1])
+
+        indicies = torch.sum(torch.ge(x[:, None], xp[None, :]), 1) - 1
+        indicies = torch.clamp(indicies, 0, len(m) - 1)
+
+        return m[indicies] * x + b[indicies]
 
     def update_ib(self,t,iteration,dt=1):
         # iteration = int(t/dt)
@@ -165,6 +180,7 @@ class BDIMController(AnimatNetwork):
 
         for i, body in enumerate(self.fluid_solver.composite_body.bodies):
 
+
             # update the contour position
             body.cnt_update = r[i] @ body.cnt+urdf_pos[i][:,None]
 
@@ -190,6 +206,13 @@ class BDIMController(AnimatNetwork):
                 sdf_p = body_p.sdf_interp(pos_trans_p[0],pos_trans_p[1])
                 mask=(sdf_m >= 0) & (sdf_p >= 0)
 
+            # if i<self.n_bodies-1:
+            #     body.first_set = (mask == True) & (body.sign_vec == 1)
+            #     body.second_set = (mask == True) & (body.sign_vec == -1)
+            # else:
+            #     body.first_set = (mask == True)
+            #     body.second_set = torch.zeros_like(mask).bool()
+
             moment_arm = body.cnt_update-com_pos[i][:,None] # momment arm
             body.cnt_u = lin_vel[i][0]-ang_vel[i]*(moment_arm[1])
             body.cnt_v = lin_vel[i][1]+ang_vel[i]*(moment_arm[0])
@@ -197,26 +220,290 @@ class BDIMController(AnimatNetwork):
             body.mask=mask
             body.com_pos=com_pos[i]
 
-        all_cnt = []
-        for i, body in enumerate(self.fluid_solver.composite_body.bodies):
-            if i<self.n_bodies-1:
-                first_set = (body.mask == True) & (body.sign_vec == 1)
-                all_cnt.append(body.cnt_update[:,first_set])
-            else:
-                all_cnt.append(body.cnt_update[:,body.mask == True])
-        for i, body in enumerate(self.fluid_solver.composite_body.bodies):
-            if i<self.n_bodies-1:
-                second_set = (body.mask == True) & (body.sign_vec == -1)
-                all_cnt.append(body.cnt_update[:,second_set])
+        self.fluid_solver.composite_body.com_pos = com_pos
 
-        self.fluid_solver.composite_body.all_cnt = torch.concatenate(all_cnt, axis=1)
-        # plt.figure()
-        # plt.scatter(self.fluid_solver.composite_body.all_cnt[0], self.fluid_solver.composite_body.all_cnt[1], c=np.arange(self.fluid_solver.composite_body.all_cnt.shape[1]), cmap='viridis')
-        # plt.colorbar(label='Index')
+
+        # all_points = [
+        #     torch.cat([body.cnt_update[:,body.first_set] for body in self.composite_body.bodies],dim=1),
+        #     torch.cat([body.cnt_update[:,body.second_set] for body in self.composite_body.bodies[::-1]],dim=1),
+        #     ]
+        # ds_all = []
+
+
+        # cnt_all=torch.cat([
+        #     torch.cat([body.cnt_update[:,body.first_set] for body in self.composite_body.bodies],dim=1),
+        #     torch.cat([body.cnt_update[:,body.second_set] for body in self.composite_body.bodies[::-1]],dim=1),
+        #     ], dim=1)
+        # ds_all = (cnt_all.diff(axis=1)**2).sum(axis=0).sqrt()
+        # cnt_all_x = (cnt_all[0,1:]+cnt_all[0,:-1])*0.5
+        # cnt_all_y = (cnt_all[1,1:]+cnt_all[1,:-1])*0.5
+
+
+
+        # for i, body in enumerate(self.fluid_solver.composite_body.bodies):
+
+        #     # compute sdf values at the body points
+        #     r_com_p = body.stacked_xy-urdf_pos[i][:,None]
+        #     pos_trans = r[i].T@r_com_p
+        #     xpos = pos_trans[0].reshape(body.nx, body.ny)
+        #     ypos = pos_trans[1].reshape(body.nx, body.ny)
+        #     sdf_val = body.sdf_interp(
+        #         xpos,
+        #         ypos
+        #     )
+        #     self.fluid_solver.composite_body.sdf_vals[i]=sdf_val
+        #     # compute v = v_lin_com + <v_ang_com, x-x_com>
+        #     self.fluid_solver.composite_body.u_vals[i]=lin_vel[i][0]-ang_vel[i]*(self.fluid_solver.Y-com_pos[i][1])
+        #     self.fluid_solver.composite_body.v_vals[i]=lin_vel[i][1]+ang_vel[i]*(self.fluid_solver.X-com_pos[i][0])
+
+        # idx=self.fluid_solver.composite_body.sdf_vals.argmin(0).unsqueeze(0).expand(self.fluid_solver.composite_body.sdf_vals.shape)
+        # self.fluid_solver.composite_body.sdf_val=self.fluid_solver.composite_body.sdf_vals.gather(0,idx)[0].reshape(self.fluid_solver.nx,self.fluid_solver.ny)-self.fluid_solver.composite_body.suit
+        # self.fluid_solver.composite_body.body_u=self.fluid_solver.composite_body.u_vals.gather(0,idx)[0].reshape(self.fluid_solver.nx,self.fluid_solver.ny)
+        # self.fluid_solver.composite_body.body_v=self.fluid_solver.composite_body.v_vals.gather(0,idx)[0].reshape(self.fluid_solver.nx,self.fluid_solver.ny)
+
+
+
+    def update_ib_cui(self,t,iteration,dt=1):
+
+        com_pos = torch.from_numpy(np.array(self.data.sensors.links.com_positions()[iteration,:, :2]).astype(np.float32)).to(self.device)
+        urdf_pos = torch.from_numpy(np.array(self.data.sensors.links.urdf_positions()[iteration,:, :2]).astype(np.float32)).to(self.device)
+        lin_vel = torch.from_numpy(np.array(self.data.sensors.links.com_lin_velocities()[iteration,:,:2]))
+        ang_vel = torch.from_numpy(np.array([self.data.sensors.links.com_ang_velocity(iteration, link)[2] for link in range(self.nlinks)])) # only the z ang velocity in 2d
+        orientation = torch.from_numpy(np.array(self.data.sensors.links.urdf_orientations()[iteration]).astype(np.float32))
+        r = torch.from_numpy(R.from_quat(orientation).as_matrix()[:,:2,:2].astype(np.float32)).to(self.device)
+
+        for i, body in enumerate(self.fluid_solver.composite_body.bodies):
+
+            # compute sdf values at the body points
+            r_com_p = body.stacked_xy-urdf_pos[i][:,None]
+            pos_trans = r[i].T@r_com_p
+            xpos = pos_trans[0].reshape(body.nx, body.ny)
+            ypos = pos_trans[1].reshape(body.nx, body.ny)
+            sdf_val = body.sdf_interp(
+                xpos,
+                ypos
+            )
+            self.fluid_solver.composite_body.sdf_vals[i]=sdf_val
+
+            # for plotting
+            body.com_pos=com_pos[i] # store com positions
+            body.cnt_update = r[i] @ body.cnt+urdf_pos[i][:,None] # update the contour position
+
+
+
+        idx=self.fluid_solver.composite_body.sdf_vals.argmin(0).unsqueeze(0).expand(self.fluid_solver.composite_body.sdf_vals.shape)
+        d = self.fluid_solver.composite_body.sdf_vals.gather(0,idx)[0].reshape(self.fluid_solver.nx,self.fluid_solver.ny)-self.fluid_solver.composite_body.suit
+        self.fluid_solver.composite_body.sdf_val=d
+
+        x = self.fluid_solver.x
+        y = self.fluid_solver.y
+
+        self.fluid_solver.composite_body.identity = torch.ones_like(d)
+        self.fluid_solver.composite_body.identity[1:-1, 1:-1] = torch.where(
+            d[1:-1,1:-1]>=0,
+            torch.where(
+                (d[:-2, 1:-1] >= 0) & (d[2:, 1:-1] >= 0) & (d[1:-1, :-2] >= 0) & (d[1:-1, 2:] >= 0),
+                1,
+                0
+            ),
+            -1
+        ) # 0 = ib points, 1 = fluid points, -1 = solid points
+
+        (gradx, grady) = torch.gradient(d, spacing=[self.fluid_solver.dx, self.fluid_solver.dy], edge_order=2)
+        norm = torch.sqrt(gradx**2+grady**2)
+        gradx=torch.where(norm>0, gradx/norm, 0)
+        grady=torch.where(norm>0, grady/norm, 0)
+
+        ib_idx = torch.nonzero(self.fluid_solver.composite_body.identity == 0, as_tuple=False)
+        self.fluid_solver.composite_body.ib_idx = ib_idx
+        # compute points on the contour
+        self.fluid_solver.composite_body.xb, self.fluid_solver.composite_body.yb = x[ib_idx[:, 0]]-gradx[ib_idx[:, 0], ib_idx[:, 1]]*d[ib_idx[:, 0], ib_idx[:, 1]], y[ib_idx[:, 1]]-grady[ib_idx[:, 0], ib_idx[:, 1]]*d[ib_idx[:, 0], ib_idx[:, 1]]
+
+
+        gradx_idx = torch.round(torch.sign(gradx[ib_idx[:, 0], ib_idx[:, 1]])).to(torch.int64)
+        grady_idx = torch.round(torch.sign(grady[ib_idx[:, 0], ib_idx[:, 1]])).to(torch.int64)
+        # compute horizontal neighbors
+        self.fluid_solver.composite_body.nh_idx = torch.stack([ib_idx[:, 0]+gradx_idx, ib_idx[:, 1]], dim=-1)
+        self.fluid_solver.composite_body.nh_idx[:, 1] = torch.where(
+            self.fluid_solver.composite_body.identity[self.fluid_solver.composite_body.nh_idx[:, 0], self.fluid_solver.composite_body.nh_idx[:, 1]]==0, # if the neighbor is also a ib point
+            ib_idx[:, 1]+grady_idx,
+            ib_idx[:, 1]
+        )
+        # compute vertical neighbors
+        self.fluid_solver.composite_body.nv_idx = torch.stack([ib_idx[:, 0], ib_idx[:, 1]+grady_idx], dim=-1)
+        self.fluid_solver.composite_body.nv_idx[:, 0] = torch.where(
+            self.fluid_solver.composite_body.identity[self.fluid_solver.composite_body.nv_idx[:, 0], self.fluid_solver.composite_body.nv_idx[:, 1]]==0,
+            ib_idx[:, 0]+gradx_idx,
+            ib_idx[:, 0]
+        )
+
+
+        self.fluid_solver.composite_body.ub = lin_vel[i][0]-ang_vel[i]*(self.fluid_solver.composite_body.yb-com_pos[i][1])
+        self.fluid_solver.composite_body.vb = lin_vel[i][1]+ang_vel[i]*(self.fluid_solver.composite_body.xb-com_pos[i][0])
+
+
+
+    def update_ib_bergmann(self,t,iteration,dt=1):
+
+        com_pos = torch.from_numpy(np.array(self.data.sensors.links.com_positions()[iteration,:, :2]).astype(np.float32)).to(self.device)
+        urdf_pos = torch.from_numpy(np.array(self.data.sensors.links.urdf_positions()[iteration,:, :2]).astype(np.float32)).to(self.device)
+        lin_vel = torch.from_numpy(np.array(self.data.sensors.links.com_lin_velocities()[iteration,:,:2]))
+        ang_vel = torch.from_numpy(np.array([self.data.sensors.links.com_ang_velocity(iteration, link)[2] for link in range(self.nlinks)])) # only the z ang velocity in 2d
+        orientation = torch.from_numpy(np.array(self.data.sensors.links.urdf_orientations()[iteration]).astype(np.float32))
+        r = torch.from_numpy(R.from_quat(orientation).as_matrix()[:,:2,:2].astype(np.float32)).to(self.device)
+
+        for i, body in enumerate(self.fluid_solver.composite_body.bodies):
+
+            # compute sdf values at the body points
+            r_com_p = body.stacked_xy-urdf_pos[i][:,None]
+            pos_trans = r[i].T@r_com_p
+            xpos = pos_trans[0].reshape(body.nx, body.ny)
+            ypos = pos_trans[1].reshape(body.nx, body.ny)
+            sdf_val = body.sdf_interp(
+                xpos,
+                ypos
+            )
+            self.fluid_solver.composite_body.sdf_vals[i]=sdf_val
+
+            # for plotting
+            body.com_pos=com_pos[i] # store com positions
+            body.cnt_update = r[i] @ body.cnt+urdf_pos[i][:,None] # update the contour position
+
+
+        idx=self.fluid_solver.composite_body.sdf_vals.argmin(0).unsqueeze(0).expand(self.fluid_solver.composite_body.sdf_vals.shape)
+        d = self.fluid_solver.composite_body.sdf_vals.gather(0,idx)[0].reshape(self.fluid_solver.nx,self.fluid_solver.ny)-self.fluid_solver.composite_body.suit
+        self.fluid_solver.composite_body.sdf_val=d
+
+        x = self.fluid_solver.x
+        y = self.fluid_solver.y
+
+        self.fluid_solver.composite_body.identity = torch.ones_like(d)
+        self.fluid_solver.composite_body.identity[1:-1, 1:-1] = torch.where(
+            d[1:-1,1:-1]<=0,
+            torch.where(
+                (d[:-2, 1:-1] > 0) | (d[2:, 1:-1] > 0) | (d[1:-1, :-2] > 0) | (d[1:-1, 2:] > 0),
+                0,
+                -1
+            ),
+            1
+        ) # 1 fluid, 0 ghost, -1 solid
+
+        (gradx, grady) = torch.gradient(d, spacing=[self.fluid_solver.dx, self.fluid_solver.dy], edge_order=2)
+        norm = torch.sqrt(gradx**2+grady**2)
+        gradx=torch.where(norm>0, gradx/norm, 0)
+        grady=torch.where(norm>0, grady/norm, 0)
+
+        # computed index of the GHOST points
+        gp_idx = torch.nonzero(self.fluid_solver.composite_body.identity == 0, as_tuple=False)
+        self.fluid_solver.composite_body.gp_idx = gp_idx
+        self.fluid_solver.composite_body.x_gp = x[gp_idx[:, 0]]
+        self.fluid_solver.composite_body.y_gp = y[gp_idx[:, 1]]
+
+        # compute points on the contour - IB points
+        self.fluid_solver.composite_body.x_ib = x[gp_idx[:, 0]]-gradx[gp_idx[:, 0], gp_idx[:, 1]]*d[gp_idx[:, 0], gp_idx[:, 1]]
+        self.fluid_solver.composite_body.y_ib = y[gp_idx[:, 1]]-grady[gp_idx[:, 0], gp_idx[:, 1]]*d[gp_idx[:, 0], gp_idx[:, 1]]
+        # compute velocity at the IB points
+        self.fluid_solver.composite_body.u_ib = lin_vel[i][0]-ang_vel[i]*(self.fluid_solver.composite_body.y_ib-com_pos[i][1])
+        self.fluid_solver.composite_body.v_ib = lin_vel[i][1]+ang_vel[i]*(self.fluid_solver.composite_body.x_ib-com_pos[i][0])
+
+        # compute the image points - IP
+        self.fluid_solver.composite_body.x_ip = x[gp_idx[:, 0]]-2*gradx[gp_idx[:, 0], gp_idx[:, 1]]*d[gp_idx[:, 0], gp_idx[:, 1]]
+        self.fluid_solver.composite_body.y_ip = y[gp_idx[:, 1]]-2*grady[gp_idx[:, 0], gp_idx[:, 1]]*d[gp_idx[:, 0], gp_idx[:, 1]]
+
+
+        self.fluid_solver.idx_sw = torch.stack([
+            ((self.fluid_solver.composite_body.x_ip - self.fluid_solver.x[0]) / self.fluid_solver.dx).to(torch.int64),
+            ((self.fluid_solver.composite_body.y_ip - self.fluid_solver.y[0]) / self.fluid_solver.dy).to(torch.int64)
+        ], dim=-1)
+
+        self.fluid_solver.idx_nw = self.fluid_solver.idx_sw.clone().detach()
+        self.fluid_solver.idx_nw[:, 1]+=1
+        self.fluid_solver.idx_ne = self.fluid_solver.idx_sw.clone().detach()
+        self.fluid_solver.idx_ne[:, 0]+=1
+        self.fluid_solver.idx_ne[:, 1]+=1
+        self.fluid_solver.idx_se = self.fluid_solver.idx_sw.clone().detach()
+        self.fluid_solver.idx_se[:, 0]+=1
+
+
+        import matplotlib.pyplot as plt
+
+        # Select a few example image points (ip)
+        num_examples = min(10, self.fluid_solver.composite_body.x_ip.shape[0])
+        example_indices = torch.linspace(0, self.fluid_solver.composite_body.x_ip.shape[0]-1, num_examples).to(torch.int64)
+
+        x_ip_examples = self.fluid_solver.composite_body.x_ip[example_indices].cpu().numpy()
+        y_ip_examples = self.fluid_solver.composite_body.y_ip[example_indices].cpu().numpy()
+
+        # Get neighbor indices for each example
+        idx_sw_examples = self.fluid_solver.idx_sw[example_indices]
+        idx_nw_examples = self.fluid_solver.idx_nw[example_indices]
+        idx_ne_examples = self.fluid_solver.idx_ne[example_indices]
+        idx_se_examples = self.fluid_solver.idx_se[example_indices]
+
+        # Get coordinates for each neighbor
+        x_sw = x[idx_sw_examples[:, 0]].cpu().numpy()
+        y_sw = y[idx_sw_examples[:, 1]].cpu().numpy()
+        x_nw = x[idx_nw_examples[:, 0]].cpu().numpy()
+        y_nw = y[idx_nw_examples[:, 1]].cpu().numpy()
+        x_ne = x[idx_ne_examples[:, 0]].cpu().numpy()
+        y_ne = y[idx_ne_examples[:, 1]].cpu().numpy()
+        x_se = x[idx_se_examples[:, 0]].cpu().numpy()
+        y_se = y[idx_se_examples[:, 1]].cpu().numpy()
+
+        plt.figure(figsize=(8, 8))
+        plt.scatter(x_ip_examples, y_ip_examples, color='green', label='Image Points', s=40)
+        plt.scatter(x_sw, y_sw, color='purple', label='SW Neighbor', marker='x')
+        plt.scatter(x_nw, y_nw, color='blue', label='NW Neighbor', marker='x')
+        plt.scatter(x_ne, y_ne, color='red', label='NE Neighbor', marker='x')
+        plt.scatter(x_se, y_se, color='orange', label='SE Neighbor', marker='x')
+
+        for i in range(num_examples):
+            plt.plot([x_ip_examples[i], x_sw[i]], [y_ip_examples[i], y_sw[i]], 'k--', alpha=0.5)
+            plt.plot([x_ip_examples[i], x_nw[i]], [y_ip_examples[i], y_nw[i]], 'k--', alpha=0.5)
+            plt.plot([x_ip_examples[i], x_ne[i]], [y_ip_examples[i], y_ne[i]], 'k--', alpha=0.5)
+            plt.plot([x_ip_examples[i], x_se[i]], [y_ip_examples[i], y_se[i]], 'k--', alpha=0.5)
+        for body in self.fluid_solver.composite_body.bodies:
+            plt.scatter(body.cnt_update[0], body.cnt_update[1], color='orange', s=10)
+
+        plt.xlabel('x')
+        plt.ylabel('y')
+        plt.legend()
+        plt.title('Image Points and Their SW/NW/NE/SE Neighbors')
+        plt.show()
+        # self.fluid_solver.composite_body.identity
+
+
+
+        # import matplotlib.pyplot as plt
+
+        # # Plot IB points (fluid_solver.composite_body.xb, yb)
+        # plt.figure(figsize=(8, 8))
+
+        # # Plot ghost points (gp_idx)
+        # plt.scatter(x[gp_idx[:, 0]], y[gp_idx[:, 1]], color='red', label='Ghost Points', s=10)
+
+        # # Plot IB points (x_ib, y_ib)
+        # plt.scatter(self.fluid_solver.composite_body.x_ib, self.fluid_solver.composite_body.y_ib, color='blue', label='IB Points', s=10)
+
+        # # Plot image points (x_ip, y_ip)
+        # plt.scatter(self.fluid_solver.composite_body.x_ip, self.fluid_solver.composite_body.y_ip, color='green', label='Image Points', s=10)
+
+        # # Plot cnt_update points for each body
+        # for body in self.fluid_solver.composite_body.bodies:
+        #     plt.scatter(body.cnt_update[0], body.cnt_update[1], color='orange', label='cnt_update Points', s=10)
+
+        # # Avoid duplicate legend entries for cnt_update
+        # handles, labels = plt.gca().get_legend_handles_labels()
+        # by_label = dict(zip(labels, handles))
+        # plt.legend(by_label.values(), by_label.keys())
+
         # plt.xlabel('x')
         # plt.ylabel('y')
-        # plt.title('all_cnt scatter')
+        # plt.legend()
+        # plt.title('Ghost, IB, and Image Points')
         # plt.show()
+
+
 
 
     def step(self, iteration, time, timestep):
@@ -230,18 +517,19 @@ class BDIMController(AnimatNetwork):
         self.urdf_orientations = np.array(self.data.sensors.links.urdf_orientations()[iteration])
 
         # === stepping the fluid solver ===
-        (
-        self.fluid_solver.u0,
-        self.fluid_solver.v0,
-        self.fluid_solver.p0,
-        continue_sim,
-        ) = self.fluid_stepper(
+        if not self.terminate:
+            (
             self.fluid_solver.u0,
             self.fluid_solver.v0,
             self.fluid_solver.p0,
-            iteration,
-            time
-        )
+            self.terminate,
+            ) = self.fluid_stepper(
+                self.fluid_solver.u0,
+                self.fluid_solver.v0,
+                self.fluid_solver.p0,
+                iteration,
+                time
+            )
 
         # if not continue_sim: # stop sim is the fluid solver return an exit condition
         #     if self.controller.exit_iteration==self.n_iterations:
@@ -256,8 +544,9 @@ class BDIMController(AnimatNetwork):
         self.callback.pressure_force_x = self.callback.force_scaling*(self.fluid_solver.pressure_force_x).cpu().numpy()
         self.callback.pressure_force_y = self.callback.force_scaling*(self.fluid_solver.pressure_force_y).cpu().numpy()
 
-        # === stepping the controller ===
-        self.data.state.array[iteration] = np.concatenate([
-            self.controller.step(iteration, time, timestep, pos=self.pos, urdf_positions=self.urdf_positions),
-            self.offsets
-            ])
+        if self.control_type == "torque":
+            # === stepping the controller ===
+            self.data.state.array[iteration] = np.concatenate([
+                self.controller.step(iteration, time, timestep, pos=self.pos, urdf_positions=self.urdf_positions),
+                self.offsets
+                ])

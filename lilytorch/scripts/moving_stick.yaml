@@ -8,7 +8,7 @@ solver :
   ymin   : -400
   ymax   : 400
   nt     : 8000
-  nu     : 1.0e-6
+  nu     : 1.0e-3
   rho    : 1.0e+3
 
   convection_method : "implicit"
@@ -22,7 +22,7 @@ solver :
   poisson_max_cycles: 10
   poisson_nsmoothing: 5
   poisson_verbose   : True
-  poisson_filename : "lilytorch/data/"
+  poisson_folder : "lilytorch/data/"
 
 
 
@@ -53,11 +53,11 @@ boundary_conditions:
 body:
   type: composite_analytical
   sdf:
-  - "lambda x, y: box(x,y,xb=60.0,yb=10.0)"
+  - "lambda x, y: box(x,y,xb=140.0,yb=10.0)"
   update_maps:
     - rotation: "lambda t: 50*torch.sin(t/5)"
       translation:
-        - "lambda t: 0*t"
+        - "lambda t: -150+0*t"
         - "lambda t: 0*t"
     # - rotation: "lambda t: 0*t"
     #   translation:

@@ -23,7 +23,7 @@ solver:
   jacobi_weight     : 0.7
   poisson_nsmoothing: 2
   poisson_verbose   : True
-  poisson_filename : "data/"
+  poisson_folder : "data/"
 
 body:
   type: fish_analytical

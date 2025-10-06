@@ -34,6 +34,8 @@ def run_single(pars):
 
     del animat_data
 
+    pars = network.pars # reload in case they were modified
+
     if pars.compute_metrics==1:
         network.metrics=compute_controller(network)
     elif pars.compute_metrics==2:

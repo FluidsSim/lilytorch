@@ -4,7 +4,10 @@
 def update_pd_gains(animat_options):
     for joint in animat_options["control"]["motors"]:
         joint["gains"] = [
-            10, 0.01
+            10, 1
+        ]
+        joint["limits_torque"] = [
+            -1000.0, 1000.0
         ]
 
 
@@ -14,6 +17,7 @@ def update_muscle_param(animat_options):
         joint["beta"] = 0.001
         joint["gamma"] = 1600
         joint["delta"] = 0.1
+
 
 def update_drag_param(animat_options):
     # return

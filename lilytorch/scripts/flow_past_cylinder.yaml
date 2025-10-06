@@ -16,7 +16,7 @@ solver:
   poisson_max_cycles: 10
   poisson_nsmoothing: 5
   poisson_verbose   : True
-  poisson_filename : "lilytorch/data/"
+  poisson_folder : "lilytorch/data/"
 
   dt                : 1
   convection_method : "implicit"
