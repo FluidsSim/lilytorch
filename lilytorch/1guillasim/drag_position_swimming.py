@@ -47,7 +47,7 @@ def main(amp,freq,twl):
         spawn           = {
             'loader': 0,
             'mode': "TRANSVERSE",
-            'pose': [0.0, 0.0, -0.3, 0.0, 0.0, 3.141592653589793],
+            'pose': [1.0, 0.0, -0.3, 0.0, 0.0, 3.141592653589793],
             'velocity': [0.0, 0., 0.0, 0.0, 0.0, 0.0],
             'extras': {}
             },
@@ -76,6 +76,6 @@ if __name__ == '__main__':
     # main()
     freq=0.5
     twl=12
-    for amp in [60]: #np.arange(20,60,10):
+    for amp in [40]: #np.arange(20,60,10):
         main(amp,freq,twl)
 

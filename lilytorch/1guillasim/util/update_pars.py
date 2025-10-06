@@ -4,7 +4,7 @@
 def update_pd_gains(animat_options):
     for joint in animat_options["control"]["motors"]:
         joint["gains"] = [
-            10, 1
+            50, 5
         ]
         joint["limits_torque"] = [
             -1000.0, 1000.0

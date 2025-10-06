@@ -59,12 +59,12 @@ class BDIMController(AnimatNetwork):
         self.device = self.fluid_solver.device
         self.dtype=self.fluid_solver.X.dtype
 
-        self.fluid_solver.composite_body.update = self.update_ib # modify the update rule
-        self.fluid_stepper = self.fluid_solver.step_pb_direct_forcing
+        # self.fluid_solver.composite_body.update = self.update_ib # modify the update rule
+        # self.fluid_stepper = self.fluid_solver.step_pb_direct_forcing
 
 
-        # self.fluid_solver.composite_body.update = self.update # modify the update rule
-        # self.fluid_stepper = self.fluid_solver.step_
+        self.fluid_solver.composite_body.update = self.update # modify the update rule
+        self.fluid_stepper = self.fluid_solver.step_
 
 
         controller.pars.log_path = self.fluid_solver.save_path

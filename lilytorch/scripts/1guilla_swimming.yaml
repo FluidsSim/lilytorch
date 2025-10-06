@@ -1,6 +1,6 @@
 
 solver :
-  use_gpu           : False
+  use_gpu           : True
   nthreads          : 16
 
   # ## small tank
@@ -42,14 +42,14 @@ solver :
 
 
 
-  convection_method : "implicit"
-  dt                : 0.001
-
-  # convection_method : "abdquickest"
+  # convection_method : "implicit"
   # dt                : 0.001
 
+  convection_method : "abdquickest"
+  dt                : 0.001
+
   nt                : 80000
-  nu                : 1.0e-6
+  nu                : 500.0e-6
   rho               : 1.0e+3
 
   poisson_tol       : 1.0e-7

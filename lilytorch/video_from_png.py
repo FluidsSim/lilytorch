@@ -3,20 +3,28 @@
 import cv2
 import os
 
-dir         = "/data/andreaferrario/ns_data/2025-10-02T16:12:19.387544/curl/"
+dir         = "/data/andreaferrario/ns_data/2025-10-06T14:03:54.311961/curl/"
 name        = "video"
 format      = ".mp4"
 img_name    = "curl"
 dt          = 0.001
-slow_factor =   1
-save_every    = 50
+slow_factor = 1
+save_every  = 50
+tstop       = 20
 
 video_name = dir+name+format
 
 images = [img for img in os.listdir(dir) if img.split("_")[0]==img_name]
 n=len(images)
 fps=slow_factor/(save_every*dt)
+
+# numbers = [img.split(".")[0].split("_")[1] for img in os.listdir(dir) if img.startswith(img_name+"_")]
+# sorted_numbers = sorted([num for num in numbers])
+# images_sorted = [img_name+"_"+str(number)+".png" for number in sorted_numbers]
+
 images_sorted = [img_name+"_"+str(i*save_every)+".png" for i in range(n)]
+
+
 frame = cv2.imread(os.path.join(dir, images_sorted[0]))
 height, width, layers = frame.shape
 
@@ -26,7 +34,10 @@ video = cv2.VideoWriter(video_name, _fourcc, fps, (width,height))
 font = cv2.FONT_HERSHEY_SIMPLEX
 for idx, image in enumerate(images_sorted):
     frame = cv2.imread(os.path.join(dir, image))
+    iteration = idx*save_every
     time  = idx*save_every*dt*slow_factor
+    if time>tstop:
+        break
     cv2.putText(frame,
                 'Time = {}, {}X '.format(round(time,1),round(slow_factor,2)),
                 (int(width/2), 50),
