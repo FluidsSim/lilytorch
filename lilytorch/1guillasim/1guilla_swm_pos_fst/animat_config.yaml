@@ -30,7 +30,7 @@ morphology:
       restitution: 0.5
       linearDamping: 0
       angularDamping: 0
-    swimming: true
+    fluid_interaction: true
     density: 800.0
     drag_coefficients:
     - - -0.1
@@ -50,7 +50,7 @@ morphology:
       restitution: 0.5
       linearDamping: 0
       angularDamping: 0
-    swimming: true
+    fluid_interaction: true
     density: 800.0
     drag_coefficients:
     - - -0.1
@@ -70,7 +70,7 @@ morphology:
       restitution: 0.5
       linearDamping: 0
       angularDamping: 0
-    swimming: true
+    fluid_interaction: true
     density: 800.0
     drag_coefficients:
     - - -0.1
@@ -90,7 +90,7 @@ morphology:
       restitution: 0.5
       linearDamping: 0
       angularDamping: 0
-    swimming: true
+    fluid_interaction: true
     density: 800.0
     drag_coefficients:
     - - -0.1
@@ -110,7 +110,7 @@ morphology:
       restitution: 0.5
       linearDamping: 0
       angularDamping: 0
-    swimming: true
+    fluid_interaction: true
     density: 800.0
     drag_coefficients:
     - - -0.1
@@ -130,7 +130,7 @@ morphology:
       restitution: 0.5
       linearDamping: 0
       angularDamping: 0
-    swimming: true
+    fluid_interaction: true
     density: 800.0
     drag_coefficients:
     - - -0.1
@@ -150,7 +150,7 @@ morphology:
       restitution: 0.5
       linearDamping: 0
       angularDamping: 0
-    swimming: true
+    fluid_interaction: true
     density: 800.0
     drag_coefficients:
     - - -0.1
@@ -170,7 +170,7 @@ morphology:
       restitution: 0.5
       linearDamping: 0
       angularDamping: 0
-    swimming: true
+    fluid_interaction: true
     density: 800.0
     drag_coefficients:
     - - -0.1
@@ -190,7 +190,7 @@ morphology:
       restitution: 0.5
       linearDamping: 0
       angularDamping: 0
-    swimming: true
+    fluid_interaction: true
     density: 800.0
     drag_coefficients:
     - - -0.1
@@ -1299,7 +1299,7 @@ control:
   adhesions: []
   visuals: []
 extensions:
-- loader: farms_amphibious.callbacks.SwimmingCallback
+- loader: farms_mujoco.swimming.callback.SwimmingCallback
   config:
     water_properties: null
 show_xfrc: false
