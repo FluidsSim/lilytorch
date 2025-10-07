@@ -1,33 +1,45 @@
 <?xml version="1.0" ?>
 <sdf version="1.6">
-	<world name="world">
-		<model name="ball">
-			<pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
-			<link name="sphere">
-				<pose>0 0 0 0 0 0</pose>
-				<collision name="link_leg_0_L_0_collision">
-				  <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
-				  <geometry>
-					<sphere>
-					  <radius>0.1</radius>
-					</sphere>
-				  </geometry>
-				</collision>
-				<visual name="link_leg_0_L_0_visual">
-				  <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
-				  <geometry>
-					<sphere>
-					  <radius>0.1</radius>
-					</sphere>
-				  </geometry>
-				  <material>
-					<ambient>0.7 0.5 0.5 0.5</ambient>
-					<diffuse>0.7 0.5 0.5 0.5</diffuse>
-					<specular>0.7 0.5 0.5 0.5</specular>
-					<emissive>0.7 0.5 0.5 0.5</emissive>
-				  </material>
-				</visual>
-			  </link>
-		</model>
-	</world>
+  <world name="world">
+    <model name="sphere">
+      <pose>0 0 0 0 0 0</pose>
+      <link name="base_link">
+        <pose>0 0 0 0 0 0</pose>
+        <inertial>
+          <pose>0 0 0 0 0 0</pose>
+          <mass>0.5235987755982989</mass>
+          <inertia>
+            <ixx>0.000523598775598299</ixx>
+            <ixy>0</ixy>
+            <ixz>0</ixz>
+            <iyy>0.000523598775598299</iyy>
+            <iyz>0</iyz>
+            <izz>0.000523598775598299</izz>
+          </inertia>
+        </inertial>
+        <collision name="base_link_collision">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <sphere>
+              <radius>0.05</radius>
+            </sphere>
+          </geometry>
+        </collision>
+        <visual name="base_link_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <sphere>
+              <radius>0.05</radius>
+            </sphere>
+          </geometry>
+          <material>
+            <ambient>1 1 0 1</ambient>
+            <diffuse>1 1 0 1</diffuse>
+            <specular>1 1 0 1</specular>
+            <emissive>1 1 0 1</emissive>
+          </material>
+        </visual>
+      </link>
+    </model>
+  </world>
 </sdf>
