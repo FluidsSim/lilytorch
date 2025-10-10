@@ -18,7 +18,7 @@ class PoissonSolver:
         self.max_vcycles = max_vcycles
         self.nsmoothing  = nsmoothing
         self.verbose     = verbose
-        self.jcap_tol    = 1e-5
+        self.jcap_tol    = 1e-12
         self.n_switch    = 2**6
         self.w           = w # smoothing factor
 

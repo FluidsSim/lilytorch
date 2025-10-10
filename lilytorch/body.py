@@ -319,17 +319,33 @@ class Body:
 
         self.x   = x
         self.y   = y
-        self.X, self.Y = torch.meshgrid(x,y,indexing="ij")
-        self.nx  = len(x)
-        self.ny  = len(y)
         self.dx = float(x[1]-x[0])
         self.dy = float(y[1]-y[0])
+
+        self.X, self.Y = torch.meshgrid(x,y,indexing="ij")
+        self.x_stag = self.x-self.dx/2
+        self.y_stag = self.y-self.dy/2
+        [self.Xu_stag, self.Yu_stag] = torch.meshgrid(self.x_stag, self.y, indexing="ij")
+        [self.Xv_stag, self.Yv_stag] = torch.meshgrid(self.x, self.y_stag, indexing="ij")
+
+        self.nx  = len(x)
+        self.ny  = len(y)
         self.eps = eps
         self.dtype = x.dtype
 
         self.xflat = self.X.flatten()
         self.yflat = self.Y.flatten()
+
+        self.xu_stag_flat = self.Xu_stag.flatten()
+        self.yu_stag_flat = self.Yu_stag.flatten()
+        self.xv_stag_flat = self.Xv_stag.flatten()
+        self.yv_stag_flat = self.Yv_stag.flatten()
+
         self.stacked_xy = torch.stack((self.xflat,self.yflat))
+        self.stacked_xy_u = torch.stack((self.xu_stag_flat,self.yu_stag_flat))
+        self.stacked_xy_v = torch.stack((self.xv_stag_flat,self.yv_stag_flat))
+
+
         self.ones_stacked=torch.ones((self.nx*self.ny),device=self.device,dtype=self.dtype)
 
         # body velocities
@@ -447,10 +463,7 @@ class BodyAnalytical(Body):
         """
         Initialize sdf properties at time 0
         """
-        self.body_u = torch.zeros((self.nx,self.ny),device=self.device,dtype=self.dtype)
-        self.body_v = torch.zeros((self.nx,self.ny),device=self.device,dtype=self.dtype)
-
-        # initial sdf to compute contour
+        ####### initial sdf at cc nodes to compute contour
         xmid=(self.x.min()+self.x.max())/2
         ymid=(self.y.min()+self.y.max())/2
         pos_u = self.stacked_xy[0].reshape(self.nx, self.ny)-xmid
@@ -535,15 +548,8 @@ class BodyAnalytical(Body):
                         torch.stack([s, c])])
         trans = torch.stack((transl[0]*self.ones_stacked, transl[1]*self.ones_stacked))
 
-        # compute sdf
-        translpoints=self.stacked_xy-trans
-        newpoints=rot.T@translpoints
-        newpos_u = newpoints[0].reshape(self.nx, self.ny)
-        newpos_v = newpoints[1].reshape(self.nx, self.ny)
-        self.sdf = self.sdf_fun(newpos_u, newpos_v)
-
+        # compute linear and angular velocities using automatic differentiation
         t_var = t.clone().detach().requires_grad_(True)
-
         vx = self.update_translation[0](t_var)
         vy = self.update_translation[1](t_var)
         w = self.update_theta(t_var) * self.rad_conv
@@ -552,16 +558,27 @@ class BodyAnalytical(Body):
         lin_vel_y = torch.autograd.grad(vy, t_var, create_graph=False)[0]
         ang_vel   = torch.autograd.grad(w, t_var, create_graph=False)[0]
 
+        # compute sdf at staggered grid locations (u points -sdf_u and v points-sdf_v)
+        translpoints_u=self.stacked_xy_u-trans
+        newpoints_u=rot.T@translpoints_u
+        newpos_u = newpoints_u[0].reshape(self.nx, self.ny)
+        newpos_v = newpoints_u[1].reshape(self.nx, self.ny)
+        self.sdf_u = self.sdf_fun(newpos_u, newpos_v)
 
-        self.body_u = (lin_vel_x - ang_vel*translpoints[1]).reshape(self.nx, self.ny)
-        self.body_v = (lin_vel_y + ang_vel*translpoints[0]).reshape(self.nx, self.ny)
+        translpoints_v=self.stacked_xy_v-trans
+        newpoints_v=rot.T@translpoints_v
+        newpos_u = newpoints_v[0].reshape(self.nx, self.ny)
+        newpos_v = newpoints_v[1].reshape(self.nx, self.ny)
+        self.sdf_v = self.sdf_fun(newpos_u, newpos_v)
 
-        # compute contour lines
+        # update body velocities (need to be staggered)
+        self.body_u = (lin_vel_x - ang_vel*translpoints_u[1]).reshape(self.nx, self.ny)
+        self.body_v = (lin_vel_y + ang_vel*translpoints_v[0]).reshape(self.nx, self.ny)
+
+        # update contour points and velocities
         self.cnt_update = rot @ self.cnt
         self.cnt_update[0]+=self.com_pos[0]
         self.cnt_update[1]+=self.com_pos[1]
-
-
         self.cnt_u=(lin_vel_x-ang_vel*(self.cnt_update[1]-transl[1]))
         self.cnt_v=(lin_vel_y+ang_vel*(self.cnt_update[0]-transl[0]))
 
@@ -590,7 +607,8 @@ class CompositeBodyAnalytical(Body):
         ]
 
         self.mu_funcs = self.bodies[0].mu_funcs
-        self.sdf_vals = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
+        self.sdf_vals_u = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
+        self.sdf_vals_v = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
         self.u_vals   = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
         self.v_vals   = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
         self.com_pos  = torch.zeros((self.nbodies,2),device=device)
@@ -606,13 +624,18 @@ class CompositeBodyAnalytical(Body):
     def update(self, t, iteration, dt=1):
         for i, body in enumerate(self.bodies):
             body.update(t, iteration, dt=dt)
-            self.sdf_vals[i] = body.sdf
+            self.sdf_vals_u[i] = body.sdf_u
+            self.sdf_vals_v[i] = body.sdf_v
             self.u_vals[i]   = body.body_u
             self.v_vals[i]   = body.body_v
-        self.sdf_val = torch.min(self.sdf_vals,axis=0)[0]
-        idx=self.sdf_vals.argmin(0).unsqueeze(0).expand(self.sdf_vals.shape)
-        self.sdf_val=self.sdf_vals.gather(0,idx)[0].reshape(self.nx,self.ny)
+        self.sdf_val_u = torch.min(self.sdf_vals_u,axis=0)[0]
+        idx=self.sdf_vals_u.argmin(0).unsqueeze(0).expand(self.sdf_vals_u.shape)
+        self.sdf_val_u=self.sdf_vals_u.gather(0,idx)[0].reshape(self.nx,self.ny)
         self.body_u =self.u_vals.gather(0,idx)[0].reshape(self.nx,self.ny)
+
+        self.sdf_val_v = torch.min(self.sdf_vals_v,axis=0)[0]
+        idx=self.sdf_vals_v.argmin(0).unsqueeze(0).expand(self.sdf_vals_v.shape)
+        self.sdf_val_v=self.sdf_vals_v.gather(0,idx)[0].reshape(self.nx,self.ny)
         self.body_v =self.v_vals.gather(0,idx)[0].reshape(self.nx,self.ny)
 
 
