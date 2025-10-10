@@ -42,6 +42,20 @@ def box(x,y,xb=20,yb=20):
         torch.maximum(qy,torch.zeros_like(y))**2
     )+torch.minimum(torch.maximum(qx,qy),torch.zeros_like(x))
 
+def resample_contour(x, y, spacing, closed=True):
+        if closed:
+            if x[0] != x[-1] or y[0] != y[-1]:
+                x = np.r_[x, x[0]]
+                y = np.r_[y, y[0]]
+        dx = np.diff(x)
+        dy = np.diff(y)
+        ds = np.sqrt(dx**2 + dy**2)
+        s = np.concatenate(([0], np.cumsum(ds)))
+        s_uniform = np.arange(0, s[-1], spacing)
+        x_new = np.interp(s_uniform, s, x)
+        y_new = np.interp(s_uniform, s, y)
+        return x_new, y_new, s_uniform
+
 def body_from_yaml(device, x, y, body_pars, eps=0.05, costum_update=None, starting_time=0, **kwargs):
 
     if costum_update is not None:
@@ -50,6 +64,7 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, costum_update=None, starti
     type = body_pars["type"]
     if type == "analytical":
         sdf_fun = eval(body_pars["sdf"])
+        plotting=body_pars["plotting"]
         update_map = (
             eval(update_maps["rotation"]),
             (eval(update_maps["translation"][0]),eval(update_maps["translation"][1]))
@@ -59,11 +74,13 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, costum_update=None, starti
             x, y,
             sdf_fun,
             update_map,
-            eps=eps
+            eps=eps,
+            plotting=plotting
         )
 
     elif type == "composite_analytical":
         sdf_funs = body_pars["sdf"]
+        plotting=body_pars["plotting"]
         update_maps = body_pars["update_maps"]
         return CompositeBodyAnalytical(
             device, x, y,
@@ -74,7 +91,8 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, costum_update=None, starti
                     (eval(update_map["translation"][0]),eval(update_map["translation"][1]))
                 ) for update_map in update_maps
             ],
-            eps=eps
+            eps=eps,
+            plotting=plotting
         )
 
     elif type == "mesh":
@@ -390,21 +408,22 @@ class Body:
 
 
     def mu_funcs(self, d):
-        s=torch.sin(torch.pi*d/self.eps)
-        c=torch.cos(torch.pi*d/self.eps)
+        deps=d/self.eps
+        s=torch.sin(torch.pi*deps)
+        c=torch.cos(torch.pi*deps)
         mu_0_eps = torch.where(
             d<=-self.eps,
             0,
             torch.where(
                 d>=self.eps,
                 1,
-                0.5*( 1 + d/self.eps + s/torch.pi )
+                0.5*( 1 + deps + s/torch.pi )
             )
         )
         mu_1_eps = torch.where(
             torch.abs(d)>=self.eps,
             0,
-            self.eps*( 0.25 - (d/(2*self.eps))**2 - ( d*s/self.eps+(1+c)/torch.pi )/(2*torch.pi) )
+            self.eps*( 0.25 - (0.5*deps)**2 - ( s*deps+(1+c)/torch.pi )/(2*torch.pi) )
         )
         return (mu_0_eps, mu_1_eps)
 
@@ -414,11 +433,12 @@ class Body:
 
 class BodyAnalytical(Body):
 
-    def __init__(self, device, x, y, sdf_fun, update_maps, eps=0.05):
+    def __init__(self, device, x, y, sdf_fun, update_maps, eps=0.05, plotting=False):
         super().__init__(device, x, y, eps=eps)
         self.sdf_fun = sdf_fun
         self.update_theta = update_maps[0]
         self.update_translation = update_maps[1]
+        self.plotting = plotting
         self.body=self
         self.initialize()
         self.rad_conv = (torch.pi/180)
@@ -429,8 +449,12 @@ class BodyAnalytical(Body):
         """
         self.body_u = torch.zeros((self.nx,self.ny),device=self.device,dtype=self.dtype)
         self.body_v = torch.zeros((self.nx,self.ny),device=self.device,dtype=self.dtype)
-        pos_u = self.stacked_xy[0].reshape(self.nx, self.ny)
-        pos_v = self.stacked_xy[1].reshape(self.nx, self.ny)
+
+        # initial sdf to compute contour
+        xmid=(self.x.min()+self.x.max())/2
+        ymid=(self.y.min()+self.y.max())/2
+        pos_u = self.stacked_xy[0].reshape(self.nx, self.ny)-xmid
+        pos_v = self.stacked_xy[1].reshape(self.nx, self.ny)-ymid
         self.sdf = self.sdf_fun(pos_u, pos_v)
 
         # find contour lines
@@ -438,15 +462,48 @@ class BodyAnalytical(Body):
         xnp = self.x.cpu().numpy()
         ynp = self.y.cpu().numpy()
         cnt = np.array(measure.find_contours(sdf_np, 0)[0]).T
-        cnt[0]=xnp[0]+cnt[0]*(xnp[1]-xnp[0])
-        cnt[1]=ynp[0]+cnt[1]*(ynp[1]-ynp[0])
+        cnt[0]=xnp[0]-xmid.cpu().numpy()+cnt[0]*(xnp[1]-xnp[0])
+        cnt[1]=ynp[0]-ymid.cpu().numpy()+cnt[1]*(ynp[1]-ynp[0])
         curv_coord = np.cumsum(np.sqrt(np.sum(np.diff(cnt, axis=1)**2, axis=0)))
+
+
+        # # resample contour lines for uniform spacing with spacing self.dx
+        ds=self.dx #0.5*torch.sqrt(torch.tensor(self.dx**2+self.dy**2))
+        # x, y, s_uniform = self.resample_contour(cnt[0], cnt[1], spacing=ds, closed=True)
+        x, y, s_uniform = resample_contour(cnt[0], cnt[1], spacing=ds, closed=True)
+        del cnt
+        cnt=np.array([x, y])
+        curv_coord = s_uniform
 
         self.curv_coord = torch.from_numpy(curv_coord).type(self.dtype).to(self.device)
         self.cnt        = torch.from_numpy(cnt).type(self.dtype).to(self.device)
         self.cnt_update = self.cnt.clone().detach()
+        self.ds = self.curv_coord[1]-self.curv_coord[0]
+
+
+        if self.plotting:
+
+            # Plot cnt as scatter with color given by a colormap
+            cmap = cm.get_cmap('RdBu')
+            n_points = self.cnt_update.shape[1]
+            colors = cmap(np.linspace(0, 1, n_points))
+            plt.scatter(self.cnt_update[0], self.cnt_update[1], c=colors, cmap=cmap, s=10)
+            plt.show()
+
+
+
+        self.cnt_u=torch.zeros_like(self.cnt_update[0])
+        self.cnt_v=torch.zeros_like(self.cnt_update[1])
+
+        self.cnt_f_u=torch.zeros_like(self.cnt_update[0])
+        self.cnt_f_v=torch.zeros_like(self.cnt_update[1])
+        self.cnt_int_f_u=torch.zeros_like(self.cnt_update[0])
+        self.cnt_int_f_v=torch.zeros_like(self.cnt_update[1])
+        self.mask = torch.arange(len(self.curv_coord), device=self.device)
+        self.com_pos = torch.zeros((2), device=self.device, dtype=self.dtype)
 
         self.update(torch.tensor(0.0),0)
+
 
         return
 
@@ -454,7 +511,10 @@ class BodyAnalytical(Body):
     def update(self, t, iteration, dt=1):
         """
         Apply rototranslation and update the sdf properties
+        Assumes that the rotations happen around the origin of the reference frame (i.e. the center of rotation is (0,0))
+        This simply means that com=[transl[0], transl[1]]
         """
+
         transl = torch.tensor([
             self.update_translation[0](t),
             self.update_translation[1](t)
@@ -466,6 +526,9 @@ class BodyAnalytical(Body):
                 device=self.device, dtype=self.dtype
             )
         )
+
+        self.com_pos = transl
+
         s = torch.sin(theta)
         c = torch.cos(theta)
         rot = torch.stack([torch.stack([c, -s]),
@@ -479,35 +542,35 @@ class BodyAnalytical(Body):
         newpos_v = newpoints[1].reshape(self.nx, self.ny)
         self.sdf = self.sdf_fun(newpos_u, newpos_v)
 
-        t_vx=t.clone().detach()
-        t_vy=t.clone().detach()
-        t_w=t.clone().detach()
-        t_vx.requires_grad_()
-        t_vy.requires_grad_()
-        t_w.requires_grad_()
+        t_var = t.clone().detach().requires_grad_(True)
 
-        vx =  self.update_translation[0](t_vx)
-        vy =  self.update_translation[1](t_vy)
-        w =  self.update_theta(t_w)*self.rad_conv
+        vx = self.update_translation[0](t_var)
+        vy = self.update_translation[1](t_var)
+        w = self.update_theta(t_var) * self.rad_conv
 
-        vx.backward()
-        vy.backward()
-        w.backward()
+        lin_vel_x = torch.autograd.grad(vx, t_var, create_graph=False)[0]
+        lin_vel_y = torch.autograd.grad(vy, t_var, create_graph=False)[0]
+        ang_vel   = torch.autograd.grad(w, t_var, create_graph=False)[0]
 
-        self.body_u = (t_vx.grad -t_w.grad*translpoints[1]).reshape(self.nx, self.ny)
-        self.body_v = (t_vy.grad +t_w.grad*translpoints[0]).reshape(self.nx, self.ny)
+
+        self.body_u = (lin_vel_x - ang_vel*translpoints[1]).reshape(self.nx, self.ny)
+        self.body_v = (lin_vel_y + ang_vel*translpoints[0]).reshape(self.nx, self.ny)
 
         # compute contour lines
         self.cnt_update = rot @ self.cnt
-        self.cnt_update[0]+=transl[0]
-        self.cnt_update[1]+=transl[1]
+        self.cnt_update[0]+=self.com_pos[0]
+        self.cnt_update[1]+=self.com_pos[1]
+
+
+        self.cnt_u=(lin_vel_x-ang_vel*(self.cnt_update[1]-transl[1]))
+        self.cnt_v=(lin_vel_y+ang_vel*(self.cnt_update[0]-transl[0]))
 
 
 
 
 class CompositeBodyAnalytical(Body):
 
-    def __init__(self, device, x, y, sdf_funs, update_maps, **kwargs):
+    def __init__(self, device, x, y, sdf_funs, update_maps, plotting=False, **kwargs):
         """
         sdf_folder = folder of the sdf file
         sdf_name = name of the sdf file
@@ -521,6 +584,7 @@ class CompositeBodyAnalytical(Body):
                 device, x, y,
                 sdf_funs[i],
                 update_maps[i],
+                plotting=plotting,
                 **kwargs
             ) for i in range(self.nbodies)
         ]
@@ -537,6 +601,7 @@ class CompositeBodyAnalytical(Body):
         Initialize sdf properties at time 0
         """
         self.update(torch.tensor(0.0,device=self.device,dtype=self.dtype), 0)
+
 
     def update(self, t, iteration, dt=1):
         for i, body in enumerate(self.bodies):
@@ -899,21 +964,6 @@ class BodyMesh(Body):
         self.bodies = [self]
 
 
-    def resample_contour(self, x, y, spacing, closed=True):
-        if closed:
-            if x[0] != x[-1] or y[0] != y[-1]:
-                x = np.r_[x, x[0]]
-                y = np.r_[y, y[0]]
-        dx = np.diff(x)
-        dy = np.diff(y)
-        ds = np.sqrt(dx**2 + dy**2)
-        s = np.concatenate(([0], np.cumsum(ds)))
-        s_uniform = np.arange(0, s[-1], spacing)
-        x_new = np.interp(s_uniform, s, x)
-        y_new = np.interp(s_uniform, s, y)
-        return x_new, y_new, s_uniform
-
-
     def resample_closed_contour(self, points, spacing, keep_duplicate_endpoint=True):
         """
         Resample a closed contour for (approximately) uniform spacing.
@@ -1027,7 +1077,7 @@ class BodyMesh(Body):
 
             # find contour lines
 
-            cnt = np.array(measure.find_contours(sdf_val-0*0.01, 0)[0]).T
+            cnt = np.array(measure.find_contours(sdf_val, 0)[0]).T
             cnt[0]=xnp[0]+cnt[0]*(xnp[1]-xnp[0])
             cnt[1]=ynp[0]+cnt[1]*(ynp[1]-ynp[0])
             curv_coord = np.concatenate(([0], np.cumsum(np.sqrt(np.sum(np.diff(cnt, axis=1)**2, axis=0)))))
@@ -1060,7 +1110,7 @@ class BodyMesh(Body):
             # # resample contour lines for uniform spacing with spacing self.dx
             ds=self.dx #0.5*torch.sqrt(torch.tensor(self.dx**2+self.dy**2))
             # x, y, s_uniform = self.resample_contour(cnt[0], cnt[1], spacing=ds, closed=True)
-            x, y, s_uniform = self.resample_contour(cnt[0], cnt[1], spacing=ds, closed=True)
+            x, y, s_uniform = resample_contour(cnt[0], cnt[1], spacing=ds, closed=True)
             del cnt
             cnt=np.array([x, y])
             curv_coord = s_uniform
@@ -1254,7 +1304,7 @@ class CompositeBodyMesh:
             body.initialize()
             self.sdf_vals[i]=body.sdf
 
-        self.sdf_val = torch.min(self.sdf_vals,axis=0)[0] #-self.suit
+        self.sdf_val = torch.min(self.sdf_vals,axis=0)[0]
 
         if self.plotting:
             var=self.sdf_val.cpu()

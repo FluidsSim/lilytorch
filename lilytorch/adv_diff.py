@@ -13,7 +13,6 @@ class AdvDiffSolver:
                  x,
                  y,
                  nu,
-                 rho,
                  BC_type_u=["D","D","D","D"], # w,o,s,n
                  BC_values_u=[0,0,0,0],
                  BC_type_v=["D","D","D","D"], # w,o,s,n
@@ -25,7 +24,7 @@ class AdvDiffSolver:
         y        : y-domain
         dt       : time step
         nu       : diffusion coefficient
-        type     : quick or explicit solver
+        type     : solver type: implicit, explicit, quick, abdquickest, adam-bashford
         """
 
         self.device=device
@@ -41,21 +40,17 @@ class AdvDiffSolver:
         self.dtdx2 = self.dtdx/dx
         self.dtdy2 = self.dtdy/dy
         self.nu = nu
-        self.re = rho/self.nu
 
         self.x = x
         self.y = y
         self.nx = len(x)
         self.ny = len(y)
         self.nm2 = self.nx-2
-        self.ADBzeros = torch.zeros(self.nm2,self.nm2, device=self.device,dtype=self.dtype)
-        self.ADBones = torch.ones(self.nm2,self.nm2, device=self.device,dtype=self.dtype)
 
-        self.X, self.Y = torch.meshgrid(x,y, indexing="ij")
-        self.X = self.X.to(device)
-        self.Y = self.Y.to(device)
-        self.xflat = self.X.flatten()
-        self.yflat = self.Y.flatten()
+        # dummy initialization for the abdquickest solver
+        self.C = 0.1
+        self.C2 = self.C**2
+
 
         self.BC_type_u   = BC_type_u
         self.BC_values_u = BC_values_u
@@ -65,20 +60,24 @@ class AdvDiffSolver:
         if method == "implicit":
             self.solve = self.solve_implicit
             # dummy initialization for the implicit solver
-            self.gu = RegularGridInterpolator((x,y), torch.zeros_like(self.X, device=self.device,dtype=self.dtype), fill_value=None)
-            self.gv = RegularGridInterpolator((x,y), torch.zeros_like(self.X, device=self.device,dtype=self.dtype), fill_value=None)
+            x_staggered = x #- dx/2
+            y_staggered = y #- dy/2
+            self.gu = RegularGridInterpolator((x_staggered,y), torch.zeros((self.nx,self.ny), device=self.device,dtype=self.dtype), fill_value=None)
+            self.gv = RegularGridInterpolator((x,y_staggered), torch.zeros((self.nx,self.ny), device=self.device,dtype=self.dtype), fill_value=None)
+            self.X_u, self.Y_u = torch.meshgrid(x_staggered,y, indexing="ij")
+            self.X_v, self.Y_v = torch.meshgrid(x,y_staggered, indexing="ij")
+            self.X_cc, self.Y_cc = torch.meshgrid(x_staggered,y_staggered, indexing="ij")
+            self.xflat = self.X_u.flatten().clone().detach()
+            self.yflat = self.Y_v.flatten().clone().detach()
+            # from IPython import embed; embed()
         elif method == "explicit":
             self.solve = self.solve_explicit
         elif method == "quick":
             self.solve = self.solve_FLUXLMT
         elif method == "abdquickest":
             self.solve = self.solve_ADBQUICKEST
-            # dummy initialization for the abdquickest solver
-            self.C = 0.1
-            self.C2 = self.C**2
-        elif method == "adams-bashforth":
+        elif method == "adam-bashford":
             self.solve = self.solve_adam_bashford
-            # dummy initialization for the adams-bashforth solver
             self.HU_prec = torch.zeros((self.nm2,self.nm2), device=self.device,dtype=self.dtype)
             self.HV_prec = torch.zeros((self.nm2,self.nm2), device=self.device,dtype=self.dtype)
         else:
@@ -92,7 +91,6 @@ class AdvDiffSolver:
             torch.max(torch.abs(v))
             )
         self.dt = self.dx/(vel_max*+3*self.nu)
-
 
     def solve_explicit(self, u, v, iteration=0):
         """
@@ -171,21 +169,19 @@ class AdvDiffSolver:
                         u[1:-1,1:-1]+
                         self.dtdx*(uw*self.phi_wLMT(uw,u)-ue*self.phi_eLMT(ue,u))+
                         self.dtdy*(vs*self.phi_sLMT(vs,u)-vn*self.phi_nLMT(vn,u))+
-                        (1/self.re)*self.dtdx2*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
-                        (1/self.re)*self.dtdx2*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
+                        self.nu*self.dtdx2*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
+                        self.nu*self.dtdx2*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
                         )
 
         v[1:-1,1:-1] = (
                         v[1:-1,1:-1]+
                         self.dtdx*(uw*self.phi_wLMT(uw,v)-ue*self.phi_eLMT(ue,v))+
                         self.dtdy*(vs*self.phi_sLMT(vs,v)-vn*self.phi_nLMT(vn,v))+
-                        (1/self.re)*self.dtdx2*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1]) +
-                        (1/self.re)*self.dtdx2*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])
+                        self.nu*self.dtdx2*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1]) +
+                        self.nu*self.dtdx2*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])
                         )
 
         return (u,v)
-
-
 
     def psi(self, rf):
         # ADBQUICKEST
@@ -308,9 +304,10 @@ class AdvDiffSolver:
         yold = self.yflat-v.flatten()*self.dt
 
         self.gu.F = u
+        u = self.gu(xold, yold).reshape((self.nx,self.ny)).clone().detach()
+
         self.gv.F = v
-        u = self.gu(xold, yold).reshape(self.X.shape).clone().detach()
-        v = self.gv(xold, yold).reshape(self.X.shape).clone().detach()
+        v = self.gv(xold, yold).reshape((self.nx,self.ny)).clone().detach()
 
         u[1:-1,1:-1] += (
                         self.nu*self.dtdx2*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
@@ -342,6 +339,10 @@ class AdvDiffSolver:
         else:
 
             # advection-diffusion term
+            flux_uu=u*u
+            flux_uv=u*v
+            flux_vv=v*v
+
             dudx, dudy = torch.gradient(u, spacing=(self.dx, self.dy), dim=(0,1), edge_order=2)
             HU_new = -self.dt*(u[1:-1,1:-1]*dudx[1:-1,1:-1]+v[1:-1,1:-1]*dudy[1:-1,1:-1]) + (
                 self.nu*self.dtdx2*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
@@ -365,50 +366,78 @@ class AdvDiffSolver:
 
     def set_BCs(self, u, v):
 
-        if self.BC_type_u[1]=="D":
-            u[-1,:]=self.BC_values_u[1]
-        elif self.BC_type_u[1]=="N":
-            u[-1,:] = u[-2,:]
+        u[:,0]  = u[:,1]
+        u[-1,:] = u[-2,:]
+        u[0,:]  = u[1,:]
+        u[:,-1] = u[:,-2]
 
-        if self.BC_type_u[2]=="D":
-            u[:,0]=self.BC_values_u[2]
-        elif self.BC_type_u[2]=="N":
-            u[:,0] = u[:,1]
+        v[:,0]  = v[:,1]
+        v[-1,:] = v[-2,:]
+        v[0,:]  = v[1,:]
+        v[:,-1] = v[:,-2]
 
-        if self.BC_type_u[3]=="D":
-            u[:,-1]=self.BC_values_u[3]
-        elif self.BC_type_u[3]=="N":
-            u[:,-1] = u[:,-2]
 
         if self.BC_type_u[0]=="D":
-            u[0,:]=-u[1,:]+self.BC_values_u[0]
-        elif self.BC_type_u[0]=="N":
-            u[0,:] = u[1,:]
+            u[0, :]=self.BC_values_u[0]
+        if self.BC_type_u[1]=="D":
+            u[-1,:]=self.BC_values_u[1]
+        # if self.BC_type_u[2]=="D":
+        #     u[:,1]=self.BC_values_u[2]
+        # if self.BC_type_u[3]=="D":
+        #     u[:,-2]=self.BC_values_u[3]
 
-        # v
-        if self.BC_type_v[1]=="D":
-            v[-1,:]=self.BC_values_v[1]
-        elif self.BC_type_v[1]=="N":
-            v[-1,:] = v[-2,:]
+        # if self.BC_type_v[0]=="D":
+        #     v[1, :]=self.BC_values_v[0]
+        # if self.BC_type_v[1]=="D":
+        #     v[-2,:]=self.BC_values_v[1]
+        # if self.BC_type_v[2]=="D":
+        #     v[:,1]=self.BC_values_v[2]
+        # if self.BC_type_v[3]=="D":
+        #     v[:,-2]=self.BC_values_v[3]
 
-        if self.BC_type_v[2]=="D":
-            v[:,0]=self.BC_values_v[2]
-        elif self.BC_type_v[2]=="N":
-            v[:,0] = v[:,1]
 
-        if self.BC_type_v[3]=="D":
-            v[:,-1]=self.BC_values_v[3]
-        elif self.BC_type_v[3]=="N":
-            v[:,-1] = v[:,-2]
+        # elif self.BC_type_u[1]=="N":
+        #     u[-1,:] = u[-2,:]
 
-        if self.BC_type_v[0]=="D":
-            v[0,:]=-v[1,:]+self.BC_values_v[0]
-        elif self.BC_type_v[0]=="N":
-            v[0,:] = v[1,:]
+        # if self.BC_type_u[2]=="D":
+        #     u[:,0]=self.BC_values_u[2]
+        # elif self.BC_type_u[2]=="N":
+        #     u[:,0] = u[:,1]
+
+        # if self.BC_type_u[3]=="D":
+        #     u[:,-1]=self.BC_values_u[3]
+        # elif self.BC_type_u[3]=="N":
+        #     u[:,-1] = u[:,-2]
+
+        # if self.BC_type_u[0]=="D":
+        #     u[0,:]=-u[1,:]+self.BC_values_u[0]
+        # elif self.BC_type_u[0]=="N":
+        #     u[0,:] = u[1,:]
+
+        # # v
+        # if self.BC_type_v[1]=="D":
+        #     v[-1,:]=self.BC_values_v[1]
+        # elif self.BC_type_v[1]=="N":
+        #     v[-1,:] = v[-2,:]
+
+        # if self.BC_type_v[2]=="D":
+        #     v[:,0]=self.BC_values_v[2]
+        # elif self.BC_type_v[2]=="N":
+        #     v[:,0] = v[:,1]
+
+        # if self.BC_type_v[3]=="D":
+        #     v[:,-1]=self.BC_values_v[3]
+        # elif self.BC_type_v[3]=="N":
+        #     v[:,-1] = v[:,-2]
+
+        # if self.BC_type_v[0]=="D":
+        #     v[0,:]=-v[1,:]+self.BC_values_v[0]
+        # elif self.BC_type_v[0]=="N":
+        #     v[0,:] = v[1,:]
 
 if __name__ == "__main__":
 
-    use_gpu=True
+    use_gpu=False
 
     if torch.cuda.is_available() and use_gpu:
         print(f"Using GPU: {torch.cuda.get_device_name(0)} is available.")
@@ -419,16 +448,30 @@ if __name__ == "__main__":
         torch.set_num_threads(8)
 
     N      = 2**8
-    nt      = 1300
-    nu      = 1e-6
+    nt      = 130
+    nu      = 0
     dt      = 0.01
-    x=torch.linspace(-60,180,N)
-    y=torch.linspace(-60,180,N)
+    x=torch.linspace(-60,180,N).to(device)
+    y=torch.linspace(-60,180,N).to(device)
 
-    dx      = x[1]-x[0]
-    dy      = y[1]-y[0]
-    X, Y = torch.meshgrid(x, y, indexing="ij")
+
+    solver = AdvDiffSolver(
+        device,
+        dt,
+        x,
+        y,
+        nu,
+        BC_type_u=["D","D","D","D"],
+        BC_values_u=[1,0,0,0],
+        BC_type_v=["D","D","D","D"],
+        BC_values_v=[0,0,0,0],
+        )
+
+    X, Y = solver.X_cc, solver.Y_cc
+    dx, dy = solver.dx, solver.dy
+
     print("dt={}s, dx={}, N={}".format(dt, dx, N))
+
 
     def initial_conditions():
         u = torch.zeros((N,N))
@@ -443,43 +486,29 @@ if __name__ == "__main__":
         return (u,v)
     (u0,v0) = initial_conditions()
 
-    x = x.to(device)
-    y = y.to(device)
     u0 = u0.to(device)
     v0 = v0.to(device)
-
-    solver = AdvDiffSolver(
-        device,
-        dt,
-        x,
-        y,
-        nu,
-        BC_type_u=["D","D","D","D"],
-        BC_values_u=[1,0,0,0],
-        BC_type_v=["D","D","D","D"],
-        BC_values_v=[0,0,0,0],
-        )
 
     from matplotlib import pyplot
     import time
     fig, (ax_1, ax_2, ax_3, ax_4, ax_5) = pyplot.subplots(1, 5, figsize=(25,5))
 
-    CS1=ax_1.contourf(X, Y, u0.cpu(), 20)
-    ax_1.set_title("Initial")
-    fig.colorbar(CS1)
+    # CS1=ax_1.contourf(X, Y, u0.cpu(), 20)
+    # ax_1.set_title("Initial")
+    # fig.colorbar(CS1)
 
-    u=u0.clone().detach()
-    v=v0.clone().detach()
-    start = time.time()
-    for n in range(nt + 1):
-        (u,v) = solver.solve_explicit(u,v)
-        solver.set_BCs(u,v)
-    print("Upwind solver took {}s".format(time.time()-start))
+    # u=u0.clone().detach()
+    # v=v0.clone().detach()
+    # start = time.time()
+    # for n in range(nt + 1):
+    #     (u,v) = solver.solve_explicit(u,v)
+    #     solver.set_BCs(u,v)
+    # print("Upwind solver took {}s".format(time.time()-start))
 
 
-    CS2=ax_2.contourf(X, Y, u.cpu(), 20)
-    ax_2.set_title("Upwind")
-    fig.colorbar(CS2)
+    # CS2=ax_2.contourf(X, Y, u.cpu(), 20)
+    # ax_2.set_title("Upwind")
+    # fig.colorbar(CS2)
 
 
     u=u0.clone().detach()
@@ -495,32 +524,32 @@ if __name__ == "__main__":
     ax_3.set_title("implicit")
     fig.colorbar(CS3)
 
-    u=u0.clone().detach()
-    v=v0.clone().detach()
-    start = time.time()
-    for n in range(nt + 1):
-        (u,v) = solver.solve_ADBQUICKEST(u,v)
-        solver.set_BCs(u,v)
-    print("ADBquickest solver took {}s".format(time.time()-start))
+    # u=u0.clone().detach()
+    # v=v0.clone().detach()
+    # start = time.time()
+    # for n in range(nt + 1):
+    #     (u,v) = solver.solve_ADBQUICKEST(u,v)
+    #     solver.set_BCs(u,v)
+    # print("ADBquickest solver took {}s".format(time.time()-start))
 
 
-    CS4=ax_4.contourf(X, Y, u.cpu(), 20)
-    ax_4.set_title("ADBquickest")
-    fig.colorbar(CS4)
+    # CS4=ax_4.contourf(X, Y, u.cpu(), 20)
+    # ax_4.set_title("ADBquickest")
+    # fig.colorbar(CS4)
 
 
-    # re-set initial conditions and solve using the quick method
-    u=u0.clone().detach()
-    v=v0.clone().detach()
-    start = time.time()
-    for n in range(nt + 1):
-        (u,v) = solver.solve_FLUXLMT(u,v)
-        solver.set_BCs(u,v)
-    print("Flux-LMT solver took {}s".format(time.time()-start))
+    # # re-set initial conditions and solve using the quick method
+    # u=u0.clone().detach()
+    # v=v0.clone().detach()
+    # start = time.time()
+    # for n in range(nt + 1):
+    #     (u,v) = solver.solve_FLUXLMT(u,v)
+    #     solver.set_BCs(u,v)
+    # print("Flux-LMT solver took {}s".format(time.time()-start))
 
 
-    CS5=ax_5.contourf(X, Y, u.cpu(), 20)
-    ax_5.set_title("Flux LMT")
-    fig.colorbar(CS5)
+    # CS5=ax_5.contourf(X, Y, u.cpu(), 20)
+    # ax_5.set_title("Flux LMT")
+    # fig.colorbar(CS5)
 
     pyplot.show()

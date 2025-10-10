@@ -135,9 +135,9 @@ class PoissonSolver:
 
 
     def solve_multigrid(self, f, p0, c, **kwargs):
-        f=f.to(torch.float64)
-        p0=p0.to(torch.float64)
-        c=c.to(torch.float64)
+        # f=f.to(torch.float64)
+        # p0=p0.to(torch.float64)
+        # c=c.to(torch.float64)
 
         p=p0.clone().detach()
         for cycle in range(self.max_vcycles):
@@ -149,7 +149,7 @@ class PoissonSolver:
         if self.verbose:
             print("Multigrid residual = {}/{} with {}/{} cycles \n".format(r_err,self.tol, cycle+1, self.max_vcycles))
 
-        p=p.to(torch.float32)
+        # p=p.to(torch.float32)
         return p, r
 
 

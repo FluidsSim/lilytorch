@@ -55,8 +55,8 @@ solver :
   poisson_tol       : 1.0e-7
   poisson_max_cycles: 5
   jacobi_weight     : 0.8
-  poisson_nsmoothing: 5
-  poisson_verbose   : False
+  poisson_nsmoothing: 25
+  poisson_verbose   : True
   poisson_folder : "data/"
 
 
@@ -87,7 +87,7 @@ body:
   sdf_name: "1guilla.sdf"
   sdf_folder: "/data/andreaferrario/lilytorch/lilytorch/1guillasim/models/1guilla_v1/sdf/"
   plotting: False
-  compute_interp: False
+  compute_interp: True
   plotting_meshes: False
   n_samples: (1000, 1000)
   update_maps:
@@ -95,7 +95,7 @@ body:
     translation:
       - None
       - None
-  suit: -0.00
+  suit: 0.01
   convexify: True
   scale: 1
 

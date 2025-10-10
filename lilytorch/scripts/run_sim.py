@@ -11,6 +11,8 @@ import torch
 
 pars = yaml2pyobject("lilytorch/scripts/moving_stick.yaml")
 
+# pars = yaml2pyobject("lilytorch/scripts/moving_cylinder_analytical.yaml")
+
 
 # modify parameters
 # pars["body"]["control"]["f"]  = 10
