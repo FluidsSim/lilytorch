@@ -8,7 +8,7 @@ import farms_pylog as pylog
 import numpy as np
 from gen_positions import generate_positions
 
-def main(amp,freq,twl):
+def main(amp,freq,twl,nmotors):
     """
     Exercise example, running a single simulation and plotting the results
     """
@@ -21,14 +21,14 @@ def main(amp,freq,twl):
         wlength=1,
         amp_deg=amp,
         freq=freq,
-        nmotors=8,
+        nmotors=nmotors,
         TWL=twl,
         save_path=None,
         plot=False
     )
 
     all_pars = SimulationParameters(
-        n_iterations    = 20001,
+        n_iterations    = 200001,
         controller      = "empty",
         swimming_mode   = "bdim",
         timestep        = 0.001,
@@ -75,7 +75,8 @@ def main(amp,freq,twl):
 if __name__ == '__main__':
     # main()
     freq=0.5
-    twl=12
+    twl=12 #14
+    nmotors=8
     for amp in [40]: #np.arange(20,60,10):
-        main(amp,freq,twl)
+        main(amp,freq,twl,nmotors)
 

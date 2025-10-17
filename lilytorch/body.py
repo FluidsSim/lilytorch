@@ -4,6 +4,7 @@ import torch
 import numpy as np
 import open3d as o3d
 o3d.utility.set_verbosity_level(o3d.utility.VerbosityLevel.Error) # exclusevely show errors
+from scipy.interpolate import CubicSpline
 
 try:
     from farms_core.io.sdf import ModelSDF
@@ -42,11 +43,67 @@ def box(x,y,xb=20,yb=20):
         torch.maximum(qy,torch.zeros_like(y))**2
     )+torch.minimum(torch.maximum(qx,qy),torch.zeros_like(x))
 
+def resample_contour_exact_spacing(x, y, spacing, closed=True):
+    """
+    Resample contour with exactly constant spacing
+    """
+    if closed:
+        if x[0] != x[-1] or y[0] != y[-1]:
+            x = np.r_[x, x[0]]
+            y = np.r_[y, y[0]]
+
+    # Convert to points array
+    points = np.column_stack([x, y])
+    resampled_points = [points[0]]
+
+    # Walk along contour with exact spacing
+    current_position = points[0].copy()
+    segment_idx = 0
+    distance_along_segment = 0.0
+
+    while segment_idx < len(points) - 1:
+        # Current segment
+        segment_start = points[segment_idx]
+        segment_end = points[segment_idx + 1]
+        segment_vector = segment_end - segment_start
+        segment_length = np.linalg.norm(segment_vector)
+
+        # Distance remaining in current segment
+        remaining_in_segment = segment_length - distance_along_segment
+
+        if remaining_in_segment >= spacing:
+            # Place next point within current segment
+            if segment_length > 1e-12:  # Avoid division by zero
+                direction = segment_vector / segment_length
+                current_position = segment_start + (distance_along_segment + spacing) * direction
+                resampled_points.append(current_position.copy())
+                distance_along_segment += spacing
+            else:
+                # Degenerate segment, skip
+                segment_idx += 1
+                distance_along_segment = 0.0
+        else:
+            # Move to next segment
+            segment_idx += 1
+            distance_along_segment = spacing - remaining_in_segment
+
+    resampled_points = np.array(resampled_points)
+
+    # Compute arc-length coordinates
+    if len(resampled_points) > 1:
+        diffs = np.diff(resampled_points, axis=0)
+        distances = np.linalg.norm(diffs, axis=1)
+        s_uniform = np.concatenate(([0], np.cumsum(distances)))
+    else:
+        s_uniform = np.array([0])
+
+    return resampled_points[:, 0], resampled_points[:, 1], s_uniform
+
 def resample_contour(x, y, spacing, closed=True):
-        if closed:
-            if x[0] != x[-1] or y[0] != y[-1]:
-                x = np.r_[x, x[0]]
-                y = np.r_[y, y[0]]
+        # if closed:
+        #     if x[0] != x[-1] or y[0] != y[-1]:
+        x = np.r_[x, x[0]]
+        y = np.r_[y, y[0]]
         dx = np.diff(x)
         dy = np.diff(y)
         ds = np.sqrt(dx**2 + dy**2)
@@ -466,8 +523,8 @@ class BodyAnalytical(Body):
         ####### initial sdf at cc nodes to compute contour
         xmid=(self.x.min()+self.x.max())/2
         ymid=(self.y.min()+self.y.max())/2
-        pos_u = self.stacked_xy[0].reshape(self.nx, self.ny)-xmid
-        pos_v = self.stacked_xy[1].reshape(self.nx, self.ny)-ymid
+        pos_u = self.stacked_xy[0].reshape(self.nx, self.ny)
+        pos_v = self.stacked_xy[1].reshape(self.nx, self.ny)
         self.sdf = self.sdf_fun(pos_u, pos_v)
 
         # find contour lines
@@ -475,10 +532,9 @@ class BodyAnalytical(Body):
         xnp = self.x.cpu().numpy()
         ynp = self.y.cpu().numpy()
         cnt = np.array(measure.find_contours(sdf_np, 0)[0]).T
-        cnt[0]=xnp[0]-xmid.cpu().numpy()+cnt[0]*(xnp[1]-xnp[0])
-        cnt[1]=ynp[0]-ymid.cpu().numpy()+cnt[1]*(ynp[1]-ynp[0])
+        cnt[0]=xnp[0]+cnt[0]*(xnp[1]-xnp[0])
+        cnt[1]=ynp[0]+cnt[1]*(ynp[1]-ynp[0])
         curv_coord = np.cumsum(np.sqrt(np.sum(np.diff(cnt, axis=1)**2, axis=0)))
-
 
         # # resample contour lines for uniform spacing with spacing self.dx
         ds=self.dx #0.5*torch.sqrt(torch.tensor(self.dx**2+self.dy**2))
@@ -558,6 +614,14 @@ class BodyAnalytical(Body):
         lin_vel_y = torch.autograd.grad(vy, t_var, create_graph=False)[0]
         ang_vel   = torch.autograd.grad(w, t_var, create_graph=False)[0]
 
+
+        # # compute sdf at cc locations
+        # translpoints=self.stacked_xy-trans
+        # newpoints_u=rot.T@translpoints
+        # newpos_u = newpoints_u[0].reshape(self.nx, self.ny)
+        # newpos_v = newpoints_u[1].reshape(self.nx, self.ny)
+        # self.sdf = self.sdf_fun(newpos_u, newpos_v)
+
         # compute sdf at staggered grid locations (u points -sdf_u and v points-sdf_v)
         translpoints_u=self.stacked_xy_u-trans
         newpoints_u=rot.T@translpoints_u
@@ -607,6 +671,7 @@ class CompositeBodyAnalytical(Body):
         ]
 
         self.mu_funcs = self.bodies[0].mu_funcs
+        self.sdf_vals = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
         self.sdf_vals_u = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
         self.sdf_vals_v = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
         self.u_vals   = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
@@ -624,10 +689,16 @@ class CompositeBodyAnalytical(Body):
     def update(self, t, iteration, dt=1):
         for i, body in enumerate(self.bodies):
             body.update(t, iteration, dt=dt)
+            self.sdf_vals[i]   = body.sdf
             self.sdf_vals_u[i] = body.sdf_u
             self.sdf_vals_v[i] = body.sdf_v
             self.u_vals[i]   = body.body_u
             self.v_vals[i]   = body.body_v
+
+        self.sdf_val = torch.min(self.sdf_vals,axis=0)[0]
+        idx=self.sdf_vals.argmin(0).unsqueeze(0).expand(self.sdf_vals.shape)
+        self.sdf_val=self.sdf_vals.gather(0,idx)[0].reshape(self.nx,self.ny)
+
         self.sdf_val_u = torch.min(self.sdf_vals_u,axis=0)[0]
         idx=self.sdf_vals_u.argmin(0).unsqueeze(0).expand(self.sdf_vals_u.shape)
         self.sdf_val_u=self.sdf_vals_u.gather(0,idx)[0].reshape(self.nx,self.ny)
@@ -1048,11 +1119,17 @@ class BodyMesh(Body):
         self.bb = self.m2s.bounding_box()
         if self.compute_interp:
 
+            # xmin=self.x.min().cpu().numpy()
+            # xmax=self.x.max().cpu().numpy()
+            # ymin=self.y.min().cpu().numpy()
+            # ymax=self.y.max().cpu().numpy()
+            # diag=np.sqrt((xmax-xmin)**2+(ymax-ymin)**2)
+            # xnp = np.linspace(xmin-2*diag,xmax+2*diag,self.nsamples)
+            # ynp = np.linspace(ymin-2*diag,ymax+2*diag,self.msamples)
+
             cx_bb = (self.bb[0,1]+self.bb[0,0])/2
             cy_bb = (self.bb[1,1]+self.bb[1,0])/2
-
             diag = np.sqrt((self.bb[0,1]-self.bb[0,0])**2+(self.bb[1,1]-self.bb[1,0])**2)
-
             xnp = np.linspace(cx_bb-2*diag,cx_bb+2*diag,self.nsamples)
             ynp = np.linspace(cy_bb-2*diag,cy_bb+2*diag,self.msamples)
 
@@ -1099,11 +1176,11 @@ class BodyMesh(Body):
             # sdf_val = cv2.GaussianBlur(sdf_val, (5, 5), 0)
 
             # find contour lines
-
             cnt = np.array(measure.find_contours(sdf_val, 0)[0]).T
             cnt[0]=xnp[0]+cnt[0]*(xnp[1]-xnp[0])
             cnt[1]=ynp[0]+cnt[1]*(ynp[1]-ynp[0])
             curv_coord = np.concatenate(([0], np.cumsum(np.sqrt(np.sum(np.diff(cnt, axis=1)**2, axis=0)))))
+
 
             def signed_area(contour):
                 x = contour[0,:]
@@ -1116,8 +1193,8 @@ class BodyMesh(Body):
                     contour = contour[:,::-1]
                 return contour
 
-
             cnt=ensure_clockwise(cnt)
+
 
             # ensure starting point is at the middle of the bounding box
             start_point = np.array([self.bb[0,0], 0]) # assuming y=0 is the centerline
@@ -1128,15 +1205,19 @@ class BodyMesh(Body):
                 idx = valid_indices[np.argmin(dists[valid_indices])]
             else:
                 idx = np.argmin(dists)
-            cnt = np.concatenate((cnt[:, idx:], cnt[:, :idx]), axis=1)
+
+            cnt = np.concatenate((cnt[:, idx+1:], cnt[:, :idx]), axis=1)
+
 
             # # resample contour lines for uniform spacing with spacing self.dx
             ds=self.dx #0.5*torch.sqrt(torch.tensor(self.dx**2+self.dy**2))
             # x, y, s_uniform = self.resample_contour(cnt[0], cnt[1], spacing=ds, closed=True)
-            x, y, s_uniform = resample_contour(cnt[0], cnt[1], spacing=ds, closed=True)
+            x, y, s_uniform = resample_contour(cnt[0], cnt[1], spacing=ds, closed=True) # the spacing is approximately ds
             del cnt
             cnt=np.array([x, y])
-            curv_coord = s_uniform
+            # Recompute curvilinear coordinate (arc length) of cnt
+            diffs = np.diff(cnt, axis=1)
+            curv_coord = np.concatenate(([0], np.cumsum(np.sqrt(np.sum(diffs**2, axis=0)))))
 
             # Create a vector where points in cnt above the first point
             sign_vec = np.where(cnt[1] >= cnt[1][0], 1, -1)
@@ -1270,13 +1351,14 @@ class BodyMesh(Body):
     def visualize(self):
         self.m2s.visualize()
 
-class CompositeBodyMesh:
+class CompositeBodyMesh(Body):
 
     def __init__(self, device, x, y, sdf_folder, sdf_name, costum_update, eps=0.05, compute_interp=True, nsamples=2**12, msamples=2**12, plotting=False, plotting_meshes=False, suit=0.0, **kwargs):
         """
         sdf_folder = folder of the sdf file
         sdf_name = name of the sdf file
         """
+        super().__init__(device, x, y, **kwargs)
 
         self.sdf_folder      = sdf_folder
         self.sdf             = ModelSDF.read(sdf_folder+sdf_name)[0]
@@ -1285,74 +1367,84 @@ class CompositeBodyMesh:
         self.plotting        = plotting
         self.plotting_meshes = plotting_meshes
         for link_i, link in enumerate(self.sdf.links):
-            mesh_name = link["visuals"][0]["geometry"]["uri"]
-            mesh_gpath = sdf_folder+mesh_name
-            initial_pose = np.array(link.pose).astype(x.cpu().numpy().dtype)
-            update_funcs = (
-                lambda t: 180,
-                [
-                    lambda t, initial_pose=initial_pose: -initial_pose[0],
-                    lambda t, initial_pose=initial_pose: -initial_pose[1],
-                ]
-                )
-            body = BodyMesh(
-                    device, x, y,
-                    mesh_gpath,
-                    update_funcs,
-                    eps=eps,
-                    compute_interp=compute_interp,
-                    nsamples=nsamples, msamples=msamples,
-                    suit=suit,
-                    plotting_meshes=plotting_meshes,
-                    **kwargs
-                )
-            self.bodies.append(body)
+            # if link_i>7:
+                mesh_name = link["visuals"][0]["geometry"]["uri"]
+                mesh_gpath = sdf_folder+mesh_name
+                initial_pose = np.array(link.pose).astype(x.cpu().numpy().dtype)
+                update_funcs = (
+                    lambda t: 180,
+                    [
+                        lambda t, initial_pose=initial_pose: -initial_pose[0],
+                        lambda t, initial_pose=initial_pose: -initial_pose[1],
+                    ]
+                    )
+                body = BodyMesh(
+                        device, x, y,
+                        mesh_gpath,
+                        update_funcs,
+                        eps=eps,
+                        compute_interp=compute_interp,
+                        nsamples=nsamples, msamples=msamples,
+                        suit=suit,
+                        plotting_meshes=plotting_meshes,
+                        **kwargs
+                    )
+                body.id = link_i
+                self.bodies.append(body)
+        self.nbodies = len(self.bodies)
         self.costum_update = costum_update
         self.compute_interp = compute_interp
 
         self.mu_funcs               = self.bodies[0].mu_funcs
         self.compute_sdf_properties = self.bodies[0].compute_sdf_properties
-        nbodies                     = len(self.sdf.links)
-        self.sdf_vals               = torch.zeros((nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
-        self.u_vals                 = torch.zeros((nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
-        self.v_vals                 = torch.zeros((nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
-        self.com_pos                = torch.zeros((nbodies,2),device=device)
+        self.sdf_vals = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
+        self.sdf_vals_u = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
+        self.sdf_vals_v = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
+        self.u_vals   = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
+        self.v_vals   = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
 
-        self.initialize() # initialize the sdf interpolation functions
+        self.sdf_val_u=torch.zeros_like(self.X)
+        self.sdf_val_v=torch.zeros_like(self.X)
+        self.com_pos  = torch.zeros((self.nbodies,2),device=device)
+
+
+        if not self.costum_update:
+            self.initialize() # initialize the sdf interpolation functions
 
 
     def initialize(self):
+        self.update(torch.tensor(0.0,device=self.device,dtype=self.dtype), 0)
 
-        for i, body in enumerate(self.bodies):
-            body.initialize()
-            self.sdf_vals[i]=body.sdf
+        # for i, body in enumerate(self.bodies):
+        #     body.initialize()
+        #     self.sdf_vals[i]=body.sdf
 
-        self.sdf_val = torch.min(self.sdf_vals,axis=0)[0]
+        # self.sdf_val = torch.min(self.sdf_vals,axis=0)[0]
 
-        if self.plotting:
-            var=self.sdf_val.cpu()
-            extent = (
-                torch.min(self.bodies[0].x.cpu()), torch.max(self.bodies[0].x.cpu()),
-                torch.min(self.bodies[0].y.cpu()), torch.max(self.bodies[0].y.cpu())
-            )
+        # if self.plotting:
+        #     var=self.sdf_val.cpu()
+        #     extent = (
+        #         torch.min(self.bodies[0].x.cpu()), torch.max(self.bodies[0].x.cpu()),
+        #         torch.min(self.bodies[0].y.cpu()), torch.max(self.bodies[0].y.cpu())
+        #     )
 
-            # visualize computed interpolation functions over the domain
-            plt.figure(figsize=(20,10))
-            plt.imshow(
-                var.T,
-                extent = extent,
-                origin = "lower",
-                interpolation=None
-            )
-            plt.contour(self.bodies[0].X.cpu(),self.bodies[0].Y.cpu(),var, colors='k', levels=[0])
-            plt.show()
+        #     # visualize computed interpolation functions over the domain
+        #     plt.figure(figsize=(20,10))
+        #     plt.imshow(
+        #         var.T,
+        #         extent = extent,
+        #         origin = "lower",
+        #         interpolation=None
+        #     )
+        #     plt.contour(self.bodies[0].X.cpu(),self.bodies[0].Y.cpu(),var, colors='k', levels=[0])
+        #     plt.show()
 
-        self.body_u=torch.zeros_like(self.bodies[0].X)
-        self.body_v=torch.zeros_like(self.bodies[0].X)
+        # self.body_u=torch.zeros_like(self.bodies[0].X)
+        # self.body_v=torch.zeros_like(self.bodies[0].X)
 
 
 
-    def update(self, t, dt=1):
+    def update(self, t, iteration, dt=1):
         (angles, translations) = self.costum_update(t)
         sdf_properties = []
         for body_i, body in enumerate(self.bodies):

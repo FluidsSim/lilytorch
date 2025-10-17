@@ -2,10 +2,17 @@
 
 import numpy as np
 from farms_amphibious.control.network import AnimatNetwork
-from scipy.spatial.transform import Rotation as R
+from scipy.spatial.transform import Rotation
 from lilytorch.solver import FluidSolver
 import torch
 from lilytorch.util.yaml_operations import yaml2pyobject
+
+class DummyController:
+    def __init__(self):
+        pass
+
+    def step(self, iteration, time, timestep):
+        pass
 
 class DragPositionController(AnimatNetwork):
 
@@ -39,8 +46,9 @@ class DragMuscleController(AnimatNetwork):
 
 class BDIMController(AnimatNetwork):
 
-    def __init__(self, animat_data, sim_options, controller, callback, yaml_file, n_iterations, control_type):
+    def __init__(self, animat_data, sim_options, controller, yaml_file, n_iterations, control_type):
         self.n_iterations = n_iterations
+        self.iteration=0
         super().__init__(data=animat_data, n_iterations=self.n_iterations)
         self.control_type = control_type
         if control_type == "torque":
@@ -49,12 +57,11 @@ class BDIMController(AnimatNetwork):
         self.animat_data               = animat_data
         self.controller                = controller
         self.controller.exit_iteration = self.n_iterations
-        self.callback                  = callback
         self.continue_sim              = True
 
         pars = yaml2pyobject(yaml_file)
 
-        self.fluid_solver = FluidSolver(pars, dtype=torch.float32, costum_update=None)
+        self.fluid_solver = FluidSolver(pars, dtype=torch.float32, costum_update=True)
 
         self.device = self.fluid_solver.device
         self.dtype=self.fluid_solver.X.dtype
@@ -65,6 +72,8 @@ class BDIMController(AnimatNetwork):
 
         self.fluid_solver.composite_body.update = self.update # modify the update rule
         self.fluid_stepper = self.fluid_solver.step_
+
+        # self.fluid_solver.composite_body.initialize()
 
 
         controller.pars.log_path = self.fluid_solver.save_path
@@ -77,85 +86,96 @@ class BDIMController(AnimatNetwork):
         animat_data.timestep = self.fluid_solver.dt
         sim_options["timestep"] = float(self.fluid_solver.dt)
 
-        _3d_2d_scaling=1
-        # scale forces by the z-bounding box size
-        # self.callback.force_scaling = 1/_3d_2d_scaling
-        self.callback.force_scaling = _3d_2d_scaling*np.array([np.diff(body.bb[2])[0] for body in self.fluid_solver.composite_body.bodies])
-        # self.callback.force_scaling=0.0455
-
-        print("Force scaling: ", self.callback.force_scaling)
-
 
 
     def update(self,t,iteration,dt=1):
         # iteration = int(t/dt)
-        com_pos = torch.from_numpy(np.array(self.data.sensors.links.com_positions()[iteration,:, :2]).astype(np.float32)).to(self.device)
-        urdf_pos = torch.from_numpy(np.array(self.data.sensors.links.urdf_positions()[iteration,:, :2]).astype(np.float32)).to(self.device)
-        lin_vel = torch.from_numpy(np.array(self.data.sensors.links.com_lin_velocities()[iteration,:,:2]))
-        ang_vel = torch.from_numpy(np.array([self.data.sensors.links.com_ang_velocity(iteration, link)[2] for link in range(self.nlinks)])) # only the z ang velocity in 2d
-        orientation = torch.from_numpy(np.array(self.data.sensors.links.urdf_orientations()[iteration]).astype(np.float32))
-        r = torch.from_numpy(R.from_quat(orientation).as_matrix()[:,:2,:2].astype(np.float32)).to(self.device)
 
-        for i, body in enumerate(self.fluid_solver.composite_body.bodies):
+        com_poses = torch.from_numpy(np.array(self.data.sensors.links.com_positions()[iteration,:, :2]).astype(np.float32)).to(self.device)
+        urdf_poses = torch.from_numpy(np.array(self.data.sensors.links.urdf_positions()[iteration,:, :2]).astype(np.float32)).to(self.device)
+        lin_vels = torch.from_numpy(np.array(self.data.sensors.links.com_lin_velocities()[iteration,:,:2]))
+        ang_vels = torch.from_numpy(np.array([self.data.sensors.links.com_ang_velocity(iteration, link)[2] for link in range(self.nlinks)])) # only the z ang velocity in 2d
+        orientation = torch.from_numpy(np.array(self.data.sensors.links.urdf_orientations()[iteration]).astype(np.float32))
+        r = torch.from_numpy(Rotation.from_quat(orientation).as_matrix()[:,:2,:2].astype(np.float32)).to(self.device)
+
+        for i, body in enumerate(self.fluid_solver.composite_body.bodies[:]):
+            id=body.id # id of the body in FARMS
+
+            R=r[id]
+            urdf_pos=urdf_poses[id]
+            lin_vel=lin_vels[id]
+            ang_vel=ang_vels[id]
+            com_pos=com_poses[id]
 
             # compute sdf values at the body points
-            r_com_p = body.stacked_xy-urdf_pos[i][:,None]
-            pos_trans = r[i].T@r_com_p
-            xpos = pos_trans[0].reshape(body.nx, body.ny)
-            ypos = pos_trans[1].reshape(body.nx, body.ny)
-            sdf_val = body.sdf_interp(
-                xpos,
-                ypos
-            )
-            self.fluid_solver.composite_body.sdf_vals[i]=sdf_val
+            pos_trans = R.T@(body.stacked_xy-urdf_pos[:,None])
+            newpos_u = pos_trans[0].reshape(body.nx, body.ny)
+            newpos_v = pos_trans[1].reshape(body.nx, body.ny)
+            self.fluid_solver.composite_body.sdf_vals[i]=body.sdf_interp(newpos_u, newpos_v)
+
+
+            # compute sdf values at the body points
+            pos_trans_u = R.T@(body.stacked_xy_u-urdf_pos[:,None])
+            newpos_u = pos_trans_u[0].reshape(body.nx, body.ny)
+            newpos_v = pos_trans_u[1].reshape(body.nx, body.ny)
+            self.fluid_solver.composite_body.sdf_vals_u[i]=body.sdf_interp(newpos_u, newpos_v)
+
+            pos_trans_v = R.T@(body.stacked_xy_v-urdf_pos[:,None])
+            newpos_u = pos_trans_v[0].reshape(body.nx, body.ny)
+            newpos_v = pos_trans_v[1].reshape(body.nx, body.ny)
+            self.fluid_solver.composite_body.sdf_vals_v[i]=body.sdf_interp(newpos_u, newpos_v)
 
             # compute v = v_lin_com + <v_ang_com, x-x_com>
-            self.fluid_solver.composite_body.u_vals[i]=lin_vel[i][0]-ang_vel[i]*(self.fluid_solver.Y-com_pos[i][1])
-            self.fluid_solver.composite_body.v_vals[i]=lin_vel[i][1]+ang_vel[i]*(self.fluid_solver.X-com_pos[i][0])
+            self.fluid_solver.composite_body.u_vals[i]=lin_vel[0]-ang_vel*(self.fluid_solver.Y-com_pos[1])
+            self.fluid_solver.composite_body.v_vals[i]=lin_vel[1]+ang_vel*(self.fluid_solver.X-com_pos[0])
 
             # store com positions for fluid->body force computation
-            self.fluid_solver.composite_body.com_pos[i]=com_pos[i]
-
+            self.fluid_solver.composite_body.com_pos[i]=com_pos
 
             # update the contour position
-            body.cnt_update = r[i] @ body.cnt+urdf_pos[i][:,None]
+            body.cnt_update = R @ body.cnt+urdf_pos[:,None]
 
             # compute the mask for the contour points
             x_cnt=body.cnt_update[0]
             y_cnt=body.cnt_update[1]
-            if i==0:
-                body_p=self.fluid_solver.composite_body.bodies[i+1]
-                pos_trans = r[i+1].T@(torch.stack((x_cnt,y_cnt))-urdf_pos[i+1][:,None])
-                sdf_p = body_p.sdf_interp(pos_trans[0],pos_trans[1])
-                mask=(sdf_p >= 0)
-            elif i==self.n_bodies-1:
-                body_m=self.fluid_solver.composite_body.bodies[i-1]
-                pos_trans = r[i-1].T@(torch.stack((x_cnt,y_cnt))-urdf_pos[i-1][:,None])
-                sdf_m = body_m.sdf_interp(pos_trans[0],pos_trans[1])
-                mask=(sdf_m >= 0)
-            else:
-                body_m=self.fluid_solver.composite_body.bodies[i-1]
-                pos_trans_m = r[i-1].T@(torch.stack((x_cnt,y_cnt))-urdf_pos[i-1][:,None])
-                body_p=self.fluid_solver.composite_body.bodies[i+1]
-                pos_trans_p = r[i+1].T@(torch.stack((x_cnt,y_cnt))-urdf_pos[i+1][:,None])
-                sdf_m = body_m.sdf_interp(pos_trans_m[0],pos_trans_m[1])
-                sdf_p = body_p.sdf_interp(pos_trans_p[0],pos_trans_p[1])
-                mask=(sdf_m >= 0) & (sdf_p >= 0)
+            # if i==0:
+            #     body_p=self.fluid_solver.composite_body.bodies[i+1]
+            #     pos_trans = r[i+1].T@(torch.stack((x_cnt,y_cnt))-urdf_pos[i+1][:,None])
+            #     sdf_p = body_p.sdf_interp(pos_trans[0],pos_trans[1])
+            #     mask=(sdf_p >= 0)
+            # elif i==self.n_bodies-1:
+            #     body_m=self.fluid_solver.composite_body.bodies[i-1]
+            #     pos_trans = r[i-1].T@(torch.stack((x_cnt,y_cnt))-urdf_pos[i-1][:,None])
+            #     sdf_m = body_m.sdf_interp(pos_trans[0],pos_trans[1])
+            #     mask=(sdf_m >= 0)
+            # else:
+            #     body_m=self.fluid_solver.composite_body.bodies[i-1]
+            #     pos_trans_m = r[i-1].T@(torch.stack((x_cnt,y_cnt))-urdf_pos[i-1][:,None])
+            #     body_p=self.fluid_solver.composite_body.bodies[i+1]
+            #     pos_trans_p = r[i+1].T@(torch.stack((x_cnt,y_cnt))-urdf_pos[i+1][:,None])
+            #     sdf_m = body_m.sdf_interp(pos_trans_m[0],pos_trans_m[1])
+            #     sdf_p = body_p.sdf_interp(pos_trans_p[0],pos_trans_p[1])
+            #     mask=(sdf_m >= 0) & (sdf_p >= 0)
 
 
-            body.cnt_u = lin_vel[i][0]-ang_vel[i]*(y_cnt-com_pos[i][1])
-            body.cnt_v = lin_vel[i][1]+ang_vel[i]*(x_cnt-com_pos[i][0])
-            body.r_com = body.cnt_update-com_pos[i][:,None] # moment arm
-            body.mask=mask
-            body.com_pos=com_pos[i]
 
+            body.cnt_u = lin_vel[0]-ang_vel*(y_cnt-com_pos[1])
+            body.cnt_v = lin_vel[1]+ang_vel*(x_cnt-com_pos[0])
+            body.r_com = body.cnt_update-com_pos[:,None] # moment arm
+            # body.mask=mask
+            body.com_pos=com_pos
 
         idx=self.fluid_solver.composite_body.sdf_vals.argmin(0).unsqueeze(0).expand(self.fluid_solver.composite_body.sdf_vals.shape)
-
         self.fluid_solver.composite_body.sdf_val=self.fluid_solver.composite_body.sdf_vals.gather(0,idx)[0].reshape(self.fluid_solver.nx,self.fluid_solver.ny)-self.fluid_solver.composite_body.suit
 
-        self.fluid_solver.composite_body.body_u=self.fluid_solver.composite_body.u_vals.gather(0,idx)[0].reshape(self.fluid_solver.nx,self.fluid_solver.ny)
-        self.fluid_solver.composite_body.body_v=self.fluid_solver.composite_body.v_vals.gather(0,idx)[0].reshape(self.fluid_solver.nx,self.fluid_solver.ny)
+        idx_u=self.fluid_solver.composite_body.sdf_vals_u.argmin(0).unsqueeze(0).expand(self.fluid_solver.composite_body.sdf_vals_u.shape)
+        self.fluid_solver.composite_body.sdf_val_u=self.fluid_solver.composite_body.sdf_vals_u.gather(0,idx_u)[0].reshape(self.fluid_solver.nx,self.fluid_solver.ny)-self.fluid_solver.composite_body.suit
+        self.fluid_solver.composite_body.body_u=self.fluid_solver.composite_body.u_vals.gather(0,idx_u)[0].reshape(self.fluid_solver.nx,self.fluid_solver.ny)
+
+        idx_v=self.fluid_solver.composite_body.sdf_vals_v.argmin(0).unsqueeze(0).expand(self.fluid_solver.composite_body.sdf_vals_v.shape)
+        self.fluid_solver.composite_body.sdf_val_v=self.fluid_solver.composite_body.sdf_vals_v.gather(0,idx_v)[0].reshape(self.fluid_solver.nx,self.fluid_solver.ny)-self.fluid_solver.composite_body.suit
+        self.fluid_solver.composite_body.body_v=self.fluid_solver.composite_body.v_vals.gather(0,idx_v)[0].reshape(self.fluid_solver.nx,self.fluid_solver.ny)
+
 
 
 
@@ -171,56 +191,63 @@ class BDIMController(AnimatNetwork):
 
     def update_ib(self,t,iteration,dt=1):
         # iteration = int(t/dt)
-        com_pos = torch.from_numpy(np.array(self.data.sensors.links.com_positions()[iteration,:, :2]).astype(np.float32)).to(self.device)
-        urdf_pos = torch.from_numpy(np.array(self.data.sensors.links.urdf_positions()[iteration,:, :2]).astype(np.float32)).to(self.device)
-        lin_vel = torch.from_numpy(np.array(self.data.sensors.links.com_lin_velocities()[iteration,:,:2]))
-        ang_vel = torch.from_numpy(np.array([self.data.sensors.links.com_ang_velocity(iteration, link)[2] for link in range(self.nlinks)])) # only the z ang velocity in 2d
+        com_poses = torch.from_numpy(np.array(self.data.sensors.links.com_positions()[iteration,:, :2]).astype(np.float32)).to(self.device)
+        urdf_poses = torch.from_numpy(np.array(self.data.sensors.links.urdf_positions()[iteration,:, :2]).astype(np.float32)).to(self.device)
+        lin_vels = torch.from_numpy(np.array(self.data.sensors.links.com_lin_velocities()[iteration,:,:2]))
+        ang_vels = torch.from_numpy(np.array([self.data.sensors.links.com_ang_velocity(iteration, link)[2] for link in range(self.nlinks)])) # only the z ang velocity in 2d
         orientation = torch.from_numpy(np.array(self.data.sensors.links.urdf_orientations()[iteration]).astype(np.float32))
-        r = torch.from_numpy(R.from_quat(orientation).as_matrix()[:,:2,:2].astype(np.float32)).to(self.device)
+        r = torch.from_numpy(Rotation.from_quat(orientation).as_matrix()[:,:2,:2].astype(np.float32)).to(self.device)
 
         for i, body in enumerate(self.fluid_solver.composite_body.bodies):
 
+            id=body.id # id of the body in FARMS
+
+            R=r[id]
+            urdf_pos=urdf_poses[id]
+            lin_vel=lin_vels[id]
+            ang_vel=ang_vels[id]
+            com_pos=com_poses[id]
 
             # update the contour position
-            body.cnt_update = r[i] @ body.cnt+urdf_pos[i][:,None]
+            body.cnt_update = R @ body.cnt+urdf_pos[:,None]
 
             # compute the mask (points inside the body)
             x_cnt=body.cnt_update[0]
             y_cnt=body.cnt_update[1]
-            if i==0:
+            if id==0:
                 body_p=self.fluid_solver.composite_body.bodies[i+1]
-                pos_trans = r[i+1].T@(torch.stack((x_cnt,y_cnt))-urdf_pos[i+1][:,None])
+                pos_trans = r[i+1].T@(torch.stack((x_cnt,y_cnt))-urdf_poses[i+1][:,None])
                 sdf_p = body_p.sdf_interp(pos_trans[0],pos_trans[1])
                 mask=(sdf_p >= 0)
-            elif i==self.n_bodies-1:
+            elif id==self.n_bodies-1:
                 body_m=self.fluid_solver.composite_body.bodies[i-1]
-                pos_trans = r[i-1].T@(torch.stack((x_cnt,y_cnt))-urdf_pos[i-1][:,None])
+                pos_trans = r[i-1].T@(torch.stack((x_cnt,y_cnt))-urdf_poses[i-1][:,None])
                 sdf_m = body_m.sdf_interp(pos_trans[0],pos_trans[1])
                 mask=(sdf_m >= 0)
             else:
                 body_m=self.fluid_solver.composite_body.bodies[i-1]
-                pos_trans_m = r[i-1].T@(torch.stack((x_cnt,y_cnt))-urdf_pos[i-1][:,None])
+                pos_trans_m = r[i-1].T@(torch.stack((x_cnt,y_cnt))-urdf_poses[i-1][:,None])
                 body_p=self.fluid_solver.composite_body.bodies[i+1]
-                pos_trans_p = r[i+1].T@(torch.stack((x_cnt,y_cnt))-urdf_pos[i+1][:,None])
+                pos_trans_p = r[i+1].T@(torch.stack((x_cnt,y_cnt))-urdf_poses[i+1][:,None])
                 sdf_m = body_m.sdf_interp(pos_trans_m[0],pos_trans_m[1])
                 sdf_p = body_p.sdf_interp(pos_trans_p[0],pos_trans_p[1])
                 mask=(sdf_m >= 0) & (sdf_p >= 0)
 
-            # if i<self.n_bodies-1:
-            #     body.first_set = (mask == True) & (body.sign_vec == 1)
-            #     body.second_set = (mask == True) & (body.sign_vec == -1)
-            # else:
-            #     body.first_set = (mask == True)
-            #     body.second_set = torch.zeros_like(mask).bool()
+            if i<self.n_bodies-1:
+                body.first_set = (mask == True) & (body.sign_vec == 1)
+                body.second_set = (mask == True) & (body.sign_vec == -1)
+            else:
+                body.first_set = (mask == True)
+                body.second_set = torch.zeros_like(mask).bool()
 
-            moment_arm = body.cnt_update-com_pos[i][:,None] # momment arm
-            body.cnt_u = lin_vel[i][0]-ang_vel[i]*(moment_arm[1])
-            body.cnt_v = lin_vel[i][1]+ang_vel[i]*(moment_arm[0])
+            moment_arm = body.cnt_update-com_pos[:,None] # momment arm
+            body.cnt_u = lin_vel[0]-ang_vel*(moment_arm[1])
+            body.cnt_v = lin_vel[1]+ang_vel*(moment_arm[0])
             body.r_com = moment_arm
             body.mask=mask
-            body.com_pos=com_pos[i]
+            body.com_pos=com_pos
 
-        self.fluid_solver.composite_body.com_pos = com_pos
+        self.fluid_solver.composite_body.com_pos = com_poses
 
 
         # all_points = [
@@ -509,44 +536,44 @@ class BDIMController(AnimatNetwork):
     def step(self, iteration, time, timestep):
         """Control step"""
 
-        if iteration>=self.n_iterations-1:
-            return
-
-        self.pos = np.array(self.data.sensors.joints.positions(iteration)[4:-1])
-        self.urdf_positions = np.array(self.data.sensors.links.urdf_positions()[iteration])
-        self.urdf_orientations = np.array(self.data.sensors.links.urdf_orientations()[iteration])
-
-        # === stepping the fluid solver ===
-        if not self.terminate:
-            (
-            self.fluid_solver.u0,
-            self.fluid_solver.v0,
-            self.fluid_solver.p0,
-            self.terminate,
-            ) = self.fluid_stepper(
-                self.fluid_solver.u0,
-                self.fluid_solver.v0,
-                self.fluid_solver.p0,
-                iteration,
-                time
-            )
-
-        # if not continue_sim: # stop sim is the fluid solver return an exit condition
-        #     if self.controller.exit_iteration==self.n_iterations:
-        #         self.controller.exit_iteration = iteration
+        # if iteration>=self.n_iterations-1:
         #     return
 
-        self.callback.friction_force_lin_x = self.callback.force_scaling*(self.fluid_solver.friction_force_lin_x).cpu().numpy()
-        self.callback.friction_force_lin_y = self.callback.force_scaling*(self.fluid_solver.friction_force_lin_y).cpu().numpy()
+        # self.pos = np.array(self.data.sensors.joints.positions(iteration)[4:-1])
+        # self.urdf_positions = np.array(self.data.sensors.links.urdf_positions()[iteration])
+        # self.urdf_orientations = np.array(self.data.sensors.links.urdf_orientations()[iteration])
 
-        self.callback.friction_force_ang_z = self.callback.force_scaling*(self.fluid_solver.friction_force_ang_z).cpu().numpy()
+        # # === stepping the fluid solver ===
+        # if not self.terminate:
+        #     (
+        #     self.fluid_solver.u0,
+        #     self.fluid_solver.v0,
+        #     self.fluid_solver.p0,
+        #     self.terminate,
+        #     ) = self.fluid_stepper(
+        #         self.fluid_solver.u0,
+        #         self.fluid_solver.v0,
+        #         self.fluid_solver.p0,
+        #         iteration,
+        #         time
+        #     )
 
-        self.callback.pressure_force_x = self.callback.force_scaling*(self.fluid_solver.pressure_force_x).cpu().numpy()
-        self.callback.pressure_force_y = self.callback.force_scaling*(self.fluid_solver.pressure_force_y).cpu().numpy()
+        # # if not continue_sim: # stop sim is the fluid solver return an exit condition
+        # #     if self.controller.exit_iteration==self.n_iterations:
+        # #         self.controller.exit_iteration = iteration
+        # #     return
 
-        if self.control_type == "torque":
-            # === stepping the controller ===
-            self.data.state.array[iteration] = np.concatenate([
-                self.controller.step(iteration, time, timestep, pos=self.pos, urdf_positions=self.urdf_positions),
-                self.offsets
-                ])
+        # self.callback.friction_force_lin_x = self.callback.force_scaling*(self.fluid_solver.friction_force_lin_x).cpu().numpy()
+        # self.callback.friction_force_lin_y = self.callback.force_scaling*(self.fluid_solver.friction_force_lin_y).cpu().numpy()
+
+        # self.callback.friction_force_ang_z = self.callback.force_scaling*(self.fluid_solver.friction_force_ang_z).cpu().numpy()
+
+        # self.callback.pressure_force_x = self.callback.force_scaling*(self.fluid_solver.pressure_force_x).cpu().numpy()
+        # self.callback.pressure_force_y = self.callback.force_scaling*(self.fluid_solver.pressure_force_y).cpu().numpy()
+
+        # if self.control_type == "torque":
+        #     # === stepping the controller ===
+        #     self.data.state.array[iteration] = np.concatenate([
+        #         self.controller.step(iteration, time, timestep, pos=self.pos, urdf_positions=self.urdf_positions),
+        #         self.offsets
+        #         ])

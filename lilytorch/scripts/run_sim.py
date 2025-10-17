@@ -9,6 +9,8 @@ import torch
 # pars = yaml2pyobject("lilytorch/scripts/flow_past_cylinder.yaml")
 # pars = yaml2pyobject("lilytorch/scripts/moving_cylinder_mesh.yaml")
 
+# pars = yaml2pyobject("lilytorch/scripts/flow_past_cylinder_nondimensional.yaml")
+
 pars = yaml2pyobject("lilytorch/scripts/moving_stick.yaml")
 
 # pars = yaml2pyobject("lilytorch/scripts/moving_cylinder_analytical.yaml")
@@ -20,7 +22,7 @@ pars = yaml2pyobject("lilytorch/scripts/moving_stick.yaml")
 # pars["output"]["save_uv"]     = False
 # pars["output"]["save_path"]   = "/data/andreaferrario/ns_data/"
 
-solver = FluidSolver(pars, dtype=torch.float32, compute_forces=False)
+solver = FluidSolver(pars, dtype=torch.float32, compute_forces=True)
 solver.run_sim()
 
 

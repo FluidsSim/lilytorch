@@ -11,17 +11,17 @@ solver :
   # ymax              : 1.5
 
   # ## smallest tank
-  # N                 : 256
-  # xmin              : -1.
+  # N                 : 512
+  # xmin              : -1.0
   # xmax              : 0.1
   # ymin              : -0.55
   # ymax              : 0.55
 
 
   ## small tank
-  N                 : 512
-  xmin              : -1
-  xmax              : 2
+  N                 : 1024
+  xmin              : -1.3
+  xmax              : 1.7
   ymin              : -1.5
   ymax              : 1.5
 
@@ -46,24 +46,24 @@ solver :
   # dt                : 0.001
 
   convection_method : "abdquickest"
-  dt                : 0.001
+  dt                : 0.0002
 
-  nt                : 80000
-  nu                : 500.0e-6
-  rho               : 1.0e+3
+  nt                : 800000
+  nu                : 0.01 #500.0e-6
+  rho               : 1.0 #1.0e+3
 
   poisson_tol       : 1.0e-7
   poisson_max_cycles: 5
-  jacobi_weight     : 0.8
-  poisson_nsmoothing: 25
-  poisson_verbose   : True
+  jacobi_weight     : 0.7
+  poisson_nsmoothing: 10
+  poisson_verbose   : False
   poisson_folder : "data/"
 
 
 boundary_conditions:
   BC_type_u:
-  - "N"
-  - "N"
+  - "D"
+  - "D"
   - "N"
   - "N"
   BC_values_u:
@@ -74,8 +74,8 @@ boundary_conditions:
   BC_type_v:
   - "N"
   - "N"
-  - "N"
-  - "N"
+  - "D"
+  - "D"
   BC_values_v:
   - 0
   - 0
@@ -87,7 +87,7 @@ body:
   sdf_name: "1guilla.sdf"
   sdf_folder: "/data/andreaferrario/lilytorch/lilytorch/1guillasim/models/1guilla_v1/sdf/"
   plotting: False
-  compute_interp: True
+  compute_interp: False
   plotting_meshes: False
   n_samples: (1000, 1000)
   update_maps:
@@ -95,14 +95,14 @@ body:
     translation:
       - None
       - None
-  suit: 0.01
+  suit: 0.0
   convexify: True
   scale: 1
 
 output:
   save_path: "/data/andreaferrario/ns_data/"
-  save_frames: True
-  save_every : 50
+  save_frames: False
+  save_every : 200
   vmin: -10
   vmax: 10
-  save_uv: False
+  save_uv: True

@@ -8,7 +8,7 @@ solver :
   ymin   : -1
   ymax   : 1
   nt     : 50000
-  nu     : 1.0e-6
+  nu     : 1.0e-4
   rho    : 1
 
   # convection_method : "implicit"
@@ -20,8 +20,8 @@ solver :
   poisson_tol       : 1.0e-7
   jacobi_weight     : 0.8
   poisson_max_cycles: 4
-  poisson_nsmoothing: 5
-  poisson_verbose   : False
+  poisson_nsmoothing: 10
+  poisson_verbose   : True
   poisson_folder : "lilytorch/data/"
 
 
@@ -29,8 +29,8 @@ solver :
 
 boundary_conditions:
   BC_type_u:
-  - "N"
-  - "N"
+  - "D"
+  - "D"
   - "N"
   - "N"
   BC_values_u:
@@ -41,8 +41,8 @@ boundary_conditions:
   BC_type_v:
   - "N"
   - "N"
-  - "N"
-  - "N"
+  - "D"
+  - "D"
   BC_values_v:
   - 0
   - 0
@@ -56,7 +56,7 @@ body:
   - "lambda x, y: box(x,y,xb=0.2,yb=0.03)"
   plotting: False
   update_maps:
-    - rotation: "lambda t: 50*torch.sin(t/5)"
+    - rotation: "lambda t: 50*t"
       translation:
         - "lambda t: 0*t"
         - "lambda t: 0*t"
@@ -70,7 +70,7 @@ output:
   save_path: "/data/andreaferrario/ns_data/"
   save_frames: True
   save_every : 20
-  vmin: -0.5
-  vmax: 0.5
+  vmin: -5
+  vmax: 5
   save_uv: False
 

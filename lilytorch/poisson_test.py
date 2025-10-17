@@ -18,7 +18,7 @@ class PoissonSolver:
         self.max_vcycles = max_vcycles
         self.nsmoothing  = nsmoothing
         self.verbose     = verbose
-        self.jcap_tol    = 1e-12
+        self.jcap_tol    = 1e-15
         self.n_switch    = 2**6
         self.w           = w # smoothing factor
 
@@ -30,10 +30,6 @@ class PoissonSolver:
         q[-1, :]   = q[-2, :]
         q[:, 0]    = q[:, 1]
         q[:, -1]   = q[:, -2]
-        # q[0, :]    = -q[1, :]
-        # q[-1, :]   = -q[-2, :]
-        # q[:, 0]    = -q[:, 1]
-        # q[:, -1]   = -q[:, -2]
 
     def FD_operator(self, p, ch, cv, h2):
         """
@@ -43,22 +39,24 @@ class PoissonSolver:
         Au = (ch[1:,:]*p[2:,1:-1]+ch[:-1,:]*p[:-2,1:-1]+cv[:,1:]*p[1:-1,2:]+cv[:,:-1]*p[1:-1,:-2])-J*p[1:-1,1:-1]
         return Au/h2, J/h2  # returns FDO and Jacobi operators
 
+    def compute_sum_J(self, ch, cv, p):
+        sum  = (ch[1:,:]*p[2:,1:-1]+ch[:-1,:]*p[:-2,1:-1]+cv[:,1:]*p[1:-1,2:]+cv[:,:-1]*p[1:-1,:-2])
+        J    = ch[1:,:]+ch[:-1,:]+cv[:,1:]+cv[:,:-1]
+        return sum, J
+
     def Jacobi(self, f, p, ch ,cv, h2):
         """
         Jacobi method
         """
         self.BC(p)
         for i in range(self.nsmoothing):
-
-            sum  = (ch[1:,:]*p[2:,1:-1]+ch[:-1,:]*p[:-2,1:-1]+cv[:,1:]*p[1:-1,2:]+cv[:,:-1]*p[1:-1,:-2])
-            J    = ch[1:,:]+ch[:-1,:]+cv[:,1:]+cv[:,:-1]
+            sum, J = self.compute_sum_J(ch, cv, p)
             Jinv = torch.where(torch.abs(J)<self.jcap_tol,0,1/J)
             p[1:-1,1:-1] = self.w*(-f*h2+sum)*Jinv+(1-self.w)*p[1:-1,1:-1]
             self.BC(p)
 
         # compute the residual
-        sum = (ch[1:,:]*p[2:,1:-1]+ch[:-1,:]*p[:-2,1:-1]+cv[:,1:]*p[1:-1,2:]+cv[:,:-1]*p[1:-1,:-2])
-        J   = ch[1:,:]+ch[:-1,:]+cv[:,1:]+cv[:,:-1]
+        sum, J = self.compute_sum_J(ch, cv, p)
         Au  = (sum-J*p[1:-1,1:-1])/h2
         r   = f-Au
         return p, r
@@ -76,7 +74,6 @@ class PoissonSolver:
         # smoothing
         p, r = self.Jacobi(f, p, ch, cv, h2)
 
-
         if n>8:
 
             if n==self.n_switch and self.device=="cuda":
@@ -88,9 +85,20 @@ class PoissonSolver:
                 r  = r.cpu()
 
 
-            # restriction
-            ch_coarse = 0.5*(ch[::2,1::2]+ch[::2,:-1:2])
-            cv_coarse = 0.5*(cv[1::2,::2]+cv[:-1:2,::2])
+            # # restriction
+            # ch_coarse = 0.5*(ch[::2,1::2]+ch[::2,:-1:2])
+            # cv_coarse = 0.5*(cv[1::2,::2]+cv[:-1:2,::2])
+
+            # ch_coarse, cv_coarse = self.restrict_coeffs(ch,cv,n)
+
+            ch_coarse = 0.5*(ch[::2,::2]+ch[::2,1::2])
+            cv_coarse = 0.5*(cv[::2,::2]+cv[1::2,::2])
+
+            # import matplotlib.pyplot as plt
+            # plt.imshow(ch_coarse.cpu().T,origin="lower")
+            # plt.colorbar()
+            # plt.title("ch coarse")
+            # plt.show()
 
             # r_coarse  = r[::2,::2]
             r_coarse = 0.25*(
@@ -145,7 +153,8 @@ class PoissonSolver:
             r_err = self.l2_norm(r)
             if r_err<self.tol:
                 break
-        p=torch.where(c<self.jcap_tol,0,p-p.mean())
+        p-=p.mean()
+        # p=torch.where(c<self.jcap_tol,0,p-p.mean())
         if self.verbose:
             print("Multigrid residual = {}/{} with {}/{} cycles \n".format(r_err,self.tol, cycle+1, self.max_vcycles))
 

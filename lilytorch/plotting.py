@@ -624,12 +624,12 @@ def plot2d_imshow_composite_quiver(X,Y,u,bodies,normal_x,normal_y,extent,iterati
         for i, body in enumerate(bodies):
             # d = body.sdf.cpu()
             # plt.contour(X,Y,d, colors='k', levels=[0],linewidths=0.3)
-            # plt.scatter(body.cnt_update[0][body.mask].cpu(), body.cnt_update[1][body.mask].cpu(), c=body.cnt_u[body.mask].cpu().detach().numpy(), cmap=cm.RdBu, s=0.5)
-            plt.scatter(body.cnt_update[0].cpu(), body.cnt_update[1].cpu(), c='k', s=0.1)
+            plt.scatter(body.cnt_update[0][body.mask].cpu(), body.cnt_update[1][body.mask].cpu(), c="k", cmap=cm.RdBu, s=0.5)
+            # plt.scatter(body.cnt_update[0].cpu(), body.cnt_update[1].cpu(), c='k', s=0.1)
 
             # plt.fill(body.cnt_update[0].cpu(), body.cnt_update[1].cpu(), color="#000000")
 
-            plt.plot(body.com_pos[0].cpu(), body.com_pos[1].cpu(), 'ro', markersize=5)
+            # plt.plot(body.com_pos[0].cpu(), body.com_pos[1].cpu(), 'ro', markersize=5)
 
             # plt.plot(body.cnt_update[0].cpu(), body.cnt_update[1].cpu(), 'k',linewidth=0.5)
 

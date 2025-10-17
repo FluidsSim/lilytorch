@@ -139,10 +139,10 @@ def run_experiment(pars):
             raise ValueError(f"Unknown control type: {control_type}, need position or torque")
     elif pars.swimming_mode=="bdim":
         print('Using bdim swimming mode')
+        animat_network = BDIMController(animat_data, sim_options, controller, controller.pars.yaml_file, sim_options.n_iterations, control_type)
         options['callbacks'] += [
-                callbacks.FluidCallback(animat_options, arena_options),
+                callbacks.FluidCallback(animat_options, arena_options, animat_network),
             ]
-        animat_network = BDIMController(animat_data, sim_options, controller, options['callbacks'][-1], controller.pars.yaml_file, sim_options.n_iterations, control_type)
     else:
         raise ValueError(f"Unknown swimming mode: {pars.swimming_mode}")
 

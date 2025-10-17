@@ -272,20 +272,10 @@ class AdvDiffSolver:
 
     def solve_ADBQUICKEST(self, u, v, iteration=0):
         # following lilipad notation
-        # if (b.btype == 1) {
-        # uo = 0.5*(x.a[i-1][j]+x.a[i][j]); //0.5*(u[-2:,1:-1]+u[1:-1,1:-1])
-        # ue = 0.5*(x.a[i+1][j]+x.a[i][j]); //.0.5*(u[2:,1:-1]+u[1:-1,1:-1])
-        # vs = 0.5*(y.a[i][j]+y.a[i-1][j]); //0.5*(v[1:-1,1:-1]+v[-2:,1:-1])
-        # vn = 0.5*(y.a[i][j+1]+y.a[i-1][j+1]); //0.5*(v[1:-1,2:]+v[:-2,2:])
-        # }
-        # else {
-        # uo = 0.5*(x.a[i][j-1]+x.a[i][j]); //0.5*(u[1:-1,:-2]+u[1:-1,1:-1])
-        # ue = 0.5*(x.a[i+1][j-1]+x.a[i+1][j]); //0.5*(u[2:,:-2]+u[2:,1:-1])
-        # vs = 0.5*(y.a[i][j-1]+y.a[i][j]); //0.5*(v[1:-1,:-2]+v[1:-1,1:-1])
-        # vn = 0.5*(y.a[i][j]+y.a[i][j+1]); //0.5*(v[1:-1,1:-1]+v[1:-1,2:])
-        # }
-
-
+        # uo = 0.5*(x.a[i-1][j]+x.a[i][j]);
+        # ue = 0.5*(x.a[i+1][j]+x.a[i][j]);
+        # vs = 0.5*(y.a[i][j]+y.a[i-1][j]);
+        # vn = 0.5*(y.a[i][j+1]+y.a[i-1][j+1]);
         uw = 0.5*(u[:-2,1:-1]+u[1:-1,1:-1])
         ue = 0.5*(u[2:,1:-1]+u[1:-1,1:-1])
         vs = 0.5*(v[:-2,1:-1]+v[1:-1,1:-1])
@@ -298,6 +288,10 @@ class AdvDiffSolver:
                         self.nu*self.dtdx2*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
                         )
 
+        # uo = 0.5*(x.a[i][j-1]+x.a[i][j]);
+        # ue = 0.5*(x.a[i+1][j-1]+x.a[i+1][j]);
+        # vs = 0.5*(y.a[i][j-1]+y.a[i][j]);
+        # vn = 0.5*(y.a[i][j]+y.a[i][j+1]);
         uw = 0.5*(u[1:-1,:-2]+u[1:-1,1:-1])
         ue = 0.5*(u[2:,:-2]+u[2:,1:-1])
         vs = 0.5*(v[1:-1,:-2]+v[1:-1,1:-1])
@@ -395,31 +389,15 @@ class AdvDiffSolver:
         v[0,:]  = v[1,:]
         v[:,-1] = v[:,-2]
 
-        # u[1,:]=0
-        # u[-2,:]=0
+        if self.BC_type_u[0]=="D":
+            u[0, :]=self.BC_values_u[0]
+        if self.BC_type_u[1]=="D":
+            u[-1,:]=self.BC_values_u[1]
 
-        # v[:,1]=0
-        # v[:,-2]=0
-
-
-
-        # if self.BC_type_u[0]=="D":
-        #     u[1, :]=self.BC_values_u[0]
-        # if self.BC_type_u[1]=="D":
-        #     u[-2,:]=self.BC_values_u[1]
-        # if self.BC_type_u[2]=="D":
-        #     u[:,1]=self.BC_values_u[2]
-        # if self.BC_type_u[3]=="D":
-        #     u[:,-2]=self.BC_values_u[3]
-
-        # if self.BC_type_v[0]=="D":
-        #     v[1, :]=self.BC_values_v[0]
-        # if self.BC_type_v[1]=="D":
-        #     v[-2,:]=self.BC_values_v[1]
-        # if self.BC_type_v[2]=="D":
-        #     v[:,1]=self.BC_values_v[2]
-        # if self.BC_type_v[3]=="D":
-        #     v[:,-2]=self.BC_values_v[3]
+        if self.BC_type_v[2]=="D":
+            v[:,0]=self.BC_values_v[2]
+        if self.BC_type_v[3]=="D":
+            v[:,-1]=self.BC_values_v[3]
 
 
         # elif self.BC_type_u[1]=="N":

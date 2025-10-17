@@ -136,12 +136,14 @@ class FluidCallback(TaskCallback):
             self,
             animat_options: AmphibiousOptions,
             arena_options: AmphibiousArenaOptions,
+            bdim_controller, # BDIMController
             substep=True,
     ):
         super().__init__(substep=substep)
-        self.animat_options       = animat_options
-        self.arena_options        = arena_options
-        self.nfrc                 = len(self.animat_options['control']['sensors']['xfrc'])
+        self.animat_options  = animat_options
+        self.arena_options   = arena_options
+        self.bdim_controller = bdim_controller
+        self.nfrc            = len(self.animat_options['control']['sensors']['xfrc'])
 
         self.friction_force_lin_x = np.zeros(self.nfrc)
         self.friction_force_lin_y = np.zeros(self.nfrc)
@@ -150,13 +152,76 @@ class FluidCallback(TaskCallback):
         self.pressure_force_y     = np.zeros(self.nfrc)
         self.pressure_force_ang_z = np.zeros(self.nfrc)
 
+
+        _3d_2d_scaling=1 # TO CONVERT FROM RHO GIVEN IN NON-DIMENSIONAL FORM OF THE NS EQUATIONS TO ACTUAL RHO (DENSITY) IN MUJOCO
+        # scale forces by the z-bounding box size
+        # self.force_scaling = 1/_3d_2d_scaling
+        # self.force_scaling =_3d_2d_scaling*np.array([np.diff(body.bb[2])[0] for body in self.fluid_solver.composite_body.bodies])
+        self.force_scaling=1 #0.0455*1000/float(self.bdim_controller.fluid_solver.rho) # scale by
+
+        print("Force scaling: ", self.force_scaling)
+
+
+
     def after_step(self, task, physics):
     # def before_step(self, task, action, physics):
         """Step hydrodynamics"""
         indices = task.maps['sensors']['data2xfrc']
 
+
+        iteration= self.bdim_controller.iteration
+        timestep = task.timestep
+        time    = iteration*timestep
+
+        if iteration>=self.bdim_controller.n_iterations-1:
+            return
+
+
+        # === stepping the fluid solver ===
+        if not self.bdim_controller.terminate:
+            (
+            self.bdim_controller.fluid_solver.u0,
+            self.bdim_controller.fluid_solver.v0,
+            self.bdim_controller.fluid_solver.p0,
+            self.bdim_controller.terminate,
+            ) = self.bdim_controller.fluid_stepper(
+                self.bdim_controller.fluid_solver.u0,
+                self.bdim_controller.fluid_solver.v0,
+                self.bdim_controller.fluid_solver.p0,
+                iteration,
+                time
+            )
+
+        # if not continue_sim: # stop sim is the fluid solver return an exit condition
+        #     if self.controller.exit_iteration==self.n_iterations:
+        #         self.controller.exit_iteration = iteration
+        #     return
+
+        self.friction_force_lin_x = self.force_scaling*(self.bdim_controller.fluid_solver.friction_force_lin_x).cpu().numpy()
+        self.friction_force_lin_y = self.force_scaling*(self.bdim_controller.fluid_solver.friction_force_lin_y).cpu().numpy()
+        self.friction_force_ang_z = self.force_scaling*(self.bdim_controller.fluid_solver.friction_force_ang_z).cpu().numpy()
+
+        self.pressure_force_x = self.force_scaling*(self.bdim_controller.fluid_solver.pressure_force_x).cpu().numpy()
+        self.pressure_force_y = self.force_scaling*(self.bdim_controller.fluid_solver.pressure_force_y).cpu().numpy()
+        self.pressure_force_ang_z = self.force_scaling*(self.bdim_controller.fluid_solver.pressure_force_ang_z).cpu().numpy()
+
+        if self.bdim_controller.control_type == "torque":
+            # === stepping the controller ===
+
+            pos = np.array(self.data.sensors.joints.positions(iteration)[4:-1])
+            urdf_positions = np.array(self.data.sensors.links.urdf_positions()[iteration])
+            urdf_orientations = np.array(self.data.sensors.links.urdf_orientations()[iteration])
+
+            self.data.state.array[iteration] = np.concatenate([
+                self.controller.step(iteration, time, timestep, pos=pos, urdf_positions=urdf_positions),
+                self.offsets
+                ])
+
         physics.data.xfrc_applied[indices, 0] = (self.friction_force_lin_x + self.pressure_force_x) * task.units.newtons
         physics.data.xfrc_applied[indices, 1] = (self.friction_force_lin_y + self.pressure_force_y) * task.units.newtons
         physics.data.xfrc_applied[indices, 5] = (self.friction_force_ang_z + self.pressure_force_ang_z) * task.units.newtons
 
-        # print(physics.data.xfrc_applied[indices,0])
+        print(physics.data.xfrc_applied[indices,0])
+
+
+        self.bdim_controller.iteration+=1
