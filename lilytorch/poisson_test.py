@@ -18,12 +18,13 @@ class PoissonSolver:
         self.max_vcycles = max_vcycles
         self.nsmoothing  = nsmoothing
         self.verbose     = verbose
-        self.jcap_tol    = 1e-15
+        self.jcap_tol    = 1e-12
         self.n_switch    = 2**6
         self.w           = w # smoothing factor
 
     def l2_norm(self, r):
-        return torch.tensordot(r,r)/(r.shape[0]*r.shape[1]) #  torch.sqrt((r**2).sum())  # L2 norm of the residual
+        return torch.tensordot(r,r)/(r.shape[0]*r.shape[1]) #
+        # return torch.sqrt((r**2).sum())  # L2 norm of the residual
 
     def BC(self, q):
         q[0, :]    = q[1, :]
@@ -39,24 +40,34 @@ class PoissonSolver:
         Au = (ch[1:,:]*p[2:,1:-1]+ch[:-1,:]*p[:-2,1:-1]+cv[:,1:]*p[1:-1,2:]+cv[:,:-1]*p[1:-1,:-2])-J*p[1:-1,1:-1]
         return Au/h2, J/h2  # returns FDO and Jacobi operators
 
-    def compute_sum_J(self, ch, cv, p):
-        sum  = (ch[1:,:]*p[2:,1:-1]+ch[:-1,:]*p[:-2,1:-1]+cv[:,1:]*p[1:-1,2:]+cv[:,:-1]*p[1:-1,:-2])
-        J    = ch[1:,:]+ch[:-1,:]+cv[:,1:]+cv[:,:-1]
-        return sum, J
+    def compute_sum(self,ch, cv, p):
+        """
+        compute the sum term in the FD operator
+        """
+        return ch[1:,:]*p[2:,1:-1]+ch[:-1,:]*p[:-2,1:-1]+cv[:,1:]*p[1:-1,2:]+cv[:,:-1]*p[1:-1,:-2]
+
+    def compute_J(self, ch, cv):
+        """
+        compute the J term in the FD operator
+        """
+        return ch[1:,:]+ch[:-1,:]+cv[:,1:]+cv[:,:-1]
+
 
     def Jacobi(self, f, p, ch ,cv, h2):
         """
         Jacobi method
         """
         self.BC(p)
+        J = self.compute_J(ch, cv)
+        Jinv = torch.where(torch.abs(J)<self.jcap_tol,1,1/J)
         for i in range(self.nsmoothing):
-            sum, J = self.compute_sum_J(ch, cv, p)
-            Jinv = torch.where(torch.abs(J)<self.jcap_tol,0,1/J)
+            sum = self.compute_sum(ch, cv, p)
             p[1:-1,1:-1] = self.w*(-f*h2+sum)*Jinv+(1-self.w)*p[1:-1,1:-1]
             self.BC(p)
 
         # compute the residual
-        sum, J = self.compute_sum_J(ch, cv, p)
+        sum=self.compute_sum(ch, cv, p)
+        J=self.compute_J(ch, cv)
         Au  = (sum-J*p[1:-1,1:-1])/h2
         r   = f-Au
         return p, r
@@ -253,39 +264,34 @@ class PoissonSolver:
         ch=kwargs.pop("ch", (c[1:,1:-1]+c[:-1,1:-1])/2)
         cv=kwargs.pop("cv", (c[1:-1,1:]+c[1:-1,:-1])/2)
 
-        Au,J=self.FD_operator(p, ch, cv, self.h2)
+        Au,_=self.FD_operator(p, ch, cv, self.h2)
         r=f-Au
         # z, r = self.Jacobi(r, torch.zeros_like(p), ch ,cv, self.h2)
         z, _ = self.vcycle(r, torch.zeros_like(p), c, self.h2, ch=ch, cv=cv)
 
-        d=z
-        old_norm=torch.tensordot(r,z[1:-1,1:-1])
+        d = z.clone().detach()
+        old_z = z.clone().detach()
 
         for cycle in range(self.max_cycles+1):
 
-            self.BC(d)
+            Ad, _ = self.FD_operator(d, ch, cv, self.h2)
 
-            Ad,J=self.FD_operator(d, ch, cv, self.h2)
-            Jinv = torch.where(torch.abs(J)<self.jcap_tol,0,1/J)
+            alpha = torch.tensordot(r, z[1:-1,1:-1]) / torch.tensordot(d[1:-1,1:-1], Ad)
 
-            alpha=old_norm/torch.tensordot(d[1:-1,1:-1],Ad)
+            p = p + alpha * d
+            r = r - alpha * Ad
 
-            p=p+alpha*d
-            r=r-alpha*Ad
-
-            if self.l2_norm(r)<self.tol:
+            if self.l2_norm(r) < self.tol:
                 break
 
-            # z, _=self.Jacobi(r, torch.zeros_like(p), ch ,cv, self.h2)
             z, _ = self.vcycle(r, torch.zeros_like(p), c, self.h2, ch=ch, cv=cv)
 
-            new_norm=torch.tensordot(r,z[1:-1,1:-1])
+            beta = torch.tensordot(z[1:-1,1:-1], r) / torch.tensordot(old_z[1:-1,1:-1], r + alpha * Ad)
+            d = z + beta * d
 
-            d=z+d*(new_norm/old_norm)
+            old_z = z.clone().detach()
 
-            old_norm=new_norm
-
-        self.BC(p)
+        # self.BC(p)
         p-=p.mean()
 
         if self.verbose:
@@ -322,7 +328,7 @@ def test_solvers():
         verbose=True,
         max_cycles=20,
         max_vcycles=20,
-        nsmoothing=10,
+        nsmoothing=50,
         tol=1e-5,
         w=0.9
     )
@@ -334,9 +340,9 @@ def test_solvers():
 
     u_pcg, r_pcg = solver.PCG(f, u0, c, ch=ch, cv=cv)
 
-    u_jac, r_jac = solver.Jacobi(f, u0, ch ,cv, h*h)
+    # u_jac, r_jac = solver.Jacobi(f, u0, ch ,cv, h*h)
 
-    # u_mpcg, r_mpcg = solver.MPCG(f, u0, c, ch=ch, cv=cv)
+    u_mpcg, r_mpcg = solver.MPCG(f, u0, c, ch=ch, cv=cv)
 
 
     import matplotlib.pyplot as plt
@@ -376,7 +382,7 @@ def test_solvers():
     ax_3.set_title("PCG")
     fig.colorbar(CS3)
 
-    CS4=ax_4.imshow(u_jac.cpu().T,origin = "lower",cmap=cmap)
+    CS4=ax_4.imshow(u_mpcg.cpu().T,origin = "lower",cmap=cmap)
     ax_4.set_title("MPCG")
     fig.colorbar(CS4)
 
@@ -399,7 +405,7 @@ def test_solvers():
     ax_3.set_title("PCG")
     fig.colorbar(CS3)
 
-    CS4=ax_4.imshow(r_jac.cpu().T,origin = "lower",cmap=cmap)
+    CS4=ax_4.imshow(r_mpcg.cpu().T,origin = "lower",cmap=cmap)
     ax_4.set_title("MPCG")
     fig.colorbar(CS4)
 

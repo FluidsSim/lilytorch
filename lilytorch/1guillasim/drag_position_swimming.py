@@ -74,9 +74,9 @@ def main(amp,freq,twl,nmotors):
 
 if __name__ == '__main__':
     # main()
-    freq=0.5
+    freq=1
     twl=12 #14
     nmotors=8
-    for amp in [40]: #np.arange(20,60,10):
+    for amp in [20]: #np.arange(20,60,10):
         main(amp,freq,twl,nmotors)
 

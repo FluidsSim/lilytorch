@@ -16,16 +16,22 @@ pars = yaml2pyobject("lilytorch/scripts/flow_past_cylinder.yaml")
 R = 0.1 # radius of the cylinder
 final_conv_time = 7.0 # final convective time to simulate
 
-pars["solver"]["xmin"] = -1
-pars["solver"]["xmax"] = 1
-pars["solver"]["ymin"] = -1
-pars["solver"]["ymax"] = 1
-pars["solver"]["N"]    = 512
-pars["body"]["sdf"]    = ["lambda x, y: circle(x,y,xt={},yt=0,r={})".format(pars["solver"]["xmin"]+7*R,R)]
+# pars["solver"]["xmin"] = -1
+# pars["solver"]["xmax"] = 1
+# pars["solver"]["ymin"] = -1
+# pars["solver"]["ymax"] = 1
+# pars["solver"]["N"]    = 512
+
+pars["solver"]["xmin"] = -0.5
+pars["solver"]["xmax"] = 0.5
+pars["solver"]["ymin"] = -0.5
+pars["solver"]["ymax"] = 0.5
+pars["solver"]["N"]    = 256
+pars["body"]["sdf"]    = ["lambda x, y: circle(x,y,xt={},yt=0,r={})".format(0,R)]
 
 u_inlet = pars["boundary_conditions"]["BC_values_u"]
 
-pars["output"]["save_frames"] = False
+pars["output"]["save_frames"] = True
 pars["output"]["save_every"]=50
 path=pars["output"]["save_path"] + pars["output"]["results_folder"]
 
@@ -78,8 +84,8 @@ def analyze_results():
 
     plt.figure(figsize=(8, 4))
     plt.title("Re = %.2f" % Re)
-    # plt.plot(convective_time,viscous_drag_coeff,'b')
-    # plt.plot(convective_time,pressure_drag_coeff,'r')
+    plt.plot(convective_time,viscous_drag_coeff,'b')
+    plt.plot(convective_time,pressure_drag_coeff,'r')
     plt.plot(convective_time,total_drag_coeff,'k', label="Our")
     plt.plot(data[:,0],data[:,1],'k--',label="Koumoutsakos & Leonard 1995")
     plt.xlim([convective_time[0],convective_time[-1]])
@@ -88,13 +94,13 @@ def analyze_results():
     plt.xlim([0,7])
     plt.ylabel("Drag Coefficient")
     plt.legend()
-    plt.savefig("figures/drag_force_flow_past_cylinder_"+pars["solver"]["convection_method"]+".png")
+    plt.savefig(path+"/drag_force_flow_past_cylinder_"+pars["solver"]["convection_method"]+".png")
 
 
 
 
 if __name__ == "__main__":
-    # run_sim()
+    run_sim()
     analyze_results()
 
 

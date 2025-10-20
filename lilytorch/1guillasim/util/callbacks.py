@@ -153,10 +153,11 @@ class FluidCallback(TaskCallback):
         self.pressure_force_ang_z = np.zeros(self.nfrc)
 
 
-        _3d_2d_scaling=1 # TO CONVERT FROM RHO GIVEN IN NON-DIMENSIONAL FORM OF THE NS EQUATIONS TO ACTUAL RHO (DENSITY) IN MUJOCO
-        # scale forces by the z-bounding box size
+        # _3d_2d_scaling=1000 # TO CONVERT FROM RHO GIVEN IN NON-DIMENSIONAL FORM OF THE NS EQUATIONS TO ACTUAL RHO (DENSITY) IN MUJOCO
+        # # scale forces by the z-bounding box size
+        # self.force_scaling =_3d_2d_scaling*np.array([np.diff(body.bb[2])[0] for body in self.bdim_controller.fluid_solver.composite_body.bodies])
+
         # self.force_scaling = 1/_3d_2d_scaling
-        # self.force_scaling =_3d_2d_scaling*np.array([np.diff(body.bb[2])[0] for body in self.fluid_solver.composite_body.bodies])
         self.force_scaling=1 #0.0455*1000/float(self.bdim_controller.fluid_solver.rho) # scale by
 
         print("Force scaling: ", self.force_scaling)

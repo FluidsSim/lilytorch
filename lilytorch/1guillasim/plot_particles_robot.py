@@ -7,18 +7,20 @@ from pytorch_interp import RegularGridInterpolator
 import os
 import matplotlib.pyplot as plt
 
-dir               = "/data/andreaferrario/ns_data/2025-10-16T19:46:01.461470/"
+dir               = "/data/andreaferrario/ns_data/1guilla_experiments/2025-10-17T12:21:35.124532/"
 # dir               = "/data/andreaferrario/ns_data/2025-10-06T11:25:04.426659/"
 
 
-it_spacing = 50
 it_start = 0
-it_end = 152400
+it_end = 92000
 
 device="cpu"
 dtype=torch.float32
 
 fluid_pars = yaml2pyobject(dir+"parameters.yaml")
+
+it_spacing = fluid_pars["output"]["save_every"]
+
 
 N    = fluid_pars["solver"]["N"]
 xmin = fluid_pars["solver"]["xmin"]
@@ -37,7 +39,7 @@ n_bodies = 8
 # controller = load_object(dir+"/controller0")
 # timestep = controller.pars.timestep
 
-timestep = 0.0001
+timestep = 0.0002
 
 u_interp = RegularGridInterpolator(
     (x,y),

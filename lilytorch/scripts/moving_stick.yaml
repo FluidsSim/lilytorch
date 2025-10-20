@@ -18,7 +18,7 @@ solver :
   dt     : 0.01
 
   poisson_tol       : 1.0e-7
-  jacobi_weight     : 0.8
+  jacobi_weight     : 0.9
   poisson_max_cycles: 4
   poisson_nsmoothing: 10
   poisson_verbose   : True

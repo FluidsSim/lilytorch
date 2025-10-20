@@ -19,9 +19,10 @@ solver :
 
   poisson_tol       : 1.0e-5
   jacobi_weight     : 0.8
+  poisson_max_mgcg_cycles: 10
   poisson_max_cycles: 10
   poisson_nsmoothing: 50
-  poisson_verbose   : False
+  poisson_verbose   : True
   poisson_folder : "lilytorch/data/"
 
 boundary_conditions:
@@ -60,7 +61,7 @@ body:
 output:
   save_path: "/data/andreaferrario/ns_data/"
   save_frames: True
-  save_every : 10
+  save_every : 20
   vmin: -0.1
   vmax: 0.1
   save_uv: False

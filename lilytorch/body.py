@@ -523,18 +523,34 @@ class BodyAnalytical(Body):
         ####### initial sdf at cc nodes to compute contour
         xmid=(self.x.min()+self.x.max())/2
         ymid=(self.y.min()+self.y.max())/2
-        pos_u = self.stacked_xy[0].reshape(self.nx, self.ny)
-        pos_v = self.stacked_xy[1].reshape(self.nx, self.ny)
-        self.sdf = self.sdf_fun(pos_u, pos_v)
+
+        # pos_u = (self.stacked_xy[0]).reshape(self.nx, self.ny)
+        # pos_v = (self.stacked_xy[1]).reshape(self.nx, self.ny)
+        # self.sdf = self.sdf_fun(pos_u, pos_v)
+
+        # compute sdf at init
+        (trans, rot) = self.rototranslate_points(torch.tensor(0.0))
+        translpoints=self.stacked_xy-trans
+        newpoints_u=rot.T@translpoints
+        newpos_u = newpoints_u[0].reshape(self.nx, self.ny)
+        newpos_v = newpoints_u[1].reshape(self.nx, self.ny)
+        self.sdf = self.sdf_fun(newpos_u, newpos_v)
 
         # find contour lines
         sdf_np=self.sdf.cpu().numpy()
         xnp = self.x.cpu().numpy()
         ynp = self.y.cpu().numpy()
+
+
         cnt = np.array(measure.find_contours(sdf_np, 0)[0]).T
+        cnt = rot.cpu().numpy().T@(cnt-self.com_pos.cpu().numpy()[::,None])
+
         cnt[0]=xnp[0]+cnt[0]*(xnp[1]-xnp[0])
         cnt[1]=ynp[0]+cnt[1]*(ynp[1]-ynp[0])
+
+
         curv_coord = np.cumsum(np.sqrt(np.sum(np.diff(cnt, axis=1)**2, axis=0)))
+
 
         # # resample contour lines for uniform spacing with spacing self.dx
         ds=self.dx #0.5*torch.sqrt(torch.tensor(self.dx**2+self.dy**2))
@@ -556,7 +572,7 @@ class BodyAnalytical(Body):
             cmap = cm.get_cmap('RdBu')
             n_points = self.cnt_update.shape[1]
             colors = cmap(np.linspace(0, 1, n_points))
-            plt.scatter(self.cnt_update[0], self.cnt_update[1], c=colors, cmap=cmap, s=10)
+            plt.scatter(self.cnt_update[0].cpu(), self.cnt_update[1].cpu(), c=colors, cmap=cmap, s=10)
             plt.show()
 
 
@@ -571,13 +587,13 @@ class BodyAnalytical(Body):
         self.mask = torch.arange(len(self.curv_coord), device=self.device)
         self.com_pos = torch.zeros((2), device=self.device, dtype=self.dtype)
 
-        self.update(torch.tensor(0.0),0)
+        self.update(torch.tensor(0.0),0, update_cnt=False)
 
 
         return
 
 
-    def update(self, t, iteration, dt=1):
+    def rototranslate_points(self, t):
         """
         Apply rototranslation and update the sdf properties
         Assumes that the rotations happen around the origin of the reference frame (i.e. the center of rotation is (0,0))
@@ -604,6 +620,14 @@ class BodyAnalytical(Body):
                         torch.stack([s, c])])
         trans = torch.stack((transl[0]*self.ones_stacked, transl[1]*self.ones_stacked))
 
+        return (trans, rot)
+
+
+
+    def update(self, t, iteration, dt=1, update_cnt=True):
+
+        (trans, rot) = self.rototranslate_points(t)
+
         # compute linear and angular velocities using automatic differentiation
         t_var = t.clone().detach().requires_grad_(True)
         vx = self.update_translation[0](t_var)
@@ -613,7 +637,6 @@ class BodyAnalytical(Body):
         lin_vel_x = torch.autograd.grad(vx, t_var, create_graph=False)[0]
         lin_vel_y = torch.autograd.grad(vy, t_var, create_graph=False)[0]
         ang_vel   = torch.autograd.grad(w, t_var, create_graph=False)[0]
-
 
         # # compute sdf at cc locations
         # translpoints=self.stacked_xy-trans
@@ -639,12 +662,14 @@ class BodyAnalytical(Body):
         self.body_u = (lin_vel_x - ang_vel*translpoints_u[1]).reshape(self.nx, self.ny)
         self.body_v = (lin_vel_y + ang_vel*translpoints_v[0]).reshape(self.nx, self.ny)
 
-        # update contour points and velocities
-        self.cnt_update = rot @ self.cnt
-        self.cnt_update[0]+=self.com_pos[0]
-        self.cnt_update[1]+=self.com_pos[1]
-        self.cnt_u=(lin_vel_x-ang_vel*(self.cnt_update[1]-transl[1]))
-        self.cnt_v=(lin_vel_y+ang_vel*(self.cnt_update[0]-transl[0]))
+        if update_cnt==True:
+
+            # update contour points and velocities
+            self.cnt_update = rot @ self.cnt
+            self.cnt_update[0]+=self.com_pos[0]
+            self.cnt_update[1]+=self.com_pos[1]
+            self.cnt_u=(lin_vel_x-ang_vel*(self.cnt_update[1]-self.com_pos[1]))
+            self.cnt_v=(lin_vel_y+ang_vel*(self.cnt_update[0]-self.com_pos[0]))
 
 
 
