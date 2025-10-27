@@ -8,8 +8,8 @@ solver :
   ymin   : 0
   ymax   : 256
   nt     : 8000
-  nu     : 1.0e-0
-  rho    : 1000.0
+  nu     : 1.0
+  rho    : 1.0
 
   # convection_method : "implicit"
   # dt     : 0.1

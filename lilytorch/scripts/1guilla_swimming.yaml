@@ -18,23 +18,22 @@ solver :
   # ymax              : 0.55
 
 
-  # ## small tank
-  # N                 : 512
-  # xmin              : -1.3
-  # xmax              : 1.7
-  # ymin              : -1.5
-  # ymax              : 1.5
-
-
-  ## medium tank
+  ## small tank
   N                 : 1024
   xmin              : -1.3
-  xmax              : 4.7
-  ymin              : -3
-  ymax              : 3
+  xmax              : 1.7
+  ymin              : -1.5
+  ymax              : 1.5
+
+  # ## medium tank
+  # N                 : 2048
+  # xmin              : -1.3
+  # xmax              : 4.7
+  # ymin              : -3
+  # ymax              : 3
 
   # ## large tank
-  # N                 : 1024
+  # N                 : 2048
   # xmin              : -1.0
   # xmax              : 11
   # ymin              : -6
@@ -49,15 +48,15 @@ solver :
   dt                : 0.0005
 
   nt                : 800000
-  nu                : 0.0002 #500.0e-6
+  nu                : 0.0002 #0.0002 #500.0e-6
   rho               : 1.0 #1.0e+3
 
   poisson_tol       : 1.0e-7
   poisson_max_cycles: 5
-  poisson_max_mgcg_cycles: 10
+  poisson_max_mgcg_cycles: 3
   jacobi_weight     : 0.7
   poisson_nsmoothing: 5
-  poisson_verbose   : False
+  poisson_verbose   : True
   poisson_folder : "data/"
 
 

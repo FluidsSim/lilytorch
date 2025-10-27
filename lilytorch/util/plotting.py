@@ -5,10 +5,7 @@ import matplotlib as mpl
 import numpy as np
 from scipy.interpolate import griddata
 from matplotlib import cm
-import matplotlib.colors as colors
-import matplotlib
-matplotlib.rc('font', **{"size":20})
-plt.rcParams["figure.figsize"] = (15,15)
+
 
 def plot_time_histories(
     time: np.array,
@@ -600,7 +597,7 @@ def plot2d_imshow_composite(X,Y,u,properties,extent,iteration,save_path,name,vmi
         d = prop[0].cpu()
         plt.contour(X,Y,d, colors='k', levels=[0],linewidths=0.3)
     plt.imshow(
-        u.detach().numpy().T,
+        u.T,
         vmin   = vmin,
         vmax   = vmax,
         extent = extent,
@@ -609,10 +606,9 @@ def plot2d_imshow_composite(X,Y,u,properties,extent,iteration,save_path,name,vmi
         interpolation=None
     )
     plt.colorbar()
-    plt.axis(extent)
     save_fig_to_dedicated_folder(save_path, name, iteration)
 
-def plot2d_imshow_composite_quiver(X,Y,u,bodies,normal_x,normal_y,extent,iteration,save_path,name,vmin,vmax,subsample_n = 2**4, scale=None, body_contours = True):
+def plot2d_imshow_composite_quiver(X,Y,u,properties,normal_x,normal_y,extent,iteration,save_path,name,vmin,vmax,subsample_n = 2**4, scale=None):
     if vmin is None:
         limit = max(abs(u.min()), abs(u.max()))/2
         vmin = -limit
@@ -620,22 +616,11 @@ def plot2d_imshow_composite_quiver(X,Y,u,bodies,normal_x,normal_y,extent,iterati
     if scale:
         scale=1/scale
     plt.figure(figsize=(20,10))
-    if body_contours:
-        for i, body in enumerate(bodies):
-            # d = body.sdf.cpu()
-            # plt.contour(X,Y,d, colors='k', levels=[0],linewidths=0.3)
-            plt.scatter(body.cnt_update[0][body.mask].cpu(), body.cnt_update[1][body.mask].cpu(), c="k", cmap=cm.RdBu, s=0.5)
-            # plt.scatter(body.cnt_update[0].cpu(), body.cnt_update[1].cpu(), c='k', s=0.1)
-
-            # plt.fill(body.cnt_update[0].cpu(), body.cnt_update[1].cpu(), color="#000000")
-
-            # plt.plot(body.com_pos[0].cpu(), body.com_pos[1].cpu(), 'ro', markersize=5)
-
-            # plt.plot(body.cnt_update[0].cpu(), body.cnt_update[1].cpu(), 'k',linewidth=0.5)
-
-            # plt.plot(body.cnt_update[0].cpu(), body.cnt_update[1].cpu(), 'k',linewidth=0.5)
+    for prop in properties:
+        d = prop[0].cpu()
+        plt.contour(X,Y,d, colors='k', levels=[0],linewidths=0.3)
     plt.imshow(
-        u.cpu().detach().numpy().T,
+        u.T,
         vmin   = vmin,
         vmax   = vmax,
         extent = extent,
@@ -644,15 +629,14 @@ def plot2d_imshow_composite_quiver(X,Y,u,bodies,normal_x,normal_y,extent,iterati
         interpolation=None
     )
     plt.colorbar()
-    # q = plt.quiver(
-    #     X[::subsample_n,::subsample_n].cpu(),
-    #     Y[::subsample_n,::subsample_n].cpu(),
-    #     normal_x[::subsample_n,::subsample_n].cpu(),
-    #     normal_y[::subsample_n,::subsample_n].cpu(),
-    #     color='g',
-    #     scale=scale, scale_units='xy'
-    # )
-    plt.axis(extent)
+    q = plt.quiver(
+        X[::subsample_n,::subsample_n].cpu(),
+        Y[::subsample_n,::subsample_n].cpu(),
+        normal_x[::subsample_n,::subsample_n].cpu(),
+        normal_y[::subsample_n,::subsample_n].cpu(),
+        color='g',
+        scale=scale, scale_units='xy'
+    )
     save_fig_to_dedicated_folder(save_path, name, iteration)
 
 def plot2d_imshow(X,Y,u,d,extent,iteration,save_path,name,vmin,vmax):
@@ -675,7 +659,6 @@ def plot2d_imshow(X,Y,u,d,extent,iteration,save_path,name,vmin,vmax):
     # plt.xlim([0.58,1.13])
     ax = plt.gca()
     ax.set_aspect('equal', adjustable='box')
-    plt.axis(extent)
     save_fig_to_dedicated_folder(save_path, name, iteration)
 
 def plot2d_imshow_quiver(X,Y,u,d,normal_x,normal_y,extent,iteration,save_path,name,vmin,vmax,subsample_n = 2**4, scale=None):
@@ -705,7 +688,6 @@ def plot2d_imshow_quiver(X,Y,u,d,normal_x,normal_y,extent,iteration,save_path,na
         color='g',
         scale=scale, scale_units='xy'
     )
-    plt.axis(extent)
     save_fig_to_dedicated_folder(save_path, name, iteration)
 
 def plot2d_imshow_simple(d,extent,iteration,save_path,name,vmin= -0.001,vmax= 0.001):
@@ -723,17 +705,8 @@ def plot2d_imshow_simple(d,extent,iteration,save_path,name,vmin= -0.001,vmax= 0.
         cmap = cm.RdBu
     )
     plt.colorbar()
-    plt.axis(extent)
     save_fig_to_dedicated_folder(save_path, name, iteration)
 
 
 
 
-def plot_ctrs(vars,bodies, extent, save_path, name, iteration,vmin= -0.001,vmax= 0.001, cmap = cm.get_cmap('viridis')):
-
-    norm = colors.Normalize(vmin=vmin, vmax=vmax)
-    for i, body in enumerate(bodies):
-        plt.scatter(body.cnt_update[0].cpu(), body.cnt_update[1].cpu(), c=vars[i].cpu(), cmap=cmap, norm=norm)
-    plt.colorbar()
-    plt.axis(extent)
-    save_fig_to_dedicated_folder(save_path, name, iteration)

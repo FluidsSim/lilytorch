@@ -19,36 +19,33 @@ solver :
   convection_method : "abdquickest"
   dt                : 0.1
 
-  poisson_tol       : 1.0e-7
-  poisson_max_cycles: 5
+  poisson_tol       : 1.0e-5
   jacobi_weight     : 0.8
-  poisson_nsmoothing: 10
-  poisson_verbose   : False
-  poisson_folder : "data/"
+  poisson_max_mgcg_cycles: 10
+  poisson_max_cycles: 10
+  poisson_nsmoothing: 50
+  poisson_verbose   : True
+  poisson_folder : "lilytorch/data/"
+
 
 
 
 boundary_conditions:
   BC_type_u:
-  - "D"
+  - "N"
   - "N"
   - "N"
   - "N"
   BC_values_u:
-  - 0.005
+  - 0
   - 0
   - 0
   - 0
   BC_type_v:
-  - "D"
   - "N"
   - "N"
   - "N"
-  BC_values_v:
-  - 0
-  - 0
-  - 0
-  - 0
+  - "N"
   BC_values_v:
   - 0
   - 0
@@ -56,7 +53,8 @@ boundary_conditions:
   - 0
 
 body:
-  type: mesh
+  type: composite_mesh
+
   mesh_file: "cylinder.obj"
   n_samples: (1000, 1000)
   compute_interp: True

@@ -1200,8 +1200,12 @@ class BodyMesh(Body):
 
             # sdf_val = cv2.GaussianBlur(sdf_val, (5, 5), 0)
 
+
+            ######################## Contour computation ########################
+
             # find contour lines
             cnt = np.array(measure.find_contours(sdf_val, 0)[0]).T
+            # cnt = np.array(measure.find_contours(sdf_val-self.eps, 0)[0]).T
             cnt[0]=xnp[0]+cnt[0]*(xnp[1]-xnp[0])
             cnt[1]=ynp[0]+cnt[1]*(ynp[1]-ynp[0])
             curv_coord = np.concatenate(([0], np.cumsum(np.sqrt(np.sum(np.diff(cnt, axis=1)**2, axis=0)))))
@@ -1271,7 +1275,7 @@ class BodyMesh(Body):
 
 
 
-
+            ######################## END contour computation ########################
 
 
 
@@ -1334,7 +1338,8 @@ class BodyMesh(Body):
                 torch.from_numpy(ynp).type(self.dtype).to(self.device)
             ),
             torch.from_numpy(sdf_val).type(self.dtype).to(self.device),
-            fill_value="nearest"
+            fill_value="nearest",
+            method=1 # quadratic
         )
 
         self.sdf = self.sdf_interp(
@@ -1392,7 +1397,7 @@ class CompositeBodyMesh(Body):
         self.plotting        = plotting
         self.plotting_meshes = plotting_meshes
         for link_i, link in enumerate(self.sdf.links):
-            # if link_i>7:
+            # if link_i<1:
                 mesh_name = link["visuals"][0]["geometry"]["uri"]
                 mesh_gpath = sdf_folder+mesh_name
                 initial_pose = np.array(link.pose).astype(x.cpu().numpy().dtype)
