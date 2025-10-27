@@ -381,11 +381,11 @@ control:
     control_types:
     - position
     limits_torque:
-    - -0.1
-    - 0.1
+    - -.inf
+    - .inf
     gains:
-    - 1.0e-01
-    - 1.0e-03
+    - 10
+    - 1
     equation: position
     transform:
       gain: 1
@@ -406,11 +406,11 @@ control:
     control_types:
     - position
     limits_torque:
-    - -0.1
-    - 0.1
+    - -.inf
+    - .inf
     gains:
-    - 1.0e-01
-    - 1.0e-03
+    - 10
+    - 1
     equation: position
     transform:
       gain: 1
@@ -431,11 +431,11 @@ control:
     control_types:
     - position
     limits_torque:
-    - -0.1
-    - 0.1
+    - -.inf
+    - .inf
     gains:
-    - 1.0e-01
-    - 1.0e-03
+    - 10
+    - 1
     equation: position
     transform:
       gain: 1
@@ -456,11 +456,11 @@ control:
     control_types:
     - position
     limits_torque:
-    - -0.1
-    - 0.1
+    - -.inf
+    - .inf
     gains:
-    - 1.0e-01
-    - 1.0e-03
+    - 10
+    - 1
     equation: position
     transform:
       gain: 1
@@ -481,11 +481,11 @@ control:
     control_types:
     - position
     limits_torque:
-    - -0.1
-    - 0.1
+    - -.inf
+    - .inf
     gains:
-    - 1.0e-01
-    - 1.0e-03
+    - 10
+    - 1
     equation: position
     transform:
       gain: 1
@@ -506,11 +506,11 @@ control:
     control_types:
     - position
     limits_torque:
-    - -0.1
-    - 0.1
+    - -.inf
+    - .inf
     gains:
-    - 1.0e-01
-    - 1.0e-03
+    - 10
+    - 1
     equation: position
     transform:
       gain: 1
@@ -531,11 +531,11 @@ control:
     control_types:
     - position
     limits_torque:
-    - -0.1
-    - 0.1
+    - -.inf
+    - .inf
     gains:
-    - 1.0e-01
-    - 1.0e-03
+    - 10
+    - 1
     equation: position
     transform:
       gain: 1
@@ -556,11 +556,11 @@ control:
     control_types:
     - position
     limits_torque:
-    - -0.1
-    - 0.1
+    - -.inf
+    - .inf
     gains:
-    - 1.0e-01
-    - 1.0e-03
+    - 10
+    - 1
     equation: position
     transform:
       gain: 1

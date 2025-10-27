@@ -1,9 +1,9 @@
 
-from util.run_closed_loop import run_single
+from lilytorch.util.run_closed_loop import run_single
 from simulation_parameters import SimulationParameters
 import matplotlib.pyplot as plt
 import os
-from util.plotting_common import plot_left_right, plot_trajectory, plot_time_histories, plot_time_histories_multiple_windows
+from lilytorch.util.plotting_common import plot_left_right, plot_trajectory, plot_time_histories, plot_time_histories_multiple_windows
 import farms_pylog as pylog
 import numpy as np
 from gen_positions import generate_positions
@@ -77,6 +77,6 @@ if __name__ == '__main__':
     freq=1
     twl=12 #14
     nmotors=8
-    for amp in [20]: #np.arange(20,60,10):
+    for amp in [30]: #np.arange(20,60,10):
         main(amp,freq,twl,nmotors)
 
