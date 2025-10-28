@@ -38,8 +38,7 @@
 				</visual>
 			</link>
 			<link name="link1">
-				<!-- <pose>0.17701 0 0 0 0 0</pose> -->
-				<pose>0.21 0 0 0 0 0</pose>
+				<pose>0.17701 0 0 0 0 0</pose>
 				<inertial>
 					<pose>0.0162396 0.000150087 -0.000959669 0 0 0</pose>
 					<mass>0.0481571</mass>
@@ -73,8 +72,7 @@
 				</visual>
 			</link>
 			<link name="link2">
-				<!-- <pose>0.23711 0 0 0 0 0</pose> -->
-				<pose>0.3 0 0 0 0 0</pose>
+				<pose>0.23711 0 0 0 0 0</pose>
 				<inertial>
 					<pose>0.0163229 0.000134716 -0.00105284 0 0 0</pose>
 					<mass>0.0481565</mass>
@@ -108,8 +106,7 @@
 				</visual>
 			</link>
 			<link name="link3">
-				<pose>0.4 0 0 0 0 0</pose>
-				<!-- <pose>0.29711 0 0 0 0 0</pose> -->
+				<pose>0.29711 0 0 0 0 0</pose>
 				<inertial>
 					<pose>0.0163446 0.000213776 -0.000714929 0 0 0</pose>
 					<mass>0.0481565</mass>
@@ -143,8 +140,7 @@
 				</visual>
 			</link>
 			<link name="link4">
-				<!-- <pose>0.35701 0 0 0 0 0</pose> -->
-				<pose>0.5 0 0 0 0 0</pose>
+				<pose>0.35701 0 0 0 0 0</pose>
 				<inertial>
 					<pose>0.0163461 0.000173785 -0.000345782 0 0 0</pose>
 					<mass>0.0481797</mass>
@@ -178,8 +174,7 @@
 				</visual>
 			</link>
 			<link name="link5">
-				<!-- <pose>0.41691 0 0 0 0 0</pose> -->
-				<pose>0.6 0 0 0 0 0</pose>
+				<pose>0.41691 0 0 0 0 0</pose>
 				<inertial>
 					<pose>0.0163837 3.92937e-05 3.78491e-05 0 0 0</pose>
 					<mass>0.0481478</mass>
@@ -213,8 +208,7 @@
 				</visual>
 			</link>
 			<link name="link6">
-				<!-- <pose>0.47711 0 0 0 0 0</pose> -->
-				<pose>0.7 0 0 0 0 0</pose>
+				<pose>0.47711 0 0 0 0 0</pose>
 				<inertial>
 					<pose>0.0161484 -1.31853e-05 0.000373081 0 0 0</pose>
 					<mass>0.0481507</mass>
@@ -248,8 +242,7 @@
 				</visual>
 			</link>
 			<link name="link7">
-				<pose>0.8 0 0 0 0 0</pose>
-				<!-- <pose>0.53711 0 0 0 0 0</pose> -->
+				<pose>0.53711 0 0 0 0 0</pose>
 				<inertial>
 					<pose>0.0161534 7.84285e-05 0.000820784 0 0 0</pose>
 					<mass>0.0481566</mass>
@@ -283,8 +276,7 @@
 				</visual>
 			</link>
 			<link name="link8">
-				<!-- <pose>0.59691 0 0 0 0 0</pose> -->
-				<pose>0.9 0 0 0 0 0</pose>
+				<pose>0.59691 0 0 0 0 0</pose>
 				<inertial>
 					<pose>0.059301 8.90973e-05 0.00203187 0 0 0</pose>
 					<mass>0.103066</mass>

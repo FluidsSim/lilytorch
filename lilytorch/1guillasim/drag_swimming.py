@@ -24,7 +24,7 @@ def main(**kwargs):
         swimming_mode   = "drag",
         amp             = np.ones(8),
         bias            = 0.3,
-        timestep        = 0.001,
+        timestep        = 0.0001,
         twl             = 1,
         freq            = 2,
         log_path        = log_path,

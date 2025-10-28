@@ -134,25 +134,25 @@ class BDIMController(AnimatNetwork):
             # compute the mask for the contour points
             x_cnt=body.cnt_update[0]
             y_cnt=body.cnt_update[1]
-            if i==0:
-                body_p=self.fluid_solver.composite_body.bodies[i+1]
-                pos_trans = r[i+1].T@(torch.stack((x_cnt,y_cnt))-urdf_poses[i+1][:,None])
-                sdf_p = body_p.sdf_interp(pos_trans[0],pos_trans[1])
-                mask=(sdf_p >= 0)
-            elif i==self.n_bodies-1:
-                body_m=self.fluid_solver.composite_body.bodies[i-1]
-                pos_trans = r[i-1].T@(torch.stack((x_cnt,y_cnt))-urdf_poses[i-1][:,None])
-                sdf_m = body_m.sdf_interp(pos_trans[0],pos_trans[1])
-                mask=(sdf_m >= 0)
-            else:
-                body_m=self.fluid_solver.composite_body.bodies[i-1]
-                pos_trans_m = r[i-1].T@(torch.stack((x_cnt,y_cnt))-urdf_poses[i-1][:,None])
-                body_p=self.fluid_solver.composite_body.bodies[i+1]
-                pos_trans_p = r[i+1].T@(torch.stack((x_cnt,y_cnt))-urdf_poses[i+1][:,None])
-                sdf_m = body_m.sdf_interp(pos_trans_m[0],pos_trans_m[1])
-                sdf_p = body_p.sdf_interp(pos_trans_p[0],pos_trans_p[1])
-                mask=(sdf_m >= 0) & (sdf_p >= 0)
-            body.mask=mask
+            # if i==0:
+            #     body_p=self.fluid_solver.composite_body.bodies[i+1]
+            #     pos_trans = r[i+1].T@(torch.stack((x_cnt,y_cnt))-urdf_poses[i+1][:,None])
+            #     sdf_p = body_p.sdf_interp(pos_trans[0],pos_trans[1])
+            #     mask=(sdf_p >= 0)
+            # elif i==self.n_bodies-1:
+            #     body_m=self.fluid_solver.composite_body.bodies[i-1]
+            #     pos_trans = r[i-1].T@(torch.stack((x_cnt,y_cnt))-urdf_poses[i-1][:,None])
+            #     sdf_m = body_m.sdf_interp(pos_trans[0],pos_trans[1])
+            #     mask=(sdf_m >= 0)
+            # else:
+            #     body_m=self.fluid_solver.composite_body.bodies[i-1]
+            #     pos_trans_m = r[i-1].T@(torch.stack((x_cnt,y_cnt))-urdf_poses[i-1][:,None])
+            #     body_p=self.fluid_solver.composite_body.bodies[i+1]
+            #     pos_trans_p = r[i+1].T@(torch.stack((x_cnt,y_cnt))-urdf_poses[i+1][:,None])
+            #     sdf_m = body_m.sdf_interp(pos_trans_m[0],pos_trans_m[1])
+            #     sdf_p = body_p.sdf_interp(pos_trans_p[0],pos_trans_p[1])
+            #     mask=(sdf_m >= 0) & (sdf_p >= 0)
+            # body.mask=mask
 
             # body.cnt_u = lin_vel[0]-ang_vel*(y_cnt-com_pos[1])
             # body.cnt_v = lin_vel[1]+ang_vel*(x_cnt-com_pos[0])
