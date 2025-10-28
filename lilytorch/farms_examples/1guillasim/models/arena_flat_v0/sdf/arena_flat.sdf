@@ -1,0 +1,30 @@
+<?xml version="1.0" ?>
+<sdf version="1.6">
+  <world name="world">
+    <model name="arena_flat">
+      <pose>0 0 0 0 0 0</pose>
+      <link name="floor">
+        <pose>0 0 0 0 0 0</pose>
+        <collision name="floor_collision">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>100.0 100.0 1.0</size>
+            </plane>
+          </geometry>
+        </collision>
+        <visual name="floor_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>100.0 100.0 1.0</size>
+            </plane>
+          </geometry>
+          <material/>
+        </visual>
+      </link>
+    </model>
+  </world>
+</sdf>
