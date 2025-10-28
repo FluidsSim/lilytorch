@@ -613,13 +613,24 @@ def plot2d_imshow_composite(X,Y,u,properties,extent,iteration,save_path,name,vmi
     save_fig_to_dedicated_folder(save_path, name, iteration)
 
 def plot2d_imshow_composite_quiver(X,Y,u,bodies,normal_x,normal_y,extent,iteration,save_path,name,vmin,vmax,subsample_n = 2**4, scale=None, body_contours = True):
+
+
+
     if vmin is None:
         limit = max(abs(u.min()), abs(u.max()))/2
         vmin = -limit
         vmax = limit
     if scale:
         scale=1/scale
-    plt.figure(figsize=(20,10))
+
+    x_range = extent[1] - extent[0]
+    y_range = extent[3] - extent[2]
+    scale = 15 / max(x_range, y_range)  # Adjust 10 for overall size
+    fig_width = x_range * scale
+    fig_height = y_range * scale
+
+
+    plt.figure(figsize=(fig_width, fig_height))
     if body_contours:
         for i, body in enumerate(bodies):
             # d = body.sdf.cpu()
@@ -641,8 +652,13 @@ def plot2d_imshow_composite_quiver(X,Y,u,bodies,normal_x,normal_y,extent,iterati
         extent = extent,
         origin = "lower",
         cmap = cm.RdBu,
-        interpolation=None
+        interpolation=None,
+        aspect='equal',
     )
+    plt.xlabel("x [m]")
+    plt.ylabel("y [m]")
+    plt.title(name)
+
     plt.colorbar()
     # q = plt.quiver(
     #     X[::subsample_n,::subsample_n].cpu(),
@@ -654,6 +670,14 @@ def plot2d_imshow_composite_quiver(X,Y,u,bodies,normal_x,normal_y,extent,iterati
     # )
     plt.axis(extent)
     save_fig_to_dedicated_folder(save_path, name, iteration)
+
+
+
+
+
+
+
+
 
 def plot2d_imshow(X,Y,u,d,extent,iteration,save_path,name,vmin,vmax):
     if vmin is None:

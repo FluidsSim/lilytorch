@@ -164,8 +164,8 @@ class FluidCallback(TaskCallback):
 
 
 
-    def after_step(self, task, physics):
-    # def before_step(self, task, action, physics):
+    # def after_step(self, task, physics):
+    def before_step(self, task, action, physics):
         """Step hydrodynamics"""
         indices = task.maps['sensors']['data2xfrc']
 

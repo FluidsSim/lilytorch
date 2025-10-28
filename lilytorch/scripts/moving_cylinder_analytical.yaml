@@ -2,11 +2,13 @@
 solver :
   use_gpu: False
   nthreads: 16
-  N      : 256
-  xmin   : 0
-  xmax   : 256
-  ymin   : 0
-  ymax   : 256
+
+  Nx: 128
+  Ny: 256
+  Cx: 128
+  Cy: 128
+  h: 1
+
   nt     : 8000
   nu     : 1.0
   rho    : 1.0

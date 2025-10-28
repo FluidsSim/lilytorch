@@ -18,8 +18,8 @@ class PoissonSolver:
         self.max_vcycles = max_vcycles
         self.nsmoothing  = nsmoothing
         self.verbose     = verbose
-        self.jcap_tol    = 1e-12
-        self.n_switch    = 2**6
+        self.jcap_tol    = 1e-10
+        self.n_switch    = 2**16
         self.w           = w # smoothing factor
 
     def l2_norm(self, r):
@@ -77,7 +77,7 @@ class PoissonSolver:
         """
         2D multigrid solver, assume same grid spacing (n=m), where (n,m)=u.shape with hybrid cpu-gpu implementation
         """
-        n=f.shape[0]
+        n, m = f.shape
 
         ch=kwargs.pop("ch", 0.5*(c[1:,1:-1]+c[:-1,1:-1]))
         cv=kwargs.pop("cv", 0.5*(c[1:-1,1:]+c[1:-1,:-1]))
@@ -85,7 +85,7 @@ class PoissonSolver:
         # smoothing
         p, r = self.Jacobi(f, p, ch, cv, h2)
 
-        if n>8:
+        if n>8 and m>8:
 
             if n==self.n_switch and self.device=="cuda":
                 f  = f.cpu()
@@ -122,7 +122,7 @@ class PoissonSolver:
             # multigrid cycle on the residual
             err_coarse, _ = self.vcycle(
                 r_coarse,
-                torch.zeros((n//2+2,n//2+2), device=p.device, dtype=p.dtype),
+                torch.zeros((n//2+2,m//2+2), device=p.device, dtype=p.dtype),
                 c,
                 4*h2,
                 ch=ch_coarse,
@@ -130,7 +130,7 @@ class PoissonSolver:
                 )
 
             # prolongation
-            err = torch.zeros((n,n), device=p.device, dtype=p.dtype)
+            err = torch.zeros((n,m), device=p.device, dtype=p.dtype)
             err[::2, ::2]   = err_coarse[1:-1,1:-1]
             err[1::2, ::2]  = err_coarse[1:-1,1:-1]
             err[::2, 1::2]  = err_coarse[1:-1,1:-1]

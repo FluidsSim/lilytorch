@@ -45,7 +45,8 @@ class AdvDiffSolver:
         self.y = y
         self.nx = len(x)
         self.ny = len(y)
-        self.nm2 = self.nx-2
+        self.nm2x = self.nx-2
+        self.nm2y = self.ny-2
 
         # dummy initialization for the abdquickest solver
         self.C = 0.1
@@ -78,8 +79,8 @@ class AdvDiffSolver:
             self.solve = self.solve_ADBQUICKEST
         elif method == "adam-bashford":
             self.solve = self.solve_adam_bashford
-            self.HU_prec = torch.zeros((self.nm2,self.nm2), device=self.device,dtype=self.dtype)
-            self.HV_prec = torch.zeros((self.nm2,self.nm2), device=self.device,dtype=self.dtype)
+            self.HU_prec = torch.zeros((self.nm2x,self.nm2y), device=self.device,dtype=self.dtype)
+            self.HV_prec = torch.zeros((self.nm2x,self.nm2y), device=self.device,dtype=self.dtype)
         else:
             raise("Error: the convection solver method {} does not exist".format(method))
 
@@ -215,7 +216,7 @@ class AdvDiffSolver:
         )
 
     def phi_w(self, F, phi):
-        out = torch.zeros((self.nm2,self.nm2), device=self.device)
+        out = torch.zeros((self.nm2x,self.nm2y), device=self.device)
         out[1:,:]=torch.where(
             F[1:,:]>0,
             self.ADBQUICKEST_rule(phi[1:-2,1:-1], phi[2:-1,1:-1], phi[:-3,1:-1]),
@@ -229,7 +230,7 @@ class AdvDiffSolver:
         return out
 
     def phi_s(self, F, phi):
-        out = torch.zeros((self.nm2,self.nm2), device=self.device)
+        out = torch.zeros((self.nm2x,self.nm2y), device=self.device)
         out[:,1:]=torch.where(
             F[:,1:]>0,
             self.ADBQUICKEST_rule(phi[1:-1,1:-2], phi[1:-1,2:-1], phi[1:-1,:-3]),
@@ -243,7 +244,7 @@ class AdvDiffSolver:
         return out
 
     def phi_e(self, F, phi):
-        out = torch.zeros((self.nm2,self.nm2), device=self.device)
+        out = torch.zeros((self.nm2x,self.nm2y), device=self.device)
         out[:-1,:]=torch.where(
             F[:-1,:]>0,
             self.ADBQUICKEST_rule(phi[1:-2,1:-1], phi[2:-1,1:-1], phi[:-3,1:-1]),
@@ -257,7 +258,7 @@ class AdvDiffSolver:
         return out
 
     def phi_n(self, F, phi):
-        out = torch.zeros((self.nm2,self.nm2), device=self.device)
+        out = torch.zeros((self.nm2x,self.nm2y), device=self.device)
         out[:,:-1]=torch.where(
             F[:,:-1]>0,
             self.ADBQUICKEST_rule(phi[1:-1,1:-2], phi[1:-1,2:-1], phi[1:-1,:-3]),

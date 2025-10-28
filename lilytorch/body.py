@@ -376,12 +376,11 @@ class Body:
 
         self.x   = x
         self.y   = y
-        self.dx = float(x[1]-x[0])
-        self.dy = float(y[1]-y[0])
+        self.h = float(x[1]-x[0])
 
         self.X, self.Y = torch.meshgrid(x,y,indexing="ij")
-        self.x_stag = self.x-self.dx/2
-        self.y_stag = self.y-self.dy/2
+        self.x_stag = self.x-self.h/2
+        self.y_stag = self.y-self.h/2
         [self.Xu_stag, self.Yu_stag] = torch.meshgrid(self.x_stag, self.y, indexing="ij")
         [self.Xv_stag, self.Yv_stag] = torch.meshgrid(self.x, self.y_stag, indexing="ij")
 
@@ -415,13 +414,13 @@ class Body:
 
     def compute_sdf_properties(self, sdf_val):
 
-        (gradx, grady) = torch.gradient(sdf_val, spacing=[self.dx, self.dy], edge_order=2)
+        (gradx, grady) = torch.gradient(sdf_val, spacing=[self.h, self.h], edge_order=2)
         norm = torch.sqrt(gradx**2+grady**2)
 
         # curvature=torch.where(
         #     norm>0,
-        #     (torch.gradient(gradx, spacing=self.dx, axis=0, edge_order=2)[0]*grady-
-        #      torch.gradient(grady, spacing=self.dy, axis=1, edge_order=2)[0]*gradx)/
+        #     (torch.gradient(gradx, spacing=self.h, axis=0, edge_order=2)[0]*grady-
+        #      torch.gradient(grady, spacing=self.h, axis=1, edge_order=2)[0]*gradx)/
         #     norm**3,
         #     0
         # )
@@ -431,9 +430,9 @@ class Body:
 
         # compute curvature
         numerator = (
-            (grady**2)*torch.gradient(gradx, spacing=self.dx, axis=0, edge_order=2)[0]+
-            (gradx**2)*torch.gradient(grady, spacing=self.dy, axis=1, edge_order=2)[0]+
-            -2*gradx*grady*torch.gradient(grady, spacing=self.dx, axis=0)[0]
+            (grady**2)*torch.gradient(gradx, spacing=self.h, axis=0, edge_order=2)[0]+
+            (gradx**2)*torch.gradient(grady, spacing=self.h, axis=1, edge_order=2)[0]+
+            -2*gradx*grady*torch.gradient(grady, spacing=self.h, axis=0)[0]
         )
         denominator = norm**3
         curvature = torch.where(denominator>0, numerator/denominator, 0)
@@ -442,9 +441,9 @@ class Body:
 
         # # compute curvature
         # numerator = (
-        #     (grady**2)*torch.gradient(gradx, spacing=self.dx, axis=0)[0]+
-        #     (gradx**2)*torch.gradient(grady, spacing=self.dy, axis=1)[0]+
-        #     -2*gradx*grady*torch.gradient(grady, spacing=self.dx, axis=0)[0]
+        #     (grady**2)*torch.gradient(gradx, spacing=self.h, axis=0)[0]+
+        #     (gradx**2)*torch.gradient(grady, spacing=self.h, axis=1)[0]+
+        #     -2*gradx*grady*torch.gradient(grady, spacing=self.h, axis=0)[0]
         # )
         # denominator = norm**3
         # curvature = torch.where(denominator>0, numerator/denominator, 0)
@@ -457,7 +456,7 @@ class Body:
         # curvature = (d2x_dt2 * dy_dt - dx_dt * d2y_dt2) / (dx_dt * dx_dt + dy_dt * dy_dt)**1.5
 
 
-        # numerator = torch.gradient(gradx, dim=0, spacing=self.dx)[0]+torch.gradient(grady, dim=1, spacing=self.dy)[0]
+        # numerator = torch.gradient(gradx, dim=0, spacing=self.h)[0]+torch.gradient(grady, dim=1, spacing=self.h)[0]
         # denominator = (gradx**2+grady**2)**1.5
 
         # normalize gradients
@@ -552,8 +551,8 @@ class BodyAnalytical(Body):
         curv_coord = np.cumsum(np.sqrt(np.sum(np.diff(cnt, axis=1)**2, axis=0)))
 
 
-        # # resample contour lines for uniform spacing with spacing self.dx
-        ds=self.dx #0.5*torch.sqrt(torch.tensor(self.dx**2+self.dy**2))
+        # # resample contour lines for uniform spacing with spacing self.h
+        ds=self.h #0.5*torch.sqrt(torch.tensor(self.h**2+self.h**2))
         # x, y, s_uniform = self.resample_contour(cnt[0], cnt[1], spacing=ds, closed=True)
         x, y, s_uniform = resample_contour(cnt[0], cnt[1], spacing=ds, closed=True)
         del cnt
@@ -1204,7 +1203,7 @@ class BodyMesh(Body):
             ######################## Contour computation ########################
 
             # find contour lines
-            cnt = np.array(measure.find_contours(sdf_val, 0)[0]).T
+            cnt = np.array(measure.find_contours(sdf_val-self.eps, 0)[0]).T
             # cnt = np.array(measure.find_contours(sdf_val-self.eps, 0)[0]).T
             cnt[0]=xnp[0]+cnt[0]*(xnp[1]-xnp[0])
             cnt[1]=ynp[0]+cnt[1]*(ynp[1]-ynp[0])
@@ -1238,8 +1237,8 @@ class BodyMesh(Body):
             cnt = np.concatenate((cnt[:, idx+1:], cnt[:, :idx]), axis=1)
 
 
-            # # resample contour lines for uniform spacing with spacing self.dx
-            ds=self.dx #0.5*torch.sqrt(torch.tensor(self.dx**2+self.dy**2))
+            # # resample contour lines for uniform spacing with spacing self.h
+            ds=self.h #0.5*torch.sqrt(torch.tensor(self.h**2+self.h**2))
             # x, y, s_uniform = self.resample_contour(cnt[0], cnt[1], spacing=ds, closed=True)
             x, y, s_uniform = resample_contour(cnt[0], cnt[1], spacing=ds, closed=True) # the spacing is approximately ds
             del cnt
@@ -1397,7 +1396,7 @@ class CompositeBodyMesh(Body):
         self.plotting        = plotting
         self.plotting_meshes = plotting_meshes
         for link_i, link in enumerate(self.sdf.links):
-            # if link_i<1:
+            # if link_i%2==0:
                 mesh_name = link["visuals"][0]["geometry"]["uri"]
                 mesh_gpath = sdf_folder+mesh_name
                 initial_pose = np.array(link.pose).astype(x.cpu().numpy().dtype)
@@ -1556,11 +1555,11 @@ class CompositeBodyMesh(Body):
     #     norm  = torch.sqrt(gradx**2+grady**2)
 
     #     # compute curvature
-    #     numerator = (grady**2)*torch.gradient(gradx, spacing=self.dx, axis=0)[0] \
-    #                 +(gradx**2)*torch.gradient(grady, spacing=self.dy, axis=1)[0] \
-    #                 -2*gradx*grady*torch.gradient(grady, spacing=self.dx, axis=0)[0]
+    #     numerator = (grady**2)*torch.gradient(gradx, spacing=self.h, axis=0)[0] \
+    #                 +(gradx**2)*torch.gradient(grady, spacing=self.h, axis=1)[0] \
+    #                 -2*gradx*grady*torch.gradient(grady, spacing=self.h, axis=0)[0]
     #     denominator = norm**3
-    #     # numerator = torch.gradient(gradx, dim=0, spacing=self.dx)[0]+torch.gradient(grady, dim=1, spacing=self.dy)[0]
+    #     # numerator = torch.gradient(gradx, dim=0, spacing=self.h)[0]+torch.gradient(grady, dim=1, spacing=self.h)[0]
     #     # denominator = (1+gradx**2+grady**2)**2
     #     curvature = numerator/denominator
 

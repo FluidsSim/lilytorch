@@ -40,7 +40,7 @@ class PoissonSolverFFT:
         self.dx = (x[1]-x[0]).cpu().numpy()
         self.dy = (y[1]-y[0]).cpu().numpy()
 
-        self.U = torch.zeros((2*self.ny,2*self.nx), dtype=self.dtype, device=self.device)
+        self.U = torch.zeros((2*self.nx,2*self.ny), dtype=self.dtype, device=self.device)
 
         self.name = "Gfft_"+bc_type+"_"+str(float(x[0]))+"_"+str(float(x[-1]))+str(float(y[0]))+"_"+str(float(y[-1]))+"_"+str(self.nx)+"_"+str(self.ny)
 
@@ -106,10 +106,10 @@ class PoissonSolverFFT:
         """
         Solve the inverse Fourier transform U_NEW=IFFT(FFT(U)*FFT(G))
         """
-        self.U[:self.ny,:self.nx] = u
+        self.U[:self.nx,:self.ny] = u
         return torch.real(
                 torch.fft.ifftn( self.Gfft * torch.fft.fftn(self.U))
-            )[:self.ny,:self.nx]
+            )[:self.nx,:self.ny]
 
 
     def solve_neumann(self,u):
@@ -132,8 +132,6 @@ class PoissonSolverFFT:
         G[0,-1] = G[0,0]
         G[-1,0] = G[0,0]
         return G
-
-
 
 
     def hej_fun(self, R, eps=0.01):
@@ -168,7 +166,7 @@ if __name__ == "__main__":
     device = "cuda"
 
     nx=512
-    ny=512
+    ny=256
     x=torch.linspace(0,5,nx,dtype=dtype, device=device)
     y=torch.linspace(-5,5,ny,dtype=dtype, device=device)
     ps = PoissonSolverFFT(x,y,overwrite=True)
@@ -206,14 +204,14 @@ if __name__ == "__main__":
 
     fig = plt.figure()
     ax = fig.add_subplot(projection='3d')
-    ax.plot_surface(X.cpu(), Y.cpu(), out_real.cpu().T)
+    ax.plot_surface(X.cpu(), Y.cpu(), out_real.cpu())
     ax.set_xlabel('$x$')
     ax.set_ylabel('$y$')
     plt.title("Solution real")
 
     fig = plt.figure()
     ax = fig.add_subplot(projection='3d')
-    ax.plot_surface(X.cpu(), Y.cpu(), out.cpu().T)
+    ax.plot_surface(X.cpu(), Y.cpu(), out.cpu())
     ax.set_xlabel('$x$')
     ax.set_ylabel('$y$')
     plt.title("Solution approx")
