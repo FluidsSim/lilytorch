@@ -30,6 +30,7 @@ from lilytorch.util.rw import Dict2Class
 
 from controllers.wave_controller import WaveController
 from controllers.empty_controller import EmptyController
+
 from util.controller import *
 
 from dm_control.rl.control import PhysicsError
@@ -83,7 +84,6 @@ def run_experiment(pars):
     animat_options["spawn"]         = Dict2Class(pars.spawn)
     animat_options.spawn.mode = SpawnMode(pars.spawn["mode"])
 
-    # update muscle and drag parameters
     control_type=animat_options["control"]["motors"][0]["control_types"][0]
 
     if pars.random_spine==True:

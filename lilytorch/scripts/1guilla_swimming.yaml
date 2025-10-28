@@ -91,7 +91,7 @@ boundary_conditions:
 body:
   type: composite_mesh
   sdf_name: "1guilla.sdf"
-  sdf_folder: "/data/andreaferrario/lilytorch/lilytorch/1guillasim/models/1guilla_v1/sdf/"
+  sdf_folder: "/data/andreaferrario/lilytorch/lilytorch/farms_examples/1guillasim/models/1guilla_v1/sdf/"
   plotting: False
   compute_interp: False
   plotting_meshes: False

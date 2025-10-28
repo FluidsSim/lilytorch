@@ -1052,32 +1052,32 @@ class FluidSolver:
         self.div  = self.divergence(uprime,vprime)
 
 
-        # (c, _) = self.composite_body.mu_funcs(self.composite_body.sdf_val)
-        c = torch.ones_like(u)
-        # ch = (c[1:,1:-1]+c[:-1,1:-1])/2
-        # cv = (c[1:-1,1:]+c[1:-1,:-1])/2
-        coeff = self.dt/self.rho
-        p, _    = self.poisson_solver.solve_multigrid( # f, u, c
-            self.div[1:-1,1:-1],
-            p,
-            coeff*c,
-            ch = coeff*self.mu0_all_u[1:,1:-1],
-            cv = coeff*self.mu0_all_v[1:-1,1:],
-        )
-          # ====== projection step ======
-        (p_x, p_y) = self.gradient(p)
-        u          = uprime - coeff * self.mu0_all_u * p_x
-        v          = vprime - coeff * self.mu0_all_v * p_y
+        # # (c, _) = self.composite_body.mu_funcs(self.composite_body.sdf_val)
+        # c = torch.ones_like(u)
+        # # ch = (c[1:,1:-1]+c[:-1,1:-1])/2
+        # # cv = (c[1:-1,1:]+c[1:-1,:-1])/2
+        # coeff = self.dt/self.rho
+        # p, _    = self.poisson_solver.solve_multigrid( # f, u, c
+        #     self.div[1:-1,1:-1],
+        #     p,
+        #     coeff*c,
+        #     ch = coeff*self.mu0_all_u[1:,1:-1],
+        #     cv = coeff*self.mu0_all_v[1:-1,1:],
+        # )
+        #   # ====== projection step ======
+        # (p_x, p_y) = self.gradient(p)
+        # u          = uprime - coeff * self.mu0_all_u * p_x
+        # v          = vprime - coeff * self.mu0_all_v * p_y
 
         # u = uprime - coeff * p_x
         # v = vprime - coeff * p_y
 
         # (u,v)=(uprime,vprime)
 
-        # coeff = self.dt/self.rho
-        # p=self.poisson_solverFFT.solve(self.div/coeff)
-        # (p_x, p_y) = self.gradient(p)
-        # (u,v)=(uprime-coeff*p_x, vprime-coeff*p_y)
+        coeff = self.dt/self.rho
+        p=self.poisson_solverFFT.solve(self.div/coeff)
+        (p_x, p_y) = self.gradient(p)
+        (u,v)=(uprime-coeff*p_x, vprime-coeff*p_y)
 
 
         # (u,v)=(uprime,vprime)
