@@ -1298,7 +1298,7 @@ control:
     epsilon: 0
   adhesions: []
   visuals: []
-extensions:
+extensions: []
 - loader: farms_mujoco.swimming.callback.SwimmingCallback
   config:
     water_properties: null
