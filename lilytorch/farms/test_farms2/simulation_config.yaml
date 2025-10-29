@@ -65,4 +65,9 @@ pybullet:
   max_num_cmd_per_1ms: 100000000
   report_solver_analytics: 0
 extensions: []
-viewer_extensions: []
+
+
+# extensions:
+# - loader: lilytorch.test_farms2.callback.SwimmingCallback
+#   config:
+#     water_properties: null
