@@ -42,7 +42,7 @@ morphology:
   self_collisions: []
   joints: []
 control:
-  controller_loader: farms_core.model.control.AnimatController
+  controller_loader: lilytorch.test_farms2.controller.DragEmptyController
   sensors:
     links:
     - base_link
@@ -56,6 +56,6 @@ control:
   motors: []
   hill_muscles: []
 extensions:
-- loader: lilytorch.test_farms2.callback.SwimmingCallback #farms_mujoco.swimming.callback.SwimmingCallback
+- loader: lilytorch.test_farms2.callback.DummyCallback
   config:
     water_properties: null

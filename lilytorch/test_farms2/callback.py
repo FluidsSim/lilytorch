@@ -212,3 +212,41 @@ class SwimmingCallback(TaskCallback):
         physics.data.xfrc_applied[indices, 3:] *= task.units.torques
 
 
+class DummyCallback(TaskCallback):
+    """Dummy callback"""
+
+    def __init__(
+            self,
+            animat_i: int,
+            animat_data: AnimatData,
+            animat_options: AnimatOptions,
+            arena_options: ArenaOptions,
+            substep=True,
+            water_properties=None,
+    ):
+        super().__init__(substep=substep)
+        self.animat_i = animat_i
+        self.animat_data = animat_data
+        self.animat_options = animat_options
+        self.arena_options = arena_options
+
+
+    @classmethod
+    def from_options(
+            cls,
+            animat_i: int,
+            animat_data: AnimatData,
+            animat_options: AnimatOptions,
+            experiment_options: ExperimentOptions,
+            config: dict,
+    ):
+        """From options"""
+        pass
+
+    def initialize_episode(self, task, physics):
+        """Initialize episode"""
+        pass
+
+    def before_step(self, task, action, physics):
+        """Step hydrodynamics"""
+        pass
