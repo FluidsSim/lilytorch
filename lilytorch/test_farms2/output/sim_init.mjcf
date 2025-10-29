@@ -1,0 +1,62 @@
+<?xml version="1.0" ?>
+<mujoco model="animat_0">
+  <compiler boundmass="1e-10" boundinertia="1.0000000000000001e-15" balanceinertia="false" angle="radian" eulerseq="xyz" discardvisual="false" fusestatic="true" inertiafromgeom="false">
+    <lengthrange mode="none" useexisting="true"/>
+  </compiler>
+  <option timestep="0.001" gravity="0 0 -9.8100000000000005" impratio="10" integrator="implicitfast" cone="elliptic" solver="CG" iterations="50" noslip_iterations="1000" noslip_tolerance="9.9999999999999995e-07" ccd_iterations="1000" ccd_tolerance="9.9999999999999995e-07">
+    <flag energy="enable"/>
+  </option>
+  <size njmax="4096" nconmax="4096" nkey="1"/>
+  <visual>
+    <global offwidth="1280" offheight="720"/>
+    <quality shadowsize="1024" offsamples="4" numslices="28" numstacks="16" numquads="4"/>
+    <map stiffness="100" stiffnessrot="500" force="1" torque="1" alpha="0.29999999999999999" fogstart="3" fogend="10" znear="1.0000000000000001e-05" zfar="3" haze="0.29999999999999999" shadowclip="1" shadowscale="0.29999999999999999" actuatortendon="2"/>
+    <scale forcewidth="0.01" contactwidth="0.029999999999999999" contactheight="0.01" connect="0.01" com="0.01" camera="0.10000000000000001" light="0.10000000000000001" selectpoint="0.01" jointlength="0.01" jointwidth="0.01" actuatorlength="0.01" actuatorwidth="0.01" framelength="0.01" framewidth="0.01" constraint="0.01" slidercrank="0.01"/>
+  </visual>
+  <statistic meanmass="0" meaninertia="0" meansize="0" extent="100"/>
+  <default>
+    <default class="/"/>
+  </default>
+  <asset>
+    <texture name="texture_grid" type="2d" builtin="checker" rgb1="0.10000000000000001 0.20000000000000001 0.29999999999999999" rgb2="0.20000000000000001 0.29999999999999999 0.40000000000000002" mark="edge" markrgb="0.20000000000000001 0.29999999999999999 0.40000000000000002" width="300" height="300"/>
+    <material name="material_grid" class="/" texture="texture_grid" texrepeat="1 1" texuniform="true" reflectance="0.20000000000000001"/>
+    <material name="material_water_visual" class="/" rgba="0.5 0.5 0.90000000000000002 0.29999999999999999"/>
+    <material name="a0_material_base_link_visual" class="/" rgba="1 1 0 1"/>
+    <texture name="skybox" type="skybox" builtin="gradient" rgb1="0.40000000000000002 0.59999999999999998 0.80000000000000004" rgb2="0 0 0" mark="random" markrgb="1 1 1" width="800" height="800"/>
+  </asset>
+  <worldbody>
+    <body name="arena_flat" pos="0 0 -1" quat="1 0 0 0">
+      <body name="floor" pos="0 0 0" quat="1 0 0 0">
+        <geom name="floor_collision" class="/" type="plane" contype="1" conaffinity="1" condim="3" group="2" size="100 100 1" material="material_grid" friction="0 0 0" margin="0" pos="0 0 0" quat="1 0 0 0"/>
+        <geom name="floor_visual" class="/" type="plane" contype="0" conaffinity="0" group="1" size="100 100 1" material="material_grid" pos="0 0 0" quat="1 0 0 0"/>
+      </body>
+    </body>
+    <body name="arena_water" pos="0 0 0" quat="1 0 0 0">
+      <body name="water" pos="0 0 0" quat="1 0 0 0">
+        <geom name="water_visual" class="/" type="box" contype="0" conaffinity="0" group="1" size="25 25 25" material="material_water_visual" pos="0 0 -25" quat="1 0 0 0"/>
+      </body>
+    </body>
+    <body name="a0_sphere" pos="-0 -0 0.20000000000000001" quat="0.2298488470659302 -0.42073549240394825 0.42073549240394825 0.77015115293406988">
+      <freejoint name="a0_root_sphere"/>
+      <body name="a0_base_link" pos="0 0 0" quat="1 0 0 0">
+        <geom name="a0_base_link_collision" class="/" type="sphere" contype="1" conaffinity="0" condim="3" group="2" size="0.050000000000000003 0.050000000000000003 0.050000000000000003" friction="0.5 0 0" margin="0" pos="0 0 0" quat="1 0 0 0" fluidshape="ellipsoid" fluidcoef="0 0 0 0 0"/>
+        <geom name="a0_base_link_visual" class="/" type="sphere" contype="0" conaffinity="0" group="1" size="0.050000000000000003 0.050000000000000003 0.050000000000000003" material="a0_material_base_link_visual" pos="0 0 0" quat="1 0 0 0"/>
+        <inertial pos="0 0 0" mass="0.52359877559829893" fullinertia="0.00052359877559829903 0.00052359877559829903 0.00052359877559829903 0 0 0"/>
+      </body>
+      <light name="light_animat" class="/" mode="trackcom" directional="false" castshadow="true" active="true" pos="-1.98411064855555 1.5317172526439542 2.1718994434000241" dir="1.98411064855555 -1.5317172526439542 -2.1718994434000241" attenuation="1 0 0" cutoff="45" exponent="1" ambient="0 0 0" diffuse="0.69999999999999996 0.69999999999999996 0.69999999999999996" specular="0.29999999999999999 0.29999999999999999 0.29999999999999999"/>
+      <camera name="camera_a0_sphere_0" class="/" mode="trackcom" fovy="70" ipd="0.068000000000000005" pos="-0.78603555171443096 0.40200966954889555 -0.46961296514276324" quat="0.27542341010122051 0.43610111656089062 -0.73798529707964111 -0.43512694997762813"/>
+      <camera name="camera_a0_sphere_1" class="/" mode="trackcom" fovy="70" ipd="0.068000000000000005" pos="-0.84147098480789662 0.45464871341284085 0.29192658172642888" quat="0.2298488470659302 0.42073549240394825 -0.42073549240394825 -0.77015115293406988"/>
+      <camera name="camera_a0_sphere_2" class="/" mode="trackcom" fovy="70" ipd="0.068000000000000005" pos="-0.16829419696157943 0.63123204855070791 -0.78308566846261085" quat="-0.061350494137226819 0.4754839260532876 -0.79306565322219713 -0.37576325341006905"/>
+      <camera name="camera_a0_sphere_3" class="/" mode="trackcom" fovy="70" ipd="0.068000000000000005" pos="0.37200810890656044 0.79900316095613944 0.51303402975812662" quat="-0.65882410368484157 0.25680887913751171 -0.41562693777745346 -0.57206140281768436"/>
+    </body>
+  </worldbody>
+  <sensor>
+    <framelinvel name="framelinvel_a0_sphere" objtype="body" objname="a0_sphere"/>
+    <frameangvel name="frameangvel_a0_sphere" objtype="body" objname="a0_sphere"/>
+    <framelinvel name="framelinvel_a0_base_link" objtype="body" objname="a0_base_link"/>
+    <frameangvel name="frameangvel_a0_base_link" objtype="body" objname="a0_base_link"/>
+  </sensor>
+  <keyframe>
+    <key name="initial" time="0" qpos="-0 -0 0.20000000000000001 0.2298488470659302 -0.42073549240394825 0.42073549240394825 0.77015115293406988" qvel="0 0 0 0 0 0"/>
+  </keyframe>
+</mujoco>

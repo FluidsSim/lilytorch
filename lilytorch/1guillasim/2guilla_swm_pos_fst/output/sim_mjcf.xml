@@ -1,0 +1,348 @@
+<?xml version="1.0" ?>
+<mujoco model="animat_2">
+  <compiler boundmass="1e-10" boundinertia="1.0000000000000001e-15" balanceinertia="false" angle="radian" eulerseq="xyz" discardvisual="false" fusestatic="true" inertiafromgeom="false">
+    <lengthrange mode="none" useexisting="true"/>
+  </compiler>
+  <option timestep="0.001" gravity="0 0 -9.8100000000000005" impratio="10" integrator="implicitfast" cone="elliptic" solver="CG" iterations="50" noslip_iterations="1000" noslip_tolerance="9.9999999999999995e-07" ccd_iterations="1000" ccd_tolerance="9.9999999999999995e-07">
+    <flag energy="enable"/>
+  </option>
+  <size njmax="4096" nconmax="4096" nkey="1"/>
+  <visual>
+    <global offwidth="1280" offheight="720"/>
+    <quality shadowsize="1024" offsamples="4" numslices="28" numstacks="16" numquads="4"/>
+    <map stiffness="100" stiffnessrot="500" force="1" torque="1" alpha="0.29999999999999999" fogstart="3" fogend="10" znear="1.0000000000000001e-05" zfar="3" haze="0.29999999999999999" shadowclip="1" shadowscale="0.29999999999999999" actuatortendon="2"/>
+    <scale forcewidth="0.01" contactwidth="0.029999999999999999" contactheight="0.01" connect="0.01" com="0.01" camera="0.10000000000000001" light="0.10000000000000001" selectpoint="0.01" jointlength="0.01" jointwidth="0.01" actuatorlength="0.01" actuatorwidth="0.01" framelength="0.01" framewidth="0.01" constraint="0.01" slidercrank="0.01"/>
+  </visual>
+  <statistic meanmass="0" meaninertia="0" meansize="0" extent="100"/>
+  <default>
+    <default class="/"/>
+  </default>
+  <asset>
+    <texture name="texture_grid" type="2d" builtin="checker" rgb1="0.10000000000000001 0.20000000000000001 0.29999999999999999" rgb2="0.20000000000000001 0.29999999999999999 0.40000000000000002" mark="edge" markrgb="0.20000000000000001 0.29999999999999999 0.40000000000000002" width="300" height="300"/>
+    <material name="material_grid" class="/" texture="texture_grid" texrepeat="1 1" texuniform="true" reflectance="0.20000000000000001"/>
+    <material name="material_water_visual" class="/" rgba="0.5 0.5 0.90000000000000002 0.29999999999999999"/>
+    <mesh name="a0_mesh_link0_collision" class="/" file="link0_collision.stl" scale="1 1 1"/>
+    <mesh name="a0_mesh_link0_visual" class="/" file="link0_composite.obj" scale="1 1 1"/>
+    <mesh name="a0_mesh_link1_collision" class="/" file="link1_collision.stl" scale="1 1 1"/>
+    <mesh name="a0_mesh_link1_visual" class="/" file="link1_composite.obj" scale="1 1 1"/>
+    <mesh name="a0_mesh_link2_collision" class="/" file="link2_collision.stl" scale="1 1 1"/>
+    <mesh name="a0_mesh_link2_visual" class="/" file="link2_composite.obj" scale="1 1 1"/>
+    <mesh name="a0_mesh_link3_collision" class="/" file="link3_collision.stl" scale="1 1 1"/>
+    <mesh name="a0_mesh_link3_visual" class="/" file="link3_composite.obj" scale="1 1 1"/>
+    <mesh name="a0_mesh_link4_collision" class="/" file="link4_collision.stl" scale="1 1 1"/>
+    <mesh name="a0_mesh_link4_visual" class="/" file="link4_composite.obj" scale="1 1 1"/>
+    <mesh name="a0_mesh_link5_collision" class="/" file="link5_collision.stl" scale="1 1 1"/>
+    <mesh name="a0_mesh_link5_visual" class="/" file="link5_composite.obj" scale="1 1 1"/>
+    <mesh name="a0_mesh_link6_collision" class="/" file="link6_collision.stl" scale="1 1 1"/>
+    <mesh name="a0_mesh_link6_visual" class="/" file="link6_composite.obj" scale="1 1 1"/>
+    <mesh name="a0_mesh_link7_collision" class="/" file="link7_collision.stl" scale="1 1 1"/>
+    <mesh name="a0_mesh_link7_visual" class="/" file="link7_composite.obj" scale="1 1 1"/>
+    <mesh name="a0_mesh_link8_collision" class="/" file="link8_collision.stl" scale="1 1 1"/>
+    <mesh name="a0_mesh_link8_visual" class="/" file="link8_composite.obj" scale="1 1 1"/>
+    <mesh name="a1_mesh_link0_collision" class="/" file="link0_collision.stl" scale="1 1 1"/>
+    <mesh name="a1_mesh_link0_visual" class="/" file="link0_composite.obj" scale="1 1 1"/>
+    <mesh name="a1_mesh_link1_collision" class="/" file="link1_collision.stl" scale="1 1 1"/>
+    <mesh name="a1_mesh_link1_visual" class="/" file="link1_composite.obj" scale="1 1 1"/>
+    <mesh name="a1_mesh_link2_collision" class="/" file="link2_collision.stl" scale="1 1 1"/>
+    <mesh name="a1_mesh_link2_visual" class="/" file="link2_composite.obj" scale="1 1 1"/>
+    <mesh name="a1_mesh_link3_collision" class="/" file="link3_collision.stl" scale="1 1 1"/>
+    <mesh name="a1_mesh_link3_visual" class="/" file="link3_composite.obj" scale="1 1 1"/>
+    <mesh name="a1_mesh_link4_collision" class="/" file="link4_collision.stl" scale="1 1 1"/>
+    <mesh name="a1_mesh_link4_visual" class="/" file="link4_composite.obj" scale="1 1 1"/>
+    <mesh name="a1_mesh_link5_collision" class="/" file="link5_collision.stl" scale="1 1 1"/>
+    <mesh name="a1_mesh_link5_visual" class="/" file="link5_composite.obj" scale="1 1 1"/>
+    <mesh name="a1_mesh_link6_collision" class="/" file="link6_collision.stl" scale="1 1 1"/>
+    <mesh name="a1_mesh_link6_visual" class="/" file="link6_composite.obj" scale="1 1 1"/>
+    <mesh name="a1_mesh_link7_collision" class="/" file="link7_collision.stl" scale="1 1 1"/>
+    <mesh name="a1_mesh_link7_visual" class="/" file="link7_composite.obj" scale="1 1 1"/>
+    <mesh name="a1_mesh_link8_collision" class="/" file="link8_collision.stl" scale="1 1 1"/>
+    <mesh name="a1_mesh_link8_visual" class="/" file="link8_composite.obj" scale="1 1 1"/>
+    <material name="a2_material_base_link_visual" class="/" rgba="1 1 0 1"/>
+    <texture name="skybox" type="skybox" builtin="gradient" rgb1="0.40000000000000002 0.59999999999999998 0.80000000000000004" rgb2="0 0 0" mark="random" markrgb="1 1 1" width="800" height="800"/>
+  </asset>
+  <worldbody>
+    <body name="arena_flat" pos="0 0 -1" quat="1 0 0 0">
+      <body name="floor" pos="0 0 0" quat="1 0 0 0">
+        <geom name="floor_collision" class="/" type="plane" contype="1" conaffinity="1" condim="3" group="2" size="100 100 1" material="material_grid" friction="0 0 0" margin="0" pos="0 0 0" quat="1 0 0 0"/>
+        <geom name="floor_visual" class="/" type="plane" contype="0" conaffinity="0" group="1" size="100 100 1" material="material_grid" pos="0 0 0" quat="1 0 0 0"/>
+      </body>
+    </body>
+    <body name="arena_water" pos="0 0 0" quat="1 0 0 0">
+      <body name="water" pos="0 0 0" quat="1 0 0 0">
+        <geom name="water_visual" class="/" type="box" contype="0" conaffinity="0" group="1" size="25 25 25" material="material_water_visual" pos="0 0 -25" quat="1 0 0 0"/>
+      </body>
+    </body>
+    <body name="a0_1guilla" pos="0 0 0" quat="6.123233995736766e-17 0 0 1">
+      <freejoint name="a0_root_1guilla"/>
+      <body name="a0_link0" pos="0 0 0" quat="1 0 0 0">
+        <geom name="a0_link0_collision" class="/" type="mesh" contype="1" conaffinity="0" condim="3" group="2" friction="0.20000000000000001 0 0" margin="0" pos="0 0 0" quat="1 0 0 0" mesh="a0_mesh_link0_collision" fluidshape="ellipsoid" fluidcoef="0 0 0 0 0"/>
+        <geom name="a0_link0_visual" class="/" type="mesh" contype="0" conaffinity="0" group="1" pos="0 0 0" quat="1 0 0 0" mesh="a0_mesh_link0_visual"/>
+        <inertial pos="0.089594400000000005 0.00019141899999999999 0.0028449899999999999" mass="0.098059300000000002" fullinertia="6.1403599999999996e-05 0.00023470699999999999 0.00022729900000000001 9.2411900000000002e-08 1.3720299999999999e-06 2.0817200000000001e-08"/>
+        <body name="a0_link1" pos="0.17701 0 0" quat="1 0 0 0">
+          <joint name="a0_joint_body_00" class="/" type="hinge" pos="0 0 0" axis="0 0 -1" limited="true" stiffness="0" range="-1.5708 1.5708" springref="0" damping="0" frictionloss="0"/>
+          <geom name="a0_link1_collision" class="/" type="mesh" contype="1" conaffinity="0" condim="3" group="2" friction="0.20000000000000001 0 0" margin="0" pos="0 0 0" quat="1 0 0 0" mesh="a0_mesh_link1_collision" fluidshape="ellipsoid" fluidcoef="0 0 0 0 0"/>
+          <geom name="a0_link1_visual" class="/" type="mesh" contype="0" conaffinity="0" group="1" pos="0 0 0" quat="1 0 0 0" mesh="a0_mesh_link1_visual"/>
+          <inertial pos="0.0162396 0.000150087 -0.00095966900000000002" mass="0.048157100000000001" fullinertia="1.07482e-05 1.8655500000000001e-05 1.5793800000000001e-05 8.4919200000000002e-09 -5.7129000000000002e-08 6.5887699999999998e-09"/>
+          <body name="a0_link2" pos="0.060099999999999987 0 0" quat="1 0 0 0">
+            <joint name="a0_joint_body_01" class="/" type="hinge" pos="0 0 0" axis="0 0 -1" limited="true" stiffness="0" range="-1.5708 1.5708" springref="0" damping="0" frictionloss="0"/>
+            <geom name="a0_link2_collision" class="/" type="mesh" contype="1" conaffinity="0" condim="3" group="2" friction="0.20000000000000001 0 0" margin="0" pos="0 0 0" quat="1 0 0 0" mesh="a0_mesh_link2_collision" fluidshape="ellipsoid" fluidcoef="0 0 0 0 0"/>
+            <geom name="a0_link2_visual" class="/" type="mesh" contype="0" conaffinity="0" group="1" pos="0 0 0" quat="1 0 0 0" mesh="a0_mesh_link2_visual"/>
+            <inertial pos="0.016322900000000001 0.000134716 -0.00105284" mass="0.048156499999999998" fullinertia="1.07489e-05 1.8655e-05 1.5792500000000002e-05 -1.83964e-08 -9.1788399999999996e-08 2.1849599999999999e-09"/>
+            <body name="a0_link3" pos="0.059999999999999998 0 0" quat="1 0 0 0">
+              <joint name="a0_joint_body_02" class="/" type="hinge" pos="0 0 0" axis="0 0 -1" limited="true" stiffness="0" range="-1.5708 1.5708" springref="0" damping="0" frictionloss="0"/>
+              <geom name="a0_link3_collision" class="/" type="mesh" contype="1" conaffinity="0" condim="3" group="2" friction="0.20000000000000001 0 0" margin="0" pos="0 0 0" quat="1 0 0 0" mesh="a0_mesh_link3_collision" fluidshape="ellipsoid" fluidcoef="0 0 0 0 0"/>
+              <geom name="a0_link3_visual" class="/" type="mesh" contype="0" conaffinity="0" group="1" pos="0 0 0" quat="1 0 0 0" mesh="a0_mesh_link3_visual"/>
+              <inertial pos="0.016344600000000001 0.00021377599999999999 -0.000714929" mass="0.048156499999999998" fullinertia="1.07489e-05 1.86549e-05 1.5792500000000002e-05 -2.36812e-08 -9.1810899999999995e-08 2.0763699999999999e-09"/>
+              <body name="a0_link4" pos="0.059900000000000009 0 0" quat="1 0 0 0">
+                <joint name="a0_joint_body_03" class="/" type="hinge" pos="0 0 0" axis="0 0 -1" limited="true" stiffness="0" range="-1.5708 1.5708" springref="0" damping="0" frictionloss="0"/>
+                <geom name="a0_link4_collision" class="/" type="mesh" contype="1" conaffinity="0" condim="3" group="2" friction="0.20000000000000001 0 0" margin="0" pos="0 0 0" quat="1 0 0 0" mesh="a0_mesh_link4_collision" fluidshape="ellipsoid" fluidcoef="0 0 0 0 0"/>
+                <geom name="a0_link4_visual" class="/" type="mesh" contype="0" conaffinity="0" group="1" pos="0 0 0" quat="1 0 0 0" mesh="a0_mesh_link4_visual"/>
+                <inertial pos="0.016346099999999999 0.000173785 -0.00034578199999999999" mass="0.048179699999999999" fullinertia="1.07559e-05 1.8669500000000001e-05 1.5807600000000001e-05 1.76406e-08 -9.1913900000000006e-08 2.5710900000000001e-09"/>
+                <body name="a0_link5" pos="0.059900000000000009 0 0" quat="1 0 0 0">
+                  <joint name="a0_joint_body_04" class="/" type="hinge" pos="0 0 0" axis="0 0 -1" limited="true" stiffness="0" range="-1.5708 1.5708" springref="0" damping="0" frictionloss="0"/>
+                  <geom name="a0_link5_collision" class="/" type="mesh" contype="1" conaffinity="0" condim="3" group="2" friction="0.20000000000000001 0 0" margin="0" pos="0 0 0" quat="1 0 0 0" mesh="a0_mesh_link5_collision" fluidshape="ellipsoid" fluidcoef="0 0 0 0 0"/>
+                  <geom name="a0_link5_visual" class="/" type="mesh" contype="0" conaffinity="0" group="1" pos="0 0 0" quat="1 0 0 0" mesh="a0_mesh_link5_visual"/>
+                  <inertial pos="0.016383700000000001 3.92937e-05 3.7849100000000003e-05" mass="0.048147799999999998" fullinertia="1.0745500000000001e-05 1.8651599999999999e-05 1.5788199999999999e-05 -6.2063199999999997e-09 -9.1856100000000004e-08 2.3745e-09"/>
+                  <body name="a0_link6" pos="0.060199999999999976 0 0" quat="1 0 0 0">
+                    <joint name="a0_joint_body_05" class="/" type="hinge" pos="0 0 0" axis="0 0 -1" limited="true" stiffness="0" range="-1.5708 1.5708" springref="0" damping="0" frictionloss="0"/>
+                    <geom name="a0_link6_collision" class="/" type="mesh" contype="1" conaffinity="0" condim="3" group="2" friction="0.20000000000000001 0 0" margin="0" pos="0 0 0" quat="1 0 0 0" mesh="a0_mesh_link6_collision" fluidshape="ellipsoid" fluidcoef="0 0 0 0 0"/>
+                    <geom name="a0_link6_visual" class="/" type="mesh" contype="0" conaffinity="0" group="1" pos="0 0 0" quat="1 0 0 0" mesh="a0_mesh_link6_visual"/>
+                    <inertial pos="0.0161484 -1.3185300000000001e-05 0.00037308099999999999" mass="0.048150699999999998" fullinertia="1.07467e-05 1.8652600000000002e-05 1.5789599999999999e-05 -2.6739299999999998e-08 -9.1881699999999999e-08 2.1723499999999998e-09"/>
+                    <body name="a0_link7" pos="0.059999999999999998 0 0" quat="1 0 0 0">
+                      <joint name="a0_joint_body_06" class="/" type="hinge" pos="0 0 0" axis="0 0 -1" limited="true" stiffness="0" range="-1.5708 1.5708" springref="0" damping="0" frictionloss="0"/>
+                      <geom name="a0_link7_collision" class="/" type="mesh" contype="1" conaffinity="0" condim="3" group="2" friction="0.20000000000000001 0 0" margin="0" pos="0 0 0" quat="1 0 0 0" mesh="a0_mesh_link7_collision" fluidshape="ellipsoid" fluidcoef="0 0 0 0 0"/>
+                      <geom name="a0_link7_visual" class="/" type="mesh" contype="0" conaffinity="0" group="1" pos="0 0 0" quat="1 0 0 0" mesh="a0_mesh_link7_visual"/>
+                      <inertial pos="0.016153399999999998 7.8428499999999996e-05 0.00082078399999999997" mass="0.048156600000000001" fullinertia="1.0748600000000001e-05 1.8654599999999999e-05 1.57919e-05 1.24607e-08 -9.1657600000000004e-08 2.4403099999999998e-09"/>
+                      <body name="a0_link8" pos="0.059800000000000075 0 0" quat="1 0 0 0">
+                        <joint name="a0_joint_body_07" class="/" type="hinge" pos="0 0 0" axis="0 0 -1" limited="true" stiffness="0" range="-1.5708 1.5708" springref="0" damping="0" frictionloss="0"/>
+                        <geom name="a0_link8_collision" class="/" type="mesh" contype="1" conaffinity="0" condim="3" group="2" friction="0.20000000000000001 0 0" margin="0" pos="0 0 0" quat="1 0 0 0" mesh="a0_mesh_link8_collision" fluidshape="ellipsoid" fluidcoef="0 0 0 0 0"/>
+                        <geom name="a0_link8_visual" class="/" type="mesh" contype="0" conaffinity="0" group="1" pos="0 0 0" quat="1 0 0 0" mesh="a0_mesh_link8_visual"/>
+                        <inertial pos="0.059301 8.9097299999999998e-05 0.0020318699999999999" mass="0.103066" fullinertia="2.8634799999999999e-05 0.00038380899999999998 0.00037549700000000003 -1.9403400000000001e-06 -1.36687e-06 8.9535299999999994e-09"/>
+                      </body>
+                    </body>
+                  </body>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+      <light name="light_animat" class="/" mode="trackcom" directional="false" castshadow="true" active="true" pos="1.0000000000000002 -0.99999999999999989 3" dir="-1.0000000000000002 0.99999999999999989 -3" attenuation="1 0 0" cutoff="45" exponent="1" ambient="0 0 0" diffuse="0.69999999999999996 0.69999999999999996 0.69999999999999996" specular="0.29999999999999999 0.29999999999999999 0.29999999999999999"/>
+      <camera name="camera_a0_1guilla_0" class="/" mode="trackcom" fovy="70" ipd="0.068000000000000005" pos="-0.35355339059327373 0.61237243569579447 0.70710678118654757" quat="0.23911761839433454 0.09904576054128765 -0.36964381061438611 -0.89239910083252283"/>
+      <camera name="camera_a0_1guilla_1" class="/" mode="trackcom" fovy="70" ipd="0.068000000000000005" pos="0 0 1" quat="6.123233995736766e-17 0 0 -1"/>
+      <camera name="camera_a0_1guilla_2" class="/" mode="trackcom" fovy="70" ipd="0.068000000000000005" pos="-1.2246467991473532e-16 1 0.20000000000000001" quat="4.953800363085458e-17 3.5991466390299832e-17 -0.58778525229247314 -0.80901699437494745"/>
+      <camera name="camera_a0_1guilla_3" class="/" mode="trackcom" fovy="70" ipd="0.068000000000000005" pos="1 1.2246467991473532e-16 0.20000000000000001" quat="-0.57206140281768425 -0.41562693777745341 -0.41562693777745346 -0.57206140281768436"/>
+    </body>
+    <body name="a1_1guilla" pos="0 0.20000000000000001 0" quat="6.123233995736766e-17 0 0 1">
+      <freejoint name="a1_root_1guilla"/>
+      <body name="a1_link0" pos="0 0 0" quat="1 0 0 0">
+        <geom name="a1_link0_collision" class="/" type="mesh" contype="1" conaffinity="0" condim="3" group="2" friction="0.20000000000000001 0 0" margin="0" pos="0 0 0" quat="1 0 0 0" mesh="a1_mesh_link0_collision" fluidshape="ellipsoid" fluidcoef="0 0 0 0 0"/>
+        <geom name="a1_link0_visual" class="/" type="mesh" contype="0" conaffinity="0" group="1" pos="0 0 0" quat="1 0 0 0" mesh="a1_mesh_link0_visual"/>
+        <inertial pos="0.089594400000000005 0.00019141899999999999 0.0028449899999999999" mass="0.098059300000000002" fullinertia="6.1403599999999996e-05 0.00023470699999999999 0.00022729900000000001 9.2411900000000002e-08 1.3720299999999999e-06 2.0817200000000001e-08"/>
+        <body name="a1_link1" pos="0.17701 0 0" quat="1 0 0 0">
+          <joint name="a1_joint_body_00" class="/" type="hinge" pos="0 0 0" axis="0 0 -1" limited="true" stiffness="0" range="-1.5708 1.5708" springref="0" damping="0" frictionloss="0"/>
+          <geom name="a1_link1_collision" class="/" type="mesh" contype="1" conaffinity="0" condim="3" group="2" friction="0.20000000000000001 0 0" margin="0" pos="0 0 0" quat="1 0 0 0" mesh="a1_mesh_link1_collision" fluidshape="ellipsoid" fluidcoef="0 0 0 0 0"/>
+          <geom name="a1_link1_visual" class="/" type="mesh" contype="0" conaffinity="0" group="1" pos="0 0 0" quat="1 0 0 0" mesh="a1_mesh_link1_visual"/>
+          <inertial pos="0.0162396 0.000150087 -0.00095966900000000002" mass="0.048157100000000001" fullinertia="1.07482e-05 1.8655500000000001e-05 1.5793800000000001e-05 8.4919200000000002e-09 -5.7129000000000002e-08 6.5887699999999998e-09"/>
+          <body name="a1_link2" pos="0.060099999999999987 0 0" quat="1 0 0 0">
+            <joint name="a1_joint_body_01" class="/" type="hinge" pos="0 0 0" axis="0 0 -1" limited="true" stiffness="0" range="-1.5708 1.5708" springref="0" damping="0" frictionloss="0"/>
+            <geom name="a1_link2_collision" class="/" type="mesh" contype="1" conaffinity="0" condim="3" group="2" friction="0.20000000000000001 0 0" margin="0" pos="0 0 0" quat="1 0 0 0" mesh="a1_mesh_link2_collision" fluidshape="ellipsoid" fluidcoef="0 0 0 0 0"/>
+            <geom name="a1_link2_visual" class="/" type="mesh" contype="0" conaffinity="0" group="1" pos="0 0 0" quat="1 0 0 0" mesh="a1_mesh_link2_visual"/>
+            <inertial pos="0.016322900000000001 0.000134716 -0.00105284" mass="0.048156499999999998" fullinertia="1.07489e-05 1.8655e-05 1.5792500000000002e-05 -1.83964e-08 -9.1788399999999996e-08 2.1849599999999999e-09"/>
+            <body name="a1_link3" pos="0.059999999999999998 0 0" quat="1 0 0 0">
+              <joint name="a1_joint_body_02" class="/" type="hinge" pos="0 0 0" axis="0 0 -1" limited="true" stiffness="0" range="-1.5708 1.5708" springref="0" damping="0" frictionloss="0"/>
+              <geom name="a1_link3_collision" class="/" type="mesh" contype="1" conaffinity="0" condim="3" group="2" friction="0.20000000000000001 0 0" margin="0" pos="0 0 0" quat="1 0 0 0" mesh="a1_mesh_link3_collision" fluidshape="ellipsoid" fluidcoef="0 0 0 0 0"/>
+              <geom name="a1_link3_visual" class="/" type="mesh" contype="0" conaffinity="0" group="1" pos="0 0 0" quat="1 0 0 0" mesh="a1_mesh_link3_visual"/>
+              <inertial pos="0.016344600000000001 0.00021377599999999999 -0.000714929" mass="0.048156499999999998" fullinertia="1.07489e-05 1.86549e-05 1.5792500000000002e-05 -2.36812e-08 -9.1810899999999995e-08 2.0763699999999999e-09"/>
+              <body name="a1_link4" pos="0.059900000000000009 0 0" quat="1 0 0 0">
+                <joint name="a1_joint_body_03" class="/" type="hinge" pos="0 0 0" axis="0 0 -1" limited="true" stiffness="0" range="-1.5708 1.5708" springref="0" damping="0" frictionloss="0"/>
+                <geom name="a1_link4_collision" class="/" type="mesh" contype="1" conaffinity="0" condim="3" group="2" friction="0.20000000000000001 0 0" margin="0" pos="0 0 0" quat="1 0 0 0" mesh="a1_mesh_link4_collision" fluidshape="ellipsoid" fluidcoef="0 0 0 0 0"/>
+                <geom name="a1_link4_visual" class="/" type="mesh" contype="0" conaffinity="0" group="1" pos="0 0 0" quat="1 0 0 0" mesh="a1_mesh_link4_visual"/>
+                <inertial pos="0.016346099999999999 0.000173785 -0.00034578199999999999" mass="0.048179699999999999" fullinertia="1.07559e-05 1.8669500000000001e-05 1.5807600000000001e-05 1.76406e-08 -9.1913900000000006e-08 2.5710900000000001e-09"/>
+                <body name="a1_link5" pos="0.059900000000000009 0 0" quat="1 0 0 0">
+                  <joint name="a1_joint_body_04" class="/" type="hinge" pos="0 0 0" axis="0 0 -1" limited="true" stiffness="0" range="-1.5708 1.5708" springref="0" damping="0" frictionloss="0"/>
+                  <geom name="a1_link5_collision" class="/" type="mesh" contype="1" conaffinity="0" condim="3" group="2" friction="0.20000000000000001 0 0" margin="0" pos="0 0 0" quat="1 0 0 0" mesh="a1_mesh_link5_collision" fluidshape="ellipsoid" fluidcoef="0 0 0 0 0"/>
+                  <geom name="a1_link5_visual" class="/" type="mesh" contype="0" conaffinity="0" group="1" pos="0 0 0" quat="1 0 0 0" mesh="a1_mesh_link5_visual"/>
+                  <inertial pos="0.016383700000000001 3.92937e-05 3.7849100000000003e-05" mass="0.048147799999999998" fullinertia="1.0745500000000001e-05 1.8651599999999999e-05 1.5788199999999999e-05 -6.2063199999999997e-09 -9.1856100000000004e-08 2.3745e-09"/>
+                  <body name="a1_link6" pos="0.060199999999999976 0 0" quat="1 0 0 0">
+                    <joint name="a1_joint_body_05" class="/" type="hinge" pos="0 0 0" axis="0 0 -1" limited="true" stiffness="0" range="-1.5708 1.5708" springref="0" damping="0" frictionloss="0"/>
+                    <geom name="a1_link6_collision" class="/" type="mesh" contype="1" conaffinity="0" condim="3" group="2" friction="0.20000000000000001 0 0" margin="0" pos="0 0 0" quat="1 0 0 0" mesh="a1_mesh_link6_collision" fluidshape="ellipsoid" fluidcoef="0 0 0 0 0"/>
+                    <geom name="a1_link6_visual" class="/" type="mesh" contype="0" conaffinity="0" group="1" pos="0 0 0" quat="1 0 0 0" mesh="a1_mesh_link6_visual"/>
+                    <inertial pos="0.0161484 -1.3185300000000001e-05 0.00037308099999999999" mass="0.048150699999999998" fullinertia="1.07467e-05 1.8652600000000002e-05 1.5789599999999999e-05 -2.6739299999999998e-08 -9.1881699999999999e-08 2.1723499999999998e-09"/>
+                    <body name="a1_link7" pos="0.059999999999999998 0 0" quat="1 0 0 0">
+                      <joint name="a1_joint_body_06" class="/" type="hinge" pos="0 0 0" axis="0 0 -1" limited="true" stiffness="0" range="-1.5708 1.5708" springref="0" damping="0" frictionloss="0"/>
+                      <geom name="a1_link7_collision" class="/" type="mesh" contype="1" conaffinity="0" condim="3" group="2" friction="0.20000000000000001 0 0" margin="0" pos="0 0 0" quat="1 0 0 0" mesh="a1_mesh_link7_collision" fluidshape="ellipsoid" fluidcoef="0 0 0 0 0"/>
+                      <geom name="a1_link7_visual" class="/" type="mesh" contype="0" conaffinity="0" group="1" pos="0 0 0" quat="1 0 0 0" mesh="a1_mesh_link7_visual"/>
+                      <inertial pos="0.016153399999999998 7.8428499999999996e-05 0.00082078399999999997" mass="0.048156600000000001" fullinertia="1.0748600000000001e-05 1.8654599999999999e-05 1.57919e-05 1.24607e-08 -9.1657600000000004e-08 2.4403099999999998e-09"/>
+                      <body name="a1_link8" pos="0.059800000000000075 0 0" quat="1 0 0 0">
+                        <joint name="a1_joint_body_07" class="/" type="hinge" pos="0 0 0" axis="0 0 -1" limited="true" stiffness="0" range="-1.5708 1.5708" springref="0" damping="0" frictionloss="0"/>
+                        <geom name="a1_link8_collision" class="/" type="mesh" contype="1" conaffinity="0" condim="3" group="2" friction="0.20000000000000001 0 0" margin="0" pos="0 0 0" quat="1 0 0 0" mesh="a1_mesh_link8_collision" fluidshape="ellipsoid" fluidcoef="0 0 0 0 0"/>
+                        <geom name="a1_link8_visual" class="/" type="mesh" contype="0" conaffinity="0" group="1" pos="0 0 0" quat="1 0 0 0" mesh="a1_mesh_link8_visual"/>
+                        <inertial pos="0.059301 8.9097299999999998e-05 0.0020318699999999999" mass="0.103066" fullinertia="2.8634799999999999e-05 0.00038380899999999998 0.00037549700000000003 -1.9403400000000001e-06 -1.36687e-06 8.9535299999999994e-09"/>
+                      </body>
+                    </body>
+                  </body>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+    <body name="a2_sphere" pos="-0.14999999999999999 -0.14999999999999999 0.20000000000000001" quat="0.2298488470659302 -0.42073549240394825 0.42073549240394825 0.77015115293406988">
+      <freejoint name="a2_root_sphere"/>
+      <body name="a2_base_link" pos="0 0 0" quat="1 0 0 0">
+        <geom name="a2_base_link_collision" class="/" type="sphere" contype="1" conaffinity="0" condim="3" group="2" size="0.050000000000000003 0.050000000000000003 0.050000000000000003" friction="0.5 0 0" margin="0" pos="0 0 0" quat="1 0 0 0" fluidshape="ellipsoid" fluidcoef="0 0 0 0 0"/>
+        <geom name="a2_base_link_visual" class="/" type="sphere" contype="0" conaffinity="0" group="1" size="0.050000000000000003 0.050000000000000003 0.050000000000000003" material="a2_material_base_link_visual" pos="0 0 0" quat="1 0 0 0"/>
+        <inertial pos="0 0 0" mass="0.52359877559829893" fullinertia="0.00052359877559829903 0.00052359877559829903 0.00052359877559829903 0 0 0"/>
+      </body>
+    </body>
+  </worldbody>
+  <actuator>
+    <position name="actuator_position_a0_joint_body_00" class="/" ctrllimited="false" forcelimited="true" ctrlrange="-1000000 1000000" forcerange="-2 2" joint="a0_joint_body_00" kp="3" kv="0.01"/>
+    <velocity name="actuator_velocity_a0_joint_body_00" class="/" ctrllimited="false" forcelimited="true" ctrlrange="-1000000 1000000" forcerange="-2 2" joint="a0_joint_body_00" kv="0"/>
+    <motor name="actuator_torque_a0_joint_body_00" class="/" forcelimited="true" forcerange="-2 2" joint="a0_joint_body_00"/>
+    <position name="actuator_position_a0_joint_body_01" class="/" ctrllimited="false" forcelimited="true" ctrlrange="-1000000 1000000" forcerange="-2 2" joint="a0_joint_body_01" kp="3" kv="0.01"/>
+    <velocity name="actuator_velocity_a0_joint_body_01" class="/" ctrllimited="false" forcelimited="true" ctrlrange="-1000000 1000000" forcerange="-2 2" joint="a0_joint_body_01" kv="0"/>
+    <motor name="actuator_torque_a0_joint_body_01" class="/" forcelimited="true" forcerange="-2 2" joint="a0_joint_body_01"/>
+    <position name="actuator_position_a0_joint_body_02" class="/" ctrllimited="false" forcelimited="true" ctrlrange="-1000000 1000000" forcerange="-2 2" joint="a0_joint_body_02" kp="3" kv="0.01"/>
+    <velocity name="actuator_velocity_a0_joint_body_02" class="/" ctrllimited="false" forcelimited="true" ctrlrange="-1000000 1000000" forcerange="-2 2" joint="a0_joint_body_02" kv="0"/>
+    <motor name="actuator_torque_a0_joint_body_02" class="/" forcelimited="true" forcerange="-2 2" joint="a0_joint_body_02"/>
+    <position name="actuator_position_a0_joint_body_03" class="/" ctrllimited="false" forcelimited="true" ctrlrange="-1000000 1000000" forcerange="-2 2" joint="a0_joint_body_03" kp="3" kv="0.01"/>
+    <velocity name="actuator_velocity_a0_joint_body_03" class="/" ctrllimited="false" forcelimited="true" ctrlrange="-1000000 1000000" forcerange="-2 2" joint="a0_joint_body_03" kv="0"/>
+    <motor name="actuator_torque_a0_joint_body_03" class="/" forcelimited="true" forcerange="-2 2" joint="a0_joint_body_03"/>
+    <position name="actuator_position_a0_joint_body_04" class="/" ctrllimited="false" forcelimited="true" ctrlrange="-1000000 1000000" forcerange="-2 2" joint="a0_joint_body_04" kp="3" kv="0.01"/>
+    <velocity name="actuator_velocity_a0_joint_body_04" class="/" ctrllimited="false" forcelimited="true" ctrlrange="-1000000 1000000" forcerange="-2 2" joint="a0_joint_body_04" kv="0"/>
+    <motor name="actuator_torque_a0_joint_body_04" class="/" forcelimited="true" forcerange="-2 2" joint="a0_joint_body_04"/>
+    <position name="actuator_position_a0_joint_body_05" class="/" ctrllimited="false" forcelimited="true" ctrlrange="-1000000 1000000" forcerange="-2 2" joint="a0_joint_body_05" kp="3" kv="0.01"/>
+    <velocity name="actuator_velocity_a0_joint_body_05" class="/" ctrllimited="false" forcelimited="true" ctrlrange="-1000000 1000000" forcerange="-2 2" joint="a0_joint_body_05" kv="0"/>
+    <motor name="actuator_torque_a0_joint_body_05" class="/" forcelimited="true" forcerange="-2 2" joint="a0_joint_body_05"/>
+    <position name="actuator_position_a0_joint_body_06" class="/" ctrllimited="false" forcelimited="true" ctrlrange="-1000000 1000000" forcerange="-2 2" joint="a0_joint_body_06" kp="3" kv="0.01"/>
+    <velocity name="actuator_velocity_a0_joint_body_06" class="/" ctrllimited="false" forcelimited="true" ctrlrange="-1000000 1000000" forcerange="-2 2" joint="a0_joint_body_06" kv="0"/>
+    <motor name="actuator_torque_a0_joint_body_06" class="/" forcelimited="true" forcerange="-2 2" joint="a0_joint_body_06"/>
+    <position name="actuator_position_a0_joint_body_07" class="/" ctrllimited="false" forcelimited="true" ctrlrange="-1000000 1000000" forcerange="-2 2" joint="a0_joint_body_07" kp="3" kv="0.01"/>
+    <velocity name="actuator_velocity_a0_joint_body_07" class="/" ctrllimited="false" forcelimited="true" ctrlrange="-1000000 1000000" forcerange="-2 2" joint="a0_joint_body_07" kv="0"/>
+    <motor name="actuator_torque_a0_joint_body_07" class="/" forcelimited="true" forcerange="-2 2" joint="a0_joint_body_07"/>
+    <position name="actuator_position_a1_joint_body_00" class="/" ctrllimited="false" forcelimited="true" ctrlrange="-1000000 1000000" forcerange="-2 2" joint="a1_joint_body_00" kp="3" kv="0.01"/>
+    <velocity name="actuator_velocity_a1_joint_body_00" class="/" ctrllimited="false" forcelimited="true" ctrlrange="-1000000 1000000" forcerange="-2 2" joint="a1_joint_body_00" kv="0"/>
+    <motor name="actuator_torque_a1_joint_body_00" class="/" forcelimited="true" forcerange="-2 2" joint="a1_joint_body_00"/>
+    <position name="actuator_position_a1_joint_body_01" class="/" ctrllimited="false" forcelimited="true" ctrlrange="-1000000 1000000" forcerange="-2 2" joint="a1_joint_body_01" kp="3" kv="0.01"/>
+    <velocity name="actuator_velocity_a1_joint_body_01" class="/" ctrllimited="false" forcelimited="true" ctrlrange="-1000000 1000000" forcerange="-2 2" joint="a1_joint_body_01" kv="0"/>
+    <motor name="actuator_torque_a1_joint_body_01" class="/" forcelimited="true" forcerange="-2 2" joint="a1_joint_body_01"/>
+    <position name="actuator_position_a1_joint_body_02" class="/" ctrllimited="false" forcelimited="true" ctrlrange="-1000000 1000000" forcerange="-2 2" joint="a1_joint_body_02" kp="3" kv="0.01"/>
+    <velocity name="actuator_velocity_a1_joint_body_02" class="/" ctrllimited="false" forcelimited="true" ctrlrange="-1000000 1000000" forcerange="-2 2" joint="a1_joint_body_02" kv="0"/>
+    <motor name="actuator_torque_a1_joint_body_02" class="/" forcelimited="true" forcerange="-2 2" joint="a1_joint_body_02"/>
+    <position name="actuator_position_a1_joint_body_03" class="/" ctrllimited="false" forcelimited="true" ctrlrange="-1000000 1000000" forcerange="-2 2" joint="a1_joint_body_03" kp="3" kv="0.01"/>
+    <velocity name="actuator_velocity_a1_joint_body_03" class="/" ctrllimited="false" forcelimited="true" ctrlrange="-1000000 1000000" forcerange="-2 2" joint="a1_joint_body_03" kv="0"/>
+    <motor name="actuator_torque_a1_joint_body_03" class="/" forcelimited="true" forcerange="-2 2" joint="a1_joint_body_03"/>
+    <position name="actuator_position_a1_joint_body_04" class="/" ctrllimited="false" forcelimited="true" ctrlrange="-1000000 1000000" forcerange="-2 2" joint="a1_joint_body_04" kp="3" kv="0.01"/>
+    <velocity name="actuator_velocity_a1_joint_body_04" class="/" ctrllimited="false" forcelimited="true" ctrlrange="-1000000 1000000" forcerange="-2 2" joint="a1_joint_body_04" kv="0"/>
+    <motor name="actuator_torque_a1_joint_body_04" class="/" forcelimited="true" forcerange="-2 2" joint="a1_joint_body_04"/>
+    <position name="actuator_position_a1_joint_body_05" class="/" ctrllimited="false" forcelimited="true" ctrlrange="-1000000 1000000" forcerange="-2 2" joint="a1_joint_body_05" kp="3" kv="0.01"/>
+    <velocity name="actuator_velocity_a1_joint_body_05" class="/" ctrllimited="false" forcelimited="true" ctrlrange="-1000000 1000000" forcerange="-2 2" joint="a1_joint_body_05" kv="0"/>
+    <motor name="actuator_torque_a1_joint_body_05" class="/" forcelimited="true" forcerange="-2 2" joint="a1_joint_body_05"/>
+    <position name="actuator_position_a1_joint_body_06" class="/" ctrllimited="false" forcelimited="true" ctrlrange="-1000000 1000000" forcerange="-2 2" joint="a1_joint_body_06" kp="3" kv="0.01"/>
+    <velocity name="actuator_velocity_a1_joint_body_06" class="/" ctrllimited="false" forcelimited="true" ctrlrange="-1000000 1000000" forcerange="-2 2" joint="a1_joint_body_06" kv="0"/>
+    <motor name="actuator_torque_a1_joint_body_06" class="/" forcelimited="true" forcerange="-2 2" joint="a1_joint_body_06"/>
+    <position name="actuator_position_a1_joint_body_07" class="/" ctrllimited="false" forcelimited="true" ctrlrange="-1000000 1000000" forcerange="-2 2" joint="a1_joint_body_07" kp="3" kv="0.01"/>
+    <velocity name="actuator_velocity_a1_joint_body_07" class="/" ctrllimited="false" forcelimited="true" ctrlrange="-1000000 1000000" forcerange="-2 2" joint="a1_joint_body_07" kv="0"/>
+    <motor name="actuator_torque_a1_joint_body_07" class="/" forcelimited="true" forcerange="-2 2" joint="a1_joint_body_07"/>
+  </actuator>
+  <sensor>
+    <framelinvel name="framelinvel_a0_1guilla" objtype="body" objname="a0_1guilla"/>
+    <frameangvel name="frameangvel_a0_1guilla" objtype="body" objname="a0_1guilla"/>
+    <framelinvel name="framelinvel_a0_link0" objtype="body" objname="a0_link0"/>
+    <frameangvel name="frameangvel_a0_link0" objtype="body" objname="a0_link0"/>
+    <framelinvel name="framelinvel_a0_link1" objtype="body" objname="a0_link1"/>
+    <frameangvel name="frameangvel_a0_link1" objtype="body" objname="a0_link1"/>
+    <framelinvel name="framelinvel_a0_link2" objtype="body" objname="a0_link2"/>
+    <frameangvel name="frameangvel_a0_link2" objtype="body" objname="a0_link2"/>
+    <framelinvel name="framelinvel_a0_link3" objtype="body" objname="a0_link3"/>
+    <frameangvel name="frameangvel_a0_link3" objtype="body" objname="a0_link3"/>
+    <framelinvel name="framelinvel_a0_link4" objtype="body" objname="a0_link4"/>
+    <frameangvel name="frameangvel_a0_link4" objtype="body" objname="a0_link4"/>
+    <framelinvel name="framelinvel_a0_link5" objtype="body" objname="a0_link5"/>
+    <frameangvel name="frameangvel_a0_link5" objtype="body" objname="a0_link5"/>
+    <framelinvel name="framelinvel_a0_link6" objtype="body" objname="a0_link6"/>
+    <frameangvel name="frameangvel_a0_link6" objtype="body" objname="a0_link6"/>
+    <framelinvel name="framelinvel_a0_link7" objtype="body" objname="a0_link7"/>
+    <frameangvel name="frameangvel_a0_link7" objtype="body" objname="a0_link7"/>
+    <framelinvel name="framelinvel_a0_link8" objtype="body" objname="a0_link8"/>
+    <frameangvel name="frameangvel_a0_link8" objtype="body" objname="a0_link8"/>
+    <actuatorfrc name="actuatorfrc_position_a0_joint_body_00" actuator="actuator_position_a0_joint_body_00"/>
+    <actuatorfrc name="actuatorfrc_velocity_a0_joint_body_00" actuator="actuator_velocity_a0_joint_body_00"/>
+    <actuatorfrc name="actuatorfrc_motor_a0_joint_body_00" actuator="actuator_torque_a0_joint_body_00"/>
+    <actuatorfrc name="actuatorfrc_position_a0_joint_body_01" actuator="actuator_position_a0_joint_body_01"/>
+    <actuatorfrc name="actuatorfrc_velocity_a0_joint_body_01" actuator="actuator_velocity_a0_joint_body_01"/>
+    <actuatorfrc name="actuatorfrc_motor_a0_joint_body_01" actuator="actuator_torque_a0_joint_body_01"/>
+    <actuatorfrc name="actuatorfrc_position_a0_joint_body_02" actuator="actuator_position_a0_joint_body_02"/>
+    <actuatorfrc name="actuatorfrc_velocity_a0_joint_body_02" actuator="actuator_velocity_a0_joint_body_02"/>
+    <actuatorfrc name="actuatorfrc_motor_a0_joint_body_02" actuator="actuator_torque_a0_joint_body_02"/>
+    <actuatorfrc name="actuatorfrc_position_a0_joint_body_03" actuator="actuator_position_a0_joint_body_03"/>
+    <actuatorfrc name="actuatorfrc_velocity_a0_joint_body_03" actuator="actuator_velocity_a0_joint_body_03"/>
+    <actuatorfrc name="actuatorfrc_motor_a0_joint_body_03" actuator="actuator_torque_a0_joint_body_03"/>
+    <actuatorfrc name="actuatorfrc_position_a0_joint_body_04" actuator="actuator_position_a0_joint_body_04"/>
+    <actuatorfrc name="actuatorfrc_velocity_a0_joint_body_04" actuator="actuator_velocity_a0_joint_body_04"/>
+    <actuatorfrc name="actuatorfrc_motor_a0_joint_body_04" actuator="actuator_torque_a0_joint_body_04"/>
+    <actuatorfrc name="actuatorfrc_position_a0_joint_body_05" actuator="actuator_position_a0_joint_body_05"/>
+    <actuatorfrc name="actuatorfrc_velocity_a0_joint_body_05" actuator="actuator_velocity_a0_joint_body_05"/>
+    <actuatorfrc name="actuatorfrc_motor_a0_joint_body_05" actuator="actuator_torque_a0_joint_body_05"/>
+    <actuatorfrc name="actuatorfrc_position_a0_joint_body_06" actuator="actuator_position_a0_joint_body_06"/>
+    <actuatorfrc name="actuatorfrc_velocity_a0_joint_body_06" actuator="actuator_velocity_a0_joint_body_06"/>
+    <actuatorfrc name="actuatorfrc_motor_a0_joint_body_06" actuator="actuator_torque_a0_joint_body_06"/>
+    <actuatorfrc name="actuatorfrc_position_a0_joint_body_07" actuator="actuator_position_a0_joint_body_07"/>
+    <actuatorfrc name="actuatorfrc_velocity_a0_joint_body_07" actuator="actuator_velocity_a0_joint_body_07"/>
+    <actuatorfrc name="actuatorfrc_motor_a0_joint_body_07" actuator="actuator_torque_a0_joint_body_07"/>
+    <framelinvel name="framelinvel_a1_1guilla" objtype="body" objname="a1_1guilla"/>
+    <frameangvel name="frameangvel_a1_1guilla" objtype="body" objname="a1_1guilla"/>
+    <framelinvel name="framelinvel_a1_link0" objtype="body" objname="a1_link0"/>
+    <frameangvel name="frameangvel_a1_link0" objtype="body" objname="a1_link0"/>
+    <framelinvel name="framelinvel_a1_link1" objtype="body" objname="a1_link1"/>
+    <frameangvel name="frameangvel_a1_link1" objtype="body" objname="a1_link1"/>
+    <framelinvel name="framelinvel_a1_link2" objtype="body" objname="a1_link2"/>
+    <frameangvel name="frameangvel_a1_link2" objtype="body" objname="a1_link2"/>
+    <framelinvel name="framelinvel_a1_link3" objtype="body" objname="a1_link3"/>
+    <frameangvel name="frameangvel_a1_link3" objtype="body" objname="a1_link3"/>
+    <framelinvel name="framelinvel_a1_link4" objtype="body" objname="a1_link4"/>
+    <frameangvel name="frameangvel_a1_link4" objtype="body" objname="a1_link4"/>
+    <framelinvel name="framelinvel_a1_link5" objtype="body" objname="a1_link5"/>
+    <frameangvel name="frameangvel_a1_link5" objtype="body" objname="a1_link5"/>
+    <framelinvel name="framelinvel_a1_link6" objtype="body" objname="a1_link6"/>
+    <frameangvel name="frameangvel_a1_link6" objtype="body" objname="a1_link6"/>
+    <framelinvel name="framelinvel_a1_link7" objtype="body" objname="a1_link7"/>
+    <frameangvel name="frameangvel_a1_link7" objtype="body" objname="a1_link7"/>
+    <framelinvel name="framelinvel_a1_link8" objtype="body" objname="a1_link8"/>
+    <frameangvel name="frameangvel_a1_link8" objtype="body" objname="a1_link8"/>
+    <actuatorfrc name="actuatorfrc_position_a1_joint_body_00" actuator="actuator_position_a1_joint_body_00"/>
+    <actuatorfrc name="actuatorfrc_velocity_a1_joint_body_00" actuator="actuator_velocity_a1_joint_body_00"/>
+    <actuatorfrc name="actuatorfrc_motor_a1_joint_body_00" actuator="actuator_torque_a1_joint_body_00"/>
+    <actuatorfrc name="actuatorfrc_position_a1_joint_body_01" actuator="actuator_position_a1_joint_body_01"/>
+    <actuatorfrc name="actuatorfrc_velocity_a1_joint_body_01" actuator="actuator_velocity_a1_joint_body_01"/>
+    <actuatorfrc name="actuatorfrc_motor_a1_joint_body_01" actuator="actuator_torque_a1_joint_body_01"/>
+    <actuatorfrc name="actuatorfrc_position_a1_joint_body_02" actuator="actuator_position_a1_joint_body_02"/>
+    <actuatorfrc name="actuatorfrc_velocity_a1_joint_body_02" actuator="actuator_velocity_a1_joint_body_02"/>
+    <actuatorfrc name="actuatorfrc_motor_a1_joint_body_02" actuator="actuator_torque_a1_joint_body_02"/>
+    <actuatorfrc name="actuatorfrc_position_a1_joint_body_03" actuator="actuator_position_a1_joint_body_03"/>
+    <actuatorfrc name="actuatorfrc_velocity_a1_joint_body_03" actuator="actuator_velocity_a1_joint_body_03"/>
+    <actuatorfrc name="actuatorfrc_motor_a1_joint_body_03" actuator="actuator_torque_a1_joint_body_03"/>
+    <actuatorfrc name="actuatorfrc_position_a1_joint_body_04" actuator="actuator_position_a1_joint_body_04"/>
+    <actuatorfrc name="actuatorfrc_velocity_a1_joint_body_04" actuator="actuator_velocity_a1_joint_body_04"/>
+    <actuatorfrc name="actuatorfrc_motor_a1_joint_body_04" actuator="actuator_torque_a1_joint_body_04"/>
+    <actuatorfrc name="actuatorfrc_position_a1_joint_body_05" actuator="actuator_position_a1_joint_body_05"/>
+    <actuatorfrc name="actuatorfrc_velocity_a1_joint_body_05" actuator="actuator_velocity_a1_joint_body_05"/>
+    <actuatorfrc name="actuatorfrc_motor_a1_joint_body_05" actuator="actuator_torque_a1_joint_body_05"/>
+    <actuatorfrc name="actuatorfrc_position_a1_joint_body_06" actuator="actuator_position_a1_joint_body_06"/>
+    <actuatorfrc name="actuatorfrc_velocity_a1_joint_body_06" actuator="actuator_velocity_a1_joint_body_06"/>
+    <actuatorfrc name="actuatorfrc_motor_a1_joint_body_06" actuator="actuator_torque_a1_joint_body_06"/>
+    <actuatorfrc name="actuatorfrc_position_a1_joint_body_07" actuator="actuator_position_a1_joint_body_07"/>
+    <actuatorfrc name="actuatorfrc_velocity_a1_joint_body_07" actuator="actuator_velocity_a1_joint_body_07"/>
+    <actuatorfrc name="actuatorfrc_motor_a1_joint_body_07" actuator="actuator_torque_a1_joint_body_07"/>
+    <framelinvel name="framelinvel_a2_sphere" objtype="body" objname="a2_sphere"/>
+    <frameangvel name="frameangvel_a2_sphere" objtype="body" objname="a2_sphere"/>
+    <framelinvel name="framelinvel_a2_base_link" objtype="body" objname="a2_base_link"/>
+    <frameangvel name="frameangvel_a2_base_link" objtype="body" objname="a2_base_link"/>
+  </sensor>
+  <keyframe>
+    <key name="initial" time="0" qpos="0 0 0 6.123233995736766e-17 0 0 1 0 0 0 0 0 0 0 0 0 0.20000000000000001 0 6.123233995736766e-17 0 0 1 0 0 0 0 0 0 0 0 -0.14999999999999999 -0.14999999999999999 0.20000000000000001 0.2298488470659302 -0.42073549240394825 0.42073549240394825 0.77015115293406988" qvel="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 -1 1 -1 10 10 10"/>
+  </keyframe>
+</mujoco>
