@@ -56,6 +56,6 @@ control:
   motors: []
   hill_muscles: []
 extensions:
-- loader: lilytorch.test_farms2.callback.SwimmingCallback
+- loader: lilytorch.test_farms2.callback.DummyCallback
   config:
     water_properties: null
