@@ -38,10 +38,25 @@ morphology:
       - -0.001
     mass_multiplier: 1
   self_collisions: []
-  joints:
-  # n_joints_body: 8
-  # n_dof_legs: 0
-  # n_legs: 0
+  joints: []
+  n_joints_body: 0
+  n_dof_legs: 0
+  n_legs: 0
+# control:
+#   sensors:
+#     links:
+#     - base_link
+#     joints: []
+#     contacts: []
+#     xfrc:
+#     - base_link
+#     muscles: []
+#   motors: []
+#   hill_muscles: []
+#   network:
+#     oscillators: []
+#   muscles: []
+
 control:
   sensors:
     links:
@@ -53,8 +68,6 @@ control:
     muscles: []
   motors: []
   hill_muscles: []
-  network:
-    oscillators: []
   muscles: []
 
 name: Animat

@@ -84,7 +84,10 @@ def run_experiment(pars):
     animat_options["spawn"]         = Dict2Class(pars.spawn)
     animat_options.spawn.mode = SpawnMode(pars.spawn["mode"])
 
-    control_type=animat_options["control"]["motors"][0]["control_types"][0]
+    if len(animat_options["control"]["motors"])>0:
+        control_type=animat_options["control"]["motors"][0]["control_types"][0]
+    else:
+        control_type=None
 
     if pars.random_spine==True:
         joints = animat_options["morphology"]["joints"]
@@ -126,7 +129,8 @@ def run_experiment(pars):
         elif control_type=="position":
             animat_network = DragPositionController(animat_data, controller, sim_options.n_iterations)
         else:
-            raise ValueError(f"Unknown control type: {control_type}, need position or torque")
+            animat_network = None
+            # raise ValueError(f"Unknown control type: {control_type}, need position or torque")
     elif pars.swimming_mode=="bdim":
         print('Using bdim swimming mode')
         animat_network = BDIMController(animat_data, sim_options, controller, controller.pars.yaml_file, sim_options.n_iterations, control_type)
