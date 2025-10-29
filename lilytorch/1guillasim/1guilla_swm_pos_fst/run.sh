@@ -1,5 +1,3 @@
 #!/usr/bin/env sh
 
-farmsim \
-       --experiment_config experiment_config.yaml \
-       --log_path output
+farmsim --experiment_config experiment_config.yaml "$@"

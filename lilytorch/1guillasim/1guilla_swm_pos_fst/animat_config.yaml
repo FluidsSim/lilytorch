@@ -1298,8 +1298,10 @@ control:
     epsilon: 0
   adhesions: []
   visuals: []
-extensions: []
-- loader: farms_mujoco.swimming.callback.SwimmingCallback
+extensions:
+- loader: farms_amphibious.control.amphibious.AmphibiousController
+  config: {}
+- loader: farms_mujoco.swimming.extension.SwimmingExtension
   config:
     water_properties: null
 show_xfrc: false

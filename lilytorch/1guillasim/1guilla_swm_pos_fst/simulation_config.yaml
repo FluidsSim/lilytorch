@@ -10,27 +10,6 @@ runtime:
   fast: false
   headless: false
   show_progress: true
-camera:
-  zoom: 2
-  free_camera: false
-  top_camera: false
-  rotating_camera: false
-video:
-  path: ''
-  fps: 30
-  speed: 1.0
-  name: video
-  yaw: 30
-  pitch: 45
-  distance: 1
-  offset:
-  - 0
-  - 0
-  - 0
-  motion_filter: null
-  resolution: !!python/tuple
-  - 1280
-  - 720
 physics:
   timestep: 0.002
   gravity:
@@ -64,4 +43,32 @@ pybullet:
   residual_threshold: 1.0e-06
   max_num_cmd_per_1ms: 100000000
   report_solver_analytics: 0
-extensions: []
+extensions:
+- loader: farms_core.simulation.extensions.ExperimentLogger
+  config:
+    log_path: output
+    skip: 0
+- loader: farms_mujoco.simulation.extensions.CameraFollower
+  config:
+    animat_id: 0
+    distance: 3
+    azimuth: -30
+    elevation: -20
+    angular_velocity: 0
+# - loader: farms_mujoco.sensors.camera.CameraRecording
+#   config:
+#     path: 'output/video.mp4'
+#     animat_id: 0
+#     fps: 30
+#     speed: 1.0
+#     azimuth: -30
+#     elevation: -15
+#     distance: 2
+#     angular_velocity: 0
+#     offset:
+#     - 0
+#     - 0
+#     - 0.0
+#     resolution:
+#     - 1280
+#     - 720
