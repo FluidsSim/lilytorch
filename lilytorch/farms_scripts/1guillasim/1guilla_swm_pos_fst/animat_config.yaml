@@ -30,8 +30,8 @@ morphology:
       restitution: 0.5
       linearDamping: 0
       angularDamping: 0
+    fluid_interaction: true
     density: 800.0
-    swimming: true
     drag_coefficients:
     - - -0.1
       - -4.0
@@ -50,8 +50,8 @@ morphology:
       restitution: 0.5
       linearDamping: 0
       angularDamping: 0
+    fluid_interaction: true
     density: 800.0
-    swimming: true
     drag_coefficients:
     - - -0.1
       - -4.0
@@ -70,8 +70,8 @@ morphology:
       restitution: 0.5
       linearDamping: 0
       angularDamping: 0
+    fluid_interaction: true
     density: 800.0
-    swimming: true
     drag_coefficients:
     - - -0.1
       - -4.0
@@ -90,8 +90,8 @@ morphology:
       restitution: 0.5
       linearDamping: 0
       angularDamping: 0
+    fluid_interaction: true
     density: 800.0
-    swimming: true
     drag_coefficients:
     - - -0.1
       - -4.0
@@ -110,8 +110,8 @@ morphology:
       restitution: 0.5
       linearDamping: 0
       angularDamping: 0
+    fluid_interaction: true
     density: 800.0
-    swimming: true
     drag_coefficients:
     - - -0.1
       - -4.0
@@ -130,8 +130,8 @@ morphology:
       restitution: 0.5
       linearDamping: 0
       angularDamping: 0
+    fluid_interaction: true
     density: 800.0
-    swimming: true
     drag_coefficients:
     - - -0.1
       - -4.0
@@ -150,8 +150,8 @@ morphology:
       restitution: 0.5
       linearDamping: 0
       angularDamping: 0
+    fluid_interaction: true
     density: 800.0
-    swimming: true
     drag_coefficients:
     - - -0.1
       - -4.0
@@ -170,8 +170,8 @@ morphology:
       restitution: 0.5
       linearDamping: 0
       angularDamping: 0
+    fluid_interaction: true
     density: 800.0
-    swimming: true
     drag_coefficients:
     - - -0.1
       - -4.0
@@ -190,8 +190,8 @@ morphology:
       restitution: 0.5
       linearDamping: 0
       angularDamping: 0
+    fluid_interaction: true
     density: 800.0
-    swimming: true
     drag_coefficients:
     - - -0.1
       - -4.0
@@ -1299,7 +1299,9 @@ control:
   adhesions: []
   visuals: []
 extensions:
-- loader: farms_amphibious.callbacks.SwimmingCallback
+- loader: farms_amphibious.control.amphibious.AmphibiousController
+  config: {}
+- loader: farms_mujoco.swimming.extension.SwimmingExtension
   config:
     water_properties: null
 show_xfrc: false

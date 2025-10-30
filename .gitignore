@@ -35,3 +35,8 @@ interp_data/
 results/
 __pycache__
 figures/
+
+farms_amphibious/
+farms_core/
+farms_sim/
+farms_mujoco/
