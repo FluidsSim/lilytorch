@@ -42,7 +42,6 @@ morphology:
   self_collisions: []
   joints: []
 control:
-  controller_loader: farms_core.model.control.AnimatController
   sensors:
     links:
     - base_link
@@ -56,6 +55,8 @@ control:
   motors: []
   hill_muscles: []
 extensions:
-- loader: farms_mujoco.swimming.callback.SwimmingCallback
+- loader: farms_core.model.control.AnimatController
+  config: {}
+- loader: farms_mujoco.swimming.extension.SwimmingExtension
   config:
     water_properties: null
