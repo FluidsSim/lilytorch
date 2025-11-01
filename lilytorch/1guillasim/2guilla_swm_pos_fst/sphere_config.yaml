@@ -1,4 +1,4 @@
-sdf: ../models/sphere/sphere.sdf
+sdf: ../sdfs/sphere/sphere.sdf
 spawn:
   loader: 0
   mode: !!python/object/apply:farms_core.model.options.SpawnMode

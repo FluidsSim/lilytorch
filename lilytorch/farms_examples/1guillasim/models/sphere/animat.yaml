@@ -1,0 +1,67 @@
+sdf: models/sphere/sphere.sdf
+spawn:
+  loader: 0
+  pose:
+  - 0.0
+  - 0.0
+  - 0.03
+  - 0.0
+  - 0.0
+  - 3.141592653589793
+  velocity:
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+  - 0.0
+morphology:
+  links:
+  - name: link0
+    collisions: true
+    friction:
+    - 0.
+    - 0
+    - 0
+    extras:
+      restitution: 0.0
+      linearDamping: 0
+      angularDamping: 0
+    density: 800.0
+    swimming: true
+    drag_coefficients:
+    - - -0.0
+      - -1.0
+      - -1.0
+    - - -1.0
+      - -1.0
+      - -1.0
+
+    mass_multiplier: 1
+  n_joints_body: 0
+  n_dof_legs: 0
+  n_legs: 0
+control:
+  sensors:
+    links:
+    - link0
+    contacts:
+    - !!python/tuple
+      - link0
+      - ''
+    xfrc:
+    - link0
+    muscles: []
+  motors: []
+  hill_muscles: []
+
+  network:
+    oscillators: []
+
+  muscles: []
+
+name: Animat
+show_xfrc: false
+scale_xfrc: 1
+mujoco: {}
+

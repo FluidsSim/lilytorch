@@ -1,0 +1,36 @@
+sdf: models/arena_flat_v0/sdf/arena_flat.sdf
+spawn:
+  loader: 0
+  pose:
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+  velocity:
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+water:
+  sdf: models/arena_water_v0/sdf/arena_water.sdf
+  drag: true
+  buoyancy: true
+  height: 0.0
+  velocity:
+  - 0
+  - 0
+  - 0
+  viscosity: 1.0
+  density: 1000.0
+  maps:
+  - ''
+  - ''
+<<<<<<< HEAD
+ground_height: -0.04
+=======
+ground_height: -0.02
+>>>>>>> cb21b7af07e09156fd8c754d1e4dcd698ed77036

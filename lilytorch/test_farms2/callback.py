@@ -1,10 +1,8 @@
 """Callbacks"""
 
 import os
-
 import numpy as np
 from imageio import imread
-
 from farms_core import pylog
 from farms_core.sensors.sensor_convention import sc
 from farms_core.model.data import AnimatData
