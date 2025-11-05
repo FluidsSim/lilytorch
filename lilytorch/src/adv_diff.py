@@ -1,6 +1,6 @@
 
 import torch
-from pytorch_interp import RegularGridInterpolator
+from pytorch_interpolation import RegularGridInterpolator
 
 class AdvDiffSolver:
     """
@@ -277,8 +277,8 @@ class AdvDiffSolver:
         # ue = 0.5*(x.a[i+1][j]+x.a[i][j]);
         # vs = 0.5*(y.a[i][j]+y.a[i-1][j]);
         # vn = 0.5*(y.a[i][j+1]+y.a[i-1][j+1]);
-        u_new= torch.zeros_like(u)
-        v_new= torch.zeros_like(v)
+        u_new=torch.zeros_like(u)
+        v_new=torch.zeros_like(v)
 
         uw = 0.5*(u[:-2,1:-1]+u[1:-1,1:-1])
         ue = 0.5*(u[2:,1:-1]+u[1:-1,1:-1])
@@ -338,46 +338,53 @@ class AdvDiffSolver:
 
     def solve_adam_bashford(self, u, v, iteration=0):
 
+        u_new=torch.zeros_like(u)
+        v_new=torch.zeros_like(v)
+
+        uw = 0.5*(u[:-2,1:-1]+u[1:-1,1:-1])
+        ue = 0.5*(u[2:,1:-1]+u[1:-1,1:-1])
+        us = 0.5*(u[1:-1,:-2]+u[1:-1,1:-1])
+        un = 0.5*(u[1:-1,2:]+u[1:-1,1:-1])
+        fw = uw
+        fe = ue
+        fs = 0.5*(v[:-2,1:-1]+v[1:-1,1:-1])
+        fn = 0.5*(v[:-2,2:]+v[1:-1,2:])
+        HU_new = uw*fw-ue*fe+us*fs-un*fn
+
+        vw = 0.5*(v[:-2,1:-1]+v[1:-1,1:-1])
+        ve = 0.5*(v[2:,1:-1]+v[1:-1,1:-1])
+        vs = 0.5*(v[1:-1,:-2]+v[1:-1,1:-1])
+        vn = 0.5*(v[1:-1,2:]+v[1:-1,1:-1])
+        fw = 0.5*(u[1:-1,1:-1]+u[1:-1, :-2])
+        fe = 0.5*(u[2:,1:-1]+u[2:,:-2])
+        fs = vs
+        fn = vn
+        HV_new = vw*fw-ve*fe+vs*fs-vn*fn
+
         if iteration==0:
-            # advection-diffusion term
-            dudx, dudy = torch.gradient(u, spacing=(self.dx, self.dy), dim=(0,1), edge_order=2)
-            HU_new = -self.dt*(u[1:-1,1:-1]*dudx[1:-1,1:-1]+v[1:-1,1:-1]*dudy[1:-1,1:-1]) + (
-                self.nu*self.dtdx2*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
-                self.nu*self.dtdx2*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
-                )
-            dvdx, dvdy = torch.gradient(v, spacing=(self.dx, self.dy), dim=(0,1), edge_order=2)
-            HV_new = -self.dt*(u[1:-1,1:-1]*dvdx[1:-1,1:-1]+v[1:-1,1:-1]*dvdy[1:-1,1:-1]) + (
-                self.nu*self.dtdx2*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1]) +
-                self.nu*self.dtdx2*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])
-                )
-            u[1:-1,1:-1] += HU_new
-            v[1:-1,1:-1] += HV_new
+            u_new[1:-1,1:-1] = u[1:-1,1:-1]+self.dt*HU_new/self.dx
+            v_new[1:-1,1:-1] = v[1:-1,1:-1]+self.dt*HV_new/self.dy
 
         else:
-
-            # advection-diffusion term
-            flux_uu=u*u
-            flux_uv=u*v
-            flux_vv=v*v
-
-            dudx, dudy = torch.gradient(u, spacing=(self.dx, self.dy), dim=(0,1), edge_order=2)
-            HU_new = -self.dt*(u[1:-1,1:-1]*dudx[1:-1,1:-1]+v[1:-1,1:-1]*dudy[1:-1,1:-1]) + (
-                self.nu*self.dtdx2*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
-                self.nu*self.dtdx2*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
-                )
-            dvdx, dvdy = torch.gradient(v, spacing=(self.dx, self.dy), dim=(0,1), edge_order=2)
-            HV_new = -self.dt*(u[1:-1,1:-1]*dvdx[1:-1,1:-1]+v[1:-1,1:-1]*dvdy[1:-1,1:-1]) + (
-                self.nu*self.dtdx2*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1]) +
-                self.nu*self.dtdx2*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])
-                )
-            u[1:-1,1:-1] += 0.5*(3*HU_new - self.HU_prec)
-            v[1:-1,1:-1] += 0.5*(3*HV_new - self.HV_prec)
-
+            u_new[1:-1,1:-1] = u[1:-1,1:-1]+self.dt*0.5*(3*HU_new - self.HU_prec)/self.dx
+            v_new[1:-1,1:-1] = v[1:-1,1:-1]+self.dt*0.5*(3*HV_new - self.HV_prec)/self.dy
 
         self.HU_prec = HU_new.clone().detach()
         self.HV_prec = HV_new.clone().detach()
 
-        return (u,v)
+
+
+        u_new[1:-1,1:-1] += (
+                self.nu*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
+                self.nu*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
+                )*(self.dt/(self.dx**2))
+        v_new[1:-1,1:-1] += (
+                self.nu*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1]) +
+                self.nu*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])
+                )*(self.dt/(self.dy**2))
+
+
+        return (u_new,v_new)
 
 
 

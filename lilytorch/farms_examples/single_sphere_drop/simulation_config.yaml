@@ -3,8 +3,8 @@ units:
   seconds: 1
   kilograms: 1
 runtime:
-  n_iterations: 75001
-  buffer_size: 75001
+  n_iterations: 11001
+  buffer_size: 11001
   play: true
   rtl: 1.0
   fast: false
@@ -15,7 +15,7 @@ physics:
   gravity:
   - 0
   - 0
-  - 0 #-9.81
+  - -9.81
   num_sub_steps: 1
   cb_sub_steps: 2
   n_solver_iters: 50
@@ -29,7 +29,7 @@ mujoco:
   noslip_iterations: 1000
   noslip_tolerance: 1e-6
   viewer: MuJoCo
-  texture_repeat: 1
+  texture_repeat: 10
   shadow_size: 1024
   visual_scale: 1.0
   extent: 100.0
@@ -49,8 +49,8 @@ extensions:
     handler_path: lilytorch.farms_examples.single_sphere_drop.controller.BDIMhandler
     bdim_yaml:
       solver :
-        use_gpu           : True
-        nthreads          : 16
+        use_gpu : False
+        nthreads : 16
 
         Nx: 256
         Ny: 2048
@@ -61,11 +61,14 @@ extensions:
         xmax: 0.02
         ymax: 0.32
 
-        convection_method : "abdquickest"
+        convection_method : "adam-bashford"
         dt                : 0.0001
-        nt                : 800000
-        nu                : 1.0e-6 #0.006410256
+        nt                : 11000
+        nu                : 1.0e-6
         rho               : 1000.0
+        # nu                : 0.000000801
+        # rho               : 1.0
+
 
         poisson_tol       : 1.0e-7
         poisson_max_cycles: 5
@@ -100,9 +103,9 @@ extensions:
 
       body:
         type: multi_animat
-        plotting: False
+        plotting: True
         compute_interp: False
-        plotting_meshes: False
+        plotting_meshes: True
         n_samples: (2000, 2000)
         update_maps:
           rotation: "None"
@@ -116,17 +119,21 @@ extensions:
       output:
         save_path: "/data/andreaferrario/ns_data/"
         save_frames: True
-        save_every : 500
+        save_every : 50
         vmin: -50
         vmax: 50
-        save_uv: False
+        save_uv: True
+
+# - loader: farms_mujoco.simulation.extensions.MjcfSaver
+#   config:
+#     path: output/simulation_mjcf.xml
 
 # extensions: []
 
-# - loader: farms_core.simulation.extensions.ExperimentLogger
-#   config:
-#     log_path: output
-#     skip: 0
+- loader: farms_core.simulation.extensions.ExperimentLogger
+  config:
+    log_path: output
+    skip: 0
 
 # - loader: farms_mujoco.simulation.extensions.CameraFollower
 #   config:

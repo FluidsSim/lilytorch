@@ -6,7 +6,6 @@ from farms_core.experiment.options import ExperimentOptions
 from farms_core.experiment.data import ExperimentData
 from farms_core.extensions.extensions import import_item
 from farms_mujoco.simulation.task import ExperimentTask
-from dm_control.rl.control import Task
 from dm_control.mjcf.physics import Physics
 
 class DummyOptionCallback(TaskExtension):

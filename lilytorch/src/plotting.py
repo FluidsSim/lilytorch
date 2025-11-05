@@ -630,8 +630,9 @@ def plot2d_imshow_composite_quiver(X,Y,u,bodies,normal_x,normal_y,extent,iterati
     fig_width = x_range * scale
     fig_height = y_range * scale
 
+    plt.figure(figsize=(5, 15))
 
-    plt.figure(figsize=(fig_width, fig_height))
+    # plt.figure(figsize=(fig_width, fig_height))
     if body_contours:
         for i, body in enumerate(bodies):
             # d = body.sdf.cpu()
@@ -641,7 +642,7 @@ def plot2d_imshow_composite_quiver(X,Y,u,bodies,normal_x,normal_y,extent,iterati
 
             # plt.fill(body.cnt_update[0].cpu(), body.cnt_update[1].cpu(), color="#000000")
 
-            # plt.plot(body.com_pos[0].cpu(), body.com_pos[1].cpu(), 'ro', markersize=5)
+            plt.plot(body.com_pos[0].cpu(), body.com_pos[1].cpu(), 'ro', markersize=5)
 
             # plt.plot(body.cnt_update[0].cpu(), body.cnt_update[1].cpu(), 'k',linewidth=0.5)
 

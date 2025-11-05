@@ -6,7 +6,7 @@ import open3d as o3d
 o3d.utility.set_verbosity_level(o3d.utility.VerbosityLevel.Error) # exclusevely show errors
 from scipy.interpolate import CubicSpline
 from farms_core.io.sdf import ModelSDF
-from pytorch_interp import RegularGridInterpolator
+from pytorch_interpolation import RegularGridInterpolator
 import skfmm
 from skimage import measure
 import math # important to keep this for evaluating math operations for sdfs even if it appears as not used
@@ -107,6 +107,9 @@ def resample_contour(x, y, spacing, closed=True):
         s_uniform = np.arange(0, s[-1], spacing)
         x_new = np.interp(s_uniform, s, x)
         y_new = np.interp(s_uniform, s, y)
+        x_new = np.r_[x_new, x_new[0]]
+        y_new = np.r_[y_new, y_new[0]]
+
         return x_new, y_new, s_uniform
 
 def body_from_yaml(device, x, y, body_pars, eps=0.05, costum_update=None, starting_time=0, **kwargs):
@@ -560,7 +563,8 @@ class BodyAnalytical(Body):
         xnp = xcnt.cpu().numpy()
         ynp = ycnt.cpu().numpy()
 
-        cnt = np.array(measure.find_contours(sdf_np, 0)[0]).T
+        # cnt = np.array(measure.find_contours(sdf_np, 0)[0]).T
+        cnt = np.array(measure.find_contours(sdf_np-self.eps, 0)[0]).T
         cnt[0]=xnp[0]+cnt[0]*(xnp[1]-xnp[0])
         cnt[1]=ynp[0]+cnt[1]*(ynp[1]-ynp[0])
 
@@ -572,7 +576,10 @@ class BodyAnalytical(Body):
         x, y, s_uniform = resample_contour(cnt[0], cnt[1], spacing=ds, closed=True)
         del cnt
         cnt=np.array([x, y])
-        curv_coord = s_uniform
+
+        curv_coord = np.cumsum(np.sqrt(np.sum(np.diff(cnt, axis=1)**2, axis=0)))
+
+        # curv_coord = s_uniform
 
         self.curv_coord = torch.from_numpy(curv_coord).type(self.dtype).to(self.device)
         self.cnt        = torch.from_numpy(cnt).type(self.dtype).to(self.device)
@@ -586,7 +593,7 @@ class BodyAnalytical(Body):
             cmap = cm.get_cmap('RdBu')
             n_points = self.cnt_update.shape[1]
             colors = cmap(np.linspace(0, 1, n_points))
-            plt.scatter(self.cnt_update[0].cpu(), self.cnt_update[1].cpu(), c=colors, cmap=cmap, s=10)
+            plt.plot(self.cnt_update[0].cpu(), self.cnt_update[1].cpu())
             plt.show()
 
 
@@ -1559,11 +1566,12 @@ class MultiAnimatBodies(Body):
 
         self.suit = suit
 
-        self.links = {}
-        sdf_files = [animat.sdf for animat in experiment_options.animats] # sdf files for each animat
-        sdfs = [ModelSDF.read(sdf)[0] for sdf in sdf_files]
+        self.body_ids = []
+        self.bodies = []
 
-        for i, sdf in enumerate(sdfs):
+        for animat_i, animat in enumerate(experiment_options.animats):
+            sdf = ModelSDF.read(animat.sdf)[0]
+            link_id=0
             if sdf.name == "sphere":
                 for link in sdf.links:
                     radius = link.collisions[0].geometry.radius
@@ -1571,10 +1579,14 @@ class MultiAnimatBodies(Body):
                     initial_pose = np.array(link.pose).astype(x.cpu().numpy().dtype)
                     update_maps = (lambda t: 0, [lambda t: -initial_pose[0], lambda t: -initial_pose[1]]) # set dummy update maps for initialization (not used)
 
-                    self.links[link.name+str(i)] = BodyAnalytical(
-                        device, x, y, sdf_fun, update_maps, eps=eps, plotting=False, pre_update=False
+                    self.bodies.append(
+                        BodyAnalytical(
+                            device, x, y, sdf_fun, update_maps, eps=eps, plotting=False, pre_update=False
+                        )
                     )
-        self.bodies = list(self.links.values())
+
+                    self.body_ids.append([animat_i,link_id])
+                    link_id+=1
 
         self.nbodies = len(self.bodies)
         self.sdf_vals = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)

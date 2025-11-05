@@ -4,7 +4,7 @@ spawn:
   mode: !!python/object/apply:farms_core.model.options.SpawnMode
   - sagittal
   pose:
-  - -0.01
+  - 0.01
   - -0.
   - 0.3
   - 0
