@@ -65,6 +65,11 @@ class PoissonSolverFFT:
 
             xshift_ext = numpy.concatenate((xshift,numpy.concatenate(([-xshift[-1]-self.dx],-xshift[::-1][:-1]))))
             yshift_ext = numpy.concatenate((yshift,numpy.concatenate(([-yshift[-1]-self.dx],-yshift[::-1][:-1]))))
+
+            # xshift_ext = numpy.concatenate((xshift[1:-1],xshift[1:-1][::-1]))
+            # yshift_ext = numpy.concatenate((yshift[1:-1],yshift[1:-1][::-1]))
+
+
             Xshift, Yshift = numpy.meshgrid(xshift_ext, yshift_ext, indexing='ij')
 
             R = numpy.sqrt(Xshift**2+Yshift**2)
@@ -170,7 +175,7 @@ if __name__ == "__main__":
     device = "cuda"
 
     nx=512
-    ny=256
+    ny=128
     x=torch.linspace(0,5,nx,dtype=dtype, device=device)
     y=torch.linspace(-5,5,ny,dtype=dtype, device=device)
     ps = PoissonSolverFFT(x,y,overwrite=True)

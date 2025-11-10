@@ -3,8 +3,8 @@ units:
   seconds: 1
   kilograms: 1
 runtime:
-  n_iterations: 11001
-  buffer_size: 11001
+  n_iterations: 150001
+  buffer_size: 150001
   play: true
   rtl: 1.0
   fast: false
@@ -49,7 +49,7 @@ extensions:
     handler_path: lilytorch.farms_examples.single_sphere_drop.controller.BDIMhandler
     bdim_yaml:
       solver :
-        use_gpu : False
+        use_gpu : True
         nthreads : 16
 
         Nx: 256
@@ -61,19 +61,19 @@ extensions:
         xmax: 0.02
         ymax: 0.32
 
-        convection_method : "adam-bashford"
+        convection_method : "adam-bashforth"
         dt                : 0.0001
-        nt                : 11000
+        nt                : 150000
         nu                : 1.0e-6
         rho               : 1000.0
-        # nu                : 0.000000801
+        # nu                : 0.006410256 # 0.000000801 # 1/Re Re=
         # rho               : 1.0
 
 
         poisson_tol       : 1.0e-7
         poisson_max_cycles: 5
         poisson_max_mgcg_cycles: 3
-        jacobi_weight     : 0.8
+        jacobi_weight     : 0.7
         poisson_nsmoothing: 5
         poisson_verbose   : True
         poisson_folder : "data/"
@@ -119,9 +119,9 @@ extensions:
       output:
         save_path: "/data/andreaferrario/ns_data/"
         save_frames: True
-        save_every : 50
-        vmin: -50
-        vmax: 50
+        save_every : 500
+        vmin: -5
+        vmax: 5
         save_uv: True
 
 # - loader: farms_mujoco.simulation.extensions.MjcfSaver

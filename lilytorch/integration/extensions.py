@@ -87,8 +87,8 @@ class FluidExtension(TaskExtension):
         physics.model.geom_solref[:,0]= 0.001
         physics.model.geom_solref[:,1]= 0.5
 
-    def before_step(self, task: ExperimentTask, action, physics: Physics):
-        """Before step"""
+    def after_step(self, task: ExperimentTask, physics: Physics):
+    # def before_step(self, task: ExperimentTask, action, physics: Physics):
 
         iteration = self.BDIMhandler.iteration
         timestep  = self.experiment_options.simulation.physics.timestep

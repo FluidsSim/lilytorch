@@ -4,10 +4,11 @@
 from mpi4py import MPI
 from petsc4py import PETSc
 import torch
+import os
 
 nullspace = PETSc.NullSpace().create(constant=True, comm=MPI.COMM_WORLD)
 
-class PoissonPETSc:
+class PoissonSolverPETSc:
 
     def __init__(self, nx, ny, x, y, device=None, dtype=None):
 
@@ -19,7 +20,6 @@ class PoissonPETSc:
         self.dx = float(x[1]-x[0])
         self.dy = float(y[1]-y[0])
 
-        print(self.dx, self.dy)
         assert (self.dx-self.dy)<1e-10, "Currently only square grids are supported for PETSc Poisson solver."
         self.h = self.dx
 
@@ -74,11 +74,13 @@ class PoissonPETSc:
 
         opts = PETSc.Options()
 
-        self.ksp = PETSc.KSP()
-        self.ksp.create(comm=self.A.getComm())
-        self.ksp.setType(PETSc.KSP.Type.CG)
-        self.ksp.getPC().setType(PETSc.PC.Type.GAMG)
-        self.ksp.setFromOptions()
+        petsc_options = {}
+
+        # self.ksp = PETSc.KSP()
+        # self.ksp.create(comm=self.A.getComm())
+        # self.ksp.setType(PETSc.KSP.Type.CG)
+        # self.ksp.getPC().setType(PETSc.PC.Type.GAMG)
+        # self.ksp.setFromOptions()
 
 
         # petsc_options = {
@@ -88,20 +90,9 @@ class PoissonPETSc:
         #     "pc_factor_mat_solver_type": "mumps",
         #     "ksp_monitor": None,
         # }
-        # self.ksp = PETSc.KSP().create(MPI.COMM_WORLD)
-        # self.ksp.setOptionsPrefix("singular_direct")
-        # opts.prefixPush(self.ksp.getOptionsPrefix())
-        # for key, value in petsc_options.items():
-        #     opts[key] = value
-        # self.ksp.setFromOptions()
-        # for key, value in petsc_options.items():
-        #     del opts[key]
-        # opts.prefixPop()
 
 
-        # self.ksp = PETSc.KSP().create(MPI.COMM_WORLD)
-        # self.ksp.setOptionsPrefix("singular_iterative")
-        # petsc_options_iterative = {
+        # petsc_options = {
         #     "ksp_error_if_not_converged": True,
         #     "ksp_monitor": None,
         #     "ksp_type": "gmres",
@@ -111,13 +102,27 @@ class PoissonPETSc:
         #     "pc_hypre_boomeramg_cycle_type": "v",
         #     "ksp_rtol": 1.0e-13,
         # }
-        # opts.prefixPush(self.ksp.getOptionsPrefix())
-        # for key, value in petsc_options_iterative.items():
-        #     opts[key] = value
-        # # self.ksp.setFromOptions()
-        # for key, value in petsc_options_iterative.items():
-        #     del opts[key]
-        # opts.prefixPop()
+
+
+
+        petsc_options = {
+            "ksp_error_if_not_converged": True,
+            "ksp_type": "gmres",
+            "pc_type": "gamg",
+            "ksp_rtol": 1.0e-8,
+            "ksp_monitor": None,
+        }
+
+
+        self.ksp = PETSc.KSP().create(MPI.COMM_WORLD)
+        self.ksp.setOptionsPrefix("singular_direct")
+        opts.prefixPush(self.ksp.getOptionsPrefix())
+        for key, value in petsc_options.items():
+            opts[key] = value
+        self.ksp.setFromOptions()
+        for key, value in petsc_options.items():
+            del opts[key]
+        opts.prefixPop()
 
 
         self.ksp.setOperators(self.A)
@@ -131,7 +136,8 @@ class PoissonPETSc:
         sol, b = self.A.createVecs()
         b = PETSc.Vec().createWithArray(f.flatten())
         self.ksp.solve(b, sol)
-        return sol.getArray()
+        return torch.from_numpy(sol.getArray()).to(device=self.device, dtype=self.dtype)
+
 
 
 
@@ -141,11 +147,11 @@ if __name__ == "__main__":
     dtype = torch.float32
     device = "cpu"
 
-    Nx = 302
-    Ny = 102
+    Nx = 512
+    Ny = 512
 
     xmin = 0.0
-    xmax = 3.0
+    xmax = 1.0
     ymin = 0.0
     ymax = 1.0
 
@@ -155,7 +161,7 @@ if __name__ == "__main__":
     x = torch.arange(xmin-dx/2, xmax+dx, dx, dtype=dtype, device=device)
     y = torch.arange(ymin-dy/2, ymax+dy, dy, dtype=dtype, device=device)
 
-    solver = PoissonPETSc(Nx, Ny, x, y, device=device, dtype=dtype)
+    solver = PoissonSolverPETSc(Nx, Ny, x, y, device=device, dtype=dtype)
 
 
     # f= torch.ones((Nx,Ny), dtype=dtype)

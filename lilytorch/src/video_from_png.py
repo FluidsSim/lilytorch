@@ -6,19 +6,15 @@ import numpy as np
 from lilytorch.util.yaml_operations import yaml2pyobject
 
 
-dir         = "/data/andreaferrario/ns_data/2025-11-04T11:11:33.996506/curl/"
+dir         = "/data/andreaferrario/ns_data/2025-11-06T11:13:07.112580/uv_field/"
 name        = "video"
-img_name    = "curl"
+img_name    = "vorticity"
 format      = ".mp4"
 dt          = 0.0001
-slow_factor = 0.3
-save_every  = 50
+slow_factor = 20
+save_every  = 500
 tstop       = 2000
-video_name = dir+name+format
-
-images = [img for img in os.listdir(dir) if img.split("_")[0]==img_name]
-n=len(images)
-images_sorted = [img_name+"_"+str(i*save_every)+".png" for i in range(n)]
+video_name  = dir+name+format
 
 
 
@@ -39,8 +35,6 @@ n=len(images)
 images_sorted = [img_name+"_"+str(i*save_every)+".png" for i in range(n)]
 
 
-
-
 # numbers = [img.split(".")[0].split("_")[1] for img in os.listdir(dir) if img.startswith(img_name+"_")]
 # sorted_numbers = np.sort([num for num in numbers])
 # images_sorted = [img_name+"_"+str(number)+".png" for number in sorted_numbers]
@@ -56,6 +50,9 @@ video = cv2.VideoWriter(video_name, _fourcc, fps, (width,height))
 font = cv2.FONT_HERSHEY_SIMPLEX
 for idx, image in enumerate(images_sorted):
     frame = cv2.imread(os.path.join(dir, image))
+    # from IPython import embed; embed()
+    # print(asd)
+    print(os.path.join(dir, image))
     iteration = idx*save_every
     time  = idx*save_every*dt*slow_factor
     if time>tstop:

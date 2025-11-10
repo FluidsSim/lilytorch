@@ -8,14 +8,14 @@
         <inertial>
           <pose>0 0 0 0 0 0</pose>
           <!-- compute mass and inertia based on a 2d circle instead of sphere - m=rho*pi*r^2, I=m*r^2/2, rho=1010 -->
-          <mass>0.01982125</mass>
+          <mass>0.019634954084936207</mass>
           <inertia>
-            <ixx>0.000000062</ixx>
+            <ixx>6.135923151542565e-08</ixx>
             <ixy>0</ixy>
             <ixz>0</ixz>
-            <iyy>0.000000062</iyy>
+            <iyy>6.135923151542565e-08</iyy>
             <iyz>0</iyz>
-            <izz>0.000000062</izz>
+            <izz>6.135923151542565e-08</izz>
           </inertia>
         </inertial>
         <collision name="base_link_collision">

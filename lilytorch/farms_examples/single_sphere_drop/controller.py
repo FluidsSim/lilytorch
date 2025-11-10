@@ -7,7 +7,7 @@ import torch
 
 class BDIMhandler():
 
-    def __init__(self, yaml_file, data, dtype=torch.float32):
+    def __init__(self, yaml_file, data, dtype=torch.float64):
 
         self.dtype = dtype
         if self.dtype == torch.float32:
@@ -35,7 +35,11 @@ class BDIMhandler():
         self.lin_axes = [0,2] # use x and z linear axes for 2D sim
         self.ang_axes = [1]   # use y rotation axis for 2D sim
 
-        self.force_scaling = 1000.0
+        self.force_scaling = 1.0
+
+        self.vel_x0 = 0.0
+        self.vel_z0 = 0.0
+        self.ang_y0 = 0.0
 
 
     def cython2numpy(self, array):
@@ -115,11 +119,11 @@ class BDIMhandler():
         # self.fluid_solver.composite_body.sdf_val=self.fluid_solver.composite_body.sdf_vals.gather(0,idx)[0].reshape(self.fluid_solver.nx,self.fluid_solver.ny)-self.fluid_solver.composite_body.suit
 
         idx_u=self.fluid_solver.composite_body.sdf_vals_u.argmin(0).unsqueeze(0).expand(self.fluid_solver.composite_body.sdf_vals_u.shape)
-        self.fluid_solver.composite_body.sdf_val_u=self.fluid_solver.composite_body.sdf_vals_u.gather(0,idx_u)[0].reshape(self.fluid_solver.nx,self.fluid_solver.ny)-self.fluid_solver.composite_body.suit
+        self.fluid_solver.composite_body.sdf_val_u=self.fluid_solver.composite_body.sdf_vals_u.gather(0,idx_u)[0].reshape(self.fluid_solver.nx,self.fluid_solver.ny) #-self.fluid_solver.composite_body.suit
         self.fluid_solver.composite_body.body_u=self.fluid_solver.composite_body.u_vals.gather(0,idx_u)[0].reshape(self.fluid_solver.nx,self.fluid_solver.ny)
 
         idx_v=self.fluid_solver.composite_body.sdf_vals_v.argmin(0).unsqueeze(0).expand(self.fluid_solver.composite_body.sdf_vals_v.shape)
-        self.fluid_solver.composite_body.sdf_val_v=self.fluid_solver.composite_body.sdf_vals_v.gather(0,idx_v)[0].reshape(self.fluid_solver.nx,self.fluid_solver.ny)-self.fluid_solver.composite_body.suit
+        self.fluid_solver.composite_body.sdf_val_v=self.fluid_solver.composite_body.sdf_vals_v.gather(0,idx_v)[0].reshape(self.fluid_solver.nx,self.fluid_solver.ny) #-self.fluid_solver.composite_body.suit
         self.fluid_solver.composite_body.body_v=self.fluid_solver.composite_body.v_vals.gather(0,idx_v)[0].reshape(self.fluid_solver.nx,self.fluid_solver.ny)
 
 
@@ -146,17 +150,38 @@ class BDIMhandler():
 
             ind_task= task.maps[animat_id]['sensors']['data2xfrc'][link_id]
 
+            timestep=task.timestep
+            mass=self.data[animat_id].sensors.links.masses[link_id] * task.units.kilograms # mass
+            inertia=physics.model.body_inertia[ind_task][1] # rotation inertia around y
+
+            fx = (self.friction_force_lin_x[body_i] + self.pressure_force_x[body_i])
+            fz = (self.friction_force_lin_y[body_i] + self.pressure_force_y[body_i])
+            g = -9.81
+            torque = (self.friction_force_ang_z[body_i] + self.pressure_force_ang_z[body_i]) * task.units.newtons * task.units.meters
+
+            physics.data.qvel[0]=self.vel_x0+(fx/mass) * timestep
+            physics.data.qvel[1]=self.vel_z0+(fz/mass+g) * timestep
+            physics.data.qvel[2]=self.ang_y0+(torque/inertia) * timestep
+
+            self.vel_x0 = physics.data.qvel[0].copy()
+            self.vel_z0 = physics.data.qvel[1].copy()
+            self.ang_y0 = physics.data.qvel[2].copy()
+
+
+            # print(physics.data.qvel[1])
+            # physics.data.qvel[0]= (torque/inertia) * timestep
+
 
             # mass=self.data[animat_id].sensors.links.masses[link_id] * task.units.kilograms
             # physics.data.xfrc_applied[ind_task, 2] = (9.81) * task.units.newtons*mass
 
 
-            physics.data.xfrc_applied[ind_task, 0] = (self.friction_force_lin_x[body_i] + 0*self.pressure_force_x[body_i]) * task.units.newtons
-            physics.data.xfrc_applied[ind_task, 2] = (self.friction_force_lin_y[body_i] + 0*self.pressure_force_y[body_i]) * task.units.newtons
-            physics.data.xfrc_applied[ind_task, 4] = (self.friction_force_ang_z[body_i] + 0*self.pressure_force_ang_z[body_i]) * task.units.newtons
+            # physics.data.xfrc_applied[ind_task, 0] = (self.friction_force_lin_x[body_i] + self.pressure_force_x[body_i]) * task.units.newtons
+            # physics.data.xfrc_applied[ind_task, 2] = (self.friction_force_lin_y[body_i] + self.pressure_force_y[body_i]) * task.units.newtons
+            # physics.data.xfrc_applied[ind_task, 4] = (self.friction_force_ang_z[body_i] + self.pressure_force_ang_z[body_i]) * task.units.newtons
 
 
-            print("Force z: {}, qvel[1]: {}".format(physics.data.xfrc_applied[ind_task, 2], physics.data.qvel[1]))
-            # print(self.pressure_force_y)
+            print("Friction F_z: {}, Pressure P_z: {}, qvel: {}".format(self.friction_force_lin_y[0], self.pressure_force_y[0], physics.data.qvel))
+            # print(physics.data.xfrc_applied[ind_task, 4])
 
             # physics.data.qvel[1]=-0.05

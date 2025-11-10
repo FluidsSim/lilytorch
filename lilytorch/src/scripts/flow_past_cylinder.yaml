@@ -2,7 +2,8 @@
 solver:
   use_gpu           : False
   nthreads          : 16
-  N                 : 256
+  Nx                : 256
+  Ny                : 256
   xmin              : -0.4
   xmax              : 1.6
   ymin              : -1.0
@@ -10,7 +11,6 @@ solver:
   nt                : 520
   nu                : 1.0e-6
   rho               : 1.0e+3
-
   poisson_tol       : 1.0e-7
   jacobi_weight     : 0.7
   poisson_max_cycles: 10
@@ -23,7 +23,7 @@ solver:
   # convection_method : "implicit"
 
   convection_method : "abdquickest"
-  dt                : 0.02
+  dt                : 0.01
 
 # 2*R*U/nu
 
@@ -41,8 +41,8 @@ boundary_conditions:
   BC_type_v:
   - "D"
   - "D"
-  - "D"
-  - "D"
+  - "N"
+  - "N"
   BC_values_v:
   - 0
   - 0

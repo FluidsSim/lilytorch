@@ -24,7 +24,7 @@ class AdvDiffSolver:
         y        : y-domain
         dt       : time step
         nu       : diffusion coefficient
-        type     : solver type: implicit, explicit, quick, abdquickest, adam-bashford
+        type     : solver type: implicit, explicit, quick, abdquickest, adam_bashforth
         """
 
         self.device=device
@@ -77,8 +77,8 @@ class AdvDiffSolver:
             self.solve = self.solve_FLUXLMT
         elif method == "abdquickest":
             self.solve = self.solve_ADBQUICKEST
-        elif method == "adam-bashford":
-            self.solve = self.solve_adam_bashford
+        elif method == "adam-bashforth":
+            self.solve = self.solve_adam_bashforth
             self.HU_prec = torch.zeros((self.nm2x,self.nm2y), device=self.device,dtype=self.dtype)
             self.HV_prec = torch.zeros((self.nm2x,self.nm2y), device=self.device,dtype=self.dtype)
         else:
@@ -336,7 +336,7 @@ class AdvDiffSolver:
                         )
         return (u,v)
 
-    def solve_adam_bashford(self, u, v, iteration=0):
+    def solve_adam_bashforth(self, u, v, iteration=0):
 
         u_new=torch.zeros_like(u)
         v_new=torch.zeros_like(v)
@@ -377,11 +377,11 @@ class AdvDiffSolver:
         u_new[1:-1,1:-1] += (
                 self.nu*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
                 self.nu*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
-                )*(self.dt/(self.dx**2))
+                )*self.dtdx2
         v_new[1:-1,1:-1] += (
                 self.nu*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1]) +
                 self.nu*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])
-                )*(self.dt/(self.dy**2))
+                )*self.dtdy2
 
 
         return (u_new,v_new)

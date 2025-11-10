@@ -18,7 +18,7 @@ class PoissonSolver:
         self.max_vcycles = max_vcycles
         self.nsmoothing  = nsmoothing
         self.verbose     = verbose
-        self.jcap_tol    = 1e-10
+        self.jcap_tol    = 1e-5
         self.n_switch    = 2**16
         self.w           = w # smoothing factor
 
@@ -31,6 +31,10 @@ class PoissonSolver:
         q[-1, :]   = q[-2, :]
         q[:, 0]    = q[:, 1]
         q[:, -1]   = q[:, -2]
+        # q[0, 1:-1]  = q[1, 1:-1]
+        # q[-1, 1:-1] = q[-2, 1:-1]
+        # q[1:-1, 0]  = q[1:-1, 1]
+        # q[1:-1, -1] = q[1:-1, -2]
 
     def FD_operator(self, p, ch, cv, h2):
         """

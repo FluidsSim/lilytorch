@@ -563,8 +563,8 @@ class BodyAnalytical(Body):
         xnp = xcnt.cpu().numpy()
         ynp = ycnt.cpu().numpy()
 
-        # cnt = np.array(measure.find_contours(sdf_np, 0)[0]).T
-        cnt = np.array(measure.find_contours(sdf_np-self.eps, 0)[0]).T
+        cnt = np.array(measure.find_contours(sdf_np, 0)[0]).T
+        # cnt = np.array(measure.find_contours(sdf_np-self.eps, 0)[0]).T
         cnt[0]=xnp[0]+cnt[0]*(xnp[1]-xnp[0])
         cnt[1]=ynp[0]+cnt[1]*(ynp[1]-ynp[0])
 
@@ -577,7 +577,12 @@ class BodyAnalytical(Body):
         del cnt
         cnt=np.array([x, y])
 
-        curv_coord = np.cumsum(np.sqrt(np.sum(np.diff(cnt, axis=1)**2, axis=0)))
+        # Compute ds and cumulative s
+        dx = np.diff(x)
+        dy = np.diff(y)
+        ds = np.sqrt(dx**2 + dy**2)
+        curv_coord = np.concatenate(([0], np.cumsum(ds)))
+        # curv_coord = np.cumsum(np.sqrt(np.sum(np.diff(cnt, axis=1)**2, axis=0)))
 
         # curv_coord = s_uniform
 
@@ -736,15 +741,15 @@ class CompositeBodyAnalytical(Body):
     def update(self, t, iteration, dt=1):
         for i, body in enumerate(self.bodies):
             body.update(t, iteration, dt=dt)
-            self.sdf_vals[i]   = body.sdf
+            # self.sdf_vals[i]   = body.sdf
             self.sdf_vals_u[i] = body.sdf_u
             self.sdf_vals_v[i] = body.sdf_v
             self.u_vals[i]   = body.body_u
             self.v_vals[i]   = body.body_v
 
-        self.sdf_val = torch.min(self.sdf_vals,axis=0)[0]
-        idx=self.sdf_vals.argmin(0).unsqueeze(0).expand(self.sdf_vals.shape)
-        self.sdf_val=self.sdf_vals.gather(0,idx)[0].reshape(self.nx,self.ny)
+        # self.sdf_val = torch.min(self.sdf_vals,axis=0)[0]
+        # idx=self.sdf_vals.argmin(0).unsqueeze(0).expand(self.sdf_vals.shape)
+        # self.sdf_val=self.sdf_vals.gather(0,idx)[0].reshape(self.nx,self.ny)
 
         self.sdf_val_u = torch.min(self.sdf_vals_u,axis=0)[0]
         idx=self.sdf_vals_u.argmin(0).unsqueeze(0).expand(self.sdf_vals_u.shape)

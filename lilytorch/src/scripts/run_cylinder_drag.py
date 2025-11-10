@@ -1,6 +1,6 @@
 
 
-from lilytorch.solver import FluidSolver
+from lilytorch.src.solver import FluidSolver
 from lilytorch.util.yaml_operations import yaml2pyobject
 import torch
 import numpy as np
@@ -10,7 +10,7 @@ matplotlib.rc('font', **{"size":12})
 plt.rcParams["figure.figsize"] = 15,15
 
 
-pars = yaml2pyobject("lilytorch/scripts/flow_past_cylinder.yaml")
+pars = yaml2pyobject("lilytorch/src/scripts/flow_past_cylinder.yaml")
 
 
 R = 0.1 # radius of the cylinder
@@ -23,11 +23,20 @@ final_conv_time = 7.0 # final convective time to simulate
 # pars["solver"]["N"]    = 512
 
 pars["solver"]["xmin"] = -0.5
-pars["solver"]["xmax"] = 0.5
-pars["solver"]["ymin"] = -0.5
-pars["solver"]["ymax"] = 0.5
-pars["solver"]["N"]    = 256
+pars["solver"]["xmax"] = 1.5
+pars["solver"]["ymin"] = -1
+pars["solver"]["ymax"] = 1
+pars["solver"]["Nx"]   = 512
+pars["solver"]["Ny"]   = 512
 pars["body"]["sdf"]    = ["lambda x, y: circle(x,y,xt={},yt=0,r={})".format(0,R)]
+
+pars["body"]["update_maps"] = [{
+   "rotation": "lambda t: 0*torch.sin(t/5)",
+   "translation": [
+       "lambda t: -3*{}+0*torch.sin(t/5)".format(R),
+       "lambda t: 0*torch.sin(t/5)"
+   ]
+}]
 
 u_inlet = pars["boundary_conditions"]["BC_values_u"]
 
@@ -35,7 +44,7 @@ pars["output"]["save_frames"] = True
 pars["output"]["save_every"]=50
 path=pars["output"]["save_path"] + pars["output"]["results_folder"]
 
-dx=(pars["solver"]["xmax"]-pars["solver"]["xmin"])/pars["solver"]["N"]
+dx=(pars["solver"]["xmax"]-pars["solver"]["xmin"])/pars["solver"]["Nx"]
 t_clf=dx/u_inlet[0]
 
 
