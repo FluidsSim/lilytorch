@@ -73,8 +73,8 @@ class PoissonSolverFFT:
             Xshift, Yshift = numpy.meshgrid(xshift_ext, yshift_ext, indexing='ij')
 
             R = numpy.sqrt(Xshift**2+Yshift**2)
+            # G = torch.from_numpy(self.chatelain_fun(R).astype(self.dtype_np)).to(self.device)
             eps = 2*max(self.dx,self.dy)
-            # G = torch.from_numpy(self.chatelain_fun(R, eps).astype(self.dtype_np)).to(self.device)
             G = torch.from_numpy(self.hej_fun(R, eps).astype(self.dtype_np)).to(self.device)
             Gfft = torch.fft.fftn(-self.dx*self.dy*G)
 

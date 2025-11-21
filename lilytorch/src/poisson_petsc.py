@@ -70,27 +70,8 @@ class PoissonSolverPETSc:
 
         self.A.assemblyBegin()
         self.A.assemblyEnd()
-        self.A.setNullSpace(nullspace)
 
-        opts = PETSc.Options()
-
-        petsc_options = {}
-
-        # self.ksp = PETSc.KSP()
         # self.ksp.create(comm=self.A.getComm())
-        # self.ksp.setType(PETSc.KSP.Type.CG)
-        # self.ksp.getPC().setType(PETSc.PC.Type.GAMG)
-        # self.ksp.setFromOptions()
-
-
-        # petsc_options = {
-        #     "ksp_error_if_not_converged": True,
-        #     "ksp_type": "preonly",
-        #     "pc_type": "lu",
-        #     "pc_factor_mat_solver_type": "mumps",
-        #     "ksp_monitor": None,
-        # }
-
 
         # petsc_options = {
         #     "ksp_error_if_not_converged": True,
@@ -105,17 +86,31 @@ class PoissonSolverPETSc:
 
 
 
+        # petsc_options = {
+        #     "ksp_error_if_not_converged": True,
+        #     "ksp_type": "gmres",
+        #     "pc_type": "gamg",
+        #     "ksp_rtol": 1.0e-8,
+        #     "ksp_monitor": None,
+        # }
+
+        self.setup_iterative()
+        # self.setup_mups()
+
+
+    def setup_mups(self):
+
         petsc_options = {
             "ksp_error_if_not_converged": True,
-            "ksp_type": "gmres",
-            "pc_type": "gamg",
-            "ksp_rtol": 1.0e-8,
+            "ksp_type": "preonly",
+            "pc_type": "lu",
+            "pc_factor_mat_solver_type": "mumps",
             "ksp_monitor": None,
         }
-
-
         self.ksp = PETSc.KSP().create(MPI.COMM_WORLD)
         self.ksp.setOptionsPrefix("singular_direct")
+
+        opts = PETSc.Options()
         opts.prefixPush(self.ksp.getOptionsPrefix())
         for key, value in petsc_options.items():
             opts[key] = value
@@ -124,9 +119,39 @@ class PoissonSolverPETSc:
             del opts[key]
         opts.prefixPop()
 
+        assert nullspace.test(self.A)
+        self.A.setNullSpace(nullspace)
 
         self.ksp.setOperators(self.A)
 
+
+    def setup_iterative(self):
+
+        petsc_options = {
+            "ksp_error_if_not_converged": True,
+            "ksp_monitor": None,
+            "ksp_type": "gmres",
+            "pc_type": "hypre",
+            "pc_hypre_type": "boomeramg",
+            "pc_hypre_boomeramg_max_iter": 1,
+            "pc_hypre_boomeramg_cycle_type": "v",
+            "ksp_rtol": 1.0e-13,
+        }
+        self.ksp = PETSc.KSP().create(MPI.COMM_WORLD)
+        self.ksp.setOptionsPrefix("singular_iterative")
+
+        opts = PETSc.Options()
+        opts.prefixPush(self.ksp.getOptionsPrefix())
+        for key, value in petsc_options.items():
+            opts[key] = value
+        self.ksp.setFromOptions()
+        for key, value in petsc_options.items():
+            del opts[key]
+        opts.prefixPop()
+
+        self.A.setNearNullSpace(nullspace)
+
+        self.ksp.setOperators(self.A)
 
     def solve(self, f):
         f[0,:]=0.0
@@ -135,6 +160,7 @@ class PoissonSolverPETSc:
         f[:,-1]=0.0
         sol, b = self.A.createVecs()
         b = PETSc.Vec().createWithArray(f.flatten())
+        print("solving poisson with PETSc...")
         self.ksp.solve(b, sol)
         return torch.from_numpy(sol.getArray()).to(device=self.device, dtype=self.dtype)
 
