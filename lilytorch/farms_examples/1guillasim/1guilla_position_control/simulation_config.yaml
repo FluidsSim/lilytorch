@@ -1,0 +1,193 @@
+units:
+  meters: 1
+  seconds: 1
+  kilograms: 1
+runtime:
+  n_iterations: 50001
+  buffer_size: 50001
+  play: true
+  rtl: 1.0
+  fast: false
+  headless: false
+  show_progress: true
+physics:
+  timestep: 0.0001
+  gravity:
+  - 0
+  - 0
+  - -9.81
+  num_sub_steps: 1
+  cb_sub_steps: 2
+  n_solver_iters: 50
+mujoco:
+  cone: elliptic
+  solver: CG
+  integrator: implicitfast
+  impratio: 10
+  ccd_iterations: 1000
+  ccd_tolerance: 1e-6
+  noslip_iterations: 1000
+  noslip_tolerance: 1e-6
+  viewer: MuJoCo
+  texture_repeat: 1
+  shadow_size: 1024
+  visual_scale: 1.0
+  extent: 100.0
+pybullet:
+  opengl2: false
+  lcp: dantzig
+  cfm: 1.0e-10
+  erp: 0
+  contact_erp: 0
+  friction_erp: 0
+  residual_threshold: 1.0e-06
+  max_num_cmd_per_1ms: 100000000
+  report_solver_analytics: 0
+extensions:
+- loader: lilytorch.integration.extensions.FluidExtension
+  config:
+    handler_path: lilytorch.farms_examples.1guillasim.1guilla_position_control.BDIMhandler.BDIMhandler
+    bdim_yaml:
+      solver :
+        use_gpu           : True
+        nthreads          : 16
+
+        Nx: 1024
+        Ny: 256
+        Cx: 0.2
+        Cy: 0.0
+        h: 0.003
+
+
+        # ## small tank
+        # N                 : 256
+        # xmin              : -1.0
+        # xmax              : 2
+        # ymin              : -1.5
+        # ymax              : 1.5
+
+        # ## smallest tank
+        # N                 : 512
+        # xmin              : -1.0
+        # xmax              : 0.1
+        # ymin              : -0.55
+        # ymax              : 0.55
+
+
+        # ## small tank
+        # N                 : 1024
+        # xmin              : -1.3
+        # xmax              : 1.7
+        # ymin              : -1.5
+        # ymax              : 1.5
+
+        ## medium tank
+        N                 : 2048
+        xmin              : -1.3
+        xmax              : 4.7
+        ymin              : -3
+        ymax              : 3
+
+        # ## large tank
+        # N                 : 2048
+        # xmin              : -1.0
+        # xmax              : 11
+        # ymin              : -6
+        # ymax              : 6
+
+
+
+        # convection_method : "implicit"
+        # dt                : 0.001
+
+        convection_method : "abdquickest"
+        dt                : 0.0001
+        nt                : 800000
+        nu                : 0.01 #0.0002 #500.0e-6
+        rho               : 1.0 #1.0e+3
+
+        poisson_tol       : 1.0e-7
+        poisson_max_cycles: 5
+        poisson_max_mgcg_cycles: 3
+        jacobi_weight     : 0.8
+        poisson_nsmoothing: 5
+        poisson_verbose   : True
+        poisson_folder : "data/"
+
+
+      boundary_conditions:
+        BC_type_u:
+        - "N"
+        - "N"
+        - "N"
+        - "N"
+        BC_values_u:
+        - 0
+        - 0
+        - 0
+        - 0
+        BC_type_v:
+        - "N"
+        - "N"
+        - "N"
+        - "N"
+        BC_values_v:
+        - 0
+        - 0
+        - 0
+        - 0
+
+      body:
+        type: multi_animat
+        sdf_folder: "/data/andreaferrario/lilytorch/lilytorch/farms_examples/1guillasim/models/1guilla_v1/sdf/"
+        plotting: False
+        compute_interp: False
+        plotting_meshes: False
+        n_samples: (2000, 2000)
+        update_maps:
+          rotation: "None"
+          translation:
+            - None
+            - None
+        suit: 0.0
+        convexify: True
+        scale: 1
+
+
+      output:
+        save_path: "/data/andreaferrario/ns_data/"
+        save_frames: True
+        save_every : 50
+        vmin: -10
+        vmax: 10
+        save_uv: False
+
+
+# - loader: farms_core.simulation.extensions.ExperimentLogger
+#   config:
+#     log_path: output
+#     skip: 0
+# - loader: farms_mujoco.simulation.extensions.CameraFollower
+#   config:
+#     animat_id: 0
+#     distance: 3
+#     azimuth: -30
+#     elevation: -20
+#     angular_velocity: 0
+# - loader: farms_mujoco.sensors.camera.CameraRecording
+#   config:
+#     path: 'output/video.mp4'
+#     animat_id: 0
+#     fps: 30
+#     speed: 1.0
+#     azimuth: -30
+#     elevation: -15
+#     distance: 2
+#     angular_velocity: 0
+#     offset:
+#     - 0
+#     - 0
+#     - 0.0
+#     resolution:
+#     - 1280
+#     - 720

@@ -191,6 +191,7 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, costum_update=None, starti
 
     elif type == "multi_animat":
         (nsamples,msamples) = eval(body_pars["n_samples"])
+
         return MultiAnimatBodies(
             device, x, y,
             experiment_options = body_pars["experiment_options"],
@@ -486,6 +487,7 @@ class Body:
         )
 
     def phi(self,d):
+        # return 0.5+0.5*torch.cos(torch.pi*d.clamp(-1,1))
         return torch.where(
             torch.abs(d)<self.eps,
             ( 1 + torch.cos(torch.pi*d/self.eps) )/( 2*self.eps ),
@@ -563,8 +565,8 @@ class BodyAnalytical(Body):
         xnp = xcnt.cpu().numpy()
         ynp = ycnt.cpu().numpy()
 
-        cnt = np.array(measure.find_contours(sdf_np, 0)[0]).T
-        # cnt = np.array(measure.find_contours(sdf_np-self.eps, 0)[0]).T
+        # cnt = np.array(measure.find_contours(sdf_np, 0)[0]).T
+        cnt = np.array(measure.find_contours(sdf_np-self.h, 0)[0]).T
         cnt[0]=xnp[0]+cnt[0]*(xnp[1]-xnp[0])
         cnt[1]=ynp[0]+cnt[1]*(ynp[1]-ynp[0])
 
@@ -591,8 +593,18 @@ class BodyAnalytical(Body):
         self.cnt_update = self.cnt.clone().detach()
         self.ds = self.curv_coord[1]-self.curv_coord[0]
 
-
         if self.plotting:
+
+            plt.imshow(
+                sdf_np.T,
+                extent=(
+                    torch.min(self.x.cpu()), torch.max(self.x.cpu()),
+                    torch.min(self.y.cpu()), torch.max(self.y.cpu())
+                ),
+                origin="lower",
+                cmap="Greys"
+            )
+            plt.colorbar()
 
             # Plot cnt as scatter with color given by a colormap
             cmap = cm.get_cmap('RdBu')
@@ -600,7 +612,6 @@ class BodyAnalytical(Body):
             colors = cmap(np.linspace(0, 1, n_points))
             plt.plot(self.cnt_update[0].cpu(), self.cnt_update[1].cpu())
             plt.show()
-
 
 
         self.cnt_u=torch.zeros_like(self.cnt_update[0])
@@ -665,12 +676,12 @@ class BodyAnalytical(Body):
         lin_vel_y = torch.autograd.grad(vy, t_var, create_graph=False)[0]
         ang_vel   = torch.autograd.grad(w, t_var, create_graph=False)[0]
 
-        # # compute sdf at cc locations
-        # translpoints=self.stacked_xy-trans
-        # newpoints_u=rot.T@translpoints
-        # newpos_u = newpoints_u[0].reshape(self.nx, self.ny)
-        # newpos_v = newpoints_u[1].reshape(self.nx, self.ny)
-        # self.sdf_val = self.sdf(newpos_u, newpos_v)
+        # compute sdf at cc locations
+        translpoints=self.stacked_xy-trans
+        newpoints_u=rot.T@translpoints
+        newpos_u = newpoints_u[0].reshape(self.nx, self.ny)
+        newpos_v = newpoints_u[1].reshape(self.nx, self.ny)
+        self.sdf_val = self.sdf(newpos_u, newpos_v)
 
         # compute sdf at staggered grid locations (u points -sdf_u and v points-sdf_v)
         translpoints_u=self.stacked_xy_u-trans
@@ -741,15 +752,15 @@ class CompositeBodyAnalytical(Body):
     def update(self, t, iteration, dt=1):
         for i, body in enumerate(self.bodies):
             body.update(t, iteration, dt=dt)
-            # self.sdf_vals[i]   = body.sdf
+            self.sdf_vals[i]   = body.sdf_val
             self.sdf_vals_u[i] = body.sdf_u
             self.sdf_vals_v[i] = body.sdf_v
             self.u_vals[i]   = body.body_u
             self.v_vals[i]   = body.body_v
 
-        # self.sdf_val = torch.min(self.sdf_vals,axis=0)[0]
-        # idx=self.sdf_vals.argmin(0).unsqueeze(0).expand(self.sdf_vals.shape)
-        # self.sdf_val=self.sdf_vals.gather(0,idx)[0].reshape(self.nx,self.ny)
+        self.sdf_val = torch.min(self.sdf_vals,axis=0)[0]
+        idx=self.sdf_vals.argmin(0).unsqueeze(0).expand(self.sdf_vals.shape)
+        self.sdf_val=self.sdf_vals.gather(0,idx)[0].reshape(self.nx,self.ny)
 
         self.sdf_val_u = torch.min(self.sdf_vals_u,axis=0)[0]
         idx=self.sdf_vals_u.argmin(0).unsqueeze(0).expand(self.sdf_vals_u.shape)
@@ -1342,6 +1353,11 @@ class BodyMesh(Body):
 
             print("Computing the interpolation functions for {}".format(self.mesh_file))
 
+
+            interp_data_dir = "interp_data"
+            if not os.path.exists(interp_data_dir):
+                os.makedirs(interp_data_dir)
+
             np.save("interp_data/xnp_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy",xnp)
             np.save("interp_data/ynp_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy",ynp)
             np.save("interp_data/sdf_val_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy",sdf_val)
@@ -1570,28 +1586,60 @@ class MultiAnimatBodies(Body):
         super().__init__(device, x, y, eps=eps)
 
         self.suit = suit
+        self.plotting        = plotting
+        self.plotting_meshes = plotting_meshes
 
         self.body_ids = []
         self.bodies = []
 
+
         for animat_i, animat in enumerate(experiment_options.animats):
-            sdf = ModelSDF.read(animat.sdf)[0]
+            sdf = ModelSDF.read(animat.sdf)[0] # this is the sdf content
+            sdf_folder      = os.path.dirname(animat.sdf)
             link_id=0
             if sdf.name == "sphere":
+                """ Create analytical bodies for spheres """
                 for link in sdf.links:
                     radius = link.collisions[0].geometry.radius
                     sdf_fun = lambda x,y : circle(x,y,xt=0,yt=0,r=radius)
                     initial_pose = np.array(link.pose).astype(x.cpu().numpy().dtype)
                     update_maps = (lambda t: 0, [lambda t: -initial_pose[0], lambda t: -initial_pose[1]]) # set dummy update maps for initialization (not used)
-
                     self.bodies.append(
                         BodyAnalytical(
                             device, x, y, sdf_fun, update_maps, eps=eps, plotting=False, pre_update=False
                         )
                     )
-
                     self.body_ids.append([animat_i,link_id])
                     link_id+=1
+            else:
+                """ Create mesh-based bodies for general meshes"""
+                for link_i, link in enumerate(sdf.links):
+                    # if link_i%2==0:
+                        mesh_name = link["visuals"][0]["geometry"]["uri"]
+                        mesh_gpath = sdf_folder+"/"+mesh_name
+                        initial_pose = np.array(link.pose).astype(x.cpu().numpy().dtype)
+                        update_funcs = (
+                            lambda t: 180,
+                            [
+                                lambda t, initial_pose=initial_pose: -initial_pose[0],
+                                lambda t, initial_pose=initial_pose: -initial_pose[1],
+                            ]
+                            )
+
+                        body = BodyMesh(
+                                device, x, y,
+                                mesh_gpath,
+                                update_funcs,
+                                eps=eps,
+                                compute_interp=compute_interp,
+                                nsamples=nsamples, msamples=msamples,
+                                suit=suit,
+                                plotting_meshes=plotting_meshes,
+                                **kwargs
+                            )
+                        self.body_ids.append([animat_i,link_id])
+                        self.bodies.append(body)
+                        link_id+=1
 
         self.nbodies = len(self.bodies)
         self.sdf_vals = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
@@ -1604,42 +1652,34 @@ class MultiAnimatBodies(Body):
         self.sdf_val_v=torch.zeros_like(self.X)
         self.com_pos  = torch.zeros((self.nbodies,2),device=device)
 
-        # from IPython import embed; embed()
-
-
-
-    #     self.sdf_folder      = sdf_folder
-    #     self.sdf             = ModelSDF.read(sdf_folder+sdf_name)[0]
-    #     self.plotting        = plotting
-    #     self.plotting_meshes = plotting_meshes
-    #     for link_i, link in enumerate(self.sdf.links):
-    #         # if link_i%2==0:
-    #             mesh_name = link["visuals"][0]["geometry"]["uri"]
-    #             mesh_gpath = sdf_folder+mesh_name
-    #             initial_pose = np.array(link.pose).astype(x.cpu().numpy().dtype)
-    #             update_funcs = (
-    #                 lambda t: 180,
-    #                 [
-    #                     lambda t, initial_pose=initial_pose: -initial_pose[0],
-    #                     lambda t, initial_pose=initial_pose: -initial_pose[1],
-    #                 ]
-    #                 )
-    #             body = BodyMesh(
-    #                     device, x, y,
-    #                     mesh_gpath,
-    #                     update_funcs,
-    #                     eps=eps,
-    #                     compute_interp=compute_interp,
-    #                     nsamples=nsamples, msamples=msamples,
-    #                     suit=suit,
-    #                     plotting_meshes=plotting_meshes,
-    #                     **kwargs
-    #                 )
-    #             body.id = link_i
-    #             self.bodies.append(body)
-    #     self.nbodies = len(self.bodies)
-    #     self.costum_update = costum_update
-    #     self.compute_interp = compute_interp
+        # for link_i, link in enumerate(self.sdf.links):
+        #     # if link_i%2==0:
+        #         mesh_name = link["visuals"][0]["geometry"]["uri"]
+        #         mesh_gpath = sdf_folder+mesh_name
+        #         initial_pose = np.array(link.pose).astype(x.cpu().numpy().dtype)
+        #         update_funcs = (
+        #             lambda t: 180,
+        #             [
+        #                 lambda t, initial_pose=initial_pose: -initial_pose[0],
+        #                 lambda t, initial_pose=initial_pose: -initial_pose[1],
+        #             ]
+        #             )
+        #         body = BodyMesh(
+        #                 device, x, y,
+        #                 mesh_gpath,
+        #                 update_funcs,
+        #                 eps=eps,
+        #                 compute_interp=compute_interp,
+        #                 nsamples=nsamples, msamples=msamples,
+        #                 suit=suit,
+        #                 plotting_meshes=plotting_meshes,
+        #                 **kwargs
+        #             )
+        #         body.id = link_i
+        #         self.bodies.append(body)
+        # self.nbodies = len(self.bodies)
+        # self.costum_update = costum_update
+        # self.compute_interp = compute_interp
 
     #     self.mu_funcs               = self.bodies[0].mu_funcs
     #     self.compute_sdf_properties = self.bodies[0].compute_sdf_properties

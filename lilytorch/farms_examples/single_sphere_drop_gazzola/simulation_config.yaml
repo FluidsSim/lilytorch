@@ -3,8 +3,8 @@ units:
   seconds: 1
   kilograms: 1
 runtime:
-  n_iterations: 150001
-  buffer_size: 150001
+  n_iterations: 100001
+  buffer_size: 100001
   play: true
   rtl: 1.0
   fast: false
@@ -17,7 +17,7 @@ physics:
   - 0
   - -9.81
   num_sub_steps: 1
-  cb_sub_steps: 2
+  cb_sub_steps: 1
   n_solver_iters: 50
 mujoco:
   cone: elliptic
@@ -46,7 +46,7 @@ pybullet:
 extensions:
 - loader: lilytorch.integration.extensions.FluidExtension
   config:
-    handler_path: lilytorch.farms_examples.single_sphere_drop.controller.BDIMhandler
+    handler_path: lilytorch.farms_examples.single_sphere_drop_gazzola.controller.BDIMhandler
     bdim_yaml:
       solver :
         use_gpu : True
@@ -61,14 +61,11 @@ extensions:
         xmax: 0.02
         ymax: 0.32
 
-        convection_method : "adam-bashforth"
+        convection_method : "abdquickest"
         dt                : 0.0001
         nt                : 150000
-        nu                : 1.0e-6
-        rho               : 1000.0
-        # nu                : 0.006410256 # 0.000000801 # 1/Re Re=
-        # rho               : 1.0
-
+        nu                : 8.0e-7
+        rho               : 996.0
 
         poisson_tol       : 1.0e-7
         poisson_max_cycles: 5

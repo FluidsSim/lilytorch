@@ -1,8 +1,8 @@
-sdf: ../models/1guilla_v1/sdf/1guilla.sdf
+sdf: ../../sdfs/1guilla/1guilla_v1/sdf/1guilla.sdf
 spawn:
   loader: 0
   mode: !!python/object/apply:farms_core.model.options.SpawnMode
-  - free
+  - transverse
   pose:
   - 0
   - 0

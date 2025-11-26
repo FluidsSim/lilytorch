@@ -25,7 +25,6 @@ class DummyOptionCallback(TaskExtension):
             experiment_options: ExperimentOptions,
     ):
         """From options"""
-        # config = ExperimentLoggerOptions(**config)
         return cls(
             experiment_options=experiment_options,
         )
@@ -47,7 +46,6 @@ class FluidExtension(TaskExtension):
         self.force_scaling = 1.0
         self.BDIMhandler_class = import_item(handler_path)
         self.bdim_yaml = bdim_yaml
-        self.terminate = False
 
 
     @classmethod
@@ -57,7 +55,6 @@ class FluidExtension(TaskExtension):
             experiment_options: ExperimentOptions,
     ):
         """From options"""
-        # config = ExperimentLoggerOptions(**config)
         return cls(
             experiment_options=experiment_options,
             handler_path=config.get("handler_path", ""),
@@ -81,47 +78,11 @@ class FluidExtension(TaskExtension):
         self.bdim_yaml["solver"]["dt"] = self.experiment_options.simulation.physics.timestep  # enforce farms timestep
         self.bdim_yaml["body"]["experiment_options"] = self.experiment_options
 
-        self.BDIMhandler = self.BDIMhandler_class(self.bdim_yaml, task.data.animats)
-
-        # initialize solref
-        physics.model.geom_solref[:,0]= 0.001
-        physics.model.geom_solref[:,1]= 0.5
-
-    def after_step(self, task: ExperimentTask, physics: Physics):
-    # def before_step(self, task: ExperimentTask, action, physics: Physics):
-
-        iteration = self.BDIMhandler.iteration
-        timestep  = self.experiment_options.simulation.physics.timestep
-        if iteration>=self.experiment_options.simulation.runtime.n_iterations:
-            return
-
-        time = iteration*timestep
-
-        # === stepping the fluid solver ===
-        if not self.terminate:
-            (
-            self.BDIMhandler.fluid_solver.u0,
-            self.BDIMhandler.fluid_solver.v0,
-            self.BDIMhandler.fluid_solver.p0,
-            self.terminate,
-            ) = self.BDIMhandler.fluid_stepper(
-                self.BDIMhandler.fluid_solver.u0,
-                self.BDIMhandler.fluid_solver.v0,
-                self.BDIMhandler.fluid_solver.p0,
-                iteration,
-                time
-            )
+        self.BDIMhandler = self.BDIMhandler_class(self.bdim_yaml, task.data.animats, physics)
 
 
-        # if not continue_sim: # stop sim is the fluid solver return an exit condition
-        #     if self.controller.exit_iteration==self.n_iterations:
-        #         self.controller.exit_iteration = iteration
-        #     return
+    # def after_step(self, task: ExperimentTask, physics: Physics):
+    def before_step(self, task: ExperimentTask, action, physics: Physics):
 
+        self.BDIMhandler.step(task, physics)
 
-        # from IPython import embed; embed()
-
-
-        self.BDIMhandler.apply_forces(task,physics)
-
-        self.BDIMhandler.iteration+=1

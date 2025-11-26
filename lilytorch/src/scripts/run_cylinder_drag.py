@@ -1,5 +1,7 @@
 
 
+import datetime
+import os
 from lilytorch.src.solver import FluidSolver
 from lilytorch.util.yaml_operations import yaml2pyobject
 import torch
@@ -12,9 +14,13 @@ plt.rcParams["figure.figsize"] = 15,15
 
 pars = yaml2pyobject("lilytorch/src/scripts/flow_past_cylinder.yaml")
 
-
+Re=550
+# Re = 1000
 R = 0.1 # radius of the cylinder
-final_conv_time = 7.0 # final convective time to simulate
+final_conv_time = 7 # final convective time to simulate
+D=2*R
+u_inlet = Re*1e-6/D # for Re=200
+
 
 # pars["solver"]["xmin"] = -1
 # pars["solver"]["xmax"] = 1
@@ -28,24 +34,42 @@ pars["solver"]["ymin"] = -1
 pars["solver"]["ymax"] = 1
 pars["solver"]["Nx"]   = 512
 pars["solver"]["Ny"]   = 512
+
+
+# pars["solver"]["xmin"] = -2
+# pars["solver"]["xmax"] = 2
+# pars["solver"]["ymin"] = -2
+# pars["solver"]["ymax"] = 2
+# pars["solver"]["Nx"]   = 1024
+# pars["solver"]["Ny"]   = 1024
+
+
+path=pars["output"]["save_path"]
+today          = datetime.datetime.now()
+todaystr       = today.isoformat()
+results_folder = f'{path}{todaystr}'
+pars["output"]["results_folder"] = todaystr
+
 pars["body"]["sdf"]    = ["lambda x, y: circle(x,y,xt={},yt=0,r={})".format(0,R)]
 
 pars["body"]["update_maps"] = [{
    "rotation": "lambda t: 0*torch.sin(t/5)",
    "translation": [
-       "lambda t: -3*{}+0*torch.sin(t/5)".format(R),
+       "lambda t: -0*{}+0*torch.sin(t/5)".format(R),
        "lambda t: 0*torch.sin(t/5)"
    ]
 }]
 
-u_inlet = pars["boundary_conditions"]["BC_values_u"]
+pars["boundary_conditions"]["BC_values_u"] = [u_inlet, u_inlet, 0.0, 0.0]
+
 
 pars["output"]["save_frames"] = True
-pars["output"]["save_every"]=50
+pars["output"]["save_every"]=250
+
 path=pars["output"]["save_path"] + pars["output"]["results_folder"]
 
 dx=(pars["solver"]["xmax"]-pars["solver"]["xmin"])/pars["solver"]["Nx"]
-t_clf=dx/u_inlet[0]
+t_clf=dx/u_inlet
 
 
 # pars["solver"]["dt"]                = t_clf
@@ -54,7 +78,7 @@ t_clf=dx/u_inlet[0]
 
 pars["solver"]["dt"]                = 0.1*t_clf
 pars["solver"]["convection_method"] = "abdquickest"
-pars["solver"]["nt"]                = int(final_conv_time*R/u_inlet[0]/pars["solver"]["dt"])
+pars["solver"]["nt"]                = int(final_conv_time*R/u_inlet/pars["solver"]["dt"])
 
 print("Number of iterations: ",pars["solver"]["nt"])
 
@@ -63,12 +87,14 @@ pars["solver"]["poisson_verbose"] = True
 
 def run_sim():
     # =========== Run simulation ===========
-    solver = FluidSolver(pars, dtype=torch.float32, compute_forces=True)
+    solver = FluidSolver(pars, dtype=torch.float64, compute_forces=True)
     solver.run_sim()
 
 
 def analyze_results():
     # =========== Analyze results ===========
+
+    # path="/data/andreaferrario/ns_data/2025-11-14T18:05:28.539730"
 
     viscous_forces = np.load(path+"/viscous_drags.npy")
     pressure_forces = np.load(path+"/pressure_drags.npy")
@@ -76,7 +102,7 @@ def analyze_results():
 
     time=np.arange(pars["solver"]["nt"])*pars["solver"]["dt"]
 
-    U = u_inlet[0]
+    U = u_inlet
     D = 2*R
     nu = pars["solver"]["nu"]
     Re = U*D/nu

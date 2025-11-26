@@ -1,6 +1,6 @@
 
 solver:
-  use_gpu           : False
+  use_gpu           : True
   nthreads          : 16
   Nx                : 256
   Ny                : 256
@@ -12,15 +12,12 @@ solver:
   nu                : 1.0e-6
   rho               : 1.0e+3
   poisson_tol       : 1.0e-7
-  jacobi_weight     : 0.7
+  jacobi_weight     : 0.8
   poisson_max_cycles: 10
   poisson_max_mgcg_cycles: 10
-  poisson_nsmoothing: 15
+  poisson_nsmoothing: 5
   poisson_verbose   : True
   poisson_folder : "lilytorch/data/"
-
-  # dt                : 1
-  # convection_method : "implicit"
 
   convection_method : "abdquickest"
   dt                : 0.01
@@ -62,7 +59,7 @@ body:
 
 output:
   save_path: "/data/andreaferrario/ns_data/"
-  results_folder: "flow_past_cylinder"
+  # results_folder: "flow_past_cylinder"
   save_frames: True
   save_every : 250
   vmin: -0.05

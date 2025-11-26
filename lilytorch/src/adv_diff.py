@@ -61,8 +61,8 @@ class AdvDiffSolver:
         if method == "implicit":
             self.solve = self.solve_implicit
             # dummy initialization for the implicit solver
-            x_staggered = x #- dx/2
-            y_staggered = y #- dy/2
+            x_staggered = x - dx/2
+            y_staggered = y - dy/2
             self.gu = RegularGridInterpolator((x_staggered,y), torch.zeros((self.nx,self.ny), device=self.device,dtype=self.dtype), fill_value=None)
             self.gv = RegularGridInterpolator((x,y_staggered), torch.zeros((self.nx,self.ny), device=self.device,dtype=self.dtype), fill_value=None)
             self.X_u, self.Y_u = torch.meshgrid(x_staggered,y, indexing="ij")
@@ -70,7 +70,6 @@ class AdvDiffSolver:
             self.X_cc, self.Y_cc = torch.meshgrid(x_staggered,y_staggered, indexing="ij")
             self.xflat = self.X_u.flatten().clone().detach()
             self.yflat = self.Y_v.flatten().clone().detach()
-            # from IPython import embed; embed()
         elif method == "explicit":
             self.solve = self.solve_explicit
         elif method == "quick":
@@ -81,6 +80,8 @@ class AdvDiffSolver:
             self.solve = self.solve_adam_bashforth
             self.HU_prec = torch.zeros((self.nm2x,self.nm2y), device=self.device,dtype=self.dtype)
             self.HV_prec = torch.zeros((self.nm2x,self.nm2y), device=self.device,dtype=self.dtype)
+        elif method == "quick-waterlily":
+            self.solve = self.solve_quick_waterlily
         else:
             raise("Error: the convection solver method {} does not exist".format(method))
 
@@ -386,6 +387,157 @@ class AdvDiffSolver:
 
         return (u_new,v_new)
 
+    def median(self, a, b, c):
+        return torch.maximum(
+            torch.minimum(a, b), torch.minimum(torch.maximum(a, b), c)
+        )
+
+    def lam(self, u, c, d):
+        return self.median((5.0*c+2.0*d-u)/6,c,self.median(10.0*c-9.0*u,c,d))
+
+    def phi_U(self, u):
+        fw = 0.5*(u[1:-2,1:-1]+u[2:-1,1:-1]) # west flux
+        return u[2:-1,1:-1]*torch.where(
+            fw>0,
+            self.lam(u[:-3,1:-1],u[1:-2,1:-1],u[2:-1,1:-1]),
+            self.lam(u[3:,1:-1],u[2:-1,1:-1],u[1:-2,1:-1])
+        )
+
+
+    def solve_quick_waterlily(self, u, v):
+
+        # # # # following lilipad notation
+        # # # # uo = 0.5*(x.a[i-1][j]+x.a[i][j]);
+        # # # # ue = 0.5*(x.a[i+1][j]+x.a[i][j]);
+        # # # # vs = 0.5*(y.a[i][j]+y.a[i-1][j]);
+        # # # # vn = 0.5*(y.a[i][j+1]+y.a[i-1][j+1]);
+        # # # u_new=torch.zeros_like(u)
+        # # # v_new=torch.zeros_like(v)
+
+        # # # uw = 0.5*(u[:-2,1:-1]+u[1:-1,1:-1])
+        # # # ue = 0.5*(u[2:,1:-1]+u[1:-1,1:-1])
+        # # # vs = 0.5*(v[:-2,1:-1]+v[1:-1,1:-1])
+        # # # vn = 0.5*(v[1:-1,2:]+v[:-2,2:])
+        # # # u_new[1:-1,1:-1] = (
+        # # #                 u[1:-1,1:-1]+
+        # # #                 self.dtdx*(uw*self.phi_w(uw,u)-ue*self.phi_e(ue,u))+
+        # # #                 self.dtdy*(vs*self.phi_s(vs,u)-vn*self.phi_n(vn,u))+
+        # # #                 self.nu*self.dtdx2*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
+        # # #                 self.nu*self.dtdx2*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
+        # # #                 )
+
+        # # # # uo = 0.5*(x.a[i][j-1]+x.a[i][j]);
+        # # # # ue = 0.5*(x.a[i+1][j-1]+x.a[i+1][j]);
+        # # # # vs = 0.5*(y.a[i][j-1]+y.a[i][j]);
+        # # # # vn = 0.5*(y.a[i][j]+y.a[i][j+1]);
+        # # # uw = 0.5*(u[1:-1,:-2]+u[1:-1,1:-1])
+        # # # ue = 0.5*(u[2:,:-2]+u[2:,1:-1])
+        # # # vs = 0.5*(v[1:-1,:-2]+v[1:-1,1:-1])
+        # # # vn = 0.5*(v[1:-1,1:-1]+v[1:-1,2:])
+        # # # v_new[1:-1,1:-1] = (
+        # # #                 v[1:-1,1:-1]+
+        # # #                 self.dtdx*(uw*self.phi_w(uw,v)-ue*self.phi_e(ue,v))+
+        # # #                 self.dtdy*(vs*self.phi_s(vs,v)-vn*self.phi_n(vn,v))+
+        # # #                 self.nu*self.dtdx2*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1]) +
+        # # #                 self.nu*self.dtdx2*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])
+        # # #                 )
+
+
+        u_new=torch.zeros_like(u)
+        v_new=torch.zeros_like(v)
+
+
+        # uw = 0.5*(u[:-2,1:-1]+u[1:-1,1:-1])
+        # ue = 0.5*(u[2:,1:-1]+u[1:-1,1:-1])
+        # u_new[1:-1,1:-1]+=self.dtdx*(uw*self.phi_w(uw,u)-ue*self.phi_e(ue,u))
+
+        # ==================== u convection ==============================
+        # lower boundary - i=1
+        fw = 0.5*(u[0,1:-1]+u[1,1:-1]) # west flux at left boundary
+        phi_u = self.dtdx*u[1,1:-1]*torch.where(
+            fw>0,
+            fw,
+            self.lam(u[2,1:-1],u[1,1:-1],u[0,1:-1])
+        )
+        u_new[1,1:-1] += phi_u
+
+        # inner points
+        fw = 0.5*(u[1:-2,1:-1]+u[2:-1,1:-1]) # west flux inside
+        phi_u = self.dtdx*u[2:-1,1:-1]*torch.where(
+            fw>0,
+            self.lam(u[:-3,1:-1],u[1:-2,1:-1],u[2:-1,1:-1]),
+            self.lam(u[3:,1:-1],u[2:-1,1:-1],u[1:-2,1:-1])
+        )
+        u_new[2:-1,1:-1] += phi_u
+        u_new[1:-2,1:-1] -= phi_u
+
+        # upper boundary
+        fw = 0.5*(u[-1,1:-1]+u[-2,1:-1]) # west flux at right boundary
+        phi_u = self.dtdx*u[-1,1:-1]*torch.where(
+            fw<0,
+            fw,
+            self.lam(u[-3,1:-1],u[-2,1:-1],u[-1,1:-1]),
+        )
+        u_new[-2,1:-1] -= phi_u
+
+
+
+        # fs = 0.5*(v[0,1:-1]+v[1,1:-1])
+        # phi_u = self.dtdx*u[1,1:-1]*torch.where(
+        #     fs<0,
+        #     self.lam(u[1:-1, :-2],u[1:-1,1:-1],u[1:-1,2:]),
+        #     self.lam(u[1:-1,2:],u[1:-1,1:-1],u[1:-1,:-2])
+        # )
+        # u_new[1:-1,1:-1] += phi_u
+
+
+        # ============ v convection ==============================
+
+
+
+
+
+
+
+
+        vs = 0.5*(v[:-2,1:-1]+v[1:-1,1:-1])
+        vn = 0.5*(v[1:-1,2:]+v[:-2,2:])
+        u_new[1:-1,1:-1] += (
+                        u[1:-1,1:-1]+
+                        self.dtdy*(vs*self.phi_s(vs,u)-vn*self.phi_n(vn,u))+
+                        self.nu*self.dtdx2*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
+                        self.nu*self.dtdx2*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
+                        )
+
+        # u_new=torch.zeros_like(u)
+        # v_new=torch.zeros_like(v)
+
+        # uw = 0.5*(u[:-2,1:-1]+u[1:-1,1:-1])
+        # ue = 0.5*(u[2:,1:-1]+u[1:-1,1:-1])
+        # vs = 0.5*(v[:-2,1:-1]+v[1:-1,1:-1])
+        # vn = 0.5*(v[1:-1,2:]+v[:-2,2:])
+        # u_new[1:-1,1:-1] = (
+        #                 u[1:-1,1:-1]+
+        #                 self.dtdx*(uw*self.phi_w(uw,u)-ue*self.phi_e(ue,u))+
+        #                 self.dtdy*(vs*self.phi_s(vs,u)-vn*self.phi_n(vn,u))+
+        #                 self.nu*self.dtdx2*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
+        #                 self.nu*self.dtdx2*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
+        #                 )
+
+
+        uw = 0.5*(u[1:-1,:-2]+u[1:-1,1:-1])
+        ue = 0.5*(u[2:,:-2]+u[2:,1:-1])
+        vs = 0.5*(v[1:-1,:-2]+v[1:-1,1:-1])
+        vn = 0.5*(v[1:-1,1:-1]+v[1:-1,2:])
+        v_new[1:-1,1:-1] = (
+                        v[1:-1,1:-1]+
+                        self.dtdx*(uw*self.phi_w(uw,v)-ue*self.phi_e(ue,v))+
+                        self.dtdy*(vs*self.phi_s(vs,v)-vn*self.phi_n(vn,v))+
+                        self.nu*self.dtdx2*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1]) +
+                        self.nu*self.dtdx2*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])
+                        )
+        return (u_new,v_new)
+
 
 
     def set_BCs(self, u, v):
@@ -404,11 +556,19 @@ class AdvDiffSolver:
             u[0, :]=self.BC_values_u[0]
         if self.BC_type_u[1]=="D":
             u[-1,:]=self.BC_values_u[1]
+        # if self.BC_type_u[2]=="D":
+        #     u[:,0]=self.BC_values_u[2]
+        # if self.BC_type_u[3]=="D":
+        #     u[:,-1]=self.BC_values_u[3]
 
         if self.BC_type_v[2]=="D":
             v[:,0]=self.BC_values_v[2]
         if self.BC_type_v[3]=="D":
             v[:,-1]=self.BC_values_v[3]
+        # if self.BC_type_v[0]=="D":
+        #     v[0, :]=self.BC_values_v[0]
+        # if self.BC_type_v[1]=="D":
+        #     v[-1,:]=self.BC_values_v[1]
 
 
         # elif self.BC_type_u[1]=="N":
@@ -449,6 +609,7 @@ class AdvDiffSolver:
         #     v[0,:]=-v[1,:]+self.BC_values_v[0]
         # elif self.BC_type_v[0]=="N":
         #     v[0,:] = v[1,:]
+
 
 if __name__ == "__main__":
 

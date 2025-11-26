@@ -1,12 +1,12 @@
-sdf: ../sdfs/sphere/sphere.sdf
+sdf: sphere.sdf
 spawn:
   loader: 0
   mode: !!python/object/apply:farms_core.model.options.SpawnMode
   - sagittal
   pose:
+  - 1
   - -0.
-  - -0.
-  - 0.3
+  - 4
   - 0
   - 0
   - 0
@@ -24,7 +24,7 @@ morphology:
     collisions: true
     friction:
     - 0.5
-    - 0
+    - 0.5
     - 0
     density: 1
   self_collisions: []
