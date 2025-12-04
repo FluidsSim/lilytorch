@@ -24,7 +24,7 @@ ang_vel = D*sensor_array[:,sc.link_com_velocity_ang_x:sc.link_com_velocity_ang_z
 
 
 labels=["u_x","u_z","ang"]
-cs=['b','g','r']
+cs=['r','g','b']
 # for i in range(3):
 #     plt.plot(com_vel[:,i], label=labels[i])
 #     plt.plot(ang_vel[:,i], label=labels[i])
@@ -35,34 +35,33 @@ plt.plot(time_normalized,com_vel[:,0], label=labels[0], color=cs[0])
 plt.plot(time_normalized,com_vel[:,2], label=labels[1], color=cs[1])
 plt.plot(time_normalized,ang_vel[:,1], label=labels[2], color=cs[2])
 plt.legend()
-plt.xlabel("Time step")
+plt.xlabel("t U_t/D")
 plt.ylabel("Normalized COM velocity")
-plt.title("Sphere COM Velocity over Time")
+plt.title("Normalized cylinder velocity")
 
 
 
 
-vp = np.genfromtxt('data_to_save/vp.csv', delimiter=',')
-up = np.genfromtxt('data_to_save/up.csv', delimiter=',')
-wp = np.genfromtxt('data_to_save/wp.csv', delimiter=',')
+# vp = np.genfromtxt('data_to_save/vp.csv', delimiter=',')
+# up = np.genfromtxt('data_to_save/up.csv', delimiter=',')
+# wp = np.genfromtxt('data_to_save/wp.csv', delimiter=',')
 
 
-def convert_range(arr, old_min=0, old_max=1.2, new_min=-0.2, new_max=1.2):
-    scale = (new_max - new_min) / (old_max - old_min)
-    return new_min + (arr - old_min) * scale
+# def convert_range(arr, old_min=0, old_max=1.2, new_min=-0.2, new_max=1.2):
+#     scale = (new_max - new_min) / (old_max - old_min)
+#     return new_min + (arr - old_min) * scale
 
-vp[:,1] = convert_range(vp[:,1])
-up[:,1] = convert_range(up[:,1])
-wp[:,1] = convert_range(wp[:,1])
+# vp[:,1] = convert_range(vp[:,1])
+# up[:,1] = convert_range(up[:,1])
+# wp[:,1] = convert_range(wp[:,1])
 
-plt.scatter(up[:,0]-1., up[:,1], color=cs[1], s=6)
-plt.scatter(wp[:,0], wp[:,1], color=cs[2], s=3)
-plt.scatter(vp[:,0], vp[:,1], color=cs[0], s=3)
+# plt.scatter(up[:,0]-1., up[:,1], color=cs[1], s=6)
+# plt.scatter(wp[:,0], wp[:,1], color=cs[2], s=3)
+# plt.scatter(vp[:,0], vp[:,1], color=cs[0], s=3)
 
 plt.ylim([-0.2,1.2])
-plt.show()
 
 
 
-# plt.savefig("sphere_com_velocity.png", dpi=300)
+plt.savefig("figures/sphere_com_velocity.png", dpi=300)
 

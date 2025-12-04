@@ -6,8 +6,8 @@ spawn:
   pose:
   - -0.
   - -0.
-  - 0.3
-  # - 0.05 # rising cylinder
+  # - 0.3
+  - 0.05 # rising cylinder
   - 0
   - 0
   - 0

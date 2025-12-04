@@ -8,7 +8,7 @@ from lilytorch.util.yaml_operations import yaml2pyobject
 import matplotlib
 matplotlib.rc('font', **{"size":20})
 
-dir = "/data/andreaferrario/ns_data/2025-11-19T10:37:54.990651/"
+dir = "/data/andreaferrario/ns_data/2025-11-20T18:13:27.795519/"
 format=".svg"
 
 data = hdf5_to_dict(dir + "simulation.hdf5")

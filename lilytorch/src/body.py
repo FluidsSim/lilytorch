@@ -112,6 +112,37 @@ def resample_contour(x, y, spacing, closed=True):
 
         return x_new, y_new, s_uniform
 
+def compute_inertias_2d(sdf_fun, inside_mask, x, y, x_g, y_g, density=1000.0):
+    """
+    Compute the inertial properties of a 2D shape defined by an SDF over a grid
+    sdf_fun: function that takes (N,M,2) array of points and returns (N,M) array of sdf values
+    inside_mask: (N,M) boolean array where True indicates points inside the shape
+    x: (N,) array of x coordinates of the grid
+    y: (M,) array of y coordinates of the grid
+    x_g, y_g: coordinates of the centroid
+    density: material density
+    """
+    dx = x[1]-x[0]
+    dy = y[1]-y[0]
+    xx, yy = np.meshgrid(x, y)
+
+    dA = dx * dy
+    mass = density * np.sum(inside_mask) * dA
+
+
+    # Raw moments about the origin
+    I_x = np.sum((yy[inside_mask]**2) * dA) # around x-axis (horizontal), i.e. y^2 dA
+    I_y = np.sum((xx[inside_mask]**2) * dA) # around y-axis (vertical), i.e. x^2 dA
+    I_xy = np.sum((xx[inside_mask]*yy[inside_mask]) * dA)
+
+    # Shift to centroid using parallel axis theorem
+    I_x_centroid = I_x - mass * y_g**2
+    I_y_centroid = I_y - mass * x_g**2
+    I_xy_centroid = I_xy - mass * x_g * y_g
+
+
+
+
 def body_from_yaml(device, x, y, body_pars, eps=0.05, costum_update=None, starting_time=0, **kwargs):
 
     if costum_update is not None:
@@ -271,6 +302,14 @@ class mesh2sdf():
         self._face_normals = np.asarray(self._mesh.triangle_normals)
 
     def __call__(self, points_in_object_frame: np.array):
+
+        # from IPython import embed; embed()
+
+        # pcd = self._mesh.sample_points_poisson_disk(500000)
+
+
+
+        self._raycasting_scene.compute_signed_distance(points_in_object_frame)
 
         closest = self._raycasting_scene.compute_closest_points(points_in_object_frame)
         closest_points = closest['points']
@@ -586,6 +625,7 @@ class BodyAnalytical(Body):
         curv_coord = np.concatenate(([0], np.cumsum(ds)))
         # curv_coord = np.cumsum(np.sqrt(np.sum(np.diff(cnt, axis=1)**2, axis=0)))
 
+
         # curv_coord = s_uniform
 
         self.curv_coord = torch.from_numpy(curv_coord).type(self.dtype).to(self.device)
@@ -719,7 +759,7 @@ class CompositeBodyAnalytical(Body):
         sdf_folder = folder of the sdf file
         sdf_name = name of the sdf file
         """
-        super().__init__(device, x, y)
+        super().__init__(device, x, y, **kwargs)
         self.nbodies = len(sdf_funs)
         assert self.nbodies == len(update_maps), "Number of sdf functions and update maps must be the same"
 
@@ -1108,11 +1148,9 @@ class BodyMesh(Body):
         self.suit                = suit
         self.plotting            = plotting_meshes
         self.apply_closing_morph = kwargs.pop("apply_closing_morph", True)
-
-
         self.m2s                 = mesh2sdf(
-            self.mesh_file,
-            convexify=kwargs.pop("convexify", False),
+            mesh_file,
+            convexify=kwargs.pop("convexify", True),
             scale=kwargs.pop("scale", 1)
             )
         self.compute_sdfs()
@@ -1226,15 +1264,22 @@ class BodyMesh(Body):
                 im=im[:,:,0]
             else:
                 im=binary_2d
+
             if self.plotting:
                 cv2.imshow("window_name", im)
                 cv2.waitKey(0)
                 cv2.destroyAllWindows()
-            binary_2d=np.where(im==0,1,-1)
+            binary_2d=np.where(im==0,1,-1) # this is the inside mask
+
+            # (1) compute the inertial properties of the mesh file in 2d
+            dx, dy = xnp[1]-xnp[0], ynp[1]-ynp[0]
+
+
+
 
             # (2) use skfmm to determine sdf on the full domain
             print("Computing the sdf for {}, with space steps ({},{})".format(self.mesh_file,xnp[1]-xnp[0],ynp[1]-ynp[0]))
-            sdf_val = skfmm.distance(binary_2d, dx=[xnp[1]-xnp[0],ynp[1]-ynp[0]])-self.suit
+            sdf_val = skfmm.distance(binary_2d, dx=[dx,dy])-self.suit
 
             # sdf_val = cv2.GaussianBlur(sdf_val, (5, 5), 0)
 
@@ -1282,9 +1327,13 @@ class BodyMesh(Body):
             x, y, s_uniform = resample_contour(cnt[0], cnt[1], spacing=ds, closed=True) # the spacing is approximately ds
             del cnt
             cnt=np.array([x, y])
-            # Recompute curvilinear coordinate (arc length) of cnt
-            diffs = np.diff(cnt, axis=1)
-            curv_coord = np.concatenate(([0], np.cumsum(np.sqrt(np.sum(diffs**2, axis=0)))))
+
+
+            # Compute ds and cumulative s
+            dx = np.diff(x)
+            dy = np.diff(y)
+            ds = np.sqrt(dx**2 + dy**2)
+            curv_coord = np.concatenate(([0], np.cumsum(ds)))
 
             # Create a vector where points in cnt above the first point
             sign_vec = np.where(cnt[1] >= cnt[1][0], 1, -1)
@@ -1314,43 +1363,6 @@ class BodyMesh(Body):
 
 
             ######################## END contour computation ########################
-
-
-
-            # # Set cnt to be a circle using sin/cos with spacing ds in [0, 2*pi]
-            # theta = np.linspace(0, 2 * np.pi, 1000)[:-1]  # remove duplicate endpoint
-            # cnt = np.array([
-            #     -0.7 + 0.1 * np.cos(theta),
-            #     0 + 0.1 * np.sin(theta)
-            # ])
-            # curv_coord = np.concatenate(([0], np.cumsum(np.sqrt(np.sum(np.diff(cnt, axis=1)**2, axis=0)))))
-
-
-
-
-
-            # # Use resample_closed_contour to resample the contour for uniform spacing
-            # cnt_points = np.stack([cnt[0], cnt[1]], axis=-1).T  # shape (N,2)
-            # cnt_resampled, curv_coord = self.resample_closed_contour(cnt_points.T, spacing=ds, keep_duplicate_endpoint=True)
-            # cnt = cnt_resampled.T  # shape (2, N)
-
-            # # Compute curvilinear coordinate (arc length) of cnt
-            # diffs = np.diff(cnt, axis=1)
-            # curv_coord = np.concatenate(([0], np.cumsum(np.sqrt(np.sum(diffs**2, axis=0)))))
-
-            # from IPython import embed; embed()
-
-
-            # plt.scatter(cnt[0], cnt[1])
-            # plt.show()
-
-            # # Compute curvilinear coordinate (arc length) of cnt
-            # diffs = np.diff(cnt, axis=1)
-            # curv_coord = np.concatenate(([0], np.cumsum(np.sqrt(np.sum(diffs**2, axis=0)))))
-
-
-            # from IPython import embed; embed()
-
             print("Computing the interpolation functions for {}".format(self.mesh_file))
 
 
@@ -1592,14 +1604,12 @@ class MultiAnimatBodies(Body):
         self.body_ids = []
         self.bodies = []
 
-
         for animat_i, animat in enumerate(experiment_options.animats):
             sdf = ModelSDF.read(animat.sdf)[0] # this is the sdf content
             sdf_folder      = os.path.dirname(animat.sdf)
-            link_id=0
             if sdf.name == "sphere":
                 """ Create analytical bodies for spheres """
-                for link in sdf.links:
+                for link_i, link in enumerate(sdf.links):
                     radius = link.collisions[0].geometry.radius
                     sdf_fun = lambda x,y : circle(x,y,xt=0,yt=0,r=radius)
                     initial_pose = np.array(link.pose).astype(x.cpu().numpy().dtype)
@@ -1609,13 +1619,13 @@ class MultiAnimatBodies(Body):
                             device, x, y, sdf_fun, update_maps, eps=eps, plotting=False, pre_update=False
                         )
                     )
-                    self.body_ids.append([animat_i,link_id])
-                    link_id+=1
+                    self.body_ids.append([animat_i,link_i])
             else:
+
                 """ Create mesh-based bodies for general meshes"""
                 for link_i, link in enumerate(sdf.links):
                     # if link_i%2==0:
-                        mesh_name = link["visuals"][0]["geometry"]["uri"]
+                        mesh_name = link["collisions"][0]["geometry"]["uri"]
                         mesh_gpath = sdf_folder+"/"+mesh_name
                         initial_pose = np.array(link.pose).astype(x.cpu().numpy().dtype)
                         update_funcs = (
@@ -1637,9 +1647,9 @@ class MultiAnimatBodies(Body):
                                 plotting_meshes=plotting_meshes,
                                 **kwargs
                             )
-                        self.body_ids.append([animat_i,link_id])
+                        self.body_ids.append([animat_i,link_i])
                         self.bodies.append(body)
-                        link_id+=1
+                        # link_id+=1
 
         self.nbodies = len(self.bodies)
         self.sdf_vals = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)

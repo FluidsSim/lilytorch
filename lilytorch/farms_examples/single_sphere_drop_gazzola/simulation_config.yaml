@@ -49,7 +49,7 @@ extensions:
     handler_path: lilytorch.farms_examples.single_sphere_drop_gazzola.controller.BDIMhandler
     bdim_yaml:
       solver :
-        use_gpu : True
+        use_gpu : False
         nthreads : 16
 
         Nx: 256

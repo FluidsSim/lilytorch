@@ -32,7 +32,7 @@ except ImportError:
     import sys
     pip.main(['install', 'trimesh', '--target',
              (sys.exec_prefix) + '\\lib\\site-packages'])
-    import trimesh as tri
+    import trimesh as trir
     import numpy as np
 #    except e as e:
 #        print({'WARNING'}, 'Failed to install trimesh due to %s.' % (e))
@@ -421,8 +421,8 @@ class Assign_mass(bpy.types.Operator):
                 bpy.ops.rigidbody.object_add()
             bpy.ops.rigidbody.mass_calculate(
                 material='Custom', density=1.0)  # m^3
-            volume = bpy.context.object.rigid_body.mass * 1e-9
-            bpy.context.object.rigid_body.mass = context.scene.ms.mass * 1e9
+            volume = bpy.context.object.rigid_body.mass / (context.scene.ms.length_scale**3)
+            bpy.context.object.rigid_body.mass = context.scene.ms.mass * (context.scene.ms.length_scale**3)
             density = context.scene.ms.mass / volume
             context.scene.ms.density = density
             obj['density'] = density
@@ -456,7 +456,7 @@ class Assign_density(bpy.types.Operator):
                 bpy.ops.rigidbody.object_add()
             bpy.ops.rigidbody.mass_calculate(
                 material='Custom', density=context.scene.ms.density)
-        context.scene.ms.mass = bpy.context.object.rigid_body.mass * 1e-9
+        context.scene.ms.mass = bpy.context.object.rigid_body.mass / (context.scene.ms.length_scale**3)
         return {'FINISHED'}
 
 
@@ -573,14 +573,18 @@ class Import_inertia(bpy.types.Operator):
                 obj['com'] = [float(row[9]), float(row[10]), float(row[11])]
                 obj['left'] = False
                 obj['right'] = False
+                
+                bpy.ops.object.select_all(action='DESELECT')
                 bpy.context.view_layer.objects.active = obj
+                obj.select_set(True) 
                 if obj.rigid_body is None:
                     bpy.ops.rigidbody.object_add()
                 bpy.ops.rigidbody.mass_calculate(
-                    material='Custom', density=1.0)  # m^3
-                volume = bpy.context.object.rigid_body.mass * 1e-9
-                bpy.context.object.rigid_body.mass = float(row[1]) * 1e9
-                density = context.scene.ms.mass / volume
+                    material='Custom', density=1)  # kg/m^3
+                volume = bpy.context.object.rigid_body.mass * (context.scene.ms.length_scale**3)#m^3
+                bpy.context.object.rigid_body.mass = float(row[1]) * (context.scene.ms.length_scale**3)
+                density = float(row[1]) / volume
+                
                 obj['density'] = density
                 
         self.report({'INFO'}, 'Successfully imported inertia for %s.' % name)
@@ -1464,7 +1468,7 @@ class Calc_inertia(bpy.types.Operator):
             tri_mesh = Calc_inertia.as_mesh(tri_mesh)
             tri_mesh.apply_transform(
                 tri.transformations.scale_matrix(context.scene.ms.length_scale))
-            tri_mesh.density *= obj.rigid_body.mass*1e-9/tri_mesh.mass
+            tri_mesh.density *= obj.rigid_body.mass*(context.scene.ms.length_scale**3)/tri_mesh.mass
             inertia = tri_mesh.moment_inertia
             if not Calc_inertia.valid_inertia(inertia):
                 raise ValueError(
@@ -1632,7 +1636,7 @@ class ExportSDF(bpy.types.Operator):
             link_center.text = " ".join(
                 [str(float('%.6g' % c)) for c in mesh['com']]) + " " + " ".join(['0']*3)
             link_mass = ET.SubElement(link_inertial, "mass")
-            link_mass.text = str(float('%.6g' % (mesh.rigid_body.mass * 1e-9)))
+            link_mass.text = str(float('%.6g' % (mesh.rigid_body.mass / (context.scene.ms.length_scale**3))))
             link_density = ET.SubElement(link_inertial, "density")
             link_density.text = str(float('%.6g' % (mesh['density'])))
             link_inertia = ET.SubElement(link_inertial, "inertia")
@@ -1848,10 +1852,12 @@ class ExportSDF(bpy.types.Operator):
                 if '_x' in suffix[i]:
                     if mesh2['right']:
                         joint_raxis.text = "-1.0 0.0 0.0"
+                        joint_rlim_lb.text = str('%.6g' % -limit_x_upper)
+                        joint_rlim_ub.text = str('%.6g' % -limit_x_lower)
                     else:
                         joint_raxis.text = "1.0 0.0 0.0"
-                    joint_rlim_lb.text = str('%.6g' % limit_x_lower)
-                    joint_rlim_ub.text = str('%.6g' % limit_x_upper)
+                        joint_rlim_lb.text = str('%.6g' % limit_x_lower)
+                        joint_rlim_ub.text = str('%.6g' % limit_x_upper)
                 elif '_y' in suffix[i]:
                     joint_raxis.text = "0.0 1.0 0.0"
                     joint_rlim_lb.text = str('%.6g' % (limit_y_lower))
@@ -1859,10 +1865,12 @@ class ExportSDF(bpy.types.Operator):
                 else:
                     if mesh2['left']:
                         joint_raxis.text = "0.0 0.0 -1.0"
+                        joint_rlim_lb.text = str('%.6g' % -limit_z_upper)
+                        joint_rlim_ub.text = str('%.6g' % -limit_z_lower)
                     else:
                         joint_raxis.text = "0.0 0.0 1.0"
-                    joint_rlim_lb.text = str('%.6g' % limit_z_lower)
-                    joint_rlim_ub.text = str('%.6g' % limit_z_upper)
+                        joint_rlim_lb.text = str('%.6g' % limit_z_lower)
+                        joint_rlim_ub.text = str('%.6g' % limit_z_upper)
                     
                 # effort, vel not implemented
             if len(bone.children) == 0:
@@ -2115,3 +2123,4 @@ def unregister():
 
 if __name__ == "__main__":
     register()
+

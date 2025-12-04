@@ -46,7 +46,7 @@ class BDIMhandler():
         physics.model.geom_solref[:,0]= 0.001
         physics.model.geom_solref[:,1]= 0.5
 
-        self.rho_body = 1010.0
+        self.rho_body = 990.0
         self.rho_fluid = 996.0
         self.radius = 0.0025
         self.mass = np.pi*(self.radius**2)*self.rho_body
@@ -152,10 +152,6 @@ class BDIMhandler():
         self.friction_force_lin_y = self.force_scaling*(self.fluid_solver.friction_force_lin_y).cpu().numpy()
         self.friction_force_ang_z = self.force_scaling*(self.fluid_solver.friction_force_ang_z).cpu().numpy()
 
-        # self.friction_force_lin_x = 1000*self.force_scaling*(self.fluid_solver.friction_force_lin_x).cpu().numpy()
-        # self.friction_force_lin_y = 1000*self.force_scaling*(self.fluid_solver.friction_force_lin_y).cpu().numpy()
-        # self.friction_force_ang_z = 1000*self.force_scaling*(self.fluid_solver.friction_force_ang_z).cpu().numpy()
-
         self.pressure_force_x     = self.force_scaling*(self.fluid_solver.pressure_force_x).cpu().numpy()
         self.pressure_force_y     = self.force_scaling*(self.fluid_solver.pressure_force_y).cpu().numpy()
         self.pressure_force_ang_z = self.force_scaling*(self.fluid_solver.pressure_force_ang_z).cpu().numpy()
@@ -213,17 +209,17 @@ class BDIMhandler():
 
         self.set_BC(uprime,vprime)
 
-        # uprime = (uprime+self.fluid_solver.brinkmann_k*timestep*self.fluid_solver.m_m0_all_u*self.fluid_solver.composite_body.body_u)/ \
-        #          (1+self.fluid_solver.brinkmann_k*timestep*self.fluid_solver.m_m0_all_u)
-        # vprime = (vprime+self.fluid_solver.brinkmann_k*timestep*self.fluid_solver.m_m0_all_v*self.fluid_solver.composite_body.body_v)/ \
-        #          (1+self.fluid_solver.brinkmann_k*timestep*self.fluid_solver.m_m0_all_v)
+        uprime = (uprime+self.fluid_solver.brinkmann_k*timestep*self.fluid_solver.m_m0_all_u*self.fluid_solver.composite_body.body_u)/ \
+                 (1+self.fluid_solver.brinkmann_k*timestep*self.fluid_solver.m_m0_all_u)
+        vprime = (vprime+self.fluid_solver.brinkmann_k*timestep*self.fluid_solver.m_m0_all_v*self.fluid_solver.composite_body.body_v)/ \
+                 (1+self.fluid_solver.brinkmann_k*timestep*self.fluid_solver.m_m0_all_v)
 
 
-        # ====== STEP 1 =====
-        uprime = self.fluid_solver.mu0_all_u*uprime + self.fluid_solver.m_m0_all_u*self.fluid_solver.composite_body.body_u \
-            + self.fluid_solver.mu1_all_u*self.fluid_solver.normal_derivative(uprime-self.fluid_solver.composite_body.body_u,self.fluid_solver.normal_x_u,self.fluid_solver.normal_y_u)
-        vprime = self.fluid_solver.mu0_all_v*vprime + self.fluid_solver.m_m0_all_v*self.fluid_solver.composite_body.body_v \
-            + self.fluid_solver.mu1_all_v*self.fluid_solver.normal_derivative(vprime-self.fluid_solver.composite_body.body_v,self.fluid_solver.normal_x_v,self.fluid_solver.normal_y_v)
+        # # ====== STEP 1 =====
+        # uprime = self.fluid_solver.mu0_all_u*uprime + self.fluid_solver.m_m0_all_u*self.fluid_solver.composite_body.body_u \
+        #     + self.fluid_solver.mu1_all_u*self.fluid_solver.normal_derivative(uprime-self.fluid_solver.composite_body.body_u,self.fluid_solver.normal_x_u,self.fluid_solver.normal_y_u)
+        # vprime = self.fluid_solver.mu0_all_v*vprime + self.fluid_solver.m_m0_all_v*self.fluid_solver.composite_body.body_v \
+        #     + self.fluid_solver.mu1_all_v*self.fluid_solver.normal_derivative(vprime-self.fluid_solver.composite_body.body_v,self.fluid_solver.normal_x_v,self.fluid_solver.normal_y_v)
 
 
         # # for general deforming bodies

@@ -32,14 +32,6 @@ class PoissonSolver:
         q[:, 0]    = q[:, 1]
         q[:, -1]   = q[:, -2]
 
-    def FD_operator(self, p, ch, cv, h2):
-        """
-        2nd order finite difference operator
-        """
-        J  = ch[1:,:]+ch[:-1,:]+cv[:,1:]+cv[:,:-1]
-        Au = (ch[1:,:]*p[2:,1:-1]+ch[:-1,:]*p[:-2,1:-1]+cv[:,1:]*p[1:-1,2:]+cv[:,:-1]*p[1:-1,:-2])-J*p[1:-1,1:-1]
-        return Au/h2, J/h2  # returns FDO and Jacobi operators
-
     def compute_sum(self,ch, cv, p):
         """
         compute the sum term in the FD operator
@@ -59,7 +51,7 @@ class PoissonSolver:
         """
         self.BC(p)
         J = self.compute_J(ch, cv)
-        Jinv = torch.where(torch.abs(J)<self.jcap_tol,1,1/J)
+        Jinv = torch.where(torch.abs(J)<self.jcap_tol,0,1/J)
         for i in range(self.nsmoothing):
             sum = self.compute_sum(ch, cv, p)
             p[1:-1,1:-1] = self.w*(-f*h2+sum)*Jinv+(1-self.w)*p[1:-1,1:-1]
