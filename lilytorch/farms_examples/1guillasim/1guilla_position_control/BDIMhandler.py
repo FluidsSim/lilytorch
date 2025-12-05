@@ -157,8 +157,8 @@ class BDIMhandler():
             ind_task= task.maps[animat_id]['sensors']['data2xfrc'][link_id]
 
             physics.data.xfrc_applied[ind_task, 0] = (self.friction_force_lin_x[body_i] + self.pressure_force_x[body_i]) * task.units.newtons
-            physics.data.xfrc_applied[ind_task, 2] = (self.friction_force_lin_y[body_i] + self.pressure_force_y[body_i]) * task.units.newtons
-            physics.data.xfrc_applied[ind_task, 4] = (self.friction_force_ang_z[body_i] + self.pressure_force_ang_z[body_i]) * task.units.newtons
+            physics.data.xfrc_applied[ind_task, 1] = (self.friction_force_lin_y[body_i] + self.pressure_force_y[body_i]) * task.units.newtons
+            physics.data.xfrc_applied[ind_task, 5] = (self.friction_force_ang_z[body_i] + self.pressure_force_ang_z[body_i]) * task.units.newtons
 
             print(physics.data.xfrc_applied[ind_task, 0])
 
@@ -202,22 +202,22 @@ class BDIMhandler():
         c = torch.ones_like(u)
         # ch = (c[1:,1:-1]+c[:-1,1:-1])/2
         # cv = (c[1:-1,1:]+c[1:-1,:-1])/2
-        ch = coeff * self.fluid_solver.mu0_all_u
-        cv = coeff * self.fluid_solver.mu0_all_v
+        # ch = coeff * self.fluid_solver.mu0_all_u
+        # cv = coeff * self.fluid_solver.mu0_all_v
         p, _    = self.fluid_solver.poisson_solver.solve_multigrid( # f, u, c
             self.fluid_solver.div[1:-1,1:-1],
-            p,
+            torch.zeros_like(p),
             coeff*c,
-            ch = ch[1:,1:-1],
-            cv = cv[1:-1,1:],
+            # ch = ch[1:,1:-1],
+            # cv = cv[1:-1,1:],
         )
-        # ====== projection step ======
-        (p_x, p_y) = self.fluid_solver.gradient(p)
-        u          = uprime - ch * p_x
-        v          = vprime - cv * p_y
         # # ====== projection step ======
         # (p_x, p_y) = self.fluid_solver.gradient(p)
-        # (u,v)      = (uprime-coeff*p_x, vprime-coeff*p_y)
+        # u          = uprime - ch * p_x
+        # v          = vprime - cv * p_y
+        # ====== projection step ======
+        (p_x, p_y) = self.fluid_solver.gradient(p)
+        (u,v)      = (uprime-coeff*p_x, vprime-coeff*p_y)
 
         # self.set_BC(u,v)
 
@@ -282,7 +282,6 @@ class BDIMhandler():
             (u,v,p) = self.fluid_step(self.fluid_solver.u0, self.fluid_solver.v0, self.fluid_solver.p0,timestep)
 
             p = torch.where(self.fluid_solver.composite_body.sdf_val<0,0,p)
-
 
             (self.fluid_solver.u0, self.fluid_solver.v0, self.fluid_solver.p0) = (u,v,p)
 

@@ -99,7 +99,7 @@ extensions:
         dt                : 0.0001
         nt                : 800000
 
-        nu                : 100.0e-6
+        nu                : 1000.0e-6
         rho               : 1.0e+3
 
         # nu                : 0.01 #0.0002 #500.0e-6
@@ -108,7 +108,7 @@ extensions:
         poisson_tol       : 1.0e-7
         poisson_max_cycles: 5
         poisson_max_mgcg_cycles: 3
-        jacobi_weight     : 0.8
+        jacobi_weight     : 0.6
         poisson_nsmoothing: 5
         poisson_verbose   : False
         poisson_folder : "data/"

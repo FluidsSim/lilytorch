@@ -742,6 +742,9 @@ class FluidSolver:
             delta_u = body.phi(sdf_val_u-self.eps)
             delta_v = body.phi(sdf_val_v-self.eps)
 
+            # delta_u = body.phi(sdf_val_u-self.eps)
+            # delta_v = body.phi(sdf_val_v-self.eps)
+
             fforcex_body_i = self.xstress_tensor*delta_u
             fforcey_body_i = self.ystress_tensor*delta_v
 

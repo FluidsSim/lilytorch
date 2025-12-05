@@ -1287,7 +1287,7 @@ class BodyMesh(Body):
             ######################## Contour computation ########################
 
             # find contour lines
-            cnt = np.array(measure.find_contours(sdf_val-self.eps, 0)[0]).T
+            cnt = np.array(measure.find_contours(sdf_val, 0)[0]).T
             # cnt = np.array(measure.find_contours(sdf_val-self.eps, 0)[0]).T
             cnt[0]=xnp[0]+cnt[0]*(xnp[1]-xnp[0])
             cnt[1]=ynp[0]+cnt[1]*(ynp[1]-ynp[0])
