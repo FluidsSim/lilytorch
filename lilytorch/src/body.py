@@ -221,7 +221,8 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, costum_update=None, starti
         )
 
     elif type == "multi_animat":
-        (nsamples,msamples) = eval(body_pars["n_samples"])
+
+        (nsamples,msamples) = body_pars["n_samples"]
 
         return MultiAnimatBodies(
             device, x, y,
@@ -233,6 +234,9 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, costum_update=None, starti
             plotting           = body_pars["plotting"],
             plotting_meshes    = body_pars["plotting_meshes"],
             suit               = body_pars["suit"],
+            convexify          = body_pars["convexify"],
+            scale              = body_pars["scale"],
+            save_folder        = body_pars["save_folder"],
             **kwargs
         )
 
@@ -302,10 +306,6 @@ class mesh2sdf():
         self._face_normals = np.asarray(self._mesh.triangle_normals)
 
     def __call__(self, points_in_object_frame: np.array):
-
-        # from IPython import embed; embed()
-
-        # pcd = self._mesh.sample_points_poisson_disk(500000)
 
 
 
@@ -1141,6 +1141,8 @@ class BodyMesh(Body):
         super().__init__(device, x, y, eps=eps)
         self.mesh_file           = mesh_file
         self.compute_interp      = compute_interp
+        self.save_folder         = kwargs.pop("save_folder", "")
+        os.makedirs(self.save_folder+"interp_data", exist_ok=True)
         self.nsamples            = nsamples
         self.msamples            = msamples
         self.update_theta        = update_maps[0]
@@ -1370,22 +1372,22 @@ class BodyMesh(Body):
             if not os.path.exists(interp_data_dir):
                 os.makedirs(interp_data_dir)
 
-            np.save("interp_data/xnp_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy",xnp)
-            np.save("interp_data/ynp_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy",ynp)
-            np.save("interp_data/sdf_val_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy",sdf_val)
-            np.save("interp_data/cnt_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy", cnt)
-            np.save("interp_data/curv_coord_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy", curv_coord)
-            np.save("interp_data/sign_vec_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy", sign_vec)
+            np.save(self.save_folder+"interp_data/xnp_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy",xnp)
+            np.save(self.save_folder+"interp_data/ynp_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy",ynp)
+            np.save(self.save_folder+"interp_data/sdf_val_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy",sdf_val)
+            np.save(self.save_folder+"interp_data/cnt_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy", cnt)
+            np.save(self.save_folder+"interp_data/curv_coord_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy", curv_coord)
+            np.save(self.save_folder+"interp_data/sign_vec_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy", sign_vec)
 
 
 
     def initialize(self):
-        xnp = np.load("interp_data/xnp_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy")
-        ynp = np.load("interp_data/ynp_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy")
-        sdf_val = np.load("interp_data/sdf_val_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy")
-        cnt = np.load("interp_data/cnt_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy")
-        curv_coord = np.load("interp_data/curv_coord_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy")
-        sign_vec = np.load("interp_data/sign_vec_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy")
+        xnp = np.load(self.save_folder+"interp_data/xnp_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy")
+        ynp = np.load(self.save_folder+"interp_data/ynp_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy")
+        sdf_val = np.load(self.save_folder+"interp_data/sdf_val_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy")
+        cnt = np.load(self.save_folder+"interp_data/cnt_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy")
+        curv_coord = np.load(self.save_folder+"interp_data/curv_coord_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy")
+        sign_vec = np.load(self.save_folder+"interp_data/sign_vec_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy")
 
         self.sdf_interp = RegularGridInterpolator(
             (

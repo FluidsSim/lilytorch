@@ -68,10 +68,10 @@ extensions:
 
 
         ## small tank
-        Nx                 : 1024
+        Nx                 : 2048
         Ny                 : 512
         xmin              : -0.9
-        xmax              : 2.1
+        xmax              : 5.1
         ymin              : -0.75
         ymax              : 0.75
 
@@ -99,7 +99,7 @@ extensions:
         dt                : 0.0001
         nt                : 800000
 
-        nu                : 1000.0e-6
+        nu                : 1.0e-6
         rho               : 1.0e+3
 
         # nu                : 0.01 #0.0002 #500.0e-6
@@ -159,13 +159,14 @@ extensions:
         save_every : 500
         vmin: -10
         vmax: 10
-        save_uv: False
+        save_uv: True
 
 
-# - loader: farms_core.simulation.extensions.ExperimentLogger
-#   config:
-#     log_path: output
-#     skip: 0
+- loader: farms_core.simulation.extensions.ExperimentLogger
+  config:
+    log_path: output
+    skip: 0
+
 # - loader: farms_mujoco.simulation.extensions.CameraFollower
 #   config:
 #     animat_id: 0

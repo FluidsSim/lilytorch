@@ -406,42 +406,6 @@ class AdvDiffSolver:
 
     def solve_quick_waterlily(self, u, v):
 
-        # # # # following lilipad notation
-        # # # # uo = 0.5*(x.a[i-1][j]+x.a[i][j]);
-        # # # # ue = 0.5*(x.a[i+1][j]+x.a[i][j]);
-        # # # # vs = 0.5*(y.a[i][j]+y.a[i-1][j]);
-        # # # # vn = 0.5*(y.a[i][j+1]+y.a[i-1][j+1]);
-        # # # u_new=torch.zeros_like(u)
-        # # # v_new=torch.zeros_like(v)
-
-        # # # uw = 0.5*(u[:-2,1:-1]+u[1:-1,1:-1])
-        # # # ue = 0.5*(u[2:,1:-1]+u[1:-1,1:-1])
-        # # # vs = 0.5*(v[:-2,1:-1]+v[1:-1,1:-1])
-        # # # vn = 0.5*(v[1:-1,2:]+v[:-2,2:])
-        # # # u_new[1:-1,1:-1] = (
-        # # #                 u[1:-1,1:-1]+
-        # # #                 self.dtdx*(uw*self.phi_w(uw,u)-ue*self.phi_e(ue,u))+
-        # # #                 self.dtdy*(vs*self.phi_s(vs,u)-vn*self.phi_n(vn,u))+
-        # # #                 self.nu*self.dtdx2*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
-        # # #                 self.nu*self.dtdx2*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
-        # # #                 )
-
-        # # # # uo = 0.5*(x.a[i][j-1]+x.a[i][j]);
-        # # # # ue = 0.5*(x.a[i+1][j-1]+x.a[i+1][j]);
-        # # # # vs = 0.5*(y.a[i][j-1]+y.a[i][j]);
-        # # # # vn = 0.5*(y.a[i][j]+y.a[i][j+1]);
-        # # # uw = 0.5*(u[1:-1,:-2]+u[1:-1,1:-1])
-        # # # ue = 0.5*(u[2:,:-2]+u[2:,1:-1])
-        # # # vs = 0.5*(v[1:-1,:-2]+v[1:-1,1:-1])
-        # # # vn = 0.5*(v[1:-1,1:-1]+v[1:-1,2:])
-        # # # v_new[1:-1,1:-1] = (
-        # # #                 v[1:-1,1:-1]+
-        # # #                 self.dtdx*(uw*self.phi_w(uw,v)-ue*self.phi_e(ue,v))+
-        # # #                 self.dtdy*(vs*self.phi_s(vs,v)-vn*self.phi_n(vn,v))+
-        # # #                 self.nu*self.dtdx2*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1]) +
-        # # #                 self.nu*self.dtdx2*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])
-        # # #                 )
-
 
         u_new=torch.zeros_like(u)
         v_new=torch.zeros_like(v)

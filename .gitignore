@@ -35,6 +35,7 @@ interp_data/
 results/
 __pycache__
 figures/
+output/
 
 farms_amphibious/
 farms_core/

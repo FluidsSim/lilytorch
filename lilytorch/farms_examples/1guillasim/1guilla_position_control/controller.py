@@ -25,8 +25,8 @@ class PositionController(KinematicsController):
             tstop=kinematics_end,
             sampling_rate=1/kinematics_sampling,
             wlength=1,
-            amp_deg=30.0,
-            freq=0.5,
+            amp_deg=20.0,
+            freq=1,
             TWL=12,
             nmotors=8,
             plot=False

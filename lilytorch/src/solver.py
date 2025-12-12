@@ -54,7 +54,7 @@ class FluidSolver:
         self.dx=(self.xmax-self.xmin)/(self.nx-2)
         self.dy=(self.ymax-self.ymin)/(self.ny-2)
 
-        assert (self.dx-self.dy) < 1e-10, "Grid spacing in x and y must be equal"
+        assert abs(float(self.dx-self.dy)) < 1e-10, "Grid spacing in x = {} and y = {} must be equal".format(self.dx, self.dy)
         self.h = self.dx
 
         self.x = torch.arange(self.xmin-self.h/2, self.xmax+self.h, self.h, device=self.device, dtype=self.dtype)

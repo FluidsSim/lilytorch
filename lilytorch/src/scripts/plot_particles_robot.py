@@ -3,11 +3,11 @@ import numpy as np
 import torch
 from lilytorch.util.yaml_operations import yaml2pyobject
 import torch
-from pytorch_interp import RegularGridInterpolator
+from pytorch_interpolation import RegularGridInterpolator
 import os
 import matplotlib.pyplot as plt
 
-dir               = "/data/andreaferrario/ns_data/1guilla_experiments/2025-10-17T12:21:35.124532/"
+dir               = "/data/andreaferrario/ns_data/1guilla_experiments/2025-12-06T08:42:12.098824/"
 # dir               = "/data/andreaferrario/ns_data/2025-10-06T11:25:04.426659/"
 
 
@@ -17,21 +17,27 @@ it_end = 92000
 device="cpu"
 dtype=torch.float32
 
-fluid_pars = yaml2pyobject(dir+"parameters.yaml")
+it_spacing = 500
+Nx = 1024
+Ny = 512
+xmin = -0.9
+xmax = 2.1
+ymin = -0.75
+ymax = 0.75
+dt = 0.0001
+nu = 500*1e-6
+umax = 0.35
+Re = umax*0.8/nu
 
-it_spacing = fluid_pars["output"]["save_every"]
+print(f"Reynolds number: {Re}")
+
+dx         = (xmax-xmin)/Nx
+dy         = (ymax-ymin)/Ny
 
 
-N    = fluid_pars["solver"]["N"]
-xmin = fluid_pars["solver"]["xmin"]
-xmax = fluid_pars["solver"]["xmax"]
-ymin = fluid_pars["solver"]["ymin"]
-ymax = fluid_pars["solver"]["ymax"]
 
-dx         = (xmax-xmin)/N
-dy         = (ymax-ymin)/N
-x=torch.linspace(xmin-dx/2,xmax+dx/2,N+2,device=device,dtype=dtype)
-y=torch.linspace(ymin-dy/2,ymax+dy/2,N+2,device=device,dtype=dtype)
+x=torch.linspace(xmin-dx/2,xmax+dx,Nx+2,device=device,dtype=dtype)
+y=torch.linspace(ymin-dy/2,ymax+dy,Ny+2,device=device,dtype=dtype)
 X,Y = torch.meshgrid(x,y, indexing="ij")
 
 n_bodies = 8
@@ -63,10 +69,10 @@ for i in range(it_start,it_end+1,it_spacing):
 
 
     # tail particles
-    tail_idx = 43
+    tail_idx = 85
     particle_number = 4
     tail_particles = torch.cat([tail_particles,cnt[-1][:,tail_idx-particle_number:tail_idx+particle_number]],dim=1)
-    plt.scatter(tail_particles[0], tail_particles[1], color="yellowgreen", s=5)
+    plt.scatter(tail_particles[0], tail_particles[1], color="yellowgreen", s=50)
     for j in range(n_bodies+1):
         plt.fill(cnt[j][0].cpu(), cnt[j][1].cpu(), color="#000000")
 

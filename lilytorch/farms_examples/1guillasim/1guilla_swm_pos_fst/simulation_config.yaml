@@ -31,7 +31,7 @@ mujoco:
   viewer: MuJoCo
   texture_repeat: 1
   shadow_size: 1024
-  visual_scale: 1.0
+  visual_scale: 100.0
   extent: 100.0
 pybullet:
   opengl2: false

@@ -6,14 +6,14 @@ import numpy as np
 from lilytorch.util.yaml_operations import yaml2pyobject
 
 
-dir         = "/data/andreaferrario/ns_data/2025-12-05T11:07:03.437250/curl/"
+dir         = "/data/andreaferrario/ns_data/2025-12-12T12:01:34.131140/curl/"
 name        = "video"
 img_name    = "curl"
 format      = ".mp4"
 dt          = 0.0001
-slow_factor = 1
-save_every  = 500
-tstop       = 2000
+slow_factor = 0.2
+save_every  = 100
+tstop       = 7.5
 video_name  = dir+name+format
 
 
@@ -54,7 +54,7 @@ for idx, image in enumerate(images_sorted):
     # print(asd)
     print(os.path.join(dir, image))
     iteration = idx*save_every
-    time  = idx*save_every*dt*slow_factor
+    time  = idx*save_every*dt
     if time>tstop:
         break
     cv2.putText(frame,

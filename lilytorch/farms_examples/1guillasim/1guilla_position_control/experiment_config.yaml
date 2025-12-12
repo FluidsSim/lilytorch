@@ -9,7 +9,7 @@ loaders:
   - farms_core.model.options.AnimatOptions
   # - farms_amphibious.model.options.AmphibiousOptions
   arenas_options:
-  - farms_amphibious.model.options.AmphibiousArenaOptions
+  - farms_core.model.options.ArenaOptions
   experiment_data: farms_amphibious.data.data.AmphibiousExperimentData
   animats_data:
   - farms_core.model.data.AnimatData
