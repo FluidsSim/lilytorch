@@ -27,7 +27,7 @@ make.bat
 *.vscode
 
 # folders
-FARMS/
+FARMS_V2/
 data/
 build/
 logs/
@@ -35,3 +35,9 @@ interp_data/
 results/
 __pycache__
 figures/
+output/
+
+farms_amphibious/
+farms_core/
+farms_sim/
+farms_mujoco/

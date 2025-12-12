@@ -1,0 +1,323 @@
+spawn:
+  loader: 0
+  mode: !!python/object/apply:farms_core.model.options.SpawnMode
+  - transverse
+  pose:
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+  - 3.141592653589793
+  velocity:
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+  extras: {}
+sdf: ../../sdfs/1guilla/1guilla.sdf
+morphology:
+  links:
+  - name: link0
+    collisions: true
+    friction:
+    - 0.2
+    - 0
+    - 0
+    extras: {}
+    fluid_interaction: true
+    density: 1000.0
+  - name: link1
+    collisions: true
+    friction:
+    - 0.2
+    - 0
+    - 0
+    extras: {}
+    fluid_interaction: true
+    density: 1000.0
+  - name: link2
+    collisions: true
+    friction:
+    - 0.2
+    - 0
+    - 0
+    extras: {}
+    fluid_interaction: true
+    density: 1000.0
+  - name: link3
+    collisions: true
+    friction:
+    - 0.2
+    - 0
+    - 0
+    extras: {}
+    fluid_interaction: true
+    density: 1000.0
+  - name: link4
+    collisions: true
+    friction:
+    - 0.2
+    - 0
+    - 0
+    extras: {}
+    fluid_interaction: true
+    density: 1000.0
+  - name: link5
+    collisions: true
+    friction:
+    - 0.2
+    - 0
+    - 0
+    extras: {}
+    fluid_interaction: true
+    density: 1000.0
+  - name: link6
+    collisions: true
+    friction:
+    - 0.2
+    - 0
+    - 0
+    extras: {}
+    fluid_interaction: true
+    density: 1000.0
+  - name: link7
+    collisions: true
+    friction:
+    - 0.2
+    - 0
+    - 0
+    extras: {}
+    fluid_interaction: true
+    density: 1000.0
+  - name: link8
+    collisions: true
+    friction:
+    - 0.2
+    - 0
+    - 0
+    extras: {}
+    fluid_interaction: true
+    density: 1000.0
+  joints:
+  - name: joint_body_00
+    initial:
+    - 0
+    - 0
+    limits:
+    - - -.inf
+      - .inf
+    - - -.inf
+      - .inf
+    stiffness: 0
+    springref: 0
+    damping: 0
+    extras: {}
+  - name: joint_body_01
+    initial:
+    - 0
+    - 0
+    limits:
+    - - -.inf
+      - .inf
+    - - -.inf
+      - .inf
+    stiffness: 0
+    springref: 0
+    damping: 0
+    extras: {}
+  - name: joint_body_02
+    initial:
+    - 0
+    - 0
+    limits:
+    - - -.inf
+      - .inf
+    - - -.inf
+      - .inf
+    stiffness: 0
+    springref: 0
+    damping: 0
+    extras: {}
+  - name: joint_body_03
+    initial:
+    - 0
+    - 0
+    limits:
+    - - -.inf
+      - .inf
+    - - -.inf
+      - .inf
+    stiffness: 0
+    springref: 0
+    damping: 0
+    extras: {}
+  - name: joint_body_04
+    initial:
+    - 0
+    - 0
+    limits:
+    - - -.inf
+      - .inf
+    - - -.inf
+      - .inf
+    stiffness: 0
+    springref: 0
+    damping: 0
+    extras: {}
+  - name: joint_body_05
+    initial:
+    - 0
+    - 0
+    limits:
+    - - -.inf
+      - .inf
+    - - -.inf
+      - .inf
+    stiffness: 0
+    springref: 0
+    damping: 0
+    extras: {}
+  - name: joint_body_06
+    initial:
+    - 0
+    - 0
+    limits:
+    - - -.inf
+      - .inf
+    - - -.inf
+      - .inf
+    stiffness: 0
+    springref: 0
+    damping: 0
+    extras: {}
+  - name: joint_body_07
+    initial:
+    - 0
+    - 0
+    limits:
+    - - -.inf
+      - .inf
+    - - -.inf
+      - .inf
+    stiffness: 0
+    springref: 0
+    damping: 0
+    extras: {}
+  self_collisions: []
+control:
+  sensors:
+    links: &id001
+    - link0
+    - link1
+    - link2
+    - link3
+    - link4
+    - link5
+    - link6
+    - link7
+    - link8
+    joints:
+    - joint_body_00
+    - joint_body_01
+    - joint_body_02
+    - joint_body_03
+    - joint_body_04
+    - joint_body_05
+    - joint_body_06
+    - joint_body_07
+    contacts: []
+    xfrc: *id001
+    muscles: []
+    adhesions: []
+    visuals: []
+  motors:
+  - joint_name: joint_body_00
+    control_types:
+    - torque
+    limits_torque:
+    - -.inf
+    - .inf
+    gains:
+    - 50.0
+    - 5.0
+    - 0
+  - joint_name: joint_body_01
+    control_types:
+    - torque
+    limits_torque:
+    - -.inf
+    - .inf
+    gains:
+    - 50.0
+    - 5.0
+    - 0
+  - joint_name: joint_body_02
+    control_types:
+    - torque
+    limits_torque:
+    - -.inf
+    - .inf
+    gains:
+    - 50.0
+    - 5.0
+    - 0
+  - joint_name: joint_body_03
+    control_types:
+    - torque
+    limits_torque:
+    - -.inf
+    - .inf
+    gains:
+    - 50.0
+    - 5.0
+    - 0
+  - joint_name: joint_body_04
+    control_types:
+    - torque
+    limits_torque:
+    - -.inf
+    - .inf
+    gains:
+    - 50.0
+    - 5.0
+    - 0
+  - joint_name: joint_body_05
+    control_types:
+    - torque
+    limits_torque:
+    - -.inf
+    - .inf
+    gains:
+    - 50.0
+    - 5.0
+    - 0
+  - joint_name: joint_body_06
+    control_types:
+    - torque
+    limits_torque:
+    - -.inf
+    - .inf
+    gains:
+    - 50.0
+    - 5.0
+    - 0
+  - joint_name: joint_body_07
+    control_types:
+    - torque
+    limits_torque:
+    - -.inf
+    - .inf
+    gains:
+    - 50.0
+    - 5.0
+    - 0
+extensions:
+- loader: lilytorch.farms_examples.1guillasim.torque_controller.WaveController
+  config:
+    freq: 1.0
+    twl: 0.8
+    amp: 0.4
+    bias: 0.0
