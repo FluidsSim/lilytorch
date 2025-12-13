@@ -1,0 +1,8 @@
+# ('FARMS composite mesh',)
+
+newmtl link_body_19_composite
+Ka 1.00000000 1.00000000 1.00000000
+Kd 0.40000000 0.40000000 0.40000000
+Ks 0.10196078 0.10196078 0.10196078
+Ns 159.99998500
+map_Kd link_body_19_composite.png
