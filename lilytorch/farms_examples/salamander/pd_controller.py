@@ -28,7 +28,6 @@ class PositionController(KinematicsController):
             amp_deg=config["amp"],
             freq=config["freq"],
             TWL=config["twl"],
-            nmotors=len(joints_names),
             plot=False
         )
         joints_control_types  = {
@@ -102,10 +101,11 @@ class PositionController(KinematicsController):
             wlength=1,
             amp_deg=20.0,
             freq=1.0,
-            nmotors=8,
             TWL=14,
             plot=True
         ):
+
+        nmotors = 8
         amp = amp_deg * (np.pi / 180.0)
         times = np.expand_dims(np.arange(0, tstop, 1 / sampling_rate), axis=1)
         times_expanded = np.repeat(times, nmotors, axis=1)
@@ -120,13 +120,16 @@ class PositionController(KinematicsController):
         # factor[:-1] *= 0
         # factor[-1] = 4
 
-        thetas = amp * factor * np.sin(
+        thetas_spine = amp * factor * np.sin(
             2 * np.pi * (
                 wlength * idxs / TWL - freq * times_expanded
             )
         )
 
-        data = np.column_stack([times, thetas])
+        limb_angles = -0.*(np.pi)*np.ones_like(times)
+
+        data = np.column_stack([times, thetas_spine, limb_angles, limb_angles, limb_angles, limb_angles])
+
 
         if plot:
             x_plot = data[:, 0]

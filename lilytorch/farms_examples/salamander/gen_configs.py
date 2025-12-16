@@ -14,9 +14,10 @@ fluid_extension_path = "lilytorch.integration.extensions.FluidExtension"
 control_type    = "position"
 controller_path = "lilytorch.farms_examples.salamander.pd_controller.PositionController"
 
-gains           = [0.001, .00002, 0]
-control_pars    = {'freq': 10.0, 'twl': 20, 'amp': 140}
-use_fluid       = False
+gains        = [0.001, .00002, 0]
+control_pars = {'freq': 4.0, 'twl': 8, 'amp': 300}
+use_fluid    = False
+headless     = False
 
 # control_type    = "torque"
 # controller_path = "lilytorch.farms_examples.1guillasim.torque_controller.WaveController"
@@ -27,17 +28,17 @@ os.makedirs(
 )
 
 timestep = 0.0001
-
-nlinks = 15
-njoints = 14
-
 spawn_mode = SpawnMode.TRANSVERSE
-
 density = 1000.0
 
+link_names  = ["link_body_" + str(i) for i in range(9)]
+for i in range(2): # Front - back
+    for j in range(4): # joints per side
+        link_names += [f"link_leg_{i}_L_{j}", f"link_leg_{i}_R_{j}"]
+link_names += ["foot_0_0", "foot_0_1", "foot_1_0", "foot_1_1"]
 
-link_names  = ["link_" + str(i) for i in range(nlinks+1)]
-joint_names = ["joint_" + str(i) for i in range(njoints+1)]
+joint_names = ["joint_body_" + str(i) for i in range(8)]
+joint_names += ["joint_leg_0_L_0", "joint_leg_0_R_0", "joint_leg_1_L_0", "joint_leg_1_R_0"]
 
 
 def gen_animat_config():
@@ -193,7 +194,7 @@ def gen_simulation_config():
             "play": True,
             "rtl": 1.0,
             "fast": False,
-            "headless": True,
+            "headless": headless,
             "show_progress": True
         }
         ,
@@ -261,11 +262,11 @@ def gen_simulation_config():
 
                     # intermediate tank
                     "Nx": 1024,
-                    "Ny": 256,
-                    "xmin": -0.02,
-                    "xmax": 0.08,
-                    "ymin": -0.0125,
-                    "ymax": 0.0125,
+                    "Ny": 1024,
+                    "xmin": -0.1,
+                    "xmax": 0.1,
+                    "ymin": -0.1,
+                    "ymax": 0.1,
 
                     # ## large tank
                     # N                 : 2048
@@ -312,7 +313,7 @@ def gen_simulation_config():
                 "output": {
                     "save_path": "/data/andreaferrario/ns_data/",
                     "save_frames": True,
-                    "save_every": 100,
+                    "save_every": 1,
                     "vmin": -50,
                     "vmax": 50,
                     "save_uv": False

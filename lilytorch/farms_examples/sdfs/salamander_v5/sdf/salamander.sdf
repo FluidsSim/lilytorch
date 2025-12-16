@@ -41,7 +41,7 @@
             <emissive>0.1 0.7 0.1 1.0</emissive>
           </material>
         </visual>
-        <visual name="eye_left_visual">
+        <!-- <visual name="eye_left_visual">
           <pose>0.004 -0.003 0.0015 0.0 0.0 0.0</pose>
           <geometry>
             <sphere>
@@ -68,7 +68,7 @@
             <specular>0.0 0.0 0.0 1.0</specular>
             <emissive>0.0 0.0 0.0 1.0</emissive>
           </material>
-        </visual>
+        </visual> -->
       </link>
       <link name="link_body_1">
         <pose>0.015000000596046448 0.0 0.0 0.0 0.0 0.0</pose>
@@ -383,9 +383,8 @@
           </material>
         </visual>
       </link>
-
-      <!-- <link name="link_leg_0_L_0">
-        <pose>0.015 -0.004 -0.002 0.0 0.0 0.0</pose>
+      <link name="link_leg_0_L_0">
+        <pose>0.015 -0.004 -0.0 0.0 0.0 0.0</pose>
         <collision name="link_leg_0_L_0_collision">
           <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
           <geometry>
@@ -410,7 +409,7 @@
         </visual>
       </link>
       <link name="link_leg_0_L_1">
-        <pose>0.015 -0.004 -0.002 0.0 0.0 0.0</pose>
+        <pose>0.015 -0.004 -0.0 0.0 0.0 0.0</pose>
         <collision name="link_leg_0_L_1_collision">
           <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
           <geometry>
@@ -435,7 +434,7 @@
         </visual>
       </link>
       <link name="link_leg_0_L_2">
-        <pose>0.015 -0.004 -0.002 0.0 0.0 0.0</pose>
+        <pose>0.015 -0.004 -0.0 0.0 0.0 0.0</pose>
         <inertial>
           <pose>0 -0.003 0 1.5707963267948966 0 0</pose>
           <mass>1.989675347273536e-05</mass>
@@ -469,7 +468,7 @@
         </visual>
       </link>
       <link name="link_leg_0_L_3">
-        <pose>0.015 -0.01 -0.002 0.0 0.0 0.0</pose>
+        <pose>0.015 -0.01 -0.0 0.0 0.0 0.0</pose>
         <inertial>
           <pose>0.0 -0.003 0.0 1.5707963267948966 0.0 0.0</pose>
           <mass>1.989675347273536e-05</mass>
@@ -502,9 +501,8 @@
           <material/>
         </visual>
       </link>
-
       <link name="link_leg_0_R_0">
-        <pose>0.015 0.004 -0.002 0.0 0.0 0.0</pose>
+        <pose>0.015 0.004 -0.0 0.0 0.0 0.0</pose>
         <collision name="link_leg_0_R_0_collision">
           <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
           <geometry>
@@ -529,7 +527,7 @@
         </visual>
       </link>
       <link name="link_leg_0_R_1">
-        <pose>0.015 0.004 -0.002 0.0 0.0 0.0</pose>
+        <pose>0.015 0.004 -0.0 0.0 0.0 0.0</pose>
         <collision name="link_leg_0_R_1_collision">
           <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
           <geometry>
@@ -554,7 +552,7 @@
         </visual>
       </link>
       <link name="link_leg_0_R_2">
-        <pose>0.015 0.004 -0.002 0.0 0.0 0.0</pose>
+        <pose>0.015 0.004 -0.0 0.0 0.0 0.0</pose>
         <inertial>
           <pose>0.0 0.003 0.0 1.5707963267948966 0.0 0.0</pose>
           <mass>1.989675347273536e-05</mass>
@@ -588,7 +586,7 @@
         </visual>
       </link>
       <link name="link_leg_0_R_3">
-        <pose>0.015 0.01 -0.002 0.0 0.0 0.0</pose>
+        <pose>0.015 0.01 -0.0 0.0 0.0 0.0</pose>
         <inertial>
           <pose>0.0 0.003 0.0 1.5707963267948966 0.0 0.0</pose>
           <mass>1.989675347273536e-05</mass>
@@ -621,9 +619,8 @@
           <material/>
         </visual>
       </link>
-
       <link name="link_leg_1_L_0">
-        <pose>0.04614285731315613 -0.003 -0.002 0.0 0.0 0.0</pose>
+        <pose>0.04614285731315613 -0.003 -0.0 0.0 0.0 0.0</pose>
         <collision name="link_leg_1_L_0_collision">
           <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
           <geometry>
@@ -648,7 +645,7 @@
         </visual>
       </link>
       <link name="link_leg_1_L_1">
-        <pose>0.04614285731315613 -0.003 -0.002 0.0 0.0 0.0</pose>
+        <pose>0.04614285731315613 -0.003 -0.0 0.0 0.0 0.0</pose>
         <collision name="link_leg_1_L_1_collision">
           <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
           <geometry>
@@ -673,7 +670,7 @@
         </visual>
       </link>
       <link name="link_leg_1_L_2">
-        <pose>0.04614285731315613 -0.003 -0.002 0.0 0.0 0.0</pose>
+        <pose>0.04614285731315613 -0.003 -0.0 0.0 0.0 0.0</pose>
         <inertial>
           <pose>0.0 -0.003 0.0 1.5707963267948966 0.0 0.0</pose>
           <mass>1.989675347273536e-05</mass>
@@ -707,7 +704,7 @@
         </visual>
       </link>
       <link name="link_leg_1_L_3">
-        <pose>0.04614285731315613 -0.009 -0.002 0.0 0.0 0.0</pose>
+        <pose>0.04614285731315613 -0.009 -0.0 0.0 0.0 0.0</pose>
         <inertial>
           <pose>0.0 -0.003 0.0 1.5707963267948966 0.0 0.0</pose>
           <mass>1.989675347273536e-05</mass>
@@ -740,9 +737,8 @@
           <material/>
         </visual>
       </link>
-
       <link name="link_leg_1_R_0">
-        <pose>0.04614285731315613 0.003 -0.002 0.0 0.0 0.0</pose>
+        <pose>0.04614285731315613 0.003 -0.0 0.0 0.0 0.0</pose>
         <collision name="link_leg_1_R_0_collision">
           <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
           <geometry>
@@ -767,7 +763,7 @@
         </visual>
       </link>
       <link name="link_leg_1_R_1">
-        <pose>0.04614285731315613 0.003 -0.002 0.0 0.0 0.0</pose>
+        <pose>0.04614285731315613 0.003 -0.0 0.0 0.0 0.0</pose>
         <collision name="link_leg_1_R_1_collision">
           <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
           <geometry>
@@ -792,7 +788,7 @@
         </visual>
       </link>
       <link name="link_leg_1_R_2">
-        <pose>0.04614285731315613 0.003 -0.002 0.0 0.0 0.0</pose>
+        <pose>0.04614285731315613 0.003 -0.0 0.0 0.0 0.0</pose>
         <inertial>
           <pose>0.0 0.003 0.0 1.5707963267948966 0.0 0.0</pose>
           <mass>1.989675347273536e-05</mass>
@@ -826,7 +822,7 @@
         </visual>
       </link>
       <link name="link_leg_1_R_3">
-        <pose>0.04614285731315613 0.01 -0.002 0.0 0.0 0.0</pose>
+        <pose>0.04614285731315613 0.01 -0.0 0.0 0.0 0.0</pose>
         <inertial>
           <pose>0.0 0.003 0.0 1.5707963267948966 0.0 0.0</pose>
           <mass>1.989675347273536e-05</mass>
@@ -859,9 +855,8 @@
           <material/>
         </visual>
       </link>
-
       <link name="foot_0_0">
-        <pose>0.015 -0.016 -0.002 0.0 0.0 0.0</pose>
+        <pose>0.015 -0.016 -0.0 0.0 0.0 0.0</pose>
         <inertial>
           <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
           <mass>7.238229473870881e-06</mass>
@@ -893,7 +888,7 @@
         </visual>
       </link>
       <link name="foot_0_1">
-        <pose>0.015000000596046448 0.016 -0.002 0.0 0.0 0.0</pose>
+        <pose>0.015000000596046448 0.016 -0.0 0.0 0.0 0.0</pose>
         <inertial>
           <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
           <mass>7.238229473870881e-06</mass>
@@ -925,7 +920,7 @@
         </visual>
       </link>
       <link name="foot_1_0">
-        <pose>0.04614285731315613 -0.016 -0.002 0.0 0.0 0.0</pose>
+        <pose>0.04614285731315613 -0.016 -0.0 0.0 0.0 0.0</pose>
         <inertial>
           <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
           <mass>7.238229473870881e-06</mass>
@@ -957,7 +952,7 @@
         </visual>
       </link>
       <link name="foot_1_1">
-        <pose>0.04614285731315613 0.016 -0.002 0.0 0.0 0.0</pose>
+        <pose>0.04614285731315613 0.016 -0.0 0.0 0.0 0.0</pose>
         <inertial>
           <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
           <mass>7.238229473870881e-06</mass>
@@ -988,24 +983,6 @@
           <material/>
         </visual>
       </link>
-      <link name="link_passive_0">
-        <pose>0.02571428716182709 0.0 0.0 0.0 0.0 0.0</pose>
-      </link>
-      <link name="link_passive_1">
-        <pose>0.04714285731315613 0.0 0.0 0.0 0.0 0.0</pose>
-      </link>
-      <link name="link_passive_2">
-        <pose>0.05785714387893677 0.0 0.0 0.0 0.0 0.0</pose>
-      </link>
-      <link name="link_passive_3">
-        <pose>0.0685714304447174 0.0 0.0 0.0 0.0 0.0</pose>
-      </link>
-      <link name="link_passive_4">
-        <pose>0.07928571701049805 0.0 0.0 0.0 0.0 0.0</pose>
-      </link>
-      <link name="link_passive_5">
-        <pose>0.08999999761581422 0.0 0.0 0.0 0.0 0.0</pose>
-      </link> -->
       <joint name="joint_body_0" type="revolute">
         <parent>link_body_0</parent>
         <child>link_body_1</child>
@@ -1021,7 +998,7 @@
         </axis>
       </joint>
       <joint name="joint_body_1" type="revolute">
-        <parent>link_passive_0</parent>
+        <parent>link_body_1</parent>
         <child>link_body_2</child>
         <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
         <axis>
@@ -1049,7 +1026,7 @@
         </axis>
       </joint>
       <joint name="joint_body_3" type="revolute">
-        <parent>link_passive_1</parent>
+        <parent>link_body_3</parent>
         <child>link_body_4</child>
         <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
         <axis>
@@ -1063,7 +1040,7 @@
         </axis>
       </joint>
       <joint name="joint_body_4" type="revolute">
-        <parent>link_passive_2</parent>
+        <parent>link_body_4</parent>
         <child>link_body_5</child>
         <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
         <axis>
@@ -1077,7 +1054,7 @@
         </axis>
       </joint>
       <joint name="joint_body_5" type="revolute">
-        <parent>link_passive_3</parent>
+        <parent>link_body_5</parent>
         <child>link_body_6</child>
         <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
         <axis>
@@ -1091,7 +1068,7 @@
         </axis>
       </joint>
       <joint name="joint_body_6" type="revolute">
-        <parent>link_passive_4</parent>
+        <parent>link_body_6</parent>
         <child>link_body_7</child>
         <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
         <axis>
@@ -1105,7 +1082,7 @@
         </axis>
       </joint>
       <joint name="joint_body_7" type="revolute">
-        <parent>link_passive_5</parent>
+        <parent>link_body_7</parent>
         <child>link_body_8</child>
         <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
         <axis>
@@ -1118,7 +1095,7 @@
           </limit>
         </axis>
       </joint>
-      <!-- <joint name="joint_leg_0_L_0" type="revolute">
+      <joint name="joint_leg_0_L_0" type="revolute">
         <parent>link_body_1</parent>
         <child>link_leg_0_L_0</child>
         <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
@@ -1132,7 +1109,7 @@
           </limit>
         </axis>
       </joint>
-      <joint name="joint_leg_0_L_1" type="revolute">
+      <joint name="joint_leg_0_L_1" type="fixed">
         <parent>link_leg_0_L_0</parent>
         <child>link_leg_0_L_1</child>
         <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
@@ -1146,7 +1123,7 @@
           </limit>
         </axis>
       </joint>
-      <joint name="joint_leg_0_L_2" type="revolute">
+      <joint name="joint_leg_0_L_2" type="fixed">
         <parent>link_leg_0_L_1</parent>
         <child>link_leg_0_L_2</child>
         <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
@@ -1160,7 +1137,7 @@
           </limit>
         </axis>
       </joint>
-      <joint name="joint_leg_0_L_3" type="revolute">
+      <joint name="joint_leg_0_L_3" type="fixed">
         <parent>link_leg_0_L_2</parent>
         <child>link_leg_0_L_3</child>
         <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
@@ -1188,7 +1165,7 @@
           </limit>
         </axis>
       </joint>
-      <joint name="joint_leg_0_R_1" type="revolute">
+      <joint name="joint_leg_0_R_1" type="fixed">
         <parent>link_leg_0_R_0</parent>
         <child>link_leg_0_R_1</child>
         <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
@@ -1202,7 +1179,7 @@
           </limit>
         </axis>
       </joint>
-      <joint name="joint_leg_0_R_2" type="revolute">
+      <joint name="joint_leg_0_R_2" type="fixed">
         <parent>link_leg_0_R_1</parent>
         <child>link_leg_0_R_2</child>
         <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
@@ -1216,7 +1193,7 @@
           </limit>
         </axis>
       </joint>
-      <joint name="joint_leg_0_R_3" type="revolute">
+      <joint name="joint_leg_0_R_3" type="fixed">
         <parent>link_leg_0_R_2</parent>
         <child>link_leg_0_R_3</child>
         <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
@@ -1244,7 +1221,7 @@
           </limit>
         </axis>
       </joint>
-      <joint name="joint_leg_1_L_1" type="revolute">
+      <joint name="joint_leg_1_L_1" type="fixed">
         <parent>link_leg_1_L_0</parent>
         <child>link_leg_1_L_1</child>
         <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
@@ -1258,7 +1235,7 @@
           </limit>
         </axis>
       </joint>
-      <joint name="joint_leg_1_L_2" type="revolute">
+      <joint name="joint_leg_1_L_2" type="fixed">
         <parent>link_leg_1_L_1</parent>
         <child>link_leg_1_L_2</child>
         <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
@@ -1272,7 +1249,7 @@
           </limit>
         </axis>
       </joint>
-      <joint name="joint_leg_1_L_3" type="revolute">
+      <joint name="joint_leg_1_L_3" type="fixed">
         <parent>link_leg_1_L_2</parent>
         <child>link_leg_1_L_3</child>
         <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
@@ -1300,7 +1277,7 @@
           </limit>
         </axis>
       </joint>
-      <joint name="joint_leg_1_R_1" type="revolute">
+      <joint name="joint_leg_1_R_1" type="fixed">
         <parent>link_leg_1_R_0</parent>
         <child>link_leg_1_R_1</child>
         <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
@@ -1314,7 +1291,7 @@
           </limit>
         </axis>
       </joint>
-      <joint name="joint_leg_1_R_2" type="revolute">
+      <joint name="joint_leg_1_R_2" type="fixed">
         <parent>link_leg_1_R_1</parent>
         <child>link_leg_1_R_2</child>
         <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
@@ -1328,7 +1305,7 @@
           </limit>
         </axis>
       </joint>
-      <joint name="joint_leg_1_R_3" type="revolute">
+      <joint name="joint_leg_1_R_3" type="fixed">
         <parent>link_leg_1_R_2</parent>
         <child>link_leg_1_R_3</child>
         <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
@@ -1362,90 +1339,6 @@
         <child>foot_1_1</child>
         <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
       </joint>
-      <joint name="joint_passive_0" type="revolute">
-        <parent>link_body_1</parent>
-        <child>link_passive_0</child>
-        <pose>0 0 0 0 0 0</pose>
-        <axis>
-          <xyz>0 1 0</xyz>
-          <limit>
-            <lower>-1.5707963267948966</lower>
-            <upper>1.5707963267948966</upper>
-            <effort>inf</effort>
-            <velocity>inf</velocity>
-          </limit>
-        </axis>
-      </joint>
-      <joint name="joint_passive_1" type="revolute">
-        <parent>link_body_3</parent>
-        <child>link_passive_1</child>
-        <pose>0 0 0 0 0 0</pose>
-        <axis>
-          <xyz>0 1 0</xyz>
-          <limit>
-            <lower>-1.5707963267948966</lower>
-            <upper>1.5707963267948966</upper>
-            <effort>inf</effort>
-            <velocity>inf</velocity>
-          </limit>
-        </axis>
-      </joint>
-      <joint name="joint_passive_2" type="revolute">
-        <parent>link_body_4</parent>
-        <child>link_passive_2</child>
-        <pose>0 0 0 0 0 0</pose>
-        <axis>
-          <xyz>0 1 0</xyz>
-          <limit>
-            <lower>-1.5707963267948966</lower>
-            <upper>1.5707963267948966</upper>
-            <effort>inf</effort>
-            <velocity>inf</velocity>
-          </limit>
-        </axis>
-      </joint>
-      <joint name="joint_passive_3" type="revolute">
-        <parent>link_body_5</parent>
-        <child>link_passive_3</child>
-        <pose>0 0 0 0 0 0</pose>
-        <axis>
-          <xyz>0 1 0</xyz>
-          <limit>
-            <lower>-1.5707963267948966</lower>
-            <upper>1.5707963267948966</upper>
-            <effort>inf</effort>
-            <velocity>inf</velocity>
-          </limit>
-        </axis>
-      </joint>
-      <joint name="joint_passive_4" type="revolute">
-        <parent>link_body_6</parent>
-        <child>link_passive_4</child>
-        <pose>0 0 0 0 0 0</pose>
-        <axis>
-          <xyz>0 1 0</xyz>
-          <limit>
-            <lower>-1.5707963267948966</lower>
-            <upper>1.5707963267948966</upper>
-            <effort>inf</effort>
-            <velocity>inf</velocity>
-          </limit>
-        </axis>
-      </joint>
-      <joint name="joint_passive_5" type="revolute">
-        <parent>link_body_7</parent>
-        <child>link_passive_5</child>
-        <pose>0 0 0 0 0 0</pose>
-        <axis>
-          <xyz>0 1 0</xyz>
-          <limit>
-            <lower>-1.5707963267948966</lower>
-            <upper>1.5707963267948966</upper>
-            <effort>inf</effort>
-            <velocity>inf</velocity>
-          </limit>
-        </axis>
-      </joint> -->
     </model>
   </world>
 </sdf>

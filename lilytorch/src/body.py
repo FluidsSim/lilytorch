@@ -22,6 +22,23 @@ Analitical SDFs
 def circle(x,y,xt=0,yt=60,r=25):
     return torch.sqrt((x-xt)**2+(y-yt)**2)-r
 
+
+def sdUnevenCapsule(Y, X, r1, r2, h, side="L"):
+    if side=="L":
+        X = -X
+    Yabs=torch.abs(Y)
+    b=(r1-r2)/h
+    a=torch.sqrt(1.0-b*b)
+    k=-b*Yabs+a*X
+    return torch.where(
+        k<0.0, torch.sqrt(Yabs**2+X**2)-r1,
+        torch.where(
+            k>a*h, torch.sqrt(Yabs**2+(X-h)**2)-r2,
+            a*Yabs+b*X-r1
+        )
+    )
+
+
 def segment(X,Y,A,B,r1,r2):
     pa_x=X-A[0]
     pa_y=Y-A[1]
@@ -1389,7 +1406,7 @@ class BodyMesh(Body):
         curv_coord = np.load(self.save_folder+"interp_data/curv_coord_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy")
         sign_vec = np.load(self.save_folder+"interp_data/sign_vec_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy")
 
-        self.sdf_interp = RegularGridInterpolator(
+        self.sdf = RegularGridInterpolator(
             (
                 torch.from_numpy(xnp).type(self.dtype).to(self.device),
                 torch.from_numpy(ynp).type(self.dtype).to(self.device)
@@ -1399,10 +1416,10 @@ class BodyMesh(Body):
             method=1 # quadratic
         )
 
-        self.sdf = self.sdf_interp(
-            self.stacked_xy[0],
-            self.stacked_xy[1]
-        ).reshape(self.nx, self.ny)
+        # self.sdf = self.sdf_interp(
+        #     self.stacked_xy[0],
+        #     self.stacked_xy[1]
+        # ).reshape(self.nx, self.ny)
 
         self.curv_coord = torch.from_numpy(curv_coord).type(self.dtype).to(self.device)
         self.cnt        = torch.from_numpy(cnt).type(self.dtype).to(self.device)
@@ -1606,13 +1623,64 @@ class MultiAnimatBodies(Body):
         self.body_ids = []
         self.bodies = []
 
+
         for animat_i, animat in enumerate(experiment_options.animats):
             sdf = ModelSDF.read(animat.sdf)[0] # this is the sdf content
             sdf_folder      = os.path.dirname(animat.sdf)
-            if sdf.name == "sphere":
-                """ Create analytical bodies for spheres """
-                for link_i, link in enumerate(sdf.links):
-                    radius = link.collisions[0].geometry.radius
+
+            for link_i, link in enumerate(sdf.links):
+                geometry = link["collisions"][0]["geometry"]
+                if "uri" in geometry:
+                    mesh_name = geometry["uri"]
+                    mesh_gpath = sdf_folder+"/"+mesh_name
+                    initial_pose = np.array(link.pose).astype(x.cpu().numpy().dtype)
+                    update_funcs = (
+                        lambda t: 180,
+                        [
+                            lambda t, initial_pose=initial_pose: -initial_pose[0],
+                            lambda t, initial_pose=initial_pose: -initial_pose[1],
+                        ]
+                        )
+                    if "scale" in geometry:
+                        scale = geometry["scale"]
+                        assert scale[0]==scale[1]==scale[2], "Non-uniform scaling not supported."
+                        scale = scale[0]
+                        kwargs["scale"] = scale
+                    body = BodyMesh(
+                            device, x, y,
+                            mesh_gpath,
+                            update_funcs,
+                            eps=eps,
+                            compute_interp=compute_interp,
+                            nsamples=nsamples, msamples=msamples,
+                            suit=suit,
+                            plotting_meshes=plotting_meshes,
+                            **kwargs
+                        )
+                    self.bodies.append(body)
+
+                elif "radius" in geometry and "length" in geometry:
+                    """ Create analytical bodies for capsule """
+
+                    radius = torch.tensor(geometry["radius"],dtype=x.dtype,device=x.device)
+                    length = torch.tensor(geometry["length"],dtype=x.dtype,device=x.device)
+                    if "L" in link["name"]:
+                        sdf_fun = lambda x,y : sdUnevenCapsule(x,y,radius,radius,length, side="R")
+                    elif "R" in link["name"]:
+                        sdf_fun = lambda x,y : sdUnevenCapsule(x,y,radius,radius,length, side="R")
+                    else:
+                        raise ValueError("Capsule link name must contain 'L' or 'R' to define the side.")
+                    initial_pose = np.array(link.pose).astype(x.cpu().numpy().dtype)
+                    self.bodies.append(
+                        BodyAnalytical(
+                            device, x, y, sdf_fun, update_maps, eps=eps, plotting=False, pre_update=False
+                        )
+                    )
+                    self.bodies[-1].bb=[[ -radius.cpu(), radius.cpu() ], [ -radius.cpu(), radius.cpu() ], [-radius.cpu(), radius.cpu() ]]
+
+                elif "radius" in geometry and "length" not in geometry:
+                    """ Create analytical bodies for spheres """
+                    radius = torch.tensor(geometry["radius"],dtype=x.dtype,device=x.device)
                     sdf_fun = lambda x,y : circle(x,y,xt=0,yt=0,r=radius)
                     initial_pose = np.array(link.pose).astype(x.cpu().numpy().dtype)
                     update_maps = (lambda t: 0, [lambda t: -initial_pose[0], lambda t: -initial_pose[1]]) # set dummy update maps for initialization (not used)
@@ -1621,37 +1689,13 @@ class MultiAnimatBodies(Body):
                             device, x, y, sdf_fun, update_maps, eps=eps, plotting=False, pre_update=False
                         )
                     )
-                    self.body_ids.append([animat_i,link_i])
-            else:
+                    self.bodies[-1].bb=[[ -radius.cpu(), radius.cpu() ], [ -radius.cpu(), radius.cpu() ], [-radius.cpu(), radius.cpu() ]]
+                else:
+                    raise ValueError("Unsupported geometry type in SDF.")
+                self.body_ids.append([animat_i,link_i])
 
-                """ Create mesh-based bodies for general meshes"""
-                for link_i, link in enumerate(sdf.links):
-                    # if link_i%2==0:
-                        mesh_name = link["collisions"][0]["geometry"]["uri"]
-                        mesh_gpath = sdf_folder+"/"+mesh_name
-                        initial_pose = np.array(link.pose).astype(x.cpu().numpy().dtype)
-                        update_funcs = (
-                            lambda t: 180,
-                            [
-                                lambda t, initial_pose=initial_pose: -initial_pose[0],
-                                lambda t, initial_pose=initial_pose: -initial_pose[1],
-                            ]
-                            )
 
-                        body = BodyMesh(
-                                device, x, y,
-                                mesh_gpath,
-                                update_funcs,
-                                eps=eps,
-                                compute_interp=compute_interp,
-                                nsamples=nsamples, msamples=msamples,
-                                suit=suit,
-                                plotting_meshes=plotting_meshes,
-                                **kwargs
-                            )
-                        self.body_ids.append([animat_i,link_i])
-                        self.bodies.append(body)
-                        # link_id+=1
+
 
         self.nbodies = len(self.bodies)
         self.sdf_vals = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)

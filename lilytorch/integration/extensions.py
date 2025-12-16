@@ -7,6 +7,9 @@ from farms_core.experiment.data import ExperimentData
 from farms_core.extensions.extensions import import_item
 from farms_mujoco.simulation.task import ExperimentTask
 from dm_control.mjcf.physics import Physics
+import logging
+logging.basicConfig(level=logging.ERROR)
+
 
 class DummyOptionCallback(TaskExtension):
 
@@ -43,9 +46,11 @@ class FluidExtension(TaskExtension):
         self.experiment_options = experiment_options
         self.data: ExperimentData | None = None
         self.n_animats = len(self.experiment_options.animats)
-        self.force_scaling = 1.0
         self.BDIMhandler_class = import_item(handler_path)
         self.bdim_yaml = bdim_yaml
+
+        self.initialization_it = 0
+
 
 
     @classmethod
@@ -69,16 +74,19 @@ class FluidExtension(TaskExtension):
 
 
     def initialize_episode(self, task: ExperimentTask, physics: Physics):
-        """Initialize episode"""
-        self.forces = ["friction_force_lin_x", "friction_force_lin_y", "friction_force_ang_z",
-                  "pressure_force_x", "pressure_force_y", "pressure_force_ang_z"]
-        for force in self.forces:
-            self.initialize_forces(force)
-        self.bdim_yaml["solver"]["nt"] = self.experiment_options.simulation.runtime.n_iterations
-        self.bdim_yaml["solver"]["dt"] = self.experiment_options.simulation.physics.timestep  # enforce farms timestep
-        self.bdim_yaml["body"]["experiment_options"] = self.experiment_options
 
-        self.BDIMhandler = self.BDIMhandler_class(self.bdim_yaml, task.data.animats, physics)
+        if self.initialization_it == 0:
+            """Initialize episode"""
+            self.forces = ["friction_force_lin_x", "friction_force_lin_y", "friction_force_ang_z",
+                    "pressure_force_x", "pressure_force_y", "pressure_force_ang_z"]
+            for force in self.forces:
+                self.initialize_forces(force)
+            self.bdim_yaml["solver"]["nt"] = self.experiment_options.simulation.runtime.n_iterations
+            self.bdim_yaml["solver"]["dt"] = self.experiment_options.simulation.physics.timestep  # enforce farms timestep
+            self.bdim_yaml["body"]["experiment_options"] = self.experiment_options
+
+            self.BDIMhandler = self.BDIMhandler_class(self.bdim_yaml, task.data.animats, physics)
+            self.initialization_it += 1
 
 
     # def after_step(self, task: ExperimentTask, physics: Physics):

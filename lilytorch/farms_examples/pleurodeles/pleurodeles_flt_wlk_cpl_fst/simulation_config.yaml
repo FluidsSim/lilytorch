@@ -46,11 +46,11 @@ pybullet:
 extensions:
 - loader: farms_core.simulation.extensions.ExperimentLogger
   config:
-    log_path: Output
+    log_path: output
     skip: 0
 - loader: farms_core.simulation.extensions.ExperimentOptionsLogger
   config:
-    log_path: Output
+    log_path: output
 - loader: farms_mujoco.simulation.extensions.MjcfSaver
   config:
-    path: Output/simulation_mjcf.xml
+    path: output/simulation_mjcf.xml

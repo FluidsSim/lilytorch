@@ -41,3 +41,5 @@ farms_amphibious/
 farms_core/
 farms_sim/
 farms_mujoco/
+
+Output/

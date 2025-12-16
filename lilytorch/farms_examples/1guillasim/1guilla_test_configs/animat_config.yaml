@@ -236,7 +236,7 @@ control:
   motors:
   - joint_name: joint_body_00
     control_types:
-    - torque
+    - position
     limits_torque:
     - -.inf
     - .inf
@@ -246,7 +246,7 @@ control:
     - 0
   - joint_name: joint_body_01
     control_types:
-    - torque
+    - position
     limits_torque:
     - -.inf
     - .inf
@@ -256,7 +256,7 @@ control:
     - 0
   - joint_name: joint_body_02
     control_types:
-    - torque
+    - position
     limits_torque:
     - -.inf
     - .inf
@@ -266,7 +266,7 @@ control:
     - 0
   - joint_name: joint_body_03
     control_types:
-    - torque
+    - position
     limits_torque:
     - -.inf
     - .inf
@@ -276,7 +276,7 @@ control:
     - 0
   - joint_name: joint_body_04
     control_types:
-    - torque
+    - position
     limits_torque:
     - -.inf
     - .inf
@@ -286,7 +286,7 @@ control:
     - 0
   - joint_name: joint_body_05
     control_types:
-    - torque
+    - position
     limits_torque:
     - -.inf
     - .inf
@@ -296,7 +296,7 @@ control:
     - 0
   - joint_name: joint_body_06
     control_types:
-    - torque
+    - position
     limits_torque:
     - -.inf
     - .inf
@@ -306,7 +306,7 @@ control:
     - 0
   - joint_name: joint_body_07
     control_types:
-    - torque
+    - position
     limits_torque:
     - -.inf
     - .inf
@@ -315,9 +315,8 @@ control:
     - 5.0
     - 0
 extensions:
-- loader: lilytorch.farms_examples.1guillasim.torque_controller.WaveController
+- loader: lilytorch.farms_examples.1guillasim.pd_controller.PositionController
   config:
     freq: 1.0
-    twl: 0.8
-    amp: 0.4
-    bias: 0.0
+    twl: 14
+    amp: 20.0

@@ -8,7 +8,7 @@ runtime:
   play: true
   rtl: 1.0
   fast: false
-  headless: true
+  headless: false
   show_progress: true
 physics:
   timestep: 0.0001

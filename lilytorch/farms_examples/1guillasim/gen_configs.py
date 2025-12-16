@@ -11,14 +11,14 @@ sdf_path             = '../../sdfs/1guilla/1guilla.sdf'
 
 fluid_extension_path = "lilytorch.integration.extensions.FluidExtension"
 
-# control_type = "position"
-# controller_path      = "lilytorch.farms_examples.1guillasim.pd_controller.PositionController"
-# gains = [50.0, 5.0, 0]
-# control_pars = {'freq': 1.0, 'twl': 14, 'amp': 20.0}
+control_type = "position"
+controller_path      = "lilytorch.farms_examples.1guillasim.pd_controller.PositionController"
+gains = [50.0, 5.0, 0]
+control_pars = {'freq': 1.0, 'twl': 14, 'amp': 20.0}
 
-control_type    = "torque"
-controller_path = "lilytorch.farms_examples.1guillasim.torque_controller.WaveController"
-control_pars = {'freq': 1.0, 'twl': 0.8, 'amp': 0.4, 'bias': 0.0}
+# control_type    = "torque"
+# controller_path = "lilytorch.farms_examples.1guillasim.torque_controller.WaveController"
+# control_pars = {'freq': 1.0, 'twl': 0.8, 'amp': 0.4, 'bias': 0.0}
 
 os.makedirs(
     sim_sir, exist_ok=True

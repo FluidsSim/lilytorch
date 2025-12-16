@@ -41,7 +41,6 @@ class BDIMhandler():
         self.rho_fluid = self.pars['solver']['rho']
         self.rho_body  = 1000.0
 
-
     def cython2numpy(self, array):
         return torch.from_numpy(np.array(array).astype(self.dtype_np)).to(self.device)
 

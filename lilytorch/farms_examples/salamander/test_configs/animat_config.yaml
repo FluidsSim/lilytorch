@@ -20,7 +20,7 @@ spawn:
 sdf: ../../sdfs/salamander_v5/sdf/salamander.sdf
 morphology:
   links:
-  - name: link_0
+  - name: link_body_0
     collisions: true
     friction:
     - 0.2
@@ -29,7 +29,7 @@ morphology:
     extras: {}
     fluid_interaction: true
     density: 1000.0
-  - name: link_1
+  - name: link_body_1
     collisions: true
     friction:
     - 0.2
@@ -38,7 +38,7 @@ morphology:
     extras: {}
     fluid_interaction: true
     density: 1000.0
-  - name: link_2
+  - name: link_body_2
     collisions: true
     friction:
     - 0.2
@@ -47,7 +47,7 @@ morphology:
     extras: {}
     fluid_interaction: true
     density: 1000.0
-  - name: link_3
+  - name: link_body_3
     collisions: true
     friction:
     - 0.2
@@ -56,7 +56,7 @@ morphology:
     extras: {}
     fluid_interaction: true
     density: 1000.0
-  - name: link_4
+  - name: link_body_4
     collisions: true
     friction:
     - 0.2
@@ -65,7 +65,7 @@ morphology:
     extras: {}
     fluid_interaction: true
     density: 1000.0
-  - name: link_5
+  - name: link_body_5
     collisions: true
     friction:
     - 0.2
@@ -74,7 +74,7 @@ morphology:
     extras: {}
     fluid_interaction: true
     density: 1000.0
-  - name: link_6
+  - name: link_body_6
     collisions: true
     friction:
     - 0.2
@@ -83,7 +83,7 @@ morphology:
     extras: {}
     fluid_interaction: true
     density: 1000.0
-  - name: link_7
+  - name: link_body_7
     collisions: true
     friction:
     - 0.2
@@ -92,7 +92,7 @@ morphology:
     extras: {}
     fluid_interaction: true
     density: 1000.0
-  - name: link_8
+  - name: link_body_8
     collisions: true
     friction:
     - 0.2
@@ -101,7 +101,7 @@ morphology:
     extras: {}
     fluid_interaction: true
     density: 1000.0
-  - name: link_9
+  - name: link_leg_0_L_0
     collisions: true
     friction:
     - 0.2
@@ -110,7 +110,7 @@ morphology:
     extras: {}
     fluid_interaction: true
     density: 1000.0
-  - name: link_10
+  - name: link_leg_0_R_0
     collisions: true
     friction:
     - 0.2
@@ -119,7 +119,7 @@ morphology:
     extras: {}
     fluid_interaction: true
     density: 1000.0
-  - name: link_11
+  - name: link_leg_0_L_1
     collisions: true
     friction:
     - 0.2
@@ -128,7 +128,7 @@ morphology:
     extras: {}
     fluid_interaction: true
     density: 1000.0
-  - name: link_12
+  - name: link_leg_0_R_1
     collisions: true
     friction:
     - 0.2
@@ -137,7 +137,7 @@ morphology:
     extras: {}
     fluid_interaction: true
     density: 1000.0
-  - name: link_13
+  - name: link_leg_0_L_2
     collisions: true
     friction:
     - 0.2
@@ -146,7 +146,7 @@ morphology:
     extras: {}
     fluid_interaction: true
     density: 1000.0
-  - name: link_14
+  - name: link_leg_0_R_2
     collisions: true
     friction:
     - 0.2
@@ -155,7 +155,124 @@ morphology:
     extras: {}
     fluid_interaction: true
     density: 1000.0
-  - name: link_15
+  - name: link_leg_0_L_3
+    collisions: true
+    friction:
+    - 0.2
+    - 0
+    - 0
+    extras: {}
+    fluid_interaction: true
+    density: 1000.0
+  - name: link_leg_0_R_3
+    collisions: true
+    friction:
+    - 0.2
+    - 0
+    - 0
+    extras: {}
+    fluid_interaction: true
+    density: 1000.0
+  - name: link_leg_1_L_0
+    collisions: true
+    friction:
+    - 0.2
+    - 0
+    - 0
+    extras: {}
+    fluid_interaction: true
+    density: 1000.0
+  - name: link_leg_1_R_0
+    collisions: true
+    friction:
+    - 0.2
+    - 0
+    - 0
+    extras: {}
+    fluid_interaction: true
+    density: 1000.0
+  - name: link_leg_1_L_1
+    collisions: true
+    friction:
+    - 0.2
+    - 0
+    - 0
+    extras: {}
+    fluid_interaction: true
+    density: 1000.0
+  - name: link_leg_1_R_1
+    collisions: true
+    friction:
+    - 0.2
+    - 0
+    - 0
+    extras: {}
+    fluid_interaction: true
+    density: 1000.0
+  - name: link_leg_1_L_2
+    collisions: true
+    friction:
+    - 0.2
+    - 0
+    - 0
+    extras: {}
+    fluid_interaction: true
+    density: 1000.0
+  - name: link_leg_1_R_2
+    collisions: true
+    friction:
+    - 0.2
+    - 0
+    - 0
+    extras: {}
+    fluid_interaction: true
+    density: 1000.0
+  - name: link_leg_1_L_3
+    collisions: true
+    friction:
+    - 0.2
+    - 0
+    - 0
+    extras: {}
+    fluid_interaction: true
+    density: 1000.0
+  - name: link_leg_1_R_3
+    collisions: true
+    friction:
+    - 0.2
+    - 0
+    - 0
+    extras: {}
+    fluid_interaction: true
+    density: 1000.0
+  - name: foot_0_0
+    collisions: true
+    friction:
+    - 0.2
+    - 0
+    - 0
+    extras: {}
+    fluid_interaction: true
+    density: 1000.0
+  - name: foot_0_1
+    collisions: true
+    friction:
+    - 0.2
+    - 0
+    - 0
+    extras: {}
+    fluid_interaction: true
+    density: 1000.0
+  - name: foot_1_0
+    collisions: true
+    friction:
+    - 0.2
+    - 0
+    - 0
+    extras: {}
+    fluid_interaction: true
+    density: 1000.0
+  - name: foot_1_1
     collisions: true
     friction:
     - 0.2
@@ -165,7 +282,7 @@ morphology:
     fluid_interaction: true
     density: 1000.0
   joints:
-  - name: joint_0
+  - name: joint_body_0
     initial:
     - 0
     - 0
@@ -178,7 +295,7 @@ morphology:
     springref: 0
     damping: 0
     extras: {}
-  - name: joint_1
+  - name: joint_body_1
     initial:
     - 0
     - 0
@@ -191,7 +308,7 @@ morphology:
     springref: 0
     damping: 0
     extras: {}
-  - name: joint_2
+  - name: joint_body_2
     initial:
     - 0
     - 0
@@ -204,7 +321,7 @@ morphology:
     springref: 0
     damping: 0
     extras: {}
-  - name: joint_3
+  - name: joint_body_3
     initial:
     - 0
     - 0
@@ -217,7 +334,7 @@ morphology:
     springref: 0
     damping: 0
     extras: {}
-  - name: joint_4
+  - name: joint_body_4
     initial:
     - 0
     - 0
@@ -230,7 +347,7 @@ morphology:
     springref: 0
     damping: 0
     extras: {}
-  - name: joint_5
+  - name: joint_body_5
     initial:
     - 0
     - 0
@@ -243,7 +360,7 @@ morphology:
     springref: 0
     damping: 0
     extras: {}
-  - name: joint_6
+  - name: joint_body_6
     initial:
     - 0
     - 0
@@ -256,7 +373,7 @@ morphology:
     springref: 0
     damping: 0
     extras: {}
-  - name: joint_7
+  - name: joint_body_7
     initial:
     - 0
     - 0
@@ -269,7 +386,7 @@ morphology:
     springref: 0
     damping: 0
     extras: {}
-  - name: joint_8
+  - name: joint_leg_0_L_0
     initial:
     - 0
     - 0
@@ -282,7 +399,7 @@ morphology:
     springref: 0
     damping: 0
     extras: {}
-  - name: joint_9
+  - name: joint_leg_0_R_0
     initial:
     - 0
     - 0
@@ -295,7 +412,7 @@ morphology:
     springref: 0
     damping: 0
     extras: {}
-  - name: joint_10
+  - name: joint_leg_1_L_0
     initial:
     - 0
     - 0
@@ -308,46 +425,7 @@ morphology:
     springref: 0
     damping: 0
     extras: {}
-  - name: joint_11
-    initial:
-    - 0
-    - 0
-    limits:
-    - - -.inf
-      - .inf
-    - - -.inf
-      - .inf
-    stiffness: 0
-    springref: 0
-    damping: 0
-    extras: {}
-  - name: joint_12
-    initial:
-    - 0
-    - 0
-    limits:
-    - - -.inf
-      - .inf
-    - - -.inf
-      - .inf
-    stiffness: 0
-    springref: 0
-    damping: 0
-    extras: {}
-  - name: joint_13
-    initial:
-    - 0
-    - 0
-    limits:
-    - - -.inf
-      - .inf
-    - - -.inf
-      - .inf
-    stiffness: 0
-    springref: 0
-    damping: 0
-    extras: {}
-  - name: joint_14
+  - name: joint_leg_1_R_0
     initial:
     - 0
     - 0
@@ -364,45 +442,55 @@ morphology:
 control:
   sensors:
     links: &id001
-    - link_0
-    - link_1
-    - link_2
-    - link_3
-    - link_4
-    - link_5
-    - link_6
-    - link_7
-    - link_8
-    - link_9
-    - link_10
-    - link_11
-    - link_12
-    - link_13
-    - link_14
-    - link_15
+    - link_body_0
+    - link_body_1
+    - link_body_2
+    - link_body_3
+    - link_body_4
+    - link_body_5
+    - link_body_6
+    - link_body_7
+    - link_body_8
+    - link_leg_0_L_0
+    - link_leg_0_R_0
+    - link_leg_0_L_1
+    - link_leg_0_R_1
+    - link_leg_0_L_2
+    - link_leg_0_R_2
+    - link_leg_0_L_3
+    - link_leg_0_R_3
+    - link_leg_1_L_0
+    - link_leg_1_R_0
+    - link_leg_1_L_1
+    - link_leg_1_R_1
+    - link_leg_1_L_2
+    - link_leg_1_R_2
+    - link_leg_1_L_3
+    - link_leg_1_R_3
+    - foot_0_0
+    - foot_0_1
+    - foot_1_0
+    - foot_1_1
     joints:
-    - joint_0
-    - joint_1
-    - joint_2
-    - joint_3
-    - joint_4
-    - joint_5
-    - joint_6
-    - joint_7
-    - joint_8
-    - joint_9
-    - joint_10
-    - joint_11
-    - joint_12
-    - joint_13
-    - joint_14
+    - joint_body_0
+    - joint_body_1
+    - joint_body_2
+    - joint_body_3
+    - joint_body_4
+    - joint_body_5
+    - joint_body_6
+    - joint_body_7
+    - joint_leg_0_L_0
+    - joint_leg_0_R_0
+    - joint_leg_1_L_0
+    - joint_leg_1_R_0
     contacts: []
     xfrc: *id001
     muscles: []
     adhesions: []
     visuals: []
   motors:
-  - joint_name: joint_0
+  - joint_name: joint_body_0
     control_types:
     - position
     limits_torque:
@@ -412,98 +500,77 @@ control:
     - 0.001
     - 2.0e-05
     - 0
-  - joint_name: joint_1
+  - joint_name: joint_body_1
     control_types:
     - position
     limits_torque:
     - -.inf
     - .inf
     gains: *id002
-  - joint_name: joint_2
+  - joint_name: joint_body_2
     control_types:
     - position
     limits_torque:
     - -.inf
     - .inf
     gains: *id002
-  - joint_name: joint_3
+  - joint_name: joint_body_3
     control_types:
     - position
     limits_torque:
     - -.inf
     - .inf
     gains: *id002
-  - joint_name: joint_4
+  - joint_name: joint_body_4
     control_types:
     - position
     limits_torque:
     - -.inf
     - .inf
     gains: *id002
-  - joint_name: joint_5
+  - joint_name: joint_body_5
     control_types:
     - position
     limits_torque:
     - -.inf
     - .inf
     gains: *id002
-  - joint_name: joint_6
+  - joint_name: joint_body_6
     control_types:
     - position
     limits_torque:
     - -.inf
     - .inf
     gains: *id002
-  - joint_name: joint_7
+  - joint_name: joint_body_7
     control_types:
     - position
     limits_torque:
     - -.inf
     - .inf
     gains: *id002
-  - joint_name: joint_8
+  - joint_name: joint_leg_0_L_0
     control_types:
     - position
     limits_torque:
     - -.inf
     - .inf
     gains: *id002
-  - joint_name: joint_9
+  - joint_name: joint_leg_0_R_0
     control_types:
     - position
     limits_torque:
     - -.inf
     - .inf
     gains: *id002
-  - joint_name: joint_10
+  - joint_name: joint_leg_1_L_0
     control_types:
     - position
     limits_torque:
     - -.inf
     - .inf
     gains: *id002
-  - joint_name: joint_11
-    control_types:
-    - position
-    limits_torque:
-    - -.inf
-    - .inf
-    gains: *id002
-  - joint_name: joint_12
-    control_types:
-    - position
-    limits_torque:
-    - -.inf
-    - .inf
-    gains: *id002
-  - joint_name: joint_13
-    control_types:
-    - position
-    limits_torque:
-    - -.inf
-    - .inf
-    gains: *id002
-  - joint_name: joint_14
+  - joint_name: joint_leg_1_R_0
     control_types:
     - position
     limits_torque:
@@ -513,6 +580,6 @@ control:
 extensions:
 - loader: lilytorch.farms_examples.salamander.pd_controller.PositionController
   config:
-    freq: 10.0
-    twl: 20
-    amp: 140
+    freq: 4.0
+    twl: 8
+    amp: 300

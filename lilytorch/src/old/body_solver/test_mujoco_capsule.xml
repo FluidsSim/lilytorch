@@ -1,0 +1,7 @@
+<mujoco>
+  <worldbody>
+    <body pos="0 0 0">
+      <geom type="capsule" pos="0 0 0" euler="0 0 1.570796327" size=".05 .3" rgba=".9 .9 .1 1"/>
+    </body>
+  </worldbody>
+</mujoco>

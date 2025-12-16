@@ -1915,7 +1915,9 @@ class FluidSolver:
 
         return (u,v,p,terminate)
 
-    def plotting_debug(self, u, v, p, iteration):
+    def plotting_debug(self, u, v, p, iteration):#
+
+
           # ============ plotting/saving ==========
         if not iteration % self.save_every:
             if self.save_frames:
