@@ -1,0 +1,68 @@
+
+solver:
+  use_gpu           : False
+  nthreads          : 16
+  N                 : 128
+  xmin              : -0
+  xmax              : 128
+  ymin              : 0
+  ymax              : 128
+  nt                : 1500
+  nu                : 0.06
+  rho               : 1
+
+  poisson_tol       : 1.0e-7
+  jacobi_weight     : 0.7
+  poisson_max_cycles: 10
+  poisson_nsmoothing: 10
+  poisson_verbose   : True
+  poisson_folder : "lilytorch/data/"
+
+  # dt                : 1
+  # convection_method : "implicit"
+
+  convection_method : "abdquickest"
+  dt                : 0.1
+
+# 2*R*U/nu
+
+boundary_conditions:
+  BC_type_u:
+  - "D"
+  - "D"
+  - "D"
+  - "D"
+  BC_values_u:
+  - 1
+  - 1
+  - 0
+  - 0
+  BC_type_v:
+  - "D"
+  - "D"
+  - "D"
+  - "D"
+  BC_values_v:
+  - 0
+  - 0
+  - 0
+  - 0
+
+body:
+  type: composite_analytical
+  plotting: False
+  sdf:
+  - "lambda x, y: circle(x,y,xt=20,yt=64,r=15)"
+  update_maps:
+  - rotation: "lambda t: 0*torch.sin(t/5)"
+    translation:
+      - "lambda t: 0*torch.sin(t/5)"
+      - "lambda t: 0*torch.sin(t/5)"
+
+output:
+  save_path: "/data/andreaferrario/ns_data/"
+  save_frames: True
+  save_every : 50
+  vmin: -1
+  vmax: 1
+  save_uv: False
