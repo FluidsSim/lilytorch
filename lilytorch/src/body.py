@@ -1665,12 +1665,13 @@ class MultiAnimatBodies(Body):
                     radius = torch.tensor(geometry["radius"],dtype=x.dtype,device=x.device)
                     length = torch.tensor(geometry["length"],dtype=x.dtype,device=x.device)
                     if "L" in link["name"]:
-                        sdf_fun = lambda x,y : sdUnevenCapsule(x,y,radius,radius,length, side="R")
+                        sdf_fun = lambda x,y : sdUnevenCapsule(x,y,radius,radius,length, side="L")
                     elif "R" in link["name"]:
                         sdf_fun = lambda x,y : sdUnevenCapsule(x,y,radius,radius,length, side="R")
                     else:
                         raise ValueError("Capsule link name must contain 'L' or 'R' to define the side.")
                     initial_pose = np.array(link.pose).astype(x.cpu().numpy().dtype)
+                    update_maps = (lambda t: 0, [lambda t: -initial_pose[0], lambda t: -initial_pose[1]]) # set dummy update maps for initialization (not used)
                     self.bodies.append(
                         BodyAnalytical(
                             device, x, y, sdf_fun, update_maps, eps=eps, plotting=False, pre_update=False

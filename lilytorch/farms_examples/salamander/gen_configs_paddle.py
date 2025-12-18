@@ -3,42 +3,60 @@ from cmath import inf
 import os
 from farms_core.io.yaml import pyobject2yaml
 from farms_core.model.options import SpawnMode
+from farms_core.io.sdf import ModelSDF
+from pathlib import Path
 
-sim_sir      = "lilytorch/farms_examples/salamander/test_configs/"
+current_file_path = Path(__file__).parent.absolute()
+lilytorch_root =  str(current_file_path.parent.parent)
+
 handler_path = "lilytorch.farms_examples.salamander.BDIMhandler.BDIMhandler"
-sdf_folder   = "../../sdfs/salamander_v5/"
-sdf_path     = '../../sdfs/salamander_v5/sdf/salamander.sdf'
-
 fluid_extension_path = "lilytorch.integration.extensions.FluidExtension"
 
+sim_sir      = lilytorch_root+"/farms_examples/salamander/paddle/"
+
+sdf_folder   = lilytorch_root+"/farms_examples/sdfs/salamander_v5/"
+sdf_path     = sdf_folder+"sdf/salamander.sdf"
+
+
 control_type    = "position"
-controller_path = "lilytorch.farms_examples.salamander.pd_controller.PositionController"
+controller_path = "lilytorch.farms_examples.salamander.pd_controller_paddle.PositionController"
 
 gains        = [0.001, .00002, 0]
-control_pars = {'freq': 4.0, 'twl': 8, 'amp': 300}
+control_pars = {'freq': 2.0, 'twl': 10, 'amp': 200, 'limb_pose1':-0.35*3.141592653589793, 'limb_pose2':-0.2*3.141592653589793}
 use_fluid    = False
 headless     = False
 
-# control_type    = "torque"
-# controller_path = "lilytorch.farms_examples.1guillasim.torque_controller.WaveController"
-# control_pars = {'freq': 1.0, 'twl': 0.8, 'amp': 0.4, 'bias': 0.0}
+sdf = ModelSDF.read(sdf_path)[0] # this is the sdf content
 
-os.makedirs(
-    sim_sir, exist_ok=True
-)
+
+link_names  = [link.name for link in sdf.links]
+joints      = [joint for joint in sdf.joints if joint.type != "fixed"]
+joint_names = [joint.name for joint in joints]
+
+initial_joint_pos = []
+for joint in joints:
+    initial_joint_pos.append([0, 0])
 
 timestep = 0.0001
 spawn_mode = SpawnMode.TRANSVERSE
 density = 1000.0
 
-link_names  = ["link_body_" + str(i) for i in range(9)]
-for i in range(2): # Front - back
-    for j in range(4): # joints per side
-        link_names += [f"link_leg_{i}_L_{j}", f"link_leg_{i}_R_{j}"]
-link_names += ["foot_0_0", "foot_0_1", "foot_1_0", "foot_1_1"]
+# link_names  = ["link_body_" + str(i) for i in range(9)]
+# link_names += ["link_leg_0_L_0", "link_leg_0_L_1","link_leg_0_R_0"]
 
-joint_names = ["joint_body_" + str(i) for i in range(8)]
-joint_names += ["joint_leg_0_L_0", "joint_leg_0_R_0", "joint_leg_1_L_0", "joint_leg_1_R_0"]
+# # for i in range(2): # Front - back
+# #     for j in range(4): # joints per side
+# #         link_names += [f"link_leg_{i}_L_{j}", f"link_leg_{i}_R_{j}"]
+# # link_names += ["foot_0_0", "foot_0_1", "foot_1_0", "foot_1_1"]
+
+# joint_names = ["joint_body_" + str(i) for i in range(8)]
+# joint_names += ["joint_leg_0_L_0", "joint_leg_0_R_0"] #, "joint_leg_1_L_0", "joint_leg_1_R_0"]
+
+
+
+os.makedirs(
+    sim_sir, exist_ok=True
+)
 
 
 def gen_animat_config():
@@ -82,13 +100,13 @@ def gen_animat_config():
     animat_dict["morphology"]["joints"] = [
         {
             'name'     : joint_name,
-            'initial'  : [0,0],
+            'initial'  : initial_joint_pos[i],
             'limits'   : [[-inf, inf], [-inf, inf]],
             'stiffness': 0,
             'springref': 0,
             'damping'  : 0,
             'extras'   : {}
-        } for joint_name in joint_names
+        } for i, joint_name in enumerate(joint_names)
     ]
     animat_dict["morphology"]["self_collisions"] = []
 
@@ -217,7 +235,7 @@ def gen_simulation_config():
             "viewer": "MuJoCo",
             "texture_repeat": 1,
             "shadow_size": 1024,
-            "visual_scale": 100.0,
+            "visual_scale": 10.0,
             "extent": 10.0
         },
         "pybullet": {
@@ -238,6 +256,12 @@ def gen_simulation_config():
                 "log_path": "output",
                 "skip": 0
             }
+            },
+            {
+                "loader": "farms_mujoco.simulation.extensions.MjcfSaver",
+                "config": {
+                    "path": "output/simulation_mjcf.xml"
+                }
             }
         ]
     }
@@ -262,11 +286,11 @@ def gen_simulation_config():
 
                     # intermediate tank
                     "Nx": 1024,
-                    "Ny": 1024,
-                    "xmin": -0.1,
-                    "xmax": 0.1,
-                    "ymin": -0.1,
-                    "ymax": 0.1,
+                    "Ny": 512,
+                    "xmin": -0.11,
+                    "xmax": 0.09,
+                    "ymin": -0.05,
+                    "ymax": 0.05,
 
                     # ## large tank
                     # N                 : 2048
@@ -275,15 +299,15 @@ def gen_simulation_config():
                     # ymin              : -0.104
                     # ymax              : 0.104
 
-                    "convection_method": "abdquickest",
-                    "dt": 0.0001,
+                    "convection_method": "implicit",
+                    "dt": 0.001,
                     "nt": 800000,
                     "nu": 1.0e-6,
                     "rho": 1.0e+3,
                     "poisson_tol": 1.0e-7,
                     "poisson_max_cycles": 5,
                     "poisson_max_mgcg_cycles": 3,
-                    "jacobi_weight": 0.6,
+                    "jacobi_weight": 0.7,
                     "poisson_nsmoothing": 5,
                     "poisson_verbose": False,
                     "poisson_folder": "data/"
@@ -313,7 +337,7 @@ def gen_simulation_config():
                 "output": {
                     "save_path": "/data/andreaferrario/ns_data/",
                     "save_frames": True,
-                    "save_every": 1,
+                    "save_every": 20,
                     "vmin": -50,
                     "vmax": 50,
                     "save_uv": False

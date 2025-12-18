@@ -1,4 +1,3 @@
-
 import h5py
 from farms_core.sensors.sensor_convention import sc
 import numpy as np
@@ -14,7 +13,7 @@ dirs=[
 ]
 tstops = [15, 9.5, 7, 6.1]
 
-plt.figure()
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
 
 for dir, tstop, value in zip(dirs, tstops, values):
     file = dir + 'simulation.hdf5'
@@ -30,22 +29,28 @@ for dir, tstop, value in zip(dirs, tstops, values):
 
         v_links = link_array[:,:,sc.link_com_velocity_lin_x:sc.link_com_velocity_lin_y+1]
 
-        v_com =np.mean(v_links, axis=1)
+        v_com = np.mean(v_links, axis=1)
 
         v_x = v_com[:it_max,0]
         v_y = v_com[:it_max,1]
 
-        plt.plot(times[:it_max], v_x, label=str(value)+'Hz')
-        # plt.plot(times[:it_max], v_y, label='v_y')
+        ax1.plot(times[:it_max], v_x, label=str(value)+'Hz')
+        ax2.plot(times[:it_max], v_y, label=str(value)+'Hz')
 
-plt.xlabel('Time [s]')
-plt.ylabel('V_x [m/s]')
-plt.legend()
-plt.title('COM Velocity')
-plt.grid(True)
+ax1.set_xlabel('Time [s]')
+ax1.set_ylabel('V_x [m/s]')
+ax1.legend()
+ax1.set_title('COM Velocity - Longitudinal')
+ax1.grid(True)
+
+ax2.set_xlabel('Time [s]')
+ax2.set_ylabel('V_y [m/s]')
+ax2.legend()
+ax2.set_title('COM Velocity - Lateral')
+ax2.grid(True)
+
+plt.tight_layout()
 plt.savefig(os.path.join("figures", "com_velocities_freq.png"))
 plt.close()
-
-
 
 

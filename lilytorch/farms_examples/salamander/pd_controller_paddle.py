@@ -28,6 +28,8 @@ class PositionController(KinematicsController):
             amp_deg=config["amp"],
             freq=config["freq"],
             TWL=config["twl"],
+            limb_pose1=config["limb_pose1"],
+            limb_pose2=config["limb_pose2"],
             plot=False
         )
         joints_control_types  = {
@@ -94,6 +96,19 @@ class PositionController(KinematicsController):
             animat_i = animat_i,
         )
 
+
+    def ComputeIK2D(self, elbowID, x, y, d1, d2):
+        """
+        elbowID=1 - elbow down
+        elbowID=-1 - elbow up
+        """
+        D=((x**2+y**2-d1**2-d2**2)/(2*d1*d2)).clip(-1,1)
+        elbow=elbowID*np.acos(D)
+        k1=d1+d2*np.cos(elbow)
+        k2=d2*np.sin(elbow)
+        thigh=np.atan2(y,x)-np.atan2(k2,k1)
+        return (thigh, elbow)
+
     def generate_positions(
             self,
             tstop=3,
@@ -102,33 +117,46 @@ class PositionController(KinematicsController):
             amp_deg=20.0,
             freq=1.0,
             TWL=14,
+            limb_pose1=-0.4,
+            limb_pose2=0.0,
             plot=True
         ):
 
         nmotors = 8
-        amp = amp_deg * (np.pi / 180.0)
+
         times = np.expand_dims(np.arange(0, tstop, 1 / sampling_rate), axis=1)
-        times_expanded = np.repeat(times, nmotors, axis=1)
+        thetas_spine = np.zeros((times.shape[0], nmotors))
 
-        idxs   = np.arange(nmotors)
-        x      = (idxs + 1) / nmotors
-        c1     = +0.05,
-        c2     = -0.13,
-        c3     = +0.28
-        factor = c1+c2*x+c3*x**2
+        radius = 0.005
+        center = np.array([0.01, 0.00])
+        phase_shift = 0 #np.pi
+        x_traj_left = center[0] + radius * np.sin(2*np.pi*freq*times.T[0])
+        y_traj_left = center[1] + radius * np.cos(2*np.pi*freq*times.T[0])
 
-        # factor[:-1] *= 0
-        # factor[-1] = 4
+        x_traj_right = center[0] + radius * np.sin(2*np.pi*freq*times.T[0] + phase_shift)
+        y_traj_right = center[1] + radius * np.cos(2*np.pi*freq*times.T[0] + phase_shift)
 
-        thetas_spine = amp * factor * np.sin(
-            2 * np.pi * (
-                wlength * idxs / TWL - freq * times_expanded
-            )
-        )
+        l1 = np.array(0.005)
+        l2 = np.array(0.005)
 
-        limb_angles = -0.*(np.pi)*np.ones_like(times)
+        thigh_left, elbow_left = self.ComputeIK2D(1, x_traj_left, y_traj_left, l1, l2)
+        thigh_right, elbow_right = self.ComputeIK2D(1, x_traj_right, y_traj_right, l1, l2)
 
-        data = np.column_stack([times, thetas_spine, limb_angles, limb_angles, limb_angles, limb_angles])
+        limb_angles = np.zeros((times.shape[0], 8))
+
+        limb_angles[:,0] = thigh_left
+        limb_angles[:,1] = elbow_left
+        limb_angles[:,2] = thigh_right
+        limb_angles[:,3] = elbow_right
+
+        # also hindlimbs
+        limb_angles[:,4] = thigh_right
+        limb_angles[:,5] = elbow_right
+        limb_angles[:,6] = thigh_left
+        limb_angles[:,7] = elbow_left
+
+
+        data = np.column_stack([times, thetas_spine, limb_angles])
 
 
         if plot:

@@ -31,7 +31,7 @@ mujoco:
   viewer: MuJoCo
   texture_repeat: 1
   shadow_size: 1024
-  visual_scale: 100.0
+  visual_scale: 10.0
   extent: 10.0
 pybullet:
   opengl2: false
@@ -48,3 +48,6 @@ extensions:
   config:
     log_path: output
     skip: 0
+- loader: farms_mujoco.simulation.extensions.MjcfSaver
+  config:
+    path: output/simulation_mjcf.xml

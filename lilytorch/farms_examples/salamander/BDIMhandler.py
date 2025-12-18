@@ -7,7 +7,7 @@ import torch
 
 class BDIMhandler():
 
-    def __init__(self, yaml_file, data, physics, dtype=torch.float64):
+    def __init__(self, yaml_file, data, physics, dtype=torch.float32):
 
         self.dtype = dtype
         if self.dtype == torch.float32:
@@ -41,7 +41,7 @@ class BDIMhandler():
         # self.force_scaling = 0.008 # general height of 1guilla border
 
         self.rho_fluid = self.pars['solver']['rho']
-        self.rho_body  = 1000.0
+        self.rho_body  = 900.0
 
 
     def cython2numpy(self, array):
@@ -64,6 +64,7 @@ class BDIMhandler():
             ang_vels.append( self.cython2numpy( [data.sensors.links.com_ang_velocity(iteration, link)[2] for link in range(len(data.sensors.links.names))]) )
 
         # from IPython import embed; embed()
+
 
         for body_i, body in enumerate(self.fluid_solver.composite_body.bodies[:]):
 
@@ -102,28 +103,28 @@ class BDIMhandler():
             # update the contour position
             body.cnt_update = R @ body.cnt+urdf_pos[:,None]
 
-            # # compute the mask for the contour points
-            # x_cnt=body.cnt_update[0]
-            # y_cnt=body.cnt_update[1]
-            # if link_id==0:
-            #     body_p=self.fluid_solver.composite_body.bodies[body_i+1]
-            #     pos_trans = Rs[animat_id][link_id+1].T@(torch.stack((x_cnt,y_cnt))-urdf_poses[animat_id][link_id+1][:,None])
-            #     sdf_p = body_p.sdf(pos_trans[0],pos_trans[1])-body.h
-            #     mask=(sdf_p >= 0)
-            # elif link_id==urdf_poses[animat_id].shape[0]-1:
-            #     body_m=self.fluid_solver.composite_body.bodies[body_i-1]
-            #     pos_trans = Rs[animat_id][link_id-1].T@(torch.stack((x_cnt,y_cnt))-urdf_poses[animat_id][link_id-1][:,None])
-            #     sdf_m = body_m.sdf(pos_trans[0],pos_trans[1])-body.h
-            #     mask=(sdf_m >= 0)
-            # else:
-            #     body_m=self.fluid_solver.composite_body.bodies[body_i-1]
-            #     pos_trans_m = Rs[animat_id][link_id-1].T@(torch.stack((x_cnt,y_cnt))-urdf_poses[animat_id][link_id-1][:,None])
-            #     body_p=self.fluid_solver.composite_body.bodies[body_i+1]
-            #     pos_trans_p = Rs[animat_id][link_id+1].T@(torch.stack((x_cnt,y_cnt))-urdf_poses[animat_id][link_id+1][:,None])
-            #     sdf_m = body_m.sdf(pos_trans_m[0],pos_trans_m[1])-body.h
-            #     sdf_p = body_p.sdf(pos_trans_p[0],pos_trans_p[1])-body.h
-            #     mask=(sdf_m >= 0) & (sdf_p >= 0)
-            # body.mask=mask
+            # compute the mask for the contour points
+            x_cnt=body.cnt_update[0]
+            y_cnt=body.cnt_update[1]
+            if link_id==0:
+                body_p=self.fluid_solver.composite_body.bodies[body_i+1]
+                pos_trans = Rs[animat_id][link_id+1].T@(torch.stack((x_cnt,y_cnt))-urdf_poses[animat_id][link_id+1][:,None])
+                sdf_p = body_p.sdf(pos_trans[0],pos_trans[1])-body.h
+                mask=(sdf_p >= 0)
+            elif link_id==urdf_poses[animat_id].shape[0]-1:
+                body_m=self.fluid_solver.composite_body.bodies[body_i-1]
+                pos_trans = Rs[animat_id][link_id-1].T@(torch.stack((x_cnt,y_cnt))-urdf_poses[animat_id][link_id-1][:,None])
+                sdf_m = body_m.sdf(pos_trans[0],pos_trans[1])-body.h
+                mask=(sdf_m >= 0)
+            else:
+                body_m=self.fluid_solver.composite_body.bodies[body_i-1]
+                pos_trans_m = Rs[animat_id][link_id-1].T@(torch.stack((x_cnt,y_cnt))-urdf_poses[animat_id][link_id-1][:,None])
+                body_p=self.fluid_solver.composite_body.bodies[body_i+1]
+                pos_trans_p = Rs[animat_id][link_id+1].T@(torch.stack((x_cnt,y_cnt))-urdf_poses[animat_id][link_id+1][:,None])
+                sdf_m = body_m.sdf(pos_trans_m[0],pos_trans_m[1])-body.h
+                sdf_p = body_p.sdf(pos_trans_p[0],pos_trans_p[1])-body.h
+                mask=(sdf_m >= 0) & (sdf_p >= 0)
+            body.mask=mask
 
             # body.cnt_u = lin_vel[0]-ang_vel*(y_cnt-com_pos[1])
             # body.cnt_v = lin_vel[1]+ang_vel*(x_cnt-com_pos[0])
@@ -162,7 +163,7 @@ class BDIMhandler():
             physics.data.xfrc_applied[ind_task, 1] = (self.friction_force_lin_y[body_i] + self.pressure_force_y[body_i]) * task.units.newtons
             physics.data.xfrc_applied[ind_task, 5] = (self.friction_force_ang_z[body_i] + self.pressure_force_ang_z[body_i]) * task.units.newtons
 
-            print(physics.data.xfrc_applied[ind_task, 0])
+            # print(physics.data.xfrc_applied[ind_task, 0])
 
 
 
@@ -288,7 +289,7 @@ class BDIMhandler():
             (self.fluid_solver.u0, self.fluid_solver.v0, self.fluid_solver.p0) = (u,v,p)
 
             # compute fluid forces on the body
-            self.fluid_solver.forces_method2(self.fluid_solver.u0, self.fluid_solver.v0, self.fluid_solver.p0, iteration)
+            self.fluid_solver.forces_method1(self.fluid_solver.u0, self.fluid_solver.v0, self.fluid_solver.p0, iteration)
 
             self.terminate = self.fluid_solver.plotting_debug(self.fluid_solver.u0, self.fluid_solver.v0, self.fluid_solver.p0, iteration)
 

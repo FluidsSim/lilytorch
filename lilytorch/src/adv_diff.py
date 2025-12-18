@@ -63,13 +63,15 @@ class AdvDiffSolver:
             # dummy initialization for the implicit solver
             x_staggered = x - dx/2
             y_staggered = y - dy/2
-            self.gu = RegularGridInterpolator((x_staggered,y), torch.zeros((self.nx,self.ny), device=self.device,dtype=self.dtype), fill_value=None)
-            self.gv = RegularGridInterpolator((x,y_staggered), torch.zeros((self.nx,self.ny), device=self.device,dtype=self.dtype), fill_value=None)
+            self.gu = RegularGridInterpolator((x_staggered,y), torch.zeros((self.nx,self.ny), device=self.device,dtype=self.dtype), fill_value=None, method=1)
+            self.gv = RegularGridInterpolator((x,y_staggered), torch.zeros((self.nx,self.ny), device=self.device,dtype=self.dtype), fill_value=None, method=1)
             self.X_u, self.Y_u = torch.meshgrid(x_staggered,y, indexing="ij")
             self.X_v, self.Y_v = torch.meshgrid(x,y_staggered, indexing="ij")
             self.X_cc, self.Y_cc = torch.meshgrid(x_staggered,y_staggered, indexing="ij")
-            self.xflat = self.X_u.flatten().clone().detach()
-            self.yflat = self.Y_v.flatten().clone().detach()
+            self.xflat_xgrid = self.X_u.flatten().clone().detach()
+            self.yflat_xgrid = self.Y_u.flatten().clone().detach()
+            self.xflat_ygrid = self.X_v.flatten().clone().detach()
+            self.yflat_ygrid = self.Y_v.flatten().clone().detach()
         elif method == "explicit":
             self.solve = self.solve_explicit
         elif method == "quick":
@@ -318,14 +320,14 @@ class AdvDiffSolver:
         Implicit solver based on Staam, 1999 where
         u_new(x,y) = u(x-dt*u(x,y), y-dt*v(x,y)) [linearly interpolated]
         """
-        xold = self.xflat-u.flatten()*self.dt
-        yold = self.yflat-v.flatten()*self.dt
-
         self.gu.F = u
-        u = self.gu(xold, yold).reshape((self.nx,self.ny)).clone().detach()
-
         self.gv.F = v
-        v = self.gv(xold, yold).reshape((self.nx,self.ny)).clone().detach()
+
+        v_xstag = self.gv(self.xflat_xgrid, self.yflat_xgrid).clone().detach()
+        u_ystag = self.gu(self.xflat_ygrid, self.yflat_ygrid).clone().detach()
+
+        u = self.gu(self.xflat_xgrid-u.flatten()*self.dt, self.yflat_xgrid-v_xstag*self.dt).reshape((self.nx,self.ny)).clone().detach()
+        v = self.gv(self.xflat_ygrid-u_ystag*self.dt, self.yflat_ygrid-v.flatten()*self.dt).reshape((self.nx,self.ny)).clone().detach()
 
         u[1:-1,1:-1] += (
                         self.nu*self.dtdx2*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
@@ -402,7 +404,6 @@ class AdvDiffSolver:
             self.lam(u[:-3,1:-1],u[1:-2,1:-1],u[2:-1,1:-1]),
             self.lam(u[3:,1:-1],u[2:-1,1:-1],u[1:-2,1:-1])
         )
-
 
     def solve_quick_waterlily(self, u, v):
 
@@ -501,8 +502,6 @@ class AdvDiffSolver:
                         self.nu*self.dtdx2*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])
                         )
         return (u_new,v_new)
-
-
 
     def set_BCs(self, u, v):
 
