@@ -24,7 +24,8 @@ controller_path = "lilytorch.farms_examples.salamander.pd_controller_swim.Positi
 gains        = [0.001, .00002, 0]
 control_pars = {'freq': 1.0, 'twl': 10, 'amp': 200, 'limb_pose1':-0.35*3.141592653589793, 'limb_pose2':-0.2*3.141592653589793}
 use_fluid    = True
-headless     = True
+headless     = False
+save_frames  = False
 
 sdf = ModelSDF.read(sdf_path)[0] # this is the sdf content
 
@@ -42,7 +43,7 @@ for joint in joints:
     else:
         initial_joint_pos.append([0, 0])
 
-timestep = 0.004
+timestep = 0.01
 spawn_mode = SpawnMode.TRANSVERSE
 density = 1000.0
 
@@ -279,7 +280,7 @@ def gen_simulation_config():
                 "handler_path": handler_path,
                 "bdim_yaml": {
                 "solver": {
-                    "use_gpu": False,
+                    "use_gpu": True,
                     "nthreads": 16,
 
                     # ## small tank
@@ -341,7 +342,7 @@ def gen_simulation_config():
                 },
                 "output": {
                     "save_path": "/data/andreaferrario/ns_data/",
-                    "save_frames": True,
+                    "save_frames": save_frames,
                     "save_every": 20,
                     "vmin": -50,
                     "vmax": 50,

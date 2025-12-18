@@ -8,10 +8,10 @@ runtime:
   play: true
   rtl: 1.0
   fast: false
-  headless: true
+  headless: false
   show_progress: true
 physics:
-  timestep: 0.004
+  timestep: 0.01
   gravity:
   - 0
   - 0
@@ -56,7 +56,7 @@ extensions:
     handler_path: lilytorch.farms_examples.salamander.BDIMhandler.BDIMhandler
     bdim_yaml:
       solver:
-        use_gpu: false
+        use_gpu: true
         nthreads: 16
         Nx: 1024
         Ny: 256
@@ -117,7 +117,7 @@ extensions:
         scale: 1
       output:
         save_path: /data/andreaferrario/ns_data/
-        save_frames: true
+        save_frames: false
         save_every: 20
         vmin: -50
         vmax: 50
