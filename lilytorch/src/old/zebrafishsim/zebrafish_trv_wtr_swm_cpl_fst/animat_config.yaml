@@ -26,11 +26,7 @@ morphology:
     - 0.7
     - 0
     - 0
-    extras:
-      restitution: 0.5
-      linearDamping: 0
-      angularDamping: 0
-    swimming: true
+    fluid_interaction: true
     density: 1000.0
     drag_coefficients:
     - - -0.001
@@ -39,6 +35,10 @@ morphology:
     - - 0
       - 0
       - 0
+    extras:
+      restitution: 0.5
+      linearDamping: 0
+      angularDamping: 0
     mass_multiplier: 1
   - name: link_1
     collisions: true
@@ -46,11 +46,7 @@ morphology:
     - 0.7
     - 0
     - 0
-    extras:
-      restitution: 0.5
-      linearDamping: 0
-      angularDamping: 0
-    swimming: true
+    fluid_interaction: true
     density: 1000.0
     drag_coefficients:
     - - -0.001
@@ -59,6 +55,10 @@ morphology:
     - - 0
       - 0
       - 0
+    extras:
+      restitution: 0.5
+      linearDamping: 0
+      angularDamping: 0
     mass_multiplier: 1
   - name: link_2
     collisions: true
@@ -66,11 +66,7 @@ morphology:
     - 0.7
     - 0
     - 0
-    extras:
-      restitution: 0.5
-      linearDamping: 0
-      angularDamping: 0
-    swimming: true
+    fluid_interaction: true
     density: 1000.0
     drag_coefficients:
     - - -0.001
@@ -79,6 +75,10 @@ morphology:
     - - 0
       - 0
       - 0
+    extras:
+      restitution: 0.5
+      linearDamping: 0
+      angularDamping: 0
     mass_multiplier: 1
   - name: link_3
     collisions: true
@@ -86,11 +86,7 @@ morphology:
     - 0.7
     - 0
     - 0
-    extras:
-      restitution: 0.5
-      linearDamping: 0
-      angularDamping: 0
-    swimming: true
+    fluid_interaction: true
     density: 1000.0
     drag_coefficients:
     - - -0.001
@@ -99,6 +95,10 @@ morphology:
     - - 0
       - 0
       - 0
+    extras:
+      restitution: 0.5
+      linearDamping: 0
+      angularDamping: 0
     mass_multiplier: 1
   - name: link_4
     collisions: true
@@ -106,11 +106,7 @@ morphology:
     - 0.7
     - 0
     - 0
-    extras:
-      restitution: 0.5
-      linearDamping: 0
-      angularDamping: 0
-    swimming: true
+    fluid_interaction: true
     density: 1000.0
     drag_coefficients:
     - - -0.001
@@ -119,6 +115,10 @@ morphology:
     - - 0
       - 0
       - 0
+    extras:
+      restitution: 0.5
+      linearDamping: 0
+      angularDamping: 0
     mass_multiplier: 1
   - name: link_5
     collisions: true
@@ -126,11 +126,7 @@ morphology:
     - 0.7
     - 0
     - 0
-    extras:
-      restitution: 0.5
-      linearDamping: 0
-      angularDamping: 0
-    swimming: true
+    fluid_interaction: true
     density: 1000.0
     drag_coefficients:
     - - -0.001
@@ -139,6 +135,10 @@ morphology:
     - - 0
       - 0
       - 0
+    extras:
+      restitution: 0.5
+      linearDamping: 0
+      angularDamping: 0
     mass_multiplier: 1
   - name: link_6
     collisions: true
@@ -146,11 +146,7 @@ morphology:
     - 0.7
     - 0
     - 0
-    extras:
-      restitution: 0.5
-      linearDamping: 0
-      angularDamping: 0
-    swimming: true
+    fluid_interaction: true
     density: 1000.0
     drag_coefficients:
     - - -0.001
@@ -159,6 +155,10 @@ morphology:
     - - 0
       - 0
       - 0
+    extras:
+      restitution: 0.5
+      linearDamping: 0
+      angularDamping: 0
     mass_multiplier: 1
   - name: link_7
     collisions: true
@@ -166,11 +166,7 @@ morphology:
     - 0.7
     - 0
     - 0
-    extras:
-      restitution: 0.5
-      linearDamping: 0
-      angularDamping: 0
-    swimming: true
+    fluid_interaction: true
     density: 1000.0
     drag_coefficients:
     - - -0.001
@@ -179,6 +175,10 @@ morphology:
     - - 0
       - 0
       - 0
+    extras:
+      restitution: 0.5
+      linearDamping: 0
+      angularDamping: 0
     mass_multiplier: 1
   - name: link_8
     collisions: true
@@ -186,11 +186,7 @@ morphology:
     - 0.7
     - 0
     - 0
-    extras:
-      restitution: 0.5
-      linearDamping: 0
-      angularDamping: 0
-    swimming: true
+    fluid_interaction: true
     density: 1000.0
     drag_coefficients:
     - - -0.001
@@ -199,6 +195,10 @@ morphology:
     - - 0
       - 0
       - 0
+    extras:
+      restitution: 0.5
+      linearDamping: 0
+      angularDamping: 0
     mass_multiplier: 1
   - name: link_9
     collisions: true
@@ -206,11 +206,7 @@ morphology:
     - 0.7
     - 0
     - 0
-    extras:
-      restitution: 0.5
-      linearDamping: 0
-      angularDamping: 0
-    swimming: true
+    fluid_interaction: true
     density: 1000.0
     drag_coefficients:
     - - -0.001
@@ -219,6 +215,10 @@ morphology:
     - - 0
       - 0
       - 0
+    extras:
+      restitution: 0.5
+      linearDamping: 0
+      angularDamping: 0
     mass_multiplier: 1
   - name: link_10
     collisions: true
@@ -226,11 +226,7 @@ morphology:
     - 0.7
     - 0
     - 0
-    extras:
-      restitution: 0.5
-      linearDamping: 0
-      angularDamping: 0
-    swimming: true
+    fluid_interaction: true
     density: 1000.0
     drag_coefficients:
     - - -0.001
@@ -239,6 +235,10 @@ morphology:
     - - 0
       - 0
       - 0
+    extras:
+      restitution: 0.5
+      linearDamping: 0
+      angularDamping: 0
     mass_multiplier: 1
   - name: link_11
     collisions: true
@@ -246,11 +246,7 @@ morphology:
     - 0.7
     - 0
     - 0
-    extras:
-      restitution: 0.5
-      linearDamping: 0
-      angularDamping: 0
-    swimming: true
+    fluid_interaction: true
     density: 1000.0
     drag_coefficients:
     - - -0.001
@@ -259,6 +255,10 @@ morphology:
     - - 0
       - 0
       - 0
+    extras:
+      restitution: 0.5
+      linearDamping: 0
+      angularDamping: 0
     mass_multiplier: 1
   - name: link_12
     collisions: true
@@ -266,11 +266,7 @@ morphology:
     - 0.7
     - 0
     - 0
-    extras:
-      restitution: 0.5
-      linearDamping: 0
-      angularDamping: 0
-    swimming: true
+    fluid_interaction: true
     density: 1000.0
     drag_coefficients:
     - - -0.001
@@ -279,6 +275,10 @@ morphology:
     - - 0
       - 0
       - 0
+    extras:
+      restitution: 0.5
+      linearDamping: 0
+      angularDamping: 0
     mass_multiplier: 1
   - name: link_13
     collisions: true
@@ -286,11 +286,7 @@ morphology:
     - 0.7
     - 0
     - 0
-    extras:
-      restitution: 0.5
-      linearDamping: 0
-      angularDamping: 0
-    swimming: true
+    fluid_interaction: true
     density: 1000.0
     drag_coefficients:
     - - -0.001
@@ -299,6 +295,10 @@ morphology:
     - - 0
       - 0
       - 0
+    extras:
+      restitution: 0.5
+      linearDamping: 0
+      angularDamping: 0
     mass_multiplier: 1
   - name: link_14
     collisions: true
@@ -306,11 +306,7 @@ morphology:
     - 0.7
     - 0
     - 0
-    extras:
-      restitution: 0.5
-      linearDamping: 0
-      angularDamping: 0
-    swimming: true
+    fluid_interaction: true
     density: 1000.0
     drag_coefficients:
     - - -0.001
@@ -319,6 +315,10 @@ morphology:
     - - 0
       - 0
       - 0
+    extras:
+      restitution: 0.5
+      linearDamping: 0
+      angularDamping: 0
     mass_multiplier: 1
   - name: link_15
     collisions: true
@@ -326,11 +326,7 @@ morphology:
     - 0.7
     - 0
     - 0
-    extras:
-      restitution: 0.5
-      linearDamping: 0
-      angularDamping: 0
-    swimming: true
+    fluid_interaction: true
     density: 1000.0
     drag_coefficients:
     - - -0.001
@@ -339,6 +335,10 @@ morphology:
     - - 0
       - 0
       - 0
+    extras:
+      restitution: 0.5
+      linearDamping: 0
+      angularDamping: 0
     mass_multiplier: 1
   self_collisions: []
   joints:
@@ -2424,7 +2424,9 @@ control:
   adhesions: []
   visuals: []
 extensions:
-- loader: farms_amphibious.callbacks.SwimmingCallback
+- loader: farms_amphibious.control.amphibious.AmphibiousController
+  config: {}
+- loader: farms_mujoco.swimming.extension.SwimmingExtension
   config:
     water_properties: null
 show_xfrc: false

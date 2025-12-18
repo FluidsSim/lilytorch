@@ -32,4 +32,4 @@ water:
   maps:
   - ''
   - ''
-ground_height: -1
+ground_height: -0.1
