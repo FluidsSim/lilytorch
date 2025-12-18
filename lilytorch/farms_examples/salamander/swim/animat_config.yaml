@@ -1,0 +1,551 @@
+spawn:
+  loader: 0
+  mode: !!python/object/apply:farms_core.model.options.SpawnMode
+  - transverse
+  pose:
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+  - 3.141592653589793
+  velocity:
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+  extras: {}
+sdf: /data/andreaferrario/lilytorch/lilytorch/farms_examples/sdfs/salamander_v5/sdf/salamander.sdf
+morphology:
+  links:
+  - name: link_body_0
+    collisions: true
+    friction:
+    - 0.2
+    - 0
+    - 0
+    extras: {}
+    fluid_interaction: true
+    density: 1000.0
+  - name: link_body_1
+    collisions: true
+    friction:
+    - 0.2
+    - 0
+    - 0
+    extras: {}
+    fluid_interaction: true
+    density: 1000.0
+  - name: link_body_2
+    collisions: true
+    friction:
+    - 0.2
+    - 0
+    - 0
+    extras: {}
+    fluid_interaction: true
+    density: 1000.0
+  - name: link_body_3
+    collisions: true
+    friction:
+    - 0.2
+    - 0
+    - 0
+    extras: {}
+    fluid_interaction: true
+    density: 1000.0
+  - name: link_body_4
+    collisions: true
+    friction:
+    - 0.2
+    - 0
+    - 0
+    extras: {}
+    fluid_interaction: true
+    density: 1000.0
+  - name: link_body_5
+    collisions: true
+    friction:
+    - 0.2
+    - 0
+    - 0
+    extras: {}
+    fluid_interaction: true
+    density: 1000.0
+  - name: link_body_6
+    collisions: true
+    friction:
+    - 0.2
+    - 0
+    - 0
+    extras: {}
+    fluid_interaction: true
+    density: 1000.0
+  - name: link_body_7
+    collisions: true
+    friction:
+    - 0.2
+    - 0
+    - 0
+    extras: {}
+    fluid_interaction: true
+    density: 1000.0
+  - name: link_body_8
+    collisions: true
+    friction:
+    - 0.2
+    - 0
+    - 0
+    extras: {}
+    fluid_interaction: true
+    density: 1000.0
+  - name: link_leg_0_L_2
+    collisions: true
+    friction:
+    - 0.2
+    - 0
+    - 0
+    extras: {}
+    fluid_interaction: true
+    density: 1000.0
+  - name: link_leg_0_L_3
+    collisions: true
+    friction:
+    - 0.2
+    - 0
+    - 0
+    extras: {}
+    fluid_interaction: true
+    density: 1000.0
+  - name: link_leg_0_R_2
+    collisions: true
+    friction:
+    - 0.2
+    - 0
+    - 0
+    extras: {}
+    fluid_interaction: true
+    density: 1000.0
+  - name: link_leg_0_R_3
+    collisions: true
+    friction:
+    - 0.2
+    - 0
+    - 0
+    extras: {}
+    fluid_interaction: true
+    density: 1000.0
+  - name: link_leg_1_L_2
+    collisions: true
+    friction:
+    - 0.2
+    - 0
+    - 0
+    extras: {}
+    fluid_interaction: true
+    density: 1000.0
+  - name: link_leg_1_L_3
+    collisions: true
+    friction:
+    - 0.2
+    - 0
+    - 0
+    extras: {}
+    fluid_interaction: true
+    density: 1000.0
+  - name: link_leg_1_R_2
+    collisions: true
+    friction:
+    - 0.2
+    - 0
+    - 0
+    extras: {}
+    fluid_interaction: true
+    density: 1000.0
+  - name: link_leg_1_R_3
+    collisions: true
+    friction:
+    - 0.2
+    - 0
+    - 0
+    extras: {}
+    fluid_interaction: true
+    density: 1000.0
+  joints:
+  - name: joint_body_0
+    initial:
+    - 0
+    - 0
+    limits:
+    - - -.inf
+      - .inf
+    - - -.inf
+      - .inf
+    stiffness: 0
+    springref: 0
+    damping: 0
+    extras: {}
+  - name: joint_body_1
+    initial:
+    - 0
+    - 0
+    limits:
+    - - -.inf
+      - .inf
+    - - -.inf
+      - .inf
+    stiffness: 0
+    springref: 0
+    damping: 0
+    extras: {}
+  - name: joint_body_2
+    initial:
+    - 0
+    - 0
+    limits:
+    - - -.inf
+      - .inf
+    - - -.inf
+      - .inf
+    stiffness: 0
+    springref: 0
+    damping: 0
+    extras: {}
+  - name: joint_body_3
+    initial:
+    - 0
+    - 0
+    limits:
+    - - -.inf
+      - .inf
+    - - -.inf
+      - .inf
+    stiffness: 0
+    springref: 0
+    damping: 0
+    extras: {}
+  - name: joint_body_4
+    initial:
+    - 0
+    - 0
+    limits:
+    - - -.inf
+      - .inf
+    - - -.inf
+      - .inf
+    stiffness: 0
+    springref: 0
+    damping: 0
+    extras: {}
+  - name: joint_body_5
+    initial:
+    - 0
+    - 0
+    limits:
+    - - -.inf
+      - .inf
+    - - -.inf
+      - .inf
+    stiffness: 0
+    springref: 0
+    damping: 0
+    extras: {}
+  - name: joint_body_6
+    initial:
+    - 0
+    - 0
+    limits:
+    - - -.inf
+      - .inf
+    - - -.inf
+      - .inf
+    stiffness: 0
+    springref: 0
+    damping: 0
+    extras: {}
+  - name: joint_body_7
+    initial:
+    - 0
+    - 0
+    limits:
+    - - -.inf
+      - .inf
+    - - -.inf
+      - .inf
+    stiffness: 0
+    springref: 0
+    damping: 0
+    extras: {}
+  - name: joint_leg_0_L_0
+    initial:
+    - -1.0995574287564276
+    - 0
+    limits:
+    - - -.inf
+      - .inf
+    - - -.inf
+      - .inf
+    stiffness: 0
+    springref: 0
+    damping: 0
+    extras: {}
+  - name: joint_leg_0_L_3
+    initial:
+    - -0.6283185307179586
+    - 0
+    limits:
+    - - -.inf
+      - .inf
+    - - -.inf
+      - .inf
+    stiffness: 0
+    springref: 0
+    damping: 0
+    extras: {}
+  - name: joint_leg_0_R_0
+    initial:
+    - -1.0995574287564276
+    - 0
+    limits:
+    - - -.inf
+      - .inf
+    - - -.inf
+      - .inf
+    stiffness: 0
+    springref: 0
+    damping: 0
+    extras: {}
+  - name: joint_leg_0_R_3
+    initial:
+    - -0.6283185307179586
+    - 0
+    limits:
+    - - -.inf
+      - .inf
+    - - -.inf
+      - .inf
+    stiffness: 0
+    springref: 0
+    damping: 0
+    extras: {}
+  - name: joint_leg_1_L_0
+    initial:
+    - -1.0995574287564276
+    - 0
+    limits:
+    - - -.inf
+      - .inf
+    - - -.inf
+      - .inf
+    stiffness: 0
+    springref: 0
+    damping: 0
+    extras: {}
+  - name: joint_leg_1_L_3
+    initial:
+    - -0.6283185307179586
+    - 0
+    limits:
+    - - -.inf
+      - .inf
+    - - -.inf
+      - .inf
+    stiffness: 0
+    springref: 0
+    damping: 0
+    extras: {}
+  - name: joint_leg_1_R_0
+    initial:
+    - -1.0995574287564276
+    - 0
+    limits:
+    - - -.inf
+      - .inf
+    - - -.inf
+      - .inf
+    stiffness: 0
+    springref: 0
+    damping: 0
+    extras: {}
+  - name: joint_leg_1_R_3
+    initial:
+    - -0.6283185307179586
+    - 0
+    limits:
+    - - -.inf
+      - .inf
+    - - -.inf
+      - .inf
+    stiffness: 0
+    springref: 0
+    damping: 0
+    extras: {}
+  self_collisions: []
+control:
+  sensors:
+    links: &id001
+    - link_body_0
+    - link_body_1
+    - link_body_2
+    - link_body_3
+    - link_body_4
+    - link_body_5
+    - link_body_6
+    - link_body_7
+    - link_body_8
+    - link_leg_0_L_2
+    - link_leg_0_L_3
+    - link_leg_0_R_2
+    - link_leg_0_R_3
+    - link_leg_1_L_2
+    - link_leg_1_L_3
+    - link_leg_1_R_2
+    - link_leg_1_R_3
+    joints:
+    - joint_body_0
+    - joint_body_1
+    - joint_body_2
+    - joint_body_3
+    - joint_body_4
+    - joint_body_5
+    - joint_body_6
+    - joint_body_7
+    - joint_leg_0_L_0
+    - joint_leg_0_L_3
+    - joint_leg_0_R_0
+    - joint_leg_0_R_3
+    - joint_leg_1_L_0
+    - joint_leg_1_L_3
+    - joint_leg_1_R_0
+    - joint_leg_1_R_3
+    contacts: []
+    xfrc: *id001
+    muscles: []
+    adhesions: []
+    visuals: []
+  motors:
+  - joint_name: joint_body_0
+    control_types:
+    - position
+    limits_torque:
+    - -.inf
+    - .inf
+    gains: &id002
+    - 0.001
+    - 2.0e-05
+    - 0
+  - joint_name: joint_body_1
+    control_types:
+    - position
+    limits_torque:
+    - -.inf
+    - .inf
+    gains: *id002
+  - joint_name: joint_body_2
+    control_types:
+    - position
+    limits_torque:
+    - -.inf
+    - .inf
+    gains: *id002
+  - joint_name: joint_body_3
+    control_types:
+    - position
+    limits_torque:
+    - -.inf
+    - .inf
+    gains: *id002
+  - joint_name: joint_body_4
+    control_types:
+    - position
+    limits_torque:
+    - -.inf
+    - .inf
+    gains: *id002
+  - joint_name: joint_body_5
+    control_types:
+    - position
+    limits_torque:
+    - -.inf
+    - .inf
+    gains: *id002
+  - joint_name: joint_body_6
+    control_types:
+    - position
+    limits_torque:
+    - -.inf
+    - .inf
+    gains: *id002
+  - joint_name: joint_body_7
+    control_types:
+    - position
+    limits_torque:
+    - -.inf
+    - .inf
+    gains: *id002
+  - joint_name: joint_leg_0_L_0
+    control_types:
+    - position
+    limits_torque:
+    - -.inf
+    - .inf
+    gains: *id002
+  - joint_name: joint_leg_0_L_3
+    control_types:
+    - position
+    limits_torque:
+    - -.inf
+    - .inf
+    gains: *id002
+  - joint_name: joint_leg_0_R_0
+    control_types:
+    - position
+    limits_torque:
+    - -.inf
+    - .inf
+    gains: *id002
+  - joint_name: joint_leg_0_R_3
+    control_types:
+    - position
+    limits_torque:
+    - -.inf
+    - .inf
+    gains: *id002
+  - joint_name: joint_leg_1_L_0
+    control_types:
+    - position
+    limits_torque:
+    - -.inf
+    - .inf
+    gains: *id002
+  - joint_name: joint_leg_1_L_3
+    control_types:
+    - position
+    limits_torque:
+    - -.inf
+    - .inf
+    gains: *id002
+  - joint_name: joint_leg_1_R_0
+    control_types:
+    - position
+    limits_torque:
+    - -.inf
+    - .inf
+    gains: *id002
+  - joint_name: joint_leg_1_R_3
+    control_types:
+    - position
+    limits_torque:
+    - -.inf
+    - .inf
+    gains: *id002
+extensions:
+- loader: lilytorch.farms_examples.salamander.pd_controller_swim.PositionController
+  config:
+    freq: 1.0
+    twl: 10
+    amp: 200
+    limb_pose1: -1.0995574287564276
+    limb_pose2: -0.6283185307179586

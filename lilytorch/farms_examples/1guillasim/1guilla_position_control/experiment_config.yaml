@@ -1,0 +1,15 @@
+simulation: simulation_config.yaml
+animats:
+- animat_config.yaml
+arenas:
+- arena_config.yaml
+loaders:
+  simulation_options: farms_core.simulation.options.SimulationOptions
+  animats_options:
+  - farms_core.model.options.AnimatOptions
+  # - farms_amphibious.model.options.AmphibiousOptions
+  arenas_options:
+  - farms_core.model.options.ArenaOptions
+  experiment_data: farms_amphibious.data.data.AmphibiousExperimentData
+  animats_data:
+  - farms_core.model.data.AnimatData
