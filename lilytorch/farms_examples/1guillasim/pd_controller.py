@@ -98,6 +98,7 @@ class PositionController(KinematicsController):
     def generate_positions(
             self,
             tstop=3,
+            tau_rise=1,
             sampling_rate=1000,
             wlength=1,
             amp_deg=20.0,
@@ -116,11 +117,11 @@ class PositionController(KinematicsController):
         # factor[:-1] *= 0
         # factor[-1] = 4
 
-        thetas = amp * factor * np.sin(
+        thetas = - amp * factor * np.sin(
             2 * np.pi * (
                 wlength * idxs / TWL - freq * times_expanded
             )
-        )
+            ) * (1-np.exp(-times_expanded/tau_rise))
 
         data = np.column_stack([times, thetas])
 

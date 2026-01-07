@@ -6,6 +6,10 @@ from farms_core.experiment.options import ExperimentOptions
 from farms_core.experiment.data import ExperimentData
 from farms_core.extensions.extensions import import_item
 from farms_mujoco.simulation.task import ExperimentTask
+from farms_core.model.options import AnimatOptions, ArenaOptions
+from farms_core.model.data import AnimatData
+from farms_core.experiment.data import ExperimentData
+from farms_core.model.extensions import AnimatExtension
 from dm_control.mjcf.physics import Physics
 import logging
 logging.basicConfig(level=logging.ERROR)
@@ -94,3 +98,46 @@ class FluidExtension(TaskExtension):
 
         self.BDIMhandler.step(task, physics)
 
+
+
+# class ImplicitTorqueExtension(AnimatExtension):
+
+#     def __init__(
+#             self,
+#             animat_i: int,
+#             animat_data: AnimatData,
+#             animat_options: AnimatOptions,
+#             arena_options: ArenaOptions,
+#             substep=True,
+#     ):
+#         super().__init__(substep=substep)
+#         self.animat_i = animat_i
+#         self.animat_data = animat_data
+#         self.animat_options = animat_options
+#         self.arena_options = arena_options
+
+
+#     @classmethod
+#     def from_options(
+#             cls,
+#             config: dict,
+#             experiment_options: ExperimentOptions,
+#             animat_i: int,
+#             animat_data: AnimatData,
+#             animat_options: AnimatOptions,
+#     ):
+#         """From options"""
+#         return cls(
+#             animat_i=animat_i,
+#             animat_data=animat_data,
+#             animat_options=animat_options,
+#             arena_options=experiment_options.arenas[0],
+#         )
+
+
+#     def initialize_episode(self, task, physics):
+#         """Initialize episode"""
+#         from IPython import embed; embed()
+
+#     def before_step(self, task, action, physics):
+#         """Step hydrodynamics"""

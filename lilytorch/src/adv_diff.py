@@ -414,6 +414,7 @@ class AdvDiffSolver:
 
         # uw = 0.5*(u[:-2,1:-1]+u[1:-1,1:-1])
         # ue = 0.5*(u[2:,1:-1]+u[1:-1,1:-1])
+        #
         # u_new[1:-1,1:-1]+=self.dtdx*(uw*self.phi_w(uw,u)-ue*self.phi_e(ue,u))
 
         # ==================== u convection ==============================
@@ -516,22 +517,22 @@ class AdvDiffSolver:
         v[:,-1] = v[:,-2]
 
         if self.BC_type_u[0]=="D":
-            u[0, :]=self.BC_values_u[0]
+            u[1, :]=self.BC_values_u[0]
         if self.BC_type_u[1]=="D":
-            u[-1,:]=self.BC_values_u[1]
-        # if self.BC_type_u[2]=="D":
-        #     u[:,0]=self.BC_values_u[2]
-        # if self.BC_type_u[3]=="D":
-        #     u[:,-1]=self.BC_values_u[3]
+            u[-2,:]=self.BC_values_u[1]
+        if self.BC_type_u[2]=="D":
+            u[:,1]=self.BC_values_u[2]
+        if self.BC_type_u[3]=="D":
+            u[:,-2]=self.BC_values_u[3]
 
         if self.BC_type_v[2]=="D":
-            v[:,0]=self.BC_values_v[2]
+            v[:,1]=self.BC_values_v[2]
         if self.BC_type_v[3]=="D":
-            v[:,-1]=self.BC_values_v[3]
-        # if self.BC_type_v[0]=="D":
-        #     v[0, :]=self.BC_values_v[0]
-        # if self.BC_type_v[1]=="D":
-        #     v[-1,:]=self.BC_values_v[1]
+            v[:,-2]=self.BC_values_v[3]
+        if self.BC_type_v[0]=="D":
+            v[1, :]=self.BC_values_v[0]
+        if self.BC_type_v[1]=="D":
+            v[-2,:]=self.BC_values_v[1]
 
 
         # elif self.BC_type_u[1]=="N":

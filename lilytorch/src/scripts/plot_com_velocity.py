@@ -5,7 +5,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import os
 
-dir='/data/andreaferrario/ns_data/1guilla_experiments/2025-12-09T15:35:05.118333/'
+dir='/data/andreaferrario/ns_data/2026-01-06T10:35:02.292356/'
 file = dir + 'simulation.hdf5'
 
 
@@ -15,7 +15,7 @@ with h5py.File(file, 'r') as f:
 
     timestep = np.array(f["timestep"])
     n_iterations = link_array.shape[0]
-    it_max = 95000
+    it_max = 16500
     times = timestep * np.arange(n_iterations)
 
     v_links = link_array[:,:,sc.link_com_velocity_lin_x:sc.link_com_velocity_lin_y+1]

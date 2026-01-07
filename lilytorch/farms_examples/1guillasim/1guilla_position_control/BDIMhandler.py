@@ -76,18 +76,18 @@ class BDIMhandler():
             pos_trans = R.T@(self.fluid_solver.composite_body.stacked_xy-urdf_pos[:,None])
             newpos_u = pos_trans[0].reshape(self.fluid_solver.composite_body.nx, self.fluid_solver.composite_body.ny)
             newpos_v = pos_trans[1].reshape(self.fluid_solver.composite_body.nx, self.fluid_solver.composite_body.ny)
-            self.fluid_solver.composite_body.sdf_vals[body_i]=body.sdf_interp(newpos_u, newpos_v)
+            self.fluid_solver.composite_body.sdf_vals[body_i]=body.sdf(newpos_u, newpos_v)
 
             # compute sdf values at the staggered grid
             pos_trans_u = R.T@(body.stacked_xy_u-urdf_pos[:,None])
             newpos_u = pos_trans_u[0].reshape(body.nx, body.ny)
             newpos_v = pos_trans_u[1].reshape(body.nx, body.ny)
-            self.fluid_solver.composite_body.sdf_vals_u[body_i]=body.sdf_interp(newpos_u, newpos_v)
+            self.fluid_solver.composite_body.sdf_vals_u[body_i]=body.sdf(newpos_u, newpos_v)
 
             pos_trans_v = R.T@(body.stacked_xy_v-urdf_pos[:,None])
             newpos_u = pos_trans_v[0].reshape(body.nx, body.ny)
             newpos_v = pos_trans_v[1].reshape(body.nx, body.ny)
-            self.fluid_solver.composite_body.sdf_vals_v[body_i]=body.sdf_interp(newpos_u, newpos_v)
+            self.fluid_solver.composite_body.sdf_vals_v[body_i]=body.sdf(newpos_u, newpos_v)
 
             # compute body velocities v = v_lin_com + <v_ang_com, x-x_com>
             self.fluid_solver.composite_body.u_vals[body_i]=lin_vel[0]-ang_vel*(self.fluid_solver.composite_body.Yu_stag-com_pos[1])
@@ -105,20 +105,20 @@ class BDIMhandler():
             if link_id==0:
                 body_p=self.fluid_solver.composite_body.bodies[body_i+1]
                 pos_trans = Rs[animat_id][link_id+1].T@(torch.stack((x_cnt,y_cnt))-urdf_poses[animat_id][link_id+1][:,None])
-                sdf_p = body_p.sdf_interp(pos_trans[0],pos_trans[1])-body.h
+                sdf_p = body_p.sdf(pos_trans[0],pos_trans[1])-body.h
                 mask=(sdf_p >= 0)
             elif link_id==urdf_poses[animat_id].shape[0]-1:
                 body_m=self.fluid_solver.composite_body.bodies[body_i-1]
                 pos_trans = Rs[animat_id][link_id-1].T@(torch.stack((x_cnt,y_cnt))-urdf_poses[animat_id][link_id-1][:,None])
-                sdf_m = body_m.sdf_interp(pos_trans[0],pos_trans[1])-body.h
+                sdf_m = body_m.sdf(pos_trans[0],pos_trans[1])-body.h
                 mask=(sdf_m >= 0)
             else:
                 body_m=self.fluid_solver.composite_body.bodies[body_i-1]
                 pos_trans_m = Rs[animat_id][link_id-1].T@(torch.stack((x_cnt,y_cnt))-urdf_poses[animat_id][link_id-1][:,None])
                 body_p=self.fluid_solver.composite_body.bodies[body_i+1]
                 pos_trans_p = Rs[animat_id][link_id+1].T@(torch.stack((x_cnt,y_cnt))-urdf_poses[animat_id][link_id+1][:,None])
-                sdf_m = body_m.sdf_interp(pos_trans_m[0],pos_trans_m[1])-body.h
-                sdf_p = body_p.sdf_interp(pos_trans_p[0],pos_trans_p[1])-body.h
+                sdf_m = body_m.sdf(pos_trans_m[0],pos_trans_m[1])-body.h
+                sdf_p = body_p.sdf(pos_trans_p[0],pos_trans_p[1])-body.h
                 mask=(sdf_m >= 0) & (sdf_p >= 0)
             body.mask=mask
 

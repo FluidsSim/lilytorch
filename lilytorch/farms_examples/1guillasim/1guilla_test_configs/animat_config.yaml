@@ -27,8 +27,8 @@ morphology:
     - 0
     - 0
     extras: {}
-    fluid_interaction: true
-    density: 1000.0
+    fluid_interaction: false
+    density: 800.0
   - name: link1
     collisions: true
     friction:
@@ -36,8 +36,8 @@ morphology:
     - 0
     - 0
     extras: {}
-    fluid_interaction: true
-    density: 1000.0
+    fluid_interaction: false
+    density: 800.0
   - name: link2
     collisions: true
     friction:
@@ -45,8 +45,8 @@ morphology:
     - 0
     - 0
     extras: {}
-    fluid_interaction: true
-    density: 1000.0
+    fluid_interaction: false
+    density: 800.0
   - name: link3
     collisions: true
     friction:
@@ -54,8 +54,8 @@ morphology:
     - 0
     - 0
     extras: {}
-    fluid_interaction: true
-    density: 1000.0
+    fluid_interaction: false
+    density: 800.0
   - name: link4
     collisions: true
     friction:
@@ -63,8 +63,8 @@ morphology:
     - 0
     - 0
     extras: {}
-    fluid_interaction: true
-    density: 1000.0
+    fluid_interaction: false
+    density: 800.0
   - name: link5
     collisions: true
     friction:
@@ -72,8 +72,8 @@ morphology:
     - 0
     - 0
     extras: {}
-    fluid_interaction: true
-    density: 1000.0
+    fluid_interaction: false
+    density: 800.0
   - name: link6
     collisions: true
     friction:
@@ -81,8 +81,8 @@ morphology:
     - 0
     - 0
     extras: {}
-    fluid_interaction: true
-    density: 1000.0
+    fluid_interaction: false
+    density: 800.0
   - name: link7
     collisions: true
     friction:
@@ -90,8 +90,8 @@ morphology:
     - 0
     - 0
     extras: {}
-    fluid_interaction: true
-    density: 1000.0
+    fluid_interaction: false
+    density: 800.0
   - name: link8
     collisions: true
     friction:
@@ -99,8 +99,8 @@ morphology:
     - 0
     - 0
     extras: {}
-    fluid_interaction: true
-    density: 1000.0
+    fluid_interaction: false
+    density: 800.0
   joints:
   - name: joint_body_00
     initial:
@@ -236,87 +236,89 @@ control:
   motors:
   - joint_name: joint_body_00
     control_types:
-    - position
+    - torque
     limits_torque:
     - -.inf
     - .inf
     gains:
-    - 50.0
-    - 5.0
+    - 20.0
+    - 3
     - 0
   - joint_name: joint_body_01
     control_types:
-    - position
+    - torque
     limits_torque:
     - -.inf
     - .inf
     gains:
-    - 50.0
-    - 5.0
+    - 20.0
+    - 3
     - 0
   - joint_name: joint_body_02
     control_types:
-    - position
+    - torque
     limits_torque:
     - -.inf
     - .inf
     gains:
-    - 50.0
-    - 5.0
+    - 20.0
+    - 3
     - 0
   - joint_name: joint_body_03
     control_types:
-    - position
+    - torque
     limits_torque:
     - -.inf
     - .inf
     gains:
-    - 50.0
-    - 5.0
+    - 20.0
+    - 3
     - 0
   - joint_name: joint_body_04
     control_types:
-    - position
+    - torque
     limits_torque:
     - -.inf
     - .inf
     gains:
-    - 50.0
-    - 5.0
+    - 20.0
+    - 3
     - 0
   - joint_name: joint_body_05
     control_types:
-    - position
+    - torque
     limits_torque:
     - -.inf
     - .inf
     gains:
-    - 50.0
-    - 5.0
+    - 20.0
+    - 3
     - 0
   - joint_name: joint_body_06
     control_types:
-    - position
+    - torque
     limits_torque:
     - -.inf
     - .inf
     gains:
-    - 50.0
-    - 5.0
+    - 20.0
+    - 3
     - 0
   - joint_name: joint_body_07
     control_types:
-    - position
+    - torque
     limits_torque:
     - -.inf
     - .inf
     gains:
-    - 50.0
-    - 5.0
+    - 20.0
+    - 3
     - 0
 extensions:
-- loader: lilytorch.farms_examples.1guillasim.pd_controller.PositionController
+- loader: lilytorch.farms_examples.1guillasim.torque_controller.WaveController
   config:
+    method: implicit
     freq: 1.0
-    twl: 14
-    amp: 20.0
+    twl: 0.8
+    amp: 0.4
+    bias: 0.0

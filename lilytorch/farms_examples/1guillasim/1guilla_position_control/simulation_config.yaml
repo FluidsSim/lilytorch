@@ -142,7 +142,10 @@ extensions:
         plotting: False
         compute_interp: False
         plotting_meshes: False
-        n_samples: (2000, 2000)
+        save_folder: ../
+        n_samples:
+          - 2000
+          - 2000
         update_maps:
           rotation: "None"
           translation:

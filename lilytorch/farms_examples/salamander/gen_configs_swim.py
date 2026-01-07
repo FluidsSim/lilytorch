@@ -24,8 +24,11 @@ controller_path = "lilytorch.farms_examples.salamander.pd_controller_swim.Positi
 gains        = [0.001, .00002, 0]
 control_pars = {'freq': 1.0, 'twl': 10, 'amp': 200, 'limb_pose1':-0.35*3.141592653589793, 'limb_pose2':-0.2*3.141592653589793}
 use_fluid    = True
-headless     = False
-save_frames  = False
+headless     = True
+save_frames  = True
+save_every   = 100
+method       = "implicit"
+timestep     = 0.001
 
 sdf = ModelSDF.read(sdf_path)[0] # this is the sdf content
 
@@ -43,7 +46,6 @@ for joint in joints:
     else:
         initial_joint_pos.append([0, 0])
 
-timestep = 0.01
 spawn_mode = SpawnMode.TRANSVERSE
 density = 1000.0
 
@@ -283,29 +285,17 @@ def gen_simulation_config():
                     "use_gpu": True,
                     "nthreads": 16,
 
-                    # ## small tank
-                    # N                 : 256
-                    # xmin              : -0.02
-                    # xmax              : 0.006
-                    # ymin              : -0.013
-                    # ymax              : 0.013
-
-                    # intermediate tank
-                    "Nx": 1024,
-                    "Ny": 256,
+                    "Nx": 4096,
+                    "Ny": 1024,
+                    # "Nx": 4096,
+                    # "Ny": 1024,
                     "xmin": -0.12,
                     "xmax": 0.68,
                     "ymin": -0.1,
                     "ymax": 0.1,
 
-                    # ## large tank
-                    # N                 : 2048
-                    # xmin              : -0.02
-                    # xmax              : 0.188
-                    # ymin              : -0.104
-                    # ymax              : 0.104
 
-                    "convection_method": "implicit",
+                    "convection_method": method,
                     "dt": 0.001,
                     "nt": 800000,
                     "nu": 1.0e-6,
@@ -319,9 +309,9 @@ def gen_simulation_config():
                     "poisson_folder": "data/"
                 },
                 "boundary_conditions": {
-                    "BC_type_u": ["N", "N", "N", "N"],
+                    "BC_type_u": ["N", "N", "D", "D"],
                     "BC_values_u": [0, 0, 0, 0],
-                    "BC_type_v": ["N", "N", "N", "N"],
+                    "BC_type_v": ["D", "D", "N", "N"],
                     "BC_values_v": [0, 0, 0, 0]
                 },
                 "body": {
@@ -343,7 +333,7 @@ def gen_simulation_config():
                 "output": {
                     "save_path": "/data/andreaferrario/ns_data/",
                     "save_frames": save_frames,
-                    "save_every": 20,
+                    "save_every": save_every,
                     "vmin": -50,
                     "vmax": 50,
                     "save_uv": False

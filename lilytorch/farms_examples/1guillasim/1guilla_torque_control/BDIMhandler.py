@@ -174,7 +174,7 @@ class BDIMhandler():
             physics.data.xfrc_applied[ind_task, 2] = (self.friction_force_lin_y[body_i] + self.pressure_force_y[body_i]) * task.units.newtons
             physics.data.xfrc_applied[ind_task, 4] = (self.friction_force_ang_z[body_i] + self.pressure_force_ang_z[body_i]) * task.units.newtons
 
-            print(physics.data.xfrc_applied[ind_task, 0])
+            # print(physics.data.xfrc_applied[ind_task, 0])
 
 
 

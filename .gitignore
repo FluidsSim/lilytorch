@@ -27,7 +27,7 @@ make.bat
 *.vscode
 
 # folders
-FARMS_V2/
+# FARMS_V2/
 data/
 build/
 logs/

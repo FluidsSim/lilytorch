@@ -8,10 +8,10 @@ runtime:
   play: true
   rtl: 1.0
   fast: false
-  headless: false
+  headless: true
   show_progress: true
 physics:
-  timestep: 0.01
+  timestep: 0.001
   gravity:
   - 0
   - 0
@@ -58,8 +58,8 @@ extensions:
       solver:
         use_gpu: true
         nthreads: 16
-        Nx: 1024
-        Ny: 256
+        Nx: 4096
+        Ny: 1024
         xmin: -0.12
         xmax: 0.68
         ymin: -0.1
@@ -80,16 +80,16 @@ extensions:
         BC_type_u:
         - N
         - N
-        - N
-        - N
+        - D
+        - D
         BC_values_u:
         - 0
         - 0
         - 0
         - 0
         BC_type_v:
-        - N
-        - N
+        - D
+        - D
         - N
         - N
         BC_values_v:
@@ -117,8 +117,8 @@ extensions:
         scale: 1
       output:
         save_path: /data/andreaferrario/ns_data/
-        save_frames: false
-        save_every: 20
+        save_frames: true
+        save_every: 100
         vmin: -50
         vmax: 50
         save_uv: false

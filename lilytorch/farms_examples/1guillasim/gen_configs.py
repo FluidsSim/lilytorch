@@ -11,14 +11,16 @@ sdf_path             = '../../sdfs/1guilla/1guilla.sdf'
 
 fluid_extension_path = "lilytorch.integration.extensions.FluidExtension"
 
-control_type = "position"
-controller_path      = "lilytorch.farms_examples.1guillasim.pd_controller.PositionController"
-gains = [50.0, 5.0, 0]
-control_pars = {'freq': 1.0, 'twl': 14, 'amp': 20.0}
+# control_type = "position"
+# controller_path      = "lilytorch.farms_examples.1guillasim.pd_controller.PositionController"
+# gains = [20.0, 3, 0]
+# control_pars = {'freq': 1, 'twl': 12, 'amp': 20.0}
 
-# control_type    = "torque"
-# controller_path = "lilytorch.farms_examples.1guillasim.torque_controller.WaveController"
-# control_pars = {'freq': 1.0, 'twl': 0.8, 'amp': 0.4, 'bias': 0.0}
+
+control_type    = "torque"
+controller_path = "lilytorch.farms_examples.1guillasim.torque_controller.WaveController"
+gains           = [20.0, 3, 0]
+control_pars    = {'method': 'implicit','freq': 1.0, 'twl': 0.8, 'amp': 0.4, 'bias': 0.0}
 
 os.makedirs(
     sim_sir, exist_ok=True
@@ -29,7 +31,20 @@ njoints = 8
 
 spawn_mode = SpawnMode.TRANSVERSE
 
-density = 1000.0
+density = 800.0
+# nu      = 500.0e-6
+nu      = 1.0e-6
+
+use_fluid = True
+headless  = True
+
+timestep     = 0.001
+fluid_method = "implicit"
+save_every   = 500
+
+# timestep   = 0.001
+# method     = "abdquickest"
+# save_every = 500
 
 
 link_names  = ["link" + str(i) for i in range(nlinks)]
@@ -70,7 +85,7 @@ def gen_animat_config():
             'collisions'       : True,
             'friction'         : [0.2, 0, 0],
             'extras'           : {},
-            'fluid_interaction': True,
+            'fluid_interaction': False,
             'density'          : density
         } for link_name in link_names
     ]
@@ -101,7 +116,7 @@ def gen_animat_config():
             'joint_name'   : joint_name,
             'control_types': [control_type],
             'limits_torque': [-inf, inf],
-            'gains'        : [50.0, 5.0, 0]
+            'gains'        : list(gains)
         } for joint_name in joint_names
     ]
 
@@ -135,7 +150,7 @@ def gen_arena_config():
             "height": 0,
             "velocity": [0, 0, 0],
             "viscosity": 1.0,
-            "density": 1000.0,
+            "density": density,
             "maps": ["", ""],
         },
         "ground_height": -1.0,
@@ -163,7 +178,7 @@ def gen_experiment_config():
             "arenas_options": [
                 "farms_core.model.options.ArenaOptions"
             ],
-            "experiment_data": "farms_amphibious.data.data.ExperimentData",
+            "experiment_data": "farms_core.experiment.data.ExperimentData",
             "animats_data": [
                 "farms_core.model.data.AnimatData"
             ]
@@ -189,12 +204,12 @@ def gen_simulation_config():
             "play": True,
             "rtl": 1.0,
             "fast": False,
-            "headless": True,
+            "headless": headless,
             "show_progress": True
         }
         ,
         "physics": {
-            "timestep": 0.0001,
+            "timestep": timestep,
             "gravity": [0, 0, -9.81],
             "num_sub_steps": 1,
             "cb_sub_steps": 2,
@@ -228,6 +243,25 @@ def gen_simulation_config():
         },
         "extensions": [
             {
+            "loader": "farms_core.simulation.extensions.ExperimentLogger",
+            "config": {
+                "log_path": "output",
+                "skip": 0
+            }
+            },
+            {
+                "loader": "farms_mujoco.simulation.extensions.MjcfSaver",
+                "config": {
+                    "path": "output/simulation_mjcf.xml"
+                }
+            }
+        ]
+    }
+
+    if use_fluid:
+
+        simulation_dict["extensions"] += [
+            {
             "loader": fluid_extension_path,
             "config": {
                 "handler_path": handler_path,
@@ -235,22 +269,34 @@ def gen_simulation_config():
                 "solver": {
                     "use_gpu": True,
                     "nthreads": 16,
+
+                    # # approximate the slime pool (check find_h_solution.py)
+                    # "Nx": 512,
+                    # "Ny": 256,
+                    # "xmin": -0.85,
+                    # "xmax": 1.71,
+                    # "ymin": -0.64,
+                    # "ymax": 0.64,
+
                     "Nx": 2048,
                     "Ny": 512,
                     "xmin": -0.9,
                     "xmax": 5.1,
                     "ymin": -0.75,
                     "ymax": 0.75,
-                    "convection_method": "abdquickest",
+
+                    "convection_method": fluid_method,
                     "dt": 0.0001,
                     "nt": 800000,
-                    "nu": 1.0e-6,
+
+                    "nu": nu,
+
                     "rho": 1.0e+3,
                     "poisson_tol": 1.0e-7,
                     "poisson_max_cycles": 5,
                     "poisson_max_mgcg_cycles": 3,
-                    "jacobi_weight": 0.6,
-                    "poisson_nsmoothing": 5,
+                    "jacobi_weight": 0.7,
+                    "poisson_nsmoothing": 10,
                     "poisson_verbose": False,
                     "poisson_folder": "data/"
                 },
@@ -279,10 +325,10 @@ def gen_simulation_config():
                 "output": {
                     "save_path": "/data/andreaferrario/ns_data/",
                     "save_frames": True,
-                    "save_every": 500,
+                    "save_every": save_every,
                     "vmin": -10,
                     "vmax": 10,
-                    "save_uv": True
+                    "save_uv": False
                 }
                 }
             }
@@ -294,7 +340,7 @@ def gen_simulation_config():
                 "skip": 0
             }
             }
-        ]}
+        ]
 
     pyobject2yaml(
         sim_sir + 'simulation_config.yaml',

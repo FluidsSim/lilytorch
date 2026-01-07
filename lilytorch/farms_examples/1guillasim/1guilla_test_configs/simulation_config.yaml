@@ -11,7 +11,7 @@ runtime:
   headless: true
   show_progress: true
 physics:
-  timestep: 0.0001
+  timestep: 0.001
   gravity:
   - 0
   - 0
@@ -44,6 +44,13 @@ pybullet:
   max_num_cmd_per_1ms: 100000000
   report_solver_analytics: 0
 extensions:
+- loader: farms_core.simulation.extensions.ExperimentLogger
+  config:
+    log_path: output
+    skip: 0
+- loader: farms_mujoco.simulation.extensions.MjcfSaver
+  config:
+    path: output/simulation_mjcf.xml
 - loader: lilytorch.integration.extensions.FluidExtension
   config:
     handler_path: lilytorch.farms_examples.1guillasim.BDIMhandler.BDIMhandler
@@ -57,7 +64,7 @@ extensions:
         xmax: 5.1
         ymin: -0.75
         ymax: 0.75
-        convection_method: abdquickest
+        convection_method: implicit
         dt: 0.0001
         nt: 800000
         nu: 1.0e-06
@@ -65,8 +72,8 @@ extensions:
         poisson_tol: 1.0e-07
         poisson_max_cycles: 5
         poisson_max_mgcg_cycles: 3
-        jacobi_weight: 0.6
-        poisson_nsmoothing: 5
+        jacobi_weight: 0.7
+        poisson_nsmoothing: 10
         poisson_verbose: false
         poisson_folder: data/
       boundary_conditions:
@@ -114,7 +121,7 @@ extensions:
         save_every: 500
         vmin: -10
         vmax: 10
-        save_uv: true
+        save_uv: false
 - loader: farms_core.simulation.extensions.ExperimentLogger
   config:
     log_path: output

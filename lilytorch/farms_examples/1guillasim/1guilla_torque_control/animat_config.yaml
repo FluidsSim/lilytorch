@@ -351,14 +351,14 @@ control:
       - 0.01
       - 0
 extensions:
-- loader: lilytorch.farms_examples.1guillasim.1guilla_torque_control.controller.WaveController
+- loader: lilytorch.farms_examples.1guillasim.1guilla_torque_control_implicit.controller.WaveController
   config: {
+    "method": "implicit",
     "freq": 1.0,
     "twl": 0.8,
     "amp": 0.4,
     "bias": 0.
   }
 
-# - loader: farms_mujoco.swimming.extension.SwimmingExtension
-#   config:
-#     water_properties: null
+# - loader: lilytorch.integration.extensions.ImplicitTorqueExtension
+#   config: {}

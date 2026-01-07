@@ -28,7 +28,7 @@ water:
   - 0
   - 0
   viscosity: 1.0
-  density: 1000.0
+  density: 800.0
   maps:
   - ''
   - ''

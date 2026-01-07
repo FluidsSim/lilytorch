@@ -11,7 +11,7 @@ runtime:
   headless: true
   show_progress: true
 physics:
-  timestep: 0.0001
+  timestep: 0.001
   gravity:
   - 0
   - 0
@@ -46,7 +46,7 @@ pybullet:
 extensions:
 - loader: lilytorch.integration.extensions.FluidExtension
   config:
-    handler_path: lilytorch.farms_examples.1guillasim.1guilla_torque_control.BDIMhandler.BDIMhandler
+    handler_path: lilytorch.farms_examples.1guillasim.BDIMhandler.BDIMhandler
     bdim_yaml:
       solver :
         use_gpu           : True
@@ -142,13 +142,16 @@ extensions:
         plotting: False
         compute_interp: False
         plotting_meshes: False
-        n_samples: (2000, 2000)
+        n_samples:
+          - 2000
+          - 2000
         update_maps:
           rotation: "None"
           translation:
             - None
             - None
         suit: 0.0
+        save_folder: ../
         convexify: False
         scale: 1
 
