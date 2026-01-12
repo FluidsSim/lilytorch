@@ -4,23 +4,29 @@ import os
 from farms_core.io.yaml import pyobject2yaml
 from farms_core.model.options import SpawnMode
 
-sim_sir             = "lilytorch/farms_examples/1guillasim/1guilla_test_configs/"
-handler_path         = "lilytorch.farms_examples.1guillasim.BDIMhandler.BDIMhandler"
+sim_sir             = "lilytorch/farms_examples/_1guillasim/1guilla_test_configs/"
+handler_path         = "lilytorch.farms_examples._1guillasim.BDIMhandler.BDIMhandler"
 sdf_folder           = "../../sdfs/1guilla/"
 sdf_path             = '../../sdfs/1guilla/1guilla.sdf'
 
 fluid_extension_path = "lilytorch.integration.extensions.FluidExtension"
 
 # control_type = "position"
-# controller_path      = "lilytorch.farms_examples.1guillasim.pd_controller.PositionController"
+# controller_path      = "lilytorch.farms_examples._1guillasim.pd_controller.PositionController"
 # gains = [20.0, 3, 0]
 # control_pars = {'freq': 1, 'twl': 12, 'amp': 20.0}
 
-
 control_type    = "torque"
-controller_path = "lilytorch.farms_examples.1guillasim.torque_controller.WaveController"
+controller_path = "lilytorch.farms_examples._1guillasim.torque_controller.EkebergMuscleController"
 gains           = [20.0, 3, 0]
-control_pars    = {'method': 'implicit','freq': 1.0, 'twl': 0.8, 'amp': 0.4, 'bias': 0.0}
+control_pars    = {
+    'freq': 1.0,
+    'twl': 0.8,
+    'amp': 0.4,
+    'bias': 0.0,
+    'load_controller': 'lilytorch.farms_examples._1guillasim.network.WaveController',
+    'method': 'implicit'
+}
 
 os.makedirs(
     sim_sir, exist_ok=True
@@ -35,16 +41,16 @@ density = 800.0
 # nu      = 500.0e-6
 nu      = 1.0e-6
 
-use_fluid = True
-headless  = True
+use_fluid = False
+headless  = False
 
-timestep     = 0.001
-fluid_method = "implicit"
-save_every   = 500
+# timestep     = 0.001
+# fluid_method = "implicit"
+# save_every   = 500
 
-# timestep   = 0.001
-# method     = "abdquickest"
-# save_every = 500
+timestep   = 0.001
+fluid_method     = "abdquickest"
+save_every = 500
 
 
 link_names  = ["link" + str(i) for i in range(nlinks)]

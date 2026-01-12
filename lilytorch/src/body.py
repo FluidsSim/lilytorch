@@ -2350,7 +2350,7 @@ def test_body():
 
     use_gpu=True
 
-    mesh_file = "/data/andreaferrario/lilytorch/lilytorch/1guillasim/models/1guilla_v1/sdf/meshes/link0.obj"
+    mesh_file = "/data/andreaferrario/lilytorch/lilytorch/_1guillasim/models/1guilla_v1/sdf/meshes/link0.obj"
 
     if torch.cuda.is_available() and use_gpu:
         print(f"Using GPU: {torch.cuda.get_device_name(0)} is available.")

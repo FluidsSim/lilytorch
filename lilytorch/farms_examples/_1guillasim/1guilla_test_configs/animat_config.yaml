@@ -315,10 +315,11 @@ control:
     - 3
     - 0
 extensions:
-- loader: lilytorch.farms_examples.1guillasim.torque_controller.WaveController
+- loader: lilytorch.farms_examples._1guillasim.torque_controller.EkebergMuscleController
   config:
-    method: implicit
     freq: 1.0
     twl: 0.8
     amp: 0.4
     bias: 0.0
+    load_controller: lilytorch.farms_examples._1guillasim.network.WaveController
+    method: implicit

@@ -1,39 +1,44 @@
 
-from matplotlib.pyplot import step
+
 from farms_core.model.control import AnimatController
 from farms_core.experiment.options import ExperimentOptions
 from farms_core.model.data import AnimatData
 from farms_core.model.options import AnimatOptions
 from farms_core.sensors.sensor_convention import sc
 from farms_core.model.control import ControlType
+
 from dm_control.rl.control import Task
 from dm_control.mjcf.physics import Physics
 
 import numpy as np
 from lilytorch.util.rw import Dict2Class
 
+import importlib
 
-class WaveController(AnimatController):
+class EkebergMuscleController(AnimatController):
 
     def __init__(self, animat_data, animat_options, experiment_options, config, animat_i, *args, **kwargs):
 
         super().__init__(*args, **kwargs)
-        self.animat_data = animat_data
-        self.animat_options = animat_options
+        self.animat_data        = animat_data
+        self.animat_options     = animat_options
         self.experiment_options = experiment_options
-        self.config = Dict2Class(config)
-        self.animat_i = animat_i
+        self.config             = Dict2Class(config)
+        self.animat_i           = animat_i
+        self.n_joints           = len(self.animat_options.control.motors)
+        self.n_iterations       = experiment_options.simulation.runtime.n_iterations
 
-        self.n_joints = self.animat_data.sensors.joints.array.shape[1]
-        self.n_iterations = self.animat_data.sensors.links.array.shape[0]
+        # load class from string
+        module_name, class_name = self.config.load_controller.rsplit('.', 1)
+        module = importlib.import_module(module_name)
+        controller_class = getattr(module, class_name)
 
-        self.state    = np.zeros((self.n_iterations, 2*self.n_joints))
-
-        self.muscle_l = 2*np.arange(0, self.n_joints) # indexes of the left muscle
-        self.muscle_r = self.muscle_l+1
-
-        self.config.amplitudes_left = self.config.amp+self.config.bias
-        self.config.amplitudes_right = self.config.amp-self.config.bias
+        self.nn = controller_class(
+            animat_data,
+            self.n_joints,
+            self.n_iterations,
+            self.config
+        )
 
         # Define muscle parameters for each joint
         muscles_params = [
@@ -54,7 +59,7 @@ class WaveController(AnimatController):
         self.torque = np.zeros(self.n_joints)
         self.offsets = np.zeros(self.n_joints)
 
-        self.muscle_method=config["method"]
+        self.muscle_method=config.pop("method", "implicit")
         if self.muscle_method == "explicit":
             self.step_muscles = self.step_muscles_explicit
         elif self.muscle_method == "implicit":
@@ -103,19 +108,8 @@ class WaveController(AnimatController):
             animat_i = animat_i,
         )
 
-    def step_controller(self, iteration, time, timestep):
-        """Compute neural activity"""
-        time     = iteration * timestep
-        aux_sine = np.sin(
-            2*np.pi * ( self.config.freq*time - self.config.twl*np.arange(self.n_joints)/self.n_joints )
-        )
 
-        self.state[iteration, self.muscle_l]  = self.config.amplitudes_left * (1+aux_sine)/2
-        self.state[iteration, self.muscle_r]  = self.config.amplitudes_right * (1-aux_sine)/2
-
-
-
-    def step_muscles_explicit(self, iteration, time, timestep):
+    def step_muscles_explicit(self, M_diff, M_sum, iteration, time, timestep):
 
         """
         integrate the muscles explicitly
@@ -123,8 +117,6 @@ class WaveController(AnimatController):
 
         joints_pos = np.array(self.animat_data.sensors.joints.positions(iteration))
         joint_vel  = np.array(self.animat_data.sensors.joints.velocities(iteration))
-        M_diff     = (self.state[iteration,self.muscle_l] - self.state[iteration,self.muscle_r])
-        M_sum      = (self.state[iteration,self.muscle_l] + self.state[iteration,self.muscle_r])
 
         m_delta_phi = (self.offsets - joints_pos)
 
@@ -138,18 +130,14 @@ class WaveController(AnimatController):
 
         self.animat_data.sensors.joints.array[iteration,:,sc.joint_cmd_torque] = self.torque
 
-    def step_muscles_implicit(self, iteration, time, timestep):
+    def step_muscles_implicit(self, M_diff, M_sum, iteration, time, timestep):
 
         """
         integrate the muscles semi-implicitly
         i.e. all the stiffness and damping terms are treated implicitly, except for the active torque
         """
-
-        M_diff     = (self.state[iteration,self.muscle_l] - self.state[iteration,self.muscle_r])
-        M_sum      = (self.state[iteration,self.muscle_l] + self.state[iteration,self.muscle_r])
-
-        self.kp = self.muscle_coeff["beta"] * (M_sum + self.muscle_coeff["gamma"]) # conversion from ekeberg to pd controller
-        self.kd = self.muscle_coeff["delta"]
+        self.kp     = self.muscle_coeff["beta"] * (M_sum + self.muscle_coeff["gamma"])  # conversion from ekeberg to pd controller
+        self.kd     = self.muscle_coeff["delta"]
         self.torque = self.muscle_coeff["alpha"] * M_diff
 
         if self.log_torques:
@@ -160,8 +148,8 @@ class WaveController(AnimatController):
         time = physics.time()
         timestep = physics.timestep()
         index = task.iteration % task.buffer_size
-        self.step_controller(iteration=index, time=time, timestep=timestep)
-        self.step_muscles(iteration=index, time=time, timestep=timestep)
+        Mdiff, Msum = self.nn.step(iteration=index, time=time, timestep=timestep)
+        self.step_muscles(Mdiff, Msum, iteration=index, time=time, timestep=timestep)
 
 
     def springrefs(
