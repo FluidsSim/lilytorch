@@ -4,10 +4,11 @@ import os
 from farms_core.io.yaml import pyobject2yaml
 from farms_core.model.options import SpawnMode
 
-sim_sir             = "lilytorch/farms_examples/_1guillasim/torque_control/1guilla_test_configs/"
-handler_path         = "lilytorch.farms_examples._1guillasim.BDIMhandler.BDIMhandler"
-sdf_folder           = "../../../sdfs/1guilla/"
-sdf_path             = '../../../sdfs/1guilla/1guilla.sdf'
+sim_sir      = "lilytorch/farms_examples/_1guillasim/torque_control/1guilla_test_configs/"
+handler_path = "lilytorch.farms_examples._1guillasim.BDIMhandler.BDIMhandler"
+sdfs_path    = "../../../sdfs/"
+sdf_folder   = sdfs_path+"1guilla/"
+sdf_path     = sdf_folder+'1guilla.sdf'
 
 fluid_extension_path = "lilytorch.integration.extensions.FluidExtension"
 
@@ -16,17 +17,14 @@ fluid_extension_path = "lilytorch.integration.extensions.FluidExtension"
 # gains = [20.0, 3, 0]
 # control_pars = {'freq': 1, 'twl': 12, 'amp': 20.0}
 
-control_type    = "torque"
-controller_path = "lilytorch.farms_examples._1guillasim.torque_controller.EkebergMuscleController"
-gains           = [20.0, 3, 0]
-control_pars    = {
-    'freq': 1.0,
-    'twl': 0.8,
-    'amp': 0.4,
-    'bias': 0.0,
-    'load_controller': 'lilytorch.farms_examples._1guillasim.network.WaveController',
-    'method': 'implicit'
+control_type      = "torque"
+muscle_loader = "farms_ekeberg.src.ekeberg.EkebergMuscleController"
+muscle_config            = {
+    'load_controller': 'lilytorch.farms_examples._1guillasim.torque_control.network.PAOscillatorController',
+    'method': 'implicit',
+    'muscle_pars': '../muscle_params.csv'
 }
+gains = [0, 0, 0]
 
 os.makedirs(
     sim_sir, exist_ok=True
@@ -38,20 +36,33 @@ njoints = 8
 spawn_mode = SpawnMode.TRANSVERSE
 
 density = 800.0
-# nu      = 500.0e-6
-nu      = 1.0e-6
+nu      = 500.0e-6
+# nu    = 1.0e-6
 
-use_fluid = False
-headless  = False
+use_drag  = True
+drag_coefficients = [
+    [
+        [-0.1, -5.0, -5.0],
+        [-0.001, -0.001, -0.001]
+    ] for _ in range(nlinks)
+]
+use_bdim = False
+headless = False
+
+# Validation: use_drag and use_bdim cannot both be True
+if use_drag and use_bdim:
+    raise ValueError("use_drag and use_bdim cannot both be True at the same time")
+
 
 # timestep     = 0.001
 # fluid_method = "implicit"
 # save_every   = 500
 
-timestep   = 0.001
-fluid_method     = "abdquickest"
-save_every = 500
+timestep     = 0.001
+fluid_method = "abdquickest"
+save_every   = 100
 
+n_iterations = 20001
 
 link_names  = ["link" + str(i) for i in range(nlinks)]
 joint_names = ["joint_body_" + str(i).zfill(2) for i in range(njoints)]
@@ -91,10 +102,14 @@ def gen_animat_config():
             'collisions'       : True,
             'friction'         : [0.2, 0, 0],
             'extras'           : {},
-            'fluid_interaction': False,
+            'fluid_interaction': use_drag,
             'density'          : density
         } for link_name in link_names
     ]
+    if use_drag:
+        for i, link in enumerate(animat_dict["morphology"]["links"]):
+            link["drag_coefficients"] = drag_coefficients[i]
+
     animat_dict["morphology"]["joints"] = [
         {
             'name'     : joint_name,
@@ -128,10 +143,20 @@ def gen_animat_config():
 
     animat_dict["extensions"] = [
         {
-            "loader": controller_path,
-            "config":  control_pars
+            "loader": muscle_loader,
+            "config":  muscle_config
         }
     ]
+
+    if use_drag:
+        animat_dict["extensions"] += [
+            {
+                "loader": "farms_mujoco.swimming.extension.SwimmingExtension",
+                "config": {
+                    "water_properties" : None,
+                }
+            }
+        ]
 
     pyobject2yaml(
         sim_sir + 'animat_config.yaml',
@@ -141,23 +166,23 @@ def gen_animat_config():
 def gen_arena_config():
 
     arena_dict = {
-       "sdf": "../../sdfs/arena_flat_v0/sdf/arena_flat.sdf",
+       "sdf": sdfs_path+"arena_flat_v0/sdf/arena_flat.sdf",
        "spawn": {
-            "loader": 0,
-            "mode": SpawnMode.FREE,
-            "pose": [0, 0, 0, 0, 0, 0],
+            "loader"  : 0,
+            "mode"    : SpawnMode.FREE,
+            "pose"    : [0, 0, 0, 0, 0, 0],
             "velocity": [0, 0, 0, 0, 0, 0],
-            "extras": {}
+            "extras"  : {}
         },
         "water": {
-            "sdf": "../../sdfs/arena_water_v0/sdf/arena_water.sdf",
-            "drag": False,
-            "buoyancy": False,
-            "height": 0,
-            "velocity": [0, 0, 0],
+            "sdf"      : sdfs_path+"arena_water_v0/sdf/arena_water.sdf",
+            "drag"     : use_drag,
+            "buoyancy" : use_drag,
+            "height"   : 0,
+            "velocity" : [0, 0, 0],
             "viscosity": 1.0,
-            "density": density,
-            "maps": ["", ""],
+            "density"  : density,
+            "maps"     : ["", ""],
         },
         "ground_height": -1.0,
     }
@@ -205,8 +230,8 @@ def gen_simulation_config():
             "time": "second"
         },
         "runtime": {
-            "n_iterations": 150001,
-            "buffer_size": 150001,
+            "n_iterations": n_iterations,
+            "buffer_size": n_iterations,
             "play": True,
             "rtl": 1.0,
             "fast": False,
@@ -222,29 +247,29 @@ def gen_simulation_config():
             "n_solver_iters": 50
         },
         "mujoco": {
-            "cone": "elliptic",
-            "solver": "CG",
-            "integrator": "implicitfast",
-            "impratio": 10,
-            "ccd_iterations": 1000,
-            "ccd_tolerance": 1e-6,
+            "cone"             : "elliptic",
+            "solver"           : "CG",
+            "integrator"       : "implicitfast",
+            "impratio"         : 10,
+            "ccd_iterations"   : 1000,
+            "ccd_tolerance"    : 1e-6,
             "noslip_iterations": 1000,
-            "noslip_tolerance": 1e-6,
-            "viewer": "MuJoCo",
-            "texture_repeat": 1,
-            "shadow_size": 1024,
-            "visual_scale": 1.0,
-            "extent": 100.0
+            "noslip_tolerance" : 1e-6,
+            "viewer"           : "MuJoCo",
+            "texture_repeat"   : 1,
+            "shadow_size"      : 1024,
+            "visual_scale"     : 1.0,
+            "extent"           : 100.0
         },
         "pybullet": {
-            "opengl2": False,
-            "lcp": "dantzig",
-            "cfm": 1.0e-10,
-            "erp": 0,
-            "contact_erp": 0,
-            "friction_erp": 0,
-            "residual_threshold": 1.0e-06,
-            "max_num_cmd_per_1ms": 100000000,
+            "opengl2"                : False,
+            "lcp"                    : "dantzig",
+            "cfm"                    : 1.0e-10,
+            "erp"                    : 0,
+            "contact_erp"            : 0,
+            "friction_erp"           : 0,
+            "residual_threshold"     : 1.0e-06,
+            "max_num_cmd_per_1ms"    : 100000000,
             "report_solver_analytics": 0
         },
         "extensions": [
@@ -264,7 +289,7 @@ def gen_simulation_config():
         ]
     }
 
-    if use_fluid:
+    if use_bdim:
 
         simulation_dict["extensions"] += [
             {
@@ -273,7 +298,7 @@ def gen_simulation_config():
                 "handler_path": handler_path,
                 "bdim_yaml": {
                 "solver": {
-                    "use_gpu": True,
+                    "use_gpu" : True,
                     "nthreads": 16,
 
                     # # approximate the slime pool (check find_h_solution.py)
@@ -284,27 +309,27 @@ def gen_simulation_config():
                     # "ymin": -0.64,
                     # "ymax": 0.64,
 
-                    "Nx": 2048,
-                    "Ny": 512,
+                    "Nx"  : 2048,
+                    "Ny"  : 512,
                     "xmin": -0.9,
                     "xmax": 5.1,
                     "ymin": -0.75,
                     "ymax": 0.75,
 
                     "convection_method": fluid_method,
-                    "dt": 0.0001,
-                    "nt": 800000,
+                    "dt"               : 0.0001,
+                    "nt"               : 800000,
 
                     "nu": nu,
 
-                    "rho": 1.0e+3,
-                    "poisson_tol": 1.0e-7,
-                    "poisson_max_cycles": 5,
+                    "rho"                    : 1.0e+3,
+                    "poisson_tol"            : 1.0e-7,
+                    "poisson_max_cycles"     : 5,
                     "poisson_max_mgcg_cycles": 3,
-                    "jacobi_weight": 0.7,
-                    "poisson_nsmoothing": 10,
-                    "poisson_verbose": False,
-                    "poisson_folder": "data/"
+                    "jacobi_weight"          : 0.7,
+                    "poisson_nsmoothing"     : 10,
+                    "poisson_verbose"        : False,
+                    "poisson_folder"         : "data/"
                 },
                 "boundary_conditions": {
                     "BC_type_u": ["N", "N", "N", "N"],
@@ -313,14 +338,14 @@ def gen_simulation_config():
                     "BC_values_v": [0, 0, 0, 0]
                 },
                 "body": {
-                    "type": "multi_animat",
-                    "sdf_folder": sdf_folder,
-                    "plotting": False,
-                    "compute_interp": False,
+                    "type"           : "multi_animat",
+                    "sdf_folder"     : sdf_folder,
+                    "plotting"       : False,
+                    "compute_interp" : False,
                     "plotting_meshes": False,
-                    "save_folder": "../",
-                    "n_samples": (2000, 2000),
-                    "update_maps": {
+                    "save_folder"    : "../../",
+                    "n_samples"      : (2000, 2000),
+                    "update_maps"    : {
                     "rotation": "None",
                     "translation": [None, None]
                     },
@@ -329,24 +354,26 @@ def gen_simulation_config():
                     "scale": 1
                 },
                 "output": {
-                    "save_path": "/data/andreaferrario/ns_data/",
+                    "save_path"  : "/data/andreaferrario/ns_data/",
                     "save_frames": True,
-                    "save_every": save_every,
-                    "vmin": -10,
-                    "vmax": 10,
-                    "save_uv": False
+                    "save_every" : save_every,
+                    "vmin"       : -10,
+                    "vmax"       : 10,
+                    "save_uv"    : False
                 }
                 }
             }
             },
-            {
-            "loader": "farms_core.simulation.extensions.ExperimentLogger",
-            "config": {
-                "log_path": "output",
-                "skip": 0
-            }
-            }
         ]
+
+    simulation_dict["extensions"] += [
+    {
+        "loader": "lilytorch.integration.extensions.DataLogger",
+        "config": {
+            "log_path": "output/nn_data.hdf5",
+        }
+    }
+    ]
 
     pyobject2yaml(
         sim_sir + 'simulation_config.yaml',

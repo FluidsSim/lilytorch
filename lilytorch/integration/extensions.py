@@ -6,13 +6,11 @@ from farms_core.experiment.options import ExperimentOptions
 from farms_core.experiment.data import ExperimentData
 from farms_core.extensions.extensions import import_item
 from farms_mujoco.simulation.task import ExperimentTask
-from farms_core.model.options import AnimatOptions, ArenaOptions
-from farms_core.model.data import AnimatData
 from farms_core.experiment.data import ExperimentData
-from farms_core.model.extensions import AnimatExtension
 from dm_control.mjcf.physics import Physics
 import logging
 logging.basicConfig(level=logging.ERROR)
+from farms_core.io.hdf5 import dict_to_hdf5
 
 
 class DummyOptionCallback(TaskExtension):
@@ -100,44 +98,47 @@ class FluidExtension(TaskExtension):
 
 
 
-# class ImplicitTorqueExtension(AnimatExtension):
+class DataLogger(TaskExtension):
+    """
+    Log data attached through external extensions.
+    The data is expected to be stored in animat_data.record as a dictionary.
+    """
 
-#     def __init__(
-#             self,
-#             animat_i: int,
-#             animat_data: AnimatData,
-#             animat_options: AnimatOptions,
-#             arena_options: ArenaOptions,
-#             substep=True,
-#     ):
-#         super().__init__(substep=substep)
-#         self.animat_i = animat_i
-#         self.animat_data = animat_data
-#         self.animat_options = animat_options
-#         self.arena_options = arena_options
+    def __init__(
+            self,
+            experiment_options: ExperimentOptions,
+            log_path: str,
+    ):
+        super().__init__()
+        self.experiment_options = experiment_options
+        self.log_path = log_path
 
+    @classmethod
+    def from_options(
+            cls,
+            config: dict,
+            experiment_options: ExperimentOptions,
+    ):
+        """From options"""
+        return cls(
+            experiment_options=experiment_options,
+            log_path=config.get("log_path", ""),
+        )
 
-#     @classmethod
-#     def from_options(
-#             cls,
-#             config: dict,
-#             experiment_options: ExperimentOptions,
-#             animat_i: int,
-#             animat_data: AnimatData,
-#             animat_options: AnimatOptions,
-#     ):
-#         """From options"""
-#         return cls(
-#             animat_i=animat_i,
-#             animat_data=animat_data,
-#             animat_options=animat_options,
-#             arena_options=experiment_options.arenas[0],
-#         )
+    def initialize_episode(self, task: TaskExtension, physics: Physics):
+        """Iteration 0"""
+        del physics
+        self.data = task.data
 
 
-#     def initialize_episode(self, task, physics):
-#         """Initialize episode"""
-#         from IPython import embed; embed()
+    def end_episode(self, task: ExperimentTask, physics: Physics):
 
-#     def before_step(self, task, action, physics):
-#         """Step hydrodynamics"""
+        self.experiment_options.animats
+        data={"animats":[animat_data.record for animat_data in self.data.animats]}
+
+        dict_to_hdf5(filename=self.log_path, data=data)
+
+
+
+
+

@@ -39,8 +39,8 @@ class BDIMhandler():
         self.force_scaling = 0.04 # general height of 1guilla border
 
         self.rho_fluid = self.pars['solver']['rho']
-        # self.rho_body  = 800.0
-        self.rho_body  = 1000.0
+        self.rho_body  = 800.0
+        # self.rho_body  = 1000.0
 
     def cython2numpy(self, array):
         return torch.from_numpy(np.array(array).astype(self.dtype_np)).to(self.device)
@@ -160,7 +160,7 @@ class BDIMhandler():
             physics.data.xfrc_applied[ind_task, 1] = (self.friction_force_lin_y[body_i] + self.pressure_force_y[body_i]) * task.units.newtons
             physics.data.xfrc_applied[ind_task, 5] = (self.friction_force_ang_z[body_i] + self.pressure_force_ang_z[body_i]) * task.units.newtons
 
-            print(physics.data.xfrc_applied[ind_task, 0])
+            # print(physics.data.xfrc_applied[ind_task, 0])
 
 
 
