@@ -14,7 +14,7 @@
 *.html
 *.h5
 *.pickle
-*.csv
+# *.csv
 *.so
 *.egg-info
 

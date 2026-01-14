@@ -48,7 +48,7 @@ class PoissonSolverFFT:
         if not os.path.exists(filename):
             os.makedirs(filename)
 
-        self.save_filename = filename+self.name+".pt"
+        self.save_filename = os.path.join(filename, self.name + ".pt")
         # compute green function
         if exists(self.save_filename) and not overwrite:
             self.Gfft = torch.load(self.save_filename)

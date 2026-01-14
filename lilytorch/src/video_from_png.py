@@ -13,7 +13,7 @@ format      = ".mp4"
 dt          = 0.001
 slow_factor = 1
 save_every  = 100
-tstop       = 17
+tstop       = 20
 video_name  = dir+name+format
 
 

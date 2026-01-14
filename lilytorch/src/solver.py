@@ -246,19 +246,21 @@ class FluidSolver:
 
         if self.save_frames or self.save_uv:
             path = output["save_path"]
-            if "results_folder" in output:
-                results_folder = output["results_folder"]
+            if "existing_folder" in output:
+                results_folder = output["existing_folder"]
                 results_folder = path+results_folder
             else:
                 today          = datetime.datetime.now()
                 todaystr       = today.isoformat()
                 results_folder = f'{path}{todaystr}'
-            os.makedirs(results_folder)
+            os.makedirs(results_folder, exist_ok=True)
+
+            print(f"Frames will be saved in folder: {results_folder}/")
 
             self.save_path = results_folder+"/"
 
               # Add save path to the parameters
-            pars["output"]["results_folder"] = results_folder
+            pars["output"]["existing_folder"] = results_folder
 
               # Save body signal (if available)
             if getattr(self.composite_body, 'save_signal', None):
