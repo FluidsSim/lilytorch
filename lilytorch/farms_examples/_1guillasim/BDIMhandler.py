@@ -31,6 +31,8 @@ class BDIMhandler():
 
         self.fluid_solver.composite_body.update = self.update  # modify the update rule
 
+        self.fluid_solver.u0 = self.fluid_solver.adv_diff_solver.BC_values_u[1]*torch.ones((self.fluid_solver.nx,self.fluid_solver.ny),device=self.device,dtype=self.dtype)
+
         self.lin_axes = [0,1]
         self.ang_axes = [2]
 

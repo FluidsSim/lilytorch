@@ -2,7 +2,7 @@ import xml.etree.ElementTree as ET
 from xml.dom import minidom
 from lilytorch.util.paths import lilytorch_repo_root
 
-def create_pool_sdf(xmin, xmax, ymin, ymax, wall_thickness=0.3, wall_height=0.3):
+def create_pool_sdf(xmin, xmax, ymin, ymax, wall_thickness=0.3, wall_height=0.3, plotting=False):
     # Create root element
     sdf   = ET.Element('sdf', version='1.6')
     world = ET.SubElement(sdf, 'world', name='world')
@@ -112,58 +112,58 @@ def create_pool_sdf(xmin, xmax, ymin, ymax, wall_thickness=0.3, wall_height=0.3)
         fv_size.text = f'{floor_length} {floor_width} 0.1'
         ET.SubElement(floor_visual, 'material')
 
+    if plotting:
+        # Visualize the pool dimensions
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as patches
 
-    # Visualize the pool dimensions
-    import matplotlib.pyplot as plt
-    import matplotlib.patches as patches
+        _, ax = plt.subplots(figsize=(10, 6))
 
-    _, ax = plt.subplots(figsize=(10, 6))
+        # Draw floor
+        floor_patch = patches.Rectangle((x0 - wall_thickness, y0 - wall_thickness),
+                                        floor_length, floor_width,
+                                        linewidth=1, edgecolor='brown', facecolor='tan', alpha=0.3)
+        ax.add_patch(floor_patch)
 
-    # Draw floor
-    floor_patch = patches.Rectangle((x0 - wall_thickness, y0 - wall_thickness),
-                                    floor_length, floor_width,
-                                    linewidth=1, edgecolor='brown', facecolor='tan', alpha=0.3)
-    ax.add_patch(floor_patch)
+        # Draw side walls using corner-based parameters
+        walls = [
+            # Left wall (side_x_0)
+            patches.Rectangle((x0 - wall_thickness, y0 - wall_thickness/2),
+                                wall_thickness, pool_width + wall_thickness,
+                                linewidth=2, edgecolor='black', facecolor='gray', alpha=0.5),
+            # Right wall (side_x_1)
+            patches.Rectangle((x1, y1 - wall_thickness/2),
+                                wall_thickness, pool_width + wall_thickness,
+                                linewidth=2, edgecolor='black', facecolor='gray', alpha=0.5),
+            # Bottom wall (side_y_0)
+            patches.Rectangle((x0 - wall_thickness/2, y0 - wall_thickness),
+                                pool_length + wall_thickness, wall_thickness,
+                                linewidth=2, edgecolor='black', facecolor='gray', alpha=0.5),
+            # Top wall (side_y_1)
+            patches.Rectangle((x3 - wall_thickness/2, y2),
+                                pool_length + wall_thickness, wall_thickness,
+                                linewidth=2, edgecolor='black', facecolor='gray', alpha=0.5)
+        ]
 
-    # Draw side walls using corner-based parameters
-    walls = [
-        # Left wall (side_x_0)
-        patches.Rectangle((x0 - wall_thickness, y0 - wall_thickness/2),
-                            wall_thickness, pool_width + wall_thickness,
-                            linewidth=2, edgecolor='black', facecolor='gray', alpha=0.5),
-        # Right wall (side_x_1)
-        patches.Rectangle((x1, y1 - wall_thickness/2),
-                            wall_thickness, pool_width + wall_thickness,
-                            linewidth=2, edgecolor='black', facecolor='gray', alpha=0.5),
-        # Bottom wall (side_y_0)
-        patches.Rectangle((x0 - wall_thickness/2, y0 - wall_thickness),
-                            pool_length + wall_thickness, wall_thickness,
-                            linewidth=2, edgecolor='black', facecolor='gray', alpha=0.5),
-        # Top wall (side_y_1)
-        patches.Rectangle((x3 - wall_thickness/2, y2),
-                            pool_length + wall_thickness, wall_thickness,
-                            linewidth=2, edgecolor='black', facecolor='gray', alpha=0.5)
-    ]
+        for wall in walls:
+            ax.add_patch(wall)
 
-    for wall in walls:
-        ax.add_patch(wall)
+        # Draw water area
+        water = patches.Rectangle((x0, y0), pool_length, pool_width,
+                                    linewidth=1, edgecolor='blue', facecolor='lightblue', alpha=0.3)
+        ax.add_patch(water)
 
-    # Draw water area
-    water = patches.Rectangle((x0, y0), pool_length, pool_width,
-                                linewidth=1, edgecolor='blue', facecolor='lightblue', alpha=0.3)
-    ax.add_patch(water)
+        margin = 1
+        ax.set_xlim(x0 - wall_thickness - margin, x1 + wall_thickness + margin)
+        ax.set_ylim(y0 - wall_thickness - margin, y2 + wall_thickness + margin)
+        ax.set_aspect('equal')
+        ax.set_xlabel('X (meters)')
+        ax.set_ylabel('Y (meters)')
+        ax.set_title('Pool - Top View')
+        ax.grid(True, alpha=0.3)
 
-    margin = 1
-    ax.set_xlim(x0 - wall_thickness - margin, x1 + wall_thickness + margin)
-    ax.set_ylim(y0 - wall_thickness - margin, y2 + wall_thickness + margin)
-    ax.set_aspect('equal')
-    ax.set_xlabel('X (meters)')
-    ax.set_ylabel('Y (meters)')
-    ax.set_title('Pool - Top View')
-    ax.grid(True, alpha=0.3)
-
-    plt.tight_layout()
-    plt.show()
+        plt.tight_layout()
+        plt.show()
 
     # Pretty print
     xml_str = minidom.parseString(ET.tostring(sdf)).toprettyxml(indent="  ")

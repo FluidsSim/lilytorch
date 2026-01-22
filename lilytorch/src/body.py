@@ -1159,7 +1159,6 @@ class BodyMesh(Body):
         self.mesh_file           = mesh_file
         self.compute_interp      = compute_interp
         self.save_folder         = kwargs.pop("save_folder", "")
-        os.makedirs(self.save_folder+"interp_data", exist_ok=True)
         self.nsamples            = nsamples
         self.msamples            = msamples
         self.update_theta        = update_maps[0]
@@ -1306,8 +1305,8 @@ class BodyMesh(Body):
             ######################## Contour computation ########################
 
             # find contour lines
-            cnt = np.array(measure.find_contours(sdf_val, 0)[0]).T
-            # cnt = np.array(measure.find_contours(sdf_val-self.eps, 0)[0]).T
+            # cnt = np.array(measure.find_contours(sdf_val, 0)[0]).T
+            cnt = np.array(measure.find_contours(sdf_val-self.eps, 0)[0]).T
             cnt[0]=xnp[0]+cnt[0]*(xnp[1]-xnp[0])
             cnt[1]=ynp[0]+cnt[1]*(ynp[1]-ynp[0])
             curv_coord = np.concatenate(([0], np.cumsum(np.sqrt(np.sum(np.diff(cnt, axis=1)**2, axis=0)))))
@@ -1385,9 +1384,7 @@ class BodyMesh(Body):
             print("Computing the interpolation functions for {}".format(self.mesh_file))
 
 
-            interp_data_dir = "interp_data"
-            if not os.path.exists(interp_data_dir):
-                os.makedirs(interp_data_dir)
+            os.makedirs(self.save_folder, exist_ok=True)
 
             np.save(os.path.join(self.save_folder, f"xnp_{self.mesh_file.split('/')[-1].split('.')[0]}.npy"), xnp)
             np.save(os.path.join(self.save_folder, f"ynp_{self.mesh_file.split('/')[-1].split('.')[0]}.npy"), ynp)

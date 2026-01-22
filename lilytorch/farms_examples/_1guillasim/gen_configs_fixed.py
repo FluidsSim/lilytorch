@@ -4,30 +4,32 @@ import os
 from farms_core.io.yaml import pyobject2yaml
 from farms_core.model.options import SpawnMode
 from farms_core.io.sdf import ModelSDF
-from lilytorch.util.paths import lilytorch_repo_root, sdfs_path, output_folder, todaystr, save_path
+from lilytorch.util.paths import lilytorch_repo_root, sdfs_path, gen_new_folder, save_path
 from lilytorch.integration.gen_pool_sdf import create_pool_sdf
 import subprocess
+import numpy as np
 
-data_folder = os.path.join(lilytorch_repo_root, 'farms_examples', '_1guillasim')
-
+stack_folder      = os.path.join(save_path, "2guilla","fb_on")
+stack_folder      = save_path
+data_folder       = os.path.join(lilytorch_repo_root, 'farms_examples', '_1guillasim')
 bdim_handler_path = "lilytorch.farms_examples._1guillasim.BDIMhandler.BDIMhandler"
 
-os.makedirs(
-    output_folder, exist_ok=True
-)
-print(
-    "Saving configs to folder:", output_folder
-)
+freqs = np.linspace(0.4, 1.0, 20)
+freqs = [0.4, 0.43, 0.47, 0.5, 0.53, 0.57, 0.6, 0.63, 0.67, 0.7, 0.73, 0.77, 0.8, 0.83, 0.87, 0.9, 0.93, 0.97, 1.0]
+
+
+nthreads = 16
+use_gpu  = False
 
 use_bdim = True
-headless = False
+headless = True
+fast     = False
 
 use_drag = not use_bdim
-
 constant_drags = [
             [-0.1, -5.0, -5.0],
             [-0.001, -0.001, -0.001]
-        ]
+]
 
 animats_pars = [
     {
@@ -38,11 +40,11 @@ animats_pars = [
     "muscle_config": {
         'load_controller': 'lilytorch.farms_examples._1guillasim.network.PAOscillatorController',
         'method'         : 'implicit',
-        'muscle_pars'    : os.path.join(data_folder, 'muscle_params.csv'),
+        'muscle_pars'    : os.path.join(data_folder, 'muscle_params_od.csv'),
     },
     "gains": [0, 0, 0],
-    "spawn_mode": SpawnMode.TRANSVERSE,
-    "pose": [0, 0, 0, 0, 0, 3.141592653589793],
+    "spawn_mode": SpawnMode.FIXED,
+    "pose": [1, 0, 0, 0, 0, 3.141592653589793],
     },
 
     {
@@ -53,11 +55,11 @@ animats_pars = [
     "muscle_config": {
         'load_controller': 'lilytorch.farms_examples._1guillasim.network.PAOscillatorController',
         'method'         : 'implicit',
-        'muscle_pars'    : os.path.join(data_folder, 'muscle_params.csv'),
+        'muscle_pars'    : os.path.join(data_folder, 'muscle_params_od.csv'),
     },
     "gains": [0, 0, 0],
-    "spawn_mode": SpawnMode.TRANSVERSE,
-    "pose": [1, 0, 0, 0, 0, 3.141592653589793],
+    "spawn_mode": SpawnMode.FIXED,
+    "pose": [2, 0, 0, 0, 0, 3.141592653589793],
     },
 
 ]
@@ -79,49 +81,87 @@ animats_pars = [
 
 
 
-Nx = 2048
-Ny = 512
-xmin = -0.9
-xmax = 5.1
-ymin = -0.75
-ymax = 0.75
+# Nx           = 2048
+# Ny           = 512
+# xmin         = -0.9
+# xmax         = 5.1
+# ymin         = -0.75
+# ymax         = 0.75
 
+
+# Nx           = 1024
+# Ny           = 256
+# xmin         = -0.9
+# xmax         = 5.1
+# ymin         = -0.75
+# ymax         = 0.75
+
+
+
+# Nx           = 2048
+# Ny           = 512
+# xmin         = -0.9
+# xmax         = 11.1
+# ymin         = -1.5
+# ymax         = 1.5
+
+
+Nx           = 512
+Ny           = 256
+xmin         = -0.9
+xmax         = 2.1
+ymin         = -0.75
+ymax         = 0.75
 
 density = 800.0
 nu      = 500.0e-6
 # nu    = 1.0e-6
 
 
-# timestep     = 0.001
+# timestep     = 0.01
 # fluid_method = "implicit"
 # save_every   = 500
+# n_iterations = 40001
 
 timestep     = 0.001
 fluid_method = "abdquickest"
+save_frames  = True
 save_every   = 100
-
 n_iterations = 20001
 
 
-def gen_animat_config():
+save_frames  = True
+save_uv      = False
+
+def gen_animat_config(output_folder, index):
 
     for animat_i, animat_pars in enumerate(animats_pars):
 
-        model_name    = animat_pars.pop("model_name")
-        sdf_name      = animat_pars.pop("sdf_name")
-        control_type  = animat_pars.pop("control_type")
-        muscle_loader = animat_pars.pop("muscle_loader")
-        muscle_config = animat_pars.pop("muscle_config")
-        gains         = animat_pars.pop("gains")
-        spawn_mode    = animat_pars.pop("spawn_mode")
-        pose          = animat_pars.pop("pose")
+        model_name    = animat_pars["model_name"]
+        sdf_name      = animat_pars["sdf_name"]
+        control_type  = animat_pars["control_type"]
+        muscle_loader = animat_pars["muscle_loader"]
+        muscle_config = animat_pars["muscle_config"]
+        gains         = animat_pars["gains"]
+        spawn_mode    = animat_pars["spawn_mode"]
+        pose          = animat_pars["pose"]
 
-        sdf_file   = os.path.join(sdfs_path, model_name, sdf_name)
+        sdf_file = os.path.join(sdfs_path, model_name, sdf_name)
 
         model_sdf   = ModelSDF.read(sdf_file)[0]
         link_names  = [link.name for link in model_sdf.links]
         joint_names = [joint.name for joint in model_sdf.joints]
         nlinks      = len(link_names)
+
+        n_joints = len(joint_names)
+        muscle_config["go_straight"]   = False
+        if animat_i==0:
+            # muscle_config["initial_state"] = np.roll(np.linspace(0, -2*np.pi, n_joints), index)
+            muscle_config["freq"]          = 0.7
+        if animat_i==1:
+            muscle_config["freq"]          = freqs[index]
+
+
 
         drag_coefficients = [
             constant_drags for _ in range(nlinks)
@@ -187,6 +227,7 @@ def gen_animat_config():
         animat_dict["control"]["sensors"]["contacts"] = [
             (link_name,'') for link_name in link_names
         ]
+        # animat_dict["control"]["sensors"]["contacts"] = []
         animat_dict["control"]["sensors"]["xfrc"] = link_names
         animat_dict["control"]["sensors"]["muscles"] = []
         animat_dict["control"]["sensors"]["adhesions"] = []
@@ -222,11 +263,12 @@ def gen_animat_config():
             animat_dict
         )
 
-def gen_arena_config():
+def gen_arena_config(output_folder, index):
 
-    create_pool_sdf(xmin, xmax, ymin, ymax, wall_thickness=0.3, wall_height=0.3)
+    create_pool_sdf(xmin, xmax, ymin, ymax, wall_thickness=0.3, wall_height=0.3, plotting=False)
 
     arena_dict = {
+    #    "sdf": os.path.join(sdfs_path, "arena_flat_v0", "sdf", "arena_flat.sdf"),
        "sdf": os.path.join(sdfs_path, "pool", "sdf", "pool.sdf"),
        "spawn": {
             "loader"  : 0,
@@ -252,13 +294,13 @@ def gen_arena_config():
         arena_dict
     )
 
-def gen_experiment_config():
+def gen_experiment_config(output_folder, index):
 
-    experiment_dict               = {}
-    experiment_dict["simulation"] = "simulation_config.yaml"
-    experiment_dict["arenas"]     = ["arena_config.yaml"]
-    experiment_dict["animats"]    = ["animat_config_"+str(i)+".yaml" for i in range(len(animats_pars))]
-    experiment_dict["loaders"]    = {}
+    experiment_dict                                  = {}
+    experiment_dict["simulation"]                    = "simulation_config.yaml"
+    experiment_dict["arenas"]                        = ["arena_config.yaml"]
+    experiment_dict["animats"]                       = ["animat_config_"+str(i)+".yaml" for i in range(len(animats_pars))]
+    experiment_dict["loaders"]                       = {}
     experiment_dict["loaders"]["simulation_options"] = "farms_core.simulation.options.SimulationOptions"
     experiment_dict["loaders"]["animats_options"]    = ["farms_core.model.options.AnimatOptions" for _ in range(len(animats_pars))]
     experiment_dict["loaders"]["arenas_options"]     = ["farms_core.model.options.ArenaOptions"]
@@ -270,7 +312,7 @@ def gen_experiment_config():
         experiment_dict
     )
 
-def gen_simulation_config():
+def gen_simulation_config(output_folder, index):
 
     simulation_dict = {
         "units": {
@@ -283,7 +325,7 @@ def gen_simulation_config():
             "buffer_size"  : n_iterations,
             "play"         : True,
             "rtl"          : 1.0,
-            "fast"         : False,
+            "fast"         : fast,
             "headless"     : headless,
             "show_progress": True
         }
@@ -308,33 +350,35 @@ def gen_simulation_config():
             "texture_repeat"   : 1,
             "shadow_size"      : 1024,
             "visual_scale"     : 1.0,
-            "extent"           : 100.0
-        },
-        "pybullet": {
-            "opengl2"                : False,
-            "lcp"                    : "dantzig",
-            "cfm"                    : 1.0e-10,
-            "erp"                    : 0,
-            "contact_erp"            : 0,
-            "friction_erp"           : 0,
-            "residual_threshold"     : 1.0e-06,
-            "max_num_cmd_per_1ms"    : 100000000,
-            "report_solver_analytics": 0
+            "extent"           : 400.0
         },
         "extensions": [
             {
-            "loader": "farms_core.simulation.extensions.ExperimentLogger",
-            "config": {
-                "log_path": "output",
-                "skip": 0
-            }
+                "loader": "farms_core.simulation.extensions.ExperimentLogger",
+                "config": {
+                    "log_path": os.path.join(output_folder, "output"),
+                    "skip": 0
+                }
             },
             {
                 "loader": "farms_mujoco.simulation.extensions.MjcfSaver",
                 "config": {
-                    "path": "output/simulation_mjcf.xml"
+                    "path": os.path.join(output_folder, "output", "simulation_mjcf.xml")
                 }
-            }
+            },
+            {
+                "loader": "lilytorch.integration.extensions.DataLogger",
+                "config": {
+                    "log_path": os.path.join(output_folder, "output", "nn_data.hdf5"),
+                }
+            },
+            # {
+            #     "loader": "farms_mujoco.simulation.extensions.TrailCoMViewer",
+            #     "config": {
+            #         "width": 0.1,
+            #         "rgba" : [1.0, 0.0, 0.0, 1.0]
+            #     }
+            # }
         ]
     }
 
@@ -347,8 +391,8 @@ def gen_simulation_config():
                 "handler_path": bdim_handler_path,
                 "bdim_yaml": {
                 "solver": {
-                    "use_gpu"                : True,
-                    "nthreads"               : 16,
+                    "use_gpu"                : use_gpu,
+                    "nthreads"               : nthreads,
                     "Nx"                     : Nx,
                     "Ny"                     : Ny,
                     "xmin"                   : xmin,
@@ -369,9 +413,9 @@ def gen_simulation_config():
                     "poisson_folder"         : os.path.join(data_folder, "data")
                 },
                 "boundary_conditions": {
-                    "BC_type_u"  : ["N", "N", "N", "N"],
-                    "BC_values_u": [0, 0, 0, 0],
-                    "BC_type_v"  : ["N", "N", "N", "N"],
+                    "BC_type_u"  : ["D", "D", "N", "N"],
+                    "BC_values_u": [-0.5, -0.5, 0, 0],
+                    "BC_type_v"  : ["N", "N", "D", "D"],
                     "BC_values_v": [0, 0, 0, 0]
                 },
                 "body": {
@@ -391,34 +435,25 @@ def gen_simulation_config():
                     "scale"    : 1
                 },
                 "output": {
-                    "save_path"      : save_path,
-                    "existing_folder": todaystr,
-                    "save_frames"    : True,
+                    "save_path"      : "",
+                    "existing_folder": output_folder,
+                    "save_frames"    : save_frames,
                     "save_every"     : save_every,
-                    "vmin"           : -10,
-                    "vmax"           : 10,
-                    "save_uv"        : False
+                    "vmin"           : -40,
+                    "vmax"           : 40,
+                    "save_uv"        : save_uv
                 }
                 }
             }
-            },
+            }
         ]
-
-    simulation_dict["extensions"] += [
-    {
-        "loader": "lilytorch.integration.extensions.DataLogger",
-        "config": {
-            "log_path": "output/nn_data.hdf5",
-        }
-    }
-    ]
 
     pyobject2yaml(
         os.path.join(output_folder, 'simulation_config.yaml'),
         simulation_dict
     )
 
-def gen_sh_config():
+def gen_sh_config(output_folder, index):
 
     sh_str = f"""#!/bin/bash
     farmsim --experiment_config experiment_config.yaml "$@"
@@ -429,16 +464,31 @@ def gen_sh_config():
     ) as f:
         f.write(sh_str)
 
-def gen_run():
-    gen_animat_config()
-    gen_arena_config()
-    gen_simulation_config()
-    gen_experiment_config()
-    gen_sh_config()
+def single_run(index):
 
+    output_folder = gen_new_folder(stack_folder)
+
+    os.makedirs(
+        output_folder, exist_ok=True
+    )
+    print(
+        "Saving configs to folder:", output_folder
+    )
+
+    gen_animat_config(output_folder, index)
+    gen_arena_config(output_folder, index)
+    gen_simulation_config(output_folder, index)
+    gen_experiment_config(output_folder, index)
+    gen_sh_config(output_folder, index)
     os.chdir(output_folder)
     subprocess.run(['bash', 'run.sh'])
 
+    # import sys
+    # from farms_sim.farmsim import main
+    # sys.argv = ['farmsim', '--experiment_config', 'experiment_config.yaml']
+    # main()
+
 if __name__ == "__main__":
 
-    gen_run()
+    for i in range(8,20):
+        single_run(i)

@@ -130,12 +130,9 @@ class DataLogger(TaskExtension):
         del physics
         self.data = task.data
 
-
     def end_episode(self, task: ExperimentTask, physics: Physics):
-
         self.experiment_options.animats
         data={"animats":[animat_data.record for animat_data in self.data.animats]}
-
         dict_to_hdf5(filename=self.log_path, data=data)
 
 

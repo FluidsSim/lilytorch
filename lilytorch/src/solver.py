@@ -4,7 +4,7 @@ from pytorch_interpolation import RegularGridInterpolator
 from lilytorch.src.adv_diff import AdvDiffSolver
 from lilytorch.src.poisson_mult import PoissonSolver
 from lilytorch.src.poisson_fft import PoissonSolverFFT
-from lilytorch.src.poisson_petsc import PoissonSolverPETSc
+# from lilytorch.src.poisson_petsc import PoissonSolverPETSc
 from lilytorch.src.body import body_from_yaml
 from lilytorch.src import plotting
 from lilytorch.util.rw import save_object
@@ -27,7 +27,6 @@ class FluidSolver:
         """
         BDIM2 solver for fluid structure interaction
         """
-
         solver    = pars["solver"]
         bcs       = pars["boundary_conditions"]
         output    = pars["output"]
@@ -119,14 +118,14 @@ class FluidSolver:
 
         )
 
-        self.poisson_solverPETSc  = PoissonSolverPETSc(
-            self.nx,
-            self.ny,
-            self.x,
-            self.y,
-            device=self.device,
-            dtype=self.dtype
-        )
+        # self.poisson_solverPETSc  = PoissonSolverPETSc(
+        #     self.nx,
+        #     self.ny,
+        #     self.x,
+        #     self.y,
+        #     device=self.device,
+        #     dtype=self.dtype
+        # )
 
         self.composite_body = body_from_yaml(
             self.device,
@@ -248,7 +247,6 @@ class FluidSolver:
             path = output["save_path"]
             if "existing_folder" in output:
                 results_folder = output["existing_folder"]
-                results_folder = path+results_folder
             else:
                 today          = datetime.datetime.now()
                 todaystr       = today.isoformat()
