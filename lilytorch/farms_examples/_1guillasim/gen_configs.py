@@ -15,8 +15,8 @@ stack_folder      = save_path
 data_folder       = os.path.join(lilytorch_repo_root, 'farms_examples', '_1guillasim')
 bdim_handler_path = "lilytorch.farms_examples._1guillasim.BDIMhandler.BDIMhandler"
 
-nthreads = 8
-use_gpu  = False
+nthreads = 16
+use_gpu  = True
 use_bdim = True
 headless = False
 fast     = False
@@ -108,16 +108,16 @@ density = 800.0
 nu    = 1.0e-6
 
 
-timestep     = 0.01
-fluid_method = "implicit"
-save_every   = 500
-n_iterations = 2001
+# timestep     = 0.01
+# fluid_method = "implicit"
+# save_every   = 500
+# n_iterations = 2001
 
-# timestep     = 0.001
-# fluid_method = "abdquickest"
-# save_frames  = True
-# save_every   = 100
-# n_iterations = 10001
+timestep     = 0.001
+fluid_method = "abdquickest"
+save_frames  = True
+save_every   = 50
+n_iterations = 20001
 
 save_frames = True
 save_uv     = False
@@ -147,7 +147,9 @@ def gen_animat_config(output_folder, index):
             muscle_config["initial_state"] = np.roll(np.linspace(0, -2*np.pi, n_joints), index)
             muscle_config["go_straight"]    = True
             muscle_config["freq"]         = 0.9
-
+        else:
+            muscle_config["go_straight"]    = True
+            muscle_config["freq"]         = 1
 
 
         drag_coefficients = [

@@ -23,13 +23,12 @@ class PAOscillatorController(NNController):
 
         self.phase_lag       = getattr(config, 'phase_lag', 2*np.pi/10)
         self.weight          = getattr(config, 'weight', 1.0)
-        self.freq            = getattr(config, 'freq', 1)
-
+        self.freq            = getattr(config, 'freq', 0.7)
         self.enable_coupling = getattr(config, 'enable_coupling', 1)
-        self.weight_feedback = getattr(config, 'weight_feedback', 500.0)
+        self.weight_feedback = getattr(config, 'weight_feedback', 10.0)
         self.amp_bias        = getattr(config, 'amp_bias', 0.0)
         self.taua            = getattr(config, 'taua', 0.1)
-        self.go_straight     = getattr(config, 'go_straight', False)
+        self.go_straight     = getattr(config, 'go_straight', True)
         initial_state        = getattr(config, 'initial_state', np.linspace(0, -2*np.pi, self.n_joints))
 
         print("self.freq = ", self.freq)
@@ -41,7 +40,7 @@ class PAOscillatorController(NNController):
         self.state[0][self.n_joints:2*self.n_joints] = initial_state + np.pi
 
 
-        self.state[0][:2*self.n_joints] = np.random.rand(2*self.n_joints) * 2 * np.pi
+        # self.state[0][:2*self.n_joints] = np.random.rand(2*self.n_joints) * 2 * np.pi
 
         if self.go_straight:
             self.speed_lateral_filtered = 0.0 # initial value
@@ -147,7 +146,7 @@ class PAOscillatorController(NNController):
             # alpha                        = 1 * 2 * np.pi * self.freq * timestep
 
             self.speed_lateral_filtered = alpha * var  + (1 - alpha) * self.speed_lateral_filtered
-            self.amp_bias                = - 1 * self.speed_lateral_filtered
+            self.amp_bias                = - 1.0 * self.speed_lateral_filtered
 
             self.animat_data.record["lateral_speed"][iteration] = var
             self.animat_data.record["lateral_speed_filtered"][iteration] = self.speed_lateral_filtered
