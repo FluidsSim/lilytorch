@@ -21,14 +21,14 @@ class PAOscillatorController(NNController):
 
         self.state  = np.zeros((self.n_iterations, 4*self.n_joints))  # phases and amplitudes
 
-        self.phase_lag       = getattr(config, 'phase_lag', 2*np.pi/10)
-        self.weight          = getattr(config, 'weight', 1.0)
+        self.phase_lag       = getattr(config, 'phase_lag', 2*np.pi/12)
+        self.weight          = getattr(config, 'weight', 5.0)
         self.freq            = getattr(config, 'freq', 0.7)
         self.enable_coupling = getattr(config, 'enable_coupling', 1)
-        self.weight_feedback = getattr(config, 'weight_feedback', 10.0)
+        self.weight_feedback = getattr(config, 'weight_feedback', 400.0)
         self.amp_bias        = getattr(config, 'amp_bias', 0.0)
         self.taua            = getattr(config, 'taua', 0.1)
-        self.go_straight     = getattr(config, 'go_straight', True)
+        self.go_straight     = getattr(config, 'go_straight', False)
         initial_state        = getattr(config, 'initial_state', np.linspace(0, -2*np.pi, self.n_joints))
 
         print("self.freq = ", self.freq)

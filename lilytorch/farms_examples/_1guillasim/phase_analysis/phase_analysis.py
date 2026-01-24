@@ -54,7 +54,7 @@ def get_schooling_data(
     sigma     = 2
 
     freqs       = np.geomspace(1, 0.6, num=1000)
-    wavelet     = 'cmor1.0-1.0'
+    wavelet     = 'cmor1.0-3.0'
     scales      = 1 / (freqs*timestep)
     frequencies = pywt.scale2frequency(wavelet, scales) / timestep
     scaleMatrix = np.ones([1, n]) * scales[:, None]
@@ -93,10 +93,36 @@ def get_schooling_data(
         return phi_max
 
 
-
     W_0, freq_0, power_0 = compute_cwt(angle_0)
     W_1, freq_1, power_1 = compute_cwt(angle_1)
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+    extent = [times[0], times[-1], frequencies[0], frequencies[-1]]
 
+    im0 = axes[0].imshow(
+        np.abs(W_0**2)/scaleMatrix,
+        aspect='auto',
+        origin='lower',
+        extent=[times[0], times[-1], frequencies[0], frequencies[-1]]
+    )
+    axes[0].set_title('CWT Magnitude - Agent 1')
+    axes[0].set_xlabel('Time (s)')
+    axes[0].set_ylabel('Frequency (Hz)')
+    fig.colorbar(im0, ax=axes[0], label='Power')
+
+    im1 = axes[1].imshow(
+        np.abs(W_1**2)/scaleMatrix,
+        aspect='auto',
+        origin='lower',
+        extent=[times[0], times[-1], frequencies[0], frequencies[-1]]
+    )
+    axes[1].set_title('CWT Magnitude - Agent 2')
+    axes[1].set_xlabel('Time (s)')
+    axes[1].set_ylabel('Frequency (Hz)')
+    fig.colorbar(im1, ax=axes[1], label='Power')
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(data_dir, "cwt_agents_" + str(freq1) + ".png"))
+    plt.close(fig)
 
     phases = compute_cross_coherence(W_0, W_1)
 

@@ -114,8 +114,8 @@ ymin         = -0.75
 ymax         = 0.75
 
 density = 800.0
-nu      = 500.0e-6
-# nu    = 1.0e-6
+# nu      = 500.0e-6
+nu    = 1.0e-6
 
 
 # timestep     = 0.01
@@ -490,5 +490,5 @@ def single_run(index):
 
 if __name__ == "__main__":
 
-    for i in [11]: #range(8,20):
+    for i, freq in enumerate(freqs):
         single_run(i)

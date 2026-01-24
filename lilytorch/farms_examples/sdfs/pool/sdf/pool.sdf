@@ -9,7 +9,7 @@
           <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
           <geometry>
             <box>
-              <size>0.3 3.3 0.3</size>
+              <size>0.3 1.8 0.3</size>
             </box>
           </geometry>
         </collision>
@@ -17,7 +17,7 @@
           <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
           <geometry>
             <box>
-              <size>0.3 3.3 0.3</size>
+              <size>0.3 1.8 0.3</size>
             </box>
           </geometry>
           <material/>
@@ -26,30 +26,30 @@
       <link name="floor">
         <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
         <collision name="floor_collision">
-          <pose>5.1 0.0 -0.35 0.0 0.0 0.0</pose>
+          <pose>0.6000000000000001 0.0 -0.35 0.0 0.0 0.0</pose>
           <geometry>
             <box>
-              <size>12.6 3.6 0.1</size>
+              <size>3.6 2.1 0.1</size>
             </box>
           </geometry>
         </collision>
         <visual name="floor_visual">
-          <pose>5.1 0.0 -0.35 0.0 0.0 0.0</pose>
+          <pose>0.6000000000000001 0.0 -0.35 0.0 0.0 0.0</pose>
           <geometry>
             <box>
-              <size>12.6 3.6 0.1</size>
+              <size>3.6 2.1 0.1</size>
             </box>
           </geometry>
           <material/>
         </visual>
       </link>
       <link name="side_x_1">
-        <pose>11.25 0.0 -0.15 0.0 0.0 0.0</pose>
+        <pose>2.25 0.0 -0.15 0.0 0.0 0.0</pose>
         <collision name="side_x_1_collision">
           <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
           <geometry>
             <box>
-              <size>0.3 3.3 0.3</size>
+              <size>0.3 1.8 0.3</size>
             </box>
           </geometry>
         </collision>
@@ -57,7 +57,7 @@
           <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
           <geometry>
             <box>
-              <size>0.3 3.3 0.3</size>
+              <size>0.3 1.8 0.3</size>
             </box>
           </geometry>
           <material/>
@@ -66,30 +66,30 @@
       <link name="floor">
         <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
         <collision name="floor_collision">
-          <pose>5.1 0.0 -0.35 0.0 0.0 0.0</pose>
+          <pose>0.6000000000000001 0.0 -0.35 0.0 0.0 0.0</pose>
           <geometry>
             <box>
-              <size>12.6 3.6 0.1</size>
+              <size>3.6 2.1 0.1</size>
             </box>
           </geometry>
         </collision>
         <visual name="floor_visual">
-          <pose>5.1 0.0 -0.35 0.0 0.0 0.0</pose>
+          <pose>0.6000000000000001 0.0 -0.35 0.0 0.0 0.0</pose>
           <geometry>
             <box>
-              <size>12.6 3.6 0.1</size>
+              <size>3.6 2.1 0.1</size>
             </box>
           </geometry>
           <material/>
         </visual>
       </link>
       <link name="side_y_0">
-        <pose>5.1 -1.65 -0.15 0.0 0.0 0.0</pose>
+        <pose>0.6000000000000001 -0.9 -0.15 0.0 0.0 0.0</pose>
         <collision name="side_y_0_collision">
           <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
           <geometry>
             <box>
-              <size>12.3 0.3 0.3</size>
+              <size>3.3 0.3 0.3</size>
             </box>
           </geometry>
         </collision>
@@ -97,7 +97,7 @@
           <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
           <geometry>
             <box>
-              <size>12.3 0.3 0.3</size>
+              <size>3.3 0.3 0.3</size>
             </box>
           </geometry>
           <material/>
@@ -106,30 +106,30 @@
       <link name="floor">
         <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
         <collision name="floor_collision">
-          <pose>5.1 0.0 -0.35 0.0 0.0 0.0</pose>
+          <pose>0.6000000000000001 0.0 -0.35 0.0 0.0 0.0</pose>
           <geometry>
             <box>
-              <size>12.6 3.6 0.1</size>
+              <size>3.6 2.1 0.1</size>
             </box>
           </geometry>
         </collision>
         <visual name="floor_visual">
-          <pose>5.1 0.0 -0.35 0.0 0.0 0.0</pose>
+          <pose>0.6000000000000001 0.0 -0.35 0.0 0.0 0.0</pose>
           <geometry>
             <box>
-              <size>12.6 3.6 0.1</size>
+              <size>3.6 2.1 0.1</size>
             </box>
           </geometry>
           <material/>
         </visual>
       </link>
       <link name="side_y_1">
-        <pose>5.1 1.65 -0.15 0.0 0.0 0.0</pose>
+        <pose>0.6000000000000001 0.9 -0.15 0.0 0.0 0.0</pose>
         <collision name="side_y_1_collision">
           <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
           <geometry>
             <box>
-              <size>12.3 0.3 0.3</size>
+              <size>3.3 0.3 0.3</size>
             </box>
           </geometry>
         </collision>
@@ -137,7 +137,7 @@
           <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
           <geometry>
             <box>
-              <size>12.3 0.3 0.3</size>
+              <size>3.3 0.3 0.3</size>
             </box>
           </geometry>
           <material/>
@@ -146,18 +146,18 @@
       <link name="floor">
         <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
         <collision name="floor_collision">
-          <pose>5.1 0.0 -0.35 0.0 0.0 0.0</pose>
+          <pose>0.6000000000000001 0.0 -0.35 0.0 0.0 0.0</pose>
           <geometry>
             <box>
-              <size>12.6 3.6 0.1</size>
+              <size>3.6 2.1 0.1</size>
             </box>
           </geometry>
         </collision>
         <visual name="floor_visual">
-          <pose>5.1 0.0 -0.35 0.0 0.0 0.0</pose>
+          <pose>0.6000000000000001 0.0 -0.35 0.0 0.0 0.0</pose>
           <geometry>
             <box>
-              <size>12.6 3.6 0.1</size>
+              <size>3.6 2.1 0.1</size>
             </box>
           </geometry>
           <material/>

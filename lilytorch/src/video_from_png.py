@@ -6,7 +6,7 @@ import numpy as np
 from lilytorch.util.yaml_operations import yaml2pyobject
 
 
-dir         = "/data/andreaferrario/ns_data/2026-01-23T12:06:35.483591/curl/"
+dir         = "/data/andreaferrario/ns_data/2026-01-23T14:01:01.372604/curl/"
 name        = "video"
 img_name    = "curl"
 format      = ".mp4"

@@ -125,4 +125,4 @@ def main(data_dir, color):
 
 if __name__ == "__main__":
 
-    times, phases, freq1 = main(os.path.join(save_path,"2026-01-23T12:06:35.483591"), "b")
+    times, phases, freq1 = main("/data/andreaferrario/ns_data/pinned_2guilla_exp_2/2026-01-24T07:09:44.030339", "b")

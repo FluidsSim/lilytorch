@@ -15,8 +15,8 @@ stack_folder      = save_path
 data_folder       = os.path.join(lilytorch_repo_root, 'farms_examples', '_1guillasim')
 bdim_handler_path = "lilytorch.farms_examples._1guillasim.BDIMhandler.BDIMhandler"
 
-nthreads = 16
-use_gpu  = True
+nthreads = 32
+use_gpu  = False
 use_bdim = True
 headless = False
 fast     = False
@@ -86,21 +86,21 @@ animats_pars = [
 # ymax         = 0.75
 
 
-# Nx           = 1024
-# Ny           = 256
-# xmin         = -0.9
-# xmax         = 5.1
-# ymin         = -0.75
-# ymax         = 0.75
-
-
-
-Nx           = 2048
-Ny           = 512
+Nx           = 1024
+Ny           = 256
 xmin         = -0.9
-xmax         = 11.1
-ymin         = -1.5
-ymax         = 1.5
+xmax         = 5.1
+ymin         = -0.75
+ymax         = 0.75
+
+
+
+# Nx           = 2048
+# Ny           = 512
+# xmin         = -0.9
+# xmax         = 11.1
+# ymin         = -1.5
+# ymax         = 1.5
 
 
 density = 800.0
@@ -117,7 +117,7 @@ timestep     = 0.001
 fluid_method = "abdquickest"
 save_frames  = True
 save_every   = 50
-n_iterations = 20001
+n_iterations = 30001
 
 save_frames = True
 save_uv     = False
@@ -403,7 +403,7 @@ def gen_simulation_config(output_folder, index):
                 },
                 "boundary_conditions": {
                     "BC_type_u"  : ["D", "D", "N", "N"],
-                    "BC_values_u": [0, 0, 0, 0],
+                    "BC_values_u": [-0.2, -0.2, 0, 0],
                     "BC_type_v"  : ["N", "N", "D", "D"],
                     "BC_values_v": [0, 0, 0, 0]
                 },

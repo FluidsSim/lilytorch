@@ -12,7 +12,7 @@ import matplotlib
 matplotlib.rcParams.update({'font.size': 16})
 from lilytorch.util.mp_util import sweep_1d
 
-data_dir = os.path.join(save_path, "pinned_2guilla_exp")
+data_dir = os.path.join(save_path, "pinned_2guilla_exp_2")
 
 CURRENTDIR = os.path.dirname(os.path.abspath(inspect.getfile(inspect.currentframe())))
 sys.path.insert(0, CURRENTDIR)
@@ -155,17 +155,17 @@ if __name__ == "__main__":
 
 
 
-    idxs = range(19) #range(10,11)
-    plt.figure()
-    for i, phases in enumerate(all_phases_converted[idxs]):
-        plt.plot(times, phases, label=f'Simulation {i+1}', color=colors[i], alpha=0.7)
-    plt.xlabel('Time Index')
-    plt.ylabel('Phase Difference (rad)')
-    plt.title('Phase Difference Over Time for All Simulations')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.show()
+    # idxs = range(19) #range(10,11)
+    # plt.figure()
+    # for i, phases in enumerate(all_phases_converted[idxs]):
+    #     plt.plot(times, phases, label=f'Simulation {i+1}', color=colors[i], alpha=0.7)
+    # plt.xlabel('Time Index')
+    # plt.ylabel('Phase Difference (rad)')
+    # plt.title('Phase Difference Over Time for All Simulations')
+    # plt.legend()
+    # plt.grid(True, alpha=0.3)
+    # plt.tight_layout()
+    # plt.show()
 
 
 
@@ -175,7 +175,7 @@ if __name__ == "__main__":
     nbins = 20
     bins = np.linspace(0, 2*np.pi, nbins)
     zbin = []
-    for i, phases in enumerate(all_phases_converted[idxs]):
+    for i, phases in enumerate(all_phases_converted):
         hist, bin_edges = np.histogram(phases, bins=bins, density=True)
         centers = (bin_edges[:-1] + bin_edges[1:]) / 2
         plt.plot(centers, hist + i*0.1, label=f'Freq: {all_freqs[i]:.2f} Hz', color=colors[sorted_indices[i]])
@@ -211,14 +211,6 @@ if __name__ == "__main__":
 
 
 
-
-
-
-
-
-
-
-    from IPython import embed; embed()
 
 
 
