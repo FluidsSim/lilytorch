@@ -12,7 +12,6 @@ setup(
     version="0.0.1",
     author="Andrea Ferrario",
     author_email="ferrarioa5@gmail.com",
-    # packages=["lilytorch"],
     description="Lilytorch",
     packages=find_packages(),
     long_description=description,

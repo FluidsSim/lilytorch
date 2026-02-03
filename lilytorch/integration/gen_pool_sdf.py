@@ -23,9 +23,9 @@ def create_pool_sdf(xmin, xmax, ymin, ymax, wall_thickness=0.3, wall_height=0.3,
     ]
 
 
-    wall_thickness = 0.3
-    wall_height = 0.3
-    wall_z = -0.15  # vertical position of walls
+    wall_thickness = wall_thickness
+    wall_height = wall_height
+    wall_z = wall_height / 2  # vertical position of walls
 
     # Calculate pool dimensions from corners
     x0, y0 = corners[0]
@@ -82,35 +82,36 @@ def create_pool_sdf(xmin, xmax, ymin, ymax, wall_thickness=0.3, wall_height=0.3,
         v_size.text = size_text
         ET.SubElement(visual, 'material')
 
+    # Floor link (aligned with inner faces of the walls to form the pool bottom)
+    floor = ET.SubElement(model, 'link', name='floor')
 
-        # Floor link
-        floor = ET.SubElement(model, 'link', name='floor')
-        floor_pose = ET.SubElement(floor, 'pose')
-        floor_pose.text = '0.0 0.0 0.0 0.0 0.0 0.0'
+    # Calculate floor dimensions and position based on pool inner corners
+    floor_thickness = wall_thickness/2
+    floor_length = pool_length                # match inner pool length
+    floor_width = pool_width                  # match inner pool width
+    floor_x = (x0 + x2) / 2
+    floor_y = (y1 + y2) / 2
+    floor_z = -floor_thickness / 2            # top of floor at z=0 (flush with wall bases)
 
-        # Calculate floor dimensions and position based on pool corners
-        floor_x = (x0 + x1) / 2
-        floor_y = (y0 + y2) / 2
-        floor_z = -0.35
-        floor_length = pool_length + 2 * wall_thickness
-        floor_width = pool_width + 2 * wall_thickness
+    # floor_pose = ET.SubElement(floor, 'pose')
+    # floor_pose.text = f'{floor_x} {floor_y} {floor_z} 0.0 0.0 0.0'
 
-        floor_collision = ET.SubElement(floor, 'collision', name='floor_collision')
-        fc_pose = ET.SubElement(floor_collision, 'pose')
-        fc_pose.text = f'{floor_x} {floor_y} {floor_z} 0.0 0.0 0.0'
-        fc_geom = ET.SubElement(floor_collision, 'geometry')
-        fc_box = ET.SubElement(fc_geom, 'box')
-        fc_size = ET.SubElement(fc_box, 'size')
-        fc_size.text = f'{floor_length} {floor_width} 0.1'
+    # floor_collision = ET.SubElement(floor, 'collision', name='floor_collision')
+    # fc_pose = ET.SubElement(floor_collision, 'pose')
+    # fc_pose.text = f'{floor_x} {floor_y} {floor_z} 0.0 0.0 0.0'
+    # fc_geom = ET.SubElement(floor_collision, 'geometry')
+    # fc_box = ET.SubElement(fc_geom, 'box')
+    # fc_size = ET.SubElement(fc_box, 'size')
+    # fc_size.text = f'{floor_length} {floor_width} {floor_thickness}'
 
-        floor_visual = ET.SubElement(floor, 'visual', name='floor_visual')
-        fv_pose = ET.SubElement(floor_visual, 'pose')
-        fv_pose.text = f'{floor_x} {floor_y} {floor_z} 0.0 0.0 0.0'
-        fv_geom = ET.SubElement(floor_visual, 'geometry')
-        fv_box = ET.SubElement(fv_geom, 'box')
-        fv_size = ET.SubElement(fv_box, 'size')
-        fv_size.text = f'{floor_length} {floor_width} 0.1'
-        ET.SubElement(floor_visual, 'material')
+    # floor_visual = ET.SubElement(floor, 'visual', name='floor_visual')
+    # fv_pose = ET.SubElement(floor_visual, 'pose')
+    # fv_pose.text = f'{floor_x} {floor_y} {floor_z} 0.0 0.0 0.0'
+    # fv_geom = ET.SubElement(floor_visual, 'geometry')
+    # fv_box = ET.SubElement(fv_geom, 'box')
+    # fv_size = ET.SubElement(fv_box, 'size')
+    # fv_size.text = f'{floor_length} {floor_width} {floor_thickness}'
+    # ET.SubElement(floor_visual, 'material')
 
     if plotting:
         # Visualize the pool dimensions
@@ -153,7 +154,7 @@ def create_pool_sdf(xmin, xmax, ymin, ymax, wall_thickness=0.3, wall_height=0.3,
                                     linewidth=1, edgecolor='blue', facecolor='lightblue', alpha=0.3)
         ax.add_patch(water)
 
-        margin = 1
+        margin = 0.01
         ax.set_xlim(x0 - wall_thickness - margin, x1 + wall_thickness + margin)
         ax.set_ylim(y0 - wall_thickness - margin, y2 + wall_thickness + margin)
         ax.set_aspect('equal')

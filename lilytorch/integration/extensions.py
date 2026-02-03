@@ -132,7 +132,17 @@ class DataLogger(TaskExtension):
 
     def end_episode(self, task: ExperimentTask, physics: Physics):
         self.experiment_options.animats
-        data={"animats":[animat_data.record for animat_data in self.data.animats]}
+        # if data is not set or no animats, do nothing
+        if not hasattr(self, "data") or self.data is None:
+            return
+        records = []
+        for idx, animat_data in enumerate(self.data.animats):
+            if hasattr(animat_data, "record"):
+                records.append(animat_data.record)
+        # nothing to log
+        if not records:
+            return
+        data = {"animats": records}
         dict_to_hdf5(filename=self.log_path, data=data)
 
 

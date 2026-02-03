@@ -10,7 +10,12 @@ from pytorch_interpolation import RegularGridInterpolator
 import skfmm
 from skimage import measure
 import math # important to keep this for evaluating math operations for sdfs even if it appears as not used
+
+# Configure matplotlib backend BEFORE importing pyplot
+import matplotlib
+matplotlib.use('TkAgg')  # Force TkAgg for interactive plotting
 import matplotlib.pyplot as plt
+
 import cv2
 import matplotlib.cm as cm
 

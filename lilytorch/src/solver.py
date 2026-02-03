@@ -15,8 +15,8 @@ from tqdm import tqdm
 import datetime
 import os
 import numpy as np
-from spreading_operator import spreading_operator_python_parallel, spreading_operator_python_parallel_out
-from spreading_operator import interpolation_operator, spreading_operator_python, interp_operator_python_parallel
+# from spreading_operator import spreading_operator_python_parallel, spreading_operator_python_parallel_out
+# from spreading_operator import interpolation_operator, spreading_operator_python, interp_operator_python_parallel
 
 class FluidSolver:
     """

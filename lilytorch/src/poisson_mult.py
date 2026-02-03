@@ -1,5 +1,3 @@
-
-from tkinter import E
 import torch
 
 class PoissonSolver:

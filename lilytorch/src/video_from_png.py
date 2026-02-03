@@ -1,7 +1,10 @@
 
 
-import cv2
 import os
+# Set Qt to use offscreen platform before any Qt imports
+os.environ['QT_QPA_PLATFORM'] = 'offscreen'
+
+import cv2
 import numpy as np
 from lilytorch.util.yaml_operations import yaml2pyobject
 
