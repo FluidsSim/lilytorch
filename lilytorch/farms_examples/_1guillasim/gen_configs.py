@@ -15,7 +15,7 @@ stack_folder      = save_path
 data_folder       = os.path.join(lilytorch_repo_root, 'farms_examples', '_1guillasim')
 bdim_handler_path = "lilytorch.farms_examples._1guillasim.BDIMhandler.BDIMhandler"
 
-nthreads = 32
+nthreads = 16
 use_gpu  = False
 use_bdim = True
 headless = False
@@ -87,11 +87,11 @@ animats_pars = [
 
 
 Nx           = 1024
-Ny           = 256
+Ny           = 512
 xmin         = -0.9
 xmax         = 5.1
-ymin         = -0.75
-ymax         = 0.75
+ymin         = -1.5
+ymax         = 1.5
 
 
 
@@ -146,10 +146,12 @@ def gen_animat_config(output_folder, index):
         if animat_i==0:
             muscle_config["initial_state"] = np.roll(np.linspace(0, -2*np.pi, n_joints), index)
             muscle_config["go_straight"]    = True
-            muscle_config["freq"]         = 0.9
+            muscle_config["weight_feedback"] = 20.0
+            muscle_config["freq"]         = 0.6
         else:
             muscle_config["go_straight"]    = True
-            muscle_config["freq"]         = 1
+            muscle_config["freq"]         = 0.7
+            muscle_config["weight_feedback"] = 0.0
 
 
         drag_coefficients = [
@@ -403,7 +405,7 @@ def gen_simulation_config(output_folder, index):
                 },
                 "boundary_conditions": {
                     "BC_type_u"  : ["D", "D", "N", "N"],
-                    "BC_values_u": [-0.2, -0.2, 0, 0],
+                    "BC_values_u": [-0.1, -0.1, 0, 0],
                     "BC_type_v"  : ["N", "N", "D", "D"],
                     "BC_values_v": [0, 0, 0, 0]
                 },

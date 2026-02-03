@@ -9,6 +9,7 @@ import pywt
 from scipy import ndimage
 import os
 from ssqueezepy import Wavelet, cwt
+from ssqueezepy.experimental import scale_to_freq
 
 def get_schooling_data(
     times       : np.ndarray,
@@ -50,8 +51,8 @@ def get_schooling_data(
     com_posx_1 = com_pos_1[:, 0]
 
     fs = 1 / timestep
-    fmin = 0.4          # Minimum frequency of interest (Hz)
-    fmax = 1.5         # Maximum frequency of interest (Hz)
+    fmin = 0.2
+    fmax = 2
     duration = times[-1] - times[0]
     N=int(fs * duration)
     wavelet = Wavelet(('morlet', {'mu': 5}), N=N)
@@ -61,17 +62,64 @@ def get_schooling_data(
     nv = 32
     scales = np.logspace(np.log2(min_scale), np.log2(max_scale), int(np.ceil(nv*np.log2(max_scale/min_scale))), base=2)
     scales = scales.reshape(-1,1)
+    freqs_cwt = scale_to_freq(scales, wavelet, angle_1.shape[0], fs=fs)
     def compute_cwt(signal):
-        Wx, scales_out = cwt(signal, wavelet=wavelet, scales=scales, fs=fs)
-    #     S = np.abs(W**2)/scaleMatrix
-    #     if smoothing:
-    #         S = ndimage.gaussian_filter(S, sigma=sigma)
+        W, scales_out = cwt(signal, wavelet=wavelet, scales=scales, fs=fs)
+        S = np.abs(W**2)
+        freq_idx = np.argmax(S,axis=0)
+        freq_max = freqs_cwt[freq_idx]
+        power_1d = S[freq_idx,range(signal.shape[0])]
+        return W, freq_max, power_1d
 
-    #     freq_idx = np.argmax(S,axis=0)
-    #     power_1d = S[freq_idx,range(n)]
-    #     # freq_max = np.where(power_1d>0.1, frequencies[freq_idx], 0)
-    #     freq_max = frequencies[freq_idx]
-    #     return W, freq_max, power_1d
+    def compute_cross_coherence(W1, W2):
+        xwt       = W1 * W2.conj()
+        power_xwt = np.abs(xwt**2)
+        phase_xwt = np.angle(xwt)
+        freq_idx  = np.argmax(power_xwt,axis=0)
+        phi_max   = phase_xwt[freq_idx,range(angle_1.shape[0])]
+        return phi_max
+
+
+    W_0, freq_0, power_0 = compute_cwt(angle_0)
+    W_1, freq_1, power_1 = compute_cwt(angle_1)
+    phases = compute_cross_coherence(W_0, W_1)
+
+
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+
+    if plotting:
+        fig, axes = plt.subplots(3, 1, figsize=(12, 10))
+        # Plot freq_1 and freq_2
+        axes[0].plot(times, freq_0, label='Agent 1 (computed)', color='blue', linewidth=1.5)
+        axes[0].plot(times, freq_1, label='Agent 2 (computed)', color='red', linewidth=1.5)
+        if freq0 is not None:
+            axes[0].plot(times, np.full_like(times, freq0), 'b:', label='Agent 1 (actual)', linewidth=1.2)
+        if freq1 is not None:
+            axes[0].plot(times, np.full_like(times, freq1), 'r:', label='Agent 2 (actual)', linewidth=1.2)
+        axes[0].set_ylabel('Frequency (Hz)')
+        axes[0].legend()
+        axes[0].grid(True, alpha=0.3)
+
+        # Plot angle_1 and angle_2
+        axes[1].plot(times, angle_0, label='Agent 1', color='blue', linewidth=1.5)
+        axes[1].plot(times, angle_1, label='Agent 2', color='red', linewidth=1.5)
+        axes[1].set_ylabel('Angle (rad)')
+        axes[1].set_title('Joint Angles')
+        axes[1].legend()
+        axes[1].grid(True, alpha=0.3)
+
+        # Plot phase difference
+        axes[2].plot(times, phases, label='Phase Difference', color='green', linewidth=1.5)
+        axes[2].set_ylabel('Phase (rad)')
+        axes[2].legend()
+        axes[2].grid(True, alpha=0.3)
+        axes[2].axhline(0, color='black', linestyle='--', linewidth=0.8, alpha=0.5)
+
+        plt.tight_layout()
+        plt.savefig(os.path.join(data_dir, "phase_analysis_schooling_" + str(freq1) + ".png"))
+        plt.close(fig)
+
+
 
     # n         = angle_1.shape[0]
     # normalize = True

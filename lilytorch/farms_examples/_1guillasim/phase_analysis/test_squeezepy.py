@@ -62,3 +62,17 @@ plt.grid(True)
 plt.subplot(2,1,2)
 ikw = dict(abs=1, xticks=t, xlabel="Time [sec]", ylabel="Frequency [Hz]")
 imshow(Wx, **ikw, yticks=freqs_cwt)
+
+S = np.abs(Wx**2)
+freq_idx = np.argmax(S,axis=0)
+freq_max = freqs_cwt[freq_idx]
+power_1d = S[freq_idx,range(signal.shape[0])]
+
+plt.figure(figsize=(10,4))
+plt.plot(t, freq_max)
+plt.xlabel("Time [sec]")
+plt.ylabel("Frequency [Hz]")
+plt.title("Computed Instantaneous Frequency")
+plt.grid(True)
+plt.tight_layout()
+plt.show()
