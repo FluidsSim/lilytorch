@@ -25,7 +25,7 @@ class PAOscillatorController(NNController):
         self.weight          = getattr(config, 'weight', 5.0)
         self.freq            = getattr(config, 'freq', 0.7)
         self.enable_coupling = getattr(config, 'enable_coupling', 1)
-        self.weight_feedback = getattr(config, 'weight_feedback', 400.0)
+        self.weight_feedback = getattr(config, 'weight_feedback', 200.0)
         self.amp_bias        = getattr(config, 'amp_bias', 0.0)
         self.taua            = getattr(config, 'taua', 0.1)
         self.go_straight     = getattr(config, 'go_straight', False)
@@ -146,7 +146,7 @@ class PAOscillatorController(NNController):
             # alpha                        = 1 * 2 * np.pi * self.freq * timestep
 
             self.speed_lateral_filtered = alpha * var  + (1 - alpha) * self.speed_lateral_filtered
-            self.amp_bias                = - 1.0 * self.speed_lateral_filtered
+            self.amp_bias                = - 0.4 * self.speed_lateral_filtered
 
             self.animat_data.record["lateral_speed"][iteration] = var
             self.animat_data.record["lateral_speed_filtered"][iteration] = self.speed_lateral_filtered

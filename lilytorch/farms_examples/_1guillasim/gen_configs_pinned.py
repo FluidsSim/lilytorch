@@ -14,13 +14,11 @@ stack_folder      = save_path
 data_folder       = os.path.join(lilytorch_repo_root, 'farms_examples', '_1guillasim')
 bdim_handler_path = "lilytorch.farms_examples._1guillasim.BDIMhandler.BDIMhandler"
 
-freqs = np.linspace(0.4, 1.0, 20)
 freqs = [0.4, 0.43, 0.47, 0.5, 0.53, 0.57, 0.6, 0.63, 0.67, 0.7, 0.73, 0.77, 0.8, 0.83, 0.87, 0.9, 0.93, 0.97, 1.0]
-
+# freqs = np.linspace(0.7, 1.0, 10)
 
 nthreads = 16
 use_gpu  = False
-
 use_bdim = True
 headless = True
 fast     = False
@@ -125,9 +123,9 @@ nu    = 1.0e-6
 
 timestep     = 0.001
 fluid_method = "abdquickest"
-save_frames  = True
-save_every   = 100
-n_iterations = 20001
+save_frames  = False
+save_every   = 1000
+n_iterations = 40001
 
 
 save_frames  = True

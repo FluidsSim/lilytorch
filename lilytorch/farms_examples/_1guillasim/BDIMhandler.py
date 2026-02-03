@@ -202,24 +202,26 @@ class BDIMhandler():
         # (c, _) = self.composite_body.mu_funcs(self.composite_body.sdf_val)
         coeff = timestep/self.fluid_solver.rho
         c = torch.ones_like(u)
-        # ch = (c[1:,1:-1]+c[:-1,1:-1])/2
-        # cv = (c[1:-1,1:]+c[1:-1,:-1])/2
-        # ch = coeff * self.fluid_solver.mu0_all_u
-        # cv = coeff * self.fluid_solver.mu0_all_v
+        ch = (c[1:,1:-1]+c[:-1,1:-1])/2
+        cv = (c[1:-1,1:]+c[1:-1,:-1])/2
+        ch = coeff * self.fluid_solver.mu0_all_u
+        cv = coeff * self.fluid_solver.mu0_all_v
         p, _    = self.fluid_solver.poisson_solver.solve_multigrid( # f, u, c
             self.fluid_solver.div[1:-1,1:-1],
             torch.zeros_like(p),
             coeff*c,
             # ch = ch[1:,1:-1],
             # cv = cv[1:-1,1:],
+            # ch = ch,
+            # cv = cv,
         )
         # # ====== projection step ======
-        # (p_x, p_y) = self.fluid_solver.gradient(p)
-        # u          = uprime - ch * p_x
-        # v          = vprime - cv * p_y
-        # ====== projection step ======
         (p_x, p_y) = self.fluid_solver.gradient(p)
-        (u,v)      = (uprime-coeff*p_x, vprime-coeff*p_y)
+        u          = uprime - ch * p_x
+        v          = vprime - cv * p_y
+        # ====== projection step ======
+        # (p_x, p_y) = self.fluid_solver.gradient(p)
+        # (u,v)      = (uprime-coeff*p_x, vprime-coeff*p_y)
 
         self.fluid_solver.adv_diff_solver.set_BCs(u,v)
 
