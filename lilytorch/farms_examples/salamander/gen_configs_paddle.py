@@ -20,9 +20,9 @@ sdf_path     = sdf_folder+"sdf/salamander.sdf"
 
 control_type    = "position"
 controller_path = "lilytorch.farms_examples.salamander.pd_controller_paddle.PositionController"
-
 gains        = [0.001, .00002, 0]
 control_pars = {'freq': 2.0, 'twl': 10, 'amp': 200, 'limb_pose1':-0.35*3.141592653589793, 'limb_pose2':-0.2*3.141592653589793}
+
 use_fluid    = False
 headless     = False
 

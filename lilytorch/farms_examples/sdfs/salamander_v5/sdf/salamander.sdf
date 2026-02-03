@@ -384,7 +384,7 @@
         </visual>
       </link>
 
-      <!-- <link name="link_leg_0_L_2">
+      <link name="link_leg_0_L_2">
         <pose>0.015 -0.004 -0.0 0.0 0.0 0.0</pose>
         <inertial>
           <pose>0 -0.003 0 1.5707963267948966 0 0</pose>
@@ -660,7 +660,7 @@
           </geometry>
           <material/>
         </visual>
-      </link> -->
+      </link>
       <joint name="joint_body_0" type="revolute">
         <parent>link_body_0</parent>
         <child>link_body_1</child>
@@ -773,7 +773,7 @@
           </limit>
         </axis>
       </joint>
-      <!-- <joint name="joint_leg_0_L_0" type="revolute">
+      <joint name="joint_leg_0_L_0" type="revolute">
         <parent>link_body_1</parent>
         <child>link_leg_0_L_2</child>
         <pose>0.0 0.0 0.0 0.0 0.0 0.0</pose>
@@ -884,7 +884,7 @@
             <velocity>inf</velocity>
           </limit>
         </axis>
-      </joint> -->
+      </joint>
 
     </model>
   </world>

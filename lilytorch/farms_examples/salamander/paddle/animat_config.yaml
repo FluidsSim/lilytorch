@@ -17,7 +17,7 @@ spawn:
   - 0
   - 0
   extras: {}
-sdf: /data/andreaferrario/lilytorch/lilytorch/farms_examples/sdfs/salamander_v5/sdf/salamander.sdf
+sdf: /home/andrea/Research/Software/lilytorch/lilytorch/farms_examples/sdfs/salamander_v5/sdf/salamander.sdf
 morphology:
   links:
   - name: link_body_0
@@ -93,78 +93,6 @@ morphology:
     fluid_interaction: true
     density: 1000.0
   - name: link_body_8
-    collisions: true
-    friction:
-    - 0.2
-    - 0
-    - 0
-    extras: {}
-    fluid_interaction: true
-    density: 1000.0
-  - name: link_leg_0_L_2
-    collisions: true
-    friction:
-    - 0.2
-    - 0
-    - 0
-    extras: {}
-    fluid_interaction: true
-    density: 1000.0
-  - name: link_leg_0_L_3
-    collisions: true
-    friction:
-    - 0.2
-    - 0
-    - 0
-    extras: {}
-    fluid_interaction: true
-    density: 1000.0
-  - name: link_leg_0_R_2
-    collisions: true
-    friction:
-    - 0.2
-    - 0
-    - 0
-    extras: {}
-    fluid_interaction: true
-    density: 1000.0
-  - name: link_leg_0_R_3
-    collisions: true
-    friction:
-    - 0.2
-    - 0
-    - 0
-    extras: {}
-    fluid_interaction: true
-    density: 1000.0
-  - name: link_leg_1_L_2
-    collisions: true
-    friction:
-    - 0.2
-    - 0
-    - 0
-    extras: {}
-    fluid_interaction: true
-    density: 1000.0
-  - name: link_leg_1_L_3
-    collisions: true
-    friction:
-    - 0.2
-    - 0
-    - 0
-    extras: {}
-    fluid_interaction: true
-    density: 1000.0
-  - name: link_leg_1_R_2
-    collisions: true
-    friction:
-    - 0.2
-    - 0
-    - 0
-    extras: {}
-    fluid_interaction: true
-    density: 1000.0
-  - name: link_leg_1_R_3
     collisions: true
     friction:
     - 0.2
@@ -395,14 +323,6 @@ control:
     - link_body_6
     - link_body_7
     - link_body_8
-    - link_leg_0_L_2
-    - link_leg_0_L_3
-    - link_leg_0_R_2
-    - link_leg_0_R_3
-    - link_leg_1_L_2
-    - link_leg_1_L_3
-    - link_leg_1_R_2
-    - link_leg_1_R_3
     joints:
     - joint_body_0
     - joint_body_1

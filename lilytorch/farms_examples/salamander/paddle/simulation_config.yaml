@@ -1,0 +1,53 @@
+units:
+  length: meter
+  mass: kilogram
+  time: second
+runtime:
+  n_iterations: 150001
+  buffer_size: 150001
+  play: true
+  rtl: 1.0
+  fast: false
+  headless: false
+  show_progress: true
+physics:
+  timestep: 0.0001
+  gravity:
+  - 0
+  - 0
+  - -9.81
+  num_sub_steps: 1
+  cb_sub_steps: 2
+  n_solver_iters: 50
+mujoco:
+  cone: elliptic
+  solver: CG
+  integrator: implicitfast
+  impratio: 10
+  ccd_iterations: 1000
+  ccd_tolerance: 1.0e-06
+  noslip_iterations: 1000
+  noslip_tolerance: 1.0e-06
+  viewer: MuJoCo
+  texture_repeat: 1
+  shadow_size: 1024
+  visual_scale: 10.0
+  extent: 10.0
+pybullet:
+  opengl2: false
+  lcp: dantzig
+  cfm: 1.0e-10
+  erp: 0
+  contact_erp: 0
+  friction_erp: 0
+  residual_threshold: 1.0e-06
+  max_num_cmd_per_1ms: 100000000
+  report_solver_analytics: 0
+extensions:
+- loader: farms_core.simulation.extensions.ExperimentLogger
+  config:
+    log_path: output
+    skip: 0
+- loader: farms_mujoco.simulation.extensions.MjcfSaver
+  config:
+    path: output/simulation_mjcf.xml

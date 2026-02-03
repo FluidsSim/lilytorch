@@ -289,7 +289,7 @@ class BDIMhandler():
             (self.fluid_solver.u0, self.fluid_solver.v0, self.fluid_solver.p0) = (u,v,p)
 
             # compute fluid forces on the body
-            self.fluid_solver.forces_method1(self.fluid_solver.u0, self.fluid_solver.v0, self.fluid_solver.p0, iteration)
+            self.fluid_solver.forces_method2(self.fluid_solver.u0, self.fluid_solver.v0, self.fluid_solver.p0, iteration)
 
             self.terminate = self.fluid_solver.plotting_debug(self.fluid_solver.u0, self.fluid_solver.v0, self.fluid_solver.p0, iteration)
 

@@ -1,27 +1,33 @@
 # lilytorch
-Lilytorch implements a rigid-fluid solver in pytorch
+Lilytorch implements a 2D rigid-fluid solver in pytorch and integrated with MuJoCo via the FARMS framework (https://github.com/farmsim). In a nutshell, this package allows for the simulation of 2d fluids on top of the MuJoCo physics enging. This coupling allows the simulation of multi-rigid body systems and their interactions, including robots, animals. 
+
+It is strongly recommended to set up a virtual environment to use this repository.
+
 
 # installation steps
-It is strongly recommended to set up a virtual environment to use this repository.
-Follow the following instruction in the right order (the order is important):
-1. Install torch following the instructions at https://pytorch.org/get-started/locally/
-2. Install the necessary FARMS packages: enter in the lilytorch/FARMS directory and run
-> python setup_farms.py
-3. Install the requirements via
-> pip install -r requirements.txt
-4. Install the lilytorch library by runnning
-> pip install -e .
+Install FARMS:
+Run the following from the repository root:
 
-# example scripts
-1. Test the correct farms installation by running the file `lilytorch/lilytorch/zebrafish/example_single.py`:
-> python lilytorch/lilytorch/zebrafish/example_single.py
-2. Test the correct integration with FARMS by running `lilytorch/lilytorch/zebrafish/example_fluid.py`:
-> python example_fluid.py
+1. Install PyTorch from https://pytorch.org/get-started/locally/ 
 
-# project goals
-1. Pytorch extension for the Poisson multigrid solver
-2. Staggered grid for pressure-velocity instead of cell centered discretization, to avoid checkerboard effect (https://www.youtube.com/watch?v=_dsYuUkfvWE&ab_channel=QuickerSimLtd and https://tum-pbs.github.io/PhiFlow/Staggered_Grids.html)
-3. Modify solver to account for different x/y discretizations (dx!=dy). This requires rewriting a multigrid solver that works on different Nx, Ny number of points.
-4. Implement adbquickest solver on a Pytorch extension (to speedup?)
+2. Install the necessary requirements:
+```bash
+python -m pip install -r requirements.txt
+```
+
+3. Initialize submodules and install FARMS:
+```bash
+git submodule update --init --recursive
+cd lilytorch/FARMS_V2
+python setup_farms.py
+cd -
+```
+
+4. Install lilytorch in editable mode:
+```bash
+pip install -e .
+```
+
+
 
 
