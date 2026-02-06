@@ -9,14 +9,14 @@ import numpy as np
 from lilytorch.util.yaml_operations import yaml2pyobject
 
 
-dir         = "/data/andreaferrario/ns_data/2026-01-23T14:01:01.372604/curl/"
+dir         = "/data/andreaferrario/ns_data/2026-02-04T11:54:47.146275/curl/"
 name        = "video"
 img_name    = "curl"
 format      = ".mp4"
 dt          = 0.001
 slow_factor = 1
 save_every  = 50
-tstop       = 20
+tstop       = 9
 video_name  = dir+name+format
 
 
@@ -47,14 +47,12 @@ fps=slow_factor/(save_every*dt)
 frame = cv2.imread(os.path.join(dir, images_sorted[0]))
 height, width, layers = frame.shape
 
-_fourcc = cv2.VideoWriter_fourcc(*'avc1')
+_fourcc = cv2.VideoWriter_fourcc(*'mp4v')
 
 video = cv2.VideoWriter(video_name, _fourcc, fps, (width,height))
 font = cv2.FONT_HERSHEY_SIMPLEX
 for idx, image in enumerate(images_sorted):
     frame = cv2.imread(os.path.join(dir, image))
-    # from IPython import embed; embed()
-    # print(asd)
     print(os.path.join(dir, image))
     iteration = idx*save_every
     time  = idx*save_every*dt
