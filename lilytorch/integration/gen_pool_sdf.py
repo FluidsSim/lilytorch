@@ -1,6 +1,7 @@
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
 from lilytorch.util.paths import lilytorch_repo_root
+import os
 
 def create_pool_sdf(xmin, xmax, ymin, ymax, wall_thickness=0.3, wall_height=0.3, plotting=False):
     # Create root element
@@ -168,8 +169,10 @@ def create_pool_sdf(xmin, xmax, ymin, ymax, wall_thickness=0.3, wall_height=0.3,
 
     # Pretty print
     xml_str = minidom.parseString(ET.tostring(sdf)).toprettyxml(indent="  ")
+    # Ensure the directory exists
+    output_path = lilytorch_repo_root + '/farms_examples/sdfs/pool/sdf/pool.sdf'
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
     # Write to file
-    with open(lilytorch_repo_root + '/farms_examples/sdfs/pool/sdf/pool.sdf', 'w') as f:
+    with open(output_path, 'w') as f:
         f.write(xml_str)
-

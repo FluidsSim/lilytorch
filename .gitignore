@@ -6,7 +6,7 @@
 *.pyc
 *.*~
 *_flymake.py
-*.ipynb
+# *.ipynb
 *.pt
 
 #: File types

@@ -9,37 +9,58 @@ from lilytorch.integration.gen_pool_sdf import create_pool_sdf
 import subprocess
 import numpy as np
 
-
-stack_folder      = os.path.join(save_path, "2guilla","fb_on")
 stack_folder      = save_path
-data_folder       = os.path.join(lilytorch_repo_root, 'farms_examples', '_1guillasim')
-bdim_handler_path = "lilytorch.farms_examples._1guillasim.BDIMhandler.BDIMhandler"
+data_folder       = os.path.join(lilytorch_repo_root, 'farms_examples', 'zebrafishsim')
+bdim_handler_path = "lilytorch.farms_examples.zebrafishsim.BDIMhandler.BDIMhandler"
 
 nthreads = 16
 use_gpu  = False
-use_bdim = True
+use_bdim = False
 headless = False
 fast     = False
 
 use_drag = not use_bdim
 
 constant_drags = [
-            [-0.1, -5.0, -5.0],
+            [-0.1, -0.1, -1.0],
             [-0.001, -0.001, -0.001]
         ]
 
 animats_pars = [
     {
-    "model_name"     : "1guilla",
-    "sdf_name"       : "1guilla.sdf",
+    "sdf_file"       : os.path.join(sdfs_path, "zebrafish", "zebrafish_v1_triangulated", "sdf", "zebrafish.sdf"),
     "control_type"   : "position",
-    "gains"          : [20.0, 4.0, 0],
+    "gains"          : [0.001, .00002, 0],
     "spawn_mode"     : SpawnMode.TRANSVERSE,
     "pose"           : [0, 0, 0, 0, 0, 3.141592653589793],
-    "controller_path": "lilytorch.farms_examples._1guillasim.pd_controller.PositionController",
-    "control_pars"   : {'freq': 1, 'twl': 12, 'amp': 20.0},
+    "controller_path": "lilytorch.farms_examples.zebrafishsim.pd_controller.PositionController",
+    "control_pars"   : {'freq': 10.0, 'twl': 20, 'amp': 140},
     },
 ]
+
+# control_type = "position"
+# controller_path      = "lilytorch.farms_examples._1guillasim.pd_controller.PositionController"
+# gains = [20.0, 3, 0]
+# control_pars = {'freq': 1, 'twl': 12, 'amp': 20.0}
+
+
+
+# # approximate the slime pool (check find_h_solution.py)
+# "Nx": 512,
+# "Ny": 256,
+# "xmin": -0.85,
+# "xmax": 1.71,
+# "ymin": -0.64,
+# "ymax": 0.64,
+
+
+
+# Nx           = 2048
+# Ny           = 512
+# xmin         = -0.9
+# xmax         = 5.1
+# ymin         = -0.75
+# ymax         = 0.75
 
 
 Nx           = 1024
@@ -49,6 +70,14 @@ xmax         = 5.1
 ymin         = -1.5
 ymax         = 1.5
 
+
+
+# Nx           = 2048
+# Ny           = 512
+# xmin         = -0.9
+# xmax         = 11.1
+# ymin         = -1.5
+# ymax         = 1.5
 
 
 density = 800.0
@@ -65,36 +94,28 @@ timestep     = 0.001
 fluid_method = "abdquickest"
 save_frames  = True
 save_every   = 50
-n_iterations = 18001
+n_iterations = 30001
 
 save_frames = True
 save_uv     = False
-
-freqs = [1,0.5, 1.5, 2]
 
 def gen_animat_config(output_folder, index):
 
     for animat_i, animat_pars in enumerate(animats_pars):
 
-        model_name      = animat_pars["model_name"]
-        sdf_name        = animat_pars["sdf_name"]
-        control_type    = animat_pars["control_type"]
-        controller_path = animat_pars["controller_path"]
-        control_pars    = animat_pars["control_pars"]
-        gains           = animat_pars["gains"]
-        spawn_mode      = animat_pars["spawn_mode"]
-        pose            = animat_pars["pose"]
+        sdf_file       = animat_pars["sdf_file"]
+        control_type   = animat_pars["control_type"]
+        muscle_loader  = animat_pars["muscle_loader"]
+        muscle_config  = animat_pars["muscle_config"]
+        gains          = animat_pars["gains"]
+        spawn_mode    = animat_pars["spawn_mode"]
+        pose          = animat_pars["pose"]
 
-        control_pars["freq"] = float(freqs[index])
-
-        sdf_file = os.path.join(sdfs_path, model_name, sdf_name)
 
         model_sdf   = ModelSDF.read(sdf_file)[0]
         link_names  = [link.name for link in model_sdf.links]
         joint_names = [joint.name for joint in model_sdf.joints]
         nlinks      = len(link_names)
-
-        n_joints = len(joint_names)
 
         drag_coefficients = [
             constant_drags for _ in range(nlinks)
@@ -176,8 +197,8 @@ def gen_animat_config(output_folder, index):
 
         animat_dict["extensions"] = [
             {
-                "loader": controller_path,
-                "config": control_pars
+                "loader": muscle_loader,
+                "config": muscle_config
             }
         ]
 
@@ -220,7 +241,7 @@ def gen_arena_config(output_folder, index):
             "density"  : density,
             "maps"     : ["", ""],
         },
-        "ground_height": 0.,
+        "ground_height": 0.2,
     }
     pyobject2yaml(
         os.path.join(output_folder, 'arena_config.yaml'),
@@ -347,7 +368,7 @@ def gen_simulation_config(output_folder, index):
                 },
                 "boundary_conditions": {
                     "BC_type_u"  : ["D", "D", "N", "N"],
-                    "BC_values_u": [-0.0, -0.0, 0, 0],
+                    "BC_values_u": [-0.1, -0.1, 0, 0],
                     "BC_type_v"  : ["N", "N", "D", "D"],
                     "BC_values_v": [0, 0, 0, 0]
                 },
@@ -416,9 +437,12 @@ def single_run(index):
     os.chdir(output_folder)
     subprocess.run(['bash', 'run.sh'])
 
+    # import sys
+    # from farms_sim.farmsim import main
+    # sys.argv = ['farmsim', '--experiment_config', 'experiment_config.yaml']
+    # main()
 
 if __name__ == "__main__":
 
-    n=len(freqs)
-    for i in range(n):
+    for i in range(8):
         single_run(i)

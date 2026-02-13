@@ -8,9 +8,9 @@ from lilytorch.util.paths import save_path
 import random
 
 
-# stack_folder=os.path.join(save_path, "2guilla","fb_off")qqq
+# stack_folder=os.path.join(save_path, "2guilla","fb_off")
 # stack_folder=os.path.join(save_path, "2guilla_2","fb_on")
-stack_folder=os.path.join(save_path, "tests")
+stack_folder=os.path.join(save_path, "1guilla_swim_pd")
 subdirs = [
     os.path.join(stack_folder, dir2)
     for dir2 in os.listdir(stack_folder)
@@ -18,7 +18,7 @@ subdirs = [
 random.shuffle(subdirs)
 
 
-# subdirs = [os.path.join(save_path, "2026-01-19T18:49:00.332693")]
+# subdirs = [os.path.join(save_path, "2026-02-04T15:50:32.829599")]
 
 def plot_lateral_speeds(dir):
     ''' Plot lateral speeds from simulation data '''

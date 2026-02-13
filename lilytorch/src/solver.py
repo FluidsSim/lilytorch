@@ -1915,7 +1915,7 @@ class FluidSolver:
 
         return (u,v,p,terminate)
 
-    def plotting_debug(self, u, v, p, iteration):#
+    def plotting_debug(self, u, v, p, iteration, check_termination=True):#
 
 
           # ============ plotting/saving ==========
@@ -2048,10 +2048,11 @@ class FluidSolver:
             if self.save_uv:
                 self.save_results(u, v, p, iteration)
 
+        if check_termination:
+            return self.check_termination(iteration, u, v, p)
+        else:
+            return False
 
-        terminate = self.check_termination(iteration, u, v, p)
-
-        return terminate
 
     def interpolate(self,x,y,val):
         self.interp_utility.F = val
