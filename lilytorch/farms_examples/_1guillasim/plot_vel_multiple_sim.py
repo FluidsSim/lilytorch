@@ -8,7 +8,7 @@ from lilytorch.util.paths import save_path
 from lilytorch.util.metrics import compute_speed_PCA
 
 values=[0.5, 1, 1.5, 2]
-stack_folder=os.path.join(save_path, "1guilla_swim_pd", "damping_4")
+stack_folder=os.path.join(save_path, "1guilla_swim_pd", "damping_2")
 dirs = [
     os.path.join(stack_folder, dir2)
     for dir2 in os.listdir(stack_folder)
@@ -31,7 +31,7 @@ for dir, value in zip(dirs, values):
         link_array = np.array(f["FARMSLISTanimats"]["0"]["sensors"]["links"]["array"])
         times = np.array(f["times"])
 
-        it_max = 12000
+        it_max = 8000
 
         links_vel = link_array[:,:,sc.link_com_velocity_lin_x:sc.link_com_velocity_lin_y+1]
         links_pos = link_array[:,:,sc.link_com_position_x:sc.link_com_position_z+1]

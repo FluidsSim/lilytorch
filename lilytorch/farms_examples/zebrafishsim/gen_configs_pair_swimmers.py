@@ -15,16 +15,16 @@ bdim_handler_path = "lilytorch.farms_examples.zebrafishsim.BDIMhandler.BDIMhandl
 
 nthreads = 16
 use_gpu  = False
-use_bdim = False
+use_bdim = True
 headless = False
 fast     = False
 
 use_drag = not use_bdim
 
 constant_drags = [
-            [-0.1, -0.1, -1.0],
-            [-0.001, -0.001, -0.001]
-        ]
+    [-0.0, -0.0102864, -0.0080005],
+    [0, 0, 0]
+]
 
 animats_pars = [
     {
@@ -34,50 +34,18 @@ animats_pars = [
     "spawn_mode"     : SpawnMode.TRANSVERSE,
     "pose"           : [0, 0, 0, 0, 0, 3.141592653589793],
     "controller_path": "lilytorch.farms_examples.zebrafishsim.pd_controller.PositionController",
-    "control_pars"   : {'freq': 10.0, 'twl': 20, 'amp': 140},
+    "control_pars"   : {'freq': 10.0, 'twl': 20, 'amp': 120},
     },
 ]
 
-# control_type = "position"
-# controller_path      = "lilytorch.farms_examples._1guillasim.pd_controller.PositionController"
-# gains = [20.0, 3, 0]
-# control_pars = {'freq': 1, 'twl': 12, 'amp': 20.0}
 
 
-
-# # approximate the slime pool (check find_h_solution.py)
-# "Nx": 512,
-# "Ny": 256,
-# "xmin": -0.85,
-# "xmax": 1.71,
-# "ymin": -0.64,
-# "ymax": 0.64,
-
-
-
-# Nx           = 2048
-# Ny           = 512
-# xmin         = -0.9
-# xmax         = 5.1
-# ymin         = -0.75
-# ymax         = 0.75
-
-
-Nx           = 1024
-Ny           = 512
-xmin         = -0.9
-xmax         = 5.1
-ymin         = -1.5
-ymax         = 1.5
-
-
-
-# Nx           = 2048
-# Ny           = 512
-# xmin         = -0.9
-# xmax         = 11.1
-# ymin         = -1.5
-# ymax         = 1.5
+Nx= 1024
+Ny= 256
+xmin= -0.02
+xmax= 0.08
+ymin= -0.0125
+ymax= 0.0125
 
 
 density = 800.0
@@ -85,16 +53,16 @@ density = 800.0
 nu    = 1.0e-6
 
 
-# timestep     = 0.01
-# fluid_method = "implicit"
-# save_every   = 500
-# n_iterations = 2001
-
 timestep     = 0.001
-fluid_method = "abdquickest"
-save_frames  = True
+fluid_method = "implicit"
 save_every   = 50
-n_iterations = 30001
+n_iterations = 5001
+
+# timestep     = 0.0001
+# fluid_method = "abdquickest"
+# save_frames  = True
+# save_every   = 50
+# n_iterations = 50001
 
 save_frames = True
 save_uv     = False
@@ -103,13 +71,13 @@ def gen_animat_config(output_folder, index):
 
     for animat_i, animat_pars in enumerate(animats_pars):
 
-        sdf_file       = animat_pars["sdf_file"]
-        control_type   = animat_pars["control_type"]
-        muscle_loader  = animat_pars["muscle_loader"]
-        muscle_config  = animat_pars["muscle_config"]
-        gains          = animat_pars["gains"]
-        spawn_mode    = animat_pars["spawn_mode"]
-        pose          = animat_pars["pose"]
+        sdf_file        = animat_pars["sdf_file"]
+        control_type    = animat_pars["control_type"]
+        gains           = animat_pars["gains"]
+        spawn_mode      = animat_pars["spawn_mode"]
+        pose            = animat_pars["pose"]
+        controller_path = animat_pars["controller_path"]
+        control_pars    = animat_pars["control_pars"]
 
 
         model_sdf   = ModelSDF.read(sdf_file)[0]
@@ -197,8 +165,8 @@ def gen_animat_config(output_folder, index):
 
         animat_dict["extensions"] = [
             {
-                "loader": muscle_loader,
-                "config": muscle_config
+                "loader": controller_path,
+                "config": control_pars
             }
         ]
 
@@ -219,7 +187,7 @@ def gen_animat_config(output_folder, index):
 
 def gen_arena_config(output_folder, index):
 
-    create_pool_sdf(xmin, xmax, ymin, ymax, wall_thickness=0.3, wall_height=0.3, plotting=False)
+    create_pool_sdf(xmin, xmax, ymin, ymax, wall_thickness=0.003, wall_height=0.003, plotting=False)
 
     arena_dict = {
     #    "sdf": os.path.join(sdfs_path, "arena_flat_v0", "sdf", "arena_flat.sdf"),
@@ -241,7 +209,7 @@ def gen_arena_config(output_folder, index):
             "density"  : density,
             "maps"     : ["", ""],
         },
-        "ground_height": 0.2,
+        "ground_height": 0.,
     }
     pyobject2yaml(
         os.path.join(output_folder, 'arena_config.yaml'),
@@ -288,7 +256,7 @@ def gen_simulation_config(output_folder, index):
             "timestep"      : timestep,
             "gravity"       : [0, 0, -9.81],
             "num_sub_steps" : 1,
-            "cb_sub_steps"  : 1,
+            "cb_sub_steps"  : 2,
             "n_solver_iters": 50
         },
         "mujoco": {
@@ -303,8 +271,8 @@ def gen_simulation_config(output_folder, index):
             "viewer"           : "MuJoCo",
             "texture_repeat"   : 1,
             "shadow_size"      : 1024,
-            "visual_scale"     : 1.0,
-            "extent"           : 400.0
+            "visual_scale"     : 100.0,
+            "extent"           : 10.0
         },
         "extensions": [
             {
@@ -368,7 +336,7 @@ def gen_simulation_config(output_folder, index):
                 },
                 "boundary_conditions": {
                     "BC_type_u"  : ["D", "D", "N", "N"],
-                    "BC_values_u": [-0.1, -0.1, 0, 0],
+                    "BC_values_u": [0., 0., 0, 0],
                     "BC_type_v"  : ["N", "N", "D", "D"],
                     "BC_values_v": [0, 0, 0, 0]
                 },
@@ -385,7 +353,7 @@ def gen_simulation_config(output_folder, index):
                         "translation": [None, None]
                     },
                     "suit"     : 0.0,
-                    "convexify": True,
+                    "convexify": False,
                     "scale"    : 1
                 },
                 "output": {
@@ -437,12 +405,8 @@ def single_run(index):
     os.chdir(output_folder)
     subprocess.run(['bash', 'run.sh'])
 
-    # import sys
-    # from farms_sim.farmsim import main
-    # sys.argv = ['farmsim', '--experiment_config', 'experiment_config.yaml']
-    # main()
 
 if __name__ == "__main__":
 
-    for i in range(8):
+    for i in range(1):
         single_run(i)
