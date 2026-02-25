@@ -1,5 +1,3 @@
-
-
 import os
 # Set Qt to use offscreen platform before any Qt imports
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
@@ -7,6 +5,7 @@ os.environ['QT_QPA_PLATFORM'] = 'offscreen'
 import cv2
 import numpy as np
 from lilytorch.util.yaml_operations import yaml2pyobject
+import subprocess  # Add this import for ffmpeg call
 
 
 def _build_video_writer(output_path, fps, frame_size):
@@ -22,14 +21,14 @@ def _build_video_writer(output_path, fps, frame_size):
     raise RuntimeError("Unable to create a compatible MP4 encoder (tried avc1/H264/X264/mp4v).")
 
 
-dir         = "/data/andreaferrario/ns_data/pinned_2guilla_exp_5/2026-01-29T03:47:11.573321/curl/"
+dir         = "/data/andreaferrario/ns_data/salamander_paddle/curl/"
 name        = "video"
 img_name    = "curl"
 format      = ".mp4"
 dt          = 0.001
 slow_factor = 1
-save_every  = 1000
-tstop       = 50
+save_every  = 50
+tstop       = 10
 video_name  = dir+name+format
 
 
@@ -80,4 +79,14 @@ for idx, image in enumerate(images_sorted):
 
 cv2.destroyAllWindows()
 video.release()
+
+# Convert to H.264 MP4 using ffmpeg for better compatibility
+converted_video_name = video_name.replace('.mp4', '_converted.mp4')
+subprocess.run([
+    'ffmpeg', '-i', video_name, '-c:v', 'libx264', '-preset', 'fast', '-crf', '22', '-c:a', 'aac', converted_video_name
+], check=True)
+print(f"Converted video saved as {converted_video_name}")
+
+# Optionally, remove the original if desired
+# os.remove(video_name)
 
