@@ -208,8 +208,8 @@ class BDIMhandler():
             self.fluid_solver.div[1:-1,1:-1],
             torch.zeros_like(p),
             coeff*c,
-            # ch = ch[1:,1:-1],
-            # cv = cv[1:-1,1:],
+            ch = ch[1:,1:-1],
+            cv = cv[1:-1,1:],
             # ch = ch,
             # cv = cv,
         )

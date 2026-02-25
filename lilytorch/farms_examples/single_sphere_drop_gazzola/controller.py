@@ -46,7 +46,7 @@ class BDIMhandler():
         physics.model.geom_solref[:,0]= 0.001
         physics.model.geom_solref[:,1]= 0.5
 
-        self.rho_body = 990.0
+        self.rho_body = 1050.0
         self.rho_fluid = 996.0
         self.radius = 0.0025
         self.mass = np.pi*(self.radius**2)*self.rho_body

@@ -56,7 +56,7 @@ nu    = 1.0e-6
 timestep     = 0.001
 fluid_method = "implicit"
 save_every   = 50
-n_iterations = 5001
+n_iterations = 1501
 
 # timestep     = 0.0001
 # fluid_method = "abdquickest"

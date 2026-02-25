@@ -8,7 +8,7 @@ runtime:
   play: true
   rtl: 1.0
   fast: false
-  headless: true
+  headless: false
   show_progress: true
 physics:
   timestep: 0.0001
@@ -103,7 +103,10 @@ extensions:
         plotting: True
         compute_interp: False
         plotting_meshes: True
-        n_samples: (2000, 2000)
+        save_folder: None
+        n_samples:
+        - 1000
+        - 1000
         update_maps:
           rotation: "None"
           translation:

@@ -208,7 +208,7 @@ def compute_speed_PCA(links_positions, links_vel, sim_fraction=1.0):
         speed_forward.append(v_com_forward_proj)
         speed_lateral.append(v_com_lateral_proj)
 
-    return speed_forward, speed_lateral
+    return np.array(speed_forward), np.array(speed_lateral)
 
 
 # ------= SIGNAL PROCESSING TOOLS ------=

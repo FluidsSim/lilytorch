@@ -9,14 +9,27 @@ import numpy as np
 from lilytorch.util.yaml_operations import yaml2pyobject
 
 
-dir         = "/data/andreaferrario/ns_data/pinned_2guilla_exp_5/2026-01-28T14:07:56.735003curl/"
+def _build_video_writer(output_path, fps, frame_size):
+    """Return a VideoWriter that prefers H.264 for PowerPoint/OneDrive."""
+    preferred_codecs = ['avc1', 'H264', 'X264', 'mp4v']
+    for codec in preferred_codecs:
+        fourcc = cv2.VideoWriter_fourcc(*codec)
+        writer = cv2.VideoWriter(output_path, fourcc, fps, frame_size)
+        if writer.isOpened():
+            print(f"Using {codec} codec for video export")
+            return writer
+        writer.release()
+    raise RuntimeError("Unable to create a compatible MP4 encoder (tried avc1/H264/X264/mp4v).")
+
+
+dir         = "/data/andreaferrario/ns_data/pinned_2guilla_exp_5/2026-01-29T03:47:11.573321/curl/"
 name        = "video"
 img_name    = "curl"
 format      = ".mp4"
 dt          = 0.001
 slow_factor = 1
-save_every  = 50
-tstop       = 9
+save_every  = 1000
+tstop       = 50
 video_name  = dir+name+format
 
 
@@ -47,9 +60,7 @@ fps=slow_factor/(save_every*dt)
 frame = cv2.imread(os.path.join(dir, images_sorted[0]))
 height, width, layers = frame.shape
 
-_fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-
-video = cv2.VideoWriter(video_name, _fourcc, fps, (width,height))
+video = _build_video_writer(video_name, fps, (width, height))
 font = cv2.FONT_HERSHEY_SIMPLEX
 for idx, image in enumerate(images_sorted):
     frame = cv2.imread(os.path.join(dir, image))
