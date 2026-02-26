@@ -52,6 +52,7 @@ class PositionController(KinematicsController):
             joints_control_types=joints_control_types,
         )
         super().__init__(
+            animat_i=animat_i,
             joints_names=joints_names_per_type,
             kinematics=kinematics,
             sampling=kinematics_sampling,

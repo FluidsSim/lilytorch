@@ -52,6 +52,7 @@ class PositionController(KinematicsController):
             joints_control_types=joints_control_types,
         )
         super().__init__(
+            animat_i=animat_i,
             joints_names=joints_names_per_type,
             kinematics=kinematics,
             sampling=kinematics_sampling,
@@ -109,10 +110,10 @@ class PositionController(KinematicsController):
         thigh=np.atan2(y,x)-np.atan2(k2,k1)
         return (thigh, elbow)
 
-    
+
     def gen_trajectory(self, times, freq, phase, sampling_rate):
         s    = np.zeros_like(times)
-        side = 1 
+        side = 1
         s[0] = 0.0
         k    = 0.8
         for i in range(1, len(times)):
