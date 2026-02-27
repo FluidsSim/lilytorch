@@ -2256,7 +2256,7 @@
 				<child>link_leg_1_L_1</child>
 				<pose>0 0 0 -0.00837941374629736 -0.008380037732422352 -1.5707217454910278</pose>
 				<axis>
-					<xyz>0.0 1.0 0.0</xyz>
+					<xyz>0.0 0.0 -1.0</xyz>
 					<limit>
 						<lower>-1.5708</lower>
 						<upper>3.14159</upper>
@@ -2268,7 +2268,7 @@
 				<child>link_leg_1_L_2</child>
 				<pose>0 0 0 -0.005962856113910675 -0.005963088944554329 -1.5707573890686035</pose>
 				<axis>
-					<xyz>0.0 1.0 0.0</xyz>
+					<xyz>0.0 0.0 -1.0</xyz>
 					<limit>
 						<lower>-1.5708</lower>
 						<upper>3.14159</upper>
@@ -2292,7 +2292,7 @@
 				<child>link_leg_1_R_1</child>
 				<pose>0 0 0 0.00837956927716732 -0.008380187675356865 1.5707225799560547</pose>
 				<axis>
-					<xyz>0.0 1.0 0.0</xyz>
+					<xyz>0.0 0.0 1.0</xyz>
 					<limit>
 						<lower>-1.5708</lower>
 						<upper>3.14159</upper>
@@ -2304,7 +2304,7 @@
 				<child>link_leg_1_R_2</child>
 				<pose>0 0 0 0.00596286216750741 -0.005963081493973732 1.570759654045105</pose>
 				<axis>
-					<xyz>0.0 1.0 0.0</xyz>
+					<xyz>0.0 0.0 1.0</xyz>
 					<limit>
 						<lower>-1.5708</lower>
 						<upper>3.14159</upper>
@@ -2328,7 +2328,7 @@
 				<child>link_leg_0_L_1</child>
 				<pose>0 0 0 -0.0028109042905271053 -0.0028109720442444086 -1.570772409439087</pose>
 				<axis>
-					<xyz>0.0 1.0 0.0</xyz>
+					<xyz>0.0 0.0 -1.0</xyz>
 					<limit>
 						<lower>-1.5708</lower>
 						<upper>3.14159</upper>
@@ -2340,7 +2340,7 @@
 				<child>link_leg_0_L_2</child>
 				<pose>0 0 0 -0.002276829443871975 -0.002276871120557189 -1.5707781314849854</pose>
 				<axis>
-					<xyz>0.0 1.0 0.0</xyz>
+					<xyz>0.0 0.0 -1.0</xyz>
 					<limit>
 						<lower>-1.5708</lower>
 						<upper>3.14159</upper>
@@ -2364,7 +2364,7 @@
 				<child>link_leg_0_R_1</child>
 				<pose>0 0 0 0.0028095084708184004 -0.0028095212765038013 1.5707917213439941</pose>
 				<axis>
-					<xyz>0.0 1.0 0.0</xyz>
+					<xyz>0.0 0.0 1.0</xyz>
 					<limit>
 						<lower>-1.5708</lower>
 						<upper>3.14159</upper>
@@ -2376,7 +2376,7 @@
 				<child>link_leg_0_R_2</child>
 				<pose>0 0 0 0.0022782268933951855 -0.0022783023305237293 1.5707632303237915</pose>
 				<axis>
-					<xyz>0.0 1.0 0.0</xyz>
+					<xyz>0.0 0.0 1.0</xyz>
 					<limit>
 						<lower>-1.5708</lower>
 						<upper>3.14159</upper>

@@ -11,6 +11,7 @@
 
 #: File types
 *.mp4
+*.MP4
 *.html
 *.h5
 *.pickle

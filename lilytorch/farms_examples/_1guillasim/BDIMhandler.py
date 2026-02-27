@@ -191,34 +191,38 @@ class BDIMhandler():
         # for general deforming bodies
         self.fluid_solver.div  = self.fluid_solver.divergence(uprime,vprime)
 
-        # coeff      = timestep/self.fluid_solver.rho
-        # p          = self.fluid_solver.poisson_solverFFT.solve(self.fluid_solver.div/coeff)
-        # (p_x, p_y) = self.fluid_solver.gradient(p)
-        # (u,v)      = (uprime-coeff*p_x, vprime-coeff*p_y)
+        # ====== STEP 2: variable-coefficient Poisson solve ======
+        # c = dt/rho at each face.  rho is the BDIM mixed density, already
+        # computed on the u-face grid (rho_u) and v-face grid (rho_v).
+        rho_u = (self.rho_fluid * self.fluid_solver.mu0_all_u
+                 + self.rho_body  * self.fluid_solver.m_m0_all_u)   # shape (nx, ny)
+        rho_v = (self.rho_fluid * self.fluid_solver.mu0_all_v
+                 + self.rho_body  * self.fluid_solver.m_m0_all_v)   # shape (nx, ny)
 
-        # (c, _) = self.composite_body.mu_funcs(self.composite_body.sdf_val)
-        coeff = timestep/self.fluid_solver.rho
-        c = torch.ones_like(u)
-        ch = (c[1:,1:-1]+c[:-1,1:-1])/2
-        cv = (c[1:-1,1:]+c[1:-1,:-1])/2
-        ch = coeff * self.fluid_solver.mu0_all_u
-        cv = coeff * self.fluid_solver.mu0_all_v
-        p, _    = self.fluid_solver.poisson_solver.solve_multigrid( # f, u, c
-            self.fluid_solver.div[1:-1,1:-1],
+        # c = dt/rho — variable density but NO μ₀ factor.
+        # Adding μ₀ makes J→0 at the body boundary, causing multigrid blow-up.
+        # LilyPad's μ₀·dt applies to a normalised single-fluid (rho=1) system
+        # and is not equivalent here. Body pressure is zeroed after the solve.
+        ch_full = timestep / rho_u
+        cv_full = timestep / rho_v
+
+        # The Poisson solver works on the interior block f = div[1:-1,1:-1] of
+        # shape (nx-2, ny-2).  It needs:
+        #   ch  shape (nx-1, ny-2)  — faces between interior columns
+        #   cv  shape (nx-2, ny-1)  — faces between interior rows
+        p, _ = self.fluid_solver.poisson_solver.solve_multigrid(
+            self.fluid_solver.div[1:-1, 1:-1],
             torch.zeros_like(p),
-            coeff*c,
-            # ch = ch[1:,1:-1],
-            # cv = cv[1:-1,1:],
-            # ch = ch,
-            # cv = cv,
+            torch.ones_like(self.fluid_solver.div[1:-1, 1:-1]),  # c arg unused when ch/cv given
+            ch=ch_full[1:,  1:-1],   # (nx-1, ny-2)
+            cv=cv_full[1:-1, 1:],    # (nx-2, ny-1)
         )
-        # # ====== projection step ======
-        (p_x, p_y) = self.fluid_solver.gradient(p)
-        u          = uprime - ch * p_x
-        v          = vprime - cv * p_y
+
         # ====== projection step ======
-        # (p_x, p_y) = self.fluid_solver.gradient(p)
-        # (u,v)      = (uprime-coeff*p_x, vprime-coeff*p_y)
+        # Use the same face coefficients (full grid) for the projection.
+        (p_x, p_y) = self.fluid_solver.gradient(p)
+        u = uprime - ch_full * p_x
+        v = vprime - cv_full * p_y
 
         self.fluid_solver.adv_diff_solver.set_BCs(u,v)
 

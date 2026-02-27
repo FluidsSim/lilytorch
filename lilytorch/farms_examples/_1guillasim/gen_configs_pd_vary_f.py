@@ -70,7 +70,7 @@ n_iterations = 18001
 save_frames = True
 save_uv     = False
 
-freqs = [1,0.5, 1.5, 2]
+freqs = [0.5] #[1,0.5, 1.5, 2]
 
 def gen_animat_config(output_folder, index):
 

@@ -24,7 +24,8 @@ class PositionController(KinematicsController):
         kinematics_start      = 0.0
         kinematics_end        = experiment_options.simulation.physics.timestep*experiment_options.simulation.runtime.n_iterations
         kinematics            = self.generate_positions(
-            plot=True
+            animat_options=animat_options,
+            plot=False
         )
         joints_control_types  = {
             motor.joint_name: ControlType.from_string_list(
@@ -112,19 +113,26 @@ class PositionController(KinematicsController):
 
     def generate_positions(
             self,
+            animat_options=None,
             n_cycles=15,
             plot=True
         ):
 
 
         base_dir = os.path.dirname(__file__)
-        data_file = os.path.join(base_dir, 'salamander_kinematics_2D.csv')
+        data_file = os.path.join(base_dir, 'salamander_kinematics_2D_x15.csv')
         data = np.loadtxt(data_file, delimiter=',', skiprows=1)
 
-        data = self.repeat_cycles(data, n_cycles=n_cycles)
-
-
-
+        # ======================= TEMPORARY FIX =======================
+        # Set limb joint columns to their initial positions
+        if animat_options is not None:
+            joints_names = animat_options.control.joints_names()
+            morph_joints = {j.name: j for j in animat_options.morphology.joints}
+            for i, name in enumerate(joints_names):
+                if 'leg' in name and name in morph_joints:
+                    init_pos = morph_joints[name].initial[0]
+                    data[:, i + 1] = init_pos  # col 0 is time
+        # ======================= TEMPORARY FIX =======================
 
         if plot:
             x_plot = data[:, 0]

@@ -15,7 +15,7 @@ bdim_handler_path = "lilytorch.farms_examples.pleurodeles.BDIMhandler.BDIMhandle
 
 nthreads = 32
 use_gpu  = True
-use_bdim = False
+use_bdim = True
 headless = False
 fast     = False
 
@@ -25,10 +25,9 @@ animats_pars = [
     "model_name"  : "pleurodeles",
     "sdf_name"    : "salamander_animal_fmsv0.21_2D.sdf",
     "control_type": "position",
-    "gains"       : [0.1, .02, 0],
+    "gains"       : [0.2, .001, 0],
     "controller_config": {
         'path': "lilytorch.farms_examples.pleurodeles.pd_controller_swim.PositionController",
-        'freq': 1, 'twl': 10, 'amp': 200, 'limb_pose1':-0.35*3.141592653589793, 'limb_pose2':-0.2*3.141592653589793,
         },
     "spawn_mode": SpawnMode.TRANSVERSE,
     "pose": [0, 0, 0., 0, 0, 3.141592653589793],
@@ -51,16 +50,16 @@ density = 1000.0
 nu    = 1.0e-6
 
 
-# timestep     = 0.01
-# fluid_method = "implicit"
-# save_every   = 50
-# n_iterations = 7001
+timestep     = 0.01
+fluid_method = "implicit"
+save_every   = 1
+n_iterations = 7001
 
-timestep     = 0.001
-fluid_method = "abdquickest"
-save_frames  = True
-save_every   = 50
-n_iterations = 50001
+# timestep     = 0.001
+# fluid_method = "abdquickest"
+# save_frames  = True
+# save_every   = 50
+# n_iterations = 5001
 
 save_frames = True
 save_uv     = False
@@ -273,33 +272,51 @@ def gen_simulation_config(output_folder, index):
         },
         "extensions": [
             {
-                "loader": "farms_core.simulation.extensions.ExperimentLogger",
-                "config": {
-                    "log_path": os.path.join(output_folder, "output"),
-                    "skip": 0
-                }
+            "loader": "farms_core.simulation.extensions.ExperimentLogger",
+            "config": {
+                "log_path": os.path.join(output_folder, "output"),
+                "skip": 0
+            }
             },
             {
-                "loader": "farms_mujoco.simulation.extensions.MjcfSaver",
-                "config": {
-                    "path": os.path.join(output_folder, "output", "simulation_mjcf.xml")
-                }
+            "loader": "farms_mujoco.simulation.extensions.MjcfSaver",
+            "config": {
+                "path": os.path.join(output_folder, "output", "simulation_mjcf.xml")
+            }
             },
             {
-                "loader": "lilytorch.integration.extensions.DataLogger",
-                "config": {
-                    "log_path": os.path.join(output_folder, "output", "nn_data.hdf5"),
-                }
+            "loader": "lilytorch.integration.extensions.DataLogger",
+            "config": {
+                "log_path": os.path.join(output_folder, "output", "nn_data.hdf5"),
+            }
             },
-            # {
-            #     "loader": "farms_mujoco.simulation.extensions.TrailCoMViewer",
-            #     "config": {
-            #         "width": 0.1,
-            #         "rgba" : [1.0, 0.0, 0.0, 1.0]
-            #     }
-            # }
+            {
+            "loader": "farms_mujoco.simulation.extensions.CameraFollower",
+            "config": {
+                "animat_id": 0,
+                "distance": 0.8,
+                "azimuth": -30,
+                "elevation": -20,
+                "angular_velocity": 0
+            }
+            },
+            {
+            "loader": "farms_mujoco.sensors.camera.CameraRecording",
+            "config": {
+                "path": os.path.join(output_folder, "output", "video.mp4"),
+                "animat_id": 0,
+                "fps": 30,
+                "speed": 1.0,
+                "azimuth": -30,
+                "elevation": -15,
+                "distance": 0.2,
+                "angular_velocity": 0,
+                "offset": [0, 0, 0.0],
+                "resolution": [1280, 720]
+            }
+            }
         ]
-    }
+        }
 
     if use_bdim:
 
@@ -340,9 +357,9 @@ def gen_simulation_config(output_folder, index):
                 "body": {
                     "type"           : "multi_animat",
                     "sdf_folder"     : None,
-                    "plotting"       : False,
-                    "compute_interp" : False,
-                    "plotting_meshes": False,
+                    "plotting"       : True,
+                    "compute_interp" : True,
+                    "plotting_meshes": True,
                     "save_folder"    : os.path.join(data_folder, "interp_data"),
                     "n_samples"      : (2000, 2000),
                     "update_maps"    : {
@@ -350,7 +367,7 @@ def gen_simulation_config(output_folder, index):
                         "translation": [None, None]
                     },
                     "suit"     : 0.0,
-                    "convexify": True,
+                    "convexify": False,
                     "scale"    : 1
                 },
                 "output": {
