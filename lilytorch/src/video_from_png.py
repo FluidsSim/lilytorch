@@ -21,7 +21,7 @@ def _build_video_writer(output_path, fps, frame_size):
     raise RuntimeError("Unable to create a compatible MP4 encoder (tried avc1/H264/X264/mp4v).")
 
 
-dir         = "/data/andreaferrario/ns_data/1guilla_swim_pd/damping_2/2026-02-06T14:59:18.851664/curl/"
+dir         = "/data/andreaferrario/ns_data/2026-03-02T12:26:17.742051/curl/"
 name        = "video"
 img_name    = "curl"
 format      = ".mp4"

@@ -233,7 +233,7 @@ class BDIMhandler():
 
 
 
-    def step(self, task,physics):
+    def step(self, task, physics):
 
 
         iteration = self.iteration
@@ -276,8 +276,6 @@ class BDIMhandler():
             (self.fluid_solver.mu0_all_v, self.fluid_solver.mu1_all_v)         = self.fluid_solver.composite_body.mu_funcs(self.fluid_solver.composite_body.sdf_val_v)
             self.fluid_solver.m_m0_all_v                                       = (1-self.fluid_solver.mu0_all_v)
             (_, self.fluid_solver.normal_x_v, self.fluid_solver.normal_y_v, _) = self.fluid_solver.composite_body.compute_sdf_properties(self.fluid_solver.composite_body.sdf_val_v)
-
-            self.fluid_solver.rho = (self.rho_fluid*self.fluid_solver.mu0_all_u + self.rho_body*self.fluid_solver.m_m0_all_u)
 
             (u,v,p) = (self.fluid_solver.u0, self.fluid_solver.v0, self.fluid_solver.p0)
 

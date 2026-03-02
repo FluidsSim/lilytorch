@@ -7,7 +7,7 @@ from farms_core.sensors.sensor_convention import sc
 from farms_core.model.control import ControlType
 import numpy as np
 from lilytorch.util.rw import Dict2Class
-from farms_amphibious.control.kinematics import KinematicsController
+from lilytorch.integration.kinematics import KinematicsController
 import matplotlib.pyplot as plt
 
 class PositionController(KinematicsController):

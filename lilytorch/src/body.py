@@ -329,8 +329,6 @@ class mesh2sdf():
 
     def __call__(self, points_in_object_frame: np.array):
 
-
-
         self._raycasting_scene.compute_signed_distance(points_in_object_frame)
 
         closest = self._raycasting_scene.compute_closest_points(points_in_object_frame)
@@ -1159,7 +1157,7 @@ class BodyFishExperimental(Body):
 class BodyMesh(Body):
     """
     """
-    def __init__(self, device, x, y, mesh_file, update_maps, eps=0.05, compute_interp=True, nsamples=500, msamples=500, suit=0, plotting_meshes=False, **kwargs):
+    def __init__(self, device, x, y, mesh_file, update_maps, eps=0.05, compute_interp=True, nsamples=500, msamples=500, suit=0, plotting_meshes=False, zpos=0, **kwargs):
         super().__init__(device, x, y, eps=eps)
         self.mesh_file           = mesh_file
         self.compute_interp      = compute_interp
@@ -1176,7 +1174,7 @@ class BodyMesh(Body):
             convexify=kwargs.pop("convexify", True),
             scale=kwargs.pop("scale", 1)
             )
-        self.compute_sdfs()
+        self.compute_sdfs(zpos)
         del self.m2s
         self.initialize()
         self.bodies = [self]
@@ -1236,7 +1234,7 @@ class BodyMesh(Body):
         return new_pts, actual_spacing      # return N+1 points where last==first
 
 
-    def compute_sdfs(self):
+    def compute_sdfs(self, zpos=0):
         """
         Initialize the sdf interpolation function
         """
@@ -1262,7 +1260,7 @@ class BodyMesh(Body):
             X,Y=np.meshgrid(xnp,ynp,indexing="ij")
             xflat = X.flatten()
             yflat = Y.flatten()
-            zflat = 0.0*np.ones_like(xflat)
+            zflat = zpos*np.ones_like(xflat)
             xyz   = np.stack([xflat,yflat,zflat],axis=1)
             query_pts=np.array(xyz.astype(np.float32))
 
@@ -1289,7 +1287,11 @@ class BodyMesh(Body):
                 im=binary_2d
 
             if self.plotting:
-                cv2.imshow("window_name", im)
+                # Resize image for display
+                display_scale = 0.5
+                display_size = (int(im.shape[1] * display_scale), int(im.shape[0] * display_scale))
+                im_resized = cv2.resize(im, display_size)
+                cv2.imshow("window_name", im_resized)
                 cv2.waitKey(0)
                 cv2.destroyAllWindows()
             binary_2d=np.where(im==0,1,-1) # this is the inside mask
@@ -1647,6 +1649,7 @@ class MultiAnimatBodies(Body):
                         assert scale[0]==scale[1]==scale[2], "Non-uniform scaling not supported."
                         scale = scale[0]
                         kwargs["scale"] = scale
+                        kwargs["zpos"] = link.pose[2]
                     body = BodyMesh(
                             device, x, y,
                             mesh_gpath,

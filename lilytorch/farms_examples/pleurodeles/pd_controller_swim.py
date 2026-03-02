@@ -7,7 +7,7 @@ from farms_core.sensors.sensor_convention import sc
 from farms_core.model.control import ControlType
 import numpy as np
 from lilytorch.util.rw import Dict2Class
-from farms_amphibious.control.kinematics import KinematicsController
+from lilytorch.integration.kinematics import KinematicsController
 import os
 import matplotlib.pyplot as plt
 
@@ -122,6 +122,35 @@ class PositionController(KinematicsController):
         base_dir = os.path.dirname(__file__)
         data_file = os.path.join(base_dir, 'salamander_kinematics_2D_x15.csv')
         data = np.loadtxt(data_file, delimiter=',', skiprows=1)
+
+        amp_deg=40
+        TWL=39
+        freq=3.0
+        nmotors = 39
+        tstop=30
+        amp = amp_deg * (np.pi / 180.0)
+        times = np.expand_dims(np.arange(0, tstop, 0.01), axis=1)
+        times_expanded = np.repeat(times, nmotors, axis=1)
+
+        idxs   = np.arange(nmotors)
+        x      = (idxs + 1) / nmotors
+        c1     = +0.05,
+        c2     = -0.13,
+        c3     = +0.28
+        factor = c1+c2*x+c3*x**2
+
+        # factor[:-1] *= 0
+        # factor[-1] = 4
+
+        data=np.zeros((times.shape[0], nmotors+13))
+        data[:,0]=times[:,0]
+
+        data[:,1:40] = amp * factor * np.sin(
+            2 * np.pi * (
+                idxs / TWL - freq * times_expanded
+            )
+        )
+
 
         # ======================= TEMPORARY FIX =======================
         # Set limb joint columns to their initial positions

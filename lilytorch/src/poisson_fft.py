@@ -3,7 +3,7 @@ import torch
 from scipy import special
 from os.path import exists
 import numpy
-import torch_dct as dct
+# import torch_dct as dct
 import os
 
 class PoissonSolverFFT:

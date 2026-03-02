@@ -1,13 +1,12 @@
 
 from pytorch_interpolation import RegularGridInterpolator
-
 from lilytorch.src.adv_diff import AdvDiffSolver
 from lilytorch.src.poisson_mult import PoissonSolver
 from lilytorch.src.poisson_fft import PoissonSolverFFT
 # from lilytorch.src.poisson_petsc import PoissonSolverPETSc
 from lilytorch.src.body import body_from_yaml
 from lilytorch.src import plotting
-from lilytorch.util.rw import save_object
+# from lilytorch.util.rw import save_object
 from lilytorch.util.yaml_operations import pyobject2yaml
 
 import torch
@@ -1960,8 +1959,8 @@ class FluidSolver:
                 # plotting.plot2d_imshow_composite(X,Y,u.cpu(),self.sdf_properties,self.extent,iteration,self.save_path,"u",None, None)
                 # plotting.plot2d_imshow_composite(X,Y,v.cpu(),self.sdf_properties,self.extent,iteration,self.save_path,"v",None, None)
 
-                # plotting.plot2d_imshow_composite_quiver(X,Y,vec_x,self.composite_body.bodies,0*X,0*X,self.extent,iteration,self.save_path,"bodyu",None, None,subsample_n = self.n_quiver_spacing, scale=self.save_every*self.dt_np)
-                # plotting.plot2d_imshow_composite_quiver(X,Y,vec_y,self.composite_body.bodies,0*X,0*X,self.extent,iteration,self.save_path,"bodyv",None, None,subsample_n = self.n_quiver_spacing, scale=self.save_every*self.dt_np)
+                plotting.plot2d_imshow_composite_quiver(X,Y,(self.m_m0_all_u*self.composite_body.body_u).cpu(),self.composite_body.bodies,0*X,0*X,self.extent,iteration,self.save_path,"bodyu",None, None,subsample_n = self.n_quiver_spacing, scale=self.save_every*self.dt_np)
+                plotting.plot2d_imshow_composite_quiver(X,Y,(self.m_m0_all_v*self.composite_body.body_v).cpu(),self.composite_body.bodies,0*X,0*X,self.extent,iteration,self.save_path,"bodyv",None, None,subsample_n = self.n_quiver_spacing, scale=self.save_every*self.dt_np)
 
 
                 plotting.plot2d_imshow_composite_quiver(

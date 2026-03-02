@@ -166,7 +166,7 @@ def gen_experiment_config():
             "arenas_options": [
                 "farms_core.model.options.ArenaOptions"
             ],
-            "experiment_data": "farms_amphibious.data.data.ExperimentData",
+            "experiment_data": "farms_core.experiment.data.ExperimentData",
             "animats_data": [
                 "farms_core.model.data.AnimatData"
             ]

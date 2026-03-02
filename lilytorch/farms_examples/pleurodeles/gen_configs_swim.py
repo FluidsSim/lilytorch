@@ -13,11 +13,12 @@ stack_folder      = save_path
 data_folder       = os.path.join(lilytorch_repo_root, 'farms_examples', 'pleurodeles')
 bdim_handler_path = "lilytorch.farms_examples.pleurodeles.BDIMhandler.BDIMhandler"
 
-nthreads = 32
-use_gpu  = True
-use_bdim = True
-headless = False
-fast     = False
+nthreads    = 32
+use_gpu     = True
+use_bdim    = True
+headless    = False
+fast        = False
+compute_sdf = False
 
 
 animats_pars = [
@@ -25,7 +26,7 @@ animats_pars = [
     "model_name"  : "pleurodeles",
     "sdf_name"    : "salamander_animal_fmsv0.21_2D.sdf",
     "control_type": "position",
-    "gains"       : [0.2, .001, 0],
+    "gains"       : [0.2, .005, 0],
     "controller_config": {
         'path': "lilytorch.farms_examples.pleurodeles.pd_controller_swim.PositionController",
         },
@@ -45,21 +46,21 @@ ymin = -0.05*2
 ymax = 0.05*2
 
 
-density = 1000.0
+density = 800.0
 # nu      = 500.0e-6
 nu    = 1.0e-6
 
 
-timestep     = 0.01
-fluid_method = "implicit"
-save_every   = 1
-n_iterations = 7001
-
 # timestep     = 0.001
-# fluid_method = "abdquickest"
-# save_frames  = True
+# fluid_method = "implicit"
 # save_every   = 50
-# n_iterations = 5001
+# n_iterations = 7001
+
+timestep     = 0.0005
+fluid_method = "abdquickest"
+save_frames  = True
+save_every   = 50
+n_iterations = 10001
 
 save_frames = True
 save_uv     = False
@@ -134,16 +135,15 @@ def gen_animat_config(output_folder, index):
             } for joint_name in joint_names
         ]
 
-
         for joint in animat_dict["morphology"]["joints"]:
             if joint['name']=="joint_leg_0_L_0" or joint['name']=="joint_leg_0_R_0":
-                joint['initial'] = [-np.pi/3, 0.0]
-            if joint['name']=="joint_leg_0_L_3" or joint['name']=="joint_leg_0_R_3":
-                joint['initial'] = [-np.pi/4, 0.0]
+                joint['initial'] = [-0.3*3.141592653589793, -0]
+            if joint['name']=="joint_leg_0_L_1" or joint['name']=="joint_leg_0_R_1":
+                joint['initial'] = [-0.2*3.141592653589793, -0]
             if joint['name']=="joint_leg_1_L_0" or joint['name']=="joint_leg_1_R_0":
-                joint['initial'] = [-np.pi/3, 0.0]
-            if joint['name']=="joint_leg_1_L_3" or joint['name']=="joint_leg_1_R_3":
-                joint['initial'] = [-np.pi/4, 0.0]
+                joint['initial'] = [-0.35*3.141592653589793, -0]
+            if joint['name']=="joint_leg_1_L_1" or joint['name']=="joint_leg_1_R_1":
+                joint['initial'] = [-0.2*3.141592653589793, -0]
 
 
 
@@ -357,9 +357,9 @@ def gen_simulation_config(output_folder, index):
                 "body": {
                     "type"           : "multi_animat",
                     "sdf_folder"     : None,
-                    "plotting"       : True,
-                    "compute_interp" : True,
-                    "plotting_meshes": True,
+                    "plotting"       : compute_sdf,
+                    "compute_interp" : compute_sdf,
+                    "plotting_meshes": compute_sdf,
                     "save_folder"    : os.path.join(data_folder, "interp_data"),
                     "n_samples"      : (2000, 2000),
                     "update_maps"    : {
