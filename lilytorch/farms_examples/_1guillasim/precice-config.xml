@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<precice-configuration>
+
+  <log>
+    <sink
+      filter="%Severity% > debug"
+      format="---[precice] %ColorizedSeverity% %Message%"
+      enabled="true" />
+  </log>
+
+  <data:vector name="Force" />
+  <data:vector name="Displacement" />
+
+  <mesh name="FARMS-Mesh" dimensions="3">
+    <use-data name="Displacement" />
+    <use-data name="Force" />
+  </mesh>
+
+  <mesh name="OpenFOAM-Mesh" dimensions="3">
+    <use-data name="Displacement" />
+    <use-data name="Force" />
+  </mesh>
+
+  <participant name="FARMS">
+    <provide-mesh name="FARMS-Mesh" />
+    <receive-mesh name="OpenFOAM-Mesh" from="OpenFOAM" />
+
+    <write-data name="Displacement" mesh="FARMS-Mesh" />
+    <read-data  name="Force"        mesh="FARMS-Mesh" />
+
+    <mapping:nearest-neighbor
+      direction="read"
+      from="OpenFOAM-Mesh"
+      to="FARMS-Mesh"
+      constraint="consistent" />
+  </participant>
+
+  <participant name="OpenFOAM">
+    <provide-mesh name="OpenFOAM-Mesh" />
+    <receive-mesh name="FARMS-Mesh" from="FARMS" />
+
+    <read-data  name="Displacement" mesh="OpenFOAM-Mesh" />
+    <write-data name="Force"        mesh="OpenFOAM-Mesh" />
+
+    <mapping:nearest-neighbor
+      direction="read"
+      from="FARMS-Mesh"
+      to="OpenFOAM-Mesh"
+      constraint="consistent" />
+  </participant>
+
+  <!-- Serial-implicit coupling: FARMS computes displacement first,
+       OpenFOAM solves fluid + returns forces.  Implicit iterations
+       with Aitken under-relaxation ensure stability. -->
+  <coupling-scheme:serial-implicit>
+    <time-window-size value="0.0005" />
+    <max-time value="10.0" />
+    <participants first="FARMS" second="OpenFOAM" />
+
+    <exchange data="Displacement" mesh="FARMS-Mesh"   from="FARMS"    to="OpenFOAM" />
+    <exchange data="Force"        mesh="OpenFOAM-Mesh" from="OpenFOAM" to="FARMS" />
+
+    <max-iterations value="5" />
+
+    <relative-convergence-measure limit="1e-3" data="Displacement" mesh="FARMS-Mesh" />
+    <relative-convergence-measure limit="1e-3" data="Force"        mesh="OpenFOAM-Mesh" />
+
+    <acceleration:aitken>
+      <data name="Displacement" mesh="FARMS-Mesh" />
+      <initial-relaxation value="0.5" />
+    </acceleration:aitken>
+  </coupling-scheme:serial-implicit>
+
+</precice-configuration>

@@ -1,0 +1,40 @@
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      preciceDict;
+}
+
+preciceConfig   "../precice-config.xml";
+
+participant     OpenFOAM;
+
+modules (FSI);
+
+interfaces
+{
+    Interface1
+    {
+        mesh              OpenFOAM-Mesh;
+        patches           (swimmer);
+        locations         faceCenters;
+
+        readData
+        (
+            Displacement
+        );
+
+        writeData
+        (
+            Force
+        );
+    };
+};
+
+FSI
+{
+    // OpenFOAM reads displacement from FARMS and writes forces back
+    namePointDisplacement   pointDisplacement;
+    nameCellDisplacement    cellDisplacement;
+}
