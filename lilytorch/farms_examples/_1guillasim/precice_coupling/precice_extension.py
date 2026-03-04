@@ -1,7 +1,7 @@
 """
 FARMS TaskExtension for preCICE-OpenFOAM coupling.
 
-Drop-in replacement for FluidExtension when use_precice=True.
+Drop-in replacement for FluidExtension when using preCICE for 3D FSI.
 Loads the PreCICEHandler instead of the BDIMhandler.
 """
 
@@ -55,7 +55,7 @@ class PreCICEExtension(TaskExtension):
     def initialize_episode(self, task: ExperimentTask, physics: Physics):
         """Initialize the preCICE handler on the first episode."""
         if not self._initialized:
-            from lilytorch.farms_examples._1guillasim.precice_handler import PreCICEHandler
+            from lilytorch.farms_examples._1guillasim.precice_coupling.precice_handler import PreCICEHandler
 
             # Gather link names from the first animat
             animat_opts = self.experiment_options.animats[0]

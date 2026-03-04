@@ -18,15 +18,10 @@ bdim_handler_path = "lilytorch.farms_examples._1guillasim.BDIMhandler.BDIMhandle
 nthreads = 16
 use_gpu  = True
 use_bdim = True
-use_precice = False   # Set True to couple with OpenFOAM via preCICE (3D)
 headless = False
 fast     = False
 
-precice_config_path = os.path.join(data_folder, "precice-config.xml")
-openfoam_case_path  = os.path.join(data_folder, "openfoam_case")
-stl_folder          = os.path.join(sdfs_path, "1guilla", "meshes")
-
-use_drag = not use_bdim and not use_precice
+use_drag = not use_bdim
 constant_drags = [
             [-0.1, -5.0, -5.0],
             [-0.001, -0.001, -0.001]
@@ -349,20 +344,7 @@ def gen_simulation_config(output_folder):
         ]
     }
 
-    if use_precice:
-
-        simulation_dict["extensions"] += [
-            {
-            "loader": "lilytorch.farms_examples._1guillasim.precice_extension.PreCICEExtension",
-            "config": {
-                "precice_config": precice_config_path,
-                "stl_folder"    : stl_folder,
-                "rho_fluid"     : 1000.0,
-            }
-            }
-        ]
-
-    elif use_bdim:
+    if use_bdim:
 
         simulation_dict["extensions"] += [
             {
@@ -435,35 +417,7 @@ def gen_simulation_config(output_folder):
 
 def gen_sh_config(output_folder):
 
-    if use_precice:
-        # For preCICE coupling, generate a script that:
-        #   1. Launches OpenFOAM in the background
-        #   2. Runs FARMS in the foreground
-        sh_str = f"""#!/bin/bash
-set -e
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-OF_CASE="$SCRIPT_DIR/openfoam_case"
-
-echo "=== Launching preCICE-coupled FARMS + OpenFOAM ==="
-
-# Start OpenFOAM participant in background
-echo "Starting OpenFOAM (pimpleFoam)..."
-cd "$OF_CASE"
-source /usr/lib/openfoam/openfoam2312/etc/bashrc
-pimpleFoam &
-OF_PID=$!
-
-# Start FARMS participant
-echo "Starting FARMS..."
-cd "$SCRIPT_DIR"
-farmsim --experiment_config experiment_config.yaml "$@"
-
-# Wait for OpenFOAM to finish
-wait $OF_PID
-echo "=== Coupling complete ==="
-"""
-    else:
-        sh_str = f"""#!/bin/bash
+    sh_str = f"""#!/bin/bash
     farmsim --experiment_config experiment_config.yaml "$@"
     """
     with open(
@@ -471,40 +425,6 @@ echo "=== Coupling complete ==="
         'w'
     ) as f:
         f.write(sh_str)
-
-def gen_precice_case(output_folder):
-    """Copy the OpenFOAM case template and precice-config.xml into the output folder."""
-    import shutil
-
-    # Copy OpenFOAM case
-    src_of_case = openfoam_case_path
-    dst_of_case = os.path.join(output_folder, "openfoam_case")
-    if os.path.exists(dst_of_case):
-        shutil.rmtree(dst_of_case)
-    shutil.copytree(src_of_case, dst_of_case)
-
-    # Copy precice-config.xml
-    src_precice_xml = precice_config_path
-    dst_precice_xml = os.path.join(output_folder, "precice-config.xml")
-    shutil.copy2(src_precice_xml, dst_precice_xml)
-
-    # Also copy into the openfoam_case dir (OpenFOAM adapter looks for ../precice-config.xml)
-    shutil.copy2(src_precice_xml, os.path.join(dst_of_case, "precice-config.xml"))
-
-    print(f"  Copied OpenFOAM case to: {dst_of_case}")
-    print(f"  Copied preCICE config to: {dst_precice_xml}")
-
-    # Prepare the mesh
-    print("  Preparing OpenFOAM mesh (blockMesh + snappyHexMesh)...")
-    result = subprocess.run(
-        ['bash', 'prepare_mesh.sh', stl_folder],
-        cwd=dst_of_case,
-        capture_output=True, text=True
-    )
-    if result.returncode != 0:
-        print(f"  WARNING: Mesh preparation failed:\n{result.stderr}")
-    else:
-        print("  OpenFOAM mesh prepared successfully.")
 
 
 def single_run():
@@ -523,10 +443,6 @@ def single_run():
     gen_simulation_config(output_folder)
     gen_experiment_config(output_folder)
     gen_sh_config(output_folder)
-
-    if use_precice:
-        gen_precice_case(output_folder)
-
     os.chdir(output_folder)
     subprocess.run(['bash', 'run.sh'])
 
