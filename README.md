@@ -2,11 +2,11 @@
 
 **Lilytorch** is a GPU-accelerated 2D computational fluid dynamics (CFD) package built on [PyTorch](https://pytorch.org/), implementing a **BDIM2 (Boundary Data Immersion Method)** solver for fluid–structure interaction. It integrates with [MuJoCo](https://mujoco.org/) via the [FARMS](https://github.com/farmsim) framework, enabling two-way coupled simulations of articulated bodies (robots, animals) immersed in viscous fluids.
 
-
+![Anguilliform Swimming](images/curl_1guilla.png)
 
 ## Overview
 
-Lilytorch solves the 2D incompressible Navier-Stokes equations on a Cartesian grid with immersed bodies represented via Signed Distance Functions (SDFs). When coupled with FARMS/MuJoCo, the fluid solver runs alongside the multibody dynamics engine: at each timestep it reads body poses from MuJoCo, solves the fluid equations, computes hydrodynamic forces (pressure + viscous drag), and applies them back as external wrenches — achieving closed-loop fluid–structure coupling.
+Lilytorch solves the 2D incompressible Navier-Stokes equations on a Cartesian grid with immersed bodies represented via Signed Distance Functions (SDFs) using a second order Boundary Data Immersion Method. When coupled with FARMS/MuJoCo, the fluid solver runs alongside the multibody dynamics engine: at each timestep it reads body poses from MuJoCo, solves the fluid equations, computes hydrodynamic forces (pressure + viscous drag), and applies them back as external wrenches — achieving closed-loop fluid–structure coupling.
 
 ### Architecture
 
@@ -142,7 +142,13 @@ Four git submodules from [farmsim](https://github.com/farmsim), pinned to the `a
    source venv/bin/activate
    ```
 
-3. **Install PyTorch** (select the appropriate CUDA version for your system):
+3. **Install PyTorch:**
+
+   There are two installation modes:
+   - **CPU-only**: No additional prerequisites — install the CPU build of PyTorch.
+   - **CPU/CUDA**: Requires the [CUDA Toolkit](https://developer.nvidia.com/cuda-toolkit) to be installed on your system. Install the CUDA build of PyTorch matching your CUDA version. Use this mode if you want to run the simulation on the GPU.
+
+   Visit the official selector to get the right install command for your setup:
    https://pytorch.org/get-started/locally/
 
 4. **Install Python dependencies:**
@@ -167,7 +173,7 @@ Four git submodules from [farmsim](https://github.com/farmsim), pinned to the `a
 
 | Dependency | Purpose |
 |---|---|
-| [PyTorch](https://pytorch.org/) | GPU-accelerated tensor computation for the CFD solver |
+| [PyTorch](https://pytorch.org/) | GPU/-accelerated tensor computation for the CFD solver |
 | [MuJoCo](https://mujoco.org/) / `dm_control` | Rigid-body multibody dynamics engine |
 | [FARMS](https://github.com/farmsim) | Neuromechanical simulation framework |
 | NumPy / SciPy | Array operations, splines, signal processing, ODE integration |

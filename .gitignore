@@ -2,6 +2,7 @@
 
 #: Python
 *.orig
+!**/0.orig/
 *.npy
 *.pyc
 *.*~
@@ -44,3 +45,13 @@ farms_sim/
 farms_mujoco/
 
 Output/
+
+# OpenFOAM generated files
+**/constant/polyMesh/
+**/constant/triSurface/
+**/openfoam_case/0/
+
+# Cython generated C files (but keep source files)
+*.c
+!lilytorch/farms_examples/amphibot/experimental_data/modes.c
+

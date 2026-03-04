@@ -15,7 +15,7 @@ class PositionController(KinematicsController):
 
         joints_names          = animat_options.control.joints_names()
         kinematics_sampling   = experiment_options.simulation.physics.timestep
-        kinematics_indices    = [1,2,3,4,5,6,7,8]
+        kinematics_indices    = [1,2,3,4,5,6,7]
         kinematics_time_index = 0
         kinematics_invert     = False
         kinematics_degrees    = False
@@ -28,7 +28,7 @@ class PositionController(KinematicsController):
             amp_deg=config["amp"],
             freq=config["freq"],
             TWL=config["twl"],
-            nmotors=8,
+            nmotors=7,
             plot=False
         )
         joints_control_types  = {

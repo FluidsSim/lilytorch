@@ -11,7 +11,6 @@ This replaces the BDIM handler when use_precice=True.  At each timestep:
 
 import os
 import numpy as np
-from scipy.spatial.transform import Rotation
 import precice
 
 import logging
@@ -40,15 +39,22 @@ class PreCICEHandler:
         self.iteration = 0
         self.terminate = False
         self.config = config
+        self._ref_initialized = False  # Will be set on first step()
 
         precice_config = config.get("precice_config", "precice-config.xml")
         stl_folder = config.get("stl_folder", "")
         self.link_names = config.get("link_names", [])
         self.n_links = len(self.link_names)
         self.rho_fluid = config.get("rho_fluid", 1000.0)
+        # MuJoCo prefixes body names with a{animat_i}_
+        self.animat_index = config.get("animat_index", 0)
+        self.body_prefix = f"a{self.animat_index}_"
 
         # ---- Load reference STL vertices for each link ----
         self._load_stl_meshes(stl_folder)
+
+        # ---- Transform STL vertices to world frame using initial MuJoCo poses ----
+        self._transform_to_world_frame(physics)
 
         # ---- Initialize preCICE ----
         self.participant = precice.Participant(
@@ -60,8 +66,8 @@ class PreCICEHandler:
 
         mesh_name = "FARMS-Mesh"
 
-        # Combine all link vertices into a single coupling mesh
-        self.all_vertices = np.vstack(self.ref_vertices)  # (N_total, 3)
+        # Combine all link vertices into a single coupling mesh (world frame)
+        self.all_vertices = np.vstack(self.ref_vertices_world)  # (N_total, 3)
         self.n_vertices = self.all_vertices.shape[0]
 
         # Track which vertices belong to which link
@@ -72,13 +78,13 @@ class PreCICEHandler:
             self.link_vertex_ranges.append((offset, offset + n))
             offset += n
 
-        # Store reference positions (at t=0 in the SDF frame)
+        # Reference positions in world frame (initial MuJoCo pose)
         self.ref_positions = self.all_vertices.copy()
 
         # Current displaced positions
         self.current_positions = self.all_vertices.copy()
 
-        # Set mesh vertices in preCICE
+        # Set mesh vertices in preCICE (world frame for correct mapping)
         self.vertex_ids = self.participant.set_mesh_vertices(
             mesh_name,
             self.all_vertices,
@@ -141,35 +147,87 @@ class PreCICEHandler:
                 f"from {m.vectors.shape[0]} triangles"
             )
 
-    def _update_vertex_positions(self, iteration):
+    def _transform_to_world_frame(self, physics):
+        """Transform STL vertices from link-local frame to world frame
+        using the initial MuJoCo body poses."""
+        self.ref_vertices_world = []
+
+        for link_id, link_name in enumerate(self.link_names):
+            local_verts = self.ref_vertices[link_id]
+            if local_verts.shape[0] == 0:
+                self.ref_vertices_world.append(local_verts)
+                continue
+
+            try:
+                # Get initial body pose from MuJoCo (bodies are prefixed with a{i}_)
+                mujoco_name = f"{self.body_prefix}{link_name}"
+                body_xpos = np.array(physics.named.data.xpos[mujoco_name])
+                body_xmat = np.array(physics.named.data.xmat[mujoco_name]).reshape(3, 3)
+
+                world_verts = (body_xmat @ local_verts.T).T + body_xpos
+                self.ref_vertices_world.append(world_verts)
+
+                logger.info(
+                    f"  {link_name}: transformed to world frame, "
+                    f"body_pos={body_xpos}, "
+                    f"verts range x=[{world_verts[:,0].min():.4f}, {world_verts[:,0].max():.4f}], "
+                    f"y=[{world_verts[:,1].min():.4f}, {world_verts[:,1].max():.4f}], "
+                    f"z=[{world_verts[:,2].min():.4f}, {world_verts[:,2].max():.4f}]"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Could not get MuJoCo pose for {link_name}: {e}. "
+                    f"Using local-frame vertices."
+                )
+                self.ref_vertices_world.append(local_verts)
+
+    def _update_vertex_positions(self, iteration, physics):
         """
         Transform reference STL vertices to current world-frame positions
-        using FARMS link pose data.
+        using the LIVE MuJoCo body poses (physics.data.xpos / xmat).
+
+        This reads the actual current state of the bodies, which is critical
+        for implicit coupling where the handler may be called multiple times
+        at the same logical iteration (sub-iterations) and checkpoint restores
+        modify physics state directly.
         """
-        for animat_data in self.data:
-            for link_id, link_name in enumerate(self.link_names):
-                start, end = self.link_vertex_ranges[link_id]
-                if start == end:
-                    continue
+        for link_id, link_name in enumerate(self.link_names):
+            start, end = self.link_vertex_ranges[link_id]
+            if start == end:
+                continue
 
-                # Get URDF position and orientation from FARMS
-                urdf_pos = np.array(
-                    animat_data.sensors.links.urdf_positions()[iteration, link_id]
-                )
-                urdf_quat = np.array(
-                    animat_data.sensors.links.urdf_orientations()[iteration, link_id]
-                )
+            # Read current body pose directly from MuJoCo
+            mujoco_name = f"{self.body_prefix}{link_name}"
+            body_xpos = np.array(physics.named.data.xpos[mujoco_name])
+            body_xmat = np.array(physics.named.data.xmat[mujoco_name]).reshape(3, 3)
 
-                R = Rotation.from_quat(urdf_quat).as_matrix()
+            # Transform local STL vertices to current world frame
+            local_verts = self.ref_vertices[link_id]  # (n, 3)
+            world_verts = (body_xmat @ local_verts.T).T + body_xpos
 
-                # Transform: world_pos = R @ local_pos + translation
-                local_verts = self.ref_vertices[link_id]  # (n, 3)
-                world_verts = (R @ local_verts.T).T + urdf_pos
+            self.current_positions[start:end] = world_verts
 
-                self.current_positions[start:end] = world_verts
+        # On the first call, initialize ref_positions to world-frame t=0 positions
+        # so that displacement = 0 on the first timestep
+        if not self._ref_initialized:
+            self.ref_positions = self.current_positions.copy()
+            self._ref_initialized = True
+            logger.info(
+                f"Initialized ref_positions from world-frame poses at iteration {iteration}"
+            )
 
-        # Displacement = current - reference
+        # Displacement = current - reference (both in world frame now)
         self.displacements = self.current_positions - self.ref_positions
+
+        # Debug: log displacement statistics
+        disp_mag = np.linalg.norm(self.displacements, axis=1)
+        logger.info(
+            f"Displacement stats: min={disp_mag.min():.6e}, max={disp_mag.max():.6e}, "
+            f"mean={disp_mag.mean():.6e}, "
+            f"dx=[{self.displacements[:,0].min():.6e}, {self.displacements[:,0].max():.6e}], "
+            f"dy=[{self.displacements[:,1].min():.6e}, {self.displacements[:,1].max():.6e}], "
+            f"dz=[{self.displacements[:,2].min():.6e}, {self.displacements[:,2].max():.6e}]"
+        )
 
     def apply_forces(self, task, physics):
         """Apply preCICE forces back to MuJoCo bodies."""
@@ -202,12 +260,14 @@ class PreCICEHandler:
 
     def step(self, task, physics):
         """
-        Perform one preCICE coupling step:
-          1. Update mesh vertex positions from FARMS
-          2. Write displacements to preCICE
-          3. Advance preCICE (triggers OpenFOAM fluid solve)
-          4. Read forces from preCICE
-          5. Apply forces to MuJoCo bodies
+        Perform one preCICE coupling step with implicit iteration support:
+          1. Save checkpoint if preCICE requires it
+          2. Update mesh vertex positions from FARMS
+          3. Write displacements to preCICE
+          4. Advance preCICE (triggers OpenFOAM fluid solve)
+          5. Read forces from preCICE
+          6. Reload checkpoint if preCICE requires it (iteration not converged)
+          7. Apply forces to MuJoCo bodies
         """
         if self.terminate or not self.participant.is_coupling_ongoing():
             self.terminate = True
@@ -215,8 +275,12 @@ class PreCICEHandler:
 
         iteration = self.iteration
 
-        # 1. Update vertex positions from current FARMS state
-        self._update_vertex_positions(iteration)
+        # --- Implicit coupling: save checkpoint ---
+        if self.participant.requires_writing_checkpoint():
+            self._save_checkpoint(physics)
+
+        # 1. Update vertex positions from current MuJoCo state
+        self._update_vertex_positions(iteration, physics)
 
         # 2. Write displacement data to preCICE
         self.participant.write_data(
@@ -230,6 +294,13 @@ class PreCICEHandler:
         self.participant.advance(self.dt_precice)
         self.dt_precice = self.participant.get_max_time_step_size()
 
+        # --- Implicit coupling: reload checkpoint if not converged ---
+        if self.participant.requires_reading_checkpoint():
+            self._load_checkpoint(physics)
+        else:
+            # Converged — this time window is done, move to next iteration
+            self.iteration += 1
+
         # 4. Read force data from preCICE
         self.forces = self.participant.read_data(
             self.mesh_name,
@@ -238,15 +309,29 @@ class PreCICEHandler:
             self.dt_precice,
         )
 
-        # 5. Apply forces to MuJoCo
-        self.apply_forces(task, physics)
-
-        self.iteration += 1
+        # 5. Apply forces to MuJoCo (DISABLED — one-way coupling test)
+        # self.apply_forces(task, physics)
 
         if not self.participant.is_coupling_ongoing():
             self.terminate = True
             self.participant.finalize()
             logger.info("PreCICE coupling finalized.")
+
+    def _save_checkpoint(self, physics):
+        """Save MuJoCo state for implicit coupling rollback."""
+        self._checkpoint_qpos = physics.data.qpos.copy()
+        self._checkpoint_qvel = physics.data.qvel.copy()
+        self._checkpoint_positions = self.current_positions.copy()
+        self._checkpoint_iteration = self.iteration
+        logger.debug(f"Saved checkpoint at iteration {self.iteration}")
+
+    def _load_checkpoint(self, physics):
+        """Restore MuJoCo state for implicit coupling rollback."""
+        physics.data.qpos[:] = self._checkpoint_qpos
+        physics.data.qvel[:] = self._checkpoint_qvel
+        self.current_positions[:] = self._checkpoint_positions
+        self.iteration = self._checkpoint_iteration
+        logger.debug(f"Loaded checkpoint at iteration {self.iteration}")
 
     def finalize(self):
         """Clean up preCICE."""

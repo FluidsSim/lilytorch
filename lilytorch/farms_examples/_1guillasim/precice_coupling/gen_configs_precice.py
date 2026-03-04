@@ -33,11 +33,11 @@ stl_folder          = os.path.join(sdfs_path, '1guilla', 'meshes')
 # ============================================================================
 #  Simulation parameters
 # ============================================================================
-headless     = False
-fast         = False
+headless     = True
+fast         = True
 density      = 800.0
-timestep     = 0.0005
-n_iterations = 20001
+timestep     = 0.001
+n_iterations = 2001
 u_inlet      = 0.215971
 
 # Domain (matching BDIM for comparison)
@@ -260,37 +260,174 @@ def gen_simulation_config(output_folder):
 
 
 def gen_sh_config(output_folder):
-    sh_str = """#!/bin/bash
-set -e
+    # Embed source paths so run.sh can find plot scripts at runtime
+    _coupling_src = coupling_folder  # absolute path known at generation time
+
+    sh_str = f"""#!/bin/bash
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 OF_CASE="$SCRIPT_DIR/openfoam_case"
+PLOT_SRC="{_coupling_src}"
+PLOTTED_TIMES_FILE="$SCRIPT_DIR/.plotted_times"
+touch "$PLOTTED_TIMES_FILE"
 
 echo "=== Launching preCICE-coupled FARMS + OpenFOAM ==="
 
-# Start OpenFOAM participant in background
-echo "Starting OpenFOAM (pimpleFoam)..."
-cd "$OF_CASE"
-source /usr/lib/openfoam/openfoam2312/etc/bashrc
-pimpleFoam &
+# ---------------------------------------------------------------
+# Live-plot monitor: runs in background, watches for new timesteps
+# in processor0, reconstructs them, and generates 2D + 3D plots.
+# ---------------------------------------------------------------
+live_monitor() {{
+    echo "[monitor] Started — polling every 30s for new timesteps"
+    while true; do
+        sleep 30
+
+        # Discover timestep dirs that processor0 has written (exclude 0 and constant)
+        NEW_TIMES=""
+        if [ -d "$OF_CASE/processor0" ]; then
+            for TD in "$OF_CASE/processor0"/*/; do
+                TNAME=$(basename "$TD")
+                # Skip non-numeric, 0, constant
+                [[ "$TNAME" =~ ^[0-9] ]] || continue
+                [[ "$TNAME" == "0" ]] && continue
+                # Skip already done
+                grep -qxF "$TNAME" "$PLOTTED_TIMES_FILE" && continue
+                # Check it has U (i.e., complete write)
+                [ -f "$TD/U" ] || continue
+                NEW_TIMES="$NEW_TIMES $TNAME"
+            done
+        fi
+
+        [ -z "$NEW_TIMES" ] && continue
+
+        echo "[monitor] New timesteps detected:$NEW_TIMES"
+
+        # Reconstruct only the new times
+        bash -c "
+            source /usr/lib/openfoam/openfoam2312/etc/bashrc
+            for T in $NEW_TIMES; do
+                reconstructPar -case \\"$OF_CASE\\" -time \\$T > /dev/null 2>&1
+            done
+        "
+
+        # Generate plots for just these times
+        TIMES_ARGS=""
+        for T in $NEW_TIMES; do
+            TIMES_ARGS="$TIMES_ARGS $T"
+        done
+
+        if [ -f "$PLOT_SRC/plot_3d.py" ]; then
+            echo "[monitor] Vorticity top-view for:$TIMES_ARGS"
+            python3 "$PLOT_SRC/plot_3d.py" "$SCRIPT_DIR" --times $TIMES_ARGS 2>&1 | tail -5
+        fi
+
+        # Clean up reconstructed data to save disk space (plots already saved)
+        for T in $NEW_TIMES; do
+            rm -rf "$OF_CASE/$T"
+        done
+
+        # Mark these times as plotted
+        for T in $NEW_TIMES; do
+            echo "$T" >> "$PLOTTED_TIMES_FILE"
+        done
+    done
+}}
+
+# Start monitor in background
+live_monitor &
+MONITOR_PID=$!
+echo "Live-plot monitor running (PID $MONITOR_PID)"
+
+# Start OpenFOAM participant in a SEPARATE subshell so its environment
+# does not pollute the FARMS/Python process.
+# Both participants run from SCRIPT_DIR so preCICE sockets are in the same dir.
+echo "Starting OpenFOAM (pimpleFoam) on 24 MPI ranks..."
+bash -c "
+    source /usr/lib/openfoam/openfoam2312/etc/bashrc
+    export FOAM_SIGFPE=false
+    cd \\"$SCRIPT_DIR\\"
+    mpirun -np 24 --oversubscribe pimpleFoam -parallel -case \\"$OF_CASE\\" > \\"$OF_CASE/log.pimpleFoam\\" 2>&1
+" &
 OF_PID=$!
 
-# Start FARMS participant
+# Give OpenFOAM a moment to initialise preCICE and start listening
+sleep 3
+
+# Verify OpenFOAM is running
+if ! kill -0 $OF_PID 2>/dev/null; then
+    echo "ERROR: pimpleFoam died. Check $OF_CASE/log.pimpleFoam"
+    cat "$OF_CASE/log.pimpleFoam" 2>/dev/null | tail -20
+    kill $MONITOR_PID 2>/dev/null
+    exit 1
+fi
+echo "OpenFOAM running (PID $OF_PID)"
+
+# Start FARMS participant (inherits the original Python-friendly environment)
 echo "Starting FARMS..."
 cd "$SCRIPT_DIR"
-farmsim --experiment_config experiment_config.yaml "$@"
+MUJOCO_GL=egl farmsim --experiment_config experiment_config.yaml "$@"
+FARMS_EXIT=$?
 
 # Wait for OpenFOAM to finish
-wait $OF_PID
-echo "=== Coupling complete ==="
+wait $OF_PID || true
+echo "=== Coupling complete (FARMS exit code: $FARMS_EXIT) ==="
+
+# Stop the live monitor
+kill $MONITOR_PID 2>/dev/null
+wait $MONITOR_PID 2>/dev/null
+echo "Live monitor stopped."
+
+# ---- Final pass: plot any remaining timesteps the monitor missed ----
+echo "=== Final post-processing pass ==="
+bash -c "
+    source /usr/lib/openfoam/openfoam2312/etc/bashrc
+    reconstructPar -case \\"$OF_CASE\\" -newTimes 2>&1 | tail -5
+"
+
+if [ -f "$PLOT_SRC/plot_3d.py" ]; then
+    echo "  -> Final vorticity renders (if any remaining)..."
+    python3 "$PLOT_SRC/plot_3d.py" "$SCRIPT_DIR" 2>&1 | tail -10
+fi
+
+# Clean up any leftover reconstructed timestep dirs
+for D in "$OF_CASE"/*/; do
+    DNAME=$(basename "$D")
+    [[ "$DNAME" =~ ^[0-9] ]] || continue
+    [[ "$DNAME" == "0" ]] && continue
+    rm -rf "$D"
+done
+
+echo "=== All done. Figures in $SCRIPT_DIR/figures/ ==="
 """
     with open(os.path.join(output_folder, 'run.sh'), 'w') as f:
         f.write(sh_str)
 
 
 def gen_precice_case(output_folder):
-    """Copy the OpenFOAM case template and precice-config.xml into the output folder."""
+    """Copy the OpenFOAM case template and precice-config.xml into the output folder.
 
-    # Copy OpenFOAM case
+    The mesh (blockMesh + snappyHexMesh) is prepared once in the *template*
+    openfoam_case/ directory and cached there.  Subsequent runs detect the
+    existing polyMesh and skip the expensive meshing step entirely.
+    """
+
+    # --- Prepare mesh in template (cached) --------------------------------
+    template_polyMesh = os.path.join(openfoam_case_path, "constant", "polyMesh")
+    if not os.path.isdir(template_polyMesh) or not os.path.isfile(
+        os.path.join(template_polyMesh, "owner")
+    ):
+        print("  Preparing OpenFOAM mesh in template (one-time)...")
+        result = subprocess.run(
+            ['bash', 'prepare_mesh.sh', stl_folder],
+            cwd=openfoam_case_path, capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            print(f"  WARNING: Mesh preparation failed:\n{result.stderr}")
+        else:
+            print("  Template mesh prepared and cached.")
+    else:
+        print("  Using cached mesh from template (skipping blockMesh/snappyHexMesh).")
+
+    # --- Copy the (now-meshed) template into the output folder -------------
     dst_of_case = os.path.join(output_folder, "openfoam_case")
     if os.path.exists(dst_of_case):
         shutil.rmtree(dst_of_case)
@@ -299,22 +436,30 @@ def gen_precice_case(output_folder):
     # Copy precice-config.xml
     dst_xml = os.path.join(output_folder, "precice-config.xml")
     shutil.copy2(precice_config_path, dst_xml)
-    # OpenFOAM adapter looks for ../precice-config.xml
     shutil.copy2(precice_config_path, os.path.join(dst_of_case, "precice-config.xml"))
+
+    # Ensure 0/ has the boundary conditions (not just snappy leftovers)
+    dst_0 = os.path.join(dst_of_case, "0")
+    dst_0orig = os.path.join(dst_of_case, "0.orig")
+    if os.path.isdir(dst_0orig):
+        for f in os.listdir(dst_0orig):
+            shutil.copy2(os.path.join(dst_0orig, f), os.path.join(dst_0, f))
+
+    # --- Decompose mesh for parallel run --------------------------------
+    print("  Decomposing mesh for parallel run...")
+    result = subprocess.run(
+        ['bash', '-c',
+         'source /usr/lib/openfoam/openfoam2312/etc/bashrc && '
+         f'decomposePar -case {dst_of_case} -force'],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print(f"  WARNING: decomposePar failed:\n{result.stderr[-500:]}")
+    else:
+        print("  Mesh decomposed into 24 subdomains.")
 
     print(f"  Copied OpenFOAM case  → {dst_of_case}")
     print(f"  Copied preCICE config → {dst_xml}")
-
-    # Prepare the mesh
-    print("  Preparing OpenFOAM mesh (blockMesh + snappyHexMesh)...")
-    result = subprocess.run(
-        ['bash', 'prepare_mesh.sh', stl_folder],
-        cwd=dst_of_case, capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        print(f"  WARNING: Mesh preparation failed:\n{result.stderr}")
-    else:
-        print("  OpenFOAM mesh prepared successfully.")
 
 
 # ============================================================================
@@ -334,6 +479,7 @@ def single_run():
     gen_precice_case(output_folder)
 
     os.chdir(output_folder)
+    print(f"\n=== To run manually: cd {output_folder} && bash run.sh ===\n")
     subprocess.run(['bash', 'run.sh'])
 
 

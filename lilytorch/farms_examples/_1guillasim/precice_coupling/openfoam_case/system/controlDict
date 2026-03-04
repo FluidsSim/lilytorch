@@ -14,12 +14,12 @@ startTime       0;
 stopAt          endTime;
 endTime         10;
 
-deltaT          0.0005;
+deltaT          0.001;
 
-writeControl    adjustableRunTime;
-writeInterval   0.05;
+writeControl    timeStep;
+writeInterval   50;
 
-purgeWrite      0;
+purgeWrite      3;
 
 writeFormat     ascii;
 writePrecision  8;
@@ -54,25 +54,11 @@ functions
         CofR            (0 0 0);
     }
 
-    fieldAverage1
+    vorticity
     {
-        type            fieldAverage;
+        type            vorticity;
         libs            (fieldFunctionObjects);
         writeControl    writeTime;
-        fields
-        (
-            U
-            {
-                mean        on;
-                prime2Mean  on;
-                base        time;
-            }
-            p
-            {
-                mean        on;
-                prime2Mean  on;
-                base        time;
-            }
-        );
     }
+
 }

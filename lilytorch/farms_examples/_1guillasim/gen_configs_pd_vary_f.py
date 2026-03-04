@@ -16,8 +16,8 @@ data_folder       = os.path.join(lilytorch_repo_root, 'farms_examples', '_1guill
 bdim_handler_path = "lilytorch.farms_examples._1guillasim.BDIMhandler.BDIMhandler"
 
 nthreads = 16
-use_gpu  = False
-use_bdim = True
+use_gpu  = True
+use_bdim = False
 headless = False
 fast     = False
 
@@ -33,11 +33,11 @@ animats_pars = [
     "model_name"     : "1guilla",
     "sdf_name"       : "1guilla.sdf",
     "control_type"   : "position",
-    "gains"          : [20.0, 4.0, 0],
+    "gains"          : [100.0, 4.0, 0],
     "spawn_mode"     : SpawnMode.TRANSVERSE,
     "pose"           : [0, 0, 0, 0, 0, 3.141592653589793],
     "controller_path": "lilytorch.farms_examples._1guillasim.pd_controller.PositionController",
-    "control_pars"   : {'freq': 1, 'twl': 12, 'amp': 20.0},
+    "control_pars"   : {'freq': 1, 'twl': 12, 'amp': 30.0},
     },
 ]
 
@@ -48,6 +48,14 @@ xmin         = -0.9
 xmax         = 5.1
 ymin         = -1.5
 ymax         = 1.5
+
+
+# Nx           = 512
+# Ny           = 256
+# xmin         = -0.9
+# xmax         = 2.1
+# ymin         = -0.75
+# ymax         = 0.75
 
 
 
@@ -354,9 +362,9 @@ def gen_simulation_config(output_folder, index):
                 "body": {
                     "type"           : "multi_animat",
                     "sdf_folder"     : None,
-                    "plotting"       : False,
-                    "compute_interp" : False,
-                    "plotting_meshes": False,
+                    "plotting"       : True,
+                    "compute_interp" : True,
+                    "plotting_meshes": True,
                     "save_folder"    : os.path.join(data_folder, "interp_data"),
                     "n_samples"      : (2000, 2000),
                     "update_maps"    : {
