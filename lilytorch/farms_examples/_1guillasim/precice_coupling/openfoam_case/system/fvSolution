@@ -75,7 +75,7 @@ solvers
 
 PIMPLE
 {
-    nOuterCorrectors    2;
+    nOuterCorrectors    3;
     nCorrectors         1;
     nNonOrthogonalCorrectors 1;
 }

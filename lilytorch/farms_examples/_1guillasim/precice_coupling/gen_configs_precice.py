@@ -37,7 +37,7 @@ headless     = True
 fast         = True
 density      = 800.0
 timestep     = 0.001
-n_iterations = 2001
+n_iterations = 10001
 u_inlet      = 0.215971
 
 # Domain (matching BDIM for comparison)
@@ -219,7 +219,7 @@ def gen_simulation_config(output_folder):
         "extensions": [
             {
                 "loader": "farms_core.simulation.extensions.ExperimentLogger",
-                "config": {"log_path": os.path.join(output_folder, "output"), "skip": 0},
+                "config": {"log_path": os.path.join(output_folder, "output"), "skip": 199},
             },
             {
                 "loader": "farms_mujoco.simulation.extensions.MjcfSaver",
@@ -277,23 +277,32 @@ echo "=== Launching preCICE-coupled FARMS + OpenFOAM ==="
 # in processor0, reconstructs them, and generates 2D + 3D plots.
 # ---------------------------------------------------------------
 live_monitor() {{
-    echo "[monitor] Started — polling every 30s for new timesteps"
+    echo "[monitor] Started — polling every 5s for new timesteps"
     while true; do
-        sleep 30
+        sleep 5
 
-        # Discover timestep dirs that processor0 has written (exclude 0 and constant)
+# Discover timestep dirs that processor0 has written
         NEW_TIMES=""
+        BATCH_COUNT=0
+        MAX_BATCH=5
+
         if [ -d "$OF_CASE/processor0" ]; then
-            for TD in "$OF_CASE/processor0"/*/; do
+            # Use ls -v to sort numerically (0.1, 0.2, ... 10.0)
+            for TD in $(ls -dv "$OF_CASE/processor0"/*/ 2>/dev/null); do
                 TNAME=$(basename "$TD")
-                # Skip non-numeric, 0, constant
+
+                # Validation checks
                 [[ "$TNAME" =~ ^[0-9] ]] || continue
-                [[ "$TNAME" == "0" ]] && continue
-                # Skip already done
                 grep -qxF "$TNAME" "$PLOTTED_TIMES_FILE" && continue
-                # Check it has U (i.e., complete write)
                 [ -f "$TD/U" ] || continue
+
                 NEW_TIMES="$NEW_TIMES $TNAME"
+
+                # Limit batch size to prevent disk saturation
+                BATCH_COUNT=$((BATCH_COUNT+1))
+                if [ "$BATCH_COUNT" -ge "$MAX_BATCH" ]; then
+                    break
+                fi
             done
         fi
 
@@ -301,28 +310,29 @@ live_monitor() {{
 
         echo "[monitor] New timesteps detected:$NEW_TIMES"
 
-        # Reconstruct only the new times
-        bash -c "
+        # Format times as comma-separated list for batch processing
+        # Clean leading space if present, then replace spaces with commas
+        CLEAN_TIMES=$(echo $NEW_TIMES | xargs | tr ' ' ',')
+
+        # Reconstruct ALL new times in one go to save mesh loading time
+        # Run with lowest priority (nice -n 19) to prioritize simulation
+        nice -n 19 bash -c "
             source /usr/lib/openfoam/openfoam2312/etc/bashrc
-            for T in $NEW_TIMES; do
-                reconstructPar -case \\"$OF_CASE\\" -time \\$T > /dev/null 2>&1
-            done
+            reconstructPar -case \\"$OF_CASE\\" -time \\"$CLEAN_TIMES\\" > /dev/null 2>&1
         "
 
-        # Generate plots for just these times
-        TIMES_ARGS=""
-        for T in $NEW_TIMES; do
-            TIMES_ARGS="$TIMES_ARGS $T"
-        done
-
+        # Generate plots for these times (also low priority)
         if [ -f "$PLOT_SRC/plot_3d.py" ]; then
-            echo "[monitor] Vorticity top-view for:$TIMES_ARGS"
-            python3 "$PLOT_SRC/plot_3d.py" "$SCRIPT_DIR" --times $TIMES_ARGS 2>&1 | tail -5
+            echo "[monitor] Vorticity top-view for times: $CLEAN_TIMES"
+            nice -n 19 /data/andreaferrario/venv_ns_312/bin/python "$PLOT_SRC/plot_3d.py" "$SCRIPT_DIR" --times $NEW_TIMES 2>&1 | tail -5
         fi
 
         # Clean up reconstructed data to save disk space (plots already saved)
         for T in $NEW_TIMES; do
-            rm -rf "$OF_CASE/$T"
+            # Preserve initial conditions (0)
+            if [ "$T" != "0" ]; then
+                rm -rf "$OF_CASE/$T"
+            fi
         done
 
         # Mark these times as plotted
@@ -333,9 +343,10 @@ live_monitor() {{
 }}
 
 # Start monitor in background
-live_monitor &
-MONITOR_PID=$!
-echo "Live-plot monitor running (PID $MONITOR_PID)"
+# live_monitor &
+# MONITOR_PID=$!
+# echo "Live-plot monitor running (PID $MONITOR_PID)"
+echo "Live plotting DISABLED to save resources."
 
 # Start OpenFOAM participant in a SEPARATE subshell so its environment
 # does not pollute the FARMS/Python process.
@@ -364,7 +375,9 @@ echo "OpenFOAM running (PID $OF_PID)"
 # Start FARMS participant (inherits the original Python-friendly environment)
 echo "Starting FARMS..."
 cd "$SCRIPT_DIR"
-MUJOCO_GL=egl farmsim --experiment_config experiment_config.yaml "$@"
+# Force EGL for headless rendering on clusters
+export MUJOCO_GL=egl
+/data/andreaferrario/venv_ns_312/bin/farmsim --experiment_config experiment_config.yaml "$@"
 FARMS_EXIT=$?
 
 # Wait for OpenFOAM to finish
@@ -372,9 +385,11 @@ wait $OF_PID || true
 echo "=== Coupling complete (FARMS exit code: $FARMS_EXIT) ==="
 
 # Stop the live monitor
-kill $MONITOR_PID 2>/dev/null
-wait $MONITOR_PID 2>/dev/null
-echo "Live monitor stopped."
+if [ ! -z "$MONITOR_PID" ]; then
+    kill $MONITOR_PID 2>/dev/null
+    wait $MONITOR_PID 2>/dev/null
+    echo "Live monitor stopped."
+fi
 
 # ---- Final pass: plot any remaining timesteps the monitor missed ----
 echo "=== Final post-processing pass ==="
@@ -412,10 +427,19 @@ def gen_precice_case(output_folder):
 
     # --- Prepare mesh in template (cached) --------------------------------
     template_polyMesh = os.path.join(openfoam_case_path, "constant", "polyMesh")
-    if not os.path.isdir(template_polyMesh) or not os.path.isfile(
-        os.path.join(template_polyMesh, "owner")
-    ):
+    boundary_file = os.path.join(template_polyMesh, "boundary")
+    mesh_ready = False
+    if os.path.isfile(boundary_file):
+        with open(boundary_file, 'r') as f:
+            if "swimmer" in f.read():
+                mesh_ready = True
+
+    if not mesh_ready:
         print("  Preparing OpenFOAM mesh in template (one-time)...")
+        # Ensure clean state
+        if os.path.exists(template_polyMesh):
+            shutil.rmtree(template_polyMesh)
+
         result = subprocess.run(
             ['bash', 'prepare_mesh.sh', stl_folder],
             cwd=openfoam_case_path, capture_output=True, text=True,
@@ -425,7 +449,7 @@ def gen_precice_case(output_folder):
         else:
             print("  Template mesh prepared and cached.")
     else:
-        print("  Using cached mesh from template (skipping blockMesh/snappyHexMesh).")
+        print("  Using cached mesh from template.")
 
     # --- Copy the (now-meshed) template into the output folder -------------
     dst_of_case = os.path.join(output_folder, "openfoam_case")

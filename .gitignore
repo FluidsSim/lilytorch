@@ -46,10 +46,14 @@ farms_mujoco/
 
 Output/
 
-# OpenFOAM generated files
+# OpenFOAM generated files (do NOT commit)
 **/constant/polyMesh/
 **/constant/triSurface/
 **/openfoam_case/0/
+processor*/
+postProcessing/
+VTK/
+log.*
 
 # Cython generated C files (but keep source files)
 *.c

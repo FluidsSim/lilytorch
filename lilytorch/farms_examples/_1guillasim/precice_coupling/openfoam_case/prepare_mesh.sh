@@ -25,6 +25,11 @@ echo "  Case dir  : $CASE_DIR"
 
 cd "$CASE_DIR"
 
+# Cleanup previous mesh/fields to avoid size mismatches
+rm -rf constant/polyMesh
+rm -rf 0
+mkdir -p 0
+
 # --- 1. Merge link STLs into a single triSurface file ---
 mkdir -p constant/triSurface
 
