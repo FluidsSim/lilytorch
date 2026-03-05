@@ -1,0 +1,155 @@
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    object      snappyHexMeshDict;
+}
+
+castellatedMesh true;
+snap            true;
+addLayers       false;
+
+geometry
+{
+    swimmer.stl
+    {
+        type triSurfaceMesh;
+        name swimmer;
+    }
+
+    // Refinement box around the wake region
+    // Swimmer is at x=[-0.83, -0.23], z=0.2
+    refinementBox
+    {
+        type searchableBox;
+        min (-0.9  -0.1  0.1);
+        max ( 1.5   0.1  0.3);
+    }
+
+    // Finer refinement in the near-wake to resolve vortex shedding
+    wakeBox
+    {
+        type searchableBox;
+        min (-0.85  -0.06  0.14);
+        max ( 1.2    0.06  0.26);
+    }
+};
+
+castellatedMeshControls
+{
+    maxLocalCells       4000000;
+    maxGlobalCells      30000000;
+    minRefinementCells  10;
+    maxLoadUnbalance    0.10;
+    nCellsBetweenLevels 3;
+
+    features
+    (
+    );
+
+    refinementSurfaces
+    {
+        swimmer
+        {
+            level (3 4);
+
+            patchInfo
+            {
+                type wall;
+            }
+        }
+    }
+
+    resolveFeatureAngle 30;
+
+    refinementRegions
+    {
+        refinementBox
+        {
+            mode inside;
+            levels ((1e15 1));
+        }
+        wakeBox
+        {
+            mode inside;
+            levels ((1e15 2));
+        }
+    }
+
+    // Location in mesh (must be OUTSIDE the swimmer body)
+    locationInMesh (0.5 0.2 0.2);
+
+    allowFreeStandingZoneFaces true;
+}
+
+snapControls
+{
+    nSmoothPatch    3;
+    tolerance       2.0;
+    nSolveIter      100;
+    nRelaxIter      5;
+    nFeatureSnapIter 10;
+
+    implicitFeatureSnap false;
+    explicitFeatureSnap true;
+    multiRegionFeatureSnap false;
+}
+
+addLayersControls
+{
+    relativeSizes true;
+
+    layers
+    {
+        swimmer
+        {
+            nSurfaceLayers 2;
+        }
+    }
+
+    expansionRatio      1.2;
+    finalLayerThickness 0.3;
+    minThickness        0.1;
+    nGrow               0;
+    featureAngle        60;
+    nRelaxIter          3;
+    nSmoothSurfaceNormals 1;
+    nSmoothNormals      3;
+    nSmoothThickness    10;
+    maxFaceThicknessRatio 0.5;
+    maxThicknessToMedialRatio 0.3;
+    minMedialAxisAngle  90;
+    nBufferCellsNoExtrude 0;
+    nLayerIter          50;
+}
+
+meshQualityControls
+{
+    maxNonOrtho         65;
+    maxBoundarySkewness 20;
+    maxInternalSkewness 4;
+    maxConcave          80;
+    minVol              1e-13;
+    minTetQuality       1e-15;
+    minArea             -1;
+    minTwist            0.05;
+    minDeterminant      0.001;
+    minFaceWeight       0.05;
+    minVolRatio         0.01;
+    minTriangleTwist    -1;
+
+    nSmoothScale        4;
+    errorReduction      0.75;
+}
+
+writeFlags
+(
+    scalarLevels
+    layerSets
+    layerFields
+);
+
+debug 0;
+
+mergeTolerance 1e-6;

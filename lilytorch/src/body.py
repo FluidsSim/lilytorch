@@ -1168,7 +1168,7 @@ class BodyMesh(Body):
         self.update_translation  = update_maps[1]
         self.suit                = suit
         self.plotting            = plotting_meshes
-        self.apply_closing_morph = kwargs.pop("apply_closing_morph", True)
+        self.apply_closing_morph = kwargs.pop("apply_closing_morph", False)
         self.m2s                 = mesh2sdf(
             mesh_file,
             convexify=kwargs.pop("convexify", True),
@@ -1306,14 +1306,11 @@ class BodyMesh(Body):
             print("Computing the sdf for {}, with space steps ({},{})".format(self.mesh_file,xnp[1]-xnp[0],ynp[1]-ynp[0]))
             sdf_val = skfmm.distance(binary_2d, dx=[dx,dy])-self.suit
 
-            # sdf_val = cv2.GaussianBlur(sdf_val, (5, 5), 0)
-
-
             ######################## Contour computation ########################
 
             # find contour lines
-            # cnt = np.array(measure.find_contours(sdf_val, 0)[0]).T
-            cnt = np.array(measure.find_contours(sdf_val-self.eps, 0)[0]).T
+            cnt = np.array(measure.find_contours(sdf_val, 0)[0]).T
+            # cnt = np.array(measure.find_contours(sdf_val-self.eps, 0)[0]).T
             cnt[0]=xnp[0]+cnt[0]*(xnp[1]-xnp[0])
             cnt[1]=ynp[0]+cnt[1]*(ynp[1]-ynp[0])
             curv_coord = np.concatenate(([0], np.cumsum(np.sqrt(np.sum(np.diff(cnt, axis=1)**2, axis=0)))))
