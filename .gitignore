@@ -44,3 +44,5 @@ farms_sim/
 farms_mujoco/
 
 Output/
+
+precice_coupling/
