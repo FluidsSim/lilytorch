@@ -165,7 +165,7 @@ def compute_inertias_2d(sdf_fun, inside_mask, x, y, x_g, y_g, density=1000.0):
 
 
 
-def body_from_yaml(device, x, y, body_pars, eps=0.05, costum_update=None, starting_time=0, z=None, **kwargs):
+def body_from_yaml(device, x, y, body_pars, eps=0.05, costum_update=None, starting_time=0, **kwargs):
 
     if costum_update is not None:
         update_map = costum_update
@@ -174,18 +174,15 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, costum_update=None, starti
     if type == "analytical":
         sdf_fun = eval(body_pars["sdf"])
         plotting=body_pars["plotting"]
-        transl_strs = update_maps["translation"]
-        transl = tuple(eval(s) for s in transl_strs)
         update_map = (
             eval(update_maps["rotation"]),
-            transl
+            (eval(update_maps["translation"][0]),eval(update_maps["translation"][1]))
         )
         return BodyAnalytical(
             device,
             x, y,
             sdf_fun,
             update_map,
-            z=z,
             eps=eps,
             plotting=plotting
         )
@@ -200,10 +197,9 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, costum_update=None, starti
             [
                 (
                     eval(update_map["rotation"]),
-                    tuple(eval(s) for s in update_map["translation"])
+                    (eval(update_map["translation"][0]),eval(update_map["translation"][1]))
                 ) for update_map in update_maps
             ],
-            z=z,
             eps=eps,
             plotting=plotting
         )
@@ -445,50 +441,28 @@ class COMPOSITEmesh2sdf():
 
 class Body:
 
-    def __init__(self, device, x, y, z=None, eps=0.05):
-        """Base class for immersed bodies on a MAC staggered grid.
-
-        Works in 2-D (z is None) or 3-D (z is a 1-D tensor).
+    def __init__(self, device, x, y, eps=0.05):
         """
-        self.device = device
-        self.dtype  = x.dtype
-        self.h      = float(x[1] - x[0])
-        self.eps    = eps
 
-        # ---- dimensionality -------------------------------------------
-        self.x = x
-        self.y = y
-        self.z = z
-        self.nx = len(x)
-        self.ny = len(y)
-        self.ndim = 2 if z is None else 3
+        """
+        self.device=device
+        self.dtype = x.dtype
 
-        if z is not None:
-            self.nz = len(z)
+        self.x   = x
+        self.y   = y
+        self.h = float(x[1]-x[0])
 
-        # ---- cell-centre meshgrid -------------------------------------
-        if self.ndim == 2:
-            self.X, self.Y = torch.meshgrid(x, y, indexing="ij")
-            self.grid_shape = (self.nx, self.ny)
-        else:
-            self.X, self.Y, self.Z_grid = torch.meshgrid(x, y, z, indexing="ij")
-            self.grid_shape = (self.nx, self.ny, self.nz)
+        self.X, self.Y = torch.meshgrid(x,y,indexing="ij")
+        self.x_stag = self.x-self.h/2
+        self.y_stag = self.y-self.h/2
+        [self.Xu_stag, self.Yu_stag] = torch.meshgrid(self.x_stag, self.y, indexing="ij")
+        [self.Xv_stag, self.Yv_stag] = torch.meshgrid(self.x, self.y_stag, indexing="ij")
 
-        # ---- staggered grids ------------------------------------------
-        self.x_stag = x - self.h / 2
-        self.y_stag = y - self.h / 2
+        self.nx  = len(x)
+        self.ny  = len(y)
+        self.eps = eps
+        self.dtype = x.dtype
 
-        if self.ndim == 2:
-            self.Xu_stag, self.Yu_stag = torch.meshgrid(self.x_stag, y, indexing="ij")
-            self.Xv_stag, self.Yv_stag = torch.meshgrid(x, self.y_stag, indexing="ij")
-        else:
-            self.z_stag = z - self.h / 2
-            self.Xu_stag, self.Yu_stag, self.Zu_stag = torch.meshgrid(self.x_stag, y, z, indexing="ij")
-            self.Xv_stag, self.Yv_stag, self.Zv_stag = torch.meshgrid(x, self.y_stag, z, indexing="ij")
-            self.Xw_stag, self.Yw_stag, self.Zw_stag = torch.meshgrid(x, y, self.z_stag, indexing="ij")
-
-        # ---- flattened coordinate stacks ------------------------------
-        n_pts = int(torch.tensor(self.grid_shape).prod().item())
         self.xflat = self.X.flatten()
         self.yflat = self.Y.flatten()
 
@@ -497,84 +471,79 @@ class Body:
         self.xv_stag_flat = self.Xv_stag.flatten()
         self.yv_stag_flat = self.Yv_stag.flatten()
 
-        if self.ndim == 2:
-            self.stacked_xy   = torch.stack((self.xflat, self.yflat))
-            self.stacked_xy_u = torch.stack((self.xu_stag_flat, self.yu_stag_flat))
-            self.stacked_xy_v = torch.stack((self.xv_stag_flat, self.yv_stag_flat))
-        else:
-            self.zflat = self.Z_grid.flatten()
-            self.zu_stag_flat = self.Zu_stag.flatten()
-            self.zv_stag_flat = self.Zv_stag.flatten()
-            self.zw_stag_flat = self.Zw_stag.flatten()
-            self.xw_stag_flat = self.Xw_stag.flatten()
-            self.yw_stag_flat = self.Yw_stag.flatten()
+        self.stacked_xy = torch.stack((self.xflat,self.yflat))
+        self.stacked_xy_u = torch.stack((self.xu_stag_flat,self.yu_stag_flat))
+        self.stacked_xy_v = torch.stack((self.xv_stag_flat,self.yv_stag_flat))
 
-            self.stacked_xy   = torch.stack((self.xflat, self.yflat, self.zflat))
-            self.stacked_xy_u = torch.stack((self.xu_stag_flat, self.yu_stag_flat, self.zu_stag_flat))
-            self.stacked_xy_v = torch.stack((self.xv_stag_flat, self.yv_stag_flat, self.zv_stag_flat))
-            self.stacked_xy_w = torch.stack((self.xw_stag_flat, self.yw_stag_flat, self.zw_stag_flat))
 
-        self.ones_stacked = torch.ones(n_pts, device=self.device, dtype=self.dtype)
+        self.ones_stacked=torch.ones((self.nx*self.ny),device=self.device,dtype=self.dtype)
 
-        # ---- body velocity fields / SDF --------------------------------
-        self.sdf    = torch.zeros(self.grid_shape, device=self.device, dtype=self.dtype)
-        self.body_u = torch.zeros(self.grid_shape, device=self.device, dtype=self.dtype)
-        self.body_v = torch.zeros(self.grid_shape, device=self.device, dtype=self.dtype)
-        if self.ndim == 3:
-            self.body_w = torch.zeros(self.grid_shape, device=self.device, dtype=self.dtype)
-
+        # body velocities
+        self.sdf = torch.zeros((self.nx,self.ny),device=self.device,dtype=self.dtype)
+        self.body_u = torch.zeros((self.nx,self.ny),device=self.device,dtype=self.dtype)
+        self.body_v = torch.zeros((self.nx,self.ny),device=self.device,dtype=self.dtype)
         self.old_points = self.stacked_xy.clone().detach()
-        self.rad_conv   = (torch.pi / 180)
+        self.rad_conv = (torch.pi/180)
 
 
     def compute_sdf_properties(self, sdf_val):
-        """Compute gradient and curvature of an SDF field (2-D or 3-D).
 
-        Returns
-        -------
-        2-D: (sdf_val, gradx, grady, curvature)
-        3-D: (sdf_val, gradx, grady, gradz, curvature)
-        """
-        ndim = sdf_val.ndim
-        spacing = [self.h] * ndim
+        (gradx, grady) = torch.gradient(sdf_val, spacing=[self.h, self.h], edge_order=2)
+        norm = torch.sqrt(gradx**2+grady**2)
 
-        grads = torch.gradient(sdf_val, spacing=spacing, edge_order=2)
-        norm = torch.sqrt(sum(g ** 2 for g in grads))
+        # curvature=torch.where(
+        #     norm>0,
+        #     (torch.gradient(gradx, spacing=self.h, axis=0, edge_order=2)[0]*grady-
+        #      torch.gradient(grady, spacing=self.h, axis=1, edge_order=2)[0]*gradx)/
+        #     norm**3,
+        #     0
+        # )
 
-        if ndim == 2:
-            gradx, grady = grads
-            # 2-D curvature:  κ = (φ_yy φ_x² − 2φ_xy φ_x φ_y + φ_xx φ_y²) / |∇φ|³
-            numerator = (
-                (grady ** 2) * torch.gradient(gradx, spacing=self.h, axis=0, edge_order=2)[0]
-                + (gradx ** 2) * torch.gradient(grady, spacing=self.h, axis=1, edge_order=2)[0]
-                - 2 * gradx * grady * torch.gradient(grady, spacing=self.h, axis=0)[0]
-            )
-            denominator = norm ** 3
-            curvature = torch.where(denominator > 0, numerator / denominator, 0)
+        # curvature = (d2x_dt2 * dy_dt - dx_dt * d2y_dt2) / (dx_dt * dx_dt + dy_dt * dy_dt)**1.5
 
-            # normalise
-            gradx = torch.where(norm > 0, gradx / norm, 0)
-            grady = torch.where(norm > 0, grady / norm, 0)
-            return (sdf_val, gradx, grady, curvature)
 
-        else:  # 3-D
-            gradx, grady, gradz = grads
-            # 3-D mean curvature via div(∇φ/|∇φ|)
-            # κ = div(n)  where n = ∇φ/|∇φ|
-            nx = torch.where(norm > 0, gradx / norm, 0)
-            ny = torch.where(norm > 0, grady / norm, 0)
-            nz = torch.where(norm > 0, gradz / norm, 0)
-            curvature = (
-                torch.gradient(nx, spacing=self.h, axis=0, edge_order=2)[0]
-                + torch.gradient(ny, spacing=self.h, axis=1, edge_order=2)[0]
-                + torch.gradient(nz, spacing=self.h, axis=2, edge_order=2)[0]
-            )
+        # compute curvature
+        numerator = (
+            (grady**2)*torch.gradient(gradx, spacing=self.h, axis=0, edge_order=2)[0]+
+            (gradx**2)*torch.gradient(grady, spacing=self.h, axis=1, edge_order=2)[0]+
+            -2*gradx*grady*torch.gradient(grady, spacing=self.h, axis=0)[0]
+        )
+        denominator = norm**3
+        curvature = torch.where(denominator>0, numerator/denominator, 0)
 
-            # normalise
-            gradx = torch.where(norm > 0, gradx / norm, 0)
-            grady = torch.where(norm > 0, grady / norm, 0)
-            gradz = torch.where(norm > 0, gradz / norm, 0)
-            return (sdf_val, gradx, grady, gradz, curvature)
+
+
+        # # compute curvature
+        # numerator = (
+        #     (grady**2)*torch.gradient(gradx, spacing=self.h, axis=0)[0]+
+        #     (gradx**2)*torch.gradient(grady, spacing=self.h, axis=1)[0]+
+        #     -2*gradx*grady*torch.gradient(grady, spacing=self.h, axis=0)[0]
+        # )
+        # denominator = norm**3
+        # curvature = torch.where(denominator>0, numerator/denominator, 0)
+
+
+        # dx_dt   = np.gradient(com_x)
+        # dy_dt   = np.gradient(com_y)
+        # d2x_dt2 = np.gradient(dx_dt)
+        # d2y_dt2 = np.gradient(dy_dt)
+        # curvature = (d2x_dt2 * dy_dt - dx_dt * d2y_dt2) / (dx_dt * dx_dt + dy_dt * dy_dt)**1.5
+
+
+        # numerator = torch.gradient(gradx, dim=0, spacing=self.h)[0]+torch.gradient(grady, dim=1, spacing=self.h)[0]
+        # denominator = (gradx**2+grady**2)**1.5
+
+        # normalize gradients
+        gradx=torch.where(norm>0, gradx/norm, 0)
+        grady=torch.where(norm>0, grady/norm, 0)
+
+
+        return (
+            sdf_val,
+            gradx,
+            grady,
+            curvature,
+        )
 
     def phi(self,d):
         # return 0.5+0.5*torch.cos(torch.pi*d.clamp(-1,1))
@@ -611,339 +580,234 @@ class Body:
 
 class BodyAnalytical(Body):
 
-    def __init__(self, device, x, y, sdf, update_maps, z=None, eps=0.05, plotting=False, pre_update=True):
-        super().__init__(device, x, y, z=z, eps=eps)
+    def __init__(self, device, x, y, sdf, update_maps, eps=0.05, plotting=False, pre_update=True):
+        super().__init__(device, x, y, eps=eps)
         self.sdf = sdf
         self.update_theta = update_maps[0]
         self.update_translation = update_maps[1]
         self.plotting = plotting
-        self.body = self
+        self.body=self
         self.pre_update = pre_update
         self.initialize()
-        self.rad_conv = (torch.pi / 180)
+        self.rad_conv = (torch.pi/180)
 
-    # ------------------------------------------------------------------
-    # Initialisation
-    # ------------------------------------------------------------------
     def initialize(self):
-        """Compute initial contour (2-D only) and SDF."""
+        """
+        Initialize sdf properties at time 0
+        """
 
-        if self.ndim == 2:
-            self._initialize_2d()
-        else:
-            self._initialize_3d()
+        ####### initial sdf at cc nodes to compute contour
+        xmid=(self.x.min()+self.x.max())/2
+        ymid=(self.y.min()+self.y.max())/2
+        xcnt = self.x-xmid
+        ycnt = self.y-ymid
 
-    def _initialize_2d(self):
-        """2-D initialisation: find contour, resample, set up arrays."""
-        xmid = (self.x.min() + self.x.max()) / 2
-        ymid = (self.y.min() + self.y.max()) / 2
-        xcnt = self.x - xmid
-        ycnt = self.y - ymid
-
-        X, Y = torch.meshgrid(xcnt, ycnt, indexing="ij")
+        X,Y= torch.meshgrid(xcnt, ycnt,indexing="ij")
         sdf_cnt = self.sdf(X, Y)
 
-        sdf_np = sdf_cnt.cpu().numpy()
+        # pos_u = (self.stacked_xy[0]).reshape(self.nx, self.ny)
+        # pos_v = (self.stacked_xy[1]).reshape(self.nx, self.ny)
+        # self.sdf = self.sdf(pos_u, pos_v)
+
+        # # compute sdf at init
+        # (trans, rot) = self.rototranslate_points(torch.tensor(0.0))
+        # translpoints=self.stacked_xy-trans
+        # newpoints_u=rot.T@translpoints
+        # newpos_u = newpoints_u[0].reshape(self.nx, self.ny)
+        # newpos_v = newpoints_u[1].reshape(self.nx, self.ny)
+        # self.sdf_val = self.sdf(newpos_u, newpos_v)
+
+        # compute sdf at location (0,0)
+
+        # find contour lines
+        sdf_np=sdf_cnt.cpu().numpy()
         xnp = xcnt.cpu().numpy()
         ynp = ycnt.cpu().numpy()
 
-        cnt = np.array(measure.find_contours(sdf_np - self.h, 0)[0]).T
-        cnt[0] = xnp[0] + cnt[0] * (xnp[1] - xnp[0])
-        cnt[1] = ynp[0] + cnt[1] * (ynp[1] - ynp[0])
+        # cnt = np.array(measure.find_contours(sdf_np, 0)[0]).T
+        cnt = np.array(measure.find_contours(sdf_np-self.h, 0)[0]).T
+        cnt[0]=xnp[0]+cnt[0]*(xnp[1]-xnp[0])
+        cnt[1]=ynp[0]+cnt[1]*(ynp[1]-ynp[0])
 
-        ds = self.h
+        curv_coord = np.cumsum(np.sqrt(np.sum(np.diff(cnt, axis=1)**2, axis=0)))
+
+        # # resample contour lines for uniform spacing with spacing self.h
+        ds=self.h #0.5*torch.sqrt(torch.tensor(self.h**2+self.h**2))
+        # x, y, s_uniform = self.resample_contour(cnt[0], cnt[1], spacing=ds, closed=True)
         x, y, s_uniform = resample_contour(cnt[0], cnt[1], spacing=ds, closed=True)
         del cnt
-        cnt = np.array([x, y])
+        cnt=np.array([x, y])
 
+        # Compute ds and cumulative s
         dx = np.diff(x)
         dy = np.diff(y)
-        ds = np.sqrt(dx ** 2 + dy ** 2)
+        ds = np.sqrt(dx**2 + dy**2)
         curv_coord = np.concatenate(([0], np.cumsum(ds)))
+        # curv_coord = np.cumsum(np.sqrt(np.sum(np.diff(cnt, axis=1)**2, axis=0)))
+
+
+        # curv_coord = s_uniform
 
         self.curv_coord = torch.from_numpy(curv_coord).type(self.dtype).to(self.device)
-        self.cnt = torch.from_numpy(cnt).type(self.dtype).to(self.device)
+        self.cnt        = torch.from_numpy(cnt).type(self.dtype).to(self.device)
         self.cnt_update = self.cnt.clone().detach()
-        self.ds = self.curv_coord[1] - self.curv_coord[0]
+        self.ds = self.curv_coord[1]-self.curv_coord[0]
 
         if self.plotting:
+
             plt.imshow(
                 sdf_np.T,
                 extent=(
                     torch.min(self.x.cpu()), torch.max(self.x.cpu()),
                     torch.min(self.y.cpu()), torch.max(self.y.cpu())
                 ),
-                origin="lower", cmap="Greys",
+                origin="lower",
+                cmap="Greys"
             )
             plt.colorbar()
+
+            # Plot cnt as scatter with color given by a colormap
             cmap = cm.get_cmap('RdBu')
+            n_points = self.cnt_update.shape[1]
+            colors = cmap(np.linspace(0, 1, n_points))
             plt.plot(self.cnt_update[0].cpu(), self.cnt_update[1].cpu())
             plt.show()
 
-        self.cnt_u = torch.zeros_like(self.cnt_update[0])
-        self.cnt_v = torch.zeros_like(self.cnt_update[1])
-        self.cnt_f_u = torch.zeros_like(self.cnt_update[0])
-        self.cnt_f_v = torch.zeros_like(self.cnt_update[1])
-        self.cnt_int_f_u = torch.zeros_like(self.cnt_update[0])
-        self.cnt_int_f_v = torch.zeros_like(self.cnt_update[1])
+
+        self.cnt_u=torch.zeros_like(self.cnt_update[0])
+        self.cnt_v=torch.zeros_like(self.cnt_update[1])
+
+        self.cnt_f_u=torch.zeros_like(self.cnt_update[0])
+        self.cnt_f_v=torch.zeros_like(self.cnt_update[1])
+        self.cnt_int_f_u=torch.zeros_like(self.cnt_update[0])
+        self.cnt_int_f_v=torch.zeros_like(self.cnt_update[1])
         self.mask = torch.arange(len(self.curv_coord), device=self.device)
-        self.com_pos = torch.zeros(2, device=self.device, dtype=self.dtype)
-
+        self.com_pos = torch.zeros((2), device=self.device, dtype=self.dtype)
         if self.pre_update:
-            self.update(torch.tensor(0.0), 0, update_cnt=False)
+            self.update(torch.tensor(0.0),0, update_cnt=False)
 
-    def _initialize_3d(self):
-        """3-D initialisation: no contour; just set up placeholder arrays."""
-        # 3-D bodies don't have 1-D contour representations.
-        # We set minimal stubs so that solver code doesn't crash
-        # when checking for these attributes.
-        self.cnt = torch.zeros((3, 1), device=self.device, dtype=self.dtype)
-        self.cnt_update = self.cnt.clone().detach()
-        self.curv_coord = torch.tensor([0, 1], device=self.device, dtype=self.dtype)
-        self.ds = self.curv_coord[1] - self.curv_coord[0]
-        self.cnt_u = torch.zeros(1, device=self.device, dtype=self.dtype)
-        self.cnt_v = torch.zeros(1, device=self.device, dtype=self.dtype)
-        self.cnt_w = torch.zeros(1, device=self.device, dtype=self.dtype)
-        self.cnt_f_u = torch.zeros(1, device=self.device, dtype=self.dtype)
-        self.cnt_f_v = torch.zeros(1, device=self.device, dtype=self.dtype)
-        self.cnt_f_w = torch.zeros(1, device=self.device, dtype=self.dtype)
-        self.cnt_int_f_u = torch.zeros(1, device=self.device, dtype=self.dtype)
-        self.cnt_int_f_v = torch.zeros(1, device=self.device, dtype=self.dtype)
-        self.cnt_int_f_w = torch.zeros(1, device=self.device, dtype=self.dtype)
-        self.mask = torch.arange(1, device=self.device)
-        self.com_pos = torch.zeros(3, device=self.device, dtype=self.dtype)
 
-        if self.pre_update:
-            self.update(torch.tensor(0.0), 0, update_cnt=False)
+        return
 
-    # ------------------------------------------------------------------
-    # Roto-translation
-    # ------------------------------------------------------------------
+
     def rototranslate_points(self, t):
-        """Build rotation matrix and translation broadcast vector.
-
-        2-D: scalar theta  → 2×2 rotation, (2, N) translation
-        3-D: update_theta returns (θx, θy, θz) Euler angles (deg)
-             → 3×3 rotation Rz·Ry·Rx, (3, N) translation
         """
-        if self.ndim == 2:
-            transl = torch.tensor([
-                self.update_translation[0](t),
-                self.update_translation[1](t),
-            ], device=self.device, dtype=self.dtype)
+        Apply rototranslation and update the sdf properties
+        Assumes that the rotations happen around the origin of the reference frame (i.e. the center of rotation is (0,0))
+        This simply means that com=[transl[0], transl[1]]
+        """
 
-            theta = self.rad_conv * torch.tensor(
-                self.update_theta(t), device=self.device, dtype=self.dtype
+        transl = torch.tensor([
+            self.update_translation[0](t),
+            self.update_translation[1](t)
+        ], device=self.device, dtype=self.dtype)
+
+        theta = self.rad_conv*(
+            torch.tensor(
+                self.update_theta(t),
+                device=self.device, dtype=self.dtype
             )
-            self.com_pos = transl
+        )
 
-            s, c = torch.sin(theta), torch.cos(theta)
-            rot = torch.stack([torch.stack([c, -s]),
-                               torch.stack([s, c])])
-            trans = torch.stack((transl[0] * self.ones_stacked,
-                                 transl[1] * self.ones_stacked))
-            return (trans, rot)
+        self.com_pos = transl
 
-        else:  # 3-D
-            transl = torch.tensor([
-                self.update_translation[0](t),
-                self.update_translation[1](t),
-                self.update_translation[2](t),
-            ], device=self.device, dtype=self.dtype)
+        s = torch.sin(theta)
+        c = torch.cos(theta)
+        rot = torch.stack([torch.stack([c, -s]),
+                        torch.stack([s, c])])
+        trans = torch.stack((transl[0]*self.ones_stacked, transl[1]*self.ones_stacked))
 
-            angles_raw = self.update_theta(t)
-            # Accept scalar (rotate about z only) or 3-tuple Euler (x,y,z)
-            is_scalar = (isinstance(angles_raw, (int, float))
-                         or (isinstance(angles_raw, torch.Tensor) and angles_raw.dim() == 0))
-            if is_scalar:
-                angles_raw = (0.0, 0.0, angles_raw)
-            ax, ay, az = [
-                self.rad_conv * (a.clone().detach().to(device=self.device, dtype=self.dtype)
-                                 if isinstance(a, torch.Tensor)
-                                 else torch.tensor(a, device=self.device, dtype=self.dtype))
-                for a in angles_raw
-            ]
-            self.com_pos = transl
+        return (trans, rot)
 
-            # Rx
-            sx, cx = torch.sin(ax), torch.cos(ax)
-            Rx = torch.stack([
-                torch.stack([torch.ones_like(ax), torch.zeros_like(ax), torch.zeros_like(ax)]),
-                torch.stack([torch.zeros_like(ax), cx, -sx]),
-                torch.stack([torch.zeros_like(ax), sx, cx]),
-            ])
-            # Ry
-            sy, cy = torch.sin(ay), torch.cos(ay)
-            Ry = torch.stack([
-                torch.stack([cy, torch.zeros_like(ay), sy]),
-                torch.stack([torch.zeros_like(ay), torch.ones_like(ay), torch.zeros_like(ay)]),
-                torch.stack([-sy, torch.zeros_like(ay), cy]),
-            ])
-            # Rz
-            sz, cz = torch.sin(az), torch.cos(az)
-            Rz = torch.stack([
-                torch.stack([cz, -sz, torch.zeros_like(az)]),
-                torch.stack([sz, cz, torch.zeros_like(az)]),
-                torch.stack([torch.zeros_like(az), torch.zeros_like(az), torch.ones_like(az)]),
-            ])
-            rot = Rz @ Ry @ Rx
 
-            trans = torch.stack([
-                transl[i] * self.ones_stacked for i in range(3)
-            ])
-            return (trans, rot)
 
-    # ------------------------------------------------------------------
-    # Update
-    # ------------------------------------------------------------------
     def update(self, t, iteration, dt=1, update_cnt=True):
+
+
         (trans, rot) = self.rototranslate_points(t)
 
-        # --- linear / angular velocities via autograd ------------------
+        # compute linear and angular velocities using automatic differentiation
         t_var = t.clone().detach().requires_grad_(True)
+        vx = self.update_translation[0](t_var)
+        vy = self.update_translation[1](t_var)
+        w = self.update_theta(t_var) * self.rad_conv
 
-        def _safe_grad(val, t_var):
-            """autograd.grad that handles constants (float / int / non-graph tensors)."""
-            if not isinstance(val, torch.Tensor) or not val.requires_grad:
-                return torch.tensor(0.0, device=self.device, dtype=self.dtype)
-            g = torch.autograd.grad(val, t_var, create_graph=False, allow_unused=True)[0]
-            if g is None:
-                return torch.tensor(0.0, device=self.device, dtype=self.dtype)
-            return g
+        lin_vel_x = torch.autograd.grad(vx, t_var, create_graph=False)[0]
+        lin_vel_y = torch.autograd.grad(vy, t_var, create_graph=False)[0]
+        ang_vel   = torch.autograd.grad(w, t_var, create_graph=False)[0]
 
-        if self.ndim == 2:
-            vx = self.update_translation[0](t_var)
-            vy = self.update_translation[1](t_var)
-            w = self.update_theta(t_var) * self.rad_conv
+        # compute sdf at cc locations
+        translpoints=self.stacked_xy-trans
+        newpoints_u=rot.T@translpoints
+        newpos_u = newpoints_u[0].reshape(self.nx, self.ny)
+        newpos_v = newpoints_u[1].reshape(self.nx, self.ny)
+        self.sdf_val = self.sdf(newpos_u, newpos_v)
 
-            lin_vel_x = _safe_grad(vx, t_var)
-            lin_vel_y = _safe_grad(vy, t_var)
-            ang_vel = _safe_grad(w, t_var)
+        # compute sdf at staggered grid locations (u points -sdf_u and v points-sdf_v)
+        translpoints_u=self.stacked_xy_u-trans
+        newpoints_u=rot.T@translpoints_u
+        newpos_u = newpoints_u[0].reshape(self.nx, self.ny)
+        newpos_v = newpoints_u[1].reshape(self.nx, self.ny)
+        self.sdf_u = self.sdf(newpos_u, newpos_v)
 
-            # SDF at cell-centres
-            translpoints = self.stacked_xy - trans
-            newpoints = rot.T @ translpoints
-            self.sdf_val = self.sdf(
-                newpoints[0].reshape(self.grid_shape),
-                newpoints[1].reshape(self.grid_shape),
-            )
+        translpoints_v=self.stacked_xy_v-trans
+        newpoints_v=rot.T@translpoints_v
+        newpos_u = newpoints_v[0].reshape(self.nx, self.ny)
+        newpos_v = newpoints_v[1].reshape(self.nx, self.ny)
+        self.sdf_v = self.sdf(newpos_u, newpos_v)
 
-            # SDF at u-faces
-            translpoints_u = self.stacked_xy_u - trans
-            newpoints_u = rot.T @ translpoints_u
-            self.sdf_u = self.sdf(
-                newpoints_u[0].reshape(self.grid_shape),
-                newpoints_u[1].reshape(self.grid_shape),
-            )
+        # update body velocities (need to be staggered)
+        self.body_u = (lin_vel_x - ang_vel*translpoints_u[1]).reshape(self.nx, self.ny)
+        self.body_v = (lin_vel_y + ang_vel*translpoints_v[0]).reshape(self.nx, self.ny)
 
-            # SDF at v-faces
-            translpoints_v = self.stacked_xy_v - trans
-            newpoints_v = rot.T @ translpoints_v
-            self.sdf_v = self.sdf(
-                newpoints_v[0].reshape(self.grid_shape),
-                newpoints_v[1].reshape(self.grid_shape),
-            )
+        if update_cnt==True:
 
-            # body velocities (staggered)
-            # v = v_lin + ω × r  (2-D:  ω×r = (-ω*ry, ω*rx))
-            self.body_u = (lin_vel_x - ang_vel * translpoints_u[1]).reshape(self.grid_shape)
-            self.body_v = (lin_vel_y + ang_vel * translpoints_v[0]).reshape(self.grid_shape)
-
-            if update_cnt:
-                self.cnt_update = rot @ self.cnt
-                self.cnt_update[0] += self.com_pos[0]
-                self.cnt_update[1] += self.com_pos[1]
-                self.cnt_u = lin_vel_x - ang_vel * (self.cnt_update[1] - self.com_pos[1])
-                self.cnt_v = lin_vel_y + ang_vel * (self.cnt_update[0] - self.com_pos[0])
-
-        else:  # 3-D
-            vx = self.update_translation[0](t_var)
-            vy = self.update_translation[1](t_var)
-            vz = self.update_translation[2](t_var)
-
-            angles_raw = self.update_theta(t_var)
-            is_scalar = (isinstance(angles_raw, (int, float))
-                         or (isinstance(angles_raw, torch.Tensor) and angles_raw.dim() == 0))
-            if is_scalar:
-                angles_raw = (torch.tensor(0.0, requires_grad=True),
-                              torch.tensor(0.0, requires_grad=True),
-                              angles_raw)
-            wx = angles_raw[0] * self.rad_conv
-            wy = angles_raw[1] * self.rad_conv
-            wz = angles_raw[2] * self.rad_conv
-
-            lin_vel_x = _safe_grad(vx, t_var)
-            lin_vel_y = _safe_grad(vy, t_var)
-            lin_vel_z = _safe_grad(vz, t_var)
-            ang_vel_x = _safe_grad(wx, t_var)
-            ang_vel_y = _safe_grad(wy, t_var)
-            ang_vel_z = _safe_grad(wz, t_var)
-
-            # SDF evaluation helper
-            def _eval_sdf(stacked):
-                translpoints = stacked - trans
-                newpoints = rot.T @ translpoints
-                return self.sdf(
-                    newpoints[0].reshape(self.grid_shape),
-                    newpoints[1].reshape(self.grid_shape),
-                    newpoints[2].reshape(self.grid_shape),
-                )
-
-            self.sdf_val = _eval_sdf(self.stacked_xy)
-            self.sdf_u = _eval_sdf(self.stacked_xy_u)
-            self.sdf_v = _eval_sdf(self.stacked_xy_v)
-            self.sdf_w = _eval_sdf(self.stacked_xy_w)
-
-            # body velocities: v = v_lin + ω × r
-            # ω × r = (ωy*rz - ωz*ry, ωz*rx - ωx*rz, ωx*ry - ωy*rx)
-            def _body_vel(stacked):
-                r = stacked - trans
-                bu = (lin_vel_x + ang_vel_y * r[2] - ang_vel_z * r[1]).reshape(self.grid_shape)
-                bv = (lin_vel_y + ang_vel_z * r[0] - ang_vel_x * r[2]).reshape(self.grid_shape)
-                bw = (lin_vel_z + ang_vel_x * r[1] - ang_vel_y * r[0]).reshape(self.grid_shape)
-                return bu, bv, bw
-
-            self.body_u, _, _ = _body_vel(self.stacked_xy_u)
-            _, self.body_v, _ = _body_vel(self.stacked_xy_v)
-            _, _, self.body_w = _body_vel(self.stacked_xy_w)
+            # update contour points and velocities
+            self.cnt_update = rot @ self.cnt
+            self.cnt_update[0]+=self.com_pos[0]
+            self.cnt_update[1]+=self.com_pos[1]
+            self.cnt_u=(lin_vel_x-ang_vel*(self.cnt_update[1]-self.com_pos[1]))
+            self.cnt_v=(lin_vel_y+ang_vel*(self.cnt_update[0]-self.com_pos[0]))
 
 
 
 
 class CompositeBodyAnalytical(Body):
 
-    def __init__(self, device, x, y, sdf_funs, update_maps, z=None, plotting=False, **kwargs):
-        """Composite body: union of several BodyAnalytical objects."""
-        super().__init__(device, x, y, z=z, **kwargs)
+    def __init__(self, device, x, y, sdf_funs, update_maps, plotting=False, **kwargs):
+        """
+        sdf_folder = folder of the sdf file
+        sdf_name = name of the sdf file
+        """
+        super().__init__(device, x, y, **kwargs)
         self.nbodies = len(sdf_funs)
         assert self.nbodies == len(update_maps), "Number of sdf functions and update maps must be the same"
 
-        self.bodies = [
+        self.bodies=[
             BodyAnalytical(
                 device, x, y,
                 sdf_funs[i],
                 update_maps[i],
-                z=z,
                 plotting=plotting,
                 **kwargs
             ) for i in range(self.nbodies)
         ]
 
         self.mu_funcs = self.bodies[0].mu_funcs
-        gs = self.grid_shape
-        self.sdf_vals   = torch.zeros((self.nbodies, *gs), device=device)
-        self.sdf_vals_u = torch.zeros((self.nbodies, *gs), device=device)
-        self.sdf_vals_v = torch.zeros((self.nbodies, *gs), device=device)
-        self.u_vals     = torch.zeros((self.nbodies, *gs), device=device)
-        self.v_vals     = torch.zeros((self.nbodies, *gs), device=device)
-        if self.ndim == 3:
-            self.sdf_vals_w = torch.zeros((self.nbodies, *gs), device=device)
-            self.w_vals     = torch.zeros((self.nbodies, *gs), device=device)
-        self.com_pos = torch.zeros((self.nbodies, self.ndim), device=device)
+        self.sdf_vals = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
+        self.sdf_vals_u = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
+        self.sdf_vals_v = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
+        self.u_vals   = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
+        self.v_vals   = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
+        self.com_pos  = torch.zeros((self.nbodies,2),device=device)
         self.initialize()
 
     def initialize(self):
-        self.update(torch.tensor(0.0, device=self.device, dtype=self.dtype), 0)
+        """
+        Initialize sdf properties at time 0
+        """
+        self.update(torch.tensor(0.0,device=self.device,dtype=self.dtype), 0)
+
 
     def update(self, t, iteration, dt=1):
         for i, body in enumerate(self.bodies):
@@ -951,30 +815,22 @@ class CompositeBodyAnalytical(Body):
             self.sdf_vals[i]   = body.sdf_val
             self.sdf_vals_u[i] = body.sdf_u
             self.sdf_vals_v[i] = body.sdf_v
-            self.u_vals[i]     = body.body_u
-            self.v_vals[i]     = body.body_v
-            if self.ndim == 3:
-                self.sdf_vals_w[i] = body.sdf_w
-                self.w_vals[i]     = body.body_w
+            self.u_vals[i]   = body.body_u
+            self.v_vals[i]   = body.body_v
 
-        # Union SDF (min) + pick velocity from closest body
-        gs = self.grid_shape
+        self.sdf_val = torch.min(self.sdf_vals,axis=0)[0]
+        idx=self.sdf_vals.argmin(0).unsqueeze(0).expand(self.sdf_vals.shape)
+        self.sdf_val=self.sdf_vals.gather(0,idx)[0].reshape(self.nx,self.ny)
 
-        idx = self.sdf_vals.argmin(0).unsqueeze(0).expand(self.sdf_vals.shape)
-        self.sdf_val = self.sdf_vals.gather(0, idx)[0].reshape(gs)
+        self.sdf_val_u = torch.min(self.sdf_vals_u,axis=0)[0]
+        idx=self.sdf_vals_u.argmin(0).unsqueeze(0).expand(self.sdf_vals_u.shape)
+        self.sdf_val_u=self.sdf_vals_u.gather(0,idx)[0].reshape(self.nx,self.ny)
+        self.body_u =self.u_vals.gather(0,idx)[0].reshape(self.nx,self.ny)
 
-        idx_u = self.sdf_vals_u.argmin(0).unsqueeze(0).expand(self.sdf_vals_u.shape)
-        self.sdf_val_u = self.sdf_vals_u.gather(0, idx_u)[0].reshape(gs)
-        self.body_u    = self.u_vals.gather(0, idx_u)[0].reshape(gs)
-
-        idx_v = self.sdf_vals_v.argmin(0).unsqueeze(0).expand(self.sdf_vals_v.shape)
-        self.sdf_val_v = self.sdf_vals_v.gather(0, idx_v)[0].reshape(gs)
-        self.body_v    = self.v_vals.gather(0, idx_v)[0].reshape(gs)
-
-        if self.ndim == 3:
-            idx_w = self.sdf_vals_w.argmin(0).unsqueeze(0).expand(self.sdf_vals_w.shape)
-            self.sdf_val_w = self.sdf_vals_w.gather(0, idx_w)[0].reshape(gs)
-            self.body_w    = self.w_vals.gather(0, idx_w)[0].reshape(gs)
+        self.sdf_val_v = torch.min(self.sdf_vals_v,axis=0)[0]
+        idx=self.sdf_vals_v.argmin(0).unsqueeze(0).expand(self.sdf_vals_v.shape)
+        self.sdf_val_v=self.sdf_vals_v.gather(0,idx)[0].reshape(self.nx,self.ny)
+        self.body_v =self.v_vals.gather(0,idx)[0].reshape(self.nx,self.ny)
 
 
 class BodyFishAnalytical(Body):

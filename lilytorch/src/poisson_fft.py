@@ -1,231 +1,320 @@
+"""Dimension-agnostic FFT-based Poisson solver for unbounded domains.
 
+Solves  nabla^2 phi = f  in free space via Green function convolution
+using zero-padded FFT.  Works in 2-D and 3-D with a single code path.
+
+Green function regularisations
+------------------------------
+* **2-D** -- Hejlesen et al., *Appl. Math. Lett.* 2013,
+  8th-order algebraic smoothing.
+* **3-D** -- Gaussian (erf) regularisation (2nd order in sigma).
+
+Usage::
+
+    # 2-D  (backward-compatible with old interface)
+    ps = PoissonSolverFFT(x, y, bc_type="free")
+    phi = ps.solve(rhs)
+
+    # 3-D
+    ps = PoissonSolverFFT(x, y, z=z)
+    phi = ps.solve(rhs)
+"""
+
+import os
+import numpy
 import torch
 from scipy import special
-from os.path import exists
-import numpy
-# import torch_dct as dct
-import os
+
 
 class PoissonSolverFFT:
-    """
-    Solver class for the unbounded poisson equation
-    """
+    """FFT-based Poisson solver for unbounded (free-space) domains."""
 
-    def __init__(self,
-                x,
-                y,
-                bc_type = "free",
-                overwrite = True,
-                filename = "lilytorch/data/",
-                ):
+    def __init__(
+        self,
+        x,
+        y,
+        bc_type="free",
+        overwrite=True,
+        filename="lilytorch/data/",
+        z=None,
+    ):
         """
-        x : x-domain
-        y : y-domain
-        overwrite: if True compute the green function, otherwise searches for an already computed one (if found)
+        Parameters
+        ----------
+        x, y : 1-D tensors -- cell-centre coordinates
+        z    : 1-D tensor or None -- cell-centre z-coordinates (3-D mode)
+        bc_type  : str -- only ``"free"`` is supported
+        overwrite : bool -- recompute even if a cached file exists
+        filename  : str -- directory for caching the Green function FFT
         """
+        if bc_type != "free":
+            raise ValueError(
+                f"Only bc_type='free' is supported, got '{bc_type}'"
+            )
 
         self.dtype = x.dtype
-        if self.dtype == torch.float32:
-            self.dtype_np = numpy.float32
-        elif self.dtype == torch.float64:
-            self.dtype_np = numpy.float64
-
+        self.dtype_np = {
+            torch.float32: numpy.float32,
+            torch.float64: numpy.float64,
+        }[self.dtype]
         self.device = x.device
 
-        self.bc_type = bc_type
+        # -- dimension-agnostic grid ------------------------------------
+        self.coords = [x, y] if z is None else [x, y, z]
+        self.ndim   = len(self.coords)
+        self.n      = [len(c) for c in self.coords]
+        self.dh     = [float(c[1] - c[0]) for c in self.coords]
+        self._coords_np = [c.cpu().numpy() for c in self.coords]
 
-        self.x = x.cpu().numpy()
-        self.y = y.cpu().numpy()
-        self.nx = len(x)
-        self.ny = len(y)
-        self.dx = (x[1]-x[0]).cpu().numpy()
-        self.dy = (y[1]-y[0]).cpu().numpy()
+        # -- legacy 2-D accessors (backward-compat with solver.py) -----
+        self.x  = self._coords_np[0]
+        self.y  = self._coords_np[1]
+        self.nx = self.n[0]
+        self.ny = self.n[1]
+        self.dx = self.dh[0]
+        self.dy = self.dh[1]
+        if self.ndim == 3:
+            self.z  = self._coords_np[2]
+            self.nz = self.n[2]
+            self.dz = self.dh[2]
 
-        self.U = torch.zeros((2*self.nx,2*self.ny), dtype=self.dtype, device=self.device)
+        # -- zero-padded work buffer (doubled in each dim) -------------
+        shape_2x = tuple(2 * ni for ni in self.n)
+        self.U = torch.zeros(shape_2x, dtype=self.dtype, device=self.device)
 
-        self.name = "Gfft_"+bc_type+"_"+str(float(x[0]))+"_"+str(float(x[-1]))+str(float(y[0]))+"_"+str(float(y[-1]))+"_"+str(self.nx)+"_"+str(self.ny)
-
+        # -- cache filename --------------------------------------------
+        coords_tag = "_".join(
+            f"{float(c[0])}_{float(c[-1])}" for c in self.coords
+        )
+        dims_tag = "_".join(str(ni) for ni in self.n)
+        self.name = f"Gfft_free_{coords_tag}_{dims_tag}"
         if not os.path.exists(filename):
             os.makedirs(filename)
-
         self.save_filename = os.path.join(filename, self.name + ".pt")
-        # compute green function
-        if exists(self.save_filename) and not overwrite:
-            self.Gfft = torch.load(self.save_filename)
+
+        # -- compute or load Green function FFT ------------------------
+        if os.path.exists(self.save_filename) and not overwrite:
+            self.Gfft = torch.load(self.save_filename,
+                                   map_location=self.device)
         else:
-            self.Gfft = self.compute_solve_method()
+            self.Gfft = self._compute_green_fft()
 
+        print(
+            f"PoissonSolverFFT ready  ({self.ndim}D, "
+            f"{'x'.join(str(ni) for ni in self.n)})"
+        )
 
-    def compute_solve_method(self):
+    # ==================================================================
+    # Green function computation
+    # ==================================================================
+    def _compute_green_fft(self):
+        """Return FFT( -dV * G ) on the doubled grid."""
+        # shifted coordinates: origin at domain minimum
+        shifts = [c - c.min() for c in self._coords_np]
 
-        if self.bc_type == "free":
+        # mirrored extension for zero-padded linear convolution
+        exts = []
+        for s, h in zip(shifts, self.dh):
+            exts.append(numpy.concatenate([
+                s,
+                [-s[-1] - h],
+                -s[::-1][:-1],
+            ]))
 
-            xshift = self.x-numpy.min(self.x)
-            yshift = self.y-numpy.min(self.y)
+        # N-D distance field
+        grids = numpy.meshgrid(*exts, indexing="ij")
+        R = numpy.sqrt(sum(g**2 for g in grids))
 
-            xshift_ext = numpy.concatenate((xshift,numpy.concatenate(([-xshift[-1]-self.dx],-xshift[::-1][:-1]))))
-            yshift_ext = numpy.concatenate((yshift,numpy.concatenate(([-yshift[-1]-self.dx],-yshift[::-1][:-1]))))
+        # regularised Green function
+        eps = 2.0 * max(self.dh)
+        if self.ndim == 2:
+            G = self._green_2d(R, eps)
+        else:
+            G = self._green_3d(R, eps)
 
-            # xshift_ext = numpy.concatenate((xshift[1:-1],xshift[1:-1][::-1]))
-            # yshift_ext = numpy.concatenate((yshift[1:-1],yshift[1:-1][::-1]))
+        # Gfft = FFT( -dV * G )
+        dV = float(numpy.prod(self.dh))
+        G_t = torch.from_numpy(G.astype(self.dtype_np)).to(self.device)
+        Gfft = torch.fft.fftn(-dV * G_t)
 
+        torch.save(Gfft, self.save_filename)
+        return Gfft
 
-            Xshift, Yshift = numpy.meshgrid(xshift_ext, yshift_ext, indexing='ij')
+    # ------------------------------------------------------------------
+    def _green_2d(self, R, eps):
+        r"""Hejlesen et al. 2013 -- 8th-order algebraic regularisation.
 
-            R = numpy.sqrt(Xshift**2+Yshift**2)
-            # G = torch.from_numpy(self.chatelain_fun(R).astype(self.dtype_np)).to(self.device)
-            eps = 2*max(self.dx,self.dy)
-            G = torch.from_numpy(self.hej_fun(R, eps).astype(self.dtype_np)).to(self.device)
-            Gfft = torch.fft.fftn(-self.dx*self.dy*G)
-
-            torch.save(Gfft, self.save_filename)
-            self.solve = self.solve_free_space
-            return Gfft
-
-        elif self.bc_type == "neumann":
-
-            # kx = 1/(self.x[1]-self.x[0])
-            # ky = 1/(self.y[1]-self.y[0])
-            # K = torch.meshgrid(
-            #     torch.pi*torch.linspace(-kx/2, kx/2, self.nx, dtype=self.dtype, device=self.device),
-            #     torch.pi*torch.linspace(-ky/2, ky/2, self.ny, dtype=self.dtype, device=self.device),
-            #     indexing='ij'
-            # )
-
-            # K = torch.meshgrid(
-            #     torch.pi*torch.arange(-int(self.nx/2),int(self.nx/2), dtype=self.dtype, device=self.device)/(self.x[-1]-self.x[0]),
-            #     torch.pi*torch.arange(-int(self.ny/2),int(self.ny/2), dtype=self.dtype, device=self.device)/(self.y[-1]-self.y[0]),
-            #     indexing='ij'
-            # )
-
-            K = torch.meshgrid(
-                torch.pi*torch.arange(self.nx, dtype=self.dtype, device=self.device)/(self.x[-1]-self.x[0]),
-                torch.pi*torch.arange(self.ny, dtype=self.dtype, device=self.device)/(self.y[-1]-self.y[0]),
-                indexing='ij'
-            )
-            Gfft = -1/(K[0]**2+K[1]**2)
-            Gfft[0,0] = 0
-            self.solve = self.solve_neumann
-            return Gfft
-
-
-
-
-    def solve_free_space(self,u):
+        .. math::
+            G_\varepsilon(r) \approx
+            -\frac{1}{2\pi}\!\left[\ln r
+                + \tfrac12 E_1\!\bigl(\xi^2/2\bigr)
+                - W(\xi)\,e^{-\xi^2/2}\right],
+            \quad \xi = r/\varepsilon
         """
-        Solve the inverse Fourier transform U_NEW=IFFT(FFT(U)*FFT(G))
-        """
-        self.U[:self.nx,:self.ny] = u
-        return torch.real(
-                torch.fft.ifftn( self.Gfft * torch.fft.fftn(self.U))
-            )[:self.nx,:self.ny]
-
-
-    def solve_neumann(self,u):
-        """
-        Homogeneous Neumann BC
-        """
-        out=dct.idct1( self.Gfft * dct.dct1(u))
-        return out-out.mean()
-
-
-    def chatelain_fun(self, r):
-        """
-        Green function singular approximation following Chatelain and Koumoutsakos, J Comp Phys, 2010
-        """
-        G = numpy.zeros((2*self.nx,2*self.ny))
-        G = numpy.where(r>0,-(numpy.log(r))/(2*numpy.pi),0)
-        req = numpy.sqrt(float(self.dx*self.dy)/numpy.pi)
-        G[0,0] = -(req**2) * (numpy.log(req)-1/2)/2 # integral over spherical area equivalent to a rectangle of dimension [dx,dy]
-        G[-1,-1] = G[0,0]
-        G[0,-1] = G[0,0]
-        G[-1,0] = G[0,0]
-        return G
-
-
-    def hej_fun(self, R, eps=0.01):
-        """
-        Green function approximation following Hejlesen et al, Applied Mathematics Letters, 2013
-        """
-        G = numpy.zeros((2*self.nx,2*self.ny))
-        xeps=R/eps
-        old = numpy.seterr(divide='ignore',invalid='ignore') # ignore invalid warnings
+        xi = R / eps
+        old = numpy.seterr(divide="ignore", invalid="ignore")
         logR = numpy.log(R)
-        G = - (
-            logR + \
-            0.5*special.exp1(xeps**2/2) - \
-            (
-                137/120 - 163/240*xeps**2 + \
-                137/960*xeps**4 - \
-                7/640*xeps**6 + \
-                1/3840*xeps**8
-            )*numpy.exp(-xeps**2/2)
-        )/(2*numpy.pi)
-        singularity = (numpy.euler_gamma/2-numpy.log(numpy.sqrt(2)*eps) + 137/120)/(2*numpy.pi)
-        G[0,0] = singularity
-        numpy.seterr(**old) # reset warnings
+
+        G = -(
+            logR
+            + 0.5 * special.exp1(xi**2 / 2)
+            - (
+                  137 / 120
+                - 163 / 240 * xi**2
+                + 137 / 960 * xi**4
+                -   7 / 640 * xi**6
+                +   1 / 3840 * xi**8
+            ) * numpy.exp(-xi**2 / 2)
+        ) / (2.0 * numpy.pi)
+
+        # regularised singularity at the origin
+        G[0, 0] = (
+            numpy.euler_gamma / 2
+            - numpy.log(numpy.sqrt(2) * eps)
+            + 137 / 120
+        ) / (2.0 * numpy.pi)
+
+        numpy.seterr(**old)
         return G
 
+    # ------------------------------------------------------------------
+    def _green_3d(self, R, eps):
+        r"""Gaussian-regularised 3-D free-space Green function.
+
+        Returns :math:`-G_{\text{fund}}` (positive) so that the calling
+        convention ``FFT(-dV \cdot G_{\text{func}})`` produces the correct
+        sign for the convolution.
+
+        .. math::
+            G_{\text{func}}(r)
+              = \frac{1}{4\pi r}\,\mathrm{erf}\!\!\left(
+                  \frac{r}{\sqrt{2}\,\varepsilon}\right)
+
+        Finite singularity:
+
+        .. math::
+            G_{\text{func}}(0) = \frac{1}{(2\pi)^{3/2}\,\varepsilon}
+        """
+        xi = R / (eps * numpy.sqrt(2))
+        old = numpy.seterr(divide="ignore", invalid="ignore")
+
+        G = numpy.where(
+            R > 0,
+            special.erf(xi) / (4.0 * numpy.pi * R),
+            0.0,
+        )
+        G[0, 0, 0] = 1.0 / ((2.0 * numpy.pi) ** 1.5 * eps)
+
+        numpy.seterr(**old)
+        return G
+
+    # ==================================================================
+    # Solve
+    # ==================================================================
+    def solve(self, u):
+        r"""Solve  :math:`\nabla^2\varphi = u`  in free space.
+
+        Parameters
+        ----------
+        u : tensor, shape ``(n0, n1)`` or ``(n0, n1, n2)``
+
+        Returns
+        -------
+        phi : tensor, same shape as *u*
+        """
+        slc = tuple(slice(ni) for ni in self.n)
+        self.U[slc] = u
+        return torch.real(
+            torch.fft.ifftn(self.Gfft * torch.fft.fftn(self.U))
+        )[slc]
+
+    def solve_free_space(self, u):
+        """Alias for :meth:`solve` (backward-compat)."""
+        return self.solve(u)
 
 
-
+# ======================================================================
+# Stand-alone demo / test
+# ======================================================================
 if __name__ == "__main__":
+    import time
 
-    dtype=torch.float64
-    device = "cuda"
+    dtype  = torch.float64
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Device: {device}")
 
-    nx=512
-    ny=128
-    x=torch.linspace(0,5,nx,dtype=dtype, device=device)
-    y=torch.linspace(-5,5,ny,dtype=dtype, device=device)
-    ps = PoissonSolverFFT(x,y,overwrite=True)
+    # ==================================================================
+    # 2-D test  -- compact bump function with analytical Laplacian
+    # ==================================================================
+    print("\n=== 2-D test ===")
+    nx, ny = 512, 128
+    x = torch.linspace(0, 5, nx, dtype=dtype, device=device)
+    y = torch.linspace(-5, 5, ny, dtype=dtype, device=device)
 
-    X,Y = torch.meshgrid(x,y, indexing='ij')
-    Usmall = torch.zeros((nx,ny), dtype=torch.double)
-    X0 = 2
-    Y0 = 2
-    XX = X-X0
-    YY = Y-Y0
-    RR2 = XX**2+YY**2
-    c=6
-    Usmall = 4*c*torch.exp(-c/(1-RR2)) * (c*RR2 + XX**4 + YY**4 + 2*(XX**2)*(YY**2) -1 ) * (-1 + RR2)**(-4)
-    Usmall[RR2>=1] = 0
+    ps2 = PoissonSolverFFT(x, y, overwrite=True)
 
-    sol = torch.exp(-c/(1-RR2))
-    sol[RR2>=1] = 0
+    X, Y = torch.meshgrid(x, y, indexing="ij")
+    X0, Y0 = 2.0, 2.0
+    XX, YY = X - X0, Y - Y0
+    RR2 = XX**2 + YY**2
+    c = 6.0
 
-    ps.U[:ps.nx,:ps.ny] = Usmall # 0 padded extended initial function
-    out_real = sol # exact solution in the smaller domain
+    # source = laplacian of exp(-c/(1-r^2))
+    f2 = (
+        4 * c * torch.exp(-c / (1 - RR2))
+        * (c * RR2 + XX**4 + YY**4 + 2 * XX**2 * YY**2 - 1)
+        * (-1 + RR2) ** (-4)
+    )
+    f2[RR2 >= 1] = 0
 
-    # compute approximate solution using the Green function
-    out=ps.solve_free_space(Usmall)
+    phi_exact_2d = torch.exp(-c / (1 - RR2))
+    phi_exact_2d[RR2 >= 1] = 0
 
-    diff = torch.sqrt((out - out_real)**2)/torch.max(torch.max(abs(out_real)))
+    t0 = time.time()
+    phi_approx_2d = ps2.solve(f2)
+    elapsed = time.time() - t0
 
-    # === compute errors between real and approximated solution ====
-    print(torch.argmax(torch.abs(out-out_real)))
-    print("The Linf error is "+str(torch.max(torch.max(abs(diff)))))
-    print("The L2 error is "+str(torch.sqrt(torch.sum(torch.sum(diff**2))/(nx*ny))))
+    diff2 = torch.abs(phi_approx_2d - phi_exact_2d)
+    linf2 = diff2.max().item() / phi_exact_2d.abs().max().item()
+    l2_2  = torch.sqrt((diff2**2).mean()).item() / phi_exact_2d.abs().max().item()
 
+    print(f"  Solve time: {elapsed:.4f}s")
+    print(f"  Relative Linf error: {linf2:.2e}")
+    print(f"  Relative L2   error: {l2_2:.2e}")
 
-    # === plot solution ===
-    import matplotlib.pylab as plt
+    # ==================================================================
+    # 3-D test  -- Gaussian with analytical Laplacian
+    #   phi(r) = exp(-alpha * r^2)
+    #   nabla^2 phi = (4*alpha^2*r^2 - 6*alpha) * exp(-alpha*r^2)   [3-D]
+    # ==================================================================
+    print("\n=== 3-D test ===")
+    N3 = 64
+    x3 = torch.linspace(-5, 5, N3, dtype=dtype, device=device)
+    y3 = torch.linspace(-5, 5, N3, dtype=dtype, device=device)
+    z3 = torch.linspace(-5, 5, N3, dtype=dtype, device=device)
 
-    fig = plt.figure()
-    ax = fig.add_subplot(projection='3d')
-    ax.plot_surface(X.cpu(), Y.cpu(), out_real.cpu())
-    ax.set_xlabel('$x$')
-    ax.set_ylabel('$y$')
-    plt.title("Solution real")
+    t0 = time.time()
+    ps3 = PoissonSolverFFT(x3, y3, z=z3, overwrite=True)
+    build_time = time.time() - t0
+    print(f"  Green function build: {build_time:.2f}s")
 
-    fig = plt.figure()
-    ax = fig.add_subplot(projection='3d')
-    ax.plot_surface(X.cpu(), Y.cpu(), out.cpu())
-    ax.set_xlabel('$x$')
-    ax.set_ylabel('$y$')
-    plt.title("Solution approx")
+    X3, Y3, Z3 = torch.meshgrid(x3, y3, z3, indexing="ij")
+    alpha = 1.0
+    R2_3d = X3**2 + Y3**2 + Z3**2
 
-    plt.show()
+    phi_exact_3d = torch.exp(-alpha * R2_3d)
+    f3 = (4.0 * alpha**2 * R2_3d - 6.0 * alpha) * torch.exp(-alpha * R2_3d)
 
+    t0 = time.time()
+    phi_approx_3d = ps3.solve(f3)
+    elapsed = time.time() - t0
 
+    diff3 = torch.abs(phi_approx_3d - phi_exact_3d)
+    linf3 = diff3.max().item() / phi_exact_3d.abs().max().item()
+    l2_3  = torch.sqrt((diff3**2).mean()).item() / phi_exact_3d.abs().max().item()
 
+    print(f"  Solve time: {elapsed:.4f}s")
+    print(f"  Relative Linf error: {linf3:.2e}")
+    print(f"  Relative L2   error: {l2_3:.2e}")
+
+    print("\nDone.")
