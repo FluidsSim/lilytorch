@@ -711,8 +711,9 @@ class FluidSolver:
         # pforce_x = self.interp_utility(self.composite_body.Xu_stag, self.composite_body.Yu_stag)*self.normal_x_u
         # pforce_y = self.interp_utility(self.composite_body.Xv_stag, self.composite_body.Yv_stag)*self.normal_y_v
 
-        self.pforce_x = -p*self.normal_x
-        self.pforce_y = -p*self.normal_y
+        p_outer=torch.where(self.fluid_solver.composite_body.sdf_val<0,0,p)
+        self.pforce_x = -p_outer*self.normal_x
+        self.pforce_y = -p_outer*self.normal_y
 
 
         for i, body in enumerate(self.composite_body.bodies[:]):

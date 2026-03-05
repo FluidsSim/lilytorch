@@ -213,7 +213,7 @@ class BDIMhandler():
         p, _ = self.fluid_solver.poisson_solver.solve_multigrid(
             self.fluid_solver.div[1:-1, 1:-1],
             torch.zeros_like(p),
-            torch.ones_like(self.fluid_solver.div[1:-1, 1:-1]),  # c arg unused when ch/cv given
+            (timestep/self.rho_body)*torch.ones_like(self.fluid_solver.div),  # c arg unused when ch/cv given
             ch=ch_full[1:,  1:-1],   # (nx-1, ny-2)
             cv=cv_full[1:-1, 1:],    # (nx-2, ny-1)
         )
@@ -287,12 +287,12 @@ class BDIMhandler():
 
             (u,v,p) = self.fluid_step(self.fluid_solver.u0, self.fluid_solver.v0, self.fluid_solver.p0,timestep)
 
-            p = torch.where(self.fluid_solver.composite_body.sdf_val<0,0,p)
+            # p = torch.where(self.fluid_solver.composite_body.sdf_val<0,0,p)
 
             (self.fluid_solver.u0, self.fluid_solver.v0, self.fluid_solver.p0) = (u,v,p)
 
             # compute fluid forces on the body
-            self.fluid_solver.forces_method1(self.fluid_solver.u0, self.fluid_solver.v0, self.fluid_solver.p0, iteration)
+            self.fluid_solver.forces_method2(self.fluid_solver.u0, self.fluid_solver.v0, self.fluid_solver.p0, iteration)
 
             self.terminate = self.fluid_solver.plotting_debug(self.fluid_solver.u0, self.fluid_solver.v0, self.fluid_solver.p0, iteration)
 

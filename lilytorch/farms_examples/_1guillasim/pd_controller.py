@@ -115,8 +115,6 @@ class PositionController(KinematicsController):
         idxs = np.arange(nmotors)
         x = (idxs + 1) / nmotors
         factor = (1 + 0.323 * (x - 1) + 0.31 * (x ** 2 - 1))
-        # factor[:-1] *= 0
-        # factor[-1] = 4
 
         thetas = - amp * factor * np.sin(
             2 * np.pi * (
