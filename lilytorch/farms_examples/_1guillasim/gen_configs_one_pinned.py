@@ -70,7 +70,7 @@ nu    = 1.0e-6
 # n_iterations = 1001
 
 timestep     = 0.0005
-fluid_method = "abdquickest"
+convection_method = "quick"
 save_frames  = False
 save_every   = 200
 n_iterations = 20001
@@ -361,7 +361,7 @@ def gen_simulation_config(output_folder):
                     "xmax"                   : xmax,
                     "ymin"                   : ymin,
                     "ymax"                   : ymax,
-                    "convection_method"      : fluid_method,
+                    "convection_method"      : convection_method,
                     "dt"                     : 0.0001,
                     "nt"                     : 800000,
                     "nu"                     : nu,
