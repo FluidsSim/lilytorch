@@ -629,6 +629,11 @@ def plot_field_2d(
     _save_figure(save_path, name, iteration, fmt)
 
 
+def _nearest_index(coord_1d, target=0.0):
+    """Return the array index whose coordinate is closest to *target*."""
+    return int(np.argmin(np.abs(coord_1d - target)))
+
+
 def plot_field_3d_slices(
     field_3d,           # 3-D numpy array (Nx, Ny, Nz) – already on CPU
     coords,             # dict with keys "x", "y", "z" – 1-D numpy arrays
@@ -639,22 +644,25 @@ def plot_field_3d_slices(
     vmin=None,
     vmax=None,
     bodies=None,
-    slice_indices=None,  # dict {"xy": k, "xz": j, "yz": i}  (None → mid-plane)
+    slice_indices=None,  # dict {"xy": k, "xz": j, "yz": i}  (None → origin)
     cmap=cm.RdBu,
     fmt="png",
 ):
     """
     For a 3-D field, produce three orthogonal mid-plane slices and save each
     as a separate 2-D plot (reuses `plot_field_2d`).
+
+    Default slice positions pass through the coordinate origin (0, 0, 0)
+    rather than the array midpoint, so that slices intersect the body
+    even when the domain is not symmetric about the origin.
     """
     field_np = np.asarray(field_3d)
     Nx, Ny, Nz = field_np.shape
-    si = slice_indices or {}
-    k_xy = si.get("xy", Nz // 2)
-    j_xz = si.get("xz", Ny // 2)
-    i_yz = si.get("yz", Nx // 2)
-
     x, y, z = coords["x"], coords["y"], coords["z"]
+    si = slice_indices or {}
+    k_xy = si.get("xy", _nearest_index(z, 0.0))
+    j_xz = si.get("xz", _nearest_index(y, 0.0))
+    i_yz = si.get("yz", _nearest_index(x, 0.0))
 
     # ---- XY slice (fixed z) ----
     extent_xy = (float(x[0]), float(x[-1]), float(y[0]), float(y[-1]))
@@ -689,7 +697,10 @@ def plot_field_3d(
     save_path,
     *,
     sdf_3d=None,        # optional SDF array for body isosurface (same shape)
-    iso_percentile=65,  # percentile of |field| for isosurface threshold
+    iso_value=None,     # fixed isosurface threshold (overrides auto when set)
+    iso_fraction=0.15,  # threshold = iso_fraction * max(|smoothed field|)
+    smooth_sigma=2.5,   # Gaussian smoothing (in grid-cells) before isosurface extraction
+    crop_boundary=3,    # number of cells to crop from each domain face before rendering
     window_size=(1920, 1080),
     fmt="png",
 ):
@@ -701,6 +712,19 @@ def plot_field_3d(
     component, pressure), dual ±threshold isosurfaces are drawn (red/blue).
     For non-negative fields (e.g. |curl| magnitude), a single isosurface is
     drawn at `threshold` coloured by value.
+
+    ``crop_boundary`` removes cells from each face so that zero-padded
+    boundary layers (from the vorticity stencil) and ghost-cell artifacts
+    never reach the isosurface algorithm.
+
+    Threshold strategy
+    ------------------
+    Vorticity fields from backward-difference stencils are dominated by
+    near-zero noise: the 85th-percentile of |ω| can be 100,000× smaller
+    than the peak.  A percentile-based threshold would trace isosurfaces
+    through this noise.  Instead we use a **fraction of the peak amplitude**
+    of the *smoothed* field (default 15 %).  This cleanly selects the
+    physical vortex structures near the body.
     """
     try:
         import pyvista as pv
@@ -715,6 +739,26 @@ def plot_field_3d(
     y = np.asarray(coords["y"])
     z = np.asarray(coords["z"])
 
+    # ---- Crop boundary layers ----
+    # The vorticity stencil ([2:-2]) zero-pads the outermost cells.
+    # The sharp 0→nonzero transition creates spurious isosurfaces.
+    # Cropping removes these cells from the rendering domain.
+    c = int(crop_boundary)
+    if c > 0:
+        field_np = field_np[c:-c, c:-c, c:-c]
+        x = x[c:-c]
+        y = y[c:-c]
+        z = z[c:-c]
+        if sdf_3d is not None:
+            sdf_3d = np.asarray(sdf_3d)[c:-c, c:-c, c:-c]
+
+    # ---- Gaussian smoothing suppresses grid-scale noise in derivative
+    #      fields (vorticity) that would otherwise produce jagged,
+    #      oscillatory isosurfaces.  sigma is in grid-cell units. ----
+    if smooth_sigma and smooth_sigma > 0:
+        from scipy.ndimage import gaussian_filter
+        field_np = gaussian_filter(field_np, sigma=smooth_sigma)
+
     grid = pv.RectilinearGrid(x, y, z)
     grid.point_data[name] = field_np.flatten(order="F")
 
@@ -726,16 +770,50 @@ def plot_field_3d(
     # For non-negative fields like |curl|, we only draw a positive iso.
 
     # ---- determine isosurface threshold ----
-    abs_f = np.abs(field_np.ravel())
-    noise_floor = 1e-10
-    nonzero = abs_f[abs_f > noise_floor]
+    # Use the peak amplitude of the (already smoothed) field, excluding
+    # the body interior when an SDF is available.
+    if sdf_3d is not None:
+        mask = np.asarray(sdf_3d).ravel() > 0
+        abs_f = np.abs(field_np.ravel()[mask])
+    else:
+        abs_f = np.abs(field_np.ravel())
+    peak = float(abs_f.max()) if abs_f.size > 0 else 0.0
 
-    if len(nonzero) == 0:
+    if iso_value is not None and iso_value > 0:
+        # Fixed threshold requested by caller
+        threshold = float(iso_value)
+    elif peak < 1e-10:
         threshold = None
     else:
-        threshold = float(np.percentile(nonzero, iso_percentile))
-        if threshold < noise_floor:
-            threshold = None
+        threshold = iso_fraction * peak
+
+    # ---- helper: remove tiny disconnected mesh fragments ----
+    _min_cell_frac = 0.01   # drop components < 1% of total cells
+
+    def _clean_iso(mesh, min_frac=_min_cell_frac):
+        """Keep only connected components whose *cell* count exceeds
+        *min_frac* of the total.  Strips noise speckle that survived
+        Gaussian smoothing and the amplitude threshold."""
+        if mesh is None or mesh.n_cells == 0:
+            return mesh
+        try:
+            conn = mesh.connectivity(extraction_mode="all")
+            region_ids = conn.cell_data.get("RegionId", None)
+            if region_ids is None:
+                return mesh
+            from collections import Counter
+            counts = Counter(region_ids)
+            total = mesh.n_cells
+            min_cells = max(1, int(total * min_frac))
+            keep_ids = {rid for rid, cnt in counts.items()
+                        if cnt >= min_cells}
+            if len(keep_ids) == len(counts):
+                return mesh          # nothing to remove
+            # Build cell-based boolean mask and extract
+            keep_mask = np.isin(region_ids, list(keep_ids))
+            return conn.extract_cells(np.where(keep_mask)[0])
+        except Exception:
+            return mesh   # on any error, fall back to unfiltered mesh
 
     # ---- build scene ----
     pl = pv.Plotter(off_screen=True, window_size=list(window_size))
@@ -745,14 +823,14 @@ def plot_field_3d(
         if is_bipolar:
             # Dual isosurfaces: +threshold (red) and -threshold (blue)
             try:
-                iso_pos = grid.contour([threshold], scalars=name)
+                iso_pos = _clean_iso(grid.contour([threshold], scalars=name))
                 if iso_pos.n_points > 0:
                     pl.add_mesh(iso_pos, color="#CC3333", opacity=0.6,
                                 smooth_shading=True, label=f"+{threshold:.2e}")
             except Exception:
                 pass
             try:
-                iso_neg = grid.contour([-threshold], scalars=name)
+                iso_neg = _clean_iso(grid.contour([-threshold], scalars=name))
                 if iso_neg.n_points > 0:
                     pl.add_mesh(iso_neg, color="#3333CC", opacity=0.6,
                                 smooth_shading=True, label=f"−{threshold:.2e}")
@@ -761,7 +839,7 @@ def plot_field_3d(
         else:
             # Single isosurface at threshold, coloured hot-orange
             try:
-                iso = grid.contour([threshold], scalars=name)
+                iso = _clean_iso(grid.contour([threshold], scalars=name))
                 if iso.n_points > 0:
                     pl.add_mesh(iso, color="#E06030", opacity=0.7,
                                 smooth_shading=True,

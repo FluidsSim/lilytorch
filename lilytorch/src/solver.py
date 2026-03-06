@@ -276,10 +276,16 @@ class FluidSolver:
         if self.skip_projection:
             print(">>> PROJECTION DISABLED — running without pressure correction <<<")
 
+        self.poisson_method = solver.get("poisson_method", "multigrid")
+        assert self.poisson_method in ("multigrid", "fft"), \
+            f"Unknown poisson_method '{self.poisson_method}'. Choose 'multigrid' or 'fft'."
+        print(f"Poisson solver: {self.poisson_method}")
+
           # ===== create folder for frames' storage ====
         self.save_frames      = output["save_frames"]
         self.save_every       = output["save_every"]
         self.save_uv          = output["save_uv"]
+        self.save_vtk         = output.get("save_vtk", False)
         self.vmin             = output["vmin"]
         self.vmax             = output["vmax"]
         self.n_quiver_spacing = 2**3
@@ -379,6 +385,18 @@ class FluidSolver:
         if self.ndim == 3:
             self.w0 = torch.zeros(self.grid_shape, device=self.device, dtype=self.dtype)
 
+        # Mask the initial velocity inside the body using the smooth BDIM
+        # mask (mu0 = 1 outside, 0 inside).  Without this, the uniform
+        # freestream fills the body interior and the first BDIM step creates
+        # an impulsive discontinuity that produces a spurious pressure spike
+        # and artificial vorticity at t=0.
+        if hasattr(self, "composite_body") and hasattr(self.composite_body, "sdf_val"):
+            mu0, _ = self.composite_body.mu_funcs(self.composite_body.sdf_val)
+            self.u0 = self.u0 * mu0
+            self.v0 = self.v0 * mu0
+            if self.ndim == 3:
+                self.w0 = self.w0 * mu0
+
 
     def compute_dpdx(self,p):
         """
@@ -468,25 +486,54 @@ class FluidSolver:
         else:
             # 3D vorticity magnitude
             h = self.h
+            # Start at index 2 so backward differences never reach into
+            # ghost cells (index 0), which can have BC-inconsistent values
+            # and produce spurious boundary vorticity.
             # omega_x = dw/dy - dv/dz
             ox = torch.zeros_like(u)
-            ox[1:-1,1:-1,1:-1] = (
-                (w[1:-1,1:-1,1:-1] - w[1:-1,:-2,1:-1])/h -
-                (v[1:-1,1:-1,1:-1] - v[1:-1,1:-1,:-2])/h
+            ox[2:-2,2:-2,2:-2] = (
+                (w[2:-2,2:-2,2:-2] - w[2:-2,1:-3,2:-2])/h -
+                (v[2:-2,2:-2,2:-2] - v[2:-2,2:-2,1:-3])/h
             )
             # omega_y = du/dz - dw/dx
             oy = torch.zeros_like(u)
-            oy[1:-1,1:-1,1:-1] = (
-                (u[1:-1,1:-1,1:-1] - u[1:-1,1:-1,:-2])/h -
-                (w[1:-1,1:-1,1:-1] - w[:-2,1:-1,1:-1])/h
+            oy[2:-2,2:-2,2:-2] = (
+                (u[2:-2,2:-2,2:-2] - u[2:-2,2:-2,1:-3])/h -
+                (w[2:-2,2:-2,2:-2] - w[1:-3,2:-2,2:-2])/h
             )
             # omega_z = dv/dx - du/dy
             oz = torch.zeros_like(u)
-            oz[1:-1,1:-1,1:-1] = (
-                (v[1:-1,1:-1,1:-1] - v[:-2,1:-1,1:-1])/h -
-                (u[1:-1,1:-1,1:-1] - u[1:-1,:-2,1:-1])/h
+            oz[2:-2,2:-2,2:-2] = (
+                (v[2:-2,2:-2,2:-2] - v[1:-3,2:-2,2:-2])/h -
+                (u[2:-2,2:-2,2:-2] - u[2:-2,1:-3,2:-2])/h
             )
             return torch.sqrt(ox**2 + oy**2 + oz**2)
+
+    def vorticity_components(self, u, v, w):
+        """
+        Return the three signed vorticity components (omega_x, omega_y, omega_z)
+        as a dict, plus the magnitude.  Only meaningful in 3-D.
+        """
+        h = self.h
+        # Start at index 2 so backward differences never reach into
+        # ghost cells (index 0), avoiding spurious boundary vorticity.
+        ox = torch.zeros_like(u)
+        ox[2:-2,2:-2,2:-2] = (
+            (w[2:-2,2:-2,2:-2] - w[2:-2,1:-3,2:-2])/h -
+            (v[2:-2,2:-2,2:-2] - v[2:-2,2:-2,1:-3])/h
+        )
+        oy = torch.zeros_like(u)
+        oy[2:-2,2:-2,2:-2] = (
+            (u[2:-2,2:-2,2:-2] - u[2:-2,2:-2,1:-3])/h -
+            (w[2:-2,2:-2,2:-2] - w[1:-3,2:-2,2:-2])/h
+        )
+        oz = torch.zeros_like(u)
+        oz[2:-2,2:-2,2:-2] = (
+            (v[2:-2,2:-2,2:-2] - v[1:-3,2:-2,2:-2])/h -
+            (u[2:-2,2:-2,2:-2] - u[2:-2,1:-3,2:-2])/h
+        )
+        return {"omega_x": ox, "omega_y": oy, "omega_z": oz,
+                "omega_mag": torch.sqrt(ox**2 + oy**2 + oz**2)}
 
     def forces_method1(self, u, v, p, iteration):
 
@@ -1423,38 +1470,53 @@ class FluidSolver:
         else:
             self.div  = self.divergence(u, v, w_vel)
 
-        c = torch.ones_like(u)
         coeff = w*self.dt/self.rho
-        ch = coeff*self.mu0_all_u
-        cv = coeff*self.mu0_all_v
 
-        if self.ndim == 2:
-            p, _    = self.poisson_solver.solve_multigrid(
-                self.div[1:-1,1:-1],
-                torch.zeros_like(u),
-                coeff*c,
-                ch = ch[1:,1:-1],
-                cv = cv[1:-1,1:],
-            )
-            # ====== projection step ======
-            (p_x, p_y) = self.gradient(p)
-            u          = u - ch * p_x
-            v          = v - cv * p_y
+        if self.poisson_method == "fft":
+            # ---- FFT solver (constant-coefficient Poisson) ----
+            p = self.poisson_solverFFT.solve(self.div / coeff)
+            if self.ndim == 2:
+                (p_x, p_y) = self.gradient(p)
+                u = u - coeff * p_x
+                v = v - coeff * p_y
+            else:
+                (p_x, p_y, p_z) = self.gradient(p)
+                u     = u - coeff * p_x
+                v     = v - coeff * p_y
+                w_vel = w_vel - coeff * p_z
         else:
-            cw = coeff * self.mu0_all_w
-            p, _ = self.poisson_solver.solve_multigrid(
-                self.div[1:-1, 1:-1, 1:-1],
-                torch.zeros_like(u),
-                coeff * c,
-                ch=ch[1:, 1:-1, 1:-1],
-                cv=cv[1:-1, 1:, 1:-1],
-                cw=cw[1:-1, 1:-1, 1:],
-            )
-            # ====== projection step ======
-            (p_x, p_y, p_z) = self.gradient(p)
-            u    = u - ch * p_x
-            v    = v - cv * p_y
-            w_vel = w_vel - cw * p_z
+            # ---- Multigrid solver (variable-coefficient Poisson) ----
+            c = torch.ones_like(u)
+            ch = coeff*self.mu0_all_u
+            cv = coeff*self.mu0_all_v
+
+            if self.ndim == 2:
+                p, _    = self.poisson_solver.solve_multigrid(
+                    self.div[1:-1,1:-1],
+                    torch.zeros_like(u),
+                    coeff*c,
+                    ch = ch[1:,1:-1],
+                    cv = cv[1:-1,1:],
+                )
+                # ====== projection step ======
+                (p_x, p_y) = self.gradient(p)
+                u          = u - ch * p_x
+                v          = v - cv * p_y
+            else:
+                cw = coeff * self.mu0_all_w
+                p, _ = self.poisson_solver.solve_multigrid(
+                    self.div[1:-1, 1:-1, 1:-1],
+                    torch.zeros_like(u),
+                    coeff * c,
+                    ch=ch[1:, 1:-1, 1:-1],
+                    cv=cv[1:-1, 1:, 1:-1],
+                    cw=cw[1:-1, 1:-1, 1:],
+                )
+                # ====== projection step ======
+                (p_x, p_y, p_z) = self.gradient(p)
+                u    = u - ch * p_x
+                v    = v - cv * p_y
+                w_vel = w_vel - cw * p_z
 
         if self.ndim == 2:
             return (u, v, p)
@@ -1724,9 +1786,40 @@ class FluidSolver:
     # field_lambda receives (solver, u, v, p, w_vel) and returns a CPU tensor/array.
 
     DEFAULT_PLOT_SPECS = [
-        ("curl",       lambda s, u, v, p, w: s.vorticity(u, v, w).cpu(), None, None, True),
+        ("curl",       lambda s, u, v, p, w: (
+            s.vorticity(u, v, w).cpu() if s.ndim == 2
+            else s.vorticity_components(u, v, w)["omega_z"].cpu()
+        ), None, None, True),
         ("pressure",   lambda s, u, v, p, w: p.cpu(),                    None, None, True),
         ("divergence", lambda s, u, v, p, w: s.divergence(u, v, w).cpu(),None, None, False),
+    ]
+
+    # Additional specs used only for 3-D isosurface rendering.
+    # Signed vorticity components give much better 3-D visualisation
+    # than the magnitude (which loses rotational direction).
+    # We cache the vorticity dict on the solver so it's computed once per frame.
+    @staticmethod
+    def _cached_vort(s, u, v, w):
+        """Compute vorticity_components once per frame and cache on solver."""
+        if not hasattr(s, "_vort_cache") or s._vort_cache_id != id(u):
+            s._vort_cache = s.vorticity_components(u, v, w)
+            s._vort_cache_id = id(u)
+        return s._vort_cache
+
+    @staticmethod
+    def _vel_mag(s, u, v, w):
+        """Velocity magnitude.  u, v, w all share the same (Nx+2, Ny+2, Nz+2)
+        shape in this solver, so we can compute |V| element-wise.  The
+        O(dx/2) stagger offset is negligible for visualisation."""
+        return (u**2 + v**2 + w**2).sqrt()
+
+    DEFAULT_3D_ISO_SPECS = [
+        ("omega_x",    lambda s, u, v, p, w: FluidSolver._cached_vort(s, u, v, w)["omega_x"].cpu(), None, True),
+        ("omega_y",    lambda s, u, v, p, w: FluidSolver._cached_vort(s, u, v, w)["omega_y"].cpu(), None, True),
+        ("omega_z",    lambda s, u, v, p, w: FluidSolver._cached_vort(s, u, v, w)["omega_z"].cpu(), None, True),
+        ("omega_mag",  lambda s, u, v, p, w: FluidSolver._cached_vort(s, u, v, w)["omega_mag"].cpu(), None, True),
+        ("vel_mag",    lambda s, u, v, p, w: FluidSolver._vel_mag(s, u, v, w).cpu(),                 None,   True),
+        ("pressure",   lambda s, u, v, p, w: p.cpu(),                                                None,   True),
     ]
 
     def plotting_and_saving(self, u, v, p, iteration, *, w_vel=None, check_termination=True):
@@ -1772,22 +1865,33 @@ class FluidSolver:
                     )
 
                 # ---- VTK export (3-D only) ----
-                vtk_fields = {"u": u.cpu().numpy(), "v": v.cpu().numpy(), "p": p.cpu().numpy()}
-                if w_vel is not None:
-                    vtk_fields["w"] = w_vel.cpu().numpy()
-                plotting.save_vtk(vtk_fields, coords, iteration, self.save_path)
+                if self.save_vtk:
+                    vtk_fields = {"u": u.cpu().numpy(), "v": v.cpu().numpy(), "p": p.cpu().numpy()}
+                    if w_vel is not None:
+                        vtk_fields["w"] = w_vel.cpu().numpy()
+                    plotting.save_vtk(vtk_fields, coords, iteration, self.save_path)
 
                 # ---- 3-D isosurface renders ----
                 sdf_np = None
                 if hasattr(self, "composite_body") and hasattr(self.composite_body, "sdf_val"):
                     sdf_np = self.composite_body.sdf_val.cpu().numpy()
-                for (name, field_fn, vmin, vmax, _show_body) in specs:
+                iso_specs = getattr(self, "iso_3d_specs",
+                                    self.DEFAULT_3D_ISO_SPECS if self.ndim == 3
+                                    else specs)
+                for iso_entry in iso_specs:
+                    name, field_fn = iso_entry[0], iso_entry[1]
+                    # iso_entry format: (name, field_fn, iso_thresh, show_body)
+                    # iso_thresh can be: None (auto), a float, or "vmax" (use self.vmax)
+                    iso_thresh = iso_entry[2] if len(iso_entry) > 2 else None
+                    if iso_thresh == "vmax":
+                        iso_thresh = getattr(self, "vmax", None)
                     field = field_fn(self, u, v, p, w_vel)
                     field_np = field.detach().numpy() if hasattr(field, 'detach') else np.asarray(field)
                     plotting.plot_field_3d(
                         field_np, coords,
                         name, iteration, self.save_path,
                         sdf_3d=sdf_np,
+                        iso_value=iso_thresh,
                     )
 
         # ---- raw data save ----

@@ -182,7 +182,59 @@ Four git submodules from [farmsim](https://github.com/farmsim), pinned to the `a
 | matplotlib / OpenCV | Visualization and video generation |
 | PETSc / petsc4py | Parallel sparse Poisson solver (optional) |
 
+## Generating Videos from Simulation Output
+
+After a simulation run, the solver saves PNG frames for each field (vorticity, pressure, velocity magnitude, etc.) into sub-folders under the output directory. Use `video_from_png.py` to assemble these frames into MP4 videos.
+
+### Basic Usage
+
+```bash
+# Generate videos for ALL fields in a specific run directory
+python lilytorch/src/video_from_png.py /path/to/save_path/2026-03-05_12-00-00/
+
+# Pass the parent save_path — the script auto-picks the latest run
+python lilytorch/src/video_from_png.py /path/to/save_path/
 ```
+
+### Selecting Specific Fields
+
+```bash
+# Only generate videos for selected fields
+python lilytorch/src/video_from_png.py /path/to/run_dir --fields omega_z_3d vel_mag_3d pressure_3d
+```
+
+Available field names depend on the simulation (2D vs 3D). Common ones include:
+- **2D:** `omega_z`, `vel_mag`, `pressure`
+- **3D:** `omega_x_3d`, `omega_y_3d`, `omega_z_3d`, `omega_mag_3d`, `vel_mag_3d`, `pressure_3d`
+
+### Options
+
+| Flag | Default | Description |
+|---|---|---|
+| `--fields F1 F2 ...` | all | Only generate videos for the listed sub-folders |
+| `--fps N` | auto | Override frame rate (by default computed from `dt * save_every`) |
+| `--slow-factor S` | 1.0 | Real-time multiplier. 1.0 = physical time equals video time |
+| `--no-overlay` | off | Disable the simulation-time text overlay on each frame |
+| `--crf N` | 18 | H.264 quality (lower = better; 18 ≈ visually lossless) |
+
+### Examples
+
+```bash
+# Slow-motion (5× slower than real time), high quality
+python lilytorch/src/video_from_png.py /path/to/run_dir --slow-factor 5.0 --crf 15
+
+# Fixed 30 FPS, no timestamp overlay
+python lilytorch/src/video_from_png.py /path/to/run_dir --fps 30 --no-overlay
+
+# 3D cylinder wake — only vorticity z-component and velocity magnitude
+python lilytorch/src/video_from_png.py /data/andreaferrario/ns_data/cylinder_3d_Re200/ --fields omega_z_3d vel_mag_3d
+```
+
+### Notes
+
+- The script reads `parameters.yaml` from the run directory to compute the FPS from `dt` and `save_every`. If the file is missing, it defaults to 10 FPS.
+- **ffmpeg** is the preferred backend (H.264, concat demuxer, optional drawtext overlay). If ffmpeg is not installed, the script falls back to OpenCV `VideoWriter`.
+- Output videos are saved alongside the PNG sub-folders inside the run directory (e.g. `omega_z_3d.mp4`).
 
 
 

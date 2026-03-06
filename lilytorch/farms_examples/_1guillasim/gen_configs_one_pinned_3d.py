@@ -9,16 +9,15 @@ from lilytorch.integration.gen_pool_sdf import create_pool_sdf
 import subprocess
 import numpy as np
 
-stack_folder      = os.path.join(save_path, "2guilla","fb_on")
 stack_folder      = save_path
 data_folder       = os.path.join(lilytorch_repo_root, 'farms_examples', '_1guillasim')
-bdim_handler_path = "lilytorch.farms_examples._1guillasim.BDIMhandler.BDIMhandler"
+bdim_handler_path = "lilytorch.farms_examples._1guillasim.BDIMhandler3D.BDIMhandler3D"
 
 
 nthreads = 16
-use_gpu  = False
-use_bdim = False
-headless = False
+use_gpu  = True
+use_bdim = True
+headless = True
 fast     = False
 
 use_drag = not use_bdim
@@ -34,49 +33,33 @@ animats_pars = [
     "control_type"   : "position",
     "gains"          : [50.0, .4, 0],
     "spawn_mode"     : SpawnMode.ROTZ,
-    "pose"           : [-0.65, 0, 0.2, 0, 0, 0],
+    "pose"           : [-0.65, 0, 0., 0, 0, 0],
     "controller_path": "lilytorch.farms_examples._1guillasim.pd_controller_fixed_neck.PositionController",
     "control_pars"   : {'freq': 1, 'twl': 0.571429*14, 'amp': 15.0},
     },
 ]
 
-
-# u_inlet = 0.115971
-
 u_inlet = 0.215971
 
-# control_type = "position"
-# controller_path      = "lilytorch.farms_examples._1guillasim.pd_controller.PositionController"
-# gains = [20.0, 3, 0]
-# control_pars = {'freq': 1, 'twl': 12, 'amp': 20.0}
-
-
-
-Nx           = 1024
-Ny           = 256
+# ---- 3-D grid --------------------------------------------------------
+Nx           = 512
+Ny           = 128
+Nz           = 128
 xmin         = -0.9
 xmax         = 1.5
 ymin         = -0.3
 ymax         = 0.3
+zmin         = -0.3
+zmax         = 0.3
 
 density = 800.0
-# nu      = 500.0e-6
 nu    = 1.0e-6
-
-
-# timestep     = 0.01
-# fluid_method = "implicit"
-# save_every   = 50
-# n_iterations = 1001
 
 timestep     = 0.0005
 convection_method = "quick"
-save_frames  = False
+save_frames  = True
 save_every   = 200
 n_iterations = 20001
-
-
-save_frames  = True
 save_uv      = False
 
 def gen_animat_config(output_folder):
@@ -165,7 +148,6 @@ def gen_animat_config(output_folder):
         animat_dict["control"]["sensors"]["contacts"] = [
             (link_name,'') for link_name in link_names
         ]
-        # animat_dict["control"]["sensors"]["contacts"] = []
         animat_dict["control"]["sensors"]["xfrc"] = link_names
         animat_dict["control"]["sensors"]["muscles"] = []
         animat_dict["control"]["sensors"]["adhesions"] = []
@@ -206,7 +188,6 @@ def gen_arena_config(output_folder):
     create_pool_sdf(xmin, xmax, ymin, ymax, wall_thickness=0.3, wall_height=0.3, plotting=False)
 
     arena_dict = {
-    #    "sdf": os.path.join(sdfs_path, "arena_flat_v0", "sdf", "arena_flat.sdf"),
        "sdf": os.path.join(sdfs_path, "pool", "sdf", "pool.sdf"),
        "spawn": {
             "loader"  : 0,
@@ -310,16 +291,6 @@ def gen_simulation_config(output_folder):
                     "log_path": os.path.join(output_folder, "output", "nn_data.hdf5"),
                 }
             },
-            # {
-            # "loader": "farms_mujoco.simulation.extensions.CameraFollower",
-            # "config": {
-            #     "animat_id": 0,
-            #     "distance": 1.0,
-            #     "azimuth": 0,
-            #     "elevation": -90,
-            #     "angular_velocity": 0
-            # }
-            # },
             {
             "loader": "farms_mujoco.sensors.camera.CameraRecording",
             "config": {
@@ -334,13 +305,7 @@ def gen_simulation_config(output_folder):
                 "offset": [0, 0, 0.0],
                 "resolution": [1280, 720]
             }
-            }            # {
-            #     "loader": "farms_mujoco.simulation.extensions.TrailCoMViewer",
-            #     "config": {
-            #         "width": 0.1,
-            #         "rgba" : [1.0, 0.0, 0.0, 1.0]
-            #     }
-            # }
+            }
         ]
     }
 
@@ -357,39 +322,44 @@ def gen_simulation_config(output_folder):
                     "nthreads"               : nthreads,
                     "Nx"                     : Nx,
                     "Ny"                     : Ny,
+                    "Nz"                     : Nz,
                     "xmin"                   : xmin,
                     "xmax"                   : xmax,
                     "ymin"                   : ymin,
                     "ymax"                   : ymax,
+                    "zmin"                   : zmin,
+                    "zmax"                   : zmax,
                     "convection_method"      : convection_method,
                     "dt"                     : 0.0001,
                     "nt"                     : 800000,
                     "nu"                     : nu,
                     "rho"                    : 1.0e+3,
-                    "poisson_tol"            : 1.0e-7,
-                    "poisson_max_cycles"     : 5,
+                    "poisson_tol"            : 1.0e-4,
+                    "poisson_max_cycles"     : 30,
                     "poisson_max_mgcg_cycles": 3,
                     "jacobi_weight"          : 0.7,
-                    "poisson_nsmoothing"     : 10,
+                    "poisson_nsmoothing"     : 5,
                     "poisson_verbose"        : False,
                     "poisson_folder"         : os.path.join(data_folder, "data")
                 },
                 "boundary_conditions": {
-                    "BC_type_u"  : ["D", "D", "N", "N"],
-                    "BC_values_u": [u_inlet, u_inlet, 0],
-                    "BC_type_v"  : ["N", "N", "D", "D"],
-                    "BC_values_v": [0, 0, 0, 0]
+                    "BC_type_u"  : ["D", "D", "N", "N", "N", "N"],
+                    "BC_values_u": [u_inlet, u_inlet, 0, 0, 0, 0],
+                    "BC_type_v"  : ["N", "N", "D", "D", "N", "N"],
+                    "BC_values_v": [0, 0, 0, 0, 0, 0],
+                    "BC_type_w"  : ["N", "N", "N", "N", "D", "D"],
+                    "BC_values_w": [0, 0, 0, 0, 0, 0],
                 },
                 "body": {
                     "type"           : "multi_animat",
                     "sdf_folder"     : None,
-                    "plotting"       : True,
-                    "compute_interp" : True,
-                    "plotting_meshes": True,
+                    "plotting"       : False,
+                    "compute_interp" : False,
+                    "plotting_meshes": False,
                     "save_folder"    : os.path.join(data_folder, "interp_data"),
                     "update_maps"    : {
                         "rotation"   : "None",
-                        "translation": [None, None]
+                        "translation": [None, None, None]
                     },
                     "suit"     : 0.0,
                     "convexify": True,
@@ -445,10 +415,6 @@ def single_run():
     os.chdir(output_folder)
     subprocess.run(['bash', 'run.sh'])
 
-    # import sys
-    # from farms_sim.farmsim import main
-    # sys.argv = ['farmsim', '--experiment_config', 'experiment_config.yaml']
-    # main()
 
 if __name__ == "__main__":
 

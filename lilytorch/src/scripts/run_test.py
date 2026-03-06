@@ -57,7 +57,7 @@ if __name__ == "__main__":
         # Default: run both examples shipped alongside this script
         configs = [
             # os.path.join(SCRIPT_DIR, "flow_past_circle_2d.yaml"),
-            os.path.join(SCRIPT_DIR, "flow_past_sphere_3d.yaml"),
+            os.path.join(SCRIPT_DIR, "flow_past_cylinder_3d.yaml"),
         ]
 
     for cfg in configs:
