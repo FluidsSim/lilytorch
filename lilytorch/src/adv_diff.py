@@ -214,6 +214,9 @@ class AdvDiffSolver:
             self.BC_type_w   = self._bc_types[2]
             self.BC_values_w = self._bc_values[2]
 
+        # ---- precompute BC operations (avoid per-call allocations) ---
+        self._bc_neumann_ops, self._bc_dirichlet_ops = self._build_bc_ops()
+
         # ---- method dispatch -----------------------------------------
         _schemes = {
             "quick": quick, "abdquickest": abdquickest,
@@ -231,13 +234,6 @@ class AdvDiffSolver:
                 f"Unknown convection method '{method}'. Choose from: "
                 f"{sorted(set(list(_schemes.keys()) + ['semi-lagrangian', 'implicit']))}"
             )
-
-        # ---- staggered-coordinate meshgrids (backward-compat) --------
-        stag = [c - h / 2 for c, h in zip(self.coords, self.dh)]
-        if self.ndim >= 2:
-            self.X_u,  self.Y_u  = torch.meshgrid(stag[0], self.coords[1], indexing="ij")
-            self.X_v,  self.Y_v  = torch.meshgrid(self.coords[0], stag[1], indexing="ij")
-            self.X_cc, self.Y_cc = torch.meshgrid(stag[0], stag[1], indexing="ij")
 
         print(f"Using the {method} method for the adv-diff equation ({self.ndim}D)")
 
@@ -430,36 +426,63 @@ class AdvDiffSolver:
     # =================================================================
     # Boundary conditions  (dimension-agnostic)
     # =================================================================
+    def _build_bc_ops(self):
+        """Precompute BC operations as two flat lists (run once at init).
+
+        Reproduces the original two-pass semantics exactly:
+          1. Neumann zero-gradient copy on every ghost face
+          2. Dirichlet overwrite on specified faces
+
+        Returns ``(neumann_ops, dirichlet_ops)`` where each entry is a
+        tuple of precomputed index tuples — no allocations or string
+        comparisons needed at runtime.
+        """
+        ndim = self.ndim
+        n_components = len(self._bc_types)
+        neumann_ops   = []   # (component, dst_idx, src_idx)
+        dirichlet_ops = []   # (component, dst_idx, value)
+
+        for i in range(n_components):
+            bc_t = self._bc_types[i]
+            bc_v = self._bc_values[i]
+
+            # --- pass 1: Neumann on every face ---
+            for d in range(ndim):
+                dst_lo = tuple(0  if k == d else slice(None) for k in range(ndim))
+                src_lo = tuple(1  if k == d else slice(None) for k in range(ndim))
+                neumann_ops.append((i, dst_lo, src_lo))
+
+                dst_hi = tuple(-1 if k == d else slice(None) for k in range(ndim))
+                src_hi = tuple(-2 if k == d else slice(None) for k in range(ndim))
+                neumann_ops.append((i, dst_hi, src_hi))
+
+            # --- pass 2: Dirichlet overwrite where specified ---
+            for face in range(2 * ndim):
+                if bc_t[face] == "D":
+                    d    = face // 2
+                    side = face % 2          # 0 = lo, 1 = hi
+                    idx  = tuple(
+                        (1 if side == 0 else -1) if k == d else slice(None)
+                        for k in range(ndim)
+                    )
+                    dirichlet_ops.append((i, idx, bc_v[face]))
+
+        return neumann_ops, dirichlet_ops
+
     def set_BCs(self, *vel):
         """Apply Dirichlet / Neumann BCs on the ghost layer.
 
         Face ordering per component:
             (dim0_lo, dim0_hi, dim1_lo, dim1_hi, [dim2_lo, dim2_hi])
         i.e. (west, east, south, north, [bottom, top]) in 3-D.
+
+        Uses precomputed ``_bc_ops`` — no allocations or string
+        comparisons at runtime.
         """
-        ndim = self.ndim
-        for i, phi in enumerate(vel):
-            bc_t = self._bc_types[i]
-            bc_v = self._bc_values[i]
-
-            # Neumann default (zero-gradient) on every face
-            for d in range(ndim):
-                dst_lo = [slice(None)] * ndim; dst_lo[d] = 0
-                src_lo = [slice(None)] * ndim; src_lo[d] = 1
-                phi[tuple(dst_lo)] = phi[tuple(src_lo)]
-
-                dst_hi = [slice(None)] * ndim; dst_hi[d] = -1
-                src_hi = [slice(None)] * ndim; src_hi[d] = -2
-                phi[tuple(dst_hi)] = phi[tuple(src_hi)]
-
-            # Dirichlet overwrite where specified
-            for face in range(2 * ndim):
-                if bc_t[face] == "D":
-                    d    = face // 2
-                    side = face % 2   # 0 = lo, 1 = hi
-                    idx  = [slice(None)] * ndim
-                    idx[d] = 1 if side == 0 else -1
-                    phi[tuple(idx)] = bc_v[face]
+        for comp, dst, src in self._bc_neumann_ops:
+            vel[comp][dst] = vel[comp][src]
+        for comp, dst, val in self._bc_dirichlet_ops:
+            vel[comp][dst] = val
 
     # =================================================================
     # CFL helper
@@ -529,7 +552,9 @@ if __name__ == "__main__":
     fig, axes = pyplot.subplots(1, len(methods) + 1,
                                 figsize=(5 * (len(methods) + 1), 5))
     solver_demo = make_solver("quick")
-    X, Y = solver_demo.X_cc, solver_demo.Y_cc
+    stag_x = x - float(x[1] - x[0]) / 2
+    stag_y = y - float(y[1] - y[0]) / 2
+    X, Y = torch.meshgrid(stag_x, stag_y, indexing="ij")
     axes[0].contourf(X.cpu(), Y.cpu(), u0.cpu(), 20)
     axes[0].set_title("Initial")
 

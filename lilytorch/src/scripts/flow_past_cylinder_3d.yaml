@@ -1,6 +1,6 @@
 
 solver:
-  use_gpu           : False
+  use_gpu           : True
   nthreads          : 24
   Nx                : 256
   Ny                : 128
@@ -12,9 +12,10 @@ solver:
   zmin              : -1.0
   zmax              :  1.0
   nt                : 20000
-  nu                : 0.0027
+  nu                : 0.002
   rho               : 1.0
   dt                : 0.001
+  perturbation_amplitude : 0.01
   convection_method : "quick"
   skip_projection   : False
 

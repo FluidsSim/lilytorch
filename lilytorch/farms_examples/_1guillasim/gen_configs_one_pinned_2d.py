@@ -11,13 +11,13 @@ import numpy as np
 
 stack_folder      = save_path
 data_folder       = os.path.join(lilytorch_repo_root, 'farms_examples', '_1guillasim')
-bdim_handler_path = "lilytorch.farms_examples._1guillasim.BDIMhandler3D.BDIMhandler3D"
+bdim_handler_path = "lilytorch.farms_examples._1guillasim.BDIMhandler.BDIMhandler"
 
 
 nthreads = 16
-use_gpu  = True
+use_gpu  = False
 use_bdim = True
-headless = False  # must be False for FlowViewer (MuJoCo GUI)
+headless = False
 fast     = False
 
 use_drag = not use_bdim
@@ -29,28 +29,25 @@ constant_drags = [
 animats_pars = [
     {
     "model_name"     : "1guilla",
-    "sdf_name"       : "1guilla.sdf",
+    "sdf_name"       : "1guilla_link1_base.sdf",
     "control_type"   : "position",
-    "gains"          : [100.0, 4.0, 0],
+    "gains"          : [50.0, .4, 0],
     "spawn_mode"     : SpawnMode.ROTZ,
     "pose"           : [-0.65, 0, 0., 0, 0, 0],
-    "controller_path": "lilytorch.farms_examples._1guillasim.pd_controller.PositionController",
-    "control_pars"   : {'freq': 1, 'twl': 12, 'amp': 30.0},
+    "controller_path": "lilytorch.farms_examples._1guillasim.pd_controller_fixed_neck.PositionController",
+    "control_pars"   : {'freq': 1, 'twl': 0.571429*14, 'amp': 15.0},
     },
 ]
 
 u_inlet = 0.215971
 
-# ---- 3-D grid --------------------------------------------------------
+# ---- 2-D grid --------------------------------------------------------
 Nx           = 512
 Ny           = 128
-Nz           = 128
 xmin         = -0.9
 xmax         = 1.5
 ymin         = -0.3
 ymax         = 0.3
-zmin         = -0.3
-zmax         = 0.3
 
 density = 800.0
 nu    = 1.0e-6
@@ -59,7 +56,7 @@ timestep     = 0.0005
 convection_method = "quick"
 save_frames  = True
 save_every   = 200
-n_iterations = 201
+n_iterations = 20001
 save_uv      = False
 
 # note - to compare the experimental values that were normalized
@@ -295,6 +292,21 @@ def gen_simulation_config(output_folder):
                     "log_path": os.path.join(output_folder, "output", "nn_data.hdf5"),
                 }
             },
+            {
+            "loader": "farms_mujoco.sensors.camera.CameraRecording",
+            "config": {
+                "path": os.path.join(output_folder, "output", "video.mp4"),
+                "animat_id": None,
+                "fps": 30,
+                "speed": 1.0,
+                "azimuth": 0,
+                "elevation": -90,
+                "distance": 2,
+                "angular_velocity": 0,
+                "offset": [0, 0, 0.0],
+                "resolution": [1280, 720]
+            }
+            }
         ]
     }
 
@@ -311,13 +323,10 @@ def gen_simulation_config(output_folder):
                     "nthreads"               : nthreads,
                     "Nx"                     : Nx,
                     "Ny"                     : Ny,
-                    "Nz"                     : Nz,
                     "xmin"                   : xmin,
                     "xmax"                   : xmax,
                     "ymin"                   : ymin,
                     "ymax"                   : ymax,
-                    "zmin"                   : zmin,
-                    "zmax"                   : zmax,
                     "convection_method"      : convection_method,
                     "dt"                     : 0.0001,
                     "nt"                     : 800000,
@@ -332,12 +341,10 @@ def gen_simulation_config(output_folder):
                     "poisson_folder"         : os.path.join(data_folder, "data")
                 },
                 "boundary_conditions": {
-                    "BC_type_u"  : ["D", "D", "N", "N", "N", "N"],
-                    "BC_values_u": [u_inlet, u_inlet, 0, 0, 0, 0],
-                    "BC_type_v"  : ["N", "N", "D", "D", "N", "N"],
-                    "BC_values_v": [0, 0, 0, 0, 0, 0],
-                    "BC_type_w"  : ["N", "N", "N", "N", "D", "D"],
-                    "BC_values_w": [0, 0, 0, 0, 0, 0],
+                    "BC_type_u"  : ["D", "D", "N", "N"],
+                    "BC_values_u": [u_inlet, u_inlet, 0, 0],
+                    "BC_type_v"  : ["N", "N", "D", "D"],
+                    "BC_values_v": [0, 0, 0, 0]
                 },
                 "body": {
                     "type"           : "multi_animat",
@@ -345,10 +352,10 @@ def gen_simulation_config(output_folder):
                     "plotting"       : False,
                     "compute_interp" : False,
                     "plotting_meshes": False,
-                    "save_folder"    : os.path.join(data_folder, "interp_data_3d"),
+                    "save_folder"    : os.path.join(data_folder, "interp_data_2d"),
                     "update_maps"    : {
                         "rotation"   : "None",
-                        "translation": [None, None, None]
+                        "translation": [None, None]
                     },
                     "suit"     : 0.0,
                     "convexify": True,
@@ -367,42 +374,6 @@ def gen_simulation_config(output_folder):
             }
             }
         ]
-
-        # ── Flow visualisation in MuJoCo viewer (requires headless=False) ──
-        simulation_dict["extensions"] += [
-            {
-                "loader": "lilytorch.integration.flow_viewer.FlowViewer",
-                "config": {
-                    "field"        : "omega_z",
-                    "max_spheres"  : 4000,
-                    "iso_fraction" : 0.15,
-                    "smooth_sigma" : 2.5,
-                    "crop_boundary": 3,
-                    "sphere_size"  : 0.02,
-                    "update_every" : None,
-                }
-            }
-        ]
-
-    # ── CameraRecording MUST come last so it captures frames
-    # ── after FluidExtension + FlowViewer have updated the scene ──
-    simulation_dict["extensions"] += [
-        {
-            "loader": "farms_mujoco.sensors.camera.CameraRecording",
-            "config": {
-                "path": os.path.join(output_folder, "output", "video.mp4"),
-                "animat_id": None,
-                "fps": 30,
-                "speed": 1.0,
-                "azimuth": 0,
-                "elevation": -90,
-                "distance": 2,
-                "angular_velocity": 0,
-                "offset": [0, 0, 0.0],
-                "resolution": [1280, 720]
-            }
-        }
-    ]
 
     pyobject2yaml(
         os.path.join(output_folder, 'simulation_config.yaml'),
@@ -439,7 +410,6 @@ def single_run():
     gen_sh_config(output_folder)
     os.chdir(output_folder)
     subprocess.run(['bash', 'run.sh'])
-
 
 if __name__ == "__main__":
 

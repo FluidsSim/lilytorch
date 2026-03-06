@@ -185,6 +185,9 @@ def _make_video_ffmpeg(pngs, out_mp4, fps, dt, save_every, time_overlay, crf):
         "-i", str(concat_file),
     ]
 
+    # pad to even dimensions (libx264 requires width & height divisible by 2)
+    pad_filter = "pad=ceil(iw/2)*2:ceil(ih/2)*2"
+
     # Optional time overlay using drawtext filter
     if time_overlay and dt is not None and save_every is not None:
         # Build the time expression: t_sim = frame_number * save_every * dt
@@ -196,7 +199,9 @@ def _make_video_ffmpeg(pngs, out_mp4, fps, dt, save_every, time_overlay, crf):
             f"x=(w-text_w)/2:y=30:"
             f"borderw=2:bordercolor=white"
         )
-        cmd += ["-vf", drawtext]
+        cmd += ["-vf", f"{pad_filter},{drawtext}"]
+    else:
+        cmd += ["-vf", pad_filter]
 
     cmd += [
         "-c:v", "libx264",

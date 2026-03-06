@@ -1,17 +1,3 @@
-# [submodule "lilytorch/FARMS_V2/farms_core"]
-# 	path = lilytorch/FARMS_V2/farms_core
-# 	url = git@github.com:ferrarioa5/farms_core.git
-# [submodule "lilytorch/FARMS_V2/farms_mujoco"]
-# 	path = lilytorch/FARMS_V2/farms_mujoco
-# 	url = git@github.com:ferrarioa5/farms_mujoco.git
-# [submodule "lilytorch/FARMS_V2/farms_sim"]
-# 	path = lilytorch/FARMS_V2/farms_sim
-# 	url = git@github.com:ferrarioa5/farms_sim.git
-# [submodule "lilytorch/FARMS_V2/farms_amphibious"]
-# 	path = lilytorch/FARMS_V2/farms_amphibious
-# 	url = git@github.com:ferrarioa5/farms_amphibious.git
-
-
 [submodule "lilytorch/FARMS_V2/farms_core"]
 	path = lilytorch/FARMS_V2/farms_core
 	url = git@github.com:farmsim/farms_core.git

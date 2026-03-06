@@ -1,6 +1,6 @@
 
 solver:
-  use_gpu           : True
+  use_gpu           : False
   nthreads          : 16
   Nx                : 256
   Ny                : 256
@@ -28,18 +28,18 @@ boundary_conditions:
   BC_type_u:
   - "D"
   - "D"
-  - "D"
-  - "D"
+  - "N"
+  - "N"
   BC_values_u:
   - 0.00275
   - 0.00275
   - 0.0
   - 0.0
   BC_type_v:
-  - "D"
-  - "D"
   - "N"
   - "N"
+  - "D"
+  - "D"
   BC_values_v:
   - 0
   - 0

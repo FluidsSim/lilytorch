@@ -6,7 +6,7 @@
 
 ## Overview
 
-Lilytorch solves the 2D incompressible Navier-Stokes equations on a Cartesian grid with immersed bodies represented via Signed Distance Functions (SDFs) using a second order Boundary Data Immersion Method. When coupled with FARMS/MuJoCo, the fluid solver runs alongside the multibody dynamics engine: at each timestep it reads body poses from MuJoCo, solves the fluid equations, computes hydrodynamic forces (pressure + viscous drag), and applies them back as external wrenches — achieving closed-loop fluid–structure coupling.
+Lilytorch solves the 2D/3D incompressible Navier-Stokes equations on a Cartesian grid with immersed bodies represented via Signed Distance Functions (SDFs) using a second order Boundary Data Immersion Method. When coupled with FARMS/MuJoCo, the fluid solver runs alongside the multibody dynamics engine: at each timestep it reads body poses from MuJoCo, solves the fluid equations, computes hydrodynamic forces (pressure + viscous drag), and applies them back as external wrenches — achieving closed-loop fluid–structure coupling.
 
 ### Architecture
 
@@ -78,6 +78,7 @@ YAML Config
 | Module | Description |
 |---|---|
 | `extensions.py` | `FluidExtension` — FARMS `TaskExtension` subclass that initializes the fluid solver at episode start and applies hydrodynamic forces at each `before_step`. Also includes `DataLogger` for HDF5 logging. |
+| `flow_viewer.py` | `FlowViewer` — FARMS `TaskExtension` that renders fluid fields (vorticity, pressure, velocity) as coloured spheres directly inside the MuJoCo viewer window. See [FlowViewer](#flowviewer--in-viewer-flow-visualisation). |
 | `gen_pool_sdf.py` | Generates SDF XML files defining rectangular pool arenas with collision walls for MuJoCo. |
 
 ### Utilities (`lilytorch/util/`)
@@ -235,6 +236,114 @@ python lilytorch/src/video_from_png.py /data/andreaferrario/ns_data/cylinder_3d_
 - The script reads `parameters.yaml` from the run directory to compute the FPS from `dt` and `save_every`. If the file is missing, it defaults to 10 FPS.
 - **ffmpeg** is the preferred backend (H.264, concat demuxer, optional drawtext overlay). If ffmpeg is not installed, the script falls back to OpenCV `VideoWriter`.
 - Output videos are saved alongside the PNG sub-folders inside the run directory (e.g. `omega_z_3d.mp4`).
+
+## FlowViewer — In-Viewer Flow Visualisation
+
+FlowViewer is a FARMS `TaskExtension` that renders a fluid field (e.g. vorticity, pressure, velocity magnitude) as coloured spheres directly inside the MuJoCo viewer window **and** in the recorded video, overlaid on the swimming animat. This gives real-time visual feedback of the flow during a coupled simulation without requiring a separate plotting window.
+
+Spheres are injected into both:
+- The **interactive viewer's** `user_scn` (visible in the MuJoCo GUI window).
+- The **CameraRecording** extension's offscreen renderer (visible in the saved MP4 video).
+
+### How It Works
+
+1. During `initialize_episode`, FlowViewer pre-allocates a fixed number of sphere geoms in the MuJoCo viewer's `user_scn`.
+2. At every `update_every` timesteps (defaults to the solver's `save_every`), it:
+   - Extracts the chosen scalar field from the fluid solver.
+   - Applies Gaussian smoothing and crops boundary cells.
+   - Masks out the body interior using the SDF.
+   - Finds grid points where the field exceeds `iso_fraction × peak|field|`.
+   - Sub-samples to the sphere budget and updates sphere positions and colours.
+3. **Bipolar fields** (vorticity components): positive values are red, negative values are blue.
+4. **Non-negative fields** (velocity magnitude, pressure): displayed in orange.
+
+### Prerequisites
+
+- FlowViewer must be listed **after** `FluidExtension` in the extensions list (it reads the solver state that `FluidExtension` computes in `before_step`).
+- A 3D fluid solver must be active (`w0` must exist); 2D simulations are skipped.
+- For the **interactive viewer**: set `headless: false`.
+- For the **recorded video**: include a `CameraRecording` extension in the extensions list. FlowViewer automatically patches its offscreen renderer.
+- Both modes work simultaneously when both the viewer and CameraRecording are present.
+
+### Configuration
+
+Add FlowViewer to the `extensions` list in your `gen_configs` file:
+
+```python
+extensions = [
+    # ... FluidExtension must come first ...
+    {
+        "loader": "lilytorch.integration.flow_viewer.FlowViewer",
+        "config": {
+            "field":         "omega_z",   # scalar field to display
+            "max_spheres":   4000,         # sphere budget (max visual geoms)
+            "iso_fraction":  0.15,         # threshold = fraction × peak |field|
+            "smooth_sigma":  2.5,          # Gaussian smoothing (grid cells)
+            "crop_boundary": 3,            # cells to crop from each domain face
+            "sphere_size":   0.004,        # radius of each sphere (MuJoCo units)
+            "update_every":  None,         # None → uses solver.save_every
+        },
+    },
+]
+```
+
+### Parameters
+
+| Parameter | Default | Description |
+|---|---|---|
+| `field` | `"omega_z"` | Which scalar field to visualise. See available fields below. |
+| `max_spheres` | `4000` | Maximum number of sphere geoms to allocate. MuJoCo's hard limit is 100 000 geoms per scene. Higher values give denser coverage but cost more rendering time. |
+| `iso_fraction` | `0.15` | Isosurface threshold as a fraction of the peak absolute field value. Lower values show more of the field; higher values show only the strongest features. |
+| `smooth_sigma` | `2.5` | Standard deviation (in grid cells) for Gaussian smoothing of the field before thresholding. Reduces noise and produces cleaner isosurfaces. Set to `0` to disable. |
+| `crop_boundary` | `3` | Number of grid cells to discard from each face of the domain. Removes boundary artefacts from the visualisation. |
+| `sphere_size` | `0.004` | Radius of each sphere in MuJoCo world units. Adjust relative to the body size for visual clarity. |
+| `update_every` | `None` | How often (in solver iterations) to refresh the spheres. `None` defaults to the solver's `save_every` value. |
+
+### Available Fields
+
+| Field name | Description | Colour scheme |
+|---|---|---|
+| `omega_x` | Vorticity x-component | Bipolar (red +, blue −) |
+| `omega_y` | Vorticity y-component | Bipolar (red +, blue −) |
+| `omega_z` | Vorticity z-component | Bipolar (red +, blue −) |
+| `omega_mag` | Vorticity magnitude | Orange |
+| `vel_mag` | Velocity magnitude | Orange |
+| `pressure` | Pressure field | Bipolar (red +, blue −) |
+
+### Example
+
+In `gen_configs_one_pinned_3d.py`:
+
+```python
+headless = False   # must be False for FlowViewer
+
+simulation_dict = {
+    # ... other config ...
+    "extensions": [
+        {
+            "loader": "lilytorch.integration.extensions.FluidExtension",
+            "config": { ... },
+        },
+        {
+            "loader": "lilytorch.integration.flow_viewer.FlowViewer",
+            "config": {
+                "field":        "omega_z",
+                "max_spheres":  4000,
+                "iso_fraction": 0.15,
+                "sphere_size":  0.004,
+            },
+        },
+    ],
+}
+```
+
+### Tuning Tips
+
+- **Too few / too many spheres visible?** Adjust `iso_fraction`. A value of `0.10` shows more of the wake; `0.25` highlights only the strongest vortices.
+- **Noisy / speckled appearance?** Increase `smooth_sigma` (e.g. `3.0`–`4.0`).
+- **Spheres too small or too large?** Scale `sphere_size` relative to your swimmer's body length.
+- **Slow rendering?** Reduce `max_spheres` or increase `update_every`.
+- **Want to see pressure instead of vorticity?** Change `field` to `"pressure"` or `"vel_mag"`.
 
 
 

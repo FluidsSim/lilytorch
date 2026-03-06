@@ -92,6 +92,10 @@ class _StaggeredGrids:
             self.stacked_xy_v = torch.stack((xv_flat, yv_flat, zv_flat))
             self.stacked_xy_w = torch.stack((xw_flat, yw_flat, zw_flat))
 
+        # Shared ones vector (same for every body on this grid)
+        n_pts = int(torch.tensor(self.grid_shape).prod().item())
+        self.ones_stacked = torch.ones(n_pts, device=x.device, dtype=x.dtype)
+
 
 # Module-level cache:  (data_ptr_x, data_ptr_y, data_ptr_z) -> _StaggeredGrids
 _grid_cache: dict[tuple, _StaggeredGrids] = {}
@@ -248,7 +252,7 @@ def compute_inertias_2d(sdf_fun, inside_mask, x, y, x_g, y_g, density=1000.0):
 
 
 
-def body_from_yaml(device, x, y, body_pars, eps=0.05, costum_update=None, starting_time=0, z=None, **kwargs):
+def body_from_yaml(device, x, y, body_pars, eps=0.05, costum_update=None, starting_time=0, z=None, grids=None, **kwargs):
 
     if costum_update is not None:
         update_map = costum_update
@@ -270,7 +274,8 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, costum_update=None, starti
             update_map,
             z=z,
             eps=eps,
-            plotting=plotting
+            plotting=plotting,
+            grids=grids,
         )
 
     elif type == "composite_analytical":
@@ -288,7 +293,8 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, costum_update=None, starti
             ],
             z=z,
             eps=eps,
-            plotting=plotting
+            plotting=plotting,
+            grids=grids,
         )
 
     elif type == "mesh":
@@ -305,7 +311,8 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, costum_update=None, starti
             eps=eps,
             plotting_meshes=body_pars["plotting_meshes"],
             compute_interp=body_pars["compute_interp"],
-            nsamples=nsamples, msamples=msamples
+            nsamples=nsamples, msamples=msamples,
+            grids=grids,
         )
 
     elif type == "composite_mesh":
@@ -330,6 +337,7 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, costum_update=None, starti
             suit            = body_pars["suit"],
             convexify       = body_pars["convexify"],
             scale           = body_pars["scale"],
+            grids           = grids,
             **kwargs
         )
 
@@ -353,6 +361,7 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, costum_update=None, starti
             convexify          = body_pars["convexify"],
             scale              = body_pars["scale"],
             save_folder        = body_pars["save_folder"],
+            grids              = grids,
             **kwargs
         )
 
@@ -366,7 +375,8 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, costum_update=None, starti
             wavefrequency=control_pars["wavefrequency"],
             c1=control_pars["c1"], c2=control_pars["c2"], c3=control_pars["c3"],
             xshift=control_pars["xshift"], yshift=control_pars["yshift"],
-            sb=control_pars["sb"], wh=control_pars["wh"], st=control_pars["st"], wt=control_pars["wt"], thk=control_pars["thk"]
+            sb=control_pars["sb"], wh=control_pars["wh"], st=control_pars["st"], wt=control_pars["wt"], thk=control_pars["thk"],
+            grids=grids,
         )
 
     elif type == "fish_experimental":
@@ -388,7 +398,8 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, costum_update=None, starti
             filter_freqs    = control_pars["filter_freqs"],
             xshift          = control_pars["xshift"],
             yshift          = control_pars["yshift"],
-            initial_time    = starting_time
+            initial_time    = starting_time,
+            grids           = grids,
         )
 
     elif type == "composite_segment_body":
@@ -397,7 +408,8 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, costum_update=None, starti
         return CompositeSegmentBody(
                     device, x, y,
                     sdf_folder, sdf_name,
-                    eps=eps
+                    eps=eps,
+                    grids=grids,
                 )
 
 class mesh2sdf():
@@ -535,12 +547,19 @@ class COMPOSITEmesh2sdf():
 
 class Body:
 
-    def __init__(self, device, x, y, z=None, eps=0.05):
+    def __init__(self, device, x, y, z=None, eps=0.05, grids=None):
         """Base class for immersed bodies on a MAC staggered grid.
 
         Works in 2-D (z is None) or 3-D (z is a 1-D tensor).
         Staggered meshgrids are shared across all Body instances that live
-        on the same (x, y, z) coordinate vectors (via _StaggeredGrids cache).
+        on the same (x, y, z) coordinate vectors.
+
+        Parameters
+        ----------
+        grids : _StaggeredGrids or None
+            Pre-built staggered grids to reuse.  When provided the grids
+            are used directly (zero extra memory).  When *None* the legacy
+            ``_get_staggered_grids`` cache is used as a fallback.
         """
         self.device = device
         self.dtype  = x.dtype
@@ -558,8 +577,8 @@ class Body:
         if z is not None:
             self.nz = len(z)
 
-        # ---- shared grids (cached) ------------------------------------
-        g = _get_staggered_grids(x, y, z)
+        # ---- shared grids ---------------------------------------------
+        g = grids if grids is not None else _get_staggered_grids(x, y, z)
 
         self.X = g.X
         self.Y = g.Y
@@ -583,7 +602,6 @@ class Body:
             self.Zw_stag = g.Zw_stag
 
         # ---- flattened coordinate stacks (shared) ----------------------
-        n_pts = int(torch.tensor(self.grid_shape).prod().item())
         self.xflat = g.xflat
         self.yflat = g.yflat
         self.stacked_xy   = g.stacked_xy
@@ -594,7 +612,7 @@ class Body:
             self.zflat = g.zflat
             self.stacked_xy_w = g.stacked_xy_w
 
-        self.ones_stacked = torch.ones(n_pts, device=self.device, dtype=self.dtype)
+        self.ones_stacked = g.ones_stacked  # shared across all bodies
 
         # ---- body velocity fields / SDF --------------------------------
         self.sdf    = torch.zeros(self.grid_shape, device=self.device, dtype=self.dtype)
@@ -603,7 +621,6 @@ class Body:
         if self.ndim == 3:
             self.body_w = torch.zeros(self.grid_shape, device=self.device, dtype=self.dtype)
 
-        self.old_points = self.stacked_xy.clone().detach()
         self.rad_conv   = (torch.pi / 180)
 
 
@@ -691,8 +708,8 @@ class Body:
 
 class BodyAnalytical(Body):
 
-    def __init__(self, device, x, y, sdf, update_maps, z=None, eps=0.05, plotting=False, pre_update=True):
-        super().__init__(device, x, y, z=z, eps=eps)
+    def __init__(self, device, x, y, sdf, update_maps, z=None, eps=0.05, plotting=False, pre_update=True, grids=None):
+        super().__init__(device, x, y, z=z, eps=eps, grids=grids)
         self.sdf = sdf
         self.update_theta = update_maps[0]
         self.update_translation = update_maps[1]
@@ -812,8 +829,11 @@ class BodyAnalytical(Body):
                 self.update_translation[1](t),
             ], device=self.device, dtype=self.dtype)
 
-            theta = self.rad_conv * torch.tensor(
-                self.update_theta(t), device=self.device, dtype=self.dtype
+            _theta_raw = self.update_theta(t)
+            theta = self.rad_conv * (
+                _theta_raw.clone().detach().to(device=self.device, dtype=self.dtype)
+                if isinstance(_theta_raw, torch.Tensor)
+                else torch.tensor(_theta_raw, device=self.device, dtype=self.dtype)
             )
             self.com_pos = transl
 
@@ -1010,15 +1030,6 @@ class CompositeBodyAnalytical(Body):
         ]
 
         self.mu_funcs = self.bodies[0].mu_funcs
-        gs = self.grid_shape
-        self.sdf_vals   = torch.zeros((self.nbodies, *gs), device=device)
-        self.sdf_vals_u = torch.zeros((self.nbodies, *gs), device=device)
-        self.sdf_vals_v = torch.zeros((self.nbodies, *gs), device=device)
-        self.u_vals     = torch.zeros((self.nbodies, *gs), device=device)
-        self.v_vals     = torch.zeros((self.nbodies, *gs), device=device)
-        if self.ndim == 3:
-            self.sdf_vals_w = torch.zeros((self.nbodies, *gs), device=device)
-            self.w_vals     = torch.zeros((self.nbodies, *gs), device=device)
         self.com_pos = torch.zeros((self.nbodies, self.ndim), device=device)
         self.initialize()
 
@@ -1026,35 +1037,35 @@ class CompositeBodyAnalytical(Body):
         self.update(torch.tensor(0.0, device=self.device, dtype=self.dtype), 0)
 
     def update(self, t, iteration, dt=1):
+        # Streaming union: process bodies one at a time to avoid
+        # allocating (nbodies, *grid_shape) stacks.
         for i, body in enumerate(self.bodies):
             body.update(t, iteration, dt=dt)
-            self.sdf_vals[i]   = body.sdf_val
-            self.sdf_vals_u[i] = body.sdf_u
-            self.sdf_vals_v[i] = body.sdf_v
-            self.u_vals[i]     = body.body_u
-            self.v_vals[i]     = body.body_v
-            if self.ndim == 3:
-                self.sdf_vals_w[i] = body.sdf_w
-                self.w_vals[i]     = body.body_w
+            if i == 0:
+                self.sdf_val   = body.sdf_val
+                self.sdf_val_u = body.sdf_u
+                self.body_u    = body.body_u
+                self.sdf_val_v = body.sdf_v
+                self.body_v    = body.body_v
+                if self.ndim == 3:
+                    self.sdf_val_w = body.sdf_w
+                    self.body_w    = body.body_w
+            else:
+                mask = body.sdf_val < self.sdf_val
+                self.sdf_val = torch.where(mask, body.sdf_val, self.sdf_val)
 
-        # Union SDF (min) + pick velocity from closest body
-        gs = self.grid_shape
+                mask_u = body.sdf_u < self.sdf_val_u
+                self.sdf_val_u = torch.where(mask_u, body.sdf_u, self.sdf_val_u)
+                self.body_u    = torch.where(mask_u, body.body_u, self.body_u)
 
-        idx = self.sdf_vals.argmin(0).unsqueeze(0).expand(self.sdf_vals.shape)
-        self.sdf_val = self.sdf_vals.gather(0, idx)[0].reshape(gs)
+                mask_v = body.sdf_v < self.sdf_val_v
+                self.sdf_val_v = torch.where(mask_v, body.sdf_v, self.sdf_val_v)
+                self.body_v    = torch.where(mask_v, body.body_v, self.body_v)
 
-        idx_u = self.sdf_vals_u.argmin(0).unsqueeze(0).expand(self.sdf_vals_u.shape)
-        self.sdf_val_u = self.sdf_vals_u.gather(0, idx_u)[0].reshape(gs)
-        self.body_u    = self.u_vals.gather(0, idx_u)[0].reshape(gs)
-
-        idx_v = self.sdf_vals_v.argmin(0).unsqueeze(0).expand(self.sdf_vals_v.shape)
-        self.sdf_val_v = self.sdf_vals_v.gather(0, idx_v)[0].reshape(gs)
-        self.body_v    = self.v_vals.gather(0, idx_v)[0].reshape(gs)
-
-        if self.ndim == 3:
-            idx_w = self.sdf_vals_w.argmin(0).unsqueeze(0).expand(self.sdf_vals_w.shape)
-            self.sdf_val_w = self.sdf_vals_w.gather(0, idx_w)[0].reshape(gs)
-            self.body_w    = self.w_vals.gather(0, idx_w)[0].reshape(gs)
+                if self.ndim == 3:
+                    mask_w = body.sdf_w < self.sdf_val_w
+                    self.sdf_val_w = torch.where(mask_w, body.sdf_w, self.sdf_val_w)
+                    self.body_w    = torch.where(mask_w, body.body_w, self.body_w)
 
 
 class BodyFishAnalytical(Body):
@@ -1078,10 +1089,11 @@ class BodyFishAnalytical(Body):
         wh            = 0.07,
         st            = 0.95,
         wt            = 0.01,
-        thk           = False
+        thk           = False,
+        grids         = None,
 
     ):
-        super().__init__(device, x, y, eps=eps)
+        super().__init__(device, x, y, eps=eps, grids=grids)
         """
 
         """
@@ -1218,9 +1230,10 @@ class BodyFishExperimental(Body):
         xshift       = -0.0,
         yshift       = 0.0,
         eps          = 0.05,
-        initial_time = 0.0
+        initial_time = 0.0,
+        grids        = None,
     ):
-        super().__init__(device, x, y, eps=eps)
+        super().__init__(device, x, y, eps=eps, grids=grids)
         """
 
         """
@@ -1388,7 +1401,8 @@ class BodyMesh(Body):
     def __init__(self, device, x, y, mesh_file, update_maps, z=None, eps=0.05,
                  compute_interp=True, nsamples=None, msamples=None, suit=0,
                  plotting_meshes=False, zpos=0, **kwargs):
-        super().__init__(device, x, y, z=z, eps=eps)
+        grids = kwargs.pop("grids", None)
+        super().__init__(device, x, y, z=z, eps=eps, grids=grids)
         self.mesh_file           = mesh_file
         self.compute_interp      = compute_interp
         self.save_folder         = kwargs.pop("save_folder", "")
@@ -1783,7 +1797,8 @@ class CompositeBodyMesh(Body):
                  compute_interp=True, nsamples=None, msamples=None, plotting=False,
                  plotting_meshes=False, suit=0.0, **kwargs):
         """Composite body built from a multi-link SDF model file."""
-        super().__init__(device, x, y, eps=eps)
+        grids = kwargs.pop("grids", None)
+        super().__init__(device, x, y, eps=eps, grids=grids)
 
         self.sdf_folder      = sdf_folder
         self.sdf             = ModelSDF.read(sdf_folder+sdf_name)[0]
@@ -1811,6 +1826,7 @@ class CompositeBodyMesh(Body):
                 nsamples=nsamples, msamples=msamples,
                 suit=suit,
                 plotting_meshes=plotting_meshes,
+                grids=grids,
                 **kwargs
             )
             body.id = link_i
@@ -1909,7 +1925,8 @@ class MultiAnimatBodies(Body):
         pipeline runs only once per unique mesh, and the resulting BodyMesh
         is reused (with its own pose) for every duplicate.
         """
-        super().__init__(device, x, y, z=z, eps=eps)
+        grids = kwargs.pop("grids", None)
+        super().__init__(device, x, y, z=z, eps=eps, grids=grids)
 
         self.suit = suit
         self.plotting        = plotting
@@ -1964,6 +1981,7 @@ class MultiAnimatBodies(Body):
                             msamples=template.msamples,
                             suit=suit,
                             plotting_meshes=False,
+                            grids=grids,
                             **local_kwargs
                         )
                         # Copy the pre-computed SDF interpolation data
@@ -1987,6 +2005,7 @@ class MultiAnimatBodies(Body):
                             nsamples=nsamples, msamples=msamples,
                             suit=suit,
                             plotting_meshes=plotting_meshes,
+                            grids=grids,
                             **local_kwargs
                         )
                         _mesh_body_cache[cache_key] = body
@@ -2004,7 +2023,7 @@ class MultiAnimatBodies(Body):
                     initial_pose = np.array(link.pose).astype(x.cpu().numpy().dtype)
                     update_maps = (lambda t: 0, [lambda t: -initial_pose[0], lambda t: -initial_pose[1]])
                     self.bodies.append(
-                        BodyAnalytical(device, x, y, sdf_fun, update_maps, z=self.z, eps=eps, plotting=False, pre_update=False)
+                        BodyAnalytical(device, x, y, sdf_fun, update_maps, z=self.z, eps=eps, plotting=False, pre_update=False, grids=grids)
                     )
                     self.bodies[-1].bb = [[-radius.cpu(), radius.cpu()], [-radius.cpu(), radius.cpu()], [-radius.cpu(), radius.cpu()]]
 
@@ -2014,7 +2033,7 @@ class MultiAnimatBodies(Body):
                     initial_pose = np.array(link.pose).astype(x.cpu().numpy().dtype)
                     update_maps = (lambda t: 0, [lambda t: -initial_pose[0], lambda t: -initial_pose[1]])
                     self.bodies.append(
-                        BodyAnalytical(device, x, y, sdf_fun, update_maps, z=self.z, eps=eps, plotting=False, pre_update=False)
+                        BodyAnalytical(device, x, y, sdf_fun, update_maps, z=self.z, eps=eps, plotting=False, pre_update=False, grids=grids)
                     )
                     self.bodies[-1].bb = [[-radius.cpu(), radius.cpu()], [-radius.cpu(), radius.cpu()], [-radius.cpu(), radius.cpu()]]
                 else:
@@ -2023,34 +2042,44 @@ class MultiAnimatBodies(Body):
 
         self.nbodies = len(self.bodies)
         gs = self.grid_shape
-        self.sdf_vals   = torch.zeros((self.nbodies, *gs), device=device)
-        self.sdf_vals_u = torch.zeros((self.nbodies, *gs), device=device)
-        self.sdf_vals_v = torch.zeros((self.nbodies, *gs), device=device)
-        self.u_vals     = torch.zeros((self.nbodies, *gs), device=device)
-        self.v_vals     = torch.zeros((self.nbodies, *gs), device=device)
+        # Output fields — filled by streaming union in update() or
+        # BDIMhandler3D.update().  No (nbodies, *gs) stacks needed.
+        self.sdf_val   = torch.zeros(gs, device=device, dtype=self.dtype)
+        self.sdf_val_u = torch.zeros(gs, device=device, dtype=self.dtype)
+        self.sdf_val_v = torch.zeros(gs, device=device, dtype=self.dtype)
+        self.body_u    = torch.zeros(gs, device=device, dtype=self.dtype)
+        self.body_v    = torch.zeros(gs, device=device, dtype=self.dtype)
         if self.ndim == 3:
-            self.sdf_vals_w = torch.zeros((self.nbodies, *gs), device=device)
-            self.w_vals     = torch.zeros((self.nbodies, *gs), device=device)
-
-        self.sdf_val_u = torch.zeros_like(self.X)
-        self.sdf_val_v = torch.zeros_like(self.X)
+            self.sdf_val_w = torch.zeros(gs, device=device, dtype=self.dtype)
+            self.body_w    = torch.zeros(gs, device=device, dtype=self.dtype)
         self.com_pos   = torch.zeros((self.nbodies, self.ndim), device=device)
+
+        # Free per-body velocity/SDF tensors that are only used by default
+        # update methods.  MultiAnimatBodies always uses an external update
+        # (e.g. BDIMhandler3D) that writes directly to the output fields
+        # above, so these per-body fields would just waste GPU memory.
+        for body in self.bodies:
+            body.body_u = None
+            body.body_v = None
+            body.sdf    = body.sdf if not isinstance(body.sdf, torch.Tensor) else None
+            if self.ndim == 3:
+                body.body_w = None
 
 
 class CompositeSegmentBody:
 
-    def __init__(self, device, x, y, sdf_folder, sdf_name, eps=0.05):
+    def __init__(self, device, x, y, sdf_folder, sdf_name, eps=0.05, grids=None):
         """
         sdf_folder = folder of the sdf file
         sdf_name = name of the sdf file
         """
         self.device          = device
         self.thk             = 0.0005
-        self.body            = Body(device,x,y,eps=eps)
+        self.body            = Body(device,x,y,eps=eps,grids=grids)
         self.sdf_folder      = sdf_folder
         self.sdf             = ModelSDF.read(sdf_folder+sdf_name)[0]
         self.n               = len(self.sdf.links)
-        self.body            = Body(device,x,y,eps=0.05)
+        self.body            = Body(device,x,y,eps=0.05,grids=grids)
         self.nlinks          = len(self.sdf.links)
         self.initial_poses   = torch.tensor([link.pose[:2] for link in self.sdf.links],device=device)
         self.initial_lin_vel = torch.zeros((self.initial_poses.shape[0]),2,device=device)
@@ -2093,9 +2122,9 @@ class CompositeSegmentBody:
 
 
         idx=self.ds.argmin(0).unsqueeze(0).expand(self.ds.shape)
-        self.sdf=self.ds.gather(0,idx)[0].reshape(self.body.nx,self.body.ny)
-        self.body_u=self.uv[:,0,:].gather(0,idx)[0].reshape(self.body.nx,self.body.ny)
-        self.body_v=self.uv[:,1,:].gather(0,idx)[0].reshape(self.body.nx,self.body.ny)
+        self.sdf=self.ds.gather(0,idx)[0].reshape(self.body.nx,self.body.ny).contiguous()
+        self.body_u=self.uv[:,0,:].gather(0,idx)[0].reshape(self.body.nx,self.body.ny).contiguous()
+        self.body_v=self.uv[:,1,:].gather(0,idx)[0].reshape(self.body.nx,self.body.ny).contiguous()
 
 
 

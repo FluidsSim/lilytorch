@@ -6,11 +6,8 @@ Extends the 2-D BDIMhandler to work with full 3-D velocity fields (u, v, w),
 
 Notes
 -----
-* Fluid → body **force coupling** is NOT yet implemented in 3-D.
-  ``apply_forces`` currently zeros all external forces and prints a warning
-  on the first call, so the MuJoCo body moves as if no fluid forces were
-  present (muscle / gravity only).  This is still useful for visualising the
-  3-D flow field around a swimming body.
+* Fluid → body **force coupling** uses the same smoothed-delta volume-
+  integration approach as the 2-D handler (``forces_method2_3d``).
 * The custom ``fluid_step`` mirrors the 2-D handler's variable-density
   Poisson formulation, extended to three dimensions (ch, cv, cw).
 """
@@ -41,7 +38,7 @@ class BDIMhandler3D:
             self.pars,
             dtype=self.dtype,
             costum_update=True,
-            compute_forces=False,  # 3-D forces not implemented yet
+            compute_forces=True,
         )
         self.device = self.fluid_solver.device
 
@@ -61,7 +58,15 @@ class BDIMhandler3D:
         self.rho_fluid = self.pars["solver"]["rho"]
         self.rho_body  = 800.0
 
-        self._forces_warned = False
+        # Allocate per-body cell-centre SDF storage needed by forces_method2_3d.
+        # MultiAnimatBodies deliberately omits this to save memory, but force
+        # computation requires per-body SDF values for the smoothed-delta
+        # integration.  Only cell-centre SDFs are needed (not staggered).
+        comp = self.fluid_solver.composite_body
+        comp.sdf_vals = torch.zeros(
+            (comp.nbodies, *self.fluid_solver.grid_shape),
+            device=self.device, dtype=self.dtype,
+        )
 
     # ------------------------------------------------------------------
     # helpers
@@ -111,8 +116,11 @@ class BDIMhandler3D:
                 )
             )  # (nlinks, 3)
 
-        # ---- per-body update ----
-        for body_i, body in enumerate(comp.bodies[:]):
+        # ---- streaming union: process bodies one at a time ----
+        # Instead of filling (nbodies, *gs) stacks and then reducing,
+        # we keep a running-min SDF and pick-closest velocity, saving
+        # 7 × nbodies × field_size of GPU memory (~1.9 GB for 9 bodies).
+        for body_i, body in enumerate(comp.bodies):
 
             (animat_id, link_id) = comp.body_ids[body_i]
 
@@ -122,91 +130,77 @@ class BDIMhandler3D:
             lin_vel  = lin_vels[animat_id][link_id]     # (3,)
             ang_vel  = ang_vels[animat_id][link_id]     # (3,)
 
-            # Mesh sub-bodies now use RegularGridInterpolatorGridSample3D
-            # which accepts (xpt, ypt, zpt).  We transform 3-D grid points
-            # into the body frame and evaluate the full 3-D SDF.
-            # Use the *composite* staggered grids (which are 3-D) for all
-            # coordinate lookups.
-
             # --- SDF at cell centres ---
-            pos_trans = R.T @ (comp.stacked_xy - urdf_pos[:, None])  # (3, N)
-            px = pos_trans[0].reshape(gs)
-            py = pos_trans[1].reshape(gs)
-            pz = pos_trans[2].reshape(gs)
-            comp.sdf_vals[body_i] = body.sdf(px, py, pz)
+            pos_trans = R.T @ (comp.stacked_xy - urdf_pos[:, None])
+            sdf_cc = body.sdf(
+                pos_trans[0].reshape(gs),
+                pos_trans[1].reshape(gs),
+                pos_trans[2].reshape(gs),
+            )
 
-            # --- SDF at u-staggered ---
+            # --- SDF + velocity at u-staggered ---
             pos_trans_u = R.T @ (comp.stacked_xy_u - urdf_pos[:, None])
-            comp.sdf_vals_u[body_i] = body.sdf(
+            sdf_u = body.sdf(
                 pos_trans_u[0].reshape(gs),
                 pos_trans_u[1].reshape(gs),
                 pos_trans_u[2].reshape(gs),
             )
+            vel_u = (lin_vel[0]
+                     + ang_vel[1] * (comp.Zu_stag - com_pos[2])
+                     - ang_vel[2] * (comp.Yu_stag - com_pos[1]))
 
-            # --- SDF at v-staggered ---
+            # --- SDF + velocity at v-staggered ---
             pos_trans_v = R.T @ (comp.stacked_xy_v - urdf_pos[:, None])
-            comp.sdf_vals_v[body_i] = body.sdf(
+            sdf_v = body.sdf(
                 pos_trans_v[0].reshape(gs),
                 pos_trans_v[1].reshape(gs),
                 pos_trans_v[2].reshape(gs),
             )
+            vel_v = (lin_vel[1]
+                     + ang_vel[2] * (comp.Xv_stag - com_pos[0])
+                     - ang_vel[0] * (comp.Zv_stag - com_pos[2]))
 
-            # --- SDF at w-staggered ---
+            # --- SDF + velocity at w-staggered ---
             pos_trans_w = R.T @ (comp.stacked_xy_w - urdf_pos[:, None])
-            comp.sdf_vals_w[body_i] = body.sdf(
+            sdf_w = body.sdf(
                 pos_trans_w[0].reshape(gs),
                 pos_trans_w[1].reshape(gs),
                 pos_trans_w[2].reshape(gs),
             )
+            vel_w = (lin_vel[2]
+                     + ang_vel[0] * (comp.Yw_stag - com_pos[1])
+                     - ang_vel[1] * (comp.Xw_stag - com_pos[0]))
 
-            # --- body velocities: v = v_lin + ω × (x - x_com) ---
-            # u-staggered  (only u-component kept)
-            rx_u = comp.Xu_stag - com_pos[0]
-            ry_u = comp.Yu_stag - com_pos[1]
-            rz_u = comp.Zu_stag - com_pos[2]
-            comp.u_vals[body_i] = (
-                lin_vel[0]
-                + ang_vel[1] * rz_u - ang_vel[2] * ry_u
-            )
+            # --- store per-body cell-centre SDF for force computation ---
+            comp.sdf_vals[body_i] = sdf_cc
 
-            # v-staggered  (only v-component kept)
-            rx_v = comp.Xv_stag - com_pos[0]
-            ry_v = comp.Yv_stag - com_pos[1]
-            rz_v = comp.Zv_stag - com_pos[2]
-            comp.v_vals[body_i] = (
-                lin_vel[1]
-                + ang_vel[2] * rx_v - ang_vel[0] * rz_v
-            )
+            # --- streaming min: update union fields ---
+            if body_i == 0:
+                comp.sdf_val   = sdf_cc
+                comp.sdf_val_u = sdf_u
+                comp.body_u    = vel_u
+                comp.sdf_val_v = sdf_v
+                comp.body_v    = vel_v
+                comp.sdf_val_w = sdf_w
+                comp.body_w    = vel_w
+            else:
+                mask = sdf_cc < comp.sdf_val
+                comp.sdf_val = torch.where(mask, sdf_cc, comp.sdf_val)
 
-            # w-staggered  (only w-component kept)
-            rx_w = comp.Xw_stag - com_pos[0]
-            ry_w = comp.Yw_stag - com_pos[1]
-            rz_w = comp.Zw_stag - com_pos[2]
-            comp.w_vals[body_i] = (
-                lin_vel[2]
-                + ang_vel[0] * ry_w - ang_vel[1] * rx_w
-            )
+                mask_u = sdf_u < comp.sdf_val_u
+                comp.sdf_val_u = torch.where(mask_u, sdf_u, comp.sdf_val_u)
+                comp.body_u    = torch.where(mask_u, vel_u, comp.body_u)
 
-            # store com position for (future) force computation
+                mask_v = sdf_v < comp.sdf_val_v
+                comp.sdf_val_v = torch.where(mask_v, sdf_v, comp.sdf_val_v)
+                comp.body_v    = torch.where(mask_v, vel_v, comp.body_v)
+
+                mask_w = sdf_w < comp.sdf_val_w
+                comp.sdf_val_w = torch.where(mask_w, sdf_w, comp.sdf_val_w)
+                comp.body_w    = torch.where(mask_w, vel_w, comp.body_w)
+
             comp.com_pos[body_i] = com_pos
-
-        # ---- union: pick closest body at every grid point ----
-        gs_flat = comp.sdf_vals.shape  # (nbodies, *grid_shape)
-
-        idx = comp.sdf_vals.argmin(0).unsqueeze(0).expand(gs_flat)
-        comp.sdf_val = comp.sdf_vals.gather(0, idx)[0].reshape(gs)
-
-        idx_u = comp.sdf_vals_u.argmin(0).unsqueeze(0).expand(gs_flat)
-        comp.sdf_val_u = comp.sdf_vals_u.gather(0, idx_u)[0].reshape(gs)
-        comp.body_u    = comp.u_vals.gather(0, idx_u)[0].reshape(gs)
-
-        idx_v = comp.sdf_vals_v.argmin(0).unsqueeze(0).expand(gs_flat)
-        comp.sdf_val_v = comp.sdf_vals_v.gather(0, idx_v)[0].reshape(gs)
-        comp.body_v    = comp.v_vals.gather(0, idx_v)[0].reshape(gs)
-
-        idx_w = comp.sdf_vals_w.argmin(0).unsqueeze(0).expand(gs_flat)
-        comp.sdf_val_w = comp.sdf_vals_w.gather(0, idx_w)[0].reshape(gs)
-        comp.body_w    = comp.w_vals.gather(0, idx_w)[0].reshape(gs)
+            body.com_pos = com_pos  # per-body com_pos for forces_method2_3d
 
     # ------------------------------------------------------------------
     # fluid_step: one BDIM time-step (advection-diffusion + projection)
@@ -286,21 +280,51 @@ class BDIMhandler3D:
         return (u, v, w, p)
 
     # ------------------------------------------------------------------
-    # apply_forces:  fluid → body  (NOT YET IMPLEMENTED FOR 3-D)
+    # apply_forces:  fluid → body  (3-D viscous + pressure forces)
     # ------------------------------------------------------------------
     def apply_forces(self, task, physics):
-        if not self._forces_warned:
-            print(
-                "[BDIMhandler3D] WARNING: 3-D fluid→body force coupling is not "
-                "implemented.  External forces on all links are set to zero."
-            )
-            self._forces_warned = True
 
-        for body_i, body in enumerate(self.fluid_solver.composite_body.bodies[:]):
-            (animat_id, link_id) = self.fluid_solver.composite_body.body_ids[body_i]
+        fs = self.fluid_solver
+
+        self.friction_force_lin_x = fs.friction_force_lin_x.cpu().numpy()
+        self.friction_force_lin_y = fs.friction_force_lin_y.cpu().numpy()
+        self.friction_force_lin_z = fs.friction_force_lin_z.cpu().numpy()
+        self.friction_force_ang_x = fs.friction_force_ang_x.cpu().numpy()
+        self.friction_force_ang_y = fs.friction_force_ang_y.cpu().numpy()
+        self.friction_force_ang_z = fs.friction_force_ang_z.cpu().numpy()
+
+        self.pressure_force_x     = fs.pressure_force_x.cpu().numpy()
+        self.pressure_force_y     = fs.pressure_force_y.cpu().numpy()
+        self.pressure_force_z     = fs.pressure_force_z.cpu().numpy()
+        self.pressure_force_ang_x = fs.pressure_force_ang_x.cpu().numpy()
+        self.pressure_force_ang_y = fs.pressure_force_ang_y.cpu().numpy()
+        self.pressure_force_ang_z = fs.pressure_force_ang_z.cpu().numpy()
+
+        for body_i, body in enumerate(fs.composite_body.bodies[:]):
+            (animat_id, link_id) = fs.composite_body.body_ids[body_i]
             ind_task = task.maps[animat_id]["sensors"]["data2xfrc"][link_id]
-            # zero all 6 DOF forces/torques
-            physics.data.xfrc_applied[ind_task, :] = 0.0
+
+            # linear forces  (Fx, Fy, Fz)
+            physics.data.xfrc_applied[ind_task, 0] = (
+                self.friction_force_lin_x[body_i] + self.pressure_force_x[body_i]
+            ) * task.units.newtons
+            physics.data.xfrc_applied[ind_task, 1] = (
+                self.friction_force_lin_y[body_i] + self.pressure_force_y[body_i]
+            ) * task.units.newtons
+            physics.data.xfrc_applied[ind_task, 2] = (
+                self.friction_force_lin_z[body_i] + self.pressure_force_z[body_i]
+            ) * task.units.newtons
+
+            # torques  (Tx, Ty, Tz)
+            physics.data.xfrc_applied[ind_task, 3] = (
+                self.friction_force_ang_x[body_i] + self.pressure_force_ang_x[body_i]
+            ) * task.units.newtons
+            physics.data.xfrc_applied[ind_task, 4] = (
+                self.friction_force_ang_y[body_i] + self.pressure_force_ang_y[body_i]
+            ) * task.units.newtons
+            physics.data.xfrc_applied[ind_task, 5] = (
+                self.friction_force_ang_z[body_i] + self.pressure_force_ang_z[body_i]
+            ) * task.units.newtons
 
     # ------------------------------------------------------------------
     # step:  one full coupled step  (called by FluidExtension.before_step)
@@ -363,12 +387,15 @@ class BDIMhandler3D:
 
             (fs.u0, fs.v0, fs.w0, fs.p0) = (u, v, w, p)
 
-            # 7. plotting / saving
+            # 7. compute fluid forces on each body
+            fs.forces_method2_3d(fs.u0, fs.v0, fs.w0, fs.p0, iteration)
+
+            # 8. plotting / saving
             self.terminate = fs.plotting_and_saving(
                 fs.u0, fs.v0, fs.p0, iteration, w_vel=fs.w0
             )
 
-            # 8. apply (zero) forces back to FARMS
+            # 9. apply forces back to FARMS
             self.apply_forces(task, physics)
 
         self.iteration += 1

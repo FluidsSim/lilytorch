@@ -874,10 +874,23 @@ def plot_field_3d(
     pl.camera.parallel_projection = True
     pl.camera.parallel_scale = Lmax * 0.7
 
-    # ---- legend ----
+    # ---- text annotation with field range + threshold ----
     if threshold is not None:
+        info_lines = [f"{name}"]
+        info_lines.append(f"range: [{fmin:.2e}, {fmax:.2e}]")
+        if is_bipolar:
+            info_lines.append(f"iso: ±{threshold:.2e}")
+        else:
+            info_lines.append(f"iso: {threshold:.2e}")
+        info_text = "\n".join(info_lines)
         try:
-            pl.add_legend(bcolor="white", face=None, size=(0.25, 0.12))
+            pl.add_text(
+                info_text,
+                position="upper_right",
+                font_size=10,
+                color="black",
+                shadow=True,
+            )
         except Exception:
             pass
 
