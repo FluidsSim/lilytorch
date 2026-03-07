@@ -18,7 +18,7 @@ nxs=[4096, 2048, 1024, 512, 256, 128] # grid sizes to test
 
 for nx in nxs:
 
-    pars = yaml2pyobject("lilytorch/scripts/flow_past_cylinder.yaml")
+    pars = yaml2pyobject("lilytorch/src/scripts/configs/flow_past_cylinder.yaml")
 
     R = 0.1 # radius of the cylinder
     time_stop=200

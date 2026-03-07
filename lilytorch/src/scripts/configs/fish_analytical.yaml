@@ -2,7 +2,8 @@
 solver:
   use_gpu           : True
   nthreads          : 16
-  N                 : 512
+  Nx                : 512
+  Ny                : 512
   xmin              : -0.5
   xmax              : 5.5
   ymin              : -3.0
@@ -18,9 +19,10 @@ solver:
   # dt                : 0.01
   # convection_method : "implicit"
 
-  poisson_tol       : 1.0e-7
-  poisson_max_cycles: 10
-  jacobi_weight     : 0.7
+  poisson_tol            : 1.0e-7
+  poisson_max_mgcg_cycles: 3
+  poisson_max_cycles     : 10
+  jacobi_weight          : 0.7
   poisson_nsmoothing: 2
   poisson_verbose   : True
   poisson_folder : "data/"

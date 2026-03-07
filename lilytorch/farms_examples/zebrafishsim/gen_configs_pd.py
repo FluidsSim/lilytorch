@@ -11,7 +11,7 @@ import numpy as np
 
 stack_folder      = save_path
 data_folder       = os.path.join(lilytorch_repo_root, 'farms_examples', 'zebrafishsim')
-bdim_handler_path = "lilytorch.farms_examples.zebrafishsim.BDIMhandler.BDIMhandler"
+bdim_handler_path = "lilytorch.integration.BDIMhandler.BDIMhandler"
 
 nthreads = 16
 use_gpu  = False
@@ -332,7 +332,10 @@ def gen_simulation_config(output_folder, index):
                     "jacobi_weight"          : 0.7,
                     "poisson_nsmoothing"     : 10,
                     "poisson_verbose"        : False,
-                    "poisson_folder"         : os.path.join(data_folder, "data")
+                    "poisson_folder"         : os.path.join(data_folder, "data"),
+                    "dtype"                  : "float64",
+                    "rho_body"               : 800.0,
+                    "zero_pressure_inside"   : True,
                 },
                 "boundary_conditions": {
                     "BC_type_u"  : ["D", "D", "N", "N"],

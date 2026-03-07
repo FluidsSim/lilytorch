@@ -2,7 +2,8 @@
 solver :
   use_gpu: False
   nthreads: 16
-  N      : 256
+  Nx     : 256
+  Ny     : 256
   xmin   : -1
   xmax   : 1
   ymin   : -1
@@ -17,9 +18,10 @@ solver :
   convection_method : "abdquickest"
   dt     : 0.01
 
-  poisson_tol       : 1.0e-7
-  jacobi_weight     : 0.9
-  poisson_max_cycles: 4
+  poisson_tol            : 1.0e-7
+  poisson_max_mgcg_cycles: 3
+  jacobi_weight          : 0.9
+  poisson_max_cycles     : 4
   poisson_nsmoothing: 10
   poisson_verbose   : True
   poisson_folder : "lilytorch/data/"

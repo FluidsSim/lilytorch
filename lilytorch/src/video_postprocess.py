@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""
-Generate MP4 videos from PNG frames saved by the NS solver.
+"""Generate MP4 or GIF videos from PNG frames saved by the NS solver.
 
 Usage
 -----
-    python video_from_png.py <run_dir>              # one specific run
-    python video_from_png.py <save_path>            # auto-pick latest run
-    python video_from_png.py <run_dir> --fields omega_z_3d pressure_3d
-    python video_from_png.py <run_dir> --fps 30     # override frame-rate
+    python video_postprocess.py <run_dir>              # one specific run
+    python video_postprocess.py <save_path>            # auto-pick latest run
+    python video_postprocess.py <run_dir> --fields omega_z_3d pressure_3d
+    python video_postprocess.py <run_dir> --fps 30     # override frame-rate
+    python video_postprocess.py <run_dir> --format gif  # generate GIF instead of MP4
 
 The script reads ``parameters.yaml`` from the run directory to extract
 ``dt`` and ``save_every``, then discovers every sub-folder containing
@@ -93,9 +93,10 @@ def make_videos(
     slow_factor: float = 1.0,
     time_overlay: bool = True,
     crf: int = 18,
+    fmt: str = "mp4",
 ):
     """
-    Generate one MP4 video per field sub-directory.
+    Generate one video per field sub-directory.
 
     Parameters
     ----------
@@ -112,7 +113,12 @@ def make_videos(
         Burn a timestamp into each frame (requires ffmpeg drawtext).
     crf : int
         H.264 quality (lower = better, 18 ≈ visually lossless).
+    fmt : str
+        Output format: ``"mp4"`` (default) or ``"gif"``.
     """
+    fmt = fmt.lower().strip(".")
+    if fmt not in ("mp4", "gif"):
+        sys.exit(f"Unsupported format '{fmt}'. Choose 'mp4' or 'gif'.")
     run_dir = Path(run_dir)
     if not run_dir.is_dir():
         sys.exit(f"Not a directory: {run_dir}")
@@ -141,19 +147,25 @@ def make_videos(
         print(f"  {field_name}  ({len(pngs)} frames)")
         print(f"{'─'*60}")
 
-        out_mp4 = run_dir / f"{field_name}.mp4"
+        out_path = run_dir / f"{field_name}.{fmt}"
 
-        if use_ffmpeg:
-            _make_video_ffmpeg(
-                pngs, out_mp4, fps, dt, save_every, time_overlay, crf,
-            )
+        if fmt == "gif":
+            if use_ffmpeg:
+                _make_gif_ffmpeg(pngs, out_path, fps, dt, save_every, time_overlay)
+            else:
+                _make_gif_pillow(pngs, out_path, fps, dt, save_every)
         else:
-            _make_video_opencv(pngs, out_mp4, fps, dt, save_every)
+            if use_ffmpeg:
+                _make_video_ffmpeg(
+                    pngs, out_path, fps, dt, save_every, time_overlay, crf,
+                )
+            else:
+                _make_video_opencv(pngs, out_path, fps, dt, save_every)
 
-        if out_mp4.exists():
-            size_mb = out_mp4.stat().st_size / 1e6
-            print(f"  → {out_mp4}  ({size_mb:.1f} MB)")
-            videos_created.append(out_mp4)
+        if out_path.exists():
+            size_mb = out_path.stat().st_size / 1e6
+            print(f"  → {out_path}  ({size_mb:.1f} MB)")
+            videos_created.append(out_path)
 
     print(f"\n{'═'*60}")
     print(f"  {len(videos_created)} video(s) created in {run_dir}")
@@ -225,6 +237,84 @@ def _make_video_ffmpeg(pngs, out_mp4, fps, dt, save_every, time_overlay, crf):
             print(f"  ffmpeg error:\n{result.stderr[-500:]}")
 
 
+def _make_gif_ffmpeg(pngs, out_gif, fps, dt, save_every, time_overlay):
+    """
+    Use ffmpeg to produce an optimised GIF via palette generation.
+    """
+    concat_file = out_gif.with_suffix(".concat.txt")
+    frame_dur = 1.0 / fps
+    with open(concat_file, "w") as f:
+        for png in pngs:
+            escaped = str(png.resolve()).replace("'", "'\\''")
+            f.write(f"file '{escaped}'\n")
+            f.write(f"duration {frame_dur:.6f}\n")
+        escaped = str(pngs[-1].resolve()).replace("'", "'\\''")
+        f.write(f"file '{escaped}'\n")
+
+    # Build filter graph: optional time overlay → palette generation
+    filters = []
+    if time_overlay and dt is not None and save_every is not None:
+        dt_frame = save_every * dt
+        filters.append(
+            f"drawtext=text='t = %{{eif\\:{dt_frame}*n\\:d\\:3}} s':"
+            f"fontsize=28:fontcolor=black:"
+            f"x=(w-text_w)/2:y=30:"
+            f"borderw=2:bordercolor=white"
+        )
+    filters.append("fps={:.2f}".format(fps))
+    filter_pre = ",".join(filters)
+
+    # Two-pass palette approach for high-quality GIF
+    palette = out_gif.with_suffix(".palette.png")
+    cmd_palette = [
+        "ffmpeg", "-y",
+        "-f", "concat", "-safe", "0", "-i", str(concat_file),
+        "-vf", f"{filter_pre},palettegen=stats_mode=diff",
+        str(palette),
+    ]
+    cmd_gif = [
+        "ffmpeg", "-y",
+        "-f", "concat", "-safe", "0", "-i", str(concat_file),
+        "-i", str(palette),
+        "-lavfi", f"{filter_pre} [x]; [x][1:v] paletteuse=dither=bayer:bayer_scale=5",
+        str(out_gif),
+    ]
+
+    res1 = subprocess.run(cmd_palette, capture_output=True, text=True)
+    if res1.returncode != 0:
+        print(f"  palette-gen error:\n{res1.stderr[-500:]}")
+        concat_file.unlink(missing_ok=True)
+        return
+
+    res2 = subprocess.run(cmd_gif, capture_output=True, text=True)
+    concat_file.unlink(missing_ok=True)
+    palette.unlink(missing_ok=True)
+    if res2.returncode != 0:
+        print(f"  gif-encode error:\n{res2.stderr[-500:]}")
+
+
+def _make_gif_pillow(pngs, out_gif, fps, dt, save_every):
+    """Fallback: use Pillow to create a GIF when ffmpeg is unavailable."""
+    from PIL import Image
+
+    frames = []
+    for png in pngs:
+        img = Image.open(str(png)).convert("RGBA")
+        frames.append(img)
+    if not frames:
+        print("  ERROR: no frames loaded")
+        return
+
+    duration_ms = int(1000.0 / fps)
+    frames[0].save(
+        str(out_gif),
+        save_all=True,
+        append_images=frames[1:],
+        duration=duration_ms,
+        loop=0,
+    )
+
+
 def _make_video_opencv(pngs, out_mp4, fps, dt, save_every):
     """Fallback: use OpenCV VideoWriter (no H.264 guarantee)."""
     import cv2
@@ -268,7 +358,7 @@ def _make_video_opencv(pngs, out_mp4, fps, dt, save_every):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Generate MP4 videos from NS solver PNG output.",
+        description="Generate MP4 or GIF videos from NS solver PNG output.",
     )
     parser.add_argument(
         "path",
@@ -294,6 +384,10 @@ def main():
         "--crf", type=int, default=18,
         help="H.264 quality (default 18; lower = better).",
     )
+    parser.add_argument(
+        "--format", dest="fmt", choices=["mp4", "gif"], default="mp4",
+        help="Output format: mp4 (default) or gif.",
+    )
     args = parser.parse_args()
 
     run_dir = Path(args.path)
@@ -309,6 +403,7 @@ def main():
         slow_factor=args.slow_factor,
         time_overlay=not args.no_overlay,
         crf=args.crf,
+        fmt=args.fmt,
     )
 
 

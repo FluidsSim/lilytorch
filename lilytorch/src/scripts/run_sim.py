@@ -4,16 +4,16 @@ from lilytorch.solver import FluidSolver
 from lilytorch.util.yaml_operations import yaml2pyobject
 import torch
 
-# pars = yaml2pyobject("lilytorch/scripts/fish_analytical.yaml")
+# pars = yaml2pyobject("lilytorch/src/scripts/configs/fish_analytical.yaml")
 
-# pars = yaml2pyobject("lilytorch/scripts/flow_past_cylinder.yaml")
-# pars = yaml2pyobject("lilytorch/scripts/moving_cylinder_mesh.yaml")
+# pars = yaml2pyobject("lilytorch/src/scripts/configs/flow_past_cylinder.yaml")
+# pars = yaml2pyobject("lilytorch/src/scripts/configs/moving_cylinder_mesh.yaml")
 
-# pars = yaml2pyobject("lilytorch/scripts/flow_past_cylinder_nondimensional.yaml")
+# pars = yaml2pyobject("lilytorch/src/scripts/configs/flow_past_cylinder_nondimensional.yaml")
 
-# pars = yaml2pyobject("lilytorch/scripts/moving_stick.yaml")
+# pars = yaml2pyobject("lilytorch/src/scripts/configs/moving_stick.yaml")
 
-pars = yaml2pyobject("lilytorch/scripts/moving_cylinder_analytical.yaml")
+pars = yaml2pyobject("lilytorch/src/scripts/configs/moving_cylinder_analytical.yaml")
 
 
 # modify parameters

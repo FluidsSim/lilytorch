@@ -5,6 +5,7 @@ from lilytorch.src.poisson_mult import PoissonSolver
 from lilytorch.src.poisson_fft import PoissonSolverFFT
 # from lilytorch.src.poisson_petsc import PoissonSolverPETSc
 from lilytorch.src.body import body_from_yaml, _StaggeredGrids
+from lilytorch.src import operations as ops
 from lilytorch.src import plotting
 # from lilytorch.util.rw import save_object
 from lilytorch.util.yaml_operations import pyobject2yaml
@@ -21,6 +22,20 @@ class FluidSolver:
     """
     Solver class
     """
+
+    # ---- thin wrappers around standalone functions in operations.py ----
+    def compute_dpdx(self, p):  return ops.compute_dpdx(p, self.h)
+    def compute_dpdy(self, p):  return ops.compute_dpdy(p, self.h)
+    def compute_dpdz(self, p):  return ops.compute_dpdz(p, self.h)
+    def gradient(self, var):    return ops.gradient(var, self.h, self.ndim)
+    def divergence(self, u, v, w=None):
+        return ops.divergence(u, v, self.dx, self.dy, w=w, dz=getattr(self, 'dz', None))
+    def normal_derivative(self, var, normal_x, normal_y, normal_z=None):
+        return ops.normal_derivative(var, self.h, self.ndim, normal_x, normal_y, normal_z)
+    def vorticity(self, u, v, w=None):
+        return ops.vorticity(u, v, self.h, self.ndim, w=w)
+    def vorticity_components(self, u, v, w):
+        return ops.vorticity_components(u, v, w, self.h)
 
     def __init__(self, pars, dtype=torch.float32, costum_update=None, compute_forces=True):
         """
@@ -431,131 +446,6 @@ class FluidSolver:
                 self.w0 = self.w0 * mu0
 
 
-    def compute_dpdx(self,p):
-        """
-        Compute dp/dx
-        """
-        return torch.gradient(p, spacing=self.h, dim=0, edge_order=2)[0]
-
-    def compute_dpdy(self,p):
-        """
-        Compute dp/dy (central difference)
-        """
-        return torch.gradient(p, spacing=self.h, dim=1, edge_order=2)[0]
-
-    def compute_dpdz(self, p):
-        """
-        Compute dp/dz (3D only)
-        """
-        return torch.gradient(p, spacing=self.h, dim=2, edge_order=2)[0]
-
-    def gradient(self, var):
-        """
-        Compute gradient(var) — 2D returns (dvar_dx, dvar_dy), 3D returns (dvar_dx, dvar_dy, dvar_dz)
-        """
-        dvar_dx = torch.zeros_like(var)
-        dvar_dy = torch.zeros_like(var)
-        if self.ndim == 2:
-            dvar_dx[1:-1,1:-1] = (var[1:-1,1:-1]-var[:-2,1:-1])/self.h
-            dvar_dy[1:-1,1:-1] = (var[1:-1,1:-1]-var[1:-1,:-2])/self.h
-            return (dvar_dx, dvar_dy)
-        else:
-            dvar_dz = torch.zeros_like(var)
-            dvar_dx[1:-1,1:-1,1:-1] = (var[1:-1,1:-1,1:-1]-var[:-2,1:-1,1:-1])/self.h
-            dvar_dy[1:-1,1:-1,1:-1] = (var[1:-1,1:-1,1:-1]-var[1:-1,:-2,1:-1])/self.h
-            dvar_dz[1:-1,1:-1,1:-1] = (var[1:-1,1:-1,1:-1]-var[1:-1,1:-1,:-2])/self.h
-            return (dvar_dx, dvar_dy, dvar_dz)
-
-    def divergence(self, u, v, w=None):
-        """
-        Compute the divergence — 2D: div(u,v), 3D: div(u,v,w)
-        """
-        div = torch.zeros_like(u)
-        if self.ndim == 2:
-            div[1:-1, 1:-1] = ((u[2:, 1:-1] - u[1:-1, 1:-1]) / self.dx
-                             + (v[1:-1, 2:] - v[1:-1, 1:-1]) / self.dy)
-        else:
-            div[1:-1, 1:-1, 1:-1] = (
-                (u[2:, 1:-1, 1:-1] - u[1:-1, 1:-1, 1:-1]) / self.dx
-              + (v[1:-1, 2:, 1:-1] - v[1:-1, 1:-1, 1:-1]) / self.dy
-              + (w[1:-1, 1:-1, 2:] - w[1:-1, 1:-1, 1:-1]) / self.dz
-            )
-        return div
-
-    def normal_derivative(self, var, normal_x, normal_y, normal_z=None):
-        """
-        Compute the normal derivative dvar/dn = n · ∇var
-        """
-        nd = normal_x * self.compute_dpdx(var) + normal_y * self.compute_dpdy(var)
-        if self.ndim == 3 and normal_z is not None:
-            nd = nd + normal_z * self.compute_dpdz(var)
-        return nd
-
-    def vorticity(self, u, v, w=None):
-        """
-        Compute vorticity.
-        2D: scalar  omega = dv/dx - du/dy
-        3D: returns magnitude |omega| = sqrt(wx^2 + wy^2 + wz^2)
-            where omega = curl(u,v,w)
-        """
-        if self.ndim == 2 or w is None:
-            dvdx = torch.zeros_like(u)
-            dudy = torch.zeros_like(u)
-            dvdx[1:-1, 1:-1] = (v[1:-1, 1:-1]-v[:-2, 1:-1])/self.h
-            dudy[1:-1, 1:-1] = (u[1:-1, 1:-1]-u[1:-1, :-2])/self.h
-            return dvdx-dudy
-        else:
-            # 3D vorticity magnitude
-            h = self.h
-            # Start at index 2 so backward differences never reach into
-            # ghost cells (index 0), which can have BC-inconsistent values
-            # and produce spurious boundary vorticity.
-            # omega_x = dw/dy - dv/dz
-            ox = torch.zeros_like(u)
-            ox[2:-2,2:-2,2:-2] = (
-                (w[2:-2,2:-2,2:-2] - w[2:-2,1:-3,2:-2])/h -
-                (v[2:-2,2:-2,2:-2] - v[2:-2,2:-2,1:-3])/h
-            )
-            # omega_y = du/dz - dw/dx
-            oy = torch.zeros_like(u)
-            oy[2:-2,2:-2,2:-2] = (
-                (u[2:-2,2:-2,2:-2] - u[2:-2,2:-2,1:-3])/h -
-                (w[2:-2,2:-2,2:-2] - w[1:-3,2:-2,2:-2])/h
-            )
-            # omega_z = dv/dx - du/dy
-            oz = torch.zeros_like(u)
-            oz[2:-2,2:-2,2:-2] = (
-                (v[2:-2,2:-2,2:-2] - v[1:-3,2:-2,2:-2])/h -
-                (u[2:-2,2:-2,2:-2] - u[2:-2,1:-3,2:-2])/h
-            )
-            return torch.sqrt(ox**2 + oy**2 + oz**2)
-
-    def vorticity_components(self, u, v, w):
-        """
-        Return the three signed vorticity components (omega_x, omega_y, omega_z)
-        as a dict, plus the magnitude.  Only meaningful in 3-D.
-        """
-        h = self.h
-        # Start at index 2 so backward differences never reach into
-        # ghost cells (index 0), avoiding spurious boundary vorticity.
-        ox = torch.zeros_like(u)
-        ox[2:-2,2:-2,2:-2] = (
-            (w[2:-2,2:-2,2:-2] - w[2:-2,1:-3,2:-2])/h -
-            (v[2:-2,2:-2,2:-2] - v[2:-2,2:-2,1:-3])/h
-        )
-        oy = torch.zeros_like(u)
-        oy[2:-2,2:-2,2:-2] = (
-            (u[2:-2,2:-2,2:-2] - u[2:-2,2:-2,1:-3])/h -
-            (w[2:-2,2:-2,2:-2] - w[1:-3,2:-2,2:-2])/h
-        )
-        oz = torch.zeros_like(u)
-        oz[2:-2,2:-2,2:-2] = (
-            (v[2:-2,2:-2,2:-2] - v[1:-3,2:-2,2:-2])/h -
-            (u[2:-2,2:-2,2:-2] - u[2:-2,1:-3,2:-2])/h
-        )
-        return {"omega_x": ox, "omega_y": oy, "omega_z": oz,
-                "omega_mag": torch.sqrt(ox**2 + oy**2 + oz**2)}
-
     def forces_method1(self, u, v, p, iteration):
 
 
@@ -650,7 +540,7 @@ class FluidSolver:
                   self.friction_force_lin_x[i] = torch.sum(f_x[mask])*body.ds
                   self.friction_force_lin_y[i] = torch.sum(f_y[mask])*body.ds
                   self.friction_force_ang_z[i] = torch.sum(
-                      self.cross_product_2d(
+                      ops.cross_product_2d(
                           moment_arm[0][mask],
                           moment_arm[1][mask],
                           f_x[mask],
@@ -662,7 +552,7 @@ class FluidSolver:
                   # self.friction_force_lin_x[i] = torch.trapz(f_x[mask],curv_coord)
                   # self.friction_force_lin_y[i] = torch.trapz(f_y[mask],curv_coord)
                   # self.friction_force_ang_z[i] = torch.trapz(
-                  #   self.cross_product_2d(
+                  #   ops.cross_product_2d(
                   #       moment_arm[0][mask],
                   #       moment_arm[1][mask],
                   #       f_x[mask],
@@ -680,7 +570,7 @@ class FluidSolver:
                   # self.pressure_force_x[i] = torch.trapz(f_x[mask],curv_coord)
                   # self.pressure_force_y[i] = torch.trapz(f_y[mask],curv_coord)
                   # self.pressure_force_ang_z[i] = torch.trapz(
-                  #       self.cross_product_2d(
+                  #       ops.cross_product_2d(
                   #           moment_arm[0][mask],
                   #           moment_arm[1][mask],
                   #           f_x[mask],
@@ -704,7 +594,7 @@ class FluidSolver:
                   # self.pressure_force_x[i] = torch.trapz(f_x[mask],curv_coord)
                   # self.pressure_force_y[i] = torch.trapz(f_y[mask],curv_coord)
                   # self.pressure_force_ang_z[i] = torch.trapz(
-                  #       self.cross_product_2d(
+                  #       ops.cross_product_2d(
                   #           moment_arm[0][mask],
                   #           moment_arm[1][mask],
                   #           f_x[mask],
@@ -716,7 +606,7 @@ class FluidSolver:
                   self.pressure_force_x[i] = torch.sum(f_x[mask])*body.ds
                   self.pressure_force_y[i] = torch.sum(f_y[mask])*body.ds
                   self.pressure_force_ang_z[i] = torch.sum(
-                      self.cross_product_2d(
+                      ops.cross_product_2d(
                           moment_arm[0][mask],
                           moment_arm[1][mask],
                           f_x[mask],
@@ -754,7 +644,7 @@ class FluidSolver:
 
                   # # # self.friction_force_lin_x[i] = fforcex_body_i.sum()*self.h2
                   # # # self.friction_force_lin_y[i] = fforcey_body_i.sum()*self.h2
-                  # # # self.friction_force_ang_z[i] = self.cross_product_2d(
+                  # # # self.friction_force_ang_z[i] = ops.cross_product_2d(
                   # # #         moment_arm[0],
                   # # #         moment_arm[1],
                   # # #         fforcex_body_i,
@@ -792,7 +682,7 @@ class FluidSolver:
 
                   # # # self.pressure_force_x[i] = pforcex_body_i.sum()*self.h2
                   # # # self.pressure_force_y[i] = pforcey_body_i.sum()*self.h2
-                  # # # self.pressure_force_ang_z[i] = self.cross_product_2d(
+                  # # # self.pressure_force_ang_z[i] = ops.cross_product_2d(
                   # # #           moment_arm[0],
                   # # #           moment_arm[1],
                   # # #           pforcex_body_i,
@@ -887,7 +777,7 @@ class FluidSolver:
 
             # self.friction_force_lin_x[i] = (fforcex_body_i).sum()*self.h2
             # self.friction_force_lin_y[i] = (fforcey_body_i).sum()*self.h2
-            # self.friction_force_ang_z[i] = self.cross_product_2d(
+            # self.friction_force_ang_z[i] = ops.cross_product_2d(
             #         moment_arm[0],
             #         moment_arm[1],
             #         fforcex_body_i,
@@ -924,7 +814,7 @@ class FluidSolver:
             # self.friction_force_lin_x[i] = torch.trapz(f_x[mask],curv_coord)
             # self.friction_force_lin_y[i] = torch.trapz(f_y[mask],curv_coord)
             # self.friction_force_ang_z[i] = torch.trapz(
-            #   self.cross_product_2d(
+            #   ops.cross_product_2d(
             #       moment_arm[0][mask],
             #       moment_arm[1][mask],
             #       f_x[mask],
@@ -982,7 +872,7 @@ class FluidSolver:
 
             self.friction_force_lin_x[i] = fforcex_body_i.sum()*self.h2
             self.friction_force_lin_y[i] = fforcey_body_i.sum()*self.h2
-            self.friction_force_ang_z[i] = self.cross_product_2d(
+            self.friction_force_ang_z[i] = ops.cross_product_2d(
                     moment_arm[0],
                     moment_arm[1],
                     fforcex_body_i,
@@ -1050,7 +940,7 @@ class FluidSolver:
 
             self.pressure_force_x[i] = (self.pforcex_body_i).sum()*self.h2
             self.pressure_force_y[i] = (self.pforcey_body_i).sum()*self.h2
-            self.pressure_force_ang_z[i] = self.cross_product_2d(
+            self.pressure_force_ang_z[i] = ops.cross_product_2d(
                       moment_arm[0],
                       moment_arm[1],
                       self.pforcex_body_i,
@@ -1085,7 +975,7 @@ class FluidSolver:
 
             # self.friction_force_lin_x[i] = fforcex_body_i.sum()*self.h2
             # self.friction_force_lin_y[i] = fforcey_body_i.sum()*self.h2
-            # self.friction_force_ang_z[i] = self.cross_product_2d(
+            # self.friction_force_ang_z[i] = ops.cross_product_2d(
             #         moment_arm[0],
             #         moment_arm[1],
             #         fforcex_body_i,
@@ -1123,7 +1013,7 @@ class FluidSolver:
 
             # self.pressure_force_x[i] = pforcex_body_i.sum()*self.h2
             # self.pressure_force_y[i] = pforcey_body_i.sum()*self.h2
-            # self.pressure_force_ang_z[i] = self.cross_product_2d(
+            # self.pressure_force_ang_z[i] = ops.cross_product_2d(
             #           moment_arm[0],
             #           moment_arm[1],
             #           pforcex_body_i,
@@ -1140,7 +1030,7 @@ class FluidSolver:
 
             # self.friction_force_lin_x[i] = fforcex_body_i.sum()*self.h2
             # self.friction_force_lin_y[i] = fforcey_body_i.sum()*self.h2
-            # self.friction_force_ang_z[i] = self.cross_product_2d(
+            # self.friction_force_ang_z[i] = ops.cross_product_2d(
             #         moment_arm[0],
             #         moment_arm[1],
             #         fforcex_body_i,
@@ -1168,7 +1058,7 @@ class FluidSolver:
 
             # self.pressure_force_x[i] = (pforcex_body_i).sum()*self.h2
             # self.pressure_force_y[i] = (pforcey_body_i).sum()*self.h2
-            # self.pressure_force_ang_z[i] = self.cross_product_2d(
+            # self.pressure_force_ang_z[i] = ops.cross_product_2d(
             #           moment_arm[0],
             #           moment_arm[1],
             #           pforcex_body_i,
@@ -1253,7 +1143,7 @@ class FluidSolver:
             rz = Z - body.com_pos[2]
 
             # torque = ∫ r × f dV
-            tx, ty, tz = self.cross_product_3d(rx, ry, rz, fvisc_x, fvisc_y, fvisc_z)
+            tx, ty, tz = ops.cross_product_3d(rx, ry, rz, fvisc_x, fvisc_y, fvisc_z)
             self.friction_force_ang_x[i] = tx.sum() * h3
             self.friction_force_ang_y[i] = ty.sum() * h3
             self.friction_force_ang_z[i] = tz.sum() * h3
@@ -1267,7 +1157,7 @@ class FluidSolver:
             self.pressure_force_y[i] = fpres_y.sum() * h3
             self.pressure_force_z[i] = fpres_z.sum() * h3
 
-            tx_p, ty_p, tz_p = self.cross_product_3d(rx, ry, rz, fpres_x, fpres_y, fpres_z)
+            tx_p, ty_p, tz_p = ops.cross_product_3d(rx, ry, rz, fpres_x, fpres_y, fpres_z)
             self.pressure_force_ang_x[i] = tx_p.sum() * h3
             self.pressure_force_ang_y[i] = ty_p.sum() * h3
             self.pressure_force_ang_z[i] = tz_p.sum() * h3
@@ -1288,163 +1178,6 @@ class FluidSolver:
         """
         return torch.trapz(torch.trapz(var, dx=self.h), dx=self.h)
 
-    def project_old(self, uprime, vprime, p):
-
-          # coeff = torch.ones((self.nx,self.ny),device=self.device,dtype=self.dtype)
-        coeff            = self.mu0_all[1:-1,1:-1]
-        coeff_horizontal = (coeff[1:,:]+coeff[:-1,:])/2
-        coeff_vertical   = (coeff[:,1:]+coeff[:,:-1])/2
-        coeff_horizontal = torch.vstack((self.zc,coeff_horizontal,self.zc))
-        coeff_vertical   = torch.hstack((self.zr,coeff_vertical,self.zr))
-
-        p, _ = self.poisson_solver.solve_multigrid( # f, u, c
-            self.div,
-            p,
-            coeff,
-            coeff_horizontal,
-            coeff_vertical,
-        )
-          # ====== projection step ======
-        (p_x, p_y) = torch.gradient(p,spacing=self.hdy,edge_order=2)
-        (u,v)      = (uprime-(self.dt/self.rho)*self.mu0_all*p_x, vprime-(self.dt/self.rho)*self.mu0_all*p_y)
-
-          # self.div=self.divergence(uprime,vprime)
-          # p=self.poisson_solverFFT.solve(self.div)
-          # (p_x, p_y) = torch.gradient(p,spacing=self.hdy,edge_order=2)
-          # (u,v)=(uprime-self.mu0_all*p_x, vprime-self.mu0_all*p_y)
-
-        return (u,v,p)
-
-    def solver_iteration_test2(self,u,v,p,iteration):
-        """
-        BDIM2 iteration
-        """
-
-          # # ====== convection solver ======
-          # (u,v) = self.adv_diff_solver.solve(u,v)
-
-          # uprime = self.mu0_all*u
-          # vprime = self.mu0_all*v
-
-
-          # for i, body in enumerate(self.composite_body.bodies):
-
-          #     if i==self.n_bodies-1:
-          #         sdf_val = self.composite_body.sdf_vals[i]
-          #         mu0, mu1 = self.composite_body.mu_funcs(sdf_val)
-          #         xi0 = 1-mu0
-          #         xi1 = mu1
-          #         (_, normal_x, normal_y, _) = self.composite_body.compute_sdf_properties(sdf_val)
-
-          #     else:
-          #         sdf_val = self.composite_body.sdf_vals[i]
-          #         mu0, mu1 = self.composite_body.mu_funcs(sdf_val)
-          #         m_m0 = (1-mu0)
-
-          #         sdf_val1 = self.composite_body.sdf_vals[i+1]
-          #         mu0p, mu1p = self.composite_body.mu_funcs(sdf_val1)
-          #         m_m0p = (1-mu0p)
-
-          #         (_, normal_x, normal_y, _) = self.composite_body.compute_sdf_properties(sdf_val)
-          #         xi0 = m_m0-m_m0*m_m0p
-          #         xi1 = mu1-(mu1*mu1p)
-
-          #     body_u = self.composite_body.u_vals[i]
-          #     body_v = self.composite_body.v_vals[i]
-          #     self.div_body=xi0*self.divergence(body_u,body_v)
-
-          #     uprime += xi0*body_u+mu1*self.normal_derivative(uprime-body_u,normal_x,normal_y)
-          #     vprime += xi0*body_v+mu1*self.normal_derivative(vprime-body_v,normal_x,normal_y)
-
-          #     # uprime += 1000*(m_m0-intersect)*(body_u-uprime)*self.dt
-          #     # vprime += 1000*(m_m0-intersect)*(body_v-vprime)*self.dt
-
-          #     # # brinkmann implicit
-          #     # uprime = (self.brinkmann_k*xi0*body_u+uprime/self.dt)/(1/self.dt+self.brinkmann_k*xi0)
-          #     # vprime = (self.brinkmann_k*xi0*body_v+vprime/self.dt)/(1/self.dt+self.brinkmann_k*xi0)
-
-          #     # # brinkmann explicit
-          #     # uprime += self.brinkmann_k*xi0*(body_u-uprime)*self.dt
-          #     # vprime += self.brinkmann_k*xi0*(body_v-vprime)*self.dt
-
-          #     # uprime += 1000*m_m0*(body_u-uprime)*self.dt
-          #     # vprime += 1000*m_m0*(body_v-vprime)*self.dt
-
-          # ====== convection solver ======
-        (u,v) = self.adv_diff_solver.solve(u,v)
-
-          # # brinkmann implicit
-          # uprime = (self.brinkmann_k*self.m_m0_all*self.composite_body.body_u+u/self.dt)/(1/self.dt+self.brinkmann_k*self.m_m0_all)
-          # vprime = (self.brinkmann_k*self.m_m0_all*self.composite_body.body_v+v/self.dt)/(1/self.dt+self.brinkmann_k*self.m_m0_all)
-
-          # ====== BDIM2 =====
-        uprime = self.mu0_all*u + self.m_m0_all*self.composite_body.body_u + self.mu1_all*self.normal_derivative(u-self.composite_body.body_u,self.normal_x,self.normal_y)
-        vprime = self.mu0_all*v + self.m_m0_all*self.composite_body.body_v + self.mu1_all*self.normal_derivative(v-self.composite_body.body_v,self.normal_x,self.normal_y)
-
-          # self.adv_diff_solver.set_BCs(uprime,vprime)
-
-
-        self.div_body = self.divergence(self.composite_body.body_u,self.composite_body.body_v)
-        self.div      = (self.divergence(uprime,vprime)-self.m_m0_all*self.div_body)
-
-          # c = self.mu0_all
-          # ch = (c[1:,1:-1]+c[:-1,1:-1])/2
-          # cv = (c[1:-1,1:]+c[1:-1,:-1])/2
-          # p, _ = self.poisson_solver.solve_multigrid( # f, u, c
-          #     self.div[1:-1,1:-1],
-          #     torch.zeros_like(u),
-          #     c,
-          #     ch=ch,
-          #     cv=cv,
-          # )
-          # p/=(self.dt/self.rho)
-          # # ====== projection step ======
-          # (p_x, p_y) = torch.gradient(p,spacing=self.hdy,edge_order=2)
-          # (u,v)=(uprime-self.mu0_all*(self.dt/self.rho)*p_x, vprime-self.mu0_all*(self.dt/self.rho)*p_y)
-
-
-        p          = self.poisson_solverFFT.solve(self.div/(self.dt/self.rho))
-        (p_x, p_y) = self.gradient(p)
-        (u,v)      = (uprime-(self.dt/self.rho)*p_x, vprime-(self.dt/self.rho)*p_y)
-
-          # rhs_p=self.div
-          # p=self.poisson_solverFFT.solve(rhs_p)
-          # (p_x, p_y) = self.gradient(p)
-          # (u,v)=(uprime-p_x, vprime-p_y)
-
-
-
-        self.adv_diff_solver.set_BCs(u,v)
-
-
-          # self.mu0_all, self.mu1_all = self.composite_body.mu_funcs(self.composite_body.sdf_vals[0])
-        if self.compute_forces:
-            self.compute_fluid_forces(u,v,p,iteration)
-
-        else:
-            self.delta = torch.zeros_like(u)
-
-
-
-
-        return (u,v,p)
-
-    def cc2fc(self,uprime,vprime):
-        U         = torch.zeros(self.nx+1,self.ny,device=self.device,dtype=self.dtype)
-        V         = torch.zeros(self.nx,self.ny+1,device=self.device,dtype=self.dtype)
-        U[1:-1,:] = 0.5*(uprime[1:,:]+uprime[:-1,:])
-        U[0,:]    = 1.5*uprime[0,:]-0.5*uprime[1,:]
-        U[-1,:]   = 1.5*uprime[-1,:]-0.5*uprime[-2,:]
-        V[:,1:-1] = 0.5*(vprime[:,1:]+vprime[:,:-1])
-        V[:,0]    = 1.5*vprime[:,0]-0.5*vprime[:,1]
-        V[:,-1]   = 1.5*vprime[:,-1]-0.5*vprime[:,-2]
-        return (U,V)
-
-    def fc2cc(self,p):
-        u        = torch.zeros_like(p)
-        u[:-1,:] = 0.5*(p[1:,:]+p[:-1,:])
-        u[-1,:]  = 1.5*p[-2,:]-0.5*p[-3,:]
-        return u
 
     def project(self, u, v, p, w_vel=None, w=1.0):
 
@@ -1643,128 +1376,6 @@ class FluidSolver:
 
             return (u_out, v_out, p_out, w_out)
 
-    def solver_iteration_test3(self,u,v,p,iteration):
-        """
-        BDIM2 iteration
-        """
-
-        # ====== convection solver ======
-        (uprime,vprime) = self.adv_diff_solver.solve(u,v)
-        self.adv_diff_solver.set_BCs(uprime,vprime)
-
-        # uprime = (uprime+self.brinkmann_k*self.dt*self.m_m0_all_u*self.composite_body.body_u)/(1+self.brinkmann_k*self.dt*self.m_m0_all_u)
-        # vprime = (vprime+self.brinkmann_k*self.dt*self.m_m0_all_v*self.composite_body.body_v)/(1+self.brinkmann_k*self.dt*self.m_m0_all_v)
-
-        # ====== STEP 1 =====
-        uprime = self.mu0_all_u*uprime + self.m_m0_all_u*self.composite_body.body_u + self.mu1_all_u*self.normal_derivative(uprime-self.composite_body.body_u,self.normal_x_u,self.normal_y_u)
-        vprime = self.mu0_all_v*vprime + self.m_m0_all_v*self.composite_body.body_v + self.mu1_all_v*self.normal_derivative(vprime-self.composite_body.body_v,self.normal_x_v,self.normal_y_v)
-
-
-        # # for general deforming bodies
-        # self.div_body = torch.zeros_like(u)
-        # self.div_body[1:-1,1:-1] = self.m_m0_all_u[1:-1,1:-1]*(self.composite_body.body_u[2:, 1:-1] - self.composite_body.body_u[1:-1, 1:-1]) / self.h \
-        #                             + self.m_m0_all_v[1:-1,1:-1]*(self.composite_body.body_v[1:-1, 2:] - self.composite_body.body_v[1:-1, 1:-1]) / self.h
-        # self.div  = self.divergence(uprime,vprime) - self.div_body
-
-        # for general deforming bodies
-        self.div  = self.divergence(uprime,vprime)
-
-        # (c, _) = self.composite_body.mu_funcs(self.composite_body.sdf_val)
-        c = torch.ones_like(u)
-        # ch = (c[1:,1:-1]+c[:-1,1:-1])/2
-        # cv = (c[1:-1,1:]+c[1:-1,:-1])/2
-        coeff = self.dt/self.rho
-        ch = coeff*self.mu0_all_u
-        cv = coeff*self.mu0_all_v
-        p, _    = self.poisson_solver.solve_multigrid(
-            self.div[1:-1,1:-1],
-            torch.zeros_like(u),
-            coeff*c,
-            ch = ch[1:,1:-1],
-            cv = cv[1:-1,1:],
-        )
-        # ====== projection step ======
-        (p_x, p_y) = self.gradient(p)
-        u          = uprime - ch * p_x
-        v          = vprime - cv * p_y
-
-        # u = uprime - coeff * p_x
-        # v = vprime - coeff * p_y
-
-        # self.adv_diff_solver.set_BCs(uprime,vprime)
-
-        # coeff = self.dt/self.rho
-        # p = self.poisson_solverPETSc.solve(-self.div/coeff).reshape(self.nx,self.ny)
-        # (p_x, p_y) = self.gradient(p)
-        # (u,v)=(uprime-coeff*p_x, vprime-coeff*p_y)
-
-        # (u,v)=(uprime,vprime)
-
-        # coeff = self.dt/self.rho
-        # p=self.poisson_solverFFT.solve(self.div/coeff)
-        # (p_x, p_y) = self.gradient(p)
-        # (u,v)=(uprime-coeff*p_x, vprime-coeff*p_y)
-
-
-
-
-
-        # (u,v)=(uprime,vprime)
-        # p=torch.zeros_like(u)
-
-
-
-
-        return (u,v,p)
-
-    def solver_iteration(self,u,v,p,iteration):
-        """
-        BDIM2 iteration
-        """
-
-          # ====== convection solver ======
-        (u,v)  = self.adv_diff_solver.solve(u,v)
-        uprime = self.mu0_all*u + self.m_m0_all*self.composite_body.body_u + self.mu1_all*self.normal_derivative(u-self.body_u,self.normal_x,self.normal_y)
-        vprime = self.mu0_all*v + self.m_m0_all*self.composite_body.body_v + self.mu1_all*self.normal_derivative(v-self.body_v,self.normal_x,self.normal_y)
-        self.adv_diff_solver.set_BCs(uprime,vprime)
-
-        self.div         = (self.divergence(uprime,vprime))[1:-1,1:-1]
-        coeff            = torch.ones((self.nx,self.ny),device=self.device)  #*self.mu0_all[1:-1,1:-1]
-        coeff_horizontal = (coeff[1:,1:-1]+coeff[:-1,1:-1])/2
-        coeff_vertical   = (coeff[1:-1,1:]+coeff[1:-1,:-1])/2
-          # coeff_horizontal=torch.vstack((self.zc,coeff_horizontal,self.zc))
-          # coeff_vertical=torch.hstack((self.zr,coeff_vertical,self.zr))
-
-        p, _ = self.poisson_solver.solve_multigrid( # f, u, c
-            self.div,
-            p,
-            coeff,
-            coeff_horizontal,
-            coeff_vertical,
-        )
-          # ====== projection step ======
-        (p_x, p_y) = self.gradient(p)
-        (u,v)      = (uprime-p_x, vprime-p_y)
-
-          # self.div=self.divergence(uprime,vprime)
-          # self.div_body=self.divergence(self.composite_body.body_u,self.composite_body.body_v)
-          # p=self.poisson_solverFFT.solve(self.div-self.m_m0_all*self.div_body)
-          # (p_x, p_y) = torch.gradient(p,spacing=self.hdy,edge_order=2)
-          # (u,v)=(uprime-p_x, vprime-p_y)
-
-          # self.mu0_all, self.mu1_all = self.composite_body.mu_funcs(self.composite_body.sdf_vals[0])
-        if self.compute_forces:
-            self.compute_fluid_forces(u,v,p,iteration)
-
-        else:
-            self.delta = torch.zeros_like(u)
-
-        self.xstress_tensor = self.force_x_interp.F
-
-          # self.adv_diff_solver.set_BCs(u,v)
-
-        return (u,v,p)
-
     def solve_heun(self, u, v, p, iteration, w_vel=None):
         if self.ndim == 2:
             return self.solver_iteration_heun(u, v, p, iteration)
@@ -1808,16 +1419,12 @@ class FluidSolver:
 
             if self.compute_forces:
                 self.forces_method2(u, v, p, iteration)
-            else:
-                self.delta = torch.zeros_like(u)
 
         else:
             (u, v, p, w_vel) = self.solve_heun(u, v, p, iteration, w_vel=w_vel)
 
             if self.compute_forces:
                 self.forces_method2_3d(u, v, w_vel, p, iteration)
-            else:
-                self.delta = torch.zeros_like(u)
 
         # ---- plotting / saving  (works for 2D and 3D) ----
         terminate = self.plotting_and_saving(u, v, p, iteration, w_vel=w_vel)
@@ -1965,25 +1572,6 @@ class FluidSolver:
     def plotting_debug(self, u, v, p, iteration, check_termination=True):
         return self.plotting_and_saving(u, v, p, iteration, check_termination=check_termination)
 
-
-    def interpolate(self,x,y,val):
-        self.interp_utility.F = val
-        return self.interp_utility(x,y)
-
-    def cross_product_2d(self,ax,ay,bx,by):
-        return ax*by-ay*bx
-
-    def cross_product_3d(self, ax, ay, az, bx, by, bz):
-        """Element-wise 3-D cross product  a × b.
-
-        Returns (cx, cy, cz) tensors.
-        """
-        cx = ay * bz - az * by
-        cy = az * bx - ax * bz
-        cz = ax * by - ay * bx
-        return cx, cy, cz
-
-
     def check_termination(self, iteration, u, v, p):
         if iteration == self.nt - 1 or torch.isnan(u).any():
                 print("Termination condition met: max_iter or NaN")
@@ -1996,9 +1584,6 @@ class FluidSolver:
             else:
                 terminate = False
         return terminate
-
-
-
 
     def plotting_saving(self, u, v, p, iteration):
         """Legacy alias — delegates to the unified method."""
@@ -2023,8 +1608,6 @@ class FluidSolver:
               os.makedirs(cnt_path, exist_ok=True)
               for i, body in enumerate(self.composite_body.bodies):
                   np.save(f'{cnt_path}/cnt_{iteration}_{i}',body.cnt_update.cpu().numpy())
-
-
 
     def run_from_initial(self, u0, v0, w0=None):
         u = u0

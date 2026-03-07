@@ -11,7 +11,7 @@ import numpy as np
 
 stack_folder      = save_path
 data_folder       = os.path.join(lilytorch_repo_root, 'farms_examples', 'pleurodeles')
-bdim_handler_path = "lilytorch.farms_examples.pleurodeles.BDIMhandler.BDIMhandler"
+bdim_handler_path = "lilytorch.integration.BDIMhandler.BDIMhandler"
 
 nthreads    = 32
 use_gpu     = True
@@ -346,7 +346,9 @@ def gen_simulation_config(output_folder, index):
                     "jacobi_weight"          : 0.7,
                     "poisson_nsmoothing"     : 10,
                     "poisson_verbose"        : False,
-                    "poisson_folder"         : os.path.join(data_folder, "data")
+                    "poisson_folder"         : os.path.join(data_folder, "data"),
+                    "rho_body"               : 800.0,
+                    "zero_pressure_inside"   : True,
                 },
                 "boundary_conditions": {
                     "BC_type_u"  : ["D", "D", "N", "N"],
@@ -366,9 +368,13 @@ def gen_simulation_config(output_folder, index):
                         "rotation"   : "None",
                         "translation": [None, None]
                     },
-                    "suit"     : 0.0,
-                    "convexify": False,
-                    "scale"    : 1
+                    "suit"          : 0.0,
+                    "convexify"     : False,
+                    "scale"         : 1,
+                    "contour_mask"  : True,
+                },
+                "physics": {
+                    "solref"        : [0.001, 0.5],
                 },
                 "output": {
                     "save_path"      : "",

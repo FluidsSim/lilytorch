@@ -71,7 +71,7 @@ YAML Config
 | `dynamic_water.py` | `WaterDynamicsCallback` that feeds CFD-computed velocity fields back to MuJoCo as spatially-varying water drag for closed-loop coupling. |
 | `plotting.py` | Visualization of velocity fields, vorticity, pressure, SDFs, and time histories. |
 | `parser.py` | CLI argument parser for selecting YAML config files. |
-| `video_from_png.py` | Utility to assemble saved PNG frames into MP4 videos. |
+| `video_postprocess.py` | Utility to assemble saved PNG frames into MP4 or GIF videos. |
 
 ### FARMS/MuJoCo Integration (`lilytorch/integration/`)
 
@@ -185,23 +185,25 @@ Four git submodules from [farmsim](https://github.com/farmsim), pinned to the `a
 
 ## Generating Videos from Simulation Output
 
-After a simulation run, the solver saves PNG frames for each field (vorticity, pressure, velocity magnitude, etc.) into sub-folders under the output directory. Use `video_from_png.py` to assemble these frames into MP4 videos.
+After a simulation run, the solver saves PNG frames for each field (vorticity, pressure, velocity magnitude, etc.) into sub-folders under the output directory. Use `video_postprocess.py` to assemble these frames into MP4 or GIF videos.
 
 ### Basic Usage
 
 ```bash
 # Generate videos for ALL fields in a specific run directory
-python lilytorch/src/video_from_png.py /path/to/save_path/2026-03-05_12-00-00/
+python lilytorch/src/video_postprocess.py /path/to/save_path/2026-03-05_12-00-00/
 
 # Pass the parent save_path — the script auto-picks the latest run
-python lilytorch/src/video_from_png.py /path/to/save_path/
+python lilytorch/src/video_postprocess.py /path/to/save_path/
 ```
 
 ### Selecting Specific Fields
 
 ```bash
 # Only generate videos for selected fields
-python lilytorch/src/video_from_png.py /path/to/run_dir --fields omega_z_3d vel_mag_3d pressure_3d
+python lilytorch/src/video_postprocess.py /path/to/run_dir --fields omega_z_3d vel_mag_3d pressure_3d
+
+--fields omega_z_3d
 ```
 
 Available field names depend on the simulation (2D vs 3D). Common ones include:
@@ -217,25 +219,33 @@ Available field names depend on the simulation (2D vs 3D). Common ones include:
 | `--slow-factor S` | 1.0 | Real-time multiplier. 1.0 = physical time equals video time |
 | `--no-overlay` | off | Disable the simulation-time text overlay on each frame |
 | `--crf N` | 18 | H.264 quality (lower = better; 18 ≈ visually lossless) |
+| `--format {mp4,gif}` | mp4 | Output format: `mp4` (H.264 video) or `gif` (animated GIF) |
 
 ### Examples
 
 ```bash
 # Slow-motion (5× slower than real time), high quality
-python lilytorch/src/video_from_png.py /path/to/run_dir --slow-factor 5.0 --crf 15
+python lilytorch/src/video_postprocess.py /path/to/run_dir --slow-factor 5.0 --crf 15
 
 # Fixed 30 FPS, no timestamp overlay
-python lilytorch/src/video_from_png.py /path/to/run_dir --fps 30 --no-overlay
+python lilytorch/src/video_postprocess.py /path/to/run_dir --fps 30 --no-overlay
 
 # 3D cylinder wake — only vorticity z-component and velocity magnitude
-python lilytorch/src/video_from_png.py /data/andreaferrario/ns_data/cylinder_3d_Re200/ --fields omega_z_3d vel_mag_3d
+python lilytorch/src/video_postprocess.py /data/andreaferrario/ns_data/1guilla_self_propelled/swimming1 --fields omega_z_3d vel_mag_3d
+
+# Generate GIF instead of MP4
+python lilytorch/src/video_postprocess.py /path/to/run_dir --format gif
+
+# GIF of a specific field with slow-motion
+python lilytorch/src/video_postprocess.py /path/to/run_dir --fields omega_z_3d --format gif --slow-factor 5.0
 ```
 
 ### Notes
 
 - The script reads `parameters.yaml` from the run directory to compute the FPS from `dt` and `save_every`. If the file is missing, it defaults to 10 FPS.
 - **ffmpeg** is the preferred backend (H.264, concat demuxer, optional drawtext overlay). If ffmpeg is not installed, the script falls back to OpenCV `VideoWriter`.
-- Output videos are saved alongside the PNG sub-folders inside the run directory (e.g. `omega_z_3d.mp4`).
+- Output files are saved alongside the PNG sub-folders inside the run directory (e.g. `omega_z_3d.mp4` or `omega_z_3d.gif`).
+- GIF output uses a two-pass palette approach via ffmpeg for high quality. If ffmpeg is unavailable, the script falls back to Pillow.
 
 ## FlowViewer — In-Viewer Flow Visualisation
 

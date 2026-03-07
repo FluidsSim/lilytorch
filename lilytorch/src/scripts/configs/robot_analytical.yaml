@@ -1,8 +1,9 @@
 
-solver: 
+solver:
   use_gpu           : True
   nthreads          : 16
-  N                 : 512
+  Nx                : 512
+  Ny                : 512
   xmin              : -0.1
   xmax              : 1.2
   ymin              : -0.65
@@ -12,16 +13,19 @@ solver:
   nu                : 1.0e-6
   rho               : 1.0e+3
   convection_method : "implicit"
-  poisson_tol       : 1.0e-2
-  poisson_max_cycles: 1
-  poisson_nsmoothing: 15
-  poisson_verbose   : False
+  poisson_tol            : 1.0e-2
+  poisson_max_mgcg_cycles: 3
+  poisson_max_cycles     : 1
+  jacobi_weight          : 0.7
+  poisson_nsmoothing     : 15
+  poisson_verbose        : False
+  poisson_folder         : "lilytorch/data/"
 
 body:
   type: fish_analytical
-  update_maps: 
+  update_maps:
     rotation: "None"
-    translation: 
+    translation:
       - None
       - None
   control:
@@ -33,7 +37,7 @@ body:
     c2: 0.323
     c3: 0.4
     xshift: 0.0
-    yshift: 0.0 
+    yshift: 0.0
     sb: 0.03
     st: 0.8
     wt: 0.02
@@ -41,7 +45,7 @@ body:
     thk: False
 
 
-output: 
+output:
   save_path: "/data/andreaferrario/ns_data/"
   save_frames: True
   save_every : 10
@@ -55,7 +59,7 @@ boundary_conditions:
   - "-"
   - "N"
   - "N"
-  BC_values_u: 
+  BC_values_u:
   - 0.21
   - 0
   - 0
@@ -65,7 +69,7 @@ boundary_conditions:
   - "-"
   - "N"
   - "N"
-  BC_values_v: 
+  BC_values_v:
   - 0
   - 0
   - 0
@@ -73,4 +77,3 @@ boundary_conditions:
 
 
 
-  

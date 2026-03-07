@@ -14,7 +14,8 @@ solver :
   # ymax              : 0.013
 
   ## intermediate tank
-  N                 : 1024
+  Nx                : 1024
+  Ny                : 1024
   xmin              : -0.02
   xmax              : 0.084
   ymin              : -0.052
@@ -37,9 +38,10 @@ solver :
   nu                : 1.0e-6
   rho               : 1.0e+3
 
-  poisson_tol       : 1.0e-4
-  poisson_max_cycles: 30
-  jacobi_weight     : 0.8
+  poisson_tol            : 1.0e-4
+  poisson_max_mgcg_cycles: 3
+  poisson_max_cycles     : 30
+  jacobi_weight          : 0.8
   poisson_nsmoothing: 10
   poisson_verbose   : True
   poisson_folder : "data/"

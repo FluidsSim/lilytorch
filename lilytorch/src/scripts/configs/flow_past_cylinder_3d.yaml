@@ -1,7 +1,7 @@
 
 solver:
   use_gpu           : True
-  nthreads          : 4
+  nthreads          : 24
   Nx                : 256
   Ny                : 128
   Nz                : 128
@@ -11,22 +11,24 @@ solver:
   ymax              :  1.0
   zmin              : -1.0
   zmax              :  1.0
-  nt                : 10000
-  nu                : 0.0008
+  nt                : 20000
+  nu                : 0.015
   rho               : 1.0
   dt                : 0.001
+  perturbation_amplitude : 0.01
   convection_method : "quick"
   skip_projection   : False
 
   poisson_tol            : 1.0e-4
   jacobi_weight          : 0.7
   poisson_max_mgcg_cycles: 3
-  poisson_max_cycles     : 30
+  poisson_max_cycles     : 2
   poisson_nsmoothing     : 5
   poisson_verbose        : False
   poisson_folder         : "lilytorch/data/"
 
 boundary_conditions:
+  # Face ordering: (west, east, south, north, bottom, top)
   BC_type_u:
   - "D"
   - "D"
@@ -74,7 +76,8 @@ body:
   type: composite_analytical
   plotting: False
   sdf:
-  - "lambda x, y, z: torch.sqrt(x**2 + y**2 + z**2) - 0.2"
+    # Infinite cylinder along z: SDF = sqrt(x^2 + y^2) - R
+  - "lambda x, y, z: torch.sqrt(x**2 + y**2) - 0.2"
   update_maps:
   - rotation: "lambda t: 0*t"
     translation:
@@ -83,9 +86,9 @@ body:
     - "lambda t: 0*t"
 
 output:
-  save_path   : "/data/andreaferrario/ns_data/test_3d_Re500_hires/"
+  save_path   : "/data/andreaferrario/ns_data/cylinder_3d/"
   save_frames : True
-  save_every  : 200
-  vmin        : -1
-  vmax        :  1
+  save_every  : 500
+  vmin        : -5
+  vmax        :  5
   save_uv     : False

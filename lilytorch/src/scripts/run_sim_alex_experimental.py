@@ -64,7 +64,7 @@ def main(
     frequency   = 3.5
 
     # Load parameters
-    pars = yaml2pyobject("lilytorch/scripts/zebrafish_experimental.yaml")
+    pars = yaml2pyobject("lilytorch/src/scripts/configs/zebrafish_experimental.yaml")
 
     # Control parameters
     freq_scaling = 0.25

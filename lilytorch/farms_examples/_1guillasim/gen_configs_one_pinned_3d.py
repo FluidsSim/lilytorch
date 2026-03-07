@@ -11,7 +11,7 @@ import numpy as np
 
 stack_folder      = save_path
 data_folder       = os.path.join(lilytorch_repo_root, 'farms_examples', '_1guillasim')
-bdim_handler_path = "lilytorch.farms_examples._1guillasim.BDIMhandler3D.BDIMhandler3D"
+bdim_handler_path = "lilytorch.integration.BDIMhandler.BDIMhandler"
 
 
 nthreads = 16
@@ -329,7 +329,8 @@ def gen_simulation_config(output_folder):
                     "jacobi_weight"          : 0.7,
                     "poisson_nsmoothing"     : 5,
                     "poisson_verbose"        : False,
-                    "poisson_folder"         : os.path.join(data_folder, "data")
+                    "poisson_folder"         : os.path.join(data_folder, "data"),
+                    "rho_body"               : 800.0,
                 },
                 "boundary_conditions": {
                     "BC_type_u"  : ["D", "D", "N", "N", "N", "N"],
@@ -350,9 +351,10 @@ def gen_simulation_config(output_folder):
                         "rotation"   : "None",
                         "translation": [None, None, None]
                     },
-                    "suit"     : 0.0,
-                    "convexify": True,
-                    "scale"    : 1
+                    "suit"          : 0.0,
+                    "convexify"     : True,
+                    "scale"         : 1,
+                    "force_scaling" : 1.0,
                 },
                 "output": {
                     "save_path"      : "",

@@ -4,7 +4,8 @@ solver :
   nthreads          : 16
 
   ## small tank
-  N                 : 256
+  Nx                : 256
+  Ny                : 256
   xmin              : -1.5
   xmax              : 0.5
   ymin              : -1
@@ -37,9 +38,10 @@ solver :
   nu                : 1.0e-6
   rho               : 1.0e+3
 
-  poisson_tol       : 1.0e-4
-  poisson_max_cycles: 10
-  jacobi_weight     : 0.8
+  poisson_tol            : 1.0e-4
+  poisson_max_mgcg_cycles: 3
+  poisson_max_cycles     : 10
+  jacobi_weight          : 0.8
   poisson_nsmoothing: 3
   poisson_verbose   : False
   poisson_folder : "data/"

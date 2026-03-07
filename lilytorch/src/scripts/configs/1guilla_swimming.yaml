@@ -5,9 +5,10 @@ solver :
 
   Nx: 1024
   Ny: 256
-  Cx: 0.2
-  Cy: 0.0
-  h: 0.003
+  xmin: -1.336
+  xmax:  1.736
+  ymin: -0.384
+  ymax:  0.384
 
 
   # ## small tank

@@ -1,16 +1,20 @@
 """
 Error analysis for flow past cylinder in 2D — Maertens & Weymouth (2015) style.
 
-Setup:
-  - Diameter D = 120 (grid-unit scale)
-  - Domain  30D × 30D  (3600 × 3600)
-  - Grid spacings dx = dy ∈ {3, 4, 6, 8, 12}  →  Nx = Ny ∈ {1200, 900, 600, 450, 300}
-  - Re = 550  (same as the previous test)
+Setup (non-dimensional, following MW2015 Section 3.1):
+  - Diameter D = 1
+  - Domain  30D × 30D  (30 × 30)
+  - Grid: power-of-2 Nx for multigrid compatibility
+      Nx ∈ {128, 256, 512, 1024}   →   dx = 30/Nx
+      D/dx ∈ {4.27, 8.53, 17.07, 34.13}
+      Refinement ratio = 2 between successive levels
+  - Re = 100  (MW2015 Section 3.1: "circular cylinder at Re = 100")
   - CFL = 0.1  →  dt = 0.1 * dx / U
-  - Run for 3 convective times  →  t_stop = 3 * D / U = 360
-  - Cylinder centred at (0, 0) in domain [-1800, 1800]²
+  - Run for 3 convective times  →  t_stop = 3 * D / U = 3
+  - Cylinder centred at (0, 0) in domain [-15, 15]²
+  - ε = 2·dx  (kernel half-width)
 
-Reference solution: finest grid (dx = 3).
+Reference solution: finest grid (Nx = 1024, D/dx ≈ 34).
 """
 
 from lilytorch.src.solver import FluidSolver
@@ -24,18 +28,18 @@ import os
 import gc
 
 # ================================================================
-# Physical / geometric parameters
+# Physical / geometric parameters  (non-dimensional, D = 1)
 # ================================================================
-D  = 120          # cylinder diameter (grid-unit scale)
-R  = D / 2        # radius = 60
-Re = 550          # Reynolds number (matches previous test)
+D  = 1            # cylinder diameter (non-dimensional)
+R  = D / 2        # radius = 0.5
+Re = 100          # Reynolds number (MW2015 Section 3.1)
 U  = 1.0          # free-stream velocity
-nu = U * D / Re   # kinematic viscosity  ≈ 0.2182
+nu = U * D / Re   # kinematic viscosity = 0.01
 
 rho = 1.0         # density
 
 # Domain: 30D × 30D, centred at origin
-half_L = 15 * D   # 1800
+half_L = 15 * D   # 15
 xmin, xmax = -half_L, half_L
 ymin, ymax = -half_L, half_L
 
@@ -45,12 +49,14 @@ cx, cy = 0.0, 0.0
 # Time: 3 convective times
 t_conv = D / U
 n_conv = 3.0
-t_stop = n_conv * t_conv   # 360
+t_stop = n_conv * t_conv   # 3
 
 # ================================================================
-# Grid spacings (coarse → fine)
+# Grid sizes (power-of-2 for multigrid; refinement ratio = 2)
+#   dx = domain_size / Nx ,  D/dx = Nx / domain_size
 # ================================================================
-dxs = [12, 8, 6, 4, 3]
+nxs = [128, 256, 512, 1024, 2048]          # coarse → fine
+domain_size = xmax - xmin       # 30
 
 convection_method = "abdquickest"
 output_base = "/data/andreaferrario/ns_data/flow_past_cylinder_error_tests_MW/" + convection_method
@@ -59,21 +65,21 @@ print(f"{'='*70}")
 print(f"  Maertens & Weymouth (2015) style convergence test")
 print(f"{'='*70}")
 print(f"  D = {D},  R = {R},  Re = {Re},  U = {U},  nu = {nu:.6f}")
-print(f"  Domain = [{xmin}, {xmax}] × [{ymin}, {ymax}]  ({int(xmax-xmin)} × {int(ymax-ymin)})")
+print(f"  Domain = [{xmin}, {xmax}] × [{ymin}, {ymax}]  ({domain_size} × {domain_size})")
 print(f"  Cylinder centre = ({cx}, {cy})")
 print(f"  t_stop = {t_stop} ({n_conv} convective times)")
-print(f"  Grid spacings: {dxs}")
+print(f"  Grid sizes Nx: {nxs}")
 print()
 
-for dx in dxs:
-    Nx = int((xmax - xmin) / dx)
+for Nx in nxs:
+    dx = domain_size / Nx
     Ny = Nx
 
     print(f"\n{'='*60}")
-    print(f"  dx = dy = {dx}  →  Nx = Ny = {Nx}")
+    print(f"  Nx = {Nx}  →  dx = {dx:.6f}  →  D/dx = {D/dx:.2f}")
     print(f"{'='*60}\n")
 
-    pars = yaml2pyobject("lilytorch/src/scripts/flow_past_cylinder.yaml")
+    pars = yaml2pyobject("lilytorch/src/scripts/configs/flow_past_cylinder.yaml")
 
     # --- Domain ---
     pars["solver"]["xmin"] = xmin
@@ -86,6 +92,11 @@ for dx in dxs:
     # --- Physics ---
     pars["solver"]["nu"]  = nu
     pars["solver"]["rho"] = rho
+
+    # --- Poisson solver: increase iterations for larger grids ---
+    pars["solver"]["poisson_max_cycles"]      = 30   # V-cycles (was 10)
+    pars["solver"]["poisson_nsmoothing"]      = 10   # Jacobi sweeps per level (was 5)
+    pars["solver"]["poisson_tol"]             = 1e-5 # relax tolerance slightly
 
     # --- Body: cylinder centred at (cx, cy) ---
     pars["body"]["sdf"] = [
@@ -103,14 +114,14 @@ for dx in dxs:
     pars["solver"]["nt"]                = int(t_stop / dt) + 1
 
     # --- Output ---
-    save_path = f"{output_base}/{dx}/"
+    save_path = f"{output_base}/Nx{Nx}/"
     pars["output"]["save_frames"] = True
     pars["output"]["save_every"]  = max(50, pars["solver"]["nt"] // 10)
 
     print(f"  Re = {U * D / nu:.1f}")
-    print(f"  dx = {dx},  dt = {dt:.4f},  nt = {pars['solver']['nt']}")
+    print(f"  Nx = {Nx},  dx = {dx:.6f},  dt = {dt:.6f},  nt = {pars['solver']['nt']}")
     print(f"  D/dx = {D/dx:.1f} cells per diameter")
-    print(f"  eps = 2*dx = {2*dx}  (eps/D = {2*dx/D:.3f})")
+    print(f"  eps = 2·dx = {2*dx:.6f}")
 
     # =========== Run simulation ===========
     solver = FluidSolver(pars, dtype=torch.float32, compute_forces=True)
@@ -121,7 +132,7 @@ for dx in dxs:
     v = solver.v0
     p = solver.p0
 
-    for it in tqdm(range(0, solver.nt), desc=f"dx={dx}"):
+    for it in tqdm(range(0, solver.nt), desc=f"Nx={Nx}, D/dx={D/dx:.0f}"):
         t = it * solver.dt
         (u, v, p, stop_sim) = solver.step_(u, v, p, it, t)
 

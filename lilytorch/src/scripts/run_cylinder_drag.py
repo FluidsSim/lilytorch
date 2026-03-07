@@ -12,7 +12,7 @@ matplotlib.rc('font', **{"size":12})
 plt.rcParams["figure.figsize"] = 15,15
 
 
-pars = yaml2pyobject("lilytorch/src/scripts/flow_past_cylinder.yaml")
+pars = yaml2pyobject("lilytorch/src/scripts/configs/flow_past_cylinder.yaml")
 
 Re=550
 # Re = 1000

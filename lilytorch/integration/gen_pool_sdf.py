@@ -3,176 +3,232 @@ from xml.dom import minidom
 from lilytorch.util.paths import lilytorch_repo_root
 import os
 
-def create_pool_sdf(xmin, xmax, ymin, ymax, wall_thickness=0.3, wall_height=0.3, plotting=False):
-    # Create root element
+# ── Material palettes (ambient / diffuse / specular / emissive) ────────
+
+# Warm sandstone walls
+WALL_MATERIAL = {
+    'ambient':  '0.78 0.74 0.68 1.0',
+    'diffuse':  '0.88 0.84 0.78 1.0',
+    'specular': '0.30 0.28 0.25 1.0',
+    'emissive': '0.0  0.0  0.0  1.0',
+}
+
+# Blue-tiled pool floor
+FLOOR_MATERIAL = {
+    'ambient':  '0.15 0.38 0.58 1.0',
+    'diffuse':  '0.22 0.50 0.72 1.0',
+    'specular': '0.50 0.50 0.50 1.0',
+    'emissive': '0.0  0.0  0.0  1.0',
+}
+
+# Translucent water
+WATER_MATERIAL = {
+    'ambient':  '0.25 0.45 0.75 0.18',
+    'diffuse':  '0.30 0.50 0.80 0.18',
+    'specular': '0.60 0.60 0.65 0.30',
+    'emissive': '0.05 0.08 0.15 0.10',
+}
+
+
+# ── Helpers ────────────────────────────────────────────────────────────
+
+def _add_material(visual_elem, mat_dict):
+    """Append <material> with ambient/diffuse/specular/emissive children."""
+    mat = ET.SubElement(visual_elem, 'material')
+    for tag, value in mat_dict.items():
+        el = ET.SubElement(mat, tag)
+        el.text = value
+
+
+def _add_box_link(model, name, pose_text, size_text, mat_dict):
+    """Create a <link> with collision + visual box geometry and material."""
+    link = ET.SubElement(model, 'link', name=name)
+    p = ET.SubElement(link, 'pose')
+    p.text = pose_text
+
+    # collision
+    col = ET.SubElement(link, 'collision', name=f'{name}_collision')
+    cp  = ET.SubElement(col, 'pose')
+    cp.text = '0 0 0 0 0 0'
+    cg  = ET.SubElement(col, 'geometry')
+    cb  = ET.SubElement(cg, 'box')
+    cs  = ET.SubElement(cb, 'size')
+    cs.text = size_text
+
+    # visual
+    vis = ET.SubElement(link, 'visual', name=f'{name}_visual')
+    vp  = ET.SubElement(vis, 'pose')
+    vp.text = '0 0 0 0 0 0'
+    vg  = ET.SubElement(vis, 'geometry')
+    vb  = ET.SubElement(vg, 'box')
+    vs  = ET.SubElement(vb, 'size')
+    vs.text = size_text
+    _add_material(vis, mat_dict)
+
+    return link
+
+
+def _write_sdf(sdf_elem, rel_path):
+    """Pretty-print an SDF ElementTree and write it under the sdfs folder."""
+    xml_str = minidom.parseString(ET.tostring(sdf_elem)).toprettyxml(indent="  ")
+    output_path = os.path.join(
+        lilytorch_repo_root, 'farms_examples', 'sdfs', *rel_path.split('/'))
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, 'w') as f:
+        f.write(xml_str)
+    return output_path
+
+
+# ── Public API ─────────────────────────────────────────────────────────
+
+def create_pool_sdf(xmin, xmax, ymin, ymax, zmin=None, zmax=None,
+                    wall_thickness=None, wall_height=0.3, plotting=False):
+    """Generate a rectangular pool SDF with textured walls and floor.
+
+    Parameters
+    ----------
+    xmin, xmax, ymin, ymax : float
+        Inner (fluid-domain) boundaries.
+    zmin, zmax : float, optional
+        Vertical extent.  When given a full 3-D pool is built (4 side walls
+        + floor; open top for camera visibility).  When *None* the legacy
+        2-D mode is used with *wall_height* in the z-direction.
+    wall_thickness : float or None
+        Wall thickness.  If *None* it is set to 8 % of the smallest domain
+        dimension (>= 0.01 m).
+    wall_height : float
+        Wall extent in z -- only used when *zmin*/*zmax* are not given.
+    plotting : bool
+        Pop up a top-view matplotlib figure of the pool.
+    """
+    is_3d = zmin is not None and zmax is not None
+
+    dx = xmax - xmin
+    dy = ymax - ymin
+    dz = (zmax - zmin) if is_3d else wall_height
+
+    # Auto-scale wall thickness
+    if wall_thickness is None:
+        wall_thickness = round(0.08 * min(dx, dy, dz), 4)
+        wall_thickness = max(wall_thickness, 0.01)
+
+    wt = wall_thickness
+    wz = dz                                                       # wall height
+    zc = ((zmin + zmax) / 2) if is_3d else (wall_height / 2)      # wall z-centre
+
+    # ── SDF skeleton ──────────────────────────────────────────────────
     sdf   = ET.Element('sdf', version='1.6')
     world = ET.SubElement(sdf, 'world', name='world')
     model = ET.SubElement(world, 'model', name='pool')
+    mp    = ET.SubElement(model, 'pose')
+    mp.text = '0 0 0 0 0 0'
 
-    # Model pose
-    model_pose = ET.SubElement(model, 'pose')
-    model_pose.text = '0.0 0.0 0.0 0.0 0.0 0.0'
-
-    # Side walls
-    # Pool parameters - define the 4 corner points of the inner pool
-    # Corners are ordered: bottom-left, bottom-right, top-right, top-left
-    corners = [
-        (xmin, ymin),  # (x0, y0) - bottom-left
-        (xmax, ymin),  # (x1, y1) - bottom-right
-        (xmax, ymax),  # (x2, y2) - top-right
-        (xmin, ymax)   # (x3, y3) - top-left
-    ]
-
-
-    wall_thickness = wall_thickness
-    wall_height = wall_height
-    wall_z = wall_height / 2  # vertical position of walls
-
-    # Calculate pool dimensions from corners
-    x0, y0 = corners[0]
-    x1, y1 = corners[1]
-    x2, y2 = corners[2]
-    x3, y3 = corners[3]
-
-    pool_length = x1 - x0  # x-direction (assuming rectangular pool)
-    pool_width = y2 - y1   # y-direction
-
-    # Calculate wall positions and sizes
-    # Each wall is centered on the pool edge and extends half thickness inward/outward
+    # ---- four side walls ---------------------------------------------
     sides = [
-        # Left wall (x_0): centered at x0, full height in y + extra for corners
-        ('side_x_0',
-            f'{x0 - wall_thickness/2} {(y0 + y3)/2} {wall_z} 0.0 0.0 0.0',
-            f'{wall_thickness} {pool_width + wall_thickness} {wall_height}'),
+        ('wall_xmin',
+         f'{xmin - wt/2} {(ymin+ymax)/2} {zc} 0 0 0',
+         f'{wt} {dy + 2*wt} {wz}'),
 
-        # Right wall (x_1): centered at x1, full height in y + extra for corners
-        ('side_x_1',
-            f'{x1 + wall_thickness/2} {(y1 + y2)/2} {wall_z} 0.0 0.0 0.0',
-            f'{wall_thickness} {pool_width + wall_thickness} {wall_height}'),
+        ('wall_xmax',
+         f'{xmax + wt/2} {(ymin+ymax)/2} {zc} 0 0 0',
+         f'{wt} {dy + 2*wt} {wz}'),
 
-        # Bottom wall (y_0): centered at y0, full length in x + extra for corners
-        ('side_y_0',
-            f'{(x0 + x1)/2} {y0 - wall_thickness/2} {wall_z} 0.0 0.0 0.0',
-            f'{pool_length + wall_thickness} {wall_thickness} {wall_height}'),
+        ('wall_ymin',
+         f'{(xmin+xmax)/2} {ymin - wt/2} {zc} 0 0 0',
+         f'{dx + 2*wt} {wt} {wz}'),
 
-        # Top wall (y_1): centered at y2, full length in x + extra for corners
-        ('side_y_1',
-            f'{(x2 + x3)/2} {y2 + wall_thickness/2} {wall_z} 0.0 0.0 0.0',
-            f'{pool_length + wall_thickness} {wall_thickness} {wall_height}')
+        ('wall_ymax',
+         f'{(xmin+xmax)/2} {ymax + wt/2} {zc} 0 0 0',
+         f'{dx + 2*wt} {wt} {wz}'),
     ]
 
     for name, pose_text, size_text in sides:
-        link = ET.SubElement(model, 'link', name=name)
-        link_pose = ET.SubElement(link, 'pose')
-        link_pose.text = pose_text
+        _add_box_link(model, name, pose_text, size_text, WALL_MATERIAL)
 
-        collision   = ET.SubElement(link, 'collision', name=f'{name}_collision')
-        c_pose      = ET.SubElement(collision, 'pose')
-        c_pose.text = '0.0 0.0 0.0 0.0 0.0 0.0'
-        c_geom      = ET.SubElement(collision, 'geometry')
-        c_box       = ET.SubElement(c_geom, 'box')
-        c_size      = ET.SubElement(c_box, 'size')
-        c_size.text = size_text
+    # ---- floor (z-min face) ------------------------------------------
+    fz = (zmin - wt / 2) if is_3d else (-wt / 2)
+    _add_box_link(
+        model, 'floor',
+        f'{(xmin+xmax)/2} {(ymin+ymax)/2} {fz} 0 0 0',
+        f'{dx + 2*wt} {dy + 2*wt} {wt}',
+        FLOOR_MATERIAL,
+    )
 
-        visual      = ET.SubElement(link, 'visual', name=f'{name}_visual')
-        v_pose      = ET.SubElement(visual, 'pose')
-        v_pose.text = '0.0 0.0 0.0 0.0 0.0 0.0'
-        v_geom      = ET.SubElement(visual, 'geometry')
-        v_box       = ET.SubElement(v_geom, 'box')
-        v_size      = ET.SubElement(v_box, 'size')
-        v_size.text = size_text
-        ET.SubElement(visual, 'material')
-
-    # Floor link (aligned with inner faces of the walls to form the pool bottom)
-    floor = ET.SubElement(model, 'link', name='floor')
-
-    # Calculate floor dimensions and position based on pool inner corners
-    floor_thickness = wall_thickness/2
-    floor_length = pool_length                # match inner pool length
-    floor_width = pool_width                  # match inner pool width
-    floor_x = (x0 + x2) / 2
-    floor_y = (y1 + y2) / 2
-    floor_z = -floor_thickness / 2            # top of floor at z=0 (flush with wall bases)
-
-    # floor_pose = ET.SubElement(floor, 'pose')
-    # floor_pose.text = f'{floor_x} {floor_y} {floor_z} 0.0 0.0 0.0'
-
-    # floor_collision = ET.SubElement(floor, 'collision', name='floor_collision')
-    # fc_pose = ET.SubElement(floor_collision, 'pose')
-    # fc_pose.text = f'{floor_x} {floor_y} {floor_z} 0.0 0.0 0.0'
-    # fc_geom = ET.SubElement(floor_collision, 'geometry')
-    # fc_box = ET.SubElement(fc_geom, 'box')
-    # fc_size = ET.SubElement(fc_box, 'size')
-    # fc_size.text = f'{floor_length} {floor_width} {floor_thickness}'
-
-    # floor_visual = ET.SubElement(floor, 'visual', name='floor_visual')
-    # fv_pose = ET.SubElement(floor_visual, 'pose')
-    # fv_pose.text = f'{floor_x} {floor_y} {floor_z} 0.0 0.0 0.0'
-    # fv_geom = ET.SubElement(floor_visual, 'geometry')
-    # fv_box = ET.SubElement(fv_geom, 'box')
-    # fv_size = ET.SubElement(fv_box, 'size')
-    # fv_size.text = f'{floor_length} {floor_width} {floor_thickness}'
-    # ET.SubElement(floor_visual, 'material')
-
+    # ── Optional matplotlib top-view ──────────────────────────────────
     if plotting:
-        # Visualize the pool dimensions
         import matplotlib.pyplot as plt
         import matplotlib.patches as patches
 
         _, ax = plt.subplots(figsize=(10, 6))
 
-        # Draw floor
-        floor_patch = patches.Rectangle((x0 - wall_thickness, y0 - wall_thickness),
-                                        floor_length, floor_width,
-                                        linewidth=1, edgecolor='brown', facecolor='tan', alpha=0.3)
-        ax.add_patch(floor_patch)
+        # floor
+        ax.add_patch(patches.Rectangle(
+            (xmin - wt, ymin - wt), dx + 2*wt, dy + 2*wt,
+            lw=1, ec='brown', fc='tan', alpha=0.3))
 
-        # Draw side walls using corner-based parameters
-        walls = [
-            # Left wall (side_x_0)
-            patches.Rectangle((x0 - wall_thickness, y0 - wall_thickness/2),
-                                wall_thickness, pool_width + wall_thickness,
-                                linewidth=2, edgecolor='black', facecolor='gray', alpha=0.5),
-            # Right wall (side_x_1)
-            patches.Rectangle((x1, y1 - wall_thickness/2),
-                                wall_thickness, pool_width + wall_thickness,
-                                linewidth=2, edgecolor='black', facecolor='gray', alpha=0.5),
-            # Bottom wall (side_y_0)
-            patches.Rectangle((x0 - wall_thickness/2, y0 - wall_thickness),
-                                pool_length + wall_thickness, wall_thickness,
-                                linewidth=2, edgecolor='black', facecolor='gray', alpha=0.5),
-            # Top wall (side_y_1)
-            patches.Rectangle((x3 - wall_thickness/2, y2),
-                                pool_length + wall_thickness, wall_thickness,
-                                linewidth=2, edgecolor='black', facecolor='gray', alpha=0.5)
-        ]
+        # side walls
+        for rect_args in [
+            ((xmin - wt, ymin - wt), wt,      dy + 2*wt),
+            ((xmax,      ymin - wt), wt,      dy + 2*wt),
+            ((xmin - wt, ymin - wt), dx + 2*wt, wt),
+            ((xmin - wt, ymax),      dx + 2*wt, wt),
+        ]:
+            ax.add_patch(patches.Rectangle(
+                *rect_args, lw=2, ec='black', fc='gray', alpha=0.5))
 
-        for wall in walls:
-            ax.add_patch(wall)
+        # water area
+        ax.add_patch(patches.Rectangle(
+            (xmin, ymin), dx, dy, lw=1, ec='blue', fc='lightblue', alpha=0.3))
 
-        # Draw water area
-        water = patches.Rectangle((x0, y0), pool_length, pool_width,
-                                    linewidth=1, edgecolor='blue', facecolor='lightblue', alpha=0.3)
-        ax.add_patch(water)
-
-        margin = 0.01
-        ax.set_xlim(x0 - wall_thickness - margin, x1 + wall_thickness + margin)
-        ax.set_ylim(y0 - wall_thickness - margin, y2 + wall_thickness + margin)
+        m = 0.01
+        ax.set_xlim(xmin - wt - m, xmax + wt + m)
+        ax.set_ylim(ymin - wt - m, ymax + wt + m)
         ax.set_aspect('equal')
-        ax.set_xlabel('X (meters)')
-        ax.set_ylabel('Y (meters)')
+        ax.set_xlabel('X (m)')
+        ax.set_ylabel('Y (m)')
         ax.set_title('Pool - Top View')
         ax.grid(True, alpha=0.3)
-
         plt.tight_layout()
         plt.show()
 
-    # Pretty print
-    xml_str = minidom.parseString(ET.tostring(sdf)).toprettyxml(indent="  ")
-    # Ensure the directory exists
-    output_path = lilytorch_repo_root + '/farms_examples/sdfs/pool/sdf/pool.sdf'
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    # ── write SDF file ────────────────────────────────────────────────
+    return _write_sdf(sdf, 'pool/sdf/pool.sdf')
 
-    # Write to file
-    with open(output_path, 'w') as f:
-        f.write(xml_str)
+
+def create_water_sdf(xmin, xmax, ymin, ymax, zmin=None, zmax=None):
+    """Generate a visual-only water-volume SDF sized to the pool interior.
+
+    Returns the absolute path of the written SDF file.
+    """
+    dx = xmax - xmin
+    dy = ymax - ymin
+    cx = (xmin + xmax) / 2
+    cy = (ymin + ymax) / 2
+
+    if zmin is not None and zmax is not None:
+        dz = zmax - zmin
+        cz = (zmin + zmax) / 2
+    else:
+        dz, cz = 50.0, -25.0      # legacy: tall slab below z = 0
+
+    sdf   = ET.Element('sdf', version='1.6')
+    world = ET.SubElement(sdf, 'world', name='world')
+    model = ET.SubElement(world, 'model', name='arena_water')
+    mp    = ET.SubElement(model, 'pose')
+    mp.text = '0 0 0 0 0 0'
+
+    link = ET.SubElement(model, 'link', name='water')
+    lp   = ET.SubElement(link, 'pose')
+    lp.text = '0 0 0 0 0 0'
+
+    vis = ET.SubElement(link, 'visual', name='water_visual')
+    vp  = ET.SubElement(vis, 'pose')
+    vp.text = f'{cx} {cy} {cz} 0 0 0'
+    vg  = ET.SubElement(vis, 'geometry')
+    vb  = ET.SubElement(vg, 'box')
+    vs  = ET.SubElement(vb, 'size')
+    vs.text = f'{dx} {dy} {dz}'
+
+    _add_material(vis, WATER_MATERIAL)
+
+    return _write_sdf(sdf, 'arena_water/sdf/arena_water.sdf')

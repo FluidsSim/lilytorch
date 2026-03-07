@@ -5,18 +5,18 @@ from farms_core.io.yaml import pyobject2yaml
 from farms_core.model.options import SpawnMode
 from farms_core.io.sdf import ModelSDF
 from lilytorch.util.paths import lilytorch_repo_root, sdfs_path, gen_new_folder, save_path
-from lilytorch.integration.gen_pool_sdf import create_pool_sdf
+from lilytorch.integration.gen_pool_sdf import create_pool_sdf, create_water_sdf
 import subprocess
 import numpy as np
 
 stack_folder      = save_path
 data_folder       = os.path.join(lilytorch_repo_root, 'farms_examples', '_1guillasim')
-bdim_handler_path = "lilytorch.farms_examples._1guillasim.BDIMhandler3D.BDIMhandler3D"
+bdim_handler_path = "lilytorch.integration.BDIMhandler.BDIMhandler"
 
 
 nthreads = 16
 use_gpu  = True
-use_bdim = True
+use_bdim = False
 headless = False  # must be False for FlowViewer (MuJoCo GUI)
 fast     = False
 
@@ -190,7 +190,16 @@ def gen_animat_config(output_folder):
 
 def gen_arena_config(output_folder):
 
-    create_pool_sdf(xmin, xmax, ymin, ymax, wall_thickness=0.3, wall_height=0.3, plotting=False)
+    # Auto-scale wall thickness from domain dimensions
+    pool_dims  = [xmax - xmin, ymax - ymin, zmax - zmin]
+    wall_thick = round(0.08 * min(pool_dims), 4)
+    wall_thick = max(wall_thick, 0.01)
+
+    create_pool_sdf(xmin, xmax, ymin, ymax, zmin=zmin, zmax=zmax,
+                    wall_thickness=wall_thick, plotting=False)
+
+    water_sdf_path = create_water_sdf(xmin, xmax, ymin, ymax,
+                                      zmin=zmin, zmax=zmax)
 
     arena_dict = {
        "sdf": os.path.join(sdfs_path, "pool", "sdf", "pool.sdf"),
@@ -202,16 +211,16 @@ def gen_arena_config(output_folder):
             "extras"  : {}
         },
         "water": {
-            "sdf"      : os.path.join(sdfs_path, "arena_water_v0", "sdf", "arena_water.sdf"),
+            "sdf"      : water_sdf_path,
             "drag"     : use_drag,
             "buoyancy" : use_drag,
-            "height"   : 0,
+            "height"   : zmax,
             "velocity" : [0, 0, 0],
             "viscosity": 1.0,
             "density"  : density,
             "maps"     : ["", ""],
         },
-        "ground_height": 0.2,
+        "ground_height": zmin - wall_thick - 0.5,
     }
     pyobject2yaml(
         os.path.join(output_folder, 'arena_config.yaml'),
@@ -256,7 +265,7 @@ def gen_simulation_config(output_folder):
         ,
         "physics": {
             "timestep"      : timestep,
-            "gravity"       : [0, 0, 0.0],
+            "gravity"       : [0, 0, -9.81],
             "num_sub_steps" : 1,
             "cb_sub_steps"  : 1,
             "n_solver_iters": 50
@@ -330,7 +339,8 @@ def gen_simulation_config(output_folder):
                     "jacobi_weight"          : 0.7,
                     "poisson_nsmoothing"     : 5,
                     "poisson_verbose"        : False,
-                    "poisson_folder"         : os.path.join(data_folder, "data")
+                    "poisson_folder"         : os.path.join(data_folder, "data"),
+                    "rho_body"               : 800.0,
                 },
                 "boundary_conditions": {
                     "BC_type_u"  : ["N", "N", "N", "N", "N", "N"],
@@ -351,9 +361,10 @@ def gen_simulation_config(output_folder):
                         "rotation"   : "None",
                         "translation": [None, None, None]
                     },
-                    "suit"     : 0.0,
-                    "convexify": True,
-                    "scale"    : 1
+                    "suit"          : 0.0,
+                    "convexify"     : True,
+                    "scale"         : 1,
+                    "force_scaling" : 1.0,
                 },
                 "output": {
                     "save_path"      : "",

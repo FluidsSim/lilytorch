@@ -56,14 +56,14 @@ if __name__ == "__main__":
     if not configs:
         # Default: run both examples shipped alongside this script
         configs = [
-            # os.path.join(SCRIPT_DIR, "flow_past_circle_2d.yaml"),
-            os.path.join(SCRIPT_DIR, "flow_past_cylinder_3d.yaml"),
+            # os.path.join(SCRIPT_DIR, "configs", "flow_past_circle_2d.yaml"),
+            os.path.join(SCRIPT_DIR, "configs", "flow_past_cylinder_3d.yaml"),
         ]
 
     for cfg in configs:
         # Allow bare filenames to be resolved from the script directory
         if not os.path.isabs(cfg) and not os.path.exists(cfg):
-            candidate = os.path.join(SCRIPT_DIR, cfg)
+            candidate = os.path.join(SCRIPT_DIR, "configs", cfg)
             if os.path.exists(candidate):
                 cfg = candidate
 

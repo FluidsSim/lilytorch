@@ -2,19 +2,20 @@
 solver :
   use_gpu: False
   nthreads: 16
-  N      : 512
-  xmin   : -1
-  xmax   : 1
-  ymin   : -1
-  ymax   : 1
 
-  nt     : 20000
-  nu     : 1.0e-6
-  rho    : 1.0e+3
+  Nx: 128
+  Ny: 256
+  xmin: 64
+  xmax: 192
+  ymin: 0
+  ymax: 256
 
+  nt     : 8000
+  nu     : 1.0
+  rho    : 1.0
 
   # convection_method : "implicit"
-  # dt     : 1
+  # dt     : 0.1
 
   convection_method : "abdquickest"
   dt                : 0.1
@@ -26,9 +27,6 @@ solver :
   poisson_nsmoothing: 50
   poisson_verbose   : True
   poisson_folder : "lilytorch/data/"
-
-
-
 
 boundary_conditions:
   BC_type_u:
@@ -53,26 +51,20 @@ boundary_conditions:
   - 0
 
 body:
-  type: composite_mesh
-
-  mesh_file: "cylinder.obj"
-  n_samples: (1000, 1000)
-  compute_interp: True
-  plotting_meshes: False
+  type: composite_analytical
+  plotting: True
+  sdf:
+  - "lambda x, y: circle(x,y,xt=0,yt=0,r=16)"
   update_maps:
-    rotation: "None"
-    translation:
-      - None
-      - None
-  suit: 0.0
-  convexify: False
-  scale: 1
-
+    - rotation: "lambda t: 0*torch.cos(t/10)"
+      translation:
+        - "lambda t: 128+0*torch.cos(t/20)"
+        - "lambda t: 128+40*torch.sin(t/20)"
 
 output:
   save_path: "/data/andreaferrario/ns_data/"
   save_frames: True
-  save_every : 50
-  vmin: -0.05
-  vmax: 0.05
+  save_every : 20
+  vmin: -0.1
+  vmax: 0.1
   save_uv: False
