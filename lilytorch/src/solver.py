@@ -1517,19 +1517,66 @@ class FluidSolver:
 
 
     def solver_iteration_heun(self, u, v, p, iteration, w_vel=None):
+        """
+        Heun (RK2 predictor-corrector) time integration with BDIM2.
+
+        Matches the WaterLily.jl ``mom_step!`` algorithm:
+          1. Predictor: adv-diff → BDIM → project(w=1)
+          2. Corrector: adv-diff at predicted vel → rebase from u^n →
+             BDIM → average with predictor → project(w=0.5)
+        """
 
         if self.ndim == 2:
             # ====== PREDICTOR ======
             (uprime, vprime) = self.adv_diff_solver.solve(u, v)
 
-            uprime = self.mu0_all_u*uprime + self.m_m0_all_u*self.composite_body.body_u + self.mu1_all_u*self.normal_derivative(uprime-self.composite_body.body_u, self.normal_x_u, self.normal_y_u)
-            vprime = self.mu0_all_v*vprime + self.m_m0_all_v*self.composite_body.body_v + self.mu1_all_v*self.normal_derivative(vprime-self.composite_body.body_v, self.normal_x_v, self.normal_y_v)
+            # BDIM2 meta-equation
+            uprime = (self.mu0_all_u * uprime
+                      + self.m_m0_all_u * self.composite_body.body_u
+                      + self.mu1_all_u * self.normal_derivative(
+                          uprime - self.composite_body.body_u,
+                          self.normal_x_u, self.normal_y_u))
+            vprime = (self.mu0_all_v * vprime
+                      + self.m_m0_all_v * self.composite_body.body_v
+                      + self.mu1_all_v * self.normal_derivative(
+                          vprime - self.composite_body.body_v,
+                          self.normal_x_v, self.normal_y_v))
+
+            # Save BDIM'd pre-projection velocities for averaging
+            uprime_bdim = uprime.clone()
+            vprime_bdim = vprime.clone()
 
             self.adv_diff_solver.set_BCs(uprime, vprime)
-
             (u1, v1, p1) = self.project(uprime, vprime, p)
 
-            return (u1, v1, p1)
+            # ====== CORRECTOR ======
+            # Evaluate RHS at the projected predicted velocity
+            (uprime2, vprime2) = self.adv_diff_solver.solve(u1, v1)
+            # adv_diff.solve returns u1 + dt*RHS(u1).
+            # Heun needs u^n + dt*RHS(u1), so rebase from u^n:
+            uprime2 = u + (uprime2 - u1)
+            vprime2 = v + (vprime2 - v1)
+
+            # BDIM2 meta-equation on corrector
+            uprime2 = (self.mu0_all_u * uprime2
+                       + self.m_m0_all_u * self.composite_body.body_u
+                       + self.mu1_all_u * self.normal_derivative(
+                           uprime2 - self.composite_body.body_u,
+                           self.normal_x_u, self.normal_y_u))
+            vprime2 = (self.mu0_all_v * vprime2
+                       + self.m_m0_all_v * self.composite_body.body_v
+                       + self.mu1_all_v * self.normal_derivative(
+                           vprime2 - self.composite_body.body_v,
+                           self.normal_x_v, self.normal_y_v))
+
+            # Average the BDIM'd pre-projection velocities (WaterLily style)
+            u_avg = 0.5 * (uprime_bdim + uprime2)
+            v_avg = 0.5 * (vprime_bdim + vprime2)
+
+            self.adv_diff_solver.set_BCs(u_avg, v_avg)
+            (u_out, v_out, p_out) = self.project(u_avg, v_avg, p, w=0.5)
+
+            return (u_out, v_out, p_out)
 
         else:  # 3D
             # ====== PREDICTOR ======
@@ -1554,40 +1601,47 @@ class FluidSolver:
                           wprime - self.composite_body.body_w,
                           self.normal_x_w, self.normal_y_w, self.normal_z_w))
 
-            self.adv_diff_solver.set_BCs(uprime, vprime, wprime)
+            # Save BDIM'd pre-projection velocities for averaging
+            uprime_bdim = uprime.clone()
+            vprime_bdim = vprime.clone()
+            wprime_bdim = wprime.clone()
 
+            self.adv_diff_solver.set_BCs(uprime, vprime, wprime)
             (u1, v1, w1, p1) = self.project(uprime, vprime, p, w_vel=wprime)
 
-            return (u1, v1, p1, w1)
+            # ====== CORRECTOR ======
+            (uprime2, vprime2, wprime2) = self.adv_diff_solver.solve(u1, v1, w1)
+            # Rebase from u^n
+            uprime2 = u     + (uprime2 - u1)
+            vprime2 = v     + (vprime2 - v1)
+            wprime2 = w_vel + (wprime2 - w1)
 
+            # BDIM2 meta-equation on corrector
+            uprime2 = (self.mu0_all_u * uprime2
+                       + self.m_m0_all_u * self.composite_body.body_u
+                       + self.mu1_all_u * self.normal_derivative(
+                           uprime2 - self.composite_body.body_u,
+                           self.normal_x_u, self.normal_y_u, self.normal_z_u))
+            vprime2 = (self.mu0_all_v * vprime2
+                       + self.m_m0_all_v * self.composite_body.body_v
+                       + self.mu1_all_v * self.normal_derivative(
+                           vprime2 - self.composite_body.body_v,
+                           self.normal_x_v, self.normal_y_v, self.normal_z_v))
+            wprime2 = (self.mu0_all_w * wprime2
+                       + self.m_m0_all_w * self.composite_body.body_w
+                       + self.mu1_all_w * self.normal_derivative(
+                           wprime2 - self.composite_body.body_w,
+                           self.normal_x_w, self.normal_y_w, self.normal_z_w))
 
-        # # ====== CORRECTOR ======
-        # (uprime,vprime) = self.adv_diff_solver.solve(u1,v1)
+            # Average the BDIM'd pre-projection velocities
+            u_avg = 0.5 * (uprime_bdim + uprime2)
+            v_avg = 0.5 * (vprime_bdim + vprime2)
+            w_avg = 0.5 * (wprime_bdim + wprime2)
 
-        # # uprime = (uprime+self.brinkmann_k*self.dt*self.m_m0_all_u*self.composite_body.body_u)/(1+self.brinkmann_k*self.dt*self.m_m0_all_u)
-        # # vprime = (vprime+self.brinkmann_k*self.dt*self.m_m0_all_v*self.composite_body.body_v)/(1+self.brinkmann_k*self.dt*self.m_m0_all_v)
+            self.adv_diff_solver.set_BCs(u_avg, v_avg, w_avg)
+            (u_out, v_out, w_out, p_out) = self.project(u_avg, v_avg, p, w_vel=w_avg, w=0.5)
 
-        # uprime = self.mu0_all_u*uprime + self.m_m0_all_u*self.composite_body.body_u + self.mu1_all_u*self.normal_derivative(uprime-self.composite_body.body_u,self.normal_x_u,self.normal_y_u)
-        # vprime = self.mu0_all_v*vprime + self.m_m0_all_v*self.composite_body.body_v + self.mu1_all_v*self.normal_derivative(vprime-self.composite_body.body_v,self.normal_x_v,self.normal_y_v)
-
-        # self.adv_diff_solver.set_BCs(uprime,vprime)
-
-        # (u2,v2,p) = self.project(uprime,vprime,p,w=1)
-
-        # # uprime*=0.5
-        # # vprime*=0.5
-
-        # u=0.5*(u+u2)
-        # v=0.5*(v+v2)
-
-
-
-
-
-
-
-
-        # return (u,v,p)
+            return (u_out, v_out, p_out, w_out)
 
     def solver_iteration_test3(self,u,v,p,iteration):
         """
