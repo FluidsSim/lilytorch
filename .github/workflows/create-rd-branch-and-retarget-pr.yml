@@ -1,0 +1,59 @@
+name: Create rd branch and retarget PR
+
+on:
+  push:
+    branches:
+      - copilot/refactor-differential-operators
+
+jobs:
+  create-rd-and-retarget:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create rd branch from main (if not exists)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Check if rd branch already exists on remote
+          if git ls-remote --exit-code --heads origin rd; then
+            echo "Branch 'rd' already exists, skipping creation."
+          else
+            echo "Creating 'rd' branch from main..."
+            git fetch origin main
+            git checkout -b rd origin/main
+            git push origin rd
+            echo "Branch 'rd' created successfully."
+          fi
+
+      - name: Retarget PR to rd branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUMBER=$(gh pr list --head copilot/refactor-differential-operators --json number --jq '.[0].number')
+          if [ -z "$PR_NUMBER" ]; then
+            echo "No open PR found for this branch."
+            exit 0
+          fi
+          echo "Found PR #$PR_NUMBER, updating base to 'rd'..."
+          gh pr edit "$PR_NUMBER" --base rd
+          echo "PR #$PR_NUMBER now targets 'rd' branch."
+
+      - name: Remove this workflow file
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git fetch origin copilot/refactor-differential-operators
+          git checkout copilot/refactor-differential-operators
+          git rm .github/workflows/create-rd-branch-and-retarget-pr.yml
+          git commit -m "chore: remove one-shot workflow after rd branch setup"
+          git push origin copilot/refactor-differential-operators
