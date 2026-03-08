@@ -10,6 +10,7 @@ from lilytorch.src import plotting
 from lilytorch.util.rw import save_object
 from lilytorch.util.yaml_operations import pyobject2yaml
 
+import warnings
 import torch
 from tqdm import tqdm
 import datetime
@@ -54,11 +55,21 @@ class FluidSolver:
         self.dx=(self.xmax-self.xmin)/(self.nx-2)
         self.dy=(self.ymax-self.ymin)/(self.ny-2)
 
-        assert abs(float(self.dx-self.dy)) < 1e-10, "Grid spacing in x = {} and y = {} must be equal".format(self.dx, self.dy)
+        if abs(float(self.dx-self.dy)) >= 1e-10:
+            warnings.warn(
+                "Grid spacing in x = {} and y = {} must be equal".format(self.dx, self.dy),
+                UserWarning,
+                stacklevel=2,
+            )
         self.h = self.dx
 
         self.x = torch.arange(self.xmin-self.h/2, self.xmax+self.h, self.h, device=self.device, dtype=self.dtype)
         self.y = torch.arange(self.ymin-self.h/2, self.ymax+self.h, self.h, device=self.device, dtype=self.dtype)
+
+        # Per-cell spacing arrays (uniform by default; override via hx/hy for non-uniform grids)
+        self.hx  = self.h * torch.ones((self.nx, self.ny), device=self.device, dtype=self.dtype)
+        self.hy  = self.h * torch.ones((self.nx, self.ny), device=self.device, dtype=self.dtype)
+        self.hxy = self.hx * self.hy  # area element field, shape (nx, ny)
 
         self.h2    = self.h**2
         self.dt    = torch.tensor(solver["dt"], device=self.device, dtype=self.dtype)
@@ -345,7 +356,7 @@ class FluidSolver:
         Compute dp/dy
         """
         dp=torch.zeros_like(p)
-        dp[1:-1,1:-1]=(p[1:-1,2:]-p[1:-1,:-2])/(2*self.h)
+        dp[1:-1,1:-1]=(p[1:-1,2:]-p[1:-1,:-2])/(2*self.hy[1:-1,1:-1])
         return dp
         # return torch.gradient(p, spacing=self.h, dim=1, edge_order=2)[0]
 
@@ -355,8 +366,8 @@ class FluidSolver:
         """
         dvar_dx            = torch.zeros_like(var)
         dvar_dy            = torch.zeros_like(var)
-        dvar_dx[1:-1,1:-1] = (var[1:-1,1:-1]-var[:-2,1:-1])/self.h
-        dvar_dy[1:-1,1:-1] = (var[1:-1,1:-1]-var[1:-1,:-2])/self.h
+        dvar_dx[1:-1,1:-1] = (var[1:-1,1:-1]-var[:-2,1:-1])/self.hx[1:-1,1:-1]
+        dvar_dy[1:-1,1:-1] = (var[1:-1,1:-1]-var[1:-1,:-2])/self.hy[1:-1,1:-1]
         return (dvar_dx, dvar_dy)
           # return (self.compute_dpdx(var), self.compute_dpdy(var))
 
@@ -367,17 +378,17 @@ class FluidSolver:
         return (p[1:,:]-p[:-1,:])/self.h, (p[:,1:]-p[:,:-1])/self.h
 
     def gradient_xstag(self, var):
-        return (var[2:, 1:-1] - var[1:-1, 1:-1]) / self.h
+        return (var[2:, 1:-1] - var[1:-1, 1:-1]) / self.hx[1:-1, 1:-1]
 
     def gradient_ystag(self, var):
-        return (var[1:-1, 2:] - var[1:-1, 1:-1]) / self.h
+        return (var[1:-1, 2:] - var[1:-1, 1:-1]) / self.hy[1:-1, 1:-1]
 
     def divergence(self, u, v):
         """
         Compute the divergence
         """
         div             = torch.zeros_like(u)
-        div[1:-1, 1:-1] = (u[2:, 1:-1] - u[1:-1, 1:-1]) / self.dx + (v[1:-1, 2:] - v[1:-1, 1:-1]) / self.dy
+        div[1:-1, 1:-1] = (u[2:, 1:-1] - u[1:-1, 1:-1]) / self.hx[1:-1,1:-1] + (v[1:-1, 2:] - v[1:-1, 1:-1]) / self.hy[1:-1,1:-1]
         return div
 
     def normal_derivative(self, var, normal_x, normal_y):
@@ -395,8 +406,8 @@ class FluidSolver:
         dudy = torch.zeros_like(u)
           # dvdx[1:-1, 1:-1] = (v[2:, 1:-1]-v[1:-1, 1:-1])/self.h
           # dudy[1:-1, 1:-1] = (u[1:-1, 2:]-u[1:-1, 1:-1])/self.h
-        dvdx[1:-1, 1:-1] = (v[1:-1, 1:-1]-v[:-2, 1:-1])/self.h
-        dudy[1:-1, 1:-1] = (u[1:-1, 1:-1]-u[1:-1, :-2])/self.h
+        dvdx[1:-1, 1:-1] = (v[1:-1, 1:-1]-v[:-2, 1:-1])/self.hx[1:-1, 1:-1]
+        dudy[1:-1, 1:-1] = (u[1:-1, 1:-1]-u[1:-1, :-2])/self.hy[1:-1, 1:-1]
         return dvdx-dudy
 
     def forces_method1(self, u, v, p, iteration):
@@ -822,8 +833,8 @@ class FluidSolver:
 
             # sdf_val_u = self.composite_body.sdf_vals[i]
 
-            self.friction_force_lin_x[i] = fforcex_body_i.sum()*self.h2
-            self.friction_force_lin_y[i] = fforcey_body_i.sum()*self.h2
+            self.friction_force_lin_x[i] = (fforcex_body_i*self.hxy).sum()
+            self.friction_force_lin_y[i] = (fforcey_body_i*self.hxy).sum()
             self.friction_force_ang_z[i] = self.cross_product_2d(
                     moment_arm[0],
                     moment_arm[1],
@@ -890,8 +901,8 @@ class FluidSolver:
 
 
 
-            self.pressure_force_x[i] = (self.pforcex_body_i).sum()*self.h2
-            self.pressure_force_y[i] = (self.pforcey_body_i).sum()*self.h2
+            self.pressure_force_x[i] = (self.pforcex_body_i*self.hxy).sum()
+            self.pressure_force_y[i] = (self.pforcey_body_i*self.hxy).sum()
             self.pressure_force_ang_z[i] = self.cross_product_2d(
                       moment_arm[0],
                       moment_arm[1],
@@ -1566,12 +1577,12 @@ class FluidSolver:
         HV_new = vw*fw-ve*fe+vs*fs-vn*fn
 
         if iteration==0:
-            u_new[1:-1,1:-1] = u[1:-1,1:-1]+self.dt*HU_new/self.h
-            v_new[1:-1,1:-1] = v[1:-1,1:-1]+self.dt*HV_new/self.h
+            u_new[1:-1,1:-1] = u[1:-1,1:-1]+self.dt*HU_new/self.hx[1:-1,1:-1]
+            v_new[1:-1,1:-1] = v[1:-1,1:-1]+self.dt*HV_new/self.hy[1:-1,1:-1]
 
         else:
-            u_new[1:-1,1:-1] = u[1:-1,1:-1]+self.dt*0.5*(3*HU_new - self.HU_prec)/self.h
-            v_new[1:-1,1:-1] = v[1:-1,1:-1]+self.dt*0.5*(3*HV_new - self.HV_prec)/self.h
+            u_new[1:-1,1:-1] = u[1:-1,1:-1]+self.dt*0.5*(3*HU_new - self.HU_prec)/self.hx[1:-1,1:-1]
+            v_new[1:-1,1:-1] = v[1:-1,1:-1]+self.dt*0.5*(3*HV_new - self.HV_prec)/self.hy[1:-1,1:-1]
 
         self.HU_prec = HU_new.clone().detach()
         self.HV_prec = HV_new.clone().detach()
@@ -1579,13 +1590,13 @@ class FluidSolver:
 
 
         u_new[1:-1,1:-1] += (
-                self.nu*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
-                self.nu*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
-                )*(self.dt/(self.h**2))
+                self.nu*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1])*(self.dt/self.hx[1:-1,1:-1]**2) +
+                self.nu*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])*(self.dt/self.hy[1:-1,1:-1]**2)
+                )
         v_new[1:-1,1:-1] += (
-                self.nu*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1]) +
-                self.nu*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])
-                )*(self.dt/(self.h**2))
+                self.nu*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1])*(self.dt/self.hx[1:-1,1:-1]**2) +
+                self.nu*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])*(self.dt/self.hy[1:-1,1:-1]**2)
+                )
 
 
         return (u_new,v_new)
@@ -1618,12 +1629,12 @@ class FluidSolver:
         (Utilda,Vtilda) = self.cc2fc(utilda,vtilda)
 
         Ustar            = torch.zeros_like(Utilda)
-        Ustar[1:-1,1:-1] = Utilda[1:-1,1:-1]-(self.dt/self.rho)*(p[1:,1:-1]-p[:-1,1:-1])/self.h
+        Ustar[1:-1,1:-1] = Utilda[1:-1,1:-1]-(self.dt/self.rho)*(p[1:,1:-1]-p[:-1,1:-1])/self.hx[:-1,1:-1]
         Vstar            = torch.zeros_like(Vtilda)
-        Vstar[1:-1,1:-1] = Vtilda[1:-1,1:-1]-(self.dt/self.rho)*(p[1:-1,1:]-p[1:-1,:-1])/self.h
+        Vstar[1:-1,1:-1] = Vtilda[1:-1,1:-1]-(self.dt/self.rho)*(p[1:-1,1:]-p[1:-1,:-1])/self.hy[1:-1,:-1]
         self.adv_diff_solver.set_BCs(Ustar,Vstar)
 
-        self.div = (Ustar[1:,:]-Ustar[:-1,:])/self.h+(Vstar[:,1:]-Vstar[:,:-1])/self.h
+        self.div = (Ustar[1:,:]-Ustar[:-1,:])/self.hx+(Vstar[:,1:]-Vstar[:,:-1])/self.hy
         phi      = self.poisson_solverFFT.solve(self.div/(self.dt/self.rho))
 
 
@@ -1743,12 +1754,12 @@ class FluidSolver:
         (Utilda,Vtilda) = self.cc2fc(utilda,vtilda)
 
         Ustar            = torch.zeros_like(Utilda)
-        Ustar[1:-1,1:-1] = Utilda[1:-1,1:-1]-(self.dt/self.rho)*(p[1:,1:-1]-p[:-1,1:-1])/self.h
+        Ustar[1:-1,1:-1] = Utilda[1:-1,1:-1]-(self.dt/self.rho)*(p[1:,1:-1]-p[:-1,1:-1])/self.hx[:-1,1:-1]
         Vstar            = torch.zeros_like(Vtilda)
-        Vstar[1:-1,1:-1] = Vtilda[1:-1,1:-1]-(self.dt/self.rho)*(p[1:-1,1:]-p[1:-1,:-1])/self.h
+        Vstar[1:-1,1:-1] = Vtilda[1:-1,1:-1]-(self.dt/self.rho)*(p[1:-1,1:]-p[1:-1,:-1])/self.hy[1:-1,:-1]
         self.adv_diff_solver.set_BCs(Ustar,Vstar)
 
-        self.div = (Ustar[1:,:]-Ustar[:-1,:])/self.h+(Vstar[:,1:]-Vstar[:,:-1])/self.h
+        self.div = (Ustar[1:,:]-Ustar[:-1,:])/self.hx+(Vstar[:,1:]-Vstar[:,:-1])/self.hy
         phi      = self.poisson_solverFFT.solve(self.div/(self.dt/self.rho))
 
 
@@ -1770,9 +1781,9 @@ class FluidSolver:
         (u,v)          = (ustar-phi_x*(self.dt/self.rho), vstar-phi_y*(self.dt/self.rho))
           # (phi_fc_x, phi_fc_y) = self.gradient_fc(phi)
         self.U            = torch.zeros_like(Utilda)
-        self.U[1:-1,1:-1] = Ustar[1:-1,1:-1]-(self.dt/self.rho)*(phi[1:,1:-1]-phi[:-1,1:-1])/self.h
+        self.U[1:-1,1:-1] = Ustar[1:-1,1:-1]-(self.dt/self.rho)*(phi[1:,1:-1]-phi[:-1,1:-1])/self.hx[:-1,1:-1]
         self.V            = torch.zeros_like(Vtilda)
-        self.V[1:-1,1:-1] = Vstar[1:-1,1:-1]-(self.dt/self.rho)*(phi[1:-1,1:]-phi[1:-1,:-1])/self.h
+        self.V[1:-1,1:-1] = Vstar[1:-1,1:-1]-(self.dt/self.rho)*(phi[1:-1,1:]-phi[1:-1,:-1])/self.hy[1:-1,:-1]
 
 
 

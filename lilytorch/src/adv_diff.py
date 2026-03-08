@@ -48,6 +48,10 @@ class AdvDiffSolver:
         self.nm2x = self.nx-2
         self.nm2y = self.ny-2
 
+        # Per-cell spacing arrays (same shape as field arrays). Default to uniform.
+        self.DX = self.dx * torch.ones((self.nx, self.ny), device=self.device, dtype=self.dtype)
+        self.DY = self.dy * torch.ones((self.nx, self.ny), device=self.device, dtype=self.dtype)
+
         # dummy initialization for the abdquickest solver
         self.C = 0.1
         self.C2 = self.C**2
@@ -96,6 +100,14 @@ class AdvDiffSolver:
             )
         self.dt = self.dx/(vel_max*+3*self.nu)
 
+    def set_spacing(self, DX: torch.Tensor, DY: torch.Tensor):
+        """Override uniform grid spacing with per-cell spacing tensors.
+        DX, DY must have shape (nx, ny) and be on self.device."""
+        assert DX.shape == (self.nx, self.ny)
+        assert DY.shape == (self.nx, self.ny)
+        self.DX = DX
+        self.DY = DY
+
     def solve_explicit(self, u, v, iteration=0):
         """
         explicit solver
@@ -103,17 +115,17 @@ class AdvDiffSolver:
 
         u[1:-1, 1:-1] = (
             u[1:-1, 1:-1]-
-            self.dtdx*u[1:-1,1:-1]*(u[1:-1,1:-1]-u[:-2,1:-1]) -
-            self.dtdy*v[1:-1,1:-1]*(u[1:-1,1:-1]-u[1:-1,:-2]) +
-            self.nu*self.dtdx2*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
-            self.nu*self.dtdx2*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
+            (self.dt/self.DX[1:-1,1:-1])*u[1:-1,1:-1]*(u[1:-1,1:-1]-u[:-2,1:-1]) -
+            (self.dt/self.DY[1:-1,1:-1])*v[1:-1,1:-1]*(u[1:-1,1:-1]-u[1:-1,:-2]) +
+            self.nu*(self.dt/self.DX[1:-1,1:-1]**2)*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
+            self.nu*(self.dt/self.DY[1:-1,1:-1]**2)*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
         )
         v[1:-1, 1:-1] = (
             v[1:-1, 1:-1]-
-            self.dtdx*u[1:-1,1:-1]*(v[1:-1,1:-1]-v[:-2,1:-1]) -
-            self.dtdy*v[1:-1,1:-1]*(v[1:-1,1:-1]-v[1:-1,:-2]) +
-            self.nu*self.dtdx2*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1]) +
-            self.nu*self.dtdx2*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])
+            (self.dt/self.DX[1:-1,1:-1])*u[1:-1,1:-1]*(v[1:-1,1:-1]-v[:-2,1:-1]) -
+            (self.dt/self.DY[1:-1,1:-1])*v[1:-1,1:-1]*(v[1:-1,1:-1]-v[1:-1,:-2]) +
+            self.nu*(self.dt/self.DX[1:-1,1:-1]**2)*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1]) +
+            self.nu*(self.dt/self.DY[1:-1,1:-1]**2)*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])
         )
 
         return (u,v)
@@ -171,18 +183,18 @@ class AdvDiffSolver:
 
         u[1:-1,1:-1] = (
                         u[1:-1,1:-1]+
-                        self.dtdx*(uw*self.phi_wLMT(uw,u)-ue*self.phi_eLMT(ue,u))+
-                        self.dtdy*(vs*self.phi_sLMT(vs,u)-vn*self.phi_nLMT(vn,u))+
-                        self.nu*self.dtdx2*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
-                        self.nu*self.dtdx2*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
+                        (self.dt/self.DX[1:-1,1:-1])*(uw*self.phi_wLMT(uw,u)-ue*self.phi_eLMT(ue,u))+
+                        (self.dt/self.DY[1:-1,1:-1])*(vs*self.phi_sLMT(vs,u)-vn*self.phi_nLMT(vn,u))+
+                        self.nu*(self.dt/self.DX[1:-1,1:-1]**2)*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
+                        self.nu*(self.dt/self.DY[1:-1,1:-1]**2)*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
                         )
 
         v[1:-1,1:-1] = (
                         v[1:-1,1:-1]+
-                        self.dtdx*(uw*self.phi_wLMT(uw,v)-ue*self.phi_eLMT(ue,v))+
-                        self.dtdy*(vs*self.phi_sLMT(vs,v)-vn*self.phi_nLMT(vn,v))+
-                        self.nu*self.dtdx2*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1]) +
-                        self.nu*self.dtdx2*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])
+                        (self.dt/self.DX[1:-1,1:-1])*(uw*self.phi_wLMT(uw,v)-ue*self.phi_eLMT(ue,v))+
+                        (self.dt/self.DY[1:-1,1:-1])*(vs*self.phi_sLMT(vs,v)-vn*self.phi_nLMT(vn,v))+
+                        self.nu*(self.dt/self.DX[1:-1,1:-1]**2)*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1]) +
+                        self.nu*(self.dt/self.DY[1:-1,1:-1]**2)*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])
                         )
 
         return (u,v)
@@ -289,10 +301,10 @@ class AdvDiffSolver:
         vn = 0.5*(v[1:-1,2:]+v[:-2,2:])
         u_new[1:-1,1:-1] = (
                         u[1:-1,1:-1]+
-                        self.dtdx*(uw*self.phi_w(uw,u)-ue*self.phi_e(ue,u))+
-                        self.dtdy*(vs*self.phi_s(vs,u)-vn*self.phi_n(vn,u))+
-                        self.nu*self.dtdx2*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
-                        self.nu*self.dtdx2*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
+                        (self.dt/self.DX[1:-1,1:-1])*(uw*self.phi_w(uw,u)-ue*self.phi_e(ue,u))+
+                        (self.dt/self.DY[1:-1,1:-1])*(vs*self.phi_s(vs,u)-vn*self.phi_n(vn,u))+
+                        self.nu*(self.dt/self.DX[1:-1,1:-1]**2)*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
+                        self.nu*(self.dt/self.DY[1:-1,1:-1]**2)*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
                         )
 
         # uo = 0.5*(x.a[i][j-1]+x.a[i][j]);
@@ -305,10 +317,10 @@ class AdvDiffSolver:
         vn = 0.5*(v[1:-1,1:-1]+v[1:-1,2:])
         v_new[1:-1,1:-1] = (
                         v[1:-1,1:-1]+
-                        self.dtdx*(uw*self.phi_w(uw,v)-ue*self.phi_e(ue,v))+
-                        self.dtdy*(vs*self.phi_s(vs,v)-vn*self.phi_n(vn,v))+
-                        self.nu*self.dtdx2*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1]) +
-                        self.nu*self.dtdx2*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])
+                        (self.dt/self.DX[1:-1,1:-1])*(uw*self.phi_w(uw,v)-ue*self.phi_e(ue,v))+
+                        (self.dt/self.DY[1:-1,1:-1])*(vs*self.phi_s(vs,v)-vn*self.phi_n(vn,v))+
+                        self.nu*(self.dt/self.DX[1:-1,1:-1]**2)*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1]) +
+                        self.nu*(self.dt/self.DY[1:-1,1:-1]**2)*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])
                         )
 
         return (u_new,v_new)
@@ -330,12 +342,12 @@ class AdvDiffSolver:
         v = self.gv(self.xflat_ygrid-u_ystag*self.dt, self.yflat_ygrid-v.flatten()*self.dt).reshape((self.nx,self.ny)).clone().detach()
 
         u[1:-1,1:-1] += (
-                        self.nu*self.dtdx2*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
-                        self.nu*self.dtdx2*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
+                        self.nu*(self.dt/self.DX[1:-1,1:-1]**2)*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
+                        self.nu*(self.dt/self.DY[1:-1,1:-1]**2)*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
                         )
         v[1:-1,1:-1] += (
-                        self.nu*self.dtdx2*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1]) +
-                        self.nu*self.dtdx2*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])
+                        self.nu*(self.dt/self.DX[1:-1,1:-1]**2)*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1]) +
+                        self.nu*(self.dt/self.DY[1:-1,1:-1]**2)*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])
                         )
         return (u,v)
 
@@ -365,12 +377,12 @@ class AdvDiffSolver:
         HV_new = vw*fw-ve*fe+vs*fs-vn*fn
 
         if iteration==0:
-            u_new[1:-1,1:-1] = u[1:-1,1:-1]+self.dt*HU_new/self.dx
-            v_new[1:-1,1:-1] = v[1:-1,1:-1]+self.dt*HV_new/self.dy
+            u_new[1:-1,1:-1] = u[1:-1,1:-1]+self.dt*HU_new/self.DX[1:-1,1:-1]
+            v_new[1:-1,1:-1] = v[1:-1,1:-1]+self.dt*HV_new/self.DY[1:-1,1:-1]
 
         else:
-            u_new[1:-1,1:-1] = u[1:-1,1:-1]+self.dt*0.5*(3*HU_new - self.HU_prec)/self.dx
-            v_new[1:-1,1:-1] = v[1:-1,1:-1]+self.dt*0.5*(3*HV_new - self.HV_prec)/self.dy
+            u_new[1:-1,1:-1] = u[1:-1,1:-1]+self.dt*0.5*(3*HU_new - self.HU_prec)/self.DX[1:-1,1:-1]
+            v_new[1:-1,1:-1] = v[1:-1,1:-1]+self.dt*0.5*(3*HV_new - self.HV_prec)/self.DY[1:-1,1:-1]
 
         self.HU_prec = HU_new.clone().detach()
         self.HV_prec = HV_new.clone().detach()
@@ -378,13 +390,13 @@ class AdvDiffSolver:
 
 
         u_new[1:-1,1:-1] += (
-                self.nu*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
-                self.nu*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
-                )*self.dtdx2
+                self.nu*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1])*(self.dt/self.DX[1:-1,1:-1]**2) +
+                self.nu*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])*(self.dt/self.DY[1:-1,1:-1]**2)
+                )
         v_new[1:-1,1:-1] += (
-                self.nu*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1]) +
-                self.nu*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])
-                )*self.dtdy2
+                self.nu*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1])*(self.dt/self.DX[1:-1,1:-1]**2) +
+                self.nu*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])*(self.dt/self.DY[1:-1,1:-1]**2)
+                )
 
 
         return (u_new,v_new)
