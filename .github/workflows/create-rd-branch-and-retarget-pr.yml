@@ -1,7 +1,9 @@
 name: Create rd branch and retarget PR
 
 on:
-  workflow_dispatch:
+  push:
+    branches:
+      - copilot/refactor-differential-operators
 
 jobs:
   create-rd-and-retarget:
