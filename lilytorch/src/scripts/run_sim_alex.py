@@ -63,7 +63,7 @@ def main(
     duration    = 30
 
     # Load parameters
-    pars = yaml2pyobject("lilytorch/scripts/zebrafish_analytical.yaml")
+    pars = yaml2pyobject("lilytorch/src/scripts/configs/zebrafish_analytical.yaml")
 
     # Control parameters
     pars["body"]["control"]["f"]             = frequency

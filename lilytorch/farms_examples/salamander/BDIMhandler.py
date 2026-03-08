@@ -161,7 +161,7 @@ class BDIMhandler():
 
             physics.data.xfrc_applied[ind_task, 0] = (self.friction_force_lin_x[body_i] + self.pressure_force_x[body_i]) * task.units.newtons
             physics.data.xfrc_applied[ind_task, 1] = (self.friction_force_lin_y[body_i] + self.pressure_force_y[body_i]) * task.units.newtons
-            physics.data.xfrc_applied[ind_task, 5] = (self.friction_force_ang_z[body_i] + self.pressure_force_ang_z[body_i]) * task.units.newtons
+            physics.data.xfrc_applied[ind_task, 5] = 0*(self.friction_force_ang_z[body_i] + self.pressure_force_ang_z[body_i]) * task.units.newtons
 
             # print(physics.data.xfrc_applied[ind_task, 0])
 
@@ -205,8 +205,8 @@ class BDIMhandler():
         c = torch.ones_like(u)
         # ch = (c[1:,1:-1]+c[:-1,1:-1])/2
         # cv = (c[1:-1,1:]+c[1:-1,:-1])/2
-        # ch = coeff * self.fluid_solver.mu0_all_u
-        # cv = coeff * self.fluid_solver.mu0_all_v
+        ch = coeff * self.fluid_solver.mu0_all_u
+        cv = coeff * self.fluid_solver.mu0_all_v
         p, _    = self.fluid_solver.poisson_solver.solve_multigrid( # f, u, c
             self.fluid_solver.div[1:-1,1:-1],
             torch.zeros_like(p),
@@ -289,7 +289,7 @@ class BDIMhandler():
             (self.fluid_solver.u0, self.fluid_solver.v0, self.fluid_solver.p0) = (u,v,p)
 
             # compute fluid forces on the body
-            self.fluid_solver.forces_method1(self.fluid_solver.u0, self.fluid_solver.v0, self.fluid_solver.p0, iteration)
+            self.fluid_solver.forces_method2(self.fluid_solver.u0, self.fluid_solver.v0, self.fluid_solver.p0, iteration)
 
             self.terminate = self.fluid_solver.plotting_debug(self.fluid_solver.u0, self.fluid_solver.v0, self.fluid_solver.p0, iteration)
 

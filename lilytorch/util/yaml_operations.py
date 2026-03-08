@@ -66,5 +66,5 @@ def pyobject2yaml(filename: str, pyobject: Any, mode='w+'):
 def yaml2pyobject(filename: str) -> Any:
     """Pyobject to yaml"""
     with open(filename, 'r', encoding='utf-8') as yaml_file:
-        options = yaml.load(yaml_file, Loader=YamlLoader)
+        options = yaml.safe_load(yaml_file)
     return options

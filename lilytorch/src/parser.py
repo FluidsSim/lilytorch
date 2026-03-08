@@ -11,7 +11,7 @@ def parse_arguments():
         action  = 'store',
         type    = str,
         help    = "Yaml file to parse",
-        default = 'lilytorch/scripts/zebrafish_analytical.yaml'
+        default = 'lilytorch/src/scripts/configs/zebrafish_analytical.yaml'
     )
 
     return vars(parser.parse_args())

@@ -6,9 +6,11 @@ from farms_core.experiment.options import ExperimentOptions
 from farms_core.experiment.data import ExperimentData
 from farms_core.extensions.extensions import import_item
 from farms_mujoco.simulation.task import ExperimentTask
+from farms_core.experiment.data import ExperimentData
 from dm_control.mjcf.physics import Physics
 import logging
 logging.basicConfig(level=logging.ERROR)
+from farms_core.io.hdf5 import dict_to_hdf5
 
 
 class DummyOptionCallback(TaskExtension):
@@ -93,4 +95,57 @@ class FluidExtension(TaskExtension):
     def before_step(self, task: ExperimentTask, action, physics: Physics):
 
         self.BDIMhandler.step(task, physics)
+
+
+
+class DataLogger(TaskExtension):
+    """
+    Log data attached through external extensions.
+    The data is expected to be stored in animat_data.record as a dictionary.
+    """
+
+    def __init__(
+            self,
+            experiment_options: ExperimentOptions,
+            log_path: str,
+    ):
+        super().__init__()
+        self.experiment_options = experiment_options
+        self.log_path = log_path
+
+    @classmethod
+    def from_options(
+            cls,
+            config: dict,
+            experiment_options: ExperimentOptions,
+    ):
+        """From options"""
+        return cls(
+            experiment_options=experiment_options,
+            log_path=config.get("log_path", ""),
+        )
+
+    def initialize_episode(self, task: TaskExtension, physics: Physics):
+        """Iteration 0"""
+        del physics
+        self.data = task.data
+
+    def end_episode(self, task: ExperimentTask, physics: Physics):
+        self.experiment_options.animats
+        # if data is not set or no animats, do nothing
+        if not hasattr(self, "data") or self.data is None:
+            return
+        records = []
+        for idx, animat_data in enumerate(self.data.animats):
+            if hasattr(animat_data, "record"):
+                records.append(animat_data.record)
+        # nothing to log
+        if not records:
+            return
+        data = {"animats": records}
+        dict_to_hdf5(filename=self.log_path, data=data)
+
+
+
+
 

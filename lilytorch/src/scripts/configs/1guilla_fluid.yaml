@@ -1,0 +1,93 @@
+
+solver :
+  use_gpu           : True
+  nthreads          : 16
+
+  # dt=0.001
+  # dx=0.000101562
+
+  # ## small tank
+  # N                 : 256
+  # xmin              : -0.02
+  # xmax              : 0.006
+  # ymin              : -0.013
+  # ymax              : 0.013
+
+  ## intermediate tank
+  Nx                : 1024
+  Ny                : 1024
+  xmin              : -0.02
+  xmax              : 0.084
+  ymin              : -0.052
+  ymax              : 0.052
+
+  # ## large tank
+  # N                 : 2048
+  # xmin              : -0.02
+  # xmax              : 0.188
+  # ymin              : -0.104
+  # ymax              : 0.104
+
+  convection_method : "implicit"
+  dt                : 0.001
+
+  # convection_method : "abdquickest"
+  # dt                : 0.0001
+
+  nt                : 80000
+  nu                : 1.0e-6
+  rho               : 1.0e+3
+
+  poisson_tol            : 1.0e-4
+  poisson_max_mgcg_cycles: 3
+  poisson_max_cycles     : 30
+  jacobi_weight          : 0.8
+  poisson_nsmoothing: 10
+  poisson_verbose   : True
+  poisson_folder : "data/"
+
+
+boundary_conditions:
+  BC_type_u:
+  - "N"
+  - "N"
+  - "N"
+  - "N"
+  BC_values_u:
+  - 0
+  - 0
+  - 0
+  - 0
+  BC_type_v:
+  - "N"
+  - "N"
+  - "N"
+  - "N"
+  BC_values_v:
+  - 0
+  - 0
+  - 0
+  - 0
+
+body:
+  type: composite_mesh
+  sdf_name: "zebrafish.sdf"
+  sdf_folder: "/data/andreaferrario/lilytorch/lilytorch/zebrafishsim/models/zebrafish_v1_triangulated_scale_x_80/sdf/"
+  plotting: False
+  compute_interp: False
+  plotting_meshes: False
+  n_samples: (1000, 1000)
+  update_maps:
+    rotation: "None"
+    translation:
+      - None
+      - None
+  suit: 0.000
+
+output:
+  save_path: "/data/andreaferrario/ns_data/"
+  save_frames: True
+  save_every : 10
+  vmin: -60
+  vmax: 60
+  save_uv: False

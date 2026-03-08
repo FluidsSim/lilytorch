@@ -2,19 +2,21 @@
 
 #: Python
 *.orig
+!**/0.orig/
 *.npy
 *.pyc
 *.*~
 *_flymake.py
-*.ipynb
+# *.ipynb
 *.pt
 
 #: File types
 *.mp4
+*.MP4
 *.html
 *.h5
 *.pickle
-*.csv
+# *.csv
 *.so
 *.egg-info
 
@@ -27,7 +29,7 @@ make.bat
 *.vscode
 
 # folders
-FARMS_V2/
+# FARMS_V2/
 data/
 build/
 logs/
@@ -43,3 +45,18 @@ farms_sim/
 farms_mujoco/
 
 Output/
+
+precice_coupling/
+
+# OpenFOAM generated files (do NOT commit)
+**/constant/polyMesh/
+**/constant/triSurface/
+**/openfoam_case/0/
+processor*/
+postProcessing/
+VTK/
+log.*
+
+# Cython generated C files (but keep source files)
+*.c
+!lilytorch/farms_examples/amphibot/experimental_data/modes.c

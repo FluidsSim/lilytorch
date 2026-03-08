@@ -1,4 +1,4 @@
-name: Create rd branch and retarget PR
+name: Retarget PR to 3d_solver branch
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
       - copilot/refactor-differential-operators
 
 jobs:
-  create-rd-and-retarget:
+  retarget-to-3d-solver:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -18,31 +18,17 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Create rd branch from main (if not exists)
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          if git ls-remote --exit-code --heads origin rd; then
-            echo "Branch 'rd' already exists, skipping creation."
-          else
-            echo "Creating 'rd' branch from main..."
-            git fetch origin main
-            git checkout -b rd origin/main
-            git push origin rd
-            echo "Branch 'rd' created successfully."
-          fi
-
-      - name: Retarget PR to rd branch
+      - name: Retarget PR to 3d_solver branch
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           PR_NUMBER=$(gh pr list --head copilot/refactor-differential-operators \
             --json number,baseRefName \
-            --jq '.[] | select(.baseRefName != "rd") | .number')
+            --jq '.[] | select(.baseRefName != "3d_solver") | .number')
           if [ -z "$PR_NUMBER" ]; then
-            echo "PR is already targeting 'rd' or no open PR found — nothing to do."
+            echo "PR is already targeting '3d_solver' or no open PR found — nothing to do."
           else
-            echo "Updating PR #$PR_NUMBER base to 'rd'..."
-            gh pr edit "$PR_NUMBER" --base rd
-            echo "Done. PR #$PR_NUMBER now targets 'rd'."
+            echo "Updating PR #$PR_NUMBER base to '3d_solver'..."
+            gh pr edit "$PR_NUMBER" --base 3d_solver
+            echo "Done. PR #$PR_NUMBER now targets '3d_solver'."
           fi

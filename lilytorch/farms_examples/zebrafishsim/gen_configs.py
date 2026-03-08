@@ -5,7 +5,7 @@ from farms_core.io.yaml import pyobject2yaml
 from farms_core.model.options import SpawnMode
 
 sim_sir      = "lilytorch/farms_examples/zebrafishsim/test_configs/"
-handler_path = "lilytorch.farms_examples.zebrafishsim.BDIMhandler.BDIMhandler"
+handler_path = "lilytorch.integration.BDIMhandler.BDIMhandler"
 sdf_folder   = "../../sdfs/zebrafish/"
 sdf_path     = '../../sdfs/zebrafish/zebrafish_v1_triangulated/sdf/zebrafish.sdf'
 
@@ -166,7 +166,7 @@ def gen_experiment_config():
             "arenas_options": [
                 "farms_core.model.options.ArenaOptions"
             ],
-            "experiment_data": "farms_amphibious.data.data.ExperimentData",
+            "experiment_data": "farms_core.experiment.data.ExperimentData",
             "animats_data": [
                 "farms_core.model.data.AnimatData"
             ]
@@ -284,7 +284,11 @@ def gen_simulation_config():
                     "jacobi_weight": 0.6,
                     "poisson_nsmoothing": 5,
                     "poisson_verbose": False,
-                    "poisson_folder": "data/"
+                    "poisson_folder": "data/",
+                    "dtype"         : "float64",
+                    "rho_body"      : 800.0,
+                    "zero_pressure_inside": True,
+                    "force_method"  : "method1"
                 },
                 "boundary_conditions": {
                     "BC_type_u": ["N", "N", "N", "N"],

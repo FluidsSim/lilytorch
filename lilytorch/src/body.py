@@ -6,15 +6,107 @@ import open3d as o3d
 o3d.utility.set_verbosity_level(o3d.utility.VerbosityLevel.Error) # exclusevely show errors
 from scipy.interpolate import CubicSpline
 from farms_core.io.sdf import ModelSDF
-from pytorch_interpolation import RegularGridInterpolator
+from pytorch_interpolation import RegularGridInterpolator, RegularGridInterpolatorAutomatic
 import skfmm
 from skimage import measure
 import math # important to keep this for evaluating math operations for sdfs even if it appears as not used
+
+import matplotlib
 import matplotlib.pyplot as plt
+
 import cv2
 import matplotlib.cm as cm
 
 from lilytorch.src.scripts.zebrafish_files.load_data import get_experimental_signal
+
+
+# ---------------------------------------------------------------------------
+# Staggered-grid cache – avoids duplicate meshgrid allocations when several
+# Body instances share the same (x, y, z) coordinate vectors.
+# ---------------------------------------------------------------------------
+class _StaggeredGrids:
+    """Pre-computed cell-centre and MAC staggered meshgrids.
+
+    Instances are created and cached by :func:`_get_staggered_grids` so that
+    every Body / BodyAnalytical / etc. that lives on the same computational
+    domain reuses the **same** tensors (zero extra memory).
+    """
+
+    def __init__(self, x, y, z=None):
+        h = float(x[1] - x[0])
+        ndim = 2 if z is None else 3
+        nx, ny = len(x), len(y)
+
+        # ---- cell-centre meshgrid ------------------------------------
+        if ndim == 2:
+            self.X, self.Y = torch.meshgrid(x, y, indexing="ij")
+            self.Z_grid = None
+            self.grid_shape = (nx, ny)
+        else:
+            nz = len(z)
+            self.X, self.Y, self.Z_grid = torch.meshgrid(x, y, z, indexing="ij")
+            self.grid_shape = (nx, ny, nz)
+
+        # ---- staggered 1-D coordinates --------------------------------
+        self.x_stag = x - h / 2
+        self.y_stag = y - h / 2
+
+        # ---- staggered meshgrids -------------------------------------
+        if ndim == 2:
+            self.Xu_stag, self.Yu_stag = torch.meshgrid(self.x_stag, y, indexing="ij")
+            self.Xv_stag, self.Yv_stag = torch.meshgrid(x, self.y_stag, indexing="ij")
+            # 3-D placeholders
+            self.z_stag = None
+            self.Zu_stag = self.Zv_stag = None
+            self.Xw_stag = self.Yw_stag = self.Zw_stag = None
+        else:
+            self.z_stag = z - h / 2
+            self.Xu_stag, self.Yu_stag, self.Zu_stag = torch.meshgrid(self.x_stag, y, z, indexing="ij")
+            self.Xv_stag, self.Yv_stag, self.Zv_stag = torch.meshgrid(x, self.y_stag, z, indexing="ij")
+            self.Xw_stag, self.Yw_stag, self.Zw_stag = torch.meshgrid(x, y, self.z_stag, indexing="ij")
+
+        # ---- flattened coordinate stacks -----------------------------
+        self.xflat = self.X.flatten()
+        self.yflat = self.Y.flatten()
+        xu_flat = self.Xu_stag.flatten()
+        yu_flat = self.Yu_stag.flatten()
+        xv_flat = self.Xv_stag.flatten()
+        yv_flat = self.Yv_stag.flatten()
+
+        if ndim == 2:
+            self.stacked_xy   = torch.stack((self.xflat, self.yflat))
+            self.stacked_xy_u = torch.stack((xu_flat, yu_flat))
+            self.stacked_xy_v = torch.stack((xv_flat, yv_flat))
+            self.stacked_xy_w = None
+            self.zflat = None
+        else:
+            self.zflat = self.Z_grid.flatten()
+            zu_flat = self.Zu_stag.flatten()
+            zv_flat = self.Zv_stag.flatten()
+            zw_flat = self.Zw_stag.flatten()
+            xw_flat = self.Xw_stag.flatten()
+            yw_flat = self.Yw_stag.flatten()
+
+            self.stacked_xy   = torch.stack((self.xflat, self.yflat, self.zflat))
+            self.stacked_xy_u = torch.stack((xu_flat, yu_flat, zu_flat))
+            self.stacked_xy_v = torch.stack((xv_flat, yv_flat, zv_flat))
+            self.stacked_xy_w = torch.stack((xw_flat, yw_flat, zw_flat))
+
+        # Shared ones vector (same for every body on this grid)
+        n_pts = int(torch.tensor(self.grid_shape).prod().item())
+        self.ones_stacked = torch.ones(n_pts, device=x.device, dtype=x.dtype)
+
+
+# Module-level cache:  (data_ptr_x, data_ptr_y, data_ptr_z) -> _StaggeredGrids
+_grid_cache: dict[tuple, _StaggeredGrids] = {}
+
+
+def _get_staggered_grids(x, y, z=None) -> _StaggeredGrids:
+    """Return (possibly cached) staggered grids for the given coordinate vectors."""
+    key = (x.data_ptr(), y.data_ptr(), z.data_ptr() if z is not None else None)
+    if key not in _grid_cache:
+        _grid_cache[key] = _StaggeredGrids(x, y, z)
+    return _grid_cache[key]
 
 """
 Analitical SDFs
@@ -160,7 +252,7 @@ def compute_inertias_2d(sdf_fun, inside_mask, x, y, x_g, y_g, density=1000.0):
 
 
 
-def body_from_yaml(device, x, y, body_pars, eps=0.05, costum_update=None, starting_time=0, **kwargs):
+def body_from_yaml(device, x, y, body_pars, eps=0.05, costum_update=None, starting_time=0, z=None, grids=None, **kwargs):
 
     if costum_update is not None:
         update_map = costum_update
@@ -169,17 +261,21 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, costum_update=None, starti
     if type == "analytical":
         sdf_fun = eval(body_pars["sdf"])
         plotting=body_pars["plotting"]
+        transl_strs = update_maps["translation"]
+        transl = tuple(eval(s) for s in transl_strs)
         update_map = (
             eval(update_maps["rotation"]),
-            (eval(update_maps["translation"][0]),eval(update_maps["translation"][1]))
+            transl
         )
         return BodyAnalytical(
             device,
             x, y,
             sdf_fun,
             update_map,
+            z=z,
             eps=eps,
-            plotting=plotting
+            plotting=plotting,
+            grids=grids,
         )
 
     elif type == "composite_analytical":
@@ -192,17 +288,21 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, costum_update=None, starti
             [
                 (
                     eval(update_map["rotation"]),
-                    (eval(update_map["translation"][0]),eval(update_map["translation"][1]))
+                    tuple(eval(s) for s in update_map["translation"])
                 ) for update_map in update_maps
             ],
+            z=z,
             eps=eps,
-            plotting=plotting
+            plotting=plotting,
+            grids=grids,
         )
 
     elif type == "mesh":
         update_map = [None,None]
         mesh_file = body_pars["mesh_file"]
-        (nsamples,msamples) = eval(body_pars["n_samples"])
+        nsamples, msamples = None, None
+        if "n_samples" in body_pars and body_pars["n_samples"] is not None:
+            (nsamples, msamples) = eval(body_pars["n_samples"])
         return BodyMesh(
             device,
             x, y,
@@ -211,13 +311,16 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, costum_update=None, starti
             eps=eps,
             plotting_meshes=body_pars["plotting_meshes"],
             compute_interp=body_pars["compute_interp"],
-            nsamples=nsamples, msamples=msamples
+            nsamples=nsamples, msamples=msamples,
+            grids=grids,
         )
 
     elif type == "composite_mesh":
         sdf_name = body_pars["sdf_name"]
         sdf_folder = body_pars["sdf_folder"]
-        (nsamples,msamples) = eval(body_pars["n_samples"])
+        nsamples, msamples = None, None
+        if "n_samples" in body_pars and body_pars["n_samples"] is not None:
+            (nsamples, msamples) = eval(body_pars["n_samples"])
         compute_interp = body_pars["compute_interp"]
         plotting= body_pars["plotting"]
         plotting_meshes = body_pars["plotting_meshes"]
@@ -234,16 +337,20 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, costum_update=None, starti
             suit            = body_pars["suit"],
             convexify       = body_pars["convexify"],
             scale           = body_pars["scale"],
+            grids           = grids,
             **kwargs
         )
 
     elif type == "multi_animat":
 
-        (nsamples,msamples) = body_pars["n_samples"]
+        nsamples, msamples = None, None
+        if "n_samples" in body_pars and body_pars["n_samples"] is not None:
+            (nsamples, msamples) = body_pars["n_samples"]
 
         return MultiAnimatBodies(
             device, x, y,
             experiment_options = body_pars["experiment_options"],
+            z                  = z,
             eps                = eps,
             compute_interp     = body_pars["compute_interp"],
             nsamples           = nsamples,
@@ -254,6 +361,7 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, costum_update=None, starti
             convexify          = body_pars["convexify"],
             scale              = body_pars["scale"],
             save_folder        = body_pars["save_folder"],
+            grids              = grids,
             **kwargs
         )
 
@@ -267,7 +375,8 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, costum_update=None, starti
             wavefrequency=control_pars["wavefrequency"],
             c1=control_pars["c1"], c2=control_pars["c2"], c3=control_pars["c3"],
             xshift=control_pars["xshift"], yshift=control_pars["yshift"],
-            sb=control_pars["sb"], wh=control_pars["wh"], st=control_pars["st"], wt=control_pars["wt"], thk=control_pars["thk"]
+            sb=control_pars["sb"], wh=control_pars["wh"], st=control_pars["st"], wt=control_pars["wt"], thk=control_pars["thk"],
+            grids=grids,
         )
 
     elif type == "fish_experimental":
@@ -289,7 +398,8 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, costum_update=None, starti
             filter_freqs    = control_pars["filter_freqs"],
             xshift          = control_pars["xshift"],
             yshift          = control_pars["yshift"],
-            initial_time    = starting_time
+            initial_time    = starting_time,
+            grids           = grids,
         )
 
     elif type == "composite_segment_body":
@@ -298,7 +408,8 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, costum_update=None, starti
         return CompositeSegmentBody(
                     device, x, y,
                     sdf_folder, sdf_name,
-                    eps=eps
+                    eps=eps,
+                    grids=grids,
                 )
 
 class mesh2sdf():
@@ -323,8 +434,6 @@ class mesh2sdf():
         self._face_normals = np.asarray(self._mesh.triangle_normals)
 
     def __call__(self, points_in_object_frame: np.array):
-
-
 
         self._raycasting_scene.compute_signed_distance(points_in_object_frame)
 
@@ -438,109 +547,131 @@ class COMPOSITEmesh2sdf():
 
 class Body:
 
-    def __init__(self, device, x, y, eps=0.05):
+    def __init__(self, device, x, y, z=None, eps=0.05, grids=None):
+        """Base class for immersed bodies on a MAC staggered grid.
+
+        Works in 2-D (z is None) or 3-D (z is a 1-D tensor).
+        Staggered meshgrids are shared across all Body instances that live
+        on the same (x, y, z) coordinate vectors.
+
+        Parameters
+        ----------
+        grids : _StaggeredGrids or None
+            Pre-built staggered grids to reuse.  When provided the grids
+            are used directly (zero extra memory).  When *None* the legacy
+            ``_get_staggered_grids`` cache is used as a fallback.
         """
+        self.device = device
+        self.dtype  = x.dtype
+        self.h      = float(x[1] - x[0])
+        self.eps    = eps
 
-        """
-        self.device=device
-        self.dtype = x.dtype
+        # ---- dimensionality -------------------------------------------
+        self.x = x
+        self.y = y
+        self.z = z
+        self.nx = len(x)
+        self.ny = len(y)
+        self.ndim = 2 if z is None else 3
 
-        self.x   = x
-        self.y   = y
-        self.h = float(x[1]-x[0])
+        if z is not None:
+            self.nz = len(z)
 
-        self.X, self.Y = torch.meshgrid(x,y,indexing="ij")
-        self.x_stag = self.x-self.h/2
-        self.y_stag = self.y-self.h/2
-        [self.Xu_stag, self.Yu_stag] = torch.meshgrid(self.x_stag, self.y, indexing="ij")
-        [self.Xv_stag, self.Yv_stag] = torch.meshgrid(self.x, self.y_stag, indexing="ij")
+        # ---- shared grids ---------------------------------------------
+        g = grids if grids is not None else _get_staggered_grids(x, y, z)
 
-        self.nx  = len(x)
-        self.ny  = len(y)
-        self.eps = eps
-        self.dtype = x.dtype
+        self.X = g.X
+        self.Y = g.Y
+        self.grid_shape = g.grid_shape
+        if self.ndim == 3:
+            self.Z_grid = g.Z_grid
 
-        self.xflat = self.X.flatten()
-        self.yflat = self.Y.flatten()
+        self.x_stag = g.x_stag
+        self.y_stag = g.y_stag
+        self.Xu_stag = g.Xu_stag
+        self.Yu_stag = g.Yu_stag
+        self.Xv_stag = g.Xv_stag
+        self.Yv_stag = g.Yv_stag
 
-        self.xu_stag_flat = self.Xu_stag.flatten()
-        self.yu_stag_flat = self.Yu_stag.flatten()
-        self.xv_stag_flat = self.Xv_stag.flatten()
-        self.yv_stag_flat = self.Yv_stag.flatten()
+        if self.ndim == 3:
+            self.z_stag  = g.z_stag
+            self.Zu_stag = g.Zu_stag
+            self.Zv_stag = g.Zv_stag
+            self.Xw_stag = g.Xw_stag
+            self.Yw_stag = g.Yw_stag
+            self.Zw_stag = g.Zw_stag
 
-        self.stacked_xy = torch.stack((self.xflat,self.yflat))
-        self.stacked_xy_u = torch.stack((self.xu_stag_flat,self.yu_stag_flat))
-        self.stacked_xy_v = torch.stack((self.xv_stag_flat,self.yv_stag_flat))
+        # ---- flattened coordinate stacks (shared) ----------------------
+        self.xflat = g.xflat
+        self.yflat = g.yflat
+        self.stacked_xy   = g.stacked_xy
+        self.stacked_xy_u = g.stacked_xy_u
+        self.stacked_xy_v = g.stacked_xy_v
 
+        if self.ndim == 3:
+            self.zflat = g.zflat
+            self.stacked_xy_w = g.stacked_xy_w
 
-        self.ones_stacked=torch.ones((self.nx*self.ny),device=self.device,dtype=self.dtype)
+        self.ones_stacked = g.ones_stacked  # shared across all bodies
 
-        # body velocities
-        self.sdf = torch.zeros((self.nx,self.ny),device=self.device,dtype=self.dtype)
-        self.body_u = torch.zeros((self.nx,self.ny),device=self.device,dtype=self.dtype)
-        self.body_v = torch.zeros((self.nx,self.ny),device=self.device,dtype=self.dtype)
-        self.old_points = self.stacked_xy.clone().detach()
-        self.rad_conv = (torch.pi/180)
+        # ---- body velocity fields / SDF --------------------------------
+        self.sdf    = torch.zeros(self.grid_shape, device=self.device, dtype=self.dtype)
+        self.body_u = torch.zeros(self.grid_shape, device=self.device, dtype=self.dtype)
+        self.body_v = torch.zeros(self.grid_shape, device=self.device, dtype=self.dtype)
+        if self.ndim == 3:
+            self.body_w = torch.zeros(self.grid_shape, device=self.device, dtype=self.dtype)
+
+        self.rad_conv   = (torch.pi / 180)
 
 
     def compute_sdf_properties(self, sdf_val):
+        """Compute gradient and curvature of an SDF field (2-D or 3-D).
 
-        (gradx, grady) = torch.gradient(sdf_val, spacing=[self.h, self.h], edge_order=2)
-        norm = torch.sqrt(gradx**2+grady**2)
+        Returns
+        -------
+        2-D: (sdf_val, gradx, grady, curvature)
+        3-D: (sdf_val, gradx, grady, gradz, curvature)
+        """
+        ndim = sdf_val.ndim
+        spacing = [self.h] * ndim
 
-        # curvature=torch.where(
-        #     norm>0,
-        #     (torch.gradient(gradx, spacing=self.h, axis=0, edge_order=2)[0]*grady-
-        #      torch.gradient(grady, spacing=self.h, axis=1, edge_order=2)[0]*gradx)/
-        #     norm**3,
-        #     0
-        # )
+        grads = torch.gradient(sdf_val, spacing=spacing, edge_order=2)
+        norm = torch.sqrt(sum(g ** 2 for g in grads))
 
-        # curvature = (d2x_dt2 * dy_dt - dx_dt * d2y_dt2) / (dx_dt * dx_dt + dy_dt * dy_dt)**1.5
+        if ndim == 2:
+            gradx, grady = grads
+            # 2-D curvature:  κ = (φ_yy φ_x² − 2φ_xy φ_x φ_y + φ_xx φ_y²) / |∇φ|³
+            numerator = (
+                (grady ** 2) * torch.gradient(gradx, spacing=self.h, axis=0, edge_order=2)[0]
+                + (gradx ** 2) * torch.gradient(grady, spacing=self.h, axis=1, edge_order=2)[0]
+                - 2 * gradx * grady * torch.gradient(grady, spacing=self.h, axis=0)[0]
+            )
+            denominator = norm ** 3
+            curvature = torch.where(denominator > 0, numerator / denominator, 0)
 
+            # normalise
+            gradx = torch.where(norm > 0, gradx / norm, 0)
+            grady = torch.where(norm > 0, grady / norm, 0)
+            return (sdf_val, gradx, grady, curvature)
 
-        # compute curvature
-        numerator = (
-            (grady**2)*torch.gradient(gradx, spacing=self.h, axis=0, edge_order=2)[0]+
-            (gradx**2)*torch.gradient(grady, spacing=self.h, axis=1, edge_order=2)[0]+
-            -2*gradx*grady*torch.gradient(grady, spacing=self.h, axis=0)[0]
-        )
-        denominator = norm**3
-        curvature = torch.where(denominator>0, numerator/denominator, 0)
+        else:  # 3-D
+            gradx, grady, gradz = grads
+            # 3-D mean curvature via div(∇φ/|∇φ|)
+            # κ = div(n)  where n = ∇φ/|∇φ|
+            nx = torch.where(norm > 0, gradx / norm, 0)
+            ny = torch.where(norm > 0, grady / norm, 0)
+            nz = torch.where(norm > 0, gradz / norm, 0)
+            curvature = (
+                torch.gradient(nx, spacing=self.h, axis=0, edge_order=2)[0]
+                + torch.gradient(ny, spacing=self.h, axis=1, edge_order=2)[0]
+                + torch.gradient(nz, spacing=self.h, axis=2, edge_order=2)[0]
+            )
 
-
-
-        # # compute curvature
-        # numerator = (
-        #     (grady**2)*torch.gradient(gradx, spacing=self.h, axis=0)[0]+
-        #     (gradx**2)*torch.gradient(grady, spacing=self.h, axis=1)[0]+
-        #     -2*gradx*grady*torch.gradient(grady, spacing=self.h, axis=0)[0]
-        # )
-        # denominator = norm**3
-        # curvature = torch.where(denominator>0, numerator/denominator, 0)
-
-
-        # dx_dt   = np.gradient(com_x)
-        # dy_dt   = np.gradient(com_y)
-        # d2x_dt2 = np.gradient(dx_dt)
-        # d2y_dt2 = np.gradient(dy_dt)
-        # curvature = (d2x_dt2 * dy_dt - dx_dt * d2y_dt2) / (dx_dt * dx_dt + dy_dt * dy_dt)**1.5
-
-
-        # numerator = torch.gradient(gradx, dim=0, spacing=self.h)[0]+torch.gradient(grady, dim=1, spacing=self.h)[0]
-        # denominator = (gradx**2+grady**2)**1.5
-
-        # normalize gradients
-        gradx=torch.where(norm>0, gradx/norm, 0)
-        grady=torch.where(norm>0, grady/norm, 0)
-
-
-        return (
-            sdf_val,
-            gradx,
-            grady,
-            curvature,
-        )
+            # normalise
+            gradx = torch.where(norm > 0, gradx / norm, 0)
+            grady = torch.where(norm > 0, grady / norm, 0)
+            gradz = torch.where(norm > 0, gradz / norm, 0)
+            return (sdf_val, gradx, grady, gradz, curvature)
 
     def phi(self,d):
         # return 0.5+0.5*torch.cos(torch.pi*d.clamp(-1,1))
@@ -577,257 +708,364 @@ class Body:
 
 class BodyAnalytical(Body):
 
-    def __init__(self, device, x, y, sdf, update_maps, eps=0.05, plotting=False, pre_update=True):
-        super().__init__(device, x, y, eps=eps)
+    def __init__(self, device, x, y, sdf, update_maps, z=None, eps=0.05, plotting=False, pre_update=True, grids=None):
+        super().__init__(device, x, y, z=z, eps=eps, grids=grids)
         self.sdf = sdf
         self.update_theta = update_maps[0]
         self.update_translation = update_maps[1]
         self.plotting = plotting
-        self.body=self
+        self.body = self
         self.pre_update = pre_update
         self.initialize()
-        self.rad_conv = (torch.pi/180)
+        self.rad_conv = (torch.pi / 180)
 
+    # ------------------------------------------------------------------
+    # Initialisation
+    # ------------------------------------------------------------------
     def initialize(self):
-        """
-        Initialize sdf properties at time 0
-        """
+        """Compute initial contour (2-D only) and SDF."""
 
-        ####### initial sdf at cc nodes to compute contour
-        xmid=(self.x.min()+self.x.max())/2
-        ymid=(self.y.min()+self.y.max())/2
-        xcnt = self.x-xmid
-        ycnt = self.y-ymid
+        if self.ndim == 2:
+            self._initialize_2d()
+        else:
+            self._initialize_3d()
 
-        X,Y= torch.meshgrid(xcnt, ycnt,indexing="ij")
+    def _initialize_2d(self):
+        """2-D initialisation: find contour, resample, set up arrays."""
+        xmid = (self.x.min() + self.x.max()) / 2
+        ymid = (self.y.min() + self.y.max()) / 2
+        xcnt = self.x - xmid
+        ycnt = self.y - ymid
+
+        X, Y = torch.meshgrid(xcnt, ycnt, indexing="ij")
         sdf_cnt = self.sdf(X, Y)
 
-        # pos_u = (self.stacked_xy[0]).reshape(self.nx, self.ny)
-        # pos_v = (self.stacked_xy[1]).reshape(self.nx, self.ny)
-        # self.sdf = self.sdf(pos_u, pos_v)
-
-        # # compute sdf at init
-        # (trans, rot) = self.rototranslate_points(torch.tensor(0.0))
-        # translpoints=self.stacked_xy-trans
-        # newpoints_u=rot.T@translpoints
-        # newpos_u = newpoints_u[0].reshape(self.nx, self.ny)
-        # newpos_v = newpoints_u[1].reshape(self.nx, self.ny)
-        # self.sdf_val = self.sdf(newpos_u, newpos_v)
-
-        # compute sdf at location (0,0)
-
-        # find contour lines
-        sdf_np=sdf_cnt.cpu().numpy()
+        sdf_np = sdf_cnt.cpu().numpy()
         xnp = xcnt.cpu().numpy()
         ynp = ycnt.cpu().numpy()
 
-        # cnt = np.array(measure.find_contours(sdf_np, 0)[0]).T
-        cnt = np.array(measure.find_contours(sdf_np-self.h, 0)[0]).T
-        cnt[0]=xnp[0]+cnt[0]*(xnp[1]-xnp[0])
-        cnt[1]=ynp[0]+cnt[1]*(ynp[1]-ynp[0])
+        cnt = np.array(measure.find_contours(sdf_np - self.h, 0)[0]).T
+        cnt[0] = xnp[0] + cnt[0] * (xnp[1] - xnp[0])
+        cnt[1] = ynp[0] + cnt[1] * (ynp[1] - ynp[0])
 
-        curv_coord = np.cumsum(np.sqrt(np.sum(np.diff(cnt, axis=1)**2, axis=0)))
-
-        # # resample contour lines for uniform spacing with spacing self.h
-        ds=self.h #0.5*torch.sqrt(torch.tensor(self.h**2+self.h**2))
-        # x, y, s_uniform = self.resample_contour(cnt[0], cnt[1], spacing=ds, closed=True)
+        ds = self.h
         x, y, s_uniform = resample_contour(cnt[0], cnt[1], spacing=ds, closed=True)
         del cnt
-        cnt=np.array([x, y])
+        cnt = np.array([x, y])
 
-        # Compute ds and cumulative s
         dx = np.diff(x)
         dy = np.diff(y)
-        ds = np.sqrt(dx**2 + dy**2)
+        ds = np.sqrt(dx ** 2 + dy ** 2)
         curv_coord = np.concatenate(([0], np.cumsum(ds)))
-        # curv_coord = np.cumsum(np.sqrt(np.sum(np.diff(cnt, axis=1)**2, axis=0)))
-
-
-        # curv_coord = s_uniform
 
         self.curv_coord = torch.from_numpy(curv_coord).type(self.dtype).to(self.device)
-        self.cnt        = torch.from_numpy(cnt).type(self.dtype).to(self.device)
+        self.cnt = torch.from_numpy(cnt).type(self.dtype).to(self.device)
         self.cnt_update = self.cnt.clone().detach()
-        self.ds = self.curv_coord[1]-self.curv_coord[0]
+        self.ds = self.curv_coord[1] - self.curv_coord[0]
 
         if self.plotting:
-
             plt.imshow(
                 sdf_np.T,
                 extent=(
                     torch.min(self.x.cpu()), torch.max(self.x.cpu()),
                     torch.min(self.y.cpu()), torch.max(self.y.cpu())
                 ),
-                origin="lower",
-                cmap="Greys"
+                origin="lower", cmap="Greys",
             )
             plt.colorbar()
-
-            # Plot cnt as scatter with color given by a colormap
             cmap = cm.get_cmap('RdBu')
-            n_points = self.cnt_update.shape[1]
-            colors = cmap(np.linspace(0, 1, n_points))
             plt.plot(self.cnt_update[0].cpu(), self.cnt_update[1].cpu())
             plt.show()
 
-
-        self.cnt_u=torch.zeros_like(self.cnt_update[0])
-        self.cnt_v=torch.zeros_like(self.cnt_update[1])
-
-        self.cnt_f_u=torch.zeros_like(self.cnt_update[0])
-        self.cnt_f_v=torch.zeros_like(self.cnt_update[1])
-        self.cnt_int_f_u=torch.zeros_like(self.cnt_update[0])
-        self.cnt_int_f_v=torch.zeros_like(self.cnt_update[1])
+        self.cnt_u = torch.zeros_like(self.cnt_update[0])
+        self.cnt_v = torch.zeros_like(self.cnt_update[1])
+        self.cnt_f_u = torch.zeros_like(self.cnt_update[0])
+        self.cnt_f_v = torch.zeros_like(self.cnt_update[1])
+        self.cnt_int_f_u = torch.zeros_like(self.cnt_update[0])
+        self.cnt_int_f_v = torch.zeros_like(self.cnt_update[1])
         self.mask = torch.arange(len(self.curv_coord), device=self.device)
-        self.com_pos = torch.zeros((2), device=self.device, dtype=self.dtype)
+        self.com_pos = torch.zeros(2, device=self.device, dtype=self.dtype)
+
         if self.pre_update:
-            self.update(torch.tensor(0.0),0, update_cnt=False)
+            self.update(torch.tensor(0.0), 0, update_cnt=False)
 
+    def _initialize_3d(self):
+        """3-D initialisation: no contour; just set up placeholder arrays."""
+        # 3-D bodies don't have 1-D contour representations.
+        # We set minimal stubs so that solver code doesn't crash
+        # when checking for these attributes.
+        self.cnt = torch.zeros((3, 1), device=self.device, dtype=self.dtype)
+        self.cnt_update = self.cnt.clone().detach()
+        self.curv_coord = torch.tensor([0, 1], device=self.device, dtype=self.dtype)
+        self.ds = self.curv_coord[1] - self.curv_coord[0]
+        self.cnt_u = torch.zeros(1, device=self.device, dtype=self.dtype)
+        self.cnt_v = torch.zeros(1, device=self.device, dtype=self.dtype)
+        self.cnt_w = torch.zeros(1, device=self.device, dtype=self.dtype)
+        self.cnt_f_u = torch.zeros(1, device=self.device, dtype=self.dtype)
+        self.cnt_f_v = torch.zeros(1, device=self.device, dtype=self.dtype)
+        self.cnt_f_w = torch.zeros(1, device=self.device, dtype=self.dtype)
+        self.cnt_int_f_u = torch.zeros(1, device=self.device, dtype=self.dtype)
+        self.cnt_int_f_v = torch.zeros(1, device=self.device, dtype=self.dtype)
+        self.cnt_int_f_w = torch.zeros(1, device=self.device, dtype=self.dtype)
+        self.mask = torch.arange(1, device=self.device)
+        self.com_pos = torch.zeros(3, device=self.device, dtype=self.dtype)
 
-        return
+        if self.pre_update:
+            self.update(torch.tensor(0.0), 0, update_cnt=False)
 
-
+    # ------------------------------------------------------------------
+    # Roto-translation
+    # ------------------------------------------------------------------
     def rototranslate_points(self, t):
-        """
-        Apply rototranslation and update the sdf properties
-        Assumes that the rotations happen around the origin of the reference frame (i.e. the center of rotation is (0,0))
-        This simply means that com=[transl[0], transl[1]]
-        """
+        """Build rotation matrix and translation broadcast vector.
 
-        transl = torch.tensor([
-            self.update_translation[0](t),
-            self.update_translation[1](t)
-        ], device=self.device, dtype=self.dtype)
+        2-D: scalar theta  → 2×2 rotation, (2, N) translation
+        3-D: update_theta returns (θx, θy, θz) Euler angles (deg)
+             → 3×3 rotation Rz·Ry·Rx, (3, N) translation
+        """
+        if self.ndim == 2:
+            transl = torch.tensor([
+                self.update_translation[0](t),
+                self.update_translation[1](t),
+            ], device=self.device, dtype=self.dtype)
 
-        theta = self.rad_conv*(
-            torch.tensor(
-                self.update_theta(t),
-                device=self.device, dtype=self.dtype
+            _theta_raw = self.update_theta(t)
+            theta = self.rad_conv * (
+                _theta_raw.clone().detach().to(device=self.device, dtype=self.dtype)
+                if isinstance(_theta_raw, torch.Tensor)
+                else torch.tensor(_theta_raw, device=self.device, dtype=self.dtype)
             )
-        )
+            self.com_pos = transl
 
-        self.com_pos = transl
+            s, c = torch.sin(theta), torch.cos(theta)
+            rot = torch.stack([torch.stack([c, -s]),
+                               torch.stack([s, c])])
+            trans = torch.stack((transl[0] * self.ones_stacked,
+                                 transl[1] * self.ones_stacked))
+            return (trans, rot)
 
-        s = torch.sin(theta)
-        c = torch.cos(theta)
-        rot = torch.stack([torch.stack([c, -s]),
-                        torch.stack([s, c])])
-        trans = torch.stack((transl[0]*self.ones_stacked, transl[1]*self.ones_stacked))
+        else:  # 3-D
+            transl = torch.tensor([
+                self.update_translation[0](t),
+                self.update_translation[1](t),
+                self.update_translation[2](t),
+            ], device=self.device, dtype=self.dtype)
 
-        return (trans, rot)
+            angles_raw = self.update_theta(t)
+            # Accept scalar (rotate about z only) or 3-tuple Euler (x,y,z)
+            is_scalar = (isinstance(angles_raw, (int, float))
+                         or (isinstance(angles_raw, torch.Tensor) and angles_raw.dim() == 0))
+            if is_scalar:
+                angles_raw = (0.0, 0.0, angles_raw)
+            ax, ay, az = [
+                self.rad_conv * (a.clone().detach().to(device=self.device, dtype=self.dtype)
+                                 if isinstance(a, torch.Tensor)
+                                 else torch.tensor(a, device=self.device, dtype=self.dtype))
+                for a in angles_raw
+            ]
+            self.com_pos = transl
 
+            # Rx
+            sx, cx = torch.sin(ax), torch.cos(ax)
+            Rx = torch.stack([
+                torch.stack([torch.ones_like(ax), torch.zeros_like(ax), torch.zeros_like(ax)]),
+                torch.stack([torch.zeros_like(ax), cx, -sx]),
+                torch.stack([torch.zeros_like(ax), sx, cx]),
+            ])
+            # Ry
+            sy, cy = torch.sin(ay), torch.cos(ay)
+            Ry = torch.stack([
+                torch.stack([cy, torch.zeros_like(ay), sy]),
+                torch.stack([torch.zeros_like(ay), torch.ones_like(ay), torch.zeros_like(ay)]),
+                torch.stack([-sy, torch.zeros_like(ay), cy]),
+            ])
+            # Rz
+            sz, cz = torch.sin(az), torch.cos(az)
+            Rz = torch.stack([
+                torch.stack([cz, -sz, torch.zeros_like(az)]),
+                torch.stack([sz, cz, torch.zeros_like(az)]),
+                torch.stack([torch.zeros_like(az), torch.zeros_like(az), torch.ones_like(az)]),
+            ])
+            rot = Rz @ Ry @ Rx
 
+            trans = torch.stack([
+                transl[i] * self.ones_stacked for i in range(3)
+            ])
+            return (trans, rot)
 
+    # ------------------------------------------------------------------
+    # Update
+    # ------------------------------------------------------------------
     def update(self, t, iteration, dt=1, update_cnt=True):
-
-
         (trans, rot) = self.rototranslate_points(t)
 
-        # compute linear and angular velocities using automatic differentiation
+        # --- linear / angular velocities via autograd ------------------
         t_var = t.clone().detach().requires_grad_(True)
-        vx = self.update_translation[0](t_var)
-        vy = self.update_translation[1](t_var)
-        w = self.update_theta(t_var) * self.rad_conv
 
-        lin_vel_x = torch.autograd.grad(vx, t_var, create_graph=False)[0]
-        lin_vel_y = torch.autograd.grad(vy, t_var, create_graph=False)[0]
-        ang_vel   = torch.autograd.grad(w, t_var, create_graph=False)[0]
+        def _safe_grad(val, t_var):
+            """autograd.grad that handles constants (float / int / non-graph tensors)."""
+            if not isinstance(val, torch.Tensor) or not val.requires_grad:
+                return torch.tensor(0.0, device=self.device, dtype=self.dtype)
+            g = torch.autograd.grad(val, t_var, create_graph=False, allow_unused=True)[0]
+            if g is None:
+                return torch.tensor(0.0, device=self.device, dtype=self.dtype)
+            return g
 
-        # compute sdf at cc locations
-        translpoints=self.stacked_xy-trans
-        newpoints_u=rot.T@translpoints
-        newpos_u = newpoints_u[0].reshape(self.nx, self.ny)
-        newpos_v = newpoints_u[1].reshape(self.nx, self.ny)
-        self.sdf_val = self.sdf(newpos_u, newpos_v)
+        if self.ndim == 2:
+            vx = self.update_translation[0](t_var)
+            vy = self.update_translation[1](t_var)
+            w = self.update_theta(t_var) * self.rad_conv
 
-        # compute sdf at staggered grid locations (u points -sdf_u and v points-sdf_v)
-        translpoints_u=self.stacked_xy_u-trans
-        newpoints_u=rot.T@translpoints_u
-        newpos_u = newpoints_u[0].reshape(self.nx, self.ny)
-        newpos_v = newpoints_u[1].reshape(self.nx, self.ny)
-        self.sdf_u = self.sdf(newpos_u, newpos_v)
+            lin_vel_x = _safe_grad(vx, t_var)
+            lin_vel_y = _safe_grad(vy, t_var)
+            ang_vel = _safe_grad(w, t_var)
 
-        translpoints_v=self.stacked_xy_v-trans
-        newpoints_v=rot.T@translpoints_v
-        newpos_u = newpoints_v[0].reshape(self.nx, self.ny)
-        newpos_v = newpoints_v[1].reshape(self.nx, self.ny)
-        self.sdf_v = self.sdf(newpos_u, newpos_v)
+            # SDF at cell-centres
+            translpoints = self.stacked_xy - trans
+            newpoints = rot.T @ translpoints
+            self.sdf_val = self.sdf(
+                newpoints[0].reshape(self.grid_shape),
+                newpoints[1].reshape(self.grid_shape),
+            )
 
-        # update body velocities (need to be staggered)
-        self.body_u = (lin_vel_x - ang_vel*translpoints_u[1]).reshape(self.nx, self.ny)
-        self.body_v = (lin_vel_y + ang_vel*translpoints_v[0]).reshape(self.nx, self.ny)
+            # SDF at u-faces
+            translpoints_u = self.stacked_xy_u - trans
+            newpoints_u = rot.T @ translpoints_u
+            self.sdf_u = self.sdf(
+                newpoints_u[0].reshape(self.grid_shape),
+                newpoints_u[1].reshape(self.grid_shape),
+            )
 
-        if update_cnt==True:
+            # SDF at v-faces
+            translpoints_v = self.stacked_xy_v - trans
+            newpoints_v = rot.T @ translpoints_v
+            self.sdf_v = self.sdf(
+                newpoints_v[0].reshape(self.grid_shape),
+                newpoints_v[1].reshape(self.grid_shape),
+            )
 
-            # update contour points and velocities
-            self.cnt_update = rot @ self.cnt
-            self.cnt_update[0]+=self.com_pos[0]
-            self.cnt_update[1]+=self.com_pos[1]
-            self.cnt_u=(lin_vel_x-ang_vel*(self.cnt_update[1]-self.com_pos[1]))
-            self.cnt_v=(lin_vel_y+ang_vel*(self.cnt_update[0]-self.com_pos[0]))
+            # body velocities (staggered)
+            # v = v_lin + ω × r  (2-D:  ω×r = (-ω*ry, ω*rx))
+            self.body_u = (lin_vel_x - ang_vel * translpoints_u[1]).reshape(self.grid_shape)
+            self.body_v = (lin_vel_y + ang_vel * translpoints_v[0]).reshape(self.grid_shape)
+
+            if update_cnt:
+                self.cnt_update = rot @ self.cnt
+                self.cnt_update[0] += self.com_pos[0]
+                self.cnt_update[1] += self.com_pos[1]
+                self.cnt_u = lin_vel_x - ang_vel * (self.cnt_update[1] - self.com_pos[1])
+                self.cnt_v = lin_vel_y + ang_vel * (self.cnt_update[0] - self.com_pos[0])
+
+        else:  # 3-D
+            vx = self.update_translation[0](t_var)
+            vy = self.update_translation[1](t_var)
+            vz = self.update_translation[2](t_var)
+
+            angles_raw = self.update_theta(t_var)
+            is_scalar = (isinstance(angles_raw, (int, float))
+                         or (isinstance(angles_raw, torch.Tensor) and angles_raw.dim() == 0))
+            if is_scalar:
+                angles_raw = (torch.tensor(0.0, requires_grad=True),
+                              torch.tensor(0.0, requires_grad=True),
+                              angles_raw)
+            wx = angles_raw[0] * self.rad_conv
+            wy = angles_raw[1] * self.rad_conv
+            wz = angles_raw[2] * self.rad_conv
+
+            lin_vel_x = _safe_grad(vx, t_var)
+            lin_vel_y = _safe_grad(vy, t_var)
+            lin_vel_z = _safe_grad(vz, t_var)
+            ang_vel_x = _safe_grad(wx, t_var)
+            ang_vel_y = _safe_grad(wy, t_var)
+            ang_vel_z = _safe_grad(wz, t_var)
+
+            # SDF evaluation helper
+            def _eval_sdf(stacked):
+                translpoints = stacked - trans
+                newpoints = rot.T @ translpoints
+                return self.sdf(
+                    newpoints[0].reshape(self.grid_shape),
+                    newpoints[1].reshape(self.grid_shape),
+                    newpoints[2].reshape(self.grid_shape),
+                )
+
+            self.sdf_val = _eval_sdf(self.stacked_xy)
+            self.sdf_u = _eval_sdf(self.stacked_xy_u)
+            self.sdf_v = _eval_sdf(self.stacked_xy_v)
+            self.sdf_w = _eval_sdf(self.stacked_xy_w)
+
+            # body velocities: v = v_lin + ω × r
+            # ω × r = (ωy*rz - ωz*ry, ωz*rx - ωx*rz, ωx*ry - ωy*rx)
+            def _body_vel(stacked):
+                r = stacked - trans
+                bu = (lin_vel_x + ang_vel_y * r[2] - ang_vel_z * r[1]).reshape(self.grid_shape)
+                bv = (lin_vel_y + ang_vel_z * r[0] - ang_vel_x * r[2]).reshape(self.grid_shape)
+                bw = (lin_vel_z + ang_vel_x * r[1] - ang_vel_y * r[0]).reshape(self.grid_shape)
+                return bu, bv, bw
+
+            self.body_u, _, _ = _body_vel(self.stacked_xy_u)
+            _, self.body_v, _ = _body_vel(self.stacked_xy_v)
+            _, _, self.body_w = _body_vel(self.stacked_xy_w)
 
 
 
 
 class CompositeBodyAnalytical(Body):
 
-    def __init__(self, device, x, y, sdf_funs, update_maps, plotting=False, **kwargs):
-        """
-        sdf_folder = folder of the sdf file
-        sdf_name = name of the sdf file
-        """
-        super().__init__(device, x, y, **kwargs)
+    def __init__(self, device, x, y, sdf_funs, update_maps, z=None, plotting=False, **kwargs):
+        """Composite body: union of several BodyAnalytical objects."""
+        super().__init__(device, x, y, z=z, **kwargs)
         self.nbodies = len(sdf_funs)
         assert self.nbodies == len(update_maps), "Number of sdf functions and update maps must be the same"
 
-        self.bodies=[
+        self.bodies = [
             BodyAnalytical(
                 device, x, y,
                 sdf_funs[i],
                 update_maps[i],
+                z=z,
                 plotting=plotting,
                 **kwargs
             ) for i in range(self.nbodies)
         ]
 
         self.mu_funcs = self.bodies[0].mu_funcs
-        self.sdf_vals = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
-        self.sdf_vals_u = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
-        self.sdf_vals_v = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
-        self.u_vals   = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
-        self.v_vals   = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
-        self.com_pos  = torch.zeros((self.nbodies,2),device=device)
+        self.com_pos = torch.zeros((self.nbodies, self.ndim), device=device)
         self.initialize()
 
     def initialize(self):
-        """
-        Initialize sdf properties at time 0
-        """
-        self.update(torch.tensor(0.0,device=self.device,dtype=self.dtype), 0)
-
+        self.update(torch.tensor(0.0, device=self.device, dtype=self.dtype), 0)
 
     def update(self, t, iteration, dt=1):
+        # Streaming union: process bodies one at a time to avoid
+        # allocating (nbodies, *grid_shape) stacks.
         for i, body in enumerate(self.bodies):
             body.update(t, iteration, dt=dt)
-            self.sdf_vals[i]   = body.sdf_val
-            self.sdf_vals_u[i] = body.sdf_u
-            self.sdf_vals_v[i] = body.sdf_v
-            self.u_vals[i]   = body.body_u
-            self.v_vals[i]   = body.body_v
+            if i == 0:
+                self.sdf_val   = body.sdf_val
+                self.sdf_val_u = body.sdf_u
+                self.body_u    = body.body_u
+                self.sdf_val_v = body.sdf_v
+                self.body_v    = body.body_v
+                if self.ndim == 3:
+                    self.sdf_val_w = body.sdf_w
+                    self.body_w    = body.body_w
+            else:
+                mask = body.sdf_val < self.sdf_val
+                self.sdf_val = torch.where(mask, body.sdf_val, self.sdf_val)
 
-        self.sdf_val = torch.min(self.sdf_vals,axis=0)[0]
-        idx=self.sdf_vals.argmin(0).unsqueeze(0).expand(self.sdf_vals.shape)
-        self.sdf_val=self.sdf_vals.gather(0,idx)[0].reshape(self.nx,self.ny)
+                mask_u = body.sdf_u < self.sdf_val_u
+                self.sdf_val_u = torch.where(mask_u, body.sdf_u, self.sdf_val_u)
+                self.body_u    = torch.where(mask_u, body.body_u, self.body_u)
 
-        self.sdf_val_u = torch.min(self.sdf_vals_u,axis=0)[0]
-        idx=self.sdf_vals_u.argmin(0).unsqueeze(0).expand(self.sdf_vals_u.shape)
-        self.sdf_val_u=self.sdf_vals_u.gather(0,idx)[0].reshape(self.nx,self.ny)
-        self.body_u =self.u_vals.gather(0,idx)[0].reshape(self.nx,self.ny)
+                mask_v = body.sdf_v < self.sdf_val_v
+                self.sdf_val_v = torch.where(mask_v, body.sdf_v, self.sdf_val_v)
+                self.body_v    = torch.where(mask_v, body.body_v, self.body_v)
 
-        self.sdf_val_v = torch.min(self.sdf_vals_v,axis=0)[0]
-        idx=self.sdf_vals_v.argmin(0).unsqueeze(0).expand(self.sdf_vals_v.shape)
-        self.sdf_val_v=self.sdf_vals_v.gather(0,idx)[0].reshape(self.nx,self.ny)
-        self.body_v =self.v_vals.gather(0,idx)[0].reshape(self.nx,self.ny)
+                if self.ndim == 3:
+                    mask_w = body.sdf_w < self.sdf_val_w
+                    self.sdf_val_w = torch.where(mask_w, body.sdf_w, self.sdf_val_w)
+                    self.body_w    = torch.where(mask_w, body.body_w, self.body_w)
 
 
 class BodyFishAnalytical(Body):
@@ -851,10 +1089,11 @@ class BodyFishAnalytical(Body):
         wh            = 0.07,
         st            = 0.95,
         wt            = 0.01,
-        thk           = False
+        thk           = False,
+        grids         = None,
 
     ):
-        super().__init__(device, x, y, eps=eps)
+        super().__init__(device, x, y, eps=eps, grids=grids)
         """
 
         """
@@ -991,9 +1230,10 @@ class BodyFishExperimental(Body):
         xshift       = -0.0,
         yshift       = 0.0,
         eps          = 0.05,
-        initial_time = 0.0
+        initial_time = 0.0,
+        grids        = None,
     ):
-        super().__init__(device, x, y, eps=eps)
+        super().__init__(device, x, y, eps=eps, grids=grids)
         """
 
         """
@@ -1152,27 +1392,47 @@ class BodyFishExperimental(Body):
         )
 
 class BodyMesh(Body):
+    """Immersed body whose SDF is derived from a triangle-mesh file.
+
+    If *nsamples* / *msamples* are ``None`` (the default) the SDF sampling
+    resolution is chosen automatically so that the spacing is half the
+    simulation grid spacing *h*, ensuring the interpolated SDF is well-resolved.
     """
-    """
-    def __init__(self, device, x, y, mesh_file, update_maps, eps=0.05, compute_interp=True, nsamples=500, msamples=500, suit=0, plotting_meshes=False, **kwargs):
-        super().__init__(device, x, y, eps=eps)
+    def __init__(self, device, x, y, mesh_file, update_maps, z=None, eps=0.05,
+                 compute_interp=True, nsamples=None, msamples=None, suit=0,
+                 plotting_meshes=False, zpos=0, **kwargs):
+        grids = kwargs.pop("grids", None)
+        super().__init__(device, x, y, z=z, eps=eps, grids=grids)
         self.mesh_file           = mesh_file
         self.compute_interp      = compute_interp
         self.save_folder         = kwargs.pop("save_folder", "")
-        os.makedirs(self.save_folder+"interp_data", exist_ok=True)
-        self.nsamples            = nsamples
-        self.msamples            = msamples
         self.update_theta        = update_maps[0]
         self.update_translation  = update_maps[1]
         self.suit                = suit
         self.plotting            = plotting_meshes
-        self.apply_closing_morph = kwargs.pop("apply_closing_morph", True)
+        self.apply_closing_morph = kwargs.pop("apply_closing_morph", False)
         self.m2s                 = mesh2sdf(
             mesh_file,
             convexify=kwargs.pop("convexify", True),
             scale=kwargs.pop("scale", 1)
             )
-        self.compute_sdfs()
+
+        # ---- auto-compute nsamples / msamples -------------------------
+        # Target SDF spacing = h/2 so the interpolated field is well-resolved
+        # on the simulation grid.  The sampling domain extends ±2·diagonal
+        # around the bounding-box centre (same as the old hard-coded logic).
+        bb = self.m2s.bounding_box()
+        diag = np.sqrt(sum((bb[i, 1] - bb[i, 0]) ** 2 for i in range(min(bb.shape[0], self.ndim))))
+        target_spacing = self.h / 2.0
+
+        if nsamples is None:
+            nsamples = max(64, int(np.ceil(4 * diag / target_spacing)))
+        if msamples is None:
+            msamples = max(64, int(np.ceil(4 * diag / target_spacing)))
+        self.nsamples = nsamples
+        self.msamples = msamples
+
+        self.compute_sdfs(zpos)
         del self.m2s
         self.initialize()
         self.bodies = [self]
@@ -1232,222 +1492,298 @@ class BodyMesh(Body):
         return new_pts, actual_spacing      # return N+1 points where last==first
 
 
-    def compute_sdfs(self):
-        """
-        Initialize the sdf interpolation function
+    def compute_sdfs(self, zpos=0):
+        """Compute the SDF from the mesh and build an interpolation function.
+
+        Works in 2-D (takes a slice at *zpos*) or 3-D (full volume query).
+        The output arrays are saved to *self.save_folder* so that
+        ``initialize()`` can reload them without re-computing.
         """
         self.bb = self.m2s.bounding_box()
-        if self.compute_interp:
+        if not self.compute_interp:
+            return
 
-            # xmin=self.x.min().cpu().numpy()
-            # xmax=self.x.max().cpu().numpy()
-            # ymin=self.y.min().cpu().numpy()
-            # ymax=self.y.max().cpu().numpy()
-            # diag=np.sqrt((xmax-xmin)**2+(ymax-ymin)**2)
-            # xnp = np.linspace(xmin-2*diag,xmax+2*diag,self.nsamples)
-            # ynp = np.linspace(ymin-2*diag,ymax+2*diag,self.msamples)
+        diag_dims = min(self.bb.shape[0], self.ndim)
+        diag = np.sqrt(sum((self.bb[i, 1] - self.bb[i, 0]) ** 2 for i in range(diag_dims)))
 
-            cx_bb = (self.bb[0,1]+self.bb[0,0])/2
-            cy_bb = (self.bb[1,1]+self.bb[1,0])/2
-            diag = np.sqrt((self.bb[0,1]-self.bb[0,0])**2+(self.bb[1,1]-self.bb[1,0])**2)
-            xnp = np.linspace(cx_bb-2*diag,cx_bb+2*diag,self.nsamples)
-            ynp = np.linspace(cy_bb-2*diag,cy_bb+2*diag,self.msamples)
+        if self.ndim == 2:
+            self._compute_sdfs_2d(zpos, diag)
+        else:
+            self._compute_sdfs_3d(diag)
 
-            binary_2d = np.ones((self.nsamples,self.msamples))
+    # ---- 2-D SDF computation ------------------------------------------
+    def _compute_sdfs_2d(self, zpos, diag):
+        cx_bb = (self.bb[0, 1] + self.bb[0, 0]) / 2
+        cy_bb = (self.bb[1, 1] + self.bb[1, 0]) / 2
+        xnp = np.linspace(cx_bb - 2 * diag, cx_bb + 2 * diag, self.nsamples)
+        ynp = np.linspace(cy_bb - 2 * diag, cy_bb + 2 * diag, self.msamples)
 
-            X,Y=np.meshgrid(xnp,ynp,indexing="ij")
-            xflat = X.flatten()
-            yflat = Y.flatten()
-            zflat = 0.0*np.ones_like(xflat)
-            xyz   = np.stack([xflat,yflat,zflat],axis=1)
-            query_pts=np.array(xyz.astype(np.float32))
+        X, Y = np.meshgrid(xnp, ynp, indexing="ij")
+        xflat = X.flatten()
+        yflat = Y.flatten()
+        zflat = zpos * np.ones_like(xflat)
+        query_pts = np.stack([xflat, yflat, zflat], axis=1).astype(np.float32)
 
-            sdf_val_o3d, _=self.m2s(query_pts)
-            if self.plotting:
-                self.m2s.visualize()
+        sdf_val_o3d, _ = self.m2s(query_pts)
+        if self.plotting:
+            self.m2s.visualize()
 
-            binary_2d=np.zeros((self.nsamples,self.msamples))
-            binary_2d[sdf_val_o3d.reshape(X.shape)<0]=1
+        binary_2d = np.zeros((self.nsamples, self.msamples))
+        binary_2d[sdf_val_o3d.reshape(X.shape) < 0] = 1
 
-            if self.apply_closing_morph:
-                gray = (255*binary_2d).astype('uint8')
-                im = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-                # im = cv2.morphologyEx(im, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (2,2)))
-                element = cv2.getStructuringElement(cv2.MORPH_RECT, (2,2))
+        if self.apply_closing_morph:
+            gray = (255 * binary_2d).astype('uint8')
+            im = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+            element = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+            im = cv2.dilate(im, element, iterations=1)
+            im = cv2.erode(im, element, iterations=3)
+            im = im[:, :, 0]
+        else:
+            im = binary_2d
 
-                # im = cv2.erode(im, element, iterations = 1)
-                im = cv2.dilate(im, element, iterations = 1)
-                im = cv2.erode(im, element, iterations = 3)
+        if self.plotting:
+            display_scale = 0.5
+            display_size = (int(im.shape[1] * display_scale), int(im.shape[0] * display_scale))
+            im_resized = cv2.resize(im.astype(np.float32), display_size)
+            cv2.imshow("window_name", im_resized)
+            cv2.waitKey(0)
+            cv2.destroyAllWindows()
 
+        binary_2d = np.where(im == 0, 1, -1)  # inside mask
 
-                im=im[:,:,0]
-            else:
-                im=binary_2d
+        dx, dy = xnp[1] - xnp[0], ynp[1] - ynp[0]
+        print(f"Computing the sdf for {self.mesh_file}, with space steps ({dx},{dy})")
+        sdf_val = skfmm.distance(binary_2d, dx=[dx, dy]) - self.suit
 
-            if self.plotting:
-                cv2.imshow("window_name", im)
-                cv2.waitKey(0)
-                cv2.destroyAllWindows()
-            binary_2d=np.where(im==0,1,-1) # this is the inside mask
+        # ---- contour computation (2-D only) ----------------------------
+        cnt = np.array(measure.find_contours(sdf_val, 0)[0]).T
+        cnt[0] = xnp[0] + cnt[0] * (xnp[1] - xnp[0])
+        cnt[1] = ynp[0] + cnt[1] * (ynp[1] - ynp[0])
 
-            # (1) compute the inertial properties of the mesh file in 2d
-            dx, dy = xnp[1]-xnp[0], ynp[1]-ynp[0]
+        def signed_area(contour):
+            x, y = contour[0, :], contour[1, :]
+            return 0.5 * np.sum(x * np.roll(y, -1) - np.roll(x, -1) * y)
 
+        def ensure_clockwise(contour):
+            if signed_area(contour) > 0:
+                contour = contour[:, ::-1]
+            return contour
 
+        cnt = ensure_clockwise(cnt)
 
+        # ensure starting point is at the middle of the bounding box
+        start_point = np.array([self.bb[0, 0], 0])
+        dists = np.sqrt((cnt[0] - start_point[0]) ** 2 + (cnt[1] - start_point[1]) ** 2)
+        valid_indices = np.where(cnt[1] > 0)[0]
+        idx = valid_indices[np.argmin(dists[valid_indices])] if len(valid_indices) > 0 else np.argmin(dists)
+        cnt = np.concatenate((cnt[:, idx + 1:], cnt[:, :idx]), axis=1)
 
-            # (2) use skfmm to determine sdf on the full domain
-            print("Computing the sdf for {}, with space steps ({},{})".format(self.mesh_file,xnp[1]-xnp[0],ynp[1]-ynp[0]))
-            sdf_val = skfmm.distance(binary_2d, dx=[dx,dy])-self.suit
+        ds = self.h
+        x, y, _ = resample_contour(cnt[0], cnt[1], spacing=ds, closed=True)
+        del cnt
+        cnt = np.array([x, y])
 
-            # sdf_val = cv2.GaussianBlur(sdf_val, (5, 5), 0)
+        dx_cnt = np.diff(x)
+        dy_cnt = np.diff(y)
+        ds_cnt = np.sqrt(dx_cnt ** 2 + dy_cnt ** 2)
+        curv_coord = np.concatenate(([0], np.cumsum(ds_cnt)))
+        sign_vec = np.where(cnt[1] >= cnt[1][0], 1, -1)
 
+        if self.plotting:
+            plt.figure()
+            plt.contourf(X, Y, sdf_val)
+            plt.plot(cnt[0], cnt[1], 'r', linewidth=2)
+            plt.colorbar()
+            plt.show()
 
-            ######################## Contour computation ########################
+            cmap = cm.get_cmap('RdBu')
+            n_points = cnt.shape[1]
+            colors = cmap(np.linspace(0, 1, n_points))
+            plt.scatter(cnt[0], cnt[1], c=colors, cmap=cmap, s=10)
+            plt.show()
 
-            # find contour lines
-            cnt = np.array(measure.find_contours(sdf_val, 0)[0]).T
-            # cnt = np.array(measure.find_contours(sdf_val-self.eps, 0)[0]).T
-            cnt[0]=xnp[0]+cnt[0]*(xnp[1]-xnp[0])
-            cnt[1]=ynp[0]+cnt[1]*(ynp[1]-ynp[0])
-            curv_coord = np.concatenate(([0], np.cumsum(np.sqrt(np.sum(np.diff(cnt, axis=1)**2, axis=0)))))
+        print(f"Computing the interpolation functions for {self.mesh_file}")
 
+        os.makedirs(self.save_folder, exist_ok=True)
+        mesh_tag = self.mesh_file.split('/')[-1].split('.')[0]
+        np.save(os.path.join(self.save_folder, f"xnp_{mesh_tag}.npy"), xnp)
+        np.save(os.path.join(self.save_folder, f"ynp_{mesh_tag}.npy"), ynp)
+        np.save(os.path.join(self.save_folder, f"sdf_val_{mesh_tag}.npy"), sdf_val)
+        np.save(os.path.join(self.save_folder, f"cnt_{mesh_tag}.npy"), cnt)
+        np.save(os.path.join(self.save_folder, f"curv_coord_{mesh_tag}.npy"), curv_coord)
+        np.save(os.path.join(self.save_folder, f"sign_vec_{mesh_tag}.npy"), sign_vec)
 
-            def signed_area(contour):
-                x = contour[0,:]
-                y = contour[1,:]
-                return 0.5 * np.sum(x * np.roll(y, -1) - np.roll(x, -1) * y)
+    # ---- 3-D SDF computation ------------------------------------------
+    def _compute_sdfs_3d(self, diag):
+        """Build a 3-D SDF field from the mesh using open3d + skfmm."""
+        centres = [(self.bb[i, 1] + self.bb[i, 0]) / 2 for i in range(3)]
+        xnp = np.linspace(centres[0] - 2 * diag, centres[0] + 2 * diag, self.nsamples)
+        ynp = np.linspace(centres[1] - 2 * diag, centres[1] + 2 * diag, self.msamples)
+        # Use a third axis with same number of samples as msamples
+        nz_samp = self.msamples
+        znp = np.linspace(centres[2] - 2 * diag, centres[2] + 2 * diag, nz_samp)
 
-            def ensure_clockwise(contour):
-                A = signed_area(contour)
-                if A > 0:  # currently CCW
-                    contour = contour[:,::-1]
-                return contour
+        X, Y, Z = np.meshgrid(xnp, ynp, znp, indexing="ij")
+        query_pts = np.stack([X.flatten(), Y.flatten(), Z.flatten()], axis=1).astype(np.float32)
 
-            cnt=ensure_clockwise(cnt)
+        print(f"Computing 3-D SDF for {self.mesh_file} ({self.nsamples}×{self.msamples}×{nz_samp}) ...")
+        sdf_val_o3d, _ = self.m2s(query_pts)
+        if self.plotting:
+            self.m2s.visualize()
 
+        binary_3d = np.where(sdf_val_o3d.reshape(X.shape) < 0, -1, 1)
 
-            # ensure starting point is at the middle of the bounding box
-            start_point = np.array([self.bb[0,0], 0]) # assuming y=0 is the centerline
-            dists = np.sqrt((cnt[0]-start_point[0])**2+(cnt[1]-start_point[1])**2)
-            # Find the closest point to start_point with positive y
-            valid_indices = np.where(cnt[1] > 0)[0]
-            if len(valid_indices) > 0:
-                idx = valid_indices[np.argmin(dists[valid_indices])]
-            else:
-                idx = np.argmin(dists)
+        dx, dy, dz = xnp[1] - xnp[0], ynp[1] - ynp[0], znp[1] - znp[0]
+        print(f"  skfmm distance with spacing ({dx:.6f},{dy:.6f},{dz:.6f})")
+        sdf_val = skfmm.distance(binary_3d, dx=[dx, dy, dz]) - self.suit
 
-            cnt = np.concatenate((cnt[:, idx+1:], cnt[:, :idx]), axis=1)
+        print(f"  Saving 3-D interpolation data for {self.mesh_file}")
+        os.makedirs(self.save_folder, exist_ok=True)
+        mesh_tag = self.mesh_file.split('/')[-1].split('.')[0]
+        np.save(os.path.join(self.save_folder, f"xnp_{mesh_tag}.npy"), xnp)
+        np.save(os.path.join(self.save_folder, f"ynp_{mesh_tag}.npy"), ynp)
+        np.save(os.path.join(self.save_folder, f"znp_{mesh_tag}.npy"), znp)
+        np.save(os.path.join(self.save_folder, f"sdf_val_{mesh_tag}.npy"), sdf_val)
 
+        if self.plotting:
+            self._plot_sdf_3d(xnp, ynp, znp, sdf_val, centres)
 
-            # # resample contour lines for uniform spacing with spacing self.h
-            ds=self.h #0.5*torch.sqrt(torch.tensor(self.h**2+self.h**2))
-            # x, y, s_uniform = self.resample_contour(cnt[0], cnt[1], spacing=ds, closed=True)
-            x, y, s_uniform = resample_contour(cnt[0], cnt[1], spacing=ds, closed=True) # the spacing is approximately ds
-            del cnt
-            cnt=np.array([x, y])
+    def _plot_sdf_3d(self, xnp, ynp, znp, sdf_val, centres):
+        """Visualise a 3-D SDF: three orthogonal slices + isosurface."""
+        from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
+        ix_mid = np.argmin(np.abs(xnp - centres[0]))
+        iy_mid = np.argmin(np.abs(ynp - centres[1]))
+        iz_mid = np.argmin(np.abs(znp - centres[2]))
 
-            # Compute ds and cumulative s
-            dx = np.diff(x)
-            dy = np.diff(y)
-            ds = np.sqrt(dx**2 + dy**2)
-            curv_coord = np.concatenate(([0], np.cumsum(ds)))
+        # --- 1. Three orthogonal slice plots ---
+        fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
-            # Create a vector where points in cnt above the first point
-            sign_vec = np.where(cnt[1] >= cnt[1][0], 1, -1)
+        # XY slice (z = centre)
+        ax = axes[0]
+        Xxy, Yxy = np.meshgrid(xnp, ynp, indexing="ij")
+        cf = ax.contourf(Xxy, Yxy, sdf_val[:, :, iz_mid], levels=30, cmap="RdBu_r")
+        ax.contour(Xxy, Yxy, sdf_val[:, :, iz_mid], levels=[0], colors="k", linewidths=2)
+        ax.set_xlabel("x"); ax.set_ylabel("y")
+        ax.set_title(f"XY slice (z={znp[iz_mid]:.4f})")
+        ax.set_aspect("equal")
+        fig.colorbar(cf, ax=ax)
 
+        # XZ slice (y = centre)
+        ax = axes[1]
+        Xxz, Zxz = np.meshgrid(xnp, znp, indexing="ij")
+        cf = ax.contourf(Xxz, Zxz, sdf_val[:, iy_mid, :], levels=30, cmap="RdBu_r")
+        ax.contour(Xxz, Zxz, sdf_val[:, iy_mid, :], levels=[0], colors="k", linewidths=2)
+        ax.set_xlabel("x"); ax.set_ylabel("z")
+        ax.set_title(f"XZ slice (y={ynp[iy_mid]:.4f})")
+        ax.set_aspect("equal")
+        fig.colorbar(cf, ax=ax)
 
-            if self.plotting:
+        # YZ slice (x = centre)
+        ax = axes[2]
+        Yyz, Zyz = np.meshgrid(ynp, znp, indexing="ij")
+        cf = ax.contourf(Yyz, Zyz, sdf_val[ix_mid, :, :], levels=30, cmap="RdBu_r")
+        ax.contour(Yyz, Zyz, sdf_val[ix_mid, :, :], levels=[0], colors="k", linewidths=2)
+        ax.set_xlabel("y"); ax.set_ylabel("z")
+        ax.set_title(f"YZ slice (x={xnp[ix_mid]:.4f})")
+        ax.set_aspect("equal")
+        fig.colorbar(cf, ax=ax)
 
-                var=sdf_val
-                plt.figure()
-                plt.contourf(
-                    X,
-                    Y,
-                    var
-                )
-                plt.plot(cnt[0], cnt[1], 'r', linewidth=2)
-                plt.colorbar()
-                plt.show()
+        fig.suptitle(f"3-D SDF slices: {self.mesh_file.split('/')[-1]}", fontsize=13)
+        fig.tight_layout()
+        plt.show()
 
+        # --- 2. Isosurface of the zero level-set ---
+        try:
+            verts, faces, _, _ = measure.marching_cubes(sdf_val, level=0)
+            # Convert voxel indices to physical coordinates
+            verts_phys = np.column_stack([
+                xnp[0] + verts[:, 0] * (xnp[1] - xnp[0]),
+                ynp[0] + verts[:, 1] * (ynp[1] - ynp[0]),
+                znp[0] + verts[:, 2] * (znp[1] - znp[0]),
+            ])
 
-                # Plot cnt as scatter with color given by a colormap
-                cmap = cm.get_cmap('RdBu')
-                n_points = cnt.shape[1]
-                colors = cmap(np.linspace(0, 1, n_points))
-                plt.scatter(cnt[0], cnt[1], c=colors, cmap=cmap, s=10)
-                plt.show()
-
-
-
-            ######################## END contour computation ########################
-            print("Computing the interpolation functions for {}".format(self.mesh_file))
-
-
-            interp_data_dir = "interp_data"
-            if not os.path.exists(interp_data_dir):
-                os.makedirs(interp_data_dir)
-
-            np.save(self.save_folder+"interp_data/xnp_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy",xnp)
-            np.save(self.save_folder+"interp_data/ynp_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy",ynp)
-            np.save(self.save_folder+"interp_data/sdf_val_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy",sdf_val)
-            np.save(self.save_folder+"interp_data/cnt_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy", cnt)
-            np.save(self.save_folder+"interp_data/curv_coord_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy", curv_coord)
-            np.save(self.save_folder+"interp_data/sign_vec_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy", sign_vec)
-
-
+            fig3d = plt.figure(figsize=(8, 8))
+            ax3d = fig3d.add_subplot(111, projection="3d")
+            mesh_coll = Poly3DCollection(
+                verts_phys[faces], alpha=0.6, edgecolor="k",
+                linewidth=0.1, facecolor="steelblue",
+            )
+            ax3d.add_collection3d(mesh_coll)
+            ax3d.set_xlim(xnp[0], xnp[-1])
+            ax3d.set_ylim(ynp[0], ynp[-1])
+            ax3d.set_zlim(znp[0], znp[-1])
+            ax3d.set_xlabel("x"); ax3d.set_ylabel("y"); ax3d.set_zlabel("z")
+            ax3d.set_title(f"SDF=0 isosurface: {self.mesh_file.split('/')[-1]}")
+            plt.show()
+        except (RuntimeError, ValueError) as e:
+            print(f"  [WARNING] Could not extract isosurface: {e}")
 
     def initialize(self):
-        xnp = np.load(self.save_folder+"interp_data/xnp_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy")
-        ynp = np.load(self.save_folder+"interp_data/ynp_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy")
-        sdf_val = np.load(self.save_folder+"interp_data/sdf_val_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy")
-        cnt = np.load(self.save_folder+"interp_data/cnt_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy")
-        curv_coord = np.load(self.save_folder+"interp_data/curv_coord_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy")
-        sign_vec = np.load(self.save_folder+"interp_data/sign_vec_"+self.mesh_file.split('/')[-1].split('.')[0]+".npy")
+        """Load pre-computed SDF data and build the interpolation function."""
+        mesh_tag = self.mesh_file.split('/')[-1].split('.')[0]
 
-        self.sdf = RegularGridInterpolator(
+        xnp = np.load(os.path.join(self.save_folder, f"xnp_{mesh_tag}.npy"))
+        ynp = np.load(os.path.join(self.save_folder, f"ynp_{mesh_tag}.npy"))
+        sdf_val = np.load(os.path.join(self.save_folder, f"sdf_val_{mesh_tag}.npy"))
+
+        if self.ndim == 2:
+            self._initialize_2d_mesh(xnp, ynp, sdf_val, mesh_tag)
+        else:
+            self._initialize_3d_mesh(xnp, ynp, sdf_val, mesh_tag)
+
+    def _initialize_2d_mesh(self, xnp, ynp, sdf_val, mesh_tag):
+        cnt = np.load(os.path.join(self.save_folder, f"cnt_{mesh_tag}.npy"))
+        curv_coord = np.load(os.path.join(self.save_folder, f"curv_coord_{mesh_tag}.npy"))
+        sign_vec = np.load(os.path.join(self.save_folder, f"sign_vec_{mesh_tag}.npy"))
+
+        self.sdf = RegularGridInterpolatorAutomatic(
             (
                 torch.from_numpy(xnp).type(self.dtype).to(self.device),
                 torch.from_numpy(ynp).type(self.dtype).to(self.device)
             ),
             torch.from_numpy(sdf_val).type(self.dtype).to(self.device),
             fill_value="nearest",
-            method=1 # quadratic
+            method=1  # quadratic
         )
-
-        # self.sdf = self.sdf_interp(
-        #     self.stacked_xy[0],
-        #     self.stacked_xy[1]
-        # ).reshape(self.nx, self.ny)
 
         self.curv_coord = torch.from_numpy(curv_coord).type(self.dtype).to(self.device)
         self.cnt        = torch.from_numpy(cnt).type(self.dtype).to(self.device)
         self.cnt_update = self.cnt.clone().detach()
-        self.cnt_u=torch.zeros_like(self.cnt_update[0])
-        self.cnt_v=torch.zeros_like(self.cnt_update[1])
-        self.cnt_f_u=torch.zeros_like(self.cnt_update[0])
-        self.cnt_f_v=torch.zeros_like(self.cnt_update[1])
-        self.cnt_int_f_u=torch.zeros_like(self.cnt_update[0])
-        self.cnt_int_f_v=torch.zeros_like(self.cnt_update[1])
-        self.r_com=torch.zeros_like(self.cnt_update)
-        self.ds = self.curv_coord[1]-self.curv_coord[0]
-        # self.ds = np.diff(self.curv_coord)
+        self.cnt_u = torch.zeros_like(self.cnt_update[0])
+        self.cnt_v = torch.zeros_like(self.cnt_update[1])
+        self.cnt_f_u = torch.zeros_like(self.cnt_update[0])
+        self.cnt_f_v = torch.zeros_like(self.cnt_update[1])
+        self.cnt_int_f_u = torch.zeros_like(self.cnt_update[0])
+        self.cnt_int_f_v = torch.zeros_like(self.cnt_update[1])
+        self.r_com = torch.zeros_like(self.cnt_update)
+        self.ds = self.curv_coord[1] - self.curv_coord[0]
         self.mask = torch.arange(len(self.curv_coord), device=self.device)
         self.sign_vec = torch.from_numpy(sign_vec).type(self.dtype).to(self.device)
 
-        # return self.update(0)
+    def _initialize_3d_mesh(self, xnp, ynp, sdf_val, mesh_tag):
+        znp = np.load(os.path.join(self.save_folder, f"znp_{mesh_tag}.npy"))
 
-    # def update(self, t, dt=1):
-    #     return [self.update_body(
-    #         self.sdf_interp,
-    #         self.update_theta(t),
-    #         (
-    #             self.update_translation[0](t),
-    #             self.update_translation[1](t)
-    #         ),
-    #         dt=dt
-    #     )]
+        self.sdf = RegularGridInterpolatorAutomatic(
+            (
+                torch.from_numpy(xnp).type(self.dtype).to(self.device),
+                torch.from_numpy(ynp).type(self.dtype).to(self.device),
+                torch.from_numpy(znp).type(self.dtype).to(self.device),
+            ),
+            torch.from_numpy(sdf_val).type(self.dtype).to(self.device),
+            fill_value="nearest",
+        )
+
+        # 3-D bodies don't have 1-D contour representations – set stubs
+        self.cnt = torch.zeros((3, 1), device=self.device, dtype=self.dtype)
+        self.cnt_update = self.cnt.clone().detach()
+        self.curv_coord = torch.tensor([0, 1], device=self.device, dtype=self.dtype)
+        self.ds = self.curv_coord[1] - self.curv_coord[0]
+        self.cnt_u = torch.zeros(1, device=self.device, dtype=self.dtype)
+        self.cnt_v = torch.zeros(1, device=self.device, dtype=self.dtype)
+        self.cnt_w = torch.zeros(1, device=self.device, dtype=self.dtype)
+        self.mask = torch.arange(1, device=self.device)
+        self.sign_vec = torch.ones(1, device=self.device, dtype=self.dtype)
 
     def update(self, iteration, t, dt=1):
         pass
@@ -1457,12 +1793,12 @@ class BodyMesh(Body):
 
 class CompositeBodyMesh(Body):
 
-    def __init__(self, device, x, y, sdf_folder, sdf_name, costum_update, eps=0.05, compute_interp=True, nsamples=2**12, msamples=2**12, plotting=False, plotting_meshes=False, suit=0.0, **kwargs):
-        """
-        sdf_folder = folder of the sdf file
-        sdf_name = name of the sdf file
-        """
-        super().__init__(device, x, y, eps=eps)
+    def __init__(self, device, x, y, sdf_folder, sdf_name, costum_update, eps=0.05,
+                 compute_interp=True, nsamples=None, msamples=None, plotting=False,
+                 plotting_meshes=False, suit=0.0, **kwargs):
+        """Composite body built from a multi-link SDF model file."""
+        grids = kwargs.pop("grids", None)
+        super().__init__(device, x, y, eps=eps, grids=grids)
 
         self.sdf_folder      = sdf_folder
         self.sdf             = ModelSDF.read(sdf_folder+sdf_name)[0]
@@ -1471,82 +1807,54 @@ class CompositeBodyMesh(Body):
         self.plotting        = plotting
         self.plotting_meshes = plotting_meshes
         for link_i, link in enumerate(self.sdf.links):
-            # if link_i%2==0:
-                mesh_name = link["visuals"][0]["geometry"]["uri"]
-                mesh_gpath = sdf_folder+mesh_name
-                initial_pose = np.array(link.pose).astype(x.cpu().numpy().dtype)
-                update_funcs = (
-                    lambda t: 180,
-                    [
-                        lambda t, initial_pose=initial_pose: -initial_pose[0],
-                        lambda t, initial_pose=initial_pose: -initial_pose[1],
-                    ]
-                    )
-                body = BodyMesh(
-                        device, x, y,
-                        mesh_gpath,
-                        update_funcs,
-                        eps=eps,
-                        compute_interp=compute_interp,
-                        nsamples=nsamples, msamples=msamples,
-                        suit=suit,
-                        plotting_meshes=plotting_meshes,
-                        **kwargs
-                    )
-                body.id = link_i
-                self.bodies.append(body)
+            mesh_name = link["visuals"][0]["geometry"]["uri"]
+            mesh_gpath = sdf_folder+mesh_name
+            initial_pose = np.array(link.pose).astype(x.cpu().numpy().dtype)
+            update_funcs = (
+                lambda t: 180,
+                [
+                    lambda t, initial_pose=initial_pose: -initial_pose[0],
+                    lambda t, initial_pose=initial_pose: -initial_pose[1],
+                ]
+            )
+            body = BodyMesh(
+                device, x, y,
+                mesh_gpath,
+                update_funcs,
+                eps=eps,
+                compute_interp=compute_interp,
+                nsamples=nsamples, msamples=msamples,
+                suit=suit,
+                plotting_meshes=plotting_meshes,
+                grids=grids,
+                **kwargs
+            )
+            body.id = link_i
+            self.bodies.append(body)
+
         self.nbodies = len(self.bodies)
         self.costum_update = costum_update
         self.compute_interp = compute_interp
 
         self.mu_funcs               = self.bodies[0].mu_funcs
         self.compute_sdf_properties = self.bodies[0].compute_sdf_properties
-        self.sdf_vals = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
-        self.sdf_vals_u = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
-        self.sdf_vals_v = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
-        self.u_vals   = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
-        self.v_vals   = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
+        gs = self.grid_shape
+        self.sdf_vals   = torch.zeros((self.nbodies, *gs), device=device)
+        self.sdf_vals_u = torch.zeros((self.nbodies, *gs), device=device)
+        self.sdf_vals_v = torch.zeros((self.nbodies, *gs), device=device)
+        self.u_vals     = torch.zeros((self.nbodies, *gs), device=device)
+        self.v_vals     = torch.zeros((self.nbodies, *gs), device=device)
 
-        self.sdf_val_u=torch.zeros_like(self.X)
-        self.sdf_val_v=torch.zeros_like(self.X)
-        self.com_pos  = torch.zeros((self.nbodies,2),device=device)
-
+        self.sdf_val_u = torch.zeros_like(self.X)
+        self.sdf_val_v = torch.zeros_like(self.X)
+        self.com_pos   = torch.zeros((self.nbodies, self.ndim), device=device)
 
         if not self.costum_update:
-            self.initialize() # initialize the sdf interpolation functions
+            self.initialize()
 
 
     def initialize(self):
-        self.update(torch.tensor(0.0,device=self.device,dtype=self.dtype), 0)
-
-        # for i, body in enumerate(self.bodies):
-        #     body.initialize()
-        #     self.sdf_vals[i]=body.sdf
-
-        # self.sdf_val = torch.min(self.sdf_vals,axis=0)[0]
-
-        # if self.plotting:
-        #     var=self.sdf_val.cpu()
-        #     extent = (
-        #         torch.min(self.bodies[0].x.cpu()), torch.max(self.bodies[0].x.cpu()),
-        #         torch.min(self.bodies[0].y.cpu()), torch.max(self.bodies[0].y.cpu())
-        #     )
-
-        #     # visualize computed interpolation functions over the domain
-        #     plt.figure(figsize=(20,10))
-        #     plt.imshow(
-        #         var.T,
-        #         extent = extent,
-        #         origin = "lower",
-        #         interpolation=None
-        #     )
-        #     plt.contour(self.bodies[0].X.cpu(),self.bodies[0].Y.cpu(),var, colors='k', levels=[0])
-        #     plt.show()
-
-        # self.body_u=torch.zeros_like(self.bodies[0].X)
-        # self.body_v=torch.zeros_like(self.bodies[0].X)
-
-
+        self.update(torch.tensor(0.0, device=self.device, dtype=self.dtype), 0)
 
     def update(self, t, iteration, dt=1):
         (angles, translations) = self.costum_update(t)
@@ -1607,14 +1915,18 @@ class CompositeBodyMesh(Body):
 
 class MultiAnimatBodies(Body):
 
-    def __init__(self, device, x, y, experiment_options, eps=0.05, compute_interp=True, nsamples=2**12, msamples=2**12, plotting=False, plotting_meshes=False, suit=0.0, **kwargs):
+    def __init__(self, device, x, y, experiment_options, z=None, eps=0.05, compute_interp=True,
+                 nsamples=None, msamples=None, plotting=False, plotting_meshes=False,
+                 suit=0.0, **kwargs):
+        """Union of bodies from one or more MuJoCo/SDF model files.
 
+        Mesh-based bodies that share the same mesh file (and scale) are
+        automatically deduplicated: the expensive open3d → skfmm → interpolation
+        pipeline runs only once per unique mesh, and the resulting BodyMesh
+        is reused (with its own pose) for every duplicate.
         """
-        sdf_folder = folder of the sdf file
-        sdf_name = name of the sdf file
-        """
-
-        super().__init__(device, x, y, eps=eps)
+        grids = kwargs.pop("grids", None)
+        super().__init__(device, x, y, z=z, eps=eps, grids=grids)
 
         self.suit = suit
         self.plotting        = plotting
@@ -1623,16 +1935,19 @@ class MultiAnimatBodies(Body):
         self.body_ids = []
         self.bodies = []
 
+        # ---- mesh SDF deduplication cache ----------------------------
+        # key: (mesh_gpath, scale)  →  BodyMesh instance (used as template)
+        _mesh_body_cache: dict[tuple, BodyMesh] = {}
 
         for animat_i, animat in enumerate(experiment_options.animats):
-            sdf = ModelSDF.read(animat.sdf)[0] # this is the sdf content
-            sdf_folder      = os.path.dirname(animat.sdf)
+            sdf        = ModelSDF.read(animat.sdf)[0]
+            sdf_folder = os.path.dirname(animat.sdf)
 
             for link_i, link in enumerate(sdf.links):
                 geometry = link["collisions"][0]["geometry"]
                 if "uri" in geometry:
                     mesh_name = geometry["uri"]
-                    mesh_gpath = sdf_folder+"/"+mesh_name
+                    mesh_gpath = os.path.normpath(sdf_folder + "/" + mesh_name)
                     initial_pose = np.array(link.pose).astype(x.cpu().numpy().dtype)
                     update_funcs = (
                         lambda t: 180,
@@ -1640,263 +1955,131 @@ class MultiAnimatBodies(Body):
                             lambda t, initial_pose=initial_pose: -initial_pose[0],
                             lambda t, initial_pose=initial_pose: -initial_pose[1],
                         ]
-                        )
+                    )
+
+                    scale = 1
+                    local_kwargs = dict(kwargs)
                     if "scale" in geometry:
-                        scale = geometry["scale"]
-                        assert scale[0]==scale[1]==scale[2], "Non-uniform scaling not supported."
-                        scale = scale[0]
-                        kwargs["scale"] = scale
-                    body = BodyMesh(
+                        scale_vec = geometry["scale"]
+                        assert scale_vec[0] == scale_vec[1] == scale_vec[2], "Non-uniform scaling not supported."
+                        scale = scale_vec[0]
+                        local_kwargs["scale"] = scale
+                        local_kwargs["zpos"] = link.pose[2]
+
+                    cache_key = (mesh_gpath, scale)
+                    if cache_key in _mesh_body_cache:
+                        # Reuse the already-computed SDF data
+                        template = _mesh_body_cache[cache_key]
+                        body = BodyMesh(
                             device, x, y,
                             mesh_gpath,
                             update_funcs,
+                            z=self.z,
+                            eps=eps,
+                            compute_interp=False,  # skip heavy computation
+                            nsamples=template.nsamples,
+                            msamples=template.msamples,
+                            suit=suit,
+                            plotting_meshes=False,
+                            grids=grids,
+                            **local_kwargs
+                        )
+                        # Copy the pre-computed SDF interpolation data
+                        body.sdf       = template.sdf
+                        body.bb        = template.bb
+                        body.cnt       = template.cnt.clone()
+                        body.cnt_update = template.cnt_update.clone()
+                        body.curv_coord = template.curv_coord
+                        body.sign_vec   = template.sign_vec
+                        body.ds         = template.ds
+                        body.mask       = template.mask
+                        print(f"  Reusing cached SDF for {mesh_gpath} (scale={scale})")
+                    else:
+                        body = BodyMesh(
+                            device, x, y,
+                            mesh_gpath,
+                            update_funcs,
+                            z=self.z,
                             eps=eps,
                             compute_interp=compute_interp,
                             nsamples=nsamples, msamples=msamples,
                             suit=suit,
                             plotting_meshes=plotting_meshes,
-                            **kwargs
+                            grids=grids,
+                            **local_kwargs
                         )
+                        _mesh_body_cache[cache_key] = body
                     self.bodies.append(body)
 
                 elif "radius" in geometry and "length" in geometry:
-                    """ Create analytical bodies for capsule """
-
-                    radius = torch.tensor(geometry["radius"],dtype=x.dtype,device=x.device)
-                    length = torch.tensor(geometry["length"],dtype=x.dtype,device=x.device)
+                    radius = torch.tensor(geometry["radius"], dtype=x.dtype, device=x.device)
+                    length = torch.tensor(geometry["length"], dtype=x.dtype, device=x.device)
                     if "L" in link["name"]:
-                        sdf_fun = lambda x,y : sdUnevenCapsule(x,y,radius,radius,length, side="L")
+                        sdf_fun = lambda x, y: sdUnevenCapsule(x, y, radius, radius, length, side="L")
                     elif "R" in link["name"]:
-                        sdf_fun = lambda x,y : sdUnevenCapsule(x,y,radius,radius,length, side="R")
+                        sdf_fun = lambda x, y: sdUnevenCapsule(x, y, radius, radius, length, side="R")
                     else:
                         raise ValueError("Capsule link name must contain 'L' or 'R' to define the side.")
                     initial_pose = np.array(link.pose).astype(x.cpu().numpy().dtype)
-                    update_maps = (lambda t: 0, [lambda t: -initial_pose[0], lambda t: -initial_pose[1]]) # set dummy update maps for initialization (not used)
+                    update_maps = (lambda t: 0, [lambda t: -initial_pose[0], lambda t: -initial_pose[1]])
                     self.bodies.append(
-                        BodyAnalytical(
-                            device, x, y, sdf_fun, update_maps, eps=eps, plotting=False, pre_update=False
-                        )
+                        BodyAnalytical(device, x, y, sdf_fun, update_maps, z=self.z, eps=eps, plotting=False, pre_update=False, grids=grids)
                     )
-                    self.bodies[-1].bb=[[ -radius.cpu(), radius.cpu() ], [ -radius.cpu(), radius.cpu() ], [-radius.cpu(), radius.cpu() ]]
+                    self.bodies[-1].bb = [[-radius.cpu(), radius.cpu()], [-radius.cpu(), radius.cpu()], [-radius.cpu(), radius.cpu()]]
 
                 elif "radius" in geometry and "length" not in geometry:
-                    """ Create analytical bodies for spheres """
-                    radius = torch.tensor(geometry["radius"],dtype=x.dtype,device=x.device)
-                    sdf_fun = lambda x,y : circle(x,y,xt=0,yt=0,r=radius)
+                    radius = torch.tensor(geometry["radius"], dtype=x.dtype, device=x.device)
+                    sdf_fun = lambda x, y: circle(x, y, xt=0, yt=0, r=radius)
                     initial_pose = np.array(link.pose).astype(x.cpu().numpy().dtype)
-                    update_maps = (lambda t: 0, [lambda t: -initial_pose[0], lambda t: -initial_pose[1]]) # set dummy update maps for initialization (not used)
+                    update_maps = (lambda t: 0, [lambda t: -initial_pose[0], lambda t: -initial_pose[1]])
                     self.bodies.append(
-                        BodyAnalytical(
-                            device, x, y, sdf_fun, update_maps, eps=eps, plotting=False, pre_update=False
-                        )
+                        BodyAnalytical(device, x, y, sdf_fun, update_maps, z=self.z, eps=eps, plotting=False, pre_update=False, grids=grids)
                     )
-                    self.bodies[-1].bb=[[ -radius.cpu(), radius.cpu() ], [ -radius.cpu(), radius.cpu() ], [-radius.cpu(), radius.cpu() ]]
+                    self.bodies[-1].bb = [[-radius.cpu(), radius.cpu()], [-radius.cpu(), radius.cpu()], [-radius.cpu(), radius.cpu()]]
                 else:
                     raise ValueError("Unsupported geometry type in SDF.")
-                self.body_ids.append([animat_i,link_i])
-
-
-
+                self.body_ids.append([animat_i, link_i])
 
         self.nbodies = len(self.bodies)
-        self.sdf_vals = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
-        self.sdf_vals_u = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
-        self.sdf_vals_v = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
-        self.u_vals   = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
-        self.v_vals   = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
+        gs = self.grid_shape
+        # Output fields — filled by streaming union in update() or
+        # BDIMhandler3D.update().  No (nbodies, *gs) stacks needed.
+        self.sdf_val   = torch.zeros(gs, device=device, dtype=self.dtype)
+        self.sdf_val_u = torch.zeros(gs, device=device, dtype=self.dtype)
+        self.sdf_val_v = torch.zeros(gs, device=device, dtype=self.dtype)
+        self.body_u    = torch.zeros(gs, device=device, dtype=self.dtype)
+        self.body_v    = torch.zeros(gs, device=device, dtype=self.dtype)
+        if self.ndim == 3:
+            self.sdf_val_w = torch.zeros(gs, device=device, dtype=self.dtype)
+            self.body_w    = torch.zeros(gs, device=device, dtype=self.dtype)
+        self.com_pos   = torch.zeros((self.nbodies, self.ndim), device=device)
 
-        self.sdf_val_u=torch.zeros_like(self.X)
-        self.sdf_val_v=torch.zeros_like(self.X)
-        self.com_pos  = torch.zeros((self.nbodies,2),device=device)
-
-        # for link_i, link in enumerate(self.sdf.links):
-        #     # if link_i%2==0:
-        #         mesh_name = link["visuals"][0]["geometry"]["uri"]
-        #         mesh_gpath = sdf_folder+mesh_name
-        #         initial_pose = np.array(link.pose).astype(x.cpu().numpy().dtype)
-        #         update_funcs = (
-        #             lambda t: 180,
-        #             [
-        #                 lambda t, initial_pose=initial_pose: -initial_pose[0],
-        #                 lambda t, initial_pose=initial_pose: -initial_pose[1],
-        #             ]
-        #             )
-        #         body = BodyMesh(
-        #                 device, x, y,
-        #                 mesh_gpath,
-        #                 update_funcs,
-        #                 eps=eps,
-        #                 compute_interp=compute_interp,
-        #                 nsamples=nsamples, msamples=msamples,
-        #                 suit=suit,
-        #                 plotting_meshes=plotting_meshes,
-        #                 **kwargs
-        #             )
-        #         body.id = link_i
-        #         self.bodies.append(body)
-        # self.nbodies = len(self.bodies)
-        # self.costum_update = costum_update
-        # self.compute_interp = compute_interp
-
-    #     self.mu_funcs               = self.bodies[0].mu_funcs
-    #     self.compute_sdf_properties = self.bodies[0].compute_sdf_properties
-    #     self.sdf_vals = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
-    #     self.sdf_vals_u = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
-    #     self.sdf_vals_v = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
-    #     self.u_vals   = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
-    #     self.v_vals   = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
-
-    #     self.sdf_val_u=torch.zeros_like(self.X)
-    #     self.sdf_val_v=torch.zeros_like(self.X)
-    #     self.com_pos  = torch.zeros((self.nbodies,2),device=device)
-
-
-    #     if not self.costum_update:
-    #         self.initialize() # initialize the sdf interpolation functions
-
-
-    # def initialize(self):
-    #     self.update(torch.tensor(0.0,device=self.device,dtype=self.dtype), 0)
-
-    #     # for i, body in enumerate(self.bodies):
-    #     #     body.initialize()
-    #     #     self.sdf_vals[i]=body.sdf
-
-    #     # self.sdf_val = torch.min(self.sdf_vals,axis=0)[0]
-
-    #     # if self.plotting:
-    #     #     var=self.sdf_val.cpu()
-    #     #     extent = (
-    #     #         torch.min(self.bodies[0].x.cpu()), torch.max(self.bodies[0].x.cpu()),
-    #     #         torch.min(self.bodies[0].y.cpu()), torch.max(self.bodies[0].y.cpu())
-    #     #     )
-
-    #     #     # visualize computed interpolation functions over the domain
-    #     #     plt.figure(figsize=(20,10))
-    #     #     plt.imshow(
-    #     #         var.T,
-    #     #         extent = extent,
-    #     #         origin = "lower",
-    #     #         interpolation=None
-    #     #     )
-    #     #     plt.contour(self.bodies[0].X.cpu(),self.bodies[0].Y.cpu(),var, colors='k', levels=[0])
-    #     #     plt.show()
-
-    #     # self.body_u=torch.zeros_like(self.bodies[0].X)
-    #     # self.body_v=torch.zeros_like(self.bodies[0].X)
-
-
-
-
-
-
-
-
-    # def sdf_from_obj(self, mesh_file="box.obj"):
-    #     """
-    #     No longer used, keep for storing in case
-    #     """
-
-    #     m2s = mesh2sdf(mesh_file)
-    #     xflat = self.xflat.cpu().numpy().astype(np.float32)
-    #     yflat = self.yflat.cpu().numpy().astype(np.float32)
-    #     xflat = self.xflat.cpu().numpy().astype(np.float32)
-    #     yflat = self.yflat.cpu().numpy().astype(np.float32)
-    #     zflat = np.zeros_like(xflat)
-    #     xyz   = np.stack([xflat,yflat,zflat],axis=1)
-
-    #     query_pts = np.array(xyz,dtype=np.float32)
-    #     sdf_val, sdf_grad= m2s(query_pts)
-    #     sdf_val  = torch.from_numpy(sdf_val).to(self.device).reshape(self.nx, self.ny)
-    #     sdf_grad = torch.from_numpy(sdf_grad).to(self.device)
-
-    #     # subsample arrows
-    #     gradx = sdf_grad[:,0].reshape(self.nx, self.ny)
-    #     grady = sdf_grad[:,1].reshape(self.nx, self.ny)
-    #     norm  = torch.sqrt(gradx**2+grady**2)
-
-    #     # compute curvature
-    #     numerator = (grady**2)*torch.gradient(gradx, spacing=self.h, axis=0)[0] \
-    #                 +(gradx**2)*torch.gradient(grady, spacing=self.h, axis=1)[0] \
-    #                 -2*gradx*grady*torch.gradient(grady, spacing=self.h, axis=0)[0]
-    #     denominator = norm**3
-    #     # numerator = torch.gradient(gradx, dim=0, spacing=self.h)[0]+torch.gradient(grady, dim=1, spacing=self.h)[0]
-    #     # denominator = (1+gradx**2+grady**2)**2
-    #     curvature = numerator/denominator
-
-    #     # normalize gradient
-    #     gradx/=norm
-    #     grady/=norm
-
-
-    #     return (
-    #         sdf_val,
-    #         gradx,
-    #         grady,
-    #         curvature,
-    #     )
-
-    #     # return sdf_val.reshape(self.nx, self.ny), du.reshape(self.nx, self.ny), dv.reshape(self.nx, self.ny)
-
-
-
-
-
-
-    # def compute_sdf_from_interp_query(self, xquery, yquery):
-    #     return self.compute_sdf_properties(
-    #         self.sdf_interp(xquery,yquery).reshape(self.nx, self.ny)
-    #     )
-
-
-    # def update_interp_from_rototranslation2D(self, theta, transl, dt=1):
-    #     theta = theta*torch.pi/180
-    #     s = torch.sin(torch.tensor(theta, device=self.device))
-    #     c = torch.cos(torch.tensor(theta, device=self.device))
-    #     rot = torch.stack([torch.stack([c, -s]),
-    #                     torch.stack([s, c])]).to(self.device)
-    #     trans = torch.stack((transl[0]*self.ones_stacked, transl[1]*self.ones_stacked))
-    #     newpoints=rot.T@self.stacked_xy-trans
-
-    #     newpos = rot@self.stacked_xy+trans
-    #     newpos_u = newpos[0].reshape(self.nx, self.ny)
-    #     newpos_v = newpos[1].reshape(self.nx, self.ny)
-
-    #     # self.body_uprev = self.body_u
-    #     # self.body_vprev = self.body_v
-
-    #     self.body_u=(newpos_u-self.oldpos_u)/dt
-    #     self.body_v=(newpos_v-self.oldpos_v)/dt
-
-    #     self.oldpos_u = newpos_u
-    #     self.oldpos_v = newpos_v
-
-    #     (
-    #         new_sdf,
-    #         new_nx,
-    #         new_ny,
-    #         new_curv,
-    #     ) = self.compute_sdf_from_interp_query(newpoints[0], newpoints[1])
-
-
-
-    #     return new_sdf, new_nx, new_ny, new_curv
+        # Free per-body velocity/SDF tensors that are only used by default
+        # update methods.  MultiAnimatBodies always uses an external update
+        # (e.g. BDIMhandler3D) that writes directly to the output fields
+        # above, so these per-body fields would just waste GPU memory.
+        for body in self.bodies:
+            body.body_u = None
+            body.body_v = None
+            body.sdf    = body.sdf if not isinstance(body.sdf, torch.Tensor) else None
+            if self.ndim == 3:
+                body.body_w = None
 
 
 class CompositeSegmentBody:
 
-    def __init__(self, device, x, y, sdf_folder, sdf_name, eps=0.05):
+    def __init__(self, device, x, y, sdf_folder, sdf_name, eps=0.05, grids=None):
         """
         sdf_folder = folder of the sdf file
         sdf_name = name of the sdf file
         """
         self.device          = device
         self.thk             = 0.0005
-        self.body            = Body(device,x,y,eps=eps)
+        self.body            = Body(device,x,y,eps=eps,grids=grids)
         self.sdf_folder      = sdf_folder
         self.sdf             = ModelSDF.read(sdf_folder+sdf_name)[0]
         self.n               = len(self.sdf.links)
-        self.body            = Body(device,x,y,eps=0.05)
+        self.body            = Body(device,x,y,eps=0.05,grids=grids)
         self.nlinks          = len(self.sdf.links)
         self.initial_poses   = torch.tensor([link.pose[:2] for link in self.sdf.links],device=device)
         self.initial_lin_vel = torch.zeros((self.initial_poses.shape[0]),2,device=device)
@@ -1939,9 +2122,9 @@ class CompositeSegmentBody:
 
 
         idx=self.ds.argmin(0).unsqueeze(0).expand(self.ds.shape)
-        self.sdf=self.ds.gather(0,idx)[0].reshape(self.body.nx,self.body.ny)
-        self.body_u=self.uv[:,0,:].gather(0,idx)[0].reshape(self.body.nx,self.body.ny)
-        self.body_v=self.uv[:,1,:].gather(0,idx)[0].reshape(self.body.nx,self.body.ny)
+        self.sdf=self.ds.gather(0,idx)[0].reshape(self.body.nx,self.body.ny).contiguous()
+        self.body_u=self.uv[:,0,:].gather(0,idx)[0].reshape(self.body.nx,self.body.ny).contiguous()
+        self.body_v=self.uv[:,1,:].gather(0,idx)[0].reshape(self.body.nx,self.body.ny).contiguous()
 
 
 
@@ -2350,7 +2533,7 @@ def test_body():
 
     use_gpu=True
 
-    mesh_file = "/data/andreaferrario/lilytorch/lilytorch/1guillasim/models/1guilla_v1/sdf/meshes/link0.obj"
+    mesh_file = "/data/andreaferrario/lilytorch/lilytorch/_1guillasim/models/1guilla_v1/sdf/meshes/link0.obj"
 
     if torch.cuda.is_available() and use_gpu:
         print(f"Using GPU: {torch.cuda.get_device_name(0)} is available.")
@@ -2463,90 +2646,12 @@ def test_fish_mesh():
     device = torch.device("cpu")
     torch.set_num_threads(8)
 
-    # compute sdf on query points
     import matplotlib.pyplot as plt
     n=2**10
     x=torch.linspace(-0.002,0.05,n)
     y=torch.linspace(-0.002,0.002,n)
-    X,Y=torch.meshgrid(x,y,indexing='ij')
 
-    # compute the model boolean's inner part
-    composite_body=CompositeSegmentBody(device,x, y, sdf_folder, sdf_name, eps=0.05)
-    # sdf_properties = composite_body.initialize()
-    # for sdf_property in sdf_properties:
-    #     sdf=sdf_property[0]
-    #     # plt.contour(X,Y,sdf, colors='k', levels=[0])
-    # boolean_model_min = torch.stack([sdf[0] for sdf in sdf_properties]).min(axis=0)[0]<0
-
-    # # define parameters for the line approximation
-    # poses = torch.tensor([
-    #     [body.update_translation[0](0),
-    #     body.update_translation[1](0)]
-    # for body in composite_body.bodies]) # translations are obtained from the update translation functions at time 0
-
-    # assert len((sdf_properties))==poses.shape[0]
-
-    # def sdf_approx(V,thk,plotting=False):
-    #     """
-    #     sdf function for the line segments
-    #     """
-    #     m=V.shape[0]
-    #     sdf=torch.zeros((m-1,n,n))
-    #     # thk=torch.tensor([0.5,0.3,0.2,0.7,1])
-    #     for i in range(m-1):
-    #         sdf[i]=segment(X,Y,V[i],V[i+1],thk[i],thk[i+1])
-    #         if plotting:
-    #             plt.contour(X,Y,sdf[i], colors='g', levels=[0])
-    #     return sdf
-
-    # def cost_fcn(thk):
-    #     sdf = sdf_approx(poses, thk)
-    #     boolean_approx_min = sdf.min(axis=0)[0]
-    #     return torch.abs(boolean_model_min-boolean_approx_min).sum().numpy()<0
-
-
-    # # sdf = sdf_approx(poses, 0.0005*torch.ones(m))
-    # # boolean_approx_min = sdf.min(axis=0)[0]<0
-    # # plt.contour(X,Y,boolean_model_min, colors='k', levels=[0])
-    # # plt.contour(X,Y,boolean_approx_min, colors='g', levels=[0])
-    # #
-
-    # # from scipy.optimize import minimize
-    # init_thinkess=0.0005*torch.ones(poses.shape[0])#+0.0001*torch.rand(poses.shape[0])
-    # # cons = ({'type': 'ineq', 'fun': lambda x:  x>0})
-    # # res = minimize(cost_fcn, init_thinkess, method='COBYLA', constraints=cons)
-
-    # # sdf = sdf_approx(poses, res.x, plotting=True)
-
-    # sdf = sdf_approx(poses, init_thinkess, plotting=True)
-    # boolean_approx_min = sdf.min(axis=0)[0]<0
-    # plt.contour(X,Y,boolean_model_min, colors='k', levels=[0])
-    # plt.contour(X,Y,boolean_approx_min, colors='b', levels=[0])
-    # plt.plot(poses[:,0],poses[:,1],'r',marker='o')
-    # plt.show()
-
-
-
-
-
-    # import matplotlib.pyplot as plt
-    # import matplotlib
-
-    # # plotting
-    # X,Y=np.meshgrid(x,y,indexing='ij')
-    # c=1
-    # for sdf_val,   in zip(sdf_vals, sdf_grads):
-    #     sdf_val = sdf_val.reshape(len(x), len(y))
-    #     sdf_grad = sdf_grad.reshape(len(x), len(y), 3)
-
-    #     plt.subplot(4,5,c)
-    #     norm = matplotlib.colors.Normalize(vmin=sdf_val.min(), vmax=sdf_val.max())
-    #     cset1 = plt.contourf(X,Y,sdf_val, cmap="Greys")
-    #     plt.title("Link"+str(c-1))
-    #     # cset2 = plt.contour(X,Y,sdf_val, colors='k', levels=[0], linestyles='dashed')
-    #     plt.colorbar(cset1)
-    #     c=c+1
-    # plt.show()
+    composite_body=CompositeSegmentBody(device, x, y, sdf_folder, sdf_name, eps=0.05)
 
 
 def test_overlapping_bodies():

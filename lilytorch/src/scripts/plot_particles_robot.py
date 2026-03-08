@@ -7,27 +7,28 @@ from pytorch_interpolation import RegularGridInterpolator
 import os
 import matplotlib.pyplot as plt
 
-dir               = "/data/andreaferrario/ns_data/1guilla_experiments/2025-12-06T08:42:12.098824/"
+dir               = "/data/andreaferrario/ns_data/2025-12-19T17:01:39.100929/"
 # dir               = "/data/andreaferrario/ns_data/2025-10-06T11:25:04.426659/"
 
 
 it_start = 0
-it_end = 92000
+it_end = 20000
 
 device="cpu"
 dtype=torch.float32
+it_spacing = 100
+Nx         = 512
+Ny         = 256
 
-it_spacing = 500
-Nx = 1024
-Ny = 512
-xmin = -0.9
-xmax = 2.1
-ymin = -0.75
-ymax = 0.75
-dt = 0.0001
-nu = 500*1e-6
-umax = 0.35
-Re = umax*0.8/nu
+xmin       = -0.85
+xmax       = 1.71
+ymin       = -0.64
+ymax       = 0.64
+timestep   = 0.001
+
+nu         = 0.0007
+umax       = 0.35
+Re         = umax*0.8/nu
 
 print(f"Reynolds number: {Re}")
 
@@ -45,7 +46,6 @@ n_bodies = 8
 # controller = load_object(dir+"/controller0")
 # timestep = controller.pars.timestep
 
-timestep = 0.0002
 
 u_interp = RegularGridInterpolator(
     (x,y),
@@ -58,7 +58,7 @@ v_interp = RegularGridInterpolator(
 
 tail_particles = torch.tensor([[],[]], device=device, dtype=dtype)
 
-for i in range(it_start,it_end+1,it_spacing):
+for i in range(it_start,it_end,it_spacing):
 
     # load data
     u = torch.from_numpy(np.load(dir+"uv_field/u_"+str(i)+".npy")).to(device=device, dtype=dtype)
@@ -70,18 +70,11 @@ for i in range(it_start,it_end+1,it_spacing):
 
     # tail particles
     tail_idx = 85
-    particle_number = 4
+    particle_number = 2
     tail_particles = torch.cat([tail_particles,cnt[-1][:,tail_idx-particle_number:tail_idx+particle_number]],dim=1)
     plt.scatter(tail_particles[0], tail_particles[1], color="yellowgreen", s=50)
     for j in range(n_bodies+1):
         plt.fill(cnt[j][0].cpu(), cnt[j][1].cpu(), color="#000000")
-
-    # move particles according to the velocity field
-    u_interp.F = u
-    v_interp.F = v
-
-    plt.xlim(xmin, xmax)
-    plt.ylim(ymin, ymax)
 
     plt.gca().set_facecolor('#0033cc')  # Shiny dark blue
     plt.gca().patch.set_alpha(0.9)
@@ -89,8 +82,11 @@ for i in range(it_start,it_end+1,it_spacing):
     u_interp.F = u
     v_interp.F = v
 
+    print(tail_particles.shape)
+
     u_particles = u_interp(tail_particles[0], tail_particles[1])
     v_particles = v_interp(tail_particles[0], tail_particles[1])
+
 
     # update the tail particles based on the computed velocities
     tail_particles[0] += u_particles * timestep * it_spacing

@@ -12,7 +12,6 @@ setup(
     version="0.0.1",
     author="Andrea Ferrario",
     author_email="ferrarioa5@gmail.com",
-    # packages=["lilytorch"],
     description="Lilytorch",
     packages=find_packages(),
     long_description=description,
@@ -21,10 +20,4 @@ setup(
     long_description_content_type="text/markdown",
     python_requires='>=3.8',
     zip_safe=False,
-    install_requires=[
-        'numpy',
-        'scipy',
-        'matplotlib',
-        # 'torch'
-    ],
 )

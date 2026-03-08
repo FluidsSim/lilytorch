@@ -1,0 +1,25 @@
+<?xml version="1.0" ?>
+<sdf version="1.6">
+  <world name="world">
+    <model name="arena_water">
+      <pose>0 0 0 0 0 0</pose>
+      <link name="water">
+        <pose>0 0 0 0 0 0</pose>
+        <visual name="water_visual">
+          <pose>0.3 0.0 0.0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>2.4 0.6 0.6</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.25 0.45 0.75 0.18</ambient>
+            <diffuse>0.30 0.50 0.80 0.18</diffuse>
+            <specular>0.60 0.60 0.65 0.30</specular>
+            <emissive>0.05 0.08 0.15 0.10</emissive>
+          </material>
+        </visual>
+      </link>
+    </model>
+  </world>
+</sdf>

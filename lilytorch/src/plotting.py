@@ -546,6 +546,401 @@ def plot_urdf_positions(
 # FLUID SOLVER PLOTTING #######################################################
 ###############################################################################
 
+# ---------------------------------------------------------------------------
+#   Unified field plotting  (2D / 3D)
+# ---------------------------------------------------------------------------
+
+def _save_figure(save_path, name, iteration, fmt="png"):
+    """Save the current pyplot figure into *save_path/name/name_ITER.fmt*."""
+    folder = f"{save_path}/{name}"
+    os.makedirs(folder, exist_ok=True)
+    plt.savefig(f"{folder}/{name}_{iteration:06d}.{fmt}", bbox_inches="tight")
+    plt.close()
+
+
+def plot_field_2d(
+    field,              # 2-D numpy array (Nx, Ny)
+    extent,             # (xmin, xmax, ymin, ymax) for imshow
+    name,               # quantity string  (e.g. "curl")
+    iteration,          # time-step index
+    save_path,          # root folder for output
+    *,
+    vmin=None,
+    vmax=None,
+    bodies=None,        # list of body objects (optional, for contour overlay)
+    cmap=cm.RdBu,
+    fmt="png",
+):
+    """
+    Single unified 2-D field plot.
+
+    * Symmetric auto-range when *vmin*/*vmax* are ``None``.
+    * Optional body contour scatter overlay.
+    """
+    field_np = np.asarray(field)
+
+    # ---- symmetric auto-range ----
+    if vmin is None or vmax is None:
+        limit = max(abs(field_np.min()), abs(field_np.max())) / 2
+        if limit == 0:
+            limit = 1.0
+        vmin, vmax = -limit, limit
+
+    # ---- figure size from domain aspect ratio ----
+    x_range = extent[1] - extent[0]
+    y_range = extent[3] - extent[2]
+    scale_f = 25 / max(x_range, y_range)
+    fig_w   = max(x_range * scale_f, 4)
+    fig_h   = max(y_range * scale_f, 4)
+
+    plt.figure(figsize=(fig_w, fig_h))
+
+    # ---- heatmap ----
+    plt.imshow(
+        field_np.T,
+        vmin=vmin, vmax=vmax,
+        extent=extent,
+        origin="lower",
+        cmap=cmap,
+        aspect="equal",
+        interpolation=None,
+    )
+    plt.colorbar()
+
+    # ---- body contours ----
+    if bodies is not None:
+        for body in bodies:
+            cnt = getattr(body, "cnt_update", None)
+            mask = getattr(body, "mask", None)
+            if cnt is not None and mask is not None:
+                plt.scatter(
+                    cnt[0][mask].cpu().numpy(),
+                    cnt[1][mask].cpu().numpy(),
+                    c="k", s=0.3,
+                )
+                com = getattr(body, "com_pos", None)
+                if com is not None:
+                    plt.plot(com[0].cpu().numpy(), com[1].cpu().numpy(), "ro", markersize=2)
+
+    plt.xlabel("x [m]")
+    plt.ylabel("y [m]")
+    plt.title(name)
+    plt.axis(extent)
+    _save_figure(save_path, name, iteration, fmt)
+
+
+def _nearest_index(coord_1d, target=0.0):
+    """Return the array index whose coordinate is closest to *target*."""
+    return int(np.argmin(np.abs(coord_1d - target)))
+
+
+def plot_field_3d_slices(
+    field_3d,           # 3-D numpy array (Nx, Ny, Nz) – already on CPU
+    coords,             # dict with keys "x", "y", "z" – 1-D numpy arrays
+    name,               # quantity string
+    iteration,
+    save_path,
+    *,
+    vmin=None,
+    vmax=None,
+    bodies=None,
+    slice_indices=None,  # dict {"xy": k, "xz": j, "yz": i}  (None → origin)
+    cmap=cm.RdBu,
+    fmt="png",
+):
+    """
+    For a 3-D field, produce three orthogonal mid-plane slices and save each
+    as a separate 2-D plot (reuses `plot_field_2d`).
+
+    Default slice positions pass through the coordinate origin (0, 0, 0)
+    rather than the array midpoint, so that slices intersect the body
+    even when the domain is not symmetric about the origin.
+    """
+    field_np = np.asarray(field_3d)
+    Nx, Ny, Nz = field_np.shape
+    x, y, z = coords["x"], coords["y"], coords["z"]
+    si = slice_indices or {}
+    k_xy = si.get("xy", _nearest_index(z, 0.0))
+    j_xz = si.get("xz", _nearest_index(y, 0.0))
+    i_yz = si.get("yz", _nearest_index(x, 0.0))
+
+    # ---- XY slice (fixed z) ----
+    extent_xy = (float(x[0]), float(x[-1]), float(y[0]), float(y[-1]))
+    plot_field_2d(
+        field_np[:, :, k_xy], extent_xy, f"{name}_xy_k{k_xy}",
+        iteration, save_path,
+        vmin=vmin, vmax=vmax, bodies=bodies, cmap=cmap, fmt=fmt,
+    )
+
+    # ---- XZ slice (fixed y) ----
+    extent_xz = (float(x[0]), float(x[-1]), float(z[0]), float(z[-1]))
+    plot_field_2d(
+        field_np[:, j_xz, :], extent_xz, f"{name}_xz_j{j_xz}",
+        iteration, save_path,
+        vmin=vmin, vmax=vmax, bodies=None, cmap=cmap, fmt=fmt,
+    )
+
+    # ---- YZ slice (fixed x) ----
+    extent_yz = (float(y[0]), float(y[-1]), float(z[0]), float(z[-1]))
+    plot_field_2d(
+        field_np[i_yz, :, :], extent_yz, f"{name}_yz_i{i_yz}",
+        iteration, save_path,
+        vmin=vmin, vmax=vmax, bodies=None, cmap=cmap, fmt=fmt,
+    )
+
+
+def plot_field_3d(
+    field_3d,           # 3-D numpy array (Nx, Ny, Nz)
+    coords,             # dict  {"x": 1d, "y": 1d, "z": 1d}
+    name,
+    iteration,
+    save_path,
+    *,
+    sdf_3d=None,        # optional SDF array for body isosurface (same shape)
+    iso_value=None,     # fixed isosurface threshold (overrides auto when set)
+    iso_fraction=0.15,  # threshold = iso_fraction * max(|smoothed field|)
+    smooth_sigma=2.5,   # Gaussian smoothing (in grid-cells) before isosurface extraction
+    crop_boundary=3,    # number of cells to crop from each domain face before rendering
+    window_size=(1920, 1080),
+    fmt="png",
+):
+    """
+    Render a 3-D field as isosurfaces with an optional opaque body surface
+    (SDF = 0), using PyVista off-screen.
+
+    For fields that contain both positive and negative values (e.g. vorticity
+    component, pressure), dual ±threshold isosurfaces are drawn (red/blue).
+    For non-negative fields (e.g. |curl| magnitude), a single isosurface is
+    drawn at `threshold` coloured by value.
+
+    ``crop_boundary`` removes cells from each face so that zero-padded
+    boundary layers (from the vorticity stencil) and ghost-cell artifacts
+    never reach the isosurface algorithm.
+
+    Threshold strategy
+    ------------------
+    Vorticity fields from backward-difference stencils are dominated by
+    near-zero noise: the 85th-percentile of |ω| can be 100,000× smaller
+    than the peak.  A percentile-based threshold would trace isosurfaces
+    through this noise.  Instead we use a **fraction of the peak amplitude**
+    of the *smoothed* field (default 15 %).  This cleanly selects the
+    physical vortex structures near the body.
+    """
+    try:
+        import pyvista as pv
+    except ImportError:
+        print("[plot_field_3d] pyvista not installed – skipping 3D render.")
+        return
+
+    pv.OFF_SCREEN = True
+
+    field_np = np.asarray(field_3d, dtype=np.float64)
+    x = np.asarray(coords["x"])
+    y = np.asarray(coords["y"])
+    z = np.asarray(coords["z"])
+
+    # ---- Crop boundary layers ----
+    # The vorticity stencil ([2:-2]) zero-pads the outermost cells.
+    # The sharp 0→nonzero transition creates spurious isosurfaces.
+    # Cropping removes these cells from the rendering domain.
+    c = int(crop_boundary)
+    if c > 0:
+        field_np = field_np[c:-c, c:-c, c:-c]
+        x = x[c:-c]
+        y = y[c:-c]
+        z = z[c:-c]
+        if sdf_3d is not None:
+            sdf_3d = np.asarray(sdf_3d)[c:-c, c:-c, c:-c]
+
+    # ---- Gaussian smoothing suppresses grid-scale noise in derivative
+    #      fields (vorticity) that would otherwise produce jagged,
+    #      oscillatory isosurfaces.  sigma is in grid-cell units. ----
+    if smooth_sigma and smooth_sigma > 0:
+        from scipy.ndimage import gaussian_filter
+        field_np = gaussian_filter(field_np, sigma=smooth_sigma)
+
+    grid = pv.RectilinearGrid(x, y, z)
+    grid.point_data[name] = field_np.flatten(order="F")
+
+    # ---- classify sign character of the field ----
+    fmin, fmax = float(field_np.min()), float(field_np.max())
+    has_neg = fmin < -1e-12
+    has_pos = fmax >  1e-12
+    is_bipolar = has_neg and has_pos   # e.g. ωz, pressure
+    # For non-negative fields like |curl|, we only draw a positive iso.
+
+    # ---- determine isosurface threshold ----
+    # Use the peak amplitude of the (already smoothed) field, excluding
+    # the body interior when an SDF is available.
+    if sdf_3d is not None:
+        mask = np.asarray(sdf_3d).ravel() > 0
+        abs_f = np.abs(field_np.ravel()[mask])
+    else:
+        abs_f = np.abs(field_np.ravel())
+    peak = float(abs_f.max()) if abs_f.size > 0 else 0.0
+
+    if iso_value is not None and iso_value > 0:
+        # Fixed threshold requested by caller
+        threshold = float(iso_value)
+    elif peak < 1e-10:
+        threshold = None
+    else:
+        threshold = iso_fraction * peak
+
+    # ---- helper: remove tiny disconnected mesh fragments ----
+    _min_cell_frac = 0.01   # drop components < 1% of total cells
+
+    def _clean_iso(mesh, min_frac=_min_cell_frac):
+        """Keep only connected components whose *cell* count exceeds
+        *min_frac* of the total.  Strips noise speckle that survived
+        Gaussian smoothing and the amplitude threshold."""
+        if mesh is None or mesh.n_cells == 0:
+            return mesh
+        try:
+            conn = mesh.connectivity(extraction_mode="all")
+            region_ids = conn.cell_data.get("RegionId", None)
+            if region_ids is None:
+                return mesh
+            from collections import Counter
+            counts = Counter(region_ids)
+            total = mesh.n_cells
+            min_cells = max(1, int(total * min_frac))
+            keep_ids = {rid for rid, cnt in counts.items()
+                        if cnt >= min_cells}
+            if len(keep_ids) == len(counts):
+                return mesh          # nothing to remove
+            # Build cell-based boolean mask and extract
+            keep_mask = np.isin(region_ids, list(keep_ids))
+            return conn.extract_cells(np.where(keep_mask)[0])
+        except Exception:
+            return mesh   # on any error, fall back to unfiltered mesh
+
+    # ---- build scene ----
+    pl = pv.Plotter(off_screen=True, window_size=list(window_size))
+    pl.set_background("white")
+
+    if threshold is not None:
+        if is_bipolar:
+            # Dual isosurfaces: +threshold (red) and -threshold (blue)
+            try:
+                iso_pos = _clean_iso(grid.contour([threshold], scalars=name))
+                if iso_pos.n_points > 0:
+                    pl.add_mesh(iso_pos, color="#CC3333", opacity=0.6,
+                                smooth_shading=True, label=f"+{threshold:.2e}")
+            except Exception:
+                pass
+            try:
+                iso_neg = _clean_iso(grid.contour([-threshold], scalars=name))
+                if iso_neg.n_points > 0:
+                    pl.add_mesh(iso_neg, color="#3333CC", opacity=0.6,
+                                smooth_shading=True, label=f"−{threshold:.2e}")
+            except Exception:
+                pass
+        else:
+            # Single isosurface at threshold, coloured hot-orange
+            try:
+                iso = _clean_iso(grid.contour([threshold], scalars=name))
+                if iso.n_points > 0:
+                    pl.add_mesh(iso, color="#E06030", opacity=0.7,
+                                smooth_shading=True,
+                                label=f"{name}={threshold:.2e}")
+            except Exception:
+                pass
+
+    # ---- body surface from SDF ----
+    if sdf_3d is not None:
+        sdf_np = np.asarray(sdf_3d)
+        grid.point_data["sdf"] = sdf_np.flatten(order="F")
+        try:
+            body_surf = grid.contour([0.0], scalars="sdf")
+            if body_surf.n_points > 0:
+                pl.add_mesh(body_surf, color="#888888", opacity=0.9,
+                            smooth_shading=True)
+        except Exception:
+            pass
+
+    # ---- domain outline ----
+    pl.add_mesh(grid.outline(), color="gray", line_width=0.5, opacity=0.3)
+
+    # ---- camera  (isometric, looking from upstream-above) ----
+    bds = grid.bounds
+    cx = (bds[0] + bds[1]) / 2
+    cy = (bds[2] + bds[3]) / 2
+    cz = (bds[4] + bds[5]) / 2
+    Lmax = max(bds[1] - bds[0], bds[3] - bds[2], bds[5] - bds[4])
+    focal = (cx, cy, cz)
+    cam_pos = (cx - 0.8 * Lmax, cy - 0.6 * Lmax, cz + 1.5 * Lmax)
+    pl.camera_position = [cam_pos, focal, (0, 0, 1)]
+    pl.camera.parallel_projection = True
+    pl.camera.parallel_scale = Lmax * 0.7
+
+    # ---- text annotation with field range + threshold ----
+    if threshold is not None:
+        info_lines = [f"{name}"]
+        info_lines.append(f"range: [{fmin:.2e}, {fmax:.2e}]")
+        if is_bipolar:
+            info_lines.append(f"iso: ±{threshold:.2e}")
+        else:
+            info_lines.append(f"iso: {threshold:.2e}")
+        info_text = "\n".join(info_lines)
+        try:
+            pl.add_text(
+                info_text,
+                position="upper_right",
+                font_size=10,
+                color="black",
+                shadow=True,
+            )
+        except Exception:
+            pass
+
+    # ---- save ----
+    out_dir = os.path.join(save_path, f"{name}_3d")
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, f"{name}_3d_{iteration:06d}.{fmt}")
+    pl.screenshot(out_path)
+    pl.close()
+
+
+def save_vtk(
+    fields,            # dict  {"u": array, "v": array, ...}
+    coords,            # dict  {"x": 1d, "y": 1d, "z": 1d}
+    iteration,
+    save_path,
+    *,
+    name_prefix="flow",
+):
+    """
+    Write a 3-D rectilinear-grid VTK file readable by ParaView.
+    Requires PyVista (already available in the env).
+    """
+    try:
+        import pyvista as pv
+    except ImportError:
+        print("[save_vtk] pyvista not installed – skipping VTK export.")
+        return
+
+    x = np.asarray(coords["x"])
+    y = np.asarray(coords["y"])
+    z = np.asarray(coords["z"])
+
+    grid = pv.RectilinearGrid(x, y, z)
+
+    for fname, fdata in fields.items():
+        arr = np.asarray(fdata)
+        # RectilinearGrid point data expects Fortran-order flattening
+        grid.point_data[fname] = arr.flatten(order="F")
+
+    vtk_dir = f"{save_path}/vtk"
+    os.makedirs(vtk_dir, exist_ok=True)
+    out_path = f"{vtk_dir}/{name_prefix}_{iteration:06d}.vtr"
+    grid.save(out_path)
+
+
+# ---------------------------------------------------------------------------
+#   Legacy helpers  (kept for backward-compat, new code uses plot_field_*)
+# ---------------------------------------------------------------------------
+
 def save_fig_to_dedicated_folder(
     save_path   : str,
     quantity_str: str,
@@ -640,7 +1035,7 @@ def plot2d_imshow_composite_quiver(X,Y,u,bodies,normal_x,normal_y,extent,iterati
             plt.scatter(body.cnt_update[0][body.mask].cpu(), body.cnt_update[1][body.mask].cpu(), c="k",s=0.1)
             # plt.scatter(body.cnt_update[0].cpu(), body.cnt_update[1].cpu(), c='k', s=0.1)
 
-            # plt.fill(body.cnt_update[0].cpu(), body.cnt_update[1].cpu(), color="#000000")
+            # plt.fill(body.cnt_update[0].cpu(), body.cnt_update[1].cpu(), color="#3E8854E1")
 
             plt.plot(body.com_pos[0].cpu(), body.com_pos[1].cpu(), 'ro', markersize=2)
 

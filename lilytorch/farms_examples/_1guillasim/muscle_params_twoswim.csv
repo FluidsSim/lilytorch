@@ -1,0 +1,9 @@
+joint,alpha,beta,gamma,delta,offset
+joint_body_00,0.3,0.01,60,0.1,0.0
+joint_body_01,0.3,0.01,60,0.1,0.0
+joint_body_02,0.3,0.01,60,0.1,0.0
+joint_body_03,0.3,0.01,60,0.1,0.0
+joint_body_04,0.3,0.01,60,0.1,0.0
+joint_body_05,0.3,0.01,60,0.1,0.0
+joint_body_06,0.3,0.01,60,0.1,0.0
+joint_body_07,0.3,0.01,60,0.1,0.0
