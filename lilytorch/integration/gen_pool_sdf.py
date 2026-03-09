@@ -13,13 +13,35 @@ WALL_MATERIAL = {
     'emissive': '0.0  0.0  0.0  1.0',
 }
 
-# Blue-tiled pool floor
 FLOOR_MATERIAL = {
-    'ambient':  '0.15 0.38 0.58 1.0',
-    'diffuse':  '0.22 0.50 0.72 1.0',
-    'specular': '0.50 0.50 0.50 1.0',
+    'ambient':  '0.78 0.74 0.68 1.0',
+    'diffuse':  '0.88 0.84 0.78 1.0',
+    'specular': '0.30 0.28 0.25 1.0',
     'emissive': '0.0  0.0  0.0  1.0',
 }
+
+# Checker tile colours (Mediterranean blue-teal)
+TILE_LIGHT = {
+    'ambient':  '0.22 0.58 0.68 1.0',
+    'diffuse':  '0.28 0.65 0.75 1.0',
+    'specular': '0.35 0.40 0.45 1.0',
+    'emissive': '0.0  0.0  0.0  1.0',
+}
+TILE_DARK = {
+    'ambient':  '0.12 0.38 0.52 1.0',
+    'diffuse':  '0.16 0.45 0.60 1.0',
+    'specular': '0.25 0.30 0.35 1.0',
+    'emissive': '0.0  0.0  0.0  1.0',
+}
+
+# Large background ground plane (dark slate grey)
+GROUND_BG_MATERIAL = {
+    'ambient':  '0.28 0.32 0.36 1.0',
+    'diffuse':  '0.35 0.40 0.44 1.0',
+    'specular': '0.10 0.10 0.12 1.0',
+    'emissive': '0.0  0.0  0.0  1.0',
+}
+
 
 # Translucent water
 WATER_MATERIAL = {
@@ -56,6 +78,41 @@ def _add_box_link(model, name, pose_text, size_text, mat_dict):
     cs.text = size_text
 
     # visual
+    vis = ET.SubElement(link, 'visual', name=f'{name}_visual')
+    vp  = ET.SubElement(vis, 'pose')
+    vp.text = '0 0 0 0 0 0'
+    vg  = ET.SubElement(vis, 'geometry')
+    vb  = ET.SubElement(vg, 'box')
+    vs  = ET.SubElement(vb, 'size')
+    vs.text = size_text
+    _add_material(vis, mat_dict)
+
+    return link
+
+
+def _add_collision_only_link(model, name, pose_text, size_text):
+    """Create a <link> with collision-only box geometry (no visual)."""
+    link = ET.SubElement(model, 'link', name=name)
+    p = ET.SubElement(link, 'pose')
+    p.text = pose_text
+
+    col = ET.SubElement(link, 'collision', name=f'{name}_collision')
+    cp  = ET.SubElement(col, 'pose')
+    cp.text = '0 0 0 0 0 0'
+    cg  = ET.SubElement(col, 'geometry')
+    cb  = ET.SubElement(cg, 'box')
+    cs  = ET.SubElement(cb, 'size')
+    cs.text = size_text
+
+    return link
+
+
+def _add_visual_only_link(model, name, pose_text, size_text, mat_dict):
+    """Create a <link> with visual-only box geometry (no collision)."""
+    link = ET.SubElement(model, 'link', name=name)
+    p = ET.SubElement(link, 'pose')
+    p.text = pose_text
+
     vis = ET.SubElement(link, 'visual', name=f'{name}_visual')
     vp  = ET.SubElement(vis, 'pose')
     vp.text = '0 0 0 0 0 0'
@@ -113,8 +170,9 @@ def create_pool_sdf(xmin, xmax, ymin, ymax, zmin=None, zmax=None,
         wall_thickness = max(wall_thickness, 0.01)
 
     wt = wall_thickness
-    wz = dz                                                       # wall height
-    zc = ((zmin + zmax) / 2) if is_3d else (wall_height / 2)      # wall z-centre
+    lip = wt                                                      # how much walls rise above water
+    wz = dz + lip                                                 # wall height
+    zc = ((zmin + zmax) / 2 + lip / 2) if is_3d else ((wall_height + lip) / 2)  # wall z-centre
 
     # ── SDF skeleton ──────────────────────────────────────────────────
     sdf   = ET.Element('sdf', version='1.6')
@@ -147,11 +205,49 @@ def create_pool_sdf(xmin, xmax, ymin, ymax, zmin=None, zmax=None,
 
     # ---- floor (z-min face) ------------------------------------------
     fz = (zmin - wt / 2) if is_3d else (-wt / 2)
+    # Full collision+visual slab (tiles cover it visually; opaque floor
+    # blocks light so no rectangular shadow appears on ground_bg below)
     _add_box_link(
         model, 'floor',
         f'{(xmin+xmax)/2} {(ymin+ymax)/2} {fz} 0 0 0',
         f'{dx + 2*wt} {dy + 2*wt} {wt}',
         FLOOR_MATERIAL,
+    )
+
+    # Checker-pattern visual tiles on top of the collision slab
+    floor_dx = dx + 2 * wt
+    floor_dy = dy + 2 * wt
+    tile_z   = fz + wt / 2 + 0.0005          # sit just on top of slab
+    tile_h   = 0.002                           # wafer-thin visual slab
+
+    # Choose tile count so tiles are roughly square
+    _target_tile = max(floor_dx, floor_dy) / 24.0
+    n_tx = max(2, round(floor_dx / _target_tile))
+    n_ty = max(2, round(floor_dy / _target_tile))
+    t_dx = floor_dx / n_tx
+    t_dy = floor_dy / n_ty
+    x0   = (xmin + xmax) / 2 - floor_dx / 2 + t_dx / 2
+    y0   = (ymin + ymax) / 2 - floor_dy / 2 + t_dy / 2
+
+    for i in range(n_tx):
+        for j in range(n_ty):
+            mat = TILE_LIGHT if (i + j) % 2 == 0 else TILE_DARK
+            cx  = x0 + i * t_dx
+            cy  = y0 + j * t_dy
+            _add_visual_only_link(
+                model, f'tile_{i}_{j}',
+                f'{cx} {cy} {tile_z} 0 0 0',
+                f'{t_dx} {t_dy} {tile_h}',
+                mat,
+            )
+
+    # ---- large background ground (visual-only, hides skybox/stars) ---
+    # Place well below the tank so it never appears above the walls
+    _add_visual_only_link(
+        model, 'ground_bg',
+        f'{(xmin+xmax)/2} {(ymin+ymax)/2} {fz - wt - 0.01} 0 0 0',
+        '100 100 0.002',
+        GROUND_BG_MATERIAL,
     )
 
     # ── Optional matplotlib top-view ──────────────────────────────────
@@ -195,8 +291,17 @@ def create_pool_sdf(xmin, xmax, ymin, ymax, zmin=None, zmax=None,
     return _write_sdf(sdf, 'pool/sdf/pool.sdf')
 
 
-def create_water_sdf(xmin, xmax, ymin, ymax, zmin=None, zmax=None):
+def create_water_sdf(xmin, xmax, ymin, ymax, zmin=None, zmax=None,
+                     water_height=0.0):
     """Generate a visual-only water-volume SDF sized to the pool interior.
+
+    Parameters
+    ----------
+    water_height : float
+        The value of ``water.height`` used in the arena config.  FARMS
+        positions the water body at ``[0, 0, water_height]``, so we
+        subtract it from *cz* here so the visual ends up at the correct
+        absolute location.
 
     Returns the absolute path of the written SDF file.
     """
@@ -210,6 +315,9 @@ def create_water_sdf(xmin, xmax, ymin, ymax, zmin=None, zmax=None):
         cz = (zmin + zmax) / 2
     else:
         dz, cz = 50.0, -25.0      # legacy: tall slab below z = 0
+
+    # Compensate for FARMS water-body offset (water.pos = [0, 0, height])
+    cz -= water_height
 
     sdf   = ET.Element('sdf', version='1.6')
     world = ET.SubElement(sdf, 'world', name='world')

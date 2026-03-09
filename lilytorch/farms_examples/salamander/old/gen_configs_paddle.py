@@ -161,7 +161,7 @@ def gen_arena_config():
             "density": 1000.0,
             "maps": ["", ""],
         },
-        "ground_height": -1.0,
+        "ground_height": 0,
     }
     pyobject2yaml(
         sim_sir + 'arena_config.yaml',
@@ -234,7 +234,7 @@ def gen_simulation_config():
             "noslip_tolerance": 1e-6,
             "viewer": "MuJoCo",
             "texture_repeat": 1,
-            "shadow_size": 1024,
+            "shadow_size": 0,
             "visual_scale": 10.0,
             "extent": 10.0
         },

@@ -1,5 +1,5 @@
 
-from cmath import inf
+from math import inf
 import os
 from farms_core.io.yaml import pyobject2yaml
 from farms_core.model.options import SpawnMode
@@ -32,7 +32,8 @@ njoints = 14
 
 spawn_mode = SpawnMode.TRANSVERSE
 
-density = 1000.0
+density       = 800.0   # robot body density [kg/m^3]
+water_density = 1000.0  # water density [kg/m^3]
 
 
 link_names  = ["link_" + str(i) for i in range(nlinks+1)]
@@ -40,8 +41,6 @@ joint_names = ["joint_" + str(i) for i in range(njoints+1)]
 
 
 def gen_animat_config():
-
-    animat_dict = {}
 
     animat_dict = {
         "spawn": {},
@@ -138,7 +137,7 @@ def gen_arena_config():
             "height": 0,
             "velocity": [0, 0, 0],
             "viscosity": 1.0,
-            "density": 1000.0,
+            "density": water_density,
             "maps": ["", ""],
         },
         "ground_height": -1.0,

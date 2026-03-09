@@ -31,6 +31,7 @@ Works with ``headless: false`` (viewer + video) and ``headless: true``
 
 import numpy as np
 import mujoco
+from scipy.ndimage import gaussian_filter
 
 from farms_core.simulation.extensions import TaskExtension
 from farms_core.experiment.options import ExperimentOptions
@@ -261,7 +262,10 @@ class FlowViewer(TaskExtension):
         # Get current flow state
         u, v, w, p = fs.u0, fs.v0, getattr(fs, "w0", None), fs.p0
         if w is None:
-            # 2D solver – vorticity_components won't work
+            # 2D solver – FlowViewer only works in 3D
+            if not getattr(self, "_warned_2d", False):
+                print("[FlowViewer] WARNING: 2D solver detected – FlowViewer requires 3D. Skipping.")
+                self._warned_2d = True
             return
 
         try:
@@ -283,7 +287,6 @@ class FlowViewer(TaskExtension):
 
         # Smooth
         if self.smooth_sigma > 0:
-            from scipy.ndimage import gaussian_filter
             field = gaussian_filter(field, sigma=self.smooth_sigma)
 
         # SDF mask (exclude body interior)

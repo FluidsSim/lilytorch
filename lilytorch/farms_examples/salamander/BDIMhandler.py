@@ -24,7 +24,7 @@ class BDIMhandler():
         self.fluid_solver = FluidSolver(
             self.pars,
             dtype=self.dtype,
-            costum_update=True,
+            custom_update=True,
             compute_forces=True
         )
         self.device = self.fluid_solver.device
@@ -262,15 +262,15 @@ class BDIMhandler():
 
             (self.fluid_solver.mu0_all, self.fluid_solver.mu1_all)         = self.fluid_solver.composite_body.mu_funcs(self.fluid_solver.composite_body.sdf_val)
             self.fluid_solver.m_m0_all                                     = (1-self.fluid_solver.mu0_all)
-            (_, self.fluid_solver.normal_x, self.fluid_solver.normal_y, _) = self.fluid_solver.composite_body.compute_sdf_properties(self.fluid_solver.composite_body.sdf_val)
+            (self.fluid_solver.normal_x, self.fluid_solver.normal_y) = self.fluid_solver.composite_body.compute_normals(self.fluid_solver.composite_body.sdf_val)
 
             (self.fluid_solver.mu0_all_u, self.fluid_solver.mu1_all_u)         = self.fluid_solver.composite_body.mu_funcs(self.fluid_solver.composite_body.sdf_val_u)
             self.fluid_solver.m_m0_all_u                                       = (1-self.fluid_solver.mu0_all_u)
-            (_, self.fluid_solver.normal_x_u, self.fluid_solver.normal_y_u, _) = self.fluid_solver.composite_body.compute_sdf_properties(self.fluid_solver.composite_body.sdf_val_u)
+            (self.fluid_solver.normal_x_u, self.fluid_solver.normal_y_u) = self.fluid_solver.composite_body.compute_normals(self.fluid_solver.composite_body.sdf_val_u)
 
             (self.fluid_solver.mu0_all_v, self.fluid_solver.mu1_all_v)         = self.fluid_solver.composite_body.mu_funcs(self.fluid_solver.composite_body.sdf_val_v)
             self.fluid_solver.m_m0_all_v                                       = (1-self.fluid_solver.mu0_all_v)
-            (_, self.fluid_solver.normal_x_v, self.fluid_solver.normal_y_v, _) = self.fluid_solver.composite_body.compute_sdf_properties(self.fluid_solver.composite_body.sdf_val_v)
+            (self.fluid_solver.normal_x_v, self.fluid_solver.normal_y_v) = self.fluid_solver.composite_body.compute_normals(self.fluid_solver.composite_body.sdf_val_v)
 
             self.fluid_solver.rho = (self.rho_fluid*self.fluid_solver.mu0_all_u + self.rho_body*self.fluid_solver.m_m0_all_u)
 

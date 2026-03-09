@@ -24,7 +24,7 @@ class BDIMhandler():
         self.fluid_solver = FluidSolver(
             self.pars,
             dtype=self.dtype,
-            costum_update=True,
+            custom_update=True,
             compute_forces=True
         )
         self.device = self.fluid_solver.device
@@ -265,17 +265,29 @@ class BDIMhandler():
             # update sdf_properties
             self.update(t, iteration, dt=timestep)
 
-            (self.fluid_solver.mu0_all, self.fluid_solver.mu1_all)         = self.fluid_solver.composite_body.mu_funcs(self.fluid_solver.composite_body.sdf_val)
-            self.fluid_solver.m_m0_all                                     = (1-self.fluid_solver.mu0_all)
-            (_, self.fluid_solver.normal_x, self.fluid_solver.normal_y, _) = self.fluid_solver.composite_body.compute_sdf_properties(self.fluid_solver.composite_body.sdf_val)
+            # --- batched mu_funcs: one kernel launch instead of three ---
+            _cb = self.fluid_solver.composite_body
+            sdf_stack = torch.stack([_cb.sdf_val, _cb.sdf_val_u, _cb.sdf_val_v])  # (3, nx, ny)
+            mu0_stack, mu1_stack = _cb.mu_funcs_batched(sdf_stack)
+            m_m0_stack = 1 - mu0_stack
 
-            (self.fluid_solver.mu0_all_u, self.fluid_solver.mu1_all_u)         = self.fluid_solver.composite_body.mu_funcs(self.fluid_solver.composite_body.sdf_val_u)
-            self.fluid_solver.m_m0_all_u                                       = (1-self.fluid_solver.mu0_all_u)
-            (_, self.fluid_solver.normal_x_u, self.fluid_solver.normal_y_u, _) = self.fluid_solver.composite_body.compute_sdf_properties(self.fluid_solver.composite_body.sdf_val_u)
+            self.fluid_solver.mu0_all,   self.fluid_solver.mu1_all   = mu0_stack[0], mu1_stack[0]
+            self.fluid_solver.m_m0_all   = m_m0_stack[0]
+            self.fluid_solver.mu0_all_u, self.fluid_solver.mu1_all_u = mu0_stack[1], mu1_stack[1]
+            self.fluid_solver.m_m0_all_u = m_m0_stack[1]
+            self.fluid_solver.mu0_all_v, self.fluid_solver.mu1_all_v = mu0_stack[2], mu1_stack[2]
+            self.fluid_solver.m_m0_all_v = m_m0_stack[2]
 
-            (self.fluid_solver.mu0_all_v, self.fluid_solver.mu1_all_v)         = self.fluid_solver.composite_body.mu_funcs(self.fluid_solver.composite_body.sdf_val_v)
-            self.fluid_solver.m_m0_all_v                                       = (1-self.fluid_solver.mu0_all_v)
-            (_, self.fluid_solver.normal_x_v, self.fluid_solver.normal_y_v, _) = self.fluid_solver.composite_body.compute_sdf_properties(self.fluid_solver.composite_body.sdf_val_v)
+            # --- batched normals: one torch.gradient instead of three ---
+            h = _cb.h
+            gx, gy = torch.gradient(sdf_stack, spacing=[h, h], dim=[1, 2], edge_order=2)
+            norm = torch.sqrt(gx**2 + gy**2)
+            nx_stack = torch.where(norm > 0, gx / norm, 0)
+            ny_stack = torch.where(norm > 0, gy / norm, 0)
+
+            self.fluid_solver.normal_x,   self.fluid_solver.normal_y   = nx_stack[0], ny_stack[0]
+            self.fluid_solver.normal_x_u, self.fluid_solver.normal_y_u = nx_stack[1], ny_stack[1]
+            self.fluid_solver.normal_x_v, self.fluid_solver.normal_y_v = nx_stack[2], ny_stack[2]
 
             (u,v,p) = (self.fluid_solver.u0, self.fluid_solver.v0, self.fluid_solver.p0)
 

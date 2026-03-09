@@ -1,11 +1,11 @@
 
-from cmath import inf
+from math import inf
 import os
 from farms_core.io.yaml import pyobject2yaml
 from farms_core.model.options import SpawnMode
 from farms_core.io.sdf import ModelSDF
 from lilytorch.util.paths import lilytorch_repo_root, sdfs_path, gen_new_folder, save_path
-from lilytorch.integration.gen_pool_sdf import create_pool_sdf
+from lilytorch.integration.gen_pool_sdf import create_pool_sdf, create_water_sdf
 import subprocess
 import numpy as np
 
@@ -52,7 +52,8 @@ ymax         = 0.3
 zmin         = -0.3
 zmax         = 0.3
 
-density = 800.0
+density       = 800.0   # robot body density [kg/m^3]
+water_density = 1000.0  # water density [kg/m^3]
 nu    = 1.0e-6
 
 timestep     = 0.0005
@@ -91,8 +92,6 @@ def gen_animat_config(output_folder):
         drag_coefficients = [
             constant_drags for _ in range(nlinks)
         ]
-
-        animat_dict = {}
 
         animat_dict = {
             "spawn": {},
@@ -189,7 +188,17 @@ def gen_animat_config(output_folder):
 
 def gen_arena_config(output_folder):
 
-    create_pool_sdf(xmin, xmax, ymin, ymax, wall_thickness=0.3, wall_height=0.3, plotting=False)
+    # Auto-scale wall thickness from domain dimensions
+    pool_dims  = [xmax - xmin, ymax - ymin, zmax - zmin]
+    wall_thick = round(0.08 * min(pool_dims), 4)
+    wall_thick = max(wall_thick, 0.01)
+
+    create_pool_sdf(xmin, xmax, ymin, ymax, zmin=zmin, zmax=zmax,
+                    wall_thickness=wall_thick, plotting=False)
+
+    water_sdf_path = create_water_sdf(xmin, xmax, ymin, ymax,
+                                      zmin=zmin, zmax=zmax,
+                                      water_height=zmax)
 
     arena_dict = {
        "sdf": os.path.join(sdfs_path, "pool", "sdf", "pool.sdf"),
@@ -201,16 +210,16 @@ def gen_arena_config(output_folder):
             "extras"  : {}
         },
         "water": {
-            "sdf"      : os.path.join(sdfs_path, "arena_water_v0", "sdf", "arena_water.sdf"),
+            "sdf"      : water_sdf_path,
             "drag"     : use_drag,
             "buoyancy" : use_drag,
-            "height"   : 0,
+            "height"   : zmax,
             "velocity" : [0, 0, 0],
             "viscosity": 1.0,
-            "density"  : density,
+            "density"  : water_density,
             "maps"     : ["", ""],
         },
-        "ground_height": 0.2,
+        "ground_height": 0,
     }
     pyobject2yaml(
         os.path.join(output_folder, 'arena_config.yaml'),
@@ -271,7 +280,7 @@ def gen_simulation_config(output_folder):
             "noslip_tolerance" : 1e-6,
             "viewer"           : "MuJoCo",
             "texture_repeat"   : 1,
-            "shadow_size"      : 1024,
+            "shadow_size"      : 0,
             "visual_scale"     : 1.0,
             "extent"           : 400.0
         },
@@ -325,11 +334,16 @@ def gen_simulation_config(output_folder):
                     "rho"                    : 1.0e+3,
                     "poisson_tol"            : 1.0e-4,
                     "poisson_max_cycles"     : 30,
-                    "poisson_max_mgcg_cycles": 3,
+                    "poisson_max_mgcg_cycles": 10,
+                    "poisson_precond_vcycles": 1,
+                    "poisson_warm_start"     : True,
                     "jacobi_weight"          : 0.7,
+                    "poisson_smoother"       : "jacobi",
+                    "poisson_compile"        : False,
                     "poisson_nsmoothing"     : 5,
                     "poisson_verbose"        : False,
                     "poisson_folder"         : os.path.join(data_folder, "data"),
+                    "poisson_bc_type"        : "neumann",
                     "rho_body"               : 800.0,
                 },
                 "boundary_conditions": {

@@ -3,8 +3,8 @@ units:
   seconds: 1
   kilograms: 1
 runtime:
-  n_iterations: 55001
-  buffer_size: 55001
+  n_iterations: 5001
+  buffer_size: 5001
   play: true
   rtl: 1.0
   fast: false
@@ -49,7 +49,7 @@ extensions:
     handler_path: lilytorch.farms_examples.single_sphere_drop_coquerelle.controller.BDIMhandler
     bdim_yaml:
       solver :
-        use_gpu : True
+        use_gpu : False
         nthreads : 16
 
         Nx: 512
@@ -61,7 +61,7 @@ extensions:
         xmax: 2
         ymax: 6
 
-        convection_method : "adam-bashforth"
+        convection_method : "quick"
         dt                : 0.00001
         nt                : 150000
         nu                : 0.01
@@ -100,10 +100,13 @@ extensions:
 
       body:
         type: multi_animat
-        plotting: True
+        plotting: False
         compute_interp: False
-        plotting_meshes: True
-        n_samples: (2000, 2000)
+        plotting_meshes: False
+        save_folder: None
+        n_samples:
+        - 2000
+        - 2000
         update_maps:
           rotation: "None"
           translation:
@@ -115,7 +118,7 @@ extensions:
 
       output:
         save_path: "/data/andreaferrario/ns_data/"
-        save_frames: True
+        save_frames: False
         save_every : 1000
         vmin: -50
         vmax: 50

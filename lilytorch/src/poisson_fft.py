@@ -1,22 +1,31 @@
-"""Dimension-agnostic FFT-based Poisson solver for unbounded domains.
+r"""Dimension-agnostic FFT-based Poisson solver.
 
-Solves  nabla^2 phi = f  in free space via Green function convolution
-using zero-padded FFT.  Works in 2-D and 3-D with a single code path.
+Two boundary condition types are supported:
 
-Green function regularisations
-------------------------------
+* **free-space** (``bc_type="free"``) -- unbounded domain via Green
+  function convolution with zero-padded FFT.
+* **Neumann** (``bc_type="neumann"``) -- all-Neumann
+  (:math:`\partial p / \partial n = 0`) via the Discrete Cosine
+  Transform (DCT-II / IDCT-II).  The DCT naturally diagonalises the
+  Neumann discrete Laplacian with eigenvalues
+  :math:`\lambda_k = (2/h^2)(\cos(\pi k/N) - 1)`.  The solve is
+  simply  DCT → divide by eigenvalues → IDCT  on the original
+  N-sized grid (no data mirroring required).
+
+Green function regularisations (free-space only)
+-------------------------------------------------
 * **2-D** -- Hejlesen et al., *Appl. Math. Lett.* 2013,
   8th-order algebraic smoothing.
 * **3-D** -- Gaussian (erf) regularisation (2nd order in sigma).
 
 Usage::
 
-    # 2-D  (backward-compatible with old interface)
+    # Free-space (2-D or 3-D)
     ps = PoissonSolverFFT(x, y, bc_type="free")
     phi = ps.solve(rhs)
 
-    # 3-D
-    ps = PoissonSolverFFT(x, y, z=z)
+    # Neumann BCs (2-D or 3-D)
+    ps = PoissonSolverFFT(x, y, z=z, bc_type="neumann")
     phi = ps.solve(rhs)
 """
 
@@ -27,7 +36,14 @@ from scipy import special
 
 
 class PoissonSolverFFT:
-    """FFT-based Poisson solver for unbounded (free-space) domains."""
+    """FFT-based Poisson solver (free-space or Neumann BCs).
+
+    Supported boundary conditions
+    -----------------------------
+    * ``"free"``    -- unbounded (free-space) via Green function convolution.
+    * ``"neumann"`` -- all-Neumann (dp/dn = 0) via DCT with Neumann
+      eigenvalues.
+    """
 
     def __init__(
         self,
@@ -43,13 +59,13 @@ class PoissonSolverFFT:
         ----------
         x, y : 1-D tensors -- cell-centre coordinates
         z    : 1-D tensor or None -- cell-centre z-coordinates (3-D mode)
-        bc_type  : str -- only ``"free"`` is supported
+        bc_type  : ``"free"`` | ``"neumann"``
         overwrite : bool -- recompute even if a cached file exists
         filename  : str -- directory for caching the Green function FFT
         """
-        if bc_type != "free":
+        if bc_type not in ("free", "neumann"):
             raise ValueError(
-                f"Only bc_type='free' is supported, got '{bc_type}'"
+                f"bc_type must be 'free' or 'neumann', got '{bc_type}'"
             )
 
         self.dtype = x.dtype
@@ -78,11 +94,20 @@ class PoissonSolverFFT:
             self.nz = self.n[2]
             self.dz = self.dh[2]
 
-        # -- zero-padded work buffer (doubled in each dim) -------------
-        shape_2x = tuple(2 * ni for ni in self.n)
-        self.U = torch.zeros(shape_2x, dtype=self.dtype, device=self.device)
+        self.bc_type = bc_type
 
-        # -- cache filename --------------------------------------------
+        # -- mode-specific initialisation ------------------------------
+        if self.bc_type == "free":
+            # Doubled work buffer for zero-padded free-space convolution
+            shape_2x = tuple(2 * ni for ni in self.n)
+            self.U = torch.zeros(shape_2x, dtype=self.dtype, device=self.device)
+            self._init_free_space(filename, overwrite)
+        else:  # neumann
+            self._init_neumann()
+
+    # ------------------------------------------------------------------
+    def _init_free_space(self, filename, overwrite):
+        """Precompute (or load) the Green function FFT for free-space."""
         coords_tag = "_".join(
             f"{float(c[0])}_{float(c[-1])}" for c in self.coords
         )
@@ -92,17 +117,143 @@ class PoissonSolverFFT:
             os.makedirs(filename)
         self.save_filename = os.path.join(filename, self.name + ".pt")
 
-        # -- compute or load Green function FFT ------------------------
         if os.path.exists(self.save_filename) and not overwrite:
             self.Gfft = torch.load(self.save_filename,
-                                   map_location=self.device)
+                                   map_location=self.device,
+                                   weights_only=True)
         else:
             self.Gfft = self._compute_green_fft()
 
         print(
-            f"PoissonSolverFFT ready  ({self.ndim}D, "
+            f"PoissonSolverFFT [free-space] ready  ({self.ndim}D, "
             f"{'x'.join(str(ni) for ni in self.n)})"
         )
+
+    # ------------------------------------------------------------------
+    def _init_neumann(self):
+        r"""Precompute inverse eigenvalues for the Neumann (DCT) solver.
+
+        The DCT-II diagonalises the discrete Laplacian with Neumann BCs
+        (cell-centred grid, ghost cell = replicate).  The eigenvalues are
+
+        .. math::
+            \lambda_k^{(d)} = \frac{2}{h_d^2}
+            \left(\cos\frac{\pi k}{N_d} - 1\right),
+            \quad k = 0, 1, \ldots, N_d-1
+
+        These are N-sized (not 2N); no data mirroring is needed.
+        """
+        shape_n = tuple(self.n)
+        eig = torch.zeros(shape_n, dtype=self.dtype, device=self.device)
+
+        for d in range(self.ndim):
+            Nd = self.n[d]
+            k = torch.arange(Nd, dtype=self.dtype, device=self.device)
+            lam_d = (2.0 / self.dh[d] ** 2) * (
+                torch.cos(torch.pi * k / Nd) - 1.0
+            )
+            shape = [1] * self.ndim
+            shape[d] = Nd
+            eig = eig + lam_d.reshape(shape)
+
+        # Fix the zero mode (pressure determined up to a constant).
+        zero_idx = tuple(0 for _ in range(self.ndim))
+        eig[zero_idx] = 1.0
+        self.inv_eig = 1.0 / eig
+        self.inv_eig[zero_idx] = 0.0        # zero mean pressure
+
+        # Pre-compute the DCT/IDCT twiddle factors and permutation
+        # indices for each dimension (avoids recomputing every solve).
+        self._dct_idx     = []   # forward permutation per dim
+        self._idct_idx    = []   # inverse permutation per dim
+        self._dct_twiddle = []   # exp(-j*pi*k/(2N))  per dim
+        cdtype = (torch.complex128 if self.dtype == torch.float64
+                  else torch.complex64)
+        for d in range(self.ndim):
+            Nd = self.n[d]
+            # Forward permutation: even indices, then odd indices reversed
+            idx = torch.cat([
+                torch.arange(0, Nd, 2, device=self.device),
+                torch.arange(1, Nd, 2, device=self.device).flip(0),
+            ])
+            self._dct_idx.append(idx)
+            self._idct_idx.append(torch.argsort(idx))
+
+            k = torch.arange(Nd, dtype=self.dtype, device=self.device)
+            shape = [1] * self.ndim
+            shape[d] = Nd
+            W = torch.exp(
+                -1j * torch.pi * k.reshape(shape) / (2 * Nd)
+            ).to(cdtype)
+            self._dct_twiddle.append(W)
+
+        print(
+            f"PoissonSolverFFT [Neumann/DCT] ready  ({self.ndim}D, "
+            f"{'x'.join(str(ni) for ni in self.n)})"
+        )
+
+    # ==================================================================
+    # DCT-II / IDCT-II  (Makhoul algorithm, FFT of size N)
+    # ==================================================================
+    def _dct_1d(self, x, d):
+        r"""Type-II DCT along dimension *d* using size-N FFT.
+
+        .. math::
+            X_k = 2\sum_{n=0}^{N-1} x_n\,
+                  \cos\!\frac{\pi k(2n+1)}{2N}
+
+        Algorithm (Makhoul 1980):
+        1. Reorder *x*: even-indexed elements, then odd-indexed reversed.
+        2. FFT of the reordered vector (size N).
+        3. Multiply by twiddle :math:`2 e^{-j\pi k/(2N)}`, take real part.
+        """
+        v = x.index_select(d, self._dct_idx[d])
+        V = torch.fft.fft(v, dim=d)
+        return 2.0 * (V * self._dct_twiddle[d]).real
+
+    def _idct_1d(self, X, d):
+        r"""Inverse Type-II DCT along dimension *d*.
+
+        Recovers *x* from its DCT-II coefficients *X*:
+
+        .. math::
+            x_n = \frac{1}{N}\!\left[\frac{X_0}{2}
+                  + \sum_{k=1}^{N-1} X_k\,
+                  \cos\!\frac{\pi k(2n+1)}{2N}\right]
+
+        Algorithm:
+        1. Set :math:`C'_0 = X_0/2,\; C'_k = X_k` for :math:`k \geq 1`.
+        2. Multiply by conjugate twiddle
+           :math:`e^{-j\pi k/(2N)}`.
+        3. Forward FFT (size N), take real part.
+        4. Undo the Makhoul permutation, divide by N.
+        """
+        Nd = X.shape[d]
+        cdtype = self._dct_twiddle[d].dtype
+
+        # Halve the k=0 coefficient
+        Cp = X.clone()
+        sl = [slice(None)] * X.ndim
+        sl[d] = slice(0, 1)
+        Cp[tuple(sl)] = Cp[tuple(sl)] * 0.5
+
+        # Twiddle → FFT → real part → un-permute → scale
+        Z = Cp.to(cdtype) * self._dct_twiddle[d]   # same twiddle as forward
+        V = torch.fft.fft(Z, dim=d)
+        v = V.real
+        return v.index_select(d, self._idct_idx[d]) / Nd
+
+    def _dctn(self, x):
+        """N-dimensional DCT-II (separable, applied dim-by-dim)."""
+        for d in range(self.ndim):
+            x = self._dct_1d(x, d)
+        return x
+
+    def _idctn(self, X):
+        """N-dimensional inverse DCT-II (separable, applied dim-by-dim)."""
+        for d in range(self.ndim):
+            X = self._idct_1d(X, d)
+        return X
 
     # ==================================================================
     # Green function computation
@@ -212,7 +363,10 @@ class PoissonSolverFFT:
     # Solve
     # ==================================================================
     def solve(self, u):
-        r"""Solve  :math:`\nabla^2\varphi = u`  in free space.
+        r"""Solve  :math:`\nabla^2\varphi = u`.
+
+        Dispatches to the free-space or Neumann implementation depending
+        on :pyattr:`bc_type`.
 
         Parameters
         ----------
@@ -222,11 +376,30 @@ class PoissonSolverFFT:
         -------
         phi : tensor, same shape as *u*
         """
+        if self.bc_type == "free":
+            return self._solve_free(u)
+        return self._solve_neumann(u)
+
+    # ------------------------------------------------------------------
+    def _solve_free(self, u):
+        """Free-space solve via Green function convolution."""
         slc = tuple(slice(ni) for ni in self.n)
         self.U[slc] = u
         return torch.real(
             torch.fft.ifftn(self.Gfft * torch.fft.fftn(self.U))
         )[slc]
+
+    # ------------------------------------------------------------------
+    def _solve_neumann(self, u):
+        r"""Neumann solve via DCT.
+
+        1. :math:`\hat f = \text{DCT-II}(f)`
+        2. :math:`\hat\varphi_k = \hat f_k / \lambda_k`
+           (zero mode set to 0)
+        3. :math:`\varphi = \text{IDCT-II}(\hat\varphi)`
+        """
+        f_hat = self._dctn(u)
+        return self._idctn(f_hat * self.inv_eig)
 
     def solve_free_space(self, u):
         """Alias for :meth:`solve` (backward-compat)."""
@@ -316,5 +489,118 @@ if __name__ == "__main__":
     print(f"  Solve time: {elapsed:.4f}s")
     print(f"  Relative Linf error: {linf3:.2e}")
     print(f"  Relative L2   error: {l2_3:.2e}")
+
+    # ==================================================================
+    # ██ Neumann BC tests
+    # ==================================================================
+    # The FFT Neumann solver exactly inverts the *discrete* Laplacian
+    # (with replicate / Neumann ghost cells), NOT the continuous one.
+    # We therefore test with the discrete Laplacian of the exact solution.
+
+    def discrete_laplacian_neumann(phi, dh):
+        """Discrete Laplacian with Neumann (replicate) ghost cells."""
+        ndim = phi.ndim
+        Lh = torch.zeros_like(phi)
+        for d in range(ndim):
+            N = phi.shape[d]
+            # Build ghost-padded view along dimension d
+            # ghost[-1] = phi[0], ghost[N] = phi[N-1]  (Neumann)
+            sl_lo = [slice(None)] * ndim
+            sl_hi = [slice(None)] * ndim
+            sl_lo[d] = slice(0, 1)  # first element
+            sl_hi[d] = slice(-1, None)  # last element
+            padded = torch.cat([phi[tuple(sl_lo)], phi, phi[tuple(sl_hi)]], dim=d)
+            # Second difference
+            sl_m = [slice(None)] * ndim
+            sl_0 = [slice(None)] * ndim
+            sl_p = [slice(None)] * ndim
+            sl_m[d] = slice(0, -2)
+            sl_0[d] = slice(1, -1)
+            sl_p[d] = slice(2, None)
+            Lh = Lh + (padded[tuple(sl_m)] - 2 * padded[tuple(sl_0)]
+                       + padded[tuple(sl_p)]) / dh[d] ** 2
+        return Lh
+
+    # ------------------------------------------------------------------
+    # 2-D Neumann test
+    #   phi(x,y) = cos(pi*x/Lx)*cos(pi*y/Ly)
+    #   dp/dn = 0 on all boundaries (cosine modes satisfy this)
+    # ------------------------------------------------------------------
+    print("\n=== 2-D Neumann test ===")
+    Lx, Ly = 2.0, 3.0
+    nx_n, ny_n = 128, 128
+    hx, hy = Lx / nx_n, Ly / ny_n
+    x_n = torch.linspace(hx / 2, Lx - hx / 2, nx_n, dtype=dtype, device=device)
+    y_n = torch.linspace(hy / 2, Ly - hy / 2, ny_n, dtype=dtype, device=device)
+
+    ps_n2 = PoissonSolverFFT(x_n, y_n, bc_type="neumann")
+
+    Xn, Yn = torch.meshgrid(x_n, y_n, indexing="ij")
+    phi_exact_n2 = torch.cos(torch.pi * Xn / Lx) * torch.cos(torch.pi * Yn / Ly)
+
+    # Compute RHS as the *discrete* Laplacian of the exact solution
+    f_n2 = discrete_laplacian_neumann(phi_exact_n2, [hx, hy])
+
+    t0 = time.time()
+    phi_approx_n2 = ps_n2.solve(f_n2)
+    elapsed = time.time() - t0
+
+    # Remove mean (Neumann solution is unique up to a constant)
+    phi_approx_n2 = phi_approx_n2 - phi_approx_n2.mean()
+    phi_exact_n2  = phi_exact_n2  - phi_exact_n2.mean()
+
+    diff_n2 = torch.abs(phi_approx_n2 - phi_exact_n2)
+    scale   = phi_exact_n2.abs().max().item()
+    linf_n2 = diff_n2.max().item() / scale
+    l2_n2   = torch.sqrt((diff_n2 ** 2).mean()).item() / scale
+
+    print(f"  Solve time: {elapsed:.4f}s")
+    print(f"  Relative Linf error: {linf_n2:.2e}")
+    print(f"  Relative L2   error: {l2_n2:.2e}")
+    assert linf_n2 < 1e-10, f"2-D Neumann Linf error too large: {linf_n2:.2e}"
+    print("  PASSED")
+
+    # ------------------------------------------------------------------
+    # 3-D Neumann test
+    #   phi = cos(pi*x/Lx)*cos(2*pi*y/Ly)*cos(pi*z/Lz)
+    # ------------------------------------------------------------------
+    print("\n=== 3-D Neumann test ===")
+    Lx3, Ly3, Lz3 = 2.0, 3.0, 1.5
+    nn3 = 64
+    hx3 = Lx3 / nn3
+    hy3 = Ly3 / nn3
+    hz3 = Lz3 / nn3
+    x_n3 = torch.linspace(hx3 / 2, Lx3 - hx3 / 2, nn3, dtype=dtype, device=device)
+    y_n3 = torch.linspace(hy3 / 2, Ly3 - hy3 / 2, nn3, dtype=dtype, device=device)
+    z_n3 = torch.linspace(hz3 / 2, Lz3 - hz3 / 2, nn3, dtype=dtype, device=device)
+
+    ps_n3 = PoissonSolverFFT(x_n3, y_n3, z=z_n3, bc_type="neumann")
+
+    Xn3, Yn3, Zn3 = torch.meshgrid(x_n3, y_n3, z_n3, indexing="ij")
+    kx = torch.pi / Lx3
+    ky = 2.0 * torch.pi / Ly3
+    kz = torch.pi / Lz3
+    phi_exact_n3 = torch.cos(kx * Xn3) * torch.cos(ky * Yn3) * torch.cos(kz * Zn3)
+
+    # Discrete Laplacian with Neumann ghost cells
+    f_n3 = discrete_laplacian_neumann(phi_exact_n3, [hx3, hy3, hz3])
+
+    t0 = time.time()
+    phi_approx_n3 = ps_n3.solve(f_n3)
+    elapsed = time.time() - t0
+
+    phi_approx_n3 = phi_approx_n3 - phi_approx_n3.mean()
+    phi_exact_n3  = phi_exact_n3  - phi_exact_n3.mean()
+
+    diff_n3 = torch.abs(phi_approx_n3 - phi_exact_n3)
+    scale3  = phi_exact_n3.abs().max().item()
+    linf_n3 = diff_n3.max().item() / scale3
+    l2_n3   = torch.sqrt((diff_n3 ** 2).mean()).item() / scale3
+
+    print(f"  Solve time: {elapsed:.4f}s")
+    print(f"  Relative Linf error: {linf_n3:.2e}")
+    print(f"  Relative L2   error: {l2_n3:.2e}")
+    assert linf_n3 < 1e-10, f"3-D Neumann Linf error too large: {linf_n3:.2e}"
+    print("  PASSED")
 
     print("\nDone.")

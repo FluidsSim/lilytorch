@@ -1,5 +1,5 @@
 
-from cmath import inf
+from math import inf
 import os
 from farms_core.io.yaml import pyobject2yaml
 from farms_core.model.options import SpawnMode
@@ -46,7 +46,8 @@ ymin = -0.05*2
 ymax = 0.05*2
 
 
-density = 800.0
+density       = 800.0   # robot body density [kg/m^3]
+water_density = 1000.0  # water density [kg/m^3]
 # nu      = 500.0e-6
 nu    = 1.0e-6
 
@@ -85,8 +86,6 @@ def gen_animat_config(output_folder, index):
         link_names  = [link.name for link in model_sdf.links]
         joint_names = [joint.name for joint in model_sdf.joints if joint.type != "fixed"]
 
-
-        animat_dict = {}
 
         animat_dict = {
             "spawn": {},
@@ -202,7 +201,7 @@ def gen_arena_config(output_folder, index):
             "height"   : 0,
             "velocity" : [0, 0, 0],
             "viscosity": 1.0,
-            "density"  : density,
+            "density"  : water_density,
             "maps"     : ["", ""],
         },
         "ground_height": 0.0,
@@ -266,7 +265,7 @@ def gen_simulation_config(output_folder, index):
             "noslip_tolerance" : 1e-6,
             "viewer"           : "MuJoCo",
             "texture_repeat"   : 1,
-            "shadow_size"      : 1024,
+            "shadow_size"      : 0,
             "visual_scale"     : 10.0,
             "extent"           : 10.0
         },

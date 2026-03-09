@@ -1,12 +1,13 @@
 import os
 
+import matplotlib
+matplotlib.use("Agg")          # non-interactive backend — thread-safe, no GUI
 import matplotlib.pyplot as plt
 import matplotlib as mpl
 import numpy as np
 from scipy.interpolate import griddata
 from matplotlib import cm
 import matplotlib.colors as colors
-import matplotlib
 matplotlib.rc('font', **{"size":20})
 plt.rcParams["figure.figsize"] = (15,15)
 
@@ -361,201 +362,41 @@ def plot2D(
         if closefig:
             plt.close()
 
-def fill_gait_diagram(
-        ax,
-        gait,
-        color,
-        alpha=0.1
-):
-    ax.fill_between(gait[0], [gait[1][0],gait[1][0]], [gait[1][1],gait[1][1]], alpha=alpha, color=color)
-
-def gait_diagram(
-
-):
-    std = 0.2
-    lsw = np.array( [
-        [0.25-std, 0.25+std],
-        [0.75-std, 0.75+std]
-    ] )
-
-    dsw = np.array( [
-        [0.75-std, 0.75+std],
-        [0.25-std, 0.25+std]
-    ] )
-
-    trot1 = np.array( [
-        [0.5-std, 0.5+std],
-        [0., 0.+std]
-    ] )
-    trot2 = np.array( [
-        [0.5-std, 0.5+std],
-        [1.-std, 1]
-    ] )
-
-    bound1 = np.array( [
-        [0., 0.+std],
-        [0.5-std, 0.5+std]
-    ] )
-    bound2 = np.array( [
-        [1.-std, 1],
-        [0.5-std, 0.5+std]
-    ] )
-
-    fig, ax = plt.subplots()
-    plt.axis([0,1,0,1])
-
-    fill_gait_diagram(trot1, color='g', alpha=0.5)
-    fill_gait_diagram(trot2, color='g', alpha=0.5)
-    fill_gait_diagram(bound1, color='y', alpha=0.5)
-    fill_gait_diagram(bound2, color='y', alpha=0.5)
-
-    fill_gait_diagram(lsw, color='r', alpha=0.5)
-    fill_gait_diagram(dsw, color='b', alpha=0.5)
-    plt.xlabel("homo")
-    plt.ylabel("dia")
-
-    n=10
-    std_c=0.25
-    x=np.linspace(0,1,n)
-    ax.fill_between(x,x-0.5+std_c,x+0.5-std_c, alpha=1, color="k")
-    ax.fill_between(x,x+0.5+std_c,1, alpha=1, color="k")
-    ax.fill_between(x,0,x-0.5-std_c, alpha=1, color="k")
-    ax.set_title(r"C=0.5 $\pm$ "+str(std_c))
-
-def plot_errorbar(
-    x,
-    y,
-    err,
-    **kwargs,
-):
-
-    xlabel        = kwargs.pop('xlabel', None)
-    ylabel        = kwargs.pop('ylabel', None)
-    title         = kwargs.pop('title', None)
-    color         = kwargs.pop('color', 'k')
-    xlim          = kwargs.pop('xlim', None)
-    ylim          = kwargs.pop('ylim', None)
-    savepath      = kwargs.pop('savepath', None)
-    xticks        = kwargs.pop('xticks', None)
-    yticks        = kwargs.pop('yticks', None)
-    xticks_labels = kwargs.pop('xticks_labels', None)
-    yticks_labels = kwargs.pop('xticks_labels', None)
-    marker        = kwargs.pop('marker', 'o')
-    linestyle     = kwargs.pop('linestyle', None)
-    label         = kwargs.pop('label', None)
-    closefig      = kwargs.pop('closefig', True)
-
-    plt.grid(False)
-    if title:
-        plt.figure(title)
-    plt.xlabel(xlabel)
-    plt.ylabel(ylabel)
-    if xlim:
-        plt.xlim(xlim)
-    if ylim:
-        plt.ylim(ylim)
-    if xticks:
-        plt.xticks(xticks, labels=xticks_labels)
-    if yticks:
-        plt.yticks(yticks, labels=yticks_labels)
-
-    plt.errorbar(
-        x, y, err,
-        ecolor=color,
-        markerfacecolor=color,
-        markeredgecolor=color,
-        marker=marker,
-        linestyle=linestyle,
-        label=label
-    )
-    plt.legend()
-    # for i in range(len(x)):
-    #     plt.errorbar(x[i], y[i], err[i], ecolor=color, marker=marker, linestyle=linestyle)
-
-    if savepath:
-        plt.savefig(savepath)
-        if closefig:
-            plt.close()
-
-
-def boxplot(
-    data,
-    **kwargs,
-):
-
-    xlabel        = kwargs.pop('xlabel', None)
-    ylabel        = kwargs.pop('ylabel', None)
-    title         = kwargs.pop('title', None)
-    xlim          = kwargs.pop('xlim', None)
-    ylim          = kwargs.pop('ylim', None)
-    savepath      = kwargs.pop('savepath', None)
-    xticks        = kwargs.pop('xticks', None)
-    xticks_labels = kwargs.pop('xticks_labels', None)
-    closefig      = kwargs.pop('closefig', True)
-
-    plt.grid(False)
-    if title:
-        plt.figure(title)
-
-    plt.boxplot(
-        data,
-    )
-
-    plt.xlabel(xlabel)
-    plt.ylabel(ylabel)
-    if xlim:
-        plt.xlim(xlim)
-    if ylim:
-        plt.ylim(ylim)
-    if xticks:
-        plt.xticks(xticks, xticks_labels)
-
-    if savepath:
-        plt.savefig(savepath)
-        if closefig:
-            plt.close()
-
-def plot_urdf_positions(
-    net,
-    iteration,
-    **kwargs
-):
-    """
-    plot the urdf position and contact points of the links in 3D
-    """
-    link_positions = np.asarray(net.data.sensors.links.urdf_positions())[iteration]
-    xs=link_positions[:,0]
-    ys=link_positions[:,1]
-    zs=link_positions[:,2]
-    ax = net.fig.add_subplot(projection='3d')
-    ax.scatter(xs, ys, zs, marker="o", c="g")
-
-    for i in range(4):
-        p_c = net.data.sensors.contacts.position_all(i)[iteration]
-        print(np.asarray(p_c))
-        xc = p_c[0]
-        yc = p_c[1]
-        zc = p_c[2]
-
-        ax.scatter(xc, yc, zc, marker="o", c="k")
-        ax.set_xlim(-0.1,0.02)
-        ax.set_ylim(-0.05,0.05)
-        ax.set_zlim(-0.02,0.02)
-
-###############################################################################
-# FLUID SOLVER PLOTTING #######################################################
-###############################################################################
-
-# ---------------------------------------------------------------------------
-#   Unified field plotting  (2D / 3D)
-# ---------------------------------------------------------------------------
-
 def _save_figure(save_path, name, iteration, fmt="png"):
     """Save the current pyplot figure into *save_path/name/name_ITER.fmt*."""
     folder = f"{save_path}/{name}"
     os.makedirs(folder, exist_ok=True)
-    plt.savefig(f"{folder}/{name}_{iteration:06d}.{fmt}", bbox_inches="tight")
+    plt.savefig(
+        f"{folder}/{name}_{iteration:06d}.{fmt}",
+        bbox_inches="tight",
+        facecolor=plt.gcf().get_facecolor(),
+        edgecolor="none",
+        dpi=150,
+    )
     plt.close()
+
+
+def _vibrant_rdbu():
+    """
+    Highly saturated red–blue diverging colormap inspired by the
+    Tekinalp et al. (2024) vortex-method visualisations
+    (deep vivid blue ↔ black centre ↔ deep vivid red).
+    """
+    from matplotlib.colors import LinearSegmentedColormap
+    cdict = {
+        "red":   [(0.0, 0.05, 0.05), (0.35, 0.10, 0.10),
+                  (0.5, 0.0,  0.0),  (0.65, 0.85, 0.85),
+                  (1.0, 1.0,  1.0)],
+        "green": [(0.0, 0.20, 0.20), (0.35, 0.10, 0.10),
+                  (0.5, 0.0,  0.0),  (0.65, 0.08, 0.08),
+                  (1.0, 0.15, 0.15)],
+        "blue":  [(0.0, 1.0,  1.0),  (0.35, 0.85, 0.85),
+                  (0.5, 0.0,  0.0),  (0.65, 0.10, 0.10),
+                  (1.0, 0.05, 0.05)],
+    }
+    return LinearSegmentedColormap("vibrant_rdbu", cdict, N=512)
+
+VIBRANT_RDBU = _vibrant_rdbu()
 
 
 def plot_field_2d(
@@ -568,15 +409,21 @@ def plot_field_2d(
     vmin=None,
     vmax=None,
     bodies=None,        # list of body objects (optional, for contour overlay)
-    cmap=cm.RdBu,
+    cmap=None,
     fmt="png",
 ):
     """
     Single unified 2-D field plot.
 
     * Symmetric auto-range when *vmin*/*vmax* are ``None``.
-    * Optional body contour scatter overlay.
+    * Optional body contour scatter overlay – body is always shown even
+      when it partially or fully exits the fluid domain.
+    * Black-background aesthetic with vivid red/blue colormap inspired by
+      Tekinalp et al. (2024).
     """
+    if cmap is None:
+        cmap = VIBRANT_RDBU
+
     field_np = np.asarray(field)
 
     # ---- symmetric auto-range ----
@@ -593,10 +440,20 @@ def plot_field_2d(
     fig_w   = max(x_range * scale_f, 4)
     fig_h   = max(y_range * scale_f, 4)
 
-    plt.figure(figsize=(fig_w, fig_h))
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+
+    # ---- dark theme styling ----
+    fig.patch.set_facecolor("black")
+    ax.set_facecolor("black")
+    for spine in ax.spines.values():
+        spine.set_color("white")
+    ax.tick_params(colors="white", which="both")
+    ax.xaxis.label.set_color("white")
+    ax.yaxis.label.set_color("white")
+    ax.title.set_color("white")
 
     # ---- heatmap ----
-    plt.imshow(
+    im = ax.imshow(
         field_np.T,
         vmin=vmin, vmax=vmax,
         extent=extent,
@@ -605,27 +462,52 @@ def plot_field_2d(
         aspect="equal",
         interpolation=None,
     )
-    plt.colorbar()
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.ax.yaxis.set_tick_params(color="white")
+    plt.setp(cbar.ax.yaxis.get_ticklabels(), color="white")
+    cbar.outline.set_edgecolor("white")
 
-    # ---- body contours ----
+    # ---- body contours (always shown, even outside domain) ----
+    view_xmin, view_xmax = extent[0], extent[1]
+    view_ymin, view_ymax = extent[2], extent[3]
+
     if bodies is not None:
         for body in bodies:
             cnt = getattr(body, "cnt_update", None)
             mask = getattr(body, "mask", None)
             if cnt is not None and mask is not None:
-                plt.scatter(
-                    cnt[0][mask].cpu().numpy(),
-                    cnt[1][mask].cpu().numpy(),
-                    c="k", s=0.3,
-                )
+                bx = cnt[0][mask].cpu().numpy()
+                by = cnt[1][mask].cpu().numpy()
+                ax.scatter(bx, by, c="white", s=0.5, zorder=5,
+                           edgecolors="none", linewidths=0)
+                # expand view to include the full robot body
+                if len(bx) > 0:
+                    view_xmin = min(view_xmin, bx.min())
+                    view_xmax = max(view_xmax, bx.max())
+                if len(by) > 0:
+                    view_ymin = min(view_ymin, by.min())
+                    view_ymax = max(view_ymax, by.max())
+
                 com = getattr(body, "com_pos", None)
                 if com is not None:
-                    plt.plot(com[0].cpu().numpy(), com[1].cpu().numpy(), "ro", markersize=2)
+                    cx = com[0].cpu().numpy()
+                    cy = com[1].cpu().numpy()
+                    ax.plot(cx, cy, "o", color="#FF4040",
+                            markersize=3, zorder=6)
+                    view_xmin = min(view_xmin, float(cx))
+                    view_xmax = max(view_xmax, float(cx))
+                    view_ymin = min(view_ymin, float(cy))
+                    view_ymax = max(view_ymax, float(cy))
 
-    plt.xlabel("x [m]")
-    plt.ylabel("y [m]")
-    plt.title(name)
-    plt.axis(extent)
+    # add a small margin so the body is not glued to the plot border
+    pad_x = 0.02 * (view_xmax - view_xmin) if view_xmax > view_xmin else 0.01
+    pad_y = 0.02 * (view_ymax - view_ymin) if view_ymax > view_ymin else 0.01
+    ax.set_xlim(view_xmin - pad_x, view_xmax + pad_x)
+    ax.set_ylim(view_ymin - pad_y, view_ymax + pad_y)
+
+    ax.set_xlabel("x [m]")
+    ax.set_ylabel("y [m]")
+    ax.set_title(name)
     _save_figure(save_path, name, iteration, fmt)
 
 
@@ -645,7 +527,7 @@ def plot_field_3d_slices(
     vmax=None,
     bodies=None,
     slice_indices=None,  # dict {"xy": k, "xz": j, "yz": i}  (None → origin)
-    cmap=cm.RdBu,
+    cmap=None,
     fmt="png",
 ):
     """
@@ -701,7 +583,8 @@ def plot_field_3d(
     iso_fraction=0.15,  # threshold = iso_fraction * max(|smoothed field|)
     smooth_sigma=2.5,   # Gaussian smoothing (in grid-cells) before isosurface extraction
     crop_boundary=3,    # number of cells to crop from each domain face before rendering
-    window_size=(1920, 1080),
+    window_size=(3840, 2160),
+    image_scale=2,          # multiplier on window_size for the saved image
     fmt="png",
 ):
     """
@@ -815,25 +698,31 @@ def plot_field_3d(
         except Exception:
             return mesh   # on any error, fall back to unfiltered mesh
 
-    # ---- build scene ----
+    # ---- build scene (dark theme, Tekinalp et al. 2024 style) ----
     pl = pv.Plotter(off_screen=True, window_size=list(window_size))
-    pl.set_background("white")
+    pl.set_background("black")
+    try:
+        pl.enable_anti_aliasing("ssaa")   # screen-space AA – best quality
+    except Exception:
+        pass
 
     if threshold is not None:
         if is_bipolar:
-            # Dual isosurfaces: +threshold (red) and -threshold (blue)
+            # Dual isosurfaces: +threshold (vivid red) and -threshold (vivid blue)
             try:
                 iso_pos = _clean_iso(grid.contour([threshold], scalars=name))
                 if iso_pos.n_points > 0:
-                    pl.add_mesh(iso_pos, color="#CC3333", opacity=0.6,
-                                smooth_shading=True, label=f"+{threshold:.2e}")
+                    pl.add_mesh(iso_pos, color="#FF2020", opacity=0.75,
+                                smooth_shading=True, specular=0.5,
+                                label=f"+{threshold:.2e}")
             except Exception:
                 pass
             try:
                 iso_neg = _clean_iso(grid.contour([-threshold], scalars=name))
                 if iso_neg.n_points > 0:
-                    pl.add_mesh(iso_neg, color="#3333CC", opacity=0.6,
-                                smooth_shading=True, label=f"−{threshold:.2e}")
+                    pl.add_mesh(iso_neg, color="#1E90FF", opacity=0.75,
+                                smooth_shading=True, specular=0.5,
+                                label=f"\u2212{threshold:.2e}")
             except Exception:
                 pass
         else:
@@ -841,8 +730,8 @@ def plot_field_3d(
             try:
                 iso = _clean_iso(grid.contour([threshold], scalars=name))
                 if iso.n_points > 0:
-                    pl.add_mesh(iso, color="#E06030", opacity=0.7,
-                                smooth_shading=True,
+                    pl.add_mesh(iso, color="#FF6020", opacity=0.8,
+                                smooth_shading=True, specular=0.5,
                                 label=f"{name}={threshold:.2e}")
             except Exception:
                 pass
@@ -854,25 +743,21 @@ def plot_field_3d(
         try:
             body_surf = grid.contour([0.0], scalars="sdf")
             if body_surf.n_points > 0:
-                pl.add_mesh(body_surf, color="#888888", opacity=0.9,
-                            smooth_shading=True)
+                pl.add_mesh(body_surf, color="white", opacity=0.95,
+                            smooth_shading=True, specular=0.6)
         except Exception:
             pass
 
-    # ---- domain outline ----
-    pl.add_mesh(grid.outline(), color="gray", line_width=0.5, opacity=0.3)
+    # ---- domain outline (white tank lines) ----
+    pl.add_mesh(grid.outline(), color="white", line_width=4.0, opacity=1.0)
 
-    # ---- camera  (isometric, looking from upstream-above) ----
+    # ---- camera helpers ----
     bds = grid.bounds
     cx = (bds[0] + bds[1]) / 2
     cy = (bds[2] + bds[3]) / 2
     cz = (bds[4] + bds[5]) / 2
     Lmax = max(bds[1] - bds[0], bds[3] - bds[2], bds[5] - bds[4])
     focal = (cx, cy, cz)
-    cam_pos = (cx - 0.8 * Lmax, cy - 0.6 * Lmax, cz + 1.5 * Lmax)
-    pl.camera_position = [cam_pos, focal, (0, 0, 1)]
-    pl.camera.parallel_projection = True
-    pl.camera.parallel_scale = Lmax * 0.7
 
     # ---- text annotation with field range + threshold ----
     if threshold is not None:
@@ -888,17 +773,23 @@ def plot_field_3d(
                 info_text,
                 position="upper_right",
                 font_size=10,
-                color="black",
+                color="white",
                 shadow=True,
             )
         except Exception:
             pass
 
-    # ---- save ----
+    # ---- camera  (isometric, looking from upstream-above) ----
+    cam_pos = (cx - 0.8 * Lmax, cy - 0.6 * Lmax, cz + 1.5 * Lmax)
+    pl.camera_position = [cam_pos, focal, (0, 0, 1)]
+    pl.camera.parallel_projection = True
+    pl.camera.parallel_scale = Lmax * 0.7
+
+    # ---- save high-resolution screenshot ----
     out_dir = os.path.join(save_path, f"{name}_3d")
     os.makedirs(out_dir, exist_ok=True)
     out_path = os.path.join(out_dir, f"{name}_3d_{iteration:06d}.{fmt}")
-    pl.screenshot(out_path)
+    pl.screenshot(out_path, scale=image_scale)
     pl.close()
 
 

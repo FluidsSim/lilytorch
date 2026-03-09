@@ -173,11 +173,11 @@ def instrument_handler(handler):
                 setattr(ffs, a_mu1, mu1)
                 setattr(ffs, a_mm0, 1 - mu0)
 
-                with T("3  compute_sdf_properties (normals)"):
-                    result = comp.compute_sdf_properties(sdf_field)
-                setattr(ffs, a_nx, result[1])
-                setattr(ffs, a_ny, result[2])
-                setattr(ffs, a_nz, result[3])
+                with T("3  compute_normals"):
+                    result = comp.compute_normals(sdf_field)
+                setattr(ffs, a_nx, result[0])
+                setattr(ffs, a_ny, result[1])
+                setattr(ffs, a_nz, result[2])
 
             # ── 6. Fluid step (instrumented separately) ──────────────
             with T("4  fluid_step (total PDE)"):

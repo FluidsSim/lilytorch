@@ -1,5 +1,5 @@
 
-from cmath import inf
+from math import inf, radians, tan
 import os
 from farms_core.io.yaml import pyobject2yaml
 from farms_core.model.options import SpawnMode
@@ -16,7 +16,7 @@ bdim_handler_path = "lilytorch.integration.BDIMhandler.BDIMhandler"
 
 nthreads = 16
 use_gpu  = True
-use_bdim = False
+use_bdim = True
 headless = False  # must be False for FlowViewer (MuJoCo GUI)
 fast     = False
 
@@ -33,7 +33,7 @@ animats_pars = [
     "control_type"   : "position",
     "gains"          : [100.0, 4.0, 0],
     "spawn_mode"     : SpawnMode.FREE,
-    "pose"           : [0, 0, 0, 0, 0, 3.141592653589793],
+    "pose"           : [0, 0, 0.2, 0, 0, 3.141592653589793],
     "controller_path": "lilytorch.farms_examples._1guillasim.pd_controller.PositionController",
     "control_pars"   : {'freq': 1, 'twl': 12, 'amp': 30.0},
     },
@@ -53,10 +53,11 @@ ymax         = 0.3
 zmin         = -0.3
 zmax         = 0.3
 
-density = 800.0
+density       = 1000.0   # robot body density [kg/m^3]
+water_density = 1000.0  # water density [kg/m^3]
 nu    = 1.0e-6
 
-timestep     = 0.0005
+timestep     = 0.001
 convection_method = "quick"
 save_frames  = True
 save_every   = 200
@@ -71,14 +72,14 @@ def gen_animat_config(output_folder):
 
     for animat_i, animat_pars in enumerate(animats_pars):
 
-        model_name    = animat_pars["model_name"]
-        sdf_name      = animat_pars["sdf_name"]
+        model_name      = animat_pars["model_name"]
+        sdf_name        = animat_pars["sdf_name"]
         control_type    = animat_pars["control_type"]
         controller_path = animat_pars["controller_path"]
         control_pars    = animat_pars["control_pars"]
-        gains         = animat_pars["gains"]
-        spawn_mode    = animat_pars["spawn_mode"]
-        pose          = animat_pars["pose"]
+        gains           = animat_pars["gains"]
+        spawn_mode      = animat_pars["spawn_mode"]
+        pose            = animat_pars["pose"]
 
         sdf_file = os.path.join(sdfs_path, model_name, sdf_name)
 
@@ -92,8 +93,6 @@ def gen_animat_config(output_folder):
         drag_coefficients = [
             constant_drags for _ in range(nlinks)
         ]
-
-        animat_dict = {}
 
         animat_dict = {
             "spawn": {},
@@ -199,7 +198,8 @@ def gen_arena_config(output_folder):
                     wall_thickness=wall_thick, plotting=False)
 
     water_sdf_path = create_water_sdf(xmin, xmax, ymin, ymax,
-                                      zmin=zmin, zmax=zmax)
+                                      zmin=zmin, zmax=zmax,
+                                      water_height=zmax)
 
     arena_dict = {
        "sdf": os.path.join(sdfs_path, "pool", "sdf", "pool.sdf"),
@@ -217,10 +217,10 @@ def gen_arena_config(output_folder):
             "height"   : zmax,
             "velocity" : [0, 0, 0],
             "viscosity": 1.0,
-            "density"  : density,
+            "density"  : water_density,
             "maps"     : ["", ""],
         },
-        "ground_height": zmin - wall_thick - 0.5,
+        "ground_height": 0,
     }
     pyobject2yaml(
         os.path.join(output_folder, 'arena_config.yaml'),
@@ -281,9 +281,9 @@ def gen_simulation_config(output_folder):
             "noslip_tolerance" : 1e-6,
             "viewer"           : "MuJoCo",
             "texture_repeat"   : 1,
-            "shadow_size"      : 1024,
-            "visual_scale"     : 1.0,
-            "extent"           : 400.0
+            "shadow_size"      : 0,
+            "visual_scale"     : 10.0,
+            "extent"           : 100.0
         },
         "extensions": [
             {
@@ -329,18 +329,25 @@ def gen_simulation_config(output_folder):
                     "zmin"                   : zmin,
                     "zmax"                   : zmax,
                     "convection_method"      : convection_method,
-                    "dt"                     : 0.0001,
-                    "nt"                     : 800000,
+                    "dt"                     : timestep,
+                    "nt"                     : n_iterations+1,
                     "nu"                     : nu,
-                    "rho"                    : 1.0e+3,
+                    "rho"                    : water_density,
+                    "poisson_method"         : "multigrid",
                     "poisson_tol"            : 1.0e-4,
                     "poisson_max_cycles"     : 30,
-                    "poisson_max_mgcg_cycles": 3,
+                    "poisson_max_mgcg_cycles": 10,
+                    "poisson_precond_vcycles": 1,
+                    "poisson_warm_start"     : True,
                     "jacobi_weight"          : 0.7,
+                    "poisson_smoother"       : "jacobi",
+                    "poisson_compile"        : False,
                     "poisson_nsmoothing"     : 5,
                     "poisson_verbose"        : False,
                     "poisson_folder"         : os.path.join(data_folder, "data"),
-                    "rho_body"               : 800.0,
+                    "poisson_bc_type"        : "free",
+                    "compile_adv_diff"       : False,
+                    "rho_body"               : density,
                 },
                 "boundary_conditions": {
                     "BC_type_u"  : ["N", "N", "N", "N", "N", "N"],
@@ -398,6 +405,38 @@ def gen_simulation_config(output_folder):
 
     # ── CameraRecording MUST come last so it captures frames
     # ── after FluidExtension + FlowViewer have updated the scene ──
+
+    # Auto-compute top-down camera: orient & distance to fit the pool
+    # Include wall thickness so all four borders are visible
+    pool_dims  = [xmax - xmin, ymax - ymin, zmax - zmin]
+    wt_cam     = max(round(0.08 * min(pool_dims), 4), 0.01)  # same as gen_arena_config
+    pool_dx = (xmax - xmin) + 2 * wt_cam   # full width including walls
+    pool_dy = (ymax - ymin) + 2 * wt_cam   # full depth including walls
+    fovy = 45.0                             # MuJoCo default vertical FOV
+    half_fov = tan(radians(fovy / 2))
+
+    # In top-down (elevation=-90):
+    #   azimuth 90 → x-axis horizontal, y-axis vertical
+    #   azimuth  0 → y-axis horizontal, x-axis vertical
+    # Choose orientation so pool's long axis is along the image's wide axis.
+    if pool_dx >= pool_dy:
+        # Pool longer in x → landscape, x horizontal
+        cam_azimuth = 90
+        cam_res     = [1280, 720]
+        dim_horiz   = pool_dx
+        dim_vert    = pool_dy
+    else:
+        # Pool longer in y → portrait, y horizontal
+        cam_azimuth = 0
+        cam_res     = [720, 1280]
+        dim_horiz   = pool_dy
+        dim_vert    = pool_dx
+
+    aspect_ratio = cam_res[0] / cam_res[1]
+    d_for_vert   = (dim_vert  / 2) / half_fov
+    d_for_horiz  = (dim_horiz / 2) / (half_fov * aspect_ratio)
+    cam_distance = max(d_for_vert, d_for_horiz) * 1.30   # 30 % margin for comfort
+
     simulation_dict["extensions"] += [
         {
             "loader": "farms_mujoco.sensors.camera.CameraRecording",
@@ -406,12 +445,12 @@ def gen_simulation_config(output_folder):
                 "animat_id": None,
                 "fps": 30,
                 "speed": 1.0,
-                "azimuth": 0,
+                "azimuth": cam_azimuth,
                 "elevation": -90,
-                "distance": 2,
+                "distance": cam_distance,
                 "angular_velocity": 0,
-                "offset": [0, 0, 0.0],
-                "resolution": [1280, 720]
+                "offset": [(xmin + xmax) / 2, (ymin + ymax) / 2, (zmin + zmax) / 2],
+                "resolution": cam_res
             }
         }
     ]

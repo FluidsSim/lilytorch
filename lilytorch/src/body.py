@@ -3,7 +3,7 @@ import os
 import torch
 import numpy as np
 import open3d as o3d
-o3d.utility.set_verbosity_level(o3d.utility.VerbosityLevel.Error) # exclusevely show errors
+o3d.utility.set_verbosity_level(o3d.utility.VerbosityLevel.Error)  # exclusively show errors
 from scipy.interpolate import CubicSpline
 from farms_core.io.sdf import ModelSDF
 from pytorch_interpolation import RegularGridInterpolator, RegularGridInterpolatorAutomatic
@@ -65,36 +65,172 @@ class _StaggeredGrids:
             self.Xv_stag, self.Yv_stag, self.Zv_stag = torch.meshgrid(x, self.y_stag, z, indexing="ij")
             self.Xw_stag, self.Yw_stag, self.Zw_stag = torch.meshgrid(x, y, self.z_stag, indexing="ij")
 
-        # ---- flattened coordinate stacks -----------------------------
-        self.xflat = self.X.flatten()
-        self.yflat = self.Y.flatten()
-        xu_flat = self.Xu_stag.flatten()
-        yu_flat = self.Yu_stag.flatten()
-        xv_flat = self.Xv_stag.flatten()
-        yv_flat = self.Yv_stag.flatten()
+        self._ndim = ndim
 
-        if ndim == 2:
-            self.stacked_xy   = torch.stack((self.xflat, self.yflat))
-            self.stacked_xy_u = torch.stack((xu_flat, yu_flat))
-            self.stacked_xy_v = torch.stack((xv_flat, yv_flat))
-            self.stacked_xy_w = None
-            self.zflat = None
-        else:
-            self.zflat = self.Z_grid.flatten()
-            zu_flat = self.Zu_stag.flatten()
-            zv_flat = self.Zv_stag.flatten()
-            zw_flat = self.Zw_stag.flatten()
-            xw_flat = self.Xw_stag.flatten()
-            yw_flat = self.Yw_stag.flatten()
+    # ---- Lazy backward-compat properties  ----------------------------
+    # These used to be pre-allocated tensors.  They are now computed on
+    # demand so that GPU memory is not consumed permanently.  The main
+    # code paths (BDIMhandler, solver) no longer use them; they exist
+    # only for legacy farms_examples handlers.
 
-            self.stacked_xy   = torch.stack((self.xflat, self.yflat, self.zflat))
-            self.stacked_xy_u = torch.stack((xu_flat, yu_flat, zu_flat))
-            self.stacked_xy_v = torch.stack((xv_flat, yv_flat, zv_flat))
-            self.stacked_xy_w = torch.stack((xw_flat, yw_flat, zw_flat))
+    @property
+    def xflat(self):
+        return self.X.flatten()
 
-        # Shared ones vector (same for every body on this grid)
-        n_pts = int(torch.tensor(self.grid_shape).prod().item())
-        self.ones_stacked = torch.ones(n_pts, device=x.device, dtype=x.dtype)
+    @property
+    def yflat(self):
+        return self.Y.flatten()
+
+    @property
+    def zflat(self):
+        return self.Z_grid.flatten() if self.Z_grid is not None else None
+
+    @property
+    def stacked_xy(self):
+        if self._ndim == 2:
+            return torch.stack((self.X.flatten(), self.Y.flatten()))
+        return torch.stack((self.X.flatten(), self.Y.flatten(),
+                            self.Z_grid.flatten()))
+
+    @property
+    def stacked_xy_u(self):
+        if self._ndim == 2:
+            return torch.stack((self.Xu_stag.flatten(), self.Yu_stag.flatten()))
+        return torch.stack((self.Xu_stag.flatten(), self.Yu_stag.flatten(),
+                            self.Zu_stag.flatten()))
+
+    @property
+    def stacked_xy_v(self):
+        if self._ndim == 2:
+            return torch.stack((self.Xv_stag.flatten(), self.Yv_stag.flatten()))
+        return torch.stack((self.Xv_stag.flatten(), self.Yv_stag.flatten(),
+                            self.Zv_stag.flatten()))
+
+    @property
+    def stacked_xy_w(self):
+        if self.Zw_stag is None:
+            return None
+        return torch.stack((self.Xw_stag.flatten(), self.Yw_stag.flatten(),
+                            self.Zw_stag.flatten()))
+
+    @property
+    def ones_stacked(self):
+        n = 1
+        for s in self.grid_shape:
+            n *= s
+        return torch.ones(n, device=self.X.device, dtype=self.X.dtype)
+
+
+# =====================================================================
+# Rotation helpers for meshgrid-based SDF evaluation
+# =====================================================================
+# These avoid flattening + stacking + matmul, operating directly on the
+# (nx, ny) or (nx, ny, nz) meshgrid tensors with scalar broadcasting.
+
+def rotate_grid_2d(X, Y, R_T, origin):
+    """Rotate 2-D meshgrids into a body's local frame.
+
+    Parameters
+    ----------
+    X, Y : Tensor  (nx, ny) – meshgrid coordinates
+    R_T  : Tensor  (2, 2)   – **transposed** rotation matrix  (R.T)
+    origin : Tensor  (2,)   – body-frame origin (URDF position)
+
+    Returns
+    -------
+    px, py : Tensor  (nx, ny) – coordinates in the body-local frame
+    """
+    dx = X - origin[0]
+    dy = Y - origin[1]
+    px = R_T[0, 0] * dx + R_T[0, 1] * dy
+    py = R_T[1, 0] * dx + R_T[1, 1] * dy
+    return px, py
+
+
+def rotate_grid_3d(X, Y, Z, R_T, origin):
+    """Rotate 3-D meshgrids into a body's local frame.
+
+    Parameters
+    ----------
+    X, Y, Z : Tensor  (nx, ny, nz) – meshgrid coordinates
+    R_T     : Tensor  (3, 3)       – **transposed** rotation matrix  (R.T)
+    origin  : Tensor  (3,)         – body-frame origin (URDF position)
+
+    Returns
+    -------
+    px, py, pz : Tensor  (nx, ny, nz) – coordinates in the body-local frame
+    """
+    dx = X - origin[0]
+    dy = Y - origin[1]
+    dz = Z - origin[2]
+    px = R_T[0, 0] * dx + R_T[0, 1] * dy + R_T[0, 2] * dz
+    py = R_T[1, 0] * dx + R_T[1, 1] * dy + R_T[1, 2] * dz
+    pz = R_T[2, 0] * dx + R_T[2, 1] * dy + R_T[2, 2] * dz
+    return px, py, pz
+
+
+# Compiled variant – fuses the 9 element-wise ops into ~1 kernel.
+_rotate_grid_3d_compiled = torch.compile(rotate_grid_3d, mode="reduce-overhead")
+
+
+def _stagger_sdf_3d(sdf_cc):
+    """Derive staggered (MAC face) SDFs from cell-centre SDF via averaging.
+
+    Returns (sdf_u, sdf_v, sdf_w) — each the same shape as sdf_cc.
+    """
+    sdf_u = torch.empty_like(sdf_cc)
+    sdf_u[1:, :, :] = 0.5 * (sdf_cc[:-1, :, :] + sdf_cc[1:, :, :])
+    sdf_u[0,  :, :] = sdf_cc[0, :, :]
+
+    sdf_v = torch.empty_like(sdf_cc)
+    sdf_v[:, 1:, :] = 0.5 * (sdf_cc[:, :-1, :] + sdf_cc[:, 1:, :])
+    sdf_v[:,  0, :] = sdf_cc[:, 0, :]
+
+    sdf_w = torch.empty_like(sdf_cc)
+    sdf_w[:, :, 1:] = 0.5 * (sdf_cc[:, :, :-1] + sdf_cc[:, :, 1:])
+    sdf_w[:, :,  0] = sdf_cc[:, :, 0]
+    return sdf_u, sdf_v, sdf_w
+
+
+_stagger_sdf_3d_compiled = torch.compile(_stagger_sdf_3d, mode="reduce-overhead")
+
+
+def _mu_normals_batched_3d(sdf_u, sdf_v, sdf_w, sdf_cc, h, eps):
+    """Compute mu0, mu1, normals for all 4 grids (u, v, w, cc) in one pass.
+
+    Returns
+    -------
+    mu0    : (4, Nx, Ny, Nz) — order [u, v, w, cc]
+    mu1    : (4, Nx, Ny, Nz)
+    nx, ny, nz : (4, Nx, Ny, Nz) — unit normals
+    """
+    stacked = torch.stack([sdf_u, sdf_v, sdf_w, sdf_cc])  # (4, Nx, Ny, Nz)
+
+    # ---- Heaviside mu functions (batched) ----
+    deps = stacked / eps
+    s = torch.sin(torch.pi * deps)
+    c = torch.cos(torch.pi * deps)
+    mu0 = torch.where(
+        stacked <= -eps, 0,
+        torch.where(stacked >= eps, 1,
+                    0.5 * (1 + deps + s / torch.pi)))
+    mu1 = torch.where(
+        torch.abs(stacked) >= eps, 0,
+        eps * (0.25 - (0.5 * deps) ** 2
+               - (s * deps + (1 + c) / torch.pi) / (2 * torch.pi)))
+
+    # ---- Unit normals from SDF gradient (batched) ----
+    gx, gy, gz = torch.gradient(stacked, spacing=[h, h, h],
+                                dim=[1, 2, 3], edge_order=2)
+    norm = torch.sqrt(gx ** 2 + gy ** 2 + gz ** 2)
+    nx = torch.where(norm > 0, gx / norm, 0)
+    ny = torch.where(norm > 0, gy / norm, 0)
+    nz = torch.where(norm > 0, gz / norm, 0)
+    return mu0, mu1, nx, ny, nz
+
+
+_mu_normals_batched_3d_compiled = torch.compile(
+    _mu_normals_batched_3d, mode="reduce-overhead")
 
 
 # Module-level cache:  (data_ptr_x, data_ptr_y, data_ptr_z) -> _StaggeredGrids
@@ -109,7 +245,7 @@ def _get_staggered_grids(x, y, z=None) -> _StaggeredGrids:
     return _grid_cache[key]
 
 """
-Analitical SDFs
+Analytical SDFs
 """
 def circle(x,y,xt=0,yt=60,r=25):
     return torch.sqrt((x-xt)**2+(y-yt)**2)-r
@@ -205,8 +341,6 @@ def resample_contour_exact_spacing(x, y, spacing, closed=True):
     return resampled_points[:, 0], resampled_points[:, 1], s_uniform
 
 def resample_contour(x, y, spacing, closed=True):
-        # if closed:
-        #     if x[0] != x[-1] or y[0] != y[-1]:
         x = np.r_[x, x[0]]
         y = np.r_[y, y[0]]
         dx = np.diff(x)
@@ -249,18 +383,21 @@ def compute_inertias_2d(sdf_fun, inside_mask, x, y, x_g, y_g, density=1000.0):
     I_y_centroid = I_y - mass * x_g**2
     I_xy_centroid = I_xy - mass * x_g * y_g
 
+    return mass, I_x_centroid, I_y_centroid, I_xy_centroid
 
 
 
-def body_from_yaml(device, x, y, body_pars, eps=0.05, costum_update=None, starting_time=0, z=None, grids=None, **kwargs):
 
-    if costum_update is not None:
-        update_map = costum_update
+def body_from_yaml(device, x, y, body_pars, eps=0.05, custom_update=None, starting_time=0, z=None, grids=None, **kwargs):
 
-    type = body_pars["type"]
-    if type == "analytical":
+    if custom_update is not None:
+        update_map = custom_update
+
+    body_type = body_pars["type"]
+    if body_type == "analytical":
         sdf_fun = eval(body_pars["sdf"])
-        plotting=body_pars["plotting"]
+        plotting = body_pars["plotting"]
+        update_maps = body_pars["update_maps"]
         transl_strs = update_maps["translation"]
         transl = tuple(eval(s) for s in transl_strs)
         update_map = (
@@ -278,7 +415,7 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, costum_update=None, starti
             grids=grids,
         )
 
-    elif type == "composite_analytical":
+    elif body_type == "composite_analytical":
         sdf_funs = body_pars["sdf"]
         plotting=body_pars["plotting"]
         update_maps = body_pars["update_maps"]
@@ -297,7 +434,7 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, costum_update=None, starti
             grids=grids,
         )
 
-    elif type == "mesh":
+    elif body_type == "mesh":
         update_map = [None,None]
         mesh_file = body_pars["mesh_file"]
         nsamples, msamples = None, None
@@ -315,7 +452,7 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, costum_update=None, starti
             grids=grids,
         )
 
-    elif type == "composite_mesh":
+    elif body_type == "composite_mesh":
         sdf_name = body_pars["sdf_name"]
         sdf_folder = body_pars["sdf_folder"]
         nsamples, msamples = None, None
@@ -327,7 +464,7 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, costum_update=None, starti
         return CompositeBodyMesh(
             device, x, y,
             sdf_folder, sdf_name,
-            costum_update,
+            custom_update,
             eps             = eps,
             compute_interp  = compute_interp,
             nsamples        = nsamples,
@@ -341,7 +478,7 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, costum_update=None, starti
             **kwargs
         )
 
-    elif type == "multi_animat":
+    elif body_type == "multi_animat":
 
         nsamples, msamples = None, None
         if "n_samples" in body_pars and body_pars["n_samples"] is not None:
@@ -366,7 +503,7 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, costum_update=None, starti
         )
 
 
-    elif type == "fish_analytical":
+    elif body_type == "fish_analytical":
         control_pars = body_pars["control"]
         return BodyFishAnalytical(
             device, x, y,
@@ -379,7 +516,7 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, costum_update=None, starti
             grids=grids,
         )
 
-    elif type == "fish_experimental":
+    elif body_type == "fish_experimental":
         control_pars = body_pars["control"]
         return BodyFishExperimental(
             device, x, y,
@@ -402,7 +539,7 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, costum_update=None, starti
             grids           = grids,
         )
 
-    elif type == "composite_segment_body":
+    elif body_type == "composite_segment_body":
         sdf_name = body_pars["sdf_name"]
         sdf_folder = body_pars["sdf_folder"]
         return CompositeSegmentBody(
@@ -515,8 +652,17 @@ class COMPOSITEmesh2sdf():
             self.sdfs.append(sdf)
 
     def transform_3d(self, quat_list=[], center_list=[], pos_list=[]):
-        for i, (quat, center, pop) in enumerate(zip(quat_list, center_list, pos_list)):
-            self.sdf[i].transform_3d()
+        """Apply quaternion rotations and translations to each link mesh.
+
+        .. note::
+           Not yet implemented — the underlying ``mesh2sdf`` class does not
+           expose a ``transform_3d`` method.  Add the required mesh
+           transformation logic to ``mesh2sdf`` first.
+        """
+        raise NotImplementedError(
+            "COMPOSITEmesh2sdf.transform_3d requires mesh2sdf.transform_3d "
+            "which has not been implemented yet."
+        )
 
 
     def __call__(self, points_in_object_frame: np.array):
@@ -524,10 +670,7 @@ class COMPOSITEmesh2sdf():
         sdfv = []
         sdfg = []
         for i, sdf in enumerate(self.sdfs):
-            # B x N for v and B x N x 3 for g
             v, g = sdf(points_in_object_frame)
-            # # need to transform the gradient back to the object frame
-            # g = self.link_frame_to_obj_frame[i].transform_normals(g)
             sdfv.append(v)
             sdfg.append(g)
         return sdfv, sdfg
@@ -601,21 +744,13 @@ class Body:
             self.Yw_stag = g.Yw_stag
             self.Zw_stag = g.Zw_stag
 
-        # ---- flattened coordinate stacks (shared) ----------------------
-        self.xflat = g.xflat
-        self.yflat = g.yflat
-        self.stacked_xy   = g.stacked_xy
-        self.stacked_xy_u = g.stacked_xy_u
-        self.stacked_xy_v = g.stacked_xy_v
+        # ---- reference to shared grids (for lazy properties) ----------
+        self._grids = g
 
-        if self.ndim == 3:
-            self.zflat = g.zflat
-            self.stacked_xy_w = g.stacked_xy_w
-
-        self.ones_stacked = g.ones_stacked  # shared across all bodies
-
-        # ---- body velocity fields / SDF --------------------------------
-        self.sdf    = torch.zeros(self.grid_shape, device=self.device, dtype=self.dtype)
+        # ---- body velocity fields --------------------------------
+        # NOTE: self.sdf is NOT pre-allocated here; every subclass
+        # (BodyAnalytical, BodyMesh, etc.) sets it to a callable or
+        # interpolator before it is ever read.
         self.body_u = torch.zeros(self.grid_shape, device=self.device, dtype=self.dtype)
         self.body_v = torch.zeros(self.grid_shape, device=self.device, dtype=self.dtype)
         if self.ndim == 3:
@@ -623,14 +758,51 @@ class Body:
 
         self.rad_conv   = (torch.pi / 180)
 
+    # ---- lazy property delegates (computed on demand) ----------------
+    # These forward to the _StaggeredGrids lazy properties so that
+    # legacy code doing  body.stacked_xy  still works without
+    # permanently consuming GPU memory.
 
-    def compute_sdf_properties(self, sdf_val):
-        """Compute gradient and curvature of an SDF field (2-D or 3-D).
+    @property
+    def xflat(self):
+        return self._grids.xflat
+
+    @property
+    def yflat(self):
+        return self._grids.yflat
+
+    @property
+    def zflat(self):
+        return self._grids.zflat
+
+    @property
+    def stacked_xy(self):
+        return self._grids.stacked_xy
+
+    @property
+    def stacked_xy_u(self):
+        return self._grids.stacked_xy_u
+
+    @property
+    def stacked_xy_v(self):
+        return self._grids.stacked_xy_v
+
+    @property
+    def stacked_xy_w(self):
+        return self._grids.stacked_xy_w
+
+    @property
+    def ones_stacked(self):
+        return self._grids.ones_stacked
+
+
+    def compute_normals(self, sdf_val):
+        """Compute unit normals from an SDF field (2-D or 3-D).
 
         Returns
         -------
-        2-D: (sdf_val, gradx, grady, curvature)
-        3-D: (sdf_val, gradx, grady, gradz, curvature)
+        2-D: (nx, ny)
+        3-D: (nx, ny, nz)
         """
         ndim = sdf_val.ndim
         spacing = [self.h] * ndim
@@ -638,40 +810,61 @@ class Body:
         grads = torch.gradient(sdf_val, spacing=spacing, edge_order=2)
         norm = torch.sqrt(sum(g ** 2 for g in grads))
 
-        if ndim == 2:
-            gradx, grady = grads
-            # 2-D curvature:  κ = (φ_yy φ_x² − 2φ_xy φ_x φ_y + φ_xx φ_y²) / |∇φ|³
-            numerator = (
-                (grady ** 2) * torch.gradient(gradx, spacing=self.h, axis=0, edge_order=2)[0]
-                + (gradx ** 2) * torch.gradient(grady, spacing=self.h, axis=1, edge_order=2)[0]
-                - 2 * gradx * grady * torch.gradient(grady, spacing=self.h, axis=0)[0]
-            )
-            denominator = norm ** 3
-            curvature = torch.where(denominator > 0, numerator / denominator, 0)
+        normals = tuple(
+            torch.where(norm > 0, g / norm, 0) for g in grads
+        )
+        return normals
 
-            # normalise
-            gradx = torch.where(norm > 0, gradx / norm, 0)
-            grady = torch.where(norm > 0, grady / norm, 0)
-            return (sdf_val, gradx, grady, curvature)
+    def compute_normals_3d_batched(self, sdf_vals_4):
+        """Compute unit normals for 4 stacked SDF grids in one pass.
 
-        else:  # 3-D
-            gradx, grady, gradz = grads
-            # 3-D mean curvature via div(∇φ/|∇φ|)
-            # κ = div(n)  where n = ∇φ/|∇φ|
-            nx = torch.where(norm > 0, gradx / norm, 0)
-            ny = torch.where(norm > 0, grady / norm, 0)
-            nz = torch.where(norm > 0, gradz / norm, 0)
-            curvature = (
-                torch.gradient(nx, spacing=self.h, axis=0, edge_order=2)[0]
-                + torch.gradient(ny, spacing=self.h, axis=1, edge_order=2)[0]
-                + torch.gradient(nz, spacing=self.h, axis=2, edge_order=2)[0]
-            )
+        Parameters
+        ----------
+        sdf_vals_4 : (4, Nx, Ny, Nz) tensor — the p/u/v/w SDF fields stacked
+                     along dimension 0.
 
-            # normalise
-            gradx = torch.where(norm > 0, gradx / norm, 0)
-            grady = torch.where(norm > 0, grady / norm, 0)
-            gradz = torch.where(norm > 0, gradz / norm, 0)
-            return (sdf_val, gradx, grady, gradz, curvature)
+        Returns
+        -------
+        (nx, ny, nz) : each (4, Nx, Ny, Nz) — batched unit normals.
+        """
+        h = self.h
+        gx, gy, gz = torch.gradient(sdf_vals_4, spacing=[h, h, h],
+                                     dim=[1, 2, 3], edge_order=2)
+        norm = torch.sqrt(gx**2 + gy**2 + gz**2)
+        nx = torch.where(norm > 0, gx / norm, 0)
+        ny = torch.where(norm > 0, gy / norm, 0)
+        nz = torch.where(norm > 0, gz / norm, 0)
+        return (nx, ny, nz)
+
+    def mu_funcs_batched(self, d):
+        """Heaviside mu_0 and mu_1 — works on any shape (including batched).
+
+        Narrow-band optimised: sin/cos are only evaluated where |d| < eps,
+        which is typically < 5 % of the grid, giving a large speedup.
+
+        Parameters
+        ----------
+        d : tensor of any shape (e.g. (3, Nx, Ny) or (4, Nx, Ny, Nz)).
+
+        Returns
+        -------
+        (mu_0, mu_1) : tensors with the same shape as d.
+        """
+        eps = self.eps
+        # Pre-fill: 0 inside body (d<0), 1 in fluid (d>=0);
+        # band values will be overwritten below.
+        mu_0 = (d >= 0).to(d.dtype)
+        mu_1 = torch.zeros_like(d)
+
+        band = (d > -eps) & (d < eps)
+        d_b  = d[band]
+        deps = d_b / eps
+        s = torch.sin(torch.pi * deps)
+        c = torch.cos(torch.pi * deps)
+        mu_0[band] = 0.5 * (1 + deps + s / torch.pi)
+        mu_1[band] = eps * (0.25 - (0.5 * deps)**2
+                            - (s * deps + (1 + c) / torch.pi) / (2 * torch.pi))
+        return (mu_0, mu_1)
 
     def phi(self,d):
         # return 0.5+0.5*torch.cos(torch.pi*d.clamp(-1,1))
@@ -683,27 +876,20 @@ class Body:
 
 
     def mu_funcs(self, d):
-        deps=d/self.eps
-        s=torch.sin(torch.pi*deps)
-        c=torch.cos(torch.pi*deps)
-        mu_0_eps = torch.where(
-            d<=-self.eps,
-            0,
-            torch.where(
-                d>=self.eps,
-                1,
-                0.5*( 1 + deps + s/torch.pi )
-            )
-        )
-        mu_1_eps = torch.where(
-            torch.abs(d)>=self.eps,
-            0,
-            self.eps*( 0.25 - (0.5*deps)**2 - ( s*deps+(1+c)/torch.pi )/(2*torch.pi) )
-        )
-        return (mu_0_eps, mu_1_eps)
+        """Narrow-band optimised: sin/cos only where |d| < eps."""
+        eps = self.eps
+        mu_0 = (d >= 0).to(d.dtype)
+        mu_1 = torch.zeros_like(d)
 
-
-
+        band = (d > -eps) & (d < eps)
+        d_b  = d[band]
+        deps = d_b / eps
+        s = torch.sin(torch.pi * deps)
+        c = torch.cos(torch.pi * deps)
+        mu_0[band] = 0.5 * (1 + deps + s / torch.pi)
+        mu_1[band] = eps * (0.25 - (0.5 * deps)**2
+                            - (s * deps + (1 + c) / torch.pi) / (2 * torch.pi))
+        return (mu_0, mu_1)
 
 
 class BodyAnalytical(Body):
@@ -717,7 +903,6 @@ class BodyAnalytical(Body):
         self.body = self
         self.pre_update = pre_update
         self.initialize()
-        self.rad_conv = (torch.pi / 180)
 
     # ------------------------------------------------------------------
     # Initialisation
@@ -817,11 +1002,16 @@ class BodyAnalytical(Body):
     # Roto-translation
     # ------------------------------------------------------------------
     def rototranslate_points(self, t):
-        """Build rotation matrix and translation broadcast vector.
+        """Build rotation matrix and translation vector.
 
-        2-D: scalar theta  → 2×2 rotation, (2, N) translation
+        Returns
+        -------
+        transl : Tensor  (2,) or (3,) – centre-of-mass position
+        rot    : Tensor  (2,2) or (3,3) – rotation matrix
+
+        2-D: scalar theta  → 2×2 rotation
         3-D: update_theta returns (θx, θy, θz) Euler angles (deg)
-             → 3×3 rotation Rz·Ry·Rx, (3, N) translation
+             → 3×3 rotation Rz·Ry·Rx
         """
         if self.ndim == 2:
             transl = torch.tensor([
@@ -840,9 +1030,7 @@ class BodyAnalytical(Body):
             s, c = torch.sin(theta), torch.cos(theta)
             rot = torch.stack([torch.stack([c, -s]),
                                torch.stack([s, c])])
-            trans = torch.stack((transl[0] * self.ones_stacked,
-                                 transl[1] * self.ones_stacked))
-            return (trans, rot)
+            return (transl, rot)
 
         else:  # 3-D
             transl = torch.tensor([
@@ -888,16 +1076,14 @@ class BodyAnalytical(Body):
             ])
             rot = Rz @ Ry @ Rx
 
-            trans = torch.stack([
-                transl[i] * self.ones_stacked for i in range(3)
-            ])
-            return (trans, rot)
+            return (transl, rot)
 
     # ------------------------------------------------------------------
     # Update
     # ------------------------------------------------------------------
     def update(self, t, iteration, dt=1, update_cnt=True):
-        (trans, rot) = self.rototranslate_points(t)
+        (transl, rot) = self.rototranslate_points(t)
+        R_T = rot.T
 
         # --- linear / angular velocities via autograd ------------------
         t_var = t.clone().detach().requires_grad_(True)
@@ -920,34 +1106,28 @@ class BodyAnalytical(Body):
             lin_vel_y = _safe_grad(vy, t_var)
             ang_vel = _safe_grad(w, t_var)
 
-            # SDF at cell-centres
-            translpoints = self.stacked_xy - trans
-            newpoints = rot.T @ translpoints
-            self.sdf_val = self.sdf(
-                newpoints[0].reshape(self.grid_shape),
-                newpoints[1].reshape(self.grid_shape),
-            )
+            # SDF at cell-centres (meshgrid broadcasting)
+            px, py = rotate_grid_2d(self.X, self.Y, R_T, transl)
+            self.sdf_val = self.sdf(px, py)
 
             # SDF at u-faces
-            translpoints_u = self.stacked_xy_u - trans
-            newpoints_u = rot.T @ translpoints_u
-            self.sdf_u = self.sdf(
-                newpoints_u[0].reshape(self.grid_shape),
-                newpoints_u[1].reshape(self.grid_shape),
-            )
+            px, py = rotate_grid_2d(self.Xu_stag, self.Yu_stag, R_T, transl)
+            self.sdf_u = self.sdf(px, py)
 
             # SDF at v-faces
-            translpoints_v = self.stacked_xy_v - trans
-            newpoints_v = rot.T @ translpoints_v
-            self.sdf_v = self.sdf(
-                newpoints_v[0].reshape(self.grid_shape),
-                newpoints_v[1].reshape(self.grid_shape),
-            )
+            px, py = rotate_grid_2d(self.Xv_stag, self.Yv_stag, R_T, transl)
+            self.sdf_v = self.sdf(px, py)
 
             # body velocities (staggered)
             # v = v_lin + ω × r  (2-D:  ω×r = (-ω*ry, ω*rx))
-            self.body_u = (lin_vel_x - ang_vel * translpoints_u[1]).reshape(self.grid_shape)
-            self.body_v = (lin_vel_y + ang_vel * translpoints_v[0]).reshape(self.grid_shape)
+            ry_u = self.Yu_stag - transl[1]
+            self.body_u = lin_vel_x - ang_vel * ry_u
+            rx_v = self.Xv_stag - transl[0]
+            self.body_v = lin_vel_y + ang_vel * rx_v
+
+            # Aliases so standalone BodyAnalytical works directly with solver
+            self.sdf_val_u = self.sdf_u
+            self.sdf_val_v = self.sdf_v
 
             if update_cnt:
                 self.cnt_update = rot @ self.cnt
@@ -979,33 +1159,38 @@ class BodyAnalytical(Body):
             ang_vel_y = _safe_grad(wy, t_var)
             ang_vel_z = _safe_grad(wz, t_var)
 
-            # SDF evaluation helper
-            def _eval_sdf(stacked):
-                translpoints = stacked - trans
-                newpoints = rot.T @ translpoints
-                return self.sdf(
-                    newpoints[0].reshape(self.grid_shape),
-                    newpoints[1].reshape(self.grid_shape),
-                    newpoints[2].reshape(self.grid_shape),
-                )
+            # SDF evaluation (meshgrid broadcasting, no flatten)
+            def _eval_sdf(X, Y, Z):
+                px, py, pz = rotate_grid_3d(X, Y, Z, R_T, transl)
+                return self.sdf(px, py, pz)
 
-            self.sdf_val = _eval_sdf(self.stacked_xy)
-            self.sdf_u = _eval_sdf(self.stacked_xy_u)
-            self.sdf_v = _eval_sdf(self.stacked_xy_v)
-            self.sdf_w = _eval_sdf(self.stacked_xy_w)
+            self.sdf_val = _eval_sdf(self.X, self.Y, self.Z_grid)
+            self.sdf_u = _eval_sdf(self.Xu_stag, self.Yu_stag, self.Zu_stag)
+            self.sdf_v = _eval_sdf(self.Xv_stag, self.Yv_stag, self.Zv_stag)
+            self.sdf_w = _eval_sdf(self.Xw_stag, self.Yw_stag, self.Zw_stag)
 
             # body velocities: v = v_lin + ω × r
             # ω × r = (ωy*rz - ωz*ry, ωz*rx - ωx*rz, ωx*ry - ωy*rx)
-            def _body_vel(stacked):
-                r = stacked - trans
-                bu = (lin_vel_x + ang_vel_y * r[2] - ang_vel_z * r[1]).reshape(self.grid_shape)
-                bv = (lin_vel_y + ang_vel_z * r[0] - ang_vel_x * r[2]).reshape(self.grid_shape)
-                bw = (lin_vel_z + ang_vel_x * r[1] - ang_vel_y * r[0]).reshape(self.grid_shape)
+            def _body_vel_component(Xg, Yg, Zg):
+                rx = Xg - transl[0]
+                ry = Yg - transl[1]
+                rz = Zg - transl[2]
+                bu = lin_vel_x + ang_vel_y * rz - ang_vel_z * ry
+                bv = lin_vel_y + ang_vel_z * rx - ang_vel_x * rz
+                bw = lin_vel_z + ang_vel_x * ry - ang_vel_y * rx
                 return bu, bv, bw
 
-            self.body_u, _, _ = _body_vel(self.stacked_xy_u)
-            _, self.body_v, _ = _body_vel(self.stacked_xy_v)
-            _, _, self.body_w = _body_vel(self.stacked_xy_w)
+            self.body_u, _, _ = _body_vel_component(
+                self.Xu_stag, self.Yu_stag, self.Zu_stag)
+            _, self.body_v, _ = _body_vel_component(
+                self.Xv_stag, self.Yv_stag, self.Zv_stag)
+            _, _, self.body_w = _body_vel_component(
+                self.Xw_stag, self.Yw_stag, self.Zw_stag)
+
+            # Aliases so standalone BodyAnalytical works directly with solver
+            self.sdf_val_u = self.sdf_u
+            self.sdf_val_v = self.sdf_v
+            self.sdf_val_w = self.sdf_w
 
 
 
@@ -1132,28 +1317,27 @@ class BodyFishAnalytical(Body):
         else:
             self.thk = self.thk_nonconst
 
-        self.oldpos_u = torch.zeros((self.nx,self.ny),device=self.device,dtype=self.dtype)
-        self.oldpos_v = torch.zeros((self.nx,self.ny),device=self.device,dtype=self.dtype)
+        # Staggered shifted coordinates
+        self.XC_u = self.Xu_stag - xshift
+        self.YC_u = self.Yu_stag - yshift
+        self.XC_v = self.Xv_stag - xshift
+        self.YC_v = self.Yv_stag - yshift
+
+        # Old positions on cell-centre grid
+        self.oldpos_u = torch.zeros((self.nx, self.ny), device=self.device, dtype=self.dtype)
+        self.oldpos_v = torch.zeros((self.nx, self.ny), device=self.device, dtype=self.dtype)
+
+        # Old positions on staggered grids (for staggered body-velocity FD)
+        self.oldpos_u_ustag = torch.zeros((self.nx, self.ny), device=self.device, dtype=self.dtype)
+        self.oldpos_v_vstag = torch.zeros((self.nx, self.ny), device=self.device, dtype=self.dtype)
 
         self.initialize()
 
     def envelope(self, s):
         """
-        width lower in the tail
+        Amplitude envelope — width tapers toward the tail.
+        Uses the old polynomial envelope (c1 + c2*s + c3*s^2).
         """
-
-        # NEW ENVELOPE
-        # return torch.where(
-        #     s < self.p0,
-        #     self.a0,
-        #     torch.where(
-        #         s < self.p1,
-        #         self.a0 + self.s1 * (s - self.p0),
-        #         self.a1 + self.s2 * (s - self.p1),
-        #     )
-        # )
-
-        # OLD ENVELOPE
         return self.c1+self.c2*s+self.c3*s**2
 
     def thk_nonconst(self,s):
@@ -1175,38 +1359,51 @@ class BodyFishAnalytical(Body):
         sdf = torch.sqrt((x-s)**2+y**2)
         return sdf-self.thk(s)
 
+    def _deform_y(self, XC, YC, t):
+        """Compute deformed y-coordinates on a given (XC, YC) grid."""
+        s = XC.clamp(0, self.L)
+        return YC + self.A * self.envelope(s / self.L) * torch.sin(
+            2 * torch.pi * (self.wavefrequency * s / self.L - self.f * t)
+        )
+
     def update(self, t, iteration, dt=1):
-        """
-        Update sdf properties from analytical rototranslation map
-        """
-        s = self.XC.clamp(0,self.L)
+        """Update SDF and body-velocity fields on cell-centre and staggered grids."""
+
+        # --- Cell-centre grid ---
         new_x = self.XC
-        new_y = self.YC+self.A*self.envelope(s/self.L)*torch.sin(2*torch.pi*(self.wavefrequency*s/self.L-self.f*t))
+        new_y = self._deform_y(self.XC, self.YC, t)
 
-        self.body_u=-(new_x-self.oldpos_u)/dt
-        self.body_v=-(new_y-self.oldpos_v)/dt
+        self.oldpos_u = new_x
+        self.oldpos_v = new_y
+        self.sdf_val = self.sdf_fun(new_x, new_y)
 
-        self.oldpos_u=new_x
-        self.oldpos_v=new_y
+        # --- U-staggered grid ---
+        new_x_u = self.XC_u
+        new_y_u = self._deform_y(self.XC_u, self.YC_u, t)
+        self.sdf_u = self.sdf_fun(new_x_u, new_y_u)
+        self.sdf_val_u = self.sdf_u  # alias for solver compatibility
+        self.body_u = -(new_x_u - self.oldpos_u_ustag) / dt
+        self.oldpos_u_ustag = new_x_u
 
-        self.sdf_val=self.sdf_fun(new_x,new_y)
-
-        self.sdf_vals=[self.sdf_fun(new_x,new_y)]
-
-        # return [self.compute_sdf_properties(self.sdf_fun(new_x,new_y))]
+        # --- V-staggered grid ---
+        new_y_v = self._deform_y(self.XC_v, self.YC_v, t)
+        self.sdf_v = self.sdf_fun(self.XC_v, new_y_v)
+        self.sdf_val_v = self.sdf_v  # alias for solver compatibility
+        self.body_v = -(new_y_v - self.oldpos_v_vstag) / dt
+        self.oldpos_v_vstag = new_y_v
 
     def initialize(self):
-        """
-        Initialize sdf properties at time 0
-        """
-        self.cnt        = torch.zeros((2,1),device=self.device,dtype=self.dtype)
+        """Initialize SDF properties at time 0."""
+        self.cnt        = torch.zeros((2, 1), device=self.device, dtype=self.dtype)
         self.cnt_update = self.cnt.clone().detach()
-        self.curv_coord = torch.tensor([0,1],device=self.device,dtype=self.dtype)
-        self.com_pos    = torch.tensor([[0,0]],device=self.device,dtype=self.dtype)
-        self.update(0,0)
+        self.curv_coord = torch.tensor([0, 1], device=self.device, dtype=self.dtype)
+        self.com_pos    = torch.tensor([[0, 0]], device=self.device, dtype=self.dtype)
+        self.update(0, 0)
 
-        self.body_u=torch.zeros((self.nx,self.ny),device=self.device,dtype=self.dtype)
-        self.body_v=torch.zeros((self.nx,self.ny),device=self.device,dtype=self.dtype)
+        # Zero-out initial body velocities (the first update computed
+        # spurious velocities from the zero-initialised old positions).
+        self.body_u = torch.zeros(self.grid_shape, device=self.device, dtype=self.dtype)
+        self.body_v = torch.zeros(self.grid_shape, device=self.device, dtype=self.dtype)
 
 class BodyFishExperimental(Body):
 
@@ -1234,9 +1431,7 @@ class BodyFishExperimental(Body):
         grids        = None,
     ):
         super().__init__(device, x, y, eps=eps, grids=grids)
-        """
 
-        """
         self.L               = body_length
         self.folder_name     = folder_name
         self.file_name       = file_name
@@ -1250,17 +1445,22 @@ class BodyFishExperimental(Body):
         self.total_duration  = total_duration
         self.freq_scaling    = freq_scaling
         self.filter_freqs    = filter_freqs
-        self.initial_time  = initial_time
+        self.initial_time    = initial_time
 
-        self.XC              = self.X-xshift
-        self.YC              = self.Y-yshift
+        self.XC              = self.X - xshift
+        self.YC              = self.Y - yshift
 
+        # Staggered shifted coordinates
+        self.XC_u = self.Xu_stag - xshift
+        self.YC_u = self.Yu_stag - yshift
+        self.XC_v = self.Xv_stag - xshift
+        self.YC_v = self.Yv_stag - yshift
 
         # TYTELL-LIKE
-        self.sb              = 0.07*body_length
-        self.st              = 0.95*body_length
-        self.wh              = 0.07*body_length
-        self.wt              = 0.01*body_length
+        self.sb              = 0.07 * body_length
+        self.st              = 0.95 * body_length
+        self.wh              = 0.07 * body_length
+        self.wt              = 0.01 * body_length
 
         # LIU-LIKE
         self.s1 = 0.54
@@ -1293,6 +1493,13 @@ class BodyFishExperimental(Body):
         self.points_x[:] = np.mean(self.points_x, axis=0)
 
         self.bodies = [self]
+
+        # Old positions for finite-difference body velocity
+        self.oldpos_v        = torch.zeros(self.grid_shape, device=self.device, dtype=self.dtype)
+        self.oldpos_v_vstag  = torch.zeros(self.grid_shape, device=self.device, dtype=self.dtype)
+        self.oldpos_u_ustag  = torch.zeros(self.grid_shape, device=self.device, dtype=self.dtype)
+
+        self.initialize()
 
     def thk_liu(self, s):
         """
@@ -1334,55 +1541,67 @@ class BodyFishExperimental(Body):
         return sdf-self.thk(s)
 
 
-    def update(self, t, dt=1):
-        """
-        Update sdf properties from analytical rototranslation map
-        """
-        s = self.XC.clamp(0,self.L)
-        new_x = self.XC
-
-        # Get coordinates
-        t0     = self.times[self.times<=t][-1]
-        t1     = self.times[self.times>t][0]
-        t0_ind = ( self.times == t0 )
-        t1_ind = ( self.times == t1 )
+    def _interp_y_at_time(self, t):
+        """Build a lateral-displacement interpolator for time *t*."""
+        t0 = self.times[self.times <= t][-1]
+        t1 = self.times[self.times > t][0]
+        t0_ind = (self.times == t0)
+        t1_ind = (self.times == t1)
 
         x0, x1 = self.points_x[t0_ind], self.points_x[t1_ind]
         y0, y1 = self.points_y[t0_ind], self.points_y[t1_ind]
 
-        x_coords_t : np.ndarray = x0 + (x1-x0) * (t-t0) / (t1-t0)
-        y_coords_t : np.ndarray = y0 + (y1-y0) * (t-t0) / (t1-t0)
+        x_coords_t = (x0 + (x1 - x0) * (t - t0) / (t1 - t0)).flatten()
+        y_coords_t = (y0 + (y1 - y0) * (t - t0) / (t1 - t0)).flatten()
 
-        x_coords_t = x_coords_t.flatten()
-        y_coords_t = y_coords_t.flatten()
-
-        # Get coordinates interpolation
         s_coords_t = x_coords_t / x_coords_t[-1]
-        # interp_y   = CubicSpline(s_coords_t, y_coords_t)
-        interp_y   = lambda s: np.interp(s, s_coords_t, y_coords_t)
+        return lambda s: np.interp(s, s_coords_t, y_coords_t)
 
-        # Get the new y coordinates
-        new_y = (
-            self.YC +
-            torch.tensor(
-                interp_y(s/self.L),
-                dtype  = torch.float32,
-                device = self.device
-            )
+    def _deform_y(self, XC, YC, interp_y):
+        """Compute deformed y-coordinates on a given grid using *interp_y*."""
+        s = XC.clamp(0, self.L)
+        return YC + torch.tensor(
+            interp_y(s.cpu().numpy() / self.L),
+            dtype=self.dtype,
+            device=self.device,
         )
 
-        self.body_u=0
-        self.body_v=-(new_y-self.oldpos_v)/dt
+    def update(self, t, iteration, dt=1):
+        """Update SDF and body-velocity fields on cell-centre and staggered grids."""
+        interp_y = self._interp_y_at_time(t)
 
-        self.oldpos_v=new_y
+        # --- Cell-centre grid ---
+        new_x = self.XC
+        new_y = self._deform_y(self.XC, self.YC, interp_y)
+        self.oldpos_v = new_y
+        self.sdf_val = self.sdf_fun(new_x, new_y)
 
-        return [self.compute_sdf_properties(self.sdf_fun(new_x,new_y))]
+        # --- U-staggered grid ---
+        new_x_u = self.XC_u
+        new_y_u = self._deform_y(self.XC_u, self.YC_u, interp_y)
+        self.sdf_u = self.sdf_fun(new_x_u, new_y_u)
+        self.sdf_val_u = self.sdf_u
+        self.body_u = -(new_x_u - self.oldpos_u_ustag) / dt
+        self.oldpos_u_ustag = new_x_u
+
+        # --- V-staggered grid ---
+        new_y_v = self._deform_y(self.XC_v, self.YC_v, interp_y)
+        self.sdf_v = self.sdf_fun(self.XC_v, new_y_v)
+        self.sdf_val_v = self.sdf_v
+        self.body_v = -(new_y_v - self.oldpos_v_vstag) / dt
+        self.oldpos_v_vstag = new_y_v
 
     def initialize(self):
-        """
-        Initialize sdf properties at initial time
-        """
-        return self.update(self.initial_time)
+        """Initialize SDF properties at initial time."""
+        self.cnt        = torch.zeros((2, 1), device=self.device, dtype=self.dtype)
+        self.cnt_update = self.cnt.clone().detach()
+        self.curv_coord = torch.tensor([0, 1], device=self.device, dtype=self.dtype)
+        self.com_pos    = torch.tensor([[0, 0]], device=self.device, dtype=self.dtype)
+        self.update(self.initial_time, 0)
+
+        # Zero-out initial body velocities
+        self.body_u = torch.zeros(self.grid_shape, device=self.device, dtype=self.dtype)
+        self.body_v = torch.zeros(self.grid_shape, device=self.device, dtype=self.dtype)
 
     def save_signal(self, folder_name):
         ''' Save the signal to a csv file '''
@@ -1785,7 +2004,7 @@ class BodyMesh(Body):
         self.mask = torch.arange(1, device=self.device)
         self.sign_vec = torch.ones(1, device=self.device, dtype=self.dtype)
 
-    def update(self, iteration, t, dt=1):
+    def update(self, t, iteration, dt=1):
         pass
 
     def visualize(self):
@@ -1793,7 +2012,7 @@ class BodyMesh(Body):
 
 class CompositeBodyMesh(Body):
 
-    def __init__(self, device, x, y, sdf_folder, sdf_name, costum_update, eps=0.05,
+    def __init__(self, device, x, y, sdf_folder, sdf_name, custom_update, eps=0.05,
                  compute_interp=True, nsamples=None, msamples=None, plotting=False,
                  plotting_meshes=False, suit=0.0, **kwargs):
         """Composite body built from a multi-link SDF model file."""
@@ -1833,11 +2052,11 @@ class CompositeBodyMesh(Body):
             self.bodies.append(body)
 
         self.nbodies = len(self.bodies)
-        self.costum_update = costum_update
+        self.custom_update = custom_update
         self.compute_interp = compute_interp
 
-        self.mu_funcs               = self.bodies[0].mu_funcs
-        self.compute_sdf_properties = self.bodies[0].compute_sdf_properties
+        self.mu_funcs        = self.bodies[0].mu_funcs
+        self.compute_normals = self.bodies[0].compute_normals
         gs = self.grid_shape
         self.sdf_vals   = torch.zeros((self.nbodies, *gs), device=device)
         self.sdf_vals_u = torch.zeros((self.nbodies, *gs), device=device)
@@ -1849,7 +2068,7 @@ class CompositeBodyMesh(Body):
         self.sdf_val_v = torch.zeros_like(self.X)
         self.com_pos   = torch.zeros((self.nbodies, self.ndim), device=device)
 
-        if not self.costum_update:
+        if not self.custom_update:
             self.initialize()
 
 
@@ -1857,7 +2076,7 @@ class CompositeBodyMesh(Body):
         self.update(torch.tensor(0.0, device=self.device, dtype=self.dtype), 0)
 
     def update(self, t, iteration, dt=1):
-        (angles, translations) = self.costum_update(t)
+        (angles, translations) = self.custom_update(t)
         sdf_properties = []
         for body_i, body in enumerate(self.bodies):
             sdf_properties.append(
@@ -1872,9 +2091,6 @@ class CompositeBodyMesh(Body):
                 )
             )
         self.sdf_val = torch.min(torch.stack([prop[0] for idx, prop in enumerate(sdf_properties)]),axis=0)[0]
-
-
-        # return sdf_properties
 
 
     def visualize(self):
@@ -1894,7 +2110,7 @@ class CompositeBodyMesh(Body):
         """Creates a 2D Gaussian kernel."""
         x_coord = torch.arange(size)
         x_grid = x_coord.repeat(size).view(size, size)
-        y_grid = x_grid.t()#
+        y_grid = x_grid.t()
 
         xy_grid = torch.stack([x_grid, y_grid], dim=-1).float()
 
@@ -2075,11 +2291,10 @@ class CompositeSegmentBody:
         """
         self.device          = device
         self.thk             = 0.0005
-        self.body            = Body(device,x,y,eps=eps,grids=grids)
         self.sdf_folder      = sdf_folder
         self.sdf             = ModelSDF.read(sdf_folder+sdf_name)[0]
         self.n               = len(self.sdf.links)
-        self.body            = Body(device,x,y,eps=0.05,grids=grids)
+        self.body            = Body(device,x,y,eps=eps,grids=grids)
         self.nlinks          = len(self.sdf.links)
         self.initial_poses   = torch.tensor([link.pose[:2] for link in self.sdf.links],device=device)
         self.initial_lin_vel = torch.zeros((self.initial_poses.shape[0]),2,device=device)
@@ -2151,7 +2366,6 @@ class CompositeSegmentBody:
             plt.contour(X,Y,var, colors='k', levels=[0], linestyles='-')
             cset1 = plt.contourf(X,Y, var, levels=20, cmap="Greys")
             plt.plot(pcpu[:,0],pcpu[:,1],'r',marker='o')
-            # plt.plot(p_new[:,0],p_new[:,1],'g',marker='o')
             subsample_n = 2**3
             plt.quiver(
                 X[::subsample_n,::subsample_n],
@@ -2162,613 +2376,15 @@ class CompositeSegmentBody:
                 scale=dt, scale_units='xy'
             )
 
-            # dp2=p_new[2]-p[2]
-            # plt.quiver(
-            #     p[2][0],
-            #     p[2][1],
-            #     dp2[0],
-            #     dp2[1],
-            #     color='r',
-            #     scale=dt, scale_units='xy'
-            # )
-
-
-            # # ==== plotting ====
-            # var=self.body_u.cpu()
-            # plt.figure()
-            # plt.imshow(
-            #         var.T,
-            #         extent = (
-            #             torch.min(x.cpu()), torch.max(x.cpu()),
-            #             torch.min(y.cpu()), torch.max(y.cpu())
-            #         ),
-            #         origin = "lower",
-            #         cmap = "Greys"
-            #     )
-            # plt.colorbar()
-            # plt.contour(X,Y,self.sdf.cpu(), colors='k', levels=[0], linestyles='-')
             plt.show()
 
 
-
-
-
-
-
-def test_single_mesh():
-
-    N=2**10
-
-    # mesh_file="box.obj"
-    # x=np.linspace(-1,1,N,dtype=dtype)
-    # y=np.linspace(-1,1,N,dtype=dtype)
-
-    x=torch.linspace(-0.002,0.002,N)
-    y=torch.linspace(-0.002,0.002,N)
-    mesh_file = "/data/andreaferrario/zebrafish/models/zebrafish_v1_triangulated/sdf/meshes_zebrafish/link_4.obj"
-
-    m2s = mesh2sdf(mesh_file)
-
-    m2s.visualize(wireframe=False)
-
-
-    body = BodyMesh("cpu", x, y, mesh_file, (lambda t: 0, [lambda t:0, lambda t:0]),eps=2*(x[1]-x[0]), compute_interp=False,suit=0.0)
-    sdf_val = body.initialize()[0]
-    sdf_val, du, dv, curv = body.compute_sdf_properties(sdf_val)
-
-    dtype = np.float32
-
-    # compute sdf on query points
-
-    X,Y=np.meshgrid(x,y,indexing="ij")
-    # xflat = X.flatten()
-    # yflat = Y.flatten()
-    # zflat = np.zeros_like(xflat)
-    # xflat = xflat.astype(dtype)
-    # yflat = yflat.astype(dtype)
-    # xyz   = np.stack([xflat,yflat,zflat],axis=1)
-
-    # query_pts=np.array(xyz,dtype=dtype)
-
-
-    # query_pts=np.array(list(it.product(x,y,[0.0])),dtype=dtype)
-    # sdf_val, sdf_grad=m2s(query_pts)
-
-
-    # sdf_val = sdf_val.reshape(len(x), len(y))
-    # sdf_grad = sdf_grad.reshape(len(x), len(y), 3)
-
-    # du = sdf_grad[:,:,0]
-    # dv = sdf_grad[:,:,1]
-    # norm = np.sqrt(du**2+dv**2)
-    # du/=norm
-    # dv/=norm
-
-    # zoom
-    # x=torch.linspace(-0.0004,-0.00035,N)
-    # y=torch.linspace(0.00052,0.00053,N)
-    # plotting
-    import matplotlib.pyplot as plt
-    X,Y=np.meshgrid(x,y,indexing='ij')
-    plt.figure()
-    plt.imshow(
-        sdf_val.T,
-        extent = (
-            torch.min(x.cpu()), torch.max(x.cpu()),
-            torch.min(y.cpu()), torch.max(y.cpu())
-        ),
-        origin = "lower",
-        cmap = "Greys"
-    )
-    plt.colorbar()
-    plt.contour(X,Y,sdf_val, colors='k', levels=[0], linestyles='dashed')
-    subsample_n = 2**6
-    plt.quiver(
-        X[::subsample_n,::subsample_n],
-        Y[::subsample_n,::subsample_n],
-        du[::subsample_n,::subsample_n],
-        dv[::subsample_n,::subsample_n],
-        color='g'
-    )
-    plt.savefig("mesh_body_example.pdf")
-
-
-    plt.figure()
-    plt.imshow(
-        curv.T,
-        extent = (
-            torch.min(x.cpu()), torch.max(x.cpu()),
-            torch.min(y.cpu()), torch.max(y.cpu())
-        ),
-        origin = "lower",
-        cmap = "Greys"
-    )
-    plt.colorbar()
-
-
-    plt.show()
-
-
-def test_body_interpolation():
-
-    use_gpu=True
-
-    if torch.cuda.is_available() and use_gpu:
-        print(f"Using GPU: {torch.cuda.get_device_name(0)} is available.")
-        device = torch.device("cuda")
-    else:
-        print("Using the CPU.")
-        device = torch.device("cpu")
-        torch.set_num_threads(8)
-
-
-
-    N=2**10+1
-
-    x=torch.linspace(-0.002,0.002,N)
-    y=torch.linspace(-0.002,0.002,N)
-    filename = "/data/andreaferrario/zebrafish/models/zebrafish_v1_triangulated/sdf/meshes_zebrafish/link_10.obj"
-
-    # x=torch.linspace(-60,180,N)
-    # y=torch.linspace(-60,180,N)
-    # filename = "cylinder.obj"
-
-    # x=torch.linspace(-4,4,N)
-    # y=torch.linspace(-4,4,N)
-    # filename = "box.obj"
-
-    x = x.to(device)
-    y = y.to(device)
-
-
-    N=2**10+1
-    N=2**10+1
-
-    body = BodyMesh(device, x, y, filename, (lambda t: 0, [lambda t:0, lambda t:0]),eps=2*(x[1]-x[0]))
-    d, nx, ny, curv = body.initialize()[0]
-
-    body.visualize()
-
-
-
-
-    X=body.X.cpu()
-    Y=body.Y.cpu()
-    d=d.cpu()
-    nx=nx.cpu()
-    ny=ny.cpu()
-    curv=curv.cpu()
-
-    import matplotlib.pyplot as plt
-
-    plt.figure()
-    cset1 = plt.contourf(X,Y, d, cmap="Greys")
-    plt.colorbar(cset1)
-    plt.contour(X,Y, d, colors='k', levels=[0], linestyles='dashed')
-
-    plt.contour(X,Y, d, colors='k', levels=[0], linestyles='dashed')
-    subsample_n = 2**7
-    plt.quiver(
-        X[::subsample_n,::subsample_n],
-        Y[::subsample_n,::subsample_n],
-        nx.cpu()[::subsample_n,::subsample_n],
-        ny.cpu()[::subsample_n,::subsample_n],
-        color='g'
-    )
-
-
-    # # d, nx, ny, curv = body.update_fun_from_function(box, torch.tensor(45), [100,0])
-    # d, nx, ny, curv = body.update_interp_from_rototranslation2D(torch.tensor(30),[0.005,0.00])
-    # (mu0, mu1) = body.mu_funcs(d)
-
-
-    # X=body.X.cpu()
-    # Y=body.Y.cpu()
-    # d=d.cpu()
-    # nx=nx.cpu()
-    # ny=ny.cpu()
-    # curv=curv.cpu()
-    # mu0=mu0.cpu()
-    # mu1=mu1.cpu()
-
-    # plt.figure()
-    # cset1 = plt.contourf(X,Y, d, cmap="Greys")
-    # plt.colorbar(cset1)
-    # plt.contour(X,Y, d, colors='k', levels=[0], linestyles='dashed')
-    # subsample_n = 2**7
-    # plt.quiver(
-    #     X[::subsample_n,::subsample_n],
-    #     Y[::subsample_n,::subsample_n],
-    #     nx[::subsample_n,::subsample_n],
-    #     ny[::subsample_n,::subsample_n],
-    #     color='g'
-    # )
-
-    plt.figure()
-    # cset2 = plt.contourf(X,Y,1/curv, cmap="Greys")
-    # plt.colorbar(cset2)
-    plt.contour(X,Y,d, colors='k', levels=[0], linestyles='dashed')
-    plt.imshow(
-            curv.T,
-            extent = (
-                torch.min(x.cpu()), torch.max(x.cpu()),
-                torch.min(y.cpu()), torch.max(y.cpu())
-            ),
-            origin = "lower",
-            cmap = "Greys"
-        )
-
-    # plt.figure()
-    # plt.imshow(
-    #         body.body_u.cpu(),
-    #         extent = (
-    #             torch.min(x.cpu()), torch.max(x.cpu()),
-    #             torch.min(y.cpu()), torch.max(y.cpu())
-    #         ),
-    #         origin = "lower",
-    #         cmap = "Greys"
-    #     )
-
-    plt.show()
-
-
-def test_moving_mesh():
-
-    import matplotlib.pyplot as plt
-    import math
-    from matplotlib import animation
-
-    print("Using the CPU.")
-    device = torch.device("cpu")
-    torch.set_num_threads(8)
-
-    N=2**11+1
-
-    x=torch.linspace(-300,300,N)
-    y=torch.linspace(-300,300,N)
-    x = x.to(device)
-    y = y.to(device)
-
-
-    N=2**10+1
-    sdf = lambda x,y : circle (x,y,xt=0,yt=0,r=25)
-    update = (lambda i : torch.tensor(1)*i, [lambda i : 0*math.cos(i/10),lambda i : 0*math.sin(i/10)])
-    body = BodyAnalytical(device,x,y,sdf,update,eps=2*(x[1]-x[0]))
-    d0, nx, ny, curv = body.initialize()
-
-    # x=torch.linspace(-0.01,0.01,N)
-    # y=torch.linspace(-0.01,0.01,N)
-    # filename = "/data/andreaferrario/zebrafish/models/zebrafish_v1_triangulated/sdf/meshes_zebrafish/link_15.obj"
-    # update = (lambda i : torch.tensor(10)*i, [lambda i : 0.00*math.cos(i/10),lambda i : 0.00*math.sin(i/10)])
-    # body = BodyMesh(device, x, y, filename, update)
-    # d0, nx, ny, curv = body.initialize()
-
-    fig = plt.figure()
-    im = plt.imshow(
-            d0.T,
-            extent = (
-                torch.min(x.cpu()), torch.max(x.cpu()),
-                torch.min(y.cpu()), torch.max(y.cpu())
-            ),
-            origin        = "lower",
-            cmap          = "Greys",
-            interpolation = "none"
-        )
-    ctr = plt.contour(body.X,body.Y, d0, colors='k', levels=[0], linestyles='dashed')
-
-    subsample_n = 2**7
-    sct=plt.scatter(body.X[::subsample_n,::subsample_n].flatten(),body.Y[::subsample_n,::subsample_n].flatten())
-
-    def init():
-        d, nx, ny, curv = body.initialize()
-        im.set_array(d.T)
-        ctr = plt.contour(body.X,body.Y, d, colors='k', levels=[0], linestyles='dashed')
-        ctr0 = plt.contour(body.X,body.Y, d0, colors='k', levels=[0], linestyles='dashed')
-        quiv= plt.quiver(
-            body.X[::subsample_n,::subsample_n],
-            body.Y[::subsample_n,::subsample_n],
-            body.body_u.cpu()[::subsample_n,::subsample_n],
-            body.body_v.cpu()[::subsample_n,::subsample_n],
-            color='g'
-        )
-        return [im,ctr,ctr0,quiv]
-
-
-    global X0, Y0
-    X0=body.X
-    Y0=body.Y
-    def animate(i):
-        global X0, Y0
-        d, nx, ny, curv = body.update(i)
-        im.set_array(d.T)
-        ctr = plt.contour(body.X,body.Y, d, colors='k', levels=[0], linestyles='dashed')
-        ctr0 = plt.contour(body.X,body.Y, d0, colors='k', levels=[0], linestyles='dashed')
-        quiv = plt.quiver(
-            body.oldpos_u[::subsample_n,::subsample_n],
-            body.oldpos_v[::subsample_n,::subsample_n],
-            body.body_u.cpu()[::subsample_n,::subsample_n],
-            body.body_v.cpu()[::subsample_n,::subsample_n],
-            color='g'
-        )
-
-
-        u_=body.body_u
-        v_=body.body_v
-        dt=1
-        X=body.oldpos_u #X0+u_*dt
-        Y=body.oldpos_v #Y0+v_*dt
-        sct.set_offsets(
-            torch.stack((
-                    X[::subsample_n,::subsample_n].flatten(),
-                    Y[::subsample_n,::subsample_n].flatten()
-                )
-            ).T
-        )
-        X0=X
-        Y0=Y
-
-        return [im,ctr,ctr0,sct,quiv]
-
-    animation = animation.FuncAnimation(fig, animate, init_func=init,
-                                frames=100, interval=0, blit=True)
-
-    # pause on click
-    global paused
-    paused = False
-    def toggle_pause(self, *args, **kwargs):
-        global paused
-        if paused:
-            animation.resume()
-        else:
-            animation.pause()
-        paused = not paused
-    fig.canvas.mpl_connect('button_press_event', toggle_pause)
-
-
-
-    plt.show()
-
-
-def test_body():
-
-    use_gpu=True
-
-    mesh_file = "/data/andreaferrario/lilytorch/lilytorch/_1guillasim/models/1guilla_v1/sdf/meshes/link0.obj"
-
-    if torch.cuda.is_available() and use_gpu:
-        print(f"Using GPU: {torch.cuda.get_device_name(0)} is available.")
-        device = torch.device("cuda")
-    else:
-        print("Using the CPU.")
-        device = torch.device("cpu")
-        torch.set_num_threads(8)
-
-    N=2**8
-    x=torch.linspace(-0.02,0.3,N)
-    y=torch.linspace(-0.05,0.05,N)
-    X,Y=torch.meshgrid(x,y,indexing="ij")
-
-    x = x.to(device)
-    y = y.to(device)
-
-    body = BodyMesh(device, x, y, mesh_file, (lambda t: 0, [lambda t:0, lambda t:0]), eps=2*(x[1]-x[0]), compute_interp=True, convexify=True, plotting_meshes=False)
-    body.initialize()
-    d, nx, ny, curv = body.compute_sdf_properties(body.sdf)
-    (mu0, mu1) = body.mu_funcs(d)
-
-    import matplotlib.pyplot as plt
-    import matplotlib
-
-    x=x.cpu()
-    y=y.cpu()
-    d=d.cpu()
-    nx=nx.cpu()
-    ny=ny.cpu()
-    mu0=mu0.cpu()
-    mu1=mu1.cpu()
-
-    plt.figure()
-    norm = matplotlib.colors.Normalize(vmin=d.min(), vmax=d.max())
-    cset1 = plt.contourf(X,Y,d, cmap="Greys")
-    cset2 = plt.contour(X,Y,d, colors='k', levels=[0], linestyles='dashed')
-    plt.colorbar(cset1)
-    subsample_n = 2**3
-    plt.quiver(
-        X[::subsample_n,::subsample_n],
-        Y[::subsample_n,::subsample_n],
-        nx[::subsample_n,::subsample_n],
-        ny[::subsample_n,::subsample_n],
-        color='g'
-    )
-
-    plt.figure()
-    cset1 = plt.contourf(X,Y,mu0,cmap="Greys")
-    plt.colorbar(cset1)
-
-    plt.figure()
-    cset1 = plt.contourf(X,Y,mu1,cmap="Greys")
-    plt.colorbar(cset1)
-
-    plt.figure()
-    cset1 = plt.contourf(X,Y,nx,cmap="Greys")
-    plt.colorbar(cset1)
-
-    plt.figure()
-    cset1 = plt.contourf(X,Y,ny,cmap="Greys")
-    plt.colorbar(cset1)
-
-
-
-    plt.show()
-
-
-def test_composite_mesh():
-    sdf_name = "zebrafish.sdf"
-    sdf_folder="/data/andreaferrario/zebrafish/models/zebrafish_v1_triangulated/sdf/"
-
-    m2s = COMPOSITEmesh2sdf(sdf_name, sdf_folder)
-    m2s.visualize()
-
-    dtype = np.float32
-
-    # compute sdf on query points
-    import itertools as it
-    n=2**10
-    x=np.linspace(-0.002,0.05,n,dtype=dtype)
-    y=np.linspace(-0.002,0.002,n,dtype=dtype)
-    query_pts=np.array(list(it.product(x,y,[0.0])),dtype=dtype)
-    sdf_vals, sdf_grads=m2s(query_pts)
-
-
-    import matplotlib.pyplot as plt
-    import matplotlib
-
-    # plotting
-    X,Y=np.meshgrid(x,y,indexing='ij')
-    c=1
-    for sdf_val, sdf_grad in zip(sdf_vals, sdf_grads):
-        sdf_val = sdf_val.reshape(len(x), len(y))
-        sdf_grad = sdf_grad.reshape(len(x), len(y), 3)
-
-        plt.subplot(4,5,c)
-        norm = matplotlib.colors.Normalize(vmin=sdf_val.min(), vmax=sdf_val.max())
-        cset1 = plt.contourf(X,Y,sdf_val, cmap="Greys")
-        plt.title("Link"+str(c-1))
-        # cset2 = plt.contour(X,Y,sdf_val, colors='k', levels=[0], linestyles='dashed')
-        plt.colorbar(cset1)
-        c=c+1
-    plt.show()
-
-
-def test_fish_mesh():
-    sdf_name = "zebrafish.sdf"
-    sdf_folder="/data/andreaferrario/zebrafish/models/zebrafish_v1_triangulated/sdf/"
-    device = torch.device("cpu")
-    torch.set_num_threads(8)
-
-    import matplotlib.pyplot as plt
-    n=2**10
-    x=torch.linspace(-0.002,0.05,n)
-    y=torch.linspace(-0.002,0.002,n)
-
-    composite_body=CompositeSegmentBody(device, x, y, sdf_folder, sdf_name, eps=0.05)
-
-
-def test_overlapping_bodies():
-
-    import matplotlib.pyplot as plt
-    import math
-    import matplotlib
-
-    print("Using the CPU.")
-    device = torch.device("cpu")
-    torch.set_num_threads(8)
-
-    N=2**11+1
-
-    x=torch.linspace(-100,100,N)
-    y=torch.linspace(-100,100,N)
-    x = x.to(device)
-    y = y.to(device)
-
-    body1 = BodyAnalytical(
-        device,x,y,
-        lambda x,y : circle (x,y,xt=-30,yt=0,r=30),
-        (lambda i : torch.tensor(1)*i, [lambda i : 0*math.cos(i/10),lambda i : 0*math.sin(i/10)]),
-        eps=2*(x[1]-x[0])
-    )
-    d1, _, _, c1 = body1.initialize()[0]
-    mu0_1, mu1_1 = body1.mu_funcs(d1)
-
-    body2 = BodyAnalytical(
-        device,x,y,
-        lambda x,y : circle (x,y,xt=30,yt=0,r=30),
-        (lambda i : torch.tensor(1)*i, [lambda i : 0*math.cos(i/10),lambda i : 0*math.sin(i/10)]),
-        eps=2*(x[1]-x[0])
-    )
-    d2, _, _, c2 = body2.initialize()[0]
-    mu0_2, mu1_2 = body2.mu_funcs(d2)
-
-    X=body1.X
-    Y=body1.Y
-
-    d = torch.where(body1.phi(d1)>0,1/c1,0) #torch.min(torch.stack([d1,d2]),axis=0)[0]
-
-    plt.figure()
-    plt.imshow(
-                d.T,
-                extent = (
-                    torch.min(x.cpu()), torch.max(x.cpu()),
-                    torch.min(y.cpu()), torch.max(y.cpu())
-                ),
-                origin = "lower",
-                cmap = "Greys"
-            )
-    plt.colorbar()
-    plt.show()
-
-
-def test_curvature():
-
-    N=2**10
-    x=torch.linspace(-0.001,0.001,N)
-    y=torch.linspace(-0.001,0.001,N)
-
-    # mesh_file = "/data/andreaferrario/zebrafish/models/zebrafish_v1_triangulated/sdf/meshes_zebrafish/link_10.obj"
-    # body = BodyMesh("cpu", x, y, mesh_file, (lambda t: 0, [lambda t:0, lambda t:0]),eps=2*(x[1]-x[0]),suit=0.0)
-
-    sdf = lambda x,y : circle (x,y,xt=0,yt=0,r=0.0007)
-    update = (lambda i : torch.tensor(1)*i, [lambda i : 0*math.cos(i/10),lambda i : 0*math.sin(i/10)])
-    body = BodyAnalytical("cpu",x,y,sdf,update,eps=2*(x[1]-x[0]))
-
-    sdf_val = body.initialize()[0]
-    sdf_val, du, dv, curv = body.compute_sdf_properties(sdf_val)
-    R = torch.where(curv>0,1/curv,0)
-
-
-    import matplotlib.pyplot as plt
-    X,Y=np.meshgrid(x,y,indexing='ij')
-    plt.figure()
-    plt.imshow(
-        sdf_val.T,
-        extent = (
-            torch.min(x.cpu()), torch.max(x.cpu()),
-            torch.min(y.cpu()), torch.max(y.cpu())
-        ),
-        origin = "lower",
-        cmap = "Greys"
-    )
-    plt.colorbar()
-    plt.contour(X,Y,sdf_val, colors='k', levels=[0], linestyles='dashed')
-    subsample_n = 2**6
-    plt.quiver(
-        X[::subsample_n,::subsample_n],
-        Y[::subsample_n,::subsample_n],
-        du[::subsample_n,::subsample_n],
-        dv[::subsample_n,::subsample_n],
-        color='g'
-    )
-    plt.savefig("sphere_body_example.pdf")
-
-
-    plt.figure()
-    plt.imshow(
-        R.T,
-        extent = (
-            torch.min(x.cpu()), torch.max(x.cpu()),
-            torch.min(y.cpu()), torch.max(y.cpu())
-        ),
-        origin = "lower",
-        cmap = "Greys"
-    )
-    plt.colorbar()
-
-
-    plt.show()
-
-
+# ---------------------------------------------------------------------------
+# Module-level test entry point (kept minimal; detailed tests belong in a
+# dedicated test file).
+# ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    test_body()
+    pass
 
 
 

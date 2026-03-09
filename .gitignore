@@ -34,6 +34,7 @@ data/
 build/
 logs/
 interp_data/
+interp_data_3d/
 results/
 __pycache__
 figures/

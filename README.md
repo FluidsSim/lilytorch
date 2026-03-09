@@ -201,9 +201,7 @@ python lilytorch/src/video_postprocess.py /path/to/save_path/
 
 ```bash
 # Only generate videos for selected fields
-python lilytorch/src/video_postprocess.py /path/to/run_dir --fields omega_z_3d vel_mag_3d pressure_3d
-
---fields omega_z_3d
+python lilytorch/src/video_postprocess.py /data/andreaferrario/ns_data/1guilla_self_propelled/swimming2 --fields omega_z_3d vel_mag_3d --format gif
 ```
 
 Available field names depend on the simulation (2D vs 3D). Common ones include:
