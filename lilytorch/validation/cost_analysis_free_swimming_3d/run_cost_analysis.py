@@ -46,11 +46,17 @@ parser = argparse.ArgumentParser(
 parser.add_argument("--Nx",        type=int, default=128)
 parser.add_argument("--Ny",        type=int, default=32)
 parser.add_argument("--Nz",        type=int, default=32)
-parser.add_argument("--n_steps",   type=int, default=30,
-                    help="Total steps (first --warmup are discarded)")
-parser.add_argument("--warmup",    type=int, default=10,
-                    help="Warm-up steps to discard (>=10 recommended "
-                         "when torch.compile is active)")
+parser.add_argument("--n_steps",   type=int, default=50,
+                    help="Measured steps (all are timed — compilation is "
+                         "excluded via a separate pre-compilation phase)")
+parser.add_argument("--precompile", type=int, default=30,
+                    help="Pre-compilation steps (run before any timing to "
+                         "trigger all torch.compile CUDA-graph captures; "
+                         "needs ≥ 3× the number of compiled functions)")
+parser.add_argument("--discard_first", type=int, default=3,
+                    help="Discard the first N timed steps from summary "
+                         "stats (avoids CUDA-graph settling overhead after "
+                         "deep patches are installed)")
 parser.add_argument("--save_every",type=int, default=9999)
 parser.add_argument("--device",    type=str, default="cuda",
                     choices=["cuda", "cpu"])
@@ -69,19 +75,15 @@ if args.out_dir is None:
 # ═══════════════════════════════════════════════════════════════════════
 
 class TimerBank:
-    """CUDA-synchronised timer collection with step-based warm-up."""
+    """CUDA-synchronised timer collection.  No warmup — all steps timed."""
 
-    def __init__(self, use_cuda: bool, warmup: int = 0):
+    def __init__(self, use_cuda: bool):
         self.use_cuda = use_cuda
         self._data: dict[str, list[float]] = defaultdict(list)
         self._step_count = 0
-        self._warmup = warmup
 
     @contextmanager
     def __call__(self, label: str):
-        if self._step_count < self._warmup:
-            yield
-            return
         if self.use_cuda:
             torch.cuda.synchronize()
         t0 = time.perf_counter()
@@ -92,14 +94,16 @@ class TimerBank:
 
     def new_step(self):
         self._step_count += 1
-        if self._step_count == self._warmup + 1:
-            print(f"\n  [profiler] Warm-up done ({self._warmup} steps). "
-                  f"Collecting from step {self._step_count}…\n", flush=True)
 
-    def summary(self):
-        outer_total = sum(self._data.get("TOTAL step", [1.0]))
+    def summary(self, discard_first: int = 0):
+        """Return per-label stats, optionally discarding the first N entries
+        (to exclude CUDA-graph settling overhead after deep patches)."""
+        trimmed = {}
+        for label, times in self._data.items():
+            trimmed[label] = times[discard_first:] if discard_first < len(times) else times
+        outer_total = sum(trimmed.get("TOTAL step", [1.0]))
         rows = {}
-        for label, times in sorted(self._data.items()):
+        for label, times in sorted(trimmed.items()):
             arr = np.array(times)
             rows[label] = {
                 "mean":  arr.mean(),
@@ -112,7 +116,7 @@ class TimerBank:
             }
         return rows
 
-T = TimerBank(USE_CUDA, warmup=args.warmup)
+T = TimerBank(USE_CUDA)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -148,9 +152,41 @@ def instrument_handler(handler):
     _orig_apply      = type(handler).apply_forces
     _orig_forces     = type(fs).forces_method2_3d
     _orig_plot       = type(fs).plotting_and_saving
+    _orig_step       = type(handler).step          # unmodified handler.step
+
+    # ── Pre-compilation gate ─────────────────────────────────────
+    # ── Pre-compilation gate ─────────────────────────────────────
+    # The first `precompile` steps call the ORIGINAL handler.step()
+    # without any timing.  This triggers all torch.compile CUDA-graph
+    # recordings.  Once done we flush GPU state, install the deep
+    # instrumentation patches, and switch to the timed path.
+    #
+    # IMPORTANT: during precompile we use the ORIGINAL fluid_step
+    # (not the instrumented one which expects attributes from the timed
+    # path).  Deep patches are deferred until precompile completes.
+    _precompile_count = [0]
+    _precompile_done  = [False]
 
     # ── Replacement for handler.step ─────────────────────────────
     def detailed_step(self, task, physics):
+        # ── Pre-compilation phase: run untimed original steps ────
+        if not _precompile_done[0]:
+            _precompile_count[0] += 1
+            _orig_step(self, task, physics)
+            if _precompile_count[0] >= args.precompile:
+                _precompile_done[0] = True
+                if USE_CUDA:
+                    torch.cuda.synchronize()
+                    # NOTE: do NOT call empty_cache() here — it can
+                    # invalidate the CUDA-graph memory pool recorded
+                    # during precompile by mode='reduce-overhead'.
+                _install_deep_patches()
+                print(f"\n  [profiler] Pre-compilation complete "
+                      f"({_precompile_count[0]} steps).  "
+                      f"Measuring {args.n_steps} steps…\n", flush=True)
+            return
+
+        # ── Timed phase: every step from here is measured ────────
         T.new_step()
         iteration = self.iteration
         timestep  = self.pars["solver"]["dt"]
@@ -246,11 +282,19 @@ def instrument_handler(handler):
         self.iteration += 1
 
     def outer_step(self_h, task, physics):
-        with T("TOTAL step"):
-            detailed_step(self_h, task, physics)
+        if not _precompile_done[0]:
+            detailed_step(self_h, task, physics)   # untimed precompile
+        else:
+            with T("TOTAL step"):
+                detailed_step(self_h, task, physics)
     handler.step = types.MethodType(outer_step, handler)
 
-    # ── Instrument fluid_step internals ──────────────────────────
+    # ── Deep patches (deferred until after pre-compilation) ──────
+    # These replace handler.fluid_step, Poisson internals, and SDF
+    # with timed wrappers.  They MUST NOT be active during precompile
+    # because the timed wrappers depend on attributes (m_m0_all_u etc.)
+    # that only exist after the timed `detailed_step` body runs.
+
     _orig_adv_solve = adv.solve
     _orig_set_bcs   = type(adv).set_BCs
     _orig_nd        = type(fs).normal_derivative
@@ -266,194 +310,132 @@ def instrument_handler(handler):
         _orig_jacobi     = type(poisson_mg).Jacobi
         _orig_vcycle     = type(poisson_mg)._vcycle
 
-    def detailed_fluid_step(self_h, u, v, w, p, timestep):
-        ffs = self_h.fluid_solver
+    _orig_update_3d = type(handler)._update_3d   # unbound method
 
-        # ── advection + diffusion ────────────────────────────────
-        with T("4a   advection+diffusion"):
-            (uprime, vprime, wprime) = _orig_adv_solve(u, v, w)
+    def _install_deep_patches():
+        """Install fluid_step / Poisson / SDF sub-timers after precompile."""
 
-        with T("4b   set_BCs (post-advection)"):
-            _orig_set_bcs(adv, uprime, vprime, wprime)
+        def detailed_fluid_step(self_h, u, v, w, p, timestep):
+            ffs = self_h.fluid_solver
 
-        # ── BDIM meta-equation ───────────────────────────────────
-        with T("4c   BDIM meta-equation"):
-            uprime = (
-                ffs.mu0_all_u * uprime
-                + ffs.m_m0_all_u * comp.body_u
-                + ffs.mu1_all_u * _orig_nd(ffs,
-                    uprime - comp.body_u,
-                    ffs.normal_x_u, ffs.normal_y_u, ffs.normal_z_u)
-            )
-            vprime = (
-                ffs.mu0_all_v * vprime
-                + ffs.m_m0_all_v * comp.body_v
-                + ffs.mu1_all_v * _orig_nd(ffs,
-                    vprime - comp.body_v,
-                    ffs.normal_x_v, ffs.normal_y_v, ffs.normal_z_v)
-            )
-            wprime = (
-                ffs.mu0_all_w * wprime
-                + ffs.m_m0_all_w * comp.body_w
-                + ffs.mu1_all_w * _orig_nd(ffs,
-                    wprime - comp.body_w,
-                    ffs.normal_x_w, ffs.normal_y_w, ffs.normal_z_w)
-            )
+            # ── advection + diffusion ────────────────────────────
+            with T("4a   advection+diffusion"):
+                (uprime, vprime, wprime) = _orig_adv_solve(u, v, w)
 
-        # ── divergence ───────────────────────────────────────────
-        with T("4d   divergence"):
-            ffs.div = _orig_div(ffs, uprime, vprime, wprime)
+            with T("4b   set_BCs (post-advection)"):
+                _orig_set_bcs(adv, uprime, vprime, wprime)
 
-        # ── Poisson solve ────────────────────────────────────────
-        if ffs.poisson_method == "fft":
-            coeff = timestep / self_h.rho_fluid
-            with T("4e   Poisson solve"):
-                p = _orig_poisson_fft(poisson_fft, ffs.div / coeff)
-            with T("4f   gradient (pressure)"):
-                (p_x, p_y, p_z) = _orig_grad(ffs, p)
-            with T("4g   projection (vel. correction)"):
-                u = uprime - coeff * p_x
-                v = vprime - coeff * p_y
-                w = wprime - coeff * p_z
-        else:
-            with T("4e0  Poisson MG: rho coefficients"):
-                rho_u = self_h.rho_fluid * ffs.mu0_all_u + self_h.rho_body * ffs.m_m0_all_u
-                rho_v = self_h.rho_fluid * ffs.mu0_all_v + self_h.rho_body * ffs.m_m0_all_v
-                rho_w = self_h.rho_fluid * ffs.mu0_all_w + self_h.rho_body * ffs.m_m0_all_w
-                ch = timestep / rho_u
-                cv = timestep / rho_v
-                cw = timestep / rho_w
-
-            with T("4e   Poisson solve"):
-                p, _ = _orig_poisson_mg(poisson_mg,
-                    ffs.div[1:-1, 1:-1, 1:-1],
-                    torch.zeros_like(p),
-                    (timestep / self_h.rho_body) * torch.ones_like(ffs.div),
-                    ch=ch[1:,  1:-1, 1:-1],
-                    cv=cv[1:-1, 1:,  1:-1],
-                    cw=cw[1:-1, 1:-1, 1:],
+            # ── BDIM meta-equation ───────────────────────────────
+            with T("4c   BDIM meta-equation"):
+                uprime = (
+                    ffs.mu0_all_u * uprime
+                    + ffs.m_m0_all_u * comp.body_u
+                    + ffs.mu1_all_u * _orig_nd(ffs,
+                        uprime - comp.body_u,
+                        ffs.normal_x_u, ffs.normal_y_u, ffs.normal_z_u)
+                )
+                vprime = (
+                    ffs.mu0_all_v * vprime
+                    + ffs.m_m0_all_v * comp.body_v
+                    + ffs.mu1_all_v * _orig_nd(ffs,
+                        vprime - comp.body_v,
+                        ffs.normal_x_v, ffs.normal_y_v, ffs.normal_z_v)
+                )
+                wprime = (
+                    ffs.mu0_all_w * wprime
+                    + ffs.m_m0_all_w * comp.body_w
+                    + ffs.mu1_all_w * _orig_nd(ffs,
+                        wprime - comp.body_w,
+                        ffs.normal_x_w, ffs.normal_y_w, ffs.normal_z_w)
                 )
 
-            with T("4f   gradient (pressure)"):
-                (p_x, p_y, p_z) = _orig_grad(ffs, p)
+            # ── divergence ───────────────────────────────────────
+            with T("4d   divergence"):
+                ffs.div = _orig_div(ffs, uprime, vprime, wprime)
 
-            with T("4g   projection (vel. correction)"):
-                u = uprime - ch * p_x
-                v = vprime - cv * p_y
-                w = wprime - cw * p_z
-
-        with T("4h   set_BCs (post-projection)"):
-            _orig_set_bcs(adv, u, v, w)
-
-        return (u, v, w, p)
-
-    handler.fluid_step = types.MethodType(detailed_fluid_step, handler)
-
-    # ── Instrument Poisson sub-components ────────────────────────
-    # NOTE: Sub-component timers (Jacobi, V-cycle) each insert a
-    # cuda.synchronize() before and after.  At small grids the sync
-    # overhead (~50-100 µs per call) dominates the actual kernel time,
-    # causing the profiled Poisson cost to appear 5-20× higher than
-    # reality.  We therefore ONLY instrument sub-components when the
-    # grid is large enough that the sync overhead is negligible.
-    _instrument_poisson_internals = (args.Nx * args.Ny * args.Nz) >= 500_000
-
-    if poisson_mg is not None and _instrument_poisson_internals:
-        _orig_jacobi_fn = type(poisson_mg).Jacobi
-        def timed_jacobi(self_p, *a, **kw):
-            with T("4e.i   Jacobi smoothing"):
-                return _orig_jacobi_fn(self_p, *a, **kw)
-        poisson_mg.Jacobi = types.MethodType(timed_jacobi, poisson_mg)
-
-        _orig_vcycle_fn = type(poisson_mg)._vcycle
-        _in_vcycle = [False]
-        def timed_vcycle(self_p, *a, **kw):
-            if _in_vcycle[0]:
-                return _orig_vcycle_fn(self_p, *a, **kw)
-            _in_vcycle[0] = True
-            try:
-                with T("4e.ii  V-cycle (top-level)"):
-                    return _orig_vcycle_fn(self_p, *a, **kw)
-            finally:
-                _in_vcycle[0] = False
-        poisson_mg._vcycle = types.MethodType(timed_vcycle, poisson_mg)
-
-    # ── Instrument SDF update sub-parts ──────────────────────────
-    def timed_update_detailed(self_h, t, iteration, dt=1):
-        ffs = self_h.fluid_solver
-        cmp = ffs.composite_body
-        gs  = ffs.grid_shape
-
-        with T("1a   FARMS kinematics (data gather)"):
-            from scipy.spatial.transform import Rotation
-            com_poses  = []
-            urdf_poses = []
-            Rs         = []
-            lin_vels   = []
-            ang_vels   = []
-            for exp_data in self_h.data:
-                sen = exp_data.sensors.links
-                com_poses.append(self_h.cython2numpy(sen.com_positions()[iteration, :]))
-                urdf_poses.append(self_h.cython2numpy(sen.urdf_positions()[iteration, :]))
-                Rs.append(self_h.cython2numpy(
-                    Rotation.from_quat(sen.urdf_orientations()[iteration, :]).as_matrix().astype(self_h.dtype_np)))
-                lin_vels.append(self_h.cython2numpy(sen.com_lin_velocities()[iteration, :]))
-                nlinks = len(sen.names)
-                ang_vels.append(self_h.cython2numpy(
-                    np.stack([sen.com_ang_velocity(iteration, lk) for lk in range(nlinks)])))
-
-        with T("1b   SDF eval (per-body × 4 grids)"):
-            _use_compile = getattr(ffs, '_compile_sdf', False)
-            if _use_compile:
-                from lilytorch.src.body import _rotate_grid_3d_compiled
-                _rotate_fn = _rotate_grid_3d_compiled
+            # ── Poisson solve ────────────────────────────────────
+            if ffs.poisson_method == "fft":
+                coeff = timestep / self_h.rho_fluid
+                with T("4e   Poisson solve"):
+                    p = _orig_poisson_fft(poisson_fft, ffs.div / coeff)
+                with T("4f   gradient (pressure)"):
+                    (p_x, p_y, p_z) = _orig_grad(ffs, p)
+                with T("4g   projection (vel. correction)"):
+                    u = uprime - coeff * p_x
+                    v = vprime - coeff * p_y
+                    w = wprime - coeff * p_z
             else:
-                from lilytorch.src.body import rotate_grid_3d as _rotate_fn
+                with T("4e0  Poisson MG: rho coefficients"):
+                    rho_u = self_h.rho_fluid * ffs.mu0_all_u + self_h.rho_body * ffs.m_m0_all_u
+                    rho_v = self_h.rho_fluid * ffs.mu0_all_v + self_h.rho_body * ffs.m_m0_all_v
+                    rho_w = self_h.rho_fluid * ffs.mu0_all_w + self_h.rho_body * ffs.m_m0_all_w
+                    ch = timestep / rho_u
+                    cv = timestep / rho_v
+                    cw = timestep / rho_w
 
-            for body_i, body in enumerate(cmp.bodies):
-                (animat_id, link_id) = cmp.body_ids[body_i]
-                com_pos  = com_poses[animat_id][link_id]
-                urdf_pos = urdf_poses[animat_id][link_id]
-                R        = Rs[animat_id][link_id]
-                lin_vel  = lin_vels[animat_id][link_id]
-                ang_vel  = ang_vels[animat_id][link_id]
+                with T("4e   Poisson solve"):
+                    p, _ = _orig_poisson_mg(poisson_mg,
+                        ffs.div[1:-1, 1:-1, 1:-1],
+                        torch.zeros_like(p),
+                        (timestep / self_h.rho_body) * torch.ones_like(ffs.div),
+                        ch=ch[1:,  1:-1, 1:-1],
+                        cv=cv[1:-1, 1:,  1:-1],
+                        cw=cw[1:-1, 1:-1, 1:],
+                    )
 
-                R_T = R.T
+                with T("4f   gradient (pressure)"):
+                    (p_x, p_y, p_z) = _orig_grad(ffs, p)
 
-                # ── Full-grid SDF evaluation ────────────────────
-                px, py, pz = _rotate_fn(cmp.X, cmp.Y, cmp.Z_grid,
-                                        R_T, urdf_pos)
-                sdf_cc = body.sdf(px, py, pz)
-                cmp.sdf_vals[body_i] = sdf_cc
+                with T("4g   projection (vel. correction)"):
+                    u = uprime - ch * p_x
+                    v = vprime - cv * p_y
+                    w = wprime - cw * p_z
 
-                # Staggered SDFs via averaging of CC neighbours (O(h²))
-                # (eager stagger — clone overhead from CUDA graph
-                # buffer reuse exceeds the compilation savings)
-                from lilytorch.src.body import _stagger_sdf_3d
-                sdf_u, sdf_v, sdf_w = _stagger_sdf_3d(sdf_cc)
+            with T("4h   set_BCs (post-projection)"):
+                _orig_set_bcs(adv, u, v, w)
 
-                vel_u = (lin_vel[0] + ang_vel[1] * (cmp.Zu_stag - com_pos[2]) - ang_vel[2] * (cmp.Yu_stag - com_pos[1]))
-                vel_v = (lin_vel[1] + ang_vel[2] * (cmp.Xv_stag - com_pos[0]) - ang_vel[0] * (cmp.Zv_stag - com_pos[2]))
-                vel_w = (lin_vel[2] + ang_vel[0] * (cmp.Yw_stag - com_pos[1]) - ang_vel[1] * (cmp.Xw_stag - com_pos[0]))
+            return (u, v, w, p)
 
-                if body_i == 0:
-                    cmp.sdf_val   = sdf_cc; cmp.sdf_val_u = sdf_u; cmp.body_u = vel_u
-                    cmp.sdf_val_v = sdf_v;  cmp.body_v    = vel_v
-                    cmp.sdf_val_w = sdf_w;  cmp.body_w    = vel_w
-                else:
-                    mask   = sdf_cc < cmp.sdf_val;   cmp.sdf_val   = torch.where(mask,   sdf_cc, cmp.sdf_val)
-                    mask_u = sdf_u  < cmp.sdf_val_u;  cmp.sdf_val_u = torch.where(mask_u, sdf_u,  cmp.sdf_val_u); cmp.body_u = torch.where(mask_u, vel_u, cmp.body_u)
-                    mask_v = sdf_v  < cmp.sdf_val_v;  cmp.sdf_val_v = torch.where(mask_v, sdf_v,  cmp.sdf_val_v); cmp.body_v = torch.where(mask_v, vel_v, cmp.body_v)
-                    mask_w = sdf_w  < cmp.sdf_val_w;  cmp.sdf_val_w = torch.where(mask_w, sdf_w,  cmp.sdf_val_w); cmp.body_w = torch.where(mask_w, vel_w, cmp.body_w)
+        handler.fluid_step = types.MethodType(detailed_fluid_step, handler)
 
-                cmp.com_pos[body_i] = com_pos
-                body.com_pos = com_pos
+        # ── Instrument Poisson sub-components ────────────────────
+        _instrument_poisson_internals = (args.Nx * args.Ny * args.Nz) >= 500_000
 
-    handler.update = types.MethodType(timed_update_detailed, handler)
-    fs.composite_body.update = handler.update
+        if poisson_mg is not None and _instrument_poisson_internals:
+            _orig_jacobi_fn = type(poisson_mg).Jacobi
+            def timed_jacobi(self_p, *a, **kw):
+                with T("4e.i   Jacobi smoothing"):
+                    return _orig_jacobi_fn(self_p, *a, **kw)
+            poisson_mg.Jacobi = types.MethodType(timed_jacobi, poisson_mg)
+
+            _orig_vcycle_fn = type(poisson_mg)._vcycle
+            _in_vcycle = [False]
+            def timed_vcycle(self_p, *a, **kw):
+                if _in_vcycle[0]:
+                    return _orig_vcycle_fn(self_p, *a, **kw)
+                _in_vcycle[0] = True
+                try:
+                    with T("4e.ii  V-cycle (top-level)"):
+                        return _orig_vcycle_fn(self_p, *a, **kw)
+                finally:
+                    _in_vcycle[0] = False
+            poisson_mg._vcycle = types.MethodType(timed_vcycle, poisson_mg)
+
+        # ── Instrument SDF update sub-parts ──────────────────────
+        def timed_update_detailed(self_h, t, iteration, dt=1):
+            with T("1b   SDF eval (per-body × 4 grids)"):
+                _orig_update_3d(self_h, t, iteration, dt)
+
+        handler.update = types.MethodType(timed_update_detailed, handler)
+        fs.composite_body.update = handler.update
+
+        print(f"  [profiler] Deep patches installed (fluid_step, Poisson, SDF)",
+              flush=True)
 
     print(f"  [profiler] Instrumented handler (grid {fs.grid_shape}, "
           f"device {fs.device}, poisson={fs.poisson_method})", flush=True)
+    print(f"  [profiler] Running {args.precompile} pre-compilation steps "
+          f"(untimed)…", flush=True)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -474,7 +456,9 @@ FluidExtension.initialize_episode = _patched_init_episode
 # Configure: free-swimming 1guilla (headless, fluid-only)
 # ═══════════════════════════════════════════════════════════════════════
 
-import lilytorch.farms_examples._1guillasim.gen_configs_one_free_3d as cfg
+import lilytorch.farms_examples._1guillasim.gen_configs_one_free_3d as cfg_mod
+
+cfg = cfg_mod.SimConfig()
 
 cfg.Nx           = args.Nx
 cfg.Ny           = args.Ny
@@ -493,7 +477,7 @@ cfg.xmin = 0.3 - 0.5 * _Lx;  cfg.xmax = 0.3 + 0.5 * _Lx
 cfg.ymin = -0.5 * _Ly;        cfg.ymax =  0.5 * _Ly
 cfg.zmin = -0.5 * _Lz;        cfg.zmax =  0.5 * _Lz
 
-cfg.n_iterations = args.n_steps + 1
+cfg.n_iterations = args.precompile + args.n_steps + 1
 cfg.save_every   = args.save_every
 cfg.save_frames  = False
 cfg.headless     = True
@@ -541,7 +525,7 @@ grid_N = args.Nx * args.Ny * args.Nz
 print("=" * 72)
 print("  3-D Free-Swimming 1guilla – Computational Cost Analysis")
 print(f"  Grid:   {args.Nx} × {args.Ny} × {args.Nz}  ({grid_N:,} cells)")
-print(f"  Steps:  {args.n_steps}  (warm-up: {args.warmup})")
+print(f"  Steps:  {args.n_steps} measured  (+ {args.precompile} pre-compilation)")
 print(f"  Device: {'CUDA' if USE_CUDA else 'CPU'}")
 print("=" * 72)
 
@@ -585,12 +569,16 @@ sim = run_simulation(
 os.chdir(SCRIPT_DIR)
 os.makedirs(args.out_dir, exist_ok=True)
 
-summary = T.summary()
-n_meas = max(1, T._step_count - args.warmup)
+summary = T.summary(discard_first=args.discard_first)
+n_meas = T._step_count   # all steps are measured (precompile is separate)
+n_used = n_meas - args.discard_first
+if args.discard_first > 0:
+    print(f"\n  [profiler] Discarded first {args.discard_first} timed steps "
+          f"→ using {n_used} of {n_meas} measured steps for statistics")
 
 if not summary:
     print(f"\nERROR: No measurements (step_count={T._step_count}, "
-          f"warmup={args.warmup})")
+          f"precompile={args.precompile})")
     sys.exit(1)
 
 step_mean = summary.get("TOTAL step", {}).get("mean", 0)
@@ -632,6 +620,23 @@ with open(csv_path, "w") as f:
                 f"{1e3*s['min']:.4f},{1e3*s['max']:.4f},"
                 f"{s['total']:.6f},{s['pct']:.2f},{s['count']}\n")
 print(f"\n  CSV saved → {csv_path}")
+
+# ── Save per-step raw timings (for variance diagnosis) ───────────────
+raw_path = os.path.join(args.out_dir, f"cost_perstep_{tag}.csv")
+# Build columns in consistent order (TOTAL first, then sorted sub-labels)
+raw_labels = ["TOTAL step"] + sorted(
+    k for k in T._data.keys() if k != "TOTAL step")
+with open(raw_path, "w") as f:
+    f.write("step,used," + ",".join(raw_labels) + "\n")
+    n_steps = len(T._data.get("TOTAL step", []))
+    for i in range(n_steps):
+        used = "yes" if i >= args.discard_first else "discarded"
+        vals = []
+        for lb in raw_labels:
+            times = T._data.get(lb, [])
+            vals.append(f"{1e3*times[i]:.4f}" if i < len(times) else "")
+        f.write(f"{i},{used},{','.join(vals)}\n")
+print(f"  Per-step CSV saved → {raw_path}")
 
 
 # ═══════════════════════════════════════════════════════════════════════

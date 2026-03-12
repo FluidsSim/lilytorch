@@ -204,6 +204,3 @@ with h5py.File(file, 'r') as f:
 
 
     plt.show()
-
-
-    from IPython import embed; embed()

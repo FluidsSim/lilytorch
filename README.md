@@ -1,8 +1,8 @@
 # Lilytorch
 
-**Lilytorch** is a GPU-accelerated 2D computational fluid dynamics (CFD) package built on [PyTorch](https://pytorch.org/), implementing a **BDIM2 (Boundary Data Immersion Method)** solver for fluid–structure interaction. It integrates with [MuJoCo](https://mujoco.org/) via the [FARMS](https://github.com/farmsim) framework, enabling two-way coupled simulations of articulated bodies (robots, animals) immersed in viscous fluids.
+**Lilytorch** is a GPU-accelerated 2D/3D computational fluid dynamics (CFD) package built on [PyTorch](https://pytorch.org/), implementing a **BDIM2 (Boundary Data Immersion Method)** solver for fluid–structure interaction. It integrates with [MuJoCo](https://mujoco.org/) via the [FARMS](https://github.com/farmsim) framework, enabling two-way coupled simulations of articulated bodies (robots, animals) immersed in viscous fluids.
 
-![Anguilliform Swimming](images/curl_1guilla.png)
+<!-- ![Anguilliform Swimming](images/curl_1guilla.png) -->
 
 ## Overview
 
@@ -120,7 +120,7 @@ Four git submodules from [farmsim](https://github.com/farmsim), pinned to the `a
 
 ### Prerequisites
 
-- Python ≥ 3.8
+- Python ≥ 3.9
 - A C compiler (for Cython extensions in FARMS)
 - CUDA-capable GPU (recommended for performance, CPU also supported)
 

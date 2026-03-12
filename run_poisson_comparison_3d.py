@@ -104,7 +104,7 @@ def run_one_method(method_name, nx, ny, nz, n_steps, warmup,
     cfg.save_every   = 99999
     cfg.save_frames  = False
     cfg.headless     = True
-    cfg.save_uv      = False
+    cfg.save         = False
 
     # Override to strip non-fluid extensions and inject poisson_method
     _orig_gen_sim = cfg.gen_simulation_config

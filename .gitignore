@@ -23,10 +23,22 @@
 #: Do not ignore figures folder
 
 make.bat
-*.txt
+# *.txt — do NOT blanket-ignore .txt (requirements.txt is tracked)
 
 # VS Code
-*.vscode
+.vscode/
+
+# RAG vector store and papers (large binary files)
+rag/vectorstore/
+rag/papers/*.pdf
+rag/papers/**/*.pdf
+
+# Editor / IDE temp files
+*.swp
+*.swo
+*~
+.idea/
+*.sublime-workspace
 
 # folders
 # FARMS_V2/
@@ -34,6 +46,7 @@ data/
 build/
 logs/
 interp_data/
+interp_data_2d/
 interp_data_3d/
 results/
 __pycache__

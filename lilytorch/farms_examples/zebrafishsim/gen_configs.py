@@ -317,7 +317,8 @@ def gen_simulation_config():
                     "save_every": 100,
                     "vmin": -50,
                     "vmax": 50,
-                    "save_uv": False
+                    "save_uv": False,
+                    "save": False
                 }
                 }
             }

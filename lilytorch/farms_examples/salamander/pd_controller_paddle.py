@@ -104,10 +104,10 @@ class PositionController(KinematicsController):
         elbowID=-1 - elbow up
         """
         D=((x**2+y**2-d1**2-d2**2)/(2*d1*d2)).clip(-1,1)
-        elbow=elbowID*np.acos(D)
+        elbow=elbowID*np.arccos(D)
         k1=d1+d2*np.cos(elbow)
         k2=d2*np.sin(elbow)
-        thigh=np.atan2(y,x)-np.atan2(k2,k1)
+        thigh=np.arctan2(y,x)-np.arctan2(k2,k1)
         return (thigh, elbow)
 
 

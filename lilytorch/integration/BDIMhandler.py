@@ -95,8 +95,9 @@ class BDIMhandler:
             if self.ndim == 2:
                 comp = self.fluid_solver.composite_body
                 try:
-                    self.force_scaling = np.array(
-                        [np.diff(body.bb[2])[0] for body in comp.bodies]
+                    self.force_scaling = torch.tensor(
+                        [np.diff(body.bb[2])[0] for body in comp.bodies],
+                        device=self.device, dtype=self.dtype
                     )
                 except Exception:
                     self.force_scaling = 1.0
@@ -123,7 +124,7 @@ class BDIMhandler:
         # drag.pyx which uses MuJoCo body mass, bounding-sphere half-height,
         # and a linear submersion fraction.
         self.gravity_z = float(physics.model.opt.gravity[2])  # e.g. -9.81
-        self.water_surface = float(self.pars["solver"]["zmax"])
+        self.water_surface = float(self.pars["solver"]["zmax"]) if "zmax" in self.pars["solver"] else 0.0
         self._buoyancy_initialized = False
 
         # ---- optional physics solref tweak ----
@@ -132,14 +133,33 @@ class BDIMhandler:
             physics.model.geom_solref[:, 0] = solref[0]
             physics.model.geom_solref[:, 1] = solref[1]
 
-        # ---- 3-D: allocate per-body cell-centre SDF for force computation ----
+        # ---- allocate per-body SDF / velocity arrays if missing ----
+        comp = self.fluid_solver.composite_body
+        gs = self.fluid_solver.grid_shape
         if self.ndim == 3:
-            comp = self.fluid_solver.composite_body
             comp.sdf_vals = torch.zeros(
-                (comp.nbodies, *self.fluid_solver.grid_shape),
-                device=self.device,
-                dtype=self.dtype,
+                (comp.nbodies, *gs), device=self.device, dtype=self.dtype,
             )
+        else:
+            # 2-D update uses per-body stacks for argmin-based union
+            if not hasattr(comp, 'sdf_vals'):
+                comp.sdf_vals = torch.zeros(
+                    (comp.nbodies, *gs), device=self.device, dtype=self.dtype)
+            if not hasattr(comp, 'sdf_vals_u'):
+                comp.sdf_vals_u = torch.zeros(
+                    (comp.nbodies, *gs), device=self.device, dtype=self.dtype)
+            if not hasattr(comp, 'sdf_vals_v'):
+                comp.sdf_vals_v = torch.zeros(
+                    (comp.nbodies, *gs), device=self.device, dtype=self.dtype)
+            if not hasattr(comp, 'u_vals'):
+                comp.u_vals = torch.zeros(
+                    (comp.nbodies, *gs), device=self.device, dtype=self.dtype)
+            if not hasattr(comp, 'v_vals'):
+                comp.v_vals = torch.zeros(
+                    (comp.nbodies, *gs), device=self.device, dtype=self.dtype)
+
+            # Pre-build batched SDF tensor for grid_sample (2-D only)
+            self._init_batched_sdf_2d()
 
     # ------------------------------------------------------------------
     # helpers
@@ -204,6 +224,9 @@ class BDIMhandler:
     def _update_2d(self, t, iteration, dt=1):
         fs   = self.fluid_solver
         comp = fs.composite_body
+        B    = comp.nbodies
+
+        _FAR = 1e4   # far-field SDF sentinel (same as 3-D path)
 
         # gather per-animat kinematics
         com_poses  = []
@@ -236,37 +259,79 @@ class BDIMhandler:
                 )
             )
 
+        # ── Stack per-body kinematics into batched GPU tensors ────
+        urdf_t = torch.stack([urdf_poses[aid][lid] for aid, lid in comp.body_ids])  # (B, 2)
+        com_t  = torch.stack([com_poses[aid][lid]  for aid, lid in comp.body_ids])   # (B, 2)
+        R_t    = torch.stack([Rs[aid][lid]         for aid, lid in comp.body_ids])    # (B, 2, 2)
+        lv_t   = torch.stack([lin_vels[aid][lid]   for aid, lid in comp.body_ids])   # (B, 2)
+        av_t   = torch.stack([ang_vels[aid][lid]   for aid, lid in comp.body_ids])   # (B,)
+        R_T_t  = R_t.transpose(1, 2)  # (B, 2, 2)
+
+        # ── Batched rotation + grid_sample for CC grid ────────────
+        dx = comp.X.unsqueeze(0) - urdf_t[:, 0, None, None]   # (B, nx, ny)
+        dy = comp.Y.unsqueeze(0) - urdf_t[:, 1, None, None]   # (B, nx, ny)
+        px = R_T_t[:, 0, 0, None, None] * dx + R_T_t[:, 0, 1, None, None] * dy
+        py = R_T_t[:, 1, 0, None, None] * dx + R_T_t[:, 1, 1, None, None] * dy
+        x_n = px * self._sdf_x_scale[:, None, None] + self._sdf_x_offset[:, None, None]
+        y_n = py * self._sdf_y_scale[:, None, None] + self._sdf_y_offset[:, None, None]
+        # grid_sample grid: [..., 0] → W (y axis), [..., 1] → H (x axis)
+        sdf_cc_all = torch.nn.functional.grid_sample(
+            self._sdf_batch, torch.stack([y_n, x_n], dim=-1),
+            mode='bilinear', padding_mode='border', align_corners=True,
+        ).squeeze(1)                                              # (B, nx, ny)
+
+        # ── Batched rotation + grid_sample for u-staggered grid ───
+        dx = comp.Xu_stag.unsqueeze(0) - urdf_t[:, 0, None, None]
+        dy = comp.Yu_stag.unsqueeze(0) - urdf_t[:, 1, None, None]
+        px = R_T_t[:, 0, 0, None, None] * dx + R_T_t[:, 0, 1, None, None] * dy
+        py = R_T_t[:, 1, 0, None, None] * dx + R_T_t[:, 1, 1, None, None] * dy
+        x_n = px * self._sdf_x_scale[:, None, None] + self._sdf_x_offset[:, None, None]
+        y_n = py * self._sdf_y_scale[:, None, None] + self._sdf_y_offset[:, None, None]
+        sdf_u_all = torch.nn.functional.grid_sample(
+            self._sdf_batch, torch.stack([y_n, x_n], dim=-1),
+            mode='bilinear', padding_mode='border', align_corners=True,
+        ).squeeze(1)                                              # (B, nx, ny)
+
+        # ── Batched rotation + grid_sample for v-staggered grid ───
+        dx = comp.Xv_stag.unsqueeze(0) - urdf_t[:, 0, None, None]
+        dy = comp.Yv_stag.unsqueeze(0) - urdf_t[:, 1, None, None]
+        px = R_T_t[:, 0, 0, None, None] * dx + R_T_t[:, 0, 1, None, None] * dy
+        py = R_T_t[:, 1, 0, None, None] * dx + R_T_t[:, 1, 1, None, None] * dy
+        x_n = px * self._sdf_x_scale[:, None, None] + self._sdf_x_offset[:, None, None]
+        y_n = py * self._sdf_y_scale[:, None, None] + self._sdf_y_offset[:, None, None]
+        sdf_v_all = torch.nn.functional.grid_sample(
+            self._sdf_batch, torch.stack([y_n, x_n], dim=-1),
+            mode='bilinear', padding_mode='border', align_corners=True,
+        ).squeeze(1)                                              # (B, nx, ny)
+
+        # ── Batched body velocities ───────────────────────────────
+        vel_u_all = lv_t[:, 0, None, None] - av_t[:, None, None] * (
+            comp.Yu_stag.unsqueeze(0) - com_t[:, 1, None, None])  # (B, nx, ny)
+        vel_v_all = lv_t[:, 1, None, None] + av_t[:, None, None] * (
+            comp.Xv_stag.unsqueeze(0) - com_t[:, 0, None, None])  # (B, nx, ny)
+
+        # ── Batched union-min ─────────────────────────────────────
+        comp.sdf_vals[:]   = sdf_cc_all
+        comp.sdf_vals_u[:] = sdf_u_all
+        comp.sdf_vals_v[:] = sdf_v_all
+        comp.sdf_val       = sdf_cc_all.min(dim=0).values
+
+        min_u = sdf_u_all.min(dim=0)
+        comp.sdf_val_u = min_u.values
+        comp.body_u    = vel_u_all.gather(0, min_u.indices.unsqueeze(0)).squeeze(0)
+
+        min_v = sdf_v_all.min(dim=0)
+        comp.sdf_val_v = min_v.values
+        comp.body_v    = vel_v_all.gather(0, min_v.indices.unsqueeze(0)).squeeze(0)
+
+        # ── Per-body: contour update + contour mask ───────────────
         for body_i, body in enumerate(comp.bodies):
             (animat_id, link_id) = comp.body_ids[body_i]
 
-            com_pos  = com_poses[animat_id][link_id]
-            urdf_pos = urdf_poses[animat_id][link_id]
-            R        = Rs[animat_id][link_id]
-            lin_vel  = lin_vels[animat_id][link_id]
-            ang_vel  = ang_vels[animat_id][link_id]
-
-            R_T = R.T  # (2, 2)
-
-            # SDF at cell centres (meshgrid broadcasting, no flatten)
-            px, py = rotate_grid_2d(comp.X, comp.Y, R_T, urdf_pos)
-            comp.sdf_vals[body_i] = body.sdf(px, py)
-
-            # SDF at u-staggered
-            px, py = rotate_grid_2d(comp.Xu_stag, comp.Yu_stag, R_T, urdf_pos)
-            comp.sdf_vals_u[body_i] = body.sdf(px, py)
-
-            # SDF at v-staggered
-            px, py = rotate_grid_2d(comp.Xv_stag, comp.Yv_stag, R_T, urdf_pos)
-            comp.sdf_vals_v[body_i] = body.sdf(px, py)
-
-            # body velocities: v = v_lin + omega_z x (x - x_com)
-            comp.u_vals[body_i] = lin_vel[0] - ang_vel * (comp.Yu_stag - com_pos[1])
-            comp.v_vals[body_i] = lin_vel[1] + ang_vel * (comp.Xv_stag - com_pos[0])
-
-            comp.com_pos[body_i] = com_pos
+            comp.com_pos[body_i] = com_t[body_i]
 
             # contour update
-            body.cnt_update = R @ body.cnt + urdf_pos[:, None]
+            body.cnt_update = R_t[body_i] @ body.cnt + urdf_t[body_i, :, None]
 
             # optional contour mask for overlapping links
             if self.contour_mask:
@@ -302,40 +367,118 @@ class BDIMhandler:
                     mask = (sdf_m >= 0) & (sdf_p >= 0)
                 body.mask = mask
 
-            body.r_com   = body.cnt_update - com_pos[:, None]
-            body.com_pos = com_pos
+            body.r_com   = body.cnt_update - com_t[body_i, :, None]
+            body.com_pos = com_t[body_i]
 
-        # union reduction (gather / argmin)
-        idx = comp.sdf_vals.argmin(0).unsqueeze(0).expand(comp.sdf_vals.shape)
-        comp.sdf_val = (
-            comp.sdf_vals.gather(0, idx)[0]
-            .reshape(fs.nx, fs.ny)
-            .contiguous()
-        )
+    @staticmethod
+    def _body_sdf_grid(body):
+        """Return ``(F, x, y)`` for any 2-D body type.
 
-        idx_u = comp.sdf_vals_u.argmin(0).unsqueeze(0).expand(comp.sdf_vals_u.shape)
-        comp.sdf_val_u = (
-            comp.sdf_vals_u.gather(0, idx_u)[0]
-            .reshape(fs.nx, fs.ny)
-            .contiguous()
-        )
-        comp.body_u = (
-            comp.u_vals.gather(0, idx_u)[0]
-            .reshape(fs.nx, fs.ny)
-            .contiguous()
-        )
+        * **Mesh / interpolated bodies** store the SDF on a regular
+          grid inside a ``RegularGridInterpolator``-like object →
+          return ``(sdf.F, sdf.x, sdf.y)`` directly.
+        * **Analytical bodies** (circle, box, segment …) only expose
+          a callable ``sdf(X, Y)`` with no pre-sampled grid → evaluate
+          the SDF on a local grid covering the body contour plus a
+          margin of ``4 h`` (enough for the BDIM transition layer +
+          bilinear stencil) and return the sampled tensor.
+        """
+        if hasattr(body.sdf, 'F'):
+            # Mesh / interpolated body – grid already available
+            return body.sdf.F, body.sdf.x, body.sdf.y
 
-        idx_v = comp.sdf_vals_v.argmin(0).unsqueeze(0).expand(comp.sdf_vals_v.shape)
-        comp.sdf_val_v = (
-            comp.sdf_vals_v.gather(0, idx_v)[0]
-            .reshape(fs.nx, fs.ny)
-            .contiguous()
-        )
-        comp.body_v = (
-            comp.v_vals.gather(0, idx_v)[0]
-            .reshape(fs.nx, fs.ny)
-            .contiguous()
-        )
+        # ── Analytical body: pre-sample onto a regular grid ──────
+        h = body.h
+        margin = 4.0 * h
+
+        # Derive local extent from the contour (computed during init
+        # in _initialize_2d via skimage.measure.find_contours).
+        x_lo = float(body.cnt[0].min()) - margin
+        x_hi = float(body.cnt[0].max()) + margin
+        y_lo = float(body.cnt[1].min()) - margin
+        y_hi = float(body.cnt[1].max()) + margin
+
+        nx = max(int((x_hi - x_lo) / h) + 1, 4)
+        ny = max(int((y_hi - y_lo) / h) + 1, 4)
+
+        x_coords = torch.linspace(x_lo, x_hi, nx,
+                                  device=body.device, dtype=body.dtype)
+        y_coords = torch.linspace(y_lo, y_hi, ny,
+                                  device=body.device, dtype=body.dtype)
+        X, Y = torch.meshgrid(x_coords, y_coords, indexing='ij')
+        F = body.sdf(X, Y)
+        return F, x_coords, y_coords
+
+    def _init_batched_sdf_2d(self):
+        """Pre-build batched SDF tensor and normalization constants for grid_sample.
+
+        Called lazily on the first ``_update_2d`` invocation.  The SDF
+        fields are in body-local coordinates and never change, so this
+        only runs once.
+
+        Body SDF grids may have different resolutions (e.g. legs vs
+        torso links).  We pad every SDF to the maximum (H, W) with a
+        far-field sentinel so they can be stacked into a single tensor
+        for ``grid_sample``.  The coordinate normalization maps each
+        body's physical extent to the *unpadded* sub-region of the
+        padded tensor.
+        """
+        comp = self.fluid_solver.composite_body
+        B = comp.nbodies
+        _FAR = 1e4  # sentinel: "far from any body surface"
+
+        # --- extract (F, x, y) for every body (mesh or analytical) ---
+        grids = [self._body_sdf_grid(body) for body in comp.bodies]
+
+        # --- gather per-body shapes and find max dims ---
+        shapes = [(F.shape[0], F.shape[1]) for F, _x, _y in grids]
+        max_h = max(s[0] for s in shapes)
+        max_w = max(s[1] for s in shapes)
+
+        # --- pad each SDF to (max_h, max_w) ---
+        padded = []
+        for (F, _x, _y), (h_i, w_i) in zip(grids, shapes):
+            if h_i < max_h or w_i < max_w:
+                # F.pad order: (W_left, W_right, H_top, H_bottom)
+                F = torch.nn.functional.pad(
+                    F, (0, max_w - w_i, 0, max_h - h_i), value=_FAR)
+            padded.append(F)
+
+        self._sdf_batch = torch.stack(padded).unsqueeze(1).contiguous()
+        # shape: (B, 1, max_h, max_w)
+
+        # --- axis ranges for coordinate normalization ---
+        x_min = torch.tensor([g[1][0].item()  for g in grids],
+                             device=self.device, dtype=self.dtype)
+        x_max = torch.tensor([g[1][-1].item() for g in grids],
+                             device=self.device, dtype=self.dtype)
+        y_min = torch.tensor([g[2][0].item()  for g in grids],
+                             device=self.device, dtype=self.dtype)
+        y_max = torch.tensor([g[2][-1].item() for g in grids],
+                             device=self.device, dtype=self.dtype)
+
+        # Original per-body pixel counts (float for division)
+        h_orig = torch.tensor([s[0] for s in shapes],
+                              device=self.device, dtype=self.dtype)
+        w_orig = torch.tensor([s[1] for s in shapes],
+                              device=self.device, dtype=self.dtype)
+
+        # --- affine map: physical coord → grid_sample [-1, 1] ---
+        # With align_corners=True the grid maps [-1,+1] onto
+        # [0, max_dim-1].  The *original* data lives in [0, orig-1],
+        # so physical x_min→ grid=-1 and x_max→ grid=-1+2*(orig-1)/(max-1).
+        #   grid_x = x * scale_x + offset_x
+        # where scale_x = 2*(h_orig-1) / ((x_max-x_min) * (max_h-1))
+        self._sdf_x_scale  = 2.0 * (h_orig - 1) / ((x_max - x_min) * (max_h - 1))
+        self._sdf_x_offset = -1.0 - x_min * self._sdf_x_scale
+        self._sdf_y_scale  = 2.0 * (w_orig - 1) / ((y_max - y_min) * (max_w - 1))
+        self._sdf_y_offset = -1.0 - y_min * self._sdf_y_scale
+
+        n_unique = len(set(shapes))
+        print(f"  [batched-SDF] built ({B}, 1, {max_h}, {max_w}) "
+              f"grid_sample tensor  "
+              f"({self._sdf_batch.nelement()*self._sdf_batch.element_size()/1e6:.0f} MB)  "
+              f"({n_unique} unique SDF sizes, padded to max)")
 
     # ---- 3-D update --------------------------------------------------
     # ------------------------------------------------------------------
@@ -391,6 +534,7 @@ class BDIMhandler:
 
         return (i0, i1, j0, j1, k0, k1)
 
+
     # ---- 3-D update --------------------------------------------------
     def _update_3d(self, t, iteration, dt=1):
         fs   = self.fluid_solver
@@ -429,19 +573,22 @@ class BDIMhandler:
 
         h_grid = comp.h          # uniform grid spacing
 
-        # Per-body SDF storage for forces (fill once per step)
-        comp.sdf_vals.fill_(_FAR)
+        # Per-body SDF storage for forces (reset sparse list each step)
+        comp._sdf_sparse = [None] * len(comp.bodies)
 
         # Initialise union fields to _FAR / zero (once per step).
-        # First body's torch.where / torch.minimum will overwrite
-        # with its actual SDF since actual < _FAR.
-        comp.sdf_val   = torch.full(gs, _FAR, device=self.device, dtype=self.dtype)
-        comp.sdf_val_u = torch.full(gs, _FAR, device=self.device, dtype=self.dtype)
-        comp.sdf_val_v = torch.full(gs, _FAR, device=self.device, dtype=self.dtype)
-        comp.sdf_val_w = torch.full(gs, _FAR, device=self.device, dtype=self.dtype)
-        comp.body_u    = torch.zeros(gs, device=self.device, dtype=self.dtype)
-        comp.body_v    = torch.zeros(gs, device=self.device, dtype=self.dtype)
-        comp.body_w    = torch.zeros(gs, device=self.device, dtype=self.dtype)
+        # Reuse existing tensors in-place to avoid re-allocation.
+        comp.sdf_val.fill_(_FAR)
+        comp.sdf_val_u.fill_(_FAR)
+        comp.sdf_val_v.fill_(_FAR)
+        comp.sdf_val_w.fill_(_FAR)
+        comp.body_u.zero_()
+        comp.body_v.zero_()
+        comp.body_w.zero_()
+
+        # Cache per-body AABBs for downstream use (e.g. narrow-band forces)
+        if not hasattr(comp, '_body_aabbs'):
+            comp._body_aabbs = [None] * len(comp.bodies)
 
         for body_i, body in enumerate(comp.bodies):
             (animat_id, link_id) = comp.body_ids[body_i]
@@ -462,6 +609,7 @@ class BDIMhandler:
                     comp.x, comp.y, comp.z,
                     h_grid, gs, pad=3,
                 )
+            comp._body_aabbs[body_i] = aabb   # cache for force integration
 
             if aabb is not None:
                 # ── Sub-block path (main saving) ────────────────────
@@ -479,8 +627,8 @@ class BDIMhandler:
                 )
                 sdf_sub = body.sdf(px, py, pz)       # contiguous
 
-                # Per-body SDF (for forces; rest stays _FAR)
-                comp.sdf_vals[body_i, i0:i1, j0:j1, k0:k1] = sdf_sub
+                # Per-body SDF (sparse: store sub-block + AABB for forces)
+                comp._sdf_sparse[body_i] = (aabb, sdf_sub)
 
                 # Sub-block stagger (contiguous in → contiguous out)
                 sdf_sub_u, sdf_sub_v, sdf_sub_w = _stagger_sdf_3d(
@@ -540,7 +688,7 @@ class BDIMhandler:
                 px, py, pz = _rotate(comp.X, comp.Y, comp.Z_grid,
                                      R_T, urdf_pos)
                 sdf_cc = body.sdf(px, py, pz)
-                comp.sdf_vals[body_i] = sdf_cc
+                comp._sdf_sparse[body_i] = (None, sdf_cc)  # None = full grid
 
                 sdf_u, sdf_v, sdf_w = _stagger_sdf_3d(sdf_cc)
 
@@ -605,13 +753,13 @@ class BDIMhandler:
             )
         )
 
-        fs.div = fs.divergence(uprime, vprime)
+        div = fs.divergence(uprime, vprime)
 
         # ---- Poisson solve ----
         poisson_method = getattr(fs, "poisson_method", "multigrid")
         if poisson_method == "fft":
             coeff = timestep / self.rho_fluid
-            p = fs.poisson_solverFFT.solve(fs.div / coeff)
+            p = fs.poisson_solverFFT.solve(div / coeff)
             (p_x, p_y) = fs.gradient(p)
             u = uprime - coeff * p_x
             v = vprime - coeff * p_y
@@ -629,9 +777,9 @@ class BDIMhandler:
             p0 = p if getattr(fs, 'poisson_warm_start', False) else torch.zeros_like(p)
 
             p, _ = _poisson_solve(
-                fs.div[1:-1, 1:-1],
+                div[1:-1, 1:-1],
                 p0,
-                (timestep / self.rho_body) * torch.ones_like(fs.div),
+                (timestep / self.rho_body) * torch.ones_like(div),
                 ch=ch_full[1:,  1:-1],
                 cv=cv_full[1:-1, 1:],
             )
@@ -675,12 +823,33 @@ class BDIMhandler:
             )
         )
 
-        fs.div = fs.divergence(uprime, vprime, wprime)
+
+
+        # ── Free mu1 + staggered normals right after BDIM ────────────
+        # project() only uses mu0_{u,v,w}.  forces_method2_3d recomputes
+        # CC normals on-the-fly.  Freeing these 12 grid-sized arrays
+        # (~12 × 131 MB ≈ 1.6 GB) reduces peak memory during the
+        # Poisson solve that follows.
+        for _attr in ('mu1_all_u', 'mu1_all_v', 'mu1_all_w',
+                      'normal_x_u', 'normal_y_u', 'normal_z_u',
+                      'normal_x_v', 'normal_y_v', 'normal_z_v',
+                      'normal_x_w', 'normal_y_w', 'normal_z_w',
+                      # CC mu1 / m_m0 are also not needed by project
+                      'mu1_all', 'm_m0_all'):
+            if hasattr(fs, _attr):
+                setattr(fs, _attr, None)
+        del diff_u, diff_v, diff_w
+
+        div = fs.divergence(uprime, vprime, wprime)
 
         poisson_method = getattr(fs, "poisson_method", "multigrid")
         if poisson_method == "fft":
             coeff = timestep / self.rho_fluid
-            p = fs.poisson_solverFFT.solve(fs.div / coeff)
+            # Free mu0 before Poisson solve (not needed by FFT path)
+            for _attr in ('mu0_all_u', 'mu0_all_v', 'mu0_all_w', 'mu0_all'):
+                if hasattr(fs, _attr):
+                    setattr(fs, _attr, None)
+            p = fs.poisson_solverFFT.solve(div / coeff)
             (p_x, p_y, p_z) = fs.gradient(p)
             u = uprime - coeff * p_x
             v = vprime - coeff * p_y
@@ -694,16 +863,25 @@ class BDIMhandler:
             ch = timestep / rho_u
             cv = timestep / rho_v
             cw = timestep / rho_w
+            del rho_u, rho_v, rho_w
+
+            # ── Free mu0 now — ch/cv/cw are independent tensors ──────
+            for _attr in ('mu0_all_u', 'mu0_all_v', 'mu0_all_w', 'mu0_all'):
+                if hasattr(fs, _attr):
+                    setattr(fs, _attr, None)
 
             _poisson_solve = (fs.poisson_solver.solve_mgcg
                               if poisson_method == "mgcg"
                               else fs.poisson_solver.solve_multigrid)
-            p0 = p if getattr(fs, 'poisson_warm_start', False) else torch.zeros_like(p)
+            if getattr(fs, 'poisson_warm_start', False):
+                p0 = p
+            else:
+                p.zero_()          # reuse existing tensor instead of allocating
+                p0 = p
 
             p, _ = _poisson_solve(
-                fs.div[1:-1, 1:-1, 1:-1],
+                div[1:-1, 1:-1, 1:-1],
                 p0,
-                (timestep / self.rho_body) * torch.ones_like(fs.div),
                 ch=ch[1:,  1:-1, 1:-1],
                 cv=cv[1:-1, 1:,  1:-1],
                 cw=cw[1:-1, 1:-1, 1:],
@@ -729,44 +907,54 @@ class BDIMhandler:
         fs = self.fluid_solver
         s  = self.force_scaling
 
-        self.friction_force_lin_x = s * fs.friction_force_lin_x.cpu().numpy()
-        self.friction_force_lin_y = s * fs.friction_force_lin_y.cpu().numpy()
-        self.friction_force_ang_z = s * fs.friction_force_ang_z.cpu().numpy()
-        self.pressure_force_x     = s * fs.pressure_force_x.cpu().numpy()
-        self.pressure_force_y     = s * fs.pressure_force_y.cpu().numpy()
-        self.pressure_force_ang_z = s * fs.pressure_force_ang_z.cpu().numpy()
+        # Single GPU→CPU transfer instead of 6 separate .cpu().numpy() calls
+        forces_gpu = torch.stack([
+            fs.friction_force_lin_x,
+            fs.friction_force_lin_y,
+            fs.friction_force_ang_z,
+            fs.pressure_force_x,
+            fs.pressure_force_y,
+            fs.pressure_force_ang_z,
+        ])                                          # (6, B)
+        forces_cpu = (s * forces_gpu).cpu().numpy() # single sync
+        friction_force_lin_x = forces_cpu[0]
+        friction_force_lin_y = forces_cpu[1]
+        friction_force_ang_z = forces_cpu[2]
+        pressure_force_x     = forces_cpu[3]
+        pressure_force_y     = forces_cpu[4]
+        pressure_force_ang_z = forces_cpu[5]
 
         for body_i in range(len(fs.composite_body.bodies)):
             (animat_id, link_id) = fs.composite_body.body_ids[body_i]
             ind = task.maps[animat_id]["sensors"]["data2xfrc"][link_id]
 
             physics.data.xfrc_applied[ind, 0] = (
-                self.friction_force_lin_x[body_i] + self.pressure_force_x[body_i]
+                friction_force_lin_x[body_i] + pressure_force_x[body_i]
             ) * task.units.newtons
             physics.data.xfrc_applied[ind, 1] = (
-                self.friction_force_lin_y[body_i] + self.pressure_force_y[body_i]
+                friction_force_lin_y[body_i] + pressure_force_y[body_i]
             ) * task.units.newtons
             physics.data.xfrc_applied[ind, 5] = (
-                self.friction_force_ang_z[body_i] + self.pressure_force_ang_z[body_i]
+                friction_force_ang_z[body_i] + pressure_force_ang_z[body_i]
             ) * task.units.newtons
 
     def _apply_forces_3d(self, task, physics):
         fs = self.fluid_solver
         s  = self.force_scaling
 
-        self.friction_force_lin_x = s * fs.friction_force_lin_x.cpu().numpy()
-        self.friction_force_lin_y = s * fs.friction_force_lin_y.cpu().numpy()
-        self.friction_force_lin_z = s * fs.friction_force_lin_z.cpu().numpy()
-        self.friction_force_ang_x = s * fs.friction_force_ang_x.cpu().numpy()
-        self.friction_force_ang_y = s * fs.friction_force_ang_y.cpu().numpy()
-        self.friction_force_ang_z = s * fs.friction_force_ang_z.cpu().numpy()
+        friction_force_lin_x = s * fs.friction_force_lin_x.cpu().numpy()
+        friction_force_lin_y = s * fs.friction_force_lin_y.cpu().numpy()
+        friction_force_lin_z = s * fs.friction_force_lin_z.cpu().numpy()
+        friction_force_ang_x = s * fs.friction_force_ang_x.cpu().numpy()
+        friction_force_ang_y = s * fs.friction_force_ang_y.cpu().numpy()
+        friction_force_ang_z = s * fs.friction_force_ang_z.cpu().numpy()
 
-        self.pressure_force_x     = s * fs.pressure_force_x.cpu().numpy()
-        self.pressure_force_y     = s * fs.pressure_force_y.cpu().numpy()
-        self.pressure_force_z     = s * fs.pressure_force_z.cpu().numpy()
-        self.pressure_force_ang_x = s * fs.pressure_force_ang_x.cpu().numpy()
-        self.pressure_force_ang_y = s * fs.pressure_force_ang_y.cpu().numpy()
-        self.pressure_force_ang_z = s * fs.pressure_force_ang_z.cpu().numpy()
+        pressure_force_x     = s * fs.pressure_force_x.cpu().numpy()
+        pressure_force_y     = s * fs.pressure_force_y.cpu().numpy()
+        pressure_force_z     = s * fs.pressure_force_z.cpu().numpy()
+        pressure_force_ang_x = s * fs.pressure_force_ang_x.cpu().numpy()
+        pressure_force_ang_y = s * fs.pressure_force_ang_y.cpu().numpy()
+        pressure_force_ang_z = s * fs.pressure_force_ang_z.cpu().numpy()
 
         # ---- FARMS-identical buoyancy (drag.pyx  compute_buoyancy) ----
         # Lazy-init per-body mass & half-height on first call
@@ -796,23 +984,23 @@ class BDIMhandler:
                 )
 
             physics.data.xfrc_applied[ind, 0] = (
-                self.friction_force_lin_x[body_i] + self.pressure_force_x[body_i]
+                friction_force_lin_x[body_i] + pressure_force_x[body_i]
             ) * task.units.newtons
             physics.data.xfrc_applied[ind, 1] = (
-                self.friction_force_lin_y[body_i] + self.pressure_force_y[body_i]
+                friction_force_lin_y[body_i] + pressure_force_y[body_i]
             ) * task.units.newtons
             physics.data.xfrc_applied[ind, 2] = (
-                self.friction_force_lin_z[body_i] + self.pressure_force_z[body_i]
+                friction_force_lin_z[body_i] + pressure_force_z[body_i]
                 + buoyancy_z
             ) * task.units.newtons
             physics.data.xfrc_applied[ind, 3] = (
-                self.friction_force_ang_x[body_i] + self.pressure_force_ang_x[body_i]
+                friction_force_ang_x[body_i] + pressure_force_ang_x[body_i]
             ) * task.units.newtons
             physics.data.xfrc_applied[ind, 4] = (
-                self.friction_force_ang_y[body_i] + self.pressure_force_ang_y[body_i]
+                friction_force_ang_y[body_i] + pressure_force_ang_y[body_i]
             ) * task.units.newtons
             physics.data.xfrc_applied[ind, 5] = (
-                self.friction_force_ang_z[body_i] + self.pressure_force_ang_z[body_i]
+                friction_force_ang_z[body_i] + pressure_force_ang_z[body_i]
             ) * task.units.newtons
 
     # ==================================================================
@@ -862,6 +1050,14 @@ class BDIMhandler:
                 fs.forces_method1(fs.u0, fs.v0, fs.p0, iteration)
             else:
                 fs.forces_method2(fs.u0, fs.v0, fs.p0, iteration)
+
+            # ── Free cached force-density tensors (6 × grid_shape) ───
+            # These are only needed for the per-body integration above;
+            # plotting_and_saving does not use them.
+            for _attr in ('xstress_tensor', 'ystress_tensor', 'zstress_tensor',
+                          'pforce_x', 'pforce_y', 'pforce_z'):
+                if hasattr(fs, _attr):
+                    setattr(fs, _attr, None)
 
             # 5. plotting / saving
             if self.ndim == 3:

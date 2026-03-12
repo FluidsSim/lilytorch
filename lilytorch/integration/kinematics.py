@@ -41,7 +41,7 @@ def kinematics_interpolation(
 
 
 class KinematicsController(AnimatController):
-    """Amphibious kinematics"""
+    """kinematics"""
 
     def __init__(
             self,

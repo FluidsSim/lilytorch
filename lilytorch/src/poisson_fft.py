@@ -231,14 +231,16 @@ class PoissonSolverFFT:
         Nd = X.shape[d]
         cdtype = self._dct_twiddle[d].dtype
 
-        # Halve the k=0 coefficient
-        Cp = X.clone()
+        # Halve the k=0 coefficient — build the twiddle in-place
+        # to avoid a full .clone() of the 3-D array (~264 MB saved).
+        W = self._dct_twiddle[d]
         sl = [slice(None)] * X.ndim
         sl[d] = slice(0, 1)
-        Cp[tuple(sl)] = Cp[tuple(sl)] * 0.5
+        W_mod = W.clone()          # clone only the small 1-D twiddle
+        W_mod[tuple(sl)] = W_mod[tuple(sl)] * 0.5
 
-        # Twiddle → FFT → real part → un-permute → scale
-        Z = Cp.to(cdtype) * self._dct_twiddle[d]   # same twiddle as forward
+        # Twiddle (with halved k=0) → cast → FFT → real → un-permute → scale
+        Z = X.to(cdtype) * W_mod
         V = torch.fft.fft(Z, dim=d)
         v = V.real
         return v.index_select(d, self._idct_idx[d]) / Nd

@@ -163,8 +163,28 @@ class BDIMhandler:
 
             print(physics.data.xfrc_applied[ind] / mass, physics.data.qvel)
 
+    # ------------------------------------------------------------------
+    #  BDIM2 helper: apply the meta-equation to a velocity component
+    # ------------------------------------------------------------------
+    def _bdim2(self, phi, mu0, m_m0, body_vel, mu1, nx, ny):
+        fs = self.fluid_solver
+        return (
+            mu0 * phi
+            + m_m0 * body_vel
+            + mu1 * fs.normal_derivative(phi - body_vel, nx, ny)
+        )
+
+    # ------------------------------------------------------------------
+    #  BCs helper
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _set_bc(u, v):
+        for i in [1, -1]:
+            u[i, :] = 0;  u[:, i] = 0
+            v[i, :] = 0;  v[:, i] = 0
+
     # ==================================================================
-    #  step: one full coupled fluid-body step
+    #  step: one full coupled fluid-body step  (Heun / RK2)
     # ==================================================================
     def step(self, task, physics):
 
@@ -203,50 +223,77 @@ class BDIMhandler:
             # 4. Gravity body force  (g = -980 in the y-direction)
             v = v - 980 * fs.dt
 
-            # 5. Advection-diffusion
-            (uprime, vprime) = fs.adv_diff_solver.solve(u, v)
-
-            # No-slip BC at all domain boundaries
-            for i in [1, -1]:
-                uprime[i, :] = 0;  uprime[:, i] = 0
-                vprime[i, :] = 0;  vprime[:, i] = 0
-
-            # 6. BDIM2 meta-equation
-            uprime = (
-                fs.mu0_all_u * uprime
-                + fs.m_m0_all_u * comp.body_u
-                + fs.mu1_all_u * fs.normal_derivative(
-                    uprime - comp.body_u, fs.normal_x_u, fs.normal_y_u
-                )
-            )
-            vprime = (
-                fs.mu0_all_v * vprime
-                + fs.m_m0_all_v * comp.body_v
-                + fs.mu1_all_v * fs.normal_derivative(
-                    vprime - comp.body_v, fs.normal_x_v, fs.normal_y_v
-                )
-            )
-
-            # 7. Divergence
-            fs.div = fs.divergence(uprime, vprime)
-
-            # 8. Poisson solve (variable-density multigrid)
+            # -- pre-compute Poisson coefficients (constant for both stages) --
             c     = torch.ones_like(u)
             coeff = timestep / fs.rho
             ch    = timestep * fs.mu0_all_u / fs.rho
             cv    = timestep * fs.mu0_all_v / fs.rho
-            p, _ = fs.poisson_solver.solve_multigrid(
-                fs.div[1:-1, 1:-1], p, coeff * c,
+
+            # ==================== PREDICTOR (w = 1) ====================
+            (uprime, vprime) = fs.adv_diff_solver.solve(u, v)
+            self._set_bc(uprime, vprime)
+
+            # BDIM2 meta-equation
+            uprime = self._bdim2(
+                uprime, fs.mu0_all_u, fs.m_m0_all_u, comp.body_u,
+                fs.mu1_all_u, fs.normal_x_u, fs.normal_y_u,
+            )
+            vprime = self._bdim2(
+                vprime, fs.mu0_all_v, fs.m_m0_all_v, comp.body_v,
+                fs.mu1_all_v, fs.normal_x_v, fs.normal_y_v,
+            )
+
+            # Keep BDIM'd velocities for Heun averaging
+            uprime_bdim = uprime
+            vprime_bdim = vprime
+
+            # Poisson solve  (w = 1)
+            fs.div = fs.divergence(uprime, vprime)
+            p1, _ = fs.poisson_solver.solve_multigrid(
+                fs.div[1:-1, 1:-1], p,
                 ch=ch[1:, 1:-1],
                 cv=cv[1:-1, 1:],
             )
+            (p_x, p_y) = fs.gradient(p1)
+            u1 = uprime - ch * p_x
+            v1 = vprime - cv * p_y
 
-            # 9. Projection step
-            (p_x, p_y) = fs.gradient(p)
-            u = uprime - ch * p_x
-            v = vprime - cv * p_y
+            # ==================== CORRECTOR (w = 0.5) ==================
+            (uprime2, vprime2) = fs.adv_diff_solver.solve(u1, v1)
+            # Rebase from u^n  (v already includes gravity)
+            uprime2 = u + (uprime2 - u1)
+            vprime2 = v + (vprime2 - v1)
+            self._set_bc(uprime2, vprime2)
 
-            (fs.u0, fs.v0, fs.p0) = (u, v, p)
+            # BDIM2 meta-equation
+            uprime2 = self._bdim2(
+                uprime2, fs.mu0_all_u, fs.m_m0_all_u, comp.body_u,
+                fs.mu1_all_u, fs.normal_x_u, fs.normal_y_u,
+            )
+            vprime2 = self._bdim2(
+                vprime2, fs.mu0_all_v, fs.m_m0_all_v, comp.body_v,
+                fs.mu1_all_v, fs.normal_x_v, fs.normal_y_v,
+            )
+
+            # Heun average of BDIM'd velocities
+            u_avg = 0.5 * (uprime_bdim + uprime2)
+            v_avg = 0.5 * (vprime_bdim + vprime2)
+            self._set_bc(u_avg, v_avg)
+
+            # Poisson solve  (w = 0.5)
+            fs.div = fs.divergence(u_avg, v_avg)
+            ch2 = 0.5 * ch
+            cv2 = 0.5 * cv
+            p2, _ = fs.poisson_solver.solve_multigrid(
+                fs.div[1:-1, 1:-1], p,
+                ch=ch2[1:, 1:-1],
+                cv=cv2[1:-1, 1:],
+            )
+            (p_x, p_y) = fs.gradient(p2)
+            u_out = u_avg - ch2 * p_x
+            v_out = v_avg - cv2 * p_y
+
+            (fs.u0, fs.v0, fs.p0) = (u_out, v_out, p2)
 
             # 10. Compute fluid forces
             fs.forces_method2(fs.u0, fs.v0, fs.p0, iteration)

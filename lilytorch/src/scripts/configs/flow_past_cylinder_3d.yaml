@@ -17,7 +17,6 @@ solver:
   dt                : 0.001
   perturbation_amplitude : 0.01
   convection_method : "quick"
-  skip_projection   : False
 
   poisson_tol            : 1.0e-4
   jacobi_weight          : 0.7

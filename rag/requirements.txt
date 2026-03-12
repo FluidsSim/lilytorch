@@ -1,0 +1,15 @@
+# RAG pipeline dependencies
+anthropic>=0.40.0          # direct API client (supports prompt caching)
+langchain-community>=0.3.0
+langchain-text-splitters>=0.3.0
+chromadb>=0.5.0
+sentence-transformers>=3.0.0
+rich>=13.0.0
+
+# MCP server (VS Code Copilot integration)
+mcp[cli]>=1.0.0           # Model Context Protocol server SDK
+
+# PDF paper ingestion
+pymupdf>=1.24.0          # fast PDF → text extraction (handles columns, headers)
+# Optional: better math extraction from papers
+# nougat-ocr             # Meta's PDF-to-markdown for scientific papers (heavy, GPU)

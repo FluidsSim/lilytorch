@@ -3,8 +3,8 @@ units:
   seconds: 1
   kilograms: 1
 runtime:
-  n_iterations: 5001
-  buffer_size: 5001
+  n_iterations: 55001
+  buffer_size: 55001
   play: true
   rtl: 1.0
   fast: false
@@ -68,8 +68,8 @@ extensions:
         rho               : 1
 
         poisson_tol       : 1.0e-7
-        poisson_max_cycles: 5
-        poisson_max_mgcg_cycles: 3
+        poisson_max_cycles: 10
+        poisson_max_mgcg_cycles: 5
         jacobi_weight     : 0.7
         poisson_nsmoothing: 5
         poisson_verbose   : True

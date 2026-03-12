@@ -1,497 +1,129 @@
 
-from math import inf, radians, tan
 import os
-from farms_core.io.yaml import pyobject2yaml
 from farms_core.model.options import SpawnMode
-from farms_core.io.sdf import ModelSDF
-from lilytorch.util.paths import lilytorch_repo_root, sdfs_path, gen_new_folder, save_path
-from lilytorch.integration.gen_pool_sdf import create_pool_sdf, create_water_sdf
-import subprocess
-import numpy as np
-
-stack_folder      = save_path
-data_folder       = os.path.join(lilytorch_repo_root, 'farms_examples', '_1guillasim')
-bdim_handler_path = "lilytorch.integration.BDIMhandler.BDIMhandler"
+from lilytorch.util.paths import lilytorch_repo_root
+from lilytorch.farms_examples.base_sim_config import BaseSimConfig
+from lilytorch.integration.camera import top_down_camera_config
 
 
-nthreads = 16
-use_gpu  = True
-use_bdim = True
-headless = False  # must be False for FlowViewer (MuJoCo GUI)
-fast     = False
+class SimConfig(BaseSimConfig):
 
-use_drag = not use_bdim
-constant_drags = [
-            [-0.1, -5.0, -5.0],
-            [-0.001, -0.001, -0.001]
-]
+    def __init__(self):
+        super().__init__()
 
-animats_pars = [
-    {
-    "model_name"     : "1guilla",
-    "sdf_name"       : "1guilla.sdf",
-    "control_type"   : "position",
-    "gains"          : [100.0, 4.0, 0],
-    "spawn_mode"     : SpawnMode.FREE,
-    "pose"           : [0, 0, 0.2, 0, 0, 3.141592653589793],
-    "controller_path": "lilytorch.farms_examples._1guillasim.pd_controller.PositionController",
-    "control_pars"   : {'freq': 1, 'twl': 12, 'amp': 30.0},
-    },
-]
-
-# Self-propelled: no inlet flow
-u_inlet = 0.0
-
-# ---- 3-D grid --------------------------------------------------------
-Nx           = 512
-Ny           = 128
-Nz           = 128
-xmin         = -0.9
-xmax         = 1.5
-ymin         = -0.3
-ymax         = 0.3
-zmin         = -0.3
-zmax         = 0.3
-
-density       = 1000.0   # robot body density [kg/m^3]
-water_density = 1000.0  # water density [kg/m^3]
-nu    = 1.0e-6
-
-timestep     = 0.001
-convection_method = "quick"
-save_frames  = True
-save_every   = 200
-n_iterations = 10001
-save_uv      = False
-
-# vorticity colour scale
-vmin = -10.0
-vmax =  10.0
-
-def gen_animat_config(output_folder):
-
-    for animat_i, animat_pars in enumerate(animats_pars):
-
-        model_name      = animat_pars["model_name"]
-        sdf_name        = animat_pars["sdf_name"]
-        control_type    = animat_pars["control_type"]
-        controller_path = animat_pars["controller_path"]
-        control_pars    = animat_pars["control_pars"]
-        gains           = animat_pars["gains"]
-        spawn_mode      = animat_pars["spawn_mode"]
-        pose            = animat_pars["pose"]
-
-        sdf_file = os.path.join(sdfs_path, model_name, sdf_name)
-
-        model_sdf   = ModelSDF.read(sdf_file)[0]
-        link_names  = [link.name for link in model_sdf.links]
-        joint_names = [joint.name for joint in model_sdf.joints if joint.type != "fixed"]
-        nlinks      = len(link_names)
-
-        n_joints = len(joint_names)
-
-        drag_coefficients = [
-            constant_drags for _ in range(nlinks)
-        ]
-
-        animat_dict = {
-            "spawn": {},
-            "sdf"  : "",
-            "morphology": {},
-            "control": {
-                "sensors": {},
-                "motors" : []
-            },
-            "extensions": []
-        }
-
-        # == Spawn ==
-        animat_dict["spawn"] = {
-            'loader'  : 0,
-            'mode'    : spawn_mode,
-            'pose'    : pose,
-            'velocity': [0, 0, 0, 0, 0, 0],
-            'extras'  : {}
-        }
-        animat_dict["sdf"] = sdf_file
-
-
-
-        # == Morphology ==
-        animat_dict["morphology"]["links"] = [
-            {
-                'name'             : link_name,
-                'collisions'       : True,
-                'friction'         : [0.2, 0, 0],
-                'extras'           : {},
-                'fluid_interaction': use_drag,
-                'density'          : density
-            } for link_name in link_names
-        ]
-        if use_drag:
-            for i, link in enumerate(animat_dict["morphology"]["links"]):
-                link["drag_coefficients"] = drag_coefficients[i]
-
-        animat_dict["morphology"]["joints"] = [
-            {
-                'name'     : joint_name,
-                'initial'  : [0,0],
-                'limits'   : [[-inf, inf], [-inf, inf]],
-                'stiffness': 0,
-                'springref': 0,
-                'damping'  : 0,
-                'extras'   : {}
-            } for joint_name in joint_names
-        ]
-        animat_dict["morphology"]["self_collisions"] = []
-
-
-        # == Control ==
-        animat_dict["control"]["sensors"]["links"] = link_names
-        animat_dict["control"]["sensors"]["joints"] = joint_names
-        animat_dict["control"]["sensors"]["contacts"] = [
-            (link_name,'') for link_name in link_names
-        ]
-        animat_dict["control"]["sensors"]["xfrc"] = link_names
-        animat_dict["control"]["sensors"]["muscles"] = []
-        animat_dict["control"]["sensors"]["adhesions"] = []
-        animat_dict["control"]["sensors"]["visuals"] = []
-        animat_dict["control"]["motors"] = [
-            {
-                'joint_name'   : joint_name,
-                'control_types': [control_type],
-                'limits_torque': [-inf, inf],
-                'gains'        : list(gains)
-            } for joint_name in joint_names
-        ]
-
-        animat_dict["extensions"] = [
-            {
-                "loader": controller_path,
-                "config": control_pars
-            }
-        ]
-
-        if use_drag:
-            animat_dict["extensions"] += [
-                {
-                    "loader": "farms_mujoco.swimming.extension.SwimmingExtension",
-                    "config": {
-                        "water_properties" : None,
-                    }
-                }
-            ]
-
-        pyobject2yaml(
-            os.path.join(output_folder, "animat_config_"+str(animat_i)+".yaml"),
-            animat_dict
+        self.data_folder = os.path.join(
+            lilytorch_repo_root, 'farms_examples', '_1guillasim',
         )
 
-def gen_arena_config(output_folder):
+        # ── Hardware ──────────────────────────────────────────────────
+        self.use_gpu  = True
+        self.use_bdim = True
+        self.headless = False   # must be False for FlowViewer
 
-    # Auto-scale wall thickness from domain dimensions
-    pool_dims  = [xmax - xmin, ymax - ymin, zmax - zmin]
-    wall_thick = round(0.08 * min(pool_dims), 4)
-    wall_thick = max(wall_thick, 0.01)
-
-    create_pool_sdf(xmin, xmax, ymin, ymax, zmin=zmin, zmax=zmax,
-                    wall_thickness=wall_thick, plotting=False)
-
-    water_sdf_path = create_water_sdf(xmin, xmax, ymin, ymax,
-                                      zmin=zmin, zmax=zmax,
-                                      water_height=zmax)
-
-    arena_dict = {
-       "sdf": os.path.join(sdfs_path, "pool", "sdf", "pool.sdf"),
-       "spawn": {
-            "loader"  : 0,
-            "mode"    : SpawnMode.FREE,
-            "pose"    : [0, 0, 0, 0, 0, 0],
-            "velocity": [0, 0, 0, 0, 0, 0],
-            "extras"  : {}
-        },
-        "water": {
-            "sdf"      : water_sdf_path,
-            "drag"     : use_drag,
-            "buoyancy" : use_drag,
-            "height"   : zmax,
-            "velocity" : [0, 0, 0],
-            "viscosity": 1.0,
-            "density"  : water_density,
-            "maps"     : ["", ""],
-        },
-        "ground_height": 0,
-    }
-    pyobject2yaml(
-        os.path.join(output_folder, 'arena_config.yaml'),
-        arena_dict
-    )
-
-def gen_experiment_config(output_folder):
-
-    experiment_dict                                  = {}
-    experiment_dict["simulation"]                    = "simulation_config.yaml"
-    experiment_dict["arenas"]                        = ["arena_config.yaml"]
-    experiment_dict["animats"]                       = ["animat_config_"+str(i)+".yaml" for i in range(len(animats_pars))]
-    experiment_dict["loaders"]                       = {}
-    experiment_dict["loaders"]["simulation_options"] = "farms_core.simulation.options.SimulationOptions"
-    experiment_dict["loaders"]["animats_options"]    = ["farms_core.model.options.AnimatOptions" for _ in range(len(animats_pars))]
-    experiment_dict["loaders"]["arenas_options"]     = ["farms_core.model.options.ArenaOptions"]
-    experiment_dict["loaders"]["experiment_data"]    = "farms_core.experiment.data.ExperimentData"
-    experiment_dict["loaders"]["animats_data"]       = ["farms_core.model.data.AnimatData" for _ in range(len(animats_pars))]
-
-    pyobject2yaml(
-        os.path.join(output_folder, 'experiment_config.yaml'),
-        experiment_dict
-    )
-
-def gen_simulation_config(output_folder):
-
-    simulation_dict = {
-        "units": {
-            "length": "meter",
-            "mass"  : "kilogram",
-            "time"  : "second"
-        },
-        "runtime": {
-            "n_iterations" : n_iterations,
-            "buffer_size"  : n_iterations,
-            "play"         : True,
-            "rtl"          : 1.0,
-            "fast"         : fast,
-            "headless"     : headless,
-            "show_progress": True
-        }
-        ,
-        "physics": {
-            "timestep"      : timestep,
-            "gravity"       : [0, 0, -9.81],
-            "num_sub_steps" : 1,
-            "cb_sub_steps"  : 1,
-            "n_solver_iters": 50
-        },
-        "mujoco": {
-            "cone"             : "elliptic",
-            "solver"           : "CG",
-            "integrator"       : "implicitfast",
-            "impratio"         : 10,
-            "ccd_iterations"   : 1000,
-            "ccd_tolerance"    : 1e-6,
-            "noslip_iterations": 1000,
-            "noslip_tolerance" : 1e-6,
-            "viewer"           : "MuJoCo",
-            "texture_repeat"   : 1,
-            "shadow_size"      : 0,
-            "visual_scale"     : 10.0,
-            "extent"           : 100.0
-        },
-        "extensions": [
+        # ── Animats ───────────────────────────────────────────────────
+        self.animats_pars = [
             {
-                "loader": "farms_core.simulation.extensions.ExperimentLogger",
-                "config": {
-                    "log_path": os.path.join(output_folder, "output"),
-                    "skip": 0
-                }
-            },
-            {
-                "loader": "farms_mujoco.simulation.extensions.MjcfSaver",
-                "config": {
-                    "path": os.path.join(output_folder, "output", "simulation_mjcf.xml")
-                }
-            },
-            {
-                "loader": "lilytorch.integration.extensions.DataLogger",
-                "config": {
-                    "log_path": os.path.join(output_folder, "output", "nn_data.hdf5"),
-                }
+                "model_name"     : "1guilla",
+                "sdf_name"       : "1guilla.sdf",
+                "control_type"   : "position",
+                "gains"          : [100.0, 4.0, 0],
+                "spawn_mode"     : SpawnMode.FREE,
+                "pose"           : [0, 0, 0., 0, 0, 3.141592653589793],
+                "controller_path": "lilytorch.farms_examples._1guillasim.pd_controller.PositionController",
+                "control_pars"   : {'freq': 0.5, 'twl': 12, 'amp': 20.0},
             },
         ]
-    }
 
-    if use_bdim:
+        # ── 3-D grid ─────────────────────────────────────────────────
+        self.Nx   = 512
+        self.Ny   = 128
+        self.Nz   = 128
+        self.xmin = -0.9
+        self.xmax =  1.5
+        self.ymin = -0.3
+        self.ymax =  0.3
+        self.zmin = -0.3
+        self.zmax =  0.3
 
-        simulation_dict["extensions"] += [
-            {
-            "loader": "lilytorch.integration.extensions.FluidExtension",
+        # ── Physics ───────────────────────────────────────────────────
+        self.rho_body          = 1000.0
+        self.timestep          = 0.001
+        self.convection_method = "quick"
+        self.n_iterations      = 10001
+        self.save_every        = 200
+        self.vmin              = -10.0
+        self.vmax              = 10.0
+        self.save              = True
+
+        # ── MuJoCo ───────────────────────────────────────────────────
+        self.visual_scale  = 10.0
+        self.extent        = 100.0
+
+        # ── BDIM solver ──────────────────────────────────────────────
+        self.bdim_dt                 = self.timestep
+        self.bdim_nt                 = self.n_iterations + 1
+        self.poisson_tol             = 1.0e-4
+        self.poisson_max_cycles      = 30
+        self.poisson_max_mgcg_cycles = 10
+        self.poisson_precond_vcycles = 1
+        self.poisson_warm_start      = True
+        self.poisson_smoother        = "jacobi"
+        self.poisson_compile         = True
+        self.poisson_nsmoothing      = 5
+        self.poisson_bc_type         = "free"
+        self.compile_adv_diff        = True
+
+        # ── Boundary conditions (3-D, all Neumann) ───────────────────
+        self.bc_type_u   = ["D", "D", "N", "N", "N", "N"]
+        self.bc_values_u = [0, 0, 0, 0, 0, 0]
+        self.bc_type_v   = ["N", "N", "D", "D", "N", "N"]
+        self.bc_values_v = [0, 0, 0, 0, 0, 0]
+        self.bc_type_w   = ["N", "N", "N", "N", "D", "D"]
+        self.bc_values_w = [0, 0, 0, 0, 0, 0]
+
+        # ── Body ─────────────────────────────────────────────────────
+        self.force_scaling = 1.0
+        self.interp_data_subfolder = "interp_data_3d"
+
+    # ── Extensions ────────────────────────────────────────────────────
+
+    def extra_simulation_extensions(self, output_folder):
+        extensions = []
+
+        # FlowViewer (requires headless=False)
+        extensions.append({
+            "loader": "lilytorch.integration.flow_viewer.FlowViewer",
             "config": {
-                "handler_path": bdim_handler_path,
-                "bdim_yaml": {
-                "solver": {
-                    "use_gpu"                : use_gpu,
-                    "nthreads"               : nthreads,
-                    "Nx"                     : Nx,
-                    "Ny"                     : Ny,
-                    "Nz"                     : Nz,
-                    "xmin"                   : xmin,
-                    "xmax"                   : xmax,
-                    "ymin"                   : ymin,
-                    "ymax"                   : ymax,
-                    "zmin"                   : zmin,
-                    "zmax"                   : zmax,
-                    "convection_method"      : convection_method,
-                    "dt"                     : timestep,
-                    "nt"                     : n_iterations+1,
-                    "nu"                     : nu,
-                    "rho"                    : water_density,
-                    "poisson_method"         : "multigrid",
-                    "poisson_tol"            : 1.0e-4,
-                    "poisson_max_cycles"     : 30,
-                    "poisson_max_mgcg_cycles": 10,
-                    "poisson_precond_vcycles": 1,
-                    "poisson_warm_start"     : True,
-                    "jacobi_weight"          : 0.7,
-                    "poisson_smoother"       : "jacobi",
-                    "poisson_compile"        : False,
-                    "poisson_nsmoothing"     : 5,
-                    "poisson_verbose"        : False,
-                    "poisson_folder"         : os.path.join(data_folder, "data"),
-                    "poisson_bc_type"        : "free",
-                    "compile_adv_diff"       : False,
-                    "rho_body"               : density,
-                },
-                "boundary_conditions": {
-                    "BC_type_u"  : ["N", "N", "N", "N", "N", "N"],
-                    "BC_values_u": [0, 0, 0, 0, 0, 0],
-                    "BC_type_v"  : ["N", "N", "N", "N", "N", "N"],
-                    "BC_values_v": [0, 0, 0, 0, 0, 0],
-                    "BC_type_w"  : ["N", "N", "N", "N", "N", "N"],
-                    "BC_values_w": [0, 0, 0, 0, 0, 0],
-                },
-                "body": {
-                    "type"           : "multi_animat",
-                    "sdf_folder"     : None,
-                    "plotting"       : False,
-                    "compute_interp" : False,
-                    "plotting_meshes": False,
-                    "save_folder"    : os.path.join(data_folder, "interp_data_3d"),
-                    "update_maps"    : {
-                        "rotation"   : "None",
-                        "translation": [None, None, None]
-                    },
-                    "suit"          : 0.0,
-                    "convexify"     : True,
-                    "scale"         : 1,
-                    "force_scaling" : 1.0,
-                },
-                "output": {
-                    "save_path"      : "",
-                    "existing_folder": output_folder,
-                    "save_frames"    : save_frames,
-                    "save_every"     : save_every,
-                    "vmin"           : vmin,
-                    "vmax"           : vmax,
-                    "save_uv"        : save_uv
-                }
-                }
-            }
-            }
-        ]
+                "field"        : "omega_z",
+                "max_spheres"  : 4000,
+                "iso_fraction" : 0.15,
+                "smooth_sigma" : 2.5,
+                "crop_boundary": 3,
+                "sphere_size"  : 0.01,
+                "update_every" : None,
+            },
+        })
 
-        # ── Flow visualisation in MuJoCo viewer (requires headless=False) ──
-        simulation_dict["extensions"] += [
-            {
-                "loader": "lilytorch.integration.flow_viewer.FlowViewer",
-                "config": {
-                    "field"        : "omega_z",
-                    "max_spheres"  : 4000,
-                    "iso_fraction" : 0.15,
-                    "smooth_sigma" : 2.5,
-                    "crop_boundary": 3,
-                    "sphere_size"  : 0.02,
-                    "update_every" : None,
-                }
-            }
-        ]
-
-    # ── CameraRecording MUST come last so it captures frames
-    # ── after FluidExtension + FlowViewer have updated the scene ──
-
-    # Auto-compute top-down camera: orient & distance to fit the pool
-    # Include wall thickness so all four borders are visible
-    pool_dims  = [xmax - xmin, ymax - ymin, zmax - zmin]
-    wt_cam     = max(round(0.08 * min(pool_dims), 4), 0.01)  # same as gen_arena_config
-    pool_dx = (xmax - xmin) + 2 * wt_cam   # full width including walls
-    pool_dy = (ymax - ymin) + 2 * wt_cam   # full depth including walls
-    fovy = 45.0                             # MuJoCo default vertical FOV
-    half_fov = tan(radians(fovy / 2))
-
-    # In top-down (elevation=-90):
-    #   azimuth 90 → x-axis horizontal, y-axis vertical
-    #   azimuth  0 → y-axis horizontal, x-axis vertical
-    # Choose orientation so pool's long axis is along the image's wide axis.
-    if pool_dx >= pool_dy:
-        # Pool longer in x → landscape, x horizontal
-        cam_azimuth = 90
-        cam_res     = [1280, 720]
-        dim_horiz   = pool_dx
-        dim_vert    = pool_dy
-    else:
-        # Pool longer in y → portrait, y horizontal
-        cam_azimuth = 0
-        cam_res     = [720, 1280]
-        dim_horiz   = pool_dy
-        dim_vert    = pool_dx
-
-    aspect_ratio = cam_res[0] / cam_res[1]
-    d_for_vert   = (dim_vert  / 2) / half_fov
-    d_for_horiz  = (dim_horiz / 2) / (half_fov * aspect_ratio)
-    cam_distance = max(d_for_vert, d_for_horiz) * 1.30   # 30 % margin for comfort
-
-    simulation_dict["extensions"] += [
-        {
+        # Top-down camera auto-fitted to the pool
+        cam = top_down_camera_config(
+            self.xmin, self.xmax,
+            self.ymin, self.ymax,
+            self.zmin, self.zmax,
+        )
+        extensions.append({
             "loader": "farms_mujoco.sensors.camera.CameraRecording",
             "config": {
-                "path": os.path.join(output_folder, "output", "video.mp4"),
-                "animat_id": None,
-                "fps": 30,
-                "speed": 1.0,
-                "azimuth": cam_azimuth,
-                "elevation": -90,
-                "distance": cam_distance,
+                "path"            : os.path.join(output_folder, "output", "video.mp4"),
+                "animat_id"       : None,
+                "fps"             : 30,
+                "speed"           : 1.0,
                 "angular_velocity": 0,
-                "offset": [(xmin + xmax) / 2, (ymin + ymax) / 2, (zmin + zmax) / 2],
-                "resolution": cam_res
-            }
-        }
-    ]
+                **cam,
+            },
+        })
 
-    pyobject2yaml(
-        os.path.join(output_folder, 'simulation_config.yaml'),
-        simulation_dict
-    )
-
-def gen_sh_config(output_folder):
-
-    sh_str = f"""#!/bin/bash
-    farmsim --experiment_config experiment_config.yaml "$@"
-    """
-    with open(
-        os.path.join(output_folder, 'run.sh'),
-        'w'
-    ) as f:
-        f.write(sh_str)
-
-
-def single_run():
-
-    output_folder = gen_new_folder(stack_folder)
-
-    os.makedirs(
-        output_folder, exist_ok=True
-    )
-    print(
-        "Saving configs to folder:", output_folder
-    )
-
-    gen_animat_config(output_folder)
-    gen_arena_config(output_folder)
-    gen_simulation_config(output_folder)
-    gen_experiment_config(output_folder)
-    gen_sh_config(output_folder)
-    os.chdir(output_folder)
-    subprocess.run(['bash', 'run.sh'])
+        return extensions
 
 
 if __name__ == "__main__":
-
-    single_run()
+    SimConfig().run()

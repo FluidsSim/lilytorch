@@ -14,8 +14,8 @@ where c_{d+}, c_{d-} are face-averaged coefficients along dimension *d*.
 Usage (backward-compatible with old 2-D interface)::
 
     ps = PoissonSolver(dtype, device, h, tol=1e-2)
-    p, r = ps.solve_multigrid(f, p0, c, ch=ch, cv=cv)        # 2-D
-    p, r = ps.solve_multigrid(f, p0, c, ch=ch, cv=cv, cw=cw)  # 3-D
+    p, r = ps.solve_multigrid(f, p0, ch=ch, cv=cv)        # 2-D
+    p, r = ps.solve_multigrid(f, p0, ch=ch, cv=cv, cw=cw)  # 3-D
 """
 
 import torch
@@ -829,30 +829,32 @@ class PoissonSolver:
     # ------------------------------------------------------------------
     # Public V-cycle  (wrapper that builds face_arrs from kwargs)
     # ------------------------------------------------------------------
-    def vcycle(self, f, p, c, h2, **kwargs):
-        """V-cycle accepting legacy ch/cv/cw kwargs."""
+    def vcycle(self, f, p, **kwargs):
+        """V-cycle with face-coefficient arrays ch/cv(/cw)."""
         ndim = f.ndim
         face_arrs, kwargs = self._face_arrs_from_kwargs(kwargs, ndim)
         if face_arrs is None:
-            face_arrs = self._default_face_arrs(c, ndim)
-        return self._vcycle(f, p, face_arrs, h2)
+            raise ValueError(
+                "vcycle: ch/cv (2-D) or ch/cv/cw (3-D) keyword "
+                "arguments are required."
+            )
+        return self._vcycle(f, p, face_arrs, 1)
 
     # ------------------------------------------------------------------
     # Top-level solve
     # ------------------------------------------------------------------
-    def solve_multigrid(self, f, p0, c, **kwargs):
+    def solve_multigrid(self, f, p0, **kwargs):
         """Solve with multigrid V-cycles.
 
         Parameters
         ----------
         f  : RHS on the interior grid  (no ghost cells)
         p0 : initial guess (with ghost cells)
-        c  : cell-centred coefficient field (with ghost cells)
-        ch, cv[, cw] : optional pre-computed face-averaged coefficients
+        ch, cv[, cw] : pre-computed face-averaged coefficients
         """
         p = p0.clone().detach()
         for cycle in range(self.max_vcycles):
-            p, r = self.vcycle(self.h2 * f, p, c, 1, **kwargs)
+            p, r = self.vcycle(self.h2 * f, p, **kwargs)
             r_err = self.l2_norm(r)
             if r_err < self.tol:
                 break
@@ -889,7 +891,7 @@ class PoissonSolver:
     # ------------------------------------------------------------------
     # MGCG  (multigrid-preconditioned conjugate gradient)
     # ------------------------------------------------------------------
-    def solve_mgcg(self, f, p0, c, **kwargs):
+    def solve_mgcg(self, f, p0, **kwargs):
         """Solve with CG using geometric multigrid V-cycles as preconditioner.
 
         This is the standard MGCG algorithm:  at each CG iteration the
@@ -909,13 +911,15 @@ class PoissonSolver:
         ----------
         f  : RHS on the interior grid  (no ghost cells)
         p0 : initial guess (with ghost cells)
-        c  : cell-centred coefficient field (with ghost cells)
-        ch, cv[, cw] : optional pre-computed face-averaged coefficients
+        ch, cv[, cw] : pre-computed face-averaged coefficients
         """
         ndim = f.ndim
         face_arrs, extra = self._face_arrs_from_kwargs(kwargs, ndim)
         if face_arrs is None:
-            face_arrs = self._default_face_arrs(c, ndim)
+            raise ValueError(
+                "solve_mgcg: ch/cv (2-D) or ch/cv/cw (3-D) keyword "
+                "arguments are required."
+            )
         cfaces = self._extract_cfaces(face_arrs, ndim)
         inner  = _inner(ndim)
 
@@ -1024,7 +1028,7 @@ if __name__ == "__main__":
     ps = PoissonSolver(dtype, device, h, tol=1e-8, max_vcycles=100,
                        nsmoothing=10, verbose=True)
     t0 = time.time()
-    p, r = ps.solve_multigrid(f_inner, p0, c, ch=ch, cv=cv)
+    p, r = ps.solve_multigrid(f_inner, p0, ch=ch, cv=cv)
     elapsed = time.time() - t0
 
     err = torch.abs(p - phi_exact)
@@ -1055,7 +1059,7 @@ if __name__ == "__main__":
     ps3 = PoissonSolver(dtype, device, h3, tol=1e-8, max_vcycles=100,
                         nsmoothing=10, verbose=True)
     t0 = time.time()
-    p3, r3 = ps3.solve_multigrid(f3_inner, p3_0, c3, ch=ch3, cv=cv3, cw=cw3)
+    p3, r3 = ps3.solve_multigrid(f3_inner, p3_0, ch=ch3, cv=cv3, cw=cw3)
     elapsed = time.time() - t0
 
     err3 = torch.abs(p3 - phi3)
@@ -1070,7 +1074,7 @@ if __name__ == "__main__":
                           max_cycles=30, max_vcycles=1, nsmoothing=10,
                           precond_vcycles=1, verbose=True)
     t0 = time.time()
-    p_cg, r_cg = ps_cg.solve_mgcg(f_inner, p0.clone(), c, ch=ch, cv=cv)
+    p_cg, r_cg = ps_cg.solve_mgcg(f_inner, p0.clone(), ch=ch, cv=cv)
     elapsed_cg = time.time() - t0
     err_cg = torch.abs(p_cg - phi_exact)
     linf_cg = err_cg[1:-1, 1:-1].max().item()
@@ -1081,7 +1085,7 @@ if __name__ == "__main__":
                            max_cycles=30, max_vcycles=1, nsmoothing=10,
                            precond_vcycles=1, verbose=True)
     t0 = time.time()
-    p3_cg, r3_cg = ps3_cg.solve_mgcg(f3_inner, p3_0.clone(), c3,
+    p3_cg, r3_cg = ps3_cg.solve_mgcg(f3_inner, p3_0.clone(),
                                        ch=ch3, cv=cv3, cw=cw3)
     elapsed_cg3 = time.time() - t0
     err3_cg = torch.abs(p3_cg - phi3)
@@ -1121,7 +1125,7 @@ if __name__ == "__main__":
                              max_vcycles=50, nsmoothing=10, w=0.8,
                              verbose=True)
     t0 = time.time()
-    p_mg, _ = ps_vc_mg.solve_multigrid(f_vc, p0_vc.clone(), c_vc,
+    p_mg, _ = ps_vc_mg.solve_multigrid(f_vc, p0_vc.clone(),
                                         ch=ch_vc, cv=cv_vc)
     t_mg = time.time() - t0
     print(f"  Time: {t_mg:.3f}s")
@@ -1131,7 +1135,7 @@ if __name__ == "__main__":
                              max_cycles=50, max_vcycles=1, nsmoothing=10,
                              w=0.8, precond_vcycles=1, verbose=True)
     t0 = time.time()
-    p_mgcg, _ = ps_vc_cg.solve_mgcg(f_vc, p0_vc.clone(), c_vc,
+    p_mgcg, _ = ps_vc_cg.solve_mgcg(f_vc, p0_vc.clone(),
                                       ch=ch_vc, cv=cv_vc)
     t_mgcg = time.time() - t0
     print(f"  Time: {t_mgcg:.3f}s")

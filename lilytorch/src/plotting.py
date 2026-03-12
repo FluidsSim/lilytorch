@@ -1,15 +1,22 @@
 import os
+import threading
 
 import matplotlib
 matplotlib.use("Agg")          # non-interactive backend — thread-safe, no GUI
 import matplotlib.pyplot as plt
-import matplotlib as mpl
-import numpy as np
-from scipy.interpolate import griddata
-from matplotlib import cm
 import matplotlib.colors as colors
-matplotlib.rc('font', **{"size":20})
-plt.rcParams["figure.figsize"] = (15,15)
+import numpy as np
+from matplotlib import cm
+from scipy.interpolate import griddata
+
+# VTK / PyVista is **not** thread-safe: the vtkFreeTypeTools singleton,
+# OpenGL contexts, and internal caches are shared across threads.
+# Concurrent Plotter instances cause heap corruption ("corrupted size
+# vs. prev_size") and FreeType failures.  Serialise all VTK work.
+_vtk_lock = threading.Lock()
+
+matplotlib.rc('font', **{"size": 20})
+plt.rcParams["figure.figsize"] = (15, 15)
 
 def plot_time_histories(
     time: np.array,
@@ -329,7 +336,7 @@ def plot2D(
         aspect='auto',
         origin='lower',
         interpolation=interpolation,
-        norm=mpl.colors.LogNorm() if log else None
+        norm=matplotlib.colors.LogNorm() if log else None
     )
 
     if cmap is not None:
@@ -350,8 +357,8 @@ def plot2D(
             aspect='auto',
             origin='lower',
             interpolation='none',
-            cmap=mpl.cm.jet,
-            norm=mpl.colors.LogNorm() if log else None
+            cmap=matplotlib.cm.jet,
+            norm=matplotlib.colors.LogNorm() if log else None
         )
 
     plt.xlabel(labels[0])
@@ -362,18 +369,29 @@ def plot2D(
         if closefig:
             plt.close()
 
-def _save_figure(save_path, name, iteration, fmt="png"):
-    """Save the current pyplot figure into *save_path/name/name_ITER.fmt*."""
+def _save_figure(save_path, name, iteration, fmt="png", fig=None):
+    """Save a figure into *save_path/name/name_ITER.fmt*.
+
+    When *fig* is given the save is fully thread-safe (no pyplot global
+    state involved).  Falls back to ``plt.gcf()`` for legacy callers.
+    """
+    if fig is None:
+        fig = plt.gcf()
     folder = f"{save_path}/{name}"
     os.makedirs(folder, exist_ok=True)
-    plt.savefig(
+    fig.savefig(
         f"{folder}/{name}_{iteration:06d}.{fmt}",
         bbox_inches="tight",
-        facecolor=plt.gcf().get_facecolor(),
+        facecolor=fig.get_facecolor(),
         edgecolor="none",
         dpi=150,
     )
-    plt.close()
+    # If the figure is managed by pyplot, close it there;
+    # otherwise just delete the canvas reference so it can be GC'd.
+    try:
+        plt.close(fig)
+    except Exception:
+        pass
 
 
 def _vibrant_rdbu():
@@ -399,6 +417,144 @@ def _vibrant_rdbu():
 VIBRANT_RDBU = _vibrant_rdbu()
 
 
+def _resolve_body_color(body, index, body_colors, body_default_color):
+    """Return a matplotlib-compatible RGBA tuple for one body.
+
+    Priority: explicit *body_colors[index]* → ``body.mujoco_rgba``
+    → *body_default_color* → ``(0, 0, 0, 1)``.
+    """
+    from matplotlib.colors import to_rgba
+    if body_colors is not None and index < len(body_colors):
+        return to_rgba(body_colors[index])
+    mj = getattr(body, "mujoco_rgba", None)
+    if mj is not None:
+        # MuJoCo rgba is [R, G, B, A] in 0‥1
+        return tuple(float(c) for c in mj[:4])
+    if body_default_color is not None:
+        return to_rgba(body_default_color)
+    return (0.0, 0.0, 0.0, 1.0)
+
+
+def build_body_mu0_rgba(
+    bodies,
+    grid_shape,
+    eps,
+    *,
+    body_colors=None,
+    body_default_color=None,
+    sdf_vals=None,           # (B, *grid_shape) numpy array – batched per-body
+                             # SDFs from comp.sdf_vals.  Used when individual
+                             # body.sdf_val is not available (BDIMhandler path).
+    slice_axis=None,         # None for 2-D; "xy", "xz", "yz" for 3-D slices
+    slice_index=None,        # index along the sliced axis
+):
+    """Build an ``(Nx, Ny, 4)`` RGBA overlay image for body interiors.
+
+    Each body's cell-centred SDF is converted to a smoothed Heaviside
+    *mu0* (0 inside body → 1 in fluid).  The body interior
+    ``(1 - mu0)`` is tinted with the body's MuJoCo / user colour.
+    Where multiple bodies overlap, the deepest (smallest SDF) wins.
+
+    SDF source priority (per body *bi*):
+      1. ``sdf_vals[bi]``  – batched tensor from ``comp.sdf_vals``
+      2. ``body.sdf_val``  – set by ``BodyAnalytical.update()``
+    If neither is available the body is skipped.
+
+    Parameters
+    ----------
+    bodies : list
+        Body objects (used for colour resolution and optional ``sdf_val``).
+    grid_shape : tuple
+        ``(Nx, Ny)`` for 2-D or ``(Nx, Ny, Nz)`` for 3-D before slicing.
+    eps : float
+        BDIM smoothing half-width (same as the solver uses).
+    body_colors, body_default_color
+        Colour overrides (same semantics as ``plot_field_2d``).
+    sdf_vals : np.ndarray, optional
+        ``(B, Nx, Ny)`` or ``(B, Nx, Ny, Nz)`` pre-computed per-body SDF
+        array (already on CPU as numpy).  Preferred over ``body.sdf_val``.
+    slice_axis, slice_index
+        For 3-D fields: which plane ("xy", "xz", "yz") and at what index.
+
+    Returns
+    -------
+    rgba : np.ndarray, shape ``(Nx', Ny', 4)``, float32 in [0, 1]
+        Ready for ``ax.imshow(rgba.transpose(1, 0, 2) …)``.
+        Alpha is ``1-mu0`` inside bodies, 0 in fluid.
+    """
+    if bodies is None or len(bodies) == 0:
+        return None
+
+    Nx, Ny = grid_shape[0], grid_shape[1]
+
+    # Pre-allocate correctly based on dimensionality
+    if slice_axis is None:
+        rgba = np.zeros((Nx, Ny, 4), dtype=np.float32)
+        best_sdf = np.full((Nx, Ny), np.inf, dtype=np.float32)
+    else:
+        Nz = grid_shape[2]
+        if slice_axis == "xy":
+            s2d = (Nx, Ny)
+        elif slice_axis == "xz":
+            s2d = (Nx, Nz)
+        elif slice_axis == "yz":
+            s2d = (Ny, Nz)
+        else:
+            return None
+        rgba = np.zeros((*s2d, 4), dtype=np.float32)
+        best_sdf = np.full(s2d, np.inf, dtype=np.float32)
+
+    for bi, body in enumerate(bodies):
+        # ---- obtain per-body SDF ----
+        sdf_np = None
+        # Priority 1: batched sdf_vals from comp.sdf_vals
+        if sdf_vals is not None and bi < sdf_vals.shape[0]:
+            sdf_np = sdf_vals[bi].astype(np.float32)
+        else:
+            # Priority 2: individual body.sdf_val
+            sdf_raw = getattr(body, "sdf_val", None)
+            if sdf_raw is not None:
+                sdf_np = np.asarray(
+                    sdf_raw.detach().cpu().numpy() if hasattr(sdf_raw, "detach") else sdf_raw,
+                    dtype=np.float32,
+                )
+        if sdf_np is None:
+            continue
+
+        # Slice for 3-D
+        if slice_axis is not None and sdf_np.ndim == 3:
+            if slice_axis == "xy":
+                sdf_np = sdf_np[:, :, slice_index]
+            elif slice_axis == "xz":
+                sdf_np = sdf_np[:, slice_index, :]
+            elif slice_axis == "yz":
+                sdf_np = sdf_np[slice_index, :, :]
+
+        # Smoothed Heaviside: mu0 ∈ [0,1], 0 = deep inside body, 1 = fluid
+        mu0 = np.where(sdf_np >= eps, 1.0, np.where(
+            sdf_np <= -eps, 0.0,
+            0.5 * (1.0 + sdf_np / eps + np.sin(np.pi * sdf_np / eps) / np.pi)
+        )).astype(np.float32)
+        body_alpha = 1.0 - mu0   # body interior → 1, fluid → 0
+
+        colour = _resolve_body_color(body, bi, body_colors, body_default_color)
+
+        # Only overwrite cells where this body is deeper (smaller SDF)
+        deeper = sdf_np < best_sdf
+        inside = deeper & (body_alpha > 0)
+        if not np.any(inside):
+            continue
+        best_sdf[inside] = sdf_np[inside]
+        rgba[inside, 0] = colour[0]
+        rgba[inside, 1] = colour[1]
+        rgba[inside, 2] = colour[2]
+        rgba[inside, 3] = body_alpha[inside] * colour[3]
+
+    if np.max(rgba[:, :, 3]) == 0:
+        return None  # nothing to draw
+    return rgba
+
+
 def plot_field_2d(
     field,              # 2-D numpy array (Nx, Ny)
     extent,             # (xmin, xmax, ymin, ymax) for imshow
@@ -409,8 +565,21 @@ def plot_field_2d(
     vmin=None,
     vmax=None,
     bodies=None,        # list of body objects (optional, for contour overlay)
+    sdf_2d=None,        # 2-D numpy array (Nx, Ny) – SDF; zero-contour drawn as body shape
     cmap=None,
     fmt="png",
+    axis_labels=None,   # tuple (xlabel, ylabel); defaults to ("x [m]", "y [m]")
+    body_colors=None,   # per-body colour list; each entry is an RGBA/RGB tuple
+                        # or matplotlib colour string.  When ``None`` the
+                        # function first tries ``body.mujoco_rgba`` (set
+                        # from the SDF/MuJoCo visual material), then falls
+                        # back to ``body_default_color``, then to black.
+    body_default_color=None,  # single fallback colour for all bodies
+    body_fill_color=None,     # SDF contourf fill colour (default "#d0d0d0")
+    body_mu0_rgba=None,       # pre-built RGBA overlay (Nx, Ny, 4) from
+                              # build_body_mu0_rgba(); when provided the
+                              # body interior is painted with per-body
+                              # MuJoCo colours via mu0 blending.
 ):
     """
     Single unified 2-D field plot.
@@ -418,19 +587,35 @@ def plot_field_2d(
     * Symmetric auto-range when *vmin*/*vmax* are ``None``.
     * Optional body contour scatter overlay – body is always shown even
       when it partially or fully exits the fluid domain.
-    * Black-background aesthetic with vivid red/blue colormap inspired by
-      Tekinalp et al. (2024).
+    * White-background aesthetic with standard red/blue colormap.
+
+    Per-body colouring
+    ------------------
+    When *body_mu0_rgba* is given (an ``(Nx, Ny, 4)`` RGBA array built by
+    ``build_body_mu0_rgba``), each body's interior is painted using the
+    smoothed Heaviside ``mu0`` blended with its MuJoCo / user colour.
+    This replaces the single-grey SDF ``contourf`` fill.
+
+    Alternatively, *body_colors* can override the contour-scatter colour.
+    The function inspects each body's ``mujoco_rgba`` attribute (set from
+    the SDF/MuJoCo ``<visual><material><diffuse>`` tag).  If that is also
+    absent, *body_default_color* is used.  The ultimate fallback is black.
     """
     if cmap is None:
-        cmap = VIBRANT_RDBU
+        cmap = "RdBu_r"
 
     field_np = np.asarray(field)
 
-    # ---- symmetric auto-range ----
+    # ---- symmetric auto-range (only when vmin/vmax not set) ----
     if vmin is None or vmax is None:
-        limit = max(abs(field_np.min()), abs(field_np.max())) / 2
+        # Crop ghost / boundary cells (typically 1–2 layers) so that
+        # boundary artefacts do not dictate the colour range.
+        g = min(2, *(s // 4 for s in field_np.shape))   # guard width
+        interior = field_np[g:-g, g:-g] if g > 0 else field_np
+        abs_int  = np.abs(interior)
+        limit    = float(np.percentile(abs_int, 99.5))
         if limit == 0:
-            limit = 1.0
+            limit = float(abs_int.max()) or 1.0
         vmin, vmax = -limit, limit
 
     # ---- figure size from domain aspect ratio ----
@@ -440,17 +625,17 @@ def plot_field_2d(
     fig_w   = max(x_range * scale_f, 4)
     fig_h   = max(y_range * scale_f, 4)
 
-    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+    # Use the OO API (Figure + Canvas) instead of plt.subplots so that
+    # plotting is thread-safe when _submit_io offloads to a thread pool.
+    from matplotlib.figure import Figure
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    fig = Figure(figsize=(fig_w, fig_h))
+    FigureCanvasAgg(fig)           # attach renderer so savefig works
+    ax  = fig.add_subplot(111)
 
-    # ---- dark theme styling ----
-    fig.patch.set_facecolor("black")
-    ax.set_facecolor("black")
-    for spine in ax.spines.values():
-        spine.set_color("white")
-    ax.tick_params(colors="white", which="both")
-    ax.xaxis.label.set_color("white")
-    ax.yaxis.label.set_color("white")
-    ax.title.set_color("white")
+    # ---- white background styling ----
+    fig.patch.set_facecolor("white")
+    ax.set_facecolor("white")
 
     # ---- heatmap ----
     im = ax.imshow(
@@ -463,22 +648,67 @@ def plot_field_2d(
         interpolation=None,
     )
     cbar = fig.colorbar(im, ax=ax)
-    cbar.ax.yaxis.set_tick_params(color="white")
-    plt.setp(cbar.ax.yaxis.get_ticklabels(), color="white")
-    cbar.outline.set_edgecolor("white")
+
+    # ---- body interior colouring via mu0 RGBA overlay ----
+    if body_mu0_rgba is not None:
+        # Overlay the pre-built per-body colour image (transparent in fluid)
+        ax.imshow(
+            np.transpose(body_mu0_rgba, (1, 0, 2)),   # (Ny, Nx, 4)
+            extent=extent,
+            origin="lower",
+            aspect="equal",
+            interpolation="nearest",
+            zorder=4,
+        )
+        # Still draw the SDF zero-contour outline so the body edges are crisp
+        if sdf_2d is not None:
+            sdf_np2 = np.asarray(sdf_2d)
+            sdf_min = float(sdf_np2.min())
+            if sdf_min < 0.0:
+                sx = np.linspace(extent[0], extent[1], sdf_np2.shape[0])
+                sy = np.linspace(extent[2], extent[3], sdf_np2.shape[1])
+                SY, SX = np.meshgrid(sy, sx)
+                ax.contour(SX, SY, sdf_np2, levels=[0.0], colors="black",
+                           linewidths=2.5, zorder=5)
+    elif sdf_2d is not None:
+        # Fallback: single-colour fill + outline
+        _fill_col = body_fill_color if body_fill_color is not None else "#d0d0d0"
+        sdf_np2 = np.asarray(sdf_2d)
+        sdf_min = float(sdf_np2.min())
+        # Only draw body when the slice actually intersects the interior
+        # (sdf < 0 inside body).  If sdf_min >= 0 the body is entirely
+        # outside this slice plane → skip to avoid matplotlib errors.
+        if sdf_min < 0.0:
+            sx = np.linspace(extent[0], extent[1], sdf_np2.shape[0])
+            sy = np.linspace(extent[2], extent[3], sdf_np2.shape[1])
+            SY, SX = np.meshgrid(sy, sx)  # SX(Nx,Ny), SY(Nx,Ny)
+            # Filled interior
+            ax.contourf(SX, SY, sdf_np2, levels=[sdf_min, 0.0],
+                        colors=[_fill_col], zorder=4)
+            # Thick black outline
+            ax.contour(SX, SY, sdf_np2, levels=[0.0], colors="black",
+                       linewidths=2.5, zorder=5)
 
     # ---- body contours (always shown, even outside domain) ----
     view_xmin, view_xmax = extent[0], extent[1]
     view_ymin, view_ymax = extent[2], extent[3]
 
     if bodies is not None:
-        for body in bodies:
+        for bi, body in enumerate(bodies):
             cnt = getattr(body, "cnt_update", None)
             mask = getattr(body, "mask", None)
             if cnt is not None and mask is not None:
                 bx = cnt[0][mask].cpu().numpy()
                 by = cnt[1][mask].cpu().numpy()
-                ax.scatter(bx, by, c="white", s=0.5, zorder=5,
+                # ---- resolve per-body colour ----
+                #  priority: explicit body_colors > body.mujoco_rgba > body_default_color > black
+                if body_colors is not None and bi < len(body_colors):
+                    _bc = body_colors[bi]
+                else:
+                    _bc = getattr(body, "mujoco_rgba", None)
+                if _bc is None:
+                    _bc = body_default_color if body_default_color is not None else "black"
+                ax.scatter(bx, by, c=[_bc], s=0.5, zorder=5,
                            edgecolors="none", linewidths=0)
                 # expand view to include the full robot body
                 if len(bx) > 0:
@@ -505,10 +735,11 @@ def plot_field_2d(
     ax.set_xlim(view_xmin - pad_x, view_xmax + pad_x)
     ax.set_ylim(view_ymin - pad_y, view_ymax + pad_y)
 
-    ax.set_xlabel("x [m]")
-    ax.set_ylabel("y [m]")
+    _xlabel, _ylabel = axis_labels if axis_labels else ("x [m]", "y [m]")
+    ax.set_xlabel(_xlabel)
+    ax.set_ylabel(_ylabel)
     ax.set_title(name)
-    _save_figure(save_path, name, iteration, fmt)
+    _save_figure(save_path, name, iteration, fmt, fig=fig)
 
 
 def _nearest_index(coord_1d, target=0.0):
@@ -526,9 +757,16 @@ def plot_field_3d_slices(
     vmin=None,
     vmax=None,
     bodies=None,
+    sdf_3d=None,        # 3-D numpy array (Nx, Ny, Nz) – SDF; sliced per plane
     slice_indices=None,  # dict {"xy": k, "xz": j, "yz": i}  (None → origin)
     cmap=None,
     fmt="png",
+    body_colors=None,
+    body_default_color=None,
+    body_fill_color=None,
+    body_mu0_coloring=False,  # when True, build per-body mu0 RGBA overlays
+    body_eps=None,            # BDIM eps for mu0 computation (required if body_mu0_coloring)
+    sdf_vals=None,            # (B, Nx, Ny, Nz) numpy – batched per-body SDFs
 ):
     """
     For a 3-D field, produce three orthogonal mid-plane slices and save each
@@ -546,28 +784,64 @@ def plot_field_3d_slices(
     j_xz = si.get("xz", _nearest_index(y, 0.0))
     i_yz = si.get("yz", _nearest_index(x, 0.0))
 
+    sdf_np = np.asarray(sdf_3d) if sdf_3d is not None else None
+
+    # ---- build per-body mu0 RGBA overlays for each slice ----
+    mu0_xy = mu0_xz = mu0_yz = None
+    if body_mu0_coloring and bodies is not None and body_eps is not None:
+        mu0_xy = build_body_mu0_rgba(
+            bodies, (Nx, Ny, Nz), body_eps,
+            body_colors=body_colors, body_default_color=body_default_color,
+            sdf_vals=sdf_vals,
+            slice_axis="xy", slice_index=k_xy,
+        )
+        mu0_xz = build_body_mu0_rgba(
+            bodies, (Nx, Ny, Nz), body_eps,
+            body_colors=body_colors, body_default_color=body_default_color,
+            sdf_vals=sdf_vals,
+            slice_axis="xz", slice_index=j_xz,
+        )
+        mu0_yz = build_body_mu0_rgba(
+            bodies, (Nx, Ny, Nz), body_eps,
+            body_colors=body_colors, body_default_color=body_default_color,
+            sdf_vals=sdf_vals,
+            slice_axis="yz", slice_index=i_yz,
+        )
+
     # ---- XY slice (fixed z) ----
     extent_xy = (float(x[0]), float(x[-1]), float(y[0]), float(y[-1]))
+    sdf_xy = sdf_np[:, :, k_xy] if sdf_np is not None else None
     plot_field_2d(
         field_np[:, :, k_xy], extent_xy, f"{name}_xy_k{k_xy}",
         iteration, save_path,
-        vmin=vmin, vmax=vmax, bodies=bodies, cmap=cmap, fmt=fmt,
+        vmin=vmin, vmax=vmax, bodies=bodies, sdf_2d=sdf_xy, cmap=cmap, fmt=fmt,
+        axis_labels=("x [m]", "y [m]"),
+        body_colors=body_colors, body_default_color=body_default_color,
+        body_fill_color=body_fill_color, body_mu0_rgba=mu0_xy,
     )
 
     # ---- XZ slice (fixed y) ----
     extent_xz = (float(x[0]), float(x[-1]), float(z[0]), float(z[-1]))
+    sdf_xz = sdf_np[:, j_xz, :] if sdf_np is not None else None
     plot_field_2d(
         field_np[:, j_xz, :], extent_xz, f"{name}_xz_j{j_xz}",
         iteration, save_path,
-        vmin=vmin, vmax=vmax, bodies=None, cmap=cmap, fmt=fmt,
+        vmin=vmin, vmax=vmax, bodies=None, sdf_2d=sdf_xz, cmap=cmap, fmt=fmt,
+        axis_labels=("x [m]", "z [m]"),
+        body_colors=body_colors, body_default_color=body_default_color,
+        body_fill_color=body_fill_color, body_mu0_rgba=mu0_xz,
     )
 
     # ---- YZ slice (fixed x) ----
     extent_yz = (float(y[0]), float(y[-1]), float(z[0]), float(z[-1]))
+    sdf_yz = sdf_np[i_yz, :, :] if sdf_np is not None else None
     plot_field_2d(
         field_np[i_yz, :, :], extent_yz, f"{name}_yz_i{i_yz}",
         iteration, save_path,
-        vmin=vmin, vmax=vmax, bodies=None, cmap=cmap, fmt=fmt,
+        vmin=vmin, vmax=vmax, bodies=None, sdf_2d=sdf_yz, cmap=cmap, fmt=fmt,
+        axis_labels=("y [m]", "z [m]"),
+        body_colors=body_colors, body_default_color=body_default_color,
+        body_fill_color=body_fill_color, body_mu0_rgba=mu0_yz,
     )
 
 
@@ -581,8 +855,8 @@ def plot_field_3d(
     sdf_3d=None,        # optional SDF array for body isosurface (same shape)
     iso_value=None,     # fixed isosurface threshold (overrides auto when set)
     iso_fraction=0.15,  # threshold = iso_fraction * max(|smoothed field|)
-    smooth_sigma=2.5,   # Gaussian smoothing (in grid-cells) before isosurface extraction
-    crop_boundary=3,    # number of cells to crop from each domain face before rendering
+    smooth_sigma=0,   # Gaussian smoothing (in grid-cells) before isosurface extraction
+    crop_boundary=0,    # number of cells to crop from each domain face before rendering
     window_size=(3840, 2160),
     image_scale=2,          # multiplier on window_size for the saved image
     fmt="png",
@@ -615,6 +889,23 @@ def plot_field_3d(
         print("[plot_field_3d] pyvista not installed – skipping 3D render.")
         return
 
+    # Serialise all VTK/PyVista work – VTK is not thread-safe.
+    with _vtk_lock:
+        _plot_field_3d_locked(
+            pv, field_3d, coords, name, iteration, save_path,
+            sdf_3d=sdf_3d, iso_value=iso_value, iso_fraction=iso_fraction,
+            smooth_sigma=smooth_sigma, crop_boundary=crop_boundary,
+            window_size=window_size, image_scale=image_scale, fmt=fmt,
+        )
+
+
+def _plot_field_3d_locked(
+    pv, field_3d, coords, name, iteration, save_path, *,
+    sdf_3d=None, iso_value=None, iso_fraction=0.15,
+    smooth_sigma=0, crop_boundary=0,
+    window_size=(3840, 2160), image_scale=2, fmt="png",
+):
+    """Inner implementation of plot_field_3d – must be called under _vtk_lock."""
     pv.OFF_SCREEN = True
 
     field_np = np.asarray(field_3d, dtype=np.float64)
@@ -771,8 +1062,8 @@ def plot_field_3d(
         try:
             pl.add_text(
                 info_text,
-                position="upper_right",
-                font_size=10,
+                position="upper_left",
+                font_size=35,
                 color="white",
                 shadow=True,
             )
@@ -783,7 +1074,12 @@ def plot_field_3d(
     cam_pos = (cx - 0.8 * Lmax, cy - 0.6 * Lmax, cz + 1.5 * Lmax)
     pl.camera_position = [cam_pos, focal, (0, 0, 1)]
     pl.camera.parallel_projection = True
-    pl.camera.parallel_scale = Lmax * 0.7
+    # Use the diagonal of the bounding box so elongated domains fill the frame
+    Lx = bds[1] - bds[0]
+    Ly = bds[3] - bds[2]
+    Lz = bds[5] - bds[4]
+    diag = (Lx**2 + Ly**2 + Lz**2) ** 0.5
+    pl.camera.parallel_scale = diag * 0.38
 
     # ---- save high-resolution screenshot ----
     out_dir = os.path.join(save_path, f"{name}_3d")
@@ -792,260 +1088,3 @@ def plot_field_3d(
     pl.screenshot(out_path, scale=image_scale)
     pl.close()
 
-
-def save_vtk(
-    fields,            # dict  {"u": array, "v": array, ...}
-    coords,            # dict  {"x": 1d, "y": 1d, "z": 1d}
-    iteration,
-    save_path,
-    *,
-    name_prefix="flow",
-):
-    """
-    Write a 3-D rectilinear-grid VTK file readable by ParaView.
-    Requires PyVista (already available in the env).
-    """
-    try:
-        import pyvista as pv
-    except ImportError:
-        print("[save_vtk] pyvista not installed – skipping VTK export.")
-        return
-
-    x = np.asarray(coords["x"])
-    y = np.asarray(coords["y"])
-    z = np.asarray(coords["z"])
-
-    grid = pv.RectilinearGrid(x, y, z)
-
-    for fname, fdata in fields.items():
-        arr = np.asarray(fdata)
-        # RectilinearGrid point data expects Fortran-order flattening
-        grid.point_data[fname] = arr.flatten(order="F")
-
-    vtk_dir = f"{save_path}/vtk"
-    os.makedirs(vtk_dir, exist_ok=True)
-    out_path = f"{vtk_dir}/{name_prefix}_{iteration:06d}.vtr"
-    grid.save(out_path)
-
-
-# ---------------------------------------------------------------------------
-#   Legacy helpers  (kept for backward-compat, new code uses plot_field_*)
-# ---------------------------------------------------------------------------
-
-def save_fig_to_dedicated_folder(
-    save_path   : str,
-    quantity_str: str,
-    iteration   : int,
-    type        : str = "png"
-):
-    ''' Save plot to dedicated folder '''
-
-    # Create folder for the current plot
-    target_folder = f'{save_path}/{quantity_str}'
-    os.makedirs(target_folder, exist_ok=True)
-
-    # Save plot
-    target_file   = f'{target_folder}/{quantity_str}_{iteration}.{type}'
-    plt.savefig(target_file)
-    plt.close()
-
-    return
-
-def plot_composite_countour(X,Y,properties,iteration,save_path,name):
-    plt.figure(figsize=(20,10))
-    for prop in properties:
-        d = prop[0].cpu()
-        plt.contour(X,Y,d, colors='k', levels=[0],linewidths=0.3)
-    save_fig_to_dedicated_folder(save_path, name, iteration)
-
-def plot2d_imshow_only(u,extent,iteration,save_path,name,vmin,vmax):
-    if vmin is None:
-        limit = max(abs(u.min()), abs(u.max()))
-        vmin = -limit
-        vmax = limit
-    plt.figure(figsize=(20,10))
-    plt.imshow(
-        u.T,
-        vmin   = vmin,
-        vmax   = vmax,
-        extent = extent,
-        origin = "lower",
-        cmap = cm.RdBu,
-        interpolation=None
-    )
-    plt.colorbar()
-    save_fig_to_dedicated_folder(save_path, name, iteration)
-
-def plot2d_imshow_composite(X,Y,u,properties,extent,iteration,save_path,name,vmin,vmax):
-    if vmin is None:
-        limit = max(abs(u.min()), abs(u.max())) #/2
-        vmin = -limit
-        vmax = limit
-    plt.figure(figsize=(20,10))
-    for prop in properties:
-        d = prop[0].cpu()
-        plt.contour(X,Y,d, colors='k', levels=[0],linewidths=0.3)
-    plt.imshow(
-        u.detach().numpy().T,
-        vmin   = vmin,
-        vmax   = vmax,
-        extent = extent,
-        origin = "lower",
-        cmap = cm.RdBu,
-        interpolation=None
-    )
-    plt.colorbar()
-    plt.axis(extent)
-    save_fig_to_dedicated_folder(save_path, name, iteration)
-
-def plot2d_imshow_composite_quiver(X,Y,u,bodies,normal_x,normal_y,extent,iteration,save_path,name,vmin,vmax,subsample_n = 2**4, scale=None, body_contours = True):
-
-
-
-    if vmin is None:
-        limit = max(abs(u.min()), abs(u.max()))/2
-        vmin = -limit
-        vmax = limit
-    if scale:
-        scale=1/scale
-
-
-    x_range = extent[1] - extent[0]
-    y_range = extent[3] - extent[2]
-    scale = 25 / max(x_range, y_range)  # Adjust 10 for overall size
-    fig_width = x_range * scale
-    fig_height = y_range * scale
-
-    # plt.figure(figsize=(5, 15))
-
-    plt.figure(figsize=(fig_width, fig_height))
-    if body_contours:
-        for i, body in enumerate(bodies):
-            # d = body.sdf.cpu()
-            # plt.contour(X,Y,d, colors='k', levels=[0],linewidths=0.3)
-            plt.scatter(body.cnt_update[0][body.mask].cpu(), body.cnt_update[1][body.mask].cpu(), c="k",s=0.1)
-            # plt.scatter(body.cnt_update[0].cpu(), body.cnt_update[1].cpu(), c='k', s=0.1)
-
-            # plt.fill(body.cnt_update[0].cpu(), body.cnt_update[1].cpu(), color="#3E8854E1")
-
-            plt.plot(body.com_pos[0].cpu(), body.com_pos[1].cpu(), 'ro', markersize=2)
-
-            # plt.plot(body.cnt_update[0].cpu(), body.cnt_update[1].cpu(), 'k',linewidth=0.5)
-
-            # plt.plot(body.cnt_update[0].cpu(), body.cnt_update[1].cpu(), 'k',linewidth=0.5)
-    plt.imshow(
-        u.cpu().detach().numpy().T,
-        vmin   = vmin,
-        vmax   = vmax,
-        extent = extent,
-        origin = "lower",
-        cmap = cm.RdBu,
-        interpolation=None,
-        aspect='equal',
-    )
-    plt.xlabel("x [m]")
-    plt.ylabel("y [m]")
-    plt.title(name)
-
-    plt.colorbar()
-    # q = plt.quiver(
-    #     X[::subsample_n,::subsample_n].cpu(),
-    #     Y[::subsample_n,::subsample_n].cpu(),
-    #     normal_x[::subsample_n,::subsample_n].cpu(),
-    #     normal_y[::subsample_n,::subsample_n].cpu(),
-    #     color='g',
-    #     scale=scale, scale_units='xy'
-    # )
-    plt.axis(extent)
-    save_fig_to_dedicated_folder(save_path, name, iteration)
-
-
-
-
-
-
-
-
-
-def plot2d_imshow(X,Y,u,d,extent,iteration,save_path,name,vmin,vmax):
-    if vmin is None:
-        limit = max(abs(u.min()), abs(u.max()))/2
-        vmin = -limit
-        vmax = limit
-    plt.figure(figsize=(20,10))
-    ctr = plt.contour(X,Y,d, colors='k', levels=[0],linewidths=0.3)
-    plt.imshow(
-        np.where(d<0,0,u).T,
-        vmin   = vmin,
-        vmax   = vmax,
-        extent = extent,
-        origin = "lower",
-        cmap = cm.RdBu
-    )
-    plt.colorbar()
-    # plt.ylim([-0.25,0.25])
-    # plt.xlim([0.58,1.13])
-    ax = plt.gca()
-    ax.set_aspect('equal', adjustable='box')
-    plt.axis(extent)
-    save_fig_to_dedicated_folder(save_path, name, iteration)
-
-def plot2d_imshow_quiver(X,Y,u,d,normal_x,normal_y,extent,iteration,save_path,name,vmin,vmax,subsample_n = 2**4, scale=None):
-
-    if vmin is None:
-        limit = max(abs(u.min()), abs(u.max()))/2
-        vmin = -limit
-        vmax = limit
-    if scale:
-        scale=1/scale
-    plt.figure(figsize=(20,10))
-    ctr = plt.contour(X,Y,d, colors='k', levels=[0],linewidths=0.3)
-    plt.imshow(
-        u.T,
-        vmin   = vmin,
-        vmax   = vmax,
-        extent = extent,
-        origin = "lower",
-        cmap = cm.RdBu
-    )
-    plt.colorbar()
-    q = plt.quiver(
-        X[::subsample_n,::subsample_n].cpu(),
-        Y[::subsample_n,::subsample_n].cpu(),
-        normal_x[::subsample_n,::subsample_n].cpu(),
-        normal_y[::subsample_n,::subsample_n].cpu(),
-        color='g',
-        scale=scale, scale_units='xy'
-    )
-    plt.axis(extent)
-    save_fig_to_dedicated_folder(save_path, name, iteration)
-
-def plot2d_imshow_simple(d,extent,iteration,save_path,name,vmin= -0.001,vmax= 0.001):
-    plt.figure(figsize=(20,10))
-    if vmin is None:
-        limit = max(abs(d.min()), abs(d.max()))/2
-        vmin = -limit
-        vmax = limit
-    plt.imshow(
-        d.T,
-        extent = extent,
-        origin = "lower",
-        vmin   = vmin,
-        vmax   = vmax,
-        cmap = cm.RdBu
-    )
-    plt.colorbar()
-    plt.axis(extent)
-    save_fig_to_dedicated_folder(save_path, name, iteration)
-
-
-
-
-def plot_ctrs(vars,bodies, extent, save_path, name, iteration,vmin= -0.001,vmax= 0.001, cmap = cm.get_cmap('viridis')):
-
-    norm = colors.Normalize(vmin=vmin, vmax=vmax)
-    for i, body in enumerate(bodies):
-        plt.scatter(body.cnt_update[0].cpu(), body.cnt_update[1].cpu(), c=vars[i].cpu(), cmap=cmap, norm=norm)
-    plt.colorbar()
-    plt.axis(extent)
-    save_fig_to_dedicated_folder(save_path, name, iteration)

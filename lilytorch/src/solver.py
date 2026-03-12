@@ -1,23 +1,25 @@
 
+import datetime
+import logging
+import os
+import threading
+
+import h5py
+import numpy as np
+import torch
+from concurrent.futures import ThreadPoolExecutor
 from pytorch_interpolation import RegularGridInterpolator
+from tqdm import tqdm
+
 from lilytorch.src.adv_diff import AdvDiffSolver
-from lilytorch.src.poisson_mult import PoissonSolver
-from lilytorch.src.poisson_fft import PoissonSolverFFT
-# from lilytorch.src.poisson_petsc import PoissonSolverPETSc
 from lilytorch.src.body import body_from_yaml, _StaggeredGrids
 from lilytorch.src import operations as ops
 from lilytorch.src import plotting
-# from lilytorch.util.rw import save_object
+from lilytorch.src.poisson_fft import PoissonSolverFFT
+from lilytorch.src.poisson_mult import PoissonSolver
 from lilytorch.util.yaml_operations import pyobject2yaml
 
-import torch
-from tqdm import tqdm
-import datetime
-import os
-import numpy as np
-from concurrent.futures import ThreadPoolExecutor
-# from spreading_operator import spreading_operator_python_parallel, spreading_operator_python_parallel_out
-# from spreading_operator import interpolation_operator, spreading_operator_python, interp_operator_python_parallel
+logger = logging.getLogger(__name__)
 
 # ======================================================================
 # Compilable force-computation kernels  (module-level, for torch.compile)
@@ -123,6 +125,228 @@ def _forces_body_integrate_3d(
             fp_x, fp_y, fp_z, tp_x, tp_y, tp_z)
 
 
+def _forces_body_batch_3d(
+    xstress, ystress, zstress,
+    pforce_x, pforce_y, pforce_z,
+    sdf_all, eps_body, eps_solver,
+    com_x, com_y, com_z,
+    X, Y, Z, h3,
+):
+    """Batched force/torque integration for ALL bodies in one fused call.
+
+    Parameters
+    ----------
+    xstress, ystress, zstress : (Ni, Nj, Nk)  viscous stress·n
+    pforce_x, pforce_y, pforce_z : (Ni, Nj, Nk) pressure force density
+    sdf_all : (B, Ni, Nj, Nk)  per-body SDF (1e4 outside each AABB)
+    eps_body, eps_solver : scalar
+    com_x, com_y, com_z : (B,) centre-of-mass positions
+    X, Y, Z : (Ni, Nj, Nk)  grid coordinates
+    h3 : scalar (h**3)
+
+    Returns
+    -------
+    12 tensors of shape (B,): fv_xyz, tv_xyz, fp_xyz, tp_xyz
+
+    Torques use the algebraic decomposition:
+        τ_x = Σ(Y·f_z - Z·f_y)·h³  -  com_y·F_z  +  com_z·F_y
+    which avoids materializing (B,Ni,Nj,Nk) moment arm tensors.
+    """
+    # smoothed delta — viscous (shifted by eps_solver)   (B, Ni, Nj, Nk)
+    d_visc = sdf_all - eps_solver
+    delta_visc = torch.where(
+        torch.abs(d_visc) < eps_body,
+        (1.0 + torch.cos(torch.pi * d_visc / eps_body)) / (2.0 * eps_body),
+        0.0,
+    )
+    # smoothed delta — pressure
+    delta_pres = torch.where(
+        torch.abs(sdf_all) < eps_body,
+        (1.0 + torch.cos(torch.pi * sdf_all / eps_body)) / (2.0 * eps_body),
+        0.0,
+    )
+
+    # Broadcast stress (1,Ni,Nj,Nk) * delta (B,Ni,Nj,Nk)
+    xs = xstress.unsqueeze(0)
+    ys = ystress.unsqueeze(0)
+    zs = zstress.unsqueeze(0)
+
+    fvisc_x = xs * delta_visc
+    fvisc_y = ys * delta_visc
+    fvisc_z = zs * delta_visc
+
+    fv_x = fvisc_x.sum(dim=(1, 2, 3)) * h3
+    fv_y = fvisc_y.sum(dim=(1, 2, 3)) * h3
+    fv_z = fvisc_z.sum(dim=(1, 2, 3)) * h3
+
+    # ---- Torques via origin-torque decomposition ------------------
+    # τ_x = Σ((Y-com_y)·fz - (Z-com_z)·fy)·h³
+    #      = (Σ Y·fz)·h³ - com_y·F_z - (Σ Z·fy)·h³ + com_z·F_y
+    # No (B,Ni,Nj,Nk) moment arm allocation needed.
+    Xu = X.unsqueeze(0)
+    Yu = Y.unsqueeze(0)
+    Zu = Z.unsqueeze(0)
+
+    # Raw torques about the origin (fused multiply+reduce)
+    raw_v_yz = (Yu * fvisc_z).sum(dim=(1, 2, 3)) * h3
+    raw_v_zy = (Zu * fvisc_y).sum(dim=(1, 2, 3)) * h3
+    raw_v_zx = (Zu * fvisc_x).sum(dim=(1, 2, 3)) * h3
+    raw_v_xz = (Xu * fvisc_z).sum(dim=(1, 2, 3)) * h3
+    raw_v_xy = (Xu * fvisc_y).sum(dim=(1, 2, 3)) * h3
+    raw_v_yx = (Yu * fvisc_x).sum(dim=(1, 2, 3)) * h3
+
+    tv_x = raw_v_yz - com_y * fv_z - raw_v_zy + com_z * fv_y
+    tv_y = raw_v_zx - com_z * fv_x - raw_v_xz + com_x * fv_z
+    tv_z = raw_v_xy - com_x * fv_y - raw_v_yx + com_y * fv_x
+
+    # Pressure forces
+    px = pforce_x.unsqueeze(0)
+    py = pforce_y.unsqueeze(0)
+    pz = pforce_z.unsqueeze(0)
+
+    fpres_x = px * delta_pres
+    fpres_y = py * delta_pres
+    fpres_z = pz * delta_pres
+
+    fp_x = fpres_x.sum(dim=(1, 2, 3)) * h3
+    fp_y = fpres_y.sum(dim=(1, 2, 3)) * h3
+    fp_z = fpres_z.sum(dim=(1, 2, 3)) * h3
+
+    raw_p_yz = (Yu * fpres_z).sum(dim=(1, 2, 3)) * h3
+    raw_p_zy = (Zu * fpres_y).sum(dim=(1, 2, 3)) * h3
+    raw_p_zx = (Zu * fpres_x).sum(dim=(1, 2, 3)) * h3
+    raw_p_xz = (Xu * fpres_z).sum(dim=(1, 2, 3)) * h3
+    raw_p_xy = (Xu * fpres_y).sum(dim=(1, 2, 3)) * h3
+    raw_p_yx = (Yu * fpres_x).sum(dim=(1, 2, 3)) * h3
+
+    tp_x = raw_p_yz - com_y * fp_z - raw_p_zy + com_z * fp_y
+    tp_y = raw_p_zx - com_z * fp_x - raw_p_xz + com_x * fp_z
+    tp_z = raw_p_xy - com_x * fp_y - raw_p_yx + com_y * fp_x
+
+    return (fv_x, fv_y, fv_z, tv_x, tv_y, tv_z,
+            fp_x, fp_y, fp_z, tp_x, tp_y, tp_z)
+
+
+# ======================================================================
+# Compilable 2-D force-computation kernels  (module-level)
+# ======================================================================
+
+def _forces_shared_2d(u, v, p, sdf_val, nx_u, ny_u, nx_v, ny_v, nx_cc, ny_cc,
+                      nu_rho, h):
+    """Compute stress tensors and pressure force density for 2-D.
+
+    Uses staggered-grid normals for viscous stress (consistent with the
+    existing ``forces_method2`` formulation) and CC normals for pressure.
+    Velocity derivatives are computed via ``torch.gradient`` (central
+    differences, 2nd-order accurate — same approach as the 3-D path).
+
+    Returns
+    -------
+    xstress, ystress : viscous stress on u-stag and v-stag grids
+    pforce_x, pforce_y : pressure force density on CC grid
+    """
+    dudx = torch.gradient(u, spacing=h, dim=0, edge_order=2)[0]
+    dudy = torch.gradient(u, spacing=h, dim=1, edge_order=2)[0]
+    dvdx = torch.gradient(v, spacing=h, dim=0, edge_order=2)[0]
+    dvdy = torch.gradient(v, spacing=h, dim=1, edge_order=2)[0]
+
+    ss_11 = 2 * dudx * nx_u
+    ss_12 = (dudy + dvdx) * ny_u
+    ss_21 = (dudy + dvdx) * nx_v
+    ss_22 = 2 * dvdy * ny_v
+
+    xstress = (ss_11 + ss_12) * nu_rho
+    ystress = (ss_21 + ss_22) * nu_rho
+
+    p_outer = torch.where(sdf_val < 0, 0.0, p)
+    pforce_x = -p_outer * nx_cc
+    pforce_y = -p_outer * ny_cc
+
+    return xstress, ystress, pforce_x, pforce_y
+
+
+def _forces_body_batch_2d(
+    xstress, ystress,
+    pforce_x, pforce_y,
+    sdf_vals_u, sdf_vals_v, sdf_vals_cc,
+    eps_body, eps_solver,
+    com_x, com_y,
+    Xv_stag, Yu_stag, X, Y, h2,
+):
+    """Batched 2-D force/torque integration for ALL bodies in one call.
+
+    Parameters
+    ----------
+    xstress, ystress : (Ni, Nj)  viscous stress on u-/v-staggered grids
+    pforce_x, pforce_y : (Ni, Nj)  pressure force density on CC grid
+    sdf_vals_u, sdf_vals_v : (B, Ni, Nj)  per-body SDF on staggered grids
+    sdf_vals_cc : (B, Ni, Nj)  per-body SDF on CC grid
+    eps_body, eps_solver : scalar
+    com_x, com_y : (B,)  centre-of-mass positions
+    Xv_stag, Yu_stag : (Ni, Nj)  staggered grid coordinates
+    X, Y : (Ni, Nj)  CC grid coordinates
+    h2 : scalar (h**2)
+
+    Returns
+    -------
+    6 tensors of shape (B,): fv_x, fv_y, tv_z, fp_x, fp_y, tp_z
+    """
+    # smoothed delta — viscous (shifted by eps_solver)  (B, Ni, Nj)
+    d_visc_u = sdf_vals_u - eps_solver
+    delta_visc_u = torch.where(
+        torch.abs(d_visc_u) < eps_body,
+        (1.0 + torch.cos(torch.pi * d_visc_u / eps_body)) / (2.0 * eps_body),
+        0.0,
+    )
+    d_visc_v = sdf_vals_v - eps_solver
+    delta_visc_v = torch.where(
+        torch.abs(d_visc_v) < eps_body,
+        (1.0 + torch.cos(torch.pi * d_visc_v / eps_body)) / (2.0 * eps_body),
+        0.0,
+    )
+    # smoothed delta — pressure
+    delta_pres = torch.where(
+        torch.abs(sdf_vals_cc) < eps_body,
+        (1.0 + torch.cos(torch.pi * sdf_vals_cc / eps_body)) / (2.0 * eps_body),
+        0.0,
+    )
+
+    # Broadcast stress (1,Ni,Nj) * delta (B,Ni,Nj)
+    fvisc_x = xstress.unsqueeze(0) * delta_visc_u   # (B, Ni, Nj)
+    fvisc_y = ystress.unsqueeze(0) * delta_visc_v   # (B, Ni, Nj)
+
+    fv_x = fvisc_x.sum(dim=(1, 2)) * h2  # (B,)
+    fv_y = fvisc_y.sum(dim=(1, 2)) * h2  # (B,)
+
+    # Torque via origin-torque decomposition:
+    #   τ_z = Σ((Xv-com_x)·fy - (Yu-com_y)·fx)·h²
+    #       = (Σ Xv·fy)·h² - com_x·Fy - (Σ Yu·fx)·h² + com_y·Fx
+    Xv_u = Xv_stag.unsqueeze(0)  # (1, Ni, Nj)
+    Yu_u = Yu_stag.unsqueeze(0)  # (1, Ni, Nj)
+
+    raw_xv_fy = (Xv_u * fvisc_y).sum(dim=(1, 2)) * h2  # (B,)
+    raw_yu_fx = (Yu_u * fvisc_x).sum(dim=(1, 2)) * h2  # (B,)
+
+    tv_z = raw_xv_fy - com_x * fv_y - raw_yu_fx + com_y * fv_x
+
+    # Pressure forces
+    fpres_x = pforce_x.unsqueeze(0) * delta_pres  # (B, Ni, Nj)
+    fpres_y = pforce_y.unsqueeze(0) * delta_pres  # (B, Ni, Nj)
+
+    fp_x = fpres_x.sum(dim=(1, 2)) * h2  # (B,)
+    fp_y = fpres_y.sum(dim=(1, 2)) * h2  # (B,)
+
+    Xu = X.unsqueeze(0)   # (1, Ni, Nj)
+    Yu = Y.unsqueeze(0)   # (1, Ni, Nj)
+
+    raw_x_py = (Xu * fpres_y).sum(dim=(1, 2)) * h2
+    raw_y_px = (Yu * fpres_x).sum(dim=(1, 2)) * h2
+
+    tp_z = raw_x_py - com_x * fp_y - raw_y_px + com_y * fp_x
+
+    return fv_x, fv_y, tv_z, fp_x, fp_y, tp_z
+
+
 class FluidSolver:
     """
     Solver class
@@ -208,16 +432,21 @@ class FluidSolver:
 
         self.eps  = 2*self.h
 
-        # self.re   = 158
-        # print("Reynolds number: ", self.re)
-
         self.starting_iteration      = solver.get("starting_iteration", 0)
         self.starting_iteration_path = solver.get("starting_iteration_path", None)
         self.starting_time           = self.starting_iteration * self.dt
 
         self.perturbation_amplitude  = solver.get("perturbation_amplitude", 0.0)
 
+        # ============= time integration =============
+        self.time_integration = solver.get("time_integration", "heun")
+        assert self.time_integration in ("heun", "euler"), \
+            f"Unknown time_integration '{self.time_integration}'. Choose 'heun' or 'euler'."
+        # ---- time integration dispatch (set once, used every step) ----
+        self._solve = self.solve_heun if self.time_integration == "heun" else self.solve_euler
+
         print("Setting dt={}s, dx={}".format(self.dt, self.h))
+        print(f"Time integration: {self.time_integration}")
 
         # ============= convection solver =============
         adv_diff_kwargs = dict(
@@ -252,16 +481,31 @@ class FluidSolver:
         # ---- optional torch.compile for force computation -----
         self._compile_forces = solver.get("compile_forces", False)
         if self._compile_forces and self.device.type == "cuda":
+            # 3-D kernels
             self._forces_shared_compiled = torch.compile(
                 _forces_shared_3d, mode="reduce-overhead",
             )
             self._forces_body_compiled = torch.compile(
                 _forces_body_integrate_3d, mode="reduce-overhead",
             )
-            print("  [compile] forces_shared + forces_body_integrate compiled (reduce-overhead)")
+            self._forces_body_batch_compiled = torch.compile(
+                _forces_body_batch_3d, mode="reduce-overhead",
+            )
+            # 2-D kernels
+            self._forces_shared_2d_compiled = torch.compile(
+                _forces_shared_2d, mode="reduce-overhead",
+            )
+            self._forces_body_batch_2d_compiled = torch.compile(
+                _forces_body_batch_2d, mode="reduce-overhead",
+            )
+            print("  [compile] forces_shared + forces_body_batch compiled "
+                  "(reduce-overhead, 2D+3D)")
         else:
             self._forces_shared_compiled = _forces_shared_3d
             self._forces_body_compiled = _forces_body_integrate_3d
+            self._forces_body_batch_compiled = _forces_body_batch_3d
+            self._forces_shared_2d_compiled = _forces_shared_2d
+            self._forces_body_batch_2d_compiled = _forces_body_batch_2d
 
         # ---- optional torch.compile for SDF / mu / normals ----
         self._compile_sdf = solver.get("compile_sdf", False)
@@ -313,15 +557,6 @@ class FluidSolver:
                 )
         else:
             self.poisson_solverFFT = None
-
-        # self.poisson_solverPETSc  = PoissonSolverPETSc(
-        #     self.nx,
-        #     self.ny,
-        #     self.x,
-        #     self.y,
-        #     device=self.device,
-        #     dtype=self.dtype
-        # )
 
         # ---- staggered grids (shared by all bodies) ------------------
         self.grids = _StaggeredGrids(self.x, self.y, self.z)
@@ -394,17 +629,6 @@ class FluidSolver:
         # are created on-the-fly in forces_method* and project() respectively
         # (no pre-allocation needed — they are rebound, not written in-place).
 
-
-        # self.ds = self.composite_body.bodies[0].ds
-
-
-        # # Parameters for the Gaussian kernel
-        # kernel_dx=0.005
-        # self.kernel_size = round(kernel_dx/self.h)  # Example kernel size
-        # self.kernel_size += 1-self.kernel_size%2
-        # sigma = 10  # Standard deviation for Gaussian
-        # self.kernel = self.composite_body.gaussian_kernel(self.kernel_size, sigma).view(1, 1, self.kernel_size, self.kernel_size).to(self.device)
-
           # ===== set initial conditions =====
         self.set_initial_conditions()
 
@@ -429,15 +653,15 @@ class FluidSolver:
 
 
         self.compute_forces = compute_forces
-        self.skip_projection = solver.get("skip_projection", False)
-        if self.skip_projection:
-            print(">>> PROJECTION DISABLED — running without pressure correction <<<")
 
           # ===== create folder for frames' storage ====
         self.save_frames      = output["save_frames"]
         self.save_every       = output["save_every"]
-        self.save_uv          = output["save_uv"]
-        self.save_vtk         = output.get("save_vtk", False)
+        # Unified save flag (replaces old save_uv + save_vtk).
+        # Backward compat: accept legacy keys from old YAML configs.
+        self.save             = output.get("save",
+                                    output.get("save_uv", False)
+                                    or output.get("save_vtk", False))
         # vmin/vmax: a number → fixed colour limits; "auto" → auto-scale per field
         _vmin = output["vmin"]
         _vmax = output["vmax"]
@@ -448,8 +672,9 @@ class FluidSolver:
         # Background thread pool for async I/O (saving + plotting)
         self._io_executor = ThreadPoolExecutor(max_workers=2)
         self._io_futures = []  # track pending I/O tasks
+        self._hdf5_lock  = threading.Lock()  # serialise HDF5 writes
 
-        if self.save_frames or self.save_uv:
+        if self.save_frames or self.save:
             path = output["save_path"]
             if "existing_folder" in output:
                 results_folder = output["existing_folder"]
@@ -574,46 +799,6 @@ class FluidSolver:
             self.composite_body.sdf_val
         )
 
-
-        # # ======= compute stress tensor at CC ======
-        # u_cc = torch.zeros_like(u)
-        # u_cc[:-1,:] = 0.5*(u[1:,:]+u[:-1,:])
-        # u_cc[-1,:] = u_cc[-2,:]
-        # v_cc = torch.zeros_like(v)
-        # v_cc[:,:-1] = 0.5*(v[:,1:]+v[:,:-1])
-        # v_cc[:,-1] = v_cc[:,-2]
-
-        # mult=1 #self.visc
-        # dudx, dudy = self.compute_dpdx(u_cc), self.compute_dpdy(u_cc)
-        # dvdx, dvdy = self.compute_dpdx(v_cc), self.compute_dpdy(v_cc)
-        # ss_11 = 2*self.normal_x*dudx
-        # ss_12 = self.normal_y*(dudy+dvdx)
-        # ss_21 = self.normal_x*(dudy+dvdx)
-        # ss_22 = 2*self.normal_y*dvdy
-        # self.xstress_tensor = mult*(ss_11+ss_12)
-        # self.ystress_tensor = mult*(ss_21+ss_22)
-
-        # pforce_x = -p*self.normal_x
-        # pforce_y = -p*self.normal_y
-
-
-        # dudx, dudy = self.compute_dpdx(u), self.compute_dpdy(u)
-        # dvdx, dvdy = self.compute_dpdx(v), self.compute_dpdy(v)
-        # ss_diag = (self.normal_x_u*dudy+self.normal_y_v*dvdx)
-        # ss_11 = 2*self.normal_x_u*dudx
-        # ss_12 = dudy*self.normal_y_u+dvdx*self.normal_x_v
-        # ss_22 = 2*self.normal_y_v*dvdy
-        # self.xstress_tensor = self.visc*(ss_11+ss_diag)
-        # self.ystress_tensor = self.visc*(ss_diag+ss_22)
-
-        # pforce_x = -p*self.normal_x
-        # pforce_y = -p*self.normal_y
-
-
-        # self.force_f_ibm_x[:]=0
-        # self.force_f_ibm_y[:]=0
-
-
         # ======= compute stress tensor at FC ======
         self.force_y_interp.F = v
         v_xstag = self.force_y_interp(self.grids.Xu_stag, self.grids.Yu_stag)
@@ -625,22 +810,9 @@ class FluidSolver:
         ss_21 = (self.compute_dpdy(u_ystag)+self.compute_dpdx(v))*self.normal_x_v
         ss_22 = 2*self.compute_dpdy(v)*self.normal_y_v
 
-        # mult=1/self.re
         mult=self.nu*self.rho
         self.xstress_tensor = (ss_11+ss_12)*mult
         self.ystress_tensor = (ss_21+ss_22)*mult
-
-        # u_mask = torch.where(u==0,1,u/torch.abs(u))
-        # v_mask = torch.where(v==0,1,v/torch.abs(v))
-
-        # self.xstress_tensor = (ss_11+ss_12)*mult*u_mask
-        # self.ystress_tensor = (ss_21+ss_22)*mult*v_mask
-
-
-        # # ======= compute pressure at staggered locations ======
-        # self.interp_utility.F = -p
-        # pforce_x = self.interp_utility(self.composite_body.Xu_stag, self.composite_body.Yu_stag)*self.normal_x_u
-        # pforce_y = self.interp_utility(self.composite_body.Xv_stag, self.composite_body.Yv_stag)*self.normal_y_v
 
         self.pforce_x = -p*normal_x
         self.pforce_y = -p*normal_y
@@ -648,7 +820,6 @@ class FluidSolver:
 
         for i, body in enumerate(self.composite_body.bodies[:]):
 
-                  # method 1
                   mask       = body.mask
                   curv_coord = body.curv_coord
 
@@ -674,60 +845,15 @@ class FluidSolver:
                           )
                       )*body.ds
 
-
-                  # self.friction_force_lin_x[i] = torch.trapz(f_x[mask],curv_coord)
-                  # self.friction_force_lin_y[i] = torch.trapz(f_y[mask],curv_coord)
-                  # self.friction_force_ang_z[i] = torch.trapz(
-                  #   ops.cross_product_2d(
-                  #       moment_arm[0][mask],
-                  #       moment_arm[1][mask],
-                  #       f_x[mask],
-                  #       f_y[mask]
-                  #     ),
-                  #   curv_coord
-                  # )
-
-                  # self.force_x_interp.F = pforce_x
-                  # self.force_y_interp.F = pforce_y
-
-                  # f_x = self.force_x_interp(body.cnt_update[0], body.cnt_update[1])
-                  # f_y = self.force_y_interp(body.cnt_update[0], body.cnt_update[1])
-
-                  # self.pressure_force_x[i] = torch.trapz(f_x[mask],curv_coord)
-                  # self.pressure_force_y[i] = torch.trapz(f_y[mask],curv_coord)
-                  # self.pressure_force_ang_z[i] = torch.trapz(
-                  #       ops.cross_product_2d(
-                  #           moment_arm[0][mask],
-                  #           moment_arm[1][mask],
-                  #           f_x[mask],
-                  #           f_y[mask]
-                  #           ), curv_coord
-                  #       )
-
-
-
                   moment_arm = [
                       body.cnt_update[0]-body.com_pos[0],
                       body.cnt_update[1]-body.com_pos[1],
                   ]
 
-
                   self.interp_utility.F = self.pforce_x
                   f_x = self.interp_utility(body.cnt_update[0], body.cnt_update[1])
                   self.interp_utility.F = self.pforce_y
                   f_y = self.interp_utility(body.cnt_update[0], body.cnt_update[1])
-
-                  # self.pressure_force_x[i] = torch.trapz(f_x[mask],curv_coord)
-                  # self.pressure_force_y[i] = torch.trapz(f_y[mask],curv_coord)
-                  # self.pressure_force_ang_z[i] = torch.trapz(
-                  #       ops.cross_product_2d(
-                  #           moment_arm[0][mask],
-                  #           moment_arm[1][mask],
-                  #           f_x[mask],
-                  #           f_y[mask]
-                  #           ), curv_coord
-                  #       )
-
 
                   self.pressure_force_x[i] = torch.sum(f_x[mask])*body.ds
                   self.pressure_force_y[i] = torch.sum(f_y[mask])*body.ds
@@ -739,82 +865,6 @@ class FluidSolver:
                           f_y[mask]
                           )
                       )*body.ds
-
-
-                  # # # # # # # self.friction_force_lin_x[i] = self.brinkmann_k*((u-self.composite_body.body_u)*self.m_m0_all_u).sum()*self.h2
-                  # # # # # # # self.friction_force_lin_y[i] = self.brinkmann_k*((v-self.composite_body.body_v)*self.m_m0_all_v).sum()*self.h2
-
-                  # # # # method of integration over the grid
-
-                  # # # moment_arm = [
-                  # # #     self.composite_body.Xu_stag-body.com_pos[0],
-                  # # #     self.composite_body.Yv_stag-body.com_pos[1],
-                  # # # ]
-
-                  # # # # method 2
-                  # # # d_u=self.composite_body.sdf_val_u-2*self.dx
-                  # # # d_v=self.composite_body.sdf_val_v-2*self.dx
-                  # # # mu_0_all_u_friction, _ = self.composite_body.mu_funcs(d_u)
-                  # # # mu_0_all_v_friction, _ = self.composite_body.mu_funcs(d_v)
-                  # # # (_, normal_x_u, normal_y_u, _) = self.composite_body.compute_sdf_properties(d_u)
-                  # # # (_, normal_x_v, normal_y_v, _) = self.composite_body.compute_sdf_properties(d_v)
-
-
-                  # # # mult_x = self.normal_derivative(mu_0_all_u_friction, normal_x_u, normal_y_u)
-                  # # # mult_y = self.normal_derivative(mu_0_all_v_friction, normal_x_v, normal_y_v)
-
-
-                  # # # fforcex_body_i = self.xstress_tensor*mult_x
-                  # # # fforcey_body_i = self.ystress_tensor*mult_y
-
-
-                  # # # self.friction_force_lin_x[i] = fforcex_body_i.sum()*self.h2
-                  # # # self.friction_force_lin_y[i] = fforcey_body_i.sum()*self.h2
-                  # # # self.friction_force_ang_z[i] = ops.cross_product_2d(
-                  # # #         moment_arm[0],
-                  # # #         moment_arm[1],
-                  # # #         fforcex_body_i,
-                  # # #         fforcey_body_i
-                  # # #         ).sum()*self.h2
-
-
-
-                  # # # # print(self.friction_force_lin_x*2/(1000*0.00275**2*0.2))
-
-                  # # # mult_x = self.normal_derivative(self.mu0_all_u, normal_x_u, normal_y_u)
-                  # # # mult_y = self.normal_derivative(self.mu0_all_v, normal_x_v, normal_y_v)
-
-                  # # # pforcex_body_i = pforce_x*mult_x
-                  # # # pforcey_body_i = pforce_y*mult_y
-
-
-                  # # # # if iteration==100:
-                  # # # #     from IPython import embed; embed()
-
-
-                  # # # # import matplotlib.pyplot as plt
-                  # # # # import matplotlib.cm as cm
-
-                  # # # # plt.contourf(
-                  # # # #     self.composite_body.Xu_stag.cpu(),
-                  # # # #     self.composite_body.Yu_stag.cpu(),
-                  # # # #     pforcey_body_i,
-                  # # # #     levels=50,
-                  # # # # )
-                  # # # # plt.colorbar()
-                  # # # # plt.show()
-
-
-
-                  # # # self.pressure_force_x[i] = pforcex_body_i.sum()*self.h2
-                  # # # self.pressure_force_y[i] = pforcey_body_i.sum()*self.h2
-                  # # # self.pressure_force_ang_z[i] = ops.cross_product_2d(
-                  # # #           moment_arm[0],
-                  # # #           moment_arm[1],
-                  # # #           pforcex_body_i,
-                  # # #           pforcey_body_i
-                  # # #           ).sum()*self.h2
-
 
                   self.viscous_drag_record[i,0,iteration] = self.friction_force_lin_x[i]
                   self.viscous_drag_record[i,1,iteration] = self.friction_force_lin_y[i]
@@ -831,379 +881,62 @@ class FluidSolver:
             self.composite_body.sdf_val
         )
 
-        # # ======= compute stress tensor at CC ======
-        # u_cc = torch.zeros_like(u)
-        # u_cc[:-1,:] = 0.5*(u[1:,:]+u[:-1,:])
-        # u_cc[-1,:] = u_cc[-2,:]
-        # v_cc = torch.zeros_like(v)
-        # v_cc[:,:-1] = 0.5*(v[:,1:]+v[:,:-1])
-        # v_cc[:,-1] = v_cc[:,-2]
-
-        # mult=self.nu*self.rho # rho might change in time
-        # dudx, dudy = self.compute_dpdx(u_cc), self.compute_dpdy(u_cc)
-        # dvdx, dvdy = self.compute_dpdx(v_cc), self.compute_dpdy(v_cc)
-        # ss_11 = 2*self.normal_x*dudx
-        # ss_12 = self.normal_y*(dudy+dvdx)
-        # ss_21 = self.normal_x*(dudy+dvdx)
-        # ss_22 = 2*self.normal_y*dvdy
-        # self.xstress_tensor = mult*(ss_11+ss_12)
-        # self.ystress_tensor = mult*(ss_21+ss_22)
-
-        # pforce_x = -p*self.normal_x
-        # pforce_y = -p*self.normal_y
-
-
-        # ======= compute stress tensor at FC ======
-        self.force_y_interp.F = v
-        v_xstag = self.force_y_interp(self.grids.Xu_stag, self.grids.Yu_stag)
-        self.force_x_interp.F = u
-        u_ystag = self.force_x_interp(self.grids.Xv_stag, self.grids.Yv_stag)
-
-        ss_11 = 2*self.compute_dpdx(u)*self.normal_x_u
-        ss_12 = (self.compute_dpdy(u)+self.compute_dpdx(v_xstag))*self.normal_y_u
-        ss_21 = (self.compute_dpdy(u_ystag)+self.compute_dpdx(v))*self.normal_x_v
-        ss_22 = 2*self.compute_dpdy(v)*self.normal_y_v
-
-        mult=self.nu*self.rho
-        self.xstress_tensor = (ss_11+ss_12)*mult
-        self.ystress_tensor = (ss_21+ss_22)*mult
-
-
-
-        # # ======= compute stress tensor at FC ======
-        # self.force_y_interp.F = v
-        # v_xstag = self.force_y_interp(self.composite_body.Xu_stag, self.composite_body.Yu_stag)
-        # self.force_x_interp.F = u
-        # u_ystag = self.force_x_interp(self.composite_body.Xv_stag, self.composite_body.Yv_stag)
-
-        # ss_11 = 2*self.compute_dpdx(u)*self.normal_x_u
-        # ss_12 = (self.compute_dpdy(u)+self.compute_dpdx(v_xstag))*self.normal_y_u
-        # ss_21 = (self.compute_dpdy(u_ystag)+self.compute_dpdx(v))*self.normal_x_v
-        # ss_22 = 2*self.compute_dpdy(v)*self.normal_y_v
-
-        # mult=self.nu*self.rho
-        # self.xstress_tensor = (ss_11+ss_12)*mult
-        # self.ystress_tensor = (ss_21+ss_22)*mult
-
-        # # ======= compute pressure at staggered locations ======
-        # self.interp_utility.F = -p
-        # pforce_x = self.interp_utility(self.composite_body.Xu_stag, self.composite_body.Yu_stag)*self.normal_x_u
-        # pforce_y = self.interp_utility(self.composite_body.Xv_stag, self.composite_body.Yv_stag)*self.normal_y_v
-
-        p_outer=torch.where(self.composite_body.sdf_val<0,0,p)
-        self.pforce_x = -p_outer*normal_x
-        self.pforce_y = -p_outer*normal_y
-
-
-        for i, body in enumerate(self.composite_body.bodies[:]):
-
-            moment_arm = [
-                self.grids.Xv_stag-body.com_pos[0],
-                self.grids.Yu_stag-body.com_pos[1],
-            ]
-
-
-            # fforcex_body_i = self.xstress_tensor*delta
-            # fforcey_body_i = self.ystress_tensor*delta
-
-            # self.friction_force_lin_x[i] = (fforcex_body_i).sum()*self.h2
-            # self.friction_force_lin_y[i] = (fforcey_body_i).sum()*self.h2
-            # self.friction_force_ang_z[i] = ops.cross_product_2d(
-            #         moment_arm[0],
-            #         moment_arm[1],
-            #         fforcex_body_i,
-            #         fforcey_body_i
-            #         ).sum()*self.h2
-
-            sdf_val_u = body.sdf_u
-            sdf_val_v = body.sdf_v
-
-            delta_u = body.phi(sdf_val_u-self.eps)
-            delta_v = body.phi(sdf_val_v-self.eps)
-
-            # delta_u = body.phi(sdf_val_u-self.eps)
-            # delta_v = body.phi(sdf_val_v-self.eps)
-
-            fforcex_body_i = self.xstress_tensor*delta_u
-            fforcey_body_i = self.ystress_tensor*delta_v
-
-            # # method 1
-            # mask       = body.mask
-            # curv_coord = body.curv_coord
-
-            # moment_arm = [
-            #     body.cnt_update[0]-body.com_pos[0],
-            #     body.cnt_update[1]-body.com_pos[1],
-            # ]
-
-            # self.force_x_interp.F = self.xstress_tensor
-            # self.force_y_interp.F = self.ystress_tensor
-
-            # f_x = self.force_x_interp(body.cnt_update[0], body.cnt_update[1])
-            # f_y = self.force_y_interp(body.cnt_update[0], body.cnt_update[1])
-
-            # self.friction_force_lin_x[i] = torch.trapz(f_x[mask],curv_coord)
-            # self.friction_force_lin_y[i] = torch.trapz(f_y[mask],curv_coord)
-            # self.friction_force_ang_z[i] = torch.trapz(
-            #   ops.cross_product_2d(
-            #       moment_arm[0][mask],
-            #       moment_arm[1][mask],
-            #       f_x[mask],
-            #       f_y[mask]
-            #     ),
-            #   curv_coord
-            # )
-
-
-
-
-            # # method 2
-            # d_u=self.composite_body.sdf_val_u-self.dx
-            # d_v=self.composite_body.sdf_val_v-self.dx
-            # mu_0_all_u_friction, _ = self.composite_body.mu_funcs(d_u)
-            # mu_0_all_v_friction, _ = self.composite_body.mu_funcs(d_v)
-            # (_, normal_x_u, normal_y_u, _) = self.composite_body.compute_sdf_properties(d_u)
-            # (_, normal_x_v, normal_y_v, _) = self.composite_body.compute_sdf_properties(d_v)
-
-
-            # mult_x = self.normal_derivative(mu_0_all_u_friction, normal_x_u, normal_y_u)
-            # mult_y = self.normal_derivative(mu_0_all_v_friction, normal_x_v, normal_y_v)
-
-
-            # fforcex_body_i = self.xstress_tensor*mult_x
-            # fforcey_body_i = self.ystress_tensor*mult_y
-
-            # if iteration==100:
-            #     from IPython import embed; embed()
-
-
-
-
-            #     import matplotlib.pyplot as plt
-            #     import matplotlib.cm as cm
-
-            #     plt.contourf(
-            #         self.composite_body.Xu_stag.cpu(),
-            #         self.composite_body.Yu_stag.cpu(),
-            #         delta_u.cpu(),
-            #         levels=300,
-            #     )
-            #     plt.colorbar()
-            #     plt.show()
-
-
-
-
-
-            #     plt.scatter(body.cnt_update[0],body.cnt_update[1],c=f_x[mask])
-            #     plt.colorbar()
-
-
-            # sdf_val_u = self.composite_body.sdf_vals[i]
-
-            self.friction_force_lin_x[i] = fforcex_body_i.sum()*self.h2
-            self.friction_force_lin_y[i] = fforcey_body_i.sum()*self.h2
-            self.friction_force_ang_z[i] = ops.cross_product_2d(
-                    moment_arm[0],
-                    moment_arm[1],
-                    fforcex_body_i,
-                    fforcey_body_i
-                    ).sum()*self.h2
-
-
-            moment_arm = [
-                self.grids.X-body.com_pos[0],
-                self.grids.Y-body.com_pos[1],
-            ]
-
-            delta = body.phi(body.sdf_val)
-            self.pforcex_body_i = self.pforce_x*delta
-            self.pforcey_body_i = self.pforce_y*delta
-
-
-
-            # mult = self.normal_derivative(self.m_m0_all, self.normal_x, self.normal_y)
-            # pforcex_body_i = pforce_x*mult
-            # pforcey_body_i = pforce_y*mult
-
-            # if iteration==100:
-            #     from IPython import embed; embed()
-
-
-
-            # import matplotlib.pyplot as plt
-            # import matplotlib.cm as cm
-
-            # plt.contourf(
-            #     self.composite_body.X.cpu(),
-            #     self.composite_body.Y.cpu(),
-            #     mult,
-            #     levels=100,
-            # )
-            # plt.colorbar()
-            # plt.show()
-
-
-            # sdf_p = self.composite_body.sdf_val-2*self.dx
-            # mu_0_all_p, _ = self.composite_body.mu_funcs(sdf_p)
-            # m_mu0_all_p = 1 - mu_0_all_p
-            # (_, normal_x_p, normal_y_p, _) = self.composite_body.compute_sdf_properties(sdf_p)
-
-
-            # mult = -self.normal_derivative(m_mu0_all_p, normal_x_p, normal_y_p)
-            # pforcex_body_i = -p*normal_x_p*mult
-            # pforcey_body_i = -p*normal_y_p*mult
-
-
-            # sdf_p = self.composite_body.sdf_val
-            # (_, normal_x_p, normal_y_p, _) = self.composite_body.compute_sdf_properties(sdf_p)
-            # delta = self.composite_body.phi(sdf_p)
-            # integrand = (-p+sdf_p*self.normal_derivative(p,normal_x_p,normal_y_p))
-            # self.pforcex_body_i = integrand*normal_x_p*delta
-            # self.pforcey_body_i = integrand*normal_y_p*delta
-
-
-            # mult = self.normal_derivative(self.m_m0_all, self.normal_x, self.normal_y)
-            # pforcex_body_i = pforce_x*mult
-            # pforcey_body_i = pforce_y*mult
-
-
-
-            self.pressure_force_x[i] = (self.pforcex_body_i).sum()*self.h2
-            self.pressure_force_y[i] = (self.pforcey_body_i).sum()*self.h2
-            self.pressure_force_ang_z[i] = ops.cross_product_2d(
-                      moment_arm[0],
-                      moment_arm[1],
-                      self.pforcex_body_i,
-                      self.pforcey_body_i
-                      ).sum()*self.h2
-
-
-
-
-            # method of integration over the grid
-
-            # moment_arm = [
-            #     self.composite_body.Xu_stag-body.com_pos[0],
-            #     self.composite_body.Yv_stag-body.com_pos[1],
-            # ]
-
-            # d_u=self.composite_body.sdf_val_u-2*self.dx
-            # d_v=self.composite_body.sdf_val_v-2*self.dx
-            # mu_0_all_u_friction, _ = self.composite_body.mu_funcs(d_u)
-            # mu_0_all_v_friction, _ = self.composite_body.mu_funcs(d_v)
-            # (_, normal_x_u, normal_y_u, _) = self.composite_body.compute_sdf_properties(d_u)
-            # (_, normal_x_v, normal_y_v, _) = self.composite_body.compute_sdf_properties(d_v)
-
-
-            # mult_x = self.normal_derivative(mu_0_all_u_friction, normal_x_u, normal_y_u)
-            # mult_y = self.normal_derivative(mu_0_all_v_friction, normal_x_v, normal_y_v)
-
-
-            # fforcex_body_i = self.xstress_tensor*mult_x
-            # fforcey_body_i = self.ystress_tensor*mult_y
-
-
-            # self.friction_force_lin_x[i] = fforcex_body_i.sum()*self.h2
-            # self.friction_force_lin_y[i] = fforcey_body_i.sum()*self.h2
-            # self.friction_force_ang_z[i] = ops.cross_product_2d(
-            #         moment_arm[0],
-            #         moment_arm[1],
-            #         fforcex_body_i,
-            #         fforcey_body_i
-            #         ).sum()*self.h2
-
-
-
-            # print(self.friction_force_lin_x*2/(1000*0.00275**2*0.2))
-
-            # mult_x = self.normal_derivative(self.mu0_all_u, normal_x_u, normal_y_u)
-            # mult_y = self.normal_derivative(self.mu0_all_v, normal_x_v, normal_y_v)
-
-            # pforcex_body_i = pforce_x*mult_x
-            # pforcey_body_i = pforce_y*mult_y
-
-
-            # if iteration==100:
-            #     from IPython import embed; embed()
-
-
-            # import matplotlib.pyplot as plt
-            # import matplotlib.cm as cm
-
-            # plt.contourf(
-            #     self.composite_body.Xu_stag.cpu(),
-            #     self.composite_body.Yu_stag.cpu(),
-            #     pforcey_body_i,
-            #     levels=50,
-            # )
-            # plt.colorbar()
-            # plt.show()
-
-
-
-            # self.pressure_force_x[i] = pforcex_body_i.sum()*self.h2
-            # self.pressure_force_y[i] = pforcey_body_i.sum()*self.h2
-            # self.pressure_force_ang_z[i] = ops.cross_product_2d(
-            #           moment_arm[0],
-            #           moment_arm[1],
-            #           pforcex_body_i,
-            #           pforcey_body_i
-            #           ).sum()*self.h2
-
-
-
-            # delta_u = self.composite_body.phi(self.composite_body.sdf_val_u-self.eps)
-            # delta_v = self.composite_body.phi(self.composite_body.sdf_val_v-self.eps)
-
-            # fforcex_body_i = self.xstress_tensor*delta_u
-            # fforcey_body_i = self.ystress_tensor*delta_v
-
-            # self.friction_force_lin_x[i] = fforcex_body_i.sum()*self.h2
-            # self.friction_force_lin_y[i] = fforcey_body_i.sum()*self.h2
-            # self.friction_force_ang_z[i] = ops.cross_product_2d(
-            #         moment_arm[0],
-            #         moment_arm[1],
-            #         fforcex_body_i,
-            #         fforcey_body_i
-            #         ).sum()*self.h2
-
-
-            # delta_u = self.composite_body.phi(self.composite_body.sdf_val_u)
-            # delta_v = self.composite_body.phi(self.composite_body.sdf_val_v)
-
-            # pforcex_body_i = pforce_x*delta_u
-            # pforcey_body_i = pforce_y*delta_v
-
-            # moment_arm = [
-            #     self.composite_body.X-body.com_pos[0],
-            #     self.composite_body.Y-body.com_pos[1],
-            # ]
-
-
-            # delta = self.composite_body.phi(self.composite_body.sdf_val)
-
-            # pforcex_body_i = -p*delta*self.normal_x
-            # pforcey_body_i = -p*delta*self.normal_y
-
-
-            # self.pressure_force_x[i] = (pforcex_body_i).sum()*self.h2
-            # self.pressure_force_y[i] = (pforcey_body_i).sum()*self.h2
-            # self.pressure_force_ang_z[i] = ops.cross_product_2d(
-            #           moment_arm[0],
-            #           moment_arm[1],
-            #           pforcex_body_i,
-            #           pforcey_body_i
-            #           ).sum()*self.h2
-
-
-
-
-            self.viscous_drag_record[i,0,iteration] = self.friction_force_lin_x[i]
-            self.viscous_drag_record[i,1,iteration] = self.friction_force_lin_y[i]
-
-            self.pressure_drag_record[i,0,iteration] = self.pressure_force_x[i]
-            self.pressure_drag_record[i,1,iteration] = self.pressure_force_y[i]
+        comp = self.composite_body
+        B = len(comp.bodies)
+
+        # ==============================================================
+        # BATCHED path — all bodies in one fused call
+        # ==============================================================
+        # Shared part: stress + pressure force density
+        (xstress, ystress,
+         pforce_x, pforce_y) = self._forces_shared_2d_compiled(
+            u, v, p, comp.sdf_val,
+            self.normal_x_u, self.normal_y_u,
+            self.normal_x_v, self.normal_y_v,
+            normal_x, normal_y,
+            self.nu * self.rho, self.h,
+        )
+
+        if self._compile_forces:
+            xstress  = xstress.clone()
+            ystress  = ystress.clone()
+            pforce_x = pforce_x.clone()
+            pforce_y = pforce_y.clone()
+
+        # Cache for post-processing
+        self.xstress_tensor = xstress
+        self.ystress_tensor = ystress
+        self.pforce_x = pforce_x
+        self.pforce_y = pforce_y
+
+        eps_body = comp.bodies[0].eps
+
+        (fv_x, fv_y, tv_z,
+         fp_x, fp_y, tp_z) = self._forces_body_batch_2d_compiled(
+            xstress, ystress,
+            pforce_x, pforce_y,
+            comp.sdf_vals_u, comp.sdf_vals_v, comp.sdf_vals,
+            eps_body, self.eps,
+            comp.com_pos[:, 0], comp.com_pos[:, 1],
+            self.grids.Xv_stag, self.grids.Yu_stag,
+            self.grids.X, self.grids.Y, self.h2,
+        )
+
+        if self._compile_forces:
+            fv_x = fv_x.clone(); fv_y = fv_y.clone(); tv_z = tv_z.clone()
+            fp_x = fp_x.clone(); fp_y = fp_y.clone(); tp_z = tp_z.clone()
+
+        for i in range(B):
+            self.friction_force_lin_x[i] = fv_x[i]
+            self.friction_force_lin_y[i] = fv_y[i]
+            self.friction_force_ang_z[i] = tv_z[i]
+            self.pressure_force_x[i] = fp_x[i]
+            self.pressure_force_y[i] = fp_y[i]
+            self.pressure_force_ang_z[i] = tp_z[i]
+            self.viscous_drag_record[i, 0, iteration]  = fv_x[i]
+            self.viscous_drag_record[i, 1, iteration]  = fv_y[i]
+            self.pressure_drag_record[i, 0, iteration] = fp_x[i]
+            self.pressure_drag_record[i, 1, iteration] = fp_y[i]
 
 
     # ==================================================================
@@ -1268,64 +1001,150 @@ class FluidSolver:
         self.pforce_y = pforce_y
         self.pforce_z = pforce_z
 
-        # ---- per-body integration ------------------------------------
+        # ---- per-body integration -----------------------------------
         X   = self.composite_body.X
         Y   = self.composite_body.Y
         Z   = self.composite_body.Z_grid
+        comp = self.composite_body
+        B = len(comp.bodies)
 
-        for i, body in enumerate(self.composite_body.bodies):
-            sdf_i    = self.composite_body.sdf_vals[i]
-            eps_body = body.eps          # smoothing width (same for all bodies)
+        if self._compile_forces:
+            # ---- BATCHED path (compiled CUDA graph) ----------------
+            # Process all bodies in one fused kernel launch.
+            # Reconstruct dense sdf_vals from sparse storage if needed.
+            if hasattr(comp, '_sdf_sparse') and comp._sdf_sparse[0] is not None:
+                _FAR = 1e6
+                sdf_all = torch.full(
+                    (B, *self.grid_shape), _FAR,
+                    device=self.device, dtype=self.dtype,
+                )
+                for bi in range(B):
+                    aabb_i, sdf_sub_i = comp._sdf_sparse[bi]
+                    if aabb_i is not None:
+                        i0, i1, j0, j1, k0, k1 = aabb_i
+                        sdf_all[bi, i0:i1, j0:j1, k0:k1] = sdf_sub_i
+                    else:
+                        sdf_all[bi] = sdf_sub_i
+            else:
+                sdf_all = comp.sdf_vals                # legacy dense path
+            eps_body = comp.bodies[0].eps
+
+            if not hasattr(self, '_com_buf_x'):
+                self._com_buf_x = torch.empty(B, device=self.device, dtype=self.dtype)
+                self._com_buf_y = torch.empty(B, device=self.device, dtype=self.dtype)
+                self._com_buf_z = torch.empty(B, device=self.device, dtype=self.dtype)
+            for i, body in enumerate(comp.bodies):
+                self._com_buf_x[i] = body.com_pos[0]
+                self._com_buf_y[i] = body.com_pos[1]
+                self._com_buf_z[i] = body.com_pos[2]
 
             (fv_x, fv_y, fv_z,
              tv_x, tv_y, tv_z,
              fp_x, fp_y, fp_z,
-             tp_x, tp_y, tp_z) = self._forces_body_compiled(
+             tp_x, tp_y, tp_z) = self._forces_body_batch_compiled(
                 xstress, ystress, zstress,
                 pforce_x, pforce_y, pforce_z,
-                sdf_i, eps_body, self.eps,
-                body.com_pos[0], body.com_pos[1], body.com_pos[2],
+                sdf_all, eps_body, self.eps,
+                self._com_buf_x, self._com_buf_y, self._com_buf_z,
                 X, Y, Z, h3,
             )
 
-            # store linear forces
-            self.friction_force_lin_x[i] = fv_x
-            self.friction_force_lin_y[i] = fv_y
-            self.friction_force_lin_z[i] = fv_z
+            # Clone outputs (CUDA graph buffer reuse)
+            fv_x = fv_x.clone(); fv_y = fv_y.clone(); fv_z = fv_z.clone()
+            tv_x = tv_x.clone(); tv_y = tv_y.clone(); tv_z = tv_z.clone()
+            fp_x = fp_x.clone(); fp_y = fp_y.clone(); fp_z = fp_z.clone()
+            tp_x = tp_x.clone(); tp_y = tp_y.clone(); tp_z = tp_z.clone()
 
-            # store viscous torques
-            self.friction_force_ang_x[i] = tv_x
-            self.friction_force_ang_y[i] = tv_y
-            self.friction_force_ang_z[i] = tv_z
+            for i in range(B):
+                self.friction_force_lin_x[i] = fv_x[i]
+                self.friction_force_lin_y[i] = fv_y[i]
+                self.friction_force_lin_z[i] = fv_z[i]
+                self.friction_force_ang_x[i] = tv_x[i]
+                self.friction_force_ang_y[i] = tv_y[i]
+                self.friction_force_ang_z[i] = tv_z[i]
+                self.pressure_force_x[i] = fp_x[i]
+                self.pressure_force_y[i] = fp_y[i]
+                self.pressure_force_z[i] = fp_z[i]
+                self.pressure_force_ang_x[i] = tp_x[i]
+                self.pressure_force_ang_y[i] = tp_y[i]
+                self.pressure_force_ang_z[i] = tp_z[i]
+                self.viscous_drag_record[i, 0, iteration]  = fv_x[i]
+                self.viscous_drag_record[i, 1, iteration]  = fv_y[i]
+                self.viscous_drag_record[i, 2, iteration]  = fv_z[i]
+                self.pressure_drag_record[i, 0, iteration] = fp_x[i]
+                self.pressure_drag_record[i, 1, iteration] = fp_y[i]
+                self.pressure_drag_record[i, 2, iteration] = fp_z[i]
+        else:
+            # ---- PER-BODY path (un-compiled fallback) --------------
+            # Use sparse SDF storage when available: integrate forces
+            # only over the body's AABB sub-block (much less memory
+            # and faster than iterating the full grid).
+            _use_sparse = hasattr(comp, '_sdf_sparse') and comp._sdf_sparse[0] is not None
+            for i, body in enumerate(comp.bodies):
+                eps_body = body.eps
 
-            # store pressure forces
-            self.pressure_force_x[i] = fp_x
-            self.pressure_force_y[i] = fp_y
-            self.pressure_force_z[i] = fp_z
+                if _use_sparse:
+                    aabb_i, sdf_sub_i = comp._sdf_sparse[i]
+                    if aabb_i is not None:
+                        i0, i1, j0, j1, k0, k1 = aabb_i
+                        sl = (slice(i0, i1), slice(j0, j1), slice(k0, k1))
+                        (fv_x, fv_y, fv_z,
+                         tv_x, tv_y, tv_z,
+                         fp_x, fp_y, fp_z,
+                         tp_x, tp_y, tp_z) = _forces_body_integrate_3d(
+                            xstress[sl], ystress[sl], zstress[sl],
+                            pforce_x[sl], pforce_y[sl], pforce_z[sl],
+                            sdf_sub_i, eps_body, self.eps,
+                            body.com_pos[0], body.com_pos[1], body.com_pos[2],
+                            X[sl], Y[sl], Z[sl], h3,
+                        )
+                    else:
+                        # Full-grid SDF (rare: body covers most of grid)
+                        (fv_x, fv_y, fv_z,
+                         tv_x, tv_y, tv_z,
+                         fp_x, fp_y, fp_z,
+                         tp_x, tp_y, tp_z) = _forces_body_integrate_3d(
+                            xstress, ystress, zstress,
+                            pforce_x, pforce_y, pforce_z,
+                            sdf_sub_i, eps_body, self.eps,
+                            body.com_pos[0], body.com_pos[1], body.com_pos[2],
+                            X, Y, Z, h3,
+                        )
+                else:
+                    # Legacy dense path (comp.sdf_vals exists)
+                    sdf_i = comp.sdf_vals[i]
+                    (fv_x, fv_y, fv_z,
+                     tv_x, tv_y, tv_z,
+                     fp_x, fp_y, fp_z,
+                     tp_x, tp_y, tp_z) = self._forces_body_compiled(
+                        xstress, ystress, zstress,
+                        pforce_x, pforce_y, pforce_z,
+                        sdf_i, eps_body, self.eps,
+                        body.com_pos[0], body.com_pos[1], body.com_pos[2],
+                        X, Y, Z, h3,
+                    )
 
-            # store pressure torques
-            self.pressure_force_ang_x[i] = tp_x
-            self.pressure_force_ang_y[i] = tp_y
-            self.pressure_force_ang_z[i] = tp_z
-
-            # record for post-processing
-            self.viscous_drag_record[i, 0, iteration]  = fv_x
-            self.viscous_drag_record[i, 1, iteration]  = fv_y
-            self.viscous_drag_record[i, 2, iteration]  = fv_z
-
-            self.pressure_drag_record[i, 0, iteration] = fp_x
-            self.pressure_drag_record[i, 1, iteration] = fp_y
-            self.pressure_drag_record[i, 2, iteration] = fp_z
+                self.friction_force_lin_x[i] = fv_x
+                self.friction_force_lin_y[i] = fv_y
+                self.friction_force_lin_z[i] = fv_z
+                self.friction_force_ang_x[i] = tv_x
+                self.friction_force_ang_y[i] = tv_y
+                self.friction_force_ang_z[i] = tv_z
+                self.pressure_force_x[i] = fp_x
+                self.pressure_force_y[i] = fp_y
+                self.pressure_force_z[i] = fp_z
+                self.pressure_force_ang_x[i] = tp_x
+                self.pressure_force_ang_y[i] = tp_y
+                self.pressure_force_ang_z[i] = tp_z
+                self.viscous_drag_record[i, 0, iteration]  = fv_x
+                self.viscous_drag_record[i, 1, iteration]  = fv_y
+                self.viscous_drag_record[i, 2, iteration]  = fv_z
+                self.pressure_drag_record[i, 0, iteration] = fp_x
+                self.pressure_drag_record[i, 1, iteration] = fp_y
+                self.pressure_drag_record[i, 2, iteration] = fp_z
 
 
     def project(self, u, v, p, w_vel=None, w=1.0):
-
-        # skip projection if requested (diagnostic mode)
-        if self.skip_projection:
-            if self.ndim == 2:
-                return (u, v, p)
-            else:
-                return (u, v, w_vel, p)
 
         # for general deforming bodies
         if self.ndim == 2:
@@ -1349,7 +1168,6 @@ class FluidSolver:
                 w_vel = w_vel - coeff * p_z
         else:
             # ---- Multigrid / MGCG solver (variable-coefficient Poisson) ----
-            c = torch.ones_like(u)
             ch = coeff*self.mu0_all_u
             cv = coeff*self.mu0_all_v
 
@@ -1359,13 +1177,16 @@ class FluidSolver:
                               else self.poisson_solver.solve_multigrid)
 
             # Warm-start: reuse previous pressure as initial guess
-            p0 = p if self.poisson_warm_start else torch.zeros_like(u)
+            if self.poisson_warm_start:
+                p0 = p
+            else:
+                p.zero_()
+                p0 = p
 
             if self.ndim == 2:
                 p, _    = _poisson_solve(
                     self.div[1:-1,1:-1],
                     p0,
-                    coeff*c,
                     ch = ch[1:,1:-1],
                     cv = cv[1:-1,1:],
                 )
@@ -1378,7 +1199,6 @@ class FluidSolver:
                 p, _ = _poisson_solve(
                     self.div[1:-1, 1:-1, 1:-1],
                     p0,
-                    coeff * c,
                     ch=ch[1:, 1:-1, 1:-1],
                     cv=cv[1:-1, 1:, 1:-1],
                     cw=cw[1:-1, 1:-1, 1:],
@@ -1404,10 +1224,6 @@ class FluidSolver:
 
         phi_out = mu0 * (phi - body_vel) + body_vel
                   + mu1 * normal_derivative(phi - body_vel, ...)
-
-        Algebraically equivalent to mu0*phi + (1-mu0)*body_vel + mu1*nd
-        but avoids materialising the (1 - mu0) tensor.
-
         Parameters
         ----------
         normals_and_extras : variable-length
@@ -1549,6 +1365,14 @@ class FluidSolver:
                 self.normal_x_w, self.normal_y_w, self.normal_z_w, _h, 3,
             )
 
+            # Free mu1 + staggered normals after both BDIM passes
+            for _attr in ('mu1_all_u', 'mu1_all_v', 'mu1_all_w',
+                          'normal_x_u', 'normal_y_u', 'normal_z_u',
+                          'normal_x_v', 'normal_y_v', 'normal_z_v',
+                          'normal_x_w', 'normal_y_w', 'normal_z_w'):
+                if hasattr(self, _attr):
+                    setattr(self, _attr, None)
+
             # Average the BDIM'd pre-projection velocities
             u_avg = 0.5 * (uprime_bdim + uprime2)
             v_avg = 0.5 * (vprime_bdim + vprime2)
@@ -1557,6 +1381,11 @@ class FluidSolver:
             self.adv_diff_solver.set_BCs(u_avg, v_avg, w_avg)
             (u_out, v_out, w_out, p_out) = self.project(u_avg, v_avg, p, w_vel=w_avg, w=0.5)
 
+            # Free mu0 after project
+            for _attr in ('mu0_all_u', 'mu0_all_v', 'mu0_all_w'):
+                if hasattr(self, _attr):
+                    setattr(self, _attr, None)
+
             return (u_out, v_out, p_out, w_out)
 
     def solve_heun(self, u, v, p, iteration, w_vel=None):
@@ -1564,6 +1393,87 @@ class FluidSolver:
             return self.solver_iteration_heun(u, v, p, iteration)
         else:
             return self.solver_iteration_heun(u, v, p, iteration, w_vel=w_vel)
+
+    def solver_iteration_euler(self, u, v, p, iteration, w_vel=None):
+        """Forward Euler time integration with BDIM2.
+
+        Single-stage scheme:
+          adv-diff → BDIM → project(w=1)
+
+        Cheaper per step than Heun (one RHS evaluation instead of two),
+        but only first-order accurate in time.
+        """
+
+        _bdim = self._bdim_meta_compiled
+        _h    = self.h
+
+        if self.ndim == 2:
+            (uprime, vprime) = self.adv_diff_solver.solve(u, v)
+
+            # BDIM2 meta-equation
+            uprime = _bdim(
+                uprime, self.mu0_all_u,
+                self.composite_body.body_u, self.mu1_all_u,
+                self.normal_x_u, self.normal_y_u, _h, 2,
+            )
+            vprime = _bdim(
+                vprime, self.mu0_all_v,
+                self.composite_body.body_v, self.mu1_all_v,
+                self.normal_x_v, self.normal_y_v, _h, 2,
+            )
+
+            self.adv_diff_solver.set_BCs(uprime, vprime)
+            (u_out, v_out, p_out) = self.project(uprime, vprime, p)
+
+            return (u_out, v_out, p_out)
+
+        else:  # 3D
+            (uprime, vprime, wprime) = self.adv_diff_solver.solve(u, v, w_vel)
+
+            # BDIM2 meta-equation
+            uprime = _bdim(
+                uprime, self.mu0_all_u,
+                self.composite_body.body_u, self.mu1_all_u,
+                self.normal_x_u, self.normal_y_u, self.normal_z_u, _h, 3,
+            )
+            vprime = _bdim(
+                vprime, self.mu0_all_v,
+                self.composite_body.body_v, self.mu1_all_v,
+                self.normal_x_v, self.normal_y_v, self.normal_z_v, _h, 3,
+            )
+            wprime = _bdim(
+                wprime, self.mu0_all_w,
+                self.composite_body.body_w, self.mu1_all_w,
+                self.normal_x_w, self.normal_y_w, self.normal_z_w, _h, 3,
+            )
+
+            # Free mu1 and staggered normals — no longer needed after
+            # BDIM.  project() only uses mu0_{u,v,w}, and forces
+            # recomputes CC normals on-the-fly.  This releases
+            # 12 × grid_shape × 4 bytes ≈ 1.5 GB for typical 3-D grids.
+            for _attr in ('mu1_all_u', 'mu1_all_v', 'mu1_all_w',
+                          'normal_x_u', 'normal_y_u', 'normal_z_u',
+                          'normal_x_v', 'normal_y_v', 'normal_z_v',
+                          'normal_x_w', 'normal_y_w', 'normal_z_w'):
+                if hasattr(self, _attr):
+                    setattr(self, _attr, None)
+
+            self.adv_diff_solver.set_BCs(uprime, vprime, wprime)
+            (u_out, v_out, w_out, p_out) = self.project(uprime, vprime, p, w_vel=wprime)
+
+            # Free mu0 — no longer needed after project.  Reduces peak
+            # memory during force computation by another ~0.4 GB.
+            for _attr in ('mu0_all_u', 'mu0_all_v', 'mu0_all_w'):
+                if hasattr(self, _attr):
+                    setattr(self, _attr, None)
+
+            return (u_out, v_out, p_out, w_out)
+
+    def solve_euler(self, u, v, p, iteration, w_vel=None):
+        if self.ndim == 2:
+            return self.solver_iteration_euler(u, v, p, iteration)
+        else:
+            return self.solver_iteration_euler(u, v, p, iteration, w_vel=w_vel)
 
     # ------------------------------------------------------------------
     #   BDIM field cleanup  —  free intermediate tensors between steps
@@ -1621,19 +1531,23 @@ class FluidSolver:
         self.sdf_properties = [[self.composite_body.sdf_val_u]]
 
         if self.ndim == 2:
-            (u, v, p) = self.solve_heun(u, v, p, iteration)
+            (u, v, p) = self._solve(u, v, p, iteration)
 
             if self.compute_forces:
                 self.forces_method2(u, v, p, iteration)
 
         else:
-            (u, v, p, w_vel) = self.solve_heun(u, v, p, iteration, w_vel=w_vel)
+            (u, v, p, w_vel) = self._solve(u, v, p, iteration, w_vel=w_vel)
 
             if self.compute_forces:
                 self.forces_method2_3d(u, v, w_vel, p, iteration)
 
         # ---- free BDIM fields to reclaim GPU memory between steps ----
         self._release_bdim_fields()
+
+        # ---- flush CUDA allocator cache to reduce nvidia-smi usage ----
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
 
         # ---- plotting / saving  (works for 2D and 3D) ----
         terminate = self.plotting_and_saving(u, v, p, iteration, w_vel=w_vel)
@@ -1728,6 +1642,24 @@ class FluidSolver:
             bodies = getattr(self.composite_body, "bodies", None) if hasattr(self, "composite_body") else None
 
             if self.ndim == 2:
+                # ---- build per-body mu0 RGBA overlay (once per frame) ----
+                _mu0_rgba = None
+                if bodies is not None and hasattr(self, "composite_body"):
+                    _eps = getattr(self.composite_body, "eps",
+                                   getattr(self, "eps", None))
+                    # Snapshot batched per-body SDFs (comp.sdf_vals) to CPU
+                    # numpy.  This is the primary SDF source for BDIMhandler
+                    # paths where individual body.sdf_val is never set.
+                    _sdf_vals_np = None
+                    _sv = getattr(self.composite_body, "sdf_vals", None)
+                    if _sv is not None:
+                        _sdf_vals_np = _sv.detach().cpu().numpy().copy()
+                    if _eps is not None:
+                        _mu0_rgba = plotting.build_body_mu0_rgba(
+                            bodies, self.grid_shape, float(_eps),
+                            sdf_vals=_sdf_vals_np,
+                        )
+
                 for (name, field_fn, vmin, vmax, show_body) in specs:
                     field = field_fn(self, u, v, p, w_vel)
                     field_np = field.detach().cpu().numpy().copy() if hasattr(field, 'detach') else np.array(field)
@@ -1741,6 +1673,7 @@ class FluidSolver:
                         field_np, extent,
                         name, iteration, save_path,
                         vmin=eff_vmin, vmax=eff_vmax, bodies=_bodies,
+                        body_mu0_rgba=_mu0_rgba if show_body else None,
                     )
             else:
                 coords = {
@@ -1748,34 +1681,66 @@ class FluidSolver:
                     "y": self.y.cpu().numpy().copy(),
                     "z": self.z.cpu().numpy().copy(),
                 }
+                # snapshot SDF for body-shape overlay on 2-D slice plots
+                sdf_np = None
+                if hasattr(self, "composite_body") and hasattr(self.composite_body, "sdf_val"):
+                    sdf_np = self.composite_body.sdf_val.cpu().numpy().copy()
+                # snapshot batched per-body SDFs for mu0 colouring
+                _sdf_vals_3d_np = None
+                _eps_3d = None
+                if bodies is not None and hasattr(self, "composite_body"):
+                    _sv3 = getattr(self.composite_body, "sdf_vals", None)
+                    if _sv3 is not None:
+                        _sdf_vals_3d_np = _sv3.detach().cpu().numpy().copy()
+                    _eps_3d = getattr(self.composite_body, "eps",
+                                       getattr(self, "eps", None))
                 for (name, field_fn, vmin, vmax, _show_body) in specs:
                     field = field_fn(self, u, v, p, w_vel)
                     field_np = field.detach().cpu().numpy().copy() if hasattr(field, 'detach') else np.array(field)
                     eff_vmin = self.vmin if vmin is None else vmin
                     eff_vmax = self.vmax if vmax is None else vmax
                     save_path = self.save_path
+                    _pass_bodies = bodies if _show_body else None
+                    _pass_mu0 = (_sdf_vals_3d_np is not None and _eps_3d is not None
+                                 and _show_body)
                     self._submit_io(
                         plotting.plot_field_3d_slices,
                         field_np, coords,
                         name, iteration, save_path,
-                        vmin=eff_vmin, vmax=eff_vmax, bodies=None,
+                        vmin=eff_vmin, vmax=eff_vmax, bodies=_pass_bodies,
+                        sdf_3d=sdf_np,
+                        body_mu0_coloring=_pass_mu0,
+                        body_eps=float(_eps_3d) if _eps_3d is not None else None,
+                        sdf_vals=_sdf_vals_3d_np if _pass_mu0 else None,
                     )
 
-                # ---- VTK export (3-D only) ----
-                if self.save_vtk:
-                    vtk_fields = {
+                # ---- HDF5 field export (3-D only, replaces old VTK) ----
+                # Saves u, v, w, p, sdf — all derived fields (vorticity,
+                # vel_mag, divergence) can be recomputed from these.
+                if self.save:
+                    h5_fields = {
                         "u": u.detach().cpu().numpy().copy(),
                         "v": v.detach().cpu().numpy().copy(),
                         "p": p.detach().cpu().numpy().copy(),
                     }
                     if w_vel is not None:
-                        vtk_fields["w"] = w_vel.detach().cpu().numpy().copy()
-                    self._submit_io(plotting.save_vtk, vtk_fields, coords, iteration, self.save_path)
+                        h5_fields["w"] = w_vel.detach().cpu().numpy().copy()
+                    if sdf_np is not None:
+                        h5_fields["sdf"] = sdf_np  # already on CPU
+
+                    # Grids only on first snapshot
+                    grids = None
+                    if iteration == 0 or not hasattr(self, '_grids_saved'):
+                        grids = coords
+                        self._grids_saved = True
+
+                    self._submit_io(
+                        self._save_fields_h5,
+                        h5_fields, grids, iteration,
+                    )
 
                 # ---- 3-D isosurface renders ----
-                sdf_np = None
-                if hasattr(self, "composite_body") and hasattr(self.composite_body, "sdf_val"):
-                    sdf_np = self.composite_body.sdf_val.cpu().numpy().copy()
+                # sdf_np already snapshotted above for slice plots
                 iso_specs = getattr(self, "iso_3d_specs",
                                     self.DEFAULT_3D_ISO_SPECS if self.ndim == 3
                                     else specs)
@@ -1793,9 +1758,44 @@ class FluidSolver:
                         sdf_3d=sdf_np, iso_value=iso_thresh,
                     )
 
-        # ---- raw data save ----
-        if self.save_uv:
-            self.save_results(u, v, p, iteration, w_vel=w_vel)
+        # ---- raw data save (2-D) ----
+        if self.save and self.ndim == 2:
+            h5_fields = {
+                "u": u.detach().cpu().numpy().copy(),
+                "v": v.detach().cpu().numpy().copy(),
+                "p": p.detach().cpu().numpy().copy(),
+            }
+            # SDF snapshot
+            sdf_np = None
+            if hasattr(self, "composite_body") and hasattr(self.composite_body, "sdf_val"):
+                sdf_np = self.composite_body.sdf_val.cpu().numpy().copy()
+                h5_fields["sdf"] = sdf_np
+
+            # Grids only on first snapshot
+            grids = None
+            if iteration == 0 or not hasattr(self, '_grids_saved'):
+                grids = {
+                    "x": self.x.cpu().numpy().copy(),
+                    "y": self.y.cpu().numpy().copy(),
+                }
+                self._grids_saved = True
+
+            self._submit_io(
+                self._save_fields_h5,
+                h5_fields, grids, iteration,
+            )
+
+            # 2-D body contours
+            if hasattr(self, "composite_body") and hasattr(self.composite_body, "bodies"):
+                cnt_arrays = [
+                    body.cnt_update.cpu().numpy().copy()
+                    for body in self.composite_body.bodies
+                    if hasattr(body, "cnt_update")
+                ]
+                if cnt_arrays:
+                    self._submit_io(
+                        self._save_contours_h5, cnt_arrays, iteration,
+                    )
 
         if check_termination:
             return self.check_termination(iteration, u, v, p)
@@ -1807,13 +1807,13 @@ class FluidSolver:
 
     def check_termination(self, iteration, u, v, p):
         if iteration == self.nt - 1 or torch.isnan(u).any():
-                print("Termination condition met: max_iter or NaN")
+                logger.warning("Termination condition met: max_iter or NaN")
                 terminate = True
         else:
             if hasattr(self.composite_body, "com_pos"):
                     terminate = not self.inside(self.composite_body.com_pos)
                     if terminate:
-                        print("Termination condition met: body exited domain")
+                        logger.warning("Termination condition met: body exited domain")
             else:
                 terminate = False
         return terminate
@@ -1823,45 +1823,66 @@ class FluidSolver:
         self.plotting_and_saving(u, v, p, iteration, check_termination=False)
 
     def save_results(self, u, v, p, iteration, *, w_vel=None):
-        if self.save_uv:
-          uv_path = f'{self.save_path}/uv_field'
-          os.makedirs(uv_path, exist_ok=True)
+        """Legacy alias — delegates to the unified HDF5 pipeline."""
+        if not self.save:
+            return
+        h5_fields = {
+            "u": u.detach().cpu().numpy().copy(),
+            "v": v.detach().cpu().numpy().copy(),
+            "p": p.detach().cpu().numpy().copy(),
+        }
+        if w_vel is not None:
+            h5_fields["w"] = w_vel.detach().cpu().numpy().copy()
+        if hasattr(self, "composite_body") and hasattr(self.composite_body, "sdf_val"):
+            h5_fields["sdf"] = self.composite_body.sdf_val.cpu().numpy().copy()
+        grids = None
+        if iteration == 0 or not hasattr(self, '_grids_saved'):
+            grids = {"x": self.x.cpu().numpy().copy(),
+                     "y": self.y.cpu().numpy().copy()}
+            if self.z is not None:
+                grids["z"] = self.z.cpu().numpy().copy()
+            self._grids_saved = True
+        self._submit_io(self._save_fields_h5, h5_fields, grids, iteration)
 
-          # Snapshot tensors to CPU numpy arrays on the main thread (single
-          # GPU→CPU transfer), then hand the actual np.save() to a worker.
-          u_np = u.detach().cpu().numpy().copy()
-          v_np = v.detach().cpu().numpy().copy()
-          p_np = p.detach().cpu().numpy().copy()
+    # ------------------------------------------------------------------
+    #   Unified HDF5 saving helpers (used by both 2-D and 3-D paths)
+    # ------------------------------------------------------------------
 
-          def _save_fields(path, it, u_a, v_a, p_a, w_a):
-              np.save(f'{path}/u_{it}', u_a)
-              np.save(f'{path}/v_{it}', v_a)
-              np.save(f'{path}/p_{it}', p_a)
-              if w_a is not None:
-                  np.save(f'{path}/w_{it}', w_a)
+    def _save_fields_h5(self, fields, grids, iteration):
+        """Write velocity / pressure / SDF fields to a single HDF5 file.
 
-          w_np = w_vel.detach().cpu().numpy().copy() if w_vel is not None else None
-          self._submit_io(_save_fields, uv_path, iteration, u_np, v_np, p_np, w_np)
+        File layout::
 
-          if iteration == 0:
-              x_np = self.x.cpu().numpy().copy()
-              y_np = self.y.cpu().numpy().copy()
-              z_np = self.z.cpu().numpy().copy() if self.z is not None else None
+            grids/x, grids/y [, grids/z]   – written once
+            fields/000000/u
+            fields/000000/v
+            fields/000000/p
+            fields/000000/w   (3-D only)
+            fields/000000/sdf (when a body is present)
+            ...
 
-              def _save_grids(path, x_a, y_a, z_a):
-                  np.save(f'{path}/x_grid', x_a)
-                  np.save(f'{path}/y_grid', y_a)
-                  if z_a is not None:
-                      np.save(f'{path}/z_grid', z_a)
+        All derived quantities (vorticity, velocity magnitude, divergence)
+        can be recomputed from u, v, [w] and the grid coordinates.
+        """
+        h5_path = f'{self.save_path}/fields.h5'
+        grp = f'fields/{iteration:06d}'
+        lock = self._hdf5_lock
+        with lock:
+            with h5py.File(h5_path, 'a') as f:
+                for name, arr in fields.items():
+                    f.create_dataset(f'{grp}/{name}', data=arr)
+                if grids is not None and 'grids' not in f:
+                    for name, arr in grids.items():
+                        f.create_dataset(f'grids/{name}', data=arr)
 
-              self._submit_io(_save_grids, uv_path, x_np, y_np, z_np)
-
-          if self.ndim == 2:
-              cnt_path = f'{self.save_path}/cnt_field'
-              os.makedirs(cnt_path, exist_ok=True)
-              for i, body in enumerate(self.composite_body.bodies):
-                  cnt_np = body.cnt_update.cpu().numpy().copy()
-                  self._submit_io(np.save, f'{cnt_path}/cnt_{iteration}_{i}', cnt_np)
+    def _save_contours_h5(self, cnt_arrays, iteration):
+        """Write 2-D body contour data to a dedicated HDF5 file."""
+        cnt_h5 = f'{self.save_path}/contours.h5'
+        lock = self._hdf5_lock
+        with lock:
+            with h5py.File(cnt_h5, 'a') as f:
+                for i, arr in enumerate(cnt_arrays):
+                    f.create_dataset(f'{iteration:06d}/body_{i}', data=arr)
 
     def run_from_initial(self, u0, v0, w0=None):
         u = u0
@@ -1891,12 +1912,20 @@ class FluidSolver:
                 t                      = iteration*self.dt
                 (u,v,p,w,stop_sim) = self.step_(u, v, p, iteration, t, w_vel=w)
 
-        if self.compute_forces and self.save_uv:
+        if self.compute_forces and self.save:
             uv_path = f'{self.save_path}'
             vd_np = self.viscous_drag_record.cpu().numpy().copy()
             pd_np = self.pressure_drag_record.cpu().numpy().copy()
-            self._submit_io(np.save, f'{uv_path}/viscous_drags', vd_np)
-            self._submit_io(np.save, f'{uv_path}/pressure_drags', pd_np)
+            h5_path = f'{uv_path}/drags.h5'
+            lock = self._hdf5_lock
+
+            def _save_drags_h5(path, vd, pd):
+                with lock:
+                    with h5py.File(path, 'w') as f:
+                        f.create_dataset('viscous_drags', data=vd)
+                        f.create_dataset('pressure_drags', data=pd)
+
+            self._submit_io(_save_drags_h5, h5_path, vd_np, pd_np)
 
         # Block until all background I/O is complete before returning
         self.flush_io()

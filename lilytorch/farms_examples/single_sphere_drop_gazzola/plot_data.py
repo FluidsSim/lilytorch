@@ -1,83 +1,285 @@
+"""
+Plot results from the Gazzola et al. 2D sphere sedimentation test.
 
-import os
-import matplotlib.pyplot as plt
+Produces:
+  1. Normalised COM velocity (ux, uz, omega) vs normalised time,
+     compared with reference data from Gazzola et al. (2011).
+  2. Velocity-field snapshots at selected time steps.
+  3. Vorticity field snapshot.
+  4. Kinetic & potential energy evolution.
+"""
+
+import pathlib
 import numpy as np
-from farms_core.io.hdf5 import hdf5_to_dict
-from farms_core.sensors.sensor_convention import sc
-from lilytorch.util.yaml_operations import yaml2pyobject
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from matplotlib.colors import TwoSlopeNorm
 
-dir = "/data/andreaferrario/ns_data/2025-11-23T14:55:17.471975/"
+# ── style ────────────────────────────────────────────────────────────────
+plt.rcParams.update({
+    "font.family":       "serif",
+    "font.size":         11,
+    "axes.labelsize":    13,
+    "axes.titlesize":    13,
+    "legend.fontsize":   9.5,
+    "xtick.labelsize":   10,
+    "ytick.labelsize":   10,
+    "lines.linewidth":   1.6,
+    "figure.dpi":        150,
+    "savefig.dpi":       300,
+    "savefig.bbox":      "tight",
+    "axes.grid":         True,
+    "grid.alpha":        0.3,
+    "grid.linewidth":    0.5,
+})
 
-uinf = -0.02501
-D=0.005
+# ── paths ────────────────────────────────────────────────────────────────
+HERE       = pathlib.Path(__file__).resolve().parent
+FIG_DIR    = HERE / "figures"
+FIG_DIR.mkdir(exist_ok=True)
+REF_DIR    = HERE.parent.parent.parent / "data_to_save"
+FMT        = ".png"
 
-data = hdf5_to_dict(dir + "simulation.hdf5")
-times=data["times"][:-1]
+# Auto-detect data: fluid field + HDF5
+FLUID_DIR  = pathlib.Path("/data/andreaferrario/ns_data/2026-03-09T17:05:04.152466")
+HDF5_PATH  = pathlib.Path("/data/andreaferrario/ns_data/2026-03-09T17:05:03.094491/output/simulation.hdf5")
 
+# ── physical parameters ─────────────────────────────────────────────────
+D          = 0.005          # sphere diameter  [m]
+R          = D / 2
+rho_body   = 1050.0         # kg/m^3
+rho_fluid  = 996.0          # kg/m^3
+nu         = 8e-7           # kinematic viscosity [m^2/s]
+g_acc      = 9.81           # gravitational acceleration [m/s^2]
+U_t        = 0.02501        # terminal settling velocity [m/s]
+mass_2d    = 0.02061670178918302   # rho_body * pi * R^2
+dt_fluid   = 1e-4
 
-sphere=data["animats"][0]
-
-sensor_array = sphere["sensors"]["links"]["array"][:,0,:]
-
-com_vel = sensor_array[:,sc.link_com_velocity_lin_x:sc.link_com_velocity_lin_z+1]
-ang_vel = sensor_array[:,sc.link_com_velocity_ang_x:sc.link_com_velocity_ang_z+1]
-z_pos = sensor_array[:,sc.link_urdf_position_z]
-
-labels=["u_x","u_z","ang"]
-cs=['r','g','b']
-# for i in range(3):
-#     plt.plot(com_vel[:,i], label=labels[i])
-#     plt.plot(ang_vel[:,i], label=labels[i])
-
-time_normalized = -times*uinf/D
-
-plt.plot(time_normalized,com_vel[:,0]/uinf, label=labels[0], color=cs[0])
-plt.plot(time_normalized,com_vel[:,2]/uinf, label=labels[1], color=cs[1])
-plt.plot(time_normalized,D*ang_vel[:,1]/uinf, label=labels[2], color=cs[2])
-plt.legend()
-plt.xlabel("t U_t/D")
-plt.ylabel("Normalized COM velocity")
-plt.title("Normalized cylinder velocity")
-
-
-
-
-# vp = np.genfromtxt('data_to_save/vp.csv', delimiter=',')
-# up = np.genfromtxt('data_to_save/up.csv', delimiter=',')
-# wp = np.genfromtxt('data_to_save/wp.csv', delimiter=',')
-
-
-# def convert_range(arr, old_min=0, old_max=1.2, new_min=-0.2, new_max=1.2):
-#     scale = (new_max - new_min) / (old_max - old_min)
-#     return new_min + (arr - old_min) * scale
-
-# vp[:,1] = convert_range(vp[:,1])
-# up[:,1] = convert_range(up[:,1])
-# wp[:,1] = convert_range(wp[:,1])
-
-# plt.scatter(up[:,0]-1., up[:,1], color=cs[1], s=6)
-# plt.scatter(wp[:,0], wp[:,1], color=cs[2], s=3)
-# plt.scatter(vp[:,0], vp[:,1], color=cs[0], s=3)
-
-plt.ylim([-0.2,1.2])
+# ── colours ──────────────────────────────────────────────────────────────
+C_UX  = "#2166AC"   # blue   – horizontal velocity
+C_UZ  = "#B2182B"   # red    – vertical (settling) velocity
+C_ANG = "#4DAF4A"   # green  – angular velocity
 
 
+# =====================================================================
+# 1.  Normalised velocity plot  (HDF5 body kinematics)
+# =====================================================================
+def plot_velocities():
+    from farms_core.io.hdf5 import hdf5_to_dict
+    from farms_core.sensors.sensor_convention import sc
 
-plt.savefig("figures/sphere_com_velocity.png", dpi=300)
+    data  = hdf5_to_dict(str(HDF5_PATH))
+    times = data["times"][:-1]
+    sa    = data["animats"][0]["sensors"]["links"]["array"][:-1, 0, :]
+
+    com_vel = sa[:, sc.link_com_velocity_lin_x : sc.link_com_velocity_lin_z + 1]
+    ang_vel = sa[:, sc.link_com_velocity_ang_x : sc.link_com_velocity_ang_z + 1]
+    z_pos   = sa[:, sc.link_com_position_y]  # MuJoCo y = vertical (gravity)
+
+    # Normalised time: t* = t |U_t| / D
+    t_star = times * abs(U_t) / D
+
+    # Normalised velocities
+    # MuJoCo x -> fluid x (horizontal), MuJoCo y -> vertical (settling)
+    ux_norm  =  com_vel[:, 0] / U_t
+    uz_norm  = -com_vel[:, 1] / U_t   # negate: positive = downward settling
+    ang_norm =  D * ang_vel[:, 1] / U_t
+
+    # ── reference data (digitised from Gazzola et al.) ──
+    ref_up = np.genfromtxt(str(REF_DIR / "up.csv"), delimiter=",")   # settling vel
+    ref_vp = np.genfromtxt(str(REF_DIR / "vp.csv"), delimiter=",")   # horizontal
+    ref_wp = np.genfromtxt(str(REF_DIR / "wp.csv"), delimiter=",")   # angular
+
+    # ── velocity figure ──
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+
+    # Reference (open markers)
+    ax.scatter(ref_vp[:, 0], ref_vp[:, 1], s=16, marker="o",
+               facecolors="none", edgecolors=C_UX, linewidths=0.8,
+               label=r"$u_x/U_t$ (Gazzola et al.)", zorder=3)
+    ax.scatter(ref_up[:, 0] - 1.0, ref_up[:, 1], s=16, marker="s",
+               facecolors="none", edgecolors=C_UZ, linewidths=0.8,
+               label=r"$u_z/U_t$ (Gazzola et al.)", zorder=3)
+    ax.scatter(ref_wp[:, 0], ref_wp[:, 1], s=16, marker="^",
+               facecolors="none", edgecolors=C_ANG, linewidths=0.8,
+               label=r"$D\omega/U_t$ (Gazzola et al.)", zorder=3)
+
+    # Simulation (solid lines)
+    ax.plot(t_star, ux_norm,  color=C_UX,  label=r"$u_x/U_t$ (BDIM)")
+    ax.plot(t_star, uz_norm,  color=C_UZ,  label=r"$u_z/U_t$ (BDIM)")
+    ax.plot(t_star, ang_norm, color=C_ANG, label=r"$D\omega/U_t$ (BDIM)")
+
+    ax.set_xlabel(r"$t^{*} = t\,|U_t|/D$")
+    ax.set_ylabel(r"Normalised velocity")
+    ax.set_title("Sphere sedimentation – Gazzola et al. (2011)")
+    ax.set_ylim([-0.2, 1.3])
+    ax.legend(ncol=2, loc="upper right", framealpha=0.92, edgecolor="0.7")
+    fig.tight_layout()
+    fig.savefig(str(FIG_DIR / f"gazzola_com_velocity{FMT}"))
+    print(f"  Saved {FIG_DIR / f'gazzola_com_velocity{FMT}'}")
+    plt.close(fig)
+
+    # ── energy figure ──
+    KE = 0.5 * mass_2d * (com_vel[:, 0]**2 + com_vel[:, 1]**2)
+    PE = mass_2d * g_acc * z_pos
+
+    fig2, ax2 = plt.subplots(figsize=(6, 3.8))
+    ax2.plot(t_star, 1e6 * KE, color="#D95F02", label="Kinetic energy")
+    ax2.plot(t_star, 1e6 * PE, color="#1B9E77", label="Potential energy")
+    ax2.set_xlabel(r"$t^{*}$")
+    ax2.set_ylabel(r"Energy  [$\mu$J]")
+    ax2.set_title("Energy evolution – Gazzola")
+    ax2.legend(framealpha=0.92, edgecolor="0.7")
+    fig2.tight_layout()
+    fig2.savefig(str(FIG_DIR / f"gazzola_energy{FMT}"))
+    print(f"  Saved {FIG_DIR / f'gazzola_energy{FMT}'}")
+    plt.close(fig2)
 
 
-mass = 0.019831303625785567
-g=9.81
-potential_energy = mass * g * z_pos
-# Compute kinetic energy: KE = 0.5 * (u_x^2 + u_z^2 + (D*ang_y)^2)
-kinetic_energy = 0.5 * (com_vel[:,0]**2 + com_vel[:,2]**2 + ang_vel[:,1]**2)
+# =====================================================================
+# 2.  Velocity-field snapshots (from UV npy files)
+# =====================================================================
+def plot_velocity_fields():
+    uv_dir = FLUID_DIR / "uv_field"
+    xg = np.load(str(uv_dir / "x_grid.npy"))
+    yg = np.load(str(uv_dir / "y_grid.npy"))
+    X, Y = np.meshgrid(xg, yg, indexing="ij")
 
-plt.figure()
-plt.plot(time_normalized, kinetic_energy, color='k', label='Kinetic Energy')
-plt.plot(time_normalized, potential_energy, color='b', label='Potential Energy')
-plt.xlabel("t U_t/D")
-plt.ylabel("Energy (J)")
-plt.title("Normalized Kinetic and Potential Energy of Sphere")
-plt.legend()
-plt.ylim([0, max(np.max(kinetic_energy), np.max(potential_energy))*1.1])
-plt.savefig("figures/sphere_kinetic_potential_energy.png", dpi=300)
+    iters = sorted(set(
+        int(p.stem.split("_")[1])
+        for p in uv_dir.glob("u_*.npy")
+    ))
+    if not iters:
+        print("  No UV field data – skipping.")
+        return
+
+    # Pick 4 evenly spaced snapshots
+    n_panels = min(4, len(iters))
+    idx = np.linspace(0, len(iters) - 1, n_panels, dtype=int)
+    chosen = [iters[i] for i in idx]
+
+    fig, axes = plt.subplots(1, n_panels, figsize=(3.8 * n_panels, 7),
+                             sharey=True, constrained_layout=True)
+    if n_panels == 1:
+        axes = [axes]
+
+    im = None
+    for ax, it in zip(axes, chosen):
+        u = np.load(str(uv_dir / f"u_{it}.npy"))
+        v = np.load(str(uv_dir / f"v_{it}.npy"))
+        speed = np.sqrt(u**2 + v**2)
+        t_phys = it * dt_fluid
+
+        vmax = max(np.percentile(speed, 99.5), 1e-9)
+        im = ax.pcolormesh(X * 1e3, Y * 1e3, speed,
+                           cmap="inferno", vmin=0, vmax=vmax,
+                           shading="auto", rasterized=True)
+
+        # Sphere outline (approximate: drops from y=0.3)
+        th = np.linspace(0, 2 * np.pi, 120)
+        cx, cy = 0.0, 0.3 - abs(U_t) * t_phys
+        ax.plot((cx + R * np.cos(th)) * 1e3,
+                (cy + R * np.sin(th)) * 1e3,
+                color="white", linewidth=1.2)
+
+        ax.set_title(f"$t = {t_phys * 1e3:.1f}$ ms", fontsize=10)
+        ax.set_xlabel("$x$ [mm]")
+        ax.set_aspect("equal")
+        ax.set_xlim([(cx - 4 * R) * 1e3, (cx + 4 * R) * 1e3])
+        ax.set_ylim([(cy - 6 * R) * 1e3, (cy + 6 * R) * 1e3])
+
+    axes[0].set_ylabel("$y$ [mm]")
+    fig.colorbar(im, ax=axes, shrink=0.7, label=r"$|\mathbf{u}|$ [m/s]",
+                 pad=0.02)
+    fig.suptitle("Velocity magnitude – Gazzola sphere sedimentation",
+                 fontsize=13, y=1.01)
+    fig.savefig(str(FIG_DIR / f"gazzola_velocity_field{FMT}"))
+    print(f"  Saved {FIG_DIR / f'gazzola_velocity_field{FMT}'}")
+    plt.close(fig)
+
+
+# =====================================================================
+# 3.  Vorticity field snapshot
+# =====================================================================
+def plot_vorticity():
+    uv_dir = FLUID_DIR / "uv_field"
+    xg = np.load(str(uv_dir / "x_grid.npy"))
+    yg = np.load(str(uv_dir / "y_grid.npy"))
+    dx, dy = xg[1] - xg[0], yg[1] - yg[0]
+
+    iters = sorted(set(int(p.stem.split("_")[1]) for p in uv_dir.glob("u_*.npy")))
+    if len(iters) < 2:
+        return
+
+    it = iters[-1]
+    u = np.load(str(uv_dir / f"u_{it}.npy"))
+    v = np.load(str(uv_dir / f"v_{it}.npy"))
+    t_phys = it * dt_fluid
+
+    omega = np.gradient(v, dx, axis=0) - np.gradient(u, dy, axis=1)
+    X, Y = np.meshgrid(xg, yg, indexing="ij")
+    vlim = np.percentile(np.abs(omega), 99)
+
+    fig, ax = plt.subplots(figsize=(5, 7))
+    norm = TwoSlopeNorm(vmin=-vlim, vcenter=0, vmax=vlim)
+    im = ax.pcolormesh(X * 1e3, Y * 1e3, omega,
+                       cmap="RdBu_r", norm=norm,
+                       shading="auto", rasterized=True)
+
+    th = np.linspace(0, 2 * np.pi, 120)
+    cx, cy = 0.0, 0.3 - abs(U_t) * t_phys
+    ax.plot((cx + R * np.cos(th)) * 1e3,
+            (cy + R * np.sin(th)) * 1e3, "k-", linewidth=1.2)
+
+    ax.set_xlabel("$x$ [mm]")
+    ax.set_ylabel("$y$ [mm]")
+    ax.set_xlim([(cx - 5 * R) * 1e3, (cx + 5 * R) * 1e3])
+    ax.set_ylim([(cy - 8 * R) * 1e3, (cy + 8 * R) * 1e3])
+    ax.set_aspect("equal")
+    ax.set_title(f"Vorticity  $\\omega_z$  at  $t = {t_phys * 1e3:.1f}$ ms")
+    fig.colorbar(im, ax=ax, shrink=0.55, label=r"$\omega_z$ [1/s]")
+    fig.tight_layout()
+    fig.savefig(str(FIG_DIR / f"gazzola_vorticity{FMT}"))
+    print(f"  Saved {FIG_DIR / f'gazzola_vorticity{FMT}'}")
+    plt.close(fig)
+
+
+# =====================================================================
+# 4.  Vertical velocity profile at the last saved snapshot
+# =====================================================================
+def plot_v_profile():
+    uv_dir = FLUID_DIR / "uv_field"
+    xg = np.load(str(uv_dir / "x_grid.npy"))
+    yg = np.load(str(uv_dir / "y_grid.npy"))
+
+    iters = sorted(set(int(p.stem.split("_")[1]) for p in uv_dir.glob("v_*.npy")))
+    if not iters:
+        return
+
+    it = iters[-1]
+    v = np.load(str(uv_dir / f"v_{it}.npy"))
+    t_phys = it * dt_fluid
+    cy = 0.3 - abs(U_t) * t_phys
+    j_cen = np.argmin(np.abs(yg - cy))
+
+    fig, ax = plt.subplots(figsize=(6, 3.8))
+    ax.plot(xg * 1e3, v[:, j_cen] / U_t, color=C_UZ, linewidth=1.5)
+    ax.axhline(0, color="0.5", linewidth=0.5, linestyle="--")
+    ax.set_xlabel("$x$ [mm]")
+    ax.set_ylabel(r"$v_y / U_t$")
+    ax.set_title(f"Vertical velocity profile at $t = {t_phys * 1e3:.1f}$ ms")
+    fig.tight_layout()
+    fig.savefig(str(FIG_DIR / f"gazzola_v_profile{FMT}"))
+    print(f"  Saved {FIG_DIR / f'gazzola_v_profile{FMT}'}")
+    plt.close(fig)
+
+
+# =====================================================================
+if __name__ == "__main__":
+    print("Plotting Gazzola sphere sedimentation results …")
+    plot_velocities()
+    plot_velocity_fields()
+    plot_vorticity()
+    plot_v_profile()
+    print("Done.")

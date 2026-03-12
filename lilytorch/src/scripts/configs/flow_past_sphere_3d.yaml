@@ -16,7 +16,6 @@ solver:
   rho               : 1.0
   dt                : 0.001
   convection_method : "quick"
-  skip_projection   : False
 
   poisson_tol            : 1.0e-4
   jacobi_weight          : 0.7

@@ -1,23 +1,47 @@
 
+import logging
+import math  # used for evaluating math operations for sdfs
 import os
-import torch
+
 import numpy as np
-import open3d as o3d
-o3d.utility.set_verbosity_level(o3d.utility.VerbosityLevel.Error)  # exclusively show errors
-from scipy.interpolate import CubicSpline
+import torch
 from farms_core.io.sdf import ModelSDF
 from pytorch_interpolation import RegularGridInterpolator, RegularGridInterpolatorAutomatic
-import skfmm
-from skimage import measure
-import math # important to keep this for evaluating math operations for sdfs even if it appears as not used
 
-import matplotlib
-import matplotlib.pyplot as plt
+logger = logging.getLogger(__name__)
 
-import cv2
-import matplotlib.cm as cm
+# ---------------------------------------------------------------------------
+# Lazy-imported heavy dependencies — only loaded when first used.
+# This avoids ~2-3 s of unnecessary startup cost for code paths that never
+# call SDF construction, plotting, or mesh operations.
+# ---------------------------------------------------------------------------
 
-from lilytorch.src.scripts.zebrafish_files.load_data import get_experimental_signal
+def _import_open3d():
+    import open3d as o3d
+    o3d.utility.set_verbosity_level(o3d.utility.VerbosityLevel.Error)
+    return o3d
+
+def _import_cv2():
+    import cv2
+    return cv2
+
+def _import_skfmm():
+    import skfmm
+    return skfmm
+
+def _import_measure():
+    from skimage import measure
+    return measure
+
+def _import_cubic_spline():
+    from scipy.interpolate import CubicSpline
+    return CubicSpline
+
+def _import_matplotlib():
+    import matplotlib
+    import matplotlib.pyplot as plt
+    import matplotlib.cm as cm
+    return matplotlib, plt, cm
 
 
 # ---------------------------------------------------------------------------
@@ -554,11 +578,13 @@ class mesh2sdf():
     It is assumed that all vector inputs are numpy arrays
     """
     def __init__(self, mesh_file, convexify=True, scale=1):
+        o3d = _import_open3d()
         self.mesh_file = mesh_file
         self._mesh = o3d.io.read_triangle_mesh(self.mesh_file)
         self.update_mesh(convexify=convexify, scale=scale)
 
     def update_mesh(self, convexify, scale):
+        o3d = _import_open3d()
         self._mesh = self._mesh.scale(scale, (0,0,0)) #self._mesh.get_center())
         if convexify:
             self._mesht = o3d.t.geometry.TriangleMesh.from_legacy(self._mesh.compute_convex_hull()[0])
@@ -619,6 +645,7 @@ class mesh2sdf():
         return ranges
 
     def visualize(self, wireframe=True):
+        o3d = _import_open3d()
 
         print("Visualizing the mesh file: {}".format(self.mesh_file))
 
@@ -677,6 +704,7 @@ class COMPOSITEmesh2sdf():
 
 
     def visualize(self):
+        o3d = _import_open3d()
 
         viewer = o3d.visualization.Visualizer()
         viewer.create_window()
@@ -917,6 +945,7 @@ class BodyAnalytical(Body):
 
     def _initialize_2d(self):
         """2-D initialisation: find contour, resample, set up arrays."""
+        measure = _import_measure()
         xmid = (self.x.min() + self.x.max()) / 2
         ymid = (self.y.min() + self.y.max()) / 2
         xcnt = self.x - xmid
@@ -949,6 +978,7 @@ class BodyAnalytical(Body):
         self.ds = self.curv_coord[1] - self.curv_coord[0]
 
         if self.plotting:
+            _, plt, cm = _import_matplotlib()
             plt.imshow(
                 sdf_np.T,
                 extent=(
@@ -1471,6 +1501,7 @@ class BodyFishExperimental(Body):
         self.w2 = 0.004
 
         # Get the signal
+        from lilytorch.src.scripts.zebrafish_files.load_data import get_experimental_signal
         self.points_coords_df = get_experimental_signal(
             folder_name     = self.folder_name,
             file_name       = self.file_name,
@@ -1732,6 +1763,9 @@ class BodyMesh(Body):
 
     # ---- 2-D SDF computation ------------------------------------------
     def _compute_sdfs_2d(self, zpos, diag):
+        cv2 = _import_cv2()
+        skfmm = _import_skfmm()
+        measure = _import_measure()
         cx_bb = (self.bb[0, 1] + self.bb[0, 0]) / 2
         cy_bb = (self.bb[1, 1] + self.bb[1, 0]) / 2
         xnp = np.linspace(cx_bb - 2 * diag, cx_bb + 2 * diag, self.nsamples)
@@ -1809,6 +1843,7 @@ class BodyMesh(Body):
         sign_vec = np.where(cnt[1] >= cnt[1][0], 1, -1)
 
         if self.plotting:
+            _, plt, cm = _import_matplotlib()
             plt.figure()
             plt.contourf(X, Y, sdf_val)
             plt.plot(cnt[0], cnt[1], 'r', linewidth=2)
@@ -1835,6 +1870,7 @@ class BodyMesh(Body):
     # ---- 3-D SDF computation ------------------------------------------
     def _compute_sdfs_3d(self, diag):
         """Build a 3-D SDF field from the mesh using open3d + skfmm."""
+        skfmm = _import_skfmm()
         centres = [(self.bb[i, 1] + self.bb[i, 0]) / 2 for i in range(3)]
         xnp = np.linspace(centres[0] - 2 * diag, centres[0] + 2 * diag, self.nsamples)
         ynp = np.linspace(centres[1] - 2 * diag, centres[1] + 2 * diag, self.msamples)
@@ -1869,6 +1905,8 @@ class BodyMesh(Body):
 
     def _plot_sdf_3d(self, xnp, ynp, znp, sdf_val, centres):
         """Visualise a 3-D SDF: three orthogonal slices + isosurface."""
+        _, plt, _ = _import_matplotlib()
+        measure = _import_measure()
         from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
         ix_mid = np.argmin(np.abs(xnp - centres[0]))
@@ -1936,7 +1974,7 @@ class BodyMesh(Body):
             ax3d.set_title(f"SDF=0 isosurface: {self.mesh_file.split('/')[-1]}")
             plt.show()
         except (RuntimeError, ValueError) as e:
-            print(f"  [WARNING] Could not extract isosurface: {e}")
+            logger.warning("Could not extract isosurface: %s", e)
 
     def initialize(self):
         """Load pre-computed SDF data and build the interpolation function."""
@@ -2058,15 +2096,34 @@ class CompositeBodyMesh(Body):
         self.mu_funcs        = self.bodies[0].mu_funcs
         self.compute_normals = self.bodies[0].compute_normals
         gs = self.grid_shape
-        self.sdf_vals   = torch.zeros((self.nbodies, *gs), device=device)
-        self.sdf_vals_u = torch.zeros((self.nbodies, *gs), device=device)
-        self.sdf_vals_v = torch.zeros((self.nbodies, *gs), device=device)
-        self.u_vals     = torch.zeros((self.nbodies, *gs), device=device)
-        self.v_vals     = torch.zeros((self.nbodies, *gs), device=device)
+        is_3d = len(gs) == 3
 
-        self.sdf_val_u = torch.zeros_like(self.X)
-        self.sdf_val_v = torch.zeros_like(self.X)
+        # Per-body SDF for force computation (always needed; overwritten
+        # by BDIMhandler in 3-D but used directly in standalone 2-D mode).
+        self.sdf_vals   = torch.zeros((self.nbodies, *gs), device=device)
+
+        # Per-body staggered-SDF and velocity arrays – 2-D only.
+        # The 3-D BDIMhandler computes these on-the-fly per sub-block
+        # and never touches these batched arrays, so skip them to save
+        # ~5.2 GB for a large 3-D grid with 10 bodies.
+        if not is_3d:
+            self.sdf_vals_u = torch.zeros((self.nbodies, *gs), device=device)
+            self.sdf_vals_v = torch.zeros((self.nbodies, *gs), device=device)
+            self.u_vals     = torch.zeros((self.nbodies, *gs), device=device)
+            self.v_vals     = torch.zeros((self.nbodies, *gs), device=device)
+            self.sdf_val_u  = torch.zeros_like(self.X)
+            self.sdf_val_v  = torch.zeros_like(self.X)
+
         self.com_pos   = torch.zeros((self.nbodies, self.ndim), device=device)
+
+        # Free per-child body-velocity fields that the composite never
+        # uses (the BDIMhandler operates on the composite's union fields).
+        # Saves ~2.6 GB for 10 children on a large 3-D grid.
+        if is_3d:
+            for body in self.bodies:
+                for attr in ('body_u', 'body_v', 'body_w'):
+                    if hasattr(body, attr):
+                        delattr(body, attr)
 
         if not self.custom_update:
             self.initialize()
@@ -2094,6 +2151,7 @@ class CompositeBodyMesh(Body):
 
 
     def visualize(self):
+        o3d = _import_open3d()
         viewer = o3d.visualization.Visualizer()
         viewer.create_window()
         for body in self.bodies:
@@ -2160,6 +2218,13 @@ class MultiAnimatBodies(Body):
             sdf_folder = os.path.dirname(animat.sdf)
 
             for link_i, link in enumerate(sdf.links):
+                # ---- extract MuJoCo / SDF visual colour (RGBA) ----
+                _link_rgba = None
+                if hasattr(link, "visuals") and link.visuals:
+                    _vis = link.visuals[0]
+                    if hasattr(_vis, "color") and _vis.color is not None:
+                        _link_rgba = list(_vis.color)  # [R, G, B, A]
+
                 geometry = link["collisions"][0]["geometry"]
                 if "uri" in geometry:
                     mesh_name = geometry["uri"]
@@ -2225,6 +2290,7 @@ class MultiAnimatBodies(Body):
                             **local_kwargs
                         )
                         _mesh_body_cache[cache_key] = body
+                    body.mujoco_rgba = _link_rgba
                     self.bodies.append(body)
 
                 elif "radius" in geometry and "length" in geometry:
@@ -2242,6 +2308,7 @@ class MultiAnimatBodies(Body):
                         BodyAnalytical(device, x, y, sdf_fun, update_maps, z=self.z, eps=eps, plotting=False, pre_update=False, grids=grids)
                     )
                     self.bodies[-1].bb = [[-radius.cpu(), radius.cpu()], [-radius.cpu(), radius.cpu()], [-radius.cpu(), radius.cpu()]]
+                    self.bodies[-1].mujoco_rgba = _link_rgba
 
                 elif "radius" in geometry and "length" not in geometry:
                     radius = torch.tensor(geometry["radius"], dtype=x.dtype, device=x.device)
@@ -2252,6 +2319,7 @@ class MultiAnimatBodies(Body):
                         BodyAnalytical(device, x, y, sdf_fun, update_maps, z=self.z, eps=eps, plotting=False, pre_update=False, grids=grids)
                     )
                     self.bodies[-1].bb = [[-radius.cpu(), radius.cpu()], [-radius.cpu(), radius.cpu()], [-radius.cpu(), radius.cpu()]]
+                    self.bodies[-1].mujoco_rgba = _link_rgba
                 else:
                     raise ValueError("Unsupported geometry type in SDF.")
                 self.body_ids.append([animat_i, link_i])

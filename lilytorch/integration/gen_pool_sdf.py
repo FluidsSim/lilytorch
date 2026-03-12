@@ -5,19 +5,19 @@ import os
 
 # ── Material palettes (ambient / diffuse / specular / emissive) ────────
 
-# Warm sandstone walls
+# Warm sandstone walls (transparent)
 WALL_MATERIAL = {
-    'ambient':  '0.78 0.74 0.68 1.0',
-    'diffuse':  '0.88 0.84 0.78 1.0',
-    'specular': '0.30 0.28 0.25 1.0',
-    'emissive': '0.0  0.0  0.0  1.0',
+    'ambient':  '0.78 0.74 0.68 0.3',
+    'diffuse':  '0.88 0.84 0.78 0.3',
+    'specular': '0.30 0.28 0.25 0.3',
+    'emissive': '0.0  0.0  0.0  0.3',
 }
 
 FLOOR_MATERIAL = {
-    'ambient':  '0.78 0.74 0.68 1.0',
-    'diffuse':  '0.88 0.84 0.78 1.0',
-    'specular': '0.30 0.28 0.25 1.0',
-    'emissive': '0.0  0.0  0.0  1.0',
+    'ambient':  '0.78 0.74 0.68 0.3',
+    'diffuse':  '0.88 0.84 0.78 0.3',
+    'specular': '0.30 0.28 0.25 0.3',
+    'emissive': '0.0  0.0  0.0  0.3',
 }
 
 # Checker tile colours (Mediterranean blue-teal)
@@ -292,7 +292,7 @@ def create_pool_sdf(xmin, xmax, ymin, ymax, zmin=None, zmax=None,
 
 
 def create_water_sdf(xmin, xmax, ymin, ymax, zmin=None, zmax=None,
-                     water_height=0.0):
+                     water_height=0.0, wall_height=0.3):
     """Generate a visual-only water-volume SDF sized to the pool interior.
 
     Parameters
@@ -302,6 +302,10 @@ def create_water_sdf(xmin, xmax, ymin, ymax, zmin=None, zmax=None,
         positions the water body at ``[0, 0, water_height]``, so we
         subtract it from *cz* here so the visual ends up at the correct
         absolute location.
+    wall_height : float
+        Only used in the 2-D fallback (when *zmin*/*zmax* are *None*).
+        The water box is sized to fill the pool from the floor
+        (z = 0) up to z = ``wall_height``.
 
     Returns the absolute path of the written SDF file.
     """
@@ -314,7 +318,9 @@ def create_water_sdf(xmin, xmax, ymin, ymax, zmin=None, zmax=None,
         dz = zmax - zmin
         cz = (zmin + zmax) / 2
     else:
-        dz, cz = 50.0, -25.0      # legacy: tall slab below z = 0
+        # 2-D mode: water fills from z = 0 up to z = wall_height.
+        dz = wall_height
+        cz = wall_height / 2
 
     # Compensate for FARMS water-body offset (water.pos = [0, 0, height])
     cz -= water_height
