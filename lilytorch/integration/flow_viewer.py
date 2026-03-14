@@ -26,7 +26,7 @@ the FluidExtension entry::
     }
 
 Works with ``headless: false`` (viewer + video) and ``headless: true``
-(video only, if CameraRecording is present).
+(video only via CameraRecording — no interactive viewer needed).
 """
 
 import numpy as np
@@ -366,6 +366,10 @@ class FlowViewer(TaskExtension):
             self._active_positions[i] = [pts_x[i], pts_y[i], pts_z[i]]
             self._active_colors[i] = rgba_pos if is_pos[i] else rgba_neg
 
+        # Always update _n_active so the offscreen renderer picks up
+        # the spheres even in headless mode (no interactive viewer).
+        self._n_active = n_pts
+
         # Update viewer sphere geoms (interactive GUI)
         if self._viewer is not None:
             scn = self._viewer.user_scn
@@ -415,6 +419,7 @@ class FlowViewer(TaskExtension):
                      scn.geoms[i].rgba[3] = 0
 
             self._n_active = count
+        # In headless mode _n_active was already set above.
 
     def _hide_all(self):
         """Make all reserved spheres transparent."""

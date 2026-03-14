@@ -62,7 +62,7 @@ YAML Config
 |---|---|
 | `solver.py` | Main `FluidSolver` class implementing the BDIM2 Navier-Stokes solver: grid setup, time-stepping (Heun, Adams-Bashforth), pressure projection, IBM forcing, and force computation on immersed bodies. |
 | `body.py` | Immersed body representation via SDFs. Class hierarchy: `Body` → `BodyAnalytical`, `BodyMesh`, `BodyFishAnalytical`, `BodyFishExperimental`, plus composite wrappers for multi-link articulated models. Includes `body_from_yaml()` factory. |
-| `adv_diff.py` | Advection-diffusion solver for velocity transport. Supports implicit/explicit/QUICK/ABDQUICKEST/Adams-Bashforth schemes with Dirichlet/Neumann BCs. |
+| `adv_diff.py` | Advection-diffusion solver for velocity transport. Supports implicit/explicit/QUICK/ABDQUICKEST/Adams-Bashforth schemes with Dirichlet/Neumann BCs. Optional Smagorinsky LES eddy-viscosity model (`smagorinsky_cs`). |
 | `diffusion.py` | Stand-alone diffusion solver using multigrid V-cycles. |
 | `poisson_fft.py` | FFT-based Poisson solver for the pressure equation using Green's function convolution (via `torch_dct`). Pre-computes and caches Green's functions to disk. |
 | `poisson_mult.py` | Multigrid Poisson solver with Jacobi smoothing for variable-coefficient problems. |

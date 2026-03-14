@@ -63,7 +63,6 @@ python rag/index.py --papers-only
 | `mcp_server.py` | **MCP server** — exposes 4 tools to VS Code Copilot |
 | `cfd_knowledge_base.py` | **The core expertise** — equations, methods, terminology. Edit this to teach Copilot new things. |
 | `index.py` | Indexes code + docs + PDF papers into ChromaDB |
-| `query.py` | Standalone terminal query tool (uses Anthropic API directly — optional) |
 | `papers/` | Drop your PDFs here |
 | `requirements.txt` | Dependencies |
 
@@ -128,23 +127,6 @@ python rag/index.py --force
 ```
 
 **Use this for:** equations that extract poorly from PDFs, your own derivations.
-
----
-
-## Standalone terminal mode (optional)
-
-If you want to use this outside VS Code, query.py talks to the
-Anthropic API directly with prompt caching:
-
-```bash
-export ANTHROPIC_API_KEY=sk-ant-...
-python rag/query.py                                    # interactive
-python rag/query.py -q "How does BDIM handle BCs?"     # single question
-python rag/query.py --mode code -q "Write a SimConfig" # code generation
-python rag/query.py --mode theory --source paper        # theory mode
-```
-
-This costs ~$0.003-0.01 per question (with prompt caching).
 
 ---
 
@@ -215,7 +197,6 @@ rag/
 ├── mcp_server.py          ← MCP SERVER: 4 tools for Copilot
 ├── cfd_knowledge_base.py  ← THE CORE: all domain expertise lives here
 ├── index.py               ← Index code + docs + papers → ChromaDB
-├── query.py               ← Standalone terminal tool (optional, uses Anthropic API)
 ├── requirements.txt
 ├── papers/                ← Your PDFs
 │   ├── bdim/

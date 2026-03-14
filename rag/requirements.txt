@@ -1,5 +1,4 @@
 # RAG pipeline dependencies
-anthropic>=0.40.0          # direct API client (supports prompt caching)
 langchain-community>=0.3.0
 langchain-text-splitters>=0.3.0
 chromadb>=0.5.0

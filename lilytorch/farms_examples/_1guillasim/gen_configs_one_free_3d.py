@@ -16,9 +16,10 @@ class SimConfig(BaseSimConfig):
         )
 
         # ── Hardware ──────────────────────────────────────────────────
-        self.use_gpu  = True
-        self.use_bdim = True
-        self.headless = False   # must be False for FlowViewer
+        self.use_gpu        = True
+        self.use_bdim       = True
+        self.headless       = True
+        self.smagorinsky_cs = 0.15
 
         # ── Animats ───────────────────────────────────────────────────
         self.animats_pars = [
@@ -26,9 +27,9 @@ class SimConfig(BaseSimConfig):
                 "model_name"     : "1guilla",
                 "sdf_name"       : "1guilla.sdf",
                 "control_type"   : "position",
-                "gains"          : [100.0, 4.0, 0],
+                "gains"          : [20.0, 6.0, 0],
                 "spawn_mode"     : SpawnMode.FREE,
-                "pose"           : [0, 0, 0., 0, 0, 3.141592653589793],
+                "pose"           : [-0.07, 0, 0., 0, 0, 3.141592653589793],
                 "controller_path": "lilytorch.farms_examples._1guillasim.pd_controller.PositionController",
                 "control_pars"   : {'freq': 0.5, 'twl': 12, 'amp': 20.0},
             },
@@ -36,19 +37,19 @@ class SimConfig(BaseSimConfig):
 
         # ── 3-D grid ─────────────────────────────────────────────────
         self.Nx   = 512
-        self.Ny   = 128
-        self.Nz   = 128
+        self.Ny   = 256
+        self.Nz   = 64
         self.xmin = -0.9
-        self.xmax =  1.5
-        self.ymin = -0.3
-        self.ymax =  0.3
-        self.zmin = -0.3
-        self.zmax =  0.3
+        self.xmax = 1.5
+        self.ymin = -0.6
+        self.ymax = 0.6
+        self.zmin = -0.15
+        self.zmax = 0.15
 
         # ── Physics ───────────────────────────────────────────────────
         self.rho_body          = 1000.0
         self.timestep          = 0.001
-        self.convection_method = "quick"
+        self.convection_method = "abdquickest"
         self.n_iterations      = 10001
         self.save_every        = 200
         self.vmin              = -10.0
@@ -82,7 +83,7 @@ class SimConfig(BaseSimConfig):
         self.bc_values_w = [0, 0, 0, 0, 0, 0]
 
         # ── Body ─────────────────────────────────────────────────────
-        self.force_scaling = 1.0
+        self.force_scaling         = 1.0
         self.interp_data_subfolder = "interp_data_3d"
 
     # ── Extensions ────────────────────────────────────────────────────
@@ -90,7 +91,7 @@ class SimConfig(BaseSimConfig):
     def extra_simulation_extensions(self, output_folder):
         extensions = []
 
-        # FlowViewer (requires headless=False)
+        # FlowViewer (works headless via CameraRecording)
         extensions.append({
             "loader": "lilytorch.integration.flow_viewer.FlowViewer",
             "config": {

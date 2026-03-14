@@ -188,6 +188,61 @@ The CFL stability condition is
      \le \frac{\min(h)}{v_{\max} + 3\nu}
 
 
+Smagorinsky LES model (optional)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+When the grid is too coarse to resolve all turbulent scales, an optional
+**Smagorinsky subgrid-scale (SGS) model** (Smagorinsky 1963) can be
+enabled.  It models the effect of unresolved eddies as an additive
+*eddy viscosity* :math:`\nu_t`:
+
+.. math::
+   :label: smagorinsky
+
+   \nu_t = (C_s \, \Delta)^{2} \, |\bar{S}|
+
+where
+
+* :math:`C_s` is the **Smagorinsky constant** (typically 0.1–0.2),
+* :math:`\Delta` is the grid filter width (taken equal to the grid
+  spacing :math:`h`),
+* :math:`|\bar{S}| = \sqrt{2\,\bar{S}_{ij}\,\bar{S}_{ij}}` is the
+  magnitude of the resolved **strain-rate tensor**
+
+  .. math::
+
+     \bar{S}_{ij}
+       = \frac{1}{2}
+         \left(
+           \frac{\partial \bar{u}_i}{\partial x_j}
+           + \frac{\partial \bar{u}_j}{\partial x_i}
+         \right)
+
+With this model the diffusion term in the momentum equation becomes
+
+.. math::
+   :label: variable_diffusion
+
+   \nabla \cdot \bigl[(\nu + \nu_t) \, \nabla \mathbf{u}\bigr]
+
+instead of :math:`\nu\,\nabla^{2}\mathbf{u}`.  Because :math:`\nu_t`
+varies in space (it depends on the local velocity gradients), this
+requires a **variable-coefficient Laplacian**; see
+:doc:`numerical_schemes` for the discrete stencil.
+
+The CFL condition is likewise updated:
+
+.. math::
+
+   \Delta t
+     \le \frac{\min(h)}{v_{\max} + 3(\nu + \max\,\nu_t)}
+
+The model is **disabled by default** (:math:`C_s = 0`).  When disabled,
+the solver reverts exactly to the standard constant-viscosity formulation
+with zero computational overhead.  To enable, set ``smagorinsky_cs`` in
+the YAML configuration; see :doc:`parameters`.
+
+
 Force computation
 -----------------
 

@@ -128,7 +128,7 @@ if repo_root not in sys.path:
     sys.path.insert(0, repo_root)
 
 from lilytorch.integration.extensions import FluidExtension
-from lilytorch.farms_examples._1guillasim.BDIMhandler3D import BDIMhandler3D  # noqa: F401
+from lilytorch.integration.BDIMhandler import BDIMhandler  # noqa: F401
 from lilytorch.src.poisson_mult import PoissonSolver  # noqa: F401
 
 

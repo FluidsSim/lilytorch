@@ -135,6 +135,8 @@ class BaseSimConfig:
         self.poisson_bc_type         = "neumann"
         self.compile_adv_diff        = True
         self.compile_forces          = True
+        self.compile_sdf             = False
+        self.smagorinsky_cs          = 0.0
         self.jacobi_weight           = 0.7
         self.dtype                   = None
         self.zero_pressure_inside    = None
@@ -572,6 +574,7 @@ class BaseSimConfig:
             "poisson_verbose"        : self.poisson_verbose,
             "poisson_folder"         : os.path.join(self.data_folder, "data"),
             "rho_body"               : self.rho_body,
+            "smagorinsky_cs"         : self.smagorinsky_cs,
         }
 
         if self.is_3d:
@@ -589,6 +592,7 @@ class BaseSimConfig:
             ("poisson_bc_type",         self.poisson_bc_type),
             ("compile_adv_diff",        self.compile_adv_diff),
             ("compile_forces",          self.compile_forces),
+            ("compile_sdf",             self.compile_sdf),
             ("dtype",                   self.dtype),
             ("zero_pressure_inside",    self.zero_pressure_inside),
             ("force_method",            self.force_method),

@@ -1,4 +1,21 @@
 
+MEMORY COUNT 3D
+
+---- FS variables -----
+sdf_val_u, sdf_val_v, sdf_val_w
+u0, v0, w0, p0
+u, v, w, p
+nx_u, ny_u, nz_u
+nx_v, ny_v, nz_v
+nx_w, ny_w, nz_w
+body_u, body_v, body_w
+mu0_u, mu1_u
+mu0_v, mu1_v
+mu0_w, mu1_w
+diff_u, diff_v, diff_w
+
+
+
 
 python lilytorch/src/video_postprocess.py /data/andreaferrario/ns_data/cylinder_3d/Re_27_laminar --fields omega_z_3d vel_mag_3d --slow-factor 4
 
@@ -32,6 +49,10 @@ pre-allocated buffers or cache them on the solver.
 - I prefer the old 2d plots with white backgroud. Please return to those
 - It seems that many of the functions/parameters in the configs for running the simulations in farms_examples are shared. I think it would be better to have a single common config class and that each run config can be a class that inherits this master class and modifies its attributes for its specific simulation settings. Do that
 - set a sphinx documentation system, with API, mathematical formulas, scheme descriptions, boundary conditions explanations, and parameters that can be used
+- The solver only checks for NaN. Monitoring E_k = 0.5·Σ(u²+v²+w²)·h^d and enstrophy
+would catch slow blow-ups, non-physical energy growth, or excessive dissipation
+- how difficult would be to add a turbulence Smagorinsky model
+(ν_t = (Cs·Δ)²|S̄|) to model additive eddy viscosity? What does the model do exactly and how expensive is it?
 
 # HIGH PRIORITY:
 - Test a simulation in 2d and one in 3d with an analytically moving body, both analytically defined
@@ -40,8 +61,9 @@ pre-allocated buffers or cache them on the solver.
 - Make new zebrafish swimming models
 - Polish the repository
 - Schooling experiment with many zebrafish in 2d
- Test solution of the Poisson equation using PINNs/CNNs - ask agent
-
+- Test solution of the Poisson equation using PINNs/CNNs - ask agent
+- Compare 1guilla pinned simulation against PIV data (need a fined grid)
+- Compare 1guilla with dyes experiments
 
 # LOW PRIORITY:
 - Test an analytical 2d swimmer simulation
@@ -50,49 +72,19 @@ pre-allocated buffers or cache them on the solver.
 
 # LONG TERM GOALS:
 - How to handle bodies outside the water (at the interface)
-- Add volume of fluids methods for handling water surface breaking
-- Add sph simulation support
+- Add volume of fluids methods for handling water surface breaking (?)
+- Add sph simulation support (?)
 - Monolithic fluid multi rigid body solver (?)
-- Compare 1guilla pinned simulation against PIV data (need a fined grid)
-- Compare 1guilla with dyes experiments
 - Simulate a submarine
+- AMR (Adaptive Mesh Refinement) - refine grid only near bodies and in the wake. Would dramatically reduce cost for external flow problems where most of the domain is smooth freestream.
 
 
 # IMPROVEMENT SUGGESTIONS (from deep code review, March 2026)
 
 
-### A15. Unify derivative implementations
-`compute_dpdx/dpdy/dpdz` use `torch.gradient(edge_order=2)` while `gradient()`,
-`divergence()`, `vorticity()` use manual slice-based FD. The former has extra overhead
-for edge handling. Unifying on slice-based FD would be faster and consistent.
-
-
 
 
 ## B. STABILITY — Solver Robustness
-
-### B1. Add runtime CFL monitoring
-The `clf()` method in adv_diff.py computes CFL but is never called during simulation.
-Add a CFL check in `step_()` or `solve_heun()`:
-```python
-cfl = self.adv_diff_solver.clf(u, v, w)
-if cfl > 0.5:
-    warnings.warn(f"CFL = {cfl:.3f} exceeds 0.5 at iter {iteration}")
-```
-
-### B2. Implement adaptive time-stepping
-Use CFL helper to adjust dt dynamically:
-```python
-cfl = self.adv_diff_solver.clf(u, v, w)
-self.dt = min(self.dt_max, cfl_target * self.h / (u_max + 1e-12))
-```
-Prevents blowups during impulsive events (body startup, vortex shedding onset).
-
-### B3. Use `zero_pressure_inside = True`
-Already implemented as a config key. Zeros pressure inside body SDF, preventing
-pressure spikes at the fluid-solid interface. Especially important in 3D.
-
-### B4.
 
 
 ### B6. Post-projection divergence monitoring
@@ -100,9 +92,6 @@ After projection, the residual divergence is stored (self.div) but never checked
 Adding `div_max = self.divergence(u,v,w).abs().max()` every N steps catches Poisson
 under-convergence before it cascades into NaN.
 
-### B7. Energy and enstrophy monitoring
-The solver only checks for NaN. Monitoring E_k = 0.5·Σ(u²+v²+w²)·h^d and enstrophy
-would catch slow blow-ups, non-physical energy growth, or excessive dissipation.
 
 ### B8. Sponge/buffer layer for outflow
 Current BCs are Dirichlet or Neumann only. For external flows with vortex shedding,
@@ -129,13 +118,6 @@ BDIM conservation checks, analytical force validation (Stokes drag).
 
 
 
-### C5. BDIM meta-equation duplicated 6 times
-Same `mu0*u' + (1-mu0)*u_body + mu1*normal_derivative(...)` pattern at 6 locations.
-Extract into a single `_apply_bdim(vel_prime, body_vel, mu0, m_m0, mu1, normals)`.
-
-### C6. `_recompute_mu_normals` duplicated between solver.py and BDIMhandler.py
-Near-identical logic in both files. One should call the other.
-
 ### C7. No type hints
 No Python type annotations anywhere. Adding them improves IDE support, catches bugs,
 and serves as documentation.
@@ -151,18 +133,13 @@ body positions, Poisson state). A crash at iter 999k of a 1M-step run means star
 No turbulence model limits the solver to low-Re. A Smagorinsky model
 (ν_t = (Cs·Δ)²|S̄|) would be straightforward: additive eddy viscosity to self.nu.
 
-### D5. Compressed output format
-`np.save` produces uncompressed files. For 512×128×128, each field is ~32 MB.
-Use `np.savez_compressed` or HDF5 (h5py) for 5–10× storage reduction.
 
 ### D6. Performance profiling hooks
 No timing infrastructure to identify which phase (advection, Poisson, BDIM, SDF, force,
 I/O) dominates cost. Add `torch.cuda.Event`-based timers around each phase, toggled by a
 `profile=True` flag.
 
-### D7. AMR (Adaptive Mesh Refinement)
-Long-term: refine grid only near bodies and in the wake. Would dramatically reduce
-cost for external flow problems where most of the domain is smooth freestream.
+### D7.
 
 
 

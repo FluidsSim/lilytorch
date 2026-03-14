@@ -122,6 +122,28 @@ Numerics — advection
        ``"cubista"``, ``"van_leer"``, ``"cds"``, ``"semi_lagrangian"``.
        See :doc:`numerical_schemes`.
 
+.. _smagorinsky-params:
+
+Numerics — Smagorinsky LES
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. list-table::
+   :header-rows: 1
+   :widths: 22 10 12 56
+
+   * - Key
+     - Type
+     - Default
+     - Description
+   * - ``smagorinsky_cs``
+     - float
+     - 0.0
+     - Smagorinsky constant :math:`C_s`.  Set to a value in the range
+       0.1–0.2 to enable the subgrid-scale eddy-viscosity model.
+       When 0 (default), the model is **disabled** and the solver uses
+       constant viscosity with zero overhead.
+       See :doc:`mathematical_formulation` and :doc:`numerical_schemes`.
+
 Numerics — Poisson solver
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
 

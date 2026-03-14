@@ -55,24 +55,50 @@ def _iteration_from_name(path: Path) -> int:
 
 
 def _read_parameters(run_dir: Path):
-    """Read parameters.yaml and return (dt, save_every)."""
+    """Read parameters.yaml and return (dt, save_every).
+
+    The YAML may contain serialised Python objects (e.g. FARMS
+    ``ExperimentOptions``) with recursive references that defeat both
+    ``safe_load`` and ``unsafe_load``.  When full parsing fails we fall
+    back to a simple regex scan of the raw text for the two scalar
+    values we need.
+    """
     params_file = run_dir / "parameters.yaml"
     if not params_file.exists():
         return None, None
-    with open(params_file) as f:
+
+    raw = params_file.read_text()
+
+    # ── try full YAML parse first ────────────────────────────────────
+    params = None
+    try:
+        params = yaml.safe_load(raw)
+    except yaml.YAMLError:
         try:
-            params = yaml.safe_load(f)
-        except yaml.YAMLError:
-            # parameters.yaml may contain serialised Python objects
-            # (e.g. FARMS options) that safe_load cannot handle.
-            # Fall back to unsafe_load which supports arbitrary tags.
-            f.seek(0)
-            try:
-                params = yaml.unsafe_load(f)
-            except Exception:
-                return None, None
-    dt = params.get("solver", {}).get("dt", None)
-    save_every = params.get("output", {}).get("save_every", None)
+            params = yaml.unsafe_load(raw)
+        except Exception:
+            pass
+
+    if params is not None:
+        dt = params.get("solver", {}).get("dt", None)
+        save_every = params.get("output", {}).get("save_every", None)
+        if dt is not None and save_every is not None:
+            return dt, save_every
+
+    # ── regex fallback for files with un-loadable Python objects ──────
+    dt = save_every = None
+    m_dt = re.search(r"^\s+dt:\s+([\d.eE+\-]+)", raw, re.MULTILINE)
+    m_se = re.search(r"^\s+save_every:\s+(\d+)", raw, re.MULTILINE)
+    if m_dt:
+        try:
+            dt = float(m_dt.group(1))
+        except ValueError:
+            pass
+    if m_se:
+        try:
+            save_every = int(m_se.group(1))
+        except ValueError:
+            pass
     return dt, save_every
 
 
@@ -191,8 +217,11 @@ def _make_video_ffmpeg(pngs, out_mp4, fps, dt, save_every, time_overlay, crf):
         f.write(f"file '{escaped}'\n")
 
     # Build ffmpeg command
+    # NOTE: -r before -i overrides concat-demuxer timestamps which
+    # mis-handle image durations in many ffmpeg builds (producing 2× speed).
     cmd = [
         "ffmpeg", "-y",
+        "-r", f"{fps:.6f}",
         "-f", "concat", "-safe", "0",
         "-i", str(concat_file),
     ]
@@ -268,12 +297,14 @@ def _make_gif_ffmpeg(pngs, out_gif, fps, dt, save_every, time_overlay):
     palette = out_gif.with_suffix(".palette.png")
     cmd_palette = [
         "ffmpeg", "-y",
+        "-r", f"{fps:.6f}",
         "-f", "concat", "-safe", "0", "-i", str(concat_file),
         "-vf", f"{filter_pre},palettegen=stats_mode=diff",
         str(palette),
     ]
     cmd_gif = [
         "ffmpeg", "-y",
+        "-r", f"{fps:.6f}",
         "-f", "concat", "-safe", "0", "-i", str(concat_file),
         "-i", str(palette),
         "-lavfi", f"{filter_pre} [x]; [x][1:v] paletteuse=dither=bayer:bayer_scale=5",

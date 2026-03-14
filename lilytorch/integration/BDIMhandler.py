@@ -24,9 +24,7 @@ from scipy.spatial.transform import Rotation
 from lilytorch.src.solver import FluidSolver
 from lilytorch.src.body import (rotate_grid_2d, rotate_grid_3d,
                                 _rotate_grid_3d_compiled,
-                                _stagger_sdf_3d, _stagger_sdf_3d_compiled,
-                                _mu_normals_batched_3d,
-                                _mu_normals_batched_3d_compiled)
+                                _stagger_sdf_3d, _stagger_sdf_3d_compiled)
 import torch
 
 
@@ -723,6 +721,23 @@ class BDIMhandler:
     # ==================================================================
     #  fluid_step: one BDIM time-step (advection-diffusion + projection)
     # ==================================================================
+    def _compute_variable_density_coefficients(self, timestep):
+        """Compute variable-density Poisson coefficients.
+
+        Returns (ch, cv) for 2-D or (ch, cv, cw) for 3-D, using
+        rho = rho_body + (rho_fluid - rho_body) * mu0  at each
+        staggered grid location.
+        """
+        fs = self.fluid_solver
+        _drho = self.rho_fluid - self.rho_body
+
+        ch = timestep / (self.rho_body + _drho * fs.mu0_all_u)
+        cv = timestep / (self.rho_body + _drho * fs.mu0_all_v)
+        if self.ndim == 3:
+            cw = timestep / (self.rho_body + _drho * fs.mu0_all_w)
+            return ch, cv, cw
+        return ch, cv
+
     def fluid_step(self, *args):
         if self.ndim == 3:
             return self._fluid_step_3d(*args)
@@ -731,61 +746,37 @@ class BDIMhandler:
     # ---- 2-D fluid step ---------------------------------------------
     def _fluid_step_2d(self, u, v, p, timestep):
         fs = self.fluid_solver
+        _bdim = fs._bdim_meta_compiled
+        _h = fs.h
 
-        (uprime, vprime) = fs.adv_diff_solver.solve(u, v)
+        nu_t = fs._compute_smagorinsky_nu_t(u, v) if fs.use_smagorinsky else None
+        (uprime, vprime) = fs.adv_diff_solver.solve(u, v, nu_t=nu_t)
+        # Clone CUDA-graph outputs so they can safely be passed to
+        # another compiled kernel (_bdim) and modified by set_BCs.
+        uprime = uprime.clone()
+        vprime = vprime.clone()
         fs.adv_diff_solver.set_BCs(uprime, vprime)
 
-        # BDIM2 meta-equation  (uses mu0*(phi-body)+body to avoid m_m0)
-        diff_u = uprime - fs.composite_body.body_u
-        uprime = (
-            fs.mu0_all_u * diff_u + fs.composite_body.body_u
-            + fs.mu1_all_u * fs.normal_derivative(
-                diff_u,
-                fs.normal_x_u, fs.normal_y_u,
-            )
-        )
-        diff_v = vprime - fs.composite_body.body_v
-        vprime = (
-            fs.mu0_all_v * diff_v + fs.composite_body.body_v
-            + fs.mu1_all_v * fs.normal_derivative(
-                diff_v,
-                fs.normal_x_v, fs.normal_y_v,
-            )
-        )
+        # BDIM2 meta-equation  (reuses FluidSolver's compiled kernel)
+        uprime = _bdim(
+            uprime, fs.mu0_all_u,
+            fs.composite_body.body_u, fs.mu1_all_u,
+            fs.normal_x_u, fs.normal_y_u, _h, 2,
+        ).clone()
+        vprime = _bdim(
+            vprime, fs.mu0_all_v,
+            fs.composite_body.body_v, fs.mu1_all_v,
+            fs.normal_x_v, fs.normal_y_v, _h, 2,
+        ).clone()
 
-        div = fs.divergence(uprime, vprime)
-
-        # ---- Poisson solve ----
+        # Variable-density Poisson coefficients
         poisson_method = getattr(fs, "poisson_method", "multigrid")
         if poisson_method == "fft":
             coeff = timestep / self.rho_fluid
-            p = fs.poisson_solverFFT.solve(div / coeff)
-            (p_x, p_y) = fs.gradient(p)
-            u = uprime - coeff * p_x
-            v = vprime - coeff * p_y
+            (u, v, p) = fs.project(uprime, vprime, p, ch=coeff, cv=coeff)
         else:
-            # variable-density:  rho = rho_body + (rho_fluid - rho_body)*mu0
-            _drho = self.rho_fluid - self.rho_body
-            rho_u = self.rho_body + _drho * fs.mu0_all_u
-            rho_v = self.rho_body + _drho * fs.mu0_all_v
-            ch_full = timestep / rho_u
-            cv_full = timestep / rho_v
-
-            _poisson_solve = (fs.poisson_solver.solve_mgcg
-                              if poisson_method == "mgcg"
-                              else fs.poisson_solver.solve_multigrid)
-            p0 = p if getattr(fs, 'poisson_warm_start', False) else torch.zeros_like(p)
-
-            p, _ = _poisson_solve(
-                div[1:-1, 1:-1],
-                p0,
-                (timestep / self.rho_body) * torch.ones_like(div),
-                ch=ch_full[1:,  1:-1],
-                cv=cv_full[1:-1, 1:],
-            )
-            (p_x, p_y) = fs.gradient(p)
-            u = uprime - ch_full * p_x
-            v = vprime - cv_full * p_y
+            ch, cv = self._compute_variable_density_coefficients(timestep)
+            (u, v, p) = fs.project(uprime, vprime, p, ch=ch, cv=cv)
 
         fs.adv_diff_solver.set_BCs(u, v)
         return (u, v, p)
@@ -793,37 +784,34 @@ class BDIMhandler:
     # ---- 3-D fluid step ---------------------------------------------
     def _fluid_step_3d(self, u, v, w, p, timestep):
         fs = self.fluid_solver
+        _bdim = fs._bdim_meta_compiled
+        _h = fs.h
 
-        (uprime, vprime, wprime) = fs.adv_diff_solver.solve(u, v, w)
+        nu_t = fs._compute_smagorinsky_nu_t(u, v, w) if fs.use_smagorinsky else None
+        (uprime, vprime, wprime) = fs.adv_diff_solver.solve(u, v, w, nu_t=nu_t)
+        # Clone CUDA-graph outputs so they can safely be passed to
+        # another compiled kernel (_bdim) and modified by set_BCs.
+        uprime = uprime.clone()
+        vprime = vprime.clone()
+        wprime = wprime.clone()
         fs.adv_diff_solver.set_BCs(uprime, vprime, wprime)
 
-        # BDIM2 meta-equation  (uses mu0*(phi-body)+body to avoid m_m0)
-        diff_u = uprime - fs.composite_body.body_u
-        uprime = (
-            fs.mu0_all_u * diff_u + fs.composite_body.body_u
-            + fs.mu1_all_u * fs.normal_derivative(
-                diff_u,
-                fs.normal_x_u, fs.normal_y_u, fs.normal_z_u,
-            )
-        )
-        diff_v = vprime - fs.composite_body.body_v
-        vprime = (
-            fs.mu0_all_v * diff_v + fs.composite_body.body_v
-            + fs.mu1_all_v * fs.normal_derivative(
-                diff_v,
-                fs.normal_x_v, fs.normal_y_v, fs.normal_z_v,
-            )
-        )
-        diff_w = wprime - fs.composite_body.body_w
-        wprime = (
-            fs.mu0_all_w * diff_w + fs.composite_body.body_w
-            + fs.mu1_all_w * fs.normal_derivative(
-                diff_w,
-                fs.normal_x_w, fs.normal_y_w, fs.normal_z_w,
-            )
-        )
-
-
+        # BDIM2 meta-equation  (reuses FluidSolver's compiled kernel)
+        uprime = _bdim(
+            uprime, fs.mu0_all_u,
+            fs.composite_body.body_u, fs.mu1_all_u,
+            fs.normal_x_u, fs.normal_y_u, fs.normal_z_u, _h, 3,
+        ).clone()
+        vprime = _bdim(
+            vprime, fs.mu0_all_v,
+            fs.composite_body.body_v, fs.mu1_all_v,
+            fs.normal_x_v, fs.normal_y_v, fs.normal_z_v, _h, 3,
+        ).clone()
+        wprime = _bdim(
+            wprime, fs.mu0_all_w,
+            fs.composite_body.body_w, fs.mu1_all_w,
+            fs.normal_x_w, fs.normal_y_w, fs.normal_z_w, _h, 3,
+        ).clone()
 
         # ── Free mu1 + staggered normals right after BDIM ────────────
         # project() only uses mu0_{u,v,w}.  forces_method2_3d recomputes
@@ -838,10 +826,8 @@ class BDIMhandler:
                       'mu1_all', 'm_m0_all'):
             if hasattr(fs, _attr):
                 setattr(fs, _attr, None)
-        del diff_u, diff_v, diff_w
 
-        div = fs.divergence(uprime, vprime, wprime)
-
+        # Variable-density Poisson coefficients
         poisson_method = getattr(fs, "poisson_method", "multigrid")
         if poisson_method == "fft":
             coeff = timestep / self.rho_fluid
@@ -849,47 +835,18 @@ class BDIMhandler:
             for _attr in ('mu0_all_u', 'mu0_all_v', 'mu0_all_w', 'mu0_all'):
                 if hasattr(fs, _attr):
                     setattr(fs, _attr, None)
-            p = fs.poisson_solverFFT.solve(div / coeff)
-            (p_x, p_y, p_z) = fs.gradient(p)
-            u = uprime - coeff * p_x
-            v = vprime - coeff * p_y
-            w = wprime - coeff * p_z
+            (u, v, w, p) = fs.project(uprime, vprime, p,
+                                      w_vel=wprime, ch=coeff, cv=coeff, cw=coeff)
         else:
-            # variable-density:  rho = rho_body + (rho_fluid - rho_body)*mu0
-            _drho = self.rho_fluid - self.rho_body
-            rho_u = self.rho_body + _drho * fs.mu0_all_u
-            rho_v = self.rho_body + _drho * fs.mu0_all_v
-            rho_w = self.rho_body + _drho * fs.mu0_all_w
-            ch = timestep / rho_u
-            cv = timestep / rho_v
-            cw = timestep / rho_w
-            del rho_u, rho_v, rho_w
+            ch, cv, cw = self._compute_variable_density_coefficients(timestep)
 
             # ── Free mu0 now — ch/cv/cw are independent tensors ──────
             for _attr in ('mu0_all_u', 'mu0_all_v', 'mu0_all_w', 'mu0_all'):
                 if hasattr(fs, _attr):
                     setattr(fs, _attr, None)
 
-            _poisson_solve = (fs.poisson_solver.solve_mgcg
-                              if poisson_method == "mgcg"
-                              else fs.poisson_solver.solve_multigrid)
-            if getattr(fs, 'poisson_warm_start', False):
-                p0 = p
-            else:
-                p.zero_()          # reuse existing tensor instead of allocating
-                p0 = p
-
-            p, _ = _poisson_solve(
-                div[1:-1, 1:-1, 1:-1],
-                p0,
-                ch=ch[1:,  1:-1, 1:-1],
-                cv=cv[1:-1, 1:,  1:-1],
-                cw=cw[1:-1, 1:-1, 1:],
-            )
-            (p_x, p_y, p_z) = fs.gradient(p)
-            u = uprime - ch * p_x
-            v = vprime - cv * p_y
-            w = wprime - cw * p_z
+            (u, v, w, p) = fs.project(uprime, vprime, p,
+                                      w_vel=wprime, ch=ch, cv=cv, cw=cw)
 
         fs.adv_diff_solver.set_BCs(u, v, w)
         return (u, v, w, p)
@@ -1023,9 +980,9 @@ class BDIMhandler:
 
             # 2. recompute mu / normal fields
             if self.ndim == 3:
-                self._recompute_mu_normals_3d()
+                fs._recompute_mu_normals_3d()
             else:
-                self._recompute_mu_normals_2d()
+                fs._recompute_mu_normals_2d()
 
             # 3. BDIM fluid step
             if self.ndim == 3:
@@ -1076,67 +1033,3 @@ class BDIMhandler:
             fs._release_bdim_fields()
 
         self.iteration += 1
-
-    # ------------------------------------------------------------------
-    #  mu / normal recomputation helpers
-    # ------------------------------------------------------------------
-    def _recompute_mu_normals_2d(self):
-        fs   = self.fluid_solver
-        comp = fs.composite_body
-
-        # CC normals are computed on-the-fly inside forces_method1/2;
-        # CC mu0/mu1 are not consumed by any live code path.
-
-        (fs.mu0_all_u, fs.mu1_all_u) = comp.mu_funcs(comp.sdf_val_u)
-        (fs.normal_x_u, fs.normal_y_u) = comp.compute_normals(comp.sdf_val_u)
-
-        (fs.mu0_all_v, fs.mu1_all_v) = comp.mu_funcs(comp.sdf_val_v)
-        (fs.normal_x_v, fs.normal_y_v) = comp.compute_normals(comp.sdf_val_v)
-
-    def _recompute_mu_normals_3d(self):
-        fs   = self.fluid_solver
-        comp = fs.composite_body
-
-        if fs._compile_sdf:
-            # ── Batched + compiled path: all 4 grids in one fused pass ──
-            _fn = _mu_normals_batched_3d_compiled
-            mu0, mu1, nx, ny, nz = _fn(
-                comp.sdf_val_u, comp.sdf_val_v, comp.sdf_val_w,
-                comp.sdf_val, comp.h, comp.eps,
-            )
-            # Clone outputs — CUDA graph buffers are overwritten on
-            # subsequent replays, so we must detach before storing.
-            mu0, mu1 = mu0.clone(), mu1.clone()
-            nx, ny, nz = nx.clone(), ny.clone(), nz.clone()
-
-            # Unstack: order is [u, v, w, cc]
-            fs.mu0_all_u, fs.mu1_all_u = mu0[0], mu1[0]
-            fs.normal_x_u, fs.normal_y_u, fs.normal_z_u = nx[0], ny[0], nz[0]
-
-            fs.mu0_all_v, fs.mu1_all_v = mu0[1], mu1[1]
-            fs.normal_x_v, fs.normal_y_v, fs.normal_z_v = nx[1], ny[1], nz[1]
-
-            fs.mu0_all_w, fs.mu1_all_w = mu0[2], mu1[2]
-            fs.normal_x_w, fs.normal_y_w, fs.normal_z_w = nx[2], ny[2], nz[2]
-
-            fs.mu0_all, fs.mu1_all = mu0[3], mu1[3]
-            fs.m_m0_all = 1 - fs.mu0_all
-            fs.normal_x, fs.normal_y, fs.normal_z = nx[3], ny[3], nz[3]
-        else:
-            # ── Eager path: 4 × individual mu_funcs + compute_normals ──
-            # u-grid
-            (fs.mu0_all_u, fs.mu1_all_u) = comp.mu_funcs(comp.sdf_val_u)
-            (fs.normal_x_u, fs.normal_y_u, fs.normal_z_u) = comp.compute_normals(comp.sdf_val_u)
-
-            # v-grid
-            (fs.mu0_all_v, fs.mu1_all_v) = comp.mu_funcs(comp.sdf_val_v)
-            (fs.normal_x_v, fs.normal_y_v, fs.normal_z_v) = comp.compute_normals(comp.sdf_val_v)
-
-            # w-grid
-            (fs.mu0_all_w, fs.mu1_all_w) = comp.mu_funcs(comp.sdf_val_w)
-            (fs.normal_x_w, fs.normal_y_w, fs.normal_z_w) = comp.compute_normals(comp.sdf_val_w)
-
-            # CC-grid (p) — cached for forces_method2_3d
-            (fs.mu0_all, fs.mu1_all) = comp.mu_funcs(comp.sdf_val)
-            fs.m_m0_all = 1 - fs.mu0_all
-            (fs.normal_x, fs.normal_y, fs.normal_z) = comp.compute_normals(comp.sdf_val)

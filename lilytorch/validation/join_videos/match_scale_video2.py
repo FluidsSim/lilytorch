@@ -1,21 +1,40 @@
 """
-Scale video2 so that 1 metre in video2 occupies the same number of pixels as
-1 metre in video1, then crop/pad to exactly match video1's frame size,
-anchoring a user-chosen landmark to the same pixel position as in video1.
+Metric scale matching, spatial anchoring, and temporal sync for video2.
 
-Usage:
+Part of the join_videos pipeline (standalone version of pipeline.py steps 2-4
+plus video2 encoding).  Use this after correct_video1.py and before
+stack_videos.sh.
+
+What it does
+------------
+  1. Metric scale – you click 2 points of known distance in each video and
+     type the real-world distance in metres.  video2 is rescaled so that
+     1 m spans the same number of pixels as in video1.
+  2. Spatial anchor – you click one fixed landmark visible in both videos
+     (e.g. a tank corner).  video2 is cropped/padded so the landmark sits
+     at the same pixel position as in video1.
+  3. Temporal sync – you scrub each video to the frame where motion begins.
+     video2 is trimmed from that frame onward; the video1 start offset is
+     written to video_sync.env for stack_videos.sh.
+  4. Encodes the result as video2_scaled.mp4 matching video1's frame size.
+
+Usage
+-----
     python match_scale_video2.py
 
-Steps
------
-1. video1  – click TWO points along a known distance, type distance (m).
-2. video2  – click TWO points along the same kind of known distance, type distance (m).
-3. video1  – click ONE landmark point (e.g. a fixed corner of the tank).
-4. video2  – click the SAME landmark point in video2 (after rescaling preview).
-   The crop is anchored so that landmark aligns between the two videos.
-5. Saves video2_scaled.mp4.
+Interactive steps
+-----------------
+  1. video1  – click TWO points along a known distance, type distance (m).
+  2. video2  – click TWO points along the same kind of known distance, type distance (m).
+  3. video1  – click ONE landmark point (e.g. a fixed corner of the tank).
+  4. video2  – click the SAME landmark point in video2 (after rescaling preview).
+  5. video1  – scrub to motion start frame, press ENTER.
+  6. video2  – scrub to motion start frame, press ENTER.
 
-After running this, re-run stack_videos.sh to rebuild the stacked output.
+Input:  video1_corrected.mp4 (or video1.MP4), video2.mp4
+Output: video2_scaled.mp4, video_sync.env
+
+After this, run stack_videos.sh to produce the final stacked comparison.
 """
 
 import cv2
@@ -23,11 +42,21 @@ import numpy as np
 import sys
 import os
 
-DIR    = os.path.dirname(os.path.abspath(__file__))
-INPUT1 = os.path.join(DIR, "video1_corrected.mp4") if os.path.exists(
-         os.path.join(DIR, "video1_corrected.mp4")) else os.path.join(DIR, "video1.MP4")
-INPUT2 = os.path.join(DIR, "video2.mp4")
-OUTPUT = os.path.join(DIR, "video2_scaled.mp4")
+
+import argparse
+
+parser = argparse.ArgumentParser(description="Scale, anchor, and sync two videos.")
+parser.add_argument("input1", help="Corrected experiment video filename (e.g. exp_water_corrected.MP4)")
+parser.add_argument("input2", help="Corrected simulation video filename (e.g. sim_water_corrected.mp4)")
+args = parser.parse_args()
+
+INPUT1 = os.path.abspath(args.input1)
+INPUT2 = os.path.abspath(args.input2)
+DIR = os.path.dirname(INPUT1)
+def synced_name(path):
+    base, ext = os.path.splitext(os.path.basename(path))
+    return os.path.join(DIR, base + '_synced' + ext)
+OUTPUT = INPUT2  # Overwrite/corrected video2
 
 print(f"Reference (video1): {INPUT1}")
 print(f"To scale  (video2): {INPUT2}")

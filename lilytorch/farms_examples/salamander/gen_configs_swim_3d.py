@@ -20,7 +20,7 @@ class SimConfig(BaseSimConfig):
         # ── Hardware ──────────────────────────────────────────────────
         self.use_bdim = True
         self.use_gpu  = True
-        self.headless = False   # must be False for FlowViewer
+        self.headless = False   # FlowViewer works in headless too
 
         # ── Animats ───────────────────────────────────────────────────
         self.animats_pars = [
@@ -38,7 +38,7 @@ class SimConfig(BaseSimConfig):
                     'limb_pose2': -0.2 * 3.141592653589793,
                 },
                 "spawn_mode": SpawnMode.TRANSVERSE,
-                "pose"      : [0, 0, 0.0, 0, 0, 3.141592653589793],
+                "pose"      : [-0.1, 0, 0.0, 0, 0, 3.141592653589793],
             },
         ]
 

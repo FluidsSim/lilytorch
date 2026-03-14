@@ -1,17 +1,34 @@
 """
 Interactive perspective correction + horizontal flip for video1.
 
-Usage:
+Part of the join_videos pipeline (standalone version of pipeline.py step 1).
+Use this when you only need to correct perspective distortion in the
+experimental video without running the full pipeline.
+
+What it does
+------------
+  1. Opens a window showing the first frame of video1.MP4.
+  2. You click 4 corners of a known rectangular feature in the scene
+     (TOP-LEFT → TOP-RIGHT → BOTTOM-RIGHT → BOTTOM-LEFT).
+  3. A homography is computed and applied to every frame, removing
+     perspective distortion.
+  4. The result is horizontally flipped (mirror) and saved as
+     video1_corrected.mp4.
+
+Usage
+-----
     python correct_video1.py
 
-Instructions:
-    1. A window will open showing the first frame.
-    2. Click exactly 4 points that define a region which should be a rectangle,
-       going in order: TOP-LEFT → TOP-RIGHT → BOTTOM-RIGHT → BOTTOM-LEFT.
-       (e.g. the four corners of the tank or any known rectangular feature)
-    3. Press ENTER to confirm and start encoding.
-    4. Press 'r' to reset your point selection.
-    5. The corrected, horizontally-flipped video is saved as video1_corrected.mp4.
+Key bindings
+------------
+    ENTER – confirm the 4 selected points and start encoding.
+    r     – reset point selection.
+    ESC   – cancel.
+
+Input:  video1.MP4            (GoPro experimental recording, same directory)
+Output: video1_corrected.mp4  (perspective-corrected + h-flipped)
+
+After this, run match_scale_video2.py then stack_videos.sh.
 """
 
 import cv2
@@ -19,9 +36,17 @@ import numpy as np
 import sys
 import os
 
-DIR = os.path.dirname(os.path.abspath(__file__))
-INPUT  = os.path.join(DIR, "video1.MP4")
-OUTPUT = os.path.join(DIR, "video1_corrected.mp4")
+
+import argparse
+
+parser = argparse.ArgumentParser(description="Perspective correction + flip for a video.")
+parser.add_argument("input", help="Input video filename (e.g. exp_water.MP4)")
+args = parser.parse_args()
+
+INPUT = os.path.abspath(args.input)
+DIR = os.path.dirname(INPUT)
+base, ext = os.path.splitext(os.path.basename(INPUT))
+OUTPUT = os.path.join(DIR, base + '_corrected' + ext)
 
 # ── step 1: grab first frame ──────────────────────────────────────────────────
 cap = cv2.VideoCapture(INPUT)

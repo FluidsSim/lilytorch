@@ -355,13 +355,45 @@ class AdvDiffSolver:
             lap += (phi[tuple(fwd)] - 2.0 * phi[inner] + phi[tuple(bwd)]) * inv_dh2[d]
         return lap
 
+    @staticmethod
+    def _variable_laplacian(phi, nu_eff, dh):
+        """Variable-coefficient Laplacian: div(nu_eff * grad(phi)).
+
+        Uses face-averaged viscosity:
+            sum_d  (nu_{i+1/2}(phi_{i+1} - phi_i) - nu_{i-1/2}(phi_i - phi_{i-1})) / dh_d^2
+
+        Parameters
+        ----------
+        phi     : tensor — the field (interior + ghost).
+        nu_eff  : tensor — effective viscosity at cell centres (same shape as phi).
+        dh      : list of floats — grid spacing per dimension.
+        """
+        ndim  = phi.ndim
+        inner = _inner(ndim)
+        lap   = torch.zeros_like(phi[inner])
+        for d in range(ndim):
+            fwd = list(inner); fwd[d] = slice(2, None)
+            bwd = list(inner); bwd[d] = slice(None, -2)
+            # face-averaged viscosity
+            nu_fwd = 0.5 * (nu_eff[inner] + nu_eff[tuple(fwd)])
+            nu_bwd = 0.5 * (nu_eff[inner] + nu_eff[tuple(bwd)])
+            inv_dh2 = 1.0 / (dh[d] * dh[d])
+            lap += (nu_fwd * (phi[tuple(fwd)] - phi[inner])
+                    - nu_bwd * (phi[inner] - phi[tuple(bwd)])) * inv_dh2
+        return lap
+
     # =================================================================
     # Convective-scheme solve  (dimension-agnostic)
     # =================================================================
-    def _solve_convective(self, *vel, iteration=0):
+    def _solve_convective(self, *vel, nu_t=None, iteration=0):
         """Forward-Euler advection-diffusion step.
 
-            phi^{n+1} = phi^n + dt * [-div(vel (x) phi) + nu * lap(phi)]
+            phi^{n+1} = phi^n + dt * [-div(vel (x) phi) + diff(phi)]
+
+        When *nu_t* is ``None`` (constant viscosity):
+            diff = nu * lap(phi)
+        When *nu_t* is a tensor (Smagorinsky LES):
+            diff = div((nu + nu_t) * grad(phi))   [variable-coeff Laplacian]
 
         Accepts (u, v) in 2-D or (u, v, w) in 3-D.
         """
@@ -371,7 +403,11 @@ class AdvDiffSolver:
 
         for i in range(ndim):
             # diffusion
-            rhs = self.nu * self.dt * self._laplacian(vel[i], self._inv_dh2)
+            if nu_t is None:
+                rhs = self.nu * self.dt * self._laplacian(vel[i], self._inv_dh2)
+            else:
+                nu_eff = self.nu + nu_t
+                rhs = self.dt * self._variable_laplacian(vel[i], nu_eff, self.dh)
             # convective fluxes in each direction
             for d in range(ndim):
                 fv = self._face_vel(vel, i, d)
@@ -388,7 +424,7 @@ class AdvDiffSolver:
     # =================================================================
     # Semi-Lagrangian solve  (Stam 1999, dimension-agnostic)
     # =================================================================
-    def _solve_semi_lagrangian(self, *vel, iteration=0):
+    def _solve_semi_lagrangian(self, *vel, nu_t=None, iteration=0):
         """Unconditionally-stable advection via back-tracing."""
         ndim  = self.ndim
         shape = tuple(self.n)
@@ -417,9 +453,15 @@ class AdvDiffSolver:
         # explicit diffusion
         inner = _inner(ndim)
         for i in range(ndim):
-            vel_new[i][inner] += (
-                self.nu * self.dt * self._laplacian(vel_new[i], self._inv_dh2)
-            )
+            if nu_t is None:
+                vel_new[i][inner] += (
+                    self.nu * self.dt * self._laplacian(vel_new[i], self._inv_dh2)
+                )
+            else:
+                nu_eff = self.nu + nu_t
+                vel_new[i][inner] += (
+                    self.dt * self._variable_laplacian(vel_new[i], nu_eff, self.dh)
+                )
 
         return tuple(vel_new)
 
@@ -487,10 +529,17 @@ class AdvDiffSolver:
     # =================================================================
     # CFL helper
     # =================================================================
-    def clf(self, *vel):
-        """Adjust dt to satisfy CFL."""
+    def clf(self, *vel, nu_t_max=0.0):
+        """Adjust dt to satisfy CFL.
+
+        Parameters
+        ----------
+        *vel    : velocity component tensors.
+        nu_t_max : float — maximum eddy viscosity (0 when Smagorinsky is off).
+        """
         vel_max = max(torch.max(torch.abs(v)).item() for v in vel)
-        self.dt = min(self.dh) / (vel_max + 3.0 * self.nu)
+        nu_total = float(self.nu) + float(nu_t_max)
+        self.dt = min(self.dh) / (vel_max + 3.0 * nu_total)
         self._dt_dh = [self.dt / h for h in self.dh]
         # legacy
         self.dtdx = self._dt_dh[0]

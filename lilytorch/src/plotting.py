@@ -608,14 +608,12 @@ def plot_field_2d(
 
     # ---- symmetric auto-range (only when vmin/vmax not set) ----
     if vmin is None or vmax is None:
-        # Crop ghost / boundary cells (typically 1–2 layers) so that
-        # boundary artefacts do not dictate the colour range.
-        g = min(2, *(s // 4 for s in field_np.shape))   # guard width
-        interior = field_np[g:-g, g:-g] if g > 0 else field_np
-        abs_int  = np.abs(interior)
-        limit    = float(np.percentile(abs_int, 99.5))
+        # Ghost cells are already stripped by the caller, so use the
+        # full field for the auto-range (99.5-th percentile symmetric).
+        abs_f  = np.abs(field_np)
+        limit  = float(np.percentile(abs_f, 99.5))
         if limit == 0:
-            limit = float(abs_int.max()) or 1.0
+            limit = float(abs_f.max()) or 1.0
         vmin, vmax = -limit, limit
 
     # ---- figure size from domain aspect ratio ----
@@ -649,45 +647,32 @@ def plot_field_2d(
     )
     cbar = fig.colorbar(im, ax=ax)
 
-    # ---- body interior colouring via mu0 RGBA overlay ----
-    if body_mu0_rgba is not None:
-        # Overlay the pre-built per-body colour image (transparent in fluid)
-        ax.imshow(
-            np.transpose(body_mu0_rgba, (1, 0, 2)),   # (Ny, Nx, 4)
-            extent=extent,
-            origin="lower",
-            aspect="equal",
-            interpolation="nearest",
-            zorder=4,
-        )
-        # Still draw the SDF zero-contour outline so the body edges are crisp
-        if sdf_2d is not None:
-            sdf_np2 = np.asarray(sdf_2d)
-            sdf_min = float(sdf_np2.min())
-            if sdf_min < 0.0:
-                sx = np.linspace(extent[0], extent[1], sdf_np2.shape[0])
-                sy = np.linspace(extent[2], extent[3], sdf_np2.shape[1])
-                SY, SX = np.meshgrid(sy, sx)
-                ax.contour(SX, SY, sdf_np2, levels=[0.0], colors="black",
-                           linewidths=2.5, zorder=5)
-    elif sdf_2d is not None:
-        # Fallback: single-colour fill + outline
+    # ---- body SDF fill + outline (always drawn when available) ----
+    if sdf_2d is not None:
         _fill_col = body_fill_color if body_fill_color is not None else "#d0d0d0"
         sdf_np2 = np.asarray(sdf_2d)
         sdf_min = float(sdf_np2.min())
-        # Only draw body when the slice actually intersects the interior
-        # (sdf < 0 inside body).  If sdf_min >= 0 the body is entirely
-        # outside this slice plane → skip to avoid matplotlib errors.
         if sdf_min < 0.0:
             sx = np.linspace(extent[0], extent[1], sdf_np2.shape[0])
             sy = np.linspace(extent[2], extent[3], sdf_np2.shape[1])
-            SY, SX = np.meshgrid(sy, sx)  # SX(Nx,Ny), SY(Nx,Ny)
+            SY, SX = np.meshgrid(sy, sx)
             # Filled interior
             ax.contourf(SX, SY, sdf_np2, levels=[sdf_min, 0.0],
                         colors=[_fill_col], zorder=4)
             # Thick black outline
             ax.contour(SX, SY, sdf_np2, levels=[0.0], colors="black",
                        linewidths=2.5, zorder=5)
+
+    # ---- body interior colouring via mu0 RGBA overlay (on top) ----
+    if body_mu0_rgba is not None:
+        ax.imshow(
+            np.transpose(body_mu0_rgba, (1, 0, 2)),   # (Ny, Nx, 4)
+            extent=extent,
+            origin="lower",
+            aspect="equal",
+            interpolation="nearest",
+            zorder=6,
+        )
 
     # ---- body contours (always shown, even outside domain) ----
     view_xmin, view_xmax = extent[0], extent[1]
@@ -729,11 +714,11 @@ def plot_field_2d(
                     view_ymin = min(view_ymin, float(cy))
                     view_ymax = max(view_ymax, float(cy))
 
-    # add a small margin so the body is not glued to the plot border
-    pad_x = 0.02 * (view_xmax - view_xmin) if view_xmax > view_xmin else 0.01
-    pad_y = 0.02 * (view_ymax - view_ymin) if view_ymax > view_ymin else 0.01
-    ax.set_xlim(view_xmin - pad_x, view_xmax + pad_x)
-    ax.set_ylim(view_ymin - pad_y, view_ymax + pad_y)
+    # Set axis limits exactly to the field extent (no padding).
+    # If a body extends outside the domain the view expands just enough
+    # to keep it visible, but the heatmap fills the full plot area.
+    ax.set_xlim(view_xmin, view_xmax)
+    ax.set_ylim(view_ymin, view_ymax)
 
     _xlabel, _ylabel = axis_labels if axis_labels else ("x [m]", "y [m]")
     ax.set_xlabel(_xlabel)
@@ -808,8 +793,15 @@ def plot_field_3d_slices(
             slice_axis="yz", slice_index=i_yz,
         )
 
+    # Half-cell offset: imshow `extent` is the outer pixel boundary, not
+    # the cell centre, so we expand by h/2 on each side.
+    hx = 0.5 * float(x[1] - x[0]) if len(x) > 1 else 0.0
+    hy = 0.5 * float(y[1] - y[0]) if len(y) > 1 else 0.0
+    hz = 0.5 * float(z[1] - z[0]) if len(z) > 1 else 0.0
+
     # ---- XY slice (fixed z) ----
-    extent_xy = (float(x[0]), float(x[-1]), float(y[0]), float(y[-1]))
+    extent_xy = (float(x[0]) - hx, float(x[-1]) + hx,
+                 float(y[0]) - hy, float(y[-1]) + hy)
     sdf_xy = sdf_np[:, :, k_xy] if sdf_np is not None else None
     plot_field_2d(
         field_np[:, :, k_xy], extent_xy, f"{name}_xy_k{k_xy}",
@@ -821,7 +813,8 @@ def plot_field_3d_slices(
     )
 
     # ---- XZ slice (fixed y) ----
-    extent_xz = (float(x[0]), float(x[-1]), float(z[0]), float(z[-1]))
+    extent_xz = (float(x[0]) - hx, float(x[-1]) + hx,
+                 float(z[0]) - hz, float(z[-1]) + hz)
     sdf_xz = sdf_np[:, j_xz, :] if sdf_np is not None else None
     plot_field_2d(
         field_np[:, j_xz, :], extent_xz, f"{name}_xz_j{j_xz}",
@@ -833,7 +826,8 @@ def plot_field_3d_slices(
     )
 
     # ---- YZ slice (fixed x) ----
-    extent_yz = (float(y[0]), float(y[-1]), float(z[0]), float(z[-1]))
+    extent_yz = (float(y[0]) - hy, float(y[-1]) + hy,
+                 float(z[0]) - hz, float(z[-1]) + hz)
     sdf_yz = sdf_np[i_yz, :, :] if sdf_np is not None else None
     plot_field_2d(
         field_np[i_yz, :, :], extent_yz, f"{name}_yz_i{i_yz}",

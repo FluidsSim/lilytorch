@@ -3,6 +3,7 @@ import datetime
 import logging
 import os
 import threading
+import warnings
 
 import h5py
 import numpy as np
@@ -12,7 +13,9 @@ from pytorch_interpolation import RegularGridInterpolator
 from tqdm import tqdm
 
 from lilytorch.src.adv_diff import AdvDiffSolver
-from lilytorch.src.body import body_from_yaml, _StaggeredGrids
+from lilytorch.src.body import (body_from_yaml, _StaggeredGrids,
+                                _mu_normals_batched_3d,
+                                _mu_normals_batched_3d_compiled)
 from lilytorch.src import operations as ops
 from lilytorch.src import plotting
 from lilytorch.src.poisson_fft import PoissonSolverFFT
@@ -20,6 +23,147 @@ from lilytorch.src.poisson_mult import PoissonSolver
 from lilytorch.util.yaml_operations import pyobject2yaml
 
 logger = logging.getLogger(__name__)
+
+
+# ======================================================================
+# Flow diagnostics — energy, enstrophy, divergence, CFL monitoring
+# ======================================================================
+
+class FlowDiagnostics:
+    """Lightweight monitor for kinetic energy, enstrophy, max-divergence,
+    and CFL number.  Records scalar time-series and optionally warns when
+    energy grows beyond a user-specified factor of its initial value.
+
+    Parameters
+    ----------
+    nt : int
+        Total number of time steps (for pre-allocation).
+    ndim : int
+        Spatial dimension (2 or 3).
+    h : float or Tensor
+        Uniform grid spacing.
+    device, dtype
+        Torch device / dtype for the record arrays.
+    check_every : int
+        Diagnostics are computed every *check_every* steps.  1 = every step.
+    energy_growth_factor : float
+        Issue a warning when E_k exceeds *energy_growth_factor* × E_k(0).
+        Set to ``None`` or ``inf`` to disable the energy blow-up check.
+    """
+
+    def __init__(self, nt, ndim, h, device, dtype,
+                 check_every=1, energy_growth_factor=10.0):
+        self.nt    = nt
+        self.ndim  = ndim
+        self.h     = float(h)
+        self.hd    = self.h ** ndim          # cell volume  h^d
+        self.device = device
+        self.dtype  = dtype
+
+        self.check_every = max(1, int(check_every))
+        self.energy_growth_factor = energy_growth_factor
+
+        # Pre-allocated record arrays (filled with NaN so uncomputed slots
+        # are visually obvious when plotted).
+        self.kinetic_energy = torch.full((nt,), float('nan'), device=device, dtype=dtype)
+        self.enstrophy      = torch.full((nt,), float('nan'), device=device, dtype=dtype)
+        self.max_divergence  = torch.full((nt,), float('nan'), device=device, dtype=dtype)
+        self.cfl_number      = torch.full((nt,), float('nan'), device=device, dtype=dtype)
+
+        self._ek0 = None   # E_k at the first computed step (baseline)
+
+    # ------------------------------------------------------------------
+    @torch.no_grad()
+    def update(self, iteration, u, v, p, dt, nu, divergence_fn, vorticity_fn,
+               w=None):
+        """Compute and record diagnostics for the current step.
+
+        Parameters
+        ----------
+        iteration : int
+            Current time-step index.
+        u, v : Tensor
+            Velocity components.  *w* is ``None`` in 2-D.
+        p : Tensor
+            Pressure (unused for now; kept for future pressure-energy).
+        dt : float or Tensor
+            Time step size (for CFL).
+        nu : float or Tensor
+            Kinematic viscosity (for CFL).
+        divergence_fn : callable(u, v, w=None) -> Tensor
+            Solver's divergence method.
+        vorticity_fn  : callable(u, v, w=None) -> Tensor
+            Solver's vorticity method (returns scalar in 2-D,
+            magnitude in 3-D).
+        w : Tensor or None
+            z-velocity component (3-D only).
+        """
+        if iteration % self.check_every != 0:
+            return
+
+        h  = self.h
+        hd = self.hd
+        dt_val = float(dt)
+        nu_val = float(nu)
+
+        # ---- kinetic energy  E_k = 0.5 * h^d * Σ(u² + v² [+ w²]) ----
+        ke = u.square() + v.square()
+        if w is not None:
+            ke = ke + w.square()
+        ek = 0.5 * hd * ke.sum()
+        self.kinetic_energy[iteration] = ek
+
+        # ---- enstrophy  Z = 0.5 * h^d * Σ ω² ----
+        omega = vorticity_fn(u, v, w)
+        enst = 0.5 * hd * omega.square().sum()
+        self.enstrophy[iteration] = enst
+
+        # ---- max |div(u)| ----
+        div = divergence_fn(u, v, w=w)
+        self.max_divergence[iteration] = div.abs().max()
+
+        # ---- CFL = u_max * dt / h ----
+        vel_max = u.abs().max()
+        vel_max = max(vel_max, v.abs().max())
+        if w is not None:
+            vel_max = max(vel_max, w.abs().max())
+        self.cfl_number[iteration] = float(vel_max) * dt_val / h
+
+        # ---- energy blow-up warning ----
+        if self._ek0 is None:
+            self._ek0 = float(ek) if float(ek) > 0 else 1.0
+        if (self.energy_growth_factor is not None
+                and float(ek) > self.energy_growth_factor * self._ek0):
+            warnings.warn(
+                f"[FlowDiagnostics] E_k = {float(ek):.6e} at iter {iteration} "
+                f"exceeds {self.energy_growth_factor}x initial "
+                f"({self._ek0:.6e}).  Possible blow-up.",
+                RuntimeWarning, stacklevel=2,
+            )
+
+        # ---- CFL warning ----
+        cfl_val = float(self.cfl_number[iteration])
+        if cfl_val > 0.5:
+            warnings.warn(
+                f"[FlowDiagnostics] CFL = {cfl_val:.3f} > 0.5 at iter {iteration}",
+                RuntimeWarning, stacklevel=2,
+            )
+
+    # ------------------------------------------------------------------
+    def save_h5(self, path, lock):
+        """Write diagnostics to ``<path>/diagnostics.h5``."""
+        h5_path = os.path.join(path, "diagnostics.h5")
+        data = {
+            "kinetic_energy": self.kinetic_energy.cpu().numpy().copy(),
+            "enstrophy":      self.enstrophy.cpu().numpy().copy(),
+            "max_divergence":  self.max_divergence.cpu().numpy().copy(),
+            "cfl_number":      self.cfl_number.cpu().numpy().copy(),
+        }
+        with lock:
+            with h5py.File(h5_path, "w") as f:
+                for name, arr in data.items():
+                    f.create_dataset(name, data=arr)
+        logger.info("Saved flow diagnostics to %s", h5_path)
 
 # ======================================================================
 # Compilable force-computation kernels  (module-level, for torch.compile)
@@ -438,6 +582,12 @@ class FluidSolver:
 
         self.perturbation_amplitude  = solver.get("perturbation_amplitude", 0.0)
 
+        # ============= Smagorinsky LES model =============
+        self.smagorinsky_cs = solver.get("smagorinsky_cs", 0.0)
+        self.use_smagorinsky = self.smagorinsky_cs > 0
+        if self.use_smagorinsky:
+            print(f"Smagorinsky LES model enabled: Cs = {self.smagorinsky_cs}")
+
         # ============= time integration =============
         self.time_integration = solver.get("time_integration", "heun")
         assert self.time_integration in ("heun", "euler"), \
@@ -624,6 +774,19 @@ class FluidSolver:
             self.pressure_force_ang_y  = torch.zeros(self.n_bodies,device=self.device,dtype=self.dtype)
         self.viscous_drag_record  = torch.zeros((self.n_bodies,n_force_comp,self.nt),device=self.device,dtype=self.dtype)
         self.pressure_drag_record = torch.zeros((self.n_bodies,n_force_comp,self.nt),device=self.device,dtype=self.dtype)
+
+        # ===== flow diagnostics (energy, enstrophy, CFL) =====
+        _diag_every  = solver.get("diagnostics_every", 1)
+        _energy_grow = solver.get("energy_growth_factor", 10.0)
+        self.diagnostics = FlowDiagnostics(
+            nt      = self.nt,
+            ndim    = self.ndim,
+            h       = self.h,
+            device  = self.device,
+            dtype   = self.dtype,
+            check_every          = _diag_every,
+            energy_growth_factor = _energy_grow,
+        )
 
         # NOTE: xstress_tensor, ystress_tensor, zstress_tensor, and div
         # are created on-the-fly in forces_method* and project() respectively
@@ -1144,7 +1307,25 @@ class FluidSolver:
                 self.pressure_drag_record[i, 2, iteration] = fp_z
 
 
-    def project(self, u, v, p, w_vel=None, w=1.0):
+    def project(self, u, v, p, w_vel=None, w=1.0, *,
+                ch=None, cv=None, cw=None):
+        """Pressure-Poisson projection.
+
+        Parameters
+        ----------
+        u, v, p : tensors
+            Velocity & pressure fields.
+        w_vel : tensor or None
+            z-velocity (3-D only).
+        w : float
+            Heun weight (1.0 = predictor, 0.5 = corrector).
+        ch, cv, cw : tensor or None
+            Pre-computed Poisson coefficients for each staggered grid.
+            When *None* (default), the standard BDIM coefficients
+            ``(w*dt/rho) * mu0`` are used.  Pass custom coefficients
+            for variable-density formulations (e.g. FARMS coupling where
+            ``ch = dt / (rho_body + drho * mu0_u)``).
+        """
 
         # for general deforming bodies
         if self.ndim == 2:
@@ -1156,20 +1337,26 @@ class FluidSolver:
 
         if self.poisson_method == "fft":
             # ---- FFT solver (constant-coefficient Poisson) ----
-            p = self.poisson_solverFFT.solve(self.div / coeff)
+            # FFT path uses scalar coeff (no variable-density support).
+            # If ch/cv were provided, use ch as the scalar coefficient
+            # (assuming it is uniform, which is the FFT prerequisite).
+            fft_coeff = coeff if ch is None else ch
+            p = self.poisson_solverFFT.solve(self.div / fft_coeff)
             if self.ndim == 2:
                 (p_x, p_y) = self.gradient(p)
-                u = u - coeff * p_x
-                v = v - coeff * p_y
+                u = u - fft_coeff * p_x
+                v = v - fft_coeff * p_y
             else:
                 (p_x, p_y, p_z) = self.gradient(p)
-                u     = u - coeff * p_x
-                v     = v - coeff * p_y
-                w_vel = w_vel - coeff * p_z
+                u     = u - fft_coeff * p_x
+                v     = v - fft_coeff * p_y
+                w_vel = w_vel - fft_coeff * p_z
         else:
             # ---- Multigrid / MGCG solver (variable-coefficient Poisson) ----
-            ch = coeff*self.mu0_all_u
-            cv = coeff*self.mu0_all_v
+            if ch is None:
+                ch = coeff * self.mu0_all_u
+            if cv is None:
+                cv = coeff * self.mu0_all_v
 
             # Select solve method: MGCG or standalone multigrid
             _poisson_solve = (self.poisson_solver.solve_mgcg
@@ -1195,7 +1382,8 @@ class FluidSolver:
                 u          = u - ch * p_x
                 v          = v - cv * p_y
             else:
-                cw = coeff * self.mu0_all_w
+                if cw is None:
+                    cw = coeff * self.mu0_all_w
                 p, _ = _poisson_solve(
                     self.div[1:-1, 1:-1, 1:-1],
                     p0,
@@ -1215,6 +1403,18 @@ class FluidSolver:
             return (u, v, w_vel, p)
 
 
+
+    # ------------------------------------------------------------------
+    #  Smagorinsky LES model
+    # ------------------------------------------------------------------
+    def _compute_smagorinsky_nu_t(self, *vel):
+        """Compute Smagorinsky eddy viscosity ν_t = (Cs·Δ)²|S̄|.
+
+        Only called when ``self.use_smagorinsky`` is True.
+        """
+        return ops.smagorinsky_viscosity(
+            vel, float(self.h), self.ndim, cs=self.smagorinsky_cs,
+        )
 
     @staticmethod
     def _bdim_meta(
@@ -1254,7 +1454,11 @@ class FluidSolver:
 
         if self.ndim == 2:
             # ====== PREDICTOR ======
-            (uprime, vprime) = self.adv_diff_solver.solve(u, v)
+            nu_t = self._compute_smagorinsky_nu_t(u, v) if self.use_smagorinsky else None
+            (uprime, vprime) = self.adv_diff_solver.solve(u, v, nu_t=nu_t)
+            # Clone CUDA-graph outputs before passing to _bdim.
+            uprime = uprime.clone()
+            vprime = vprime.clone()
 
             # BDIM2 meta-equation (fused when compiled)
             _bdim = self._bdim_meta_compiled
@@ -1263,17 +1467,14 @@ class FluidSolver:
                 uprime, self.mu0_all_u,
                 self.composite_body.body_u, self.mu1_all_u,
                 self.normal_x_u, self.normal_y_u, _h, 2,
-            )
+            ).clone()
             vprime = _bdim(
                 vprime, self.mu0_all_v,
                 self.composite_body.body_v, self.mu1_all_v,
                 self.normal_x_v, self.normal_y_v, _h, 2,
-            )
+            ).clone()
 
             # Keep references to BDIM'd velocities for Heun averaging.
-            # No .clone() needed: project() does not modify its inputs
-            # in-place, and set_BCs() only touches boundary cells that
-            # get overwritten by the final set_BCs(u_avg) anyway.
             uprime_bdim = uprime
             vprime_bdim = vprime
 
@@ -1282,7 +1483,8 @@ class FluidSolver:
 
             # ====== CORRECTOR ======
             # Evaluate RHS at the projected predicted velocity
-            (uprime2, vprime2) = self.adv_diff_solver.solve(u1, v1)
+            nu_t = self._compute_smagorinsky_nu_t(u1, v1) if self.use_smagorinsky else None
+            (uprime2, vprime2) = self.adv_diff_solver.solve(u1, v1, nu_t=nu_t)
             # adv_diff.solve returns u1 + dt*RHS(u1).
             # Heun needs u^n + dt*RHS(u1), so rebase from u^n:
             uprime2 = u + (uprime2 - u1)
@@ -1293,12 +1495,12 @@ class FluidSolver:
                 uprime2, self.mu0_all_u,
                 self.composite_body.body_u, self.mu1_all_u,
                 self.normal_x_u, self.normal_y_u, _h, 2,
-            )
+            ).clone()
             vprime2 = _bdim(
                 vprime2, self.mu0_all_v,
                 self.composite_body.body_v, self.mu1_all_v,
                 self.normal_x_v, self.normal_y_v, _h, 2,
-            )
+            ).clone()
 
             # Average the BDIM'd pre-projection velocities (WaterLily style)
             u_avg = 0.5 * (uprime_bdim + uprime2)
@@ -1311,7 +1513,12 @@ class FluidSolver:
 
         else:  # 3D
             # ====== PREDICTOR ======
-            (uprime, vprime, wprime) = self.adv_diff_solver.solve(u, v, w_vel)
+            nu_t = self._compute_smagorinsky_nu_t(u, v, w_vel) if self.use_smagorinsky else None
+            (uprime, vprime, wprime) = self.adv_diff_solver.solve(u, v, w_vel, nu_t=nu_t)
+            # Clone CUDA-graph outputs before passing to _bdim.
+            uprime = uprime.clone()
+            vprime = vprime.clone()
+            wprime = wprime.clone()
 
             # BDIM2 meta-equation (fused when compiled)
             _bdim = self._bdim_meta_compiled
@@ -1320,20 +1527,19 @@ class FluidSolver:
                 uprime, self.mu0_all_u,
                 self.composite_body.body_u, self.mu1_all_u,
                 self.normal_x_u, self.normal_y_u, self.normal_z_u, _h, 3,
-            )
+            ).clone()
             vprime = _bdim(
                 vprime, self.mu0_all_v,
                 self.composite_body.body_v, self.mu1_all_v,
                 self.normal_x_v, self.normal_y_v, self.normal_z_v, _h, 3,
-            )
+            ).clone()
             wprime = _bdim(
                 wprime, self.mu0_all_w,
                 self.composite_body.body_w, self.mu1_all_w,
                 self.normal_x_w, self.normal_y_w, self.normal_z_w, _h, 3,
-            )
+            ).clone()
 
             # Keep references to BDIM'd velocities for Heun averaging.
-            # No .clone() needed — see 2-D comment above.
             uprime_bdim = uprime
             vprime_bdim = vprime
             wprime_bdim = wprime
@@ -1342,7 +1548,8 @@ class FluidSolver:
             (u1, v1, w1, p1) = self.project(uprime, vprime, p, w_vel=wprime)
 
             # ====== CORRECTOR ======
-            (uprime2, vprime2, wprime2) = self.adv_diff_solver.solve(u1, v1, w1)
+            nu_t = self._compute_smagorinsky_nu_t(u1, v1, w1) if self.use_smagorinsky else None
+            (uprime2, vprime2, wprime2) = self.adv_diff_solver.solve(u1, v1, w1, nu_t=nu_t)
             # Rebase from u^n
             uprime2 = u     + (uprime2 - u1)
             vprime2 = v     + (vprime2 - v1)
@@ -1353,17 +1560,17 @@ class FluidSolver:
                 uprime2, self.mu0_all_u,
                 self.composite_body.body_u, self.mu1_all_u,
                 self.normal_x_u, self.normal_y_u, self.normal_z_u, _h, 3,
-            )
+            ).clone()
             vprime2 = _bdim(
                 vprime2, self.mu0_all_v,
                 self.composite_body.body_v, self.mu1_all_v,
                 self.normal_x_v, self.normal_y_v, self.normal_z_v, _h, 3,
-            )
+            ).clone()
             wprime2 = _bdim(
                 wprime2, self.mu0_all_w,
                 self.composite_body.body_w, self.mu1_all_w,
                 self.normal_x_w, self.normal_y_w, self.normal_z_w, _h, 3,
-            )
+            ).clone()
 
             # Free mu1 + staggered normals after both BDIM passes
             for _attr in ('mu1_all_u', 'mu1_all_v', 'mu1_all_w',
@@ -1408,19 +1615,23 @@ class FluidSolver:
         _h    = self.h
 
         if self.ndim == 2:
-            (uprime, vprime) = self.adv_diff_solver.solve(u, v)
+            nu_t = self._compute_smagorinsky_nu_t(u, v) if self.use_smagorinsky else None
+            (uprime, vprime) = self.adv_diff_solver.solve(u, v, nu_t=nu_t)
+            # Clone CUDA-graph outputs before passing to _bdim.
+            uprime = uprime.clone()
+            vprime = vprime.clone()
 
             # BDIM2 meta-equation
             uprime = _bdim(
                 uprime, self.mu0_all_u,
                 self.composite_body.body_u, self.mu1_all_u,
                 self.normal_x_u, self.normal_y_u, _h, 2,
-            )
+            ).clone()
             vprime = _bdim(
                 vprime, self.mu0_all_v,
                 self.composite_body.body_v, self.mu1_all_v,
                 self.normal_x_v, self.normal_y_v, _h, 2,
-            )
+            ).clone()
 
             self.adv_diff_solver.set_BCs(uprime, vprime)
             (u_out, v_out, p_out) = self.project(uprime, vprime, p)
@@ -1428,24 +1639,29 @@ class FluidSolver:
             return (u_out, v_out, p_out)
 
         else:  # 3D
-            (uprime, vprime, wprime) = self.adv_diff_solver.solve(u, v, w_vel)
+            nu_t = self._compute_smagorinsky_nu_t(u, v, w_vel) if self.use_smagorinsky else None
+            (uprime, vprime, wprime) = self.adv_diff_solver.solve(u, v, w_vel, nu_t=nu_t)
+            # Clone CUDA-graph outputs before passing to _bdim.
+            uprime = uprime.clone()
+            vprime = vprime.clone()
+            wprime = wprime.clone()
 
             # BDIM2 meta-equation
             uprime = _bdim(
                 uprime, self.mu0_all_u,
                 self.composite_body.body_u, self.mu1_all_u,
                 self.normal_x_u, self.normal_y_u, self.normal_z_u, _h, 3,
-            )
+            ).clone()
             vprime = _bdim(
                 vprime, self.mu0_all_v,
                 self.composite_body.body_v, self.mu1_all_v,
                 self.normal_x_v, self.normal_y_v, self.normal_z_v, _h, 3,
-            )
+            ).clone()
             wprime = _bdim(
                 wprime, self.mu0_all_w,
                 self.composite_body.body_w, self.mu1_all_w,
                 self.normal_x_w, self.normal_y_w, self.normal_z_w, _h, 3,
-            )
+            ).clone()
 
             # Free mu1 and staggered normals — no longer needed after
             # BDIM.  project() only uses mu0_{u,v,w}, and forces
@@ -1504,28 +1720,88 @@ class FluidSolver:
             if hasattr(self, attr):
                 setattr(self, attr, None)
 
+    # ------------------------------------------------------------------
+    #   mu / normal recomputation  (shared by step_() and BDIMhandler)
+    # ------------------------------------------------------------------
+    def _recompute_mu_normals_2d(self):
+        """Recompute mu0/mu1 and normals on u- and v-staggered grids (2-D).
+
+        CC-grid normals are computed on-the-fly inside forces_method1/2.
+        """
+        comp = self.composite_body
+
+        (self.mu0_all_u, self.mu1_all_u) = comp.mu_funcs(comp.sdf_val_u)
+        (self.normal_x_u, self.normal_y_u) = comp.compute_normals(comp.sdf_val_u)
+
+        (self.mu0_all_v, self.mu1_all_v) = comp.mu_funcs(comp.sdf_val_v)
+        (self.normal_x_v, self.normal_y_v) = comp.compute_normals(comp.sdf_val_v)
+
+    def _recompute_mu_normals_3d(self):
+        """Recompute mu0/mu1 and normals on all staggered + CC grids (3-D).
+
+        When ``_compile_sdf`` is enabled, uses a batched+compiled kernel that
+        processes all four grids (u, v, w, CC) in a single fused CUDA graph.
+        """
+        comp = self.composite_body
+
+        if self._compile_sdf:
+            # ── Batched + compiled path: all 4 grids in one fused pass ──
+            _fn = _mu_normals_batched_3d_compiled
+            mu0, mu1, nx, ny, nz = _fn(
+                comp.sdf_val_u, comp.sdf_val_v, comp.sdf_val_w,
+                comp.sdf_val, comp.h, comp.eps,
+            )
+            # Clone outputs — CUDA graph buffers are overwritten on
+            # subsequent replays, so we must detach before storing.
+            mu0, mu1 = mu0.clone(), mu1.clone()
+            nx, ny, nz = nx.clone(), ny.clone(), nz.clone()
+
+            # Unstack: order is [u, v, w, cc]
+            self.mu0_all_u, self.mu1_all_u = mu0[0], mu1[0]
+            self.normal_x_u, self.normal_y_u, self.normal_z_u = nx[0], ny[0], nz[0]
+
+            self.mu0_all_v, self.mu1_all_v = mu0[1], mu1[1]
+            self.normal_x_v, self.normal_y_v, self.normal_z_v = nx[1], ny[1], nz[1]
+
+            self.mu0_all_w, self.mu1_all_w = mu0[2], mu1[2]
+            self.normal_x_w, self.normal_y_w, self.normal_z_w = nx[2], ny[2], nz[2]
+
+            self.mu0_all, self.mu1_all = mu0[3], mu1[3]
+            self.m_m0_all = 1 - self.mu0_all
+            self.normal_x, self.normal_y, self.normal_z = nx[3], ny[3], nz[3]
+        else:
+            # ── Eager path: 4 × individual mu_funcs + compute_normals ──
+            # u-grid
+            (self.mu0_all_u, self.mu1_all_u) = comp.mu_funcs(comp.sdf_val_u)
+            (self.normal_x_u, self.normal_y_u, self.normal_z_u) = comp.compute_normals(comp.sdf_val_u)
+
+            # v-grid
+            (self.mu0_all_v, self.mu1_all_v) = comp.mu_funcs(comp.sdf_val_v)
+            (self.normal_x_v, self.normal_y_v, self.normal_z_v) = comp.compute_normals(comp.sdf_val_v)
+
+            # w-grid
+            (self.mu0_all_w, self.mu1_all_w) = comp.mu_funcs(comp.sdf_val_w)
+            (self.normal_x_w, self.normal_y_w, self.normal_z_w) = comp.compute_normals(comp.sdf_val_w)
+
+            # CC-grid (p) — cached for forces_method2_3d
+            (self.mu0_all, self.mu1_all) = comp.mu_funcs(comp.sdf_val)
+            self.m_m0_all = 1 - self.mu0_all
+            (self.normal_x, self.normal_y, self.normal_z) = comp.compute_normals(comp.sdf_val)
+
+    def _recompute_mu_normals(self):
+        """Dispatch to 2-D or 3-D mu/normal recomputation."""
+        if self.ndim == 2:
+            self._recompute_mu_normals_2d()
+        else:
+            self._recompute_mu_normals_3d()
+
     def step_(self, u, v, p, iteration, t, w_vel=None):
 
         # update sdf_properties
         self.composite_body.update(t, iteration, dt=self.dt)
 
-        # --- mu / normals at u-staggered ---
-        (self.mu0_all_u, self.mu1_all_u) = self.composite_body.mu_funcs(self.composite_body.sdf_val_u)
-
-        # --- mu / normals at v-staggered ---
-        (self.mu0_all_v, self.mu1_all_v) = self.composite_body.mu_funcs(self.composite_body.sdf_val_v)
-
-        if self.ndim == 2:
-            # CC normals are computed on-the-fly inside forces_method1/2
-            (self.normal_x_u, self.normal_y_u) = self.composite_body.compute_normals(self.composite_body.sdf_val_u)
-            (self.normal_x_v, self.normal_y_v) = self.composite_body.compute_normals(self.composite_body.sdf_val_v)
-        else:
-            # CC normals are computed on-the-fly inside forces_method2_3d
-            (self.normal_x_u, self.normal_y_u, self.normal_z_u) = self.composite_body.compute_normals(self.composite_body.sdf_val_u)
-            (self.normal_x_v, self.normal_y_v, self.normal_z_v) = self.composite_body.compute_normals(self.composite_body.sdf_val_v)
-            # --- mu / normals at w-staggered ---
-            (self.mu0_all_w, self.mu1_all_w) = self.composite_body.mu_funcs(self.composite_body.sdf_val_w)
-            (self.normal_x_w, self.normal_y_w, self.normal_z_w) = self.composite_body.compute_normals(self.composite_body.sdf_val_w)
+        # --- recompute mu / normals on all staggered grids ---
+        self._recompute_mu_normals()
 
         ##### just for plotting
         self.sdf_properties = [[self.composite_body.sdf_val_u]]
@@ -1541,6 +1817,14 @@ class FluidSolver:
 
             if self.compute_forces:
                 self.forces_method2_3d(u, v, w_vel, p, iteration)
+
+        # ---- flow diagnostics (energy, enstrophy, CFL, divergence) ----
+        self.diagnostics.update(
+            iteration, u, v, p, self.dt, self.nu,
+            divergence_fn=self.divergence,
+            vorticity_fn=self.vorticity,
+            w=w_vel,
+        )
 
         # ---- free BDIM fields to reclaim GPU memory between steps ----
         self._release_bdim_fields()
@@ -1660,43 +1944,77 @@ class FluidSolver:
                             sdf_vals=_sdf_vals_np,
                         )
 
+                # Crop ghost cells so the plot shows only the physical domain.
+                _crop_mu0 = _mu0_rgba[1:-1, 1:-1] if _mu0_rgba is not None else None
+                _phys_extent = (self.xmin, self.xmax, self.ymin, self.ymax)
+
                 for (name, field_fn, vmin, vmax, show_body) in specs:
                     field = field_fn(self, u, v, p, w_vel)
                     field_np = field.detach().cpu().numpy().copy() if hasattr(field, 'detach') else np.array(field)
+                    field_np = field_np[1:-1, 1:-1]  # strip ghost cells
                     eff_vmin = self.vmin if vmin is None else vmin
                     eff_vmax = self.vmax if vmax is None else vmax
-                    extent   = self.extent  # plain tuple, safe to share
                     save_path = self.save_path
                     _bodies  = bodies if show_body else None
                     self._submit_io(
                         plotting.plot_field_2d,
-                        field_np, extent,
+                        field_np, _phys_extent,
                         name, iteration, save_path,
                         vmin=eff_vmin, vmax=eff_vmax, bodies=_bodies,
-                        body_mu0_rgba=_mu0_rgba if show_body else None,
+                        body_mu0_rgba=_crop_mu0 if show_body else None,
                     )
             else:
+                # Crop ghost cells (index 0 and -1 on each axis) so plots
+                # show only the physical domain, not BC-padded boundaries.
+                _s = slice(1, -1)  # reusable ghost-cell crop slice
                 coords = {
-                    "x": self.x.cpu().numpy().copy(),
-                    "y": self.y.cpu().numpy().copy(),
-                    "z": self.z.cpu().numpy().copy(),
+                    "x": self.x.cpu().numpy().copy()[_s],
+                    "y": self.y.cpu().numpy().copy()[_s],
+                    "z": self.z.cpu().numpy().copy()[_s],
                 }
                 # snapshot SDF for body-shape overlay on 2-D slice plots
                 sdf_np = None
                 if hasattr(self, "composite_body") and hasattr(self.composite_body, "sdf_val"):
-                    sdf_np = self.composite_body.sdf_val.cpu().numpy().copy()
+                    sdf_np = self.composite_body.sdf_val.cpu().numpy().copy()[_s, _s, _s]
                 # snapshot batched per-body SDFs for mu0 colouring
                 _sdf_vals_3d_np = None
                 _eps_3d = None
                 if bodies is not None and hasattr(self, "composite_body"):
-                    _sv3 = getattr(self.composite_body, "sdf_vals", None)
-                    if _sv3 is not None:
-                        _sdf_vals_3d_np = _sv3.detach().cpu().numpy().copy()
-                    _eps_3d = getattr(self.composite_body, "eps",
+                    comp = self.composite_body
+                    _eps_3d = getattr(comp, "eps",
                                        getattr(self, "eps", None))
+                    # Prefer sparse per-body SDFs from _update_3d (the
+                    # dense comp.sdf_vals is NOT populated by the 3-D
+                    # AABB path and stays all-zero → wrong mu0 overlay).
+                    _sparse = getattr(comp, "_sdf_sparse", None)
+                    if _sparse is not None and any(s is not None for s in _sparse):
+                        _FAR = 1e4
+                        B = len(_sparse)
+                        full = np.full((B, *self.grid_shape), _FAR,
+                                       dtype=np.float32)
+                        for bi, entry in enumerate(_sparse):
+                            if entry is None:
+                                continue
+                            aabb, sdf_sub = entry
+                            sdf_cpu = (sdf_sub.detach().cpu().numpy()
+                                       if hasattr(sdf_sub, 'detach')
+                                       else np.asarray(sdf_sub))
+                            if aabb is not None:
+                                i0, i1, j0, j1, k0, k1 = aabb
+                                full[bi, i0:i1, j0:j1, k0:k1] = sdf_cpu
+                            else:
+                                full[bi] = sdf_cpu
+                        _sdf_vals_3d_np = full[:, _s, _s, _s]
+                    else:
+                        # Fallback: dense comp.sdf_vals (2-D path or
+                        # legacy code that populates it directly).
+                        _sv3 = getattr(comp, "sdf_vals", None)
+                        if _sv3 is not None:
+                            _sdf_vals_3d_np = _sv3.detach().cpu().numpy().copy()[:, _s, _s, _s]
                 for (name, field_fn, vmin, vmax, _show_body) in specs:
                     field = field_fn(self, u, v, p, w_vel)
                     field_np = field.detach().cpu().numpy().copy() if hasattr(field, 'detach') else np.array(field)
+                    field_np = field_np[_s, _s, _s]  # strip ghost cells
                     eff_vmin = self.vmin if vmin is None else vmin
                     eff_vmax = self.vmax if vmax is None else vmax
                     save_path = self.save_path
@@ -1717,6 +2035,8 @@ class FluidSolver:
                 # ---- HDF5 field export (3-D only, replaces old VTK) ----
                 # Saves u, v, w, p, sdf — all derived fields (vorticity,
                 # vel_mag, divergence) can be recomputed from these.
+                # HDF5 stores the *full* arrays (including ghost cells)
+                # so post-processing retains boundary information.
                 if self.save:
                     h5_fields = {
                         "u": u.detach().cpu().numpy().copy(),
@@ -1725,13 +2045,20 @@ class FluidSolver:
                     }
                     if w_vel is not None:
                         h5_fields["w"] = w_vel.detach().cpu().numpy().copy()
-                    if sdf_np is not None:
-                        h5_fields["sdf"] = sdf_np  # already on CPU
+                    _sdf_full = None
+                    if hasattr(self, "composite_body") and hasattr(self.composite_body, "sdf_val"):
+                        _sdf_full = self.composite_body.sdf_val.cpu().numpy().copy()
+                    if _sdf_full is not None:
+                        h5_fields["sdf"] = _sdf_full
 
-                    # Grids only on first snapshot
+                    # Grids only on first snapshot (full coords incl. ghost cells)
                     grids = None
                     if iteration == 0 or not hasattr(self, '_grids_saved'):
-                        grids = coords
+                        grids = {
+                            "x": self.x.cpu().numpy().copy(),
+                            "y": self.y.cpu().numpy().copy(),
+                            "z": self.z.cpu().numpy().copy(),
+                        }
                         self._grids_saved = True
 
                     self._submit_io(
@@ -1751,6 +2078,7 @@ class FluidSolver:
                         iso_thresh = getattr(self, "vmax", None)
                     field = field_fn(self, u, v, p, w_vel)
                     field_np = field.detach().cpu().numpy().copy() if hasattr(field, 'detach') else np.array(field)
+                    field_np = field_np[_s, _s, _s]  # strip ghost cells
                     self._submit_io(
                         plotting.plot_field_3d,
                         field_np, coords,
@@ -1806,8 +2134,14 @@ class FluidSolver:
         return self.plotting_and_saving(u, v, p, iteration, check_termination=check_termination)
 
     def check_termination(self, iteration, u, v, p):
-        if iteration == self.nt - 1 or torch.isnan(u).any():
-                logger.warning("Termination condition met: max_iter or NaN")
+        # NaN in any velocity or pressure field
+        has_nan = (torch.isnan(u).any() or torch.isnan(v).any()
+                   or torch.isnan(p).any())
+        if iteration == self.nt - 1 or has_nan:
+                if has_nan:
+                    logger.warning("Termination: NaN detected in velocity/pressure fields")
+                else:
+                    logger.info("Termination: reached max iterations (%d)", self.nt)
                 terminate = True
         else:
             if hasattr(self.composite_body, "com_pos"):
@@ -1926,6 +2260,11 @@ class FluidSolver:
                         f.create_dataset('pressure_drags', data=pd)
 
             self._submit_io(_save_drags_h5, h5_path, vd_np, pd_np)
+
+        # ---- save flow diagnostics ----
+        if self.save:
+            self._submit_io(self.diagnostics.save_h5,
+                            self.save_path, self._hdf5_lock)
 
         # Block until all background I/O is complete before returning
         self.flush_io()

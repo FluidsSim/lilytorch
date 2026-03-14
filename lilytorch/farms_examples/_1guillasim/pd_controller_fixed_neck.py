@@ -28,7 +28,7 @@ class PositionController(KinematicsController):
             amp_deg=config["amp"],
             freq=config["freq"],
             TWL=config["twl"],
-            nmotors=7,
+            nmotors=8,
             plot=False
         )
         joints_control_types  = {

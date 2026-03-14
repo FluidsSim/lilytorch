@@ -144,6 +144,69 @@ def vorticity_components(u, v, w, h):
 # ------------------------------------------------------------------
 # Cross products
 # ------------------------------------------------------------------
+# ------------------------------------------------------------------
+# Strain-rate magnitude and Smagorinsky eddy viscosity
+# ------------------------------------------------------------------
+def strain_rate_magnitude(vel, h, ndim):
+    """Compute |S̄| = sqrt(2 * S_ij * S_ij) on the cell-centred grid.
+
+    Parameters
+    ----------
+    vel  : tuple of tensors (u, v) in 2-D or (u, v, w) in 3-D.
+    h    : float — uniform grid spacing.
+    ndim : int — 2 or 3.
+
+    Returns
+    -------
+    |S̄| tensor with same shape as vel[0].  Ghost cells are zero.
+    """
+    if ndim == 2:
+        u, v = vel
+        dudx = torch.gradient(u, spacing=h, dim=0, edge_order=2)[0]
+        dudy = torch.gradient(u, spacing=h, dim=1, edge_order=2)[0]
+        dvdx = torch.gradient(v, spacing=h, dim=0, edge_order=2)[0]
+        dvdy = torch.gradient(v, spacing=h, dim=1, edge_order=2)[0]
+        # S_ij S_ij = S11² + S22² + 2*S12²
+        # S11 = dudx, S22 = dvdy, S12 = 0.5*(dudy + dvdx)
+        S2 = dudx**2 + dvdy**2 + 0.5 * (dudy + dvdx)**2
+        return torch.sqrt(2.0 * S2)
+    else:
+        u, v, w = vel
+        dudx = torch.gradient(u, spacing=h, dim=0, edge_order=2)[0]
+        dudy = torch.gradient(u, spacing=h, dim=1, edge_order=2)[0]
+        dudz = torch.gradient(u, spacing=h, dim=2, edge_order=2)[0]
+        dvdx = torch.gradient(v, spacing=h, dim=0, edge_order=2)[0]
+        dvdy = torch.gradient(v, spacing=h, dim=1, edge_order=2)[0]
+        dvdz = torch.gradient(v, spacing=h, dim=2, edge_order=2)[0]
+        dwdx = torch.gradient(w, spacing=h, dim=0, edge_order=2)[0]
+        dwdy = torch.gradient(w, spacing=h, dim=1, edge_order=2)[0]
+        dwdz = torch.gradient(w, spacing=h, dim=2, edge_order=2)[0]
+        # S_ij S_ij = S11² + S22² + S33² + 2*(S12² + S13² + S23²)
+        S2 = (dudx**2 + dvdy**2 + dwdz**2
+              + 0.5 * (dudy + dvdx)**2
+              + 0.5 * (dudz + dwdx)**2
+              + 0.5 * (dvdz + dwdy)**2)
+        return torch.sqrt(2.0 * S2)
+
+
+def smagorinsky_viscosity(vel, h, ndim, cs=0.1):
+    """Compute the Smagorinsky eddy viscosity  ν_t = (Cs·Δ)² |S̄|.
+
+    Parameters
+    ----------
+    vel  : tuple of tensors — velocity components.
+    h    : float — uniform grid spacing (used as filter width Δ).
+    ndim : int — 2 or 3.
+    cs   : float — Smagorinsky constant (typically 0.1–0.2).
+
+    Returns
+    -------
+    ν_t tensor with same shape as vel[0].
+    """
+    S_mag = strain_rate_magnitude(vel, h, ndim)
+    return (cs * h) ** 2 * S_mag
+
+
 def cross_product_2d(ax, ay, bx, by):
     """Element-wise 2-D cross product (scalar result)."""
     return ax * by - ay * bx

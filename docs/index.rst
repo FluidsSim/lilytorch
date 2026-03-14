@@ -18,6 +18,8 @@ Key features
 * **Heun (RK2) predictor–corrector** time stepping.
 * Multiple advection schemes: QUICK, ADBQUICKEST, CUBISTA, van Leer, CDS,
   semi-Lagrangian.
+* Optional **Smagorinsky LES** subgrid-scale model for under-resolved
+  turbulent flows.
 * FFT Poisson solvers (Neumann DCT & free-space Green's function) and
   variable-coefficient multigrid / MGCG.
 * Full ``torch.compile`` support for all hot kernels.

@@ -1,26 +1,42 @@
 #!/bin/bash
-# Stack video1 (top) and video2 (bottom) vertically.
-# Uses video1_corrected.mp4 if it exists (produced by correct_video1.py),
-# otherwise falls back to the original video1.MP4.
-# -r before -i forces both inputs to be treated as 30 fps,
-# which prevents the 90k time-base in video1 from exploding frame counts.
+# ── stack_videos.sh ─────────────────────────────────────────────────────────
+# Final step of the join_videos pipeline (standalone version of pipeline.py
+# step 6).  Run after correct_video1.py and match_scale_video2.py.
+#
+# What it does:
+#   Vertically stacks video1 (top, experiment) and video2 (bottom, simulation)
+#   into stacked_output.mp4 using ffmpeg.  Both are scaled to 1920 px wide.
+#   If video_sync.env exists (written by match_scale_video2.py), applies the
+#   temporal offset so both videos start at the motion onset frame.
+#
+# Input:   video1_corrected.mp4 (or video1.MP4), video2_scaled.mp4 (or video2.mp4)
+# Output:  stacked_output.mp4  (H.264, CRF 18, 30 fps)
+#
+# Notes:
+#   -r 30 before -i forces both inputs to be treated as 30 fps, which
+#   prevents the 90k time-base in GoPro video1 from exploding frame counts.
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 
-if [ -f "$DIR/video1_corrected.mp4" ]; then
-    TOP="$DIR/video1_corrected.mp4"
-    echo "Using corrected video1: $TOP"
+
+# Find *_corrected.* files for both experiment and simulation
+EXP_CORRECTED=$(ls "$DIR"/*_corrected.* 2>/dev/null | head -n1)
+SIM_CORRECTED=$(ls "$DIR"/*_corrected.* 2>/dev/null | tail -n1)
+
+if [ -n "$EXP_CORRECTED" ]; then
+    TOP="$EXP_CORRECTED"
+    echo "Using corrected experiment video: $TOP"
 else
-    TOP="$DIR/video1.MP4"
-    echo "Using original video1: $TOP (run correct_video1.py to correct it)"
+    echo "No *_corrected.* experiment video found."
+    exit 1
 fi
 
-if [ -f "$DIR/video2_scaled.mp4" ]; then
-    BOT="$DIR/video2_scaled.mp4"
-    echo "Using scaled video2: $BOT"
+if [ -n "$SIM_CORRECTED" ]; then
+    BOT="$SIM_CORRECTED"
+    echo "Using corrected simulation video: $BOT"
 else
-    BOT="$DIR/video2.mp4"
-    echo "Using original video2: $BOT (run match_scale_video2.py to scale it)"
+    echo "No *_corrected.* simulation video found."
+    exit 1
 fi
 
 # Temporal sync: video_sync.env is written by match_scale_video2.py
