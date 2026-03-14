@@ -76,8 +76,8 @@ PRESETS = {
     "production": [
         (128,  32,  32),
         (256,  64,  64),
-        (512, 128,  64),
-        (512, 256,  64),
+        (512, 128, 128),
+        (1024, 256, 128),
     ],
 }
 
@@ -287,7 +287,8 @@ for (nx, ny, nz) in grids:
         except Exception:
             pass
 
-    print(f"  {nx}×{ny}×{nz:<12s} {cells:>12,d} {status:>10s} "
+    grid_label = f"{nx}×{ny}×{nz}"
+    print(f"  {grid_label:<20s} {cells:>12,d} {status:>10s} "
           f"{wt:>12s} {has_csv:>6s}{step_ms}")
 
 print("=" * 72)
@@ -350,10 +351,10 @@ def _generate_inline_scaling_plots(out_dir, csv_files_list):
 
     cats = {
         "Body update (SDF)":      ["1b"],
-        "Forces":                 ["5 "],
-        "Projection (pressure)":  ["4d", "4e ", "4f", "4g", "4h"],
-        "Convection & diffusion": ["4a", "4b"],
-        "Other":                  ["1 ", "7 ", "2 ", "3 ", "4c", "6 "],
+        "Forces":                 ["4 "],
+        "Projection (pressure)":  ["3c"],
+        "Convection & diffusion": ["3a"],
+        "Other":                  ["1  ", "2 ", "3b", "5 ", "6 "],
     }
     cat_colours = {
         "Body update (SDF)":      "#26a69a",

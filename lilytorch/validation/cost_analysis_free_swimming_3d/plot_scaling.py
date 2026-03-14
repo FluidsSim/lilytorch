@@ -57,10 +57,10 @@ plt.rcParams.update({
 # ── Paper categories (must match run_cost_analysis.py prefixes) ──────
 CATEGORIES = {
     "Body update (SDF)":       ["1b"],
-    "Forces":                  ["5 "],
-    "Projection (pressure)":   ["4d", "4e ", "4f", "4g", "4h"],
-    "Convection & diffusion":  ["4a", "4b"],
-    "Other":                   ["1a", "7 ", "2 ", "3 ", "4c", "6 "],
+    "Forces":                  ["4 "],
+    "Projection (pressure)":   ["3c"],
+    "Convection & diffusion":  ["3a"],
+    "Other":                   ["1  ", "2 ", "3b", "5 ", "6 "],
 }
 
 CAT_COLOURS = {

@@ -137,7 +137,16 @@ from lilytorch.src.poisson_mult import PoissonSolver  # noqa: F401
 # ═══════════════════════════════════════════════════════════════════════
 
 def instrument_handler(handler):
-    """Wrap every hot-path method on live instances with fine-grained timers."""
+    """Wrap every hot-path method on live instances with fine-grained timers.
+
+    DESIGN PRINCIPLE: we NEVER reimplement production code paths.  Instead
+    we wrap the *existing* compiled methods with timing context managers.
+    This ensures:
+      • torch.compile / CUDA-graph recordings from precompile are REUSED
+        during the timed phase (same code path, just with sync+timer around it).
+      • Results are identical to production (no divergent BDIM arithmetic).
+      • Sync overhead is minimised (≤ 7 timer blocks per step).
+    """
     if getattr(handler, "_profiled", False):
         return
     handler._profiled = True
@@ -146,24 +155,16 @@ def instrument_handler(handler):
     comp = fs.composite_body
     adv  = fs.adv_diff_solver
 
-    # Keep originals
+    # Keep originals (unbound class methods)
+    _orig_step       = type(handler).step
     _orig_update     = type(handler).update
     _orig_fluid_step = type(handler).fluid_step
     _orig_apply      = type(handler).apply_forces
     _orig_forces     = type(fs).forces_method2_3d
     _orig_plot       = type(fs).plotting_and_saving
-    _orig_step       = type(handler).step          # unmodified handler.step
+    _orig_recompute  = type(fs)._recompute_mu_normals_3d
 
     # ── Pre-compilation gate ─────────────────────────────────────
-    # ── Pre-compilation gate ─────────────────────────────────────
-    # The first `precompile` steps call the ORIGINAL handler.step()
-    # without any timing.  This triggers all torch.compile CUDA-graph
-    # recordings.  Once done we flush GPU state, install the deep
-    # instrumentation patches, and switch to the timed path.
-    #
-    # IMPORTANT: during precompile we use the ORIGINAL fluid_step
-    # (not the instrumented one which expects attributes from the timed
-    # path).  Deep patches are deferred until precompile completes.
     _precompile_count = [0]
     _precompile_done  = [False]
 
@@ -177,9 +178,6 @@ def instrument_handler(handler):
                 _precompile_done[0] = True
                 if USE_CUDA:
                     torch.cuda.synchronize()
-                    # NOTE: do NOT call empty_cache() here — it can
-                    # invalidate the CUDA-graph memory pool recorded
-                    # during precompile by mode='reduce-overhead'.
                 _install_deep_patches()
                 print(f"\n  [profiler] Pre-compilation complete "
                       f"({_precompile_count[0]} steps).  "
@@ -203,81 +201,42 @@ def instrument_handler(handler):
             with T("1  SDF update (body kinematics + SDF eval)"):
                 self.update(t, iteration, dt=timestep)
 
-            # ── 2-3. mu + normals on 4 staggered grids ──────────
-            if getattr(ffs, '_compile_sdf', False):
-                # ── Batched + compiled path (all 4 grids in one fused pass) ──
-                from lilytorch.src.body import _mu_normals_batched_3d_compiled
-                with T("2  mu+normals (batched+compiled)"):
-                    mu0, mu1, nx, ny, nz = _mu_normals_batched_3d_compiled(
-                        comp.sdf_val_u, comp.sdf_val_v, comp.sdf_val_w,
-                        comp.sdf_val, comp.h, comp.eps,
-                    )
-                # Clone outputs — CUDA graph buffers are overwritten on replay
-                mu0, mu1 = mu0.clone(), mu1.clone()
-                nx, ny, nz = nx.clone(), ny.clone(), nz.clone()
+            # ── 2. mu + normals (production path) ────────────────
+            with T("2  mu+normals (recompute)"):
+                _orig_recompute(ffs)
 
-                # Unstack [u, v, w, cc] and store on solver
-                ffs.mu0_all_u, ffs.mu1_all_u = mu0[0], mu1[0]
-                ffs.m_m0_all_u = 1 - mu0[0]
-                ffs.normal_x_u, ffs.normal_y_u, ffs.normal_z_u = nx[0], ny[0], nz[0]
-
-                ffs.mu0_all_v, ffs.mu1_all_v = mu0[1], mu1[1]
-                ffs.m_m0_all_v = 1 - mu0[1]
-                ffs.normal_x_v, ffs.normal_y_v, ffs.normal_z_v = nx[1], ny[1], nz[1]
-
-                ffs.mu0_all_w, ffs.mu1_all_w = mu0[2], mu1[2]
-                ffs.m_m0_all_w = 1 - mu0[2]
-                ffs.normal_x_w, ffs.normal_y_w, ffs.normal_z_w = nx[2], ny[2], nz[2]
-
-                ffs.mu0_all, ffs.mu1_all = mu0[3], mu1[3]
-                ffs.m_m0_all = 1 - mu0[3]
-                ffs.normal_x, ffs.normal_y, ffs.normal_z = nx[3], ny[3], nz[3]
-            else:
-                # ── Eager path: 4 × individual calls ──
-                sdf_fields = [
-                    ("u",  comp.sdf_val_u),
-                    ("v",  comp.sdf_val_v),
-                    ("w",  comp.sdf_val_w),
-                    ("cc", comp.sdf_val),
-                ]
-                mu_attrs = [
-                    ("mu0_all_u", "mu1_all_u", "m_m0_all_u", "normal_x_u", "normal_y_u", "normal_z_u"),
-                    ("mu0_all_v", "mu1_all_v", "m_m0_all_v", "normal_x_v", "normal_y_v", "normal_z_v"),
-                    ("mu0_all_w", "mu1_all_w", "m_m0_all_w", "normal_x_w", "normal_y_w", "normal_z_w"),
-                    ("mu0_all",   "mu1_all",   "m_m0_all",   "normal_x",   "normal_y",   "normal_z"),
-                ]
-                for (grid_name, sdf_field), (a_mu0, a_mu1, a_mm0, a_nx, a_ny, a_nz) in zip(sdf_fields, mu_attrs):
-                    with T("2  mu_funcs (Heaviside)"):
-                        (mu0, mu1) = comp.mu_funcs(sdf_field)
-                    setattr(ffs, a_mu0, mu0)
-                    setattr(ffs, a_mu1, mu1)
-                    setattr(ffs, a_mm0, 1 - mu0)
-
-                    with T("3  compute_normals"):
-                        (nx, ny, nz) = comp.compute_normals(sdf_field)
-                    setattr(ffs, a_nx, nx)
-                    setattr(ffs, a_ny, ny)
-                    setattr(ffs, a_nz, nz)
-
-            # ── 4. Fluid step ────────────────────────────────────
-            with T("4  fluid_step (total PDE)"):
-                (u, v, w, p) = self.fluid_step(
+            # ── 3. Fluid step (production _fluid_step_3d) ────────
+            # Sub-step timers are installed as wrappers around the
+            # production methods (adv.solve, _bdim_meta_compiled,
+            # fs.project) — see _install_deep_patches().
+            with T("3  fluid_step (total PDE)"):
+                (u, v, w, p) = _orig_fluid_step(self,
                     ffs.u0, ffs.v0, ffs.w0, ffs.p0, timestep)
 
             (ffs.u0, ffs.v0, ffs.w0, ffs.p0) = (u, v, w, p)
 
-            # ── 5. Forces ────────────────────────────────────────
-            with T("5  forces_method2_3d"):
+            # ── 4. Forces ────────────────────────────────────────
+            with T("4  forces_method2_3d"):
                 _orig_forces(ffs, ffs.u0, ffs.v0, ffs.w0, ffs.p0, iteration)
 
-            # ── 6. Plotting / saving ─────────────────────────────
-            with T("6  plotting_and_saving"):
-                self.terminate = _orig_plot(
-                    ffs, ffs.u0, ffs.v0, ffs.p0, iteration, w_vel=ffs.w0)
+            # ── Free cached force-density tensors ────────────────
+            for _attr in ('xstress_tensor', 'ystress_tensor', 'zstress_tensor',
+                          'pforce_x', 'pforce_y', 'pforce_z'):
+                if hasattr(ffs, _attr):
+                    setattr(ffs, _attr, None)
 
-            # ── 7. Apply forces (FARMS ← GPU) ───────────────────
-            with T("7  apply_forces (FARMS)"):
+            # ── 5. Plotting / saving ─────────────────────────────
+            with T("5  plotting_and_saving"):
+                self.terminate = _orig_plot(
+                    ffs, ffs.u0, ffs.v0, ffs.p0, iteration, w_vel=ffs.w0,
+                    check_termination=False)
+
+            # ── 6. Apply forces (FARMS ← GPU) ───────────────────
+            with T("6  apply_forces (FARMS)"):
                 _orig_apply(self, task, physics)
+
+            # ── 7. Free BDIM intermediates ───────────────────────
+            ffs._release_bdim_fields()
 
         self.iteration += 1
 
@@ -290,121 +249,64 @@ def instrument_handler(handler):
     handler.step = types.MethodType(outer_step, handler)
 
     # ── Deep patches (deferred until after pre-compilation) ──────
-    # These replace handler.fluid_step, Poisson internals, and SDF
-    # with timed wrappers.  They MUST NOT be active during precompile
-    # because the timed wrappers depend on attributes (m_m0_all_u etc.)
-    # that only exist after the timed `detailed_step` body runs.
-
-    _orig_adv_solve = adv.solve
-    _orig_set_bcs   = type(adv).set_BCs
-    _orig_nd        = type(fs).normal_derivative
-    _orig_div       = type(fs).divergence
-    _orig_grad      = type(fs).gradient
-
-    poisson_fft = getattr(fs, "poisson_solverFFT", None)
-    poisson_mg  = getattr(fs, "poisson_solver", None)
-    if poisson_fft is not None:
-        _orig_poisson_fft = type(poisson_fft).solve
-    if poisson_mg is not None:
-        _orig_poisson_mg = type(poisson_mg).solve_multigrid
-        _orig_jacobi     = type(poisson_mg).Jacobi
-        _orig_vcycle     = type(poisson_mg)._vcycle
+    # These wrap production methods with timers.  Because we wrap
+    # rather than reimplement, the compiled CUDA-graph code path
+    # from precompile is preserved.* Important: the patches MUST
+    # NOT change the function signature or break compiled wrappers.
 
     _orig_update_3d = type(handler)._update_3d   # unbound method
 
+    # We'll need references to the actual bound/compiled methods
+    # for sub-step wrapping inside fluid_step.
+    _orig_adv_solve_bound = adv.solve   # possibly compiled
+    _orig_set_bcs = type(adv).set_BCs
+    _orig_bdim_meta = fs._bdim_meta_compiled  # compiled or eager
+    _orig_project = type(fs).project
+
+    poisson_mg  = getattr(fs, "poisson_solver", None)
+
     def _install_deep_patches():
-        """Install fluid_step / Poisson / SDF sub-timers after precompile."""
+        """Install timing wrappers around production methods after precompile.
 
-        def detailed_fluid_step(self_h, u, v, w, p, timestep):
-            ffs = self_h.fluid_solver
+        The wrappers call the ORIGINAL (possibly compiled) methods, so
+        CUDA-graph recordings from precompile are replayed correctly.
+        """
 
-            # ── advection + diffusion ────────────────────────────
-            with T("4a   advection+diffusion"):
-                (uprime, vprime, wprime) = _orig_adv_solve(u, v, w)
+        # ── 1b. Timed SDF update sub-step ────────────────────────
+        def timed_update_detailed(self_h, t, iteration, dt=1):
+            with T("1b   SDF eval (per-body × 4 grids)"):
+                _orig_update_3d(self_h, t, iteration, dt)
+        handler.update = types.MethodType(timed_update_detailed, handler)
 
-            with T("4b   set_BCs (post-advection)"):
-                _orig_set_bcs(adv, uprime, vprime, wprime)
+        # ── Wrap adv_diff_solver.solve ───────────────────────────
+        _saved_adv_solve = adv.solve  # the (compiled) bound method
 
-            # ── BDIM meta-equation ───────────────────────────────
-            with T("4c   BDIM meta-equation"):
-                uprime = (
-                    ffs.mu0_all_u * uprime
-                    + ffs.m_m0_all_u * comp.body_u
-                    + ffs.mu1_all_u * _orig_nd(ffs,
-                        uprime - comp.body_u,
-                        ffs.normal_x_u, ffs.normal_y_u, ffs.normal_z_u)
-                )
-                vprime = (
-                    ffs.mu0_all_v * vprime
-                    + ffs.m_m0_all_v * comp.body_v
-                    + ffs.mu1_all_v * _orig_nd(ffs,
-                        vprime - comp.body_v,
-                        ffs.normal_x_v, ffs.normal_y_v, ffs.normal_z_v)
-                )
-                wprime = (
-                    ffs.mu0_all_w * wprime
-                    + ffs.m_m0_all_w * comp.body_w
-                    + ffs.mu1_all_w * _orig_nd(ffs,
-                        wprime - comp.body_w,
-                        ffs.normal_x_w, ffs.normal_y_w, ffs.normal_z_w)
-                )
+        def timed_adv_solve(*a, **kw):
+            with T("3a   advection+diffusion"):
+                return _saved_adv_solve(*a, **kw)
+        adv.solve = timed_adv_solve
 
-            # ── divergence ───────────────────────────────────────
-            with T("4d   divergence"):
-                ffs.div = _orig_div(ffs, uprime, vprime, wprime)
+        # ── Wrap _bdim_meta_compiled ─────────────────────────────
+        _saved_bdim = fs._bdim_meta_compiled
 
-            # ── Poisson solve ────────────────────────────────────
-            if ffs.poisson_method == "fft":
-                coeff = timestep / self_h.rho_fluid
-                with T("4e   Poisson solve"):
-                    p = _orig_poisson_fft(poisson_fft, ffs.div / coeff)
-                with T("4f   gradient (pressure)"):
-                    (p_x, p_y, p_z) = _orig_grad(ffs, p)
-                with T("4g   projection (vel. correction)"):
-                    u = uprime - coeff * p_x
-                    v = vprime - coeff * p_y
-                    w = wprime - coeff * p_z
-            else:
-                with T("4e0  Poisson MG: rho coefficients"):
-                    rho_u = self_h.rho_fluid * ffs.mu0_all_u + self_h.rho_body * ffs.m_m0_all_u
-                    rho_v = self_h.rho_fluid * ffs.mu0_all_v + self_h.rho_body * ffs.m_m0_all_v
-                    rho_w = self_h.rho_fluid * ffs.mu0_all_w + self_h.rho_body * ffs.m_m0_all_w
-                    ch = timestep / rho_u
-                    cv = timestep / rho_v
-                    cw = timestep / rho_w
+        def timed_bdim(*a, **kw):
+            with T("3b   BDIM meta-equation"):
+                return _saved_bdim(*a, **kw)
+        fs._bdim_meta_compiled = timed_bdim
 
-                with T("4e   Poisson solve"):
-                    p, _ = _orig_poisson_mg(poisson_mg,
-                        ffs.div[1:-1, 1:-1, 1:-1],
-                        torch.zeros_like(p),
-                        (timestep / self_h.rho_body) * torch.ones_like(ffs.div),
-                        ch=ch[1:,  1:-1, 1:-1],
-                        cv=cv[1:-1, 1:,  1:-1],
-                        cw=cw[1:-1, 1:-1, 1:],
-                    )
+        # ── Wrap fs.project (contains Poisson + gradient + correction) ──
+        def timed_project(self_fs, *a, **kw):
+            with T("3c   projection (Poisson+gradient+correction)"):
+                return _orig_project(self_fs, *a, **kw)
+        fs.project = types.MethodType(timed_project, fs)
 
-                with T("4f   gradient (pressure)"):
-                    (p_x, p_y, p_z) = _orig_grad(ffs, p)
-
-                with T("4g   projection (vel. correction)"):
-                    u = uprime - ch * p_x
-                    v = vprime - cv * p_y
-                    w = wprime - cw * p_z
-
-            with T("4h   set_BCs (post-projection)"):
-                _orig_set_bcs(adv, u, v, w)
-
-            return (u, v, w, p)
-
-        handler.fluid_step = types.MethodType(detailed_fluid_step, handler)
-
-        # ── Instrument Poisson sub-components ────────────────────
+        # ── Instrument Poisson sub-components (large grids only) ─
         _instrument_poisson_internals = (args.Nx * args.Ny * args.Nz) >= 500_000
 
         if poisson_mg is not None and _instrument_poisson_internals:
             _orig_jacobi_fn = type(poisson_mg).Jacobi
             def timed_jacobi(self_p, *a, **kw):
-                with T("4e.i   Jacobi smoothing"):
+                with T("3c.i   Jacobi smoothing"):
                     return _orig_jacobi_fn(self_p, *a, **kw)
             poisson_mg.Jacobi = types.MethodType(timed_jacobi, poisson_mg)
 
@@ -415,21 +317,14 @@ def instrument_handler(handler):
                     return _orig_vcycle_fn(self_p, *a, **kw)
                 _in_vcycle[0] = True
                 try:
-                    with T("4e.ii  V-cycle (top-level)"):
+                    with T("3c.ii  V-cycle (top-level)"):
                         return _orig_vcycle_fn(self_p, *a, **kw)
                 finally:
                     _in_vcycle[0] = False
             poisson_mg._vcycle = types.MethodType(timed_vcycle, poisson_mg)
 
-        # ── Instrument SDF update sub-parts ──────────────────────
-        def timed_update_detailed(self_h, t, iteration, dt=1):
-            with T("1b   SDF eval (per-body × 4 grids)"):
-                _orig_update_3d(self_h, t, iteration, dt)
-
-        handler.update = types.MethodType(timed_update_detailed, handler)
-        fs.composite_body.update = handler.update
-
-        print(f"  [profiler] Deep patches installed (fluid_step, Poisson, SDF)",
+        print(f"  [profiler] Deep patches installed (SDF, advection, BDIM, "
+              f"project{', Poisson internals' if _instrument_poisson_internals and poisson_mg else ''})",
               flush=True)
 
     print(f"  [profiler] Instrumented handler (grid {fs.grid_shape}, "
@@ -481,7 +376,8 @@ cfg.n_iterations = args.precompile + args.n_steps + 1
 cfg.save_every   = args.save_every
 cfg.save_frames  = False
 cfg.headless     = True
-cfg.save_uv      = False
+cfg.save         = False
+cfg.save         = False
 
 # Override gen_simulation_config to strip non-fluid extensions
 _orig_gen_sim_config = cfg.gen_simulation_config
@@ -672,10 +568,10 @@ plt.rcParams.update({
 # Maps category display name → list of timer-label prefixes
 CATEGORIES = {
     "Body update (SDF)":           ["1b"],
-    "Forces\ncomputation":         ["5 "],
-    "Projection\n(pressure)":      ["4d", "4e ", "4f", "4g", "4h"],
-    "Convection\n& diffusion":     ["4a", "4b"],
-    "Other":                       ["1a", "7 ", "2 ", "3 ", "4c", "6 "],
+    "Forces\ncomputation":         ["4 "],
+    "Projection\n(pressure)":      ["3c"],
+    "Convection\n& diffusion":     ["3a"],
+    "Other":                       ["1  ", "2 ", "3b", "5 ", "6 "],
 }
 
 CAT_COLOURS = {
