@@ -1,0 +1,177 @@
+spawn:
+  loader: 0
+  mode: !!python/object/apply:farms_core.model.options.SpawnMode
+  - transverse
+  pose:
+  - 0
+  - 0
+  - 0.05
+  - 0
+  - 0
+  - 0
+  velocity:
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+  extras: {}
+sdf: ../../sdfs/submarine_v1/sdf/submarine.sdf
+morphology:
+  links:
+  - name: link_body_0
+    collisions: true
+    friction:
+    - 0.2
+    - 0
+    - 0
+    extras: {}
+    fluid_interaction: true
+    density: 1000.0
+  - name: link_body_1
+    collisions: true
+    friction:
+    - 0.2
+    - 0
+    - 0
+    extras: {}
+    fluid_interaction: true
+    density: 1000.0
+  - name: link_body_2
+    collisions: true
+    friction:
+    - 0.2
+    - 0
+    - 0
+    extras: {}
+    fluid_interaction: true
+    density: 1000.0
+  - name: link_body_3
+    collisions: true
+    friction:
+    - 0.2
+    - 0
+    - 0
+    extras: {}
+    fluid_interaction: true
+    density: 1000.0
+  - name: link_body_4
+    collisions: true
+    friction:
+    - 0.2
+    - 0
+    - 0
+    extras: {}
+    fluid_interaction: true
+    density: 1000.0
+  joints:
+  - name: joint_body_0
+    initial:
+    - 0
+    - 0
+    limits:
+    - - -.inf
+      - .inf
+    - - -.inf
+      - .inf
+    stiffness: 0
+    springref: 0
+    damping: 0
+    extras: {}
+  - name: joint_body_1
+    initial:
+    - 0
+    - 0
+    limits:
+    - - -.inf
+      - .inf
+    - - -.inf
+      - .inf
+    stiffness: 0
+    springref: 0
+    damping: 0
+    extras: {}
+  - name: joint_body_2
+    initial:
+    - 0
+    - 0
+    limits:
+    - - -.inf
+      - .inf
+    - - -.inf
+      - .inf
+    stiffness: 0
+    springref: 0
+    damping: 0
+    extras: {}
+  - name: joint_body_3
+    initial:
+    - 0
+    - 0
+    limits:
+    - - -.inf
+      - .inf
+    - - -.inf
+      - .inf
+    stiffness: 0
+    springref: 0
+    damping: 0
+    extras: {}
+  self_collisions: []
+control:
+  sensors:
+    links: &id001
+    - link_body_0
+    - link_body_1
+    - link_body_2
+    - link_body_3
+    - link_body_4
+    joints:
+    - joint_body_0
+    - joint_body_1
+    - joint_body_2
+    - joint_body_3
+    contacts: []
+    xfrc: *id001
+    muscles: []
+    adhesions: []
+    visuals: []
+  motors:
+  - joint_name: joint_body_0
+    control_types:
+    - position
+    limits_torque:
+    - -.inf
+    - .inf
+    gains: &id002
+    - 0.001
+    - 2.0e-05
+    - 0
+  - joint_name: joint_body_1
+    control_types:
+    - position
+    limits_torque:
+    - -.inf
+    - .inf
+    gains: *id002
+  - joint_name: joint_body_2
+    control_types:
+    - position
+    limits_torque:
+    - -.inf
+    - .inf
+    gains: *id002
+  - joint_name: joint_body_3
+    control_types:
+    - position
+    limits_torque:
+    - -.inf
+    - .inf
+    gains: *id002
+extensions:
+- loader: lilytorch.farms_examples.submarinesim.pd_controller.PositionController
+  config:
+    freq: 1.0
+    twl: 8
+    amp: 20

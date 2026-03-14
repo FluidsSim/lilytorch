@@ -1,0 +1,343 @@
+<?xml version="1.0" ?>
+<sdf version="1.6">
+  <world name="world">
+    <model name="submarine">
+      <pose>0 0 0 0 0 0</pose>
+      <!--
+        Submarine model: 5 cylindrical body segments, 4 revolute joints.
+        Total length: 0.1 m, radius: 0.01 m.
+
+        Modeling approach (undulatory / BCF locomotion):
+          The submarine body is divided into 5 segments connected by revolute
+          joints whose axes are aligned with the world z-axis (yaw). A traveling
+          sinusoidal wave of lateral displacement propagates from head to tail,
+          generating thrust via reactive hydrodynamic forces (carangiform-like
+          propulsion). This is the same mechanism used by many elongated fish
+          and is well-suited to the FARMS joint-control architecture.
+
+        Reynolds number (tractable):
+          Re = v * L / nu
+             = 0.01 [m/s] * 0.1 [m] / 1e-6 [m2/s]
+             = 1000
+          At Re ~ 1000 the flow is laminar/transitional, well within the range
+          tractable by viscous solvers (LBM, BDIM, Navier-Stokes FVM).
+
+        Per-segment physical parameters (cylinder r=0.01 m, L=0.02 m):
+          V   = pi * r^2 * L = 6.2832e-6 m^3
+          rho = 1000 kg/m^3  (neutral buoyancy)
+          m   = rho * V      = 6.2832e-3 kg
+          Ixx = m*r^2/2             = 3.14159e-7 kg*m^2  (roll, along x)
+          Iyy = m*(3r^2+L^2)/12     = 3.6652e-7  kg*m^2  (pitch)
+          Izz = m*(3r^2+L^2)/12     = 3.6652e-7  kg*m^2  (yaw)
+      -->
+
+      <!-- ============================================================
+           LINKS
+           Body extends along the +x axis. Each cylindrical segment
+           occupies [x_origin, x_origin + 0.02 m].
+           In SDF a cylinder geometry is z-aligned by default; a 90-degree
+           pitch rotation (0 pi/2 0) orients it along x.
+      ============================================================ -->
+
+      <link name="link_body_0">
+        <pose>0.00 0.0 0.0 0 0 0</pose>
+        <inertial>
+          <!-- CoM at geometric centre of segment -->
+          <pose>0.01 0.0 0.0 0.0 0.0 0.0</pose>
+          <mass>6.2832e-3</mass>
+          <inertia>
+            <ixx>3.14159e-7</ixx>
+            <ixy>0</ixy>
+            <ixz>0</ixz>
+            <iyy>3.6652e-7</iyy>
+            <iyz>0</iyz>
+            <izz>3.6652e-7</izz>
+          </inertia>
+        </inertial>
+        <collision name="link_body_0_collision">
+          <!-- cylinder centred at (0.01, 0, 0), axis along x -->
+          <pose>0.01 0.0 0.0 0 1.5707963 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.01</radius>
+              <length>0.02</length>
+            </cylinder>
+          </geometry>
+        </collision>
+        <visual name="link_body_0_visual">
+          <pose>0.01 0.0 0.0 0 1.5707963 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.01</radius>
+              <length>0.02</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <ambient>0.1 0.3 0.7 1.0</ambient>
+            <diffuse>0.1 0.3 0.7 1.0</diffuse>
+            <specular>0.5 0.5 0.8 1.0</specular>
+            <emissive>0.0 0.0 0.0 1.0</emissive>
+          </material>
+        </visual>
+        <!-- Hemispherical nose cap at x=0 -->
+        <visual name="link_body_0_nose_visual">
+          <pose>0.0 0.0 0.0 0 0 0</pose>
+          <geometry>
+            <sphere>
+              <radius>0.01</radius>
+            </sphere>
+          </geometry>
+          <material>
+            <ambient>0.1 0.3 0.7 1.0</ambient>
+            <diffuse>0.1 0.3 0.7 1.0</diffuse>
+            <specular>0.5 0.5 0.8 1.0</specular>
+            <emissive>0.0 0.0 0.0 1.0</emissive>
+          </material>
+        </visual>
+      </link>
+
+      <link name="link_body_1">
+        <pose>0.02 0.0 0.0 0 0 0</pose>
+        <inertial>
+          <pose>0.01 0.0 0.0 0.0 0.0 0.0</pose>
+          <mass>6.2832e-3</mass>
+          <inertia>
+            <ixx>3.14159e-7</ixx>
+            <ixy>0</ixy>
+            <ixz>0</ixz>
+            <iyy>3.6652e-7</iyy>
+            <iyz>0</iyz>
+            <izz>3.6652e-7</izz>
+          </inertia>
+        </inertial>
+        <collision name="link_body_1_collision">
+          <pose>0.01 0.0 0.0 0 1.5707963 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.01</radius>
+              <length>0.02</length>
+            </cylinder>
+          </geometry>
+        </collision>
+        <visual name="link_body_1_visual">
+          <pose>0.01 0.0 0.0 0 1.5707963 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.01</radius>
+              <length>0.02</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <ambient>0.1 0.3 0.7 1.0</ambient>
+            <diffuse>0.1 0.3 0.7 1.0</diffuse>
+            <specular>0.5 0.5 0.8 1.0</specular>
+            <emissive>0.0 0.0 0.0 1.0</emissive>
+          </material>
+        </visual>
+      </link>
+
+      <link name="link_body_2">
+        <pose>0.04 0.0 0.0 0 0 0</pose>
+        <inertial>
+          <pose>0.01 0.0 0.0 0.0 0.0 0.0</pose>
+          <mass>6.2832e-3</mass>
+          <inertia>
+            <ixx>3.14159e-7</ixx>
+            <ixy>0</ixy>
+            <ixz>0</ixz>
+            <iyy>3.6652e-7</iyy>
+            <iyz>0</iyz>
+            <izz>3.6652e-7</izz>
+          </inertia>
+        </inertial>
+        <collision name="link_body_2_collision">
+          <pose>0.01 0.0 0.0 0 1.5707963 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.01</radius>
+              <length>0.02</length>
+            </cylinder>
+          </geometry>
+        </collision>
+        <visual name="link_body_2_visual">
+          <pose>0.01 0.0 0.0 0 1.5707963 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.01</radius>
+              <length>0.02</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <ambient>0.1 0.3 0.7 1.0</ambient>
+            <diffuse>0.1 0.3 0.7 1.0</diffuse>
+            <specular>0.5 0.5 0.8 1.0</specular>
+            <emissive>0.0 0.0 0.0 1.0</emissive>
+          </material>
+        </visual>
+      </link>
+
+      <link name="link_body_3">
+        <pose>0.06 0.0 0.0 0 0 0</pose>
+        <inertial>
+          <pose>0.01 0.0 0.0 0.0 0.0 0.0</pose>
+          <mass>6.2832e-3</mass>
+          <inertia>
+            <ixx>3.14159e-7</ixx>
+            <ixy>0</ixy>
+            <ixz>0</ixz>
+            <iyy>3.6652e-7</iyy>
+            <iyz>0</iyz>
+            <izz>3.6652e-7</izz>
+          </inertia>
+        </inertial>
+        <collision name="link_body_3_collision">
+          <pose>0.01 0.0 0.0 0 1.5707963 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.01</radius>
+              <length>0.02</length>
+            </cylinder>
+          </geometry>
+        </collision>
+        <visual name="link_body_3_visual">
+          <pose>0.01 0.0 0.0 0 1.5707963 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.01</radius>
+              <length>0.02</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <ambient>0.1 0.3 0.7 1.0</ambient>
+            <diffuse>0.1 0.3 0.7 1.0</diffuse>
+            <specular>0.5 0.5 0.8 1.0</specular>
+            <emissive>0.0 0.0 0.0 1.0</emissive>
+          </material>
+        </visual>
+      </link>
+
+      <link name="link_body_4">
+        <pose>0.08 0.0 0.0 0 0 0</pose>
+        <inertial>
+          <pose>0.01 0.0 0.0 0.0 0.0 0.0</pose>
+          <mass>6.2832e-3</mass>
+          <inertia>
+            <ixx>3.14159e-7</ixx>
+            <ixy>0</ixy>
+            <ixz>0</ixz>
+            <iyy>3.6652e-7</iyy>
+            <iyz>0</iyz>
+            <izz>3.6652e-7</izz>
+          </inertia>
+        </inertial>
+        <collision name="link_body_4_collision">
+          <pose>0.01 0.0 0.0 0 1.5707963 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.01</radius>
+              <length>0.02</length>
+            </cylinder>
+          </geometry>
+        </collision>
+        <visual name="link_body_4_visual">
+          <pose>0.01 0.0 0.0 0 1.5707963 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.01</radius>
+              <length>0.02</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <ambient>0.1 0.3 0.7 1.0</ambient>
+            <diffuse>0.1 0.3 0.7 1.0</diffuse>
+            <specular>0.5 0.5 0.8 1.0</specular>
+            <emissive>0.0 0.0 0.0 1.0</emissive>
+          </material>
+        </visual>
+        <!-- Hemispherical tail cap at end of last segment (x=0.02 in link frame) -->
+        <visual name="link_body_4_tail_visual">
+          <pose>0.02 0.0 0.0 0 0 0</pose>
+          <geometry>
+            <sphere>
+              <radius>0.01</radius>
+            </sphere>
+          </geometry>
+          <material>
+            <ambient>0.1 0.3 0.7 1.0</ambient>
+            <diffuse>0.1 0.3 0.7 1.0</diffuse>
+            <specular>0.5 0.5 0.8 1.0</specular>
+            <emissive>0.0 0.0 0.0 1.0</emissive>
+          </material>
+        </visual>
+      </link>
+
+      <!-- ============================================================
+           JOINTS
+           Revolute joints about the z-axis (yaw). The joint pose is
+           expressed in the child link frame; placing it at (0,0,0)
+           sets the pivot at the child link's origin (= connection point).
+      ============================================================ -->
+
+      <joint name="joint_body_0" type="revolute">
+        <parent>link_body_0</parent>
+        <child>link_body_1</child>
+        <pose>0 0 0 0 0 0</pose>
+        <axis>
+          <xyz>0 0 1</xyz>
+          <limit>
+            <lower>-1.5707963267948966</lower>
+            <upper>1.5707963267948966</upper>
+            <effort>100</effort>
+            <velocity>100</velocity>
+          </limit>
+        </axis>
+      </joint>
+
+      <joint name="joint_body_1" type="revolute">
+        <parent>link_body_1</parent>
+        <child>link_body_2</child>
+        <pose>0 0 0 0 0 0</pose>
+        <axis>
+          <xyz>0 0 1</xyz>
+          <limit>
+            <lower>-1.5707963267948966</lower>
+            <upper>1.5707963267948966</upper>
+            <effort>100</effort>
+            <velocity>100</velocity>
+          </limit>
+        </axis>
+      </joint>
+
+      <joint name="joint_body_2" type="revolute">
+        <parent>link_body_2</parent>
+        <child>link_body_3</child>
+        <pose>0 0 0 0 0 0</pose>
+        <axis>
+          <xyz>0 0 1</xyz>
+          <limit>
+            <lower>-1.5707963267948966</lower>
+            <upper>1.5707963267948966</upper>
+            <effort>100</effort>
+            <velocity>100</velocity>
+          </limit>
+        </axis>
+      </joint>
+
+      <joint name="joint_body_3" type="revolute">
+        <parent>link_body_3</parent>
+        <child>link_body_4</child>
+        <pose>0 0 0 0 0 0</pose>
+        <axis>
+          <xyz>0 0 1</xyz>
+          <limit>
+            <lower>-1.5707963267948966</lower>
+            <upper>1.5707963267948966</upper>
+            <effort>100</effort>
+            <velocity>100</velocity>
+          </limit>
+        </axis>
+      </joint>
+
+    </model>
+  </world>
+</sdf>
