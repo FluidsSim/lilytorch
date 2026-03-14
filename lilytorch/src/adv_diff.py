@@ -1,6 +1,9 @@
 
 import torch
-from pytorch_interpolation import RegularGridInterpolator
+try:
+    from pytorch_interpolation import RegularGridInterpolator
+except ImportError:
+    RegularGridInterpolator = None
 
 class AdvDiffSolver:
     """
@@ -18,13 +21,25 @@ class AdvDiffSolver:
                  BC_type_v=["D","D","D","D"], # w,o,s,n
                  BC_values_v=[0,0,0,0],
                  method="implicit",
+                 sgs_model=None,
+                 Cs=0.17,
+                 Cv=0.1,
                  ):
         """
-        x        : x-domain
-        y        : y-domain
-        dt       : time step
-        nu       : diffusion coefficient
-        type     : solver type: implicit, explicit, quick, abdquickest, adam_bashforth
+        x          : x-domain
+        y          : y-domain
+        dt         : time step
+        nu         : molecular diffusion coefficient (kinematic viscosity)
+        method     : solver type: implicit, explicit, quick, abdquickest, adam_bashforth
+        sgs_model  : sub-grid scale / stabilisation model added on top of nu for TVD schemes:
+                       None               – no extra diffusion (default)
+                       "smagorinsky"      – classic Smagorinsky SGS model (ν_t = (Cs·Δ)²·|S̄|),
+                                           analogous to the Smagorinsky LES closure used in OpenFOAM
+                       "artificial_diffusion" – SUPG-inspired local artificial diffusion
+                                           (ν_art = Cv·h·|u|), analogous to the stabilisation
+                                           term used in FEniCS/DOLFIN advection problems
+        Cs         : Smagorinsky constant (default 0.17, typical range 0.1–0.2)
+        Cv         : artificial-diffusion coefficient (default 0.1, typical range 0.05–0.5)
         """
 
         self.device=device
@@ -40,6 +55,13 @@ class AdvDiffSolver:
         self.dtdx2 = self.dtdx/dx
         self.dtdy2 = self.dtdy/dy
         self.nu = nu
+
+        # SGS / stabilisation model parameters
+        self.sgs_model = sgs_model
+        self.Cs = Cs                            # Smagorinsky constant
+        self.Cv = Cv                            # artificial-diffusion coefficient
+        # LES filter width Δ = √(dx·dy)
+        self.delta_sgs = float((dx * dy) ** 0.5)
 
         self.x = x
         self.y = y
@@ -59,6 +81,11 @@ class AdvDiffSolver:
         self.BC_values_v = BC_values_v
 
         if method == "implicit":
+            if RegularGridInterpolator is None:
+                raise ImportError(
+                    "The 'pytorch_interpolation' package is required for method='implicit'. "
+                    "Install it from https://github.com/ferrarioa5/pytorch_interpolation"
+                )
             self.solve = self.solve_implicit
             # dummy initialization for the implicit solver
             x_staggered = x - dx/2
@@ -87,7 +114,7 @@ class AdvDiffSolver:
         else:
             raise("Error: the convection solver method {} does not exist".format(method))
 
-        print("Using the {} method for the adv-diff equation".format(method))
+        print("Using the {} method for the adv-diff equation (sgs_model={})".format(method, sgs_model))
 
     def clf(self, u, v):
         vel_max = torch.max(
@@ -95,6 +122,77 @@ class AdvDiffSolver:
             torch.max(torch.abs(v))
             )
         self.dt = self.dx/(vel_max*+3*self.nu)
+
+    # ------------------------------------------------------------------
+    # Sub-grid scale / stabilisation models
+    # ------------------------------------------------------------------
+
+    def smagorinsky_viscosity(self, u, v):
+        """
+        Classic Smagorinsky (1963) SGS eddy-viscosity model, analogous to the
+        Smagorinsky LES closure used in OpenFOAM (``SmagorinskyModel``).
+
+        Returns a 2-D tensor ν_t[1:-1, 1:-1] (inner cells only) of shape
+        (nx-2, ny-2) with the sub-grid turbulent viscosity:
+
+            ν_t = (Cs · Δ)² · |S̄|
+
+        where
+            Δ = √(dx·dy)           LES filter width
+            |S̄| = √(2·Sij·Sij)    magnitude of the resolved strain-rate tensor
+            S11 = ∂u/∂x,  S22 = ∂v/∂y,  S12 = ½(∂u/∂y + ∂v/∂x)
+
+        Velocity gradients are evaluated by 2nd-order centred differences on
+        the interior points.
+        """
+        idx = 1.0 / (2.0 * self.dx)
+        idy = 1.0 / (2.0 * self.dy)
+
+        # Strain-rate components at interior cells (indices 1:-1, 1:-1)
+        S11 = (u[2:, 1:-1] - u[:-2, 1:-1]) * idx        # ∂u/∂x
+        S22 = (v[1:-1, 2:] - v[1:-1, :-2]) * idy        # ∂v/∂y
+        S12 = 0.5 * (
+            (u[1:-1, 2:] - u[1:-1, :-2]) * idy +        # ∂u/∂y
+            (v[2:, 1:-1] - v[:-2, 1:-1]) * idx          # ∂v/∂x
+        )
+
+        S_mag = torch.sqrt(torch.clamp(2.0 * (S11**2 + S22**2 + 2.0 * S12**2), min=0.0))
+        nu_t = (self.Cs * self.delta_sgs) ** 2 * S_mag
+        return nu_t
+
+    def artificial_diffusion_viscosity(self, u, v):
+        """
+        SUPG-inspired local artificial diffusion, analogous to the streamline
+        upwind stabilisation used in FEniCS/DOLFIN advection problems.
+
+        Returns a 2-D tensor ν_art[1:-1, 1:-1] (inner cells only) of shape
+        (nx-2, ny-2):
+
+            ν_art = Cv · h · |u_local|
+
+        where
+            h = √(dx·dy)             mesh size
+            |u_local| = √(u² + v²)  local velocity magnitude
+
+        This adds diffusion proportional to the local Courant velocity and the
+        grid spacing, damping under-resolved high-frequency oscillations without
+        over-diffusing smooth regions.
+        """
+        u_mag = torch.sqrt(u[1:-1, 1:-1]**2 + v[1:-1, 1:-1]**2)
+        nu_art = self.Cv * self.delta_sgs * u_mag
+        return nu_art
+
+    def compute_nu_sgs(self, u, v):
+        """
+        Return the effective additional diffusivity on interior cells (nx-2, ny-2)
+        based on ``self.sgs_model``.  Returns a scalar zero when no model is set.
+        """
+        if self.sgs_model == "smagorinsky":
+            return self.smagorinsky_viscosity(u, v)
+        elif self.sgs_model == "artificial_diffusion":
+            return self.artificial_diffusion_viscosity(u, v)
+        else:
+            return 0.0
 
     def solve_explicit(self, u, v, iteration=0):
         """
@@ -164,6 +262,8 @@ class AdvDiffSolver:
 
     def solve_FLUXLMT(self, u, v, iteration=0):
 
+        nu_eff = self.nu + self.compute_nu_sgs(u, v)
+
         uw = 0.5*(u[:-2,1:-1]+u[1:-1,1:-1])
         ue = 0.5*(u[2:,1:-1]+u[1:-1,1:-1])
         vs = 0.5*(v[1:-1,:-2]+v[1:-1,1:-1])
@@ -173,16 +273,18 @@ class AdvDiffSolver:
                         u[1:-1,1:-1]+
                         self.dtdx*(uw*self.phi_wLMT(uw,u)-ue*self.phi_eLMT(ue,u))+
                         self.dtdy*(vs*self.phi_sLMT(vs,u)-vn*self.phi_nLMT(vn,u))+
-                        self.nu*self.dtdx2*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
-                        self.nu*self.dtdx2*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
+                        nu_eff*self.dtdx2*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
+                        nu_eff*self.dtdx2*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
                         )
+
+        nu_eff = self.nu + self.compute_nu_sgs(u, v)
 
         v[1:-1,1:-1] = (
                         v[1:-1,1:-1]+
                         self.dtdx*(uw*self.phi_wLMT(uw,v)-ue*self.phi_eLMT(ue,v))+
                         self.dtdy*(vs*self.phi_sLMT(vs,v)-vn*self.phi_nLMT(vn,v))+
-                        self.nu*self.dtdx2*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1]) +
-                        self.nu*self.dtdx2*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])
+                        nu_eff*self.dtdx2*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1]) +
+                        nu_eff*self.dtdx2*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])
                         )
 
         return (u,v)
@@ -283,6 +385,10 @@ class AdvDiffSolver:
         u_new=torch.zeros_like(u)
         v_new=torch.zeros_like(v)
 
+        # Compute effective viscosity once from the current velocity field so
+        # that nu_eff is consistent for both u and v momentum equations.
+        nu_eff = self.nu + self.compute_nu_sgs(u, v)
+
         uw = 0.5*(u[:-2,1:-1]+u[1:-1,1:-1])
         ue = 0.5*(u[2:,1:-1]+u[1:-1,1:-1])
         vs = 0.5*(v[:-2,1:-1]+v[1:-1,1:-1])
@@ -291,8 +397,8 @@ class AdvDiffSolver:
                         u[1:-1,1:-1]+
                         self.dtdx*(uw*self.phi_w(uw,u)-ue*self.phi_e(ue,u))+
                         self.dtdy*(vs*self.phi_s(vs,u)-vn*self.phi_n(vn,u))+
-                        self.nu*self.dtdx2*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
-                        self.nu*self.dtdx2*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
+                        nu_eff*self.dtdx2*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
+                        nu_eff*self.dtdx2*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
                         )
 
         # uo = 0.5*(x.a[i][j-1]+x.a[i][j]);
@@ -307,8 +413,8 @@ class AdvDiffSolver:
                         v[1:-1,1:-1]+
                         self.dtdx*(uw*self.phi_w(uw,v)-ue*self.phi_e(ue,v))+
                         self.dtdy*(vs*self.phi_s(vs,v)-vn*self.phi_n(vn,v))+
-                        self.nu*self.dtdx2*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1]) +
-                        self.nu*self.dtdx2*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])
+                        nu_eff*self.dtdx2*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1]) +
+                        nu_eff*self.dtdx2*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])
                         )
 
         return (u_new,v_new)
