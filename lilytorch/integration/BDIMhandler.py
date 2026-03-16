@@ -749,7 +749,7 @@ class BDIMhandler:
         _bdim = fs._bdim_meta_compiled
         _h = fs.h
 
-        nu_t = fs._compute_smagorinsky_nu_t(u, v) if fs.use_smagorinsky else None
+        nu_t = fs._compute_nu_t(u, v)
         (uprime, vprime) = fs.adv_diff_solver.solve(u, v, nu_t=nu_t)
         # Clone CUDA-graph outputs so they can safely be passed to
         # another compiled kernel (_bdim) and modified by set_BCs.
@@ -778,6 +778,10 @@ class BDIMhandler:
             ch, cv = self._compute_variable_density_coefficients(timestep)
             (u, v, p) = fs.project(uprime, vprime, p, ch=ch, cv=cv)
 
+        # Sponge damping (2-D)
+        if fs.use_sponge:
+            (u, v) = fs.apply_sponge_damping(u, v)
+
         fs.adv_diff_solver.set_BCs(u, v)
         return (u, v, p)
 
@@ -787,7 +791,7 @@ class BDIMhandler:
         _bdim = fs._bdim_meta_compiled
         _h = fs.h
 
-        nu_t = fs._compute_smagorinsky_nu_t(u, v, w) if fs.use_smagorinsky else None
+        nu_t = fs._compute_nu_t(u, v, w)
         (uprime, vprime, wprime) = fs.adv_diff_solver.solve(u, v, w, nu_t=nu_t)
         # Clone CUDA-graph outputs so they can safely be passed to
         # another compiled kernel (_bdim) and modified by set_BCs.
@@ -847,6 +851,10 @@ class BDIMhandler:
 
             (u, v, w, p) = fs.project(uprime, vprime, p,
                                       w_vel=wprime, ch=ch, cv=cv, cw=cw)
+
+        # Sponge damping: damp velocity near domain boundaries
+        if fs.use_sponge:
+            (u, v, w) = fs.apply_sponge_damping(u, v, w)
 
         fs.adv_diff_solver.set_BCs(u, v, w)
         return (u, v, w, p)

@@ -46,6 +46,18 @@ class SimConfig(BaseSimConfig):
         self.zmin = -0.15
         self.zmax = 0.15
 
+        # ── 3-D grid ─────────────────────────────────────────────────
+        self.Nx   = 512
+        self.Ny   = 256
+        self.Nz   = 64
+        self.xmin = -0.9
+        self.xmax = 1.5
+        self.ymin = -0.6
+        self.ymax = 0.6
+        self.zmin = -0.15
+        self.zmax = 0.15
+
+
         # ── Physics ───────────────────────────────────────────────────
         self.rho_body          = 1000.0
         self.timestep          = 0.001

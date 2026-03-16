@@ -207,6 +207,47 @@ def smagorinsky_viscosity(vel, h, ndim, cs=0.1):
     return (cs * h) ** 2 * S_mag
 
 
+def carreau_viscosity(vel, h, ndim, nu_0, nu_inf, lam, n,
+                     tau_y=0.0, rho=1000.0, nu_max=None):
+    """Compute Carreau (or Herschel-Bulkley–Carreau) viscosity field.
+
+    Without yield stress (tau_y = 0):
+        ν(γ̇) = ν_∞ + (ν_0 − ν_∞) · [1 + (λ·γ̇)²]^((n−1)/2)
+
+    With yield stress (tau_y > 0):
+        ν(γ̇) = τ_y / (ρ · max(γ̇, γ̇_min)) + ν_∞ + (ν_0 − ν_∞) · [1 + (λ·γ̇)²]^((n−1)/2)
+
+    The total viscosity is clamped to ``nu_max`` to guarantee diffusion CFL
+    stability.  When ``nu_max`` is None no clamping is applied (pure Carreau
+    without yield stress is bounded by ν_0 anyway).
+
+    Parameters
+    ----------
+    vel    : tuple of tensors — velocity components (u, v) or (u, v, w).
+    h      : float — uniform grid spacing.
+    ndim   : int — 2 or 3.
+    nu_0   : float — zero-shear-rate kinematic viscosity [m²/s].
+    nu_inf : float — infinite-shear-rate kinematic viscosity [m²/s].
+    lam    : float — relaxation time [s].
+    n      : float — power-law index (< 1 for shear-thinning).
+    tau_y  : float — yield stress [Pa]. Default 0 (pure Carreau).
+    rho    : float — fluid density [kg/m³]. Only used when tau_y > 0.
+    nu_max : float or None — hard upper bound on ν for CFL stability.
+
+    Returns
+    -------
+    ν tensor (spatially varying kinematic viscosity) with same shape as vel[0].
+    """
+    S_mag = strain_rate_magnitude(vel, h, ndim)
+    nu = nu_inf + (nu_0 - nu_inf) * (1.0 + (lam * S_mag) ** 2) ** ((n - 1.0) / 2.0)
+    if tau_y > 0.0:
+        gamma_dot_reg = torch.clamp(S_mag, min=1e-6)
+        nu = nu + tau_y / (rho * gamma_dot_reg)
+    if nu_max is not None:
+        nu = torch.clamp(nu, max=nu_max)
+    return nu
+
+
 def cross_product_2d(ax, ay, bx, by):
     """Element-wise 2-D cross product (scalar result)."""
     return ax * by - ay * bx

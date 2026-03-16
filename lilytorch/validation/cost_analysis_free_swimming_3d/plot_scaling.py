@@ -57,25 +57,34 @@ plt.rcParams.update({
 # ── Paper categories (must match run_cost_analysis.py prefixes) ──────
 CATEGORIES = {
     "Body update (SDF)":       ["1b"],
-    "Forces":                  ["4 "],
+    "mu + normals":            ["2 "],
+    "Smagorinsky νt":          ["3a.0"],
+    "Convection & diffusion":  ["3a  "],
+    "BDIM meta-equation":      ["3b"],
     "Projection (pressure)":   ["3c"],
-    "Convection & diffusion":  ["3a"],
-    "Other":                   ["1  ", "2 ", "3b", "5 ", "6 "],
+    "Forces":                  ["4 "],
+    "Other":                   ["5 ", "6 "],
 }
 
 CAT_COLOURS = {
     "Body update (SDF)":       "#26a69a",
-    "Forces":                  "#ffa726",
-    "Projection (pressure)":   "#ef5350",
+    "mu + normals":            "#66bb6a",
+    "Smagorinsky νt":          "#ab47bc",
     "Convection & diffusion":  "#42a5f5",
+    "BDIM meta-equation":      "#29b6f6",
+    "Projection (pressure)":   "#ef5350",
+    "Forces":                  "#ffa726",
     "Other":                   "#90a4ae",
 }
 
 HATCHES = {
     "Body update (SDF)":       "",
-    "Forces":                  "xx",
-    "Projection (pressure)":   "",
+    "mu + normals":            "",
+    "Smagorinsky νt":          "//",
     "Convection & diffusion":  "",
+    "BDIM meta-equation":      "",
+    "Projection (pressure)":   "",
+    "Forces":                  "xx",
     "Other":                   "..",
 }
 

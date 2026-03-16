@@ -13,3 +13,8 @@ python video_postprocess.py /data/andreaferrario/ns_data/1guilla_dye_experiment/
 
 
 python pipeline.py water_dye_videos/exp_water.MP4 water_dye_videos/sim_water.mp4
+
+
+# ====== slime in the dark video (Carboxymethylcellulose & Acid Fluoresceine) ====
+
+python plot_particles_robot.py --sim_dir /data/andreaferrario/ns_data/2026-03-16T09:42:21.508718 --mode 3d_topview --particle_color "#CCFF00" --bg_color "#1A40E9" --body_color "#000000"

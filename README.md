@@ -54,6 +54,91 @@ YAML Config
 - **Standalone mode**: The `FluidSolver` runs the full Navier-Stokes loop (advection-diffusion → pressure Poisson → velocity correction → body update → force computation) independently.
 - **Coupled mode**: `FluidExtension` hooks into the FARMS/MuJoCo simulation loop via the `BDIMhandler`, which bridges body kinematics from FARMS sensors to the fluid solver and applies computed hydrodynamic forces back to MuJoCo bodies.
 
+### Variable-Viscosity Models
+
+Lilytorch supports spatially-varying viscosity for non-Newtonian fluids via two models, configured as solver-level dictionaries. When active, the constant `nu` is overridden by a field that is recomputed every timestep from the local strain rate.
+
+#### Carreau Model
+
+Models shear-thinning fluids (e.g. CMC, polymer solutions) whose viscosity decreases with increasing shear rate:
+
+$$\nu(\dot\gamma) = \nu_\infty + (\nu_0 - \nu_\infty)\left[1 + (\lambda\dot\gamma)^2\right]^{(n-1)/2}$$
+
+| Parameter | Key | Description |
+|---|---|---|
+| `nu_0` | Zero-shear kinematic viscosity [m²/s] | Viscosity at rest (low shear rate) |
+| `nu_inf` | Infinite-shear kinematic viscosity [m²/s] | Viscosity at very high shear rate |
+| `lam` | Relaxation time [s] | Controls the shear rate at which thinning begins (γ̇_c ≈ 1/λ) |
+| `n` | Power-law index [-] | Controls how steeply viscosity drops (n=1 → Newtonian, n→0 → strong thinning) |
+
+**Usage** (in config):
+```python
+self.carreau = {
+    "nu_0"  : 450.0e-6,
+    "nu_inf": 10.0e-6,
+    "lam"   : 1.0,
+    "n"     : 0.5,
+}
+```
+
+#### Herschel-Bulkley Extension (Yield Stress)
+
+Adds a yield stress τ_y to the Carreau model, preventing flow below a critical stress threshold. Useful for gels and concentrated polymer solutions that behave as soft solids at rest:
+
+$$\nu_\text{eff}(\dot\gamma) = \nu_\text{Carreau}(\dot\gamma) + \frac{\tau_y}{\rho \cdot \max(\dot\gamma,\, \epsilon)}$$
+
+A CFL-based upper clamp `nu_max` is automatically computed to prevent the diverging 1/γ̇ term from violating the diffusion stability limit.
+
+| Parameter | Key | Description |
+|---|---|---|
+| `tau_y` | Yield stress [Pa] | Set to `0.0` to disable. Typical range for CMC gels: 0.01–0.5 Pa |
+
+**Usage:**
+```python
+self.carreau = {
+    "nu_0"  : 450.0e-6,
+    "nu_inf": 10.0e-6,
+    "lam"   : 1.0,
+    "n"     : 0.5,
+    "tau_y" : 0.05,   # enable yield stress
+}
+```
+
+> **Note:** Carreau and Smagorinsky LES cannot be used simultaneously.
+
+### Sponge / Damping Layer
+
+A sponge layer absorbs outgoing waves and suppresses spurious recirculation near domain boundaries — effectively mimicking an infinite domain. This is particularly important for low-Re (Stokes-like) flows where the pressure Poisson equation instantaneously creates velocity across the entire domain.
+
+**How it works:** A damping coefficient σ(**x**) is defined on the grid, ramping from zero in the interior to σ_max near each wall using a smooth quadratic profile:
+
+$$\sigma(\mathbf{x}) = \sigma_\text{max} \cdot \left(\frac{\max(0,\; L_s - d)}{L_s}\right)^2$$
+
+where *d* is the distance to the nearest domain boundary and *L_s* is the sponge layer thickness. After each pressure projection, velocity is damped:
+
+$$\mathbf{u} \leftarrow \frac{\mathbf{u}}{1 + \Delta t \cdot \sigma}$$
+
+- **Interior** (d > L_s): σ = 0, physics unchanged.
+- **Near walls** (d < L_s): σ ramps up, velocity driven toward zero.
+
+| Parameter | Key | Default | Description |
+|---|---|---|---|
+| `width` | Sponge thickness [m] | `0.15` | Distance from each wall over which damping is active. Should be large enough to avoid reflections but small enough to leave the region of interest unaffected. |
+| `strength` | Max damping [1/s] | `50.0` | Peak damping rate σ_max. Higher values damp more aggressively. Typical range: 20–200. |
+
+**Usage:**
+```python
+self.sponge = {
+    "width"   : 0.2,    # 20 cm thick absorbing layer on all walls
+    "strength": 50.0,   # σ_max = 50 s⁻¹
+}
+```
+
+**Tuning tips:**
+- If far-field fluid still moves too much → increase `strength` (e.g. 100–200).
+- If the sponge interferes with the body's near-field flow → decrease `width` or move the walls further away.
+- Set `self.sponge = None` to disable.
+
 ## Package Structure
 
 ### Core Solver (`lilytorch/src/`)

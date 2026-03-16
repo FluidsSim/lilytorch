@@ -455,8 +455,8 @@ def _draw_contours_2d(ax, contours, color="#FFEA00"):
 
 
 def _draw_dye_density(ax, px, py, xlim, ylim, bins=300, sigma=0.0,
-                       intensity=10.0, zorder=1):
-    """Render particles as a density field: fixed pink, alpha ∝ density (scaled by intensity)."""
+                       intensity=10.0, zorder=1, color="#FF00A6"):
+    """Render particles as a density field: alpha ∝ density (scaled by intensity)."""
     if len(px) == 0:
         return
     H, xe, ye = np.histogram2d(px, py, bins=bins, range=[list(xlim), list(ylim)])
@@ -464,10 +464,11 @@ def _draw_dye_density(ax, px, py, xlim, ylim, bins=300, sigma=0.0,
     if sigma > 0:
         from scipy.ndimage import gaussian_filter
         H = gaussian_filter(H, sigma=sigma)
-    pink = np.array([1.0, 0.41, 0.71])
+    # Parse hex colour to RGB float triple
+    rgb = np.array(matplotlib.colors.to_rgb(color))
     alpha = np.clip(H.T * intensity, 0.0, 1.0)
     rgba = np.zeros((*alpha.shape, 4))
-    rgba[..., :3] = pink
+    rgba[..., :3] = rgb
     rgba[..., 3] = alpha
     ax.imshow(rgba, origin="lower", extent=[xe[0], xe[-1], ye[0], ye[-1]],
               aspect="auto", interpolation="bilinear", zorder=zorder)
@@ -588,8 +589,8 @@ def run_topview(cfg: ParticlePlotConfig):
 
         # ── Draw ────────────────────────────────────────────────────
         fig, ax = plt.subplots(1, 1, figsize=cfg.figsize, dpi=cfg.dpi)
-        fig.patch.set_facecolor(cfg.bg_color)
-        fig.patch.set_alpha(cfg.bg_alpha)
+        fig.patch.set_facecolor("white")
+        fig.patch.set_alpha(0)
 
         ax.set_facecolor(cfg.bg_color)
         ax.patch.set_alpha(cfg.bg_alpha)
@@ -608,7 +609,7 @@ def run_topview(cfg: ParticlePlotConfig):
                 _draw_dye_density(
                     ax, px, py, xlim, ylim,
                     bins=cfg.density_bins, sigma=cfg.density_sigma,
-                    intensity=cfg.density_intensity)
+                    intensity=cfg.density_intensity, color=cfg.particle_color)
             if cfg.render_mode in ("scatter", "both"):
                 ax.scatter(px, py, c=cfg.particle_color, s=cfg.particle_size,
                            alpha=cfg.particle_alpha, edgecolors="none", zorder=3)
@@ -619,7 +620,7 @@ def run_topview(cfg: ParticlePlotConfig):
 
         fig.tight_layout()
         fig.savefig(os.path.join(img_dir, f"{prefix}_{it:06d}.png"), dpi=cfg.dpi,
-                    facecolor=fig.get_facecolor(), edgecolor="none")
+                    facecolor="white", edgecolor="none")
         plt.close(fig)
 
         # ── Sub-stepped advection to next snapshot ──────────────────
@@ -731,8 +732,8 @@ def run_3d_full(cfg: ParticlePlotConfig):
 
         # Draw 3-D scatter
         fig = plt.figure(figsize=cfg.figsize, dpi=cfg.dpi)
-        fig.patch.set_facecolor(cfg.bg_color)
-        fig.patch.set_alpha(cfg.bg_alpha)
+        fig.patch.set_facecolor("white")
+        fig.patch.set_alpha(0)
         ax = fig.add_subplot(111, projection="3d")
         ax.set_facecolor(cfg.bg_color)
 
@@ -760,7 +761,7 @@ def run_3d_full(cfg: ParticlePlotConfig):
 
         fig.tight_layout()
         fig.savefig(os.path.join(img_dir, f"particles_3d_{it:06d}.png"), dpi=cfg.dpi,
-                    facecolor=fig.get_facecolor(), edgecolor="none")
+                    facecolor="white", edgecolor="none")
         plt.close(fig)
 
         # Single-step advection (no sub-stepping for 3d_full)
@@ -798,7 +799,7 @@ def build_parser():
     g.add_argument("--seed_mode", type=str, default="tail_contour",
                    choices=["tail_contour", "body_boundary", "line"],
                    help="Particle injection strategy.")
-    g.add_argument("--boundary_n_particles", type=int, default=120,
+    g.add_argument("--boundary_n_particles", type=int, default=5,
                    help="[body_boundary] Target boundary seed count.")
     g.add_argument("--boundary_n_z_layers", type=int, default=5,
                    help="[body_boundary] Number of z replicas (3-D only).")
@@ -806,9 +807,9 @@ def build_parser():
                    help="[tail_contour] Body index in contours.h5 (-1=last).")
     g.add_argument("--tail_center_idx", type=int, default=85,
                    help="[tail_contour] Contour index at trailing-edge centre.")
-    g.add_argument("--tail_n_particles", type=int, default=12,
+    g.add_argument("--tail_n_particles", type=int, default=20,
                    help="[tail_contour] Half-width in contour indices.")
-    g.add_argument("--seed_interval", type=int, default=10,
+    g.add_argument("--seed_interval", type=int, default=1,
                    help="Inject seeds every n solver sub-steps.")
     g.add_argument("--turb_diffusivity", type=float, default=0.0,
                    help="Turbulent diffusivity D_eff [m²/s] for stochastic dispersion. 0=off.")

@@ -78,8 +78,8 @@ class FluidExtension(TaskExtension):
             #         "pressure_force_x", "pressure_force_y", "pressure_force_ang_z"]
             # for force in self.forces:
             #     self.initialize_forces(force)
-            # self.bdim_yaml["solver"]["nt"] = self.experiment_options.simulation.runtime.n_iterations
-            # self.bdim_yaml["solver"]["dt"] = self.experiment_options.simulation.physics.timestep  # enforce farms timestep
+            self.bdim_yaml["solver"]["nt"] = self.experiment_options.simulation.runtime.n_iterations
+            self.bdim_yaml["solver"]["dt"] = self.experiment_options.simulation.physics.timestep  # enforce farms timestep
             self.bdim_yaml["body"]["experiment_options"] = self.experiment_options
 
             self.BDIMhandler = self.BDIMhandler_class(self.bdim_yaml, task.data.animats, physics)

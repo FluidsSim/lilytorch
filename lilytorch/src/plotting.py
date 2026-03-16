@@ -580,6 +580,10 @@ def plot_field_2d(
                               # build_body_mu0_rgba(); when provided the
                               # body interior is painted with per-body
                               # MuJoCo colours via mu0 blending.
+    body_com_positions=None,  # list of numpy arrays – pre-snapshotted COM
+                              # positions (thread-safe); when provided, used
+                              # instead of reading body.com_pos (which may
+                              # have been overwritten by the next solver step).
 ):
     """
     Single unified 2-D field plot.
@@ -703,16 +707,35 @@ def plot_field_2d(
                     view_ymin = min(view_ymin, by.min())
                     view_ymax = max(view_ymax, by.max())
 
-                com = getattr(body, "com_pos", None)
+                com = None
+                if body_com_positions is not None and bi < len(body_com_positions):
+                    com = body_com_positions[bi]  # already numpy
+                else:
+                    _cp = getattr(body, "com_pos", None)
+                    if _cp is not None:
+                        com = _cp.detach().cpu().numpy() if hasattr(_cp, 'cpu') else np.asarray(_cp)
                 if com is not None:
-                    cx = com[0].cpu().numpy()
-                    cy = com[1].cpu().numpy()
+                    cx = float(com[0])
+                    cy = float(com[1])
                     ax.plot(cx, cy, "o", color="#FF4040",
                             markersize=3, zorder=6)
-                    view_xmin = min(view_xmin, float(cx))
-                    view_xmax = max(view_xmax, float(cx))
-                    view_ymin = min(view_ymin, float(cy))
-                    view_ymax = max(view_ymax, float(cy))
+                    view_xmin = min(view_xmin, cx)
+                    view_xmax = max(view_xmax, cx)
+                    view_ymin = min(view_ymin, cy)
+                    view_ymax = max(view_ymax, cy)
+
+    # ---- standalone COM dots (when no bodies list but positions given) ----
+    if bodies is None and body_com_positions is not None:
+        for bi, com in enumerate(body_com_positions):
+            if com is not None:
+                cx = float(com[0])
+                cy = float(com[1])
+                ax.plot(cx, cy, "o", color="#FF4040",
+                        markersize=3, zorder=6)
+                view_xmin = min(view_xmin, cx)
+                view_xmax = max(view_xmax, cx)
+                view_ymin = min(view_ymin, cy)
+                view_ymax = max(view_ymax, cy)
 
     # Set axis limits exactly to the field extent (no padding).
     # If a body extends outside the domain the view expands just enough
@@ -752,6 +775,7 @@ def plot_field_3d_slices(
     body_mu0_coloring=False,  # when True, build per-body mu0 RGBA overlays
     body_eps=None,            # BDIM eps for mu0 computation (required if body_mu0_coloring)
     sdf_vals=None,            # (B, Nx, Ny, Nz) numpy – batched per-body SDFs
+    body_com_positions=None,  # list of numpy arrays – pre-snapshotted COM positions
 ):
     """
     For a 3-D field, produce three orthogonal mid-plane slices and save each
@@ -810,12 +834,20 @@ def plot_field_3d_slices(
         axis_labels=("x [m]", "y [m]"),
         body_colors=body_colors, body_default_color=body_default_color,
         body_fill_color=body_fill_color, body_mu0_rgba=mu0_xy,
+        body_com_positions=body_com_positions,
     )
 
     # ---- XZ slice (fixed y) ----
     extent_xz = (float(x[0]) - hx, float(x[-1]) + hx,
                  float(z[0]) - hz, float(z[-1]) + hz)
     sdf_xz = sdf_np[:, j_xz, :] if sdf_np is not None else None
+    # For XZ slice, remap COM: axis0=x (index 0), axis1=z (index 2)
+    _com_xz = None
+    if body_com_positions is not None:
+        _com_xz = [
+            np.array([c[0], c[2]]) if c is not None else None
+            for c in body_com_positions
+        ]
     plot_field_2d(
         field_np[:, j_xz, :], extent_xz, f"{name}_xz_j{j_xz}",
         iteration, save_path,
@@ -823,12 +855,20 @@ def plot_field_3d_slices(
         axis_labels=("x [m]", "z [m]"),
         body_colors=body_colors, body_default_color=body_default_color,
         body_fill_color=body_fill_color, body_mu0_rgba=mu0_xz,
+        body_com_positions=_com_xz,
     )
 
     # ---- YZ slice (fixed x) ----
     extent_yz = (float(y[0]) - hy, float(y[-1]) + hy,
                  float(z[0]) - hz, float(z[-1]) + hz)
     sdf_yz = sdf_np[i_yz, :, :] if sdf_np is not None else None
+    # For YZ slice, remap COM: axis0=y (index 1), axis1=z (index 2)
+    _com_yz = None
+    if body_com_positions is not None:
+        _com_yz = [
+            np.array([c[1], c[2]]) if c is not None else None
+            for c in body_com_positions
+        ]
     plot_field_2d(
         field_np[i_yz, :, :], extent_yz, f"{name}_yz_i{i_yz}",
         iteration, save_path,
@@ -836,6 +876,7 @@ def plot_field_3d_slices(
         axis_labels=("y [m]", "z [m]"),
         body_colors=body_colors, body_default_color=body_default_color,
         body_fill_color=body_fill_color, body_mu0_rgba=mu0_yz,
+        body_com_positions=_com_yz,
     )
 
 

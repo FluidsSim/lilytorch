@@ -278,6 +278,15 @@ def instrument_handler(handler):
                 _orig_update_3d(self_h, t, iteration, dt)
         handler.update = types.MethodType(timed_update_detailed, handler)
 
+        # ── Wrap Smagorinsky ν_t computation ─────────────────────
+        if getattr(fs, 'use_smagorinsky', False):
+            _saved_smag = fs._compute_smagorinsky_nu_t
+
+            def timed_smag(self_fs, *a, **kw):
+                with T("3a.0 Smagorinsky ν_t"):
+                    return _saved_smag(*a, **kw)
+            fs._compute_smagorinsky_nu_t = types.MethodType(timed_smag, fs)
+
         # ── Wrap adv_diff_solver.solve ───────────────────────────
         _saved_adv_solve = adv.solve  # the (compiled) bound method
 
@@ -323,8 +332,10 @@ def instrument_handler(handler):
                     _in_vcycle[0] = False
             poisson_mg._vcycle = types.MethodType(timed_vcycle, poisson_mg)
 
-        print(f"  [profiler] Deep patches installed (SDF, advection, BDIM, "
-              f"project{', Poisson internals' if _instrument_poisson_internals and poisson_mg else ''})",
+        print(f"  [profiler] Deep patches installed (SDF, "
+              f"{'Smagorinsky, ' if getattr(fs, 'use_smagorinsky', False) else ''}"
+              f"advection, BDIM, project"
+              f"{', Poisson internals' if _instrument_poisson_internals and poisson_mg else ''})",
               flush=True)
 
     print(f"  [profiler] Instrumented handler (grid {fs.grid_shape}, "
@@ -338,11 +349,13 @@ def instrument_handler(handler):
 # ═══════════════════════════════════════════════════════════════════════
 
 _orig_init_episode = FluidExtension.initialize_episode
+_handler_ref = [None]   # stash handler for post-simulation field plots
 
 def _patched_init_episode(self, task, physics):
     _orig_init_episode(self, task, physics)
     if hasattr(self, "BDIMhandler") and self.BDIMhandler is not None:
         instrument_handler(self.BDIMhandler)
+        _handler_ref[0] = self.BDIMhandler
 
 FluidExtension.initialize_episode = _patched_init_episode
 
@@ -360,17 +373,36 @@ cfg.Ny           = args.Ny
 cfg.Nz           = args.Nz
 cfg.use_bdim     = True
 
-# Scale domain extents so that dx = dy = dz regardless of grid shape.
-# The baseline domain is centred at (+0.3, 0, 0) with extents 2.4×0.6×0.6.
-# For grids larger than production, EXTEND the domain to maintain dx.
-# For grids ≤ production (4:1:1), keep the original domain (coarser dx).
-_dx_ref = 2.4 / 512                   # reference spacing from production grid
-_Lx = max(2.4, args.Nx * _dx_ref)     # extend if grid is wider
-_Ly = max(0.6, args.Ny * _dx_ref)
-_Lz = max(0.6, args.Nz * _dx_ref)
-cfg.xmin = 0.3 - 0.5 * _Lx;  cfg.xmax = 0.3 + 0.5 * _Lx
-cfg.ymin = -0.5 * _Ly;        cfg.ymax =  0.5 * _Ly
-cfg.zmin = -0.5 * _Lz;        cfg.zmax =  0.5 * _Lz
+# Scale domain so that dx = dy = dz is uniform across all three axes.
+# The grid spacing is chosen as the LARGER of:
+#   (a) the production resolution dx_ref = 2.4/512 ≈ 0.0047
+#   (b) the coarsest spacing that still fits the entire fish body in x
+# This means grids with Nx < 256 run at coarser dx (the domain grows to
+# contain the fish), while Nx ≥ 256 grids use production-quality dx.
+# Since this is a *cost* benchmark, accuracy of the physics is secondary.
+#
+# Fish body at spawn: pivot at x=-0.07, tail at x≈-0.88 (body ≈ 0.81 m).
+# We centre the x-domain on the fish body midpoint (x=-0.475) and require
+# Lx ≥ 1.05 m so all 9 links have ≥ 0.1 m clearance to the boundary.
+_dx_ref       = 2.4 / 512             # production grid spacing
+_MIN_LX_FISH  = 1.05                  # minimum x-extent to contain fish + margin
+_dx = max(_dx_ref, _MIN_LX_FISH / args.Nx)
+_Lx = args.Nx * _dx
+_Ly = args.Ny * _dx
+_Lz = args.Nz * _dx
+
+_x_body_center = -0.475               # midpoint of fish body at spawn
+cfg.xmin = _x_body_center - 0.5 * _Lx
+cfg.xmax = _x_body_center + 0.5 * _Lx
+cfg.ymin = -0.5 * _Ly;  cfg.ymax = 0.5 * _Ly
+cfg.zmin = -0.5 * _Lz;  cfg.zmax = 0.5 * _Lz
+
+if _dx > _dx_ref * 1.01:
+    print(f"  [domain] Nx={args.Nx} too small for dx_ref → using dx={_dx:.6f} "
+          f"({_dx/_dx_ref:.1f}× coarser) so fish fits in Lx={_Lx:.3f} m")
+print(f"  [domain] x=[{cfg.xmin:.3f}, {cfg.xmax:.3f}]  "
+      f"y=[{cfg.ymin:.3f}, {cfg.ymax:.3f}]  "
+      f"z=[{cfg.zmin:.3f}, {cfg.zmax:.3f}]  dx={_dx:.6f}")
 
 cfg.n_iterations = args.precompile + args.n_steps + 1
 cfg.save_every   = args.save_every
@@ -567,18 +599,24 @@ plt.rcParams.update({
 # ── Aggregate into paper categories ──────────────────────────────────
 # Maps category display name → list of timer-label prefixes
 CATEGORIES = {
-    "Body update (SDF)":           ["1b"],
-    "Forces\ncomputation":         ["4 "],
+    "Body update\n(SDF eval)":      ["1b"],
+    "mu + normals":                ["2 "],
+    "Smagorinsky ν_t":             ["3a.0"],
+    "Convection\n& diffusion":     ["3a  "],
+    "BDIM\nmeta-equation":         ["3b"],
     "Projection\n(pressure)":      ["3c"],
-    "Convection\n& diffusion":     ["3a"],
-    "Other":                       ["1  ", "2 ", "3b", "5 ", "6 "],
+    "Forces\ncomputation":         ["4 "],
+    "Other":                       ["5 ", "6 "],
 }
 
 CAT_COLOURS = {
-    "Body update (SDF)":           "#26a69a",
-    "Forces\ncomputation":         "#ffa726",
-    "Projection\n(pressure)":      "#ef5350",
+    "Body update\n(SDF eval)":      "#26a69a",
+    "mu + normals":                "#66bb6a",
+    "Smagorinsky ν_t":             "#ab47bc",
     "Convection\n& diffusion":     "#42a5f5",
+    "BDIM\nmeta-equation":         "#29b6f6",
+    "Projection\n(pressure)":      "#ef5350",
+    "Forces\ncomputation":         "#ffa726",
     "Other":                       "#90a4ae",
 }
 
@@ -706,6 +744,104 @@ if detail_labels:
     fig3.savefig(detail_path.replace(".pdf", ".png"))
     print(f"  Figure saved → {detail_path}")
     plt.close(fig3)
+
+
+# ── Figure 4: Flow field snapshot (pressure, velocity, vorticity) ────
+# Plots mid-z-plane slices of the final flow state to quickly verify
+# that the computation is physically reasonable at each grid resolution.
+_h = _handler_ref[0]
+if _h is not None:
+    fs   = _h.fluid_solver
+    comp = fs.composite_body
+
+    # Move to CPU for plotting
+    p  = fs.p0.detach().cpu().float().numpy()
+    u  = fs.u0.detach().cpu().float().numpy()
+    v  = fs.v0.detach().cpu().float().numpy()
+    w  = fs.w0.detach().cpu().float().numpy()
+    sdf = comp.sdf_val.detach().cpu().float().numpy()
+
+    # Mid-z slice (exclude ghost cells: index 1:-1)
+    kz = p.shape[2] // 2
+    p_slice   = p[1:-1, 1:-1, kz]
+    u_slice   = u[1:-1, 1:-1, kz]
+    v_slice   = v[1:-1, 1:-1, kz]
+    sdf_slice = sdf[1:-1, 1:-1, kz]
+
+    # Velocity magnitude
+    vmag_slice = np.sqrt(u_slice**2 + v_slice**2)
+
+    # Vorticity ω_z ≈ dv/dx - du/dy  (finite differences, interior)
+    dx = (cfg.xmax - cfg.xmin) / args.Nx
+    dvdx = np.gradient(v_slice, dx, axis=0)
+    dudy = np.gradient(u_slice, dx, axis=1)
+    omega_z = dvdx - dudy
+
+    # Domain coordinates for axes
+    x_1d = np.linspace(cfg.xmin, cfg.xmax, p_slice.shape[0])
+    y_1d = np.linspace(cfg.ymin, cfg.ymax, p_slice.shape[1])
+
+    fig4, axes = plt.subplots(2, 2, figsize=(10, 7), constrained_layout=True)
+    fig4.suptitle(
+        f"Flow fields (mid-z plane) – {args.Nx}×{args.Ny}×{args.Nz}  "
+        f"({grid_N:,} cells, step {args.precompile + args.n_steps})",
+        fontsize=12, fontweight="bold",
+    )
+
+    # Helper for consistent axis formatting
+    def _format_ax(ax, title, data, cmap, symmetric=False):
+        if symmetric:
+            vmax = max(abs(np.nanpercentile(data, 2)),
+                       abs(np.nanpercentile(data, 98)))
+            vmin = -vmax
+        else:
+            vmin = np.nanpercentile(data, 2)
+            vmax = np.nanpercentile(data, 98)
+        im = ax.imshow(
+            data.T, origin="lower", aspect="equal", cmap=cmap,
+            extent=[x_1d[0], x_1d[-1], y_1d[0], y_1d[-1]],
+            vmin=vmin, vmax=vmax,
+        )
+        # SDF=0 contour (body surface)
+        ax.contour(
+            x_1d, y_1d, sdf_slice.T, levels=[0], colors="k",
+            linewidths=0.8, linestyles="-",
+        )
+        ax.set_title(title, fontsize=10)
+        ax.set_xlabel("x (m)", fontsize=8)
+        ax.set_ylabel("y (m)", fontsize=8)
+        ax.tick_params(labelsize=7)
+        plt.colorbar(im, ax=ax, shrink=0.85, pad=0.02)
+
+    _format_ax(axes[0, 0], "Pressure $p$",           p_slice,    "RdBu_r", symmetric=True)
+    _format_ax(axes[0, 1], "Velocity magnitude $|u|$", vmag_slice, "viridis")
+    _format_ax(axes[1, 0], "Vorticity $\\omega_z$",  omega_z,    "RdBu_r", symmetric=True)
+
+    # SDF field
+    sdf_vmax = max(abs(np.nanpercentile(sdf_slice, 5)),
+                   abs(np.nanpercentile(sdf_slice, 95)))
+    im_sdf = axes[1, 1].imshow(
+        sdf_slice.T, origin="lower", aspect="equal", cmap="coolwarm",
+        extent=[x_1d[0], x_1d[-1], y_1d[0], y_1d[-1]],
+        vmin=-sdf_vmax, vmax=sdf_vmax,
+    )
+    axes[1, 1].contour(
+        x_1d, y_1d, sdf_slice.T, levels=[0], colors="k",
+        linewidths=0.8, linestyles="-",
+    )
+    axes[1, 1].set_title("SDF (body outline at 0)", fontsize=10)
+    axes[1, 1].set_xlabel("x (m)", fontsize=8)
+    axes[1, 1].set_ylabel("y (m)", fontsize=8)
+    axes[1, 1].tick_params(labelsize=7)
+    plt.colorbar(im_sdf, ax=axes[1, 1], shrink=0.85, pad=0.02)
+
+    field_path = os.path.join(args.out_dir, f"flow_fields_{tag}.pdf")
+    fig4.savefig(field_path)
+    fig4.savefig(field_path.replace(".pdf", ".png"))
+    print(f"  Figure saved → {field_path}")
+    plt.close(fig4)
+else:
+    print("  [warning] Could not access handler — skipping flow field plots.")
 
 
 print(f"""

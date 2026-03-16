@@ -39,6 +39,7 @@ def _import_cubic_spline():
 
 def _import_matplotlib():
     import matplotlib
+    matplotlib.use("TkAgg")
     import matplotlib.pyplot as plt
     import matplotlib.cm as cm
     return matplotlib, plt, cm

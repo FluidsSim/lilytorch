@@ -588,6 +588,65 @@ class FluidSolver:
         if self.use_smagorinsky:
             print(f"Smagorinsky LES model enabled: Cs = {self.smagorinsky_cs}")
 
+        # ============= Carreau non-Newtonian model =============
+        carreau = solver.get("carreau", None)
+        if carreau is not None:
+            self.use_carreau = True
+            self.carreau_nu_0   = carreau["nu_0"]
+            self.carreau_nu_inf = carreau["nu_inf"]
+            self.carreau_lam    = carreau["lam"]
+            self.carreau_n      = carreau["n"]
+            self.carreau_tau_y  = carreau.get("tau_y", 0.0)
+            # Diffusion CFL stability limit: Δt < h² / (2·ndim·ν_max)
+            # → ν_max = safety · h² / (2·ndim·Δt),  safety = 0.4
+            cfl_nu_max = 0.4 * float(self.h)**2 / (2.0 * self.ndim * float(self.dt))
+            self.carreau_nu_max = carreau.get("nu_max", cfl_nu_max)
+            model_name = "Herschel-Bulkley–Carreau" if self.carreau_tau_y > 0 else "Carreau"
+            print(f"{model_name} model enabled: "
+                  f"nu_0={self.carreau_nu_0}, nu_inf={self.carreau_nu_inf}, "
+                  f"lam={self.carreau_lam}, n={self.carreau_n}")
+            if self.carreau_tau_y > 0:
+                print(f"  yield stress tau_y={self.carreau_tau_y} Pa, "
+                      f"nu_max={self.carreau_nu_max:.4e} (CFL limit={cfl_nu_max:.4e})")
+            if self.use_smagorinsky:
+                raise ValueError("Cannot use both Smagorinsky and Carreau simultaneously.")
+            # Override self.nu to nu_inf so that the nu_t pathway
+            # (nu_eff = self.nu + nu_t) yields nu_t >= 0 everywhere.
+            # The user-supplied "nu" in the config is ignored when Carreau is
+            # active — the zero-shear and infinite-shear viscosities are
+            # specified entirely by the Carreau parameters.
+            if float(self.nu) != self.carreau_nu_inf:
+                print(f"  [Carreau] Overriding solver nu={float(self.nu):.6e} "
+                      f"→ nu_inf={self.carreau_nu_inf:.6e} for consistency.")
+                self.nu   = torch.tensor(self.carreau_nu_inf, device=self.device, dtype=self.dtype)
+                self.visc = self.nu * self.rho
+        else:
+            self.use_carreau = False
+
+        # Whether any variable-viscosity model is active
+        self.use_variable_viscosity = self.use_smagorinsky or self.use_carreau
+        # Cached spatially-varying ν·ρ field for force computation
+        # (set each step when use_variable_viscosity is True, else None)
+        self._nu_rho_field = None
+
+        # ============= Sponge / damping layer =============
+        sponge = solver.get("sponge", None)
+        if sponge is not None:
+            self.use_sponge = True
+            sponge_width    = sponge.get("width", 0.15)    # [m] thickness of the sponge layer
+            sponge_strength = sponge.get("strength", 50.0)  # [1/s] max damping coefficient σ_max
+            # Build quadratic σ(x,y,z) fields on each staggered grid.
+            # σ = σ_max · (max(0, Ls - d) / Ls)²
+            # where d = distance from the nearest domain boundary.
+            self._sponge_sigma_u, self._sponge_sigma_v, self._sponge_sigma_w = \
+                self._build_sponge_fields(sponge_width, sponge_strength)
+            print(f"Sponge layer enabled: width={sponge_width} m, strength={sponge_strength} 1/s")
+        else:
+            self.use_sponge = False
+            self._sponge_sigma_u = None
+            self._sponge_sigma_v = None
+            self._sponge_sigma_w = None
+
         # ============= time integration =============
         self.time_integration = solver.get("time_integration", "heun")
         assert self.time_integration in ("heun", "euler"), \
@@ -973,7 +1032,7 @@ class FluidSolver:
         ss_21 = (self.compute_dpdy(u_ystag)+self.compute_dpdx(v))*self.normal_x_v
         ss_22 = 2*self.compute_dpdy(v)*self.normal_y_v
 
-        mult=self.nu*self.rho
+        mult = self._compute_nu_rho_for_forces(u, v)
         self.xstress_tensor = (ss_11+ss_12)*mult
         self.ystress_tensor = (ss_21+ss_22)*mult
 
@@ -1051,13 +1110,14 @@ class FluidSolver:
         # BATCHED path — all bodies in one fused call
         # ==============================================================
         # Shared part: stress + pressure force density
+        nu_rho = self._compute_nu_rho_for_forces(u, v)
         (xstress, ystress,
          pforce_x, pforce_y) = self._forces_shared_2d_compiled(
             u, v, p, comp.sdf_val,
             self.normal_x_u, self.normal_y_u,
             self.normal_x_v, self.normal_y_v,
             normal_x, normal_y,
-            self.nu * self.rho, self.h,
+            nu_rho, self.h,
         )
 
         if self._compile_forces:
@@ -1125,7 +1185,7 @@ class FluidSolver:
         ``_forces_body_integrate_3d``) that fuse ~40 CUDA kernels into one
         or two CUDA-graph launches, giving ~6× wall-clock speedup.
         """
-        nu_rho = self.nu * self.rho
+        nu_rho = self._compute_nu_rho_for_forces(u, v, w)
         h      = self.h
         h3     = self.h3
 
@@ -1405,6 +1465,75 @@ class FluidSolver:
 
 
     # ------------------------------------------------------------------
+    #  Sponge / damping layer
+    # ------------------------------------------------------------------
+    def _build_sponge_fields(self, width, strength):
+        """Build quadratic sponge coefficient σ on each staggered grid.
+
+        σ(x) = σ_max · (max(0, Ls - d) / Ls)²
+
+        where  d  is the distance to the nearest domain boundary and
+        Ls = *width*.  Returns (sigma_u, sigma_v, sigma_w) tensors on the
+        MAC staggered grids.  For 2-D, sigma_w is ``None``.
+        """
+        Ls = width
+        sigma_max = strength
+
+        def _quadratic_ramp_1d(coords, lo, hi):
+            """Return σ(x) along one axis for cell centres *coords*."""
+            d_lo = coords - lo            # distance from low boundary
+            d_hi = hi - coords            # distance from high boundary
+            d    = torch.minimum(d_lo, d_hi)  # distance from nearest wall
+            ratio = torch.clamp((Ls - d) / Ls, min=0.0)
+            return sigma_max * ratio * ratio
+
+        # -- cell-centre coordinates (used for all grids) ----------------
+        x = self.x   # (Nx,)
+        y = self.y   # (Ny,)
+
+        sx = _quadratic_ramp_1d(x, self.xmin, self.xmax)
+        sy = _quadratic_ramp_1d(y, self.ymin, self.ymax)
+
+        if self.ndim == 3:
+            z  = self.z  # (Nz,)
+            sz = _quadratic_ramp_1d(z, self.zmin, self.zmax)
+            # Combine via max (take the strongest damping from any wall):
+            # sigma(i,j,k) = max(sx_i, sy_j, sz_k)
+            sigma_3d = torch.maximum(
+                torch.maximum(sx[:, None, None], sy[None, :, None]),
+                sz[None, None, :],
+            )                                      # (Nx, Ny, Nz)
+            return sigma_3d, sigma_3d, sigma_3d
+        else:
+            sigma_2d = torch.maximum(sx[:, None], sy[None, :])  # (Nx, Ny)
+            return sigma_2d, sigma_2d, None
+
+    def apply_sponge_damping(self, u, v, w=None):
+        """Damp velocity towards zero near domain boundaries.
+
+        u_new = u / (1 + dt·σ)
+
+        Applied in-place via multiplication for efficiency.
+        Returns (u, v) in 2-D or (u, v, w) in 3-D.
+        """
+        if not self.use_sponge:
+            return (u, v, w) if w is not None else (u, v)
+
+        dt = float(self.dt)
+
+        # Pre-compute damping factor: 1 / (1 + dt·σ)
+        damp_u = 1.0 / (1.0 + dt * self._sponge_sigma_u)
+        damp_v = 1.0 / (1.0 + dt * self._sponge_sigma_v)
+        u = u * damp_u
+        v = v * damp_v
+
+        if w is not None and self._sponge_sigma_w is not None:
+            damp_w = 1.0 / (1.0 + dt * self._sponge_sigma_w)
+            w = w * damp_w
+            return (u, v, w)
+        return (u, v)
+
+    # ------------------------------------------------------------------
     #  Smagorinsky LES model
     # ------------------------------------------------------------------
     def _compute_smagorinsky_nu_t(self, *vel):
@@ -1415,6 +1544,75 @@ class FluidSolver:
         return ops.smagorinsky_viscosity(
             vel, float(self.h), self.ndim, cs=self.smagorinsky_cs,
         )
+
+    # ------------------------------------------------------------------
+    #  Carreau non-Newtonian model
+    # ------------------------------------------------------------------
+    def _compute_carreau_nu_t(self, *vel):
+        """Compute Carreau viscosity as a ``nu_t`` offset from ``self.nu``.
+
+        The Carreau model gives a spatially-varying kinematic viscosity:
+            ν(γ̇) = ν_∞ + (ν_0 − ν_∞) · [1 + (λ·γ̇)²]^((n−1)/2)
+
+        To plug into the existing ``nu_t`` pathway we return
+            nu_t = ν(γ̇) − self.nu
+        so that the solver computes  nu_eff = self.nu + nu_t = ν(γ̇).
+
+        Only called when ``self.use_carreau`` is True.
+        """
+        nu_field = ops.carreau_viscosity(
+            vel, float(self.h), self.ndim,
+            nu_0=self.carreau_nu_0,
+            nu_inf=self.carreau_nu_inf,
+            lam=self.carreau_lam,
+            n=self.carreau_n,
+            tau_y=self.carreau_tau_y,
+            rho=float(self.rho),
+            nu_max=self.carreau_nu_max,
+        )
+        return nu_field - float(self.nu)
+
+    # ------------------------------------------------------------------
+    #  Unified variable-viscosity dispatcher
+    # ------------------------------------------------------------------
+    def _compute_nu_t(self, *vel):
+        """Return the extra viscosity field for the advection-diffusion step.
+
+        Returns ``None`` when neither Smagorinsky nor Carreau is active,
+        keeping the constant-viscosity fast path.
+        """
+        if self.use_smagorinsky:
+            return self._compute_smagorinsky_nu_t(*vel)
+        if self.use_carreau:
+            return self._compute_carreau_nu_t(*vel)
+        return None
+
+    def _compute_nu_rho_for_forces(self, *vel):
+        """Return ν·ρ for the force computation (scalar or tensor).
+
+        * Constant viscosity:  returns ``self.nu * self.rho``  (scalar).
+        * Smagorinsky/Carreau: returns a spatially-varying tensor field.
+
+        The result is cached in ``self._nu_rho_field`` so that the force
+        computation does not recompute strain rates a second time.
+        """
+        if not self.use_variable_viscosity:
+            return self.nu * self.rho
+        if self.use_smagorinsky:
+            nu_eff = float(self.nu) + self._compute_smagorinsky_nu_t(*vel)
+        else:  # Carreau / Herschel-Bulkley–Carreau
+            nu_eff = ops.carreau_viscosity(
+                vel, float(self.h), self.ndim,
+                nu_0=self.carreau_nu_0,
+                nu_inf=self.carreau_nu_inf,
+                lam=self.carreau_lam,
+                n=self.carreau_n,
+                tau_y=self.carreau_tau_y,
+                rho=float(self.rho),
+                nu_max=self.carreau_nu_max,
+            )
+        self._nu_rho_field = nu_eff * self.rho
+        return self._nu_rho_field
 
     @staticmethod
     def _bdim_meta(
@@ -1454,7 +1652,7 @@ class FluidSolver:
 
         if self.ndim == 2:
             # ====== PREDICTOR ======
-            nu_t = self._compute_smagorinsky_nu_t(u, v) if self.use_smagorinsky else None
+            nu_t = self._compute_nu_t(u, v)
             (uprime, vprime) = self.adv_diff_solver.solve(u, v, nu_t=nu_t)
             # Clone CUDA-graph outputs before passing to _bdim.
             uprime = uprime.clone()
@@ -1483,7 +1681,7 @@ class FluidSolver:
 
             # ====== CORRECTOR ======
             # Evaluate RHS at the projected predicted velocity
-            nu_t = self._compute_smagorinsky_nu_t(u1, v1) if self.use_smagorinsky else None
+            nu_t = self._compute_nu_t(u1, v1)
             (uprime2, vprime2) = self.adv_diff_solver.solve(u1, v1, nu_t=nu_t)
             # adv_diff.solve returns u1 + dt*RHS(u1).
             # Heun needs u^n + dt*RHS(u1), so rebase from u^n:
@@ -1509,11 +1707,15 @@ class FluidSolver:
             self.adv_diff_solver.set_BCs(u_avg, v_avg)
             (u_out, v_out, p_out) = self.project(u_avg, v_avg, p, w=0.5)
 
+            # Sponge damping (2-D)
+            if self.use_sponge:
+                (u_out, v_out) = self.apply_sponge_damping(u_out, v_out)
+
             return (u_out, v_out, p_out)
 
         else:  # 3D
             # ====== PREDICTOR ======
-            nu_t = self._compute_smagorinsky_nu_t(u, v, w_vel) if self.use_smagorinsky else None
+            nu_t = self._compute_nu_t(u, v, w_vel)
             (uprime, vprime, wprime) = self.adv_diff_solver.solve(u, v, w_vel, nu_t=nu_t)
             # Clone CUDA-graph outputs before passing to _bdim.
             uprime = uprime.clone()
@@ -1548,7 +1750,7 @@ class FluidSolver:
             (u1, v1, w1, p1) = self.project(uprime, vprime, p, w_vel=wprime)
 
             # ====== CORRECTOR ======
-            nu_t = self._compute_smagorinsky_nu_t(u1, v1, w1) if self.use_smagorinsky else None
+            nu_t = self._compute_nu_t(u1, v1, w1)
             (uprime2, vprime2, wprime2) = self.adv_diff_solver.solve(u1, v1, w1, nu_t=nu_t)
             # Rebase from u^n
             uprime2 = u     + (uprime2 - u1)
@@ -1593,6 +1795,10 @@ class FluidSolver:
                 if hasattr(self, _attr):
                     setattr(self, _attr, None)
 
+            # Sponge damping: damp velocity near domain boundaries
+            if self.use_sponge:
+                (u_out, v_out, w_out) = self.apply_sponge_damping(u_out, v_out, w_out)
+
             return (u_out, v_out, p_out, w_out)
 
     def solve_heun(self, u, v, p, iteration, w_vel=None):
@@ -1615,7 +1821,7 @@ class FluidSolver:
         _h    = self.h
 
         if self.ndim == 2:
-            nu_t = self._compute_smagorinsky_nu_t(u, v) if self.use_smagorinsky else None
+            nu_t = self._compute_nu_t(u, v)
             (uprime, vprime) = self.adv_diff_solver.solve(u, v, nu_t=nu_t)
             # Clone CUDA-graph outputs before passing to _bdim.
             uprime = uprime.clone()
@@ -1636,10 +1842,14 @@ class FluidSolver:
             self.adv_diff_solver.set_BCs(uprime, vprime)
             (u_out, v_out, p_out) = self.project(uprime, vprime, p)
 
+            # Sponge damping (2-D)
+            if self.use_sponge:
+                (u_out, v_out) = self.apply_sponge_damping(u_out, v_out)
+
             return (u_out, v_out, p_out)
 
         else:  # 3D
-            nu_t = self._compute_smagorinsky_nu_t(u, v, w_vel) if self.use_smagorinsky else None
+            nu_t = self._compute_nu_t(u, v, w_vel)
             (uprime, vprime, wprime) = self.adv_diff_solver.solve(u, v, w_vel, nu_t=nu_t)
             # Clone CUDA-graph outputs before passing to _bdim.
             uprime = uprime.clone()
@@ -1682,6 +1892,10 @@ class FluidSolver:
             for _attr in ('mu0_all_u', 'mu0_all_v', 'mu0_all_w'):
                 if hasattr(self, _attr):
                     setattr(self, _attr, None)
+
+            # Sponge damping: damp velocity near domain boundaries
+            if self.use_sponge:
+                (u_out, v_out, w_out) = self.apply_sponge_damping(u_out, v_out, w_out)
 
             return (u_out, v_out, p_out, w_out)
 
@@ -1857,8 +2071,8 @@ class FluidSolver:
             s.vorticity(u, v, w).cpu() if s.ndim == 2
             else s.vorticity_components(u, v, w)["omega_z"].cpu()
         ), None, None, True),
-        ("pressure",   lambda s, u, v, p, w: p.cpu(),                    None, None, True),
-        ("divergence", lambda s, u, v, p, w: s.divergence(u, v, w).cpu(),None, None, False),
+        # ("pressure",   lambda s, u, v, p, w: p.cpu(),                    None, None, True),
+        # ("divergence", lambda s, u, v, p, w: s.divergence(u, v, w).cpu(),None, None, False),
     ]
 
     # Additional specs used only for 3-D isosurface rendering.
@@ -1881,8 +2095,8 @@ class FluidSolver:
         return (u**2 + v**2 + w**2).sqrt()
 
     DEFAULT_3D_ISO_SPECS = [
-        ("omega_x",    lambda s, u, v, p, w: FluidSolver._cached_vort(s, u, v, w)["omega_x"].cpu(), None, True),
-        ("omega_y",    lambda s, u, v, p, w: FluidSolver._cached_vort(s, u, v, w)["omega_y"].cpu(), None, True),
+        # ("omega_x",    lambda s, u, v, p, w: FluidSolver._cached_vort(s, u, v, w)["omega_x"].cpu(), None, True),
+        # ("omega_y",    lambda s, u, v, p, w: FluidSolver._cached_vort(s, u, v, w)["omega_y"].cpu(), None, True),
         ("omega_z",    lambda s, u, v, p, w: FluidSolver._cached_vort(s, u, v, w)["omega_z"].cpu(), None, True),
         ("omega_mag",  lambda s, u, v, p, w: FluidSolver._cached_vort(s, u, v, w)["omega_mag"].cpu(), None, True),
         ("vel_mag",    lambda s, u, v, p, w: FluidSolver._vel_mag(s, u, v, w).cpu(),                 None,   True),
@@ -1925,6 +2139,19 @@ class FluidSolver:
             specs = getattr(self, "plot_specs", self.DEFAULT_PLOT_SPECS)
             bodies = getattr(self.composite_body, "bodies", None) if hasattr(self, "composite_body") else None
 
+            # Snapshot per-body COM positions to CPU numpy *now* so the
+            # background IO thread reads a frozen copy rather than the
+            # live tensor (which the next solver step will overwrite).
+            _com_positions = None
+            if bodies is not None:
+                _com_positions = []
+                for _b in bodies:
+                    _cp = getattr(_b, "com_pos", None)
+                    if _cp is not None:
+                        _com_positions.append(_cp.detach().cpu().numpy().copy())
+                    else:
+                        _com_positions.append(None)
+
             if self.ndim == 2:
                 # ---- build per-body mu0 RGBA overlay (once per frame) ----
                 _mu0_rgba = None
@@ -1962,6 +2189,7 @@ class FluidSolver:
                         name, iteration, save_path,
                         vmin=eff_vmin, vmax=eff_vmax, bodies=_bodies,
                         body_mu0_rgba=_crop_mu0 if show_body else None,
+                        body_com_positions=_com_positions if show_body else None,
                     )
             else:
                 # Crop ghost cells (index 0 and -1 on each axis) so plots
@@ -2030,6 +2258,7 @@ class FluidSolver:
                         body_mu0_coloring=_pass_mu0,
                         body_eps=float(_eps_3d) if _eps_3d is not None else None,
                         sdf_vals=_sdf_vals_3d_np if _pass_mu0 else None,
+                        body_com_positions=_com_positions if _show_body else None,
                     )
 
                 # ---- HDF5 field export (3-D only, replaces old VTK) ----

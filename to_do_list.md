@@ -55,6 +55,7 @@ would catch slow blow-ups, non-physical energy growth, or excessive dissipation
 (ν_t = (Cs·Δ)²|S̄|) to model additive eddy viscosity? What does the model do exactly and how expensive is it?
 
 # HIGH PRIORITY:
+- when running 1guilla slime exp i noticed that the gpu is not fully used - check why
 - Test a simulation in 2d and one in 3d with an analytically moving body, both analytically defined
 - Test a simulation in 2d and one in 3d with an analytically moving body defined via a mesh file.
 - Create new 2d/3d salamander simulation

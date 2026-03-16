@@ -10,8 +10,10 @@ scaling figures.  Subprocess isolation is essential because:
   ▸ torch.compile CUDA-graph recordings cannot be cleanly reset
   ▸ monkey-patching global state must be fresh for each grid
 
-Grid configurations maintain a ≈ 4 : 1 : 1  (Nx : Ny : Nz) aspect ratio
-matching the production free-swimming 1guilla domain.
+All grid dimensions must be powers of 2 (multigrid solver requirement).
+The domain scales as N × dx_ref in each direction (dx_ref = 2.4/512),
+so varying Nx:Ny:Nz ratios produces different domain shapes while
+keeping h constant.  Minimum Nx = 128 (domain must contain the fish).
 
 Usage
 -----
@@ -19,7 +21,7 @@ Usage
     python run_multigrid_cost_analysis.py
 
     # Custom grids (comma-separated Nx:Ny:Nz triplets)
-    python run_multigrid_cost_analysis.py --grids 64:16:16,128:32:32,256:64:64
+    python run_multigrid_cost_analysis.py --grids 128:32:32,256:64:64,512:128:128
 
     # Override step counts
     python run_multigrid_cost_analysis.py --n_steps 80 --precompile 40
@@ -51,33 +53,47 @@ SINGLE_RUN_SCRIPT = os.path.join(SCRIPT_DIR, "run_cost_analysis.py")
 PLOT_SCALING_SCRIPT = os.path.join(SCRIPT_DIR, "plot_scaling.py")
 
 # ── Pre-defined grid presets ─────────────────────────────────────────
+# All grid dimensions must be powers of 2 (multigrid requirement).
+# The domain extents scale as N * dx_ref in each direction, so
+# different Nx:Ny:Nz ratios simply produce different domain shapes.
+# This gives many more distinct cell-count data points for scaling.
 PRESETS = {
     "small": [
-        (64,   16,  16),
-        (128,  32,  32),
-        (256,  64,  64),
+        (128,  32,  32),       #    131,072
+        (128,  64,  32),       #    262,144
+        (128,  64,  64),       #    524,288
+        (256,  64,  64),       #  1,048,576
     ],
     "medium": [
-        (128,  32,  32),
-        (256,  64,  64),
-        (512, 128, 128),
+        (128,  32,  32),       #    131,072
+        (128,  64,  64),       #    524,288
+        (256,  64,  64),       #  1,048,576
+        (256, 128,  64),       #  2,097,152
+        (512, 128, 128),       #  8,388,608
     ],
     "large": [
-        (256,   64,  64),
-        (512,  128, 128),
-        (768,  192, 192),
+        (256, 128,  64),       #  2,097,152
+        (256, 128, 128),       #  4,194,304
+        (512, 128,  64),       #  4,194,304  (same N, diff shape)
+        (512, 128, 128),       #  8,388,608
+        (512, 256, 128),       # 16,777,216
     ],
     "full": [
-        (64,   16,  16),
-        (128,  32,  32),
-        (256,  64,  64),
-        (512, 128, 128),
+        (128,  32,  32),       #    131,072
+        (128,  64,  32),       #    262,144
+        (128,  64,  64),       #    524,288
+        (256,  64,  64),       #  1,048,576
+        (256, 128,  64),       #  2,097,152
+        (256, 128, 128),       #  4,194,304
+        (512, 128, 128),       #  8,388,608
+        (512, 256, 128),       # 16,777,216
     ],
     "production": [
-        (128,  32,  32),
-        (256,  64,  64),
-        (512, 128, 128),
-        (1024, 256, 128),
+        (128,  32,  32),       #    131,072
+        (256,  64,  64),       #  1,048,576
+        (256, 128,  64),       #  2,097,152
+        (512, 128, 128),       #  8,388,608
+        (512, 256, 128),       # 16,777,216
     ],
 }
 

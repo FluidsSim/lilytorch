@@ -129,14 +129,16 @@ class BaseSimConfig:
         self.poisson_precond_vcycles = None
         self.poisson_warm_start      = None
         self.poisson_smoother        = None
-        self.poisson_compile         = True
         self.poisson_nsmoothing      = 10
         self.poisson_verbose         = False
         self.poisson_bc_type         = "neumann"
+        self.poisson_compile         = True
         self.compile_adv_diff        = True
         self.compile_forces          = True
         self.compile_sdf             = False
         self.smagorinsky_cs          = 0.0
+        self.carreau                 = None   # dict with keys: nu_0, nu_inf, lam, n
+        self.sponge                  = None   # dict with keys: width, strength
         self.jacobi_weight           = 0.7
         self.dtype                   = None
         self.zero_pressure_inside    = None
@@ -158,6 +160,7 @@ class BaseSimConfig:
         self.convexify      = False
         self.force_scaling  = None
         self.compute_sdf    = False
+        self.suit           = 0.0
 
         # ── BDIM physics (e.g. pleurodeles solref) ────────────────────────
         self.bdim_physics = None
@@ -577,6 +580,12 @@ class BaseSimConfig:
             "smagorinsky_cs"         : self.smagorinsky_cs,
         }
 
+        if self.carreau is not None:
+            solver["carreau"] = self.carreau
+
+        if self.sponge is not None:
+            solver["sponge"] = self.sponge
+
         if self.is_3d:
             solver["Nz"]   = self.Nz
             solver["zmin"] = self.zmin
@@ -615,9 +624,9 @@ class BaseSimConfig:
         body = {
             "type"           : "multi_animat",
             "sdf_folder"     : None,
-            "plotting"       : self.compute_sdf,
+            "plotting"       : False,
             "compute_interp" : self.compute_sdf,
-            "plotting_meshes": self.compute_sdf,
+            "plotting_meshes": False,
             "save_folder"    : os.path.join(
                 self.data_folder, self.interp_data_subfolder
             ),
@@ -625,7 +634,7 @@ class BaseSimConfig:
                 "rotation"   : "None",
                 "translation": translation,
             },
-            "suit"     : 0.0,
+            "suit"     : self.suit,
             "convexify": self.convexify,
             "scale"    : 1,
         }
