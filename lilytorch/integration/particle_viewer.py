@@ -247,6 +247,9 @@ class ParticleViewer(TaskExtension):
         no_light: bool = False,
         light_color: list[float] | str | None = None,
         emissive_particles: bool = False,
+        save_particles: bool = False,
+        save_dir: str = "particle_saves",
+        save_every: int | None = None,
     ):
         super().__init__()
         self.experiment_options = experiment_options
@@ -270,6 +273,14 @@ class ParticleViewer(TaskExtension):
         self.no_light = no_light
         self.light_color = self._parse_color(light_color)
         self.emissive_particles = emissive_particles
+
+        # Saving options
+        self.save_particles = save_particles
+        self.save_dir = save_dir
+        if self.save_particles:
+            import os
+            os.makedirs(self.save_dir, exist_ok=True)
+        self.save_every = save_every
 
         # Internal state
         self._viewer = None
@@ -332,6 +343,9 @@ class ParticleViewer(TaskExtension):
             no_light=config.get("no_light", False),
             light_color=config.get("light_color", None),
             emissive_particles=config.get("emissive_particles", False),
+            save_particles=config.get("save_particles", False),
+            save_dir=config.get("save_dir", "particle_saves"),
+            save_every=config.get("save_every", None),
         )
 
     # ── lifecycle hooks ──────────────────────────────────────────────
@@ -938,6 +952,12 @@ class ParticleViewer(TaskExtension):
                         self._particles, sdf_val, fs.x, fs.y,
                         margin=self.body_cull_margin,
                     )
+
+        # ── Save particle positions if enabled ─────────────
+        if self.save_particles and self._particles.shape[1] > 0:
+            if self.save_every is None or (iteration % self.save_every == 0):
+                npy_path = f"{self.save_dir}/particles_{iteration:06d}.npy"
+                np.save(npy_path, self._particles.cpu().numpy())
 
         # ── Update sphere visuals ─────────────────────────────────
         if iteration % 200 == 0:

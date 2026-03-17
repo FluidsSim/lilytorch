@@ -56,10 +56,19 @@ DIR = os.path.dirname(INPUT1)
 def synced_name(path):
     base, ext = os.path.splitext(os.path.basename(path))
     return os.path.join(DIR, base + '_synced' + ext)
-OUTPUT = INPUT2  # Overwrite/corrected video2
+def corrected_name(path):
+    base, ext = os.path.splitext(os.path.basename(path))
+    return os.path.join(DIR, base + '_corrected' + ext)
+OUTPUT = corrected_name(INPUT2)
 
-print(f"Reference (video1): {INPUT1}")
-print(f"To scale  (video2): {INPUT2}")
+# Read actual frame rates
+_c1 = cv2.VideoCapture(INPUT1); FPS1 = _c1.get(cv2.CAP_PROP_FPS); _c1.release()
+_c2 = cv2.VideoCapture(INPUT2); FPS2 = _c2.get(cv2.CAP_PROP_FPS); _c2.release()
+if FPS1 <= 0: FPS1 = 30.0
+if FPS2 <= 0: FPS2 = 30.0
+
+print(f"Reference (video1): {INPUT1}  ({FPS1:.2f} fps)")
+print(f"To scale  (video2): {INPUT2}  ({FPS2:.2f} fps)")
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -293,9 +302,8 @@ sync1 = pick_sync_frame(INPUT1, "video1 – scrub to motion start, press ENTER")
 sync2 = pick_sync_frame(INPUT2, "video2 – scrub to motion start, press ENTER")
 print(f"  video1 sync frame: {sync1},  video2 sync frame: {sync2}")
 
-# Write video1 sync offset so stack_videos.sh can apply -ss
-FPS = 30.0
-video1_start_sec = sync1 / FPS
+# Write video1 sync offset using actual video1 FPS
+video1_start_sec = sync1 / FPS1
 env_path = os.path.join(DIR, "video_sync.env")
 with open(env_path, "w") as f:
     f.write(f"VIDEO1_START={video1_start_sec:.6f}\n")
@@ -304,7 +312,7 @@ print(f"  Saved video1 start offset → {env_path}")
 # ── encode scaled video2 ──────────────────────────────────────────────────────
 cap2 = cv2.VideoCapture(INPUT2)
 fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-out = cv2.VideoWriter(OUTPUT, fourcc, 30, (W1, H1))
+out = cv2.VideoWriter(OUTPUT, fourcc, FPS2, (W1, H1))
 
 total = int(cap2.get(cv2.CAP_PROP_FRAME_COUNT))
 

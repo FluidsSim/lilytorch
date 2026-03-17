@@ -143,8 +143,11 @@ class SimConfig(BaseSimConfig):
                 "n_z_layers"       : 1,
                 "floor_color"      : "#0A1866",               # dark blue floor
                 "body_color"       : "#050505",               # near-black robot
-                "light_color"      : [0.05, 0.12, 0.85, 1.0], # blue lamp
-                "emissive_particles": False,                   # glow independent of light
+                # "light_color"      : [0.05, 0.12, 0.85, 1.0], # blue lamp
+                # "emissive_particles": True,                   # glow independent of light
+                "save_particles"   : True,
+                "save_dir"         : os.path.join(output_folder, "particles"),
+                "save_every"       : self.save_every,
             },
         })
 
