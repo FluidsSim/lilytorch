@@ -4,6 +4,7 @@ from 1Guilla robot experiment log files.
 """
 
 import os
+import datetime
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -11,8 +12,10 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 # ── Configuration ──────────────────────────────────────────────────────
-LOG_DIR = "/data/andreaferrario/1guilla_experiment_dye/1guilla_videos_swim_water/log"
-SAVE_DIR = "/data/andreaferrario/lilytorch/figures/experiment_logs"
+# LOG_DIR = "/data/andreaferrario/1guilla_experiment_dye/1guilla_videos_swim_water/log"
+MAIN_DIR = "/data/andreaferrario/1guilla_experiments/dyes"
+LOG_DIR = MAIN_DIR+"/log"
+SAVE_DIR = LOG_DIR+"/kinematic_plots"
 os.makedirs(SAVE_DIR, exist_ok=True)
 
 
@@ -125,12 +128,27 @@ if __name__ == "__main__":
     )
     print(f"Found {len(csv_files)} CSV files in {LOG_DIR}\n")
 
+    summary_rows = []
+
     for fname in csv_files:
         fpath = os.path.join(LOG_DIR, fname)
         tag = fname.replace("log.csv", "")
         print(f"Processing {fname} …")
 
+        # Get file creation date/time (use birth time if available, else mtime)
+        stat = os.stat(fpath)
+        ctime = getattr(stat, "st_birthtime", None) or stat.st_mtime
+        creation_dt = datetime.datetime.fromtimestamp(ctime).strftime("%Y-%m-%d %H:%M:%S")
+
         t, goal, fbck, meta, _ = read_experiment_csv(fpath)
+
+        summary_rows.append({
+            "filename": fname,
+            "creation_datetime": creation_dt,
+            "positionAmplitude_deg": meta["positionAmplitude_deg"],
+            "Lambda": meta["Lambda"],
+            "Frequency_Hz": meta["Frequency_Hz"],
+        })
 
         plot_desired_vs_actual(
             t, goal, fbck, meta,
@@ -142,5 +160,11 @@ if __name__ == "__main__":
             title_extra=tag,
             save_path=os.path.join(SAVE_DIR, f"{tag}_tracking_error.png"),
         )
+
+    # Save summary CSV
+    summary_df = pd.DataFrame(summary_rows)
+    summary_path = os.path.join(SAVE_DIR, "experiment_log_summary.csv")
+    summary_df.to_csv(summary_path, index=False)
+    print(f"\nSummary CSV saved → {summary_path}")
 
     print("\nDone.")
