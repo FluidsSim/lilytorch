@@ -6,10 +6,10 @@
       <link name="water">
         <pose>0 0 0 0 0 0</pose>
         <visual name="water_visual">
-          <pose>0.3 0.0 -0.15 0 0 0</pose>
+          <pose>0.22874999999999995 0.0 -0.215 0 0 0</pose>
           <geometry>
             <box>
-              <size>2.4 1.2 0.3</size>
+              <size>2.2575 1.505 0.43</size>
             </box>
           </geometry>
           <material>

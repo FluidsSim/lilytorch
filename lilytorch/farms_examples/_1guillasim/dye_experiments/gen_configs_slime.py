@@ -22,11 +22,17 @@ class SimConfig(BaseSimConfig):
         self.use_bdim       = True
         self.headless       = False
         self.smagorinsky_cs = 0.
-        self.carreau        = None   # Step 1: constant-ν baseline + sponge
-        self.sponge         = {
-            "width"   : 0.3,        # sponge layer thickness          [m]
-            "strength": 20.0,       # max damping coefficient σ_max   [1/s]
+        self.carreau = {
+            "nu_0"  : 2800.0e-6,
+            "nu_inf": 20.0e-6,
+            "lam"   : 1.0,
+            "n"     : 0.5,
+            "tau_y" : 0.05,   # enable yield stress
         }
+        # self.sponge         = {
+        #     "width"   : 0.6,        # sponge layer thickness          [m]
+        #     "strength": 4.0,       # max damping coefficient σ_max   [1/s]
+        # }
         self.nu             = 450.0 * 1e-6
         self.force_scaling  = 1
         self.rho_body       = 1000.0
@@ -36,13 +42,17 @@ class SimConfig(BaseSimConfig):
         self.animats_pars = [
             {
                 "model_name"     : "1guilla",
-                "sdf_name"       : "1guilla_800.sdf",
+                "sdf_name"       : "1guilla.sdf",
                 "control_type"   : "position",
                 "gains"          : [100.0, 1., 0],
                 "spawn_mode"     : SpawnMode.FREE,
-                "pose"           : [0.1, -0.2, 0., 0, 0, 2.9],
-                "controller_path": "lilytorch.farms_examples._1guillasim.pd_controller.PositionController",
-                "control_pars"   : {'freq': 0.5, 'twl': 14, 'amp': 40.0},
+                "pose"           : [0., -0.2, 0., 0, 0, 3.05],
+                "controller_path": "lilytorch.farms_examples._1guillasim.dye_experiments.controller.PositionController",
+                "control_pars"   : {
+                    "file_path": os.path.join(
+                        self.data_folder, "dye_experiments/robot_data/robot_data_log_2025-09-01_19_09_17.csv"
+                    ),
+                },
             },
         ]
 
@@ -93,13 +103,24 @@ class SimConfig(BaseSimConfig):
         self.compile_sdf             = True
         self.poisson_compile         = True
 
-        # ── Boundary conditions (3-D, all no-slip Dirichlet) ────────
-        self.bc_type_u   = ["D", "D", "D", "D", "D", "D"]
+        # # ── Boundary conditions (3-D, all no-slip Dirichlet) ────────
+        # self.bc_type_u   = ["D", "D", "D", "D", "D", "D"]
+        # self.bc_values_u = [0, 0, 0, 0, 0, 0]
+        # self.bc_type_v   = ["D", "D", "D", "D", "D", "D"]
+        # self.bc_values_v = [0, 0, 0, 0, 0, 0]
+        # self.bc_type_w   = ["D", "D", "D", "D", "D", "D"]
+        # self.bc_values_w = [0, 0, 0, 0, 0, 0]
+
+        # u: no-penetration on x-walls, free-slip on y/z-walls
+        self.bc_type_u   = ["D", "D", "N", "N", "N", "N"]
         self.bc_values_u = [0, 0, 0, 0, 0, 0]
-        self.bc_type_v   = ["D", "D", "D", "D", "D", "D"]
+        # v: free-slip on x/z-walls, no-penetration on y-walls
+        self.bc_type_v   = ["N", "N", "D", "D", "N", "N"]
         self.bc_values_v = [0, 0, 0, 0, 0, 0]
-        self.bc_type_w   = ["D", "D", "D", "D", "D", "D"]
+        # w: free-slip on x/y-walls, no-penetration on z-walls
+        self.bc_type_w   = ["N", "N", "N", "N", "D", "D"]
         self.bc_values_w = [0, 0, 0, 0, 0, 0]
+
 
         # ── Body ─────────────────────────────────────────────────────
         self.interp_data_subfolder = "interp_data_3d"
@@ -137,7 +158,7 @@ class SimConfig(BaseSimConfig):
                 "seed_interval"    : 1,
                 "turb_diffusivity" : 0.0,
                 "sphere_size"      : 0.003,
-                "particle_color"   : [0.545098039, 1.0, 0.0, 0.85],
+                "particle_color"   : [0.545098039, 1.0, 0.0, 0.1],
                 "trail_length"     : 0,
                 "update_every"     : None,
                 "n_z_layers"       : 1,

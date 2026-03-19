@@ -38,11 +38,10 @@ def quick(u, c, d):
 
 def van_leer(u, c, d):
     """Van Leer flux limiter -- 2nd-order TVD."""
-    return torch.where(
-        (c <= torch.minimum(u, d)) | (c >= torch.maximum(u, d)),
-        c,
-        c + (d - c) * (c - u) / (d - u + 1e-10),
-    )
+    denom = d - c
+    rf = (c - u) / (denom + 1e-30)
+    psi = (rf + rf.abs()) / (1.0 + rf.abs())
+    return torch.where(denom.abs() < 1e-30, c, _tvd_face(c, d, psi))
 
 
 def cds(u, c, d):
