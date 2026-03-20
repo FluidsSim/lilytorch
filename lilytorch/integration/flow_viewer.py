@@ -159,7 +159,10 @@ class FlowViewer(TaskExtension):
             _transparent = np.array([0, 0, 0, 0], dtype=np.float32)
             _zero = np.zeros(3, dtype=np.float64)
             _sz = np.array([self.sphere_size, 0, 0], dtype=np.float64)
+            reserved = 0
             for _ in range(self.max_spheres):
+                if scn.ngeom >= scn.maxgeom:
+                    break
                 g = scn.geoms[scn.ngeom]
                 mujoco.mjv_initGeom(
                     g,
@@ -167,6 +170,12 @@ class FlowViewer(TaskExtension):
                     _sz, _zero, _eye3, _transparent,
                 )
                 scn.ngeom += 1
+                reserved += 1
+            if reserved < self.max_spheres:
+                print(f"[FlowViewer] WARNING: user_scn.maxgeom={scn.maxgeom} "
+                      f"reached – only {reserved}/{self.max_spheres} sphere "
+                      f"slots reserved. Reduce max_spheres or increase maxgeom.")
+                self.max_spheres = reserved
             print(f"[FlowViewer] Reserved {self.max_spheres} sphere slots "
                   f"(geom {self._geom_start}..{scn.ngeom - 1}).")
         else:

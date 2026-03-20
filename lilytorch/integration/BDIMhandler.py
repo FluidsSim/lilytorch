@@ -782,6 +782,10 @@ class BDIMhandler:
         if fs.use_sponge:
             (u, v) = fs.apply_sponge_damping(u, v)
 
+        # Yield-stress damping (2-D)
+        if fs.use_yield_damping:
+            (u, v) = fs.apply_yield_damping(u, v)
+
         fs.adv_diff_solver.set_BCs(u, v)
         return (u, v, p)
 
@@ -855,6 +859,10 @@ class BDIMhandler:
         # Sponge damping: damp velocity near domain boundaries
         if fs.use_sponge:
             (u, v, w) = fs.apply_sponge_damping(u, v, w)
+
+        # Yield-stress damping (3-D)
+        if fs.use_yield_damping:
+            (u, v, w) = fs.apply_yield_damping(u, v, w)
 
         fs.adv_diff_solver.set_BCs(u, v, w)
         return (u, v, w, p)

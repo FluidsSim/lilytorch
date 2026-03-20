@@ -476,6 +476,8 @@ class ParticleViewer(TaskExtension):
                     _eye3,
                     pv._active_colors[i],
                 )
+                if pv.emissive_particles:
+                    g.emission = 1.0
             scn.ngeom = base + limit
             return limit
 
@@ -1016,6 +1018,8 @@ class ParticleViewer(TaskExtension):
                     _eye3,
                     self._active_colors[i],
                 )
+                if self.emissive_particles:
+                    g.emission = 1.0
                 g.category = mujoco.mjtCatBit.mjCAT_ALL
                 g.objtype = mujoco.mjtObj.mjOBJ_UNKNOWN
                 g.objid = -1

@@ -139,6 +139,7 @@ class BaseSimConfig:
         self.smagorinsky_cs          = 0.0
         self.carreau                 = None   # dict with keys: nu_0, nu_inf, lam, n
         self.sponge                  = None   # dict with keys: width, strength
+        self.yield_damping           = None   # dict with keys: gamma_c, strength (auto-derived from carreau.tau_y if None)
         self.jacobi_weight           = 0.7
         self.dtype                   = None
         self.zero_pressure_inside    = None
@@ -585,6 +586,9 @@ class BaseSimConfig:
 
         if self.sponge is not None:
             solver["sponge"] = self.sponge
+
+        if self.yield_damping is not None:
+            solver["yield_damping"] = self.yield_damping
 
         if self.is_3d:
             solver["Nz"]   = self.Nz

@@ -143,4 +143,95 @@ I/O) dominates cost. Add `torch.cuda.Event`-based timers around each phase, togg
 ### D7.
 
 
+---
+
+# IMPROVEMENT SUGGESTIONS (from deep code review, March 2026 — second pass)
+
+## E. NUMERICAL ACCURACY
+
+
+
+### E2. All-Neumann Poisson compatibility condition not enforced
+When `poisson_bc_type = "neumann"`, the system ∇²p = f is only solvable if ∫f dV = 0.
+There is no check or enforcement of this. Floating-point drift in the divergence of u* can
+violate it. Subtracting `mean(f)` from the RHS before the FFT/multigrid solve would make the
+solver robust and is standard practice.
+
+### E3. Heun body update is called only once per step — coupling is effectively 1st-order
+Heun's method calls the advection-diffusion solver twice (predictor + corrector). The body SDF
+and velocity are updated only once at the start of the step, so the corrector uses the body
+state at time *t*, not *t + dt/2*. The fluid–body coupling is therefore 1st-order accurate
+even though the fluid integration is 2nd-order. At minimum, document this as a known limitation;
+ideally, update the body to *t + dt* after the predictor and feed it into the corrector.
+
+### E4. `eps = 2*h` hardcoded — should be configurable
+The BDIM transition thickness is fixed at `2h` in `solver.py:577` with no config override.
+For coarser grids or larger bodies, `3h`–`4h` gives smoother IBM forcing. Add `eps_cells: 2`
+(integer) as a solver config key.
+
+
+## F. PERFORMANCE
+
+### F1. AABB culling for force integration
+`_forces_body_batch_3d` (and 2D equivalent) evaluates the smoothed delta δ(sdf − ε) across the
+**entire** domain for every body, but δ is non-zero only within ε of the body surface. Each body
+already has a bounding box. Slice the grid to each body's AABB + ε before the force integral.
+For a small swimmer in a large pool this is a 10–100× reduction in flops.
+
+### F2. Drag records allocate on GPU with full `nt` pre-allocation
+`viscous_drag_record` and `pressure_drag_record` pre-allocate `(n_bodies, n_force_comp, nt)` on
+device (solver.py:853). Move them to CPU pinned memory and use `tensor.pin_memory()` + async
+`copy_()`. This frees device memory and overlaps force accumulation with GPU compute.
+
+### F3. CC normals recomputed in every force call
+Both `forces_method2` and `forces_method2_3d` call `compute_normals(sdf_val)` via
+`torch.gradient` on the full SDF each step for the cell-centred normals. The staggered normals
+(`normal_x_u`, etc.) are already cached from the body update. Cache the CC normals too, computed
+once per body update alongside the staggered ones.
+
+### F4. `FlowDiagnostics` default `check_every = 1` is expensive
+With `check_every=1`, every step computes `vorticity_fn()` (another `torch.gradient` over the
+full velocity field). The config key `diagnostics_every` is not set in `base_sim_config.py` so
+it silently defaults to 1. The default should be `save_every` or at least 10.
+
+### F5. No `torch.compile` warm-up before the simulation loop
+Compiled kernels (adv-diff, BDIM meta, forces) trigger JIT tracing on their first real call,
+causing a latency spike at iteration 0. Add one dummy forward pass (with detach/no_grad) during
+`initialize_episode` — before the loop — to absorb tracing overhead.
+
+
+## G. CORRECTNESS / ROBUSTNESS
+
+### G1. Restart is incomplete — drag records and body state are not saved/restored
+`_load_initial_conditions` restores u, v, [w], p but not: `viscous_drag_record`,
+`pressure_drag_record`, Adams-Bashforth previous-step flux, or body initial state from FARMS.
+A warm restart will produce a different trajectory from a continuous run at the same point.
+A complete checkpoint should serialise all solver state plus the FARMS body poses.
+
+### G2. Async I/O futures are never pruned — potential memory leak
+`_io_futures` is an ever-growing list (solver.py:915). Over a 100k-step run with
+`save_every=100`, 1000 `Future` objects accumulate. Completed futures should be pruned
+periodically (e.g., every `save_every` steps), and uncaught I/O exceptions in futures should
+be surfaced rather than silently dropped.
+
+
+## H. ARCHITECTURE
+
+### H1. `forces_method1` is dead code
+`force_method` defaults to `"method2"` and 3D always uses `forces_method2_3d`. `forces_method1`
+(solver.py:1036) requires `body.cnt_update`, `body.mask`, `body.ds` — none of which are
+populated in any current example. The ~80-line method should be removed or formally deprecated
+with a docstring note to avoid misleading future contributors.
+
+### H2. `FluidSolver.__init__` is ~500 lines — extract into setup helpers
+The constructor initialises the grid, time integration, non-Newtonian models (Carreau,
+Smagorinsky, yield damping), sponge layer, both Poisson solvers, force buffers, diagnostics,
+output paths, and initial conditions. Extract into private methods: `_setup_grid()`,
+`_setup_models()`, `_setup_poisson()`, `_setup_output()`. Easier to navigate, test, and
+override in subclasses.
+
+### H3. `BaseSimConfig.run()` couples config generation and simulation launch
+Running a config to inspect the generated YAML requires launching a full FARMS simulation.
+Add a `BaseSimConfig.generate_config()` method that returns the parameter dicts without
+launching, and have `run()` call it internally. This makes unit testing and dry-runs trivial.
 

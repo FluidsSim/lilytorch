@@ -629,6 +629,25 @@ class FluidSolver:
         # (set each step when use_variable_viscosity is True, else None)
         self._nu_rho_field = None
 
+        # ============= Yield-stress damping =============
+        # Implicit penalty that drives velocity toward zero in unyielded
+        # (low-shear) regions, mimicking the solid-like behaviour of a
+        # yield-stress fluid.  Enabled only when the user explicitly sets
+        # a "yield_damping" dict in the solver config:
+        #   yield_damping:
+        #     gamma_c  : 0.0625   # critical strain rate [1/s]
+        #     strength : 1.1      # max damping coefficient σ_max [1/s]
+        yield_damping_cfg = solver.get("yield_damping", None)
+        if yield_damping_cfg is not None:
+            self.use_yield_damping = True
+            self._yield_gamma_c  = yield_damping_cfg["gamma_c"]
+            self._yield_strength = yield_damping_cfg["strength"]
+            print(f"Yield-stress damping enabled: "
+                  f"gamma_c={self._yield_gamma_c:.4f} s^-1, "
+                  f"strength={self._yield_strength:.4f} s^-1")
+        else:
+            self.use_yield_damping = False
+
         # ============= Sponge / damping layer =============
         sponge = solver.get("sponge", None)
         if sponge is not None:
@@ -1534,6 +1553,41 @@ class FluidSolver:
         return (u, v)
 
     # ------------------------------------------------------------------
+    #  Yield-stress damping
+    # ------------------------------------------------------------------
+    def apply_yield_damping(self, u, v, w=None):
+        """Damp velocity in unyielded (low-shear-rate) regions.
+
+        Where the local strain rate γ̇ is below γ̇_c, the fluid stress
+        is below the yield stress and the material should behave as a
+        solid.  We enforce this with an implicit penalty:
+
+            u_new = u / (1 + dt · σ(γ̇))
+
+        where σ(γ̇) = σ_max · max(0, 1 − γ̇/γ̇_c)².
+
+        This is applied to the cell-centred velocity magnitude; the
+        same scalar damping factor is used for all components.
+        """
+        if not self.use_yield_damping:
+            return (u, v, w) if w is not None else (u, v)
+
+        vel = (u, v, w) if w is not None else (u, v)
+        S_mag = ops.strain_rate_magnitude(vel, float(self.h), self.ndim)
+
+        # Quadratic ramp: full damping at γ̇=0, zero at γ̇≥γ̇_c
+        ratio = torch.clamp(1.0 - S_mag / self._yield_gamma_c, min=0.0)
+        sigma = self._yield_strength * ratio * ratio
+        damp = 1.0 / (1.0 + float(self.dt) * sigma)
+
+        u = u * damp
+        v = v * damp
+        if w is not None:
+            w = w * damp
+            return (u, v, w)
+        return (u, v)
+
+    # ------------------------------------------------------------------
     #  Smagorinsky LES model
     # ------------------------------------------------------------------
     def _compute_smagorinsky_nu_t(self, *vel):
@@ -1711,6 +1765,10 @@ class FluidSolver:
             if self.use_sponge:
                 (u_out, v_out) = self.apply_sponge_damping(u_out, v_out)
 
+            # Yield-stress damping (2-D)
+            if self.use_yield_damping:
+                (u_out, v_out) = self.apply_yield_damping(u_out, v_out)
+
             return (u_out, v_out, p_out)
 
         else:  # 3D
@@ -1799,6 +1857,10 @@ class FluidSolver:
             if self.use_sponge:
                 (u_out, v_out, w_out) = self.apply_sponge_damping(u_out, v_out, w_out)
 
+            # Yield-stress damping (3-D)
+            if self.use_yield_damping:
+                (u_out, v_out, w_out) = self.apply_yield_damping(u_out, v_out, w_out)
+
             return (u_out, v_out, p_out, w_out)
 
     def solve_heun(self, u, v, p, iteration, w_vel=None):
@@ -1845,6 +1907,10 @@ class FluidSolver:
             # Sponge damping (2-D)
             if self.use_sponge:
                 (u_out, v_out) = self.apply_sponge_damping(u_out, v_out)
+
+            # Yield-stress damping (2-D Euler)
+            if self.use_yield_damping:
+                (u_out, v_out) = self.apply_yield_damping(u_out, v_out)
 
             return (u_out, v_out, p_out)
 
@@ -1896,6 +1962,10 @@ class FluidSolver:
             # Sponge damping: damp velocity near domain boundaries
             if self.use_sponge:
                 (u_out, v_out, w_out) = self.apply_sponge_damping(u_out, v_out, w_out)
+
+            # Yield-stress damping (3-D Euler)
+            if self.use_yield_damping:
+                (u_out, v_out, w_out) = self.apply_yield_damping(u_out, v_out, w_out)
 
             return (u_out, v_out, p_out, w_out)
 
