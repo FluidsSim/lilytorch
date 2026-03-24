@@ -101,6 +101,7 @@ class BaseSimConfig:
         self.vmax        = 10.0
 
         # ── Arena ─────────────────────────────────────────────────────────
+        self.generate_pool  = True   # generate pool/water SDFs; False → use flat arena
         self.wall_thickness = None   # None → auto for 3-D, 0.3 for 2-D
         self.wall_height    = None   # None → 0.3 for 2-D (ignored for 3-D)
         self.arena_pose     = [0, 0, 0, 0, 0, 0]
@@ -369,40 +370,46 @@ class BaseSimConfig:
             )
 
     def gen_arena_config(self, output_folder, index=0):
-        if self.is_3d:
-            pool_dims = [self.xmax - self.xmin,
-                         self.ymax - self.ymin,
-                         self.zmax - self.zmin]
-            wt = self.wall_thickness
-            if wt is None:
-                wt = max(round(0.08 * min(pool_dims), 4), 0.01)
-            create_pool_sdf(
-                self.xmin, self.xmax, self.ymin, self.ymax,
-                zmin=self.zmin, zmax=self.zmax,
-                wall_thickness=wt, plotting=False,
-            )
-            water_sdf = create_water_sdf(
-                self.xmin, self.xmax, self.ymin, self.ymax,
-                zmin=self.zmin, zmax=self.zmax,
-                water_height=self.zmax,
-            )
-            water_h = self.water_height if self.water_height != 0 else self.zmax
+        if self.generate_pool:
+            if self.is_3d:
+                pool_dims = [self.xmax - self.xmin,
+                             self.ymax - self.ymin,
+                             self.zmax - self.zmin]
+                wt = self.wall_thickness
+                if wt is None:
+                    wt = max(round(0.08 * min(pool_dims), 4), 0.01)
+                create_pool_sdf(
+                    self.xmin, self.xmax, self.ymin, self.ymax,
+                    zmin=self.zmin, zmax=self.zmax,
+                    wall_thickness=wt, plotting=False,
+                )
+                water_sdf = create_water_sdf(
+                    self.xmin, self.xmax, self.ymin, self.ymax,
+                    zmin=self.zmin, zmax=self.zmax,
+                    water_height=self.zmax,
+                )
+                water_h = self.water_height if self.water_height != 0 else self.zmax
+            else:
+                wt = self.wall_thickness if self.wall_thickness is not None else 0.3
+                wh = self.wall_height if self.wall_height is not None else 0.3
+                create_pool_sdf(
+                    self.xmin, self.xmax, self.ymin, self.ymax,
+                    wall_thickness=wt, wall_height=wh, plotting=False,
+                )
+                water_sdf = create_water_sdf(
+                    self.xmin, self.xmax, self.ymin, self.ymax,
+                    water_height=self.water_height,
+                    wall_height=wh,
+                )
+                water_h = self.water_height
+            arena_sdf = os.path.join(sdfs_path, "pool", "sdf", "pool.sdf")
         else:
-            wt = self.wall_thickness if self.wall_thickness is not None else 0.3
-            wh = self.wall_height if self.wall_height is not None else 0.3
-            create_pool_sdf(
-                self.xmin, self.xmax, self.ymin, self.ymax,
-                wall_thickness=wt, wall_height=wh, plotting=False,
-            )
-            water_sdf = create_water_sdf(
-                self.xmin, self.xmax, self.ymin, self.ymax,
-                water_height=self.water_height,
-                wall_height=wh,
-            )
+            arena_sdf = os.path.join(sdfs_path, "arena_flat_v0", "sdf", "arena_flat.sdf")
+            water_sdf = os.path.join(sdfs_path, "arena_water_v0", "sdf", "arena_water.sdf")
             water_h = self.water_height
 
         arena_dict = {
-            "sdf": os.path.join(sdfs_path, "pool", "sdf", "pool.sdf"),
+            "sdf": arena_sdf,
             "spawn": {
                 "loader"  : 0,
                 "mode"    : SpawnMode.FREE,

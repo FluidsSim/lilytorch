@@ -1,6 +1,9 @@
 """
 Plot results from the Gazzola et al. 2D sphere sedimentation test.
 
+Reads fluid fields from ``fields.h5`` and body contours from
+``contours.h5`` (the new unified HDF5 storage).
+
 Produces:
   1. Normalised COM velocity (ux, uz, omega) vs normalised time,
      compared with reference data from Gazzola et al. (2011).
@@ -11,6 +14,7 @@ Produces:
 
 import pathlib
 import numpy as np
+import h5py
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -41,19 +45,21 @@ FIG_DIR.mkdir(exist_ok=True)
 REF_DIR    = HERE.parent.parent.parent / "data_to_save"
 FMT        = ".png"
 
-# Auto-detect data: fluid field + HDF5
-FLUID_DIR  = pathlib.Path("/data/andreaferrario/ns_data/2026-03-09T17:05:04.152466")
-HDF5_PATH  = pathlib.Path("/data/andreaferrario/ns_data/2026-03-09T17:05:03.094491/output/simulation.hdf5")
+# Data directory containing fields.h5, contours.h5, and output/simulation.hdf5
+DATA_DIR   = pathlib.Path("/data/andreaferrario/ns_data/2026-03-24T21:35:37.663298")
+FIELDS_H5  = DATA_DIR / "fields.h5"
+CONTOURS_H5 = DATA_DIR / "contours.h5"
+HDF5_PATH  = DATA_DIR / "output" / "simulation.hdf5"
 
 # ── physical parameters ─────────────────────────────────────────────────
 D          = 0.005          # sphere diameter  [m]
 R          = D / 2
-rho_body   = 1050.0         # kg/m^3
+rho_body   = 1010.0         # kg/m^3
 rho_fluid  = 996.0          # kg/m^3
 nu         = 8e-7           # kinematic viscosity [m^2/s]
 g_acc      = 9.81           # gravitational acceleration [m/s^2]
 U_t        = 0.02501        # terminal settling velocity [m/s]
-mass_2d    = 0.02061670178918302   # rho_body * pi * R^2
+mass_2d    = rho_body * np.pi * R**2
 dt_fluid   = 1e-4
 
 # ── colours ──────────────────────────────────────────────────────────────
@@ -62,10 +68,47 @@ C_UZ  = "#B2182B"   # red    – vertical (settling) velocity
 C_ANG = "#4DAF4A"   # green  – angular velocity
 
 
+# ── helpers ──────────────────────────────────────────────────────────────
+def load_grids():
+    """Return (x, y) 1-D grid arrays from fields.h5."""
+    with h5py.File(FIELDS_H5, "r") as f:
+        x = f["grids/x"][:]
+        y = f["grids/y"][:]
+    return x, y
+
+
+def load_field(iteration, name):
+    """Load a single field array for a given iteration."""
+    grp = f"fields/{iteration:06d}"
+    with h5py.File(FIELDS_H5, "r") as f:
+        return f[grp][name][:]
+
+
+def list_iterations():
+    """Return sorted list of saved iteration numbers."""
+    with h5py.File(FIELDS_H5, "r") as f:
+        return sorted(int(k) for k in f["fields"].keys())
+
+
+def load_contour(iteration, body_idx=0):
+    """Load body contour (2, N) for a given iteration from contours.h5."""
+    if not CONTOURS_H5.exists():
+        return None
+    with h5py.File(CONTOURS_H5, "r") as f:
+        key = f"{iteration:06d}/body_{body_idx}"
+        if key in f:
+            return f[key][:]
+    return None
+
+
 # =====================================================================
 # 1.  Normalised velocity plot  (HDF5 body kinematics)
 # =====================================================================
 def plot_velocities():
+    if not HDF5_PATH.exists():
+        print("  simulation.hdf5 not found – skipping velocity plot.")
+        return
+
     from farms_core.io.hdf5 import hdf5_to_dict
     from farms_core.sensors.sensor_convention import sc
 
@@ -138,20 +181,19 @@ def plot_velocities():
 
 
 # =====================================================================
-# 2.  Velocity-field snapshots (from UV npy files)
+# 2.  Velocity-field snapshots (from fields.h5)
 # =====================================================================
 def plot_velocity_fields():
-    uv_dir = FLUID_DIR / "uv_field"
-    xg = np.load(str(uv_dir / "x_grid.npy"))
-    yg = np.load(str(uv_dir / "y_grid.npy"))
-    X, Y = np.meshgrid(xg, yg, indexing="ij")
+    if not FIELDS_H5.exists():
+        print("  fields.h5 not found – skipping velocity field plots.")
+        return
 
-    iters = sorted(set(
-        int(p.stem.split("_")[1])
-        for p in uv_dir.glob("u_*.npy")
-    ))
+    xg, yg = load_grids()
+    X, Y = np.meshgrid(xg, yg, indexing="ij")
+    iters = list_iterations()
+
     if not iters:
-        print("  No UV field data – skipping.")
+        print("  No field data – skipping.")
         return
 
     # Pick 4 evenly spaced snapshots
@@ -166,8 +208,8 @@ def plot_velocity_fields():
 
     im = None
     for ax, it in zip(axes, chosen):
-        u = np.load(str(uv_dir / f"u_{it}.npy"))
-        v = np.load(str(uv_dir / f"v_{it}.npy"))
+        u = load_field(it, "u")
+        v = load_field(it, "v")
         speed = np.sqrt(u**2 + v**2)
         t_phys = it * dt_fluid
 
@@ -176,16 +218,28 @@ def plot_velocity_fields():
                            cmap="inferno", vmin=0, vmax=vmax,
                            shading="auto", rasterized=True)
 
-        # Sphere outline (approximate: drops from y=0.3)
-        th = np.linspace(0, 2 * np.pi, 120)
-        cx, cy = 0.0, 0.3 - abs(U_t) * t_phys
-        ax.plot((cx + R * np.cos(th)) * 1e3,
-                (cy + R * np.sin(th)) * 1e3,
-                color="white", linewidth=1.2)
+        # Sphere outline from contours.h5 (fall back to approximate circle)
+        cnt = load_contour(it)
+        if cnt is not None:
+            ax.plot(cnt[0] * 1e3, cnt[1] * 1e3,
+                    color="white", linewidth=1.2)
+        else:
+            th = np.linspace(0, 2 * np.pi, 120)
+            cx, cy = 0.0, 0.3 - abs(U_t) * t_phys
+            ax.plot((cx + R * np.cos(th)) * 1e3,
+                    (cy + R * np.sin(th)) * 1e3,
+                    color="white", linewidth=1.2)
 
         ax.set_title(f"$t = {t_phys * 1e3:.1f}$ ms", fontsize=10)
         ax.set_xlabel("$x$ [mm]")
         ax.set_aspect("equal")
+
+        # Zoom around sphere using SDF or contour centroid
+        if cnt is not None:
+            cx = np.mean(cnt[0])
+            cy = np.mean(cnt[1])
+        else:
+            cx, cy = 0.0, 0.3 - abs(U_t) * t_phys
         ax.set_xlim([(cx - 4 * R) * 1e3, (cx + 4 * R) * 1e3])
         ax.set_ylim([(cy - 6 * R) * 1e3, (cy + 6 * R) * 1e3])
 
@@ -203,18 +257,20 @@ def plot_velocity_fields():
 # 3.  Vorticity field snapshot
 # =====================================================================
 def plot_vorticity():
-    uv_dir = FLUID_DIR / "uv_field"
-    xg = np.load(str(uv_dir / "x_grid.npy"))
-    yg = np.load(str(uv_dir / "y_grid.npy"))
-    dx, dy = xg[1] - xg[0], yg[1] - yg[0]
+    if not FIELDS_H5.exists():
+        print("  fields.h5 not found – skipping vorticity plot.")
+        return
 
-    iters = sorted(set(int(p.stem.split("_")[1]) for p in uv_dir.glob("u_*.npy")))
+    xg, yg = load_grids()
+    dx, dy = xg[1] - xg[0], yg[1] - yg[0]
+    iters = list_iterations()
+
     if len(iters) < 2:
         return
 
     it = iters[-1]
-    u = np.load(str(uv_dir / f"u_{it}.npy"))
-    v = np.load(str(uv_dir / f"v_{it}.npy"))
+    u = load_field(it, "u")
+    v = load_field(it, "v")
     t_phys = it * dt_fluid
 
     omega = np.gradient(v, dx, axis=0) - np.gradient(u, dy, axis=1)
@@ -227,10 +283,22 @@ def plot_vorticity():
                        cmap="RdBu_r", norm=norm,
                        shading="auto", rasterized=True)
 
-    th = np.linspace(0, 2 * np.pi, 120)
-    cx, cy = 0.0, 0.3 - abs(U_t) * t_phys
-    ax.plot((cx + R * np.cos(th)) * 1e3,
-            (cy + R * np.sin(th)) * 1e3, "k-", linewidth=1.2)
+    # Sphere outline from contours.h5
+    cnt = load_contour(it)
+    if cnt is not None:
+        ax.plot(cnt[0] * 1e3, cnt[1] * 1e3, "k-", linewidth=1.2)
+    else:
+        th = np.linspace(0, 2 * np.pi, 120)
+        cx, cy = 0.0, 0.3 - abs(U_t) * t_phys
+        ax.plot((cx + R * np.cos(th)) * 1e3,
+                (cy + R * np.sin(th)) * 1e3, "k-", linewidth=1.2)
+
+    # Zoom around sphere
+    if cnt is not None:
+        cx = np.mean(cnt[0])
+        cy = np.mean(cnt[1])
+    else:
+        cx, cy = 0.0, 0.3 - abs(U_t) * t_phys
 
     ax.set_xlabel("$x$ [mm]")
     ax.set_ylabel("$y$ [mm]")
@@ -249,18 +317,26 @@ def plot_vorticity():
 # 4.  Vertical velocity profile at the last saved snapshot
 # =====================================================================
 def plot_v_profile():
-    uv_dir = FLUID_DIR / "uv_field"
-    xg = np.load(str(uv_dir / "x_grid.npy"))
-    yg = np.load(str(uv_dir / "y_grid.npy"))
+    if not FIELDS_H5.exists():
+        print("  fields.h5 not found – skipping v-profile plot.")
+        return
 
-    iters = sorted(set(int(p.stem.split("_")[1]) for p in uv_dir.glob("v_*.npy")))
+    xg, yg = load_grids()
+    iters = list_iterations()
+
     if not iters:
         return
 
     it = iters[-1]
-    v = np.load(str(uv_dir / f"v_{it}.npy"))
+    v = load_field(it, "v")
     t_phys = it * dt_fluid
-    cy = 0.3 - abs(U_t) * t_phys
+
+    # Find sphere centre from contour or estimate
+    cnt = load_contour(it)
+    if cnt is not None:
+        cy = np.mean(cnt[1])
+    else:
+        cy = 0.3 - abs(U_t) * t_phys
     j_cen = np.argmin(np.abs(yg - cy))
 
     fig, ax = plt.subplots(figsize=(6, 3.8))

@@ -1,10 +1,6 @@
 """Network controller – 2-D sphere sedimentation (Gazzola et al.)
 
-Updated to be compatible with the current lilytorch API (MultiAnimatBodies,
-BDIM2 meta-equation, forces_method2 per-body SDF fields, etc.).
-
-Previous version used Brinkmann penalisation; now switched to BDIM2 for
-consistency with the rest of the codebase.
+Uses BDIM2 meta-equation with single Euler step.
 """
 
 import numpy as np
@@ -47,9 +43,9 @@ class BDIMhandler:
         physics.model.geom_solref[:, 0] = 0.001
         physics.model.geom_solref[:, 1] = 0.5
 
-        # Physical parameters
-        self.rho_body  = 1050.0
-        self.rho_fluid = 996.0
+        # Physical parameters (read from config)
+        self.rho_fluid = self.pars['solver']['rho']
+        self.rho_body  = self.pars['solver'].get('rho_body', self.rho_fluid)
         self.radius    = 0.0025
         self.mass      = np.pi * (self.radius ** 2) * self.rho_body
         self.inertia   = 0.5 * self.mass * (self.radius ** 2)
@@ -57,8 +53,6 @@ class BDIMhandler:
         print("Body inertia: ", self.inertia)
 
         # ---- allocate per-body stack tensors --------------------------
-        # MultiAnimatBodies no longer pre-allocates these; we need them
-        # for the argmin/gather union reduction in update().
         comp = self.fluid_solver.composite_body
         gs   = comp.grid_shape
         nb   = comp.nbodies
@@ -176,6 +170,15 @@ class BDIMhandler:
             print(physics.data.xfrc_applied[ind, [0, 2, 4]] / mass, physics.data.qvel[1])
 
     # ------------------------------------------------------------------
+    #  BCs helper
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _set_bc(u, v):
+        for i in [1, -1]:
+            u[i, :] = 0;  u[:, i] = 0
+            v[i, :] = 0;  v[:, i] = 0
+
+    # ------------------------------------------------------------------
     #  BDIM2 helper: apply the meta-equation to a velocity component
     # ------------------------------------------------------------------
     def _bdim2(self, phi, mu0, m_m0, body_vel, mu1, nx, ny):
@@ -186,17 +189,54 @@ class BDIMhandler:
             + mu1 * fs.normal_derivative(phi - body_vel, nx, ny)
         )
 
-    # ------------------------------------------------------------------
-    #  BCs helper
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _set_bc(u, v):
-        for i in [1, -1]:
-            u[i, :] = 0;  u[:, i] = 0
-            v[i, :] = 0;  v[:, i] = 0
+    # ==================================================================
+    #  fluid_step: single Euler step with BDIM2
+    # ==================================================================
+    def fluid_step(self, u, v, p, timestep):
+        fs = self.fluid_solver
+        comp = fs.composite_body
+
+        # Gravity body force (g = -9.81 in fluid y-direction)
+        v = v - 9.81 * fs.dt
+
+        # Advection-diffusion
+        (uprime, vprime) = fs.adv_diff_solver.solve(u, v)
+        self._set_bc(uprime, vprime)
+
+        # BDIM2 meta-equation
+        uprime = self._bdim2(
+            uprime, fs.mu0_all_u, fs.m_m0_all_u, comp.body_u,
+            fs.mu1_all_u, fs.normal_x_u, fs.normal_y_u,
+        )
+        vprime = self._bdim2(
+            vprime, fs.mu0_all_v, fs.m_m0_all_v, comp.body_v,
+            fs.mu1_all_v, fs.normal_x_v, fs.normal_y_v,
+        )
+
+        # Poisson solve (variable-density coefficients)
+        # Use local variable — do NOT overwrite fs.rho, which must stay
+        # as the scalar fluid density for forces_method1's stress tensor.
+        rho_blend = self.rho_fluid * fs.mu0_all_u + self.rho_body * fs.m_m0_all_u
+        ch = timestep * fs.mu0_all_u / rho_blend
+        cv = timestep * fs.mu0_all_v / rho_blend
+
+        fs.div = fs.divergence(uprime, vprime)
+        p, _ = fs.poisson_solver.solve_multigrid(
+            fs.div[1:-1, 1:-1],
+            p,
+            ch=ch[1:, 1:-1],
+            cv=cv[1:-1, 1:],
+        )
+
+        # Pressure projection
+        (p_x, p_y) = fs.gradient(p)
+        u = uprime - ch * p_x
+        v = vprime - cv * p_y
+
+        return (u, v, p)
 
     # ==================================================================
-    #  step: one full coupled fluid-body step  (Heun / RK2)
+    #  step: one full coupled fluid-body step
     # ==================================================================
     def step(self, task, physics):
 
@@ -214,7 +254,7 @@ class BDIMhandler:
             # 1. Update SDF + body velocities from FARMS kinematics
             self.update(t, iteration, dt=timestep)
 
-            # 2. Recompute mu / normal fields
+            # 2. Recompute mu / mask fields
             (fs.mu0_all, fs.mu1_all) = comp.mu_funcs(comp.sdf_val)
             fs.m_m0_all = 1 - fs.mu0_all
             (fs.normal_x, fs.normal_y) = comp.compute_normals(comp.sdf_val)
@@ -227,93 +267,17 @@ class BDIMhandler:
             fs.m_m0_all_v = 1 - fs.mu0_all_v
             (fs.normal_x_v, fs.normal_y_v) = comp.compute_normals(comp.sdf_val_v)
 
-            # 3. Variable density: rho = rho_fluid * mu0 + rho_body * (1-mu0)
-            fs.rho = 996.0 * fs.mu0_all_u + 1010.0 * fs.m_m0_all_u
+            # 3. Euler step with Brinkmann penalisation
+            (u, v, p) = self.fluid_step(fs.u0, fs.v0, fs.p0, timestep)
+            (fs.u0, fs.v0, fs.p0) = (u, v, p)
 
-            (u, v, p) = (fs.u0, fs.v0, fs.p0)
-
-            # 4. Gravity body force  (g = -9.81 in the y-direction)
-            v = v - 9.81 * fs.dt
-
-            # -- pre-compute Poisson coefficients (constant for both stages) --
-            c     = torch.ones_like(u)
-            coeff = timestep / fs.rho
-            ch    = timestep * fs.mu0_all_u / fs.rho
-            cv    = timestep * fs.mu0_all_v / fs.rho
-
-            # ==================== PREDICTOR (w = 1) ====================
-            (uprime, vprime) = fs.adv_diff_solver.solve(u, v)
-            self._set_bc(uprime, vprime)
-
-            # BDIM2 meta-equation
-            uprime = self._bdim2(
-                uprime, fs.mu0_all_u, fs.m_m0_all_u, comp.body_u,
-                fs.mu1_all_u, fs.normal_x_u, fs.normal_y_u,
-            )
-            vprime = self._bdim2(
-                vprime, fs.mu0_all_v, fs.m_m0_all_v, comp.body_v,
-                fs.mu1_all_v, fs.normal_x_v, fs.normal_y_v,
-            )
-
-            # Keep BDIM'd velocities for Heun averaging
-            uprime_bdim = uprime
-            vprime_bdim = vprime
-
-            # Poisson solve  (w = 1)
-            fs.div = fs.divergence(uprime, vprime)
-            p1, _ = fs.poisson_solver.solve_multigrid(
-                fs.div[1:-1, 1:-1], p,
-                ch=ch[1:, 1:-1],
-                cv=cv[1:-1, 1:],
-            )
-            (p_x, p_y) = fs.gradient(p1)
-            u1 = uprime - ch * p_x
-            v1 = vprime - cv * p_y
-
-            # ==================== CORRECTOR (w = 0.5) ==================
-            (uprime2, vprime2) = fs.adv_diff_solver.solve(u1, v1)
-            # Rebase from u^n  (v already includes gravity)
-            uprime2 = u + (uprime2 - u1)
-            vprime2 = v + (vprime2 - v1)
-            self._set_bc(uprime2, vprime2)
-
-            # BDIM2 meta-equation
-            uprime2 = self._bdim2(
-                uprime2, fs.mu0_all_u, fs.m_m0_all_u, comp.body_u,
-                fs.mu1_all_u, fs.normal_x_u, fs.normal_y_u,
-            )
-            vprime2 = self._bdim2(
-                vprime2, fs.mu0_all_v, fs.m_m0_all_v, comp.body_v,
-                fs.mu1_all_v, fs.normal_x_v, fs.normal_y_v,
-            )
-
-            # Heun average of BDIM'd velocities
-            u_avg = 0.5 * (uprime_bdim + uprime2)
-            v_avg = 0.5 * (vprime_bdim + vprime2)
-            self._set_bc(u_avg, v_avg)
-
-            # Poisson solve  (w = 0.5)
-            fs.div = fs.divergence(u_avg, v_avg)
-            ch2 = 0.5 * ch
-            cv2 = 0.5 * cv
-            p2, _ = fs.poisson_solver.solve_multigrid(
-                fs.div[1:-1, 1:-1], p,
-                ch=ch2[1:, 1:-1],
-                cv=cv2[1:-1, 1:],
-            )
-            (p_x, p_y) = fs.gradient(p2)
-            u_out = u_avg - ch2 * p_x
-            v_out = v_avg - cv2 * p_y
-
-            (fs.u0, fs.v0, fs.p0) = (u_out, v_out, p2)
-
-            # 5. Compute fluid forces
+            # 4. Compute fluid forces
             fs.forces_method2(fs.u0, fs.v0, fs.p0, iteration)
 
-            # 6. Plotting / saving
+            # 5. Plotting / saving
             self.terminate = fs.plotting_debug(fs.u0, fs.v0, fs.p0, iteration)
 
-            # 7. Apply forces to MuJoCo body
+            # 6. Apply forces to MuJoCo body
             self.apply_forces(task, physics)
 
         self.iteration += 1
