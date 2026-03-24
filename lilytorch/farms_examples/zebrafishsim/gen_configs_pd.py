@@ -10,7 +10,7 @@ class SimConfig(BaseSimConfig):
 
     def __init__(self):
 
-        self.freqs = [1,3,5,7,9]
+        self.freqs = [3,8,12]
 
         super().__init__()
 
@@ -18,8 +18,13 @@ class SimConfig(BaseSimConfig):
             lilytorch_repo_root, 'farms_examples', 'zebrafishsim',
         )
 
+        self.constant_drags = [
+            [-0.0, -0.0102864, -0.0080005],
+            [0, 0, 0]
+        ]
+
         # ── Hardware ──────────────────────────────────────────────────
-        self.compute_sdf    = False
+        self.compute_sdf    = True
         self.use_gpu        = True
         self.use_bdim       = True
         self.headless       = False
@@ -36,7 +41,11 @@ class SimConfig(BaseSimConfig):
                 "spawn_mode"     : SpawnMode.TRANSVERSE,
                 "pose"           : [0, 0, 0.0, 0, 0, 3.141592653589793],
                 "controller_path": "lilytorch.farms_examples.zebrafishsim.pd_controller.PositionController",
-                "control_pars"   : {'freq': 5.0, 'twl': 20, 'amp': 120},
+                "control_pars"   : {
+                    'freq': 5.0, 'twl': 20, 'amp': 120,
+                    'bout_duration': None, 'glide_duration': 1,
+                    'bout_ramp': 0.2,
+                },
             },
         ]
 
@@ -51,8 +60,6 @@ class SimConfig(BaseSimConfig):
         self.ymax =  0.0125
         self.zmin = -0.00625
         self.zmax =  0.00625
-
-        # self.force_scaling         = 1.0
 
         # ── Physics ───────────────────────────────────────────────────
         self.rho_body          = 1000.0
