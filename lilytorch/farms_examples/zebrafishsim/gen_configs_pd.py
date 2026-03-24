@@ -27,7 +27,7 @@ class SimConfig(BaseSimConfig):
         self.compute_sdf    = True
         self.use_gpu        = True
         self.use_bdim       = True
-        self.headless       = False
+        self.headless       = True
         self.smagorinsky_cs = 0.
 
         # ── Animats ───────────────────────────────────────────────────
@@ -38,7 +38,7 @@ class SimConfig(BaseSimConfig):
                 "sdf_file"       : os.path.join(sdfs_path, "zebrafish", "zebrafish_v1_triangulated", "sdf", "zebrafish_old.sdf"),
                 "control_type"   : "position",
                 "gains"          : [0.001, .00002, 0],
-                "spawn_mode"     : SpawnMode.TRANSVERSE,
+                "spawn_mode"     : SpawnMode.FREE,
                 "pose"           : [0, 0, 0.0, 0, 0, 3.141592653589793],
                 "controller_path": "lilytorch.farms_examples.zebrafishsim.pd_controller.PositionController",
                 "control_pars"   : {
