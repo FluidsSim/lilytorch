@@ -2173,10 +2173,22 @@ class FluidSolver:
         ("pressure",   lambda s, u, v, p, w: p.cpu(),                                                None,   True),
     ]
 
+    # Maximum number of pending I/O futures before _submit_io blocks.
+    # Each future can capture hundreds of MB of numpy arrays (3-D field
+    # snapshots, per-body SDFs, …).  Without a cap the queue grows faster
+    # than the 2-worker pool can drain it, causing OOM on large grids.
+    _MAX_PENDING_IO = 10
+
     def _submit_io(self, fn, *args, **kwargs):
         """Submit *fn* to the background I/O pool and track the future."""
         # Reap already-finished futures to avoid unbounded growth
         self._io_futures = [f for f in self._io_futures if not f.done()]
+        # Throttle: block until the queue drains below the cap so that
+        # captured numpy arrays from old frames can be garbage-collected.
+        while len(self._io_futures) >= self._MAX_PENDING_IO:
+            # Wait for the oldest pending future to finish
+            self._io_futures[0].result()
+            self._io_futures = [f for f in self._io_futures if not f.done()]
         fut = self._io_executor.submit(fn, *args, **kwargs)
         self._io_futures.append(fut)
         return fut
@@ -2223,26 +2235,6 @@ class FluidSolver:
                         _com_positions.append(None)
 
             if self.ndim == 2:
-                # ---- build per-body mu0 RGBA overlay (once per frame) ----
-                _mu0_rgba = None
-                if bodies is not None and hasattr(self, "composite_body"):
-                    _eps = getattr(self.composite_body, "eps",
-                                   getattr(self, "eps", None))
-                    # Snapshot batched per-body SDFs (comp.sdf_vals) to CPU
-                    # numpy.  This is the primary SDF source for BDIMhandler
-                    # paths where individual body.sdf_val is never set.
-                    _sdf_vals_np = None
-                    _sv = getattr(self.composite_body, "sdf_vals", None)
-                    if _sv is not None:
-                        _sdf_vals_np = _sv.detach().cpu().numpy().copy()
-                    if _eps is not None:
-                        _mu0_rgba = plotting.build_body_mu0_rgba(
-                            bodies, self.grid_shape, float(_eps),
-                            sdf_vals=_sdf_vals_np,
-                        )
-
-                # Crop ghost cells so the plot shows only the physical domain.
-                _crop_mu0 = _mu0_rgba[1:-1, 1:-1] if _mu0_rgba is not None else None
                 _phys_extent = (self.xmin, self.xmax, self.ymin, self.ymax)
 
                 for (name, field_fn, vmin, vmax, show_body) in specs:
@@ -2258,7 +2250,6 @@ class FluidSolver:
                         field_np, _phys_extent,
                         name, iteration, save_path,
                         vmin=eff_vmin, vmax=eff_vmax, bodies=_bodies,
-                        body_mu0_rgba=_crop_mu0 if show_body else None,
                         body_com_positions=_com_positions if show_body else None,
                     )
             else:
@@ -2274,41 +2265,6 @@ class FluidSolver:
                 sdf_np = None
                 if hasattr(self, "composite_body") and hasattr(self.composite_body, "sdf_val"):
                     sdf_np = self.composite_body.sdf_val.cpu().numpy().copy()[_s, _s, _s]
-                # snapshot batched per-body SDFs for mu0 colouring
-                _sdf_vals_3d_np = None
-                _eps_3d = None
-                if bodies is not None and hasattr(self, "composite_body"):
-                    comp = self.composite_body
-                    _eps_3d = getattr(comp, "eps",
-                                       getattr(self, "eps", None))
-                    # Prefer sparse per-body SDFs from _update_3d (the
-                    # dense comp.sdf_vals is NOT populated by the 3-D
-                    # AABB path and stays all-zero → wrong mu0 overlay).
-                    _sparse = getattr(comp, "_sdf_sparse", None)
-                    if _sparse is not None and any(s is not None for s in _sparse):
-                        _FAR = 1e4
-                        B = len(_sparse)
-                        full = np.full((B, *self.grid_shape), _FAR,
-                                       dtype=np.float32)
-                        for bi, entry in enumerate(_sparse):
-                            if entry is None:
-                                continue
-                            aabb, sdf_sub = entry
-                            sdf_cpu = (sdf_sub.detach().cpu().numpy()
-                                       if hasattr(sdf_sub, 'detach')
-                                       else np.asarray(sdf_sub))
-                            if aabb is not None:
-                                i0, i1, j0, j1, k0, k1 = aabb
-                                full[bi, i0:i1, j0:j1, k0:k1] = sdf_cpu
-                            else:
-                                full[bi] = sdf_cpu
-                        _sdf_vals_3d_np = full[:, _s, _s, _s]
-                    else:
-                        # Fallback: dense comp.sdf_vals (2-D path or
-                        # legacy code that populates it directly).
-                        _sv3 = getattr(comp, "sdf_vals", None)
-                        if _sv3 is not None:
-                            _sdf_vals_3d_np = _sv3.detach().cpu().numpy().copy()[:, _s, _s, _s]
                 for (name, field_fn, vmin, vmax, _show_body) in specs:
                     field = field_fn(self, u, v, p, w_vel)
                     field_np = field.detach().cpu().numpy().copy() if hasattr(field, 'detach') else np.array(field)
@@ -2317,17 +2273,12 @@ class FluidSolver:
                     eff_vmax = self.vmax if vmax is None else vmax
                     save_path = self.save_path
                     _pass_bodies = bodies if _show_body else None
-                    _pass_mu0 = (_sdf_vals_3d_np is not None and _eps_3d is not None
-                                 and _show_body)
                     self._submit_io(
                         plotting.plot_field_3d_slices,
                         field_np, coords,
                         name, iteration, save_path,
                         vmin=eff_vmin, vmax=eff_vmax, bodies=_pass_bodies,
                         sdf_3d=sdf_np,
-                        body_mu0_coloring=_pass_mu0,
-                        body_eps=float(_eps_3d) if _eps_3d is not None else None,
-                        sdf_vals=_sdf_vals_3d_np if _pass_mu0 else None,
                         body_com_positions=_com_positions if _show_body else None,
                     )
 

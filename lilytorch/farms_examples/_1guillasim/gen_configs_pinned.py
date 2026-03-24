@@ -8,20 +8,21 @@ from lilytorch.farms_examples.base_sim_config import BaseSimConfig
 class SimConfig(BaseSimConfig):
 
     def __init__(self):
+        self.freqs = [
+            0.4, 0.43, 0.47, 0.5, 0.53, 0.57, 0.6, 0.63, 0.67,
+            0.7, 0.73, 0.77, 0.8, 0.83, 0.87, 0.9, 0.93, 0.97, 1.0,
+        ]
+
         super().__init__()
 
         self.data_folder = os.path.join(
             lilytorch_repo_root, 'farms_examples', '_1guillasim',
         )
 
-        self.freqs = [
-            0.4, 0.43, 0.47, 0.5, 0.53, 0.57, 0.6, 0.63, 0.67,
-            0.7, 0.73, 0.77, 0.8, 0.83, 0.87, 0.9, 0.93, 0.97, 1.0,
-        ]
-
         # ── Hardware ──────────────────────────────────────────────────
         self.use_gpu  = False
         self.headless = True
+        self.use_bdim = False
 
         # ── Animats ───────────────────────────────────────────────────
         self.filter_fixed_joints = False

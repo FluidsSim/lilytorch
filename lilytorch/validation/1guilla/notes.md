@@ -27,3 +27,30 @@ python plot_particles_robot.py --sim_dir /data/andreaferrario/ns_data/2026-03-16
 ./run_pipeline.sh dye_videos/exp_water.MP4 dye_videos/sim_water.mp4 --no-homography
 
 ./run_pipeline.sh dye_videos/exp_slime.MP4 dye_videos/sim_slime.mp4 --no-homography
+
+
+
+
+
+
+
+# Step 1 — compute homography interactively (saved as <video>_homography.npy)
+python track_robot.py --homography --video /data/andreaferrario/1guilla_experiments/swim/videos/ms001mpt001.mp4
+
+# Step 2 — calibrate scale on the corrected view
+python track_robot.py --calibrate --video /data/andreaferrario/1guilla_experiments/swim/videos/ms001mpt001.mp4 \
+    --homography_file /data/andreaferrario/1guilla_experiments/swim/videos/ms001mpt001_homography.npy
+
+# Step 3 — batch process all videos
+python3 track_robot.py \
+    --video .../ms001mpt001.mp4 \
+    --meters_per_pixel 0.002488 \
+    --midline_method colwise \
+    --homography_file /data/andreaferrario/1guilla_experiments/swim/videos/ms001mpt001_homography.npy
+
+
+
+timeout 90 python3 track_robot.py \
+    --preview \
+    --video /data/andreaferrario/1guilla_experiments/swim/videos/ms001mpt001.mp4 \
+    --save_preview /tmp/preview_detection.mp4 2>&1 | grep -v inotify

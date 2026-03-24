@@ -28,10 +28,10 @@ class SimConfig(BaseSimConfig):
                 "sdf_name"       : "1guilla.sdf",
                 "control_type"   : "position",
                 "gains"          : [100.0, 4.0, 0],
-                "spawn_mode"     : SpawnMode.TRANSVERSE,
-                "pose"           : [0, 0, 0, 0, 0, 3.141592653589793],
+                "spawn_mode"     : SpawnMode.ROTY,
+                "pose"           : [0, 0, 10.2, 0, 0, 3.141592653589793],
                 "controller_path": "lilytorch.farms_examples._1guillasim.pd_controller.PositionController",
-                "control_pars"   : {'freq': 1, 'twl': 12, 'amp': 30.0},
+                "control_pars"   : {'freq': 1, 'twl': 12, 'amp': 0.0},
             },
         ]
 
@@ -47,7 +47,7 @@ class SimConfig(BaseSimConfig):
         # ── Physics ───────────────────────────────────────────────────
         self.timestep          = 0.001
         self.convection_method = "abdquickest"
-        self.n_iterations      = 18001
+        self.n_iterations      = 5001
         self.save_every        = 50
 
         # ── BDIM solver (unused since use_bdim=False) ────────────────

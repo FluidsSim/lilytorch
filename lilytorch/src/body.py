@@ -462,9 +462,12 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, custom_update=None, starti
     elif body_type == "mesh":
         update_map = [None,None]
         mesh_file = body_pars["mesh_file"]
-        nsamples, msamples = None, None
+        nsamples, msamples, ksamples = None, None, None
         if "n_samples" in body_pars and body_pars["n_samples"] is not None:
-            (nsamples, msamples) = eval(body_pars["n_samples"])
+            _ns = eval(body_pars["n_samples"])
+            nsamples, msamples = _ns[0], _ns[1]
+            if len(_ns) >= 3:
+                ksamples = _ns[2]
         return BodyMesh(
             device,
             x, y,
@@ -473,16 +476,19 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, custom_update=None, starti
             eps=eps,
             plotting_meshes=body_pars["plotting_meshes"],
             compute_interp=body_pars["compute_interp"],
-            nsamples=nsamples, msamples=msamples,
+            nsamples=nsamples, msamples=msamples, ksamples=ksamples,
             grids=grids,
         )
 
     elif body_type == "composite_mesh":
         sdf_name = body_pars["sdf_name"]
         sdf_folder = body_pars["sdf_folder"]
-        nsamples, msamples = None, None
+        nsamples, msamples, ksamples = None, None, None
         if "n_samples" in body_pars and body_pars["n_samples"] is not None:
-            (nsamples, msamples) = eval(body_pars["n_samples"])
+            _ns = eval(body_pars["n_samples"])
+            nsamples, msamples = _ns[0], _ns[1]
+            if len(_ns) >= 3:
+                ksamples = _ns[2]
         compute_interp = body_pars["compute_interp"]
         plotting= body_pars["plotting"]
         plotting_meshes = body_pars["plotting_meshes"]
@@ -494,6 +500,7 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, custom_update=None, starti
             compute_interp  = compute_interp,
             nsamples        = nsamples,
             msamples        = msamples,
+            ksamples        = ksamples,
             plotting        = plotting,
             plotting_meshes = plotting_meshes,
             suit            = body_pars["suit"],
@@ -505,9 +512,12 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, custom_update=None, starti
 
     elif body_type == "multi_animat":
 
-        nsamples, msamples = None, None
+        nsamples, msamples, ksamples = None, None, None
         if "n_samples" in body_pars and body_pars["n_samples"] is not None:
-            (nsamples, msamples) = body_pars["n_samples"]
+            _ns = body_pars["n_samples"]
+            nsamples, msamples = _ns[0], _ns[1]
+            if len(_ns) >= 3:
+                ksamples = _ns[2]
 
         return MultiAnimatBodies(
             device, x, y,
@@ -517,6 +527,7 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, custom_update=None, starti
             compute_interp     = body_pars["compute_interp"],
             nsamples           = nsamples,
             msamples           = msamples,
+            ksamples           = ksamples,
             plotting           = body_pars["plotting"],
             plotting_meshes    = body_pars["plotting_meshes"],
             suit               = body_pars["suit"],
@@ -1650,8 +1661,8 @@ class BodyMesh(Body):
     simulation grid spacing *h*, ensuring the interpolated SDF is well-resolved.
     """
     def __init__(self, device, x, y, mesh_file, update_maps, z=None, eps=0.05,
-                 compute_interp=True, nsamples=None, msamples=None, suit=0,
-                 plotting_meshes=False, zpos=0, **kwargs):
+                 compute_interp=True, nsamples=None, msamples=None, ksamples=None,
+                 suit=0, plotting_meshes=False, zpos=0, **kwargs):
         grids = kwargs.pop("grids", None)
         super().__init__(device, x, y, z=z, eps=eps, grids=grids)
         self.mesh_file           = mesh_file
@@ -1668,20 +1679,29 @@ class BodyMesh(Body):
             scale=kwargs.pop("scale", 1)
             )
 
-        # ---- auto-compute nsamples / msamples -------------------------
+        # ---- auto-compute nsamples / msamples / ksamples --------------
         # Target SDF spacing = h/2 so the interpolated field is well-resolved
-        # on the simulation grid.  The sampling domain extends ±2·diagonal
-        # around the bounding-box centre (same as the old hard-coded logic).
+        # on the simulation grid.  The sampling domain is sized per-axis:
+        # each axis covers the bounding-box span plus padding on each side.
+        # The Heaviside band extends eps from the surface and normals need
+        # ~2 extra cells, so pad ≈ eps + 2*h suffices; the interpolator
+        # uses fill_value="nearest" for anything beyond.
         bb = self.m2s.bounding_box()
-        diag = np.sqrt(sum((bb[i, 1] - bb[i, 0]) ** 2 for i in range(min(bb.shape[0], self.ndim))))
         target_spacing = self.h / 2.0
+        pad = self.eps + 2 * self.h
 
         if nsamples is None:
-            nsamples = max(64, int(np.ceil(4 * diag / target_spacing)))
+            span_x = (bb[0, 1] - bb[0, 0]) + 2 * pad
+            nsamples = max(64, int(np.ceil(span_x / target_spacing)))
         if msamples is None:
-            msamples = max(64, int(np.ceil(4 * diag / target_spacing)))
+            span_y = (bb[1, 1] - bb[1, 0]) + 2 * pad
+            msamples = max(64, int(np.ceil(span_y / target_spacing)))
+        if ksamples is None and self.ndim == 3:
+            span_z = (bb[2, 1] - bb[2, 0]) + 2 * pad
+            ksamples = max(64, int(np.ceil(span_z / target_spacing)))
         self.nsamples = nsamples
         self.msamples = msamples
+        self.ksamples = ksamples
 
         self.compute_sdfs(zpos)
         del self.m2s
@@ -1754,23 +1774,24 @@ class BodyMesh(Body):
         if not self.compute_interp:
             return
 
-        diag_dims = min(self.bb.shape[0], self.ndim)
-        diag = np.sqrt(sum((self.bb[i, 1] - self.bb[i, 0]) ** 2 for i in range(diag_dims)))
+        pad = self.eps + 2 * self.h  # same padding used for sample-count computation
 
         if self.ndim == 2:
-            self._compute_sdfs_2d(zpos, diag)
+            self._compute_sdfs_2d(zpos, pad)
         else:
-            self._compute_sdfs_3d(diag)
+            self._compute_sdfs_3d(pad)
 
     # ---- 2-D SDF computation ------------------------------------------
-    def _compute_sdfs_2d(self, zpos, diag):
+    def _compute_sdfs_2d(self, zpos, pad):
         cv2 = _import_cv2()
         skfmm = _import_skfmm()
         measure = _import_measure()
         cx_bb = (self.bb[0, 1] + self.bb[0, 0]) / 2
         cy_bb = (self.bb[1, 1] + self.bb[1, 0]) / 2
-        xnp = np.linspace(cx_bb - 2 * diag, cx_bb + 2 * diag, self.nsamples)
-        ynp = np.linspace(cy_bb - 2 * diag, cy_bb + 2 * diag, self.msamples)
+        half_x = (self.bb[0, 1] - self.bb[0, 0]) / 2 + pad
+        half_y = (self.bb[1, 1] - self.bb[1, 0]) / 2 + pad
+        xnp = np.linspace(cx_bb - half_x, cx_bb + half_x, self.nsamples)
+        ynp = np.linspace(cy_bb - half_y, cy_bb + half_y, self.msamples)
 
         X, Y = np.meshgrid(xnp, ynp, indexing="ij")
         xflat = X.flatten()
@@ -1869,20 +1890,19 @@ class BodyMesh(Body):
         np.save(os.path.join(self.save_folder, f"sign_vec_{mesh_tag}.npy"), sign_vec)
 
     # ---- 3-D SDF computation ------------------------------------------
-    def _compute_sdfs_3d(self, diag):
+    def _compute_sdfs_3d(self, pad):
         """Build a 3-D SDF field from the mesh using open3d + skfmm."""
         skfmm = _import_skfmm()
         centres = [(self.bb[i, 1] + self.bb[i, 0]) / 2 for i in range(3)]
-        xnp = np.linspace(centres[0] - 2 * diag, centres[0] + 2 * diag, self.nsamples)
-        ynp = np.linspace(centres[1] - 2 * diag, centres[1] + 2 * diag, self.msamples)
-        # Use a third axis with same number of samples as msamples
-        nz_samp = self.msamples
-        znp = np.linspace(centres[2] - 2 * diag, centres[2] + 2 * diag, nz_samp)
+        halves = [(self.bb[i, 1] - self.bb[i, 0]) / 2 + pad for i in range(3)]
+        xnp = np.linspace(centres[0] - halves[0], centres[0] + halves[0], self.nsamples)
+        ynp = np.linspace(centres[1] - halves[1], centres[1] + halves[1], self.msamples)
+        znp = np.linspace(centres[2] - halves[2], centres[2] + halves[2], self.ksamples)
 
         X, Y, Z = np.meshgrid(xnp, ynp, znp, indexing="ij")
         query_pts = np.stack([X.flatten(), Y.flatten(), Z.flatten()], axis=1).astype(np.float32)
 
-        print(f"Computing 3-D SDF for {self.mesh_file} ({self.nsamples}×{self.msamples}×{nz_samp}) ...")
+        print(f"Computing 3-D SDF for {self.mesh_file} ({self.nsamples}×{self.msamples}×{self.ksamples}) ...")
         sdf_val_o3d, _ = self.m2s(query_pts)
         if self.plotting:
             self.m2s.visualize()
@@ -2052,8 +2072,8 @@ class BodyMesh(Body):
 class CompositeBodyMesh(Body):
 
     def __init__(self, device, x, y, sdf_folder, sdf_name, custom_update, eps=0.05,
-                 compute_interp=True, nsamples=None, msamples=None, plotting=False,
-                 plotting_meshes=False, suit=0.0, **kwargs):
+                 compute_interp=True, nsamples=None, msamples=None, ksamples=None,
+                 plotting=False, plotting_meshes=False, suit=0.0, **kwargs):
         """Composite body built from a multi-link SDF model file."""
         grids = kwargs.pop("grids", None)
         super().__init__(device, x, y, eps=eps, grids=grids)
@@ -2081,7 +2101,7 @@ class CompositeBodyMesh(Body):
                 update_funcs,
                 eps=eps,
                 compute_interp=compute_interp,
-                nsamples=nsamples, msamples=msamples,
+                nsamples=nsamples, msamples=msamples, ksamples=ksamples,
                 suit=suit,
                 plotting_meshes=plotting_meshes,
                 grids=grids,
@@ -2191,7 +2211,7 @@ class CompositeBodyMesh(Body):
 class MultiAnimatBodies(Body):
 
     def __init__(self, device, x, y, experiment_options, z=None, eps=0.05, compute_interp=True,
-                 nsamples=None, msamples=None, plotting=False, plotting_meshes=False,
+                 nsamples=None, msamples=None, ksamples=None, plotting=False, plotting_meshes=False,
                  suit=0.0, **kwargs):
         """Union of bodies from one or more MuJoCo/SDF model files.
 
@@ -2261,6 +2281,7 @@ class MultiAnimatBodies(Body):
                             compute_interp=False,  # skip heavy computation
                             nsamples=template.nsamples,
                             msamples=template.msamples,
+                            ksamples=template.ksamples,
                             suit=suit,
                             plotting_meshes=False,
                             grids=grids,
@@ -2284,7 +2305,7 @@ class MultiAnimatBodies(Body):
                             z=self.z,
                             eps=eps,
                             compute_interp=compute_interp,
-                            nsamples=nsamples, msamples=msamples,
+                            nsamples=nsamples, msamples=msamples, ksamples=ksamples,
                             suit=suit,
                             plotting_meshes=plotting_meshes,
                             grids=grids,

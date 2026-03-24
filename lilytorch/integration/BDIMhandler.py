@@ -23,8 +23,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 from lilytorch.src.solver import FluidSolver
 from lilytorch.src.body import (rotate_grid_2d, rotate_grid_3d,
-                                _rotate_grid_3d_compiled,
-                                _stagger_sdf_3d, _stagger_sdf_3d_compiled)
+                                _rotate_grid_3d_compiled)
 import torch
 
 
@@ -612,10 +611,11 @@ class BDIMhandler:
             if aabb is not None:
                 # ── Sub-block path (main saving) ────────────────────
                 # Only rotate + interpolate the AABB sub-block of the
-                # grid, then stagger / velocity / union-min ALL on the
-                # sub-block with contiguous intermediates.  Strided
-                # reads of union fields are small (~3-5 MB per body)
-                # and fit in L2 cache.
+                # grid, then evaluate SDF directly at staggered
+                # locations / velocity / union-min ALL on the sub-block
+                # with contiguous intermediates.  Strided reads of
+                # union fields are small (~3-5 MB per body) and fit in
+                # L2 cache.
                 (i0, i1, j0, j1, k0, k1) = aabb
                 sl = (slice(i0, i1), slice(j0, j1), slice(k0, k1))
 
@@ -628,9 +628,22 @@ class BDIMhandler:
                 # Per-body SDF (sparse: store sub-block + AABB for forces)
                 comp._sdf_sparse[body_i] = (aabb, sdf_sub)
 
-                # Sub-block stagger (contiguous in → contiguous out)
-                sdf_sub_u, sdf_sub_v, sdf_sub_w = _stagger_sdf_3d(
-                    sdf_sub)
+                # Evaluate SDF directly at staggered face locations
+                # (exact interpolation instead of CC averaging)
+                px_u, py_u, pz_u = rotate_grid_3d(
+                    comp.Xu_stag[sl], comp.Yu_stag[sl], comp.Zu_stag[sl],
+                    R_T, urdf_pos)
+                sdf_sub_u = body.sdf(px_u, py_u, pz_u)
+
+                px_v, py_v, pz_v = rotate_grid_3d(
+                    comp.Xv_stag[sl], comp.Yv_stag[sl], comp.Zv_stag[sl],
+                    R_T, urdf_pos)
+                sdf_sub_v = body.sdf(px_v, py_v, pz_v)
+
+                px_w, py_w, pz_w = rotate_grid_3d(
+                    comp.Xw_stag[sl], comp.Yw_stag[sl], comp.Zw_stag[sl],
+                    R_T, urdf_pos)
+                sdf_sub_w = body.sdf(px_w, py_w, pz_w)
 
                 # Sub-block body velocity (strided coord reads →
                 # contiguous output from element-wise arithmetic)
@@ -688,7 +701,22 @@ class BDIMhandler:
                 sdf_cc = body.sdf(px, py, pz)
                 comp._sdf_sparse[body_i] = (None, sdf_cc)  # None = full grid
 
-                sdf_u, sdf_v, sdf_w = _stagger_sdf_3d(sdf_cc)
+                # Evaluate SDF directly at staggered face locations
+                # (exact interpolation instead of CC averaging)
+                px_u, py_u, pz_u = _rotate(
+                    comp.Xu_stag, comp.Yu_stag, comp.Zu_stag,
+                    R_T, urdf_pos)
+                sdf_u = body.sdf(px_u, py_u, pz_u)
+
+                px_v, py_v, pz_v = _rotate(
+                    comp.Xv_stag, comp.Yv_stag, comp.Zv_stag,
+                    R_T, urdf_pos)
+                sdf_v = body.sdf(px_v, py_v, pz_v)
+
+                px_w, py_w, pz_w = _rotate(
+                    comp.Xw_stag, comp.Yw_stag, comp.Zw_stag,
+                    R_T, urdf_pos)
+                sdf_w = body.sdf(px_w, py_w, pz_w)
 
                 vel_u = (lin_vel[0]
                          + ang_vel[1] * (comp.Zu_stag - com_pos[2])

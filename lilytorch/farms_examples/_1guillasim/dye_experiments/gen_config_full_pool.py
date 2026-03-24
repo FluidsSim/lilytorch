@@ -30,7 +30,7 @@ class SimConfig(BaseSimConfig):
                 "control_type"   : "position",
                 "gains"          : [100.0, 1., 0],
                 "spawn_mode"     : SpawnMode.FREE,
-                "pose"           : [4.75, 0.1, 0.0, 0, 0, 0.0],
+                "pose"           : [4.75, 0.1, 0.0, 0, 0, 0.05],
                 "controller_path": "lilytorch.farms_examples._1guillasim.dye_experiments.controller.PositionController",
                 "control_pars"   : {
                     "file_path": os.path.join(
@@ -76,30 +76,30 @@ class SimConfig(BaseSimConfig):
         self.poisson_method          = "fft"
         self.poisson_smoother        = "jacobi"
         self.poisson_nsmoothing      = 5
-        self.poisson_bc_type         = "free"
+        self.poisson_bc_type         = "neumann"
 
         self.poisson_compile         = False
         self.compile_adv_diff        = False
         self.compile_forces          = False
         self.compile_sdf             = False
 
-        # u: no-penetration on x-walls, free-slip on y/z-walls
-        self.bc_type_u   = ["D", "D", "N", "N", "N", "N"]
-        self.bc_values_u = [0, 0, 0, 0, 0, 0]
-        # v: free-slip on x/z-walls, no-penetration on y-walls
-        self.bc_type_v   = ["N", "N", "D", "D", "N", "N"]
-        self.bc_values_v = [0, 0, 0, 0, 0, 0]
-        # w: free-slip on x/y-walls, no-penetration on z-walls
-        self.bc_type_w   = ["N", "N", "N", "N", "D", "D"]
-        self.bc_values_w = [0, 0, 0, 0, 0, 0]
-
-        # # ── Boundary conditions (3-D, all Neumann) ───────────────────
-        # self.bc_type_u   = ["D", "D", "D", "D", "D", "D"]
+        # # u: no-penetration on x-walls, free-slip on y/z-walls
+        # self.bc_type_u   = ["D", "D", "N", "N", "N", "N"]
         # self.bc_values_u = [0, 0, 0, 0, 0, 0]
-        # self.bc_type_v   = ["D", "D", "D", "D", "D", "D"]
+        # # v: free-slip on x/z-walls, no-penetration on y-walls
+        # self.bc_type_v   = ["N", "N", "D", "D", "N", "N"]
         # self.bc_values_v = [0, 0, 0, 0, 0, 0]
-        # self.bc_type_w   = ["D", "D", "D", "D", "D", "D"]
+        # # w: free-slip on x/y-walls, no-penetration on z-walls
+        # self.bc_type_w   = ["N", "N", "N", "N", "D", "D"]
         # self.bc_values_w = [0, 0, 0, 0, 0, 0]
+
+        # ── Boundary conditions (3-D, all Neumann) ───────────────────
+        self.bc_type_u   = ["D", "D", "D", "D", "D", "D"]
+        self.bc_values_u = [0, 0, 0, 0, 0, 0]
+        self.bc_type_v   = ["D", "D", "D", "D", "D", "D"]
+        self.bc_values_v = [0, 0, 0, 0, 0, 0]
+        self.bc_type_w   = ["D", "D", "D", "D", "D", "D"]
+        self.bc_values_w = [0, 0, 0, 0, 0, 0]
 
         # ── Body ─────────────────────────────────────────────────────
         self.force_scaling         = 1.0
