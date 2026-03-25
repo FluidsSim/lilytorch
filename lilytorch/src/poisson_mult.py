@@ -77,7 +77,7 @@ class PoissonSolver:
 
         if n>8 and m>8:
 
-            if n==self.n_switch and self.device=="cuda":
+            if n==self.n_switch and self.device.type=="cuda":
                 f  = f.cpu()
                 p  = p.cpu()
                 ch = ch.cpu()
@@ -118,13 +118,13 @@ class PoissonSolver:
             # correction
             p[1:-1,1:-1]+=err
 
-            if n== self.n_switch and self.device== "cuda":
-               f  = f.cuda()
-               p  = p.cuda()
-               ch = ch.cuda()
-               cv = cv.cuda()
-               h2 = h2.cuda()
-               r  = r.cuda()
+            if n== self.n_switch and self.device.type== "cuda":
+               f  = f.to(self.device)
+               p  = p.to(self.device)
+               ch = ch.to(self.device)
+               cv = cv.to(self.device)
+               h2 = h2.to(self.device)
+               r  = r.to(self.device)
 
             # Jacobi relaxation
             p, r = self.Jacobi(f, p, ch, cv, h2)

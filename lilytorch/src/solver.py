@@ -49,16 +49,21 @@ class FluidSolver:
         self.ymin  = solver["ymin"]
         self.ymax  = solver["ymax"]
 
-        self.dx=(self.xmax-self.xmin)/(self.nx-2)
-        self.dy=(self.ymax-self.ymin)/(self.ny-2)
+        dx=(self.xmax-self.xmin)/(self.nx-2)
+        dy=(self.ymax-self.ymin)/(self.ny-2)
 
-        assert abs(float(self.dx-self.dy)) < 1e-10, "Grid spacing in x = {} and y = {} must be equal".format(self.dx, self.dy)
-        self.h = self.dx
+        assert abs(float(dx-dy)) < 1e-10, "Grid spacing in x = {} and y = {} must be equal".format(dx, dy)
+        self.h_float = dx  # Python float for torch.arange, plotting extents, etc.
 
-        self.x = torch.arange(self.xmin-self.h/2, self.xmax+self.h, self.h, device=self.device, dtype=self.dtype)
-        self.y = torch.arange(self.ymin-self.h/2, self.ymax+self.h, self.h, device=self.device, dtype=self.dtype)
+        self.x = torch.linspace(self.xmin - dx/2, self.xmax + dx/2, self.nx, device=self.device, dtype=self.dtype)
+        self.y = torch.linspace(self.ymin - dx/2, self.ymax + dx/2, self.ny, device=self.device, dtype=self.dtype)
+        assert len(self.x) == self.nx, f"x grid: expected {self.nx}, got {len(self.x)}"
+        assert len(self.y) == self.ny, f"y grid: expected {self.ny}, got {len(self.y)}"
 
-        self.h2    = self.h**2
+        self.h  = torch.tensor(dx, dtype=self.dtype, device=self.device)
+        self.dx = torch.tensor(dx, dtype=self.dtype, device=self.device)
+        self.dy = torch.tensor(dy, dtype=self.dtype, device=self.device)
+        self.h2 = self.dx**2
         self.dt    = torch.tensor(solver["dt"], device=self.device, dtype=self.dtype)
         self.dt_np = self.dt.cpu().numpy()
 
@@ -214,20 +219,20 @@ class FluidSolver:
 
           # ===== plotting parameters =====
         self.extent = (
-            self.xmin-self.h/2, self.xmax+self.h/2,
-            self.ymin-self.h/2, self.ymax+self.h/2
+            self.xmin-self.h_float/2, self.xmax+self.h_float/2,
+            self.ymin-self.h_float/2, self.ymax+self.h_float/2
         )
         self.extent_vstag = (
-            self.xmin-self.h/2, self.xmax+self.h/2,
-            self.ymin-self.h, self.ymax
+            self.xmin-self.h_float/2, self.xmax+self.h_float/2,
+            self.ymin-self.h_float, self.ymax
         )
         self.extent_ustag = (
-            self.xmin-self.h, self.xmax,
-            self.ymin-self.h/2, self.ymax+self.h/2
+            self.xmin-self.h_float, self.xmax,
+            self.ymin-self.h_float/2, self.ymax+self.h_float/2
         )
         self.extent_curl = (
-            self.xmin-self.h, self.xmax,
-            self.ymin-self.h, self.ymax
+            self.xmin-self.h_float, self.xmax,
+            self.ymin-self.h_float, self.ymax
         )
 
 
@@ -335,16 +340,20 @@ class FluidSolver:
 
     def compute_dpdx(self,p):
         """
-        Compute dp/dx
+        Compute dp/dx (central finite differences, identical on GPU and CPU)
         """
-        return torch.gradient(p, spacing=self.h, dim=0, edge_order=2)[0]
+        dp=torch.zeros_like(p)
+        inv_2h = 1.0 / (2 * self.h)
+        dp[1:-1,1:-1]=(p[2:,1:-1]-p[:-2,1:-1])*inv_2h
+        return dp
 
     def compute_dpdy(self,p):
         """
         Compute dp/dy
         """
         dp=torch.zeros_like(p)
-        dp[1:-1,1:-1]=(p[1:-1,2:]-p[1:-1,:-2])/(2*self.h)
+        inv_2h = 1.0 / (2 * self.h)
+        dp[1:-1,1:-1]=(p[1:-1,2:]-p[1:-1,:-2])*inv_2h
         return dp
         # return torch.gradient(p, spacing=self.h, dim=1, edge_order=2)[0]
 

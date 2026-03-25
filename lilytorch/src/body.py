@@ -460,7 +460,8 @@ class Body:
 
         self.nx  = len(x)
         self.ny  = len(y)
-        self.eps = eps
+        self.eps = torch.tensor(eps, dtype=x.dtype, device=device)
+        self.pi  = torch.tensor(torch.pi, dtype=x.dtype, device=device)
         self.dtype = x.dtype
 
         self.xflat = self.X.flatten()
@@ -488,7 +489,21 @@ class Body:
 
     def compute_sdf_properties(self, sdf_val):
 
-        (gradx, grady) = torch.gradient(sdf_val, spacing=[self.h, self.h], edge_order=2)
+        # Explicit finite differences (identical on GPU and CPU, unlike
+        # torch.gradient which uses different reduction order on CUDA).
+        # Use multiply-by-reciprocal to avoid GPU/CPU division divergence.
+        inv_2h = 1.0 / (2 * self.h)
+        gradx = torch.zeros_like(sdf_val)
+        grady = torch.zeros_like(sdf_val)
+        # Central differences — interior
+        gradx[1:-1, :] = (sdf_val[2:, :] - sdf_val[:-2, :]) * inv_2h
+        grady[:, 1:-1] = (sdf_val[:, 2:] - sdf_val[:, :-2]) * inv_2h
+        # Second-order one-sided stencils — boundaries (matches edge_order=2)
+        gradx[0, :]  = (-3*sdf_val[0, :]  + 4*sdf_val[1, :]  - sdf_val[2, :])  * inv_2h
+        gradx[-1, :] = ( 3*sdf_val[-1, :] - 4*sdf_val[-2, :] + sdf_val[-3, :]) * inv_2h
+        grady[:, 0]  = (-3*sdf_val[:, 0]  + 4*sdf_val[:, 1]  - sdf_val[:, 2])  * inv_2h
+        grady[:, -1] = ( 3*sdf_val[:, -1] - 4*sdf_val[:, -2] + sdf_val[:, -3]) * inv_2h
+
         norm = torch.sqrt(gradx**2+grady**2)
 
         # curvature=torch.where(
@@ -502,11 +517,17 @@ class Body:
         # curvature = (d2x_dt2 * dy_dt - dx_dt * d2y_dt2) / (dx_dt * dx_dt + dy_dt * dy_dt)**1.5
 
 
-        # compute curvature
+        # compute curvature (explicit finite differences)
+        d2sdx2 = torch.zeros_like(sdf_val)
+        d2sdx2[1:-1, :] = (gradx[2:, :] - gradx[:-2, :]) * inv_2h
+        d2sdy2 = torch.zeros_like(sdf_val)
+        d2sdy2[:, 1:-1] = (grady[:, 2:] - grady[:, :-2]) * inv_2h
+        d2sdxdy = torch.zeros_like(sdf_val)
+        d2sdxdy[1:-1, :] = (grady[2:, :] - grady[:-2, :]) * inv_2h
         numerator = (
-            (grady**2)*torch.gradient(gradx, spacing=self.h, axis=0, edge_order=2)[0]+
-            (gradx**2)*torch.gradient(grady, spacing=self.h, axis=1, edge_order=2)[0]+
-            -2*gradx*grady*torch.gradient(grady, spacing=self.h, axis=0)[0]
+            (grady**2)*d2sdx2+
+            (gradx**2)*d2sdy2+
+            -2*gradx*grady*d2sdxdy
         )
         denominator = norm**3
         curvature = torch.where(denominator>0, numerator/denominator, 0)
@@ -546,31 +567,48 @@ class Body:
         )
 
     def phi(self,d):
-        # return 0.5+0.5*torch.cos(torch.pi*d.clamp(-1,1))
+        # Polynomial smooth delta (C2, integrates to 1 over [-eps, eps]):
+        #   phi(d) = 15/(16*eps) * (1 - (d/eps)^2)^2    for |d| < eps
+        # This is the derivative of polynomial mu_0 below, so the pair is
+        # self-consistent.  Uses only +, -, *, ** — no transcendental
+        # functions — so it is bit-identical on GPU and CPU.
+        t = d / self.eps
+        t2 = t * t
         return torch.where(
-            torch.abs(d)<self.eps,
-            ( 1 + torch.cos(torch.pi*d/self.eps) )/( 2*self.eps ),
-            0
+            t2 < 1,
+            (15 / (16 * self.eps)) * (1 - t2) * (1 - t2),
+            torch.zeros_like(d),
         )
 
 
     def mu_funcs(self, d):
-        deps=d/self.eps
-        s=torch.sin(torch.pi*deps)
-        c=torch.cos(torch.pi*deps)
+        # Polynomial smooth Heaviside / first-moment pair (C2 quintic):
+        #   mu_0(d) = 1/2 + t*(15 - 10*t^2 + 3*t^4)/16   for |d| < eps
+        #   (0 for d <= -eps,  1 for d >= eps)
+        # d(mu_0)/dd = 15*(1-t^2)^2 / (16*eps) = phi(d)
+        #
+        # mu_1 is the first moment, used only in the BDIM1 formulation
+        # (currently commented out).  We provide a polynomial version that
+        # matches the original's key properties (zero at |d| >= eps,
+        # antisymmetric about d = 0):
+        #   mu_1 = eps * t * (1 - t^2)^2 / 4
+        t = d / self.eps
+        t2 = t * t
+        t4 = t2 * t2
         mu_0_eps = torch.where(
-            d<=-self.eps,
-            0,
+            d <= -self.eps,
+            torch.zeros_like(d),
             torch.where(
-                d>=self.eps,
-                1,
-                0.5*( 1 + deps + s/torch.pi )
-            )
+                d >= self.eps,
+                torch.ones_like(d),
+                0.5 + t * (15 - 10 * t2 + 3 * t4) / 16,
+            ),
         )
+        omt2 = (1 - t2)
         mu_1_eps = torch.where(
-            torch.abs(d)>=self.eps,
-            0,
-            self.eps*( 0.25 - (0.5*deps)**2 - ( s*deps+(1+c)/torch.pi )/(2*torch.pi) )
+            t2 >= 1,
+            torch.zeros_like(d),
+            self.eps * t * omt2 * omt2 / 4,
         )
         return (mu_0_eps, mu_1_eps)
 
@@ -794,12 +832,12 @@ class CompositeBodyAnalytical(Body):
         ]
 
         self.mu_funcs = self.bodies[0].mu_funcs
-        self.sdf_vals = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
-        self.sdf_vals_u = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
-        self.sdf_vals_v = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
-        self.u_vals   = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
-        self.v_vals   = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
-        self.com_pos  = torch.zeros((self.nbodies,2),device=device)
+        self.sdf_vals = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device,dtype=self.dtype)
+        self.sdf_vals_u = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device,dtype=self.dtype)
+        self.sdf_vals_v = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device,dtype=self.dtype)
+        self.u_vals   = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device,dtype=self.dtype)
+        self.v_vals   = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device,dtype=self.dtype)
+        self.com_pos  = torch.zeros((self.nbodies,2),device=device,dtype=self.dtype)
         self.initialize()
 
     def initialize(self):
@@ -1501,15 +1539,15 @@ class CompositeBodyMesh(Body):
 
         self.mu_funcs               = self.bodies[0].mu_funcs
         self.compute_sdf_properties = self.bodies[0].compute_sdf_properties
-        self.sdf_vals = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
-        self.sdf_vals_u = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
-        self.sdf_vals_v = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
-        self.u_vals   = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
-        self.v_vals   = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
+        self.sdf_vals = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device,dtype=self.dtype)
+        self.sdf_vals_u = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device,dtype=self.dtype)
+        self.sdf_vals_v = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device,dtype=self.dtype)
+        self.u_vals   = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device,dtype=self.dtype)
+        self.v_vals   = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device,dtype=self.dtype)
 
         self.sdf_val_u=torch.zeros_like(self.X)
         self.sdf_val_v=torch.zeros_like(self.X)
-        self.com_pos  = torch.zeros((self.nbodies,2),device=device)
+        self.com_pos  = torch.zeros((self.nbodies,2),device=device,dtype=self.dtype)
 
 
         if not self.costum_update:
@@ -1700,15 +1738,15 @@ class MultiAnimatBodies(Body):
 
 
         self.nbodies = len(self.bodies)
-        self.sdf_vals = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
-        self.sdf_vals_u = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
-        self.sdf_vals_v = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
-        self.u_vals   = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
-        self.v_vals   = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device)
+        self.sdf_vals = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device,dtype=self.dtype)
+        self.sdf_vals_u = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device,dtype=self.dtype)
+        self.sdf_vals_v = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device,dtype=self.dtype)
+        self.u_vals   = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device,dtype=self.dtype)
+        self.v_vals   = torch.zeros((self.nbodies,self.bodies[0].nx,self.bodies[0].ny),device=device,dtype=self.dtype)
 
         self.sdf_val_u=torch.zeros_like(self.X)
         self.sdf_val_v=torch.zeros_like(self.X)
-        self.com_pos  = torch.zeros((self.nbodies,2),device=device)
+        self.com_pos  = torch.zeros((self.nbodies,2),device=device,dtype=self.dtype)
 
         # for link_i, link in enumerate(self.sdf.links):
         #     # if link_i%2==0:

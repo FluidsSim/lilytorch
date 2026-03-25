@@ -145,8 +145,8 @@ class AdvDiffSolver:
 
         self.dt  = dt
         dx, dy   = x[1] - x[0], y[1] - y[0]
-        self.dx  = float(dx)
-        self.dy  = float(dy)
+        self.dx  = dx
+        self.dy  = dy
         self.dtdx  = dt / dx
         self.dtdy  = dt / dy
         self.dtdx2 = self.dtdx / dx

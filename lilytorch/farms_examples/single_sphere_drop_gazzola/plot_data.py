@@ -6,13 +6,13 @@ from farms_core.io.hdf5 import hdf5_to_dict
 from farms_core.sensors.sensor_convention import sc
 from lilytorch.util.yaml_operations import yaml2pyobject
 
-dir = "/data/andreaferrario/ns_data/2025-11-23T14:55:17.471975/"
+dir = "/data/andreaferrario/ns_data/2026-03-25T14:37:49.889517/"
 
 uinf = -0.02501
 D=0.005
 
 data = hdf5_to_dict(dir + "simulation.hdf5")
-times=data["times"][:-1]
+times=data["times"]
 
 
 sphere=data["animats"][0]

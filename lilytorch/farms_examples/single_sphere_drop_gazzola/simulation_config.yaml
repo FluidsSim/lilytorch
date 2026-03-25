@@ -3,8 +3,8 @@ units:
   seconds: 1
   kilograms: 1
 runtime:
-  n_iterations: 100001
-  buffer_size: 100001
+  n_iterations: 20001
+  buffer_size: 20001
   play: true
   rtl: 1.0
   fast: false
@@ -49,7 +49,7 @@ extensions:
     handler_path: lilytorch.farms_examples.single_sphere_drop_gazzola.controller.BDIMhandler
     bdim_yaml:
       solver :
-        use_gpu : False
+        use_gpu : True
         nthreads : 16
 
         Nx: 256
@@ -62,7 +62,7 @@ extensions:
         ymax: 0.32
 
         convection_method : "abdquickest"
-        dt                : 0.0001
+        dt                : 0.001
         nt                : 150000
         nu                : 8.0e-7
         rho               : 996.0
@@ -120,8 +120,8 @@ extensions:
         save_path: "/data/andreaferrario/ns_data/"
         save_frames: True
         save_every : 500
-        vmin: -5
-        vmax: 5
+        vmin: -1
+        vmax: 1
         save_uv: True
 
 # - loader: farms_mujoco.simulation.extensions.MjcfSaver

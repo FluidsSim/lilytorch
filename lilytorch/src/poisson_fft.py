@@ -51,7 +51,7 @@ class PoissonSolverFFT:
         self.save_filename = os.path.join(filename, self.name + ".pt")
         # compute green function
         if exists(self.save_filename) and not overwrite:
-            self.Gfft = torch.load(self.save_filename)
+            self.Gfft = torch.load(self.save_filename, map_location=self.device)
         else:
             self.Gfft = self.compute_solve_method()
 
