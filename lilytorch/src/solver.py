@@ -154,20 +154,20 @@ class FluidSolver:
         self.force_x_interp = RegularGridInterpolator(
             (self.composite_body.x_stag,self.composite_body.y),
             torch.zeros_like(self.X, device=self.device, dtype=self.dtype),
-            method=1,
+            method=0,
             fill_value=None
         )
         self.force_y_interp = RegularGridInterpolator(
             (self.composite_body.x,self.composite_body.y_stag),
             torch.zeros_like(self.Y, device=self.device, dtype=self.dtype),
-            method=1,
+            method=0,
             fill_value=None
         )
 
         self.interp_utility = RegularGridInterpolator(
             (self.x,self.y),
             torch.zeros_like(self.X, device=self.device, dtype=self.dtype),
-            method=1,
+            method=0,
             fill_value=None
         )
 
