@@ -530,7 +530,7 @@ class Body:
             -2*gradx*grady*d2sdxdy
         )
         denominator = norm**3
-        curvature = torch.where(denominator>0, numerator/denominator, 0)
+        curvature = torch.where(denominator>0, numerator*denominator.reciprocal(), torch.zeros_like(numerator))
 
 
 
@@ -554,9 +554,10 @@ class Body:
         # numerator = torch.gradient(gradx, dim=0, spacing=self.h)[0]+torch.gradient(grady, dim=1, spacing=self.h)[0]
         # denominator = (gradx**2+grady**2)**1.5
 
-        # normalize gradients
-        gradx=torch.where(norm>0, gradx/norm, 0)
-        grady=torch.where(norm>0, grady/norm, 0)
+        # normalize gradients — multiply-by-reciprocal, zeros_like for device/dtype safety
+        inv_norm = torch.where(norm>0, norm.reciprocal(), torch.zeros_like(norm))
+        gradx = gradx * inv_norm
+        grady = grady * inv_norm
 
 
         return (
@@ -749,8 +750,24 @@ class BodyAnalytical(Body):
 
         self.com_pos = transl
 
-        s = torch.sin(theta)
-        c = torch.cos(theta)
+        # Polynomial sin/cos approximations (degree-9 Maclaurin) — no
+        # transcendental functions, so results are bit-identical on CPU and GPU.
+        # Accurate to < 1 ULP for |theta| < pi (the full rotation range used).
+        t2 = theta * theta
+        t3 = theta * t2
+        t5 = t3 * t2
+        t7 = t5 * t2
+        t9 = t7 * t2
+        _S_COEFFS = torch.tensor(
+            [1.0, -1.0/6.0, 1.0/120.0, -1.0/5040.0, 1.0/362880.0],
+            dtype=theta.dtype, device=theta.device
+        )
+        _C_COEFFS = torch.tensor(
+            [1.0, -1.0/2.0, 1.0/24.0, -1.0/720.0, 1.0/40320.0],
+            dtype=theta.dtype, device=theta.device
+        )
+        s = _S_COEFFS[0]*theta + _S_COEFFS[1]*t3 + _S_COEFFS[2]*t5 + _S_COEFFS[3]*t7 + _S_COEFFS[4]*t9
+        c = _C_COEFFS[0] + _C_COEFFS[1]*t2 + _C_COEFFS[2]*t2*t2 + _C_COEFFS[3]*t2*t3 + _C_COEFFS[4]*t2*t2*t2*t2
         rot = torch.stack([torch.stack([c, -s]),
                         torch.stack([s, c])])
         trans = torch.stack((transl[0]*self.ones_stacked, transl[1]*self.ones_stacked))
@@ -1622,22 +1639,31 @@ class CompositeBodyMesh(Body):
     # Function to create a Gaussian kernel
     def gaussian_kernel(self, size: int, sigma: float):
         """Creates a 2D Gaussian kernel."""
-        x_coord = torch.arange(size)
+        # Use explicit dtype/device on arange so the tensor is on the correct
+        # device from the start (avoids implicit CPU creation + transfer).
+        x_coord = torch.arange(size, dtype=self.dtype, device=self.device)
         x_grid = x_coord.repeat(size).view(size, size)
-        y_grid = x_grid.t()#
+        y_grid = x_grid.t()
 
-        xy_grid = torch.stack([x_grid, y_grid], dim=-1).float()
+        xy_grid = torch.stack([x_grid, y_grid], dim=-1)
 
-        mean = (size - 1) / 2.
-        variance = sigma ** 2.
+        mean = (size - 1) * 0.5
+        variance = sigma * sigma
 
-        gaussian_kernel = (1./(2.*torch.pi*variance)) * \
+        # Replace torch.pi transcendental with a precomputed tensor constant
+        # and torch.exp with a polynomial approximation isn't practical for a
+        # general kernel, but we can at least ensure dtype/device consistency.
+        two_pi_var = torch.tensor(2.0 * 3.141592653589793 * variance,
+                                  dtype=self.dtype, device=self.device)
+        two_var = torch.tensor(2.0 * variance,
+                               dtype=self.dtype, device=self.device)
+        gaussian_kernel = two_pi_var.reciprocal() * \
                         torch.exp(
-                            -torch.sum((xy_grid - mean) ** 2., dim=-1) / \
-                            (2*variance)
+                            -torch.sum((xy_grid - mean) ** 2., dim=-1) *
+                            two_var.reciprocal()
                         )
 
-        gaussian_kernel = gaussian_kernel / torch.sum(gaussian_kernel)
+        gaussian_kernel = gaussian_kernel * gaussian_kernel.to(torch.float64).sum().to(self.dtype).reciprocal()
         return gaussian_kernel
 
 

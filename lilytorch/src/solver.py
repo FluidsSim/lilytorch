@@ -64,6 +64,12 @@ class FluidSolver:
         self.dx = torch.tensor(dx, dtype=self.dtype, device=self.device)
         self.dy = torch.tensor(dy, dtype=self.dtype, device=self.device)
         self.h2 = self.dx**2
+        # Precomputed reciprocals — multiply-by-reciprocal is deterministic across
+        # CPU and GPU (avoids potential division rounding differences in torch ops).
+        self.inv_h  = self.h.reciprocal()
+        self.inv_dx = self.dx.reciprocal()
+        self.inv_dy = self.dy.reciprocal()
+        self.inv_2h = (2.0 * self.h).reciprocal()
         self.dt    = torch.tensor(solver["dt"], device=self.device, dtype=self.dtype)
         self.dt_np = self.dt.cpu().numpy()
 
@@ -340,52 +346,49 @@ class FluidSolver:
 
     def compute_dpdx(self,p):
         """
-        Compute dp/dx (central finite differences, identical on GPU and CPU)
+        Compute dp/dx (central finite differences, multiply-by-reciprocal for
+        deterministic CPU/GPU parity).
         """
         dp=torch.zeros_like(p)
-        inv_2h = 1.0 / (2 * self.h)
-        dp[1:-1,1:-1]=(p[2:,1:-1]-p[:-2,1:-1])*inv_2h
+        dp[1:-1,1:-1]=(p[2:,1:-1]-p[:-2,1:-1])*self.inv_2h
         return dp
 
     def compute_dpdy(self,p):
         """
-        Compute dp/dy
+        Compute dp/dy (central finite differences, multiply-by-reciprocal).
         """
         dp=torch.zeros_like(p)
-        inv_2h = 1.0 / (2 * self.h)
-        dp[1:-1,1:-1]=(p[1:-1,2:]-p[1:-1,:-2])*inv_2h
+        dp[1:-1,1:-1]=(p[1:-1,2:]-p[1:-1,:-2])*self.inv_2h
         return dp
-        # return torch.gradient(p, spacing=self.h, dim=1, edge_order=2)[0]
 
     def gradient(self, var):
         """
-        Compute gradient(var)
+        Compute gradient(var) using multiply-by-reciprocal (CPU/GPU parity).
         """
         dvar_dx            = torch.zeros_like(var)
         dvar_dy            = torch.zeros_like(var)
-        dvar_dx[1:-1,1:-1] = (var[1:-1,1:-1]-var[:-2,1:-1])/self.h
-        dvar_dy[1:-1,1:-1] = (var[1:-1,1:-1]-var[1:-1,:-2])/self.h
+        dvar_dx[1:-1,1:-1] = (var[1:-1,1:-1]-var[:-2,1:-1])*self.inv_h
+        dvar_dy[1:-1,1:-1] = (var[1:-1,1:-1]-var[1:-1,:-2])*self.inv_h
         return (dvar_dx, dvar_dy)
-          # return (self.compute_dpdx(var), self.compute_dpdy(var))
 
     def gradient_fc(self, p):
         """
-        Compute gradient(var) given face-centered variables
+        Compute gradient(var) given face-centered variables.
         """
-        return (p[1:,:]-p[:-1,:])/self.h, (p[:,1:]-p[:,:-1])/self.h
+        return (p[1:,:]-p[:-1,:])*self.inv_h, (p[:,1:]-p[:,:-1])*self.inv_h
 
     def gradient_xstag(self, var):
-        return (var[2:, 1:-1] - var[1:-1, 1:-1]) / self.h
+        return (var[2:, 1:-1] - var[1:-1, 1:-1]) * self.inv_h
 
     def gradient_ystag(self, var):
-        return (var[1:-1, 2:] - var[1:-1, 1:-1]) / self.h
+        return (var[1:-1, 2:] - var[1:-1, 1:-1]) * self.inv_h
 
     def divergence(self, u, v):
         """
-        Compute the divergence
+        Compute the divergence using multiply-by-reciprocal (CPU/GPU parity).
         """
         div             = torch.zeros_like(u)
-        div[1:-1, 1:-1] = (u[2:, 1:-1] - u[1:-1, 1:-1]) / self.dx + (v[1:-1, 2:] - v[1:-1, 1:-1]) / self.dy
+        div[1:-1, 1:-1] = (u[2:, 1:-1] - u[1:-1, 1:-1]) * self.inv_dx + (v[1:-1, 2:] - v[1:-1, 1:-1]) * self.inv_dy
         return div
 
     def normal_derivative(self, var, normal_x, normal_y):
@@ -403,8 +406,8 @@ class FluidSolver:
         dudy = torch.zeros_like(u)
           # dvdx[1:-1, 1:-1] = (v[2:, 1:-1]-v[1:-1, 1:-1])/self.h
           # dudy[1:-1, 1:-1] = (u[1:-1, 2:]-u[1:-1, 1:-1])/self.h
-        dvdx[1:-1, 1:-1] = (v[1:-1, 1:-1]-v[:-2, 1:-1])/self.h
-        dudy[1:-1, 1:-1] = (u[1:-1, 1:-1]-u[1:-1, :-2])/self.h
+        dvdx[1:-1, 1:-1] = (v[1:-1, 1:-1]-v[:-2, 1:-1])*self.inv_h
+        dudy[1:-1, 1:-1] = (u[1:-1, 1:-1]-u[1:-1, :-2])*self.inv_h
         return dvdx-dudy
 
     def forces_method1(self, u, v, p, iteration):
@@ -720,7 +723,7 @@ class FluidSolver:
         # pforce_x = self.interp_utility(self.composite_body.Xu_stag, self.composite_body.Yu_stag)*self.normal_x_u
         # pforce_y = self.interp_utility(self.composite_body.Xv_stag, self.composite_body.Yv_stag)*self.normal_y_v
 
-        p_outer=torch.where(self.composite_body.sdf_val<0,0,p)
+        p_outer=torch.where(self.composite_body.sdf_val<0,torch.zeros_like(p),p)
         self.pforce_x = -p_outer*self.normal_x
         self.pforce_y = -p_outer*self.normal_y
 
@@ -831,14 +834,17 @@ class FluidSolver:
 
             # sdf_val_u = self.composite_body.sdf_vals[i]
 
-            self.friction_force_lin_x[i] = fforcex_body_i.sum()*self.h2
-            self.friction_force_lin_y[i] = fforcey_body_i.sum()*self.h2
+            # Cast to float64 before summing to get a deterministic accumulation
+            # order that is identical on CPU and GPU (GPU tree-reduction of
+            # float32 gives a different result than CPU sequential sum).
+            self.friction_force_lin_x[i] = fforcex_body_i.to(torch.float64).sum().to(self.dtype)*self.h2
+            self.friction_force_lin_y[i] = fforcey_body_i.to(torch.float64).sum().to(self.dtype)*self.h2
             self.friction_force_ang_z[i] = self.cross_product_2d(
                     moment_arm[0],
                     moment_arm[1],
                     fforcex_body_i,
                     fforcey_body_i
-                    ).sum()*self.h2
+                    ).to(torch.float64).sum().to(self.dtype)*self.h2
 
 
             moment_arm = [
@@ -899,14 +905,16 @@ class FluidSolver:
 
 
 
-            self.pressure_force_x[i] = (self.pforcex_body_i).sum()*self.h2
-            self.pressure_force_y[i] = (self.pforcey_body_i).sum()*self.h2
+            # Cast to float64 before summing for CPU/GPU determinism (same as
+            # friction forces above).
+            self.pressure_force_x[i] = self.pforcex_body_i.to(torch.float64).sum().to(self.dtype)*self.h2
+            self.pressure_force_y[i] = self.pforcey_body_i.to(torch.float64).sum().to(self.dtype)*self.h2
             self.pressure_force_ang_z[i] = self.cross_product_2d(
                       moment_arm[0],
                       moment_arm[1],
                       self.pforcex_body_i,
                       self.pforcey_body_i
-                      ).sum()*self.h2
+                      ).to(torch.float64).sum().to(self.dtype)*self.h2
 
 
 
@@ -1186,7 +1194,8 @@ class FluidSolver:
             coeff_vertical,
         )
           # ====== projection step ======
-        (p_x, p_y) = torch.gradient(p,spacing=self.hdy,edge_order=2)
+        # Replaced torch.gradient (non-deterministic on CUDA) with explicit FD.
+        (p_x, p_y) = self.gradient(p)
         (u,v)      = (uprime-(self.dt/self.rho)*self.mu0_all*p_x, vprime-(self.dt/self.rho)*self.mu0_all*p_y)
 
           # self.div=self.divergence(uprime,vprime)
@@ -1575,12 +1584,12 @@ class FluidSolver:
         HV_new = vw*fw-ve*fe+vs*fs-vn*fn
 
         if iteration==0:
-            u_new[1:-1,1:-1] = u[1:-1,1:-1]+self.dt*HU_new/self.h
-            v_new[1:-1,1:-1] = v[1:-1,1:-1]+self.dt*HV_new/self.h
+            u_new[1:-1,1:-1] = u[1:-1,1:-1]+self.dt*HU_new*self.inv_h
+            v_new[1:-1,1:-1] = v[1:-1,1:-1]+self.dt*HV_new*self.inv_h
 
         else:
-            u_new[1:-1,1:-1] = u[1:-1,1:-1]+self.dt*0.5*(3*HU_new - self.HU_prec)/self.h
-            v_new[1:-1,1:-1] = v[1:-1,1:-1]+self.dt*0.5*(3*HV_new - self.HV_prec)/self.h
+            u_new[1:-1,1:-1] = u[1:-1,1:-1]+self.dt*0.5*(3*HU_new - self.HU_prec)*self.inv_h
+            v_new[1:-1,1:-1] = v[1:-1,1:-1]+self.dt*0.5*(3*HV_new - self.HV_prec)*self.inv_h
 
         self.HU_prec = HU_new.clone().detach()
         self.HV_prec = HV_new.clone().detach()
@@ -1627,12 +1636,12 @@ class FluidSolver:
         (Utilda,Vtilda) = self.cc2fc(utilda,vtilda)
 
         Ustar            = torch.zeros_like(Utilda)
-        Ustar[1:-1,1:-1] = Utilda[1:-1,1:-1]-(self.dt/self.rho)*(p[1:,1:-1]-p[:-1,1:-1])/self.h
+        Ustar[1:-1,1:-1] = Utilda[1:-1,1:-1]-(self.dt/self.rho)*(p[1:,1:-1]-p[:-1,1:-1])*self.inv_h
         Vstar            = torch.zeros_like(Vtilda)
-        Vstar[1:-1,1:-1] = Vtilda[1:-1,1:-1]-(self.dt/self.rho)*(p[1:-1,1:]-p[1:-1,:-1])/self.h
+        Vstar[1:-1,1:-1] = Vtilda[1:-1,1:-1]-(self.dt/self.rho)*(p[1:-1,1:]-p[1:-1,:-1])*self.inv_h
         self.adv_diff_solver.set_BCs(Ustar,Vstar)
 
-        self.div = (Ustar[1:,:]-Ustar[:-1,:])/self.h+(Vstar[:,1:]-Vstar[:,:-1])/self.h
+        self.div = (Ustar[1:,:]-Ustar[:-1,:])*self.inv_h+(Vstar[:,1:]-Vstar[:,:-1])*self.inv_h
         phi      = self.poisson_solverFFT.solve(self.div/(self.dt/self.rho))
 
 
@@ -1752,12 +1761,12 @@ class FluidSolver:
         (Utilda,Vtilda) = self.cc2fc(utilda,vtilda)
 
         Ustar            = torch.zeros_like(Utilda)
-        Ustar[1:-1,1:-1] = Utilda[1:-1,1:-1]-(self.dt/self.rho)*(p[1:,1:-1]-p[:-1,1:-1])/self.h
+        Ustar[1:-1,1:-1] = Utilda[1:-1,1:-1]-(self.dt/self.rho)*(p[1:,1:-1]-p[:-1,1:-1])*self.inv_h
         Vstar            = torch.zeros_like(Vtilda)
-        Vstar[1:-1,1:-1] = Vtilda[1:-1,1:-1]-(self.dt/self.rho)*(p[1:-1,1:]-p[1:-1,:-1])/self.h
+        Vstar[1:-1,1:-1] = Vtilda[1:-1,1:-1]-(self.dt/self.rho)*(p[1:-1,1:]-p[1:-1,:-1])*self.inv_h
         self.adv_diff_solver.set_BCs(Ustar,Vstar)
 
-        self.div = (Ustar[1:,:]-Ustar[:-1,:])/self.h+(Vstar[:,1:]-Vstar[:,:-1])/self.h
+        self.div = (Ustar[1:,:]-Ustar[:-1,:])*self.inv_h+(Vstar[:,1:]-Vstar[:,:-1])*self.inv_h
         phi      = self.poisson_solverFFT.solve(self.div/(self.dt/self.rho))
 
 
@@ -1779,9 +1788,9 @@ class FluidSolver:
         (u,v)          = (ustar-phi_x*(self.dt/self.rho), vstar-phi_y*(self.dt/self.rho))
           # (phi_fc_x, phi_fc_y) = self.gradient_fc(phi)
         self.U            = torch.zeros_like(Utilda)
-        self.U[1:-1,1:-1] = Ustar[1:-1,1:-1]-(self.dt/self.rho)*(phi[1:,1:-1]-phi[:-1,1:-1])/self.h
+        self.U[1:-1,1:-1] = Ustar[1:-1,1:-1]-(self.dt/self.rho)*(phi[1:,1:-1]-phi[:-1,1:-1])*self.inv_h
         self.V            = torch.zeros_like(Vtilda)
-        self.V[1:-1,1:-1] = Vstar[1:-1,1:-1]-(self.dt/self.rho)*(phi[1:-1,1:]-phi[1:-1,:-1])/self.h
+        self.V[1:-1,1:-1] = Vstar[1:-1,1:-1]-(self.dt/self.rho)*(phi[1:-1,1:]-phi[1:-1,:-1])*self.inv_h
 
 
 

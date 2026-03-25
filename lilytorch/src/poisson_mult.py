@@ -49,7 +49,7 @@ class PoissonSolver:
         """
         self.BC(p)
         J = self.compute_J(ch, cv)
-        Jinv = torch.where(torch.abs(J)<self.jcap_tol,0,1/J)
+        Jinv = torch.where(torch.abs(J)<self.jcap_tol,torch.zeros_like(J),J.reciprocal())
         for i in range(self.nsmoothing):
             sum = self.compute_sum(ch, cv, p)
             p[1:-1,1:-1] = self.w*(-f*h2+sum)*Jinv+(1-self.w)*p[1:-1,1:-1]
@@ -58,7 +58,9 @@ class PoissonSolver:
         # compute the residual
         sum=self.compute_sum(ch, cv, p)
         J=self.compute_J(ch, cv)
-        Au  = (sum-J*p[1:-1,1:-1])/h2
+        # Use multiply-by-reciprocal for CPU/GPU parity.
+        h2_inv = h2.reciprocal() if isinstance(h2, torch.Tensor) else 1.0 / h2
+        Au  = (sum-J*p[1:-1,1:-1])*h2_inv
         r   = f-Au
         return p, r
 
@@ -140,8 +142,11 @@ class PoissonSolver:
             r_err = self.l2_norm(r)
             if r_err<self.tol:
                 break
-        p-=p.mean()
-        # p=torch.where(c<self.jcap_tol,0,p-p.mean())
+        # Compute mean in float64 then cast back: GPU parallel-reduction of
+        # float32 gives a different value than CPU sequential sum, so the
+        # mean subtraction would shift the pressure field differently.
+        p-=p.to(torch.float64).mean().to(p.dtype)
+        # p=torch.where(c<self.jcap_tol,torch.zeros_like(p),p-p.to(torch.float64).mean().to(p.dtype))
         if self.verbose:
             print("Multigrid residual = {}/{} with {}/{} cycles \n".format(r_err,self.tol, cycle+1, self.max_vcycles))
 
