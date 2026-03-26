@@ -49,7 +49,7 @@ class PoissonSolver:
         """
         self.BC(p)
         J = self.compute_J(ch, cv)
-        Jinv = torch.where(torch.abs(J)<self.jcap_tol,0,1/J)
+        Jinv = torch.where(torch.abs(J) < self.jcap_tol, torch.zeros_like(J), J.reciprocal())
         for i in range(self.nsmoothing):
             sum = self.compute_sum(ch, cv, p)
             p[1:-1,1:-1] = self.w*(-f*h2+sum)*Jinv+(1-self.w)*p[1:-1,1:-1]

@@ -235,7 +235,7 @@ class PoissonSolver:
             self.BC(d)
 
             Ad,J=self.FD_operator(d, ch, cv, self.h2)
-            Jinv = torch.where(torch.abs(J)<self.jcap_tol,0,1/J)
+            Jinv = torch.where(torch.abs(J) < self.jcap_tol, torch.zeros_like(J), J.reciprocal())
 
             alpha=old_norm/torch.tensordot(d[1:-1,1:-1],Ad)
 

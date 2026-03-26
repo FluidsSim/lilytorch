@@ -188,7 +188,7 @@ class PoissonSolver:
 
             sum  = (ch[1:,:]*p[2:,1:-1]+ch[:-1,:]*p[:-2,1:-1]+cv[:,1:]*p[1:-1,2:]+cv[:,:-1]*p[1:-1,:-2])
             J    = ch[1:,:]+ch[:-1,:]+cv[:,1:]+cv[:,:-1]
-            Jinv = torch.where(torch.abs(J)<self.jcap_tol,0,1/J)
+            Jinv = torch.where(torch.abs(J) < self.jcap_tol, torch.zeros_like(J), J.reciprocal())
             p[1:-1,1:-1] = self.w*(-f*h2+sum)*Jinv+(1-self.w)*p[1:-1,1:-1]
             self.BC(p)
 
@@ -281,7 +281,7 @@ class PoissonSolver:
             r_err = self.l2_norm(r)
             if r_err<self.tol:
                 break
-        p=torch.where(c<self.jcap_tol,0,p-p.mean())
+        p=torch.where(c<self.jcap_tol, torch.zeros_like(p), p-p.to(torch.float64).mean().to(p.dtype))
         if self.verbose:
             print("Multigrid residual = {}/{} with {}/{} cycles \n".format(r_err,self.tol, cycle+1, self.max_vcycles))
 
