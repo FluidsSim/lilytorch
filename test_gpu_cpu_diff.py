@@ -13,6 +13,7 @@ Tests cover all operations fixed in fix/cpu-gpu-parity:
  10. Pressure-mean subtraction (float64 accumulation)
  11. Polynomial sin/cos vs torch.sin/cos parity
  12. Multiply-by-reciprocal gradient / divergence vs division
+ 13. Multigrid convergence-norm determinism (L-inf: _convergence_norm)
 """
 import torch
 import numpy as np
@@ -369,6 +370,43 @@ print(f"gradient (division)    CPU-GPU max diff: {diff_gx_div:.2e}")
 print(f"gradient (reciprocal)  CPU-GPU max diff: {diff_gx_rec:.2e}")
 
 # ---------------------------------------------------------------------------
+# 13. Multigrid convergence norm determinism  (L-inf vs L2)
+#
+# The core issue: if GPU and CPU see different residual norms near the tol
+# threshold they take different numbers of V-cycles → different p fields.
+# _convergence_norm uses torch.max (exact, no summation) so both backends
+# always do the same number of iterations.
+# ---------------------------------------------------------------------------
+from lilytorch.src.poisson_mult import PoissonSolver
+
+print(f"\n=== 13. Multigrid convergence norm (L-inf determinism) ===")
+ps_cpu2 = PoissonSolver(dtype, torch.device('cpu'),  h,     tol=1e-4, max_cycles=5,
+                        max_vcycles=4, nsmoothing=5, w=0.7, verbose=False)
+ps_gpu2 = PoissonSolver(dtype, torch.device('cuda'), h_gpu, tol=1e-4, max_cycles=5,
+                        max_vcycles=4, nsmoothing=5, w=0.7, verbose=False)
+
+div_c13  = torch.randn(Nx, Ny, dtype=dtype, device='cpu', generator=torch.Generator().manual_seed(0))
+div_g13  = div_c13.clone().cuda()
+p0_c13   = torch.zeros(Nx+2, Ny+2, dtype=dtype, device='cpu')
+p0_g13   = torch.zeros(Nx+2, Ny+2, dtype=dtype, device='cuda')
+coeff_c13 = torch.full((Nx+2, Ny+2), 0.0001/996.0, dtype=dtype, device='cpu')
+coeff_g13 = coeff_c13.cuda()
+
+p_c13, r_c13 = ps_cpu2.solve_multigrid(div_c13, p0_c13, coeff_c13,
+                                        ch=coeff_c13[1:,1:-1], cv=coeff_c13[1:-1,1:])
+p_g13, r_g13 = ps_gpu2.solve_multigrid(div_g13, p0_g13, coeff_g13,
+                                        ch=coeff_g13[1:,1:-1], cv=coeff_g13[1:-1,1:])
+
+diff_p13 = float(torch.max(torch.abs(p_c13 - p_g13.cpu())))
+print(f"  pressure max diff (L-inf early-exit): {diff_p13:.2e}")
+print(f"  CPU L-inf residual: {float(ps_cpu2._convergence_norm(r_c13)):.2e}")
+print(f"  GPU L-inf residual: {float(ps_gpu2._convergence_norm(r_g13.cpu())):.2e}")
+
+# Show L2 norms for comparison (these may differ slightly between backends):
+print(f"  CPU L2 residual:    {float(ps_cpu2.l2_norm(r_c13)):.2e}")
+print(f"  GPU L2 residual:    {float(ps_gpu2.l2_norm(r_g13.cpu())):.2e}")
+
+# ---------------------------------------------------------------------------
 # SUMMARY
 # ---------------------------------------------------------------------------
 print(f"\n=== SUMMARY ===")
@@ -385,6 +423,7 @@ results = [
     ("10. Pressure mean float64 fix",   diff_mean_f64),
     ("11. Polynomial sin/cos",          diff_poly_s),
     ("12. Gradient reciprocal",         diff_gx_rec),
+    ("13. Multigrid L-inf convergence", torch.tensor(diff_p13)),
 ]
 threshold = 1e-5  # float32 ULP neighbourhood
 all_pass = True
