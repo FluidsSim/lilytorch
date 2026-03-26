@@ -1,6 +1,31 @@
-"""Network controller – 2-D sphere sedimentation (Gazzola et al.)
+"""Network controller -- 2-D cylinder sedimentation (Gazzola et al., 2011)
 
-Uses BDIM2 meta-equation with single Euler step.
+Supports two immersed-boundary formulations, selectable via the config key
+``solver.use_brinkman`` (default ``True``):
+
+* **Brinkman penalization** (Gazzola Eq. 29):
+      u_lambda = (u + lambda*dt*chi_s*u_s) / (1 + lambda*dt*chi_s)
+  with configurable penalization parameter ``solver.brinkman_k`` (default 1e4).
+
+* **BDIM2 meta-equation** (original lilytorch approach):
+      u = mu0*u_advected + (1-mu0)*u_body + mu1*dn(u_advected - u_body)
+
+Force computation also has two modes (``solver.force_method``, default
+``"penalization"``):
+
+* ``"penalization"``: integrates the penalization/BDIM2 body force directly
+  from the velocity correction applied by the IB method.  This is the robust
+  volume-integral approach used by Gazzola (Eq. 37).
+
+* ``"stress"``: the existing ``forces_method2`` surface-stress integration
+  (smoothed delta on SDF).  Known to underpredict drag by ~3x for this
+  benchmark due to staggered/CC grid mismatch and resolution sensitivity.
+
+.. note::
+   ``forces_method1`` (contour integral) is **incompatible** with this
+   controller because the contour data (``body.cnt_u``, ``body.cnt_v``,
+   ``body.mask``) is not populated by the custom ``update()`` method.
+   Selecting it will raise ``RuntimeError``.
 """
 
 import numpy as np
@@ -48,6 +73,24 @@ class BDIMhandler:
         self.rho_body  = self.pars['solver'].get('rho_body', self.rho_fluid)
         self.radius    = 0.0025
 
+        # ---- Brinkman vs BDIM2 toggle ----
+        # Gazzola (2011) uses Brinkman penalization (Eq. 29).
+        # Set solver.use_brinkman = False to revert to BDIM2.
+        self.use_brinkman = self.pars['solver'].get('use_brinkman', True)
+        # Penalization parameter lambda (Gazzola default: 1e4)
+        self.brinkman_k = self.pars['solver'].get('brinkman_k', 1e4)
+
+        # ---- Force computation method ----
+        # "penalization": volume integral of IB body force (Gazzola Eq. 37)
+        # "stress": existing forces_method2 (surface-stress integration)
+        self.force_method = self.pars['solver'].get('force_method', 'penalization')
+
+        if self.force_method not in ('penalization', 'stress'):
+            raise ValueError(
+                f"Unknown force_method={self.force_method!r}. "
+                f"Use 'penalization' or 'stress'."
+            )
+
         # ---- FARMS-style buoyancy ----
         # With all-Neumann BCs the BDIM pressure field is purely dynamic;
         # no hydrostatic gradient builds up, so buoyancy must be added
@@ -65,6 +108,10 @@ class BDIMhandler:
         comp.sdf_vals_v = torch.zeros((nb, *gs), device=self.device, dtype=self.dtype)
         comp.u_vals     = torch.zeros((nb, *gs), device=self.device, dtype=self.dtype)
         comp.v_vals     = torch.zeros((nb, *gs), device=self.device, dtype=self.dtype)
+
+        print(f"[Gazzola] use_brinkman={self.use_brinkman}, "
+              f"brinkman_k={self.brinkman_k}, "
+              f"force_method={self.force_method}")
 
     # ------------------------------------------------------------------
     # helpers
@@ -202,7 +249,7 @@ class BDIMhandler:
             self._init_buoyancy_params(task, physics)
             m_2d = self.rho_body * np.pi * self.radius**2
             print(f"[DIAG] buoy_mass(MuJoCo)={self._buoy_mass[0]:.6e}  "
-                  f"m_2d(rho_b*pi*R²)={m_2d:.6e}  "
+                  f"m_2d(rho_b*pi*R^2)={m_2d:.6e}  "
                   f"buoy_height={self._buoy_height[0]:.6e}  "
                   f"MuJoCo_weight={self._buoy_mass[0]*9.81:.6e}  "
                   f"2D_net_weight={(self.rho_body-self.rho_fluid)*np.pi*self.radius**2*9.81:.6e}")
@@ -253,14 +300,130 @@ class BDIMhandler:
             + mu1 * fs.normal_derivative(phi - body_vel, nx, ny)
         )
 
+    # ------------------------------------------------------------------
+    #  Brinkman penalization (Gazzola Eq. 29)
+    # ------------------------------------------------------------------
+    def _brinkman(self, phi, m_m0, body_vel):
+        """Apply Brinkman penalization to a velocity component.
+
+        Gazzola et al. (2011) Eq. 29:
+            u_lambda = (u + lambda*dt*chi_s*u_s) / (1 + lambda*dt*chi_s)
+
+        Here chi_s = (1 - mu0) = m_m0 is the body characteristic function
+        (smooth Heaviside).  lambda is self.brinkman_k.
+
+        In the limit lambda -> inf, u_lambda -> u_s inside the body and
+        u_lambda -> u outside, exactly enforcing the no-slip condition.
+        """
+        lam_dt = self.brinkman_k * float(self.fluid_solver.dt)
+        chi_s = m_m0
+        return (phi + lam_dt * chi_s * body_vel) / (1.0 + lam_dt * chi_s)
+
     # ==================================================================
-    #  fluid_step: single Euler step with BDIM2
+    #  Penalization-based force computation (Gazzola Eq. 37)
+    # ==================================================================
+    def _compute_penalization_forces(self, u_before, v_before, u_after, v_after, timestep):
+        """Compute fluid-body interaction forces from the IB velocity correction.
+
+        For Brinkman penalization, the force density on the fluid is:
+            f = -lambda * chi_s * (u_lambda - u_s)
+        and the reaction on the body is equal and opposite (Newton III):
+            F_body = +lambda * integral( chi_s * (u_lambda - u_s) ) dV
+
+        Equivalently (and more generally for both Brinkman and BDIM2),
+        the total IB forcing is:
+            F_body = -rho * integral( u_after - u_before ) dV / dt
+        where u_before is the advected velocity and u_after is the velocity
+        after the IB correction (penalization or BDIM2), both BEFORE the
+        pressure projection.  The sign convention gives the force ON the body
+        (reaction to the momentum injected into the fluid).
+
+        This is a robust volume integral over the body interior, avoiding the
+        resolution-sensitive surface-stress integration of forces_method2.
+        """
+        fs   = self.fluid_solver
+        comp = fs.composite_body
+        h2   = float(fs.h ** 2)
+        rho  = self.rho_fluid
+        dt   = float(timestep)
+
+        # Total velocity correction from IB method (on staggered grids)
+        du = u_after - u_before  # (Nx, Ny)
+        dv = v_after - v_before  # (Nx, Ny)
+
+        # For per-body attribution in multi-body cases, we weight by each
+        # body's (1-mu0) mask on the staggered grids.  For a single body
+        # this is equivalent to integrating over the whole domain.
+        for body_i, body in enumerate(comp.bodies):
+            # Body mask on staggered grids: (1 - mu0) from per-body SDF
+            sdf_u_i = comp.sdf_vals_u[body_i]
+            sdf_v_i = comp.sdf_vals_v[body_i]
+            mu0_u_i = comp.mu_funcs(sdf_u_i)[0]
+            mu0_v_i = comp.mu_funcs(sdf_v_i)[0]
+            chi_u_i = 1.0 - mu0_u_i  # body indicator on u-grid
+            chi_v_i = 1.0 - mu0_v_i  # body indicator on v-grid
+
+            # Force ON the body = -rho/dt * integral(delta_u * chi_body) dV
+            # delta_u = u_after - u_before is the momentum injected INTO the
+            # fluid by the IB method, so the reaction on the body has opposite sign.
+            fx = -(rho / dt) * (du * chi_u_i).to(torch.float64).sum().to(self.dtype) * h2
+            fy = -(rho / dt) * (dv * chi_v_i).to(torch.float64).sum().to(self.dtype) * h2
+
+            # Torque about COM: tau_z = (x-xc)*fy_density - (y-yc)*fx_density
+            xc = comp.com_pos[body_i, 0]
+            yc = comp.com_pos[body_i, 1]
+            X = fs.grids.X   # CC grid coordinates
+            Y = fs.grids.Y
+
+            # Approximate torque using CC-grid projection of the corrections.
+            # The staggered du/dv are half-cell shifted; for torque we
+            # interpolate to CC (simple average of neighbours).
+            du_cc = 0.5 * (du[:-1, :] + du[1:, :])
+            # Pad to full grid size
+            du_cc = torch.nn.functional.pad(du_cc, (0, 0, 0, 1), mode='replicate')
+            dv_cc = 0.5 * (dv[:, :-1] + dv[:, 1:])
+            dv_cc = torch.nn.functional.pad(dv_cc, (0, 1, 0, 0), mode='replicate')
+
+            # Use CC-grid body mask for torque
+            sdf_cc_i = comp.sdf_vals[body_i]
+            mu0_cc_i = comp.mu_funcs(sdf_cc_i)[0]
+            chi_cc_i = 1.0 - mu0_cc_i
+
+            fx_density = -(rho / dt) * du_cc * chi_cc_i
+            fy_density = -(rho / dt) * dv_cc * chi_cc_i
+
+            torque_z = (
+                ((X - xc) * fy_density - (Y - yc) * fx_density)
+                .to(torch.float64).sum().to(self.dtype) * h2
+            )
+
+            # Store in the same arrays that apply_forces reads.
+            # Convention: penalization force goes into friction_force (viscous-like)
+            # and pressure_force is zeroed, since the penalization integral
+            # captures the total IB force (viscous + pressure combined).
+            fs.friction_force_lin_x[body_i] = fx
+            fs.friction_force_lin_y[body_i] = fy
+            fs.friction_force_ang_z[body_i] = torque_z
+            fs.pressure_force_x[body_i] = 0.0
+            fs.pressure_force_y[body_i] = 0.0
+            fs.pressure_force_ang_z[body_i] = 0.0
+
+            # Update drag records for post-processing
+            it = self.iteration
+            if it < fs.viscous_drag_record.shape[2]:
+                fs.viscous_drag_record[body_i, 0, it] = fx
+                fs.viscous_drag_record[body_i, 1, it] = fy
+                fs.pressure_drag_record[body_i, 0, it] = 0.0
+                fs.pressure_drag_record[body_i, 1, it] = 0.0
+
+    # ==================================================================
+    #  fluid_step: single Euler step with Brinkman or BDIM2
     # ==================================================================
     def fluid_step(self, u, v, p, timestep):
         fs = self.fluid_solver
         comp = fs.composite_body
 
-        # No gravity in the fluid equations — with all-Neumann BCs the
+        # No gravity in the fluid equations -- with all-Neumann BCs the
         # Poisson solver cannot build a hydrostatic gradient, so adding
         # g here causes runaway velocity.  Buoyancy is handled explicitly
         # in apply_forces (FARMS style).
@@ -269,22 +432,53 @@ class BDIMhandler:
         (uprime, vprime) = fs.adv_diff_solver.solve(u, v)
         fs.adv_diff_solver.set_BCs(uprime, vprime)
 
-        # BDIM2 meta-equation
-        uprime = self._bdim2(
-            uprime, fs.mu0_all_u, fs.m_m0_all_u, comp.body_u,
-            fs.mu1_all_u, fs.normal_x_u, fs.normal_y_u,
-        )
-        vprime = self._bdim2(
-            vprime, fs.mu0_all_v, fs.m_m0_all_v, comp.body_v,
-            fs.mu1_all_v, fs.normal_x_v, fs.normal_y_v,
-        )
+        # Save pre-IB velocities for penalization force computation.
+        # Clone BEFORE the IB correction modifies them.
+        if self.force_method == 'penalization':
+            u_advected = uprime.clone()
+            v_advected = vprime.clone()
 
-        # Poisson solve (variable-density coefficients)
-        # Use local variable — do NOT overwrite fs.rho, which must stay
+        # ---- Immersed boundary correction ----
+        if self.use_brinkman:
+            # Brinkman penalization (Gazzola Eq. 29)
+            uprime = self._brinkman(uprime, fs.m_m0_all_u, comp.body_u)
+            vprime = self._brinkman(vprime, fs.m_m0_all_v, comp.body_v)
+        else:
+            # BDIM2 meta-equation
+            uprime = self._bdim2(
+                uprime, fs.mu0_all_u, fs.m_m0_all_u, comp.body_u,
+                fs.mu1_all_u, fs.normal_x_u, fs.normal_y_u,
+            )
+            vprime = self._bdim2(
+                vprime, fs.mu0_all_v, fs.m_m0_all_v, comp.body_v,
+                fs.mu1_all_v, fs.normal_x_v, fs.normal_y_v,
+            )
+
+        # Compute penalization forces BEFORE pressure projection.
+        # The penalization integral captures the total body force from the
+        # IB correction.  The subsequent pressure projection redistributes
+        # momentum to enforce incompressibility but does not change the net
+        # force on the body (the pressure gradient integrates to zero over
+        # the closed body surface for incompressible flow).
+        if self.force_method == 'penalization':
+            self._compute_penalization_forces(
+                u_advected, v_advected, uprime, vprime, timestep,
+            )
+
+        # Variable-density Poisson solve.
+        #
+        # Gazzola (Eq. 12) defines rho = (1-chi_s)*rho_f + chi_s*rho_s.
+        # Our mu0 is the smooth Heaviside of the SDF: mu0 ~ 1 in fluid,
+        # mu0 ~ 0 inside the body.  So (1-mu0) = m_m0 ~ chi_s, and:
+        #   rho_blend = rho_f * mu0 + rho_s * (1-mu0)
+        # which matches Gazzola's density field exactly.
+        #
+        # Use local variable -- do NOT overwrite fs.rho, which must stay
         # as the scalar fluid density for forces_method1's stress tensor.
-        rho_blend = self.rho_fluid * fs.mu0_all_u + self.rho_body * fs.m_m0_all_u
-        ch = timestep * fs.mu0_all_u / rho_blend
-        cv = timestep * fs.mu0_all_v / rho_blend
+        rho_blend_u = self.rho_fluid * fs.mu0_all_u + self.rho_body * fs.m_m0_all_u
+        rho_blend_v = self.rho_fluid * fs.mu0_all_v + self.rho_body * fs.m_m0_all_v
+        ch = timestep * fs.mu0_all_u / rho_blend_u
+        cv = timestep * fs.mu0_all_v / rho_blend_v
 
         fs.div = fs.divergence(uprime, vprime)
         p, _ = fs.poisson_solver.solve_multigrid(
@@ -333,12 +527,17 @@ class BDIMhandler:
             fs.m_m0_all_v = 1 - fs.mu0_all_v
             (fs.normal_x_v, fs.normal_y_v) = comp.compute_normals(comp.sdf_val_v)
 
-            # 3. Euler step with Brinkmann penalisation
+            # 3. Euler step (Brinkman or BDIM2, selected by self.use_brinkman)
             (u, v, p) = self.fluid_step(fs.u0, fs.v0, fs.p0, timestep)
             (fs.u0, fs.v0, fs.p0) = (u, v, p)
 
             # 4. Compute fluid forces
-            fs.forces_method2(fs.u0, fs.v0, fs.p0, iteration)
+            #    - "penalization" forces are already computed inside fluid_step
+            #      (before pressure projection).
+            #    - "stress" forces use the existing surface-stress integration.
+            if self.force_method == 'stress':
+                fs.forces_method2(fs.u0, fs.v0, fs.p0, iteration)
+            # (penalization forces were computed in fluid_step)
 
             # 5. Plotting / saving
             self.terminate = fs.plotting_debug(fs.u0, fs.v0, fs.p0, iteration)

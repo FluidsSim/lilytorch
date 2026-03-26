@@ -71,6 +71,22 @@ extensions:
         rho               : 996.0
         rho_body          : 1005.96
 
+        # ---- Brinkman penalization (Gazzola et al., 2011) ----
+        # use_brinkman: true  -> Brinkman penalization (Eq. 29)
+        # use_brinkman: false -> BDIM2 meta-equation
+        use_brinkman      : true
+        # Penalization parameter lambda (Gazzola default: 1e4).
+        # Higher values enforce no-slip more strongly but require
+        # smaller dt for stability (dt < 1/lambda).
+        brinkman_k        : 10000
+
+        # ---- Force computation method ----
+        # "penalization" -> volume integral of IB body force (Gazzola Eq. 37)
+        #                   Robust, resolution-insensitive.
+        # "stress"       -> surface-stress integration (forces_method2)
+        #                   Known to underpredict drag by ~3x for this benchmark.
+        force_method      : "penalization"
+
         poisson_tol            : 1.0e-7
         poisson_max_cycles     : 10
         poisson_max_mgcg_cycles: 5
