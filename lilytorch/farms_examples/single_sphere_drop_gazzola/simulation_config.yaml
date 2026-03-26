@@ -3,8 +3,8 @@ units:
   seconds: 1
   kilograms: 1
 runtime:
-  n_iterations: 100001
-  buffer_size: 100001
+  n_iterations: 10001
+  buffer_size: 10001
   play: true
   rtl: 1.0
   fast: false
@@ -49,11 +49,14 @@ extensions:
     handler_path: lilytorch.farms_examples.single_sphere_drop_gazzola.controller.BDIMhandler
     bdim_yaml:
       solver :
-        use_gpu : False
+        use_gpu : True
         nthreads : 16
+
 
         Nx: 256
         Ny: 2048
+        # Nx: 256
+        # Ny: 2048
         # Nx: 1024
         # Ny: 8192
         xmin: -0.02
@@ -66,20 +69,24 @@ extensions:
         nt                : 150000
         nu                : 8.0e-7
         rho               : 996.0
+        rho_body          : 1005.96
 
-        poisson_tol       : 1.0e-7
-        poisson_max_cycles: 10
+        poisson_tol            : 1.0e-7
+        poisson_max_cycles     : 10
         poisson_max_mgcg_cycles: 5
-        jacobi_weight     : 0.7
-        poisson_nsmoothing: 5
-        poisson_verbose   : True
-        poisson_folder : "data/"
+        jacobi_weight          : 0.7
+        poisson_nsmoothing     : 5
+        poisson_verbose        : False
+        # poisson_method         : "fft"
+        # poisson_bc_type        : "neumann"
+
+        poisson_folder         : "data/"
 
 
       boundary_conditions:
         BC_type_u:
-        - "N"
-        - "N"
+        - "D"
+        - "D"
         - "N"
         - "N"
         BC_values_u:
@@ -90,8 +97,8 @@ extensions:
         BC_type_v:
         - "N"
         - "N"
-        - "N"
-        - "N"
+        - "D"
+        - "D"
         BC_values_v:
         - 0
         - 0
@@ -118,7 +125,7 @@ extensions:
 
       output:
         save_path: "/data/andreaferrario/ns_data/"
-        save_frames: False
+        save_frames: True
         save_every : 500
         vmin: -5
         vmax: 5

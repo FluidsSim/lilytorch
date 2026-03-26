@@ -755,14 +755,18 @@ class BDIMhandler:
         Returns (ch, cv) for 2-D or (ch, cv, cw) for 3-D, using
         rho = rho_body + (rho_fluid - rho_body) * mu0  at each
         staggered grid location.
+
+        The mu0 factor in the numerator ensures ch → 0 inside the body
+        (mu0 ≈ 0), so the pressure projection does not corrupt the body
+        velocity enforced by the BDIM meta-equation.
         """
         fs = self.fluid_solver
         _drho = self.rho_fluid - self.rho_body
 
-        ch = timestep / (self.rho_body + _drho * fs.mu0_all_u)
-        cv = timestep / (self.rho_body + _drho * fs.mu0_all_v)
+        ch = timestep * fs.mu0_all_u / (self.rho_body + _drho * fs.mu0_all_u)
+        cv = timestep * fs.mu0_all_v / (self.rho_body + _drho * fs.mu0_all_v)
         if self.ndim == 3:
-            cw = timestep / (self.rho_body + _drho * fs.mu0_all_w)
+            cw = timestep * fs.mu0_all_w / (self.rho_body + _drho * fs.mu0_all_w)
             return ch, cv, cw
         return ch, cv
 

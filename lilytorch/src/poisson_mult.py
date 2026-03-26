@@ -65,82 +65,82 @@ def _J2d(cp0, cm0, cp1, cm1):
 
 
 # ── Jacobi 3-D (compilable) ─────────────────────────────────────────
-def _jacobi_3d(f, p, cp0, cm0, cp1, cm1, cp2, cm2, h2, w, jcap_tol,
+def _jacobi_3d(f, p, cp0, cm0, cp1, cm1, cp2, cm2, w, jcap_tol,
                nsmoothing):
     _bc_3d(p)
     J = _J3d(cp0, cm0, cp1, cm1, cp2, cm2)
     active = torch.abs(J) >= jcap_tol
-    Jinv = torch.where(active, 1.0 / J, torch.zeros_like(J))
+    Jinv = torch.where(active, J.reciprocal(), torch.zeros_like(J))
     for _ in range(nsmoothing):
         s = _sum3d(cp0, cm0, cp1, cm1, cp2, cm2, p)
         p[1:-1, 1:-1, 1:-1] = (
-            w * (-f * h2 + s) * Jinv + (1 - w) * p[1:-1, 1:-1, 1:-1]
+            w * (-f + s) * Jinv + (1 - w) * p[1:-1, 1:-1, 1:-1]
         )
         _bc_3d(p)
     s  = _sum3d(cp0, cm0, cp1, cm1, cp2, cm2, p)
-    Au = (s - J * p[1:-1, 1:-1, 1:-1]) / h2  # reuse J from above
+    Au = (s - J * p[1:-1, 1:-1, 1:-1])
     r  = torch.where(active, f - Au, torch.zeros_like(f))
     return p, r
 
 
 # ── Jacobi 2-D (compilable) ─────────────────────────────────────────
-def _jacobi_2d(f, p, cp0, cm0, cp1, cm1, h2, w, jcap_tol, nsmoothing):
+def _jacobi_2d(f, p, cp0, cm0, cp1, cm1, w, jcap_tol, nsmoothing):
     _bc_2d(p)
     J = _J2d(cp0, cm0, cp1, cm1)
     active = torch.abs(J) >= jcap_tol
-    Jinv = torch.where(active, 1.0 / J, torch.zeros_like(J))
+    Jinv = torch.where(active, J.reciprocal(), torch.zeros_like(J))
     for _ in range(nsmoothing):
         s = _sum2d(cp0, cm0, cp1, cm1, p)
         p[1:-1, 1:-1] = (
-            w * (-f * h2 + s) * Jinv + (1 - w) * p[1:-1, 1:-1]
+            w * (-f + s) * Jinv + (1 - w) * p[1:-1, 1:-1]
         )
         _bc_2d(p)
     s  = _sum2d(cp0, cm0, cp1, cm1, p)
-    Au = (s - J * p[1:-1, 1:-1]) / h2  # reuse J from above
+    Au = (s - J * p[1:-1, 1:-1])
     r  = torch.where(active, f - Au, torch.zeros_like(f))
     return p, r
 
 
 # ── RBGS 3-D (compilable) ───────────────────────────────────────────
-def _rbgs_3d(f, p, cp0, cm0, cp1, cm1, cp2, cm2, h2, jcap_tol,
+def _rbgs_3d(f, p, cp0, cm0, cp1, cm1, cp2, cm2, jcap_tol,
              nsmoothing, red, black):
     _bc_3d(p)
     J = _J3d(cp0, cm0, cp1, cm1, cp2, cm2)
     active = torch.abs(J) >= jcap_tol
-    Jinv = torch.where(active, 1.0 / J, torch.zeros_like(J))
+    Jinv = torch.where(active, J.reciprocal(), torch.zeros_like(J))
     for _ in range(nsmoothing):
         s = _sum3d(cp0, cm0, cp1, cm1, cp2, cm2, p)
-        p_new = (-f * h2 + s) * Jinv
+        p_new = (-f + s) * Jinv
         p[1:-1, 1:-1, 1:-1] = torch.where(red, p_new, p[1:-1, 1:-1, 1:-1])
         _bc_3d(p)
         s = _sum3d(cp0, cm0, cp1, cm1, cp2, cm2, p)
-        p_new = (-f * h2 + s) * Jinv
+        p_new = (-f + s) * Jinv
         p[1:-1, 1:-1, 1:-1] = torch.where(black, p_new, p[1:-1, 1:-1, 1:-1])
         _bc_3d(p)
     s  = _sum3d(cp0, cm0, cp1, cm1, cp2, cm2, p)
-    Au = (s - J * p[1:-1, 1:-1, 1:-1]) / h2  # reuse J from above
+    Au = (s - J * p[1:-1, 1:-1, 1:-1])
     r  = torch.where(active, f - Au, torch.zeros_like(f))
     return p, r
 
 
 # ── RBGS 2-D (compilable) ───────────────────────────────────────────
-def _rbgs_2d(f, p, cp0, cm0, cp1, cm1, h2, jcap_tol, nsmoothing,
+def _rbgs_2d(f, p, cp0, cm0, cp1, cm1, jcap_tol, nsmoothing,
              red, black):
     _bc_2d(p)
     J = _J2d(cp0, cm0, cp1, cm1)
     active = torch.abs(J) >= jcap_tol
-    Jinv = torch.where(active, 1.0 / J, torch.zeros_like(J))
+    Jinv = torch.where(active, J.reciprocal(), torch.zeros_like(J))
     for _ in range(nsmoothing):
         s = _sum2d(cp0, cm0, cp1, cm1, p)
-        p_new = (-f * h2 + s) * Jinv
+        p_new = (-f + s) * Jinv
         p[1:-1, 1:-1] = torch.where(red, p_new, p[1:-1, 1:-1])
         _bc_2d(p)
         s = _sum2d(cp0, cm0, cp1, cm1, p)
-        p_new = (-f * h2 + s) * Jinv
+        p_new = (-f + s) * Jinv
         p[1:-1, 1:-1] = torch.where(black, p_new, p[1:-1, 1:-1])
         _bc_2d(p)
     s  = _sum2d(cp0, cm0, cp1, cm1, p)
-    Au = (s - J * p[1:-1, 1:-1]) / h2  # reuse J from above
+    Au = (s - J * p[1:-1, 1:-1])
     r  = torch.where(active, f - Au, torch.zeros_like(f))
     return p, r
 
@@ -212,7 +212,7 @@ def _rb_masks_3d(nx, ny, nz, device):
 
 
 # ── Full 3-D V-cycle with Jacobi (compilable, recursive) ────────────
-def _vcycle_jac_3d(f, p, ch, cv, cw, h2_t, w, jcap_tol, nsmoothing):
+def _vcycle_jac_3d(f, p, ch, cv, cw, w, jcap_tol, nsmoothing):
     """Complete 3-D V-cycle with Jacobi smoother.
 
     torch.compile unrolls the recursion at trace time, producing a single
@@ -226,7 +226,7 @@ def _vcycle_jac_3d(f, p, ch, cv, cw, h2_t, w, jcap_tol, nsmoothing):
 
     # pre-smooth
     p, r = _jacobi_3d(f, p, cp0, cm0, cp1, cm1, cp2, cm2,
-                       h2_t, w, jcap_tol, nsmoothing)
+                       w, jcap_tol, nsmoothing)
 
     nx, ny, nz = f.shape
     if nx > 2 and ny > 2 and nz > 2:
@@ -238,7 +238,7 @@ def _vcycle_jac_3d(f, p, ch, cv, cw, h2_t, w, jcap_tol, nsmoothing):
 
         # recursive call (unrolled by torch.compile tracer)
         err_c, _ = _vcycle_jac_3d(r_c, p_c, ch_c, cv_c, cw_c,
-                                   h2_t, w, jcap_tol, nsmoothing)
+                                   w, jcap_tol, nsmoothing)
 
         err = _prolongate_3d(err_c, r.shape)
         p[1:-1, 1:-1, 1:-1] = p[1:-1, 1:-1, 1:-1] + err
@@ -248,13 +248,13 @@ def _vcycle_jac_3d(f, p, ch, cv, cw, h2_t, w, jcap_tol, nsmoothing):
         cp1, cm1 = cv[:, 1:, :], cv[:, :-1, :]
         cp2, cm2 = cw[:, :, 1:], cw[:, :, :-1]
         p, r = _jacobi_3d(f, p, cp0, cm0, cp1, cm1, cp2, cm2,
-                           h2_t, w, jcap_tol, nsmoothing)
+                           w, jcap_tol, nsmoothing)
 
     return p, r
 
 
 # ── Full 3-D V-cycle with RBGS (compilable, recursive) ──────────────
-def _vcycle_rbgs_3d(f, p, ch, cv, cw, h2_t, jcap_tol, nsmoothing):
+def _vcycle_rbgs_3d(f, p, ch, cv, cw, jcap_tol, nsmoothing):
     """Complete 3-D V-cycle with Red-Black Gauss-Seidel smoother."""
     cp0, cm0 = ch[1:, :, :], ch[:-1, :, :]
     cp1, cm1 = cv[:, 1:, :], cv[:, :-1, :]
@@ -262,7 +262,7 @@ def _vcycle_rbgs_3d(f, p, ch, cv, cw, h2_t, jcap_tol, nsmoothing):
 
     red, black = _rb_masks_3d(f.shape[0], f.shape[1], f.shape[2], p.device)
     p, r = _rbgs_3d(f, p, cp0, cm0, cp1, cm1, cp2, cm2,
-                     h2_t, jcap_tol, nsmoothing, red, black)
+                     jcap_tol, nsmoothing, red, black)
 
     nx, ny, nz = f.shape
     if nx > 2 and ny > 2 and nz > 2:
@@ -273,7 +273,7 @@ def _vcycle_rbgs_3d(f, p, ch, cv, cw, h2_t, jcap_tol, nsmoothing):
         p_c = torch.zeros(coarse_shape, device=p.device, dtype=p.dtype)
 
         err_c, _ = _vcycle_rbgs_3d(r_c, p_c, ch_c, cv_c, cw_c,
-                                    h2_t, jcap_tol, nsmoothing)
+                                    jcap_tol, nsmoothing)
 
         err = _prolongate_3d(err_c, r.shape)
         p[1:-1, 1:-1, 1:-1] = p[1:-1, 1:-1, 1:-1] + err
@@ -283,7 +283,7 @@ def _vcycle_rbgs_3d(f, p, ch, cv, cw, h2_t, jcap_tol, nsmoothing):
         cp2, cm2 = cw[:, :, 1:], cw[:, :, :-1]
         red, black = _rb_masks_3d(f.shape[0], f.shape[1], f.shape[2], p.device)
         p, r = _rbgs_3d(f, p, cp0, cm0, cp1, cm1, cp2, cm2,
-                         h2_t, jcap_tol, nsmoothing, red, black)
+                         jcap_tol, nsmoothing, red, black)
 
     return p, r
 
@@ -338,14 +338,14 @@ def _rb_masks_2d(nx, ny, device):
 
 
 # ── Full 2-D V-cycle with Jacobi (compilable, recursive) ────────────
-def _vcycle_jac_2d(f, p, ch, cv, h2_t, w, jcap_tol, nsmoothing):
+def _vcycle_jac_2d(f, p, ch, cv, w, jcap_tol, nsmoothing):
     """Complete 2-D V-cycle with Jacobi smoother."""
     cp0, cm0 = ch[1:, :], ch[:-1, :]
     cp1, cm1 = cv[:, 1:], cv[:, :-1]
 
     # pre-smooth
     p, r = _jacobi_2d(f, p, cp0, cm0, cp1, cm1,
-                       h2_t, w, jcap_tol, nsmoothing)
+                       w, jcap_tol, nsmoothing)
 
     nx, ny = f.shape
     if nx > 2 and ny > 2:
@@ -356,7 +356,7 @@ def _vcycle_jac_2d(f, p, ch, cv, h2_t, w, jcap_tol, nsmoothing):
         p_c = torch.zeros(coarse_shape, device=p.device, dtype=p.dtype)
 
         err_c, _ = _vcycle_jac_2d(r_c, p_c, ch_c, cv_c,
-                                   h2_t, w, jcap_tol, nsmoothing)
+                                   w, jcap_tol, nsmoothing)
 
         err = _prolongate_2d(err_c, r.shape)
         p[1:-1, 1:-1] = p[1:-1, 1:-1] + err
@@ -364,20 +364,20 @@ def _vcycle_jac_2d(f, p, ch, cv, h2_t, w, jcap_tol, nsmoothing):
         cp0, cm0 = ch[1:, :], ch[:-1, :]
         cp1, cm1 = cv[:, 1:], cv[:, :-1]
         p, r = _jacobi_2d(f, p, cp0, cm0, cp1, cm1,
-                           h2_t, w, jcap_tol, nsmoothing)
+                           w, jcap_tol, nsmoothing)
 
     return p, r
 
 
 # ── Full 2-D V-cycle with RBGS (compilable, recursive) ──────────────
-def _vcycle_rbgs_2d(f, p, ch, cv, h2_t, jcap_tol, nsmoothing):
+def _vcycle_rbgs_2d(f, p, ch, cv, jcap_tol, nsmoothing):
     """Complete 2-D V-cycle with Red-Black Gauss-Seidel smoother."""
     cp0, cm0 = ch[1:, :], ch[:-1, :]
     cp1, cm1 = cv[:, 1:], cv[:, :-1]
 
     red, black = _rb_masks_2d(f.shape[0], f.shape[1], p.device)
     p, r = _rbgs_2d(f, p, cp0, cm0, cp1, cm1,
-                     h2_t, jcap_tol, nsmoothing, red, black)
+                     jcap_tol, nsmoothing, red, black)
 
     nx, ny = f.shape
     if nx > 2 and ny > 2:
@@ -388,7 +388,7 @@ def _vcycle_rbgs_2d(f, p, ch, cv, h2_t, jcap_tol, nsmoothing):
         p_c = torch.zeros(coarse_shape, device=p.device, dtype=p.dtype)
 
         err_c, _ = _vcycle_rbgs_2d(r_c, p_c, ch_c, cv_c,
-                                    h2_t, jcap_tol, nsmoothing)
+                                    jcap_tol, nsmoothing)
 
         err = _prolongate_2d(err_c, r.shape)
         p[1:-1, 1:-1] = p[1:-1, 1:-1] + err
@@ -397,7 +397,7 @@ def _vcycle_rbgs_2d(f, p, ch, cv, h2_t, jcap_tol, nsmoothing):
         cp1, cm1 = cv[:, 1:], cv[:, :-1]
         red, black = _rb_masks_2d(f.shape[0], f.shape[1], p.device)
         p, r = _rbgs_2d(f, p, cp0, cm0, cp1, cm1,
-                         h2_t, jcap_tol, nsmoothing, red, black)
+                         jcap_tol, nsmoothing, red, black)
 
     return p, r
 
@@ -475,6 +475,14 @@ class PoissonSolver:
         return torch.linalg.vector_norm(r)
 
     @staticmethod
+    def _convergence_norm(r):
+        """L-infinity norm: returns the exact maximum element — no floating-point
+        summation — so it is deterministic on both CPU and CUDA.  Using this for
+        the early-exit test guarantees that GPU and CPU perform the same number
+        of V-cycles, eliminating pressure-field divergence between backends."""
+        return torch.max(torch.abs(r))
+
+    @staticmethod
     def BC(q):
         """Zero-gradient (Neumann) BCs on all faces."""
         ndim = q.ndim
@@ -516,21 +524,21 @@ class PoissonSolver:
     # ------------------------------------------------------------------
     # Jacobi smoother
     # ------------------------------------------------------------------
-    def Jacobi(self, f, p, cfaces, h2):
+    def Jacobi(self, f, p, cfaces):
         self.BC(p)
         J    = self.compute_J(cfaces)
         active = torch.abs(J) >= self.jcap_tol          # fluid mask
-        Jinv = torch.where(active, 1 / J, torch.zeros_like(J))
+        Jinv = torch.where(active, J.reciprocal(), torch.zeros_like(J))
         inner = _inner(p.ndim)
 
         for _ in range(self.nsmoothing):
             s = self.compute_sum(cfaces, p)
-            p[inner] = self.w * (-f * h2 + s) * Jinv + (1 - self.w) * p[inner]
+            p[inner] = self.w * (-f + s) * Jinv + (1 - self.w) * p[inner]
             self.BC(p)
 
         # residual — zero at degenerate cells (cf. WaterLily residual!)
         s  = self.compute_sum(cfaces, p)
-        Au = (s - J * p[inner]) / h2  # reuse J from above
+        Au = (s - J * p[inner])
         r  = torch.where(active, f - Au, torch.zeros_like(f))
         return p, r
 
@@ -557,7 +565,7 @@ class PoissonSolver:
         self._rb_mask_cache[key] = (red, black)
         return red, black
 
-    def RBGS(self, f, p, cfaces, h2):
+    def RBGS(self, f, p, cfaces):
         """Red-Black Gauss-Seidel smoother.
 
         Sweeps red cells (sum of interior indices even), then black cells,
@@ -577,19 +585,19 @@ class PoissonSolver:
         for _ in range(self.nsmoothing):
             # --- red sweep ---
             s = self.compute_sum(cfaces, p)
-            p_new = (-f * h2 + s) * Jinv
+            p_new = (-f + s) * Jinv
             p[inner] = torch.where(red, p_new, p[inner])
             self.BC(p)
 
             # --- black sweep ---
             s = self.compute_sum(cfaces, p)
-            p_new = (-f * h2 + s) * Jinv
+            p_new = (-f + s) * Jinv
             p[inner] = torch.where(black, p_new, p[inner])
             self.BC(p)
 
         # residual
         s  = self.compute_sum(cfaces, p)
-        Au = (s - J * p[inner]) / h2  # reuse J from above
+        Au = (s - J * p[inner])
         r  = torch.where(active, f - Au, torch.zeros_like(f))
         return p, r
 
@@ -606,7 +614,7 @@ class PoissonSolver:
             self._compiled_fn[ndim] = torch.compile(raw)
         return self._compiled_fn[ndim]
 
-    def _smooth_compiled(self, f, p, cfaces, h2):
+    def _smooth_compiled(self, f, p, cfaces):
         """Compiled smoother path — flattens cfaces for the compiled kernel."""
         ndim = p.ndim
         fn   = self._get_compiled_fn(ndim)
@@ -616,28 +624,22 @@ class PoissonSolver:
         for cp, cm in cfaces:
             flat.extend([cp, cm])
 
-        # h2 must be a tensor on the same device for compiled graph
-        if isinstance(h2, (int, float)):
-            h2_t = torch.tensor(h2, device=p.device, dtype=p.dtype)
-        else:
-            h2_t = h2
-
         if self.smoother == "rbgs":
             interior_shape = p[_inner(ndim)].shape
             red, black = self._build_rb_masks(interior_shape)
-            return fn(f, p, *flat, h2_t, self.jcap_tol,
+            return fn(f, p, *flat, self.jcap_tol,
                       self.nsmoothing, red, black)
         else:
-            return fn(f, p, *flat, h2_t, self.w, self.jcap_tol,
+            return fn(f, p, *flat, self.w, self.jcap_tol,
                       self.nsmoothing)
 
-    def smooth(self, f, p, cfaces, h2):
+    def smooth(self, f, p, cfaces):
         """Dispatch to the configured smoother."""
         if self.compile_smoother:
-            return self._smooth_compiled(f, p, cfaces, h2)
+            return self._smooth_compiled(f, p, cfaces)
         if self.smoother == "rbgs":
-            return self.RBGS(f, p, cfaces, h2)
-        return self.Jacobi(f, p, cfaces, h2)
+            return self.RBGS(f, p, cfaces)
+        return self.Jacobi(f, p, cfaces)
 
     # ------------------------------------------------------------------
     # Face array helpers
@@ -702,39 +704,35 @@ class PoissonSolver:
             self._compiled_fn[key] = torch.compile(raw)
         return self._compiled_fn[key]
 
-    def _run_compiled_vcycle(self, f, p, face_arrs, h2):
+    def _run_compiled_vcycle(self, f, p, face_arrs):
         """Run the compiled V-cycle (2-D or 3-D)."""
         ndim = f.ndim
-        if isinstance(h2, (int, float)):
-            h2_t = torch.tensor(float(h2), device=p.device, dtype=p.dtype)
-        else:
-            h2_t = h2
         fn = self._get_compiled_vcycle(ndim)
         if ndim == 3:
             ch, cv, cw = face_arrs
             if self.smoother == "rbgs":
-                return fn(f, p, ch, cv, cw, h2_t,
+                return fn(f, p, ch, cv, cw,
                           self.jcap_tol, self.nsmoothing)
             else:
-                return fn(f, p, ch, cv, cw, h2_t,
+                return fn(f, p, ch, cv, cw,
                           self.w, self.jcap_tol, self.nsmoothing)
         else:
             ch, cv = face_arrs
             if self.smoother == "rbgs":
-                return fn(f, p, ch, cv, h2_t,
+                return fn(f, p, ch, cv,
                           self.jcap_tol, self.nsmoothing)
             else:
-                return fn(f, p, ch, cv, h2_t,
+                return fn(f, p, ch, cv,
                           self.w, self.jcap_tol, self.nsmoothing)
 
     # ------------------------------------------------------------------
     # V-cycle  (dimension-agnostic, recursive)
     # ------------------------------------------------------------------
-    def _vcycle(self, f, p, face_arrs, h2):
+    def _vcycle(self, f, p, face_arrs):
         """Internal V-cycle operating on full face arrays."""
         # Use compiled full V-cycle when enabled
         if self.compile_smoother:
-            return self._run_compiled_vcycle(f, p, face_arrs, h2)
+            return self._run_compiled_vcycle(f, p, face_arrs)
 
         ndim  = f.ndim
         shape = f.shape
@@ -743,7 +741,7 @@ class PoissonSolver:
         cfaces = self._extract_cfaces(face_arrs, ndim)
 
         # pre-smooth
-        p, r = self.smooth(f, p, cfaces, h2)
+        p, r = self.smooth(f, p, cfaces)
 
         # coarsen if grid is large enough
         if all(n > 2 for n in shape):
@@ -756,8 +754,6 @@ class PoissonSolver:
                 p         = p.cpu()
                 r         = r.cpu()
                 face_arrs = [cf.cpu() for cf in face_arrs]
-                if not isinstance(h2, float):
-                    h2 = h2.cpu()
 
             # ---- restriction of face arrays --------------------------
             # Matches WaterLily.jl's restrictL:
@@ -797,7 +793,6 @@ class PoissonSolver:
                 r_coarse,
                 torch.zeros(coarse_shape, device=p.device, dtype=p.dtype),
                 face_arrs_coarse,
-                1,
             )
 
             # ---- prolongation (trilinear / bilinear) -----------------
@@ -816,13 +811,11 @@ class PoissonSolver:
                 f         = f.cuda()
                 p         = p.cuda()
                 face_arrs = [cf.cuda() for cf in face_arrs]
-                if not isinstance(h2, float):
-                    h2 = h2.cuda()
                 # re-extract after device transfer
                 cfaces = self._extract_cfaces(face_arrs, ndim)
 
             # post-smooth
-            p, r = self.smooth(f, p, cfaces, h2)
+            p, r = self.smooth(f, p, cfaces)
 
         return p, r
 
@@ -838,7 +831,7 @@ class PoissonSolver:
                 "vcycle: ch/cv (2-D) or ch/cv/cw (3-D) keyword "
                 "arguments are required."
             )
-        return self._vcycle(f, p, face_arrs, 1)
+        return self._vcycle(f, p, face_arrs)
 
     # ------------------------------------------------------------------
     # Top-level solve
@@ -855,13 +848,16 @@ class PoissonSolver:
         p = p0.clone().detach()
         for cycle in range(self.max_vcycles):
             p, r = self.vcycle(self.h2 * f, p, **kwargs)
-            r_err = self.l2_norm(r)
+            # L-inf norm: deterministic on both CPU and CUDA (no summation).
+            r_err = self._convergence_norm(r)
             if r_err < self.tol:
                 break
-        p -= p.mean()
+        # float64 mean subtraction: GPU parallel-reduction of float32 gives
+        # a different value than CPU sequential sum.
+        p -= p.to(torch.float64).mean().to(p.dtype)
         if self.verbose:
             print(
-                f"Multigrid residual = {r_err:.2e}/{self.tol:.2e} "
+                f"Multigrid residual = {self.l2_norm(r):.2e}/{self.tol:.2e} "
                 f"with {cycle + 1}/{self.max_vcycles} cycles"
             )
         return p, r
@@ -931,10 +927,10 @@ class PoissonSolver:
 
         # Initial residual: r = b - B(x)
         r = b - self._apply_op_spd(x, cfaces)
-        r_norm = self.l2_norm(r)
+        r_norm = self._convergence_norm(r)
 
         if r_norm < self.tol:
-            x -= x.mean()
+            x -= x.to(torch.float64).mean().to(x.dtype)
             if self.verbose:
                 print(f"MGCG converged at initial guess: "
                       f"residual = {r_norm:.2e}")
@@ -945,18 +941,18 @@ class PoissonSolver:
         # so we pass f_arg = -r  →  -B(z) ≈ -r  →  B(z) ≈ r.
         z = torch.zeros_like(x)
         for _ in range(self.precond_vcycles):
-            z, _ = self._vcycle(-r, z, face_arrs, 1)
+            z, _ = self._vcycle(-r, z, face_arrs)
 
         d = z.clone()                              # search direction
         self.BC(d)
-        rz = (r * z[inner]).sum()                  # r · M⁻¹r
+        rz = (r * z[inner]).to(torch.float64).sum().to(r.dtype)  # r · M⁻¹r
 
         r_norm_final = r_norm
         for k in range(self.max_cycles):
             # --- matrix-vector product ---
             q = self._apply_op_spd(d, cfaces)      # q = B·d
 
-            dq = (d[inner] * q).sum()              # d · B·d
+            dq = (d[inner] * q).to(torch.float64).sum().to(r.dtype)  # d · B·d
             if dq.abs() < 1e-30:                   # degenerate
                 break
 
@@ -966,16 +962,16 @@ class PoissonSolver:
             self.BC(x)
             r = r - alpha * q
 
-            r_norm_final = self.l2_norm(r)
+            r_norm_final = self._convergence_norm(r)
             if r_norm_final < self.tol:
                 break
 
             # --- preconditioner (reuse buffer) ---
             z.zero_()
             for _ in range(self.precond_vcycles):
-                z, _ = self._vcycle(-r, z, face_arrs, 1)
+                z, _ = self._vcycle(-r, z, face_arrs)
 
-            rz_new = (r * z[inner]).sum()
+            rz_new = (r * z[inner]).to(torch.float64).sum().to(r.dtype)
             if rz.abs() < 1e-30:
                 break
 
@@ -984,7 +980,7 @@ class PoissonSolver:
             self.BC(d)
             rz = rz_new
 
-        x -= x.mean()
+        x -= x.to(torch.float64).mean().to(x.dtype)
         if self.verbose:
             cg_iters = min(k + 1, self.max_cycles)
             print(

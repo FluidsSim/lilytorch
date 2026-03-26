@@ -47,10 +47,14 @@ class BDIMhandler:
         self.rho_fluid = self.pars['solver']['rho']
         self.rho_body  = self.pars['solver'].get('rho_body', self.rho_fluid)
         self.radius    = 0.0025
-        self.mass      = np.pi * (self.radius ** 2) * self.rho_body
-        self.inertia   = 0.5 * self.mass * (self.radius ** 2)
-        print("Body mass: ", self.mass)
-        print("Body inertia: ", self.inertia)
+
+        # ---- FARMS-style buoyancy ----
+        # With all-Neumann BCs the BDIM pressure field is purely dynamic;
+        # no hydrostatic gradient builds up, so buoyancy must be added
+        # explicitly.  Replicates FARMS' compute_buoyancy() from drag.pyx.
+        self.gravity_z = float(physics.model.opt.gravity[2])  # e.g. -9.81
+        self.water_surface = self.pars['solver']['ymax']
+        self._buoyancy_initialized = False
 
         # ---- allocate per-body stack tensors --------------------------
         comp = self.fluid_solver.composite_body
@@ -139,6 +143,45 @@ class BDIMhandler:
             body.sdf_v   = comp.sdf_vals_v[body_i]
             body.sdf_val = comp.sdf_vals[body_i]
 
+    # ------------------------------------------------------------------
+    #  buoyancy initialisation
+    # ------------------------------------------------------------------
+    def _init_buoyancy_params(self, task, physics):
+        """Precompute per-body mass & half-height for FARMS-style buoyancy.
+
+        FARMS formula (from drag.pyx compute_buoyancy):
+            if pos_z - height < surface:
+                F_z = -rho_water * mass * gravity / density
+                      * min((surface + height - pos_z) / (2*height), 1)
+        """
+        comp = self.fluid_solver.composite_body
+        n = len(comp.bodies)
+
+        self._buoy_mass   = np.zeros(n)
+        self._buoy_height = np.zeros(n)
+
+        for body_i in range(n):
+            (animat_id, link_id) = comp.body_ids[body_i]
+            ind = task.maps[animat_id]['sensors']['data2xfrc'][link_id]
+
+            self._buoy_mass[body_i] = float(physics.model.body_mass[ind])
+
+            # Maximum bounding-sphere radius among geoms attached to this body
+            max_rbound = 0.0
+            for gi in range(physics.model.ngeom):
+                if int(physics.model.geom_bodyid[gi]) == ind:
+                    rb = float(physics.model.geom_rbound[gi])
+                    if rb > max_rbound:
+                        max_rbound = rb
+            self._buoy_height[body_i] = 0.5 * max_rbound
+
+        self._buoyancy_initialized = True
+
+    def cython2numpy(self, array):
+        return torch.from_numpy(
+            np.array(array).astype(self.dtype_np)
+        ).to(self.device)
+
     # ==================================================================
     #  apply_forces: fluid -> MuJoCo xfrc_applied
     # ==================================================================
@@ -154,29 +197,50 @@ class BDIMhandler:
         fy_pres  = s * fs.pressure_force_y.cpu().numpy()
         ang_pres = s * fs.pressure_force_ang_z.cpu().numpy()
 
+        # Lazy-init buoyancy parameters on first call
+        if not self._buoyancy_initialized:
+            self._init_buoyancy_params(task, physics)
+            m_2d = self.rho_body * np.pi * self.radius**2
+            print(f"[DIAG] buoy_mass(MuJoCo)={self._buoy_mass[0]:.6e}  "
+                  f"m_2d(rho_b*pi*R²)={m_2d:.6e}  "
+                  f"buoy_height={self._buoy_height[0]:.6e}  "
+                  f"MuJoCo_weight={self._buoy_mass[0]*9.81:.6e}  "
+                  f"2D_net_weight={(self.rho_body-self.rho_fluid)*np.pi*self.radius**2*9.81:.6e}")
+
         for body_i in range(len(fs.composite_body.bodies)):
             (animat_id, link_id) = fs.composite_body.body_ids[body_i]
             ind  = task.maps[animat_id]['sensors']['data2xfrc'][link_id]
             mass = self.data[animat_id].sensors.links.masses[link_id] * task.units.kilograms
 
+            # ---- FARMS-style buoyancy (drag.pyx compute_buoyancy) ----
+            buoy_mass   = self._buoy_mass[body_i]
+            buoy_height = self._buoy_height[body_i]
+            # com_pos[1] is the fluid y-coordinate = MuJoCo z
+            pos_z = float(fs.composite_body.com_pos[body_i][1])
+
+            buoyancy_z = 0.0
+            if buoy_mass > 0 and buoy_height > 0 and pos_z - buoy_height < self.water_surface:
+                frac = min((self.water_surface + buoy_height - pos_z) / (2.0 * buoy_height), 1.0)
+                buoyancy_z = -self.rho_fluid * buoy_mass * self.gravity_z / self.rho_body #* frac
+
+
             # MuJoCo xfrc_applied: [fx, fy, fz, tx, ty, tz]
             # Fluid x -> MuJoCo x (index 0)
-            # Fluid y -> MuJoCo z (index 2)
+            # Fluid y -> MuJoCo z (index 2), buoyancy added here
             # 2D torque -> MuJoCo ty (index 4)
             physics.data.xfrc_applied[ind, 0] = (fx_fric[body_i] + fx_pres[body_i]) * task.units.newtons
-            physics.data.xfrc_applied[ind, 2] = (fy_fric[body_i] + fy_pres[body_i]) * task.units.newtons
+            physics.data.xfrc_applied[ind, 2] = (fy_fric[body_i] + fy_pres[body_i] + buoyancy_z) * task.units.newtons
             physics.data.xfrc_applied[ind, 4] = (ang_fric[body_i] + ang_pres[body_i]) * task.units.newtons
 
-            print(physics.data.xfrc_applied[ind, [0, 2, 4]] / mass, physics.data.qvel[1])
-
-    # ------------------------------------------------------------------
-    #  BCs helper
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _set_bc(u, v):
-        for i in [1, -1]:
-            u[i, :] = 0;  u[:, i] = 0
-            v[i, :] = 0;  v[:, i] = 0
+            if self.iteration % 100 == 0:
+                vel = self.cython2numpy(self.data[0].sensors.links.com_lin_velocities()[self.iteration, 0])
+                vel_z = vel[2]
+                # vel_z = physics.data.qvel[2]
+                Re = abs(vel_z) * 2 * self.radius / (self.pars['solver']['nu'])
+                print(f"it={self.iteration:6d}  "
+                      f"Fvisc_z={fy_fric[body_i]:.4e}  Fpres_z={fy_pres[body_i]:.4e}  "
+                      f"Fbuoy={buoyancy_z:.4e}  "
+                      f"vel_z={vel_z:.4e}  Re={Re:.1f}")
 
     # ------------------------------------------------------------------
     #  BDIM2 helper: apply the meta-equation to a velocity component
@@ -196,12 +260,14 @@ class BDIMhandler:
         fs = self.fluid_solver
         comp = fs.composite_body
 
-        # Gravity body force (g = -9.81 in fluid y-direction)
-        v = v - 9.81 * fs.dt
+        # No gravity in the fluid equations — with all-Neumann BCs the
+        # Poisson solver cannot build a hydrostatic gradient, so adding
+        # g here causes runaway velocity.  Buoyancy is handled explicitly
+        # in apply_forces (FARMS style).
 
         # Advection-diffusion
         (uprime, vprime) = fs.adv_diff_solver.solve(u, v)
-        self._set_bc(uprime, vprime)
+        fs.adv_diff_solver.set_BCs(uprime, vprime)
 
         # BDIM2 meta-equation
         uprime = self._bdim2(

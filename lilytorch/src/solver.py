@@ -175,21 +175,59 @@ def _forces_shared_3d(u, v, w, p, sdf_val, nx, ny, nz, nu_rho, h):
     All arguments are plain tensors or scalars — no ``self`` access — so this
     function is safe for ``torch.compile(mode='reduce-overhead')``.
 
+    Derivative stencils match WaterLily.jl ``∂(i,j,I,u)``:
+
+    * **Diagonal** (∂u_i/∂x_i): natural compact stencil exploiting the
+      MAC stagger — ``(u[I+δ(i),i] - u[I,i]) / h``, exact at CC.
+    * **Cross** (∂u_i/∂x_j, i≠j): 4-point average to CC —
+      equivalent to interpolating u_i to CC along its stagger dimension,
+      then central-differencing along x_j.
+
+    Stagger convention: u at (x−h/2,y,z), v at (x,y−h/2,z), w at (x,y,z−h/2).
+
     Returns
     -------
     xstress, ystress, zstress : viscous-stress × normal  (σ·n)_i
     pforce_x, pforce_y, pforce_z : -p_outer * n_i
     """
-    # 9 velocity gradients (central difference, edge_order=2)
-    dudx = torch.gradient(u, spacing=h, dim=0, edge_order=2)[0]
-    dudy = torch.gradient(u, spacing=h, dim=1, edge_order=2)[0]
-    dudz = torch.gradient(u, spacing=h, dim=2, edge_order=2)[0]
-    dvdx = torch.gradient(v, spacing=h, dim=0, edge_order=2)[0]
-    dvdy = torch.gradient(v, spacing=h, dim=1, edge_order=2)[0]
-    dvdz = torch.gradient(v, spacing=h, dim=2, edge_order=2)[0]
-    dwdx = torch.gradient(w, spacing=h, dim=0, edge_order=2)[0]
-    dwdy = torch.gradient(w, spacing=h, dim=1, edge_order=2)[0]
-    dwdz = torch.gradient(w, spacing=h, dim=2, edge_order=2)[0]
+    # ---- Diagonal derivatives: compact stencil (exact at CC) --------
+    dudx = torch.empty_like(u)
+    dudx[:-1, :, :] = (u[1:, :, :] - u[:-1, :, :]) / h
+    dudx[-1, :, :]  = dudx[-2, :, :]
+
+    dvdy = torch.empty_like(v)
+    dvdy[:, :-1, :] = (v[:, 1:, :] - v[:, :-1, :]) / h
+    dvdy[:, -1, :]  = dvdy[:, -2, :]
+
+    dwdz = torch.empty_like(w)
+    dwdz[:, :, :-1] = (w[:, :, 1:] - w[:, :, :-1]) / h
+    dwdz[:, :, -1]  = dwdz[:, :, -2]
+
+    # ---- Cross derivatives: interp to CC along stagger dim, ----------
+    #      then central diff along the other dim (= WaterLily 4-pt avg)
+    # u_cc: u interpolated to CC along dim 0
+    u_cc = torch.empty_like(u)
+    u_cc[:-1, :, :] = 0.5 * (u[:-1, :, :] + u[1:, :, :])
+    u_cc[-1, :, :]  = u[-1, :, :]
+
+    dudy = torch.gradient(u_cc, spacing=h, dim=1, edge_order=2)[0]
+    dudz = torch.gradient(u_cc, spacing=h, dim=2, edge_order=2)[0]
+
+    # v_cc: v interpolated to CC along dim 1
+    v_cc = torch.empty_like(v)
+    v_cc[:, :-1, :] = 0.5 * (v[:, :-1, :] + v[:, 1:, :])
+    v_cc[:, -1, :]  = v[:, -1, :]
+
+    dvdx = torch.gradient(v_cc, spacing=h, dim=0, edge_order=2)[0]
+    dvdz = torch.gradient(v_cc, spacing=h, dim=2, edge_order=2)[0]
+
+    # w_cc: w interpolated to CC along dim 2
+    w_cc = torch.empty_like(w)
+    w_cc[:, :, :-1] = 0.5 * (w[:, :, :-1] + w[:, :, 1:])
+    w_cc[:, :, -1]  = w[:, :, -1]
+
+    dwdx = torch.gradient(w_cc, spacing=h, dim=0, edge_order=2)[0]
+    dwdy = torch.gradient(w_cc, spacing=h, dim=1, edge_order=2)[0]
 
     # viscous stress tensor  σ_{ij} n_j  (summed over j, for each i)
     xstress = nu_rho * (2 * dudx * nx + (dudy + dvdx) * ny + (dudz + dwdx) * nz)
@@ -197,7 +235,7 @@ def _forces_shared_3d(u, v, w, p, sdf_val, nx, ny, nz, nu_rho, h):
     zstress = nu_rho * ((dwdx + dudz) * nx + (dwdy + dvdz) * ny + 2 * dwdz * nz)
 
     # pressure force density (outside body only)
-    p_outer  = torch.where(sdf_val < 0, 0.0, p)
+    p_outer  = torch.where(sdf_val < 0, torch.zeros_like(p), p)
     pforce_x = -p_outer * nx
     pforce_y = -p_outer * ny
     pforce_z = -p_outer * nz
@@ -234,13 +272,15 @@ def _forces_body_integrate_3d(
         0.0,
     )
 
-    # viscous forces
+    # viscous forces — cast to float64 before .sum() for deterministic
+    # accumulation order (GPU tree-reduction vs CPU sequential).
     fvisc_x = xstress * delta_visc
     fvisc_y = ystress * delta_visc
     fvisc_z = zstress * delta_visc
-    fv_x = fvisc_x.sum() * h3
-    fv_y = fvisc_y.sum() * h3
-    fv_z = fvisc_z.sum() * h3
+    _d = torch.float64
+    fv_x = fvisc_x.to(_d).sum().to(fvisc_x.dtype) * h3
+    fv_y = fvisc_y.to(_d).sum().to(fvisc_y.dtype) * h3
+    fv_z = fvisc_z.to(_d).sum().to(fvisc_z.dtype) * h3
 
     # moment arms from CoM
     rx = X - com_x
@@ -248,22 +288,22 @@ def _forces_body_integrate_3d(
     rz = Z - com_z
 
     # torque  r × f_visc
-    tv_x = (ry * fvisc_z - rz * fvisc_y).sum() * h3
-    tv_y = (rz * fvisc_x - rx * fvisc_z).sum() * h3
-    tv_z = (rx * fvisc_y - ry * fvisc_x).sum() * h3
+    tv_x = (ry * fvisc_z - rz * fvisc_y).to(_d).sum().to(fvisc_x.dtype) * h3
+    tv_y = (rz * fvisc_x - rx * fvisc_z).to(_d).sum().to(fvisc_x.dtype) * h3
+    tv_z = (rx * fvisc_y - ry * fvisc_x).to(_d).sum().to(fvisc_x.dtype) * h3
 
     # pressure forces
     fpres_x = pforce_x * delta_pres
     fpres_y = pforce_y * delta_pres
     fpres_z = pforce_z * delta_pres
-    fp_x = fpres_x.sum() * h3
-    fp_y = fpres_y.sum() * h3
-    fp_z = fpres_z.sum() * h3
+    fp_x = fpres_x.to(_d).sum().to(fpres_x.dtype) * h3
+    fp_y = fpres_y.to(_d).sum().to(fpres_y.dtype) * h3
+    fp_z = fpres_z.to(_d).sum().to(fpres_z.dtype) * h3
 
     # torque  r × f_pres
-    tp_x = (ry * fpres_z - rz * fpres_y).sum() * h3
-    tp_y = (rz * fpres_x - rx * fpres_z).sum() * h3
-    tp_z = (rx * fpres_y - ry * fpres_x).sum() * h3
+    tp_x = (ry * fpres_z - rz * fpres_y).to(_d).sum().to(fpres_x.dtype) * h3
+    tp_y = (rz * fpres_x - rx * fpres_z).to(_d).sum().to(fpres_x.dtype) * h3
+    tp_z = (rx * fpres_y - ry * fpres_x).to(_d).sum().to(fpres_x.dtype) * h3
 
     return (fv_x, fv_y, fv_z, tv_x, tv_y, tv_z,
             fp_x, fp_y, fp_z, tp_x, tp_y, tp_z)
@@ -319,9 +359,12 @@ def _forces_body_batch_3d(
     fvisc_y = ys * delta_visc
     fvisc_z = zs * delta_visc
 
-    fv_x = fvisc_x.sum(dim=(1, 2, 3)) * h3
-    fv_y = fvisc_y.sum(dim=(1, 2, 3)) * h3
-    fv_z = fvisc_z.sum(dim=(1, 2, 3)) * h3
+    # Cast to float64 before .sum() for deterministic CPU/GPU accumulation.
+    _d = torch.float64
+    _dt = fvisc_x.dtype
+    fv_x = fvisc_x.to(_d).sum(dim=(1, 2, 3)).to(_dt) * h3
+    fv_y = fvisc_y.to(_d).sum(dim=(1, 2, 3)).to(_dt) * h3
+    fv_z = fvisc_z.to(_d).sum(dim=(1, 2, 3)).to(_dt) * h3
 
     # ---- Torques via origin-torque decomposition ------------------
     # τ_x = Σ((Y-com_y)·fz - (Z-com_z)·fy)·h³
@@ -332,12 +375,12 @@ def _forces_body_batch_3d(
     Zu = Z.unsqueeze(0)
 
     # Raw torques about the origin (fused multiply+reduce)
-    raw_v_yz = (Yu * fvisc_z).sum(dim=(1, 2, 3)) * h3
-    raw_v_zy = (Zu * fvisc_y).sum(dim=(1, 2, 3)) * h3
-    raw_v_zx = (Zu * fvisc_x).sum(dim=(1, 2, 3)) * h3
-    raw_v_xz = (Xu * fvisc_z).sum(dim=(1, 2, 3)) * h3
-    raw_v_xy = (Xu * fvisc_y).sum(dim=(1, 2, 3)) * h3
-    raw_v_yx = (Yu * fvisc_x).sum(dim=(1, 2, 3)) * h3
+    raw_v_yz = (Yu * fvisc_z).to(_d).sum(dim=(1, 2, 3)).to(_dt) * h3
+    raw_v_zy = (Zu * fvisc_y).to(_d).sum(dim=(1, 2, 3)).to(_dt) * h3
+    raw_v_zx = (Zu * fvisc_x).to(_d).sum(dim=(1, 2, 3)).to(_dt) * h3
+    raw_v_xz = (Xu * fvisc_z).to(_d).sum(dim=(1, 2, 3)).to(_dt) * h3
+    raw_v_xy = (Xu * fvisc_y).to(_d).sum(dim=(1, 2, 3)).to(_dt) * h3
+    raw_v_yx = (Yu * fvisc_x).to(_d).sum(dim=(1, 2, 3)).to(_dt) * h3
 
     tv_x = raw_v_yz - com_y * fv_z - raw_v_zy + com_z * fv_y
     tv_y = raw_v_zx - com_z * fv_x - raw_v_xz + com_x * fv_z
@@ -352,16 +395,16 @@ def _forces_body_batch_3d(
     fpres_y = py * delta_pres
     fpres_z = pz * delta_pres
 
-    fp_x = fpres_x.sum(dim=(1, 2, 3)) * h3
-    fp_y = fpres_y.sum(dim=(1, 2, 3)) * h3
-    fp_z = fpres_z.sum(dim=(1, 2, 3)) * h3
+    fp_x = fpres_x.to(_d).sum(dim=(1, 2, 3)).to(_dt) * h3
+    fp_y = fpres_y.to(_d).sum(dim=(1, 2, 3)).to(_dt) * h3
+    fp_z = fpres_z.to(_d).sum(dim=(1, 2, 3)).to(_dt) * h3
 
-    raw_p_yz = (Yu * fpres_z).sum(dim=(1, 2, 3)) * h3
-    raw_p_zy = (Zu * fpres_y).sum(dim=(1, 2, 3)) * h3
-    raw_p_zx = (Zu * fpres_x).sum(dim=(1, 2, 3)) * h3
-    raw_p_xz = (Xu * fpres_z).sum(dim=(1, 2, 3)) * h3
-    raw_p_xy = (Xu * fpres_y).sum(dim=(1, 2, 3)) * h3
-    raw_p_yx = (Yu * fpres_x).sum(dim=(1, 2, 3)) * h3
+    raw_p_yz = (Yu * fpres_z).to(_d).sum(dim=(1, 2, 3)).to(_dt) * h3
+    raw_p_zy = (Zu * fpres_y).to(_d).sum(dim=(1, 2, 3)).to(_dt) * h3
+    raw_p_zx = (Zu * fpres_x).to(_d).sum(dim=(1, 2, 3)).to(_dt) * h3
+    raw_p_xz = (Xu * fpres_z).to(_d).sum(dim=(1, 2, 3)).to(_dt) * h3
+    raw_p_xy = (Xu * fpres_y).to(_d).sum(dim=(1, 2, 3)).to(_dt) * h3
+    raw_p_yx = (Yu * fpres_x).to(_d).sum(dim=(1, 2, 3)).to(_dt) * h3
 
     tp_x = raw_p_yz - com_y * fp_z - raw_p_zy + com_z * fp_y
     tp_y = raw_p_zx - com_z * fp_x - raw_p_xz + com_x * fp_z
@@ -375,36 +418,58 @@ def _forces_body_batch_3d(
 # Compilable 2-D force-computation kernels  (module-level)
 # ======================================================================
 
-def _forces_shared_2d(u, v, p, sdf_val, nx_u, ny_u, nx_v, ny_v, nx_cc, ny_cc,
-                      nu_rho, h):
+def _forces_shared_2d(u, v, p, sdf_val, nx, ny, nu_rho, h):
     """Compute stress tensors and pressure force density for 2-D.
 
-    Uses staggered-grid normals for viscous stress (consistent with the
-    existing ``forces_method2`` formulation) and CC normals for pressure.
-    Velocity derivatives are computed via ``torch.gradient`` (central
-    differences, 2nd-order accurate — same approach as the 3-D path).
+    All quantities are evaluated on the cell-centred (CC) grid.
+    Derivative stencils match WaterLily.jl ``∂(i,j,I,u)``:
+
+    * **Diagonal** (∂u_i/∂x_i): natural compact stencil exploiting the
+      MAC stagger — ``(u[I+δ(i),i] - u[I,i]) / h``, exact at CC.
+    * **Cross** (∂u_i/∂x_j, i≠j): 4-point average to CC —
+      equivalent to interpolating u_i to CC along its stagger dimension,
+      then central-differencing along x_j.
+
+    Stagger convention: u at (x − h/2, y), v at (x, y − h/2).
 
     Returns
     -------
-    xstress, ystress : viscous stress on u-stag and v-stag grids
+    xstress, ystress : viscous stress·n components on CC grid
     pforce_x, pforce_y : pressure force density on CC grid
     """
-    dudx = torch.gradient(u, spacing=h, dim=0, edge_order=2)[0]
-    dudy = torch.gradient(u, spacing=h, dim=1, edge_order=2)[0]
-    dvdx = torch.gradient(v, spacing=h, dim=0, edge_order=2)[0]
-    dvdy = torch.gradient(v, spacing=h, dim=1, edge_order=2)[0]
+    # ---- Diagonal derivatives: compact stencil (exact at CC) --------
+    dudx = torch.empty_like(u)
+    dudx[:-1, :] = (u[1:, :] - u[:-1, :]) / h
+    dudx[-1, :]  = dudx[-2, :]
 
-    ss_11 = 2 * dudx * nx_u
-    ss_12 = (dudy + dvdx) * ny_u
-    ss_21 = (dudy + dvdx) * nx_v
-    ss_22 = 2 * dvdy * ny_v
+    dvdy = torch.empty_like(v)
+    dvdy[:, :-1] = (v[:, 1:] - v[:, :-1]) / h
+    dvdy[:, -1]  = dvdy[:, -2]
 
-    xstress = (ss_11 + ss_12) * nu_rho
-    ystress = (ss_21 + ss_22) * nu_rho
+    # ---- Cross derivatives: interp to CC along stagger dim, ----------
+    #      then central diff along the other dim (= WaterLily 4-pt avg)
+    # u_cc: u interpolated to CC along dim 0
+    u_cc = torch.empty_like(u)
+    u_cc[:-1, :] = 0.5 * (u[:-1, :] + u[1:, :])
+    u_cc[-1, :]  = u[-1, :]
 
-    p_outer = torch.where(sdf_val < 0, 0.0, p)
-    pforce_x = -p_outer * nx_cc
-    pforce_y = -p_outer * ny_cc
+    dudy = torch.gradient(u_cc, spacing=h, dim=1, edge_order=2)[0]
+
+    # v_cc: v interpolated to CC along dim 1
+    v_cc = torch.empty_like(v)
+    v_cc[:, :-1] = 0.5 * (v[:, :-1] + v[:, 1:])
+    v_cc[:, -1]  = v[:, -1]
+
+    dvdx = torch.gradient(v_cc, spacing=h, dim=0, edge_order=2)[0]
+
+    # viscous stress tensor  σ_{ij} n_j  (summed over j, for each i)
+    xstress = nu_rho * (2 * dudx * nx + (dudy + dvdx) * ny)
+    ystress = nu_rho * ((dvdx + dudy) * nx + 2 * dvdy * ny)
+
+    # pressure force density (outside body only)
+    p_outer = torch.where(sdf_val < 0, torch.zeros_like(p), p)
+    pforce_x = -p_outer * nx
+    pforce_y = -p_outer * ny
 
     return xstress, ystress, pforce_x, pforce_y
 
@@ -412,22 +477,23 @@ def _forces_shared_2d(u, v, p, sdf_val, nx_u, ny_u, nx_v, ny_v, nx_cc, ny_cc,
 def _forces_body_batch_2d(
     xstress, ystress,
     pforce_x, pforce_y,
-    sdf_vals_u, sdf_vals_v, sdf_vals_cc,
+    sdf_vals_cc,
     eps_body, eps_solver,
     com_x, com_y,
-    Xv_stag, Yu_stag, X, Y, h2,
+    X, Y, h2,
 ):
     """Batched 2-D force/torque integration for ALL bodies in one call.
 
+    All quantities live on the cell-centred (CC) grid, matching the
+    all-CC approach used in ``_forces_shared_2d`` and the 3-D path.
+
     Parameters
     ----------
-    xstress, ystress : (Ni, Nj)  viscous stress on u-/v-staggered grids
+    xstress, ystress : (Ni, Nj)  viscous stress·n on CC grid
     pforce_x, pforce_y : (Ni, Nj)  pressure force density on CC grid
-    sdf_vals_u, sdf_vals_v : (B, Ni, Nj)  per-body SDF on staggered grids
     sdf_vals_cc : (B, Ni, Nj)  per-body SDF on CC grid
     eps_body, eps_solver : scalar
     com_x, com_y : (B,)  centre-of-mass positions
-    Xv_stag, Yu_stag : (Ni, Nj)  staggered grid coordinates
     X, Y : (Ni, Nj)  CC grid coordinates
     h2 : scalar (h**2)
 
@@ -436,16 +502,10 @@ def _forces_body_batch_2d(
     6 tensors of shape (B,): fv_x, fv_y, tv_z, fp_x, fp_y, tp_z
     """
     # smoothed delta — viscous (shifted by eps_solver)  (B, Ni, Nj)
-    d_visc_u = sdf_vals_u - eps_solver
-    delta_visc_u = torch.where(
-        torch.abs(d_visc_u) < eps_body,
-        (1.0 + torch.cos(torch.pi * d_visc_u / eps_body)) / (2.0 * eps_body),
-        0.0,
-    )
-    d_visc_v = sdf_vals_v - eps_solver
-    delta_visc_v = torch.where(
-        torch.abs(d_visc_v) < eps_body,
-        (1.0 + torch.cos(torch.pi * d_visc_v / eps_body)) / (2.0 * eps_body),
+    d_visc = sdf_vals_cc - eps_solver
+    delta_visc = torch.where(
+        torch.abs(d_visc) < eps_body,
+        (1.0 + torch.cos(torch.pi * d_visc / eps_body)) / (2.0 * eps_body),
         0.0,
     )
     # smoothed delta — pressure
@@ -456,35 +516,35 @@ def _forces_body_batch_2d(
     )
 
     # Broadcast stress (1,Ni,Nj) * delta (B,Ni,Nj)
-    fvisc_x = xstress.unsqueeze(0) * delta_visc_u   # (B, Ni, Nj)
-    fvisc_y = ystress.unsqueeze(0) * delta_visc_v   # (B, Ni, Nj)
+    fvisc_x = xstress.unsqueeze(0) * delta_visc   # (B, Ni, Nj)
+    fvisc_y = ystress.unsqueeze(0) * delta_visc   # (B, Ni, Nj)
 
-    fv_x = fvisc_x.sum(dim=(1, 2)) * h2  # (B,)
-    fv_y = fvisc_y.sum(dim=(1, 2)) * h2  # (B,)
+    # Cast to float64 before .sum() for deterministic CPU/GPU accumulation.
+    _d = torch.float64
+    _dt = fvisc_x.dtype
+    fv_x = fvisc_x.to(_d).sum(dim=(1, 2)).to(_dt) * h2  # (B,)
+    fv_y = fvisc_y.to(_d).sum(dim=(1, 2)).to(_dt) * h2  # (B,)
 
     # Torque via origin-torque decomposition:
-    #   τ_z = Σ((Xv-com_x)·fy - (Yu-com_y)·fx)·h²
-    #       = (Σ Xv·fy)·h² - com_x·Fy - (Σ Yu·fx)·h² + com_y·Fx
-    Xv_u = Xv_stag.unsqueeze(0)  # (1, Ni, Nj)
-    Yu_u = Yu_stag.unsqueeze(0)  # (1, Ni, Nj)
+    #   τ_z = Σ((X-com_x)·fy - (Y-com_y)·fx)·h²
+    #       = (Σ X·fy)·h² - com_x·Fy - (Σ Y·fx)·h² + com_y·Fx
+    Xu = X.unsqueeze(0)   # (1, Ni, Nj)
+    Yu = Y.unsqueeze(0)   # (1, Ni, Nj)
 
-    raw_xv_fy = (Xv_u * fvisc_y).sum(dim=(1, 2)) * h2  # (B,)
-    raw_yu_fx = (Yu_u * fvisc_x).sum(dim=(1, 2)) * h2  # (B,)
+    raw_x_fy = (Xu * fvisc_y).to(_d).sum(dim=(1, 2)).to(_dt) * h2  # (B,)
+    raw_y_fx = (Yu * fvisc_x).to(_d).sum(dim=(1, 2)).to(_dt) * h2  # (B,)
 
-    tv_z = raw_xv_fy - com_x * fv_y - raw_yu_fx + com_y * fv_x
+    tv_z = raw_x_fy - com_x * fv_y - raw_y_fx + com_y * fv_x
 
     # Pressure forces
     fpres_x = pforce_x.unsqueeze(0) * delta_pres  # (B, Ni, Nj)
     fpres_y = pforce_y.unsqueeze(0) * delta_pres  # (B, Ni, Nj)
 
-    fp_x = fpres_x.sum(dim=(1, 2)) * h2  # (B,)
-    fp_y = fpres_y.sum(dim=(1, 2)) * h2  # (B,)
+    fp_x = fpres_x.to(_d).sum(dim=(1, 2)).to(_dt) * h2  # (B,)
+    fp_y = fpres_y.to(_d).sum(dim=(1, 2)).to(_dt) * h2  # (B,)
 
-    Xu = X.unsqueeze(0)   # (1, Ni, Nj)
-    Yu = Y.unsqueeze(0)   # (1, Ni, Nj)
-
-    raw_x_py = (Xu * fpres_y).sum(dim=(1, 2)) * h2
-    raw_y_px = (Yu * fpres_x).sum(dim=(1, 2)) * h2
+    raw_x_py = (Xu * fpres_y).to(_d).sum(dim=(1, 2)).to(_dt) * h2
+    raw_y_px = (Yu * fpres_x).to(_d).sum(dim=(1, 2)).to(_dt) * h2
 
     tp_z = raw_x_py - com_x * fp_y - raw_y_px + com_y * fp_x
 
@@ -541,7 +601,7 @@ class FluidSolver:
         self.dy=(self.ymax-self.ymin)/(self.ny-2)
 
         assert abs(float(self.dx-self.dy)) < 1e-10, "Grid spacing in x = {} and y = {} must be equal".format(self.dx, self.dy)
-        self.h = self.dx
+        self.h = torch.tensor(self.dx, device=self.device, dtype=self.dtype)
 
         self.x = torch.arange(self.xmin-self.h/2, self.xmax+self.h, self.h, device=self.device, dtype=self.dtype)
         self.y = torch.arange(self.ymin-self.h/2, self.ymax+self.h, self.h, device=self.device, dtype=self.dtype)
@@ -574,7 +634,7 @@ class FluidSolver:
         self.rho  = torch.tensor(solver["rho"], device=self.device, dtype=self.dtype)  # density
         self.visc = self.nu*self.rho                                                   # dynamic viscosity
 
-        self.eps  = 2*self.h
+        self.eps  = 1*self.h
 
         self.starting_iteration      = solver.get("starting_iteration", 0)
         self.starting_iteration_path = solver.get("starting_iteration_path", None)
@@ -1075,16 +1135,14 @@ class FluidSolver:
                   f_x = self.force_x_interp(body.cnt_update[0], body.cnt_update[1])
                   f_y = self.force_y_interp(body.cnt_update[0], body.cnt_update[1])
 
-                  self.friction_force_lin_x[i] = torch.sum(f_x[mask])*body.ds
-                  self.friction_force_lin_y[i] = torch.sum(f_y[mask])*body.ds
-                  self.friction_force_ang_z[i] = torch.sum(
-                      ops.cross_product_2d(
+                  self.friction_force_lin_x[i] = f_x[mask].to(torch.float64).sum().to(self.dtype)*body.ds
+                  self.friction_force_lin_y[i] = f_y[mask].to(torch.float64).sum().to(self.dtype)*body.ds
+                  self.friction_force_ang_z[i] = ops.cross_product_2d(
                           moment_arm[0][mask],
                           moment_arm[1][mask],
                           f_x[mask],
                           f_y[mask]
-                          )
-                      )*body.ds
+                          ).to(torch.float64).sum().to(self.dtype)*body.ds
 
                   moment_arm = [
                       body.cnt_update[0]-body.com_pos[0],
@@ -1096,16 +1154,14 @@ class FluidSolver:
                   self.interp_utility.F = self.pforce_y
                   f_y = self.interp_utility(body.cnt_update[0], body.cnt_update[1])
 
-                  self.pressure_force_x[i] = torch.sum(f_x[mask])*body.ds
-                  self.pressure_force_y[i] = torch.sum(f_y[mask])*body.ds
-                  self.pressure_force_ang_z[i] = torch.sum(
-                      ops.cross_product_2d(
+                  self.pressure_force_x[i] = f_x[mask].to(torch.float64).sum().to(self.dtype)*body.ds
+                  self.pressure_force_y[i] = f_y[mask].to(torch.float64).sum().to(self.dtype)*body.ds
+                  self.pressure_force_ang_z[i] = ops.cross_product_2d(
                           moment_arm[0][mask],
                           moment_arm[1][mask],
                           f_x[mask],
                           f_y[mask]
-                          )
-                      )*body.ds
+                          ).to(torch.float64).sum().to(self.dtype)*body.ds
 
                   self.viscous_drag_record[i,0,iteration] = self.friction_force_lin_x[i]
                   self.viscous_drag_record[i,1,iteration] = self.friction_force_lin_y[i]
@@ -1128,13 +1184,11 @@ class FluidSolver:
         # ==============================================================
         # BATCHED path — all bodies in one fused call
         # ==============================================================
-        # Shared part: stress + pressure force density
+        # Shared part: stress + pressure force density (all CC grid)
         nu_rho = self._compute_nu_rho_for_forces(u, v)
         (xstress, ystress,
          pforce_x, pforce_y) = self._forces_shared_2d_compiled(
             u, v, p, comp.sdf_val,
-            self.normal_x_u, self.normal_y_u,
-            self.normal_x_v, self.normal_y_v,
             normal_x, normal_y,
             nu_rho, self.h,
         )
@@ -1157,10 +1211,9 @@ class FluidSolver:
          fp_x, fp_y, tp_z) = self._forces_body_batch_2d_compiled(
             xstress, ystress,
             pforce_x, pforce_y,
-            comp.sdf_vals_u, comp.sdf_vals_v, comp.sdf_vals,
+            comp.sdf_vals,
             eps_body, self.eps,
             comp.com_pos[:, 0], comp.com_pos[:, 1],
-            self.grids.Xv_stag, self.grids.Yu_stag,
             self.grids.X, self.grids.Y, self.h2,
         )
 
@@ -2141,7 +2194,8 @@ class FluidSolver:
             s.vorticity(u, v, w).cpu() if s.ndim == 2
             else s.vorticity_components(u, v, w)["omega_z"].cpu()
         ), None, None, True),
-        # ("pressure",   lambda s, u, v, p, w: p.cpu(),                    None, None, True),
+        ("v",          lambda s, u, v, p, w: v.cpu(), "auto", "auto", True),
+        # ("pressure",   lambda s, u, v, p, w: p.cpu(), None, None, True),
         # ("divergence", lambda s, u, v, p, w: s.divergence(u, v, w).cpu(),None, None, False),
     ]
 
@@ -2241,8 +2295,8 @@ class FluidSolver:
                     field = field_fn(self, u, v, p, w_vel)
                     field_np = field.detach().cpu().numpy().copy() if hasattr(field, 'detach') else np.array(field)
                     field_np = field_np[1:-1, 1:-1]  # strip ghost cells
-                    eff_vmin = self.vmin if vmin is None else vmin
-                    eff_vmax = self.vmax if vmax is None else vmax
+                    eff_vmin = self.vmin if vmin is None else (None if vmin == "auto" else vmin)
+                    eff_vmax = self.vmax if vmax is None else (None if vmax == "auto" else vmax)
                     save_path = self.save_path
                     _bodies  = bodies if show_body else None
                     self._submit_io(
@@ -2269,8 +2323,8 @@ class FluidSolver:
                     field = field_fn(self, u, v, p, w_vel)
                     field_np = field.detach().cpu().numpy().copy() if hasattr(field, 'detach') else np.array(field)
                     field_np = field_np[_s, _s, _s]  # strip ghost cells
-                    eff_vmin = self.vmin if vmin is None else vmin
-                    eff_vmax = self.vmax if vmax is None else vmax
+                    eff_vmin = self.vmin if vmin is None else (None if vmin == "auto" else vmin)
+                    eff_vmax = self.vmax if vmax is None else (None if vmax == "auto" else vmax)
                     save_path = self.save_path
                     _pass_bodies = bodies if _show_body else None
                     self._submit_io(

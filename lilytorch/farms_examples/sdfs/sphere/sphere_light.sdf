@@ -7,15 +7,15 @@
         <pose>0 0 0 0 0 0</pose>
         <inertial>
           <pose>0 0 0 0 0 0</pose>
-          <!-- compute mass and inertia based on a 2d circle instead of sphere - m=rho*pi*r^2, I=m*r^2/2, rho=1005.96 -->
-          <mass>0.019795624792869435</mass>
+          <!-- compute mass and inertia based on a 2d circle instead of sphere - m=rho*pi*r^2, I=m*r^2/2, rho=990 -->
+          <mass>0.019438604544086843</mass>
           <inertia>
-            <ixx>6.186144543407404e-08</ixx>
+            <ixx>6.074563920027139e-08</ixx>
             <ixy>0</ixy>
             <ixz>0</ixz>
-            <iyy>6.186144543407404e-08</iyy>
+            <iyy>6.074563920027139e-08</iyy>
             <iyz>0</iyz>
-            <izz>6.186144543407404e-08</izz>
+            <izz>6.074563920027139e-08</izz>
           </inertia>
         </inertial>
         <collision name="base_link_collision">

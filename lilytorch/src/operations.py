@@ -11,21 +11,50 @@ import torch
 
 
 # ------------------------------------------------------------------
+# Reciprocal helper — accepts float or Tensor, returns Tensor reciprocal
+# ------------------------------------------------------------------
+def _recip(val):
+    """Return the reciprocal of *val* as a Tensor.
+
+    Multiply-by-reciprocal is deterministic across CPU and CUDA
+    (avoids potential division rounding differences in torch ops).
+    """
+    if isinstance(val, torch.Tensor):
+        return val.reciprocal()
+    return 1.0 / val  # plain float — exact
+
+
+# ------------------------------------------------------------------
 # First-order partial derivatives
 # ------------------------------------------------------------------
 def compute_dpdx(p, h):
-    """Compute dp/dx via central difference."""
-    return torch.gradient(p, spacing=h, dim=0, edge_order=2)[0]
+    """Compute dp/dx via central difference (multiply-by-reciprocal)."""
+    dp = torch.zeros_like(p)
+    inv_2h = _recip(2.0 * h) if isinstance(h, torch.Tensor) else 1.0 / (2.0 * h)
+    if p.ndim == 2:
+        dp[1:-1, 1:-1] = (p[2:, 1:-1] - p[:-2, 1:-1]) * inv_2h
+    else:
+        dp[1:-1, 1:-1, 1:-1] = (p[2:, 1:-1, 1:-1] - p[:-2, 1:-1, 1:-1]) * inv_2h
+    return dp
 
 
 def compute_dpdy(p, h):
-    """Compute dp/dy via central difference."""
-    return torch.gradient(p, spacing=h, dim=1, edge_order=2)[0]
+    """Compute dp/dy via central difference (multiply-by-reciprocal)."""
+    dp = torch.zeros_like(p)
+    inv_2h = _recip(2.0 * h) if isinstance(h, torch.Tensor) else 1.0 / (2.0 * h)
+    if p.ndim == 2:
+        dp[1:-1, 1:-1] = (p[1:-1, 2:] - p[1:-1, :-2]) * inv_2h
+    else:
+        dp[1:-1, 1:-1, 1:-1] = (p[1:-1, 2:, 1:-1] - p[1:-1, :-2, 1:-1]) * inv_2h
+    return dp
 
 
 def compute_dpdz(p, h):
-    """Compute dp/dz (3-D only)."""
-    return torch.gradient(p, spacing=h, dim=2, edge_order=2)[0]
+    """Compute dp/dz (3-D only, multiply-by-reciprocal)."""
+    dp = torch.zeros_like(p)
+    inv_2h = _recip(2.0 * h) if isinstance(h, torch.Tensor) else 1.0 / (2.0 * h)
+    dp[1:-1, 1:-1, 1:-1] = (p[1:-1, 1:-1, 2:] - p[1:-1, 1:-1, :-2]) * inv_2h
+    return dp
 
 
 # ------------------------------------------------------------------
@@ -33,20 +62,21 @@ def compute_dpdz(p, h):
 # ------------------------------------------------------------------
 def gradient(var, h, ndim):
     """
-    Compute gradient(var).
+    Compute gradient(var) using multiply-by-reciprocal (CPU/GPU parity).
     2-D → (dvar_dx, dvar_dy),  3-D → (dvar_dx, dvar_dy, dvar_dz).
     """
+    inv_h = _recip(h)
     dvar_dx = torch.zeros_like(var)
     dvar_dy = torch.zeros_like(var)
     if ndim == 2:
-        dvar_dx[1:-1, 1:-1] = (var[1:-1, 1:-1] - var[:-2, 1:-1]) / h
-        dvar_dy[1:-1, 1:-1] = (var[1:-1, 1:-1] - var[1:-1, :-2]) / h
+        dvar_dx[1:-1, 1:-1] = (var[1:-1, 1:-1] - var[:-2, 1:-1]) * inv_h
+        dvar_dy[1:-1, 1:-1] = (var[1:-1, 1:-1] - var[1:-1, :-2]) * inv_h
         return (dvar_dx, dvar_dy)
     else:
         dvar_dz = torch.zeros_like(var)
-        dvar_dx[1:-1, 1:-1, 1:-1] = (var[1:-1, 1:-1, 1:-1] - var[:-2, 1:-1, 1:-1]) / h
-        dvar_dy[1:-1, 1:-1, 1:-1] = (var[1:-1, 1:-1, 1:-1] - var[1:-1, :-2, 1:-1]) / h
-        dvar_dz[1:-1, 1:-1, 1:-1] = (var[1:-1, 1:-1, 1:-1] - var[1:-1, 1:-1, :-2]) / h
+        dvar_dx[1:-1, 1:-1, 1:-1] = (var[1:-1, 1:-1, 1:-1] - var[:-2, 1:-1, 1:-1]) * inv_h
+        dvar_dy[1:-1, 1:-1, 1:-1] = (var[1:-1, 1:-1, 1:-1] - var[1:-1, :-2, 1:-1]) * inv_h
+        dvar_dz[1:-1, 1:-1, 1:-1] = (var[1:-1, 1:-1, 1:-1] - var[1:-1, 1:-1, :-2]) * inv_h
         return (dvar_dx, dvar_dy, dvar_dz)
 
 
@@ -54,16 +84,19 @@ def gradient(var, h, ndim):
 # Divergence
 # ------------------------------------------------------------------
 def divergence(u, v, dx, dy, w=None, dz=None):
-    """Compute the divergence — 2-D: div(u,v), 3-D: div(u,v,w)."""
+    """Compute the divergence using multiply-by-reciprocal (CPU/GPU parity)."""
+    inv_dx = _recip(dx)
+    inv_dy = _recip(dy)
     div = torch.zeros_like(u)
     if w is None:
-        div[1:-1, 1:-1] = ((u[2:, 1:-1] - u[1:-1, 1:-1]) / dx
-                         + (v[1:-1, 2:] - v[1:-1, 1:-1]) / dy)
+        div[1:-1, 1:-1] = ((u[2:, 1:-1] - u[1:-1, 1:-1]) * inv_dx
+                         + (v[1:-1, 2:] - v[1:-1, 1:-1]) * inv_dy)
     else:
+        inv_dz = _recip(dz)
         div[1:-1, 1:-1, 1:-1] = (
-            (u[2:, 1:-1, 1:-1] - u[1:-1, 1:-1, 1:-1]) / dx
-          + (v[1:-1, 2:, 1:-1] - v[1:-1, 1:-1, 1:-1]) / dy
-          + (w[1:-1, 1:-1, 2:] - w[1:-1, 1:-1, 1:-1]) / dz
+            (u[2:, 1:-1, 1:-1] - u[1:-1, 1:-1, 1:-1]) * inv_dx
+          + (v[1:-1, 2:, 1:-1] - v[1:-1, 1:-1, 1:-1]) * inv_dy
+          + (w[1:-1, 1:-1, 2:] - w[1:-1, 1:-1, 1:-1]) * inv_dz
         )
     return div
 
@@ -88,11 +121,12 @@ def vorticity(u, v, h, ndim, w=None):
     2-D: scalar  omega = dv/dx - du/dy
     3-D: magnitude |ω| = sqrt(ωx² + ωy² + ωz²)
     """
+    inv_h = _recip(h)
     if ndim == 2 or w is None:
         dvdx = torch.zeros_like(u)
         dudy = torch.zeros_like(u)
-        dvdx[1:-1, 1:-1] = (v[1:-1, 1:-1] - v[:-2, 1:-1]) / h
-        dudy[1:-1, 1:-1] = (u[1:-1, 1:-1] - u[1:-1, :-2]) / h
+        dvdx[1:-1, 1:-1] = (v[1:-1, 1:-1] - v[:-2, 1:-1]) * inv_h
+        dudy[1:-1, 1:-1] = (u[1:-1, 1:-1] - u[1:-1, :-2]) * inv_h
         return dvdx - dudy
     else:
         # 3-D vorticity magnitude.
@@ -101,18 +135,18 @@ def vorticity(u, v, h, ndim, w=None):
         # and produce spurious boundary vorticity.
         ox = torch.zeros_like(u)
         ox[2:-2, 2:-2, 2:-2] = (
-            (w[2:-2, 2:-2, 2:-2] - w[2:-2, 1:-3, 2:-2]) / h -
-            (v[2:-2, 2:-2, 2:-2] - v[2:-2, 2:-2, 1:-3]) / h
+            (w[2:-2, 2:-2, 2:-2] - w[2:-2, 1:-3, 2:-2]) * inv_h -
+            (v[2:-2, 2:-2, 2:-2] - v[2:-2, 2:-2, 1:-3]) * inv_h
         )
         oy = torch.zeros_like(u)
         oy[2:-2, 2:-2, 2:-2] = (
-            (u[2:-2, 2:-2, 2:-2] - u[2:-2, 2:-2, 1:-3]) / h -
-            (w[2:-2, 2:-2, 2:-2] - w[1:-3, 2:-2, 2:-2]) / h
+            (u[2:-2, 2:-2, 2:-2] - u[2:-2, 2:-2, 1:-3]) * inv_h -
+            (w[2:-2, 2:-2, 2:-2] - w[1:-3, 2:-2, 2:-2]) * inv_h
         )
         oz = torch.zeros_like(u)
         oz[2:-2, 2:-2, 2:-2] = (
-            (v[2:-2, 2:-2, 2:-2] - v[1:-3, 2:-2, 2:-2]) / h -
-            (u[2:-2, 2:-2, 2:-2] - u[2:-2, 1:-3, 2:-2]) / h
+            (v[2:-2, 2:-2, 2:-2] - v[1:-3, 2:-2, 2:-2]) * inv_h -
+            (u[2:-2, 2:-2, 2:-2] - u[2:-2, 1:-3, 2:-2]) * inv_h
         )
         return torch.sqrt(ox**2 + oy**2 + oz**2)
 
@@ -122,20 +156,21 @@ def vorticity_components(u, v, w, h):
     Return the three signed vorticity components (omega_x, omega_y, omega_z)
     as a dict, plus the magnitude.  Only meaningful in 3-D.
     """
+    inv_h = _recip(h)
     ox = torch.zeros_like(u)
     ox[2:-2, 2:-2, 2:-2] = (
-        (w[2:-2, 2:-2, 2:-2] - w[2:-2, 1:-3, 2:-2]) / h -
-        (v[2:-2, 2:-2, 2:-2] - v[2:-2, 2:-2, 1:-3]) / h
+        (w[2:-2, 2:-2, 2:-2] - w[2:-2, 1:-3, 2:-2]) * inv_h -
+        (v[2:-2, 2:-2, 2:-2] - v[2:-2, 2:-2, 1:-3]) * inv_h
     )
     oy = torch.zeros_like(u)
     oy[2:-2, 2:-2, 2:-2] = (
-        (u[2:-2, 2:-2, 2:-2] - u[2:-2, 2:-2, 1:-3]) / h -
-        (w[2:-2, 2:-2, 2:-2] - w[1:-3, 2:-2, 2:-2]) / h
+        (u[2:-2, 2:-2, 2:-2] - u[2:-2, 2:-2, 1:-3]) * inv_h -
+        (w[2:-2, 2:-2, 2:-2] - w[1:-3, 2:-2, 2:-2]) * inv_h
     )
     oz = torch.zeros_like(u)
     oz[2:-2, 2:-2, 2:-2] = (
-        (v[2:-2, 2:-2, 2:-2] - v[1:-3, 2:-2, 2:-2]) / h -
-        (u[2:-2, 2:-2, 2:-2] - u[2:-2, 1:-3, 2:-2]) / h
+        (v[2:-2, 2:-2, 2:-2] - v[1:-3, 2:-2, 2:-2]) * inv_h -
+        (u[2:-2, 2:-2, 2:-2] - u[2:-2, 1:-3, 2:-2]) * inv_h
     )
     return {"omega_x": ox, "omega_y": oy, "omega_z": oz,
             "omega_mag": torch.sqrt(ox**2 + oy**2 + oz**2)}

@@ -236,11 +236,11 @@ def _mu_normals_batched_3d(sdf_u, sdf_v, sdf_w, sdf_cc, h, eps):
     s = torch.sin(torch.pi * deps)
     c = torch.cos(torch.pi * deps)
     mu0 = torch.where(
-        stacked <= -eps, 0,
-        torch.where(stacked >= eps, 1,
+        stacked <= -eps, torch.zeros_like(stacked),
+        torch.where(stacked >= eps, torch.ones_like(stacked),
                     0.5 * (1 + deps + s / torch.pi)))
     mu1 = torch.where(
-        torch.abs(stacked) >= eps, 0,
+        torch.abs(stacked) >= eps, torch.zeros_like(stacked),
         eps * (0.25 - (0.5 * deps) ** 2
                - (s * deps + (1 + c) / torch.pi) / (2 * torch.pi)))
 
@@ -248,9 +248,10 @@ def _mu_normals_batched_3d(sdf_u, sdf_v, sdf_w, sdf_cc, h, eps):
     gx, gy, gz = torch.gradient(stacked, spacing=[h, h, h],
                                 dim=[1, 2, 3], edge_order=2)
     norm = torch.sqrt(gx ** 2 + gy ** 2 + gz ** 2)
-    nx = torch.where(norm > 0, gx / norm, 0)
-    ny = torch.where(norm > 0, gy / norm, 0)
-    nz = torch.where(norm > 0, gz / norm, 0)
+    inv_norm = torch.where(norm > 0, norm.reciprocal(), torch.zeros_like(norm))
+    nx = gx * inv_norm
+    ny = gy * inv_norm
+    nz = gz * inv_norm
     return mu0, mu1, nx, ny, nz
 
 
@@ -849,10 +850,9 @@ class Body:
 
         grads = torch.gradient(sdf_val, spacing=spacing, edge_order=2)
         norm = torch.sqrt(sum(g ** 2 for g in grads))
+        inv_norm = torch.where(norm > 0, norm.reciprocal(), torch.zeros_like(norm))
 
-        normals = tuple(
-            torch.where(norm > 0, g / norm, 0) for g in grads
-        )
+        normals = tuple(g * inv_norm for g in grads)
         return normals
 
     def compute_normals_3d_batched(self, sdf_vals_4):
@@ -871,9 +871,10 @@ class Body:
         gx, gy, gz = torch.gradient(sdf_vals_4, spacing=[h, h, h],
                                      dim=[1, 2, 3], edge_order=2)
         norm = torch.sqrt(gx**2 + gy**2 + gz**2)
-        nx = torch.where(norm > 0, gx / norm, 0)
-        ny = torch.where(norm > 0, gy / norm, 0)
-        nz = torch.where(norm > 0, gz / norm, 0)
+        inv_norm = torch.where(norm > 0, norm.reciprocal(), torch.zeros_like(norm))
+        nx = gx * inv_norm
+        ny = gy * inv_norm
+        nz = gz * inv_norm
         return (nx, ny, nz)
 
     def mu_funcs_batched(self, d):
@@ -911,7 +912,7 @@ class Body:
         return torch.where(
             torch.abs(d)<self.eps,
             ( 1 + torch.cos(torch.pi*d/self.eps) )/( 2*self.eps ),
-            0
+            torch.zeros_like(d)
         )
 
 
@@ -2187,22 +2188,26 @@ class CompositeBodyMesh(Body):
     # Function to create a Gaussian kernel
     def gaussian_kernel(self, size: int, sigma: float):
         """Creates a 2D Gaussian kernel."""
-        x_coord = torch.arange(size)
+        x_coord = torch.arange(size, dtype=self.dtype, device=self.device)
         x_grid = x_coord.repeat(size).view(size, size)
         y_grid = x_grid.t()
 
-        xy_grid = torch.stack([x_grid, y_grid], dim=-1).float()
+        xy_grid = torch.stack([x_grid, y_grid], dim=-1)
 
-        mean = (size - 1) / 2.
-        variance = sigma ** 2.
+        mean = (size - 1) * 0.5
+        variance = sigma * sigma
 
-        gaussian_kernel = (1./(2.*torch.pi*variance)) * \
+        two_pi_var = torch.tensor(2.0 * 3.141592653589793 * variance,
+                                  dtype=self.dtype, device=self.device)
+        two_var = torch.tensor(2.0 * variance,
+                               dtype=self.dtype, device=self.device)
+        gaussian_kernel = two_pi_var.reciprocal() * \
                         torch.exp(
-                            -torch.sum((xy_grid - mean) ** 2., dim=-1) / \
-                            (2*variance)
+                            -torch.sum((xy_grid - mean) ** 2., dim=-1) *
+                            two_var.reciprocal()
                         )
 
-        gaussian_kernel = gaussian_kernel / torch.sum(gaussian_kernel)
+        gaussian_kernel = gaussian_kernel * gaussian_kernel.to(torch.float64).sum().to(self.dtype).reciprocal()
         return gaussian_kernel
 
 

@@ -16,7 +16,7 @@ import pathlib
 import numpy as np
 import h5py
 import matplotlib
-matplotlib.use("Agg")
+# matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.colors import TwoSlopeNorm
 
@@ -46,7 +46,7 @@ REF_DIR    = HERE.parent.parent.parent / "data_to_save"
 FMT        = ".png"
 
 # Data directory containing fields.h5, contours.h5, and output/simulation.hdf5
-DATA_DIR   = pathlib.Path("/data/andreaferrario/ns_data/2026-03-24T21:35:37.663298")
+DATA_DIR   = pathlib.Path("/data/andreaferrario/ns_data/2026-03-26T18:29:14.994723")
 FIELDS_H5  = DATA_DIR / "fields.h5"
 CONTOURS_H5 = DATA_DIR / "contours.h5"
 HDF5_PATH  = DATA_DIR / "output" / "simulation.hdf5"
@@ -114,7 +114,7 @@ def plot_velocities():
 
     data  = hdf5_to_dict(str(HDF5_PATH))
     times = data["times"][:-1]
-    sa    = data["animats"][0]["sensors"]["links"]["array"][:-1, 0, :]
+    sa    = data["animats"][0]["sensors"]["links"]["array"][:, 0, :]
 
     com_vel = sa[:, sc.link_com_velocity_lin_x : sc.link_com_velocity_lin_z + 1]
     ang_vel = sa[:, sc.link_com_velocity_ang_x : sc.link_com_velocity_ang_z + 1]
@@ -126,8 +126,10 @@ def plot_velocities():
     # Normalised velocities
     # MuJoCo x -> fluid x (horizontal), MuJoCo y -> vertical (settling)
     ux_norm  =  com_vel[:, 0] / U_t
-    uz_norm  = -com_vel[:, 1] / U_t   # negate: positive = downward settling
+    uz_norm  = -com_vel[:, 2] / U_t   # negate: positive = downward settling
     ang_norm =  D * ang_vel[:, 1] / U_t
+
+    # from IPython import embed; embed()
 
     # ── reference data (digitised from Gazzola et al.) ──
     ref_up = np.genfromtxt(str(REF_DIR / "up.csv"), delimiter=",")   # settling vel
@@ -156,7 +158,7 @@ def plot_velocities():
     ax.set_xlabel(r"$t^{*} = t\,|U_t|/D$")
     ax.set_ylabel(r"Normalised velocity")
     ax.set_title("Sphere sedimentation – Gazzola et al. (2011)")
-    ax.set_ylim([-0.2, 1.3])
+    # ax.set_ylim([-0.2, 1.3])
     ax.legend(ncol=2, loc="upper right", framealpha=0.92, edgecolor="0.7")
     fig.tight_layout()
     fig.savefig(str(FIG_DIR / f"gazzola_com_velocity{FMT}"))
@@ -352,10 +354,105 @@ def plot_v_profile():
 
 
 # =====================================================================
+# 5.  Check: fluid velocity inside the body vs body u_z
+# =====================================================================
+def check_body_velocity():
+    """Compare the fluid v-field inside the body (SDF < 0) with u_z from FARMS.
+
+    For a rigid body the BDIM meta-equation enforces u → u_body inside,
+    so v (settling direction) averaged over cells deep inside the body
+    should closely match the COM settling velocity u_z from MuJoCo.
+    """
+    if not FIELDS_H5.exists() or not HDF5_PATH.exists():
+        print("  fields.h5 or simulation.hdf5 not found – skipping body-vel check.")
+        return
+
+    from farms_core.io.hdf5 import hdf5_to_dict
+    from farms_core.sensors.sensor_convention import sc
+
+    # Body kinematics (every iteration)
+    data  = hdf5_to_dict(str(HDF5_PATH))
+    times = data["times"][:-1]
+    sa    = data["animats"][0]["sensors"]["links"]["array"][:, 0, :]
+    com_vel = sa[:, sc.link_com_velocity_lin_x : sc.link_com_velocity_lin_z + 1]
+
+    xg, yg = load_grids()
+    iters  = list_iterations()
+
+    print(f"\n  {'iter':>6s}  {'u_z(body)':>12s}  {'<v>_inside':>12s}  "
+          f"{'|diff|':>12s}  {'rel_err':>10s}  {'#cells':>6s}")
+    print("  " + "-" * 70)
+
+    uz_body_arr = []
+    v_inside_arr = []
+    t_arr = []
+
+    for it in iters:
+        if it >= len(times):
+            continue
+
+        v_field   = load_field(it, "v")
+        sdf_field = load_field(it, "sdf")
+
+        # Cells deep inside the body (SDF < -eps, i.e. well inside)
+        eps = xg[1] - xg[0]         # one grid spacing
+        mask = sdf_field < -eps
+
+        if mask.sum() == 0:
+            continue
+
+        # Mean fluid v inside the body
+        v_mean_inside = np.mean(v_field[mask])
+
+        # Body settling velocity: MuJoCo z → fluid y
+        # In the Gazzola controller: lin_axes = [0, 2], so
+        # fluid y-velocity = MuJoCo z-velocity = com_vel[:, 2]
+        uz_body = float(com_vel[it, 2])
+
+        diff = abs(v_mean_inside - uz_body)
+        rel  = diff / max(abs(uz_body), 1e-30)
+
+        uz_body_arr.append(uz_body)
+        v_inside_arr.append(v_mean_inside)
+        t_arr.append(times[it])
+
+        print(f"  {it:6d}  {uz_body:12.6e}  {v_mean_inside:12.6e}  "
+              f"{diff:12.6e}  {rel:10.4e}  {int(mask.sum()):6d}")
+
+    # ── Plot comparison ──
+    if len(t_arr) > 1:
+        t_arr = np.array(t_arr)
+        t_star = t_arr * abs(U_t) / D
+
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(7, 6),
+                                        gridspec_kw={"height_ratios": [3, 1]},
+                                        sharex=True)
+        ax1.plot(t_star, uz_body_arr, "o-", color=C_UZ, ms=4,
+                 label=r"$u_z$ (body COM)")
+        ax1.plot(t_star, v_inside_arr, "s--", color=C_UX, ms=4,
+                 label=r"$\langle v \rangle$ inside body")
+        ax1.set_ylabel("Velocity [m/s]")
+        ax1.set_title("Body velocity vs fluid velocity inside body")
+        ax1.legend()
+
+        rel_err = np.abs(np.array(v_inside_arr) - np.array(uz_body_arr)) / np.maximum(np.abs(uz_body_arr), 1e-30)
+        ax2.semilogy(t_star, rel_err, "k.-")
+        ax2.set_xlabel(r"$t^{*} = t\,|U_t|/D$")
+        ax2.set_ylabel("Relative error")
+        ax2.set_ylim(bottom=1e-6)
+
+        fig.tight_layout()
+        fig.savefig(str(FIG_DIR / f"gazzola_body_vel_check{FMT}"))
+        print(f"\n  Saved {FIG_DIR / f'gazzola_body_vel_check{FMT}'}")
+        plt.close(fig)
+
+
+# =====================================================================
 if __name__ == "__main__":
     print("Plotting Gazzola sphere sedimentation results …")
     plot_velocities()
     plot_velocity_fields()
     plot_vorticity()
     plot_v_profile()
+    check_body_velocity()
     print("Done.")
