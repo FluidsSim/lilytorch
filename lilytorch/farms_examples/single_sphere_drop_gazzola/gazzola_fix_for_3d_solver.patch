@@ -1,0 +1,143 @@
+diff --git a/lilytorch/farms_examples/single_sphere_drop_gazzola/simulation_config.yaml b/lilytorch/farms_examples/single_sphere_drop_gazzola/simulation_config.yaml
+index eb1c3f9..04bc0d5 100644
+--- a/lilytorch/farms_examples/single_sphere_drop_gazzola/simulation_config.yaml
++++ b/lilytorch/farms_examples/single_sphere_drop_gazzola/simulation_config.yaml
+@@ -70,6 +70,7 @@ extensions:
+         nu                : 8.0e-7
+         rho               : 996.0
+         rho_body          : 1005.96
++        eps_multiplier    : 2.8284271247461903   # 2*sqrt(2) per Gazzola et al. 2011
+ 
+         poisson_tol            : 1.0e-7
+         poisson_max_cycles     : 10
+@@ -80,7 +81,7 @@ extensions:
+         # poisson_method         : "fft"
+         # poisson_bc_type        : "neumann"
+ 
+-        poisson_folder         : "data/"
++        poisson_folder         : "output/"
+ 
+ 
+       boundary_conditions:
+@@ -124,7 +125,7 @@ extensions:
+         scale: 1
+ 
+       output:
+-        save_path: "/data/andreaferrario/ns_data/"
++        save_path: "output/"
+         save_frames: True
+         save_every : 500
+         vmin: -5
+diff --git a/lilytorch/src/body.py b/lilytorch/src/body.py
+index 19bd4c0..c8cc3d9 100644
+--- a/lilytorch/src/body.py
++++ b/lilytorch/src/body.py
+@@ -5,7 +5,6 @@ import os
+ 
+ import numpy as np
+ import torch
+-from farms_core.io.sdf import ModelSDF
+ from pytorch_interpolation import RegularGridInterpolator, RegularGridInterpolatorAutomatic
+ 
+ logger = logging.getLogger(__name__)
+@@ -16,6 +15,11 @@ logger = logging.getLogger(__name__)
+ # call SDF construction, plotting, or mesh operations.
+ # ---------------------------------------------------------------------------
+ 
++def _import_model_sdf():
++    """Lazy import for farms_core.io.sdf.ModelSDF (only needed for SDF mesh bodies)."""
++    from farms_core.io.sdf import ModelSDF
++    return ModelSDF
++
+ def _import_open3d():
+     import open3d as o3d
+     o3d.utility.set_verbosity_level(o3d.utility.VerbosityLevel.Error)
+@@ -195,7 +199,10 @@ def rotate_grid_3d(X, Y, Z, R_T, origin):
+ 
+ 
+ # Compiled variant – fuses the 9 element-wise ops into ~1 kernel.
+-_rotate_grid_3d_compiled = torch.compile(rotate_grid_3d, mode="reduce-overhead")
++try:
++    _rotate_grid_3d_compiled = torch.compile(rotate_grid_3d, mode="reduce-overhead")
++except Exception:
++    _rotate_grid_3d_compiled = rotate_grid_3d
+ 
+ 
+ def _stagger_sdf_3d(sdf_cc):
+@@ -217,7 +224,10 @@ def _stagger_sdf_3d(sdf_cc):
+     return sdf_u, sdf_v, sdf_w
+ 
+ 
+-_stagger_sdf_3d_compiled = torch.compile(_stagger_sdf_3d, mode="reduce-overhead")
++try:
++    _stagger_sdf_3d_compiled = torch.compile(_stagger_sdf_3d, mode="reduce-overhead")
++except Exception:
++    _stagger_sdf_3d_compiled = _stagger_sdf_3d
+ 
+ 
+ def _mu_normals_batched_3d(sdf_u, sdf_v, sdf_w, sdf_cc, h, eps):
+@@ -255,8 +265,11 @@ def _mu_normals_batched_3d(sdf_u, sdf_v, sdf_w, sdf_cc, h, eps):
+     return mu0, mu1, nx, ny, nz
+ 
+ 
+-_mu_normals_batched_3d_compiled = torch.compile(
+-    _mu_normals_batched_3d, mode="reduce-overhead")
++try:
++    _mu_normals_batched_3d_compiled = torch.compile(
++        _mu_normals_batched_3d, mode="reduce-overhead")
++except Exception:
++    _mu_normals_batched_3d_compiled = _mu_normals_batched_3d
+ 
+ 
+ # Module-level cache:  (data_ptr_x, data_ptr_y, data_ptr_z) -> _StaggeredGrids
+@@ -682,7 +695,7 @@ class COMPOSITEmesh2sdf():
+         sdf_folder = folder of the sdf file
+         sdf_name = name of the sdf file
+         """
+-        self.sdf = ModelSDF.read(sdf_folder+sdf_name)[0]
++        self.sdf = _import_model_sdf().read(sdf_folder+sdf_name)[0]
+         self.sdfs = []
+         for link in self.sdf.links:
+             mesh_name = link["visuals"][0]["geometry"]["uri"]
+@@ -2080,7 +2093,7 @@ class CompositeBodyMesh(Body):
+         super().__init__(device, x, y, eps=eps, grids=grids)
+ 
+         self.sdf_folder      = sdf_folder
+-        self.sdf             = ModelSDF.read(sdf_folder+sdf_name)[0]
++        self.sdf             = _import_model_sdf().read(sdf_folder+sdf_name)[0]
+         self.bodies          = []
+         self.suit            = suit
+         self.plotting        = plotting
+@@ -2240,7 +2253,7 @@ class MultiAnimatBodies(Body):
+         _mesh_body_cache: dict[tuple, BodyMesh] = {}
+ 
+         for animat_i, animat in enumerate(experiment_options.animats):
+-            sdf        = ModelSDF.read(animat.sdf)[0]
++            sdf        = _import_model_sdf().read(animat.sdf)[0]
+             sdf_folder = os.path.dirname(animat.sdf)
+ 
+             for link_i, link in enumerate(sdf.links):
+@@ -2387,7 +2400,7 @@ class CompositeSegmentBody:
+         self.device          = device
+         self.thk             = 0.0005
+         self.sdf_folder      = sdf_folder
+-        self.sdf             = ModelSDF.read(sdf_folder+sdf_name)[0]
++        self.sdf             = _import_model_sdf().read(sdf_folder+sdf_name)[0]
+         self.n               = len(self.sdf.links)
+         self.body            = Body(device,x,y,eps=eps,grids=grids)
+         self.nlinks          = len(self.sdf.links)
+diff --git a/lilytorch/src/solver.py b/lilytorch/src/solver.py
+index 22036b6..481fa4a 100644
+--- a/lilytorch/src/solver.py
++++ b/lilytorch/src/solver.py
+@@ -634,7 +634,9 @@ class FluidSolver:
+         self.rho  = torch.tensor(solver["rho"], device=self.device, dtype=self.dtype)  # density
+         self.visc = self.nu*self.rho                                                   # dynamic viscosity
+ 
+-        self.eps  = 1*self.h
++        # Mollification half-width.  Gazzola et al. (2011) use ε = 2√2 h.
++        # Configurable via eps_multiplier in the solver YAML block (default 1.0).
++        self.eps  = solver.get("eps_multiplier", 1.0) * self.h
+ 
+         self.starting_iteration      = solver.get("starting_iteration", 0)
+         self.starting_iteration_path = solver.get("starting_iteration_path", None)
