@@ -46,7 +46,9 @@ class BDIMhandler():
         physics.model.geom_solref[:,0]= 0.001
         physics.model.geom_solref[:,1]= 0.5
 
-        self.rho_body = 990.0
+        # Gazzola et al. (2011) benchmark parameters:
+        #   rho_f = 996 kg/m³, rho_s = 1005.96 kg/m³ (density ratio 1.01)
+        self.rho_body = 1005.96
         self.rho_fluid = 996.0
         self.radius = 0.0025
         self.mass = np.pi*(self.radius**2)*self.rho_body
@@ -209,6 +211,12 @@ class BDIMhandler():
 
         self.set_BC(uprime,vprime)
 
+        # Save velocities *before* the Brinkman penalization step so that
+        # forces_penalization can compute the exact momentum exchange between
+        # the fluid and the immersed body.
+        self.fluid_solver.uprime_before_brinkman = uprime.clone()
+        self.fluid_solver.vprime_before_brinkman = vprime.clone()
+
         uprime = (uprime+self.fluid_solver.brinkmann_k*timestep*self.fluid_solver.m_m0_all_u*self.fluid_solver.composite_body.body_u)/ \
                  (1+self.fluid_solver.brinkmann_k*timestep*self.fluid_solver.m_m0_all_u)
         vprime = (vprime+self.fluid_solver.brinkmann_k*timestep*self.fluid_solver.m_m0_all_v*self.fluid_solver.composite_body.body_v)/ \
@@ -343,8 +351,10 @@ class BDIMhandler():
             self.fluid_solver.m_m0_all_v                                       = (1-self.fluid_solver.mu0_all_v)
             (_, self.fluid_solver.normal_x_v, self.fluid_solver.normal_y_v, _) = self.fluid_solver.composite_body.compute_sdf_properties(self.fluid_solver.composite_body.sdf_val_v)
 
+            # Spatially-varying density: rho_fluid in the fluid region, rho_body inside the body.
+            # Gazzola benchmark: rho_fluid=996, rho_body=1005.96 kg/m³ (density ratio 1.01).
             # self.fluid_solver.rho = (self.rho_fluid*self.fluid_solver.mu0_all_u + self.rho_body*self.fluid_solver.m_m0_all_u)
-            self.fluid_solver.rho = (996.0*self.fluid_solver.mu0_all_u + 1010.0*self.fluid_solver.m_m0_all_u)
+            self.fluid_solver.rho = (996.0*self.fluid_solver.mu0_all_u + 1005.96*self.fluid_solver.m_m0_all_u)
 
             (u,v,p) = (self.fluid_solver.u0, self.fluid_solver.v0, self.fluid_solver.p0)
 
@@ -359,8 +369,16 @@ class BDIMhandler():
 
             (self.fluid_solver.u0, self.fluid_solver.v0, self.fluid_solver.p0) = (u,v,p)
 
-            # compute fluid forces on the body
-            self.fluid_solver.forces_method2(self.fluid_solver.u0, self.fluid_solver.v0, self.fluid_solver.p0, iteration)
+            # compute fluid forces on the body using Brinkman penalization momentum exchange.
+            # This uses the pre-Brinkman velocities saved in fluid_step to compute the
+            # exact momentum transferred between fluid and body, giving accurate drag.
+            # forces_method2 (BDIM surface-stress integration) is kept for reference.
+            self.fluid_solver.forces_penalization(
+                self.fluid_solver.uprime_before_brinkman,
+                self.fluid_solver.vprime_before_brinkman,
+                timestep,
+                iteration,
+            )
 
             self.terminate = self.fluid_solver.plotting_debug(self.fluid_solver.u0, self.fluid_solver.v0, self.fluid_solver.p0, iteration)
 

@@ -67,6 +67,14 @@ extensions:
         nu                : 8.0e-7
         rho               : 996.0
 
+        # Brinkman penalization coefficient (large value enforces no-slip inside body).
+        # Increased from 1e5 to 1e7 for a stiffer constraint and more accurate drag.
+        brinkman_k        : 1.0e7
+
+        # Mollification half-width = eps_multiplier * h.
+        # Gazzola et al. (2011) specify epsilon = 2*sqrt(2)*h ≈ 2.8284*h.
+        eps_multiplier    : 2.8284
+
         poisson_tol       : 1.0e-7
         poisson_max_cycles: 5
         poisson_max_mgcg_cycles: 3

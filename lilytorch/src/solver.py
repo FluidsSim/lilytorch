@@ -70,7 +70,9 @@ class FluidSolver:
         self.rho  = torch.tensor(solver["rho"], device=self.device, dtype=self.dtype)  # density
         self.visc = self.nu*self.rho                                                   # dynamic viscosity
 
-        self.eps  = 2*self.h
+        # Mollification half-width; Gazzola et al. (2011) use 2*sqrt(2)*h.
+        # Configurable via eps_multiplier in the solver YAML block.
+        self.eps  = solver.get("eps_multiplier", 2.0) * self.h
 
         # self.re   = 158
         # print("Reynolds number: ", self.re)
@@ -80,7 +82,10 @@ class FluidSolver:
         self.p_fc = torch.zeros((self.nx,self.ny),device=self.device,dtype=self.dtype)
         self.p_cc = torch.zeros((self.nx,self.ny),device=self.device,dtype=self.dtype)
 
-        self.brinkmann_k = 1.0e5
+        # Brinkman penalization coefficient; large values enforce no-slip inside the body.
+        # Configurable via brinkman_k (single-n) in the solver YAML block; stored as
+        # self.brinkmann_k (double-n) to match the existing convention throughout this file.
+        self.brinkmann_k = solver.get("brinkman_k", 1.0e5)
 
         self.starting_iteration      = solver.get("starting_iteration", 0)
         self.starting_iteration_path = solver.get("starting_iteration_path", None)
@@ -1027,6 +1032,76 @@ class FluidSolver:
             self.pressure_drag_record[i,1,iteration] = self.pressure_force_y[i]
 
 
+
+
+    def forces_penalization(self, uprime_pre, vprime_pre, dt, iteration):
+        """
+        Compute hydrodynamic forces on each body via Brinkman penalization.
+
+        The Brinkman term in the fluid momentum equation enforces the no-slip
+        condition inside the body:
+
+            rho * du/dt = ... + rho * lambda * chi * (u_body - u)
+
+        where chi = m_m0_all (= 1 fully inside the body, 0 in the fluid) and
+        lambda = brinkmann_k.  By Newton's third law the body receives the
+        equal and opposite reaction force:
+
+            dF/dV = rho * lambda * chi * (u_pre - u_body) / (1 + lambda*dt*chi)
+
+        using the implicit Brinkman update so that the denominator is consistent
+        with the discrete scheme.  u_pre / v_pre are the velocities *before* the
+        Brinkman step (i.e. after advection-diffusion), which represent the
+        unconstrained fluid state.
+
+        This method captures both viscous and pressure contributions through the
+        momentum exchange and gives more reliable drag than surface-stress
+        integration (forces_method2) at coarser resolutions.
+
+        For the Gazzola et al. (2011) 2-D cylinder benchmark the result stored in
+        friction_force_lin_* / friction_force_ang_* is the total hydrodynamic
+        force.  pressure_force_* is set to zero (already included above).
+        """
+
+        for i, body in enumerate(self.composite_body.bodies[:]):
+
+            # Body indicator functions on the staggered velocity grids:
+            #   m_m0_all_u/v  -> 1 inside the body, 0 in the fluid
+            chi_u = self.m_m0_all_u
+            chi_v = self.m_m0_all_v
+
+            # Implicit Brinkman denominator (prevents over-correction for large dt*lambda)
+            denom_u = 1.0 + self.brinkmann_k * dt * chi_u
+            denom_v = 1.0 + self.brinkmann_k * dt * chi_v
+
+            # Penalization force density acting on the body (reaction to fluid forcing):
+            #   f = rho * lambda * chi * (u_pre - u_body) / (1 + lambda*dt*chi)
+            # rho is the spatially-varying density field (rho_fluid in the fluid
+            # region, rho_body inside the body).  For small density ratios
+            # (rho_s/rho_f ~ 1) the distinction is minor.
+            pen_fx = self.rho * self.brinkmann_k * chi_u * (uprime_pre - self.composite_body.body_u) / denom_u
+            pen_fy = self.rho * self.brinkmann_k * chi_v * (vprime_pre - self.composite_body.body_v) / denom_v
+
+            # Moment arms from the body centre of mass
+            arm_x = self.composite_body.Xu_stag - body.com_pos[0]
+            arm_y = self.composite_body.Yu_stag - body.com_pos[1]
+
+            self.friction_force_lin_x[i] = pen_fx.sum() * self.h2
+            self.friction_force_lin_y[i] = pen_fy.sum() * self.h2
+            self.friction_force_ang_z[i] = self.cross_product_2d(
+                arm_x, arm_y, pen_fx, pen_fy
+            ).sum() * self.h2
+
+            # Pressure force is implicit in the penalization momentum exchange
+            self.pressure_force_x[i]     = 0.0
+            self.pressure_force_y[i]     = 0.0
+            self.pressure_force_ang_z[i] = 0.0
+
+            self.viscous_drag_record[i,0,iteration] = self.friction_force_lin_x[i]
+            self.viscous_drag_record[i,1,iteration] = self.friction_force_lin_y[i]
+
+            self.pressure_drag_record[i,0,iteration] = self.pressure_force_x[i]
+            self.pressure_drag_record[i,1,iteration] = self.pressure_force_y[i]
 
 
     def solver_iteration_old(self,u,v,p):
