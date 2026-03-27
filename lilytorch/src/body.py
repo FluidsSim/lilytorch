@@ -1908,7 +1908,7 @@ class BodyMesh(Body):
         """Build a 3-D SDF field from the mesh using open3d + skfmm."""
         skfmm = _import_skfmm()
         centres = [(self.bb[i, 1] + self.bb[i, 0]) / 2 for i in range(3)]
-        halves = [(self.bb[i, 1] - self.bb[i, 0]) / 2 + pad for i in range(3)]
+        halves = [(self.bb[i, 1] - self.bb[i, 0]) / 2 + float(pad) for i in range(3)]
         xnp = np.linspace(centres[0] - halves[0], centres[0] + halves[0], self.nsamples)
         ynp = np.linspace(centres[1] - halves[1], centres[1] + halves[1], self.msamples)
         znp = np.linspace(centres[2] - halves[2], centres[2] + halves[2], self.ksamples)
