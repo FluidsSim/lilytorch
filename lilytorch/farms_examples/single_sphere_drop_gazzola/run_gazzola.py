@@ -16,11 +16,13 @@ import os
 import sys
 
 # --- ensure lilytorch is importable ------------------------------------------
-_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../../'))
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../'))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from farms_core.experiment.options import ExperimentOptions
+from farms_core.experiment.data import ExperimentData
+from farms_core.extensions.extensions import import_item
 from farms_core.simulation.options import Simulator
 from farms_sim.simulation import run_simulation, simulation_post
 
@@ -74,9 +76,14 @@ def main():
     print(f"  eps_multiplier = {bdim_cfg['solver'].get('eps_multiplier', 1.0):.4f}")
     print("=" * 60 + "\n")
 
+    # --- load experiment data (mirrors farmsim CLI) -------------------------
+    experiment_data_loader = import_item(experiment_options.loaders.experiment_data)
+    experiment_data = experiment_data_loader.from_options(experiment_options)
+
     # --- run simulation ------------------------------------------------------
     sim = run_simulation(
         experiment_options,
+        experiment_data=experiment_data,
         simulator=Simulator.MUJOCO,
     )
 

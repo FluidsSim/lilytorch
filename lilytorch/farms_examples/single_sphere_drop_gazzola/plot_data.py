@@ -46,7 +46,7 @@ REF_DIR    = HERE.parent.parent.parent / "data_to_save"
 FMT        = ".png"
 
 # Data directory containing fields.h5, contours.h5, and output/simulation.hdf5
-DATA_DIR   = pathlib.Path("/data/andreaferrario/ns_data/2026-03-26T18:29:14.994723")
+DATA_DIR   = pathlib.Path("/data/andreaferrario/ns_data/2026-03-27T14:15:41.873886")
 FIELDS_H5  = DATA_DIR / "fields.h5"
 CONTOURS_H5 = DATA_DIR / "contours.h5"
 HDF5_PATH  = DATA_DIR / "output" / "simulation.hdf5"

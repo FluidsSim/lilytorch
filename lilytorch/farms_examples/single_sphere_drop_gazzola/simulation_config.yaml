@@ -125,7 +125,7 @@ extensions:
         scale: 1
 
       output:
-        save_path: "output/"
+        save_path: "/data/andreaferrario/ns_data/"
         save_frames: True
         save_every : 500
         vmin: -5

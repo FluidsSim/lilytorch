@@ -1702,7 +1702,7 @@ class BodyMesh(Body):
         # uses fill_value="nearest" for anything beyond.
         bb = self.m2s.bounding_box()
         target_spacing = self.h / 2.0
-        pad = self.eps + 2 * self.h
+        pad = float(self.eps + 2 * self.h)
 
         if nsamples is None:
             span_x = (bb[0, 1] - bb[0, 0]) + 2 * pad
