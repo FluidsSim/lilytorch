@@ -65,7 +65,7 @@ extensions:
         ymax: 0.32
 
         convection_method : "abdquickest"
-        dt                : 0.0001
+        dt                : 0.00005
         nt                : 150000
         nu                : 8.0e-7
         rho               : 996.0
@@ -86,6 +86,7 @@ extensions:
         # "stress"       -> surface-stress integration (forces_method2)
         #                   Known to underpredict drag by ~3x for this benchmark.
         force_method      : "penalization"
+        hybrid_pressure_scale : 0.4
 
         poisson_tol            : 1.0e-7
         poisson_max_cycles     : 10

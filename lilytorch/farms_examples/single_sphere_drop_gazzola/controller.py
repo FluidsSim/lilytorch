@@ -98,6 +98,14 @@ class BDIMhandler:
         self.gravity_z = float(physics.model.opt.gravity[2])  # e.g. -9.81
         self.water_surface = self.pars['solver']['ymax']
         self._buoyancy_initialized = False
+        self.debug_force_interval = int(
+            self.pars['solver'].get('debug_force_interval', 100)
+        )
+        self.hybrid_pressure_scale = float(
+            self.pars['solver'].get('hybrid_pressure_scale', 0.0)
+        )
+        self._debug_penalization = {}
+        self._debug_stress_forces = {}
 
         # ---- allocate per-body stack tensors --------------------------
         comp = self.fluid_solver.composite_body
@@ -111,7 +119,9 @@ class BDIMhandler:
 
         print(f"[Gazzola] use_brinkman={self.use_brinkman}, "
               f"brinkman_k={self.brinkman_k}, "
-              f"force_method={self.force_method}")
+              f"force_method={self.force_method}, "
+              f"debug_force_interval={self.debug_force_interval}, "
+              f"hybrid_pressure_scale={self.hybrid_pressure_scale}")
 
     # ------------------------------------------------------------------
     # helpers
@@ -229,6 +239,96 @@ class BDIMhandler:
             np.array(array).astype(self.dtype_np)
         ).to(self.device)
 
+    def _log_force_balance(
+        self,
+        *,
+        body_i,
+        animat_id,
+        link_id,
+        ind,
+        mass,
+        buoy_mass,
+        buoyancy_z,
+        fx_total,
+        fy_total,
+        tau_total,
+        physics,
+    ):
+        dt = float(self.pars['solver']['dt'])
+        vel = self.cython2numpy(
+            self.data[animat_id].sensors.links.com_lin_velocities()[self.iteration, link_id]
+        )
+        vel_z = float(vel[2])
+        if self.iteration > 0:
+            prev_vel = self.cython2numpy(
+                self.data[animat_id].sensors.links.com_lin_velocities()[self.iteration - 1, link_id]
+            )
+            accel_z = (vel_z - float(prev_vel[2])) / dt
+        else:
+            accel_z = 0.0
+
+        gravity_force_z = mass * self.gravity_z
+        fluid_force_z = fy_total + buoyancy_z
+        net_force_z = gravity_force_z + fluid_force_z
+        force_residual_z = net_force_z - mass * accel_z
+
+        analytic_mass_2d = self.rho_body * np.pi * self.radius**2
+        analytic_buoyant_mass = self.rho_fluid * np.pi * self.radius**2
+        analytic_net_weight = (analytic_mass_2d - analytic_buoyant_mass) * self.gravity_z
+        debug_pen = self._debug_penalization.get(body_i, {})
+
+        qvel_z = float(physics.data.qvel[2]) if physics.data.qvel.shape[0] > 2 else float("nan")
+        Re = abs(vel_z) * 2 * self.radius / float(self.pars['solver']['nu'])
+
+        print(
+            f"[FORCE] it={self.iteration:6d} body={body_i} ind={ind} "
+            f"vz_sensor={vel_z:.4e} vz_qvel={qvel_z:.4e} az={accel_z:.4e} Re={Re:.1f}"
+        )
+        print(
+            f"[FORCE] mass_mujoco={mass:.6e} mass_buoy={buoy_mass:.6e} "
+            f"mass_2d={analytic_mass_2d:.6e} mass_ratio={mass/analytic_mass_2d:.6f}"
+        )
+        print(
+            f"[FORCE] Fg_z={gravity_force_z:.4e} Ffluid_x={fx_total:.4e} "
+            f"Ffluid_z={fy_total:.4e} Fbuoy_z={buoyancy_z:.4e} tau_y={tau_total:.4e}"
+        )
+        print(
+            f"[FORCE] netF_z={net_force_z:.4e} m*a_z={mass*accel_z:.4e} "
+            f"residual_z={force_residual_z:.4e} analytic_net_weight={analytic_net_weight:.4e}"
+        )
+        if debug_pen:
+            print(
+                f"[FORCE] pen_area_u={debug_pen['area_u']:.6e} "
+                f"pen_area_v={debug_pen['area_v']:.6e} area_2d={np.pi*self.radius**2:.6e} "
+                f"du_sum={debug_pen['du_sum']:.6e} dv_sum={debug_pen['dv_sum']:.6e}"
+            )
+            print(
+                f"[FORCE] lam_dt={debug_pen['lam_dt']:.3e} "
+                f"slip_u_mean={debug_pen['slip_u_mean']:.6e} "
+                f"slip_v_mean={debug_pen['slip_v_mean']:.6e} "
+                f"slip_u_max={debug_pen['slip_u_max']:.6e} "
+                f"slip_v_max={debug_pen['slip_v_max']:.6e}"
+            )
+            if 'fy_total_masked' in debug_pen:
+                print(
+                    f"[FORCE] fy_preproj={debug_pen['fy_preproj']:.4e} "
+                    f"fy_total_masked={debug_pen['fy_total_masked']:.4e} "
+                    f"fy_projection_only={debug_pen['fy_projection_only']:.4e}"
+                )
+        debug_stress = self._debug_stress_forces.get(body_i)
+        if debug_stress:
+            print(
+                f"[FORCE] stress_fvisc_z={debug_stress['fy_visc']:.4e} "
+                f"stress_fpres_z={debug_stress['fy_pres']:.4e} "
+                f"stress_ftotal_z={debug_stress['fy_total']:.4e}"
+            )
+            if 'fy_pres_masked' in debug_stress:
+                print(
+                    f"[FORCE] stress_masked_fvisc_z={debug_stress['fy_visc_masked']:.4e} "
+                    f"stress_masked_fpres_z={debug_stress['fy_pres_masked']:.4e} "
+                    f"stress_masked_ftotal_z={debug_stress['fy_total_masked']:.4e}"
+                )
+
     # ==================================================================
     #  apply_forces: fluid -> MuJoCo xfrc_applied
     # ==================================================================
@@ -275,19 +375,28 @@ class BDIMhandler:
             # Fluid x -> MuJoCo x (index 0)
             # Fluid y -> MuJoCo z (index 2), buoyancy added here
             # 2D torque -> MuJoCo ty (index 4)
-            physics.data.xfrc_applied[ind, 0] = (fx_fric[body_i] + fx_pres[body_i]) * task.units.newtons
-            physics.data.xfrc_applied[ind, 2] = (fy_fric[body_i] + fy_pres[body_i] + buoyancy_z) * task.units.newtons
-            physics.data.xfrc_applied[ind, 4] = (ang_fric[body_i] + ang_pres[body_i]) * task.units.newtons
+            fx_total = fx_fric[body_i] + fx_pres[body_i]
+            fy_total = fy_fric[body_i] + fy_pres[body_i]
+            tau_total = ang_fric[body_i] + ang_pres[body_i]
 
-            if self.iteration % 100 == 0:
-                vel = self.cython2numpy(self.data[0].sensors.links.com_lin_velocities()[self.iteration, 0])
-                vel_z = vel[2]
-                # vel_z = physics.data.qvel[2]
-                Re = abs(vel_z) * 2 * self.radius / (self.pars['solver']['nu'])
-                print(f"it={self.iteration:6d}  "
-                      f"Fvisc_z={fy_fric[body_i]:.4e}  Fpres_z={fy_pres[body_i]:.4e}  "
-                      f"Fbuoy={buoyancy_z:.4e}  "
-                      f"vel_z={vel_z:.4e}  Re={Re:.1f}")
+            physics.data.xfrc_applied[ind, 0] = fx_total * task.units.newtons
+            physics.data.xfrc_applied[ind, 2] = (fy_total + buoyancy_z) * task.units.newtons
+            physics.data.xfrc_applied[ind, 4] = tau_total * task.units.newtons
+
+            if self.debug_force_interval > 0 and self.iteration % self.debug_force_interval == 0:
+                self._log_force_balance(
+                    body_i=body_i,
+                    animat_id=animat_id,
+                    link_id=link_id,
+                    ind=ind,
+                    mass=mass,
+                    buoy_mass=buoy_mass,
+                    buoyancy_z=buoyancy_z,
+                    fx_total=fx_total,
+                    fy_total=fy_total,
+                    tau_total=tau_total,
+                    physics=physics,
+                )
 
     # ------------------------------------------------------------------
     #  BDIM2 helper: apply the meta-equation to a velocity component
@@ -362,12 +471,36 @@ class BDIMhandler:
             mu0_v_i = comp.mu_funcs(sdf_v_i)[0]
             chi_u_i = 1.0 - mu0_u_i  # body indicator on u-grid
             chi_v_i = 1.0 - mu0_v_i  # body indicator on v-grid
+            area_u = chi_u_i.to(torch.float64).sum().item() * h2
+            area_v = chi_v_i.to(torch.float64).sum().item() * h2
+
+            slip_u = (u_after - comp.body_u).abs()
+            slip_v = (v_after - comp.body_v).abs()
+            slip_u_mean = 0.0 if area_u == 0 else float(
+                (slip_u * chi_u_i).to(torch.float64).sum().item() * h2 / area_u
+            )
+            slip_v_mean = 0.0 if area_v == 0 else float(
+                (slip_v * chi_v_i).to(torch.float64).sum().item() * h2 / area_v
+            )
+            slip_u_max = float((slip_u * chi_u_i).max().item())
+            slip_v_max = float((slip_v * chi_v_i).max().item())
 
             # Force ON the body = -rho/dt * integral(delta_u * chi_body) dV
             # delta_u = u_after - u_before is the momentum injected INTO the
             # fluid by the IB method, so the reaction on the body has opposite sign.
             fx = -(rho / dt) * (du * chi_u_i).to(torch.float64).sum().to(self.dtype) * h2
             fy = -(rho / dt) * (dv * chi_v_i).to(torch.float64).sum().to(self.dtype) * h2
+            self._debug_penalization[body_i] = {
+                'area_u': float(area_u),
+                'area_v': float(area_v),
+                'du_sum': float((du * chi_u_i).to(torch.float64).sum().item()),
+                'dv_sum': float((dv * chi_v_i).to(torch.float64).sum().item()),
+                'lam_dt': float(self.brinkman_k * dt),
+                'slip_u_mean': slip_u_mean,
+                'slip_v_mean': slip_v_mean,
+                'slip_u_max': slip_u_max,
+                'slip_v_max': slip_v_max,
+            }
 
             # Torque about COM: tau_z = (x-xc)*fy_density - (y-yc)*fx_density
             xc = comp.com_pos[body_i, 0]
@@ -379,10 +512,10 @@ class BDIMhandler:
             # The staggered du/dv are half-cell shifted; for torque we
             # interpolate to CC (simple average of neighbours).
             du_cc = 0.5 * (du[:-1, :] + du[1:, :])
-            # Pad to full grid size
-            du_cc = torch.nn.functional.pad(du_cc, (0, 0, 0, 1), mode='replicate')
+            # Pad to full grid size (replicate last row / last column)
+            du_cc = torch.cat([du_cc, du_cc[-1:, :]], dim=0)
             dv_cc = 0.5 * (dv[:, :-1] + dv[:, 1:])
-            dv_cc = torch.nn.functional.pad(dv_cc, (0, 1, 0, 0), mode='replicate')
+            dv_cc = torch.cat([dv_cc, dv_cc[:, -1:]], dim=1)
 
             # Use CC-grid body mask for torque
             sdf_cc_i = comp.sdf_vals[body_i]
@@ -415,6 +548,128 @@ class BDIMhandler:
                 fs.viscous_drag_record[body_i, 1, it] = fy
                 fs.pressure_drag_record[body_i, 0, it] = 0.0
                 fs.pressure_drag_record[body_i, 1, it] = 0.0
+
+    def _record_post_projection_force_diagnostic(self, u_before, v_before, u_after, v_after, timestep):
+        fs = self.fluid_solver
+        comp = fs.composite_body
+        h2 = float(fs.h ** 2)
+        rho = self.rho_fluid
+        dt = float(timestep)
+
+        for body_i, _ in enumerate(comp.bodies):
+            debug_pen = self._debug_penalization.get(body_i)
+            if debug_pen is None:
+                continue
+
+            sdf_v_i = comp.sdf_vals_v[body_i]
+            mu0_v_i = comp.mu_funcs(sdf_v_i)[0]
+            chi_v_i = 1.0 - mu0_v_i
+
+            dv_total = v_after - v_before
+            fy_total = -(rho / dt) * (dv_total * chi_v_i).to(torch.float64).sum().item() * h2
+            debug_pen['fy_preproj'] = float(fs.friction_force_lin_y[body_i].item())
+            debug_pen['fy_total_masked'] = float(fy_total)
+            debug_pen['fy_projection_only'] = float(fy_total - debug_pen['fy_preproj'])
+
+    def _compute_masked_stress_forces(self, u, v, p, iteration):
+        fs = self.fluid_solver
+
+        saved_forces = {
+            'friction_force_lin_x': fs.friction_force_lin_x.clone(),
+            'friction_force_lin_y': fs.friction_force_lin_y.clone(),
+            'friction_force_ang_z': fs.friction_force_ang_z.clone(),
+            'pressure_force_x': fs.pressure_force_x.clone(),
+            'pressure_force_y': fs.pressure_force_y.clone(),
+            'pressure_force_ang_z': fs.pressure_force_ang_z.clone(),
+        }
+        saved_records = None
+        if iteration < fs.viscous_drag_record.shape[2]:
+            saved_records = {
+                'viscous': fs.viscous_drag_record[:, :, iteration].clone(),
+                'pressure': fs.pressure_drag_record[:, :, iteration].clone(),
+            }
+
+        p_masked = p * fs.mu0_all
+        fs.forces_method2(u, v, p_masked, iteration)
+        masked_forces = {
+            'friction_x': fs.friction_force_lin_x.clone(),
+            'friction_y': fs.friction_force_lin_y.clone(),
+            'friction_tau': fs.friction_force_ang_z.clone(),
+            'pressure_x': fs.pressure_force_x.clone(),
+            'pressure_y': fs.pressure_force_y.clone(),
+            'pressure_tau': fs.pressure_force_ang_z.clone(),
+        }
+
+        for name, tensor in saved_forces.items():
+            setattr(fs, name, tensor)
+        if saved_records is not None:
+            fs.viscous_drag_record[:, :, iteration] = saved_records['viscous']
+            fs.pressure_drag_record[:, :, iteration] = saved_records['pressure']
+
+        return masked_forces
+
+    def _apply_hybrid_pressure_correction(self, u, v, p, iteration):
+        if self.force_method != 'penalization' or self.hybrid_pressure_scale == 0.0:
+            return
+
+        fs = self.fluid_solver
+        masked_forces = self._compute_masked_stress_forces(u, v, p, iteration)
+        scale = self.hybrid_pressure_scale
+
+        fs.pressure_force_x[:] = scale * masked_forces['pressure_x']
+        fs.pressure_force_y[:] = scale * masked_forces['pressure_y']
+        fs.pressure_force_ang_z[:] = scale * masked_forces['pressure_tau']
+
+        if iteration < fs.pressure_drag_record.shape[2]:
+            fs.pressure_drag_record[:, 0, iteration] = fs.pressure_force_x
+            fs.pressure_drag_record[:, 1, iteration] = fs.pressure_force_y
+
+    def _record_stress_force_diagnostic(self, u, v, p, iteration):
+        fs = self.fluid_solver
+        if self.force_method != 'penalization':
+            return
+        if self.debug_force_interval <= 0 or iteration % self.debug_force_interval != 0:
+            return
+
+        saved_forces = {
+            'friction_force_lin_x': fs.friction_force_lin_x.clone(),
+            'friction_force_lin_y': fs.friction_force_lin_y.clone(),
+            'friction_force_ang_z': fs.friction_force_ang_z.clone(),
+            'pressure_force_x': fs.pressure_force_x.clone(),
+            'pressure_force_y': fs.pressure_force_y.clone(),
+            'pressure_force_ang_z': fs.pressure_force_ang_z.clone(),
+        }
+
+        fs.forces_method2(u, v, p, iteration)
+        debug_stress_forces = {
+            body_i: {
+                'fy_visc': float(fs.friction_force_lin_y[body_i].item()),
+                'fy_pres': float(fs.pressure_force_y[body_i].item()),
+                'fy_total': float(
+                    fs.friction_force_lin_y[body_i].item()
+                    + fs.pressure_force_y[body_i].item()
+                ),
+            }
+            for body_i in range(len(fs.composite_body.bodies))
+        }
+
+        masked_forces = self._compute_masked_stress_forces(u, v, p, iteration)
+        for body_i in range(len(fs.composite_body.bodies)):
+            debug_stress_forces[body_i]['fy_visc_masked'] = float(
+                masked_forces['friction_y'][body_i].item()
+            )
+            debug_stress_forces[body_i]['fy_pres_masked'] = float(
+                masked_forces['pressure_y'][body_i].item()
+            )
+            debug_stress_forces[body_i]['fy_total_masked'] = float(
+                masked_forces['friction_y'][body_i].item()
+                + masked_forces['pressure_y'][body_i].item()
+            )
+
+        self._debug_stress_forces = debug_stress_forces
+
+        for name, tensor in saved_forces.items():
+            setattr(fs, name, tensor)
 
     # ==================================================================
     #  fluid_step: single Euler step with Brinkman or BDIM2
@@ -493,6 +748,11 @@ class BDIMhandler:
         u = uprime - ch * p_x
         v = vprime - cv * p_y
 
+        if self.force_method == 'penalization':
+            self._record_post_projection_force_diagnostic(
+                u_advected, v_advected, u, v, timestep,
+            )
+
         return (u, v, p)
 
     # ==================================================================
@@ -538,6 +798,8 @@ class BDIMhandler:
             if self.force_method == 'stress':
                 fs.forces_method2(fs.u0, fs.v0, fs.p0, iteration)
             # (penalization forces were computed in fluid_step)
+            self._apply_hybrid_pressure_correction(fs.u0, fs.v0, fs.p0, iteration)
+            self._record_stress_force_diagnostic(fs.u0, fs.v0, fs.p0, iteration)
 
             # 5. Plotting / saving
             self.terminate = fs.plotting_debug(fs.u0, fs.v0, fs.p0, iteration)
