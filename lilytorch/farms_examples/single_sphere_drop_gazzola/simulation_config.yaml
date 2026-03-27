@@ -70,6 +70,7 @@ extensions:
         nu                : 8.0e-7
         rho               : 996.0
         rho_body          : 1005.96
+        eps_multiplier    : 2.8284271247461903   # 2*sqrt(2) per Gazzola et al. 2011
 
         poisson_tol            : 1.0e-7
         poisson_max_cycles     : 10
@@ -80,7 +81,7 @@ extensions:
         # poisson_method         : "fft"
         # poisson_bc_type        : "neumann"
 
-        poisson_folder         : "data/"
+        poisson_folder         : "output/"
 
 
       boundary_conditions:
@@ -124,7 +125,7 @@ extensions:
         scale: 1
 
       output:
-        save_path: "/data/andreaferrario/ns_data/"
+        save_path: "output/"
         save_frames: True
         save_every : 500
         vmin: -5

@@ -5,7 +5,6 @@ import os
 
 import numpy as np
 import torch
-from farms_core.io.sdf import ModelSDF
 from pytorch_interpolation import RegularGridInterpolator, RegularGridInterpolatorAutomatic
 
 logger = logging.getLogger(__name__)
@@ -15,6 +14,11 @@ logger = logging.getLogger(__name__)
 # This avoids ~2-3 s of unnecessary startup cost for code paths that never
 # call SDF construction, plotting, or mesh operations.
 # ---------------------------------------------------------------------------
+
+def _import_model_sdf():
+    """Lazy import for farms_core.io.sdf.ModelSDF (only needed for SDF mesh bodies)."""
+    from farms_core.io.sdf import ModelSDF
+    return ModelSDF
 
 def _import_open3d():
     import open3d as o3d
@@ -195,7 +199,10 @@ def rotate_grid_3d(X, Y, Z, R_T, origin):
 
 
 # Compiled variant – fuses the 9 element-wise ops into ~1 kernel.
-_rotate_grid_3d_compiled = torch.compile(rotate_grid_3d, mode="reduce-overhead")
+try:
+    _rotate_grid_3d_compiled = torch.compile(rotate_grid_3d, mode="reduce-overhead")
+except Exception:
+    _rotate_grid_3d_compiled = rotate_grid_3d
 
 
 def _stagger_sdf_3d(sdf_cc):
@@ -217,7 +224,10 @@ def _stagger_sdf_3d(sdf_cc):
     return sdf_u, sdf_v, sdf_w
 
 
-_stagger_sdf_3d_compiled = torch.compile(_stagger_sdf_3d, mode="reduce-overhead")
+try:
+    _stagger_sdf_3d_compiled = torch.compile(_stagger_sdf_3d, mode="reduce-overhead")
+except Exception:
+    _stagger_sdf_3d_compiled = _stagger_sdf_3d
 
 
 def _mu_normals_batched_3d(sdf_u, sdf_v, sdf_w, sdf_cc, h, eps):
@@ -255,8 +265,11 @@ def _mu_normals_batched_3d(sdf_u, sdf_v, sdf_w, sdf_cc, h, eps):
     return mu0, mu1, nx, ny, nz
 
 
-_mu_normals_batched_3d_compiled = torch.compile(
-    _mu_normals_batched_3d, mode="reduce-overhead")
+try:
+    _mu_normals_batched_3d_compiled = torch.compile(
+        _mu_normals_batched_3d, mode="reduce-overhead")
+except Exception:
+    _mu_normals_batched_3d_compiled = _mu_normals_batched_3d
 
 
 # Module-level cache:  (data_ptr_x, data_ptr_y, data_ptr_z) -> _StaggeredGrids
@@ -682,7 +695,7 @@ class COMPOSITEmesh2sdf():
         sdf_folder = folder of the sdf file
         sdf_name = name of the sdf file
         """
-        self.sdf = ModelSDF.read(sdf_folder+sdf_name)[0]
+        self.sdf = _import_model_sdf().read(sdf_folder+sdf_name)[0]
         self.sdfs = []
         for link in self.sdf.links:
             mesh_name = link["visuals"][0]["geometry"]["uri"]
@@ -2080,7 +2093,7 @@ class CompositeBodyMesh(Body):
         super().__init__(device, x, y, eps=eps, grids=grids)
 
         self.sdf_folder      = sdf_folder
-        self.sdf             = ModelSDF.read(sdf_folder+sdf_name)[0]
+        self.sdf             = _import_model_sdf().read(sdf_folder+sdf_name)[0]
         self.bodies          = []
         self.suit            = suit
         self.plotting        = plotting
@@ -2240,7 +2253,7 @@ class MultiAnimatBodies(Body):
         _mesh_body_cache: dict[tuple, BodyMesh] = {}
 
         for animat_i, animat in enumerate(experiment_options.animats):
-            sdf        = ModelSDF.read(animat.sdf)[0]
+            sdf        = _import_model_sdf().read(animat.sdf)[0]
             sdf_folder = os.path.dirname(animat.sdf)
 
             for link_i, link in enumerate(sdf.links):
@@ -2387,7 +2400,7 @@ class CompositeSegmentBody:
         self.device          = device
         self.thk             = 0.0005
         self.sdf_folder      = sdf_folder
-        self.sdf             = ModelSDF.read(sdf_folder+sdf_name)[0]
+        self.sdf             = _import_model_sdf().read(sdf_folder+sdf_name)[0]
         self.n               = len(self.sdf.links)
         self.body            = Body(device,x,y,eps=eps,grids=grids)
         self.nlinks          = len(self.sdf.links)

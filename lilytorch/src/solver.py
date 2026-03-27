@@ -634,7 +634,9 @@ class FluidSolver:
         self.rho  = torch.tensor(solver["rho"], device=self.device, dtype=self.dtype)  # density
         self.visc = self.nu*self.rho                                                   # dynamic viscosity
 
-        self.eps  = 1*self.h
+        # Mollification half-width.  Gazzola et al. (2011) use ε = 2√2 h.
+        # Configurable via eps_multiplier in the solver YAML block (default 1.0).
+        self.eps  = solver.get("eps_multiplier", 1.0) * self.h
 
         self.starting_iteration      = solver.get("starting_iteration", 0)
         self.starting_iteration_path = solver.get("starting_iteration_path", None)
