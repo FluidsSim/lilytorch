@@ -1,21 +1,22 @@
-"""Network controller"""
+"""Network controller – 2-D sphere sedimentation (Gazzola et al.)
+
+Uses BDIM2 meta-equation with single Euler step.
+"""
 
 import numpy as np
 from scipy.spatial.transform import Rotation
 from lilytorch.src.solver import FluidSolver
 import torch
 
-class BDIMhandler():
+
+class BDIMhandler:
 
     def __init__(self, yaml_file, data, physics, dtype=torch.float64):
 
         self.dtype = dtype
-        if self.dtype == torch.float32:
-            self.dtype_np = np.float32
-        elif self.dtype == torch.float64:
-            self.dtype_np = np.float64
+        self.dtype_np = np.float32 if dtype == torch.float32 else np.float64
 
-        self.data = data # ExperimentData in FARMS
+        self.data = data          # list[AnimatData] from FARMS
         self.iteration = 0
         self.terminate = False
 
@@ -24,364 +25,325 @@ class BDIMhandler():
         self.fluid_solver = FluidSolver(
             self.pars,
             dtype=self.dtype,
-            costum_update=True,
-            compute_forces=True
+            custom_update=True,
+            compute_forces=True,
         )
         self.device = self.fluid_solver.device
 
-        self.fluid_solver.composite_body.update = self.update  # modify the update rule
-        self.fluid_stepper = self.fluid_solver.step_
+        # Override composite-body update with FARMS-driven kinematics
+        self.fluid_solver.composite_body.update = self.update
 
-        # convert the axes from (x,z) sagittal plane to (x,y) plane
-        self.lin_axes = [0,2] # use x and z linear axes for 2D sim
-        self.ang_axes = [1]   # use y rotation axis for 2D sim
+        # MuJoCo (x,z) sagittal plane <-> fluid-solver (x,y)
+        self.lin_axes = [0, 2]    # MuJoCo x,z -> fluid x,y
+        self.ang_axes = [1]       # MuJoCo rotation around y -> 2D angular vel
 
         self.force_scaling = 1.0
 
-        self.vel_x0 = 0.0
-        self.vel_z0 = 0.0
-        self.ang_y0 = 0.0
+        # Contact solver parameters
+        physics.model.geom_solref[:, 0] = 0.001
+        physics.model.geom_solref[:, 1] = 0.5
 
-        # initialize solref
-        physics.model.geom_solref[:,0]= 0.001
-        physics.model.geom_solref[:,1]= 0.5
+        # Physical parameters (read from config)
+        self.rho_fluid = self.pars['solver']['rho']
+        self.rho_body  = self.pars['solver'].get('rho_body', self.rho_fluid)
+        self.radius    = 0.0025
 
-        # Gazzola et al. (2011) benchmark parameters:
-        #   rho_f = 996 kg/m³, rho_s = 1005.96 kg/m³ (density ratio 1.01)
-        self.rho_body = 1005.96
-        self.rho_fluid = 996.0
-        self.radius = 0.0025
-        self.mass = np.pi*(self.radius**2)*self.rho_body
-        self.inertia = 0.5*self.mass*(self.radius**2)
+        # ---- FARMS-style buoyancy ----
+        # With all-Neumann BCs the BDIM pressure field is purely dynamic;
+        # no hydrostatic gradient builds up, so buoyancy must be added
+        # explicitly.  Replicates FARMS' compute_buoyancy() from drag.pyx.
+        self.gravity_z = float(physics.model.opt.gravity[2])  # e.g. -9.81
+        self.water_surface = self.pars['solver']['ymax']
+        self._buoyancy_initialized = False
 
-        print("Body mass: ", self.mass)
-        print("Body inertia: ", self.inertia)
+        # ---- allocate per-body stack tensors --------------------------
+        comp = self.fluid_solver.composite_body
+        gs   = comp.grid_shape
+        nb   = comp.nbodies
+        comp.sdf_vals   = torch.zeros((nb, *gs), device=self.device, dtype=self.dtype)
+        comp.sdf_vals_u = torch.zeros((nb, *gs), device=self.device, dtype=self.dtype)
+        comp.sdf_vals_v = torch.zeros((nb, *gs), device=self.device, dtype=self.dtype)
+        comp.u_vals     = torch.zeros((nb, *gs), device=self.device, dtype=self.dtype)
+        comp.v_vals     = torch.zeros((nb, *gs), device=self.device, dtype=self.dtype)
 
-
-
+    # ------------------------------------------------------------------
+    # helpers
+    # ------------------------------------------------------------------
     def cython2numpy(self, array):
         return torch.from_numpy(np.array(array).astype(self.dtype_np)).to(self.device)
 
-
+    # ==================================================================
+    #  update: FARMS kinematics -> SDF + body velocities
+    # ==================================================================
     def update(self, t, iteration, dt=1):
+        fs   = self.fluid_solver
+        comp = fs.composite_body
 
-        for body_i, body in enumerate(self.fluid_solver.composite_body.bodies[:]):
+        for body_i, body in enumerate(comp.bodies):
+            (animat_id, link_id) = comp.body_ids[body_i]
+            sen = self.data[animat_id].sensors.links
 
-            (animat_id, link_id) = self.fluid_solver.composite_body.body_ids[body_i]
-            data = self.data[animat_id]
+            com_pos  = self.cython2numpy(sen.com_positions()[iteration, link_id])[self.lin_axes]
+            urdf_pos = self.cython2numpy(sen.urdf_positions()[iteration, link_id])[self.lin_axes]
+            R = self.cython2numpy(
+                Rotation.from_quat(sen.urdf_orientations()[iteration, link_id])
+                .as_matrix().astype(self.dtype_np)
+            )[self.lin_axes, :][:, self.lin_axes]
+            lin_vel = self.cython2numpy(sen.com_lin_velocities()[iteration, link_id])[self.lin_axes]
+            ang_vel = self.cython2numpy(sen.com_ang_velocity(iteration, link_id))[self.ang_axes]
 
-            com_pos = self.cython2numpy( data.sensors.links.com_positions()[iteration,link_id] ) [self.lin_axes]
-            urdf_pos = self.cython2numpy( data.sensors.links.urdf_positions()[iteration,link_id] ) [self.lin_axes]
-            R = self.cython2numpy(Rotation.from_quat(data.sensors.links.urdf_orientations()[iteration,link_id]).as_matrix().astype(self.dtype_np))[self.lin_axes, :][:, self.lin_axes]
-            lin_vel = self.cython2numpy( data.sensors.links.com_lin_velocities()[iteration,link_id] ) [self.lin_axes]
-            ang_vel = self.cython2numpy( data.sensors.links.com_ang_velocity(iteration, link_id) )[self.ang_axes]
+            R_T = R.T
 
-            # compute sdf values at the body points
-            pos_trans = R.T@(self.fluid_solver.composite_body.stacked_xy-urdf_pos[:,None])
-            newpos_u = pos_trans[0].reshape(self.fluid_solver.composite_body.nx, self.fluid_solver.composite_body.ny)
-            newpos_v = pos_trans[1].reshape(self.fluid_solver.composite_body.nx, self.fluid_solver.composite_body.ny)
-            self.fluid_solver.composite_body.sdf_vals[body_i]=body.sdf(newpos_u, newpos_v)
+            # SDF at cell centres
+            pos_trans = R_T @ (comp.stacked_xy - urdf_pos[:, None])
+            px = pos_trans[0].reshape(comp.nx, comp.ny)
+            py = pos_trans[1].reshape(comp.nx, comp.ny)
+            comp.sdf_vals[body_i] = body.sdf(px, py)
 
-            # compute sdf values at the staggered grid
-            pos_trans_u = R.T@(body.stacked_xy_u-urdf_pos[:,None])
-            newpos_u = pos_trans_u[0].reshape(body.nx, body.ny)
-            newpos_v = pos_trans_u[1].reshape(body.nx, body.ny)
-            self.fluid_solver.composite_body.sdf_vals_u[body_i]=body.sdf(newpos_u, newpos_v)
+            # SDF at u-staggered grid
+            pos_u = R_T @ (body.stacked_xy_u - urdf_pos[:, None])
+            comp.sdf_vals_u[body_i] = body.sdf(
+                pos_u[0].reshape(body.nx, body.ny),
+                pos_u[1].reshape(body.nx, body.ny),
+            )
 
-            pos_trans_v = R.T@(body.stacked_xy_v-urdf_pos[:,None])
-            newpos_u = pos_trans_v[0].reshape(body.nx, body.ny)
-            newpos_v = pos_trans_v[1].reshape(body.nx, body.ny)
-            self.fluid_solver.composite_body.sdf_vals_v[body_i]=body.sdf(newpos_u, newpos_v)
+            # SDF at v-staggered grid
+            pos_v = R_T @ (body.stacked_xy_v - urdf_pos[:, None])
+            comp.sdf_vals_v[body_i] = body.sdf(
+                pos_v[0].reshape(body.nx, body.ny),
+                pos_v[1].reshape(body.nx, body.ny),
+            )
 
-            # compute body velocities v = v_lin_com + <v_ang_com, x-x_com>
-            self.fluid_solver.composite_body.u_vals[body_i]=lin_vel[0]-ang_vel*(self.fluid_solver.composite_body.Y-com_pos[1])
-            self.fluid_solver.composite_body.v_vals[body_i]=lin_vel[1]+ang_vel*(self.fluid_solver.composite_body.X-com_pos[0])
+            # Body velocities: v = v_lin + omega x (x - x_com)
+            comp.u_vals[body_i] = lin_vel[0] - ang_vel * (comp.Y - com_pos[1])
+            comp.v_vals[body_i] = lin_vel[1] + ang_vel * (comp.X - com_pos[0])
 
-            # store com positions for fluid->body force computation
-            self.fluid_solver.composite_body.com_pos[body_i]=com_pos
+            comp.com_pos[body_i] = com_pos
 
-            # update the contour position
-            body.cnt_update = R @ body.cnt+urdf_pos[:,None]
+            # Contour update
+            body.cnt_update = R @ body.cnt + urdf_pos[:, None]
+            body.r_com   = body.cnt_update - com_pos[:, None]
+            body.com_pos = com_pos
 
-            # compute the mask for the contour points
-            # x_cnt=body.cnt_update[0]
-            # y_cnt=body.cnt_update[1]
-            # if i==0:
-            #     body_p=self.fluid_solver.composite_body.bodies[i+1]
-            #     pos_trans = r[i+1].T@(torch.stack((x_cnt,y_cnt))-urdf_poses[i+1][:,None])
-            #     sdf_p = body_p.sdf_interp(pos_trans[0],pos_trans[1])
-            #     mask=(sdf_p >= 0)
-            # elif i==self.n_bodies-1:
-            #     body_m=self.fluid_solver.composite_body.bodies[i-1]
-            #     pos_trans = r[i-1].T@(torch.stack((x_cnt,y_cnt))-urdf_poses[i-1][:,None])
-            #     sdf_m = body_m.sdf_interp(pos_trans[0],pos_trans[1])
-            #     mask=(sdf_m >= 0)
-            # else:
-            #     body_m=self.fluid_solver.composite_body.bodies[i-1]
-            #     pos_trans_m = r[i-1].T@(torch.stack((x_cnt,y_cnt))-urdf_poses[i-1][:,None])
-            #     body_p=self.fluid_solver.composite_body.bodies[i+1]
-            #     pos_trans_p = r[i+1].T@(torch.stack((x_cnt,y_cnt))-urdf_poses[i+1][:,None])
-            #     sdf_m = body_m.sdf_interp(pos_trans_m[0],pos_trans_m[1])
-            #     sdf_p = body_p.sdf_interp(pos_trans_p[0],pos_trans_p[1])
-            #     mask=(sdf_m >= 0) & (sdf_p >= 0)
-            # body.mask=mask
+        # ---- union reduction (argmin / gather) -----------------------
+        idx = comp.sdf_vals.argmin(0).unsqueeze(0).expand(comp.sdf_vals.shape)
+        comp.sdf_val = comp.sdf_vals.gather(0, idx)[0].reshape(fs.nx, fs.ny)
 
-            # body.cnt_u = lin_vel[0]-ang_vel*(y_cnt-com_pos[1])
-            # body.cnt_v = lin_vel[1]+ang_vel*(x_cnt-com_pos[0])
-            body.r_com = body.cnt_update-com_pos[:,None] # moment arm
-            body.com_pos=com_pos
+        idx_u = comp.sdf_vals_u.argmin(0).unsqueeze(0).expand(comp.sdf_vals_u.shape)
+        comp.sdf_val_u = comp.sdf_vals_u.gather(0, idx_u)[0].reshape(fs.nx, fs.ny)
+        comp.body_u    = comp.u_vals.gather(0, idx_u)[0].reshape(fs.nx, fs.ny)
 
+        idx_v = comp.sdf_vals_v.argmin(0).unsqueeze(0).expand(comp.sdf_vals_v.shape)
+        comp.sdf_val_v = comp.sdf_vals_v.gather(0, idx_v)[0].reshape(fs.nx, fs.ny)
+        comp.body_v    = comp.v_vals.gather(0, idx_v)[0].reshape(fs.nx, fs.ny)
 
-        idx=self.fluid_solver.composite_body.sdf_vals.argmin(0).unsqueeze(0).expand(self.fluid_solver.composite_body.sdf_vals.shape)
-        self.fluid_solver.composite_body.sdf_val=self.fluid_solver.composite_body.sdf_vals.gather(0,idx)[0].reshape(self.fluid_solver.nx,self.fluid_solver.ny) #-self.fluid_solver.composite_body.suit
+        # ---- set per-body SDF arrays needed by forces_method2 --------
+        for body_i, body in enumerate(comp.bodies):
+            body.sdf_u   = comp.sdf_vals_u[body_i]
+            body.sdf_v   = comp.sdf_vals_v[body_i]
+            body.sdf_val = comp.sdf_vals[body_i]
 
-        idx_u=self.fluid_solver.composite_body.sdf_vals_u.argmin(0).unsqueeze(0).expand(self.fluid_solver.composite_body.sdf_vals_u.shape)
-        self.fluid_solver.composite_body.sdf_val_u=self.fluid_solver.composite_body.sdf_vals_u.gather(0,idx_u)[0].reshape(self.fluid_solver.nx,self.fluid_solver.ny) #-self.fluid_solver.composite_body.suit
-        self.fluid_solver.composite_body.body_u=self.fluid_solver.composite_body.u_vals.gather(0,idx_u)[0].reshape(self.fluid_solver.nx,self.fluid_solver.ny)
+    # ------------------------------------------------------------------
+    #  buoyancy initialisation
+    # ------------------------------------------------------------------
+    def _init_buoyancy_params(self, task, physics):
+        """Precompute per-body mass & half-height for FARMS-style buoyancy.
 
-        idx_v=self.fluid_solver.composite_body.sdf_vals_v.argmin(0).unsqueeze(0).expand(self.fluid_solver.composite_body.sdf_vals_v.shape)
-        self.fluid_solver.composite_body.sdf_val_v=self.fluid_solver.composite_body.sdf_vals_v.gather(0,idx_v)[0].reshape(self.fluid_solver.nx,self.fluid_solver.ny) #-self.fluid_solver.composite_body.suit
-        self.fluid_solver.composite_body.body_v=self.fluid_solver.composite_body.v_vals.gather(0,idx_v)[0].reshape(self.fluid_solver.nx,self.fluid_solver.ny)
+        FARMS formula (from drag.pyx compute_buoyancy):
+            if pos_z - height < surface:
+                F_z = -rho_water * mass * gravity / density
+                      * min((surface + height - pos_z) / (2*height), 1)
+        """
+        comp = self.fluid_solver.composite_body
+        n = len(comp.bodies)
 
+        self._buoy_mass   = np.zeros(n)
+        self._buoy_height = np.zeros(n)
 
+        for body_i in range(n):
+            (animat_id, link_id) = comp.body_ids[body_i]
+            ind = task.maps[animat_id]['sensors']['data2xfrc'][link_id]
+
+            self._buoy_mass[body_i] = float(physics.model.body_mass[ind])
+
+            # Maximum bounding-sphere radius among geoms attached to this body
+            max_rbound = 0.0
+            for gi in range(physics.model.ngeom):
+                if int(physics.model.geom_bodyid[gi]) == ind:
+                    rb = float(physics.model.geom_rbound[gi])
+                    if rb > max_rbound:
+                        max_rbound = rb
+            self._buoy_height[body_i] = 0.5 * max_rbound
+
+        self._buoyancy_initialized = True
+
+    def cython2numpy(self, array):
+        return torch.from_numpy(
+            np.array(array).astype(self.dtype_np)
+        ).to(self.device)
+
+    # ==================================================================
+    #  apply_forces: fluid -> MuJoCo xfrc_applied
+    # ==================================================================
     def apply_forces(self, task, physics):
+        fs = self.fluid_solver
+        s  = self.force_scaling
 
-        # physics.data.qvel[1]=-0.05
-        # physics.data.qvel[4]=-0.05
-        # physics.data.qvel[7]=-0.05
+        fx_fric  = s * fs.friction_force_lin_x.cpu().numpy()
+        fy_fric  = s * fs.friction_force_lin_y.cpu().numpy()
+        ang_fric = s * fs.friction_force_ang_z.cpu().numpy()
 
-        self.friction_force_lin_x = self.force_scaling*(self.fluid_solver.friction_force_lin_x).cpu().numpy()
-        self.friction_force_lin_y = self.force_scaling*(self.fluid_solver.friction_force_lin_y).cpu().numpy()
-        self.friction_force_ang_z = self.force_scaling*(self.fluid_solver.friction_force_ang_z).cpu().numpy()
+        fx_pres  = s * fs.pressure_force_x.cpu().numpy()
+        fy_pres  = s * fs.pressure_force_y.cpu().numpy()
+        ang_pres = s * fs.pressure_force_ang_z.cpu().numpy()
 
-        self.pressure_force_x     = self.force_scaling*(self.fluid_solver.pressure_force_x).cpu().numpy()
-        self.pressure_force_y     = self.force_scaling*(self.fluid_solver.pressure_force_y).cpu().numpy()
-        self.pressure_force_ang_z = self.force_scaling*(self.fluid_solver.pressure_force_ang_z).cpu().numpy()
+        # Lazy-init buoyancy parameters on first call
+        if not self._buoyancy_initialized:
+            self._init_buoyancy_params(task, physics)
+            m_2d = self.rho_body * np.pi * self.radius**2
+            print(f"[DIAG] buoy_mass(MuJoCo)={self._buoy_mass[0]:.6e}  "
+                  f"m_2d(rho_b*pi*R²)={m_2d:.6e}  "
+                  f"buoy_height={self._buoy_height[0]:.6e}  "
+                  f"MuJoCo_weight={self._buoy_mass[0]*9.81:.6e}  "
+                  f"2D_net_weight={(self.rho_body-self.rho_fluid)*np.pi*self.radius**2*9.81:.6e}")
 
+        for body_i in range(len(fs.composite_body.bodies)):
+            (animat_id, link_id) = fs.composite_body.body_ids[body_i]
+            ind  = task.maps[animat_id]['sensors']['data2xfrc'][link_id]
+            mass = self.data[animat_id].sensors.links.masses[link_id] * task.units.kilograms
 
+            # ---- FARMS-style buoyancy (drag.pyx compute_buoyancy) ----
+            buoy_mass   = self._buoy_mass[body_i]
+            buoy_height = self._buoy_height[body_i]
+            # com_pos[1] is the fluid y-coordinate = MuJoCo z
+            pos_z = float(fs.composite_body.com_pos[body_i][1])
 
-
-        for body_i, body in enumerate(self.fluid_solver.composite_body.bodies[:]):
-
-            (animat_id, link_id) = self.fluid_solver.composite_body.body_ids[body_i]
-
-            ind_task= task.maps[animat_id]['sensors']['data2xfrc'][link_id]
-
-            # timestep=task.timestep
-            # # mass= self.data[animat_id].sensors.links.masses[link_id] * task.units.kilograms # mass
-            # # inertia=physics.model.body_inertia[ind_task][1] # rotation inertia around y
-            # mass=self.mass
-            # inertia=self.inertia
-
-            # fx = (self.friction_force_lin_x[body_i] + self.pressure_force_x[body_i]) * task.units.newtons * task.units.meters
-            # fz = (self.friction_force_lin_y[body_i] + self.pressure_force_y[body_i]) * task.units.newtons * task.units.meters
-            # g = -9.81
-            # torque =(self.friction_force_ang_z[body_i] + self.pressure_force_ang_z[body_i]) * task.units.newtons * task.units.meters
-
-            # physics.data.qvel[0]=self.vel_x0+(fx/mass) * timestep
-            # physics.data.qvel[1]=self.vel_z0+(fz/mass+g) * timestep
-            # physics.data.qvel[2]=self.ang_y0+(torque/inertia) * timestep
-
-            # self.vel_x0 = physics.data.qvel[0].copy()
-            # self.vel_z0 = physics.data.qvel[1].copy()
-            # self.ang_y0 = physics.data.qvel[2].copy()
-
-            # print("Friction F_z: {}, Pressure P_z: {}, qvel: {}".format(fz/mass, self.pressure_force_y[body_i]/mass, physics.data.qvel))
+            buoyancy_z = 0.0
+            if buoy_mass > 0 and buoy_height > 0 and pos_z - buoy_height < self.water_surface:
+                frac = min((self.water_surface + buoy_height - pos_z) / (2.0 * buoy_height), 1.0)
+                buoyancy_z = -self.rho_fluid * buoy_mass * self.gravity_z / self.rho_body #* frac
 
 
-            # print(physics.data.qvel[1])
-            # physics.data.qvel[0]= (torque/inertia) * timestep
+            # MuJoCo xfrc_applied: [fx, fy, fz, tx, ty, tz]
+            # Fluid x -> MuJoCo x (index 0)
+            # Fluid y -> MuJoCo z (index 2), buoyancy added here
+            # 2D torque -> MuJoCo ty (index 4)
+            physics.data.xfrc_applied[ind, 0] = (fx_fric[body_i] + fx_pres[body_i]) * task.units.newtons
+            physics.data.xfrc_applied[ind, 2] = (fy_fric[body_i] + fy_pres[body_i] + buoyancy_z) * task.units.newtons
+            physics.data.xfrc_applied[ind, 4] = (ang_fric[body_i] + ang_pres[body_i]) * task.units.newtons
 
+            if self.iteration % 100 == 0:
+                vel = self.cython2numpy(self.data[0].sensors.links.com_lin_velocities()[self.iteration, 0])
+                vel_z = vel[2]
+                # vel_z = physics.data.qvel[2]
+                Re = abs(vel_z) * 2 * self.radius / (self.pars['solver']['nu'])
+                print(f"it={self.iteration:6d}  "
+                      f"Fvisc_z={fy_fric[body_i]:.4e}  Fpres_z={fy_pres[body_i]:.4e}  "
+                      f"Fbuoy={buoyancy_z:.4e}  "
+                      f"vel_z={vel_z:.4e}  Re={Re:.1f}")
 
-            mass=self.data[animat_id].sensors.links.masses[link_id] * task.units.kilograms
-
-            physics.data.xfrc_applied[ind_task, 0] = (self.friction_force_lin_x[body_i] + self.pressure_force_x[body_i]) * task.units.newtons
-            physics.data.xfrc_applied[ind_task, 2] = (self.friction_force_lin_y[body_i] + self.pressure_force_y[body_i]) * task.units.newtons
-            physics.data.xfrc_applied[ind_task, 4] = (self.friction_force_ang_z[body_i] + self.pressure_force_ang_z[body_i]) * task.units.newtons
-
-
-            print(physics.data.xfrc_applied[ind_task, [0,2,4]]/mass,physics.data.qvel[1])
-
-            # physics.data.qvel[1]=-0.05
-
-    def fluid_step(self,u,v,p,timestep):
-
-        v          -= 9.81*self.fluid_solver.dt
-        (uprime,vprime)  = self.fluid_solver.adv_diff_solver.solve(u,v)
-
-        self.set_BC(uprime,vprime)
-
-        # Save velocities *before* the Brinkman penalization step so that
-        # forces_penalization can compute the exact momentum exchange between
-        # the fluid and the immersed body.
-        self.fluid_solver.uprime_before_brinkman = uprime.clone()
-        self.fluid_solver.vprime_before_brinkman = vprime.clone()
-
-        uprime = (uprime+self.fluid_solver.brinkmann_k*timestep*self.fluid_solver.m_m0_all_u*self.fluid_solver.composite_body.body_u)/ \
-                 (1+self.fluid_solver.brinkmann_k*timestep*self.fluid_solver.m_m0_all_u)
-        vprime = (vprime+self.fluid_solver.brinkmann_k*timestep*self.fluid_solver.m_m0_all_v*self.fluid_solver.composite_body.body_v)/ \
-                 (1+self.fluid_solver.brinkmann_k*timestep*self.fluid_solver.m_m0_all_v)
-
-
-        # # ====== STEP 1 =====
-        # uprime = self.fluid_solver.mu0_all_u*uprime + self.fluid_solver.m_m0_all_u*self.fluid_solver.composite_body.body_u \
-        #     + self.fluid_solver.mu1_all_u*self.fluid_solver.normal_derivative(uprime-self.fluid_solver.composite_body.body_u,self.fluid_solver.normal_x_u,self.fluid_solver.normal_y_u)
-        # vprime = self.fluid_solver.mu0_all_v*vprime + self.fluid_solver.m_m0_all_v*self.fluid_solver.composite_body.body_v \
-        #     + self.fluid_solver.mu1_all_v*self.fluid_solver.normal_derivative(vprime-self.fluid_solver.composite_body.body_v,self.fluid_solver.normal_x_v,self.fluid_solver.normal_y_v)
-
-
-        # # for general deforming bodies
-        # self.div_body = torch.zeros_like(u)
-        # self.div_body[1:-1,1:-1] = self.m_m0_all_u[1:-1,1:-1]*(self.composite_body.body_u[2:, 1:-1] - self.composite_body.body_u[1:-1, 1:-1]) / self.h \
-        #                             + self.m_m0_all_v[1:-1,1:-1]*(self.composite_body.body_v[1:-1, 2:] - self.composite_body.body_v[1:-1, 1:-1]) / self.h
-        # self.div  = self.divergence(uprime,vprime) - self.div_body
-
-        # for general deforming bodies
-        self.fluid_solver.div  = self.fluid_solver.divergence(uprime,vprime)
-
-
-        # coeff = timestep/self.fluid_solver.rho
-        # p=self.fluid_solver.poisson_solverFFT.solve(self.fluid_solver.div/coeff)
-        # (p_x, p_y) = self.fluid_solver.gradient(p)
-        # (u,v)=(uprime-coeff*p_x, vprime-coeff*p_y)
-
-        # (c, _) = self.composite_body.mu_funcs(self.composite_body.sdf_val)
-        c = torch.ones_like(u)
-        # ch = (c[1:,1:-1]+c[:-1,1:-1])/2
-        # cv = (c[1:-1,1:]+c[1:-1,:-1])/2
-        coeff = timestep/self.fluid_solver.rho
-        ch = timestep * self.fluid_solver.mu0_all_u / self.fluid_solver.rho
-        cv = timestep * self.fluid_solver.mu0_all_v / self.fluid_solver.rho
-        p, _    = self.fluid_solver.poisson_solver.solve_multigrid( # f, u, c
-            self.fluid_solver.div[1:-1,1:-1],
-            p,
-            coeff*c,
-            ch = ch[1:,1:-1],
-            cv = cv[1:-1,1:],
+    # ------------------------------------------------------------------
+    #  BDIM2 helper: apply the meta-equation to a velocity component
+    # ------------------------------------------------------------------
+    def _bdim2(self, phi, mu0, m_m0, body_vel, mu1, nx, ny):
+        fs = self.fluid_solver
+        return (
+            mu0 * phi
+            + m_m0 * body_vel
+            + mu1 * fs.normal_derivative(phi - body_vel, nx, ny)
         )
-        # ====== projection step ======
-        (p_x, p_y) = self.fluid_solver.gradient(p)
-        u          = uprime - ch * p_x
-        v          = vprime - cv * p_y
 
-        # self.set_BC(u,v)
+    # ==================================================================
+    #  fluid_step: single Euler step with BDIM2
+    # ==================================================================
+    def fluid_step(self, u, v, p, timestep):
+        fs = self.fluid_solver
+        comp = fs.composite_body
 
+        # No gravity in the fluid equations — with all-Neumann BCs the
+        # Poisson solver cannot build a hydrostatic gradient, so adding
+        # g here causes runaway velocity.  Buoyancy is handled explicitly
+        # in apply_forces (FARMS style).
 
-        return (u,v,p)
+        # Advection-diffusion
+        (uprime, vprime) = fs.adv_diff_solver.solve(u, v)
+        fs.adv_diff_solver.set_BCs(uprime, vprime)
 
+        # BDIM2 meta-equation
+        uprime = self._bdim2(
+            uprime, fs.mu0_all_u, fs.m_m0_all_u, comp.body_u,
+            fs.mu1_all_u, fs.normal_x_u, fs.normal_y_u,
+        )
+        vprime = self._bdim2(
+            vprime, fs.mu0_all_v, fs.m_m0_all_v, comp.body_v,
+            fs.mu1_all_v, fs.normal_x_v, fs.normal_y_v,
+        )
 
+        # Poisson solve (variable-density coefficients)
+        # Use local variable — do NOT overwrite fs.rho, which must stay
+        # as the scalar fluid density for forces_method1's stress tensor.
+        rho_blend = self.rho_fluid * fs.mu0_all_u + self.rho_body * fs.m_m0_all_u
+        ch = timestep * fs.mu0_all_u / rho_blend
+        cv = timestep * fs.mu0_all_v / rho_blend
 
+        fs.div = fs.divergence(uprime, vprime)
+        p, _ = fs.poisson_solver.solve_multigrid(
+            fs.div[1:-1, 1:-1],
+            p,
+            ch=ch[1:, 1:-1],
+            cv=cv[1:-1, 1:],
+        )
 
-    def set_BC(self, u,v):
+        # Pressure projection
+        (p_x, p_y) = fs.gradient(p)
+        u = uprime - ch * p_x
+        v = vprime - cv * p_y
 
-        # self.fluid_solver.adv_diff_solver.set_BCs(u,v)
-        # u[:,0]  = 0.0
-        # v[:,0]  = 0.0
+        return (u, v, p)
 
-        # u[0,1:-1] = u[1,1:-1]
-        # v[0,1:-1] = v[1,1:-1]+0.5*(u[0,2:]-u[1,:-2])
-
-        # u[-1,1:-1] = u[-2,1:-1]
-        # v[-1,1:-1] = v[-2,1:-1]+0.5*(u[-1,2:]-u[-1,:-2])
-
-        # u[1:-1,-1] = u[1:-1,-2]
-        # v[1:-1,-1] = v[1:-1,-2]+0.5*(u[2:,-1]-u[:-2,-1])
-
-        # self.fluid_solver.adv_diff_solver.set_BCs(u,v)
-        # u[:,0]=0
-        # v[:,0]=0
-
-        for i in [1,-1]:
-            u[i,:]=0
-            u[:,i]=0
-            v[i,:]=0
-            v[:,i]=0
-
-        # u[:,0]  = u[:,2]
-        # u[-1,:] = u[-3,:]
-        # u[0,:]  = u[2,:]
-        # u[:,-1] = u[:,-3]
-
-        # v[:,0]  = v[:,2]
-        # v[-1,:] = v[-3,:]
-        # v[0,:]  = v[2,:]
-        # v[:,-1] = v[:,-3]
-
-    def step(self, task,physics):
-
+    # ==================================================================
+    #  step: one full coupled fluid-body step
+    # ==================================================================
+    def step(self, task, physics):
 
         iteration = self.iteration
         timestep  = self.pars['solver']['dt']
-        if iteration>=self.pars['solver']['nt']:
+        if iteration >= self.pars['solver']['nt']:
             return
 
-        t = iteration*timestep
+        t  = iteration * timestep
+        fs = self.fluid_solver
+        comp = fs.composite_body
 
-        # if iteration==0:
-        #     (u,v,p) = (self.fluid_solver.u0, self.fluid_solver.v0, self.fluid_solver.p0)
-
-        # === stepping the fluid solver ===
         if not self.terminate:
 
-            # (
-            # self.fluid_solver.u0,
-            # self.fluid_solver.v0,
-            # self.fluid_solver.p0,
-            # self.terminate,
-            # ) = self.fluid_stepper(
-            #     self.fluid_solver.u0,
-            #     self.fluid_solver.v0,
-            #     self.fluid_solver.p0,
-            #     iteration,
-            #     t
-            # )
-
-            # update sdf_properties
+            # 1. Update SDF + body velocities from FARMS kinematics
             self.update(t, iteration, dt=timestep)
 
-            (self.fluid_solver.mu0_all, self.fluid_solver.mu1_all)         = self.fluid_solver.composite_body.mu_funcs(self.fluid_solver.composite_body.sdf_val)
-            self.fluid_solver.m_m0_all                                     = (1-self.fluid_solver.mu0_all)
-            (_, self.fluid_solver.normal_x, self.fluid_solver.normal_y, _) = self.fluid_solver.composite_body.compute_sdf_properties(self.fluid_solver.composite_body.sdf_val)
+            # 2. Recompute mu / mask fields
+            (fs.mu0_all, fs.mu1_all) = comp.mu_funcs(comp.sdf_val)
+            fs.m_m0_all = 1 - fs.mu0_all
+            (fs.normal_x, fs.normal_y) = comp.compute_normals(comp.sdf_val)
 
-            (self.fluid_solver.mu0_all_u, self.fluid_solver.mu1_all_u)         = self.fluid_solver.composite_body.mu_funcs(self.fluid_solver.composite_body.sdf_val_u)
-            self.fluid_solver.m_m0_all_u                                       = (1-self.fluid_solver.mu0_all_u)
-            (_, self.fluid_solver.normal_x_u, self.fluid_solver.normal_y_u, _) = self.fluid_solver.composite_body.compute_sdf_properties(self.fluid_solver.composite_body.sdf_val_u)
+            (fs.mu0_all_u, fs.mu1_all_u) = comp.mu_funcs(comp.sdf_val_u)
+            fs.m_m0_all_u = 1 - fs.mu0_all_u
+            (fs.normal_x_u, fs.normal_y_u) = comp.compute_normals(comp.sdf_val_u)
 
-            (self.fluid_solver.mu0_all_v, self.fluid_solver.mu1_all_v)         = self.fluid_solver.composite_body.mu_funcs(self.fluid_solver.composite_body.sdf_val_v)
-            self.fluid_solver.m_m0_all_v                                       = (1-self.fluid_solver.mu0_all_v)
-            (_, self.fluid_solver.normal_x_v, self.fluid_solver.normal_y_v, _) = self.fluid_solver.composite_body.compute_sdf_properties(self.fluid_solver.composite_body.sdf_val_v)
+            (fs.mu0_all_v, fs.mu1_all_v) = comp.mu_funcs(comp.sdf_val_v)
+            fs.m_m0_all_v = 1 - fs.mu0_all_v
+            (fs.normal_x_v, fs.normal_y_v) = comp.compute_normals(comp.sdf_val_v)
 
-            # Spatially-varying density: rho_fluid in the fluid region, rho_body inside the body.
-            # Gazzola benchmark: rho_fluid=996, rho_body=1005.96 kg/m³ (density ratio 1.01).
-            # self.fluid_solver.rho = (self.rho_fluid*self.fluid_solver.mu0_all_u + self.rho_body*self.fluid_solver.m_m0_all_u)
-            self.fluid_solver.rho = (996.0*self.fluid_solver.mu0_all_u + 1005.96*self.fluid_solver.m_m0_all_u)
+            # 3. Euler step with Brinkmann penalisation
+            (u, v, p) = self.fluid_step(fs.u0, fs.v0, fs.p0, timestep)
+            (fs.u0, fs.v0, fs.p0) = (u, v, p)
 
-            (u,v,p) = (self.fluid_solver.u0, self.fluid_solver.v0, self.fluid_solver.p0)
+            # 4. Compute fluid forces
+            fs.forces_method2(fs.u0, fs.v0, fs.p0, iteration)
 
-            # (u1,v1,p1) = self.fluid_step(u,v,p,timestep)
-            # (u2,v2,p2) = self.fluid_step(u1,v1,p1,timestep)
-            # u=0.5*(u+u2)
-            # v=0.5*(v+v2)
-            # p=p2
+            # 5. Plotting / saving
+            self.terminate = fs.plotting_debug(fs.u0, fs.v0, fs.p0, iteration)
 
-            (u,v,p) = self.fluid_step(self.fluid_solver.u0, self.fluid_solver.v0, self.fluid_solver.p0,timestep)
+            # 6. Apply forces to MuJoCo body
+            self.apply_forces(task, physics)
 
-
-            (self.fluid_solver.u0, self.fluid_solver.v0, self.fluid_solver.p0) = (u,v,p)
-
-            # compute fluid forces on the body using Brinkman penalization momentum exchange.
-            # This uses the pre-Brinkman velocities saved in fluid_step to compute the
-            # exact momentum transferred between fluid and body, giving accurate drag.
-            # forces_method2 (BDIM surface-stress integration) is kept for reference.
-            self.fluid_solver.forces_penalization(
-                self.fluid_solver.uprime_before_brinkman,
-                self.fluid_solver.vprime_before_brinkman,
-                timestep,
-                iteration,
-            )
-
-            self.terminate = self.fluid_solver.plotting_debug(self.fluid_solver.u0, self.fluid_solver.v0, self.fluid_solver.p0, iteration)
-
-            self.apply_forces(task,physics)
-
-        self.iteration+=1
+        self.iteration += 1

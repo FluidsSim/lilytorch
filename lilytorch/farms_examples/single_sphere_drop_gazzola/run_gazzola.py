@@ -81,7 +81,10 @@ def main():
     )
 
     # --- post-process --------------------------------------------------------
-    simulation_post(sim, log_path=args.log_path)
+    try:
+        simulation_post(sim, log_path=args.log_path)
+    except Exception as e:
+        print(f"  [post-process skipped: {e}]")
 
     print("\n" + "=" * 60)
     print("  Simulation complete.")

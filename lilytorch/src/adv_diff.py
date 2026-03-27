@@ -1,694 +1,657 @@
+"""Dimension-agnostic advection-diffusion solver for MAC staggered grids.
+
+Supports pluggable convective schemes (QUICK, ADBQUICKEST, CUBISTA, van Leer,
+CDS) and a semi-Lagrangian (Stam 1999) method.  Works in 2-D and 3-D with a
+single code path -- inspired by WaterLily.jl.
+"""
 
 import torch
-from pytorch_interpolation import RegularGridInterpolator
+from pytorch_interpolation import RegularGridInterpolatorAutomatic
 
+
+# =====================================================================
+# Convective scheme functions:  f(upstream, center, downstream)
+# =====================================================================
+#
+# Convention -- face between cell L (left) and cell R (right):
+#   positive flow (L->R):
+#       upstream   = f[L-1]   (far upstream)
+#       center     = f[L]     (upwind cell)
+#       downstream = f[R]     (downwind cell)
+#   negative flow (R->L):
+#       upstream   = f[R+1]
+#       center     = f[R]
+#       downstream = f[L]
+
+def median(a, b, c):
+    """Element-wise median of three tensors."""
+    return torch.maximum(
+        torch.minimum(a, b),
+        torch.minimum(torch.maximum(a, b), c),
+    )
+
+
+def quick(u, c, d):
+    """QUICK scheme -- 3rd-order, median-based (WaterLily default)."""
+    return median((5 * c + 2 * d - u) / 6, c, median(10 * c - 9 * u, c, d))
+
+
+def van_leer(u, c, d):
+    """Van Leer flux limiter -- 2nd-order TVD."""
+    denom = d - c
+    rf = (c - u) / (denom + 1e-30)
+    psi = (rf + rf.abs()) / (1.0 + rf.abs())
+    return torch.where(denom.abs() < 1e-30, c, _tvd_face(c, d, psi))
+
+
+def cds(u, c, d):
+    """Central difference scheme -- 2nd-order, not TVD."""
+    return 0.5 * (c + d)
+
+
+def _tvd_face(c, d, psi):
+    """Generic TVD face value: c + 0.5*(d - c)*psi(rf)."""
+    return c + 0.5 * (d - c) * psi
+
+
+def abdquickest(u, c, d, C=0.1):
+    """ADBQUICKEST scheme -- 3rd-order TVD, Courant-number dependent."""
+    C2 = C * C
+    denom = d - c
+    rf = (c - u) / (denom + 1e-30)
+    psi = torch.clamp(
+        torch.minimum(
+            2.0 * rf * (1.0 - C),
+            torch.minimum(
+                (2.0 + C2 - 3.0 * C + (1.0 - C2) * rf) / (3.0 - 3.0 * C),
+                torch.full_like(rf, 2.0 * (1.0 - C)),
+            ),
+        ),
+        min=0.0,
+    )
+    return torch.where(denom.abs() < 1e-30, c, _tvd_face(c, d, psi))
+
+
+def cubista(u, c, d):
+    """CUBISTA scheme -- 2nd-order TVD (Alves, Oliveira & Pinho, 2003)."""
+    denom = d - c
+    rf = (c - u) / (denom + 1e-30)
+    psi = torch.clamp(
+        torch.minimum(
+            1.5 * rf,
+            torch.minimum(
+                0.75 * rf + 0.25,
+                torch.full_like(rf, 1.5),
+            ),
+        ),
+        min=0.0,
+    )
+    return torch.where(denom.abs() < 1e-30, c, _tvd_face(c, d, psi))
+
+
+# =====================================================================
+# Slicing helpers -- dimension-agnostic index construction
+# =====================================================================
+
+def _sl(ndim, dim, s):
+    """N-D index tuple: slice *s* on dimension *dim*, full elsewhere."""
+    idx = [slice(None)] * ndim
+    idx[dim] = s
+    return tuple(idx)
+
+
+def _inner(ndim):
+    """Index tuple selecting interior cells: [1:-1] on every dimension."""
+    return tuple(slice(1, -1) for _ in range(ndim))
+
+
+# =====================================================================
+# Advection-diffusion solver
+# =====================================================================
 class AdvDiffSolver:
     """
-    Solver class for the advection-diffusion equation
+    Dimension-agnostic advection-diffusion solver on a MAC staggered grid.
+
+    Works identically in 2-D ``(x, y)`` and 3-D ``(x, y, z)`` by looping
+    over spatial dimensions rather than duplicating code per axis.
+
+    Supported methods
+    -----------------
+    * ``'quick'``                              -- QUICK (default)
+    * ``'abdquickest'``                        -- ADBQUICKEST TVD
+    * ``'cubista'``                            -- CUBISTA TVD
+    * ``'vanLeer'``                            -- van Leer TVD
+    * ``'cds'``                                -- central difference
+    * ``'semi-lagrangian'`` / ``'implicit'``   -- Stam 1999
+
+    For explicit schemes the time integration is forward-Euler:
+
+        u^{n+1} = u^n + dt * [-div(vel (x) u) + nu * laplacian(u)]
     """
 
-    def __init__(self,
-                 device,
-                 dt,
-                 x,
-                 y,
-                 nu,
-                 BC_type_u=["D","D","D","D"], # w,o,s,n
-                 BC_values_u=[0,0,0,0],
-                 BC_type_v=["D","D","D","D"], # w,o,s,n
-                 BC_values_v=[0,0,0,0],
-                 method="implicit",
-                 ):
-        """
-        x        : x-domain
-        y        : y-domain
-        dt       : time step
-        nu       : diffusion coefficient
-        type     : solver type: implicit, explicit, quick, abdquickest, adam_bashforth
-        """
-
-        self.device=device
-        self.dtype=x.dtype
-
-        self.dt = dt
-        dx=x[1]-x[0]
-        dy=y[1]-y[0]
-        self.dx = float(dx)
-        self.dy = float(dy)
-        self.dtdx = dt / dx
-        self.dtdy = dt / dy
-        self.dtdx2 = self.dtdx/dx
-        self.dtdy2 = self.dtdy/dy
-        self.nu = nu
-
-        self.x = x
-        self.y = y
-        self.nx = len(x)
-        self.ny = len(y)
-        self.nm2x = self.nx-2
-        self.nm2y = self.ny-2
-
-        # dummy initialization for the abdquickest solver
-        self.C = 0.1
-        self.C2 = self.C**2
-
-
-        self.BC_type_u   = BC_type_u
-        self.BC_values_u = BC_values_u
-        self.BC_type_v   = BC_type_v
-        self.BC_values_v = BC_values_v
-
-        if method == "implicit":
-            self.solve = self.solve_implicit
-            # dummy initialization for the implicit solver
-            x_staggered = x - dx/2
-            y_staggered = y - dy/2
-            self.gu = RegularGridInterpolator((x_staggered,y), torch.zeros((self.nx,self.ny), device=self.device,dtype=self.dtype), fill_value=None, method=1)
-            self.gv = RegularGridInterpolator((x,y_staggered), torch.zeros((self.nx,self.ny), device=self.device,dtype=self.dtype), fill_value=None, method=1)
-            self.X_u, self.Y_u = torch.meshgrid(x_staggered,y, indexing="ij")
-            self.X_v, self.Y_v = torch.meshgrid(x,y_staggered, indexing="ij")
-            self.X_cc, self.Y_cc = torch.meshgrid(x_staggered,y_staggered, indexing="ij")
-            self.xflat_xgrid = self.X_u.flatten().clone().detach()
-            self.yflat_xgrid = self.Y_u.flatten().clone().detach()
-            self.xflat_ygrid = self.X_v.flatten().clone().detach()
-            self.yflat_ygrid = self.Y_v.flatten().clone().detach()
-        elif method == "explicit":
-            self.solve = self.solve_explicit
-        elif method == "quick":
-            self.solve = self.solve_FLUXLMT
-        elif method == "abdquickest":
-            self.solve = self.solve_ADBQUICKEST
-        elif method == "adam-bashforth":
-            self.solve = self.solve_adam_bashforth
-            self.HU_prec = torch.zeros((self.nm2x,self.nm2y), device=self.device,dtype=self.dtype)
-            self.HV_prec = torch.zeros((self.nm2x,self.nm2y), device=self.device,dtype=self.dtype)
-        elif method == "quick-waterlily":
-            self.solve = self.solve_quick_waterlily
-        else:
-            raise("Error: the convection solver method {} does not exist".format(method))
-
-        print("Using the {} method for the adv-diff equation".format(method))
-
-    def clf(self, u, v):
-        vel_max = torch.max(
-            torch.max(torch.abs(u)),
-            torch.max(torch.abs(v))
-            )
-        self.dt = self.dx/(vel_max*+3*self.nu)
-
-    def solve_explicit(self, u, v, iteration=0):
-        """
-        explicit solver
-        """
-
-        u[1:-1, 1:-1] = (
-            u[1:-1, 1:-1]-
-            self.dtdx*u[1:-1,1:-1]*(u[1:-1,1:-1]-u[:-2,1:-1]) -
-            self.dtdy*v[1:-1,1:-1]*(u[1:-1,1:-1]-u[1:-1,:-2]) +
-            self.nu*self.dtdx2*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
-            self.nu*self.dtdx2*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
-        )
-        v[1:-1, 1:-1] = (
-            v[1:-1, 1:-1]-
-            self.dtdx*u[1:-1,1:-1]*(v[1:-1,1:-1]-v[:-2,1:-1]) -
-            self.dtdy*v[1:-1,1:-1]*(v[1:-1,1:-1]-v[1:-1,:-2]) +
-            self.nu*self.dtdx2*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1]) +
-            self.nu*self.dtdx2*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])
-        )
-
-        return (u,v)
-
-    def med(self, a, b, c):
-        return torch.max(torch.min(a,b), torch.min(torch.max(a,b), c))
-
-    def FLUXLMT_rule(self, bf, phiU, phiD, phiR): # correspond to (C,D,U) in LilyPad notation
-        bf -= (phiD-2*phiU+phiR)/6
-        b1 = phiR+10*(phiU-phiR)
-        return self.med(bf, phiU, self.med(phiU, phiD, b1))
-
-    def phi_wLMT(self, F, phi):
-        bf=0.5*(phi[:-2,1:-1]+phi[1:-1,1:-1])
-        bf[1:-1,1:-1] = torch.where(
-            F[1:-1,1:-1]>0,
-            self.FLUXLMT_rule(bf[1:-1,1:-1], phi[1:-3,2:-2],phi[2:-2,2:-2],phi[:-4,2:-2]),
-            self.FLUXLMT_rule(bf[1:-1,1:-1], phi[2:-2,2:-2],phi[1:-3,2:-2],phi[3:-1,2:-2]),
-        )
-        return bf
-
-    def phi_sLMT(self, F, phi):
-        bf=0.5*(phi[1:-1,:-2]+phi[1:-1,1:-1])
-        bf[1:-1,1:-1] = torch.where(
-            F[1:-1,1:-1]>0,
-            self.FLUXLMT_rule(bf[1:-1,1:-1], phi[2:-2,1:-3],phi[2:-2,2:-2],phi[2:-2,:-4]),
-            self.FLUXLMT_rule(bf[1:-1,1:-1], phi[2:-2,2:-2],phi[1:-3,2:-2],phi[2:-2,3:-1]),
-        )
-        return bf
-
-    def phi_eLMT(self, F, phi):
-        bf=0.5*(phi[2:,1:-1]+phi[1:-1,1:-1])
-        bf[1:-1,1:-1] = torch.where(
-            F[1:-1,1:-1]>0,
-            self.FLUXLMT_rule(bf[1:-1,1:-1], phi[2:-2,2:-2],phi[3:-1,2:-2],phi[1:-3,2:-2]),
-            self.FLUXLMT_rule(bf[1:-1,1:-1], phi[3:-1,2:-2],phi[2:-2,2:-2],phi[4:,2:-2]),
-        )
-        return bf
-
-    def phi_nLMT(self, F, phi):
-        bf=0.5*(phi[1:-1,2:]+phi[1:-1,1:-1])
-        bf[1:-1,1:-1] = torch.where(
-            F[1:-1,1:-1]>0,
-            self.FLUXLMT_rule(bf[1:-1,1:-1], phi[2:-2,2:-2],phi[2:-2,3:-1],phi[2:-2,1:-3]),
-            self.FLUXLMT_rule(bf[1:-1,1:-1], phi[2:-2,3:-1],phi[2:-2,2:-2],phi[2:-2,4:]),
-        )
-        return bf
-
-    def solve_FLUXLMT(self, u, v, iteration=0):
-
-        uw = 0.5*(u[:-2,1:-1]+u[1:-1,1:-1])
-        ue = 0.5*(u[2:,1:-1]+u[1:-1,1:-1])
-        vs = 0.5*(v[1:-1,:-2]+v[1:-1,1:-1])
-        vn = 0.5*(v[1:-1,2:]+v[1:-1,1:-1])
-
-        u[1:-1,1:-1] = (
-                        u[1:-1,1:-1]+
-                        self.dtdx*(uw*self.phi_wLMT(uw,u)-ue*self.phi_eLMT(ue,u))+
-                        self.dtdy*(vs*self.phi_sLMT(vs,u)-vn*self.phi_nLMT(vn,u))+
-                        self.nu*self.dtdx2*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
-                        self.nu*self.dtdx2*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
-                        )
-
-        v[1:-1,1:-1] = (
-                        v[1:-1,1:-1]+
-                        self.dtdx*(uw*self.phi_wLMT(uw,v)-ue*self.phi_eLMT(ue,v))+
-                        self.dtdy*(vs*self.phi_sLMT(vs,v)-vn*self.phi_nLMT(vn,v))+
-                        self.nu*self.dtdx2*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1]) +
-                        self.nu*self.dtdx2*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])
-                        )
-
-        return (u,v)
-
-    def psi(self, rf):
-        # ADBQUICKEST
-        return torch.max(
-            torch.zeros_like(rf, device=self.device),
-            torch.min(
-                2.0*rf*(1.0-self.C),
-                torch.min(
-                    (2.0+self.C2-3.0*self.C+(1.0-self.C2)*rf)/(3.0-3.0*self.C),
-                    2.0*(1.0-self.C)*torch.ones_like(rf, device=self.device)
-                    )
-                )
-            )
-        # # CUBISTA
-        # return torch.max(
-        #     torch.zeros_like(rf),
-        #     torch.min(
-        #         (3/2)*rf,
-        #         torch.min(
-        #             (3/4)*rf+1/4,
-        #             (3/2)*torch.ones_like(rf)
-        #             )
-        #         )
-        #     )
-
-    def ADBQUICKEST_rule(self, phiU, phiD, phiR):
-        return torch.where(
-            phiD==phiU,
-            phiU,
-            phiU+0.5*(phiD-phiU)*self.psi((phiU-phiR)/(phiD-phiU))
-        )
-
-    def phi_w(self, F, phi):
-        out = torch.zeros((self.nm2x,self.nm2y), device=self.device)
-        out[1:,:]=torch.where(
-            F[1:,:]>0,
-            self.ADBQUICKEST_rule(phi[1:-2,1:-1], phi[2:-1,1:-1], phi[:-3,1:-1]),
-            self.ADBQUICKEST_rule(phi[2:-1,1:-1], phi[1:-2,1:-1], phi[3:,1:-1])
-        )
-        out[0,:]=torch.where(
-            F[0,:]>0,
-            0.5*(phi[0,1:-1]+phi[1,1:-1]),
-            self.ADBQUICKEST_rule(phi[1,1:-1], phi[0,1:-1], phi[2,1:-1])
-        )
-        return out
-
-    def phi_s(self, F, phi):
-        out = torch.zeros((self.nm2x,self.nm2y), device=self.device)
-        out[:,1:]=torch.where(
-            F[:,1:]>0,
-            self.ADBQUICKEST_rule(phi[1:-1,1:-2], phi[1:-1,2:-1], phi[1:-1,:-3]),
-            self.ADBQUICKEST_rule(phi[1:-1,2:-1], phi[1:-1,1:-2], phi[1:-1,3:])
-        )
-        out[:,0]=torch.where(
-            F[:,0]>0,
-            0.5*(phi[1:-1,0]+phi[1:-1,1]),
-            self.ADBQUICKEST_rule(phi[1:-1,1], phi[1:-1,0], phi[1:-1,2])
-        )
-        return out
-
-    def phi_e(self, F, phi):
-        out = torch.zeros((self.nm2x,self.nm2y), device=self.device)
-        out[:-1,:]=torch.where(
-            F[:-1,:]>0,
-            self.ADBQUICKEST_rule(phi[1:-2,1:-1], phi[2:-1,1:-1], phi[:-3,1:-1]),
-            self.ADBQUICKEST_rule(phi[2:-1,1:-1], phi[1:-2,1:-1], phi[3:,1:-1])
-        )
-        out[-1,:]=torch.where(
-            F[0,:]<0,
-            0.5*(phi[-1,1:-1]+phi[-2,1:-1]),
-            self.ADBQUICKEST_rule(phi[-2,1:-1], phi[-1,1:-1], phi[-3,1:-1])
-        )
-        return out
-
-    def phi_n(self, F, phi):
-        out = torch.zeros((self.nm2x,self.nm2y), device=self.device)
-        out[:,:-1]=torch.where(
-            F[:,:-1]>0,
-            self.ADBQUICKEST_rule(phi[1:-1,1:-2], phi[1:-1,2:-1], phi[1:-1,:-3]),
-            self.ADBQUICKEST_rule(phi[1:-1,2:-1], phi[1:-1,1:-2], phi[1:-1,3:])
-        )
-        out[:,-1]=torch.where(
-            F[:,0]<0,
-            0.5*(phi[1:-1,-1]+phi[1:-1,-2]),
-            self.ADBQUICKEST_rule(phi[1:-1,-2], phi[1:-1,-1], phi[1:-1,-3])
-        )
-        return out
-
-    def solve_ADBQUICKEST(self, u, v, iteration=0):
-        # following lilipad notation
-        # uo = 0.5*(x.a[i-1][j]+x.a[i][j]);
-        # ue = 0.5*(x.a[i+1][j]+x.a[i][j]);
-        # vs = 0.5*(y.a[i][j]+y.a[i-1][j]);
-        # vn = 0.5*(y.a[i][j+1]+y.a[i-1][j+1]);
-        u_new=torch.zeros_like(u)
-        v_new=torch.zeros_like(v)
-
-        uw = 0.5*(u[:-2,1:-1]+u[1:-1,1:-1])
-        ue = 0.5*(u[2:,1:-1]+u[1:-1,1:-1])
-        vs = 0.5*(v[:-2,1:-1]+v[1:-1,1:-1])
-        vn = 0.5*(v[1:-1,2:]+v[:-2,2:])
-        u_new[1:-1,1:-1] = (
-                        u[1:-1,1:-1]+
-                        self.dtdx*(uw*self.phi_w(uw,u)-ue*self.phi_e(ue,u))+
-                        self.dtdy*(vs*self.phi_s(vs,u)-vn*self.phi_n(vn,u))+
-                        self.nu*self.dtdx2*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
-                        self.nu*self.dtdx2*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
-                        )
-
-        # uo = 0.5*(x.a[i][j-1]+x.a[i][j]);
-        # ue = 0.5*(x.a[i+1][j-1]+x.a[i+1][j]);
-        # vs = 0.5*(y.a[i][j-1]+y.a[i][j]);
-        # vn = 0.5*(y.a[i][j]+y.a[i][j+1]);
-        uw = 0.5*(u[1:-1,:-2]+u[1:-1,1:-1])
-        ue = 0.5*(u[2:,:-2]+u[2:,1:-1])
-        vs = 0.5*(v[1:-1,:-2]+v[1:-1,1:-1])
-        vn = 0.5*(v[1:-1,1:-1]+v[1:-1,2:])
-        v_new[1:-1,1:-1] = (
-                        v[1:-1,1:-1]+
-                        self.dtdx*(uw*self.phi_w(uw,v)-ue*self.phi_e(ue,v))+
-                        self.dtdy*(vs*self.phi_s(vs,v)-vn*self.phi_n(vn,v))+
-                        self.nu*self.dtdx2*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1]) +
-                        self.nu*self.dtdx2*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])
-                        )
-
-        return (u_new,v_new)
-
-
-
-    def solve_implicit(self, u, v, iteration=0):
-        """
-        Implicit solver based on Staam, 1999 where
-        u_new(x,y) = u(x-dt*u(x,y), y-dt*v(x,y)) [linearly interpolated]
-        """
-        self.gu.F = u
-        self.gv.F = v
-
-        v_xstag = self.gv(self.xflat_xgrid, self.yflat_xgrid).clone().detach()
-        u_ystag = self.gu(self.xflat_ygrid, self.yflat_ygrid).clone().detach()
-
-        u = self.gu(self.xflat_xgrid-u.flatten()*self.dt, self.yflat_xgrid-v_xstag*self.dt).reshape((self.nx,self.ny)).clone().detach()
-        v = self.gv(self.xflat_ygrid-u_ystag*self.dt, self.yflat_ygrid-v.flatten()*self.dt).reshape((self.nx,self.ny)).clone().detach()
-
-        u[1:-1,1:-1] += (
-                        self.nu*self.dtdx2*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
-                        self.nu*self.dtdx2*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
-                        )
-        v[1:-1,1:-1] += (
-                        self.nu*self.dtdx2*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1]) +
-                        self.nu*self.dtdx2*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])
-                        )
-        return (u,v)
-
-    def solve_adam_bashforth(self, u, v, iteration=0):
-
-        u_new=torch.zeros_like(u)
-        v_new=torch.zeros_like(v)
-
-        uw = 0.5*(u[:-2,1:-1]+u[1:-1,1:-1])
-        ue = 0.5*(u[2:,1:-1]+u[1:-1,1:-1])
-        us = 0.5*(u[1:-1,:-2]+u[1:-1,1:-1])
-        un = 0.5*(u[1:-1,2:]+u[1:-1,1:-1])
-        fw = uw
-        fe = ue
-        fs = 0.5*(v[:-2,1:-1]+v[1:-1,1:-1])
-        fn = 0.5*(v[:-2,2:]+v[1:-1,2:])
-        HU_new = uw*fw-ue*fe+us*fs-un*fn
-
-        vw = 0.5*(v[:-2,1:-1]+v[1:-1,1:-1])
-        ve = 0.5*(v[2:,1:-1]+v[1:-1,1:-1])
-        vs = 0.5*(v[1:-1,:-2]+v[1:-1,1:-1])
-        vn = 0.5*(v[1:-1,2:]+v[1:-1,1:-1])
-        fw = 0.5*(u[1:-1,1:-1]+u[1:-1, :-2])
-        fe = 0.5*(u[2:,1:-1]+u[2:,:-2])
-        fs = vs
-        fn = vn
-        HV_new = vw*fw-ve*fe+vs*fs-vn*fn
-
-        if iteration==0:
-            u_new[1:-1,1:-1] = u[1:-1,1:-1]+self.dt*HU_new/self.dx
-            v_new[1:-1,1:-1] = v[1:-1,1:-1]+self.dt*HV_new/self.dy
-
-        else:
-            u_new[1:-1,1:-1] = u[1:-1,1:-1]+self.dt*0.5*(3*HU_new - self.HU_prec)/self.dx
-            v_new[1:-1,1:-1] = v[1:-1,1:-1]+self.dt*0.5*(3*HV_new - self.HV_prec)/self.dy
-
-        self.HU_prec = HU_new.clone().detach()
-        self.HV_prec = HV_new.clone().detach()
-
-
-
-        u_new[1:-1,1:-1] += (
-                self.nu*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
-                self.nu*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
-                )*self.dtdx2
-        v_new[1:-1,1:-1] += (
-                self.nu*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1]) +
-                self.nu*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])
-                )*self.dtdy2
-
-
-        return (u_new,v_new)
-
-    def median(self, a, b, c):
-        return torch.maximum(
-            torch.minimum(a, b), torch.minimum(torch.maximum(a, b), c)
-        )
-
-    def lam(self, u, c, d):
-        return self.median((5.0*c+2.0*d-u)/6,c,self.median(10.0*c-9.0*u,c,d))
-
-    def phi_U(self, u):
-        fw = 0.5*(u[1:-2,1:-1]+u[2:-1,1:-1]) # west flux
-        return u[2:-1,1:-1]*torch.where(
-            fw>0,
-            self.lam(u[:-3,1:-1],u[1:-2,1:-1],u[2:-1,1:-1]),
-            self.lam(u[3:,1:-1],u[2:-1,1:-1],u[1:-2,1:-1])
-        )
-
-    def solve_quick_waterlily(self, u, v):
-
-
-        u_new=torch.zeros_like(u)
-        v_new=torch.zeros_like(v)
-
-
-        # uw = 0.5*(u[:-2,1:-1]+u[1:-1,1:-1])
-        # ue = 0.5*(u[2:,1:-1]+u[1:-1,1:-1])
-        # u_new[1:-1,1:-1]+=self.dtdx*(uw*self.phi_w(uw,u)-ue*self.phi_e(ue,u))
-
-        # ==================== u convection ==============================
-        # lower boundary - i=1
-        fw = 0.5*(u[0,1:-1]+u[1,1:-1]) # west flux at left boundary
-        phi_u = self.dtdx*u[1,1:-1]*torch.where(
-            fw>0,
-            fw,
-            self.lam(u[2,1:-1],u[1,1:-1],u[0,1:-1])
-        )
-        u_new[1,1:-1] += phi_u
-
-        # inner points
-        fw = 0.5*(u[1:-2,1:-1]+u[2:-1,1:-1]) # west flux inside
-        phi_u = self.dtdx*u[2:-1,1:-1]*torch.where(
-            fw>0,
-            self.lam(u[:-3,1:-1],u[1:-2,1:-1],u[2:-1,1:-1]),
-            self.lam(u[3:,1:-1],u[2:-1,1:-1],u[1:-2,1:-1])
-        )
-        u_new[2:-1,1:-1] += phi_u
-        u_new[1:-2,1:-1] -= phi_u
-
-        # upper boundary
-        fw = 0.5*(u[-1,1:-1]+u[-2,1:-1]) # west flux at right boundary
-        phi_u = self.dtdx*u[-1,1:-1]*torch.where(
-            fw<0,
-            fw,
-            self.lam(u[-3,1:-1],u[-2,1:-1],u[-1,1:-1]),
-        )
-        u_new[-2,1:-1] -= phi_u
-
-
-
-        # fs = 0.5*(v[0,1:-1]+v[1,1:-1])
-        # phi_u = self.dtdx*u[1,1:-1]*torch.where(
-        #     fs<0,
-        #     self.lam(u[1:-1, :-2],u[1:-1,1:-1],u[1:-1,2:]),
-        #     self.lam(u[1:-1,2:],u[1:-1,1:-1],u[1:-1,:-2])
-        # )
-        # u_new[1:-1,1:-1] += phi_u
-
-
-        # ============ v convection ==============================
-
-
-
-
-
-
-
-
-        vs = 0.5*(v[:-2,1:-1]+v[1:-1,1:-1])
-        vn = 0.5*(v[1:-1,2:]+v[:-2,2:])
-        u_new[1:-1,1:-1] += (
-                        u[1:-1,1:-1]+
-                        self.dtdy*(vs*self.phi_s(vs,u)-vn*self.phi_n(vn,u))+
-                        self.nu*self.dtdx2*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
-                        self.nu*self.dtdx2*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
-                        )
-
-        # u_new=torch.zeros_like(u)
-        # v_new=torch.zeros_like(v)
-
-        # uw = 0.5*(u[:-2,1:-1]+u[1:-1,1:-1])
-        # ue = 0.5*(u[2:,1:-1]+u[1:-1,1:-1])
-        # vs = 0.5*(v[:-2,1:-1]+v[1:-1,1:-1])
-        # vn = 0.5*(v[1:-1,2:]+v[:-2,2:])
-        # u_new[1:-1,1:-1] = (
-        #                 u[1:-1,1:-1]+
-        #                 self.dtdx*(uw*self.phi_w(uw,u)-ue*self.phi_e(ue,u))+
-        #                 self.dtdy*(vs*self.phi_s(vs,u)-vn*self.phi_n(vn,u))+
-        #                 self.nu*self.dtdx2*(u[2:,1:-1]-2*u[1:-1,1:-1]+u[:-2,1:-1]) +
-        #                 self.nu*self.dtdx2*(u[1:-1,2:]-2*u[1:-1,1:-1]+u[1:-1,:-2])
-        #                 )
-
-
-        uw = 0.5*(u[1:-1,:-2]+u[1:-1,1:-1])
-        ue = 0.5*(u[2:,:-2]+u[2:,1:-1])
-        vs = 0.5*(v[1:-1,:-2]+v[1:-1,1:-1])
-        vn = 0.5*(v[1:-1,1:-1]+v[1:-1,2:])
-        v_new[1:-1,1:-1] = (
-                        v[1:-1,1:-1]+
-                        self.dtdx*(uw*self.phi_w(uw,v)-ue*self.phi_e(ue,v))+
-                        self.dtdy*(vs*self.phi_s(vs,v)-vn*self.phi_n(vn,v))+
-                        self.nu*self.dtdx2*(v[2:,1:-1]-2*v[1:-1,1:-1]+v[:-2,1:-1]) +
-                        self.nu*self.dtdx2*(v[1:-1,2:]-2*v[1:-1,1:-1]+v[1:-1,:-2])
-                        )
-        return (u_new,v_new)
-
-    def set_BCs(self, u, v):
-
-        u[:,0]  = u[:,1]
-        u[-1,:] = u[-2,:]
-        u[0,:]  = u[1,:]
-        u[:,-1] = u[:,-2]
-
-        v[:,0]  = v[:,1]
-        v[-1,:] = v[-2,:]
-        v[0,:]  = v[1,:]
-        v[:,-1] = v[:,-2]
-
-        if self.BC_type_u[0]=="D":
-            u[0, :]=self.BC_values_u[0]
-        if self.BC_type_u[1]=="D":
-            u[-1,:]=self.BC_values_u[1]
-        # if self.BC_type_u[2]=="D":
-        #     u[:,0]=self.BC_values_u[2]
-        # if self.BC_type_u[3]=="D":
-        #     u[:,-1]=self.BC_values_u[3]
-
-        if self.BC_type_v[2]=="D":
-            v[:,0]=self.BC_values_v[2]
-        if self.BC_type_v[3]=="D":
-            v[:,-1]=self.BC_values_v[3]
-        # if self.BC_type_v[0]=="D":
-        #     v[0, :]=self.BC_values_v[0]
-        # if self.BC_type_v[1]=="D":
-        #     v[-1,:]=self.BC_values_v[1]
-
-
-        # elif self.BC_type_u[1]=="N":
-        #     u[-1,:] = u[-2,:]
-
-        # if self.BC_type_u[2]=="D":
-        #     u[:,0]=self.BC_values_u[2]
-        # elif self.BC_type_u[2]=="N":
-        #     u[:,0] = u[:,1]
-
-        # if self.BC_type_u[3]=="D":
-        #     u[:,-1]=self.BC_values_u[3]
-        # elif self.BC_type_u[3]=="N":
-        #     u[:,-1] = u[:,-2]
-
-        # if self.BC_type_u[0]=="D":
-        #     u[0,:]=-u[1,:]+self.BC_values_u[0]
-        # elif self.BC_type_u[0]=="N":
-        #     u[0,:] = u[1,:]
-
-        # # v
-        # if self.BC_type_v[1]=="D":
-        #     v[-1,:]=self.BC_values_v[1]
-        # elif self.BC_type_v[1]=="N":
-        #     v[-1,:] = v[-2,:]
-
-        # if self.BC_type_v[2]=="D":
-        #     v[:,0]=self.BC_values_v[2]
-        # elif self.BC_type_v[2]=="N":
-        #     v[:,0] = v[:,1]
-
-        # if self.BC_type_v[3]=="D":
-        #     v[:,-1]=self.BC_values_v[3]
-        # elif self.BC_type_v[3]=="N":
-        #     v[:,-1] = v[:,-2]
-
-        # if self.BC_type_v[0]=="D":
-        #     v[0,:]=-v[1,:]+self.BC_values_v[0]
-        # elif self.BC_type_v[0]=="N":
-        #     v[0,:] = v[1,:]
-
-
-if __name__ == "__main__":
-
-    use_gpu=False
-
-    if torch.cuda.is_available() and use_gpu:
-        print(f"Using GPU: {torch.cuda.get_device_name(0)} is available.")
-        device = torch.device("cuda")
-    else:
-        print("Using the CPU.")
-        device = torch.device("cpu")
-        torch.set_num_threads(8)
-
-    N      = 2**8
-    nt      = 130
-    nu      = 0
-    dt      = 0.01
-    x=torch.linspace(-60,180,N).to(device)
-    y=torch.linspace(-60,180,N).to(device)
-
-
-    solver = AdvDiffSolver(
+    # -- construction ---------------------------------------------------
+    def __init__(
+        self,
         device,
         dt,
         x,
         y,
         nu,
-        BC_type_u=["D","D","D","D"],
-        BC_values_u=[1,0,0,0],
-        BC_type_v=["D","D","D","D"],
-        BC_values_v=[0,0,0,0],
+        BC_type_u=("D", "D", "D", "D"),
+        BC_values_u=(0, 0, 0, 0),
+        BC_type_v=("D", "D", "D", "D"),
+        BC_values_v=(0, 0, 0, 0),
+        method="quick",
+        z=None,
+        BC_type_w=None,
+        BC_values_w=None,
+    ):
+        """
+        Parameters
+        ----------
+        device : torch.device
+        dt     : float -- time step
+        x, y   : 1-D tensors -- cell-centre coordinates (incl. ghost cells)
+        nu     : float -- kinematic viscosity
+        method : str -- convection scheme name
+        z      : 1-D tensor or None -- cell-centre z-coordinates (3-D mode)
+        BC_type_w, BC_values_w : boundary conditions for w (3-D only)
+        """
+        self.device = device
+        self.dtype  = x.dtype
+        self.dt     = dt
+        self.nu     = nu
+
+        # ---- dimension-agnostic grid setup ----------------------------
+        self.coords = [x, y] if z is None else [x, y, z]
+        self.ndim   = len(self.coords)
+        self.n      = [len(c) for c in self.coords]
+        self.dh     = [float(c[1] - c[0]) for c in self.coords]
+
+        self._dt_dh  = [dt / h for h in self.dh]
+        self._inv_dh2 = [1.0 / (h * h) for h in self.dh]
+
+        # ---- legacy accessors (backward-compat with solver.py) -------
+        self.x, self.y = x, y
+        self.nx, self.ny = self.n[0], self.n[1]
+        self.dx, self.dy = self.dh[0], self.dh[1]
+        self.dtdx, self.dtdy = self._dt_dh[0], self._dt_dh[1]
+        self.dtdx2 = self.dtdx / self.dh[0]
+        self.dtdy2 = self.dtdy / self.dh[1]
+        if self.ndim == 3:
+            self.z  = z
+            self.nz = self.n[2]
+            self.dz = self.dh[2]
+            self.dtdz  = self._dt_dh[2]
+            self.dtdz2 = self.dtdz / self.dh[2]
+
+        # ---- boundary conditions (2*ndim faces per component) --------
+        n_faces = 2 * self.ndim
+
+        def _pad(seq, length, default):
+            out = list(seq)
+            return out + [default] * max(0, length - len(out))
+
+        self._bc_types = [
+            _pad(BC_type_u, n_faces, "N"),
+            _pad(BC_type_v, n_faces, "N"),
+        ]
+        self._bc_values = [
+            _pad(BC_values_u, n_faces, 0),
+            _pad(BC_values_v, n_faces, 0),
+        ]
+        if self.ndim == 3:
+            self._bc_types.append(_pad(BC_type_w or (), n_faces, "N"))
+            self._bc_values.append(_pad(BC_values_w or (), n_faces, 0))
+
+        # legacy BC accessors (backward-compat with solver.py)
+        self.BC_type_u   = self._bc_types[0]
+        self.BC_values_u = self._bc_values[0]
+        self.BC_type_v   = self._bc_types[1]
+        self.BC_values_v = self._bc_values[1]
+        if self.ndim == 3:
+            self.BC_type_w   = self._bc_types[2]
+            self.BC_values_w = self._bc_values[2]
+
+        # ---- precompute BC operations (avoid per-call allocations) ---
+        self._bc_neumann_ops, self._bc_dirichlet_ops = self._build_bc_ops()
+
+        # ---- method dispatch -----------------------------------------
+        _schemes = {
+            "quick": quick, "abdquickest": abdquickest,
+            "vanLeer": van_leer, "van_leer": van_leer,
+            "cds": cds, "cubista": cubista,
+        }
+        if method in _schemes:
+            self._scheme = _schemes[method]
+            self.solve   = self._solve_convective
+        elif method in ("semi-lagrangian", "implicit"):
+            self._init_semi_lagrangian()
+            self.solve = self._solve_semi_lagrangian
+        else:
+            raise ValueError(
+                f"Unknown convection method '{method}'. Choose from: "
+                f"{sorted(set(list(_schemes.keys()) + ['semi-lagrangian', 'implicit']))}"
+            )
+
+        print(f"Using the {method} method for the adv-diff equation ({self.ndim}D)")
+
+    # -----------------------------------------------------------------
+    # Semi-Lagrangian initialisation  (Stam 1999, N-D)
+    # -----------------------------------------------------------------
+    def _init_semi_lagrangian(self):
+        ndim = self.ndim
+        stag = [c - h / 2 for c, h in zip(self.coords, self.dh)]
+
+        self._interps     = []
+        self._flat_coords = []
+
+        for i in range(ndim):
+            # component-i lives on a grid staggered in dim i only
+            grid = tuple(stag[d] if d == i else self.coords[d]
+                         for d in range(ndim))
+            interp = RegularGridInterpolatorAutomatic(
+                grid,
+                torch.zeros(tuple(self.n), device=self.device, dtype=self.dtype),
+                fill_value=None, method=1,
+            )
+            self._interps.append(interp)
+
+            grids = torch.meshgrid(*grid, indexing="ij")
+            self._flat_coords.append(
+                [g.flatten().clone().detach() for g in grids]
+            )
+
+    # =================================================================
+    # Flux computation  (dimension-agnostic)
+    # =================================================================
+    def _flux(self, fv, p, dim):
+        """Scheme-weighted flux along dimension *dim*.
+
+        Parameters
+        ----------
+        fv  : face velocities  (n[dim]-1 on *dim*, interior on others)
+        p   : field values      (n[dim]   on *dim*, interior on others)
+        """
+        lam = self._scheme
+        D   = dim
+        S   = lambda s: _sl(p.ndim, D, s)
+
+        # interior faces (full 3-point stencil available)
+        fv_in = fv[S(slice(1, -1))]
+        flux_in = torch.where(
+            fv_in > 0,
+            fv_in * lam(p[S(slice(None, -3))], p[S(slice(1, -2))], p[S(slice(2, -1))]),
+            fv_in * lam(p[S(slice(3, None))],  p[S(slice(2, -1))], p[S(slice(1, -2))]),
         )
 
-    X, Y = solver.X_cc, solver.Y_cc
-    dx, dy = solver.dx, solver.dy
+        # lo boundary face — CDS fallback for positive flow
+        fv_lo = fv[S(slice(0, 1))]
+        flux_lo = torch.where(
+            fv_lo > 0,
+            fv_lo * 0.5 * (p[S(slice(0, 1))] + p[S(slice(1, 2))]),
+            fv_lo * lam(p[S(slice(2, 3))], p[S(slice(1, 2))], p[S(slice(0, 1))]),
+        )
 
-    print("dt={}s, dx={}, N={}".format(dt, dx, N))
+        # hi boundary face — CDS fallback for negative flow
+        fv_hi = fv[S(slice(-1, None))]
+        flux_hi = torch.where(
+            fv_hi > 0,
+            fv_hi * lam(p[S(slice(-3, -2))], p[S(slice(-2, -1))], p[S(slice(-1, None))]),
+            fv_hi * 0.5 * (p[S(slice(-2, -1))] + p[S(slice(-1, None))]),
+        )
 
+        return torch.cat([flux_lo, flux_in, flux_hi], dim=D)
+
+    # =================================================================
+    # Face-velocity construction  (dimension-agnostic)
+    # =================================================================
+    def _face_vel(self, vel, i, d):
+        """Face velocity for the *i*-th momentum eq. along direction *d*.
+
+        d == i  : self-advection — average vel[i] at consecutive d-faces
+        d != i  : cross-advection — average vel[d] along dim i to reach
+                  vel[i]'s stagger location
+        """
+        ndim = self.ndim
+        if d == i:
+            # average vel[i] along its own stagger direction
+            lo = [slice(1, -1)] * ndim
+            hi = [slice(1, -1)] * ndim
+            lo[d] = slice(None, -1)
+            hi[d] = slice(1, None)
+            return 0.5 * (vel[i][tuple(lo)] + vel[i][tuple(hi)])
+        else:
+            # average vel[d] along dim i (two adjacent in i-direction)
+            # and select full face range in dim d
+            lo = [slice(1, -1)] * ndim
+            hi = [slice(1, -1)] * ndim
+            lo[i] = slice(None, -2)
+            hi[i] = slice(1, -1)
+            lo[d] = slice(1, None)
+            hi[d] = slice(1, None)
+            return 0.5 * (vel[d][tuple(lo)] + vel[d][tuple(hi)])
+
+    @staticmethod
+    def _field_for_flux(phi, d, ndim):
+        """Extract *phi* with interior on all dims except *d* (full)."""
+        idx = [slice(1, -1)] * ndim
+        idx[d] = slice(None)
+        return phi[tuple(idx)]
+
+    # =================================================================
+    # Diffusion  (dimension-agnostic Laplacian)
+    # =================================================================
+    @staticmethod
+    def _laplacian(phi, inv_dh2):
+        """Discrete Laplacian at interior cells (arbitrary dimension)."""
+        ndim  = phi.ndim
+        inner = _inner(ndim)
+        lap   = torch.zeros_like(phi[inner])
+        for d in range(ndim):
+            fwd = list(inner); fwd[d] = slice(2, None)
+            bwd = list(inner); bwd[d] = slice(None, -2)
+            lap += (phi[tuple(fwd)] - 2.0 * phi[inner] + phi[tuple(bwd)]) * inv_dh2[d]
+        return lap
+
+    @staticmethod
+    def _variable_laplacian(phi, nu_eff, dh):
+        """Variable-coefficient Laplacian: div(nu_eff * grad(phi)).
+
+        Uses face-averaged viscosity:
+            sum_d  (nu_{i+1/2}(phi_{i+1} - phi_i) - nu_{i-1/2}(phi_i - phi_{i-1})) / dh_d^2
+
+        Parameters
+        ----------
+        phi     : tensor — the field (interior + ghost).
+        nu_eff  : tensor — effective viscosity at cell centres (same shape as phi).
+        dh      : list of floats — grid spacing per dimension.
+        """
+        ndim  = phi.ndim
+        inner = _inner(ndim)
+        lap   = torch.zeros_like(phi[inner])
+        for d in range(ndim):
+            fwd = list(inner); fwd[d] = slice(2, None)
+            bwd = list(inner); bwd[d] = slice(None, -2)
+            # face-averaged viscosity
+            nu_fwd = 0.5 * (nu_eff[inner] + nu_eff[tuple(fwd)])
+            nu_bwd = 0.5 * (nu_eff[inner] + nu_eff[tuple(bwd)])
+            inv_dh2 = 1.0 / (dh[d] * dh[d])
+            lap += (nu_fwd * (phi[tuple(fwd)] - phi[inner])
+                    - nu_bwd * (phi[inner] - phi[tuple(bwd)])) * inv_dh2
+        return lap
+
+    # =================================================================
+    # Convective-scheme solve  (dimension-agnostic)
+    # =================================================================
+    def _solve_convective(self, *vel, nu_t=None, iteration=0):
+        """Forward-Euler advection-diffusion step.
+
+            phi^{n+1} = phi^n + dt * [-div(vel (x) phi) + diff(phi)]
+
+        When *nu_t* is ``None`` (constant viscosity):
+            diff = nu * lap(phi)
+        When *nu_t* is a tensor (Smagorinsky LES):
+            diff = div((nu + nu_t) * grad(phi))   [variable-coeff Laplacian]
+
+        Accepts (u, v) in 2-D or (u, v, w) in 3-D.
+        """
+        ndim    = self.ndim
+        vel_new = [v.clone() for v in vel]
+        inner   = _inner(ndim)
+
+        for i in range(ndim):
+            # diffusion
+            if nu_t is None:
+                rhs = self.nu * self.dt * self._laplacian(vel[i], self._inv_dh2)
+            else:
+                nu_eff = self.nu + nu_t
+                rhs = self.dt * self._variable_laplacian(vel[i], nu_eff, self.dh)
+            # convective fluxes in each direction
+            for d in range(ndim):
+                fv = self._face_vel(vel, i, d)
+                p  = self._field_for_flux(vel[i], d, ndim)
+                F  = self._flux(fv, p, d)
+                rhs = rhs + self._dt_dh[d] * (
+                    F[_sl(ndim, d, slice(None, -1))]
+                    - F[_sl(ndim, d, slice(1, None))]
+                )
+            vel_new[i][inner] += rhs
+
+        return tuple(vel_new)
+
+    # =================================================================
+    # Semi-Lagrangian solve  (Stam 1999, dimension-agnostic)
+    # =================================================================
+    def _solve_semi_lagrangian(self, *vel, nu_t=None, iteration=0):
+        """Unconditionally-stable advection via back-tracing."""
+        ndim  = self.ndim
+        shape = tuple(self.n)
+
+        # update interpolator data
+        for i in range(ndim):
+            self._interps[i].F = vel[i]
+
+        vel_new = list(vel)
+        for i in range(ndim):
+            # all velocity components interpolated to component-i's grid
+            vel_at_i = [
+                self._interps[d](*self._flat_coords[i]).clone().detach()
+                for d in range(ndim)
+            ]
+            # departure points
+            departure = [
+                self._flat_coords[i][d] - vel_at_i[d] * self.dt
+                for d in range(ndim)
+            ]
+            vel_new[i] = (
+                self._interps[i](*departure)
+                .reshape(shape).clone().detach()
+            )
+
+        # explicit diffusion
+        inner = _inner(ndim)
+        for i in range(ndim):
+            if nu_t is None:
+                vel_new[i][inner] += (
+                    self.nu * self.dt * self._laplacian(vel_new[i], self._inv_dh2)
+                )
+            else:
+                nu_eff = self.nu + nu_t
+                vel_new[i][inner] += (
+                    self.dt * self._variable_laplacian(vel_new[i], nu_eff, self.dh)
+                )
+
+        return tuple(vel_new)
+
+    # =================================================================
+    # Boundary conditions  (dimension-agnostic)
+    # =================================================================
+    def _build_bc_ops(self):
+        """Precompute BC operations as two flat lists (run once at init).
+
+        Reproduces the original two-pass semantics exactly:
+          1. Neumann zero-gradient copy on every ghost face
+          2. Dirichlet overwrite on specified faces
+
+        Returns ``(neumann_ops, dirichlet_ops)`` where each entry is a
+        tuple of precomputed index tuples — no allocations or string
+        comparisons needed at runtime.
+        """
+        ndim = self.ndim
+        n_components = len(self._bc_types)
+        neumann_ops   = []   # (component, dst_idx, src_idx)
+        dirichlet_ops = []   # (component, dst_idx, value)
+
+        for i in range(n_components):
+            bc_t = self._bc_types[i]
+            bc_v = self._bc_values[i]
+
+            # --- pass 1: Neumann on every face ---
+            for d in range(ndim):
+                dst_lo = tuple(0  if k == d else slice(None) for k in range(ndim))
+                src_lo = tuple(1  if k == d else slice(None) for k in range(ndim))
+                neumann_ops.append((i, dst_lo, src_lo))
+
+                dst_hi = tuple(-1 if k == d else slice(None) for k in range(ndim))
+                src_hi = tuple(-2 if k == d else slice(None) for k in range(ndim))
+                neumann_ops.append((i, dst_hi, src_hi))
+
+            # --- pass 2: Dirichlet overwrite where specified ---
+            for face in range(2 * ndim):
+                if bc_t[face] == "D":
+                    d    = face // 2
+                    side = face % 2          # 0 = lo, 1 = hi
+                    idx  = tuple(
+                        (1 if side == 0 else -1) if k == d else slice(None)
+                        for k in range(ndim)
+                    )
+                    dirichlet_ops.append((i, idx, bc_v[face]))
+
+        return neumann_ops, dirichlet_ops
+
+    def set_BCs(self, *vel):
+        """Apply Dirichlet / Neumann BCs on the ghost layer.
+
+        Face ordering per component:
+            (dim0_lo, dim0_hi, dim1_lo, dim1_hi, [dim2_lo, dim2_hi])
+        i.e. (west, east, south, north, [bottom, top]) in 3-D.
+
+        Uses precomputed ``_bc_ops`` — no allocations or string
+        comparisons at runtime.
+        """
+        for comp, dst, src in self._bc_neumann_ops:
+            vel[comp][dst] = vel[comp][src]
+        for comp, dst, val in self._bc_dirichlet_ops:
+            vel[comp][dst] = val
+
+    # =================================================================
+    # CFL helper
+    # =================================================================
+    def clf(self, *vel, nu_t_max=0.0):
+        """Adjust dt to satisfy CFL.
+
+        Parameters
+        ----------
+        *vel    : velocity component tensors.
+        nu_t_max : float — maximum eddy viscosity (0 when Smagorinsky is off).
+        """
+        vel_max = max(torch.max(torch.abs(v)).item() for v in vel)
+        nu_total = float(self.nu) + float(nu_t_max)
+        self.dt = min(self.dh) / (vel_max + 3.0 * nu_total)
+        self._dt_dh = [self.dt / h for h in self.dh]
+        # legacy
+        self.dtdx = self._dt_dh[0]
+        self.dtdy = self._dt_dh[1]
+        self.dtdx2 = self.dtdx / self.dh[0]
+        self.dtdy2 = self.dtdy / self.dh[1]
+        if self.ndim == 3:
+            self.dtdz  = self._dt_dh[2]
+            self.dtdz2 = self.dtdz / self.dh[2]
+
+
+# =====================================================================
+#  Stand-alone demo  --  2-D square-pulse advection + 3-D sanity test
+# =====================================================================
+if __name__ == "__main__":
+    import time
+
+    use_gpu = False
+    if torch.cuda.is_available() and use_gpu:
+        print(f"Using GPU: {torch.cuda.get_device_name(0)}")
+        device = torch.device("cuda")
+    else:
+        print("Using CPU.")
+        device = torch.device("cpu")
+        torch.set_num_threads(8)
+
+    # ---- 2-D demo ----------------------------------------------------
+    N  = 2 ** 8
+    nt = 130
+    nu = 0
+    dt = 0.01
+    x  = torch.linspace(-60, 180, N, device=device)
+    y  = torch.linspace(-60, 180, N, device=device)
+
+    def make_solver(method):
+        return AdvDiffSolver(
+            device, dt, x, y, nu,
+            BC_type_u=["D", "D", "D", "D"],
+            BC_values_u=[1, 0, 0, 0],
+            BC_type_v=["D", "D", "D", "D"],
+            BC_values_v=[0, 0, 0, 0],
+            method=method,
+        )
 
     def initial_conditions():
-        u = torch.zeros((N,N))
-        v = torch.zeros((N,N))
-        nm=int(N/2)-int(30 / dy)
-        np=int(N/2)+int(30 / dy)
-        u[nm:np,nm:np] = 1
-        v[nm:np,nm:np] = 1
-        # Z=(-X**2-Y**2)/0.5
-        # u = torch.exp(Z/500-50)
-        # v = torch.exp(Z/500-50)
-        return (u,v)
-    (u0,v0) = initial_conditions()
+        u0 = torch.zeros((N, N), device=device)
+        v0 = torch.zeros((N, N), device=device)
+        dy_val = float(y[1] - y[0])
+        nm  = int(N / 2) - int(30 / dy_val)
+        np_ = int(N / 2) + int(30 / dy_val)
+        u0[nm:np_, nm:np_] = 1
+        v0[nm:np_, nm:np_] = 1
+        return u0, v0
 
-    u0 = u0.to(device)
-    v0 = v0.to(device)
+    u0, v0 = initial_conditions()
 
     from matplotlib import pyplot
-    import time
-    fig, (ax_1, ax_2, ax_3, ax_4, ax_5) = pyplot.subplots(1, 5, figsize=(25,5))
+    methods = ["quick", "vanLeer", "cds", "semi-lagrangian"]
+    fig, axes = pyplot.subplots(1, len(methods) + 1,
+                                figsize=(5 * (len(methods) + 1), 5))
+    solver_demo = make_solver("quick")
+    stag_x = x - float(x[1] - x[0]) / 2
+    stag_y = y - float(y[1] - y[0]) / 2
+    X, Y = torch.meshgrid(stag_x, stag_y, indexing="ij")
+    axes[0].contourf(X.cpu(), Y.cpu(), u0.cpu(), 20)
+    axes[0].set_title("Initial")
 
-    # CS1=ax_1.contourf(X, Y, u0.cpu(), 20)
-    # ax_1.set_title("Initial")
-    # fig.colorbar(CS1)
+    for k, meth in enumerate(methods):
+        solver = make_solver(meth)
+        u, v = u0.clone(), v0.clone()
+        t0 = time.time()
+        for n in range(nt + 1):
+            u, v = solver.solve(u, v)
+            solver.set_BCs(u, v)
+        elapsed = time.time() - t0
+        print(f"{meth:20s} took {elapsed:.3f}s")
+        cs = axes[k + 1].contourf(X.cpu(), Y.cpu(), u.cpu(), 20)
+        axes[k + 1].set_title(meth)
+        fig.colorbar(cs, ax=axes[k + 1])
 
-    # u=u0.clone().detach()
-    # v=v0.clone().detach()
-    # start = time.time()
-    # for n in range(nt + 1):
-    #     (u,v) = solver.solve_explicit(u,v)
-    #     solver.set_BCs(u,v)
-    # print("Upwind solver took {}s".format(time.time()-start))
+    pyplot.tight_layout()
+    pyplot.savefig("adv_diff_2d_demo.png", dpi=100)
+    print("Saved adv_diff_2d_demo.png")
 
+    # ---- 3-D sanity test ---------------------------------------------
+    print("\n--- 3-D sanity test ---")
+    N3 = 32
+    x3 = torch.linspace(-1, 1, N3, device=device)
+    y3 = torch.linspace(-1, 1, N3, device=device)
+    z3 = torch.linspace(-1, 1, N3, device=device)
 
-    # CS2=ax_2.contourf(X, Y, u.cpu(), 20)
-    # ax_2.set_title("Upwind")
-    # fig.colorbar(CS2)
+    for meth in ["quick", "abdquickest", "cubista", "vanLeer", "cds"]:
+        s3 = AdvDiffSolver(
+            device, 0.001, x3, y3, 0.01,
+            BC_type_u=("D", "D", "N", "N", "N", "N"),
+            BC_values_u=(1, 0),
+            BC_type_v=("N", "N", "D", "D", "N", "N"),
+            BC_values_v=(0, 0, 0, 0),
+            method=meth, z=z3,
+            BC_type_w=("N", "N", "N", "N", "D", "D"),
+            BC_values_w=(0, 0, 0, 0, 0, 0),
+        )
+        u3 = torch.zeros(N3, N3, N3, device=device)
+        v3 = torch.zeros(N3, N3, N3, device=device)
+        w3 = torch.zeros(N3, N3, N3, device=device)
+        q = N3 // 4
+        u3[q:3*q, q:3*q, q:3*q] = 1.0
+        t0 = time.time()
+        for _ in range(5):
+            u3, v3, w3 = s3.solve(u3, v3, w3)
+            s3.set_BCs(u3, v3, w3)
+        elapsed = time.time() - t0
+        ok = not torch.isnan(u3).any()
+        print(f"  {meth:15s}: max(u)={u3.max():.4f}  stable={ok}  {elapsed:.3f}s")
 
-
-    u=u0.clone().detach()
-    v=v0.clone().detach()
-    start = time.time()
-    for n in range(nt + 1):
-        (u,v) = solver.solve_implicit(u,v)
-        solver.set_BCs(u,v)
-    print("Implicit solver took {}s".format(time.time()-start))
-
-
-    CS3=ax_3.contourf(X, Y, u.cpu(), 20)
-    ax_3.set_title("implicit")
-    fig.colorbar(CS3)
-
-    # u=u0.clone().detach()
-    # v=v0.clone().detach()
-    # start = time.time()
-    # for n in range(nt + 1):
-    #     (u,v) = solver.solve_ADBQUICKEST(u,v)
-    #     solver.set_BCs(u,v)
-    # print("ADBquickest solver took {}s".format(time.time()-start))
-
-
-    # CS4=ax_4.contourf(X, Y, u.cpu(), 20)
-    # ax_4.set_title("ADBquickest")
-    # fig.colorbar(CS4)
-
-
-    # # re-set initial conditions and solve using the quick method
-    # u=u0.clone().detach()
-    # v=v0.clone().detach()
-    # start = time.time()
-    # for n in range(nt + 1):
-    #     (u,v) = solver.solve_FLUXLMT(u,v)
-    #     solver.set_BCs(u,v)
-    # print("Flux-LMT solver took {}s".format(time.time()-start))
-
-
-    # CS5=ax_5.contourf(X, Y, u.cpu(), 20)
-    # ax_5.set_title("Flux LMT")
-    # fig.colorbar(CS5)
-
-    pyplot.show()
+    print("Done.")

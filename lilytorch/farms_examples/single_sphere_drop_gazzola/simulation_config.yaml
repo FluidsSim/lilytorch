@@ -81,7 +81,7 @@ extensions:
         # poisson_method         : "fft"
         # poisson_bc_type        : "neumann"
 
-        poisson_folder         : "data/"
+        poisson_folder         : "output/"
 
 
       boundary_conditions:
@@ -125,7 +125,7 @@ extensions:
         scale: 1
 
       output:
-        save_path: "/data/andreaferrario/ns_data/"
+        save_path: "output/"
         save_frames: True
         save_every : 500
         vmin: -5
