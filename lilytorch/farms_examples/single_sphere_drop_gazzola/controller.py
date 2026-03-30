@@ -47,6 +47,12 @@ class BDIMhandler:
         self.rho_fluid = self.pars['solver']['rho']
         self.rho_body  = self.pars['solver'].get('rho_body', self.rho_fluid)
         self.radius    = 0.0025
+        self.force_method = self.pars['solver'].get('force_method', 'method2')
+        if self.force_method not in ('method1', 'method2'):
+            raise ValueError(
+                f"Unknown force_method '{self.force_method}'. "
+                "Choose 'method1' or 'method2'."
+            )
 
         # ---- FARMS-style buoyancy ----
         # With all-Neumann BCs the BDIM pressure field is purely dynamic;
@@ -254,7 +260,7 @@ class BDIMhandler:
         )
 
     # ==================================================================
-    #  fluid_step: single Euler step with BDIM2
+    #  fluid_step: Heun (RK2) predictor-corrector with BDIM2
     # ==================================================================
     def fluid_step(self, u, v, p, timestep):
         fs = self.fluid_solver
@@ -265,11 +271,38 @@ class BDIMhandler:
         # g here causes runaway velocity.  Buoyancy is handled explicitly
         # in apply_forces (FARMS style).
 
-        # Advection-diffusion
-        (uprime, vprime) = fs.adv_diff_solver.solve(u, v)
-        fs.adv_diff_solver.set_BCs(uprime, vprime)
+        # Variable-density projection coefficients.
+        # Bug fix: use SEPARATE rho_blend for u- and v-staggered grids.
+        # The u- and v-SDFs differ by up to h/2 near the body surface, so
+        # mixing them (old: rho_blend from mu0_all_u applied to cv) gave
+        # wrong pressure corrections in the wall-normal direction and caused
+        # drag underestimation.
+        rho_blend_u = self.rho_fluid * fs.mu0_all_u + self.rho_body * fs.m_m0_all_u
+        rho_blend_v = self.rho_fluid * fs.mu0_all_v + self.rho_body * fs.m_m0_all_v
+        ch = timestep * fs.mu0_all_u / rho_blend_u
+        cv = timestep * fs.mu0_all_v / rho_blend_v
 
-        # BDIM2 meta-equation
+        def _project(up, vp, p_in, ch_, cv_):
+            fs.div = fs.divergence(up, vp)
+            rho_blend_cc = self.rho_fluid * fs.mu0_all + self.rho_body * fs.m_m0_all
+            fft_coeff = timestep/rho_blend_cc
+            if fs.poisson_method == "fft":
+                p_out = fs.poisson_solverFFT.solve(fs.div / fft_coeff)
+            elif fs.poisson_method in ("mgcg", "multigrid"):
+                poisson_solve = (
+                    fs.poisson_solver.solve_mgcg
+                    if fs.poisson_method == "mgcg"
+                    else fs.poisson_solver.solve_multigrid
+                )
+                p_out, _ = poisson_solve(
+                    fs.div[1:-1, 1:-1], p_in,
+                    ch=ch_[1:, 1:-1], cv=cv_[1:-1, 1:],
+                )
+            p_x, p_y = fs.gradient(p_out)
+            return up - ch_ * p_x, vp - cv_ * p_y, p_out
+
+        # ===== PREDICTOR =====
+        (uprime, vprime) = fs.adv_diff_solver.solve(u, v)
         uprime = self._bdim2(
             uprime, fs.mu0_all_u, fs.m_m0_all_u, comp.body_u,
             fs.mu1_all_u, fs.normal_x_u, fs.normal_y_u,
@@ -278,28 +311,42 @@ class BDIMhandler:
             vprime, fs.mu0_all_v, fs.m_m0_all_v, comp.body_v,
             fs.mu1_all_v, fs.normal_x_v, fs.normal_y_v,
         )
+        # Bug fix: set_BCs must come AFTER BDIM (not before) so that wall
+        # boundary conditions are re-enforced on the BDIM-corrected field.
+        fs.adv_diff_solver.set_BCs(uprime, vprime)
+        uprime_bdim = uprime
+        vprime_bdim = vprime
+        u1, v1, p1 = _project(uprime, vprime, p, ch, cv)
 
-        # Poisson solve (variable-density coefficients)
-        # Use local variable — do NOT overwrite fs.rho, which must stay
-        # as the scalar fluid density for forces_method1's stress tensor.
-        rho_blend = self.rho_fluid * fs.mu0_all_u + self.rho_body * fs.m_m0_all_u
-        ch = timestep * fs.mu0_all_u / rho_blend
-        cv = timestep * fs.mu0_all_v / rho_blend
+        # return (u1, v1, p1)
 
-        fs.div = fs.divergence(uprime, vprime)
-        p, _ = fs.poisson_solver.solve_multigrid(
-            fs.div[1:-1, 1:-1],
-            p,
-            ch=ch[1:, 1:-1],
-            cv=cv[1:-1, 1:],
+        # ===== CORRECTOR =====
+        # Re-enforce BCs on the projected u1 before advecting from it, so
+        # that ghost-cell errors from the pressure correction do not propagate.
+        fs.adv_diff_solver.set_BCs(u1, v1)
+        (uprime2, vprime2) = fs.adv_diff_solver.solve(u1, v1)
+        # Rebase increment from u^n (standard Heun rebasing)
+        uprime2 = u + (uprime2 - u1)
+        vprime2 = v + (vprime2 - v1)
+        uprime2 = self._bdim2(
+            uprime2, fs.mu0_all_u, fs.m_m0_all_u, comp.body_u,
+            fs.mu1_all_u, fs.normal_x_u, fs.normal_y_u,
         )
+        vprime2 = self._bdim2(
+            vprime2, fs.mu0_all_v, fs.m_m0_all_v, comp.body_v,
+            fs.mu1_all_v, fs.normal_x_v, fs.normal_y_v,
+        )
+        # Heun average of pre-projection BDIM velocities
+        u_avg = 0.5 * (uprime_bdim + uprime2)
+        v_avg = 0.5 * (vprime_bdim + vprime2)
+        fs.adv_diff_solver.set_BCs(u_avg, v_avg)
+        # Corrector projection weight = 0.5
+        u_out, v_out, p_out = _project(u_avg, v_avg, p1, 0.5 * ch, 0.5 * cv)
 
-        # Pressure projection
-        (p_x, p_y) = fs.gradient(p)
-        u = uprime - ch * p_x
-        v = vprime - cv * p_y
+        if fs.use_sponge:
+            (u_out, v_out) = fs.apply_sponge_damping(u_out, v_out)
 
-        return (u, v, p)
+        return (u_out, v_out, p_out)
 
     # ==================================================================
     #  step: one full coupled fluid-body step
@@ -333,17 +380,20 @@ class BDIMhandler:
             fs.m_m0_all_v = 1 - fs.mu0_all_v
             (fs.normal_x_v, fs.normal_y_v) = comp.compute_normals(comp.sdf_val_v)
 
-            # 3. Euler step with Brinkmann penalisation
+            # 3. Heun (RK2) step with BDIM2
             (u, v, p) = self.fluid_step(fs.u0, fs.v0, fs.p0, timestep)
             (fs.u0, fs.v0, fs.p0) = (u, v, p)
 
-            # 4. Compute fluid forces
-            fs.forces_method2(fs.u0, fs.v0, fs.p0, iteration)
+            # 5. Compute fluid forces
+            if self.force_method == 'method1':
+                fs.forces_method1(fs.u0, fs.v0, fs.p0, iteration)
+            else:
+                fs.forces_method2(fs.u0, fs.v0, fs.p0, iteration)
 
-            # 5. Plotting / saving
+            # 6. Plotting / saving
             self.terminate = fs.plotting_debug(fs.u0, fs.v0, fs.p0, iteration)
 
-            # 6. Apply forces to MuJoCo body
+            # 7. Apply forces to MuJoCo body
             self.apply_forces(task, physics)
 
         self.iteration += 1

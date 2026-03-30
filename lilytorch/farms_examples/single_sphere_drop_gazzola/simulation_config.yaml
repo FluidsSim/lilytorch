@@ -3,15 +3,15 @@ units:
   seconds: 1
   kilograms: 1
 runtime:
-  n_iterations: 10001
-  buffer_size: 10001
+  n_iterations: 15001
+  buffer_size: 15001
   play: true
   rtl: 1.0
   fast: false
-  headless: true
+  headless: false
   show_progress: true
 physics:
-  timestep: 0.0001
+  timestep: 0.001
   gravity:
   - 0
   - 0
@@ -32,7 +32,7 @@ mujoco:
   texture_repeat: 10
   shadow_size: 1024
   visual_scale: 1.0
-  extent: 100.0
+  extent: 3.0
 pybullet:
   opengl2: false
   lcp: dantzig
@@ -46,7 +46,7 @@ pybullet:
 extensions:
 - loader: lilytorch.integration.extensions.FluidExtension
   config:
-    handler_path: lilytorch.farms_examples.single_sphere_drop_gazzola.controller.BDIMhandler
+    handler_path: lilytorch.integration.BDIMhandler.BDIMhandler
     bdim_yaml:
       solver :
         use_gpu : True
@@ -55,8 +55,8 @@ extensions:
 
         Nx: 256
         Ny: 2048
-        # Nx: 256
-        # Ny: 2048
+        # Nx: 512
+        # Ny: 4096
         # Nx: 1024
         # Ny: 8192
         xmin: -0.02
@@ -64,25 +64,31 @@ extensions:
         xmax: 0.02
         ymax: 0.32
 
-        convection_method : "abdquickest"
-        dt                : 0.0001
-        nt                : 150000
+        convection_method : "quick"
+        dt                : 0.001
+        nt                : 12001
         nu                : 8.0e-7
         rho               : 996.0
         rho_body          : 1005.96
-        eps_multiplier    : 2.8284271247461903   # 2*sqrt(2) per Gazzola et al. 2011
+        eps_multiplier    : 2.0
 
-        poisson_tol            : 1.0e-7
+        poisson_tol            : 1.0e-9
         poisson_max_cycles     : 10
         poisson_max_mgcg_cycles: 5
         jacobi_weight          : 0.7
         poisson_nsmoothing     : 5
-        poisson_verbose        : False
+        poisson_verbose        : True
         # poisson_method         : "fft"
         # poisson_bc_type        : "neumann"
 
         poisson_folder         : "output/"
 
+        sponge:
+          width   : 0.005    # 1D — absorbing layer on each x-wall only
+          strength: 100.0     # 1/s
+          axes    : ["x"]    # lateral walls only; do not damp y (settling direction)
+
+        force_delta_order: 2
 
       boundary_conditions:
         BC_type_u:
@@ -106,7 +112,12 @@ extensions:
         - 0
         - 0
 
+      physics:
+        solref: [0.001, 0.5]
+
       body:
+        2d_plane: "xz"       # MuJoCo (x,z) → fluid (x,y); sphere falls in MuJoCo z
+        force_scaling: 1.0   # no z-extent scaling for 2D analytical body
         type: multi_animat
         plotting: False
         compute_interp: False

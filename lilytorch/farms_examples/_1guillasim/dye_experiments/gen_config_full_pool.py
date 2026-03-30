@@ -54,7 +54,7 @@ class SimConfig(BaseSimConfig):
         # ── Physics ───────────────────────────────────────────────────
         self.rho_body          = 1000.0
         self.timestep          = 0.001
-        self.convection_method = "quick"
+        self.convection_method = "abdquickest"
         self.n_iterations      = 20001
         self.save_every        = 200
         self.vmin              = -10.0

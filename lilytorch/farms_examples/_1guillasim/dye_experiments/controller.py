@@ -24,7 +24,8 @@ class PositionController(KinematicsController):
         kinematics_end        = experiment_options.simulation.physics.timestep*experiment_options.simulation.runtime.n_iterations
         kinematics            = self.load_positions(
             config["file_path"],
-            plot=False,
+            goal=True,
+            plot=True,
         )
 
 
@@ -93,7 +94,7 @@ class PositionController(KinematicsController):
             animat_i = animat_i,
         )
 
-    def load_positions(self, file_path, plot=False):
+    def load_positions(self, file_path, goal=True, plot=False):
 
         import pandas as pd
 
@@ -105,8 +106,13 @@ class PositionController(KinematicsController):
         times = df.iloc[:, 0].values + df.iloc[:, 1].values * 1e-6
         times = times - times[0]
 
-        # FbckPosition columns: indices 10..17 (8 motors)
-        thetas = df.iloc[:, 10:18].values
+
+        if goal:
+            # Goal columns: indices 2..9 (8 motors)
+            thetas = df.iloc[:, 2:10].values
+        else:
+            # FbckPosition columns: indices 10..17 (8 motors)
+            thetas = df.iloc[:, 10:18].values
 
         # Positions are already in radians; convert to degrees for the
         # KinematicsController (which will convert back with degrees=True)

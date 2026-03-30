@@ -249,11 +249,18 @@ def _forces_body_integrate_3d(
     sdf_i, eps_body, eps_solver,
     com_x, com_y, com_z,
     X, Y, Z, h3,
+    sdf_grad_mag=None,
 ):
     """Integrate viscous + pressure force / torque for ONE body.
 
     Inlines ``body.phi`` (smoothed delta) and ``cross_product_3d`` for
     maximal fusion under ``torch.compile``.
+
+    Parameters
+    ----------
+    sdf_grad_mag : (Ni, Nj, Nk) or None
+        |∇SDF| for this body.  When provided (Towers 2nd-order), deltas
+        are divided by this to correct for non-unit SDF gradients.
 
     Returns 18 scalars: (fv_x,fv_y,fv_z, tv_x,tv_y,tv_z,
                           fp_x,fp_y,fp_z, tp_x,tp_y,tp_z).
@@ -271,6 +278,11 @@ def _forces_body_integrate_3d(
         (1.0 + torch.cos(torch.pi * sdf_i / eps_body)) / (2.0 * eps_body),
         0.0,
     )
+    # Towers (2008) 2nd-order correction: δ_S = δ_ε(φ) / |∇φ|
+    if sdf_grad_mag is not None:
+        inv_grad = 1.0 / sdf_grad_mag.clamp(min=1e-3)
+        delta_visc = delta_visc * inv_grad
+        delta_pres = delta_pres * inv_grad
 
     # viscous forces — cast to float64 before .sum() for deterministic
     # accumulation order (GPU tree-reduction vs CPU sequential).
@@ -315,6 +327,7 @@ def _forces_body_batch_3d(
     sdf_all, eps_body, eps_solver,
     com_x, com_y, com_z,
     X, Y, Z, h3,
+    sdf_grad_mag=None,
 ):
     """Batched force/torque integration for ALL bodies in one fused call.
 
@@ -327,6 +340,10 @@ def _forces_body_batch_3d(
     com_x, com_y, com_z : (B,) centre-of-mass positions
     X, Y, Z : (Ni, Nj, Nk)  grid coordinates
     h3 : scalar (h**3)
+    sdf_grad_mag : (B, Ni, Nj, Nk) or None
+        Per-body |∇SDF|.  When provided (Towers 2nd-order), deltas are
+        divided by this to correct for non-unit SDF gradients.
+        Pass ``None`` (default) for the standard 1st-order cosine delta.
 
     Returns
     -------
@@ -349,6 +366,11 @@ def _forces_body_batch_3d(
         (1.0 + torch.cos(torch.pi * sdf_all / eps_body)) / (2.0 * eps_body),
         0.0,
     )
+    # Towers (2008) 2nd-order correction: δ_S = δ_ε(φ) / |∇φ|
+    if sdf_grad_mag is not None:
+        inv_grad = 1.0 / sdf_grad_mag.clamp(min=1e-3)
+        delta_visc = delta_visc * inv_grad
+        delta_pres = delta_pres * inv_grad
 
     # Broadcast stress (1,Ni,Nj,Nk) * delta (B,Ni,Nj,Nk)
     xs = xstress.unsqueeze(0)
@@ -418,7 +440,7 @@ def _forces_body_batch_3d(
 # Compilable 2-D force-computation kernels  (module-level)
 # ======================================================================
 
-def _forces_shared_2d(u, v, p, sdf_val, nx, ny, nu_rho, h):
+def _forces_shared_2d(u, v, p, sdf_val, nx, ny, nu_rho, h, mu0=None):
     """Compute stress tensors and pressure force density for 2-D.
 
     All quantities are evaluated on the cell-centred (CC) grid.
@@ -466,8 +488,19 @@ def _forces_shared_2d(u, v, p, sdf_val, nx, ny, nu_rho, h):
     xstress = nu_rho * (2 * dudx * nx + (dudy + dvdx) * ny)
     ystress = nu_rho * ((dvdx + dudy) * nx + 2 * dvdy * ny)
 
-    # pressure force density (outside body only)
-    p_outer = torch.where(sdf_val < 0, torch.zeros_like(p), p)
+    # pressure force density — use the BDIM smooth Heaviside (mu0) when
+    # available instead of a hard torch.where at sdf=0.  The hard masking
+    # creates a step-function discontinuity: equatorial cells (|nx|≈1) flip
+    # all-or-nothing as the body zigzags laterally, producing spurious Fx
+    # noise at the x-grid-crossing frequency (~63 steps for Gazzola).
+    # mu0 transitions smoothly over [-eps, +eps], so the contribution of
+    # each cell changes continuously as the body moves.  The surface-integral
+    # magnitude is preserved: ∫ mu0(φ) δ_ε(φ) dφ = mu0(0) = 0.5, same as
+    # ∫ H(φ) δ_ε(φ) dφ = 0.5 for the one-sided hard masking.
+    if mu0 is not None:
+        p_outer = p * mu0
+    else:
+        p_outer = torch.where(sdf_val < 0, torch.zeros_like(p), p)
     pforce_x = -p_outer * nx
     pforce_y = -p_outer * ny
 
@@ -481,6 +514,7 @@ def _forces_body_batch_2d(
     eps_body, eps_solver,
     com_x, com_y,
     X, Y, h2,
+    sdf_grad_mag=None,
 ):
     """Batched 2-D force/torque integration for ALL bodies in one call.
 
@@ -496,6 +530,11 @@ def _forces_body_batch_2d(
     com_x, com_y : (B,)  centre-of-mass positions
     X, Y : (Ni, Nj)  CC grid coordinates
     h2 : scalar (h**2)
+    sdf_grad_mag : (B, Ni, Nj) or None
+        Per-body |∇SDF| on the CC grid.  When provided (Towers 2nd-order),
+        deltas are divided by this to correct for non-unit SDF gradients,
+        giving a correct surface measure even when |∇SDF| ≠ 1.
+        Pass ``None`` (default) for the standard 1st-order cosine delta.
 
     Returns
     -------
@@ -514,6 +553,13 @@ def _forces_body_batch_2d(
         (1.0 + torch.cos(torch.pi * sdf_vals_cc / eps_body)) / (2.0 * eps_body),
         0.0,
     )
+    # Towers (2008) 2nd-order correction: δ_S = δ_ε(φ) / |∇φ|.
+    # For a perfect SDF |∇φ|=1 so this is a no-op; for numerical SDFs
+    # (mesh bodies, near corners) it restores the correct surface measure.
+    if sdf_grad_mag is not None:
+        inv_grad = 1.0 / sdf_grad_mag.clamp(min=1e-3)
+        delta_visc = delta_visc * inv_grad
+        delta_pres = delta_pres * inv_grad
 
     # Broadcast stress (1,Ni,Nj) * delta (B,Ni,Nj)
     fvisc_x = xstress.unsqueeze(0) * delta_visc   # (B, Ni, Nj)
@@ -634,9 +680,7 @@ class FluidSolver:
         self.rho  = torch.tensor(solver["rho"], device=self.device, dtype=self.dtype)  # density
         self.visc = self.nu*self.rho                                                   # dynamic viscosity
 
-        # Mollification half-width.  Gazzola et al. (2011) use ε = 2√2 h.
-        # Configurable via eps_multiplier in the solver YAML block (default 1.0).
-        self.eps  = solver.get("eps_multiplier", 1.0) * self.h
+        self.eps  = solver.get("eps_multiplier", torch.sqrt(torch.tensor(2.0))) * self.h
 
         self.starting_iteration      = solver.get("starting_iteration", 0)
         self.starting_iteration_path = solver.get("starting_iteration_path", None)
@@ -716,12 +760,14 @@ class FluidSolver:
             self.use_sponge = True
             sponge_width    = sponge.get("width", 0.15)    # [m] thickness of the sponge layer
             sponge_strength = sponge.get("strength", 50.0)  # [1/s] max damping coefficient σ_max
+            sponge_axes     = sponge.get("axes", None)      # None = all axes, or list e.g. ["x"]
             # Build quadratic σ(x,y,z) fields on each staggered grid.
             # σ = σ_max · (max(0, Ls - d) / Ls)²
             # where d = distance from the nearest domain boundary.
             self._sponge_sigma_u, self._sponge_sigma_v, self._sponge_sigma_w = \
-                self._build_sponge_fields(sponge_width, sponge_strength)
-            print(f"Sponge layer enabled: width={sponge_width} m, strength={sponge_strength} 1/s")
+                self._build_sponge_fields(sponge_width, sponge_strength, axes=sponge_axes)
+            axes_str = ",".join(sponge_axes) if sponge_axes else "all"
+            print(f"Sponge layer enabled: width={sponge_width} m, strength={sponge_strength} 1/s, axes={axes_str}")
         else:
             self.use_sponge = False
             self._sponge_sigma_u = None
@@ -767,6 +813,16 @@ class FluidSolver:
             print("  [compile] adv_diff_solver.solve + BDIM meta-equation compiled (reduce-overhead)")
         else:
             self._bdim_meta_compiled = FluidSolver._bdim_meta
+
+        # ---- optional Towers (2008) 2nd-order delta correction -----------
+        # When force_delta_order=2, the smoothed delta is divided by |∇SDF|
+        # so that the volume integral gives the correct surface measure even
+        # when the numerical SDF deviates from unit gradient.
+        # For analytical bodies |∇SDF|=1 exactly, so order 2 is a no-op;
+        # it matters for mesh bodies or near geometric corners.
+        self.force_delta_order = int(solver.get("force_delta_order", 1))
+        if self.force_delta_order not in (1, 2):
+            raise ValueError(f"force_delta_order must be 1 or 2, got {self.force_delta_order}")
 
         # ---- optional torch.compile for force computation -----
         self._compile_forces = solver.get("compile_forces", False)
@@ -819,7 +875,7 @@ class FluidSolver:
             w               = solver["jacobi_weight"],
             verbose         = solver["poisson_verbose"],
             precond_vcycles = solver.get("poisson_precond_vcycles", 1),
-            smoother        = solver.get("poisson_smoother", "jacobi"),
+            smoother        = solver.get("poisson_smoother", "rbgs"),
             compile_smoother= solver.get("poisson_compile", False),
         )
 
@@ -1193,6 +1249,7 @@ class FluidSolver:
             u, v, p, comp.sdf_val,
             normal_x, normal_y,
             nu_rho, self.h,
+            getattr(self, 'mu0_all', None),
         )
 
         if self._compile_forces:
@@ -1209,6 +1266,13 @@ class FluidSolver:
 
         eps_body = comp.bodies[0].eps
 
+        # Towers (2008) 2nd-order: compute per-body |∇SDF| on CC grid  (B,Ni,Nj)
+        sdf_grad_mag_2d = None
+        if self.force_delta_order == 2:
+            gx = torch.gradient(comp.sdf_vals, spacing=self.h, dim=1)[0]
+            gy = torch.gradient(comp.sdf_vals, spacing=self.h, dim=2)[0]
+            sdf_grad_mag_2d = torch.sqrt(gx**2 + gy**2)
+
         (fv_x, fv_y, tv_z,
          fp_x, fp_y, tp_z) = self._forces_body_batch_2d_compiled(
             xstress, ystress,
@@ -1217,6 +1281,7 @@ class FluidSolver:
             eps_body, self.eps,
             comp.com_pos[:, 0], comp.com_pos[:, 1],
             self.grids.X, self.grids.Y, self.h2,
+            sdf_grad_mag_2d,
         )
 
         if self._compile_forces:
@@ -1335,6 +1400,14 @@ class FluidSolver:
                 self._com_buf_y[i] = body.com_pos[1]
                 self._com_buf_z[i] = body.com_pos[2]
 
+            # Towers (2008) 2nd-order: per-body |∇SDF|  (B, Ni, Nj, Nk)
+            sdf_grad_mag_3d = None
+            if self.force_delta_order == 2:
+                gx = torch.gradient(sdf_all, spacing=h, dim=1)[0]
+                gy = torch.gradient(sdf_all, spacing=h, dim=2)[0]
+                gz = torch.gradient(sdf_all, spacing=h, dim=3)[0]
+                sdf_grad_mag_3d = torch.sqrt(gx**2 + gy**2 + gz**2)
+
             (fv_x, fv_y, fv_z,
              tv_x, tv_y, tv_z,
              fp_x, fp_y, fp_z,
@@ -1344,6 +1417,7 @@ class FluidSolver:
                 sdf_all, eps_body, self.eps,
                 self._com_buf_x, self._com_buf_y, self._com_buf_z,
                 X, Y, Z, h3,
+                sdf_grad_mag_3d,
             )
 
             # Clone outputs (CUDA graph buffer reuse)
@@ -1385,6 +1459,12 @@ class FluidSolver:
                     if aabb_i is not None:
                         i0, i1, j0, j1, k0, k1 = aabb_i
                         sl = (slice(i0, i1), slice(j0, j1), slice(k0, k1))
+                        grad_mag_i = None
+                        if self.force_delta_order == 2:
+                            gx = torch.gradient(sdf_sub_i, spacing=h, dim=0)[0]
+                            gy = torch.gradient(sdf_sub_i, spacing=h, dim=1)[0]
+                            gz = torch.gradient(sdf_sub_i, spacing=h, dim=2)[0]
+                            grad_mag_i = torch.sqrt(gx**2 + gy**2 + gz**2)
                         (fv_x, fv_y, fv_z,
                          tv_x, tv_y, tv_z,
                          fp_x, fp_y, fp_z,
@@ -1394,9 +1474,16 @@ class FluidSolver:
                             sdf_sub_i, eps_body, self.eps,
                             body.com_pos[0], body.com_pos[1], body.com_pos[2],
                             X[sl], Y[sl], Z[sl], h3,
+                            grad_mag_i,
                         )
                     else:
                         # Full-grid SDF (rare: body covers most of grid)
+                        grad_mag_i = None
+                        if self.force_delta_order == 2:
+                            gx = torch.gradient(sdf_sub_i, spacing=h, dim=0)[0]
+                            gy = torch.gradient(sdf_sub_i, spacing=h, dim=1)[0]
+                            gz = torch.gradient(sdf_sub_i, spacing=h, dim=2)[0]
+                            grad_mag_i = torch.sqrt(gx**2 + gy**2 + gz**2)
                         (fv_x, fv_y, fv_z,
                          tv_x, tv_y, tv_z,
                          fp_x, fp_y, fp_z,
@@ -1406,10 +1493,17 @@ class FluidSolver:
                             sdf_sub_i, eps_body, self.eps,
                             body.com_pos[0], body.com_pos[1], body.com_pos[2],
                             X, Y, Z, h3,
+                            grad_mag_i,
                         )
                 else:
                     # Legacy dense path (comp.sdf_vals exists)
                     sdf_i = comp.sdf_vals[i]
+                    grad_mag_i = None
+                    if self.force_delta_order == 2:
+                        gx = torch.gradient(sdf_i, spacing=h, dim=0)[0]
+                        gy = torch.gradient(sdf_i, spacing=h, dim=1)[0]
+                        gz = torch.gradient(sdf_i, spacing=h, dim=2)[0]
+                        grad_mag_i = torch.sqrt(gx**2 + gy**2 + gz**2)
                     (fv_x, fv_y, fv_z,
                      tv_x, tv_y, tv_z,
                      fp_x, fp_y, fp_z,
@@ -1419,6 +1513,7 @@ class FluidSolver:
                         sdf_i, eps_body, self.eps,
                         body.com_pos[0], body.com_pos[1], body.com_pos[2],
                         X, Y, Z, h3,
+                        grad_mag_i,
                     )
 
                 self.friction_force_lin_x[i] = fv_x
@@ -1541,7 +1636,7 @@ class FluidSolver:
     # ------------------------------------------------------------------
     #  Sponge / damping layer
     # ------------------------------------------------------------------
-    def _build_sponge_fields(self, width, strength):
+    def _build_sponge_fields(self, width, strength, axes=None):
         """Build quadratic sponge coefficient σ on each staggered grid.
 
         σ(x) = σ_max · (max(0, Ls - d) / Ls)²
@@ -1549,9 +1644,18 @@ class FluidSolver:
         where  d  is the distance to the nearest domain boundary and
         Ls = *width*.  Returns (sigma_u, sigma_v, sigma_w) tensors on the
         MAC staggered grids.  For 2-D, sigma_w is ``None``.
+
+        Parameters
+        ----------
+        axes : list of str or None
+            Which axes to sponge.  None = all axes.  E.g. ``["x"]`` damps
+            only near the left/right walls (useful for lateral absorbing
+            layers without touching inflow/outflow boundaries in y/z).
         """
         Ls = width
         sigma_max = strength
+        if axes is None:
+            axes = ["x", "y", "z"]
 
         def _quadratic_ramp_1d(coords, lo, hi):
             """Return σ(x) along one axis for cell centres *coords*."""
@@ -1565,22 +1669,46 @@ class FluidSolver:
         x = self.x   # (Nx,)
         y = self.y   # (Ny,)
 
-        sx = _quadratic_ramp_1d(x, self.xmin, self.xmax)
-        sy = _quadratic_ramp_1d(y, self.ymin, self.ymax)
+        sx = _quadratic_ramp_1d(x, self.xmin, self.xmax) if "x" in axes else torch.zeros_like(x)
+        sy = _quadratic_ramp_1d(y, self.ymin, self.ymax) if "y" in axes else torch.zeros_like(y)
+
+        # Component-selective sponge: each velocity component is damped
+        # only near walls where it is the wall-NORMAL component.
+        #   u ← damped near x-walls (u is normal to x-walls)
+        #   v ← damped near y-walls (v is normal to y-walls)
+        #   w ← damped near z-walls (w is normal to z-walls)
+        # When ALL axes are active, fall back to isotropic max(sx,sy[,sz])
+        # for backward compatibility (each component damped near every wall).
 
         if self.ndim == 3:
             z  = self.z  # (Nz,)
-            sz = _quadratic_ramp_1d(z, self.zmin, self.zmax)
-            # Combine via max (take the strongest damping from any wall):
-            # sigma(i,j,k) = max(sx_i, sy_j, sz_k)
-            sigma_3d = torch.maximum(
-                torch.maximum(sx[:, None, None], sy[None, :, None]),
-                sz[None, None, :],
-            )                                      # (Nx, Ny, Nz)
-            return sigma_3d, sigma_3d, sigma_3d
+            sz = _quadratic_ramp_1d(z, self.zmin, self.zmax) if "z" in axes else torch.zeros_like(z)
+            all_active = "x" in axes and "y" in axes and "z" in axes
+            if all_active:
+                sigma_3d = torch.maximum(
+                    torch.maximum(sx[:, None, None], sy[None, :, None]),
+                    sz[None, None, :],
+                )                                      # (Nx, Ny, Nz)
+                return sigma_3d, sigma_3d, sigma_3d
+            else:
+                Nx, Ny, Nz = len(x), len(y), len(z)
+                shape = (Nx, Ny, Nz)
+                zeros = torch.zeros(shape, device=x.device, dtype=x.dtype)
+                sigma_u = sx[:, None, None].expand(shape).contiguous() if "x" in axes else zeros
+                sigma_v = sy[None, :, None].expand(shape).contiguous() if "y" in axes else zeros.clone()
+                sigma_w = sz[None, None, :].expand(shape).contiguous() if "z" in axes else zeros.clone()
+                return sigma_u, sigma_v, sigma_w
         else:
-            sigma_2d = torch.maximum(sx[:, None], sy[None, :])  # (Nx, Ny)
-            return sigma_2d, sigma_2d, None
+            all_active = "x" in axes and "y" in axes
+            if all_active:
+                sigma_2d = torch.maximum(sx[:, None], sy[None, :])  # (Nx, Ny)
+                return sigma_2d, sigma_2d, None
+            else:
+                Nx, Ny = len(x), len(y)
+                zeros = torch.zeros(Nx, Ny, device=x.device, dtype=x.dtype)
+                sigma_u = sx[:, None].expand(Nx, Ny).contiguous() if "x" in axes else zeros
+                sigma_v = sy[None, :].expand(Nx, Ny).contiguous() if "y" in axes else zeros.clone()
+                return sigma_u, sigma_v, None
 
     def apply_sponge_damping(self, u, v, w=None):
         """Damp velocity towards zero near domain boundaries.
@@ -2074,6 +2202,9 @@ class FluidSolver:
 
         (self.mu0_all_v, self.mu1_all_v) = comp.mu_funcs(comp.sdf_val_v)
         (self.normal_x_v, self.normal_y_v) = comp.compute_normals(comp.sdf_val_v)
+
+        # CC-grid mu0 — used for smooth pressure masking in forces_method2
+        (self.mu0_all, self.mu1_all) = comp.mu_funcs(comp.sdf_val)
 
     def _recompute_mu_normals_3d(self):
         """Recompute mu0/mu1 and normals on all staggered + CC grids (3-D).

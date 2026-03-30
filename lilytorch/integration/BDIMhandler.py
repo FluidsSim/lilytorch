@@ -78,13 +78,30 @@ class BDIMhandler:
                 device=self.device, dtype=self.dtype,
             )
 
-        # ---- axes (derived from ndim) ----
+        # ---- axes (derived from ndim and 2d_plane) ----
         if self.ndim == 3:
             self.lin_axes = [0, 1, 2]
             self.ang_axes = [0, 1, 2]
+            self._2d_plane        = None
+            self._2d_ang_ax       = None
+            self._2d_force_axes   = None
+            self._2d_has_buoyancy = False
         else:
-            self.lin_axes = [0, 1]
-            self.ang_axes = [2]
+            _2d_plane = self.pars.get("body", {}).get("2d_plane", "xy")
+            self._2d_plane = _2d_plane
+            if _2d_plane == "xz":
+                # MuJoCo (x, z) → fluid (x, y): sphere falling under gravity in z
+                self.lin_axes         = [0, 2]
+                self.ang_axes         = [1]
+                self._2d_ang_ax       = 1          # rotation around MuJoCo y-axis
+                self._2d_force_axes   = (0, 2, 4)  # xfrc: fx, fz, ty
+                self._2d_has_buoyancy = True
+            else:  # "xy" — default
+                self.lin_axes         = [0, 1]
+                self.ang_axes         = [2]
+                self._2d_ang_ax       = 2          # rotation around MuJoCo z-axis
+                self._2d_force_axes   = (0, 1, 5)  # xfrc: fx, fy, tz
+                self._2d_has_buoyancy = False
 
         # ---- force scaling (config or auto) ----
         fs_cfg = self.pars.get("body", {}).get("force_scaling", "auto")
@@ -121,7 +138,16 @@ class BDIMhandler:
         # drag.pyx which uses MuJoCo body mass, bounding-sphere half-height,
         # and a linear submersion fraction.
         self.gravity_z = float(physics.model.opt.gravity[2])  # e.g. -9.81
-        self.water_surface = float(self.pars["solver"]["zmax"]) if "zmax" in self.pars["solver"] else 0.0
+        # water_surface: height at which buoyancy becomes full.
+        # 3-D:        MuJoCo z ↔ fluid z  → use solver.zmax
+        # 2-D xz:     MuJoCo z ↔ fluid y  → use solver.ymax
+        # 2-D xy:     no buoyancy needed   → 0.0
+        if self.ndim == 3:
+            self.water_surface = float(self.pars["solver"]["zmax"]) if "zmax" in self.pars["solver"] else 0.0
+        elif self._2d_plane == "xz":
+            self.water_surface = float(self.pars["solver"]["ymax"]) if "ymax" in self.pars["solver"] else 0.0
+        else:
+            self.water_surface = 0.0
         self._buoyancy_initialized = False
 
         # ---- optional physics solref tweak ----
@@ -251,7 +277,7 @@ class BDIMhandler:
             )
             ang_vels.append(
                 self.cython2numpy(
-                    [sen.com_ang_velocity(iteration, lk)[2]
+                    [sen.com_ang_velocity(iteration, lk)[self._2d_ang_ax]
                      for lk in range(len(sen.names))]
                 )
             )
@@ -911,6 +937,7 @@ class BDIMhandler:
     def _apply_forces_2d(self, task, physics):
         fs = self.fluid_solver
         s  = self.force_scaling
+        fx_idx, fy_idx, torque_idx = self._2d_force_axes
 
         # Single GPU→CPU transfer instead of 6 separate .cpu().numpy() calls
         forces_gpu = torch.stack([
@@ -929,17 +956,36 @@ class BDIMhandler:
         pressure_force_y     = forces_cpu[4]
         pressure_force_ang_z = forces_cpu[5]
 
-        for body_i in range(len(fs.composite_body.bodies)):
-            (animat_id, link_id) = fs.composite_body.body_ids[body_i]
+        # Lazy-init buoyancy parameters (xz plane only)
+        if self._2d_has_buoyancy and not self._buoyancy_initialized:
+            self._init_buoyancy_params(task, physics)
+
+        comp    = fs.composite_body
+        surface = self.water_surface
+        g_z     = self.gravity_z
+
+        for body_i in range(len(comp.bodies)):
+            (animat_id, link_id) = comp.body_ids[body_i]
             ind = task.maps[animat_id]["sensors"]["data2xfrc"][link_id]
 
-            physics.data.xfrc_applied[ind, 0] = (
+            # FARMS-style buoyancy: only active for xz plane (fluid y = MuJoCo z)
+            buoyancy_y = 0.0
+            if self._2d_has_buoyancy:
+                mass   = self._buoy_mass[body_i]
+                height = self._buoy_height[body_i]
+                # comp.com_pos[body_i][1] = fluid y = MuJoCo z (vertical)
+                pos_z  = float(comp.com_pos[body_i][1])
+                if mass > 0 and height > 0 and pos_z - height < surface:
+                    frac = min((surface + height - pos_z) / (2.0 * height), 1.0)
+                    buoyancy_y = -self.rho_fluid * mass * g_z / self.rho_body * frac
+
+            physics.data.xfrc_applied[ind, fx_idx] = (
                 friction_force_lin_x[body_i] + pressure_force_x[body_i]
             ) * task.units.newtons
-            physics.data.xfrc_applied[ind, 1] = (
-                friction_force_lin_y[body_i] + pressure_force_y[body_i]
+            physics.data.xfrc_applied[ind, fy_idx] = (
+                friction_force_lin_y[body_i] + pressure_force_y[body_i] + buoyancy_y
             ) * task.units.newtons
-            physics.data.xfrc_applied[ind, 5] = (
+            physics.data.xfrc_applied[ind, torque_idx] = (
                 friction_force_ang_z[body_i] + pressure_force_ang_z[body_i]
             ) * task.units.newtons
 

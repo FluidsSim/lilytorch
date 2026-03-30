@@ -46,21 +46,22 @@ REF_DIR    = HERE.parent.parent.parent / "data_to_save"
 FMT        = ".png"
 
 # Data directory containing fields.h5, contours.h5, and output/simulation.hdf5
-DATA_DIR   = pathlib.Path("/data/andreaferrario/ns_data/2026-03-27T14:15:41.873886")
+DATA_DIR   = pathlib.Path("/data/andreaferrario/ns_data/2026-03-30T17:26:53.461714")
 FIELDS_H5  = DATA_DIR / "fields.h5"
 CONTOURS_H5 = DATA_DIR / "contours.h5"
 HDF5_PATH  = DATA_DIR / "output" / "simulation.hdf5"
 
 # ── physical parameters ─────────────────────────────────────────────────
-D          = 0.005          # sphere diameter  [m]
-R          = D / 2
-rho_body   = 1010.0         # kg/m^3
-rho_fluid  = 996.0          # kg/m^3
-nu         = 8e-7           # kinematic viscosity [m^2/s]
-g_acc      = 9.81           # gravitational acceleration [m/s^2]
-U_t        = 0.02501        # terminal settling velocity [m/s]
-mass_2d    = rho_body * np.pi * R**2
-dt_fluid   = 1e-4
+D         = 0.005                    # sphere diameter  [m]
+R         = D / 2
+rho_body  = 1005.96                  # kg/m^3  (matches simulation_config.yaml)
+rho_fluid = 996.0                    # kg/m^3
+nu        = 8e-7                     # kinematic viscosity [m^2/s]
+g_acc     = 9.81                     # gravitational acceleration [m/s^2]
+U_t       = -0.02501                 # terminal settling velocity [m/s]
+mass_2d   = rho_body * np.pi * R**2
+dt_fluid  = 1e-4
+xlim      = (0, 125)
 
 # ── colours ──────────────────────────────────────────────────────────────
 C_UX  = "#2166AC"   # blue   – horizontal velocity
@@ -113,7 +114,7 @@ def plot_velocities():
     from farms_core.sensors.sensor_convention import sc
 
     data  = hdf5_to_dict(str(HDF5_PATH))
-    times = data["times"][:-1]
+    times = data["times"]
     sa    = data["animats"][0]["sensors"]["links"]["array"][:, 0, :]
 
     com_vel = sa[:, sc.link_com_velocity_lin_x : sc.link_com_velocity_lin_z + 1]
@@ -125,8 +126,8 @@ def plot_velocities():
 
     # Normalised velocities
     # MuJoCo x -> fluid x (horizontal), MuJoCo y -> vertical (settling)
-    ux_norm  =  com_vel[:, 0] / U_t
-    uz_norm  = -com_vel[:, 2] / U_t   # negate: positive = downward settling
+    ux_norm  =  -com_vel[:, 0] / U_t
+    uz_norm  = com_vel[:, 2] / U_t   # negate: positive = downward settling
     ang_norm =  D * ang_vel[:, 1] / U_t
 
     # from IPython import embed; embed()
@@ -140,13 +141,13 @@ def plot_velocities():
     fig, ax = plt.subplots(figsize=(7, 4.5))
 
     # Reference (open markers)
-    ax.scatter(ref_vp[:, 0], ref_vp[:, 1], s=16, marker="o",
+    ax.scatter(ref_vp[:, 0], ref_vp[:, 1], s=16, marker=".",
                facecolors="none", edgecolors=C_UX, linewidths=0.8,
-               label=r"$u_x/U_t$ (Gazzola et al.)", zorder=3)
-    ax.scatter(ref_up[:, 0] - 1.0, ref_up[:, 1], s=16, marker="s",
+               label=r"$u_x/U_t$ (Gazzola et al.)")
+    ax.scatter(ref_up[:, 0], ref_up[:, 1], s=16, marker=".",
                facecolors="none", edgecolors=C_UZ, linewidths=0.8,
                label=r"$u_z/U_t$ (Gazzola et al.)", zorder=3)
-    ax.scatter(ref_wp[:, 0], ref_wp[:, 1], s=16, marker="^",
+    ax.scatter(ref_wp[:, 0], ref_wp[:, 1], s=16, marker=".",
                facecolors="none", edgecolors=C_ANG, linewidths=0.8,
                label=r"$D\omega/U_t$ (Gazzola et al.)", zorder=3)
 
@@ -160,6 +161,7 @@ def plot_velocities():
     ax.set_title("Sphere sedimentation – Gazzola et al. (2011)")
     # ax.set_ylim([-0.2, 1.3])
     ax.legend(ncol=2, loc="upper right", framealpha=0.92, edgecolor="0.7")
+    ax.set_xlim(xlim)
     fig.tight_layout()
     fig.savefig(str(FIG_DIR / f"gazzola_com_velocity{FMT}"))
     print(f"  Saved {FIG_DIR / f'gazzola_com_velocity{FMT}'}")

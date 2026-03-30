@@ -456,7 +456,7 @@ class PoissonSolver:
         self.max_vcycles = max_vcycles
         self.nsmoothing  = nsmoothing
         self.verbose     = verbose
-        self.jcap_tol    = 1e-12
+        self.jcap_tol    = 1e-12 # lower value helps to reduce degenerate
         self.n_switch    = 2 ** 16
         self.w           = w   # Jacobi relaxation weight
         self.precond_vcycles = precond_vcycles  # V-cycles per CG preconditioner
@@ -744,7 +744,7 @@ class PoissonSolver:
         p, r = self.smooth(f, p, cfaces)
 
         # coarsen if grid is large enough
-        if all(n > 2 for n in shape):
+        if all(n > 8 for n in shape):
 
             # CPU offload for very large grids
             on_gpu = (self.device == "cuda"

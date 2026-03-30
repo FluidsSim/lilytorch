@@ -53,6 +53,7 @@ pre-allocated buffers or cache them on the solver.
 would catch slow blow-ups, non-physical energy growth, or excessive dissipation
 - how difficult would be to add a turbulence Smagorinsky model
 (ν_t = (Cs·Δ)²|S̄|) to model additive eddy viscosity? What does the model do exactly and how expensive is it?
+- Towers (2008) 2nd-order force correction implemented: `force_delta_order: 2` in solver config divides smoothed delta by |∇SDF|, correcting surface measure when numerical SDF deviates from unit gradient. Default is order 1 (no change). Not codimension-restricted.
 
 # HIGH PRIORITY:
 - when running 1guilla slime exp i noticed that the gpu is not fully used - check why
@@ -65,6 +66,11 @@ would catch slow blow-ups, non-physical energy growth, or excessive dissipation
 - Test solution of the Poisson equation using PINNs/CNNs - ask agent
 - Compare 1guilla pinned simulation against PIV data (need a fined grid)
 - Compare 1guilla with dyes experiments
+-   The current branch was checkout from 3d_solver branch (3DB).
+    Check the diffs with 3DB. I want to soon merge it to the 3DB, but before doing that I want to:
+    - make sure that the code is cleaned of useless parts
+    - Make the gazzola sphere experiment runnable using the BDIMHANDLER approach (probably need to modify the BDIMHANDLER code to support arbitrary dimensions in 2d - for example x and z)
+    - the modifications done to 2d solvers should be implemented for 3d, I suspect some methods were only set for 2d simulations.
 
 # LOW PRIORITY:
 - Test an analytical 2d swimmer simulation
@@ -129,18 +135,6 @@ and serves as documentation.
 ### D1. Checkpoint/restart system
 No automatic periodic checkpointing that saves full solver state (iteration, drag records,
 body positions, Poisson state). A crash at iter 999k of a 1M-step run means starting over.
-
-### D4. LES subgrid model (Smagorinsky)
-No turbulence model limits the solver to low-Re. A Smagorinsky model
-(ν_t = (Cs·Δ)²|S̄|) would be straightforward: additive eddy viscosity to self.nu.
-
-
-### D6. Performance profiling hooks
-No timing infrastructure to identify which phase (advection, Poisson, BDIM, SDF, force,
-I/O) dominates cost. Add `torch.cuda.Event`-based timers around each phase, toggled by a
-`profile=True` flag.
-
-### D7.
 
 
 ---

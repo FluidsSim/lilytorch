@@ -52,6 +52,7 @@ results/
 __pycache__
 figures/
 output/
+.pytest_cache/
 
 farms_amphibious/
 farms_core/
