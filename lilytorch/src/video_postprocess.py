@@ -43,7 +43,11 @@ def _discover_fields(run_dir: Path):
     for sub in sorted(run_dir.iterdir()):
         if not sub.is_dir():
             continue
-        pngs = sorted(sub.glob("*.png"))
+        # Sort by numeric iteration suffix (e.g. *_2.png before *_10.png).
+        pngs = sorted(
+            sub.glob("*.png"),
+            key=lambda p: (_iteration_from_name(p), p.name),
+        )
         if pngs:
             yield sub.name, pngs
 

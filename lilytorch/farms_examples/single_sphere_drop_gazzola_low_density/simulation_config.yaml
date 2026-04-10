@@ -8,7 +8,7 @@ runtime:
   play: true
   rtl: 1.0
   fast: false
-  headless: true
+  headless: false
   show_progress: true
 physics:
   timestep: 0.001
@@ -53,13 +53,15 @@ extensions:
         nthreads : 16
 
 
-        Nx: 512
+        Nx: 256
         Ny: 4096
         # Nx: 512
+        # Ny: 4096
+        # Nx: 1024
         # Ny: 8192
-        xmin: -0.06
+        xmin: -0.02
         ymin: 0.0
-        xmax: 0.06
+        xmax: 0.02
         ymax: 0.64
 
         convection_method : "quick"
@@ -67,7 +69,7 @@ extensions:
         nt                : 27001
         nu                : 8.0e-7
         rho               : 996.0
-        rho_body          : 1005.96
+        rho_body          : 990.0
         eps_multiplier    : 2.0
 
         poisson_tol            : 1.0e-9
@@ -81,20 +83,18 @@ extensions:
 
         poisson_folder         : "output/"
 
-        # sponge:
-        #   width   : 0.005    # 1D — absorbing layer on each x-wall only
-        #   strength: 100.0     # 1/s
-        #   axes    : ["x"]    # lateral walls only; do not damp y (settling direction)
+        sponge:
+          width   : 0.005    # 1D — absorbing layer on each x-wall only
+          strength: 100.0     # 1/s
+          axes    : ["x"]    # lateral walls only; do not damp y (settling direction)
 
-        time_integration: "euler"
-        heun: false            # Heun (RK2) for BDIM-projection cycle (matches namkoong)
-        force_method: "method2"
-        force_delta_order: 1
+        heun: true            # Heun (RK2) for BDIM-projection cycle (matches namkoong)
+        force_delta_order: 2
 
       boundary_conditions:
         BC_type_u:
-        - "N"
-        - "N"
+        - "D"
+        - "D"
         - "N"
         - "N"
         BC_values_u:
@@ -105,8 +105,8 @@ extensions:
         BC_type_v:
         - "N"
         - "N"
-        - "N"
-        - "N"
+        - "D"
+        - "D"
         BC_values_v:
         - 0
         - 0
@@ -138,7 +138,7 @@ extensions:
 
       output:
         save_path: ""
-        existing_folder: /data/andreaferrario/ns_data/namkoong_sphere_drop
+        existing_folder: /data/andreaferrario/ns_data/namkoong_sphere_rise
         save_frames: True
         save_every : 500
         vmin: -5
@@ -153,7 +153,7 @@ extensions:
 
 - loader: farms_core.simulation.extensions.ExperimentLogger
   config:
-    log_path: /data/andreaferrario/ns_data/namkoong_sphere_drop/output
+    log_path: /data/andreaferrario/ns_data/namkoong_sphere_rise/output
     skip: 0
 
 # - loader: farms_mujoco.simulation.extensions.CameraFollower

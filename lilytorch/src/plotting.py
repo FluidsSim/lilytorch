@@ -2,7 +2,7 @@ import os
 import threading
 
 import matplotlib
-matplotlib.use("Agg")          # non-interactive backend — thread-safe, no GUI
+# matplotlib.use("Agg")          # non-interactive backend — thread-safe, no GUI
 import matplotlib.pyplot as plt
 import matplotlib.colors as colors
 import numpy as np

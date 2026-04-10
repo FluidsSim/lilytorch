@@ -130,6 +130,10 @@ class BDIMhandler:
         )
         self.contour_mask = self.pars.get("body", {}).get("contour_mask", False)
         self.force_method = self.pars["solver"].get("force_method", "method2")
+        # Heun (RK2) for the full BDIM-projection cycle (2-D only).
+        # Off by default (Euler) for backwards compatibility; enable for
+        # benchmarks that require RK2 accuracy (e.g. Gazzola sedimentation).
+        self._use_heun = self.pars["solver"].get("heun", False) if self.ndim == 2 else False
 
         # ---- FARMS-style buoyancy parameters ----
         # With all-Neumann BCs the BDIM pressure field is purely dynamic;
@@ -778,23 +782,36 @@ class BDIMhandler:
     def _compute_variable_density_coefficients(self, timestep):
         """Compute variable-density Poisson coefficients.
 
-        Returns (ch, cv) for 2-D or (ch, cv, cw) for 3-D, using
-        rho = rho_body + (rho_fluid - rho_body) * mu0  at each
-        staggered grid location.
+        Returns ``(ch, cv, ch_cc)`` for 2-D or ``(ch, cv, cw, ch_cc)``
+        for 3-D, where:
 
-        The mu0 factor in the numerator ensures ch → 0 inside the body
-        (mu0 ≈ 0), so the pressure projection does not corrupt the body
-        velocity enforced by the BDIM meta-equation.
+        * ``ch, cv, cw`` -- staggered ``dt / rho_eff`` on the respective
+          face grids.  Used by both the multigrid correction step and the
+          FFT correction step.  The mu0 factor in the numerator ensures
+          ch → 0 inside the body (mu0 ≈ 0), so the pressure projection
+          does not corrupt the body velocity.
+        * ``ch_cc`` -- cell-centred ``dt / rho_eff_cc``.  Used as the
+          Poisson RHS coefficient in the FFT path so that the solve
+          accounts for spatially-varying density:
+          ``∇²p = div / ch_cc  ≡  div * rho_eff_cc / dt``.
+
+        Effective density at location x:
+            rho_eff(x) = rho_body + (rho_fluid - rho_body) * mu0(x)
         """
         fs = self.fluid_solver
         _drho = self.rho_fluid - self.rho_body
 
         ch = timestep * fs.mu0_all_u / (self.rho_body + _drho * fs.mu0_all_u)
         cv = timestep * fs.mu0_all_v / (self.rho_body + _drho * fs.mu0_all_v)
+
+        # Cell-centred effective density → CC coefficient for FFT RHS.
+        rho_cc = self.rho_body + _drho * fs.mu0_all
+        ch_cc  = timestep / rho_cc
+
         if self.ndim == 3:
             cw = timestep * fs.mu0_all_w / (self.rho_body + _drho * fs.mu0_all_w)
-            return ch, cv, cw
-        return ch, cv
+            return ch, cv, cw, ch_cc
+        return ch, cv, ch_cc
 
     def fluid_step(self, *args):
         if self.ndim == 3:
@@ -806,46 +823,108 @@ class BDIMhandler:
         fs = self.fluid_solver
         _bdim = fs._bdim_meta_compiled
         _h = fs.h
+        comp = fs.composite_body
+
+        # Pre-compute variable-density Poisson coefficients once
+        # (mu0_all_{u,v,cc} are fixed for the duration of the fluid step).
+        # Both FFT and multigrid paths use spatially-varying density:
+        #   ch/cv   -- staggered dt/rho_eff, used for the correction step
+        #   ch_cc   -- cell-centred dt/rho_eff_cc, used for the FFT RHS
+        _ch, _cv, _ch_cc = self._compute_variable_density_coefficients(timestep)
+
+        def _advect_bdim(u_in, v_in, nu_t=None, u_rebase=None, v_rebase=None):
+            """One advection-diffusion + BDIM pass.
+
+            Returns the BDIM-corrected (uprime, vprime) with BCs applied
+            *after* BDIM so that wall BCs override any BDIM corrections
+            near the domain boundary.
+            """
+            (up, vp) = fs.adv_diff_solver.solve(u_in, v_in, nu_t=nu_t)
+            # Clone CUDA-graph outputs before in-place ops / set_BCs
+            up = up.clone()
+            vp = vp.clone()
+            # Rebase predictor/corrector increment from (u_in, v_in)
+            # to a reference state (u_rebase, v_rebase). This is used
+            # in Heun corrector to build u^n + dt*RHS(u_pred).
+            if u_rebase is not None:
+                up = u_rebase + (up - u_in)
+            if v_rebase is not None:
+                vp = v_rebase + (vp - v_in)
+            up = _bdim(
+                up, fs.mu0_all_u,
+                comp.body_u, fs.mu1_all_u,
+                fs.normal_x_u, fs.normal_y_u, _h, 2,
+            ).clone()
+            vp = _bdim(
+                vp, fs.mu0_all_v,
+                comp.body_v, fs.mu1_all_v,
+                fs.normal_x_v, fs.normal_y_v, _h, 2,
+            ).clone()
+            # BCs enforced *after* BDIM so that wall conditions override
+            # any BDIM blending that reaches ghost cells near a wall.
+            fs.adv_diff_solver.set_BCs(up, vp)
+            return up, vp
 
         nu_t = fs._compute_nu_t(u, v)
-        (uprime, vprime) = fs.adv_diff_solver.solve(u, v, nu_t=nu_t)
-        # Clone CUDA-graph outputs so they can safely be passed to
-        # another compiled kernel (_bdim) and modified by set_BCs.
-        uprime = uprime.clone()
-        vprime = vprime.clone()
-        fs.adv_diff_solver.set_BCs(uprime, vprime)
 
-        # BDIM2 meta-equation  (reuses FluidSolver's compiled kernel)
-        uprime = _bdim(
-            uprime, fs.mu0_all_u,
-            fs.composite_body.body_u, fs.mu1_all_u,
-            fs.normal_x_u, fs.normal_y_u, _h, 2,
-        ).clone()
-        vprime = _bdim(
-            vprime, fs.mu0_all_v,
-            fs.composite_body.body_v, fs.mu1_all_v,
-            fs.normal_x_v, fs.normal_y_v, _h, 2,
-        ).clone()
+        if self._use_heun:
+            # ===== Heun (RK2) predictor-corrector =====
+            # Matches WaterLily.jl's mom_step! exactly:
+            #   1. Predictor: adv-diff → BDIM → project(w=1) → BCs → u_pred
+            #   2. Corrector: adv-diff on u_pred → rebase from u^n → BDIM
+            #      → average PROJECTED predictor with corrector BDIM
+            #      → project with halved coefficients (w=0.5 equivalent)
+            #
+            # The corrector average is 0.5*(u_pred + BDIM(u^n + dt*RHS(u_pred))).
+            # Because u_pred is div-free, div(u_avg) = 0.5*div(BDIM_corr).
+            # Halving the Poisson coefficients compensates this, giving the
+            # correct physical pressure for force computation.
 
-        # Variable-density Poisson coefficients
-        poisson_method = getattr(fs, "poisson_method", "multigrid")
-        if poisson_method == "fft":
-            coeff = timestep / self.rho_fluid
-            (u, v, p) = fs.project(uprime, vprime, p, ch=coeff, cv=coeff)
+            # Predictor
+            uprime, vprime = _advect_bdim(u, v, nu_t=nu_t)
+            u1, v1, p1 = fs.project(uprime, vprime, p, ch=_ch, cv=_cv, ch_cc=_ch_cc)
+            # Re-apply BCs after projection (matches WaterLily's BC!
+            # after every project! call).
+            fs.adv_diff_solver.set_BCs(u1, v1)
+
+            # Corrector
+            nu_t = fs._compute_nu_t(u1, v1)
+            uprime2, vprime2 = _advect_bdim(
+                u1, v1, nu_t=nu_t,
+                u_rebase=u, v_rebase=v,
+            )
+
+            # Average projected predictor with BDIM-corrected corrector,
+            # then project once with half coefficients (w=0.5 equivalent).
+            u_avg = 0.5 * (u1 + uprime2)
+            v_avg = 0.5 * (v1 + vprime2)
+            fs.adv_diff_solver.set_BCs(u_avg, v_avg)
+
+            _ch_half = 0.5 * _ch
+            _cv_half = 0.5 * _cv
+            _ch_cc_half = 0.5 * _ch_cc
+            u_out, v_out, p_out = fs.project(
+                u_avg, v_avg, p1,
+                ch=_ch_half, cv=_cv_half, ch_cc=_ch_cc_half,
+            )
+
+
         else:
-            ch, cv = self._compute_variable_density_coefficients(timestep)
-            (u, v, p) = fs.project(uprime, vprime, p, ch=ch, cv=cv)
+            # ===== Single Euler step =====
+            uprime, vprime = _advect_bdim(u, v, nu_t=nu_t)
+            u_out, v_out, p_out = fs.project(uprime, vprime, p,
+                                              ch=_ch, cv=_cv, ch_cc=_ch_cc)
 
         # Sponge damping (2-D)
         if fs.use_sponge:
-            (u, v) = fs.apply_sponge_damping(u, v)
+            (u_out, v_out) = fs.apply_sponge_damping(u_out, v_out)
 
         # Yield-stress damping (2-D)
         if fs.use_yield_damping:
-            (u, v) = fs.apply_yield_damping(u, v)
+            (u_out, v_out) = fs.apply_yield_damping(u_out, v_out)
 
-        fs.adv_diff_solver.set_BCs(u, v)
-        return (u, v, p)
+        fs.adv_diff_solver.set_BCs(u_out, v_out)
+        return (u_out, v_out, p_out)
 
     # ---- 3-D fluid step ---------------------------------------------
     def _fluid_step_3d(self, u, v, w, p, timestep):
@@ -893,24 +972,22 @@ class BDIMhandler:
             if hasattr(fs, _attr):
                 setattr(fs, _attr, None)
 
-        # Variable-density Poisson coefficients
+        # Variable-density Poisson coefficients.
+        # Computed before freeing mu0 arrays (both FFT and multigrid need
+        # ch_cc from mu0_all CC, which is freed below).
+        ch, cv, cw, ch_cc = self._compute_variable_density_coefficients(timestep)
+
+        # ── Free mu0 now — ch/cv/cw/ch_cc are independent tensors ────
+        for _attr in ('mu0_all_u', 'mu0_all_v', 'mu0_all_w', 'mu0_all'):
+            if hasattr(fs, _attr):
+                setattr(fs, _attr, None)
+
         poisson_method = getattr(fs, "poisson_method", "multigrid")
         if poisson_method == "fft":
-            coeff = timestep / self.rho_fluid
-            # Free mu0 before Poisson solve (not needed by FFT path)
-            for _attr in ('mu0_all_u', 'mu0_all_v', 'mu0_all_w', 'mu0_all'):
-                if hasattr(fs, _attr):
-                    setattr(fs, _attr, None)
             (u, v, w, p) = fs.project(uprime, vprime, p,
-                                      w_vel=wprime, ch=coeff, cv=coeff, cw=coeff)
+                                      w_vel=wprime, ch=ch, cv=cv, cw=cw,
+                                      ch_cc=ch_cc)
         else:
-            ch, cv, cw = self._compute_variable_density_coefficients(timestep)
-
-            # ── Free mu0 now — ch/cv/cw are independent tensors ──────
-            for _attr in ('mu0_all_u', 'mu0_all_v', 'mu0_all_w', 'mu0_all'):
-                if hasattr(fs, _attr):
-                    setattr(fs, _attr, None)
-
             (u, v, w, p) = fs.project(uprime, vprime, p,
                                       w_vel=wprime, ch=ch, cv=cv, cw=cw)
 

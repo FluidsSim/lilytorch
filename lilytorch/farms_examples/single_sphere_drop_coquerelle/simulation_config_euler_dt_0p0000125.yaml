@@ -3,15 +3,15 @@ units:
   seconds: 1
   kilograms: 1
 runtime:
-  n_iterations: 7001
-  buffer_size: 7001
+  n_iterations: 52001
+  buffer_size: 52001
   play: true
   rtl: 1.0
   fast: false
   headless: true
   show_progress: true
 physics:
-  timestep: 0.0001
+  timestep: 1.25e-05
   gravity:
   - 0
   - 0
@@ -22,7 +22,7 @@ physics:
 mujoco:
   cone: elliptic
   solver: CG
-  integrator: implicit
+  integrator: implicitfast
   impratio: 10
   ccd_iterations: 1000
   ccd_tolerance: 1e-6
@@ -49,99 +49,87 @@ extensions:
     handler_path: lilytorch.integration.BDIMhandler.BDIMhandler
     bdim_yaml:
       solver:
-        use_gpu: True
+        use_gpu: true
         nthreads: 16
-        dtype: "float64"
-
-        # Nx: 256
-        # Ny: 768
+        dtype: float64
         Nx: 512
         Ny: 1536
-        # Nx: 1024
-        # Ny: 8192
         xmin: 0
         ymin: 0
         xmax: 2
         ymax: 6
-
-        convection_method: "quick"
-        dt: 0.000025
-        nt: 26001
+        convection_method: quick
+        dt: 1.25e-05
+        nt: 52001
         nu: 0.01
         rho: 1
         rho_body: 1.5
         eps_multiplier: 2
-
-        poisson_tol: 1.0e-7
+        poisson_tol: 1.0e-07
         poisson_max_cycles: 10
         poisson_max_mgcg_cycles: 5
         jacobi_weight: 0.7
         poisson_nsmoothing: 5
-        poisson_verbose: True
-        poisson_folder: "data/"
-        poisson_smoother: "jacobi"
-        poisson_method: "fft"
-        poisson_bc_type: "neumann"
-
+        poisson_verbose: true
+        poisson_folder: data/
+        poisson_smoother: jacobi
+        poisson_method: fft
+        poisson_bc_type: neumann
         heun: false
-        force_method: "method1"
         force_delta_order: 1
-
       boundary_conditions:
         BC_type_u:
-        - "D"
-        - "D"
-        - "D"
-        - "D"
+        - D
+        - D
+        - D
+        - D
         BC_values_u:
         - 0
         - 0
         - 0
         - 0
         BC_type_v:
-        - "D"
-        - "D"
-        - "D"
-        - "D"
+        - D
+        - D
+        - D
+        - D
         BC_values_v:
         - 0
         - 0
         - 0
         - 0
-
       physics:
-        solref: [0.00001, 10]
-
+        solref:
+        - 1.0e-05
+        - 10
       body:
-        2d_plane: "xz"       # MuJoCo (x,z) → fluid (x,y); sphere falls in MuJoCo z
-        force_scaling: 1.0   # no z-extent scaling for 2-D analytical body
+        2d_plane: xz
+        force_scaling: 1.0
         type: multi_animat
-        plotting: False
-        compute_interp: False
-        plotting_meshes: False
+        plotting: false
+        compute_interp: false
+        plotting_meshes: false
         save_folder: None
         n_samples:
         - 2000
         - 2000
         update_maps:
-          rotation: "None"
+          rotation: None
           translation:
-            - None
-            - None
+          - None
+          - None
         suit: 0.0
-        convexify: True
+        convexify: true
         scale: 1
-
       output:
-        save_path: ""
-        existing_folder: /data/andreaferrario/ns_data/coquerelle_sphere_drop
-        save_frames: True
+        save_path: ''
+        existing_folder: /data/andreaferrario/ns_data/coquerelle_heun_euler_study/euler_dt_0p0000125
+        save_frames: true
         save_every: 1000
         vmin: -50
         vmax: 50
-        save_uv: True
-
+        save_uv: true
 - loader: farms_core.simulation.extensions.ExperimentLogger
   config:
-    log_path: /data/andreaferrario/ns_data/coquerelle_sphere_drop/output
+    log_path: /data/andreaferrario/ns_data/coquerelle_heun_euler_study/euler_dt_0p0000125/output
     skip: 0

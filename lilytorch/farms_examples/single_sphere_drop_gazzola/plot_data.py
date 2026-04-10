@@ -1,12 +1,12 @@
 """
-Plot results from the Gazzola et al. 2D sphere sedimentation test.
+Plot results from the namkoong et al. 2D circle sedimentation test.
 
 Reads fluid fields from ``fields.h5`` and body contours from
 ``contours.h5`` (the new unified HDF5 storage).
 
 Produces:
   1. Normalised COM velocity (ux, uz, omega) vs normalised time,
-     compared with reference data from Gazzola et al. (2011).
+     compared with reference data from namkoong et al. 2008
   2. Velocity-field snapshots at selected time steps.
   3. Vorticity field snapshot.
   4. Kinetic & potential energy evolution.
@@ -46,22 +46,22 @@ REF_DIR    = HERE.parent.parent.parent / "data_to_save"
 FMT        = ".png"
 
 # Data directory containing fields.h5, contours.h5, and output/simulation.hdf5
-DATA_DIR   = pathlib.Path("/data/andreaferrario/ns_data/2026-03-30T17:26:53.461714")
+DATA_DIR   = pathlib.Path("/data/andreaferrario/ns_data/namkoong_sphere_drop")
 FIELDS_H5  = DATA_DIR / "fields.h5"
 CONTOURS_H5 = DATA_DIR / "contours.h5"
 HDF5_PATH  = DATA_DIR / "output" / "simulation.hdf5"
 
 # ── physical parameters ─────────────────────────────────────────────────
-D         = 0.005                    # sphere diameter  [m]
+D         = 0.005                    # circle diameter  [m]
 R         = D / 2
 rho_body  = 1005.96                  # kg/m^3  (matches simulation_config.yaml)
 rho_fluid = 996.0                    # kg/m^3
 nu        = 8e-7                     # kinematic viscosity [m^2/s]
 g_acc     = 9.81                     # gravitational acceleration [m/s^2]
-U_t       = -0.02501                 # terminal settling velocity [m/s]
+U_t       = -0.025                 # terminal settling velocity [m/s]
 mass_2d   = rho_body * np.pi * R**2
-dt_fluid  = 1e-4
-xlim      = (0, 125)
+dt_fluid  = 1e-3
+xlim      = (0, 135)
 
 # ── colours ──────────────────────────────────────────────────────────────
 C_UX  = "#2166AC"   # blue   – horizontal velocity
@@ -114,7 +114,7 @@ def plot_velocities():
     from farms_core.sensors.sensor_convention import sc
 
     data  = hdf5_to_dict(str(HDF5_PATH))
-    times = data["times"]
+    times = data["times"][:-1]
     sa    = data["animats"][0]["sensors"]["links"]["array"][:, 0, :]
 
     com_vel = sa[:, sc.link_com_velocity_lin_x : sc.link_com_velocity_lin_z + 1]
@@ -126,16 +126,21 @@ def plot_velocities():
 
     # Normalised velocities
     # MuJoCo x -> fluid x (horizontal), MuJoCo y -> vertical (settling)
-    ux_norm  =  -com_vel[:, 0] / U_t
+    ux_norm  =  com_vel[:, 0] / U_t
     uz_norm  = com_vel[:, 2] / U_t   # negate: positive = downward settling
-    ang_norm =  D * ang_vel[:, 1] / U_t
+    ang_norm =  -D * ang_vel[:, 1] / U_t
 
     # from IPython import embed; embed()
 
-    # ── reference data (digitised from Gazzola et al.) ──
+    # ── reference data (digitised from namkoong et al.) ──
     ref_up = np.genfromtxt(str(REF_DIR / "up.csv"), delimiter=",")   # settling vel
     ref_vp = np.genfromtxt(str(REF_DIR / "vp.csv"), delimiter=",")   # horizontal
     ref_wp = np.genfromtxt(str(REF_DIR / "wp.csv"), delimiter=",")   # angular
+
+    # Restrict reference data to t* ≤ 120
+    ref_up = ref_up[ref_up[:, 0] <= 120]
+    ref_vp = ref_vp[ref_vp[:, 0] <= 120]
+    ref_wp = ref_wp[ref_wp[:, 0] <= 120]
 
     # ── velocity figure ──
     fig, ax = plt.subplots(figsize=(7, 4.5))
@@ -143,28 +148,28 @@ def plot_velocities():
     # Reference (open markers)
     ax.scatter(ref_vp[:, 0], ref_vp[:, 1], s=16, marker=".",
                facecolors="none", edgecolors=C_UX, linewidths=0.8,
-               label=r"$u_x/U_t$ (Gazzola et al.)")
+               label=r"$u_x/U_t$ (namkoong et al.)")
     ax.scatter(ref_up[:, 0], ref_up[:, 1], s=16, marker=".",
                facecolors="none", edgecolors=C_UZ, linewidths=0.8,
-               label=r"$u_z/U_t$ (Gazzola et al.)", zorder=3)
+               label=r"$u_z/U_t$ (namkoong et al.)", zorder=3)
     ax.scatter(ref_wp[:, 0], ref_wp[:, 1], s=16, marker=".",
                facecolors="none", edgecolors=C_ANG, linewidths=0.8,
-               label=r"$D\omega/U_t$ (Gazzola et al.)", zorder=3)
+               label=r"$D\omega/U_t$ (namkoong et al.)", zorder=3)
 
     # Simulation (solid lines)
-    ax.plot(t_star, ux_norm,  color=C_UX,  label=r"$u_x/U_t$ (BDIM)")
-    ax.plot(t_star, uz_norm,  color=C_UZ,  label=r"$u_z/U_t$ (BDIM)")
-    ax.plot(t_star, ang_norm, color=C_ANG, label=r"$D\omega/U_t$ (BDIM)")
+    ax.plot(t_star, ux_norm,  color=C_UX,  label=r"OUR", linewidth=1)
+    ax.plot(t_star, uz_norm,  color=C_UZ,  label=r"OUR", linewidth=1)
+    ax.plot(t_star, ang_norm, color=C_ANG, label=r"OUR", linewidth=1)
 
     ax.set_xlabel(r"$t^{*} = t\,|U_t|/D$")
     ax.set_ylabel(r"Normalised velocity")
-    ax.set_title("Sphere sedimentation – Gazzola et al. (2011)")
-    # ax.set_ylim([-0.2, 1.3])
-    ax.legend(ncol=2, loc="upper right", framealpha=0.92, edgecolor="0.7")
+    ax.set_title("circle sedimentation")
+    ax.set_ylim([-0.5, 1.3])
+    ax.legend(ncol=2, loc="center", framealpha=0.92, edgecolor="0.7")
     ax.set_xlim(xlim)
     fig.tight_layout()
-    fig.savefig(str(FIG_DIR / f"gazzola_com_velocity{FMT}"))
-    print(f"  Saved {FIG_DIR / f'gazzola_com_velocity{FMT}'}")
+    fig.savefig(str(FIG_DIR / f"namkoong_com_velocity{FMT}"))
+    print(f"  Saved {FIG_DIR / f'namkoong_com_velocity{FMT}'}")
     plt.close(fig)
 
     # ── energy figure ──
@@ -176,11 +181,11 @@ def plot_velocities():
     ax2.plot(t_star, 1e6 * PE, color="#1B9E77", label="Potential energy")
     ax2.set_xlabel(r"$t^{*}$")
     ax2.set_ylabel(r"Energy  [$\mu$J]")
-    ax2.set_title("Energy evolution – Gazzola")
+    ax2.set_title("Energy evolution – namkoong")
     ax2.legend(framealpha=0.92, edgecolor="0.7")
     fig2.tight_layout()
-    fig2.savefig(str(FIG_DIR / f"gazzola_energy{FMT}"))
-    print(f"  Saved {FIG_DIR / f'gazzola_energy{FMT}'}")
+    fig2.savefig(str(FIG_DIR / f"namkoong_energy{FMT}"))
+    print(f"  Saved {FIG_DIR / f'namkoong_energy{FMT}'}")
     plt.close(fig2)
 
 
@@ -193,7 +198,6 @@ def plot_velocity_fields():
         return
 
     xg, yg = load_grids()
-    X, Y = np.meshgrid(xg, yg, indexing="ij")
     iters = list_iterations()
 
     if not iters:
@@ -217,28 +221,34 @@ def plot_velocity_fields():
         speed = np.sqrt(u**2 + v**2)
         t_phys = it * dt_fluid
 
-        vmax = max(np.percentile(speed, 99.5), 1e-9)
-        im = ax.pcolormesh(X * 1e3, Y * 1e3, speed,
-                           cmap="inferno", vmin=0, vmax=vmax,
-                           shading="auto", rasterized=True)
+        # Build coordinate arrays matching the actual (Ny, Nx) field shape
+        ny_f, nx_f = speed.shape
+        x_f = np.linspace(xg[0], xg[-1], nx_f)
+        y_f = np.linspace(yg[0], yg[-1], ny_f)
+        Xf, Yf = np.meshgrid(x_f, y_f)
 
-        # Sphere outline from contours.h5 (fall back to approximate circle)
+        vmax = max(np.percentile(speed, 99.5), 1e-9)
+        im = ax.pcolormesh(Xf * 1e3, Yf * 1e3, speed,
+                           cmap="inferno", vmin=0, vmax=vmax,
+                           shading="nearest", rasterized=True)
+
+        # circle outline from contours.h5 (fall back to approximate circle)
         cnt = load_contour(it)
         if cnt is not None:
             ax.plot(cnt[0] * 1e3, cnt[1] * 1e3,
-                    color="white", linewidth=1.2)
+                    color="white", linewidth=0.8)
         else:
             th = np.linspace(0, 2 * np.pi, 120)
             cx, cy = 0.0, 0.3 - abs(U_t) * t_phys
             ax.plot((cx + R * np.cos(th)) * 1e3,
                     (cy + R * np.sin(th)) * 1e3,
-                    color="white", linewidth=1.2)
+                    color="white", linewidth=0.8)
 
         ax.set_title(f"$t = {t_phys * 1e3:.1f}$ ms", fontsize=10)
         ax.set_xlabel("$x$ [mm]")
         ax.set_aspect("equal")
 
-        # Zoom around sphere using SDF or contour centroid
+        # Zoom around circle using SDF or contour centroid
         if cnt is not None:
             cx = np.mean(cnt[0])
             cy = np.mean(cnt[1])
@@ -250,10 +260,10 @@ def plot_velocity_fields():
     axes[0].set_ylabel("$y$ [mm]")
     fig.colorbar(im, ax=axes, shrink=0.7, label=r"$|\mathbf{u}|$ [m/s]",
                  pad=0.02)
-    fig.suptitle("Velocity magnitude – Gazzola sphere sedimentation",
+    fig.suptitle("Velocity magnitude – namkoong circle sedimentation",
                  fontsize=13, y=1.01)
-    fig.savefig(str(FIG_DIR / f"gazzola_velocity_field{FMT}"))
-    print(f"  Saved {FIG_DIR / f'gazzola_velocity_field{FMT}'}")
+    fig.savefig(str(FIG_DIR / f"namkoong_velocity_field{FMT}"))
+    print(f"  Saved {FIG_DIR / f'namkoong_velocity_field{FMT}'}")
     plt.close(fig)
 
 
@@ -285,19 +295,19 @@ def plot_vorticity():
     norm = TwoSlopeNorm(vmin=-vlim, vcenter=0, vmax=vlim)
     im = ax.pcolormesh(X * 1e3, Y * 1e3, omega,
                        cmap="RdBu_r", norm=norm,
-                       shading="auto", rasterized=True)
+                       shading="nearest", rasterized=True)
 
-    # Sphere outline from contours.h5
+    # circle outline from contours.h5
     cnt = load_contour(it)
     if cnt is not None:
-        ax.plot(cnt[0] * 1e3, cnt[1] * 1e3, "k-", linewidth=1.2)
+        ax.plot(cnt[0] * 1e3, cnt[1] * 1e3, "k-", linewidth=0.8)
     else:
         th = np.linspace(0, 2 * np.pi, 120)
         cx, cy = 0.0, 0.3 - abs(U_t) * t_phys
         ax.plot((cx + R * np.cos(th)) * 1e3,
-                (cy + R * np.sin(th)) * 1e3, "k-", linewidth=1.2)
+                (cy + R * np.sin(th)) * 1e3, "k-", linewidth=0.8)
 
-    # Zoom around sphere
+    # Zoom around circle
     if cnt is not None:
         cx = np.mean(cnt[0])
         cy = np.mean(cnt[1])
@@ -312,8 +322,8 @@ def plot_vorticity():
     ax.set_title(f"Vorticity  $\\omega_z$  at  $t = {t_phys * 1e3:.1f}$ ms")
     fig.colorbar(im, ax=ax, shrink=0.55, label=r"$\omega_z$ [1/s]")
     fig.tight_layout()
-    fig.savefig(str(FIG_DIR / f"gazzola_vorticity{FMT}"))
-    print(f"  Saved {FIG_DIR / f'gazzola_vorticity{FMT}'}")
+    fig.savefig(str(FIG_DIR / f"namkoong_vorticity{FMT}"))
+    print(f"  Saved {FIG_DIR / f'namkoong_vorticity{FMT}'}")
     plt.close(fig)
 
 
@@ -335,7 +345,7 @@ def plot_v_profile():
     v = load_field(it, "v")
     t_phys = it * dt_fluid
 
-    # Find sphere centre from contour or estimate
+    # Find circle centre from contour or estimate
     cnt = load_contour(it)
     if cnt is not None:
         cy = np.mean(cnt[1])
@@ -350,8 +360,8 @@ def plot_v_profile():
     ax.set_ylabel(r"$v_y / U_t$")
     ax.set_title(f"Vertical velocity profile at $t = {t_phys * 1e3:.1f}$ ms")
     fig.tight_layout()
-    fig.savefig(str(FIG_DIR / f"gazzola_v_profile{FMT}"))
-    print(f"  Saved {FIG_DIR / f'gazzola_v_profile{FMT}'}")
+    fig.savefig(str(FIG_DIR / f"namkoong_v_profile{FMT}"))
+    print(f"  Saved {FIG_DIR / f'namkoong_v_profile{FMT}'}")
     plt.close(fig)
 
 
@@ -407,7 +417,7 @@ def check_body_velocity():
         v_mean_inside = np.mean(v_field[mask])
 
         # Body settling velocity: MuJoCo z → fluid y
-        # In the Gazzola controller: lin_axes = [0, 2], so
+        # In the namkoong controller: lin_axes = [0, 2], so
         # fluid y-velocity = MuJoCo z-velocity = com_vel[:, 2]
         uz_body = float(com_vel[it, 2])
 
@@ -444,14 +454,14 @@ def check_body_velocity():
         ax2.set_ylim(bottom=1e-6)
 
         fig.tight_layout()
-        fig.savefig(str(FIG_DIR / f"gazzola_body_vel_check{FMT}"))
-        print(f"\n  Saved {FIG_DIR / f'gazzola_body_vel_check{FMT}'}")
+        fig.savefig(str(FIG_DIR / f"namkoong_body_vel_check{FMT}"))
+        print(f"\n  Saved {FIG_DIR / f'namkoong_body_vel_check{FMT}'}")
         plt.close(fig)
 
 
 # =====================================================================
 if __name__ == "__main__":
-    print("Plotting Gazzola sphere sedimentation results …")
+    print("Plotting namkoong circle sedimentation results …")
     plot_velocities()
     plot_velocity_fields()
     plot_vorticity()

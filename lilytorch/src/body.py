@@ -1845,7 +1845,7 @@ class BodyMesh(Body):
         sdf_val = skfmm.distance(binary_2d, dx=[dx, dy]) - self.suit
 
         # ---- contour computation (2-D only) ----------------------------
-        cnt = np.array(measure.find_contours(sdf_val, 0)[0]).T
+        cnt = np.array(measure.find_contours(sdf_val-self.h, 0)[0]).T
         cnt[0] = xnp[0] + cnt[0] * (xnp[1] - xnp[0])
         cnt[1] = ynp[0] + cnt[1] * (ynp[1] - ynp[0])
 

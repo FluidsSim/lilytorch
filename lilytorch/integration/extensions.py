@@ -78,8 +78,25 @@ class FluidExtension(TaskExtension):
             #         "pressure_force_x", "pressure_force_y", "pressure_force_ang_z"]
             # for force in self.forces:
             #     self.initialize_forces(force)
-            self.bdim_yaml["solver"]["nt"] = self.experiment_options.simulation.runtime.n_iterations
-            self.bdim_yaml["solver"]["dt"] = self.experiment_options.simulation.physics.timestep  # enforce farms timestep
+            runtime_nt = self.experiment_options.simulation.runtime.n_iterations
+            physics_dt = self.experiment_options.simulation.physics.timestep
+
+            user_nt = self.bdim_yaml["solver"].get("nt", None)
+            user_dt = self.bdim_yaml["solver"].get("dt", None)
+            if user_nt is not None and int(user_nt) != int(runtime_nt):
+                print(
+                    "[FluidExtension] overriding bdim_yaml.solver.nt "
+                    f"({user_nt}) with runtime.n_iterations ({runtime_nt})."
+                )
+            if user_dt is not None and float(user_dt) != float(physics_dt):
+                print(
+                    "[FluidExtension] overriding bdim_yaml.solver.dt "
+                    f"({user_dt}) with physics.timestep ({physics_dt}). "
+                    "Set physics.timestep to change the coupled fluid timestep."
+                )
+
+            self.bdim_yaml["solver"]["nt"] = runtime_nt
+            self.bdim_yaml["solver"]["dt"] = physics_dt  # enforce farms timestep
             self.bdim_yaml["body"]["experiment_options"] = self.experiment_options
 
             self.BDIMhandler = self.BDIMhandler_class(self.bdim_yaml, task.data.animats, physics)

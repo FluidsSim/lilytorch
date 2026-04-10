@@ -188,7 +188,7 @@ def _forces_shared_3d(u, v, w, p, sdf_val, nx, ny, nz, nu_rho, h):
     Returns
     -------
     xstress, ystress, zstress : viscous-stress × normal  (σ·n)_i
-    pforce_x, pforce_y, pforce_z : -p_outer * n_i
+    pforce_x, pforce_y, pforce_z : -p * n_i
     """
     # ---- Diagonal derivatives: compact stencil (exact at CC) --------
     dudx = torch.empty_like(u)
@@ -234,11 +234,11 @@ def _forces_shared_3d(u, v, w, p, sdf_val, nx, ny, nz, nu_rho, h):
     ystress = nu_rho * ((dvdx + dudy) * nx + 2 * dvdy * ny + (dvdz + dwdy) * nz)
     zstress = nu_rho * ((dwdx + dudz) * nx + (dwdy + dvdz) * ny + 2 * dwdz * nz)
 
-    # pressure force density (outside body only)
-    p_outer  = torch.where(sdf_val < 0, torch.zeros_like(p), p)
-    pforce_x = -p_outer * nx
-    pforce_y = -p_outer * ny
-    pforce_z = -p_outer * nz
+    # Pressure force density: use p directly (NO mu0 masking).
+    # See comment in _forces_shared_2d for the mathematical rationale.
+    pforce_x = -p * nx
+    pforce_y = -p * ny
+    pforce_z = -p * nz
 
     return xstress, ystress, zstress, pforce_x, pforce_y, pforce_z
 
@@ -272,12 +272,15 @@ def _forces_body_integrate_3d(
         (1.0 + torch.cos(torch.pi * d_visc / eps_body)) / (2.0 * eps_body),
         0.0,
     )
+    # # smoothed delta — pressure
+    # delta_pres = torch.where(
+    #     torch.abs(sdf_i) < eps_body,
+    #     (1.0 + torch.cos(torch.pi * sdf_i / eps_body)) / (2.0 * eps_body),
+    #     0.0,
+    # )
     # smoothed delta — pressure
-    delta_pres = torch.where(
-        torch.abs(sdf_i) < eps_body,
-        (1.0 + torch.cos(torch.pi * sdf_i / eps_body)) / (2.0 * eps_body),
-        0.0,
-    )
+    delta_pres = delta_visc
+
     # Towers (2008) 2nd-order correction: δ_S = δ_ε(φ) / |∇φ|
     if sdf_grad_mag is not None:
         inv_grad = 1.0 / sdf_grad_mag.clamp(min=1e-3)
@@ -440,7 +443,7 @@ def _forces_body_batch_3d(
 # Compilable 2-D force-computation kernels  (module-level)
 # ======================================================================
 
-def _forces_shared_2d(u, v, p, sdf_val, nx, ny, nu_rho, h, mu0=None):
+def _forces_shared_2d(u, v, p, sdf_val, nx, ny, nu_rho, h):
     """Compute stress tensors and pressure force density for 2-D.
 
     All quantities are evaluated on the cell-centred (CC) grid.
@@ -488,21 +491,18 @@ def _forces_shared_2d(u, v, p, sdf_val, nx, ny, nu_rho, h, mu0=None):
     xstress = nu_rho * (2 * dudx * nx + (dudy + dvdx) * ny)
     ystress = nu_rho * ((dvdx + dudy) * nx + 2 * dvdy * ny)
 
-    # pressure force density — use the BDIM smooth Heaviside (mu0) when
-    # available instead of a hard torch.where at sdf=0.  The hard masking
-    # creates a step-function discontinuity: equatorial cells (|nx|≈1) flip
-    # all-or-nothing as the body zigzags laterally, producing spurious Fx
-    # noise at the x-grid-crossing frequency (~63 steps for Gazzola).
-    # mu0 transitions smoothly over [-eps, +eps], so the contribution of
-    # each cell changes continuously as the body moves.  The surface-integral
-    # magnitude is preserved: ∫ mu0(φ) δ_ε(φ) dφ = mu0(0) = 0.5, same as
-    # ∫ H(φ) δ_ε(φ) dφ = 0.5 for the one-sided hard masking.
-    if mu0 is not None:
-        p_outer = p * mu0
-    else:
-        p_outer = torch.where(sdf_val < 0, torch.zeros_like(p), p)
-    pforce_x = -p_outer * nx
-    pforce_y = -p_outer * ny
+    # Pressure force density: use p directly (NO mu0 masking).
+    #
+    # The smoothed delta δ_ε(φ) is normalised so that ∫δ_ε dφ = 1 over
+    # the full support [-ε, +ε].  Masking p by mu0 (the smooth Heaviside,
+    # which equals 0.5 at the surface) halves the integral:
+    #     ∫ mu0(φ) δ_ε(φ) dφ = 0.5  (WRONG)
+    # vs  ∫        δ_ε(φ) dφ = 1.0  (CORRECT)
+    # The Poisson solve produces a continuous pressure field across the
+    # interface, so both sides contribute correctly to the surface
+    # integral.  This matches WaterLily.jl's pressure_force().
+    pforce_x = -p * nx
+    pforce_y = -p * ny
 
     return xstress, ystress, pforce_x, pforce_y
 
@@ -548,11 +548,19 @@ def _forces_body_batch_2d(
         0.0,
     )
     # smoothed delta — pressure
-    delta_pres = torch.where(
-        torch.abs(sdf_vals_cc) < eps_body,
-        (1.0 + torch.cos(torch.pi * sdf_vals_cc / eps_body)) / (2.0 * eps_body),
-        0.0,
-    )
+    # delta_pres = torch.where(
+    #     torch.abs(sdf_vals_cc) < eps_body,
+    #     (1.0 + torch.cos(torch.pi * sdf_vals_cc / eps_body)) / (2.0 * eps_body),
+    #     0.0,
+    # )
+    # smoothed delta — pressure
+    delta_pres = delta_visc
+
+    # delta_pres = torch.where(
+    #     torch.abs(d_visc) < eps_body,
+    #     (1.0 + torch.cos(torch.pi * d_visc / eps_body)) / (2.0 * eps_body),
+    #     0.0,
+    # )
     # Towers (2008) 2nd-order correction: δ_S = δ_ε(φ) / |∇φ|.
     # For a perfect SDF |∇φ|=1 so this is a no-op; for numerical SDFs
     # (mesh bodies, near corners) it restores the correct surface measure.
@@ -1158,49 +1166,61 @@ class FluidSolver:
             self.composite_body.sdf_val
         )
 
-        # ======= compute stress tensor at FC ======
-        self.force_y_interp.F = v
-        v_xstag = self.force_y_interp(self.grids.Xu_stag, self.grids.Yu_stag)
-        self.force_x_interp.F = u
-        u_ystag = self.force_x_interp(self.grids.Xv_stag, self.grids.Yv_stag)
+        # Build a co-located CC traction field before contour interpolation.
+        # The legacy method1 mixed x/y traction components sampled from
+        # different staggered grids, which produced noisy force/torque pairs
+        # at moving contour points and destabilized MuJoCo coupling.
+        nu_rho = self._compute_nu_rho_for_forces(u, v)
+        (xstress, ystress,
+         pforce_x, pforce_y) = self._forces_shared_2d_compiled(
+            u, v, p, self.composite_body.sdf_val,
+            normal_x, normal_y,
+            nu_rho, self.h,
+        )
 
-        ss_11 = 2*self.compute_dpdx(u)*self.normal_x_u
-        ss_12 = (self.compute_dpdy(u)+self.compute_dpdx(v_xstag))*self.normal_y_u
-        ss_21 = (self.compute_dpdy(u_ystag)+self.compute_dpdx(v))*self.normal_x_v
-        ss_22 = 2*self.compute_dpdy(v)*self.normal_y_v
+        if self._compile_forces:
+            xstress = xstress.clone()
+            ystress = ystress.clone()
+            pforce_x = pforce_x.clone()
+            pforce_y = pforce_y.clone()
 
-        mult = self._compute_nu_rho_for_forces(u, v)
-        self.xstress_tensor = (ss_11+ss_12)*mult
-        self.ystress_tensor = (ss_21+ss_22)*mult
-
-        self.pforce_x = -p*normal_x
-        self.pforce_y = -p*normal_y
+        self.xstress_tensor = xstress
+        self.ystress_tensor = ystress
+        self.pforce_x = pforce_x
+        self.pforce_y = pforce_y
 
 
         for i, body in enumerate(self.composite_body.bodies[:]):
 
                   mask       = body.mask
-                  curv_coord = body.curv_coord
+                  curv_coord = body.curv_coord[mask].to(torch.float64)
 
                   moment_arm = [
                       body.cnt_update[0]-body.com_pos[0],
                       body.cnt_update[1]-body.com_pos[1],
                   ]
 
-                  self.force_x_interp.F = self.xstress_tensor
-                  self.force_y_interp.F = self.ystress_tensor
+                  self.interp_utility.F = self.xstress_tensor
+                  f_x = self.interp_utility(body.cnt_update[0], body.cnt_update[1])
+                  self.interp_utility.F = self.ystress_tensor
+                  f_y = self.interp_utility(body.cnt_update[0], body.cnt_update[1])
 
-                  f_x = self.force_x_interp(body.cnt_update[0], body.cnt_update[1])
-                  f_y = self.force_y_interp(body.cnt_update[0], body.cnt_update[1])
-
-                  self.friction_force_lin_x[i] = f_x[mask].to(torch.float64).sum().to(self.dtype)*body.ds
-                  self.friction_force_lin_y[i] = f_y[mask].to(torch.float64).sum().to(self.dtype)*body.ds
-                  self.friction_force_ang_z[i] = ops.cross_product_2d(
+                  visc_torque = ops.cross_product_2d(
                           moment_arm[0][mask],
                           moment_arm[1][mask],
                           f_x[mask],
                           f_y[mask]
-                          ).to(torch.float64).sum().to(self.dtype)*body.ds
+                          ).to(torch.float64)
+
+                  self.friction_force_lin_x[i] = torch.trapz(
+                      f_x[mask].to(torch.float64), curv_coord
+                  ).to(self.dtype)
+                  self.friction_force_lin_y[i] = torch.trapz(
+                      f_y[mask].to(torch.float64), curv_coord
+                  ).to(self.dtype)
+                  self.friction_force_ang_z[i] = torch.trapz(
+                      visc_torque, curv_coord
+                  ).to(self.dtype)
 
                   moment_arm = [
                       body.cnt_update[0]-body.com_pos[0],
@@ -1212,14 +1232,22 @@ class FluidSolver:
                   self.interp_utility.F = self.pforce_y
                   f_y = self.interp_utility(body.cnt_update[0], body.cnt_update[1])
 
-                  self.pressure_force_x[i] = f_x[mask].to(torch.float64).sum().to(self.dtype)*body.ds
-                  self.pressure_force_y[i] = f_y[mask].to(torch.float64).sum().to(self.dtype)*body.ds
-                  self.pressure_force_ang_z[i] = ops.cross_product_2d(
+                  pres_torque = ops.cross_product_2d(
                           moment_arm[0][mask],
                           moment_arm[1][mask],
                           f_x[mask],
                           f_y[mask]
-                          ).to(torch.float64).sum().to(self.dtype)*body.ds
+                          ).to(torch.float64)
+
+                  self.pressure_force_x[i] = torch.trapz(
+                      f_x[mask].to(torch.float64), curv_coord
+                  ).to(self.dtype)
+                  self.pressure_force_y[i] = torch.trapz(
+                      f_y[mask].to(torch.float64), curv_coord
+                  ).to(self.dtype)
+                  self.pressure_force_ang_z[i] = torch.trapz(
+                      pres_torque, curv_coord
+                  ).to(self.dtype)
 
                   self.viscous_drag_record[i,0,iteration] = self.friction_force_lin_x[i]
                   self.viscous_drag_record[i,1,iteration] = self.friction_force_lin_y[i]
@@ -1249,7 +1277,6 @@ class FluidSolver:
             u, v, p, comp.sdf_val,
             normal_x, normal_y,
             nu_rho, self.h,
-            getattr(self, 'mu0_all', None),
         )
 
         if self._compile_forces:
@@ -1537,7 +1564,7 @@ class FluidSolver:
 
 
     def project(self, u, v, p, w_vel=None, w=1.0, *,
-                ch=None, cv=None, cw=None):
+                ch=None, cv=None, cw=None, ch_cc=None):
         """Pressure-Poisson projection.
 
         Parameters
@@ -1549,11 +1576,19 @@ class FluidSolver:
         w : float
             Heun weight (1.0 = predictor, 0.5 = corrector).
         ch, cv, cw : tensor or None
-            Pre-computed Poisson coefficients for each staggered grid.
+            Pre-computed Poisson coefficients for each staggered grid
+            (``dt / rho_eff`` on the respective face grids).
             When *None* (default), the standard BDIM coefficients
             ``(w*dt/rho) * mu0`` are used.  Pass custom coefficients
             for variable-density formulations (e.g. FARMS coupling where
             ``ch = dt / (rho_body + drho * mu0_u)``).
+        ch_cc : tensor or None
+            Cell-centred coefficient ``dt / rho_eff_cc`` for the FFT
+            Poisson RHS.  When provided the FFT path solves
+            ``∇²p = div / ch_cc`` (i.e. ``div * rho_eff_cc / dt``) and
+            then corrects using the staggered *ch/cv/cw*.  When *None*
+            (default) the FFT path falls back to a single scalar
+            coefficient (constant-density behaviour).
         """
 
         # for general deforming bodies
@@ -1565,21 +1600,34 @@ class FluidSolver:
         coeff = w*self.dt/self.rho
 
         if self.poisson_method == "fft":
-            # ---- FFT solver (constant-coefficient Poisson) ----
-            # FFT path uses scalar coeff (no variable-density support).
-            # If ch/cv were provided, use ch as the scalar coefficient
-            # (assuming it is uniform, which is the FFT prerequisite).
-            fft_coeff = coeff if ch is None else ch
-            p = self.poisson_solverFFT.solve(self.div / fft_coeff)
-            if self.ndim == 2:
-                (p_x, p_y) = self.gradient(p)
-                u = u - fft_coeff * p_x
-                v = v - fft_coeff * p_y
+            # ---- FFT solver ----
+            if ch_cc is not None:
+                # Variable-density path: RHS uses cell-centred density,
+                # correction uses the staggered ch/cv/cw coefficients.
+                p = self.poisson_solverFFT.solve(self.div / ch_cc)
+                if self.ndim == 2:
+                    (p_x, p_y) = self.gradient(p)
+                    u = u - ch * p_x
+                    v = v - cv * p_y
+                else:
+                    (p_x, p_y, p_z) = self.gradient(p)
+                    u     = u - ch * p_x
+                    v     = v - cv * p_y
+                    w_vel = w_vel - cw * p_z
             else:
-                (p_x, p_y, p_z) = self.gradient(p)
-                u     = u - fft_coeff * p_x
-                v     = v - fft_coeff * p_y
-                w_vel = w_vel - fft_coeff * p_z
+                # Constant-density fallback: single scalar coefficient.
+                # If ch was provided, use it as the scalar (backward compat).
+                fft_coeff = coeff if ch is None else ch
+                p = self.poisson_solverFFT.solve(self.div / fft_coeff)
+                if self.ndim == 2:
+                    (p_x, p_y) = self.gradient(p)
+                    u = u - fft_coeff * p_x
+                    v = v - fft_coeff * p_y
+                else:
+                    (p_x, p_y, p_z) = self.gradient(p)
+                    u     = u - fft_coeff * p_x
+                    v     = v - fft_coeff * p_y
+                    w_vel = w_vel - fft_coeff * p_z
         else:
             # ---- Multigrid / MGCG solver (variable-coefficient Poisson) ----
             if ch is None:
@@ -1881,10 +1929,21 @@ class FluidSolver:
         """
         Heun (RK2 predictor-corrector) time integration with BDIM2.
 
-        Matches the WaterLily.jl ``mom_step!`` algorithm:
-          1. Predictor: adv-diff → BDIM → project(w=1)
-          2. Corrector: adv-diff at predicted vel → rebase from u^n →
-             BDIM → average with predictor → project(w=0.5)
+        Mirrors WaterLily.jl ``mom_step!`` exactly:
+
+          1. **Predictor** (w = 1):
+             adv-diff on u^n → BDIM → project → BCs → u_pred (div-free)
+
+          2. **Corrector** (w = 0.5):
+             adv-diff on u_pred → rebase from u^n → BDIM →
+             average with **projected** predictor → project(w=0.5)
+
+        The corrector average is ``0.5*(u_pred + BDIM(u^n + dt·RHS(u_pred)))``.
+        Because ``u_pred`` is divergence-free, ``div(u_avg)`` equals half
+        the corrector's BDIM divergence.  ``w=0.5`` compensates this
+        halving in the Poisson coefficient so that the stored pressure
+        equals the physical dynamic pressure (needed for correct force
+        computation).  The velocity correction is ``w``-independent.
         """
 
         if self.ndim == 2:
@@ -1909,19 +1968,20 @@ class FluidSolver:
                 self.normal_x_v, self.normal_y_v, _h, 2,
             ).clone()
 
-            # Keep references to BDIM'd velocities for Heun averaging.
-            uprime_bdim = uprime
-            vprime_bdim = vprime
-
             self.adv_diff_solver.set_BCs(uprime, vprime)
             (u1, v1, p1) = self.project(uprime, vprime, p)
+            # Re-apply BCs after projection (matches WaterLily's
+            # BC!(a.u,...) after every project! call).
+            self.adv_diff_solver.set_BCs(u1, v1)
 
             # ====== CORRECTOR ======
             # Evaluate RHS at the projected predicted velocity
             nu_t = self._compute_nu_t(u1, v1)
             (uprime2, vprime2) = self.adv_diff_solver.solve(u1, v1, nu_t=nu_t)
             # adv_diff.solve returns u1 + dt*RHS(u1).
-            # Heun needs u^n + dt*RHS(u1), so rebase from u^n:
+            # Rebase from u^n: u^n + dt*RHS(u_pred), matching
+            # WaterLily's BDIM!(a) which builds f = u⁰ + dt*f - V
+            # with u⁰ = u^n (saved once at the top of mom_step!).
             uprime2 = u + (uprime2 - u1)
             vprime2 = v + (vprime2 - v1)
 
@@ -1937,11 +1997,17 @@ class FluidSolver:
                 self.normal_x_v, self.normal_y_v, _h, 2,
             ).clone()
 
-            # Average the BDIM'd pre-projection velocities (WaterLily style)
-            u_avg = 0.5 * (uprime_bdim + uprime2)
-            v_avg = 0.5 * (vprime_bdim + vprime2)
+            # Average the PROJECTED predictor with the corrector's BDIM
+            # output — matches WaterLily's  scale_u!(a, 0.5)  which
+            # halves  u_pred + BDIM(u^n + dt*RHS(u_pred)).
+            u_avg = 0.5 * (u1 + uprime2)
+            v_avg = 0.5 * (v1 + vprime2)
 
             self.adv_diff_solver.set_BCs(u_avg, v_avg)
+            # w=0.5: the corrector average halves the divergence (u_pred
+            # is div-free), so w=0.5 doubles the Poisson coefficient to
+            # recover the physical pressure.  Velocity correction is
+            # w-independent; only the stored pressure changes.
             (u_out, v_out, p_out) = self.project(u_avg, v_avg, p, w=0.5)
 
             # Sponge damping (2-D)
@@ -1982,13 +2048,10 @@ class FluidSolver:
                 self.normal_x_w, self.normal_y_w, self.normal_z_w, _h, 3,
             ).clone()
 
-            # Keep references to BDIM'd velocities for Heun averaging.
-            uprime_bdim = uprime
-            vprime_bdim = vprime
-            wprime_bdim = wprime
-
             self.adv_diff_solver.set_BCs(uprime, vprime, wprime)
             (u1, v1, w1, p1) = self.project(uprime, vprime, p, w_vel=wprime)
+            # Re-apply BCs after projection (matches WaterLily).
+            self.adv_diff_solver.set_BCs(u1, v1, w1)
 
             # ====== CORRECTOR ======
             nu_t = self._compute_nu_t(u1, v1, w1)
@@ -2023,12 +2086,14 @@ class FluidSolver:
                 if hasattr(self, _attr):
                     setattr(self, _attr, None)
 
-            # Average the BDIM'd pre-projection velocities
-            u_avg = 0.5 * (uprime_bdim + uprime2)
-            v_avg = 0.5 * (vprime_bdim + vprime2)
-            w_avg = 0.5 * (wprime_bdim + wprime2)
+            # Average the PROJECTED predictor (div-free) with the
+            # corrector's BDIM output — mirrors WaterLily's scale_u!(a,0.5).
+            u_avg = 0.5 * (u1 + uprime2)
+            v_avg = 0.5 * (v1 + vprime2)
+            w_avg = 0.5 * (w1 + wprime2)
 
             self.adv_diff_solver.set_BCs(u_avg, v_avg, w_avg)
+            # w=0.5: see 2-D comment.
             (u_out, v_out, w_out, p_out) = self.project(u_avg, v_avg, p, w_vel=w_avg, w=0.5)
 
             # Free mu0 after project
@@ -2327,8 +2392,8 @@ class FluidSolver:
             s.vorticity(u, v, w).cpu() if s.ndim == 2
             else s.vorticity_components(u, v, w)["omega_z"].cpu()
         ), None, None, True),
-        ("v",          lambda s, u, v, p, w: v.cpu(), "auto", "auto", True),
-        # ("pressure",   lambda s, u, v, p, w: p.cpu(), None, None, True),
+        # ("v",          lambda s, u, v, p, w: v.cpu(), "auto", "auto", True),
+        ("pressure",   lambda s, u, v, p, w: p.cpu(), "auto", "auto", True),
         # ("divergence", lambda s, u, v, p, w: s.divergence(u, v, w).cpu(),None, None, False),
     ]
 
@@ -2354,10 +2419,10 @@ class FluidSolver:
     DEFAULT_3D_ISO_SPECS = [
         # ("omega_x",    lambda s, u, v, p, w: FluidSolver._cached_vort(s, u, v, w)["omega_x"].cpu(), None, True),
         # ("omega_y",    lambda s, u, v, p, w: FluidSolver._cached_vort(s, u, v, w)["omega_y"].cpu(), None, True),
-        ("omega_z",    lambda s, u, v, p, w: FluidSolver._cached_vort(s, u, v, w)["omega_z"].cpu(), None, True),
+        # ("omega_z",    lambda s, u, v, p, w: FluidSolver._cached_vort(s, u, v, w)["omega_z"].cpu(), None, True),
         ("omega_mag",  lambda s, u, v, p, w: FluidSolver._cached_vort(s, u, v, w)["omega_mag"].cpu(), None, True),
         ("vel_mag",    lambda s, u, v, p, w: FluidSolver._vel_mag(s, u, v, w).cpu(),                 None,   True),
-        ("pressure",   lambda s, u, v, p, w: p.cpu(),                                                None,   True),
+        # ("pressure",   lambda s, u, v, p, w: p.cpu(),                                                None,   True),
     ]
 
     # Maximum number of pending I/O futures before _submit_io blocks.

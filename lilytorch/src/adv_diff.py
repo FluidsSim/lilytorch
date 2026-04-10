@@ -498,15 +498,23 @@ class AdvDiffSolver:
                 neumann_ops.append((i, dst_hi, src_hi))
 
             # --- pass 2: Dirichlet overwrite where specified ---
+            # Each Dirichlet face zeroes both boundary layers:
+            #   lo: interior cell (1) AND ghost cell (0)
+            #   hi: ghost cell (-1) AND last interior cell (-2)
+            # This is required for non-staggered components at hi walls:
+            # e.g. v at east wall — v[-1,:] is outside the domain (ghost),
+            # so v[-2,:] (last interior) must also be constrained.
+            # For staggered components the extra cell is harmless.
             for face in range(2 * ndim):
                 if bc_t[face] == "D":
                     d    = face // 2
                     side = face % 2          # 0 = lo, 1 = hi
-                    idx  = tuple(
-                        (1 if side == 0 else -1) if k == d else slice(None)
-                        for k in range(ndim)
-                    )
-                    dirichlet_ops.append((i, idx, bc_v[face]))
+                    for offset in ((1, 0) if side == 0 else (-1, -2)):
+                        idx = tuple(
+                            offset if k == d else slice(None)
+                            for k in range(ndim)
+                        )
+                        dirichlet_ops.append((i, idx, bc_v[face]))
 
         return neumann_ops, dirichlet_ops
 

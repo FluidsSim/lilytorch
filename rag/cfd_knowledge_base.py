@@ -141,9 +141,14 @@ Interior: [1:-1, 1:-1, ...].
 
 **Corrector (w=1/2):**
 1. Advection-diffusion on ũ → u**
-2. Rebase: u** ← ½(u** + u^n)
-3. BDIM meta-equation
-4. Pressure projection → u^{n+1}
+2. Rebase from u^n: u** ← u^n + (u** − ũ) = u^n + dt·RHS(ũ)
+3. BDIM meta-equation → u**_bdim
+4. Average with projected predictor: u_avg ← ½(ũ + u**_bdim)
+5. Pressure projection with w=½ → u^{n+1}
+
+Because ũ is divergence-free, div(u_avg) = ½ div(u**_bdim).
+w = ½ doubles the Poisson coefficient so the pressure is at the
+correct physical scale (the 0.5 cancels).
 
 Heun achieves 2nd-order temporal accuracy. Forward Euler is also supported.
 
