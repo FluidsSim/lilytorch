@@ -290,6 +290,10 @@ def circle(x,y,xt=0,yt=60,r=25):
     return torch.sqrt((x-xt)**2+(y-yt)**2)-r
 
 
+def sphere(x, y, z, xt=0, yt=0, zt=0, r=25):
+    return torch.sqrt((x - xt)**2 + (y - yt)**2 + (z - zt)**2) - r
+
+
 def sdUnevenCapsule(Y, X, r1, r2, h, side="L"):
     if side=="L":
         X = -X
@@ -314,6 +318,11 @@ def segment(X,Y,A,B,r1,r2):
     return torch.sqrt(
         (pa_x-h*ba[0])**2+(pa_y-h*ba[1])**2
     )-(r1+h*(r2-r1))
+
+
+def capsule_3d(x, y, z, r1, r2, h, side="L"):
+    radial = torch.sqrt(y**2 + z**2)
+    return sdUnevenCapsule(radial, x, r1, r2, h, side=side)
 
 def box(x,y,xb=20,yb=20):
     qx=torch.abs(x)-xb
@@ -2336,14 +2345,33 @@ class MultiAnimatBodies(Body):
                 elif "radius" in geometry and "length" in geometry:
                     radius = torch.tensor(geometry["radius"], dtype=x.dtype, device=x.device)
                     length = torch.tensor(geometry["length"], dtype=x.dtype, device=x.device)
+                    initial_pose = np.array(link.pose).astype(x.cpu().numpy().dtype)
                     if "L" in link["name"]:
-                        sdf_fun = lambda x, y: sdUnevenCapsule(x, y, radius, radius, length, side="L")
+                        side = "L"
                     elif "R" in link["name"]:
-                        sdf_fun = lambda x, y: sdUnevenCapsule(x, y, radius, radius, length, side="R")
+                        side = "R"
                     else:
                         raise ValueError("Capsule link name must contain 'L' or 'R' to define the side.")
-                    initial_pose = np.array(link.pose).astype(x.cpu().numpy().dtype)
-                    update_maps = (lambda t: 0, [lambda t: -initial_pose[0], lambda t: -initial_pose[1]])
+
+                    if self.ndim == 3:
+                        sdf_fun = lambda x, y, z, side=side: capsule_3d(x, y, z, radius, radius, length, side=side)
+                        update_maps = (
+                            lambda t: (0.0, 0.0, 0.0),
+                            [
+                                lambda t, initial_pose=initial_pose: -initial_pose[0],
+                                lambda t, initial_pose=initial_pose: -initial_pose[1],
+                                lambda t, initial_pose=initial_pose: -initial_pose[2],
+                            ],
+                        )
+                    else:
+                        sdf_fun = lambda x, y, side=side: sdUnevenCapsule(x, y, radius, radius, length, side=side)
+                        update_maps = (
+                            lambda t: 0,
+                            [
+                                lambda t, initial_pose=initial_pose: -initial_pose[0],
+                                lambda t, initial_pose=initial_pose: -initial_pose[1],
+                            ],
+                        )
                     self.bodies.append(
                         BodyAnalytical(device, x, y, sdf_fun, update_maps, z=self.z, eps=eps, plotting=False, pre_update=False, grids=grids)
                     )
@@ -2352,9 +2380,26 @@ class MultiAnimatBodies(Body):
 
                 elif "radius" in geometry and "length" not in geometry:
                     radius = torch.tensor(geometry["radius"], dtype=x.dtype, device=x.device)
-                    sdf_fun = lambda x, y: circle(x, y, xt=0, yt=0, r=radius)
                     initial_pose = np.array(link.pose).astype(x.cpu().numpy().dtype)
-                    update_maps = (lambda t: 0, [lambda t: -initial_pose[0], lambda t: -initial_pose[1]])
+                    if self.ndim == 3:
+                        sdf_fun = lambda x, y, z: sphere(x, y, z, xt=0, yt=0, zt=0, r=radius)
+                        update_maps = (
+                            lambda t: (0.0, 0.0, 0.0),
+                            [
+                                lambda t, initial_pose=initial_pose: -initial_pose[0],
+                                lambda t, initial_pose=initial_pose: -initial_pose[1],
+                                lambda t, initial_pose=initial_pose: -initial_pose[2],
+                            ],
+                        )
+                    else:
+                        sdf_fun = lambda x, y: circle(x, y, xt=0, yt=0, r=radius)
+                        update_maps = (
+                            lambda t: 0,
+                            [
+                                lambda t, initial_pose=initial_pose: -initial_pose[0],
+                                lambda t, initial_pose=initial_pose: -initial_pose[1],
+                            ],
+                        )
                     self.bodies.append(
                         BodyAnalytical(device, x, y, sdf_fun, update_maps, z=self.z, eps=eps, plotting=False, pre_update=False, grids=grids)
                     )
