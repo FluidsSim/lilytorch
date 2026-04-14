@@ -14,9 +14,6 @@ mu0_v, mu1_v
 mu0_w, mu1_w
 diff_u, diff_v, diff_w
 
-
-
-
 python lilytorch/src/video_postprocess.py /data/andreaferrario/ns_data/cylinder_3d/Re_27_laminar --fields omega_z_3d vel_mag_3d --slow-factor 4
 
 ALREADY RUN:

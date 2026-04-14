@@ -122,7 +122,7 @@ class BDIMhandler:
 
         # ---- densities ----
         self.rho_fluid = self.pars["solver"]["rho"]
-        self.rho_body  = self.pars["solver"].get("rho_body", 800.0)
+        self.rho_body  = self.pars["solver"].get("rho_body", 1000.0)
 
         # ---- toggles ----
         self.zero_pressure_inside = self.pars["solver"].get(

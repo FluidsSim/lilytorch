@@ -773,17 +773,15 @@ def track_video(video_path: str, meters_per_pixel: float,
     --------
     1. Detect swim direction once (compare centroid at 40 % and 60 % of video).
     2. Detect robot each frame using chain-walking midline.
-    3. Reject outlier jumps > MAX_JUMP_PX and interpolate.
-    4. Savitzky-Golay smooth positions (0.5 s window).
-    5. Differentiate smoothed positions for speed.
-    6. Compute two speed columns:
-       - speed_2d_mps : full √(dx²+dy²)/dt  (includes lateral undulation)
-       - speed_fwd_mps: speed projected onto the mean swimming direction
-                        (removes anguilliform y-undulation noise — use this one)
+    3. Fit a quadratic polynomial to the tracked trajectory.
+    4. Low-pass filter x/y positions at 3 Hz.
+    5. Differentiate filtered positions to get planar velocity.
+    6. Project velocity onto the quadratic tangent/normal directions to get
+       forward and lateral speed components.
 
     Returns a DataFrame with columns:
         frame, time_s, x_px, y_px, x_m, y_m, x_sm, y_sm,
-        speed_2d_mps, speed_fwd_mps, area_px
+        speed_2d_mps, speed_fwd_mps, speed_lat_mps, area_px
     """
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS)
@@ -853,7 +851,7 @@ def track_video(video_path: str, meters_per_pixel: float,
     if len(ts) < 3:
         sys.exit(f"[ERROR] Too few frames tracked ({len(ts)}). "
                  "Check that the video path is correct and the robot is visible.")
-    valid = ~np.isnan(xm)
+    valid = np.isfinite(xm) & np.isfinite(ym)
     if valid.sum() < 3:
         sys.exit("[ERROR] Too few valid detections for polynomial fit.")
 
@@ -876,19 +874,18 @@ def track_video(video_path: str, meters_per_pixel: float,
 
     speed_2d = np.sqrt(vx**2 + vy**2)
 
-    # ── 6. forward speed: project velocity onto instantaneous quadratic dir ─
+    # ── 6. project velocity onto the fitted tangent/normal directions ───────
     # Direction from quadratic tangent: d/dt [fit] = 2a*t + b
     tx = 2 * px_coeffs[0] * ts + px_coeffs[1]
     ty = 2 * py_coeffs[0] * ts + py_coeffs[1]
     tnorm = np.hypot(tx, ty)
     tnorm = np.where(tnorm > 0, tnorm, 1.0)
     tx_n, ty_n = tx / tnorm, ty / tnorm
+    nx_n, ny_n = -ty_n, tx_n
 
-    # signed projection: positive = swimming forward along the fitted path
-    speed_fwd_raw = vx * tx_n + vy * ty_n
-    # low-pass speed signal at 3 Hz to remove residual differentiation noise
-    speed_fwd = _lowpass(speed_fwd_raw, fps, cutoff_hz=3.0)
-    speed_2d  = _lowpass(speed_2d,      fps, cutoff_hz=3.0)
+    # Signed projections in the fitted trajectory frame.
+    speed_fwd = vx * tx_n + vy * ty_n
+    speed_lat = vx * nx_n + vy * ny_n
 
     df = pd.DataFrame({
         "frame":         frames,
@@ -903,6 +900,7 @@ def track_video(video_path: str, meters_per_pixel: float,
         "y_sm":          ym_sm,
         "speed_2d_mps":  speed_2d,
         "speed_fwd_mps": speed_fwd,
+        "speed_lat_mps": speed_lat,
         "area_px":       ar,
     })
 
@@ -980,7 +978,11 @@ def process_all(summary_csv: str, video_dir: str, output_dir: str,
                           f"A={row['positionAmplitude_deg']}°  "
                           f"f={row['Frequency_Hz']} Hz")
         axes[1].plot(df["time_s"], df["speed_fwd_mps"].abs(), color="tab:orange",
-                     label="fwd speed")
+                     label="|fwd speed|")
+        if "speed_lat_mps" in df.columns:
+            axes[1].plot(df["time_s"], df["speed_lat_mps"], color="tab:green",
+                         label="lateral speed")
+            axes[1].axhline(0.0, color="0.3", lw=0.8, alpha=0.5)
         axes[1].axhline(mean_spd, color="red", ls="--",
                         label=f"mean={mean_spd:.3f} m/s")
         axes[1].set_ylabel("Speed (m/s)")
@@ -1140,7 +1142,7 @@ DEFAULT_OUTPUT = os.path.join(
 
 
 def plot_track(df: pd.DataFrame, title: str = "") -> None:
-    """Plot position and forward speed from a tracking DataFrame."""
+    """Plot position and trajectory-aligned speed components from a track CSV."""
     spd = steady_state_speed(df)
     fig, axes = plt.subplots(2, 1, figsize=(10, 5), sharex=True)
     axes[0].plot(df["time_s"], df["x_sm"], label="x")
@@ -1150,7 +1152,11 @@ def plot_track(df: pd.DataFrame, title: str = "") -> None:
     if title:
         axes[0].set_title(title)
     axes[1].plot(df["time_s"], df["speed_fwd_mps"].abs(),
-                 color="tab:orange", label="fwd speed")
+                 color="tab:orange", label="|fwd speed|")
+    if "speed_lat_mps" in df.columns:
+        axes[1].plot(df["time_s"], df["speed_lat_mps"],
+                     color="tab:green", label="lateral speed")
+        axes[1].axhline(0.0, color="0.3", lw=0.8, alpha=0.5)
     axes[1].axhline(spd, color="red", ls="--", label=f"mean = {spd:.3f} m/s")
     axes[1].set_ylabel("Speed (m/s)")
     axes[1].set_xlabel("Time (s)")

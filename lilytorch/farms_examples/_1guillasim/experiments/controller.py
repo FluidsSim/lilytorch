@@ -25,7 +25,7 @@ class PositionController(KinematicsController):
         kinematics            = self.load_positions(
             config["file_path"],
             goal=True,
-            plot=True,
+            plot=False,
         )
 
 

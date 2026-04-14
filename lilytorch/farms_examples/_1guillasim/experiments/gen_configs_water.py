@@ -1,7 +1,6 @@
 
 import os
 from farms_core.model.options import SpawnMode
-from lilytorch.integration.flow_viewer import FlowViewer
 from lilytorch.util.paths import lilytorch_repo_root
 from lilytorch.farms_examples.base_sim_config import BaseSimConfig
 from lilytorch.integration.camera import top_down_camera_config
@@ -17,6 +16,7 @@ class SimConfig(BaseSimConfig):
         )
 
         # ── Hardware ──────────────────────────────────────────────────
+        self.compute_sdf    = True
         self.use_gpu        = True
         self.use_bdim       = True
         self.headless       = False
@@ -30,32 +30,55 @@ class SimConfig(BaseSimConfig):
                 "control_type"   : "position",
                 "gains"          : [100.0, 1., 0],
                 "spawn_mode"     : SpawnMode.FREE,
-                "pose"           : [4.75, 0.1, 0.0, 0, 0, 0.05],
+                "pose"           : [-0.07, 0, 0.0, 0, 0, 3.1],
                 "controller_path": "lilytorch.farms_examples._1guillasim.dye_experiments.controller.PositionController",
                 "control_pars"   : {
                     "file_path": os.path.join(
-                        self.data_folder, "/data/andreaferrario/1guilla_experiments/swim/log/ms001mpt001log.csv"
+                        self.data_folder, "dye_experiments/robot_data/robot_data_log_2025-09-01_16_13_04.csv"
                     ),
                 },
             },
         ]
 
         # ── 3-D grid ─────────────────────────────────────────────────
-        self.Nx   = 900
-        self.Ny   = 300
-        self.Nz   = 52
-        self.xmin = 0
-        self.xmax = 6
-        self.ymin = -1
-        self.ymax = 1
-        self.zmin = -(2/300*52/2)
-        self.zmax = (2/300*52/2)
+        self.Nx   = 512
+        self.Ny   = 256
+        self.Nz   = 32
+        self.xmin = -0.9
+        self.xmax = 1.5
+        self.ymin = -0.6
+        self.ymax = 0.6
+        self.zmin = -0.075
+        self.zmax = 0.075
+
+        # # ── 3-D grid ─────────────────────────────────────────────────
+        # self.Nx   = 800
+        # self.Ny   = 400
+        # self.Nz   = 50
+        # self.xmin = -0.9
+        # self.xmax = 1.5
+        # self.ymin = -0.6
+        # self.ymax = 0.6
+        # self.zmin = -0.075
+        # self.zmax = 0.075
+
+        # # ── 3-D grid ─────────────────────────────────────────────────
+        # self.Nx   = 400
+        # self.Ny   = 200
+        # self.Nz   = 25
+        # self.xmin = -0.9
+        # self.xmax = 1.5
+        # self.ymin = -0.6
+        # self.ymax = 0.6
+        # self.zmin = -0.075
+        # self.zmax = 0.075
+
 
         # ── Physics ───────────────────────────────────────────────────
         self.rho_body          = 1000.0
         self.timestep          = 0.001
-        self.convection_method = "abdquickest"
-        self.n_iterations      = 20001
+        self.convection_method = "quick"
+        self.n_iterations      = 15001
         self.save_every        = 200
         self.vmin              = -10.0
         self.vmax              = 10.0
@@ -73,10 +96,11 @@ class SimConfig(BaseSimConfig):
         self.poisson_max_mgcg_cycles = 10
         self.poisson_precond_vcycles = 1
         self.poisson_warm_start      = False
-        self.poisson_method          = "fft"
+        self.poisson_method          = "multigrid"
         self.poisson_smoother        = "jacobi"
         self.poisson_nsmoothing      = 5
         self.poisson_bc_type         = "neumann"
+        self.zero_pressure_inside    = True
 
         self.poisson_compile         = False
         self.compile_adv_diff        = False
@@ -110,12 +134,12 @@ class SimConfig(BaseSimConfig):
     def extra_simulation_extensions(self, output_folder):
         extensions = []
 
-        # # FlowViewer (works headless via CameraRecording)
+        # FlowViewer (works headless via CameraRecording)
         # extensions.append({
         #     "loader": "lilytorch.integration.flow_viewer.FlowViewer",
         #     "config": {
         #         "field"        : "omega_z",
-        #         "max_spheres"  : 800000,
+        #         "max_spheres"  : 4000,
         #         "iso_fraction" : 0.15,
         #         "smooth_sigma" : 2.5,
         #         "crop_boundary": 3,
@@ -124,35 +148,34 @@ class SimConfig(BaseSimConfig):
         #     },
         # })
 
-        # extensions.append({
-        #     "loader": "lilytorch.integration.particle_viewer.ParticleViewer",
-        #     "config": {
-        #         "seed_mode"       : "boundary",
-        #         "max_particles"   : 800000,
-        #         "seed_n_particles": 3,
-        #         "seed_interval"   : 1,
-        #         "turb_diffusivity": 0.00001,
-        #         "sphere_size"     : 0.003,
-        #         "particle_color"  : [255/256, 0.0, 0.0, 0.6],
-        #         "trail_length"    : 0,
-        #         "update_every"    : None,
-        #         "n_z_layers"      : 1,
-        #         "floor_color"     : "#5B5B5B63",
-        #         "body_color"      : "#B5A425",
-        #         # "light_color"      : [0.05, 0.12, 0.85, 1.0], # blue lamp
-        #         # "emissive_particles": True,                   # glow independent of light
-        #         "save_particles"   : True,
-        #         "save_dir"         : os.path.join(output_folder, "particles"),
-        #         "save_every"       : self.save_every,
-        #     }
-        # })
+        extensions.append({
+            "loader": "lilytorch.integration.particle_viewer.ParticleViewer",
+            "config": {
+                "max_particles"   : 800000,
+                "seed_n_particles": 3,
+                "seed_interval"   : 1,
+                "turb_diffusivity": 0.0000,
+                "sphere_size"     : 0.003,
+                "particle_color"  : [255/256, 0.0, 166/256, 0.6],
+                "trail_length"    : 0,
+                "update_every"    : None,
+                "n_z_layers"      : 1,
+                "floor_color"     : "#5B5B5B63",
+                "body_color"      : "#B5A425",
+                # "light_color"      : [0.05, 0.12, 0.85, 1.0], # blue lamp
+                # "emissive_particles": True,                   # glow independent of light
+                "save_particles"   : True,
+                "save_dir"         : os.path.join(output_folder, "particles"),
+                "save_every"       : self.save_every,
+            }
+        })
 
         # Top-down camera auto-fitted to the pool
         cam = top_down_camera_config(
             self.xmin, self.xmax,
             self.ymin, self.ymax,
             self.zmin, self.zmax,
-            overshoot=1
+            overshoot=2
         )
         extensions.append({
             "loader": "farms_mujoco.sensors.camera.CameraRecording",

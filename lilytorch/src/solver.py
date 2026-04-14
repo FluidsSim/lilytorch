@@ -175,7 +175,6 @@ def _forces_shared_3d(u, v, w, p, sdf_val, nx, ny, nz, nu_rho, h):
     All arguments are plain tensors or scalars — no ``self`` access — so this
     function is safe for ``torch.compile(mode='reduce-overhead')``.
 
-    Derivative stencils match WaterLily.jl ``∂(i,j,I,u)``:
 
     * **Diagonal** (∂u_i/∂x_i): natural compact stencil exploiting the
       MAC stagger — ``(u[I+δ(i),i] - u[I,i]) / h``, exact at CC.
@@ -204,7 +203,6 @@ def _forces_shared_3d(u, v, w, p, sdf_val, nx, ny, nz, nu_rho, h):
     dwdz[:, :, -1]  = dwdz[:, :, -2]
 
     # ---- Cross derivatives: interp to CC along stagger dim, ----------
-    #      then central diff along the other dim (= WaterLily 4-pt avg)
     # u_cc: u interpolated to CC along dim 0
     u_cc = torch.empty_like(u)
     u_cc[:-1, :, :] = 0.5 * (u[:-1, :, :] + u[1:, :, :])
@@ -272,14 +270,12 @@ def _forces_body_integrate_3d(
         (1.0 + torch.cos(torch.pi * d_visc / eps_body)) / (2.0 * eps_body),
         0.0,
     )
-    # # smoothed delta — pressure
-    # delta_pres = torch.where(
-    #     torch.abs(sdf_i) < eps_body,
-    #     (1.0 + torch.cos(torch.pi * sdf_i / eps_body)) / (2.0 * eps_body),
-    #     0.0,
-    # )
     # smoothed delta — pressure
-    delta_pres = delta_visc
+    delta_pres = torch.where(
+        torch.abs(sdf_i) < eps_body,
+        (1.0 + torch.cos(torch.pi * sdf_i / eps_body)) / (2.0 * eps_body),
+        0.0,
+    )
 
     # Towers (2008) 2nd-order correction: δ_S = δ_ε(φ) / |∇φ|
     if sdf_grad_mag is not None:
@@ -447,7 +443,6 @@ def _forces_shared_2d(u, v, p, sdf_val, nx, ny, nu_rho, h):
     """Compute stress tensors and pressure force density for 2-D.
 
     All quantities are evaluated on the cell-centred (CC) grid.
-    Derivative stencils match WaterLily.jl ``∂(i,j,I,u)``:
 
     * **Diagonal** (∂u_i/∂x_i): natural compact stencil exploiting the
       MAC stagger — ``(u[I+δ(i),i] - u[I,i]) / h``, exact at CC.
@@ -472,7 +467,7 @@ def _forces_shared_2d(u, v, p, sdf_val, nx, ny, nu_rho, h):
     dvdy[:, -1]  = dvdy[:, -2]
 
     # ---- Cross derivatives: interp to CC along stagger dim, ----------
-    #      then central diff along the other dim (= WaterLily 4-pt avg)
+    #      then central diff along the other dim
     # u_cc: u interpolated to CC along dim 0
     u_cc = torch.empty_like(u)
     u_cc[:-1, :] = 0.5 * (u[:-1, :] + u[1:, :])
@@ -500,7 +495,7 @@ def _forces_shared_2d(u, v, p, sdf_val, nx, ny, nu_rho, h):
     # vs  ∫        δ_ε(φ) dφ = 1.0  (CORRECT)
     # The Poisson solve produces a continuous pressure field across the
     # interface, so both sides contribute correctly to the surface
-    # integral.  This matches WaterLily.jl's pressure_force().
+    # integral.
     pforce_x = -p * nx
     pforce_y = -p * ny
 
@@ -548,19 +543,11 @@ def _forces_body_batch_2d(
         0.0,
     )
     # smoothed delta — pressure
-    # delta_pres = torch.where(
-    #     torch.abs(sdf_vals_cc) < eps_body,
-    #     (1.0 + torch.cos(torch.pi * sdf_vals_cc / eps_body)) / (2.0 * eps_body),
-    #     0.0,
-    # )
-    # smoothed delta — pressure
-    delta_pres = delta_visc
-
-    # delta_pres = torch.where(
-    #     torch.abs(d_visc) < eps_body,
-    #     (1.0 + torch.cos(torch.pi * d_visc / eps_body)) / (2.0 * eps_body),
-    #     0.0,
-    # )
+    delta_pres = torch.where(
+        torch.abs(sdf_vals_cc) < eps_body,
+        (1.0 + torch.cos(torch.pi * sdf_vals_cc / eps_body)) / (2.0 * eps_body),
+        0.0,
+    )
     # Towers (2008) 2nd-order correction: δ_S = δ_ε(φ) / |∇φ|.
     # For a perfect SDF |∇φ|=1 so this is a no-op; for numerical SDFs
     # (mesh bodies, near corners) it restores the correct surface measure.
@@ -688,7 +675,7 @@ class FluidSolver:
         self.rho  = torch.tensor(solver["rho"], device=self.device, dtype=self.dtype)  # density
         self.visc = self.nu*self.rho                                                   # dynamic viscosity
 
-        self.eps  = solver.get("eps_multiplier", torch.sqrt(torch.tensor(2.0))) * self.h
+        self.eps  = solver.get("eps_multiplier",torch.tensor(2.0)) * self.h
 
         self.starting_iteration      = solver.get("starting_iteration", 0)
         self.starting_iteration_path = solver.get("starting_iteration_path", None)
@@ -783,7 +770,7 @@ class FluidSolver:
             self._sponge_sigma_w = None
 
         # ============= time integration =============
-        self.time_integration = solver.get("time_integration", "heun")
+        self.time_integration = solver.get("time_integration", "euler")
         assert self.time_integration in ("heun", "euler"), \
             f"Unknown time_integration '{self.time_integration}'. Choose 'heun' or 'euler'."
         # ---- time integration dispatch (set once, used every step) ----
@@ -1929,14 +1916,12 @@ class FluidSolver:
         """
         Heun (RK2 predictor-corrector) time integration with BDIM2.
 
-        Mirrors WaterLily.jl ``mom_step!`` exactly:
+        1. **Predictor** (w = 1):
+            adv-diff on u^n → BDIM → project → BCs → u_pred (div-free)
 
-          1. **Predictor** (w = 1):
-             adv-diff on u^n → BDIM → project → BCs → u_pred (div-free)
-
-          2. **Corrector** (w = 0.5):
-             adv-diff on u_pred → rebase from u^n → BDIM →
-             average with **projected** predictor → project(w=0.5)
+        2. **Corrector** (w = 0.5):
+            adv-diff on u_pred → rebase from u^n → BDIM →
+            average with **projected** predictor → project(w=0.5)
 
         The corrector average is ``0.5*(u_pred + BDIM(u^n + dt·RHS(u_pred)))``.
         Because ``u_pred`` is divergence-free, ``div(u_avg)`` equals half
@@ -1970,7 +1955,7 @@ class FluidSolver:
 
             self.adv_diff_solver.set_BCs(uprime, vprime)
             (u1, v1, p1) = self.project(uprime, vprime, p)
-            # Re-apply BCs after projection (matches WaterLily's
+            # Re-apply BCs after projection
             # BC!(a.u,...) after every project! call).
             self.adv_diff_solver.set_BCs(u1, v1)
 
@@ -1980,7 +1965,6 @@ class FluidSolver:
             (uprime2, vprime2) = self.adv_diff_solver.solve(u1, v1, nu_t=nu_t)
             # adv_diff.solve returns u1 + dt*RHS(u1).
             # Rebase from u^n: u^n + dt*RHS(u_pred), matching
-            # WaterLily's BDIM!(a) which builds f = u⁰ + dt*f - V
             # with u⁰ = u^n (saved once at the top of mom_step!).
             uprime2 = u + (uprime2 - u1)
             vprime2 = v + (vprime2 - v1)
@@ -1998,7 +1982,6 @@ class FluidSolver:
             ).clone()
 
             # Average the PROJECTED predictor with the corrector's BDIM
-            # output — matches WaterLily's  scale_u!(a, 0.5)  which
             # halves  u_pred + BDIM(u^n + dt*RHS(u_pred)).
             u_avg = 0.5 * (u1 + uprime2)
             v_avg = 0.5 * (v1 + vprime2)
@@ -2050,7 +2033,7 @@ class FluidSolver:
 
             self.adv_diff_solver.set_BCs(uprime, vprime, wprime)
             (u1, v1, w1, p1) = self.project(uprime, vprime, p, w_vel=wprime)
-            # Re-apply BCs after projection (matches WaterLily).
+            # Re-apply BCs after projection
             self.adv_diff_solver.set_BCs(u1, v1, w1)
 
             # ====== CORRECTOR ======
@@ -2087,7 +2070,7 @@ class FluidSolver:
                     setattr(self, _attr, None)
 
             # Average the PROJECTED predictor (div-free) with the
-            # corrector's BDIM output — mirrors WaterLily's scale_u!(a,0.5).
+            # corrector's BDIM output
             u_avg = 0.5 * (u1 + uprime2)
             v_avg = 0.5 * (v1 + vprime2)
             w_avg = 0.5 * (w1 + wprime2)

@@ -42,8 +42,9 @@ python track_robot.py --calibrate --video /data/andreaferrario/1guilla_experimen
     --homography_file /data/andreaferrario/1guilla_experiments/swim/videos/ms001mpt001_homography.npy
 
 # Step 3 — batch process all videos
+
 python3 track_robot.py \
-    --video .../ms001mpt001.mp4 \
+    --video /data/andreaferrario/1guilla_experiments/swim/videos/ms007mpt001.mp4 \
     --meters_per_pixel 0.002488 \
     --midline_method colwise \
     --homography_file /data/andreaferrario/1guilla_experiments/swim/videos/ms001mpt001_homography.npy
@@ -52,5 +53,10 @@ python3 track_robot.py \
 
 timeout 90 python3 track_robot.py \
     --preview \
-    --video /data/andreaferrario/1guilla_experiments/swim/videos/ms001mpt001.mp4 \
+    --video /data/andreaferrario/1guilla_experiments/swim/videos/ms004mpt002.mp4 \
     --save_preview /tmp/preview_detection.mp4 2>&1 | grep -v inotify
+
+
+
+
+
