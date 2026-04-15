@@ -1584,7 +1584,7 @@ class FluidSolver:
         else:
             self.div  = self.divergence(u, v, w_vel)
 
-        coeff = w*self.dt/self.rho
+        coeff = w * self.dt / self.rho
 
         if self.poisson_method == "fft":
             # ---- FFT solver ----
@@ -1617,6 +1617,7 @@ class FluidSolver:
                     w_vel = w_vel - fft_coeff * p_z
         else:
             # ---- Multigrid / MGCG solver (variable-coefficient Poisson) ----
+            has_custom_coeffs = any(arr is not None for arr in (ch, cv, cw))
             if ch is None:
                 ch = coeff * self.mu0_all_u
             if cv is None:
@@ -1627,15 +1628,16 @@ class FluidSolver:
                               if self.poisson_method == "mgcg"
                               else self.poisson_solver.solve_multigrid)
 
-            # Warm-start: reuse previous pressure as initial guess
-            if self.poisson_warm_start:
+            # Variable-density custom coefficients are coupled to a moving
+            # immersed geometry; reusing the previous pressure field can carry
+            # stale body-interior/interface values and destabilize the solve.
+            if self.poisson_warm_start and not has_custom_coeffs:
                 p0 = p
             else:
-                p.zero_()
-                p0 = p
+                p0 = torch.zeros_like(p)
 
             if self.ndim == 2:
-                p, _    = _poisson_solve(
+                p, _ = _poisson_solve(
                     self.div[1:-1,1:-1],
                     p0,
                     ch = ch[1:,1:-1],

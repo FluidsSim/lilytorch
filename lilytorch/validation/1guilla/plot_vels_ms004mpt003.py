@@ -6,7 +6,10 @@ import numpy as np
 import pandas as pd
 from scipy.signal import butter, filtfilt, find_peaks
 
-from lilytorch.FARMS_V2.farms_core.farms_core.sensors.sensor_convention import sc
+from lilytorch.util.oneguilla_head_tip import (
+    extract_1guilla_head_tip_trajectory,
+    resolve_saved_simulation_path,
+)
 from lilytorch.util.paths import save_path
 
 import matplotlib.pyplot as plt
@@ -190,51 +193,23 @@ def _decode_link_names(raw_names: np.ndarray) -> list[str]:
 
 
 def _extract_sim_head_trajectory(
-    link_positions: np.ndarray,
+    link_array: np.ndarray,
     link_names: list[str],
 ) -> tuple[np.ndarray, str]:
-    """
-    Return a head-point proxy trajectory from the simulated links.
-
-    In _1guillasim ordering, link0 is the head and link1 is the next body
-    segment.  The experiment tracks the leading edge of the head blob rather
-    than the head-link COM, so extrapolate half a segment length forward from
-    link0 toward link0-link1 to better match the tracked head point.
-    """
-    if not link_names:
-        raise ValueError("No link names found in simulation.hdf5")
-
-    if HEAD_LINK_NAME in link_names:
-        head_idx = link_names.index(HEAD_LINK_NAME)
-    else:
-        head_idx = 0
-
-    head_pos = link_positions[:, head_idx, :]
-    if link_positions.shape[1] < 2:
-        return head_pos, f"{link_names[head_idx]} COM"
-
-    if head_idx == 0:
-        neighbor_idx = 1
-    elif head_idx == link_positions.shape[1] - 1:
-        neighbor_idx = head_idx - 1
-    else:
-        # Prefer the downstream body segment to build the local head direction.
-        neighbor_idx = head_idx + 1
-
-    neighbor_pos = link_positions[:, neighbor_idx, :]
-    head_tip_proxy = head_pos + 0.5 * (head_pos - neighbor_pos)
-    label = f"{link_names[head_idx]} tip proxy"
-    return head_tip_proxy, label
+    return extract_1guilla_head_tip_trajectory(
+        link_array,
+        link_names,
+        head_link_name=HEAD_LINK_NAME,
+    )
 
 
 def main() -> None:
-    if not os.path.exists(SIMULATION_PATH):
-        raise FileNotFoundError(f"Simulation file not found: {SIMULATION_PATH}")
+    simulation_path = resolve_saved_simulation_path(SIMULATION_PATH, RUN_DIR)
 
     exp_track = _load_experiment_track(TRACK_CSV_PATH)
     control_meta = _load_position_control_metadata(TRACK_CSV_PATH)
 
-    with h5py.File(SIMULATION_PATH, "r") as h5_file:
+    with h5py.File(simulation_path, "r") as h5_file:
         link_group = h5_file["FARMSLISTanimats"]["0"]["sensors"]["links"]
         link_array = np.asarray(link_group["array"], dtype=float)
         link_names = _decode_link_names(link_group["names"][()])
@@ -244,9 +219,8 @@ def main() -> None:
     link_array = link_array[:it_stop]
     times = times[:it_stop]
 
-    link_positions = link_array[:, :, sc.link_com_position_x:sc.link_com_position_z + 1]
     sim_head_positions_3d, sim_head_label = _extract_sim_head_trajectory(
-        link_positions,
+        link_array,
         link_names,
     )
     planar_positions, _, _ = _flatten_to_best_fit_plane(sim_head_positions_3d)

@@ -162,8 +162,43 @@ In coupled FARMS simulations the body may have a different density
    \rho(\mathbf{x})
      = \rho_b + (\rho_f - \rho_b)\,\mu_0(\mathbf{x})
 
-and the face-centred Poisson coefficients become
-:math:`c_u = \Delta t / \rho_u`, etc.
+In this coupled variable-density extension the face-centred coefficients are
+
+.. math::
+
+   c_u = \frac{\Delta t}{\rho_u},
+   \qquad
+   c_v = \frac{\Delta t}{\rho_v},
+   \qquad
+   c_w = \frac{\Delta t}{\rho_w}
+
+with :math:`\rho_u, \rho_v, \rho_w` the BDIM-blended densities on the
+staggered face grids.  The corresponding cell-centred FFT coefficient is
+:math:`c_{cc} = \Delta t / \rho_{cc}`.
+
+This coupled FARMS formulation differs from upstream WaterLily's built-in
+single-density operator.  When :math:`\rho_b = \rho_f`, the default BDIM /
+WaterLily form reduces to :math:`(w\Delta t / \rho_f)\,\mu_0`; when the
+body density is blended explicitly into :math:`\rho`, lilytorch uses the
+effective-density coefficients above for the custom multigrid path.
+
+These two coefficient fields are not algebraically identical rewrites of one
+another.  With
+
+.. math::
+
+  \rho(\mu_0) = \rho_b + (\rho_f - \rho_b)\,\mu_0
+
+we have, in general,
+
+.. math::
+
+  \frac{\mu_0}{\rho(\mu_0)} \neq \frac{1}{\rho(\mu_0)}
+
+except in the trivial fluid region :math:`\mu_0 = 1`.  Therefore LilyTorch's
+custom FARMS variable-density operator should be understood as a separate
+extension that shares WaterLily's BDIM fields and single-density limit, not as
+the exact same variable-coefficient operator under a different pressure scaling.
 
 
 Advection–diffusion

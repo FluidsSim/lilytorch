@@ -33,7 +33,7 @@ class SimConfig(BaseSimConfig):
                 "gains"          : [100.0, 1., 0],
                 "spawn_mode"     : SpawnMode.FREE,
                 "pose"           : [4.75, 0.1, 0.0, 0, 0, 0.05],
-                "controller_path": "lilytorch.farms_examples._1guillasim.dye_experiments.controller.PositionController",
+                "controller_path": "lilytorch.farms_examples._1guillasim.experiments.controller.PositionController",
                 "control_pars"   : {
                     "file_path": os.path.join(
                         self.data_folder, "/data/andreaferrario/1guilla_experiments/swim/log/ms007mpt001log.csv"
@@ -61,7 +61,7 @@ class SimConfig(BaseSimConfig):
         self.save_every        = 200
         self.vmin              = -10.0
         self.vmax              = 10.0
-        self.save              = True
+        self.save              = False
 
         # ── MuJoCo ───────────────────────────────────────────────────
         self.visual_scale  = 10.0
@@ -75,10 +75,11 @@ class SimConfig(BaseSimConfig):
         self.poisson_max_mgcg_cycles = 10
         self.poisson_precond_vcycles = 1
         self.poisson_warm_start      = True
-        self.poisson_method          = "fft"
+        self.poisson_method          = "multigrid"
         self.poisson_smoother        = "jacobi"
         self.poisson_nsmoothing      = 5
         self.poisson_bc_type         = "free"
+        self.zero_pressure_inside    = True
 
         self.poisson_compile         = False
         self.compile_adv_diff        = False

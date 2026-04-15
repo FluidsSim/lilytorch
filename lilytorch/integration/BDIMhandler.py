@@ -783,33 +783,35 @@ class BDIMhandler:
         """Compute variable-density Poisson coefficients.
 
         Returns ``(ch, cv, ch_cc)`` for 2-D or ``(ch, cv, cw, ch_cc)``
-        for 3-D, where:
+                for 3-D, where:
 
-        * ``ch, cv, cw`` -- staggered ``dt / rho_eff`` on the respective
-          face grids.  Used by both the multigrid correction step and the
-          FFT correction step.  The mu0 factor in the numerator ensures
-          ch → 0 inside the body (mu0 ≈ 0), so the pressure projection
-          does not corrupt the body velocity.
-        * ``ch_cc`` -- cell-centred ``dt / rho_eff_cc``.  Used as the
-          Poisson RHS coefficient in the FFT path so that the solve
-          accounts for spatially-varying density:
-          ``∇²p = div / ch_cc  ≡  div * rho_eff_cc / dt``.
+                * ``ch, cv, cw`` -- staggered ``dt / rho_eff`` on the respective
+                    face grids. Used by both the multigrid correction step and the
+                    FFT correction step.
+                * ``ch_cc`` -- cell-centred ``dt / rho_eff_cc``. Used as the
+                    Poisson RHS coefficient in the FFT path so that the solve
+                    accounts for spatially-varying density:
+                    ``∇²p = div / ch_cc  ≡  div * rho_eff_cc / dt``.
 
-        Effective density at location x:
-            rho_eff(x) = rho_body + (rho_fluid - rho_body) * mu0(x)
+                Effective density at location x:
+                        rho_eff(x) = rho_body + (rho_fluid - rho_body) * mu0(x)
+
+                The density blend is already built from the BDIM face field ``mu0``,
+                so the coupled variable-density path does not apply an additional
+                ``mu0`` factor in the numerator.
         """
         fs = self.fluid_solver
         _drho = self.rho_fluid - self.rho_body
 
-        ch = timestep * fs.mu0_all_u / (self.rho_body + _drho * fs.mu0_all_u)
-        cv = timestep * fs.mu0_all_v / (self.rho_body + _drho * fs.mu0_all_v)
+        ch = timestep / (self.rho_body + _drho * fs.mu0_all_u)
+        cv = timestep / (self.rho_body + _drho * fs.mu0_all_v)
 
         # Cell-centred effective density → CC coefficient for FFT RHS.
         rho_cc = self.rho_body + _drho * fs.mu0_all
-        ch_cc  = timestep / rho_cc
+        ch_cc = timestep / rho_cc
 
         if self.ndim == 3:
-            cw = timestep * fs.mu0_all_w / (self.rho_body + _drho * fs.mu0_all_w)
+            cw = timestep / (self.rho_body + _drho * fs.mu0_all_w)
             return ch, cv, cw, ch_cc
         return ch, cv, ch_cc
 
@@ -825,9 +827,7 @@ class BDIMhandler:
         _h = fs.h
         comp = fs.composite_body
 
-        # Pre-compute variable-density Poisson coefficients once
-        # (mu0_all_{u,v,cc} are fixed for the duration of the fluid step).
-        # Both FFT and multigrid paths use spatially-varying density:
+        # Pre-compute variable-density Poisson coefficients once.
         #   ch/cv   -- staggered dt/rho_eff, used for the correction step
         #   ch_cc   -- cell-centred dt/rho_eff_cc, used for the FFT RHS
         _ch, _cv, _ch_cc = self._compute_variable_density_coefficients(timestep)

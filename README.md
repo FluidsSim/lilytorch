@@ -330,6 +330,49 @@ python lilytorch/src/video_postprocess.py /path/to/run_dir --fields omega_z_3d -
 - Output files are saved alongside the PNG sub-folders inside the run directory (e.g. `omega_z_3d.mp4` or `omega_z_3d.gif`).
 - GIF output uses a two-pass palette approach via ffmpeg for high quality. If ffmpeg is unavailable, the script falls back to Pillow.
 
+## Projected PIV-Style Curl From HDF5
+
+When you want a top-view curl movie that is reconstructed from the full recorded 3-D velocity volume, use `projected_field_postprocess.py` instead of `video_postprocess.py`.
+
+The projected-field tool reads `u`, `v`, `w` from `fields.h5`, collapses the in-plane velocity through a user-selected depth slab, computes a 2-D curl on that projected velocity field, writes PNG frames into a dedicated folder, and then encodes them into MP4 or GIF.
+
+### Example
+
+```bash
+python lilytorch/src/projected_field_postprocess.py /path/to/run_dir \
+    --camera-axis -z \
+    --projection-mode gaussian \
+    --zlim -0.04 0.04 \
+    --focus-depth 0.0 \
+    --depth-sigma 0.015 \
+    --xlim -0.8 0.6 \
+    --ylim -0.25 0.25 \
+    --output-tag top_piv
+```
+
+### Useful Parameters
+
+| Flag | Meaning |
+|---|---|
+| `--camera-axis` | Orthographic viewing direction (`-z` is the standard top view) |
+| `--xlim`, `--ylim` | Camera window in the image plane |
+| `--zlim` | Depth slab to include in the projection |
+| `--projection-mode` | How the transparent-water depth is collapsed (`mean`, `sum`, `max_abs`, `gaussian`) |
+| `--coarsen` | Block-average the projected velocity before curl to mimic a larger interrogation window |
+| `--velocity-sigma` | Gaussian smoothing on projected velocity before curl; this is the main control for suppressing tiny vortices |
+| `--curl-sigma` | Optional extra smoothing on the final curl image |
+| `--focus-depth`, `--depth-sigma` | Depth emphasis for Gaussian weighting |
+| `--camera-roll` | In-plane image rotation after projection |
+| `--flip-horizontal`, `--flip-vertical` | Image mirroring for camera matching |
+| `--output-tag` | Suffix for the generated frame folder and video |
+| `--no-video` | Keep PNG frames only, without encoding a movie |
+
+### Notes
+
+- This tool is intentionally separate from `video_postprocess.py`: `video_postprocess.py` only stitches existing frame folders into videos.
+- For matching an experimental top camera, the most important controls are the view axis, the physical crop limits, the depth slab, and the projection rule. Those are the parameters that change which fluid motion is actually visible in the synthetic movie.
+- If you see many more tiny vortices than in the experiment, first increase `--velocity-sigma` and then `--coarsen`. That is the right direction physically, because real PIV returns an interrogation-window average before vorticity is computed.
+
 ## FlowViewer — In-Viewer Flow Visualisation
 
 FlowViewer is a FARMS `TaskExtension` that renders a fluid field (e.g. vorticity, pressure, velocity magnitude) as coloured spheres directly inside the MuJoCo viewer window **and** in the recorded video, overlaid on the swimming animat. This gives real-time visual feedback of the flow during a coupled simulation without requiring a separate plotting window.
