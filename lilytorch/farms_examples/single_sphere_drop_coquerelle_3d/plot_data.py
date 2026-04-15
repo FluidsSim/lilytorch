@@ -22,12 +22,12 @@ import yaml
 
 plt.rcParams.update({
     "font.family": "serif",
-    "font.size": 11,
-    "axes.labelsize": 13,
-    "axes.titlesize": 13,
-    "legend.fontsize": 9.5,
-    "xtick.labelsize": 10,
-    "ytick.labelsize": 10,
+    "font.size": 18,
+    "axes.labelsize": 18,
+    "axes.titlesize": 18,
+    "legend.fontsize": 18,
+    "xtick.labelsize": 18,
+    "ytick.labelsize": 18,
     "lines.linewidth": 1.8,
     "figure.dpi": 150,
     "savefig.dpi": 300,
@@ -42,7 +42,7 @@ HERE = Path(__file__).resolve().parent
 FIG_DIR = HERE / "figures"
 FIG_DIR.mkdir(exist_ok=True)
 OUT_ROOT = Path("/data/andreaferrario/ns_data/coquerelle_cottet_3d_drop")
-FMT = ".png"
+FMT = ".svg"
 
 PAPER_BOX = (0.0, 1.0, 0.0, 1.0, 0.0, 4.0)
 
@@ -296,36 +296,30 @@ def plot_terminal_comparison(summaries: list[dict]) -> Path:
     fig, ax = plt.subplots(figsize=(10.5, 5.0))
     x = np.arange(len(summaries), dtype=float)
 
-    labels = [fr"$D={s['diameter']:.1f}$\n$\nu={s['viscosity']:.2f}$" for s in summaries]
+    labels = [fr"$\nu={s['viscosity']:.2f}$" for s in summaries]
 
-    ax.plot(x, [s["u_exp"] for s in summaries], marker="o", color="#1b9e77", label=r"Paper $U_E$")
-    ax.plot(x, [s["u_h0"] for s in summaries], marker="s", color="#d95f02", label=r"Paper $U_{h\to 0}$")
-    ax.plot(x, [s["u_glowinski"] for s in summaries], marker="^", color="#7570b3", label=r"Glowinski $U_G$")
-    ax.plot(x, [s["u_h_1_64"] for s in summaries], marker="v", color="#e7298a", label=r"Paper / our $U_{h=1/64}$")
+    ax.plot(x, [s["u_exp"] for s in summaries], marker="o", linestyle="none", color="#1b9e77", label="exp")
+    ax.plot(x, [s["u_h_1_64"] for s in summaries], marker="v", linestyle="none", color="#e7298a", label="coquerelle & cotet")
 
     available_x = [idx for idx, s in enumerate(summaries) if s["available"]]
     available_y = [s["terminal_mean"] for s in summaries if s["available"]]
-    available_err = [s["terminal_std"] for s in summaries if s["available"]]
     if available_x:
-        ax.errorbar(
+        ax.plot(
             available_x,
             available_y,
-            yerr=available_err,
-            fmt="D",
+            marker="D",
+            linestyle="none",
             markersize=7,
             color="black",
-            ecolor="black",
-            elinewidth=1.0,
-            capsize=3,
-            label=r"Current runs: tail mean $\pm 1\sigma$",
+            label="ours",
             zorder=5,
         )
 
     ax.axvline(2.5, color="0.75", linewidth=1.0)
-    ax.text(1.25, 0.02, "$D=0.2$", transform=ax.get_xaxis_transform(),
-            ha="center", va="bottom", color="0.35")
-    ax.text(4.25, 0.02, "$D=0.3$", transform=ax.get_xaxis_transform(),
-            ha="center", va="bottom", color="0.35")
+    ax.text(1.25, 0.97, "$D=0.2$", transform=ax.get_xaxis_transform(),
+            ha="center", va="top", color="0.35", fontsize=11)
+    ax.text(4.25, 0.97, "$D=0.3$", transform=ax.get_xaxis_transform(),
+            ha="center", va="top", color="0.35", fontsize=11)
 
     ax.set_xticks(x)
     ax.set_xticklabels(labels)

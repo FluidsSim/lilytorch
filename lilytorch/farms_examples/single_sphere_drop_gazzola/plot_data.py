@@ -43,7 +43,7 @@ HERE       = pathlib.Path(__file__).resolve().parent
 FIG_DIR    = HERE / "figures"
 FIG_DIR.mkdir(exist_ok=True)
 REF_DIR    = HERE.parent.parent.parent / "data_to_save"
-FMT        = ".png"
+FMT        = ".svg"
 
 # Data directory containing fields.h5, contours.h5, and output/simulation.hdf5
 DATA_DIR   = pathlib.Path("/data/andreaferrario/ns_data/namkoong_sphere_drop")

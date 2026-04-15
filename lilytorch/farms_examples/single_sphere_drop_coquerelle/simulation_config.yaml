@@ -84,7 +84,7 @@ extensions:
         poisson_bc_type: "neumann"
 
         heun: false
-        force_method: "method1"
+        force_method: "method2"
         force_delta_order: 1
 
       boundary_conditions:

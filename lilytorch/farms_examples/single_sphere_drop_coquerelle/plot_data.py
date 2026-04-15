@@ -17,12 +17,12 @@ import matplotlib.pyplot as plt
 # ── style ────────────────────────────────────────────────────────────────
 plt.rcParams.update({
     "font.family":       "serif",
-    "font.size":         11,
-    "axes.labelsize":    13,
-    "axes.titlesize":    13,
-    "legend.fontsize":   9.5,
-    "xtick.labelsize":   10,
-    "ytick.labelsize":   10,
+    "font.size":         18,
+    "axes.labelsize":    18,
+    "axes.titlesize":    18,
+    "legend.fontsize":   18,
+    "xtick.labelsize":   18,
+    "ytick.labelsize":   18,
     "lines.linewidth":   1.6,
     "figure.dpi":        150,
     "savefig.dpi":       300,
@@ -36,11 +36,15 @@ plt.rcParams.update({
 HERE      = pathlib.Path(__file__).resolve().parent
 FIG_DIR   = HERE / "figures"
 FIG_DIR.mkdir(exist_ok=True)
-FMT       = ".png"
+FMT       = ".svg"
 
 DATA_DIR  = pathlib.Path("/data/andreaferrario/ns_data/coquerelle_sphere_drop")
 FIELDS_H5 = DATA_DIR / "fields.h5"
 HDF5_PATH = DATA_DIR / "output" / "simulation.hdf5"
+
+BERGMANN_DIR      = pathlib.Path("/data/andreaferrario/lilytorch/data_to_save")
+BERGMANN_VPROF    = BERGMANN_DIR / "vertical_velocity_bergmann.csv"
+BERGMANN_HEIGHT   = BERGMANN_DIR / "height_evolution_bergmann.csv"
 
 # ── physical parameters ──────────────────────────────────────────────────
 D        = 0.25      # sphere diameter [cm]
@@ -50,8 +54,9 @@ dt_fluid = 0.0001
 T_PROF   = 0.1       # time for velocity profile [s]
 
 # ── colours ──────────────────────────────────────────────────────────────
-C_X  = "#2166AC"
-C_Z  = "#B2182B"
+C_X        = "#2166AC"
+C_Z        = "#0066CC"   # vivid blue  – LilyTorch
+C_BERGMANN = "#CC4400"   # vivid orange-red – Bergmann reference
 
 
 # ── helpers ──────────────────────────────────────────────────────────────
@@ -136,7 +141,18 @@ def plot_sphere_position():
     axes[0].set_ylabel("$x$ [cm]")
     axes[0].set_title("Sphere URDF position – Coquerelle sedimentation")
 
-    axes[1].plot(times, pos_z, color=C_Z)
+    axes[1].plot(times, pos_z, color=C_Z, label="LilyTorch")
+    if BERGMANN_HEIGHT.exists():
+        berg = np.loadtxt(BERGMANN_HEIGHT, delimiter=",")
+        order = np.argsort(berg[:, 0])
+        # plot Bergmann as dashed line and markers for raw points
+        axes[1].plot(berg[order, 0], berg[order, 1], color=C_BERGMANN,
+                     linestyle="--", linewidth=1.4, label="Bergmann et al. 2014")
+        sel = _marker_step_slice(len(order))
+        axes[1].plot(berg[order, 0][sel], berg[order, 1][sel], linestyle="", marker="o",
+                     markerfacecolor="none", markeredgewidth=0.8, markersize=4,
+                     color=C_BERGMANN)
+        axes[1].legend(framealpha=0.92, edgecolor="0.7")
     axes[1].set_ylabel("$z$ [cm]")
     axes[1].set_xlabel("$t$ [s]")
 
@@ -221,7 +237,17 @@ def plot_v_profile():
     j_cen = np.argmin(np.abs(y_stag - y_sphere_fluid))
 
     fig, ax = plt.subplots(figsize=(7, 4))
-    ax.plot(xg[1:-1], v[1:-1, j_cen], color=C_Z, linewidth=1.5)
+    ax.plot(xg[1:-1], v[1:-1, j_cen], color=C_Z, linewidth=1.5, label="LilyTorch")
+    if BERGMANN_VPROF.exists():
+        berg = np.loadtxt(BERGMANN_VPROF, delimiter=",")
+        order = np.argsort(berg[:, 0])
+        # dashed interpolation line + markers for raw Bergmann points
+        ax.plot(berg[order, 0], berg[order, 1], color=C_BERGMANN,
+                linestyle="--", linewidth=1.4, label="Bergmann et al. 2014")
+        sel = _marker_step_slice(len(order))
+        ax.plot(berg[order, 0][sel], berg[order, 1][sel], linestyle="", marker="o",
+                markerfacecolor="none", markeredgewidth=0.8, markersize=4,
+                color=C_BERGMANN)
     ax.axhline(0, color="0.5", linewidth=0.5, linestyle="--")
     ax.axvline(x_sphere_fluid - R, color="0.7", linewidth=0.8, linestyle=":")
     ax.axvline(x_sphere_fluid + R, color="0.7", linewidth=0.8, linestyle=":",
@@ -231,7 +257,7 @@ def plot_v_profile():
     y_slice = float(y_stag[j_cen])
     ax.set_title(f"Vertical velocity profile at $y = {y_slice:.3f}$ cm "
                  f"(SDF centre $y = {y_sphere_fluid:.3f}$), $t = {t_actual:.4f}$ s")
-    ax.legend(framealpha=0.92, edgecolor="0.7")
+    ax.legend(framealpha=0.92, edgecolor="0.7", loc="best")
     fig.tight_layout()
     fig.savefig(str(FIG_DIR / f"coquerelle_v_profile{FMT}"))
     print(f"  Saved {FIG_DIR / f'coquerelle_v_profile{FMT}'}")
@@ -265,10 +291,141 @@ def plot_v_profile():
 
 
 # =====================================================================
+# Bergmann interpolation helper
+# =====================================================================
+def _interp_berg_uniform(raw_data, n=500):
+    """Sort, deduplicate, and resample Bergmann scatter to n uniform points."""
+    order = np.argsort(raw_data[:, 0])
+    xd, yd = raw_data[order, 0], raw_data[order, 1]
+    _, uniq = np.unique(xd, return_index=True)
+    xd, yd = xd[uniq], yd[uniq]
+    x_uni = np.linspace(xd[0], xd[-1], n)
+    y_uni = np.interp(x_uni, xd, yd)
+    return x_uni, y_uni
+
+
+def _marker_step_slice(n):
+    """Return a slice that subsamples points: 3x when large, 2x when medium."""
+    if n > 90:
+        step = 3
+    elif n > 45:
+        step = 2
+    else:
+        step = 1
+    return slice(None, None, step)
+
+
+# =====================================================================
+# 4.  Bergmann comparison: velocity profile (left) + height (right)
+# =====================================================================
+def plot_bergmann_comparison():
+    can_vprof  = FIELDS_H5.exists() and BERGMANN_VPROF.exists()
+    can_height = HDF5_PATH.exists() and BERGMANN_HEIGHT.exists()
+
+    if not can_vprof and not can_height:
+        print("  Neither fields.h5 nor simulation.hdf5 found – skipping Bergmann comparison.")
+        return
+
+    fig, (ax_v, ax_h) = plt.subplots(1, 2, figsize=(13, 4.5))
+
+    # ── LEFT: vertical velocity profile at t = T_PROF ──────────────
+    if can_vprof:
+        iters     = list_iterations()
+        dt_data   = infer_dt_from_hdf5()
+        it_target = int(round(T_PROF / dt_data))
+
+        with h5py.File(FIELDS_H5, "r") as f:
+            yg_raw = f["grids/y"][:]
+            def _sdf_y(it):
+                s = f[f"fields/{it:06d}"]["sdf"][1:-1, 1:-1]
+                ij = np.unravel_index(np.argmin(s), s.shape)
+                return float(yg_raw[1:-1][ij[1]])
+            sdf_y0     = _sdf_y(iters[0])
+            candidates = [i for i in iters if abs(_sdf_y(i) - sdf_y0) > 0.05]
+        if not candidates:
+            candidates = iters
+
+        it       = min(candidates, key=lambda i: abs(i - it_target))
+        t_actual = it * dt_data
+        print(f"  bergmann comparison – v_profile: iter {it} (t={t_actual:.4f}s)")
+
+        xg, yg = load_grids()
+        v      = load_field(it, "v")
+        sdf    = load_field(it, "sdf")
+
+        sdf_phys       = sdf[1:-1, 1:-1]
+        ij_min         = np.unravel_index(np.argmin(sdf_phys), sdf_phys.shape)
+        x_sphere_fluid = float(xg[1:-1][ij_min[0]])
+        y_sphere_fluid = float(yg[1:-1][ij_min[1]])
+
+        h      = float(yg[1] - yg[0])
+        y_stag = yg - h / 2
+        j_cen  = np.argmin(np.abs(y_stag - y_sphere_fluid))
+
+        ax_v.plot(xg[1:-1], v[1:-1, j_cen], color=C_Z, linewidth=1.8, label="LilyTorch")
+        xv_u, yv_u = _interp_berg_uniform(np.loadtxt(BERGMANN_VPROF, delimiter=","))
+        berg_v_raw = np.loadtxt(BERGMANN_VPROF, delimiter=",")
+        ord_v_raw  = np.argsort(berg_v_raw[:, 0])
+        # overlay raw points as markers (subsample for clarity)
+        sel_v = _marker_step_slice(len(ord_v_raw))
+        ax_v.plot(berg_v_raw[ord_v_raw, 0][sel_v], berg_v_raw[ord_v_raw, 1][sel_v], linestyle="",
+              marker="o", markerfacecolor="none", markeredgewidth=0.8, markersize=4,
+              color=C_BERGMANN, alpha=0.95)
+        xv_u, yv_u = _interp_berg_uniform(berg_v_raw)
+        ax_v.plot(xv_u, yv_u, color=C_BERGMANN,
+              linestyle="--", linewidth=1.8, label="Bergmann et al. 2014")
+        ax_v.axhline(0, color="0.5", linewidth=0.5, linestyle="--")
+        ax_v.axvline(x_sphere_fluid - R, color="0.7", linewidth=0.8, linestyle=":")
+        ax_v.axvline(x_sphere_fluid + R, color="0.7", linewidth=0.8, linestyle=":")
+        ax_v.set_xlabel("$x$ [cm]")
+        ax_v.set_ylabel(r"$v_y$ [cm/s]")
+        ax_v.set_title(f"Vertical velocity at $t = {t_actual:.4f}$ s")
+        ax_v.legend(framealpha=0.92, edgecolor="0.7", loc="best")
+    else:
+        ax_v.set_visible(False)
+        print("  Skipping velocity panel (fields.h5 or Bergmann v-prof missing).")
+
+    # ── RIGHT: sphere height (z) vs time, clipped to Bergmann range ─
+    if can_height:
+        times, com_pos, _ = load_hdf5_kinematics()
+        pos_z = com_pos[:, 2]
+        berg_h_raw = np.loadtxt(BERGMANN_HEIGHT, delimiter=",")
+        ord_h_raw  = np.argsort(berg_h_raw[:, 0])
+        xh_u, yh_u = _interp_berg_uniform(berg_h_raw)
+        t_berg_max = float(xh_u[-1])
+        mask = times <= t_berg_max
+        ax_h.plot(times[mask], pos_z[mask], color=C_Z, linewidth=1.8, label="LilyTorch")
+        # raw Bergmann markers (subsample for clarity)
+        sel_h = _marker_step_slice(len(ord_h_raw))
+        ax_h.plot(berg_h_raw[ord_h_raw, 0][sel_h], berg_h_raw[ord_h_raw, 1][sel_h], linestyle="",
+              marker="o", markerfacecolor="none", markeredgewidth=0.8, markersize=4,
+              color=C_BERGMANN, alpha=0.95)
+        # smooth interpolated Bergmann line
+        ax_h.plot(xh_u, yh_u, color=C_BERGMANN,
+              linestyle="--", linewidth=1.8, label="Bergmann et al. 2014")
+        ax_h.set_xlim(left=float(times[mask][0]), right=t_berg_max)
+        ax_h.set_xlabel("$t$ [s]")
+        ax_h.set_ylabel("$z$ [cm]")
+        ax_h.set_title("Sphere height evolution")
+        ax_h.legend(framealpha=0.92, edgecolor="0.7", loc="best")
+    else:
+        ax_h.set_visible(False)
+        print("  Skipping height panel (simulation.hdf5 or Bergmann height missing).")
+
+    fig.suptitle("Coquerelle sedimentation – comparison with Bergmann et al. 2014",
+                 fontsize=13, y=1.01)
+    fig.tight_layout()
+    fig.savefig(str(FIG_DIR / f"coquerelle_bergmann_comparison{FMT}"))
+    print(f"  Saved {FIG_DIR / f'coquerelle_bergmann_comparison{FMT}'}")
+    plt.close(fig)
+
+
+# =====================================================================
 if __name__ == "__main__":
     print("Plotting Coquerelle sphere sedimentation results …")
     report_settling_metrics()
     plot_sphere_position()
     plot_sphere_uz()
     plot_v_profile()
+    plot_bergmann_comparison()
     print("Done.")
