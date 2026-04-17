@@ -109,6 +109,42 @@ class FluidExtension(TaskExtension):
         self.BDIMhandler.step(task, physics)
 
 
+class PhysicsOptionsExtension(TaskExtension):
+    """Apply global MuJoCo geom contact parameters at episode start."""
+
+    def __init__(
+            self,
+            experiment_options: ExperimentOptions,
+            physics_options: dict | None,
+    ):
+        super().__init__()
+        self.experiment_options = experiment_options
+        self.physics_options = physics_options or {}
+
+    @classmethod
+    def from_options(
+            cls,
+            config: dict,
+            experiment_options: ExperimentOptions,
+    ):
+        """From options"""
+        return cls(
+            experiment_options=experiment_options,
+            physics_options=config.get("physics_options", {}),
+        )
+
+    def initialize_episode(self, task: ExperimentTask, physics: Physics):
+        del task
+
+        solref = self.physics_options.get("solref", None)
+        if solref is not None:
+            physics.model.geom_solref[:, 0] = solref[0]
+            physics.model.geom_solref[:, 1] = solref[1]
+
+        solimp = self.physics_options.get("solimp", None)
+        if solimp is not None:
+            physics.model.geom_solimp[:, :] = solimp
+
 
 class DataLogger(TaskExtension):
     """

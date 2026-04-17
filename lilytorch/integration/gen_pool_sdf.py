@@ -214,11 +214,13 @@ def create_pool_sdf(xmin, xmax, ymin, ymax, zmin=None, zmax=None,
         FLOOR_MATERIAL,
     )
 
-    # Checker-pattern visual tiles on top of the collision slab
-    floor_dx = dx + 2 * wt
-    floor_dy = dy + 2 * wt
-    tile_z   = fz + wt / 2 + 0.0005          # sit just on top of slab
-    tile_h   = 0.002                           # wafer-thin visual slab
+    # Checker-pattern visual tiles only cover the inner fluid footprint
+    # and are sunk slightly into the floor so they appear painted on.
+    floor_dx = dx
+    floor_dy = dy
+    floor_top_z = zmin if is_3d else 0.0
+    tile_h   = 0.002
+    tile_z   = floor_top_z - tile_h / 2 + 1.0e-4
 
     # Choose tile count so tiles are roughly square
     _target_tile = max(floor_dx, floor_dy) / 24.0
@@ -226,8 +228,8 @@ def create_pool_sdf(xmin, xmax, ymin, ymax, zmin=None, zmax=None,
     n_ty = max(2, round(floor_dy / _target_tile))
     t_dx = floor_dx / n_tx
     t_dy = floor_dy / n_ty
-    x0   = (xmin + xmax) / 2 - floor_dx / 2 + t_dx / 2
-    y0   = (ymin + ymax) / 2 - floor_dy / 2 + t_dy / 2
+    x0   = xmin + t_dx / 2
+    y0   = ymin + t_dy / 2
 
     for i in range(n_tx):
         for j in range(n_ty):

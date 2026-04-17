@@ -21,6 +21,7 @@ Usage example::
 from math import inf
 import os
 import subprocess
+import sys
 import numpy as np
 
 from farms_core.io.yaml import pyobject2yaml
@@ -43,6 +44,7 @@ class BaseSimConfig:
     Override hook methods for custom behaviour:
 
     * ``customize_animat``          – per-animat / per-index tweaks
+    * ``customize_morphology_links`` – override per-link morphology fields
     * ``customize_joint_initials``  – override joint initial positions
     * ``extra_simulation_extensions`` – add FlowViewer, CameraRecording, etc.
     """
@@ -164,7 +166,7 @@ class BaseSimConfig:
         self.compute_sdf    = False
         self.suit           = 0.0
 
-        # ── BDIM physics (e.g. pleurodeles solref) ────────────────────────
+        # ── Global MuJoCo contact tweaks (also forwarded into BDIM YAML) ───
         self.bdim_physics = None
 
         # ── Lock the configuration ────────────────────────────────────────
@@ -223,6 +225,13 @@ class BaseSimConfig:
         frequency or initial state).
         """
 
+    def customize_morphology_links(self, links_list, animat_i, animat_pars, index):
+        """Called after the links list is built.
+
+        Override to customize per-link morphology fields such as friction,
+        density, fluid interaction, or drag coefficients.
+        """
+
     def customize_joint_initials(self, joints_list):
         """Called after the joints list is built.
 
@@ -276,15 +285,20 @@ class BaseSimConfig:
                 ext_loader = animat_pars["controller_config"]["path"]
                 ext_config = animat_pars["controller_config"]
             else:
-                raise ValueError(
-                    "animat_pars must contain 'controller_path', "
-                    "'muscle_loader', or 'controller_config'"
-                )
+                ext_loader = ""
+                ext_config = {}
 
             control_type = animat_pars["control_type"]
             gains        = animat_pars["gains"]
             spawn_mode   = animat_pars["spawn_mode"]
             pose         = animat_pars["pose"]
+
+            animat_extensions = []
+            if ext_loader:
+                animat_extensions.append({
+                    "loader": ext_loader,
+                    "config": ext_config,
+                })
 
             drag_coefficients = [self.constant_drags for _ in range(nlinks)]
 
@@ -341,15 +355,20 @@ class BaseSimConfig:
                         } for jn in joint_names
                     ],
                 },
-                "extensions": [
-                    {"loader": ext_loader, "config": ext_config},
-                ],
+                "extensions": animat_extensions,
             }
 
             # Add drag coefficients when using drag model
             if self.use_drag:
                 for i, link in enumerate(animat_dict["morphology"]["links"]):
                     link["drag_coefficients"] = drag_coefficients[i]
+
+            self.customize_morphology_links(
+                animat_dict["morphology"]["links"],
+                animat_i,
+                animat_pars,
+                index,
+            )
 
             # Joint initial overrides hook
             self.customize_joint_initials(
@@ -519,6 +538,14 @@ class BaseSimConfig:
             ],
         }
 
+        if self.bdim_physics is not None:
+            simulation_dict["extensions"].append({
+                "loader": "lilytorch.integration.extensions.PhysicsOptionsExtension",
+                "config": {
+                    "physics_options": self.bdim_physics,
+                },
+            })
+
         if self.use_bdim:
             simulation_dict["extensions"].append(
                 self._bdim_extension(output_folder)
@@ -535,9 +562,12 @@ class BaseSimConfig:
         )
 
     def gen_sh_config(self, output_folder, index=0):
-        sh_str = f"""#!/bin/bash
-    farmsim --experiment_config experiment_config.yaml "$@"
-    """
+        sh_str = (
+            "#!/bin/bash\n"
+            "set -e\n"
+            f'"{sys.executable}" -c "from farms_sim._bootstrap import main; main()" '
+            '--experiment_config experiment_config.yaml "$@"\n'
+        )
         with open(os.path.join(output_folder, 'run.sh'), 'w') as f:
             f.write(sh_str)
 
@@ -554,7 +584,7 @@ class BaseSimConfig:
         self.gen_experiment_config(output_folder, index)
         self.gen_sh_config(output_folder, index)
         os.chdir(output_folder)
-        subprocess.run(['bash', 'run.sh'])
+        subprocess.run(['bash', 'run.sh'], check=True)
 
     def run(self):
         """Run all configurations. Override for multi-run sweeps."""
