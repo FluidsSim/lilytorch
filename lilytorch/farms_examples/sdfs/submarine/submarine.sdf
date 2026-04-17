@@ -1,0 +1,101 @@
+<?xml version="1.0" ?>
+<sdf version="1.6">
+  <world name="world">
+    <model name="submarine">
+      <pose>0 0 0 0 0 0</pose>
+      <link name="base_link">
+        <pose>0 0 0 0 0 0</pose>
+        <inertial>
+          <pose>0 0 0 0 0 0</pose>
+          <!--
+            Submarine body modelled as a solid cylinder of length L=0.4 m
+            and radius R=0.05 m with mean density rho_body=900 kg/m^3
+            (slightly buoyant in water of rho=1000 kg/m^3).
+
+              V    = pi * R^2 * L                = 3.14159e-3 m^3
+              m    = rho_body * V                = 2.82743338823 kg
+              Ixx  = (1/2) * m * R^2             = 3.534291735e-3
+              Iyy  = Izz = (1/12) * m * (3 R^2 + L^2)
+                                                 = 3.95840354e-2
+            (X is the long axis of the submarine.)
+          -->
+          <mass>2.82743338823</mass>
+          <inertia>
+            <ixx>0.003534291735</ixx>
+            <ixy>0</ixy>
+            <ixz>0</ixz>
+            <iyy>0.039584035367</iyy>
+            <iyz>0</iyz>
+            <izz>0.039584035367</izz>
+          </inertia>
+        </inertial>
+        <collision name="base_link_collision">
+          <pose>0 0 0 0 1.5707963267948966 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.05</radius>
+              <length>0.4</length>
+            </cylinder>
+          </geometry>
+        </collision>
+        <visual name="base_link_visual">
+          <pose>0 0 0 0 1.5707963267948966 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.05</radius>
+              <length>0.4</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <ambient>0.1 0.3 0.5 1</ambient>
+            <diffuse>0.1 0.3 0.5 1</diffuse>
+            <specular>0.4 0.4 0.4 1</specular>
+            <emissive>0 0 0 1</emissive>
+          </material>
+        </visual>
+        <visual name="conning_tower_visual">
+          <pose>0 0 0.05 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.08 0.04 0.04</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.1 0.3 0.5 1</ambient>
+            <diffuse>0.1 0.3 0.5 1</diffuse>
+            <specular>0.4 0.4 0.4 1</specular>
+            <emissive>0 0 0 1</emissive>
+          </material>
+        </visual>
+        <visual name="nose_visual">
+          <pose>0.2 0 0 0 0 0</pose>
+          <geometry>
+            <sphere>
+              <radius>0.05</radius>
+            </sphere>
+          </geometry>
+          <material>
+            <ambient>0.1 0.3 0.5 1</ambient>
+            <diffuse>0.1 0.3 0.5 1</diffuse>
+            <specular>0.4 0.4 0.4 1</specular>
+            <emissive>0 0 0 1</emissive>
+          </material>
+        </visual>
+        <visual name="tail_visual">
+          <pose>-0.2 0 0 0 0 0</pose>
+          <geometry>
+            <sphere>
+              <radius>0.05</radius>
+            </sphere>
+          </geometry>
+          <material>
+            <ambient>0.1 0.3 0.5 1</ambient>
+            <diffuse>0.1 0.3 0.5 1</diffuse>
+            <specular>0.4 0.4 0.4 1</specular>
+            <emissive>0 0 0 1</emissive>
+          </material>
+        </visual>
+      </link>
+    </model>
+  </world>
+</sdf>
