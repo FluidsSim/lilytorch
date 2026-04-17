@@ -61,7 +61,7 @@ class BDIMController(AnimatNetwork):
 
         pars = yaml2pyobject(yaml_file)
 
-        self.fluid_solver = FluidSolver(pars, dtype=torch.float32, costum_update=True, compute_forces=True)
+        self.fluid_solver = FluidSolver(pars, dtype=torch.float32, custom_update=True, compute_forces=True)
 
         self.device = self.fluid_solver.device
         self.dtype=self.fluid_solver.X.dtype

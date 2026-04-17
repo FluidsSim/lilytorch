@@ -1,30 +1,18 @@
 
 from setuptools import setup, find_packages
-import numpy as np  # pylint: disable=wrong-import-position
-
-# setuptools.dist.Distribution().fetch_build_eggs(['ns_core'])
-
-with open("README.md", "r") as fh:
-    description = fh.read()
+import numpy as np
 
 setup(
     name="lilytorch",
-    version="0.0.1",
+    version="0.1.0",
     author="Andrea Ferrario",
     author_email="ferrarioa5@gmail.com",
-    # packages=["lilytorch"],
-    description="Lilytorch",
-    packages=find_packages(),
-    long_description=description,
-    include_package_data=True,
-    include_dirs=[np.get_include(), 'lilytorch'],
+    description="GPU-accelerated CFD with immersed-boundary methods, built on PyTorch",
+    long_description=open("README.md").read(),
     long_description_content_type="text/markdown",
-    python_requires='>=3.8',
+    packages=find_packages(),
+    include_package_data=True,
+    include_dirs=[np.get_include(), "lilytorch"],
+    python_requires=">=3.9",
     zip_safe=False,
-    install_requires=[
-        'numpy',
-        'scipy',
-        'matplotlib',
-        # 'torch'
-    ],
 )

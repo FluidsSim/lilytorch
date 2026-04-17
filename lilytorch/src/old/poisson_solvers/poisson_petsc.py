@@ -1,86 +1,230 @@
+
+
+
+from mpi4py import MPI
 from petsc4py import PETSc
-import numpy as np
+import torch
+import os
 
-# Create a 2D DMDA (structured grid)
-nx, ny = 32, 32
-da = PETSc.DMDA().create([nx, ny], dof=1,
-                          stencil_width=1,
-                          boundary_type=(PETSc.DM.BoundaryType.MIRROR,
-                                         PETSc.DM.BoundaryType.MIRROR))
+nullspace = PETSc.NullSpace().create(constant=True, comm=MPI.COMM_WORLD)
 
-A = da.createMatrix()
-b = da.createGlobalVec()
-x = da.createGlobalVec()
+class PoissonSolverPETSc:
 
-hx = 1.0 / (nx - 1)
-hy = 1.0 / (ny - 1)
-hx2 = hx * hx
-hy2 = hy * hy
+    def __init__(self, nx, ny, x, y, device=None, dtype=None):
 
-# Assemble the matrix and RHS
-rows, cols = da.getRanges()
+        self.nx = nx
+        self.ny = ny
+        self.device = device
+        self.dtype = dtype
 
-# Fill A and b manually
-for j in range(rows[0], rows[1]):
-    for i in range(cols[0], cols[1]):
-        row = da.getGlobalIndices([i, j])[0]
-        v_center = 0.0
-        entries = []
-        cols_ = []
+        self.dx = float(x[1]-x[0])
+        self.dy = float(y[1]-y[0])
 
-        # f(x, y)
-        xcoord, ycoord = i * hx, j * hy
-        f_val = 1.0  # right-hand side
+        assert (self.dx-self.dy)<1e-10, "Currently only square grids are supported for PETSc Poisson solver."
+        self.h = self.dx
 
-        # Center
-        v_center = -2.0 * (1.0/hx2 + 1.0/hy2)
+        # ==================== create Poisson matrix ====================
+        self.A = PETSc.Mat()
+        self.A.create(comm=PETSc.COMM_WORLD)
+        self.A.setSizes((self.nx * self.ny, self.nx * self.ny))
+        self.A.setType(PETSc.Mat.Type.AIJ)
+        self.A.setFromOptions()
+        self.A.setPreallocationNNZ(5)
+        def index(i,j):
+            return i * self.ny + j
 
-        # Neighbors
-        for di, dj, coeff in [(-1,0,1.0/hx2), (1,0,1.0/hx2), (0,-1,1.0/hy2), (0,1,1.0/hy2)]:
-            ni, nj = i + di, j + dj
-            if 0 <= ni < nx and 0 <= nj < ny:
-                entries.append(coeff)
-                cols_.append(da.getGlobalIndices([ni, nj])[0])
-            else:
-                # Neumann BC: du/dn = 0  → mirror the interior value
-                v_center += coeff  # modifies the diagonal (acts as zero flux)
+        rstart, rend = self.A.getOwnershipRange()
+        Neumann = True
+        for i in range(self.nx):
+            for j in range(self.ny):
+                row = index(i,j)
+                self.A.setValue(row, row, 4.0/self.h**2, addv=PETSc.InsertMode.ADD_VALUES)
+                if i > 0:
+                    column = index(i-1,j)
+                    self.A.setValue(row, column, -1.0/self.h**2, addv=PETSc.InsertMode.ADD_VALUES)
+                else:
+                    if Neumann:
+                        column = index(i+1,j)
+                        self.A.setValue(row, column, -1.0/self.h**2, addv=PETSc.InsertMode.ADD_VALUES)
+                if i < self.nx-1:
+                    column = index(i+1,j)
+                    self.A.setValue(row, column, -1.0/self.h**2, addv=PETSc.InsertMode.ADD_VALUES)
+                else:
+                    if Neumann:
+                        column = index(i-1,j)
+                        self.A.setValue(row, column, -1.0/self.h**2, addv=PETSc.InsertMode.ADD_VALUES)
+                if j > 0:
+                    column = index(i,j-1)
+                    self.A.setValue(row, column, -1.0/self.h**2, addv=PETSc.InsertMode.ADD_VALUES)
+                else:
+                    if Neumann:
+                        column = index(i,j+1)
+                        self.A.setValue(row, column, -1.0/self.h**2, addv=PETSc.InsertMode.ADD_VALUES)
+                if j < self.ny-1:
+                    column = index(i,j+1)
+                    self.A.setValue(row, column, -1.0/self.h**2, addv=PETSc.InsertMode.ADD_VALUES)
+                else:
+                    if Neumann:
+                        column = index(i,j-1)
+                        self.A.setValue(row, column, -1.0/self.h**2, addv=PETSc.InsertMode.ADD_VALUES)
 
-        entries.append(v_center)
-        cols_.append(row)
+        self.A.assemblyBegin()
+        self.A.assemblyEnd()
 
-        A.setValues([row], cols_, entries)
-        b.setValue(row, f_val)
+        # self.ksp.create(comm=self.A.getComm())
 
-A.assemble()
-b.assemble()
+        # petsc_options = {
+        #     "ksp_error_if_not_converged": True,
+        #     "ksp_monitor": None,
+        #     "ksp_type": "gmres",
+        #     "pc_type": "hypre",
+        #     "pc_hypre_type": "boomeramg",
+        #     "pc_hypre_boomeramg_max_iter": 1,
+        #     "pc_hypre_boomeramg_cycle_type": "v",
+        #     "ksp_rtol": 1.0e-13,
+        # }
 
-# Set up KSP solver
-ksp = PETSc.KSP().create()
-ksp.setOperators(A)
-ksp.setType('cg')
-ksp.getPC().setType('hypre')  # or 'jacobi' / 'sor' etc.
-ksp.setFromOptions()
 
-# Solve
-ksp.solve(b, x)
 
-# Get solution as NumPy array
-x_local = da.getVecArray(x)
-u = np.zeros((ny, nx))
-for j in range(ny):
-    for i in range(nx):
-        u[j, i] = x_local[i, j]
+        # petsc_options = {
+        #     "ksp_error_if_not_converged": True,
+        #     "ksp_type": "gmres",
+        #     "pc_type": "gamg",
+        #     "ksp_rtol": 1.0e-8,
+        #     "ksp_monitor": None,
+        # }
 
-# Shift mean to zero since Neumann BC makes solution unique up to a constant
-u -= np.mean(u)
+        self.setup_iterative()
+        # self.setup_mups()
 
-# Print residual and info
-print("Converged in", ksp.getIterationNumber(), "iterations.")
-print("Final residual norm:", ksp.getResidualNorm())
 
-# Optionally visualize
-import matplotlib.pyplot as plt
-plt.imshow(u, origin='lower', extent=(0,1,0,1))
-plt.colorbar(label='u(x,y)')
-plt.title("Poisson equation with Neumann BCs")
-plt.show()
+    def setup_mups(self):
+
+        petsc_options = {
+            "ksp_error_if_not_converged": True,
+            "ksp_type": "preonly",
+            "pc_type": "lu",
+            "pc_factor_mat_solver_type": "mumps",
+            "ksp_monitor": None,
+        }
+        self.ksp = PETSc.KSP().create(MPI.COMM_WORLD)
+        self.ksp.setOptionsPrefix("singular_direct")
+
+        opts = PETSc.Options()
+        opts.prefixPush(self.ksp.getOptionsPrefix())
+        for key, value in petsc_options.items():
+            opts[key] = value
+        self.ksp.setFromOptions()
+        for key, value in petsc_options.items():
+            del opts[key]
+        opts.prefixPop()
+
+        assert nullspace.test(self.A)
+        self.A.setNullSpace(nullspace)
+
+        self.ksp.setOperators(self.A)
+
+
+    def setup_iterative(self):
+
+        petsc_options = {
+            "ksp_error_if_not_converged": True,
+            "ksp_monitor": None,
+            "ksp_type": "gmres",
+            "pc_type": "hypre",
+            "pc_hypre_type": "boomeramg",
+            "pc_hypre_boomeramg_max_iter": 1,
+            "pc_hypre_boomeramg_cycle_type": "v",
+            "ksp_rtol": 1.0e-13,
+        }
+        self.ksp = PETSc.KSP().create(MPI.COMM_WORLD)
+        self.ksp.setOptionsPrefix("singular_iterative")
+
+        opts = PETSc.Options()
+        opts.prefixPush(self.ksp.getOptionsPrefix())
+        for key, value in petsc_options.items():
+            opts[key] = value
+        self.ksp.setFromOptions()
+        for key, value in petsc_options.items():
+            del opts[key]
+        opts.prefixPop()
+
+        self.A.setNearNullSpace(nullspace)
+
+        self.ksp.setOperators(self.A)
+
+    def solve(self, f):
+        f[0,:]=0.0
+        f[-1,:]=0.0
+        f[:,0]=0.0
+        f[:,-1]=0.0
+        sol, b = self.A.createVecs()
+        b = PETSc.Vec().createWithArray(f.flatten())
+        print("solving poisson with PETSc...")
+        self.ksp.solve(b, sol)
+        return torch.from_numpy(sol.getArray()).to(device=self.device, dtype=self.dtype)
+
+
+
+
+
+if __name__ == "__main__":
+
+    dtype = torch.float32
+    device = "cpu"
+
+    Nx = 512
+    Ny = 512
+
+    xmin = 0.0
+    xmax = 1.0
+    ymin = 0.0
+    ymax = 1.0
+
+    dx=(xmax-xmin)/(Nx-2)
+    dy=(ymax-ymin)/(Ny-2)
+
+    x = torch.arange(xmin-dx/2, xmax+dx, dx, dtype=dtype, device=device)
+    y = torch.arange(ymin-dy/2, ymax+dy, dy, dtype=dtype, device=device)
+
+    solver = PoissonSolverPETSc(Nx, Ny, x, y, device=device, dtype=dtype)
+
+
+    # f= torch.ones((Nx,Ny), dtype=dtype)
+    f = torch.cos(2 * torch.pi * x[:, None]) * torch.ones((1, Ny), dtype=dtype, device=device)
+
+    sol=solver.solve(f)
+
+    # Compute exact solution with zero mean
+    B = 0.0
+    u_exact = torch.cos(2 * torch.pi * x[:, None]) / (4 * torch.pi ** 2)
+    mean_u_exact = torch.mean(u_exact)
+    u_exact = u_exact - mean_u_exact  # ensure zero mean
+
+
+    import matplotlib.pyplot as plt
+
+    # Plot both numerical and exact solutions side by side
+    fig, axs = plt.subplots(1, 2, subplot_kw={'projection': '3d'}, figsize=(12, 5))
+
+    X, Y = torch.meshgrid(x, y, indexing='ij')
+    Z = sol.reshape(Nx, Ny)
+
+
+    # Numerical solution
+    axs[0].plot_surface(X, Y, Z, cmap='viridis')
+    axs[0].set_xlabel('x')
+    axs[0].set_ylabel('y')
+    axs[0].set_zlabel('Numerical Solution')
+    axs[0].set_title('Poisson Equation Solution')
+
+    # Exact solution
+    axs[1].plot_surface(X, Y, u_exact, cmap='viridis')
+    axs[1].set_xlabel('x')
+    axs[1].set_ylabel('y')
+    axs[1].set_zlabel('Exact Solution')
+    axs[1].set_title('Exact Solution (Zero Mean)')
+
+    plt.tight_layout()
+    plt.show()
+

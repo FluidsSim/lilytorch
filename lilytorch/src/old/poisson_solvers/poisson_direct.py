@@ -44,8 +44,6 @@ class Poisson2D_DIRECT:
 
         L_jax = jsparse.BCOO.from_scipy_sparse(L_sys)
 
-        from IPython import embed; embed()
-
         # self.L_sys_torch = np.sparse_csr_tensor(L_sys_coo.row, L_sys_coo.col, L_sys_coo.data, (self.Ny, self.Nx), dtype=self.dtype, device=self.device)
 
 

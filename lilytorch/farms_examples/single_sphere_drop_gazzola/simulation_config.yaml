@@ -3,15 +3,15 @@ units:
   seconds: 1
   kilograms: 1
 runtime:
-  n_iterations: 100001
-  buffer_size: 100001
+  n_iterations: 27001
+  buffer_size: 27001
   play: true
   rtl: 1.0
   fast: false
   headless: true
   show_progress: true
 physics:
-  timestep: 0.0001
+  timestep: 0.001
   gravity:
   - 0
   - 0
@@ -32,7 +32,7 @@ mujoco:
   texture_repeat: 10
   shadow_size: 1024
   visual_scale: 1.0
-  extent: 100.0
+  extent: 3.0
 pybullet:
   opengl2: false
   lcp: dantzig
@@ -46,35 +46,50 @@ pybullet:
 extensions:
 - loader: lilytorch.integration.extensions.FluidExtension
   config:
-    handler_path: lilytorch.farms_examples.single_sphere_drop_gazzola.controller.BDIMhandler
+    handler_path: lilytorch.integration.BDIMhandler.BDIMhandler
     bdim_yaml:
       solver :
-        use_gpu : False
+        use_gpu : True
         nthreads : 16
 
-        Nx: 256
-        Ny: 2048
-        # Nx: 1024
-        # Ny: 8192
-        xmin: -0.02
-        ymin: 0.0
-        xmax: 0.02
-        ymax: 0.32
 
-        convection_method : "abdquickest"
-        dt                : 0.0001
-        nt                : 150000
+        Nx: 512
+        Ny: 4096
+        # Nx: 512
+        # Ny: 8192
+        xmin: -0.06
+        ymin: 0.0
+        xmax: 0.06
+        ymax: 0.64
+
+        convection_method : "quick"
+        dt                : 0.001
+        nt                : 27001
         nu                : 8.0e-7
         rho               : 996.0
+        rho_body          : 1005.96
+        eps_multiplier    : 2.0
 
-        poisson_tol       : 1.0e-7
-        poisson_max_cycles: 5
-        poisson_max_mgcg_cycles: 3
-        jacobi_weight     : 0.7
-        poisson_nsmoothing: 5
-        poisson_verbose   : True
-        poisson_folder : "data/"
+        poisson_tol            : 1.0e-9
+        poisson_max_cycles     : 10
+        poisson_max_mgcg_cycles: 5
+        jacobi_weight          : 0.7
+        poisson_nsmoothing     : 5
+        poisson_verbose        : True
+        poisson_method         : "fft"
+        poisson_bc_type        : "neumann"
 
+        poisson_folder         : "output/"
+
+        # sponge:
+        #   width   : 0.005    # 1D — absorbing layer on each x-wall only
+        #   strength: 100.0     # 1/s
+        #   axes    : ["x"]    # lateral walls only; do not damp y (settling direction)
+
+        time_integration: "euler"
+        heun: false            # Heun (RK2) for BDIM-projection cycle (matches namkoong)
+        force_method: "method2"
+        force_delta_order: 1
 
       boundary_conditions:
         BC_type_u:
@@ -98,12 +113,20 @@ extensions:
         - 0
         - 0
 
+      physics:
+        solref: [0.001, 0.5]
+
       body:
+        2d_plane: "xz"       # MuJoCo (x,z) → fluid (x,y); sphere falls in MuJoCo z
+        force_scaling: 1.0   # no z-extent scaling for 2D analytical body
         type: multi_animat
-        plotting: True
+        plotting: False
         compute_interp: False
-        plotting_meshes: True
-        n_samples: (2000, 2000)
+        plotting_meshes: False
+        save_folder: None
+        n_samples:
+        - 1000
+        - 1000
         update_maps:
           rotation: "None"
           translation:
@@ -114,7 +137,8 @@ extensions:
         scale: 1
 
       output:
-        save_path: "/data/andreaferrario/ns_data/"
+        save_path: ""
+        existing_folder: /data/andreaferrario/ns_data/namkoong_sphere_drop
         save_frames: True
         save_every : 500
         vmin: -5
@@ -129,7 +153,7 @@ extensions:
 
 - loader: farms_core.simulation.extensions.ExperimentLogger
   config:
-    log_path: output
+    log_path: /data/andreaferrario/ns_data/namkoong_sphere_drop/output
     skip: 0
 
 # - loader: farms_mujoco.simulation.extensions.CameraFollower

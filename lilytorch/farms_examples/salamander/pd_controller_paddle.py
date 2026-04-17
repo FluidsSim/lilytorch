@@ -7,7 +7,7 @@ from farms_core.sensors.sensor_convention import sc
 from farms_core.model.control import ControlType
 import numpy as np
 from lilytorch.util.rw import Dict2Class
-from farms_amphibious.control.kinematics import KinematicsController
+from lilytorch.integration.kinematics import KinematicsController
 import matplotlib.pyplot as plt
 
 class PositionController(KinematicsController):
@@ -52,6 +52,7 @@ class PositionController(KinematicsController):
             joints_control_types=joints_control_types,
         )
         super().__init__(
+            animat_i=animat_i,
             joints_names=joints_names_per_type,
             kinematics=kinematics,
             sampling=kinematics_sampling,
@@ -103,11 +104,22 @@ class PositionController(KinematicsController):
         elbowID=-1 - elbow up
         """
         D=((x**2+y**2-d1**2-d2**2)/(2*d1*d2)).clip(-1,1)
-        elbow=elbowID*np.acos(D)
+        elbow=elbowID*np.arccos(D)
         k1=d1+d2*np.cos(elbow)
         k2=d2*np.sin(elbow)
-        thigh=np.atan2(y,x)-np.atan2(k2,k1)
+        thigh=np.arctan2(y,x)-np.arctan2(k2,k1)
         return (thigh, elbow)
+
+
+    def gen_trajectory(self, times, freq, phase, sampling_rate):
+        s    = np.zeros_like(times)
+        side = 1
+        s[0] = 0.0
+        k    = 0.8
+        for i in range(1, len(times)):
+            dsdt = 2*np.pi*freq * (1 + side * k * np.cos(s[i-1]+phase))
+            s[i] = s[i-1] + dsdt/sampling_rate
+        return np.cos(-s+phase), np.sin(-s+phase)
 
     def generate_positions(
             self,
@@ -124,23 +136,28 @@ class PositionController(KinematicsController):
 
         nmotors = 8
 
-        times = np.expand_dims(np.arange(0, tstop, 1 / sampling_rate), axis=1)
+        times = np.arange(0, tstop, 1 / sampling_rate) #np.expand_dims(np.arange(0, tstop, 1 / sampling_rate), axis=1)
         thetas_spine = np.zeros((times.shape[0], nmotors))
 
-        radius = 0.005
-        center = np.array([0.01, 0.00])
-        phase_shift = 0 #np.pi
-        x_traj_left = center[0] + radius * np.sin(2*np.pi*freq*times.T[0])
-        y_traj_left = center[1] + radius * np.cos(2*np.pi*freq*times.T[0])
+        radius      = 0.006
+        center      = np.array([0.01, -0.00])
+        phase_shift = np.pi
 
-        x_traj_right = center[0] + radius * np.sin(2*np.pi*freq*times.T[0] + phase_shift)
-        y_traj_right = center[1] + radius * np.cos(2*np.pi*freq*times.T[0] + phase_shift)
+        x_, y_ = self.gen_trajectory(times, freq, 0, sampling_rate)
 
-        l1 = np.array(0.005)
-        l2 = np.array(0.005)
+        x_traj_left = center[0] + radius * x_
+        y_traj_left = center[1] + radius * y_
 
-        thigh_left, elbow_left = self.ComputeIK2D(1, x_traj_left, y_traj_left, l1, l2)
-        thigh_right, elbow_right = self.ComputeIK2D(1, x_traj_right, y_traj_right, l1, l2)
+        x_, y_ = self.gen_trajectory(times, freq, phase_shift, sampling_rate)
+
+        x_traj_right = center[0] + radius * x_
+        y_traj_right = center[1] + radius * y_
+
+        l1 = np.array(0.006)
+        l2 = np.array(0.006)
+
+        thigh_left , elbow_left  = self.ComputeIK2D(-1, x_traj_left, y_traj_left, l1, l2)
+        thigh_right, elbow_right = self.ComputeIK2D(-1, x_traj_right, y_traj_right, l1, l2)
 
         limb_angles = np.zeros((times.shape[0], 8))
 
@@ -149,11 +166,16 @@ class PositionController(KinematicsController):
         limb_angles[:,2] = thigh_right
         limb_angles[:,3] = elbow_right
 
-        # also hindlimbs
-        limb_angles[:,4] = thigh_right
-        limb_angles[:,5] = elbow_right
-        limb_angles[:,6] = thigh_left
-        limb_angles[:,7] = elbow_left
+        limb_angles[:,4] = -np.pi/3
+        limb_angles[:,5] = -np.pi/4
+        limb_angles[:,6] = -np.pi/3
+        limb_angles[:,7] = -np.pi/4
+
+        # # also hindlimbs -- remove to emulate forelimb-only motion for transection
+        # limb_angles[:,4] = thigh_right
+        # limb_angles[:,5] = elbow_right
+        # limb_angles[:,6] = thigh_left
+        # limb_angles[:,7] = elbow_left
 
 
         data = np.column_stack([times, thetas_spine, limb_angles])
