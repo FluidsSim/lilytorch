@@ -46,19 +46,25 @@ class SimConfig(BaseSimConfig):
         self.use_bdim = False
 
         # ── Animats ───────────────────────────────────────────────────
-        # Single submarine rigid body (no joints).  The constant drag
-        # coefficients [linear, quadratic] applied to every link by the
-        # FARMS drag model are inherited from BaseSimConfig.
+        # Submarine with a propeller revolute joint.  The propeller is
+        # driven at a constant angular velocity ``omega`` by
+        # PropellerController, and two pitched blade links (with
+        # anisotropic drag coefficients set in customize_morphology_links)
+        # convert tangential drag into axial thrust.
         self.animats_pars = [
             {
                 "model_name"  : "submarine",
                 "sdf_name"    : "submarine.sdf",
-                "control_type": "position",
+                "control_type": "torque",
                 "gains"       : [0.0, 0.0, 0.0],
+                "controller_config": {
+                    "path": "lilytorch.farms_examples.submarine."
+                            "propeller_controller.PropellerController",
+                    "tau" : 0.1,   # constant torque on the propeller joint (Nm)
+                },
                 "spawn_mode"  : SpawnMode.FREE,
-                # Spawn the sub roughly at the centre of the pool,
-                # near the surface, oriented along +X.
-                "pose"        : [-0.5, 0.0, 0.2, 0.0, 0.0, 0.0],
+                # Spawn the sub at mid-depth in the pool, oriented along +X.
+                "pose"        : [-0.5, 0.0, 0.0, 0.0, 0.0, 0.0],
             },
         ]
 
@@ -74,9 +80,10 @@ class SimConfig(BaseSimConfig):
         self.zmax =  0.25
 
         # ── Physics ───────────────────────────────────────────────────
-        self.rho_body          = 900.0   # matches the SDF inertia mass
+        # Submarine is neutrally buoyant: body density matches the water.
+        self.rho_body          = 1000.0  # matches the SDF inertia mass
         self.rho               = 1000.0  # water density
-        self.timestep          = 0.005
+        self.timestep          = 0.001
         self.n_iterations      = 4001
         self.save_every        = 50
         self.num_sub_steps     = 1
@@ -127,6 +134,19 @@ class SimConfig(BaseSimConfig):
         self.n_samples             = (2000, 2000)
         self.force_scaling         = 1.0
         self.interp_data_subfolder = "interp_data_3d"
+
+    # ── Hooks ─────────────────────────────────────────────────────────
+
+    def customize_morphology_links(self, links_list, animat_i, animat_pars, index):
+        # Anisotropic drag on the blades: high normal-to-face (blade X,
+        # the thickness axis), low along chord (Z) and span (Y).  Together
+        # with the blade pitch this turns tangential rotation into +X thrust.
+        for link in links_list:
+            if link['name'] in ('blade_0', 'blade_1'):
+                link['drag_coefficients'] = [
+                    [-0.5, -0.01, -0.05],
+                    [0.0, 0.0, 0.0],
+                ]
 
     # ── Extensions ────────────────────────────────────────────────────
 
