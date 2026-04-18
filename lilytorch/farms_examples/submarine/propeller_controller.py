@@ -15,12 +15,12 @@ from farms_core.model.options import AnimatOptions
 class PropellerController(AnimatController):
     def __init__(self, joints_names, max_torques, tau, animat_i):
         super().__init__(
+            animat_i      = animat_i,
             joints_names  = joints_names,
             muscles_names = [],
             max_torques   = max_torques,
         )
-        self.tau      = float(tau)
-        self.animat_i = animat_i
+        self.tau = float(tau)
 
     @classmethod
     def from_options(
