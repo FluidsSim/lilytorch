@@ -321,8 +321,11 @@ def segment(X,Y,A,B,r1,r2):
 
 
 def capsule_3d(x, y, z, r1, r2, h, side="L"):
-    radial = torch.sqrt(y**2 + z**2)
-    return sdUnevenCapsule(radial, x, r1, r2, h, side=side)
+    # SDF/MuJoCo capsules are aligned with the local z-axis and centred on the
+    # geom frame; the cylindrical section runs from -h/2 to +h/2.
+    radial = torch.sqrt(x**2 + y**2)
+    axis = z + 0.5 * h
+    return sdUnevenCapsule(radial, axis, r1, r2, h, side="R")
 
 def box(x,y,xb=20,yb=20):
     qx=torch.abs(x)-xb
@@ -630,10 +633,13 @@ class mesh2sdf():
         self._ = self._raycasting_scene.add_triangles(self._mesht)
         self._mesh.compute_triangle_normals()
         self._face_normals = np.asarray(self._mesh.triangle_normals)
+        self._sign_nsamples = 11
 
     def __call__(self, points_in_object_frame: np.array):
-
-        self._raycasting_scene.compute_signed_distance(points_in_object_frame)
+        signed_distance = self._raycasting_scene.compute_signed_distance(
+            points_in_object_frame,
+            nsamples=self._sign_nsamples,
+        ).numpy()
 
         closest = self._raycasting_scene.compute_closest_points(points_in_object_frame)
         closest_points = closest['points']
@@ -642,31 +648,23 @@ class mesh2sdf():
         # negative SDF gradient outside the object and positive SDF gradient inside the object
         gradient = pts - points_in_object_frame
 
-        distance = np.linalg.norm(gradient, axis=-1)
+        distance = np.abs(signed_distance)
         # normalize gradients
         has_direction = distance > 0
         gradient[has_direction] = gradient[has_direction] / distance[has_direction, None]
 
-        # ensure ray destination is outside the object
-        ray_destination = np.repeat(self.bounding_box(padding=0.0)[None, :, 1], points_in_object_frame.shape[0], axis=0)
-        ray_destination = ray_destination.astype(np.float32)
-
-        # check if point is inside the object
-        rays = np.concatenate([points_in_object_frame, ray_destination], axis=-1)
-        intersection_counts = self._raycasting_scene.count_intersections(rays).numpy()
-        is_inside = intersection_counts % 2 == 1
-        distance[is_inside] = distance[is_inside] * -1
+        is_inside = signed_distance < 0
         # fix gradient direction to point away from surface outside
         gradient[~is_inside] = gradient[~is_inside] * -1
 
         # for any points very close to the surface, it is better to use the surface normal as the gradient
         # this is because the closest point on the surface may be noisy when close by
         # e.g. if you are actually on the surface, the closest surface point is itself so you get no gradient info
-        on_surface = np.abs(distance) < 1e-3
+        on_surface = distance < 1e-3
         surface_normals = self._face_normals[face_ids.numpy()[on_surface]]
         gradient[on_surface] = surface_normals
 
-        return distance, gradient
+        return signed_distance, gradient
 
     def bounding_box(self, padding=0., padding_ratio=0):
         aabb = self._mesh.get_axis_aligned_bounding_box()
@@ -1797,7 +1795,7 @@ class BodyMesh(Body):
         if not self.compute_interp:
             return
 
-        pad = self.eps + 2 * self.h  # same padding used for sample-count computation
+        pad = (self.eps + 2 * self.h).cpu()  # same padding used for sample-count computation
 
         if self.ndim == 2:
             self._compute_sdfs_2d(zpos, pad)
@@ -1823,11 +1821,18 @@ class BodyMesh(Body):
         query_pts = np.stack([xflat, yflat, zflat], axis=1).astype(np.float32)
 
         sdf_val_o3d, _ = self.m2s(query_pts)
-        if self.plotting:
-            self.m2s.visualize()
+        inside_mask = sdf_val_o3d.reshape(X.shape) < 0
+        labels = measure.label(inside_mask, connectivity=1)
+        component_ids, component_sizes = np.unique(labels[labels > 0], return_counts=True)
+        tiny_components = component_ids[component_sizes < 4]
+        if len(tiny_components) > 0:
+            inside_mask[np.isin(labels, tiny_components)] = False
 
         binary_2d = np.zeros((self.nsamples, self.msamples))
-        binary_2d[sdf_val_o3d.reshape(X.shape) < 0] = 1
+        binary_2d[inside_mask] = 1
+
+        if self.plotting:
+            self.m2s.visualize()
 
         if self.apply_closing_morph:
             gray = (255 * binary_2d).astype('uint8')
@@ -2264,6 +2269,7 @@ class MultiAnimatBodies(Body):
         for animat_i, animat in enumerate(experiment_options.animats):
             sdf        = _import_model_sdf().read(animat.sdf)[0]
             sdf_folder = os.path.dirname(animat.sdf)
+            morphology_links = getattr(getattr(animat, "morphology", None), "links", None)
 
             for link_i, link in enumerate(sdf.links):
                 # ---- extract MuJoCo / SDF visual colour (RGBA) ----
@@ -2273,7 +2279,35 @@ class MultiAnimatBodies(Body):
                     if hasattr(_vis, "color") and _vis.color is not None:
                         _link_rgba = list(_vis.color)  # [R, G, B, A]
 
-                geometry = link["collisions"][0]["geometry"]
+                morphology_link = None
+                if morphology_links is not None and link_i < len(morphology_links):
+                    morphology_link = morphology_links[link_i]
+
+                link_fluid_interaction = True
+                if morphology_link is not None:
+                    link_fluid_interaction = getattr(
+                        morphology_link,
+                        "fluid_interaction",
+                        link_fluid_interaction,
+                    )
+
+                collisions = link["collisions"]
+                if not collisions:
+                    if link_fluid_interaction:
+                        raise ValueError(
+                            f"Link '{link['name']}' in '{animat.sdf}' has no collision geometry "
+                            "but morphology.fluid_interaction=True. "
+                            "Add collision geometry or disable fluid interaction for that link."
+                        )
+                    print(f"  Skipping non-fluid link without collisions: {link['name']}")
+                    continue
+
+                collision = collisions[0]
+                collision_pose = np.array(
+                    collision["pose"] if "pose" in collision else np.zeros(6),
+                    dtype=x.cpu().numpy().dtype,
+                )
+                geometry = collision["geometry"]
                 if "uri" in geometry:
                     mesh_name = geometry["uri"]
                     mesh_gpath = os.path.normpath(sdf_folder + "/" + mesh_name)
@@ -2340,21 +2374,23 @@ class MultiAnimatBodies(Body):
                         )
                         _mesh_body_cache[cache_key] = body
                     body.mujoco_rgba = _link_rgba
+                    body.local_pose = collision_pose
                     self.bodies.append(body)
 
                 elif "radius" in geometry and "length" in geometry:
                     radius = torch.tensor(geometry["radius"], dtype=x.dtype, device=x.device)
                     length = torch.tensor(geometry["length"], dtype=x.dtype, device=x.device)
                     initial_pose = np.array(link.pose).astype(x.cpu().numpy().dtype)
-                    if "L" in link["name"]:
-                        side = "L"
-                    elif "R" in link["name"]:
-                        side = "R"
-                    else:
-                        raise ValueError("Capsule link name must contain 'L' or 'R' to define the side.")
+                    if self.ndim == 2:
+                        if "L" in link["name"]:
+                            side = "L"
+                        elif "R" in link["name"]:
+                            side = "R"
+                        else:
+                            raise ValueError("Capsule link name must contain 'L' or 'R' to define the side.")
 
                     if self.ndim == 3:
-                        sdf_fun = lambda x, y, z, side=side: capsule_3d(x, y, z, radius, radius, length, side=side)
+                        sdf_fun = lambda x, y, z: capsule_3d(x, y, z, radius, radius, length)
                         update_maps = (
                             lambda t: (0.0, 0.0, 0.0),
                             [
@@ -2372,11 +2408,20 @@ class MultiAnimatBodies(Body):
                                 lambda t, initial_pose=initial_pose: -initial_pose[1],
                             ],
                         )
-                    self.bodies.append(
-                        BodyAnalytical(device, x, y, sdf_fun, update_maps, z=self.z, eps=eps, plotting=False, pre_update=False, grids=grids)
+                    body = BodyAnalytical(
+                        device, x, y, sdf_fun, update_maps, z=self.z,
+                        eps=eps, plotting=False, pre_update=False, grids=grids,
                     )
-                    self.bodies[-1].bb = [[-radius.cpu(), radius.cpu()], [-radius.cpu(), radius.cpu()], [-radius.cpu(), radius.cpu()]]
-                    self.bodies[-1].mujoco_rgba = _link_rgba
+                    radius_cpu = radius.detach().cpu()
+                    length_cpu = length.detach().cpu()
+                    body.bb = [
+                        [-radius_cpu, radius_cpu],
+                        [-radius_cpu, radius_cpu],
+                        [-(0.5 * length_cpu + radius_cpu), 0.5 * length_cpu + radius_cpu],
+                    ]
+                    body.mujoco_rgba = _link_rgba
+                    body.local_pose = collision_pose
+                    self.bodies.append(body)
 
                 elif "radius" in geometry and "length" not in geometry:
                     radius = torch.tensor(geometry["radius"], dtype=x.dtype, device=x.device)
@@ -2400,11 +2445,14 @@ class MultiAnimatBodies(Body):
                                 lambda t, initial_pose=initial_pose: -initial_pose[1],
                             ],
                         )
-                    self.bodies.append(
-                        BodyAnalytical(device, x, y, sdf_fun, update_maps, z=self.z, eps=eps, plotting=False, pre_update=False, grids=grids)
+                    body = BodyAnalytical(
+                        device, x, y, sdf_fun, update_maps, z=self.z,
+                        eps=eps, plotting=False, pre_update=False, grids=grids,
                     )
-                    self.bodies[-1].bb = [[-radius.cpu(), radius.cpu()], [-radius.cpu(), radius.cpu()], [-radius.cpu(), radius.cpu()]]
-                    self.bodies[-1].mujoco_rgba = _link_rgba
+                    body.bb = [[-radius.cpu(), radius.cpu()], [-radius.cpu(), radius.cpu()], [-radius.cpu(), radius.cpu()]]
+                    body.mujoco_rgba = _link_rgba
+                    body.local_pose = collision_pose
+                    self.bodies.append(body)
                 else:
                     raise ValueError("Unsupported geometry type in SDF.")
                 self.body_ids.append([animat_i, link_i])

@@ -121,6 +121,9 @@ class BaseSimConfig:
         self.visual_scale  = 1.0
         self.extent        = 400.0
         self.shadow_size   = 0
+        self.viewer_native_body_colors = True
+        self.viewer_body_alpha = None
+        self.viewer_hide_collision_geoms_with_visuals = True
 
         # ── BDIM solver ───────────────────────────────────────────────────
         self.bdim_dt                 = 0.0001
@@ -135,9 +138,9 @@ class BaseSimConfig:
         self.poisson_nsmoothing      = 10
         self.poisson_verbose         = False
         self.poisson_bc_type         = "neumann"
-        self.poisson_compile         = True
-        self.compile_adv_diff        = True
-        self.compile_forces          = True
+        self.poisson_compile         = False
+        self.compile_adv_diff        = False
+        self.compile_forces          = False
         self.compile_sdf             = False
         self.smagorinsky_cs          = 0.0
         self.carreau                 = None   # dict with keys: nu_0, nu_inf, lam, n
@@ -148,6 +151,8 @@ class BaseSimConfig:
         self.zero_pressure_inside    = None
         self.force_method            = None
         self.time_integration        = None
+        # Fluid-explosion guard (forwarded into bdim_yaml.solver)
+        self.vmax_abort              = None   # m/s; None = auto
 
         # ── BDIM boundary conditions ──────────────────────────────────────
         # 2-D: 4 entries;  3-D: 6 entries
@@ -538,6 +543,15 @@ class BaseSimConfig:
             ],
         }
 
+        if self.viewer_native_body_colors:
+            simulation_dict["extensions"].append({
+                "loader": "lilytorch.integration.native_body_colors.NativeBodyColors",
+                "config": {
+                    "alpha": self.viewer_body_alpha,
+                    "hide_collision_geoms_with_visuals": self.viewer_hide_collision_geoms_with_visuals,
+                },
+            })
+
         if self.bdim_physics is not None:
             simulation_dict["extensions"].append({
                 "loader": "lilytorch.integration.extensions.PhysicsOptionsExtension",
@@ -647,6 +661,7 @@ class BaseSimConfig:
             ("zero_pressure_inside",    self.zero_pressure_inside),
             ("force_method",            self.force_method),
             ("time_integration",        self.time_integration),
+            ("vmax_abort",              self.vmax_abort),
         ]:
             if val is not None:
                 solver[key] = val

@@ -2436,6 +2436,89 @@ class FluidSolver:
             fut.result()          # re-raises any exception from the worker
         self._io_futures.clear()
 
+    def _snapshot_body_sdf_vals_for_plots(self, crop_slices=None):
+        """Snapshot per-body SDFs on CPU for plot colouring.
+
+        2-D uses the dense ``composite_body.sdf_vals`` stack directly.
+        3-D reconstructs a dense stack from the sparse per-body SDF blocks
+        cached in ``composite_body._sdf_sparse``.
+        """
+        comp = getattr(self, "composite_body", None)
+        bodies = getattr(comp, "bodies", None) if comp is not None else None
+        if comp is None or bodies is None or len(bodies) == 0:
+            return None
+
+        ndim = len(self.grid_shape)
+        if crop_slices is None:
+            crop_slices = (slice(None),) * ndim
+        elif not isinstance(crop_slices, tuple):
+            crop_slices = (crop_slices,) * ndim
+
+        if self.ndim == 2:
+            sdf_vals = getattr(comp, "sdf_vals", None)
+            if sdf_vals is None:
+                return None
+            sdf_vals_np = np.asarray(
+                sdf_vals.detach().cpu().numpy() if hasattr(sdf_vals, "detach") else sdf_vals,
+                dtype=np.float32,
+            )
+            return np.array(sdf_vals_np[(slice(None), *crop_slices)], dtype=np.float32, copy=True)
+
+        sdf_sparse = getattr(comp, "_sdf_sparse", None)
+        if sdf_sparse is None:
+            return None
+
+        full_shape = tuple(int(n) for n in self.grid_shape)
+        crop_bounds = []
+        cropped_shape = []
+        for axis, sl in enumerate(crop_slices):
+            start = 0 if sl.start is None else (full_shape[axis] + sl.start if sl.start < 0 else sl.start)
+            stop = full_shape[axis] if sl.stop is None else (full_shape[axis] + sl.stop if sl.stop < 0 else sl.stop)
+            start = max(0, min(full_shape[axis], start))
+            stop = max(start, min(full_shape[axis], stop))
+            crop_bounds.append((start, stop))
+            cropped_shape.append(stop - start)
+
+        sdf_vals_np = np.full((len(bodies), *cropped_shape), 1e4, dtype=np.float32)
+
+        for body_i, sparse_entry in enumerate(sdf_sparse):
+            if sparse_entry is None:
+                continue
+            aabb, sdf_body = sparse_entry
+            sdf_body_np = np.asarray(
+                sdf_body.detach().cpu().numpy() if hasattr(sdf_body, "detach") else sdf_body,
+                dtype=np.float32,
+            )
+
+            if aabb is None:
+                sdf_vals_np[body_i] = np.array(sdf_body_np[crop_slices], dtype=np.float32, copy=True)
+                continue
+
+            axis_ranges = [
+                (aabb[0], aabb[1]),
+                (aabb[2], aabb[3]),
+                (aabb[4], aabb[5]),
+            ]
+            dst_slices = []
+            src_slices = []
+            intersects = True
+            for axis, (body_lo, body_hi) in enumerate(axis_ranges):
+                crop_lo, crop_hi = crop_bounds[axis]
+                src_lo = max(body_lo, crop_lo)
+                src_hi = min(body_hi, crop_hi)
+                if src_lo >= src_hi:
+                    intersects = False
+                    break
+                dst_slices.append(slice(src_lo - crop_lo, src_hi - crop_lo))
+                src_slices.append(slice(src_lo - body_lo, src_hi - body_lo))
+
+            if not intersects:
+                continue
+
+            sdf_vals_np[(body_i, *dst_slices)] = sdf_body_np[tuple(src_slices)]
+
+        return sdf_vals_np
+
     def plotting_and_saving(self, u, v, p, iteration, *, w_vel=None, check_termination=True):
         """
         Unified plotting + data saving for 2-D and 3-D.
@@ -2473,6 +2556,19 @@ class FluidSolver:
 
             if self.ndim == 2:
                 _phys_extent = (self.xmin, self.xmax, self.ymin, self.ymax)
+                _crop_2d = (slice(1, -1), slice(1, -1))
+                _body_sdf_vals_np = self._snapshot_body_sdf_vals_for_plots(_crop_2d)
+                _sdf_2d = None
+                if hasattr(self, "composite_body") and hasattr(self.composite_body, "sdf_val"):
+                    _sdf_2d = self.composite_body.sdf_val.cpu().numpy().copy()[1:-1, 1:-1]
+                _body_mu0_rgba = None
+                if _body_sdf_vals_np is not None:
+                    _body_mu0_rgba = plotting.build_body_mu0_rgba(
+                        bodies,
+                        _body_sdf_vals_np.shape[1:],
+                        float(self.eps),
+                        sdf_vals=_body_sdf_vals_np,
+                    )
 
                 for (name, field_fn, vmin, vmax, show_body) in specs:
                     field = field_fn(self, u, v, p, w_vel)
@@ -2487,6 +2583,8 @@ class FluidSolver:
                         field_np, _phys_extent,
                         name, iteration, save_path,
                         vmin=eff_vmin, vmax=eff_vmax, bodies=_bodies,
+                        sdf_2d=_sdf_2d if show_body else None,
+                        body_mu0_rgba=_body_mu0_rgba if show_body else None,
                         body_com_positions=_com_positions if show_body else None,
                     )
             else:
@@ -2498,6 +2596,7 @@ class FluidSolver:
                     "y": self.y.cpu().numpy().copy()[_s],
                     "z": self.z.cpu().numpy().copy()[_s],
                 }
+                _body_sdf_vals_np = self._snapshot_body_sdf_vals_for_plots((_s, _s, _s))
                 # snapshot SDF for body-shape overlay on 2-D slice plots
                 sdf_np = None
                 if hasattr(self, "composite_body") and hasattr(self.composite_body, "sdf_val"):
@@ -2516,6 +2615,9 @@ class FluidSolver:
                         name, iteration, save_path,
                         vmin=eff_vmin, vmax=eff_vmax, bodies=_pass_bodies,
                         sdf_3d=sdf_np,
+                        body_mu0_coloring=_show_body and _body_sdf_vals_np is not None,
+                        body_eps=float(self.eps) if _body_sdf_vals_np is not None else None,
+                        sdf_vals=_body_sdf_vals_np if _show_body else None,
                         body_com_positions=_com_positions if _show_body else None,
                     )
 
@@ -2570,7 +2672,10 @@ class FluidSolver:
                         plotting.plot_field_3d,
                         field_np, coords,
                         name, iteration, self.save_path,
-                        sdf_3d=sdf_np, iso_value=iso_thresh,
+                        sdf_3d=sdf_np,
+                        iso_value=iso_thresh,
+                        bodies=bodies,
+                        sdf_vals=_body_sdf_vals_np,
                     )
 
         # ---- raw data save (2-D) ----

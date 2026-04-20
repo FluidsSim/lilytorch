@@ -47,6 +47,8 @@ class BDIMhandler:
             dtype_str = self.pars["solver"].get("dtype", "float32")
             self.dtype = torch.float32 if dtype_str == "float32" else torch.float64
         self.dtype_np = np.float32 if self.dtype == torch.float32 else np.float64
+        self._prev_body_index = ()
+        self._next_body_index = ()
 
         # ---- bookkeeping ----
         self.data = data          # list[AnimatData] from FARMS
@@ -154,6 +156,14 @@ class BDIMhandler:
             self.water_surface = 0.0
         self._buoyancy_initialized = False
 
+        # ---- explosion detection (cheap per-step NaN + |u|_max guard) ----
+        # vmax_abort defaults to a generous multiple of the inlet speed
+        # (or 100 m/s if no inlet). Finite-check is always on.
+        u_inlet = float(self.fluid_solver.adv_diff_solver.BC_values_u[1])
+        self._vmax_abort = float(self.pars["solver"].get(
+            "vmax_abort", max(100.0 * abs(u_inlet), 100.0),
+        ))
+
         # ---- optional physics solref tweak ----
         solref = self.pars.get("physics", {}).get("solref", None)
         if solref is not None:
@@ -185,12 +195,33 @@ class BDIMhandler:
                 comp.v_vals = torch.zeros(
                     (comp.nbodies, *gs), device=self.device, dtype=self.dtype)
 
+            # ``comp.body_ids`` is built once with the composite body, so the
+            # per-animat previous/next body links are static as well.
+            self._init_body_neighbors_2d()
+
             # Pre-build batched SDF tensor for grid_sample (2-D only)
             self._init_batched_sdf_2d()
 
     # ------------------------------------------------------------------
     # helpers
     # ------------------------------------------------------------------
+    def _init_body_neighbors_2d(self):
+        """Cache previous/next body indices within each animat for 2-D."""
+        comp = self.fluid_solver.composite_body
+
+        prev_body_index = [None] * len(comp.bodies)
+        next_body_index = [None] * len(comp.bodies)
+        last_body_index_by_animat = {}
+        for built_body_i, (built_animat_id, _) in enumerate(comp.body_ids):
+            prev_i = last_body_index_by_animat.get(built_animat_id)
+            if prev_i is not None:
+                prev_body_index[built_body_i] = prev_i
+                next_body_index[prev_i] = built_body_i
+            last_body_index_by_animat[built_animat_id] = built_body_i
+
+        self._prev_body_index = tuple(prev_body_index)
+        self._next_body_index = tuple(next_body_index)
+
     def _init_buoyancy_params(self, task, physics):
         """Precompute per-body mass & half-height for FARMS-style buoyancy.
 
@@ -364,30 +395,39 @@ class BDIMhandler:
             if self.contour_mask:
                 x_cnt = body.cnt_update[0]
                 y_cnt = body.cnt_update[1]
-                if link_id == 0:
-                    body_p = comp.bodies[body_i + 1]
-                    pt = Rs[animat_id][link_id + 1].T @ (
+                prev_body_i = self._prev_body_index[body_i]
+                next_body_i = self._next_body_index[body_i]
+
+                if prev_body_i is None and next_body_i is None:
+                    mask = torch.ones_like(x_cnt, dtype=torch.bool)
+                elif prev_body_i is None:
+                    (_, next_link_id) = comp.body_ids[next_body_i]
+                    body_p = comp.bodies[next_body_i]
+                    pt = Rs[animat_id][next_link_id].T @ (
                         torch.stack((x_cnt, y_cnt))
-                        - urdf_poses[animat_id][link_id + 1][:, None]
+                        - urdf_poses[animat_id][next_link_id][:, None]
                     )
                     mask = (body_p.sdf(pt[0], pt[1]) - body.h) >= 0
-                elif link_id == urdf_poses[animat_id].shape[0] - 1:
-                    body_m = comp.bodies[body_i - 1]
-                    pt = Rs[animat_id][link_id - 1].T @ (
+                elif next_body_i is None:
+                    (_, prev_link_id) = comp.body_ids[prev_body_i]
+                    body_m = comp.bodies[prev_body_i]
+                    pt = Rs[animat_id][prev_link_id].T @ (
                         torch.stack((x_cnt, y_cnt))
-                        - urdf_poses[animat_id][link_id - 1][:, None]
+                        - urdf_poses[animat_id][prev_link_id][:, None]
                     )
                     mask = (body_m.sdf(pt[0], pt[1]) - body.h) >= 0
                 else:
-                    body_m = comp.bodies[body_i - 1]
-                    pt_m = Rs[animat_id][link_id - 1].T @ (
+                    (_, prev_link_id) = comp.body_ids[prev_body_i]
+                    body_m = comp.bodies[prev_body_i]
+                    pt_m = Rs[animat_id][prev_link_id].T @ (
                         torch.stack((x_cnt, y_cnt))
-                        - urdf_poses[animat_id][link_id - 1][:, None]
+                        - urdf_poses[animat_id][prev_link_id][:, None]
                     )
-                    body_p = comp.bodies[body_i + 1]
-                    pt_p = Rs[animat_id][link_id + 1].T @ (
+                    (_, next_link_id) = comp.body_ids[next_body_i]
+                    body_p = comp.bodies[next_body_i]
+                    pt_p = Rs[animat_id][next_link_id].T @ (
                         torch.stack((x_cnt, y_cnt))
-                        - urdf_poses[animat_id][link_id + 1][:, None]
+                        - urdf_poses[animat_id][next_link_id][:, None]
                     )
                     sdf_m = body_m.sdf(pt_m[0], pt_m[1]) - body.h
                     sdf_p = body_p.sdf(pt_p[0], pt_p[1]) - body.h
@@ -561,6 +601,30 @@ class BDIMhandler:
 
         return (i0, i1, j0, j1, k0, k1)
 
+    def _compose_body_frame_3d(self, body, urdf_pos, R):
+        """Compose the MuJoCo link pose with the body's local collision pose."""
+        local_pose = getattr(body, "local_pose", None)
+        if local_pose is None:
+            return urdf_pos, R
+
+        local_translation = getattr(body, "_local_translation_t", None)
+        local_rotation = getattr(body, "_local_rotation_t", None)
+        if local_translation is None or local_rotation is None:
+            local_pose_np = np.asarray(local_pose, dtype=self.dtype_np)
+            local_translation = torch.tensor(
+                local_pose_np[:3], device=self.device, dtype=self.dtype,
+            )
+            local_rotation = torch.tensor(
+                Rotation.from_euler("xyz", local_pose_np[3:]).as_matrix().astype(self.dtype_np),
+                device=self.device, dtype=self.dtype,
+            )
+            body._local_translation_t = local_translation
+            body._local_rotation_t = local_rotation
+
+        body_pos = urdf_pos + R @ local_translation
+        body_rot = R @ local_rotation
+        return body_pos, body_rot
+
 
     # ---- 3-D update --------------------------------------------------
     def _update_3d(self, t, iteration, dt=1):
@@ -626,13 +690,15 @@ class BDIMhandler:
             lin_vel  = lin_vels[animat_id][link_id]
             ang_vel  = ang_vels[animat_id][link_id]
 
-            R_T = R.T  # (3, 3) — transposed rotation
+            body_pos, body_rot = self._compose_body_frame_3d(body, urdf_pos, R)
+
+            R_T = body_rot.T  # (3, 3) — transposed rotation
 
             # ── AABB-clipped SDF evaluation ─────────────────────────
             aabb = None
             if hasattr(body, 'sdf') and hasattr(body.sdf, 'z'):
                 aabb = self._body_aabb_indices(
-                    body, R, urdf_pos,
+                    body, body_rot, body_pos,
                     comp.x, comp.y, comp.z,
                     h_grid, gs, pad=3,
                 )
@@ -651,7 +717,7 @@ class BDIMhandler:
 
                 px, py, pz = rotate_grid_3d(
                     comp.X[sl], comp.Y[sl], comp.Z_grid[sl],
-                    R_T, urdf_pos,
+                    R_T, body_pos,
                 )
                 sdf_sub = body.sdf(px, py, pz)       # contiguous
 
@@ -662,17 +728,17 @@ class BDIMhandler:
                 # (exact interpolation instead of CC averaging)
                 px_u, py_u, pz_u = rotate_grid_3d(
                     comp.Xu_stag[sl], comp.Yu_stag[sl], comp.Zu_stag[sl],
-                    R_T, urdf_pos)
+                    R_T, body_pos)
                 sdf_sub_u = body.sdf(px_u, py_u, pz_u)
 
                 px_v, py_v, pz_v = rotate_grid_3d(
                     comp.Xv_stag[sl], comp.Yv_stag[sl], comp.Zv_stag[sl],
-                    R_T, urdf_pos)
+                    R_T, body_pos)
                 sdf_sub_v = body.sdf(px_v, py_v, pz_v)
 
                 px_w, py_w, pz_w = rotate_grid_3d(
                     comp.Xw_stag[sl], comp.Yw_stag[sl], comp.Zw_stag[sl],
-                    R_T, urdf_pos)
+                    R_T, body_pos)
                 sdf_sub_w = body.sdf(px_w, py_w, pz_w)
 
                 # Sub-block body velocity (strided coord reads →
@@ -727,7 +793,7 @@ class BDIMhandler:
                 _rotate = (_rotate_grid_3d_compiled
                            if fs._compile_sdf else rotate_grid_3d)
                 px, py, pz = _rotate(comp.X, comp.Y, comp.Z_grid,
-                                     R_T, urdf_pos)
+                                     R_T, body_pos)
                 sdf_cc = body.sdf(px, py, pz)
                 comp._sdf_sparse[body_i] = (None, sdf_cc)  # None = full grid
 
@@ -735,17 +801,17 @@ class BDIMhandler:
                 # (exact interpolation instead of CC averaging)
                 px_u, py_u, pz_u = _rotate(
                     comp.Xu_stag, comp.Yu_stag, comp.Zu_stag,
-                    R_T, urdf_pos)
+                    R_T, body_pos)
                 sdf_u = body.sdf(px_u, py_u, pz_u)
 
                 px_v, py_v, pz_v = _rotate(
                     comp.Xv_stag, comp.Yv_stag, comp.Zv_stag,
-                    R_T, urdf_pos)
+                    R_T, body_pos)
                 sdf_v = body.sdf(px_v, py_v, pz_v)
 
                 px_w, py_w, pz_w = _rotate(
                     comp.Xw_stag, comp.Yw_stag, comp.Zw_stag,
-                    R_T, urdf_pos)
+                    R_T, body_pos)
                 sdf_w = body.sdf(px_w, py_w, pz_w)
 
                 vel_u = (lin_vel[0]
@@ -1131,6 +1197,39 @@ class BDIMhandler:
                 friction_force_ang_z[body_i] + pressure_force_ang_z[body_i]
             ) * task.units.newtons
 
+    def _check_explosion(self, iteration):
+        """Abort immediately if the fluid fields went non-finite or
+        velocities grew past ``vmax_abort``.
+
+        Without this, NaN propagates silently (matplotlib renders NaN
+        as transparent) and FARMS happily keeps stepping MuJoCo with
+        zero fluid forces.
+        """
+        fs = self.fluid_solver
+        fields = {"u": fs.u0, "v": fs.v0, "p": fs.p0}
+        if self.ndim == 3:
+            fields["w"] = fs.w0
+
+        for name, arr in fields.items():
+            if not torch.isfinite(arr).all():
+                self.terminate = True
+                raise RuntimeError(
+                    f"[BDIM] Fluid explosion at iteration {iteration}: "
+                    f"non-finite values in field '{name}'. Likely cause: "
+                    f"body intersecting a domain wall (Poisson ill-conditioned) "
+                    f"or CFL violation."
+                )
+
+        vmax = max(float(fs.u0.abs().max()), float(fs.v0.abs().max()))
+        if self.ndim == 3:
+            vmax = max(vmax, float(fs.w0.abs().max()))
+        if vmax > self._vmax_abort:
+            self.terminate = True
+            raise RuntimeError(
+                f"[BDIM] Fluid explosion at iteration {iteration}: "
+                f"|u|_max = {vmax:.3e} > vmax_abort = {self._vmax_abort:.3e}."
+            )
+
     # ==================================================================
     #  step: one full coupled step (called by FluidExtension.before_step)
     # ==================================================================
@@ -1170,6 +1269,9 @@ class BDIMhandler:
                 if self.zero_pressure_inside:
                     p = torch.where(fs.composite_body.sdf_val < 0, 0, p)
                 (fs.u0, fs.v0, fs.p0) = (u, v, p)
+
+            # 3b. bail out immediately if the fluid blew up
+            self._check_explosion(iteration)
 
             # 4. compute fluid forces on each body
             if self.ndim == 3:

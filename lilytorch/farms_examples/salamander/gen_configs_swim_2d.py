@@ -18,8 +18,8 @@ class SimConfig(BaseSimConfig):
 
         # ── Hardware ──────────────────────────────────────────────────
         self.use_bdim     = True
-        self.use_gpu      = False
-        self.compute_sdf  = False
+        self.use_gpu      = True
+        self.compute_sdf  = True
         self.wall_height  = 0.02
         self.water_height = 0.015
         self.stack_folder = "salamander"
@@ -72,10 +72,10 @@ class SimConfig(BaseSimConfig):
         self.water_buoyancy = False
 
         # ── BDIM solver ──────────────────────────────────────────────
-        self.bdim_dt              = self.timestep
-        self.bdim_nt              = self.n_iterations
-        self.zero_pressure_inside = False
-        self.rho_body             = 900.0
+        # self.convexify    = True
+        self.bdim_dt      = self.timestep
+        self.bdim_nt      = self.n_iterations
+        self.rho_body     = 900.0
 
         # ── Boundary conditions ──────────────────────────────────────
         self.bc_type_u   = ["D", "D", "N", "N"]

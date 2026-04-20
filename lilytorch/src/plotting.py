@@ -415,13 +415,14 @@ def _vibrant_rdbu():
     return LinearSegmentedColormap("vibrant_rdbu", cdict, N=512)
 
 VIBRANT_RDBU = _vibrant_rdbu()
+MUJOCO_DEFAULT_GEOM_RGBA = (0.5, 0.5, 0.5, 1.0)
 
 
 def _resolve_body_color(body, index, body_colors, body_default_color):
     """Return a matplotlib-compatible RGBA tuple for one body.
 
     Priority: explicit *body_colors[index]* → ``body.mujoco_rgba``
-    → *body_default_color* → ``(0, 0, 0, 1)``.
+    → *body_default_color* → MuJoCo's default geom grey.
     """
     from matplotlib.colors import to_rgba
     if body_colors is not None and index < len(body_colors):
@@ -432,7 +433,7 @@ def _resolve_body_color(body, index, body_colors, body_default_color):
         return tuple(float(c) for c in mj[:4])
     if body_default_color is not None:
         return to_rgba(body_default_color)
-    return (0.0, 0.0, 0.0, 1.0)
+    return MUJOCO_DEFAULT_GEOM_RGBA
 
 
 def build_body_mu0_rgba(
@@ -573,7 +574,8 @@ def plot_field_2d(
                         # or matplotlib colour string.  When ``None`` the
                         # function first tries ``body.mujoco_rgba`` (set
                         # from the SDF/MuJoCo visual material), then falls
-                        # back to ``body_default_color``, then to black.
+                        # back to ``body_default_color``, then to MuJoCo's
+                        # default geom grey.
     body_default_color=None,  # single fallback colour for all bodies
     body_fill_color=None,     # SDF contourf fill colour (default "#d0d0d0")
     body_mu0_rgba=None,       # pre-built RGBA overlay (Nx, Ny, 4) from
@@ -603,7 +605,8 @@ def plot_field_2d(
     Alternatively, *body_colors* can override the contour-scatter colour.
     The function inspects each body's ``mujoco_rgba`` attribute (set from
     the SDF/MuJoCo ``<visual><material><diffuse>`` tag).  If that is also
-    absent, *body_default_color* is used.  The ultimate fallback is black.
+    absent, *body_default_color* is used.  The ultimate fallback matches
+    MuJoCo's default geom grey.
     """
     if cmap is None:
         cmap = "RdBu_r"
@@ -653,16 +656,17 @@ def plot_field_2d(
 
     # ---- body SDF fill + outline (always drawn when available) ----
     if sdf_2d is not None:
-        _fill_col = body_fill_color if body_fill_color is not None else "#d0d0d0"
         sdf_np2 = np.asarray(sdf_2d)
         sdf_min = float(sdf_np2.min())
         if sdf_min < 0.0:
             sx = np.linspace(extent[0], extent[1], sdf_np2.shape[0])
             sy = np.linspace(extent[2], extent[3], sdf_np2.shape[1])
             SY, SX = np.meshgrid(sy, sx)
-            # Filled interior
-            ax.contourf(SX, SY, sdf_np2, levels=[sdf_min, 0.0],
-                        colors=[_fill_col], zorder=4)
+            if body_mu0_rgba is None or body_fill_color is not None:
+                _fill_col = body_fill_color if body_fill_color is not None else "#d0d0d0"
+                # Filled interior
+                ax.contourf(SX, SY, sdf_np2, levels=[sdf_min, 0.0],
+                            colors=[_fill_col], zorder=4)
             # Thick black outline
             ax.contour(SX, SY, sdf_np2, levels=[0.0], colors="black",
                        linewidths=2.5, zorder=5)
@@ -690,13 +694,8 @@ def plot_field_2d(
                 bx = cnt[0][mask].cpu().numpy()
                 by = cnt[1][mask].cpu().numpy()
                 # ---- resolve per-body colour ----
-                #  priority: explicit body_colors > body.mujoco_rgba > body_default_color > black
-                if body_colors is not None and bi < len(body_colors):
-                    _bc = body_colors[bi]
-                else:
-                    _bc = getattr(body, "mujoco_rgba", None)
-                if _bc is None:
-                    _bc = body_default_color if body_default_color is not None else "black"
+                #  priority: explicit body_colors > body.mujoco_rgba > body_default_color > MuJoCo default grey
+                _bc = _resolve_body_color(body, bi, body_colors, body_default_color)
                 ax.scatter(bx, by, c=[_bc], s=0.5, zorder=5,
                            edgecolors="none", linewidths=0)
                 # expand view to include the full robot body
@@ -888,6 +887,10 @@ def plot_field_3d(
     save_path,
     *,
     sdf_3d=None,        # optional SDF array for body isosurface (same shape)
+    bodies=None,        # optional body list; used with sdf_vals for native colouring
+    sdf_vals=None,      # optional (B, Nx, Ny, Nz) per-body SDF stack
+    body_colors=None,
+    body_default_color=None,
     iso_value=None,     # fixed isosurface threshold (overrides auto when set)
     iso_fraction=0.15,  # threshold = iso_fraction * max(|smoothed field|)
     smooth_sigma=0,   # Gaussian smoothing (in grid-cells) before isosurface extraction
@@ -928,7 +931,9 @@ def plot_field_3d(
     with _vtk_lock:
         _plot_field_3d_locked(
             pv, field_3d, coords, name, iteration, save_path,
-            sdf_3d=sdf_3d, iso_value=iso_value, iso_fraction=iso_fraction,
+            sdf_3d=sdf_3d, bodies=bodies, sdf_vals=sdf_vals,
+            body_colors=body_colors, body_default_color=body_default_color,
+            iso_value=iso_value, iso_fraction=iso_fraction,
             smooth_sigma=smooth_sigma, crop_boundary=crop_boundary,
             window_size=window_size, image_scale=image_scale, fmt=fmt,
         )
@@ -936,7 +941,9 @@ def plot_field_3d(
 
 def _plot_field_3d_locked(
     pv, field_3d, coords, name, iteration, save_path, *,
-    sdf_3d=None, iso_value=None, iso_fraction=0.15,
+    sdf_3d=None, bodies=None, sdf_vals=None,
+    body_colors=None, body_default_color=None,
+    iso_value=None, iso_fraction=0.15,
     smooth_sigma=0, crop_boundary=0,
     window_size=(3840, 2160), image_scale=2, fmt="png",
 ):
@@ -960,6 +967,8 @@ def _plot_field_3d_locked(
         z = z[c:-c]
         if sdf_3d is not None:
             sdf_3d = np.asarray(sdf_3d)[c:-c, c:-c, c:-c]
+        if sdf_vals is not None:
+            sdf_vals = np.asarray(sdf_vals)[:, c:-c, c:-c, c:-c]
 
     # ---- Gaussian smoothing suppresses grid-scale noise in derivative
     #      fields (vorticity) that would otherwise produce jagged,
@@ -1063,7 +1072,35 @@ def _plot_field_3d_locked(
                 pass
 
     # ---- body surface from SDF ----
-    if sdf_3d is not None:
+    body_surface_drawn = False
+    if bodies is not None and sdf_vals is not None:
+        sdf_vals_np = np.asarray(sdf_vals, dtype=np.float64)
+        for bi, body in enumerate(bodies):
+            if bi >= sdf_vals_np.shape[0]:
+                break
+            body_sdf = sdf_vals_np[bi]
+            if body_sdf.shape != field_np.shape:
+                continue
+            if float(body_sdf.min()) >= 0.0 or float(body_sdf.max()) <= 0.0:
+                continue
+            try:
+                body_grid = pv.RectilinearGrid(x, y, z)
+                body_grid.point_data["sdf"] = body_sdf.flatten(order="F")
+                body_surf = body_grid.contour([0.0], scalars="sdf")
+                if body_surf.n_points > 0:
+                    colour = _resolve_body_color(body, bi, body_colors, body_default_color)
+                    pl.add_mesh(
+                        body_surf,
+                        color=colour[:3],
+                        opacity=max(0.0, min(1.0, 0.95 * colour[3])),
+                        smooth_shading=True,
+                        specular=0.6,
+                    )
+                    body_surface_drawn = True
+            except Exception:
+                pass
+
+    if not body_surface_drawn and sdf_3d is not None:
         sdf_np = np.asarray(sdf_3d)
         grid.point_data["sdf"] = sdf_np.flatten(order="F")
         try:
