@@ -19,7 +19,7 @@ class SimConfig(BaseSimConfig):
         self.use_bdim     = True
         self.use_drag     = True
         self.use_gpu      = True
-        self.compute_sdf  = False
+        self.compute_sdf  = True
         self.wall_height  = 0.02
         self.water_height = 0.015
         self.stack_folder = "salamander"
