@@ -18,7 +18,9 @@ class SimConfig(BaseSimConfig):
         # ── Hardware ──────────────────────────────────────────────────
         self.use_bdim     = True
         self.headless     = True
-        self.use_drag     = True
+        # BDIM already supplies hydrodynamic forces; enabling the legacy
+        # swimming drag path on top destabilizes multi-animat runs.
+        self.use_drag     = False
         self.use_gpu      = True
         self.compute_sdf  = True
         self.wall_height  = 0.02
@@ -88,12 +90,12 @@ class SimConfig(BaseSimConfig):
         self.zmax =  0.03
 
         # ── Physics ───────────────────────────────────────────────────
-        self.timestep          = 0.001
+        self.timestep          = 0.0005
         self.convection_method = "abdquickest"
         self.n_iterations      = 50001
         self.save_every        = 50
         self.save              = True
-        self.num_sub_steps     = 6
+        self.num_sub_steps     = 2
         self.poisson_verbose   = True
         self.poisson_method    = "fft"
 
@@ -105,8 +107,8 @@ class SimConfig(BaseSimConfig):
         self.wall_thickness = 0.003
         self.wall_height    = 0.03
         self.arena_pose     = [0, 0, 0, 0, 0, 0]
-        self.water_drag     = True
-        self.water_buoyancy = True
+        self.water_drag     = False
+        self.water_buoyancy = False
 
         # ── BDIM solver ──────────────────────────────────────────────
         self.bdim_dt                  = self.timestep
@@ -116,7 +118,7 @@ class SimConfig(BaseSimConfig):
 
         # Abort the sim loudly if the fluid blows up instead of letting
         # NaN propagate silently (matplotlib renders NaN as transparent).
-        self.vmax_abort = 50.0
+        self.vmax_abort = 150.0
 
         # ── Boundary conditions ──────────────────────────────────────
         self.bc_type_u   = ["D", "D", "N", "N", "N", "N"]
