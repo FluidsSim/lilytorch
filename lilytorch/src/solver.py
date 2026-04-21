@@ -675,7 +675,8 @@ class FluidSolver:
         self.rho  = torch.tensor(solver["rho"], device=self.device, dtype=self.dtype)  # density
         self.visc = self.nu*self.rho                                                   # dynamic viscosity
 
-        self.eps  = solver.get("eps_multiplier",torch.tensor(2.0)) * self.h
+        self.eps  = solver.get("eps_multiplier",
+                                torch.tensor(2.0, device=self.device, dtype=self.dtype)) * self.h
 
         self.starting_iteration      = solver.get("starting_iteration", 0)
         self.starting_iteration_path = solver.get("starting_iteration_path", None)
@@ -1094,9 +1095,9 @@ class FluidSolver:
         if not os.path.exists(v0_path) or not os.path.exists(u0_path):
             raise FileNotFoundError(f'Initial conditions not found at {v0_path} or {u0_path}')
 
-        u0 = torch.tensor(np.load(u0_path)).to(self.device)
-        v0 = torch.tensor(np.load(v0_path)).to(self.device)
-        p0 = torch.zeros(self.grid_shape, device=self.device)
+        u0 = torch.tensor(np.load(u0_path)).to(device=self.device, dtype=self.dtype)
+        v0 = torch.tensor(np.load(v0_path)).to(device=self.device, dtype=self.dtype)
+        p0 = torch.zeros(self.grid_shape, device=self.device, dtype=self.dtype)
 
           # Verify shape
         assert u0.shape == tuple(self.grid_shape), f"u0 shape: {u0.shape} != {self.grid_shape}"
@@ -1107,7 +1108,7 @@ class FluidSolver:
         if self.ndim == 3:
             w0_path = f'{self.starting_iteration_path}/uv_field/w_{self.starting_iteration}.npy'
             if os.path.exists(w0_path):
-                self.w0 = torch.tensor(np.load(w0_path)).to(self.device)
+                self.w0 = torch.tensor(np.load(w0_path)).to(device=self.device, dtype=self.dtype)
             else:
                 self.w0 = torch.zeros(self.grid_shape, device=self.device, dtype=self.dtype)
 
@@ -1142,13 +1143,18 @@ class FluidSolver:
         # mask (mu0 = 1 outside, 0 inside).  Without this, the uniform
         # freestream fills the body interior and the first BDIM step creates
         # an impulsive discontinuity that produces a spurious pressure spike
-        # and artificial vorticity at t=0.
+        # and artificial vorticity at t=0.  Each staggered velocity component
+        # is masked with its own staggered-grid mu0 for consistency with the
+        # rest of the BDIM pipeline.
         if hasattr(self, "composite_body") and hasattr(self.composite_body, "sdf_val"):
-            mu0, _ = self.composite_body.mu_funcs(self.composite_body.sdf_val)
-            self.u0 = self.u0 * mu0
-            self.v0 = self.v0 * mu0
+            cb = self.composite_body
+            mu0_u, _ = cb.mu_funcs(cb.sdf_val_u)
+            mu0_v, _ = cb.mu_funcs(cb.sdf_val_v)
+            self.u0 = self.u0 * mu0_u
+            self.v0 = self.v0 * mu0_v
             if self.ndim == 3:
-                self.w0 = self.w0 * mu0
+                mu0_w, _ = cb.mu_funcs(cb.sdf_val_w)
+                self.w0 = self.w0 * mu0_w
 
 
     def forces_method1(self, u, v, p, iteration):
@@ -1288,8 +1294,8 @@ class FluidSolver:
         # Towers (2008) 2nd-order: compute per-body |∇SDF| on CC grid  (B,Ni,Nj)
         sdf_grad_mag_2d = None
         if self.force_delta_order == 2:
-            gx = torch.gradient(comp.sdf_vals, spacing=self.h, dim=1)[0]
-            gy = torch.gradient(comp.sdf_vals, spacing=self.h, dim=2)[0]
+            gx = torch.gradient(comp.sdf_vals, spacing=self.h, dim=1, edge_order=2)[0]
+            gy = torch.gradient(comp.sdf_vals, spacing=self.h, dim=2, edge_order=2)[0]
             sdf_grad_mag_2d = torch.sqrt(gx**2 + gy**2)
 
         (fv_x, fv_y, tv_z,
@@ -1422,9 +1428,9 @@ class FluidSolver:
             # Towers (2008) 2nd-order: per-body |∇SDF|  (B, Ni, Nj, Nk)
             sdf_grad_mag_3d = None
             if self.force_delta_order == 2:
-                gx = torch.gradient(sdf_all, spacing=h, dim=1)[0]
-                gy = torch.gradient(sdf_all, spacing=h, dim=2)[0]
-                gz = torch.gradient(sdf_all, spacing=h, dim=3)[0]
+                gx = torch.gradient(sdf_all, spacing=h, dim=1, edge_order=2)[0]
+                gy = torch.gradient(sdf_all, spacing=h, dim=2, edge_order=2)[0]
+                gz = torch.gradient(sdf_all, spacing=h, dim=3, edge_order=2)[0]
                 sdf_grad_mag_3d = torch.sqrt(gx**2 + gy**2 + gz**2)
 
             (fv_x, fv_y, fv_z,
@@ -1480,9 +1486,9 @@ class FluidSolver:
                         sl = (slice(i0, i1), slice(j0, j1), slice(k0, k1))
                         grad_mag_i = None
                         if self.force_delta_order == 2:
-                            gx = torch.gradient(sdf_sub_i, spacing=h, dim=0)[0]
-                            gy = torch.gradient(sdf_sub_i, spacing=h, dim=1)[0]
-                            gz = torch.gradient(sdf_sub_i, spacing=h, dim=2)[0]
+                            gx = torch.gradient(sdf_sub_i, spacing=h, dim=0, edge_order=2)[0]
+                            gy = torch.gradient(sdf_sub_i, spacing=h, dim=1, edge_order=2)[0]
+                            gz = torch.gradient(sdf_sub_i, spacing=h, dim=2, edge_order=2)[0]
                             grad_mag_i = torch.sqrt(gx**2 + gy**2 + gz**2)
                         (fv_x, fv_y, fv_z,
                          tv_x, tv_y, tv_z,
@@ -1499,9 +1505,9 @@ class FluidSolver:
                         # Full-grid SDF (rare: body covers most of grid)
                         grad_mag_i = None
                         if self.force_delta_order == 2:
-                            gx = torch.gradient(sdf_sub_i, spacing=h, dim=0)[0]
-                            gy = torch.gradient(sdf_sub_i, spacing=h, dim=1)[0]
-                            gz = torch.gradient(sdf_sub_i, spacing=h, dim=2)[0]
+                            gx = torch.gradient(sdf_sub_i, spacing=h, dim=0, edge_order=2)[0]
+                            gy = torch.gradient(sdf_sub_i, spacing=h, dim=1, edge_order=2)[0]
+                            gz = torch.gradient(sdf_sub_i, spacing=h, dim=2, edge_order=2)[0]
                             grad_mag_i = torch.sqrt(gx**2 + gy**2 + gz**2)
                         (fv_x, fv_y, fv_z,
                          tv_x, tv_y, tv_z,
@@ -1519,9 +1525,9 @@ class FluidSolver:
                     sdf_i = comp.sdf_vals[i]
                     grad_mag_i = None
                     if self.force_delta_order == 2:
-                        gx = torch.gradient(sdf_i, spacing=h, dim=0)[0]
-                        gy = torch.gradient(sdf_i, spacing=h, dim=1)[0]
-                        gz = torch.gradient(sdf_i, spacing=h, dim=2)[0]
+                        gx = torch.gradient(sdf_i, spacing=h, dim=0, edge_order=2)[0]
+                        gy = torch.gradient(sdf_i, spacing=h, dim=1, edge_order=2)[0]
+                        gz = torch.gradient(sdf_i, spacing=h, dim=2, edge_order=2)[0]
                         grad_mag_i = torch.sqrt(gx**2 + gy**2 + gz**2)
                     (fv_x, fv_y, fv_z,
                      tv_x, tv_y, tv_z,
