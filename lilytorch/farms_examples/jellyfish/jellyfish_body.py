@@ -1,44 +1,23 @@
-"""Ad-hoc 3-D jellyfish body for lilytorch's FluidSolver.
+"""Free-swimming 3-D jellyfish body for lilytorch's standalone FluidSolver.
 
-The jellyfish geometry is the analytical SDF used in WaterLily-jl's
-``examples/ThreeD_Jelly.jl``: a thin spherical shell of mean radius ``R``
-and half-thickness ``t``, intersected with the half-space ``z >= h`` so
-that only the upper "bell" remains::
+The jellyfish geometry still follows the analytical WaterLily bell model:
+a thin spherical shell clipped by a horizontal plane and pulsed through the
+time-dependent maps used in ``ThreeD_Jelly.jl``. The difference is that the
+body now also carries its own rigid state: a 6D Newton-Euler model advances
+the jellyfish centre of mass and orientation from the hydrodynamic force and
+torque computed by the solver.
 
-    sdf_sphere(x) = | |x|  − R | − t
-    sdf_plane (x) = x_3 − h
-    sdf_body  (x) = max(sdf_sphere, −sdf_plane)          (CSG "sphere ∖ plane")
-
-WaterLily animates the jellyfish with prescribed, time-varying *maps*
-``x_body = A(t) · x_lab + B(t) + C(t)`` for the sphere and
-``x_body = x_lab + C(t)`` for the plane, with
-
-    ω     = 2 U / R                                       (pulse freq.)
-    A(t)  = (1 − cos(ωt)/10,  1 − cos(ωt)/10,  1)         (lateral pulse)
-    B(t)  = (0, 0, (cos(ωt) − 1) R/4 − h)                 (bell-tip shift)
-    C(t)  = (0, 0, sin(ωt) R/4)                           (common shift)
-
-The ``cos(ωt)/10`` factor makes the bell periodically contract/expand in
-the horizontal plane (the "pulse"), while ``B + C`` shifts the bell
-vertically so that the effective propulsion is in the -z direction — the
-full 6-coordinate motion of a free-swimming jellyfish (translation +
-orientation + bell deformation).
-
-Because this is a prescribed-kinematics body, no separate rigid-body
-integrator is required: the state is a closed-form function of time, and
-the *only* ad-hoc solver needed is the update routine below that feeds
-the FluidSolver with (sdf_val, body_u, body_v, body_w) on every step.
-MuJoCo is not involved at all — this is what "run the SDF updating as
-WaterLily" means.
-
-This module is self-contained: it does not touch any lilytorch source
-outside ``farms_examples/jellyfish/``.
+This keeps the actuation local to the bell deformation while the global pose
+is solved in the standalone fluid loop, without relying on MuJoCo.
 """
 
 from __future__ import annotations
 
+import csv
+import os
 from dataclasses import dataclass
 from types import SimpleNamespace
+from typing import Any
 
 import torch
 
@@ -52,7 +31,7 @@ from lilytorch.src.body import Body
 
 @dataclass
 class JellyfishParams:
-    """Geometric / kinematic parameters of the jellyfish.
+    """Geometric, actuation, and rigid-body parameters of the jellyfish.
 
     Defaults are a metric rescaling of the WaterLily ``jelly(L=2^5)``
     reference case:
@@ -75,15 +54,140 @@ class JellyfishParams:
     axial_amplitude: float = 0.25  # z-shift amplitude as fraction of R (R/4)
 
     # --- lab-frame placement ------------------------------------------------
-    # Additional constant offset of the sphere centre in the lab frame.
-    # The bell opens toward -z, so placing the sphere centre high in the
-    # domain makes the jellyfish swim downward under its own propulsion.
+    # Initial sphere-centre placement in the lab frame.
     x0: float = 0.0
     y0: float = 0.0
     z0: float = 0.0
 
+    # --- rigid-body model ---------------------------------------------------
+    # These values come from the generated jellyfish SDF and are treated as a
+    # fixed reference inertia model for the pulsing bell.
+    mass: float = 0.07546768732
+    inertia_diag: tuple[float, float, float] = (
+        7.893193369e-05,
+        7.893193369e-05,
+        1.262487591e-04,
+    )
+    com_offset: tuple[float, float, float] = (0.0, 0.0, 0.025037438901)
+    gravity: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    linear_damping: float = 0.0
+    angular_damping: float = 0.0
+    initial_orientation_rpy: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    initial_linear_velocity: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    initial_angular_velocity: tuple[float, float, float] = (0.0, 0.0, 0.0)
+
     def omega(self) -> float:
         return 2.0 * self.U / self.R
+
+    @classmethod
+    def from_solver_config(cls, pars: dict[str, Any] | None) -> "JellyfishParams":
+        cfg = {} if pars is None else pars.get("jellyfish", {})
+
+        origin = cfg.get("origin")
+        if origin is None:
+            origin = [cfg.get("x0", cls.x0), cfg.get("y0", cls.y0), cfg.get("z0", cls.z0)]
+
+        return cls(
+            R=cfg.get("R", cls.R),
+            t=cfg.get("t", cls.t),
+            h=cfg.get("h", cls.h),
+            U=cfg.get("U", cls.U),
+            pulse_amplitude=cfg.get("pulse_amplitude", cls.pulse_amplitude),
+            axial_amplitude=cfg.get("axial_amplitude", cls.axial_amplitude),
+            x0=origin[0],
+            y0=origin[1],
+            z0=origin[2],
+            mass=cfg.get("mass", cls.mass),
+            inertia_diag=tuple(cfg.get("inertia_diag", cls.inertia_diag)),
+            com_offset=tuple(cfg.get("com_offset", cls.com_offset)),
+            gravity=tuple(cfg.get("gravity", cls.gravity)),
+            linear_damping=cfg.get("linear_damping", cls.linear_damping),
+            angular_damping=cfg.get("angular_damping", cls.angular_damping),
+            initial_orientation_rpy=tuple(
+                cfg.get("initial_orientation_rpy", cls.initial_orientation_rpy)
+            ),
+            initial_linear_velocity=tuple(
+                cfg.get("initial_linear_velocity", cls.initial_linear_velocity)
+            ),
+            initial_angular_velocity=tuple(
+                cfg.get("initial_angular_velocity", cls.initial_angular_velocity)
+            ),
+        )
+
+
+def _cross_components(ax, ay, az, bx, by, bz):
+    return (
+        ay * bz - az * by,
+        az * bx - ax * bz,
+        ax * by - ay * bx,
+    )
+
+
+def _normalize_quaternion(quaternion: torch.Tensor) -> torch.Tensor:
+    return quaternion / torch.linalg.vector_norm(quaternion)
+
+
+def _quaternion_multiply(lhs: torch.Tensor, rhs: torch.Tensor) -> torch.Tensor:
+    lw, lx, ly, lz = lhs.unbind()
+    rw, rx, ry, rz = rhs.unbind()
+    return torch.stack(
+        (
+            lw * rw - lx * rx - ly * ry - lz * rz,
+            lw * rx + lx * rw + ly * rz - lz * ry,
+            lw * ry - lx * rz + ly * rw + lz * rx,
+            lw * rz + lx * ry - ly * rx + lz * rw,
+        )
+    )
+
+
+def _quaternion_from_rpy(rpy: torch.Tensor) -> torch.Tensor:
+    half = 0.5 * rpy
+    cr, cp, cy = torch.cos(half)
+    sr, sp, sy = torch.sin(half)
+    return _normalize_quaternion(
+        torch.stack(
+            (
+                cr * cp * cy + sr * sp * sy,
+                sr * cp * cy - cr * sp * sy,
+                cr * sp * cy + sr * cp * sy,
+                cr * cp * sy - sr * sp * cy,
+            )
+        )
+    )
+
+
+def _quaternion_to_matrix(quaternion: torch.Tensor) -> torch.Tensor:
+    q = _normalize_quaternion(quaternion)
+    qw, qx, qy, qz = q.unbind()
+
+    two_qx = 2.0 * qx
+    two_qy = 2.0 * qy
+    two_qz = 2.0 * qz
+    two_qwqx = two_qx * qw
+    two_qwqy = two_qy * qw
+    two_qwqz = two_qz * qw
+    two_qxqx = two_qx * qx
+    two_qxqy = two_qy * qx
+    two_qxqz = two_qz * qx
+    two_qyqy = two_qy * qy
+    two_qyqz = two_qz * qy
+    two_qzqz = two_qz * qz
+
+    return torch.stack(
+        (
+            torch.stack((1.0 - (two_qyqy + two_qzqz), two_qxqy - two_qwqz, two_qxqz + two_qwqy)),
+            torch.stack((two_qxqy + two_qwqz, 1.0 - (two_qxqx + two_qzqz), two_qyqz - two_qwqx)),
+            torch.stack((two_qxqz - two_qwqy, two_qyqz + two_qwqx, 1.0 - (two_qxqx + two_qyqy))),
+        )
+    )
+
+
+def _rotate_components(rotation: torch.Tensor, x, y, z):
+    return (
+        rotation[0, 0] * x + rotation[0, 1] * y + rotation[0, 2] * z,
+        rotation[1, 0] * x + rotation[1, 1] * y + rotation[1, 2] * z,
+        rotation[2, 0] * x + rotation[2, 1] * y + rotation[2, 2] * z,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -92,30 +196,7 @@ class JellyfishParams:
 
 
 class JellyfishBody(Body):
-    """Single-body composite that exposes the WaterLily jellyfish on the
-    MAC staggered grid.
-
-    The class is plugged into :class:`lilytorch.src.solver.FluidSolver`
-    by replacing ``solver.composite_body`` *after* the solver has been
-    constructed — this is the pattern the solver's ``step_`` already
-    supports (it only calls ``composite_body.update`` and reads a
-    well-defined set of attributes).
-
-    Attributes filled on every :meth:`update` call
-    ---------------------------------------------
-    sdf_val, sdf_val_u, sdf_val_v, sdf_val_w
-        Signed distance on the cell-centred grid and on each MAC
-        staggered grid.
-    body_u, body_v, body_w
-        Eulerian material velocity of the body at every grid point,
-        i.e. the lab-frame velocity of the body point that currently
-        occupies that location.  Needed by BDIM to impose the no-slip
-        condition.
-    bodies
-        One-element list exposing ``self`` so that downstream code that
-        iterates over composite sub-bodies (e.g. force reporting) keeps
-        working.
-    """
+    """WaterLily jellyfish bell plus a rigid 6D free-swimming state."""
 
     def __init__(self, device, x, y, z, eps=0.05, grids=None,
                  params: JellyfishParams | None = None):
@@ -123,6 +204,45 @@ class JellyfishBody(Body):
         assert self.ndim == 3, "JellyfishBody is 3-D only"
 
         self.params = params if params is not None else JellyfishParams()
+        self.mass = torch.tensor(self.params.mass, device=device, dtype=self.dtype)
+        self.inertia_diag = torch.tensor(
+            self.params.inertia_diag, device=device, dtype=self.dtype,
+        )
+        self.inv_inertia_diag = 1.0 / self.inertia_diag
+        self.com_offset_body = torch.tensor(
+            self.params.com_offset, device=device, dtype=self.dtype,
+        )
+        self.gravity = torch.tensor(
+            self.params.gravity, device=device, dtype=self.dtype,
+        )
+        self.linear_damping = torch.tensor(
+            self.params.linear_damping, device=device, dtype=self.dtype,
+        )
+        self.angular_damping = torch.tensor(
+            self.params.angular_damping, device=device, dtype=self.dtype,
+        )
+
+        initial_rpy = torch.tensor(
+            self.params.initial_orientation_rpy, device=device, dtype=self.dtype,
+        )
+        self.rigid_quaternion = _quaternion_from_rpy(initial_rpy)
+        self.rigid_rotation = _quaternion_to_matrix(self.rigid_quaternion)
+        self.rigid_rotation_t = self.rigid_rotation.transpose(0, 1)
+        initial_origin = torch.tensor(
+            [self.params.x0, self.params.y0, self.params.z0],
+            device=device, dtype=self.dtype,
+        )
+        self.rigid_com_pos = initial_origin + self.rigid_rotation @ self.com_offset_body
+        self.rigid_lin_vel = torch.tensor(
+            self.params.initial_linear_velocity, device=device, dtype=self.dtype,
+        )
+        self.rigid_ang_vel_body = torch.tensor(
+            self.params.initial_angular_velocity, device=device, dtype=self.dtype,
+        )
+        self.rigid_ang_vel_world = self.rigid_rotation @ self.rigid_ang_vel_body
+        self.origin_world = initial_origin.clone()
+        self.last_force_world = torch.zeros(3, device=device, dtype=self.dtype)
+        self.last_torque_world = torch.zeros(3, device=device, dtype=self.dtype)
 
         # Solver iterates over self.bodies (e.g. for force bookkeeping);
         # we expose a tiny proxy sub-body whose ``com_pos`` is 1-D (shape
@@ -159,13 +279,120 @@ class JellyfishBody(Body):
         # Shape (nbodies, ndim) — solver.inside() expects a 2-D tensor
         # when iterating over bodies.
         self.com_pos = torch.tensor(
-            [[self.params.x0, self.params.y0, self.params.z0]],
+            [[self.rigid_com_pos[0], self.rigid_com_pos[1], self.rigid_com_pos[2]]],
             device=device, dtype=self.dtype,
         )
+
+        self.clear_history()
 
         # Prime SDF / body-velocity fields so that the solver's initial
         # set-up (_recompute_mu_normals, plotting) finds valid tensors.
         self.update(torch.tensor(0.0, device=device, dtype=self.dtype), 0)
+
+    def clear_history(self):
+        self.iteration_history: list[int] = []
+        self.time_history: list[float] = []
+        self.origin_history: list[list[float]] = []
+        self.com_history: list[list[float]] = []
+        self.linear_velocity_history: list[list[float]] = []
+        self.angular_velocity_body_history: list[list[float]] = []
+        self.quaternion_history: list[list[float]] = []
+        self.force_history: list[list[float]] = []
+        self.torque_history: list[list[float]] = []
+
+    def _record_state(self, t: torch.Tensor, iteration: int):
+        self.iteration_history.append(int(iteration))
+        self.time_history.append(float(t.item()))
+        self.origin_history.append(self.origin_world.detach().cpu().tolist())
+        self.com_history.append(self.rigid_com_pos.detach().cpu().tolist())
+        self.linear_velocity_history.append(self.rigid_lin_vel.detach().cpu().tolist())
+        self.angular_velocity_body_history.append(
+            self.rigid_ang_vel_body.detach().cpu().tolist()
+        )
+        self.quaternion_history.append(self.rigid_quaternion.detach().cpu().tolist())
+
+    def save_state_history(self, output_dir: str):
+        if not self.time_history:
+            return
+
+        csv_path = os.path.join(output_dir, "jellyfish_rigid_state.csv")
+        with open(csv_path, "w", newline="", encoding="utf-8") as csv_file:
+            writer = csv.writer(csv_file)
+            writer.writerow(
+                [
+                    "iteration",
+                    "time",
+                    "origin_x", "origin_y", "origin_z",
+                    "com_x", "com_y", "com_z",
+                    "vel_x", "vel_y", "vel_z",
+                    "omega_body_x", "omega_body_y", "omega_body_z",
+                    "quat_w", "quat_x", "quat_y", "quat_z",
+                    "force_x", "force_y", "force_z",
+                    "torque_x", "torque_y", "torque_z",
+                ]
+            )
+            for index, time_value in enumerate(self.time_history):
+                force = self.force_history[index] if index < len(self.force_history) else [0.0, 0.0, 0.0]
+                torque = self.torque_history[index] if index < len(self.torque_history) else [0.0, 0.0, 0.0]
+                writer.writerow(
+                    [
+                        self.iteration_history[index],
+                        time_value,
+                        *self.origin_history[index],
+                        *self.com_history[index],
+                        *self.linear_velocity_history[index],
+                        *self.angular_velocity_body_history[index],
+                        *self.quaternion_history[index],
+                        *force,
+                        *torque,
+                    ]
+                )
+
+    def apply_force_feedback(self, force, torque, iteration, time, dt, solver=None):
+        del iteration, time, solver
+
+        if force.ndim == 2:
+            total_force = force.sum(dim=0)
+        else:
+            total_force = force
+
+        if torque.ndim == 2:
+            total_torque_world = torque.sum(dim=0)
+        else:
+            raise ValueError("JellyfishBody expects a 3-D torque vector.")
+
+        total_force = total_force + self.mass * self.gravity - self.linear_damping * self.rigid_lin_vel
+        total_torque_body = self.rigid_rotation_t @ total_torque_world - self.angular_damping * self.rigid_ang_vel_body
+
+        linear_acc = total_force / self.mass
+        angular_momentum_body = self.inertia_diag * self.rigid_ang_vel_body
+        gyroscopic = torch.linalg.cross(self.rigid_ang_vel_body, angular_momentum_body)
+        angular_acc_body = (total_torque_body - gyroscopic) * self.inv_inertia_diag
+
+        self.rigid_lin_vel = self.rigid_lin_vel + dt * linear_acc
+        self.rigid_com_pos = self.rigid_com_pos + dt * self.rigid_lin_vel
+        self.rigid_ang_vel_body = self.rigid_ang_vel_body + dt * angular_acc_body
+
+        omega_quat = torch.cat(
+            (
+                torch.zeros(1, device=self.device, dtype=self.dtype),
+                self.rigid_ang_vel_body,
+            )
+        )
+        quat_dot = 0.5 * _quaternion_multiply(self.rigid_quaternion, omega_quat)
+        self.rigid_quaternion = _normalize_quaternion(self.rigid_quaternion + dt * quat_dot)
+        self._refresh_rigid_kinematics()
+
+        self.last_force_world = total_force
+        self.last_torque_world = total_torque_world
+        self.force_history.append(total_force.detach().cpu().tolist())
+        self.torque_history.append(total_torque_world.detach().cpu().tolist())
+
+    def _refresh_rigid_kinematics(self):
+        self.rigid_rotation = _quaternion_to_matrix(self.rigid_quaternion)
+        self.rigid_rotation_t = self.rigid_rotation.transpose(0, 1)
+        self.rigid_ang_vel_world = self.rigid_rotation @ self.rigid_ang_vel_body
+        self.origin_world = self.rigid_com_pos - self.rigid_rotation @ self.com_offset_body
 
     # ------------------------------------------------------------------
     #   Analytical SDF pieces (in the sphere body-frame coordinates)
@@ -245,17 +472,35 @@ class JellyfishBody(Body):
     # where the plane actually clips material).
 
     def _body_velocity(self, X, Y, Z,
+                       Yx, Yy, Yz,
                        Ax, Az, dAx, dAz, dBz, dCz):
-        p = self.params
-        # Local coordinates relative to the sphere centre
-        rx = X - p.x0
-        ry = Y - p.y0
-        rz = Z - p.z0
-        # Note: Ay = Ax by construction.
-        u = -(dAx * rx) / Ax
-        v = -(dAx * ry) / Ax
-        w = -(dAz * rz + dBz + dCz) / Az
-        return u, v, w
+        # Internal deformation velocity in the body frame, plus rigid COM
+        # translation and rigid-body rotation in the lab frame.
+        du_x_local = -(dAx * Yx) / Ax
+        du_y_local = -(dAx * Yy) / Ax
+        du_z_local = -(dAz * Yz + dBz + dCz) / Az
+
+        du_x_world, du_y_world, du_z_world = _rotate_components(
+            self.rigid_rotation,
+            du_x_local,
+            du_y_local,
+            du_z_local,
+        )
+
+        rx = X - self.rigid_com_pos[0]
+        ry = Y - self.rigid_com_pos[1]
+        rz = Z - self.rigid_com_pos[2]
+        omega_x, omega_y, omega_z = self.rigid_ang_vel_world
+        rigid_x, rigid_y, rigid_z = _cross_components(
+            omega_x, omega_y, omega_z,
+            rx, ry, rz,
+        )
+
+        return (
+            self.rigid_lin_vel[0] + rigid_x + du_x_world,
+            self.rigid_lin_vel[1] + rigid_y + du_y_world,
+            self.rigid_lin_vel[2] + rigid_z + du_z_world,
+        )
 
     # ------------------------------------------------------------------
     #   Main update – called every solver time step
@@ -269,7 +514,7 @@ class JellyfishBody(Body):
         else:
             t = t.to(device=device, dtype=dtype)
 
-        p = self.params
+        self._refresh_rigid_kinematics()
         Ax, Az, Bz, Cz, dAx, dAz, dBz, dCz = self._kinematics(t)
 
         # Helper: evaluate the combined SDF on an arbitrary (X,Y,Z)
@@ -277,16 +522,17 @@ class JellyfishBody(Body):
         # (C(t) is common), but the sphere additionally rescales laterally
         # by A(t) and translates by Bz in z.
         def _sdf_on(X, Y, Z):
-            rx = X - p.x0
-            ry = Y - p.y0
-            rz = Z - p.z0
+            rx = X - self.origin_world[0]
+            ry = Y - self.origin_world[1]
+            rz = Z - self.origin_world[2]
+            Yx, Yy, Yz = _rotate_components(self.rigid_rotation_t, rx, ry, rz)
             # Sphere-frame coords: X_b = A · r_lab + B + C
-            xb = Ax * rx
-            yb = Ax * ry
-            zb = Az * rz + Bz + Cz
+            xb = Ax * Yx
+            yb = Ax * Yy
+            zb = Az * Yz + Bz + Cz
             # Plane-frame z: z_p = z_lab + C_z  (map from WaterLily,
             # "x .+ C(t)").  The plane SDF is (h − z_p).
-            zp = rz + Cz
+            zp = Yz + Cz
             return self._sdf_bell(xb, yb, zb, zp)
 
         # ------------------------------------------------------------
@@ -306,14 +552,32 @@ class JellyfishBody(Body):
         # ------------------------------------------------------------
         # Material velocities on each staggered grid
         # ------------------------------------------------------------
+        xu = self.Xu_stag - self.origin_world[0]
+        yu = self.Yu_stag - self.origin_world[1]
+        zu = self.Zu_stag - self.origin_world[2]
+        Yux, Yuy, Yuz = _rotate_components(self.rigid_rotation_t, xu, yu, zu)
+
+        xv = self.Xv_stag - self.origin_world[0]
+        yv = self.Yv_stag - self.origin_world[1]
+        zv = self.Zv_stag - self.origin_world[2]
+        Yvx, Yvy, Yvz = _rotate_components(self.rigid_rotation_t, xv, yv, zv)
+
+        xw = self.Xw_stag - self.origin_world[0]
+        yw = self.Yw_stag - self.origin_world[1]
+        zw = self.Zw_stag - self.origin_world[2]
+        Ywx, Ywy, Ywz = _rotate_components(self.rigid_rotation_t, xw, yw, zw)
+
         bu, _, _ = self._body_velocity(
             self.Xu_stag, self.Yu_stag, self.Zu_stag,
+            Yux, Yuy, Yuz,
             Ax, Az, dAx, dAz, dBz, dCz)
         _, bv, _ = self._body_velocity(
             self.Xv_stag, self.Yv_stag, self.Zv_stag,
+            Yvx, Yvy, Yvz,
             Ax, Az, dAx, dAz, dBz, dCz)
         _, _, bw = self._body_velocity(
             self.Xw_stag, self.Yw_stag, self.Zw_stag,
+            Ywx, Ywy, Ywz,
             Ax, Az, dAx, dAz, dBz, dCz)
 
         self.body_u = bu
@@ -330,16 +594,9 @@ class JellyfishBody(Body):
         # ------------------------------------------------------------
         self.sdf_vals = self.sdf_val.unsqueeze(0)
 
-        # Track COM position (useful for plotting / logging).  The
-        # sphere-centre's lab-frame position is the fixed offset c0
-        # minus the inverse image of (B+C) through A; since A is
-        # purely a scale on (x,y) and 1 on z, the lab-frame centre in
-        # z moves by -(Bz + Cz).
-        com_z = p.z0 - float(Bz + Cz) / float(Az)
-        com_xyz = torch.tensor(
-            [p.x0, p.y0, com_z], device=device, dtype=dtype,
-        )
         # Shape (nbodies, ndim) — used by solver.inside() / check_termination
-        self.com_pos = com_xyz.unsqueeze(0)
+        self.com_pos = self.rigid_com_pos.unsqueeze(0)
         # 1-D shape (ndim,) — used by forces_method2_3d per sub-body
-        self._sub_body.com_pos = com_xyz
+        self._sub_body.com_pos = self.rigid_com_pos
+
+        self._record_state(t, iteration)

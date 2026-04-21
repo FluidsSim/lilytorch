@@ -1,21 +1,19 @@
-"""Run the 3-D jellyfish fluid simulation (no MuJoCo, no drag model).
+"""Run the standalone free-swimming 3-D jellyfish fluid simulation.
 
 This is the ad-hoc driver for the jellyfish example.  It
 
 1. loads a YAML config describing the 3-D fluid solver parameters,
 2. constructs :class:`lilytorch.src.solver.FluidSolver` from it,
 3. *replaces* ``solver.composite_body`` with a
-   :class:`JellyfishBody` — an analytical, time-varying SDF body that
-   reproduces the WaterLily ``ThreeD_Jelly.jl`` jellyfish (thin
-   spherical-shell bell intersected with a horizontal plane and animated
-   with a sinusoidal "pulse"), and
+    :class:`JellyfishBody` — an analytical, pulsing SDF body that now also
+    integrates its own rigid 6D motion from the solver's hydrodynamic loads,
+    and
 4. runs ``solver.run_sim()``.
 
 MuJoCo cannot integrate the equations of motion of a body whose SDF is
 being deformed at every time-step, so the entire pipeline is deliberately
-side-stepped here: the kinematics are prescribed analytically and the
-BDIM fluid solver integrates Navier–Stokes around the moving, deforming
-body — exactly the pattern used by WaterLily.
+side-stepped here: the bell actuation is analytical, while the global pose
+is advanced directly in the standalone BDIM loop.
 
 Usage
 -----
@@ -36,13 +34,29 @@ import time
 import torch
 
 from lilytorch.src.solver import FluidSolver
+from lilytorch.util.paths import gen_new_folder
 from lilytorch.util.yaml_operations import yaml2pyobject
 
-from .jellyfish_body import JellyfishBody, JellyfishParams
+from lilytorch.farms_examples.jellyfish.jellyfish_body import JellyfishBody, JellyfishParams
 
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CONFIG = os.path.join(HERE, "config_fluid.yaml")
+
+
+def _resolve_output_folder(pars: dict) -> str:
+    """Create a timestamped output folder using the shared repo helper."""
+    output = pars.setdefault("output", {})
+    stack_folder = output.get("stack_folder")
+    if not stack_folder:
+        configured = output.get("save_path", "")
+        normalized = os.path.normpath(configured) if configured else ""
+        basename = os.path.basename(normalized) if normalized else ""
+        stack_folder = basename if basename not in ("", ".") else "jellyfish_fluid_output"
+
+    output_folder = gen_new_folder(stack_folder)
+    output["existing_folder"] = output_folder
+    return output_folder
 
 
 def build_solver(config_path: str, dtype=torch.float32) -> FluidSolver:
@@ -56,7 +70,9 @@ def build_solver(config_path: str, dtype=torch.float32) -> FluidSolver:
             "(missing Nz/zmin/zmax in 'solver' section)."
         )
 
+    output_dir = _resolve_output_folder(pars)
     solver = FluidSolver(pars, dtype=dtype, compute_forces=True)
+    solver.jellyfish_output_dir = output_dir
 
     # ------------------------------------------------------------------
     # Replace the placeholder composite_body with the jellyfish body.
@@ -72,7 +88,7 @@ def build_solver(config_path: str, dtype=torch.float32) -> FluidSolver:
         z=solver.z,
         eps=float(solver.eps),
         grids=solver.grids,
-        params=JellyfishParams(),
+        params=JellyfishParams.from_solver_config(pars),
     )
     solver.composite_body = jelly
     solver.n_bodies = len(jelly.bodies)
@@ -81,6 +97,7 @@ def build_solver(config_path: str, dtype=torch.float32) -> FluidSolver:
     # with consistent masks.
     jelly.update(solver.starting_time, 0, dt=float(solver.dt))
     solver._recompute_mu_normals()
+    jelly.clear_history()
 
     return solver
 
@@ -105,14 +122,23 @@ def main(argv=None):
     t0 = time.time()
     solver = build_solver(config_path)
     solver.run_sim()
+    if hasattr(solver.composite_body, "save_state_history"):
+        output_dir = getattr(solver, "save_path", None)
+        if output_dir is None:
+            output_dir = getattr(solver, "jellyfish_output_dir", HERE)
+            os.makedirs(output_dir, exist_ok=True)
+        solver.composite_body.save_state_history(output_dir)
     elapsed = time.time() - t0
 
     print(f"\n  Config  : {config_path}")
     print(f"  Elapsed : {elapsed:.2f} s")
     print(f"  Grid    : {solver.nx}x{solver.ny}x{solver.nz}")
     print(f"  Steps   : {solver.nt}")
-    if hasattr(solver, "save_path"):
-        print(f"  Output  : {solver.save_path}")
+    output_dir = getattr(solver, "save_path", None)
+    if output_dir is None:
+        output_dir = getattr(solver, "jellyfish_output_dir", None)
+    if output_dir is not None:
+        print(f"  Output  : {output_dir}")
 
 
 if __name__ == "__main__":
