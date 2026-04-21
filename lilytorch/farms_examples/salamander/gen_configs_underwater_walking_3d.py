@@ -92,7 +92,7 @@ class SimConfig(BaseSimConfig):
         # ── Physics ───────────────────────────────────────────────────
         self.timestep          = 0.001
         self.convection_method = "implicit"
-        self.n_iterations      = 10001
+        self.n_iterations      = 15001
         self.save_every        = 50
         self.save              = False
         self.num_sub_steps     = 2
