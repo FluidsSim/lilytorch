@@ -278,6 +278,91 @@ with zero computational overhead.  To enable, set ``smagorinsky_cs`` in
 the YAML configuration; see :doc:`parameters`.
 
 
+Non-Newtonian viscosity (optional)
+-----------------------------------
+
+In addition to constant kinematic viscosity, LilyTorch supports two
+spatially-varying viscosity models. When active, the constant ``nu`` is
+overridden by a field recomputed every time-step from the local strain
+rate :math:`\dot\gamma = |\bar S|` (see :eq:`smagorinsky`).
+
+.. note::
+
+   Non-Newtonian viscosity and Smagorinsky LES cannot be used
+   simultaneously — both provide a variable effective viscosity and
+   would otherwise compound.
+
+Carreau model (shear-thinning)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+For shear-thinning fluids (CMC, polymer solutions) whose viscosity
+decreases with shear rate:
+
+.. math::
+   :label: carreau
+
+   \nu(\dot\gamma) = \nu_\infty
+     + (\nu_0 - \nu_\infty)\,
+       \bigl[\,1 + (\lambda\,\dot\gamma)^{2}\,\bigr]^{(n-1)/2}
+
+with
+
+* :math:`\nu_0`      — zero-shear kinematic viscosity [m²/s],
+* :math:`\nu_\infty` — infinite-shear kinematic viscosity [m²/s],
+* :math:`\lambda`    — relaxation time [s]; thinning begins around
+  :math:`\dot\gamma_c \approx 1/\lambda`,
+* :math:`n`          — power-law index; :math:`n = 1` recovers the
+  Newtonian limit, :math:`n \to 0` gives strong thinning.
+
+Herschel–Bulkley extension (yield stress)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+A yield stress :math:`\tau_y` added on top of :eq:`carreau` prevents
+flow below a critical stress — useful for gels and concentrated
+polymer solutions that behave as soft solids at rest:
+
+.. math::
+
+   \nu_\text{eff}(\dot\gamma) = \nu_\text{Carreau}(\dot\gamma)
+     + \frac{\tau_y}{\rho\,\max(\dot\gamma,\,\epsilon)}
+
+A CFL-based upper clamp ``nu_max`` is computed automatically so that the
+diverging :math:`1/\dot\gamma` term never violates the diffusion stability
+limit.
+
+
+Sponge / damping layer (optional)
+----------------------------------
+
+A sponge layer absorbs outgoing waves and suppresses spurious
+recirculation near domain boundaries — effectively mimicking an
+infinite domain. This is important for low-Reynolds / Stokes-like flows
+where the pressure Poisson equation instantaneously propagates velocity
+across the entire domain.
+
+A damping coefficient :math:`\sigma(\mathbf{x})` is defined on the grid,
+ramping from zero in the interior up to :math:`\sigma_\text{max}` near
+each wall using a smooth quadratic profile:
+
+.. math::
+
+   \sigma(\mathbf{x}) = \sigma_\text{max}\,
+     \left(\frac{\max(0,\; L_s - d)}{L_s}\right)^{2}
+
+where :math:`d` is the distance to the nearest domain boundary and
+:math:`L_s` is the sponge thickness. After each pressure projection the
+velocity is damped in place:
+
+.. math::
+
+   \mathbf{u} \leftarrow \frac{\mathbf{u}}{1 + \Delta t\,\sigma(\mathbf{x})}
+
+In the interior (:math:`d > L_s`) :math:`\sigma = 0` and physics is
+unchanged. Near walls :math:`\sigma` ramps up and drives the velocity
+toward zero. The layer thickness and strength are exposed through the
+YAML config; see :doc:`parameters`.
+
+
 Force computation
 -----------------
 
