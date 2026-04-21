@@ -1,9 +1,9 @@
-"""Constant-torque controller for the submarine propeller.
+"""Torque controller for the submarine propeller joints.
 
-Applies a constant torque ``tau`` to the single revolute joint
-``joint_propeller``.  The propeller accelerates up to a steady-state
-angular velocity where the applied torque balances the tangential
-blade drag.
+By default this applies the same scalar torque ``tau`` to every
+torque-controlled propeller joint. For contra-rotating setups, a
+``joint_torques`` mapping can override the torque per joint so paired
+rotors spin in opposite directions.
 """
 
 from farms_core.experiment.options import ExperimentOptions
@@ -13,7 +13,7 @@ from farms_core.model.options import AnimatOptions
 
 
 class PropellerController(AnimatController):
-    def __init__(self, joints_names, max_torques, tau, animat_i):
+    def __init__(self, joints_names, max_torques, tau, joint_torques, animat_i):
         super().__init__(
             animat_i      = animat_i,
             joints_names  = joints_names,
@@ -21,6 +21,10 @@ class PropellerController(AnimatController):
             max_torques   = max_torques,
         )
         self.tau = float(tau)
+        self.joint_torques = {
+            str(joint_name): float(joint_tau)
+            for joint_name, joint_tau in joint_torques.items()
+        }
 
     @classmethod
     def from_options(
@@ -53,12 +57,14 @@ class PropellerController(AnimatController):
                 max_torques          = max_torques,
                 joints_control_types = joints_control_types,
             ),
-            tau          = config["tau"],
+            tau          = config.get("tau", 0.0),
+            joint_torques = config.get("joint_torques", {}),
             animat_i     = animat_i,
         )
 
     def torques(self, iteration, time, timestep):
+        del iteration, time, timestep
         return {
-            joint: self.tau
+            joint: self.joint_torques.get(joint, self.tau)
             for joint in self.joints_names[ControlType.TORQUE]
         }

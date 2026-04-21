@@ -16,41 +16,6 @@ diff_u, diff_v, diff_w
 
 python lilytorch/src/video_postprocess.py /data/andreaferrario/ns_data/cylinder_3d/Re_27_laminar --fields omega_z_3d vel_mag_3d --slow-factor 4
 
-ALREADY RUN:
-
-- Run a full self-propelled 3d 1guilla simulation to check if the force computation in 3d works
-- Run error analysis for the flow past cylinder in 2d following run_error_analysis_cylinder.py (adapting this script)
-- The pool appears above the swimmer position. I want the swimmer to be inside the pool. Also, the water arena should be programmatically be generated to have water inside the pool only. Also the sizes of the pool borders should be scaled with the pool size - make it automatically generate them from the generation files in the config run. It would be nice to have some cool textures for the pool as well.
-- Add a proper analusis of the computational cost of the main parts of the code for 1guilla 3d swimming, for example what is the cost of the different parts of the solver, the computation of the sdf properties, the posson solver, the advection, etc. Suggest a small list of cost to tests
-- Move the yaml files in a dedicated folder. Fix the yaml files to adhere to the most recent
-- I want to understand if it is possible to make a unique shared BDIMhandler for all mujoco simulations (if possible - check that they can share it) 2d and 3d simulations. First check all BDIMhandler files and see how they differ. Clarify if it is possible to define hyperparameters that are generated via the config generation files instead of the BDIMhandler. This would simplified greatly the repo.
-- Bilinear/trilinear prolongation instead of piecewise-constant injection — would improve V-cycle quality and reduce CG iterations
-- Red-Black Gauss-Seidel instead of Jacobi — 2x smoothing rate per sweep
-- Run a computational analysis of the solver for the 1guilla free swimming simulation, in particular i would like a good (paper quality) plot of the cost of the main operations: FARMS step, body update, computation of body interpolation (mu) and normals (grouped together), convection+diffusion, projection (pressure solve). Suggest some more if you think it is worthed including. Add these tests in the validation folder.
-- Find memory bottlenecks and potential memory improvements
-- torch.compile() on the Jacobi stencil — would fuse the elementwise ops into a single GPU kernel
-- Implement faster solver for the Poisson equation, i.e. test different smoother, or preconjugate gradient multigrid method
-- Clean the code and suggest improvements for body.py
-- i would like to add a ground plane that looks good at the bottom of the pool to avoid seeing the stars. also i want to generate the recording camera in mujoco to be at a good position to see the swimmer
-- Speed up force computations
-- Cache SDF rotation transforms in 3D updates
-In `_update_3d()` (BDIMhandler), the rotation matrix from Euler angles is recomputed for
-every body every timestep, then applied to the full SDF grid. For slowly rotating bodies,
-cache the previous rotation and only recompute when angle change exceeds a threshold.
-- Run 2d sphere coquerelle and gazzola tests again
-- Pre-allocate operator output buffers in operations.py
-`gradient()` creates `torch.zeros_like(var)` for dvar_dx/dy/dz every call. Same for
-`divergence()` and `vorticity()`. Called multiple times per Heun sub-step. Pass
-pre-allocated buffers or cache them on the solver.
-- Run the drag cylinder test in 2d
-- I prefer the old 2d plots with white backgroud. Please return to those
-- It seems that many of the functions/parameters in the configs for running the simulations in farms_examples are shared. I think it would be better to have a single common config class and that each run config can be a class that inherits this master class and modifies its attributes for its specific simulation settings. Do that
-- set a sphinx documentation system, with API, mathematical formulas, scheme descriptions, boundary conditions explanations, and parameters that can be used
-- The solver only checks for NaN. Monitoring E_k = 0.5·Σ(u²+v²+w²)·h^d and enstrophy
-would catch slow blow-ups, non-physical energy growth, or excessive dissipation
-- how difficult would be to add a turbulence Smagorinsky model
-(ν_t = (Cs·Δ)²|S̄|) to model additive eddy viscosity? What does the model do exactly and how expensive is it?
-- Towers (2008) 2nd-order force correction implemented: `force_delta_order: 2` in solver config divides smoothed delta by |∇SDF|, correcting surface measure when numerical SDF deviates from unit gradient. Default is order 1 (no change). Not codimension-restricted.
 
 # HIGH PRIORITY:
 - when running 1guilla slime exp i noticed that the gpu is not fully used - check why

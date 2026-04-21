@@ -755,7 +755,7 @@ def _nearest_index(coord_1d, target=0.0):
 
 
 def plot_field_3d_slices(
-    field_3d,           # 3-D numpy array (Nx, Ny, Nz) – already on CPU
+    field_3d,           # 3-D numpy array or dict of per-slice 3-D arrays
     coords,             # dict with keys "x", "y", "z" – 1-D numpy arrays
     name,               # quantity string
     iteration,
@@ -784,8 +784,14 @@ def plot_field_3d_slices(
     rather than the array midpoint, so that slices intersect the body
     even when the domain is not symmetric about the origin.
     """
-    field_np = np.asarray(field_3d)
-    Nx, Ny, Nz = field_np.shape
+    if isinstance(field_3d, dict):
+        field_xy = np.asarray(field_3d["xy"])
+        field_xz = np.asarray(field_3d["xz"])
+        field_yz = np.asarray(field_3d["yz"])
+    else:
+        field_xy = field_xz = field_yz = np.asarray(field_3d)
+
+    Nx, Ny, Nz = field_xy.shape
     x, y, z = coords["x"], coords["y"], coords["z"]
     si = slice_indices or {}
     k_xy = si.get("xy", _nearest_index(z, 0.0))
@@ -827,7 +833,7 @@ def plot_field_3d_slices(
                  float(y[0]) - hy, float(y[-1]) + hy)
     sdf_xy = sdf_np[:, :, k_xy] if sdf_np is not None else None
     plot_field_2d(
-        field_np[:, :, k_xy], extent_xy, f"{name}_xy_k{k_xy}",
+        field_xy[:, :, k_xy], extent_xy, f"{name}_xy_k{k_xy}",
         iteration, save_path,
         vmin=vmin, vmax=vmax, bodies=bodies, sdf_2d=sdf_xy, cmap=cmap, fmt=fmt,
         axis_labels=("x [m]", "y [m]"),
@@ -848,7 +854,7 @@ def plot_field_3d_slices(
             for c in body_com_positions
         ]
     plot_field_2d(
-        field_np[:, j_xz, :], extent_xz, f"{name}_xz_j{j_xz}",
+        field_xz[:, j_xz, :], extent_xz, f"{name}_xz_j{j_xz}",
         iteration, save_path,
         vmin=vmin, vmax=vmax, bodies=None, sdf_2d=sdf_xz, cmap=cmap, fmt=fmt,
         axis_labels=("x [m]", "z [m]"),
@@ -869,7 +875,7 @@ def plot_field_3d_slices(
             for c in body_com_positions
         ]
     plot_field_2d(
-        field_np[i_yz, :, :], extent_yz, f"{name}_yz_i{i_yz}",
+        field_yz[i_yz, :, :], extent_yz, f"{name}_yz_i{i_yz}",
         iteration, save_path,
         vmin=vmin, vmax=vmax, bodies=None, sdf_2d=sdf_yz, cmap=cmap, fmt=fmt,
         axis_labels=("y [m]", "z [m]"),

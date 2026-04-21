@@ -335,6 +335,23 @@ def box(x,y,xb=20,yb=20):
         torch.maximum(qy,torch.zeros_like(y))**2
     )+torch.minimum(torch.maximum(qx,qy),torch.zeros_like(x))
 
+
+def box_3d(x, y, z, xb=20, yb=20, zb=20):
+    qx = torch.abs(x) - xb
+    qy = torch.abs(y) - yb
+    qz = torch.abs(z) - zb
+    return (
+        torch.sqrt(
+            torch.maximum(qx, torch.zeros_like(x))**2 +
+            torch.maximum(qy, torch.zeros_like(y))**2 +
+            torch.maximum(qz, torch.zeros_like(z))**2
+        )
+        + torch.minimum(
+            torch.maximum(torch.maximum(qx, qy), qz),
+            torch.zeros_like(x),
+        )
+    )
+
 def resample_contour_exact_spacing(x, y, spacing, closed=True):
     """
     Resample contour with exactly constant spacing
@@ -2302,160 +2319,223 @@ class MultiAnimatBodies(Body):
                     print(f"  Skipping non-fluid link without collisions: {link['name']}")
                     continue
 
-                collision = collisions[0]
-                collision_pose = np.array(
-                    collision["pose"] if "pose" in collision else np.zeros(6),
-                    dtype=x.cpu().numpy().dtype,
-                )
-                geometry = collision["geometry"]
-                if "uri" in geometry:
-                    mesh_name = geometry["uri"]
-                    mesh_gpath = os.path.normpath(sdf_folder + "/" + mesh_name)
-                    initial_pose = np.array(link.pose).astype(x.cpu().numpy().dtype)
-                    update_funcs = (
-                        lambda t: 180,
-                        [
-                            lambda t, initial_pose=initial_pose: -initial_pose[0],
-                            lambda t, initial_pose=initial_pose: -initial_pose[1],
-                        ]
+                initial_pose = np.array(link.pose).astype(x.cpu().numpy().dtype)
+                link_extras = {}
+                if morphology_link is not None:
+                    link_extras = dict(getattr(morphology_link, "extras", {}) or {})
+
+                for collision in collisions:
+                    collision_pose = np.array(
+                        collision["pose"] if "pose" in collision else np.zeros(6),
+                        dtype=x.cpu().numpy().dtype,
                     )
-
-                    scale = 1
-                    local_kwargs = dict(kwargs)
-                    if "scale" in geometry:
-                        scale_vec = geometry["scale"]
-                        assert scale_vec[0] == scale_vec[1] == scale_vec[2], "Non-uniform scaling not supported."
-                        scale = scale_vec[0]
-                        local_kwargs["scale"] = scale
-                        local_kwargs["zpos"] = link.pose[2]
-
-                    cache_key = (mesh_gpath, scale)
-                    if cache_key in _mesh_body_cache:
-                        # Reuse the already-computed SDF data
-                        template = _mesh_body_cache[cache_key]
-                        body = BodyMesh(
-                            device, x, y,
-                            mesh_gpath,
-                            update_funcs,
-                            z=self.z,
-                            eps=eps,
-                            compute_interp=False,  # skip heavy computation
-                            nsamples=template.nsamples,
-                            msamples=template.msamples,
-                            ksamples=template.ksamples,
-                            suit=suit,
-                            plotting_meshes=False,
-                            grids=grids,
-                            **local_kwargs
+                    geometry = collision["geometry"]
+                    if "uri" in geometry:
+                        mesh_name = geometry["uri"]
+                        mesh_gpath = os.path.normpath(sdf_folder + "/" + mesh_name)
+                        update_funcs = (
+                            lambda t: 180,
+                            [
+                                lambda t, initial_pose=initial_pose: -initial_pose[0],
+                                lambda t, initial_pose=initial_pose: -initial_pose[1],
+                            ]
                         )
-                        # Copy the pre-computed SDF interpolation data
-                        body.sdf       = template.sdf
-                        body.bb        = template.bb
-                        body.cnt       = template.cnt.clone()
-                        body.cnt_update = template.cnt_update.clone()
-                        body.curv_coord = template.curv_coord
-                        body.sign_vec   = template.sign_vec
-                        body.ds         = template.ds
-                        body.mask       = template.mask
-                        print(f"  Reusing cached SDF for {mesh_gpath} (scale={scale})")
-                    else:
-                        body = BodyMesh(
-                            device, x, y,
-                            mesh_gpath,
-                            update_funcs,
-                            z=self.z,
-                            eps=eps,
-                            compute_interp=compute_interp,
-                            nsamples=nsamples, msamples=msamples, ksamples=ksamples,
-                            suit=suit,
-                            plotting_meshes=plotting_meshes,
-                            grids=grids,
-                            **local_kwargs
-                        )
-                        _mesh_body_cache[cache_key] = body
-                    body.mujoco_rgba = _link_rgba
-                    body.local_pose = collision_pose
-                    self.bodies.append(body)
 
-                elif "radius" in geometry and "length" in geometry:
-                    radius = torch.tensor(geometry["radius"], dtype=x.dtype, device=x.device)
-                    length = torch.tensor(geometry["length"], dtype=x.dtype, device=x.device)
-                    initial_pose = np.array(link.pose).astype(x.cpu().numpy().dtype)
-                    if self.ndim == 2:
-                        if "L" in link["name"]:
-                            side = "L"
-                        elif "R" in link["name"]:
-                            side = "R"
+                        scale = 1
+                        local_kwargs = dict(kwargs)
+                        if "scale" in geometry:
+                            scale_vec = geometry["scale"]
+                            assert scale_vec[0] == scale_vec[1] == scale_vec[2], "Non-uniform scaling not supported."
+                            scale = scale_vec[0]
+                            local_kwargs["scale"] = scale
+                            local_kwargs["zpos"] = link.pose[2]
+
+                        cache_key = (mesh_gpath, scale)
+                        if cache_key in _mesh_body_cache:
+                            # Reuse the already-computed SDF data
+                            template = _mesh_body_cache[cache_key]
+                            body = BodyMesh(
+                                device, x, y,
+                                mesh_gpath,
+                                update_funcs,
+                                z=self.z,
+                                eps=eps,
+                                compute_interp=False,  # skip heavy computation
+                                nsamples=template.nsamples,
+                                msamples=template.msamples,
+                                ksamples=template.ksamples,
+                                suit=suit,
+                                plotting_meshes=False,
+                                grids=grids,
+                                **local_kwargs
+                            )
+                            # Copy the pre-computed SDF interpolation data
+                            body.sdf       = template.sdf
+                            body.bb        = template.bb
+                            body.cnt       = template.cnt.clone()
+                            body.cnt_update = template.cnt_update.clone()
+                            body.curv_coord = template.curv_coord
+                            body.sign_vec   = template.sign_vec
+                            body.ds         = template.ds
+                            body.mask       = template.mask
+                            print(f"  Reusing cached SDF for {mesh_gpath} (scale={scale})")
                         else:
-                            raise ValueError("Capsule link name must contain 'L' or 'R' to define the side.")
+                            body = BodyMesh(
+                                device, x, y,
+                                mesh_gpath,
+                                update_funcs,
+                                z=self.z,
+                                eps=eps,
+                                compute_interp=compute_interp,
+                                nsamples=nsamples, msamples=msamples, ksamples=ksamples,
+                                suit=suit,
+                                plotting_meshes=plotting_meshes,
+                                grids=grids,
+                                **local_kwargs
+                            )
+                            _mesh_body_cache[cache_key] = body
 
-                    if self.ndim == 3:
-                        sdf_fun = lambda x, y, z: capsule_3d(x, y, z, radius, radius, length)
-                        update_maps = (
-                            lambda t: (0.0, 0.0, 0.0),
-                            [
-                                lambda t, initial_pose=initial_pose: -initial_pose[0],
-                                lambda t, initial_pose=initial_pose: -initial_pose[1],
-                                lambda t, initial_pose=initial_pose: -initial_pose[2],
-                            ],
+                    elif "radius" in geometry and "length" in geometry:
+                        radius = torch.tensor(geometry["radius"], dtype=x.dtype, device=x.device)
+                        length = torch.tensor(geometry["length"], dtype=x.dtype, device=x.device)
+                        if self.ndim == 2:
+                            if "L" in link["name"]:
+                                side = "L"
+                            elif "R" in link["name"]:
+                                side = "R"
+                            else:
+                                raise ValueError("Capsule link name must contain 'L' or 'R' to define the side.")
+
+                        if self.ndim == 3:
+                            sdf_fun = (
+                                lambda x, y, z, radius=radius, length=length:
+                                capsule_3d(x, y, z, radius, radius, length)
+                            )
+                            update_maps = (
+                                lambda t: (0.0, 0.0, 0.0),
+                                [
+                                    lambda t, initial_pose=initial_pose: -initial_pose[0],
+                                    lambda t, initial_pose=initial_pose: -initial_pose[1],
+                                    lambda t, initial_pose=initial_pose: -initial_pose[2],
+                                ],
+                            )
+                        else:
+                            sdf_fun = (
+                                lambda x, y, radius=radius, length=length, side=side:
+                                sdUnevenCapsule(x, y, radius, radius, length, side=side)
+                            )
+                            update_maps = (
+                                lambda t: 0,
+                                [
+                                    lambda t, initial_pose=initial_pose: -initial_pose[0],
+                                    lambda t, initial_pose=initial_pose: -initial_pose[1],
+                                ],
+                            )
+                        body = BodyAnalytical(
+                            device, x, y, sdf_fun, update_maps, z=self.z,
+                            eps=eps, plotting=False, pre_update=False, grids=grids,
                         )
+                        radius_cpu = radius.detach().cpu()
+                        length_cpu = length.detach().cpu()
+                        body.bb = [
+                            [-radius_cpu, radius_cpu],
+                            [-radius_cpu, radius_cpu],
+                            [-(0.5 * length_cpu + radius_cpu), 0.5 * length_cpu + radius_cpu],
+                        ]
+
+                    elif "radius" in geometry and "length" not in geometry:
+                        radius = torch.tensor(geometry["radius"], dtype=x.dtype, device=x.device)
+                        if self.ndim == 3:
+                            sdf_fun = (
+                                lambda x, y, z, radius=radius:
+                                sphere(x, y, z, xt=0, yt=0, zt=0, r=radius)
+                            )
+                            update_maps = (
+                                lambda t: (0.0, 0.0, 0.0),
+                                [
+                                    lambda t, initial_pose=initial_pose: -initial_pose[0],
+                                    lambda t, initial_pose=initial_pose: -initial_pose[1],
+                                    lambda t, initial_pose=initial_pose: -initial_pose[2],
+                                ],
+                            )
+                        else:
+                            sdf_fun = (
+                                lambda x, y, radius=radius:
+                                circle(x, y, xt=0, yt=0, r=radius)
+                            )
+                            update_maps = (
+                                lambda t: 0,
+                                [
+                                    lambda t, initial_pose=initial_pose: -initial_pose[0],
+                                    lambda t, initial_pose=initial_pose: -initial_pose[1],
+                                ],
+                            )
+                        body = BodyAnalytical(
+                            device, x, y, sdf_fun, update_maps, z=self.z,
+                            eps=eps, plotting=False, pre_update=False, grids=grids,
+                        )
+                        radius_cpu = radius.detach().cpu()
+                        body.bb = [
+                            [-radius_cpu, radius_cpu],
+                            [-radius_cpu, radius_cpu],
+                            [-radius_cpu, radius_cpu],
+                        ]
+
+                    elif "size" in geometry:
+                        size = torch.tensor(geometry["size"], dtype=x.dtype, device=x.device)
+                        half_size = 0.5 * size
+                        if self.ndim == 3:
+                            sdf_fun = (
+                                lambda x, y, z, half_size=half_size: box_3d(
+                                    x, y, z,
+                                    xb=half_size[0],
+                                    yb=half_size[1],
+                                    zb=half_size[2],
+                                )
+                            )
+                            update_maps = (
+                                lambda t: (0.0, 0.0, 0.0),
+                                [
+                                    lambda t, initial_pose=initial_pose: -initial_pose[0],
+                                    lambda t, initial_pose=initial_pose: -initial_pose[1],
+                                    lambda t, initial_pose=initial_pose: -initial_pose[2],
+                                ],
+                            )
+                        else:
+                            sdf_fun = (
+                                lambda x, y, half_size=half_size: box(
+                                    x, y,
+                                    xb=half_size[0],
+                                    yb=half_size[1],
+                                )
+                            )
+                            update_maps = (
+                                lambda t: 0,
+                                [
+                                    lambda t, initial_pose=initial_pose: -initial_pose[0],
+                                    lambda t, initial_pose=initial_pose: -initial_pose[1],
+                                ],
+                            )
+                        body = BodyAnalytical(
+                            device, x, y, sdf_fun, update_maps, z=self.z,
+                            eps=eps, plotting=False, pre_update=False, grids=grids,
+                        )
+                        body.bb = [
+                            [-half_size[0].cpu(), half_size[0].cpu()],
+                            [-half_size[1].cpu(), half_size[1].cpu()],
+                            [-half_size[2].cpu(), half_size[2].cpu()],
+                        ]
+
                     else:
-                        sdf_fun = lambda x, y, side=side: sdUnevenCapsule(x, y, radius, radius, length, side=side)
-                        update_maps = (
-                            lambda t: 0,
-                            [
-                                lambda t, initial_pose=initial_pose: -initial_pose[0],
-                                lambda t, initial_pose=initial_pose: -initial_pose[1],
-                            ],
-                        )
-                    body = BodyAnalytical(
-                        device, x, y, sdf_fun, update_maps, z=self.z,
-                        eps=eps, plotting=False, pre_update=False, grids=grids,
-                    )
-                    radius_cpu = radius.detach().cpu()
-                    length_cpu = length.detach().cpu()
-                    body.bb = [
-                        [-radius_cpu, radius_cpu],
-                        [-radius_cpu, radius_cpu],
-                        [-(0.5 * length_cpu + radius_cpu), 0.5 * length_cpu + radius_cpu],
-                    ]
+                        raise ValueError("Unsupported geometry type in SDF.")
+
                     body.mujoco_rgba = _link_rgba
                     body.local_pose = collision_pose
+                    body.name = link["name"]
+                    body.collision_name = collision["name"] if "name" in collision else None
+                    body.link_extras = link_extras
                     self.bodies.append(body)
-
-                elif "radius" in geometry and "length" not in geometry:
-                    radius = torch.tensor(geometry["radius"], dtype=x.dtype, device=x.device)
-                    initial_pose = np.array(link.pose).astype(x.cpu().numpy().dtype)
-                    if self.ndim == 3:
-                        sdf_fun = lambda x, y, z: sphere(x, y, z, xt=0, yt=0, zt=0, r=radius)
-                        update_maps = (
-                            lambda t: (0.0, 0.0, 0.0),
-                            [
-                                lambda t, initial_pose=initial_pose: -initial_pose[0],
-                                lambda t, initial_pose=initial_pose: -initial_pose[1],
-                                lambda t, initial_pose=initial_pose: -initial_pose[2],
-                            ],
-                        )
-                    else:
-                        sdf_fun = lambda x, y: circle(x, y, xt=0, yt=0, r=radius)
-                        update_maps = (
-                            lambda t: 0,
-                            [
-                                lambda t, initial_pose=initial_pose: -initial_pose[0],
-                                lambda t, initial_pose=initial_pose: -initial_pose[1],
-                            ],
-                        )
-                    body = BodyAnalytical(
-                        device, x, y, sdf_fun, update_maps, z=self.z,
-                        eps=eps, plotting=False, pre_update=False, grids=grids,
-                    )
-                    body.bb = [[-radius.cpu(), radius.cpu()], [-radius.cpu(), radius.cpu()], [-radius.cpu(), radius.cpu()]]
-                    body.mujoco_rgba = _link_rgba
-                    body.local_pose = collision_pose
-                    self.bodies.append(body)
-                else:
-                    raise ValueError("Unsupported geometry type in SDF.")
-                self.body_ids.append([animat_i, link_i])
+                    self.body_ids.append([animat_i, link_i])
 
         self.nbodies = len(self.bodies)
         gs = self.grid_shape

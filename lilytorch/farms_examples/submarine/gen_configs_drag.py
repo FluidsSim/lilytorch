@@ -1,15 +1,13 @@
-"""Submarine simulation in MuJoCo using the FARMS drag model.
+"""Submarine simulation coupled to the 3-D BDIM fluid solver.
 
-This example runs a single rigid-body submarine in a 3-D pool, with
-hydrodynamic forces approximated by the FARMS drag model
-(``use_bdim = False`` => ``use_drag = True`` in :class:`BaseSimConfig`).
+This example runs a fully free submarine in a 3-D pool with two-way fluid
+coupling handled by lilytorch's BDIM solver. The default propulsion setup
+keeps the single propeller plus tail fins so the wake is resolved by the
+fluid model instead of approximated by anisotropic drag coefficients.
 
-It is intentionally written as a *template* mirroring the layout of the
-other examples in ``lilytorch/farms_examples`` (see
-``_1guillasim/gen_configs_one_free_3d.py`` or ``salamander/gen_configs_swim_3d.py``):
-all BDIM / fluid-coupling knobs are present and grouped, but disabled, so
-that switching to a coupled fluid simulation later only requires flipping
-``self.use_bdim = True`` (and tuning the relevant grid / solver fields).
+The file still keeps the drag-only link overrides used in the legacy
+``use_bdim = False`` path, but the default configuration below is the
+fluid-coupled one.
 
 Run with::
 
@@ -39,29 +37,60 @@ class SimConfig(BaseSimConfig):
         self.headless = False
 
         # ── Simulation flags ──────────────────────────────────────────
-        # Drag-only: the FARMS drag model is enabled automatically when
-        # use_bdim is False (see BaseSimConfig.use_drag).  Flip this to
-        # True (and tune the BDIM section below) to couple with the
-        # fluid solver.
-        self.use_bdim = False
+        self.use_bdim = True
+        # With BDIM enabled, links do not automatically opt into fluid
+        # forces because BaseSimConfig otherwise ties fluid interaction
+        # to use_drag. Force it on explicitly for the submarine bodies.
+        self.animat_fluid_interaction = True
+
+        submarine_sdf_dir = os.path.join(
+            lilytorch_repo_root, 'farms_examples', 'sdfs', 'submarine',
+        )
+
+        # In free 3-D, a single propeller injects a steady reaction torque
+        # into the hull. Use the contra-rotating layout by default so the
+        # submarine remains torque-balanced without relying on artificial
+        # roll constraints.
+        propulsion_variant = 'contra_rotating'
+        if propulsion_variant == 'single_propeller':
+            sdf_file = os.path.join(submarine_sdf_dir, 'submarine.sdf')
+            controller_config = {
+                "path": "lilytorch.farms_examples.submarine."
+                        "propeller_controller.PropellerController",
+                "tau": 0.1,
+            }
+        elif propulsion_variant == 'tail_fins':
+            sdf_file = os.path.join(submarine_sdf_dir, 'submarine_tail_fins.sdf')
+            controller_config = {
+                "path": "lilytorch.farms_examples.submarine."
+                        "propeller_controller.PropellerController",
+                "tau": 0.1,
+            }
+        elif propulsion_variant == 'contra_rotating':
+            shaft_tau = 0.05
+            sdf_file = os.path.join(submarine_sdf_dir, 'submarine_contra.sdf')
+            controller_config = {
+                "path": "lilytorch.farms_examples.submarine."
+                        "propeller_controller.PropellerController",
+                "joint_torques": {
+                    "joint_propeller_front": shaft_tau,
+                    "joint_propeller_rear": -shaft_tau,
+                },
+            }
+        else:
+            raise ValueError(f"Unsupported propulsion_variant: {propulsion_variant}")
 
         # ── Animats ───────────────────────────────────────────────────
-        # Submarine with a propeller revolute joint.  The propeller is
-        # driven at a constant angular velocity ``omega`` by
-        # PropellerController, and two pitched blade links (with
-        # anisotropic drag coefficients set in customize_morphology_links)
-        # convert tangential drag into axial thrust.
+        # The propeller blades use anisotropic drag coefficients set in
+        # customize_morphology_links so their tangential motion produces
+        # axial thrust.
         self.animats_pars = [
             {
                 "model_name"  : "submarine",
-                "sdf_name"    : "submarine.sdf",
+                "sdf_file"    : sdf_file,
                 "control_type": "torque",
                 "gains"       : [0.0, 0.0, 0.0],
-                "controller_config": {
-                    "path": "lilytorch.farms_examples.submarine."
-                            "propeller_controller.PropellerController",
-                    "tau" : 0.1,   # constant torque on the propeller joint (Nm)
-                },
+                "controller_config": controller_config,
                 "spawn_mode"  : SpawnMode.FREE,
                 # Spawn the sub at mid-depth in the pool, oriented along +X.
                 "pose"        : [-0.5, 0.0, 0.0, 0.0, 0.0, 0.0],
@@ -84,7 +113,7 @@ class SimConfig(BaseSimConfig):
         self.rho_body          = 1000.0  # matches the SDF inertia mass
         self.rho               = 1000.0  # water density
         self.timestep          = 0.001
-        self.n_iterations      = 4001
+        self.n_iterations      = 20001
         self.save_every        = 50
         self.num_sub_steps     = 1
 
@@ -94,16 +123,15 @@ class SimConfig(BaseSimConfig):
 
         # ── Arena ────────────────────────────────────────────────────
         # Pool walls auto-sized from the grid extents, water filled up
-        # to the top of the pool.  Drag and buoyancy are driven by the
-        # FARMS drag model when use_bdim=False.
+        # to the top of the pool. In the BDIM path the fluid solver
+        # provides the hydrodynamic forces, so the legacy water drag /
+        # buoyancy toggles remain disabled.
         self.wall_thickness = 0.01
         self.arena_pose     = [0, 0, 0, 0, 0, 0]
+        self.water_drag     = False
         # (water_drag / water_buoyancy default to use_drag, i.e. True)
 
-        # ─────────────────────────────────────────────────────────────
-        #  BDIM template (kept disabled; activate by setting
-        #  self.use_bdim = True above and tuning the values below).
-        # ─────────────────────────────────────────────────────────────
+        # ── BDIM solver ──────────────────────────────────────────────
         self.bdim_dt                 = self.timestep
         self.bdim_nt                 = self.n_iterations
         self.convection_method       = "quick"
@@ -129,23 +157,60 @@ class SimConfig(BaseSimConfig):
         self.bc_type_w   = ["N", "N", "N", "N", "D", "D"]
         self.bc_values_w = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
-        # Body sampling for BDIM (used only when use_bdim=True).
+        # Body sampling for BDIM. The submarine SDFs are primitive-based,
+        # so no explicit mesh interpolation grid is needed here; if mesh
+        # collisions are added later, the 3-D body path will auto-size the
+        # per-axis sampling from the fluid grid spacing.
         self.contour_mask          = True
-        self.n_samples             = (2000, 2000)
         self.force_scaling         = 1.0
         self.interp_data_subfolder = "interp_data_3d"
 
     # ── Hooks ─────────────────────────────────────────────────────────
 
     def customize_morphology_links(self, links_list, animat_i, animat_pars, index):
-        # Anisotropic drag on the blades: high normal-to-face (blade X,
-        # the thickness axis), low along chord (Z) and span (Y).  Together
-        # with the blade pitch this turns tangential rotation into +X thrust.
+        del animat_i, animat_pars, index
+
+        # These drag coefficients are only used in the legacy drag-only
+        # fallback (`use_bdim=False`). The BDIM configuration above ignores
+        # them and takes hydrodynamic forces from the fluid solver instead.
         for link in links_list:
-            if link['name'] in ('blade_0', 'blade_1'):
+            # Hull: give it realistic skin-friction roll drag about its own
+            # long axis. Without this the cylinder is free-spinning and any
+            # steady shaft reaction torque spins it up to a large terminal
+            # omega regardless of hull inertia. Pitch/yaw angular drag are
+            # less critical but set to a sane nonzero value too.
+            if link['name'] == 'base_link':
                 link['drag_coefficients'] = [
-                    [-0.5, -0.01, -0.05],
-                    [0.0, 0.0, 0.0],
+                    [-0.1, -5.0, -5.0],
+                    [-0.05, -0.5, -0.5],
+                ]
+                # The 3-D BDIM path applies buoyancy explicitly as a force.
+                # Add a small positive metacentric offset so the buoyancy
+                # force acts above the base-link CG and generates a restoring
+                # roll moment instead of allowing free 360-degree roll.
+                link['extras']['metacentric_offset'] = [0.0, 0.0, 0.03]
+
+            if link['name'] in (
+                    'blade_0', 'blade_1',
+                    'front_blade_0', 'front_blade_1',
+                    'rear_blade_0', 'rear_blade_1',
+            ):
+                link['drag_coefficients'] = [
+                    [-0.5, -0.1, -0.3],
+                    [0.0001, 0.01, 0.01],
+                ]
+
+            # Tail fins only add passive roll damping. They do not cancel
+            # steady propeller reaction torque, but they do resist hull roll.
+            if link['name'] in ('fin_top', 'fin_bottom'):
+                link['drag_coefficients'] = [
+                    [-0.3, -1.5, -0.3],
+                    [0.0001, 0.01, 0.01],
+                ]
+            if link['name'] in ('fin_port', 'fin_starboard'):
+                link['drag_coefficients'] = [
+                    [-0.3, -0.3, -1.5],
+                    [0.0001, 0.01, 0.01],
                 ]
 
     # ── Extensions ────────────────────────────────────────────────────

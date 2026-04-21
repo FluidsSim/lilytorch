@@ -2315,6 +2315,40 @@ class FluidSolver:
         else:
             self._recompute_mu_normals_3d()
 
+    def _apply_force_feedback(self, iteration, t):
+        """Advance any standalone body state that consumes solver loads.
+
+        This is intentionally separate from the FARMS / MuJoCo path: it is
+        only used by ``FluidSolver.step_()`` after viscous and pressure loads
+        have been accumulated on the current standalone composite body.
+        """
+        callback = getattr(self.composite_body, "apply_force_feedback", None)
+        if callback is None:
+            return
+
+        force_x = self.friction_force_lin_x + self.pressure_force_x
+        force_y = self.friction_force_lin_y + self.pressure_force_y
+
+        if self.ndim == 2:
+            force = torch.stack((force_x, force_y), dim=-1)
+            torque = self.friction_force_ang_z + self.pressure_force_ang_z
+        else:
+            force_z = self.friction_force_lin_z + self.pressure_force_z
+            torque_x = self.friction_force_ang_x + self.pressure_force_ang_x
+            torque_y = self.friction_force_ang_y + self.pressure_force_ang_y
+            torque_z = self.friction_force_ang_z + self.pressure_force_ang_z
+            force = torch.stack((force_x, force_y, force_z), dim=-1)
+            torque = torch.stack((torque_x, torque_y, torque_z), dim=-1)
+
+        callback(
+            force=force,
+            torque=torque,
+            iteration=iteration,
+            time=t,
+            dt=self.dt,
+            solver=self,
+        )
+
     def step_(self, u, v, p, iteration, t, w_vel=None):
 
         # update sdf_properties
@@ -2331,12 +2365,14 @@ class FluidSolver:
 
             if self.compute_forces:
                 self.forces_method2(u, v, p, iteration)
+                self._apply_force_feedback(iteration, t)
 
         else:
             (u, v, p, w_vel) = self._solve(u, v, p, iteration, w_vel=w_vel)
 
             if self.compute_forces:
                 self.forces_method2_3d(u, v, w_vel, p, iteration)
+                self._apply_force_feedback(iteration, t)
 
         # ---- flow diagnostics (energy, enstrophy, CFL, divergence) ----
         self.diagnostics.update(
@@ -2375,7 +2411,7 @@ class FluidSolver:
     DEFAULT_PLOT_SPECS = [
         ("curl",       lambda s, u, v, p, w: (
             s.vorticity(u, v, w).cpu() if s.ndim == 2
-            else s.vorticity_components(u, v, w)["omega_z"].cpu()
+            else FluidSolver._curl_slice_fields(s, u, v, w)
         ), None, None, True),
         # ("v",          lambda s, u, v, p, w: v.cpu(), "auto", "auto", True),
         ("pressure",   lambda s, u, v, p, w: p.cpu(), "auto", "auto", True),
@@ -2393,6 +2429,20 @@ class FluidSolver:
             s._vort_cache = s.vorticity_components(u, v, w)
             s._vort_cache_id = id(u)
         return s._vort_cache
+
+    @staticmethod
+    def _curl_slice_fields(s, u, v, w):
+        """Return the out-of-plane curl component for each orthogonal slice.
+
+        XY uses ``omega_z`` as usual. For XZ, the 2-D-like scalar curl is
+        ``dw/dx - du/dz = -omega_y``. For YZ, it is ``dw/dy - dv/dz = omega_x``.
+        """
+        vort = FluidSolver._cached_vort(s, u, v, w)
+        return {
+            "xy": vort["omega_z"].cpu(),
+            "xz": (-vort["omega_y"]).cpu(),
+            "yz": vort["omega_x"].cpu(),
+        }
 
     @staticmethod
     def _vel_mag(s, u, v, w):
@@ -2603,8 +2653,14 @@ class FluidSolver:
                     sdf_np = self.composite_body.sdf_val.cpu().numpy().copy()[_s, _s, _s]
                 for (name, field_fn, vmin, vmax, _show_body) in specs:
                     field = field_fn(self, u, v, p, w_vel)
-                    field_np = field.detach().cpu().numpy().copy() if hasattr(field, 'detach') else np.array(field)
-                    field_np = field_np[_s, _s, _s]  # strip ghost cells
+                    if isinstance(field, dict):
+                        field_np = {
+                            key: (value.detach().cpu().numpy().copy() if hasattr(value, 'detach') else np.array(value))[_s, _s, _s]
+                            for key, value in field.items()
+                        }
+                    else:
+                        field_np = field.detach().cpu().numpy().copy() if hasattr(field, 'detach') else np.array(field)
+                        field_np = field_np[_s, _s, _s]  # strip ghost cells
                     eff_vmin = self.vmin if vmin is None else (None if vmin == "auto" else vmin)
                     eff_vmax = self.vmax if vmax is None else (None if vmax == "auto" else vmax)
                     save_path = self.save_path
