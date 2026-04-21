@@ -90,14 +90,15 @@ class SimConfig(BaseSimConfig):
         self.zmax =  0.03
 
         # ── Physics ───────────────────────────────────────────────────
-        self.timestep          = 0.0005
-        self.convection_method = "abdquickest"
+        self.timestep          = 0.001
+        self.convection_method = "implicit"
         self.n_iterations      = 50001
         self.save_every        = 50
         self.save              = True
         self.num_sub_steps     = 2
         self.poisson_verbose   = True
         self.poisson_method    = "fft"
+        # self.poisson_bc_type  = "free"
 
         # ── MuJoCo ───────────────────────────────────────────────────
         self.visual_scale = 10.0
