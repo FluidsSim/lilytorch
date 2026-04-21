@@ -101,6 +101,9 @@ class BaseSimConfig:
         self.save        = False   # save fields (u, v, [w], p, sdf) to HDF5
         self.vmin        = -10.0
         self.vmax        = 10.0
+        self.plot_specs  = ["curl", "pressure"]
+        self.iso_3d_specs = ["omega_mag", "vel_mag"]
+        self.iso_3d_value = None
 
         # ── Arena ─────────────────────────────────────────────────────────
         self.generate_pool  = True   # generate pool/water SDFs; False → use flat arena
@@ -708,6 +711,9 @@ class BaseSimConfig:
             "save_every"     : self.save_every,
             "vmin"           : self.vmin,
             "vmax"           : self.vmax,
+            "plot_specs"     : None if self.plot_specs is None else list(self.plot_specs),
+            "iso_3d_specs"   : None if self.iso_3d_specs is None else list(self.iso_3d_specs),
+            "iso_3d_value"   : self.iso_3d_value,
             "save"           : self.save,
         }
 

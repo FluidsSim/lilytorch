@@ -31,6 +31,10 @@ the FluidExtension entry::
             "n_z_layers"         : 3,            # z replicas for 3-D tail seeding
             "floor_color"        : null,         # RGBA or "#hex" for arena geoms
             "body_color"         : null,         # RGBA or "#hex" for animat geoms
+            "seed_link_name"     : null,         # optional link to seed around
+            "seed_ring_radius"   : null,         # optional ring radius in link frame
+            "seed_ring_axis"     : "x",         # ring normal axis in link frame
+            "seed_ring_offset"   : 0.0,          # axial offset along ring normal
         }
     }
 
@@ -247,6 +251,10 @@ class ParticleViewer(TaskExtension):
         no_light: bool = False,
         light_color: list[float] | str | None = None,
         emissive_particles: bool = False,
+        seed_link_name: str | None = None,
+        seed_ring_radius: float | None = None,
+        seed_ring_axis: str = "x",
+        seed_ring_offset: float = 0.0,
     ):
         super().__init__()
         self.experiment_options = experiment_options
@@ -270,6 +278,10 @@ class ParticleViewer(TaskExtension):
         self.no_light = no_light
         self.light_color = self._parse_color(light_color)
         self.emissive_particles = emissive_particles
+        self.seed_link_name = seed_link_name
+        self.seed_ring_radius = seed_ring_radius
+        self.seed_ring_axis = seed_ring_axis.lower()
+        self.seed_ring_offset = float(seed_ring_offset)
 
         # Internal state
         self._viewer = None
@@ -332,6 +344,10 @@ class ParticleViewer(TaskExtension):
             no_light=config.get("no_light", False),
             light_color=config.get("light_color", None),
             emissive_particles=config.get("emissive_particles", False),
+            seed_link_name=config.get("seed_link_name", None),
+            seed_ring_radius=config.get("seed_ring_radius", None),
+            seed_ring_axis=config.get("seed_ring_axis", "x"),
+            seed_ring_offset=config.get("seed_ring_offset", 0.0),
         )
 
     # ── lifecycle hooks ──────────────────────────────────────────────
@@ -707,6 +723,17 @@ class ParticleViewer(TaskExtension):
         last link.  Subsequent seeding roto-translates these fixed
         body-local seeds to the current world frame each step.
         """
+        if self.seed_link_name is not None and self.seed_ring_radius is not None:
+            local_pts, link_id = self._cache_link_ring_seeds_body_local(handler)
+            if local_pts is not None and link_id is not None:
+                self._tail_seeds_local = local_pts
+                self._tail_link_id = link_id
+                print(
+                    f"[ParticleViewer] ✓ Cached {local_pts.shape[1]} link-ring seeds "
+                    f"for '{self.seed_link_name}' in body-local frame of link {link_id}."
+                )
+                return
+
         from scipy.spatial.transform import Rotation as ScipyRotation
 
         # 1) Get composite SDF boundary (all links merged)
@@ -761,6 +788,74 @@ class ParticleViewer(TaskExtension):
         print(f"[ParticleViewer] ✓ Cached {local_pts.shape[1]} tail-tip "
               f"seeds (min-x from union SDF at iter={iteration}) in "
               f"body-local frame of link ({a_tail}, {l_tail}).")
+
+    def _cache_link_ring_seeds_body_local(self, handler):
+        """Build a ring of local-frame seeds around a named link."""
+        link_id = self._find_link_by_name(handler, self.seed_link_name)
+        if link_id is None:
+            print(f"[ParticleViewer] Cache deferred: link '{self.seed_link_name}' not found")
+            return None, None
+
+        if self.seed_ring_axis not in {"x", "y", "z"}:
+            print(
+                f"[ParticleViewer] Cache deferred: unsupported seed_ring_axis="
+                f"'{self.seed_ring_axis}'"
+            )
+            return None, None
+
+        n_pts = max(3, int(self.seed_n_particles))
+        theta = np.linspace(0.0, 2.0 * np.pi, n_pts, endpoint=False, dtype=np.float64)
+        radius = float(self.seed_ring_radius)
+        offset = self.seed_ring_offset
+
+        if self._ndim == 3:
+            if self.seed_ring_axis == "x":
+                local_pts = np.vstack([
+                    np.full(n_pts, offset, dtype=np.float64),
+                    radius * np.cos(theta),
+                    radius * np.sin(theta),
+                ])
+            elif self.seed_ring_axis == "y":
+                local_pts = np.vstack([
+                    radius * np.cos(theta),
+                    np.full(n_pts, offset, dtype=np.float64),
+                    radius * np.sin(theta),
+                ])
+            else:
+                local_pts = np.vstack([
+                    radius * np.cos(theta),
+                    radius * np.sin(theta),
+                    np.full(n_pts, offset, dtype=np.float64),
+                ])
+        else:
+            if self.seed_ring_axis == "x":
+                local_pts = np.vstack([
+                    np.full(n_pts, offset, dtype=np.float64),
+                    radius * np.cos(theta),
+                ])
+            elif self.seed_ring_axis == "y":
+                local_pts = np.vstack([
+                    radius * np.cos(theta),
+                    np.full(n_pts, offset, dtype=np.float64),
+                ])
+            else:
+                local_pts = np.vstack([
+                    radius * np.cos(theta),
+                    radius * np.sin(theta),
+                ])
+
+        return local_pts, link_id
+
+    def _find_link_by_name(self, handler, link_name):
+        """Return (animat_id, link_id) for a FARMS link name, or None."""
+        for animat_id, animat_data in enumerate(handler.data):
+            try:
+                names = list(animat_data.sensors.links.names)
+            except Exception:
+                continue
+            if link_name in names:
+                return animat_id, names.index(link_name)
+        return None
 
     def _seed_particles(self, fs, handler, iteration) -> np.ndarray | None:
         """Transform the cached body-local tail-tip seeds to the current

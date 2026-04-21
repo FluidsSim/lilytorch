@@ -1021,6 +1021,11 @@ class FluidSolver:
         _vmax = output["vmax"]
         self.vmin = None if _vmin == "auto" else _vmin
         self.vmax = None if _vmax == "auto" else _vmax
+        self.plot_specs = self._resolve_plot_specs(output.get("plot_specs"))
+        self.iso_3d_specs = self._resolve_iso_3d_specs(
+            output.get("iso_3d_specs"),
+            global_iso_value=output.get("iso_3d_value"),
+        )
         self.n_quiver_spacing = 2**3
 
         # Background thread pool for async I/O (saving + plotting)
@@ -2407,6 +2412,8 @@ class FluidSolver:
     # vmin/vmax per-spec:  None or "yaml" → use the global output.vmin/vmax
     #                      float          → fixed limit for this field
     # The YAML output.vmin/vmax can be a number (fixed) or "auto" (auto-scale).
+    # ``output.plot_specs`` can override these defaults with a list of
+    # field names or dicts such as {"name": "pressure", "vmin": "auto"}.
 
     DEFAULT_PLOT_SPECS = [
         ("curl",       lambda s, u, v, p, w: (
@@ -2451,6 +2458,11 @@ class FluidSolver:
         O(dx/2) stagger offset is negligible for visualisation."""
         return (u**2 + v**2 + w**2).sqrt()
 
+    # ``output.iso_3d_specs`` can override these defaults with field names
+    # or dicts such as {"name": "omega_mag", "iso_value": 5.0}. When
+    # ``output.iso_3d_value`` is set, it becomes the default threshold for
+    # all configured 3-D isosurface fields; otherwise the automatic peak-
+    # fraction thresholding in plotting.plot_field_3d is used.
     DEFAULT_3D_ISO_SPECS = [
         # ("omega_x",    lambda s, u, v, p, w: FluidSolver._cached_vort(s, u, v, w)["omega_x"].cpu(), None, True),
         # ("omega_y",    lambda s, u, v, p, w: FluidSolver._cached_vort(s, u, v, w)["omega_y"].cpu(), None, True),
@@ -2459,6 +2471,146 @@ class FluidSolver:
         ("vel_mag",    lambda s, u, v, p, w: FluidSolver._vel_mag(s, u, v, w).cpu(),                 None,   True),
         # ("pressure",   lambda s, u, v, p, w: p.cpu(),                                                None,   True),
     ]
+
+    @classmethod
+    def _plot_spec_registry(cls):
+        registry = {spec[0]: spec for spec in cls.DEFAULT_PLOT_SPECS}
+        registry.update({
+            "v": (
+                "v",
+                lambda s, u, v, p, w: v.cpu(),
+                "auto",
+                "auto",
+                True,
+            ),
+            "divergence": (
+                "divergence",
+                lambda s, u, v, p, w: s.divergence(u, v, w).cpu(),
+                None,
+                None,
+                False,
+            ),
+        })
+        return registry
+
+    @classmethod
+    def _iso_3d_spec_registry(cls):
+        registry = {spec[0]: spec for spec in cls.DEFAULT_3D_ISO_SPECS}
+        registry.update({
+            "omega_x": (
+                "omega_x",
+                lambda s, u, v, p, w: FluidSolver._cached_vort(s, u, v, w)["omega_x"].cpu(),
+                None,
+                True,
+            ),
+            "omega_y": (
+                "omega_y",
+                lambda s, u, v, p, w: FluidSolver._cached_vort(s, u, v, w)["omega_y"].cpu(),
+                None,
+                True,
+            ),
+            "omega_z": (
+                "omega_z",
+                lambda s, u, v, p, w: FluidSolver._cached_vort(s, u, v, w)["omega_z"].cpu(),
+                None,
+                True,
+            ),
+            "pressure": (
+                "pressure",
+                lambda s, u, v, p, w: p.cpu(),
+                None,
+                True,
+            ),
+        })
+        return registry
+
+    @staticmethod
+    def _normalize_iso_threshold(value):
+        return None if value == "auto" else value
+
+    def _resolve_plot_specs(self, plot_specs_cfg):
+        if plot_specs_cfg is None:
+            return list(self.DEFAULT_PLOT_SPECS)
+        if isinstance(plot_specs_cfg, str):
+            plot_specs_cfg = [plot_specs_cfg]
+
+        registry = self._plot_spec_registry()
+        resolved = []
+        for entry in plot_specs_cfg:
+            if isinstance(entry, str):
+                name = entry
+                overrides = {}
+            elif isinstance(entry, dict):
+                name = entry.get("name")
+                if not isinstance(name, str) or not name:
+                    raise ValueError("Each output.plot_specs entry must define a non-empty 'name'.")
+                overrides = entry
+            else:
+                raise TypeError(
+                    "output.plot_specs entries must be strings or dicts with a 'name' key."
+                )
+
+            if name not in registry:
+                raise ValueError(
+                    f"Unknown plot field '{name}'. Available fields: {sorted(registry)}"
+                )
+
+            base = registry[name]
+            show_body = base[4] if "show_body" not in overrides else bool(overrides["show_body"])
+            resolved.append((
+                name,
+                base[1],
+                overrides.get("vmin", base[2]),
+                overrides.get("vmax", base[3]),
+                show_body,
+            ))
+        return resolved
+
+    def _resolve_iso_3d_specs(self, iso_specs_cfg, *, global_iso_value=None):
+        if self.ndim != 3:
+            return []
+
+        global_iso_value = self._normalize_iso_threshold(global_iso_value)
+        if iso_specs_cfg is None:
+            if global_iso_value is None:
+                return list(self.DEFAULT_3D_ISO_SPECS)
+            iso_specs_cfg = [spec[0] for spec in self.DEFAULT_3D_ISO_SPECS]
+        if isinstance(iso_specs_cfg, str):
+            iso_specs_cfg = [iso_specs_cfg]
+
+        registry = self._iso_3d_spec_registry()
+        resolved = []
+        for entry in iso_specs_cfg:
+            if isinstance(entry, str):
+                name = entry
+                overrides = {}
+            elif isinstance(entry, dict):
+                name = entry.get("name")
+                if not isinstance(name, str) or not name:
+                    raise ValueError("Each output.iso_3d_specs entry must define a non-empty 'name'.")
+                overrides = entry
+            else:
+                raise TypeError(
+                    "output.iso_3d_specs entries must be strings or dicts with a 'name' key."
+                )
+
+            if name not in registry:
+                raise ValueError(
+                    f"Unknown 3D isosurface field '{name}'. Available fields: {sorted(registry)}"
+                )
+
+            base = registry[name]
+            iso_value = overrides.get("iso_value")
+            if "iso_value" not in overrides:
+                iso_value = global_iso_value if global_iso_value is not None else base[2]
+            iso_value = self._normalize_iso_threshold(iso_value)
+
+            if len(base) > 3:
+                show_body = base[3] if "show_body" not in overrides else bool(overrides["show_body"])
+                resolved.append((name, base[1], iso_value, show_body))
+            else:
+                resolved.append((name, base[1], iso_value))
+        return resolved
 
     # Maximum number of pending I/O futures before _submit_io blocks.
     # Each future can capture hundreds of MB of numpy arrays (3-D field
@@ -2713,9 +2865,11 @@ class FluidSolver:
 
                 # ---- 3-D isosurface renders ----
                 # sdf_np already snapshotted above for slice plots
-                iso_specs = getattr(self, "iso_3d_specs",
-                                    self.DEFAULT_3D_ISO_SPECS if self.ndim == 3
-                                    else specs)
+                iso_specs = getattr(
+                    self,
+                    "iso_3d_specs",
+                    self.DEFAULT_3D_ISO_SPECS if self.ndim == 3 else [],
+                )
                 for iso_entry in iso_specs:
                     name, field_fn = iso_entry[0], iso_entry[1]
                     iso_thresh = iso_entry[2] if len(iso_entry) > 2 else None

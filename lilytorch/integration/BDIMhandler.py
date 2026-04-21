@@ -235,15 +235,17 @@ class BDIMhandler:
                       * min((surface + height - pos_z) / (2*height), 1)
         where
             mass   = MuJoCo body_mass            [kg]
-            density = link density from config    [kg/m³]
+            density = morphology link density     [kg/m³]
             height  = 0.5 * geom bounding radius  [m]
             surface = water surface height (zmax)  [m]
             gravity = -9.81                        [m/s²]
         """
         comp = self.fluid_solver.composite_body
         n = comp.nbodies
+        experiment_options = self.pars.get("body", {}).get("experiment_options", None)
 
         self._buoy_mass   = np.zeros(n)
+        self._buoy_density = np.full(n, float(self.rho_body))
         self._buoy_height = np.zeros(n)
 
         for body_i in range(n):
@@ -251,6 +253,16 @@ class BDIMhandler:
             ind = task.maps[animat_id]["sensors"]["data2xfrc"][link_id]
 
             self._buoy_mass[body_i] = float(physics.model.body_mass[ind])
+            if experiment_options is not None:
+                try:
+                    density = float(
+                        experiment_options.animats[animat_id]
+                        .morphology.links[link_id].density
+                    )
+                except Exception:
+                    density = float(self.rho_body)
+                if density > 0.0:
+                    self._buoy_density[body_i] = density
 
             # Find the maximum bounding-sphere radius among geoms attached
             # to this MuJoCo body (same logic as FARMS SwimmingHandler).
@@ -268,42 +280,6 @@ class BDIMhandler:
         return torch.from_numpy(
             np.array(array).astype(self.dtype_np)
         ).to(self.device)
-
-    def _body_link_extras(self, animat_id, link_id):
-        experiment_options = self.pars.get("body", {}).get("experiment_options", None)
-        if experiment_options is None:
-            return {}
-        try:
-            link_opts = experiment_options.animats[animat_id].morphology.links[link_id]
-        except Exception:
-            return {}
-        return getattr(link_opts, "extras", {}) or {}
-
-    def _buoyancy_lever_world_3d(self, animat_id, link_id, body):
-        """Return the world-frame lever arm from CG to buoyancy center."""
-        extras = self._body_link_extras(animat_id, link_id)
-        cob = extras.get("center_of_buoyancy", extras.get("buoyancy_center", None))
-        cog = extras.get("center_of_gravity", extras.get("gravity_center", None))
-        metacentric_offset = extras.get("metacentric_offset", None)
-
-        if metacentric_offset is not None:
-            rel = np.asarray(metacentric_offset, dtype=self.dtype_np)
-        else:
-            if cob is None:
-                return None
-            cob_np = np.asarray(cob, dtype=self.dtype_np)
-            cog_np = np.asarray(cog if cog is not None else [0.0, 0.0, 0.0], dtype=self.dtype_np)
-            rel = cob_np - cog_np
-
-        if rel.shape != (3,) or not np.any(rel):
-            return None
-
-        link_world_rot = getattr(body, "_link_world_rot_t", None)
-        if link_world_rot is None:
-            return None
-
-        rel_t = torch.tensor(rel, device=self.device, dtype=self.dtype)
-        return link_world_rot @ rel_t
 
     # ==================================================================
     #  update: FARMS kinematics  ->  SDF fields + body velocities
@@ -877,8 +853,6 @@ class BDIMhandler:
 
             comp.com_pos[body_i] = com_pos
             body.com_pos = com_pos
-            body._link_world_rot_t = R
-            body._link_world_pos_t = urdf_pos
 
     # ==================================================================
     #  fluid_step: one BDIM time-step (advection-diffusion + projection)
@@ -1145,38 +1119,31 @@ class BDIMhandler:
         surface = self.water_surface
         g_z     = self.gravity_z
 
-        link_wrenches = {}
-        link_first_body = {}
-        link_keys = {}
-
         for body_i in range(len(comp.bodies)):
             (animat_id, link_id) = comp.body_ids[body_i]
             ind = task.maps[animat_id]["sensors"]["data2xfrc"][link_id]
-            if ind not in link_wrenches:
-                link_wrenches[ind] = np.zeros(3, dtype=self.dtype_np)
-                link_first_body[ind] = body_i
-                link_keys[ind] = (animat_id, link_id)
-            link_wrenches[ind][0] += friction_force_lin_x[body_i] + pressure_force_x[body_i]
-            link_wrenches[ind][1] += friction_force_lin_y[body_i] + pressure_force_y[body_i]
-            link_wrenches[ind][2] += friction_force_ang_z[body_i] + pressure_force_ang_z[body_i]
-
-        for ind, wrench in link_wrenches.items():
-            body_i = link_first_body[ind]
 
             # FARMS-style buoyancy: only active for xz plane (fluid y = MuJoCo z)
             buoyancy_y = 0.0
             if self._2d_has_buoyancy:
                 mass   = self._buoy_mass[body_i]
+                density = self._buoy_density[body_i]
                 height = self._buoy_height[body_i]
                 # comp.com_pos[body_i][1] = fluid y = MuJoCo z (vertical)
                 pos_z  = float(comp.com_pos[body_i][1])
                 if mass > 0 and height > 0 and pos_z - height < surface:
                     frac = min((surface + height - pos_z) / (2.0 * height), 1.0)
-                    buoyancy_y = -self.rho_fluid * mass * g_z / self.rho_body * frac
+                    buoyancy_y = -self.rho_fluid * mass * g_z / density * frac
 
-            physics.data.xfrc_applied[ind, fx_idx] = wrench[0] * task.units.newtons
-            physics.data.xfrc_applied[ind, fy_idx] = (wrench[1] + buoyancy_y) * task.units.newtons
-            physics.data.xfrc_applied[ind, torque_idx] = wrench[2] * task.units.newtons
+            physics.data.xfrc_applied[ind, fx_idx] = (
+                friction_force_lin_x[body_i] + pressure_force_x[body_i]
+            ) * task.units.newtons
+            physics.data.xfrc_applied[ind, fy_idx] = (
+                friction_force_lin_y[body_i] + pressure_force_y[body_i] + buoyancy_y
+            ) * task.units.newtons
+            physics.data.xfrc_applied[ind, torque_idx] = (
+                friction_force_ang_z[body_i] + pressure_force_ang_z[body_i]
+            ) * task.units.newtons
 
     def _apply_forces_3d(self, task, physics):
         fs = self.fluid_solver
@@ -1205,31 +1172,13 @@ class BDIMhandler:
         surface = self.water_surface
         g_z     = self.gravity_z          # e.g. -9.81
 
-        link_wrenches = {}
-        link_first_body = {}
-        link_keys = {}
-
         for body_i in range(len(comp.bodies)):
             (animat_id, link_id) = comp.body_ids[body_i]
             ind = task.maps[animat_id]["sensors"]["data2xfrc"][link_id]
-            if ind not in link_wrenches:
-                link_wrenches[ind] = np.zeros(6, dtype=self.dtype_np)
-                link_first_body[ind] = body_i
-                link_keys[ind] = (animat_id, link_id)
-
-            link_wrenches[ind][0] += friction_force_lin_x[body_i] + pressure_force_x[body_i]
-            link_wrenches[ind][1] += friction_force_lin_y[body_i] + pressure_force_y[body_i]
-            link_wrenches[ind][2] += friction_force_lin_z[body_i] + pressure_force_z[body_i]
-            link_wrenches[ind][3] += friction_force_ang_x[body_i] + pressure_force_ang_x[body_i]
-            link_wrenches[ind][4] += friction_force_ang_y[body_i] + pressure_force_ang_y[body_i]
-            link_wrenches[ind][5] += friction_force_ang_z[body_i] + pressure_force_ang_z[body_i]
-
-        for ind, wrench in link_wrenches.items():
-            body_i = link_first_body[ind]
-            animat_id, link_id = link_keys[ind]
 
             # FARMS buoyancy per link
             mass   = self._buoy_mass[body_i]
+            density = self._buoy_density[body_i]
             height = self._buoy_height[body_i]
             pos_z  = float(comp.com_pos[body_i][2])
 
@@ -1239,26 +1188,28 @@ class BDIMhandler:
                 # -rho_water * (mass/density) * gravity * frac
                 # = -rho_water * V_link * gravity * frac  (upward when g<0)
                 buoyancy_z = (
-                    -self.rho_fluid * mass * g_z / self.rho_body * frac
+                    -self.rho_fluid * mass * g_z / density * frac
                 )
 
-            righting_torque = np.zeros(3, dtype=self.dtype_np)
-            if buoyancy_z != 0.0:
-                lever_world = self._buoyancy_lever_world_3d(
-                    animat_id, link_id, comp.bodies[body_i]
-                )
-                if lever_world is not None:
-                    righting_torque = np.cross(
-                        lever_world.detach().cpu().numpy(),
-                        np.array([0.0, 0.0, buoyancy_z], dtype=self.dtype_np),
-                    )
-
-            physics.data.xfrc_applied[ind, 0] = wrench[0] * task.units.newtons
-            physics.data.xfrc_applied[ind, 1] = wrench[1] * task.units.newtons
-            physics.data.xfrc_applied[ind, 2] = (wrench[2] + buoyancy_z) * task.units.newtons
-            physics.data.xfrc_applied[ind, 3] = (wrench[3] + righting_torque[0]) * task.units.newtons
-            physics.data.xfrc_applied[ind, 4] = (wrench[4] + righting_torque[1]) * task.units.newtons
-            physics.data.xfrc_applied[ind, 5] = (wrench[5] + righting_torque[2]) * task.units.newtons
+            physics.data.xfrc_applied[ind, 0] = (
+                friction_force_lin_x[body_i] + pressure_force_x[body_i]
+            ) * task.units.newtons
+            physics.data.xfrc_applied[ind, 1] = (
+                friction_force_lin_y[body_i] + pressure_force_y[body_i]
+            ) * task.units.newtons
+            physics.data.xfrc_applied[ind, 2] = (
+                friction_force_lin_z[body_i] + pressure_force_z[body_i]
+                + buoyancy_z
+            ) * task.units.newtons
+            physics.data.xfrc_applied[ind, 3] = (
+                friction_force_ang_x[body_i] + pressure_force_ang_x[body_i]
+            ) * task.units.newtons
+            physics.data.xfrc_applied[ind, 4] = (
+                friction_force_ang_y[body_i] + pressure_force_ang_y[body_i]
+            ) * task.units.newtons
+            physics.data.xfrc_applied[ind, 5] = (
+                friction_force_ang_z[body_i] + pressure_force_ang_z[body_i]
+            ) * task.units.newtons
 
     def _check_explosion(self, iteration):
         """Abort immediately if the fluid fields went non-finite or

@@ -476,6 +476,18 @@ Analytical-specific keys
      - float
      - *null*
      - Colour-bar maximum (``"auto"`` for automatic).
+   * - ``plot_specs``
+     - list
+     - ``["curl", "pressure"]``
+     - Fields used for saved 2-D plots and 3-D orthogonal slice plots. Each entry can be a field name or a dict such as ``{"name": "pressure", "vmin": "auto", "vmax": "auto", "show_body": true}``.
+   * - ``iso_3d_specs``
+     - list
+     - ``["omega_mag", "vel_mag"]``
+     - Fields rendered as 3-D isosurfaces. Each entry can be a field name or a dict such as ``{"name": "omega_mag", "iso_value": 5.0}``.
+   * - ``iso_3d_value``
+     - float
+     - *null*
+     - Fixed threshold used for all configured 3-D isosurface fields when set. Use ``null`` or ``"auto"`` to keep the existing automatic peak-fraction thresholding.
 
 
 ``physics`` — FARMS coupling (optional)

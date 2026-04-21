@@ -1,9 +1,9 @@
 """Submarine simulation coupled to the 3-D BDIM fluid solver.
 
 This example runs a fully free submarine in a 3-D pool with two-way fluid
-coupling handled by lilytorch's BDIM solver. The default propulsion setup
-keeps the single propeller plus tail fins so the wake is resolved by the
-fluid model instead of approximated by anisotropic drag coefficients.
+coupling handled by lilytorch's BDIM solver. The default setup keeps the
+simple single propeller and stabilizes roll with a fixed ballast mass below
+the hull rather than an explicit hydrostatic torque hook.
 
 The file still keeps the drag-only link overrides used in the legacy
 ``use_bdim = False`` path, but the default configuration below is the
@@ -14,6 +14,7 @@ Run with::
     python -m lilytorch.farms_examples.submarine.gen_configs_drag
 """
 
+import math
 import os
 
 from farms_core.model.options import SpawnMode
@@ -21,6 +22,16 @@ from farms_core.model.options import SpawnMode
 from lilytorch.util.paths import lilytorch_repo_root
 from lilytorch.farms_examples.base_sim_config import BaseSimConfig
 from lilytorch.integration.camera import top_down_camera_config
+
+
+HULL_DISPLACED_MASS = math.pi * 0.05 ** 2 * 0.4 * 1000.0
+BALLAST_MASS = 1.8
+BASE_LINK_MASS = HULL_DISPLACED_MASS - BALLAST_MASS
+# Both the FARMS drag path and BDIM's explicit buoyancy term use
+# displaced_volume = mass / density. Lower the hull's effective buoyancy
+# density so it carries the fixed internal ballast while the ballast link
+# itself remains non-hydrodynamic and collision-free.
+BUOYANT_HULL_DENSITY = 1000.0 * BASE_LINK_MASS / HULL_DISPLACED_MASS
 
 
 class SimConfig(BaseSimConfig):
@@ -47,11 +58,8 @@ class SimConfig(BaseSimConfig):
             lilytorch_repo_root, 'farms_examples', 'sdfs', 'submarine',
         )
 
-        # In free 3-D, a single propeller injects a steady reaction torque
-        # into the hull. Use the contra-rotating layout by default so the
-        # submarine remains torque-balanced without relying on artificial
-        # roll constraints.
-        propulsion_variant = 'contra_rotating'
+        # Keep the simple single-propeller hull as the default case.
+        propulsion_variant = 'single_propeller'
         if propulsion_variant == 'single_propeller':
             sdf_file = os.path.join(submarine_sdf_dir, 'submarine.sdf')
             controller_config = {
@@ -109,11 +117,13 @@ class SimConfig(BaseSimConfig):
         self.zmax =  0.25
 
         # ── Physics ───────────────────────────────────────────────────
-        # Submarine is neutrally buoyant: body density matches the water.
+        # Submarine is approximately neutrally buoyant overall. The outer
+        # hull carries the ballast in the buoyancy model while the fixed keel
+        # link only changes inertia and centre of mass.
         self.rho_body          = 1000.0  # matches the SDF inertia mass
         self.rho               = 1000.0  # water density
         self.timestep          = 0.001
-        self.n_iterations      = 20001
+        self.n_iterations      = 10001
         self.save_every        = 50
         self.num_sub_steps     = 1
 
@@ -123,13 +133,12 @@ class SimConfig(BaseSimConfig):
 
         # ── Arena ────────────────────────────────────────────────────
         # Pool walls auto-sized from the grid extents, water filled up
-        # to the top of the pool. In the BDIM path the fluid solver
-        # provides the hydrodynamic forces, so the legacy water drag /
-        # buoyancy toggles remain disabled.
+        # to the top of the pool. In the legacy drag path FARMS evaluates
+        # buoyancy inside the same extension as drag, so keep both enabled.
         self.wall_thickness = 0.01
         self.arena_pose     = [0, 0, 0, 0, 0, 0]
-        self.water_drag     = False
-        # (water_drag / water_buoyancy default to use_drag, i.e. True)
+        self.water_drag     = True
+        self.water_buoyancy = True
 
         # ── BDIM solver ──────────────────────────────────────────────
         self.bdim_dt                 = self.timestep
@@ -143,10 +152,10 @@ class SimConfig(BaseSimConfig):
         self.poisson_precond_vcycles = 1
         self.poisson_warm_start      = True
         self.poisson_smoother        = "jacobi"
-        self.poisson_compile         = True
+        # self.poisson_compile         = True
         self.poisson_nsmoothing      = 5
         self.poisson_bc_type         = "free"
-        self.compile_adv_diff        = True
+        # self.compile_adv_diff        = True
 
         # Boundary conditions for a 3-D fluid box (Dirichlet on the
         # lateral / top-bottom walls; ready for the BDIM solver).
@@ -184,11 +193,10 @@ class SimConfig(BaseSimConfig):
                     [-0.1, -5.0, -5.0],
                     [-0.05, -0.5, -0.5],
                 ]
-                # The 3-D BDIM path applies buoyancy explicitly as a force.
-                # Add a small positive metacentric offset so the buoyancy
-                # force acts above the base-link CG and generates a restoring
-                # roll moment instead of allowing free 360-degree roll.
-                link['extras']['metacentric_offset'] = [0.0, 0.0, 0.03]
+                link['density'] = BUOYANT_HULL_DENSITY
+
+            if link['name'] == 'ballast_keel':
+                link['fluid_interaction'] = False
 
             if link['name'] in (
                     'blade_0', 'blade_1',
@@ -217,6 +225,28 @@ class SimConfig(BaseSimConfig):
 
     def extra_simulation_extensions(self, output_folder):
         extensions = []
+
+        extensions.append({
+            "loader": "lilytorch.integration.particle_viewer.ParticleViewer",
+            "config": {
+                "max_particles"   : 800000,
+                "seed_n_particles": 12,
+                "seed_interval"   : 1,
+                "turb_diffusivity": 0.0,
+                "sphere_size"     : 0.003,
+                "particle_color"  : [255/256, 0.0, 166/256, 0.6],
+                "trail_length"    : 0,
+                "update_every"    : None,
+                "n_z_layers"      : 1,
+                "seed_link_name"  : "propeller_hub",
+                "seed_ring_radius": 0.04,
+                "seed_ring_axis"  : "x",
+                "seed_ring_offset": 0.0,
+                "save_particles"  : False,
+                "save_dir"        : os.path.join(output_folder, "particles"),
+                "save_every"      : self.save_every,
+            }
+        })
 
         # Top-down camera auto-fitted to the pool, also used to record
         # an .mp4 of the run.
