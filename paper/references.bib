@@ -1,0 +1,496 @@
+% =====================================================================
+% Bibliography for: LilyTorch --- GPU-Accelerated Immersed-Boundary CFD
+% for Neuromechanical Simulation of Aquatic Locomotion
+% =====================================================================
+
+% ---- Immersed Boundary / BDIM ---------------------------------------
+
+@article{peskin2002immersed,
+  author  = {Peskin, Charles S.},
+  title   = {The Immersed Boundary Method},
+  journal = {Acta Numerica},
+  volume  = {11},
+  pages   = {479--517},
+  year    = {2002},
+  doi     = {10.1017/S0962492902000077},
+}
+
+@article{mittal2005immersed,
+  author  = {Mittal, Rajat and Iaccarino, Gianluca},
+  title   = {Immersed Boundary Methods},
+  journal = {Annual Review of Fluid Mechanics},
+  volume  = {37},
+  pages   = {239--261},
+  year    = {2005},
+  doi     = {10.1146/annurev.fluid.37.061903.175743},
+}
+
+@article{weymouth2011boundary,
+  author  = {Weymouth, Gabriel D. and Yue, Dick K.-P.},
+  title   = {Boundary Data Immersion Method for {Cartesian}-grid
+             Simulations of Fluid--Body Interaction Problems},
+  journal = {Journal of Computational Physics},
+  volume  = {230},
+  number  = {16},
+  pages   = {6233--6247},
+  year    = {2011},
+  doi     = {10.1016/j.jcp.2011.04.022},
+}
+
+@article{maertens2015accurate,
+  author  = {Maertens, Audrey P. and Weymouth, Gabriel D.},
+  title   = {Accurate {Cartesian}-grid Simulations of Near-body Flows
+             at Intermediate {Reynolds} Numbers},
+  journal = {Computer Methods in Applied Mechanics and Engineering},
+  volume  = {283},
+  pages   = {106--129},
+  year    = {2015},
+  doi     = {10.1016/j.cma.2014.09.007},
+}
+
+@article{weymouth2024waterlily,
+  author  = {Weymouth, Gabriel D. and Font, Bernat},
+  title   = {{WaterLily.jl}: A Differentiable and Backend-agnostic
+             {Julia} Solver for Incompressible Viscous Flow Around
+             Dynamic Bodies},
+  journal = {arXiv preprint arXiv:2407.16032},
+  year    = {2024},
+}
+
+@article{bhalla2013unified,
+  author  = {Bhalla, Amneet Pal Singh and Bale, Rahul and Griffith,
+             Boyce E. and Patankar, Neelesh A.},
+  title   = {A Unified Mathematical Framework and an Adaptive
+             Numerical Method for Fluid--Structure Interaction with
+             Rigid, Deforming, and Elastic Bodies},
+  journal = {Journal of Computational Physics},
+  volume  = {250},
+  pages   = {446--476},
+  year    = {2013},
+  doi     = {10.1016/j.jcp.2013.04.033},
+}
+
+
+% ---- Navier--Stokes projection / fractional step --------------------
+
+@article{chorin1968numerical,
+  author  = {Chorin, Alexandre Joel},
+  title   = {Numerical Solution of the {Navier--Stokes} Equations},
+  journal = {Mathematics of Computation},
+  volume  = {22},
+  number  = {104},
+  pages   = {745--762},
+  year    = {1968},
+  doi     = {10.1090/S0025-5718-1968-0242392-2},
+}
+
+@article{temam1969approximation,
+  author  = {Temam, Roger},
+  title   = {Sur l'approximation de la solution des \'equations de
+             {Navier--Stokes} par la m\'ethode des pas fractionnaires},
+  journal = {Archive for Rational Mechanics and Analysis},
+  volume  = {33},
+  pages   = {377--385},
+  year    = {1969},
+  doi     = {10.1007/BF00247696},
+}
+
+@article{harlow1965numerical,
+  author  = {Harlow, Francis H. and Welch, J. Eddy},
+  title   = {Numerical Calculation of Time-dependent Viscous
+             Incompressible Flow of Fluid with Free Surface},
+  journal = {Physics of Fluids},
+  volume  = {8},
+  number  = {12},
+  pages   = {2182--2189},
+  year    = {1965},
+  doi     = {10.1063/1.1761178},
+}
+
+
+% ---- Advection schemes ----------------------------------------------
+
+@article{leonard1979quick,
+  author  = {Leonard, Brian P.},
+  title   = {A Stable and Accurate Convective Modelling Procedure Based
+             on Quadratic Upstream Interpolation},
+  journal = {Computer Methods in Applied Mechanics and Engineering},
+  volume  = {19},
+  number  = {1},
+  pages   = {59--98},
+  year    = {1979},
+  doi     = {10.1016/0045-7825(79)90034-3},
+}
+
+@article{vanleer1979towards,
+  author  = {van Leer, Bram},
+  title   = {Towards the Ultimate Conservative Difference Scheme. {V}.
+             A Second-order Sequel to {Godunov}'s Method},
+  journal = {Journal of Computational Physics},
+  volume  = {32},
+  number  = {1},
+  pages   = {101--136},
+  year    = {1979},
+  doi     = {10.1016/0021-9991(79)90145-1},
+}
+
+@article{alves2003convergent,
+  author  = {Alves, Manuel A. and Oliveira, Paulo J. and Pinho,
+             Fernando T.},
+  title   = {A Convergent and Universally Bounded Interpolation Scheme
+             for the Treatment of Advection},
+  journal = {International Journal for Numerical Methods in Fluids},
+  volume  = {41},
+  number  = {1},
+  pages   = {47--75},
+  year    = {2003},
+  doi     = {10.1002/fld.428},
+}
+
+@inproceedings{stam1999stable,
+  author    = {Stam, Jos},
+  title     = {Stable Fluids},
+  booktitle = {Proc. SIGGRAPH},
+  pages     = {121--128},
+  year      = {1999},
+  doi       = {10.1145/311535.311548},
+}
+
+
+% ---- Turbulence / LES -----------------------------------------------
+
+@article{smagorinsky1963general,
+  author  = {Smagorinsky, Joseph},
+  title   = {General Circulation Experiments with the Primitive
+             Equations: I. The Basic Experiment},
+  journal = {Monthly Weather Review},
+  volume  = {91},
+  number  = {3},
+  pages   = {99--164},
+  year    = {1963},
+  doi     = {10.1175/1520-0493(1963)091<0099:GCEWTP>2.3.CO;2},
+}
+
+
+% ---- Poisson solvers -----------------------------------------------
+
+@article{makhoul1980dct,
+  author  = {Makhoul, John},
+  title   = {A Fast Cosine Transform in One and Two Dimensions},
+  journal = {IEEE Transactions on Acoustics, Speech, and Signal
+             Processing},
+  volume  = {28},
+  number  = {1},
+  pages   = {27--34},
+  year    = {1980},
+  doi     = {10.1109/TASSP.1980.1163351},
+}
+
+@article{hejlesen2013high,
+  author  = {Hejlesen, Mads M. and Rasmussen, Johannes T. and
+             Chatelain, Philippe and Walther, Jens H.},
+  title   = {A High Order Solver for the Unbounded {Poisson} Equation},
+  journal = {Journal of Computational Physics},
+  volume  = {252},
+  pages   = {458--467},
+  year    = {2013},
+  doi     = {10.1016/j.jcp.2013.05.050},
+}
+
+@book{trottenberg2001multigrid,
+  author    = {Trottenberg, Ulrich and Oosterlee, Cornelis W. and
+               Sch{\"u}ller, Anton},
+  title     = {Multigrid},
+  publisher = {Academic Press},
+  year      = {2001},
+}
+
+@article{balay2019petsc,
+  author  = {Balay, Satish and Abhyankar, Shrirang and Adams, Mark F.
+             and others},
+  title   = {{PETSc} Users Manual},
+  journal = {Argonne National Laboratory, ANL-95/11--Rev. 3.12},
+  year    = {2019},
+}
+
+
+% ---- Non-Newtonian rheology -----------------------------------------
+
+@book{bird1987dynamics,
+  author    = {Bird, R. Byron and Armstrong, Robert C. and Hassager, Ole},
+  title     = {Dynamics of Polymeric Liquids, Volume 1: Fluid Mechanics},
+  publisher = {Wiley},
+  edition   = {2nd},
+  year      = {1987},
+}
+
+
+% ---- Geometry / SDF -------------------------------------------------
+
+@article{sethian1996fastmarch,
+  author  = {Sethian, James A.},
+  title   = {A Fast Marching Level Set Method for Monotonically
+             Advancing Fronts},
+  journal = {Proceedings of the National Academy of Sciences},
+  volume  = {93},
+  number  = {4},
+  pages   = {1591--1595},
+  year    = {1996},
+  doi     = {10.1073/pnas.93.4.1591},
+}
+
+@article{zhou2018open3d,
+  author  = {Zhou, Qian-Yi and Park, Jaesik and Koltun, Vladlen},
+  title   = {{Open3D}: A Modern Library for {3D} Data Processing},
+  journal = {arXiv preprint arXiv:1801.09847},
+  year    = {2018},
+}
+
+@article{alliez2009cgal,
+  author  = {Alliez, Pierre and Tayeb, Sylvain and Wormser,
+             Camille},
+  title   = {{3D} Fast Intersection and Distance Computation
+             ({AABB} Tree)},
+  journal = {CGAL User and Reference Manual, CGAL Editorial Board},
+  year    = {2009},
+}
+
+
+% ---- Robotics / MuJoCo / FARMS --------------------------------------
+
+@inproceedings{todorov2012mujoco,
+  author    = {Todorov, Emanuel and Erez, Tom and Tassa, Yuval},
+  title     = {{MuJoCo}: A Physics Engine for Model-based Control},
+  booktitle = {Proc. IEEE/RSJ Int. Conf. on Intelligent Robots and
+               Systems (IROS)},
+  pages     = {5026--5033},
+  year      = {2012},
+  doi       = {10.1109/IROS.2012.6386109},
+}
+
+@article{arreguit2023farms,
+  author  = {Arreguit, Jonathan and Tata Ramalingasetty, Shravan and
+             Ijspeert, Auke J.},
+  title   = {{FARMS}: Framework for Animal and Robot Modeling and
+             Simulation},
+  journal = {bioRxiv},
+  year    = {2023},
+  doi     = {10.1101/2023.09.25.559130},
+}
+
+@article{ijspeert2007salamander,
+  author  = {Ijspeert, Auke Jan and Crespi, Alessandro and Ryczko,
+             Dimitri and Cabelguen, Jean-Marie},
+  title   = {From Swimming to Walking with a Salamander Robot Driven
+             by a Spinal Cord Model},
+  journal = {Science},
+  volume  = {315},
+  number  = {5817},
+  pages   = {1416--1420},
+  year    = {2007},
+  doi     = {10.1126/science.1138353},
+}
+
+@article{ijspeert2008central,
+  author  = {Ijspeert, Auke Jan},
+  title   = {Central Pattern Generators for Locomotion Control in
+             Animals and Robots: A Review},
+  journal = {Neural Networks},
+  volume  = {21},
+  number  = {4},
+  pages   = {642--653},
+  year    = {2008},
+  doi     = {10.1016/j.neunet.2008.03.014},
+}
+
+@article{porez2014improved,
+  author  = {Porez, Mathieu and Boyer, Fr{\'e}d{\'e}ric and Ijspeert,
+             Auke J.},
+  title   = {Improved {Lighthill} Fish Swimming Model for Bio-inspired
+             Robots: Modeling, Computational Aspects and Experimental
+             Comparisons},
+  journal = {The International Journal of Robotics Research},
+  volume  = {33},
+  number  = {10},
+  pages   = {1322--1341},
+  year    = {2014},
+  doi     = {10.1177/0278364914525811},
+}
+
+@article{katzschmann2018exploration,
+  author  = {Katzschmann, Robert K. and DelPreto, Joseph and
+             MacCurdy, Robert and Rus, Daniela},
+  title   = {Exploration of Underwater Life with an Acoustically
+             Controlled Soft Robotic Fish},
+  journal = {Science Robotics},
+  volume  = {3},
+  number  = {16},
+  pages   = {eaar3449},
+  year    = {2018},
+  doi     = {10.1126/scirobotics.aar3449},
+}
+
+
+% ---- Biological swimming --------------------------------------------
+
+@article{tytell2004hydrodynamics,
+  author  = {Tytell, Eric D. and Lauder, George V.},
+  title   = {The Hydrodynamics of Eel Swimming: {I}. Wake Structure},
+  journal = {Journal of Experimental Biology},
+  volume  = {207},
+  number  = {11},
+  pages   = {1825--1841},
+  year    = {2004},
+  doi     = {10.1242/jeb.00968},
+}
+
+@article{tytell2010interplay,
+  author  = {Tytell, Eric D. and Hsu, Chia-Yu and Williams, Thelma L.
+             and Cohen, Avis H. and Fauci, Lisa J.},
+  title   = {Interactions between Internal Forces, Body Stiffness,
+             and Fluid Environment in a Neuromechanical Model of
+             Lamprey Swimming},
+  journal = {Proceedings of the National Academy of Sciences},
+  volume  = {107},
+  number  = {46},
+  pages   = {19832--19837},
+  year    = {2010},
+  doi     = {10.1073/pnas.1011564107},
+}
+
+@article{muller2008larval,
+  author  = {M{\"u}ller, Ulrike K. and van den Boogaart, Jos G. M. and
+             van Leeuwen, Johan L.},
+  title   = {Flow Patterns of Larval Fish: Undulatory Swimming in
+             the Intermediate {Flow} Regime},
+  journal = {Journal of Experimental Biology},
+  volume  = {211},
+  number  = {2},
+  pages   = {196--205},
+  year    = {2008},
+  doi     = {10.1242/jeb.005629},
+}
+
+@article{kern2006simulations,
+  author  = {Kern, Stefan and Koumoutsakos, Petros},
+  title   = {Simulations of Optimized Anguilliform Swimming},
+  journal = {Journal of Experimental Biology},
+  volume  = {209},
+  number  = {24},
+  pages   = {4841--4857},
+  year    = {2006},
+  doi     = {10.1242/jeb.02526},
+}
+
+@article{lauder2015fish,
+  author  = {Lauder, George V.},
+  title   = {Fish Locomotion: Recent Advances and New Directions},
+  journal = {Annual Review of Marine Science},
+  volume  = {7},
+  pages   = {521--545},
+  year    = {2015},
+  doi     = {10.1146/annurev-marine-010814-015614},
+}
+
+
+% ---- Validation benchmarks ------------------------------------------
+
+@article{koumoutsakos1995high,
+  author  = {Koumoutsakos, Petros and Leonard, Anthony},
+  title   = {High-resolution Simulations of the Flow Around an
+             Impulsively Started Cylinder Using Vortex Methods},
+  journal = {Journal of Fluid Mechanics},
+  volume  = {296},
+  pages   = {1--38},
+  year    = {1995},
+  doi     = {10.1017/S0022112095002059},
+}
+
+@article{bergmann2011accurate,
+  author  = {Bergmann, Michel and Iollo, Angelo},
+  title   = {Modeling and Simulation of Fish-like Swimming},
+  journal = {Journal of Computational Physics},
+  volume  = {230},
+  number  = {2},
+  pages   = {329--348},
+  year    = {2011},
+  doi     = {10.1016/j.jcp.2010.09.017},
+}
+
+
+% ---- Added-mass / FSI stability -------------------------------------
+
+@article{causin2005added,
+  author  = {Causin, Paola and Gerbeau, Jean-Fr{\'e}d{\'e}ric and
+             Nobile, Fabio},
+  title   = {Added-mass Effect in the Design of Partitioned
+             Algorithms for Fluid--Structure Problems},
+  journal = {Computer Methods in Applied Mechanics and Engineering},
+  volume  = {194},
+  number  = {42--44},
+  pages   = {4506--4527},
+  year    = {2005},
+  doi     = {10.1016/j.cma.2004.12.005},
+}
+
+
+% ---- Machine learning for CFD ---------------------------------------
+
+@article{kochkov2021machinelearned,
+  author  = {Kochkov, Dmitrii and Smith, Jamie A. and Alieva,
+             Ayya and Wang, Qing and Brenner, Michael P. and
+             Hoyer, Stephan},
+  title   = {Machine Learning--accelerated Computational Fluid
+             Dynamics},
+  journal = {Proceedings of the National Academy of Sciences},
+  volume  = {118},
+  number  = {21},
+  pages   = {e2101784118},
+  year    = {2021},
+  doi     = {10.1073/pnas.2101784118},
+}
+
+@article{brunton2020machine,
+  author  = {Brunton, Steven L. and Noack, Bernd R. and
+             Koumoutsakos, Petros},
+  title   = {Machine Learning for Fluid Mechanics},
+  journal = {Annual Review of Fluid Mechanics},
+  volume  = {52},
+  pages   = {477--508},
+  year    = {2020},
+  doi     = {10.1146/annurev-fluid-010719-060214},
+}
+
+
+% ---- Software / frameworks ------------------------------------------
+
+@inproceedings{paszke2019pytorch,
+  author    = {Paszke, Adam and Gross, Sam and Massa, Francisco and
+               others},
+  title     = {{PyTorch}: An Imperative Style, High-performance Deep
+               Learning Library},
+  booktitle = {Advances in Neural Information Processing Systems
+               (NeurIPS)},
+  year      = {2019},
+}
+
+@article{weller1998openfoam,
+  author  = {Weller, Henry G. and Tabor, Gavin and Jasak, Hrvoje
+             and Fureby, Christer},
+  title   = {A Tensorial Approach to Computational Continuum
+             Mechanics Using Object-oriented Techniques},
+  journal = {Computers in Physics},
+  volume  = {12},
+  number  = {6},
+  pages   = {620--631},
+  year    = {1998},
+  doi     = {10.1063/1.168744},
+}
+
+@misc{fischer2007nek5000,
+  author       = {Fischer, Paul F. and Lottes, James W. and
+                  Kerkemeier, Stefan G.},
+  title        = {{nek5000} Web Page},
+  year         = {2008},
+  howpublished = {\url{http://nek5000.mcs.anl.gov}},
+}
