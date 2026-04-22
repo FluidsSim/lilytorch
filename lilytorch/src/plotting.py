@@ -1078,8 +1078,22 @@ def _plot_field_3d_locked(
                 pass
 
     # ---- body surface from SDF ----
+    # Prefer the union SDF used by the 2-D slice overlays so that the 3-D
+    # body surface matches the slice plots for multi-link animats.
     body_surface_drawn = False
-    if bodies is not None and sdf_vals is not None:
+    if sdf_3d is not None:
+        sdf_np = np.asarray(sdf_3d)
+        grid.point_data["sdf"] = sdf_np.flatten(order="F")
+        try:
+            body_surf = grid.contour([0.0], scalars="sdf")
+            if body_surf.n_points > 0:
+                pl.add_mesh(body_surf, color="white", opacity=0.95,
+                            smooth_shading=True, specular=0.6)
+                body_surface_drawn = True
+        except Exception:
+            pass
+
+    if not body_surface_drawn and bodies is not None and sdf_vals is not None:
         sdf_vals_np = np.asarray(sdf_vals, dtype=np.float64)
         for bi, body in enumerate(bodies):
             if bi >= sdf_vals_np.shape[0]:
@@ -1105,17 +1119,6 @@ def _plot_field_3d_locked(
                     body_surface_drawn = True
             except Exception:
                 pass
-
-    if not body_surface_drawn and sdf_3d is not None:
-        sdf_np = np.asarray(sdf_3d)
-        grid.point_data["sdf"] = sdf_np.flatten(order="F")
-        try:
-            body_surf = grid.contour([0.0], scalars="sdf")
-            if body_surf.n_points > 0:
-                pl.add_mesh(body_surf, color="white", opacity=0.95,
-                            smooth_shading=True, specular=0.6)
-        except Exception:
-            pass
 
     # ---- domain outline (white tank lines) ----
     pl.add_mesh(grid.outline(), color="white", line_width=4.0, opacity=1.0)
