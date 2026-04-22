@@ -1304,6 +1304,19 @@ class CompositeBodyAnalytical(Body):
     def update(self, t, iteration, dt=1):
         # Streaming union: process bodies one at a time to avoid
         # allocating (nbodies, *grid_shape) stacks.
+        #
+        # To keep memory O(grid), we also release each child's grid-sized
+        # caches as soon as they have been merged into the composite's
+        # union fields.  For the first body we still alias the tensors
+        # into self.* so we don't clone unnecessarily — the child's
+        # attribute slot is simply cleared, but the underlying tensor
+        # object stays alive through self.sdf_val / self.body_u / … .
+        # For later bodies the ``torch.where`` calls produce *new*
+        # tensors, so nothing on the composite references the child's
+        # data once the mask-where pair has executed; clearing the
+        # child's slots lets Python's refcount free that GPU memory
+        # immediately.  This brings the body-scaling cost of
+        # ``CompositeBodyAnalytical`` from ~0.9 GB/body to ~0.
         for i, body in enumerate(self.bodies):
             body.update(t, iteration, dt=dt)
             if i == 0:
@@ -1331,6 +1344,19 @@ class CompositeBodyAnalytical(Body):
                     mask_w = body.sdf_w < self.sdf_val_w
                     self.sdf_val_w = torch.where(mask_w, body.sdf_w, self.sdf_val_w)
                     self.body_w    = torch.where(mask_w, body.body_w, self.body_w)
+
+            # Release child grid-sized caches now that they have been
+            # merged.  For i == 0 this only removes the child's refs;
+            # self.* still holds the tensors alive.  For i > 0 this
+            # actually frees the memory.
+            body.sdf_val = None
+            body.sdf_u   = None
+            body.sdf_v   = None
+            body.body_u  = None
+            body.body_v  = None
+            if self.ndim == 3:
+                body.sdf_w  = None
+                body.body_w = None
 
 
 class BodyFishAnalytical(Body):

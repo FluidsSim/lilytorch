@@ -822,6 +822,12 @@ class FluidSolver:
 
         # ---- optional torch.compile for force computation -----
         self._compile_forces = solver.get("compile_forces", False)
+        # Step 3: max dense-bytes threshold before falling back from the
+        # batched (B, Nx, Ny, Nz) path to the per-body sparse loop.
+        # Default 1 GiB; config key ``batched_forces_max_dense_bytes``.
+        self._batched_forces_max_dense_bytes = int(
+            solver.get("batched_forces_max_dense_bytes", 1 * 1024**3)
+        )
         if self._compile_forces and self.device.type == "cuda":
             # 3-D kernels
             self._forces_shared_compiled = torch.compile(
@@ -1399,7 +1405,47 @@ class FluidSolver:
         comp = self.composite_body
         B = len(comp.bodies)
 
-        if self._compile_forces:
+        # Step 3: when sparse SDF storage is available, avoid the
+        # ``(B, Nx, Ny, Nz)`` dense reconstruction that the batched
+        # compiled path otherwise builds.  For large B the dense
+        # ``sdf_all`` (and the matching |∇SDF| stack when
+        # ``force_delta_order == 2``) is the dominant hidden cost; the
+        # per-body sparse loop below computes exactly the same forces on
+        # each body's AABB sub-block.  Threshold defaults to ~1 GB; can
+        # be overridden via ``solver.batched_forces_max_dense_bytes`` in
+        # the config.
+        _sparse_available = (
+            hasattr(comp, '_sdf_sparse')
+            and comp._sdf_sparse
+            and comp._sdf_sparse[0] is not None
+        )
+        _dense_threshold = getattr(
+            self, "_batched_forces_max_dense_bytes", 1 * 1024**3,
+        )
+        _dense_stack_bytes = (
+            B * int(self.grid_shape[0]) * int(self.grid_shape[1])
+            * int(self.grid_shape[2])
+            * torch.empty((), dtype=self.dtype).element_size()
+            * (2 if self.force_delta_order == 2 else 1)
+        )
+        _use_batched = (
+            self._compile_forces
+            and not (_sparse_available and _dense_stack_bytes > _dense_threshold)
+        )
+        if (self._compile_forces and not _use_batched
+                and not getattr(self, "_warned_batched_forces_fallback", False)):
+            import warnings
+            warnings.warn(
+                f"Disabling batched-forces dense path for B={B}: dense "
+                f"(B, Nx, Ny, Nz) stack would take "
+                f"{_dense_stack_bytes / 1024**3:.2f} GB "
+                f"(> {_dense_threshold / 1024**3:.2f} GB threshold).  "
+                "Falling back to the per-body sparse loop.",
+                RuntimeWarning, stacklevel=2,
+            )
+            self._warned_batched_forces_fallback = True
+
+        if _use_batched:
             # ---- BATCHED path (compiled CUDA graph) ----------------
             # Process all bodies in one fused kernel launch.
             # Reconstruct dense sdf_vals from sparse storage if needed.
@@ -1481,11 +1527,23 @@ class FluidSolver:
                 self.pressure_torque_record[i, 1, iteration] = tp_y[i]
                 self.pressure_torque_record[i, 2, iteration] = tp_z[i]
         else:
-            # ---- PER-BODY path (un-compiled fallback) --------------
-            # Use sparse SDF storage when available: integrate forces
-            # only over the body's AABB sub-block (much less memory
-            # and faster than iterating the full grid).
-            _use_sparse = hasattr(comp, '_sdf_sparse') and comp._sdf_sparse[0] is not None
+            # ---- PER-BODY path (un-compiled fallback, or step-3 sparse
+            # fallback from the batched branch).  When the batched
+            # dense ``(B, Nx, Ny, Nz)`` stack would exceed the memory
+            # threshold we land here even with ``_compile_forces=True``;
+            # in that case we still dispatch to the compiled per-body
+            # kernel ``self._forces_body_compiled`` so the per-AABB work
+            # stays fused.
+            _use_sparse = (
+                hasattr(comp, '_sdf_sparse')
+                and comp._sdf_sparse
+                and comp._sdf_sparse[0] is not None
+            )
+            _body_kernel = (
+                self._forces_body_compiled
+                if self._compile_forces
+                else _forces_body_integrate_3d
+            )
             for i, body in enumerate(comp.bodies):
                 eps_body = body.eps
 
@@ -1503,7 +1561,7 @@ class FluidSolver:
                         (fv_x, fv_y, fv_z,
                          tv_x, tv_y, tv_z,
                          fp_x, fp_y, fp_z,
-                         tp_x, tp_y, tp_z) = _forces_body_integrate_3d(
+                         tp_x, tp_y, tp_z) = _body_kernel(
                             xstress[sl], ystress[sl], zstress[sl],
                             pforce_x[sl], pforce_y[sl], pforce_z[sl],
                             sdf_sub_i, eps_body, self.eps,
@@ -1522,7 +1580,7 @@ class FluidSolver:
                         (fv_x, fv_y, fv_z,
                          tv_x, tv_y, tv_z,
                          fp_x, fp_y, fp_z,
-                         tp_x, tp_y, tp_z) = _forces_body_integrate_3d(
+                         tp_x, tp_y, tp_z) = _body_kernel(
                             xstress, ystress, zstress,
                             pforce_x, pforce_y, pforce_z,
                             sdf_sub_i, eps_body, self.eps,
@@ -1542,7 +1600,7 @@ class FluidSolver:
                     (fv_x, fv_y, fv_z,
                      tv_x, tv_y, tv_z,
                      fp_x, fp_y, fp_z,
-                     tp_x, tp_y, tp_z) = self._forces_body_compiled(
+                     tp_x, tp_y, tp_z) = _body_kernel(
                         xstress, ystress, zstress,
                         pforce_x, pforce_y, pforce_z,
                         sdf_i, eps_body, self.eps,
