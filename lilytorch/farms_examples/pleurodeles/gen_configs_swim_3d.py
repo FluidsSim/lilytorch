@@ -59,9 +59,9 @@ class SimConfig(BaseSimConfig):
         self.zmax = 0.5 * self.Nz * dx
 
         # Physics
-        self.timestep = 0.001
+        self.timestep = 0.0005
         self.convection_method = "quick"
-        self.n_iterations = 4001
+        self.n_iterations = 8001
         self.save_every = 50
         self.num_sub_steps = 1
 
@@ -79,7 +79,7 @@ class SimConfig(BaseSimConfig):
         self.bdim_dt = self.timestep
         self.bdim_nt = self.n_iterations
         self.zero_pressure_inside = False
-        self.rho_body = 800.0
+        self.rho_body = 1000.0
         self.poisson_method = "fft"
         self.poisson_tol = 1.0e-4
         self.poisson_max_cycles = 30
