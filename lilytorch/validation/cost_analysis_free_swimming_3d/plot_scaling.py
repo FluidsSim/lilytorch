@@ -61,12 +61,19 @@ plt.rcParams.update({
 # so that every bit of step cost (parent-timer overhead, bookkeeping,
 # set_BCs, etc.) is represented.  Smagorinsky is deliberately excluded
 # because the cost run sets ``smagorinsky_cs = 0``.
+# Each prefix matches ONLY the outer leaf timer for its category.  In
+# particular, ``"3c "`` (trailing space) matches
+# ``"3c   projection (Poisson+gradient+correction)"`` but NOT
+# ``"3c.i Jacobi smoothing"`` or ``"3c.ii V-cycle (top-level)"`` — the
+# latter two are nested sub-timers *inside* projection and would
+# double-count it on grids where Poisson internals are instrumented
+# (≥ 500k cells).
 CATEGORIES = {
     "Body update (SDF)":       ["1b"],
     "mu + normals":            ["2 "],
     "Convection & diffusion":  ["3a  "],
     "BDIM meta-equation":      ["3b"],
-    "Projection (pressure)":   ["3c"],
+    "Projection (pressure)":   ["3c "],
     "Forces":                  ["4 "],
     "Plotting & saving":       ["5 "],
     "FARMS (apply_forces)":    ["6 "],

@@ -370,7 +370,10 @@ def _generate_inline_scaling_plots(out_dir, csv_files_list):
         "mu + normals":           ["2 "],
         "Convection & diffusion": ["3a  "],
         "BDIM meta-equation":     ["3b"],
-        "Projection (pressure)":  ["3c"],
+        # "3c " (trailing space) matches only the outer projection leaf
+        # and NOT the nested "3c.i Jacobi" / "3c.ii V-cycle" sub-timers,
+        # which would otherwise double-count projection on large grids.
+        "Projection (pressure)":  ["3c "],
         "Forces":                 ["4 "],
         "Plotting & saving":      ["5 "],
         "FARMS (apply_forces)":   ["6 "],

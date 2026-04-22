@@ -622,12 +622,19 @@ plt.rcParams.update({
 #
 # Smagorinsky is intentionally absent because the run is configured with
 # ``cfg.smagorinsky_cs = 0`` (see the config section above).
+#
+# Each prefix is chosen so that it matches ONLY the outer leaf timer and
+# not any nested sub-timer.  In particular, ``"3c "`` (trailing space)
+# matches ``"3c   projection (Poisson+gradient+correction)"`` but NOT
+# ``"3c.i   Jacobi smoothing"`` or ``"3c.ii  V-cycle (top-level)"`` — the
+# latter two are *inside* projection and would double-count it on grids
+# where the Poisson internals are instrumented (≥ 500k cells).
 CATEGORIES = {
     "Body update\n(SDF eval)":      ["1b"],
     "mu + normals":                ["2 "],
     "Convection\n& diffusion":     ["3a  "],
     "BDIM\nmeta-equation":         ["3b"],
-    "Projection\n(pressure)":      ["3c"],
+    "Projection\n(pressure)":      ["3c "],
     "Forces\ncomputation":         ["4 "],
     "Plotting\n& saving":          ["5 "],
     "FARMS step\n(apply_forces)":  ["6 "],
