@@ -966,6 +966,10 @@ class FluidSolver:
             self.pressure_force_ang_y  = torch.zeros(self.n_bodies,device=self.device,dtype=self.dtype)
         self.viscous_drag_record  = torch.zeros((self.n_bodies,n_force_comp,self.nt),device=self.device,dtype=self.dtype)
         self.pressure_drag_record = torch.zeros((self.n_bodies,n_force_comp,self.nt),device=self.device,dtype=self.dtype)
+        # Torques about each body's COM (scalar in 2-D, 3-vector in 3-D).
+        # Populated only in 3-D BDIM paths for now.
+        self.viscous_torque_record  = torch.zeros((self.n_bodies,n_torque_comp,self.nt),device=self.device,dtype=self.dtype)
+        self.pressure_torque_record = torch.zeros((self.n_bodies,n_torque_comp,self.nt),device=self.device,dtype=self.dtype)
 
         # ===== flow diagnostics (energy, enstrophy, CFL) =====
         _diag_every  = solver.get("diagnostics_every", 1)
@@ -1470,6 +1474,12 @@ class FluidSolver:
                 self.pressure_drag_record[i, 0, iteration] = fp_x[i]
                 self.pressure_drag_record[i, 1, iteration] = fp_y[i]
                 self.pressure_drag_record[i, 2, iteration] = fp_z[i]
+                self.viscous_torque_record[i, 0, iteration]  = tv_x[i]
+                self.viscous_torque_record[i, 1, iteration]  = tv_y[i]
+                self.viscous_torque_record[i, 2, iteration]  = tv_z[i]
+                self.pressure_torque_record[i, 0, iteration] = tp_x[i]
+                self.pressure_torque_record[i, 1, iteration] = tp_y[i]
+                self.pressure_torque_record[i, 2, iteration] = tp_z[i]
         else:
             # ---- PER-BODY path (un-compiled fallback) --------------
             # Use sparse SDF storage when available: integrate forces
@@ -1559,6 +1569,12 @@ class FluidSolver:
                 self.pressure_drag_record[i, 0, iteration] = fp_x
                 self.pressure_drag_record[i, 1, iteration] = fp_y
                 self.pressure_drag_record[i, 2, iteration] = fp_z
+                self.viscous_torque_record[i, 0, iteration]  = tv_x
+                self.viscous_torque_record[i, 1, iteration]  = tv_y
+                self.viscous_torque_record[i, 2, iteration]  = tv_z
+                self.pressure_torque_record[i, 0, iteration] = tp_x
+                self.pressure_torque_record[i, 1, iteration] = tp_y
+                self.pressure_torque_record[i, 2, iteration] = tp_z
 
 
     def project(self, u, v, p, w_vel=None, w=1.0, *,
@@ -3026,6 +3042,37 @@ class FluidSolver:
                 for i, arr in enumerate(cnt_arrays):
                     f.create_dataset(f'{iteration:06d}/body_{i}', data=arr)
 
+    def save_drags_h5(self, path=None):
+        """Persist per-body force/torque histories to HDF5.
+
+        Writes ``<save_path>/drags.h5`` with datasets:
+            viscous_drags    (n_bodies, 3, nt)  viscous (skin) force  [N]
+            pressure_drags   (n_bodies, 3, nt)  pressure (form) force [N]
+            viscous_torques  (n_bodies, 3, nt)  viscous torque about COM  [N m]
+            pressure_torques (n_bodies, 3, nt)  pressure torque about COM [N m]
+
+        Metadata (dt, rho, nt, link names, geometry) is intentionally
+        *not* written here — post-processing scripts can recover it from
+        ``parameters.yaml``, ``simulation.hdf5`` and the cached SDFs.
+        """
+        if path is None:
+            path = f'{self.save_path}/drags.h5'
+        vd = self.viscous_drag_record.detach().cpu().numpy().copy()
+        pd = self.pressure_drag_record.detach().cpu().numpy().copy()
+        vt = self.viscous_torque_record.detach().cpu().numpy().copy()
+        pt = self.pressure_torque_record.detach().cpu().numpy().copy()
+        lock = self._hdf5_lock
+
+        def _save(path, vd, pd, vt, pt):
+            with lock:
+                with h5py.File(path, 'w') as f:
+                    f.create_dataset('viscous_drags',    data=vd)
+                    f.create_dataset('pressure_drags',   data=pd)
+                    f.create_dataset('viscous_torques',  data=vt)
+                    f.create_dataset('pressure_torques', data=pt)
+
+        self._submit_io(_save, path, vd, pd, vt, pt)
+
     def run_from_initial(self, u0, v0, w0=None):
         u = u0
         v = v0
@@ -3055,19 +3102,7 @@ class FluidSolver:
                 (u,v,p,w,stop_sim) = self.step_(u, v, p, iteration, t, w_vel=w)
 
         if self.compute_forces and self.save:
-            uv_path = f'{self.save_path}'
-            vd_np = self.viscous_drag_record.cpu().numpy().copy()
-            pd_np = self.pressure_drag_record.cpu().numpy().copy()
-            h5_path = f'{uv_path}/drags.h5'
-            lock = self._hdf5_lock
-
-            def _save_drags_h5(path, vd, pd):
-                with lock:
-                    with h5py.File(path, 'w') as f:
-                        f.create_dataset('viscous_drags', data=vd)
-                        f.create_dataset('pressure_drags', data=pd)
-
-            self._submit_io(_save_drags_h5, h5_path, vd_np, pd_np)
+            self.save_drags_h5()
 
         # ---- save flow diagnostics ----
         if self.save:

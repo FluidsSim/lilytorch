@@ -162,8 +162,43 @@ In coupled FARMS simulations the body may have a different density
    \rho(\mathbf{x})
      = \rho_b + (\rho_f - \rho_b)\,\mu_0(\mathbf{x})
 
-and the face-centred Poisson coefficients become
-:math:`c_u = \Delta t / \rho_u`, etc.
+In this coupled variable-density extension the face-centred coefficients are
+
+.. math::
+
+   c_u = \frac{\Delta t}{\rho_u},
+   \qquad
+   c_v = \frac{\Delta t}{\rho_v},
+   \qquad
+   c_w = \frac{\Delta t}{\rho_w}
+
+with :math:`\rho_u, \rho_v, \rho_w` the BDIM-blended densities on the
+staggered face grids.  The corresponding cell-centred FFT coefficient is
+:math:`c_{cc} = \Delta t / \rho_{cc}`.
+
+This coupled FARMS formulation differs from upstream WaterLily's built-in
+single-density operator.  When :math:`\rho_b = \rho_f`, the default BDIM /
+WaterLily form reduces to :math:`(w\Delta t / \rho_f)\,\mu_0`; when the
+body density is blended explicitly into :math:`\rho`, lilytorch uses the
+effective-density coefficients above for the custom multigrid path.
+
+These two coefficient fields are not algebraically identical rewrites of one
+another.  With
+
+.. math::
+
+  \rho(\mu_0) = \rho_b + (\rho_f - \rho_b)\,\mu_0
+
+we have, in general,
+
+.. math::
+
+  \frac{\mu_0}{\rho(\mu_0)} \neq \frac{1}{\rho(\mu_0)}
+
+except in the trivial fluid region :math:`\mu_0 = 1`.  Therefore LilyTorch's
+custom FARMS variable-density operator should be understood as a separate
+extension that shares WaterLily's BDIM fields and single-density limit, not as
+the exact same variable-coefficient operator under a different pressure scaling.
 
 
 Advection–diffusion
@@ -186,6 +221,146 @@ The CFL stability condition is
 
    \Delta t
      \le \frac{\min(h)}{v_{\max} + 3\nu}
+
+
+Smagorinsky LES model (optional)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+When the grid is too coarse to resolve all turbulent scales, an optional
+**Smagorinsky subgrid-scale (SGS) model** (Smagorinsky 1963) can be
+enabled.  It models the effect of unresolved eddies as an additive
+*eddy viscosity* :math:`\nu_t`:
+
+.. math::
+   :label: smagorinsky
+
+   \nu_t = (C_s \, \Delta)^{2} \, |\bar{S}|
+
+where
+
+* :math:`C_s` is the **Smagorinsky constant** (typically 0.1–0.2),
+* :math:`\Delta` is the grid filter width (taken equal to the grid
+  spacing :math:`h`),
+* :math:`|\bar{S}| = \sqrt{2\,\bar{S}_{ij}\,\bar{S}_{ij}}` is the
+  magnitude of the resolved **strain-rate tensor**
+
+  .. math::
+
+     \bar{S}_{ij}
+       = \frac{1}{2}
+         \left(
+           \frac{\partial \bar{u}_i}{\partial x_j}
+           + \frac{\partial \bar{u}_j}{\partial x_i}
+         \right)
+
+With this model the diffusion term in the momentum equation becomes
+
+.. math::
+   :label: variable_diffusion
+
+   \nabla \cdot \bigl[(\nu + \nu_t) \, \nabla \mathbf{u}\bigr]
+
+instead of :math:`\nu\,\nabla^{2}\mathbf{u}`.  Because :math:`\nu_t`
+varies in space (it depends on the local velocity gradients), this
+requires a **variable-coefficient Laplacian**; see
+:doc:`numerical_schemes` for the discrete stencil.
+
+The CFL condition is likewise updated:
+
+.. math::
+
+   \Delta t
+     \le \frac{\min(h)}{v_{\max} + 3(\nu + \max\,\nu_t)}
+
+The model is **disabled by default** (:math:`C_s = 0`).  When disabled,
+the solver reverts exactly to the standard constant-viscosity formulation
+with zero computational overhead.  To enable, set ``smagorinsky_cs`` in
+the YAML configuration; see :doc:`parameters`.
+
+
+Non-Newtonian viscosity (optional)
+-----------------------------------
+
+In addition to constant kinematic viscosity, LilyTorch supports two
+spatially-varying viscosity models. When active, the constant ``nu`` is
+overridden by a field recomputed every time-step from the local strain
+rate :math:`\dot\gamma = |\bar S|` (see :eq:`smagorinsky`).
+
+.. note::
+
+   Non-Newtonian viscosity and Smagorinsky LES cannot be used
+   simultaneously — both provide a variable effective viscosity and
+   would otherwise compound.
+
+Carreau model (shear-thinning)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+For shear-thinning fluids (CMC, polymer solutions) whose viscosity
+decreases with shear rate:
+
+.. math::
+   :label: carreau
+
+   \nu(\dot\gamma) = \nu_\infty
+     + (\nu_0 - \nu_\infty)\,
+       \bigl[\,1 + (\lambda\,\dot\gamma)^{2}\,\bigr]^{(n-1)/2}
+
+with
+
+* :math:`\nu_0`      — zero-shear kinematic viscosity [m²/s],
+* :math:`\nu_\infty` — infinite-shear kinematic viscosity [m²/s],
+* :math:`\lambda`    — relaxation time [s]; thinning begins around
+  :math:`\dot\gamma_c \approx 1/\lambda`,
+* :math:`n`          — power-law index; :math:`n = 1` recovers the
+  Newtonian limit, :math:`n \to 0` gives strong thinning.
+
+Herschel–Bulkley extension (yield stress)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+A yield stress :math:`\tau_y` added on top of :eq:`carreau` prevents
+flow below a critical stress — useful for gels and concentrated
+polymer solutions that behave as soft solids at rest:
+
+.. math::
+
+   \nu_\text{eff}(\dot\gamma) = \nu_\text{Carreau}(\dot\gamma)
+     + \frac{\tau_y}{\rho\,\max(\dot\gamma,\,\epsilon)}
+
+A CFL-based upper clamp ``nu_max`` is computed automatically so that the
+diverging :math:`1/\dot\gamma` term never violates the diffusion stability
+limit.
+
+
+Sponge / damping layer (optional)
+----------------------------------
+
+A sponge layer absorbs outgoing waves and suppresses spurious
+recirculation near domain boundaries — effectively mimicking an
+infinite domain. This is important for low-Reynolds / Stokes-like flows
+where the pressure Poisson equation instantaneously propagates velocity
+across the entire domain.
+
+A damping coefficient :math:`\sigma(\mathbf{x})` is defined on the grid,
+ramping from zero in the interior up to :math:`\sigma_\text{max}` near
+each wall using a smooth quadratic profile:
+
+.. math::
+
+   \sigma(\mathbf{x}) = \sigma_\text{max}\,
+     \left(\frac{\max(0,\; L_s - d)}{L_s}\right)^{2}
+
+where :math:`d` is the distance to the nearest domain boundary and
+:math:`L_s` is the sponge thickness. After each pressure projection the
+velocity is damped in place:
+
+.. math::
+
+   \mathbf{u} \leftarrow \frac{\mathbf{u}}{1 + \Delta t\,\sigma(\mathbf{x})}
+
+In the interior (:math:`d > L_s`) :math:`\sigma = 0` and physics is
+unchanged. Near walls :math:`\sigma` ramps up and drives the velocity
+toward zero. The layer thickness and strength are exposed through the
+YAML config; see :doc:`parameters`.
 
 
 Force computation

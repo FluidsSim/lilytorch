@@ -108,6 +108,25 @@ class FluidExtension(TaskExtension):
 
         self.BDIMhandler.step(task, physics)
 
+    def end_episode(self, task: ExperimentTask, physics: Physics):
+        """Flush per-link force/torque histories to ``<save_path>/drags.h5``.
+
+        FARMS-coupled runs do not call ``FluidSolver.run_sim`` (the step
+        loop is driven by MuJoCo), so the drag records would otherwise
+        never be written. We also block on pending HDF5 I/O so that the
+        file is fully on disk before the task finishes.
+        """
+        del task, physics
+        fs = getattr(self.BDIMhandler, "fluid_solver", None)
+        if fs is None:
+            return
+        if getattr(fs, "compute_forces", False) and getattr(fs, "save", False):
+            try:
+                fs.save_drags_h5()
+                fs.flush_io()
+            except Exception as exc:
+                print(f"[FluidExtension] save_drags_h5 failed: {exc}")
+
 
 class PhysicsOptionsExtension(TaskExtension):
     """Apply global MuJoCo geom contact parameters at episode start."""

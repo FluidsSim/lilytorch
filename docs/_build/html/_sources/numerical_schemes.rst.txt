@@ -125,6 +125,75 @@ evaluated with one of six configurable schemes, selected by the
        large time-steps but introduces numerical diffusion.
 
 
+.. _smagorinsky-discretisation:
+
+Smagorinsky LES — variable-coefficient diffusion
+-------------------------------------------------
+
+When the Smagorinsky subgrid-scale model is enabled
+(``smagorinsky_cs > 0``; see :ref:`smagorinsky eq <smagorinsky>`), the
+constant-viscosity Laplacian :math:`\nu\,\nabla^{2}\phi` is replaced by
+a **variable-coefficient** diffusion operator:
+
+.. math::
+
+   \nabla\cdot\bigl[(\nu + \nu_t)\,\nabla\phi\bigr]
+
+On the staggered grid this is discretised as:
+
+.. math::
+
+   \sum_{d}
+   \frac{
+     \nu^{\text{eff}}_{i+\frac{1}{2}}\,
+       (\phi_{i+1} - \phi_i)
+     - \nu^{\text{eff}}_{i-\frac{1}{2}}\,
+       (\phi_i - \phi_{i-1})
+   }{(\Delta x_d)^{2}}
+
+where the **face-centred** effective viscosity is the arithmetic average
+of the two adjacent cell-centred values:
+
+.. math::
+
+   \nu^{\text{eff}}_{i+\frac{1}{2}}
+     = \tfrac{1}{2}\bigl(
+         \nu^{\text{eff}}_i + \nu^{\text{eff}}_{i+1}
+       \bigr),
+   \qquad
+   \nu^{\text{eff}} = \nu + \nu_t
+
+The strain-rate magnitude :math:`|\bar{S}|` is computed on the
+cell-centred grid using second-order central differences
+(``torch.gradient``).  In 3-D this requires 9 velocity-gradient
+evaluations (one per :math:`\partial u_i/\partial x_j` component):
+
+.. math::
+
+   |\bar{S}| = \sqrt{2\,S_{ij}\,S_{ij}}
+   = \sqrt{
+       2\left(
+         S_{11}^2 + S_{22}^2 + S_{33}^2
+         + 2 S_{12}^2 + 2 S_{13}^2 + 2 S_{23}^2
+       \right)
+     }
+
+The eddy viscosity :math:`\nu_t` is recomputed at the start of each
+advection–diffusion sub-step (i.e.\ once per Heun stage, or once per
+Euler step).
+
+**Computational cost.**  The Smagorinsky model adds a handful of
+element-wise GPU kernels per time step — negligible compared to the
+Poisson solve.  Memory overhead is one extra scalar field (same size as
+pressure).
+
+When ``smagorinsky_cs`` is 0 (the default), no strain-rate or eddy-viscosity
+computation is performed and the solver uses the original constant-coefficient
+Laplacian with zero overhead.
+
+See the :ref:`parameters <smagorinsky-params>` page for configuration.
+
+
 .. _multigrid-solver:
 
 Poisson solvers
