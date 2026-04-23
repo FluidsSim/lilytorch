@@ -367,22 +367,34 @@ def _generate_inline_scaling_plots(out_dir, csv_files_list):
 
     cats = {
         "Body update (SDF)":      ["1b"],
+        "mu + normals":           ["2 "],
+        "Convection & diffusion": ["3a  "],
+        "BDIM meta-equation":     ["3b"],
+        # "3c " (trailing space) matches only the outer projection leaf
+        # and NOT the nested "3c.i Jacobi" / "3c.ii V-cycle" sub-timers,
+        # which would otherwise double-count projection on large grids.
+        "Projection (pressure)":  ["3c "],
         "Forces":                 ["4 "],
-        "Projection (pressure)":  ["3c"],
-        "Convection & diffusion": ["3a"],
-        "Other":                  ["1  ", "2 ", "3b", "5 ", "6 "],
+        "Plotting & saving":      ["5 "],
+        "FARMS (apply_forces)":   ["6 "],
     }
+    _OTHER = "Other (residual)"
     cat_colours = {
         "Body update (SDF)":      "#26a69a",
-        "Forces":                 "#ffa726",
-        "Projection (pressure)":  "#ef5350",
+        "mu + normals":           "#66bb6a",
         "Convection & diffusion": "#42a5f5",
-        "Other":                  "#90a4ae",
+        "BDIM meta-equation":     "#29b6f6",
+        "Projection (pressure)":  "#ef5350",
+        "Forces":                 "#ffa726",
+        "Plotting & saving":      "#8d6e63",
+        "FARMS (apply_forces)":   "#5c6bc0",
+        _OTHER:                   "#90a4ae",
     }
 
     csv_files_list = sorted(csv_files_list, key=_grid_cells_from_path)
     g_labels, g_cells = [], []
     cat_data = {c: [] for c in cats}
+    cat_data[_OTHER] = []
 
     for csv_f in csv_files_list:
         m = re.search(r"(\d+)x(\d+)x(\d+)", os.path.basename(csv_f))
@@ -393,23 +405,35 @@ def _generate_inline_scaling_plots(out_dir, csv_files_list):
         g_cells.append(fnx * fny * fnz)
 
         df = pd.read_csv(csv_f)
+        total_row = df[df["component"] == "TOTAL step"]
+        n_st = int(total_row["calls"].iloc[0]) if len(total_row) else 1
+        total_step_s = (
+            float(total_row["total_s"].iloc[0]) if len(total_row) else 0.0
+        )
+
+        explicit_s = 0.0
         for cat_name, prefixes in cats.items():
             mask = df["component"].apply(
                 lambda comp, pfx=prefixes: any(comp.startswith(p) for p in pfx))
+            mask &= df["component"] != "TOTAL step"
             cat_s = df.loc[mask, "total_s"].sum()
-            total_row = df[df["component"] == "TOTAL step"]
-            n_st = int(total_row["calls"].iloc[0]) if len(total_row) else 1
+            explicit_s += cat_s
             cat_data[cat_name].append(1e3 * cat_s / n_st)
+
+        residual_s = max(total_step_s - explicit_s, 0.0)
+        cat_data[_OTHER].append(1e3 * residual_s / n_st)
 
     n = len(g_labels)
     if n < 2:
         return
 
+    plot_order = list(cats.keys()) + [_OTHER]
+
     # Stacked bar
     fig, ax = plt.subplots(figsize=(max(4.5, 1.2 * n + 2), 4.0))
     x = np.arange(n)
     bottoms = np.zeros(n)
-    for cat in cats:
+    for cat in plot_order:
         vals = np.array(cat_data[cat])
         if vals.sum() == 0:
             continue

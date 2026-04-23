@@ -279,13 +279,17 @@ def instrument_handler(handler):
         handler.update = types.MethodType(timed_update_detailed, handler)
 
         # ── Wrap Smagorinsky ν_t computation ─────────────────────
+        # The cost analysis disables Smagorinsky (``cfg.smagorinsky_cs = 0``),
+        # so this branch should never fire.  Kept as a safety net: if someone
+        # re-enables the LES closure without updating this script, we abort
+        # loudly rather than silently attributing ν_t time to "Other".
         if getattr(fs, 'use_smagorinsky', False):
-            _saved_smag = fs._compute_smagorinsky_nu_t
-
-            def timed_smag(self_fs, *a, **kw):
-                with T("3a.0 Smagorinsky ν_t"):
-                    return _saved_smag(*a, **kw)
-            fs._compute_smagorinsky_nu_t = types.MethodType(timed_smag, fs)
+            raise RuntimeError(
+                "Smagorinsky LES is active (smagorinsky_cs > 0) but the "
+                "cost analysis is configured to exclude it.  Set "
+                "cfg.smagorinsky_cs = 0.0 (already done in this script) "
+                "and make sure no other override re-enables it."
+            )
 
         # ── Wrap adv_diff_solver.solve ───────────────────────────
         _saved_adv_solve = adv.solve  # the (compiled) bound method
@@ -333,7 +337,6 @@ def instrument_handler(handler):
             poisson_mg._vcycle = types.MethodType(timed_vcycle, poisson_mg)
 
         print(f"  [profiler] Deep patches installed (SDF, "
-              f"{'Smagorinsky, ' if getattr(fs, 'use_smagorinsky', False) else ''}"
               f"advection, BDIM, project"
               f"{', Poisson internals' if _instrument_poisson_internals and poisson_mg else ''})",
               flush=True)
@@ -372,6 +375,15 @@ cfg.Nx           = args.Nx
 cfg.Ny           = args.Ny
 cfg.Nz           = args.Nz
 cfg.use_bdim     = True
+
+# ── Turbulence model ─────────────────────────────────────────────────
+# The cost analysis deliberately excludes the Smagorinsky LES closure
+# (``use_smagorinsky = smagorinsky_cs > 0``).  We want to benchmark the
+# baseline solver without the extra ν_t kernel in order to characterise
+# the unmodified per-step cost.  Setting ``smagorinsky_cs = 0`` disables
+# the model both in the advection–diffusion viscosity and in the force
+# computation path.
+cfg.smagorinsky_cs = 0.0
 
 # Scale domain so that dx = dy = dz is uniform across all three axes.
 # The grid spacing is chosen as the LARGER of:
@@ -597,49 +609,97 @@ plt.rcParams.update({
 })
 
 # ── Aggregate into paper categories ──────────────────────────────────
-# Maps category display name → list of timer-label prefixes
+# Maps category display name → list of timer-label prefixes.
+#
+# The categories below cover every explicitly-instrumented leaf timer in
+# ``detailed_step``.  "Other" is computed as a *residual* relative to the
+# outer ``TOTAL step`` timer, so it captures every bit of per-step work
+# that is not claimed by another category — e.g. the parent wrappers
+# (``1  …``, ``3  fluid_step``), ``set_BCs``, ``_release_bdim_fields``,
+# attribute bookkeeping, Python-level overhead between timer blocks.
+# This guarantees that Σ(categories) ≡ TOTAL step, as required for a
+# faithful cost analysis.
+#
+# Smagorinsky is intentionally absent because the run is configured with
+# ``cfg.smagorinsky_cs = 0`` (see the config section above).
+#
+# Each prefix is chosen so that it matches ONLY the outer leaf timer and
+# not any nested sub-timer.  In particular, ``"3c "`` (trailing space)
+# matches ``"3c   projection (Poisson+gradient+correction)"`` but NOT
+# ``"3c.i   Jacobi smoothing"`` or ``"3c.ii  V-cycle (top-level)"`` — the
+# latter two are *inside* projection and would double-count it on grids
+# where the Poisson internals are instrumented (≥ 500k cells).
 CATEGORIES = {
     "Body update\n(SDF eval)":      ["1b"],
     "mu + normals":                ["2 "],
-    "Smagorinsky ν_t":             ["3a.0"],
     "Convection\n& diffusion":     ["3a  "],
     "BDIM\nmeta-equation":         ["3b"],
-    "Projection\n(pressure)":      ["3c"],
+    "Projection\n(pressure)":      ["3c "],
     "Forces\ncomputation":         ["4 "],
-    "Other":                       ["5 ", "6 "],
+    "Plotting\n& saving":          ["5 "],
+    "FARMS step\n(apply_forces)":  ["6 "],
 }
+# "Other" is injected after the explicit categories have been summed.
+_OTHER_LABEL = "Other\n(residual)"
 
 CAT_COLOURS = {
     "Body update\n(SDF eval)":      "#26a69a",
     "mu + normals":                "#66bb6a",
-    "Smagorinsky ν_t":             "#ab47bc",
     "Convection\n& diffusion":     "#42a5f5",
     "BDIM\nmeta-equation":         "#29b6f6",
     "Projection\n(pressure)":      "#ef5350",
     "Forces\ncomputation":         "#ffa726",
-    "Other":                       "#90a4ae",
+    "Plotting\n& saving":          "#8d6e63",
+    "FARMS step\n(apply_forces)":  "#5c6bc0",
+    _OTHER_LABEL:                  "#90a4ae",
 }
 
 cat_means = {}   # ms
 cat_pcts  = {}   # %
+outer_total_s = summary.get("TOTAL step", {}).get("total", 0.0)
+explicit_total_s = 0.0
+# ``summary`` is already built with ``discard_first`` applied, so all
+# ``total`` values reflect exactly ``n_used`` steps.  Dividing by
+# ``n_used`` therefore gives the correct per-step mean — dividing by
+# ``n_meas`` would systematically under-estimate the means.
+_n_per_step = max(n_used, 1)
 for cat_name, prefixes in CATEGORIES.items():
     total_s = 0.0
     for l, s in summary.items():
+        if l == "TOTAL step":
+            continue
         if any(l.startswith(pfx) for pfx in prefixes):
             total_s += s["total"]
-    mean_ms = 1e3 * total_s / n_meas if n_meas > 0 else 0.0
-    pct = 100.0 * total_s / sum(summary.get("TOTAL step", {}).get("total", 1.0) for _ in [1])
-    outer_total_s = summary.get("TOTAL step", {}).get("total", 1.0)
+    explicit_total_s += total_s
+    mean_ms = 1e3 * total_s / _n_per_step
     pct = 100.0 * total_s / outer_total_s if outer_total_s > 0 else 0.0
     if mean_ms > 0:
         cat_means[cat_name] = mean_ms
         cat_pcts[cat_name]  = pct
 
+# Residual: everything the outer "TOTAL step" timer saw that is not
+# attributed to an explicit category.  Includes parent-timer wrappers
+# ("1  SDF update", "3  fluid_step"), set_BCs, bookkeeping, etc.
+residual_s = max(outer_total_s - explicit_total_s, 0.0)
+if residual_s > 0:
+    cat_means[_OTHER_LABEL] = 1e3 * residual_s / _n_per_step
+    cat_pcts[_OTHER_LABEL]  = (
+        100.0 * residual_s / outer_total_s if outer_total_s > 0 else 0.0
+    )
+
 # Print grouped summary
 print("\n  ── Grouped categories ──")
-for cn in CATEGORIES:
+_ordered_cats = list(CATEGORIES.keys()) + [_OTHER_LABEL]
+for cn in _ordered_cats:
     if cn in cat_means:
-        print(f"    {cn:<28s}  {cat_means[cn]:8.2f} ms  ({cat_pcts[cn]:5.1f}%)")
+        # Collapse multi-line display names for console output
+        label = cn.replace("\n", " ")
+        print(f"    {label:<32s}  {cat_means[cn]:8.2f} ms  ({cat_pcts[cn]:5.1f}%)")
+# Sanity check: explicit + residual should equal TOTAL step (within fp eps).
+if outer_total_s > 0:
+    _coverage = 100.0 * (explicit_total_s + residual_s) / outer_total_s
+    print(f"    {'(coverage check: Σ categories / TOTAL step)':<32s}  "
+          f"{_coverage:7.2f}%")
 
 # ── Figure 1: Horizontal bar chart ──────────────────────────────────
 cat_names_sorted = sorted(cat_means.keys(), key=lambda k: cat_means[k])

@@ -55,37 +55,53 @@ plt.rcParams.update({
 })
 
 # ── Paper categories (must match run_cost_analysis.py prefixes) ──────
+# The explicit categories map to *leaf* timers instrumented in
+# ``run_cost_analysis.py``.  "Other (residual)" is computed per grid as
+#     residual = TOTAL step  −  Σ (explicit leaves)
+# so that every bit of step cost (parent-timer overhead, bookkeeping,
+# set_BCs, etc.) is represented.  Smagorinsky is deliberately excluded
+# because the cost run sets ``smagorinsky_cs = 0``.
+# Each prefix matches ONLY the outer leaf timer for its category.  In
+# particular, ``"3c "`` (trailing space) matches
+# ``"3c   projection (Poisson+gradient+correction)"`` but NOT
+# ``"3c.i Jacobi smoothing"`` or ``"3c.ii V-cycle (top-level)"`` — the
+# latter two are nested sub-timers *inside* projection and would
+# double-count it on grids where Poisson internals are instrumented
+# (≥ 500k cells).
 CATEGORIES = {
     "Body update (SDF)":       ["1b"],
     "mu + normals":            ["2 "],
-    "Smagorinsky νt":          ["3a.0"],
     "Convection & diffusion":  ["3a  "],
     "BDIM meta-equation":      ["3b"],
-    "Projection (pressure)":   ["3c"],
+    "Projection (pressure)":   ["3c "],
     "Forces":                  ["4 "],
-    "Other":                   ["5 ", "6 "],
+    "Plotting & saving":       ["5 "],
+    "FARMS (apply_forces)":    ["6 "],
 }
+_OTHER_LABEL = "Other (residual)"
 
 CAT_COLOURS = {
     "Body update (SDF)":       "#26a69a",
     "mu + normals":            "#66bb6a",
-    "Smagorinsky νt":          "#ab47bc",
     "Convection & diffusion":  "#42a5f5",
     "BDIM meta-equation":      "#29b6f6",
     "Projection (pressure)":   "#ef5350",
     "Forces":                  "#ffa726",
-    "Other":                   "#90a4ae",
+    "Plotting & saving":       "#8d6e63",
+    "FARMS (apply_forces)":    "#5c6bc0",
+    _OTHER_LABEL:              "#90a4ae",
 }
 
 HATCHES = {
     "Body update (SDF)":       "",
     "mu + normals":            "",
-    "Smagorinsky νt":          "//",
     "Convection & diffusion":  "",
     "BDIM meta-equation":      "",
     "Projection (pressure)":   "",
     "Forces":                  "xx",
-    "Other":                   "..",
+    "Plotting & saving":       "",
+    "FARMS (apply_forces)":    "",
+    _OTHER_LABEL:              "..",
 }
 
 
@@ -109,6 +125,7 @@ grids = []       # list of (Nx, Ny, Nz)
 grid_labels = [] # "128×32×32"
 grid_cells = []  # total cells
 cat_data = {c: [] for c in CATEGORIES}  # cat → list of mean_ms per grid
+cat_data[_OTHER_LABEL] = []              # residual
 
 for csv_f in csv_files:
     m = re.search(r"(\d+)x(\d+)x(\d+)", os.path.basename(csv_f))
@@ -121,16 +138,31 @@ for csv_f in csv_files:
 
     df = pd.read_csv(csv_f)
 
-    # Compute per-category mean time
+    # Number of measured steps = calls of "TOTAL step"
+    total_row = df[df["component"] == "TOTAL step"]
+    n_steps = int(total_row["calls"].iloc[0]) if len(total_row) > 0 else 1
+    total_step_s = (
+        float(total_row["total_s"].iloc[0]) if len(total_row) > 0 else 0.0
+    )
+
+    # Explicit leaf categories
+    explicit_s = 0.0
     for cat_name, prefixes in CATEGORIES.items():
         mask = df["component"].apply(
-            lambda comp: any(comp.startswith(pfx) for pfx in prefixes))
+            lambda comp, pfx=prefixes: any(comp.startswith(p) for p in pfx))
+        # Exclude the TOTAL step row itself from any category match.
+        mask &= df["component"] != "TOTAL step"
         cat_total_s = df.loc[mask, "total_s"].sum()
-        # Number of measured steps = calls of "TOTAL step"
-        total_row = df[df["component"] == "TOTAL step"]
-        n_steps = int(total_row["calls"].iloc[0]) if len(total_row) > 0 else 1
+        explicit_s += cat_total_s
         cat_mean_ms = 1e3 * cat_total_s / n_steps
         cat_data[cat_name].append(cat_mean_ms)
+
+    # Residual — everything in TOTAL step not claimed above.
+    residual_s = max(total_step_s - explicit_s, 0.0)
+    cat_data[_OTHER_LABEL].append(1e3 * residual_s / n_steps)
+
+# Ordered list of categories used for plotting (explicit first, residual last).
+PLOT_ORDER = list(CATEGORIES.keys()) + [_OTHER_LABEL]
 
 n_grids = len(grids)
 if n_grids == 0:
@@ -149,7 +181,7 @@ x = np.arange(n_grids)
 bar_width = 0.55
 bottoms = np.zeros(n_grids)
 
-for cat_name in CATEGORIES:
+for cat_name in PLOT_ORDER:
     vals = np.array(cat_data[cat_name])
     if vals.sum() == 0:
         continue
@@ -189,8 +221,8 @@ if n_grids >= 2:
     fig2, ax2 = plt.subplots(figsize=(5.5, 4.0))
     cells_arr = np.array(grid_cells, dtype=float)
 
-    markers = ["o", "s", "D", "^", "v", "p", "h", "X"]
-    for i, cat_name in enumerate(CATEGORIES):
+    markers = ["o", "s", "D", "^", "v", "p", "h", "X", "*"]
+    for i, cat_name in enumerate(PLOT_ORDER):
         vals = np.array(cat_data[cat_name])
         if vals.sum() == 0:
             continue
@@ -227,10 +259,10 @@ if n_grids >= 2:
 fig3, ax3 = plt.subplots(figsize=(max(4.5, 1.2 * n_grids + 2), 4.0))
 bottoms3 = np.zeros(n_grids)
 totals = np.zeros(n_grids)
-for cat_name in CATEGORIES:
+for cat_name in PLOT_ORDER:
     totals += np.array(cat_data[cat_name])
 
-for cat_name in CATEGORIES:
+for cat_name in PLOT_ORDER:
     vals = np.array(cat_data[cat_name])
     if vals.sum() == 0:
         continue
