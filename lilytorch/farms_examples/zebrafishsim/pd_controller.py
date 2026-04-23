@@ -7,7 +7,7 @@ from farms_core.sensors.sensor_convention import sc
 from farms_core.model.control import ControlType
 import numpy as np
 from lilytorch.util.rw import Dict2Class
-from farms_amphibious.control.kinematics import KinematicsController
+from lilytorch.integration.kinematics import KinematicsController
 import matplotlib.pyplot as plt
 
 class PositionController(KinematicsController):
@@ -29,6 +29,9 @@ class PositionController(KinematicsController):
             freq=config["freq"],
             TWL=config["twl"],
             nmotors=len(joints_names),
+            bout_duration=config.get("bout_duration", None),
+            glide_duration=config.get("glide_duration", None),
+            bout_ramp=config.get("bout_ramp", 0.2),
             plot=False
         )
         joints_control_types  = {
@@ -51,6 +54,7 @@ class PositionController(KinematicsController):
             joints_control_types=joints_control_types,
         )
         super().__init__(
+            animat_i=animat_i,
             joints_names=joints_names_per_type,
             kinematics=kinematics,
             sampling=kinematics_sampling,
@@ -104,27 +108,67 @@ class PositionController(KinematicsController):
             freq=1.0,
             nmotors=8,
             TWL=14,
+            bout_duration=None,
+            glide_duration=None,
+            bout_ramp=0.2,
             plot=True
         ):
+        """Generate joint angle time series.
+
+        When *bout_duration* and *glide_duration* are both set, the
+        output alternates between active tail-beat bouts and passive
+        glide phases (all joints held at zero).  A raised-cosine ramp
+        of length *bout_ramp* × *bout_duration* smoothly transitions
+        between phases.
+
+        Parameters
+        ----------
+        bout_duration : float, optional
+            Duration of each active bout in seconds.
+        glide_duration : float, optional
+            Duration of each passive glide in seconds.
+        bout_ramp : float
+            Fraction of *bout_duration* used for the smooth onset/offset
+            ramp (0–0.5).  Default 0.2.
+        """
         amp = amp_deg * (np.pi / 180.0)
         times = np.expand_dims(np.arange(0, tstop, 1 / sampling_rate), axis=1)
         times_expanded = np.repeat(times, nmotors, axis=1)
 
         idxs   = np.arange(nmotors)
         x      = (idxs + 1) / nmotors
-        c1     = +0.05,
-        c2     = -0.13,
+        c1     = +0.05
+        c2     = -0.13
         c3     = +0.28
-        factor = c1+c2*x+c3*x**2
-
-        # factor[:-1] *= 0
-        # factor[-1] = 4
+        factor = c1 + c2*x + c3*x**2
 
         thetas = amp * factor * np.sin(
             2 * np.pi * (
                 wlength * idxs / TWL - freq * times_expanded
             )
         )
+
+        # ── bout-and-glide envelope ──────────────────────────────────
+        if bout_duration is not None and glide_duration is not None:
+            cycle = bout_duration + glide_duration
+            ramp_dur = np.clip(bout_ramp, 0.0, 0.5) * bout_duration
+            t_flat = times.ravel()
+            envelope = np.zeros_like(t_flat)
+            for i, t in enumerate(t_flat):
+                phase = t % cycle
+                if phase < ramp_dur:
+                    # ramp up (raised cosine)
+                    envelope[i] = 0.5 * (1.0 - np.cos(np.pi * phase / ramp_dur))
+                elif phase < bout_duration - ramp_dur:
+                    # full bout
+                    envelope[i] = 1.0
+                elif phase < bout_duration:
+                    # ramp down
+                    envelope[i] = 0.5 * (1.0 + np.cos(
+                        np.pi * (phase - (bout_duration - ramp_dur)) / ramp_dur
+                    ))
+                # else: glide → 0
+            thetas *= envelope[:, np.newaxis]
 
         data = np.column_stack([times, thetas])
 

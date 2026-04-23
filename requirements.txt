@@ -1,15 +1,37 @@
 
-open3d
-scikit-fmm
-numpy
+# --- Core ---
 setuptools
+numpy
 scipy
 matplotlib
-# pytorch_interpolation @ git+https://github.com/ferrarioa5/pytorch_interpolation.git
-strenum
-pywavefront
-# mujoco==3.2.3
-# dm-control==1.0.23
+h5py
+scikit-image
+tqdm
+imageio
 opencv-python
-sdf @ git+https://github.com/fogleman/sdf.git
 trimesh
+open3d
+scikit-fmm
+pytorch_interpolation @ git+https://github.com/ferrarioa5/pytorch_interpolation.git
+seaborn
+plotly
+scikit-learn
+pyvista
+
+# --- Optional (uncomment as needed) ---
+# sdf @ git+https://github.com/fogleman/sdf.git
+# petsc4py
+# mpi4py
+# jax
+# bezier
+# pyamg
+# pybullet
+# pymeshlab
+# meshpy
+# pytorch-kinematics
+# pytorch-volumetric
+# fastsweep
+# pyro-ppl
+# torch-dct
+# pandas
+

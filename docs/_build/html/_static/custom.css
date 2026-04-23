@@ -1,0 +1,23 @@
+/* Custom CSS for LilyTorch docs */
+
+/* Slightly wider content area */
+.content {
+    max-width: 56rem;
+}
+
+/* Math block styling */
+div.math {
+    padding: 0.5rem 1rem;
+    overflow-x: auto;
+}
+
+/* Parameter table styling */
+table.docutils td,
+table.docutils th {
+    padding: 0.4rem 0.8rem;
+}
+
+/* Admonition tweaks */
+.admonition.tip {
+    border-left-color: #2962FF;
+}

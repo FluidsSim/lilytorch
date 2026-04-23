@@ -47,7 +47,7 @@ class ZebrafishFluidController(AnimatNetwork):
 
         pars = yaml2pyobject("../scripts/zebrafish_fluid.yaml")
 
-        self.fluid_solver = FluidSolver(pars, dtype=torch.float32, costum_update=self.bodies_update)
+        self.fluid_solver = FluidSolver(pars, dtype=torch.float32, custom_update=self.bodies_update)
         self.device = self.fluid_solver.device
         self.fluid_solver.composite_body.update = self.update # modify the update rule
         # self.fluid_solver.sdf_properties = self.initialize()
@@ -276,7 +276,7 @@ class ZebrafishFluidSegmentController(AnimatNetwork):
 
         pars = yaml2pyobject("../scripts/zebrafish_fluid.yaml")
 
-        self.fluid_solver = FluidSolver(pars, costum_update=True)
+        self.fluid_solver = FluidSolver(pars, custom_update=True)
         self.device = self.fluid_solver.device
         self.fluid_solver.composite_body.update = self.update # modify the update rule
 

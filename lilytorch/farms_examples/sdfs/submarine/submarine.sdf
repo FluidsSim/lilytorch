@@ -1,0 +1,313 @@
+<?xml version="1.0" ?>
+<sdf version="1.6">
+  <world name="world">
+    <model name="submarine">
+      <pose>0 0 0 0 0 0</pose>
+
+      <!-- Main hull body. A separate fixed ballast link below the hull lowers
+           the overall centre of gravity while keeping the displaced volume
+           unchanged. -->
+      <link name="base_link">
+        <pose>0 0 0 0 0 0</pose>
+        <inertial>
+          <pose>0 0 0 0 0 0</pose>
+          <!--
+            Hull mass after moving 1.8 kg of ballast into a separate fixed
+            keel link below the hull. The outer-hull displaced volume is
+            represented in the simulation config through an effective hull
+            buoyancy density, so the vehicle stays approximately neutrally
+            buoyant while its overall centre of gravity moves downward.
+
+              m    = 1.341592653589793 kg
+              Ixx  = (1/2) * m * R^2             = 1.67699082e-3
+              Iyy  = Izz = (1/12) * m * (3 R^2 + L^2)
+                                                 = 1.87326475e-2
+            (X is the long axis of the submarine.)
+          -->
+          <mass>1.341592653589793</mass>
+          <inertia>
+            <ixx>0.0016769908169872413</ixx>
+            <ixy>0</ixy>
+            <ixz>0</ixz>
+            <iyy>0.018732647456357533</iyy>
+            <iyz>0</iyz>
+            <izz>0.018732647456357533</izz>
+          </inertia>
+        </inertial>
+        <collision name="base_link_collision">
+          <pose>0 0 0 0 1.5707963267948966 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.05</radius>
+              <length>0.4</length>
+            </cylinder>
+          </geometry>
+        </collision>
+        <collision name="conning_tower_collision">
+          <pose>0 0 0.05 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.08 0.04 0.04</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="base_link_visual">
+          <pose>0 0 0 0 1.5707963267948966 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.05</radius>
+              <length>0.4</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <ambient>0.1 0.3 0.5 1</ambient>
+            <diffuse>0.1 0.3 0.5 1</diffuse>
+            <specular>0.4 0.4 0.4 1</specular>
+            <emissive>0 0 0 1</emissive>
+          </material>
+        </visual>
+        <visual name="conning_tower_visual">
+          <pose>0 0 0.05 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.08 0.04 0.04</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.1 0.3 0.5 1</ambient>
+            <diffuse>0.1 0.3 0.5 1</diffuse>
+            <specular>0.4 0.4 0.4 1</specular>
+            <emissive>0 0 0 1</emissive>
+          </material>
+        </visual>
+        <visual name="nose_visual">
+          <pose>0.2 0 0 0 0 0</pose>
+          <geometry>
+            <sphere>
+              <radius>0.05</radius>
+            </sphere>
+          </geometry>
+          <material>
+            <ambient>0.1 0.3 0.5 1</ambient>
+            <diffuse>0.1 0.3 0.5 1</diffuse>
+            <specular>0.4 0.4 0.4 1</specular>
+            <emissive>0 0 0 1</emissive>
+          </material>
+        </visual>
+        <visual name="tail_visual">
+          <pose>-0.2 0 0 0 0 0</pose>
+          <geometry>
+            <sphere>
+              <radius>0.05</radius>
+            </sphere>
+          </geometry>
+          <material>
+            <ambient>0.1 0.3 0.5 1</ambient>
+            <diffuse>0.1 0.3 0.5 1</diffuse>
+            <specular>0.4 0.4 0.4 1</specular>
+            <emissive>0 0 0 1</emissive>
+          </material>
+        </visual>
+      </link>
+
+      <!-- Fixed ballast slug located near the bottom of the hull. It has no
+           collision geometry, so it changes inertia and centre of gravity
+           without changing displaced volume in the fluid solver. -->
+      <link name="ballast_keel">
+        <pose>0 0 -0.09 0 0 0</pose>
+        <inertial>
+          <pose>0 0 0 0 0 0</pose>
+          <!-- Compact ballast block, approximated as a 0.12 x 0.03 x 0.02 m
+               solid box of mass 1.8 kg. -->
+          <mass>1.8</mass>
+          <inertia>
+            <ixx>0.000195</ixx>
+            <ixy>0</ixy>
+            <ixz>0</ixz>
+            <iyy>0.00222</iyy>
+            <iyz>0</iyz>
+            <izz>0.002295</izz>
+          </inertia>
+        </inertial>
+      </link>
+
+      <!--
+        Propeller: a small cylindrical hub mounted at the rear of the
+        submarine, free to spin about the sub's long axis (X).  Two
+        thin flat blades are rigidly attached to the hub via fixed
+        joints.  The blades are pitched about their radial (Y) axes by
+        opposite angles so that, when drag is applied in the blade
+        local frames with anisotropic coefficients (high drag normal
+        to the blade face, low drag edge-on), tangential rotation of
+        the propeller produces a net axial (+X) thrust.
+      -->
+
+      <!-- Propeller hub -->
+      <link name="propeller_hub">
+        <pose>-0.27 0 0 0 0 0</pose>
+        <inertial>
+          <pose>0 0 0 0 0 0</pose>
+          <!--
+            Solid cylinder R=0.015 m, L=0.03 m, density=1000 kg/m^3:
+              V   = pi*R^2*L                   = 2.12058e-5 m^3
+              m   = rho*V                      = 0.02120575 kg
+              Ixx = 0.5 * m * R^2              = 2.3857e-6
+              Iyy = Izz = (1/12)*m*(3R^2+L^2)  = 2.7843e-6
+          -->
+          <mass>0.021205750411731104</mass>
+          <inertia>
+            <ixx>2.385646921319749e-06</ixx>
+            <ixy>0</ixy>
+            <ixz>0</ixz>
+            <iyy>2.784321474773041e-06</iyy>
+            <iyz>0</iyz>
+            <izz>2.784321474773041e-06</izz>
+          </inertia>
+        </inertial>
+        <collision name="propeller_hub_collision">
+          <pose>0 0 0 0 1.5707963267948966 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.015</radius>
+              <length>0.03</length>
+            </cylinder>
+          </geometry>
+        </collision>
+        <visual name="propeller_hub_visual">
+          <pose>0 0 0 0 1.5707963267948966 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.015</radius>
+              <length>0.03</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <ambient>0.8 0.6 0.1 1</ambient>
+            <diffuse>0.8 0.6 0.1 1</diffuse>
+            <specular>0.4 0.4 0.4 1</specular>
+            <emissive>0 0 0 1</emissive>
+          </material>
+        </visual>
+      </link>
+
+      <!-- Blade 0 (on +Y side, pitched +alpha around radial Y axis) -->
+      <link name="blade_0">
+        <pose>-0.27 0.04 0 0 0.3 0</pose>
+        <inertial>
+          <pose>0 0 0 0 0 0</pose>
+          <!--
+            Thin flat blade: size 0.004 (X=thickness) x 0.08 (Y=span) x 0.02 (Z=chord).
+            Density=1000 kg/m^3:
+              V   = 0.004*0.08*0.02        = 6.4e-6 m^3
+              m   = rho*V                  = 6.4e-3 kg
+              Ixx = (1/12)*m*(Y^2+Z^2)     = 3.627e-6
+              Iyy = (1/12)*m*(X^2+Z^2)     = 2.219e-7
+              Izz = (1/12)*m*(X^2+Y^2)     = 3.422e-6
+          -->
+          <mass>0.0064</mass>
+          <inertia>
+            <ixx>3.626666666666667e-06</ixx>
+            <ixy>0</ixy>
+            <ixz>0</ixz>
+            <iyy>2.218666666666667e-07</iyy>
+            <iyz>0</iyz>
+            <izz>3.421333333333333e-06</izz>
+          </inertia>
+        </inertial>
+        <collision name="blade_0_collision">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.004 0.08 0.02</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="blade_0_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.004 0.08 0.02</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.9 0.7 0.1 1</ambient>
+            <diffuse>0.9 0.7 0.1 1</diffuse>
+            <specular>0.4 0.4 0.4 1</specular>
+            <emissive>0 0 0 1</emissive>
+          </material>
+        </visual>
+      </link>
+
+      <!-- Blade 1 (on -Y side, pitched -alpha so thrust adds instead of cancelling) -->
+      <link name="blade_1">
+        <pose>-0.27 -0.04 0 0 -0.3 0</pose>
+        <inertial>
+          <pose>0 0 0 0 0 0</pose>
+          <mass>0.0064</mass>
+          <inertia>
+            <ixx>3.626666666666667e-06</ixx>
+            <ixy>0</ixy>
+            <ixz>0</ixz>
+            <iyy>2.218666666666667e-07</iyy>
+            <iyz>0</iyz>
+            <izz>3.421333333333333e-06</izz>
+          </inertia>
+        </inertial>
+        <collision name="blade_1_collision">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.004 0.08 0.02</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="blade_1_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.004 0.08 0.02</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.9 0.7 0.1 1</ambient>
+            <diffuse>0.9 0.7 0.1 1</diffuse>
+            <specular>0.4 0.4 0.4 1</specular>
+            <emissive>0 0 0 1</emissive>
+          </material>
+        </visual>
+      </link>
+
+      <!-- Revolute joint: propeller spins about the submarine's X axis -->
+      <joint name="joint_propeller" type="revolute">
+        <parent>base_link</parent>
+        <child>propeller_hub</child>
+        <pose>0 0 0 0 0 0</pose>
+        <axis>
+          <xyz>1 0 0</xyz>
+          <limit>
+            <lower>-1e16</lower>
+            <upper>1e16</upper>
+          </limit>
+        </axis>
+      </joint>
+
+      <joint name="joint_ballast" type="fixed">
+        <parent>base_link</parent>
+        <child>ballast_keel</child>
+        <pose>0 0 0 0 0 0</pose>
+      </joint>
+
+      <!-- Fixed joints: rigidly attach the two blades to the hub -->
+      <joint name="joint_blade_0" type="fixed">
+        <parent>propeller_hub</parent>
+        <child>blade_0</child>
+        <pose>0 0 0 0 0 0</pose>
+      </joint>
+      <joint name="joint_blade_1" type="fixed">
+        <parent>propeller_hub</parent>
+        <child>blade_1</child>
+        <pose>0 0 0 0 0 0</pose>
+      </joint>
+    </model>
+  </world>
+</sdf>
