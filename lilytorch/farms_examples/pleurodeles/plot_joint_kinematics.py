@@ -176,7 +176,7 @@ def plot_desired_vs_actual(
 if __name__ == "__main__":
 
     # ---- User settings ----
-    sim_dir   = "/data/andreaferrario/ns_data/2026-02-27T12:31:04.108378"
+    sim_dir   = "/data/andreaferrario/ns_data/2026-04-22T21:44:50.482912"
     animat_id = None   # Set to an int to plot a specific animat, or None to plot all
     save_path = None   # Set to a file path to save the figure, or None to show interactively
     # -----------------------

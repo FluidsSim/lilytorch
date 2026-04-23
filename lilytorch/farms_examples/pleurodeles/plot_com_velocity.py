@@ -64,12 +64,72 @@ from farms_core.sensors.sensor_convention import sc
 # ---------------------------------------------------------------------------
 # I/O helpers
 # ---------------------------------------------------------------------------
+class _TolerantLoader(yaml.SafeLoader):
+    """SafeLoader that ignores unknown (e.g. ``!!python/object:...``) tags."""
+
+
+def _construct_unknown(loader, tag_suffix, node):
+    if isinstance(node, yaml.MappingNode):
+        return loader.construct_mapping(node, deep=True)
+    if isinstance(node, yaml.SequenceNode):
+        return loader.construct_sequence(node, deep=True)
+    return loader.construct_scalar(node)
+
+
+_TolerantLoader.add_multi_constructor("", _construct_unknown)
+_TolerantLoader.add_multi_constructor("tag:yaml.org,2002:python/", _construct_unknown)
+
+
+def _scrape_solver_rho(path: str) -> float | None:
+    """Fallback: extract ``solver.rho`` by scanning lines of ``parameters.yaml``.
+
+    The solver's ``parameters.yaml`` contains Python-object tags with
+    self-referential anchors that PyYAML cannot construct. We only need
+    ``solver.rho``, so scrape it textually.
+    """
+    try:
+        with open(path, "r") as f:
+            lines = f.readlines()
+    except OSError:
+        return None
+    in_solver = False
+    for line in lines:
+        stripped = line.rstrip("\n")
+        if stripped.startswith("solver:"):
+            in_solver = True
+            continue
+        if in_solver:
+            # leaving the solver block once we hit another top-level key
+            if stripped and not stripped.startswith((" ", "\t")):
+                break
+            s = stripped.strip()
+            if s.startswith("rho:"):
+                try:
+                    return float(s.split(":", 1)[1].strip())
+                except ValueError:
+                    return None
+    return None
+
+
 def _load_parameters_yaml(path: str) -> dict:
-    """Return the parsed parameters.yaml (empty dict if missing)."""
+    """Return a minimal dict with ``{'solver': {'rho': ...}}`` if available.
+
+    The solver writes ``parameters.yaml`` with ``!!python/object:...`` tags
+    and recursive anchors that neither ``safe_load`` nor a tolerant loader
+    can reconstruct. Since only ``solver.rho`` is needed downstream, try a
+    tolerant YAML load first and fall back to text scraping.
+    """
     if not os.path.exists(path):
         return {}
-    with open(path, "r") as f:
-        return yaml.safe_load(f) or {}
+    try:
+        with open(path, "r") as f:
+            data = yaml.load(f, Loader=_TolerantLoader) or {}
+        if isinstance(data, dict):
+            return data
+    except yaml.YAMLError:
+        pass
+    rho = _scrape_solver_rho(path)
+    return {"solver": {"rho": rho}} if rho is not None else {}
 
 
 def _load_link_sensors(sim_hdf5_path: str):
@@ -285,7 +345,7 @@ def main():
     )
     parser.add_argument(
         "--data_dir", type=str,
-        default="/data/andreaferrario/ns_data/pleurodeles_3d/sine_transverse",
+        default="/data/andreaferrario/ns_data/pleurodeles_3d/2026-04-22T21:44:50.482912",
         help="Run directory containing parameters.yaml, interp_data_3d/, "
              "and output/{simulation.hdf5,drags.h5}.",
     )
@@ -294,11 +354,17 @@ def main():
         help="Sub-folder of --data_dir containing the cached SDFs.",
     )
     parser.add_argument(
+        "--interp_data_dir", type=str, default=None,
+        help="Absolute path to the cached SDFs. Overrides "
+             "--interp_data_subfolder. Defaults to the pleurodeles example "
+             "folder alongside this script if set to 'auto'.",
+    )
+    parser.add_argument(
         "--it_max", type=int, default=None,
         help="Clip plotting to this number of iterations (default: all).",
     )
     parser.add_argument(
-        "--cd_clip", type=float, default=10.0,
+        "--cd_clip", type=float, default=None,
         help="y-axis clip for drag coefficient plots.",
     )
     args = parser.parse_args()
@@ -306,21 +372,45 @@ def main():
     out_dir    = os.path.join(args.data_dir, "output")
     params     = _load_parameters_yaml(os.path.join(args.data_dir,
                                                     "parameters.yaml"))
-    interp_dir = os.path.join(args.data_dir, args.interp_data_subfolder)
+    # Prefer the run-local SDF cache; fall back to the source example folder
+    # (``lilytorch/farms_examples/pleurodeles/interp_data_3d``) where the
+    # SimConfig actually writes it via ``data_folder``.
+    if args.interp_data_dir is not None:
+        interp_dir = args.interp_data_dir
+    else:
+        run_local = os.path.join(args.data_dir, args.interp_data_subfolder)
+        source_local = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    args.interp_data_subfolder)
+        interp_dir = run_local if os.path.isdir(run_local) else source_local
     sim_h5     = os.path.join(out_dir, "simulation.hdf5")
-    drags_h5   = os.path.join(out_dir, "drags.h5")
+    # ``drags.h5`` is written by ``FluidSolver.save_drags_h5`` into the run
+    # directory itself (``self.save_path``), not into ``output/``.
+    drags_h5_candidates = [
+        os.path.join(args.data_dir, "drags.h5"),
+        os.path.join(out_dir, "drags.h5"),
+    ]
+    drags_h5 = next((p for p in drags_h5_candidates if os.path.exists(p)), None)
 
     times, vel_lin, vel_ang, link_names_sim, _ = _load_link_sensors(sim_h5)
-    drags = _load_drags(drags_h5)
+    drags = _load_drags(drags_h5) if drags_h5 is not None else None
+    if drags is None:
+        print(f"[warn] drags.h5 not found in {drags_h5_candidates} -- "
+              "skipping drag-coefficient plots.")
 
     # rho from parameters.yaml (written by the solver alongside drags.h5).
     rho = float(params.get("solver", {}).get("rho", 1000.0))
 
     it_max = args.it_max if args.it_max is not None else times.shape[0]
-    it_max = min(it_max, times.shape[0], drags["viscous_drags"].shape[-1])
+    it_max = min(it_max, times.shape[0])
+    if drags is not None:
+        it_max = min(it_max, drags["viscous_drags"].shape[-1])
 
     _plot_com_velocity(times, vel_lin, it_max,
                        os.path.join(args.data_dir, "com_velocity_plot.png"))
+
+    if drags is None:
+        print(f"Wrote COM velocity plot under {args.data_dir}")
+        return
 
     # Line up axes: solver records (n_bodies, 3, nt); FARMS sensors are
     # (nt, n_links, 3). Transpose sensors to match and clip to common length.
@@ -354,18 +444,18 @@ def main():
     _plot_per_link_grid(
         times, C_D, it_max, link_names,
         title=r"Per-link linear drag coefficients $C_{D,\alpha}=F_\alpha/"
-              r"(\tfrac12 \rho\, A_w\, U_\alpha|U_\alpha|)$",
+              r"(\frac{1}{2} \rho\, A_w\, U_\alpha|U_\alpha|)$",
         ylabel=r"$C_D$",
         save_path=os.path.join(args.data_dir, "link_drag_coefficients.png"),
-        ylim=(-args.cd_clip, args.cd_clip),
+        ylim=(-args.cd_clip, args.cd_clip) if args.cd_clip is not None else None,
     )
     _plot_per_link_grid(
         times, C_T, it_max, link_names,
         title=r"Per-link angular drag coefficients $C_{T,\alpha}=T_\alpha/"
-              r"(\tfrac12 \rho\, A_w L^2\, \Omega_\alpha|\Omega_\alpha|)$",
+              r"(\frac{1}{2} \rho\, A_w L^2\, \Omega_\alpha|\Omega_\alpha|)$",
         ylabel=r"$C_T$",
         save_path=os.path.join(args.data_dir, "link_torque_coefficients.png"),
-        ylim=(-args.cd_clip, args.cd_clip),
+        ylim=(-args.cd_clip, args.cd_clip) if args.cd_clip is not None else None,
     )
 
     np.savez(
