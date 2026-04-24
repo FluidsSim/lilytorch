@@ -514,6 +514,59 @@ additional \texttt{physics} block is used only when coupling with
 \farms.  State checkpoints are written to HDF5 and can be resumed.
 
 
+\subsection{Union narrow-band optimisation for articulated bodies}\label{sec:union-narrow-band}
+
+Articulated animats are represented as a collection of $N_b$ rigid
+links, each carrying its own SDF lookup table.  The naive pipeline
+evaluates, at every fractional step, a \emph{separate} per-link SDF
+interpolation, $\mu_0$/$\mu_1$ kernel, shared stress tensor, and BDIM
+meta-equation, all on the \emph{full} grid.  This produces
+$\mathcal O(N_b N)$ memory traffic and $\mathcal O(N_b N_{\text{ops}})$
+kernel launches, which dominates the step cost well before the linear
+solves do: the operators involved are bandwidth-bound, and the GPU
+spends most of its time on launch overhead rather than arithmetic.
+
+The key observation is that each body occupies a small axis-aligned
+bounding box (AABB), and the \emph{union} of all per-link AABBs
+(padded by a 2-cell halo to keep finite-difference stencils in bounds)
+still covers only a fraction of the domain,
+$N_\cup \ll N$.  \lilytorch therefore restricts the bandwidth-bound
+operators --- the shared viscous-stress tensor, the $\mu_0$/$\mu_1$
+and normals fields, and the BDIM2 meta-equation itself --- to this
+union sub-block, and further replaces the per-link Python loop over
+\texttt{grid\_sample} calls by a single batched
+\texttt{grid\_sample} over a padded tensor of stacked LUTs of shape
+$(N_b,\,1,\,N_x^{\max},\,N_y^{\max},\,N_z^{\max})$, combined by a
+\texttt{min}-reduction along the body axis.  Per-link rigid-body
+velocities $\mathbf v_i = \mathbf l_i + \boldsymbol\omega_i \times
+(\mathbf r - \mathbf c_i)$ are assembled in a single batched tensor
+expression and \texttt{gather}-ed at the per-cell
+$\arg\min$ of the union SDF.  Because the sub-block shape changes
+with body pose, the crop kernels are compiled with
+\texttt{dynamic=True}; the outer envelope is rounded up to a bucket
+of 16 cells per axis so that \texttt{torch.compile} sees only a
+bounded number of shape specialisations during a long run.  The
+static-shape, full-grid kernels (advection--diffusion, Poisson) retain
+\texttt{mode="reduce-overhead"} and the associated CUDA-graph
+capture.
+
+The four ingredients --- union-cropped forces, union-cropped
+$\mu$/normals, union-cropped BDIM, and batched SDF --- share the same
+AABB bookkeeping, so their savings are additive and are all toggled
+by a single user flag, \texttt{solver.union\_narrow\_band}.  The
+expected speed-up grows both with $N_b$ (kernel-launch overhead
+amortised over all links in one launch) and with $N/N_\cup$ (memory
+traffic amortised over the occupied sub-block), which makes the
+optimisation \emph{most} effective for simulations with \emph{many}
+moving bodies and \emph{large} grids --- precisely the regime we
+target.  For the 9-link 1guilla free-swimmer on an RTX 4080 SUPER,
+the body-update stage drops from 8.2 to 2.9\,ms at
+$256{\times}64{\times}64$ ($2.8\times$) and from 8.4 to
+3.4\,ms at $512{\times}128{\times}128$ ($2.5\times$); hydrodynamic
+forces speed up by $\sim\!2.3\times$ and the BDIM meta-equation by
+$6$--$11\times$ across the swept grid sizes.
+
+
 % =====================================================================
 \section{Discussion}\label{sec:discussion}
 % =====================================================================

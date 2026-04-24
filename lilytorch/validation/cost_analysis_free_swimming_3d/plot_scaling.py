@@ -25,7 +25,8 @@ import pandas as pd
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-parser = argparse.ArgumentParser(description="Multi-grid cost scaling plots")
+parser = argparse.ArgumentParser(description="Multi-grid cost sc" \
+"aling plots")
 parser.add_argument("--data_dir", type=str,
                     default=os.path.join(SCRIPT_DIR, "figures"),
                     help="Directory containing cost_breakdown_*.csv files")
@@ -75,8 +76,6 @@ CATEGORIES = {
     "BDIM meta-equation":      ["3b"],
     "Projection (pressure)":   ["3c "],
     "Forces":                  ["4 "],
-    "Plotting & saving":       ["5 "],
-    "FARMS (apply_forces)":    ["6 "],
 }
 _OTHER_LABEL = "Other (residual)"
 
@@ -84,11 +83,9 @@ CAT_COLOURS = {
     "Body update (SDF)":       "#26a69a",
     "mu + normals":            "#66bb6a",
     "Convection & diffusion":  "#42a5f5",
-    "BDIM meta-equation":      "#29b6f6",
+    "BDIM meta-equation":      "#ab47bc",   # violet: distinct from adv/diff blue
     "Projection (pressure)":   "#ef5350",
     "Forces":                  "#ffa726",
-    "Plotting & saving":       "#8d6e63",
-    "FARMS (apply_forces)":    "#5c6bc0",
     _OTHER_LABEL:              "#90a4ae",
 }
 
@@ -99,8 +96,6 @@ HATCHES = {
     "BDIM meta-equation":      "",
     "Projection (pressure)":   "",
     "Forces":                  "xx",
-    "Plotting & saving":       "",
-    "FARMS (apply_forces)":    "",
     _OTHER_LABEL:              "..",
 }
 
@@ -145,21 +140,54 @@ for csv_f in csv_files:
         float(total_row["total_s"].iloc[0]) if len(total_row) > 0 else 0.0
     )
 
-    # Explicit leaf categories
-    explicit_s = 0.0
-    for cat_name, prefixes in CATEGORIES.items():
-        mask = df["component"].apply(
+    # Prefer per-step medians when a matching cost_perstep_*.csv is
+    # available.  Per-step medians are robust to the single-recompile
+    # outliers that can inflate dynamic-shape compiled kernel means by
+    # orders of magnitude (e.g. one 225 ms spike across 50 steps pushes
+    # mu+normals mean from 0.5 ms to 5 ms).
+    perstep_f = csv_f.replace("cost_breakdown_", "cost_perstep_")
+    df_ps = None
+    if os.path.exists(perstep_f):
+        try:
+            df_ps_raw = pd.read_csv(perstep_f)
+            if "used" in df_ps_raw.columns:
+                df_ps = df_ps_raw[df_ps_raw["used"] != "discarded"]
+            else:
+                df_ps = df_ps_raw
+            if len(df_ps) == 0:
+                df_ps = None
+        except Exception:
+            df_ps = None
+
+    def _cat_ms_per_step(prefixes, _df=df, _df_ps=df_ps, _n_st=n_steps):
+        if _df_ps is not None:
+            matching_cols = [c for c in _df_ps.columns
+                             if any(c.startswith(p) for p in prefixes)
+                             and c != "TOTAL step"]
+            if matching_cols:
+                per_step_sum = _df_ps[matching_cols].sum(axis=1)
+                return float(per_step_sum.median())
+        mask = _df["component"].apply(
             lambda comp, pfx=prefixes: any(comp.startswith(p) for p in pfx))
-        # Exclude the TOTAL step row itself from any category match.
-        mask &= df["component"] != "TOTAL step"
-        cat_total_s = df.loc[mask, "total_s"].sum()
-        explicit_s += cat_total_s
-        cat_mean_ms = 1e3 * cat_total_s / n_steps
-        cat_data[cat_name].append(cat_mean_ms)
+        mask &= _df["component"] != "TOTAL step"
+        return 1e3 * _df.loc[mask, "total_s"].sum() / _n_st
+
+    def _total_ms_per_step(_df_ps=df_ps, _total_s=total_step_s, _n_st=n_steps):
+        if _df_ps is not None and "TOTAL step" in _df_ps.columns:
+            return float(_df_ps["TOTAL step"].median())
+        return 1e3 * _total_s / _n_st
+
+    # Explicit leaf categories
+    explicit_ms = 0.0
+    for cat_name, prefixes in CATEGORIES.items():
+        cat_ms = _cat_ms_per_step(prefixes)
+        explicit_ms += cat_ms
+        cat_data[cat_name].append(cat_ms)
 
     # Residual — everything in TOTAL step not claimed above.
-    residual_s = max(total_step_s - explicit_s, 0.0)
-    cat_data[_OTHER_LABEL].append(1e3 * residual_s / n_steps)
+    total_ms = _total_ms_per_step()
+    residual_ms = max(total_ms - explicit_ms, 0.0)
+    cat_data[_OTHER_LABEL].append(residual_ms)
 
 # Ordered list of categories used for plotting (explicit first, residual last).
 PLOT_ORDER = list(CATEGORIES.keys()) + [_OTHER_LABEL]

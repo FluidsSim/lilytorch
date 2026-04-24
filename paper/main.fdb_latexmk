@@ -1,13 +1,13 @@
 # Fdb version 3
-["bibtex main"] 1776871738 "main.aux" "main.bbl" "main" 1776871739
+["bibtex main"] 1777058000 "main.aux" "main.bbl" "main" 1777058000
   "/usr/share/texlive/texmf-dist/bibtex/bst/ieeetran/IEEEtran.bst" 1440712899 57748 7c8250ecf02814ce6ddc0cdbb63df1dd ""
-  "main.aux" 1776871739 9164 f4fd471ac83d8d77bc5157a229fb2000 "pdflatex"
+  "main.aux" 1777058000 9460 4eb0120c0be5d417ba67ba74b430945e "pdflatex"
   "references.bib" 1776845656 15414 5f75a45b3cb119780b80683f97b46131 ""
   (generated)
   "main.bbl"
   "main.blg"
-["pdflatex"] 1776871738 "/data/andreaferrario/lilytorch/paper/main.tex" "main.pdf" "main" 1776871739
-  "/data/andreaferrario/lilytorch/paper/main.tex" 1776845656 31393 3b965f9669707d0c660f15ae24febebc ""
+["pdflatex"] 1777058000 "/data/andreaferrario/lilytorch/paper/main.tex" "main.pdf" "main" 1777058000
+  "/data/andreaferrario/lilytorch/paper/main.tex" 1777057999 34452 8d9e6f6858645950a81aaa294ba98047 ""
   "/etc/texmf/web2c/texmf.cnf" 1739876851 475 c0e671620eb5563b2130f56340a5fde8 ""
   "/usr/share/texlive/texmf-dist/fonts/enc/dvips/base/8r.enc" 1165713224 4850 80dc9bab7f31fb78a000ccfed0e27cab ""
   "/usr/share/texlive/texmf-dist/fonts/map/fontname/texfonts.map" 1577235249 3524 cb3e574dea2d1052e39280babc910dc8 ""
@@ -154,10 +154,10 @@
   "/usr/share/texmf/web2c/texmf.cnf" 1644012257 39432 7155514e09a3d69036fac785183a21c2 ""
   "/var/lib/texmf/fonts/map/pdftex/updmap/pdftex.map" 1741078154 4379155 98693266ff65f58d9f98aff394de12d2 ""
   "/var/lib/texmf/web2c/pdftex/pdflatex.fmt" 1772622496 2800136 84df6a7463f486110ef83c72a27b90a2 ""
-  "main.aux" 1776871739 9164 f4fd471ac83d8d77bc5157a229fb2000 "pdflatex"
-  "main.bbl" 1776871738 9868 3062ac823be012ad2b3b91c174866217 "bibtex main"
-  "main.out" 1776871739 3860 4df16834ec6b5fe5546c307f8687cf3b "pdflatex"
-  "main.tex" 1776845656 31393 3b965f9669707d0c660f15ae24febebc ""
+  "main.aux" 1777058000 9460 4eb0120c0be5d417ba67ba74b430945e "pdflatex"
+  "main.bbl" 1777058000 9868 3062ac823be012ad2b3b91c174866217 "bibtex main"
+  "main.out" 1777058000 4198 7024ddfd872133cc5fdc63544d8517fe "pdflatex"
+  "main.tex" 1777057999 34452 8d9e6f6858645950a81aaa294ba98047 ""
   (generated)
   "main.aux"
   "main.log"

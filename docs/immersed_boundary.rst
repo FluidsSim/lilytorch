@@ -177,3 +177,163 @@ each MuJoCo link is an independent body.  At every time-step:
 
 An **AABB narrow-band optimisation** avoids evaluating the SDF over the
 full grid for links that occupy less than 90 % of the domain.
+
+
+Performance: union narrow-band
+-------------------------------
+
+Articulated swimmers (e.g. the 9-link 1guilla, salamander or pleurodeles)
+evaluate *many* per-link SDFs, normals and BDIM kernels on every
+fractional step.  For realistic grid sizes (:math:`\sim 10^6`–:math:`10^7`
+cells) the bodies only touch a tiny fraction of cells, yet the naive
+implementation touches the **full grid** for every link and for every
+operator.  This makes the whole pipeline **memory-bandwidth bound** and
+dominated by **kernel-launch overhead** — exactly the regime where GPUs
+perform worst.
+
+LilyTorch therefore implements a *union narrow-band* strategy that is
+activated by a single user flag and covers four different operators.
+
+Motivation
+^^^^^^^^^^
+
+For :math:`N_b` bodies on a grid of :math:`N` cells the naive per-body
+pipeline has cost
+
+.. math::
+
+   C_{\text{naive}}
+     = \mathcal{O}\!\bigl(N_b\,N\bigr)
+       \;+\;
+       \mathcal{O}\!\bigl(N_b\,N_{\text{ops}}\bigr)\;\text{kernel launches.}
+
+In practice every body lies in a small axis-aligned bounding box (AABB),
+and the *union* of all per-body AABBs, padded by a halo of a few cells,
+still covers only a small sub-block :math:`N_\cup \ll N` of the domain.
+Restricting the bandwidth-bound operators to the union sub-block and
+**batching** all bodies into a single launch converts the cost to
+
+.. math::
+
+   C_{\text{opt}}
+     = \mathcal{O}\!\bigl(N_\cup\bigr)
+       \;+\;
+       \mathcal{O}\!\bigl(N_{\text{ops}}\bigr)\;\text{kernel launches.}
+
+The speed-up therefore grows with both :math:`N_b` (launch-overhead
+amortisation) and :math:`N/N_\cup` (memory-traffic amortisation), so the
+approach is *most* useful for **many moving bodies** and **large grids**
+— precisely the scenarios that LilyTorch targets.
+
+Components
+^^^^^^^^^^
+
+The optimisation is split into four composable pieces, each of which can
+be toggled independently:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 28 72
+
+   * - Flag
+     - What it restricts to the union AABB
+   * - ``solver.forces_shared_union``
+     - Shared viscous-stress tensor used by the hydrodynamic-force
+       integrator (one compiled kernel over the union, instead of one
+       full-grid kernel per body).
+   * - ``solver.mu_normals_union``
+     - :math:`\mu_0`, :math:`\mu_1` and the outward normals needed by the
+       BDIM meta-equation and by the variable-density Poisson
+       coefficients.
+   * - ``solver.bdim_union``
+     - The BDIM2 meta-equation itself (Eq. :eq:`bdim-meta`), applied to
+       each face-velocity component only on union cells.
+   * - ``solver.batched_sdf_3d``
+     - Replaces the per-link Python loop of ``grid_sample`` calls by a
+       *single* batched ``torch.nn.functional.grid_sample`` over a
+       padded tensor of all link SDFs.  The union sub-block is evaluated
+       once and ``min``-reduced across bodies.
+
+All four can be enabled at once via the convenience meta-flag
+
+.. code-block:: yaml
+
+   solver:
+     union_narrow_band: true
+
+or, in the cost-analysis harness,
+
+.. code-block:: bash
+
+   python run_multigrid_cost_analysis.py --preset full --union_narrow_band
+
+Implementation details
+^^^^^^^^^^^^^^^^^^^^^^
+
+* **Union AABB construction** — per-link AABBs in world coordinates are
+  expanded by a halo of 2 cells (so stencil operators remain in bounds)
+  and their outer envelope is rounded up to a **bucket of 16** cells per
+  axis.  The bucket rounding caps the number of distinct sub-block
+  shapes that ``torch.compile`` has to specialise for, keeping recompile
+  counts bounded while the swimmer moves.
+
+* **Dynamic-shape compilation** — the union-crop kernels are compiled
+  with ``dynamic=True`` instead of ``mode="reduce-overhead"``, because
+  the sub-block shape changes over time.  The static, full-grid kernels
+  (adv-diff, Poisson) keep the reduce-overhead mode.
+
+* **Batched SDF update** — at initialisation all per-link SDFs are
+  padded to a common maximum shape and stacked into a single tensor of
+  shape ``(B, 1, max_Nx, max_Ny, max_Nz)`` filled with a large sentinel
+  value outside each body's own LUT box.  Every step the solver builds
+  a ``(B, D, H, W, 3)`` grid of normalised coordinates for the current
+  union sub-block, runs **four** ``grid_sample`` calls (one per
+  staggered component: cc, u, v, w), combines the resulting
+  ``(B, D, H, W)`` tensors with ``min`` along the body axis, and writes
+  the result back into the full-grid SDF tensors.  Body velocities are
+  computed in a single batched
+  :math:`\mathbf{v}_i = \mathbf{l}_i + \boldsymbol\omega_i \times (\mathbf{r} - \mathbf{c}_i)`
+  and ``gather``-ed at the per-cell ``argmin`` of the union SDF.
+
+Measured impact
+^^^^^^^^^^^^^^^
+
+On an RTX 4080 SUPER, for the 9-link 1guilla free-swimming benchmark:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 18 18 18
+
+   * - Grid
+     - Body update
+     - Forces
+     - BDIM meta
+   * - 256 × 64 × 64
+     - 8.24 → 2.93 ms  (**2.8×**)
+     - 2.3× faster
+     - 6–11× faster
+   * - 512 × 128 × 128
+     - 8.4 → 3.39 ms  (**2.5×**)
+     - 2.3× faster
+     - 6–11× faster
+
+Because the three operator flags share the *same* union AABB, their
+savings are additive: enabling them together eliminates most of the
+kernel-launch overhead that previously scaled linearly in :math:`N_b`.
+
+When to use it
+^^^^^^^^^^^^^^
+
+The meta-flag is enabled by default on the supplied multi-grid cost
+benchmarks and on all articulated FARMS cases.  You may want to
+**disable** it only when:
+
+* A single body occupies a large fraction of the domain
+  (:math:`N_\cup \approx N`), in which case the overhead of AABB
+  bookkeeping is not recovered.
+* You are debugging a new analytical SDF and prefer full-grid kernels
+  for numerical inspection.
+
+For every other scenario — and in particular for long multi-body
+swimming simulations on fine grids — ``union_narrow_band`` should be on.
+

@@ -320,6 +320,85 @@ def _forces_body_integrate_3d(
             fp_x, fp_y, fp_z, tp_x, tp_y, tp_z)
 
 
+def _forces_body_narrow_batch_3d(
+    xs_b, ys_b, zs_b,
+    px_b, py_b, pz_b,
+    sdf_b, eps_body, eps_solver,
+    com_x, com_y, com_z,
+    X_b, Y_b, Z_b, h3,
+    sdf_grad_mag=None,
+):
+    """Batched narrow-band force/torque integration.
+
+    Same algorithm as ``_forces_body_batch_3d`` but expects per-body
+    *padded* AABB sub-blocks of a fixed shape ``(B, Di, Dj, Dk)``.  All
+    inputs have a leading body dimension; padded cells must have
+    ``sdf_b >> eps_body`` so the smoothed delta vanishes there.  Running
+    this on a tiny fixed volume (~(9, 63, 27, 26) ≈ 400 k cells for a
+    9-link fish) lets ``torch.compile(mode='reduce-overhead')`` emit a
+    single CUDA-graph launch regardless of grid resolution.
+    """
+    # smoothed deltas (B, Di, Dj, Dk)
+    d_visc = sdf_b - eps_solver
+    delta_visc = torch.where(
+        torch.abs(d_visc) < eps_body,
+        (1.0 + torch.cos(torch.pi * d_visc / eps_body)) / (2.0 * eps_body),
+        0.0,
+    )
+    delta_pres = torch.where(
+        torch.abs(sdf_b) < eps_body,
+        (1.0 + torch.cos(torch.pi * sdf_b / eps_body)) / (2.0 * eps_body),
+        0.0,
+    )
+    if sdf_grad_mag is not None:
+        inv_grad = 1.0 / sdf_grad_mag.clamp(min=1e-3)
+        delta_visc = delta_visc * inv_grad
+        delta_pres = delta_pres * inv_grad
+
+    fvisc_x = xs_b * delta_visc
+    fvisc_y = ys_b * delta_visc
+    fvisc_z = zs_b * delta_visc
+
+    _d = torch.float64
+    _dt = fvisc_x.dtype
+    fv_x = fvisc_x.to(_d).sum(dim=(1, 2, 3)).to(_dt) * h3
+    fv_y = fvisc_y.to(_d).sum(dim=(1, 2, 3)).to(_dt) * h3
+    fv_z = fvisc_z.to(_d).sum(dim=(1, 2, 3)).to(_dt) * h3
+
+    # Torques: per-body absolute-coordinate reductions then com correction.
+    raw_v_yz = (Y_b * fvisc_z).to(_d).sum(dim=(1, 2, 3)).to(_dt) * h3
+    raw_v_zy = (Z_b * fvisc_y).to(_d).sum(dim=(1, 2, 3)).to(_dt) * h3
+    raw_v_zx = (Z_b * fvisc_x).to(_d).sum(dim=(1, 2, 3)).to(_dt) * h3
+    raw_v_xz = (X_b * fvisc_z).to(_d).sum(dim=(1, 2, 3)).to(_dt) * h3
+    raw_v_xy = (X_b * fvisc_y).to(_d).sum(dim=(1, 2, 3)).to(_dt) * h3
+    raw_v_yx = (Y_b * fvisc_x).to(_d).sum(dim=(1, 2, 3)).to(_dt) * h3
+
+    tv_x = raw_v_yz - com_y * fv_z - raw_v_zy + com_z * fv_y
+    tv_y = raw_v_zx - com_z * fv_x - raw_v_xz + com_x * fv_z
+    tv_z = raw_v_xy - com_x * fv_y - raw_v_yx + com_y * fv_x
+
+    fpres_x = px_b * delta_pres
+    fpres_y = py_b * delta_pres
+    fpres_z = pz_b * delta_pres
+    fp_x = fpres_x.to(_d).sum(dim=(1, 2, 3)).to(_dt) * h3
+    fp_y = fpres_y.to(_d).sum(dim=(1, 2, 3)).to(_dt) * h3
+    fp_z = fpres_z.to(_d).sum(dim=(1, 2, 3)).to(_dt) * h3
+
+    raw_p_yz = (Y_b * fpres_z).to(_d).sum(dim=(1, 2, 3)).to(_dt) * h3
+    raw_p_zy = (Z_b * fpres_y).to(_d).sum(dim=(1, 2, 3)).to(_dt) * h3
+    raw_p_zx = (Z_b * fpres_x).to(_d).sum(dim=(1, 2, 3)).to(_dt) * h3
+    raw_p_xz = (X_b * fpres_z).to(_d).sum(dim=(1, 2, 3)).to(_dt) * h3
+    raw_p_xy = (X_b * fpres_y).to(_d).sum(dim=(1, 2, 3)).to(_dt) * h3
+    raw_p_yx = (Y_b * fpres_x).to(_d).sum(dim=(1, 2, 3)).to(_dt) * h3
+
+    tp_x = raw_p_yz - com_y * fp_z - raw_p_zy + com_z * fp_y
+    tp_y = raw_p_zx - com_z * fp_x - raw_p_xz + com_x * fp_z
+    tp_z = raw_p_xy - com_x * fp_y - raw_p_yx + com_y * fp_x
+
+    return (fv_x, fv_y, fv_z, tv_x, tv_y, tv_z,
+            fp_x, fp_y, fp_z, tp_x, tp_y, tp_z)
+
+
 def _forces_body_batch_3d(
     xstress, ystress, zstress,
     pforce_x, pforce_y, pforce_z,
@@ -806,9 +885,15 @@ class FluidSolver:
             self._bdim_meta_compiled = torch.compile(
                 FluidSolver._bdim_meta, mode="reduce-overhead",
             )
+            # Dynamic-shape variant for the union-AABB crop path
+            # (sub-block shape varies with body kinematics).
+            self._bdim_meta_dyn_compiled = torch.compile(
+                FluidSolver._bdim_meta, dynamic=True,
+            )
             print("  [compile] adv_diff_solver.solve + BDIM meta-equation compiled (reduce-overhead)")
         else:
             self._bdim_meta_compiled = FluidSolver._bdim_meta
+            self._bdim_meta_dyn_compiled = FluidSolver._bdim_meta
 
         # ---- optional Towers (2008) 2nd-order delta correction -----------
         # When force_delta_order=2, the smoothed delta is divided by |∇SDF|
@@ -822,16 +907,93 @@ class FluidSolver:
 
         # ---- optional torch.compile for force computation -----
         self._compile_forces = solver.get("compile_forces", False)
+        # Narrow-band forces: when ``comp._sdf_sparse`` is available (set by
+        # BDIMhandler 3-D update), integrate each body's surface forces only
+        # over its AABB sub-block (~50³ cells) instead of scattering to a
+        # full (B, Nx, Ny, Nz) dense tensor and reducing over all cells.
+        # Enabled by default; disable via solver.force_narrow_band=False
+        # to fall back to the old dense batched path.
+        self._forces_narrow_band = bool(solver.get("force_narrow_band", True))
+        # Batched narrow-band forces: pack all per-body AABB sub-blocks into
+        # a single fixed-shape tensor (B, D_i, D_j, D_k) and dispatch a single
+        # compiled CUDA-graph kernel instead of B separate dynamic-shape launches.
+        # D is determined once at init from the body-local SDF bbox diagonal
+        # (rotation-invariant worst case).  Opt-in until benchmarked.
+        self._forces_narrow_batch = bool(solver.get("force_narrow_batch", False))
+        if self._forces_narrow_batch and not self._forces_narrow_band:
+            # batched path requires the sparse SDF infrastructure
+            self._forces_narrow_band = True
+        # Shared-stress union-AABB crop: run the bandwidth-bound shared
+        # gradient + stress + pressure kernel only over the union AABB
+        # of all body sub-blocks (plus halo) instead of the full grid.
+        # On large grids the full-grid shared kernel is the dominant cost;
+        # cropping to the union AABB (~10× smaller cells for thin swimmers)
+        # cuts memory traffic proportionally.  Opt-in.
+        self._forces_shared_union = bool(solver.get("force_shared_union", False))
+        if self._forces_shared_union and not self._forces_narrow_band:
+            self._forces_narrow_band = True
+        # mu + normals union-AABB crop: run the batched mu/normal kernel
+        # only over the union AABB of all body sub-blocks (with halo for
+        # gradient stencils) instead of the full 4×(Nx,Ny,Nz) grid.
+        # Outside the union SDF equals _FAR, so mu0=1, mu1=0, normals=0;
+        # persistent full-grid buffers are pre-filled with those defaults
+        # and only the union sub-block is overwritten each step.  Opt-in.
+        self._mu_normals_union = bool(solver.get("mu_normals_union", False))
+        self._mu_union_ready = False   # persistent buffers allocated lazily
+        # BDIM meta-equation union-AABB crop: outside the union mu0=1,
+        # mu1=0, body_vel=0, so the meta-equation is the identity
+        # (phi_out = phi).  We can therefore run the elementwise kernel
+        # only on the union sub-block (with a 1-cell halo for the normal
+        # derivative) and slice-write the result into phi.  Opt-in.
+        self._bdim_union = bool(solver.get("bdim_union", False))
+        # Batched SDF evaluation in `_update_3d`: replace the per-body
+        # Python loop (9× rotate_grid + 9× grid_sample + 9× union-where
+        # per staggered grid) with a single broadcast rotation and one
+        # batched `grid_sample` across a stacked per-body SDF tensor.
+        # Collapses ~150 serial GPU launches / step down to ~6-8.
+        # Requires mesh-based bodies exposing (sdf.F, sdf.x, sdf.y, sdf.z).
+        # Opt-in.
+        self._batched_sdf_3d = bool(solver.get("batched_sdf_3d", False))
+        # Lazy-allocated padded buffers (see _init_forces_narrow_batch)
+        self._fnb_D = None        # (D_i, D_j, D_k)
+        self._fnb_sdf = None      # (B, D_i, D_j, D_k)
+        self._fnb_xs = None
+        self._fnb_ys = None
+        self._fnb_zs = None
+        self._fnb_px = None
+        self._fnb_py = None
+        self._fnb_pz = None
+        self._fnb_X = None
+        self._fnb_Y = None
+        self._fnb_Z = None
         if self._compile_forces and self.device.type == "cuda":
             # 3-D kernels
             self._forces_shared_compiled = torch.compile(
                 _forces_shared_3d, mode="reduce-overhead",
             )
+            # ``_forces_body_integrate_3d`` runs on per-body AABB sub-blocks
+            # whose shapes change slowly as the body rotates.  Use
+            # ``dynamic=True`` so we get kernel fusion without a recompile
+            # for every orientation (CUDA-graph mode is incompatible with
+            # variable shapes).
             self._forces_body_compiled = torch.compile(
-                _forces_body_integrate_3d, mode="reduce-overhead",
+                _forces_body_integrate_3d, dynamic=True,
             )
             self._forces_body_batch_compiled = torch.compile(
                 _forces_body_batch_3d, mode="reduce-overhead",
+            )
+            self._forces_body_narrow_batch_compiled = torch.compile(
+                _forces_body_narrow_batch_3d, mode="reduce-overhead",
+            )
+            # Dynamic-shape shared kernel for the union-AABB crop path
+            # (sub-block shape varies with body kinematics).
+            self._forces_shared_dyn_compiled = torch.compile(
+                _forces_shared_3d, dynamic=True,
+            )
+            # Dynamic-shape batched mu/normals kernel for the union-AABB
+            # crop path (same rationale).
+            self._mu_normals_batched_3d_dyn_compiled = torch.compile(
+                _mu_normals_batched_3d, dynamic=True,
             )
             # 2-D kernels
             self._forces_shared_2d_compiled = torch.compile(
@@ -841,11 +1003,20 @@ class FluidSolver:
                 _forces_body_batch_2d, mode="reduce-overhead",
             )
             print("  [compile] forces_shared + forces_body_batch compiled "
-                  "(reduce-overhead, 2D+3D)")
+                  "(reduce-overhead, 2D+3D)"
+                  + ("  + narrow-band per-body path (dynamic)" if self._forces_narrow_band else "")
+                  + ("  + narrow-band BATCHED (reduce-overhead)" if self._forces_narrow_batch else "")
+                  + ("  + shared-stress UNION crop (dynamic)" if self._forces_shared_union else "")
+                  + ("  + mu/normals UNION crop (dynamic)" if self._mu_normals_union else "")
+                  + ("  + BDIM meta UNION crop (dynamic)" if self._bdim_union else "")
+                  + ("  + batched-SDF update (grid_sample)" if self._batched_sdf_3d else ""))
         else:
             self._forces_shared_compiled = _forces_shared_3d
             self._forces_body_compiled = _forces_body_integrate_3d
             self._forces_body_batch_compiled = _forces_body_batch_3d
+            self._forces_body_narrow_batch_compiled = _forces_body_narrow_batch_3d
+            self._forces_shared_dyn_compiled = _forces_shared_3d
+            self._mu_normals_batched_3d_dyn_compiled = _mu_normals_batched_3d
             self._forces_shared_2d_compiled = _forces_shared_2d
             self._forces_body_batch_2d_compiled = _forces_body_batch_2d
 
@@ -1333,6 +1504,61 @@ class FluidSolver:
     # ==================================================================
     # 3-D force computation  (volume-integral with smoothed delta)
     # ==================================================================
+    def _init_forces_narrow_batch(self, comp, h):
+        """Pre-allocate fixed-shape padded buffers for the batched
+        narrow-band forces path.
+
+        Mirrors the 2-D ``BDIMhandler._init_batched_sdf_2d`` pattern:
+        find the worst-case per-body sub-block size, pad every body to
+        the common shape ``(D_i, D_j, D_k)`` with a sentinel, and stack
+        into a single ``(B, D_i, D_j, D_k)`` tensor so that a single
+        CUDA-graph launch integrates forces for all bodies regardless
+        of current orientation.
+
+        Per-axis ``D_a`` is derived once from the body-local SDF bbox
+        diagonal (rotation-invariant upper bound on the world-space
+        AABB extent), plus a safety margin for the ``pad`` cells added
+        by ``_body_aabb_indices``.
+        """
+        B = len(comp.bodies)
+        # Body-local SDF bbox diagonal → rotation-invariant cell bound.
+        # In the extreme case a diagonally-oriented body occupies a cube
+        # of side = diag_len in every axis, so we use that for all 3 axes.
+        max_cells = 0
+        for body in comp.bodies:
+            sdf_lo = torch.tensor([float(body.sdf.x[0]),
+                                   float(body.sdf.y[0]),
+                                   float(body.sdf.z[0])])
+            sdf_hi = torch.tensor([float(body.sdf.x[-1]),
+                                   float(body.sdf.y[-1]),
+                                   float(body.sdf.z[-1])])
+            diag_len = float(torch.norm(sdf_hi - sdf_lo))
+            # + 2*pad(=3) + 2 margin cells against AABB growth between steps
+            n_cells = int(diag_len / h) + 2 * 3 + 2 + 1
+            if n_cells > max_cells:
+                max_cells = n_cells
+
+        D = max_cells
+        self._fnb_D = (D, D, D)
+
+        dev, dt = self.device, self.dtype
+        shape = (B, D, D, D)
+        # SDF padded to _FAR so smoothed delta vanishes at padded cells.
+        _FAR = 1e4
+        self._fnb_sdf = torch.full(shape, _FAR, device=dev, dtype=dt)
+        self._fnb_xs = torch.zeros(shape, device=dev, dtype=dt)
+        self._fnb_ys = torch.zeros(shape, device=dev, dtype=dt)
+        self._fnb_zs = torch.zeros(shape, device=dev, dtype=dt)
+        self._fnb_px = torch.zeros(shape, device=dev, dtype=dt)
+        self._fnb_py = torch.zeros(shape, device=dev, dtype=dt)
+        self._fnb_pz = torch.zeros(shape, device=dev, dtype=dt)
+        self._fnb_X = torch.zeros(shape, device=dev, dtype=dt)
+        self._fnb_Y = torch.zeros(shape, device=dev, dtype=dt)
+        self._fnb_Z = torch.zeros(shape, device=dev, dtype=dt)
+        print(f"  [forces-narrow-batch] padded buffers "
+              f"(B={B}, D={D}³)  "
+              f"{self._fnb_sdf.nelement() * self._fnb_sdf.element_size() / 1e6:.1f} MB each")
+
     def forces_method2_3d(self, u, v, w, p, iteration):
         """Compute viscous and pressure forces/torques on each body in 3-D.
 
@@ -1356,21 +1582,73 @@ class FluidSolver:
         nu_rho = self._compute_nu_rho_for_forces(u, v, w)
         h      = self.h
         h3     = self.h3
+        comp   = self.composite_body
 
         # ---- CC normals (reuse cached values when available) ---------
         nx = getattr(self, 'normal_x', None)
         if nx is None:
-            nx, ny, nz = self.composite_body.compute_normals(
-                self.composite_body.sdf_val)
+            nx, ny, nz = comp.compute_normals(comp.sdf_val)
         else:
             ny, nz = self.normal_y, self.normal_z
 
-        # ---- shared part: gradients + stress + pressure density ------
-        (xstress, ystress, zstress,
-         pforce_x, pforce_y, pforce_z) = self._forces_shared_compiled(
-            u, v, w, p, self.composite_body.sdf_val, nx, ny, nz,
-            nu_rho, h,
+        # ---- decide whether to crop shared kernel to union AABB ------
+        # Only worthwhile when narrow-band path is on and sparse SDFs are
+        # available.  We compute the union AABB across all bodies and run
+        # the bandwidth-bound _forces_shared_3d only on that sub-block.
+        # Per-body integration then uses indices RELATIVE to the union.
+        _have_sparse_for_union = (
+            self._forces_shared_union
+            and hasattr(comp, '_sdf_sparse')
+            and len(comp._sdf_sparse) > 0
+            and comp._sdf_sparse[0] is not None
         )
+        # Determine union AABB (only if all bodies have AABBs; if any
+        # body uses full-grid evaluation we fall back to the full kernel).
+        u_aabb = None
+        if _have_sparse_for_union:
+            u_i0, u_j0, u_k0 = 1 << 30, 1 << 30, 1 << 30
+            u_i1, u_j1, u_k1 = -1, -1, -1
+            for aabb_i, _ in comp._sdf_sparse:
+                if aabb_i is None:
+                    u_i0 = -1
+                    break
+                i0, i1, j0, j1, k0, k1 = aabb_i
+                if i0 < u_i0: u_i0 = i0
+                if j0 < u_j0: u_j0 = j0
+                if k0 < u_k0: u_k0 = k0
+                if i1 > u_i1: u_i1 = i1
+                if j1 > u_j1: u_j1 = j1
+                if k1 > u_k1: u_k1 = k1
+            if u_i0 != -1:
+                # 1-cell halo on each side for gradient stencil safety;
+                # AABB indices are already padded by ``_body_aabb_indices``
+                # but the cropped boundary cell of the shared kernel
+                # uses a one-sided diff, so add an extra halo of 2.
+                Ni, Nj, Nk = u.shape
+                halo = 2
+                u_i0 = max(0, u_i0 - halo); u_i1 = min(Ni, u_i1 + halo)
+                u_j0 = max(0, u_j0 - halo); u_j1 = min(Nj, u_j1 + halo)
+                u_k0 = max(0, u_k0 - halo); u_k1 = min(Nk, u_k1 + halo)
+                u_aabb = (u_i0, u_i1, u_j0, u_j1, u_k0, u_k1)
+
+        if u_aabb is not None:
+            # ---- shared kernel on cropped sub-block ------------------
+            ui0, ui1, uj0, uj1, uk0, uk1 = u_aabb
+            usl = (slice(ui0, ui1), slice(uj0, uj1), slice(uk0, uk1))
+            (xstress, ystress, zstress,
+             pforce_x, pforce_y, pforce_z) = self._forces_shared_dyn_compiled(
+                u[usl].contiguous(), v[usl].contiguous(), w[usl].contiguous(),
+                p[usl].contiguous(), comp.sdf_val[usl].contiguous(),
+                nx[usl].contiguous(), ny[usl].contiguous(), nz[usl].contiguous(),
+                nu_rho, h,
+            )
+        else:
+            # ---- full-grid shared kernel (default path) --------------
+            (xstress, ystress, zstress,
+             pforce_x, pforce_y, pforce_z) = self._forces_shared_compiled(
+                u, v, w, p, comp.sdf_val, nx, ny, nz,
+                nu_rho, h,
+            )
 
         # When compiled with CUDA graphs (reduce-overhead), the returned
         # tensors live in the graph's replay buffer and will be overwritten
@@ -1398,6 +1676,214 @@ class FluidSolver:
         Z   = self.composite_body.Z_grid
         comp = self.composite_body
         B = len(comp.bodies)
+
+        # Prefer the narrow-band per-body path whenever sparse SDFs are
+        # available: it integrates each body only over its AABB sub-block
+        # (~50³ cells × B) instead of scattering to (B, Nx, Ny, Nz) and
+        # reducing over the full volume.  This is ~50–100× less work for
+        # typical thin-body geometries and removes the large Triton kernel
+        # shape-dependent cliff seen on 512×128×128 grids.
+        _have_sparse = (
+            hasattr(comp, '_sdf_sparse')
+            and len(comp._sdf_sparse) > 0
+            and comp._sdf_sparse[0] is not None
+        )
+        _use_narrow = self._forces_narrow_band and _have_sparse
+        _use_narrow_batch = self._forces_narrow_batch and _have_sparse
+
+        if _use_narrow_batch:
+            # ---- BATCHED narrow-band path (fixed padded shape) ------
+            # Pack every body's AABB sub-block into persistent
+            # (B, D_i, D_j, D_k) buffers and dispatch a single CUDA-graph
+            # launch.  Uses the same max-over-shapes-then-pad-with-sentinel
+            # pattern as the 2-D batched SDF (BDIMhandler._init_batched_sdf_2d).
+            if self._fnb_sdf is None:
+                self._init_forces_narrow_batch(comp, h)
+
+            _FAR = 1e4
+            D_i, D_j, D_k = self._fnb_D
+
+            # --- per-body slice-write packing (contiguous strided copy) -
+            # Persistent buffers let the compiled kernel replay from its
+            # captured CUDA graph with zero input memcpy.  Slice writes
+            # are far cheaper than advanced-indexing gather here because
+            # (a) each write is one contiguous kernel and (b) we avoid
+            # re-allocating tensors each step.
+            self._fnb_sdf.fill_(_FAR)
+            fallback_full = False
+            # When the shared kernel ran cropped to the union AABB, its
+            # outputs are in union-relative coordinates.  Per-body AABBs
+            # from ``_sdf_sparse`` are in absolute fluid-grid indices, so
+            # we translate them by the union origin before indexing.
+            if u_aabb is not None:
+                _su_i0, _, _su_j0, _, _su_k0, _ = u_aabb
+            else:
+                _su_i0 = _su_j0 = _su_k0 = 0
+            for bi in range(B):
+                aabb_i, sdf_sub_i = comp._sdf_sparse[bi]
+                if aabb_i is None:
+                    fallback_full = True
+                    break
+                i0, i1, j0, j1, k0, k1 = aabb_i
+                di, dj, dk = i1 - i0, j1 - j0, k1 - k0
+                if di > D_i or dj > D_j or dk > D_k:
+                    print(f"  [forces-narrow-batch] body {bi} AABB "
+                          f"({di},{dj},{dk}) > D={self._fnb_D}; "
+                          f"rebuilding buffers (triggers CUDA-graph recompile)")
+                    self._fnb_sdf = None
+                    self._init_forces_narrow_batch(comp, h)
+                    self._fnb_sdf.fill_(_FAR)
+                    D_i, D_j, D_k = self._fnb_D
+                sl = (slice(i0, i1), slice(j0, j1), slice(k0, k1))
+                # Stress / pforce are in union-relative coords.
+                sl_stress = (
+                    slice(i0 - _su_i0, i1 - _su_i0),
+                    slice(j0 - _su_j0, j1 - _su_j0),
+                    slice(k0 - _su_k0, k1 - _su_k0),
+                )
+                self._fnb_sdf[bi, :di, :dj, :dk] = sdf_sub_i
+                self._fnb_xs[bi, :di, :dj, :dk] = xstress[sl_stress]
+                self._fnb_ys[bi, :di, :dj, :dk] = ystress[sl_stress]
+                self._fnb_zs[bi, :di, :dj, :dk] = zstress[sl_stress]
+                self._fnb_px[bi, :di, :dj, :dk] = pforce_x[sl_stress]
+                self._fnb_py[bi, :di, :dj, :dk] = pforce_y[sl_stress]
+                self._fnb_pz[bi, :di, :dj, :dk] = pforce_z[sl_stress]
+                self._fnb_X[bi, :di, :dj, :dk] = X[sl]
+                self._fnb_Y[bi, :di, :dj, :dk] = Y[sl]
+                self._fnb_Z[bi, :di, :dj, :dk] = Z[sl]
+
+            if fallback_full:
+                _use_narrow_batch = False
+
+            if _use_narrow_batch:
+                grad_mag_b = None
+                if self.force_delta_order == 2:
+                    gx = torch.gradient(self._fnb_sdf, spacing=h, dim=1, edge_order=2)[0]
+                    gy = torch.gradient(self._fnb_sdf, spacing=h, dim=2, edge_order=2)[0]
+                    gz = torch.gradient(self._fnb_sdf, spacing=h, dim=3, edge_order=2)[0]
+                    grad_mag_b = torch.sqrt(gx**2 + gy**2 + gz**2)
+
+                eps_body = comp.bodies[0].eps
+                (fv_x, fv_y, fv_z,
+                 tv_x, tv_y, tv_z,
+                 fp_x, fp_y, fp_z,
+                 tp_x, tp_y, tp_z) = self._forces_body_narrow_batch_compiled(
+                    self._fnb_xs, self._fnb_ys, self._fnb_zs,
+                    self._fnb_px, self._fnb_py, self._fnb_pz,
+                    self._fnb_sdf, eps_body, self.eps,
+                    comp.com_pos[:, 0], comp.com_pos[:, 1], comp.com_pos[:, 2],
+                    self._fnb_X, self._fnb_Y, self._fnb_Z, h3,
+                    grad_mag_b,
+                )
+                # Clone CUDA-graph outputs
+                fv_x = fv_x.clone(); fv_y = fv_y.clone(); fv_z = fv_z.clone()
+                tv_x = tv_x.clone(); tv_y = tv_y.clone(); tv_z = tv_z.clone()
+                fp_x = fp_x.clone(); fp_y = fp_y.clone(); fp_z = fp_z.clone()
+                tp_x = tp_x.clone(); tp_y = tp_y.clone(); tp_z = tp_z.clone()
+
+                for i in range(B):
+                    self.friction_force_lin_x[i] = fv_x[i]
+                    self.friction_force_lin_y[i] = fv_y[i]
+                    self.friction_force_lin_z[i] = fv_z[i]
+                    self.friction_force_ang_x[i] = tv_x[i]
+                    self.friction_force_ang_y[i] = tv_y[i]
+                    self.friction_force_ang_z[i] = tv_z[i]
+                    self.pressure_force_x[i] = fp_x[i]
+                    self.pressure_force_y[i] = fp_y[i]
+                    self.pressure_force_z[i] = fp_z[i]
+                    self.pressure_force_ang_x[i] = tp_x[i]
+                    self.pressure_force_ang_y[i] = tp_y[i]
+                    self.pressure_force_ang_z[i] = tp_z[i]
+                    self.viscous_drag_record[i, 0, iteration]  = fv_x[i]
+                    self.viscous_drag_record[i, 1, iteration]  = fv_y[i]
+                    self.viscous_drag_record[i, 2, iteration]  = fv_z[i]
+                    self.pressure_drag_record[i, 0, iteration] = fp_x[i]
+                    self.pressure_drag_record[i, 1, iteration] = fp_y[i]
+                    self.pressure_drag_record[i, 2, iteration] = fp_z[i]
+                    self.viscous_torque_record[i, 0, iteration]  = tv_x[i]
+                    self.viscous_torque_record[i, 1, iteration]  = tv_y[i]
+                    self.viscous_torque_record[i, 2, iteration]  = tv_z[i]
+                    self.pressure_torque_record[i, 0, iteration] = tp_x[i]
+                    self.pressure_torque_record[i, 1, iteration] = tp_y[i]
+                    self.pressure_torque_record[i, 2, iteration] = tp_z[i]
+                return
+
+        if _use_narrow:
+            # ---- NARROW-BAND per-body path (preferred) --------------
+            # Integrate each body on its own AABB sub-block.  Inner kernel
+            # is the same as the uncompiled fallback, optionally compiled
+            # with dynamic=True so varying AABB shapes don't recompile.
+            # When the union-AABB shared-stress crop is active, stress &
+            # pforce live on the cropped sub-block: shift per-body indices
+            # by the union origin to slice them.  X/Y/Z stay global.
+            if u_aabb is not None:
+                ui0, _, uj0, _, uk0, _ = u_aabb
+            for i, body in enumerate(comp.bodies):
+                eps_body = body.eps
+
+                aabb_i, sdf_sub_i = comp._sdf_sparse[i]
+                if aabb_i is not None:
+                    i0, i1, j0, j1, k0, k1 = aabb_i
+                    sl = (slice(i0, i1), slice(j0, j1), slice(k0, k1))
+                    if u_aabb is not None:
+                        sl_s = (slice(i0 - ui0, i1 - ui0),
+                                slice(j0 - uj0, j1 - uj0),
+                                slice(k0 - uk0, k1 - uk0))
+                    else:
+                        sl_s = sl
+                    xs_i, ys_i, zs_i = xstress[sl_s], ystress[sl_s], zstress[sl_s]
+                    px_i, py_i, pz_i = pforce_x[sl_s], pforce_y[sl_s], pforce_z[sl_s]
+                    X_i, Y_i, Z_i    = X[sl], Y[sl], Z[sl]
+                else:
+                    # Body covers >90% of grid → full-grid evaluation.
+                    xs_i, ys_i, zs_i = xstress, ystress, zstress
+                    px_i, py_i, pz_i = pforce_x, pforce_y, pforce_z
+                    X_i, Y_i, Z_i    = X, Y, Z
+
+                grad_mag_i = None
+                if self.force_delta_order == 2:
+                    gx = torch.gradient(sdf_sub_i, spacing=h, dim=0, edge_order=2)[0]
+                    gy = torch.gradient(sdf_sub_i, spacing=h, dim=1, edge_order=2)[0]
+                    gz = torch.gradient(sdf_sub_i, spacing=h, dim=2, edge_order=2)[0]
+                    grad_mag_i = torch.sqrt(gx**2 + gy**2 + gz**2)
+
+                (fv_x, fv_y, fv_z,
+                 tv_x, tv_y, tv_z,
+                 fp_x, fp_y, fp_z,
+                 tp_x, tp_y, tp_z) = self._forces_body_compiled(
+                    xs_i, ys_i, zs_i,
+                    px_i, py_i, pz_i,
+                    sdf_sub_i, eps_body, self.eps,
+                    body.com_pos[0], body.com_pos[1], body.com_pos[2],
+                    X_i, Y_i, Z_i, h3,
+                    grad_mag_i,
+                )
+
+                self.friction_force_lin_x[i] = fv_x
+                self.friction_force_lin_y[i] = fv_y
+                self.friction_force_lin_z[i] = fv_z
+                self.friction_force_ang_x[i] = tv_x
+                self.friction_force_ang_y[i] = tv_y
+                self.friction_force_ang_z[i] = tv_z
+                self.pressure_force_x[i] = fp_x
+                self.pressure_force_y[i] = fp_y
+                self.pressure_force_z[i] = fp_z
+                self.pressure_force_ang_x[i] = tp_x
+                self.pressure_force_ang_y[i] = tp_y
+                self.pressure_force_ang_z[i] = tp_z
+                self.viscous_drag_record[i, 0, iteration]  = fv_x
+                self.viscous_drag_record[i, 1, iteration]  = fv_y
+                self.viscous_drag_record[i, 2, iteration]  = fv_z
+                self.pressure_drag_record[i, 0, iteration] = fp_x
+                self.pressure_drag_record[i, 1, iteration] = fp_y
+                self.pressure_drag_record[i, 2, iteration] = fp_z
+                self.viscous_torque_record[i, 0, iteration]  = tv_x
+                self.viscous_torque_record[i, 1, iteration]  = tv_y
+                self.viscous_torque_record[i, 2, iteration]  = tv_z
+                self.pressure_torque_record[i, 0, iteration] = tp_x
+                self.pressure_torque_record[i, 1, iteration] = tp_y
+                self.pressure_torque_record[i, 2, iteration] = tp_z
+            return
 
         if self._compile_forces:
             # ---- BATCHED path (compiled CUDA graph) ----------------
@@ -1941,6 +2427,108 @@ class FluidSolver:
         nd = ops.normal_derivative(diff, h, ndim, normal_x, normal_y, normal_z)
         return mu0 * diff + body_vel + mu1 * nd
 
+    # ------------------------------------------------------------------
+    #   3-D BDIM apply with optional union-AABB narrow band
+    # ------------------------------------------------------------------
+    def _bdim_apply_3d(self, phi, mu0, body_vel, mu1,
+                      normal_x, normal_y, normal_z):
+        """Apply the BDIM2 meta-equation to a single 3-D staggered grid.
+
+        When ``self._bdim_union`` is on AND a union AABB is available
+        (cached on ``self._bdim_union_aabb``), only the union sub-block
+        is touched.  Outside the union mu0=1, mu1=0, body_vel=0 makes the
+        meta-equation the identity, so phi[outside] is left unchanged
+        (we slice-write the cropped result back into phi).
+
+        Otherwise falls back to the full-grid CUDA-graph kernel.
+        Returns a tensor that the caller can safely consume; the caller
+        is responsible for cloning if it needs to keep a reference past
+        the next CUDA-graph replay (full-grid path) — in the union path
+        the returned tensor is the input ``phi`` itself (mutated in
+        place), which is already an owned tensor.
+        """
+        _h = self.h
+        if self._bdim_union and getattr(self, '_bdim_union_aabb', None) is not None:
+            ui0, ui1, uj0, uj1, uk0, uk1 = self._bdim_union_aabb
+            usl = (slice(ui0, ui1), slice(uj0, uj1), slice(uk0, uk1))
+            sub = self._bdim_meta_dyn_compiled(
+                phi[usl].contiguous(),
+                mu0[usl].contiguous(),
+                body_vel[usl].contiguous(),
+                mu1[usl].contiguous(),
+                normal_x[usl].contiguous(),
+                normal_y[usl].contiguous(),
+                normal_z[usl].contiguous(),
+                _h, 3,
+            )
+            phi[usl] = sub
+            return phi
+        else:
+            return self._bdim_meta_compiled(
+                phi, mu0, body_vel, mu1,
+                normal_x, normal_y, normal_z, _h, 3,
+            ).clone()
+
+    # ------------------------------------------------------------------
+    #   Union AABB across all body sub-blocks (3-D)
+    # ------------------------------------------------------------------
+    def _compute_union_aabb_3d(self, halo=2, bucket=16):
+        """Return (i0,i1,j0,j1,k0,k1) union AABB over all body sparse
+        SDFs, expanded by ``halo`` cells and clipped to grid extent.
+        Returns ``None`` if any body lacks a sparse AABB.
+
+        When ``bucket > 1`` each extent (i1-i0, j1-j0, k1-k0) is rounded
+        up to a multiple of ``bucket`` by expanding the high side first
+        and, if we hit the grid boundary, the low side.  This stabilizes
+        the sub-block shape to a small discrete set so that
+        ``dynamic=True`` compiled kernels only pay the recompile cost a
+        bounded number of times (once per bucket combination seen during
+        warmup) instead of every time the swimmer deforms.
+        """
+        comp = self.composite_body
+        sparse = getattr(comp, '_sdf_sparse', None)
+        if not sparse or sparse[0] is None:
+            return None
+        u_i0 = u_j0 = u_k0 = 1 << 30
+        u_i1 = u_j1 = u_k1 = -1
+        for entry in sparse:
+            if entry is None:
+                return None
+            aabb_i = entry[0]
+            if aabb_i is None:
+                return None
+            i0, i1, j0, j1, k0, k1 = aabb_i
+            if i0 < u_i0: u_i0 = i0
+            if j0 < u_j0: u_j0 = j0
+            if k0 < u_k0: u_k0 = k0
+            if i1 > u_i1: u_i1 = i1
+            if j1 > u_j1: u_j1 = j1
+            if k1 > u_k1: u_k1 = k1
+        Ni, Nj, Nk = comp.sdf_val.shape
+        u_i0 = max(0, u_i0 - halo); u_i1 = min(Ni, u_i1 + halo)
+        u_j0 = max(0, u_j0 - halo); u_j1 = min(Nj, u_j1 + halo)
+        u_k0 = max(0, u_k0 - halo); u_k1 = min(Nk, u_k1 + halo)
+
+        if bucket is not None and bucket > 1:
+            def _pad(lo, hi, N, b):
+                extent = hi - lo
+                target = ((extent + b - 1) // b) * b
+                if target > N:
+                    target = N
+                pad = target - extent
+                # Expand high side first, then spill to low side if clipped.
+                new_hi = hi + pad
+                if new_hi > N:
+                    over = new_hi - N
+                    new_hi = N
+                    lo = max(0, lo - over)
+                return lo, new_hi
+            u_i0, u_i1 = _pad(u_i0, u_i1, Ni, bucket)
+            u_j0, u_j1 = _pad(u_j0, u_j1, Nj, bucket)
+            u_k0, u_k1 = _pad(u_k0, u_k1, Nk, bucket)
+
+        return (u_i0, u_i1, u_j0, u_j1, u_k0, u_k1)
+
     def solver_iteration_heun(self, u, v, p, iteration, w_vel=None):
         """
         Heun (RK2 predictor-corrector) time integration with BDIM2.
@@ -2041,24 +2629,31 @@ class FluidSolver:
             vprime = vprime.clone()
             wprime = wprime.clone()
 
+            # Cache union AABB for both BDIM passes (predictor + corrector).
+            # Cleared at end of step.  Cheap (Python loop over <~10 bodies).
+            self._bdim_union_aabb = (
+                self._compute_union_aabb_3d(halo=2)
+                if self._bdim_union else None
+            )
+
             # BDIM2 meta-equation (fused when compiled)
             _bdim = self._bdim_meta_compiled
             _h    = self.h
-            uprime = _bdim(
+            uprime = self._bdim_apply_3d(
                 uprime, self.mu0_all_u,
                 self.composite_body.body_u, self.mu1_all_u,
-                self.normal_x_u, self.normal_y_u, self.normal_z_u, _h, 3,
-            ).clone()
-            vprime = _bdim(
+                self.normal_x_u, self.normal_y_u, self.normal_z_u,
+            )
+            vprime = self._bdim_apply_3d(
                 vprime, self.mu0_all_v,
                 self.composite_body.body_v, self.mu1_all_v,
-                self.normal_x_v, self.normal_y_v, self.normal_z_v, _h, 3,
-            ).clone()
-            wprime = _bdim(
+                self.normal_x_v, self.normal_y_v, self.normal_z_v,
+            )
+            wprime = self._bdim_apply_3d(
                 wprime, self.mu0_all_w,
                 self.composite_body.body_w, self.mu1_all_w,
-                self.normal_x_w, self.normal_y_w, self.normal_z_w, _h, 3,
-            ).clone()
+                self.normal_x_w, self.normal_y_w, self.normal_z_w,
+            )
 
             self.adv_diff_solver.set_BCs(uprime, vprime, wprime)
             (u1, v1, w1, p1) = self.project(uprime, vprime, p, w_vel=wprime)
@@ -2074,21 +2669,24 @@ class FluidSolver:
             wprime2 = w_vel + (wprime2 - w1)
 
             # BDIM2 meta-equation on corrector (fused when compiled)
-            uprime2 = _bdim(
+            uprime2 = self._bdim_apply_3d(
                 uprime2, self.mu0_all_u,
                 self.composite_body.body_u, self.mu1_all_u,
-                self.normal_x_u, self.normal_y_u, self.normal_z_u, _h, 3,
-            ).clone()
-            vprime2 = _bdim(
+                self.normal_x_u, self.normal_y_u, self.normal_z_u,
+            )
+            vprime2 = self._bdim_apply_3d(
                 vprime2, self.mu0_all_v,
                 self.composite_body.body_v, self.mu1_all_v,
-                self.normal_x_v, self.normal_y_v, self.normal_z_v, _h, 3,
-            ).clone()
-            wprime2 = _bdim(
+                self.normal_x_v, self.normal_y_v, self.normal_z_v,
+            )
+            wprime2 = self._bdim_apply_3d(
                 wprime2, self.mu0_all_w,
                 self.composite_body.body_w, self.mu1_all_w,
-                self.normal_x_w, self.normal_y_w, self.normal_z_w, _h, 3,
-            ).clone()
+                self.normal_x_w, self.normal_y_w, self.normal_z_w,
+            )
+
+            # Drop the cached union AABB now that both BDIM passes are done.
+            self._bdim_union_aabb = None
 
             # Free mu1 + staggered normals after both BDIM passes
             for _attr in ('mu1_all_u', 'mu1_all_v', 'mu1_all_w',
@@ -2182,22 +2780,29 @@ class FluidSolver:
             vprime = vprime.clone()
             wprime = wprime.clone()
 
+            # Cache union AABB for the BDIM pass.
+            self._bdim_union_aabb = (
+                self._compute_union_aabb_3d(halo=2)
+                if self._bdim_union else None
+            )
+
             # BDIM2 meta-equation
-            uprime = _bdim(
+            uprime = self._bdim_apply_3d(
                 uprime, self.mu0_all_u,
                 self.composite_body.body_u, self.mu1_all_u,
-                self.normal_x_u, self.normal_y_u, self.normal_z_u, _h, 3,
-            ).clone()
-            vprime = _bdim(
+                self.normal_x_u, self.normal_y_u, self.normal_z_u,
+            )
+            vprime = self._bdim_apply_3d(
                 vprime, self.mu0_all_v,
                 self.composite_body.body_v, self.mu1_all_v,
-                self.normal_x_v, self.normal_y_v, self.normal_z_v, _h, 3,
-            ).clone()
-            wprime = _bdim(
+                self.normal_x_v, self.normal_y_v, self.normal_z_v,
+            )
+            wprime = self._bdim_apply_3d(
                 wprime, self.mu0_all_w,
                 self.composite_body.body_w, self.mu1_all_w,
-                self.normal_x_w, self.normal_y_w, self.normal_z_w, _h, 3,
-            ).clone()
+                self.normal_x_w, self.normal_y_w, self.normal_z_w,
+            )
+            self._bdim_union_aabb = None
 
             # Free mu1 and staggered normals — no longer needed after
             # BDIM.  project() only uses mu0_{u,v,w}, and forces
@@ -2260,7 +2865,24 @@ class FluidSolver:
         """Set BDIM intermediate fields to *None* so their GPU memory
         can be reclaimed between time-steps (they are recomputed at the
         beginning of every step anyway)."""
+        # When mu/normals union crop is active, keep the persistent
+        # full-grid mu/normal buffers alive across steps — they hold the
+        # outside-body default values that never change, and only the
+        # union sub-block is overwritten each step.
+        keep = set()
+        if getattr(self, '_mu_normals_union', False):
+            keep = {
+                'mu0_all_u', 'mu1_all_u', 'mu0_all_v', 'mu1_all_v',
+                'mu0_all_w', 'mu1_all_w', 'mu0_all', 'mu1_all',
+                'm_m0_all',
+                'normal_x_u', 'normal_y_u', 'normal_z_u',
+                'normal_x_v', 'normal_y_v', 'normal_z_v',
+                'normal_x_w', 'normal_y_w', 'normal_z_w',
+                'normal_x', 'normal_y', 'normal_z',
+            }
         for attr in self._BDIM_FIELD_NAMES:
+            if attr in keep:
+                continue
             if hasattr(self, attr):
                 setattr(self, attr, None)
 
@@ -2288,8 +2910,86 @@ class FluidSolver:
 
         When ``_compile_sdf`` is enabled, uses a batched+compiled kernel that
         processes all four grids (u, v, w, CC) in a single fused CUDA graph.
+        When ``_mu_normals_union`` is enabled, the kernel runs only on the
+        union AABB of all body sub-blocks (with halo) and results are
+        slice-written into persistent full-grid buffers pre-filled with
+        the outside-body defaults (mu0=1, mu1=0, normals=0).
         """
         comp = self.composite_body
+
+        # ------------------------------------------------------------------
+        # Union-AABB crop path — outside the union SDF is _FAR so mu0=1,
+        # mu1=0, normals=0 (these defaults never change between steps).
+        # Uses the shared _compute_union_aabb_3d helper which rounds the
+        # sub-block extents up to a bucket multiple so the dynamic-shape
+        # compiled kernel only recompiles a bounded number of times.
+        # ------------------------------------------------------------------
+        u_aabb = None
+        if self._mu_normals_union:
+            u_aabb = self._compute_union_aabb_3d(halo=2, bucket=16)
+
+        if u_aabb is not None:
+            # Lazy-allocate a single packed persistent buffer of shape
+            # (21, Nx, Ny, Nz) pre-filled with outside-body defaults
+            # (mu0=1, mu1=0, normals=0, m_m0=0).  All downstream mu /
+            # normal attributes are *views* into this packed tensor, so
+            # the union sub-block can be written with a single slice
+            # assignment instead of 21 separate slice-writes.
+            #
+            # Pack layout along dim-0:
+            #    0- 3  : mu0 for [u, v, w, cc]
+            #    4- 7  : mu1 for [u, v, w, cc]
+            #    8-11  : normal_x for [u, v, w, cc]
+            #   12-15  : normal_y for [u, v, w, cc]
+            #   16-19  : normal_z for [u, v, w, cc]
+            #      20  : m_m0_all  (= 1 - mu0_cc)
+            if getattr(self, '_mu_pack', None) is None or \
+               self._mu_pack.shape[1:] != comp.sdf_val.shape or \
+               self._mu_pack.dtype != comp.sdf_val.dtype or \
+               self._mu_pack.device != comp.sdf_val.device:
+                pack = torch.zeros(
+                    (21, *comp.sdf_val.shape),
+                    device=comp.sdf_val.device, dtype=comp.sdf_val.dtype,
+                )
+                pack[0:4].fill_(1.0)  # mu0 defaults to 1 outside body
+                self._mu_pack = pack
+                self._mu_union_ready = True
+            pack = self._mu_pack
+
+            # (Re-)alias every step: cheap Python, and robust to any
+            # non-union path overwriting these attributes.
+            self.mu0_all_u, self.mu0_all_v, self.mu0_all_w, self.mu0_all = (
+                pack[0], pack[1], pack[2], pack[3])
+            self.mu1_all_u, self.mu1_all_v, self.mu1_all_w, self.mu1_all = (
+                pack[4], pack[5], pack[6], pack[7])
+            self.normal_x_u, self.normal_x_v, self.normal_x_w, self.normal_x = (
+                pack[8], pack[9], pack[10], pack[11])
+            self.normal_y_u, self.normal_y_v, self.normal_y_w, self.normal_y = (
+                pack[12], pack[13], pack[14], pack[15])
+            self.normal_z_u, self.normal_z_v, self.normal_z_w, self.normal_z = (
+                pack[16], pack[17], pack[18], pack[19])
+            self.m_m0_all = pack[20]
+
+            ui0, ui1, uj0, uj1, uk0, uk1 = u_aabb
+            usl = (slice(ui0, ui1), slice(uj0, uj1), slice(uk0, uk1))
+
+            mu0_s, mu1_s, nx_s, ny_s, nz_s = self._mu_normals_batched_3d_dyn_compiled(
+                comp.sdf_val_u[usl].contiguous(),
+                comp.sdf_val_v[usl].contiguous(),
+                comp.sdf_val_w[usl].contiguous(),
+                comp.sdf_val[usl].contiguous(),
+                comp.h, comp.eps,
+            )
+
+            # Fused slice-write: stack all 21 sub-block outputs along
+            # dim-0 and scatter into the packed buffer with ONE assign.
+            # Order must match the pack layout above.
+            stacked = torch.cat(
+                (mu0_s, mu1_s, nx_s, ny_s, nz_s, 1.0 - mu0_s[3:4]),
+                dim=0,
+            )  # (21, sub_Nx, sub_Ny, sub_Nz)
+            self._mu_pack[:, ui0:ui1, uj0:uj1, uk0:uk1] = stacked
+            return
 
         if self._compile_sdf:
             # ── Batched + compiled path: all 4 grids in one fused pass ──

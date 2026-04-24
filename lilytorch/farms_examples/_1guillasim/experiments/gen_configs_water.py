@@ -17,6 +17,7 @@ class SimConfig(BaseSimConfig):
 
         # ── Hardware ──────────────────────────────────────────────────
         self.compute_sdf    = True
+        self.convexify      = True
         self.use_gpu        = True
         self.use_bdim       = True
         self.headless       = False
@@ -31,10 +32,10 @@ class SimConfig(BaseSimConfig):
                 "gains"          : [100.0, 1., 0],
                 "spawn_mode"     : SpawnMode.FREE,
                 "pose"           : [-0.07, 0, 0.0, 0, 0, 3.1],
-                "controller_path": "lilytorch.farms_examples._1guillasim.dye_experiments.controller.PositionController",
+                "controller_path": "lilytorch.farms_examples._1guillasim.experiments.controller.PositionController",
                 "control_pars"   : {
                     "file_path": os.path.join(
-                        self.data_folder, "dye_experiments/robot_data/robot_data_log_2025-09-01_16_13_04.csv"
+                        self.data_folder, "experiments/robot_data/robot_data_log_2025-09-01_16_13_04.csv"
                     ),
                 },
             },

@@ -177,6 +177,9 @@ class BDIMhandler:
             comp.sdf_vals = torch.zeros(
                 (comp.nbodies, *gs), device=self.device, dtype=self.dtype,
             )
+            # Lazy-build batched SDF tensor for grid_sample (3-D opt-in)
+            if getattr(self.fluid_solver, '_batched_sdf_3d', False):
+                self._init_batched_sdf_3d()
         else:
             # 2-D update uses per-body stacks for argmin-based union
             if not hasattr(comp, 'sdf_vals'):
@@ -640,6 +643,9 @@ class BDIMhandler:
 
     # ---- 3-D update --------------------------------------------------
     def _update_3d(self, t, iteration, dt=1):
+        # Batched path dispatch (opt-in via solver.batched_sdf_3d)
+        if getattr(self.fluid_solver, '_batched_sdf_3d', False):
+            return self._update_3d_batched(t, iteration, dt)
         fs   = self.fluid_solver
         comp = fs.composite_body
         gs   = fs.grid_shape
@@ -854,6 +860,373 @@ class BDIMhandler:
             comp.com_pos[body_i] = com_pos
             body.com_pos = com_pos
 
+    # ------------------------------------------------------------------
+    #  Batched 3-D SDF init (once) — mirror of `_init_batched_sdf_2d`
+    # ------------------------------------------------------------------
+    def _init_batched_sdf_3d(self):
+        """Pre-build stacked per-body SDF tensor for `grid_sample` (3-D).
+
+        All bodies must expose a regular-grid SDF with attributes
+        ``sdf.F`` (3-D tensor) and ``sdf.x, sdf.y, sdf.z`` (1-D axis
+        vectors).  Per-body grids may differ in resolution; they are
+        padded to the common ``(max_Nx, max_Ny, max_Nz)`` with the
+        ``_FAR`` sentinel so padded cells lose the union-min to real
+        bodies.
+
+        After this call the following attributes are available::
+
+            self._sdf_batch_3d        : (B, 1, max_Nx, max_Ny, max_Nz)
+            self._sdf_x_scale_3d      : (B,)
+            self._sdf_x_offset_3d     : (B,)
+            self._sdf_y_scale_3d      : (B,)
+            self._sdf_y_offset_3d     : (B,)
+            self._sdf_z_scale_3d      : (B,)
+            self._sdf_z_offset_3d     : (B,)
+
+        Coordinate mapping (with ``align_corners=True``): physical
+        coordinate ``x`` → normalized grid coordinate in ``[-1, +1]``
+        indexing the unpadded sub-region of the padded tensor.
+        """
+        comp = self.fluid_solver.composite_body
+        B = comp.nbodies
+        _FAR = 1e4
+
+        # Validate all bodies have the required attributes
+        for bi, body in enumerate(comp.bodies):
+            if not (hasattr(body, 'sdf')
+                    and hasattr(body.sdf, 'F')
+                    and hasattr(body.sdf, 'x')
+                    and hasattr(body.sdf, 'y')
+                    and hasattr(body.sdf, 'z')):
+                raise RuntimeError(
+                    f"_batched_sdf_3d requires mesh-based bodies with "
+                    f"(sdf.F, sdf.x, sdf.y, sdf.z); body {bi} is missing.")
+
+        grids = [(b.sdf.F, b.sdf.x, b.sdf.y, b.sdf.z) for b in comp.bodies]
+        shapes = [tuple(F.shape) for (F, *_rest) in grids]
+        max_nx = max(s[0] for s in shapes)
+        max_ny = max(s[1] for s in shapes)
+        max_nz = max(s[2] for s in shapes)
+
+        # Pad each SDF to (max_nx, max_ny, max_nz) with _FAR
+        padded = []
+        for (F, _x, _y, _z), (nx_i, ny_i, nz_i) in zip(grids, shapes):
+            if nx_i < max_nx or ny_i < max_ny or nz_i < max_nz:
+                # F.pad order for 3-D: (Dz_l, Dz_r, Dy_l, Dy_r, Dx_l, Dx_r)
+                F = torch.nn.functional.pad(
+                    F,
+                    (0, max_nz - nz_i, 0, max_ny - ny_i, 0, max_nx - nx_i),
+                    value=_FAR,
+                )
+            padded.append(F)
+
+        # (B, 1, max_nx, max_ny, max_nz) for grid_sample 5-D input
+        # where (D, H, W) = (max_nx, max_ny, max_nz)
+        self._sdf_batch_3d = torch.stack(padded).unsqueeze(1).contiguous()
+
+        dev, dt_ = self.device, self.dtype
+        x_min = torch.tensor([g[1][0].item()  for g in grids], device=dev, dtype=dt_)
+        x_max = torch.tensor([g[1][-1].item() for g in grids], device=dev, dtype=dt_)
+        y_min = torch.tensor([g[2][0].item()  for g in grids], device=dev, dtype=dt_)
+        y_max = torch.tensor([g[2][-1].item() for g in grids], device=dev, dtype=dt_)
+        z_min = torch.tensor([g[3][0].item()  for g in grids], device=dev, dtype=dt_)
+        z_max = torch.tensor([g[3][-1].item() for g in grids], device=dev, dtype=dt_)
+
+        nx_orig = torch.tensor([s[0] for s in shapes], device=dev, dtype=dt_)
+        ny_orig = torch.tensor([s[1] for s in shapes], device=dev, dtype=dt_)
+        nz_orig = torch.tensor([s[2] for s in shapes], device=dev, dtype=dt_)
+
+        # Affine map physical → normalized [-1, 1] targeting unpadded sub-region
+        self._sdf_x_scale_3d  = 2.0 * (nx_orig - 1) / ((x_max - x_min) * (max_nx - 1))
+        self._sdf_x_offset_3d = -1.0 - x_min * self._sdf_x_scale_3d
+        self._sdf_y_scale_3d  = 2.0 * (ny_orig - 1) / ((y_max - y_min) * (max_ny - 1))
+        self._sdf_y_offset_3d = -1.0 - y_min * self._sdf_y_scale_3d
+        self._sdf_z_scale_3d  = 2.0 * (nz_orig - 1) / ((z_max - z_min) * (max_nz - 1))
+        self._sdf_z_offset_3d = -1.0 - z_min * self._sdf_z_scale_3d
+
+        n_unique = len(set(shapes))
+        mem_mb = (self._sdf_batch_3d.nelement()
+                  * self._sdf_batch_3d.element_size() / 1e6)
+        print(f"  [batched-SDF-3D] built ({B}, 1, "
+              f"{max_nx}, {max_ny}, {max_nz}) grid_sample tensor  "
+              f"({mem_mb:.1f} MB)  ({n_unique} unique SDF sizes, padded to max)")
+
+    # ------------------------------------------------------------------
+    #  Batched 3-D update — analogue of `_update_2d`
+    # ------------------------------------------------------------------
+    def _update_3d_batched(self, t, iteration, dt=1):
+        """Vectorized 3-D update: batched rotation + one grid_sample per
+        staggered grid, collapsing the per-body Python loop.
+
+        Semantics match `_update_3d`.  All per-body SDF entries in
+        ``comp._sdf_sparse`` share the same (bucket-rounded) union
+        AABB; downstream force/mu/normal/BDIM paths see identical
+        contracts (padded cells have ``_FAR`` so union-min and
+        mask-based integrals are unaffected).
+        """
+        fs   = self.fluid_solver
+        comp = fs.composite_body
+        gs   = fs.grid_shape
+        _FAR = 1e4
+
+        # Lazy init if someone flipped the flag post-construction
+        if not hasattr(self, '_sdf_batch_3d'):
+            self._init_batched_sdf_3d()
+
+        # ── Gather kinematics (host) ──────────────────────────────────
+        com_poses  = []
+        urdf_poses = []
+        Rs         = []
+        lin_vels   = []
+        ang_vels   = []
+        for exp_data in self.data:
+            sen = exp_data.sensors.links
+            com_poses.append(self.cython2numpy(sen.com_positions()[iteration, :]))
+            urdf_poses.append(self.cython2numpy(sen.urdf_positions()[iteration, :]))
+            Rs.append(self.cython2numpy(
+                Rotation.from_quat(
+                    sen.urdf_orientations()[iteration, :]
+                ).as_matrix().astype(self.dtype_np)))
+            lin_vels.append(self.cython2numpy(sen.com_lin_velocities()[iteration, :]))
+            nlinks = len(sen.names)
+            ang_vels.append(self.cython2numpy(
+                np.stack([sen.com_ang_velocity(iteration, lk)
+                          for lk in range(nlinks)])))
+
+        # ── Compose per-body frames + stack kinematics ─────────────────
+        com_list, urdf_list, R_list, lv_list, av_list = [], [], [], [], []
+        for body_i, body in enumerate(comp.bodies):
+            (animat_id, link_id) = comp.body_ids[body_i]
+            com_pos  = com_poses[animat_id][link_id]
+            urdf_pos = urdf_poses[animat_id][link_id]
+            R        = Rs[animat_id][link_id]
+            body_pos, body_rot = self._compose_body_frame_3d(body, urdf_pos, R)
+            com_list.append(com_pos)
+            urdf_list.append(body_pos)
+            R_list.append(body_rot)
+            lv_list.append(lin_vels[animat_id][link_id])
+            av_list.append(ang_vels[animat_id][link_id])
+
+        com_t  = torch.stack(com_list)                # (B, 3)
+        urdf_t = torch.stack(urdf_list)               # (B, 3)
+        R_t    = torch.stack(R_list)                  # (B, 3, 3)
+        R_T_t  = R_t.transpose(1, 2).contiguous()     # (B, 3, 3)
+        lv_t   = torch.stack(lv_list)                 # (B, 3)
+        av_t   = torch.stack(av_list)                 # (B, 3)
+
+        # ── Per-body AABBs → union AABB (bucket-rounded) ──────────────
+        h_grid = comp.h
+        B = len(comp.bodies)
+        per_body_aabbs = []
+        u_i0 = u_j0 = u_k0 = 1 << 30
+        u_i1 = u_j1 = u_k1 = -1
+        full_vol = gs[0] * gs[1] * gs[2]
+        force_full = False
+        for bi, body in enumerate(comp.bodies):
+            aabb_i = self._body_aabb_indices(
+                body, R_t[bi], urdf_t[bi],
+                comp.x, comp.y, comp.z, h_grid, gs, pad=3,
+            )
+            if aabb_i is None:
+                force_full = True
+                break
+            per_body_aabbs.append(aabb_i)
+            i0, i1, j0, j1, k0, k1 = aabb_i
+            if i0 < u_i0: u_i0 = i0
+            if j0 < u_j0: u_j0 = j0
+            if k0 < u_k0: u_k0 = k0
+            if i1 > u_i1: u_i1 = i1
+            if j1 > u_j1: u_j1 = j1
+            if k1 > u_k1: u_k1 = k1
+
+        # Halo + bucket-round extents (match `_compute_union_aabb_3d`)
+        halo = 2
+        bucket = 16
+        if not force_full:
+            u_i0 = max(0, u_i0 - halo); u_i1 = min(gs[0], u_i1 + halo)
+            u_j0 = max(0, u_j0 - halo); u_j1 = min(gs[1], u_j1 + halo)
+            u_k0 = max(0, u_k0 - halo); u_k1 = min(gs[2], u_k1 + halo)
+
+            def _pad(lo, hi, N, b):
+                extent = hi - lo
+                target = ((extent + b - 1) // b) * b
+                if target > N:
+                    target = N
+                pad = target - extent
+                new_hi = hi + pad
+                if new_hi > N:
+                    over = new_hi - N
+                    new_hi = N
+                    lo = max(0, lo - over)
+                return lo, new_hi
+            u_i0, u_i1 = _pad(u_i0, u_i1, gs[0], bucket)
+            u_j0, u_j1 = _pad(u_j0, u_j1, gs[1], bucket)
+            u_k0, u_k1 = _pad(u_k0, u_k1, gs[2], bucket)
+
+            sub_vol = (u_i1 - u_i0) * (u_j1 - u_j0) * (u_k1 - u_k0)
+            if sub_vol > 0.9 * full_vol:
+                force_full = True
+
+        if force_full:
+            u_i0, u_i1 = 0, gs[0]
+            u_j0, u_j1 = 0, gs[1]
+            u_k0, u_k1 = 0, gs[2]
+
+        union_aabb = (u_i0, u_i1, u_j0, u_j1, u_k0, u_k1)
+        sl = (slice(u_i0, u_i1), slice(u_j0, u_j1), slice(u_k0, u_k1))
+
+        # ── Initialise union fields (full grid) to _FAR / zero ────────
+        comp.sdf_val.fill_(_FAR)
+        comp.sdf_val_u.fill_(_FAR)
+        comp.sdf_val_v.fill_(_FAR)
+        comp.sdf_val_w.fill_(_FAR)
+        comp.body_u.zero_()
+        comp.body_v.zero_()
+        comp.body_w.zero_()
+        comp._sdf_sparse = [None] * B
+        if not hasattr(comp, '_body_aabbs'):
+            comp._body_aabbs = [None] * B
+
+        # ── Batched grid_sample helper ─────────────────────────────────
+        # Expand anchors for broadcast: (B, 1, 1, 1)
+        ux = urdf_t[:, 0, None, None, None]
+        uy = urdf_t[:, 1, None, None, None]
+        uz = urdf_t[:, 2, None, None, None]
+        # R_T rows; (B, 1, 1, 1)
+        rt00 = R_T_t[:, 0, 0, None, None, None]
+        rt01 = R_T_t[:, 0, 1, None, None, None]
+        rt02 = R_T_t[:, 0, 2, None, None, None]
+        rt10 = R_T_t[:, 1, 0, None, None, None]
+        rt11 = R_T_t[:, 1, 1, None, None, None]
+        rt12 = R_T_t[:, 1, 2, None, None, None]
+        rt20 = R_T_t[:, 2, 0, None, None, None]
+        rt21 = R_T_t[:, 2, 1, None, None, None]
+        rt22 = R_T_t[:, 2, 2, None, None, None]
+
+        sx = self._sdf_x_scale_3d [:, None, None, None]
+        ox = self._sdf_x_offset_3d[:, None, None, None]
+        sy = self._sdf_y_scale_3d [:, None, None, None]
+        oy = self._sdf_y_offset_3d[:, None, None, None]
+        sz = self._sdf_z_scale_3d [:, None, None, None]
+        oz = self._sdf_z_offset_3d[:, None, None, None]
+
+        def _batched_sdf(Xg, Yg, Zg):
+            """Evaluate all B per-body SDFs on the same (Du,Dv,Dw) grid
+            points `(Xg, Yg, Zg)` in world coordinates.  Returns
+            `(B, Du, Dv, Dw)`."""
+            Xg = Xg.unsqueeze(0)   # (1, Du, Dv, Dw)
+            Yg = Yg.unsqueeze(0)
+            Zg = Zg.unsqueeze(0)
+            dxw = Xg - ux
+            dyw = Yg - uy
+            dzw = Zg - uz
+            px = rt00 * dxw + rt01 * dyw + rt02 * dzw
+            py = rt10 * dxw + rt11 * dyw + rt12 * dzw
+            pz = rt20 * dxw + rt21 * dyw + rt22 * dzw
+            x_n = px * sx + ox
+            y_n = py * sy + oy
+            z_n = pz * sz + oz
+            # grid_sample 5-D expects grid shape (N, D, H, W, 3) with
+            # last-axis order [W, H, D].  Our (D, H, W) = (Nx, Ny, Nz).
+            grid = torch.stack([z_n, y_n, x_n], dim=-1)  # (B, Du, Dv, Dw, 3)
+            out = torch.nn.functional.grid_sample(
+                self._sdf_batch_3d, grid,
+                mode='bilinear', padding_mode='border', align_corners=True,
+            ).squeeze(1)  # (B, Du, Dv, Dw)
+            return out
+
+        X_sub  = comp.X[sl]
+        Y_sub  = comp.Y[sl]
+        Z_sub  = comp.Z_grid[sl]
+        Xu_sub = comp.Xu_stag[sl]
+        Yu_sub = comp.Yu_stag[sl]
+        Zu_sub = comp.Zu_stag[sl]
+        Xv_sub = comp.Xv_stag[sl]
+        Yv_sub = comp.Yv_stag[sl]
+        Zv_sub = comp.Zv_stag[sl]
+        Xw_sub = comp.Xw_stag[sl]
+        Yw_sub = comp.Yw_stag[sl]
+        Zw_sub = comp.Zw_stag[sl]
+
+        sdf_cc_all = _batched_sdf(X_sub,  Y_sub,  Z_sub)    # (B, Du, Dv, Dw)
+        sdf_u_all  = _batched_sdf(Xu_sub, Yu_sub, Zu_sub)
+        sdf_v_all  = _batched_sdf(Xv_sub, Yv_sub, Zv_sub)
+        sdf_w_all  = _batched_sdf(Xw_sub, Yw_sub, Zw_sub)
+
+        # ── Batched body rigid-body velocities (B, Du, Dv, Dw) ────────
+        # v = lv + ω × (r - com)
+        cx = com_t[:, 0, None, None, None]
+        cy = com_t[:, 1, None, None, None]
+        cz = com_t[:, 2, None, None, None]
+        lvx = lv_t[:, 0, None, None, None]
+        lvy = lv_t[:, 1, None, None, None]
+        lvz = lv_t[:, 2, None, None, None]
+        avx = av_t[:, 0, None, None, None]
+        avy = av_t[:, 1, None, None, None]
+        avz = av_t[:, 2, None, None, None]
+
+        vel_u_all = (lvx
+                     + avy * (Zu_sub.unsqueeze(0) - cz)
+                     - avz * (Yu_sub.unsqueeze(0) - cy))
+        vel_v_all = (lvy
+                     + avz * (Xv_sub.unsqueeze(0) - cx)
+                     - avx * (Zv_sub.unsqueeze(0) - cz))
+        vel_w_all = (lvz
+                     + avx * (Yw_sub.unsqueeze(0) - cy)
+                     - avy * (Xw_sub.unsqueeze(0) - cx))
+
+        # ── Union-min reduction over body dim ─────────────────────────
+        min_cc = sdf_cc_all.min(dim=0)
+        comp.sdf_val[sl] = min_cc.values
+
+        min_u = sdf_u_all.min(dim=0)
+        comp.sdf_val_u[sl] = min_u.values
+        comp.body_u[sl] = vel_u_all.gather(
+            0, min_u.indices.unsqueeze(0)).squeeze(0)
+
+        min_v = sdf_v_all.min(dim=0)
+        comp.sdf_val_v[sl] = min_v.values
+        comp.body_v[sl] = vel_v_all.gather(
+            0, min_v.indices.unsqueeze(0)).squeeze(0)
+
+        min_w = sdf_w_all.min(dim=0)
+        comp.sdf_val_w[sl] = min_w.values
+        comp.body_w[sl] = vel_w_all.gather(
+            0, min_w.indices.unsqueeze(0)).squeeze(0)
+
+        # ── Per-body sparse SDF storage ──────────────────────────────
+        # Downstream forces code (``forces_method2_3d`` narrow-band path)
+        # expects ``(per_body_aabb, sdf_sub)`` where ``sdf_sub.shape``
+        # matches the per-body AABB, NOT the union sub-block.  We already
+        # have each body's own AABB from ``per_body_aabbs``; crop the
+        # per-body SDF out of the union slab ``sdf_cc_all[bi]``
+        # (which lives in union-local coordinates [i0_u:i1_u, ...]).
+        u_i0, u_j0, u_k0 = sl[0].start, sl[1].start, sl[2].start
+        have_per_body_aabbs = (
+            not force_full
+            and len(per_body_aabbs) == B
+        )
+        for bi in range(B):
+            if have_per_body_aabbs:
+                b_i0, b_i1, b_j0, b_j1, b_k0, b_k1 = per_body_aabbs[bi]
+                loc = (
+                    slice(b_i0 - u_i0, b_i1 - u_i0),
+                    slice(b_j0 - u_j0, b_j1 - u_j0),
+                    slice(b_k0 - u_k0, b_k1 - u_k0),
+                )
+                sdf_i = sdf_cc_all[bi][loc].contiguous()
+                comp._sdf_sparse[bi] = (per_body_aabbs[bi], sdf_i)
+                comp._body_aabbs[bi] = per_body_aabbs[bi]
+            else:
+                # Fallback: store the full union sub-block (matches legacy
+                # behaviour; forces narrow-batch path will trigger its
+                # own fallback path if shapes don't match its buffers).
+                sdf_i = sdf_cc_all[bi].contiguous()
+                comp._sdf_sparse[bi] = (union_aabb, sdf_i)
+                comp._body_aabbs[bi] = union_aabb
+            comp.com_pos[bi]   = com_t[bi]
+            comp.bodies[bi].com_pos = com_t[bi]
+
     # ==================================================================
     #  fluid_step: one BDIM time-step (advection-diffusion + projection)
     # ==================================================================
@@ -877,10 +1250,70 @@ class BDIMhandler:
                 The density blend is already built from the BDIM face field ``mu0``,
                 so the coupled variable-density path does not apply an additional
                 ``mu0`` factor in the numerator.
+
+        Narrow-band fast-path (3-D only)
+        --------------------------------
+        When the solver runs with ``_mu_normals_union = True`` the mu0
+        face buffers contain the outside-body default value ``mu0 = 1``
+        everywhere except inside the union AABB of all bodies.  Outside
+        that AABB ``ch = cv = cw = ch_cc = dt / rho_fluid`` is a runtime
+        constant — so we allocate persistent full-grid ``ch/cv/cw/ch_cc``
+        buffers once, pre-fill them with ``dt / rho_fluid``, and each
+        step only overwrite the union sub-block.  This avoids the four
+        full-grid divisions that otherwise dominate the "Other
+        (residual)" cost at large grids.
         """
         fs = self.fluid_solver
         _drho = self.rho_fluid - self.rho_body
 
+        # ──────────────────────────────────────────────────────────────
+        # Narrow-band path (3-D + mu_normals_union active)
+        # ──────────────────────────────────────────────────────────────
+        if (self.ndim == 3
+            and getattr(fs, '_mu_normals_union', False)
+            and fs.mu0_all_u is not None
+            and fs.mu0_all_v is not None
+            and fs.mu0_all_w is not None
+            and fs.mu0_all   is not None):
+            u_aabb = fs._compute_union_aabb_3d(halo=2, bucket=16)
+
+            # Lazy-allocate persistent buffers on first call (or after
+            # grid / dtype / device changes).  The outside-body default
+            # dt / rho_fluid is stamped in once and never overwritten by
+            # the narrow-band update.
+            _dt_over_rhofluid = float(timestep / self.rho_fluid)
+            mu0_u = fs.mu0_all_u
+            needs_realloc = (
+                getattr(self, '_ch_persist', None) is None
+                or self._ch_persist.shape != mu0_u.shape
+                or self._ch_persist.dtype != mu0_u.dtype
+                or self._ch_persist.device != mu0_u.device
+                or self._ch_outside_val != _dt_over_rhofluid
+            )
+            if needs_realloc:
+                self._ch_persist    = torch.full_like(fs.mu0_all_u, _dt_over_rhofluid)
+                self._cv_persist    = torch.full_like(fs.mu0_all_v, _dt_over_rhofluid)
+                self._cw_persist    = torch.full_like(fs.mu0_all_w, _dt_over_rhofluid)
+                self._ch_cc_persist = torch.full_like(fs.mu0_all,   _dt_over_rhofluid)
+                self._ch_outside_val = _dt_over_rhofluid
+
+            ui0, ui1, uj0, uj1, uk0, uk1 = u_aabb
+            usl = (slice(ui0, ui1), slice(uj0, uj1), slice(uk0, uk1))
+
+            # Only inside the union AABB can mu0 differ from 1 → so only
+            # there can ch/cv/cw/ch_cc differ from dt/rho_fluid.  Four
+            # small tensor expressions, each on an (Nx_sub, Ny_sub, Nz_sub)
+            # sub-block, instead of four full-grid divisions.
+            self._ch_persist[usl]    = timestep / (self.rho_body + _drho * fs.mu0_all_u[usl])
+            self._cv_persist[usl]    = timestep / (self.rho_body + _drho * fs.mu0_all_v[usl])
+            self._cw_persist[usl]    = timestep / (self.rho_body + _drho * fs.mu0_all_w[usl])
+            self._ch_cc_persist[usl] = timestep / (self.rho_body + _drho * fs.mu0_all[usl])
+            return (self._ch_persist, self._cv_persist,
+                    self._cw_persist, self._ch_cc_persist)
+
+        # ──────────────────────────────────────────────────────────────
+        # Full-grid reference path (2-D, or 3-D without narrow-band)
+        # ──────────────────────────────────────────────────────────────
         ch = timestep / (self.rho_body + _drho * fs.mu0_all_u)
         cv = timestep / (self.rho_body + _drho * fs.mu0_all_v)
 
@@ -1019,22 +1452,30 @@ class BDIMhandler:
         wprime = wprime.clone()
         fs.adv_diff_solver.set_BCs(uprime, vprime, wprime)
 
-        # BDIM2 meta-equation  (reuses FluidSolver's compiled kernel)
-        uprime = _bdim(
+        # Cache union AABB on the solver for the BDIM pass.
+        fs._bdim_union_aabb = (
+            fs._compute_union_aabb_3d(halo=2)
+            if getattr(fs, '_bdim_union', False) else None
+        )
+
+        # BDIM2 meta-equation  (reuses FluidSolver's compiled kernel,
+        # optionally cropped to the union AABB)
+        uprime = fs._bdim_apply_3d(
             uprime, fs.mu0_all_u,
             fs.composite_body.body_u, fs.mu1_all_u,
-            fs.normal_x_u, fs.normal_y_u, fs.normal_z_u, _h, 3,
-        ).clone()
-        vprime = _bdim(
+            fs.normal_x_u, fs.normal_y_u, fs.normal_z_u,
+        )
+        vprime = fs._bdim_apply_3d(
             vprime, fs.mu0_all_v,
             fs.composite_body.body_v, fs.mu1_all_v,
-            fs.normal_x_v, fs.normal_y_v, fs.normal_z_v, _h, 3,
-        ).clone()
-        wprime = _bdim(
+            fs.normal_x_v, fs.normal_y_v, fs.normal_z_v,
+        )
+        wprime = fs._bdim_apply_3d(
             wprime, fs.mu0_all_w,
             fs.composite_body.body_w, fs.mu1_all_w,
-            fs.normal_x_w, fs.normal_y_w, fs.normal_z_w, _h, 3,
-        ).clone()
+            fs.normal_x_w, fs.normal_y_w, fs.normal_z_w,
+        )
+        fs._bdim_union_aabb = None
 
         # ── Free mu1 + staggered normals right after BDIM ────────────
         # project() only uses mu0_{u,v,w}.  forces_method2_3d recomputes

@@ -30,6 +30,7 @@ Usage
 """
 
 import argparse
+import logging
 import os
 import sys
 import time
@@ -39,6 +40,15 @@ from contextlib import contextmanager
 
 import numpy as np
 import torch
+
+# ── torch.compile recompile / graph-break logging ───────────────────
+# Any recompilation inside the timed window would silently inflate
+# timings.  We enable the torch._logging facility BEFORE any compiled
+# module is imported, and attach a file handler later (per-grid) to
+# capture the events without spamming stderr.
+torch._logging.set_logs(recompiles=True, graph_breaks=True)
+_TORCH_DYNAMO_LOG = logging.getLogger("torch._dynamo")
+_TORCH_DYNAMO_LOG.setLevel(logging.INFO)
 
 # ── CLI ──────────────────────────────────────────────────────────────
 parser = argparse.ArgumentParser(
@@ -53,16 +63,70 @@ parser.add_argument("--precompile", type=int, default=30,
                     help="Pre-compilation steps (run before any timing to "
                          "trigger all torch.compile CUDA-graph captures; "
                          "needs ≥ 3× the number of compiled functions)")
-parser.add_argument("--discard_first", type=int, default=3,
+parser.add_argument("--settle_steps", type=int, default=40,
+                    help="Untimed settle steps AFTER pre-compilation to let "
+                         "the fluid field develop past the cold-start "
+                         "transient (body kinematics ramping from rest)")
+parser.add_argument("--discard_first", type=int, default=5,
                     help="Discard the first N timed steps from summary "
                          "stats (avoids CUDA-graph settling overhead after "
                          "deep patches are installed)")
+parser.add_argument("--stability_tol", type=float, default=0.05,
+                    help="Warn if rolling (std/mean) of the last 10 timed "
+                         "steps exceeds this threshold after warm-up.")
 parser.add_argument("--save_every",type=int, default=9999)
+parser.add_argument("--force_narrow_batch", action="store_true",
+                    help="Enable the batched narrow-band forces path "
+                         "(packs all body AABBs into a fixed (B,D,D,D) "
+                         "tensor and dispatches a single compiled kernel).")
+parser.add_argument("--force_shared_union", action="store_true",
+                    help="Run the bandwidth-bound shared stress kernel "
+                         "only over the union AABB of all body sub-blocks "
+                         "(plus halo) instead of the full grid.")
+parser.add_argument("--mu_normals_union", action="store_true",
+                    help="Run the batched mu/normals kernel only over the "
+                         "union AABB of all body sub-blocks (with halo); "
+                         "persistent full-grid buffers hold outside-body "
+                         "defaults (mu0=1, mu1=0, normals=0).")
+parser.add_argument("--bdim_union", action="store_true",
+                    help="Run the BDIM2 meta-equation kernel only over the "
+                         "union AABB of all body sub-blocks (with halo). "
+                         "Outside the union mu0=1, mu1=0, body_vel=0 makes "
+                         "the meta-equation the identity, so phi[outside] "
+                         "is left unchanged.")
+parser.add_argument("--batched_sdf_3d", action="store_true",
+                    help="Replace the per-body SDF loop in _update_3d with a "
+                         "single batched grid_sample across all bodies. "
+                         "Collapses ~150 serial GPU launches/step into ~6-8 "
+                         "(requires mesh-based bodies with sdf.F/x/y/z).")
+parser.add_argument("--union_narrow_band", action="store_true",
+                    help="Meta-flag: enables ALL narrow-band optimisations "
+                         "at once (force_shared_union + mu_normals_union + "
+                         "bdim_union + batched_sdf_3d + force_narrow_batch). "
+                         "This is the single switch users should turn on to "
+                         "activate every available narrow-band path.")
 parser.add_argument("--device",    type=str, default="cuda",
                     choices=["cuda", "cpu"])
 parser.add_argument("--out_dir",   type=str, default=None,
                     help="Output directory (default: figures/ in this folder)")
+parser.add_argument("--Lx_fixed", type=float, default=None,
+                    help="Override the x-extent of the fluid domain (m). "
+                         "When set, Ly and Lz are derived from the Ny/Nx and "
+                         "Nz/Nx ratios so that dx = Lx_fixed/Nx is isotropic. "
+                         "Overrides the default auto-scaling rule "
+                         "(dx = max(dx_ref, 1.05/Nx); domain grows with N).")
+parser.add_argument("--tag_suffix", type=str, default="",
+                    help="Suffix appended to the CSV filename tag "
+                         "(e.g. '_small_nbon'). Defaults to empty string.")
 args = parser.parse_args()
+
+# Expand meta-flag — enables every narrow-band optimisation simultaneously.
+if args.union_narrow_band:
+    args.force_shared_union = True
+    args.mu_normals_union = True
+    args.bdim_union = True
+    args.batched_sdf_3d = True
+    args.force_narrow_batch = True
 
 USE_CUDA = args.device == "cuda" and torch.cuda.is_available()
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -75,15 +139,26 @@ if args.out_dir is None:
 # ═══════════════════════════════════════════════════════════════════════
 
 class TimerBank:
-    """CUDA-synchronised timer collection.  No warmup — all steps timed."""
+    """CUDA-synchronised timer collection.
+
+    An explicit ``_active`` flag gates accumulation: during pre-compile
+    and the physics settle phase the wrapped methods still execute the
+    production code paths but the timings are discarded, so the first
+    entry in every buffer corresponds to a fully warm, CUDA-graph-
+    replayed step.
+    """
 
     def __init__(self, use_cuda: bool):
         self.use_cuda = use_cuda
         self._data: dict[str, list[float]] = defaultdict(list)
         self._step_count = 0
+        self._active = False
 
     @contextmanager
     def __call__(self, label: str):
+        if not self._active:
+            yield
+            return
         if self.use_cuda:
             torch.cuda.synchronize()
         t0 = time.perf_counter()
@@ -97,7 +172,12 @@ class TimerBank:
 
     def summary(self, discard_first: int = 0):
         """Return per-label stats, optionally discarding the first N entries
-        (to exclude CUDA-graph settling overhead after deep patches)."""
+        (to exclude CUDA-graph settling overhead after deep patches).
+
+        ``median`` is the preferred central-tendency estimator: timing
+        distributions on CUDA are right-skewed by occasional launch/sync
+        stalls and the median is robust to those outliers.
+        """
         trimmed = {}
         for label, times in self._data.items():
             trimmed[label] = times[discard_first:] if discard_first < len(times) else times
@@ -106,13 +186,14 @@ class TimerBank:
         for label, times in sorted(trimmed.items()):
             arr = np.array(times)
             rows[label] = {
-                "mean":  arr.mean(),
-                "std":   arr.std(),
-                "min":   arr.min(),
-                "max":   arr.max(),
-                "total": arr.sum(),
-                "count": len(arr),
-                "pct":   100.0 * arr.sum() / outer_total if outer_total > 0 else 0,
+                "median": float(np.median(arr)),
+                "mean":   arr.mean(),
+                "std":    arr.std(),
+                "min":    arr.min(),
+                "max":    arr.max(),
+                "total":  arr.sum(),
+                "count":  len(arr),
+                "pct":    100.0 * arr.sum() / outer_total if outer_total > 0 else 0,
             }
         return rows
 
@@ -164,9 +245,11 @@ def instrument_handler(handler):
     _orig_plot       = type(fs).plotting_and_saving
     _orig_recompute  = type(fs)._recompute_mu_normals_3d
 
-    # ── Pre-compilation gate ─────────────────────────────────────
+    # ── Pre-compilation / settle gates ───────────────────────────
     _precompile_count = [0]
     _precompile_done  = [False]
+    _settle_count     = [0]
+    _settle_done      = [False]
 
     # ── Replacement for handler.step ─────────────────────────────
     def detailed_step(self, task, physics):
@@ -181,6 +264,25 @@ def instrument_handler(handler):
                 _install_deep_patches()
                 print(f"\n  [profiler] Pre-compilation complete "
                       f"({_precompile_count[0]} steps).  "
+                      f"Settling physics for {args.settle_steps} more steps…\n",
+                      flush=True)
+            return
+
+        # ── Settle phase: run patched-but-untimed steps so the ──
+        #    fluid develops past the cold-start transient and the
+        #    wrapped-compiled graphs warm up their replay cache.
+        if not _settle_done[0]:
+            _settle_count[0] += 1
+            # Timer is inactive → wrapped calls fall through without
+            # accumulating.  Code path is identical to the timed phase.
+            _orig_step(self, task, physics)
+            if _settle_count[0] >= args.settle_steps:
+                _settle_done[0] = True
+                if USE_CUDA:
+                    torch.cuda.synchronize()
+                T._active = True
+                print(f"  [profiler] Settling complete "
+                      f"({_settle_count[0]} steps).  "
                       f"Measuring {args.n_steps} steps…\n", flush=True)
             return
 
@@ -225,24 +327,34 @@ def instrument_handler(handler):
                 if hasattr(ffs, _attr):
                     setattr(ffs, _attr, None)
 
-            # ── 5. Plotting / saving ─────────────────────────────
-            with T("5  plotting_and_saving"):
-                self.terminate = _orig_plot(
-                    ffs, ffs.u0, ffs.v0, ffs.p0, iteration, w_vel=ffs.w0,
-                    check_termination=False)
+            # ── 5. Plotting / saving — SKIPPED for pure solver cost ─
+            # The benchmark is configured with save=False / save_frames=
+            # False / headless=True, and we no longer call
+            # ``plotting_and_saving`` at all so its per-step overhead
+            # (input validation, contour thresholds, attribute lookups)
+            # does not pollute the timing.  Termination is determined
+            # purely by ``self.iteration >= nt`` above.
+            self.terminate = False
 
             # ── 6. Apply forces (FARMS ← GPU) ───────────────────
-            with T("6  apply_forces (FARMS)"):
-                _orig_apply(self, task, physics)
+            # Untimed on purpose: the GPU→CPU transfer and FARMS
+            # MuJoCo tick are not representative of solver work.
+            # They still execute inside the outer ``TOTAL step``
+            # timer so their cost falls into the "Other (residual)"
+            # category automatically.
+            _orig_apply(self, task, physics)
 
             # ── 7. Free BDIM intermediates ───────────────────────
             ffs._release_bdim_fields()
 
         self.iteration += 1
 
+    # ── Untimed variant used during the settle phase ─────────────
+    #    Handled via ``T._active = False`` — see TimerBank.__call__.
+
     def outer_step(self_h, task, physics):
-        if not _precompile_done[0]:
-            detailed_step(self_h, task, physics)   # untimed precompile
+        if (not _precompile_done[0]) or (not _settle_done[0]):
+            detailed_step(self_h, task, physics)   # untimed (precompile/settle)
         else:
             with T("TOTAL step"):
                 detailed_step(self_h, task, physics)
@@ -307,11 +419,43 @@ def instrument_handler(handler):
                 return _saved_bdim(*a, **kw)
         fs._bdim_meta_compiled = timed_bdim
 
+        # Also wrap the dynamic-shape variant used by the union-AABB
+        # narrow-band path (when --bdim_union is on).
+        if hasattr(fs, '_bdim_meta_dyn_compiled'):
+            _saved_bdim_dyn = fs._bdim_meta_dyn_compiled
+
+            def timed_bdim_dyn(*a, **kw):
+                with T("3b   BDIM meta-equation"):
+                    return _saved_bdim_dyn(*a, **kw)
+            fs._bdim_meta_dyn_compiled = timed_bdim_dyn
+
         # ── Wrap fs.project (contains Poisson + gradient + correction) ──
         def timed_project(self_fs, *a, **kw):
             with T("3c   projection (Poisson+gradient+correction)"):
                 return _orig_project(self_fs, *a, **kw)
         fs.project = types.MethodType(timed_project, fs)
+
+        # ── Wrap set_BCs (called 2-3× per step on full velocity grids) ──
+        _orig_set_bcs_fn = type(adv).set_BCs
+        def timed_set_bcs(self_a, *a, **kw):
+            with T("3d   set_BCs"):
+                return _orig_set_bcs_fn(self_a, *a, **kw)
+        adv.set_BCs = types.MethodType(timed_set_bcs, adv)
+
+        # ── Wrap variable-density coefficients (4 full-grid tensors) ──
+        _orig_vardens = type(handler)._compute_variable_density_coefficients
+        def timed_vardens(self_h, *a, **kw):
+            with T("3e   var-density coeffs [ch cv cw ch_cc]"):
+                return _orig_vardens(self_h, *a, **kw)
+        handler._compute_variable_density_coefficients = types.MethodType(
+            timed_vardens, handler)
+
+        # ── Wrap _release_bdim_fields (O(N) tensor dealloc + sync) ──
+        _orig_release = type(fs)._release_bdim_fields
+        def timed_release(self_fs, *a, **kw):
+            with T("3f   release BDIM fields"):
+                return _orig_release(self_fs, *a, **kw)
+        fs._release_bdim_fields = types.MethodType(timed_release, fs)
 
         # ── Instrument Poisson sub-components (large grids only) ─
         _instrument_poisson_internals = (args.Nx * args.Ny * args.Nz) >= 500_000
@@ -398,10 +542,20 @@ cfg.smagorinsky_cs = 0.0
 # Lx ≥ 1.05 m so all 9 links have ≥ 0.1 m clearance to the boundary.
 _dx_ref       = 2.4 / 512             # production grid spacing
 _MIN_LX_FISH  = 1.05                  # minimum x-extent to contain fish + margin
-_dx = max(_dx_ref, _MIN_LX_FISH / args.Nx)
-_Lx = args.Nx * _dx
-_Ly = args.Ny * _dx
-_Lz = args.Nz * _dx
+if args.Lx_fixed is not None:
+    # Fixed-domain mode: dx = Lx_fixed / Nx is chosen directly; Ly and Lz
+    # follow the Ny/Nx, Nz/Nx ratios so dx stays isotropic across axes.
+    _dx = args.Lx_fixed / args.Nx
+    _Lx = args.Lx_fixed
+    _Ly = args.Ny * _dx
+    _Lz = args.Nz * _dx
+    print(f"  [domain] FIXED-DOMAIN mode: Lx={_Lx:.4f} m  "
+          f"dx={_dx:.6f} m  (Nx={args.Nx})")
+else:
+    _dx = max(_dx_ref, _MIN_LX_FISH / args.Nx)
+    _Lx = args.Nx * _dx
+    _Ly = args.Ny * _dx
+    _Lz = args.Nz * _dx
 
 _x_body_center = -0.475               # midpoint of fish body at spawn
 cfg.xmin = _x_body_center - 0.5 * _Lx
@@ -416,7 +570,7 @@ print(f"  [domain] x=[{cfg.xmin:.3f}, {cfg.xmax:.3f}]  "
       f"y=[{cfg.ymin:.3f}, {cfg.ymax:.3f}]  "
       f"z=[{cfg.zmin:.3f}, {cfg.zmax:.3f}]  dx={_dx:.6f}")
 
-cfg.n_iterations = args.precompile + args.n_steps + 1
+cfg.n_iterations = args.precompile + args.settle_steps + args.n_steps + 1
 cfg.save_every   = args.save_every
 cfg.save_frames  = False
 cfg.headless     = True
@@ -451,6 +605,16 @@ def gen_simulation_config_lean(output_folder):
             solver_cfg["poisson_compile"]  = True
             solver_cfg["compile_forces"]   = True
             solver_cfg["compile_sdf"]      = True
+            if args.force_narrow_batch:
+                solver_cfg["force_narrow_batch"] = True
+            if args.force_shared_union:
+                solver_cfg["force_shared_union"] = True
+            if args.mu_normals_union:
+                solver_cfg["mu_normals_union"] = True
+            if args.bdim_union:
+                solver_cfg["bdim_union"] = True
+            if args.batched_sdf_3d:
+                solver_cfg["batched_sdf_3d"] = True
 
     with open(yaml_path, "w") as f:
         yaml.dump(sim_dict, f, default_flow_style=False, sort_keys=False)
@@ -465,9 +629,23 @@ grid_N = args.Nx * args.Ny * args.Nz
 print("=" * 72)
 print("  3-D Free-Swimming 1guilla – Computational Cost Analysis")
 print(f"  Grid:   {args.Nx} × {args.Ny} × {args.Nz}  ({grid_N:,} cells)")
-print(f"  Steps:  {args.n_steps} measured  (+ {args.precompile} pre-compilation)")
+print(f"  Steps:  {args.n_steps} measured  (+ {args.precompile} pre-compile, "
+      f"+ {args.settle_steps} settle)")
 print(f"  Device: {'CUDA' if USE_CUDA else 'CPU'}")
 print("=" * 72)
+
+# ── torch._dynamo recompile log → per-grid file ─────────────────
+os.makedirs(args.out_dir, exist_ok=True)
+_recompile_log_path = os.path.join(
+    args.out_dir, f"recompiles_{args.Nx}x{args.Ny}x{args.Nz}.log")
+# Truncate any previous run
+open(_recompile_log_path, "w").close()
+_rc_handler = logging.FileHandler(_recompile_log_path, mode="a")
+_rc_handler.setLevel(logging.INFO)
+_rc_handler.setFormatter(
+    logging.Formatter("%(asctime)s %(name)s %(levelname)s: %(message)s"))
+_TORCH_DYNAMO_LOG.addHandler(_rc_handler)
+print(f"  Recompile log: {_recompile_log_path}")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -521,14 +699,14 @@ if not summary:
           f"precompile={args.precompile})")
     sys.exit(1)
 
-step_mean = summary.get("TOTAL step", {}).get("mean", 0)
+step_median = summary.get("TOTAL step", {}).get("median", 0)
 
 print("\n" + "=" * 108)
 print(f"  TIMING RESULTS  ({n_meas} measured steps, "
       f"grid {args.Nx}×{args.Ny}×{args.Nz} = {grid_N:,} cells, "
       f"{'GPU' if USE_CUDA else 'CPU'})")
 print("=" * 108)
-hdr = (f"  {'Component':<44s} {'Mean':>9s} {'Std':>9s} {'Min':>9s} "
+hdr = (f"  {'Component':<44s} {'Median':>9s} {'Std':>9s} {'Min':>9s} "
        f"{'Max':>9s} {'Total':>9s} {'%step':>7s} {'Calls':>6s}")
 print(hdr)
 print(f"  {'':44s} {'(ms)':>9s} {'(ms)':>9s} {'(ms)':>9s} "
@@ -537,26 +715,51 @@ print("-" * 108)
 
 for label in sorted(summary.keys(), key=lambda k: -summary[k]["total"]):
     s = summary[label]
-    print(f"  {label:<44s} {1e3*s['mean']:9.2f} {1e3*s['std']:9.2f} "
+    print(f"  {label:<44s} {1e3*s['median']:9.2f} {1e3*s['std']:9.2f} "
           f"{1e3*s['min']:9.2f} {1e3*s['max']:9.2f} "
           f"{s['total']:9.4f} {s['pct']:7.1f} {s['count']:6d}")
 
 print("=" * 108)
-if step_mean > 0:
-    print(f"\n  Average step time: {1e3*step_mean:.2f} ms  "
-          f"({1.0/step_mean:.1f} steps/s)")
+if step_median > 0:
+    print(f"\n  Median step time: {1e3*step_median:.2f} ms  "
+          f"({1.0/step_median:.1f} steps/s)")
     print(f"  Grid cells: {grid_N:,}  "
-          f"({1e6*step_mean/grid_N:.3f} µs/cell/step)")
+          f"({1e6*step_median/grid_N:.3f} µs/cell/step)")
+
+# ── Stability diagnostic: rolling std / mean over the last 10 steps ─
+_total_times = np.array(T._data.get("TOTAL step", [])[args.discard_first:])
+if len(_total_times) >= 10:
+    tail = _total_times[-10:]
+    cv = tail.std() / tail.mean() if tail.mean() > 0 else 0.0
+    status = "OK" if cv < args.stability_tol else "UNSTABLE"
+    print(f"  Stability check (last 10 timed steps): CV = {cv*100:.1f}%  "
+          f"[{status}, tol = {args.stability_tol*100:.0f}%]")
+
+# ── Recompile summary from log ────────────────────────────
+_rc_handler.flush()
+try:
+    with open(_recompile_log_path) as _rcf:
+        _rc_text = _rcf.read()
+    _n_recompiles = sum(1 for ln in _rc_text.splitlines()
+                        if "recompiling" in ln.lower()
+                        or "Recompiling" in ln
+                        or "cache_size_limit" in ln)
+    _n_breaks = sum(1 for ln in _rc_text.splitlines()
+                    if "graph break" in ln.lower())
+    print(f"  torch.compile: {_n_recompiles} recompile event(s), "
+          f"{_n_breaks} graph break(s)  → see {_recompile_log_path}")
+except OSError:
+    pass
 
 
 # ── Save CSV ─────────────────────────────────────────────────────────
-tag = f"{args.Nx}x{args.Ny}x{args.Nz}"
+tag = f"{args.Nx}x{args.Ny}x{args.Nz}{args.tag_suffix}"
 csv_path = os.path.join(args.out_dir, f"cost_breakdown_{tag}.csv")
 with open(csv_path, "w") as f:
-    f.write("component,mean_ms,std_ms,min_ms,max_ms,total_s,pct_of_step,calls\n")
+    f.write("component,median_ms,mean_ms,std_ms,min_ms,max_ms,total_s,pct_of_step,calls\n")
     for label in sorted(summary.keys(), key=lambda k: -summary[k]["total"]):
         s = summary[label]
-        f.write(f"{label},{1e3*s['mean']:.4f},{1e3*s['std']:.4f},"
+        f.write(f"{label},{1e3*s['median']:.4f},{1e3*s['mean']:.4f},{1e3*s['std']:.4f},"
                 f"{1e3*s['min']:.4f},{1e3*s['max']:.4f},"
                 f"{s['total']:.6f},{s['pct']:.2f},{s['count']}\n")
 print(f"\n  CSV saved → {csv_path}")
@@ -636,56 +839,77 @@ CATEGORIES = {
     "BDIM\nmeta-equation":         ["3b"],
     "Projection\n(pressure)":      ["3c "],
     "Forces\ncomputation":         ["4 "],
-    "Plotting\n& saving":          ["5 "],
-    "FARMS step\n(apply_forces)":  ["6 "],
 }
 # "Other" is injected after the explicit categories have been summed.
+# It captures set_BCs, FARMS apply_forces (no longer timed individually),
+# parent-wrapper Python overhead, and any untagged work.
 _OTHER_LABEL = "Other\n(residual)"
 
 CAT_COLOURS = {
     "Body update\n(SDF eval)":      "#26a69a",
     "mu + normals":                "#66bb6a",
     "Convection\n& diffusion":     "#42a5f5",
-    "BDIM\nmeta-equation":         "#29b6f6",
+    "BDIM\nmeta-equation":         "#ab47bc",   # violet: distinct from adv/diff blue
     "Projection\n(pressure)":      "#ef5350",
     "Forces\ncomputation":         "#ffa726",
-    "Plotting\n& saving":          "#8d6e63",
-    "FARMS step\n(apply_forces)":  "#5c6bc0",
     _OTHER_LABEL:                  "#90a4ae",
 }
 
-cat_means = {}   # ms
+cat_means = {}   # ms   (per-step MEDIAN; keeps the name for downstream code)
 cat_pcts  = {}   # %
-outer_total_s = summary.get("TOTAL step", {}).get("total", 0.0)
-explicit_total_s = 0.0
-# ``summary`` is already built with ``discard_first`` applied, so all
-# ``total`` values reflect exactly ``n_used`` steps.  Dividing by
-# ``n_used`` therefore gives the correct per-step mean — dividing by
-# ``n_meas`` would systematically under-estimate the means.
-_n_per_step = max(n_used, 1)
+
+# ── Per-step category time series (median-based aggregation) ─────────
+# Build, for every timed step kept after ``discard_first``, the sum of
+# per-step timings whose label starts with any of the category's
+# prefixes.  The per-step median of that series is the reported cost.
+# This is robust to right-skewed CUDA timing tails and matches the
+# methodology used by ``plot_scaling.py``.
+def _trimmed(lbl):
+    times = T._data.get(lbl, [])
+    return np.array(times[args.discard_first:]) if args.discard_first < len(times) else np.array(times)
+
+_total_series = _trimmed("TOTAL step")              # seconds
+outer_total_s = float(_total_series.sum())
+explicit_per_step = np.zeros_like(_total_series)    # accumulates per-step Σ categories
 for cat_name, prefixes in CATEGORIES.items():
-    total_s = 0.0
-    for l, s in summary.items():
+    cat_series = np.zeros_like(_total_series)
+    for l in summary:
         if l == "TOTAL step":
             continue
         if any(l.startswith(pfx) for pfx in prefixes):
-            total_s += s["total"]
-    explicit_total_s += total_s
-    mean_ms = 1e3 * total_s / _n_per_step
-    pct = 100.0 * total_s / outer_total_s if outer_total_s > 0 else 0.0
-    if mean_ms > 0:
-        cat_means[cat_name] = mean_ms
+            s = _trimmed(l)
+            # Align lengths: some sub-timers fire multiple times per
+            # step (e.g. BDIM meta fires ~3× per RK stage); we rely on
+            # the fact that the outer TOTAL timer emits once per step.
+            # For a fair per-step attribution, take the SUM of all
+            # firings within each step — which is exactly what
+            # ``total_s`` aggregates, but we need the per-step
+            # granularity.  Because sub-timers record multiple entries
+            # per step they can be LONGER than the TOTAL series; we
+            # therefore fall back to (total / n_steps) if lengths
+            # differ.
+            if len(s) == len(_total_series):
+                cat_series += s
+            else:
+                cat_series += s.sum() / max(len(_total_series), 1)
+    explicit_per_step += cat_series
+    if cat_series.sum() > 0:
+        med_ms = 1e3 * float(np.median(cat_series))
+        pct    = 100.0 * cat_series.sum() / outer_total_s if outer_total_s > 0 else 0.0
+        cat_means[cat_name] = med_ms
         cat_pcts[cat_name]  = pct
 
-# Residual: everything the outer "TOTAL step" timer saw that is not
-# attributed to an explicit category.  Includes parent-timer wrappers
-# ("1  SDF update", "3  fluid_step"), set_BCs, bookkeeping, etc.
-residual_s = max(outer_total_s - explicit_total_s, 0.0)
-if residual_s > 0:
-    cat_means[_OTHER_LABEL] = 1e3 * residual_s / _n_per_step
+# Residual: per-step TOTAL − per-step Σ categories.  Median is taken on
+# the per-step residual, preserving its distributional character.
+residual_series = np.clip(_total_series - explicit_per_step, 0.0, None)
+if residual_series.sum() > 0:
+    cat_means[_OTHER_LABEL] = 1e3 * float(np.median(residual_series))
     cat_pcts[_OTHER_LABEL]  = (
-        100.0 * residual_s / outer_total_s if outer_total_s > 0 else 0.0
+        100.0 * residual_series.sum() / outer_total_s if outer_total_s > 0 else 0.0
     )
+# Alias retained for backward compat with downstream plot code.
+explicit_total_s = float(explicit_per_step.sum())
+residual_s       = float(residual_series.sum())
 
 # Print grouped summary
 print("\n  ── Grouped categories ──")
@@ -878,18 +1102,37 @@ if _h is not None:
     _format_ax(axes[1, 0], "Vorticity $\\omega_z$",  omega_z,    "RdBu_r", symmetric=True)
 
     # SDF field
-    sdf_vmax = max(abs(np.nanpercentile(sdf_slice, 5)),
-                   abs(np.nanpercentile(sdf_slice, 95)))
+    # NOTE: ``comp.sdf_val`` is a union-min of AABB-clipped per-body SDFs
+    # (BDIMhandler._update_3d fills ``_FAR = 1e4`` outside each body's
+    # AABB).  That is by design — the BDIM μ₀ smoothed Heaviside only
+    # depends on SDF values within a few ``h`` of the surface, so the
+    # solver never evaluates the true distance far from any body.  For
+    # plotting we mask the sentinel band and clip the colour range to a
+    # few cells so the visualisation shows the meaningful narrow band.
+    dx_cell = (cfg.xmax - cfg.xmin) / args.Nx
+    _FAR_SENTINEL = 1e3                         # any value ≥ this is sentinel
+    sdf_clip = 8.0 * dx_cell                    # display range: ±8 cells
+    sdf_plot = np.ma.masked_where(
+        np.abs(sdf_slice) > _FAR_SENTINEL, sdf_slice
+    )
+    cmap_sdf = plt.get_cmap("coolwarm").copy()
+    cmap_sdf.set_bad(color="#dddddd")           # light grey = "far from body"
     im_sdf = axes[1, 1].imshow(
-        sdf_slice.T, origin="lower", aspect="equal", cmap="coolwarm",
+        sdf_plot.T, origin="lower", aspect="equal", cmap=cmap_sdf,
         extent=[x_1d[0], x_1d[-1], y_1d[0], y_1d[-1]],
-        vmin=-sdf_vmax, vmax=sdf_vmax,
+        vmin=-sdf_clip, vmax=sdf_clip,
+    )
+    # Contour at SDF=0: restrict to non-sentinel region
+    sdf_for_contour = np.where(
+        np.abs(sdf_slice) > _FAR_SENTINEL, np.nan, sdf_slice
     )
     axes[1, 1].contour(
-        x_1d, y_1d, sdf_slice.T, levels=[0], colors="k",
+        x_1d, y_1d, sdf_for_contour.T, levels=[0], colors="k",
         linewidths=0.8, linestyles="-",
     )
-    axes[1, 1].set_title("SDF (body outline at 0)", fontsize=10)
+    axes[1, 1].set_title(
+        f"SDF (narrow-band, ±{sdf_clip*1e3:.1f} mm ≈ ±8·h)", fontsize=10,
+    )
     axes[1, 1].set_xlabel("x (m)", fontsize=8)
     axes[1, 1].set_ylabel("y (m)", fontsize=8)
     axes[1, 1].tick_params(labelsize=7)

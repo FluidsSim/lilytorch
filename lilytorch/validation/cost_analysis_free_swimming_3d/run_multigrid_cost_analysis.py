@@ -54,21 +54,27 @@ PLOT_SCALING_SCRIPT = os.path.join(SCRIPT_DIR, "plot_scaling.py")
 
 # ── Pre-defined grid presets ─────────────────────────────────────────
 # All grid dimensions must be powers of 2 (multigrid requirement).
-# The domain extents scale as N * dx_ref in each direction, so
-# different Nx:Ny:Nz ratios simply produce different domain shapes.
-# This gives many more distinct cell-count data points for scaling.
+# The domain extents scale as N * dx_ref in each direction so that the
+# grid spacing dx = 2.4/512 ≈ 0.0047 m is held CONSTANT across grids.
+#
+# Why the Nx = 128 grids are excluded from the default presets
+# ------------------------------------------------------------
+# For Nx < 256 the domain shrinks below the body length, so
+# ``run_cost_analysis.py`` automatically falls back to a coarser dx
+# (up to 1.8× production) so the fish still fits in Lx.  At that
+# coarser resolution the BDIM-MuJoCo coupling becomes unstable over
+# the ~ 120 step benchmark window (MuJoCo raises ``mjWARN_BADQACC``).
+# Since the coarser grids would also measure a *different* physical
+# problem, a fair scaling study keeps dx constant → only Nx ≥ 256.
 PRESETS = {
     "small": [
-        (128,  32,  32),       #    131,072
-        (128,  64,  32),       #    262,144
-        (128,  64,  64),       #    524,288
-        (256,  64,  64),       #  1,048,576
-    ],
-    "medium": [
-        (128,  32,  32),       #    131,072
-        (128,  64,  64),       #    524,288
         (256,  64,  64),       #  1,048,576
         (256, 128,  64),       #  2,097,152
+        (256, 128, 128),       #  4,194,304
+    ],
+    "medium": [
+        (256,  64,  64),       #  1,048,576
+        (256, 128, 128),       #  4,194,304
         (512, 128, 128),       #  8,388,608
     ],
     "large": [
@@ -79,9 +85,6 @@ PRESETS = {
         (512, 256, 128),       # 16,777,216
     ],
     "full": [
-        (128,  32,  32),       #    131,072
-        (128,  64,  32),       #    262,144
-        (128,  64,  64),       #    524,288
         (256,  64,  64),       #  1,048,576
         (256, 128,  64),       #  2,097,152
         (256, 128, 128),       #  4,194,304
@@ -89,9 +92,21 @@ PRESETS = {
         (512, 256, 128),       # 16,777,216
     ],
     "production": [
-        (128,  32,  32),       #    131,072
         (256,  64,  64),       #  1,048,576
         (256, 128,  64),       #  2,097,152
+        (512, 128, 128),       #  8,388,608
+        (512, 256, 128),       # 16,777,216
+    ],
+    # Legacy preset with coarse-dx 128^3 grids.  Kept for backwards
+    # compatibility but expected to FAIL on the 128^x entries due to
+    # the MuJoCo physics instability described above.
+    "coarse_unstable": [
+        (128,  32,  32),       #    131,072
+        (128,  64,  32),       #    262,144
+        (128,  64,  64),       #    524,288
+        (256,  64,  64),       #  1,048,576
+        (256, 128,  64),       #  2,097,152
+        (256, 128, 128),       #  4,194,304
         (512, 128, 128),       #  8,388,608
         (512, 256, 128),       # 16,777,216
     ],
@@ -141,7 +156,34 @@ parser.add_argument(
 parser.add_argument(
     "--save_every", type=int, default=9999,
     help="Save interval (default: 9999 = effectively never)")
+parser.add_argument(
+    "--force_shared_union", action="store_true",
+    help="Crop shared-stress kernel to union of body AABBs (big win at ≥512³)")
+parser.add_argument(
+    "--force_narrow_batch", action="store_true",
+    help="Use padded-batched narrow-band forces kernel")
+parser.add_argument(
+    "--mu_normals_union", action="store_true",
+    help="Crop mu/normals kernel to union of body AABBs")
+parser.add_argument(
+    "--bdim_union", action="store_true",
+    help="Crop BDIM2 meta-equation kernel to union of body AABBs")
+parser.add_argument(
+    "--batched_sdf_3d", action="store_true",
+    help="Batched grid_sample SDF update (replaces per-body loop)")
+parser.add_argument(
+    "--union_narrow_band", action="store_true",
+    help="Meta-flag: enables ALL narrow-band optimisations simultaneously "
+         "(force_shared_union + mu_normals_union + bdim_union + "
+         "batched_sdf_3d + force_narrow_batch).")
 args = parser.parse_args()
+
+if args.union_narrow_band:
+    args.force_shared_union = True
+    args.mu_normals_union = True
+    args.bdim_union = True
+    args.batched_sdf_3d = True
+    args.force_narrow_batch = True
 
 if args.out_dir is None:
     args.out_dir = os.path.join(SCRIPT_DIR, "figures")
@@ -216,6 +258,16 @@ for i, (nx, ny, nz) in enumerate(grids):
         "--device", args.device,
         "--out_dir", args.out_dir,
     ]
+    if args.force_shared_union:
+        cmd.append("--force_shared_union")
+    if args.force_narrow_batch:
+        cmd.append("--force_narrow_batch")
+    if args.mu_normals_union:
+        cmd.append("--mu_normals_union")
+    if args.bdim_union:
+        cmd.append("--bdim_union")
+    if args.batched_sdf_3d:
+        cmd.append("--batched_sdf_3d")
 
     print(f"  CMD: {' '.join(cmd)}")
 
@@ -298,7 +350,13 @@ for (nx, ny, nz) in grids:
                 reader = csv_mod.DictReader(f)
                 for row in reader:
                     if row.get("component", "").strip() == "TOTAL step":
-                        step_ms = f"  step={float(row['mean_ms']):.2f} ms"
+                        # Prefer median (robust to CUDA tail outliers);
+                        # fall back to mean for older CSVs that pre-date
+                        # the median column.
+                        if "median_ms" in row:
+                            step_ms = f"  step={float(row['median_ms']):.2f} ms"
+                        else:
+                            step_ms = f"  step={float(row['mean_ms']):.2f} ms"
                         break
         except Exception:
             pass
@@ -383,7 +441,7 @@ def _generate_inline_scaling_plots(out_dir, csv_files_list):
         "Body update (SDF)":      "#26a69a",
         "mu + normals":           "#66bb6a",
         "Convection & diffusion": "#42a5f5",
-        "BDIM meta-equation":     "#29b6f6",
+        "BDIM meta-equation":     "#ab47bc",
         "Projection (pressure)":  "#ef5350",
         "Forces":                 "#ffa726",
         "Plotting & saving":      "#8d6e63",
@@ -411,17 +469,57 @@ def _generate_inline_scaling_plots(out_dir, csv_files_list):
             float(total_row["total_s"].iloc[0]) if len(total_row) else 0.0
         )
 
-        explicit_s = 0.0
-        for cat_name, prefixes in cats.items():
+        # Prefer per-step medians over mean-from-total_s when the
+        # matching cost_perstep_*.csv is available.  Per-step medians
+        # are robust to the single-recompile outliers that can inflate
+        # dynamic-shape compiled kernel means by orders of magnitude.
+        perstep_f = csv_f.replace("cost_breakdown_", "cost_perstep_")
+        df_ps = None
+        if os.path.exists(perstep_f):
+            try:
+                df_ps_raw = pd.read_csv(perstep_f)
+                # Keep only measured (non-discarded) rows if the "used"
+                # column is present.
+                if "used" in df_ps_raw.columns:
+                    df_ps = df_ps_raw[df_ps_raw["used"] != "discarded"]
+                else:
+                    df_ps = df_ps_raw
+                if len(df_ps) == 0:
+                    df_ps = None
+            except Exception:
+                df_ps = None
+
+        def _cat_ms_per_step(prefixes):
+            """Return category cost in ms/step, using per-step medians
+            when available (robust to compile-outlier spikes), else
+            falling back to mean from total_s / n_calls."""
+            if df_ps is not None:
+                # Sum all matching columns per step, then take median.
+                matching_cols = [c for c in df_ps.columns
+                                 if any(c.startswith(p) for p in prefixes)
+                                 and c != "TOTAL step"]
+                if matching_cols:
+                    per_step_sum = df_ps[matching_cols].sum(axis=1)
+                    return float(per_step_sum.median())
             mask = df["component"].apply(
                 lambda comp, pfx=prefixes: any(comp.startswith(p) for p in pfx))
             mask &= df["component"] != "TOTAL step"
-            cat_s = df.loc[mask, "total_s"].sum()
-            explicit_s += cat_s
-            cat_data[cat_name].append(1e3 * cat_s / n_st)
+            return 1e3 * df.loc[mask, "total_s"].sum() / n_st
 
-        residual_s = max(total_step_s - explicit_s, 0.0)
-        cat_data[_OTHER].append(1e3 * residual_s / n_st)
+        def _total_ms_per_step():
+            if df_ps is not None and "TOTAL step" in df_ps.columns:
+                return float(df_ps["TOTAL step"].median())
+            return 1e3 * total_step_s / n_st
+
+        explicit_ms = 0.0
+        for cat_name, prefixes in cats.items():
+            cat_ms = _cat_ms_per_step(prefixes)
+            explicit_ms += cat_ms
+            cat_data[cat_name].append(cat_ms)
+
+        total_ms = _total_ms_per_step()
+        residual_ms = max(total_ms - explicit_ms, 0.0)
+        cat_data[_OTHER].append(residual_ms)
 
     n = len(g_labels)
     if n < 2:
