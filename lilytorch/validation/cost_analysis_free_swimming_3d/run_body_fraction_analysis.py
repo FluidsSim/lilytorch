@@ -2,9 +2,11 @@
 """
 Body-fraction cost analysis: narrow-band vs full-grid.
 
-Sweeps grid resolution N at TWO FIXED domain sizes so that the body
-volume fraction ``V_body / V_domain`` stays constant within each sweep
-but differs between the two sweeps by roughly an order of magnitude.
+Sweeps grid resolution N at TWO FIXED domain sizes so that the linear
+body coverage ``L_body / L_domain`` stays constant within each sweep
+but differs between the two sweeps by ~ 2× (~ 70 % vs ~ 30 % along the
+longitudinal axis, with matched transverse fractions because the 4:1:1
+grid ratio carries (Lx, Ly, Lz) together).
 
 For every (domain × N) combination the script runs
 ``run_cost_analysis.py`` TWICE — once with the narrow-band master
@@ -22,21 +24,44 @@ dominate.  The default cost analysis scales the domain with N so the
 body fraction shrinks with N — it cannot answer this question.  This
 runner fixes the domain so the fraction is held constant as N grows.
 
+Default sweep
+-------------
+* ``small`` domain — ``Lx = 1.2 m``, ``Ly = Lz = 0.30 m`` (4:1:1).
+  Body length 0.81 m fills ~ 68 % of x; undulation sweep fills ~ 67 %
+  of y/z.  ⇒ "body comprises ~ 70 % of the domain".
+* ``large`` domain — ``Lx = 2.7 m``, ``Ly = Lz = 0.675 m`` (4:1:1).
+  Body fills ~ 30 % of x; undulation fills ~ 30 % of y/z.
+  ⇒ "body comprises ~ 30 % of the domain".
+
+Each domain is swept over **5 N points** (4:1:1 cubic-ish triplets);
+combined with the default {nboff, nbcrop, nbon} mode toggle this gives
+**30 runs** total (5 N × 2 domains × 3 NB modes).  Expected outcome: in
+the small domain NB-on ≈ NB-off (cropping does not save much because
+the body already covers ~ 70 % of the cells); in the large domain
+NB-on ≪ NB-off because the body union covers only ~ 1/30 of the cells.
+
 Usage
 -----
-    # Default: two domains × 3 grid sizes × {NB on, NB off}
+    # Default shared-even sweep
     python run_body_fraction_analysis.py
+
+    # Broader shared sweep (same grids for both domains)
+    python run_body_fraction_analysis.py --grid_policy shared_broad
+
+    # Power-of-two sweep (per-domain preset grids)
+    python run_body_fraction_analysis.py --grid_policy power2
 
     # Single domain (e.g. only the tight one)
     python run_body_fraction_analysis.py --domains small
 
-    # Coarser sweep
+    # Custom grids (applied to every domain — must share Ny/Nx, Nz/Nx)
     python run_body_fraction_analysis.py --grids 128:32:32,256:64:64
 
 Output
 ------
 CSVs land in ``figures/body_fraction/`` with the tag
-``{Nx}x{Ny}x{Nz}_{domain}_{nb}`` where ``nb ∈ {nbon, nboff}``.  The
+``{Nx}x{Ny}x{Nz}_{domain}_{nb}`` where ``nb`` is one of the selected
+narrow-band modes.  The
 companion ``plot_body_fraction.py`` reads those CSVs and produces
 log-log cost curves per domain plus a narrow-band vs full-grid
 speed-up summary.
@@ -57,7 +82,8 @@ PLOT_SCRIPT = os.path.join(SCRIPT_DIR, "plot_body_fraction.py")
 # Domain presets
 # ─────────────────────────────────────────────────────────────────────
 # Body geometry (free-swimming 1guilla): length ≈ 0.81 m along x, thin
-# transverse section (~0.05-0.10 m sweep during undulation).
+# transverse section (~0.05-0.10 m sweep during undulation, so total
+# y/z extent ≈ 0.20 m once both sides are accounted for).
 #
 # ``Lx_fixed`` is the x-extent of the fluid domain.  Ly and Lz are
 # derived from the Ny/Nx and Nz/Nx grid ratios so dx stays isotropic.
@@ -65,54 +91,103 @@ PLOT_SCRIPT = os.path.join(SCRIPT_DIR, "plot_body_fraction.py")
 #     Ly = Lx_fixed * Ny/Nx = Lx_fixed / 4
 #     Lz = Lx_fixed * Nz/Nx = Lx_fixed / 4
 #
-# "small"  : Lx = 1.0 m  →  Ly = Lz = 0.25 m   (tight around the body)
-#            body AABB ~ 0.81×0.12×0.12 ≈ 1.2e-2 m³
-#            domain     = 1.0×0.25×0.25  = 6.25e-2 m³
-#            fraction   ≈ 19 %  (union halo+bucket pushes closer to 25-30 %)
+# Body coverage (linear, along the longitudinal axis):u
 #
-# "large"  : Lx = 2.4 m  →  Ly = Lz = 0.6 m    (production-scale domain)
-#            fraction   ≈ 1.4 %
+# "small"  : Lx = 1.2 m   (body fills ~ 68 % of x; undulation fills
+#                          ~ 67 % of y/z)  →  Ly = Lz = 0.30 m
+#                          → "body comprises ~ 70 % of the domain"
+#
+# "large"  : Lx = 2.7 m   (body fills ~ 30 % of x; undulation fills
+#                          ~ 30 % of y/z)  →  Ly = Lz = 0.675 m
+#                          → "body comprises ~ 30 % of the domain"
 #
 # Per-domain grid lists
 # ---------------------
 # The BDIM ↔ MuJoCo coupling is only stable for a bounded range of dx,
-# roughly  dx ∈ [0.003, 0.013] m  (see notes in
-# ``run_multigrid_cost_analysis.py``).  Grids whose dx = Lx / Nx falls
+# roughly  dx ∈ [0.003, 0.013] m.  Grids whose dx = Lx / Nx falls
 # outside that band fail for physics reasons with BOTH narrow-band ON
 # and OFF identically, so they give no extra information about the
-# narrow-band optimisation.  Each domain therefore carries its own
-# stable grid list and the sweep only runs dx values inside the band.
-# The (256, 64, 64) grid is shared by both domains, providing the
-# direct NB-on / NB-off comparison at matching N.
+# narrow-band optimisation.  Each domain therefore carries 5 N points
+# spaced inside the stable band.  Note: not all sizes are strict
+# powers of 2 — the multigrid Poisson smoother handles arbitrary even
+# extents (it stops coarsening once any axis falls to ≤ 8 cells), so
+# this only costs at deep V-cycle levels and does not affect the cost
+# breakdown that is being measured.
+#
+# Expected outcome:
+#   * "small" domain — body ~ 70 %, very few cells outside the body-
+#     union AABB.  Narrow-band trims little work: NB-on ≈ NB-off, with
+#     NB-on possibly slower at small N due to dynamic-shape bookkeeping.
+#   * "large" domain — body ~ 30 %, the body-union AABB covers ≲ 1/30
+#     of the cells.  Narrow-band kernels skip the bulk of the grid →
+#     large NB speed-up that grows with N.
+# Both domains use the SAME 5 N points so the log-log plots overlay
+# cell-for-cell.  The Nx range is constrained to the intersection of
+# each domain's stable dx band:
+#     small (Lx = 1.2 m)  : dx > 3 mm  →  Nx ≤ 400
+#     large (Lx = 2.7 m)  : dx < 13 mm →  Nx ≥ 208
+# Five values divisible by 4 (so Ny = Nz = Nx/4 is integer) inside the
+# intersection [216, 384]:  Nx ∈ {224, 256, 288, 320, 352}.
+SHARED_GRIDS = [
+    (224,  56,  56),   #   702 k cells
+    (256,  64,  64),   #  1.05 M cells
+    (288,  72,  72),   #  1.49 M cells
+    (320,  80,  80),   #  2.05 M cells
+    (352,  88,  88),   #  2.73 M cells
+]
+
+# Broader common-band sweep for fixed-domain comparisons.  These are the
+# same grids for both domains and span the validated shared dx range
+# from Nx = 208 (large-domain coarse edge) to Nx = 400 (small-domain
+# fine edge), reaching 4.0 M cells at the upper end.
+SHARED_BROAD_GRIDS = [
+    (208,  52,  52),   #   562 k cells
+    (224,  56,  56),   #   702 k cells
+    (240,  60,  60),   #   864 k cells
+    (256,  64,  64),   #  1.05 M cells
+    (272,  68,  68),   #  1.26 M cells
+    (288,  72,  72),   #  1.49 M cells
+    (304,  76,  76),   #  1.76 M cells
+    (320,  80,  80),   #  2.05 M cells
+    (336,  84,  84),   #  2.37 M cells
+    (352,  88,  88),   #  2.73 M cells
+    (368,  92,  92),   #  3.11 M cells
+    (384,  96,  96),   #  3.54 M cells
+    (400, 100, 100),   #  4.00 M cells
+]
+
+POWER2_GRIDS = {
+    "small": [
+        (128,  32,  32),   # dx = 9.38 mm
+        (256,  64,  64),   # dx = 4.69 mm
+    ],
+    "large": [
+        (256,  64,  64),   # dx = 10.55 mm
+        (512, 128, 128),   # dx = 5.27 mm
+    ],
+}
+
 DOMAIN_PRESETS = {
     "small": {
-        "Lx_fixed": 1.0,
-        "label":    "small (tight)",
-        "note":     "Ly = Lz = Lx/4 = 0.25 m  |  body fraction ≈ 19 %",
-        # dx = 1.0 / {128, 256} = {0.0078, 0.0039} m  – both in band.
-        # dx = 1.0 / 512 = 0.00195 m → MuJoCo BADQACC, excluded.
-        "grids": [
-            (128,  32,  32),   #   131 k cells   dx = 7.81 mm
-            (256,  64,  64),   #  1.05 M cells   dx = 3.91 mm
-        ],
+        "Lx_fixed": 1.2,
+        "label":    "small (body ≈ 70 %)",
+        "note":     "Ly = Lz = Lx/4 = 0.30 m  |  body length / Lx ≈ 68 %",
+        # dx = 1.2 / Nx ∈ {5.36, 4.69, 4.17, 3.75, 3.41} mm  – all in band.
+        "grids": list(SHARED_GRIDS),
+        "power2_grids": list(POWER2_GRIDS["small"]),
     },
     "large": {
-        "Lx_fixed": 2.4,
-        "label":    "large (spacious)",
-        "note":     "Ly = Lz = Lx/4 = 0.6  m  |  body fraction ≈ 1.4 %",
-        # dx = 2.4 / {256, 512} = {0.0094, 0.0047} m  – both in band.
-        # dx = 2.4 / 128 = 0.01875 m → fluid explosion, excluded.
-        "grids": [
-            (256,  64,  64),   #  1.05 M cells   dx = 9.38 mm
-            (512, 128, 128),   #  8.39 M cells   dx = 4.69 mm
-        ],
+        "Lx_fixed": 2.7,
+        "label":    "large (body ≈ 30 %)",
+        "note":     "Ly = Lz = Lx/4 = 0.675 m  |  body length / Lx ≈ 30 %",
+        # dx = 2.7 / Nx ∈ {12.05, 10.55, 9.38, 8.44, 7.67} mm  – all in band.
+        "grids": list(SHARED_GRIDS),
+        "power2_grids": list(POWER2_GRIDS["large"]),
     },
 }
 
 # ``--grids`` override (if supplied) is applied to every domain and
-# still validated to keep the 4:1:1 ratio.  All triplets are powers of 2
-# because the multigrid Poisson solver requires it.
-DEFAULT_GRIDS = None    # per-domain lists above are used when omitted
+# still validated to keep the same Ny/Nx, Nz/Nx ratio across the sweep.
 
 # ─────────────────────────────────────────────────────────────────────
 # CLI
@@ -120,12 +195,18 @@ DEFAULT_GRIDS = None    # per-domain lists above are used when omitted
 parser = argparse.ArgumentParser(
     description="Body-fraction cost analysis (narrow-band vs full-grid)",
     formatter_class=argparse.RawDescriptionHelpFormatter,
-    epilog=f"""\
-Domain presets:
-  small   Lx=1.00 m   body fraction ≈ 19 %
-  large   Lx=2.40 m   body fraction ≈ 1.4 %
+    epilog="""\
+Grid presets:
+    shared  → same grids for both domains:
+                        224x56x56, 256x64x64, 288x72x72, 320x80x80, 352x88x88
+    shared_broad  → broader same-grid sweep for both domains:
+                        208x52x52, 224x56x56, ..., 384x96x96, 400x100x100
+    power2  → power-of-two grids per domain:
+                        small: 128x32x32, 256x64x64
+                        large: 256x64x64, 512x128x128
 
-Default grids (4:1:1 ratio): {DEFAULT_GRIDS}
+All preset grids enforce the 4:1:1 ratio (Ly = Lz = Lx / 4) so dx is
+isotropic and (Lx, Ly, Lz) stays fixed within each domain sweep.
 """,
 )
 parser.add_argument(
@@ -137,6 +218,13 @@ parser.add_argument(
          "When omitted, each domain uses its own stable grid list "
          "(see DOMAIN_PRESETS). Ratio Nx:Ny:Nz MUST be 4:1:1 so dx "
          "stays isotropic.")
+parser.add_argument(
+    "--grid_policy", type=str, default="shared",
+    choices=["shared", "shared_broad", "power2"],
+    help="Preset grid family used when --grids is omitted: "
+         "'shared' uses the same even grids for both domains; "
+         "'shared_broad' uses a denser common-band sweep for both domains; "
+         "'power2' uses per-domain power-of-two grids only.")
 parser.add_argument(
     "--n_steps", type=int, default=50,
     help="Measured steps per run (default: 50)")
@@ -161,9 +249,19 @@ parser.add_argument(
     "--continue-on-error", action="store_true",
     help="Continue to next run if one fails")
 parser.add_argument(
-    "--nb_modes", type=str, default="nbon,nboff",
-    help="Which narrow-band modes to measure (default: nbon,nboff). "
-         "Use 'nbon' only to skip the baseline runs.")
+    "--nb_modes", type=str, default="nboff,nbcrop,nbon",
+    help="Which narrow-band modes to measure. Each mode is a different "
+         "subset of solver flags:\n"
+         "  nboff  – every flag off (true baseline)\n"
+         "  nbcrop – only the 3 AABB-cropping flags on "
+         "(force_shared_union, mu_normals_union, bdim_union)\n"
+         "  nbbatch – only the 2 batching flags on "
+         "(batched_sdf_3d, force_narrow_batch)\n"
+         "  nbon   – every narrow-band flag on (--union_narrow_band)\n"
+         "Default measures all three of nboff, nbcrop, nbon so the plot "
+         "decomposes the combined win into 'cropping alone' vs 'batching "
+         "added on top' (cropping is body-fraction dependent; batching "
+         "is a uniform launch-count reduction).")
 args = parser.parse_args()
 
 # ── Parse domains ────────────────────────────────────────────────────
@@ -209,7 +307,12 @@ if args.grids is not None:
 else:
     grids_per_domain = {}
     for d in domains:
-        g = list(DOMAIN_PRESETS[d].get("grids", []))
+        if args.grid_policy == "power2":
+            g = list(DOMAIN_PRESETS[d].get("power2_grids", []))
+        elif args.grid_policy == "shared_broad":
+            g = list(SHARED_BROAD_GRIDS)
+        else:
+            g = list(DOMAIN_PRESETS[d].get("grids", []))
         if not g:
             print(f"ERROR: domain '{d}' has no default grid list; "
                   "supply --grids explicitly.")
@@ -219,15 +322,32 @@ else:
         grids_per_domain[d] = g
 
 # ── Parse nb_modes ───────────────────────────────────────────────────
+# Each mode maps to a list of flags appended to the run_cost_analysis.py
+# command.  Modes are chosen to factor the combined narrow-band win into
+# the two functional groups whose effects scale very differently:
+#   * cropping  — body-fraction dependent (wins on sparse domains)
+#   * batching  — body-fraction independent (uniform launch reduction)
+NB_MODE_FLAGS = {
+    "nboff":  [],                              # true baseline
+    "nbcrop": ["--force_shared_union",         # AABB cropping only
+               "--mu_normals_union",
+               "--bdim_union"],
+    "nbbatch": ["--force_narrow_batch",        # launch-batching only
+                "--batched_sdf_3d"],
+    "nbon":   ["--union_narrow_band"],         # everything (5 flags)
+}
+
 nb_modes = [m.strip() for m in args.nb_modes.split(",") if m.strip()]
 for m in nb_modes:
-    if m not in ("nbon", "nboff"):
-        print(f"ERROR: unknown nb_mode '{m}'. Use 'nbon' or 'nboff'.")
+    if m not in NB_MODE_FLAGS:
+        print(f"ERROR: unknown nb_mode '{m}'. "
+              f"Use one of {list(NB_MODE_FLAGS)}.")
         sys.exit(1)
 
 # ── Output directory ─────────────────────────────────────────────────
 if args.out_dir is None:
     args.out_dir = os.path.join(SCRIPT_DIR, "figures", "body_fraction")
+args.out_dir = os.path.abspath(args.out_dir)
 os.makedirs(args.out_dir, exist_ok=True)
 
 
@@ -238,6 +358,7 @@ total_runs = sum(len(grids_per_domain[d]) for d in domains) * len(nb_modes)
 print("\n" + "=" * 72)
 print("  Body-Fraction Cost Analysis — Narrow-Band vs Full-Grid")
 print("=" * 72)
+print(f"  Grid policy  : {args.grid_policy}")
 print(f"  Domains      : {', '.join(domains)}")
 for d in domains:
     p = DOMAIN_PRESETS[d]
@@ -292,9 +413,7 @@ for domain in domains:
                 "--Lx_fixed", str(p["Lx_fixed"]),
                 "--tag_suffix", suffix,
             ]
-            if nb == "nbon":
-                cmd.append("--union_narrow_band")
-            # nb == "nboff" → leave all narrow-band flags off (full grid)
+            cmd.extend(NB_MODE_FLAGS[nb])
 
             print(f"  CMD: {' '.join(cmd)}")
 

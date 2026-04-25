@@ -35,8 +35,11 @@ parser.add_argument("--data_dir", type=str,
                     default=os.path.join(SCRIPT_DIR, "figures", "body_fraction"))
 parser.add_argument("--out_dir", type=str, default=None)
 args = parser.parse_args()
+args.data_dir = os.path.abspath(args.data_dir)
 if args.out_dir is None:
     args.out_dir = args.data_dir
+else:
+    args.out_dir = os.path.abspath(args.out_dir)
 os.makedirs(args.out_dir, exist_ok=True)
 
 # ─────────────────────────────────────────────────────────────────────
@@ -84,21 +87,34 @@ CAT_COLOURS = {
 }
 
 NB_STYLES = {
-    "nbon":  {"linestyle": "-",  "marker": "o", "label": "narrow-band on"},
-    "nboff": {"linestyle": "--", "marker": "s", "label": "full-grid (baseline)"},
+    "nboff":   {"linestyle": "--", "marker": "s",
+                "label": "baseline (all flags off)"},
+    "nbcrop":  {"linestyle": "-.", "marker": "^",
+                "label": "cropping only"},
+    "nbbatch": {"linestyle": ":",  "marker": "D",
+                "label": "batching only"},
+    "nbon":    {"linestyle": "-",  "marker": "o",
+                "label": "all flags on (cropping + batching)"},
 }
 
+# Order modes for plotting & legends so the visual reads
+# off → crop → batch → on (least to most enabled).
+NB_PLOT_ORDER = ["nboff", "nbcrop", "nbbatch", "nbon"]
+
 DOMAIN_LABEL = {
-    "small": "Small domain (Lx = 1.0 m,  body fraction ≈ 19 %)",
-    "large": "Large domain (Lx = 2.4 m,  body fraction ≈ 1.4 %)",
+    "small": "Small domain (Lx = 1.2 m,  body ≈ 70 % of domain)",
+    "large": "Large domain (Lx = 2.7 m,  body ≈ 30 % of domain)",
 }
+
+# Sort domains so plots and legends always read small → large.
+DOMAIN_ORDER = ["small", "large"]
 
 
 # ─────────────────────────────────────────────────────────────────────
 # Parse CSV filenames
 # ─────────────────────────────────────────────────────────────────────
 CSV_RE = re.compile(
-    r"cost_breakdown_(\d+)x(\d+)x(\d+)_([A-Za-z]+)_(nbon|nboff)\.csv$")
+    r"cost_breakdown_(\d+)x(\d+)x(\d+)_([A-Za-z]+)_(nbon|nboff|nbcrop|nbbatch)\.csv$")
 
 csv_files = glob.glob(os.path.join(args.data_dir, "cost_breakdown_*.csv"))
 if not csv_files:
@@ -181,6 +197,14 @@ if not records:
 for d in records:
     for nb in records[d]:
         records[d][nb].sort(key=lambda r: r["cells"])
+
+# Iterate in canonical small → large order (then any extra domains by name)
+def _domain_sort_key(name):
+    try:
+        return (0, DOMAIN_ORDER.index(name))
+    except ValueError:
+        return (1, name)
+records = {d: records[d] for d in sorted(records, key=_domain_sort_key)}
 
 print(f"  Loaded {sum(len(v) for d in records.values() for v in d.values())} "
       f"CSV(s) across {len(records)} domain(s)")
@@ -308,33 +332,124 @@ for domain, by_nb in records.items():
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Figure 3 — narrow-band speed-up (nboff / nbon) vs N, per domain
+# Figure 3 — combined 4-condition log-log view (all conditions overlaid)
 # ─────────────────────────────────────────────────────────────────────
-if any("nbon" in by_nb and "nboff" in by_nb
-       for by_nb in records.values()):
-    fig, ax = plt.subplots(figsize=(6.0, 4.2))
+# Headline plot for the body-fraction comparison: every (domain, NB-mode)
+# combination on the same log-log axes so the narrow-band benefit
+# emerges directly from the curve spacing.
+#
+# Expected pattern at convergence:
+#   * "small" domain: nbon and nboff curves nearly overlap (body fills
+#     ~ 70 % of cells, so cropping does not save much work).
+#   * "large" domain: nbon sits well below nboff, with the gap widening
+#     as N grows (body covers ~ 1/30 of cells, so cropping skips the
+#     bulk of the per-step work).
+DOMAIN_COND_COLOURS = {
+    "small": "#1976d2",   # blue
+    "large": "#d32f2f",   # red
+}
+
+if records:
+    fig, ax = plt.subplots(figsize=(7.2, 4.8))
+    # Open marker face for "more enabled" modes so the visual cleanly
+    # reads off → crop → batch → on as the curve gets lower (= faster).
+    _MARKER_FACE = {"nboff": "filled", "nbcrop": "filled",
+                    "nbbatch": "white", "nbon": "white"}
     for domain, by_nb in records.items():
-        if "nbon" not in by_nb or "nboff" not in by_nb:
+        col = DOMAIN_COND_COLOURS.get(domain, "#455a64")
+        for nb in NB_PLOT_ORDER:
+            runs = by_nb.get(nb, [])
+            if not runs:
+                continue
+            cells = np.array([r["cells"] for r in runs], dtype=float)
+            total = np.array([r["cat_ms"]["TOTAL step"] for r in runs])
+            style = NB_STYLES[nb]
+            label = (f"{DOMAIN_LABEL.get(domain, domain).split('(')[0].strip()} "
+                     f"— {style['label']}")
+            face = "white" if _MARKER_FACE.get(nb) == "white" else col
+            ax.loglog(cells, total,
+                      linestyle=style["linestyle"],
+                      marker=style["marker"], markersize=6,
+                      linewidth=1.8, color=col,
+                      markerfacecolor=face,
+                      markeredgewidth=1.4,
+                      label=label)
+
+    # O(N) reference slope, anchored at the smallest "large nboff" point
+    # if available, otherwise at the smallest data point overall.
+    all_pts = [(r["cells"], r["cat_ms"]["TOTAL step"])
+               for by_nb in records.values()
+               for runs in by_nb.values() for r in runs]
+    if len(all_pts) >= 2:
+        all_pts.sort()
+        x_ref = np.array([all_pts[0][0], all_pts[-1][0]], dtype=float)
+        y_anchor = all_pts[0][1]
+        y_ref = y_anchor * x_ref / x_ref[0]
+        ax.loglog(x_ref, y_ref, color="#9e9e9e",
+                  linestyle=":", linewidth=1.0, alpha=0.7,
+                  label="O(N) reference")
+
+    ax.set_xlabel("Total cells  $N_x N_y N_z$")
+    ax.set_ylabel("Time per step (ms)")
+    ax.set_title("Cost scaling: 4 conditions (domain × narrow-band)")
+    ax.legend(loc="upper left", framealpha=0.9, fontsize=8.5)
+    fig.tight_layout()
+    path = os.path.join(args.out_dir, "body_fraction_loglog_combined.pdf")
+    fig.savefig(path)
+    fig.savefig(path.replace(".pdf", ".png"))
+    print(f"  Figure saved → {path}")
+    plt.close(fig)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Figure 4 — speed-ups vs baseline (nboff), per (domain, mode), vs N.
+# ─────────────────────────────────────────────────────────────────────
+# Plots TIME(nboff) / TIME(mode) for each non-baseline mode so the
+# decomposition is visible at a glance:
+#   * "batching only"  → uniform speed-up across N for both domains
+#                        (justifies defaulting batching).
+#   * "cropping only"  → small-domain curve hugs 1.0× (or dips below)
+#                        because cropping has nothing to skip and adds
+#                        dynamic-shape overhead; large-domain curve
+#                        sits well above 1.0× and grows with N.
+#   * "cropping+batching" → product of the two effects.
+if any(any(nb != "nboff" for nb in by_nb) and "nboff" in by_nb
+       for by_nb in records.values()):
+    fig, ax = plt.subplots(figsize=(6.6, 4.4))
+    for domain, by_nb in records.items():
+        if "nboff" not in by_nb:
             continue
-        on  = {tuple(r["grid"]): r for r in by_nb["nbon"]}
+        col = DOMAIN_COND_COLOURS.get(domain, "#455a64")
         off = {tuple(r["grid"]): r for r in by_nb["nboff"]}
-        common = sorted(set(on) & set(off), key=lambda g: g[0] * g[1] * g[2])
-        if not common:
-            continue
-        cells = np.array([g[0] * g[1] * g[2] for g in common], dtype=float)
-        speedup = np.array([
-            off[g]["cat_ms"]["TOTAL step"] / on[g]["cat_ms"]["TOTAL step"]
-            for g in common
-        ])
-        ax.semilogx(cells, speedup, marker="o", linewidth=1.6,
-                    label=DOMAIN_LABEL.get(domain, domain))
+        for nb in NB_PLOT_ORDER:
+            if nb == "nboff" or nb not in by_nb:
+                continue
+            other = {tuple(r["grid"]): r for r in by_nb[nb]}
+            common = sorted(set(off) & set(other),
+                            key=lambda g: g[0] * g[1] * g[2])
+            if not common:
+                continue
+            cells = np.array([g[0] * g[1] * g[2] for g in common],
+                             dtype=float)
+            speedup = np.array([
+                off[g]["cat_ms"]["TOTAL step"]
+                / other[g]["cat_ms"]["TOTAL step"]
+                for g in common
+            ])
+            style = NB_STYLES[nb]
+            dom_short = DOMAIN_LABEL.get(domain, domain).split("(")[0].strip()
+            ax.semilogx(cells, speedup,
+                        linestyle=style["linestyle"],
+                        marker=style["marker"], markersize=6,
+                        linewidth=1.6, color=col,
+                        label=f"{dom_short} — {style['label']}")
 
     ax.axhline(1.0, color="#9e9e9e", linestyle=":", linewidth=1.0,
                label="break-even (1×)")
     ax.set_xlabel("Total cells  $N_x N_y N_z$")
-    ax.set_ylabel("Speed-up  (full-grid  /  narrow-band)")
-    ax.set_title("Narrow-band speed-up vs body fraction")
-    ax.legend(loc="best", framealpha=0.9, fontsize=8)
+    ax.set_ylabel(r"Speed-up  $T_\mathrm{off}\,/\,T_\mathrm{mode}$")
+    ax.set_title("Speed-up decomposition: cropping vs batching vs combined")
+    ax.legend(loc="best", framealpha=0.9, fontsize=7.5)
     fig.tight_layout()
     path = os.path.join(args.out_dir, "body_fraction_speedup.pdf")
     fig.savefig(path)

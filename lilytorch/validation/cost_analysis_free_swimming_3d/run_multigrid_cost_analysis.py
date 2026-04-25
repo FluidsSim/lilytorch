@@ -30,6 +30,7 @@ Usage
     python run_multigrid_cost_analysis.py --preset small   # 64→256
     python run_multigrid_cost_analysis.py --preset medium  # 128→512
     python run_multigrid_cost_analysis.py --preset large   # 256→1024
+    python run_multigrid_cost_analysis.py --preset extended
 
     # Dry-run to see commands without executing
     python run_multigrid_cost_analysis.py --dry-run
@@ -91,6 +92,18 @@ PRESETS = {
         (512, 128, 128),       #  8,388,608
         (512, 256, 128),       # 16,777,216
     ],
+    # Extended power-of-two scaling set.  On the current 16 GB GPU the
+    # next point below 1e8 cells, 1024x256x256 = 67,108,864, OOMs in the
+    # compiled mu+normals path; 1024x256x128 = 33,554,432 is the largest
+    # validated large case that initializes and runs.
+    "extended": [
+        (256,   64,  64),      #  1,048,576
+        (256,  128,  64),      #  2,097,152
+        (256,  128, 128),      #  4,194,304
+        (512,  128, 128),      #  8,388,608
+        (512,  256, 128),      # 16,777,216
+        (1024, 256, 128),      # 33,554,432
+    ],
     "production": [
         (256,  64,  64),       #  1,048,576
         (256, 128,  64),       #  2,097,152
@@ -121,6 +134,7 @@ Preset grids (--preset <name>):
   medium      {PRESETS['medium']}
   large       {PRESETS['large']}
   full        {PRESETS['full']}
+    extended    {PRESETS['extended']}
   production  {PRESETS['production']}
 """,
 )

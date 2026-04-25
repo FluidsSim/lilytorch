@@ -132,6 +132,7 @@ USE_CUDA = args.device == "cuda" and torch.cuda.is_available()
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if args.out_dir is None:
     args.out_dir = os.path.join(SCRIPT_DIR, "figures")
+args.out_dir = os.path.abspath(args.out_dir)
 
 
 # ═══════════════════════════════════════════════════════════════════════
