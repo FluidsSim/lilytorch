@@ -142,6 +142,8 @@ body_aabb_frac = 0.70  →  AABB 56×45×39 (per-body 34.3% of cells, union ≲ 
    any future "where to optimise next" decisions should take the SDF
    stage as the primary target, not forces.
 
+   **→ Followed up in step #3 (next section).**
+
 5. **Caveats.**
    * Numbers are **CPU, single-thread, OpenMP-disabled-by-default
      PyTorch CPU build**.  GPU numbers will differ but the relative
@@ -172,3 +174,60 @@ body_aabb_frac = 0.70  →  AABB 56×45×39 (per-body 34.3% of cells, union ≲ 
   assertion that they match within tight tolerance would extend the
   bench to a correctness check; this is currently delegated to the
   separate ``test_bdim_forces_self.py`` unit test.
+
+## Step #3 — `streaming_sdf_min_3d_multi` micro-optimisation
+
+Take-away (4) above identified the SDF stage as the next target.  The
+follow-up changes (in `streaming_sdf_cpu.cpp` and `cuda/streaming_sdf.cu`)
+exploit two algebraic simplifications that the previous code did not:
+
+1. **Rotation CSE.**  The 4 sample positions per cell (cc + 3 face
+   staggers) differ in world space by `±h/2` along **one** world axis
+   each.  In body frame this is just `body_cc + Δ_k` where
+   `Δ_k = -half_h · col_k(R_T)` is a per-body constant.  So 3 of the 4
+   full-matrix rotations per cell were redundant.  The rotation is now
+   computed once per cell (9 mul + 6 add) and the 3 face points are
+   derived by 3 vector adds each.  Saves 27 mul + 18 add per cell.
+
+2. **Uniform-grid trilinear.**  The body SDF tables `bx`, `by`, `bz`
+   are uniform-grid by construction (BDIM builds them with `linspace`
+   and the kernel already takes `inv_dx`, `inv_dy`, `inv_dz`,
+   `inv_vol = 1/(dx·dy·dz)`).  Corner weights therefore reduce to
+   `(1-frac, frac)` per axis — analytically.  The new
+   `trilinear_sample_uniform` helper does **not** need:
+   * the 6 axis-table loads per sample (`bx[ix]`, `bx[ix+1]`, …)
+     ≡ 24 loads removed per cell across the 4 face samples,
+   * the slow `floor` calls (3 per sample, 12 per cell on x86),
+   * the trailing `* inv_vol` multiply (which cancels `dx·dy·dz`
+     algebraically).
+   It also evaluates the corner sum in factored form, cutting the
+   multiply count from ~21 to ~14 per sample.
+
+The op signatures are unchanged — the body axis tables and the
+`bxL/byL/bzL/inv_vol` entries of `body_meta` are still accepted (callers
+pre-allocate them) but go unused inside the new kernel.  Outputs match
+the pre-change kernel to within float-associativity rounding (≤ 2 ULP
+relative for fp64; verified by the new
+`lilytorch/src/kernels/test_streaming_sdf_self.py`).
+
+### Measured speed-up (CPU, 80×64×56, B = 4)
+
+```text
+                        SDF stage (ms)            Total per-step (ms)
+  AABB frac     before    after  speedup        before   after
+  0.10           5.39     5.24    1.03×           5.47    5.30
+  0.30           8.37     7.45    1.12×           8.71    7.80
+  0.50          16.79     9.72    1.73×          18.11   11.05
+  0.70          42.47    20.38    2.08×          45.92   23.84
+```
+
+The speed-up grows with body size because per-cell arithmetic dominates
+when the AABB is large (relative to the fixed OpenMP fork/join
+overhead).  At the largest body fraction the **total** per-step cost
+**halves** (45.9 → 23.8 ms).
+
+The optimisation is mirrored in the CUDA kernel; on GPU the rotation
+CSE saves register pressure and the uniform-grid path eliminates 24
+global-memory loads per thread for the body axis tables.  Magnitude of
+the GPU speed-up is hardware-dependent; verify with
+`run_cost_analysis.py` once a CUDA-equipped environment is available.
