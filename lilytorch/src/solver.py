@@ -1778,21 +1778,49 @@ class FluidSolver:
             # Skip redundant .contiguous() — _forces_shared_*_compiled
             # already returns row-major contiguous tensors.
             #
-            # Phase D now reads the cached per-body cc-SDF from
-            # `sparse_cc_flat` (populated by streaming_sdf_min_3d_multi)
-            # instead of re-sampling it via trilinear interpolation.
-            bdim_forces_3d_multi(
-                _stream_step['sparse_cc_flat'], _stream_step['cell_offsets'],
-                _stream_step['kin'],
-                _stream_step['aabb_lo'], _stream_step['aabb_dim'],
-                _stream_step['gx'], _stream_step['gy'], _stream_step['gz'],
-                ui0, uj0, uk0, Sj, Sk,
-                xstress, ystress, zstress,
-                pforce_x, pforce_y, pforce_z,
-                eps_body, self.eps, h3,
-                _stream_step['max_vol'],
-                out,
-            )
+            # Phase D force op signature changed across kernel builds.
+            # Detect the loaded schema once and keep a stable fast path.
+            _phaseD_sparse_sig = getattr(self, '_phaseD_sparse_sig', None)
+            if _phaseD_sparse_sig is None:
+                try:
+                    _schema = str(
+                        torch.ops.lilytorch_kernels.bdim_forces_3d_multi.default._schema
+                    )
+                    _phaseD_sparse_sig = "Tensor sparse_cc_flat" in _schema
+                except Exception:
+                    _phaseD_sparse_sig = True
+                self._phaseD_sparse_sig = _phaseD_sparse_sig
+
+            if _phaseD_sparse_sig:
+                bdim_forces_3d_multi(
+                    _stream_step['sparse_cc_flat'], _stream_step['cell_offsets'],
+                    _stream_step['kin'],
+                    _stream_step['aabb_lo'], _stream_step['aabb_dim'],
+                    _stream_step['gx'], _stream_step['gy'], _stream_step['gz'],
+                    ui0, uj0, uk0, Sj, Sk,
+                    xstress, ystress, zstress,
+                    pforce_x, pforce_y, pforce_z,
+                    eps_body, self.eps, h3,
+                    _stream_step['max_vol'],
+                    out,
+                )
+            else:
+                bdim_forces_3d_multi(
+                    _stream_static['F_flat'], _stream_static['F_offsets'],
+                    _stream_static['bx_flat'], _stream_static['bx_offsets'],
+                    _stream_static['by_flat'], _stream_static['by_offsets'],
+                    _stream_static['bz_flat'], _stream_static['bz_offsets'],
+                    _stream_static['body_shapes'], _stream_static['body_meta'],
+                    _stream_step['kin'],
+                    _stream_step['aabb_lo'], _stream_step['aabb_dim'],
+                    _stream_step['gx'], _stream_step['gy'], _stream_step['gz'],
+                    ui0, uj0, uk0, Sj, Sk,
+                    xstress, ystress, zstress,
+                    pforce_x, pforce_y, pforce_z,
+                    eps_body, self.eps, h3,
+                    _stream_step['max_vol'],
+                    out,
+                )
             # Vectorised dispatch of the (B, 12) result into the per-body
             # force/torque buffers.  Replaces 24 × B individual element-
             # assignment ATen dispatches (≥ 1 ms host overhead at small B)

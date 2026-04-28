@@ -86,7 +86,12 @@ def streaming_sdf_min_3d_multi(
 
 
 def bdim_forces_3d_multi(
-        sparse_cc_flat: Tensor, cell_offsets: Tensor,
+        F_flat: Tensor, F_offsets: Tensor,
+        bx_flat: Tensor, bx_offsets: Tensor,
+        by_flat: Tensor, by_offsets: Tensor,
+        bz_flat: Tensor, bz_offsets: Tensor,
+        body_shapes: Tensor,
+        body_meta: Tensor,
         kin: Tensor,
         aabb_lo: Tensor,
         aabb_dim: Tensor,
@@ -107,8 +112,11 @@ def bdim_forces_3d_multi(
     ``sparse_cc_flat``.
     """
     return torch.ops.lilytorch_kernels.bdim_forces_3d_multi.default(
-        sparse_cc_flat, cell_offsets,
-        kin,
+        F_flat, F_offsets,
+        bx_flat, bx_offsets,
+        by_flat, by_offsets,
+        bz_flat, bz_offsets,
+        body_shapes, body_meta, kin,
         aabb_lo, aabb_dim,
         gx, gy, gz,
         int(u_i0), int(u_j0), int(u_k0),
