@@ -27,6 +27,31 @@ from lilytorch.src.body import (rotate_grid_2d, rotate_grid_3d,
 import torch
 
 
+# ---------------------------------------------------------------------
+# Pre-built attribute-free dicts used inside the hot path of
+# `_fluid_step_3d` to release BDIM intermediates with one
+# ``__dict__.update`` call instead of N × (hasattr + setattr) Python
+# lookups.  Building these dicts at import time keeps the per-step cost
+# at one C-level dict merge.
+# ---------------------------------------------------------------------
+_FS_FREE_AFTER_BDIM_3D = {
+    'mu1_all_u': None, 'mu1_all_v': None, 'mu1_all_w': None,
+    'normal_x_u': None, 'normal_y_u': None, 'normal_z_u': None,
+    'normal_x_v': None, 'normal_y_v': None, 'normal_z_v': None,
+    'normal_x_w': None, 'normal_y_w': None, 'normal_z_w': None,
+    # CC mu1 / m_m0 are also not needed by project
+    'mu1_all': None, 'm_m0_all': None,
+}
+_FS_FREE_AFTER_VAR_DENS_3D = {
+    'mu0_all_u': None, 'mu0_all_v': None, 'mu0_all_w': None,
+    'mu0_all': None,
+}
+_FS_FREE_AFTER_FORCES_3D = {
+    'xstress_tensor': None, 'ystress_tensor': None, 'zstress_tensor': None,
+    'pforce_x': None, 'pforce_y': None, 'pforce_z': None,
+}
+
+
 class BDIMhandler:
     """Unified boundary-data immersion method handler (2-D and 3-D)."""
 
@@ -2177,14 +2202,9 @@ class BDIMhandler:
         # CC normals on-the-fly.  Freeing these 12 grid-sized arrays
         # (~12 × 131 MB ≈ 1.6 GB) reduces peak memory during the
         # Poisson solve that follows.
-        for _attr in ('mu1_all_u', 'mu1_all_v', 'mu1_all_w',
-                      'normal_x_u', 'normal_y_u', 'normal_z_u',
-                      'normal_x_v', 'normal_y_v', 'normal_z_v',
-                      'normal_x_w', 'normal_y_w', 'normal_z_w',
-                      # CC mu1 / m_m0 are also not needed by project
-                      'mu1_all', 'm_m0_all'):
-            if hasattr(fs, _attr):
-                setattr(fs, _attr, None)
+        # Use a single ``__dict__.update`` to avoid 14 ``hasattr`` +
+        # 14 ``setattr`` Python lookups per step (≥ 50 µs at low N).
+        fs.__dict__.update(_FS_FREE_AFTER_BDIM_3D)
 
         # Variable-density Poisson coefficients.
         # Computed before freeing mu0 arrays (both FFT and multigrid need
@@ -2192,9 +2212,7 @@ class BDIMhandler:
         ch, cv, cw, ch_cc = self._compute_variable_density_coefficients(timestep)
 
         # ── Free mu0 now — ch/cv/cw/ch_cc are independent tensors ────
-        for _attr in ('mu0_all_u', 'mu0_all_v', 'mu0_all_w', 'mu0_all'):
-            if hasattr(fs, _attr):
-                setattr(fs, _attr, None)
+        fs.__dict__.update(_FS_FREE_AFTER_VAR_DENS_3D)
 
         poisson_method = getattr(fs, "poisson_method", "multigrid")
         if poisson_method == "fft":
@@ -2285,19 +2303,37 @@ class BDIMhandler:
         fs = self.fluid_solver
         s  = self.force_scaling
 
-        friction_force_lin_x = s * fs.friction_force_lin_x.cpu().numpy()
-        friction_force_lin_y = s * fs.friction_force_lin_y.cpu().numpy()
-        friction_force_lin_z = s * fs.friction_force_lin_z.cpu().numpy()
-        friction_force_ang_x = s * fs.friction_force_ang_x.cpu().numpy()
-        friction_force_ang_y = s * fs.friction_force_ang_y.cpu().numpy()
-        friction_force_ang_z = s * fs.friction_force_ang_z.cpu().numpy()
-
-        pressure_force_x     = s * fs.pressure_force_x.cpu().numpy()
-        pressure_force_y     = s * fs.pressure_force_y.cpu().numpy()
-        pressure_force_z     = s * fs.pressure_force_z.cpu().numpy()
-        pressure_force_ang_x = s * fs.pressure_force_ang_x.cpu().numpy()
-        pressure_force_ang_y = s * fs.pressure_force_ang_y.cpu().numpy()
-        pressure_force_ang_z = s * fs.pressure_force_ang_z.cpu().numpy()
+        # Single GPU→CPU transfer instead of 12 separate .cpu().numpy()
+        # calls (each one was an implicit sync + DtoH copy and the single
+        # biggest contributor to "Other (residual)" at low N).
+        # Mirrors the 2-D batched transfer in _apply_forces_2d.
+        forces_gpu = torch.stack([
+            fs.friction_force_lin_x,
+            fs.friction_force_lin_y,
+            fs.friction_force_lin_z,
+            fs.friction_force_ang_x,
+            fs.friction_force_ang_y,
+            fs.friction_force_ang_z,
+            fs.pressure_force_x,
+            fs.pressure_force_y,
+            fs.pressure_force_z,
+            fs.pressure_force_ang_x,
+            fs.pressure_force_ang_y,
+            fs.pressure_force_ang_z,
+        ])                                          # (12, B)
+        forces_cpu = (s * forces_gpu).cpu().numpy() # single sync
+        friction_force_lin_x = forces_cpu[0]
+        friction_force_lin_y = forces_cpu[1]
+        friction_force_lin_z = forces_cpu[2]
+        friction_force_ang_x = forces_cpu[3]
+        friction_force_ang_y = forces_cpu[4]
+        friction_force_ang_z = forces_cpu[5]
+        pressure_force_x     = forces_cpu[6]
+        pressure_force_y     = forces_cpu[7]
+        pressure_force_z     = forces_cpu[8]
+        pressure_force_ang_x = forces_cpu[9]
+        pressure_force_ang_y = forces_cpu[10]
+        pressure_force_ang_z = forces_cpu[11]
 
         # ---- FARMS-identical buoyancy (drag.pyx  compute_buoyancy) ----
         # Lazy-init per-body mass & half-height on first call
@@ -2356,12 +2392,33 @@ class BDIMhandler:
         zero fluid forces.
         """
         fs = self.fluid_solver
-        fields = {"u": fs.u0, "v": fs.v0, "p": fs.p0}
+        # Batch every reduction the explosion check needs into a *single*
+        # GPU→CPU sync.  The previous implementation issued one sync per
+        # field for ``isfinite().all()`` (3–4 calls) plus one per velocity
+        # component for ``.abs().max()`` (2–3 calls) — i.e. 5–7 separate
+        # device-to-host transfers every step.  Each one stalls the
+        # pipeline and contributes to the "Other (residual)" plateau at
+        # low grid counts.
         if self.ndim == 3:
-            fields["w"] = fs.w0
+            field_names  = ("u", "v", "w", "p")
+            field_arrs   = (fs.u0, fs.v0, fs.w0, fs.p0)
+            n_vel        = 3
+        else:
+            field_names  = ("u", "v", "p")
+            field_arrs   = (fs.u0, fs.v0, fs.p0)
+            n_vel        = 2
 
-        for name, arr in fields.items():
-            if not torch.isfinite(arr).all():
+        finite_flags  = torch.stack([torch.isfinite(a).all() for a in field_arrs])
+        vmax_per_vel  = torch.stack([a.abs().amax() for a in field_arrs[:n_vel]])
+        # Single fused DtoH transfer + sync.
+        diag = torch.cat((finite_flags.to(vmax_per_vel.dtype),
+                          vmax_per_vel)).cpu().numpy()
+        n_fields = len(field_arrs)
+        finite_np = diag[:n_fields]
+        vmax_np   = diag[n_fields:]
+
+        for name, ok in zip(field_names, finite_np):
+            if not bool(ok):
                 self.terminate = True
                 raise RuntimeError(
                     f"[BDIM] Fluid explosion at iteration {iteration}: "
@@ -2370,9 +2427,7 @@ class BDIMhandler:
                     f"or CFL violation."
                 )
 
-        vmax = max(float(fs.u0.abs().max()), float(fs.v0.abs().max()))
-        if self.ndim == 3:
-            vmax = max(vmax, float(fs.w0.abs().max()))
+        vmax = float(vmax_np.max())
         if vmax > self._vmax_abort:
             self.terminate = True
             raise RuntimeError(
@@ -2433,11 +2488,10 @@ class BDIMhandler:
 
             # ── Free cached force-density tensors (6 × grid_shape) ───
             # These are only needed for the per-body integration above;
-            # plotting_and_saving does not use them.
-            for _attr in ('xstress_tensor', 'ystress_tensor', 'zstress_tensor',
-                          'pforce_x', 'pforce_y', 'pforce_z'):
-                if hasattr(fs, _attr):
-                    setattr(fs, _attr, None)
+            # plotting_and_saving does not use them.  Use a single
+            # ``__dict__.update`` to avoid the 6 × (hasattr + setattr)
+            # Python lookups per step.
+            fs.__dict__.update(_FS_FREE_AFTER_FORCES_3D)
 
             # 5. plotting / saving
             if self.ndim == 3:
