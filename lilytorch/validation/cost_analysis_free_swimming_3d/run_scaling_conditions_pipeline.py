@@ -26,10 +26,20 @@ the run.
 
 Conditions
 ----------
-    nboff   : baseline, all narrow-band flags off
-    nbcrop  : cropping only (force_shared_union + mu_normals_union + bdim_union)
-    nbbatch : batching only (force_narrow_batch + batched_sdf_3d)
-    nbon    : all narrow-band flags on (cropping + batching)
+    nboff         : baseline, all narrow-band flags off
+    nbcrop        : cropping only (force_shared_union + mu_normals_union + bdim_union)
+    nbbatch       : batching only (force_narrow_batch + batched_sdf_3d)
+    nbon          : all narrow-band flags on (cropping + batching)
+    nbtri         : custom trilinear (no batch, no crop)
+    nbtri_crop    : custom trilinear + cropping
+    nbstream      : streaming fused-CUDA SDF (Phase B)
+    nbstream_crop : streaming fused-CUDA SDF + cropping
+    nbforces      : streaming + fused forces (Phase D) — pre-optimisation reference
+    nbforces_opt  : NEW METHOD — streaming + fused forces + optimised
+                    streaming_sdf_min_3d_multi (rotation CSE + uniform-grid
+                    trilinear; commit 722c4cf).  Same flags as ``nbforces``
+                    but written to its own subfolder so the previously
+                    measured ``nbforces/`` CSVs are not overwritten.
 
 Output layout
 -------------
@@ -165,6 +175,33 @@ CONDITION_SPECS = {
         "linestyle": "-",
         "marker": "h",
         "color": "#b71c1c",
+    },
+    # ── NEW METHOD ──────────────────────────────────────────────────────
+    # Kernel-level optimisation of ``streaming_sdf_min_3d_multi`` introduced
+    # in commit 722c4cf (rotation CSE + uniform-grid trilinear; ~2× SDF
+    # speed-up at large body fractions on CPU, see
+    # README_forces_methods.md §"Step #3").  There is no CLI flag for it —
+    # the optimisation is baked into every ``--streaming_sdf_3d`` path —
+    # so the way to benchmark it as its own condition is to re-use the
+    # most aggressive existing flag set (same as ``nbforces``) while
+    # writing the timings into a fresh subfolder.  This keeps the prior
+    # ``nbforces/`` CSVs (measured before the optimisation) intact so the
+    # combined plot can compare the two side-by-side.
+    "nbforces_opt": {
+        "label": "NEW: streaming + fused forces + optimised SDF "
+                 "(rotation CSE + uniform-grid trilinear)",
+        "short_label": "new method",
+        "flags": [
+            "--streaming_sdf_3d",
+            "--streaming_forces_3d",
+            "--force_shared_union",
+            "--mu_normals_union",
+            "--bdim_union",
+            "--force_narrow_batch",
+        ],
+        "linestyle": "-",
+        "marker": "*",
+        "color": "#f9a825",
     },
     "nbon": {
         "label": "cropping + batching",
@@ -366,8 +403,8 @@ parser.add_argument(
 parser.add_argument(
     "--conditions",
     type=str,
-    default="nboff,nbcrop,nbbatch,nbon,nbtri,nbtri_crop,nbstream,nbstream_crop,nbforces",
-    help="Comma-separated condition ids. Valid: nboff, nbcrop, nbbatch, nbon, nbtri, nbtri_crop, nbstream, nbstream_crop, nbforces",
+    default="nboff,nbcrop,nbbatch,nbon,nbtri,nbtri_crop,nbstream,nbstream_crop,nbforces,nbforces_opt",
+    help="Comma-separated condition ids. Valid: nboff, nbcrop, nbbatch, nbon, nbtri, nbtri_crop, nbstream, nbstream_crop, nbforces, nbforces_opt (NEW method)",
 )
 parser.add_argument("--n_steps", type=int, default=50)
 parser.add_argument("--precompile", type=int, default=30)
