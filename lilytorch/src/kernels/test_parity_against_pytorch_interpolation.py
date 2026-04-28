@@ -152,43 +152,17 @@ print("  OK")
 
 
 # ---------------- 3) bdim_forces_3d_multi ----------------
-print("== bdim_forces_3d_multi ==")
-# Reuse multi setup. Build union AABB + random stress/pressure fields.
-u_i0, u_j0, u_k0 = 0, 0, 0
-Si, Sj, Sk = Nx, Ny, Nz
-xs = torch.randn(Si, Sj, Sk, device=device, dtype=dtype)
-ys = torch.randn(Si, Sj, Sk, device=device, dtype=dtype)
-zs = torch.randn(Si, Sj, Sk, device=device, dtype=dtype)
-px = torch.randn(Si, Sj, Sk, device=device, dtype=dtype)
-py = torch.randn(Si, Sj, Sk, device=device, dtype=dtype)
-pz = torch.randn(Si, Sj, Sk, device=device, dtype=dtype)
-eps_body = 1.5*h; eps_solver = 2.0*h; h3 = h*h*h
-
-def call_forces(ns):
-    out = torch.zeros((B, 12), device=device, dtype=torch.float64)
-    ns.bdim_forces_3d_multi(
-        F_flat, t(F_off, torch.int64),
-        bx_flat, t(bx_off, torch.int64),
-        by_flat, t(by_off, torch.int64),
-        bz_flat, t(bz_off, torch.int64),
-        t(shapes, torch.int64), t(metas, dtype), t(kin, dtype),
-        t(lo, torch.int64), t(dim, torch.int64),
-        gx, gy, gz,
-        u_i0, u_j0, u_k0, Sj, Sk,
-        xs, ys, zs, px, py, pz,
-        eps_body, eps_solver, h3, max_vol,
-        out,
-    )
-    return out
-
-torch.cuda.synchronize()
-oA = call_forces(ext); torch.cuda.synchronize()
-oB = call_forces(lly); torch.cuda.synchronize()
-# atomicAdd ordering is non-deterministic across runs even with identical kernels
-diff = (oA - oB).abs().max().item()
-assert torch.allclose(oA, oB, rtol=1e-12, atol=1e-14), \
-    f"bdim_forces: differs (max abs diff {diff:.3e})"
-print(f"  OK   (out norm = {oA.norm().item():.4e}, max |Δ| = {diff:.2e})")
+# NOTE: As of the high-priority refactor implementing
+# `to_do_list.md` item #1, the lilytorch `bdim_forces_3d_multi` op
+# intentionally diverges from the upstream `extension_interp` op:
+# instead of re-sampling the body cc-SDF on the fly, it reads the
+# values cached in `sparse_cc_flat` by `streaming_sdf_min_3d_multi`.
+# The two ops therefore have different schemas and cannot be
+# parity-checked here. A standalone correctness test against a pure
+# Python reference lives in
+# `lilytorch/src/kernels/test_bdim_forces_self.py`.
+print("== bdim_forces_3d_multi (parity SKIPPED — see test_bdim_forces_self.py) ==")
+print("  SKIP")
 
 
 # ---------------- 4) apply_bcs_3d ----------------

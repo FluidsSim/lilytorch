@@ -61,8 +61,32 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " Tensor(e!) body_u, Tensor(f!) body_v, Tensor(g!) body_w,"
         " Tensor(h!) sparse_cc_flat"
         ") -> ()");
+    // Forces kernel: reads the per-body cc-SDF cached in `sparse_cc_flat`
+    // (populated by streaming_sdf_min_3d_multi), so it no longer needs the
+    // body SDF grid / axis tensors / body_meta. `kin` is still passed for
+    // the per-body COM (rows 12..14 of each 21-stride block).
     m.def(
         "bdim_forces_3d_multi("
+        "Tensor sparse_cc_flat, Tensor cell_offsets,"
+        " Tensor kin,"
+        " Tensor aabb_lo, Tensor aabb_dim,"
+        " Tensor gx, Tensor gy, Tensor gz,"
+        " int u_i0, int u_j0, int u_k0, int Sj, int Sk,"
+        " Tensor xs, Tensor ys, Tensor zs,"
+        " Tensor px, Tensor py, Tensor pz,"
+        " float eps_body, float eps_solver, float h3,"
+        " int max_vol_per_body,"
+        " Tensor(a!) out"
+        ") -> ()");
+
+    // Legacy "resample-on-the-fly" forces kernel, kept exclusively for
+    // the cost-analysis benchmark
+    // (validation/cost_analysis_free_swimming_3d/bench_forces_methods.py).
+    // It mirrors the pre-cache implementation: re-samples the body SDF
+    // per cell via trilinear interpolation. Production code MUST use the
+    // cached `bdim_forces_3d_multi` op above.
+    m.def(
+        "bdim_forces_3d_multi_legacy_resample("
         "Tensor F_flat, Tensor F_offsets,"
         " Tensor bx_flat, Tensor bx_offsets,"
         " Tensor by_flat, Tensor by_offsets,"

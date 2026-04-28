@@ -76,17 +76,71 @@ __device__ __forceinline__ scalar_t trilinear_sample_border(
     ) * inv_vol;
 }
 
+// =====================================================================
+//  Trilinear sample on a UNIFORM body grid.
+//
+//  See the matching helper in streaming_sdf_cpu.cpp for the rationale.
+//  Body SDF tables are uniform-grid by construction in BDIM, so corner
+//  weights reduce to (1-frac, frac) per axis -- this saves the slow
+//  ``floor`` calls, the 24 axis-table loads per cell across the 4 face
+//  samples, and the trailing ``* inv_vol`` multiply.
+// =====================================================================
+template <typename scalar_t>
+__device__ __forceinline__ scalar_t trilinear_sample_uniform(
+    const scalar_t* __restrict__ F,
+    const int Mx, const int My, const int Mz,
+    const scalar_t bx0, const scalar_t by0, const scalar_t bz0,
+    const scalar_t inv_dx, const scalar_t inv_dy, const scalar_t inv_dz,
+    scalar_t xq, scalar_t yq, scalar_t zq)
+{
+    scalar_t tx = (xq - bx0) * inv_dx;
+    scalar_t ty = (yq - by0) * inv_dy;
+    scalar_t tz = (zq - bz0) * inv_dz;
+    const scalar_t Mx_lim = (scalar_t)(Mx - 1);
+    const scalar_t My_lim = (scalar_t)(My - 1);
+    const scalar_t Mz_lim = (scalar_t)(Mz - 1);
+    tx = max((scalar_t)0, min(tx, Mx_lim));
+    ty = max((scalar_t)0, min(ty, My_lim));
+    tz = max((scalar_t)0, min(tz, Mz_lim));
+
+    int ix = (int)tx; if (ix > Mx - 2) ix = Mx - 2;
+    int iy = (int)ty; if (iy > My - 2) iy = My - 2;
+    int iz = (int)tz; if (iz > Mz - 2) iz = Mz - 2;
+
+    const scalar_t fx = tx - (scalar_t)ix;
+    const scalar_t fy = ty - (scalar_t)iy;
+    const scalar_t fz = tz - (scalar_t)iz;
+    const scalar_t wx0 = (scalar_t)1 - fx, wx1 = fx;
+    const scalar_t wy0 = (scalar_t)1 - fy, wy1 = fy;
+    const scalar_t wz0 = (scalar_t)1 - fz, wz1 = fz;
+
+    const int s2   = Mz;
+    const int s1   = My * Mz;
+    const int base = ix*s1 + iy*s2 + iz;
+
+    return (
+        wx0 * (
+          wy0 * (wz0 * F[base]                + wz1 * F[base + 1]) +
+          wy1 * (wz0 * F[base + s2]           + wz1 * F[base + s2 + 1])
+        ) +
+        wx1 * (
+          wy0 * (wz0 * F[base + s1]           + wz1 * F[base + s1 + 1]) +
+          wy1 * (wz0 * F[base + s1 + s2]      + wz1 * F[base + s1 + s2 + 1])
+        )
+    );
+}
+
 template <typename scalar_t>
 __global__ void streaming_sdf_min_3d_kernel(
     const scalar_t* __restrict__ F,
-    const scalar_t* __restrict__ bx,
-    const scalar_t* __restrict__ by,
-    const scalar_t* __restrict__ bz,
+    const scalar_t* __restrict__ /*bx*/,
+    const scalar_t* __restrict__ /*by*/,
+    const scalar_t* __restrict__ /*bz*/,
     const int Mx, const int My, const int Mz,
     const scalar_t bx0, const scalar_t by0, const scalar_t bz0,
-    const scalar_t bx_last, const scalar_t by_last, const scalar_t bz_last,
+    const scalar_t /*bx_last*/, const scalar_t /*by_last*/, const scalar_t /*bz_last*/,
     const scalar_t inv_dx, const scalar_t inv_dy, const scalar_t inv_dz,
-    const scalar_t inv_vol,
+    const scalar_t /*inv_vol*/,
     const scalar_t r00, const scalar_t r01, const scalar_t r02,
     const scalar_t r10, const scalar_t r11, const scalar_t r12,
     const scalar_t r20, const scalar_t r21, const scalar_t r22,
@@ -128,16 +182,23 @@ __global__ void streaming_sdf_min_3d_kernel(
     const scalar_t yc = gy[j];
     const scalar_t zc = gz[k];
 
+    // Body-frame CC point (single rotation; the 3 face points are derived
+    // from it by precomputed deltas Δ_k = -half_h * col_k(R_T)). See the
+    // matching CPU code for the rationale.
+    const scalar_t dx_w = xc - bp_x, dy_w = yc - bp_y, dz_w = zc - bp_z;
+    const scalar_t bxq = r00 * dx_w + r01 * dy_w + r02 * dz_w;
+    const scalar_t byq = r10 * dx_w + r11 * dy_w + r12 * dz_w;
+    const scalar_t bzq = r20 * dx_w + r21 * dy_w + r22 * dz_w;
+
+    const scalar_t neg_half_h = -half_h;
+    const scalar_t du_x = neg_half_h * r00, du_y = neg_half_h * r10, du_z = neg_half_h * r20;
+    const scalar_t dv_x = neg_half_h * r01, dv_y = neg_half_h * r11, dv_z = neg_half_h * r21;
+    const scalar_t dw_x = neg_half_h * r02, dw_y = neg_half_h * r12, dw_z = neg_half_h * r22;
+
     // ---------------- cc ----------------
     {
-        const scalar_t dx_w = xc - bp_x, dy_w = yc - bp_y, dz_w = zc - bp_z;
-        const scalar_t bxq = r00 * dx_w + r01 * dy_w + r02 * dz_w;
-        const scalar_t byq = r10 * dx_w + r11 * dy_w + r12 * dz_w;
-        const scalar_t bzq = r20 * dx_w + r21 * dy_w + r22 * dz_w;
-        const scalar_t s = trilinear_sample_border(
-            F, bx, by, bz, Mx, My, Mz,
-            bx0, by0, bz0, bx_last, by_last, bz_last,
-            inv_dx, inv_dy, inv_dz, inv_vol,
+        const scalar_t s = trilinear_sample_uniform(
+            F, Mx, My, Mz, bx0, by0, bz0, inv_dx, inv_dy, inv_dz,
             bxq, byq, bzq);
         sparse_cc[tid] = s;
         if (s < sdf_cc[g_idx]) sdf_cc[g_idx] = s;
@@ -145,16 +206,9 @@ __global__ void streaming_sdf_min_3d_kernel(
 
     // ---------------- u-face: world (xc - h/2, yc, zc) ----------------
     {
-        const scalar_t fxw = xc - half_h;
-        const scalar_t dx_w = fxw - bp_x, dy_w = yc - bp_y, dz_w = zc - bp_z;
-        const scalar_t bxq = r00 * dx_w + r01 * dy_w + r02 * dz_w;
-        const scalar_t byq = r10 * dx_w + r11 * dy_w + r12 * dz_w;
-        const scalar_t bzq = r20 * dx_w + r21 * dy_w + r22 * dz_w;
-        const scalar_t s = trilinear_sample_border(
-            F, bx, by, bz, Mx, My, Mz,
-            bx0, by0, bz0, bx_last, by_last, bz_last,
-            inv_dx, inv_dy, inv_dz, inv_vol,
-            bxq, byq, bzq);
+        const scalar_t s = trilinear_sample_uniform(
+            F, Mx, My, Mz, bx0, by0, bz0, inv_dx, inv_dy, inv_dz,
+            bxq + du_x, byq + du_y, bzq + du_z);
         if (s < sdf_u[g_idx]) {
             sdf_u[g_idx] = s;
             bU[g_idx] = lv_x + av_y * (zc - cm_z) - av_z * (yc - cm_y);
@@ -163,16 +217,9 @@ __global__ void streaming_sdf_min_3d_kernel(
 
     // ---------------- v-face: world (xc, yc - h/2, zc) ----------------
     {
-        const scalar_t fyw = yc - half_h;
-        const scalar_t dx_w = xc - bp_x, dy_w = fyw - bp_y, dz_w = zc - bp_z;
-        const scalar_t bxq = r00 * dx_w + r01 * dy_w + r02 * dz_w;
-        const scalar_t byq = r10 * dx_w + r11 * dy_w + r12 * dz_w;
-        const scalar_t bzq = r20 * dx_w + r21 * dy_w + r22 * dz_w;
-        const scalar_t s = trilinear_sample_border(
-            F, bx, by, bz, Mx, My, Mz,
-            bx0, by0, bz0, bx_last, by_last, bz_last,
-            inv_dx, inv_dy, inv_dz, inv_vol,
-            bxq, byq, bzq);
+        const scalar_t s = trilinear_sample_uniform(
+            F, Mx, My, Mz, bx0, by0, bz0, inv_dx, inv_dy, inv_dz,
+            bxq + dv_x, byq + dv_y, bzq + dv_z);
         if (s < sdf_v[g_idx]) {
             sdf_v[g_idx] = s;
             bV[g_idx] = lv_y + av_z * (xc - cm_x) - av_x * (zc - cm_z);
@@ -181,16 +228,9 @@ __global__ void streaming_sdf_min_3d_kernel(
 
     // ---------------- w-face: world (xc, yc, zc - h/2) ----------------
     {
-        const scalar_t fzw = zc - half_h;
-        const scalar_t dx_w = xc - bp_x, dy_w = yc - bp_y, dz_w = fzw - bp_z;
-        const scalar_t bxq = r00 * dx_w + r01 * dy_w + r02 * dz_w;
-        const scalar_t byq = r10 * dx_w + r11 * dy_w + r12 * dz_w;
-        const scalar_t bzq = r20 * dx_w + r21 * dy_w + r22 * dz_w;
-        const scalar_t s = trilinear_sample_border(
-            F, bx, by, bz, Mx, My, Mz,
-            bx0, by0, bz0, bx_last, by_last, bz_last,
-            inv_dx, inv_dy, inv_dz, inv_vol,
-            bxq, byq, bzq);
+        const scalar_t s = trilinear_sample_uniform(
+            F, Mx, My, Mz, bx0, by0, bz0, inv_dx, inv_dy, inv_dz,
+            bxq + dw_x, byq + dw_y, bzq + dw_z);
         if (s < sdf_w[g_idx]) {
             sdf_w[g_idx] = s;
             bW[g_idx] = lv_z + av_x * (yc - cm_y) - av_y * (xc - cm_x);
@@ -357,18 +397,15 @@ __global__ void streaming_sdf_min_3d_multi_kernel(
     const int g_idx = (i * Ngy + j) * Ngz + k;
 
     const scalar_t* F  = F_flat  + F_offsets[b];
-    const scalar_t* bx = bx_flat + bx_offsets[b];
-    const scalar_t* by = by_flat + by_offsets[b];
-    const scalar_t* bz = bz_flat + bz_offsets[b];
+    // Body axis tables (bx/by/bz) and per-body inv_vol/bxL/byL/bzL are no
+    // longer read: trilinear_sample_uniform handles uniform grids analytically.
     const int Mx = (int)body_shapes[b*3 + 0];
     const int My = (int)body_shapes[b*3 + 1];
     const int Mz = (int)body_shapes[b*3 + 2];
 
     const scalar_t* M = body_meta + b*10;
     const scalar_t bx0 = M[0], by0 = M[1], bz0 = M[2];
-    const scalar_t bxL = M[3], byL = M[4], bzL = M[5];
     const scalar_t idx_ = M[6], idy_ = M[7], idz_ = M[8];
-    const scalar_t inv_vol = M[9];
 
     const scalar_t* K = kin + b*21;
     const scalar_t r00 = K[0],  r01 = K[1],  r02 = K[2];
@@ -385,62 +422,47 @@ __global__ void streaming_sdf_min_3d_multi_kernel(
 
     const int64_t sparse_idx = cell_offsets[b] + (int64_t)local;
 
+    // Body-frame CC point (single rotation per cell). Face points = body_cc + Δ_k,
+    // where Δ_k = -half_h * col_k(R_T) is a per-body constant.
+    const scalar_t dx_w = xc - bp_x, dy_w = yc - bp_y, dz_w = zc - bp_z;
+    const scalar_t bxq = r00*dx_w + r01*dy_w + r02*dz_w;
+    const scalar_t byq = r10*dx_w + r11*dy_w + r12*dz_w;
+    const scalar_t bzq = r20*dx_w + r21*dy_w + r22*dz_w;
+
+    const scalar_t neg_half_h = -half_h;
+    const scalar_t du_x = neg_half_h * r00, du_y = neg_half_h * r10, du_z = neg_half_h * r20;
+    const scalar_t dv_x = neg_half_h * r01, dv_y = neg_half_h * r11, dv_z = neg_half_h * r21;
+    const scalar_t dw_x = neg_half_h * r02, dw_y = neg_half_h * r12, dw_z = neg_half_h * r22;
+
     {
-        const scalar_t dx_w = xc - bp_x, dy_w = yc - bp_y, dz_w = zc - bp_z;
-        const scalar_t bxq = r00*dx_w + r01*dy_w + r02*dz_w;
-        const scalar_t byq = r10*dx_w + r11*dy_w + r12*dz_w;
-        const scalar_t bzq = r20*dx_w + r21*dy_w + r22*dz_w;
-        const scalar_t s = trilinear_sample_border(
-            F, bx, by, bz, Mx, My, Mz,
-            bx0, by0, bz0, bxL, byL, bzL,
-            idx_, idy_, idz_, inv_vol,
+        const scalar_t s = trilinear_sample_uniform(
+            F, Mx, My, Mz, bx0, by0, bz0, idx_, idy_, idz_,
             bxq, byq, bzq);
         sparse_cc_flat[sparse_idx] = s;
         if (s < sdf_cc[g_idx]) sdf_cc[g_idx] = s;
     }
     {
-        const scalar_t fxw = xc - half_h;
-        const scalar_t dx_w = fxw - bp_x, dy_w = yc - bp_y, dz_w = zc - bp_z;
-        const scalar_t bxq = r00*dx_w + r01*dy_w + r02*dz_w;
-        const scalar_t byq = r10*dx_w + r11*dy_w + r12*dz_w;
-        const scalar_t bzq = r20*dx_w + r21*dy_w + r22*dz_w;
-        const scalar_t s = trilinear_sample_border(
-            F, bx, by, bz, Mx, My, Mz,
-            bx0, by0, bz0, bxL, byL, bzL,
-            idx_, idy_, idz_, inv_vol,
-            bxq, byq, bzq);
+        const scalar_t s = trilinear_sample_uniform(
+            F, Mx, My, Mz, bx0, by0, bz0, idx_, idy_, idz_,
+            bxq + du_x, byq + du_y, bzq + du_z);
         if (s < sdf_u[g_idx]) {
             sdf_u[g_idx] = s;
             bU[g_idx] = lv_x + av_y*(zc - cm_z) - av_z*(yc - cm_y);
         }
     }
     {
-        const scalar_t fyw = yc - half_h;
-        const scalar_t dx_w = xc - bp_x, dy_w = fyw - bp_y, dz_w = zc - bp_z;
-        const scalar_t bxq = r00*dx_w + r01*dy_w + r02*dz_w;
-        const scalar_t byq = r10*dx_w + r11*dy_w + r12*dz_w;
-        const scalar_t bzq = r20*dx_w + r21*dy_w + r22*dz_w;
-        const scalar_t s = trilinear_sample_border(
-            F, bx, by, bz, Mx, My, Mz,
-            bx0, by0, bz0, bxL, byL, bzL,
-            idx_, idy_, idz_, inv_vol,
-            bxq, byq, bzq);
+        const scalar_t s = trilinear_sample_uniform(
+            F, Mx, My, Mz, bx0, by0, bz0, idx_, idy_, idz_,
+            bxq + dv_x, byq + dv_y, bzq + dv_z);
         if (s < sdf_v[g_idx]) {
             sdf_v[g_idx] = s;
             bV[g_idx] = lv_y + av_z*(xc - cm_x) - av_x*(zc - cm_z);
         }
     }
     {
-        const scalar_t fzw = zc - half_h;
-        const scalar_t dx_w = xc - bp_x, dy_w = yc - bp_y, dz_w = fzw - bp_z;
-        const scalar_t bxq = r00*dx_w + r01*dy_w + r02*dz_w;
-        const scalar_t byq = r10*dx_w + r11*dy_w + r12*dz_w;
-        const scalar_t bzq = r20*dx_w + r21*dy_w + r22*dz_w;
-        const scalar_t s = trilinear_sample_border(
-            F, bx, by, bz, Mx, My, Mz,
-            bx0, by0, bz0, bxL, byL, bzL,
-            idx_, idy_, idz_, inv_vol,
-            bxq, byq, bzq);
+        const scalar_t s = trilinear_sample_uniform(
+            F, Mx, My, Mz, bx0, by0, bz0, idx_, idy_, idz_,
+            bxq + dw_x, byq + dw_y, bzq + dw_z);
         if (s < sdf_w[g_idx]) {
             sdf_w[g_idx] = s;
             bW[g_idx] = lv_z + av_x*(yc - cm_y) - av_y*(xc - cm_x);
@@ -515,10 +537,11 @@ void streaming_sdf_min_3d_multi_cuda(
 
 
 // =====================================================================
-//  bdim_forces_3d_multi  (Phase D: fused per-body force integration)
+//  bdim_forces_3d_multi  (Phase D: per-body force integration)
 //
 //  For each body b with AABB (Ai,Aj,Ak), this kernel walks the AABB,
-//  re-samples the body SDF on the fly (no stored sparse_cc), reads the
+//  reads the cached per-body cc-SDF from `sparse_cc_flat` (already
+//  written by streaming_sdf_min_3d_multi — no resampling), reads the
 //  union-AABB-relative stress and pressure-force fields, evaluates the
 //  smoothed delta (1st-order cosine), and accumulates per-body
 //      (fv_x, fv_y, fv_z, tv_x, tv_y, tv_z,
@@ -533,16 +556,8 @@ void streaming_sdf_min_3d_multi_cuda(
 template <typename scalar_t>
 __global__ void bdim_forces_3d_multi_kernel(
     const int b,
-    const scalar_t* __restrict__ F_flat,
-    const int64_t*  __restrict__ F_offsets,
-    const scalar_t* __restrict__ bx_flat,
-    const int64_t*  __restrict__ bx_offsets,
-    const scalar_t* __restrict__ by_flat,
-    const int64_t*  __restrict__ by_offsets,
-    const scalar_t* __restrict__ bz_flat,
-    const int64_t*  __restrict__ bz_offsets,
-    const int64_t*  __restrict__ body_shapes,
-    const scalar_t* __restrict__ body_meta,
+    const scalar_t* __restrict__ sparse_cc_flat,
+    const int64_t*  __restrict__ cell_offsets,
     const scalar_t* __restrict__ kin,
     const int64_t*  __restrict__ aabb_lo,
     const int64_t*  __restrict__ aabb_dim,
@@ -583,41 +598,17 @@ __global__ void bdim_forces_3d_multi_kernel(
         const int k0  = (int)aabb_lo[b*3 + 2];
         const int i = i0 + di, j = j0 + dj, k = k0 + dk;
 
-        const scalar_t* F  = F_flat  + F_offsets[b];
-        const scalar_t* bx = bx_flat + bx_offsets[b];
-        const scalar_t* by = by_flat + by_offsets[b];
-        const scalar_t* bz = bz_flat + bz_offsets[b];
-        const int Mx = (int)body_shapes[b*3 + 0];
-        const int My = (int)body_shapes[b*3 + 1];
-        const int Mz = (int)body_shapes[b*3 + 2];
-
-        const scalar_t* M = body_meta + b*10;
-        const scalar_t bx0 = M[0], by0 = M[1], bz0 = M[2];
-        const scalar_t bxL = M[3], byL = M[4], bzL = M[5];
-        const scalar_t idx_ = M[6], idy_ = M[7], idz_ = M[8];
-        const scalar_t inv_vol = M[9];
-
+        // Only the COM (kin[12..14]) is needed for force/torque arms.
         const scalar_t* K = kin + b*21;
-        const scalar_t r00 = K[0],  r01 = K[1],  r02 = K[2];
-        const scalar_t r10 = K[3],  r11 = K[4],  r12 = K[5];
-        const scalar_t r20 = K[6],  r21 = K[7],  r22 = K[8];
-        const scalar_t bp_x = K[9],  bp_y = K[10], bp_z = K[11];
         const scalar_t cm_x = K[12], cm_y = K[13], cm_z = K[14];
 
         const scalar_t xc = gx[i];
         const scalar_t yc = gy[j];
         const scalar_t zc = gz[k];
 
-        // Sample cc SDF
-        const scalar_t dx_w = xc - bp_x, dy_w = yc - bp_y, dz_w = zc - bp_z;
-        const scalar_t bxq = r00*dx_w + r01*dy_w + r02*dz_w;
-        const scalar_t byq = r10*dx_w + r11*dy_w + r12*dz_w;
-        const scalar_t bzq = r20*dx_w + r21*dy_w + r22*dz_w;
-        const scalar_t sdf = trilinear_sample_border(
-            F, bx, by, bz, Mx, My, Mz,
-            bx0, by0, bz0, bxL, byL, bzL,
-            idx_, idy_, idz_, inv_vol,
-            bxq, byq, bzq);
+        // Read cached per-body cc-SDF written by streaming_sdf_min_3d_multi.
+        const int64_t sparse_base = cell_offsets[b];
+        const scalar_t sdf = sparse_cc_flat[sparse_base + (int64_t)local];
 
         // Smoothed deltas (1st-order cosine)
         const scalar_t pi_v = (scalar_t)3.141592653589793;
@@ -687,12 +678,8 @@ __global__ void bdim_forces_3d_multi_kernel(
 }
 
 void bdim_forces_3d_multi_cuda(
-    const at::Tensor& F_flat, const at::Tensor& F_offsets,
-    const at::Tensor& bx_flat, const at::Tensor& bx_offsets,
-    const at::Tensor& by_flat, const at::Tensor& by_offsets,
-    const at::Tensor& bz_flat, const at::Tensor& bz_offsets,
-    const at::Tensor& body_shapes,
-    const at::Tensor& body_meta,
+    const at::Tensor& sparse_cc_flat,
+    const at::Tensor& cell_offsets,
     const at::Tensor& kin,
     const at::Tensor& aabb_lo,
     const at::Tensor& aabb_dim,
@@ -714,19 +701,14 @@ void bdim_forces_3d_multi_cuda(
     const int blockSize = 256;
     const size_t shmem  = (size_t)blockSize * sizeof(double);
 
-    AT_DISPATCH_FLOATING_TYPES(F_flat.scalar_type(), "bdim_forces_3d_multi_cuda", [&] {
+    AT_DISPATCH_FLOATING_TYPES(sparse_cc_flat.scalar_type(), "bdim_forces_3d_multi_cuda", [&] {
         for (int b = 0; b < B; ++b) {
             const int blocksPerBody = (int)((max_vol_per_body + blockSize - 1) / blockSize);
             bdim_forces_3d_multi_kernel<scalar_t>
                 <<<dim3(blocksPerBody, 1, 1), dim3(blockSize, 1, 1), shmem, stream>>>(
                     b,
-                    F_flat.data_ptr<scalar_t>(),
-                    F_offsets.data_ptr<int64_t>(),
-                    bx_flat.data_ptr<scalar_t>(), bx_offsets.data_ptr<int64_t>(),
-                    by_flat.data_ptr<scalar_t>(), by_offsets.data_ptr<int64_t>(),
-                    bz_flat.data_ptr<scalar_t>(), bz_offsets.data_ptr<int64_t>(),
-                    body_shapes.data_ptr<int64_t>(),
-                    body_meta.data_ptr<scalar_t>(),
+                    sparse_cc_flat.data_ptr<scalar_t>(),
+                    cell_offsets.data_ptr<int64_t>(),
                     kin.data_ptr<scalar_t>(),
                     aabb_lo.data_ptr<int64_t>(),
                     aabb_dim.data_ptr<int64_t>(),

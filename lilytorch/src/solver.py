@@ -1777,12 +1777,12 @@ class FluidSolver:
                 out.zero_()
             # Skip redundant .contiguous() — _forces_shared_*_compiled
             # already returns row-major contiguous tensors.
+            #
+            # Phase D now reads the cached per-body cc-SDF from
+            # `sparse_cc_flat` (populated by streaming_sdf_min_3d_multi)
+            # instead of re-sampling it via trilinear interpolation.
             bdim_forces_3d_multi(
-                _stream_static['F_flat'],  _stream_static['F_offsets'],
-                _stream_static['bx_flat'], _stream_static['bx_offsets'],
-                _stream_static['by_flat'], _stream_static['by_offsets'],
-                _stream_static['bz_flat'], _stream_static['bz_offsets'],
-                _stream_static['body_shapes'], _stream_static['body_meta'],
+                _stream_step['sparse_cc_flat'], _stream_step['cell_offsets'],
                 _stream_step['kin'],
                 _stream_step['aabb_lo'], _stream_step['aabb_dim'],
                 _stream_step['gx'], _stream_step['gy'], _stream_step['gz'],
