@@ -515,10 +515,11 @@ void streaming_sdf_min_3d_multi_cuda(
 
 
 // =====================================================================
-//  bdim_forces_3d_multi  (Phase D: fused per-body force integration)
+//  bdim_forces_3d_multi  (Phase D: per-body force integration)
 //
 //  For each body b with AABB (Ai,Aj,Ak), this kernel walks the AABB,
-//  re-samples the body SDF on the fly (no stored sparse_cc), reads the
+//  reads the cached per-body cc-SDF from `sparse_cc_flat` (already
+//  written by streaming_sdf_min_3d_multi — no resampling), reads the
 //  union-AABB-relative stress and pressure-force fields, evaluates the
 //  smoothed delta (1st-order cosine), and accumulates per-body
 //      (fv_x, fv_y, fv_z, tv_x, tv_y, tv_z,
@@ -533,16 +534,8 @@ void streaming_sdf_min_3d_multi_cuda(
 template <typename scalar_t>
 __global__ void bdim_forces_3d_multi_kernel(
     const int b,
-    const scalar_t* __restrict__ F_flat,
-    const int64_t*  __restrict__ F_offsets,
-    const scalar_t* __restrict__ bx_flat,
-    const int64_t*  __restrict__ bx_offsets,
-    const scalar_t* __restrict__ by_flat,
-    const int64_t*  __restrict__ by_offsets,
-    const scalar_t* __restrict__ bz_flat,
-    const int64_t*  __restrict__ bz_offsets,
-    const int64_t*  __restrict__ body_shapes,
-    const scalar_t* __restrict__ body_meta,
+    const scalar_t* __restrict__ sparse_cc_flat,
+    const int64_t*  __restrict__ cell_offsets,
     const scalar_t* __restrict__ kin,
     const int64_t*  __restrict__ aabb_lo,
     const int64_t*  __restrict__ aabb_dim,
@@ -583,41 +576,17 @@ __global__ void bdim_forces_3d_multi_kernel(
         const int k0  = (int)aabb_lo[b*3 + 2];
         const int i = i0 + di, j = j0 + dj, k = k0 + dk;
 
-        const scalar_t* F  = F_flat  + F_offsets[b];
-        const scalar_t* bx = bx_flat + bx_offsets[b];
-        const scalar_t* by = by_flat + by_offsets[b];
-        const scalar_t* bz = bz_flat + bz_offsets[b];
-        const int Mx = (int)body_shapes[b*3 + 0];
-        const int My = (int)body_shapes[b*3 + 1];
-        const int Mz = (int)body_shapes[b*3 + 2];
-
-        const scalar_t* M = body_meta + b*10;
-        const scalar_t bx0 = M[0], by0 = M[1], bz0 = M[2];
-        const scalar_t bxL = M[3], byL = M[4], bzL = M[5];
-        const scalar_t idx_ = M[6], idy_ = M[7], idz_ = M[8];
-        const scalar_t inv_vol = M[9];
-
+        // Only the COM (kin[12..14]) is needed for force/torque arms.
         const scalar_t* K = kin + b*21;
-        const scalar_t r00 = K[0],  r01 = K[1],  r02 = K[2];
-        const scalar_t r10 = K[3],  r11 = K[4],  r12 = K[5];
-        const scalar_t r20 = K[6],  r21 = K[7],  r22 = K[8];
-        const scalar_t bp_x = K[9],  bp_y = K[10], bp_z = K[11];
         const scalar_t cm_x = K[12], cm_y = K[13], cm_z = K[14];
 
         const scalar_t xc = gx[i];
         const scalar_t yc = gy[j];
         const scalar_t zc = gz[k];
 
-        // Sample cc SDF
-        const scalar_t dx_w = xc - bp_x, dy_w = yc - bp_y, dz_w = zc - bp_z;
-        const scalar_t bxq = r00*dx_w + r01*dy_w + r02*dz_w;
-        const scalar_t byq = r10*dx_w + r11*dy_w + r12*dz_w;
-        const scalar_t bzq = r20*dx_w + r21*dy_w + r22*dz_w;
-        const scalar_t sdf = trilinear_sample_border(
-            F, bx, by, bz, Mx, My, Mz,
-            bx0, by0, bz0, bxL, byL, bzL,
-            idx_, idy_, idz_, inv_vol,
-            bxq, byq, bzq);
+        // Read cached per-body cc-SDF written by streaming_sdf_min_3d_multi.
+        const int64_t sparse_base = cell_offsets[b];
+        const scalar_t sdf = sparse_cc_flat[sparse_base + (int64_t)local];
 
         // Smoothed deltas (1st-order cosine)
         const scalar_t pi_v = (scalar_t)3.141592653589793;
@@ -687,12 +656,8 @@ __global__ void bdim_forces_3d_multi_kernel(
 }
 
 void bdim_forces_3d_multi_cuda(
-    const at::Tensor& F_flat, const at::Tensor& F_offsets,
-    const at::Tensor& bx_flat, const at::Tensor& bx_offsets,
-    const at::Tensor& by_flat, const at::Tensor& by_offsets,
-    const at::Tensor& bz_flat, const at::Tensor& bz_offsets,
-    const at::Tensor& body_shapes,
-    const at::Tensor& body_meta,
+    const at::Tensor& sparse_cc_flat,
+    const at::Tensor& cell_offsets,
     const at::Tensor& kin,
     const at::Tensor& aabb_lo,
     const at::Tensor& aabb_dim,
@@ -714,19 +679,14 @@ void bdim_forces_3d_multi_cuda(
     const int blockSize = 256;
     const size_t shmem  = (size_t)blockSize * sizeof(double);
 
-    AT_DISPATCH_FLOATING_TYPES(F_flat.scalar_type(), "bdim_forces_3d_multi_cuda", [&] {
+    AT_DISPATCH_FLOATING_TYPES(sparse_cc_flat.scalar_type(), "bdim_forces_3d_multi_cuda", [&] {
         for (int b = 0; b < B; ++b) {
             const int blocksPerBody = (int)((max_vol_per_body + blockSize - 1) / blockSize);
             bdim_forces_3d_multi_kernel<scalar_t>
                 <<<dim3(blocksPerBody, 1, 1), dim3(blockSize, 1, 1), shmem, stream>>>(
                     b,
-                    F_flat.data_ptr<scalar_t>(),
-                    F_offsets.data_ptr<int64_t>(),
-                    bx_flat.data_ptr<scalar_t>(), bx_offsets.data_ptr<int64_t>(),
-                    by_flat.data_ptr<scalar_t>(), by_offsets.data_ptr<int64_t>(),
-                    bz_flat.data_ptr<scalar_t>(), bz_offsets.data_ptr<int64_t>(),
-                    body_shapes.data_ptr<int64_t>(),
-                    body_meta.data_ptr<scalar_t>(),
+                    sparse_cc_flat.data_ptr<scalar_t>(),
+                    cell_offsets.data_ptr<int64_t>(),
                     kin.data_ptr<scalar_t>(),
                     aabb_lo.data_ptr<int64_t>(),
                     aabb_dim.data_ptr<int64_t>(),

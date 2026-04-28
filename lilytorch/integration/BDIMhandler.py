@@ -1187,15 +1187,20 @@ class BDIMhandler:
             comp._sdf_sparse[body_i] = (aabb, slab)
 
         # Phase D: stash per-step packed tensors so forces kernel can
-        # reuse kin / aabb_lo / aabb_dim without rebuilding.
+        # reuse kin / aabb_lo / aabb_dim without rebuilding. The
+        # `sparse_cc_flat` + `cell_offsets` pair is also stashed so
+        # bdim_forces_3d_multi can read the cached per-body cc-SDF
+        # directly instead of re-sampling it.
         comp._stream_multi_step = {
-            'kin':         kin,
-            'aabb_lo':     aabb_lo,
-            'aabb_dim':    aabb_dim,
-            'max_vol':     max_vol,
-            'gx':          gx_1d,
-            'gy':          gy_1d,
-            'gz':          gz_1d,
+            'kin':             kin,
+            'aabb_lo':         aabb_lo,
+            'aabb_dim':        aabb_dim,
+            'max_vol':         max_vol,
+            'gx':              gx_1d,
+            'gy':              gy_1d,
+            'gz':              gz_1d,
+            'sparse_cc_flat':  sparse_flat,
+            'cell_offsets':    cell_off,
         }
 
     # ------------------------------------------------------------------

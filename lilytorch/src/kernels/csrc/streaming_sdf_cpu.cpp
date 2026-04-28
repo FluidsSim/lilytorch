@@ -410,15 +410,15 @@ void streaming_sdf_min_3d_multi_cpu(
 //  uses atomicAdd on out (i.e. += into existing storage); we mirror
 //  that here so callers may invoke repeatedly with a pre-existing
 //  accumulator.
+//
+//  Reads the per-body cc-SDF directly from the cache populated by
+//  streaming_sdf_min_3d_multi (`sparse_cc_flat` + `cell_offsets`),
+//  avoiding a second trilinear interpolation per cell.
 // =====================================================================
 
 void bdim_forces_3d_multi_cpu(
-    const at::Tensor& F_flat, const at::Tensor& F_offsets,
-    const at::Tensor& bx_flat, const at::Tensor& bx_offsets,
-    const at::Tensor& by_flat, const at::Tensor& by_offsets,
-    const at::Tensor& bz_flat, const at::Tensor& bz_offsets,
-    const at::Tensor& body_shapes,
-    const at::Tensor& body_meta,
+    const at::Tensor& sparse_cc_flat,
+    const at::Tensor& cell_offsets,
     const at::Tensor& kin,
     const at::Tensor& aabb_lo,
     const at::Tensor& aabb_dim,
@@ -437,11 +437,8 @@ void bdim_forces_3d_multi_cpu(
     TORCH_CHECK(out.scalar_type() == at::kDouble,
                 "bdim_forces_3d_multi_cpu: out must be float64");
 
-    AT_DISPATCH_FLOATING_TYPES(F_flat.scalar_type(), "bdim_forces_3d_multi_cpu", [&] {
-        auto F_c  = F_flat.contiguous();
-        auto bx_c = bx_flat.contiguous();
-        auto by_c = by_flat.contiguous();
-        auto bz_c = bz_flat.contiguous();
+    AT_DISPATCH_FLOATING_TYPES(sparse_cc_flat.scalar_type(), "bdim_forces_3d_multi_cpu", [&] {
+        auto sp_c = sparse_cc_flat.contiguous();
         auto gx_c = gx.contiguous();
         auto gy_c = gy.contiguous();
         auto gz_c = gz.contiguous();
@@ -452,16 +449,8 @@ void bdim_forces_3d_multi_cpu(
         auto py_c = py.contiguous();
         auto pz_c = pz.contiguous();
 
-        const scalar_t* F_ptr   = F_c.data_ptr<scalar_t>();
-        const scalar_t* bx_ptr  = bx_c.data_ptr<scalar_t>();
-        const scalar_t* by_ptr  = by_c.data_ptr<scalar_t>();
-        const scalar_t* bz_ptr  = bz_c.data_ptr<scalar_t>();
-        const int64_t*  F_off   = F_offsets.data_ptr<int64_t>();
-        const int64_t*  bx_off  = bx_offsets.data_ptr<int64_t>();
-        const int64_t*  by_off  = by_offsets.data_ptr<int64_t>();
-        const int64_t*  bz_off  = bz_offsets.data_ptr<int64_t>();
-        const int64_t*  shapes  = body_shapes.data_ptr<int64_t>();
-        const scalar_t* meta    = body_meta.data_ptr<scalar_t>();
+        const scalar_t* sp_ptr  = sp_c.data_ptr<scalar_t>();
+        const int64_t*  cell_off= cell_offsets.data_ptr<int64_t>();
         const scalar_t* kin_ptr = kin.data_ptr<scalar_t>();
         const int64_t*  lo      = aabb_lo.data_ptr<int64_t>();
         const int64_t*  dim_    = aabb_dim.data_ptr<int64_t>();
@@ -496,26 +485,11 @@ void bdim_forces_3d_multi_cpu(
             const int j0_b = (int)lo[b*3 + 1];
             const int k0_b = (int)lo[b*3 + 2];
 
-            const scalar_t* F_b  = F_ptr  + F_off[b];
-            const scalar_t* bx_b = bx_ptr + bx_off[b];
-            const scalar_t* by_b = by_ptr + by_off[b];
-            const scalar_t* bz_b = bz_ptr + bz_off[b];
-            const int Mx = (int)shapes[b*3 + 0];
-            const int My = (int)shapes[b*3 + 1];
-            const int Mz = (int)shapes[b*3 + 2];
-
-            const scalar_t* M = meta + b*10;
-            const scalar_t bx0 = M[0], by0 = M[1], bz0 = M[2];
-            const scalar_t bxL = M[3], byL = M[4], bzL = M[5];
-            const scalar_t idx_ = M[6], idy_ = M[7], idz_ = M[8];
-            const scalar_t inv_vol = M[9];
-
+            // Only the COM (kin[12..14]) is needed for force/torque arms.
             const scalar_t* K = kin_ptr + b*21;
-            const scalar_t r00 = K[0],  r01 = K[1],  r02 = K[2];
-            const scalar_t r10 = K[3],  r11 = K[4],  r12 = K[5];
-            const scalar_t r20 = K[6],  r21 = K[7],  r22 = K[8];
-            const scalar_t bp_x = K[9],  bp_y = K[10], bp_z = K[11];
             const scalar_t cm_x = K[12], cm_y = K[13], cm_z = K[14];
+
+            const std::int64_t sparse_base = (std::int64_t)cell_off[b];
 
             double accs[12] = {0,0,0,0,0,0,0,0,0,0,0,0};
 
@@ -535,15 +509,8 @@ void bdim_forces_3d_multi_cpu(
                     const scalar_t yc = gy_ptr[j];
                     const scalar_t zc = gz_ptr[k];
 
-                    const scalar_t dxw = xc - bp_x, dyw = yc - bp_y, dzw = zc - bp_z;
-                    const scalar_t bxq = r00*dxw + r01*dyw + r02*dzw;
-                    const scalar_t byq = r10*dxw + r11*dyw + r12*dzw;
-                    const scalar_t bzq = r20*dxw + r21*dyw + r22*dzw;
-                    const scalar_t sdf = trilinear_sample_border<scalar_t>(
-                        F_b, bx_b, by_b, bz_b, Mx, My, Mz,
-                        bx0, by0, bz0, bxL, byL, bzL,
-                        idx_, idy_, idz_, inv_vol,
-                        bxq, byq, bzq);
+                    // Read cached per-body cc-SDF (no resampling).
+                    const scalar_t sdf = sp_ptr[sparse_base + (std::int64_t)idx];
 
                     scalar_t delta_visc = 0;
                     const scalar_t d_visc = sdf - eps_s;

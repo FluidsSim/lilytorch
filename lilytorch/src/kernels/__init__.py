@@ -11,6 +11,7 @@ registers four operators under the ``lilytorch_kernels`` torch library:
 CUDA kernels live in ``csrc/cuda/streaming_sdf.cu``; the C++ glue,
 schemas and CPU stubs live in ``csrc/ops.cpp``.
 """
+import torch  # noqa: F401 — ensures libtorch is loaded before _C.so dlopen
 from . import _C  # noqa: F401  -- triggers TORCH_LIBRARY registration
 from .ops import (
     streaming_sdf_min_3d,

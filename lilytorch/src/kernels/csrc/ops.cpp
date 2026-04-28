@@ -61,13 +61,14 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " Tensor(e!) body_u, Tensor(f!) body_v, Tensor(g!) body_w,"
         " Tensor(h!) sparse_cc_flat"
         ") -> ()");
+    // Forces kernel: reads the per-body cc-SDF cached in `sparse_cc_flat`
+    // (populated by streaming_sdf_min_3d_multi), so it no longer needs the
+    // body SDF grid / axis tensors / body_meta. `kin` is still passed for
+    // the per-body COM (rows 12..14 of each 21-stride block).
     m.def(
         "bdim_forces_3d_multi("
-        "Tensor F_flat, Tensor F_offsets,"
-        " Tensor bx_flat, Tensor bx_offsets,"
-        " Tensor by_flat, Tensor by_offsets,"
-        " Tensor bz_flat, Tensor bz_offsets,"
-        " Tensor body_shapes, Tensor body_meta, Tensor kin,"
+        "Tensor sparse_cc_flat, Tensor cell_offsets,"
+        " Tensor kin,"
         " Tensor aabb_lo, Tensor aabb_dim,"
         " Tensor gx, Tensor gy, Tensor gz,"
         " int u_i0, int u_j0, int u_k0, int Sj, int Sk,"
