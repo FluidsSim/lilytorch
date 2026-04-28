@@ -954,6 +954,31 @@ class FluidSolver:
         # Requires mesh-based bodies exposing (sdf.F, sdf.x, sdf.y, sdf.z).
         # Opt-in.
         self._batched_sdf_3d = bool(solver.get("batched_sdf_3d", False))
+        # Custom C++/CUDA trilinear SDF evaluation in `_update_3d` (the
+        # streaming, non-batched per-body path).  Replaces every
+        # `body.sdf(px, py, pz)` call (which dispatches to
+        # `RegularGridInterpolatorGridSample3D`, i.e. `grid_sample`) by
+        # the dedicated trilinear kernel from `pytorch_interpolation`
+        # (``RegularGridInterpolator3D`` / ``trilinear_interp_3d``).
+        # No coordinate normalisation, no 5-D reshape, no grid_sample
+        # overhead.  Per-body AABB cropping is preserved.  Opt-in.
+        self._custom_trilinear_3d = bool(solver.get("custom_trilinear_3d", False))
+        # Phase-B fused-CUDA streaming SDF / face-velocity update.
+        # One C++/CUDA kernel per body fuses rotate + 4 trilinear samples
+        # + 4 running-min updates + per-body sparse cc store.
+        # Implies custom_trilinear_3d (re-uses cached samplers).  Opt-in.
+        self._streaming_sdf_3d = bool(solver.get("streaming_sdf_3d", False))
+        # Phase D: fused per-body force / torque integration.  Re-samples
+        # body SDF on the fly inside the same C++/CUDA op that does the
+        # delta-function reduction, eliminating the slice-write packing
+        # into ``_fnb_*`` buffers and the dense (B, D_i, D_j, D_k)
+        # narrow-batch kernel.  Requires ``streaming_sdf_3d`` + the
+        # union-AABB shared-stress crop (``force_shared_union``).
+        self._streaming_forces_3d = bool(solver.get("streaming_forces_3d", False))
+        if self._streaming_forces_3d:
+            self._streaming_sdf_3d = True
+            self._forces_shared_union = True
+            self._forces_narrow_band = True
         # Lazy-allocated padded buffers (see _init_forces_narrow_batch)
         self._fnb_D = None        # (D_i, D_j, D_k)
         self._fnb_sdf = None      # (B, D_i, D_j, D_k)
@@ -1009,7 +1034,10 @@ class FluidSolver:
                   + ("  + shared-stress UNION crop (dynamic)" if self._forces_shared_union else "")
                   + ("  + mu/normals UNION crop (dynamic)" if self._mu_normals_union else "")
                   + ("  + BDIM meta UNION crop (dynamic)" if self._bdim_union else "")
-                  + ("  + batched-SDF update (grid_sample)" if self._batched_sdf_3d else ""))
+                  + ("  + batched-SDF update (grid_sample)" if self._batched_sdf_3d else "")
+                  + ("  + custom-trilinear SDF (C++/CUDA, streaming)" if self._custom_trilinear_3d else "")
+                  + ("  + streaming fused-CUDA SDF update (Phase C: multi-body batched)" if self._streaming_sdf_3d else "")
+                  + ("  + Phase D: fused forces (re-sample SDF on the fly)" if self._streaming_forces_3d else ""))
         else:
             self._forces_shared_compiled = _forces_shared_3d
             self._forces_body_compiled = _forces_body_integrate_3d
@@ -1591,6 +1619,10 @@ class FluidSolver:
         else:
             ny, nz = self.normal_y, self.normal_z
 
+        # ============================================================
+        # Phase F (fused per-body forces) was removed; the path below
+        # uses the streaming forces / shared-stress kernels (Phase D).
+        # ============================================================
         # ---- decide whether to crop shared kernel to union AABB ------
         # Only worthwhile when narrow-band path is on and sparse SDFs are
         # available.  We compute the union AABB across all bodies and run
@@ -1654,7 +1686,25 @@ class FluidSolver:
         # tensors live in the graph's replay buffer and will be overwritten
         # by the next compiled call.  Clone them here so the body-integrate
         # kernel can safely read them.
-        if self._compile_forces:
+        #
+        # SKIPPED when Phase D streaming forces will fire: that kernel
+        # consumes stress / pforce in-place during this step and never
+        # reads them across step boundaries.  At low-N this saves 6
+        # full-grid memcpy launches per step.
+        _comp_for_stream = self.composite_body
+        _have_sparse_for_stream = (
+            hasattr(_comp_for_stream, '_sdf_sparse')
+            and len(_comp_for_stream._sdf_sparse) > 0
+            and _comp_for_stream._sdf_sparse[0] is not None
+        )
+        _will_stream_forces = (
+            self._streaming_forces_3d
+            and _have_sparse_for_stream
+            and getattr(_comp_for_stream, '_stream_multi_step', None) is not None
+            and getattr(_comp_for_stream, '_stream_multi_static', None) is not None
+            and self.force_delta_order == 1
+        )
+        if self._compile_forces and not _will_stream_forces:
             xstress  = xstress.clone()
             ystress  = ystress.clone()
             zstress  = zstress.clone()
@@ -1690,6 +1740,89 @@ class FluidSolver:
         )
         _use_narrow = self._forces_narrow_band and _have_sparse
         _use_narrow_batch = self._forces_narrow_batch and _have_sparse
+
+        # ---- Phase D: fused per-body force integration --------------
+        _stream_step = getattr(comp, '_stream_multi_step', None)
+        _stream_static = getattr(comp, '_stream_multi_static', None)
+        _use_streaming_forces = (
+            self._streaming_forces_3d
+            and _have_sparse
+            and _stream_step is not None
+            and _stream_static is not None
+            and self.force_delta_order == 1
+        )
+        if _use_streaming_forces:
+            from lilytorch.src.kernels import bdim_forces_3d_multi
+            if u_aabb is not None:
+                ui0, ui1, uj0, uj1, uk0, uk1 = u_aabb
+            else:
+                # Full-grid fallback: stress / pforce live on the full
+                # fluid grid, so the union-relative origin is (0, 0, 0)
+                # and the union dims are the full grid dims.  Lets us
+                # fire Phase D even when union cropping is disabled
+                # (low-N regime where cropping launch overhead dominates).
+                Ni, Nj, Nk = u.shape
+                ui0, uj0, uk0 = 0, 0, 0
+                ui1, uj1, uk1 = Ni, Nj, Nk
+            Sj = uj1 - uj0
+            Sk = uk1 - uk0
+            eps_body = comp.bodies[0].eps
+            # Persistent (B, 12) accumulator: avoid per-step torch.zeros
+            # allocation (saves a malloc + a memset launch).
+            out = getattr(self, '_phaseD_out_buf', None)
+            if out is None or out.shape[0] != B:
+                out = torch.zeros((B, 12), dtype=torch.float64, device=self.device)
+                self._phaseD_out_buf = out
+            else:
+                out.zero_()
+            # Skip redundant .contiguous() — _forces_shared_*_compiled
+            # already returns row-major contiguous tensors.
+            bdim_forces_3d_multi(
+                _stream_static['F_flat'],  _stream_static['F_offsets'],
+                _stream_static['bx_flat'], _stream_static['bx_offsets'],
+                _stream_static['by_flat'], _stream_static['by_offsets'],
+                _stream_static['bz_flat'], _stream_static['bz_offsets'],
+                _stream_static['body_shapes'], _stream_static['body_meta'],
+                _stream_step['kin'],
+                _stream_step['aabb_lo'], _stream_step['aabb_dim'],
+                _stream_step['gx'], _stream_step['gy'], _stream_step['gz'],
+                ui0, uj0, uk0, Sj, Sk,
+                xstress, ystress, zstress,
+                pforce_x, pforce_y, pforce_z,
+                eps_body, self.eps, h3,
+                _stream_step['max_vol'],
+                out,
+            )
+            # Vectorised dispatch of the (B, 12) result into the per-body
+            # force/torque buffers.  Replaces 24 × B individual element-
+            # assignment ATen dispatches (≥ 1 ms host overhead at small B)
+            # with 12 contiguous slice writes.
+            out_s = out if out.dtype == u.dtype else out.to(u.dtype)
+            self.friction_force_lin_x[:B] = out_s[:, 0]
+            self.friction_force_lin_y[:B] = out_s[:, 1]
+            self.friction_force_lin_z[:B] = out_s[:, 2]
+            self.friction_force_ang_x[:B] = out_s[:, 3]
+            self.friction_force_ang_y[:B] = out_s[:, 4]
+            self.friction_force_ang_z[:B] = out_s[:, 5]
+            self.pressure_force_x[:B]     = out_s[:, 6]
+            self.pressure_force_y[:B]     = out_s[:, 7]
+            self.pressure_force_z[:B]     = out_s[:, 8]
+            self.pressure_force_ang_x[:B] = out_s[:, 9]
+            self.pressure_force_ang_y[:B] = out_s[:, 10]
+            self.pressure_force_ang_z[:B] = out_s[:, 11]
+            self.viscous_drag_record[:B, 0, iteration]    = out_s[:, 0]
+            self.viscous_drag_record[:B, 1, iteration]    = out_s[:, 1]
+            self.viscous_drag_record[:B, 2, iteration]    = out_s[:, 2]
+            self.viscous_torque_record[:B, 0, iteration]  = out_s[:, 3]
+            self.viscous_torque_record[:B, 1, iteration]  = out_s[:, 4]
+            self.viscous_torque_record[:B, 2, iteration]  = out_s[:, 5]
+            self.pressure_drag_record[:B, 0, iteration]   = out_s[:, 6]
+            self.pressure_drag_record[:B, 1, iteration]   = out_s[:, 7]
+            self.pressure_drag_record[:B, 2, iteration]   = out_s[:, 8]
+            self.pressure_torque_record[:B, 0, iteration] = out_s[:, 9]
+            self.pressure_torque_record[:B, 1, iteration] = out_s[:, 10]
+            self.pressure_torque_record[:B, 2, iteration] = out_s[:, 11]
+            return
 
         if _use_narrow_batch:
             # ---- BATCHED narrow-band path (fixed padded shape) ------
@@ -2463,11 +2596,10 @@ class FluidSolver:
             )
             phi[usl] = sub
             return phi
-        else:
-            return self._bdim_meta_compiled(
-                phi, mu0, body_vel, mu1,
-                normal_x, normal_y, normal_z, _h, 3,
-            ).clone()
+        return self._bdim_meta_compiled(
+            phi, mu0, body_vel, mu1,
+            normal_x, normal_y, normal_z, _h, 3,
+        ).clone()
 
     # ------------------------------------------------------------------
     #   Union AABB across all body sub-blocks (3-D)
@@ -2526,6 +2658,19 @@ class FluidSolver:
             u_i0, u_i1 = _pad(u_i0, u_i1, Ni, bucket)
             u_j0, u_j1 = _pad(u_j0, u_j1, Nj, bucket)
             u_k0, u_k1 = _pad(u_k0, u_k1, Nk, bucket)
+
+        # Cropping is only a net win when the union AABB covers a small
+        # fraction of the grid: each BDIM apply pays a fixed launch-
+        # overhead cost (7 .contiguous() slice copies + 1 slice-assign,
+        # ~9 kernel launches) that only beats the full-grid kernel when
+        # the saved kernel work exceeds ~9 × launch_overhead. Empirically
+        # the break-even point is around 50 % of the full volume; above
+        # that, return None so the caller falls back to the full-grid
+        # compiled kernel.
+        sub_vol  = (u_i1 - u_i0) * (u_j1 - u_j0) * (u_k1 - u_k0)
+        full_vol = Ni * Nj * Nk
+        if sub_vol > 0.5 * full_vol:
+            return None
 
         return (u_i0, u_i1, u_j0, u_j1, u_k0, u_k1)
 

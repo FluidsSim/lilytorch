@@ -107,6 +107,65 @@ CONDITION_SPECS = {
         "marker": "D",
         "color": "#ef6c00",
     },
+    "nbtri": {
+        "label": "custom trilinear (no batch, no crop)",
+        "short_label": "trilinear",
+        "flags": ["--custom_trilinear_3d"],
+        "linestyle": (0, (3, 1, 1, 1)),
+        "marker": "v",
+        "color": "#6a1b9a",
+    },
+    "nbtri_crop": {
+        "label": "custom trilinear + cropping",
+        "short_label": "tri + crop",
+        "flags": [
+            "--custom_trilinear_3d",
+            "--force_shared_union",
+            "--mu_normals_union",
+            "--bdim_union",
+            "--force_narrow_batch",
+        ],
+        "linestyle": (0, (5, 1)),
+        "marker": "P",
+        "color": "#ad1457",
+    },
+    "nbstream": {
+        "label": "streaming fused-CUDA (Phase B)",
+        "short_label": "stream",
+        "flags": ["--streaming_sdf_3d"],
+        "linestyle": (0, (1, 1)),
+        "marker": "X",
+        "color": "#00695c",
+    },
+    "nbstream_crop": {
+        "label": "streaming fused-CUDA + cropping",
+        "short_label": "stream + crop",
+        "flags": [
+            "--streaming_sdf_3d",
+            "--force_shared_union",
+            "--mu_normals_union",
+            "--bdim_union",
+            "--force_narrow_batch",
+        ],
+        "linestyle": (0, (3, 1, 1, 1, 1, 1)),
+        "marker": "*",
+        "color": "#004d40",
+    },
+    "nbforces": {
+        "label": "streaming + fused forces (Phase D)",
+        "short_label": "stream + forces",
+        "flags": [
+            "--streaming_sdf_3d",
+            "--streaming_forces_3d",
+            "--force_shared_union",
+            "--mu_normals_union",
+            "--bdim_union",
+            "--force_narrow_batch",
+        ],
+        "linestyle": "-",
+        "marker": "h",
+        "color": "#b71c1c",
+    },
     "nbon": {
         "label": "cropping + batching",
         "short_label": "crop + batch",
@@ -307,8 +366,8 @@ parser.add_argument(
 parser.add_argument(
     "--conditions",
     type=str,
-    default="nboff,nbcrop,nbbatch,nbon",
-    help="Comma-separated condition ids. Valid: nboff, nbcrop, nbbatch, nbon",
+    default="nboff,nbcrop,nbbatch,nbon,nbtri,nbtri_crop,nbstream,nbstream_crop,nbforces",
+    help="Comma-separated condition ids. Valid: nboff, nbcrop, nbbatch, nbon, nbtri, nbtri_crop, nbstream, nbstream_crop, nbforces",
 )
 parser.add_argument("--n_steps", type=int, default=50)
 parser.add_argument("--precompile", type=int, default=30)

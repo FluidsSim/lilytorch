@@ -186,6 +186,18 @@ parser.add_argument(
     "--batched_sdf_3d", action="store_true",
     help="Batched grid_sample SDF update (replaces per-body loop)")
 parser.add_argument(
+    "--custom_trilinear_3d", action="store_true",
+    help="Custom C++/CUDA trilinear SDF (pytorch_interpolation) in streaming "
+         "_update_3d (replaces grid_sample, no batching).")
+parser.add_argument(
+    "--streaming_sdf_3d", action="store_true",
+    help="Phase B: fused C++/CUDA streaming SDF/face-velocity update "
+         "(implies --custom_trilinear_3d).")
+parser.add_argument(
+    "--streaming_forces_3d", action="store_true",
+    help="Phase D: fused C++/CUDA per-body force/torque integration "
+         "(implies --streaming_sdf_3d and --force_shared_union).")
+parser.add_argument(
     "--union_narrow_band", action="store_true",
     help="Meta-flag: enables ALL narrow-band optimisations simultaneously "
          "(force_shared_union + mu_normals_union + bdim_union + "
@@ -282,6 +294,12 @@ for i, (nx, ny, nz) in enumerate(grids):
         cmd.append("--bdim_union")
     if args.batched_sdf_3d:
         cmd.append("--batched_sdf_3d")
+    if args.custom_trilinear_3d:
+        cmd.append("--custom_trilinear_3d")
+    if args.streaming_sdf_3d:
+        cmd.append("--streaming_sdf_3d")
+    if args.streaming_forces_3d:
+        cmd.append("--streaming_forces_3d")
 
     print(f"  CMD: {' '.join(cmd)}")
 

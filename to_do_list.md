@@ -1,7 +1,5 @@
 
-MEMORY COUNT 3D
-
----- FS variables -----
+---- MEMORY VARS -----
 sdf_val_u, sdf_val_v, sdf_val_w
 u0, v0, w0, p0
 u, v, w, p
@@ -14,25 +12,25 @@ mu0_v, mu1_v
 mu0_w, mu1_w
 diff_u, diff_v, diff_w
 
-python lilytorch/src/video_postprocess.py /data/andreaferrario/ns_data/cylinder_3d/Re_27_laminar --fields omega_z_3d vel_mag_3d --slow-factor 4
-
 
 # HIGH PRIORITY:
-- when running 1guilla slime exp i noticed that the gpu is not fully used - check why
+- The bdim_forces_3d_multi_kernel recompute the body cc sdf on the fly. I think this is a waste of computation. Indeed i think that forces can be computed together with the union sdf in streaming_sdf_min_3d_multi_kernel. Inside this kernel the body sdf is computed, there is where the delta force functions, and forces can be computed. This should save significant computational time.
+- Simplify methods for cost optimization: should i use full method (no cropping, no batching) and gpu sdf + force compilation kernels or just the second? Remove methods that are not useful
+- Do a systematic memory cost analysis. I think that the latest method with cuda kernels dynamically rewrites the body velocities and writed the forces computation inside the kernel whenever body properties are needed. This reduces the memory footprint by not storing the sdfs/body velocities of each rigid body (just a unique composite union body properties are stored).
+- The nbforces cost analysis plotted in cost_scaling_loglog.png reveals some scaling of the costs of "Other (residual)" and "Body update (SDF)". I do not understand why, since the cropping approach with aabb boxes should (in my view), maintain the same cost at different scales. Unless the domain size remains the same and just the number of grid points increases, in which case the portion of the domain that includes the body increases, so the operations should indeed increase. Please clarify.
+- Implement 2nd order accurate force method also for the cuda/C++ kernels (currently only )
+- Implement triquadratic interpolation similar to that implemented in pytorch_interpolation for evaluating the sdf functions in the cuda/C++ kernels. This should be optionally set by the user
+- Implement cuda kernels for 2d simulations in the style used for 2d simulations and test them (by running a 2d simulation example)
+- Combine solver.py and BDIMhandler in a single simulation file (just solver.py). BDIMhandler should only keep whatever is necessary for handling the coupling with FARMS, if possible. Review options and propose what to do.
+- Move force computations in an ad-hoc file (src/forces.py)
+- Move all non standard computations (sponge layer, carreau, etc) in a dedicated file in src/extras.py
+-
+
+
+
 - Test a simulation in 2d and one in 3d with an analytically moving body, both analytically defined
 - Test a simulation in 2d and one in 3d with an analytically moving body defined via a mesh file.
-- Create new 2d/3d salamander simulation
-- Make new zebrafish swimming models
 - Polish the repository
-- Schooling experiment with many zebrafish in 2d
-- Test solution of the Poisson equation using PINNs/CNNs - ask agent
-- Compare 1guilla pinned simulation against PIV data (need a fined grid)
-- Compare 1guilla with dyes experiments
--   The current branch was checkout from 3d_solver branch (3DB).
-    Check the diffs with 3DB. I want to soon merge it to the 3DB, but before doing that I want to:
-    - make sure that the code is cleaned of useless parts
-    - Make the gazzola sphere experiment runnable using the BDIMHANDLER approach (probably need to modify the BDIMHANDLER code to support arbitrary dimensions in 2d - for example x and z)
-    - the modifications done to 2d solvers should be implemented for 3d, I suspect some methods were only set for 2d simulations.
 
 # LOW PRIORITY:
 - Test an analytical 2d swimmer simulation
@@ -40,12 +38,10 @@ python lilytorch/src/video_postprocess.py /data/andreaferrario/ns_data/cylinder_
 
 
 # LONG TERM GOALS:
-- How to handle bodies outside the water (at the interface)
-- Add volume of fluids methods for handling water surface breaking (?)
+- How to handle bodies outside the water (at the interface). volume of fluids methods (?)
 - Add sph simulation support (?)
 - Monolithic fluid multi rigid body solver (?)
-- Simulate a submarine
-- AMR (Adaptive Mesh Refinement) - refine grid only near bodies and in the wake. Would dramatically reduce cost for external flow problems where most of the domain is smooth freestream.
+- AMR (Adaptive Mesh Refinement) - refine grid only near bodies and in the wake.
 
 
 # IMPROVEMENT SUGGESTIONS (from deep code review, March 2026)

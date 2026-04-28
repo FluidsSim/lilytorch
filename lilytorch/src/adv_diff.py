@@ -7,6 +7,7 @@ single code path -- inspired by WaterLily.jl.
 
 import torch
 from pytorch_interpolation import RegularGridInterpolatorAutomatic
+from lilytorch.src.kernels import _C as _lilytorch_kernels_C  # noqa: F401  -- registers torch.ops.lilytorch_kernels.*
 
 
 # =====================================================================
@@ -215,6 +216,15 @@ class AdvDiffSolver:
 
         # ---- precompute BC operations (avoid per-call allocations) ---
         self._bc_neumann_ops, self._bc_dirichlet_ops = self._build_bc_ops()
+
+        # ---- packed descriptors for the fused 3-D set_BCs CUDA op ----
+        # Built once here (shape-independent); ``shapes`` and ``dir_val``
+        # are cached lazily on first set_BCs() call (they need vel
+        # tensor info we don't yet have).
+        self._bc_fused_3d_packed = None
+        self._bc_fused_3d_cache  = None
+        if self.ndim == 3:
+            self._bc_fused_3d_packed = self._pack_bc_descriptors_3d()
 
         # ---- method dispatch -----------------------------------------
         _schemes = {
@@ -518,6 +528,128 @@ class AdvDiffSolver:
 
         return neumann_ops, dirichlet_ops
 
+    def _pack_bc_descriptors_3d(self):
+        """Pack ``_bc_neumann_ops`` / ``_bc_dirichlet_ops`` into compact
+        int32 / float descriptor tensors for the fused
+        ``apply_bcs_3d`` CUDA op.
+
+        Each Neumann tuple ``(comp, dst_idx, src_idx)`` is reduced to
+        ``(comp, axis, side)`` -- where *axis* is the dimension along
+        which the index is a scalar and *side* is 0 (lo: dst=0, src=1)
+        or 1 (hi: dst=N-1, src=N-2).
+
+        Each Dirichlet tuple ``(comp, dst_idx, value)`` is reduced to
+        ``(comp, axis, offset)`` plus a separate value array, where
+        ``offset`` is one of ``{0, 1, -1, -2}``.
+        """
+        ndim = self.ndim
+        assert ndim == 3, "fused BC packing only supports 3-D"
+
+        def _axis_and_index(idx_tuple):
+            # idx_tuple is e.g. (0, slice(None), slice(None))
+            for axis, x in enumerate(idx_tuple):
+                if isinstance(x, int):
+                    return axis, x
+            raise ValueError(f"unexpected BC index tuple: {idx_tuple}")
+
+        neu_rows = []
+        for comp, dst, src in self._bc_neumann_ops:
+            axis_d, dst_v = _axis_and_index(dst)
+            axis_s, src_v = _axis_and_index(src)
+            assert axis_d == axis_s, "Neumann dst/src axes must match"
+            # side 0: dst=0, src=1 ; side 1: dst=-1, src=-2
+            if dst_v == 0 and src_v == 1:
+                side = 0
+            elif dst_v == -1 and src_v == -2:
+                side = 1
+            else:
+                raise ValueError(
+                    f"unexpected Neumann (dst,src)=({dst_v},{src_v})")
+            neu_rows.append((int(comp), int(axis_d), int(side)))
+
+        dir_rows = []
+        dir_vals = []
+        for comp, dst, val in self._bc_dirichlet_ops:
+            axis_d, dst_v = _axis_and_index(dst)
+            dir_rows.append((int(comp), int(axis_d), int(dst_v)))
+            dir_vals.append(float(val))
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        neu_desc = torch.tensor(
+            neu_rows if neu_rows else [[0, 0, 0]],
+            dtype=torch.int32, device=device,
+        )
+        # Empty rows: we still need a 0-row tensor with 3 columns.
+        if not neu_rows:
+            neu_desc = neu_desc[:0].contiguous()
+
+        dir_desc = torch.tensor(
+            dir_rows if dir_rows else [[0, 0, 0]],
+            dtype=torch.int32, device=device,
+        )
+        if not dir_rows:
+            dir_desc = dir_desc[:0].contiguous()
+
+        return {
+            "neu_desc": neu_desc,
+            "dir_desc": dir_desc,
+            "dir_vals_py": dir_vals,  # cast to vel dtype on first use
+        }
+
+    def _build_fused_bc_cache(self, vel):
+        """Lazily build the per-call cache for ``apply_bcs_3d``.
+
+        Captures per-component shapes, the max plane dim, and a
+        dtype-correct ``dir_val`` tensor.  Stored on
+        ``self._bc_fused_3d_cache``; rebuilt automatically if the
+        signature (shapes / dtype / device) of ``vel`` changes.
+        """
+        u, v, w = vel
+        sig = (
+            tuple(u.shape), tuple(v.shape), tuple(w.shape),
+            u.dtype, u.device,
+        )
+        cache = self._bc_fused_3d_cache
+        if cache is not None and cache["sig"] == sig:
+            return cache
+
+        device = u.device
+        shapes = torch.tensor(
+            [list(u.shape), list(v.shape), list(w.shape)],
+            dtype=torch.int64, device=device,
+        )
+        max_plane_dim = int(max(max(u.shape), max(v.shape), max(w.shape)))
+
+        packed = self._bc_fused_3d_packed
+        # Move int descriptors to vel's device if they're not already.
+        neu_desc = packed["neu_desc"]
+        dir_desc = packed["dir_desc"]
+        if neu_desc.device != device:
+            neu_desc = neu_desc.to(device)
+        if dir_desc.device != device:
+            dir_desc = dir_desc.to(device)
+
+        dir_val = torch.tensor(
+            packed["dir_vals_py"] if packed["dir_vals_py"] else [0.0],
+            dtype=u.dtype, device=device,
+        )
+        if not packed["dir_vals_py"]:
+            dir_val = dir_val[:0].contiguous()
+
+        cache = {
+            "sig": sig,
+            "shapes": shapes,
+            "neu_desc": neu_desc,
+            "dir_desc": dir_desc,
+            "dir_val": dir_val,
+            "max_plane_dim": max_plane_dim,
+        }
+        # Persist updated descriptor device too, so future calls skip the move.
+        self._bc_fused_3d_packed["neu_desc"] = neu_desc
+        self._bc_fused_3d_packed["dir_desc"] = dir_desc
+        self._bc_fused_3d_cache = cache
+        return cache
+
     def set_BCs(self, *vel):
         """Apply Dirichlet / Neumann BCs on the ghost layer.
 
@@ -525,9 +657,31 @@ class AdvDiffSolver:
             (dim0_lo, dim0_hi, dim1_lo, dim1_hi, [dim2_lo, dim2_hi])
         i.e. (west, east, south, north, [bottom, top]) in 3-D.
 
-        Uses precomputed ``_bc_ops`` — no allocations or string
-        comparisons at runtime.
+        In 3-D with all-CUDA, contiguous, same-dtype velocity tensors
+        and floating dtype, dispatches to the fused ``apply_bcs_3d``
+        CUDA op (one kernel launch instead of 18+ small slice copies).
+        Otherwise falls back to the precomputed Python loop.
         """
+        if (self.ndim == 3
+                and self._bc_fused_3d_packed is not None
+                and len(vel) == 3
+                and all(t.is_cuda for t in vel)
+                and vel[0].dtype == vel[1].dtype == vel[2].dtype
+                and vel[0].dtype in (torch.float32, torch.float64)
+                and vel[0].is_contiguous()
+                and vel[1].is_contiguous()
+                and vel[2].is_contiguous()):
+            cache = self._build_fused_bc_cache(vel)
+            torch.ops.lilytorch_kernels.apply_bcs_3d(
+                vel[0], vel[1], vel[2],
+                cache["shapes"],
+                cache["neu_desc"],
+                cache["dir_desc"],
+                cache["dir_val"],
+                cache["max_plane_dim"],
+            )
+            return
+
         for comp, dst, src in self._bc_neumann_ops:
             vel[comp][dst] = vel[comp][src]
         for comp, dst, val in self._bc_dirichlet_ops:
