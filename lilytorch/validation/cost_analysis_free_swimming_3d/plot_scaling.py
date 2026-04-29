@@ -75,7 +75,12 @@ CATEGORIES = {
     "Convection & diffusion":  ["3a  "],
     "BDIM meta-equation":      ["3b"],
     "Projection (pressure)":   ["3c "],
+    "set_BCs (3d)":            ["3d"],
+    "var-density coeffs (3e)": ["3e"],
+    "release BDIM (3f)":       ["3f"],
     "Forces":                  ["4 "],
+    "Plotting & saving":       ["5 "],
+    "FARMS (apply_forces)":    ["6 "],
 }
 _OTHER_LABEL = "Other (residual)"
 
@@ -85,7 +90,12 @@ CAT_COLOURS = {
     "Convection & diffusion":  "#42a5f5",
     "BDIM meta-equation":      "#ab47bc",   # violet: distinct from adv/diff blue
     "Projection (pressure)":   "#ef5350",
+    "set_BCs (3d)":            "#fbc02d",
+    "var-density coeffs (3e)": "#7cb342",
+    "release BDIM (3f)":       "#bcaaa4",
     "Forces":                  "#ffa726",
+    "Plotting & saving":       "#8d6e63",
+    "FARMS (apply_forces)":    "#5c6bc0",
     _OTHER_LABEL:              "#90a4ae",
 }
 
@@ -95,7 +105,12 @@ HATCHES = {
     "Convection & diffusion":  "",
     "BDIM meta-equation":      "",
     "Projection (pressure)":   "",
+    "set_BCs (3d)":            "",
+    "var-density coeffs (3e)": "",
+    "release BDIM (3f)":       "",
     "Forces":                  "xx",
+    "Plotting & saving":       "",
+    "FARMS (apply_forces)":    "//",
     _OTHER_LABEL:              "..",
 }
 
@@ -266,6 +281,33 @@ if n_grids >= 2:
     scale_nlogn  = y0 * (x_ref / x_ref[0]) * np.log2(x_ref) / np.log2(x_ref[0])
     ax2.loglog(x_ref, scale_linear, "k--", alpha=0.35, linewidth=1.0, label=r"$\mathcal{O}(N)$")
     ax2.loglog(x_ref, scale_nlogn,  "k:",  alpha=0.35, linewidth=1.0, label=r"$\mathcal{O}(N\log N)$")
+
+    # ── a + b·N reference fitted to TOTAL step ──────────────────────
+    # The plateau-investigation plan asks for an explicit ``a + b·N``
+    # overlay on the per-condition log-log so the constant-cost floor
+    # is visually obvious.  ``a`` (intercept) is the per-step launch /
+    # FARMS / Python-overhead floor; ``b`` is the asymptotic per-cell
+    # slope.  We fit a non-negative least-squares to the TOTAL-step
+    # series (residual + every category) so the curve always exists,
+    # even when the smallest grid is launch-overhead-bound.
+    totals_arr = np.zeros_like(cells_arr)
+    for cat_name in PLOT_ORDER:
+        totals_arr = totals_arr + np.array(cat_data[cat_name])
+    if np.all(totals_arr > 0) and len(cells_arr) >= 2:
+        # Linear least-squares on (1, N) — closed form, no clipping
+        # needed because TOTAL is strictly positive.
+        A = np.column_stack([np.ones_like(cells_arr), cells_arr])
+        coef, *_ = np.linalg.lstsq(A, totals_arr, rcond=None)
+        a_fit, b_fit = float(coef[0]), float(coef[1])
+        if a_fit > 0 and b_fit > 0:
+            x_dense = np.geomspace(x_ref[0], x_ref[1], 64)
+            ax2.loglog(
+                x_dense, a_fit + b_fit * x_dense,
+                color="#37474f", linestyle=(0, (4, 2)), linewidth=1.2,
+                alpha=0.7,
+                label=fr"$a + b\,N$  ($a={a_fit:.2f}\,$ms, "
+                      fr"$b={b_fit*1e6:.2f}\,$ns/cell)",
+            )
 
     ax2.set_xlabel("Number of grid cells")
     ax2.set_ylabel("Time per step (ms)")

@@ -354,12 +354,15 @@ def instrument_handler(handler):
             self.terminate = False
 
             # ── 6. Apply forces (FARMS ← GPU) ───────────────────
-            # Untimed on purpose: the GPU→CPU transfer and FARMS
-            # MuJoCo tick are not representative of solver work.
-            # They still execute inside the outer ``TOTAL step``
-            # timer so their cost falls into the "Other (residual)"
-            # category automatically.
-            _orig_apply(self, task, physics)
+            # Now timed under category "6 " so the FARMS↔solver
+            # bridge (GPU→CPU transfer, MuJoCo tick, xfrc_applied
+            # write) is attributed explicitly instead of hiding in
+            # the "Other (residual)" bucket.  This is what lets the
+            # per-condition log-log plots tell us how much of the
+            # low-N plateau is FARMS overhead vs un-attributed
+            # solver/launch overhead.
+            with T("6  apply_forces (FARMS)"):
+                _orig_apply(self, task, physics)
 
             # ── 7. Free BDIM intermediates ───────────────────────
             ffs._release_bdim_fields()
@@ -864,11 +867,17 @@ CATEGORIES = {
     "Convection\n& diffusion":     ["3a  "],
     "BDIM\nmeta-equation":         ["3b"],
     "Projection\n(pressure)":      ["3c "],
+    "set_BCs (3d)":                ["3d"],
+    "var-density\ncoeffs (3e)":    ["3e"],
+    "release BDIM\nfields (3f)":   ["3f"],
     "Forces\ncomputation":         ["4 "],
+    "Plotting\n& saving":          ["5 "],
+    "FARMS\n(apply_forces)":       ["6 "],
 }
 # "Other" is injected after the explicit categories have been summed.
-# It captures set_BCs, FARMS apply_forces (no longer timed individually),
-# parent-wrapper Python overhead, and any untagged work.
+# With 3d/3e/3f and FARMS(apply_forces) now timed explicitly, the
+# residual should shrink to genuinely un-attributed work (parent-
+# wrapper Python overhead, untagged kernels, CUDA launch overhead).
 _OTHER_LABEL = "Other\n(residual)"
 
 CAT_COLOURS = {
@@ -877,7 +886,12 @@ CAT_COLOURS = {
     "Convection\n& diffusion":     "#42a5f5",
     "BDIM\nmeta-equation":         "#ab47bc",   # violet: distinct from adv/diff blue
     "Projection\n(pressure)":      "#ef5350",
+    "set_BCs (3d)":                "#fbc02d",
+    "var-density\ncoeffs (3e)":    "#7cb342",
+    "release BDIM\nfields (3f)":   "#bcaaa4",
     "Forces\ncomputation":         "#ffa726",
+    "Plotting\n& saving":          "#8d6e63",
+    "FARMS\n(apply_forces)":       "#5c6bc0",
     _OTHER_LABEL:                  "#90a4ae",
 }
 
