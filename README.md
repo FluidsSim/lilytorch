@@ -252,8 +252,11 @@ Four git submodules from [farmsim](https://github.com/farmsim), pinned to the `a
 
 6. **Install lilytorch in editable mode:**
    ```bash
-   pip install -e .
+    pip install -e . --no-build-isolation
    ```
+    The native kernels must be compiled against the same PyTorch install
+    you will use at runtime. Build isolation can pull a different libtorch
+    ABI and leave ``lilytorch/src/kernels/_C*.so`` unloadable.
 
 ### Key Dependencies
 

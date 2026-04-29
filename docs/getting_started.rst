@@ -50,7 +50,7 @@ jellyfish, sphere drops, cylinders, …).
    pip install -r requirements.txt
 
    # 5. Install lilytorch in editable mode
-   pip install -e .
+  pip install -e . --no-build-isolation
 
 You can now run any example or script that does **not** import
 ``farms_*`` modules — see :doc:`examples`.
@@ -81,11 +81,19 @@ eel, salamander, zebrafish, submarine, …).
    cd -
 
    # 4. Install lilytorch itself in editable mode
-   pip install -e .
+  pip install -e . --no-build-isolation
 
 This installs ``farms_core``, ``farms_mujoco``, ``farms_sim`` and
 ``farms_amphibious`` in editable mode with their Cython extensions
 compiled.
+
+.. note::
+
+  The native kernels in ``lilytorch/src/kernels`` must be built against
+  the exact PyTorch installation used at runtime. Build isolation can
+  pull a different libtorch ABI and produce import errors such as
+  ``_C.so: undefined symbol``. Install PyTorch in the target environment
+  first, then use ``pip install -e . --no-build-isolation``.
 
 .. tip::
 

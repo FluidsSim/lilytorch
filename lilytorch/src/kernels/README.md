@@ -39,10 +39,14 @@ The extension is built by the top-level `setup.py`:
 
 ```bash
 # editable / in-place build (preferred during development)
-pip install -e .              # builds lilytorch.src.kernels._C
+pip install -e . --no-build-isolation  # builds lilytorch.src.kernels._C
 # or just rebuild the extension after editing CUDA / cpp sources:
-bash lilytorch/src/kernels/build.sh
+PYTHON=$(which python) bash lilytorch/src/kernels/build.sh
 ```
+
+The extension must be compiled against the same PyTorch installation you
+will import at runtime. ``pip install -e .`` with build isolation can
+use a temporary torch build and leave ``_C.so`` with unresolved symbols.
 
 You can disable the CUDA build entirely by exporting `LILYTORCH_NO_CUDA=1`
 before installing — the extension will be skipped and the Python

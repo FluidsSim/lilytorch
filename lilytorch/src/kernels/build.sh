@@ -7,6 +7,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 cd "$REPO_ROOT"
+PYTHON_BIN="${PYTHON:-python}"
 
 # Force recompile of all source files.
 touch lilytorch/src/kernels/csrc/cuda/streaming_sdf.cu
@@ -16,4 +17,4 @@ rm -f build/temp.linux-*/lilytorch/src/kernels/csrc/cuda/streaming_sdf.o \
       build/temp.linux-*/lilytorch/src/kernels/csrc/ops.o \
       build/temp.linux-*/lilytorch/src/kernels/csrc/streaming_sdf_cpu.o 2>/dev/null || true
 
-python setup.py build_ext --inplace
+"$PYTHON_BIN" setup.py build_ext --inplace

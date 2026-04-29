@@ -11,7 +11,6 @@ def _kernel_extensions():
 
     Skipped (returns []) when:
       * ``LILYTORCH_NO_CUDA=1`` is set, or
-      * torch is not importable, or
       * CUDA is not available at build time.
     """
     if os.environ.get("LILYTORCH_NO_CUDA", "0") == "1":
@@ -23,8 +22,24 @@ def _kernel_extensions():
             CUDAExtension,
             CUDA_HOME,
         )
-    except Exception:
-        return []
+    except Exception as exc:
+        raise RuntimeError(
+            "PyTorch must be installed in the target environment before "
+            "building lilytorch's native kernels. Install torch first, then "
+            "rerun `pip install -e . --no-build-isolation` or "
+            "`python setup.py build_ext --inplace`."
+        ) from exc
+
+    torch_path = os.path.realpath(torch.__file__)
+    if "pip-build-env-" in torch_path:
+        raise RuntimeError(
+            "lilytorch's native kernels must be built against the same "
+            "PyTorch installation used at runtime. pip build isolation is "
+            f"currently using a temporary PyTorch at {torch_path}. Rerun "
+            "`pip install -e . --no-build-isolation` after installing torch "
+            "in the target environment, or rebuild in place with "
+            "`python setup.py build_ext --inplace`."
+        )
 
     use_cuda = torch.cuda.is_available() and CUDA_HOME is not None
     Extension = CUDAExtension if use_cuda else CppExtension
@@ -49,10 +64,14 @@ def _kernel_extensions():
         extra_link_args.extend(["-O0", "-g"])
 
     here = os.path.dirname(os.path.abspath(__file__))
-    csrc = os.path.join(here, "lilytorch", "src", "kernels", "csrc")
-    sources = sorted(glob.glob(os.path.join(csrc, "*.cpp")))
+    csrc = os.path.join("lilytorch", "src", "kernels", "csrc")
+    abs_csrc = os.path.join(here, csrc)
+    sources = sorted(glob.glob(os.path.join(abs_csrc, "*.cpp")))
     if use_cuda:
-        sources += sorted(glob.glob(os.path.join(csrc, "cuda", "*.cu")))
+        sources += sorted(glob.glob(os.path.join(abs_csrc, "cuda", "*.cu")))
+
+    # Convert all absolute paths to relative paths (relative to setup.py dir)
+    sources = [os.path.relpath(src, here) for src in sources]
 
     return [
         Extension(
