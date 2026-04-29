@@ -806,7 +806,21 @@ with open(raw_path, "w") as f:
         vals = []
         for lb in raw_labels:
             times = T._data.get(lb, [])
-            vals.append(f"{1e3*times[i]:.4f}" if i < len(times) else "")
+            n_calls = len(times)
+            if n_calls == 0:
+                vals.append("")
+            elif n_calls == n_steps:
+                # Single-firing per step: direct index.
+                vals.append(f"{1e3*times[i]:.4f}")
+            else:
+                # Multi-firing per step (e.g. set_BCs fires 2×, BDIM meta
+                # fires 3×): use Bresenham grouping so each call is
+                # attributed to exactly one step and per-step totals are
+                # correct.  This ensures cost_perstep_*.csv matches what
+                # run_cost_analysis.py reports in the barh figure.
+                start = (i * n_calls) // n_steps
+                end   = ((i + 1) * n_calls) // n_steps
+                vals.append(f"{1e3 * sum(times[start:end]):.4f}" if start < n_calls else "")
         f.write(f"{i},{used},{','.join(vals)}\n")
 print(f"  Per-step CSV saved → {raw_path}")
 
