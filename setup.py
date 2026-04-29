@@ -30,15 +30,19 @@ def _kernel_extensions():
     Extension = CUDAExtension if use_cuda else CppExtension
 
     debug_mode = os.environ.get("DEBUG", "0") == "1"
+    # CPU parallelism is provided by ATen's intra-op thread pool
+    # (``at::parallel_for``) — no OpenMP linkage is required for the
+    # ``.cpp`` sources. The ``-fopenmp`` / ``-lgomp`` flags were dropped
+    # so the extension builds cleanly across PyTorch versions and on
+    # toolchains without an OpenMP runtime (e.g. default macOS clang).
     extra_compile_args = {
         "cxx": [
             "-O0" if debug_mode else "-O3",
             "-fdiagnostics-color=always",
-            "-fopenmp",
         ],
         "nvcc": ["-O0" if debug_mode else "-O3"],
     }
-    extra_link_args = ["-lgomp"]
+    extra_link_args = []
     if debug_mode:
         extra_compile_args["cxx"].append("-g")
         extra_compile_args["nvcc"].append("-g")
