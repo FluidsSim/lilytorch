@@ -79,28 +79,6 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " Tensor(a!) out"
         ") -> ()");
 
-    // Legacy "resample-on-the-fly" forces kernel, kept exclusively for
-    // the cost-analysis benchmark
-    // (validation/cost_analysis_free_swimming_3d/bench_forces_methods.py).
-    // It mirrors the pre-cache implementation: re-samples the body SDF
-    // per cell via trilinear interpolation. Production code MUST use the
-    // cached `bdim_forces_3d_multi` op above.
-    m.def(
-        "bdim_forces_3d_multi_legacy_resample("
-        "Tensor F_flat, Tensor F_offsets,"
-        " Tensor bx_flat, Tensor bx_offsets,"
-        " Tensor by_flat, Tensor by_offsets,"
-        " Tensor bz_flat, Tensor bz_offsets,"
-        " Tensor body_shapes, Tensor body_meta, Tensor kin,"
-        " Tensor aabb_lo, Tensor aabb_dim,"
-        " Tensor gx, Tensor gy, Tensor gz,"
-        " int u_i0, int u_j0, int u_k0, int Sj, int Sk,"
-        " Tensor xs, Tensor ys, Tensor zs,"
-        " Tensor px, Tensor py, Tensor pz,"
-        " float eps_body, float eps_solver, float h3,"
-        " int max_vol_per_body,"
-        " Tensor(a!) out"
-        ") -> ()");
     m.def(
         "apply_bcs_3d("
         "Tensor(a!) u, Tensor(b!) v, Tensor(c!) w,"

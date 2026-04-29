@@ -10,6 +10,7 @@ breakdowns across grid resolutions and produces paper-quality figures.
 |------|---------|
 | `run_cost_analysis.py`          | Single-grid benchmark. Runs FARMS in-process with CUDA-synced timers around every major sub-kernel; writes CSV + per-grid figures. |
 | `run_multigrid_cost_analysis.py`| Driver that launches the single-grid script in isolated subprocesses across several grids, then calls `plot_scaling.py`. |
+| `run_scaling_conditions_pipeline.py` | Multi-condition wrapper around the multigrid driver. After substantial testing only two methods are exposed: the production method (`nbforces_opt`) and a no-cropping / no-batching reference (`nboff`). |
 | `plot_scaling.py`               | Reads all `cost_breakdown_*.csv` files and produces multi-resolution scaling figures (stacked bars, log–log, % distribution). |
 
 ## Running
