@@ -5,12 +5,20 @@
 //  the CUDA kernels in cuda/streaming_sdf.cu line-for-line so that the
 //  ops can run on hosts without CUDA (testing, debugging, CPU-only
 //  builds via LILYTORCH_NO_CUDA=1). The hot loops are parallelised with
-//  OpenMP. Float dispatch covers float32 / float64; half precision is
-//  intentionally skipped on CPU.
+//  ``at::parallel_for`` (PyTorch's intra-op thread pool) instead of
+//  OpenMP. This keeps the source compatible across PyTorch versions —
+//  some GCC + OpenMP combinations rejected ``_Pragma("omp ...")`` when
+//  it appears inside an ``AT_DISPATCH_FLOATING_TYPES`` lambda body
+//  ("'#pragma' is not allowed here"), and the exact expansion of that
+//  macro varies by PyTorch release. Using ``at::parallel_for`` avoids
+//  putting any pragmas inside macro-expanded lambdas and is part of
+//  ATen's long-stable public API. Float dispatch covers float32 /
+//  float64; half precision is intentionally skipped on CPU.
 // =====================================================================
 
 #include <ATen/ATen.h>
 #include <ATen/Dispatch.h>
+#include <ATen/Parallel.h>
 #include <torch/all.h>
 #include <torch/library.h>
 #include <c10/util/ArrayRef.h>
@@ -18,6 +26,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <mutex>
 #include <vector>
 
 namespace lilytorch_kernels {
@@ -298,8 +307,8 @@ void streaming_sdf_min_3d_cpu(
         const scalar_t dw_x = neg_half_h * r02, dw_y = neg_half_h * r12, dw_z = neg_half_h * r22;
         const int i0_i = (int)i0, j0_i = (int)j0, k0_i = (int)k0;
 
-        _Pragma("omp parallel for schedule(static)")
-        for (int tid = 0; tid < N; ++tid) {
+        at::parallel_for(0, N, /*grain_size=*/1024, [&](int64_t _begin, int64_t _end) {
+        for (int tid = (int)_begin; tid < (int)_end; ++tid) {
             const int di  = tid / (Aj * Ak);
             const int rem = tid - di * (Aj * Ak);
             const int dj  = rem / Ak;
@@ -323,6 +332,7 @@ void streaming_sdf_min_3d_cpu(
                 sdf_cc_ptr, sdf_u_ptr, sdf_v_ptr, sdf_w_ptr,
                 bU_ptr, bV_ptr, bW_ptr, sp_ptr);
         }
+        });
     });
 }
 
@@ -434,8 +444,8 @@ void streaming_sdf_min_3d_multi_cpu(
 
             const std::int64_t sparse_base = (std::int64_t)cell_off[b];
 
-            _Pragma("omp parallel for schedule(static)")
-            for (int local = 0; local < vol; ++local) {
+            at::parallel_for(0, vol, /*grain_size=*/1024, [&](int64_t _begin, int64_t _end) {
+            for (int local = (int)_begin; local < (int)_end; ++local) {
                 const int di  = local / (Aj * Ak);
                 const int rem = local - di * (Aj * Ak);
                 const int dj  = rem / Ak;
@@ -459,6 +469,7 @@ void streaming_sdf_min_3d_multi_cpu(
                     sdf_cc_p, sdf_u_p, sdf_v_p, sdf_w_p,
                     bU_p, bV_p, bW_p, sparse_p);
             }
+            });
         }
     });
 }
@@ -549,41 +560,51 @@ void bdim_forces_3d_multi_cpu(
         const int Sj_i   = (int)Sj,   Sk_i   = (int)Sk;
 
         // ------------------------------------------------------------
-        //  Single fused OpenMP parallel region across ALL bodies.
-        //  Replaces the previous per-body parallel-region + critical
-        //  pattern (B× fork/join + B× critical merges).  Each thread
-        //  keeps a private (B, 12) accumulator and merges once at the
-        //  end of the region.  At low-B this saves O(B) × OpenMP
-        //  fork/join overhead (~10–50 µs each) per call.
+        //  Per-body parallel reduction via ``at::parallel_for``.
+        //
+        //  Previous versions used a single fused ``omp parallel`` region
+        //  that handled all bodies inside one fork/join, with each
+        //  thread holding a private (B, 12) accumulator. Two problems:
+        //    * GCC rejects ``_Pragma("omp ...")`` inside lambdas that
+        //      live inside macro arguments (the AT_DISPATCH lambda),
+        //      sometimes with "'#pragma' is not allowed here". The
+        //      exact expansion of AT_DISPATCH varies across PyTorch
+        //      versions, so the source was not portable.
+        //    * Hard dependency on ``-fopenmp`` / libgomp.
+        //
+        //  ``at::parallel_for`` reuses ATen's intra-op thread pool
+        //  (no per-call OS thread creation), so the per-body fork/join
+        //  cost the comment was worried about doesn't actually exist —
+        //  there's no real fork/join, just task submission to a hot
+        //  pool.
         // ------------------------------------------------------------
         const int B_local = B;
         std::vector<double> accs(static_cast<size_t>(B_local) * 12, 0.0);
 
-        _Pragma("omp parallel")
-        {
-            // Per-thread (B, 12) accumulator on the stack-equivalent.
-            std::vector<double> local(static_cast<size_t>(B_local) * 12, 0.0);
+        for (int b = 0; b < B_local; ++b) {
+            const int Ai = (int)dim_[b*3 + 0];
+            const int Aj = (int)dim_[b*3 + 1];
+            const int Ak = (int)dim_[b*3 + 2];
+            const int vol = Ai * Aj * Ak;
+            if (vol <= 0) continue;
 
-            for (int b = 0; b < B_local; ++b) {
-                const int Ai = (int)dim_[b*3 + 0];
-                const int Aj = (int)dim_[b*3 + 1];
-                const int Ak = (int)dim_[b*3 + 2];
-                const int vol = Ai * Aj * Ak;
-                if (vol <= 0) continue;
+            const int i0_b = (int)lo[b*3 + 0];
+            const int j0_b = (int)lo[b*3 + 1];
+            const int k0_b = (int)lo[b*3 + 2];
 
-                const int i0_b = (int)lo[b*3 + 0];
-                const int j0_b = (int)lo[b*3 + 1];
-                const int k0_b = (int)lo[b*3 + 2];
+            // Only the COM (kin[12..14]) is needed for force/torque arms.
+            const scalar_t* K = kin_ptr + b*21;
+            const scalar_t cm_x = K[12], cm_y = K[13], cm_z = K[14];
 
-                // Only the COM (kin[12..14]) is needed for force/torque arms.
-                const scalar_t* K = kin_ptr + b*21;
-                const scalar_t cm_x = K[12], cm_y = K[13], cm_z = K[14];
+            const std::int64_t sparse_base = (std::int64_t)cell_off[b];
+            double* lb = accs.data() + (size_t)b * 12;
+            std::mutex acc_mtx;
 
-                const std::int64_t sparse_base = (std::int64_t)cell_off[b];
-                double* lb = local.data() + (size_t)b * 12;
-
-                _Pragma("omp for nowait schedule(static)")
-                for (int idx = 0; idx < vol; ++idx) {
+            at::parallel_for(0, vol, /*grain_size=*/2048,
+                [&](int64_t _begin, int64_t _end)
+            {
+                double local12[12] = {0,0,0,0,0,0,0,0,0,0,0,0};
+                for (int idx = (int)_begin; idx < (int)_end; ++idx) {
                     // Read cached per-body cc-SDF first; band test gates
                     // every other read & flop in the loop body.
                     const scalar_t sdf = sp_ptr[sparse_base + (std::int64_t)idx];
@@ -631,29 +652,22 @@ void bdim_forces_3d_multi_cpu(
                     const double fp_y = (double)(py_ptr[s_idx] * delta_pres);
                     const double fp_z = (double)(pz_ptr[s_idx] * delta_pres);
 
-                    lb[0]  += fv_x;
-                    lb[1]  += fv_y;
-                    lb[2]  += fv_z;
-                    lb[3]  += (double)arm_y * fv_z - (double)arm_z * fv_y;
-                    lb[4]  += (double)arm_z * fv_x - (double)arm_x * fv_z;
-                    lb[5]  += (double)arm_x * fv_y - (double)arm_y * fv_x;
-                    lb[6]  += fp_x;
-                    lb[7]  += fp_y;
-                    lb[8]  += fp_z;
-                    lb[9]  += (double)arm_y * fp_z - (double)arm_z * fp_y;
-                    lb[10] += (double)arm_z * fp_x - (double)arm_x * fp_z;
-                    lb[11] += (double)arm_x * fp_y - (double)arm_y * fp_x;
+                    local12[0]  += fv_x;
+                    local12[1]  += fv_y;
+                    local12[2]  += fv_z;
+                    local12[3]  += (double)arm_y * fv_z - (double)arm_z * fv_y;
+                    local12[4]  += (double)arm_z * fv_x - (double)arm_x * fv_z;
+                    local12[5]  += (double)arm_x * fv_y - (double)arm_y * fv_x;
+                    local12[6]  += fp_x;
+                    local12[7]  += fp_y;
+                    local12[8]  += fp_z;
+                    local12[9]  += (double)arm_y * fp_z - (double)arm_z * fp_y;
+                    local12[10] += (double)arm_z * fp_x - (double)arm_x * fp_z;
+                    local12[11] += (double)arm_x * fp_y - (double)arm_y * fp_x;
                 }
-                // Implicit barrier handled by next ``omp for``; ``nowait``
-                // applies to the inner loop so threads can move on to the
-                // next body without synchronising — only the final reduction
-                // (below) needs synchronisation.
-            }
-
-            _Pragma("omp critical")
-            {
-                for (size_t c = 0; c < accs.size(); ++c) accs[c] += local[c];
-            }
+                std::lock_guard<std::mutex> lk(acc_mtx);
+                for (int c = 0; c < 12; ++c) lb[c] += local12[c];
+            });
         }
 
         for (int b = 0; b < B_local; ++b) {
@@ -780,13 +794,13 @@ void bdim_forces_3d_multi_legacy_resample_cpu(
             const scalar_t cm_x = K[12], cm_y = K[13], cm_z = K[14];
 
             double accs[12] = {0,0,0,0,0,0,0,0,0,0,0,0};
+            std::mutex acc_mtx;
 
-            _Pragma("omp parallel")
+            at::parallel_for(0, vol, /*grain_size=*/2048,
+                [&](int64_t _begin, int64_t _end)
             {
                 double local[12] = {0,0,0,0,0,0,0,0,0,0,0,0};
-
-                _Pragma("omp for nowait schedule(static)")
-                for (int idx = 0; idx < vol; ++idx) {
+                for (int idx = (int)_begin; idx < (int)_end; ++idx) {
                     const int di  = idx / (Aj * Ak);
                     const int rem = idx - di * (Aj * Ak);
                     const int dj  = rem / Ak;
@@ -849,11 +863,9 @@ void bdim_forces_3d_multi_legacy_resample_cpu(
                     local[10] += (double)arm_z * fp_x - (double)arm_x * fp_z;
                     local[11] += (double)arm_x * fp_y - (double)arm_y * fp_x;
                 }
-                _Pragma("omp critical")
-                {
-                    for (int c = 0; c < 12; ++c) accs[c] += local[c];
-                }
-            }
+                std::lock_guard<std::mutex> lk(acc_mtx);
+                for (int c = 0; c < 12; ++c) accs[c] += local[c];
+            });
 
             for (int c = 0; c < 12; ++c) {
                 out_ptr[b*12 + c] += accs[c] * h3_d;
@@ -884,23 +896,25 @@ static void apply_bcs_3d_one_plane(
     const std::int64_t s1 = (std::int64_t)Ny * Nz;
     const std::int64_t s2 = (std::int64_t)Nz;
 
-    #pragma omp parallel for collapse(2) schedule(static)
-    for (int i = 0; i < dim0_max; ++i) {
-        for (int j = 0; j < dim1_max; ++j) {
-            std::int64_t dst_lin, src_lin = 0;
-            if (axis == 0) {
-                dst_lin = (std::int64_t)dst_along * s1 + (std::int64_t)i * s2 + j;
-                if (is_neu) src_lin = (std::int64_t)src_along * s1 + (std::int64_t)i * s2 + j;
-            } else if (axis == 1) {
-                dst_lin = (std::int64_t)i * s1 + (std::int64_t)dst_along * s2 + j;
-                if (is_neu) src_lin = (std::int64_t)i * s1 + (std::int64_t)src_along * s2 + j;
-            } else {
-                dst_lin = (std::int64_t)i * s1 + (std::int64_t)j * s2 + dst_along;
-                if (is_neu) src_lin = (std::int64_t)i * s1 + (std::int64_t)j * s2 + src_along;
-            }
-            base[dst_lin] = is_neu ? base[src_lin] : value;
+    const int64_t total = (int64_t)dim0_max * (int64_t)dim1_max;
+    at::parallel_for(0, total, /*grain_size=*/1024, [&](int64_t _begin, int64_t _end) {
+    for (int64_t t = _begin; t < _end; ++t) {
+        const int i = (int)(t / dim1_max);
+        const int j = (int)(t % dim1_max);
+        std::int64_t dst_lin, src_lin = 0;
+        if (axis == 0) {
+            dst_lin = (std::int64_t)dst_along * s1 + (std::int64_t)i * s2 + j;
+            if (is_neu) src_lin = (std::int64_t)src_along * s1 + (std::int64_t)i * s2 + j;
+        } else if (axis == 1) {
+            dst_lin = (std::int64_t)i * s1 + (std::int64_t)dst_along * s2 + j;
+            if (is_neu) src_lin = (std::int64_t)i * s1 + (std::int64_t)src_along * s2 + j;
+        } else {
+            dst_lin = (std::int64_t)i * s1 + (std::int64_t)j * s2 + dst_along;
+            if (is_neu) src_lin = (std::int64_t)i * s1 + (std::int64_t)j * s2 + src_along;
         }
+        base[dst_lin] = is_neu ? base[src_lin] : value;
     }
+    });
 }
 
 void apply_bcs_3d_cpu(
