@@ -94,33 +94,18 @@ parser.add_argument("--bdim_union", action="store_true",
                          "Outside the union mu0=1, mu1=0, body_vel=0 makes "
                          "the meta-equation the identity, so phi[outside] "
                          "is left unchanged.")
-parser.add_argument("--batched_sdf_3d", action="store_true",
-                    help="Replace the per-body SDF loop in _update_3d with a "
-                         "single batched grid_sample across all bodies. "
-                         "Collapses ~150 serial GPU launches/step into ~6-8 "
-                         "(requires mesh-based bodies with sdf.F/x/y/z).")
-parser.add_argument("--custom_trilinear_3d", action="store_true",
-                    help="Replace grid_sample with the custom C++/CUDA "
-                         "trilinear kernel (pytorch_interpolation, "
-                         "RegularGridInterpolator3D) in the streaming "
-                         "_update_3d path. Independent of --batched_sdf_3d.")
 parser.add_argument("--streaming_sdf_3d", action="store_true",
                     help="Phase B: fused C++/CUDA streaming SDF/face-velocity "
                          "update.  One kernel per body replaces the Python "
-                         "per-body loop in BDIMhandler._update_3d. Implies "
-                         "--custom_trilinear_3d.")
+                         "per-body loop in BDIMhandler._update_3d.  The "
+                         "trilinear samplers (pytorch_interpolation) are "
+                         "auto-built when this is on.")
 parser.add_argument("--streaming_forces_3d", action="store_true",
                     help="Phase D: fused C++/CUDA per-body force/torque "
                          "integration.  Re-samples body SDF on the fly and "
                          "replaces the slice-write packing + narrow-batch "
                          "reduction with a single op call. Implies "
                          "--streaming_sdf_3d and --force_shared_union.")
-parser.add_argument("--union_narrow_band", action="store_true",
-                    help="Meta-flag: enables ALL narrow-band optimisations "
-                         "at once (force_shared_union + mu_normals_union + "
-                         "bdim_union + batched_sdf_3d + force_narrow_batch). "
-                         "This is the single switch users should turn on to "
-                         "activate every available narrow-band path.")
 parser.add_argument("--device",    type=str, default="cuda",
                     choices=["cuda", "cpu"])
 parser.add_argument("--out_dir",   type=str, default=None,
@@ -135,14 +120,6 @@ parser.add_argument("--tag_suffix", type=str, default="",
                     help="Suffix appended to the CSV filename tag "
                          "(e.g. '_small_nbon'). Defaults to empty string.")
 args = parser.parse_args()
-
-# Expand meta-flag — enables every narrow-band optimisation simultaneously.
-if args.union_narrow_band:
-    args.force_shared_union = True
-    args.mu_normals_union = True
-    args.bdim_union = True
-    args.batched_sdf_3d = True
-    args.force_narrow_batch = True
 
 USE_CUDA = args.device == "cuda" and torch.cuda.is_available()
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -633,17 +610,11 @@ def gen_simulation_config_lean(output_folder):
                 solver_cfg["mu_normals_union"] = True
             if args.bdim_union:
                 solver_cfg["bdim_union"] = True
-            if args.batched_sdf_3d:
-                solver_cfg["batched_sdf_3d"] = True
-            if args.custom_trilinear_3d:
-                solver_cfg["custom_trilinear_3d"] = True
             if args.streaming_sdf_3d:
                 solver_cfg["streaming_sdf_3d"] = True
-                solver_cfg["custom_trilinear_3d"] = True
             if args.streaming_forces_3d:
                 solver_cfg["streaming_forces_3d"] = True
                 solver_cfg["streaming_sdf_3d"] = True
-                solver_cfg["custom_trilinear_3d"] = True
 
     with open(yaml_path, "w") as f:
         yaml.dump(sim_dict, f, default_flow_style=False, sort_keys=False)
