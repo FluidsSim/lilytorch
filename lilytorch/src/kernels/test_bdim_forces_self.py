@@ -290,6 +290,32 @@ def main():
     assert norm > 1e-6, "reference output is ~0; test setup is degenerate"
     print("OK: bdim_forces_3d_multi matches the cached-cc-SDF reference.")
 
+    # ----- step 4: edge case for the early-skip optimisation ---------
+    # Replace the cached SDF with values that lie entirely outside both
+    # delta-bands.  All 12 force/torque accumulators must come out zero,
+    # *and* the kernel must not crash (no out-of-range stress reads, no
+    # NaN propagation).  Hits the fast-path branch where every cell is
+    # skipped before stress / pforce loads.
+    far = float(eps_body * 100.0 + eps_solver * 100.0)
+    sparse_far = torch.full_like(sparse_cc_flat, far)
+    out_far = torch.zeros((B, 12), dtype=torch.float64, device=device)
+    bdim_forces_3d_multi(
+        sparse_far, cell_off_t,
+        kin_t,
+        lo_t, dim_t,
+        gx, gy, gz,
+        u_i0, u_j0, u_k0, Sj, Sk,
+        xs, ys, zs, px, py, pz,
+        eps_body, eps_solver, h3,
+        max_vol,
+        out_far,
+    )
+    assert torch.all(out_far == 0).item(), (
+        f"early-skip path leaked non-zero outputs: max |out| = "
+        f"{out_far.abs().max().item():.3e}"
+    )
+    print("OK: all-out-of-band SDF produces exactly zero forces (early-skip).")
+
 
 if __name__ == "__main__":
     main()

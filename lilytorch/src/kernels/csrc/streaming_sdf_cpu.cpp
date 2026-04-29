@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <vector>
 
 namespace lilytorch_kernels {
 
@@ -525,103 +526,139 @@ void bdim_forces_3d_multi_cpu(
         const scalar_t* pz_ptr  = pz_c.data_ptr<scalar_t>();
         double*         out_ptr = out.data_ptr<double>();
 
-        const scalar_t eps_b    = (scalar_t)eps_body;
-        const scalar_t eps_s    = (scalar_t)eps_solver;
-        const scalar_t pi_v     = (scalar_t)3.141592653589793;
-        const scalar_t inv_2eps = (scalar_t)0.5 / eps_b;
-        const double   h3_d     = (double)h3;
+        const scalar_t eps_b      = (scalar_t)eps_body;
+        const scalar_t eps_s      = (scalar_t)eps_solver;
+        const scalar_t pi_v       = (scalar_t)3.141592653589793;
+        const scalar_t inv_2eps   = (scalar_t)0.5 / eps_b;
+        const scalar_t pi_over_eb = pi_v / eps_b;
+        const double   h3_d       = (double)h3;
+
+        // The smoothed deltas vanish unless sdf is in
+        //   visc-band:  eps_s - eps_b < sdf < eps_s + eps_b   (delta_visc)
+        //   pres-band:  -eps_b        < sdf < eps_b           (delta_pres)
+        // Their union is [min(-eps_b, eps_s-eps_b), max(eps_b, eps_s+eps_b)].
+        // Outside this union all 12 contributions are zero, so we skip
+        // the cell entirely (no stress / pforce reads, no cos calls).
+        // This is the dominant cost saving at low-N: typical body AABBs
+        // have only ~5–15% of cells in the band; the rest are deep
+        // inside / outside the body.
+        const scalar_t band_lo = (eps_s - eps_b) < (-eps_b) ? (eps_s - eps_b) : (-eps_b);
+        const scalar_t band_hi = (eps_s + eps_b) > ( eps_b) ? (eps_s + eps_b) : ( eps_b);
 
         const int u_i0_i = (int)u_i0, u_j0_i = (int)u_j0, u_k0_i = (int)u_k0;
         const int Sj_i   = (int)Sj,   Sk_i   = (int)Sk;
 
-        for (int b = 0; b < B; ++b) {
-            const int Ai = (int)dim_[b*3 + 0];
-            const int Aj = (int)dim_[b*3 + 1];
-            const int Ak = (int)dim_[b*3 + 2];
-            const int vol = Ai * Aj * Ak;
-            if (vol <= 0) continue;
+        // ------------------------------------------------------------
+        //  Single fused OpenMP parallel region across ALL bodies.
+        //  Replaces the previous per-body parallel-region + critical
+        //  pattern (B× fork/join + B× critical merges).  Each thread
+        //  keeps a private (B, 12) accumulator and merges once at the
+        //  end of the region.  At low-B this saves O(B) × OpenMP
+        //  fork/join overhead (~10–50 µs each) per call.
+        // ------------------------------------------------------------
+        const int B_local = B;
+        std::vector<double> accs(static_cast<size_t>(B_local) * 12, 0.0);
 
-            const int i0_b = (int)lo[b*3 + 0];
-            const int j0_b = (int)lo[b*3 + 1];
-            const int k0_b = (int)lo[b*3 + 2];
+        _Pragma("omp parallel")
+        {
+            // Per-thread (B, 12) accumulator on the stack-equivalent.
+            std::vector<double> local(static_cast<size_t>(B_local) * 12, 0.0);
 
-            // Only the COM (kin[12..14]) is needed for force/torque arms.
-            const scalar_t* K = kin_ptr + b*21;
-            const scalar_t cm_x = K[12], cm_y = K[13], cm_z = K[14];
+            for (int b = 0; b < B_local; ++b) {
+                const int Ai = (int)dim_[b*3 + 0];
+                const int Aj = (int)dim_[b*3 + 1];
+                const int Ak = (int)dim_[b*3 + 2];
+                const int vol = Ai * Aj * Ak;
+                if (vol <= 0) continue;
 
-            const std::int64_t sparse_base = (std::int64_t)cell_off[b];
+                const int i0_b = (int)lo[b*3 + 0];
+                const int j0_b = (int)lo[b*3 + 1];
+                const int k0_b = (int)lo[b*3 + 2];
 
-            double accs[12] = {0,0,0,0,0,0,0,0,0,0,0,0};
+                // Only the COM (kin[12..14]) is needed for force/torque arms.
+                const scalar_t* K = kin_ptr + b*21;
+                const scalar_t cm_x = K[12], cm_y = K[13], cm_z = K[14];
 
-            _Pragma("omp parallel")
-            {
-                double local[12] = {0,0,0,0,0,0,0,0,0,0,0,0};
+                const std::int64_t sparse_base = (std::int64_t)cell_off[b];
+                double* lb = local.data() + (size_t)b * 12;
 
                 _Pragma("omp for nowait schedule(static)")
                 for (int idx = 0; idx < vol; ++idx) {
+                    // Read cached per-body cc-SDF first; band test gates
+                    // every other read & flop in the loop body.
+                    const scalar_t sdf = sp_ptr[sparse_base + (std::int64_t)idx];
+
+                    // Early skip: outside both delta bands ⇒ contribution = 0.
+                    if (sdf <= band_lo || sdf >= band_hi) continue;
+
                     const int di  = idx / (Aj * Ak);
                     const int rem = idx - di * (Aj * Ak);
                     const int dj  = rem / Ak;
                     const int dk  = rem - dj * Ak;
-                    const int i = i0_b + di, j = j0_b + dj, k = k0_b + dk;
-
-                    const scalar_t xc = gx_ptr[i];
-                    const scalar_t yc = gy_ptr[j];
-                    const scalar_t zc = gz_ptr[k];
-
-                    // Read cached per-body cc-SDF (no resampling).
-                    const scalar_t sdf = sp_ptr[sparse_base + (std::int64_t)idx];
 
                     scalar_t delta_visc = 0;
                     const scalar_t d_visc = sdf - eps_s;
                     if (d_visc > -eps_b && d_visc < eps_b) {
-                        delta_visc = ((scalar_t)1 + std::cos(pi_v * d_visc / eps_b)) * inv_2eps;
+                        delta_visc = ((scalar_t)1 + std::cos(pi_over_eb * d_visc)) * inv_2eps;
                     }
                     scalar_t delta_pres = 0;
                     if (sdf > -eps_b && sdf < eps_b) {
-                        delta_pres = ((scalar_t)1 + std::cos(pi_v * sdf / eps_b)) * inv_2eps;
+                        delta_pres = ((scalar_t)1 + std::cos(pi_over_eb * sdf)) * inv_2eps;
                     }
+                    // Both deltas zero (can happen on the band edge) ⇒ skip.
+                    if (delta_visc == (scalar_t)0 && delta_pres == (scalar_t)0) continue;
 
+                    const int i = i0_b + di, j = j0_b + dj, k = k0_b + dk;
                     const int sub_i = i - u_i0_i;
                     const int sub_j = j - u_j0_i;
                     const int sub_k = k - u_k0_i;
                     const std::int64_t s_idx =
                         ((std::int64_t)sub_i * Sj_i + sub_j) * Sk_i + sub_k;
-                    const scalar_t xs_v = xs_ptr[s_idx], ys_v = ys_ptr[s_idx], zs_v = zs_ptr[s_idx];
-                    const scalar_t px_v = px_ptr[s_idx], py_v = py_ptr[s_idx], pz_v = pz_ptr[s_idx];
+
+                    const scalar_t xc = gx_ptr[i];
+                    const scalar_t yc = gy_ptr[j];
+                    const scalar_t zc = gz_ptr[k];
 
                     const scalar_t arm_x = xc - cm_x;
                     const scalar_t arm_y = yc - cm_y;
                     const scalar_t arm_z = zc - cm_z;
 
-                    const double fv_x = (double)(xs_v * delta_visc);
-                    const double fv_y = (double)(ys_v * delta_visc);
-                    const double fv_z = (double)(zs_v * delta_visc);
-                    const double fp_x = (double)(px_v * delta_pres);
-                    const double fp_y = (double)(py_v * delta_pres);
-                    const double fp_z = (double)(pz_v * delta_pres);
+                    // Hoisted reads: only loaded for in-band cells.
+                    const double fv_x = (double)(xs_ptr[s_idx] * delta_visc);
+                    const double fv_y = (double)(ys_ptr[s_idx] * delta_visc);
+                    const double fv_z = (double)(zs_ptr[s_idx] * delta_visc);
+                    const double fp_x = (double)(px_ptr[s_idx] * delta_pres);
+                    const double fp_y = (double)(py_ptr[s_idx] * delta_pres);
+                    const double fp_z = (double)(pz_ptr[s_idx] * delta_pres);
 
-                    local[0]  += fv_x;
-                    local[1]  += fv_y;
-                    local[2]  += fv_z;
-                    local[3]  += (double)arm_y * fv_z - (double)arm_z * fv_y;
-                    local[4]  += (double)arm_z * fv_x - (double)arm_x * fv_z;
-                    local[5]  += (double)arm_x * fv_y - (double)arm_y * fv_x;
-                    local[6]  += fp_x;
-                    local[7]  += fp_y;
-                    local[8]  += fp_z;
-                    local[9]  += (double)arm_y * fp_z - (double)arm_z * fp_y;
-                    local[10] += (double)arm_z * fp_x - (double)arm_x * fp_z;
-                    local[11] += (double)arm_x * fp_y - (double)arm_y * fp_x;
+                    lb[0]  += fv_x;
+                    lb[1]  += fv_y;
+                    lb[2]  += fv_z;
+                    lb[3]  += (double)arm_y * fv_z - (double)arm_z * fv_y;
+                    lb[4]  += (double)arm_z * fv_x - (double)arm_x * fv_z;
+                    lb[5]  += (double)arm_x * fv_y - (double)arm_y * fv_x;
+                    lb[6]  += fp_x;
+                    lb[7]  += fp_y;
+                    lb[8]  += fp_z;
+                    lb[9]  += (double)arm_y * fp_z - (double)arm_z * fp_y;
+                    lb[10] += (double)arm_z * fp_x - (double)arm_x * fp_z;
+                    lb[11] += (double)arm_x * fp_y - (double)arm_y * fp_x;
                 }
-                _Pragma("omp critical")
-                {
-                    for (int c = 0; c < 12; ++c) accs[c] += local[c];
-                }
+                // Implicit barrier handled by next ``omp for``; ``nowait``
+                // applies to the inner loop so threads can move on to the
+                // next body without synchronising — only the final reduction
+                // (below) needs synchronisation.
             }
 
+            _Pragma("omp critical")
+            {
+                for (size_t c = 0; c < accs.size(); ++c) accs[c] += local[c];
+            }
+        }
+
+        for (int b = 0; b < B_local; ++b) {
             for (int c = 0; c < 12; ++c) {
-                out_ptr[b*12 + c] += accs[c] * h3_d;
+                out_ptr[b*12 + c] += accs[(size_t)b * 12 + c] * h3_d;
             }
         }
     });

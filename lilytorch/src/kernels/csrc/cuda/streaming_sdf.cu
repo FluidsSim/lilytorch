@@ -598,62 +598,78 @@ __global__ void bdim_forces_3d_multi_kernel(
         const int k0  = (int)aabb_lo[b*3 + 2];
         const int i = i0 + di, j = j0 + dj, k = k0 + dk;
 
-        // Only the COM (kin[12..14]) is needed for force/torque arms.
-        const scalar_t* K = kin + b*21;
-        const scalar_t cm_x = K[12], cm_y = K[13], cm_z = K[14];
-
-        const scalar_t xc = gx[i];
-        const scalar_t yc = gy[j];
-        const scalar_t zc = gz[k];
-
         // Read cached per-body cc-SDF written by streaming_sdf_min_3d_multi.
         const int64_t sparse_base = cell_offsets[b];
         const scalar_t sdf = sparse_cc_flat[sparse_base + (int64_t)local];
 
-        // Smoothed deltas (1st-order cosine)
-        const scalar_t pi_v = (scalar_t)3.141592653589793;
-        const scalar_t inv_2eps = (scalar_t)0.5 / eps_body;
-        scalar_t delta_visc = 0;
-        const scalar_t d_visc = sdf - eps_solver;
-        if (d_visc > -eps_body && d_visc < eps_body) {
-            delta_visc = ((scalar_t)1 + cos(pi_v * d_visc / eps_body)) * inv_2eps;
+        // Early-skip optimisation: most cells of the AABB lie far inside
+        // or far outside the body so both smoothed deltas are zero — the
+        // 12 force/torque contributions vanish.  Bail out early to avoid
+        // 6 global-memory loads (xs/ys/zs/px/py/pz) and 2 ``cos`` calls.
+        // Threads with skip=true keep ``acc[*] = 0.0`` (already zeroed
+        // above) and still participate in the shared-memory reduction
+        // below, so the reduction tree remains correct.
+        const scalar_t band_lo =
+            (eps_solver - eps_body) < (-eps_body)
+                ? (eps_solver - eps_body) : (-eps_body);
+        const scalar_t band_hi =
+            (eps_solver + eps_body) > ( eps_body)
+                ? (eps_solver + eps_body) : ( eps_body);
+        if (sdf > band_lo && sdf < band_hi) {
+            // Only the COM (kin[12..14]) is needed for force/torque arms.
+            const scalar_t* K = kin + b*21;
+            const scalar_t cm_x = K[12], cm_y = K[13], cm_z = K[14];
+
+            const scalar_t xc = gx[i];
+            const scalar_t yc = gy[j];
+            const scalar_t zc = gz[k];
+
+            // Smoothed deltas (1st-order cosine)
+            const scalar_t pi_v = (scalar_t)3.141592653589793;
+            const scalar_t inv_2eps = (scalar_t)0.5 / eps_body;
+            const scalar_t pi_over_eb = pi_v / eps_body;
+            scalar_t delta_visc = 0;
+            const scalar_t d_visc = sdf - eps_solver;
+            if (d_visc > -eps_body && d_visc < eps_body) {
+                delta_visc = ((scalar_t)1 + cos(pi_over_eb * d_visc)) * inv_2eps;
+            }
+            scalar_t delta_pres = 0;
+            if (sdf > -eps_body && sdf < eps_body) {
+                delta_pres = ((scalar_t)1 + cos(pi_over_eb * sdf)) * inv_2eps;
+            }
+
+            // Read union-AABB-relative stress (caller guarantees AABB ⊆ union AABB)
+            const int sub_i = i - u_i0;
+            const int sub_j = j - u_j0;
+            const int sub_k = k - u_k0;
+            const int s_idx = (sub_i * Sj + sub_j) * Sk + sub_k;
+            const scalar_t xs_v = xs[s_idx], ys_v = ys[s_idx], zs_v = zs[s_idx];
+            const scalar_t px_v = px[s_idx], py_v = py[s_idx], pz_v = pz[s_idx];
+
+            const scalar_t arm_x = xc - cm_x;
+            const scalar_t arm_y = yc - cm_y;
+            const scalar_t arm_z = zc - cm_z;
+
+            const double fv_x_d = (double)(xs_v * delta_visc);
+            const double fv_y_d = (double)(ys_v * delta_visc);
+            const double fv_z_d = (double)(zs_v * delta_visc);
+            const double fp_x_d = (double)(px_v * delta_pres);
+            const double fp_y_d = (double)(py_v * delta_pres);
+            const double fp_z_d = (double)(pz_v * delta_pres);
+
+            acc[0] = fv_x_d;
+            acc[1] = fv_y_d;
+            acc[2] = fv_z_d;
+            acc[3] = (double)arm_y * fv_z_d - (double)arm_z * fv_y_d;
+            acc[4] = (double)arm_z * fv_x_d - (double)arm_x * fv_z_d;
+            acc[5] = (double)arm_x * fv_y_d - (double)arm_y * fv_x_d;
+            acc[6] = fp_x_d;
+            acc[7] = fp_y_d;
+            acc[8] = fp_z_d;
+            acc[9]  = (double)arm_y * fp_z_d - (double)arm_z * fp_y_d;
+            acc[10] = (double)arm_z * fp_x_d - (double)arm_x * fp_z_d;
+            acc[11] = (double)arm_x * fp_y_d - (double)arm_y * fp_x_d;
         }
-        scalar_t delta_pres = 0;
-        if (sdf > -eps_body && sdf < eps_body) {
-            delta_pres = ((scalar_t)1 + cos(pi_v * sdf / eps_body)) * inv_2eps;
-        }
-
-        // Read union-AABB-relative stress (caller guarantees AABB ⊆ union AABB)
-        const int sub_i = i - u_i0;
-        const int sub_j = j - u_j0;
-        const int sub_k = k - u_k0;
-        const int s_idx = (sub_i * Sj + sub_j) * Sk + sub_k;
-        const scalar_t xs_v = xs[s_idx], ys_v = ys[s_idx], zs_v = zs[s_idx];
-        const scalar_t px_v = px[s_idx], py_v = py[s_idx], pz_v = pz[s_idx];
-
-        const scalar_t arm_x = xc - cm_x;
-        const scalar_t arm_y = yc - cm_y;
-        const scalar_t arm_z = zc - cm_z;
-
-        const double fv_x_d = (double)(xs_v * delta_visc);
-        const double fv_y_d = (double)(ys_v * delta_visc);
-        const double fv_z_d = (double)(zs_v * delta_visc);
-        const double fp_x_d = (double)(px_v * delta_pres);
-        const double fp_y_d = (double)(py_v * delta_pres);
-        const double fp_z_d = (double)(pz_v * delta_pres);
-
-        acc[0] = fv_x_d;
-        acc[1] = fv_y_d;
-        acc[2] = fv_z_d;
-        acc[3] = (double)arm_y * fv_z_d - (double)arm_z * fv_y_d;
-        acc[4] = (double)arm_z * fv_x_d - (double)arm_x * fv_z_d;
-        acc[5] = (double)arm_x * fv_y_d - (double)arm_y * fv_x_d;
-        acc[6] = fp_x_d;
-        acc[7] = fp_y_d;
-        acc[8] = fp_z_d;
-        acc[9]  = (double)arm_y * fp_z_d - (double)arm_z * fp_y_d;
-        acc[10] = (double)arm_z * fp_x_d - (double)arm_x * fp_z_d;
-        acc[11] = (double)arm_x * fp_y_d - (double)arm_y * fp_x_d;
     }
 
     // Sequential 12-channel block reductions (one shared-mem buffer)
