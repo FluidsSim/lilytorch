@@ -255,6 +255,45 @@ def _grid_arg(grid_list):
 
 
 def _load_total_step_ms(data_dir):
+    """Load median TOTAL step (ms) per grid from a condition's CSV folder.
+
+    For backward compatibility this returns ``{grid: total_ms}``.  Use
+    :func:`_load_step_breakdown_ms` when residual / per-category sums
+    are needed too.
+    """
+    return {grid: bd["total"]
+            for grid, bd in _load_step_breakdown_ms(data_dir).items()}
+
+
+# Prefix taxonomy mirrors plot_scaling.py: every prefix matches exactly
+# one explicit leaf timer column, so summing them and subtracting from
+# "TOTAL step" yields the residual (un-attributed per-step work).  The
+# residual is what dominates the plateau on the per-condition log-log,
+# so making it visible at the pipeline level is the whole point of
+# item #4 of the plan.
+_EXPLICIT_PREFIXES = (
+    "1b",
+    "2 ",
+    "3a  ",
+    "3b",
+    "3c ",
+    "3d",
+    "3e",
+    "3f",
+    "4 ",
+    "5 ",
+    "6 ",
+)
+
+
+def _load_step_breakdown_ms(data_dir):
+    """Per-grid step breakdown read from cost_perstep_*.csv (preferred)
+    or cost_breakdown_*.csv (fallback).
+
+    Returns ``{grid: {"total": ms, "explicit": ms, "residual": ms}}``.
+    The explicit sum uses the same leaf-timer prefixes as plot_scaling.py
+    so the residual definition is consistent across all four scripts.
+    """
     records = {}
     for csv_path in glob.glob(os.path.join(data_dir, "cost_breakdown_*.csv")):
         base = os.path.basename(csv_path)
@@ -263,7 +302,9 @@ def _load_total_step_ms(data_dir):
             continue
         grid = tuple(int(match.group(i)) for i in range(1, 4))
         perstep_path = csv_path.replace("cost_breakdown_", "cost_perstep_")
+
         total_ms = None
+        explicit_ms = None
         if os.path.exists(perstep_path):
             try:
                 df_ps = pd.read_csv(perstep_path)
@@ -271,30 +312,57 @@ def _load_total_step_ms(data_dir):
                     df_ps = df_ps[df_ps["used"] != "discarded"]
                 if len(df_ps) > 0 and "TOTAL step" in df_ps.columns:
                     total_ms = float(df_ps["TOTAL step"].median())
+                    matching = [c for c in df_ps.columns
+                                if c != "TOTAL step"
+                                and any(c.startswith(p) for p in _EXPLICIT_PREFIXES)]
+                    if matching:
+                        explicit_ms = float(df_ps[matching].sum(axis=1).median())
+                    else:
+                        explicit_ms = 0.0
             except Exception:
                 total_ms = None
+                explicit_ms = None
+
         if total_ms is None:
+            # Fallback: cost_breakdown_*.csv aggregates only.  Residual
+            # cannot be reconstructed exactly from aggregates because
+            # per-step medians don't sum like means; we therefore set
+            # ``explicit`` to None and let the caller skip residual.
             with open(csv_path) as handle:
                 reader = csv.DictReader(handle)
                 for row in reader:
                     if row.get("component", "").strip() == "TOTAL step":
                         if row.get("median_ms"):
                             total_ms = float(row["median_ms"])
-                        else:
+                        elif row.get("mean_ms"):
                             total_ms = float(row["mean_ms"])
                         break
-        if total_ms is not None:
-            records[grid] = total_ms
+
+        if total_ms is None:
+            continue
+
+        if explicit_ms is None:
+            residual_ms = None
+        else:
+            residual_ms = max(total_ms - explicit_ms, 0.0)
+
+        records[grid] = {
+            "total":    total_ms,
+            "explicit": explicit_ms,
+            "residual": residual_ms,
+        }
     return records
 
 
 def _plot_combined_loglog(root_dir, condition_ids):
     condition_records = {}
+    condition_breakdowns = {}
     for cond in condition_ids:
         cond_dir = os.path.join(root_dir, cond)
-        records = _load_total_step_ms(cond_dir)
-        if records:
-            condition_records[cond] = records
+        breakdown = _load_step_breakdown_ms(cond_dir)
+        if breakdown:
+            condition_breakdowns[cond] = breakdown
+            condition_records[cond] = {g: bd["total"] for g, bd in breakdown.items()}
 
     if len(condition_records) < 1:
         print("\n  Skipping combined plots: no condition CSVs found.")
@@ -349,6 +417,10 @@ def _plot_combined_loglog(root_dir, condition_ids):
     plt.close(fig)
     print(f"  Figure saved → {out_path}")
 
+    # Residual-vs-TOTAL plot is independent of "nboff" being present —
+    # render it before the speed-up plot's early-return guard.
+    _plot_residual_vs_total(root_dir, condition_ids, condition_breakdowns)
+
     if "nboff" not in condition_records:
         return True
 
@@ -388,6 +460,89 @@ def _plot_combined_loglog(root_dir, condition_ids):
     plt.close(fig2)
     print(f"  Figure saved → {out_path2}")
     return True
+
+
+def _plot_residual_vs_total(root_dir, condition_ids, condition_breakdowns):
+    """Combined residual-vs-total log-log overlay (item #4 of the plan).
+
+    For every condition we draw two curves on the same axes:
+      • TOTAL step (solid)         — what the pipeline already reports
+      • Residual = TOTAL − Σ explicit categories (dashed, same colour) —
+        the un-attributed per-step work that drives the low-N plateau.
+
+    A flat residual that doesn't shrink with N is the visual signature
+    of launch / Python / FARMS overhead, and is what items #1 and #2 of
+    the plan are intended to fix.  Until apply_forces is timed under
+    category ``6 `` (and 3d/3e/3f are surfaced), the residual will
+    over-report; that is exactly why the plot-side attribution changes
+    in item #3 land in the same PR as this combined plot.
+    """
+    have_residual = any(
+        bd.get("residual") is not None
+        for breakdown in condition_breakdowns.values()
+        for bd in breakdown.values()
+    )
+    if not have_residual:
+        print("  Skipping residual-vs-total plot: no per-step CSVs with "
+              "category columns found.")
+        return
+
+    fig, ax = plt.subplots(figsize=(7.4, 4.8))
+    for cond in condition_ids:
+        breakdown = condition_breakdowns.get(cond)
+        if not breakdown:
+            continue
+        grids = sorted(breakdown, key=_grid_cells)
+        cells = np.array([_grid_cells(g) for g in grids], dtype=float)
+        totals = np.array([breakdown[g]["total"] for g in grids], dtype=float)
+        style = CONDITION_SPECS[cond]
+        ax.loglog(
+            cells, totals,
+            linestyle="-",
+            marker=style["marker"], markersize=6,
+            linewidth=1.8, color=style["color"], markeredgewidth=1.0,
+            label=f"{style['short_label']} — TOTAL",
+        )
+        residuals = np.array(
+            [breakdown[g]["residual"] if breakdown[g]["residual"] is not None
+             else np.nan for g in grids],
+            dtype=float,
+        )
+        # Drop non-positive residuals so loglog doesn't choke on them.
+        mask = np.isfinite(residuals) & (residuals > 0)
+        if mask.any():
+            ax.loglog(
+                cells[mask], residuals[mask],
+                linestyle="--",
+                marker=style["marker"], markersize=5,
+                linewidth=1.2, color=style["color"], alpha=0.85,
+                markerfacecolor="white", markeredgewidth=1.0,
+                label=f"{style['short_label']} — residual",
+            )
+
+    # O(N) reference anchored at the smallest TOTAL value across conditions.
+    all_totals = [(c, t)
+                  for breakdown in condition_breakdowns.values()
+                  for c, t in ((float(_grid_cells(g)), bd["total"])
+                               for g, bd in breakdown.items())]
+    if len(all_totals) >= 2:
+        all_totals.sort()
+        x_ref = np.array([all_totals[0][0], all_totals[-1][0]], dtype=float)
+        y_ref = all_totals[0][1] * x_ref / x_ref[0]
+        ax.loglog(x_ref, y_ref, color="#9e9e9e", linestyle=":",
+                  linewidth=1.0, alpha=0.7, label="O(N) reference")
+
+    ax.set_xlabel("Total cells  $N_x N_y N_z$")
+    ax.set_ylabel("Time per step (ms)")
+    ax.set_title("TOTAL vs residual per condition  "
+                 "(residual = un-attributed per-step work)")
+    ax.legend(loc="upper left", framealpha=0.9, fontsize=7.5, ncol=2)
+    fig.tight_layout()
+    out_path = os.path.join(root_dir, "cost_residual_vs_total_conditions.pdf")
+    fig.savefig(out_path)
+    fig.savefig(out_path.replace(".pdf", ".png"))
+    plt.close(fig)
+    print(f"  Figure saved → {out_path}")
 
 
 parser = argparse.ArgumentParser(

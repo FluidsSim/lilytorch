@@ -71,7 +71,12 @@ CATEGORIES = {
     "Convection & diffusion":  ["3a  "],
     "BDIM meta-equation":      ["3b"],
     "Projection (pressure)":   ["3c "],
+    "set_BCs (3d)":            ["3d"],
+    "var-density coeffs (3e)": ["3e"],
+    "release BDIM (3f)":       ["3f"],
     "Forces":                  ["4 "],
+    "Plotting & saving":       ["5 "],
+    "FARMS (apply_forces)":    ["6 "],
 }
 _OTHER_LABEL = "Other (residual)"
 PLOT_ORDER = list(CATEGORIES.keys()) + [_OTHER_LABEL]
@@ -82,7 +87,12 @@ CAT_COLOURS = {
     "Convection & diffusion":  "#42a5f5",
     "BDIM meta-equation":      "#ab47bc",
     "Projection (pressure)":   "#ef5350",
+    "set_BCs (3d)":            "#fbc02d",
+    "var-density coeffs (3e)": "#7cb342",
+    "release BDIM (3f)":       "#bcaaa4",
     "Forces":                  "#ffa726",
+    "Plotting & saving":       "#8d6e63",
+    "FARMS (apply_forces)":    "#5c6bc0",
     _OTHER_LABEL:              "#90a4ae",
 }
 
@@ -252,6 +262,33 @@ for domain, by_nb in records.items():
         ax.loglog(x_ref, y_ref, color="#9e9e9e",
                   linestyle=":", linewidth=1.0, alpha=0.7,
                   label="O(N) reference")
+
+        # ── a + b·N reference fitted to the most-enabled NB mode ─
+        # Surfaces the constant-cost floor.  Pick the most aggressive
+        # narrow-band mode available so the fit reflects the curve we
+        # actually want to drive flat at high N.
+        fit_nb = None
+        for cand in ("nbon", "nbbatch", "nbcrop", "nboff"):
+            if cand in by_nb and len(by_nb[cand]) >= 2:
+                fit_nb = cand
+                break
+        if fit_nb is not None:
+            runs = by_nb[fit_nb]
+            cells_fit = np.array([r["cells"] for r in runs], dtype=float)
+            total_fit = np.array([r["cat_ms"]["TOTAL step"] for r in runs])
+            A = np.column_stack([np.ones_like(cells_fit), cells_fit])
+            coef, *_ = np.linalg.lstsq(A, total_fit, rcond=None)
+            a_fit, b_fit = float(coef[0]), float(coef[1])
+            if a_fit > 0 and b_fit > 0:
+                x_dense = np.geomspace(x_ref[0], x_ref[1], 64)
+                ax.loglog(
+                    x_dense, a_fit + b_fit * x_dense,
+                    color="#37474f", linestyle=(0, (4, 2)),
+                    linewidth=1.2, alpha=0.7,
+                    label=fr"$a + b\,N$ fit ({fit_nb}; "
+                          fr"$a={a_fit:.2f}$ ms, "
+                          fr"$b={b_fit*1e6:.2f}$ ns/cell)",
+                )
 
     ax.set_xlabel("Total cells  $N_x N_y N_z$")
     ax.set_ylabel("Time per step (ms)")
