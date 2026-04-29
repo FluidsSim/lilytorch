@@ -114,22 +114,16 @@ def install_patch():
             )
             fs._bdim_union_aabb = None
 
-        with B.time("F.6  release mu1+normals (setattr loop)"):
-            for _attr in ('mu1_all_u', 'mu1_all_v', 'mu1_all_w',
-                          'normal_x_u', 'normal_y_u', 'normal_z_u',
-                          'normal_x_v', 'normal_y_v', 'normal_z_v',
-                          'normal_x_w', 'normal_y_w', 'normal_z_w',
-                          'mu1_all', 'm_m0_all'):
-                if hasattr(fs, _attr):
-                    setattr(fs, _attr, None)
+        with B.time("F.6  release mu1+normals (dict.update)"):
+            from lilytorch.integration.BDIMhandler import _FS_FREE_AFTER_BDIM_3D
+            fs.__dict__.update(_FS_FREE_AFTER_BDIM_3D)
 
         with B.time("F.7  var-density coeffs"):
             ch, cv, cw, ch_cc = self._compute_variable_density_coefficients(timestep)
 
-        with B.time("F.8  release mu0 (setattr loop)"):
-            for _attr in ('mu0_all_u', 'mu0_all_v', 'mu0_all_w', 'mu0_all'):
-                if hasattr(fs, _attr):
-                    setattr(fs, _attr, None)
+        with B.time("F.8  release mu0 (dict.update)"):
+            from lilytorch.integration.BDIMhandler import _FS_FREE_AFTER_VAR_DENS_3D
+            fs.__dict__.update(_FS_FREE_AFTER_VAR_DENS_3D)
 
         with B.time("F.9  project"):
             poisson_method = getattr(fs, "poisson_method", "multigrid")

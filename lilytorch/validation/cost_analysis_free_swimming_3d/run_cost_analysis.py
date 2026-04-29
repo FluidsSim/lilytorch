@@ -339,10 +339,10 @@ def instrument_handler(handler):
                 _orig_forces(ffs, ffs.u0, ffs.v0, ffs.w0, ffs.p0, iteration)
 
             # ── Free cached force-density tensors ────────────────
-            for _attr in ('xstress_tensor', 'ystress_tensor', 'zstress_tensor',
-                          'pforce_x', 'pforce_y', 'pforce_z'):
-                if hasattr(ffs, _attr):
-                    setattr(ffs, _attr, None)
+            # Single ``__dict__.update`` instead of 6 hasattr+setattr
+            # lookups (matches production handler).
+            from lilytorch.integration.BDIMhandler import _FS_FREE_AFTER_FORCES_3D
+            ffs.__dict__.update(_FS_FREE_AFTER_FORCES_3D)
 
             # ── 5. Plotting / saving — SKIPPED for pure solver cost ─
             # The benchmark is configured with save=False / save_frames=
