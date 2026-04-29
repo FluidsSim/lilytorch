@@ -45,11 +45,15 @@ def _kernel_extensions():
     Extension = CUDAExtension if use_cuda else CppExtension
 
     debug_mode = os.environ.get("DEBUG", "0") == "1"
-    # CPU parallelism is provided by ATen's intra-op thread pool
-    # (``at::parallel_for``) — no OpenMP linkage is required for the
-    # ``.cpp`` sources. The ``-fopenmp`` / ``-lgomp`` flags were dropped
-    # so the extension builds cleanly across PyTorch versions and on
-    # toolchains without an OpenMP runtime (e.g. default macOS clang).
+    # ``at::parallel_for`` is a header-only template that selects its
+    # parallel implementation via ``#ifdef INTRA_OP_PARALLEL``, which is
+    # defined in ATen/ParallelOpenMP.h only when ``_OPENMP`` is set --
+    # i.e. only when the calling translation unit is compiled with
+    # ``-fopenmp``. Without it, every ``at::parallel_for`` call in our
+    # kernels silently falls back to a serial loop, even though
+    # ``torch.set_num_threads(N)`` is in effect. So OpenMP linkage IS
+    # required for our ``.cpp`` sources to actually multithread.
+    use_openmp = os.environ.get("LILYTORCH_NO_OPENMP", "0") != "1"
     extra_compile_args = {
         "cxx": [
             "-O0" if debug_mode else "-O3",
@@ -58,6 +62,9 @@ def _kernel_extensions():
         "nvcc": ["-O0" if debug_mode else "-O3"],
     }
     extra_link_args = []
+    if use_openmp:
+        extra_compile_args["cxx"].append("-fopenmp")
+        extra_link_args.append("-fopenmp")
     if debug_mode:
         extra_compile_args["cxx"].append("-g")
         extra_compile_args["nvcc"].append("-g")
