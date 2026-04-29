@@ -26,12 +26,6 @@ diff_u, diff_v, diff_w
 - Combine solver.py and BDIMhandler in a single simulation file (just solver.py). BDIMhandler should only keep whatever is necessary for handling the coupling with FARMS, if possible. Review options and propose what to do.
 - Move force computations in an ad-hoc file (src/forces.py)
 - Move all non standard computations (sponge layer, carreau, etc) in a dedicated file in src/extras.py
--
-
-
-
-- Test a simulation in 2d and one in 3d with an analytically moving body, both analytically defined
-- Test a simulation in 2d and one in 3d with an analytically moving body defined via a mesh file.
 - Polish the repository
 
 # LOW PRIORITY:

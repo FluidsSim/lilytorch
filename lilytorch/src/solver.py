@@ -1667,12 +1667,16 @@ class FluidSolver:
             # ---- shared kernel on cropped sub-block ------------------
             ui0, ui1, uj0, uj1, uk0, uk1 = u_aabb
             usl = (slice(ui0, ui1), slice(uj0, uj1), slice(uk0, uk1))
+            # Variable-viscosity (Smagorinsky/Carreau) returns a full-grid
+            # tensor; crop it to the union sub-block to match the other
+            # cropped inputs.  Constant viscosity stays a scalar.
+            nu_rho_sub = nu_rho[usl].contiguous() if torch.is_tensor(nu_rho) and nu_rho.ndim == 3 else nu_rho
             (xstress, ystress, zstress,
              pforce_x, pforce_y, pforce_z) = self._forces_shared_dyn_compiled(
                 u[usl].contiguous(), v[usl].contiguous(), w[usl].contiguous(),
                 p[usl].contiguous(), comp.sdf_val[usl].contiguous(),
                 nx[usl].contiguous(), ny[usl].contiguous(), nz[usl].contiguous(),
-                nu_rho, h,
+                nu_rho_sub, h,
             )
         else:
             # ---- full-grid shared kernel (default path) --------------

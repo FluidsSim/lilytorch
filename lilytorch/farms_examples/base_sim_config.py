@@ -154,6 +154,12 @@ class BaseSimConfig:
         self.zero_pressure_inside    = None
         self.force_method            = None
         self.time_integration        = None
+        self.streaming_sdf_3d        = None
+        self.streaming_forces_3d     = None
+        self.force_shared_union      = None
+        self.mu_normals_union        = None
+        self.bdim_union              = None
+        self.force_narrow_batch      = None
         # Fluid-explosion guard (forwarded into bdim_yaml.solver)
         self.vmax_abort              = None   # m/s; None = auto
 
@@ -664,6 +670,12 @@ class BaseSimConfig:
             ("zero_pressure_inside",    self.zero_pressure_inside),
             ("force_method",            self.force_method),
             ("time_integration",        self.time_integration),
+            ("streaming_sdf_3d",        self.streaming_sdf_3d),
+            ("streaming_forces_3d",     self.streaming_forces_3d),
+            ("force_shared_union",      self.force_shared_union),
+            ("mu_normals_union",        self.mu_normals_union),
+            ("bdim_union",              self.bdim_union),
+            ("force_narrow_batch",      self.force_narrow_batch),
             ("vmax_abort",              self.vmax_abort),
         ]:
             if val is not None:
