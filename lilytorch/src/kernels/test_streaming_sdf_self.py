@@ -105,8 +105,84 @@ def _trilinear_sample_border_torch(F, bx, by, bz, x, y, z):
     ) * inv_vol
 
 
-def _ref_streaming_sdf(bodies, aabbs, gx, gy, gz, h, *, dtype, device):
+def _triquadratic_sample_torch(F, bx, by, bz, x, y, z):
+    """Pure-PyTorch reference: triquadratic Lagrange interp with the
+    same lower-bracketing convention as the streaming kernel.
+
+    Mirrors the C++/CUDA ``triquadratic_sample_uniform`` line-for-line:
+    a 3x3x3 stencil ``[ix-1, ix, ix+1]^3`` with Lagrange weights, with
+    fallback to trilinear in any cell whose lower stencil neighbour is
+    out of range.
+    """
+    Mx, My, Mz = F.shape
+    inv_dx = 1.0 / (bx[1] - bx[0]).item()
+    inv_dy = 1.0 / (by[1] - by[0]).item()
+    inv_dz = 1.0 / (bz[1] - bz[0]).item()
+    bx0, by0, bz0 = bx[0].item(), by[0].item(), bz[0].item()
+
+    tx = torch.clamp((x - bx0) * inv_dx, 0.0, Mx - 1.0)
+    ty = torch.clamp((y - by0) * inv_dy, 0.0, My - 1.0)
+    tz = torch.clamp((z - bz0) * inv_dz, 0.0, Mz - 1.0)
+    ix = torch.clamp(tx.floor().long(), 0, Mx - 2)
+    iy = torch.clamp(ty.floor().long(), 0, My - 2)
+    iz = torch.clamp(tz.floor().long(), 0, Mz - 2)
+
+    fx = tx - ix.to(tx.dtype)
+    fy = ty - iy.to(ty.dtype)
+    fz = tz - iz.to(tz.dtype)
+
+    # Triquadratic-eligible mask: all axes have ix >= 1 and grid M >= 3.
+    eligible = (ix >= 1) & (iy >= 1) & (iz >= 1) \
+               & (Mx >= 3) & (My >= 3) & (Mz >= 3)
+
+    # Trilinear value for the fallback / non-eligible cells.
+    tri_val = _trilinear_sample_border_torch(F, bx, by, bz, x, y, z)
+
+    if not eligible.any():
+        return tri_val
+
+    # Triquadratic value (computed everywhere; selected on eligibility).
+    # Clamp ix,iy,iz to [1, M-2] so [ix-1, ix+1] is in-range; for
+    # ineligible cells we'll overwrite with the trilinear value anyway.
+    ixc = torch.clamp(ix, 1, max(Mx - 2, 1))
+    iyc = torch.clamp(iy, 1, max(My - 2, 1))
+    izc = torch.clamp(iz, 1, max(Mz - 2, 1))
+    half = 0.5
+    wxm = half * fx * (fx - 1.0)
+    wx0 = 1.0 - fx * fx
+    wxp = half * fx * (fx + 1.0)
+    wym = half * fy * (fy - 1.0)
+    wy0 = 1.0 - fy * fy
+    wyp = half * fy * (fy + 1.0)
+    wzm = half * fz * (fz - 1.0)
+    wz0_w = 1.0 - fz * fz
+    wzp = half * fz * (fz + 1.0)
+
+    out = torch.zeros_like(tri_val)
+    for dx_off, wx in enumerate((wxm, wx0, wxp)):
+        ixs = ixc + (dx_off - 1)
+        plane = torch.zeros_like(tri_val)
+        for dy_off, wy in enumerate((wym, wy0, wyp)):
+            iys = iyc + (dy_off - 1)
+            row = (
+                wzm * F[ixs, iys, izc - 1] +
+                wz0_w * F[ixs, iys, izc] +
+                wzp * F[ixs, iys, izc + 1]
+            )
+            plane = plane + wy * row
+        out = out + wx * plane
+
+    return torch.where(eligible, out, tri_val)
+
+
+_REF_SAMPLER = {0: _trilinear_sample_border_torch,
+                1: _triquadratic_sample_torch}
+
+
+def _ref_streaming_sdf(bodies, aabbs, gx, gy, gz, h, *, dtype, device,
+                       interp_method=0):
     """Pure-PyTorch reference for streaming_sdf_min_3d_multi outputs."""
+    sampler = _REF_SAMPLER[interp_method]
     Nx, Ny, Nz = gx.numel(), gy.numel(), gz.numel()
     FAR = 1e4
     sdf_cc = torch.full((Nx, Ny, Nz), FAR, dtype=dtype, device=device)
@@ -143,7 +219,7 @@ def _ref_streaming_sdf(bodies, aabbs, gx, gy, gz, h, *, dtype, device):
 
         # cc
         bxq, byq, bzq = world_to_body(xc, yc, zc)
-        s_cc = _trilinear_sample_border_torch(bd["F"], bd["bx"], bd["by"], bd["bz"],
+        s_cc = sampler(bd["F"], bd["bx"], bd["by"], bd["bz"],
                                               bxq, byq, bzq)
         sparse_cc_chunks.append(s_cc.flatten())
         sub_cc = sdf_cc[i0:i1, j0:j1, k0:k1]
@@ -151,7 +227,7 @@ def _ref_streaming_sdf(bodies, aabbs, gx, gy, gz, h, *, dtype, device):
 
         # u-face
         bxq_u, byq_u, bzq_u = world_to_body(xc - half_h, yc, zc)
-        s_u = _trilinear_sample_border_torch(bd["F"], bd["bx"], bd["by"], bd["bz"],
+        s_u = sampler(bd["F"], bd["bx"], bd["by"], bd["bz"],
                                              bxq_u, byq_u, bzq_u)
         sub_u = sdf_u[i0:i1, j0:j1, k0:k1]
         win = s_u < sub_u
@@ -161,7 +237,7 @@ def _ref_streaming_sdf(bodies, aabbs, gx, gy, gz, h, *, dtype, device):
 
         # v-face
         bxq_v, byq_v, bzq_v = world_to_body(xc, yc - half_h, zc)
-        s_v = _trilinear_sample_border_torch(bd["F"], bd["bx"], bd["by"], bd["bz"],
+        s_v = sampler(bd["F"], bd["bx"], bd["by"], bd["bz"],
                                              bxq_v, byq_v, bzq_v)
         sub_v = sdf_v[i0:i1, j0:j1, k0:k1]
         win = s_v < sub_v
@@ -171,7 +247,7 @@ def _ref_streaming_sdf(bodies, aabbs, gx, gy, gz, h, *, dtype, device):
 
         # w-face
         bxq_w, byq_w, bzq_w = world_to_body(xc, yc, zc - half_h)
-        s_w = _trilinear_sample_border_torch(bd["F"], bd["bx"], bd["by"], bd["bz"],
+        s_w = sampler(bd["F"], bd["bx"], bd["by"], bd["bz"],
                                              bxq_w, byq_w, bzq_w)
         sub_w = sdf_w[i0:i1, j0:j1, k0:k1]
         win = s_w < sub_w
@@ -237,48 +313,70 @@ def main():
     dim_t    = torch.tensor(dim_,   dtype=torch.int64)
 
     FAR = 1e4
-    sdf_cc = torch.full((Nx, Ny, Nz), FAR, dtype=dtype)
-    sdf_u  = torch.full((Nx, Ny, Nz), FAR, dtype=dtype)
-    sdf_v  = torch.full((Nx, Ny, Nz), FAR, dtype=dtype)
-    sdf_w  = torch.full((Nx, Ny, Nz), FAR, dtype=dtype)
-    bU = torch.zeros((Nx, Ny, Nz), dtype=dtype)
-    bV = torch.zeros((Nx, Ny, Nz), dtype=dtype)
-    bW = torch.zeros((Nx, Ny, Nz), dtype=dtype)
-    sparse_cc = torch.zeros(cell_off[-1], dtype=dtype)
 
-    streaming_sdf_min_3d_multi(
-        F_flat, F_off_t, bx_flat, bx_off_t, by_flat, by_off_t, bz_flat, bz_off_t,
-        shapes_t, metas_t, kin_t, lo_t, dim_t, cell_off_t,
-        gx, gy, gz, h, max_vol,
-        sdf_cc, sdf_u, sdf_v, sdf_w, bU, bV, bW, sparse_cc,
+    def _run_one(interp_method, label):
+        sdf_cc = torch.full((Nx, Ny, Nz), FAR, dtype=dtype)
+        sdf_u  = torch.full((Nx, Ny, Nz), FAR, dtype=dtype)
+        sdf_v  = torch.full((Nx, Ny, Nz), FAR, dtype=dtype)
+        sdf_w  = torch.full((Nx, Ny, Nz), FAR, dtype=dtype)
+        bU = torch.zeros((Nx, Ny, Nz), dtype=dtype)
+        bV = torch.zeros((Nx, Ny, Nz), dtype=dtype)
+        bW = torch.zeros((Nx, Ny, Nz), dtype=dtype)
+        sparse_cc = torch.zeros(cell_off[-1], dtype=dtype)
+
+        streaming_sdf_min_3d_multi(
+            F_flat, F_off_t, bx_flat, bx_off_t, by_flat, by_off_t, bz_flat, bz_off_t,
+            shapes_t, metas_t, kin_t, lo_t, dim_t, cell_off_t,
+            gx, gy, gz, h, max_vol,
+            sdf_cc, sdf_u, sdf_v, sdf_w, bU, bV, bW, sparse_cc,
+            interp_method,
+        )
+
+        rsdf_cc, rsdf_u, rsdf_v, rsdf_w, rbU, rbV, rbW, rsparse = _ref_streaming_sdf(
+            bodies, aabbs, gx, gy, gz, h, dtype=dtype, device=device,
+            interp_method=interp_method,
+        )
+
+        # Sanity: outputs are non-degenerate (some cells should be inside the band).
+        inside_cc = (sdf_cc.abs() < 1.0).sum().item()
+        inside_u  = (sdf_u.abs()  < 1.0).sum().item()
+        print(f"[{label}] cells inside band: cc={inside_cc}  u={inside_u}")
+        assert inside_cc > 100 and inside_u > 100, "scene degenerate"
+
+        def cmp(name, kernel, ref, tol):
+            diff = (kernel - ref).abs().max().item()
+            norm = ref.abs().max().item()
+            rel = diff / max(norm, 1e-30)
+            print(f"  {name:<14}  max |Δ|={diff:.3e}  max |ref|={norm:.3e}  rel={rel:.3e}")
+            assert rel < tol, f"{name}: rel={rel:.3e} > tol={tol:.3e}"
+
+        cmp("sdf_cc",         sdf_cc, rsdf_cc, 1e-12)
+        cmp("sdf_u",          sdf_u,  rsdf_u,  1e-12)
+        cmp("sdf_v",          sdf_v,  rsdf_v,  1e-12)
+        cmp("sdf_w",          sdf_w,  rsdf_w,  1e-12)
+        cmp("body_u",         bU,     rbU,     1e-12)
+        cmp("body_v",         bV,     rbV,     1e-12)
+        cmp("body_w",         bW,     rbW,     1e-12)
+        cmp("sparse_cc_flat", sparse_cc, rsparse, 1e-12)
+        return sdf_cc, sparse_cc
+
+    cc_tri,    sparse_tri    = _run_one(0, "trilinear")
+    cc_triqq,  sparse_triqq  = _run_one(1, "triquadratic")
+
+    # The two methods must give different sparse_cc on at least some
+    # cells (otherwise the triquadratic path is silently aliasing to the
+    # trilinear path).
+    diff_pts = (sparse_tri - sparse_triqq).abs()
+    n_diff = (diff_pts > 1e-10).sum().item()
+    max_diff = diff_pts.max().item()
+    print(f"trilinear vs triquadratic: {n_diff} sparse cells differ "
+          f"(max |Δ|={max_diff:.3e})")
+    assert n_diff > 0, (
+        "triquadratic path produced bit-identical output to trilinear -- "
+        "it is probably not being dispatched."
     )
-
-    rsdf_cc, rsdf_u, rsdf_v, rsdf_w, rbU, rbV, rbW, rsparse = _ref_streaming_sdf(
-        bodies, aabbs, gx, gy, gz, h, dtype=dtype, device=device,
-    )
-
-    # Sanity: outputs are non-degenerate (some cells should be inside the band).
-    inside_cc = (sdf_cc.abs() < 1.0).sum().item()
-    inside_u  = (sdf_u.abs()  < 1.0).sum().item()
-    print(f"  cells inside band: cc={inside_cc}  u={inside_u}")
-    assert inside_cc > 100 and inside_u > 100, "scene degenerate"
-
-    def cmp(name, kernel, ref, tol):
-        diff = (kernel - ref).abs().max().item()
-        norm = ref.abs().max().item()
-        rel = diff / max(norm, 1e-30)
-        print(f"  {name:<14}  max |Δ|={diff:.3e}  max |ref|={norm:.3e}  rel={rel:.3e}")
-        assert rel < tol, f"{name}: rel={rel:.3e} > tol={tol:.3e}"
-
-    cmp("sdf_cc",         sdf_cc, rsdf_cc, 1e-12)
-    cmp("sdf_u",          sdf_u,  rsdf_u,  1e-12)
-    cmp("sdf_v",          sdf_v,  rsdf_v,  1e-12)
-    cmp("sdf_w",          sdf_w,  rsdf_w,  1e-12)
-    cmp("body_u",         bU,     rbU,     1e-12)
-    cmp("body_v",         bV,     rbV,     1e-12)
-    cmp("body_w",         bW,     rbW,     1e-12)
-    cmp("sparse_cc_flat", sparse_cc, rsparse, 1e-12)
-    print("OK: streaming_sdf_min_3d_multi matches the pure-PyTorch reference.")
+    print("OK: streaming_sdf_min_3d_multi matches the pure-PyTorch reference "
+          "for both trilinear and triquadratic interpolation methods.")
 
 
 if __name__ == "__main__":

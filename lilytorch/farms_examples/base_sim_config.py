@@ -160,6 +160,9 @@ class BaseSimConfig:
         self.mu_normals_union        = None
         self.bdim_union              = None
         self.force_narrow_batch      = None
+        # Body-SDF sampling method for the streaming kernels:
+        #   "trilinear" (default) | "triquadratic"
+        self.sdf_interp_method       = None
         # Fluid-explosion guard (forwarded into bdim_yaml.solver)
         self.vmax_abort              = None   # m/s; None = auto
 
@@ -676,6 +679,7 @@ class BaseSimConfig:
             ("mu_normals_union",        self.mu_normals_union),
             ("bdim_union",              self.bdim_union),
             ("force_narrow_batch",      self.force_narrow_batch),
+            ("sdf_interp_method",       self.sdf_interp_method),
             ("vmax_abort",              self.vmax_abort),
         ]:
             if val is not None:

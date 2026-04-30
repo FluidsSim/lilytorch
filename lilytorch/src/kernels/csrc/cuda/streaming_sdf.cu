@@ -130,6 +130,100 @@ __device__ __forceinline__ scalar_t trilinear_sample_uniform(
     );
 }
 
+// =====================================================================
+//  Triquadratic sample on a UNIFORM body grid.
+//
+//  Lagrange interpolation on a 3x3x3 stencil [ix-1, ix, ix+1]^3 with the
+//  same lower-bracketing convention as ``trilinear_sample_uniform``.
+//  Mirrors the CPU implementation line-for-line; see the matching helper
+//  in streaming_sdf_cpu.cpp for the algorithmic rationale.
+// =====================================================================
+template <typename scalar_t>
+__device__ __forceinline__ scalar_t triquadratic_sample_uniform(
+    const scalar_t* __restrict__ F,
+    const int Mx, const int My, const int Mz,
+    const scalar_t bx0, const scalar_t by0, const scalar_t bz0,
+    const scalar_t inv_dx, const scalar_t inv_dy, const scalar_t inv_dz,
+    scalar_t xq, scalar_t yq, scalar_t zq)
+{
+    scalar_t tx = (xq - bx0) * inv_dx;
+    scalar_t ty = (yq - by0) * inv_dy;
+    scalar_t tz = (zq - bz0) * inv_dz;
+    const scalar_t Mx_lim = (scalar_t)(Mx - 1);
+    const scalar_t My_lim = (scalar_t)(My - 1);
+    const scalar_t Mz_lim = (scalar_t)(Mz - 1);
+    tx = max((scalar_t)0, min(tx, Mx_lim));
+    ty = max((scalar_t)0, min(ty, My_lim));
+    tz = max((scalar_t)0, min(tz, Mz_lim));
+
+    int ix = (int)tx; if (ix > Mx - 2) ix = Mx - 2;
+    int iy = (int)ty; if (iy > My - 2) iy = My - 2;
+    int iz = (int)tz; if (iz > Mz - 2) iz = Mz - 2;
+
+    if (ix < 1 || iy < 1 || iz < 1 ||
+        Mx < 3 || My < 3 || Mz < 3) {
+        return trilinear_sample_uniform<scalar_t>(
+            F, Mx, My, Mz, bx0, by0, bz0,
+            inv_dx, inv_dy, inv_dz, xq, yq, zq);
+    }
+
+    const scalar_t fx = tx - (scalar_t)ix;
+    const scalar_t fy = ty - (scalar_t)iy;
+    const scalar_t fz = tz - (scalar_t)iz;
+
+    const scalar_t half = (scalar_t)0.5;
+    const scalar_t wxm = half * fx * (fx - (scalar_t)1);
+    const scalar_t wx0 = (scalar_t)1 - fx * fx;
+    const scalar_t wxp = half * fx * (fx + (scalar_t)1);
+    const scalar_t wym = half * fy * (fy - (scalar_t)1);
+    const scalar_t wy0 = (scalar_t)1 - fy * fy;
+    const scalar_t wyp = half * fy * (fy + (scalar_t)1);
+    const scalar_t wzm = half * fz * (fz - (scalar_t)1);
+    const scalar_t wz0 = (scalar_t)1 - fz * fz;
+    const scalar_t wzp = half * fz * (fz + (scalar_t)1);
+
+    const int s2 = Mz;
+    const int s1 = My * Mz;
+    const int base = (ix - 1) * s1 + (iy - 1) * s2 + (iz - 1);
+
+    scalar_t out = (scalar_t)0;
+    #pragma unroll
+    for (int dx = 0; dx < 3; ++dx) {
+        const scalar_t wx = (dx == 0) ? wxm : (dx == 1 ? wx0 : wxp);
+        const int b0 = base + dx * s1;
+        scalar_t plane = (scalar_t)0;
+        #pragma unroll
+        for (int dy = 0; dy < 3; ++dy) {
+            const scalar_t wy = (dy == 0) ? wym : (dy == 1 ? wy0 : wyp);
+            const int b1 = b0 + dy * s2;
+            const scalar_t row =
+                wzm * F[b1]     + wz0 * F[b1 + 1] + wzp * F[b1 + 2];
+            plane += wy * row;
+        }
+        out += wx * plane;
+    }
+    return out;
+}
+
+template <typename scalar_t>
+__device__ __forceinline__ scalar_t sdf_sample_dispatch(
+    const int interp_method,
+    const scalar_t* __restrict__ F,
+    const int Mx, const int My, const int Mz,
+    const scalar_t bx0, const scalar_t by0, const scalar_t bz0,
+    const scalar_t inv_dx, const scalar_t inv_dy, const scalar_t inv_dz,
+    scalar_t xq, scalar_t yq, scalar_t zq)
+{
+    if (interp_method == 1) {
+        return triquadratic_sample_uniform<scalar_t>(
+            F, Mx, My, Mz, bx0, by0, bz0,
+            inv_dx, inv_dy, inv_dz, xq, yq, zq);
+    }
+    return trilinear_sample_uniform<scalar_t>(
+        F, Mx, My, Mz, bx0, by0, bz0,
+        inv_dx, inv_dy, inv_dz, xq, yq, zq);
+}
+
 template <typename scalar_t>
 __global__ void streaming_sdf_min_3d_kernel(
     const scalar_t* __restrict__ F,
@@ -162,7 +256,8 @@ __global__ void streaming_sdf_min_3d_kernel(
     scalar_t* __restrict__ bU,
     scalar_t* __restrict__ bV,
     scalar_t* __restrict__ bW,
-    scalar_t* __restrict__ sparse_cc)
+    scalar_t* __restrict__ sparse_cc,
+    const int interp_method)
 {
     const int total = Ai * Aj * Ak;
     const int tid   = blockIdx.x * blockDim.x + threadIdx.x;
@@ -197,7 +292,8 @@ __global__ void streaming_sdf_min_3d_kernel(
 
     // ---------------- cc ----------------
     {
-        const scalar_t s = trilinear_sample_uniform(
+        const scalar_t s = sdf_sample_dispatch(
+            interp_method,
             F, Mx, My, Mz, bx0, by0, bz0, inv_dx, inv_dy, inv_dz,
             bxq, byq, bzq);
         sparse_cc[tid] = s;
@@ -206,7 +302,8 @@ __global__ void streaming_sdf_min_3d_kernel(
 
     // ---------------- u-face: world (xc - h/2, yc, zc) ----------------
     {
-        const scalar_t s = trilinear_sample_uniform(
+        const scalar_t s = sdf_sample_dispatch(
+            interp_method,
             F, Mx, My, Mz, bx0, by0, bz0, inv_dx, inv_dy, inv_dz,
             bxq + du_x, byq + du_y, bzq + du_z);
         if (s < sdf_u[g_idx]) {
@@ -217,7 +314,8 @@ __global__ void streaming_sdf_min_3d_kernel(
 
     // ---------------- v-face: world (xc, yc - h/2, zc) ----------------
     {
-        const scalar_t s = trilinear_sample_uniform(
+        const scalar_t s = sdf_sample_dispatch(
+            interp_method,
             F, Mx, My, Mz, bx0, by0, bz0, inv_dx, inv_dy, inv_dz,
             bxq + dv_x, byq + dv_y, bzq + dv_z);
         if (s < sdf_v[g_idx]) {
@@ -228,7 +326,8 @@ __global__ void streaming_sdf_min_3d_kernel(
 
     // ---------------- w-face: world (xc, yc, zc - h/2) ----------------
     {
-        const scalar_t s = trilinear_sample_uniform(
+        const scalar_t s = sdf_sample_dispatch(
+            interp_method,
             F, Mx, My, Mz, bx0, by0, bz0, inv_dx, inv_dy, inv_dz,
             bxq + dw_x, byq + dw_y, bzq + dw_z);
         if (s < sdf_w[g_idx]) {
@@ -261,7 +360,8 @@ void streaming_sdf_min_3d_cuda(
     const int64_t k0, const int64_t k1,
     at::Tensor sdf_cc, at::Tensor sdf_u, at::Tensor sdf_v, at::Tensor sdf_w,
     at::Tensor body_u, at::Tensor body_v, at::Tensor body_w,
-    at::Tensor sparse_cc)
+    at::Tensor sparse_cc,
+    const int64_t interp_method)
 {
     TORCH_CHECK(R_T.size()      == 9, "R_T must have 9 elements");
     TORCH_CHECK(body_pos.size() == 3, "body_pos must have 3 elements");
@@ -326,7 +426,8 @@ void streaming_sdf_min_3d_cuda(
                 Ai, Aj, Ak,
                 sdf_cc_ptr, sdf_u_ptr, sdf_v_ptr, sdf_w_ptr,
                 bU_ptr, bV_ptr, bW_ptr,
-                sp_ptr);
+                sp_ptr,
+                (int)interp_method);
     });
 }
 
@@ -373,7 +474,8 @@ __global__ void streaming_sdf_min_3d_multi_kernel(
     scalar_t* __restrict__ bU,
     scalar_t* __restrict__ bV,
     scalar_t* __restrict__ bW,
-    scalar_t* __restrict__ sparse_cc_flat)
+    scalar_t* __restrict__ sparse_cc_flat,
+    const int interp_method)
 {
     const int local = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -435,14 +537,16 @@ __global__ void streaming_sdf_min_3d_multi_kernel(
     const scalar_t dw_x = neg_half_h * r02, dw_y = neg_half_h * r12, dw_z = neg_half_h * r22;
 
     {
-        const scalar_t s = trilinear_sample_uniform(
+        const scalar_t s = sdf_sample_dispatch(
+            interp_method,
             F, Mx, My, Mz, bx0, by0, bz0, idx_, idy_, idz_,
             bxq, byq, bzq);
         sparse_cc_flat[sparse_idx] = s;
         if (s < sdf_cc[g_idx]) sdf_cc[g_idx] = s;
     }
     {
-        const scalar_t s = trilinear_sample_uniform(
+        const scalar_t s = sdf_sample_dispatch(
+            interp_method,
             F, Mx, My, Mz, bx0, by0, bz0, idx_, idy_, idz_,
             bxq + du_x, byq + du_y, bzq + du_z);
         if (s < sdf_u[g_idx]) {
@@ -451,7 +555,8 @@ __global__ void streaming_sdf_min_3d_multi_kernel(
         }
     }
     {
-        const scalar_t s = trilinear_sample_uniform(
+        const scalar_t s = sdf_sample_dispatch(
+            interp_method,
             F, Mx, My, Mz, bx0, by0, bz0, idx_, idy_, idz_,
             bxq + dv_x, byq + dv_y, bzq + dv_z);
         if (s < sdf_v[g_idx]) {
@@ -460,7 +565,8 @@ __global__ void streaming_sdf_min_3d_multi_kernel(
         }
     }
     {
-        const scalar_t s = trilinear_sample_uniform(
+        const scalar_t s = sdf_sample_dispatch(
+            interp_method,
             F, Mx, My, Mz, bx0, by0, bz0, idx_, idy_, idz_,
             bxq + dw_x, byq + dw_y, bzq + dw_z);
         if (s < sdf_w[g_idx]) {
@@ -486,7 +592,8 @@ void streaming_sdf_min_3d_multi_cuda(
     const int64_t max_vol_per_body,
     at::Tensor sdf_cc, at::Tensor sdf_u, at::Tensor sdf_v, at::Tensor sdf_w,
     at::Tensor body_u, at::Tensor body_v, at::Tensor body_w,
-    at::Tensor sparse_cc_flat)
+    at::Tensor sparse_cc_flat,
+    const int64_t interp_method)
 {
     const int B = (int)aabb_dim.size(0);
     if (B <= 0 || max_vol_per_body <= 0) return;
@@ -529,7 +636,8 @@ void streaming_sdf_min_3d_multi_cuda(
                     body_u.data_ptr<scalar_t>(),
                     body_v.data_ptr<scalar_t>(),
                     body_w.data_ptr<scalar_t>(),
-                    sparse_cc_flat.data_ptr<scalar_t>());
+                    sparse_cc_flat.data_ptr<scalar_t>(),
+                    (int)interp_method);
         }
         (void)aabb_dim_ptr_h;
     });
