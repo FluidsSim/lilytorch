@@ -26,28 +26,24 @@ the run.
 
 Conditions
 ----------
-    nboff         : baseline, all narrow-band flags off
-    nbcrop        : cropping only (force_shared_union + mu_normals_union + bdim_union)
-    nbbatch       : batching only (force_narrow_batch + batched_sdf_3d)
-    nbon          : all narrow-band flags on (cropping + batching)
-    nbtri         : custom trilinear (no batch, no crop)
-    nbtri_crop    : custom trilinear + cropping
-    nbstream      : streaming fused-CUDA SDF (Phase B)
-    nbstream_crop : streaming fused-CUDA SDF + cropping
-    nbforces      : streaming + fused forces (Phase D) — pre-optimisation reference
-    nbforces_opt  : NEW METHOD — streaming + fused forces + optimised
-                    streaming_sdf_min_3d_multi (rotation CSE + uniform-grid
-                    trilinear; commit 722c4cf).  Same flags as ``nbforces``
-                    but written to its own subfolder so the previously
-                    measured ``nbforces/`` CSVs are not overwritten.
+After substantial testing (see git history of this folder) the best
+method is ``nbforces_opt``.  The pipeline therefore exposes only two
+conditions: that production method, plus an unoptimised reference so
+the speed-up versus the no-cropping / no-batching baseline remains
+visible.
+
+    nboff         : reference baseline, all narrow-band flags off
+                    (no cropping, no batching).
+    nbforces_opt  : production method — streaming SDF + fused forces +
+                    union cropping + narrow-band batching, with the
+                    rotation-CSE / uniform-grid trilinear optimisation
+                    of ``streaming_sdf_min_3d_multi``.
 
 Output layout
 -------------
     figures/scaling_conditions/
         nboff/
-        nbcrop/
-        nbbatch/
-        nbon/
+        nbforces_opt/
         cost_scaling_loglog_conditions.pdf
         cost_scaling_speedup_conditions.pdf
 
@@ -55,7 +51,7 @@ Usage
 -----
     python run_scaling_conditions_pipeline.py
 
-    python run_scaling_conditions_pipeline.py --conditions nboff,nbcrop,nbon
+    python run_scaling_conditions_pipeline.py --conditions nboff,nbforces_opt
 
     python run_scaling_conditions_pipeline.py --grids \
         256:64:64,256:128:64,256:128:128,512:128:128
@@ -94,103 +90,23 @@ DEFAULT_GRIDS = [
 
 CONDITION_SPECS = {
     "nboff": {
-        "label": "baseline (all flags off)",
+        "label": "baseline (all flags off — no cropping, no batching)",
         "short_label": "baseline",
         "flags": [],
         "linestyle": "--",
         "marker": "s",
         "color": "#37474f",
     },
-    "nbcrop": {
-        "label": "cropping only",
-        "short_label": "cropping",
-        "flags": ["--force_shared_union", "--mu_normals_union", "--bdim_union"],
-        "linestyle": "-.",
-        "marker": "^",
-        "color": "#1976d2",
-    },
-    "nbbatch": {
-        "label": "batching only",
-        "short_label": "batching",
-        "flags": ["--force_narrow_batch", "--batched_sdf_3d"],
-        "linestyle": ":",
-        "marker": "D",
-        "color": "#ef6c00",
-    },
-    "nbtri": {
-        "label": "custom trilinear (no batch, no crop)",
-        "short_label": "trilinear",
-        "flags": ["--custom_trilinear_3d"],
-        "linestyle": (0, (3, 1, 1, 1)),
-        "marker": "v",
-        "color": "#6a1b9a",
-    },
-    "nbtri_crop": {
-        "label": "custom trilinear + cropping",
-        "short_label": "tri + crop",
-        "flags": [
-            "--custom_trilinear_3d",
-            "--force_shared_union",
-            "--mu_normals_union",
-            "--bdim_union",
-            "--force_narrow_batch",
-        ],
-        "linestyle": (0, (5, 1)),
-        "marker": "P",
-        "color": "#ad1457",
-    },
-    "nbstream": {
-        "label": "streaming fused-CUDA (Phase B)",
-        "short_label": "stream",
-        "flags": ["--streaming_sdf_3d"],
-        "linestyle": (0, (1, 1)),
-        "marker": "X",
-        "color": "#00695c",
-    },
-    "nbstream_crop": {
-        "label": "streaming fused-CUDA + cropping",
-        "short_label": "stream + crop",
-        "flags": [
-            "--streaming_sdf_3d",
-            "--force_shared_union",
-            "--mu_normals_union",
-            "--bdim_union",
-            "--force_narrow_batch",
-        ],
-        "linestyle": (0, (3, 1, 1, 1, 1, 1)),
-        "marker": "*",
-        "color": "#004d40",
-    },
-    "nbforces": {
-        "label": "streaming + fused forces (Phase D)",
-        "short_label": "stream + forces",
-        "flags": [
-            "--streaming_sdf_3d",
-            "--streaming_forces_3d",
-            "--force_shared_union",
-            "--mu_normals_union",
-            "--bdim_union",
-            "--force_narrow_batch",
-        ],
-        "linestyle": "-",
-        "marker": "h",
-        "color": "#b71c1c",
-    },
-    # ── NEW METHOD ──────────────────────────────────────────────────────
-    # Kernel-level optimisation of ``streaming_sdf_min_3d_multi`` introduced
-    # in commit 722c4cf (rotation CSE + uniform-grid trilinear; ~2× SDF
-    # speed-up at large body fractions on CPU, see
-    # README_forces_methods.md §"Step #3").  There is no CLI flag for it —
-    # the optimisation is baked into every ``--streaming_sdf_3d`` path —
-    # so the way to benchmark it as its own condition is to re-use the
-    # most aggressive existing flag set (same as ``nbforces``) while
-    # writing the timings into a fresh subfolder.  This keeps the prior
-    # ``nbforces/`` CSVs (measured before the optimisation) intact so the
-    # combined plot can compare the two side-by-side.
+    # Production method.  Kernel-level optimisation of
+    # ``streaming_sdf_min_3d_multi`` (rotation CSE + uniform-grid
+    # trilinear, commit 722c4cf) baked into every ``--streaming_sdf_3d``
+    # path.  After substantial testing (see git history) this is the
+    # best of every method that was previously benchmarked, so it is
+    # the only optimised condition the pipeline still exposes.
     "nbforces_opt": {
-        "label": "NEW: streaming + fused forces + optimised SDF "
+        "label": "streaming + fused forces + optimised SDF "
                  "(rotation CSE + uniform-grid trilinear)",
-        "short_label": "new method",
+        "short_label": "production",
         "flags": [
             "--streaming_sdf_3d",
             "--streaming_forces_3d",
@@ -202,14 +118,6 @@ CONDITION_SPECS = {
         "linestyle": "-",
         "marker": "*",
         "color": "#f9a825",
-    },
-    "nbon": {
-        "label": "cropping + batching",
-        "short_label": "crop + batch",
-        "flags": ["--union_narrow_band"],
-        "linestyle": "-",
-        "marker": "o",
-        "color": "#2e7d32",
     },
 }
 
@@ -558,8 +466,9 @@ parser.add_argument(
 parser.add_argument(
     "--conditions",
     type=str,
-    default="nboff,nbcrop,nbbatch,nbon,nbtri,nbtri_crop,nbstream,nbstream_crop,nbforces,nbforces_opt",
-    help="Comma-separated condition ids. Valid: nboff, nbcrop, nbbatch, nbon, nbtri, nbtri_crop, nbstream, nbstream_crop, nbforces, nbforces_opt (NEW method)",
+    default="nboff,nbforces_opt",
+    help="Comma-separated condition ids. Valid: nboff (baseline reference, no flags), "
+         "nbforces_opt (production method).",
 )
 parser.add_argument("--n_steps", type=int, default=50)
 parser.add_argument("--precompile", type=int, default=30)
