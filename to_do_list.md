@@ -1,7 +1,10 @@
 
 # instructions
 
-You are working starting from the optimize_speed_memory branch. Checkout from there and create a new branch for your implementations. be independent and self testing. Install the necessary packages explained in the README under the installation instructions (you can install pytorch in C++ mode, but you also must install the FARMS packages). Read the HIGH PRIORITY next steps to implement in the repository and start to work on from top to bottom (higher to lower priority list).
+You are working starting from the optimize_speed_memory branch. Checkout from there and create a new branch for your implementations. Read the HIGH PRIORITY next steps to implement in the repository and start to work on from top to bottom (higher to lower priority list). Then give me a step to step guide for testing the various implementations.
+
+
+be independent and self testing. Install the necessary packages explained in the README under the installation instructions (you can install pytorch in C++ mode, but you also must install the FARMS packages). Read the HIGH PRIORITY next steps to implement in the repository and start to work on from top to bottom (higher to lower priority list).
 
 
 ---- MEMORY VARS -----
@@ -21,15 +24,14 @@ diff_u, diff_v, diff_w
 - The bdim_forces_3d_multi_kernel recompute the body cc sdf on the fly. I think this is a waste of computation. Indeed i think that forces can be computed together with the union sdf in streaming_sdf_min_3d_multi_kernel. Inside this kernel the body sdf is computed, there is where the delta force functions, and forces can be computed. This should save significant computational time.
 - the gen_config_full_pool.py simulation in cpu mode does not seem to utilize multiple cores.
 - The nbforces cost analysis plotted in cost_scaling_loglog.png reveals some scaling of the costs of "Other (residual)" and "Body update (SDF)". I do not understand why, since the cropping approach with aabb boxes should (in my view), maintain the same cost at different scales. Unless the domain size remains the same and just the number of grid points increases, in which case the portion of the domain that includes the body increases, so the operations should indeed increase. Please clarify.
+- Simplify methods for cost optimization. After substantial testing of the different methods for running the cost analysis in run_scaling_conditions_pipeline.py the best method is nbforces_opt. Remove all the other methods, except for keeping the old one for reference (no cropping, no batching method for reference).
 
 
 # HIGH PRIORITY:
-- Simplify methods for cost optimization. After substantial testing of the different methods for running the cost analysis in run_scaling_conditions_pipeline.py the best method is nbforces_opt. Remove all the other methods, except for keeping the old one for reference (no cropping, no batching method for reference).
-- Implement cuda kernels for 2d simulations in the style used for 2d simulations and test them (by running a 2d simulation example)
-- Run the cost analysis similar to run_scaling_conditions_pipeline.py for 2d simulations.
-- Implement 2nd order accurate force method also for the cuda/C++ kernels (currently only in non cuda/c++ kernel mode)
 - Implement triquadratic interpolation option similar to that implemented in pytorch_interpolation for evaluating the sdf functions in the cuda/C++ kernels. This should be optionally set by the user via a meta parameter.
+- Implement cuda kernels for 2d simulations in the style used for 2d simulations and implement the cost analysis pipeline similar to run_scaling_conditions_pipeline.py for 2d simulations. Also bilines/biquaddratic kernels similar to pytorch_interpolations. I will then test it.
 - replace pytorch_interpolation with existing precompiled cuda/c++ kernels or write new ones if necessary in the kernel/ folder.
+- Implement 2nd order accurate force method also for the cuda/C++ kernel solver version (currently only in non cuda/c++ kernel mode)
 - Combine solver.py and BDIMhandler in a single simulation file (just solver.py). BDIMhandler should only keep whatever is necessary for handling the coupling with FARMS, if possible. Review options and propose what to do.
 - Move all non standard computations (sponge layer, carreau, etc) in a dedicated file in src/extras.py
 - Polish the repository
