@@ -1,405 +1,0 @@
-================================================================================
-Grid: Nx=512 Ny=128 Nz=128  iters=201  save_every=200
-Config folder: /data/andreaferrario/ns_data/2026-03-09T13:56:29.988135
-================================================================================
-[33m# [PYLOG-1475613] 2026-03-09 13:56:31,065 - [WARNING] - task.py::27::<module>()
-# file:///data/andreaferrario/lilytorch/lilytorch/FARMS_V2/farms_mujoco/farms_mujoco/simulation/task.py#L27
-[39mfarms_muscle not installed!
-[33m-[39m
-farms_muscle not installed
-  [                      before simulation setup]  alloc=     0.0 MB   peak=     0.0 MB   reserved=     0.0 MB
-  [             after loading experiment options]  alloc=     0.0 MB   peak=     0.0 MB   reserved=     0.0 MB
-[32m# [PYLOG-1475613] 2026-03-09 13:56:31,137 - [INFO] - simulation.py::147::run_simulation()
-# file:///data/andreaferrario/lilytorch/lilytorch/FARMS_V2/farms_sim/farms_sim/simulation.py#L147
-[39mCreating simulation
-[32m-[39m
-[32m# [PYLOG-1475613] 2026-03-09 13:56:31,139 - [INFO] - mjcf.py::272::mjc_add_link()
-# file:///data/andreaferrario/lilytorch/lilytorch/FARMS_V2/farms_mujoco/farms_mujoco/simulation/mjcf.py#L272
-[39mSPAWN: pool is using a SpawnMode.FIXED base
-[32m-[39m
-[32m# [PYLOG-1475613] 2026-03-09 13:56:31,141 - [INFO] - mjcf.py::272::mjc_add_link()
-# file:///data/andreaferrario/lilytorch/lilytorch/FARMS_V2/farms_mujoco/farms_mujoco/simulation/mjcf.py#L272
-[39mSPAWN: arena_water is using a SpawnMode.FIXED base
-[32m-[39m
-[32m# [PYLOG-1475613] 2026-03-09 13:56:31,142 - [INFO] - mjcf.py::272::mjc_add_link()
-# file:///data/andreaferrario/lilytorch/lilytorch/FARMS_V2/farms_mujoco/farms_mujoco/simulation/mjcf.py#L272
-[39mSPAWN: 1guilla_watertight is using a SpawnMode.FREE base
-[32m-[39m
-[36m# [PYLOG-1475613] 2026-03-09 13:56:31,551 - [DEBUG] - simulation.py::91::__init__()
-# file:///data/andreaferrario/lilytorch/lilytorch/FARMS_V2/farms_mujoco/farms_mujoco/simulation/simulation.py#L91
-[39mUsing env variable : MUJOCO_GL=egl
-[36m-[39m
-[33m# [PYLOG-1475613] 2026-03-09 13:56:31,556 - [WARNING] - camera.py::177::__init__()
-# file:///data/andreaferrario/lilytorch/lilytorch/FARMS_V2/farms_mujoco/farms_mujoco/sensors/camera.py#L177
-[39mUnknown write for ".mp4", trying with ffmpeg
-[33m-[39m
-[33m# [PYLOG-1475613] 2026-03-09 13:56:31,560 - [WARNING] - camera.py::181::__init__()
-# file:///data/andreaferrario/lilytorch/lilytorch/FARMS_V2/farms_mujoco/farms_mujoco/sensors/camera.py#L181
-[39mOptions for Matplotlib include ['pillow', 'ffmpeg', 'ffmpeg_file', 'imagemagick', 'imagemagick_file', 'html']
-[33m-[39m
-[32m# [PYLOG-1475613] 2026-03-09 13:56:31,561 - [INFO] - kinematics.py::23::kinematics_interpolation()
-# file:///data/andreaferrario/lilytorch/lilytorch/integration/kinematics.py#L23
-[39mKINEMATICS: Loaded kinematics data for 0.401 seconds, Simulation duration 0.201 seconds.
-[32m-[39m
-[32m# [PYLOG-1475613] 2026-03-09 13:56:31,561 - [INFO] - simulation.py::170::run_simulation()
-# file:///data/andreaferrario/lilytorch/lilytorch/FARMS_V2/farms_sim/farms_sim/simulation.py#L170
-[39mRunning simulation
-[32m-[39m
-  0%|          | 0/201 [00:00<?, ?it/s][36m# [PYLOG-1475613] 2026-03-09 13:56:31,562 - [DEBUG] - task.py::145::initialize_episode()
-# file:///data/andreaferrario/lilytorch/lilytorch/FARMS_V2/farms_mujoco/farms_mujoco/simulation/task.py#L145
-[39mInitializing episode
-[36m-[39m
-[32m# [PYLOG-1475613] 2026-03-09 13:56:31,562 - [INFO] - physics.py::69::get_sensor_maps()
-# file:///data/andreaferrario/lilytorch/lilytorch/FARMS_V2/farms_mujoco/farms_mujoco/simulation/physics.py#L69
-[39mSensors data:
-FieldIndexer(sensordata):
- 0     framelinvel_a0_1guilla_watertight [ 0       ]
- 1     framelinvel_a0_1guilla_watertight [ 0       ]
- 2     framelinvel_a0_1guilla_watertight [ 0       ]
- 3     frameangvel_a0_1guilla_watertight [ 0       ]
- 4     frameangvel_a0_1guilla_watertight [ 0       ]
- 5     frameangvel_a0_1guilla_watertight [ 0       ]
- 6                  framelinvel_a0_link0 [ 0       ]
- 7                  framelinvel_a0_link0 [ 0       ]
- 8                  framelinvel_a0_link0 [ 0       ]
- 9                  frameangvel_a0_link0 [ 0       ]
-10                  frameangvel_a0_link0 [ 0       ]
-11                  frameangvel_a0_link0 [ 0       ]
-12                  framelinvel_a0_link1 [ 0       ]
-13                  framelinvel_a0_link1 [ 0       ]
-14                  framelinvel_a0_link1 [ 0       ]
-15                  frameangvel_a0_link1 [ 0       ]
-16                  frameangvel_a0_link1 [ 0       ]
-17                  frameangvel_a0_link1 [ 0       ]
-18                  framelinvel_a0_link2 [ 0       ]
-19                  framelinvel_a0_link2 [ 0       ]
-20                  framelinvel_a0_link2 [ 0       ]
-21                  frameangvel_a0_link2 [ 0       ]
-22                  frameangvel_a0_link2 [ 0       ]
-23                  frameangvel_a0_link2 [ 0       ]
-24                  framelinvel_a0_link3 [ 0       ]
-25                  framelinvel_a0_link3 [ 0       ]
-26                  framelinvel_a0_link3 [ 0       ]
-27                  frameangvel_a0_link3 [ 0       ]
-28                  frameangvel_a0_link3 [ 0       ]
-29                  frameangvel_a0_link3 [ 0       ]
-30                  framelinvel_a0_link4 [ 0       ]
-31                  framelinvel_a0_link4 [ 0       ]
-32                  framelinvel_a0_link4 [ 0       ]
-33                  frameangvel_a0_link4 [ 0       ]
-34                  frameangvel_a0_link4 [ 0       ]
-35                  frameangvel_a0_link4 [ 0       ]
-36                  framelinvel_a0_link5 [ 0       ]
-37                  framelinvel_a0_link5 [ 0       ]
-38                  framelinvel_a0_link5 [ 0       ]
-39                  frameangvel_a0_link5 [ 0       ]
-40                  frameangvel_a0_link5 [ 0       ]
-41                  frameangvel_a0_link5 [ 0       ]
-42                  framelinvel_a0_link6 [ 0       ]
-43                  framelinvel_a0_link6 [ 0       ]
-44                  framelinvel_a0_link6 [ 0       ]
-45                  frameangvel_a0_link6 [ 0       ]
-46                  frameangvel_a0_link6 [ 0       ]
-47                  frameangvel_a0_link6 [ 0       ]
-48                  framelinvel_a0_link7 [ 0       ]
-49                  framelinvel_a0_link7 [ 0       ]
-50                  framelinvel_a0_link7 [ 0       ]
-51                  frameangvel_a0_link7 [ 0       ]
-52                  frameangvel_a0_link7 [ 0       ]
-53                  frameangvel_a0_link7 [ 0       ]
-54                  framelinvel_a0_link8 [ 0       ]
-55                  framelinvel_a0_link8 [ 0       ]
-56                  framelinvel_a0_link8 [ 0       ]
-57                  frameangvel_a0_link8 [ 0       ]
-58                  frameangvel_a0_link8 [ 0       ]
-59                  frameangvel_a0_link8 [ 0       ]
-60 actuatorfrc_position_a0_joint_body_00 [ 0       ]
-61 actuatorfrc_velocity_a0_joint_body_00 [ 0       ]
-62    actuatorfrc_motor_a0_joint_body_00 [ 0       ]
-63 actuatorfrc_position_a0_joint_body_01 [ 0       ]
-64 actuatorfrc_velocity_a0_joint_body_01 [ 0       ]
-65    actuatorfrc_motor_a0_joint_body_01 [ 0       ]
-66 actuatorfrc_position_a0_joint_body_02 [ 0       ]
-67 actuatorfrc_velocity_a0_joint_body_02 [ 0       ]
-68    actuatorfrc_motor_a0_joint_body_02 [ 0       ]
-69 actuatorfrc_position_a0_joint_body_03 [ 0       ]
-70 actuatorfrc_velocity_a0_joint_body_03 [ 0       ]
-71    actuatorfrc_motor_a0_joint_body_03 [ 0       ]
-72 actuatorfrc_position_a0_joint_body_04 [ 0       ]
-73 actuatorfrc_velocity_a0_joint_body_04 [ 0       ]
-74    actuatorfrc_motor_a0_joint_body_04 [ 0       ]
-75 actuatorfrc_position_a0_joint_body_05 [ 0       ]
-76 actuatorfrc_velocity_a0_joint_body_05 [ 0       ]
-77    actuatorfrc_motor_a0_joint_body_05 [ 0       ]
-78 actuatorfrc_position_a0_joint_body_06 [ 0       ]
-79 actuatorfrc_velocity_a0_joint_body_06 [ 0       ]
-80    actuatorfrc_motor_a0_joint_body_06 [ 0       ]
-81 actuatorfrc_position_a0_joint_body_07 [ 0       ]
-82 actuatorfrc_velocity_a0_joint_body_07 [ 0       ]
-83    actuatorfrc_motor_a0_joint_body_07 [ 0       ]
-[32m-[39m
-[32m# [PYLOG-1475613] 2026-03-09 13:56:31,563 - [INFO] - physics.py::123::get_sensor_maps()
-# file:///data/andreaferrario/lilytorch/lilytorch/FARMS_V2/farms_mujoco/farms_mujoco/simulation/physics.py#L123
-[39mLinks initial positions:
-
-[32m-[39m
-[32m# [PYLOG-1475613] 2026-03-09 13:56:31,563 - [INFO] - physics.py::123::get_sensor_maps()
-# file:///data/andreaferrario/lilytorch/lilytorch/FARMS_V2/farms_mujoco/farms_mujoco/simulation/physics.py#L123
-[39mLinks initial orientations:
-
-[32m-[39m
-[32m# [PYLOG-1475613] 2026-03-09 13:56:31,563 - [INFO] - physics.py::123::get_sensor_maps()
-# file:///data/andreaferrario/lilytorch/lilytorch/FARMS_V2/farms_mujoco/farms_mujoco/simulation/physics.py#L123
-[39mLinks initial linear velocities:
-0 - framelinvel_a0_1guilla_watertight: [0. 0. 0.]
-1 - framelinvel_a0_link0: [0. 0. 0.]
-2 - framelinvel_a0_link1: [0. 0. 0.]
-3 - framelinvel_a0_link2: [0. 0. 0.]
-4 - framelinvel_a0_link3: [0. 0. 0.]
-5 - framelinvel_a0_link4: [0. 0. 0.]
-6 - framelinvel_a0_link5: [0. 0. 0.]
-7 - framelinvel_a0_link6: [0. 0. 0.]
-8 - framelinvel_a0_link7: [0. 0. 0.]
-9 - framelinvel_a0_link8: [0. 0. 0.]
-[32m-[39m
-[32m# [PYLOG-1475613] 2026-03-09 13:56:31,563 - [INFO] - physics.py::123::get_sensor_maps()
-# file:///data/andreaferrario/lilytorch/lilytorch/FARMS_V2/farms_mujoco/farms_mujoco/simulation/physics.py#L123
-[39mLinks initial angular velocities:
-0 - frameangvel_a0_1guilla_watertight: [0. 0. 0.]
-1 - frameangvel_a0_link0: [0. 0. 0.]
-2 - frameangvel_a0_link1: [0. 0. 0.]
-3 - frameangvel_a0_link2: [0. 0. 0.]
-4 - frameangvel_a0_link3: [0. 0. 0.]
-5 - frameangvel_a0_link4: [0. 0. 0.]
-6 - frameangvel_a0_link5: [0. 0. 0.]
-7 - frameangvel_a0_link6: [0. 0. 0.]
-8 - frameangvel_a0_link7: [0. 0. 0.]
-9 - frameangvel_a0_link8: [0. 0. 0.]
-[32m-[39m
-[32m# [PYLOG-1475613] 2026-03-09 13:56:31,563 - [INFO] - physics.py::149::get_sensor_maps()
-# file:///data/andreaferrario/lilytorch/lilytorch/FARMS_V2/farms_mujoco/farms_mujoco/simulation/physics.py#L149
-[39mJoints initial positions:
-
-[32m-[39m
-[32m# [PYLOG-1475613] 2026-03-09 13:56:31,564 - [INFO] - physics.py::149::get_sensor_maps()
-# file:///data/andreaferrario/lilytorch/lilytorch/FARMS_V2/farms_mujoco/farms_mujoco/simulation/physics.py#L149
-[39mJoints initial velocities:
-
-[32m-[39m
-[32m# [PYLOG-1475613] 2026-03-09 13:56:31,564 - [INFO] - physics.py::149::get_sensor_maps()
-# file:///data/andreaferrario/lilytorch/lilytorch/FARMS_V2/farms_mujoco/farms_mujoco/simulation/physics.py#L149
-[39mJoints initial torques (position):
-0 - actuatorfrc_position_a0_joint_body_00: 0.0
-1 - actuatorfrc_position_a0_joint_body_01: 0.0
-2 - actuatorfrc_position_a0_joint_body_02: 0.0
-3 - actuatorfrc_position_a0_joint_body_03: 0.0
-4 - actuatorfrc_position_a0_joint_body_04: 0.0
-5 - actuatorfrc_position_a0_joint_body_05: 0.0
-6 - actuatorfrc_position_a0_joint_body_06: 0.0
-7 - actuatorfrc_position_a0_joint_body_07: 0.0
-[32m-[39m
-[32m# [PYLOG-1475613] 2026-03-09 13:56:31,564 - [INFO] - physics.py::149::get_sensor_maps()
-# file:///data/andreaferrario/lilytorch/lilytorch/FARMS_V2/farms_mujoco/farms_mujoco/simulation/physics.py#L149
-[39mJoints initial torques (velocity):
-0 - actuatorfrc_velocity_a0_joint_body_00: 0.0
-1 - actuatorfrc_velocity_a0_joint_body_01: 0.0
-2 - actuatorfrc_velocity_a0_joint_body_02: 0.0
-3 - actuatorfrc_velocity_a0_joint_body_03: 0.0
-4 - actuatorfrc_velocity_a0_joint_body_04: 0.0
-5 - actuatorfrc_velocity_a0_joint_body_05: 0.0
-6 - actuatorfrc_velocity_a0_joint_body_06: 0.0
-7 - actuatorfrc_velocity_a0_joint_body_07: 0.0
-[32m-[39m
-[32m# [PYLOG-1475613] 2026-03-09 13:56:31,564 - [INFO] - physics.py::149::get_sensor_maps()
-# file:///data/andreaferrario/lilytorch/lilytorch/FARMS_V2/farms_mujoco/farms_mujoco/simulation/physics.py#L149
-[39mJoints initial torques (torque):
-
-[32m-[39m
-[32m# [PYLOG-1475613] 2026-03-09 13:56:31,564 - [INFO] - physics.py::182::get_sensor_maps()
-# file:///data/andreaferrario/lilytorch/lilytorch/FARMS_V2/farms_mujoco/farms_mujoco/simulation/physics.py#L182
-[39mFieldIndexer(xfrc_applied):
- 0                 world [ 0         0         0         0         0         0       ]
- 1             wall_ymax [ 0         0         0         0         0         0       ]
- 2             wall_xmax [ 0         0         0         0         0         0       ]
- 3             wall_ymin [ 0         0         0         0         0         0       ]
- 4                 floor [ 0         0         0         0         0         0       ]
- 5             wall_xmin [ 0         0         0         0         0         0       ]
- 6           arena_water [ 0         0         0         0         0         0       ]
- 7                 water [ 0         0         0         0         0         0       ]
- 8 a0_1guilla_watertight [ 0         0         0         0         0         0       ]
- 9              a0_link0 [ 0         0         0         0         0         0       ]
-10              a0_link1 [ 0         0         0         0         0         0       ]
-11              a0_link2 [ 0         0         0         0         0         0       ]
-12              a0_link3 [ 0         0         0         0         0         0       ]
-13              a0_link4 [ 0         0         0         0         0         0       ]
-14              a0_link5 [ 0         0         0         0         0         0       ]
-15              a0_link6 [ 0         0         0         0         0         0       ]
-16              a0_link7 [ 0         0         0         0         0         0       ]
-17              a0_link8 [ 0         0         0         0         0         0       ]
-[32m-[39m
-  [                  BDIMhandler.__init__: enter]  alloc=     0.0 MB   peak=     0.0 MB   reserved=     0.0 MB
-  [                  FluidSolver.__init__: enter]  alloc=     0.0 MB   peak=     0.0 MB   reserved=     0.0 MB
-Using GPU: NVIDIA GeForce RTX 4080 SUPER is available.
-Setting dt=0.0010000000474974513s, dx=0.0046875
-Using the quick method for the adv-diff equation (3D)
-Poisson solver: multigrid
-  [                   FluidSolver.__init__: exit]  alloc=   401.6 MB   peak=  1217.5 MB   reserved=  1226.0 MB
-  [                   BDIMhandler.__init__: exit]  alloc=   699.8 MB   peak=  1217.5 MB   reserved=  1526.0 MB
-[FlowViewer] No viewer (headless) – spheres will only appear in recorded video.
-[32m# [PYLOG-1475613] 2026-03-09 13:56:31,709 - [INFO] - camera.py::211::_build_video_writer()
-# file:///data/andreaferrario/lilytorch/lilytorch/FARMS_V2/farms_mujoco/farms_mujoco/sensors/camera.py#L211
-[39mUsing avc1 codec for video export
-[32m-[39m
-  0%|          | 1/201 [00:00<00:49,  4.05it/s][36m# [PYLOG-1475613] 2026-03-09 13:56:31,809 - [DEBUG] - task.py::270::before_step()
-# file:///data/andreaferrario/lilytorch/lilytorch/FARMS_V2/farms_mujoco/farms_mujoco/simulation/task.py#L270
-[39mInitializing episode due to initial time (0.0 [s])
-[36m-[39m
-[36m# [PYLOG-1475613] 2026-03-09 13:56:31,809 - [DEBUG] - task.py::145::initialize_episode()
-# file:///data/andreaferrario/lilytorch/lilytorch/FARMS_V2/farms_mujoco/farms_mujoco/simulation/task.py#L145
-[39mInitializing episode
-[36m-[39m
-[33m# [PYLOG-1475613] 2026-03-09 13:56:31,809 - [WARNING] - task.py::147::initialize_episode()
-# file:///data/andreaferrario/lilytorch/lilytorch/FARMS_V2/farms_mujoco/farms_mujoco/simulation/task.py#L147
-[39mSimulation was already initialized, skipping full episode intialization and setting iteration=0 (set task.initialized=False for full initalization)
-[33m-[39m
-  [                               step 1: before]  alloc=   699.8 MB   peak=   699.8 MB   reserved=  1526.0 MB
-  [               step 1: after update (SDF+vel)]  alloc=   699.8 MB   peak=  1345.8 MB   reserved=  1626.0 MB
-  [                     step 1: after mu/normals]  alloc=  1515.8 MB   peak=  1692.1 MB   reserved=  1730.0 MB
-  [         step 1: after fluid_step (Heun done)]  alloc=  1549.5 MB   peak=  2388.3 MB   reserved=  2662.0 MB
-  [                         step 1: after forces]  alloc=  1753.5 MB   peak=  2839.8 MB   reserved=  3274.0 MB
-  [                        step 1: after release]  alloc=  1243.5 MB   peak=  2839.8 MB   reserved=  3274.0 MB
-  1%|          | 2/201 [00:00<00:53,  3.75it/s][FlowViewer] Patched CameraRecording renderer for video output.
-  [                               step 2: before]  alloc=  1243.5 MB   peak=  1243.5 MB   reserved=  3274.0 MB
-  [               step 2: after update (SDF+vel)]  alloc=  1243.5 MB   peak=  1888.7 MB   reserved=  3374.0 MB
-  [                     step 2: after mu/normals]  alloc=  1753.5 MB   peak=  2033.8 MB   reserved=  3374.0 MB
-  [         step 2: after fluid_step (Heun done)]  alloc=  1753.8 MB   peak=  2594.3 MB   reserved=  3374.0 MB
-  [                         step 2: after forces]  alloc=  1753.8 MB   peak=  2839.8 MB   reserved=  3374.0 MB
-  [                        step 2: after release]  alloc=  1243.8 MB   peak=  2839.8 MB   reserved=  3374.0 MB
-  1%|▏         | 3/201 [00:00<00:51,  3.82it/s]  [                               step 3: before]  alloc=  1243.8 MB   peak=  1243.8 MB   reserved=  3374.0 MB
-  [               step 3: after update (SDF+vel)]  alloc=  1243.8 MB   peak=  1889.0 MB   reserved=  3374.0 MB
-  [                     step 3: after mu/normals]  alloc=  1753.8 MB   peak=  2034.1 MB   reserved=  3374.0 MB
-  [         step 3: after fluid_step (Heun done)]  alloc=  1753.8 MB   peak=  2594.3 MB   reserved=  3374.0 MB
-  [                         step 3: after forces]  alloc=  1753.8 MB   peak=  2839.8 MB   reserved=  3374.0 MB
-  [                        step 3: after release]  alloc=  1243.8 MB   peak=  2839.8 MB   reserved=  3374.0 MB
-  2%|▏         | 4/201 [00:01<00:50,  3.88it/s]  2%|▏         | 5/201 [00:01<00:50,  3.92it/s]  3%|▎         | 6/201 [00:01<00:49,  3.92it/s]  3%|▎         | 7/201 [00:01<00:49,  3.88it/s]  4%|▍         | 8/201 [00:02<00:49,  3.88it/s]  4%|▍         | 9/201 [00:02<00:49,  3.89it/s]  5%|▍         | 10/201 [00:02<00:49,  3.88it/s]  5%|▌         | 11/201 [00:02<00:49,  3.87it/s]  6%|▌         | 12/201 [00:03<00:48,  3.88it/s]  6%|▋         | 13/201 [00:03<00:48,  3.87it/s]  7%|▋         | 14/201 [00:03<00:47,  3.90it/s]  7%|▋         | 15/201 [00:03<00:47,  3.92it/s]  8%|▊         | 16/201 [00:04<00:46,  3.95it/s]  8%|▊         | 17/201 [00:04<00:46,  3.94it/s]  9%|▉         | 18/201 [00:04<00:46,  3.94it/s]  9%|▉         | 19/201 [00:04<00:45,  3.96it/s] 10%|▉         | 20/201 [00:05<00:45,  3.97it/s] 10%|█         | 21/201 [00:05<00:45,  3.98it/s] 11%|█         | 22/201 [00:05<00:44,  3.98it/s] 11%|█▏        | 23/201 [00:05<00:45,  3.93it/s] 12%|█▏        | 24/201 [00:06<00:45,  3.87it/s] 12%|█▏        | 25/201 [00:06<00:47,  3.68it/s] 13%|█▎        | 26/201 [00:06<00:50,  3.50it/s] 13%|█▎        | 27/201 [00:07<00:50,  3.46it/s] 14%|█▍        | 28/201 [00:07<00:50,  3.41it/s] 14%|█▍        | 29/201 [00:07<00:50,  3.40it/s] 15%|█▍        | 30/201 [00:07<00:48,  3.51it/s] 15%|█▌        | 31/201 [00:08<00:47,  3.58it/s] 16%|█▌        | 32/201 [00:08<00:46,  3.62it/s] 16%|█▋        | 33/201 [00:08<00:45,  3.67it/s] 17%|█▋        | 34/201 [00:08<00:44,  3.73it/s] 17%|█▋        | 35/201 [00:09<00:44,  3.76it/s] 18%|█▊        | 36/201 [00:09<00:43,  3.80it/s] 18%|█▊        | 37/201 [00:09<00:43,  3.80it/s] 19%|█▉        | 38/201 [00:10<00:42,  3.82it/s] 19%|█▉        | 39/201 [00:10<00:42,  3.82it/s] 20%|█▉        | 40/201 [00:10<00:42,  3.78it/s] 20%|██        | 41/201 [00:10<00:42,  3.79it/s] 21%|██        | 42/201 [00:11<00:41,  3.79it/s] 21%|██▏       | 43/201 [00:11<00:41,  3.79it/s] 22%|██▏       | 44/201 [00:11<00:41,  3.77it/s] 22%|██▏       | 45/201 [00:11<00:41,  3.76it/s] 23%|██▎       | 46/201 [00:12<00:41,  3.76it/s] 23%|██▎       | 47/201 [00:12<00:40,  3.77it/s] 24%|██▍       | 48/201 [00:12<00:40,  3.78it/s] 24%|██▍       | 49/201 [00:12<00:39,  3.81it/s] 25%|██▍       | 50/201 [00:13<00:39,  3.80it/s]  [                              step 50: before]  alloc=  1243.8 MB   peak=  1243.8 MB   reserved=  3374.0 MB
-  [              step 50: after update (SDF+vel)]  alloc=  1243.8 MB   peak=  1889.0 MB   reserved=  3374.0 MB
-  [                    step 50: after mu/normals]  alloc=  1753.8 MB   peak=  2034.1 MB   reserved=  3374.0 MB
-  [        step 50: after fluid_step (Heun done)]  alloc=  1753.8 MB   peak=  2594.3 MB   reserved=  3374.0 MB
-  [                        step 50: after forces]  alloc=  1753.8 MB   peak=  2839.8 MB   reserved=  3374.0 MB
-  [                       step 50: after release]  alloc=  1243.8 MB   peak=  2839.8 MB   reserved=  3374.0 MB
- 25%|██▌       | 51/201 [00:13<00:39,  3.78it/s] 26%|██▌       | 52/201 [00:13<00:39,  3.79it/s] 26%|██▋       | 53/201 [00:13<00:38,  3.81it/s] 27%|██▋       | 54/201 [00:14<00:38,  3.82it/s] 27%|██▋       | 55/201 [00:14<00:38,  3.82it/s] 28%|██▊       | 56/201 [00:14<00:38,  3.81it/s] 28%|██▊       | 57/201 [00:15<00:38,  3.79it/s] 29%|██▉       | 58/201 [00:15<00:37,  3.81it/s] 29%|██▉       | 59/201 [00:15<00:37,  3.80it/s] 30%|██▉       | 60/201 [00:15<00:36,  3.82it/s] 30%|███       | 61/201 [00:16<00:36,  3.81it/s] 31%|███       | 62/201 [00:16<00:36,  3.79it/s] 31%|███▏      | 63/201 [00:16<00:36,  3.77it/s] 32%|███▏      | 64/201 [00:16<00:35,  3.82it/s] 32%|███▏      | 65/201 [00:17<00:34,  3.90it/s] 33%|███▎      | 66/201 [00:17<00:34,  3.95it/s] 33%|███▎      | 67/201 [00:17<00:33,  3.95it/s] 34%|███▍      | 68/201 [00:17<00:34,  3.91it/s] 34%|███▍      | 69/201 [00:18<00:33,  3.89it/s] 35%|███▍      | 70/201 [00:18<00:33,  3.87it/s] 35%|███▌      | 71/201 [00:18<00:33,  3.83it/s] 36%|███▌      | 72/201 [00:18<00:34,  3.79it/s] 36%|███▋      | 73/201 [00:19<00:33,  3.78it/s] 37%|███▋      | 74/201 [00:19<00:33,  3.79it/s] 37%|███▋      | 75/201 [00:19<00:32,  3.83it/s] 38%|███▊      | 76/201 [00:19<00:32,  3.80it/s] 38%|███▊      | 77/201 [00:20<00:32,  3.80it/s] 39%|███▉      | 78/201 [00:20<00:32,  3.80it/s] 39%|███▉      | 79/201 [00:20<00:32,  3.79it/s] 40%|███▉      | 80/201 [00:21<00:32,  3.77it/s] 40%|████      | 81/201 [00:21<00:31,  3.75it/s] 41%|████      | 82/201 [00:21<00:31,  3.77it/s] 41%|████▏     | 83/201 [00:21<00:31,  3.77it/s] 42%|████▏     | 84/201 [00:22<00:31,  3.77it/s] 42%|████▏     | 85/201 [00:22<00:30,  3.77it/s] 43%|████▎     | 86/201 [00:22<00:30,  3.79it/s] 43%|████▎     | 87/201 [00:22<00:30,  3.76it/s] 44%|████▍     | 88/201 [00:23<00:31,  3.57it/s] 44%|████▍     | 89/201 [00:23<00:32,  3.42it/s] 45%|████▍     | 90/201 [00:23<00:33,  3.36it/s] 45%|████▌     | 91/201 [00:24<00:33,  3.29it/s] 46%|████▌     | 92/201 [00:24<00:32,  3.32it/s] 46%|████▋     | 93/201 [00:24<00:31,  3.43it/s] 47%|████▋     | 94/201 [00:25<00:30,  3.48it/s] 47%|████▋     | 95/201 [00:25<00:29,  3.54it/s] 48%|████▊     | 96/201 [00:25<00:29,  3.59it/s] 48%|████▊     | 97/201 [00:25<00:28,  3.65it/s] 49%|████▉     | 98/201 [00:26<00:28,  3.67it/s] 49%|████▉     | 99/201 [00:26<00:27,  3.66it/s] 50%|████▉     | 100/201 [00:26<00:27,  3.67it/s]  [                             step 100: before]  alloc=  1243.8 MB   peak=  1243.8 MB   reserved=  3374.0 MB
-  [             step 100: after update (SDF+vel)]  alloc=  1243.8 MB   peak=  1889.0 MB   reserved=  3374.0 MB
-  [                   step 100: after mu/normals]  alloc=  1753.8 MB   peak=  2034.1 MB   reserved=  3374.0 MB
-  [       step 100: after fluid_step (Heun done)]  alloc=  1753.8 MB   peak=  2594.3 MB   reserved=  3374.0 MB
-  [                       step 100: after forces]  alloc=  1753.8 MB   peak=  2839.8 MB   reserved=  3374.0 MB
-  [                      step 100: after release]  alloc=  1243.8 MB   peak=  2839.8 MB   reserved=  3374.0 MB
- 50%|█████     | 101/201 [00:26<00:27,  3.67it/s] 51%|█████     | 102/201 [00:27<00:26,  3.73it/s] 51%|█████     | 103/201 [00:27<00:25,  3.78it/s] 52%|█████▏    | 104/201 [00:27<00:25,  3.81it/s] 52%|█████▏    | 105/201 [00:27<00:24,  3.84it/s] 53%|█████▎    | 106/201 [00:28<00:24,  3.85it/s] 53%|█████▎    | 107/201 [00:28<00:24,  3.85it/s] 54%|█████▎    | 108/201 [00:28<00:24,  3.85it/s] 54%|█████▍    | 109/201 [00:28<00:23,  3.87it/s] 55%|█████▍    | 110/201 [00:29<00:23,  3.88it/s] 55%|█████▌    | 111/201 [00:29<00:23,  3.88it/s] 56%|█████▌    | 112/201 [00:29<00:23,  3.86it/s] 56%|█████▌    | 113/201 [00:30<00:22,  3.85it/s] 57%|█████▋    | 114/201 [00:30<00:22,  3.84it/s] 57%|█████▋    | 115/201 [00:30<00:22,  3.83it/s] 58%|█████▊    | 116/201 [00:30<00:22,  3.83it/s] 58%|█████▊    | 117/201 [00:31<00:22,  3.82it/s] 59%|█████▊    | 118/201 [00:31<00:21,  3.85it/s] 59%|█████▉    | 119/201 [00:31<00:21,  3.85it/s] 60%|█████▉    | 120/201 [00:31<00:21,  3.86it/s] 60%|██████    | 121/201 [00:32<00:20,  3.86it/s] 61%|██████    | 122/201 [00:32<00:20,  3.87it/s] 61%|██████    | 123/201 [00:32<00:20,  3.88it/s] 62%|██████▏   | 124/201 [00:32<00:19,  3.89it/s] 62%|██████▏   | 125/201 [00:33<00:19,  3.89it/s] 63%|██████▎   | 126/201 [00:33<00:19,  3.88it/s] 63%|██████▎   | 127/201 [00:33<00:19,  3.88it/s] 64%|██████▎   | 128/201 [00:33<00:18,  3.88it/s] 64%|██████▍   | 129/201 [00:34<00:18,  3.87it/s] 65%|██████▍   | 130/201 [00:34<00:18,  3.88it/s] 65%|██████▌   | 131/201 [00:34<00:18,  3.89it/s] 66%|██████▌   | 132/201 [00:34<00:17,  3.87it/s] 66%|██████▌   | 133/201 [00:35<00:17,  3.88it/s] 67%|██████▋   | 134/201 [00:35<00:17,  3.86it/s] 67%|██████▋   | 135/201 [00:35<00:17,  3.86it/s] 68%|██████▊   | 136/201 [00:35<00:16,  3.84it/s] 68%|██████▊   | 137/201 [00:36<00:16,  3.81it/s] 69%|██████▊   | 138/201 [00:36<00:16,  3.81it/s] 69%|██████▉   | 139/201 [00:36<00:16,  3.81it/s] 70%|██████▉   | 140/201 [00:37<00:15,  3.84it/s] 70%|███████   | 141/201 [00:37<00:15,  3.87it/s] 71%|███████   | 142/201 [00:37<00:15,  3.88it/s] 71%|███████   | 143/201 [00:37<00:14,  3.87it/s] 72%|███████▏  | 144/201 [00:38<00:14,  3.86it/s] 72%|███████▏  | 145/201 [00:38<00:14,  3.87it/s] 73%|███████▎  | 146/201 [00:38<00:14,  3.90it/s] 73%|███████▎  | 147/201 [00:38<00:13,  3.93it/s] 74%|███████▎  | 148/201 [00:39<00:13,  3.92it/s] 74%|███████▍  | 149/201 [00:39<00:13,  3.89it/s] 75%|███████▍  | 150/201 [00:39<00:13,  3.90it/s]  [                             step 150: before]  alloc=  1243.8 MB   peak=  1243.8 MB   reserved=  3374.0 MB
-  [             step 150: after update (SDF+vel)]  alloc=  1243.8 MB   peak=  1889.0 MB   reserved=  3374.0 MB
-  [                   step 150: after mu/normals]  alloc=  1753.8 MB   peak=  2034.1 MB   reserved=  3374.0 MB
-  [       step 150: after fluid_step (Heun done)]  alloc=  1753.8 MB   peak=  2594.3 MB   reserved=  3374.0 MB
-  [                       step 150: after forces]  alloc=  1753.8 MB   peak=  2839.8 MB   reserved=  3374.0 MB
-  [                      step 150: after release]  alloc=  1243.8 MB   peak=  2839.8 MB   reserved=  3374.0 MB
- 75%|███████▌  | 151/201 [00:39<00:12,  3.90it/s] 76%|███████▌  | 152/201 [00:40<00:12,  3.92it/s] 76%|███████▌  | 153/201 [00:40<00:12,  3.92it/s] 77%|███████▋  | 154/201 [00:40<00:11,  3.94it/s] 77%|███████▋  | 155/201 [00:40<00:11,  3.93it/s] 78%|███████▊  | 156/201 [00:41<00:11,  3.93it/s] 78%|███████▊  | 157/201 [00:41<00:11,  3.95it/s] 79%|███████▊  | 158/201 [00:41<00:10,  3.95it/s] 79%|███████▉  | 159/201 [00:41<00:10,  3.95it/s] 80%|███████▉  | 160/201 [00:42<00:10,  3.95it/s] 80%|████████  | 161/201 [00:42<00:10,  3.94it/s] 81%|████████  | 162/201 [00:42<00:09,  3.91it/s] 81%|████████  | 163/201 [00:42<00:09,  3.93it/s] 82%|████████▏ | 164/201 [00:43<00:09,  3.93it/s] 82%|████████▏ | 165/201 [00:43<00:09,  3.91it/s] 83%|████████▎ | 166/201 [00:43<00:08,  3.91it/s] 83%|████████▎ | 167/201 [00:43<00:08,  3.86it/s] 84%|████████▎ | 168/201 [00:44<00:08,  3.88it/s] 84%|████████▍ | 169/201 [00:44<00:08,  3.90it/s] 85%|████████▍ | 170/201 [00:44<00:07,  3.88it/s] 85%|████████▌ | 171/201 [00:44<00:07,  3.91it/s] 86%|████████▌ | 172/201 [00:45<00:07,  3.91it/s] 86%|████████▌ | 173/201 [00:45<00:07,  3.92it/s] 87%|████████▋ | 174/201 [00:45<00:06,  3.92it/s] 87%|████████▋ | 175/201 [00:45<00:06,  3.93it/s] 88%|████████▊ | 176/201 [00:46<00:06,  3.94it/s] 88%|████████▊ | 177/201 [00:46<00:06,  3.94it/s] 89%|████████▊ | 178/201 [00:46<00:05,  3.94it/s] 89%|████████▉ | 179/201 [00:46<00:05,  3.95it/s] 90%|████████▉ | 180/201 [00:47<00:05,  3.93it/s] 90%|█████████ | 181/201 [00:47<00:05,  3.94it/s] 91%|█████████ | 182/201 [00:47<00:04,  3.95it/s] 91%|█████████ | 183/201 [00:47<00:04,  3.94it/s] 92%|█████████▏| 184/201 [00:48<00:04,  3.95it/s] 92%|█████████▏| 185/201 [00:48<00:04,  3.95it/s] 93%|█████████▎| 186/201 [00:48<00:03,  3.96it/s] 93%|█████████▎| 187/201 [00:48<00:03,  3.96it/s] 94%|█████████▎| 188/201 [00:49<00:03,  3.96it/s] 94%|█████████▍| 189/201 [00:49<00:03,  3.97it/s] 95%|█████████▍| 190/201 [00:49<00:02,  3.97it/s] 95%|█████████▌| 191/201 [00:49<00:02,  3.96it/s] 96%|█████████▌| 192/201 [00:50<00:02,  3.96it/s] 96%|█████████▌| 193/201 [00:50<00:02,  3.96it/s] 97%|█████████▋| 194/201 [00:50<00:01,  3.97it/s] 97%|█████████▋| 195/201 [00:50<00:01,  3.95it/s] 98%|█████████▊| 196/201 [00:51<00:01,  3.92it/s] 98%|█████████▊| 197/201 [00:51<00:01,  3.92it/s] 99%|█████████▊| 198/201 [00:51<00:00,  3.92it/s] 99%|█████████▉| 199/201 [00:52<00:00,  3.91it/s]100%|█████████▉| 200/201 [00:52<00:00,  3.89it/s]  [                             step 200: before]  alloc=  1243.8 MB   peak=  1243.8 MB   reserved=  3374.0 MB
-  [             step 200: after update (SDF+vel)]  alloc=  1243.8 MB   peak=  1889.0 MB   reserved=  3374.0 MB
-  [                   step 200: after mu/normals]  alloc=  1753.8 MB   peak=  2034.1 MB   reserved=  3374.0 MB
-  [       step 200: after fluid_step (Heun done)]  alloc=  1753.8 MB   peak=  2594.3 MB   reserved=  3374.0 MB
-  [                       step 200: after forces]  alloc=  1753.8 MB   peak=  2839.8 MB   reserved=  3374.0 MB
-  [                      step 200: after release]  alloc=  1243.8 MB   peak=  2839.8 MB   reserved=  3374.0 MB
-100%|██████████| 201/201 [00:52<00:00,  3.19it/s]100%|██████████| 201/201 [00:52<00:00,  3.81it/s]
-[32m# [PYLOG-1475613] 2026-03-09 13:57:24,288 - [INFO] - extensions.py::123::end_episode()
-# file:///data/andreaferrario/lilytorch/lilytorch/FARMS_V2/farms_core/farms_core/simulation/extensions.py#L123
-[39mSaving data to /data/andreaferrario/ns_data/2026-03-09T13:56:29.988135/output
-[32m-[39m
-[32m# [PYLOG-1475613] 2026-03-09 13:57:24,288 - [INFO] - data.py::132::to_file()
-# file:///data/andreaferrario/lilytorch/lilytorch/FARMS_V2/farms_core/farms_core/experiment/data.py#L132
-[39mExporting to dictionary
-[32m-[39m
-[32m# [PYLOG-1475613] 2026-03-09 13:57:24,288 - [INFO] - data.py::134::to_file()
-# file:///data/andreaferrario/lilytorch/lilytorch/FARMS_V2/farms_core/farms_core/experiment/data.py#L134
-[39mSaving data to /data/andreaferrario/ns_data/2026-03-09T13:56:29.988135/output/simulation.hdf5
-[32m-[39m
-[32m# [PYLOG-1475613] 2026-03-09 13:57:24,296 - [INFO] - data.py::136::to_file()
-# file:///data/andreaferrario/lilytorch/lilytorch/FARMS_V2/farms_core/farms_core/experiment/data.py#L136
-[39mSaved data to /data/andreaferrario/ns_data/2026-03-09T13:56:29.988135/output/simulation.hdf5
-[32m-[39m
-[36m# [PYLOG-1475613] 2026-03-09 13:57:24,319 - [DEBUG] - camera.py::331::save()
-# file:///data/andreaferrario/lilytorch/lilytorch/FARMS_V2/farms_mujoco/farms_mujoco/sensors/camera.py#L331
-[39mRecording video to /data/andreaferrario/ns_data/2026-03-09T13:56:29.988135/output/video.mp4 with ffmpeg (fps=30.3030303030303, speed=1.0, skips=32, frame=6/7)
-[36m-[39m
-[32m# [PYLOG-1475613] 2026-03-09 13:57:24,338 - [INFO] - camera.py::344::save()
-# file:///data/andreaferrario/lilytorch/lilytorch/FARMS_V2/farms_mujoco/farms_mujoco/sensors/camera.py#L344
-[39mVideo saved to /data/andreaferrario/ns_data/2026-03-09T13:56:29.988135/output/video.mp4
-[32m-[39m
-[32m# [PYLOG-1475613] 2026-03-09 13:57:24,338 - [INFO] - simulation.py::319::run()
-# file:///data/andreaferrario/lilytorch/lilytorch/FARMS_V2/farms_mujoco/farms_mujoco/simulation/simulation.py#L319
-[39mClosing simulation
-[32m-[39m
-  [                    after simulation complete]  alloc=  1243.8 MB   peak=  2839.8 MB   reserved=  3374.0 MB
-/data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/torch/__init__.py:1113: FutureWarning: `torch.distributed.reduce_op` is deprecated, please use `torch.distributed.ReduceOp` instead
-  return isinstance(obj, torch.Tensor)
-
-================================================================================
-MEMORY PROFILE SUMMARY
-================================================================================
-
-Phase                                          Avg Alloc MB  Max Alloc MB   Final Peak MB
-------------------------------------------------------------------------------------------
-before simulation setup                                 0.0           0.0             0.0
-after loading experiment options                        0.0           0.0             0.0
-enter                                                   0.0           0.0             0.0
-exit                                                  550.7         699.8          1217.5
-before                                               1166.1        1243.8          1243.8
-after update (SDF+vel)                               1166.1        1243.8          1889.0
-after mu/normals                                     1719.8        1753.8          2034.1
-after fluid_step (Heun done)                         1724.6        1753.8          2594.3
-after forces                                         1753.8        1753.8          2839.8
-after release                                        1243.8        1243.8          2839.8
-after simulation complete                            1243.8        1243.8          2839.8
-
-Final peak allocated: 2839.8 MB
-Final reserved:       3374.0 MB
-
-================================================================================
-GPU TENSOR CENSUS (current)
-================================================================================
-
-Shape                                          Dtype             Count    Total MB
---------------------------------------------------------------------------------
-(514, 130, 130)                                torch.float32        39      1292.3
-(9, 514, 130, 130)                             torch.float32         1       298.2
-(64, 64, 64)                                   torch.float32        14        14.0
-(102, 102, 102)                                torch.float32         2         8.1
-(1, 1, 64, 64, 64)                             torch.float32         7         7.0
-(89, 89, 89)                                   torch.float32         2         5.4
-(1, 1, 102, 102, 102)                          torch.float32         1         4.0
-(1, 1, 89, 89, 89)                             torch.float32         1         2.7
-(9, 3, 201)                                    torch.float32         2         0.0
-(64,)                                          torch.float32        21         0.0
-(514,)                                         torch.float32         2         0.0
-(130,)                                         torch.float32         4         0.0
-(102,)                                         torch.float32         3         0.0
-(89,)                                          torch.float32         3         0.0
-(9,)                                           torch.float32        15         0.0
-(9, 3)                                         torch.float32         2         0.0
-(3, 1)                                         torch.float32        18         0.0
-(1,)                                           torch.float32        36         0.0
-(3,)                                           torch.float32         9         0.0
-()                                             torch.float32        20         0.0
-(2,)                                           torch.float32         9         0.0
-(1,)                                           torch.int64           9         0.0
-
-Total census: 1631.8 MB
-
-================================================================================
-STEP-BY-STEP DELTAS (from first traced step)
-================================================================================
-                                 step 2: before -> after update (SDF+vel)          delta=    +0.0 MB   alloc=  1243.5 MB
-                 step 2: after update (SDF+vel) -> after mu/normals                delta=  +510.0 MB   alloc=  1753.5 MB
-                       step 2: after mu/normals -> after fluid_step (Heun done)    delta=    +0.3 MB   alloc=  1753.8 MB
-           step 2: after fluid_step (Heun done) -> after forces                    delta=    +0.0 MB   alloc=  1753.8 MB
-                           step 2: after forces -> after release                   delta=  -510.0 MB   alloc=  1243.8 MB
-Exception ignored in: <function ExperimentTask.__del__ at 0x708792690860>
-Traceback (most recent call last):
-  File "/data/andreaferrario/lilytorch/lilytorch/FARMS_V2/farms_mujoco/farms_mujoco/simulation/task.py", line 94, in __del__
-  File "/data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/dm_control/mujoco/wrapper/core.py", line 112, in set_callback
-TypeError: 'NoneType' object is not callable

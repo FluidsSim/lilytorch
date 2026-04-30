@@ -20,10 +20,18 @@
 *.so
 *.egg-info
 
-#: Do not ignore figures folder
-
 make.bat
 # *.txt — do NOT blanket-ignore .txt (requirements.txt is tracked)
+
+# LaTeX build artefacts (keep .tex / .bib / .pdf / README.md)
+paper/main.aux
+paper/main.bbl
+paper/main.blg
+paper/main.fdb_latexmk
+paper/main.fls
+paper/main.log
+paper/main.out
+paper/main.synctex.gz
 
 # VS Code
 .vscode/
@@ -41,7 +49,6 @@ rag/papers/**/*.pdf
 *.sublime-workspace
 
 # folders
-# FARMS_V2/
 data/
 build/
 logs/
@@ -52,14 +59,8 @@ results/
 __pycache__
 figures/
 output/
-.pytest_cache/
-
-farms_amphibious/
-farms_core/
-farms_sim/
-farms_mujoco/
-
 Output/
+.pytest_cache/
 
 precice_coupling/
 
