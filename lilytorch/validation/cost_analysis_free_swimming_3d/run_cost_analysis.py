@@ -75,37 +75,31 @@ parser.add_argument("--stability_tol", type=float, default=0.05,
                     help="Warn if rolling (std/mean) of the last 10 timed "
                          "steps exceeds this threshold after warm-up.")
 parser.add_argument("--save_every",type=int, default=9999)
+parser.add_argument("--use_kernels", action="store_true",
+                    help="Activate the production C++/CUDA kernel path "
+                         "(streaming SDF + Phase D fused forces + union-AABB "
+                         "crops for shared stress / mu-normals / BDIM meta). "
+                         "Mutually exclusive with --no_kernels (which is the "
+                         "pure-PyTorch reference path, no batching/cropping).")
+parser.add_argument("--no_kernels", action="store_true",
+                    help="Force the suboptimal pure-PyTorch reference path "
+                         "(no batching, no cropping, no streaming kernels). "
+                         "Useful as the no-cropping reference baseline.")
+# Deprecated aliases — kept so existing wrappers keep parsing.  All of
+# them now collapse to ``use_kernels=True`` since the per-feature flags
+# were removed from the solver.
 parser.add_argument("--force_narrow_batch", action="store_true",
-                    help="Enable the batched narrow-band forces path "
-                         "(packs all body AABBs into a fixed (B,D,D,D) "
-                         "tensor and dispatches a single compiled kernel).")
+                    help="DEPRECATED: rolled into --use_kernels.")
 parser.add_argument("--force_shared_union", action="store_true",
-                    help="Run the bandwidth-bound shared stress kernel "
-                         "only over the union AABB of all body sub-blocks "
-                         "(plus halo) instead of the full grid.")
+                    help="DEPRECATED: rolled into --use_kernels.")
 parser.add_argument("--mu_normals_union", action="store_true",
-                    help="Run the batched mu/normals kernel only over the "
-                         "union AABB of all body sub-blocks (with halo); "
-                         "persistent full-grid buffers hold outside-body "
-                         "defaults (mu0=1, mu1=0, normals=0).")
+                    help="DEPRECATED: rolled into --use_kernels.")
 parser.add_argument("--bdim_union", action="store_true",
-                    help="Run the BDIM2 meta-equation kernel only over the "
-                         "union AABB of all body sub-blocks (with halo). "
-                         "Outside the union mu0=1, mu1=0, body_vel=0 makes "
-                         "the meta-equation the identity, so phi[outside] "
-                         "is left unchanged.")
+                    help="DEPRECATED: rolled into --use_kernels.")
 parser.add_argument("--streaming_sdf_3d", action="store_true",
-                    help="Phase B: fused C++/CUDA streaming SDF/face-velocity "
-                         "update.  One kernel per body replaces the Python "
-                         "per-body loop in BDIMhandler._update_3d.  The "
-                         "trilinear samplers (pytorch_interpolation) are "
-                         "auto-built when this is on.")
+                    help="DEPRECATED: rolled into --use_kernels.")
 parser.add_argument("--streaming_forces_3d", action="store_true",
-                    help="Phase D: fused C++/CUDA per-body force/torque "
-                         "integration.  Re-samples body SDF on the fly and "
-                         "replaces the slice-write packing + narrow-batch "
-                         "reduction with a single op call. Implies "
-                         "--streaming_sdf_3d and --force_shared_union.")
+                    help="DEPRECATED: rolled into --use_kernels.")
 parser.add_argument("--device",    type=str, default="cuda",
                     choices=["cuda", "cpu"])
 parser.add_argument("--out_dir",   type=str, default=None,
@@ -602,19 +596,19 @@ def gen_simulation_config_lean(output_folder):
             solver_cfg["poisson_compile"]  = True
             solver_cfg["compile_forces"]   = True
             solver_cfg["compile_sdf"]      = True
-            if args.force_narrow_batch:
-                solver_cfg["force_narrow_batch"] = True
-            if args.force_shared_union:
-                solver_cfg["force_shared_union"] = True
-            if args.mu_normals_union:
-                solver_cfg["mu_normals_union"] = True
-            if args.bdim_union:
-                solver_cfg["bdim_union"] = True
-            if args.streaming_sdf_3d:
-                solver_cfg["streaming_sdf_3d"] = True
-            if args.streaming_forces_3d:
-                solver_cfg["streaming_forces_3d"] = True
-                solver_cfg["streaming_sdf_3d"] = True
+            # Map the new --use_kernels / --no_kernels switch (and the
+            # legacy --streaming_*, --force_shared_union, --mu_normals_union,
+            # --bdim_union, --force_narrow_batch deprecation aliases) to
+            # the single solver-level ``use_kernels`` config key.
+            _legacy_on = (
+                args.force_narrow_batch or args.force_shared_union
+                or args.mu_normals_union or args.bdim_union
+                or args.streaming_sdf_3d or args.streaming_forces_3d
+            )
+            if args.no_kernels:
+                solver_cfg["use_kernels"] = False
+            elif args.use_kernels or _legacy_on:
+                solver_cfg["use_kernels"] = True
 
     with open(yaml_path, "w") as f:
         yaml.dump(sim_dict, f, default_flow_style=False, sort_keys=False)
