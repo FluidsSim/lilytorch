@@ -612,9 +612,10 @@ __global__ void apply_bcs_2d_kernel(
     const int N_neu,
     const int* __restrict__ dir_desc,
     const scalar_t* __restrict__ dir_val,
-    const int N_dir)
+    const int N_dir,
+    const int op_offset)
 {
-    const int op = blockIdx.y;
+    const int op = blockIdx.y + op_offset;
     const int total = N_neu + N_dir;
     if (op >= total) return;
 
@@ -687,19 +688,44 @@ void apply_bcs_2d_cuda(
     const int blockX = 256;
     const int gridX  = (int)((max_line_dim + blockX - 1) / blockX);
 
+    // Ops are serialized (one kernel launch per op on the same CUDA stream)
+    // because they can share ghost cells.  Two failure modes if launched in
+    // parallel via blockIdx.y:
+    //
+    //   Neumann–Neumann corner race: the x-axis op writes u[0,:] = u[1,:] and
+    //   the y-axis op writes u[:,0] = u[:,1] simultaneously, so u[0,0] has an
+    //   undefined winner.  Under sequential application the second op reads the
+    //   already-updated slice, so u[0,0] ends up holding the diagonal interior
+    //   value u_orig[1,1] (axis-0 runs first: u[0,1] ← u_orig[1,1]; axis-1
+    //   then reads that: u[0,0] ← u[0,1] = u_orig[1,1]).
+    //
+    //   Neumann–Dirichlet override race: a Neumann op and a subsequent Dirichlet
+    //   op that targets the same face must not overlap — the Dirichlet value
+    //   must win.
+    //
+    // Corner ghost cells (e.g. u[0,0]) are never read by interior 5-point
+    // stencils, so their exact value is physically irrelevant.  Many solvers
+    // leave corners untouched; this implementation writes a diagonal-interior
+    // value as a side-effect of the sequential application order, which is kept
+    // for exact reproducibility of the CPU serial-loop reference.
     AT_DISPATCH_FLOATING_TYPES(u.scalar_type(), "apply_bcs_2d_cuda", [&] {
         const int* neu_p = (N_neu > 0) ? neu_desc.data_ptr<int>() : nullptr;
         const int* dir_p = (N_dir > 0) ? dir_desc.data_ptr<int>() : nullptr;
         const scalar_t* dir_val_p =
             (N_dir > 0) ? dir_val.data_ptr<scalar_t>() : nullptr;
 
-        apply_bcs_2d_kernel<scalar_t>
-            <<<dim3(gridX, total, 1), dim3(blockX, 1, 1), 0, stream>>>(
-                u.data_ptr<scalar_t>(),
-                v.data_ptr<scalar_t>(),
-                shapes.data_ptr<int64_t>(),
-                neu_p, N_neu,
-                dir_p, dir_val_p, N_dir);
+        scalar_t* u_p = u.data_ptr<scalar_t>();
+        scalar_t* v_p = v.data_ptr<scalar_t>();
+        const int64_t* sh_p = shapes.data_ptr<int64_t>();
+
+        for (int op = 0; op < total; ++op) {
+            apply_bcs_2d_kernel<scalar_t>
+                <<<dim3(gridX, 1, 1), dim3(blockX, 1, 1), 0, stream>>>(
+                    u_p, v_p, sh_p,
+                    neu_p, N_neu,
+                    dir_p, dir_val_p, N_dir,
+                    op);
+        }
     });
 }
 

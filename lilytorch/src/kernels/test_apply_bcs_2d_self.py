@@ -53,11 +53,14 @@ def _reference_apply_bcs_2d(u, v, neu_desc, dir_desc, dir_val):
 
 
 def _make_scene(*, dtype, device):
+    # Always generate on CPU so that both the CPU and CUDA tests start from
+    # bit-identical tensors (CPU and CUDA RNGs produce different values even
+    # with the same seed, breaking the cross-device parity check).
     torch.manual_seed(0)
     Nx_u, Ny_u = 32, 24
     Nx_v, Ny_v = 30, 26
-    u = torch.randn(Nx_u, Ny_u, dtype=dtype, device=device)
-    v = torch.randn(Nx_v, Ny_v, dtype=dtype, device=device)
+    u = torch.randn(Nx_u, Ny_u, dtype=dtype).to(device)
+    v = torch.randn(Nx_v, Ny_v, dtype=dtype).to(device)
     shapes = torch.tensor([
         [Nx_u, Ny_u],
         [Nx_v, Ny_v],
