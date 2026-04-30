@@ -256,10 +256,13 @@ Project layout
    │   ├── poisson_fft.py   FFT / DCT Poisson solver
    │   ├── poisson_mult.py  Multigrid / MGCG Poisson solver
    │   ├── body.py          Body geometry, SDF, kinematics
+   │   ├── forces.py        Hydrodynamic force / torque integration
+   │   ├── extras.py        Sponge layer, Carreau / yield damping, Smagorinsky
    │   ├── operations.py    Discrete differential operators
    │   ├── plotting.py      Visualisation helpers
-   │   ├── video_postprocess.py         Frame → MP4 / GIF
-   │   └── projected_field_postprocess.py  Top-view PIV-style curl
+   │   ├── video_postprocess.py    Frame → MP4 / GIF
+   │   ├── kernels/         CUDA / C++ fused kernels (streaming SDF, BDIM forces, BCs)
+   │   └── configs/         Stand-alone YAML configs (cylinders, spheres, …)
    ├── integration/         FARMS / MuJoCo coupling layer
    │   ├── extensions.py    FluidExtension, DataLogger
    │   ├── flow_viewer.py   In-viewer flow visualisation
