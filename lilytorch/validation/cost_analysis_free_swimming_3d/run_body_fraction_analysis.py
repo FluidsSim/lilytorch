@@ -9,9 +9,10 @@ longitudinal axis, with matched transverse fractions because the 4:1:1
 grid ratio carries (Lx, Ly, Lz) together).
 
 For every (domain × N) combination the script runs
-``run_cost_analysis.py`` TWICE — once with the narrow-band master
-switch on (``--union_narrow_band``), once with every narrow-band flag
-off — so the per-category cost curves can be compared directly.
+``run_cost_analysis.py`` TWICE — once with every narrow-band /
+streaming flag on (the production ``nbforces_opt`` flag set), once
+with every narrow-band flag off — so the per-category cost curves can
+be compared directly.
 
 Motivation
 ----------
@@ -255,13 +256,13 @@ parser.add_argument(
          "  nboff  – every flag off (true baseline)\n"
          "  nbcrop – only the 3 AABB-cropping flags on "
          "(force_shared_union, mu_normals_union, bdim_union)\n"
-         "  nbbatch – only the 2 batching flags on "
-         "(batched_sdf_3d, force_narrow_batch)\n"
-         "  nbon   – every narrow-band flag on (--union_narrow_band)\n"
+         "  nbon   – every narrow-band / streaming flag on "
+         "(matches the production ``nbforces_opt`` set)\n"
          "Default measures all three of nboff, nbcrop, nbon so the plot "
-         "decomposes the combined win into 'cropping alone' vs 'batching "
-         "added on top' (cropping is body-fraction dependent; batching "
-         "is a uniform launch-count reduction).")
+         "decomposes the combined win into 'cropping alone' vs "
+         "'cropping + streaming/batching added on top' (cropping is "
+         "body-fraction dependent; streaming/batching is a uniform "
+         "launch-count reduction).")
 args = parser.parse_args()
 
 # ── Parse domains ────────────────────────────────────────────────────
@@ -326,15 +327,21 @@ else:
 # command.  Modes are chosen to factor the combined narrow-band win into
 # the two functional groups whose effects scale very differently:
 #   * cropping  — body-fraction dependent (wins on sparse domains)
-#   * batching  — body-fraction independent (uniform launch reduction)
+#   * streaming/batching  — body-fraction independent (uniform launch
+#                           reduction, plus fused-CUDA SDF/forces).
+# ``nbon`` therefore mirrors the production ``nbforces_opt`` set used by
+# ``run_scaling_conditions_pipeline.py``.
 NB_MODE_FLAGS = {
     "nboff":  [],                              # true baseline
     "nbcrop": ["--force_shared_union",         # AABB cropping only
                "--mu_normals_union",
                "--bdim_union"],
-    "nbbatch": ["--force_narrow_batch",        # launch-batching only
-                "--batched_sdf_3d"],
-    "nbon":   ["--union_narrow_band"],         # everything (5 flags)
+    "nbon":   ["--force_shared_union",         # production set (nbforces_opt)
+               "--mu_normals_union",
+               "--bdim_union",
+               "--force_narrow_batch",
+               "--streaming_sdf_3d",
+               "--streaming_forces_3d"],
 }
 
 nb_modes = [m.strip() for m in args.nb_modes.split(",") if m.strip()]

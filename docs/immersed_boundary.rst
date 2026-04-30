@@ -248,24 +248,28 @@ be toggled independently:
    * - ``solver.bdim_union``
      - The BDIM2 meta-equation itself (Eq. :eq:`bdim-meta`), applied to
        each face-velocity component only on union cells.
-   * - ``solver.batched_sdf_3d``
-     - Replaces the per-link Python loop of ``grid_sample`` calls by a
-       *single* batched ``torch.nn.functional.grid_sample`` over a
-       padded tensor of all link SDFs.  The union sub-block is evaluated
-       once and ``min``-reduced across bodies.
 
-All four can be enabled at once via the convenience meta-flag
+The three union-crop flags above are independent toggles.  The
+production cost-analysis pipeline (``run_scaling_conditions_pipeline.py``)
+combines them with the streaming fused-CUDA SDF / forces flags:
 
 .. code-block:: yaml
 
    solver:
-     union_narrow_band: true
+     force_shared_union: true
+     mu_normals_union: true
+     bdim_union: true
+     force_narrow_batch: true
+     streaming_sdf_3d: true
+     streaming_forces_3d: true
 
 or, in the cost-analysis harness,
 
 .. code-block:: bash
 
-   python run_multigrid_cost_analysis.py --preset full --union_narrow_band
+   python run_multigrid_cost_analysis.py --preset full \
+       --force_shared_union --mu_normals_union --bdim_union \
+       --force_narrow_batch --streaming_sdf_3d --streaming_forces_3d
 
 Implementation details
 ^^^^^^^^^^^^^^^^^^^^^^
@@ -282,18 +286,10 @@ Implementation details
   the sub-block shape changes over time.  The static, full-grid kernels
   (adv-diff, Poisson) keep the reduce-overhead mode.
 
-* **Batched SDF update** — at initialisation all per-link SDFs are
-  padded to a common maximum shape and stacked into a single tensor of
-  shape ``(B, 1, max_Nx, max_Ny, max_Nz)`` filled with a large sentinel
-  value outside each body's own LUT box.  Every step the solver builds
-  a ``(B, D, H, W, 3)`` grid of normalised coordinates for the current
-  union sub-block, runs **four** ``grid_sample`` calls (one per
-  staggered component: cc, u, v, w), combines the resulting
-  ``(B, D, H, W)`` tensors with ``min`` along the body axis, and writes
-  the result back into the full-grid SDF tensors.  Body velocities are
-  computed in a single batched
-  :math:`\mathbf{v}_i = \mathbf{l}_i + \boldsymbol\omega_i \times (\mathbf{r} - \mathbf{c}_i)`
-  and ``gather``-ed at the per-cell ``argmin`` of the union SDF.
+* **Streaming fused-CUDA SDF update** — when ``streaming_sdf_3d`` is on,
+  one C++/CUDA kernel per body fuses rotate + 4 trilinear samples + 4
+  running-min updates + per-body sparse cc store into a single op call,
+  replacing the Python per-body loop in ``BDIMhandler._update_3d``.
 
 Measured impact
 ^^^^^^^^^^^^^^^
@@ -335,5 +331,6 @@ benchmarks and on all articulated FARMS cases.  You may want to
   for numerical inspection.
 
 For every other scenario — and in particular for long multi-body
-swimming simulations on fine grids — ``union_narrow_band`` should be on.
+swimming simulations on fine grids — the production flag set above
+should be on.
 

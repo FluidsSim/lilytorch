@@ -946,28 +946,18 @@ class FluidSolver:
         # only on the union sub-block (with a 1-cell halo for the normal
         # derivative) and slice-write the result into phi.  Opt-in.
         self._bdim_union = bool(solver.get("bdim_union", False))
-        # Batched SDF evaluation in `_update_3d`: replace the per-body
-        # Python loop (9× rotate_grid + 9× grid_sample + 9× union-where
-        # per staggered grid) with a single broadcast rotation and one
-        # batched `grid_sample` across a stacked per-body SDF tensor.
-        # Collapses ~150 serial GPU launches / step down to ~6-8.
-        # Requires mesh-based bodies exposing (sdf.F, sdf.x, sdf.y, sdf.z).
-        # Opt-in.
-        self._batched_sdf_3d = bool(solver.get("batched_sdf_3d", False))
-        # Custom C++/CUDA trilinear SDF evaluation in `_update_3d` (the
-        # streaming, non-batched per-body path).  Replaces every
-        # `body.sdf(px, py, pz)` call (which dispatches to
-        # `RegularGridInterpolatorGridSample3D`, i.e. `grid_sample`) by
-        # the dedicated trilinear kernel from `pytorch_interpolation`
-        # (``RegularGridInterpolator3D`` / ``trilinear_interp_3d``).
-        # No coordinate normalisation, no 5-D reshape, no grid_sample
-        # overhead.  Per-body AABB cropping is preserved.  Opt-in.
-        self._custom_trilinear_3d = bool(solver.get("custom_trilinear_3d", False))
         # Phase-B fused-CUDA streaming SDF / face-velocity update.
         # One C++/CUDA kernel per body fuses rotate + 4 trilinear samples
         # + 4 running-min updates + per-body sparse cc store.
-        # Implies custom_trilinear_3d (re-uses cached samplers).  Opt-in.
+        # Internally re-uses the per-body custom-trilinear samplers
+        # (pytorch_interpolation / RegularGridInterpolator3D), which are
+        # auto-built when this is on (see ``_custom_trilinear_3d`` below).
+        # Opt-in.
         self._streaming_sdf_3d = bool(solver.get("streaming_sdf_3d", False))
+        # The streaming path requires the per-body C++/CUDA trilinear
+        # samplers; this flag is now an internal derivative of
+        # ``streaming_sdf_3d`` (no separate user-facing toggle).
+        self._custom_trilinear_3d = self._streaming_sdf_3d
         # Phase D: fused per-body force / torque integration.  Re-samples
         # body SDF on the fly inside the same C++/CUDA op that does the
         # delta-function reduction, eliminating the slice-write packing
@@ -977,6 +967,7 @@ class FluidSolver:
         self._streaming_forces_3d = bool(solver.get("streaming_forces_3d", False))
         if self._streaming_forces_3d:
             self._streaming_sdf_3d = True
+            self._custom_trilinear_3d = True
             self._forces_shared_union = True
             self._forces_narrow_band = True
         # Lazy-allocated padded buffers (see _init_forces_narrow_batch)
@@ -1034,8 +1025,6 @@ class FluidSolver:
                   + ("  + shared-stress UNION crop (dynamic)" if self._forces_shared_union else "")
                   + ("  + mu/normals UNION crop (dynamic)" if self._mu_normals_union else "")
                   + ("  + BDIM meta UNION crop (dynamic)" if self._bdim_union else "")
-                  + ("  + batched-SDF update (grid_sample)" if self._batched_sdf_3d else "")
-                  + ("  + custom-trilinear SDF (C++/CUDA, streaming)" if self._custom_trilinear_3d else "")
                   + ("  + streaming fused-CUDA SDF update (Phase C: multi-body batched)" if self._streaming_sdf_3d else "")
                   + ("  + Phase D: fused forces (re-sample SDF on the fly)" if self._streaming_forces_3d else ""))
         else:

@@ -183,33 +183,13 @@ parser.add_argument(
     "--bdim_union", action="store_true",
     help="Crop BDIM2 meta-equation kernel to union of body AABBs")
 parser.add_argument(
-    "--batched_sdf_3d", action="store_true",
-    help="Batched grid_sample SDF update (replaces per-body loop)")
-parser.add_argument(
-    "--custom_trilinear_3d", action="store_true",
-    help="Custom C++/CUDA trilinear SDF (pytorch_interpolation) in streaming "
-         "_update_3d (replaces grid_sample, no batching).")
-parser.add_argument(
     "--streaming_sdf_3d", action="store_true",
-    help="Phase B: fused C++/CUDA streaming SDF/face-velocity update "
-         "(implies --custom_trilinear_3d).")
+    help="Phase B: fused C++/CUDA streaming SDF/face-velocity update.")
 parser.add_argument(
     "--streaming_forces_3d", action="store_true",
     help="Phase D: fused C++/CUDA per-body force/torque integration "
          "(implies --streaming_sdf_3d and --force_shared_union).")
-parser.add_argument(
-    "--union_narrow_band", action="store_true",
-    help="Meta-flag: enables ALL narrow-band optimisations simultaneously "
-         "(force_shared_union + mu_normals_union + bdim_union + "
-         "batched_sdf_3d + force_narrow_batch).")
 args = parser.parse_args()
-
-if args.union_narrow_band:
-    args.force_shared_union = True
-    args.mu_normals_union = True
-    args.bdim_union = True
-    args.batched_sdf_3d = True
-    args.force_narrow_batch = True
 
 if args.out_dir is None:
     args.out_dir = os.path.join(SCRIPT_DIR, "figures")
@@ -292,10 +272,6 @@ for i, (nx, ny, nz) in enumerate(grids):
         cmd.append("--mu_normals_union")
     if args.bdim_union:
         cmd.append("--bdim_union")
-    if args.batched_sdf_3d:
-        cmd.append("--batched_sdf_3d")
-    if args.custom_trilinear_3d:
-        cmd.append("--custom_trilinear_3d")
     if args.streaming_sdf_3d:
         cmd.append("--streaming_sdf_3d")
     if args.streaming_forces_3d:
