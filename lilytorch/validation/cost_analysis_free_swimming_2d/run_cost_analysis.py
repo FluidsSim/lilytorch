@@ -61,9 +61,14 @@ parser.add_argument("--discard_first", type=int, default=5,
 parser.add_argument("--stability_tol", type=float, default=0.05,
                     help="Warn if rolling (std/mean) of last 10 steps > threshold")
 parser.add_argument("--save_every", type=int, default=9999)
+parser.add_argument("--use_kernels", action="store_true",
+                    help="Activate the production C++/CUDA kernel path "
+                         "(streaming SDF + Phase D fused forces, 2-D).")
+parser.add_argument("--no_kernels", action="store_true",
+                    help="Force the suboptimal pure-PyTorch reference path.")
+# Deprecated alias kept for backward compatibility — collapses into --use_kernels.
 parser.add_argument("--streaming_sdf_2d", action="store_true",
-                    help="Enable fused C++/CUDA 2-D streaming SDF + forces path "
-                         "(streaming_sdf_2d + streaming_forces_2d, always coupled).")
+                    help="DEPRECATED: rolled into --use_kernels.")
 parser.add_argument("--device",    type=str, default="cuda",
                     choices=["cuda", "cpu"])
 parser.add_argument("--out_dir",   type=str, default=None,
@@ -471,9 +476,10 @@ def gen_simulation_config_lean(output_folder):
             solver_cfg["poisson_compile"]  = True
             solver_cfg["compile_forces"]   = True
             solver_cfg["compile_sdf"]      = True
-            if args.streaming_sdf_2d:
-                solver_cfg["streaming_sdf_2d"]    = True
-                solver_cfg["streaming_forces_2d"] = True
+            if args.no_kernels:
+                solver_cfg["use_kernels"] = False
+            elif args.use_kernels or args.streaming_sdf_2d:
+                solver_cfg["use_kernels"] = True
 
     with open(yaml_path, "w") as f:
         yaml.dump(sim_dict, f, default_flow_style=False, sort_keys=False)

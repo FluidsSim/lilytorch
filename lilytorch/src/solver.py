@@ -172,7 +172,7 @@ class FlowDiagnostics:
 # unchanged via the module-local names.
 from lilytorch.src.forces import (
     _forces_shared_3d, _forces_body_integrate_3d,
-    _forces_body_narrow_batch_3d, _forces_body_batch_3d,
+    _forces_body_batch_3d,
     _forces_shared_2d, _forces_body_batch_2d,
 )
 from lilytorch.src import forces, extras
@@ -440,89 +440,53 @@ class FluidSolver(PlottingMixin):
 
         # ---- optional torch.compile for force computation -----
         self._compile_forces = solver.get("compile_forces", False)
-        # Narrow-band forces: when ``comp._sdf_sparse`` is available (set by
-        # BDIMhandler 3-D update), integrate each body's surface forces only
-        # over its AABB sub-block (~50³ cells) instead of scattering to a
-        # full (B, Nx, Ny, Nz) dense tensor and reducing over all cells.
-        # Enabled by default; disable via solver.force_narrow_band=False
-        # to fall back to the old dense batched path.
-        self._forces_narrow_band = bool(solver.get("force_narrow_band", True))
-        # Batched narrow-band forces: pack all per-body AABB sub-blocks into
-        # a single fixed-shape tensor (B, D_i, D_j, D_k) and dispatch a single
-        # compiled CUDA-graph kernel instead of B separate dynamic-shape launches.
-        # D is determined once at init from the body-local SDF bbox diagonal
-        # (rotation-invariant worst case).  Opt-in until benchmarked.
-        self._forces_narrow_batch = bool(solver.get("force_narrow_batch", False))
-        if self._forces_narrow_batch and not self._forces_narrow_band:
-            # batched path requires the sparse SDF infrastructure
-            self._forces_narrow_band = True
-        # Shared-stress union-AABB crop: run the bandwidth-bound shared
-        # gradient + stress + pressure kernel only over the union AABB
-        # of all body sub-blocks (plus halo) instead of the full grid.
-        # On large grids the full-grid shared kernel is the dominant cost;
-        # cropping to the union AABB (~10× smaller cells for thin swimmers)
-        # cuts memory traffic proportionally.  Opt-in.
-        self._forces_shared_union = bool(solver.get("force_shared_union", False))
-        if self._forces_shared_union and not self._forces_narrow_band:
-            self._forces_narrow_band = True
-        # mu + normals union-AABB crop: run the batched mu/normal kernel
-        # only over the union AABB of all body sub-blocks (with halo for
-        # gradient stencils) instead of the full 4×(Nx,Ny,Nz) grid.
-        # Outside the union SDF equals _FAR, so mu0=1, mu1=0, normals=0;
-        # persistent full-grid buffers are pre-filled with those defaults
-        # and only the union sub-block is overwritten each step.  Opt-in.
-        self._mu_normals_union = bool(solver.get("mu_normals_union", False))
-        self._mu_union_ready = False   # persistent buffers allocated lazily
-        # BDIM meta-equation union-AABB crop: outside the union mu0=1,
-        # mu1=0, body_vel=0, so the meta-equation is the identity
-        # (phi_out = phi).  We can therefore run the elementwise kernel
-        # only on the union sub-block (with a 1-cell halo for the normal
-        # derivative) and slice-write the result into phi.  Opt-in.
-        self._bdim_union = bool(solver.get("bdim_union", False))
-        # Phase-B fused-CUDA streaming SDF / face-velocity update.
-        # One C++/CUDA kernel per body fuses rotate + 4 trilinear samples
-        # + 4 running-min updates + per-body sparse cc store.
-        # Internally re-uses the per-body custom-trilinear samplers
-        # (pytorch_interpolation / RegularGridInterpolator3D), which are
-        # auto-built when this is on (see ``_custom_trilinear_3d`` below).
-        # Opt-in.
-        self._streaming_sdf_3d = bool(solver.get("streaming_sdf_3d", False))
-        # The streaming path requires the per-body C++/CUDA trilinear
-        # samplers; this flag is now an internal derivative of
-        # ``streaming_sdf_3d`` (no separate user-facing toggle).
-        self._custom_trilinear_3d = self._streaming_sdf_3d
-        # Phase D: fused per-body force / torque integration.  Re-samples
-        # body SDF on the fly inside the same C++/CUDA op that does the
-        # delta-function reduction, eliminating the slice-write packing
-        # into ``_fnb_*`` buffers and the dense (B, D_i, D_j, D_k)
-        # narrow-batch kernel.  Requires ``streaming_sdf_3d`` + the
-        # union-AABB shared-stress crop (``force_shared_union``).
-        self._streaming_forces_3d = bool(solver.get("streaming_forces_3d", False))
-        if self._streaming_forces_3d:
-            self._streaming_sdf_3d = True
-            self._custom_trilinear_3d = True
-            self._forces_shared_union = True
-            self._forces_narrow_band = True
-        # 2-D analogues of the streaming flags.
-        # ``streaming_sdf_2d`` activates the per-body C++/CUDA streaming
-        # SDF min-update kernel in BDIMhandler._update_2d (Phase C).
-        # ``streaming_forces_2d`` additionally fires the fused force
-        # integrator ``bdim_forces_2d_multi`` in forces_method2 (Phase D),
-        # reusing the per-body cc-SDF cached by the streaming SDF kernel.
+
+        # =====================================================================
+        # Solver mode: pure-Python  vs  C++/CUDA kernel path
+        # =====================================================================
+        # ``use_kernels`` is the SINGLE user-facing switch that selects
+        # between the two solver variants.  It is independent of
+        # ``use_gpu`` (which selects the torch device).
         #
-        # The 2-D SDF and forces flags are coupled in both directions:
-        # the existing 2-D forces path consumes the per-body
-        # ``comp.sdf_vals`` stack which the streaming SDF path no longer
-        # populates, and the streaming forces kernel needs the per-body
-        # ``sparse_cc_flat`` slab written by the streaming SDF kernel.
-        # Unlike 3-D (where ``force_narrow_band`` already consumes the
-        # sparse slabs), 2-D has no narrow-band forces fallback yet, so
-        # we couple the two flags here.
-        self._streaming_sdf_2d    = bool(solver.get("streaming_sdf_2d", False))
-        self._streaming_forces_2d = bool(solver.get("streaming_forces_2d", False))
-        if self._streaming_sdf_2d or self._streaming_forces_2d:
-            self._streaming_sdf_2d    = True
-            self._streaming_forces_2d = True
+        #   * ``use_kernels = False`` -- pure-Python / pure-PyTorch path.
+        #     Suboptimal but reference: no batching, no per-body cropping,
+        #     no streaming fused kernels.  Works on CPU and CUDA.  All
+        #     four ``compile_*`` flags (compile_adv_diff, compile_forces,
+        #     compile_sdf, poisson_compile) remain independent toggles.
+        #
+        #   * ``use_kernels = True`` -- streaming C++/CUDA kernels path.
+        #     Activates the per-body streaming SDF + fused force kernels,
+        #     the union-AABB crops for shared stress / mu / normals /
+        #     BDIM meta-equation, and the per-body custom trilinear
+        #     samplers.  Requires the compiled ``lilytorch.src.kernels``
+        #     extension to be available.
+        #
+        # All previously-individual variant flags
+        # (force_narrow_band, force_narrow_batch, force_shared_union,
+        # mu_normals_union, bdim_union, streaming_sdf_3d,
+        # streaming_forces_3d, streaming_sdf_2d, streaming_forces_2d)
+        # are removed as user-facing keys; the corresponding internal
+        # ``self._...`` attributes are derived directly from
+        # ``use_kernels`` here so that downstream dispatch in
+        # ``forces.py`` and ``BDIMhandler.py`` keeps working unchanged.
+        self._use_kernels = bool(solver.get("use_kernels", True))
+        _uk = self._use_kernels
+        # Shared-stress union-AABB crop.
+        self._forces_shared_union = _uk
+        # mu + normals union-AABB crop.
+        self._mu_normals_union = _uk
+        self._mu_union_ready = False   # persistent buffers allocated lazily
+        # BDIM meta-equation union-AABB crop.
+        self._bdim_union = _uk
+        # Phase B (3-D streaming SDF) and Phase D (3-D fused forces).
+        self._streaming_sdf_3d = _uk
+        self._streaming_forces_3d = _uk
+        # The streaming 3-D path requires the per-body C++/CUDA trilinear
+        # samplers (built in ``BDIMhandler._init_custom_trilinear_3d``).
+        self._custom_trilinear_3d = _uk
+        # 2-D analogues (streaming SDF + fused forces).
+        self._streaming_sdf_2d = _uk
+        self._streaming_forces_2d = _uk
         # Body-SDF sampling method used inside the streaming C++/CUDA
         # kernels (``streaming_sdf_min_3d`` / ``..._multi``):
         #   * ``"trilinear"`` (default) -- 2x2x2 stencil, matches the
@@ -548,18 +512,7 @@ class FluidSolver(PlottingMixin):
                     "sdf_interp_method int form must be 0 (trilinear) or "
                     f"1 (triquadratic); got {self._sdf_interp_method}"
                 )
-        # Lazy-allocated padded buffers (see _init_forces_narrow_batch)
-        self._fnb_D = None        # (D_i, D_j, D_k)
-        self._fnb_sdf = None      # (B, D_i, D_j, D_k)
-        self._fnb_xs = None
-        self._fnb_ys = None
-        self._fnb_zs = None
-        self._fnb_px = None
-        self._fnb_py = None
-        self._fnb_pz = None
-        self._fnb_X = None
-        self._fnb_Y = None
-        self._fnb_Z = None
+        # Lazy-allocated per-body compiled-wrapper plumbing.
         if self._compile_forces and self.device.type == "cuda":
             # 3-D kernels
             self._forces_shared_compiled = torch.compile(
@@ -575,9 +528,6 @@ class FluidSolver(PlottingMixin):
             )
             self._forces_body_batch_compiled = torch.compile(
                 _forces_body_batch_3d, mode="reduce-overhead",
-            )
-            self._forces_body_narrow_batch_compiled = torch.compile(
-                _forces_body_narrow_batch_3d, mode="reduce-overhead",
             )
             # Dynamic-shape shared kernel for the union-AABB crop path
             # (sub-block shape varies with body kinematics).
@@ -596,22 +546,19 @@ class FluidSolver(PlottingMixin):
             self._forces_body_batch_2d_compiled = torch.compile(
                 _forces_body_batch_2d, mode="reduce-overhead",
             )
-            print("  [compile] forces_shared + forces_body_batch compiled "
-                  "(reduce-overhead, 2D+3D)"
-                  + ("  + narrow-band per-body path (dynamic)" if self._forces_narrow_band else "")
-                  + ("  + narrow-band BATCHED (reduce-overhead)" if self._forces_narrow_batch else "")
-                  + ("  + shared-stress UNION crop (dynamic)" if self._forces_shared_union else "")
-                  + ("  + mu/normals UNION crop (dynamic)" if self._mu_normals_union else "")
-                  + ("  + BDIM meta UNION crop (dynamic)" if self._bdim_union else "")
-                  + ("  + streaming fused-CUDA SDF update (Phase C: multi-body batched)" if self._streaming_sdf_3d else "")
-                  + ("  + Phase D: fused forces (re-sample SDF on the fly)" if self._streaming_forces_3d else "")
-                  + ("  + 2-D streaming SDF (multi-body batched)" if self._streaming_sdf_2d else "")
-                  + ("  + 2-D fused forces (read cached cc-SDF)" if self._streaming_forces_2d else ""))
+            print(
+                "  [compile] forces_shared + forces_body_batch compiled "
+                "(reduce-overhead, 2D+3D)"
+                + ("  [use_kernels=True: streaming SDF + Phase D forces + "
+                   "shared-stress / mu-normals / BDIM-meta union crops "
+                   "(2D+3D)]"
+                   if self._use_kernels else
+                   "  [use_kernels=False: pure-PyTorch path]")
+            )
         else:
             self._forces_shared_compiled = _forces_shared_3d
             self._forces_body_compiled = _forces_body_integrate_3d
             self._forces_body_batch_compiled = _forces_body_batch_3d
-            self._forces_body_narrow_batch_compiled = _forces_body_narrow_batch_3d
             self._forces_shared_dyn_compiled = _forces_shared_3d
             self._mu_normals_batched_3d_dyn_compiled = _mu_normals_batched_3d
             self._forces_shared_2d_compiled = _forces_shared_2d
@@ -932,7 +879,6 @@ class FluidSolver(PlottingMixin):
     # --- moved to lilytorch/src/forces.py (item #8) ---
     forces_method1 = forces.forces_method1
     forces_method2 = forces.forces_method2
-    _init_forces_narrow_batch = forces._init_forces_narrow_batch
     forces_method2_3d = forces.forces_method2_3d
 
 

@@ -228,48 +228,53 @@ approach is *most* useful for **many moving bodies** and **large grids**
 Components
 ^^^^^^^^^^
 
-The optimisation is split into four composable pieces, each of which can
-be toggled independently:
+The kernel-mode optimisation bundles five composable pieces, all of
+which are activated together by a single user-facing switch:
 
 .. list-table::
    :header-rows: 1
    :widths: 28 72
 
    * - Flag
-     - What it restricts to the union AABB
-   * - ``solver.forces_shared_union``
+     - Effect when ``solver.use_kernels = true``
+   * - shared-stress union crop
      - Shared viscous-stress tensor used by the hydrodynamic-force
-       integrator (one compiled kernel over the union, instead of one
-       full-grid kernel per body).
-   * - ``solver.mu_normals_union``
-     - :math:`\mu_0`, :math:`\mu_1` and the outward normals needed by the
-       BDIM meta-equation and by the variable-density Poisson
-       coefficients.
-   * - ``solver.bdim_union``
+       integrator runs as one compiled kernel over the union AABB,
+       instead of one full-grid kernel per body.
+   * - mu/normals union crop
+     - :math:`\mu_0`, :math:`\mu_1` and the outward normals needed by
+       the BDIM meta-equation and by the variable-density Poisson
+       coefficients are computed only on union cells.
+   * - BDIM-meta union crop
      - The BDIM2 meta-equation itself (Eq. :eq:`bdim-meta`), applied to
        each face-velocity component only on union cells.
+   * - streaming SDF kernels (2-D and 3-D)
+     - Per-body fused C++/CUDA kernels (rotate + sample + running-min
+       + sparse-cc store) replace the Python per-body loop in
+       ``BDIMhandler._update_{2,3}d``.
+   * - streaming fused-force kernels (Phase D, 2-D and 3-D)
+     - Per-body force/torque integration is folded into the same
+       streaming op, removing the dense ``(B, Nx, Ny, Nz)`` SDF
+       reduction.
 
-The three union-crop flags above are independent toggles.  The
-production cost-analysis pipeline (``run_scaling_conditions_pipeline.py``)
-combines them with the streaming fused-CUDA SDF / forces flags:
+These five pieces are no longer individually configurable — they are
+all enabled together by ``solver.use_kernels = true`` (the default)
+and disabled together by ``solver.use_kernels = false`` (which selects
+the suboptimal pure-PyTorch reference path).  ``use_kernels`` is
+**independent** of ``solver.use_gpu``: kernel mode is supported on
+both CPU and CUDA, and pure-Python mode also runs on either device.
 
 .. code-block:: yaml
 
    solver:
-     force_shared_union: true
-     mu_normals_union: true
-     bdim_union: true
-     force_narrow_batch: true
-     streaming_sdf_3d: true
-     streaming_forces_3d: true
+     use_kernels: true
+     # ... rest of the solver config
 
 or, in the cost-analysis harness,
 
 .. code-block:: bash
 
-   python run_multigrid_cost_analysis.py --preset full \
-       --force_shared_union --mu_normals_union --bdim_union \
-       --force_narrow_batch --streaming_sdf_3d --streaming_forces_3d
+   python run_multigrid_cost_analysis.py --preset full --use_kernels
 
 Implementation details
 ^^^^^^^^^^^^^^^^^^^^^^
@@ -286,10 +291,10 @@ Implementation details
   the sub-block shape changes over time.  The static, full-grid kernels
   (adv-diff, Poisson) keep the reduce-overhead mode.
 
-* **Streaming fused-CUDA SDF update** — when ``streaming_sdf_3d`` is on,
-  one C++/CUDA kernel per body fuses rotate + 4 trilinear samples + 4
-  running-min updates + per-body sparse cc store into a single op call,
-  replacing the Python per-body loop in ``BDIMhandler._update_3d``.
+* **Streaming fused-CUDA SDF update** — when ``solver.use_kernels`` is
+  on, one C++/CUDA kernel per body fuses rotate + 4 trilinear samples +
+  4 running-min updates + per-body sparse cc store into a single op
+  call, replacing the Python per-body loop in ``BDIMhandler._update_3d``.
 
 Measured impact
 ^^^^^^^^^^^^^^^

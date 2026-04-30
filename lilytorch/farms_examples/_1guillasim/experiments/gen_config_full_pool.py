@@ -24,12 +24,7 @@ class SimConfig(BaseSimConfig):
         self.headless             = False
         self.smagorinsky_cs       = 0.2
 
-        self.streaming_sdf_3d = True
-        self.streaming_forces_3d = True
-        self.force_shared_union = True
-        self.mu_normals_union = True
-        self.bdim_union = True
-        self.force_narrow_batch = True
+        self.use_kernels = True
 
         # ── Animats ───────────────────────────────────────────────────
         self.animats_pars = [
