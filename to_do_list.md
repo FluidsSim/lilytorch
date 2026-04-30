@@ -1,10 +1,8 @@
 
 # instructions
-
-You are working starting from the optimize_speed_memory branch. Checkout from there and create a new branch for your implementations. Read the HIGH PRIORITY next steps to implement in the repository and start to work on from top to bottom (higher to lower priority list). Then give me a step to step guide for testing the various implementations.
-
-
-be independent and self testing. Install the necessary packages explained in the README under the installation instructions (you can install pytorch in C++ mode, but you also must install the FARMS packages). Read the HIGH PRIORITY next steps to implement in the repository and start to work on from top to bottom (higher to lower priority list).
+You are working starting from the optimize_speed_memory branch. Checkout from there and create a new branch for your implementations. Read the HIGH PRIORITY todo list to implement (in to_do_list.md) and start to work on from top to bottom (higher to lower priority list). Then give me a step to step guide for testing the various implementations.
+<!--
+be independent and self testing. Install the necessary packages explained in the README under the installation instructions (you can install pytorch in C++ mode, but you also must install the FARMS packages). Read the HIGH PRIORITY next steps to implement in the repository and start to work on from top to bottom (higher to lower priority list). -->
 
 
 ---- MEMORY VARS -----
