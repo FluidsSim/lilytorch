@@ -237,6 +237,16 @@ class BDIMhandler:
             # Pre-build batched SDF tensor for grid_sample (2-D only)
             self._init_batched_sdf_2d()
 
+            # ── 2-D streaming fused-CUDA path (Phase C analogue of 3-D) ──
+            # Opt-in via solver.streaming_sdf_2d.  Builds per-body
+            # `_stream_meta` from each body's own `sdf.{F, x, y}` so the
+            # `streaming_sdf_min_2d_multi` kernel can run.
+            if getattr(self.fluid_solver, '_streaming_sdf_2d', False):
+                self._init_custom_trilinear_2d()
+                print("  [streaming-sdf-2D] fused per-body C++/CUDA SDF "
+                      "min-update enabled (replaces _update_2d batched "
+                      "grid_sample loop)")
+
     # ------------------------------------------------------------------
     # helpers
     # ------------------------------------------------------------------
@@ -327,6 +337,15 @@ class BDIMhandler:
 
     # ---- 2-D update --------------------------------------------------
     def _update_2d(self, t, iteration, dt=1):
+        # Streaming fused-CUDA path (mirror of the 3-D streaming branch)
+        # — opt-in via solver.streaming_sdf_2d.  Falls back to the legacy
+        # batched grid_sample path below if any body lacks _stream_meta.
+        if getattr(self.fluid_solver, '_streaming_sdf_2d', False):
+            comp_check = self.fluid_solver.composite_body
+            if all(getattr(b, '_stream_meta', None) is not None
+                   for b in comp_check.bodies):
+                return self._update_2d_streaming_multi(t, iteration, dt)
+
         fs   = self.fluid_solver
         comp = fs.composite_body
         B    = comp.nbodies
@@ -1495,6 +1514,435 @@ class BDIMhandler:
 
         comp.com_pos[body_i] = com_pos
         body.com_pos = com_pos
+
+    # ------------------------------------------------------------------
+    #  Custom-trilinear (C++/CUDA) per-body SDF samplers
+    # ------------------------------------------------------------------
+    def _init_custom_trilinear_2d(self):
+        """2-D analogue of :meth:`_init_custom_trilinear_3d`.
+
+        For each 2-D mesh body, stash the metadata needed by the
+        ``streaming_sdf_min_2d_multi`` kernel directly on
+        ``body._stream_meta``.  Unlike the 3-D path we don't construct
+        a separate ``RegularGridInterpolator2D`` instance — the
+        streaming kernel does its own bilinear / biquadratic sampling
+        from ``F``, ``bx``, ``by`` and the cached scalars below.
+
+        Analytical (non-mesh) bodies — those whose ``body.sdf`` has no
+        ``F``/``x``/``y`` attributes — keep ``_stream_meta = None`` and
+        will cause the streaming dispatch to fall through to the legacy
+        batched ``grid_sample`` path.
+        """
+        comp = self.fluid_solver.composite_body
+        n_built = 0
+        for body in comp.bodies:
+            if not (hasattr(body, 'sdf')
+                    and hasattr(body.sdf, 'F')
+                    and hasattr(body.sdf, 'x')
+                    and hasattr(body.sdf, 'y')):
+                body._stream_meta = None
+                continue
+            F  = body.sdf.F.contiguous()
+            bx = body.sdf.x.contiguous()
+            by = body.sdf.y.contiguous()
+            dx_b = float(bx[1].item() - bx[0].item())
+            dy_b = float(by[1].item() - by[0].item())
+            body._stream_meta = {
+                'F':       F,
+                'bx':      bx,
+                'by':      by,
+                'bx0':     float(bx[0].item()),
+                'by0':     float(by[0].item()),
+                'bx_last': float(bx[-1].item()),
+                'by_last': float(by[-1].item()),
+                'inv_dx':  1.0 / dx_b,
+                'inv_dy':  1.0 / dy_b,
+                'inv_vol': 1.0 / (dx_b * dy_b),
+            }
+            n_built += 1
+        print(f"  [stream-meta-2D] built {n_built}/{len(comp.bodies)} "
+              f"per-body 2-D streaming-SDF metadata records")
+
+    def _update_2d_streaming_multi(self, t, iteration, dt=1):
+        """2-D analogue of :meth:`_update_3d_streaming_multi`.
+
+        Single Python op call dispatches B per-body 2-D streaming-SDF
+        kernels in C++/CUDA, eliminating B torch.ops dispatches/step.
+        Requires that ALL bodies expose ``_stream_meta`` (regular-grid
+        SDF; analytical bodies fall through to the legacy batched
+        grid_sample path before this method is called).
+
+        Side-effects per call:
+            * fills ``comp.sdf_val``, ``comp.sdf_val_u``, ``comp.sdf_val_v``,
+              ``comp.body_u``, ``comp.body_v`` (union over all bodies);
+            * stashes per-step packed tensors on ``comp._stream_multi_step``
+              for the fused 2-D forces kernel (``bdim_forces_2d_multi``);
+            * splits the sparse cc-SDF into per-body slabs on
+              ``comp._sdf_sparse[b] = (aabb, slab)`` for downstream code;
+            * maintains ``comp.com_pos[b]``, ``body.com_pos``,
+              ``body.cnt_update``, ``body.r_com`` and the optional
+              contour mask, exactly like the legacy 2-D path.
+        """
+        from lilytorch.src.kernels import streaming_sdf_min_2d_multi
+
+        fs   = self.fluid_solver
+        comp = fs.composite_body
+        gs   = fs.grid_shape
+        _FAR = 1e4
+        B    = len(comp.bodies)
+
+        # ── Kinematics (host) ─────────────────────────────────────
+        # Mirror the legacy ``_update_2d`` axis-projection: only the
+        # in-plane axes (``self.lin_axes``) and the out-of-plane angular
+        # axis (``self._2d_ang_ax``) are pulled from the FARMS sensors.
+        com_poses_np  = []
+        urdf_poses_np = []
+        Rs_np         = []
+        lin_vels_np   = []
+        ang_vels_np   = []
+        for exp_data in self.data:
+            sen = exp_data.sensors.links
+            com_poses_np.append(
+                self.cython2numpy(
+                    sen.com_positions()[iteration, :]
+                ).cpu().numpy()[:, self.lin_axes].astype(self.dtype_np)
+            )
+            urdf_poses_np.append(
+                self.cython2numpy(
+                    sen.urdf_positions()[iteration, :]
+                ).cpu().numpy()[:, self.lin_axes].astype(self.dtype_np)
+            )
+            R3 = (
+                Rotation.from_quat(sen.urdf_orientations()[iteration, :])
+                .as_matrix().astype(self.dtype_np)
+            )
+            # Project to the in-plane 2x2 rotation block.
+            Rs_np.append(R3[:, self.lin_axes, :][:, :, self.lin_axes])
+            lin_vels_np.append(
+                self.cython2numpy(
+                    sen.com_lin_velocities()[iteration, :]
+                ).cpu().numpy()[:, self.lin_axes].astype(self.dtype_np)
+            )
+            nlinks = len(sen.names)
+            ang_vels_np.append(
+                np.asarray(
+                    [sen.com_ang_velocity(iteration, lk)[self._2d_ang_ax]
+                     for lk in range(nlinks)],
+                    dtype=self.dtype_np,
+                )
+            )
+
+        h_grid = float(comp.h)
+
+        # Reset running-min fields and per-body sparse storage
+        comp._sdf_sparse = [None] * B
+        comp.sdf_val.fill_(_FAR)
+        comp.sdf_val_u.fill_(_FAR)
+        comp.sdf_val_v.fill_(_FAR)
+        comp.body_u.zero_()
+        comp.body_v.zero_()
+
+        if not hasattr(comp, '_body_aabbs'):
+            comp._body_aabbs = [None] * B
+
+        if getattr(comp, '_grid_axes_1d', None) is None:
+            comp._grid_axes_1d = (
+                comp.x.contiguous(),
+                comp.y.contiguous(),
+            )
+        gx_1d, gy_1d = comp._grid_axes_1d
+
+        # ──────────────────────────────────────────────────────────
+        # Build / refresh the static per-body packed device tensors once.
+        # ──────────────────────────────────────────────────────────
+        sm = getattr(comp, '_stream_multi_static_2d', None)
+        if sm is None:
+            F_chunks  = []
+            bx_chunks = []; by_chunks = []
+            F_off  = [0]; bx_off = [0]; by_off = [0]
+            shapes = []
+            meta   = []
+            for body in comp.bodies:
+                m = body._stream_meta
+                F_chunks.append(m['F'].flatten())
+                bx_chunks.append(m['bx']); by_chunks.append(m['by'])
+                F_off.append(F_off[-1]   + m['F'].numel())
+                bx_off.append(bx_off[-1] + m['bx'].numel())
+                by_off.append(by_off[-1] + m['by'].numel())
+                shapes.append([m['F'].shape[0], m['F'].shape[1]])
+                meta.append([
+                    m['bx0'], m['by0'],
+                    m['bx_last'], m['by_last'],
+                    m['inv_dx'], m['inv_dy'], m['inv_vol'],
+                ])
+            sm = {
+                'F_flat':       torch.cat(F_chunks).contiguous(),
+                'F_offsets':    torch.tensor(F_off,  dtype=torch.int64, device=self.device),
+                'bx_flat':      torch.cat(bx_chunks).contiguous(),
+                'bx_offsets':   torch.tensor(bx_off, dtype=torch.int64, device=self.device),
+                'by_flat':      torch.cat(by_chunks).contiguous(),
+                'by_offsets':   torch.tensor(by_off, dtype=torch.int64, device=self.device),
+                'body_shapes':  torch.tensor(shapes, dtype=torch.int64, device=self.device),
+                'body_meta':    torch.tensor(meta,   dtype=self.dtype,  device=self.device),
+            }
+            comp._stream_multi_static_2d = sm
+
+        # ──────────────────────────────────────────────────────────
+        # Per-step: compose body frames, AABBs, kinematics (numpy host).
+        # ──────────────────────────────────────────────────────────
+        kin_static = getattr(comp, '_stream_kin_static_2d', None)
+        if kin_static is None:
+            body_ids_np = np.asarray(
+                [(int(a), int(l)) for (a, l) in comp.body_ids],
+                dtype=np.int64,
+            )
+            # 2-D bodies have no `local_pose` concept (rigid-body links
+            # in the 2-D projection collapse to identity local frames),
+            # so the local translation / rotation are trivial.
+            local_lt_np = np.zeros((B, 2), dtype=self.dtype_np)
+            local_lr_np = np.tile(np.eye(2, dtype=self.dtype_np), (B, 1, 1))
+            sdf_lo_np   = np.empty((B, 2), dtype=self.dtype_np)
+            sdf_hi_np   = np.empty((B, 2), dtype=self.dtype_np)
+            for b, body in enumerate(comp.bodies):
+                sx, sy = body.sdf.x, body.sdf.y
+                sdf_lo_np[b] = (float(sx[0].item()),  float(sy[0].item()))
+                sdf_hi_np[b] = (float(sx[-1].item()), float(sy[-1].item()))
+            kin_static = {
+                'body_ids':     body_ids_np,
+                'local_lt':     local_lt_np,
+                'local_lr':     local_lr_np,
+                'local_center': 0.5 * (sdf_lo_np + sdf_hi_np),
+                'local_half':   0.5 * (sdf_hi_np - sdf_lo_np),
+                'grid_origin':  np.array([
+                    float(comp.x[0].item()),
+                    float(comp.y[0].item()),
+                ], dtype=self.dtype_np),
+                'inv_h':        1.0 / float(comp.h),
+                'gs':           np.asarray(gs, dtype=np.int64),
+                'pad':          3,
+            }
+            comp._stream_kin_static_2d = kin_static
+
+        body_ids_np = kin_static['body_ids']
+
+        # Gather per-body kinematics from the per-animat numpy snapshots.
+        urdf_pos = np.empty((B, 2), dtype=self.dtype_np)
+        com_pos  = np.empty((B, 2), dtype=self.dtype_np)
+        R_link   = np.empty((B, 2, 2), dtype=self.dtype_np)
+        lin_vel  = np.empty((B, 2), dtype=self.dtype_np)
+        ang_vel  = np.empty((B,),    dtype=self.dtype_np)  # scalar in 2-D
+        for b in range(B):
+            a_id = int(body_ids_np[b, 0])
+            l_id = int(body_ids_np[b, 1])
+            urdf_pos[b] = urdf_poses_np[a_id][l_id]
+            com_pos[b]  = com_poses_np[a_id][l_id]
+            R_link[b]   = Rs_np[a_id][l_id]
+            lin_vel[b]  = lin_vels_np[a_id][l_id]
+            ang_vel[b]  = ang_vels_np[a_id][l_id]
+
+        # Compose with per-body local pose (identity in 2-D, kept for
+        # symmetry with the 3-D path).
+        body_pos = urdf_pos + np.einsum(
+            'bij,bj->bi', R_link, kin_static['local_lt'],
+        )
+        body_R = np.einsum(
+            'bij,bjk->bik', R_link, kin_static['local_lr'],
+        )  # (B, 2, 2)
+
+        # Vectorised AABB of the oriented body-SDF box in world space.
+        abs_R        = np.abs(body_R)
+        world_half   = np.einsum('bij,bj->bi', abs_R, kin_static['local_half'])
+        world_center = (
+            np.einsum('bij,bj->bi', body_R, kin_static['local_center']) + body_pos
+        )
+        w_min = world_center - world_half
+        w_max = world_center + world_half
+
+        g0    = kin_static['grid_origin']
+        inv_h = kin_static['inv_h']
+        gs_np = kin_static['gs']
+        pad   = kin_static['pad']
+
+        i_lo = np.floor((w_min - g0) * inv_h).astype(np.int64) - pad
+        i_hi = np.floor((w_max - g0) * inv_h).astype(np.int64) + 1 + pad
+        np.maximum(i_lo, 0, out=i_lo)
+        np.minimum(i_hi, gs_np[None, :], out=i_hi)
+
+        dims     = i_hi - i_lo
+        sub_vol  = dims.prod(axis=1)
+        full_vol = int(gs_np.prod())
+        # Bodies covering >90 % of the grid: fall back to full grid (matches
+        # the 3-D heuristic).
+        fallback = sub_vol > int(0.9 * full_vol)
+        if fallback.any():
+            i_lo[fallback] = 0
+            i_hi[fallback] = gs_np[None, :]
+            dims = i_hi - i_lo
+
+        aabb_lo_h_np  = np.ascontiguousarray(i_lo, dtype=np.int64)
+        aabb_dim_h_np = np.ascontiguousarray(dims, dtype=np.int64)
+        cell_vols     = dims.prod(axis=1)
+        cell_off_h_np = np.empty(B + 1, dtype=np.int64)
+        cell_off_h_np[0] = 0
+        np.cumsum(cell_vols, out=cell_off_h_np[1:])
+        max_vol = int(cell_vols.max()) if B > 0 else 0
+
+        # 2-D kin row layout (matches the kernel signature):
+        #   [R^T (4) | bp (2) | cm (2) | lv (2) | omega (1)]  = 11
+        # Row-major flatten of R^T equals body_R.transpose(0,2,1).reshape(B,4).
+        kin_h_np = np.empty((B, 11), dtype=self.dtype_np)
+        kin_h_np[:, 0:4]   = np.ascontiguousarray(
+            body_R.transpose(0, 2, 1)
+        ).reshape(B, 4)
+        kin_h_np[:, 4:6]   = body_pos
+        kin_h_np[:, 6:8]   = com_pos
+        kin_h_np[:, 8:10]  = lin_vel
+        kin_h_np[:, 10]    = ang_vel
+
+        # Update Python-side AABB metadata used downstream.
+        aabbs_for_split = []
+        for b in range(B):
+            i0 = int(aabb_lo_h_np[b, 0])
+            j0 = int(aabb_lo_h_np[b, 1])
+            Ai = int(aabb_dim_h_np[b, 0])
+            Aj = int(aabb_dim_h_np[b, 1])
+            aabb = (i0, i0 + Ai, j0, j0 + Aj)
+            comp._body_aabbs[b] = aabb
+            aabbs_for_split.append(aabb)
+
+        # Single H2D per packed tensor.
+        kin       = torch.from_numpy(kin_h_np).to(
+            self.device, dtype=self.dtype, non_blocking=True,
+        )
+        aabb_lo   = torch.from_numpy(aabb_lo_h_np).to(
+            self.device, non_blocking=True,
+        )
+        aabb_dim  = torch.from_numpy(aabb_dim_h_np).to(
+            self.device, non_blocking=True,
+        )
+        cell_off  = torch.from_numpy(cell_off_h_np).to(
+            self.device, non_blocking=True,
+        )
+        com_pos_t = torch.from_numpy(com_pos).to(
+            self.device, dtype=self.dtype, non_blocking=True,
+        )
+        urdf_pos_t = torch.from_numpy(urdf_pos).to(
+            self.device, dtype=self.dtype, non_blocking=True,
+        )
+        R_t        = torch.from_numpy(body_R).to(
+            self.device, dtype=self.dtype, non_blocking=True,
+        )
+        sparse_flat = torch.zeros(
+            int(cell_off_h_np[-1]), device=self.device, dtype=self.dtype,
+        )
+
+        # Maintain `comp.com_pos[b]` views for downstream code.
+        for b, body in enumerate(comp.bodies):
+            comp.com_pos[b] = com_pos_t[b]
+            body.com_pos = comp.com_pos[b]
+
+        cell_off_h = cell_off_h_np.tolist()
+
+        streaming_sdf_min_2d_multi(
+            sm['F_flat'],  sm['F_offsets'],
+            sm['bx_flat'], sm['bx_offsets'],
+            sm['by_flat'], sm['by_offsets'],
+            sm['body_shapes'], sm['body_meta'], kin,
+            aabb_lo, aabb_dim, cell_off,
+            gx_1d, gy_1d, h_grid, max_vol,
+            comp.sdf_val, comp.sdf_val_u, comp.sdf_val_v,
+            comp.body_u,  comp.body_v,
+            sparse_flat,
+            getattr(self.fluid_solver, '_sdf_interp_method', 0),
+        )
+
+        # Split sparse_flat into per-body slabs.
+        for body_i, aabb in enumerate(aabbs_for_split):
+            i0, i1, j0, j1 = aabb
+            Ai, Aj = i1 - i0, j1 - j0
+            lo = cell_off_h[body_i]
+            hi = cell_off_h[body_i + 1]
+            slab = sparse_flat[lo:hi].view(Ai, Aj)
+            comp._sdf_sparse[body_i] = (aabb, slab)
+
+        # Stash per-step packed tensors so the 2-D forces kernel can
+        # reuse kin / aabb_lo / aabb_dim / sparse_flat without rebuilding.
+        comp._stream_multi_step = {
+            'kin':             kin,
+            'aabb_lo':         aabb_lo,
+            'aabb_dim':        aabb_dim,
+            'max_vol':         max_vol,
+            'gx':              gx_1d,
+            'gy':              gy_1d,
+            'sparse_cc_flat':  sparse_flat,
+            'cell_offsets':    cell_off,
+        }
+
+        # ── Per-body: contour update + (optional) contour mask ──
+        # 2-D bodies expose 1-D contours; the legacy ``_update_2d`` keeps
+        # them consistent with the per-step rotation/translation.  We
+        # mirror that loop here so downstream code (force projection,
+        # plotting) sees the same per-body tensors.
+        for body_i, body in enumerate(comp.bodies):
+            (animat_id, link_id) = comp.body_ids[body_i]
+
+            # contour update (world frame)
+            body.cnt_update = R_t[body_i] @ body.cnt + urdf_pos_t[body_i, :, None]
+
+            # optional contour mask for overlapping links
+            if self.contour_mask:
+                x_cnt = body.cnt_update[0]
+                y_cnt = body.cnt_update[1]
+                prev_body_i = self._prev_body_index[body_i]
+                next_body_i = self._next_body_index[body_i]
+
+                if prev_body_i is None and next_body_i is None:
+                    mask = torch.ones_like(x_cnt, dtype=torch.bool)
+                else:
+                    # Per-animat numpy snapshots are stored above; rebuild
+                    # the device tensors needed for the SDF query.
+                    Rs_a = torch.as_tensor(
+                        Rs_np[animat_id], device=self.device, dtype=self.dtype,
+                    )
+                    urdf_a = torch.as_tensor(
+                        urdf_poses_np[animat_id], device=self.device, dtype=self.dtype,
+                    )
+                    if prev_body_i is None:
+                        (_, next_link_id) = comp.body_ids[next_body_i]
+                        body_p = comp.bodies[next_body_i]
+                        pt = Rs_a[next_link_id].T @ (
+                            torch.stack((x_cnt, y_cnt))
+                            - urdf_a[next_link_id][:, None]
+                        )
+                        mask = (body_p.sdf(pt[0], pt[1]) - body.h) >= 0
+                    elif next_body_i is None:
+                        (_, prev_link_id) = comp.body_ids[prev_body_i]
+                        body_m = comp.bodies[prev_body_i]
+                        pt = Rs_a[prev_link_id].T @ (
+                            torch.stack((x_cnt, y_cnt))
+                            - urdf_a[prev_link_id][:, None]
+                        )
+                        mask = (body_m.sdf(pt[0], pt[1]) - body.h) >= 0
+                    else:
+                        (_, prev_link_id) = comp.body_ids[prev_body_i]
+                        body_m = comp.bodies[prev_body_i]
+                        pt_m = Rs_a[prev_link_id].T @ (
+                            torch.stack((x_cnt, y_cnt))
+                            - urdf_a[prev_link_id][:, None]
+                        )
+                        (_, next_link_id) = comp.body_ids[next_body_i]
+                        body_p = comp.bodies[next_body_i]
+                        pt_p = Rs_a[next_link_id].T @ (
+                            torch.stack((x_cnt, y_cnt))
+                            - urdf_a[next_link_id][:, None]
+                        )
+                        sdf_m = body_m.sdf(pt_m[0], pt_m[1]) - body.h
+                        sdf_p = body_p.sdf(pt_p[0], pt_p[1]) - body.h
+                        mask = (sdf_m >= 0) & (sdf_p >= 0)
+                body.mask = mask
+
+            body.r_com   = body.cnt_update - com_pos_t[body_i, :, None]
+            # body.com_pos already set above.
 
     # ------------------------------------------------------------------
     #  Custom-trilinear (C++/CUDA) per-body SDF samplers

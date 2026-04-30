@@ -217,14 +217,19 @@ class AdvDiffSolver:
         # ---- precompute BC operations (avoid per-call allocations) ---
         self._bc_neumann_ops, self._bc_dirichlet_ops = self._build_bc_ops()
 
-        # ---- packed descriptors for the fused 3-D set_BCs CUDA op ----
+        # ---- packed descriptors for the fused set_BCs CUDA op --------
         # Built once here (shape-independent); ``shapes`` and ``dir_val``
         # are cached lazily on first set_BCs() call (they need vel
-        # tensor info we don't yet have).
+        # tensor info we don't yet have).  Same descriptor format for
+        # 2-D and 3-D — only ``axis`` is restricted to {0, 1} in 2-D.
         self._bc_fused_3d_packed = None
         self._bc_fused_3d_cache  = None
+        self._bc_fused_2d_packed = None
+        self._bc_fused_2d_cache  = None
         if self.ndim == 3:
             self._bc_fused_3d_packed = self._pack_bc_descriptors_3d()
+        elif self.ndim == 2:
+            self._bc_fused_2d_packed = self._pack_bc_descriptors_3d()
 
         # ---- method dispatch -----------------------------------------
         _schemes = {
@@ -531,7 +536,7 @@ class AdvDiffSolver:
     def _pack_bc_descriptors_3d(self):
         """Pack ``_bc_neumann_ops`` / ``_bc_dirichlet_ops`` into compact
         int32 / float descriptor tensors for the fused
-        ``apply_bcs_3d`` CUDA op.
+        ``apply_bcs_2d`` / ``apply_bcs_3d`` CUDA ops.
 
         Each Neumann tuple ``(comp, dst_idx, src_idx)`` is reduced to
         ``(comp, axis, side)`` -- where *axis* is the dimension along
@@ -541,9 +546,15 @@ class AdvDiffSolver:
         Each Dirichlet tuple ``(comp, dst_idx, value)`` is reduced to
         ``(comp, axis, offset)`` plus a separate value array, where
         ``offset`` is one of ``{0, 1, -1, -2}``.
+
+        The descriptor format is ndim-agnostic — the only difference
+        between 2-D and 3-D is that ``axis`` is restricted to ``{0, 1}``
+        in 2-D — so this helper handles both cases.  The legacy
+        ``_pack_bc_descriptors_3d`` name is kept for compatibility with
+        external callers.
         """
         ndim = self.ndim
-        assert ndim == 3, "fused BC packing only supports 3-D"
+        assert ndim in (2, 3), "fused BC packing only supports 2-D / 3-D"
 
         def _axis_and_index(idx_tuple):
             # idx_tuple is e.g. (0, slice(None), slice(None))
@@ -650,6 +661,57 @@ class AdvDiffSolver:
         self._bc_fused_3d_cache = cache
         return cache
 
+    def _build_fused_bc_cache_2d(self, vel):
+        """Lazily build the per-call cache for ``apply_bcs_2d``.
+
+        2-D analogue of :meth:`_build_fused_bc_cache`: ``shapes`` is
+        ``int64 [2, 2]`` (rows for u, v) and ``max_line_dim`` is the
+        longest 1-D ghost line across both components.
+        """
+        u, v = vel
+        sig = (
+            tuple(u.shape), tuple(v.shape),
+            u.dtype, u.device,
+        )
+        cache = self._bc_fused_2d_cache
+        if cache is not None and cache["sig"] == sig:
+            return cache
+
+        device = u.device
+        shapes = torch.tensor(
+            [list(u.shape), list(v.shape)],
+            dtype=torch.int64, device=device,
+        )
+        max_line_dim = int(max(max(u.shape), max(v.shape)))
+
+        packed = self._bc_fused_2d_packed
+        neu_desc = packed["neu_desc"]
+        dir_desc = packed["dir_desc"]
+        if neu_desc.device != device:
+            neu_desc = neu_desc.to(device)
+        if dir_desc.device != device:
+            dir_desc = dir_desc.to(device)
+
+        dir_val = torch.tensor(
+            packed["dir_vals_py"] if packed["dir_vals_py"] else [0.0],
+            dtype=u.dtype, device=device,
+        )
+        if not packed["dir_vals_py"]:
+            dir_val = dir_val[:0].contiguous()
+
+        cache = {
+            "sig": sig,
+            "shapes": shapes,
+            "neu_desc": neu_desc,
+            "dir_desc": dir_desc,
+            "dir_val": dir_val,
+            "max_line_dim": max_line_dim,
+        }
+        self._bc_fused_2d_packed["neu_desc"] = neu_desc
+        self._bc_fused_2d_packed["dir_desc"] = dir_desc
+        self._bc_fused_2d_cache = cache
+        return cache
+
     def set_BCs(self, *vel):
         """Apply Dirichlet / Neumann BCs on the ghost layer.
 
@@ -657,10 +719,11 @@ class AdvDiffSolver:
             (dim0_lo, dim0_hi, dim1_lo, dim1_hi, [dim2_lo, dim2_hi])
         i.e. (west, east, south, north, [bottom, top]) in 3-D.
 
-        In 3-D with all-CUDA, contiguous, same-dtype velocity tensors
-        and floating dtype, dispatches to the fused ``apply_bcs_3d``
-        CUDA op (one kernel launch instead of 18+ small slice copies).
-        Otherwise falls back to the precomputed Python loop.
+        With all-CUDA, contiguous, same-floating-dtype velocity tensors
+        and a registered fused descriptor pack, dispatches to the
+        ``apply_bcs_2d`` / ``apply_bcs_3d`` CUDA op (one kernel launch
+        per BC op instead of many small slice copies).  Otherwise falls
+        back to the precomputed Python loop.
         """
         if (self.ndim == 3
                 and self._bc_fused_3d_packed is not None
@@ -679,6 +742,25 @@ class AdvDiffSolver:
                 cache["dir_desc"],
                 cache["dir_val"],
                 cache["max_plane_dim"],
+            )
+            return
+
+        if (self.ndim == 2
+                and self._bc_fused_2d_packed is not None
+                and len(vel) == 2
+                and all(t.is_cuda for t in vel)
+                and vel[0].dtype == vel[1].dtype
+                and vel[0].dtype in (torch.float32, torch.float64)
+                and vel[0].is_contiguous()
+                and vel[1].is_contiguous()):
+            cache = self._build_fused_bc_cache_2d(vel)
+            torch.ops.lilytorch_kernels.apply_bcs_2d(
+                vel[0], vel[1],
+                cache["shapes"],
+                cache["neu_desc"],
+                cache["dir_desc"],
+                cache["dir_val"],
+                cache["max_line_dim"],
             )
             return
 

@@ -11,10 +11,14 @@ PYTHON_BIN="${PYTHON:-python}"
 
 # Force recompile of all source files.
 touch lilytorch/src/kernels/csrc/cuda/streaming_sdf.cu
+touch lilytorch/src/kernels/csrc/cuda/streaming_sdf_2d.cu
 touch lilytorch/src/kernels/csrc/ops.cpp
 touch lilytorch/src/kernels/csrc/streaming_sdf_cpu.cpp
+touch lilytorch/src/kernels/csrc/streaming_sdf_cpu_2d.cpp
 rm -f build/temp.linux-*/lilytorch/src/kernels/csrc/cuda/streaming_sdf.o \
+      build/temp.linux-*/lilytorch/src/kernels/csrc/cuda/streaming_sdf_2d.o \
       build/temp.linux-*/lilytorch/src/kernels/csrc/ops.o \
-      build/temp.linux-*/lilytorch/src/kernels/csrc/streaming_sdf_cpu.o 2>/dev/null || true
+      build/temp.linux-*/lilytorch/src/kernels/csrc/streaming_sdf_cpu.o \
+      build/temp.linux-*/lilytorch/src/kernels/csrc/streaming_sdf_cpu_2d.o 2>/dev/null || true
 
 "$PYTHON_BIN" setup.py build_ext --inplace

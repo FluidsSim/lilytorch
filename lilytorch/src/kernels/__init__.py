@@ -1,15 +1,23 @@
 """Native CUDA ops for BDIM-IB CFD (ported from pytorch_interpolation).
 
 Importing this package loads the compiled ``_C.so`` extension which
-registers four operators under the ``lilytorch_kernels`` torch library:
+registers operators under the ``lilytorch_kernels`` torch library:
 
+3-D ops:
 * ``streaming_sdf_min_3d``       -- one-body fused SDF / face-velocity update
 * ``streaming_sdf_min_3d_multi`` -- multi-body fused SDF / face-velocity update
 * ``bdim_forces_3d_multi``       -- per-body force / torque integration
 * ``apply_bcs_3d``               -- fused 3-D BC writes (Neumann + Dirichlet)
 
-CUDA kernels live in ``csrc/cuda/streaming_sdf.cu``; the C++ glue,
-schemas and CPU stubs live in ``csrc/ops.cpp``.
+2-D ops (mirror the 3-D ones with the z-axis stripped):
+* ``streaming_sdf_min_2d``       -- one-body fused 2-D SDF / face-velocity update
+* ``streaming_sdf_min_2d_multi`` -- multi-body fused 2-D SDF / face-velocity update
+* ``bdim_forces_2d_multi``       -- per-body 2-D force / torque integration
+* ``apply_bcs_2d``               -- fused 2-D BC writes (Neumann + Dirichlet)
+
+CUDA kernels live in ``csrc/cuda/streaming_sdf*.cu``; the C++ glue and
+schemas live in ``csrc/ops.cpp``; CPU implementations live in
+``csrc/streaming_sdf_cpu*.cpp``.
 """
 import sys
 from pathlib import Path
@@ -51,6 +59,10 @@ from .ops import (
     streaming_sdf_min_3d_multi,
     bdim_forces_3d_multi,
     apply_bcs_3d,
+    streaming_sdf_min_2d,
+    streaming_sdf_min_2d_multi,
+    bdim_forces_2d_multi,
+    apply_bcs_2d,
 )
 
 __all__ = [
@@ -58,4 +70,8 @@ __all__ = [
     "streaming_sdf_min_3d_multi",
     "bdim_forces_3d_multi",
     "apply_bcs_3d",
+    "streaming_sdf_min_2d",
+    "streaming_sdf_min_2d_multi",
+    "bdim_forces_2d_multi",
+    "apply_bcs_2d",
 ]
