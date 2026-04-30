@@ -970,6 +970,26 @@ class FluidSolver:
             self._custom_trilinear_3d = True
             self._forces_shared_union = True
             self._forces_narrow_band = True
+        # 2-D analogues of the streaming flags.
+        # ``streaming_sdf_2d`` activates the per-body C++/CUDA streaming
+        # SDF min-update kernel in BDIMhandler._update_2d (Phase C).
+        # ``streaming_forces_2d`` additionally fires the fused force
+        # integrator ``bdim_forces_2d_multi`` in forces_method2 (Phase D),
+        # reusing the per-body cc-SDF cached by the streaming SDF kernel.
+        #
+        # The 2-D SDF and forces flags are coupled in both directions:
+        # the existing 2-D forces path consumes the per-body
+        # ``comp.sdf_vals`` stack which the streaming SDF path no longer
+        # populates, and the streaming forces kernel needs the per-body
+        # ``sparse_cc_flat`` slab written by the streaming SDF kernel.
+        # Unlike 3-D (where ``force_narrow_band`` already consumes the
+        # sparse slabs), 2-D has no narrow-band forces fallback yet, so
+        # we couple the two flags here.
+        self._streaming_sdf_2d    = bool(solver.get("streaming_sdf_2d", False))
+        self._streaming_forces_2d = bool(solver.get("streaming_forces_2d", False))
+        if self._streaming_sdf_2d or self._streaming_forces_2d:
+            self._streaming_sdf_2d    = True
+            self._streaming_forces_2d = True
         # Body-SDF sampling method used inside the streaming C++/CUDA
         # kernels (``streaming_sdf_min_3d`` / ``..._multi``):
         #   * ``"trilinear"`` (default) -- 2x2x2 stencil, matches the
@@ -1051,7 +1071,9 @@ class FluidSolver:
                   + ("  + mu/normals UNION crop (dynamic)" if self._mu_normals_union else "")
                   + ("  + BDIM meta UNION crop (dynamic)" if self._bdim_union else "")
                   + ("  + streaming fused-CUDA SDF update (Phase C: multi-body batched)" if self._streaming_sdf_3d else "")
-                  + ("  + Phase D: fused forces (re-sample SDF on the fly)" if self._streaming_forces_3d else ""))
+                  + ("  + Phase D: fused forces (re-sample SDF on the fly)" if self._streaming_forces_3d else "")
+                  + ("  + 2-D streaming SDF (multi-body batched)" if self._streaming_sdf_2d else "")
+                  + ("  + 2-D fused forces (read cached cc-SDF)" if self._streaming_forces_2d else ""))
         else:
             self._forces_shared_compiled = _forces_shared_3d
             self._forces_body_compiled = _forces_body_integrate_3d
@@ -1507,6 +1529,67 @@ class FluidSolver:
         self.pforce_y = pforce_y
 
         eps_body = comp.bodies[0].eps
+
+        # ---- 2-D Phase D: fused per-body force integration ----------
+        # Reads the per-body cc-SDF cached by ``streaming_sdf_min_2d_multi``
+        # (in BDIMhandler._update_2d_streaming_multi) instead of integrating
+        # over the full ``comp.sdf_vals`` stack — both saves the (B, Nx, Ny)
+        # SDF tensor allocation in BDIMhandler and avoids the dense
+        # ``_forces_body_batch_2d`` reduction over the full grid.
+        _stream_step = getattr(comp, '_stream_multi_step', None)
+        _have_sparse_2d = (
+            hasattr(comp, '_sdf_sparse')
+            and len(comp._sdf_sparse) > 0
+            and comp._sdf_sparse[0] is not None
+        )
+        _use_streaming_forces_2d = (
+            getattr(self, '_streaming_forces_2d', False)
+            and _have_sparse_2d
+            and _stream_step is not None
+            and self.force_delta_order == 1
+        )
+        if _use_streaming_forces_2d:
+            from lilytorch.src.kernels import bdim_forces_2d_multi
+
+            Ni, Nj = xstress.shape
+            u_i0, u_j0 = 0, 0
+            Sj = Nj
+
+            # Persistent (B, 8) accumulator (mirrors the 3-D Phase D buffer).
+            out2d = getattr(self, '_phaseD_out_buf_2d', None)
+            if out2d is None or out2d.shape[0] != B:
+                out2d = torch.zeros((B, 8), dtype=torch.float64, device=self.device)
+                self._phaseD_out_buf_2d = out2d
+            else:
+                out2d.zero_()
+
+            bdim_forces_2d_multi(
+                _stream_step['sparse_cc_flat'], _stream_step['cell_offsets'],
+                _stream_step['kin'],
+                _stream_step['aabb_lo'], _stream_step['aabb_dim'],
+                _stream_step['gx'], _stream_step['gy'],
+                u_i0, u_j0, Sj,
+                xstress, ystress,
+                pforce_x, pforce_y,
+                eps_body, self.eps, self.h2,
+                _stream_step['max_vol'],
+                out2d,
+            )
+
+            out_s = out2d if out2d.dtype == u.dtype else out2d.to(u.dtype)
+            # 8-channel layout: [fv_x, fv_y, t_v, fp_x, fp_y, t_p, 0, 0]
+            self.viscous_drag_record[:B, 0, iteration]  = out_s[:, 0]
+            self.viscous_drag_record[:B, 1, iteration]  = out_s[:, 1]
+            self.pressure_drag_record[:B, 0, iteration] = out_s[:, 3]
+            self.pressure_drag_record[:B, 1, iteration] = out_s[:, 4]
+            # Bind per-body buffers as views into the record arrays.
+            self.friction_force_lin_x = self.viscous_drag_record[:B, 0, iteration]
+            self.friction_force_lin_y = self.viscous_drag_record[:B, 1, iteration]
+            self.friction_force_ang_z = out_s[:, 2].clone()
+            self.pressure_force_x     = self.pressure_drag_record[:B, 0, iteration]
+            self.pressure_force_y     = self.pressure_drag_record[:B, 1, iteration]
+            self.pressure_force_ang_z = out_s[:, 5].clone()
+            return
 
         # Towers (2008) 2nd-order: compute per-body |∇SDF| on CC grid  (B,Ni,Nj)
         sdf_grad_mag_2d = None
