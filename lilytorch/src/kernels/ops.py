@@ -15,6 +15,8 @@ __all__ = [
     "streaming_sdf_min_3d_multi",
     "bdim_forces_3d_multi",
     "apply_bcs_3d",
+    "streaming_sdf_min_2d",
+    "streaming_sdf_min_2d_multi",
 ]
 
 
@@ -150,4 +152,101 @@ def apply_bcs_3d(
         u, v, w,
         shapes, neu_desc, dir_desc, dir_val,
         int(max_plane_dim),
+    )
+
+
+# =====================================================================
+#  2-D analogues of the streaming-SDF ops.  Same calling convention as
+#  the 3-D versions with the z-axis stripped.  Rotation ``R_T`` is a
+#  column-major 2x2 matrix (4 floats), angular velocity is the scalar
+#  ``omega`` (out-of-plane), and the kernel writes 3 staggered-grid
+#  outputs (cc, u-face, v-face) instead of 4.
+# =====================================================================
+
+def streaming_sdf_min_2d(
+        F: Tensor, bx: Tensor, by: Tensor,
+        bx0: float, by0: float,
+        bx_last: float, by_last: float,
+        inv_dx: float, inv_dy: float, inv_vol: float,
+        R_T,
+        body_pos,
+        com_pos,
+        lin_vel,
+        omega: float,
+        gx: Tensor, gy: Tensor,
+        h_grid: float,
+        i0: int, i1: int, j0: int, j1: int,
+        sdf_cc: Tensor, sdf_u: Tensor, sdf_v: Tensor,
+        body_u: Tensor, body_v: Tensor,
+        sparse_cc: Tensor,
+        interp_method: int = 0) -> None:
+    """One-body fused 2-D SDF / face-velocity running-min update on a
+    fluid grid AABB.  See ``csrc/cuda/streaming_sdf_2d.cu`` for kernel
+    details.
+
+    ``interp_method`` selects the body-SDF sampler:
+      * ``0`` -- bilinear (default);
+      * ``1`` -- biquadratic Lagrange (3x3 stencil, falls back to
+        bilinear in the boundary layer of the body grid).
+    """
+    return torch.ops.lilytorch_kernels.streaming_sdf_min_2d.default(
+        F, bx, by,
+        float(bx0), float(by0),
+        float(bx_last), float(by_last),
+        float(inv_dx), float(inv_dy), float(inv_vol),
+        list(R_T), list(body_pos), list(com_pos),
+        list(lin_vel), float(omega),
+        gx, gy, float(h_grid),
+        int(i0), int(i1), int(j0), int(j1),
+        sdf_cc, sdf_u, sdf_v,
+        body_u, body_v,
+        sparse_cc,
+        int(interp_method),
+    )
+
+
+def streaming_sdf_min_2d_multi(
+        F_flat: Tensor, F_offsets: Tensor,
+        bx_flat: Tensor, bx_offsets: Tensor,
+        by_flat: Tensor, by_offsets: Tensor,
+        body_shapes: Tensor,
+        body_meta: Tensor,
+        kin: Tensor,
+        aabb_lo: Tensor,
+        aabb_dim: Tensor,
+        cell_offsets: Tensor,
+        gx: Tensor, gy: Tensor,
+        h_grid: float,
+        max_vol_per_body: int,
+        sdf_cc: Tensor, sdf_u: Tensor, sdf_v: Tensor,
+        body_u: Tensor, body_v: Tensor,
+        sparse_cc_flat: Tensor,
+        interp_method: int = 0) -> None:
+    """Multi-body fused 2-D SDF / face-velocity running-min update.
+
+    Per-body packed layouts:
+      * ``body_shapes``  int64 [B,2]   (Mx, My)
+      * ``body_meta``    float [B,7]   (bx0, by0, bxL, byL, inv_dx, inv_dy, inv_vol)
+      * ``kin``          float [B,11]  (R_T[0..3], bp_x, bp_y, cm_x, cm_y, lv_x, lv_y, omega)
+      * ``aabb_lo``      int64 [B,2]
+      * ``aabb_dim``     int64 [B,2]
+      * ``cell_offsets`` int64 [B+1]   prefix sum of Ai*Aj
+
+    ``interp_method`` selects the body-SDF sampler:
+      * ``0`` -- bilinear (default);
+      * ``1`` -- biquadratic Lagrange (3x3 stencil, falls back to
+        bilinear in the boundary layer of the body grid).
+    """
+    return torch.ops.lilytorch_kernels.streaming_sdf_min_2d_multi.default(
+        F_flat, F_offsets,
+        bx_flat, bx_offsets,
+        by_flat, by_offsets,
+        body_shapes, body_meta, kin,
+        aabb_lo, aabb_dim, cell_offsets,
+        gx, gy, float(h_grid),
+        int(max_vol_per_body),
+        sdf_cc, sdf_u, sdf_v,
+        body_u, body_v,
+        sparse_cc_flat,
+        int(interp_method),
     )

@@ -1,0 +1,435 @@
+// =====================================================================
+//  streaming_sdf_2d.cu
+//
+//  CUDA implementations of ``streaming_sdf_min_2d`` and
+//  ``streaming_sdf_min_2d_multi``.  Mirrors ``streaming_sdf.cu``
+//  line-for-line with the z-axis stripped.  See the matching helpers
+//  in ``streaming_sdf_cpu_2d.cpp`` for the algorithmic rationale.
+// =====================================================================
+
+#include <ATen/Operators.h>
+#include <torch/all.h>
+#include <torch/library.h>
+#include <torch/extension.h>
+#include <c10/util/ArrayRef.h>
+#include <cuda.h>
+#include <cuda_runtime.h>
+#include <ATen/cuda/CUDAContext.h>
+
+namespace lilytorch_kernels {
+
+template <typename scalar_t>
+__device__ __forceinline__ scalar_t bilinear_sample_uniform_2d(
+    const scalar_t* __restrict__ F,
+    const int Mx, const int My,
+    const scalar_t bx0, const scalar_t by0,
+    const scalar_t inv_dx, const scalar_t inv_dy,
+    scalar_t xq, scalar_t yq)
+{
+    scalar_t tx = (xq - bx0) * inv_dx;
+    scalar_t ty = (yq - by0) * inv_dy;
+    const scalar_t Mx_lim = (scalar_t)(Mx - 1);
+    const scalar_t My_lim = (scalar_t)(My - 1);
+    tx = max((scalar_t)0, min(tx, Mx_lim));
+    ty = max((scalar_t)0, min(ty, My_lim));
+
+    int ix = (int)tx; if (ix > Mx - 2) ix = Mx - 2;
+    int iy = (int)ty; if (iy > My - 2) iy = My - 2;
+
+    const scalar_t fx = tx - (scalar_t)ix;
+    const scalar_t fy = ty - (scalar_t)iy;
+    const scalar_t wx0 = (scalar_t)1 - fx, wx1 = fx;
+    const scalar_t wy0 = (scalar_t)1 - fy, wy1 = fy;
+
+    const int s1   = My;
+    const int base = ix * s1 + iy;
+
+    return (
+        wx0 * (wy0 * F[base]      + wy1 * F[base + 1]) +
+        wx1 * (wy0 * F[base + s1] + wy1 * F[base + s1 + 1])
+    );
+}
+
+template <typename scalar_t>
+__device__ __forceinline__ scalar_t biquadratic_sample_uniform_2d(
+    const scalar_t* __restrict__ F,
+    const int Mx, const int My,
+    const scalar_t bx0, const scalar_t by0,
+    const scalar_t inv_dx, const scalar_t inv_dy,
+    scalar_t xq, scalar_t yq)
+{
+    scalar_t tx = (xq - bx0) * inv_dx;
+    scalar_t ty = (yq - by0) * inv_dy;
+    const scalar_t Mx_lim = (scalar_t)(Mx - 1);
+    const scalar_t My_lim = (scalar_t)(My - 1);
+    tx = max((scalar_t)0, min(tx, Mx_lim));
+    ty = max((scalar_t)0, min(ty, My_lim));
+
+    int ix = (int)tx; if (ix > Mx - 2) ix = Mx - 2;
+    int iy = (int)ty; if (iy > My - 2) iy = My - 2;
+
+    if (ix < 1 || iy < 1 || Mx < 3 || My < 3) {
+        return bilinear_sample_uniform_2d<scalar_t>(
+            F, Mx, My, bx0, by0, inv_dx, inv_dy, xq, yq);
+    }
+
+    const scalar_t fx = tx - (scalar_t)ix;
+    const scalar_t fy = ty - (scalar_t)iy;
+
+    const scalar_t half = (scalar_t)0.5;
+    const scalar_t wxm = half * fx * (fx - (scalar_t)1);
+    const scalar_t wx0 = (scalar_t)1 - fx * fx;
+    const scalar_t wxp = half * fx * (fx + (scalar_t)1);
+    const scalar_t wym = half * fy * (fy - (scalar_t)1);
+    const scalar_t wy0 = (scalar_t)1 - fy * fy;
+    const scalar_t wyp = half * fy * (fy + (scalar_t)1);
+
+    const int s1   = My;
+    const int base = (ix - 1) * s1 + (iy - 1);
+
+    scalar_t out = (scalar_t)0;
+    #pragma unroll
+    for (int dx = 0; dx < 3; ++dx) {
+        const scalar_t wx = (dx == 0) ? wxm : (dx == 1 ? wx0 : wxp);
+        const int b0 = base + dx * s1;
+        const scalar_t col =
+            wym * F[b0] + wy0 * F[b0 + 1] + wyp * F[b0 + 2];
+        out += wx * col;
+    }
+    return out;
+}
+
+template <typename scalar_t>
+__device__ __forceinline__ scalar_t sdf_sample_dispatch_2d(
+    const int interp_method,
+    const scalar_t* __restrict__ F,
+    const int Mx, const int My,
+    const scalar_t bx0, const scalar_t by0,
+    const scalar_t inv_dx, const scalar_t inv_dy,
+    scalar_t xq, scalar_t yq)
+{
+    if (interp_method == 1) {
+        return biquadratic_sample_uniform_2d<scalar_t>(
+            F, Mx, My, bx0, by0, inv_dx, inv_dy, xq, yq);
+    }
+    return bilinear_sample_uniform_2d<scalar_t>(
+        F, Mx, My, bx0, by0, inv_dx, inv_dy, xq, yq);
+}
+
+// =====================================================================
+//  streaming_sdf_min_2d (single body) kernel
+// =====================================================================
+template <typename scalar_t>
+__global__ void streaming_sdf_min_2d_kernel(
+    const scalar_t* __restrict__ F,
+    const int Mx, const int My,
+    const scalar_t bx0, const scalar_t by0,
+    const scalar_t inv_dx, const scalar_t inv_dy,
+    const scalar_t r00, const scalar_t r01,
+    const scalar_t r10, const scalar_t r11,
+    const scalar_t bp_x, const scalar_t bp_y,
+    const scalar_t cm_x, const scalar_t cm_y,
+    const scalar_t lv_x, const scalar_t lv_y,
+    const scalar_t omega,
+    const scalar_t* __restrict__ gx,
+    const scalar_t* __restrict__ gy,
+    const int Ngy,
+    const scalar_t half_h,
+    const int i0, const int j0,
+    const int Ai, const int Aj,
+    scalar_t* __restrict__ sdf_cc,
+    scalar_t* __restrict__ sdf_u,
+    scalar_t* __restrict__ sdf_v,
+    scalar_t* __restrict__ bU,
+    scalar_t* __restrict__ bV,
+    scalar_t* __restrict__ sparse_cc,
+    const int interp_method)
+{
+    const int total = Ai * Aj;
+    const int tid   = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= total) return;
+
+    const int di = tid / Aj;
+    const int dj = tid - di * Aj;
+    const int i  = i0 + di;
+    const int j  = j0 + dj;
+    const int g_idx = i * Ngy + j;
+
+    const scalar_t xc = gx[i];
+    const scalar_t yc = gy[j];
+
+    const scalar_t dx_w = xc - bp_x, dy_w = yc - bp_y;
+    const scalar_t bxq = r00 * dx_w + r01 * dy_w;
+    const scalar_t byq = r10 * dx_w + r11 * dy_w;
+
+    const scalar_t neg_half_h = -half_h;
+    const scalar_t du_x = neg_half_h * r00, du_y = neg_half_h * r10;
+    const scalar_t dv_x = neg_half_h * r01, dv_y = neg_half_h * r11;
+
+    {
+        const scalar_t s = sdf_sample_dispatch_2d(
+            interp_method, F, Mx, My, bx0, by0, inv_dx, inv_dy, bxq, byq);
+        sparse_cc[tid] = s;
+        if (s < sdf_cc[g_idx]) sdf_cc[g_idx] = s;
+    }
+    {
+        const scalar_t s = sdf_sample_dispatch_2d(
+            interp_method, F, Mx, My, bx0, by0, inv_dx, inv_dy,
+            bxq + du_x, byq + du_y);
+        if (s < sdf_u[g_idx]) {
+            sdf_u[g_idx] = s;
+            bU[g_idx] = lv_x - omega * (yc - cm_y);
+        }
+    }
+    {
+        const scalar_t s = sdf_sample_dispatch_2d(
+            interp_method, F, Mx, My, bx0, by0, inv_dx, inv_dy,
+            bxq + dv_x, byq + dv_y);
+        if (s < sdf_v[g_idx]) {
+            sdf_v[g_idx] = s;
+            bV[g_idx] = lv_y + omega * (xc - cm_x);
+        }
+    }
+}
+
+// =====================================================================
+//  CUDA dispatch (single body)
+// =====================================================================
+void streaming_sdf_min_2d_cuda(
+    const at::Tensor& F,
+    const at::Tensor& bx, const at::Tensor& by,
+    const double bx0, const double by0,
+    const double bx_last, const double by_last,
+    const double inv_dx, const double inv_dy,
+    const double inv_vol,
+    c10::ArrayRef<double> R_T,
+    c10::ArrayRef<double> body_pos,
+    c10::ArrayRef<double> com_pos,
+    c10::ArrayRef<double> lin_vel,
+    const double omega,
+    const at::Tensor& gx, const at::Tensor& gy,
+    const double h_grid,
+    const int64_t i0, const int64_t i1,
+    const int64_t j0, const int64_t j1,
+    at::Tensor sdf_cc, at::Tensor sdf_u, at::Tensor sdf_v,
+    at::Tensor body_u, at::Tensor body_v,
+    at::Tensor sparse_cc,
+    const int64_t interp_method)
+{
+    TORCH_CHECK(R_T.size()      == 4, "R_T must have 4 elements (2x2)");
+    TORCH_CHECK(body_pos.size() == 2, "body_pos must have 2 elements");
+    TORCH_CHECK(com_pos.size()  == 2, "com_pos must have 2 elements");
+    TORCH_CHECK(lin_vel.size()  == 2, "lin_vel must have 2 elements");
+    (void)bx_last; (void)by_last; (void)inv_vol;
+
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+    const int Ai = (int)(i1 - i0);
+    const int Aj = (int)(j1 - j0);
+    const int N  = Ai * Aj;
+    if (N <= 0) return;
+
+    const int Mx = (int)bx.numel();
+    const int My = (int)by.numel();
+    const int Ngy = (int)gy.numel();
+
+    const int blockSize = (N <= 128) ? 32 : (N <= 4096) ? 128 : 256;
+    const int numBlocks = (N + blockSize - 1) / blockSize;
+
+    AT_DISPATCH_FLOATING_TYPES_AND_HALF(F.scalar_type(), "streaming_sdf_min_2d_cuda", [&] {
+        const scalar_t* F_ptr  = F.contiguous().data_ptr<scalar_t>();
+        const scalar_t* gx_ptr = gx.contiguous().data_ptr<scalar_t>();
+        const scalar_t* gy_ptr = gy.contiguous().data_ptr<scalar_t>();
+
+        scalar_t* sdf_cc_ptr = sdf_cc.data_ptr<scalar_t>();
+        scalar_t* sdf_u_ptr  = sdf_u.data_ptr<scalar_t>();
+        scalar_t* sdf_v_ptr  = sdf_v.data_ptr<scalar_t>();
+        scalar_t* bU_ptr     = body_u.data_ptr<scalar_t>();
+        scalar_t* bV_ptr     = body_v.data_ptr<scalar_t>();
+        scalar_t* sp_ptr     = sparse_cc.data_ptr<scalar_t>();
+
+        streaming_sdf_min_2d_kernel<scalar_t>
+            <<<numBlocks, blockSize, 0, stream>>>(
+                F_ptr,
+                Mx, My,
+                (scalar_t)bx0, (scalar_t)by0,
+                (scalar_t)inv_dx, (scalar_t)inv_dy,
+                (scalar_t)R_T[0], (scalar_t)R_T[1],
+                (scalar_t)R_T[2], (scalar_t)R_T[3],
+                (scalar_t)body_pos[0], (scalar_t)body_pos[1],
+                (scalar_t)com_pos[0],  (scalar_t)com_pos[1],
+                (scalar_t)lin_vel[0],  (scalar_t)lin_vel[1],
+                (scalar_t)omega,
+                gx_ptr, gy_ptr,
+                Ngy,
+                (scalar_t)(0.5 * h_grid),
+                (int)i0, (int)j0,
+                Ai, Aj,
+                sdf_cc_ptr, sdf_u_ptr, sdf_v_ptr,
+                bU_ptr, bV_ptr,
+                sp_ptr,
+                (int)interp_method);
+    });
+}
+
+// =====================================================================
+//  streaming_sdf_min_2d_multi  (Phase C: batched-call over bodies)
+// =====================================================================
+
+template <typename scalar_t>
+__global__ void streaming_sdf_min_2d_multi_kernel(
+    const int b,
+    const scalar_t* __restrict__ F_flat,
+    const int64_t*  __restrict__ F_offsets,
+    const int64_t*  __restrict__ body_shapes,   // [B,2] (Mx,My)
+    const scalar_t* __restrict__ body_meta,     // [B,7]
+    const scalar_t* __restrict__ kin,           // [B,11]
+    const int64_t*  __restrict__ aabb_lo,       // [B,2] (i0,j0)
+    const int64_t*  __restrict__ aabb_dim,      // [B,2] (Ai,Aj)
+    const int64_t*  __restrict__ cell_offsets,  // [B+1] prefix sum
+    const scalar_t* __restrict__ gx,
+    const scalar_t* __restrict__ gy,
+    const int Ngy,
+    const scalar_t half_h,
+    scalar_t* __restrict__ sdf_cc,
+    scalar_t* __restrict__ sdf_u,
+    scalar_t* __restrict__ sdf_v,
+    scalar_t* __restrict__ bU,
+    scalar_t* __restrict__ bV,
+    scalar_t* __restrict__ sparse_cc_flat,
+    const int interp_method)
+{
+    const int local = blockIdx.x * blockDim.x + threadIdx.x;
+
+    const int Ai = (int)aabb_dim[b*2 + 0];
+    const int Aj = (int)aabb_dim[b*2 + 1];
+    const int vol = Ai * Aj;
+    if (local >= vol) return;
+
+    const int di = local / Aj;
+    const int dj = local - di * Aj;
+
+    const int i0 = (int)aabb_lo[b*2 + 0];
+    const int j0 = (int)aabb_lo[b*2 + 1];
+    const int i  = i0 + di;
+    const int j  = j0 + dj;
+    const int g_idx = i * Ngy + j;
+
+    const scalar_t* F  = F_flat  + F_offsets[b];
+    const int Mx = (int)body_shapes[b*2 + 0];
+    const int My = (int)body_shapes[b*2 + 1];
+
+    const scalar_t* M = body_meta + b*7;
+    const scalar_t bx0 = M[0], by0 = M[1];
+    const scalar_t idx_ = M[4], idy_ = M[5];
+
+    const scalar_t* K = kin + b*11;
+    const scalar_t r00 = K[0], r01 = K[1];
+    const scalar_t r10 = K[2], r11 = K[3];
+    const scalar_t bp_x = K[4], bp_y = K[5];
+    const scalar_t cm_x = K[6], cm_y = K[7];
+    const scalar_t lv_x = K[8], lv_y = K[9];
+    const scalar_t om   = K[10];
+
+    const scalar_t xc = gx[i];
+    const scalar_t yc = gy[j];
+
+    const int64_t sparse_idx = cell_offsets[b] + (int64_t)local;
+
+    const scalar_t dx_w = xc - bp_x, dy_w = yc - bp_y;
+    const scalar_t bxq = r00 * dx_w + r01 * dy_w;
+    const scalar_t byq = r10 * dx_w + r11 * dy_w;
+
+    const scalar_t neg_half_h = -half_h;
+    const scalar_t du_x = neg_half_h * r00, du_y = neg_half_h * r10;
+    const scalar_t dv_x = neg_half_h * r01, dv_y = neg_half_h * r11;
+
+    {
+        const scalar_t s = sdf_sample_dispatch_2d(
+            interp_method, F, Mx, My, bx0, by0, idx_, idy_, bxq, byq);
+        sparse_cc_flat[sparse_idx] = s;
+        if (s < sdf_cc[g_idx]) sdf_cc[g_idx] = s;
+    }
+    {
+        const scalar_t s = sdf_sample_dispatch_2d(
+            interp_method, F, Mx, My, bx0, by0, idx_, idy_,
+            bxq + du_x, byq + du_y);
+        if (s < sdf_u[g_idx]) {
+            sdf_u[g_idx] = s;
+            bU[g_idx] = lv_x - om * (yc - cm_y);
+        }
+    }
+    {
+        const scalar_t s = sdf_sample_dispatch_2d(
+            interp_method, F, Mx, My, bx0, by0, idx_, idy_,
+            bxq + dv_x, byq + dv_y);
+        if (s < sdf_v[g_idx]) {
+            sdf_v[g_idx] = s;
+            bV[g_idx] = lv_y + om * (xc - cm_x);
+        }
+    }
+}
+
+void streaming_sdf_min_2d_multi_cuda(
+    const at::Tensor& F_flat, const at::Tensor& F_offsets,
+    const at::Tensor& bx_flat, const at::Tensor& bx_offsets,
+    const at::Tensor& by_flat, const at::Tensor& by_offsets,
+    const at::Tensor& body_shapes,
+    const at::Tensor& body_meta,
+    const at::Tensor& kin,
+    const at::Tensor& aabb_lo,
+    const at::Tensor& aabb_dim,
+    const at::Tensor& cell_offsets,
+    const at::Tensor& gx, const at::Tensor& gy,
+    const double h_grid,
+    const int64_t max_vol_per_body,
+    at::Tensor sdf_cc, at::Tensor sdf_u, at::Tensor sdf_v,
+    at::Tensor body_u, at::Tensor body_v,
+    at::Tensor sparse_cc_flat,
+    const int64_t interp_method)
+{
+    (void)bx_flat; (void)bx_offsets; (void)by_flat; (void)by_offsets;
+
+    const int B = (int)aabb_dim.size(0);
+    if (B <= 0 || max_vol_per_body <= 0) return;
+
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    const int Ngy = (int)gy.numel();
+
+    const int blockSize = (max_vol_per_body <= 128) ? 32
+                        : (max_vol_per_body <= 4096) ? 128 : 256;
+
+    AT_DISPATCH_FLOATING_TYPES_AND_HALF(F_flat.scalar_type(), "streaming_sdf_min_2d_multi_cuda", [&] {
+        for (int b = 0; b < B; ++b) {
+            const int blocksPerBody = (int)((max_vol_per_body + blockSize - 1) / blockSize);
+            streaming_sdf_min_2d_multi_kernel<scalar_t>
+                <<<dim3(blocksPerBody, 1, 1), dim3(blockSize, 1, 1), 0, stream>>>(
+                    b,
+                    F_flat.data_ptr<scalar_t>(),
+                    F_offsets.data_ptr<int64_t>(),
+                    body_shapes.data_ptr<int64_t>(),
+                    body_meta.data_ptr<scalar_t>(),
+                    kin.data_ptr<scalar_t>(),
+                    aabb_lo.data_ptr<int64_t>(),
+                    aabb_dim.data_ptr<int64_t>(),
+                    cell_offsets.data_ptr<int64_t>(),
+                    gx.data_ptr<scalar_t>(), gy.data_ptr<scalar_t>(),
+                    Ngy,
+                    (scalar_t)(0.5 * h_grid),
+                    sdf_cc.data_ptr<scalar_t>(),
+                    sdf_u.data_ptr<scalar_t>(),
+                    sdf_v.data_ptr<scalar_t>(),
+                    body_u.data_ptr<scalar_t>(),
+                    body_v.data_ptr<scalar_t>(),
+                    sparse_cc_flat.data_ptr<scalar_t>(),
+                    (int)interp_method);
+        }
+    });
+}
+
+TORCH_LIBRARY_IMPL(lilytorch_kernels, CUDA, m) {
+    m.impl("streaming_sdf_min_2d",       &streaming_sdf_min_2d_cuda);
+    m.impl("streaming_sdf_min_2d_multi", &streaming_sdf_min_2d_multi_cuda);
+}
+
+}  // namespace lilytorch_kernels
