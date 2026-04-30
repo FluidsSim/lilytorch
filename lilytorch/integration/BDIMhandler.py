@@ -1926,14 +1926,7 @@ class BDIMhandler:
         ``grid_sample(padding_mode='border')`` semantics via
         ``fill_method=3``.
         """
-        try:
-            from pytorch_interpolation import RegularGridInterpolator3D
-        except Exception as e:
-            raise RuntimeError(
-                "custom_trilinear_3d requires pytorch_interpolation with "
-                "the C++/CUDA build (RegularGridInterpolator3D).  "
-                f"Import failed: {e}"
-            )
+        from lilytorch.src.kernels import RegularGridInterpolator3D
 
         comp = self.fluid_solver.composite_body
         n_built = 0

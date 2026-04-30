@@ -166,6 +166,31 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " Tensor shapes, Tensor neu_desc, Tensor dir_desc, Tensor dir_val,"
         " int max_line_dim"
         ") -> ()");
+
+    // ---- Scattered-point interpolation --------------------------------
+    // Reusable bilinear/biquadratic (2-D) and trilinear/triquadratic (3-D)
+    // samplers backed by the same device functions as streaming_sdf.
+    // interp_method: 0 = linear, 1 = quadratic.
+    // F must be contiguous and row-major: F[ix, iy] or F[ix, iy, iz].
+    // G is pre-allocated by the caller, same dtype and device as F.
+    m.def(
+        "interpolate_2d("
+        "Tensor F, Tensor xq, Tensor yq,"
+        " float bx0, float by0,"
+        " float inv_dx, float inv_dy,"
+        " int Mx, int My,"
+        " int interp_method,"
+        " Tensor(a!) G"
+        ") -> ()");
+    m.def(
+        "interpolate_3d("
+        "Tensor F, Tensor xq, Tensor yq, Tensor zq,"
+        " float bx0, float by0, float bz0,"
+        " float inv_dx, float inv_dy, float inv_dz,"
+        " int Mx, int My, int Mz,"
+        " int interp_method,"
+        " Tensor(a!) G"
+        ") -> ()");
 }
 
 }  // namespace lilytorch_kernels

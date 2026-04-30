@@ -63,6 +63,14 @@ from .ops import (
     streaming_sdf_min_2d_multi,
     bdim_forces_2d_multi,
     apply_bcs_2d,
+    interp_2d,
+    interp_3d,
+)
+
+from .interpolation import (
+    RegularGridInterpolator,
+    RegularGridInterpolator3D,
+    RegularGridInterpolatorAutomatic,
 )
 
 __all__ = [
@@ -74,4 +82,9 @@ __all__ = [
     "streaming_sdf_min_2d_multi",
     "bdim_forces_2d_multi",
     "apply_bcs_2d",
+    "interp_2d",
+    "interp_3d",
+    "RegularGridInterpolator",
+    "RegularGridInterpolator3D",
+    "RegularGridInterpolatorAutomatic",
 ]

@@ -18,7 +18,7 @@ class SimConfig(BaseSimConfig):
 
         # ── Hardware ──────────────────────────────────────────────────
         self.use_gpu              = True
-        self.use_bdim             = True
+        self.use_bdim             = False
         self.compute_sdf          = True
         self.convexify            = True
         self.headless             = False

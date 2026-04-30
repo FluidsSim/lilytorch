@@ -18,7 +18,7 @@ class SimConfig(BaseSimConfig):
 
         # ── Hardware ──────────────────────────────────────────────────
         self.use_bdim     = True
-        self.use_gpu      = True
+        self.use_gpu      = False
         self.compute_sdf  = True
         self.wall_height  = 0.02
         self.water_height = 0.015
@@ -54,8 +54,8 @@ class SimConfig(BaseSimConfig):
 
         # ── Physics ───────────────────────────────────────────────────
         self.poisson_method    = "fft"
-        self.timestep          = 0.001
-        self.convection_method = "quick"
+        self.timestep          = 0.01
+        self.convection_method = "implicit"
         self.n_iterations      = 8001
         self.save_every        = 50
         self.num_sub_steps     = 1

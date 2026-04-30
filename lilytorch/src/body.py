@@ -5,7 +5,7 @@ import os
 
 import numpy as np
 import torch
-from pytorch_interpolation import RegularGridInterpolator, RegularGridInterpolatorAutomatic
+from lilytorch.src.kernels import RegularGridInterpolator, RegularGridInterpolatorAutomatic
 
 logger = logging.getLogger(__name__)
 
@@ -2065,7 +2065,7 @@ class BodyMesh(Body):
             ),
             torch.from_numpy(sdf_val).type(self.dtype).to(self.device),
             fill_value="nearest",
-            method=1  # quadratic
+            method="quadratic"
         )
 
         self.curv_coord = torch.from_numpy(curv_coord).type(self.dtype).to(self.device)

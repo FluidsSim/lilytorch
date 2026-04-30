@@ -19,7 +19,11 @@ __all__ = [
     "streaming_sdf_min_2d_multi",
     "bdim_forces_2d_multi",
     "apply_bcs_2d",
+    "interp_2d",
+    "interp_3d",
 ]
+
+_METHOD_MAP = {"linear": 0, "quadratic": 1}
 
 
 def streaming_sdf_min_3d(
@@ -306,6 +310,96 @@ def bdim_forces_2d_multi(
         int(delta_order),
         out,
     )
+
+
+def interp_2d(
+        F: Tensor,
+        xq: Tensor, yq: Tensor,
+        bx0: float, by0: float,
+        inv_dx: float, inv_dy: float,
+        Mx: int, My: int,
+        method: str = "linear") -> Tensor:
+    """Bilinear (method='linear') or biquadratic (method='quadratic')
+    scattered-point interpolation on a uniform 2-D grid.
+
+    Parameters
+    ----------
+    F : Tensor
+        Grid values, shape ``(Mx, My)``, contiguous float32/float64.
+    xq, yq : Tensor
+        Query-point coordinates, each shape ``(N,)``.
+    bx0, by0 : float
+        Grid origin (first axis coordinate).
+    inv_dx, inv_dy : float
+        Inverse grid spacing per axis.
+    Mx, My : int
+        Grid size per axis.
+    method : "linear" | "quadratic"
+        Interpolation order.  Default "linear".
+
+    Returns
+    -------
+    Tensor
+        Interpolated values, shape ``(N,)``, same dtype/device as ``F``.
+    """
+    interp_method = _METHOD_MAP.get(method)
+    if interp_method is None:
+        raise ValueError(f"method must be 'linear' or 'quadratic', got {method!r}")
+    G = torch.empty(xq.numel(), dtype=F.dtype, device=F.device)
+    torch.ops.lilytorch_kernels.interpolate_2d.default(
+        F, xq, yq,
+        float(bx0), float(by0),
+        float(inv_dx), float(inv_dy),
+        int(Mx), int(My),
+        int(interp_method),
+        G,
+    )
+    return G
+
+
+def interp_3d(
+        F: Tensor,
+        xq: Tensor, yq: Tensor, zq: Tensor,
+        bx0: float, by0: float, bz0: float,
+        inv_dx: float, inv_dy: float, inv_dz: float,
+        Mx: int, My: int, Mz: int,
+        method: str = "linear") -> Tensor:
+    """Trilinear (method='linear') or triquadratic (method='quadratic')
+    scattered-point interpolation on a uniform 3-D grid.
+
+    Parameters
+    ----------
+    F : Tensor
+        Grid values, shape ``(Mx, My, Mz)``, contiguous float32/float64.
+    xq, yq, zq : Tensor
+        Query-point coordinates, each shape ``(N,)``.
+    bx0, by0, bz0 : float
+        Grid origin per axis.
+    inv_dx, inv_dy, inv_dz : float
+        Inverse grid spacing per axis.
+    Mx, My, Mz : int
+        Grid size per axis.
+    method : "linear" | "quadratic"
+        Interpolation order.  Default "linear".
+
+    Returns
+    -------
+    Tensor
+        Interpolated values, shape ``(N,)``, same dtype/device as ``F``.
+    """
+    interp_method = _METHOD_MAP.get(method)
+    if interp_method is None:
+        raise ValueError(f"method must be 'linear' or 'quadratic', got {method!r}")
+    G = torch.empty(xq.numel(), dtype=F.dtype, device=F.device)
+    torch.ops.lilytorch_kernels.interpolate_3d.default(
+        F, xq, yq, zq,
+        float(bx0), float(by0), float(bz0),
+        float(inv_dx), float(inv_dy), float(inv_dz),
+        int(Mx), int(My), int(Mz),
+        int(interp_method),
+        G,
+    )
+    return G
 
 
 def apply_bcs_2d(

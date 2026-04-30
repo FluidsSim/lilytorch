@@ -6,7 +6,7 @@ single code path -- inspired by WaterLily.jl.
 """
 
 import torch
-from pytorch_interpolation import RegularGridInterpolatorAutomatic
+from lilytorch.src.kernels import RegularGridInterpolatorAutomatic
 from lilytorch.src.kernels import _C as _lilytorch_kernels_C  # noqa: F401  -- registers torch.ops.lilytorch_kernels.*
 
 
@@ -268,7 +268,7 @@ class AdvDiffSolver:
             interp = RegularGridInterpolatorAutomatic(
                 grid,
                 torch.zeros(tuple(self.n), device=self.device, dtype=self.dtype),
-                fill_value=None, method=1,
+                fill_value=None, method="quadratic",
             )
             self._interps.append(interp)
 

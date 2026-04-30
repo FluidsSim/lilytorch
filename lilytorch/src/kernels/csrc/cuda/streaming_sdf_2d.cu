@@ -756,11 +756,71 @@ void apply_bcs_2d_cuda(
     });
 }
 
+// =====================================================================
+//  interpolate_2d: scattered-point bilinear / biquadratic sampling
+//
+//  One thread per query point.  Calls the same sdf_sample_dispatch_2d
+//  device function used by streaming_sdf_min_2d (interp_method 0 =
+//  bilinear / "linear", 1 = biquadratic / "quadratic").
+// =====================================================================
+template <typename scalar_t>
+__global__ void interpolate_2d_kernel(
+    const scalar_t* __restrict__ F,
+    const scalar_t* __restrict__ xq,
+    const scalar_t* __restrict__ yq,
+    const int N,
+    const int Mx, const int My,
+    const scalar_t bx0, const scalar_t by0,
+    const scalar_t inv_dx, const scalar_t inv_dy,
+    const int interp_method,
+    scalar_t* __restrict__ G)
+{
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= N) return;
+    G[tid] = sdf_sample_dispatch_2d(
+        interp_method,
+        F, Mx, My,
+        bx0, by0,
+        inv_dx, inv_dy,
+        xq[tid], yq[tid]);
+}
+
+void interpolate_2d_cuda(
+    const at::Tensor& F,
+    const at::Tensor& xq, const at::Tensor& yq,
+    const double bx0, const double by0,
+    const double inv_dx, const double inv_dy,
+    const int64_t Mx, const int64_t My,
+    const int64_t interp_method,
+    at::Tensor& G)
+{
+    const int N = (int)xq.numel();
+    if (N == 0) return;
+
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    const int blockSize = (N <= 128) ? 32 : (N <= 4096) ? 128 : 256;
+    const int numBlocks = (N + blockSize - 1) / blockSize;
+
+    AT_DISPATCH_FLOATING_TYPES(F.scalar_type(), "interpolate_2d_cuda", [&] {
+        interpolate_2d_kernel<scalar_t><<<numBlocks, blockSize, 0, stream>>>(
+            F.contiguous().data_ptr<scalar_t>(),
+            xq.contiguous().to(F.scalar_type()).data_ptr<scalar_t>(),
+            yq.contiguous().to(F.scalar_type()).data_ptr<scalar_t>(),
+            N,
+            (int)Mx, (int)My,
+            (scalar_t)bx0, (scalar_t)by0,
+            (scalar_t)inv_dx, (scalar_t)inv_dy,
+            (int)interp_method,
+            G.data_ptr<scalar_t>());
+    });
+}
+
 TORCH_LIBRARY_IMPL(lilytorch_kernels, CUDA, m) {
     m.impl("streaming_sdf_min_2d",       &streaming_sdf_min_2d_cuda);
     m.impl("streaming_sdf_min_2d_multi", &streaming_sdf_min_2d_multi_cuda);
     m.impl("bdim_forces_2d_multi",       &bdim_forces_2d_multi_cuda);
     m.impl("apply_bcs_2d",               &apply_bcs_2d_cuda);
+    m.impl("interpolate_2d",             &interpolate_2d_cuda);
 }
 
 }  // namespace lilytorch_kernels

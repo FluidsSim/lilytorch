@@ -9,7 +9,7 @@ import h5py
 import numpy as np
 import torch
 from concurrent.futures import ThreadPoolExecutor
-from pytorch_interpolation import RegularGridInterpolator
+from lilytorch.src.kernels import RegularGridInterpolator
 from tqdm import tqdm
 
 from lilytorch.src.adv_diff import AdvDiffSolver
@@ -693,20 +693,20 @@ class FluidSolver(PlottingMixin):
             self.force_x_interp = RegularGridInterpolator(
                 (self.grids.x_stag, self.y),
                 torch.zeros_like(self.X, device=self.device, dtype=self.dtype),
-                method=1,
+                method="quadratic",
                 fill_value=None
             )
             self.force_y_interp = RegularGridInterpolator(
                 (self.x, self.grids.y_stag),
                 torch.zeros_like(self.Y, device=self.device, dtype=self.dtype),
-                method=1,
+                method="quadratic",
                 fill_value=None
             )
 
             self.interp_utility = RegularGridInterpolator(
                 (self.x,self.y),
                 torch.zeros_like(self.X, device=self.device, dtype=self.dtype),
-                method=1,
+                method="quadratic",
                 fill_value=None
             )
 

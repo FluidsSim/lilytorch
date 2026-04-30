@@ -716,6 +716,47 @@ void apply_bcs_2d_cpu(
 }
 
 // =====================================================================
+//  interpolate_2d_cpu: scattered-point bilinear / biquadratic sampling
+// =====================================================================
+static void interpolate_2d_cpu(
+    const at::Tensor& F,
+    const at::Tensor& xq, const at::Tensor& yq,
+    const double bx0, const double by0,
+    const double inv_dx, const double inv_dy,
+    const int64_t Mx, const int64_t My,
+    const int64_t interp_method,
+    at::Tensor& G)
+{
+    const int N = (int)xq.numel();
+    if (N == 0) return;
+
+    AT_DISPATCH_FLOATING_TYPES(F.scalar_type(), "interpolate_2d_cpu", [&] {
+        const scalar_t* Fp  = F.contiguous().data_ptr<scalar_t>();
+        const scalar_t* xqp = xq.contiguous().to(F.scalar_type()).data_ptr<scalar_t>();
+        const scalar_t* yqp = yq.contiguous().to(F.scalar_type()).data_ptr<scalar_t>();
+        scalar_t* Gp = G.data_ptr<scalar_t>();
+        const int iMx = (int)Mx, iMy = (int)My;
+        const scalar_t bx0s = (scalar_t)bx0, by0s = (scalar_t)by0;
+        const scalar_t idx  = (scalar_t)inv_dx, idy = (scalar_t)inv_dy;
+        const int method    = (int)interp_method;
+
+        at::parallel_for(0, N, 0, [&](int64_t start, int64_t end) {
+            for (int64_t i = start; i < end; ++i) {
+                if (method == 1) {
+                    Gp[i] = biquadratic_sample_uniform_2d<scalar_t>(
+                        Fp, iMx, iMy, bx0s, by0s, idx, idy,
+                        xqp[i], yqp[i]);
+                } else {
+                    Gp[i] = bilinear_sample_uniform_2d<scalar_t>(
+                        Fp, iMx, iMy, bx0s, by0s, idx, idy,
+                        xqp[i], yqp[i]);
+                }
+            }
+        });
+    });
+}
+
+// =====================================================================
 //  CPU registration. Schemas live in ops.cpp.
 // =====================================================================
 
@@ -724,6 +765,7 @@ TORCH_LIBRARY_IMPL(lilytorch_kernels, CPU, m) {
     m.impl("streaming_sdf_min_2d_multi", &streaming_sdf_min_2d_multi_cpu);
     m.impl("bdim_forces_2d_multi",       &bdim_forces_2d_multi_cpu);
     m.impl("apply_bcs_2d",               &apply_bcs_2d_cpu);
+    m.impl("interpolate_2d",             &interpolate_2d_cpu);
 }
 
 }  // namespace lilytorch_kernels

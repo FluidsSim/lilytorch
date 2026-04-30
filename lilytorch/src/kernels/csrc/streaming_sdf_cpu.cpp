@@ -931,6 +931,50 @@ void apply_bcs_3d_cpu(
 }
 
 // =====================================================================
+//  interpolate_3d_cpu: scattered-point trilinear / triquadratic sampling
+// =====================================================================
+static void interpolate_3d_cpu(
+    const at::Tensor& F,
+    const at::Tensor& xq, const at::Tensor& yq, const at::Tensor& zq,
+    const double bx0, const double by0, const double bz0,
+    const double inv_dx, const double inv_dy, const double inv_dz,
+    const int64_t Mx, const int64_t My, const int64_t Mz,
+    const int64_t interp_method,
+    at::Tensor& G)
+{
+    const int N = (int)xq.numel();
+    if (N == 0) return;
+
+    AT_DISPATCH_FLOATING_TYPES(F.scalar_type(), "interpolate_3d_cpu", [&] {
+        const scalar_t* Fp  = F.contiguous().data_ptr<scalar_t>();
+        const scalar_t* xqp = xq.contiguous().to(F.scalar_type()).data_ptr<scalar_t>();
+        const scalar_t* yqp = yq.contiguous().to(F.scalar_type()).data_ptr<scalar_t>();
+        const scalar_t* zqp = zq.contiguous().to(F.scalar_type()).data_ptr<scalar_t>();
+        scalar_t* Gp = G.data_ptr<scalar_t>();
+        const int iMx = (int)Mx, iMy = (int)My, iMz = (int)Mz;
+        const scalar_t bx0s = (scalar_t)bx0, by0s = (scalar_t)by0, bz0s = (scalar_t)bz0;
+        const scalar_t idx  = (scalar_t)inv_dx, idy = (scalar_t)inv_dy, idz = (scalar_t)inv_dz;
+        const int method    = (int)interp_method;
+
+        at::parallel_for(0, N, 0, [&](int64_t start, int64_t end) {
+            for (int64_t i = start; i < end; ++i) {
+                if (method == 1) {
+                    Gp[i] = triquadratic_sample_uniform<scalar_t>(
+                        Fp, iMx, iMy, iMz,
+                        bx0s, by0s, bz0s, idx, idy, idz,
+                        xqp[i], yqp[i], zqp[i]);
+                } else {
+                    Gp[i] = trilinear_sample_uniform<scalar_t>(
+                        Fp, iMx, iMy, iMz,
+                        bx0s, by0s, bz0s, idx, idy, idz,
+                        xqp[i], yqp[i], zqp[i]);
+                }
+            }
+        });
+    });
+}
+
+// =====================================================================
 //  CPU registration. The schemas live in ops.cpp; ops.cpp no longer
 //  registers CPU stubs, so these implementations bind directly.
 // =====================================================================
@@ -940,6 +984,7 @@ TORCH_LIBRARY_IMPL(lilytorch_kernels, CPU, m) {
     m.impl("streaming_sdf_min_3d_multi", &streaming_sdf_min_3d_multi_cpu);
     m.impl("bdim_forces_3d_multi",       &bdim_forces_3d_multi_cpu);
     m.impl("apply_bcs_3d",               &apply_bcs_3d_cpu);
+    m.impl("interpolate_3d",             &interpolate_3d_cpu);
 }
 
 }  // namespace lilytorch_kernels
