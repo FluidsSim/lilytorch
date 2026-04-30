@@ -85,7 +85,8 @@ class SimConfig(BaseSimConfig):
 
         # ── Body ─────────────────────────────────────────────────────
         self.contour_mask = True
-        self.n_samples    = (2000, 2000)
+        self.zero_pressure_inside = True
+        # self.n_samples    = (2000, 2000)
 
     # ── Hooks ─────────────────────────────────────────────────────────
 

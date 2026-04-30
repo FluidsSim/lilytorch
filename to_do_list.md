@@ -32,7 +32,7 @@ diff_u, diff_v, diff_w
 - Also bilinear/biquadratic kernels similar to pytorch_interpolations (note: the 2-D `streaming_sdf_min_2d_multi` already provides bilinear + biquadratic-Lagrange in-kernel; this bullet covers a more general drop-in replacement for the standalone `pytorch_interpolation` package).
 - replace pytorch_interpolation with existing precompiled cuda/c++ kernels or write new ones if necessary in the kernel/ folder.
 - Implement 2nd order accurate force method also for the cuda/C++ kernel solver version (currently only in non cuda/c++ kernel mode)
-- Combine solver.py and BDIMhandler in a single simulation file (just solver.py). BDIMhandler should only keep whatever is necessary for handling the coupling with FARMS, if possible. Review options and propose what to do.
+- Combine solver.py and BDIMhandler in a single simulation file (just solver.py). BDIMhandler should only keep whatever is necessary for handling the coupling with FARMS, if possible. Review options and propose what to do. This should have a careful treatment of all the 
 - Move all non standard computations (sponge layer, carreau, etc) in a dedicated file in src/extras.py
 - Polish the repository
 - Can advection be improved? I.e. by implementing a cuda/c++ kernel?

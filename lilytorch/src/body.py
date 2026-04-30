@@ -1726,16 +1726,16 @@ class BodyMesh(Body):
         # uses fill_value="nearest" for anything beyond.
         bb = self.m2s.bounding_box()
         target_spacing = self.h / 2.0
-        pad = float(self.eps + 2 * self.h)
+        self.pad = float(self.eps + 2 * self.h)
 
         if nsamples is None:
-            span_x = (bb[0, 1] - bb[0, 0]) + 2 * pad
+            span_x = (bb[0, 1] - bb[0, 0]) + 2 * self.pad
             nsamples = max(64, int(np.ceil(span_x / target_spacing)))
         if msamples is None:
-            span_y = (bb[1, 1] - bb[1, 0]) + 2 * pad
+            span_y = (bb[1, 1] - bb[1, 0]) + 2 * self.pad
             msamples = max(64, int(np.ceil(span_y / target_spacing)))
         if ksamples is None and self.ndim == 3:
-            span_z = (bb[2, 1] - bb[2, 0]) + 2 * pad
+            span_z = (bb[2, 1] - bb[2, 0]) + 2 * self.pad
             ksamples = max(64, int(np.ceil(span_z / target_spacing)))
         self.nsamples = nsamples
         self.msamples = msamples
@@ -1812,12 +1812,10 @@ class BodyMesh(Body):
         if not self.compute_interp:
             return
 
-        pad = (self.eps + 2 * self.h).cpu()  # same padding used for sample-count computation
-
         if self.ndim == 2:
-            self._compute_sdfs_2d(zpos, pad)
+            self._compute_sdfs_2d(zpos, self.pad)
         else:
-            self._compute_sdfs_3d(pad)
+            self._compute_sdfs_3d(self.pad)
 
     # ---- 2-D SDF computation ------------------------------------------
     def _compute_sdfs_2d(self, zpos, pad):
