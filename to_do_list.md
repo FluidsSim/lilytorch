@@ -28,19 +28,24 @@ diff_u, diff_v, diff_w
 - Implement triquadratic interpolation option for evaluating the sdf functions in the cuda/C++ kernels (`streaming_sdf_min_3d`, `streaming_sdf_min_3d_multi`). Mirrors the pytorch_interpolation biquadratic-Lagrange algorithm extended to 3D (3x3x3 stencil, falls back to trilinear in the boundary layer). Optionally enabled by the user via the `sdf_interp_method` solver config key (`"trilinear"` (default) | `"triquadratic"`), exposed on `BaseSimConfig`. CPU implementation validated against a pure-PyTorch reference in `lilytorch/src/kernels/test_streaming_sdf_self.py`.
 - Move all non standard computations (sponge layer, carreau, etc) in a dedicated file in src/extras.py
 - Move force computations in an ad-hoc file (src/forces.py)
+- Implement 2nd order accurate force method also for the cuda/C++ kernel solver version (currently only in non cuda/c++ kernel mode)
+- replace pytorch_interpolation with existing precompiled cuda/c++ kernels or write new ones if necessary in the kernel/ folder.
 
 
 # HIGH PRIORITY:
+- There are a number of strange settings in solver.py (and maybe BDIMhandler.py) that depend on some old code, where different variants of the solvers were implemented, such as cropping, batching, streaming, etc methods. Currently (and this is how i want it to be), there should only be two solver variants. One is in pure python code, it should be suboptimal (no batching, no cropping), and another should use the cuda/c++ kernels in kernels/. The first approach should also allow compilation of advection+diff, forces, sdf, poisson. The second version should compile forces and sdf by default, but there should also be an option to compile the other two. You should read through the code and clean this feature.
+- Check that the code works for dtype float32 and float64 (double). Especially the cuda/c++ kernels (but also the rest of the code) should be using one or the other depending on the user request.
+- Confirm that the sdf and force computations done with the cuda/c++ kernels is computing on each body aabb boxes, and not on the union aabb (narrow band on individual bodies). This is the most efficient approach, as the sdf/force computations are restricted to where it is needed. Is it possible to implement this method also for the bdim update, setting of the variable coefficients, mu/normals, and perhaps other parts? I think that, whilst currently the cuda/c++ kernels separately handle force and sdf computation, this could be merged, in the sense that the forces could be computed for each body at the same time (at the same body iteration) when the sdf is computed. This would avoid the need to store several CC sdfs for later force computation, saving memory, and reusing the body normals (although these are not cell centered). Additionally, bdim update, setting of the variable coefficients, mu/normals could in my view also be computed in the same
+kernel function locally. At the end, to save memory, the mu0 of the union sdf is needed for the correction step so it must be computed, but the memory of each body velocity, sdfs, normals, etc
+can be released after the loop of that body is computed. This should, in my logic, save a lot of memory, whist maintaining the same accuracy.
 - Do a systematic memory cost analysis. I think that the latest method with cuda kernels dynamically rewrites the body velocities and writed the forces computation inside the kernel whenever body properties are needed. This reduces the memory footprint by not storing the sdfs/body velocities of each rigid body (just a unique composite union body properties are stored).
-- replace pytorch_interpolation with existing precompiled cuda/c++ kernels or write new ones if necessary in the kernel/ folder.
-- Implement 2nd order accurate force method also for the cuda/C++ kernel solver version (currently only in non cuda/c++ kernel mode)
 - Combine solver.py and BDIMhandler in a single simulation file (just solver.py). BDIMhandler should only keep whatever is necessary for handling the coupling with FARMS, if possible. Review options and propose what to do. This should have a careful modifications in all the examples scipts in farms_examples/.
-- Polish the repository
-- Can advection be improved? I.e. by implementing a cuda/c++ kernel?
-- Can poisson solve be improved? I.e. by implementing a cuda/c++ kernel?
+- Polish the repository, review and correct outdated documentation, also in the docs/ folder.
 
 # LOW PRIORITY:
-- Test an analytical 2d swimmer simulation
+- Implement a gamepad connected with the fluid solver.
+- Can advection/poisson solvers be improved? I.e. by implementing a cuda/c++ kernel instead of torch.compile?
+- Test an analytical 2d swimmer simulation of the salamander swimming in 2d (use the control.py and gamepad.py extension and figure out how to set it up)
 - Consider Crank-Nicolson for diffusion. Current explicit diffusion has stability limit dt < h²/(2ν·ndim). Not a bottleneck now (dt_diff ≈ 4.2s ≫ dt_cfl), but becomes relevant if dt is increased aggressively per A5.
 
 
@@ -60,7 +65,6 @@ A 5th-order Hermite smoothstep is more robust numerically and avoids sin/cos.
 - After projection, the residual divergence is stored (self.div) but never checked.
 Adding `div_max = self.divergence(u,v,w).abs().max()` every N steps catches Poisson
 under-convergence before it cascades into NaN.
-
 
 
 # IMPROVEMENT SUGGESTIONS (from deep code review, March 2026)
