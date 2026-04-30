@@ -26,18 +26,18 @@ diff_u, diff_v, diff_w
 - The nbforces cost analysis plotted in cost_scaling_loglog.png reveals some scaling of the costs of "Other (residual)" and "Body update (SDF)". I do not understand why, since the cropping approach with aabb boxes should (in my view), maintain the same cost at different scales. Unless the domain size remains the same and just the number of grid points increases, in which case the portion of the domain that includes the body increases, so the operations should indeed increase. Please clarify.
 - Simplify methods for cost optimization. After substantial testing of the different methods for running the cost analysis in run_scaling_conditions_pipeline.py the best method is nbforces_opt. Remove all the other methods, except for keeping the old one for reference (no cropping, no batching method for reference).
 - Implement triquadratic interpolation option for evaluating the sdf functions in the cuda/C++ kernels (`streaming_sdf_min_3d`, `streaming_sdf_min_3d_multi`). Mirrors the pytorch_interpolation biquadratic-Lagrange algorithm extended to 3D (3x3x3 stencil, falls back to trilinear in the boundary layer). Optionally enabled by the user via the `sdf_interp_method` solver config key (`"trilinear"` (default) | `"triquadratic"`), exposed on `BaseSimConfig`. CPU implementation validated against a pure-PyTorch reference in `lilytorch/src/kernels/test_streaming_sdf_self.py`.
+- Move all non standard computations (sponge layer, carreau, etc) in a dedicated file in src/extras.py
+- Move force computations in an ad-hoc file (src/forces.py)
 
 
 # HIGH PRIORITY:
+- Do a systematic memory cost analysis. I think that the latest method with cuda kernels dynamically rewrites the body velocities and writed the forces computation inside the kernel whenever body properties are needed. This reduces the memory footprint by not storing the sdfs/body velocities of each rigid body (just a unique composite union body properties are stored).
 - replace pytorch_interpolation with existing precompiled cuda/c++ kernels or write new ones if necessary in the kernel/ folder.
 - Implement 2nd order accurate force method also for the cuda/C++ kernel solver version (currently only in non cuda/c++ kernel mode)
 - Combine solver.py and BDIMhandler in a single simulation file (just solver.py). BDIMhandler should only keep whatever is necessary for handling the coupling with FARMS, if possible. Review options and propose what to do. This should have a careful modifications in all the examples scipts in farms_examples/.
-- Move all non standard computations (sponge layer, carreau, etc) in a dedicated file in src/extras.py
 - Polish the repository
 - Can advection be improved? I.e. by implementing a cuda/c++ kernel?
 - Can poisson solve be improved? I.e. by implementing a cuda/c++ kernel?
-- Move force computations in an ad-hoc file (src/forces.py)
-- Do a systematic memory cost analysis. I think that the latest method with cuda kernels dynamically rewrites the body velocities and writed the forces computation inside the kernel whenever body properties are needed. This reduces the memory footprint by not storing the sdfs/body velocities of each rigid body (just a unique composite union body properties are stored).
 
 # LOW PRIORITY:
 - Test an analytical 2d swimmer simulation
@@ -45,10 +45,22 @@ diff_u, diff_v, diff_w
 
 
 # LONG TERM GOALS:
+- Velocity gradients for the stress tensor use central differences, which degrade to
+1st-order near immersed boundaries. One-sided or ghost-cell stencils for cells near
+the body would improve force accuracy and reduce oscillations.
+- The expressions `0.5*(1 + d/ε + sin(π·d/ε)/π)` have cancellation when d ≈ ±ε.
+A 5th-order Hermite smoothstep is more robust numerically and avoids sin/cos.
 - How to handle bodies outside the water (at the interface). Volume of fluids methods (?)
 - Add sph simulation support (?)
 - Monolithic fluid multi rigid body solver (?)
 - AMR (Adaptive Mesh Refinement) - refine grid only near bodies and in the wake.
+
+
+# CHECKS
+- After projection, the residual divergence is stored (self.div) but never checked.
+Adding `div_max = self.divergence(u,v,w).abs().max()` every N steps catches Poisson
+under-convergence before it cascades into NaN.
+
 
 
 # IMPROVEMENT SUGGESTIONS (from deep code review, March 2026)
@@ -60,35 +72,10 @@ diff_u, diff_v, diff_w
 
 
 ### B6. Post-projection divergence monitoring
-After projection, the residual divergence is stored (self.div) but never checked.
-Adding `div_max = self.divergence(u,v,w).abs().max()` every N steps catches Poisson
-under-convergence before it cascades into NaN.
 
-
-### B8. Sponge/buffer layer for outflow
-Current BCs are Dirichlet or Neumann only. For external flows with vortex shedding,
-reflected pressure waves from the outlet contaminate the near-body solution.
-A convective outflow BC or exponential sponge layer (damping toward freestream in the
-last ~10% of the domain) is standard practice.
-
-### B9. Polynomial Heaviside instead of trig in `mu_funcs` (body.py)
-The expressions `0.5*(1 + d/ε + sin(π·d/ε)/π)` have cancellation when d ≈ ±ε.
-A 5th-order Hermite smoothstep is more robust numerically and avoids sin/cos.
-
-### B10. Wall-distance-aware stencils for stress
-Velocity gradients for the stress tensor use central differences, which degrade to
-1st-order near immersed boundaries. One-sided or ghost-cell stencils for cells near
-the body would improve force accuracy and reduce oscillations.
 
 
 ## C. CODE QUALITY
-
-### C1. No formal test suite
-All "tests" are standalone scripts under src/old/. Missing: pytest structure,
-convergence-rate verification (h-refinement), manufactured solution tests,
-BDIM conservation checks, analytical force validation (Stokes drag).
-
-
 
 ### C7. No type hints
 No Python type annotations anywhere. Adding them improves IDE support, catches bugs,
@@ -153,11 +140,6 @@ With `check_every=1`, every step computes `vorticity_fn()` (another `torch.gradi
 full velocity field). The config key `diagnostics_every` is not set in `base_sim_config.py` so
 it silently defaults to 1. The default should be `save_every` or at least 10.
 
-### F5. No `torch.compile` warm-up before the simulation loop
-Compiled kernels (adv-diff, BDIM meta, forces) trigger JIT tracing on their first real call,
-causing a latency spike at iteration 0. Add one dummy forward pass (with detach/no_grad) during
-`initialize_episode` — before the loop — to absorb tracing overhead.
-
 
 ## G. CORRECTNESS / ROBUSTNESS
 
@@ -167,20 +149,8 @@ causing a latency spike at iteration 0. Add one dummy forward pass (with detach/
 A warm restart will produce a different trajectory from a continuous run at the same point.
 A complete checkpoint should serialise all solver state plus the FARMS body poses.
 
-### G2. Async I/O futures are never pruned — potential memory leak
-`_io_futures` is an ever-growing list (solver.py:915). Over a 100k-step run with
-`save_every=100`, 1000 `Future` objects accumulate. Completed futures should be pruned
-periodically (e.g., every `save_every` steps), and uncaught I/O exceptions in futures should
-be surfaced rather than silently dropped.
-
-
 ## H. ARCHITECTURE
 
-### H1. `forces_method1` is dead code
-`force_method` defaults to `"method2"` and 3D always uses `forces_method2_3d`. `forces_method1`
-(solver.py:1036) requires `body.cnt_update`, `body.mask`, `body.ds` — none of which are
-populated in any current example. The ~80-line method should be removed or formally deprecated
-with a docstring note to avoid misleading future contributors.
 
 ### H2. `FluidSolver.__init__` is ~500 lines — extract into setup helpers
 The constructor initialises the grid, time integration, non-Newtonian models (Carreau,

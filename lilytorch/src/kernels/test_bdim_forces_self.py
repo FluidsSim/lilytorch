@@ -263,6 +263,7 @@ def main():
         xs, ys, zs, px, py, pz,
         eps_body, eps_solver, h3,
         max_vol,
+        1,  # delta_order
         out_kernel,
     )
 
@@ -308,6 +309,7 @@ def main():
         xs, ys, zs, px, py, pz,
         eps_body, eps_solver, h3,
         max_vol,
+        1,  # delta_order
         out_far,
     )
     assert torch.all(out_far == 0).item(), (

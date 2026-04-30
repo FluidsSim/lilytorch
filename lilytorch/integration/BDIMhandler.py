@@ -27,25 +27,6 @@ from lilytorch.src.body import (rotate_grid_2d, rotate_grid_3d,
 import torch
 
 
-# ---------------------------------------------------------------------
-# Pre-built attribute-free dicts used inside the hot path of
-# `_fluid_step_3d` to release BDIM intermediates with one
-# ``__dict__.update`` call instead of N × (hasattr + setattr) Python
-# lookups.  Building these dicts at import time keeps the per-step cost
-# at one C-level dict merge.
-# ---------------------------------------------------------------------
-_FS_FREE_AFTER_BDIM_3D = {
-    'mu1_all_u': None, 'mu1_all_v': None, 'mu1_all_w': None,
-    'normal_x_u': None, 'normal_y_u': None, 'normal_z_u': None,
-    'normal_x_v': None, 'normal_y_v': None, 'normal_z_v': None,
-    'normal_x_w': None, 'normal_y_w': None, 'normal_z_w': None,
-    # CC mu1 / m_m0 are also not needed by project
-    'mu1_all': None, 'm_m0_all': None,
-}
-_FS_FREE_AFTER_VAR_DENS_3D = {
-    'mu0_all_u': None, 'mu0_all_v': None, 'mu0_all_w': None,
-    'mu0_all': None,
-}
 _FS_FREE_AFTER_FORCES_3D = {
     'xstress_tensor': None, 'ystress_tensor': None, 'zstress_tensor': None,
     'pforce_x': None, 'pforce_y': None, 'pforce_z': None,
@@ -78,7 +59,6 @@ class BDIMhandler:
         # ---- bookkeeping ----
         self.data = data          # list[AnimatData] from FARMS
         self.iteration = 0
-        self.terminate = False
 
         # ---- create fluid solver ----
         self.fluid_solver = FluidSolver(
@@ -149,7 +129,6 @@ class BDIMhandler:
 
         # ---- densities ----
         self.rho_fluid = self.pars["solver"]["rho"]
-        self.rho_body  = self.pars["solver"].get("rho_body", 1000.0)
 
         # ---- toggles ----
         self.zero_pressure_inside = self.pars["solver"].get(
@@ -157,10 +136,6 @@ class BDIMhandler:
         )
         self.contour_mask = self.pars.get("body", {}).get("contour_mask", False)
         self.force_method = self.pars["solver"].get("force_method", "method2")
-        # Heun (RK2) for the full BDIM-projection cycle (2-D only).
-        # Off by default (Euler) for backwards compatibility; enable for
-        # benchmarks that require RK2 accuracy (e.g. Gazzola sedimentation).
-        self._use_heun = self.pars["solver"].get("heun", False) if self.ndim == 2 else False
 
         # ---- FARMS-style buoyancy parameters ----
         # With all-Neumann BCs the BDIM pressure field is purely dynamic;
@@ -180,14 +155,6 @@ class BDIMhandler:
         else:
             self.water_surface = 0.0
         self._buoyancy_initialized = False
-
-        # ---- explosion detection (cheap per-step NaN + |u|_max guard) ----
-        # vmax_abort defaults to a generous multiple of the inlet speed
-        # (or 100 m/s if no inlet). Finite-check is always on.
-        u_inlet = float(self.fluid_solver.adv_diff_solver.BC_values_u[1])
-        self._vmax_abort = float(self.pars["solver"].get(
-            "vmax_abort", max(100.0 * abs(u_inlet), 100.0),
-        ))
 
         # ---- optional physics solref tweak ----
         solref = self.pars.get("physics", {}).get("solref", None)
@@ -290,7 +257,7 @@ class BDIMhandler:
         experiment_options = self.pars.get("body", {}).get("experiment_options", None)
 
         self._buoy_mass   = np.zeros(n)
-        self._buoy_density = np.full(n, float(self.rho_body))
+        self._buoy_density = np.full(n, float(self.fluid_solver.rho_body))
         self._buoy_height = np.zeros(n)
 
         for body_i in range(n):
@@ -305,7 +272,7 @@ class BDIMhandler:
                         .morphology.links[link_id].density
                     )
                 except Exception:
-                    density = float(self.rho_body)
+                    density = float(self.fluid_solver.rho_body)
                 if density > 0.0:
                     self._buoy_density[body_i] = density
 
@@ -2014,300 +1981,6 @@ class BDIMhandler:
               f"per-body C++/CUDA trilinear samplers (replacing grid_sample)")
 
     # ==================================================================
-    #  fluid_step: one BDIM time-step (advection-diffusion + projection)
-    # ==================================================================
-    def _compute_variable_density_coefficients(self, timestep):
-        """Compute variable-density Poisson coefficients.
-
-        Returns ``(ch, cv, ch_cc)`` for 2-D or ``(ch, cv, cw, ch_cc)``
-                for 3-D, where:
-
-                * ``ch, cv, cw`` -- staggered ``dt / rho_eff`` on the respective
-                    face grids. Used by both the multigrid correction step and the
-                    FFT correction step.
-                * ``ch_cc`` -- cell-centred ``dt / rho_eff_cc``. Used as the
-                    Poisson RHS coefficient in the FFT path so that the solve
-                    accounts for spatially-varying density:
-                    ``∇²p = div / ch_cc  ≡  div * rho_eff_cc / dt``.
-
-                Effective density at location x:
-                        rho_eff(x) = rho_body + (rho_fluid - rho_body) * mu0(x)
-
-                The density blend is already built from the BDIM face field ``mu0``,
-                so the coupled variable-density path does not apply an additional
-                ``mu0`` factor in the numerator.
-
-        Narrow-band fast-path (3-D only)
-        --------------------------------
-        When the solver runs with ``_mu_normals_union = True`` the mu0
-        face buffers contain the outside-body default value ``mu0 = 1``
-        everywhere except inside the union AABB of all bodies.  Outside
-        that AABB ``ch = cv = cw = ch_cc = dt / rho_fluid`` is a runtime
-        constant — so we allocate persistent full-grid ``ch/cv/cw/ch_cc``
-        buffers once, pre-fill them with ``dt / rho_fluid``, and each
-        step only overwrite the union sub-block.  This avoids the four
-        full-grid divisions that otherwise dominate the "Other
-        (residual)" cost at large grids.
-        """
-        fs = self.fluid_solver
-        _drho = self.rho_fluid - self.rho_body
-
-        # ──────────────────────────────────────────────────────────────
-        # Narrow-band path (3-D + mu_normals_union active)
-        # ──────────────────────────────────────────────────────────────
-        if (self.ndim == 3
-            and getattr(fs, '_mu_normals_union', False)
-            and fs.mu0_all_u is not None
-            and fs.mu0_all_v is not None
-            and fs.mu0_all_w is not None
-            and fs.mu0_all   is not None):
-            u_aabb = fs._compute_union_aabb_3d(halo=2, bucket=16)
-            # u_aabb may be None when ``_compute_union_aabb_3d``
-            # decides cropping is not worth it (large fraction of grid)
-            # or when sparse SDFs aren't available.  Fall through to
-            # the full-grid path in that case.
-            if u_aabb is None:
-                pass
-            else:
-
-                # Lazy-allocate persistent buffers on first call (or after
-                # grid / dtype / device changes).  The outside-body default
-                # dt / rho_fluid is stamped in once and never overwritten by
-                # the narrow-band update.
-                _dt_over_rhofluid = float(timestep / self.rho_fluid)
-                mu0_u = fs.mu0_all_u
-                needs_realloc = (
-                    getattr(self, '_ch_persist', None) is None
-                    or self._ch_persist.shape != mu0_u.shape
-                    or self._ch_persist.dtype != mu0_u.dtype
-                    or self._ch_persist.device != mu0_u.device
-                    or self._ch_outside_val != _dt_over_rhofluid
-                )
-                if needs_realloc:
-                    self._ch_persist    = torch.full_like(fs.mu0_all_u, _dt_over_rhofluid)
-                    self._cv_persist    = torch.full_like(fs.mu0_all_v, _dt_over_rhofluid)
-                    self._cw_persist    = torch.full_like(fs.mu0_all_w, _dt_over_rhofluid)
-                    self._ch_cc_persist = torch.full_like(fs.mu0_all,   _dt_over_rhofluid)
-                    self._ch_outside_val = _dt_over_rhofluid
-
-                ui0, ui1, uj0, uj1, uk0, uk1 = u_aabb
-                usl = (slice(ui0, ui1), slice(uj0, uj1), slice(uk0, uk1))
-
-                # Only inside the union AABB can mu0 differ from 1 → so only
-                # there can ch/cv/cw/ch_cc differ from dt/rho_fluid.  Four
-                # small tensor expressions, each on an (Nx_sub, Ny_sub, Nz_sub)
-                # sub-block, instead of four full-grid divisions.
-                self._ch_persist[usl]    = timestep / (self.rho_body + _drho * fs.mu0_all_u[usl])
-                self._cv_persist[usl]    = timestep / (self.rho_body + _drho * fs.mu0_all_v[usl])
-                self._cw_persist[usl]    = timestep / (self.rho_body + _drho * fs.mu0_all_w[usl])
-                self._ch_cc_persist[usl] = timestep / (self.rho_body + _drho * fs.mu0_all[usl])
-                return (self._ch_persist, self._cv_persist,
-                        self._cw_persist, self._ch_cc_persist)
-
-        # ──────────────────────────────────────────────────────────────
-        # Full-grid reference path (2-D, or 3-D without narrow-band)
-        # ──────────────────────────────────────────────────────────────
-        ch = timestep / (self.rho_body + _drho * fs.mu0_all_u)
-        cv = timestep / (self.rho_body + _drho * fs.mu0_all_v)
-
-        # Cell-centred effective density → CC coefficient for FFT RHS.
-        rho_cc = self.rho_body + _drho * fs.mu0_all
-        ch_cc = timestep / rho_cc
-
-        if self.ndim == 3:
-            cw = timestep / (self.rho_body + _drho * fs.mu0_all_w)
-            return ch, cv, cw, ch_cc
-        return ch, cv, ch_cc
-
-    def fluid_step(self, *args):
-        if self.ndim == 3:
-            return self._fluid_step_3d(*args)
-        return self._fluid_step_2d(*args)
-
-    # ---- 2-D fluid step ---------------------------------------------
-    def _fluid_step_2d(self, u, v, p, timestep):
-        fs = self.fluid_solver
-        _bdim = fs._bdim_meta_compiled
-        _h = fs.h
-        comp = fs.composite_body
-
-        # Pre-compute variable-density Poisson coefficients once.
-        #   ch/cv   -- staggered dt/rho_eff, used for the correction step
-        #   ch_cc   -- cell-centred dt/rho_eff_cc, used for the FFT RHS
-        _ch, _cv, _ch_cc = self._compute_variable_density_coefficients(timestep)
-
-        def _advect_bdim(u_in, v_in, nu_t=None, u_rebase=None, v_rebase=None):
-            """One advection-diffusion + BDIM pass.
-
-            Returns the BDIM-corrected (uprime, vprime) with BCs applied
-            *after* BDIM so that wall BCs override any BDIM corrections
-            near the domain boundary.
-            """
-            (up, vp) = fs.adv_diff_solver.solve(u_in, v_in, nu_t=nu_t)
-            # Clone CUDA-graph outputs before in-place ops / set_BCs
-            up = up.clone()
-            vp = vp.clone()
-            # Rebase predictor/corrector increment from (u_in, v_in)
-            # to a reference state (u_rebase, v_rebase). This is used
-            # in Heun corrector to build u^n + dt*RHS(u_pred).
-            if u_rebase is not None:
-                up = u_rebase + (up - u_in)
-            if v_rebase is not None:
-                vp = v_rebase + (vp - v_in)
-            up = _bdim(
-                up, fs.mu0_all_u,
-                comp.body_u, fs.mu1_all_u,
-                fs.normal_x_u, fs.normal_y_u, _h, 2,
-            ).clone()
-            vp = _bdim(
-                vp, fs.mu0_all_v,
-                comp.body_v, fs.mu1_all_v,
-                fs.normal_x_v, fs.normal_y_v, _h, 2,
-            ).clone()
-            # BCs enforced *after* BDIM so that wall conditions override
-            # any BDIM blending that reaches ghost cells near a wall.
-            fs.adv_diff_solver.set_BCs(up, vp)
-            return up, vp
-
-        nu_t = fs._compute_nu_t(u, v)
-
-        if self._use_heun:
-            # ===== Heun (RK2) predictor-corrector =====
-            # Matches WaterLily.jl's mom_step! exactly:
-            #   1. Predictor: adv-diff → BDIM → project(w=1) → BCs → u_pred
-            #   2. Corrector: adv-diff on u_pred → rebase from u^n → BDIM
-            #      → average PROJECTED predictor with corrector BDIM
-            #      → project with halved coefficients (w=0.5 equivalent)
-            #
-            # The corrector average is 0.5*(u_pred + BDIM(u^n + dt*RHS(u_pred))).
-            # Because u_pred is div-free, div(u_avg) = 0.5*div(BDIM_corr).
-            # Halving the Poisson coefficients compensates this, giving the
-            # correct physical pressure for force computation.
-
-            # Predictor
-            uprime, vprime = _advect_bdim(u, v, nu_t=nu_t)
-            u1, v1, p1 = fs.project(uprime, vprime, p, ch=_ch, cv=_cv, ch_cc=_ch_cc)
-            # Re-apply BCs after projection (matches WaterLily's BC!
-            # after every project! call).
-            fs.adv_diff_solver.set_BCs(u1, v1)
-
-            # Corrector
-            nu_t = fs._compute_nu_t(u1, v1)
-            uprime2, vprime2 = _advect_bdim(
-                u1, v1, nu_t=nu_t,
-                u_rebase=u, v_rebase=v,
-            )
-
-            # Average projected predictor with BDIM-corrected corrector,
-            # then project once with half coefficients (w=0.5 equivalent).
-            u_avg = 0.5 * (u1 + uprime2)
-            v_avg = 0.5 * (v1 + vprime2)
-            fs.adv_diff_solver.set_BCs(u_avg, v_avg)
-
-            _ch_half = 0.5 * _ch
-            _cv_half = 0.5 * _cv
-            _ch_cc_half = 0.5 * _ch_cc
-            u_out, v_out, p_out = fs.project(
-                u_avg, v_avg, p1,
-                ch=_ch_half, cv=_cv_half, ch_cc=_ch_cc_half,
-            )
-
-
-        else:
-            # ===== Single Euler step =====
-            uprime, vprime = _advect_bdim(u, v, nu_t=nu_t)
-            u_out, v_out, p_out = fs.project(uprime, vprime, p,
-                                              ch=_ch, cv=_cv, ch_cc=_ch_cc)
-
-        # Sponge damping (2-D)
-        if fs.use_sponge:
-            (u_out, v_out) = fs.apply_sponge_damping(u_out, v_out)
-
-        # Yield-stress damping (2-D)
-        if fs.use_yield_damping:
-            (u_out, v_out) = fs.apply_yield_damping(u_out, v_out)
-
-        fs.adv_diff_solver.set_BCs(u_out, v_out)
-        return (u_out, v_out, p_out)
-
-    # ---- 3-D fluid step ---------------------------------------------
-    def _fluid_step_3d(self, u, v, w, p, timestep):
-        fs = self.fluid_solver
-        _bdim = fs._bdim_meta_compiled
-        _h = fs.h
-
-        nu_t = fs._compute_nu_t(u, v, w)
-        (uprime, vprime, wprime) = fs.adv_diff_solver.solve(u, v, w, nu_t=nu_t)
-        # Clone CUDA-graph outputs so they can safely be passed to
-        # another compiled kernel (_bdim) and modified by set_BCs.
-        uprime = uprime.clone()
-        vprime = vprime.clone()
-        wprime = wprime.clone()
-        fs.adv_diff_solver.set_BCs(uprime, vprime, wprime)
-
-        # Cache union AABB on the solver for the BDIM pass.
-        fs._bdim_union_aabb = (
-            fs._compute_union_aabb_3d(halo=2)
-            if getattr(fs, '_bdim_union', False) else None
-        )
-
-        # BDIM2 meta-equation  (reuses FluidSolver's compiled kernel,
-        # optionally cropped to the union AABB)
-        uprime = fs._bdim_apply_3d(
-            uprime, fs.mu0_all_u,
-            fs.composite_body.body_u, fs.mu1_all_u,
-            fs.normal_x_u, fs.normal_y_u, fs.normal_z_u,
-        )
-        vprime = fs._bdim_apply_3d(
-            vprime, fs.mu0_all_v,
-            fs.composite_body.body_v, fs.mu1_all_v,
-            fs.normal_x_v, fs.normal_y_v, fs.normal_z_v,
-        )
-        wprime = fs._bdim_apply_3d(
-            wprime, fs.mu0_all_w,
-            fs.composite_body.body_w, fs.mu1_all_w,
-            fs.normal_x_w, fs.normal_y_w, fs.normal_z_w,
-        )
-        fs._bdim_union_aabb = None
-
-        # ── Free mu1 + staggered normals right after BDIM ────────────
-        # project() only uses mu0_{u,v,w}.  forces_method2_3d recomputes
-        # CC normals on-the-fly.  Freeing these 12 grid-sized arrays
-        # (~12 × 131 MB ≈ 1.6 GB) reduces peak memory during the
-        # Poisson solve that follows.
-        # Use a single ``__dict__.update`` to avoid 14 ``hasattr`` +
-        # 14 ``setattr`` Python lookups per step (≥ 50 µs at low N).
-        fs.__dict__.update(_FS_FREE_AFTER_BDIM_3D)
-
-        # Variable-density Poisson coefficients.
-        # Computed before freeing mu0 arrays (both FFT and multigrid need
-        # ch_cc from mu0_all CC, which is freed below).
-        ch, cv, cw, ch_cc = self._compute_variable_density_coefficients(timestep)
-
-        # ── Free mu0 now — ch/cv/cw/ch_cc are independent tensors ────
-        fs.__dict__.update(_FS_FREE_AFTER_VAR_DENS_3D)
-
-        poisson_method = getattr(fs, "poisson_method", "multigrid")
-        if poisson_method == "fft":
-            (u, v, w, p) = fs.project(uprime, vprime, p,
-                                      w_vel=wprime, ch=ch, cv=cv, cw=cw,
-                                      ch_cc=ch_cc)
-        else:
-            (u, v, w, p) = fs.project(uprime, vprime, p,
-                                      w_vel=wprime, ch=ch, cv=cv, cw=cw)
-
-        # Sponge damping: damp velocity near domain boundaries
-        if fs.use_sponge:
-            (u, v, w) = fs.apply_sponge_damping(u, v, w)
-
-        # Yield-stress damping (3-D)
-        if fs.use_yield_damping:
-            (u, v, w) = fs.apply_yield_damping(u, v, w)
-
-        fs.adv_diff_solver.set_BCs(u, v, w)
-        return (u, v, w, p)
-
-    # ==================================================================
     #  apply_forces: fluid -> body forces via MuJoCo xfrc_applied
     # ==================================================================
     def apply_forces(self, task, physics):
@@ -2456,58 +2129,6 @@ class BDIMhandler:
                 friction_force_ang_z[body_i] + pressure_force_ang_z[body_i]
             ) * task.units.newtons
 
-    def _check_explosion(self, iteration):
-        """Abort immediately if the fluid fields went non-finite or
-        velocities grew past ``vmax_abort``.
-
-        Without this, NaN propagates silently (matplotlib renders NaN
-        as transparent) and FARMS happily keeps stepping MuJoCo with
-        zero fluid forces.
-        """
-        fs = self.fluid_solver
-        # Batch every reduction the explosion check needs into a *single*
-        # GPU→CPU sync.  The previous implementation issued one sync per
-        # field for ``isfinite().all()`` (3–4 calls) plus one per velocity
-        # component for ``.abs().max()`` (2–3 calls) — i.e. 5–7 separate
-        # device-to-host transfers every step.  Each one stalls the
-        # pipeline and contributes to the "Other (residual)" plateau at
-        # low grid counts.
-        if self.ndim == 3:
-            field_names  = ("u", "v", "w", "p")
-            field_arrs   = (fs.u0, fs.v0, fs.w0, fs.p0)
-            n_vel        = 3
-        else:
-            field_names  = ("u", "v", "p")
-            field_arrs   = (fs.u0, fs.v0, fs.p0)
-            n_vel        = 2
-
-        finite_flags  = torch.stack([torch.isfinite(a).all() for a in field_arrs])
-        vmax_per_vel  = torch.stack([a.abs().amax() for a in field_arrs[:n_vel]])
-        # Single fused DtoH transfer + sync.
-        diag = torch.cat((finite_flags.to(vmax_per_vel.dtype),
-                          vmax_per_vel)).cpu().numpy()
-        n_fields = len(field_arrs)
-        finite_np = diag[:n_fields]
-        vmax_np   = diag[n_fields:]
-
-        for name, ok in zip(field_names, finite_np):
-            if not bool(ok):
-                self.terminate = True
-                raise RuntimeError(
-                    f"[BDIM] Fluid explosion at iteration {iteration}: "
-                    f"non-finite values in field '{name}'. Likely cause: "
-                    f"body intersecting a domain wall (Poisson ill-conditioned) "
-                    f"or CFL violation."
-                )
-
-        vmax = float(vmax_np.max())
-        if vmax > self._vmax_abort:
-            self.terminate = True
-            raise RuntimeError(
-                f"[BDIM] Fluid explosion at iteration {iteration}: "
-                f"|u|_max = {vmax:.3e} > vmax_abort = {self._vmax_abort:.3e}."
-            )
-
     # ==================================================================
     #  step: one full coupled step (called by FluidExtension.before_step)
     # ==================================================================
@@ -2521,7 +2142,7 @@ class BDIMhandler:
         t  = iteration * timestep
         fs = self.fluid_solver
 
-        if not self.terminate:
+        if not fs.terminate:
 
             # 1. update SDF + body velocities from FARMS kinematics
             self.update(t, iteration, dt=timestep)
@@ -2534,14 +2155,14 @@ class BDIMhandler:
 
             # 3. BDIM fluid step
             if self.ndim == 3:
-                (u, v, w, p) = self.fluid_step(
+                (u, v, w, p) = fs.fluid_step(
                     fs.u0, fs.v0, fs.w0, fs.p0, timestep
                 )
                 if self.zero_pressure_inside:
                     p = torch.where(fs.composite_body.sdf_val < 0, 0, p)
                 (fs.u0, fs.v0, fs.w0, fs.p0) = (u, v, w, p)
             else:
-                (u, v, p) = self.fluid_step(
+                (u, v, p) = fs.fluid_step(
                     fs.u0, fs.v0, fs.p0, timestep
                 )
                 if self.zero_pressure_inside:
@@ -2549,7 +2170,7 @@ class BDIMhandler:
                 (fs.u0, fs.v0, fs.p0) = (u, v, p)
 
             # 3b. bail out immediately if the fluid blew up
-            self._check_explosion(iteration)
+            fs.check_explosion(iteration)
 
             # 4. compute fluid forces on each body
             if self.ndim == 3:
@@ -2559,20 +2180,15 @@ class BDIMhandler:
             else:
                 fs.forces_method2(fs.u0, fs.v0, fs.p0, iteration)
 
-            # ── Free cached force-density tensors (6 × grid_shape) ───
-            # These are only needed for the per-body integration above;
-            # plotting_and_saving does not use them.  Use a single
-            # ``__dict__.update`` to avoid the 6 × (hasattr + setattr)
-            # Python lookups per step.
             fs.__dict__.update(_FS_FREE_AFTER_FORCES_3D)
 
             # 5. plotting / saving
             if self.ndim == 3:
-                self.terminate = fs.plotting_and_saving(
+                fs.terminate = fs.plotting_and_saving(
                     fs.u0, fs.v0, fs.p0, iteration, w_vel=fs.w0, check_termination=False
                 )
             else:
-                self.terminate = fs.plotting_and_saving(
+                fs.terminate = fs.plotting_and_saving(
                     fs.u0, fs.v0, fs.p0, iteration, check_termination=False
                 )
 

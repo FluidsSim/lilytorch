@@ -602,6 +602,7 @@ void bdim_forces_3d_multi_cpu(
     const at::Tensor& px, const at::Tensor& py, const at::Tensor& pz,
     const double eps_body, const double eps_solver, const double h3,
     const int64_t /*max_vol_per_body*/,
+    const int64_t delta_order,
     at::Tensor out)
 {
     const int B = (int)aabb_dim.size(0);
@@ -729,6 +730,34 @@ void bdim_forces_3d_multi_cpu(
                     }
                     // Both deltas zero (can happen on the band edge) ⇒ skip.
                     if (delta_visc == (scalar_t)0 && delta_pres == (scalar_t)0) continue;
+
+                    // Towers (2008) 2nd-order: δ_S = δ_ε(φ) / |∇φ|
+                    if (delta_order == 2) {
+                        const scalar_t h_grid = gx_ptr[1] - gx_ptr[0];
+                        const scalar_t inv_h  = (scalar_t)1.0 / h_grid;
+                        const int AjAk = Aj * Ak;
+
+                        scalar_t sdf_xp = (di < Ai-1) ? sp_ptr[sparse_base + idx + AjAk] : sdf;
+                        scalar_t sdf_xm = (di > 0)    ? sp_ptr[sparse_base + idx - AjAk] : sdf;
+                        scalar_t cx     = (di > 0 && di < Ai-1) ? (scalar_t)0.5 : (scalar_t)1.0;
+                        scalar_t dsdx   = cx * (sdf_xp - sdf_xm) * inv_h;
+
+                        scalar_t sdf_yp = (dj < Aj-1) ? sp_ptr[sparse_base + idx + Ak] : sdf;
+                        scalar_t sdf_ym = (dj > 0)    ? sp_ptr[sparse_base + idx - Ak] : sdf;
+                        scalar_t cy     = (dj > 0 && dj < Aj-1) ? (scalar_t)0.5 : (scalar_t)1.0;
+                        scalar_t dsdy   = cy * (sdf_yp - sdf_ym) * inv_h;
+
+                        scalar_t sdf_zp = (dk < Ak-1) ? sp_ptr[sparse_base + idx + 1] : sdf;
+                        scalar_t sdf_zm = (dk > 0)    ? sp_ptr[sparse_base + idx - 1] : sdf;
+                        scalar_t cz     = (dk > 0 && dk < Ak-1) ? (scalar_t)0.5 : (scalar_t)1.0;
+                        scalar_t dsdz   = cz * (sdf_zp - sdf_zm) * inv_h;
+
+                        scalar_t grad_mag = std::sqrt(dsdx*dsdx + dsdy*dsdy + dsdz*dsdz);
+                        if (grad_mag < (scalar_t)1e-3) grad_mag = (scalar_t)1e-3;
+                        const scalar_t inv_grad = (scalar_t)1.0 / grad_mag;
+                        delta_visc *= inv_grad;
+                        delta_pres *= inv_grad;
+                    }
 
                     const int i = i0_b + di, j = j0_b + dj, k = k0_b + dk;
                     const int sub_i = i - u_i0_i;

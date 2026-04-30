@@ -232,6 +232,7 @@ def _run_forces(scene, stress, *, dtype, device):
         xs, ys, px, py,
         eps_body, eps_solver, h2,
         scene["max_vol"],
+        1,  # delta_order
         out_kernel,
     )
 

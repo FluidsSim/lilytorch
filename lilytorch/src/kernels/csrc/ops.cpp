@@ -78,6 +78,7 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " Tensor px, Tensor py, Tensor pz,"
         " float eps_body, float eps_solver, float h3,"
         " int max_vol_per_body,"
+        " int delta_order,"
         " Tensor(a!) out"
         ") -> ()");
 
@@ -150,6 +151,7 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " Tensor px, Tensor py,"
         " float eps_body, float eps_solver, float h2,"
         " int max_vol_per_body,"
+        " int delta_order,"
         " Tensor(a!) out"
         ") -> ()");
 

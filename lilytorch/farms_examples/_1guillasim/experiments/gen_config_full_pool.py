@@ -88,10 +88,10 @@ class SimConfig(BaseSimConfig):
         self.poisson_bc_type         = "free"
         self.zero_pressure_inside    = True
 
-        self.poisson_compile         = False
-        self.compile_adv_diff        = False
-        self.compile_forces          = False
-        self.compile_sdf             = False
+        self.poisson_compile         = True
+        self.compile_adv_diff        = True
+        self.compile_forces          = True
+        self.compile_sdf             = True
 
         # # u: no-penetration on x-walls, free-slip on y/z-walls
         # self.bc_type_u   = ["D", "D", "N", "N", "N", "N"]

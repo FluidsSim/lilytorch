@@ -116,7 +116,8 @@ def bdim_forces_3d_multi(
         px: Tensor, py: Tensor, pz: Tensor,
         eps_body: float, eps_solver: float, h3: float,
         max_vol_per_body: int,
-        out: Tensor) -> None:
+        delta_order: int = 1,
+        out: Tensor = None) -> None:
     """Phase D: per-body force / torque integration.
 
     Reads the per-body cell-centred SDF cached in ``sparse_cc_flat``
@@ -124,6 +125,11 @@ def bdim_forces_3d_multi(
     re-sampling it via trilinear interpolation. ``cell_offsets[b]`` is
     the start index of body ``b``'s AABB-local cc-SDF slab in
     ``sparse_cc_flat``.
+
+    ``delta_order`` selects the smoothed-delta order:
+      * ``1`` -- standard 1st-order cosine delta (default);
+      * ``2`` -- Towers (2008) 2nd-order: divide by |∇φ|, correcting
+        for non-unit SDF gradients on numerical grids.
     """
     return torch.ops.lilytorch_kernels.bdim_forces_3d_multi.default(
         sparse_cc_flat, cell_offsets,
@@ -135,6 +141,7 @@ def bdim_forces_3d_multi(
         xs, ys, zs, px, py, pz,
         float(eps_body), float(eps_solver), float(h3),
         int(max_vol_per_body),
+        int(delta_order),
         out,
     )
 
@@ -266,7 +273,8 @@ def bdim_forces_2d_multi(
         px: Tensor, py: Tensor,
         eps_body: float, eps_solver: float, h2: float,
         max_vol_per_body: int,
-        out: Tensor) -> None:
+        delta_order: int = 1,
+        out: Tensor = None) -> None:
     """2-D analogue of :func:`bdim_forces_3d_multi`.
 
     Per-body force/torque integration over the AABB.  Reads the
@@ -281,6 +289,9 @@ def bdim_forces_2d_multi(
     ``arm_x*f_y - arm_y*f_x``; the trailing two slots are reserved
     (the kernel writes 0 there) and exist for layout symmetry with the
     12-channel 3-D op.
+
+    ``delta_order`` selects the smoothed-delta order (1 or 2); see
+    :func:`bdim_forces_3d_multi` for details.
     """
     return torch.ops.lilytorch_kernels.bdim_forces_2d_multi.default(
         sparse_cc_flat, cell_offsets,
@@ -292,6 +303,7 @@ def bdim_forces_2d_multi(
         xs, ys, px, py,
         float(eps_body), float(eps_solver), float(h2),
         int(max_vol_per_body),
+        int(delta_order),
         out,
     )
 

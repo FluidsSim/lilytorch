@@ -676,7 +676,6 @@ def forces_method2(self, u, v, p, iteration):
         getattr(self, '_streaming_forces_2d', False)
         and _have_sparse_2d
         and _stream_step is not None
-        and self.force_delta_order == 1
     )
     if _use_streaming_forces_2d:
         from lilytorch.src.kernels import bdim_forces_2d_multi
@@ -703,6 +702,7 @@ def forces_method2(self, u, v, p, iteration):
             pforce_x, pforce_y,
             eps_body, self.eps, self.h2,
             _stream_step['max_vol'],
+            self.force_delta_order,
             out2d,
         )
 
@@ -980,7 +980,6 @@ def forces_method2_3d(self, u, v, w, p, iteration):
         and _have_sparse
         and _stream_step is not None
         and _stream_static is not None
-        and self.force_delta_order == 1
     )
     if _use_streaming_forces:
         from lilytorch.src.kernels import bdim_forces_3d_multi
@@ -1033,6 +1032,7 @@ def forces_method2_3d(self, u, v, w, p, iteration):
                 pforce_x, pforce_y, pforce_z,
                 eps_body, self.eps, h3,
                 _stream_step['max_vol'],
+                self.force_delta_order,
                 out,
             )
         else:

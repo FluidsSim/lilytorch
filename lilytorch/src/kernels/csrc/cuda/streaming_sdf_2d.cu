@@ -456,6 +456,7 @@ __global__ void bdim_forces_2d_multi_kernel(
     const scalar_t eps_body,
     const scalar_t eps_solver,
     const scalar_t h2,
+    const int delta_order,
     double* __restrict__ out)  // (B, 8)
 {
     const int local = blockIdx.x * blockDim.x + threadIdx.x;
@@ -503,6 +504,30 @@ __global__ void bdim_forces_2d_multi_kernel(
             scalar_t delta_pres = 0;
             if (sdf > -eps_body && sdf < eps_body) {
                 delta_pres = ((scalar_t)1 + cos(pi_over_eb * sdf)) * inv_2eps;
+            }
+
+            // Towers (2008) 2nd-order correction: δ_S = δ_ε(φ) / |∇φ|
+            if (delta_order == 2 && (delta_visc > (scalar_t)0 || delta_pres > (scalar_t)0)) {
+                const scalar_t h_grid = gx[1] - gx[0];
+                const scalar_t inv_h  = (scalar_t)1.0 / h_grid;
+                const int64_t  loc64  = (int64_t)local;
+
+                scalar_t sdf_xp = (di < Ai-1) ? sparse_cc_flat[sparse_base + loc64 + (int64_t)Aj] : sdf;
+                scalar_t sdf_xm = (di > 0)    ? sparse_cc_flat[sparse_base + loc64 - (int64_t)Aj] : sdf;
+                scalar_t cx     = (di > 0 && di < Ai-1) ? (scalar_t)0.5 : (scalar_t)1.0;
+                scalar_t dsdx   = cx * (sdf_xp - sdf_xm) * inv_h;
+
+                scalar_t sdf_yp = (dj < Aj-1) ? sparse_cc_flat[sparse_base + loc64 + 1] : sdf;
+                scalar_t sdf_ym = (dj > 0)    ? sparse_cc_flat[sparse_base + loc64 - 1] : sdf;
+                scalar_t cy     = (dj > 0 && dj < Aj-1) ? (scalar_t)0.5 : (scalar_t)1.0;
+                scalar_t dsdy   = cy * (sdf_yp - sdf_ym) * inv_h;
+
+                scalar_t grad_mag = sqrt(dsdx*dsdx + dsdy*dsdy);
+                const scalar_t min_grad = (scalar_t)1e-3;
+                if (grad_mag < min_grad) grad_mag = min_grad;
+                const scalar_t inv_grad = (scalar_t)1.0 / grad_mag;
+                delta_visc *= inv_grad;
+                delta_pres *= inv_grad;
             }
 
             const int sub_i = i - u_i0;
@@ -564,6 +589,7 @@ void bdim_forces_2d_multi_cuda(
     const double eps_solver,
     const double h2,
     const int64_t max_vol_per_body,
+    const int64_t delta_order,
     at::Tensor out)  // (B, 8) float64
 {
     const int B = (int)aabb_dim.size(0);
@@ -590,6 +616,7 @@ void bdim_forces_2d_multi_cuda(
                     xs.data_ptr<scalar_t>(), ys.data_ptr<scalar_t>(),
                     px.data_ptr<scalar_t>(), py.data_ptr<scalar_t>(),
                     (scalar_t)eps_body, (scalar_t)eps_solver, (scalar_t)h2,
+                    (int)delta_order,
                     out.data_ptr<double>());
         }
     });

@@ -18,6 +18,7 @@ from lilytorch.src.body import (body_from_yaml, _StaggeredGrids,
                                 _mu_normals_batched_3d_compiled)
 from lilytorch.src import operations as ops
 from lilytorch.src import plotting
+from lilytorch.src.plotting import PlottingMixin
 from lilytorch.src.poisson_fft import PoissonSolverFFT
 from lilytorch.src.poisson_mult import PoissonSolver
 from lilytorch.util.yaml_operations import pyobject2yaml
@@ -176,7 +177,22 @@ from lilytorch.src.forces import (
 )
 from lilytorch.src import forces, extras
 
-class FluidSolver:
+# Pre-built dicts for releasing BDIM intermediate tensors in the FSI hot path.
+# Used by _fluid_step_3d and check_explosion via __dict__.update().
+_FS_FREE_AFTER_BDIM_3D = {
+    'mu1_all_u': None, 'mu1_all_v': None, 'mu1_all_w': None,
+    'normal_x_u': None, 'normal_y_u': None, 'normal_z_u': None,
+    'normal_x_v': None, 'normal_y_v': None, 'normal_z_v': None,
+    'normal_x_w': None, 'normal_y_w': None, 'normal_z_w': None,
+    'mu1_all': None, 'm_m0_all': None,
+}
+_FS_FREE_AFTER_VAR_DENS_3D = {
+    'mu0_all_u': None, 'mu0_all_v': None, 'mu0_all_w': None,
+    'mu0_all': None,
+}
+
+
+class FluidSolver(PlottingMixin):
     """
     Solver class
     """
@@ -364,6 +380,15 @@ class FluidSolver:
         print("Setting dt={}s, dx={}".format(self.dt, self.h))
         print(f"Time integration: {self.time_integration}")
 
+        # ---- FSI variable-density and explosion-detection state ----
+        self.rho_body = float(solver.get("rho_body", 1000.0))
+        _heun_flag = solver.get("heun", None)
+        if _heun_flag is not None:
+            self._fsi_use_heun = bool(_heun_flag) and (self.ndim == 2)
+        else:
+            self._fsi_use_heun = (self.time_integration == "heun") and (self.ndim == 2)
+        self.terminate = False
+
         # ============= convection solver =============
         adv_diff_kwargs = dict(
             BC_type_u=bcs["BC_type_u"], BC_values_u=bcs["BC_values_u"],
@@ -380,6 +405,9 @@ class FluidSolver:
             self.device, self.dt, self.x, self.y, self.nu,
             **adv_diff_kwargs,
         )
+
+        _u_inlet = float(self.adv_diff_solver.BC_values_u[1])
+        self._vmax_abort = float(solver.get("vmax_abort", max(100.0 * abs(_u_inlet), 100.0)))
 
         # ---- optional torch.compile for adv-diff + BDIM kernels -----
         self._compile_adv_diff = solver.get("compile_adv_diff", False)
@@ -1692,6 +1720,222 @@ class FluidSolver:
         else:
             self._recompute_mu_normals_3d()
 
+    # ==================================================================
+    #  Variable-density FSI fluid step  (called by BDIMhandler.step)
+    # ==================================================================
+
+    def _compute_variable_density_coefficients(self, timestep):
+        """Compute variable-density Poisson coefficients for FSI coupling.
+
+        Returns ``(ch, cv, ch_cc)`` for 2-D or ``(ch, cv, cw, ch_cc)``
+        for 3-D, where:
+
+            * ``ch, cv, cw`` -- staggered ``dt / rho_eff`` on face grids.
+            * ``ch_cc`` -- cell-centred ``dt / rho_eff_cc`` for FFT RHS.
+
+        Effective density: ``rho_eff(x) = rho_body + (rho_fluid - rho_body) * mu0(x)``.
+
+        Narrow-band fast-path (3-D, mu_normals_union active)
+        ---------------------------------------------------
+        Outside the union AABB ``mu0 = 1`` everywhere, so
+        ``ch = cv = cw = ch_cc = dt / rho_fluid`` is constant.  Persistent
+        full-grid buffers are pre-filled once with that default and only the
+        union sub-block is overwritten each step, avoiding four full-grid
+        divisions.
+        """
+        _drho = float(self.rho) - self.rho_body
+
+        if (self.ndim == 3
+                and getattr(self, '_mu_normals_union', False)
+                and self.mu0_all_u is not None
+                and self.mu0_all_v is not None
+                and self.mu0_all_w is not None
+                and self.mu0_all   is not None):
+            u_aabb = self._compute_union_aabb_3d(halo=2, bucket=16)
+            if u_aabb is not None:
+                _dt_over_rhofluid = float(timestep / float(self.rho))
+                mu0_u = self.mu0_all_u
+                needs_realloc = (
+                    getattr(self, '_ch_persist', None) is None
+                    or self._ch_persist.shape  != mu0_u.shape
+                    or self._ch_persist.dtype  != mu0_u.dtype
+                    or self._ch_persist.device != mu0_u.device
+                    or self._ch_outside_val    != _dt_over_rhofluid
+                )
+                if needs_realloc:
+                    self._ch_persist     = torch.full_like(self.mu0_all_u, _dt_over_rhofluid)
+                    self._cv_persist     = torch.full_like(self.mu0_all_v, _dt_over_rhofluid)
+                    self._cw_persist     = torch.full_like(self.mu0_all_w, _dt_over_rhofluid)
+                    self._ch_cc_persist  = torch.full_like(self.mu0_all,   _dt_over_rhofluid)
+                    self._ch_outside_val = _dt_over_rhofluid
+
+                ui0, ui1, uj0, uj1, uk0, uk1 = u_aabb
+                usl = (slice(ui0, ui1), slice(uj0, uj1), slice(uk0, uk1))
+                self._ch_persist[usl]    = timestep / (self.rho_body + _drho * self.mu0_all_u[usl])
+                self._cv_persist[usl]    = timestep / (self.rho_body + _drho * self.mu0_all_v[usl])
+                self._cw_persist[usl]    = timestep / (self.rho_body + _drho * self.mu0_all_w[usl])
+                self._ch_cc_persist[usl] = timestep / (self.rho_body + _drho * self.mu0_all[usl])
+                return (self._ch_persist, self._cv_persist,
+                        self._cw_persist, self._ch_cc_persist)
+
+        ch    = timestep / (self.rho_body + _drho * self.mu0_all_u)
+        cv    = timestep / (self.rho_body + _drho * self.mu0_all_v)
+        ch_cc = timestep / (self.rho_body + _drho * self.mu0_all)
+        if self.ndim == 3:
+            cw = timestep / (self.rho_body + _drho * self.mu0_all_w)
+            return ch, cv, cw, ch_cc
+        return ch, cv, ch_cc
+
+    def fluid_step(self, *args):
+        """One FSI fluid step (advect-BDIM-project).  Called by BDIMhandler."""
+        if self.ndim == 3:
+            return self._fluid_step_3d(*args)
+        return self._fluid_step_2d(*args)
+
+    def _fluid_step_2d(self, u, v, p, timestep):
+        _bdim = self._bdim_meta_compiled
+        _h    = self.h
+        comp  = self.composite_body
+
+        _ch, _cv, _ch_cc = self._compute_variable_density_coefficients(timestep)
+
+        def _advect_bdim(u_in, v_in, nu_t=None, u_rebase=None, v_rebase=None):
+            (up, vp) = self.adv_diff_solver.solve(u_in, v_in, nu_t=nu_t)
+            up = up.clone()
+            vp = vp.clone()
+            if u_rebase is not None:
+                up = u_rebase + (up - u_in)
+            if v_rebase is not None:
+                vp = v_rebase + (vp - v_in)
+            up = _bdim(
+                up, self.mu0_all_u,
+                comp.body_u, self.mu1_all_u,
+                self.normal_x_u, self.normal_y_u, _h, 2,
+            ).clone()
+            vp = _bdim(
+                vp, self.mu0_all_v,
+                comp.body_v, self.mu1_all_v,
+                self.normal_x_v, self.normal_y_v, _h, 2,
+            ).clone()
+            self.adv_diff_solver.set_BCs(up, vp)
+            return up, vp
+
+        nu_t = self._compute_nu_t(u, v)
+
+        if self._fsi_use_heun:
+            # Heun (RK2) predictor-corrector — matches WaterLily.jl mom_step!
+            uprime, vprime = _advect_bdim(u, v, nu_t=nu_t)
+            u1, v1, p1 = self.project(uprime, vprime, p, ch=_ch, cv=_cv, ch_cc=_ch_cc)
+            self.adv_diff_solver.set_BCs(u1, v1)
+
+            nu_t = self._compute_nu_t(u1, v1)
+            uprime2, vprime2 = _advect_bdim(u1, v1, nu_t=nu_t, u_rebase=u, v_rebase=v)
+
+            u_avg = 0.5 * (u1 + uprime2)
+            v_avg = 0.5 * (v1 + vprime2)
+            self.adv_diff_solver.set_BCs(u_avg, v_avg)
+
+            u_out, v_out, p_out = self.project(
+                u_avg, v_avg, p1,
+                ch=0.5 * _ch, cv=0.5 * _cv, ch_cc=0.5 * _ch_cc,
+            )
+        else:
+            uprime, vprime = _advect_bdim(u, v, nu_t=nu_t)
+            u_out, v_out, p_out = self.project(uprime, vprime, p,
+                                               ch=_ch, cv=_cv, ch_cc=_ch_cc)
+
+        if self.use_sponge:
+            (u_out, v_out) = self.apply_sponge_damping(u_out, v_out)
+        if self.use_yield_damping:
+            (u_out, v_out) = self.apply_yield_damping(u_out, v_out)
+
+        self.adv_diff_solver.set_BCs(u_out, v_out)
+        return (u_out, v_out, p_out)
+
+    def _fluid_step_3d(self, u, v, w, p, timestep):
+        nu_t = self._compute_nu_t(u, v, w)
+        (uprime, vprime, wprime) = self.adv_diff_solver.solve(u, v, w, nu_t=nu_t)
+        uprime = uprime.clone()
+        vprime = vprime.clone()
+        wprime = wprime.clone()
+        self.adv_diff_solver.set_BCs(uprime, vprime, wprime)
+
+        self._bdim_union_aabb = (
+            self._compute_union_aabb_3d(halo=2) if self._bdim_union else None
+        )
+        uprime = self._bdim_apply_3d(
+            uprime, self.mu0_all_u,
+            self.composite_body.body_u, self.mu1_all_u,
+            self.normal_x_u, self.normal_y_u, self.normal_z_u,
+        )
+        vprime = self._bdim_apply_3d(
+            vprime, self.mu0_all_v,
+            self.composite_body.body_v, self.mu1_all_v,
+            self.normal_x_v, self.normal_y_v, self.normal_z_v,
+        )
+        wprime = self._bdim_apply_3d(
+            wprime, self.mu0_all_w,
+            self.composite_body.body_w, self.mu1_all_w,
+            self.normal_x_w, self.normal_y_w, self.normal_z_w,
+        )
+        self._bdim_union_aabb = None
+
+        self.__dict__.update(_FS_FREE_AFTER_BDIM_3D)
+
+        ch, cv, cw, ch_cc = self._compute_variable_density_coefficients(timestep)
+
+        self.__dict__.update(_FS_FREE_AFTER_VAR_DENS_3D)
+
+        if self.poisson_method == "fft":
+            (u, v, w, p) = self.project(uprime, vprime, p,
+                                        w_vel=wprime, ch=ch, cv=cv, cw=cw, ch_cc=ch_cc)
+        else:
+            (u, v, w, p) = self.project(uprime, vprime, p,
+                                        w_vel=wprime, ch=ch, cv=cv, cw=cw)
+
+        if self.use_sponge:
+            (u, v, w) = self.apply_sponge_damping(u, v, w)
+        if self.use_yield_damping:
+            (u, v, w) = self.apply_yield_damping(u, v, w)
+
+        self.adv_diff_solver.set_BCs(u, v, w)
+        return (u, v, w, p)
+
+    def check_explosion(self, iteration):
+        """Abort if fluid fields are non-finite or velocities exceed _vmax_abort."""
+        if self.ndim == 3:
+            field_names = ("u", "v", "w", "p")
+            field_arrs  = (self.u0, self.v0, self.w0, self.p0)
+            n_vel       = 3
+        else:
+            field_names = ("u", "v", "p")
+            field_arrs  = (self.u0, self.v0, self.p0)
+            n_vel       = 2
+
+        finite_flags = torch.stack([torch.isfinite(a).all() for a in field_arrs])
+        vmax_per_vel = torch.stack([a.abs().amax() for a in field_arrs[:n_vel]])
+        diag = torch.cat((finite_flags.to(vmax_per_vel.dtype), vmax_per_vel)).cpu().numpy()
+        finite_np = diag[:len(field_arrs)]
+        vmax_np   = diag[len(field_arrs):]
+
+        for name, ok in zip(field_names, finite_np):
+            if not bool(ok):
+                self.terminate = True
+                raise RuntimeError(
+                    f"[BDIM] Fluid explosion at iteration {iteration}: "
+                    f"non-finite values in field '{name}'. Likely cause: "
+                    f"body intersecting a domain wall (Poisson ill-conditioned) "
+                    f"or CFL violation."
+                )
+
+        vmax = float(vmax_np.max())
+        if vmax > self._vmax_abort:
+            self.terminate = True
+            raise RuntimeError(
+                f"[BDIM] Fluid explosion at iteration {iteration}: "
+                f"|u|_max = {vmax:.3e} > vmax_abort = {self._vmax_abort:.3e}."
+            )
+
     def _apply_force_feedback(self, iteration, t):
         """Advance any standalone body state that consumes solver loads.
 
@@ -1774,655 +2018,6 @@ class FluidSolver:
         else:
             return (u, v, p, w_vel, terminate)
 
-    # ------------------------------------------------------------------
-    #   Unified plotting / saving   (replaces old plotting_debug)
-    # ------------------------------------------------------------------
-
-    # Default plot specifications.
-    # Each entry: (name, field_lambda, vmin, vmax, body_contours)
-    # field_lambda receives (solver, u, v, p, w_vel) and returns a CPU tensor/array.
-    # vmin/vmax per-spec:  None or "yaml" → use the global output.vmin/vmax
-    #                      float          → fixed limit for this field
-    # The YAML output.vmin/vmax can be a number (fixed) or "auto" (auto-scale).
-    # ``output.plot_specs`` can override these defaults with a list of
-    # field names or dicts such as {"name": "pressure", "vmin": "auto"}.
-
-    DEFAULT_PLOT_SPECS = [
-        ("curl",       lambda s, u, v, p, w: (
-            s.vorticity(u, v, w).cpu() if s.ndim == 2
-            else FluidSolver._curl_slice_fields(s, u, v, w)
-        ), None, None, True),
-        # ("v",          lambda s, u, v, p, w: v.cpu(), "auto", "auto", True),
-        ("pressure",   lambda s, u, v, p, w: p.cpu(), "auto", "auto", True),
-        # ("divergence", lambda s, u, v, p, w: s.divergence(u, v, w).cpu(),None, None, False),
-    ]
-
-    # Additional specs used only for 3-D isosurface rendering.
-    # Signed vorticity components give much better 3-D visualisation
-    # than the magnitude (which loses rotational direction).
-    # We cache the vorticity dict on the solver so it's computed once per frame.
-    @staticmethod
-    def _cached_vort(s, u, v, w):
-        """Compute vorticity_components once per frame and cache on solver."""
-        if not hasattr(s, "_vort_cache") or s._vort_cache_id != id(u):
-            s._vort_cache = s.vorticity_components(u, v, w)
-            s._vort_cache_id = id(u)
-        return s._vort_cache
-
-    @staticmethod
-    def _curl_slice_fields(s, u, v, w):
-        """Return the out-of-plane curl component for each orthogonal slice.
-
-        XY uses ``omega_z`` as usual. For XZ, the 2-D-like scalar curl is
-        ``dw/dx - du/dz = -omega_y``. For YZ, it is ``dw/dy - dv/dz = omega_x``.
-        """
-        vort = FluidSolver._cached_vort(s, u, v, w)
-        return {
-            "xy": vort["omega_z"].cpu(),
-            "xz": (-vort["omega_y"]).cpu(),
-            "yz": vort["omega_x"].cpu(),
-        }
-
-    @staticmethod
-    def _vel_mag(s, u, v, w):
-        """Velocity magnitude.  u, v, w all share the same (Nx+2, Ny+2, Nz+2)
-        shape in this solver, so we can compute |V| element-wise.  The
-        O(dx/2) stagger offset is negligible for visualisation."""
-        return (u**2 + v**2 + w**2).sqrt()
-
-    # ``output.iso_3d_specs`` can override these defaults with field names
-    # or dicts such as {"name": "omega_mag", "iso_value": 5.0}. When
-    # ``output.iso_3d_value`` is set, it becomes the default threshold for
-    # all configured 3-D isosurface fields; otherwise the automatic peak-
-    # fraction thresholding in plotting.plot_field_3d is used.
-    DEFAULT_3D_ISO_SPECS = [
-        # ("omega_x",    lambda s, u, v, p, w: FluidSolver._cached_vort(s, u, v, w)["omega_x"].cpu(), None, True),
-        # ("omega_y",    lambda s, u, v, p, w: FluidSolver._cached_vort(s, u, v, w)["omega_y"].cpu(), None, True),
-        # ("omega_z",    lambda s, u, v, p, w: FluidSolver._cached_vort(s, u, v, w)["omega_z"].cpu(), None, True),
-        ("omega_mag",  lambda s, u, v, p, w: FluidSolver._cached_vort(s, u, v, w)["omega_mag"].cpu(), None, True),
-        ("vel_mag",    lambda s, u, v, p, w: FluidSolver._vel_mag(s, u, v, w).cpu(),                 None,   True),
-        # ("pressure",   lambda s, u, v, p, w: p.cpu(),                                                None,   True),
-    ]
-
-    @classmethod
-    def _plot_spec_registry(cls):
-        registry = {spec[0]: spec for spec in cls.DEFAULT_PLOT_SPECS}
-        registry.update({
-            "v": (
-                "v",
-                lambda s, u, v, p, w: v.cpu(),
-                "auto",
-                "auto",
-                True,
-            ),
-            "divergence": (
-                "divergence",
-                lambda s, u, v, p, w: s.divergence(u, v, w).cpu(),
-                None,
-                None,
-                False,
-            ),
-        })
-        return registry
-
-    @classmethod
-    def _iso_3d_spec_registry(cls):
-        registry = {spec[0]: spec for spec in cls.DEFAULT_3D_ISO_SPECS}
-        registry.update({
-            "omega_x": (
-                "omega_x",
-                lambda s, u, v, p, w: FluidSolver._cached_vort(s, u, v, w)["omega_x"].cpu(),
-                None,
-                True,
-            ),
-            "omega_y": (
-                "omega_y",
-                lambda s, u, v, p, w: FluidSolver._cached_vort(s, u, v, w)["omega_y"].cpu(),
-                None,
-                True,
-            ),
-            "omega_z": (
-                "omega_z",
-                lambda s, u, v, p, w: FluidSolver._cached_vort(s, u, v, w)["omega_z"].cpu(),
-                None,
-                True,
-            ),
-            "pressure": (
-                "pressure",
-                lambda s, u, v, p, w: p.cpu(),
-                None,
-                True,
-            ),
-        })
-        return registry
-
-    @staticmethod
-    def _normalize_iso_threshold(value):
-        return None if value == "auto" else value
-
-    def _resolve_plot_specs(self, plot_specs_cfg):
-        if plot_specs_cfg is None:
-            return list(self.DEFAULT_PLOT_SPECS)
-        if isinstance(plot_specs_cfg, str):
-            plot_specs_cfg = [plot_specs_cfg]
-
-        registry = self._plot_spec_registry()
-        resolved = []
-        for entry in plot_specs_cfg:
-            if isinstance(entry, str):
-                name = entry
-                overrides = {}
-            elif isinstance(entry, dict):
-                name = entry.get("name")
-                if not isinstance(name, str) or not name:
-                    raise ValueError("Each output.plot_specs entry must define a non-empty 'name'.")
-                overrides = entry
-            else:
-                raise TypeError(
-                    "output.plot_specs entries must be strings or dicts with a 'name' key."
-                )
-
-            if name not in registry:
-                raise ValueError(
-                    f"Unknown plot field '{name}'. Available fields: {sorted(registry)}"
-                )
-
-            base = registry[name]
-            show_body = base[4] if "show_body" not in overrides else bool(overrides["show_body"])
-            resolved.append((
-                name,
-                base[1],
-                overrides.get("vmin", base[2]),
-                overrides.get("vmax", base[3]),
-                show_body,
-            ))
-        return resolved
-
-    def _resolve_iso_3d_specs(self, iso_specs_cfg, *, global_iso_value=None):
-        if self.ndim != 3:
-            return []
-
-        global_iso_value = self._normalize_iso_threshold(global_iso_value)
-        if iso_specs_cfg is None:
-            if global_iso_value is None:
-                return list(self.DEFAULT_3D_ISO_SPECS)
-            iso_specs_cfg = [spec[0] for spec in self.DEFAULT_3D_ISO_SPECS]
-        if isinstance(iso_specs_cfg, str):
-            iso_specs_cfg = [iso_specs_cfg]
-
-        registry = self._iso_3d_spec_registry()
-        resolved = []
-        for entry in iso_specs_cfg:
-            if isinstance(entry, str):
-                name = entry
-                overrides = {}
-            elif isinstance(entry, dict):
-                name = entry.get("name")
-                if not isinstance(name, str) or not name:
-                    raise ValueError("Each output.iso_3d_specs entry must define a non-empty 'name'.")
-                overrides = entry
-            else:
-                raise TypeError(
-                    "output.iso_3d_specs entries must be strings or dicts with a 'name' key."
-                )
-
-            if name not in registry:
-                raise ValueError(
-                    f"Unknown 3D isosurface field '{name}'. Available fields: {sorted(registry)}"
-                )
-
-            base = registry[name]
-            iso_value = overrides.get("iso_value")
-            if "iso_value" not in overrides:
-                iso_value = global_iso_value if global_iso_value is not None else base[2]
-            iso_value = self._normalize_iso_threshold(iso_value)
-
-            if len(base) > 3:
-                show_body = base[3] if "show_body" not in overrides else bool(overrides["show_body"])
-                resolved.append((name, base[1], iso_value, show_body))
-            else:
-                resolved.append((name, base[1], iso_value))
-        return resolved
-
-    # Maximum number of pending I/O futures before _submit_io blocks.
-    # Each future can capture hundreds of MB of numpy arrays (3-D field
-    # snapshots, per-body SDFs, …).  Without a cap the queue grows faster
-    # than the 2-worker pool can drain it, causing OOM on large grids.
-    _MAX_PENDING_IO = 10
-
-    def _submit_io(self, fn, *args, **kwargs):
-        """Submit *fn* to the background I/O pool and track the future."""
-        # Reap already-finished futures to avoid unbounded growth
-        self._io_futures = [f for f in self._io_futures if not f.done()]
-        # Throttle: block until the queue drains below the cap so that
-        # captured numpy arrays from old frames can be garbage-collected.
-        while len(self._io_futures) >= self._MAX_PENDING_IO:
-            # Wait for the oldest pending future to finish
-            self._io_futures[0].result()
-            self._io_futures = [f for f in self._io_futures if not f.done()]
-        fut = self._io_executor.submit(fn, *args, **kwargs)
-        self._io_futures.append(fut)
-        return fut
-
-    def flush_io(self):
-        """Block until all pending background I/O tasks have completed."""
-        for fut in self._io_futures:
-            fut.result()          # re-raises any exception from the worker
-        self._io_futures.clear()
-
-    def _snapshot_body_sdf_vals_for_plots(self, crop_slices=None):
-        """Snapshot per-body SDFs on CPU for plot colouring.
-
-        2-D uses the dense ``composite_body.sdf_vals`` stack directly.
-        3-D reconstructs a dense stack from the sparse per-body SDF blocks
-        cached in ``composite_body._sdf_sparse``.
-        """
-        comp = getattr(self, "composite_body", None)
-        bodies = getattr(comp, "bodies", None) if comp is not None else None
-        if comp is None or bodies is None or len(bodies) == 0:
-            return None
-
-        ndim = len(self.grid_shape)
-        if crop_slices is None:
-            crop_slices = (slice(None),) * ndim
-        elif not isinstance(crop_slices, tuple):
-            crop_slices = (crop_slices,) * ndim
-
-        if self.ndim == 2:
-            sdf_vals = getattr(comp, "sdf_vals", None)
-            if sdf_vals is None:
-                return None
-            sdf_vals_np = np.asarray(
-                sdf_vals.detach().cpu().numpy() if hasattr(sdf_vals, "detach") else sdf_vals,
-                dtype=np.float32,
-            )
-            return np.array(sdf_vals_np[(slice(None), *crop_slices)], dtype=np.float32, copy=True)
-
-        sdf_sparse = getattr(comp, "_sdf_sparse", None)
-        if sdf_sparse is None:
-            return None
-
-        full_shape = tuple(int(n) for n in self.grid_shape)
-        crop_bounds = []
-        cropped_shape = []
-        for axis, sl in enumerate(crop_slices):
-            start = 0 if sl.start is None else (full_shape[axis] + sl.start if sl.start < 0 else sl.start)
-            stop = full_shape[axis] if sl.stop is None else (full_shape[axis] + sl.stop if sl.stop < 0 else sl.stop)
-            start = max(0, min(full_shape[axis], start))
-            stop = max(start, min(full_shape[axis], stop))
-            crop_bounds.append((start, stop))
-            cropped_shape.append(stop - start)
-
-        sdf_vals_np = np.full((len(bodies), *cropped_shape), 1e4, dtype=np.float32)
-
-        for body_i, sparse_entry in enumerate(sdf_sparse):
-            if sparse_entry is None:
-                continue
-            aabb, sdf_body = sparse_entry
-            sdf_body_np = np.asarray(
-                sdf_body.detach().cpu().numpy() if hasattr(sdf_body, "detach") else sdf_body,
-                dtype=np.float32,
-            )
-
-            if aabb is None:
-                sdf_vals_np[body_i] = np.array(sdf_body_np[crop_slices], dtype=np.float32, copy=True)
-                continue
-
-            axis_ranges = [
-                (aabb[0], aabb[1]),
-                (aabb[2], aabb[3]),
-                (aabb[4], aabb[5]),
-            ]
-            dst_slices = []
-            src_slices = []
-            intersects = True
-            for axis, (body_lo, body_hi) in enumerate(axis_ranges):
-                crop_lo, crop_hi = crop_bounds[axis]
-                src_lo = max(body_lo, crop_lo)
-                src_hi = min(body_hi, crop_hi)
-                if src_lo >= src_hi:
-                    intersects = False
-                    break
-                dst_slices.append(slice(src_lo - crop_lo, src_hi - crop_lo))
-                src_slices.append(slice(src_lo - body_lo, src_hi - body_lo))
-
-            if not intersects:
-                continue
-
-            sdf_vals_np[(body_i, *dst_slices)] = sdf_body_np[tuple(src_slices)]
-
-        return sdf_vals_np
-
-    def plotting_and_saving(self, u, v, p, iteration, *, w_vel=None, check_termination=True):
-        """
-        Unified plotting + data saving for 2-D and 3-D.
-        Replaces the old ``plotting_debug`` and ``plotting_saving`` methods.
-
-        Plotting and saving are offloaded to a background thread so the
-        solver loop is not blocked by synchronous disk I/O.
-        """
-        if iteration % self.save_every != 0:
-            if check_termination:
-                return self.check_termination(iteration, u, v, p)
-            return False
-
-        # ---- snapshot tensors to CPU numpy *once* (still on main thread
-        #      so the GPU transfer is overlapped with the previous kernel)
-        # We clone/detach to decouple from the live computation graph.
-
-        # ---- frame plots ----
-        if self.save_frames:
-            specs = getattr(self, "plot_specs", self.DEFAULT_PLOT_SPECS)
-            bodies = getattr(self.composite_body, "bodies", None) if hasattr(self, "composite_body") else None
-
-            # Snapshot per-body COM positions to CPU numpy *now* so the
-            # background IO thread reads a frozen copy rather than the
-            # live tensor (which the next solver step will overwrite).
-            _com_positions = None
-            if bodies is not None:
-                _com_positions = []
-                for _b in bodies:
-                    _cp = getattr(_b, "com_pos", None)
-                    if _cp is not None:
-                        _com_positions.append(_cp.detach().cpu().numpy().copy())
-                    else:
-                        _com_positions.append(None)
-
-            if self.ndim == 2:
-                _phys_extent = (self.xmin, self.xmax, self.ymin, self.ymax)
-                _crop_2d = (slice(1, -1), slice(1, -1))
-                _body_sdf_vals_np = self._snapshot_body_sdf_vals_for_plots(_crop_2d)
-                _sdf_2d = None
-                if hasattr(self, "composite_body") and hasattr(self.composite_body, "sdf_val"):
-                    _sdf_2d = self.composite_body.sdf_val.cpu().numpy().copy()[1:-1, 1:-1]
-                _body_mu0_rgba = None
-                if _body_sdf_vals_np is not None:
-                    _body_mu0_rgba = plotting.build_body_mu0_rgba(
-                        bodies,
-                        _body_sdf_vals_np.shape[1:],
-                        float(self.eps),
-                        sdf_vals=_body_sdf_vals_np,
-                    )
-
-                for (name, field_fn, vmin, vmax, show_body) in specs:
-                    field = field_fn(self, u, v, p, w_vel)
-                    field_np = field.detach().cpu().numpy().copy() if hasattr(field, 'detach') else np.array(field)
-                    field_np = field_np[1:-1, 1:-1]  # strip ghost cells
-                    eff_vmin = self.vmin if vmin is None else (None if vmin == "auto" else vmin)
-                    eff_vmax = self.vmax if vmax is None else (None if vmax == "auto" else vmax)
-                    save_path = self.save_path
-                    _bodies  = bodies if show_body else None
-                    self._submit_io(
-                        plotting.plot_field_2d,
-                        field_np, _phys_extent,
-                        name, iteration, save_path,
-                        vmin=eff_vmin, vmax=eff_vmax, bodies=_bodies,
-                        sdf_2d=_sdf_2d if show_body else None,
-                        body_mu0_rgba=_body_mu0_rgba if show_body else None,
-                        body_com_positions=_com_positions if show_body else None,
-                    )
-            else:
-                # Crop ghost cells (index 0 and -1 on each axis) so plots
-                # show only the physical domain, not BC-padded boundaries.
-                _s = slice(1, -1)  # reusable ghost-cell crop slice
-                coords = {
-                    "x": self.x.cpu().numpy().copy()[_s],
-                    "y": self.y.cpu().numpy().copy()[_s],
-                    "z": self.z.cpu().numpy().copy()[_s],
-                }
-                _body_sdf_vals_np = self._snapshot_body_sdf_vals_for_plots((_s, _s, _s))
-                # snapshot SDF for body-shape overlay on 2-D slice plots
-                sdf_np = None
-                if hasattr(self, "composite_body") and hasattr(self.composite_body, "sdf_val"):
-                    sdf_np = self.composite_body.sdf_val.cpu().numpy().copy()[_s, _s, _s]
-                for (name, field_fn, vmin, vmax, _show_body) in specs:
-                    field = field_fn(self, u, v, p, w_vel)
-                    if isinstance(field, dict):
-                        field_np = {
-                            key: (value.detach().cpu().numpy().copy() if hasattr(value, 'detach') else np.array(value))[_s, _s, _s]
-                            for key, value in field.items()
-                        }
-                    else:
-                        field_np = field.detach().cpu().numpy().copy() if hasattr(field, 'detach') else np.array(field)
-                        field_np = field_np[_s, _s, _s]  # strip ghost cells
-                    eff_vmin = self.vmin if vmin is None else (None if vmin == "auto" else vmin)
-                    eff_vmax = self.vmax if vmax is None else (None if vmax == "auto" else vmax)
-                    save_path = self.save_path
-                    _pass_bodies = bodies if _show_body else None
-                    self._submit_io(
-                        plotting.plot_field_3d_slices,
-                        field_np, coords,
-                        name, iteration, save_path,
-                        vmin=eff_vmin, vmax=eff_vmax, bodies=_pass_bodies,
-                        sdf_3d=sdf_np,
-                        body_mu0_coloring=_show_body and _body_sdf_vals_np is not None,
-                        body_eps=float(self.eps) if _body_sdf_vals_np is not None else None,
-                        sdf_vals=_body_sdf_vals_np if _show_body else None,
-                        body_com_positions=_com_positions if _show_body else None,
-                    )
-
-                # ---- HDF5 field export (3-D only, replaces old VTK) ----
-                # Saves u, v, w, p, sdf — all derived fields (vorticity,
-                # vel_mag, divergence) can be recomputed from these.
-                # HDF5 stores the *full* arrays (including ghost cells)
-                # so post-processing retains boundary information.
-                if self.save:
-                    h5_fields = {
-                        "u": u.detach().cpu().numpy().copy(),
-                        "v": v.detach().cpu().numpy().copy(),
-                        "p": p.detach().cpu().numpy().copy(),
-                    }
-                    if w_vel is not None:
-                        h5_fields["w"] = w_vel.detach().cpu().numpy().copy()
-                    _sdf_full = None
-                    if hasattr(self, "composite_body") and hasattr(self.composite_body, "sdf_val"):
-                        _sdf_full = self.composite_body.sdf_val.cpu().numpy().copy()
-                    if _sdf_full is not None:
-                        h5_fields["sdf"] = _sdf_full
-
-                    # Grids only on first snapshot (full coords incl. ghost cells)
-                    grids = None
-                    if iteration == 0 or not hasattr(self, '_grids_saved'):
-                        grids = {
-                            "x": self.x.cpu().numpy().copy(),
-                            "y": self.y.cpu().numpy().copy(),
-                            "z": self.z.cpu().numpy().copy(),
-                        }
-                        self._grids_saved = True
-
-                    self._submit_io(
-                        self._save_fields_h5,
-                        h5_fields, grids, iteration,
-                    )
-
-                # ---- 3-D isosurface renders ----
-                # sdf_np already snapshotted above for slice plots
-                iso_specs = getattr(
-                    self,
-                    "iso_3d_specs",
-                    self.DEFAULT_3D_ISO_SPECS if self.ndim == 3 else [],
-                )
-                for iso_entry in iso_specs:
-                    name, field_fn = iso_entry[0], iso_entry[1]
-                    iso_thresh = iso_entry[2] if len(iso_entry) > 2 else None
-                    if iso_thresh == "vmax":
-                        iso_thresh = getattr(self, "vmax", None)
-                    field = field_fn(self, u, v, p, w_vel)
-                    field_np = field.detach().cpu().numpy().copy() if hasattr(field, 'detach') else np.array(field)
-                    field_np = field_np[_s, _s, _s]  # strip ghost cells
-                    self._submit_io(
-                        plotting.plot_field_3d,
-                        field_np, coords,
-                        name, iteration, self.save_path,
-                        sdf_3d=sdf_np,
-                        iso_value=iso_thresh,
-                        bodies=bodies,
-                        sdf_vals=_body_sdf_vals_np,
-                    )
-
-        # ---- raw data save (2-D) ----
-        if self.save and self.ndim == 2:
-            h5_fields = {
-                "u": u.detach().cpu().numpy().copy(),
-                "v": v.detach().cpu().numpy().copy(),
-                "p": p.detach().cpu().numpy().copy(),
-            }
-            # SDF snapshot
-            sdf_np = None
-            if hasattr(self, "composite_body") and hasattr(self.composite_body, "sdf_val"):
-                sdf_np = self.composite_body.sdf_val.cpu().numpy().copy()
-                h5_fields["sdf"] = sdf_np
-
-            # Grids only on first snapshot
-            grids = None
-            if iteration == 0 or not hasattr(self, '_grids_saved'):
-                grids = {
-                    "x": self.x.cpu().numpy().copy(),
-                    "y": self.y.cpu().numpy().copy(),
-                }
-                self._grids_saved = True
-
-            self._submit_io(
-                self._save_fields_h5,
-                h5_fields, grids, iteration,
-            )
-
-            # 2-D body contours
-            if hasattr(self, "composite_body") and hasattr(self.composite_body, "bodies"):
-                cnt_arrays = [
-                    body.cnt_update.cpu().numpy().copy()
-                    for body in self.composite_body.bodies
-                    if hasattr(body, "cnt_update")
-                ]
-                if cnt_arrays:
-                    self._submit_io(
-                        self._save_contours_h5, cnt_arrays, iteration,
-                    )
-
-        if check_termination:
-            return self.check_termination(iteration, u, v, p)
-        return False
-
-    # keep old name as an alias so call-sites in alternative solver variants still work
-    def plotting_debug(self, u, v, p, iteration, check_termination=True):
-        return self.plotting_and_saving(u, v, p, iteration, check_termination=check_termination)
-
-    def check_termination(self, iteration, u, v, p):
-        # NaN in any velocity or pressure field
-        has_nan = (torch.isnan(u).any() or torch.isnan(v).any()
-                   or torch.isnan(p).any())
-        if iteration == self.nt - 1 or has_nan:
-                if has_nan:
-                    logger.warning("Termination: NaN detected in velocity/pressure fields")
-                else:
-                    logger.info("Termination: reached max iterations (%d)", self.nt)
-                terminate = True
-        else:
-            if hasattr(self.composite_body, "com_pos"):
-                    terminate = not self.inside(self.composite_body.com_pos)
-                    if terminate:
-                        logger.warning("Termination condition met: body exited domain")
-            else:
-                terminate = False
-        return terminate
-
-    def plotting_saving(self, u, v, p, iteration):
-        """Legacy alias — delegates to the unified method."""
-        self.plotting_and_saving(u, v, p, iteration, check_termination=False)
-
-    def save_results(self, u, v, p, iteration, *, w_vel=None):
-        """Legacy alias — delegates to the unified HDF5 pipeline."""
-        if not self.save:
-            return
-        h5_fields = {
-            "u": u.detach().cpu().numpy().copy(),
-            "v": v.detach().cpu().numpy().copy(),
-            "p": p.detach().cpu().numpy().copy(),
-        }
-        if w_vel is not None:
-            h5_fields["w"] = w_vel.detach().cpu().numpy().copy()
-        if hasattr(self, "composite_body") and hasattr(self.composite_body, "sdf_val"):
-            h5_fields["sdf"] = self.composite_body.sdf_val.cpu().numpy().copy()
-        grids = None
-        if iteration == 0 or not hasattr(self, '_grids_saved'):
-            grids = {"x": self.x.cpu().numpy().copy(),
-                     "y": self.y.cpu().numpy().copy()}
-            if self.z is not None:
-                grids["z"] = self.z.cpu().numpy().copy()
-            self._grids_saved = True
-        self._submit_io(self._save_fields_h5, h5_fields, grids, iteration)
-
-    # ------------------------------------------------------------------
-    #   Unified HDF5 saving helpers (used by both 2-D and 3-D paths)
-    # ------------------------------------------------------------------
-
-    def _save_fields_h5(self, fields, grids, iteration):
-        """Write velocity / pressure / SDF fields to a single HDF5 file.
-
-        File layout::
-
-            grids/x, grids/y [, grids/z]   – written once
-            fields/000000/u
-            fields/000000/v
-            fields/000000/p
-            fields/000000/w   (3-D only)
-            fields/000000/sdf (when a body is present)
-            ...
-
-        All derived quantities (vorticity, velocity magnitude, divergence)
-        can be recomputed from u, v, [w] and the grid coordinates.
-        """
-        h5_path = f'{self.save_path}/fields.h5'
-        grp = f'fields/{iteration:06d}'
-        lock = self._hdf5_lock
-        with lock:
-            with h5py.File(h5_path, 'a') as f:
-                for name, arr in fields.items():
-                    f.create_dataset(f'{grp}/{name}', data=arr)
-                if grids is not None and 'grids' not in f:
-                    for name, arr in grids.items():
-                        f.create_dataset(f'grids/{name}', data=arr)
-
-    def _save_contours_h5(self, cnt_arrays, iteration):
-        """Write 2-D body contour data to a dedicated HDF5 file."""
-        cnt_h5 = f'{self.save_path}/contours.h5'
-        lock = self._hdf5_lock
-        with lock:
-            with h5py.File(cnt_h5, 'a') as f:
-                for i, arr in enumerate(cnt_arrays):
-                    f.create_dataset(f'{iteration:06d}/body_{i}', data=arr)
-
-    def save_drags_h5(self, path=None):
-        """Persist per-body force/torque histories to HDF5.
-
-        Writes ``<save_path>/drags.h5`` with datasets:
-            viscous_drags    (n_bodies, 3, nt)  viscous (skin) force  [N]
-            pressure_drags   (n_bodies, 3, nt)  pressure (form) force [N]
-            viscous_torques  (n_bodies, 3, nt)  viscous torque about COM  [N m]
-            pressure_torques (n_bodies, 3, nt)  pressure torque about COM [N m]
-
-        Metadata (dt, rho, nt, link names, geometry) is intentionally
-        *not* written here — post-processing scripts can recover it from
-        ``parameters.yaml``, ``simulation.hdf5`` and the cached SDFs.
-        """
-        if path is None:
-            path = f'{self.save_path}/drags.h5'
-        vd = self.viscous_drag_record.detach().cpu().numpy().copy()
-        pd = self.pressure_drag_record.detach().cpu().numpy().copy()
-        vt = self.viscous_torque_record.detach().cpu().numpy().copy()
-        pt = self.pressure_torque_record.detach().cpu().numpy().copy()
-        lock = self._hdf5_lock
-
-        def _save(path, vd, pd, vt, pt):
-            with lock:
-                with h5py.File(path, 'w') as f:
-                    f.create_dataset('viscous_drags',    data=vd)
-                    f.create_dataset('pressure_drags',   data=pd)
-                    f.create_dataset('viscous_torques',  data=vt)
-                    f.create_dataset('pressure_torques', data=pt)
-
-        self._submit_io(_save, path, vd, pd, vt, pt)
-
     def run_from_initial(self, u0, v0, w0=None):
         u = u0
         v = v0
@@ -2461,11 +2056,4 @@ class FluidSolver:
 
         # Block until all background I/O is complete before returning
         self.flush_io()
-
-
-if __name__ == "__main__":
-
-    solver = FluidSolver()
-    solver.run_sim()
-
 
