@@ -68,7 +68,7 @@ print()
 # ================================================================
 # Build parameter dict from YAML template
 # ================================================================
-pars = yaml2pyobject("lilytorch/src/scripts/configs/flow_past_cylinder.yaml")
+pars = yaml2pyobject("lilytorch/src/configs/flow_past_cylinder.yaml")
 
 # --- Domain ---
 pars["solver"]["xmin"] = xmin

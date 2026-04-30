@@ -79,7 +79,7 @@ for Nx in nxs:
     print(f"  Nx = {Nx}  →  dx = {dx:.6f}  →  D/dx = {D/dx:.2f}")
     print(f"{'='*60}\n")
 
-    pars = yaml2pyobject("lilytorch/src/scripts/configs/flow_past_cylinder.yaml")
+    pars = yaml2pyobject("lilytorch/src/configs/flow_past_cylinder.yaml")
 
     # --- Domain ---
     pars["solver"]["xmin"] = xmin
