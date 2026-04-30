@@ -12,6 +12,8 @@ registers operators under the ``lilytorch_kernels`` torch library:
 2-D ops (mirror the 3-D ones with the z-axis stripped):
 * ``streaming_sdf_min_2d``       -- one-body fused 2-D SDF / face-velocity update
 * ``streaming_sdf_min_2d_multi`` -- multi-body fused 2-D SDF / face-velocity update
+* ``bdim_forces_2d_multi``       -- per-body 2-D force / torque integration
+* ``apply_bcs_2d``               -- fused 2-D BC writes (Neumann + Dirichlet)
 
 CUDA kernels live in ``csrc/cuda/streaming_sdf*.cu``; the C++ glue and
 schemas live in ``csrc/ops.cpp``; CPU implementations live in
@@ -59,6 +61,8 @@ from .ops import (
     apply_bcs_3d,
     streaming_sdf_min_2d,
     streaming_sdf_min_2d_multi,
+    bdim_forces_2d_multi,
+    apply_bcs_2d,
 )
 
 __all__ = [
@@ -68,4 +72,6 @@ __all__ = [
     "apply_bcs_3d",
     "streaming_sdf_min_2d",
     "streaming_sdf_min_2d_multi",
+    "bdim_forces_2d_multi",
+    "apply_bcs_2d",
 ]

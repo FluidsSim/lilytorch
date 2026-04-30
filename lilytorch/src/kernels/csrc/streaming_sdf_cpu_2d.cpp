@@ -29,6 +29,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <mutex>
 #include <vector>
 
 namespace lilytorch_kernels {
@@ -411,12 +412,295 @@ void streaming_sdf_min_2d_multi_cpu(
 }
 
 // =====================================================================
+//  bdim_forces_2d_multi
+//
+//  2-D analogue of ``bdim_forces_3d_multi``.  Per body, walks the cells
+//  inside the AABB, reads the cached cc-SDF from ``sparse_cc_flat``,
+//  evaluates the smoothed visc / pres deltas, and accumulates 8 float64
+//  channels:
+//      [fv_x, fv_y, t_v,
+//       fp_x, fp_y, t_p,
+//       0,    0]
+//  where t_v / t_p are the scalar out-of-plane torques
+//      t_v = arm_x * fv_y - arm_y * fv_x
+//      t_p = arm_x * fp_y - arm_y * fp_x
+//  and the trailing two channels are reserved (kept in the layout so
+//  the per-body output row maps cleanly onto a 1-padded 2-or-3-component
+//  buffer in Python; the kernel writes exactly zero there).
+//
+//  ``out`` is float64 and the kernel does ``out += accs * h2`` so the
+//  caller may invoke repeatedly on a pre-existing accumulator (mirrors
+//  the 3-D op).
+// =====================================================================
+
+void bdim_forces_2d_multi_cpu(
+    const at::Tensor& sparse_cc_flat,
+    const at::Tensor& cell_offsets,
+    const at::Tensor& kin,
+    const at::Tensor& aabb_lo,
+    const at::Tensor& aabb_dim,
+    const at::Tensor& gx, const at::Tensor& gy,
+    const int64_t u_i0, const int64_t u_j0,
+    const int64_t Sj,
+    const at::Tensor& xs, const at::Tensor& ys,
+    const at::Tensor& px, const at::Tensor& py,
+    const double eps_body, const double eps_solver, const double h2,
+    const int64_t /*max_vol_per_body*/,
+    at::Tensor out)
+{
+    const int B = (int)aabb_dim.size(0);
+    if (B <= 0) return;
+
+    TORCH_CHECK(out.scalar_type() == at::kDouble,
+                "bdim_forces_2d_multi_cpu: out must be float64");
+    TORCH_CHECK(out.size(1) == 8,
+                "bdim_forces_2d_multi_cpu: out must have 8 channels");
+
+    AT_DISPATCH_FLOATING_TYPES(sparse_cc_flat.scalar_type(), "bdim_forces_2d_multi_cpu", [&] {
+        auto sp_c = sparse_cc_flat.contiguous();
+        auto gx_c = gx.contiguous();
+        auto gy_c = gy.contiguous();
+        auto xs_c = xs.contiguous();
+        auto ys_c = ys.contiguous();
+        auto px_c = px.contiguous();
+        auto py_c = py.contiguous();
+
+        const scalar_t* sp_ptr  = sp_c.data_ptr<scalar_t>();
+        const int64_t*  cell_off= cell_offsets.data_ptr<int64_t>();
+        const scalar_t* kin_ptr = kin.data_ptr<scalar_t>();
+        const int64_t*  lo      = aabb_lo.data_ptr<int64_t>();
+        const int64_t*  dim_    = aabb_dim.data_ptr<int64_t>();
+        const scalar_t* gx_ptr  = gx_c.data_ptr<scalar_t>();
+        const scalar_t* gy_ptr  = gy_c.data_ptr<scalar_t>();
+        const scalar_t* xs_ptr  = xs_c.data_ptr<scalar_t>();
+        const scalar_t* ys_ptr  = ys_c.data_ptr<scalar_t>();
+        const scalar_t* px_ptr  = px_c.data_ptr<scalar_t>();
+        const scalar_t* py_ptr  = py_c.data_ptr<scalar_t>();
+        double*         out_ptr = out.data_ptr<double>();
+
+        const scalar_t eps_b      = (scalar_t)eps_body;
+        const scalar_t eps_s      = (scalar_t)eps_solver;
+        const scalar_t pi_v       = (scalar_t)3.141592653589793;
+        const scalar_t inv_2eps   = (scalar_t)0.5 / eps_b;
+        const scalar_t pi_over_eb = pi_v / eps_b;
+        const double   h2_d       = (double)h2;
+
+        // Same band-test logic as the 3-D version: deltas are zero
+        // outside [min(-eps_b, eps_s-eps_b), max(eps_b, eps_s+eps_b)].
+        const scalar_t band_lo = (eps_s - eps_b) < (-eps_b) ? (eps_s - eps_b) : (-eps_b);
+        const scalar_t band_hi = (eps_s + eps_b) > ( eps_b) ? (eps_s + eps_b) : ( eps_b);
+
+        const int u_i0_i = (int)u_i0, u_j0_i = (int)u_j0;
+        const int Sj_i   = (int)Sj;
+
+        const int B_local = B;
+        std::vector<double> accs(static_cast<size_t>(B_local) * 8, 0.0);
+
+        for (int b = 0; b < B_local; ++b) {
+            const int Ai = (int)dim_[b*2 + 0];
+            const int Aj = (int)dim_[b*2 + 1];
+            const int vol = Ai * Aj;
+            if (vol <= 0) continue;
+
+            const int i0_b = (int)lo[b*2 + 0];
+            const int j0_b = (int)lo[b*2 + 1];
+
+            // 2-D ``kin`` row (11 floats per body):
+            //   R_T[0..3], bp_xy(2), cm_xy(2), lv_xy(2), omega(1).
+            // Only the COM (kin[6..7]) is needed for the force/torque arms.
+            const scalar_t* K = kin_ptr + b*11;
+            const scalar_t cm_x = K[6], cm_y = K[7];
+
+            const std::int64_t sparse_base = (std::int64_t)cell_off[b];
+            double* lb = accs.data() + (size_t)b * 8;
+            std::mutex acc_mtx;
+
+            at::parallel_for(0, vol, /*grain_size=*/2048,
+                [&](int64_t _begin, int64_t _end)
+            {
+                double local8[8] = {0,0,0,0,0,0,0,0};
+                for (int idx = (int)_begin; idx < (int)_end; ++idx) {
+                    const scalar_t sdf = sp_ptr[sparse_base + (std::int64_t)idx];
+                    if (sdf <= band_lo || sdf >= band_hi) continue;
+
+                    const int di = idx / Aj;
+                    const int dj = idx - di * Aj;
+
+                    scalar_t delta_visc = 0;
+                    const scalar_t d_visc = sdf - eps_s;
+                    if (d_visc > -eps_b && d_visc < eps_b) {
+                        delta_visc = ((scalar_t)1 + std::cos(pi_over_eb * d_visc)) * inv_2eps;
+                    }
+                    scalar_t delta_pres = 0;
+                    if (sdf > -eps_b && sdf < eps_b) {
+                        delta_pres = ((scalar_t)1 + std::cos(pi_over_eb * sdf)) * inv_2eps;
+                    }
+                    if (delta_visc == (scalar_t)0 && delta_pres == (scalar_t)0) continue;
+
+                    const int i = i0_b + di, j = j0_b + dj;
+                    const int sub_i = i - u_i0_i;
+                    const int sub_j = j - u_j0_i;
+                    const std::int64_t s_idx = (std::int64_t)sub_i * Sj_i + sub_j;
+
+                    const scalar_t xc = gx_ptr[i];
+                    const scalar_t yc = gy_ptr[j];
+
+                    const scalar_t arm_x = xc - cm_x;
+                    const scalar_t arm_y = yc - cm_y;
+
+                    const double fv_x = (double)(xs_ptr[s_idx] * delta_visc);
+                    const double fv_y = (double)(ys_ptr[s_idx] * delta_visc);
+                    const double fp_x = (double)(px_ptr[s_idx] * delta_pres);
+                    const double fp_y = (double)(py_ptr[s_idx] * delta_pres);
+
+                    local8[0] += fv_x;
+                    local8[1] += fv_y;
+                    local8[2] += (double)arm_x * fv_y - (double)arm_y * fv_x;
+                    local8[3] += fp_x;
+                    local8[4] += fp_y;
+                    local8[5] += (double)arm_x * fp_y - (double)arm_y * fp_x;
+                    // local8[6], local8[7] reserved (always 0)
+                }
+                std::lock_guard<std::mutex> lk(acc_mtx);
+                for (int c = 0; c < 8; ++c) lb[c] += local8[c];
+            });
+        }
+
+        for (int b = 0; b < B_local; ++b) {
+            for (int c = 0; c < 8; ++c) {
+                out_ptr[b*8 + c] += accs[(size_t)b * 8 + c] * h2_d;
+            }
+        }
+    });
+}
+
+// =====================================================================
+//  apply_bcs_2d  (Phase H 2-D analogue of apply_bcs_3d)
+//
+//  Each op writes a single 1-D ghost line of u or v.  Ops are
+//  independent so we loop ops serially and parallelise the line fill.
+//
+//  shapes  : int64 [2,2]      -> per-component (Nx, Ny)
+//  neu_desc: int32 [N_neu, 3] -> (comp, axis, side)
+//                                   comp in {0=u, 1=v}
+//                                   axis in {0=x, 1=y}
+//                                   side in {0=lo, 1=hi}
+//  dir_desc: int32 [N_dir, 3] -> (comp, axis, offset)
+//                                offset is signed: dst = offset if >=0
+//                                else (sz + offset).
+//  dir_val : float[N_dir]
+// =====================================================================
+
+template <typename scalar_t>
+static void apply_bcs_2d_one_line(
+    scalar_t* base,
+    const int Ny,
+    const int axis,
+    const int dst_along, const int src_along,
+    const bool is_neu, const scalar_t value,
+    const int dim0_max)
+{
+    // Flat layout: base[i, j] = base[i*Ny + j].
+    at::parallel_for(0, dim0_max, /*grain_size=*/1024, [&](int64_t _begin, int64_t _end) {
+    for (int64_t t = _begin; t < _end; ++t) {
+        const int i = (int)t;
+        std::int64_t dst_lin, src_lin = 0;
+        if (axis == 0) {
+            dst_lin = (std::int64_t)dst_along * Ny + i;
+            if (is_neu) src_lin = (std::int64_t)src_along * Ny + i;
+        } else {
+            dst_lin = (std::int64_t)i * Ny + dst_along;
+            if (is_neu) src_lin = (std::int64_t)i * Ny + src_along;
+        }
+        base[dst_lin] = is_neu ? base[src_lin] : value;
+    }
+    });
+}
+
+void apply_bcs_2d_cpu(
+    at::Tensor u, at::Tensor v,
+    const at::Tensor& shapes,
+    const at::Tensor& neu_desc,
+    const at::Tensor& dir_desc,
+    const at::Tensor& dir_val,
+    const int64_t /*max_line_dim*/)
+{
+    TORCH_CHECK(u.is_contiguous() && v.is_contiguous(),
+                "apply_bcs_2d_cpu: u/v must be contiguous");
+    TORCH_CHECK(u.scalar_type() == v.scalar_type(),
+                "apply_bcs_2d_cpu: u/v must share dtype");
+    TORCH_CHECK(shapes.scalar_type() == at::kLong &&
+                shapes.dim() == 2 && shapes.size(0) == 2 && shapes.size(1) == 2,
+                "apply_bcs_2d_cpu: shapes must be int64[2,2]");
+    TORCH_CHECK(neu_desc.scalar_type() == at::kInt && neu_desc.dim() == 2 &&
+                neu_desc.size(1) == 3,
+                "apply_bcs_2d_cpu: neu_desc must be int32[N,3]");
+    TORCH_CHECK(dir_desc.scalar_type() == at::kInt && dir_desc.dim() == 2 &&
+                dir_desc.size(1) == 3,
+                "apply_bcs_2d_cpu: dir_desc must be int32[N,3]");
+
+    const int N_neu = (int)neu_desc.size(0);
+    const int N_dir = (int)dir_desc.size(0);
+    if (N_neu + N_dir == 0) return;
+
+    AT_DISPATCH_FLOATING_TYPES(u.scalar_type(), "apply_bcs_2d_cpu", [&] {
+        const int64_t*  shapes_p  = shapes.data_ptr<int64_t>();
+        const int*      neu_p     = (N_neu > 0) ? neu_desc.data_ptr<int>() : nullptr;
+        const int*      dir_p     = (N_dir > 0) ? dir_desc.data_ptr<int>() : nullptr;
+        const scalar_t* dir_val_p = (N_dir > 0) ? dir_val.data_ptr<scalar_t>() : nullptr;
+
+        scalar_t* u_p = u.data_ptr<scalar_t>();
+        scalar_t* v_p = v.data_ptr<scalar_t>();
+
+        const int total = N_neu + N_dir;
+        for (int op = 0; op < total; ++op) {
+            const bool is_neu = (op < N_neu);
+            int comp, axis, dst_along, src_along;
+            scalar_t value = scalar_t(0);
+
+            if (is_neu) {
+                comp = neu_p[op*3 + 0];
+                axis = neu_p[op*3 + 1];
+                const int side = neu_p[op*3 + 2];
+                const int sz = (int)shapes_p[comp*2 + axis];
+                if (side == 0) { dst_along = 0;      src_along = 1; }
+                else           { dst_along = sz - 1; src_along = sz - 2; }
+            } else {
+                const int d = op - N_neu;
+                comp = dir_p[d*3 + 0];
+                axis = dir_p[d*3 + 1];
+                const int offset = dir_p[d*3 + 2];
+                const int sz = (int)shapes_p[comp*2 + axis];
+                dst_along = (offset >= 0) ? offset : (sz + offset);
+                src_along = 0;
+                value = dir_val_p[d];
+            }
+
+            const int Nx = (int)shapes_p[comp*2 + 0];
+            const int Ny = (int)shapes_p[comp*2 + 1];
+
+            // axis==0 -> sweep along j (size Ny). axis==1 -> sweep along i (size Nx).
+            const int dim0_max = (axis == 0) ? Ny : Nx;
+
+            scalar_t* base = (comp == 0) ? u_p : v_p;
+
+            apply_bcs_2d_one_line<scalar_t>(
+                base, Ny, axis,
+                dst_along, src_along, is_neu, value,
+                dim0_max);
+        }
+    });
+}
+
+// =====================================================================
 //  CPU registration. Schemas live in ops.cpp.
 // =====================================================================
 
 TORCH_LIBRARY_IMPL(lilytorch_kernels, CPU, m) {
     m.impl("streaming_sdf_min_2d",       &streaming_sdf_min_2d_cpu);
     m.impl("streaming_sdf_min_2d_multi", &streaming_sdf_min_2d_multi_cpu);
+    m.impl("bdim_forces_2d_multi",       &bdim_forces_2d_multi_cpu);
+    m.impl("apply_bcs_2d",               &apply_bcs_2d_cpu);
 }
 
 }  // namespace lilytorch_kernels

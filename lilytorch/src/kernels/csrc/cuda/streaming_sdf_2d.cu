@@ -427,9 +427,287 @@ void streaming_sdf_min_2d_multi_cuda(
     });
 }
 
+// =====================================================================
+//  bdim_forces_2d_multi (CUDA)
+//
+//  2-D analogue of ``bdim_forces_3d_multi``.  Per-body grid: walks the
+//  AABB cells, reads cached cc-SDF from ``sparse_cc_flat``, evaluates
+//  smoothed visc/pres deltas, accumulates 8 float64 channels:
+//      [fv_x, fv_y, t_v, fp_x, fp_y, t_p, 0, 0]
+//  via shared-memory reduction + atomicAdd into out[b, 0..7].
+// =====================================================================
+
+template <typename scalar_t>
+__global__ void bdim_forces_2d_multi_kernel(
+    const int b,
+    const scalar_t* __restrict__ sparse_cc_flat,
+    const int64_t*  __restrict__ cell_offsets,
+    const scalar_t* __restrict__ kin,
+    const int64_t*  __restrict__ aabb_lo,
+    const int64_t*  __restrict__ aabb_dim,
+    const scalar_t* __restrict__ gx,
+    const scalar_t* __restrict__ gy,
+    const int u_i0, const int u_j0,
+    const int Sj,
+    const scalar_t* __restrict__ xs,
+    const scalar_t* __restrict__ ys,
+    const scalar_t* __restrict__ px,
+    const scalar_t* __restrict__ py,
+    const scalar_t eps_body,
+    const scalar_t eps_solver,
+    const scalar_t h2,
+    double* __restrict__ out)  // (B, 8)
+{
+    const int local = blockIdx.x * blockDim.x + threadIdx.x;
+
+    const int Ai = (int)aabb_dim[b*2 + 0];
+    const int Aj = (int)aabb_dim[b*2 + 1];
+    const int vol = Ai * Aj;
+
+    double acc[8];
+#pragma unroll
+    for (int c = 0; c < 8; ++c) acc[c] = 0.0;
+
+    if (local < vol) {
+        const int di = local / Aj;
+        const int dj = local - di * Aj;
+        const int i0 = (int)aabb_lo[b*2 + 0];
+        const int j0 = (int)aabb_lo[b*2 + 1];
+        const int i = i0 + di, j = j0 + dj;
+
+        const int64_t sparse_base = cell_offsets[b];
+        const scalar_t sdf = sparse_cc_flat[sparse_base + (int64_t)local];
+
+        const scalar_t band_lo =
+            (eps_solver - eps_body) < (-eps_body)
+                ? (eps_solver - eps_body) : (-eps_body);
+        const scalar_t band_hi =
+            (eps_solver + eps_body) > ( eps_body)
+                ? (eps_solver + eps_body) : ( eps_body);
+        if (sdf > band_lo && sdf < band_hi) {
+            // 2-D kin row (11 floats); cm_xy at offsets 6..7.
+            const scalar_t* K = kin + b*11;
+            const scalar_t cm_x = K[6], cm_y = K[7];
+
+            const scalar_t xc = gx[i];
+            const scalar_t yc = gy[j];
+
+            const scalar_t pi_v = (scalar_t)3.141592653589793;
+            const scalar_t inv_2eps = (scalar_t)0.5 / eps_body;
+            const scalar_t pi_over_eb = pi_v / eps_body;
+            scalar_t delta_visc = 0;
+            const scalar_t d_visc = sdf - eps_solver;
+            if (d_visc > -eps_body && d_visc < eps_body) {
+                delta_visc = ((scalar_t)1 + cos(pi_over_eb * d_visc)) * inv_2eps;
+            }
+            scalar_t delta_pres = 0;
+            if (sdf > -eps_body && sdf < eps_body) {
+                delta_pres = ((scalar_t)1 + cos(pi_over_eb * sdf)) * inv_2eps;
+            }
+
+            const int sub_i = i - u_i0;
+            const int sub_j = j - u_j0;
+            const int s_idx = sub_i * Sj + sub_j;
+            const scalar_t xs_v = xs[s_idx], ys_v = ys[s_idx];
+            const scalar_t px_v = px[s_idx], py_v = py[s_idx];
+
+            const scalar_t arm_x = xc - cm_x;
+            const scalar_t arm_y = yc - cm_y;
+
+            const double fv_x_d = (double)(xs_v * delta_visc);
+            const double fv_y_d = (double)(ys_v * delta_visc);
+            const double fp_x_d = (double)(px_v * delta_pres);
+            const double fp_y_d = (double)(py_v * delta_pres);
+
+            acc[0] = fv_x_d;
+            acc[1] = fv_y_d;
+            acc[2] = (double)arm_x * fv_y_d - (double)arm_y * fv_x_d;
+            acc[3] = fp_x_d;
+            acc[4] = fp_y_d;
+            acc[5] = (double)arm_x * fp_y_d - (double)arm_y * fp_x_d;
+            // acc[6], acc[7] reserved (always 0)
+        }
+    }
+
+    extern __shared__ double sdata[];
+    const int tid = threadIdx.x;
+    const int bdim = blockDim.x;
+    const double h2_d = (double)h2;
+
+#pragma unroll
+    for (int c = 0; c < 8; ++c) {
+        sdata[tid] = acc[c];
+        __syncthreads();
+        for (int s = bdim >> 1; s > 0; s >>= 1) {
+            if (tid < s) sdata[tid] = sdata[tid] + sdata[tid + s];
+            __syncthreads();
+        }
+        if (tid == 0) {
+            atomicAdd(&out[b*8 + c], sdata[0] * h2_d);
+        }
+        __syncthreads();
+    }
+}
+
+void bdim_forces_2d_multi_cuda(
+    const at::Tensor& sparse_cc_flat,
+    const at::Tensor& cell_offsets,
+    const at::Tensor& kin,
+    const at::Tensor& aabb_lo,
+    const at::Tensor& aabb_dim,
+    const at::Tensor& gx, const at::Tensor& gy,
+    const int64_t u_i0, const int64_t u_j0,
+    const int64_t Sj,
+    const at::Tensor& xs, const at::Tensor& ys,
+    const at::Tensor& px, const at::Tensor& py,
+    const double eps_body,
+    const double eps_solver,
+    const double h2,
+    const int64_t max_vol_per_body,
+    at::Tensor out)  // (B, 8) float64
+{
+    const int B = (int)aabb_dim.size(0);
+    if (B <= 0 || max_vol_per_body <= 0) return;
+
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    const int blockSize = 256;
+    const size_t shmem  = (size_t)blockSize * sizeof(double);
+
+    AT_DISPATCH_FLOATING_TYPES(sparse_cc_flat.scalar_type(), "bdim_forces_2d_multi_cuda", [&] {
+        for (int b = 0; b < B; ++b) {
+            const int blocksPerBody = (int)((max_vol_per_body + blockSize - 1) / blockSize);
+            bdim_forces_2d_multi_kernel<scalar_t>
+                <<<dim3(blocksPerBody, 1, 1), dim3(blockSize, 1, 1), shmem, stream>>>(
+                    b,
+                    sparse_cc_flat.data_ptr<scalar_t>(),
+                    cell_offsets.data_ptr<int64_t>(),
+                    kin.data_ptr<scalar_t>(),
+                    aabb_lo.data_ptr<int64_t>(),
+                    aabb_dim.data_ptr<int64_t>(),
+                    gx.data_ptr<scalar_t>(), gy.data_ptr<scalar_t>(),
+                    (int)u_i0, (int)u_j0,
+                    (int)Sj,
+                    xs.data_ptr<scalar_t>(), ys.data_ptr<scalar_t>(),
+                    px.data_ptr<scalar_t>(), py.data_ptr<scalar_t>(),
+                    (scalar_t)eps_body, (scalar_t)eps_solver, (scalar_t)h2,
+                    out.data_ptr<double>());
+        }
+    });
+}
+
+// =====================================================================
+//  apply_bcs_2d (CUDA)
+//
+//  2-D analogue of ``apply_bcs_3d``: writes one ghost line per op
+//  (Neumann copy or Dirichlet constant).  See CPU impl for the
+//  argument layout.
+// =====================================================================
+
+template <typename scalar_t>
+__global__ void apply_bcs_2d_kernel(
+    scalar_t* __restrict__ u,
+    scalar_t* __restrict__ v,
+    const int64_t* __restrict__ shapes,
+    const int* __restrict__ neu_desc,
+    const int N_neu,
+    const int* __restrict__ dir_desc,
+    const scalar_t* __restrict__ dir_val,
+    const int N_dir)
+{
+    const int op = blockIdx.y;
+    const int total = N_neu + N_dir;
+    if (op >= total) return;
+
+    const bool is_neu = (op < N_neu);
+    int comp, axis, dst_along, src_along;
+    scalar_t value = scalar_t(0);
+
+    if (is_neu) {
+        comp = neu_desc[op * 3 + 0];
+        axis = neu_desc[op * 3 + 1];
+        const int side = neu_desc[op * 3 + 2];
+        const int sz = (int)shapes[comp * 2 + axis];
+        if (side == 0) { dst_along = 0;      src_along = 1; }
+        else           { dst_along = sz - 1; src_along = sz - 2; }
+    } else {
+        const int d = op - N_neu;
+        comp = dir_desc[d * 3 + 0];
+        axis = dir_desc[d * 3 + 1];
+        const int offset = dir_desc[d * 3 + 2];
+        const int sz = (int)shapes[comp * 2 + axis];
+        dst_along = (offset >= 0) ? offset : (sz + offset);
+        src_along = 0;
+        value = dir_val[d];
+    }
+
+    const int Nx = (int)shapes[comp * 2 + 0];
+    const int Ny = (int)shapes[comp * 2 + 1];
+    const int dim0_max = (axis == 0) ? Ny : Nx;
+
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= dim0_max) return;
+
+    scalar_t* base = (comp == 0) ? u : v;
+
+    int64_t dst_lin, src_lin = 0;
+    if (axis == 0) {
+        dst_lin = (int64_t)dst_along * Ny + i;
+        if (is_neu) src_lin = (int64_t)src_along * Ny + i;
+    } else {
+        dst_lin = (int64_t)i * Ny + dst_along;
+        if (is_neu) src_lin = (int64_t)i * Ny + src_along;
+    }
+
+    if (is_neu) base[dst_lin] = base[src_lin];
+    else        base[dst_lin] = value;
+}
+
+void apply_bcs_2d_cuda(
+    at::Tensor u, at::Tensor v,
+    const at::Tensor& shapes,
+    const at::Tensor& neu_desc,
+    const at::Tensor& dir_desc,
+    const at::Tensor& dir_val,
+    const int64_t max_line_dim)
+{
+    TORCH_CHECK(u.is_contiguous() && v.is_contiguous(),
+                "apply_bcs_2d_cuda: u/v must be contiguous");
+    TORCH_CHECK(u.scalar_type() == v.scalar_type(),
+                "apply_bcs_2d_cuda: u/v must share dtype");
+    TORCH_CHECK(shapes.scalar_type() == at::kLong &&
+                shapes.dim() == 2 && shapes.size(0) == 2 && shapes.size(1) == 2,
+                "apply_bcs_2d_cuda: shapes must be int64[2,2]");
+
+    const int N_neu = (int)neu_desc.size(0);
+    const int N_dir = (int)dir_desc.size(0);
+    const int total = N_neu + N_dir;
+    if (total == 0 || max_line_dim <= 0) return;
+
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    const int blockX = 256;
+    const int gridX  = (int)((max_line_dim + blockX - 1) / blockX);
+
+    AT_DISPATCH_FLOATING_TYPES(u.scalar_type(), "apply_bcs_2d_cuda", [&] {
+        const int* neu_p = (N_neu > 0) ? neu_desc.data_ptr<int>() : nullptr;
+        const int* dir_p = (N_dir > 0) ? dir_desc.data_ptr<int>() : nullptr;
+        const scalar_t* dir_val_p =
+            (N_dir > 0) ? dir_val.data_ptr<scalar_t>() : nullptr;
+
+        apply_bcs_2d_kernel<scalar_t>
+            <<<dim3(gridX, total, 1), dim3(blockX, 1, 1), 0, stream>>>(
+                u.data_ptr<scalar_t>(),
+                v.data_ptr<scalar_t>(),
+                shapes.data_ptr<int64_t>(),
+                neu_p, N_neu,
+                dir_p, dir_val_p, N_dir);
+    });
+}
+
 TORCH_LIBRARY_IMPL(lilytorch_kernels, CUDA, m) {
     m.impl("streaming_sdf_min_2d",       &streaming_sdf_min_2d_cuda);
     m.impl("streaming_sdf_min_2d_multi", &streaming_sdf_min_2d_multi_cuda);
+    m.impl("bdim_forces_2d_multi",       &bdim_forces_2d_multi_cuda);
+    m.impl("apply_bcs_2d",               &apply_bcs_2d_cuda);
 }
 
 }  // namespace lilytorch_kernels

@@ -131,6 +131,39 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " Tensor(f!) sparse_cc_flat,"
         " int interp_method=0"
         ") -> ()");
+
+    // 2-D forces kernel — analogue of bdim_forces_3d_multi.  Reads the
+    // per-body cc-SDF cached in ``sparse_cc_flat`` (populated by
+    // streaming_sdf_min_2d_multi).  ``out`` is float64 and has 8
+    // channels per body:
+    //   [fv_x, fv_y, t_v, fp_x, fp_y, t_p, 0, 0]
+    // where t_* are the scalar out-of-plane torques and the trailing
+    // two slots are reserved (always written as 0).
+    m.def(
+        "bdim_forces_2d_multi("
+        "Tensor sparse_cc_flat, Tensor cell_offsets,"
+        " Tensor kin,"
+        " Tensor aabb_lo, Tensor aabb_dim,"
+        " Tensor gx, Tensor gy,"
+        " int u_i0, int u_j0, int Sj,"
+        " Tensor xs, Tensor ys,"
+        " Tensor px, Tensor py,"
+        " float eps_body, float eps_solver, float h2,"
+        " int max_vol_per_body,"
+        " Tensor(a!) out"
+        ") -> ()");
+
+    // 2-D fused boundary-condition writes — analogue of apply_bcs_3d.
+    //   shapes  : int64 [2,2]    -> (Nx, Ny) per component (u, v)
+    //   neu_desc: int32 [N_neu, 3] -> (comp, axis, side)
+    //   dir_desc: int32 [N_dir, 3] -> (comp, axis, offset)
+    //   dir_val : float[N_dir]
+    m.def(
+        "apply_bcs_2d("
+        "Tensor(a!) u, Tensor(b!) v,"
+        " Tensor shapes, Tensor neu_desc, Tensor dir_desc, Tensor dir_val,"
+        " int max_line_dim"
+        ") -> ()");
 }
 
 }  // namespace lilytorch_kernels

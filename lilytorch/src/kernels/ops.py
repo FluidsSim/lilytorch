@@ -17,6 +17,8 @@ __all__ = [
     "apply_bcs_3d",
     "streaming_sdf_min_2d",
     "streaming_sdf_min_2d_multi",
+    "bdim_forces_2d_multi",
+    "apply_bcs_2d",
 ]
 
 
@@ -249,4 +251,66 @@ def streaming_sdf_min_2d_multi(
         body_u, body_v,
         sparse_cc_flat,
         int(interp_method),
+    )
+
+
+def bdim_forces_2d_multi(
+        sparse_cc_flat: Tensor, cell_offsets: Tensor,
+        kin: Tensor,
+        aabb_lo: Tensor,
+        aabb_dim: Tensor,
+        gx: Tensor, gy: Tensor,
+        u_i0: int, u_j0: int,
+        Sj: int,
+        xs: Tensor, ys: Tensor,
+        px: Tensor, py: Tensor,
+        eps_body: float, eps_solver: float, h2: float,
+        max_vol_per_body: int,
+        out: Tensor) -> None:
+    """2-D analogue of :func:`bdim_forces_3d_multi`.
+
+    Per-body force/torque integration over the AABB.  Reads the
+    per-body cell-centred SDF cached in ``sparse_cc_flat`` (populated
+    by :func:`streaming_sdf_min_2d_multi`) instead of re-sampling it.
+
+    ``out`` is float64 with 8 channels per body:
+
+        ``[fv_x, fv_y, t_v, fp_x, fp_y, t_p, 0, 0]``
+
+    where ``t_v`` and ``t_p`` are the scalar out-of-plane torques
+    ``arm_x*f_y - arm_y*f_x``; the trailing two slots are reserved
+    (the kernel writes 0 there) and exist for layout symmetry with the
+    12-channel 3-D op.
+    """
+    return torch.ops.lilytorch_kernels.bdim_forces_2d_multi.default(
+        sparse_cc_flat, cell_offsets,
+        kin,
+        aabb_lo, aabb_dim,
+        gx, gy,
+        int(u_i0), int(u_j0),
+        int(Sj),
+        xs, ys, px, py,
+        float(eps_body), float(eps_solver), float(h2),
+        int(max_vol_per_body),
+        out,
+    )
+
+
+def apply_bcs_2d(
+        u: Tensor, v: Tensor,
+        shapes: Tensor,
+        neu_desc: Tensor,
+        dir_desc: Tensor,
+        dir_val: Tensor,
+        max_line_dim: int) -> None:
+    """Fused 2-D boundary-condition writes (Neumann + Dirichlet).
+
+    Mutates ``u`` and ``v`` in place.  See :func:`apply_bcs_3d` for the
+    descriptor layout; here ``shapes`` is int64 ``[2, 2]`` with rows
+    (Nx, Ny) for u and v, and ``axis`` is restricted to 0 (x) or 1 (y).
+    """
+    return torch.ops.lilytorch_kernels.apply_bcs_2d.default(
+        u, v,
+        shapes, neu_desc, dir_desc, dir_val,
+        int(max_line_dim),
     )
