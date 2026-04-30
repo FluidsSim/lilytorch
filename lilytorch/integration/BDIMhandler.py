@@ -1190,6 +1190,7 @@ class BDIMhandler:
             comp.sdf_val, comp.sdf_val_u, comp.sdf_val_v, comp.sdf_val_w,
             comp.body_u,  comp.body_v,    comp.body_w,
             sparse_flat,
+            getattr(self.fluid_solver, '_sdf_interp_method', 0),
         )
 
         # Split sparse_flat into per-body slabs and store
@@ -1371,6 +1372,7 @@ class BDIMhandler:
                 comp.sdf_val, comp.sdf_val_u, comp.sdf_val_v, comp.sdf_val_w,
                 comp.body_u,  comp.body_v,    comp.body_w,
                 sparse_cc,
+                getattr(self.fluid_solver, '_sdf_interp_method', 0),
             )
 
             comp._sdf_sparse[body_i] = (aabb, sparse_cc)

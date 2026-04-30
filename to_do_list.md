@@ -23,10 +23,10 @@ diff_u, diff_v, diff_w
 - the gen_config_full_pool.py simulation in cpu mode does not seem to utilize multiple cores.
 - The nbforces cost analysis plotted in cost_scaling_loglog.png reveals some scaling of the costs of "Other (residual)" and "Body update (SDF)". I do not understand why, since the cropping approach with aabb boxes should (in my view), maintain the same cost at different scales. Unless the domain size remains the same and just the number of grid points increases, in which case the portion of the domain that includes the body increases, so the operations should indeed increase. Please clarify.
 - Simplify methods for cost optimization. After substantial testing of the different methods for running the cost analysis in run_scaling_conditions_pipeline.py the best method is nbforces_opt. Remove all the other methods, except for keeping the old one for reference (no cropping, no batching method for reference).
+- Implement triquadratic interpolation option for evaluating the sdf functions in the cuda/C++ kernels (`streaming_sdf_min_3d`, `streaming_sdf_min_3d_multi`). Mirrors the pytorch_interpolation biquadratic-Lagrange algorithm extended to 3D (3x3x3 stencil, falls back to trilinear in the boundary layer). Optionally enabled by the user via the `sdf_interp_method` solver config key (`"trilinear"` (default) | `"triquadratic"`), exposed on `BaseSimConfig`. CPU implementation validated against a pure-PyTorch reference in `lilytorch/src/kernels/test_streaming_sdf_self.py`.
 
 
 # HIGH PRIORITY:
-- Implement triquadratic interpolation option similar to that implemented in pytorch_interpolation for evaluating the sdf functions in the cuda/C++ kernels. This should be optionally set by the user via a meta parameter.
 - Implement cuda kernels for 2d simulations in the style used for 2d simulations and implement the cost analysis pipeline similar to run_scaling_conditions_pipeline.py for 2d simulations. Also bilines/biquaddratic kernels similar to pytorch_interpolations. I will then test it.
 - replace pytorch_interpolation with existing precompiled cuda/c++ kernels or write new ones if necessary in the kernel/ folder.
 - Implement 2nd order accurate force method also for the cuda/C++ kernel solver version (currently only in non cuda/c++ kernel mode)

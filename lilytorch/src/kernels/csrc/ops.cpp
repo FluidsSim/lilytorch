@@ -45,7 +45,8 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " int i0, int i1, int j0, int j1, int k0, int k1,"
         " Tensor(a!) sdf_cc, Tensor(b!) sdf_u, Tensor(c!) sdf_v, Tensor(d!) sdf_w,"
         " Tensor(e!) body_u, Tensor(f!) body_v, Tensor(g!) body_w,"
-        " Tensor(h!) sparse_cc"
+        " Tensor(h!) sparse_cc,"
+        " int interp_method=0"
         ") -> ()");
     m.def(
         "streaming_sdf_min_3d_multi("
@@ -59,7 +60,8 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " int max_vol_per_body,"
         " Tensor(a!) sdf_cc, Tensor(b!) sdf_u, Tensor(c!) sdf_v, Tensor(d!) sdf_w,"
         " Tensor(e!) body_u, Tensor(f!) body_v, Tensor(g!) body_w,"
-        " Tensor(h!) sparse_cc_flat"
+        " Tensor(h!) sparse_cc_flat,"
+        " int interp_method=0"
         ") -> ()");
     // Forces kernel: reads the per-body cc-SDF cached in `sparse_cc_flat`
     // (populated by streaming_sdf_min_3d_multi), so it no longer needs the

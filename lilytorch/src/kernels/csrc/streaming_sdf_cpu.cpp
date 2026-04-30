@@ -139,6 +139,96 @@ static inline scalar_t trilinear_sample_uniform(
 }
 
 // =====================================================================
+//  Triquadratic sample on a UNIFORM body grid.
+//
+//  Lagrange interpolation on a 3x3x3 stencil [ix-1, ix, ix+1]^3 with the
+//  same lower-bracketing convention as the trilinear sampler:
+//     ix = floor((xq - bx0) * inv_dx)   (clamped to [0, M-2])
+//     f  = (xq - bx0) * inv_dx - ix     (in [0, 1])
+//  The Lagrange weights for centered grid points x_{ix-1}, x_{ix}, x_{ix+1}
+//  reduce on a uniform grid to:
+//     w_-1(f) = 0.5 * f * (f - 1)
+//     w_ 0(f) = 1 - f * f
+//     w_+1(f) = 0.5 * f * (f + 1)
+//  and the trilinear corner case (f -> 0 or 1) becomes the trilinear value.
+//
+//  When the lower stencil neighbour falls outside the body grid on any
+//  axis (ix == 0), we fall back to trilinear on that sample to mirror
+//  the pytorch_interpolation biquadratic behaviour and avoid sampling
+//  invalid memory.  In BDIM SDF tables this only happens for queries
+//  that already sit beyond the body's far-field padding, where the SDF
+//  is monotone and trilinear is fine.
+// =====================================================================
+template <typename scalar_t>
+static inline scalar_t triquadratic_sample_uniform(
+    const scalar_t* F,
+    const int Mx, const int My, const int Mz,
+    const scalar_t bx0, const scalar_t by0, const scalar_t bz0,
+    const scalar_t inv_dx, const scalar_t inv_dy, const scalar_t inv_dz,
+    scalar_t xq, scalar_t yq, scalar_t zq)
+{
+    scalar_t tx = (xq - bx0) * inv_dx;
+    scalar_t ty = (yq - by0) * inv_dy;
+    scalar_t tz = (zq - bz0) * inv_dz;
+    const scalar_t Mx_lim = (scalar_t)(Mx - 1);
+    const scalar_t My_lim = (scalar_t)(My - 1);
+    const scalar_t Mz_lim = (scalar_t)(Mz - 1);
+    if (tx < (scalar_t)0) tx = (scalar_t)0; else if (tx > Mx_lim) tx = Mx_lim;
+    if (ty < (scalar_t)0) ty = (scalar_t)0; else if (ty > My_lim) ty = My_lim;
+    if (tz < (scalar_t)0) tz = (scalar_t)0; else if (tz > Mz_lim) tz = Mz_lim;
+
+    int ix = (int)tx; if (ix > Mx - 2) ix = Mx - 2;
+    int iy = (int)ty; if (iy > My - 2) iy = My - 2;
+    int iz = (int)tz; if (iz > Mz - 2) iz = Mz - 2;
+
+    // Boundary fallback to trilinear on any axis whose lower stencil
+    // neighbour (ix-1) is out of range.  The body grid is at least 2 wide
+    // on each axis (otherwise the trilinear sampler would be invalid as
+    // well), but ix-1 < 0 for queries in the first cell.
+    if (ix < 1 || iy < 1 || iz < 1 ||
+        Mx < 3 || My < 3 || Mz < 3) {
+        return trilinear_sample_uniform<scalar_t>(
+            F, Mx, My, Mz, bx0, by0, bz0,
+            inv_dx, inv_dy, inv_dz, xq, yq, zq);
+    }
+
+    const scalar_t fx = tx - (scalar_t)ix;
+    const scalar_t fy = ty - (scalar_t)iy;
+    const scalar_t fz = tz - (scalar_t)iz;
+
+    const scalar_t half = (scalar_t)0.5;
+    const scalar_t wxm = half * fx * (fx - (scalar_t)1);
+    const scalar_t wx0 = (scalar_t)1 - fx * fx;
+    const scalar_t wxp = half * fx * (fx + (scalar_t)1);
+    const scalar_t wym = half * fy * (fy - (scalar_t)1);
+    const scalar_t wy0 = (scalar_t)1 - fy * fy;
+    const scalar_t wyp = half * fy * (fy + (scalar_t)1);
+    const scalar_t wzm = half * fz * (fz - (scalar_t)1);
+    const scalar_t wz0 = (scalar_t)1 - fz * fz;
+    const scalar_t wzp = half * fz * (fz + (scalar_t)1);
+
+    const int s2 = Mz;
+    const int s1 = My * Mz;
+    const int base = (ix - 1) * s1 + (iy - 1) * s2 + (iz - 1);
+    // Each F lookup = base + dx*s1 + dy*s2 + dz with dx,dy,dz in {0,1,2}.
+    // Factor by x: 3 inner-y reductions; then sum.
+    auto plane = [&](int dx_off) -> scalar_t {
+        const int b0 = base + dx_off * s1;
+        // y = -1
+        const scalar_t r_m =
+            wzm * F[b0 + 0]      + wz0 * F[b0 + 1]      + wzp * F[b0 + 2];
+        // y =  0
+        const scalar_t r_0 =
+            wzm * F[b0 + s2]     + wz0 * F[b0 + s2 + 1] + wzp * F[b0 + s2 + 2];
+        // y = +1
+        const scalar_t r_p =
+            wzm * F[b0 + 2*s2]   + wz0 * F[b0 + 2*s2 + 1] + wzp * F[b0 + 2*s2 + 2];
+        return wym * r_m + wy0 * r_0 + wyp * r_p;
+    };
+    return wxm * plane(0) + wx0 * plane(1) + wxp * plane(2);
+}
+
+// =====================================================================
 //  Per-cell update body shared by single- and multi-body launchers.
 //
 //  Each cell is touched once per launch -> no atomics needed (matches
@@ -176,7 +266,9 @@ static inline void update_cell(
     const std::int64_t g_idx, const std::int64_t sparse_idx,
     scalar_t* sdf_cc, scalar_t* sdf_u, scalar_t* sdf_v, scalar_t* sdf_w,
     scalar_t* bU, scalar_t* bV, scalar_t* bW,
-    scalar_t* sparse_cc)
+    scalar_t* sparse_cc,
+    // 0 = trilinear (default), 1 = triquadratic (Lagrange 3x3x3).
+    const int interp_method)
 {
     // Body-frame CC point (single rotation; the 3 face points are derived
     // from it by precomputed deltas).
@@ -185,19 +277,28 @@ static inline void update_cell(
     const scalar_t byq = r10*dxw + r11*dyw + r12*dzw;
     const scalar_t bzq = r20*dxw + r21*dyw + r22*dzw;
 
+    // Sampler dispatch: chosen once per cell, branch is highly predictable
+    // across a single op call (interp_method is constant per launch).
+    auto sample = [&](scalar_t xqs, scalar_t yqs, scalar_t zqs) -> scalar_t {
+        if (interp_method == 1) {
+            return triquadratic_sample_uniform<scalar_t>(
+                F, Mx, My, Mz, bx0, by0, bz0,
+                inv_dx, inv_dy, inv_dz, xqs, yqs, zqs);
+        }
+        return trilinear_sample_uniform<scalar_t>(
+            F, Mx, My, Mz, bx0, by0, bz0,
+            inv_dx, inv_dy, inv_dz, xqs, yqs, zqs);
+    };
+
     // ---- cc ----
     {
-        const scalar_t s = trilinear_sample_uniform<scalar_t>(
-            F, Mx, My, Mz, bx0, by0, bz0, inv_dx, inv_dy, inv_dz,
-            bxq, byq, bzq);
+        const scalar_t s = sample(bxq, byq, bzq);
         sparse_cc[sparse_idx] = s;
         if (s < sdf_cc[g_idx]) sdf_cc[g_idx] = s;
     }
     // ---- u-face ----
     {
-        const scalar_t s = trilinear_sample_uniform<scalar_t>(
-            F, Mx, My, Mz, bx0, by0, bz0, inv_dx, inv_dy, inv_dz,
-            bxq + du_x, byq + du_y, bzq + du_z);
+        const scalar_t s = sample(bxq + du_x, byq + du_y, bzq + du_z);
         if (s < sdf_u[g_idx]) {
             sdf_u[g_idx] = s;
             bU[g_idx] = lv_x + av_y*(zc - cm_z) - av_z*(yc - cm_y);
@@ -205,9 +306,7 @@ static inline void update_cell(
     }
     // ---- v-face ----
     {
-        const scalar_t s = trilinear_sample_uniform<scalar_t>(
-            F, Mx, My, Mz, bx0, by0, bz0, inv_dx, inv_dy, inv_dz,
-            bxq + dv_x, byq + dv_y, bzq + dv_z);
+        const scalar_t s = sample(bxq + dv_x, byq + dv_y, bzq + dv_z);
         if (s < sdf_v[g_idx]) {
             sdf_v[g_idx] = s;
             bV[g_idx] = lv_y + av_z*(xc - cm_x) - av_x*(zc - cm_z);
@@ -215,9 +314,7 @@ static inline void update_cell(
     }
     // ---- w-face ----
     {
-        const scalar_t s = trilinear_sample_uniform<scalar_t>(
-            F, Mx, My, Mz, bx0, by0, bz0, inv_dx, inv_dy, inv_dz,
-            bxq + dw_x, byq + dw_y, bzq + dw_z);
+        const scalar_t s = sample(bxq + dw_x, byq + dw_y, bzq + dw_z);
         if (s < sdf_w[g_idx]) {
             sdf_w[g_idx] = s;
             bW[g_idx] = lv_z + av_x*(yc - cm_y) - av_y*(xc - cm_x);
@@ -248,7 +345,8 @@ void streaming_sdf_min_3d_cpu(
     const int64_t k0, const int64_t k1,
     at::Tensor sdf_cc, at::Tensor sdf_u, at::Tensor sdf_v, at::Tensor sdf_w,
     at::Tensor body_u, at::Tensor body_v, at::Tensor body_w,
-    at::Tensor sparse_cc)
+    at::Tensor sparse_cc,
+    const int64_t interp_method)
 {
     TORCH_CHECK(R_T.size()      == 9, "R_T must have 9 elements");
     TORCH_CHECK(body_pos.size() == 3, "body_pos must have 3 elements");
@@ -330,7 +428,8 @@ void streaming_sdf_min_3d_cpu(
                 gx_ptr[i], gy_ptr[j], gz_ptr[k],
                 g_idx, /*sparse_idx=*/(std::int64_t)tid,
                 sdf_cc_ptr, sdf_u_ptr, sdf_v_ptr, sdf_w_ptr,
-                bU_ptr, bV_ptr, bW_ptr, sp_ptr);
+                bU_ptr, bV_ptr, bW_ptr, sp_ptr,
+                (int)interp_method);
         }
         });
     });
@@ -360,7 +459,8 @@ void streaming_sdf_min_3d_multi_cpu(
     const int64_t /*max_vol_per_body*/,
     at::Tensor sdf_cc, at::Tensor sdf_u, at::Tensor sdf_v, at::Tensor sdf_w,
     at::Tensor body_u, at::Tensor body_v, at::Tensor body_w,
-    at::Tensor sparse_cc_flat)
+    at::Tensor sparse_cc_flat,
+    const int64_t interp_method)
 {
     const int B = (int)aabb_dim.size(0);
     if (B <= 0) return;
@@ -467,7 +567,8 @@ void streaming_sdf_min_3d_multi_cpu(
                     gx_ptr[i], gy_ptr[j], gz_ptr[k],
                     g_idx, sparse_base + (std::int64_t)local,
                     sdf_cc_p, sdf_u_p, sdf_v_p, sdf_w_p,
-                    bU_p, bV_p, bW_p, sparse_p);
+                    bU_p, bV_p, bW_p, sparse_p,
+                    (int)interp_method);
             }
             });
         }

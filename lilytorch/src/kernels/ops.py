@@ -33,9 +33,15 @@ def streaming_sdf_min_3d(
         i0: int, i1: int, j0: int, j1: int, k0: int, k1: int,
         sdf_cc: Tensor, sdf_u: Tensor, sdf_v: Tensor, sdf_w: Tensor,
         body_u: Tensor, body_v: Tensor, body_w: Tensor,
-        sparse_cc: Tensor) -> None:
+        sparse_cc: Tensor,
+        interp_method: int = 0) -> None:
     """One-body fused SDF / face-velocity running-min update on a fluid
     grid AABB.  See ``csrc/cuda/streaming_sdf.cu`` for kernel details.
+
+    ``interp_method`` selects the body-SDF sampler:
+      * ``0`` -- trilinear (default, matches the historical behaviour);
+      * ``1`` -- triquadratic Lagrange (3x3x3 stencil, falls back to
+        trilinear in the boundary layer of the body grid).
     """
     return torch.ops.lilytorch_kernels.streaming_sdf_min_3d.default(
         F, bx, by, bz,
@@ -49,6 +55,7 @@ def streaming_sdf_min_3d(
         sdf_cc, sdf_u, sdf_v, sdf_w,
         body_u, body_v, body_w,
         sparse_cc,
+        int(interp_method),
     )
 
 
@@ -68,8 +75,15 @@ def streaming_sdf_min_3d_multi(
         max_vol_per_body: int,
         sdf_cc: Tensor, sdf_u: Tensor, sdf_v: Tensor, sdf_w: Tensor,
         body_u: Tensor, body_v: Tensor, body_w: Tensor,
-        sparse_cc_flat: Tensor) -> None:
-    """Multi-body fused SDF / face-velocity running-min update."""
+        sparse_cc_flat: Tensor,
+        interp_method: int = 0) -> None:
+    """Multi-body fused SDF / face-velocity running-min update.
+
+    ``interp_method`` selects the body-SDF sampler:
+      * ``0`` -- trilinear (default);
+      * ``1`` -- triquadratic Lagrange (3x3x3 stencil, falls back to
+        trilinear in the boundary layer of the body grid).
+    """
     return torch.ops.lilytorch_kernels.streaming_sdf_min_3d_multi.default(
         F_flat, F_offsets,
         bx_flat, bx_offsets,
@@ -82,6 +96,7 @@ def streaming_sdf_min_3d_multi(
         sdf_cc, sdf_u, sdf_v, sdf_w,
         body_u, body_v, body_w,
         sparse_cc_flat,
+        int(interp_method),
     )
 
 

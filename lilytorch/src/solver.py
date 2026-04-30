@@ -970,6 +970,31 @@ class FluidSolver:
             self._custom_trilinear_3d = True
             self._forces_shared_union = True
             self._forces_narrow_band = True
+        # Body-SDF sampling method used inside the streaming C++/CUDA
+        # kernels (``streaming_sdf_min_3d`` / ``..._multi``):
+        #   * ``"trilinear"`` (default) -- 2x2x2 stencil, matches the
+        #     historical behaviour;
+        #   * ``"triquadratic"`` -- 3x3x3 Lagrange stencil for higher-order
+        #     SDF accuracy near the body surface; falls back to trilinear
+        #     in the boundary layer of the body grid.
+        # Accepts either the string form or an int (0 / 1) for
+        # convenience from CLI / YAML configs.
+        _interp_raw = solver.get("sdf_interp_method", "trilinear")
+        if isinstance(_interp_raw, str):
+            _interp_map = {"trilinear": 0, "triquadratic": 1}
+            if _interp_raw not in _interp_map:
+                raise ValueError(
+                    f"sdf_interp_method must be one of {list(_interp_map)} "
+                    f"(got {_interp_raw!r})"
+                )
+            self._sdf_interp_method = _interp_map[_interp_raw]
+        else:
+            self._sdf_interp_method = int(_interp_raw)
+            if self._sdf_interp_method not in (0, 1):
+                raise ValueError(
+                    "sdf_interp_method int form must be 0 (trilinear) or "
+                    f"1 (triquadratic); got {self._sdf_interp_method}"
+                )
         # Lazy-allocated padded buffers (see _init_forces_narrow_batch)
         self._fnb_D = None        # (D_i, D_j, D_k)
         self._fnb_sdf = None      # (B, D_i, D_j, D_k)
