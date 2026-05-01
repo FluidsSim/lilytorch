@@ -202,7 +202,7 @@ def _compute_nu_t(self, *vel):
         return self._compute_carreau_nu_t(*vel)
     return None
 
-def _compute_nu_rho_for_forces(self, *vel):
+def _compute_nu_rho_for_forces(self, *vel, out=None):
     """Return ν·ρ for the force computation (scalar or tensor).
 
     * Constant viscosity:  returns ``self.nu * self.rho``  (scalar).
@@ -210,6 +210,13 @@ def _compute_nu_rho_for_forces(self, *vel):
 
     The result is cached in ``self._nu_rho_field`` so that the force
     computation does not recompute strain rates a second time.
+
+    Parameters
+    ----------
+    out : torch.Tensor, optional
+        Pre-allocated full-grid buffer.  If given, the variable-viscosity
+        result is written in place into ``out`` (avoiding a per-step
+        full-grid allocation).  Ignored for constant viscosity.
     """
     if not self.use_variable_viscosity:
         return self.nu * self.rho
@@ -226,5 +233,9 @@ def _compute_nu_rho_for_forces(self, *vel):
             rho=float(self.rho),
             nu_max=self.carreau_nu_max,
         )
-    self._nu_rho_field = nu_eff * self.rho
+    if out is not None:
+        torch.mul(nu_eff, self.rho, out=out)
+        self._nu_rho_field = out
+    else:
+        self._nu_rho_field = nu_eff * self.rho
     return self._nu_rho_field
