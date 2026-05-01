@@ -24,6 +24,12 @@ from scipy.spatial.transform import Rotation
 from lilytorch.src.solver import FluidSolver
 from lilytorch.src.body import (rotate_grid_2d, rotate_grid_3d,
                                 _rotate_grid_3d_compiled)
+from lilytorch.src.kernels import streaming_sdf_forces_fused_3d_multi
+from lilytorch.src.kernels import RegularGridInterpolator3D
+from lilytorch.src.kernels import streaming_sdf_min_2d_multi
+from lilytorch.src.kernels import streaming_sdf_min_3d
+from lilytorch.src.kernels import streaming_sdf_min_3d_multi
+
 import torch
 
 
@@ -927,7 +933,6 @@ class BDIMhandler:
         eliminating B torch.ops dispatches/step.  Requires that ALL
         bodies expose `_stream_meta` (regular-grid SDF).
         """
-        from lilytorch.src.kernels import streaming_sdf_min_3d_multi
 
         fs   = self.fluid_solver
         comp = fs.composite_body
@@ -1189,7 +1194,6 @@ class BDIMhandler:
         )
 
         if _use_fused:
-            from lilytorch.src.kernels import streaming_sdf_forces_fused_3d_multi
             # Per-body densities: use rho_body per body (same for all for now;
             # per-link densities can be wired here in future).
             rho_bodies = torch.full(
@@ -1198,11 +1202,15 @@ class BDIMhandler:
             )
             # winning_rho_cc: pre-filled with rho_fluid; the fused kernel
             # stamps each cell with the winning body's density.
-            winning_rho_cc = torch.full(
-                comp.sdf_val.shape,
-                float(fs.rho),
-                device=self.device, dtype=self.dtype,
-            )
+            # Reuse the persistent buffer to avoid a full-grid allocation
+            # every step (saves ~56 MB on a 900×300×52 grid).
+            _wrcc = getattr(comp, '_winning_rho_cc', None)
+            if _wrcc is None or _wrcc.shape != comp.sdf_val.shape:
+                _wrcc = torch.empty(
+                    comp.sdf_val.shape, device=self.device, dtype=self.dtype,
+                )
+            winning_rho_cc = _wrcc
+            winning_rho_cc.fill_(float(fs.rho))
             # (B, 12) force accumulator, pre-zeroed.
             fused_out = torch.zeros(
                 (B, 12), dtype=torch.float64, device=self.device,
@@ -1240,9 +1248,25 @@ class BDIMhandler:
                 fused_out,
             )
 
-            # Invalidate per-body sparse SDF cache (not populated by fused path).
+            # Fused path does not populate per-body CC-SDF slabs.
             for body_i in range(B):
                 comp._sdf_sparse[body_i] = None
+            # Cache the union AABB directly so _compute_union_aabb_3d can
+            # activate the cheap sub-block mu/normals path without reading
+            # _sdf_sparse.  Without this, _compute_union_aabb_3d returns
+            # None → _recompute_mu_normals_3d falls into the full-grid
+            # CUDA-graph (reduce-overhead) path, which statically holds
+            # ~2-3 GB of output + intermediate buffers for the full grid.
+            _u_i0 = _u_j0 = _u_k0 = 1 << 30
+            _u_i1 = _u_j1 = _u_k1 = -1
+            for _i0, _i1, _j0, _j1, _k0, _k1 in aabbs_for_split:
+                if _i0 < _u_i0: _u_i0 = _i0
+                if _j0 < _u_j0: _u_j0 = _j0
+                if _k0 < _u_k0: _u_k0 = _k0
+                if _i1 > _u_i1: _u_i1 = _i1
+                if _j1 > _u_j1: _u_j1 = _j1
+                if _k1 > _u_k1: _u_k1 = _k1
+            comp._fused_union_aabb = (_u_i0, _u_i1, _u_j0, _u_j1, _u_k0, _u_k1)
 
             # Store fused outputs on the composite body for downstream use.
             comp._fused_forces_out  = fused_out
@@ -1288,6 +1312,7 @@ class BDIMhandler:
 
             comp._fused_forces_out = None
             comp._winning_rho_cc   = None
+            comp._fused_union_aabb = None   # clear stale fused-path cache
 
             comp._stream_multi_step = {
                 'kin':            kin,
@@ -1303,7 +1328,6 @@ class BDIMhandler:
 
     # ------------------------------------------------------------------
     def _update_3d_streaming(self, t, iteration, dt=1):
-        from lilytorch.src.kernels import streaming_sdf_min_3d
 
         # Multi-body batched fast path (Phase C): one Python op call
         # handles all bodies, eliminating ~B torch.ops dispatches/step
@@ -1646,7 +1670,6 @@ class BDIMhandler:
               ``body.cnt_update``, ``body.r_com`` and the optional
               contour mask, exactly like the legacy 2-D path.
         """
-        from lilytorch.src.kernels import streaming_sdf_min_2d_multi
 
         fs   = self.fluid_solver
         comp = fs.composite_body
@@ -2022,7 +2045,6 @@ class BDIMhandler:
         ``grid_sample(padding_mode='border')`` semantics via
         ``fill_method=3``.
         """
-        from lilytorch.src.kernels import RegularGridInterpolator3D
 
         comp = self.fluid_solver.composite_body
         n_built = 0
@@ -2234,7 +2256,7 @@ class BDIMhandler:
         if not fs.terminate:
 
             # 1. update SDF + body velocities from FARMS kinematics
-            self.update(t, iteration, dt=timestep)
+            # self.update(t, iteration, dt=timestep)
 
             # 2. recompute mu / normal fields
             if self.ndim == 3:

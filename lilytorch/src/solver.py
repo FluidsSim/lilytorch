@@ -1141,23 +1141,30 @@ class FluidSolver(PlottingMixin):
         """
         comp = self.composite_body
         sparse = getattr(comp, '_sdf_sparse', None)
-        if not sparse or sparse[0] is None:
-            return None
         u_i0 = u_j0 = u_k0 = 1 << 30
         u_i1 = u_j1 = u_k1 = -1
-        for entry in sparse:
-            if entry is None:
+        if not sparse or sparse[0] is None:
+            # Fused SDF+forces path does not populate _sdf_sparse; instead it
+            # stores the union AABB directly so the cheap sub-block path can
+            # still activate without the CC-SDF per-body slabs.
+            raw = getattr(comp, '_fused_union_aabb', None)
+            if raw is None:
                 return None
-            aabb_i = entry[0]
-            if aabb_i is None:
-                return None
-            i0, i1, j0, j1, k0, k1 = aabb_i
-            if i0 < u_i0: u_i0 = i0
-            if j0 < u_j0: u_j0 = j0
-            if k0 < u_k0: u_k0 = k0
-            if i1 > u_i1: u_i1 = i1
-            if j1 > u_j1: u_j1 = j1
-            if k1 > u_k1: u_k1 = k1
+            u_i0, u_i1, u_j0, u_j1, u_k0, u_k1 = raw
+        else:
+            for entry in sparse:
+                if entry is None:
+                    return None
+                aabb_i = entry[0]
+                if aabb_i is None:
+                    return None
+                i0, i1, j0, j1, k0, k1 = aabb_i
+                if i0 < u_i0: u_i0 = i0
+                if j0 < u_j0: u_j0 = j0
+                if k0 < u_k0: u_k0 = k0
+                if i1 > u_i1: u_i1 = i1
+                if j1 > u_j1: u_j1 = j1
+                if k1 > u_k1: u_k1 = k1
         Ni, Nj, Nk = comp.sdf_val.shape
         u_i0 = max(0, u_i0 - halo); u_i1 = min(Ni, u_i1 + halo)
         u_j0 = max(0, u_j0 - halo); u_j1 = min(Nj, u_j1 + halo)

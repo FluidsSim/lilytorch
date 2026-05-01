@@ -22,9 +22,14 @@ class SimConfig(BaseSimConfig):
         self.compute_sdf          = True
         self.convexify            = True
         self.headless             = False
-        self.smagorinsky_cs       = 0.2
+        self.smagorinsky_cs       = 0.
 
-        self.use_kernels = True
+        self.use_kernels      = True
+        self.fused_sdf_forces = True
+        self.poisson_compile  = True
+        self.compile_adv_diff = True
+        self.compile_forces   = True
+        self.compile_sdf      = True
 
         # ── Animats ───────────────────────────────────────────────────
         self.animats_pars = [
@@ -83,10 +88,6 @@ class SimConfig(BaseSimConfig):
         self.poisson_bc_type         = "free"
         self.zero_pressure_inside    = True
 
-        self.poisson_compile         = True
-        self.compile_adv_diff        = True
-        self.compile_forces          = True
-        self.compile_sdf             = True
 
         # # u: no-penetration on x-walls, free-slip on y/z-walls
         # self.bc_type_u   = ["D", "D", "N", "N", "N", "N"]
