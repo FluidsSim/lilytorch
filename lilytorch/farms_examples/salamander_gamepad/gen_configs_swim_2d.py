@@ -18,11 +18,18 @@ class SimConfig(BaseSimConfig):
 
         # ── Hardware ──────────────────────────────────────────────────
         self.use_bdim     = True
-        self.use_gpu      = False
+        self.use_gpu      = True
         self.compute_sdf  = True
         self.wall_height  = 0.02
         self.water_height = 0.015
         self.stack_folder = "salamander"
+
+        self.use_kernels      = True
+        self.fused_sdf_forces = True
+        self.poisson_compile  = True
+        self.compile_adv_diff = True
+        self.compile_forces   = True
+        self.compile_sdf      = True
 
         # ── Animats ───────────────────────────────────────────────────
         self.animats_pars = [
@@ -32,7 +39,7 @@ class SimConfig(BaseSimConfig):
                 "control_type": "position",
                 "gains"       : [0.001, .0002, 0],
                 "controller_config": {
-                    'path'      : "lilytorch.farms_examples.salamander.pd_controller_swim.PositionController",
+                    'path'      : "lilytorch.farms_examples.salamander_gamepad.control.PositionController",
                     'freq'      : 1,
                     'twl'       : 10,
                     'amp'       : 200,
@@ -47,17 +54,19 @@ class SimConfig(BaseSimConfig):
         # ── 2-D grid ─────────────────────────────────────────────────
         self.Nx   = 1024
         self.Ny   = 256
-        self.xmin = -0.13
-        self.xmax =  0.27
-        self.ymin = -0.05
-        self.ymax =  0.05
+        # self.Nx   = 1024
+        # self.Ny   = 256
+        self.xmin = -0.4
+        self.xmax =  0.4
+        self.ymin = -0.1
+        self.ymax =  0.1
 
         # ── Physics ───────────────────────────────────────────────────
         self.poisson_method    = "fft"
         self.timestep          = 0.01
         self.convection_method = "implicit"
         self.n_iterations      = 8001
-        self.save_every        = 50
+        self.save_frames       = False
         self.num_sub_steps     = 1
 
         # ── MuJoCo ───────────────────────────────────────────────────
@@ -114,10 +123,12 @@ class SimConfig(BaseSimConfig):
                 "nx_vis"        : 120,
                 "ny_vis"        : 120,
                 "alpha"         : 0.65,
-                "z_offset"      : 0.005,
+                "z_offset"      : 0.015,
                 "smooth_sigma"  : 0,
                 "crop_boundary" : 0,
                 "update_every"  : 20,
+                "vmin"          : -10,
+                "vmax"          : 10,
             },
         })
 
