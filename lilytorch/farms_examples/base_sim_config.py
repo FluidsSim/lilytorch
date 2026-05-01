@@ -164,6 +164,13 @@ class BaseSimConfig:
         # Solver mode: pure-PyTorch (False) vs streaming C++/CUDA kernels (True).
         # ``None`` → solver default (True).  Independent of ``use_gpu``.
         self.use_kernels             = None
+        # Within the kernel path: fold the lagged force/torque integral into
+        # the same kernel pass that computes the running-min SDF
+        # (``streaming_sdf_forces_fused_3d_multi``).  Eliminates the per-body
+        # ``sparse_cc_flat`` slabs.  ``None`` → solver default (True when
+        # ``use_kernels=True``).  Set to ``False`` only when debugging the
+        # older two-pass kernel path or for memory-comparison studies.
+        self.fused_sdf_forces        = None
         # Body-SDF sampling method for the streaming kernels:
         #   "trilinear" (default) | "triquadratic"
         self.sdf_interp_method       = None
@@ -673,6 +680,7 @@ class BaseSimConfig:
             ("compile_adv_diff",        self.compile_adv_diff),
             ("compile_forces",          self.compile_forces),
             ("compile_sdf",             self.compile_sdf),
+            ("fused_sdf_forces",        self.fused_sdf_forces),
             ("dtype",                   self.dtype),
             ("zero_pressure_inside",    self.zero_pressure_inside),
             ("force_method",            self.force_method),

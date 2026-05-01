@@ -153,18 +153,31 @@ per-AABB kernel — see *§3. Remaining levers* and the proposal in
 
 ## 4. How to validate these numbers on hardware
 
-There are two validation paths in the repo:
+There are three validation tools in the repo:
 
 * **Live, single-snapshot:** `estimate_mem.py` allocates a scaled-down
   problem and prints the per-buffer breakdown.  Run with the exact config
   you intend to use; compare with `nvidia-smi` after `solver.step_(0)`.
 
-* **Time-resolved:** `run_memory_profile_free_3d.py` runs a full free-
-  swimming step loop with `torch.cuda.memory._record_memory_history`
-  enabled and dumps a chrome-trace pickle.  Open it in
-  <https://pytorch.org/memory_viz> to see allocation lifetimes.  Use this
-  to confirm the **transient peak** rather than just the resident
-  footprint — it is the transient that tends to OOM the GPU.
+* **Time-resolved, single mode:** `run_memory_profile_free_3d.py` runs a
+  full free-swimming step loop with
+  `torch.cuda.memory._record_memory_history` enabled and dumps a
+  chrome-trace pickle.  Open it in <https://pytorch.org/memory_viz> to
+  see allocation lifetimes.  Use this to confirm the **transient peak**
+  rather than just the resident footprint — it is the transient that
+  tends to OOM the GPU.
+
+* **Side-by-side comparison across the three solver paths:**
+  `lilytorch/validation/memory_comparison_3d/run_memory_comparison.py`.
+  This is the **measurement counterpart of this document**.  It runs
+  the same FARMS in-process scenario under
+  ``no_kernels`` / ``kernels_separate`` / ``kernels_fused``
+  (each in its own subprocess so CUDA contexts and ``torch.compile``
+  caches are isolated), captures per-phase ``alloc / peak / reserved``
+  snapshots for a chosen "peak step", takes a tensor census attributing
+  the memory difference to specific buffer shapes, and prints a
+  comparison table with absolute and percentage savings.  See
+  ``lilytorch/validation/memory_comparison_3d/README.md`` for usage.
 
 A consistency check across the three is shown in the testing guide
 appended to this PR description.
