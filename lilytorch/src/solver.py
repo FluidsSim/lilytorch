@@ -481,6 +481,12 @@ class FluidSolver(PlottingMixin):
         # Phase B (3-D streaming SDF) and Phase D (3-D fused forces).
         self._streaming_sdf_3d = _uk
         self._streaming_forces_3d = _uk
+        # Fused Phase C+D: SDF + inline lagged force in one kernel pass.
+        # Eliminates sparse_cc_flat and union-AABB stress tensors.
+        # Disabled when use_kernels=False or fused_sdf_forces=False.
+        self._fused_sdf_forces_3d = _uk and bool(
+            solver.get("fused_sdf_forces", True)
+        )
         # The streaming 3-D path requires the per-body C++/CUDA trilinear
         # samplers (built in ``BDIMhandler._init_custom_trilinear_3d``).
         self._custom_trilinear_3d = _uk
@@ -1717,10 +1723,31 @@ class FluidSolver(PlottingMixin):
 
                 ui0, ui1, uj0, uj1, uk0, uk1 = u_aabb
                 usl = (slice(ui0, ui1), slice(uj0, uj1), slice(uk0, uk1))
-                self._ch_persist[usl]    = timestep / (self.rho_body + _drho * self.mu0_all_u[usl])
-                self._cv_persist[usl]    = timestep / (self.rho_body + _drho * self.mu0_all_v[usl])
-                self._cw_persist[usl]    = timestep / (self.rho_body + _drho * self.mu0_all_w[usl])
-                self._ch_cc_persist[usl] = timestep / (self.rho_body + _drho * self.mu0_all[usl])
+
+                # Use per-cell winning body density when available (fused path).
+                # winning_rho_cc[x] = rho_body of the body closest to x,
+                # pre-filled with rho_fluid outside all bodies.
+                _winning = getattr(self.composite_body, '_winning_rho_cc', None)
+                if _winning is not None:
+                    _rho_b_u   = _winning[usl]
+                    _rho_fluid = float(self.rho)
+                    self._ch_persist[usl]    = timestep / (
+                        _rho_b_u * (1 - self.mu0_all_u[usl]) +
+                        _rho_fluid * self.mu0_all_u[usl])
+                    self._cv_persist[usl]    = timestep / (
+                        _winning[usl] * (1 - self.mu0_all_v[usl]) +
+                        _rho_fluid * self.mu0_all_v[usl])
+                    self._cw_persist[usl]    = timestep / (
+                        _winning[usl] * (1 - self.mu0_all_w[usl]) +
+                        _rho_fluid * self.mu0_all_w[usl])
+                    self._ch_cc_persist[usl] = timestep / (
+                        _winning[usl] * (1 - self.mu0_all[usl]) +
+                        _rho_fluid * self.mu0_all[usl])
+                else:
+                    self._ch_persist[usl]    = timestep / (self.rho_body + _drho * self.mu0_all_u[usl])
+                    self._cv_persist[usl]    = timestep / (self.rho_body + _drho * self.mu0_all_v[usl])
+                    self._cw_persist[usl]    = timestep / (self.rho_body + _drho * self.mu0_all_w[usl])
+                    self._ch_cc_persist[usl] = timestep / (self.rho_body + _drho * self.mu0_all[usl])
                 return (self._ch_persist, self._cv_persist,
                         self._cw_persist, self._ch_cc_persist)
 

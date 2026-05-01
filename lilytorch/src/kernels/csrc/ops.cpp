@@ -82,6 +82,31 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " Tensor(a!) out"
         ") -> ()");
 
+    // Fused Phase C+D: SDF update + inline force integration (lagged forces).
+    // Replaces streaming_sdf_min_3d_multi + bdim_forces_3d_multi in one pass.
+    // Eliminates sparse_cc_flat and union-AABB stress tensors.
+    // Forces are one-step lagged (prev-step u/v/w/p/normals).
+    // nu_rho_field: size=1 (scalar ν·ρ) or size=grid (per-cell, Smagorinsky/Carreau).
+    // delta_order: 1 = cosine, 2 = Towers 2008 |∇φ| correction.
+    m.def(
+        "streaming_sdf_forces_fused_3d_multi("
+        "Tensor F_flat, Tensor F_offsets,"
+        " Tensor body_shapes, Tensor body_meta, Tensor kin,"
+        " Tensor aabb_lo, Tensor aabb_dim,"
+        " Tensor gx, Tensor gy, Tensor gz, float h_grid,"
+        " int max_vol_per_body,"
+        " Tensor(a!) sdf_cc, Tensor(b!) sdf_u, Tensor(c!) sdf_v, Tensor(d!) sdf_w,"
+        " Tensor(e!) body_u, Tensor(f!) body_v, Tensor(g!) body_w,"
+        " int interp_method,"
+        " Tensor rho_bodies,"
+        " Tensor(h!) winning_rho_cc,"
+        " Tensor u_prev, Tensor v_prev, Tensor w_prev, Tensor p_prev,"
+        " Tensor nx_cc,  Tensor ny_cc,  Tensor nz_cc,"
+        " Tensor nu_rho_field,"
+        " float eps_body, float eps_solver, float h3,"
+        " int delta_order,"
+        " Tensor(i!) out"
+        ") -> ()");
     m.def(
         "apply_bcs_3d("
         "Tensor(a!) u, Tensor(b!) v, Tensor(c!) w,"

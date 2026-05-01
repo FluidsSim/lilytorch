@@ -979,12 +979,31 @@ static void interpolate_3d_cpu(
 //  registers CPU stubs, so these implementations bind directly.
 // =====================================================================
 
+static void streaming_sdf_forces_fused_3d_multi_cpu(
+    const at::Tensor&, const at::Tensor&,
+    const at::Tensor&, const at::Tensor&, const at::Tensor&,
+    const at::Tensor&, const at::Tensor&,
+    const at::Tensor&, const at::Tensor&, const at::Tensor&,
+    double, int64_t,
+    at::Tensor, at::Tensor, at::Tensor, at::Tensor,
+    at::Tensor, at::Tensor, at::Tensor,
+    int64_t, const at::Tensor&, at::Tensor,
+    const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
+    const at::Tensor&, const at::Tensor&, const at::Tensor&,
+    const at::Tensor&, double, double, double, int64_t, at::Tensor)
+{
+    TORCH_CHECK(false, "streaming_sdf_forces_fused_3d_multi is CUDA-only; "
+                       "run with use_gpu: true or use the two-phase path.");
+}
+
 TORCH_LIBRARY_IMPL(lilytorch_kernels, CPU, m) {
     m.impl("streaming_sdf_min_3d",       &streaming_sdf_min_3d_cpu);
     m.impl("streaming_sdf_min_3d_multi", &streaming_sdf_min_3d_multi_cpu);
     m.impl("bdim_forces_3d_multi",       &bdim_forces_3d_multi_cpu);
     m.impl("apply_bcs_3d",               &apply_bcs_3d_cpu);
     m.impl("interpolate_3d",             &interpolate_3d_cpu);
+    m.impl("streaming_sdf_forces_fused_3d_multi",
+           &streaming_sdf_forces_fused_3d_multi_cpu);
 }
 
 }  // namespace lilytorch_kernels

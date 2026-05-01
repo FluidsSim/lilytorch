@@ -1153,9 +1153,6 @@ class BDIMhandler:
         com_pos_t = torch.from_numpy(com_pos).to(
             self.device, dtype=self.dtype, non_blocking=True,
         )
-        sparse_flat = torch.zeros(
-            int(cell_off_h_np[-1]), device=self.device, dtype=self.dtype,
-        )
 
         # Maintain `comp.com_pos[b]` and `body.com_pos` views for downstream code.
         for b, body in enumerate(comp.bodies):
@@ -1165,45 +1162,124 @@ class BDIMhandler:
         # Python-list copy of cell offsets for the per-body slab split below.
         cell_off_h = cell_off_h_np.tolist()
 
-        streaming_sdf_min_3d_multi(
-            sm['F_flat'],  sm['F_offsets'],
-            sm['bx_flat'], sm['bx_offsets'],
-            sm['by_flat'], sm['by_offsets'],
-            sm['bz_flat'], sm['bz_offsets'],
-            sm['body_shapes'], sm['body_meta'], kin,
-            aabb_lo, aabb_dim, cell_off,
-            gx_1d, gy_1d, gz_1d, h_grid, max_vol,
-            comp.sdf_val, comp.sdf_val_u, comp.sdf_val_v, comp.sdf_val_w,
-            comp.body_u,  comp.body_v,    comp.body_w,
-            sparse_flat,
-            getattr(self.fluid_solver, '_sdf_interp_method', 0),
+        fs = self.fluid_solver
+        _use_fused = (
+            getattr(fs, '_fused_sdf_forces_3d', False)
+            and getattr(fs, 'normal_x', None) is not None
         )
 
-        # Split sparse_flat into per-body slabs and store
-        for body_i, aabb in enumerate(aabbs_for_split):
-            i0, i1, j0, j1, k0, k1 = aabb
-            Ai, Aj, Ak = i1 - i0, j1 - j0, k1 - k0
-            lo = cell_off_h[body_i]
-            hi = cell_off_h[body_i + 1]
-            slab = sparse_flat[lo:hi].view(Ai, Aj, Ak)
-            comp._sdf_sparse[body_i] = (aabb, slab)
+        if _use_fused:
+            from lilytorch.src.kernels import streaming_sdf_forces_fused_3d_multi
+            # Per-body densities: use rho_body per body (same for all for now;
+            # per-link densities can be wired here in future).
+            rho_bodies = torch.full(
+                (B,), float(fs.rho_body),
+                device=self.device, dtype=self.dtype,
+            )
+            # winning_rho_cc: pre-filled with rho_fluid; the fused kernel
+            # stamps each cell with the winning body's density.
+            winning_rho_cc = torch.full(
+                comp.sdf_val.shape,
+                float(fs.rho),
+                device=self.device, dtype=self.dtype,
+            )
+            # (B, 12) force accumulator, pre-zeroed.
+            fused_out = torch.zeros(
+                (B, 12), dtype=torch.float64, device=self.device,
+            )
+            # nu_rho_field: size=1 for constant viscosity, full-grid for variable.
+            if fs.use_variable_viscosity:
+                nu_rho_field = fs._compute_nu_rho_for_forces(
+                    fs.u0, fs.v0, fs.w0
+                ).contiguous()
+            else:
+                nu_rho_field = torch.full(
+                    (1,), float(fs.nu) * float(fs.rho),
+                    device=self.device, dtype=self.dtype,
+                )
+            delta_order = int(getattr(fs, 'force_delta_order', 1))
+            eps_body   = float(comp.bodies[0].eps)
+            eps_solver = float(fs.eps)
+            h3         = float(fs.h ** 3)
 
-        # Phase D: stash per-step packed tensors so forces kernel can
-        # reuse kin / aabb_lo / aabb_dim without rebuilding. The
-        # `sparse_cc_flat` + `cell_offsets` pair is also stashed so
-        # bdim_forces_3d_multi can read the cached per-body cc-SDF
-        # directly instead of re-sampling it.
-        comp._stream_multi_step = {
-            'kin':             kin,
-            'aabb_lo':         aabb_lo,
-            'aabb_dim':        aabb_dim,
-            'max_vol':         max_vol,
-            'gx':              gx_1d,
-            'gy':              gy_1d,
-            'gz':              gz_1d,
-            'sparse_cc_flat':  sparse_flat,
-            'cell_offsets':    cell_off,
-        }
+            streaming_sdf_forces_fused_3d_multi(
+                sm['F_flat'], sm['F_offsets'],
+                sm['body_shapes'], sm['body_meta'], kin,
+                aabb_lo, aabb_dim,
+                gx_1d, gy_1d, gz_1d, h_grid, max_vol,
+                comp.sdf_val, comp.sdf_val_u, comp.sdf_val_v, comp.sdf_val_w,
+                comp.body_u,  comp.body_v,    comp.body_w,
+                getattr(fs, '_sdf_interp_method', 0),
+                rho_bodies, winning_rho_cc,
+                fs.u0.contiguous(), fs.v0.contiguous(),
+                fs.w0.contiguous(), fs.p0.contiguous(),
+                fs.normal_x.contiguous(), fs.normal_y.contiguous(),
+                fs.normal_z.contiguous(),
+                nu_rho_field, eps_body, eps_solver, h3,
+                delta_order,
+                fused_out,
+            )
+
+            # Invalidate per-body sparse SDF cache (not populated by fused path).
+            for body_i in range(B):
+                comp._sdf_sparse[body_i] = None
+
+            # Store fused outputs on the composite body for downstream use.
+            comp._fused_forces_out  = fused_out
+            comp._winning_rho_cc    = winning_rho_cc
+
+            # Stash per-step metadata (kin/aabb without sparse_cc_flat).
+            comp._stream_multi_step = {
+                'kin':     kin,
+                'aabb_lo': aabb_lo,
+                'aabb_dim': aabb_dim,
+                'max_vol': max_vol,
+                'gx':      gx_1d,
+                'gy':      gy_1d,
+                'gz':      gz_1d,
+            }
+        else:
+            # ---- Two-phase path (original) ----
+            sparse_flat = torch.zeros(
+                int(cell_off_h_np[-1]), device=self.device, dtype=self.dtype,
+            )
+            streaming_sdf_min_3d_multi(
+                sm['F_flat'],  sm['F_offsets'],
+                sm['bx_flat'], sm['bx_offsets'],
+                sm['by_flat'], sm['by_offsets'],
+                sm['bz_flat'], sm['bz_offsets'],
+                sm['body_shapes'], sm['body_meta'], kin,
+                aabb_lo, aabb_dim, cell_off,
+                gx_1d, gy_1d, gz_1d, h_grid, max_vol,
+                comp.sdf_val, comp.sdf_val_u, comp.sdf_val_v, comp.sdf_val_w,
+                comp.body_u,  comp.body_v,    comp.body_w,
+                sparse_flat,
+                getattr(fs, '_sdf_interp_method', 0),
+            )
+
+            # Split sparse_flat into per-body slabs and store
+            for body_i, aabb in enumerate(aabbs_for_split):
+                i0, i1, j0, j1, k0, k1 = aabb
+                Ai, Aj, Ak = i1 - i0, j1 - j0, k1 - k0
+                lo = cell_off_h[body_i]
+                hi = cell_off_h[body_i + 1]
+                slab = sparse_flat[lo:hi].view(Ai, Aj, Ak)
+                comp._sdf_sparse[body_i] = (aabb, slab)
+
+            comp._fused_forces_out = None
+            comp._winning_rho_cc   = None
+
+            comp._stream_multi_step = {
+                'kin':            kin,
+                'aabb_lo':        aabb_lo,
+                'aabb_dim':       aabb_dim,
+                'max_vol':        max_vol,
+                'gx':             gx_1d,
+                'gy':             gy_1d,
+                'gz':             gz_1d,
+                'sparse_cc_flat': sparse_flat,
+                'cell_offsets':   cell_off,
+            }
 
     # ------------------------------------------------------------------
     def _update_3d_streaming(self, t, iteration, dt=1):

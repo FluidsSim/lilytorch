@@ -701,10 +701,44 @@ def forces_method2_3d(self, u, v, w, p, iteration):
     ``_forces_body_integrate_3d``) that fuse ~40 CUDA kernels into one
     or two CUDA-graph launches, giving ~6× wall-clock speedup.
     """
+    comp = self.composite_body
+
+    # ============================================================
+    # Fused Phase C+D fast path: forces were pre-computed in the
+    # SDF update step using lagged velocity/normals.  Just store the
+    # cached result into the force records and return early.
+    # Checked before _compute_nu_rho_for_forces to skip the
+    # potentially expensive variable-viscosity field computation.
+    # ============================================================
+    _fused_out = getattr(comp, '_fused_forces_out', None)
+    if _fused_out is not None:
+        B = len(comp.bodies)
+        out_s = _fused_out if _fused_out.dtype == u.dtype else _fused_out.to(u.dtype)
+        self.viscous_drag_record[:B, :, iteration]    = out_s[:, 0:3]
+        self.viscous_torque_record[:B, :, iteration]  = out_s[:, 3:6]
+        self.pressure_drag_record[:B, :, iteration]   = out_s[:, 6:9]
+        self.pressure_torque_record[:B, :, iteration] = out_s[:, 9:12]
+        self.friction_force_lin_x = self.viscous_drag_record[:B, 0, iteration]
+        self.friction_force_lin_y = self.viscous_drag_record[:B, 1, iteration]
+        self.friction_force_lin_z = self.viscous_drag_record[:B, 2, iteration]
+        self.friction_force_ang_x = self.viscous_torque_record[:B, 0, iteration]
+        self.friction_force_ang_y = self.viscous_torque_record[:B, 1, iteration]
+        self.friction_force_ang_z = self.viscous_torque_record[:B, 2, iteration]
+        self.pressure_force_x     = self.pressure_drag_record[:B, 0, iteration]
+        self.pressure_force_y     = self.pressure_drag_record[:B, 1, iteration]
+        self.pressure_force_z     = self.pressure_drag_record[:B, 2, iteration]
+        self.pressure_force_ang_x = self.pressure_torque_record[:B, 0, iteration]
+        self.pressure_force_ang_y = self.pressure_torque_record[:B, 1, iteration]
+        self.pressure_force_ang_z = self.pressure_torque_record[:B, 2, iteration]
+        # Cache zero-out stress tensors (not computed in fused path)
+        self.xstress_tensor = None
+        self.ystress_tensor = None
+        self.zstress_tensor = None
+        return
+
     nu_rho = self._compute_nu_rho_for_forces(u, v, w)
     h      = self.h
     h3     = self.h3
-    comp   = self.composite_body
 
     # ---- CC normals (reuse cached values when available) ---------
     nx = getattr(self, 'normal_x', None)

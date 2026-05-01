@@ -883,6 +883,483 @@ void bdim_forces_3d_multi_cuda(
 }
 
 // =====================================================================
+//  streaming_sdf_forces_fused_3d_multi  (Phase C+D fused, lagged forces)
+//
+//  Single kernel per body that replaces both streaming_sdf_min_3d_multi
+//  (Phase C) and bdim_forces_3d_multi (Phase D).
+//
+//  Per-cell operations within the body's per-body AABB:
+//  1. Sample body SDF at CC + 3 staggered face locations.
+//  2. Compare-swap into union SDF fields (same as Phase C).
+//  3. Track winning-body density in winning_rho_cc for variable-density
+//     FSI: when body b wins the CC min, winning_rho_cc[g_idx] = rho_body_b.
+//  4. When the cell is within the force band, compute viscous stress and
+//     pressure force INLINE from the beginning-of-step velocity/pressure
+//     fields (u_prev, v_prev, w_prev, p_prev) and the cached union CC
+//     normals from the previous step (nx_cc, ny_cc, nz_cc).  Accumulate
+//     12 force/torque channels for body b.
+//
+//  nu_rho_field: ν·ρ per cell (size=grid) or scalar (size=1).
+//  delta_order: 1 (cosine) or 2 (Towers 2008 |∇φ| correction).
+//  For delta_order=2 the SDF is re-sampled at 6 body-frame-shifted
+//  positions to compute |∇φ|; no sparse_cc_flat needed.
+//
+//  Memory savings vs. two-phase:
+//  • No sparse_cc_flat (per-body CC-SDF cache).
+//  • No union-AABB stress/pforce tensors (xs/ys/zs/px/py/pz).
+//  Trade-off: forces are one-step lagged (O(dt) for explicit Heun).
+//
+//  Force output (B,12) float64 must be pre-zeroed by the caller.
+//  winning_rho_cc must be pre-filled with rho_fluid by the caller.
+// =====================================================================
+
+template <typename scalar_t>
+__global__ void streaming_sdf_forces_fused_3d_multi_kernel(
+    const int b,
+    // Body SDF data
+    const scalar_t* __restrict__ F_flat,
+    const int64_t*  __restrict__ F_offsets,
+    const int64_t*  __restrict__ body_shapes,   // [B,3] (Mx,My,Mz)
+    const scalar_t* __restrict__ body_meta,     // [B,10]
+    const scalar_t* __restrict__ kin,           // [B,21]
+    // Per-body AABB
+    const int64_t*  __restrict__ aabb_lo,       // [B,3]
+    const int64_t*  __restrict__ aabb_dim,      // [B,3]
+    // Full-grid coordinates
+    const scalar_t* __restrict__ gx,
+    const scalar_t* __restrict__ gy,
+    const scalar_t* __restrict__ gz,
+    const int Ngx, const int Ngy, const int Ngz,
+    const scalar_t half_h,
+    // Union SDF / body-velocity outputs (compare-swap)
+    scalar_t* __restrict__ sdf_cc,
+    scalar_t* __restrict__ sdf_u,
+    scalar_t* __restrict__ sdf_v,
+    scalar_t* __restrict__ sdf_w,
+    scalar_t* __restrict__ bU,
+    scalar_t* __restrict__ bV,
+    scalar_t* __restrict__ bW,
+    const int interp_method,
+    // Variable-density output
+    const scalar_t  rho_body_b,                 // per-body density
+    scalar_t* __restrict__ winning_rho_cc,      // [Ngx*Ngy*Ngz], pre-filled w/ rho_fluid
+    // Prev-step fields for force computation (full-grid, read-only)
+    const scalar_t* __restrict__ u_prev,
+    const scalar_t* __restrict__ v_prev,
+    const scalar_t* __restrict__ w_prev,
+    const scalar_t* __restrict__ p_prev,
+    // Prev-step CC normals (full-grid, read-only)
+    const scalar_t* __restrict__ nx_cc,
+    const scalar_t* __restrict__ ny_cc,
+    const scalar_t* __restrict__ nz_cc,
+    // ν·ρ: size=1 → scalar; size=grid → per-cell (variable viscosity)
+    const scalar_t* __restrict__ nu_rho_field,
+    const int64_t   nu_rho_field_size,
+    const scalar_t inv_h,
+    // Force parameters
+    const scalar_t eps_body,
+    const scalar_t eps_solver,
+    const scalar_t h3,
+    const int delta_order,
+    // Force output (B,12) float64, pre-zeroed
+    double* __restrict__ out)
+{
+    const int local = blockIdx.x * blockDim.x + threadIdx.x;
+
+    const int Ai = (int)aabb_dim[b*3 + 0];
+    const int Aj = (int)aabb_dim[b*3 + 1];
+    const int Ak = (int)aabb_dim[b*3 + 2];
+    const int vol = Ai * Aj * Ak;
+
+    double acc[12];
+#pragma unroll
+    for (int c = 0; c < 12; ++c) acc[c] = 0.0;
+
+    if (local < vol) {
+        const int di  = local / (Aj * Ak);
+        const int rem = local - di * (Aj * Ak);
+        const int dj  = rem / Ak;
+        const int dk  = rem - dj * Ak;
+
+        const int i0 = (int)aabb_lo[b*3 + 0];
+        const int j0 = (int)aabb_lo[b*3 + 1];
+        const int k0 = (int)aabb_lo[b*3 + 2];
+        const int i  = i0 + di;
+        const int j  = j0 + dj;
+        const int k  = k0 + dk;
+        const int g_idx = (i * Ngy + j) * Ngz + k;
+
+        // ---- Body-frame setup (identical to streaming_sdf_min_3d_multi) ----
+        const scalar_t* F  = F_flat + F_offsets[b];
+        const int Mx = (int)body_shapes[b*3 + 0];
+        const int My = (int)body_shapes[b*3 + 1];
+        const int Mz = (int)body_shapes[b*3 + 2];
+
+        const scalar_t* M  = body_meta + b*10;
+        const scalar_t bx0 = M[0], by0 = M[1], bz0 = M[2];
+        const scalar_t idx_ = M[6], idy_ = M[7], idz_ = M[8];
+
+        const scalar_t* K  = kin + b*21;
+        const scalar_t r00 = K[0],  r01 = K[1],  r02 = K[2];
+        const scalar_t r10 = K[3],  r11 = K[4],  r12 = K[5];
+        const scalar_t r20 = K[6],  r21 = K[7],  r22 = K[8];
+        const scalar_t bp_x = K[9],  bp_y = K[10], bp_z = K[11];
+        const scalar_t cm_x = K[12], cm_y = K[13], cm_z = K[14];
+        const scalar_t lv_x = K[15], lv_y = K[16], lv_z = K[17];
+        const scalar_t av_x = K[18], av_y = K[19], av_z = K[20];
+
+        const scalar_t xc = gx[i];
+        const scalar_t yc = gy[j];
+        const scalar_t zc = gz[k];
+
+        const scalar_t dx_w = xc - bp_x, dy_w = yc - bp_y, dz_w = zc - bp_z;
+        const scalar_t bxq = r00*dx_w + r01*dy_w + r02*dz_w;
+        const scalar_t byq = r10*dx_w + r11*dy_w + r12*dz_w;
+        const scalar_t bzq = r20*dx_w + r21*dy_w + r22*dz_w;
+
+        const scalar_t neg_hh = -half_h;
+        const scalar_t du_x = neg_hh*r00, du_y = neg_hh*r10, du_z = neg_hh*r20;
+        const scalar_t dv_x = neg_hh*r01, dv_y = neg_hh*r11, dv_z = neg_hh*r21;
+        const scalar_t dw_x = neg_hh*r02, dw_y = neg_hh*r12, dw_z = neg_hh*r22;
+
+        // ---- Phase C: SDF sampling and union field updates ----
+        const scalar_t s_cc = sdf_sample_dispatch(
+            interp_method, F, Mx, My, Mz, bx0, by0, bz0, idx_, idy_, idz_,
+            bxq, byq, bzq);
+
+        // CC min update + variable-density winner tracking
+        if (s_cc < sdf_cc[g_idx]) {
+            sdf_cc[g_idx] = s_cc;
+            winning_rho_cc[g_idx] = rho_body_b;
+        }
+
+        // Staggered face SDFs + body-velocity compare-swap
+        {
+            const scalar_t s = sdf_sample_dispatch(
+                interp_method, F, Mx, My, Mz, bx0, by0, bz0, idx_, idy_, idz_,
+                bxq+du_x, byq+du_y, bzq+du_z);
+            if (s < sdf_u[g_idx]) {
+                sdf_u[g_idx] = s;
+                bU[g_idx] = lv_x + av_y*(zc - cm_z) - av_z*(yc - cm_y);
+            }
+        }
+        {
+            const scalar_t s = sdf_sample_dispatch(
+                interp_method, F, Mx, My, Mz, bx0, by0, bz0, idx_, idy_, idz_,
+                bxq+dv_x, byq+dv_y, bzq+dv_z);
+            if (s < sdf_v[g_idx]) {
+                sdf_v[g_idx] = s;
+                bV[g_idx] = lv_y + av_z*(xc - cm_x) - av_x*(zc - cm_z);
+            }
+        }
+        {
+            const scalar_t s = sdf_sample_dispatch(
+                interp_method, F, Mx, My, Mz, bx0, by0, bz0, idx_, idy_, idz_,
+                bxq+dw_x, byq+dw_y, bzq+dw_z);
+            if (s < sdf_w[g_idx]) {
+                sdf_w[g_idx] = s;
+                bW[g_idx] = lv_z + av_x*(yc - cm_y) - av_y*(xc - cm_x);
+            }
+        }
+
+        // ---- Phase D: inline force integration ----
+        const scalar_t band_lo = (eps_solver - eps_body) < (-eps_body)
+            ? (eps_solver - eps_body) : (-eps_body);
+        const scalar_t band_hi = (eps_solver + eps_body) > (eps_body)
+            ? (eps_solver + eps_body) : (eps_body);
+
+        if (s_cc > band_lo && s_cc < band_hi) {
+            // Variable or constant ν·ρ
+            const scalar_t nu_rho_val = (nu_rho_field_size == 1)
+                ? nu_rho_field[0] : nu_rho_field[g_idx];
+
+            // Prev-step CC normals
+            const scalar_t nx = nx_cc[g_idx];
+            const scalar_t ny = ny_cc[g_idx];
+            const scalar_t nz = nz_cc[g_idx];
+
+            // Clamped stencil neighbours (boundary-safe)
+            const int im1 = (i > 0)       ? i-1 : 0;
+            const int ip1 = (i+1 < Ngx)   ? i+1 : i;   // forward-diff; 0 at wall
+            const int jm1 = (j > 0)       ? j-1 : 0;
+            const int jp1 = (j+1 < Ngy)   ? j+1 : j;
+            const int km1 = (k > 0)       ? k-1 : 0;
+            const int kp1 = (k+1 < Ngz)   ? k+1 : k;
+
+            // Diagonal MAC derivatives (compact stagger-exact stencil)
+            // u staggered along x: dudx[i] = (u[i+1] - u[i]) / h
+            const scalar_t u_ijk = u_prev[(i   * Ngy + j) * Ngz + k];
+            const scalar_t u_ip1 = u_prev[(ip1 * Ngy + j) * Ngz + k];
+            const scalar_t dudx  = (u_ip1 - u_ijk) * inv_h;
+
+            // v staggered along y: dvdy[j] = (v[j+1] - v[j]) / h
+            const scalar_t v_ijk = v_prev[(i * Ngy + j   ) * Ngz + k];
+            const scalar_t v_jp1 = v_prev[(i * Ngy + jp1 ) * Ngz + k];
+            const scalar_t dvdy  = (v_jp1 - v_ijk) * inv_h;
+
+            // w staggered along z: dwdz[k] = (w[k+1] - w[k]) / h
+            const scalar_t w_ijk = w_prev[(i * Ngy + j) * Ngz + k   ];
+            const scalar_t w_kp1 = w_prev[(i * Ngy + j) * Ngz + kp1 ];
+            const scalar_t dwdz  = (w_kp1 - w_ijk) * inv_h;
+
+            // Cross derivatives via CC-interpolated velocities
+            // u_cc = 0.5*(u[i] + u[i+1]): interpolate u to cell centre
+            // dudy = central diff of u_cc along j
+            const scalar_t u_cc_jp1 = (scalar_t)0.5 * (
+                u_prev[(i * Ngy + jp1) * Ngz + k] +
+                u_prev[(ip1 * Ngy + jp1) * Ngz + k]);
+            const scalar_t u_cc_jm1 = (scalar_t)0.5 * (
+                u_prev[(i * Ngy + jm1) * Ngz + k] +
+                u_prev[(ip1 * Ngy + jm1) * Ngz + k]);
+            const scalar_t dudy = (u_cc_jp1 - u_cc_jm1) * (scalar_t)0.5 * inv_h;
+
+            // dudz = central diff of u_cc along k
+            const scalar_t u_cc_kp1 = (scalar_t)0.5 * (
+                u_prev[(i * Ngy + j) * Ngz + kp1] +
+                u_prev[(ip1 * Ngy + j) * Ngz + kp1]);
+            const scalar_t u_cc_km1 = (scalar_t)0.5 * (
+                u_prev[(i * Ngy + j) * Ngz + km1] +
+                u_prev[(ip1 * Ngy + j) * Ngz + km1]);
+            const scalar_t dudz = (u_cc_kp1 - u_cc_km1) * (scalar_t)0.5 * inv_h;
+
+            // v_cc = 0.5*(v[j] + v[j+1]): interpolate v to cell centre
+            // dvdx = central diff of v_cc along i
+            const int jp1v = (j+1 < Ngy) ? j+1 : j;  // same as jp1
+            const scalar_t v_cc_ip1 = (scalar_t)0.5 * (
+                v_prev[(ip1 * Ngy + j   ) * Ngz + k] +
+                v_prev[(ip1 * Ngy + jp1v) * Ngz + k]);
+            const scalar_t v_cc_im1 = (scalar_t)0.5 * (
+                v_prev[(im1 * Ngy + j   ) * Ngz + k] +
+                v_prev[(im1 * Ngy + jp1v) * Ngz + k]);
+            const scalar_t dvdx = (v_cc_ip1 - v_cc_im1) * (scalar_t)0.5 * inv_h;
+
+            // dvdz = central diff of v_cc along k
+            const scalar_t v_cc_kp1 = (scalar_t)0.5 * (
+                v_prev[(i * Ngy + j   ) * Ngz + kp1] +
+                v_prev[(i * Ngy + jp1v) * Ngz + kp1]);
+            const scalar_t v_cc_km1 = (scalar_t)0.5 * (
+                v_prev[(i * Ngy + j   ) * Ngz + km1] +
+                v_prev[(i * Ngy + jp1v) * Ngz + km1]);
+            const scalar_t dvdz = (v_cc_kp1 - v_cc_km1) * (scalar_t)0.5 * inv_h;
+
+            // w_cc = 0.5*(w[k] + w[k+1]): interpolate w to cell centre
+            // dwdx = central diff of w_cc along i
+            const int kp1w = (k+1 < Ngz) ? k+1 : k;  // same as kp1
+            const scalar_t w_cc_ip1 = (scalar_t)0.5 * (
+                w_prev[(ip1 * Ngy + j) * Ngz + k   ] +
+                w_prev[(ip1 * Ngy + j) * Ngz + kp1w]);
+            const scalar_t w_cc_im1 = (scalar_t)0.5 * (
+                w_prev[(im1 * Ngy + j) * Ngz + k   ] +
+                w_prev[(im1 * Ngy + j) * Ngz + kp1w]);
+            const scalar_t dwdx = (w_cc_ip1 - w_cc_im1) * (scalar_t)0.5 * inv_h;
+
+            // dwdy = central diff of w_cc along j
+            const scalar_t w_cc_jp1 = (scalar_t)0.5 * (
+                w_prev[(i * Ngy + jp1) * Ngz + k   ] +
+                w_prev[(i * Ngy + jp1) * Ngz + kp1w]);
+            const scalar_t w_cc_jm1 = (scalar_t)0.5 * (
+                w_prev[(i * Ngy + jm1) * Ngz + k   ] +
+                w_prev[(i * Ngy + jm1) * Ngz + kp1w]);
+            const scalar_t dwdy = (w_cc_jp1 - w_cc_jm1) * (scalar_t)0.5 * inv_h;
+
+            // Viscous stress · normal: σ_{ij} n_j (summed over j)
+            const scalar_t xs = nu_rho_val * (2*dudx*nx + (dudy+dvdx)*ny + (dudz+dwdx)*nz);
+            const scalar_t ys = nu_rho_val * ((dvdx+dudy)*nx + 2*dvdy*ny + (dvdz+dwdy)*nz);
+            const scalar_t zs = nu_rho_val * ((dwdx+dudz)*nx + (dwdy+dvdz)*ny + 2*dwdz*nz);
+
+            // Pressure force density: -p * n
+            const scalar_t p_c  = p_prev[g_idx];
+            const scalar_t pxv  = -p_c * nx;
+            const scalar_t pyv  = -p_c * ny;
+            const scalar_t pzv  = -p_c * nz;
+
+            // Smoothed delta kernels (1st-order cosine)
+            const scalar_t pi_v      = (scalar_t)3.141592653589793;
+            const scalar_t inv_2eps  = (scalar_t)0.5 / eps_body;
+            const scalar_t pi_ov_eb  = pi_v / eps_body;
+
+            scalar_t delta_visc = 0, delta_pres = 0;
+            const scalar_t d_visc = s_cc - eps_solver;
+            if (d_visc > -eps_body && d_visc < eps_body)
+                delta_visc = ((scalar_t)1 + cos(pi_ov_eb * d_visc)) * inv_2eps;
+            if (s_cc > -eps_body && s_cc < eps_body)
+                delta_pres = ((scalar_t)1 + cos(pi_ov_eb * s_cc))   * inv_2eps;
+
+            // Towers (2008) 2nd-order: δ_S = δ_ε(φ) / |∇φ|
+            // Re-sample SDF at 6 world-shifted positions using body-frame
+            // rotation columns to compute |∇φ| without sparse_cc_flat.
+            if (delta_order == 2 && (delta_visc > 0 || delta_pres > 0)) {
+                const scalar_t h_grid = (scalar_t)1.0 / inv_h;
+                const scalar_t s_xp = sdf_sample_dispatch(
+                    interp_method, F, Mx, My, Mz,
+                    bx0, by0, bz0, idx_, idy_, idz_,
+                    bxq+r00*h_grid, byq+r10*h_grid, bzq+r20*h_grid);
+                const scalar_t s_xm = sdf_sample_dispatch(
+                    interp_method, F, Mx, My, Mz,
+                    bx0, by0, bz0, idx_, idy_, idz_,
+                    bxq-r00*h_grid, byq-r10*h_grid, bzq-r20*h_grid);
+                const scalar_t s_yp = sdf_sample_dispatch(
+                    interp_method, F, Mx, My, Mz,
+                    bx0, by0, bz0, idx_, idy_, idz_,
+                    bxq+r01*h_grid, byq+r11*h_grid, bzq+r21*h_grid);
+                const scalar_t s_ym = sdf_sample_dispatch(
+                    interp_method, F, Mx, My, Mz,
+                    bx0, by0, bz0, idx_, idy_, idz_,
+                    bxq-r01*h_grid, byq-r11*h_grid, bzq-r21*h_grid);
+                const scalar_t s_zp = sdf_sample_dispatch(
+                    interp_method, F, Mx, My, Mz,
+                    bx0, by0, bz0, idx_, idy_, idz_,
+                    bxq+r02*h_grid, byq+r12*h_grid, bzq+r22*h_grid);
+                const scalar_t s_zm = sdf_sample_dispatch(
+                    interp_method, F, Mx, My, Mz,
+                    bx0, by0, bz0, idx_, idy_, idz_,
+                    bxq-r02*h_grid, byq-r12*h_grid, bzq-r22*h_grid);
+                const scalar_t dsdx = (s_xp - s_xm) * (scalar_t)0.5 * inv_h;
+                const scalar_t dsdy = (s_yp - s_ym) * (scalar_t)0.5 * inv_h;
+                const scalar_t dsdz = (s_zp - s_zm) * (scalar_t)0.5 * inv_h;
+                scalar_t grad_mag = sqrt(dsdx*dsdx + dsdy*dsdy + dsdz*dsdz);
+                const scalar_t min_grad = (scalar_t)1e-3;
+                if (grad_mag < min_grad) grad_mag = min_grad;
+                const scalar_t inv_grad = (scalar_t)1.0 / grad_mag;
+                delta_visc *= inv_grad;
+                delta_pres *= inv_grad;
+            }
+
+            // Force / torque accumulation
+            const scalar_t arm_x = xc - cm_x;
+            const scalar_t arm_y = yc - cm_y;
+            const scalar_t arm_z = zc - cm_z;
+
+            const double fv_x = (double)(xs  * delta_visc);
+            const double fv_y = (double)(ys  * delta_visc);
+            const double fv_z = (double)(zs  * delta_visc);
+            const double fp_x = (double)(pxv * delta_pres);
+            const double fp_y = (double)(pyv * delta_pres);
+            const double fp_z = (double)(pzv * delta_pres);
+
+            acc[0]  = fv_x;
+            acc[1]  = fv_y;
+            acc[2]  = fv_z;
+            acc[3]  = (double)arm_y * fv_z - (double)arm_z * fv_y;
+            acc[4]  = (double)arm_z * fv_x - (double)arm_x * fv_z;
+            acc[5]  = (double)arm_x * fv_y - (double)arm_y * fv_x;
+            acc[6]  = fp_x;
+            acc[7]  = fp_y;
+            acc[8]  = fp_z;
+            acc[9]  = (double)arm_y * fp_z - (double)arm_z * fp_y;
+            acc[10] = (double)arm_z * fp_x - (double)arm_x * fp_z;
+            acc[11] = (double)arm_x * fp_y - (double)arm_y * fp_x;
+        }
+    }
+
+    // Block-reduction: 12 channels sequentially into shared memory
+    extern __shared__ double sdata[];
+    const int tid  = threadIdx.x;
+    const int bdim = blockDim.x;
+    const double h3_d = (double)h3;
+
+#pragma unroll
+    for (int c = 0; c < 12; ++c) {
+        sdata[tid] = acc[c];
+        __syncthreads();
+        for (int s = bdim >> 1; s > 0; s >>= 1) {
+            if (tid < s) sdata[tid] = sdata[tid] + sdata[tid + s];
+            __syncthreads();
+        }
+        if (tid == 0) atomicAdd(&out[b*12 + c], sdata[0] * h3_d);
+        __syncthreads();
+    }
+}
+
+void streaming_sdf_forces_fused_3d_multi_cuda(
+    const at::Tensor& F_flat, const at::Tensor& F_offsets,
+    const at::Tensor& body_shapes,
+    const at::Tensor& body_meta,
+    const at::Tensor& kin,
+    const at::Tensor& aabb_lo,
+    const at::Tensor& aabb_dim,
+    const at::Tensor& gx, const at::Tensor& gy, const at::Tensor& gz,
+    const double h_grid,
+    const int64_t max_vol_per_body,
+    at::Tensor sdf_cc, at::Tensor sdf_u, at::Tensor sdf_v, at::Tensor sdf_w,
+    at::Tensor body_u, at::Tensor body_v, at::Tensor body_w,
+    const int64_t interp_method,
+    const at::Tensor& rho_bodies,   // [B] float, per-body density
+    at::Tensor winning_rho_cc,      // [Ngx*Ngy*Ngz], pre-filled w/ rho_fluid
+    const at::Tensor& u_prev, const at::Tensor& v_prev,
+    const at::Tensor& w_prev, const at::Tensor& p_prev,
+    const at::Tensor& nx_cc,  const at::Tensor& ny_cc, const at::Tensor& nz_cc,
+    const at::Tensor& nu_rho_field,   // size=1 scalar or size=grid per-cell
+    const double eps_body,
+    const double eps_solver,
+    const double h3,
+    const int64_t delta_order,
+    at::Tensor out)   // (B, 12) float64, pre-zeroed
+{
+    const int B = (int)aabb_dim.size(0);
+    if (B <= 0 || max_vol_per_body <= 0) return;
+
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    const int Ngy = (int)gy.numel();
+    const int Ngz = (int)gz.numel();
+    const int Ngx = (int)gx.numel();
+    const int blockSize = 256;
+    const size_t shmem = (size_t)blockSize * sizeof(double);
+
+    // Copy rho_bodies to CPU so we can pass per-body density as a scalar
+    // to each kernel launch (device pointer cannot be dereferenced on host).
+    const at::Tensor rho_bodies_cpu = rho_bodies.to(at::kCPU).contiguous();
+
+    AT_DISPATCH_FLOATING_TYPES(F_flat.scalar_type(),
+        "streaming_sdf_forces_fused_3d_multi_cuda", [&] {
+        const scalar_t* rho_bodies_ptr = rho_bodies_cpu.data_ptr<scalar_t>();
+        for (int b = 0; b < B; ++b) {
+            const int nblocks = (int)((max_vol_per_body + blockSize - 1) / blockSize);
+            streaming_sdf_forces_fused_3d_multi_kernel<scalar_t>
+                <<<dim3(nblocks,1,1), dim3(blockSize,1,1), shmem, stream>>>(
+                    b,
+                    F_flat.data_ptr<scalar_t>(),
+                    F_offsets.data_ptr<int64_t>(),
+                    body_shapes.data_ptr<int64_t>(),
+                    body_meta.data_ptr<scalar_t>(),
+                    kin.data_ptr<scalar_t>(),
+                    aabb_lo.data_ptr<int64_t>(),
+                    aabb_dim.data_ptr<int64_t>(),
+                    gx.data_ptr<scalar_t>(),
+                    gy.data_ptr<scalar_t>(),
+                    gz.data_ptr<scalar_t>(),
+                    Ngx, Ngy, Ngz,
+                    (scalar_t)(0.5 * h_grid),
+                    sdf_cc.data_ptr<scalar_t>(),
+                    sdf_u.data_ptr<scalar_t>(),
+                    sdf_v.data_ptr<scalar_t>(),
+                    sdf_w.data_ptr<scalar_t>(),
+                    body_u.data_ptr<scalar_t>(),
+                    body_v.data_ptr<scalar_t>(),
+                    body_w.data_ptr<scalar_t>(),
+                    (int)interp_method,
+                    rho_bodies_ptr[b],
+                    winning_rho_cc.data_ptr<scalar_t>(),
+                    u_prev.data_ptr<scalar_t>(),
+                    v_prev.data_ptr<scalar_t>(),
+                    w_prev.data_ptr<scalar_t>(),
+                    p_prev.data_ptr<scalar_t>(),
+                    nx_cc.data_ptr<scalar_t>(),
+                    ny_cc.data_ptr<scalar_t>(),
+                    nz_cc.data_ptr<scalar_t>(),
+                    nu_rho_field.data_ptr<scalar_t>(),
+                    (int64_t)nu_rho_field.numel(),
+                    (scalar_t)(1.0 / h_grid),
+                    (scalar_t)eps_body,
+                    (scalar_t)eps_solver,
+                    (scalar_t)h3,
+                    (int)delta_order,
+                    out.data_ptr<double>());
+        }
+    });
+}
+
+// =====================================================================
 //  apply_bcs_3d  (Phase H: fused boundary-condition writes)
 //
 //  Replaces the Python loop in AdvDiffSolver.set_BCs that issues 18
@@ -1078,6 +1555,7 @@ TORCH_LIBRARY_IMPL(lilytorch_kernels, CUDA, m) {
     m.impl("streaming_sdf_min_3d", &streaming_sdf_min_3d_cuda);
     m.impl("streaming_sdf_min_3d_multi", &streaming_sdf_min_3d_multi_cuda);
     m.impl("bdim_forces_3d_multi", &bdim_forces_3d_multi_cuda);
+    m.impl("streaming_sdf_forces_fused_3d_multi", &streaming_sdf_forces_fused_3d_multi_cuda);
     m.impl("apply_bcs_3d", &apply_bcs_3d_cuda);
     m.impl("interpolate_3d", &interpolate_3d_cuda);
 }

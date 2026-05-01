@@ -14,6 +14,7 @@ __all__ = [
     "streaming_sdf_min_3d",
     "streaming_sdf_min_3d_multi",
     "bdim_forces_3d_multi",
+    "streaming_sdf_forces_fused_3d_multi",
     "apply_bcs_3d",
     "streaming_sdf_min_2d",
     "streaming_sdf_min_2d_multi",
@@ -145,6 +146,65 @@ def bdim_forces_3d_multi(
         xs, ys, zs, px, py, pz,
         float(eps_body), float(eps_solver), float(h3),
         int(max_vol_per_body),
+        int(delta_order),
+        out,
+    )
+
+
+def streaming_sdf_forces_fused_3d_multi(
+        F_flat: Tensor, F_offsets: Tensor,
+        body_shapes: Tensor, body_meta: Tensor, kin: Tensor,
+        aabb_lo: Tensor, aabb_dim: Tensor,
+        gx: Tensor, gy: Tensor, gz: Tensor,
+        h_grid: float,
+        max_vol_per_body: int,
+        sdf_cc: Tensor, sdf_u: Tensor, sdf_v: Tensor, sdf_w: Tensor,
+        body_u: Tensor, body_v: Tensor, body_w: Tensor,
+        interp_method: int,
+        rho_bodies: Tensor,
+        winning_rho_cc: Tensor,
+        u_prev: Tensor, v_prev: Tensor, w_prev: Tensor, p_prev: Tensor,
+        nx_cc: Tensor, ny_cc: Tensor, nz_cc: Tensor,
+        nu_rho_field: Tensor,
+        eps_body: float, eps_solver: float, h3: float,
+        delta_order: int,
+        out: Tensor) -> None:
+    """Fused Phase C+D: per-body AABB SDF update + inline lagged force integration.
+
+    Replaces :func:`streaming_sdf_min_3d_multi` + :func:`bdim_forces_3d_multi`
+    in a single kernel pass per body.  Memory savings:
+
+    * No ``sparse_cc_flat`` (per-body CC-SDF cache).
+    * No union-AABB stress / pressure-force tensors.
+
+    ``nu_rho_field``: ν·ρ tensor, either size=1 (constant viscosity) or
+    size equal to the full grid (Smagorinsky / Carreau variable viscosity).
+
+    ``winning_rho_cc`` is updated in-place: when body ``b`` wins the SDF
+    minimum at a grid cell, that cell is stamped with ``rho_bodies[b]``.
+    Pre-fill with ``rho_fluid`` before calling.
+
+    ``out`` (B, 12) float64 accumulates force/torque; pre-zero before calling.
+
+    Forces are one time-step lagged (computed from beginning-of-step
+    u/v/w/p and previous-step normals).
+
+    ``delta_order``: 1 = cosine delta, 2 = Towers (2008) |∇φ| correction.
+    """
+    return torch.ops.lilytorch_kernels.streaming_sdf_forces_fused_3d_multi.default(
+        F_flat, F_offsets,
+        body_shapes, body_meta, kin,
+        aabb_lo, aabb_dim,
+        gx, gy, gz,
+        float(h_grid), int(max_vol_per_body),
+        sdf_cc, sdf_u, sdf_v, sdf_w,
+        body_u, body_v, body_w,
+        int(interp_method),
+        rho_bodies, winning_rho_cc,
+        u_prev, v_prev, w_prev, p_prev,
+        nx_cc, ny_cc, nz_cc,
+        nu_rho_field,
+        float(eps_body), float(eps_solver), float(h3),
         int(delta_order),
         out,
     )
