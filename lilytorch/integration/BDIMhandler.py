@@ -988,40 +988,75 @@ class BDIMhandler:
 
         # ------------------------------------------------------------------
         # Build / refresh the static per-body packed device tensors once.
+        #
+        # Memory note: the fused SDF+force path does NOT consume the
+        # per-axis bx/by/bz_flat tables (it computes body-frame coords
+        # analytically inside the kernel via the rotation matrix in
+        # ``kin``).  Skip them in fused mode to avoid Σ_b (Mx+My+Mz)
+        # device-side bytes per static cache.
         # ------------------------------------------------------------------
+        fs_for_cache = self.fluid_solver
+        _use_fused_cache = (
+            getattr(fs_for_cache, '_fused_sdf_forces_3d', False)
+            and getattr(fs_for_cache, 'normal_x', None) is not None
+        )
+
         sm = getattr(comp, '_stream_multi_static', None)
         if sm is None:
             F_chunks  = []
-            bx_chunks = []; by_chunks = []; bz_chunks = []
-            F_off  = [0]; bx_off = [0]; by_off = [0]; bz_off = [0]
+            F_off  = [0]
             shapes = []
             meta   = []
+            if not _use_fused_cache:
+                bx_chunks = []; by_chunks = []; bz_chunks = []
+                bx_off = [0]; by_off = [0]; bz_off = [0]
             for body in comp.bodies:
                 m = body._stream_meta
                 F_chunks.append(m['F'].flatten())
-                bx_chunks.append(m['bx']); by_chunks.append(m['by']); bz_chunks.append(m['bz'])
                 F_off.append(F_off[-1]   + m['F'].numel())
-                bx_off.append(bx_off[-1] + m['bx'].numel())
-                by_off.append(by_off[-1] + m['by'].numel())
-                bz_off.append(bz_off[-1] + m['bz'].numel())
                 shapes.append([m['F'].shape[0], m['F'].shape[1], m['F'].shape[2]])
                 meta.append([
                     m['bx0'], m['by0'], m['bz0'],
                     m['bx_last'], m['by_last'], m['bz_last'],
                     m['inv_dx'], m['inv_dy'], m['inv_dz'], m['inv_vol'],
                 ])
+                if not _use_fused_cache:
+                    bx_chunks.append(m['bx']); by_chunks.append(m['by']); bz_chunks.append(m['bz'])
+                    bx_off.append(bx_off[-1] + m['bx'].numel())
+                    by_off.append(by_off[-1] + m['by'].numel())
+                    bz_off.append(bz_off[-1] + m['bz'].numel())
+            F_flat = torch.cat(F_chunks).contiguous()
             sm = {
-                'F_flat':       torch.cat(F_chunks).contiguous(),
+                'F_flat':       F_flat,
                 'F_offsets':    torch.tensor(F_off,  dtype=torch.int64, device=self.device),
-                'bx_flat':      torch.cat(bx_chunks).contiguous(),
-                'bx_offsets':   torch.tensor(bx_off, dtype=torch.int64, device=self.device),
-                'by_flat':      torch.cat(by_chunks).contiguous(),
-                'by_offsets':   torch.tensor(by_off, dtype=torch.int64, device=self.device),
-                'bz_flat':      torch.cat(bz_chunks).contiguous(),
-                'bz_offsets':   torch.tensor(bz_off, dtype=torch.int64, device=self.device),
                 'body_shapes':  torch.tensor(shapes, dtype=torch.int64, device=self.device),
                 'body_meta':    torch.tensor(meta,   dtype=self.dtype,  device=self.device),
             }
+            if not _use_fused_cache:
+                sm['bx_flat']    = torch.cat(bx_chunks).contiguous()
+                sm['bx_offsets'] = torch.tensor(bx_off, dtype=torch.int64, device=self.device)
+                sm['by_flat']    = torch.cat(by_chunks).contiguous()
+                sm['by_offsets'] = torch.tensor(by_off, dtype=torch.int64, device=self.device)
+                sm['bz_flat']    = torch.cat(bz_chunks).contiguous()
+                sm['bz_offsets'] = torch.tensor(bz_off, dtype=torch.int64, device=self.device)
+            # De-duplicate per-body body-template SDFs: replace each
+            # body's `_stream_meta['F']` with a view into the packed
+            # `F_flat` buffer.  After this the `torch.cat` copy is the
+            # only owner of body-template storage, so when no other
+            # references exist the per-body originals can be released
+            # by the allocator.  This saves up to Σ_b Mx·My·Mz floats
+            # of duplicated body-template memory and therefore scales
+            # linearly with the number of bodies.
+            for b, body in enumerate(comp.bodies):
+                m = body._stream_meta
+                Mx, My, Mz = shapes[b]
+                m['F'] = F_flat[F_off[b]:F_off[b + 1]].view(Mx, My, Mz)
+            # Free the temporary chunk lists eagerly so the original
+            # `m['F'].flatten()` views don't pin storage longer than
+            # needed.
+            del F_chunks
+            if not _use_fused_cache:
+                del bx_chunks, by_chunks, bz_chunks
             comp._stream_multi_static = sm
 
         # ------------------------------------------------------------------
@@ -1196,10 +1231,17 @@ class BDIMhandler:
         if _use_fused:
             # Per-body densities: use rho_body per body (same for all for now;
             # per-link densities can be wired here in future).
-            rho_bodies = torch.full(
-                (B,), float(fs.rho_body),
-                device=self.device, dtype=self.dtype,
-            )
+            # Persistent buffer: re-allocate only when B changes.
+            _rho_buf = getattr(comp, '_fused_rho_bodies', None)
+            if _rho_buf is None or _rho_buf.numel() != B \
+                    or _rho_buf.dtype != self.dtype \
+                    or _rho_buf.device != self.device:
+                _rho_buf = torch.empty(
+                    (B,), device=self.device, dtype=self.dtype,
+                )
+                comp._fused_rho_bodies = _rho_buf
+            _rho_buf.fill_(float(fs.rho_body))
+            rho_bodies = _rho_buf
             # winning_rho_cc: pre-filled with rho_fluid; the fused kernel
             # stamps each cell with the winning body's density.
             # Reuse the persistent buffer to avoid a full-grid allocation
@@ -1212,23 +1254,78 @@ class BDIMhandler:
             winning_rho_cc = _wrcc
             winning_rho_cc.fill_(float(fs.rho))
             # (B, 12) force accumulator, pre-zeroed.
-            fused_out = torch.zeros(
-                (B, 12), dtype=torch.float64, device=self.device,
-            )
+            # Persistent buffer: re-allocate only when B changes.
+            _out_buf = getattr(comp, '_fused_out_buf', None)
+            if _out_buf is None or _out_buf.shape != (B, 12) \
+                    or _out_buf.device != self.device:
+                _out_buf = torch.empty(
+                    (B, 12), dtype=torch.float64, device=self.device,
+                )
+                comp._fused_out_buf = _out_buf
+            _out_buf.zero_()
+            fused_out = _out_buf
             # nu_rho_field: size=1 for constant viscosity, full-grid for variable.
             if fs.use_variable_viscosity:
+                # Persistent full-grid buffer for variable viscosity ν·ρ.
+                # Reused every step; reallocates only when grid shape changes.
+                _nu_rho_buf = getattr(comp, '_fused_nu_rho_buf', None)
+                if _nu_rho_buf is None \
+                        or _nu_rho_buf.shape != comp.sdf_val.shape \
+                        or _nu_rho_buf.dtype != self.dtype \
+                        or _nu_rho_buf.device != self.device:
+                    _nu_rho_buf = torch.empty(
+                        comp.sdf_val.shape,
+                        device=self.device, dtype=self.dtype,
+                    )
+                    comp._fused_nu_rho_buf = _nu_rho_buf
                 nu_rho_field = fs._compute_nu_rho_for_forces(
-                    fs.u0, fs.v0, fs.w0
-                ).contiguous()
-            else:
-                nu_rho_field = torch.full(
-                    (1,), float(fs.nu) * float(fs.rho),
-                    device=self.device, dtype=self.dtype,
+                    fs.u0, fs.v0, fs.w0, out=_nu_rho_buf,
                 )
+            else:
+                # Tiny scalar buffer (size=1); persist to avoid even a
+                # 1-element allocation per step.
+                _nu_rho_scalar = getattr(comp, '_fused_nu_rho_scalar', None)
+                if _nu_rho_scalar is None \
+                        or _nu_rho_scalar.dtype != self.dtype \
+                        or _nu_rho_scalar.device != self.device:
+                    _nu_rho_scalar = torch.empty(
+                        (1,), device=self.device, dtype=self.dtype,
+                    )
+                    comp._fused_nu_rho_scalar = _nu_rho_scalar
+                _nu_rho_scalar.fill_(float(fs.nu) * float(fs.rho))
+                nu_rho_field = _nu_rho_scalar
             delta_order = int(getattr(fs, 'force_delta_order', 1))
             eps_body   = float(comp.bodies[0].eps)
             eps_solver = float(fs.eps)
             h3         = float(fs.h ** 3)
+
+            # Loud, one-time contiguity check on the full-grid inputs so
+            # any non-contiguous tensor is caught here instead of being
+            # silently duplicated by a `.contiguous()` copy at every
+            # call site.  Fluid solver fields are constructed contiguous
+            # (torch.zeros / torch.ones / torch.full), and normals come
+            # from element-wise arithmetic on contiguous gradients, so
+            # this assertion should always hold.
+            if not getattr(comp, '_fused_contig_checked', False):
+                _required_contig = {
+                    'fs.u0': fs.u0, 'fs.v0': fs.v0,
+                    'fs.w0': fs.w0, 'fs.p0': fs.p0,
+                    'fs.normal_x': fs.normal_x,
+                    'fs.normal_y': fs.normal_y,
+                    'fs.normal_z': fs.normal_z,
+                }
+                for _name, _t in _required_contig.items():
+                    if not _t.is_contiguous():
+                        raise RuntimeError(
+                            f"streaming_sdf_forces_fused_3d_multi requires "
+                            f"contiguous full-grid inputs, but {_name} is "
+                            f"non-contiguous (shape={tuple(_t.shape)}, "
+                            f"strides={_t.stride()}). Calling .contiguous() "
+                            f"here would silently allocate a full-grid copy "
+                            f"every step. Fix the upstream construction of "
+                            f"{_name} to return a contiguous tensor."
+                        )
+                comp._fused_contig_checked = True
 
             streaming_sdf_forces_fused_3d_multi(
                 sm['F_flat'], sm['F_offsets'],
@@ -1239,10 +1336,8 @@ class BDIMhandler:
                 comp.body_u,  comp.body_v,    comp.body_w,
                 getattr(fs, '_sdf_interp_method', 0),
                 rho_bodies, winning_rho_cc,
-                fs.u0.contiguous(), fs.v0.contiguous(),
-                fs.w0.contiguous(), fs.p0.contiguous(),
-                fs.normal_x.contiguous(), fs.normal_y.contiguous(),
-                fs.normal_z.contiguous(),
+                fs.u0, fs.v0, fs.w0, fs.p0,
+                fs.normal_x, fs.normal_y, fs.normal_z,
                 nu_rho_field, eps_body, eps_solver, h3,
                 delta_order,
                 fused_out,

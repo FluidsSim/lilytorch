@@ -892,7 +892,7 @@ void bdim_forces_3d_multi_cuda(
 //  1. Sample body SDF at CC + 3 staggered face locations.
 //  2. Compare-swap into union SDF fields (same as Phase C).
 //  3. Track winning-body density in winning_rho_cc for variable-density
-//     FSI: when body b wins the CC min, winning_rho_cc[g_idx] = rho_body_b.
+//     FSI: when body b wins the CC min, winning_rho_cc[g_idx] = rho_bodies[b].
 //  4. When the cell is within the force band, compute viscous stress and
 //     pressure force INLINE from the beginning-of-step velocity/pressure
 //     fields (u_prev, v_prev, w_prev, p_prev) and the cached union CC
@@ -941,7 +941,7 @@ __global__ void streaming_sdf_forces_fused_3d_multi_kernel(
     scalar_t* __restrict__ bW,
     const int interp_method,
     // Variable-density output
-    const scalar_t  rho_body_b,                 // per-body density
+    const scalar_t* __restrict__ rho_bodies,    // [B] device pointer
     scalar_t* __restrict__ winning_rho_cc,      // [Ngx*Ngy*Ngz], pre-filled w/ rho_fluid
     // Prev-step fields for force computation (full-grid, read-only)
     const scalar_t* __restrict__ u_prev,
@@ -1030,7 +1030,7 @@ __global__ void streaming_sdf_forces_fused_3d_multi_kernel(
         // CC min update + variable-density winner tracking
         if (s_cc < sdf_cc[g_idx]) {
             sdf_cc[g_idx] = s_cc;
-            winning_rho_cc[g_idx] = rho_body_b;
+            winning_rho_cc[g_idx] = rho_bodies[b];
         }
 
         // Staggered face SDFs + body-velocity compare-swap
@@ -1306,13 +1306,12 @@ void streaming_sdf_forces_fused_3d_multi_cuda(
     const int blockSize = 256;
     const size_t shmem = (size_t)blockSize * sizeof(double);
 
-    // Copy rho_bodies to CPU so we can pass per-body density as a scalar
-    // to each kernel launch (device pointer cannot be dereferenced on host).
-    const at::Tensor rho_bodies_cpu = rho_bodies.to(at::kCPU).contiguous();
-
+    // ``rho_bodies`` stays on the device: the kernel reads
+    // ``rho_bodies[b]`` directly, eliminating a per-step D2H copy
+    // and the implicit synchronisation it forced on the CUDA stream.
     AT_DISPATCH_FLOATING_TYPES(F_flat.scalar_type(),
         "streaming_sdf_forces_fused_3d_multi_cuda", [&] {
-        const scalar_t* rho_bodies_ptr = rho_bodies_cpu.data_ptr<scalar_t>();
+        const scalar_t* rho_bodies_ptr = rho_bodies.data_ptr<scalar_t>();
         for (int b = 0; b < B; ++b) {
             const int nblocks = (int)((max_vol_per_body + blockSize - 1) / blockSize);
             streaming_sdf_forces_fused_3d_multi_kernel<scalar_t>
@@ -1338,7 +1337,7 @@ void streaming_sdf_forces_fused_3d_multi_cuda(
                     body_v.data_ptr<scalar_t>(),
                     body_w.data_ptr<scalar_t>(),
                     (int)interp_method,
-                    rho_bodies_ptr[b],
+                    rho_bodies_ptr,
                     winning_rho_cc.data_ptr<scalar_t>(),
                     u_prev.data_ptr<scalar_t>(),
                     v_prev.data_ptr<scalar_t>(),
