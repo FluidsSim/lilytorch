@@ -211,9 +211,23 @@ class FluidSolver(PlottingMixin):
     def vorticity_components(self, u, v, w):
         return ops.vorticity_components(u, v, w, self.h)
 
-    def __init__(self, pars, dtype=torch.float32, custom_update=None, compute_forces=True):
+    def __init__(self, pars, dtype=None, custom_update=None, compute_forces=True):
         """
-        BDIM2 solver for fluid structure interaction
+        BDIM2 solver for fluid structure interaction.
+
+        Parameters
+        ----------
+        pars : dict
+            Full parameter dict.  ``pars['solver']['dtype']`` may be one of
+            ``"float32"`` / ``"float64"`` (or the equivalent torch dtypes)
+            and is honoured when the ``dtype`` keyword argument is left as
+            ``None`` (the default).
+        dtype : torch.dtype or str or None
+            Explicit override for the floating-point precision.  When
+            ``None`` (default) the value is read from
+            ``pars['solver']['dtype']`` if present, otherwise falls back
+            to ``torch.float32``.  Accepts ``"float32"`` / ``"float64"``
+            strings as a convenience for YAML-driven configs.
         """
         solver    = pars["solver"]
         bcs       = pars["boundary_conditions"]
@@ -229,7 +243,30 @@ class FluidSolver(PlottingMixin):
             self.device = torch.device("cpu")
             torch.set_num_threads(solver["nthreads"])
 
+        # ---- Resolve dtype: explicit kwarg > YAML > float32 default ----
+        # The Python kwarg takes precedence so existing callers that pass
+        # ``dtype=torch.float64`` keep working unchanged.  Otherwise the
+        # YAML key ``solver.dtype`` is consulted (matching BDIMhandler's
+        # behaviour) so that ``base_sim_config.dtype = "float64"`` alone
+        # is sufficient to switch the entire solver to double precision.
+        if dtype is None:
+            dtype = solver.get("dtype", "float32")
+        if isinstance(dtype, str):
+            _dtype_map = {"float32": torch.float32, "float64": torch.float64,
+                          "double": torch.float64, "single": torch.float32}
+            if dtype not in _dtype_map:
+                raise ValueError(
+                    f"Unknown dtype string '{dtype}'. "
+                    f"Expected one of {sorted(_dtype_map)}."
+                )
+            dtype = _dtype_map[dtype]
+        if dtype not in (torch.float32, torch.float64):
+            raise ValueError(
+                f"FluidSolver dtype must be torch.float32 or torch.float64, "
+                f"got {dtype}."
+            )
         self.dtype = dtype
+        print(f"Using dtype: {self.dtype}")
         self.nx    = solver["Nx"]+2
         self.ny    = solver["Ny"]+2
 

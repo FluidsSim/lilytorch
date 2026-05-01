@@ -150,6 +150,13 @@ class BaseSimConfig:
         self.sponge                  = None   # dict with keys: width, strength
         self.yield_damping           = None   # dict with keys: gamma_c, strength (auto-derived from carreau.tau_y if None)
         self.jacobi_weight           = 0.7
+        # Floating-point precision used by FluidSolver and BDIMhandler.
+        #   None         → solver default ("float32")
+        #   "float32"    → single precision (recommended on consumer GPUs)
+        #   "float64"    → double precision (recommended for sphere-sedimentation
+        #                  validation and convergence studies)
+        # Both the pure-PyTorch path and the C++/CUDA streaming kernels honour
+        # this setting via ``AT_DISPATCH_FLOATING_TYPES`` in the kernel source.
         self.dtype                   = None
         self.zero_pressure_inside    = None
         self.force_method            = None
