@@ -975,26 +975,421 @@ static void interpolate_3d_cpu(
 }
 
 // =====================================================================
+//  streaming_sdf_forces_fused_3d_multi  (Phase C+D fused, lagged forces)
+//
+//  CPU port of the CUDA kernel in cuda/streaming_sdf.cu (line-for-line).
+//  Same memory contract:
+//    * per-body AABB iteration; all per-body state lives on the stack
+//      (registers / locals) and is released between bodies.
+//    * No per-body grid-sized scratch. Accumulates 12 force/torque
+//      channels into ``out`` (atomically combined across at::parallel_for
+//      workers via a final per-body merge).
+//    * Updates the union fields (sdf_cc / sdf_u / sdf_v / sdf_w / bU /
+//      bV / bW) and ``winning_rho_cc`` in place.
+//
+//  Forces are one-step lagged: viscous stress and pressure force are
+//  computed from the beginning-of-step velocity / pressure fields
+//  (u_prev, v_prev, w_prev, p_prev) and the cached union CC normals
+//  from the previous step (nx_cc, ny_cc, nz_cc).
+// =====================================================================
+
+template <typename scalar_t>
+static inline scalar_t sample_dispatch_cpu(
+    const int interp_method,
+    const scalar_t* F, const int Mx, const int My, const int Mz,
+    const scalar_t bx0, const scalar_t by0, const scalar_t bz0,
+    const scalar_t inv_dx, const scalar_t inv_dy, const scalar_t inv_dz,
+    const scalar_t xq, const scalar_t yq, const scalar_t zq)
+{
+    if (interp_method == 1) {
+        return triquadratic_sample_uniform<scalar_t>(
+            F, Mx, My, Mz, bx0, by0, bz0,
+            inv_dx, inv_dy, inv_dz, xq, yq, zq);
+    }
+    return trilinear_sample_uniform<scalar_t>(
+        F, Mx, My, Mz, bx0, by0, bz0,
+        inv_dx, inv_dy, inv_dz, xq, yq, zq);
+}
+
+void streaming_sdf_forces_fused_3d_multi_cpu(
+    const at::Tensor& F_flat, const at::Tensor& F_offsets,
+    const at::Tensor& body_shapes,
+    const at::Tensor& body_meta,
+    const at::Tensor& kin,
+    const at::Tensor& aabb_lo,
+    const at::Tensor& aabb_dim,
+    const at::Tensor& gx, const at::Tensor& gy, const at::Tensor& gz,
+    const double h_grid,
+    const int64_t /*max_vol_per_body*/,
+    at::Tensor sdf_cc, at::Tensor sdf_u, at::Tensor sdf_v, at::Tensor sdf_w,
+    at::Tensor body_u, at::Tensor body_v, at::Tensor body_w,
+    const int64_t interp_method,
+    const at::Tensor& rho_bodies,
+    at::Tensor winning_rho_cc,
+    const at::Tensor& u_prev, const at::Tensor& v_prev,
+    const at::Tensor& w_prev, const at::Tensor& p_prev,
+    const at::Tensor& nx_cc,  const at::Tensor& ny_cc, const at::Tensor& nz_cc,
+    const at::Tensor& nu_rho_field,
+    const double eps_body,
+    const double eps_solver,
+    const double h3,
+    const int64_t delta_order,
+    at::Tensor out)
+{
+    const int B = (int)aabb_dim.size(0);
+    if (B <= 0) return;
+
+    TORCH_CHECK(out.scalar_type() == at::kDouble,
+                "streaming_sdf_forces_fused_3d_multi_cpu: out must be float64");
+
+    const int Ngx = (int)gx.numel();
+    const int Ngy = (int)gy.numel();
+    const int Ngz = (int)gz.numel();
+    const int64_t nu_rho_field_size = nu_rho_field.numel();
+
+    AT_DISPATCH_FLOATING_TYPES(F_flat.scalar_type(),
+        "streaming_sdf_forces_fused_3d_multi_cpu", [&] {
+        const scalar_t* F_ptr   = F_flat.data_ptr<scalar_t>();
+        const int64_t*  F_off   = F_offsets.data_ptr<int64_t>();
+        const int64_t*  shapes  = body_shapes.data_ptr<int64_t>();
+        const scalar_t* meta    = body_meta.data_ptr<scalar_t>();
+        const scalar_t* kin_ptr = kin.data_ptr<scalar_t>();
+        const int64_t*  lo      = aabb_lo.data_ptr<int64_t>();
+        const int64_t*  dim_    = aabb_dim.data_ptr<int64_t>();
+        const scalar_t* gx_ptr  = gx.data_ptr<scalar_t>();
+        const scalar_t* gy_ptr  = gy.data_ptr<scalar_t>();
+        const scalar_t* gz_ptr  = gz.data_ptr<scalar_t>();
+
+        scalar_t* sdf_cc_p = sdf_cc.data_ptr<scalar_t>();
+        scalar_t* sdf_u_p  = sdf_u.data_ptr<scalar_t>();
+        scalar_t* sdf_v_p  = sdf_v.data_ptr<scalar_t>();
+        scalar_t* sdf_w_p  = sdf_w.data_ptr<scalar_t>();
+        scalar_t* bU_p     = body_u.data_ptr<scalar_t>();
+        scalar_t* bV_p     = body_v.data_ptr<scalar_t>();
+        scalar_t* bW_p     = body_w.data_ptr<scalar_t>();
+
+        const scalar_t* rho_bodies_ptr   = rho_bodies.data_ptr<scalar_t>();
+        scalar_t*       winning_rho_p    = winning_rho_cc.data_ptr<scalar_t>();
+
+        const scalar_t* u_prev_p = u_prev.data_ptr<scalar_t>();
+        const scalar_t* v_prev_p = v_prev.data_ptr<scalar_t>();
+        const scalar_t* w_prev_p = w_prev.data_ptr<scalar_t>();
+        const scalar_t* p_prev_p = p_prev.data_ptr<scalar_t>();
+        const scalar_t* nx_p     = nx_cc.data_ptr<scalar_t>();
+        const scalar_t* ny_p     = ny_cc.data_ptr<scalar_t>();
+        const scalar_t* nz_p     = nz_cc.data_ptr<scalar_t>();
+        const scalar_t* nu_rho_p = nu_rho_field.data_ptr<scalar_t>();
+
+        double*         out_ptr  = out.data_ptr<double>();
+
+        const scalar_t half_h = (scalar_t)(0.5 * h_grid);
+        const scalar_t inv_h  = (scalar_t)(1.0 / h_grid);
+        const scalar_t eps_b  = (scalar_t)eps_body;
+        const scalar_t eps_s  = (scalar_t)eps_solver;
+        const scalar_t pi_v       = (scalar_t)3.141592653589793;
+        const scalar_t inv_2eps   = (scalar_t)0.5 / eps_b;
+        const scalar_t pi_over_eb = pi_v / eps_b;
+        const scalar_t band_lo = (eps_s - eps_b) < (-eps_b) ? (eps_s - eps_b) : (-eps_b);
+        const scalar_t band_hi = (eps_s + eps_b) > ( eps_b) ? (eps_s + eps_b) : ( eps_b);
+        const double   h3_d   = (double)h3;
+        const int      interp = (int)interp_method;
+
+        for (int b = 0; b < B; ++b) {
+            const int Ai = (int)dim_[b*3 + 0];
+            const int Aj = (int)dim_[b*3 + 1];
+            const int Ak = (int)dim_[b*3 + 2];
+            const int vol = Ai * Aj * Ak;
+            if (vol <= 0) continue;
+
+            const int i0_b = (int)lo[b*3 + 0];
+            const int j0_b = (int)lo[b*3 + 1];
+            const int k0_b = (int)lo[b*3 + 2];
+
+            const scalar_t* F_b = F_ptr + F_off[b];
+            const int Mx = (int)shapes[b*3 + 0];
+            const int My = (int)shapes[b*3 + 1];
+            const int Mz = (int)shapes[b*3 + 2];
+
+            const scalar_t* M = meta + b*10;
+            const scalar_t bx0 = M[0], by0 = M[1], bz0 = M[2];
+            const scalar_t idx_ = M[6], idy_ = M[7], idz_ = M[8];
+
+            const scalar_t* K = kin_ptr + b*21;
+            const scalar_t r00 = K[0],  r01 = K[1],  r02 = K[2];
+            const scalar_t r10 = K[3],  r11 = K[4],  r12 = K[5];
+            const scalar_t r20 = K[6],  r21 = K[7],  r22 = K[8];
+            const scalar_t bp_x = K[9],  bp_y = K[10], bp_z = K[11];
+            const scalar_t cm_x = K[12], cm_y = K[13], cm_z = K[14];
+            const scalar_t lv_x = K[15], lv_y = K[16], lv_z = K[17];
+            const scalar_t av_x = K[18], av_y = K[19], av_z = K[20];
+
+            const scalar_t neg_hh = -half_h;
+            const scalar_t du_x = neg_hh*r00, du_y = neg_hh*r10, du_z = neg_hh*r20;
+            const scalar_t dv_x = neg_hh*r01, dv_y = neg_hh*r11, dv_z = neg_hh*r21;
+            const scalar_t dw_x = neg_hh*r02, dw_y = neg_hh*r12, dw_z = neg_hh*r22;
+
+            const scalar_t rho_b_val = rho_bodies_ptr[b];
+
+            // Per-body 12-channel reduction. The CUDA kernel uses
+            // ``atomicAdd`` to merge per-thread-block partial sums into
+            // ``out``; on CPU we use a per-worker local buffer protected
+            // by a mutex to merge into ``lb`` (mirror of the
+            // bdim_forces_3d_multi_cpu pattern).
+            double lb[12] = {0,0,0,0,0,0,0,0,0,0,0,0};
+            std::mutex acc_mtx;
+
+            at::parallel_for(0, vol, /*grain_size=*/1024,
+                [&](int64_t _begin, int64_t _end)
+            {
+                double local12[12] = {0,0,0,0,0,0,0,0,0,0,0,0};
+                for (int local = (int)_begin; local < (int)_end; ++local) {
+                    const int di  = local / (Aj * Ak);
+                    const int rem = local - di * (Aj * Ak);
+                    const int dj  = rem / Ak;
+                    const int dk  = rem - dj * Ak;
+                    const int i   = i0_b + di;
+                    const int j   = j0_b + dj;
+                    const int k   = k0_b + dk;
+                    const std::int64_t g_idx =
+                        ((std::int64_t)i * Ngy + j) * Ngz + k;
+
+                    const scalar_t xc = gx_ptr[i];
+                    const scalar_t yc = gy_ptr[j];
+                    const scalar_t zc = gz_ptr[k];
+
+                    // ---- Body-frame CC point ----
+                    const scalar_t dxw = xc - bp_x, dyw = yc - bp_y, dzw = zc - bp_z;
+                    const scalar_t bxq = r00*dxw + r01*dyw + r02*dzw;
+                    const scalar_t byq = r10*dxw + r11*dyw + r12*dzw;
+                    const scalar_t bzq = r20*dxw + r21*dyw + r22*dzw;
+
+                    // ---- Phase C: SDF sampling and union field updates ----
+                    const scalar_t s_cc = sample_dispatch_cpu<scalar_t>(
+                        interp, F_b, Mx, My, Mz, bx0, by0, bz0,
+                        idx_, idy_, idz_, bxq, byq, bzq);
+
+                    // CC min update + variable-density winner tracking.
+                    // Note: ``streaming_sdf_forces_fused_3d_multi`` is
+                    // called per body and each cell within a body's AABB
+                    // is touched exactly once per launch -- so the
+                    // compare-swap doesn't need atomics on either CPU
+                    // or GPU (matches the CUDA kernel).
+                    if (s_cc < sdf_cc_p[g_idx]) {
+                        sdf_cc_p[g_idx]      = s_cc;
+                        winning_rho_p[g_idx] = rho_b_val;
+                    }
+
+                    {
+                        const scalar_t s = sample_dispatch_cpu<scalar_t>(
+                            interp, F_b, Mx, My, Mz, bx0, by0, bz0,
+                            idx_, idy_, idz_,
+                            bxq+du_x, byq+du_y, bzq+du_z);
+                        if (s < sdf_u_p[g_idx]) {
+                            sdf_u_p[g_idx] = s;
+                            bU_p[g_idx] = lv_x + av_y*(zc - cm_z) - av_z*(yc - cm_y);
+                        }
+                    }
+                    {
+                        const scalar_t s = sample_dispatch_cpu<scalar_t>(
+                            interp, F_b, Mx, My, Mz, bx0, by0, bz0,
+                            idx_, idy_, idz_,
+                            bxq+dv_x, byq+dv_y, bzq+dv_z);
+                        if (s < sdf_v_p[g_idx]) {
+                            sdf_v_p[g_idx] = s;
+                            bV_p[g_idx] = lv_y + av_z*(xc - cm_x) - av_x*(zc - cm_z);
+                        }
+                    }
+                    {
+                        const scalar_t s = sample_dispatch_cpu<scalar_t>(
+                            interp, F_b, Mx, My, Mz, bx0, by0, bz0,
+                            idx_, idy_, idz_,
+                            bxq+dw_x, byq+dw_y, bzq+dw_z);
+                        if (s < sdf_w_p[g_idx]) {
+                            sdf_w_p[g_idx] = s;
+                            bW_p[g_idx] = lv_z + av_x*(yc - cm_y) - av_y*(xc - cm_x);
+                        }
+                    }
+
+                    // ---- Phase D: inline force integration ----
+                    if (!(s_cc > band_lo && s_cc < band_hi)) continue;
+
+                    const scalar_t nu_rho_val = (nu_rho_field_size == 1)
+                        ? nu_rho_p[0] : nu_rho_p[g_idx];
+
+                    const scalar_t nx = nx_p[g_idx];
+                    const scalar_t ny = ny_p[g_idx];
+                    const scalar_t nz = nz_p[g_idx];
+
+                    // Clamped stencil neighbours (boundary-safe)
+                    const int im1 = (i > 0)       ? i-1 : 0;
+                    const int ip1 = (i+1 < Ngx)   ? i+1 : i;
+                    const int jm1 = (j > 0)       ? j-1 : 0;
+                    const int jp1 = (j+1 < Ngy)   ? j+1 : j;
+                    const int km1 = (k > 0)       ? k-1 : 0;
+                    const int kp1 = (k+1 < Ngz)   ? k+1 : k;
+
+                    // Diagonal MAC derivatives (forward diff at face)
+                    const scalar_t u_ijk = u_prev_p[(i   * Ngy + j) * Ngz + k];
+                    const scalar_t u_ip1 = u_prev_p[(ip1 * Ngy + j) * Ngz + k];
+                    const scalar_t dudx  = (u_ip1 - u_ijk) * inv_h;
+
+                    const scalar_t v_ijk = v_prev_p[(i * Ngy + j   ) * Ngz + k];
+                    const scalar_t v_jp1 = v_prev_p[(i * Ngy + jp1 ) * Ngz + k];
+                    const scalar_t dvdy  = (v_jp1 - v_ijk) * inv_h;
+
+                    const scalar_t w_ijk = w_prev_p[(i * Ngy + j) * Ngz + k   ];
+                    const scalar_t w_kp1 = w_prev_p[(i * Ngy + j) * Ngz + kp1 ];
+                    const scalar_t dwdz  = (w_kp1 - w_ijk) * inv_h;
+
+                    // Cross derivatives via CC-interpolated velocities.
+                    // u_cc = 0.5*(u[i] + u[i+1]); central diff along j/k.
+                    const scalar_t u_cc_jp1 = (scalar_t)0.5 * (
+                        u_prev_p[(i  * Ngy + jp1) * Ngz + k] +
+                        u_prev_p[(ip1* Ngy + jp1) * Ngz + k]);
+                    const scalar_t u_cc_jm1 = (scalar_t)0.5 * (
+                        u_prev_p[(i  * Ngy + jm1) * Ngz + k] +
+                        u_prev_p[(ip1* Ngy + jm1) * Ngz + k]);
+                    const scalar_t dudy = (u_cc_jp1 - u_cc_jm1) * (scalar_t)0.5 * inv_h;
+
+                    const scalar_t u_cc_kp1 = (scalar_t)0.5 * (
+                        u_prev_p[(i  * Ngy + j) * Ngz + kp1] +
+                        u_prev_p[(ip1* Ngy + j) * Ngz + kp1]);
+                    const scalar_t u_cc_km1 = (scalar_t)0.5 * (
+                        u_prev_p[(i  * Ngy + j) * Ngz + km1] +
+                        u_prev_p[(ip1* Ngy + j) * Ngz + km1]);
+                    const scalar_t dudz = (u_cc_kp1 - u_cc_km1) * (scalar_t)0.5 * inv_h;
+
+                    // v_cc = 0.5*(v[j] + v[j+1]); central diff along i/k.
+                    const scalar_t v_cc_ip1 = (scalar_t)0.5 * (
+                        v_prev_p[(ip1 * Ngy + j  ) * Ngz + k] +
+                        v_prev_p[(ip1 * Ngy + jp1) * Ngz + k]);
+                    const scalar_t v_cc_im1 = (scalar_t)0.5 * (
+                        v_prev_p[(im1 * Ngy + j  ) * Ngz + k] +
+                        v_prev_p[(im1 * Ngy + jp1) * Ngz + k]);
+                    const scalar_t dvdx = (v_cc_ip1 - v_cc_im1) * (scalar_t)0.5 * inv_h;
+
+                    const scalar_t v_cc_kp1 = (scalar_t)0.5 * (
+                        v_prev_p[(i * Ngy + j  ) * Ngz + kp1] +
+                        v_prev_p[(i * Ngy + jp1) * Ngz + kp1]);
+                    const scalar_t v_cc_km1 = (scalar_t)0.5 * (
+                        v_prev_p[(i * Ngy + j  ) * Ngz + km1] +
+                        v_prev_p[(i * Ngy + jp1) * Ngz + km1]);
+                    const scalar_t dvdz = (v_cc_kp1 - v_cc_km1) * (scalar_t)0.5 * inv_h;
+
+                    // w_cc = 0.5*(w[k] + w[k+1]); central diff along i/j.
+                    const scalar_t w_cc_ip1 = (scalar_t)0.5 * (
+                        w_prev_p[(ip1 * Ngy + j) * Ngz + k  ] +
+                        w_prev_p[(ip1 * Ngy + j) * Ngz + kp1]);
+                    const scalar_t w_cc_im1 = (scalar_t)0.5 * (
+                        w_prev_p[(im1 * Ngy + j) * Ngz + k  ] +
+                        w_prev_p[(im1 * Ngy + j) * Ngz + kp1]);
+                    const scalar_t dwdx = (w_cc_ip1 - w_cc_im1) * (scalar_t)0.5 * inv_h;
+
+                    const scalar_t w_cc_jp1 = (scalar_t)0.5 * (
+                        w_prev_p[(i * Ngy + jp1) * Ngz + k  ] +
+                        w_prev_p[(i * Ngy + jp1) * Ngz + kp1]);
+                    const scalar_t w_cc_jm1 = (scalar_t)0.5 * (
+                        w_prev_p[(i * Ngy + jm1) * Ngz + k  ] +
+                        w_prev_p[(i * Ngy + jm1) * Ngz + kp1]);
+                    const scalar_t dwdy = (w_cc_jp1 - w_cc_jm1) * (scalar_t)0.5 * inv_h;
+
+                    const scalar_t xs_v = nu_rho_val * (2*dudx*nx + (dudy+dvdx)*ny + (dudz+dwdx)*nz);
+                    const scalar_t ys_v = nu_rho_val * ((dvdx+dudy)*nx + 2*dvdy*ny + (dvdz+dwdy)*nz);
+                    const scalar_t zs_v = nu_rho_val * ((dwdx+dudz)*nx + (dwdy+dvdz)*ny + 2*dwdz*nz);
+
+                    const scalar_t p_c = p_prev_p[g_idx];
+                    const scalar_t pxv = -p_c * nx;
+                    const scalar_t pyv = -p_c * ny;
+                    const scalar_t pzv = -p_c * nz;
+
+                    scalar_t delta_visc = 0, delta_pres = 0;
+                    const scalar_t d_visc = s_cc - eps_s;
+                    if (d_visc > -eps_b && d_visc < eps_b)
+                        delta_visc = ((scalar_t)1 + std::cos(pi_over_eb * d_visc)) * inv_2eps;
+                    if (s_cc > -eps_b && s_cc < eps_b)
+                        delta_pres = ((scalar_t)1 + std::cos(pi_over_eb * s_cc))   * inv_2eps;
+
+                    if (delta_order == 2 && (delta_visc > 0 || delta_pres > 0)) {
+                        // Towers (2008) 2nd-order: δ_S = δ_ε(φ) / |∇φ|.
+                        // Re-sample the body SDF at 6 world-shifted positions
+                        // using R_T columns, mirroring the CUDA kernel.
+                        const scalar_t hg = (scalar_t)h_grid;
+                        const scalar_t s_xp = sample_dispatch_cpu<scalar_t>(
+                            interp, F_b, Mx, My, Mz, bx0, by0, bz0,
+                            idx_, idy_, idz_,
+                            bxq+r00*hg, byq+r10*hg, bzq+r20*hg);
+                        const scalar_t s_xm = sample_dispatch_cpu<scalar_t>(
+                            interp, F_b, Mx, My, Mz, bx0, by0, bz0,
+                            idx_, idy_, idz_,
+                            bxq-r00*hg, byq-r10*hg, bzq-r20*hg);
+                        const scalar_t s_yp = sample_dispatch_cpu<scalar_t>(
+                            interp, F_b, Mx, My, Mz, bx0, by0, bz0,
+                            idx_, idy_, idz_,
+                            bxq+r01*hg, byq+r11*hg, bzq+r21*hg);
+                        const scalar_t s_ym = sample_dispatch_cpu<scalar_t>(
+                            interp, F_b, Mx, My, Mz, bx0, by0, bz0,
+                            idx_, idy_, idz_,
+                            bxq-r01*hg, byq-r11*hg, bzq-r21*hg);
+                        const scalar_t s_zp = sample_dispatch_cpu<scalar_t>(
+                            interp, F_b, Mx, My, Mz, bx0, by0, bz0,
+                            idx_, idy_, idz_,
+                            bxq+r02*hg, byq+r12*hg, bzq+r22*hg);
+                        const scalar_t s_zm = sample_dispatch_cpu<scalar_t>(
+                            interp, F_b, Mx, My, Mz, bx0, by0, bz0,
+                            idx_, idy_, idz_,
+                            bxq-r02*hg, byq-r12*hg, bzq-r22*hg);
+                        const scalar_t dsdx = (s_xp - s_xm) * (scalar_t)0.5 * inv_h;
+                        const scalar_t dsdy = (s_yp - s_ym) * (scalar_t)0.5 * inv_h;
+                        const scalar_t dsdz = (s_zp - s_zm) * (scalar_t)0.5 * inv_h;
+                        scalar_t grad_mag = std::sqrt(dsdx*dsdx + dsdy*dsdy + dsdz*dsdz);
+                        if (grad_mag < (scalar_t)1e-3) grad_mag = (scalar_t)1e-3;
+                        const scalar_t inv_grad = (scalar_t)1.0 / grad_mag;
+                        delta_visc *= inv_grad;
+                        delta_pres *= inv_grad;
+                    }
+
+                    const scalar_t arm_x = xc - cm_x;
+                    const scalar_t arm_y = yc - cm_y;
+                    const scalar_t arm_z = zc - cm_z;
+
+                    const double fv_x = (double)(xs_v * delta_visc);
+                    const double fv_y = (double)(ys_v * delta_visc);
+                    const double fv_z = (double)(zs_v * delta_visc);
+                    const double fp_x = (double)(pxv  * delta_pres);
+                    const double fp_y = (double)(pyv  * delta_pres);
+                    const double fp_z = (double)(pzv  * delta_pres);
+
+                    local12[0]  += fv_x;
+                    local12[1]  += fv_y;
+                    local12[2]  += fv_z;
+                    local12[3]  += (double)arm_y * fv_z - (double)arm_z * fv_y;
+                    local12[4]  += (double)arm_z * fv_x - (double)arm_x * fv_z;
+                    local12[5]  += (double)arm_x * fv_y - (double)arm_y * fv_x;
+                    local12[6]  += fp_x;
+                    local12[7]  += fp_y;
+                    local12[8]  += fp_z;
+                    local12[9]  += (double)arm_y * fp_z - (double)arm_z * fp_y;
+                    local12[10] += (double)arm_z * fp_x - (double)arm_x * fp_z;
+                    local12[11] += (double)arm_x * fp_y - (double)arm_y * fp_x;
+                }
+                std::lock_guard<std::mutex> lk(acc_mtx);
+                for (int c = 0; c < 12; ++c) lb[c] += local12[c];
+            });
+
+            // Mirror the CUDA kernel's ``atomicAdd(&out[b*12+c], ... * h3)``:
+            // accumulate into the existing ``out`` storage so callers may
+            // invoke repeatedly with a pre-existing accumulator.
+            for (int c = 0; c < 12; ++c) {
+                out_ptr[b*12 + c] += lb[c] * h3_d;
+            }
+        }
+    });
+}
+
+// =====================================================================
 //  CPU registration. The schemas live in ops.cpp; ops.cpp no longer
 //  registers CPU stubs, so these implementations bind directly.
 // =====================================================================
-
-static void streaming_sdf_forces_fused_3d_multi_cpu(
-    const at::Tensor&, const at::Tensor&,
-    const at::Tensor&, const at::Tensor&, const at::Tensor&,
-    const at::Tensor&, const at::Tensor&,
-    const at::Tensor&, const at::Tensor&, const at::Tensor&,
-    double, int64_t,
-    at::Tensor, at::Tensor, at::Tensor, at::Tensor,
-    at::Tensor, at::Tensor, at::Tensor,
-    int64_t, const at::Tensor&, at::Tensor,
-    const at::Tensor&, const at::Tensor&, const at::Tensor&, const at::Tensor&,
-    const at::Tensor&, const at::Tensor&, const at::Tensor&,
-    const at::Tensor&, double, double, double, int64_t, at::Tensor)
-{
-    TORCH_CHECK(false, "streaming_sdf_forces_fused_3d_multi is CUDA-only; "
-                       "run with use_gpu: true or use the two-phase path.");
-}
 
 TORCH_LIBRARY_IMPL(lilytorch_kernels, CPU, m) {
     m.impl("streaming_sdf_min_3d",       &streaming_sdf_min_3d_cpu);
