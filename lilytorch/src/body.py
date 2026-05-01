@@ -2162,9 +2162,11 @@ class CompositeBodyMesh(Body):
         gs = self.grid_shape
         is_3d = len(gs) == 3
 
-        # Per-body SDF for force computation (always needed; overwritten
-        # by BDIMhandler in 3-D but used directly in standalone 2-D mode).
-        self.sdf_vals   = torch.zeros((self.nbodies, *gs), device=device)
+        # Per-body SDF stack – 2-D non-streaming force path only.
+        # 3-D paths always use comp._sdf_sparse (per-body sparse sub-blocks),
+        # so skip the (B, Nx, Ny, Nz) dense allocation to save significant VRAM.
+        if not is_3d:
+            self.sdf_vals = torch.zeros((self.nbodies, *gs), device=device)
 
         # Per-body staggered-SDF and velocity arrays – 2-D only.
         # The 3-D BDIMhandler computes these on-the-fly per sub-block

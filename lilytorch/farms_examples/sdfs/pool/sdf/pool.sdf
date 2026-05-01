@@ -4,12 +4,12 @@
     <model name="pool">
       <pose>0 0 0 0 0 0</pose>
       <link name="wall_xmin">
-        <pose>-0.01385 0.0 0.01385 0 0 0</pose>
+        <pose>-0.912 0.0 0.012 0 0 0</pose>
         <collision name="wall_xmin_collision">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.0277 2.0554 0.3743666666666667</size>
+              <size>0.024 1.248 0.324</size>
             </box>
           </geometry>
         </collision>
@@ -17,7 +17,7 @@
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.0277 2.0554 0.3743666666666667</size>
+              <size>0.024 1.248 0.324</size>
             </box>
           </geometry>
           <material>
@@ -29,12 +29,12 @@
         </visual>
       </link>
       <link name="wall_xmax">
-        <pose>6.01385 0.0 0.01385 0 0 0</pose>
+        <pose>1.512 0.0 0.012 0 0 0</pose>
         <collision name="wall_xmax_collision">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.0277 2.0554 0.3743666666666667</size>
+              <size>0.024 1.248 0.324</size>
             </box>
           </geometry>
         </collision>
@@ -42,7 +42,7 @@
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.0277 2.0554 0.3743666666666667</size>
+              <size>0.024 1.248 0.324</size>
             </box>
           </geometry>
           <material>
@@ -54,12 +54,12 @@
         </visual>
       </link>
       <link name="wall_ymin">
-        <pose>3.0 -1.01385 0.01385 0 0 0</pose>
+        <pose>0.3 -0.612 0.012 0 0 0</pose>
         <collision name="wall_ymin_collision">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>6.0554 0.0277 0.3743666666666667</size>
+              <size>2.448 0.024 0.324</size>
             </box>
           </geometry>
         </collision>
@@ -67,7 +67,7 @@
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>6.0554 0.0277 0.3743666666666667</size>
+              <size>2.448 0.024 0.324</size>
             </box>
           </geometry>
           <material>
@@ -79,12 +79,12 @@
         </visual>
       </link>
       <link name="wall_ymax">
-        <pose>3.0 1.01385 0.01385 0 0 0</pose>
+        <pose>0.3 0.612 0.012 0 0 0</pose>
         <collision name="wall_ymax_collision">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>6.0554 0.0277 0.3743666666666667</size>
+              <size>2.448 0.024 0.324</size>
             </box>
           </geometry>
         </collision>
@@ -92,7 +92,7 @@
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>6.0554 0.0277 0.3743666666666667</size>
+              <size>2.448 0.024 0.324</size>
             </box>
           </geometry>
           <material>
@@ -104,12 +104,12 @@
         </visual>
       </link>
       <link name="floor">
-        <pose>3.0 0.0 -0.18718333333333334 0 0 0</pose>
+        <pose>0.3 0.0 -0.162 0 0 0</pose>
         <collision name="floor_collision">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>6.0554 2.0554 0.0277</size>
+              <size>2.448 1.248 0.024</size>
             </box>
           </geometry>
         </collision>
@@ -117,7 +117,7 @@
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>6.0554 2.0554 0.0277</size>
+              <size>2.448 1.248 0.024</size>
             </box>
           </geometry>
           <material>
@@ -129,12 +129,12 @@
         </visual>
       </link>
       <link name="tile_0_0">
-        <pose>0.125 -0.875 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.85 -0.5499999999999999 -0.1509 0 0 0</pose>
         <visual name="tile_0_0_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -146,12 +146,12 @@
         </visual>
       </link>
       <link name="tile_0_1">
-        <pose>0.125 -0.625 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.85 -0.44999999999999996 -0.1509 0 0 0</pose>
         <visual name="tile_0_1_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -163,12 +163,12 @@
         </visual>
       </link>
       <link name="tile_0_2">
-        <pose>0.125 -0.375 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.85 -0.35 -0.1509 0 0 0</pose>
         <visual name="tile_0_2_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -180,12 +180,12 @@
         </visual>
       </link>
       <link name="tile_0_3">
-        <pose>0.125 -0.125 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.85 -0.24999999999999994 -0.1509 0 0 0</pose>
         <visual name="tile_0_3_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -197,12 +197,12 @@
         </visual>
       </link>
       <link name="tile_0_4">
-        <pose>0.125 0.125 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.85 -0.14999999999999997 -0.1509 0 0 0</pose>
         <visual name="tile_0_4_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -214,12 +214,12 @@
         </visual>
       </link>
       <link name="tile_0_5">
-        <pose>0.125 0.375 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.85 -0.04999999999999999 -0.1509 0 0 0</pose>
         <visual name="tile_0_5_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -231,12 +231,12 @@
         </visual>
       </link>
       <link name="tile_0_6">
-        <pose>0.125 0.625 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.85 0.050000000000000044 -0.1509 0 0 0</pose>
         <visual name="tile_0_6_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -248,12 +248,80 @@
         </visual>
       </link>
       <link name="tile_0_7">
-        <pose>0.125 0.875 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.85 0.15000000000000002 -0.1509 0 0 0</pose>
         <visual name="tile_0_7_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.12 0.38 0.52 1.0</ambient>
+            <diffuse>0.16 0.45 0.60 1.0</diffuse>
+            <specular>0.25 0.30 0.35 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_0_8">
+        <pose>-0.85 0.25 -0.1509 0 0 0</pose>
+        <visual name="tile_0_8_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.22 0.58 0.68 1.0</ambient>
+            <diffuse>0.28 0.65 0.75 1.0</diffuse>
+            <specular>0.35 0.40 0.45 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_0_9">
+        <pose>-0.85 0.35 -0.1509 0 0 0</pose>
+        <visual name="tile_0_9_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.12 0.38 0.52 1.0</ambient>
+            <diffuse>0.16 0.45 0.60 1.0</diffuse>
+            <specular>0.25 0.30 0.35 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_0_10">
+        <pose>-0.85 0.44999999999999996 -0.1509 0 0 0</pose>
+        <visual name="tile_0_10_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.22 0.58 0.68 1.0</ambient>
+            <diffuse>0.28 0.65 0.75 1.0</diffuse>
+            <specular>0.35 0.40 0.45 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_0_11">
+        <pose>-0.85 0.5499999999999999 -0.1509 0 0 0</pose>
+        <visual name="tile_0_11_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -265,12 +333,12 @@
         </visual>
       </link>
       <link name="tile_1_0">
-        <pose>0.375 -0.875 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.75 -0.5499999999999999 -0.1509 0 0 0</pose>
         <visual name="tile_1_0_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -282,12 +350,12 @@
         </visual>
       </link>
       <link name="tile_1_1">
-        <pose>0.375 -0.625 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.75 -0.44999999999999996 -0.1509 0 0 0</pose>
         <visual name="tile_1_1_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -299,12 +367,12 @@
         </visual>
       </link>
       <link name="tile_1_2">
-        <pose>0.375 -0.375 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.75 -0.35 -0.1509 0 0 0</pose>
         <visual name="tile_1_2_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -316,12 +384,12 @@
         </visual>
       </link>
       <link name="tile_1_3">
-        <pose>0.375 -0.125 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.75 -0.24999999999999994 -0.1509 0 0 0</pose>
         <visual name="tile_1_3_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -333,12 +401,12 @@
         </visual>
       </link>
       <link name="tile_1_4">
-        <pose>0.375 0.125 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.75 -0.14999999999999997 -0.1509 0 0 0</pose>
         <visual name="tile_1_4_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -350,12 +418,12 @@
         </visual>
       </link>
       <link name="tile_1_5">
-        <pose>0.375 0.375 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.75 -0.04999999999999999 -0.1509 0 0 0</pose>
         <visual name="tile_1_5_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -367,12 +435,12 @@
         </visual>
       </link>
       <link name="tile_1_6">
-        <pose>0.375 0.625 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.75 0.050000000000000044 -0.1509 0 0 0</pose>
         <visual name="tile_1_6_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -384,12 +452,80 @@
         </visual>
       </link>
       <link name="tile_1_7">
-        <pose>0.375 0.875 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.75 0.15000000000000002 -0.1509 0 0 0</pose>
         <visual name="tile_1_7_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.22 0.58 0.68 1.0</ambient>
+            <diffuse>0.28 0.65 0.75 1.0</diffuse>
+            <specular>0.35 0.40 0.45 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_1_8">
+        <pose>-0.75 0.25 -0.1509 0 0 0</pose>
+        <visual name="tile_1_8_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.12 0.38 0.52 1.0</ambient>
+            <diffuse>0.16 0.45 0.60 1.0</diffuse>
+            <specular>0.25 0.30 0.35 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_1_9">
+        <pose>-0.75 0.35 -0.1509 0 0 0</pose>
+        <visual name="tile_1_9_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.22 0.58 0.68 1.0</ambient>
+            <diffuse>0.28 0.65 0.75 1.0</diffuse>
+            <specular>0.35 0.40 0.45 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_1_10">
+        <pose>-0.75 0.44999999999999996 -0.1509 0 0 0</pose>
+        <visual name="tile_1_10_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.12 0.38 0.52 1.0</ambient>
+            <diffuse>0.16 0.45 0.60 1.0</diffuse>
+            <specular>0.25 0.30 0.35 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_1_11">
+        <pose>-0.75 0.5499999999999999 -0.1509 0 0 0</pose>
+        <visual name="tile_1_11_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -401,12 +537,12 @@
         </visual>
       </link>
       <link name="tile_2_0">
-        <pose>0.625 -0.875 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.65 -0.5499999999999999 -0.1509 0 0 0</pose>
         <visual name="tile_2_0_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -418,12 +554,12 @@
         </visual>
       </link>
       <link name="tile_2_1">
-        <pose>0.625 -0.625 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.65 -0.44999999999999996 -0.1509 0 0 0</pose>
         <visual name="tile_2_1_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -435,12 +571,12 @@
         </visual>
       </link>
       <link name="tile_2_2">
-        <pose>0.625 -0.375 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.65 -0.35 -0.1509 0 0 0</pose>
         <visual name="tile_2_2_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -452,12 +588,12 @@
         </visual>
       </link>
       <link name="tile_2_3">
-        <pose>0.625 -0.125 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.65 -0.24999999999999994 -0.1509 0 0 0</pose>
         <visual name="tile_2_3_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -469,12 +605,12 @@
         </visual>
       </link>
       <link name="tile_2_4">
-        <pose>0.625 0.125 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.65 -0.14999999999999997 -0.1509 0 0 0</pose>
         <visual name="tile_2_4_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -486,12 +622,12 @@
         </visual>
       </link>
       <link name="tile_2_5">
-        <pose>0.625 0.375 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.65 -0.04999999999999999 -0.1509 0 0 0</pose>
         <visual name="tile_2_5_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -503,12 +639,12 @@
         </visual>
       </link>
       <link name="tile_2_6">
-        <pose>0.625 0.625 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.65 0.050000000000000044 -0.1509 0 0 0</pose>
         <visual name="tile_2_6_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -520,12 +656,80 @@
         </visual>
       </link>
       <link name="tile_2_7">
-        <pose>0.625 0.875 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.65 0.15000000000000002 -0.1509 0 0 0</pose>
         <visual name="tile_2_7_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.12 0.38 0.52 1.0</ambient>
+            <diffuse>0.16 0.45 0.60 1.0</diffuse>
+            <specular>0.25 0.30 0.35 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_2_8">
+        <pose>-0.65 0.25 -0.1509 0 0 0</pose>
+        <visual name="tile_2_8_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.22 0.58 0.68 1.0</ambient>
+            <diffuse>0.28 0.65 0.75 1.0</diffuse>
+            <specular>0.35 0.40 0.45 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_2_9">
+        <pose>-0.65 0.35 -0.1509 0 0 0</pose>
+        <visual name="tile_2_9_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.12 0.38 0.52 1.0</ambient>
+            <diffuse>0.16 0.45 0.60 1.0</diffuse>
+            <specular>0.25 0.30 0.35 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_2_10">
+        <pose>-0.65 0.44999999999999996 -0.1509 0 0 0</pose>
+        <visual name="tile_2_10_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.22 0.58 0.68 1.0</ambient>
+            <diffuse>0.28 0.65 0.75 1.0</diffuse>
+            <specular>0.35 0.40 0.45 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_2_11">
+        <pose>-0.65 0.5499999999999999 -0.1509 0 0 0</pose>
+        <visual name="tile_2_11_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -537,12 +741,12 @@
         </visual>
       </link>
       <link name="tile_3_0">
-        <pose>0.875 -0.875 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.55 -0.5499999999999999 -0.1509 0 0 0</pose>
         <visual name="tile_3_0_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -554,12 +758,12 @@
         </visual>
       </link>
       <link name="tile_3_1">
-        <pose>0.875 -0.625 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.55 -0.44999999999999996 -0.1509 0 0 0</pose>
         <visual name="tile_3_1_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -571,12 +775,12 @@
         </visual>
       </link>
       <link name="tile_3_2">
-        <pose>0.875 -0.375 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.55 -0.35 -0.1509 0 0 0</pose>
         <visual name="tile_3_2_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -588,12 +792,12 @@
         </visual>
       </link>
       <link name="tile_3_3">
-        <pose>0.875 -0.125 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.55 -0.24999999999999994 -0.1509 0 0 0</pose>
         <visual name="tile_3_3_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -605,12 +809,12 @@
         </visual>
       </link>
       <link name="tile_3_4">
-        <pose>0.875 0.125 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.55 -0.14999999999999997 -0.1509 0 0 0</pose>
         <visual name="tile_3_4_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -622,12 +826,12 @@
         </visual>
       </link>
       <link name="tile_3_5">
-        <pose>0.875 0.375 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.55 -0.04999999999999999 -0.1509 0 0 0</pose>
         <visual name="tile_3_5_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -639,12 +843,12 @@
         </visual>
       </link>
       <link name="tile_3_6">
-        <pose>0.875 0.625 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.55 0.050000000000000044 -0.1509 0 0 0</pose>
         <visual name="tile_3_6_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -656,12 +860,80 @@
         </visual>
       </link>
       <link name="tile_3_7">
-        <pose>0.875 0.875 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.55 0.15000000000000002 -0.1509 0 0 0</pose>
         <visual name="tile_3_7_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.22 0.58 0.68 1.0</ambient>
+            <diffuse>0.28 0.65 0.75 1.0</diffuse>
+            <specular>0.35 0.40 0.45 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_3_8">
+        <pose>-0.55 0.25 -0.1509 0 0 0</pose>
+        <visual name="tile_3_8_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.12 0.38 0.52 1.0</ambient>
+            <diffuse>0.16 0.45 0.60 1.0</diffuse>
+            <specular>0.25 0.30 0.35 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_3_9">
+        <pose>-0.55 0.35 -0.1509 0 0 0</pose>
+        <visual name="tile_3_9_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.22 0.58 0.68 1.0</ambient>
+            <diffuse>0.28 0.65 0.75 1.0</diffuse>
+            <specular>0.35 0.40 0.45 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_3_10">
+        <pose>-0.55 0.44999999999999996 -0.1509 0 0 0</pose>
+        <visual name="tile_3_10_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.12 0.38 0.52 1.0</ambient>
+            <diffuse>0.16 0.45 0.60 1.0</diffuse>
+            <specular>0.25 0.30 0.35 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_3_11">
+        <pose>-0.55 0.5499999999999999 -0.1509 0 0 0</pose>
+        <visual name="tile_3_11_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -673,12 +945,12 @@
         </visual>
       </link>
       <link name="tile_4_0">
-        <pose>1.125 -0.875 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.45 -0.5499999999999999 -0.1509 0 0 0</pose>
         <visual name="tile_4_0_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -690,12 +962,12 @@
         </visual>
       </link>
       <link name="tile_4_1">
-        <pose>1.125 -0.625 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.45 -0.44999999999999996 -0.1509 0 0 0</pose>
         <visual name="tile_4_1_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -707,12 +979,12 @@
         </visual>
       </link>
       <link name="tile_4_2">
-        <pose>1.125 -0.375 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.45 -0.35 -0.1509 0 0 0</pose>
         <visual name="tile_4_2_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -724,12 +996,12 @@
         </visual>
       </link>
       <link name="tile_4_3">
-        <pose>1.125 -0.125 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.45 -0.24999999999999994 -0.1509 0 0 0</pose>
         <visual name="tile_4_3_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -741,12 +1013,12 @@
         </visual>
       </link>
       <link name="tile_4_4">
-        <pose>1.125 0.125 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.45 -0.14999999999999997 -0.1509 0 0 0</pose>
         <visual name="tile_4_4_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -758,12 +1030,12 @@
         </visual>
       </link>
       <link name="tile_4_5">
-        <pose>1.125 0.375 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.45 -0.04999999999999999 -0.1509 0 0 0</pose>
         <visual name="tile_4_5_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -775,12 +1047,12 @@
         </visual>
       </link>
       <link name="tile_4_6">
-        <pose>1.125 0.625 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.45 0.050000000000000044 -0.1509 0 0 0</pose>
         <visual name="tile_4_6_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -792,12 +1064,80 @@
         </visual>
       </link>
       <link name="tile_4_7">
-        <pose>1.125 0.875 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.45 0.15000000000000002 -0.1509 0 0 0</pose>
         <visual name="tile_4_7_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.12 0.38 0.52 1.0</ambient>
+            <diffuse>0.16 0.45 0.60 1.0</diffuse>
+            <specular>0.25 0.30 0.35 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_4_8">
+        <pose>-0.45 0.25 -0.1509 0 0 0</pose>
+        <visual name="tile_4_8_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.22 0.58 0.68 1.0</ambient>
+            <diffuse>0.28 0.65 0.75 1.0</diffuse>
+            <specular>0.35 0.40 0.45 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_4_9">
+        <pose>-0.45 0.35 -0.1509 0 0 0</pose>
+        <visual name="tile_4_9_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.12 0.38 0.52 1.0</ambient>
+            <diffuse>0.16 0.45 0.60 1.0</diffuse>
+            <specular>0.25 0.30 0.35 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_4_10">
+        <pose>-0.45 0.44999999999999996 -0.1509 0 0 0</pose>
+        <visual name="tile_4_10_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.22 0.58 0.68 1.0</ambient>
+            <diffuse>0.28 0.65 0.75 1.0</diffuse>
+            <specular>0.35 0.40 0.45 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_4_11">
+        <pose>-0.45 0.5499999999999999 -0.1509 0 0 0</pose>
+        <visual name="tile_4_11_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -809,12 +1149,12 @@
         </visual>
       </link>
       <link name="tile_5_0">
-        <pose>1.375 -0.875 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.35000000000000003 -0.5499999999999999 -0.1509 0 0 0</pose>
         <visual name="tile_5_0_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -826,12 +1166,12 @@
         </visual>
       </link>
       <link name="tile_5_1">
-        <pose>1.375 -0.625 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.35000000000000003 -0.44999999999999996 -0.1509 0 0 0</pose>
         <visual name="tile_5_1_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -843,12 +1183,12 @@
         </visual>
       </link>
       <link name="tile_5_2">
-        <pose>1.375 -0.375 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.35000000000000003 -0.35 -0.1509 0 0 0</pose>
         <visual name="tile_5_2_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -860,12 +1200,12 @@
         </visual>
       </link>
       <link name="tile_5_3">
-        <pose>1.375 -0.125 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.35000000000000003 -0.24999999999999994 -0.1509 0 0 0</pose>
         <visual name="tile_5_3_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -877,12 +1217,12 @@
         </visual>
       </link>
       <link name="tile_5_4">
-        <pose>1.375 0.125 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.35000000000000003 -0.14999999999999997 -0.1509 0 0 0</pose>
         <visual name="tile_5_4_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -894,12 +1234,12 @@
         </visual>
       </link>
       <link name="tile_5_5">
-        <pose>1.375 0.375 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.35000000000000003 -0.04999999999999999 -0.1509 0 0 0</pose>
         <visual name="tile_5_5_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -911,12 +1251,12 @@
         </visual>
       </link>
       <link name="tile_5_6">
-        <pose>1.375 0.625 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.35000000000000003 0.050000000000000044 -0.1509 0 0 0</pose>
         <visual name="tile_5_6_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -928,12 +1268,80 @@
         </visual>
       </link>
       <link name="tile_5_7">
-        <pose>1.375 0.875 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.35000000000000003 0.15000000000000002 -0.1509 0 0 0</pose>
         <visual name="tile_5_7_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.22 0.58 0.68 1.0</ambient>
+            <diffuse>0.28 0.65 0.75 1.0</diffuse>
+            <specular>0.35 0.40 0.45 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_5_8">
+        <pose>-0.35000000000000003 0.25 -0.1509 0 0 0</pose>
+        <visual name="tile_5_8_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.12 0.38 0.52 1.0</ambient>
+            <diffuse>0.16 0.45 0.60 1.0</diffuse>
+            <specular>0.25 0.30 0.35 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_5_9">
+        <pose>-0.35000000000000003 0.35 -0.1509 0 0 0</pose>
+        <visual name="tile_5_9_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.22 0.58 0.68 1.0</ambient>
+            <diffuse>0.28 0.65 0.75 1.0</diffuse>
+            <specular>0.35 0.40 0.45 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_5_10">
+        <pose>-0.35000000000000003 0.44999999999999996 -0.1509 0 0 0</pose>
+        <visual name="tile_5_10_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.12 0.38 0.52 1.0</ambient>
+            <diffuse>0.16 0.45 0.60 1.0</diffuse>
+            <specular>0.25 0.30 0.35 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_5_11">
+        <pose>-0.35000000000000003 0.5499999999999999 -0.1509 0 0 0</pose>
+        <visual name="tile_5_11_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -945,12 +1353,12 @@
         </visual>
       </link>
       <link name="tile_6_0">
-        <pose>1.625 -0.875 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.25 -0.5499999999999999 -0.1509 0 0 0</pose>
         <visual name="tile_6_0_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -962,12 +1370,12 @@
         </visual>
       </link>
       <link name="tile_6_1">
-        <pose>1.625 -0.625 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.25 -0.44999999999999996 -0.1509 0 0 0</pose>
         <visual name="tile_6_1_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -979,12 +1387,12 @@
         </visual>
       </link>
       <link name="tile_6_2">
-        <pose>1.625 -0.375 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.25 -0.35 -0.1509 0 0 0</pose>
         <visual name="tile_6_2_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -996,12 +1404,12 @@
         </visual>
       </link>
       <link name="tile_6_3">
-        <pose>1.625 -0.125 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.25 -0.24999999999999994 -0.1509 0 0 0</pose>
         <visual name="tile_6_3_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1013,12 +1421,12 @@
         </visual>
       </link>
       <link name="tile_6_4">
-        <pose>1.625 0.125 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.25 -0.14999999999999997 -0.1509 0 0 0</pose>
         <visual name="tile_6_4_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1030,12 +1438,12 @@
         </visual>
       </link>
       <link name="tile_6_5">
-        <pose>1.625 0.375 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.25 -0.04999999999999999 -0.1509 0 0 0</pose>
         <visual name="tile_6_5_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1047,12 +1455,12 @@
         </visual>
       </link>
       <link name="tile_6_6">
-        <pose>1.625 0.625 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.25 0.050000000000000044 -0.1509 0 0 0</pose>
         <visual name="tile_6_6_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1064,12 +1472,80 @@
         </visual>
       </link>
       <link name="tile_6_7">
-        <pose>1.625 0.875 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.25 0.15000000000000002 -0.1509 0 0 0</pose>
         <visual name="tile_6_7_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.12 0.38 0.52 1.0</ambient>
+            <diffuse>0.16 0.45 0.60 1.0</diffuse>
+            <specular>0.25 0.30 0.35 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_6_8">
+        <pose>-0.25 0.25 -0.1509 0 0 0</pose>
+        <visual name="tile_6_8_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.22 0.58 0.68 1.0</ambient>
+            <diffuse>0.28 0.65 0.75 1.0</diffuse>
+            <specular>0.35 0.40 0.45 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_6_9">
+        <pose>-0.25 0.35 -0.1509 0 0 0</pose>
+        <visual name="tile_6_9_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.12 0.38 0.52 1.0</ambient>
+            <diffuse>0.16 0.45 0.60 1.0</diffuse>
+            <specular>0.25 0.30 0.35 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_6_10">
+        <pose>-0.25 0.44999999999999996 -0.1509 0 0 0</pose>
+        <visual name="tile_6_10_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.22 0.58 0.68 1.0</ambient>
+            <diffuse>0.28 0.65 0.75 1.0</diffuse>
+            <specular>0.35 0.40 0.45 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_6_11">
+        <pose>-0.25 0.5499999999999999 -0.1509 0 0 0</pose>
+        <visual name="tile_6_11_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1081,12 +1557,12 @@
         </visual>
       </link>
       <link name="tile_7_0">
-        <pose>1.875 -0.875 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.15000000000000002 -0.5499999999999999 -0.1509 0 0 0</pose>
         <visual name="tile_7_0_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1098,12 +1574,12 @@
         </visual>
       </link>
       <link name="tile_7_1">
-        <pose>1.875 -0.625 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.15000000000000002 -0.44999999999999996 -0.1509 0 0 0</pose>
         <visual name="tile_7_1_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1115,12 +1591,12 @@
         </visual>
       </link>
       <link name="tile_7_2">
-        <pose>1.875 -0.375 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.15000000000000002 -0.35 -0.1509 0 0 0</pose>
         <visual name="tile_7_2_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1132,12 +1608,12 @@
         </visual>
       </link>
       <link name="tile_7_3">
-        <pose>1.875 -0.125 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.15000000000000002 -0.24999999999999994 -0.1509 0 0 0</pose>
         <visual name="tile_7_3_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1149,12 +1625,12 @@
         </visual>
       </link>
       <link name="tile_7_4">
-        <pose>1.875 0.125 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.15000000000000002 -0.14999999999999997 -0.1509 0 0 0</pose>
         <visual name="tile_7_4_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1166,12 +1642,12 @@
         </visual>
       </link>
       <link name="tile_7_5">
-        <pose>1.875 0.375 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.15000000000000002 -0.04999999999999999 -0.1509 0 0 0</pose>
         <visual name="tile_7_5_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1183,12 +1659,12 @@
         </visual>
       </link>
       <link name="tile_7_6">
-        <pose>1.875 0.625 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.15000000000000002 0.050000000000000044 -0.1509 0 0 0</pose>
         <visual name="tile_7_6_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1200,12 +1676,80 @@
         </visual>
       </link>
       <link name="tile_7_7">
-        <pose>1.875 0.875 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.15000000000000002 0.15000000000000002 -0.1509 0 0 0</pose>
         <visual name="tile_7_7_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.22 0.58 0.68 1.0</ambient>
+            <diffuse>0.28 0.65 0.75 1.0</diffuse>
+            <specular>0.35 0.40 0.45 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_7_8">
+        <pose>-0.15000000000000002 0.25 -0.1509 0 0 0</pose>
+        <visual name="tile_7_8_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.12 0.38 0.52 1.0</ambient>
+            <diffuse>0.16 0.45 0.60 1.0</diffuse>
+            <specular>0.25 0.30 0.35 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_7_9">
+        <pose>-0.15000000000000002 0.35 -0.1509 0 0 0</pose>
+        <visual name="tile_7_9_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.22 0.58 0.68 1.0</ambient>
+            <diffuse>0.28 0.65 0.75 1.0</diffuse>
+            <specular>0.35 0.40 0.45 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_7_10">
+        <pose>-0.15000000000000002 0.44999999999999996 -0.1509 0 0 0</pose>
+        <visual name="tile_7_10_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.12 0.38 0.52 1.0</ambient>
+            <diffuse>0.16 0.45 0.60 1.0</diffuse>
+            <specular>0.25 0.30 0.35 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_7_11">
+        <pose>-0.15000000000000002 0.5499999999999999 -0.1509 0 0 0</pose>
+        <visual name="tile_7_11_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1217,12 +1761,12 @@
         </visual>
       </link>
       <link name="tile_8_0">
-        <pose>2.125 -0.875 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.050000000000000044 -0.5499999999999999 -0.1509 0 0 0</pose>
         <visual name="tile_8_0_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1234,12 +1778,12 @@
         </visual>
       </link>
       <link name="tile_8_1">
-        <pose>2.125 -0.625 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.050000000000000044 -0.44999999999999996 -0.1509 0 0 0</pose>
         <visual name="tile_8_1_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1251,12 +1795,12 @@
         </visual>
       </link>
       <link name="tile_8_2">
-        <pose>2.125 -0.375 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.050000000000000044 -0.35 -0.1509 0 0 0</pose>
         <visual name="tile_8_2_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1268,12 +1812,12 @@
         </visual>
       </link>
       <link name="tile_8_3">
-        <pose>2.125 -0.125 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.050000000000000044 -0.24999999999999994 -0.1509 0 0 0</pose>
         <visual name="tile_8_3_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1285,12 +1829,12 @@
         </visual>
       </link>
       <link name="tile_8_4">
-        <pose>2.125 0.125 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.050000000000000044 -0.14999999999999997 -0.1509 0 0 0</pose>
         <visual name="tile_8_4_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1302,12 +1846,12 @@
         </visual>
       </link>
       <link name="tile_8_5">
-        <pose>2.125 0.375 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.050000000000000044 -0.04999999999999999 -0.1509 0 0 0</pose>
         <visual name="tile_8_5_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1319,12 +1863,12 @@
         </visual>
       </link>
       <link name="tile_8_6">
-        <pose>2.125 0.625 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.050000000000000044 0.050000000000000044 -0.1509 0 0 0</pose>
         <visual name="tile_8_6_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1336,12 +1880,80 @@
         </visual>
       </link>
       <link name="tile_8_7">
-        <pose>2.125 0.875 -0.17423333333333335 0 0 0</pose>
+        <pose>-0.050000000000000044 0.15000000000000002 -0.1509 0 0 0</pose>
         <visual name="tile_8_7_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.12 0.38 0.52 1.0</ambient>
+            <diffuse>0.16 0.45 0.60 1.0</diffuse>
+            <specular>0.25 0.30 0.35 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_8_8">
+        <pose>-0.050000000000000044 0.25 -0.1509 0 0 0</pose>
+        <visual name="tile_8_8_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.22 0.58 0.68 1.0</ambient>
+            <diffuse>0.28 0.65 0.75 1.0</diffuse>
+            <specular>0.35 0.40 0.45 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_8_9">
+        <pose>-0.050000000000000044 0.35 -0.1509 0 0 0</pose>
+        <visual name="tile_8_9_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.12 0.38 0.52 1.0</ambient>
+            <diffuse>0.16 0.45 0.60 1.0</diffuse>
+            <specular>0.25 0.30 0.35 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_8_10">
+        <pose>-0.050000000000000044 0.44999999999999996 -0.1509 0 0 0</pose>
+        <visual name="tile_8_10_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.22 0.58 0.68 1.0</ambient>
+            <diffuse>0.28 0.65 0.75 1.0</diffuse>
+            <specular>0.35 0.40 0.45 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_8_11">
+        <pose>-0.050000000000000044 0.5499999999999999 -0.1509 0 0 0</pose>
+        <visual name="tile_8_11_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1353,12 +1965,12 @@
         </visual>
       </link>
       <link name="tile_9_0">
-        <pose>2.375 -0.875 -0.17423333333333335 0 0 0</pose>
+        <pose>0.04999999999999993 -0.5499999999999999 -0.1509 0 0 0</pose>
         <visual name="tile_9_0_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1370,12 +1982,12 @@
         </visual>
       </link>
       <link name="tile_9_1">
-        <pose>2.375 -0.625 -0.17423333333333335 0 0 0</pose>
+        <pose>0.04999999999999993 -0.44999999999999996 -0.1509 0 0 0</pose>
         <visual name="tile_9_1_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1387,12 +1999,12 @@
         </visual>
       </link>
       <link name="tile_9_2">
-        <pose>2.375 -0.375 -0.17423333333333335 0 0 0</pose>
+        <pose>0.04999999999999993 -0.35 -0.1509 0 0 0</pose>
         <visual name="tile_9_2_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1404,12 +2016,12 @@
         </visual>
       </link>
       <link name="tile_9_3">
-        <pose>2.375 -0.125 -0.17423333333333335 0 0 0</pose>
+        <pose>0.04999999999999993 -0.24999999999999994 -0.1509 0 0 0</pose>
         <visual name="tile_9_3_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1421,12 +2033,12 @@
         </visual>
       </link>
       <link name="tile_9_4">
-        <pose>2.375 0.125 -0.17423333333333335 0 0 0</pose>
+        <pose>0.04999999999999993 -0.14999999999999997 -0.1509 0 0 0</pose>
         <visual name="tile_9_4_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1438,12 +2050,12 @@
         </visual>
       </link>
       <link name="tile_9_5">
-        <pose>2.375 0.375 -0.17423333333333335 0 0 0</pose>
+        <pose>0.04999999999999993 -0.04999999999999999 -0.1509 0 0 0</pose>
         <visual name="tile_9_5_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1455,12 +2067,12 @@
         </visual>
       </link>
       <link name="tile_9_6">
-        <pose>2.375 0.625 -0.17423333333333335 0 0 0</pose>
+        <pose>0.04999999999999993 0.050000000000000044 -0.1509 0 0 0</pose>
         <visual name="tile_9_6_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1472,12 +2084,80 @@
         </visual>
       </link>
       <link name="tile_9_7">
-        <pose>2.375 0.875 -0.17423333333333335 0 0 0</pose>
+        <pose>0.04999999999999993 0.15000000000000002 -0.1509 0 0 0</pose>
         <visual name="tile_9_7_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.22 0.58 0.68 1.0</ambient>
+            <diffuse>0.28 0.65 0.75 1.0</diffuse>
+            <specular>0.35 0.40 0.45 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_9_8">
+        <pose>0.04999999999999993 0.25 -0.1509 0 0 0</pose>
+        <visual name="tile_9_8_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.12 0.38 0.52 1.0</ambient>
+            <diffuse>0.16 0.45 0.60 1.0</diffuse>
+            <specular>0.25 0.30 0.35 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_9_9">
+        <pose>0.04999999999999993 0.35 -0.1509 0 0 0</pose>
+        <visual name="tile_9_9_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.22 0.58 0.68 1.0</ambient>
+            <diffuse>0.28 0.65 0.75 1.0</diffuse>
+            <specular>0.35 0.40 0.45 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_9_10">
+        <pose>0.04999999999999993 0.44999999999999996 -0.1509 0 0 0</pose>
+        <visual name="tile_9_10_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.12 0.38 0.52 1.0</ambient>
+            <diffuse>0.16 0.45 0.60 1.0</diffuse>
+            <specular>0.25 0.30 0.35 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_9_11">
+        <pose>0.04999999999999993 0.5499999999999999 -0.1509 0 0 0</pose>
+        <visual name="tile_9_11_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1489,12 +2169,12 @@
         </visual>
       </link>
       <link name="tile_10_0">
-        <pose>2.625 -0.875 -0.17423333333333335 0 0 0</pose>
+        <pose>0.1499999999999999 -0.5499999999999999 -0.1509 0 0 0</pose>
         <visual name="tile_10_0_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1506,12 +2186,12 @@
         </visual>
       </link>
       <link name="tile_10_1">
-        <pose>2.625 -0.625 -0.17423333333333335 0 0 0</pose>
+        <pose>0.1499999999999999 -0.44999999999999996 -0.1509 0 0 0</pose>
         <visual name="tile_10_1_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1523,12 +2203,12 @@
         </visual>
       </link>
       <link name="tile_10_2">
-        <pose>2.625 -0.375 -0.17423333333333335 0 0 0</pose>
+        <pose>0.1499999999999999 -0.35 -0.1509 0 0 0</pose>
         <visual name="tile_10_2_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1540,12 +2220,12 @@
         </visual>
       </link>
       <link name="tile_10_3">
-        <pose>2.625 -0.125 -0.17423333333333335 0 0 0</pose>
+        <pose>0.1499999999999999 -0.24999999999999994 -0.1509 0 0 0</pose>
         <visual name="tile_10_3_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1557,12 +2237,12 @@
         </visual>
       </link>
       <link name="tile_10_4">
-        <pose>2.625 0.125 -0.17423333333333335 0 0 0</pose>
+        <pose>0.1499999999999999 -0.14999999999999997 -0.1509 0 0 0</pose>
         <visual name="tile_10_4_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1574,12 +2254,12 @@
         </visual>
       </link>
       <link name="tile_10_5">
-        <pose>2.625 0.375 -0.17423333333333335 0 0 0</pose>
+        <pose>0.1499999999999999 -0.04999999999999999 -0.1509 0 0 0</pose>
         <visual name="tile_10_5_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1591,12 +2271,12 @@
         </visual>
       </link>
       <link name="tile_10_6">
-        <pose>2.625 0.625 -0.17423333333333335 0 0 0</pose>
+        <pose>0.1499999999999999 0.050000000000000044 -0.1509 0 0 0</pose>
         <visual name="tile_10_6_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1608,12 +2288,80 @@
         </visual>
       </link>
       <link name="tile_10_7">
-        <pose>2.625 0.875 -0.17423333333333335 0 0 0</pose>
+        <pose>0.1499999999999999 0.15000000000000002 -0.1509 0 0 0</pose>
         <visual name="tile_10_7_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.12 0.38 0.52 1.0</ambient>
+            <diffuse>0.16 0.45 0.60 1.0</diffuse>
+            <specular>0.25 0.30 0.35 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_10_8">
+        <pose>0.1499999999999999 0.25 -0.1509 0 0 0</pose>
+        <visual name="tile_10_8_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.22 0.58 0.68 1.0</ambient>
+            <diffuse>0.28 0.65 0.75 1.0</diffuse>
+            <specular>0.35 0.40 0.45 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_10_9">
+        <pose>0.1499999999999999 0.35 -0.1509 0 0 0</pose>
+        <visual name="tile_10_9_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.12 0.38 0.52 1.0</ambient>
+            <diffuse>0.16 0.45 0.60 1.0</diffuse>
+            <specular>0.25 0.30 0.35 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_10_10">
+        <pose>0.1499999999999999 0.44999999999999996 -0.1509 0 0 0</pose>
+        <visual name="tile_10_10_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.22 0.58 0.68 1.0</ambient>
+            <diffuse>0.28 0.65 0.75 1.0</diffuse>
+            <specular>0.35 0.40 0.45 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_10_11">
+        <pose>0.1499999999999999 0.5499999999999999 -0.1509 0 0 0</pose>
+        <visual name="tile_10_11_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1625,12 +2373,12 @@
         </visual>
       </link>
       <link name="tile_11_0">
-        <pose>2.875 -0.875 -0.17423333333333335 0 0 0</pose>
+        <pose>0.2499999999999999 -0.5499999999999999 -0.1509 0 0 0</pose>
         <visual name="tile_11_0_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1642,12 +2390,12 @@
         </visual>
       </link>
       <link name="tile_11_1">
-        <pose>2.875 -0.625 -0.17423333333333335 0 0 0</pose>
+        <pose>0.2499999999999999 -0.44999999999999996 -0.1509 0 0 0</pose>
         <visual name="tile_11_1_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1659,12 +2407,12 @@
         </visual>
       </link>
       <link name="tile_11_2">
-        <pose>2.875 -0.375 -0.17423333333333335 0 0 0</pose>
+        <pose>0.2499999999999999 -0.35 -0.1509 0 0 0</pose>
         <visual name="tile_11_2_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1676,12 +2424,12 @@
         </visual>
       </link>
       <link name="tile_11_3">
-        <pose>2.875 -0.125 -0.17423333333333335 0 0 0</pose>
+        <pose>0.2499999999999999 -0.24999999999999994 -0.1509 0 0 0</pose>
         <visual name="tile_11_3_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1693,12 +2441,12 @@
         </visual>
       </link>
       <link name="tile_11_4">
-        <pose>2.875 0.125 -0.17423333333333335 0 0 0</pose>
+        <pose>0.2499999999999999 -0.14999999999999997 -0.1509 0 0 0</pose>
         <visual name="tile_11_4_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1710,12 +2458,12 @@
         </visual>
       </link>
       <link name="tile_11_5">
-        <pose>2.875 0.375 -0.17423333333333335 0 0 0</pose>
+        <pose>0.2499999999999999 -0.04999999999999999 -0.1509 0 0 0</pose>
         <visual name="tile_11_5_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1727,12 +2475,12 @@
         </visual>
       </link>
       <link name="tile_11_6">
-        <pose>2.875 0.625 -0.17423333333333335 0 0 0</pose>
+        <pose>0.2499999999999999 0.050000000000000044 -0.1509 0 0 0</pose>
         <visual name="tile_11_6_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1744,12 +2492,80 @@
         </visual>
       </link>
       <link name="tile_11_7">
-        <pose>2.875 0.875 -0.17423333333333335 0 0 0</pose>
+        <pose>0.2499999999999999 0.15000000000000002 -0.1509 0 0 0</pose>
         <visual name="tile_11_7_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.22 0.58 0.68 1.0</ambient>
+            <diffuse>0.28 0.65 0.75 1.0</diffuse>
+            <specular>0.35 0.40 0.45 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_11_8">
+        <pose>0.2499999999999999 0.25 -0.1509 0 0 0</pose>
+        <visual name="tile_11_8_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.12 0.38 0.52 1.0</ambient>
+            <diffuse>0.16 0.45 0.60 1.0</diffuse>
+            <specular>0.25 0.30 0.35 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_11_9">
+        <pose>0.2499999999999999 0.35 -0.1509 0 0 0</pose>
+        <visual name="tile_11_9_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.22 0.58 0.68 1.0</ambient>
+            <diffuse>0.28 0.65 0.75 1.0</diffuse>
+            <specular>0.35 0.40 0.45 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_11_10">
+        <pose>0.2499999999999999 0.44999999999999996 -0.1509 0 0 0</pose>
+        <visual name="tile_11_10_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.12 0.38 0.52 1.0</ambient>
+            <diffuse>0.16 0.45 0.60 1.0</diffuse>
+            <specular>0.25 0.30 0.35 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_11_11">
+        <pose>0.2499999999999999 0.5499999999999999 -0.1509 0 0 0</pose>
+        <visual name="tile_11_11_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1761,12 +2577,12 @@
         </visual>
       </link>
       <link name="tile_12_0">
-        <pose>3.125 -0.875 -0.17423333333333335 0 0 0</pose>
+        <pose>0.35 -0.5499999999999999 -0.1509 0 0 0</pose>
         <visual name="tile_12_0_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1778,12 +2594,12 @@
         </visual>
       </link>
       <link name="tile_12_1">
-        <pose>3.125 -0.625 -0.17423333333333335 0 0 0</pose>
+        <pose>0.35 -0.44999999999999996 -0.1509 0 0 0</pose>
         <visual name="tile_12_1_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1795,12 +2611,12 @@
         </visual>
       </link>
       <link name="tile_12_2">
-        <pose>3.125 -0.375 -0.17423333333333335 0 0 0</pose>
+        <pose>0.35 -0.35 -0.1509 0 0 0</pose>
         <visual name="tile_12_2_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1812,12 +2628,12 @@
         </visual>
       </link>
       <link name="tile_12_3">
-        <pose>3.125 -0.125 -0.17423333333333335 0 0 0</pose>
+        <pose>0.35 -0.24999999999999994 -0.1509 0 0 0</pose>
         <visual name="tile_12_3_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1829,12 +2645,12 @@
         </visual>
       </link>
       <link name="tile_12_4">
-        <pose>3.125 0.125 -0.17423333333333335 0 0 0</pose>
+        <pose>0.35 -0.14999999999999997 -0.1509 0 0 0</pose>
         <visual name="tile_12_4_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1846,12 +2662,12 @@
         </visual>
       </link>
       <link name="tile_12_5">
-        <pose>3.125 0.375 -0.17423333333333335 0 0 0</pose>
+        <pose>0.35 -0.04999999999999999 -0.1509 0 0 0</pose>
         <visual name="tile_12_5_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1863,12 +2679,12 @@
         </visual>
       </link>
       <link name="tile_12_6">
-        <pose>3.125 0.625 -0.17423333333333335 0 0 0</pose>
+        <pose>0.35 0.050000000000000044 -0.1509 0 0 0</pose>
         <visual name="tile_12_6_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1880,12 +2696,80 @@
         </visual>
       </link>
       <link name="tile_12_7">
-        <pose>3.125 0.875 -0.17423333333333335 0 0 0</pose>
+        <pose>0.35 0.15000000000000002 -0.1509 0 0 0</pose>
         <visual name="tile_12_7_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.12 0.38 0.52 1.0</ambient>
+            <diffuse>0.16 0.45 0.60 1.0</diffuse>
+            <specular>0.25 0.30 0.35 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_12_8">
+        <pose>0.35 0.25 -0.1509 0 0 0</pose>
+        <visual name="tile_12_8_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.22 0.58 0.68 1.0</ambient>
+            <diffuse>0.28 0.65 0.75 1.0</diffuse>
+            <specular>0.35 0.40 0.45 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_12_9">
+        <pose>0.35 0.35 -0.1509 0 0 0</pose>
+        <visual name="tile_12_9_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.12 0.38 0.52 1.0</ambient>
+            <diffuse>0.16 0.45 0.60 1.0</diffuse>
+            <specular>0.25 0.30 0.35 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_12_10">
+        <pose>0.35 0.44999999999999996 -0.1509 0 0 0</pose>
+        <visual name="tile_12_10_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.22 0.58 0.68 1.0</ambient>
+            <diffuse>0.28 0.65 0.75 1.0</diffuse>
+            <specular>0.35 0.40 0.45 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_12_11">
+        <pose>0.35 0.5499999999999999 -0.1509 0 0 0</pose>
+        <visual name="tile_12_11_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1897,12 +2781,12 @@
         </visual>
       </link>
       <link name="tile_13_0">
-        <pose>3.375 -0.875 -0.17423333333333335 0 0 0</pose>
+        <pose>0.44999999999999984 -0.5499999999999999 -0.1509 0 0 0</pose>
         <visual name="tile_13_0_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1914,12 +2798,12 @@
         </visual>
       </link>
       <link name="tile_13_1">
-        <pose>3.375 -0.625 -0.17423333333333335 0 0 0</pose>
+        <pose>0.44999999999999984 -0.44999999999999996 -0.1509 0 0 0</pose>
         <visual name="tile_13_1_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1931,12 +2815,12 @@
         </visual>
       </link>
       <link name="tile_13_2">
-        <pose>3.375 -0.375 -0.17423333333333335 0 0 0</pose>
+        <pose>0.44999999999999984 -0.35 -0.1509 0 0 0</pose>
         <visual name="tile_13_2_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1948,12 +2832,12 @@
         </visual>
       </link>
       <link name="tile_13_3">
-        <pose>3.375 -0.125 -0.17423333333333335 0 0 0</pose>
+        <pose>0.44999999999999984 -0.24999999999999994 -0.1509 0 0 0</pose>
         <visual name="tile_13_3_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1965,12 +2849,12 @@
         </visual>
       </link>
       <link name="tile_13_4">
-        <pose>3.375 0.125 -0.17423333333333335 0 0 0</pose>
+        <pose>0.44999999999999984 -0.14999999999999997 -0.1509 0 0 0</pose>
         <visual name="tile_13_4_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1982,12 +2866,12 @@
         </visual>
       </link>
       <link name="tile_13_5">
-        <pose>3.375 0.375 -0.17423333333333335 0 0 0</pose>
+        <pose>0.44999999999999984 -0.04999999999999999 -0.1509 0 0 0</pose>
         <visual name="tile_13_5_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -1999,12 +2883,12 @@
         </visual>
       </link>
       <link name="tile_13_6">
-        <pose>3.375 0.625 -0.17423333333333335 0 0 0</pose>
+        <pose>0.44999999999999984 0.050000000000000044 -0.1509 0 0 0</pose>
         <visual name="tile_13_6_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2016,12 +2900,80 @@
         </visual>
       </link>
       <link name="tile_13_7">
-        <pose>3.375 0.875 -0.17423333333333335 0 0 0</pose>
+        <pose>0.44999999999999984 0.15000000000000002 -0.1509 0 0 0</pose>
         <visual name="tile_13_7_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.22 0.58 0.68 1.0</ambient>
+            <diffuse>0.28 0.65 0.75 1.0</diffuse>
+            <specular>0.35 0.40 0.45 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_13_8">
+        <pose>0.44999999999999984 0.25 -0.1509 0 0 0</pose>
+        <visual name="tile_13_8_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.12 0.38 0.52 1.0</ambient>
+            <diffuse>0.16 0.45 0.60 1.0</diffuse>
+            <specular>0.25 0.30 0.35 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_13_9">
+        <pose>0.44999999999999984 0.35 -0.1509 0 0 0</pose>
+        <visual name="tile_13_9_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.22 0.58 0.68 1.0</ambient>
+            <diffuse>0.28 0.65 0.75 1.0</diffuse>
+            <specular>0.35 0.40 0.45 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_13_10">
+        <pose>0.44999999999999984 0.44999999999999996 -0.1509 0 0 0</pose>
+        <visual name="tile_13_10_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.12 0.38 0.52 1.0</ambient>
+            <diffuse>0.16 0.45 0.60 1.0</diffuse>
+            <specular>0.25 0.30 0.35 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_13_11">
+        <pose>0.44999999999999984 0.5499999999999999 -0.1509 0 0 0</pose>
+        <visual name="tile_13_11_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2033,12 +2985,12 @@
         </visual>
       </link>
       <link name="tile_14_0">
-        <pose>3.625 -0.875 -0.17423333333333335 0 0 0</pose>
+        <pose>0.5499999999999999 -0.5499999999999999 -0.1509 0 0 0</pose>
         <visual name="tile_14_0_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2050,12 +3002,12 @@
         </visual>
       </link>
       <link name="tile_14_1">
-        <pose>3.625 -0.625 -0.17423333333333335 0 0 0</pose>
+        <pose>0.5499999999999999 -0.44999999999999996 -0.1509 0 0 0</pose>
         <visual name="tile_14_1_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2067,12 +3019,12 @@
         </visual>
       </link>
       <link name="tile_14_2">
-        <pose>3.625 -0.375 -0.17423333333333335 0 0 0</pose>
+        <pose>0.5499999999999999 -0.35 -0.1509 0 0 0</pose>
         <visual name="tile_14_2_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2084,12 +3036,12 @@
         </visual>
       </link>
       <link name="tile_14_3">
-        <pose>3.625 -0.125 -0.17423333333333335 0 0 0</pose>
+        <pose>0.5499999999999999 -0.24999999999999994 -0.1509 0 0 0</pose>
         <visual name="tile_14_3_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2101,12 +3053,12 @@
         </visual>
       </link>
       <link name="tile_14_4">
-        <pose>3.625 0.125 -0.17423333333333335 0 0 0</pose>
+        <pose>0.5499999999999999 -0.14999999999999997 -0.1509 0 0 0</pose>
         <visual name="tile_14_4_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2118,12 +3070,12 @@
         </visual>
       </link>
       <link name="tile_14_5">
-        <pose>3.625 0.375 -0.17423333333333335 0 0 0</pose>
+        <pose>0.5499999999999999 -0.04999999999999999 -0.1509 0 0 0</pose>
         <visual name="tile_14_5_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2135,12 +3087,12 @@
         </visual>
       </link>
       <link name="tile_14_6">
-        <pose>3.625 0.625 -0.17423333333333335 0 0 0</pose>
+        <pose>0.5499999999999999 0.050000000000000044 -0.1509 0 0 0</pose>
         <visual name="tile_14_6_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2152,12 +3104,80 @@
         </visual>
       </link>
       <link name="tile_14_7">
-        <pose>3.625 0.875 -0.17423333333333335 0 0 0</pose>
+        <pose>0.5499999999999999 0.15000000000000002 -0.1509 0 0 0</pose>
         <visual name="tile_14_7_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.12 0.38 0.52 1.0</ambient>
+            <diffuse>0.16 0.45 0.60 1.0</diffuse>
+            <specular>0.25 0.30 0.35 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_14_8">
+        <pose>0.5499999999999999 0.25 -0.1509 0 0 0</pose>
+        <visual name="tile_14_8_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.22 0.58 0.68 1.0</ambient>
+            <diffuse>0.28 0.65 0.75 1.0</diffuse>
+            <specular>0.35 0.40 0.45 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_14_9">
+        <pose>0.5499999999999999 0.35 -0.1509 0 0 0</pose>
+        <visual name="tile_14_9_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.12 0.38 0.52 1.0</ambient>
+            <diffuse>0.16 0.45 0.60 1.0</diffuse>
+            <specular>0.25 0.30 0.35 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_14_10">
+        <pose>0.5499999999999999 0.44999999999999996 -0.1509 0 0 0</pose>
+        <visual name="tile_14_10_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.22 0.58 0.68 1.0</ambient>
+            <diffuse>0.28 0.65 0.75 1.0</diffuse>
+            <specular>0.35 0.40 0.45 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_14_11">
+        <pose>0.5499999999999999 0.5499999999999999 -0.1509 0 0 0</pose>
+        <visual name="tile_14_11_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2169,12 +3189,12 @@
         </visual>
       </link>
       <link name="tile_15_0">
-        <pose>3.875 -0.875 -0.17423333333333335 0 0 0</pose>
+        <pose>0.6499999999999998 -0.5499999999999999 -0.1509 0 0 0</pose>
         <visual name="tile_15_0_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2186,12 +3206,12 @@
         </visual>
       </link>
       <link name="tile_15_1">
-        <pose>3.875 -0.625 -0.17423333333333335 0 0 0</pose>
+        <pose>0.6499999999999998 -0.44999999999999996 -0.1509 0 0 0</pose>
         <visual name="tile_15_1_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2203,12 +3223,12 @@
         </visual>
       </link>
       <link name="tile_15_2">
-        <pose>3.875 -0.375 -0.17423333333333335 0 0 0</pose>
+        <pose>0.6499999999999998 -0.35 -0.1509 0 0 0</pose>
         <visual name="tile_15_2_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2220,12 +3240,12 @@
         </visual>
       </link>
       <link name="tile_15_3">
-        <pose>3.875 -0.125 -0.17423333333333335 0 0 0</pose>
+        <pose>0.6499999999999998 -0.24999999999999994 -0.1509 0 0 0</pose>
         <visual name="tile_15_3_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2237,12 +3257,12 @@
         </visual>
       </link>
       <link name="tile_15_4">
-        <pose>3.875 0.125 -0.17423333333333335 0 0 0</pose>
+        <pose>0.6499999999999998 -0.14999999999999997 -0.1509 0 0 0</pose>
         <visual name="tile_15_4_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2254,12 +3274,12 @@
         </visual>
       </link>
       <link name="tile_15_5">
-        <pose>3.875 0.375 -0.17423333333333335 0 0 0</pose>
+        <pose>0.6499999999999998 -0.04999999999999999 -0.1509 0 0 0</pose>
         <visual name="tile_15_5_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2271,12 +3291,12 @@
         </visual>
       </link>
       <link name="tile_15_6">
-        <pose>3.875 0.625 -0.17423333333333335 0 0 0</pose>
+        <pose>0.6499999999999998 0.050000000000000044 -0.1509 0 0 0</pose>
         <visual name="tile_15_6_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2288,12 +3308,80 @@
         </visual>
       </link>
       <link name="tile_15_7">
-        <pose>3.875 0.875 -0.17423333333333335 0 0 0</pose>
+        <pose>0.6499999999999998 0.15000000000000002 -0.1509 0 0 0</pose>
         <visual name="tile_15_7_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.22 0.58 0.68 1.0</ambient>
+            <diffuse>0.28 0.65 0.75 1.0</diffuse>
+            <specular>0.35 0.40 0.45 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_15_8">
+        <pose>0.6499999999999998 0.25 -0.1509 0 0 0</pose>
+        <visual name="tile_15_8_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.12 0.38 0.52 1.0</ambient>
+            <diffuse>0.16 0.45 0.60 1.0</diffuse>
+            <specular>0.25 0.30 0.35 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_15_9">
+        <pose>0.6499999999999998 0.35 -0.1509 0 0 0</pose>
+        <visual name="tile_15_9_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.22 0.58 0.68 1.0</ambient>
+            <diffuse>0.28 0.65 0.75 1.0</diffuse>
+            <specular>0.35 0.40 0.45 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_15_10">
+        <pose>0.6499999999999998 0.44999999999999996 -0.1509 0 0 0</pose>
+        <visual name="tile_15_10_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.12 0.38 0.52 1.0</ambient>
+            <diffuse>0.16 0.45 0.60 1.0</diffuse>
+            <specular>0.25 0.30 0.35 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_15_11">
+        <pose>0.6499999999999998 0.5499999999999999 -0.1509 0 0 0</pose>
+        <visual name="tile_15_11_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2305,12 +3393,12 @@
         </visual>
       </link>
       <link name="tile_16_0">
-        <pose>4.125 -0.875 -0.17423333333333335 0 0 0</pose>
+        <pose>0.7499999999999999 -0.5499999999999999 -0.1509 0 0 0</pose>
         <visual name="tile_16_0_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2322,12 +3410,12 @@
         </visual>
       </link>
       <link name="tile_16_1">
-        <pose>4.125 -0.625 -0.17423333333333335 0 0 0</pose>
+        <pose>0.7499999999999999 -0.44999999999999996 -0.1509 0 0 0</pose>
         <visual name="tile_16_1_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2339,12 +3427,12 @@
         </visual>
       </link>
       <link name="tile_16_2">
-        <pose>4.125 -0.375 -0.17423333333333335 0 0 0</pose>
+        <pose>0.7499999999999999 -0.35 -0.1509 0 0 0</pose>
         <visual name="tile_16_2_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2356,12 +3444,12 @@
         </visual>
       </link>
       <link name="tile_16_3">
-        <pose>4.125 -0.125 -0.17423333333333335 0 0 0</pose>
+        <pose>0.7499999999999999 -0.24999999999999994 -0.1509 0 0 0</pose>
         <visual name="tile_16_3_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2373,12 +3461,12 @@
         </visual>
       </link>
       <link name="tile_16_4">
-        <pose>4.125 0.125 -0.17423333333333335 0 0 0</pose>
+        <pose>0.7499999999999999 -0.14999999999999997 -0.1509 0 0 0</pose>
         <visual name="tile_16_4_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2390,12 +3478,12 @@
         </visual>
       </link>
       <link name="tile_16_5">
-        <pose>4.125 0.375 -0.17423333333333335 0 0 0</pose>
+        <pose>0.7499999999999999 -0.04999999999999999 -0.1509 0 0 0</pose>
         <visual name="tile_16_5_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2407,12 +3495,12 @@
         </visual>
       </link>
       <link name="tile_16_6">
-        <pose>4.125 0.625 -0.17423333333333335 0 0 0</pose>
+        <pose>0.7499999999999999 0.050000000000000044 -0.1509 0 0 0</pose>
         <visual name="tile_16_6_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2424,12 +3512,80 @@
         </visual>
       </link>
       <link name="tile_16_7">
-        <pose>4.125 0.875 -0.17423333333333335 0 0 0</pose>
+        <pose>0.7499999999999999 0.15000000000000002 -0.1509 0 0 0</pose>
         <visual name="tile_16_7_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.12 0.38 0.52 1.0</ambient>
+            <diffuse>0.16 0.45 0.60 1.0</diffuse>
+            <specular>0.25 0.30 0.35 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_16_8">
+        <pose>0.7499999999999999 0.25 -0.1509 0 0 0</pose>
+        <visual name="tile_16_8_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.22 0.58 0.68 1.0</ambient>
+            <diffuse>0.28 0.65 0.75 1.0</diffuse>
+            <specular>0.35 0.40 0.45 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_16_9">
+        <pose>0.7499999999999999 0.35 -0.1509 0 0 0</pose>
+        <visual name="tile_16_9_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.12 0.38 0.52 1.0</ambient>
+            <diffuse>0.16 0.45 0.60 1.0</diffuse>
+            <specular>0.25 0.30 0.35 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_16_10">
+        <pose>0.7499999999999999 0.44999999999999996 -0.1509 0 0 0</pose>
+        <visual name="tile_16_10_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.22 0.58 0.68 1.0</ambient>
+            <diffuse>0.28 0.65 0.75 1.0</diffuse>
+            <specular>0.35 0.40 0.45 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_16_11">
+        <pose>0.7499999999999999 0.5499999999999999 -0.1509 0 0 0</pose>
+        <visual name="tile_16_11_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2441,12 +3597,12 @@
         </visual>
       </link>
       <link name="tile_17_0">
-        <pose>4.375 -0.875 -0.17423333333333335 0 0 0</pose>
+        <pose>0.85 -0.5499999999999999 -0.1509 0 0 0</pose>
         <visual name="tile_17_0_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2458,12 +3614,12 @@
         </visual>
       </link>
       <link name="tile_17_1">
-        <pose>4.375 -0.625 -0.17423333333333335 0 0 0</pose>
+        <pose>0.85 -0.44999999999999996 -0.1509 0 0 0</pose>
         <visual name="tile_17_1_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2475,12 +3631,12 @@
         </visual>
       </link>
       <link name="tile_17_2">
-        <pose>4.375 -0.375 -0.17423333333333335 0 0 0</pose>
+        <pose>0.85 -0.35 -0.1509 0 0 0</pose>
         <visual name="tile_17_2_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2492,12 +3648,12 @@
         </visual>
       </link>
       <link name="tile_17_3">
-        <pose>4.375 -0.125 -0.17423333333333335 0 0 0</pose>
+        <pose>0.85 -0.24999999999999994 -0.1509 0 0 0</pose>
         <visual name="tile_17_3_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2509,12 +3665,12 @@
         </visual>
       </link>
       <link name="tile_17_4">
-        <pose>4.375 0.125 -0.17423333333333335 0 0 0</pose>
+        <pose>0.85 -0.14999999999999997 -0.1509 0 0 0</pose>
         <visual name="tile_17_4_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2526,12 +3682,12 @@
         </visual>
       </link>
       <link name="tile_17_5">
-        <pose>4.375 0.375 -0.17423333333333335 0 0 0</pose>
+        <pose>0.85 -0.04999999999999999 -0.1509 0 0 0</pose>
         <visual name="tile_17_5_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2543,12 +3699,12 @@
         </visual>
       </link>
       <link name="tile_17_6">
-        <pose>4.375 0.625 -0.17423333333333335 0 0 0</pose>
+        <pose>0.85 0.050000000000000044 -0.1509 0 0 0</pose>
         <visual name="tile_17_6_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2560,12 +3716,80 @@
         </visual>
       </link>
       <link name="tile_17_7">
-        <pose>4.375 0.875 -0.17423333333333335 0 0 0</pose>
+        <pose>0.85 0.15000000000000002 -0.1509 0 0 0</pose>
         <visual name="tile_17_7_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.22 0.58 0.68 1.0</ambient>
+            <diffuse>0.28 0.65 0.75 1.0</diffuse>
+            <specular>0.35 0.40 0.45 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_17_8">
+        <pose>0.85 0.25 -0.1509 0 0 0</pose>
+        <visual name="tile_17_8_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.12 0.38 0.52 1.0</ambient>
+            <diffuse>0.16 0.45 0.60 1.0</diffuse>
+            <specular>0.25 0.30 0.35 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_17_9">
+        <pose>0.85 0.35 -0.1509 0 0 0</pose>
+        <visual name="tile_17_9_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.22 0.58 0.68 1.0</ambient>
+            <diffuse>0.28 0.65 0.75 1.0</diffuse>
+            <specular>0.35 0.40 0.45 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_17_10">
+        <pose>0.85 0.44999999999999996 -0.1509 0 0 0</pose>
+        <visual name="tile_17_10_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.12 0.38 0.52 1.0</ambient>
+            <diffuse>0.16 0.45 0.60 1.0</diffuse>
+            <specular>0.25 0.30 0.35 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_17_11">
+        <pose>0.85 0.5499999999999999 -0.1509 0 0 0</pose>
+        <visual name="tile_17_11_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2577,12 +3801,12 @@
         </visual>
       </link>
       <link name="tile_18_0">
-        <pose>4.625 -0.875 -0.17423333333333335 0 0 0</pose>
+        <pose>0.9499999999999998 -0.5499999999999999 -0.1509 0 0 0</pose>
         <visual name="tile_18_0_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2594,12 +3818,12 @@
         </visual>
       </link>
       <link name="tile_18_1">
-        <pose>4.625 -0.625 -0.17423333333333335 0 0 0</pose>
+        <pose>0.9499999999999998 -0.44999999999999996 -0.1509 0 0 0</pose>
         <visual name="tile_18_1_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2611,12 +3835,12 @@
         </visual>
       </link>
       <link name="tile_18_2">
-        <pose>4.625 -0.375 -0.17423333333333335 0 0 0</pose>
+        <pose>0.9499999999999998 -0.35 -0.1509 0 0 0</pose>
         <visual name="tile_18_2_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2628,12 +3852,12 @@
         </visual>
       </link>
       <link name="tile_18_3">
-        <pose>4.625 -0.125 -0.17423333333333335 0 0 0</pose>
+        <pose>0.9499999999999998 -0.24999999999999994 -0.1509 0 0 0</pose>
         <visual name="tile_18_3_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2645,12 +3869,12 @@
         </visual>
       </link>
       <link name="tile_18_4">
-        <pose>4.625 0.125 -0.17423333333333335 0 0 0</pose>
+        <pose>0.9499999999999998 -0.14999999999999997 -0.1509 0 0 0</pose>
         <visual name="tile_18_4_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2662,12 +3886,12 @@
         </visual>
       </link>
       <link name="tile_18_5">
-        <pose>4.625 0.375 -0.17423333333333335 0 0 0</pose>
+        <pose>0.9499999999999998 -0.04999999999999999 -0.1509 0 0 0</pose>
         <visual name="tile_18_5_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2679,12 +3903,12 @@
         </visual>
       </link>
       <link name="tile_18_6">
-        <pose>4.625 0.625 -0.17423333333333335 0 0 0</pose>
+        <pose>0.9499999999999998 0.050000000000000044 -0.1509 0 0 0</pose>
         <visual name="tile_18_6_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2696,12 +3920,80 @@
         </visual>
       </link>
       <link name="tile_18_7">
-        <pose>4.625 0.875 -0.17423333333333335 0 0 0</pose>
+        <pose>0.9499999999999998 0.15000000000000002 -0.1509 0 0 0</pose>
         <visual name="tile_18_7_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.12 0.38 0.52 1.0</ambient>
+            <diffuse>0.16 0.45 0.60 1.0</diffuse>
+            <specular>0.25 0.30 0.35 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_18_8">
+        <pose>0.9499999999999998 0.25 -0.1509 0 0 0</pose>
+        <visual name="tile_18_8_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.22 0.58 0.68 1.0</ambient>
+            <diffuse>0.28 0.65 0.75 1.0</diffuse>
+            <specular>0.35 0.40 0.45 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_18_9">
+        <pose>0.9499999999999998 0.35 -0.1509 0 0 0</pose>
+        <visual name="tile_18_9_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.12 0.38 0.52 1.0</ambient>
+            <diffuse>0.16 0.45 0.60 1.0</diffuse>
+            <specular>0.25 0.30 0.35 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_18_10">
+        <pose>0.9499999999999998 0.44999999999999996 -0.1509 0 0 0</pose>
+        <visual name="tile_18_10_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.22 0.58 0.68 1.0</ambient>
+            <diffuse>0.28 0.65 0.75 1.0</diffuse>
+            <specular>0.35 0.40 0.45 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_18_11">
+        <pose>0.9499999999999998 0.5499999999999999 -0.1509 0 0 0</pose>
+        <visual name="tile_18_11_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2713,12 +4005,12 @@
         </visual>
       </link>
       <link name="tile_19_0">
-        <pose>4.875 -0.875 -0.17423333333333335 0 0 0</pose>
+        <pose>1.0499999999999998 -0.5499999999999999 -0.1509 0 0 0</pose>
         <visual name="tile_19_0_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2730,12 +4022,12 @@
         </visual>
       </link>
       <link name="tile_19_1">
-        <pose>4.875 -0.625 -0.17423333333333335 0 0 0</pose>
+        <pose>1.0499999999999998 -0.44999999999999996 -0.1509 0 0 0</pose>
         <visual name="tile_19_1_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2747,12 +4039,12 @@
         </visual>
       </link>
       <link name="tile_19_2">
-        <pose>4.875 -0.375 -0.17423333333333335 0 0 0</pose>
+        <pose>1.0499999999999998 -0.35 -0.1509 0 0 0</pose>
         <visual name="tile_19_2_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2764,12 +4056,12 @@
         </visual>
       </link>
       <link name="tile_19_3">
-        <pose>4.875 -0.125 -0.17423333333333335 0 0 0</pose>
+        <pose>1.0499999999999998 -0.24999999999999994 -0.1509 0 0 0</pose>
         <visual name="tile_19_3_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2781,12 +4073,12 @@
         </visual>
       </link>
       <link name="tile_19_4">
-        <pose>4.875 0.125 -0.17423333333333335 0 0 0</pose>
+        <pose>1.0499999999999998 -0.14999999999999997 -0.1509 0 0 0</pose>
         <visual name="tile_19_4_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2798,12 +4090,12 @@
         </visual>
       </link>
       <link name="tile_19_5">
-        <pose>4.875 0.375 -0.17423333333333335 0 0 0</pose>
+        <pose>1.0499999999999998 -0.04999999999999999 -0.1509 0 0 0</pose>
         <visual name="tile_19_5_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2815,12 +4107,12 @@
         </visual>
       </link>
       <link name="tile_19_6">
-        <pose>4.875 0.625 -0.17423333333333335 0 0 0</pose>
+        <pose>1.0499999999999998 0.050000000000000044 -0.1509 0 0 0</pose>
         <visual name="tile_19_6_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2832,12 +4124,80 @@
         </visual>
       </link>
       <link name="tile_19_7">
-        <pose>4.875 0.875 -0.17423333333333335 0 0 0</pose>
+        <pose>1.0499999999999998 0.15000000000000002 -0.1509 0 0 0</pose>
         <visual name="tile_19_7_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.22 0.58 0.68 1.0</ambient>
+            <diffuse>0.28 0.65 0.75 1.0</diffuse>
+            <specular>0.35 0.40 0.45 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_19_8">
+        <pose>1.0499999999999998 0.25 -0.1509 0 0 0</pose>
+        <visual name="tile_19_8_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.12 0.38 0.52 1.0</ambient>
+            <diffuse>0.16 0.45 0.60 1.0</diffuse>
+            <specular>0.25 0.30 0.35 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_19_9">
+        <pose>1.0499999999999998 0.35 -0.1509 0 0 0</pose>
+        <visual name="tile_19_9_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.22 0.58 0.68 1.0</ambient>
+            <diffuse>0.28 0.65 0.75 1.0</diffuse>
+            <specular>0.35 0.40 0.45 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_19_10">
+        <pose>1.0499999999999998 0.44999999999999996 -0.1509 0 0 0</pose>
+        <visual name="tile_19_10_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.12 0.38 0.52 1.0</ambient>
+            <diffuse>0.16 0.45 0.60 1.0</diffuse>
+            <specular>0.25 0.30 0.35 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_19_11">
+        <pose>1.0499999999999998 0.5499999999999999 -0.1509 0 0 0</pose>
+        <visual name="tile_19_11_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2849,12 +4209,12 @@
         </visual>
       </link>
       <link name="tile_20_0">
-        <pose>5.125 -0.875 -0.17423333333333335 0 0 0</pose>
+        <pose>1.15 -0.5499999999999999 -0.1509 0 0 0</pose>
         <visual name="tile_20_0_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2866,12 +4226,12 @@
         </visual>
       </link>
       <link name="tile_20_1">
-        <pose>5.125 -0.625 -0.17423333333333335 0 0 0</pose>
+        <pose>1.15 -0.44999999999999996 -0.1509 0 0 0</pose>
         <visual name="tile_20_1_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2883,12 +4243,12 @@
         </visual>
       </link>
       <link name="tile_20_2">
-        <pose>5.125 -0.375 -0.17423333333333335 0 0 0</pose>
+        <pose>1.15 -0.35 -0.1509 0 0 0</pose>
         <visual name="tile_20_2_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2900,12 +4260,12 @@
         </visual>
       </link>
       <link name="tile_20_3">
-        <pose>5.125 -0.125 -0.17423333333333335 0 0 0</pose>
+        <pose>1.15 -0.24999999999999994 -0.1509 0 0 0</pose>
         <visual name="tile_20_3_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2917,12 +4277,12 @@
         </visual>
       </link>
       <link name="tile_20_4">
-        <pose>5.125 0.125 -0.17423333333333335 0 0 0</pose>
+        <pose>1.15 -0.14999999999999997 -0.1509 0 0 0</pose>
         <visual name="tile_20_4_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2934,12 +4294,12 @@
         </visual>
       </link>
       <link name="tile_20_5">
-        <pose>5.125 0.375 -0.17423333333333335 0 0 0</pose>
+        <pose>1.15 -0.04999999999999999 -0.1509 0 0 0</pose>
         <visual name="tile_20_5_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2951,12 +4311,12 @@
         </visual>
       </link>
       <link name="tile_20_6">
-        <pose>5.125 0.625 -0.17423333333333335 0 0 0</pose>
+        <pose>1.15 0.050000000000000044 -0.1509 0 0 0</pose>
         <visual name="tile_20_6_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2968,12 +4328,80 @@
         </visual>
       </link>
       <link name="tile_20_7">
-        <pose>5.125 0.875 -0.17423333333333335 0 0 0</pose>
+        <pose>1.15 0.15000000000000002 -0.1509 0 0 0</pose>
         <visual name="tile_20_7_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.12 0.38 0.52 1.0</ambient>
+            <diffuse>0.16 0.45 0.60 1.0</diffuse>
+            <specular>0.25 0.30 0.35 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_20_8">
+        <pose>1.15 0.25 -0.1509 0 0 0</pose>
+        <visual name="tile_20_8_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.22 0.58 0.68 1.0</ambient>
+            <diffuse>0.28 0.65 0.75 1.0</diffuse>
+            <specular>0.35 0.40 0.45 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_20_9">
+        <pose>1.15 0.35 -0.1509 0 0 0</pose>
+        <visual name="tile_20_9_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.12 0.38 0.52 1.0</ambient>
+            <diffuse>0.16 0.45 0.60 1.0</diffuse>
+            <specular>0.25 0.30 0.35 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_20_10">
+        <pose>1.15 0.44999999999999996 -0.1509 0 0 0</pose>
+        <visual name="tile_20_10_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.22 0.58 0.68 1.0</ambient>
+            <diffuse>0.28 0.65 0.75 1.0</diffuse>
+            <specular>0.35 0.40 0.45 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_20_11">
+        <pose>1.15 0.5499999999999999 -0.1509 0 0 0</pose>
+        <visual name="tile_20_11_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -2985,12 +4413,12 @@
         </visual>
       </link>
       <link name="tile_21_0">
-        <pose>5.375 -0.875 -0.17423333333333335 0 0 0</pose>
+        <pose>1.2499999999999996 -0.5499999999999999 -0.1509 0 0 0</pose>
         <visual name="tile_21_0_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -3002,12 +4430,12 @@
         </visual>
       </link>
       <link name="tile_21_1">
-        <pose>5.375 -0.625 -0.17423333333333335 0 0 0</pose>
+        <pose>1.2499999999999996 -0.44999999999999996 -0.1509 0 0 0</pose>
         <visual name="tile_21_1_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -3019,12 +4447,12 @@
         </visual>
       </link>
       <link name="tile_21_2">
-        <pose>5.375 -0.375 -0.17423333333333335 0 0 0</pose>
+        <pose>1.2499999999999996 -0.35 -0.1509 0 0 0</pose>
         <visual name="tile_21_2_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -3036,12 +4464,12 @@
         </visual>
       </link>
       <link name="tile_21_3">
-        <pose>5.375 -0.125 -0.17423333333333335 0 0 0</pose>
+        <pose>1.2499999999999996 -0.24999999999999994 -0.1509 0 0 0</pose>
         <visual name="tile_21_3_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -3053,12 +4481,12 @@
         </visual>
       </link>
       <link name="tile_21_4">
-        <pose>5.375 0.125 -0.17423333333333335 0 0 0</pose>
+        <pose>1.2499999999999996 -0.14999999999999997 -0.1509 0 0 0</pose>
         <visual name="tile_21_4_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -3070,12 +4498,12 @@
         </visual>
       </link>
       <link name="tile_21_5">
-        <pose>5.375 0.375 -0.17423333333333335 0 0 0</pose>
+        <pose>1.2499999999999996 -0.04999999999999999 -0.1509 0 0 0</pose>
         <visual name="tile_21_5_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -3087,12 +4515,12 @@
         </visual>
       </link>
       <link name="tile_21_6">
-        <pose>5.375 0.625 -0.17423333333333335 0 0 0</pose>
+        <pose>1.2499999999999996 0.050000000000000044 -0.1509 0 0 0</pose>
         <visual name="tile_21_6_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -3104,12 +4532,80 @@
         </visual>
       </link>
       <link name="tile_21_7">
-        <pose>5.375 0.875 -0.17423333333333335 0 0 0</pose>
+        <pose>1.2499999999999996 0.15000000000000002 -0.1509 0 0 0</pose>
         <visual name="tile_21_7_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.22 0.58 0.68 1.0</ambient>
+            <diffuse>0.28 0.65 0.75 1.0</diffuse>
+            <specular>0.35 0.40 0.45 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_21_8">
+        <pose>1.2499999999999996 0.25 -0.1509 0 0 0</pose>
+        <visual name="tile_21_8_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.12 0.38 0.52 1.0</ambient>
+            <diffuse>0.16 0.45 0.60 1.0</diffuse>
+            <specular>0.25 0.30 0.35 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_21_9">
+        <pose>1.2499999999999996 0.35 -0.1509 0 0 0</pose>
+        <visual name="tile_21_9_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.22 0.58 0.68 1.0</ambient>
+            <diffuse>0.28 0.65 0.75 1.0</diffuse>
+            <specular>0.35 0.40 0.45 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_21_10">
+        <pose>1.2499999999999996 0.44999999999999996 -0.1509 0 0 0</pose>
+        <visual name="tile_21_10_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.12 0.38 0.52 1.0</ambient>
+            <diffuse>0.16 0.45 0.60 1.0</diffuse>
+            <specular>0.25 0.30 0.35 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_21_11">
+        <pose>1.2499999999999996 0.5499999999999999 -0.1509 0 0 0</pose>
+        <visual name="tile_21_11_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -3121,12 +4617,12 @@
         </visual>
       </link>
       <link name="tile_22_0">
-        <pose>5.625 -0.875 -0.17423333333333335 0 0 0</pose>
+        <pose>1.3499999999999996 -0.5499999999999999 -0.1509 0 0 0</pose>
         <visual name="tile_22_0_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -3138,12 +4634,12 @@
         </visual>
       </link>
       <link name="tile_22_1">
-        <pose>5.625 -0.625 -0.17423333333333335 0 0 0</pose>
+        <pose>1.3499999999999996 -0.44999999999999996 -0.1509 0 0 0</pose>
         <visual name="tile_22_1_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -3155,12 +4651,12 @@
         </visual>
       </link>
       <link name="tile_22_2">
-        <pose>5.625 -0.375 -0.17423333333333335 0 0 0</pose>
+        <pose>1.3499999999999996 -0.35 -0.1509 0 0 0</pose>
         <visual name="tile_22_2_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -3172,12 +4668,12 @@
         </visual>
       </link>
       <link name="tile_22_3">
-        <pose>5.625 -0.125 -0.17423333333333335 0 0 0</pose>
+        <pose>1.3499999999999996 -0.24999999999999994 -0.1509 0 0 0</pose>
         <visual name="tile_22_3_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -3189,12 +4685,12 @@
         </visual>
       </link>
       <link name="tile_22_4">
-        <pose>5.625 0.125 -0.17423333333333335 0 0 0</pose>
+        <pose>1.3499999999999996 -0.14999999999999997 -0.1509 0 0 0</pose>
         <visual name="tile_22_4_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -3206,12 +4702,12 @@
         </visual>
       </link>
       <link name="tile_22_5">
-        <pose>5.625 0.375 -0.17423333333333335 0 0 0</pose>
+        <pose>1.3499999999999996 -0.04999999999999999 -0.1509 0 0 0</pose>
         <visual name="tile_22_5_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -3223,12 +4719,12 @@
         </visual>
       </link>
       <link name="tile_22_6">
-        <pose>5.625 0.625 -0.17423333333333335 0 0 0</pose>
+        <pose>1.3499999999999996 0.050000000000000044 -0.1509 0 0 0</pose>
         <visual name="tile_22_6_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -3240,12 +4736,80 @@
         </visual>
       </link>
       <link name="tile_22_7">
-        <pose>5.625 0.875 -0.17423333333333335 0 0 0</pose>
+        <pose>1.3499999999999996 0.15000000000000002 -0.1509 0 0 0</pose>
         <visual name="tile_22_7_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.12 0.38 0.52 1.0</ambient>
+            <diffuse>0.16 0.45 0.60 1.0</diffuse>
+            <specular>0.25 0.30 0.35 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_22_8">
+        <pose>1.3499999999999996 0.25 -0.1509 0 0 0</pose>
+        <visual name="tile_22_8_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.22 0.58 0.68 1.0</ambient>
+            <diffuse>0.28 0.65 0.75 1.0</diffuse>
+            <specular>0.35 0.40 0.45 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_22_9">
+        <pose>1.3499999999999996 0.35 -0.1509 0 0 0</pose>
+        <visual name="tile_22_9_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.12 0.38 0.52 1.0</ambient>
+            <diffuse>0.16 0.45 0.60 1.0</diffuse>
+            <specular>0.25 0.30 0.35 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_22_10">
+        <pose>1.3499999999999996 0.44999999999999996 -0.1509 0 0 0</pose>
+        <visual name="tile_22_10_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.22 0.58 0.68 1.0</ambient>
+            <diffuse>0.28 0.65 0.75 1.0</diffuse>
+            <specular>0.35 0.40 0.45 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_22_11">
+        <pose>1.3499999999999996 0.5499999999999999 -0.1509 0 0 0</pose>
+        <visual name="tile_22_11_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -3257,12 +4821,12 @@
         </visual>
       </link>
       <link name="tile_23_0">
-        <pose>5.875 -0.875 -0.17423333333333335 0 0 0</pose>
+        <pose>1.4499999999999997 -0.5499999999999999 -0.1509 0 0 0</pose>
         <visual name="tile_23_0_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -3274,12 +4838,12 @@
         </visual>
       </link>
       <link name="tile_23_1">
-        <pose>5.875 -0.625 -0.17423333333333335 0 0 0</pose>
+        <pose>1.4499999999999997 -0.44999999999999996 -0.1509 0 0 0</pose>
         <visual name="tile_23_1_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -3291,12 +4855,12 @@
         </visual>
       </link>
       <link name="tile_23_2">
-        <pose>5.875 -0.375 -0.17423333333333335 0 0 0</pose>
+        <pose>1.4499999999999997 -0.35 -0.1509 0 0 0</pose>
         <visual name="tile_23_2_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -3308,12 +4872,12 @@
         </visual>
       </link>
       <link name="tile_23_3">
-        <pose>5.875 -0.125 -0.17423333333333335 0 0 0</pose>
+        <pose>1.4499999999999997 -0.24999999999999994 -0.1509 0 0 0</pose>
         <visual name="tile_23_3_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -3325,12 +4889,12 @@
         </visual>
       </link>
       <link name="tile_23_4">
-        <pose>5.875 0.125 -0.17423333333333335 0 0 0</pose>
+        <pose>1.4499999999999997 -0.14999999999999997 -0.1509 0 0 0</pose>
         <visual name="tile_23_4_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -3342,12 +4906,12 @@
         </visual>
       </link>
       <link name="tile_23_5">
-        <pose>5.875 0.375 -0.17423333333333335 0 0 0</pose>
+        <pose>1.4499999999999997 -0.04999999999999999 -0.1509 0 0 0</pose>
         <visual name="tile_23_5_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -3359,12 +4923,12 @@
         </visual>
       </link>
       <link name="tile_23_6">
-        <pose>5.875 0.625 -0.17423333333333335 0 0 0</pose>
+        <pose>1.4499999999999997 0.050000000000000044 -0.1509 0 0 0</pose>
         <visual name="tile_23_6_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -3376,12 +4940,80 @@
         </visual>
       </link>
       <link name="tile_23_7">
-        <pose>5.875 0.875 -0.17423333333333335 0 0 0</pose>
+        <pose>1.4499999999999997 0.15000000000000002 -0.1509 0 0 0</pose>
         <visual name="tile_23_7_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.25 0.25 0.002</size>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.22 0.58 0.68 1.0</ambient>
+            <diffuse>0.28 0.65 0.75 1.0</diffuse>
+            <specular>0.35 0.40 0.45 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_23_8">
+        <pose>1.4499999999999997 0.25 -0.1509 0 0 0</pose>
+        <visual name="tile_23_8_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.12 0.38 0.52 1.0</ambient>
+            <diffuse>0.16 0.45 0.60 1.0</diffuse>
+            <specular>0.25 0.30 0.35 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_23_9">
+        <pose>1.4499999999999997 0.35 -0.1509 0 0 0</pose>
+        <visual name="tile_23_9_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.22 0.58 0.68 1.0</ambient>
+            <diffuse>0.28 0.65 0.75 1.0</diffuse>
+            <specular>0.35 0.40 0.45 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_23_10">
+        <pose>1.4499999999999997 0.44999999999999996 -0.1509 0 0 0</pose>
+        <visual name="tile_23_10_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.12 0.38 0.52 1.0</ambient>
+            <diffuse>0.16 0.45 0.60 1.0</diffuse>
+            <specular>0.25 0.30 0.35 1.0</specular>
+            <emissive>0.0  0.0  0.0  1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="tile_23_11">
+        <pose>1.4499999999999997 0.5499999999999999 -0.1509 0 0 0</pose>
+        <visual name="tile_23_11_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.09999999999999999 0.09999999999999999 0.002</size>
             </box>
           </geometry>
           <material>
@@ -3393,7 +5025,7 @@
         </visual>
       </link>
       <link name="ground_bg">
-        <pose>3.0 0.0 -0.22488333333333335 0 0 0</pose>
+        <pose>0.3 0.0 -0.196 0 0 0</pose>
         <visual name="ground_bg_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>

@@ -24,7 +24,7 @@ python lilytorch/validation/memory_comparison_3d/run_memory_comparison.py \
 
 # Re-run a single mode (clean CUDA context):
 python lilytorch/validation/memory_comparison_3d/run_memory_comparison.py \
-    --mode kernels_fused --Nx 256 --Ny 64 --Nz 64 --n_steps 80
+    --mode kernels_fused --Nx 256 --n_steps 80
 
 # Reuse JSON files from a previous run (skip already-computed modes):
 python lilytorch/validation/memory_comparison_3d/run_memory_comparison.py \

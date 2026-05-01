@@ -91,8 +91,20 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--Nx", type=int, default=256)
-    parser.add_argument("--Ny", type=int, default=64)
-    parser.add_argument("--Nz", type=int, default=64)
+    parser.add_argument(
+        "--Ny", type=int, default=None,
+        help=(
+            "Grid cells in y.  If omitted, derived from --Nx and the "
+            "SimConfig domain extents to ensure isotropic spacing."
+        ),
+    )
+    parser.add_argument(
+        "--Nz", type=int, default=None,
+        help=(
+            "Grid cells in z.  If omitted, derived from --Nx and the "
+            "SimConfig domain extents to ensure isotropic spacing."
+        ),
+    )
     parser.add_argument(
         "--n_steps", type=int, default=80,
         help=(
@@ -162,29 +174,34 @@ def _reset_peak() -> None:
 
 
 def _tensor_census(top_k: int = 30) -> list[dict]:
-    """Walk the Python heap and group every CUDA tensor by (shape, dtype).
+    """Walk the Python heap and group every unique CUDA storage by (shape, dtype).
 
-    Returns the ``top_k`` largest groups by total bytes — this is what
-    actually moves the needle when comparing the three solver paths.
+    Deduplicates by untyped_storage().data_ptr() so that views / slices that
+    share the same underlying allocation are counted only once.  For each
+    unique storage we keep the tensor with the most elements as the
+    representative shape (closest to the base allocation).
     """
     import torch
-    grouped: dict[tuple, dict] = {}
+    # storage_ptr → (storage_nbytes, shape, dtype) of the largest tensor seen
+    unique: dict[int, tuple] = {}
     for obj in gc.get_objects():
         try:
-            if torch.is_tensor(obj) and obj.is_cuda:
-                shape = tuple(obj.shape)
-                dtype = str(obj.dtype)
-                key = (shape, dtype)
-                nbytes = obj.nelement() * obj.element_size()
-                if key not in grouped:
-                    grouped[key] = {"shape": list(shape), "dtype": dtype,
-                                    "count": 0, "bytes": 0}
-                grouped[key]["count"] += 1
-                grouped[key]["bytes"] += nbytes
+            if not (torch.is_tensor(obj) and obj.is_cuda):
+                continue
+            stor  = obj.untyped_storage()
+            ptr   = stor.data_ptr()
+            nbytes = stor.nbytes()
+            if ptr not in unique or obj.nelement() > unique[ptr][1]:
+                unique[ptr] = (nbytes, obj.nelement(), list(obj.shape), str(obj.dtype))
         except Exception:
-            # Some weakly-referenced or partially-initialised tensors
-            # raise on shape/dtype access; ignore them.
             continue
+    grouped: dict[tuple, dict] = {}
+    for nbytes, _nel, shape, dtype in unique.values():
+        key = (tuple(shape), dtype)
+        if key not in grouped:
+            grouped[key] = {"shape": shape, "dtype": dtype, "count": 0, "bytes": 0}
+        grouped[key]["count"] += 1
+        grouped[key]["bytes"] += nbytes
     rows = sorted(grouped.values(), key=lambda r: -r["bytes"])
     return rows[:top_k]
 
@@ -225,14 +242,22 @@ def _run_worker(args: argparse.Namespace) -> None:
 
     cfg = cfg_mod.SimConfig()
     cfg.Nx = args.Nx
-    cfg.Ny = args.Ny
-    cfg.Nz = args.Nz
+    # Derive Ny / Nz from Nx and the domain extents so the grid stays
+    # isotropic (dx == dy == dz), unless the user passed explicit values.
+    dx = (cfg.xmax - cfg.xmin) / cfg.Nx
+    cfg.Ny = args.Ny if args.Ny is not None else max(1, round((cfg.ymax - cfg.ymin) / dx))
+    cfg.Nz = args.Nz if args.Nz is not None else max(1, round((cfg.zmax - cfg.zmin) / dx))
 
     cfg.n_iterations = args.n_steps + 2
     cfg.save_every   = args.n_steps + 999      # disable IO
     cfg.save_frames  = False
     cfg.save         = False
     cfg.headless     = True
+
+    # The gen_configs_one_free_3d SimConfig overrides use_bdim=False (it is
+    # used standalone without fluid coupling in its normal run).  Force it
+    # back on here so FluidExtension is injected into the YAML.
+    cfg.use_bdim = True
 
     # Mode-specific solver flags — these flow through base_sim_config
     # into bdim_yaml.solver and are read by FluidSolver / BDIMhandler.
@@ -329,7 +354,8 @@ def _run_worker(args: argparse.Namespace) -> None:
         if not is_traced:
             return _orig_step(self, task, physics)
 
-        # ── traced step: replicate ``BDIMhandler.step`` body manually
+        # ── traced step: replicate ``BDIMhandler.step`` body manually.
+        # Must stay in sync with BDIMhandler.step in BDIMhandler.py.
         iteration = self.iteration
         timestep  = self.pars["solver"]["dt"]
         if iteration >= self.pars["solver"]["nt"]:
@@ -337,6 +363,10 @@ def _run_worker(args: argparse.Namespace) -> None:
 
         t  = iteration * timestep
         fs = self.fluid_solver
+
+        if fs.terminate:
+            self.iteration += 1
+            return
 
         # Reset the peak counter to capture the per-phase deltas of
         # *this step only*.
@@ -378,11 +408,37 @@ def _run_worker(args: argparse.Namespace) -> None:
             fs.forces_method2(fs.u0, fs.v0, fs.p0, iteration)
         _record(f"step {idx:03d} [{mode}]: after forces")
 
-        # 5. apply forces back to MuJoCo
+        # 4b. free stress/pforce tensors immediately after forces — this
+        # matches the real step's ``fs.__dict__.update(_FS_FREE_AFTER_FORCES_3D)``
+        # which nulls xstress_tensor, ystress_tensor, zstress_tensor,
+        # pforce_x/y/z before plotting and apply_forces.
+        from lilytorch.integration.BDIMhandler import _FS_FREE_AFTER_FORCES_3D
+        if self.ndim == 3:
+            fs.__dict__.update(_FS_FREE_AFTER_FORCES_3D)
+        _record(f"step {idx:03d} [{mode}]: after force-field release")
+
+        # 5. plotting (save=False so this is a near-no-op, but must match
+        # the real step so the memory footprint sequence is identical)
+        if self.ndim == 3:
+            fs.terminate = fs.plotting_and_saving(
+                fs.u0, fs.v0, fs.p0, iteration,
+                w_vel=fs.w0, check_termination=False,
+            )
+        else:
+            fs.terminate = fs.plotting_and_saving(
+                fs.u0, fs.v0, fs.p0, iteration, check_termination=False,
+            )
+
+        # 6. apply forces back to MuJoCo
         self.apply_forces(task, physics)
         _record(f"step {idx:03d} [{mode}]: after apply_forces")
 
-        # 6. release transients
+        # 7. release BDIM intermediates.
+        # _release_bdim_fields behaviour is mode-specific:
+        #   no_kernels      → frees mu/normals + force fields + div
+        #   kernels_separate/fused → keeps mu/normal packed buffers
+        #                            alive (they are persistent across steps
+        #                            when _mu_normals_union=True)
         fs._release_bdim_fields()
         _record(f"step {idx:03d} [{mode}]: after release")
 
@@ -476,8 +532,9 @@ def _run_driver(args: argparse.Namespace) -> None:
     print("=" * 78)
     print(" GPU memory comparison: pure-PyTorch vs streaming-kernel paths")
     print("=" * 78)
-    print(f"  Grid:        {args.Nx} × {args.Ny} × {args.Nz}  "
-          f"({args.Nx * args.Ny * args.Nz:,} cells)")
+    ny_str = str(args.Ny) if args.Ny is not None else "auto"
+    nz_str = str(args.Nz) if args.Nz is not None else "auto"
+    print(f"  Grid:        {args.Nx} × {ny_str} × {nz_str}  (Ny/Nz auto = isotropic from domain)")
     print(f"  Steps:       {args.n_steps}  "
           f"(warmup={args.warmup_steps}, peak step={args.peak_step or '~0.6·n_steps'})")
     print(f"  Output dir:  {out_dir}")
@@ -493,11 +550,15 @@ def _run_driver(args: argparse.Namespace) -> None:
             cmd = [
                 args.python, os.path.abspath(__file__),
                 "--mode", mode,
-                "--Nx", str(args.Nx), "--Ny", str(args.Ny), "--Nz", str(args.Nz),
+                "--Nx", str(args.Nx),
                 "--n_steps", str(args.n_steps),
                 "--warmup_steps", str(args.warmup_steps),
                 "--out_dir", out_dir,
             ]
+            if args.Ny is not None:
+                cmd += ["--Ny", str(args.Ny)]
+            if args.Nz is not None:
+                cmd += ["--Nz", str(args.Nz)]
             if args.peak_step is not None:
                 cmd += ["--peak_step", str(args.peak_step)]
             t0 = time.time()
@@ -627,12 +688,18 @@ def _print_comparison(results: dict[str, dict]) -> None:
         print("=" * 78)
         ref_rec     = results["no_kernels"]
         ref_persist = _persistent_baseline(ref_rec)
-        ref_peak    = max(r["peak_mb"] for r in _peak_step_rows(ref_rec))
+        ref_peak    = max(
+            (r["peak_mb"] for r in _peak_step_rows(ref_rec)),
+            default=ref_rec.get("final_peak_mb", float("nan")),
+        )
         for mode, rec in results.items():
             if mode == "no_kernels":
                 continue
             persist_mb = _persistent_baseline(rec)
-            peak_mb    = max(r["peak_mb"] for r in _peak_step_rows(rec))
+            peak_mb    = max(
+                (r["peak_mb"] for r in _peak_step_rows(rec)),
+                default=rec.get("final_peak_mb", float("nan")),
+            )
             d_persist  = persist_mb - ref_persist
             d_peak     = peak_mb    - ref_peak
             print(f"  [{mode:<18s}]  ΔPersistent = {d_persist:+8.1f} MB   "

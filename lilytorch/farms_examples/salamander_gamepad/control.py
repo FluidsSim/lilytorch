@@ -13,7 +13,7 @@ from farms_core.experiment.options import ExperimentOptions
 from farms_core.model.control import AnimatController, ControlType
 from farms_mujoco.simulation.extensions import create_cylinder
 
-from .gamepad import GamepadHandler
+from ...integration.gamepad import GamepadHandler
 
 
 class DriveControl(AnimatExtension):
@@ -241,8 +241,8 @@ class DriveControl_Feedback(AnimatExtension):
         del action
         timestep = physics.timestep()
         iteration = task.iteration
-        
-        # Get foot contact sensor readings and adjust drive accordingly        
+
+        # Get foot contact sensor readings and adjust drive accordingly
         if not self.drive_override:
             # Get the contact sensors for the four feet. For the definition of contact sensor array, see farms_core/sensors/sensor_convension
             GRF_TotalZs = task.data.animats[0].sensors.contacts.array.base[
@@ -332,7 +332,7 @@ class DriveControl_Feedback(AnimatExtension):
         elif 3 < drive_mean <= 5:
             drive_left = max(3.01, min(4.99, drive_left))
             drive_right = max(3.01, min(4.99, drive_right))
-        drives = task.data.animats[0].network.drives        
+        drives = task.data.animats[0].network.drives
         self.set_left_drives(drives, iteration, drive_left*self.drive_vector)
         self.set_right_drives(drives, iteration, drive_right*self.drive_vector)
 

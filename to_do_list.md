@@ -34,16 +34,16 @@ diff_u, diff_v, diff_w
   - The 9 individual variant flags (`force_narrow_band`, `force_narrow_batch`, `force_shared_union`, `mu_normals_union`, `bdim_union`, `streaming_sdf_3d`, `streaming_forces_3d`, `streaming_sdf_2d`, `streaming_forces_2d`) are collapsed into a single user-facing switch `solver.use_kernels` (default `True`).  `use_kernels` is independent of `use_gpu` — the latter still selects CPU vs CUDA device.
 - Confirm that the sdf and force computations done with the cuda/c++ kernels is computing on each body aabb boxes, and not on the union aabb (narrow band on individual bodies). This is the most efficient approach, as the sdf/force computations are restricted to where it is needed. Is it possible to implement this method also for the bdim update, setting of the variable coefficients, mu/normals, and perhaps other parts? I think that, whilst currently the cuda/c++ kernels separately handle force and sdf computation, this could be merged, in the sense that the forces could be computed for each body at the same time (at the same body iteration) when the sdf is computed. This would avoid the need to store several CC sdfs for later force computation, saving memory, and reusing the body normals (although these are not cell centered). Additionally, bdim update, setting of the variable coefficients, mu/normals could in my view also be computed in the same kernel function locally. At the end, to save memory, the mu0 of the union sdf is needed for the correction step so it must be computed, but the memory of each body velocity, sdfs, normals, etc
 can be released after the loop of that body is computed. This should, in my logic, save a lot of memory, whist maintaining the same accuracy.
+- Check that the code works for dtype float32 and float64 (double). Especially the cuda/c++ kernels (but also the rest of the code) should be using one or the other depending on the user request.
 
 
 # HIGH PRIORITY:
-- Check that the code works for dtype float32 and float64 (double). Especially the cuda/c++ kernels (but also the rest of the code) should be using one or the other depending on the user request.
 - Do a systematic memory cost analysis. I think that the latest method with cuda kernels dynamically rewrites the body velocities and writed the forces computation inside the kernel whenever body properties are needed. This reduces the memory footprint by not storing the sdfs/body velocities of each rigid body (just a unique composite union body properties are stored).
 - Combine solver.py and BDIMhandler in a single simulation file (just solver.py). BDIMhandler should only keep whatever is necessary for handling the coupling with FARMS, if possible. Review options and propose what to do. This should have a careful modifications in all the examples scipts in farms_examples/.
 - Polish the repository, review and correct outdated documentation, also in the docs/ folder.
 
 # LOW PRIORITY:
-- Implement a gamepad connected with the fluid solver.
+- Implement a gamepad connected with the fluid solver. The implementation should be restricted to the salamander_gamepad/ folder. The current gen_configs_swim_2d.py is copied from the salamander/ folder, but should be modifies to use the salamander_gamepad/control.py. Also you need to modify this latter file to make it work as a pd controller as the salamander.pd_controller_swim.PositionController, and allow it to make the animal turn speedup/slowdown and turn left/right as in a videogame, following the rules indicated in the current control.py script.
 - Can advection/poisson solvers be improved? I.e. by implementing a cuda/c++ kernel instead of torch.compile?
 - Test an analytical 2d swimmer simulation of the salamander swimming in 2d (use the control.py and gamepad.py extension and figure out how to set it up)
 - Consider Crank-Nicolson for diffusion. Current explicit diffusion has stability limit dt < h²/(2ν·ndim). Not a bottleneck now (dt_diff ≈ 4.2s ≫ dt_cfl), but becomes relevant if dt is increased aggressively per A5.
@@ -57,7 +57,7 @@ the body would improve force accuracy and reduce oscillations.
 A 5th-order Hermite smoothstep is more robust numerically and avoids sin/cos.
 - How to handle bodies outside the water (at the interface). Volume of fluids methods (?)
 - Add sph simulation support (?)
-- Monolithic fluid multi rigid body solver (?)
+- Strongly coupled solver - Monolithic fluid multi rigid body solver (?) --> hard, it would require dropping Mujoco
 - AMR (Adaptive Mesh Refinement) - refine grid only near bodies and in the wake.
 
 

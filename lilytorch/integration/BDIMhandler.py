@@ -2351,7 +2351,7 @@ class BDIMhandler:
         if not fs.terminate:
 
             # 1. update SDF + body velocities from FARMS kinematics
-            # self.update(t, iteration, dt=timestep)
+            self.update(t, iteration, dt=timestep)
 
             # 2. recompute mu / normal fields
             if self.ndim == 3:
