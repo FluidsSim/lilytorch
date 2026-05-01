@@ -35,7 +35,7 @@ YAML Config
     │                   │
     │          ┌────────▼────────────┐
     │          │  BDIMhandler        │
-    │          │  (per-example)      │
+    │          │  (unified, 2-D/3-D) │
     │          │  ┌────────────────┐ │
     │          │  │ FluidSolver    │ │
     │          │  └────────────────┘ │
@@ -145,32 +145,36 @@ self.sponge = {
 
 | Module | Description |
 |---|---|
-| `solver.py` | Main `FluidSolver` class implementing the BDIM2 Navier-Stokes solver: grid setup, time-stepping (Heun, Adams-Bashforth), pressure projection, IBM forcing, and force computation on immersed bodies. |
+| `solver.py` | Main `FluidSolver` class implementing the BDIM2 Navier–Stokes solver: grid setup, Heun / Euler time stepping, pressure projection, IBM forcing, force computation on immersed bodies, sponge / Carreau / Smagorinsky / yield-damping dispatchers. |
 | `body.py` | Immersed body representation via SDFs. Class hierarchy: `Body` → `BodyAnalytical`, `BodyMesh`, `BodyFishAnalytical`, `BodyFishExperimental`, plus composite wrappers for multi-link articulated models. Includes `body_from_yaml()` factory. |
-| `adv_diff.py` | Advection-diffusion solver for velocity transport. Supports implicit/explicit/QUICK/ABDQUICKEST/Adams-Bashforth schemes with Dirichlet/Neumann BCs. Optional Smagorinsky LES eddy-viscosity model (`smagorinsky_cs`). |
-| `diffusion.py` | Stand-alone diffusion solver using multigrid V-cycles. |
-| `poisson_fft.py` | FFT-based Poisson solver for the pressure equation using Green's function convolution (via `torch_dct`). Pre-computes and caches Green's functions to disk. |
-| `poisson_mult.py` | Multigrid Poisson solver with Jacobi smoothing for variable-coefficient problems. |
-| `poisson_multigrid.py` | Extended multigrid implementation with full V-cycle hierarchy, restriction, and prolongation. |
-| `poisson_petsc.py` | PETSc-based Poisson solver using sparse KSP solvers (optional, requires `petsc4py`). |
-| `dynamic_water.py` | `WaterDynamicsCallback` that feeds CFD-computed velocity fields back to MuJoCo as spatially-varying water drag for closed-loop coupling. |
-| `plotting.py` | Visualization of velocity fields, vorticity, pressure, SDFs, and time histories. |
-| `parser.py` | CLI argument parser for selecting YAML config files. |
+| `adv_diff.py` | Advection–diffusion solver for velocity transport. Supports implicit / explicit / QUICK / ABDQUICKEST / Adams–Bashforth schemes with Dirichlet / Neumann BCs. Optional Smagorinsky LES and Carreau non-Newtonian eddy-viscosity fields. |
+| `forces.py` | Hydrodynamic force / torque integrators (`forces_method1`, `forces_method2`, `forces_method2_3d`, plus the compiled / batched variants `_forces_shared_*`, `_forces_body_batch_*`). |
+| `extras.py` | Optional add-on physics: sponge layer, Smagorinsky LES, Carreau / Herschel-Bulkley, yield-stress damping, and the unified `_compute_nu_t` / `_compute_nu_rho_for_forces` dispatchers. |
+| `operations.py` | Stencil-level operators — gradients, divergence, vorticity, normal derivative, strain-rate magnitude, etc. |
+| `poisson_fft.py` | FFT-based Poisson solver for the pressure equation using Green's-function convolution. Pre-computes and caches Green's functions to disk. |
+| `poisson_mult.py` | Multigrid Poisson solver (variable-coefficient Jacobi smoother + V-cycle hierarchy + PCG outer iteration). |
+| `kernels/` | C++/CUDA extension implementing the streaming SDF + fused force kernels (`streaming_sdf_min_3d_multi`, `bdim_forces_3d_multi`, `streaming_sdf_forces_fused_3d_multi`, `apply_bcs_3d` and the 2-D analogues). Activated by `solver.use_kernels = true`. |
+| `runsim.py` | Standalone driver entry point — parses CLI arguments, loads a YAML config, instantiates `FluidSolver`, and runs the time loop. |
+| `plotting.py` | Visualisation of velocity fields, vorticity, pressure, SDFs, and time histories. |
 | `video_postprocess.py` | Utility to assemble saved PNG frames into MP4 or GIF videos. |
 
 ### FARMS/MuJoCo Integration (`lilytorch/integration/`)
 
 | Module | Description |
 |---|---|
-| `extensions.py` | `FluidExtension` — FARMS `TaskExtension` subclass that initializes the fluid solver at episode start and applies hydrodynamic forces at each `before_step`. Also includes `DataLogger` for HDF5 logging. |
-| `flow_viewer.py` | `FlowViewer` — FARMS `TaskExtension` that renders fluid fields (vorticity, pressure, velocity) as coloured spheres directly inside the MuJoCo viewer window. See [FlowViewer](#flowviewer--in-viewer-flow-visualisation). |
+| `BDIMhandler.py` | **Unified** 2-D / 3-D FARMS↔lilytorch coupling layer. Reads MuJoCo body kinematics, drives `FluidSolver` per-step, and writes hydrodynamic forces back into `xfrc_applied`. A single class covers every animat (1guilla, pleurodeles, zebrafish, salamander, submarine, …) — examples *no longer* ship a per-folder copy. |
+| `kinematics.py` | Helpers for converting FARMS sensor frames to the per-body rotations / translations consumed by `BDIMhandler.update`. |
+| `extensions.py` | `FluidExtension` — FARMS `TaskExtension` subclass that initialises the fluid solver at episode start and applies hydrodynamic forces at each `before_step`. Also hosts `DataLogger` for HDF5 logging. |
+| `flow_viewer.py`, `flow_viewer_2d.py` | `FlowViewer` — FARMS `TaskExtension` that renders fluid fields (vorticity, pressure, velocity) as coloured spheres / 2-D tiles directly inside the MuJoCo viewer. See [FlowViewer](#flowviewer--in-viewer-flow-visualisation). |
+| `particle_viewer.py`, `native_body_colors.py`, `camera.py` | Viewer extras — particle-tracer overlay, per-body colouring, camera controllers. |
+| `control.py`, `gamepad.py` | Optional interactive controllers (keyboard, gamepad) for steering coupled simulations live. |
 | `gen_pool_sdf.py` | Generates SDF XML files defining rectangular pool arenas with collision walls for MuJoCo. |
 
 ### Utilities (`lilytorch/util/`)
 
 | Module | Description |
 |---|---|
-| `mp_util.py` | Multiprocessing utility for 1D/2D parameter sweeps. |
+| `mp_util.py` | Multiprocessing utility for 1-D / 2-D parameter sweeps. |
 | `yaml_operations.py` | YAML read/write helpers. |
 | `paths.py` | Canonical path constants for the repository. |
 
@@ -178,15 +182,19 @@ self.sponge = {
 
 | Directory | Description |
 |---|---|
-| `_1guillasim/` | Anguilliform (eel-like) swimmer — 1 and 2 swimmer configurations. |
+| `_1guillasim/` | Anguilliform (eel-like) swimmer — 1- and 2-swimmer configurations. |
 | `zebrafishsim/` | Zebrafish larva swimmer. |
-| `salamander/` | Salamander swimming and paddling gaits. |
+| `salamander/` | Salamander swimming, paddling, and underwater-walking gaits (2-D and 3-D). |
+| `pleurodeles/` | Pleurodeles (newt) swimming gaits. |
 | `amphibot/` | Amphibot robot experimental data and analysis. |
+| `submarine/` | Tethered submarine drag study. |
+| `jellyfish/` | 3-D jellyfish prescribed-kinematics swimmer (standalone, no FARMS). |
 | `single_sphere_drop_*` | Validation benchmarks — sphere sedimentation test cases (Coquerelle & Gazzola). |
-| `sphere/` | Falling cylinder experiment. |
+| `drag_swimming/` | Open-loop drag-only sweeps. |
 | `sdfs/` | Pre-built SDF arena and animat descriptions. |
+| `base_sim_config.py` | Base class shared by every example: holds the YAML schema and routes user-set keys (including `dtype`, `use_kernels`, `sdf_interp_method`, …) into the solver / BDIM configs. |
 
-Each example contains a `BDIMhandler.py` (fluid–body interface), config generators, PD controllers, and plotting scripts.
+Each example folder contains config generators (`gen_configs*.py`), PD / torque controllers, and plotting scripts.  Coupling to the fluid solver goes through the *single* `lilytorch.integration.BDIMhandler.BDIMhandler` class — there is no per-example handler any more.
 
 ### FARMS Submodules (`lilytorch/FARMS_V2/`)
 

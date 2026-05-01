@@ -30,7 +30,9 @@ def run(yaml_path):
     print("=" * 60)
 
     t0 = time.time()
-    solver = FluidSolver(pars, dtype=torch.float64, compute_forces=False)
+    # dtype is read from pars['solver']['dtype'] when present (falls back
+    # to float32). Pass dtype=... explicitly here only to override the YAML.
+    solver = FluidSolver(pars, compute_forces=False)
     solver.run_sim()
     elapsed = time.time() - t0
 

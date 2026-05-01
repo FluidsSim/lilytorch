@@ -236,6 +236,46 @@ Compilation
      - *null*
      - ``torch.compile`` for SDF / :math:`\mu` / normals evaluation.
 
+Solver mode
+^^^^^^^^^^^
+
+.. list-table::
+   :header-rows: 1
+   :widths: 22 10 12 56
+
+   * - Key
+     - Type
+     - Default
+     - Description
+   * - ``use_kernels``
+     - bool
+     - true
+     - Single user-facing switch between the two solver variants.
+       ``true`` selects the streaming C++/CUDA kernel path
+       (per-body fused SDF + force kernels, union-AABB crops for
+       shared stress, :math:`\mu` / normals, and the BDIM
+       meta-equation).  ``false`` selects the suboptimal pure-PyTorch
+       reference path (no batching, no per-body cropping) which is
+       useful for validation.  Independent of ``use_gpu``: kernel
+       mode is supported on both CPU and CUDA.
+   * - ``fused_sdf_forces``
+     - bool
+     - true
+     - Inside the kernel path, fold the lagged force/torque integral
+       into the same kernel pass that computes the running-min SDF
+       (``streaming_sdf_forces_fused_3d_multi``).  Eliminates the
+       per-body ``sparse_cc_flat`` slabs.  Set to ``false`` only when
+       debugging the older two-pass kernel path.
+   * - ``sdf_interp_method``
+     - str
+     - ``"trilinear"``
+     - Body-SDF sampling stencil used inside the streaming kernels.
+       ``"trilinear"`` is the 2×2×2 stencil that matches the
+       historical behaviour; ``"triquadratic"`` uses a 3×3×3 Lagrange
+       stencil for higher-order SDF accuracy near the body surface
+       and falls back to trilinear in the boundary layer of the body
+       grid.
+
 Hardware
 ^^^^^^^^
 
@@ -257,8 +297,16 @@ Hardware
      - CPU threads (when ``use_gpu: false``).
    * - ``dtype``
      - str
-     - *null*
-     - ``"float32"`` or ``"float64"``.  Default is single precision.
+     - ``"float32"``
+     - ``"float32"`` or ``"float64"``.  Honoured by both the
+       pure-PyTorch path and the C++/CUDA streaming kernels (which
+       dispatch via ``AT_DISPATCH_FLOATING_TYPES``).  Set on the
+       :class:`~lilytorch.farms_examples.base_sim_config.BaseSimConfig`
+       — the value flows through to :class:`FluidSolver` and
+       :class:`BDIMhandler` automatically; passing
+       ``dtype=torch.float64`` to ``FluidSolver(...)`` directly is no
+       longer required.  The aliases ``"single"`` / ``"double"`` are
+       also accepted.
 
 Miscellaneous
 ^^^^^^^^^^^^^

@@ -47,11 +47,31 @@ class BDIMhandler:
         self.ndim = 3 if "Nz" in self.pars["solver"] else 2
 
         # ---- dtype ----
+        # Resolution rule (single source of truth: solver.py):
+        #   explicit ``dtype=`` kwarg  >  ``solver.dtype`` from YAML  >  float32.
+        # We intentionally delegate parsing so that strings like "double"
+        # / "single" / "float64" / "float32" all behave the same here as
+        # they do in :class:`FluidSolver`.
         if dtype is not None:
             self.dtype = dtype
         else:
             dtype_str = self.pars["solver"].get("dtype", "float32")
-            self.dtype = torch.float32 if dtype_str == "float32" else torch.float64
+            if isinstance(dtype_str, torch.dtype):
+                self.dtype = dtype_str
+            else:
+                _dtype_map = {"float32": torch.float32, "float64": torch.float64,
+                              "double":  torch.float64, "single":  torch.float32}
+                if dtype_str not in _dtype_map:
+                    raise ValueError(
+                        f"Unknown solver.dtype '{dtype_str}'. "
+                        f"Expected one of {sorted(_dtype_map)}."
+                    )
+                self.dtype = _dtype_map[dtype_str]
+        if self.dtype not in (torch.float32, torch.float64):
+            raise ValueError(
+                f"BDIMhandler dtype must be torch.float32 or torch.float64, "
+                f"got {self.dtype}."
+            )
         self.dtype_np = np.float32 if self.dtype == torch.float32 else np.float64
         self._prev_body_index = ()
         self._next_body_index = ()
