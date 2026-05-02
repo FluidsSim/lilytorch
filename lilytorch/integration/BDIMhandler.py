@@ -344,11 +344,14 @@ class BDIMhandler:
     def _update_2d(self, t, iteration, dt=1):
         # Streaming fused-CUDA path — opt-in via solver.streaming_sdf_2d.
         # The streaming dispatch (``_update_2d_streaming_multi``) handles
-        # bodies that all expose ``_stream_meta`` (regular-grid SDF table).
-        # When any body is analytical, fall through to the Python path
-        # below — which itself supports mixed analytical+mesh composites
-        # because it evaluates ``body.sdf`` directly per body.  This
-        # mirrors the 3-D streaming dispatch (see ``_update_3d_streaming``).
+        # composites where every body exposes ``_stream_meta`` (regular-
+        # grid SDF table).  When any body is analytical, fall through to
+        # the Python path below — which itself supports mixed composites
+        # (it evaluates ``body.sdf`` per body, with mesh bodies using
+        # their grid_sample-backed interpolator and analytical bodies
+        # using their callable SDF).  This mirrors the 3-D streaming
+        # dispatch (see ``_update_3d_streaming``); both use the same
+        # "all-mesh → batched kernel; mixed → per-body fallback" rule.
         if getattr(self.fluid_solver, '_streaming_sdf_2d', False):
             comp_check = self.fluid_solver.composite_body
             if all(getattr(b, '_stream_meta', None) is not None
@@ -423,11 +426,25 @@ class BDIMhandler:
             R_T = R.T  # (2, 2) transposed rotation
 
             # ── AABB-clipped SDF evaluation ─────────────────────────
-            aabb = self._body_aabb_indices_2d(
-                body, R, urdf_pos,
-                comp.x, comp.y,
-                h_grid, gs, pad=3,
-            )
+            # Mirror the 3-D pattern: only AABB-clip when the body has
+            # a regular-grid SDF table.  For analytical bodies the SDF
+            # is a closed-form callable whose values *outside* a tight
+            # AABB are still finite, so AABB-clipping would break the
+            # running-min union (cells outside the AABB would keep the
+            # _FAR sentinel even when this body's analytical SDF would
+            # win there).  Mesh bodies are immune to this because
+            # ``grid_sample(padding_mode='border')`` clamps to the
+            # edge value of the (already padded with _FAR sentinel)
+            # local-frame SDF table.
+            aabb = None
+            if (hasattr(body, 'sdf')
+                    and hasattr(body.sdf, 'x')
+                    and hasattr(body.sdf, 'y')):
+                aabb = self._body_aabb_indices_2d(
+                    body, R, urdf_pos,
+                    comp.x, comp.y,
+                    h_grid, gs, pad=3,
+                )
             comp._body_aabbs[body_i] = aabb
 
             sdf_eval = body.sdf
@@ -559,31 +576,23 @@ class BDIMhandler:
         """2-D analogue of :meth:`_body_aabb_indices`.
 
         Computes fluid-grid index ranges ``(i0, i1, j0, j1)`` for the
-        AABB of a body's local-frame domain, transformed into world
+        AABB of a body's local-frame SDF table, transformed into world
         space.
 
-        For mesh bodies the local-frame domain is the body SDF grid
-        (``body.sdf.x/y``).  For analytical bodies (no pre-sampled
-        grid) we fall back to the body contour ``body.cnt`` plus a
-        margin of ``4 h`` cells (covers the BDIM transition layer +
-        bilinear stencil).
+        Mirrors the 3-D helper: only valid for bodies whose ``body.sdf``
+        is a regular-grid interpolator exposing ``x`` and ``y`` axis
+        tensors (i.e. mesh / pre-sampled bodies).  Analytical bodies
+        whose SDF is a closed-form callable do **not** AABB-clip well
+        (their SDF is finite outside any local box, so cells outside
+        the box would not lose the running-min) — callers should pass
+        ``aabb=None`` for them and use the full-grid path.
 
         Returns ``None`` when the AABB covers >90% of the grid (full-
         grid evaluation is then cheaper).  Returns half-open Python
         slice indices otherwise.
         """
-        # Body local-frame domain bounds (1-D tensors / floats)
-        if hasattr(body, 'sdf') and hasattr(body.sdf, 'x') and hasattr(body.sdf, 'y'):
-            sdf_lo = torch.stack([body.sdf.x[0],  body.sdf.y[0]])
-            sdf_hi = torch.stack([body.sdf.x[-1], body.sdf.y[-1]])
-        else:
-            # Analytical body: use the contour bounding box + 4 h margin.
-            margin = 4.0 * float(h)
-            cnt = body.cnt  # shape (2, N) in local frame
-            sdf_lo = torch.stack([cnt[0].min() - margin,
-                                  cnt[1].min() - margin])
-            sdf_hi = torch.stack([cnt[0].max() + margin,
-                                  cnt[1].max() + margin])
+        sdf_lo = torch.stack([body.sdf.x[0],  body.sdf.y[0]])
+        sdf_hi = torch.stack([body.sdf.x[-1], body.sdf.y[-1]])
 
         local_center = 0.5 * (sdf_lo + sdf_hi)
         local_half   = 0.5 * (sdf_hi - sdf_lo)
@@ -1433,6 +1442,22 @@ class BDIMhandler:
         # handles all bodies, eliminating ~B torch.ops dispatches/step
         # and the per-body launch+sync overhead.  Falls back to the
         # per-body sequential loop below if any body lacks meta.
+        #
+        # Mixed analytical + mesh composites
+        # ----------------------------------
+        # When ``_stream_meta`` is missing on at least one body (i.e. an
+        # analytical body without a regular-grid SDF table) this gate
+        # falls through to the per-body sequential loop below.  That
+        # loop correctly handles mixed composites:
+        #   * mesh bodies                    → ``streaming_sdf_min_3d``
+        #     (single-body C++/CUDA kernel)
+        #   * analytical / non-meta bodies   → ``_fallback_update_one_body_3d``
+        #     (per-body PyTorch AABB + ``torch.where`` running-min).
+        # Both write into the same union fields with running-min
+        # semantics, so order is irrelevant and the result is correct.
+        # The only thing lost in mixed mode is the multi-body batching
+        # of the fast path (and the fused SDF+forces kernel, which is
+        # SDF-table-only by design).
         comp_check = self.fluid_solver.composite_body
         if all(getattr(b, '_stream_meta', None) is not None
                for b in comp_check.bodies):
