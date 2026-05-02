@@ -303,23 +303,6 @@ class FlowViewer2D(TaskExtension):
                   f"z_offset={self.z_offset}, domain=[{xmin:.3f},{xmax:.3f}]x[{ymin:.3f},{ymax:.3f}].")
             print(f"  user_scn.ngeom now={scn.ngeom}")
 
-            # ── DEBUG MARKER: bright red box at domain centre ─────────
-            # Visible from any camera angle.  Remove once positioning is
-            # confirmed.
-            if scn.ngeom < scn.maxgeom:
-                mid_x = (xmin + xmax) / 2.0
-                mid_y = (ymin + ymax) / 2.0
-                marker_sz = np.array([0.05, 0.05, 0.01], dtype=np.float64)
-                marker_pos = np.array([mid_x, mid_y, self.z_offset + 0.005],
-                                       dtype=np.float64)
-                marker_rgba = np.array([1.0, 0.0, 0.0, 0.9], dtype=np.float32)
-                g = scn.geoms[scn.ngeom]
-                mujoco.mjv_initGeom(
-                    g, mujoco.mjtGeom.mjGEOM_BOX,
-                    marker_sz, marker_pos, _eye3, marker_rgba,
-                )
-                scn.ngeom += 1
-                print(f"  DEBUG: red marker at ({mid_x:.3f}, {mid_y:.3f}, {self.z_offset + 0.005:.4f})")
         else:
             print("[FlowViewer2D] No viewer (headless) – "
                   "tiles will only appear in recorded video.")

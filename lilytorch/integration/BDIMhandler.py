@@ -192,9 +192,9 @@ class BDIMhandler:
         comp = self.fluid_solver.composite_body
         gs = self.fluid_solver.grid_shape
         if self.ndim == 3:
-            comp.sdf_vals = torch.zeros(
-                (comp.nbodies, *gs), device=self.device, dtype=self.dtype,
-            )
+            # 3-D never uses comp.sdf_vals — all update paths write comp._sdf_sparse
+            # and forces_method2_3d reads _sdf_sparse or _fused_forces_out directly.
+            # body.py skips the 3-D allocation; nothing to reassign here.
             # Streaming fused-CUDA path requires the per-body C++/CUDA
             # trilinear samplers (re-uses body._stream_meta cached there).
             # When ``streaming_sdf_3d`` is on, ``custom_trilinear_3d`` is
@@ -206,10 +206,18 @@ class BDIMhandler:
                       "min-update enabled (replaces _update_3d streaming "
                       "Python loop)")
         else:
-            # 2-D update uses per-body stacks for argmin-based union
+            # 2-D update uses per-body SDF stacks for argmin-based union
+            # and force integration.  body.py pre-allocates these for 2-D;
+            # the guards below are safety nets for unusual construction paths.
+            _streaming_2d = getattr(self.fluid_solver, '_streaming_sdf_2d', False)
+
+            # sdf_vals is always kept: _update_2d falls back to the batched
+            # grid_sample path when any body lacks _stream_meta, and that
+            # path writes/reads comp.sdf_vals.
             if not hasattr(comp, 'sdf_vals'):
                 comp.sdf_vals = torch.zeros(
                     (comp.nbodies, *gs), device=self.device, dtype=self.dtype)
+
             if not hasattr(comp, 'sdf_vals_u'):
                 comp.sdf_vals_u = torch.zeros(
                     (comp.nbodies, *gs), device=self.device, dtype=self.dtype)
@@ -234,7 +242,7 @@ class BDIMhandler:
             # Opt-in via solver.streaming_sdf_2d.  Builds per-body
             # `_stream_meta` from each body's own `sdf.{F, x, y}` so the
             # `streaming_sdf_min_2d_multi` kernel can run.
-            if getattr(self.fluid_solver, '_streaming_sdf_2d', False):
+            if _streaming_2d:
                 self._init_custom_trilinear_2d()
                 print("  [streaming-sdf-2D] fused per-body C++/CUDA SDF "
                       "min-update enabled (replaces _update_2d batched "
@@ -330,9 +338,10 @@ class BDIMhandler:
 
     # ---- 2-D update --------------------------------------------------
     def _update_2d(self, t, iteration, dt=1):
-        # Streaming fused-CUDA path (mirror of the 3-D streaming branch)
-        # — opt-in via solver.streaming_sdf_2d.  Falls back to the legacy
-        # batched grid_sample path below if any body lacks _stream_meta.
+        # Streaming fused-CUDA path — opt-in via solver.streaming_sdf_2d.
+        # Falls back to the legacy batched grid_sample path below when any
+        # body lacks _stream_meta (e.g. analytical bodies or those without
+        # a regular-grid SDF — _init_custom_trilinear_2d sets these to None).
         if getattr(self.fluid_solver, '_streaming_sdf_2d', False):
             comp_check = self.fluid_solver.composite_body
             if all(getattr(b, '_stream_meta', None) is not None

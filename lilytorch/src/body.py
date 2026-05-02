@@ -2162,17 +2162,13 @@ class CompositeBodyMesh(Body):
         gs = self.grid_shape
         is_3d = len(gs) == 3
 
-        # Per-body SDF stack – 2-D non-streaming force path only.
+        # Per-body SDF stacks – 2-D only.
         # 3-D paths always use comp._sdf_sparse (per-body sparse sub-blocks),
-        # so skip the (B, Nx, Ny, Nz) dense allocation to save significant VRAM.
+        # so skip the dense (B, Nx, Ny, Nz) allocations entirely for 3-D.
+        # For streaming 2-D, BDIMhandler.__init__ deletes sdf_vals after init
+        # since _update_2d_streaming_multi / bdim_forces_2d_multi never read it.
         if not is_3d:
-            self.sdf_vals = torch.zeros((self.nbodies, *gs), device=device)
-
-        # Per-body staggered-SDF and velocity arrays – 2-D only.
-        # The 3-D BDIMhandler computes these on-the-fly per sub-block
-        # and never touches these batched arrays, so skip them to save
-        # ~5.2 GB for a large 3-D grid with 10 bodies.
-        if not is_3d:
+            self.sdf_vals   = torch.zeros((self.nbodies, *gs), device=device)
             self.sdf_vals_u = torch.zeros((self.nbodies, *gs), device=device)
             self.sdf_vals_v = torch.zeros((self.nbodies, *gs), device=device)
             self.u_vals     = torch.zeros((self.nbodies, *gs), device=device)

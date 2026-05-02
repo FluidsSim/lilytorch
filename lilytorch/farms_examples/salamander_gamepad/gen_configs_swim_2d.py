@@ -18,6 +18,7 @@ class SimConfig(BaseSimConfig):
 
         # ── Hardware ──────────────────────────────────────────────────
         self.use_bdim     = True
+        self.use_drag     = False
         self.use_gpu      = True
         self.compute_sdf  = True
         self.wall_height  = 0.02
@@ -31,11 +32,16 @@ class SimConfig(BaseSimConfig):
         self.compile_forces   = True
         self.compile_sdf      = True
 
+        self.constant_drags = [
+            [-0.0, -0.05, -0.003],
+            [0, 0, 0]
+        ]
+
         # ── Animats ───────────────────────────────────────────────────
         self.animats_pars = [
             {
-                "model_name"  : "salamander_v5",
-                "sdf_name"    : "sdf/salamander.sdf",
+                "model_name"  : "salamander_v4",
+                "sdf_name"    : "sdf/salamander_no_passive.sdf",
                 "control_type": "position",
                 "gains"       : [0.001, .0002, 0],
                 "controller_config": {
@@ -61,11 +67,19 @@ class SimConfig(BaseSimConfig):
         self.ymin = -0.1
         self.ymax =  0.1
 
+        # # ── 2-D grid ─────────────────────────────────────────────────
+        # self.Nx   = 1024
+        # self.Ny   = 256
+        # self.xmin = -0.13
+        # self.xmax =  0.27
+        # self.ymin = -0.05
+        # self.ymax =  0.05
+
         # ── Physics ───────────────────────────────────────────────────
         self.poisson_method    = "fft"
-        self.timestep          = 0.01
+        self.timestep          = 0.02
         self.convection_method = "implicit"
-        self.n_iterations      = 8001
+        self.n_iterations      = 80001
         self.save_frames       = False
         self.num_sub_steps     = 1
 
@@ -77,7 +91,6 @@ class SimConfig(BaseSimConfig):
         self.wall_thickness = 0.003
         self.wall_height    = 0.03
         self.arena_pose     = [0, 0, 0, 0, 0, 0]
-        self.water_drag     = False
         self.water_buoyancy = False
 
         # ── BDIM solver ──────────────────────────────────────────────
@@ -117,16 +130,16 @@ class SimConfig(BaseSimConfig):
 
         # FlowViewer2D – overlay 2-D flow field on the MuJoCo viewer
         extensions.append({
-            "loader": "lilytorch.integration.flow_viewer_2d.FlowViewer2D",
+            "loader": "lilytorch.integration.flow_viewer_2d_gpu.FlowViewer2D",
             "config": {
                 "field"         : "curl",
-                "nx_vis"        : 120,
-                "ny_vis"        : 120,
-                "alpha"         : 0.65,
+                "nx_vis"        : 1024,
+                "ny_vis"        : 256,
+                "alpha"         : 1,
                 "z_offset"      : 0.015,
                 "smooth_sigma"  : 0,
                 "crop_boundary" : 0,
-                "update_every"  : 20,
+                "update_every"  : 1,
                 "vmin"          : -10,
                 "vmax"          : 10,
             },
@@ -149,6 +162,11 @@ class SimConfig(BaseSimConfig):
         # })
 
         return extensions
+
+    def single_run(self, index=0):
+        from lilytorch.integration.flow_viewer_2d_gpu import single_run_with_flow_viewer_2d_gpu
+
+        single_run_with_flow_viewer_2d_gpu(self, index)
 
 if __name__ == "__main__":
     SimConfig().run()

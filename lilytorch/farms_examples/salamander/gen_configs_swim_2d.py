@@ -57,6 +57,7 @@ class SimConfig(BaseSimConfig):
         self.timestep          = 0.01
         self.convection_method = "implicit"
         self.n_iterations      = 8001
+        self.save_frames       = False
         self.save_every        = 50
         self.num_sub_steps     = 1
 
@@ -108,7 +109,7 @@ class SimConfig(BaseSimConfig):
 
         # FlowViewer2D – overlay 2-D flow field on the MuJoCo viewer
         extensions.append({
-            "loader": "lilytorch.integration.flow_viewer_2d.FlowViewer2D",
+            "loader": "lilytorch.integration.flow_viewer_2d_gpu.FlowViewer2D",
             "config": {
                 "field"         : "curl",
                 "nx_vis"        : 120,
@@ -138,6 +139,11 @@ class SimConfig(BaseSimConfig):
         # })
 
         return extensions
+
+    def single_run(self, index=0):
+        from lilytorch.integration.flow_viewer_2d_gpu import single_run_with_flow_viewer_2d_gpu
+
+        single_run_with_flow_viewer_2d_gpu(self, index)
 
 if __name__ == "__main__":
     SimConfig().run()
