@@ -663,17 +663,43 @@ def forces_method2(self, u, v, p, iteration):
         return
 
     # Towers (2008) 2nd-order: compute per-body |∇SDF| on CC grid  (B,Ni,Nj)
+    # ``comp.sdf_vals`` was the legacy dense per-body SDF stack.  The new
+    # 2-D Python update (``_update_2d``) populates ``comp._sdf_sparse``
+    # (per-body AABB-cropped slabs) instead — mirroring 3-D.  Reconstruct
+    # a dense (B, Ni, Nj) tensor here when the sparse storage is present.
+    _have_sparse_2d = (
+        hasattr(comp, '_sdf_sparse')
+        and len(comp._sdf_sparse) > 0
+        and comp._sdf_sparse[0] is not None
+    )
+    if _have_sparse_2d:
+        _FAR = 1e6
+        Ni, Nj = comp.sdf_val.shape
+        sdf_vals = torch.full(
+            (B, Ni, Nj), _FAR,
+            device=self.device, dtype=self.dtype,
+        )
+        for bi in range(B):
+            aabb_i, sdf_sub_i = comp._sdf_sparse[bi]
+            if aabb_i is not None:
+                i0, i1, j0, j1 = aabb_i
+                sdf_vals[bi, i0:i1, j0:j1] = sdf_sub_i
+            else:
+                sdf_vals[bi] = sdf_sub_i
+    else:
+        sdf_vals = comp.sdf_vals  # legacy dense path
+
     sdf_grad_mag_2d = None
     if self.force_delta_order == 2:
-        gx = torch.gradient(comp.sdf_vals, spacing=self.h, dim=1, edge_order=2)[0]
-        gy = torch.gradient(comp.sdf_vals, spacing=self.h, dim=2, edge_order=2)[0]
+        gx = torch.gradient(sdf_vals, spacing=self.h, dim=1, edge_order=2)[0]
+        gy = torch.gradient(sdf_vals, spacing=self.h, dim=2, edge_order=2)[0]
         sdf_grad_mag_2d = torch.sqrt(gx**2 + gy**2)
 
     (fv_x, fv_y, tv_z,
      fp_x, fp_y, tp_z) = self._forces_body_batch_2d_compiled(
         xstress, ystress,
         pforce_x, pforce_y,
-        comp.sdf_vals,
+        sdf_vals,
         eps_body, self.eps,
         comp.com_pos[:, 0], comp.com_pos[:, 1],
         self.grids.X, self.grids.Y, self.h2,

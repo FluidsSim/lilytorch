@@ -236,8 +236,11 @@ class BDIMhandler:
             # per-animat previous/next body links are static as well.
             self._init_body_neighbors_2d()
 
-            # Pre-build batched SDF tensor for grid_sample (2-D only)
-            self._init_batched_sdf_2d()
+            # NOTE: the 2-D Python path no longer pre-samples / pads / stacks
+            # bodies for grid_sample.  It now mirrors the 3-D Python path
+            # (per-body AABB-cropped sub-grid + ``torch.where`` running-min
+            # union); analytical bodies are evaluated directly on the
+            # sub-grid via ``body.sdf(X, Y)``.
 
             # ── 2-D streaming fused-CUDA path (Phase C analogue of 3-D) ──
             # Opt-in via solver.streaming_sdf_2d.  Builds per-body
@@ -340,9 +343,12 @@ class BDIMhandler:
     # ---- 2-D update --------------------------------------------------
     def _update_2d(self, t, iteration, dt=1):
         # Streaming fused-CUDA path — opt-in via solver.streaming_sdf_2d.
-        # Falls back to the legacy batched grid_sample path below when any
-        # body lacks _stream_meta (e.g. analytical bodies or those without
-        # a regular-grid SDF — _init_custom_trilinear_2d sets these to None).
+        # The streaming dispatch (``_update_2d_streaming_multi``) handles
+        # bodies that all expose ``_stream_meta`` (regular-grid SDF table).
+        # When any body is analytical, fall through to the Python path
+        # below — which itself supports mixed analytical+mesh composites
+        # because it evaluates ``body.sdf`` directly per body.  This
+        # mirrors the 3-D streaming dispatch (see ``_update_3d_streaming``).
         if getattr(self.fluid_solver, '_streaming_sdf_2d', False):
             comp_check = self.fluid_solver.composite_body
             if all(getattr(b, '_stream_meta', None) is not None
@@ -351,11 +357,13 @@ class BDIMhandler:
 
         fs   = self.fluid_solver
         comp = fs.composite_body
+        gs   = fs.grid_shape
         B    = comp.nbodies
 
         _FAR = 1e4   # far-field SDF sentinel (same as 3-D path)
 
-        # gather per-animat kinematics
+        # gather per-animat kinematics (kept as device tensors for the
+        # downstream contour-mask path which queries other bodies' SDFs).
         com_poses  = []
         urdf_poses = []
         Rs         = []
@@ -386,79 +394,119 @@ class BDIMhandler:
                 )
             )
 
-        # ── Stack per-body kinematics into batched GPU tensors ────
-        urdf_t = torch.stack([urdf_poses[aid][lid] for aid, lid in comp.body_ids])  # (B, 2)
-        com_t  = torch.stack([com_poses[aid][lid]  for aid, lid in comp.body_ids])   # (B, 2)
-        R_t    = torch.stack([Rs[aid][lid]         for aid, lid in comp.body_ids])    # (B, 2, 2)
-        lv_t   = torch.stack([lin_vels[aid][lid]   for aid, lid in comp.body_ids])   # (B, 2)
-        av_t   = torch.stack([ang_vels[aid][lid]   for aid, lid in comp.body_ids])   # (B,)
-        R_T_t  = R_t.transpose(1, 2)  # (B, 2, 2)
+        h_grid = comp.h          # uniform grid spacing
 
-        # ── Batched rotation + grid_sample for CC grid ────────────
-        dx = comp.X.unsqueeze(0) - urdf_t[:, 0, None, None]   # (B, nx, ny)
-        dy = comp.Y.unsqueeze(0) - urdf_t[:, 1, None, None]   # (B, nx, ny)
-        px = R_T_t[:, 0, 0, None, None] * dx + R_T_t[:, 0, 1, None, None] * dy
-        py = R_T_t[:, 1, 0, None, None] * dx + R_T_t[:, 1, 1, None, None] * dy
-        x_n = px * self._sdf_x_scale[:, None, None] + self._sdf_x_offset[:, None, None]
-        y_n = py * self._sdf_y_scale[:, None, None] + self._sdf_y_offset[:, None, None]
-        # grid_sample grid: [..., 0] → W (y axis), [..., 1] → H (x axis)
-        sdf_cc_all = torch.nn.functional.grid_sample(
-            self._sdf_batch, torch.stack([y_n, x_n], dim=-1),
-            mode='bilinear', padding_mode='border', align_corners=True,
-        ).squeeze(1)                                              # (B, nx, ny)
+        # Per-body sparse SDF storage (mirrors the 3-D path).  Replaces
+        # the legacy dense (B, Nx, Ny) ``comp.sdf_vals`` stack.
+        comp._sdf_sparse = [None] * B
 
-        # ── Batched rotation + grid_sample for u-staggered grid ───
-        dx = comp.Xu_stag.unsqueeze(0) - urdf_t[:, 0, None, None]
-        dy = comp.Yu_stag.unsqueeze(0) - urdf_t[:, 1, None, None]
-        px = R_T_t[:, 0, 0, None, None] * dx + R_T_t[:, 0, 1, None, None] * dy
-        py = R_T_t[:, 1, 0, None, None] * dx + R_T_t[:, 1, 1, None, None] * dy
-        x_n = px * self._sdf_x_scale[:, None, None] + self._sdf_x_offset[:, None, None]
-        y_n = py * self._sdf_y_scale[:, None, None] + self._sdf_y_offset[:, None, None]
-        sdf_u_all = torch.nn.functional.grid_sample(
-            self._sdf_batch, torch.stack([y_n, x_n], dim=-1),
-            mode='bilinear', padding_mode='border', align_corners=True,
-        ).squeeze(1)                                              # (B, nx, ny)
+        # Initialise union fields to _FAR / zero (once per step).
+        comp.sdf_val.fill_(_FAR)
+        comp.sdf_val_u.fill_(_FAR)
+        comp.sdf_val_v.fill_(_FAR)
+        comp.body_u.zero_()
+        comp.body_v.zero_()
 
-        # ── Batched rotation + grid_sample for v-staggered grid ───
-        dx = comp.Xv_stag.unsqueeze(0) - urdf_t[:, 0, None, None]
-        dy = comp.Yv_stag.unsqueeze(0) - urdf_t[:, 1, None, None]
-        px = R_T_t[:, 0, 0, None, None] * dx + R_T_t[:, 0, 1, None, None] * dy
-        py = R_T_t[:, 1, 0, None, None] * dx + R_T_t[:, 1, 1, None, None] * dy
-        x_n = px * self._sdf_x_scale[:, None, None] + self._sdf_x_offset[:, None, None]
-        y_n = py * self._sdf_y_scale[:, None, None] + self._sdf_y_offset[:, None, None]
-        sdf_v_all = torch.nn.functional.grid_sample(
-            self._sdf_batch, torch.stack([y_n, x_n], dim=-1),
-            mode='bilinear', padding_mode='border', align_corners=True,
-        ).squeeze(1)                                              # (B, nx, ny)
+        # Cache per-body AABBs for downstream use (e.g. narrow-band forces).
+        if not hasattr(comp, '_body_aabbs'):
+            comp._body_aabbs = [None] * B
 
-        # ── Batched body velocities ───────────────────────────────
-        vel_u_all = lv_t[:, 0, None, None] - av_t[:, None, None] * (
-            comp.Yu_stag.unsqueeze(0) - com_t[:, 1, None, None])  # (B, nx, ny)
-        vel_v_all = lv_t[:, 1, None, None] + av_t[:, None, None] * (
-            comp.Xv_stag.unsqueeze(0) - com_t[:, 0, None, None])  # (B, nx, ny)
-
-        # ── Batched union-min ─────────────────────────────────────
-        comp.sdf_vals[:]   = sdf_cc_all
-        comp.sdf_vals_u[:] = sdf_u_all
-        comp.sdf_vals_v[:] = sdf_v_all
-        comp.sdf_val       = sdf_cc_all.min(dim=0).values
-
-        min_u = sdf_u_all.min(dim=0)
-        comp.sdf_val_u = min_u.values
-        comp.body_u    = vel_u_all.gather(0, min_u.indices.unsqueeze(0)).squeeze(0)
-
-        min_v = sdf_v_all.min(dim=0)
-        comp.sdf_val_v = min_v.values
-        comp.body_v    = vel_v_all.gather(0, min_v.indices.unsqueeze(0)).squeeze(0)
-
-        # ── Per-body: contour update + contour mask ───────────────
         for body_i, body in enumerate(comp.bodies):
             (animat_id, link_id) = comp.body_ids[body_i]
 
-            comp.com_pos[body_i] = com_t[body_i]
+            com_pos  = com_poses[animat_id][link_id]
+            urdf_pos = urdf_poses[animat_id][link_id]
+            R        = Rs[animat_id][link_id]
+            lin_vel  = lin_vels[animat_id][link_id]
+            ang_vel  = ang_vels[animat_id][link_id]
 
-            # contour update
-            body.cnt_update = R_t[body_i] @ body.cnt + urdf_t[body_i, :, None]
+            R_T = R.T  # (2, 2) transposed rotation
+
+            # ── AABB-clipped SDF evaluation ─────────────────────────
+            aabb = self._body_aabb_indices_2d(
+                body, R, urdf_pos,
+                comp.x, comp.y,
+                h_grid, gs, pad=3,
+            )
+            comp._body_aabbs[body_i] = aabb
+
+            sdf_eval = body.sdf
+
+            if aabb is not None:
+                # ── Sub-block path (main saving) ────────────────────
+                (i0, i1, j0, j1) = aabb
+                sl = (slice(i0, i1), slice(j0, j1))
+
+                px, py = rotate_grid_2d(
+                    comp.X[sl], comp.Y[sl], R_T, urdf_pos)
+                sdf_sub = sdf_eval(px, py)
+
+                # Per-body SDF (sparse: store sub-block + AABB for forces)
+                comp._sdf_sparse[body_i] = (aabb, sdf_sub)
+
+                # Evaluate SDF directly at staggered face locations
+                px_u, py_u = rotate_grid_2d(
+                    comp.Xu_stag[sl], comp.Yu_stag[sl], R_T, urdf_pos)
+                sdf_sub_u = sdf_eval(px_u, py_u)
+
+                px_v, py_v = rotate_grid_2d(
+                    comp.Xv_stag[sl], comp.Yv_stag[sl], R_T, urdf_pos)
+                sdf_sub_v = sdf_eval(px_v, py_v)
+
+                # Sub-block body velocity (rigid-body: lv - ω × r in 2-D
+                # collapses to ω being a scalar out-of-plane).
+                vel_sub_u = lin_vel[0] - ang_vel * (
+                    comp.Yu_stag[sl] - com_pos[1])
+                vel_sub_v = lin_vel[1] + ang_vel * (
+                    comp.Xv_stag[sl] - com_pos[0])
+
+                # Sub-block union min ─ contiguous read avoids slow
+                # strided reads inside torch.where.
+                old_cc = comp.sdf_val[sl].contiguous()
+                comp.sdf_val[sl] = torch.where(sdf_sub < old_cc, sdf_sub, old_cc)
+
+                old_u = comp.sdf_val_u[sl].contiguous()
+                mask_u = sdf_sub_u < old_u
+                comp.sdf_val_u[sl] = torch.where(mask_u, sdf_sub_u, old_u)
+                comp.body_u[sl] = torch.where(
+                    mask_u, vel_sub_u, comp.body_u[sl].contiguous())
+
+                old_v = comp.sdf_val_v[sl].contiguous()
+                mask_v = sdf_sub_v < old_v
+                comp.sdf_val_v[sl] = torch.where(mask_v, sdf_sub_v, old_v)
+                comp.body_v[sl] = torch.where(
+                    mask_v, vel_sub_v, comp.body_v[sl].contiguous())
+
+            else:
+                # ── Full-grid path (body covers >90 % of grid) ─────
+                px, py = rotate_grid_2d(comp.X, comp.Y, R_T, urdf_pos)
+                sdf_cc = sdf_eval(px, py)
+                comp._sdf_sparse[body_i] = (None, sdf_cc)
+
+                px_u, py_u = rotate_grid_2d(
+                    comp.Xu_stag, comp.Yu_stag, R_T, urdf_pos)
+                sdf_u = sdf_eval(px_u, py_u)
+                px_v, py_v = rotate_grid_2d(
+                    comp.Xv_stag, comp.Yv_stag, R_T, urdf_pos)
+                sdf_v = sdf_eval(px_v, py_v)
+
+                vel_u = lin_vel[0] - ang_vel * (comp.Yu_stag - com_pos[1])
+                vel_v = lin_vel[1] + ang_vel * (comp.Xv_stag - com_pos[0])
+
+                mask_cc = sdf_cc < comp.sdf_val
+                comp.sdf_val = torch.where(mask_cc, sdf_cc, comp.sdf_val)
+                mask_u = sdf_u < comp.sdf_val_u
+                comp.sdf_val_u = torch.where(mask_u, sdf_u, comp.sdf_val_u)
+                comp.body_u    = torch.where(mask_u, vel_u, comp.body_u)
+                mask_v = sdf_v < comp.sdf_val_v
+                comp.sdf_val_v = torch.where(mask_v, sdf_v, comp.sdf_val_v)
+                comp.body_v    = torch.where(mask_v, vel_v, comp.body_v)
+
+            comp.com_pos[body_i] = com_pos
+            body.com_pos = com_pos
+
+            # contour update (world frame)
+            body.cnt_update = R @ body.cnt + urdf_pos[:, None]
 
             # optional contour mask for overlapping links
             if self.contour_mask:
@@ -503,118 +551,65 @@ class BDIMhandler:
                     mask = (sdf_m >= 0) & (sdf_p >= 0)
                 body.mask = mask
 
-            body.r_com   = body.cnt_update - com_t[body_i, :, None]
-            body.com_pos = com_t[body_i]
+            body.r_com = body.cnt_update - com_pos[:, None]
 
     @staticmethod
-    def _body_sdf_grid(body):
-        """Return ``(F, x, y)`` for any 2-D body type.
+    def _body_aabb_indices_2d(body, R, urdf_pos, comp_x, comp_y,
+                              h, gs, pad=3):
+        """2-D analogue of :meth:`_body_aabb_indices`.
 
-        * **Mesh / interpolated bodies** store the SDF on a regular
-          grid inside a ``RegularGridInterpolator``-like object →
-          return ``(sdf.F, sdf.x, sdf.y)`` directly.
-        * **Analytical bodies** (circle, box, segment …) only expose
-          a callable ``sdf(X, Y)`` with no pre-sampled grid → evaluate
-          the SDF on a local grid covering the body contour plus a
-          margin of ``4 h`` (enough for the BDIM transition layer +
-          bilinear stencil) and return the sampled tensor.
+        Computes fluid-grid index ranges ``(i0, i1, j0, j1)`` for the
+        AABB of a body's local-frame domain, transformed into world
+        space.
+
+        For mesh bodies the local-frame domain is the body SDF grid
+        (``body.sdf.x/y``).  For analytical bodies (no pre-sampled
+        grid) we fall back to the body contour ``body.cnt`` plus a
+        margin of ``4 h`` cells (covers the BDIM transition layer +
+        bilinear stencil).
+
+        Returns ``None`` when the AABB covers >90% of the grid (full-
+        grid evaluation is then cheaper).  Returns half-open Python
+        slice indices otherwise.
         """
-        if hasattr(body.sdf, 'F'):
-            # Mesh / interpolated body – grid already available
-            return body.sdf.F, body.sdf.x, body.sdf.y
+        # Body local-frame domain bounds (1-D tensors / floats)
+        if hasattr(body, 'sdf') and hasattr(body.sdf, 'x') and hasattr(body.sdf, 'y'):
+            sdf_lo = torch.stack([body.sdf.x[0],  body.sdf.y[0]])
+            sdf_hi = torch.stack([body.sdf.x[-1], body.sdf.y[-1]])
+        else:
+            # Analytical body: use the contour bounding box + 4 h margin.
+            margin = 4.0 * float(h)
+            cnt = body.cnt  # shape (2, N) in local frame
+            sdf_lo = torch.stack([cnt[0].min() - margin,
+                                  cnt[1].min() - margin])
+            sdf_hi = torch.stack([cnt[0].max() + margin,
+                                  cnt[1].max() + margin])
 
-        # ── Analytical body: pre-sample onto a regular grid ──────
-        h = body.h
-        margin = 4.0 * h
+        local_center = 0.5 * (sdf_lo + sdf_hi)
+        local_half   = 0.5 * (sdf_hi - sdf_lo)
 
-        # Derive local extent from the contour (computed during init
-        # in _initialize_2d via skimage.measure.find_contours).
-        x_lo = float(body.cnt[0].min()) - margin
-        x_hi = float(body.cnt[0].max()) + margin
-        y_lo = float(body.cnt[1].min()) - margin
-        y_hi = float(body.cnt[1].max()) + margin
+        # AABB of the oriented local box in world space:
+        #   world_half[i] = Σ_j |R[i,j]| · local_half[j]
+        world_half   = R.abs() @ local_half
+        world_center = R @ local_center + urdf_pos
 
-        nx = max(int((x_hi - x_lo) / h) + 1, 4)
-        ny = max(int((y_hi - y_lo) / h) + 1, 4)
+        w_min = world_center - world_half
+        w_max = world_center + world_half
 
-        x_coords = torch.linspace(x_lo, x_hi, nx,
-                                  device=body.device, dtype=body.dtype)
-        y_coords = torch.linspace(y_lo, y_hi, ny,
-                                  device=body.device, dtype=body.dtype)
-        X, Y = torch.meshgrid(x_coords, y_coords, indexing='ij')
-        F = body.sdf(X, Y)
-        return F, x_coords, y_coords
+        x0, y0 = comp_x[0], comp_y[0]
+        inv_h = 1.0 / float(h)
 
-    def _init_batched_sdf_2d(self):
-        """Pre-build batched SDF tensor and normalization constants for grid_sample.
+        i0 = max(0,     int(((w_min[0] - x0) * inv_h).item()) - pad)
+        i1 = min(gs[0], int(((w_max[0] - x0) * inv_h).item()) + 1 + pad)
+        j0 = max(0,     int(((w_min[1] - y0) * inv_h).item()) - pad)
+        j1 = min(gs[1], int(((w_max[1] - y0) * inv_h).item()) + 1 + pad)
 
-        Called lazily on the first ``_update_2d`` invocation.  The SDF
-        fields are in body-local coordinates and never change, so this
-        only runs once.
+        sub_vol  = (i1 - i0) * (j1 - j0)
+        full_vol = gs[0] * gs[1]
+        if sub_vol > 0.9 * full_vol:
+            return None
 
-        Body SDF grids may have different resolutions (e.g. legs vs
-        torso links).  We pad every SDF to the maximum (H, W) with a
-        far-field sentinel so they can be stacked into a single tensor
-        for ``grid_sample``.  The coordinate normalization maps each
-        body's physical extent to the *unpadded* sub-region of the
-        padded tensor.
-        """
-        comp = self.fluid_solver.composite_body
-        B = comp.nbodies
-        _FAR = 1e4  # sentinel: "far from any body surface"
-
-        # --- extract (F, x, y) for every body (mesh or analytical) ---
-        grids = [self._body_sdf_grid(body) for body in comp.bodies]
-
-        # --- gather per-body shapes and find max dims ---
-        shapes = [(F.shape[0], F.shape[1]) for F, _x, _y in grids]
-        max_h = max(s[0] for s in shapes)
-        max_w = max(s[1] for s in shapes)
-
-        # --- pad each SDF to (max_h, max_w) ---
-        padded = []
-        for (F, _x, _y), (h_i, w_i) in zip(grids, shapes):
-            if h_i < max_h or w_i < max_w:
-                # F.pad order: (W_left, W_right, H_top, H_bottom)
-                F = torch.nn.functional.pad(
-                    F, (0, max_w - w_i, 0, max_h - h_i), value=_FAR)
-            padded.append(F)
-
-        self._sdf_batch = torch.stack(padded).unsqueeze(1).contiguous()
-        # shape: (B, 1, max_h, max_w)
-
-        # --- axis ranges for coordinate normalization ---
-        x_min = torch.tensor([g[1][0].item()  for g in grids],
-                             device=self.device, dtype=self.dtype)
-        x_max = torch.tensor([g[1][-1].item() for g in grids],
-                             device=self.device, dtype=self.dtype)
-        y_min = torch.tensor([g[2][0].item()  for g in grids],
-                             device=self.device, dtype=self.dtype)
-        y_max = torch.tensor([g[2][-1].item() for g in grids],
-                             device=self.device, dtype=self.dtype)
-
-        # Original per-body pixel counts (float for division)
-        h_orig = torch.tensor([s[0] for s in shapes],
-                              device=self.device, dtype=self.dtype)
-        w_orig = torch.tensor([s[1] for s in shapes],
-                              device=self.device, dtype=self.dtype)
-
-        # --- affine map: physical coord → grid_sample [-1, 1] ---
-        # With align_corners=True the grid maps [-1,+1] onto
-        # [0, max_dim-1].  The *original* data lives in [0, orig-1],
-        # so physical x_min→ grid=-1 and x_max→ grid=-1+2*(orig-1)/(max-1).
-        #   grid_x = x * scale_x + offset_x
-        # where scale_x = 2*(h_orig-1) / ((x_max-x_min) * (max_h-1))
-        self._sdf_x_scale  = 2.0 * (h_orig - 1) / ((x_max - x_min) * (max_h - 1))
-        self._sdf_x_offset = -1.0 - x_min * self._sdf_x_scale
-        self._sdf_y_scale  = 2.0 * (w_orig - 1) / ((y_max - y_min) * (max_w - 1))
-        self._sdf_y_offset = -1.0 - y_min * self._sdf_y_scale
-
-        n_unique = len(set(shapes))
-        print(f"  [batched-SDF] built ({B}, 1, {max_h}, {max_w}) "
-              f"grid_sample tensor  "
-              f"({self._sdf_batch.nelement()*self._sdf_batch.element_size()/1e6:.0f} MB)  "
-              f"({n_unique} unique SDF sizes, padded to max)")
+        return (i0, i1, j0, j1)
 
     # ---- 3-D update --------------------------------------------------
     # ------------------------------------------------------------------
