@@ -757,15 +757,279 @@ static void interpolate_2d_cpu(
 }
 
 // =====================================================================
+//  streaming_sdf_forces_fused_2d_multi (CPU fallback)
+//
+//  Implements Phase C (SDF update) and Phase D (force integration) in
+//  two sequential passes over the per-body AABB.  The intermediate
+//  sparse_cc_flat buffer is allocated locally and used to communicate
+//  CC-SDF values between the two passes.
+// =====================================================================
+
+void streaming_sdf_forces_fused_2d_multi_cpu(
+    const at::Tensor& F_flat, const at::Tensor& F_offsets,
+    const at::Tensor& body_shapes, const at::Tensor& body_meta, const at::Tensor& kin,
+    const at::Tensor& aabb_lo, const at::Tensor& aabb_dim,
+    const at::Tensor& gx, const at::Tensor& gy,
+    const double h_grid, const int64_t /*max_vol_per_body*/,
+    at::Tensor sdf_cc, at::Tensor sdf_u, at::Tensor sdf_v,
+    at::Tensor body_u, at::Tensor body_v,
+    const int64_t interp_method,
+    const at::Tensor& rho_bodies, at::Tensor winning_rho_cc,
+    const at::Tensor& u_prev, const at::Tensor& v_prev, const at::Tensor& p_prev,
+    const at::Tensor& nx_cc, const at::Tensor& ny_cc,
+    const at::Tensor& nu_rho_field,
+    const double eps_body, const double eps_solver, const double h2,
+    const int64_t delta_order,
+    at::Tensor out)
+{
+    const int B = (int)aabb_dim.size(0);
+    if (B <= 0) return;
+
+    TORCH_CHECK(out.scalar_type() == at::kDouble,
+                "streaming_sdf_forces_fused_2d_multi_cpu: out must be float64");
+    TORCH_CHECK(out.size(1) == 8,
+                "streaming_sdf_forces_fused_2d_multi_cpu: out must have 8 channels");
+
+    const int Ngy = (int)gy.numel();
+    const int Ngx = (int)gx.numel();
+
+    AT_DISPATCH_FLOATING_TYPES(F_flat.scalar_type(), "streaming_sdf_forces_fused_2d_multi_cpu", [&] {
+        auto F_c   = F_flat.contiguous();
+        auto gx_c  = gx.contiguous();
+        auto gy_c  = gy.contiguous();
+        auto up_c  = u_prev.contiguous();
+        auto vp_c  = v_prev.contiguous();
+        auto pp_c  = p_prev.contiguous();
+        auto nxc_c = nx_cc.contiguous();
+        auto nyc_c = ny_cc.contiguous();
+        auto nr_c  = nu_rho_field.contiguous();
+
+        const scalar_t* F_ptr     = F_c.data_ptr<scalar_t>();
+        const int64_t*  F_off     = F_offsets.data_ptr<int64_t>();
+        const int64_t*  shapes    = body_shapes.data_ptr<int64_t>();
+        const scalar_t* meta      = body_meta.data_ptr<scalar_t>();
+        const scalar_t* kin_ptr   = kin.data_ptr<scalar_t>();
+        const int64_t*  lo        = aabb_lo.data_ptr<int64_t>();
+        const int64_t*  dim_      = aabb_dim.data_ptr<int64_t>();
+        const scalar_t* gx_ptr    = gx_c.data_ptr<scalar_t>();
+        const scalar_t* gy_ptr    = gy_c.data_ptr<scalar_t>();
+        const scalar_t* rho_b_ptr = rho_bodies.data_ptr<scalar_t>();
+
+        scalar_t* sdf_cc_p       = sdf_cc.data_ptr<scalar_t>();
+        scalar_t* sdf_u_p        = sdf_u.data_ptr<scalar_t>();
+        scalar_t* sdf_v_p        = sdf_v.data_ptr<scalar_t>();
+        scalar_t* bU_p           = body_u.data_ptr<scalar_t>();
+        scalar_t* bV_p           = body_v.data_ptr<scalar_t>();
+        scalar_t* w_rho_p        = winning_rho_cc.data_ptr<scalar_t>();
+
+        const scalar_t* u_p      = up_c.data_ptr<scalar_t>();
+        const scalar_t* v_p      = vp_c.data_ptr<scalar_t>();
+        const scalar_t* p_p      = pp_c.data_ptr<scalar_t>();
+        const scalar_t* nx_p     = nxc_c.data_ptr<scalar_t>();
+        const scalar_t* ny_p     = nyc_c.data_ptr<scalar_t>();
+        const scalar_t* nr_p     = nr_c.data_ptr<scalar_t>();
+        const int64_t   nr_size  = nu_rho_field.numel();
+
+        const scalar_t neg_half_h = -(scalar_t)(0.5 * h_grid);
+        const scalar_t inv_h_s    = (scalar_t)(1.0 / h_grid);
+        const scalar_t eps_b      = (scalar_t)eps_body;
+        const scalar_t eps_s      = (scalar_t)eps_solver;
+        const scalar_t pi_v       = (scalar_t)3.141592653589793;
+        const scalar_t inv_2eps   = (scalar_t)0.5 / eps_b;
+        const scalar_t pi_over_eb = pi_v / eps_b;
+        const double   h2_d       = (double)h2;
+
+        const scalar_t band_lo = (eps_s - eps_b) < (-eps_b) ? (eps_s - eps_b) : (-eps_b);
+        const scalar_t band_hi = (eps_s + eps_b) > ( eps_b) ? (eps_s + eps_b) : ( eps_b);
+
+        std::vector<double> accs(static_cast<size_t>(B) * 8, 0.0);
+
+        for (int b = 0; b < B; ++b) {
+            const int Ai = (int)dim_[b*2 + 0];
+            const int Aj = (int)dim_[b*2 + 1];
+            const int vol = Ai * Aj;
+            if (vol <= 0) continue;
+
+            const int i0_b = (int)lo[b*2 + 0];
+            const int j0_b = (int)lo[b*2 + 1];
+
+            const scalar_t* F_b = F_ptr + F_off[b];
+            const int Mx = (int)shapes[b*2 + 0];
+            const int My = (int)shapes[b*2 + 1];
+
+            const scalar_t* M   = meta + b*7;
+            const scalar_t bx0  = M[0], by0 = M[1];
+            const scalar_t idx_ = M[4], idy_ = M[5];
+
+            const scalar_t* K   = kin_ptr + b*11;
+            const scalar_t r00  = K[0], r01 = K[1];
+            const scalar_t r10  = K[2], r11 = K[3];
+            const scalar_t bp_x = K[4], bp_y = K[5];
+            const scalar_t cm_x = K[6], cm_y = K[7];
+            const scalar_t lv_x = K[8], lv_y = K[9];
+            const scalar_t om   = K[10];
+
+            const scalar_t du_x = neg_half_h * r00, du_y = neg_half_h * r10;
+            const scalar_t dv_x = neg_half_h * r01, dv_y = neg_half_h * r11;
+
+            const scalar_t rho_body_b = rho_b_ptr[b];
+
+            std::vector<scalar_t> sparse_buf(vol);
+
+            at::parallel_for(0, vol, 1024, [&](int64_t _begin, int64_t _end) {
+            for (int local = (int)_begin; local < (int)_end; ++local) {
+                const int di = local / Aj;
+                const int dj = local - di * Aj;
+                const int i  = i0_b + di;
+                const int j  = j0_b + dj;
+                const std::int64_t g_idx = (std::int64_t)i * Ngy + j;
+
+                const scalar_t xc = gx_ptr[i];
+                const scalar_t yc = gy_ptr[j];
+                const scalar_t dxw = xc - bp_x, dyw = yc - bp_y;
+                const scalar_t bxq = r00 * dxw + r01 * dyw;
+                const scalar_t byq = r10 * dxw + r11 * dyw;
+
+                auto sample = [&](scalar_t xqs, scalar_t yqs) -> scalar_t {
+                    if (interp_method == 1) {
+                        return biquadratic_sample_uniform_2d<scalar_t>(
+                            F_b, Mx, My, bx0, by0, idx_, idy_, xqs, yqs);
+                    }
+                    return bilinear_sample_uniform_2d<scalar_t>(
+                        F_b, Mx, My, bx0, by0, idx_, idy_, xqs, yqs);
+                };
+
+                const scalar_t s_cc = sample(bxq, byq);
+                sparse_buf[local] = s_cc;
+                if (s_cc < sdf_cc_p[g_idx]) {
+                    sdf_cc_p[g_idx] = s_cc;
+                    w_rho_p[g_idx]  = rho_body_b;
+                }
+                {
+                    const scalar_t s = sample(bxq + du_x, byq + du_y);
+                    if (s < sdf_u_p[g_idx]) {
+                        sdf_u_p[g_idx] = s;
+                        bU_p[g_idx] = lv_x - om * (yc - cm_y);
+                    }
+                }
+                {
+                    const scalar_t s = sample(bxq + dv_x, byq + dv_y);
+                    if (s < sdf_v_p[g_idx]) {
+                        sdf_v_p[g_idx] = s;
+                        bV_p[g_idx] = lv_y + om * (xc - cm_x);
+                    }
+                }
+            }
+            });
+
+            double* lb = accs.data() + (size_t)b * 8;
+            std::mutex acc_mtx;
+
+            at::parallel_for(0, vol, 2048, [&](int64_t _begin, int64_t _end) {
+            double local8[8] = {0,0,0,0,0,0,0,0};
+            for (int local = (int)_begin; local < (int)_end; ++local) {
+                const scalar_t sdf = sparse_buf[local];
+                if (sdf <= band_lo || sdf >= band_hi) continue;
+
+                const int di = local / Aj;
+                const int dj = local - di * Aj;
+                const int i  = i0_b + di;
+                const int j  = j0_b + dj;
+                const std::int64_t g_idx = (std::int64_t)i * Ngy + j;
+
+                scalar_t delta_visc = 0;
+                const scalar_t d_visc = sdf - eps_s;
+                if (d_visc > -eps_b && d_visc < eps_b)
+                    delta_visc = ((scalar_t)1 + std::cos(pi_over_eb * d_visc)) * inv_2eps;
+                scalar_t delta_pres = 0;
+                if (sdf > -eps_b && sdf < eps_b)
+                    delta_pres = ((scalar_t)1 + std::cos(pi_over_eb * sdf)) * inv_2eps;
+                if (delta_visc == (scalar_t)0 && delta_pres == (scalar_t)0) continue;
+
+                if (delta_order == 2) {
+                    const scalar_t h_gs   = (scalar_t)h_grid;
+                    const scalar_t inv_h2 = inv_h_s;
+                    scalar_t sdf_xp = (di < Ai-1) ? sparse_buf[local + Aj] : sdf;
+                    scalar_t sdf_xm = (di > 0)    ? sparse_buf[local - Aj] : sdf;
+                    scalar_t cx     = (di > 0 && di < Ai-1) ? (scalar_t)0.5 : (scalar_t)1.0;
+                    scalar_t dsdx   = cx * (sdf_xp - sdf_xm) * inv_h2;
+                    scalar_t sdf_yp = (dj < Aj-1) ? sparse_buf[local + 1] : sdf;
+                    scalar_t sdf_ym = (dj > 0)    ? sparse_buf[local - 1] : sdf;
+                    scalar_t cy     = (dj > 0 && dj < Aj-1) ? (scalar_t)0.5 : (scalar_t)1.0;
+                    scalar_t dsdy   = cy * (sdf_yp - sdf_ym) * inv_h2;
+                    scalar_t grad_mag = std::sqrt(dsdx*dsdx + dsdy*dsdy);
+                    if (grad_mag < (scalar_t)1e-3) grad_mag = (scalar_t)1e-3;
+                    const scalar_t inv_grad = (scalar_t)1.0 / grad_mag;
+                    delta_visc *= inv_grad;
+                    delta_pres *= inv_grad;
+                    (void)h_gs;
+                }
+
+                const scalar_t nu_rho_val = (nr_size == 1) ? nr_p[0] : nr_p[g_idx];
+                const scalar_t nx = nx_p[g_idx];
+                const scalar_t ny = ny_p[g_idx];
+
+                const int im1 = (i > 0)     ? i-1 : 0;
+                const int ip1 = (i+1 < Ngx) ? i+1 : i;
+                const int jm1 = (j > 0)     ? j-1 : 0;
+                const int jp1 = (j+1 < Ngy) ? j+1 : j;
+
+                const scalar_t dudx = (u_p[ip1 * Ngy + j] - u_p[i * Ngy + j]) * inv_h_s;
+                const scalar_t dvdy = (v_p[i * Ngy + jp1] - v_p[i * Ngy + j]) * inv_h_s;
+                const scalar_t u_cc_jp1 = (scalar_t)0.5 * (u_p[i * Ngy + jp1] + u_p[ip1 * Ngy + jp1]);
+                const scalar_t u_cc_jm1 = (scalar_t)0.5 * (u_p[i * Ngy + jm1] + u_p[ip1 * Ngy + jm1]);
+                const scalar_t dudy = (u_cc_jp1 - u_cc_jm1) * (scalar_t)0.5 * inv_h_s;
+                const scalar_t v_cc_ip1 = (scalar_t)0.5 * (v_p[ip1 * Ngy + j] + v_p[ip1 * Ngy + jp1]);
+                const scalar_t v_cc_im1 = (scalar_t)0.5 * (v_p[im1 * Ngy + j] + v_p[im1 * Ngy + jp1]);
+                const scalar_t dvdx = (v_cc_ip1 - v_cc_im1) * (scalar_t)0.5 * inv_h_s;
+
+                const scalar_t xs = nu_rho_val * (2*dudx*nx + (dudy+dvdx)*ny);
+                const scalar_t ys = nu_rho_val * ((dvdx+dudy)*nx + 2*dvdy*ny);
+
+                const scalar_t p_c  = p_p[g_idx];
+                const scalar_t pxv  = -p_c * nx;
+                const scalar_t pyv  = -p_c * ny;
+
+                const scalar_t xc = gx_ptr[i];
+                const scalar_t yc = gy_ptr[j];
+                const scalar_t arm_x = xc - cm_x;
+                const scalar_t arm_y = yc - cm_y;
+
+                const double fv_x = (double)(xs  * delta_visc);
+                const double fv_y = (double)(ys  * delta_visc);
+                const double fp_x = (double)(pxv * delta_pres);
+                const double fp_y = (double)(pyv * delta_pres);
+
+                local8[0] += fv_x;
+                local8[1] += fv_y;
+                local8[2] += (double)arm_x * fv_y - (double)arm_y * fv_x;
+                local8[3] += fp_x;
+                local8[4] += fp_y;
+                local8[5] += (double)arm_x * fp_y - (double)arm_y * fp_x;
+            }
+            std::lock_guard<std::mutex> lk(acc_mtx);
+            for (int c = 0; c < 8; ++c) lb[c] += local8[c];
+            });
+        }
+
+        double* out_ptr = out.data_ptr<double>();
+        for (int b = 0; b < B; ++b)
+            for (int c = 0; c < 8; ++c)
+                out_ptr[b*8 + c] += accs[(size_t)b * 8 + c] * h2_d;
+    });
+}
+
+// =====================================================================
 //  CPU registration. Schemas live in ops.cpp.
 // =====================================================================
 
 TORCH_LIBRARY_IMPL(lilytorch_kernels, CPU, m) {
-    m.impl("streaming_sdf_min_2d",       &streaming_sdf_min_2d_cpu);
-    m.impl("streaming_sdf_min_2d_multi", &streaming_sdf_min_2d_multi_cpu);
-    m.impl("bdim_forces_2d_multi",       &bdim_forces_2d_multi_cpu);
-    m.impl("apply_bcs_2d",               &apply_bcs_2d_cpu);
-    m.impl("interpolate_2d",             &interpolate_2d_cpu);
+    m.impl("streaming_sdf_min_2d",                  &streaming_sdf_min_2d_cpu);
+    m.impl("streaming_sdf_min_2d_multi",            &streaming_sdf_min_2d_multi_cpu);
+    m.impl("bdim_forces_2d_multi",                  &bdim_forces_2d_multi_cpu);
+    m.impl("streaming_sdf_forces_fused_2d_multi",   &streaming_sdf_forces_fused_2d_multi_cpu);
+    m.impl("apply_bcs_2d",                          &apply_bcs_2d_cpu);
+    m.impl("interpolate_2d",                        &interpolate_2d_cpu);
 }
 
 }  // namespace lilytorch_kernels

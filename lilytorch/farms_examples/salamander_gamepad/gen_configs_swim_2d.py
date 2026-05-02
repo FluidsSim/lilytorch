@@ -28,7 +28,7 @@ class SimConfig(BaseSimConfig):
         self.use_kernels      = True
         self.fused_sdf_forces = True
         self.poisson_compile  = True
-        self.compile_adv_diff = True
+        # self.compile_adv_diff = True
         self.compile_forces   = True
         self.compile_sdf      = True
 
@@ -76,8 +76,8 @@ class SimConfig(BaseSimConfig):
         # self.ymax =  0.05
 
         # ── Physics ───────────────────────────────────────────────────
-        self.poisson_method    = "fft"
-        self.timestep          = 0.02
+        self.poisson_method    = "multigrid"
+        self.timestep          = 0.01
         self.convection_method = "implicit"
         self.n_iterations      = 80001
         self.save_frames       = False
@@ -162,11 +162,6 @@ class SimConfig(BaseSimConfig):
         # })
 
         return extensions
-
-    def single_run(self, index=0):
-        from lilytorch.integration.flow_viewer_2d_gpu import single_run_with_flow_viewer_2d_gpu
-
-        single_run_with_flow_viewer_2d_gpu(self, index)
 
 if __name__ == "__main__":
     SimConfig().run()

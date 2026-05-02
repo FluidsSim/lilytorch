@@ -180,6 +180,26 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " Tensor(a!) out"
         ") -> ()");
 
+    m.def(
+        "streaming_sdf_forces_fused_2d_multi("
+        "Tensor F_flat, Tensor F_offsets,"
+        " Tensor body_shapes, Tensor body_meta, Tensor kin,"
+        " Tensor aabb_lo, Tensor aabb_dim,"
+        " Tensor gx, Tensor gy, float h_grid,"
+        " int max_vol_per_body,"
+        " Tensor(a!) sdf_cc, Tensor(b!) sdf_u, Tensor(c!) sdf_v,"
+        " Tensor(d!) body_u, Tensor(e!) body_v,"
+        " int interp_method,"
+        " Tensor rho_bodies,"
+        " Tensor(f!) winning_rho_cc,"
+        " Tensor u_prev, Tensor v_prev, Tensor p_prev,"
+        " Tensor nx_cc, Tensor ny_cc,"
+        " Tensor nu_rho_field,"
+        " float eps_body, float eps_solver, float h2,"
+        " int delta_order,"
+        " Tensor(g!) out"
+        ") -> ()");
+
     // 2-D fused boundary-condition writes — analogue of apply_bcs_3d.
     //   shapes  : int64 [2,2]    -> (Nx, Ny) per component (u, v)
     //   neu_desc: int32 [N_neu, 3] -> (comp, axis, side)

@@ -147,7 +147,7 @@ static const char* k_fragment_shader =
     "  vec3 color = texture(uTexture, vUv).rgb;\n"
     "  vec3 delta = vec3(1.0) - color;\n"
     "  float strength = clamp(max(delta.r, max(delta.g, delta.b)), 0.0, 1.0);\n"
-  "  float alpha = uAlpha * (0.30 + 0.70 * strength);\n"
+    "  float alpha = uAlpha * (0.30 + 0.70 * pow(strength, 0.4));\n"
     "  FragColor = vec4(color, alpha);\n"
     "}\n";
 

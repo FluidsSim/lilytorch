@@ -25,6 +25,7 @@ from lilytorch.src.solver import FluidSolver
 from lilytorch.src.body import (rotate_grid_2d, rotate_grid_3d,
                                 _rotate_grid_3d_compiled)
 from lilytorch.src.kernels import streaming_sdf_forces_fused_3d_multi
+from lilytorch.src.kernels import streaming_sdf_forces_fused_2d_multi
 from lilytorch.src.kernels import RegularGridInterpolator3D
 from lilytorch.src.kernels import streaming_sdf_min_2d_multi
 from lilytorch.src.kernels import streaming_sdf_min_3d
@@ -2022,10 +2023,6 @@ class BDIMhandler:
         R_t        = torch.from_numpy(body_R).to(
             self.device, dtype=self.dtype, non_blocking=True,
         )
-        sparse_flat = torch.zeros(
-            int(cell_off_h_np[-1]), device=self.device, dtype=self.dtype,
-        )
-
         # Maintain `comp.com_pos[b]` views for downstream code.
         for b, body in enumerate(comp.bodies):
             comp.com_pos[b] = com_pos_t[b]
@@ -2033,40 +2030,139 @@ class BDIMhandler:
 
         cell_off_h = cell_off_h_np.tolist()
 
-        streaming_sdf_min_2d_multi(
-            sm['F_flat'],  sm['F_offsets'],
-            sm['bx_flat'], sm['bx_offsets'],
-            sm['by_flat'], sm['by_offsets'],
-            sm['body_shapes'], sm['body_meta'], kin,
-            aabb_lo, aabb_dim, cell_off,
-            gx_1d, gy_1d, h_grid, max_vol,
-            comp.sdf_val, comp.sdf_val_u, comp.sdf_val_v,
-            comp.body_u,  comp.body_v,
-            sparse_flat,
-            getattr(self.fluid_solver, '_sdf_interp_method', 0),
-        )
+        comp._fused_forces_out = None
 
-        # Split sparse_flat into per-body slabs.
-        for body_i, aabb in enumerate(aabbs_for_split):
-            i0, i1, j0, j1 = aabb
-            Ai, Aj = i1 - i0, j1 - j0
-            lo = cell_off_h[body_i]
-            hi = cell_off_h[body_i + 1]
-            slab = sparse_flat[lo:hi].view(Ai, Aj)
-            comp._sdf_sparse[body_i] = (aabb, slab)
+        fs = self.fluid_solver
+        interp_method = getattr(fs, '_sdf_interp_method', 0)
 
-        # Stash per-step packed tensors so the 2-D forces kernel can
-        # reuse kin / aabb_lo / aabb_dim / sparse_flat without rebuilding.
-        comp._stream_multi_step = {
-            'kin':             kin,
-            'aabb_lo':         aabb_lo,
-            'aabb_dim':        aabb_dim,
-            'max_vol':         max_vol,
-            'gx':              gx_1d,
-            'gy':              gy_1d,
-            'sparse_cc_flat':  sparse_flat,
-            'cell_offsets':    cell_off,
-        }
+        if fs._fused_sdf_forces_2d:
+            rho_bodies_buf = getattr(self, '_fused_rho_bodies_2d', None)
+            if rho_bodies_buf is None or rho_bodies_buf.shape[0] != B:
+                rho_bodies_buf = torch.full(
+                    (B,), fs.rho_body, device=self.device, dtype=self.dtype,
+                )
+                self._fused_rho_bodies_2d = rho_bodies_buf
+
+            winning_rho_cc = getattr(self, '_winning_rho_cc_2d', None)
+            if winning_rho_cc is None or winning_rho_cc.shape != comp.sdf_val.shape:
+                winning_rho_cc = torch.empty_like(comp.sdf_val)
+                self._winning_rho_cc_2d = winning_rho_cc
+            winning_rho_cc.fill_(fs.rho)
+
+            fused_out = getattr(self, '_fused_out_buf_2d', None)
+            if fused_out is None or fused_out.shape[0] != B:
+                fused_out = torch.zeros((B, 8), dtype=torch.float64, device=self.device)
+                self._fused_out_buf_2d = fused_out
+            else:
+                fused_out.zero_()
+
+            if getattr(fs, 'use_variable_viscosity', False):
+                nu_rho_buf = getattr(self, '_fused_nu_rho_buf_2d', None)
+                if nu_rho_buf is None or nu_rho_buf.shape != comp.sdf_val.shape:
+                    nu_rho_buf = torch.empty_like(comp.sdf_val)
+                    self._fused_nu_rho_buf_2d = nu_rho_buf
+                nu_rho_field = fs._compute_nu_rho_for_forces(fs.u0, fs.v0, out=nu_rho_buf)
+            else:
+                nu_rho_scalar_buf = getattr(self, '_fused_nu_rho_scalar_2d', None)
+                if nu_rho_scalar_buf is None:
+                    nu_rho_scalar_buf = torch.empty(
+                        (1,), device=self.device, dtype=self.dtype,
+                    )
+                    self._fused_nu_rho_scalar_2d = nu_rho_scalar_buf
+                nu_rho_scalar_buf.fill_(fs.nu * fs.rho)
+                nu_rho_field = nu_rho_scalar_buf
+
+            eps_body_val = float(comp.bodies[0].eps)
+            eps_solver_val = float(fs.eps)
+
+            nx_cc_t = getattr(fs, 'normal_x', None)
+            ny_cc_t = getattr(fs, 'normal_y', None)
+            if nx_cc_t is None or ny_cc_t is None:
+                (nx_cc_t, ny_cc_t) = comp.compute_normals(comp.sdf_val)
+
+            if not getattr(self, '_fused_contig_checked_2d', False):
+                for _t, _name in [
+                    (fs.u0, 'u0'), (fs.v0, 'v0'), (fs.p0, 'p0'),
+                    (nx_cc_t, 'normal_x'), (ny_cc_t, 'normal_y'),
+                ]:
+                    if not _t.is_contiguous():
+                        import warnings
+                        warnings.warn(
+                            f"streaming_sdf_forces_fused_2d_multi: {_name} is not "
+                            "contiguous; forcing contiguous copy.",
+                            stacklevel=2,
+                        )
+                self._fused_contig_checked_2d = True
+
+            streaming_sdf_forces_fused_2d_multi(
+                sm['F_flat'], sm['F_offsets'],
+                sm['body_shapes'], sm['body_meta'], kin,
+                aabb_lo, aabb_dim,
+                gx_1d, gy_1d, h_grid, max_vol,
+                comp.sdf_val, comp.sdf_val_u, comp.sdf_val_v,
+                comp.body_u, comp.body_v,
+                interp_method,
+                rho_bodies_buf, winning_rho_cc,
+                fs.u0.contiguous(), fs.v0.contiguous(), fs.p0.contiguous(),
+                nx_cc_t.contiguous(), ny_cc_t.contiguous(),
+                nu_rho_field,
+                eps_body_val, eps_solver_val,
+                fs.h2,
+                getattr(fs, 'force_delta_order', 1),
+                fused_out,
+            )
+
+            for b in range(B):
+                comp._sdf_sparse[b] = None
+
+            comp._fused_forces_out = fused_out
+            comp._winning_rho_cc   = winning_rho_cc
+
+            comp._stream_multi_step = {
+                'kin':      kin,
+                'aabb_lo':  aabb_lo,
+                'aabb_dim': aabb_dim,
+                'max_vol':  max_vol,
+                'gx':       gx_1d,
+                'gy':       gy_1d,
+            }
+
+        else:
+            sparse_flat = torch.zeros(
+                int(cell_off_h_np[-1]), device=self.device, dtype=self.dtype,
+            )
+
+            streaming_sdf_min_2d_multi(
+                sm['F_flat'],  sm['F_offsets'],
+                sm['bx_flat'], sm['bx_offsets'],
+                sm['by_flat'], sm['by_offsets'],
+                sm['body_shapes'], sm['body_meta'], kin,
+                aabb_lo, aabb_dim, cell_off,
+                gx_1d, gy_1d, h_grid, max_vol,
+                comp.sdf_val, comp.sdf_val_u, comp.sdf_val_v,
+                comp.body_u,  comp.body_v,
+                sparse_flat,
+                interp_method,
+            )
+
+            for body_i, aabb in enumerate(aabbs_for_split):
+                i0, i1, j0, j1 = aabb
+                Ai, Aj = i1 - i0, j1 - j0
+                lo = cell_off_h[body_i]
+                hi = cell_off_h[body_i + 1]
+                slab = sparse_flat[lo:hi].view(Ai, Aj)
+                comp._sdf_sparse[body_i] = (aabb, slab)
+
+            comp._stream_multi_step = {
+                'kin':             kin,
+                'aabb_lo':         aabb_lo,
+                'aabb_dim':        aabb_dim,
+                'max_vol':         max_vol,
+                'gx':              gx_1d,
+                'gy':              gy_1d,
+                'sparse_cc_flat':  sparse_flat,
+                'cell_offsets':    cell_off,
+            }
 
         # ── Per-body: contour update + (optional) contour mask ──
         # 2-D bodies expose 1-D contours; the legacy ``_update_2d`` keeps

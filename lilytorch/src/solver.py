@@ -530,6 +530,9 @@ class FluidSolver(PlottingMixin):
         # 2-D analogues (streaming SDF + fused forces).
         self._streaming_sdf_2d = _uk
         self._streaming_forces_2d = _uk
+        self._fused_sdf_forces_2d = _uk and bool(
+            solver.get("fused_sdf_forces", True)
+        )
         # Body-SDF sampling method used inside the streaming C++/CUDA
         # kernels (``streaming_sdf_min_3d`` / ``..._multi``):
         #   * ``"trilinear"`` (default) -- 2x2x2 stencil, matches the
@@ -631,6 +634,8 @@ class FluidSolver(PlottingMixin):
             precond_vcycles = solver.get("poisson_precond_vcycles", 1),
             smoother        = solver.get("poisson_smoother", "rbgs"),
             compile_smoother= solver.get("poisson_compile", False),
+            compile_mode    = solver.get("poisson_compile_mode", "default"),
+            compile_dynamic = solver.get("poisson_compile_dynamic", True),
         )
 
         # Warm-start: reuse previous pressure as Poisson initial guess
@@ -1578,6 +1583,8 @@ class FluidSolver(PlottingMixin):
 
         # CC-grid mu0 — used for smooth pressure masking in forces_method2
         (self.mu0_all, self.mu1_all) = comp.mu_funcs(comp.sdf_val)
+
+        (self.normal_x, self.normal_y) = comp.compute_normals(comp.sdf_val)
 
     def _recompute_mu_normals_3d(self):
         """Recompute mu0/mu1 and normals on all staggered + CC grids (3-D).

@@ -151,21 +151,30 @@ def _rbgs_2d(f, p, cp0, cm0, cp1, cm1, jcap_tol, nsmoothing,
 
 def _restrict_face_3d(ch, cv, cw):
     """Restrict face arrays from fine to coarse (3-D, WaterLily convention)."""
-    # ch: face along dim 0 — stride-2 in dim 0, SUM in dims 1,2
+    # ch: face along dim 0 — stride-2 in dim 0 first, then SUM in dims 1,2
     ch_c = ch[::2, :, :]
-    ch_c = ch_c[:, :-1:2, :] + ch_c[:, 1::2, :]
-    ch_c = ch_c[:, :, :-1:2] + ch_c[:, :, 1::2]
-    ch_c.mul_(0.5)
-    # cv: face along dim 1 — SUM in dim 0, stride-2 in dim 1, SUM in dim 2
-    cv_c = cv[:-1:2, :, :] + cv[1::2, :, :]
-    cv_c = cv_c[:, ::2, :]
-    cv_c = cv_c[:, :, :-1:2] + cv_c[:, :, 1::2]
-    cv_c.mul_(0.5)
-    # cw: face along dim 2 — SUM in dims 0,1, stride-2 in dim 2
-    cw_c = cw[:-1:2, :, :] + cw[1::2, :, :]
-    cw_c = cw_c[:, :-1:2, :] + cw_c[:, 1::2, :]
-    cw_c = cw_c[:, :, ::2]
-    cw_c.mul_(0.5)
+    e1, o1 = ch_c[:, :-1:2, :], ch_c[:, 1::2, :]
+    m1 = min(e1.shape[1], o1.shape[1])
+    ch_c = e1[:, :m1] + o1[:, :m1]
+    e2, o2 = ch_c[:, :, :-1:2], ch_c[:, :, 1::2]
+    m2 = min(e2.shape[2], o2.shape[2])
+    ch_c = (e2[:, :, :m2] + o2[:, :, :m2]) * 0.5
+    # cv: face along dim 1 — stride-2 in dim 1 first, then SUM in dims 0,2
+    cv_c = cv[:, ::2, :]
+    e0, o0 = cv_c[:-1:2, :, :], cv_c[1::2, :, :]
+    m0 = min(e0.shape[0], o0.shape[0])
+    cv_c = e0[:m0] + o0[:m0]
+    e2, o2 = cv_c[:, :, :-1:2], cv_c[:, :, 1::2]
+    m2 = min(e2.shape[2], o2.shape[2])
+    cv_c = (e2[:, :, :m2] + o2[:, :, :m2]) * 0.5
+    # cw: face along dim 2 — stride-2 in dim 2 first, then SUM in dims 0,1
+    cw_c = cw[:, :, ::2]
+    e0, o0 = cw_c[:-1:2, :, :], cw_c[1::2, :, :]
+    m0 = min(e0.shape[0], o0.shape[0])
+    cw_c = e0[:m0] + o0[:m0]
+    e1, o1 = cw_c[:, :-1:2, :], cw_c[:, 1::2, :]
+    m1 = min(e1.shape[1], o1.shape[1])
+    cw_c = (e1[:, :m1] + o1[:, :m1]) * 0.5
     return ch_c, cv_c, cw_c
 
 
@@ -294,14 +303,18 @@ def _vcycle_rbgs_3d(f, p, ch, cv, cw, jcap_tol, nsmoothing):
 
 def _restrict_face_2d(ch, cv):
     """Restrict face arrays from fine to coarse (2-D, WaterLily convention)."""
-    # ch: face along dim 0 — stride-2 in dim 0, SUM in dim 1
+    # ch: face along dim 0 — stride-2 in dim 0 first, then SUM in dim 1
     ch_c = ch[::2, :]
-    ch_c = ch_c[:, :-1:2] + ch_c[:, 1::2]
-    ch_c.mul_(0.5)
-    # cv: face along dim 1 — SUM in dim 0, stride-2 in dim 1
-    cv_c = cv[:-1:2, :] + cv[1::2, :]
-    cv_c = cv_c[:, ::2]
-    cv_c.mul_(0.5)
+    e = ch_c[:, :-1:2]
+    o = ch_c[:, 1::2]
+    m = min(e.shape[1], o.shape[1])
+    ch_c = (e[:, :m] + o[:, :m]) * 0.5
+    # cv: face along dim 1 — stride-2 in dim 1 first, then SUM in dim 0
+    cv_c = cv[:, ::2]
+    e = cv_c[:-1:2, :]
+    o = cv_c[1::2, :]
+    m = min(e.shape[0], o.shape[0])
+    cv_c = (e[:m] + o[:m]) * 0.5
     return ch_c, cv_c
 
 
@@ -447,6 +460,8 @@ class PoissonSolver:
         precond_vcycles=1,
         smoother="jacobi",
         compile_smoother=False,
+        compile_mode="default",
+        compile_dynamic=True,
     ):
         self.dtype       = dtype
         self.h2          = h * h
@@ -464,6 +479,8 @@ class PoissonSolver:
             f"smoother must be 'jacobi' or 'rbgs', got '{smoother}'"
         self.smoother = smoother
         self.compile_smoother = compile_smoother
+        self.compile_mode = compile_mode
+        self.compile_dynamic = compile_dynamic
         self._compiled_fn = {}    # lazily populated {ndim: compiled_fn}
         self._rb_mask_cache = {}  # {(shape, device): (red, black)}
 
@@ -611,7 +628,9 @@ class PoissonSolver:
                 raw = _rbgs_3d if ndim == 3 else _rbgs_2d
             else:
                 raw = _jacobi_3d if ndim == 3 else _jacobi_2d
-            self._compiled_fn[ndim] = torch.compile(raw)
+            self._compiled_fn[ndim] = torch.compile(
+                raw, mode=self.compile_mode, dynamic=self.compile_dynamic,
+            )
         return self._compiled_fn[ndim]
 
     def _smooth_compiled(self, f, p, cfaces):
@@ -730,10 +749,6 @@ class PoissonSolver:
     # ------------------------------------------------------------------
     def _vcycle(self, f, p, face_arrs):
         """Internal V-cycle operating on full face arrays."""
-        # Use compiled full V-cycle when enabled
-        if self.compile_smoother:
-            return self._run_compiled_vcycle(f, p, face_arrs)
-
         ndim  = f.ndim
         shape = f.shape
 

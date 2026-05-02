@@ -623,6 +623,296 @@ void bdim_forces_2d_multi_cuda(
 }
 
 // =====================================================================
+//  streaming_sdf_forces_fused_2d_multi  (Phase C+D fused, lagged forces)
+// =====================================================================
+
+template <typename scalar_t>
+__global__ void streaming_sdf_forces_fused_2d_multi_kernel(
+    const int b,
+    const scalar_t* __restrict__ F_flat,
+    const int64_t*  __restrict__ F_offsets,
+    const int64_t*  __restrict__ body_shapes,
+    const scalar_t* __restrict__ body_meta,
+    const scalar_t* __restrict__ kin,
+    const int64_t*  __restrict__ aabb_lo,
+    const int64_t*  __restrict__ aabb_dim,
+    const scalar_t* __restrict__ gx,
+    const scalar_t* __restrict__ gy,
+    const int Ngx,
+    const int Ngy,
+    const scalar_t half_h,
+    scalar_t* __restrict__ sdf_cc,
+    scalar_t* __restrict__ sdf_u,
+    scalar_t* __restrict__ sdf_v,
+    scalar_t* __restrict__ bU,
+    scalar_t* __restrict__ bV,
+    const int interp_method,
+    const scalar_t* __restrict__ rho_bodies,
+    scalar_t* __restrict__ winning_rho_cc,
+    const scalar_t* __restrict__ u_prev,
+    const scalar_t* __restrict__ v_prev,
+    const scalar_t* __restrict__ p_prev,
+    const scalar_t* __restrict__ nx_cc,
+    const scalar_t* __restrict__ ny_cc,
+    const scalar_t* __restrict__ nu_rho_field,
+    const int64_t   nu_rho_field_size,
+    const scalar_t inv_h,
+    const scalar_t eps_body,
+    const scalar_t eps_solver,
+    const scalar_t h2,
+    const int delta_order,
+    double* __restrict__ out)
+{
+    const int local = blockIdx.x * blockDim.x + threadIdx.x;
+
+    const int Ai = (int)aabb_dim[b*2 + 0];
+    const int Aj = (int)aabb_dim[b*2 + 1];
+    const int vol = Ai * Aj;
+
+    double acc[8];
+#pragma unroll
+    for (int c = 0; c < 8; ++c) acc[c] = 0.0;
+
+    if (local < vol) {
+        const int di = local / Aj;
+        const int dj = local - di * Aj;
+
+        const int i0 = (int)aabb_lo[b*2 + 0];
+        const int j0 = (int)aabb_lo[b*2 + 1];
+        const int i  = i0 + di;
+        const int j  = j0 + dj;
+        const int g_idx = i * Ngy + j;
+
+        const scalar_t* F  = F_flat + F_offsets[b];
+        const int Mx = (int)body_shapes[b*2 + 0];
+        const int My = (int)body_shapes[b*2 + 1];
+
+        const scalar_t* M  = body_meta + b*7;
+        const scalar_t bx0 = M[0], by0 = M[1];
+        const scalar_t idx_ = M[4], idy_ = M[5];
+
+        const scalar_t* K  = kin + b*11;
+        const scalar_t r00 = K[0], r01 = K[1];
+        const scalar_t r10 = K[2], r11 = K[3];
+        const scalar_t bp_x = K[4], bp_y = K[5];
+        const scalar_t cm_x = K[6], cm_y = K[7];
+        const scalar_t lv_x = K[8], lv_y = K[9];
+        const scalar_t om   = K[10];
+
+        const scalar_t xc = gx[i];
+        const scalar_t yc = gy[j];
+
+        const scalar_t dx_w = xc - bp_x, dy_w = yc - bp_y;
+        const scalar_t bxq = r00 * dx_w + r01 * dy_w;
+        const scalar_t byq = r10 * dx_w + r11 * dy_w;
+
+        const scalar_t neg_hh = -half_h;
+        const scalar_t du_x = neg_hh * r00, du_y = neg_hh * r10;
+        const scalar_t dv_x = neg_hh * r01, dv_y = neg_hh * r11;
+
+        const scalar_t s_cc = sdf_sample_dispatch_2d(
+            interp_method, F, Mx, My, bx0, by0, idx_, idy_, bxq, byq);
+
+        if (s_cc < sdf_cc[g_idx]) {
+            sdf_cc[g_idx] = s_cc;
+            winning_rho_cc[g_idx] = rho_bodies[b];
+        }
+
+        {
+            const scalar_t s = sdf_sample_dispatch_2d(
+                interp_method, F, Mx, My, bx0, by0, idx_, idy_,
+                bxq + du_x, byq + du_y);
+            if (s < sdf_u[g_idx]) {
+                sdf_u[g_idx] = s;
+                bU[g_idx] = lv_x - om * (yc - cm_y);
+            }
+        }
+        {
+            const scalar_t s = sdf_sample_dispatch_2d(
+                interp_method, F, Mx, My, bx0, by0, idx_, idy_,
+                bxq + dv_x, byq + dv_y);
+            if (s < sdf_v[g_idx]) {
+                sdf_v[g_idx] = s;
+                bV[g_idx] = lv_y + om * (xc - cm_x);
+            }
+        }
+
+        const scalar_t band_lo = (eps_solver - eps_body) < (-eps_body)
+            ? (eps_solver - eps_body) : (-eps_body);
+        const scalar_t band_hi = (eps_solver + eps_body) > (eps_body)
+            ? (eps_solver + eps_body) : (eps_body);
+
+        if (s_cc > band_lo && s_cc < band_hi) {
+            const scalar_t nu_rho_val = (nu_rho_field_size == 1)
+                ? nu_rho_field[0] : nu_rho_field[g_idx];
+
+            const scalar_t nx = nx_cc[g_idx];
+            const scalar_t ny = ny_cc[g_idx];
+
+            const int im1 = (i > 0)     ? i-1 : 0;
+            const int ip1 = (i+1 < Ngx) ? i+1 : i;
+            const int jm1 = (j > 0)     ? j-1 : 0;
+            const int jp1 = (j+1 < Ngy) ? j+1 : j;
+
+            const scalar_t dudx = (u_prev[ip1 * Ngy + j] - u_prev[i * Ngy + j]) * inv_h;
+            const scalar_t dvdy = (v_prev[i * Ngy + jp1] - v_prev[i * Ngy + j]) * inv_h;
+
+            const scalar_t u_cc_jp1 = (scalar_t)0.5 * (u_prev[i * Ngy + jp1] + u_prev[ip1 * Ngy + jp1]);
+            const scalar_t u_cc_jm1 = (scalar_t)0.5 * (u_prev[i * Ngy + jm1] + u_prev[ip1 * Ngy + jm1]);
+            const scalar_t dudy = (u_cc_jp1 - u_cc_jm1) * (scalar_t)0.5 * inv_h;
+
+            const scalar_t v_cc_ip1 = (scalar_t)0.5 * (v_prev[ip1 * Ngy + j] + v_prev[ip1 * Ngy + jp1]);
+            const scalar_t v_cc_im1 = (scalar_t)0.5 * (v_prev[im1 * Ngy + j] + v_prev[im1 * Ngy + jp1]);
+            const scalar_t dvdx = (v_cc_ip1 - v_cc_im1) * (scalar_t)0.5 * inv_h;
+
+            const scalar_t xs = nu_rho_val * (2*dudx*nx + (dudy+dvdx)*ny);
+            const scalar_t ys = nu_rho_val * ((dvdx+dudy)*nx + 2*dvdy*ny);
+
+            const scalar_t p_c = p_prev[g_idx];
+            const scalar_t pxv = -p_c * nx;
+            const scalar_t pyv = -p_c * ny;
+
+            const scalar_t pi_v     = (scalar_t)3.141592653589793;
+            const scalar_t inv_2eps = (scalar_t)0.5 / eps_body;
+            const scalar_t pi_ov_eb = pi_v / eps_body;
+
+            scalar_t delta_visc = 0, delta_pres = 0;
+            const scalar_t d_visc = s_cc - eps_solver;
+            if (d_visc > -eps_body && d_visc < eps_body)
+                delta_visc = ((scalar_t)1 + cos(pi_ov_eb * d_visc)) * inv_2eps;
+            if (s_cc > -eps_body && s_cc < eps_body)
+                delta_pres = ((scalar_t)1 + cos(pi_ov_eb * s_cc)) * inv_2eps;
+
+            if (delta_order == 2 && (delta_visc > 0 || delta_pres > 0)) {
+                const scalar_t h_grid = (scalar_t)1.0 / inv_h;
+                const scalar_t s_xp = sdf_sample_dispatch_2d(
+                    interp_method, F, Mx, My, bx0, by0, idx_, idy_,
+                    bxq + r00*h_grid, byq + r10*h_grid);
+                const scalar_t s_xm = sdf_sample_dispatch_2d(
+                    interp_method, F, Mx, My, bx0, by0, idx_, idy_,
+                    bxq - r00*h_grid, byq - r10*h_grid);
+                const scalar_t s_yp = sdf_sample_dispatch_2d(
+                    interp_method, F, Mx, My, bx0, by0, idx_, idy_,
+                    bxq + r01*h_grid, byq + r11*h_grid);
+                const scalar_t s_ym = sdf_sample_dispatch_2d(
+                    interp_method, F, Mx, My, bx0, by0, idx_, idy_,
+                    bxq - r01*h_grid, byq - r11*h_grid);
+                const scalar_t dsdx = (s_xp - s_xm) * (scalar_t)0.5 * inv_h;
+                const scalar_t dsdy = (s_yp - s_ym) * (scalar_t)0.5 * inv_h;
+                scalar_t grad_mag = sqrt(dsdx*dsdx + dsdy*dsdy);
+                const scalar_t min_grad = (scalar_t)1e-3;
+                if (grad_mag < min_grad) grad_mag = min_grad;
+                const scalar_t inv_grad = (scalar_t)1.0 / grad_mag;
+                delta_visc *= inv_grad;
+                delta_pres *= inv_grad;
+            }
+
+            const scalar_t arm_x = xc - cm_x;
+            const scalar_t arm_y = yc - cm_y;
+
+            const double fv_x = (double)(xs  * delta_visc);
+            const double fv_y = (double)(ys  * delta_visc);
+            const double fp_x = (double)(pxv * delta_pres);
+            const double fp_y = (double)(pyv * delta_pres);
+
+            acc[0] = fv_x;
+            acc[1] = fv_y;
+            acc[2] = (double)arm_x * fv_y - (double)arm_y * fv_x;
+            acc[3] = fp_x;
+            acc[4] = fp_y;
+            acc[5] = (double)arm_x * fp_y - (double)arm_y * fp_x;
+        }
+    }
+
+    extern __shared__ double sdata[];
+    const int tid  = threadIdx.x;
+    const int bdim = blockDim.x;
+    const double h2_d = (double)h2;
+
+#pragma unroll
+    for (int c = 0; c < 8; ++c) {
+        sdata[tid] = acc[c];
+        __syncthreads();
+        for (int s = bdim >> 1; s > 0; s >>= 1) {
+            if (tid < s) sdata[tid] = sdata[tid] + sdata[tid + s];
+            __syncthreads();
+        }
+        if (tid == 0) atomicAdd(&out[b*8 + c], sdata[0] * h2_d);
+        __syncthreads();
+    }
+}
+
+void streaming_sdf_forces_fused_2d_multi_cuda(
+    const at::Tensor& F_flat, const at::Tensor& F_offsets,
+    const at::Tensor& body_shapes, const at::Tensor& body_meta, const at::Tensor& kin,
+    const at::Tensor& aabb_lo, const at::Tensor& aabb_dim,
+    const at::Tensor& gx, const at::Tensor& gy,
+    const double h_grid, const int64_t max_vol_per_body,
+    at::Tensor sdf_cc, at::Tensor sdf_u, at::Tensor sdf_v,
+    at::Tensor body_u, at::Tensor body_v,
+    const int64_t interp_method,
+    const at::Tensor& rho_bodies, at::Tensor winning_rho_cc,
+    const at::Tensor& u_prev, const at::Tensor& v_prev, const at::Tensor& p_prev,
+    const at::Tensor& nx_cc, const at::Tensor& ny_cc,
+    const at::Tensor& nu_rho_field,
+    const double eps_body, const double eps_solver, const double h2,
+    const int64_t delta_order,
+    at::Tensor out)
+{
+    const int B = (int)aabb_dim.size(0);
+    if (B <= 0 || max_vol_per_body <= 0) return;
+
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    const int Ngx = (int)gx.numel();
+    const int Ngy = (int)gy.numel();
+    const int blockSize = 256;
+    const size_t shmem = (size_t)blockSize * sizeof(double);
+
+    AT_DISPATCH_FLOATING_TYPES_AND_HALF(F_flat.scalar_type(),
+        "streaming_sdf_forces_fused_2d_multi_cuda", [&] {
+        const scalar_t* rho_bodies_ptr = rho_bodies.data_ptr<scalar_t>();
+        for (int b = 0; b < B; ++b) {
+            const int nblocks = (int)((max_vol_per_body + blockSize - 1) / blockSize);
+            streaming_sdf_forces_fused_2d_multi_kernel<scalar_t>
+                <<<dim3(nblocks,1,1), dim3(blockSize,1,1), shmem, stream>>>(
+                    b,
+                    F_flat.data_ptr<scalar_t>(),
+                    F_offsets.data_ptr<int64_t>(),
+                    body_shapes.data_ptr<int64_t>(),
+                    body_meta.data_ptr<scalar_t>(),
+                    kin.data_ptr<scalar_t>(),
+                    aabb_lo.data_ptr<int64_t>(),
+                    aabb_dim.data_ptr<int64_t>(),
+                    gx.data_ptr<scalar_t>(),
+                    gy.data_ptr<scalar_t>(),
+                    Ngx, Ngy,
+                    (scalar_t)(0.5 * h_grid),
+                    sdf_cc.data_ptr<scalar_t>(),
+                    sdf_u.data_ptr<scalar_t>(),
+                    sdf_v.data_ptr<scalar_t>(),
+                    body_u.data_ptr<scalar_t>(),
+                    body_v.data_ptr<scalar_t>(),
+                    (int)interp_method,
+                    rho_bodies_ptr,
+                    winning_rho_cc.data_ptr<scalar_t>(),
+                    u_prev.data_ptr<scalar_t>(),
+                    v_prev.data_ptr<scalar_t>(),
+                    p_prev.data_ptr<scalar_t>(),
+                    nx_cc.data_ptr<scalar_t>(),
+                    ny_cc.data_ptr<scalar_t>(),
+                    nu_rho_field.data_ptr<scalar_t>(),
+                    (int64_t)nu_rho_field.numel(),
+                    (scalar_t)(1.0 / h_grid),
+                    (scalar_t)eps_body,
+                    (scalar_t)eps_solver,
+                    (scalar_t)h2,
+                    (int)delta_order,
+                    out.data_ptr<double>());
+        }
+    });
+}
+
+// =====================================================================
 //  apply_bcs_2d (CUDA)
 //
 //  2-D analogue of ``apply_bcs_3d``: writes one ghost line per op
@@ -816,11 +1106,12 @@ void interpolate_2d_cuda(
 }
 
 TORCH_LIBRARY_IMPL(lilytorch_kernels, CUDA, m) {
-    m.impl("streaming_sdf_min_2d",       &streaming_sdf_min_2d_cuda);
-    m.impl("streaming_sdf_min_2d_multi", &streaming_sdf_min_2d_multi_cuda);
-    m.impl("bdim_forces_2d_multi",       &bdim_forces_2d_multi_cuda);
-    m.impl("apply_bcs_2d",               &apply_bcs_2d_cuda);
-    m.impl("interpolate_2d",             &interpolate_2d_cuda);
+    m.impl("streaming_sdf_min_2d",                  &streaming_sdf_min_2d_cuda);
+    m.impl("streaming_sdf_min_2d_multi",            &streaming_sdf_min_2d_multi_cuda);
+    m.impl("bdim_forces_2d_multi",                  &bdim_forces_2d_multi_cuda);
+    m.impl("streaming_sdf_forces_fused_2d_multi",   &streaming_sdf_forces_fused_2d_multi_cuda);
+    m.impl("apply_bcs_2d",                          &apply_bcs_2d_cuda);
+    m.impl("interpolate_2d",                        &interpolate_2d_cuda);
 }
 
 }  // namespace lilytorch_kernels

@@ -140,10 +140,5 @@ class SimConfig(BaseSimConfig):
 
         return extensions
 
-    def single_run(self, index=0):
-        from lilytorch.integration.flow_viewer_2d_gpu import single_run_with_flow_viewer_2d_gpu
-
-        single_run_with_flow_viewer_2d_gpu(self, index)
-
 if __name__ == "__main__":
     SimConfig().run()

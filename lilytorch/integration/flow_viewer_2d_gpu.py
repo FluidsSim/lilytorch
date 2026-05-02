@@ -50,7 +50,6 @@ import ctypes
 import ctypes.util
 import math
 import os
-import subprocess
 
 import mujoco
 import numpy as np
@@ -66,7 +65,6 @@ from farms_core.experiment.options import ExperimentOptions
 from farms_core.simulation.extensions import TaskExtension
 from farms_mujoco.simulation.task import ExperimentTask
 from dm_control.mjcf.physics import Physics
-from lilytorch.util.paths import gen_new_folder
 
 
 CUDA_GRAPHICS_REGISTER_FLAGS_WRITE_DISCARD = 2
@@ -361,7 +359,7 @@ class _CudaGlQuadOverlay:
         vec3 color = texture(uTexture, vUv).rgb;
         vec3 delta = vec3(1.0) - color;
         float strength = clamp(max(delta.r, max(delta.g, delta.b)), 0.0, 1.0);
-        float alpha = uAlpha * (0.30 + 0.70 * strength);
+        float alpha = uAlpha * (0.30 + 0.70 * pow(strength, 0.4));
         FragColor = vec4(color, alpha);
     }
     """
@@ -744,17 +742,11 @@ def _rdbu_rgb_texture(field: torch.Tensor, scale: float, height: int, width: int
         )[0, 0]
 
     t = torch.clamp(image_field / scale, -1.0, 1.0)  # (H, W), [-1, 1]
-    abs_t = t.abs()
-    strength = abs_t.pow(0.4)  # fade factor, 0 at zero, 1 at ±1
-
-    # Fused RdBu colormap — 3 ops instead of 6 torch.where passes:
-    #   R = 1 + strength * clamp(t, max=0)   → 1 for t≥0, 1−|t|*s for t<0
-    #   G = 1 − strength * |t|               → white→desaturated for both signs
-    #   B = 1 − strength * clamp(t, min=0)   → 1 for t≤0, 1−|t|*s for t>0
+    # Match the legacy CPU viewer's linear RdBu-style RGB mapping.
     rgb = torch.stack([
-        (1.0 + strength * t.clamp(max=0.0)).clamp_(0.0, 1.0),
-        (1.0 - strength * abs_t).clamp_(0.0, 1.0),
-        (1.0 - strength * t.clamp(min=0.0)).clamp_(0.0, 1.0),
+        (1.0 + t.clamp(max=0.0)).clamp_(0.0, 1.0),
+        (1.0 - t.abs()).clamp_(0.0, 1.0),
+        (1.0 - t.clamp(min=0.0)).clamp_(0.0, 1.0),
     ], dim=-1)  # (H, W, 3) float32
 
     return (rgb * 255.0).round_().to(torch.uint8).contiguous()
@@ -863,6 +855,9 @@ class FlowViewer2DGPU(TaskExtension):
         self._initialized = True
 
     def before_step(self, task: ExperimentTask, action, physics: Physics):
+        del action
+        del physics
+
         renderer = self._get_camera_renderer(task)
         gl_hook = self._gl_hook
         if renderer is None and gl_hook is None:
@@ -873,9 +868,6 @@ class FlowViewer2DGPU(TaskExtension):
                 )
                 self._logged_missing_renderer_notice = True
             return
-
-        del action
-        del physics
 
         if self._fluid_ext is None or self._field_fn is None:
             self._iteration += 1
@@ -1196,26 +1188,3 @@ def prepare_flow_viewer_2d_gpu_env(
     from lilytorch.integration.flow_viewer_gl_hook import prepare_mujoco_gl_hook_env
 
     return prepare_mujoco_gl_hook_env(env)
-
-
-def single_run_with_flow_viewer_2d_gpu(sim_config, index: int = 0) -> None:
-    """Run a BaseSimConfig-style launch with the passive-viewer GL hook preloaded."""
-    output_folder = gen_new_folder(sim_config.stack_folder)
-    os.makedirs(output_folder, exist_ok=True)
-    print("Saving configs to folder:", output_folder)
-
-    sim_config.gen_animat_config(output_folder, index)
-    sim_config.gen_arena_config(output_folder, index)
-    sim_config.gen_simulation_config(output_folder, index)
-    sim_config.gen_experiment_config(output_folder, index)
-    sim_config.gen_sh_config(output_folder, index)
-    os.chdir(output_folder)
-
-    subprocess.run(
-        ["bash", "run.sh"],
-        check=True,
-        env=prepare_flow_viewer_2d_gpu_env(
-            os.environ.copy(),
-            [{"loader": "lilytorch.integration.flow_viewer_2d_gpu.FlowViewer2D"}],
-        ),
-    )

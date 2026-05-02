@@ -547,6 +547,26 @@ def forces_method1(self, u, v, p, iteration):
 
 def forces_method2(self, u, v, p, iteration):
 
+    _fused_out = getattr(self.composite_body, '_fused_forces_out', None)
+    if _fused_out is not None:
+        comp = self.composite_body
+        B = len(comp.bodies)
+        out_s = _fused_out if _fused_out.dtype == u.dtype else _fused_out.to(u.dtype)
+        self.viscous_drag_record[:B, 0, iteration]  = out_s[:, 0]
+        self.viscous_drag_record[:B, 1, iteration]  = out_s[:, 1]
+        self.pressure_drag_record[:B, 0, iteration] = out_s[:, 3]
+        self.pressure_drag_record[:B, 1, iteration] = out_s[:, 4]
+        self.friction_force_lin_x = self.viscous_drag_record[:B, 0, iteration]
+        self.friction_force_lin_y = self.viscous_drag_record[:B, 1, iteration]
+        self.friction_force_ang_z = out_s[:, 2].clone()
+        self.pressure_force_x     = self.pressure_drag_record[:B, 0, iteration]
+        self.pressure_force_y     = self.pressure_drag_record[:B, 1, iteration]
+        self.pressure_force_ang_z = out_s[:, 5].clone()
+        self.xstress_tensor = None
+        self.ystress_tensor = None
+        comp._fused_forces_out = None
+        return
+
     # ---- CC normals (computed on-the-fly, not cached on self) ------
     normal_x, normal_y = self.composite_body.compute_normals(
         self.composite_body.sdf_val

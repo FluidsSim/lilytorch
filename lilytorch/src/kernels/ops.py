@@ -19,6 +19,7 @@ __all__ = [
     "streaming_sdf_min_2d",
     "streaming_sdf_min_2d_multi",
     "bdim_forces_2d_multi",
+    "streaming_sdf_forces_fused_2d_multi",
     "apply_bcs_2d",
     "interp_2d",
     "interp_3d",
@@ -369,6 +370,36 @@ def bdim_forces_2d_multi(
         int(max_vol_per_body),
         int(delta_order),
         out,
+    )
+
+
+def streaming_sdf_forces_fused_2d_multi(
+        F_flat: Tensor, F_offsets: Tensor,
+        body_shapes: Tensor, body_meta: Tensor, kin: Tensor,
+        aabb_lo: Tensor, aabb_dim: Tensor,
+        gx: Tensor, gy: Tensor,
+        h_grid: float, max_vol_per_body: int,
+        sdf_cc: Tensor, sdf_u: Tensor, sdf_v: Tensor,
+        body_u: Tensor, body_v: Tensor,
+        interp_method: int,
+        rho_bodies: Tensor, winning_rho_cc: Tensor,
+        u_prev: Tensor, v_prev: Tensor, p_prev: Tensor,
+        nx_cc: Tensor, ny_cc: Tensor,
+        nu_rho_field: Tensor,
+        eps_body: float, eps_solver: float, h2: float,
+        delta_order: int,
+        out: Tensor) -> None:
+    """Fused 2D Phase C+D: SDF update + inline lagged force integration.
+    2D analogue of streaming_sdf_forces_fused_3d_multi.
+    out (B, 8) float64: [fv_x, fv_y, t_v, fp_x, fp_y, t_p, 0, 0]
+    """
+    return torch.ops.lilytorch_kernels.streaming_sdf_forces_fused_2d_multi.default(
+        F_flat, F_offsets, body_shapes, body_meta, kin, aabb_lo, aabb_dim,
+        gx, gy, float(h_grid), int(max_vol_per_body),
+        sdf_cc, sdf_u, sdf_v, body_u, body_v, int(interp_method),
+        rho_bodies, winning_rho_cc,
+        u_prev, v_prev, p_prev, nx_cc, ny_cc, nu_rho_field,
+        float(eps_body), float(eps_solver), float(h2), int(delta_order), out,
     )
 
 

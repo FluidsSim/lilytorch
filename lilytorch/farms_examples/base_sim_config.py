@@ -197,6 +197,10 @@ class BaseSimConfig:
         # ── Global MuJoCo contact tweaks (also forwarded into BDIM YAML) ───
         self.bdim_physics = None
 
+        # Populated by gen_simulation_config so single_run can prepare any
+        # launch-time environment needed by configured extensions.
+        self._generated_simulation_extensions = []
+
         # ── Lock the configuration ────────────────────────────────────────
         self._config_frozen = True
 
@@ -592,6 +596,7 @@ class BaseSimConfig:
         simulation_dict["extensions"] += self.extra_simulation_extensions(
             output_folder
         )
+        self._generated_simulation_extensions = list(simulation_dict["extensions"])
 
         pyobject2yaml(
             os.path.join(output_folder, 'simulation_config.yaml'),
@@ -621,7 +626,16 @@ class BaseSimConfig:
         self.gen_experiment_config(output_folder, index)
         self.gen_sh_config(output_folder, index)
         os.chdir(output_folder)
-        subprocess.run(['bash', 'run.sh'], check=True)
+        from lilytorch.integration.flow_viewer_2d_gpu import prepare_flow_viewer_2d_gpu_env
+
+        subprocess.run(
+            ['bash', 'run.sh'],
+            check=True,
+            env=prepare_flow_viewer_2d_gpu_env(
+                os.environ.copy(),
+                self._generated_simulation_extensions,
+            ),
+        )
 
     def run(self):
         """Run all configurations. Override for multi-run sweeps."""

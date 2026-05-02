@@ -39,6 +39,8 @@ can be released after the loop of that body is computed. This should, in my logi
 
 
 # HIGH PRIORITY:
+- Fix flow 2d gpu viewer (remove calls in base_sim_config), simulations sometimes stops midway, advection compilation generates flickering, multigrid method does not work with adv_compile  = False.
+- Sometimes the simulation of salamander gamepad breaks midway and does not terminate.
 - Do a systematic memory cost analysis. I think that the latest method with cuda kernels dynamically rewrites the body velocities and writed the forces computation inside the kernel whenever body properties are needed. This reduces the memory footprint by not storing the sdfs/body velocities of each rigid body (just a unique composite union body properties are stored).
 - Combine solver.py and BDIMhandler in a single simulation file (just solver.py). BDIMhandler should only keep whatever is necessary for handling the coupling with FARMS, if possible. Review options and propose what to do. This should have a careful modifications in all the examples scipts in farms_examples/.
 - Polish the repository, review and correct outdated documentation, also in the docs/ folder.
