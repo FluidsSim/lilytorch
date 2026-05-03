@@ -164,6 +164,33 @@ class BDIMhandler:
         self.contour_mask = self.pars.get("body", {}).get("contour_mask", False)
         self.force_method = self.pars["solver"].get("force_method", "method2")
 
+        # ``force_method == "method1"`` is a 2-D-only contour-integral
+        # variant that lives entirely in pure-Python (``forces_method1``
+        # in ``forces.py``).  It does not consume the per-body cc-SDF
+        # produced by the streaming/fused C++/CUDA kernels (it samples
+        # CC stress / pressure-force tensors at the body contour via
+        # ``interp_utility``), so combining it with ``use_kernels=True``
+        # would silently bypass the kernel-mode optimisations on the
+        # forces stage.  Raise here so users get a clear error instead
+        # of a confusing performance regression.  Method 1 has no 3-D
+        # analogue (only ``forces_method2_3d`` exists), and the 3-D
+        # dispatch in :meth:`step` already short-circuits to method 2
+        # regardless of ``self.force_method`` — no extra check needed
+        # for 3-D.
+        if (self.ndim == 2
+                and self.force_method == "method1"
+                and bool(self.pars["solver"].get("use_kernels", True))):
+            raise ValueError(
+                "force_method='method1' is incompatible with "
+                "use_kernels=True: forces_method1 is a contour-integral "
+                "implementation that does not consume the per-body "
+                "cc-SDF produced by the streaming/fused kernels. "
+                "Either set solver.use_kernels=False (pure-Python "
+                "path) or switch to force_method='method2' (default), "
+                "which integrates the smoothed delta with full "
+                "kernel-mode acceleration."
+            )
+
         # ---- FARMS-style buoyancy parameters ----
         # With all-Neumann BCs the BDIM pressure field is purely dynamic;
         # no hydrostatic gradient builds up, so buoyancy must be added
