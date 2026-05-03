@@ -477,6 +477,20 @@ __global__ void streaming_sdf_min_3d_multi_kernel(
     scalar_t* __restrict__ sparse_cc_flat,
     const int interp_method)
 {
+    // NOTE: bodies are dispatched **sequentially** from the host (one
+    // launch per body, all on the same CUDA stream).  An earlier
+    // refactor tried to fan bodies across ``gridDim.y`` for a single
+    // launch, but that introduced a multi-field compare-swap data
+    // race on cells covered by overlapping per-body AABBs:
+    //   ``if (s < sdf_cc[g_idx]) { sdf_cc[g_idx] = s; bU[g_idx] = ...; }``
+    // is not atomic, and even an IEEE-aware atomic-min on ``sdf_cc``
+    // alone wouldn't keep the linked velocity / density writes in
+    // sync.  A fully concurrent variant needs either a per-cell lock
+    // or a ``(s, body_id)`` 64-bit ``atomicMin`` followed by a
+    // separate scatter pass — see PR description for the follow-up
+    // plan.  Until then, host-loop serialisation is the only safe
+    // choice for this kernel because it shares the SDF arrays
+    // across bodies.
     const int local = blockIdx.x * blockDim.x + threadIdx.x;
 
     const int Ai = (int)aabb_dim[b*3 + 0];
@@ -606,12 +620,11 @@ void streaming_sdf_min_3d_multi_cuda(
                         : (max_vol_per_body <= 4096) ? 128 : 256;
 
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(F_flat.scalar_type(), "streaming_sdf_min_3d_multi_cuda", [&] {
-        const auto* aabb_dim_ptr_h = aabb_dim.data_ptr<int64_t>();  // device ptr; can't read host-side
+        // Sequential per-body launches (see kernel comment for the data-race
+        // rationale).  Launches share the same stream and worst-case grid
+        // sizing — threads beyond ``vol_b`` early-out inside the kernel.
+        const int blocksPerBody = (int)((max_vol_per_body + blockSize - 1) / blockSize);
         for (int b = 0; b < B; ++b) {
-            // Compute per-body grid size on host; we need vol_b for that.
-            // aabb_dim lives on device, so cache an int CPU view at the call site.
-            // For simplicity, re-launch with worst-case grid; threads beyond vol early-out.
-            const int blocksPerBody = (int)((max_vol_per_body + blockSize - 1) / blockSize);
             streaming_sdf_min_3d_multi_kernel<scalar_t>
                 <<<dim3(blocksPerBody, 1, 1), dim3(blockSize, 1, 1), 0, stream>>>(
                     b,
@@ -639,7 +652,6 @@ void streaming_sdf_min_3d_multi_cuda(
                     sparse_cc_flat.data_ptr<scalar_t>(),
                     (int)interp_method);
         }
-        (void)aabb_dim_ptr_h;
     });
 }
 
@@ -663,7 +675,6 @@ void streaming_sdf_min_3d_multi_cuda(
 
 template <typename scalar_t>
 __global__ void bdim_forces_3d_multi_kernel(
-    const int b,
     const scalar_t* __restrict__ sparse_cc_flat,
     const int64_t*  __restrict__ cell_offsets,
     const scalar_t* __restrict__ kin,
@@ -686,6 +697,8 @@ __global__ void bdim_forces_3d_multi_kernel(
     const int delta_order,
     double* __restrict__ out)  // (B, 12)
 {
+    // gridDim.y == B; one body per ``blockIdx.y`` row of the grid.
+    const int b     = blockIdx.y;
     const int local = blockIdx.x * blockDim.x + threadIdx.x;
 
     const int Ai = (int)aabb_dim[b*3 + 0];
@@ -860,25 +873,26 @@ void bdim_forces_3d_multi_cuda(
     const size_t shmem  = (size_t)blockSize * sizeof(double);
 
     AT_DISPATCH_FLOATING_TYPES(sparse_cc_flat.scalar_type(), "bdim_forces_3d_multi_cuda", [&] {
-        for (int b = 0; b < B; ++b) {
-            const int blocksPerBody = (int)((max_vol_per_body + blockSize - 1) / blockSize);
-            bdim_forces_3d_multi_kernel<scalar_t>
-                <<<dim3(blocksPerBody, 1, 1), dim3(blockSize, 1, 1), shmem, stream>>>(
-                    b,
-                    sparse_cc_flat.data_ptr<scalar_t>(),
-                    cell_offsets.data_ptr<int64_t>(),
-                    kin.data_ptr<scalar_t>(),
-                    aabb_lo.data_ptr<int64_t>(),
-                    aabb_dim.data_ptr<int64_t>(),
-                    gx.data_ptr<scalar_t>(), gy.data_ptr<scalar_t>(), gz.data_ptr<scalar_t>(),
-                    (int)u_i0, (int)u_j0, (int)u_k0,
-                    (int)Sj, (int)Sk,
-                    xs.data_ptr<scalar_t>(), ys.data_ptr<scalar_t>(), zs.data_ptr<scalar_t>(),
-                    px.data_ptr<scalar_t>(), py.data_ptr<scalar_t>(), pz.data_ptr<scalar_t>(),
-                    (scalar_t)eps_body, (scalar_t)eps_solver, (scalar_t)h3,
-                    (int)delta_order,
-                    out.data_ptr<double>());
-        }
+        const int blocksPerBody = (int)((max_vol_per_body + blockSize - 1) / blockSize);
+        // Single launch with gridDim.y == B (see streaming_sdf_min_3d_multi
+        // above for rationale).  Atomic-adds into ``out[b*12 + c]`` use
+        // ``b = blockIdx.y``, so blocks with different blockIdx.y target
+        // disjoint output rows — no cross-body races.
+        bdim_forces_3d_multi_kernel<scalar_t>
+            <<<dim3(blocksPerBody, B, 1), dim3(blockSize, 1, 1), shmem, stream>>>(
+                sparse_cc_flat.data_ptr<scalar_t>(),
+                cell_offsets.data_ptr<int64_t>(),
+                kin.data_ptr<scalar_t>(),
+                aabb_lo.data_ptr<int64_t>(),
+                aabb_dim.data_ptr<int64_t>(),
+                gx.data_ptr<scalar_t>(), gy.data_ptr<scalar_t>(), gz.data_ptr<scalar_t>(),
+                (int)u_i0, (int)u_j0, (int)u_k0,
+                (int)Sj, (int)Sk,
+                xs.data_ptr<scalar_t>(), ys.data_ptr<scalar_t>(), zs.data_ptr<scalar_t>(),
+                px.data_ptr<scalar_t>(), py.data_ptr<scalar_t>(), pz.data_ptr<scalar_t>(),
+                (scalar_t)eps_body, (scalar_t)eps_solver, (scalar_t)h3,
+                (int)delta_order,
+                out.data_ptr<double>());
     });
 }
 
@@ -964,6 +978,17 @@ __global__ void streaming_sdf_forces_fused_3d_multi_kernel(
     // Force output (B,12) float64, pre-zeroed
     double* __restrict__ out)
 {
+    // NOTE: bodies dispatched **sequentially** from the host — the
+    // kernel writes to ``sdf_cc`` / ``sdf_u/v/w`` / ``bU/bV/bW`` /
+    // ``winning_rho_cc`` (all global-grid arrays).  See the comment
+    // on ``streaming_sdf_min_3d_multi_kernel`` for why a parallel-B
+    // dispatch is unsafe here without per-cell locks or a packed
+    // ``(s, body_id)`` 64-bit ``atomicMin``.
+    //
+    // The 12-channel force accumulator ``out[b*12 + c]`` is the only
+    // **per-body-disjoint** output, so the force-only kernel
+    // (``bdim_forces_3d_multi``) is parallelised over B; the fused
+    // kernel can't be without first solving the SDF race.
     const int local = blockIdx.x * blockDim.x + threadIdx.x;
 
     const int Ai = (int)aabb_dim[b*3 + 0];
@@ -1312,10 +1337,14 @@ void streaming_sdf_forces_fused_3d_multi_cuda(
     AT_DISPATCH_FLOATING_TYPES(F_flat.scalar_type(),
         "streaming_sdf_forces_fused_3d_multi_cuda", [&] {
         const scalar_t* rho_bodies_ptr = rho_bodies.data_ptr<scalar_t>();
+        const int nblocks = (int)((max_vol_per_body + blockSize - 1) / blockSize);
+        // Sequential per-body launches; the kernel writes shared SDF
+        // / body-velocity arrays whose multi-field compare-swap can't
+        // be safely parallelised across bodies without per-cell locks
+        // (see kernel comment).
         for (int b = 0; b < B; ++b) {
-            const int nblocks = (int)((max_vol_per_body + blockSize - 1) / blockSize);
             streaming_sdf_forces_fused_3d_multi_kernel<scalar_t>
-                <<<dim3(nblocks,1,1), dim3(blockSize,1,1), shmem, stream>>>(
+                <<<dim3(nblocks, 1, 1), dim3(blockSize,1,1), shmem, stream>>>(
                     b,
                     F_flat.data_ptr<scalar_t>(),
                     F_offsets.data_ptr<int64_t>(),

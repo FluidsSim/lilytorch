@@ -299,6 +299,10 @@ __global__ void streaming_sdf_min_2d_multi_kernel(
     scalar_t* __restrict__ sparse_cc_flat,
     const int interp_method)
 {
+    // NOTE: bodies dispatched **sequentially** from the host — see the
+    // 3-D analog ``streaming_sdf_min_3d_multi_kernel`` for the
+    // multi-field compare-swap data-race rationale that prevents
+    // safe ``gridDim.y``-fanned dispatch here.
     const int local = blockIdx.x * blockDim.x + threadIdx.x;
 
     const int Ai = (int)aabb_dim[b*2 + 0];
@@ -400,8 +404,9 @@ void streaming_sdf_min_2d_multi_cuda(
                         : (max_vol_per_body <= 4096) ? 128 : 256;
 
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(F_flat.scalar_type(), "streaming_sdf_min_2d_multi_cuda", [&] {
+        const int blocksPerBody = (int)((max_vol_per_body + blockSize - 1) / blockSize);
+        // Sequential per-body launches (race-prone otherwise; see kernel comment).
         for (int b = 0; b < B; ++b) {
-            const int blocksPerBody = (int)((max_vol_per_body + blockSize - 1) / blockSize);
             streaming_sdf_min_2d_multi_kernel<scalar_t>
                 <<<dim3(blocksPerBody, 1, 1), dim3(blockSize, 1, 1), 0, stream>>>(
                     b,
@@ -439,7 +444,6 @@ void streaming_sdf_min_2d_multi_cuda(
 
 template <typename scalar_t>
 __global__ void bdim_forces_2d_multi_kernel(
-    const int b,
     const scalar_t* __restrict__ sparse_cc_flat,
     const int64_t*  __restrict__ cell_offsets,
     const scalar_t* __restrict__ kin,
@@ -459,6 +463,11 @@ __global__ void bdim_forces_2d_multi_kernel(
     const int delta_order,
     double* __restrict__ out)  // (B, 8)
 {
+    // Body index dispatched via gridDim.y; single launch covers all B
+    // bodies (see 3-D analog kernel for rationale).  Atomic-adds into
+    // ``out[b*8 + c]`` use ``b = blockIdx.y``, so different bodies
+    // target disjoint output rows — no cross-body races.
+    const int b     = blockIdx.y;
     const int local = blockIdx.x * blockDim.x + threadIdx.x;
 
     const int Ai = (int)aabb_dim[b*2 + 0];
@@ -600,25 +609,22 @@ void bdim_forces_2d_multi_cuda(
     const size_t shmem  = (size_t)blockSize * sizeof(double);
 
     AT_DISPATCH_FLOATING_TYPES(sparse_cc_flat.scalar_type(), "bdim_forces_2d_multi_cuda", [&] {
-        for (int b = 0; b < B; ++b) {
-            const int blocksPerBody = (int)((max_vol_per_body + blockSize - 1) / blockSize);
-            bdim_forces_2d_multi_kernel<scalar_t>
-                <<<dim3(blocksPerBody, 1, 1), dim3(blockSize, 1, 1), shmem, stream>>>(
-                    b,
-                    sparse_cc_flat.data_ptr<scalar_t>(),
-                    cell_offsets.data_ptr<int64_t>(),
-                    kin.data_ptr<scalar_t>(),
-                    aabb_lo.data_ptr<int64_t>(),
-                    aabb_dim.data_ptr<int64_t>(),
-                    gx.data_ptr<scalar_t>(), gy.data_ptr<scalar_t>(),
-                    (int)u_i0, (int)u_j0,
-                    (int)Sj,
-                    xs.data_ptr<scalar_t>(), ys.data_ptr<scalar_t>(),
-                    px.data_ptr<scalar_t>(), py.data_ptr<scalar_t>(),
-                    (scalar_t)eps_body, (scalar_t)eps_solver, (scalar_t)h2,
-                    (int)delta_order,
-                    out.data_ptr<double>());
-        }
+        const int blocksPerBody = (int)((max_vol_per_body + blockSize - 1) / blockSize);
+        bdim_forces_2d_multi_kernel<scalar_t>
+            <<<dim3(blocksPerBody, B, 1), dim3(blockSize, 1, 1), shmem, stream>>>(
+                sparse_cc_flat.data_ptr<scalar_t>(),
+                cell_offsets.data_ptr<int64_t>(),
+                kin.data_ptr<scalar_t>(),
+                aabb_lo.data_ptr<int64_t>(),
+                aabb_dim.data_ptr<int64_t>(),
+                gx.data_ptr<scalar_t>(), gy.data_ptr<scalar_t>(),
+                (int)u_i0, (int)u_j0,
+                (int)Sj,
+                xs.data_ptr<scalar_t>(), ys.data_ptr<scalar_t>(),
+                px.data_ptr<scalar_t>(), py.data_ptr<scalar_t>(),
+                (scalar_t)eps_body, (scalar_t)eps_solver, (scalar_t)h2,
+                (int)delta_order,
+                out.data_ptr<double>());
     });
 }
 
@@ -663,6 +669,10 @@ __global__ void streaming_sdf_forces_fused_2d_multi_kernel(
     const int delta_order,
     double* __restrict__ out)
 {
+    // NOTE: bodies dispatched **sequentially** from the host — see
+    // ``streaming_sdf_forces_fused_3d_multi_kernel`` for the
+    // multi-field compare-swap data-race rationale that prevents
+    // safe ``gridDim.y``-fanned dispatch here.
     const int local = blockIdx.x * blockDim.x + threadIdx.x;
 
     const int Ai = (int)aabb_dim[b*2 + 0];
@@ -871,10 +881,11 @@ void streaming_sdf_forces_fused_2d_multi_cuda(
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(F_flat.scalar_type(),
         "streaming_sdf_forces_fused_2d_multi_cuda", [&] {
         const scalar_t* rho_bodies_ptr = rho_bodies.data_ptr<scalar_t>();
+        const int nblocks = (int)((max_vol_per_body + blockSize - 1) / blockSize);
+        // Sequential per-body launches; see kernel comment.
         for (int b = 0; b < B; ++b) {
-            const int nblocks = (int)((max_vol_per_body + blockSize - 1) / blockSize);
             streaming_sdf_forces_fused_2d_multi_kernel<scalar_t>
-                <<<dim3(nblocks,1,1), dim3(blockSize,1,1), shmem, stream>>>(
+                <<<dim3(nblocks, 1, 1), dim3(blockSize,1,1), shmem, stream>>>(
                     b,
                     F_flat.data_ptr<scalar_t>(),
                     F_offsets.data_ptr<int64_t>(),

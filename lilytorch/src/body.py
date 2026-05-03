@@ -972,7 +972,7 @@ class Body:
 
 class BodyAnalytical(Body):
 
-    def __init__(self, device, x, y, sdf, update_maps, z=None, eps=0.05, plotting=False, pre_update=True, grids=None):
+    def __init__(self, device, x, y, sdf, update_maps, z=None, eps=0.05, plotting=False, pre_update=True, grids=None, local_aabb=None):
         super().__init__(device, x, y, z=z, eps=eps, grids=grids)
         self.sdf = sdf
         self.update_theta = update_maps[0]
@@ -980,6 +980,19 @@ class BodyAnalytical(Body):
         self.plotting = plotting
         self.body = self
         self.pre_update = pre_update
+        # Optional body-local AABB ``[[lo_x, lo_y[, lo_z]], [hi_x, hi_y[, hi_z]]]``
+        # used by :class:`BDIMhandler` to crop per-body SDF evaluation.
+        # In both 2-D and 3-D this is auto-derived from the analytical
+        # zero-level set during ``_initialize_2d`` / ``_initialize_3d``
+        # (2-D: ``measure.find_contours``; 3-D: ``measure.marching_cubes``)
+        # with a safety margin large enough that the analytical SDF
+        # outside the AABB is provably ≥ band radius, so cells outside
+        # don't affect the running-min union of bodies.  An explicit
+        # ``local_aabb=torch.tensor([[xmin,ymin,zmin],[xmax,ymax,zmax]])``
+        # passed in the constructor wins (used when the user knows a
+        # tighter / looser bound than the auto-derived one, or when
+        # the local grid does not capture a zero-level set).
+        self.local_aabb = local_aabb
         self.initialize()
 
     # ------------------------------------------------------------------
@@ -1026,6 +1039,26 @@ class BodyAnalytical(Body):
         self.cnt = torch.from_numpy(cnt).type(self.dtype).to(self.device)
         self.cnt_update = self.cnt.clone().detach()
         self.ds = self.curv_coord[1] - self.curv_coord[0]
+
+        # ──────────────────────────────────────────────────────────────
+        # Local-frame AABB for analytical bodies (2-D)
+        # ──────────────────────────────────────────────────────────────
+        # ``self.cnt`` traces the (offset) zero-level set of the local
+        # SDF.  Expand its extent by ``band_margin`` so that any point
+        # outside the AABB is guaranteed to lie outside the BDIM band
+        # of width ``~4*eps`` (Lipschitz-1 SDF ⇒ |sdf| ≥ band_margin
+        # outside the box).  Outside the band the body contributes
+        # only ``mu=1`` (pure fluid), so cells outside the AABB can be
+        # safely skipped during the per-body running-min union — they
+        # remain at ``_FAR`` (or whatever closer body wrote there),
+        # which is equivalent to "this analytical body doesn't matter
+        # here" for downstream BDIM/forces stages.
+        # An explicit ``local_aabb`` provided in the constructor wins.
+        if self.local_aabb is None:
+            band_margin = 4.0 * float(self.eps) + 4.0 * float(self.h)
+            cnt_lo = self.cnt.min(dim=1).values - band_margin
+            cnt_hi = self.cnt.max(dim=1).values + band_margin
+            self.local_aabb = torch.stack([cnt_lo, cnt_hi], dim=0)
 
         if self.plotting:
             _, plt, cm = _import_matplotlib()
@@ -1074,6 +1107,71 @@ class BodyAnalytical(Body):
         self.cnt_int_f_w = torch.zeros(1, device=self.device, dtype=self.dtype)
         self.mask = torch.arange(1, device=self.device)
         self.com_pos = torch.zeros(3, device=self.device, dtype=self.dtype)
+
+        # ──────────────────────────────────────────────────────────────
+        # Local-frame AABB for analytical bodies (3-D)
+        # ──────────────────────────────────────────────────────────────
+        # Mirror of the 2-D path: sample the analytical SDF on a
+        # body-local centred grid built from ``self.x/y/z``, run
+        # marching cubes at level ``self.h`` to extract the (offset)
+        # zero-level set, and use the min/max of the surface vertices
+        # plus ``band_margin = 4*eps + 4*h`` as the AABB.  Lipschitz-1
+        # SDF ⇒ |sdf| ≥ band_margin outside that box, so cells outside
+        # contribute only ``mu=1`` (pure fluid) and can be safely
+        # skipped during the per-body running-min union.
+        #
+        # Skipped when:
+        #   * the user already passed ``local_aabb`` to the ctor;
+        #   * the local grid does not contain a zero-level set
+        #     (e.g. body wholly outside ``self.x/y/z``); marching
+        #     cubes raises ``RuntimeError``/``ValueError`` and we
+        #     fall back to the full-grid path.
+        if self.local_aabb is None:
+            try:
+                measure = _import_measure()
+                xmid = (self.x.min() + self.x.max()) / 2
+                ymid = (self.y.min() + self.y.max()) / 2
+                zmid = (self.z.min() + self.z.max()) / 2
+                xcnt = self.x - xmid
+                ycnt = self.y - ymid
+                zcnt = self.z - zmid
+
+                X, Y, Z = torch.meshgrid(xcnt, ycnt, zcnt, indexing="ij")
+                sdf_cnt = self.sdf(X, Y, Z)
+
+                sdf_np = sdf_cnt.cpu().numpy()
+                xnp = xcnt.cpu().numpy()
+                ynp = ycnt.cpu().numpy()
+                znp = zcnt.cpu().numpy()
+
+                verts, _faces, _normals, _vals = measure.marching_cubes(
+                    sdf_np, level=float(self.h)
+                )
+                # ``verts`` are in voxel-index space; convert each
+                # column to physical body-local coordinates.
+                vx = xnp[0] + verts[:, 0] * (xnp[1] - xnp[0])
+                vy = ynp[0] + verts[:, 1] * (ynp[1] - ynp[0])
+                vz = znp[0] + verts[:, 2] * (znp[1] - znp[0])
+
+                band_margin = 4.0 * float(self.eps) + 4.0 * float(self.h)
+                cnt_lo = torch.tensor(
+                    [float(vx.min()) - band_margin,
+                     float(vy.min()) - band_margin,
+                     float(vz.min()) - band_margin],
+                    device=self.device, dtype=self.dtype,
+                )
+                cnt_hi = torch.tensor(
+                    [float(vx.max()) + band_margin,
+                     float(vy.max()) + band_margin,
+                     float(vz.max()) + band_margin],
+                    device=self.device, dtype=self.dtype,
+                )
+                self.local_aabb = torch.stack([cnt_lo, cnt_hi], dim=0)
+            except (RuntimeError, ValueError, ImportError):
+                # No zero-level set in the local grid (or skimage not
+                # importable); leave ``local_aabb`` as ``None`` so the
+                # BDIMhandler falls through to the full-grid path.
+                self.local_aabb = None
 
         if self.pre_update:
             self.update(torch.tensor(0.0), 0, update_cnt=False)

@@ -1,6 +1,11 @@
 
+import time
+import collections
+
+import mujoco
 import numpy as np
 from dm_control.mjcf.physics import Physics
+from dm_control.viewer import views as _dm_views
 from farms_core.experiment.data import ExperimentData
 from farms_core.experiment.options import ExperimentOptions
 from farms_core.extensions.extensions import import_item
@@ -126,6 +131,104 @@ class FluidExtension(TaskExtension):
                 fs.flush_io()
             except Exception as exc:
                 print(f"[FluidExtension] save_drags_h5 failed: {exc}")
+
+
+class _RTColumnModel(_dm_views.ColumnTextModel):
+    """Dynamic two-column text model for dm_control viewer RT overlay."""
+
+    def __init__(self):
+        self._text = "..."
+
+    def get_columns(self):
+        return [("RT", self._text)]
+
+
+class RealtimeMonitor(TaskExtension):
+    """Overlay the realtime factor in the top-right corner of the MuJoCo viewer.
+
+    Works with both viewer backends:
+    - Native MuJoCo passive viewer (default): uses ``viewer.set_texts()``
+    - dm_control Application viewer: uses ``_viewer_layout`` ColumnTextView
+
+    No-ops silently in headless mode.
+
+    Parameters
+    ----------
+    window : int
+        Rolling window size (steps) for averaging wall-clock step time.
+    """
+
+    def __init__(
+            self,
+            experiment_options: ExperimentOptions,
+            window: int = 30,
+    ):
+        super().__init__()
+        self.experiment_options = experiment_options
+        self._window = window
+        self._times: collections.deque = collections.deque(maxlen=window)
+        self._last_t: float | None = None
+        self._physics_dt: float = 0.0
+        self._rt_model: _RTColumnModel | None = None
+
+    @classmethod
+    def from_options(
+            cls,
+            config: dict,
+            experiment_options: ExperimentOptions,
+    ):
+        return cls(
+            experiment_options=experiment_options,
+            window=config.get("window", 30),
+        )
+
+    def initialize_episode(self, task: ExperimentTask, physics: Physics):
+        self._physics_dt = float(
+            self.experiment_options.simulation.physics.timestep
+        )
+        self._last_t = None
+        self._times.clear()
+        self._rt_model = None
+
+        # dm_control viewer: register a persistent overlay panel
+        app = getattr(task, "_app", None)
+        if app is not None:
+            layout = getattr(app, "_viewer_layout", None)
+            if layout is not None:
+                self._rt_model = _RTColumnModel()
+                rt_view = _dm_views.ColumnTextView(self._rt_model)
+                layout.add(rt_view, _dm_views.PanelLocation.TOP_RIGHT)
+
+    def before_step(self, task: ExperimentTask, action, physics: Physics):
+        now = time.perf_counter()
+        if self._last_t is not None:
+            self._times.append(now - self._last_t)
+        self._last_t = now
+
+        if self._times:
+            mean_dt = sum(self._times) / len(self._times)
+            rt = self._physics_dt / mean_dt if mean_dt > 0 else 0.0
+        else:
+            rt = 0.0
+
+        # dm_control viewer path
+        if self._rt_model is not None:
+            self._rt_model._text = f"{rt:.2f}x"
+            return
+
+        # Native MuJoCo passive viewer path
+        viewer = getattr(task, "viewer", None)
+        if viewer is None:
+            return
+        set_texts = getattr(viewer, "set_texts", None)
+        if set_texts is None:
+            return
+        set_texts([(
+            mujoco.mjtFontScale.mjFONTSCALE_150,
+            mujoco.mjtGridPos.mjGRID_TOPRIGHT,
+            "RT",
+            f"{rt:.2f}x",
+        )])
 
 
 class PhysicsOptionsExtension(TaskExtension):
