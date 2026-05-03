@@ -20,7 +20,7 @@ class SimConfig(BaseSimConfig):
         self.use_bdim     = True
         self.use_drag     = False
         self.use_gpu      = True
-        self.compute_sdf  = True
+        self.compute_sdf  = False
         self.wall_height  = 0.02
         self.water_height = 0.015
         self.stack_folder = "salamander"
@@ -58,8 +58,8 @@ class SimConfig(BaseSimConfig):
         ]
 
         # ── 2-D grid ─────────────────────────────────────────────────
-        self.Nx   = 1024
-        self.Ny   = 256
+        self.Nx   = 512
+        self.Ny   = 128
         # self.Nx   = 1024
         # self.Ny   = 256
         self.xmin = -0.4
@@ -76,8 +76,8 @@ class SimConfig(BaseSimConfig):
         # self.ymax =  0.05
 
         # ── Physics ───────────────────────────────────────────────────
-        self.poisson_method    = "multigrid"
-        self.timestep          = 0.01
+        self.poisson_method    = "fft"
+        self.timestep          = 0.02
         self.convection_method = "implicit"
         self.n_iterations      = 80001
         self.save_frames       = False
@@ -133,17 +133,24 @@ class SimConfig(BaseSimConfig):
             "loader": "lilytorch.integration.flow_viewer_2d_gpu.FlowViewer2D",
             "config": {
                 "field"         : "curl",
-                "nx_vis"        : 1024,
-                "ny_vis"        : 256,
+                "nx_vis"        : 512,
+                "ny_vis"        : 128,
                 "alpha"         : 1,
                 "z_offset"      : 0.015,
                 "smooth_sigma"  : 0,
                 "crop_boundary" : 0,
-                "update_every"  : 1,
+                "update_every"  : 5,
                 "vmin"          : -10,
                 "vmax"          : 10,
             },
         })
+
+        # extensions.append({
+        #     "loader": "lilytorch.integration.extensions.RealtimeMonitor",
+        #     "config": {
+        #         "window": 30,
+        #     },
+        # })
 
         # cam = top_down_camera_config(
         #     self.xmin, self.xmax,
