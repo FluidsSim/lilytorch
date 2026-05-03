@@ -453,25 +453,17 @@ class BDIMhandler:
             R_T = R.T  # (2, 2) transposed rotation
 
             # ── AABB-clipped SDF evaluation ─────────────────────────
-            # Mirror the 3-D pattern: only AABB-clip when the body has
-            # a regular-grid SDF table.  For analytical bodies the SDF
-            # is a closed-form callable whose values *outside* a tight
-            # AABB are still finite, so AABB-clipping would break the
-            # running-min union (cells outside the AABB would keep the
-            # _FAR sentinel even when this body's analytical SDF would
-            # win there).  Mesh bodies are immune to this because
-            # ``grid_sample(padding_mode='border')`` clamps to the
-            # edge value of the (already padded with _FAR sentinel)
-            # local-frame SDF table.
-            aabb = None
-            if (hasattr(body, 'sdf')
-                    and hasattr(body.sdf, 'x')
-                    and hasattr(body.sdf, 'y')):
-                aabb = self._body_aabb_indices_2d(
-                    body, R, urdf_pos,
-                    comp.x, comp.y,
-                    h_grid, gs, pad=3,
-                )
+            # Mirror the 3-D pattern: AABB-clip whenever the body
+            # provides a local-frame bounding-box descriptor (mesh
+            # bodies via ``body.sdf.x/y`` axes; analytical bodies via
+            # ``body.local_aabb`` derived from the contour with a
+            # band-radius safety margin).  Bodies without either
+            # descriptor fall through to the full-grid path.
+            aabb = self._body_aabb_indices_2d(
+                body, R, urdf_pos,
+                comp.x, comp.y,
+                h_grid, gs, pad=3,
+            )
             comp._body_aabbs[body_i] = aabb
 
             sdf_eval = body.sdf
@@ -598,28 +590,61 @@ class BDIMhandler:
             body.r_com = body.cnt_update - com_pos[:, None]
 
     @staticmethod
+    def _body_local_aabb_2d(body):
+        """Return ``(sdf_lo, sdf_hi)`` 1-D tensors describing the
+        body's local-frame AABB, or ``None`` if no AABB info is
+        available.  Source priority:
+
+        1. ``body.local_aabb`` — an explicit ``(2, 2)`` tensor set by
+           analytical bodies (auto-derived from the contour with a
+           safety margin in :meth:`BodyAnalytical._initialize_2d`,
+           or user-provided).
+        2. ``body.sdf.x`` / ``body.sdf.y`` — for mesh bodies whose
+           local SDF table carries axis tensors.  These tables are
+           padded with a ``_FAR`` sentinel outside the mesh, so
+           ``grid_sample(padding_mode='border')`` returns far-field
+           values for queries beyond the AABB.
+
+        Returns ``None`` when neither source is available; callers
+        should then use the full-grid evaluation path.
+        """
+        local_aabb = getattr(body, 'local_aabb', None)
+        if local_aabb is not None:
+            return local_aabb[0], local_aabb[1]
+        if (hasattr(body, 'sdf')
+                and hasattr(body.sdf, 'x')
+                and hasattr(body.sdf, 'y')):
+            return (
+                torch.stack([body.sdf.x[0],  body.sdf.y[0]]),
+                torch.stack([body.sdf.x[-1], body.sdf.y[-1]]),
+            )
+        return None
+
+    @staticmethod
     def _body_aabb_indices_2d(body, R, urdf_pos, comp_x, comp_y,
                               h, gs, pad=3):
         """2-D analogue of :meth:`_body_aabb_indices`.
 
         Computes fluid-grid index ranges ``(i0, i1, j0, j1)`` for the
-        AABB of a body's local-frame SDF table, transformed into world
-        space.
+        AABB of a body's local-frame SDF support, transformed into
+        world space.
 
-        Mirrors the 3-D helper: only valid for bodies whose ``body.sdf``
-        is a regular-grid interpolator exposing ``x`` and ``y`` axis
-        tensors (i.e. mesh / pre-sampled bodies).  Analytical bodies
-        whose SDF is a closed-form callable do **not** AABB-clip well
-        (their SDF is finite outside any local box, so cells outside
-        the box would not lose the running-min) — callers should pass
-        ``aabb=None`` for them and use the full-grid path.
+        Supports both mesh bodies (``body.sdf`` exposes ``x``/``y``
+        axis tensors) and analytical bodies that provide an explicit
+        ``body.local_aabb`` covering the SDF band of width ``~4*eps``
+        (auto-derived from ``body.cnt`` for :class:`BodyAnalytical`
+        instances; user-supplied otherwise).  When neither AABB
+        descriptor is available, returns ``None`` and the caller falls
+        back to the full-grid path.
 
         Returns ``None`` when the AABB covers >90% of the grid (full-
         grid evaluation is then cheaper).  Returns half-open Python
         slice indices otherwise.
         """
-        sdf_lo = torch.stack([body.sdf.x[0],  body.sdf.y[0]])
-        sdf_hi = torch.stack([body.sdf.x[-1], body.sdf.y[-1]])
+        bounds = BDIMhandler._body_local_aabb_2d(body)
+        if bounds is None:
+            return None
+        sdf_lo, sdf_hi = bounds
 
         local_center = 0.5 * (sdf_lo + sdf_hi)
         local_half   = 0.5 * (sdf_hi - sdf_lo)
@@ -652,24 +677,58 @@ class BDIMhandler:
     #  AABB narrow-band helpers (3-D)
     # ------------------------------------------------------------------
     @staticmethod
+    def _body_local_aabb_3d(body):
+        """Return ``(sdf_lo, sdf_hi)`` 1-D tensors describing the
+        body's local-frame AABB, or ``None`` if no AABB info is
+        available.  Source priority:
+
+        1. ``body.local_aabb`` — an explicit ``(2, 3)`` tensor for
+           analytical or otherwise tabulated bodies that provide an
+           AABB covering their SDF band of width ``~4*eps``.  Users
+           are expected to size this so the analytical SDF outside is
+           ≥ band radius (Lipschitz-1 ⇒ enlarging by ``4*eps + 4*h``
+           around the surface is sufficient).
+        2. ``body.sdf.x`` / ``body.sdf.y`` / ``body.sdf.z`` — for mesh
+           bodies whose local SDF table carries axis tensors and is
+           padded with the ``_FAR`` sentinel outside the mesh.
+
+        Returns ``None`` when neither source is available.
+        """
+        local_aabb = getattr(body, 'local_aabb', None)
+        if local_aabb is not None:
+            return local_aabb[0], local_aabb[1]
+        if (hasattr(body, 'sdf')
+                and hasattr(body.sdf, 'x')
+                and hasattr(body.sdf, 'y')
+                and hasattr(body.sdf, 'z')):
+            return (
+                torch.stack([body.sdf.x[0],  body.sdf.y[0],  body.sdf.z[0]]),
+                torch.stack([body.sdf.x[-1], body.sdf.y[-1], body.sdf.z[-1]]),
+            )
+        return None
+
+    @staticmethod
     def _body_aabb_indices(body, R, urdf_pos, comp_x, comp_y, comp_z,
                            h, gs, pad=3):
         """Compute fluid-grid index ranges for a body's SDF domain.
 
-        Transforms the body-local SDF grid bounding box into world
-        coordinates (accounting for rotation), then finds the axis-
-        aligned sub-block of the fluid grid that covers this region
-        plus ``pad`` cells of margin on each side.
+        Transforms the body-local SDF AABB (mesh: from
+        ``body.sdf.x/y/z`` axes; analytical: from ``body.local_aabb``)
+        into world coordinates accounting for rotation, then finds
+        the axis-aligned sub-block of the fluid grid that covers this
+        region plus ``pad`` cells of margin on each side.
 
         Returns (i0, i1, j0, j1, k0, k1) — Python-style half-open
         indices suitable for slicing ``comp.X[i0:i1, j0:j1, k0:k1]``.
         If the sub-block covers >90 % of the grid, returns ``None``
         to signal that full-grid evaluation is cheaper (avoids the
-        fill + scatter overhead).
+        fill + scatter overhead).  Also returns ``None`` when the
+        body provides no AABB descriptor.
         """
-        # Body SDF grid bounds in local coordinates
-        sdf_lo = torch.stack([body.sdf.x[0],  body.sdf.y[0],  body.sdf.z[0]])
-        sdf_hi = torch.stack([body.sdf.x[-1], body.sdf.y[-1], body.sdf.z[-1]])
+        bounds = BDIMhandler._body_local_aabb_3d(body)
+        if bounds is None:
+            return None
+        sdf_lo, sdf_hi = bounds
 
         local_center = 0.5 * (sdf_lo + sdf_hi)
         local_half   = 0.5 * (sdf_hi - sdf_lo)
@@ -798,13 +857,18 @@ class BDIMhandler:
             R_T = body_rot.T  # (3, 3) — transposed rotation
 
             # ── AABB-clipped SDF evaluation ─────────────────────────
-            aabb = None
-            if hasattr(body, 'sdf') and hasattr(body.sdf, 'z'):
-                aabb = self._body_aabb_indices(
-                    body, body_rot, body_pos,
-                    comp.x, comp.y, comp.z,
-                    h_grid, gs, pad=3,
-                )
+            # AABB-clip whenever the body provides a local-frame
+            # bounding-box descriptor: mesh bodies via the
+            # ``body.sdf.x/y/z`` axis tensors of their padded SDF
+            # table, analytical bodies via an explicit
+            # ``body.local_aabb`` (sized to cover the BDIM band).
+            # Bodies without either fall through to the full-grid
+            # path returned as ``aabb=None``.
+            aabb = self._body_aabb_indices(
+                body, body_rot, body_pos,
+                comp.x, comp.y, comp.z,
+                h_grid, gs, pad=3,
+            )
             comp._body_aabbs[body_i] = aabb   # cache for force integration
 
             # Default `body.sdf` (grid_sample-backed) per-body SDF evaluator.
@@ -1651,13 +1715,15 @@ class BDIMhandler:
         body_pos, body_rot = self._compose_body_frame_3d(body, urdf_pos, R)
         R_T = body_rot.T
 
-        aabb = None
-        if hasattr(body, 'sdf') and hasattr(body.sdf, 'z'):
-            aabb = self._body_aabb_indices(
-                body, body_rot, body_pos,
-                comp.x, comp.y, comp.z,
-                h_grid, gs, pad=3,
-            )
+        # AABB-clip via either the mesh axis tensors or analytical
+        # bodies' ``local_aabb`` descriptor (handled inside the
+        # helper).  Returns ``None`` when no descriptor is available
+        # — the body then takes the full-grid fallback below.
+        aabb = self._body_aabb_indices(
+            body, body_rot, body_pos,
+            comp.x, comp.y, comp.z,
+            h_grid, gs, pad=3,
+        )
         comp._body_aabbs[body_i] = aabb
         sdf_eval = getattr(body, '_sdf_tri3d', None) or body.sdf
 

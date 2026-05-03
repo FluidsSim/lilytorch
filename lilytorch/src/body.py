@@ -972,7 +972,7 @@ class Body:
 
 class BodyAnalytical(Body):
 
-    def __init__(self, device, x, y, sdf, update_maps, z=None, eps=0.05, plotting=False, pre_update=True, grids=None):
+    def __init__(self, device, x, y, sdf, update_maps, z=None, eps=0.05, plotting=False, pre_update=True, grids=None, local_aabb=None):
         super().__init__(device, x, y, z=z, eps=eps, grids=grids)
         self.sdf = sdf
         self.update_theta = update_maps[0]
@@ -980,6 +980,17 @@ class BodyAnalytical(Body):
         self.plotting = plotting
         self.body = self
         self.pre_update = pre_update
+        # Optional body-local AABB ``[[lo_x, lo_y[, lo_z]], [hi_x, hi_y[, hi_z]]]``
+        # used by :class:`BDIMhandler` to crop per-body SDF evaluation.
+        # In 2-D this is auto-derived from the contour during
+        # ``_initialize_2d`` (with a safety margin large enough that the
+        # analytical SDF outside the AABB is provably ≥ band radius, so
+        # cells outside don't affect the running-min union of bodies).
+        # In 3-D no contour is available, so users must pass an explicit
+        # ``local_aabb=torch.tensor([[xmin,ymin,zmin],[xmax,ymax,zmax]])``
+        # to enable cropping; otherwise the body falls through to the
+        # full-grid path (current behaviour).
+        self.local_aabb = local_aabb
         self.initialize()
 
     # ------------------------------------------------------------------
@@ -1026,6 +1037,26 @@ class BodyAnalytical(Body):
         self.cnt = torch.from_numpy(cnt).type(self.dtype).to(self.device)
         self.cnt_update = self.cnt.clone().detach()
         self.ds = self.curv_coord[1] - self.curv_coord[0]
+
+        # ──────────────────────────────────────────────────────────────
+        # Local-frame AABB for analytical bodies (2-D)
+        # ──────────────────────────────────────────────────────────────
+        # ``self.cnt`` traces the (offset) zero-level set of the local
+        # SDF.  Expand its extent by ``band_margin`` so that any point
+        # outside the AABB is guaranteed to lie outside the BDIM band
+        # of width ``~4*eps`` (Lipschitz-1 SDF ⇒ |sdf| ≥ band_margin
+        # outside the box).  Outside the band the body contributes
+        # only ``mu=1`` (pure fluid), so cells outside the AABB can be
+        # safely skipped during the per-body running-min union — they
+        # remain at ``_FAR`` (or whatever closer body wrote there),
+        # which is equivalent to "this analytical body doesn't matter
+        # here" for downstream BDIM/forces stages.
+        # An explicit ``local_aabb`` provided in the constructor wins.
+        if self.local_aabb is None:
+            band_margin = 4.0 * float(self.eps) + 4.0 * float(self.h)
+            cnt_lo = self.cnt.min(dim=1).values - band_margin
+            cnt_hi = self.cnt.max(dim=1).values + band_margin
+            self.local_aabb = torch.stack([cnt_lo, cnt_hi], dim=0)
 
         if self.plotting:
             _, plt, cm = _import_matplotlib()

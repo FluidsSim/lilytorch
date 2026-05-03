@@ -37,13 +37,21 @@ def _make_grid(nx, ny, h):
 class _AnalyticalCircle:
     """Mimics a 2-D analytical body: callable SDF + ``cnt`` contour."""
 
-    def __init__(self, radius=0.08):
+    def __init__(self, radius=0.08, with_local_aabb=False):
         self.radius = float(radius)
         self.h = 1.0 / 64.0
+        self.eps = 0.05
         # Contour: discrete set of points on the circle (2, N) in local frame.
         thetas = torch.linspace(0, 2 * math.pi, 64)
         self.cnt = torch.stack([self.radius * torch.cos(thetas),
                                 self.radius * torch.sin(thetas)])
+        # Optionally expose a local-frame AABB (mirrors what
+        # ``BodyAnalytical._initialize_2d`` does in production).
+        if with_local_aabb:
+            band_margin = 4.0 * self.eps + 4.0 * self.h
+            cnt_lo = self.cnt.min(dim=1).values - band_margin
+            cnt_hi = self.cnt.max(dim=1).values + band_margin
+            self.local_aabb = torch.stack([cnt_lo, cnt_hi], dim=0)
 
     def sdf(self, X, Y):
         return torch.sqrt(X**2 + Y**2) - self.radius
@@ -280,6 +288,67 @@ def main():
           f"(None means full-grid; expected for >90% coverage)")
     assert aabb_big is None, (
         "AABB covering >90% of the grid should return None")
+
+    # ── Analytical body with local_aabb: AABB-clip and verify union
+    # union still matches the full-grid reference.  This is the new
+    # path enabled by ``BodyAnalytical._initialize_2d``'s contour-bbox
+    # derivation: the band-margin expansion guarantees that cells
+    # outside the AABB have body SDF ≥ band_margin, so omitting them
+    # from the running-min cannot pollute the union.
+    body_circ_aabb = _AnalyticalCircle(radius=0.07, with_local_aabb=True)
+    aabb_circ = BDIMhandler._body_aabb_indices_2d(
+        body_circ_aabb, R0, urdf0, X[:, 0], Y[0], h, gs, pad=3,
+    )
+    assert aabb_circ is not None, (
+        "analytical body with explicit local_aabb must return a "
+        "valid AABB, not None"
+    )
+    print(f"  analytical-with-local_aabb AABB  = {aabb_circ}")
+
+    # Run the union: analytical body w/ AABB + same mesh square.
+    bodies_with_aabb = [body_circ_aabb, _GridSDFBody(half_extent=0.09)]
+    ref_full_aabb = _ref_running_min_union(bodies_with_aabb, poses, X, Y)
+    new_aabb_aabb = _torch_where_aabb_union(bodies_with_aabb, poses, X, Y, h, gs)
+
+    # Inside the analytical body's AABB we must match exactly.
+    coverage_circ = torch.zeros_like(X, dtype=torch.bool)
+    i0, i1, j0, j1 = aabb_circ
+    coverage_circ[i0:i1, j0:j1] = True
+    err_in_aabb = (
+        ref_full_aabb[coverage_circ] - new_aabb_aabb[coverage_circ]
+    ).abs().max().item()
+    print(f"  inside analytical AABB           max |Δ| = {err_in_aabb:.3e}")
+    assert err_in_aabb < 1e-6, (
+        f"analytical-AABB union disagrees with full-grid inside AABB: "
+        f"max |Δ| = {err_in_aabb:.3e}"
+    )
+
+    # The AABB must enclose the entire interior (sdf<=0) of the
+    # analytical body — otherwise we'd be missing cells where the
+    # body lives.
+    sdf_full_circ = _world_sdf(body_circ_aabb, R0, urdf0, X, Y)
+    inside_circ = sdf_full_circ <= 0
+    n_missed_circ = int((inside_circ & ~coverage_circ).sum().item())
+    assert n_missed_circ == 0, (
+        f"analytical body AABB missed {n_missed_circ} interior cells"
+    )
+
+    # The omitted cells (outside the AABB) must have body SDF
+    # ≥ band_margin everywhere — that's the safety condition that
+    # makes the AABB-clipped running-min equivalent to the full-grid
+    # union for downstream BDIM (the body contributes only mu=1 fluid
+    # outside the band).
+    eps = body_circ_aabb.eps
+    band_margin = 4.0 * eps + 4.0 * body_circ_aabb.h
+    outside_aabb_sdf = sdf_full_circ[~coverage_circ]
+    min_outside = outside_aabb_sdf.min().item()
+    print(f"  min analytical SDF outside AABB  = {min_outside:.3e}  "
+          f"(must be ≥ band_margin = {band_margin:.3e})")
+    assert min_outside >= 0.95 * band_margin, (
+        f"analytical-body SDF outside AABB ({min_outside:.3e}) is "
+        f"smaller than band_margin ({band_margin:.3e}); AABB margin "
+        f"is too tight."
+    )
 
     print("test_update_2d_mirrors_3d: PASSED")
 
