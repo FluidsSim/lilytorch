@@ -684,10 +684,12 @@ class BDIMhandler:
 
         1. ``body.local_aabb`` — an explicit ``(2, 3)`` tensor for
            analytical or otherwise tabulated bodies that provide an
-           AABB covering their SDF band of width ``~4*eps``.  Users
-           are expected to size this so the analytical SDF outside is
-           ≥ band radius (Lipschitz-1 ⇒ enlarging by ``4*eps + 4*h``
-           around the surface is sufficient).
+           AABB covering their SDF band of width ``~4*eps``.  For
+           ``BodyAnalytical`` this is auto-derived during
+           ``_initialize_3d`` via marching cubes on the local SDF
+           plus a ``4*eps + 4*h`` Lipschitz-safe margin (mirrors the
+           2-D contour-based path); users may still override it via
+           the constructor when they want a tighter / looser bound.
         2. ``body.sdf.x`` / ``body.sdf.y`` / ``body.sdf.z`` — for mesh
            bodies whose local SDF table carries axis tensors and is
            padded with the ``_FAR`` sentinel outside the mesh.
