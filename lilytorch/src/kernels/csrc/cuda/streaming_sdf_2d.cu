@@ -278,6 +278,7 @@ void streaming_sdf_min_2d_cuda(
 
 template <typename scalar_t>
 __global__ void streaming_sdf_min_2d_multi_kernel(
+    const int b,
     const scalar_t* __restrict__ F_flat,
     const int64_t*  __restrict__ F_offsets,
     const int64_t*  __restrict__ body_shapes,   // [B,2] (Mx,My)
@@ -298,9 +299,10 @@ __global__ void streaming_sdf_min_2d_multi_kernel(
     scalar_t* __restrict__ sparse_cc_flat,
     const int interp_method)
 {
-    // Body index dispatched via gridDim.y (see 3-D analog kernel for
-    // rationale).
-    const int b     = blockIdx.y;
+    // NOTE: bodies dispatched **sequentially** from the host — see the
+    // 3-D analog ``streaming_sdf_min_3d_multi_kernel`` for the
+    // multi-field compare-swap data-race rationale that prevents
+    // safe ``gridDim.y``-fanned dispatch here.
     const int local = blockIdx.x * blockDim.x + threadIdx.x;
 
     const int Ai = (int)aabb_dim[b*2 + 0];
@@ -403,27 +405,30 @@ void streaming_sdf_min_2d_multi_cuda(
 
     AT_DISPATCH_FLOATING_TYPES_AND_HALF(F_flat.scalar_type(), "streaming_sdf_min_2d_multi_cuda", [&] {
         const int blocksPerBody = (int)((max_vol_per_body + blockSize - 1) / blockSize);
-        // Single launch with gridDim.y == B fans all bodies across SMs.
-        streaming_sdf_min_2d_multi_kernel<scalar_t>
-            <<<dim3(blocksPerBody, B, 1), dim3(blockSize, 1, 1), 0, stream>>>(
-                F_flat.data_ptr<scalar_t>(),
-                F_offsets.data_ptr<int64_t>(),
-                body_shapes.data_ptr<int64_t>(),
-                body_meta.data_ptr<scalar_t>(),
-                kin.data_ptr<scalar_t>(),
-                aabb_lo.data_ptr<int64_t>(),
-                aabb_dim.data_ptr<int64_t>(),
-                cell_offsets.data_ptr<int64_t>(),
-                gx.data_ptr<scalar_t>(), gy.data_ptr<scalar_t>(),
-                Ngy,
-                (scalar_t)(0.5 * h_grid),
-                sdf_cc.data_ptr<scalar_t>(),
-                sdf_u.data_ptr<scalar_t>(),
-                sdf_v.data_ptr<scalar_t>(),
-                body_u.data_ptr<scalar_t>(),
-                body_v.data_ptr<scalar_t>(),
-                sparse_cc_flat.data_ptr<scalar_t>(),
-                (int)interp_method);
+        // Sequential per-body launches (race-prone otherwise; see kernel comment).
+        for (int b = 0; b < B; ++b) {
+            streaming_sdf_min_2d_multi_kernel<scalar_t>
+                <<<dim3(blocksPerBody, 1, 1), dim3(blockSize, 1, 1), 0, stream>>>(
+                    b,
+                    F_flat.data_ptr<scalar_t>(),
+                    F_offsets.data_ptr<int64_t>(),
+                    body_shapes.data_ptr<int64_t>(),
+                    body_meta.data_ptr<scalar_t>(),
+                    kin.data_ptr<scalar_t>(),
+                    aabb_lo.data_ptr<int64_t>(),
+                    aabb_dim.data_ptr<int64_t>(),
+                    cell_offsets.data_ptr<int64_t>(),
+                    gx.data_ptr<scalar_t>(), gy.data_ptr<scalar_t>(),
+                    Ngy,
+                    (scalar_t)(0.5 * h_grid),
+                    sdf_cc.data_ptr<scalar_t>(),
+                    sdf_u.data_ptr<scalar_t>(),
+                    sdf_v.data_ptr<scalar_t>(),
+                    body_u.data_ptr<scalar_t>(),
+                    body_v.data_ptr<scalar_t>(),
+                    sparse_cc_flat.data_ptr<scalar_t>(),
+                    (int)interp_method);
+        }
     });
 }
 
@@ -629,6 +634,7 @@ void bdim_forces_2d_multi_cuda(
 
 template <typename scalar_t>
 __global__ void streaming_sdf_forces_fused_2d_multi_kernel(
+    const int b,
     const scalar_t* __restrict__ F_flat,
     const int64_t*  __restrict__ F_offsets,
     const int64_t*  __restrict__ body_shapes,
@@ -663,8 +669,10 @@ __global__ void streaming_sdf_forces_fused_2d_multi_kernel(
     const int delta_order,
     double* __restrict__ out)
 {
-    // Body index dispatched via gridDim.y (see 3-D analog kernel).
-    const int b     = blockIdx.y;
+    // NOTE: bodies dispatched **sequentially** from the host — see
+    // ``streaming_sdf_forces_fused_3d_multi_kernel`` for the
+    // multi-field compare-swap data-race rationale that prevents
+    // safe ``gridDim.y``-fanned dispatch here.
     const int local = blockIdx.x * blockDim.x + threadIdx.x;
 
     const int Ai = (int)aabb_dim[b*2 + 0];
@@ -874,40 +882,44 @@ void streaming_sdf_forces_fused_2d_multi_cuda(
         "streaming_sdf_forces_fused_2d_multi_cuda", [&] {
         const scalar_t* rho_bodies_ptr = rho_bodies.data_ptr<scalar_t>();
         const int nblocks = (int)((max_vol_per_body + blockSize - 1) / blockSize);
-        streaming_sdf_forces_fused_2d_multi_kernel<scalar_t>
-            <<<dim3(nblocks, B, 1), dim3(blockSize,1,1), shmem, stream>>>(
-                F_flat.data_ptr<scalar_t>(),
-                F_offsets.data_ptr<int64_t>(),
-                body_shapes.data_ptr<int64_t>(),
-                body_meta.data_ptr<scalar_t>(),
-                kin.data_ptr<scalar_t>(),
-                aabb_lo.data_ptr<int64_t>(),
-                aabb_dim.data_ptr<int64_t>(),
-                gx.data_ptr<scalar_t>(),
-                gy.data_ptr<scalar_t>(),
-                Ngx, Ngy,
-                (scalar_t)(0.5 * h_grid),
-                sdf_cc.data_ptr<scalar_t>(),
-                sdf_u.data_ptr<scalar_t>(),
-                sdf_v.data_ptr<scalar_t>(),
-                body_u.data_ptr<scalar_t>(),
-                body_v.data_ptr<scalar_t>(),
-                (int)interp_method,
-                rho_bodies_ptr,
-                winning_rho_cc.data_ptr<scalar_t>(),
-                u_prev.data_ptr<scalar_t>(),
-                v_prev.data_ptr<scalar_t>(),
-                p_prev.data_ptr<scalar_t>(),
-                nx_cc.data_ptr<scalar_t>(),
-                ny_cc.data_ptr<scalar_t>(),
-                nu_rho_field.data_ptr<scalar_t>(),
-                (int64_t)nu_rho_field.numel(),
-                (scalar_t)(1.0 / h_grid),
-                (scalar_t)eps_body,
-                (scalar_t)eps_solver,
-                (scalar_t)h2,
-                (int)delta_order,
-                out.data_ptr<double>());
+        // Sequential per-body launches; see kernel comment.
+        for (int b = 0; b < B; ++b) {
+            streaming_sdf_forces_fused_2d_multi_kernel<scalar_t>
+                <<<dim3(nblocks, 1, 1), dim3(blockSize,1,1), shmem, stream>>>(
+                    b,
+                    F_flat.data_ptr<scalar_t>(),
+                    F_offsets.data_ptr<int64_t>(),
+                    body_shapes.data_ptr<int64_t>(),
+                    body_meta.data_ptr<scalar_t>(),
+                    kin.data_ptr<scalar_t>(),
+                    aabb_lo.data_ptr<int64_t>(),
+                    aabb_dim.data_ptr<int64_t>(),
+                    gx.data_ptr<scalar_t>(),
+                    gy.data_ptr<scalar_t>(),
+                    Ngx, Ngy,
+                    (scalar_t)(0.5 * h_grid),
+                    sdf_cc.data_ptr<scalar_t>(),
+                    sdf_u.data_ptr<scalar_t>(),
+                    sdf_v.data_ptr<scalar_t>(),
+                    body_u.data_ptr<scalar_t>(),
+                    body_v.data_ptr<scalar_t>(),
+                    (int)interp_method,
+                    rho_bodies_ptr,
+                    winning_rho_cc.data_ptr<scalar_t>(),
+                    u_prev.data_ptr<scalar_t>(),
+                    v_prev.data_ptr<scalar_t>(),
+                    p_prev.data_ptr<scalar_t>(),
+                    nx_cc.data_ptr<scalar_t>(),
+                    ny_cc.data_ptr<scalar_t>(),
+                    nu_rho_field.data_ptr<scalar_t>(),
+                    (int64_t)nu_rho_field.numel(),
+                    (scalar_t)(1.0 / h_grid),
+                    (scalar_t)eps_body,
+                    (scalar_t)eps_solver,
+                    (scalar_t)h2,
+                    (int)delta_order,
+                    out.data_ptr<double>());
+        }
     });
 }
 
