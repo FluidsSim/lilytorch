@@ -2525,9 +2525,44 @@ class MultiAnimatBodies(Body):
                                     lambda t, initial_pose=initial_pose: -initial_pose[1],
                                 ],
                             )
+                        # Analytical local_aabb in body-centred coordinates.
+                        # The SDF callables (capsule_3d / sdUnevenCapsule) are
+                        # defined at the local origin (0,0[,0]), so the AABB
+                        # is derived purely from the geometric parameters plus
+                        # the BDIM band margin (4*eps + 4*h).
+                        _h_grid = float(x[1].item() - x[0].item())
+                        _bm = 4.0 * float(eps) + 4.0 * _h_grid
+                        _r = float(radius.item())
+                        _l = float(length.item())
+                        if self.ndim == 3:
+                            # capsule_3d: axis along z, cylindrical section
+                            # from z=-l/2 to z=+l/2, hemispherical caps of
+                            # radius r at each end.
+                            _local_aabb = torch.tensor(
+                                [[-_r - _bm, -_r - _bm, -(0.5 * _l + _r) - _bm],
+                                 [ _r + _bm,  _r + _bm,  (0.5 * _l + _r) + _bm]],
+                                dtype=x.dtype, device=x.device,
+                            )
+                        else:
+                            # 2-D sdUnevenCapsule(x, y, r, r, l, side):
+                            #   side="L": pill runs along -y, from y=0 to y=-l
+                            #   side="R": pill runs along +y, from y=0 to y=+l
+                            if side == "L":
+                                _local_aabb = torch.tensor(
+                                    [[-_r - _bm, -(_l + _r) - _bm],
+                                     [ _r + _bm,          _r + _bm]],
+                                    dtype=x.dtype, device=x.device,
+                                )
+                            else:  # side == "R"
+                                _local_aabb = torch.tensor(
+                                    [[-_r - _bm,        -_r - _bm],
+                                     [ _r + _bm, (_l + _r) + _bm]],
+                                    dtype=x.dtype, device=x.device,
+                                )
                         body = BodyAnalytical(
                             device, x, y, sdf_fun, update_maps, z=self.z,
                             eps=eps, plotting=False, pre_update=False, grids=grids,
+                            local_aabb=_local_aabb,
                         )
                         radius_cpu = radius.detach().cpu()
                         length_cpu = length.detach().cpu()
@@ -2564,9 +2599,29 @@ class MultiAnimatBodies(Body):
                                     lambda t, initial_pose=initial_pose: -initial_pose[1],
                                 ],
                             )
+                        # Analytical local_aabb in body-centred coordinates.
+                        # sphere / circle SDF is sqrt(x^2+y^2[+z^2]) - r,
+                        # centred at the body origin — AABB is just [-r-bm, r+bm]
+                        # per axis.
+                        _h_grid = float(x[1].item() - x[0].item())
+                        _bm = 4.0 * float(eps) + 4.0 * _h_grid
+                        _r = float(radius.item())
+                        if self.ndim == 3:
+                            _local_aabb = torch.tensor(
+                                [[-_r - _bm, -_r - _bm, -_r - _bm],
+                                 [ _r + _bm,  _r + _bm,  _r + _bm]],
+                                dtype=x.dtype, device=x.device,
+                            )
+                        else:
+                            _local_aabb = torch.tensor(
+                                [[-_r - _bm, -_r - _bm],
+                                 [ _r + _bm,  _r + _bm]],
+                                dtype=x.dtype, device=x.device,
+                            )
                         body = BodyAnalytical(
                             device, x, y, sdf_fun, update_maps, z=self.z,
                             eps=eps, plotting=False, pre_update=False, grids=grids,
+                            local_aabb=_local_aabb,
                         )
                         radius_cpu = radius.detach().cpu()
                         body.bb = [
@@ -2610,9 +2665,28 @@ class MultiAnimatBodies(Body):
                                     lambda t, initial_pose=initial_pose: -initial_pose[1],
                                 ],
                             )
+                        # Analytical local_aabb in body-centred coordinates.
+                        # box / box_3d SDF is centred at origin with half-extents
+                        # (xb, yb[, zb]) = half_size — AABB is [-hs-bm, hs+bm].
+                        _h_grid = float(x[1].item() - x[0].item())
+                        _bm = 4.0 * float(eps) + 4.0 * _h_grid
+                        _hs = half_size.detach().cpu().tolist()
+                        if self.ndim == 3:
+                            _local_aabb = torch.tensor(
+                                [[-_hs[0] - _bm, -_hs[1] - _bm, -_hs[2] - _bm],
+                                 [ _hs[0] + _bm,  _hs[1] + _bm,  _hs[2] + _bm]],
+                                dtype=x.dtype, device=x.device,
+                            )
+                        else:
+                            _local_aabb = torch.tensor(
+                                [[-_hs[0] - _bm, -_hs[1] - _bm],
+                                 [ _hs[0] + _bm,  _hs[1] + _bm]],
+                                dtype=x.dtype, device=x.device,
+                            )
                         body = BodyAnalytical(
                             device, x, y, sdf_fun, update_maps, z=self.z,
                             eps=eps, plotting=False, pre_update=False, grids=grids,
+                            local_aabb=_local_aabb,
                         )
                         body.bb = [
                             [-half_size[0].cpu(), half_size[0].cpu()],
