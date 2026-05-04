@@ -628,7 +628,7 @@ def forces_method2(self, u, v, p, iteration):
         # Persistent (B, 8) accumulator (mirrors the 3-D Phase D buffer).
         out2d = getattr(self, '_phaseD_out_buf_2d', None)
         if out2d is None or out2d.shape[0] != B:
-            out2d = torch.zeros((B, 8), dtype=torch.float64, device=self.device)
+            out2d = torch.zeros((B, 6), dtype=torch.float64, device=self.device)
             self._phaseD_out_buf_2d = out2d
         else:
             out2d.zero_()

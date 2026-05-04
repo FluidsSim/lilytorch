@@ -163,7 +163,7 @@ class BaseSimConfig:
         self.time_integration        = None
         # Solver mode: pure-PyTorch (False) vs streaming C++/CUDA kernels (True).
         # ``None`` → solver default (True).  Independent of ``use_gpu``.
-        self.use_kernels             = None
+        self.use_kernels             = False
         # Within the kernel path: fold the lagged force/torque integral into
         # the same kernel pass that computes the running-min SDF
         # (``streaming_sdf_forces_fused_3d_multi``).  Eliminates the per-body

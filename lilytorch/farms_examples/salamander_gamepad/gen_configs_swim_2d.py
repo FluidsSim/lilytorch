@@ -24,7 +24,7 @@ class SimConfig(BaseSimConfig):
         self.water_height = 0.015
         self.stack_folder = "salamander"
 
-        # self.use_kernels      = True
+        self.use_kernels      = False
         # self.fused_sdf_forces = True
         # self.poisson_compile  = True
         # self.compile_adv_diff = False
