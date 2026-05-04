@@ -7,7 +7,7 @@ force/torque integration).  This test extends the existing 2-D
 with checks for the additional fused-only outputs:
 
     * ``winning_rho_cc``  — running-min cc-SDF body density;
-    * ``out`` (B, 8) float64 — per-body 8-channel accumulator
+    * ``out`` (B, 6) float64 — per-body 6-channel accumulator
       ``[fv_x, fv_y, t_v, fp_x, fp_y, t_p, 0, 0]``.
 
 Run with::
@@ -33,7 +33,7 @@ def _ref_winning_rho_and_forces_2d(
         u_prev, v_prev, p_prev, nx_cc, ny_cc,
         nu_rho_field, eps_body, eps_solver, rho_fluid,
         *, dtype, device):
-    """Pure-PyTorch reference for ``winning_rho_cc`` and 8-channel ``out``.
+    """Pure-PyTorch reference for ``winning_rho_cc`` and 6-channel ``out``.
 
     Mirrors the 2-D fused kernel's Phase C cc-SDF tracking and Phase D
     force integration with ``delta_order=1`` (no Towers correction).
@@ -51,7 +51,7 @@ def _ref_winning_rho_and_forces_2d(
     pi_over_eb = math.pi / eps_b
     inv_2eps = 0.5 / eps_b
 
-    out_ref = torch.zeros((len(bodies), 8), dtype=torch.float64, device=device)
+    out_ref = torch.zeros((len(bodies), 6), dtype=torch.float64, device=device)
     nu_rho_is_scalar = (nu_rho_field.numel() == 1)
 
     def cc_avg(u, axis):
@@ -236,7 +236,7 @@ def main():
         bU = torch.zeros((Nx, Ny), dtype=dtype)
         bV = torch.zeros((Nx, Ny), dtype=dtype)
         winning_rho = torch.full((Nx, Ny), float(rho_fluid), dtype=dtype)
-        out = torch.zeros((B, 8), dtype=torch.float64)
+        out = torch.zeros((B, 6), dtype=torch.float64)
         return sdf_cc, sdf_u, sdf_v, bU, bV, winning_rho, out
 
     def _run_and_check(label, nu_rho_field):

@@ -18,24 +18,18 @@ class SimConfig(BaseSimConfig):
 
         # ── Hardware ──────────────────────────────────────────────────
         self.use_bdim     = True
-        self.use_drag     = False
         self.use_gpu      = True
-        self.compute_sdf  = False
+        self.compute_sdf  = True
         self.wall_height  = 0.02
         self.water_height = 0.015
         self.stack_folder = "salamander"
 
-        self.use_kernels      = True
-        self.fused_sdf_forces = True
-        self.poisson_compile  = True
-        # self.compile_adv_diff = True
-        self.compile_forces   = True
-        self.compile_sdf      = True
-
-        self.constant_drags = [
-            [-0.0, -0.05, -0.003],
-            [0, 0, 0]
-        ]
+        # self.use_kernels      = True
+        # self.fused_sdf_forces = True
+        # self.poisson_compile  = True
+        # self.compile_adv_diff = False
+        # self.compile_forces   = True
+        # self.compile_sdf      = True
 
         # ── Animats ───────────────────────────────────────────────────
         self.animats_pars = [
@@ -58,8 +52,8 @@ class SimConfig(BaseSimConfig):
         ]
 
         # ── 2-D grid ─────────────────────────────────────────────────
-        self.Nx   = 512
-        self.Ny   = 128
+        self.Nx   = 1024
+        self.Ny   = 256
         # self.Nx   = 1024
         # self.Ny   = 256
         self.xmin = -0.4
@@ -67,19 +61,11 @@ class SimConfig(BaseSimConfig):
         self.ymin = -0.1
         self.ymax =  0.1
 
-        # # ── 2-D grid ─────────────────────────────────────────────────
-        # self.Nx   = 1024
-        # self.Ny   = 256
-        # self.xmin = -0.13
-        # self.xmax =  0.27
-        # self.ymin = -0.05
-        # self.ymax =  0.05
-
         # ── Physics ───────────────────────────────────────────────────
         self.poisson_method    = "fft"
-        self.timestep          = 0.02
+        self.timestep          = 0.01
         self.convection_method = "implicit"
-        self.n_iterations      = 80001
+        self.n_iterations      = 8001
         self.save_frames       = False
         self.num_sub_steps     = 1
 
@@ -91,6 +77,7 @@ class SimConfig(BaseSimConfig):
         self.wall_thickness = 0.003
         self.wall_height    = 0.03
         self.arena_pose     = [0, 0, 0, 0, 0, 0]
+        self.water_drag     = False
         self.water_buoyancy = False
 
         # ── BDIM solver ──────────────────────────────────────────────
@@ -101,12 +88,12 @@ class SimConfig(BaseSimConfig):
 
         # ── Boundary conditions ──────────────────────────────────────
         self.bc_type_u   = ["D", "D", "N", "N"]
-        self.bc_values_u = [0.0, 0.0, 0, 0]
+        self.bc_values_u = [0, 0, 0, 0]
         self.bc_type_v   = ["N", "N", "D", "D"]
         self.bc_values_v = [0, 0, 0, 0]
 
         # ── Body ─────────────────────────────────────────────────────
-        self.contour_mask = True
+        self.contour_mask = False
         self.zero_pressure_inside = True
         # self.n_samples    = (2000, 2000)
 
@@ -135,7 +122,7 @@ class SimConfig(BaseSimConfig):
                 "field"         : "curl",
                 "nx_vis"        : 512,
                 "ny_vis"        : 128,
-                "alpha"         : 1,
+                "alpha"         : 0.65,
                 "z_offset"      : 0.015,
                 "smooth_sigma"  : 0,
                 "crop_boundary" : 0,
@@ -145,12 +132,12 @@ class SimConfig(BaseSimConfig):
             },
         })
 
-        # extensions.append({
-        #     "loader": "lilytorch.integration.extensions.RealtimeMonitor",
-        #     "config": {
-        #         "window": 30,
-        #     },
-        # })
+        extensions.append({
+            "loader": "lilytorch.integration.extensions.RealtimeMonitor",
+            "config": {
+                "window": 30,
+            },
+        })
 
         # cam = top_down_camera_config(
         #     self.xmin, self.xmax,

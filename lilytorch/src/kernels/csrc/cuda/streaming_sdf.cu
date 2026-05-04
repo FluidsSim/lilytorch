@@ -950,24 +950,31 @@ __global__ void bdim_forces_3d_multi_kernel(
         }
     }
 
-    // Sequential 12-channel block reductions (one shared-mem buffer)
-    extern __shared__ double sdata[];
+    // Parallel 12-channel block reduction (channel-major shared memory).
+    // Reduces __syncthreads from 12*(log2(bdim)+1) = 108 to log2(bdim)+1 = 9.
+    extern __shared__ double sdata[];  // [12 * blockDim.x]
     const int tid = threadIdx.x;
     const int bdim = blockDim.x;
     const double h3_d = (double)h3;
 
 #pragma unroll
-    for (int c = 0; c < 12; ++c) {
-        sdata[tid] = acc[c];
-        __syncthreads();
-        for (int s = bdim >> 1; s > 0; s >>= 1) {
-            if (tid < s) sdata[tid] = sdata[tid] + sdata[tid + s];
-            __syncthreads();
+    for (int c = 0; c < 12; ++c)
+        sdata[c * bdim + tid] = acc[c];
+    __syncthreads();
+
+    for (int s = bdim >> 1; s > 0; s >>= 1) {
+        if (tid < s) {
+#pragma unroll
+            for (int c = 0; c < 12; ++c)
+                sdata[c * bdim + tid] += sdata[c * bdim + tid + s];
         }
-        if (tid == 0) {
-            atomicAdd(&out[b*12 + c], sdata[0] * h3_d);
-        }
         __syncthreads();
+    }
+
+    if (tid == 0) {
+#pragma unroll
+        for (int c = 0; c < 12; ++c)
+            atomicAdd(&out[b*12 + c], sdata[c * bdim] * h3_d);
     }
 }
 
@@ -994,7 +1001,7 @@ void bdim_forces_3d_multi_cuda(
 
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
     const int blockSize = 256;
-    const size_t shmem  = (size_t)blockSize * sizeof(double);
+    const size_t shmem  = (size_t)blockSize * 12 * sizeof(double);  // 12-channel parallel reduction
 
     AT_DISPATCH_FLOATING_TYPES(sparse_cc_flat.scalar_type(), "bdim_forces_3d_multi_cuda", [&] {
         const int blocksPerBody = (int)((max_vol_per_body + blockSize - 1) / blockSize);
@@ -1380,22 +1387,30 @@ __global__ void streaming_sdf_forces_fused_3d_multi_kernel(
         }
     }
 
-    // Block-reduction: 12 channels sequentially into shared memory
-    extern __shared__ double sdata[];
+    // Parallel 12-channel block reduction (same layout as bdim_forces_3d_multi_kernel).
+    extern __shared__ double sdata[];  // [12 * blockDim.x]
     const int tid  = threadIdx.x;
     const int bdim = blockDim.x;
     const double h3_d = (double)h3;
 
 #pragma unroll
-    for (int c = 0; c < 12; ++c) {
-        sdata[tid] = acc[c];
-        __syncthreads();
-        for (int s = bdim >> 1; s > 0; s >>= 1) {
-            if (tid < s) sdata[tid] = sdata[tid] + sdata[tid + s];
-            __syncthreads();
+    for (int c = 0; c < 12; ++c)
+        sdata[c * bdim + tid] = acc[c];
+    __syncthreads();
+
+    for (int s = bdim >> 1; s > 0; s >>= 1) {
+        if (tid < s) {
+#pragma unroll
+            for (int c = 0; c < 12; ++c)
+                sdata[c * bdim + tid] += sdata[c * bdim + tid + s];
         }
-        if (tid == 0) atomicAdd(&out[b*12 + c], sdata[0] * h3_d);
         __syncthreads();
+    }
+
+    if (tid == 0) {
+#pragma unroll
+        for (int c = 0; c < 12; ++c)
+            atomicAdd(&out[b*12 + c], sdata[c * bdim] * h3_d);
     }
 }
 
@@ -1517,7 +1532,7 @@ void streaming_sdf_forces_fused_3d_multi_cuda(
     const int Ngx = (int)gx.numel();
     const int64_t Ngrid = (int64_t)Ngx * Ngy * Ngz;
     const int blockSize = 256;
-    const size_t shmem = (size_t)blockSize * sizeof(double);
+    const size_t shmem = (size_t)blockSize * 12 * sizeof(double);  // 12-channel parallel reduction
 
     auto key_opts = at::TensorOptions()
         .dtype(at::kLong).device(sdf_cc.device());

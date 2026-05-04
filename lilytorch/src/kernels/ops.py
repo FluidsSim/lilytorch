@@ -346,14 +346,12 @@ def bdim_forces_2d_multi(
     per-body cell-centred SDF cached in ``sparse_cc_flat`` (populated
     by :func:`streaming_sdf_min_2d_multi`) instead of re-sampling it.
 
-    ``out`` is float64 with 8 channels per body:
+    ``out`` is float64 with 6 channels per body:
 
-        ``[fv_x, fv_y, t_v, fp_x, fp_y, t_p, 0, 0]``
+        ``[fv_x, fv_y, t_v, fp_x, fp_y, t_p]``
 
     where ``t_v`` and ``t_p`` are the scalar out-of-plane torques
-    ``arm_x*f_y - arm_y*f_x``; the trailing two slots are reserved
-    (the kernel writes 0 there) and exist for layout symmetry with the
-    12-channel 3-D op.
+    ``arm_x*f_y - arm_y*f_x``.
 
     ``delta_order`` selects the smoothed-delta order (1 or 2); see
     :func:`bdim_forces_3d_multi` for details.
@@ -391,7 +389,7 @@ def streaming_sdf_forces_fused_2d_multi(
         out: Tensor) -> None:
     """Fused 2D Phase C+D: SDF update + inline lagged force integration.
     2D analogue of streaming_sdf_forces_fused_3d_multi.
-    out (B, 8) float64: [fv_x, fv_y, t_v, fp_x, fp_y, t_p, 0, 0]
+    out (B, 6) float64: [fv_x, fv_y, t_v, fp_x, fp_y, t_p]
     """
     return torch.ops.lilytorch_kernels.streaming_sdf_forces_fused_2d_multi.default(
         F_flat, F_offsets, body_shapes, body_meta, kin, aabb_lo, aabb_dim,

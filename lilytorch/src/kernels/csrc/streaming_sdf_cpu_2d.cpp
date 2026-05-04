@@ -454,8 +454,8 @@ void bdim_forces_2d_multi_cpu(
 
     TORCH_CHECK(out.scalar_type() == at::kDouble,
                 "bdim_forces_2d_multi_cpu: out must be float64");
-    TORCH_CHECK(out.size(1) == 8,
-                "bdim_forces_2d_multi_cpu: out must have 8 channels");
+    TORCH_CHECK(out.size(1) == 6,
+                "bdim_forces_2d_multi_cpu: out must have 6 channels");
 
     AT_DISPATCH_FLOATING_TYPES(sparse_cc_flat.scalar_type(), "bdim_forces_2d_multi_cpu", [&] {
         auto sp_c = sparse_cc_flat.contiguous();
@@ -495,7 +495,7 @@ void bdim_forces_2d_multi_cpu(
         const int Sj_i   = (int)Sj;
 
         const int B_local = B;
-        std::vector<double> accs(static_cast<size_t>(B_local) * 8, 0.0);
+        std::vector<double> accs(static_cast<size_t>(B_local) * 6, 0.0);
 
         for (int b = 0; b < B_local; ++b) {
             const int Ai = (int)dim_[b*2 + 0];
@@ -513,13 +513,13 @@ void bdim_forces_2d_multi_cpu(
             const scalar_t cm_x = K[6], cm_y = K[7];
 
             const std::int64_t sparse_base = (std::int64_t)cell_off[b];
-            double* lb = accs.data() + (size_t)b * 8;
+            double* lb = accs.data() + (size_t)b * 6;
             std::mutex acc_mtx;
 
             at::parallel_for(0, vol, /*grain_size=*/2048,
                 [&](int64_t _begin, int64_t _end)
             {
-                double local8[8] = {0,0,0,0,0,0,0,0};
+                double local8[6] = {0,0,0,0,0,0};
                 for (int idx = (int)_begin; idx < (int)_end; ++idx) {
                     const scalar_t sdf = sp_ptr[sparse_base + (std::int64_t)idx];
                     if (sdf <= band_lo || sdf >= band_hi) continue;
@@ -582,16 +582,15 @@ void bdim_forces_2d_multi_cpu(
                     local8[3] += fp_x;
                     local8[4] += fp_y;
                     local8[5] += (double)arm_x * fp_y - (double)arm_y * fp_x;
-                    // local8[6], local8[7] reserved (always 0)
                 }
                 std::lock_guard<std::mutex> lk(acc_mtx);
-                for (int c = 0; c < 8; ++c) lb[c] += local8[c];
+                for (int c = 0; c < 6; ++c) lb[c] += local8[c];
             });
         }
 
         for (int b = 0; b < B_local; ++b) {
-            for (int c = 0; c < 8; ++c) {
-                out_ptr[b*8 + c] += accs[(size_t)b * 8 + c] * h2_d;
+            for (int c = 0; c < 6; ++c) {
+                out_ptr[b*6 + c] += accs[(size_t)b * 6 + c] * h2_d;
             }
         }
     });
@@ -787,8 +786,8 @@ void streaming_sdf_forces_fused_2d_multi_cpu(
 
     TORCH_CHECK(out.scalar_type() == at::kDouble,
                 "streaming_sdf_forces_fused_2d_multi_cpu: out must be float64");
-    TORCH_CHECK(out.size(1) == 8,
-                "streaming_sdf_forces_fused_2d_multi_cpu: out must have 8 channels");
+    TORCH_CHECK(out.size(1) == 6,
+                "streaming_sdf_forces_fused_2d_multi_cpu: out must have 6 channels");
 
     const int Ngy = (int)gy.numel();
     const int Ngx = (int)gx.numel();
@@ -842,7 +841,7 @@ void streaming_sdf_forces_fused_2d_multi_cpu(
         const scalar_t band_lo = (eps_s - eps_b) < (-eps_b) ? (eps_s - eps_b) : (-eps_b);
         const scalar_t band_hi = (eps_s + eps_b) > ( eps_b) ? (eps_s + eps_b) : ( eps_b);
 
-        std::vector<double> accs(static_cast<size_t>(B) * 8, 0.0);
+        std::vector<double> accs(static_cast<size_t>(B) * 6, 0.0);
 
         for (int b = 0; b < B; ++b) {
             const int Ai = (int)dim_[b*2 + 0];
@@ -922,11 +921,11 @@ void streaming_sdf_forces_fused_2d_multi_cpu(
             }
             });
 
-            double* lb = accs.data() + (size_t)b * 8;
+            double* lb = accs.data() + (size_t)b * 6;
             std::mutex acc_mtx;
 
             at::parallel_for(0, vol, 2048, [&](int64_t _begin, int64_t _end) {
-            double local8[8] = {0,0,0,0,0,0,0,0};
+            double local8[6] = {0,0,0,0,0,0};
             for (int local = (int)_begin; local < (int)_end; ++local) {
                 const scalar_t sdf = sparse_buf[local];
                 if (sdf <= band_lo || sdf >= band_hi) continue;
@@ -1008,14 +1007,14 @@ void streaming_sdf_forces_fused_2d_multi_cpu(
                 local8[5] += (double)arm_x * fp_y - (double)arm_y * fp_x;
             }
             std::lock_guard<std::mutex> lk(acc_mtx);
-            for (int c = 0; c < 8; ++c) lb[c] += local8[c];
+            for (int c = 0; c < 6; ++c) lb[c] += local8[c];
             });
         }
 
         double* out_ptr = out.data_ptr<double>();
         for (int b = 0; b < B; ++b)
-            for (int c = 0; c < 8; ++c)
-                out_ptr[b*8 + c] += accs[(size_t)b * 8 + c] * h2_d;
+            for (int c = 0; c < 6; ++c)
+                out_ptr[b*6 + c] += accs[(size_t)b * 6 + c] * h2_d;
     });
 }
 

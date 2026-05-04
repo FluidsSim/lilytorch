@@ -538,9 +538,9 @@ void streaming_sdf_min_2d_multi_cuda(
 //
 //  2-D analogue of ``bdim_forces_3d_multi``.  Per-body grid: walks the
 //  AABB cells, reads cached cc-SDF from ``sparse_cc_flat``, evaluates
-//  smoothed visc/pres deltas, accumulates 8 float64 channels:
-//      [fv_x, fv_y, t_v, fp_x, fp_y, t_p, 0, 0]
-//  via shared-memory reduction + atomicAdd into out[b, 0..7].
+//  smoothed visc/pres deltas, accumulates 6 float64 channels:
+//      [fv_x, fv_y, t_v, fp_x, fp_y, t_p]
+//  via shared-memory reduction + atomicAdd into out[b, 0..5].
 // =====================================================================
 
 template <typename scalar_t>
@@ -562,11 +562,11 @@ __global__ void bdim_forces_2d_multi_kernel(
     const scalar_t eps_solver,
     const scalar_t h2,
     const int delta_order,
-    double* __restrict__ out)  // (B, 8)
+    double* __restrict__ out)  // (B, 6)
 {
     // Body index dispatched via gridDim.y; single launch covers all B
     // bodies (see 3-D analog kernel for rationale).  Atomic-adds into
-    // ``out[b*8 + c]`` use ``b = blockIdx.y``, so different bodies
+    // ``out[b*6 + c]`` use ``b = blockIdx.y``, so different bodies
     // target disjoint output rows — no cross-body races.
     const int b     = blockIdx.y;
     const int local = blockIdx.x * blockDim.x + threadIdx.x;
@@ -575,9 +575,9 @@ __global__ void bdim_forces_2d_multi_kernel(
     const int Aj = (int)aabb_dim[b*2 + 1];
     const int vol = Ai * Aj;
 
-    double acc[8];
+    double acc[6];
 #pragma unroll
-    for (int c = 0; c < 8; ++c) acc[c] = 0.0;
+    for (int c = 0; c < 6; ++c) acc[c] = 0.0;
 
     if (local < vol) {
         const int di = local / Aj;
@@ -660,27 +660,35 @@ __global__ void bdim_forces_2d_multi_kernel(
             acc[3] = fp_x_d;
             acc[4] = fp_y_d;
             acc[5] = (double)arm_x * fp_y_d - (double)arm_y * fp_x_d;
-            // acc[6], acc[7] reserved (always 0)
         }
     }
 
-    extern __shared__ double sdata[];
+    // Parallel 6-channel block reduction: all channels stored simultaneously
+    // in shared memory (channel-major layout: sdata[c * bdim + tid]).
+    // Reduces __syncthreads from 6*(log2(bdim)+1) = 54 to log2(bdim)+1 = 9.
+    extern __shared__ double sdata[];  // [6 * blockDim.x]
     const int tid = threadIdx.x;
     const int bdim = blockDim.x;
     const double h2_d = (double)h2;
 
 #pragma unroll
-    for (int c = 0; c < 8; ++c) {
-        sdata[tid] = acc[c];
-        __syncthreads();
-        for (int s = bdim >> 1; s > 0; s >>= 1) {
-            if (tid < s) sdata[tid] = sdata[tid] + sdata[tid + s];
-            __syncthreads();
+    for (int c = 0; c < 6; ++c)
+        sdata[c * bdim + tid] = acc[c];
+    __syncthreads();
+
+    for (int s = bdim >> 1; s > 0; s >>= 1) {
+        if (tid < s) {
+#pragma unroll
+            for (int c = 0; c < 6; ++c)
+                sdata[c * bdim + tid] += sdata[c * bdim + tid + s];
         }
-        if (tid == 0) {
-            atomicAdd(&out[b*8 + c], sdata[0] * h2_d);
-        }
         __syncthreads();
+    }
+
+    if (tid == 0) {
+#pragma unroll
+        for (int c = 0; c < 6; ++c)
+            atomicAdd(&out[b*6 + c], sdata[c * bdim] * h2_d);
     }
 }
 
@@ -700,14 +708,14 @@ void bdim_forces_2d_multi_cuda(
     const double h2,
     const int64_t max_vol_per_body,
     const int64_t delta_order,
-    at::Tensor out)  // (B, 8) float64
+    at::Tensor out)  // (B, 6) float64
 {
     const int B = (int)aabb_dim.size(0);
     if (B <= 0 || max_vol_per_body <= 0) return;
 
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
     const int blockSize = 256;
-    const size_t shmem  = (size_t)blockSize * sizeof(double);
+    const size_t shmem  = (size_t)blockSize * 6 * sizeof(double);  // 6-channel parallel reduction
 
     AT_DISPATCH_FLOATING_TYPES(sparse_cc_flat.scalar_type(), "bdim_forces_2d_multi_cuda", [&] {
         const int blocksPerBody = (int)((max_vol_per_body + blockSize - 1) / blockSize);
@@ -730,7 +738,7 @@ void bdim_forces_2d_multi_cuda(
 }
 
 // =====================================================================
-//  streaming_sdf_forces_fused_2d_multi  (Phase C+D fused, lagged forces)
+//  streaming_sdf_forces_fused_2d_multi  (Phase C+D fused, lagged normals)
 // =====================================================================
 
 template <typename scalar_t>
@@ -767,8 +775,8 @@ __global__ void streaming_sdf_forces_fused_2d_multi_kernel(
 {
     // Parallel-B dispatch: one body per ``blockIdx.y``.  See the 3-D
     // analog ``streaming_sdf_forces_fused_3d_multi_kernel`` for the
-    // packed-key atomicMin rationale.  The 8-channel force accumulator
-    // ``out[b*8 + c]`` writes to per-body-disjoint output rows so the
+    // packed-key atomicMin rationale.  The 6-channel force accumulator
+    // ``out[b*6 + c]`` writes to per-body-disjoint output rows so the
     // ``atomicAdd`` reduction is race-free when fanned across B.
     const int b     = blockIdx.y;
     const int local = blockIdx.x * blockDim.x + threadIdx.x;
@@ -777,9 +785,9 @@ __global__ void streaming_sdf_forces_fused_2d_multi_kernel(
     const int Aj = (int)aabb_dim[b*2 + 1];
     const int vol = Ai * Aj;
 
-    double acc[8];
+    double acc[6];
 #pragma unroll
-    for (int c = 0; c < 8; ++c) acc[c] = 0.0;
+    for (int c = 0; c < 6; ++c) acc[c] = 0.0;
 
     if (local < vol) {
         const int di = local / Aj;
@@ -883,6 +891,8 @@ __global__ void streaming_sdf_forces_fused_2d_multi_kernel(
             if (s_cc > -eps_body && s_cc < eps_body)
                 delta_pres = ((scalar_t)1 + cos(pi_ov_eb * s_cc)) * inv_2eps;
 
+            // delta_order == 2: reuse inv_grad (already computed above for
+            // the normal direction) to also normalise the delta functions.
             if (delta_order == 2 && (delta_visc > 0 || delta_pres > 0)) {
                 const scalar_t h_grid = (scalar_t)1.0 / inv_h;
                 const scalar_t s_xp = sdf_sample_dispatch_2d(
@@ -924,21 +934,30 @@ __global__ void streaming_sdf_forces_fused_2d_multi_kernel(
         }
     }
 
-    extern __shared__ double sdata[];
+    // Parallel 6-channel block reduction (same layout as bdim_forces_2d_multi_kernel).
+    extern __shared__ double sdata[];  // [6 * blockDim.x]
     const int tid  = threadIdx.x;
     const int bdim = blockDim.x;
     const double h2_d = (double)h2;
 
 #pragma unroll
-    for (int c = 0; c < 8; ++c) {
-        sdata[tid] = acc[c];
-        __syncthreads();
-        for (int s = bdim >> 1; s > 0; s >>= 1) {
-            if (tid < s) sdata[tid] = sdata[tid] + sdata[tid + s];
-            __syncthreads();
+    for (int c = 0; c < 6; ++c)
+        sdata[c * bdim + tid] = acc[c];
+    __syncthreads();
+
+    for (int s = bdim >> 1; s > 0; s >>= 1) {
+        if (tid < s) {
+#pragma unroll
+            for (int c = 0; c < 6; ++c)
+                sdata[c * bdim + tid] += sdata[c * bdim + tid + s];
         }
-        if (tid == 0) atomicAdd(&out[b*8 + c], sdata[0] * h2_d);
         __syncthreads();
+    }
+
+    if (tid == 0) {
+#pragma unroll
+        for (int c = 0; c < 6; ++c)
+            atomicAdd(&out[b*6 + c], sdata[c * bdim] * h2_d);
     }
 }
 
@@ -1027,7 +1046,7 @@ void streaming_sdf_forces_fused_2d_multi_cuda(
     const int Ngy = (int)gy.numel();
     const int64_t Ngrid = (int64_t)Ngx * Ngy;
     const int blockSize = 256;
-    const size_t shmem = (size_t)blockSize * sizeof(double);
+    const size_t shmem = (size_t)blockSize * 6 * sizeof(double);  // 6-channel parallel reduction
 
     auto key_opts = at::TensorOptions()
         .dtype(at::kLong).device(sdf_cc.device());
