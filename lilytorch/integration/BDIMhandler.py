@@ -177,18 +177,24 @@ class BDIMhandler:
         # dispatch in :meth:`step` already short-circuits to method 2
         # regardless of ``self.force_method`` — no extra check needed
         # for 3-D.
+        _solver_cfg = self.pars["solver"]
+        _kernel_path_active = (
+            _solver_cfg.get("solver_method", None) in ("kernels", "fused")
+            or (_solver_cfg.get("solver_method", None) is None
+                and bool(_solver_cfg.get("use_kernels", True)))
+        )
         if (self.ndim == 2
                 and self.force_method == "method1"
-                and bool(self.pars["solver"].get("use_kernels", True))):
+                and _kernel_path_active):
             raise ValueError(
                 "force_method='method1' is incompatible with "
-                "use_kernels=True: forces_method1 is a contour-integral "
-                "implementation that does not consume the per-body "
-                "cc-SDF produced by the streaming/fused kernels. "
-                "Either set solver.use_kernels=False (pure-Python "
-                "path) or switch to force_method='method2' (default), "
-                "which integrates the smoothed delta with full "
-                "kernel-mode acceleration."
+                "solver_method ∈ {'kernels', 'fused'}: forces_method1 "
+                "is a contour-integral implementation that does not "
+                "consume the per-body cc-SDF produced by the streaming/"
+                "fused kernels. Either set solver.solver_method='python' "
+                "(pure-Python path) or switch to force_method='method2' "
+                "(default), which integrates the smoothed delta with "
+                "full kernel-mode acceleration."
             )
 
         # ---- FARMS-style buoyancy parameters ----

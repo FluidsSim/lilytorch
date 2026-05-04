@@ -596,19 +596,19 @@ def gen_simulation_config_lean(output_folder):
             solver_cfg["poisson_compile"]  = True
             solver_cfg["compile_forces"]   = True
             solver_cfg["compile_sdf"]      = True
-            # Map the new --use_kernels / --no_kernels switch (and the
+            # Map the --use_kernels / --no_kernels switch (and the
             # legacy --streaming_*, --force_shared_union, --mu_normals_union,
             # --bdim_union, --force_narrow_batch deprecation aliases) to
-            # the single solver-level ``use_kernels`` config key.
+            # the single solver-level ``solver_method`` config key.
             _legacy_on = (
                 args.force_narrow_batch or args.force_shared_union
                 or args.mu_normals_union or args.bdim_union
                 or args.streaming_sdf_3d or args.streaming_forces_3d
             )
             if args.no_kernels:
-                solver_cfg["use_kernels"] = False
+                solver_cfg["solver_method"] = "python"
             elif args.use_kernels or _legacy_on:
-                solver_cfg["use_kernels"] = True
+                solver_cfg["solver_method"] = "fused"
 
     with open(yaml_path, "w") as f:
         yaml.dump(sim_dict, f, default_flow_style=False, sort_keys=False)

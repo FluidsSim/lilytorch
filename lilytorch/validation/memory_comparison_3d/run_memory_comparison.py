@@ -10,20 +10,18 @@ biggest bottlenecks of each path can be identified directly on hardware.
 Modes
 -----
 * ``no_kernels``       — pure-PyTorch reference path
-                         (``solver.use_kernels = False``).
+                         (``solver.solver_method = "python"``).
                          No batching, no per-body cropping, no streaming
                          kernels.  Per-body SDF / body-velocity fields are
                          materialised on the *full* fluid grid.
 * ``kernels_separate`` — streaming C++/CUDA kernel path
-                         (``solver.use_kernels = True``,
-                         ``solver.fused_sdf_forces = False``).
+                         (``solver.solver_method = "kernels"``).
                          Two-pass: streaming SDF kernel followed by a
                          separate force/torque kernel that consumes the
                          per-body ``sparse_cc_flat`` slabs.
 * ``kernels_fused``    — streaming kernel path with the new fused
                          SDF + force pass
-                         (``solver.use_kernels = True``,
-                         ``solver.fused_sdf_forces = True``).
+                         (``solver.solver_method = "fused"``).
                          Eliminates ``sparse_cc_flat`` and inlines the
                          lagged force loop into ``streaming_sdf_forces_
                          fused_3d_multi``.
@@ -259,17 +257,14 @@ def _run_worker(args: argparse.Namespace) -> None:
     # back on here so FluidExtension is injected into the YAML.
     cfg.use_bdim = True
 
-    # Mode-specific solver flags — these flow through base_sim_config
-    # into bdim_yaml.solver and are read by FluidSolver / BDIMhandler.
+    # Mode-specific solver method — flows through base_sim_config into
+    # bdim_yaml.solver and is read by FluidSolver.
     if mode == "no_kernels":
-        cfg.use_kernels      = False
-        cfg.fused_sdf_forces = False     # irrelevant; harmless
+        cfg.solver_method = "python"
     elif mode == "kernels_separate":
-        cfg.use_kernels      = True
-        cfg.fused_sdf_forces = False
+        cfg.solver_method = "kernels"
     elif mode == "kernels_fused":
-        cfg.use_kernels      = True
-        cfg.fused_sdf_forces = True
+        cfg.solver_method = "fused"
     else:
         raise ValueError(f"unknown mode '{mode}'")
 

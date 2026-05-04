@@ -477,9 +477,9 @@ def gen_simulation_config_lean(output_folder):
             solver_cfg["compile_forces"]   = True
             solver_cfg["compile_sdf"]      = True
             if args.no_kernels:
-                solver_cfg["use_kernels"] = False
+                solver_cfg["solver_method"] = "python"
             elif args.use_kernels or args.streaming_sdf_2d:
-                solver_cfg["use_kernels"] = True
+                solver_cfg["solver_method"] = "fused"
 
     with open(yaml_path, "w") as f:
         yaml.dump(sim_dict, f, default_flow_style=False, sort_keys=False)
