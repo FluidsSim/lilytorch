@@ -24,9 +24,9 @@ class SimConfig(BaseSimConfig):
         self.water_height = 0.015
         self.stack_folder = "salamander"
 
-        self.solver_method    = "kernels"
+        self.solver_method    = "fused"
         # self.poisson_compile  = True
-        # self.compile_adv_diff = False
+        # self.compile_adv_diff = True
         # self.compile_forces   = True
         # self.compile_sdf      = True
 
@@ -114,22 +114,22 @@ class SimConfig(BaseSimConfig):
     def extra_simulation_extensions(self, output_folder):
         extensions = []
 
-        # # FlowViewer2D – overlay 2-D flow field on the MuJoCo viewer
-        # extensions.append({
-        #     "loader": "lilytorch.integration.flow_viewer_2d_gpu.FlowViewer2D",
-        #     "config": {
-        #         "field"         : "curl",
-        #         "nx_vis"        : 1024,
-        #         "ny_vis"        : 256,
-        #         "alpha"         : 1,
-        #         "z_offset"      : 0.015,
-        #         "smooth_sigma"  : 0,
-        #         "crop_boundary" : 0,
-        #         "update_every"  : 1,
-        #         "vmin"          : -10,
-        #         "vmax"          : 10,
-        #     },
-        # })
+        # FlowViewer2D – overlay 2-D flow field on the MuJoCo viewer
+        extensions.append({
+            "loader": "lilytorch.integration.flow_viewer_2d_gpu.FlowViewer2D",
+            "config": {
+                "field"         : "curl",
+                "nx_vis"        : 1024,
+                "ny_vis"        : 256,
+                "alpha"         : 1,
+                "z_offset"      : 0.015,
+                "smooth_sigma"  : 0,
+                "crop_boundary" : 0,
+                "update_every"  : 1,
+                "vmin"          : -10,
+                "vmax"          : 10,
+            },
+        })
 
         extensions.append({
             "loader": "lilytorch.integration.extensions.RealtimeMonitor",
