@@ -2006,6 +2006,25 @@ class BDIMhandler:
 
         h_grid = float(comp.h)
 
+        # ── Lagged CC normals for the fused 2-D force kernel ──────
+        # The fused 2-D Phase-D kernel reads ``fs.normal_x/normal_y`` at
+        # the previous step's SDF (true lagged-normals BDIM).  Before
+        # the running-min fields are wiped to ``_FAR`` below we must
+        # seed these from the *current* (= previous-step) ``comp.sdf_val``
+        # if they have not yet been populated by ``_recompute_mu_normals_2d``.
+        # Computing them after the reset would feed the kernel normals
+        # taken from a flat ``_FAR`` field — the gradients vanish, the
+        # delta-band integrand picks an arbitrary direction, and the 2-D
+        # forces oscillate.  This is the analogue of the same
+        # initialization performed in ``_update_3d_streaming_multi``
+        # before the 3-D SDF reset.
+        if getattr(fs, '_fused_sdf_forces_2d', False):
+            if (
+                getattr(fs, 'normal_x', None) is None
+                or getattr(fs, 'normal_y', None) is None
+            ):
+                (fs.normal_x, fs.normal_y) = comp.compute_normals(comp.sdf_val)
+
         # Reset running-min fields and per-body sparse storage
         comp._sdf_sparse = [None] * B
         comp.sdf_val.fill_(_FAR)
@@ -2263,6 +2282,22 @@ class BDIMhandler:
             nx_cc_t = getattr(fs, 'normal_x', None)
             ny_cc_t = getattr(fs, 'normal_y', None)
             if nx_cc_t is None or ny_cc_t is None:
+                # Defensive fallback only.  ``_update_2d_streaming_multi``
+                # seeds these from the previous-step ``comp.sdf_val``
+                # *before* the running-min reset above, so under normal
+                # operation this branch is not taken.  If it is, the
+                # SDF fields have already been wiped to ``_FAR`` and the
+                # resulting normals will be degenerate; warn so the
+                # caller can investigate.
+                import warnings
+                warnings.warn(
+                    "fused 2-D path: CC normals were missing after the "
+                    "running-min reset; computing them from the wiped "
+                    "SDF will yield degenerate normals.  Ensure "
+                    "fs.normal_x/normal_y are seeded before "
+                    "_update_2d_streaming_multi runs.",
+                    stacklevel=2,
+                )
                 (nx_cc_t, ny_cc_t) = comp.compute_normals(comp.sdf_val)
 
             if not getattr(self, '_fused_contig_checked_2d', False):
