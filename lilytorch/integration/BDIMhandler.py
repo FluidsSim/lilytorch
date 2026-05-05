@@ -2300,9 +2300,20 @@ class BDIMhandler:
             }
 
         else:
-            sparse_flat = torch.zeros(
-                int(cell_off_h_np[-1]), device=self.device, dtype=self.dtype,
-            )
+            sparse_n = int(cell_off_h_np[-1])
+            sparse_flat = getattr(self, '_stream_sparse_flat_2d', None)
+            if (
+                sparse_flat is None
+                or sparse_flat.numel() < sparse_n
+                or sparse_flat.device != self.device
+                or sparse_flat.dtype != self.dtype
+            ):
+                sparse_flat = torch.empty(
+                    sparse_n, device=self.device, dtype=self.dtype,
+                )
+                self._stream_sparse_flat_2d = sparse_flat
+            else:
+                sparse_flat = sparse_flat[:sparse_n]
 
             streaming_sdf_min_2d_multi(
                 sm['F_flat'],  sm['F_offsets'],

@@ -1653,7 +1653,7 @@ class FluidSolver(PlottingMixin):
     def _recompute_mu_normals_2d(self):
         """Recompute mu0/mu1 and normals on u- and v-staggered grids (2-D).
 
-        CC-grid normals are computed on-the-fly inside forces_method1/2.
+        CC-grid normals are cached here and reused by forces_method2.
         """
         comp = self.composite_body
 
@@ -2162,4 +2162,3 @@ class FluidSolver(PlottingMixin):
 
         # Block until all background I/O is complete before returning
         self.flush_io()
-

@@ -567,46 +567,9 @@ def forces_method2(self, u, v, p, iteration):
         comp._fused_forces_out = None
         return
 
-    # ---- CC normals (computed on-the-fly, not cached on self) ------
-    normal_x, normal_y = self.composite_body.compute_normals(
-        self.composite_body.sdf_val
-    )
-
     comp = self.composite_body
     B = len(comp.bodies)
 
-    # ==============================================================
-    # BATCHED path — all bodies in one fused call
-    # ==============================================================
-    # Shared part: stress + pressure force density (all CC grid)
-    nu_rho = self._compute_nu_rho_for_forces(u, v)
-    (xstress, ystress,
-     pforce_x, pforce_y) = self._forces_shared_2d_compiled(
-        u, v, p, comp.sdf_val,
-        normal_x, normal_y,
-        nu_rho, self.h,
-    )
-
-    if self._compile_forces:
-        xstress  = xstress.clone()
-        ystress  = ystress.clone()
-        pforce_x = pforce_x.clone()
-        pforce_y = pforce_y.clone()
-
-    # Cache for post-processing
-    self.xstress_tensor = xstress
-    self.ystress_tensor = ystress
-    self.pforce_x = pforce_x
-    self.pforce_y = pforce_y
-
-    eps_body = comp.bodies[0].eps
-
-    # ---- 2-D Phase D: fused per-body force integration ----------
-    # Reads the per-body cc-SDF cached by ``streaming_sdf_min_2d_multi``
-    # (in BDIMhandler._update_2d_streaming_multi) instead of integrating
-    # over the full ``comp.sdf_vals`` stack — both saves the (B, Nx, Ny)
-    # SDF tensor allocation in BDIMhandler and avoids the dense
-    # ``_forces_body_batch_2d`` reduction over the full grid.
     _stream_step = getattr(comp, '_stream_multi_step', None)
     _have_sparse_2d = (
         hasattr(comp, '_sdf_sparse')
@@ -618,12 +581,102 @@ def forces_method2(self, u, v, p, iteration):
         and _have_sparse_2d
         and _stream_step is not None
     )
+
+    # ---- CC normals ------------------------------------------------
+    # The 2-D update path recomputes and caches these in
+    # ``_recompute_mu_normals_2d``.  Reuse them here instead of launching
+    # another full-grid normal computation for the force pass.
+    normal_x = getattr(self, 'normal_x', None)
+    normal_y = getattr(self, 'normal_y', None)
+    if normal_x is None or normal_y is None:
+        normal_x, normal_y = comp.compute_normals(comp.sdf_val)
+
+    # ==============================================================
+    # BATCHED path — all bodies in one fused call
+    # ==============================================================
+    # Shared part: stress + pressure force density.  In the streaming
+    # force path, crop this bandwidth-heavy tensor work to the union of
+    # body AABBs (with a halo for derivative stencils) and let the sparse
+    # force kernel index relative to that cropped slab.
+    u_aabb = None
+    if (
+        _use_streaming_forces_2d
+        and getattr(self, '_forces_shared_union', False)
+    ):
+        u_i0, u_j0 = 1 << 30, 1 << 30
+        u_i1, u_j1 = -1, -1
+        for aabb_i, _ in comp._sdf_sparse:
+            if aabb_i is None:
+                u_i0 = -1
+                break
+            i0, i1, j0, j1 = aabb_i
+            if i0 < u_i0: u_i0 = i0
+            if j0 < u_j0: u_j0 = j0
+            if i1 > u_i1: u_i1 = i1
+            if j1 > u_j1: u_j1 = j1
+        if u_i0 != -1:
+            Ni, Nj = u.shape
+            halo = 2
+            u_i0 = max(0, u_i0 - halo); u_i1 = min(Ni, u_i1 + halo)
+            u_j0 = max(0, u_j0 - halo); u_j1 = min(Nj, u_j1 + halo)
+            if u_i1 > u_i0 and u_j1 > u_j0:
+                u_aabb = (u_i0, u_i1, u_j0, u_j1)
+
+    nu_rho = self._compute_nu_rho_for_forces(u, v)
+    if u_aabb is not None:
+        u_i0, u_i1, u_j0, u_j1 = u_aabb
+        usl = (slice(u_i0, u_i1), slice(u_j0, u_j1))
+        nu_rho_sub = (
+            nu_rho[usl].contiguous()
+            if torch.is_tensor(nu_rho) and nu_rho.ndim == 2
+            else nu_rho
+        )
+        (xstress, ystress,
+         pforce_x, pforce_y) = self._forces_shared_2d_compiled(
+            u[usl].contiguous(), v[usl].contiguous(),
+            p[usl].contiguous(), comp.sdf_val[usl].contiguous(),
+            normal_x[usl].contiguous(), normal_y[usl].contiguous(),
+            nu_rho_sub, self.h,
+        )
+    else:
+        u_i0, u_j0 = 0, 0
+        (xstress, ystress,
+         pforce_x, pforce_y) = self._forces_shared_2d_compiled(
+            u, v, p, comp.sdf_val,
+            normal_x, normal_y,
+            nu_rho, self.h,
+        )
+
+    if self._compile_forces and not _use_streaming_forces_2d:
+        xstress  = xstress.clone()
+        ystress  = ystress.clone()
+        pforce_x = pforce_x.clone()
+        pforce_y = pforce_y.clone()
+
+    # Cache for post-processing
+    if _use_streaming_forces_2d:
+        self.xstress_tensor = None
+        self.ystress_tensor = None
+        self.pforce_x = None
+        self.pforce_y = None
+    else:
+        self.xstress_tensor = xstress
+        self.ystress_tensor = ystress
+        self.pforce_x = pforce_x
+        self.pforce_y = pforce_y
+
+    eps_body = comp.bodies[0].eps
+
+    # ---- 2-D Phase D: fused per-body force integration ----------
+    # Reads the per-body cc-SDF cached by ``streaming_sdf_min_2d_multi``
+    # (in BDIMhandler._update_2d_streaming_multi) instead of integrating
+    # over the full ``comp.sdf_vals`` stack — both saves the (B, Nx, Ny)
+    # SDF tensor allocation in BDIMhandler and avoids the dense
+    # ``_forces_body_batch_2d`` reduction over the full grid.
     if _use_streaming_forces_2d:
         from lilytorch.src.kernels import bdim_forces_2d_multi
 
-        Ni, Nj = xstress.shape
-        u_i0, u_j0 = 0, 0
-        Sj = Nj
+        Sj = xstress.shape[1]
 
         # Persistent (B, 6) accumulator.
         out2d = getattr(self, '_phaseD_out_buf_2d', None)
