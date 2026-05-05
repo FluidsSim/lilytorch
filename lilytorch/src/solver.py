@@ -211,6 +211,69 @@ class FluidSolver(PlottingMixin):
     def vorticity_components(self, u, v, w):
         return ops.vorticity_components(u, v, w, self.h)
 
+    _VALID_SOLVER_METHODS = ("python", "kernels", "fused")
+
+    @staticmethod
+    def _resolve_solver_method(solver):
+        """Resolve the user-facing ``solver.solver_method`` key.
+
+        Accepts the new ``solver_method`` ∈ ``{"python", "kernels", "fused"}``
+        and the legacy ``use_kernels`` / ``fused_sdf_forces`` keys (with a
+        :class:`DeprecationWarning`).  Returns the canonical string.
+
+        Mapping for the legacy keys (only used when ``solver_method`` is
+        absent):
+
+        =====================  =========================  ================
+        ``use_kernels``        ``fused_sdf_forces``       result
+        =====================  =========================  ================
+        ``False``              ignored                    ``"python"``
+        ``True``               ``False``                  ``"kernels"``
+        ``True`` (default)     ``True`` / unset           ``"fused"``
+        =====================  =========================  ================
+
+        If both the new and legacy keys are supplied the explicit
+        ``solver_method`` wins, and a warning is emitted if the mapping
+        of the legacy keys disagrees with it.
+        """
+        import warnings
+
+        method      = solver.get("solver_method", None)
+        legacy_uk   = solver.get("use_kernels", None)
+        legacy_fsf  = solver.get("fused_sdf_forces", None)
+
+        # Compute the legacy-derived method (if any legacy key was set).
+        legacy_method = None
+        if legacy_uk is not None or legacy_fsf is not None:
+            if not bool(legacy_uk):
+                legacy_method = "python"
+            else:
+                # use_kernels=True; choose by fused_sdf_forces (default True).
+                legacy_method = "fused" if (legacy_fsf is None or bool(legacy_fsf)) else "kernels"
+            warnings.warn(
+                "solver.use_kernels / solver.fused_sdf_forces are deprecated; "
+                "use solver.solver_method ∈ {'python', 'kernels', 'fused'} "
+                f"instead (resolved to solver_method={legacy_method!r}).",
+                DeprecationWarning, stacklevel=3,
+            )
+
+        if method is None:
+            method = legacy_method if legacy_method is not None else "fused"
+        elif legacy_method is not None and legacy_method != method:
+            warnings.warn(
+                f"solver.solver_method={method!r} overrides legacy "
+                f"use_kernels/fused_sdf_forces (which would have selected "
+                f"{legacy_method!r}).",
+                stacklevel=3,
+            )
+
+        if method not in FluidSolver._VALID_SOLVER_METHODS:
+            raise ValueError(
+                f"solver.solver_method must be one of "
+                f"{FluidSolver._VALID_SOLVER_METHODS}, got {method!r}."
+            )
+        return method
+
     def __init__(self, pars, dtype=None, custom_update=None, compute_forces=True):
         """
         BDIM2 solver for fluid structure interaction.
@@ -479,60 +542,85 @@ class FluidSolver(PlottingMixin):
         self._compile_forces = solver.get("compile_forces", False)
 
         # =====================================================================
-        # Solver mode: pure-Python  vs  C++/CUDA kernel path
+        # Solver method selection
         # =====================================================================
-        # ``use_kernels`` is the SINGLE user-facing switch that selects
-        # between the two solver variants.  It is independent of
-        # ``use_gpu`` (which selects the torch device).
+        # SINGLE user-facing key: ``solver.solver_method``.  Three values:
         #
-        #   * ``use_kernels = False`` -- pure-Python / pure-PyTorch path.
-        #     Suboptimal but reference: no batching, no per-body cropping,
-        #     no streaming fused kernels.  Works on CPU and CUDA.  All
-        #     four ``compile_*`` flags (compile_adv_diff, compile_forces,
-        #     compile_sdf, poisson_compile) remain independent toggles.
+        #   * ``"python"``  -- reference, mostly-Python path.
+        #     Per-body SDFs are computed via the body-specific C++/CUDA
+        #     SDF kernel called inside a Python ``for`` loop over bodies;
+        #     per-body CC SDFs are stored; body forces are computed using
+        #     the standard PyTorch ``forces_method2`` looping over each
+        #     body and reading the CC SDFs.  Slowest, simplest, used as
+        #     the parity baseline.
         #
-        #   * ``use_kernels = True`` -- streaming C++/CUDA kernels path.
-        #     Activates the per-body streaming SDF + fused force kernels,
-        #     the union-AABB crops for shared stress / mu / normals /
-        #     BDIM meta-equation, and the per-body custom trilinear
-        #     samplers.  Requires the compiled ``lilytorch.src.kernels``
-        #     extension to be available.
+        #   * ``"kernels"`` -- separate-kernels path.
+        #     The union SDF is computed in a dedicated CUDA kernel using
+        #     a packed (sdf, body-id) ``atomicMin`` to avoid race
+        #     conditions; the body forces are computed in a *separate*
+        #     CUDA kernel (``bdim_forces_*_multi``).  No per-body CC SDF
+        #     stack is allocated; only per-body sparse AABB-cropped slabs.
         #
-        # All previously-individual variant flags
-        # (force_narrow_band, force_narrow_batch, force_shared_union,
-        # mu_normals_union, bdim_union, streaming_sdf_3d,
-        # streaming_forces_3d, streaming_sdf_2d, streaming_forces_2d)
-        # are removed as user-facing keys; the corresponding internal
-        # ``self._...`` attributes are derived directly from
-        # ``use_kernels`` here so that downstream dispatch in
-        # ``forces.py`` and ``BDIMhandler.py`` keeps working unchanged.
-        self._use_kernels = bool(solver.get("use_kernels", True))
-        _uk = self._use_kernels
-        # Shared-stress union-AABB crop.
+        #   * ``"fused"``   -- fused experimental path (default).
+        #     A single C++/CUDA kernel
+        #     (``streaming_sdf_forces_fused_*_multi``) computes the union
+        #     SDF *and* the per-body force/torque accumulators in one
+        #     pass.  Avoids the extra ``sparse_cc_flat`` allocation and
+        #     a second pass over the union grid.
+        #
+        # All other internal dispatch flags (``_use_kernels``,
+        # ``_streaming_sdf_2d/3d``, ``_streaming_forces_2d/3d``,
+        # ``_fused_sdf_forces_2d/3d``, ``_custom_trilinear_3d``,
+        # ``_forces_shared_union``, ``_mu_normals_union``,
+        # ``_bdim_union``) are derived deterministically from
+        # ``solver_method`` below — they are NOT user-facing.
+        #
+        # Backward compatibility: the legacy keys ``use_kernels`` and
+        # ``fused_sdf_forces`` are still accepted (with a
+        # ``DeprecationWarning``) and mapped onto ``solver_method`` as:
+        #     use_kernels=False                          -> "python"
+        #     use_kernels=True,  fused_sdf_forces=False  -> "kernels"
+        #     use_kernels=True,  fused_sdf_forces=True   -> "fused"
+        # If both ``solver_method`` and a legacy key are supplied, the
+        # explicit ``solver_method`` value wins (and a warning is
+        # emitted if the two disagree).
+        self._solver_method = self._resolve_solver_method(solver)
+        _method = self._solver_method
+        _uk     = (_method != "python")          # any kernel path
+        _fused  = (_method == "fused")           # fused force kernel
+
+        self._use_kernels         = _uk
+        # Shared-stress union-AABB crop (kernel paths only).
         self._forces_shared_union = _uk
-        # mu + normals union-AABB crop.
-        self._mu_normals_union = _uk
-        self._mu_union_ready = False   # persistent buffers allocated lazily
-        # BDIM meta-equation union-AABB crop.
-        self._bdim_union = _uk
-        # Phase B (3-D streaming SDF) and Phase D (3-D fused forces).
-        self._streaming_sdf_3d = _uk
+        # mu + normals union-AABB crop (kernel paths only).
+        self._mu_normals_union    = _uk
+        self._mu_union_ready      = False   # persistent buffers allocated lazily
+        # BDIM meta-equation union-AABB crop (kernel paths only).
+        self._bdim_union          = _uk
+        # Streaming SDF (Phase B) + Phase D streaming forces (3-D).
+        self._streaming_sdf_3d    = _uk
         self._streaming_forces_3d = _uk
-        # Fused Phase C+D: SDF + inline lagged force in one kernel pass.
-        # Eliminates sparse_cc_flat and union-AABB stress tensors.
-        # Disabled when use_kernels=False or fused_sdf_forces=False.
-        self._fused_sdf_forces_3d = _uk and bool(
-            solver.get("fused_sdf_forces", True)
-        )
-        # The streaming 3-D path requires the per-body C++/CUDA trilinear
-        # samplers (built in ``BDIMhandler._init_custom_trilinear_3d``).
+        # Fused SDF + inline lagged force in one kernel pass (3-D).
+        self._fused_sdf_forces_3d = _fused
+        # Per-body C++/CUDA trilinear samplers
+        # (built in ``BDIMhandler._init_custom_trilinear_3d``).
         self._custom_trilinear_3d = _uk
-        # 2-D analogues (streaming SDF + fused forces).
-        self._streaming_sdf_2d = _uk
+        # 2-D analogues.
+        self._streaming_sdf_2d    = _uk
         self._streaming_forces_2d = _uk
-        self._fused_sdf_forces_2d = _uk and bool(
-            solver.get("fused_sdf_forces", True)
-        )
+        self._fused_sdf_forces_2d = _fused
+
+        _METHOD_DESCR = {
+            "python":  ("Python reference (per-body C++/CUDA SDF kernel "
+                        "in a Python for-loop, CC SDFs stored, "
+                        "forces_method2)"),
+            "kernels": ("separate CUDA kernels (atomic-min union SDF + "
+                        "bdim_forces_*_multi force kernel)"),
+            "fused":   ("fused CUDA path (memory-saving streamed geometry; "
+                        "3-D keeps SDF+forces fused, 2-D uses fused update "
+                        "+ native post-force Phase D)"),
+        }
+        print(f"  [solver_method={_method!r}] {_METHOD_DESCR[_method]}")
         # Body-SDF sampling method used inside the streaming C++/CUDA
         # kernels (``streaming_sdf_min_3d`` / ``..._multi``):
         #   * ``"trilinear"`` (default) -- 2x2x2 stencil, matches the
@@ -595,11 +683,6 @@ class FluidSolver(PlottingMixin):
             print(
                 "  [compile] forces_shared + forces_body_batch compiled "
                 "(reduce-overhead, 2D+3D)"
-                + ("  [use_kernels=True: streaming SDF + Phase D forces + "
-                   "shared-stress / mu-normals / BDIM-meta union crops "
-                   "(2D+3D)]"
-                   if self._use_kernels else
-                   "  [use_kernels=False: pure-PyTorch path]")
             )
         else:
             self._forces_shared_compiled = _forces_shared_3d
@@ -1571,7 +1654,7 @@ class FluidSolver(PlottingMixin):
     def _recompute_mu_normals_2d(self):
         """Recompute mu0/mu1 and normals on u- and v-staggered grids (2-D).
 
-        CC-grid normals are computed on-the-fly inside forces_method1/2.
+        CC-grid normals are cached here and reused by forces_method2.
         """
         comp = self.composite_body
 
@@ -2080,4 +2163,3 @@ class FluidSolver(PlottingMixin):
 
         # Block until all background I/O is complete before returning
         self.flush_io()
-

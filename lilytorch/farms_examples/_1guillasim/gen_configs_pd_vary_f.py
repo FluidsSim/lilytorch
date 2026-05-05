@@ -17,7 +17,9 @@ class SimConfig(BaseSimConfig):
         )
 
         # ── Simulation flags ──────────────────────────────────────────
-        self.use_bdim = False
+        self.use_bdim    = True
+        self.compute_sdf = True
+        self.convexify   = True
 
         # ── Animats ───────────────────────────────────────────────────
         self.filter_fixed_joints = False
@@ -29,7 +31,7 @@ class SimConfig(BaseSimConfig):
                 "control_type"   : "position",
                 "gains"          : [100.0, 4.0, 0],
                 "spawn_mode"     : SpawnMode.TRANSVERSE,
-                "pose"           : [0, 0, 0, 0, 0, 3.141592653589793],
+                "pose"           : [0, 0, 0.3, 0, 0, 3.141592653589793],
                 "controller_path": "lilytorch.farms_examples._1guillasim.pd_controller.PositionController",
                 "control_pars"   : {'freq': 1, 'twl': 12, 'amp': 30.0},
             },
@@ -56,7 +58,7 @@ class SimConfig(BaseSimConfig):
 
         # ── Body ─────────────────────────────────────────────────────
         self.force_scaling = 0.04
-        self.n_samples     = (2000, 2000)
+        # self.n_samples     = (2000, 2000)
 
     # ── Hooks ─────────────────────────────────────────────────────────
 

@@ -18,8 +18,10 @@ __all__ = [
     "apply_bcs_3d",
     "streaming_sdf_min_2d",
     "streaming_sdf_min_2d_multi",
+    "streaming_sdf_min_rho_2d_multi",
     "bdim_forces_2d_multi",
     "streaming_sdf_forces_fused_2d_multi",
+    "streaming_sdf_forces_post_2d",
     "apply_bcs_2d",
     "interp_2d",
     "interp_3d",
@@ -326,6 +328,41 @@ def streaming_sdf_min_2d_multi(
     )
 
 
+def streaming_sdf_min_rho_2d_multi(
+        F_flat: Tensor, F_offsets: Tensor,
+        body_shapes: Tensor,
+        body_meta: Tensor,
+        kin: Tensor,
+        aabb_lo: Tensor,
+        aabb_dim: Tensor,
+        gx: Tensor, gy: Tensor,
+        h_grid: float,
+        max_vol_per_body: int,
+        sdf_cc: Tensor, sdf_u: Tensor, sdf_v: Tensor,
+        body_u: Tensor, body_v: Tensor,
+        interp_method: int,
+        rho_bodies: Tensor,
+        winning_rho_cc: Tensor) -> None:
+    """Multi-body fused 2-D Phase C update with winning-body density.
+
+    This is the memory-saving update half of the fused 2-D path: it
+    updates the union SDF / face velocities and stamps ``winning_rho_cc``
+    without materializing ``sparse_cc_flat`` and without computing forces.
+    """
+    return torch.ops.lilytorch_kernels.streaming_sdf_min_rho_2d_multi.default(
+        F_flat, F_offsets,
+        body_shapes, body_meta, kin,
+        aabb_lo, aabb_dim,
+        gx, gy, float(h_grid),
+        int(max_vol_per_body),
+        sdf_cc, sdf_u, sdf_v,
+        body_u, body_v,
+        int(interp_method),
+        rho_bodies,
+        winning_rho_cc,
+    )
+
+
 def bdim_forces_2d_multi(
         sparse_cc_flat: Tensor, cell_offsets: Tensor,
         kin: Tensor,
@@ -346,14 +383,12 @@ def bdim_forces_2d_multi(
     per-body cell-centred SDF cached in ``sparse_cc_flat`` (populated
     by :func:`streaming_sdf_min_2d_multi`) instead of re-sampling it.
 
-    ``out`` is float64 with 8 channels per body:
+    ``out`` is float64 with 6 channels per body:
 
-        ``[fv_x, fv_y, t_v, fp_x, fp_y, t_p, 0, 0]``
+        ``[fv_x, fv_y, t_v, fp_x, fp_y, t_p]``
 
     where ``t_v`` and ``t_p`` are the scalar out-of-plane torques
-    ``arm_x*f_y - arm_y*f_x``; the trailing two slots are reserved
-    (the kernel writes 0 there) and exist for layout symmetry with the
-    12-channel 3-D op.
+    ``arm_x*f_y - arm_y*f_x``.
 
     ``delta_order`` selects the smoothed-delta order (1 or 2); see
     :func:`bdim_forces_3d_multi` for details.
@@ -389,9 +424,12 @@ def streaming_sdf_forces_fused_2d_multi(
         eps_body: float, eps_solver: float, h2: float,
         delta_order: int,
         out: Tensor) -> None:
-    """Fused 2D Phase C+D: SDF update + inline lagged force integration.
+    """Fused 2D Phase C+D: SDF update + current-normal force integration.
     2D analogue of streaming_sdf_forces_fused_3d_multi.
-    out (B, 8) float64: [fv_x, fv_y, t_v, fp_x, fp_y, t_p, 0, 0]
+    The ``nx_cc`` / ``ny_cc`` arguments are kept for ABI compatibility;
+    the 2-D implementation recomputes force normals from the decoded
+    current union SDF inside the op.
+    out (B, 6) float64: [fv_x, fv_y, t_v, fp_x, fp_y, t_p]
     """
     return torch.ops.lilytorch_kernels.streaming_sdf_forces_fused_2d_multi.default(
         F_flat, F_offsets, body_shapes, body_meta, kin, aabb_lo, aabb_dim,
@@ -400,6 +438,38 @@ def streaming_sdf_forces_fused_2d_multi(
         rho_bodies, winning_rho_cc,
         u_prev, v_prev, p_prev, nx_cc, ny_cc, nu_rho_field,
         float(eps_body), float(eps_solver), float(h2), int(delta_order), out,
+    )
+
+
+def streaming_sdf_forces_post_2d(
+        F_flat: Tensor, F_offsets: Tensor,
+        body_shapes: Tensor, body_meta: Tensor, kin: Tensor,
+        aabb_lo: Tensor, aabb_dim: Tensor,
+        gx: Tensor, gy: Tensor,
+        h_grid: float, max_vol_per_body: int,
+        sdf_cc: Tensor,
+        interp_method: int,
+        u_prev: Tensor, v_prev: Tensor, p_prev: Tensor,
+        nu_rho_field: Tensor,
+        eps_body: float, eps_solver: float, h2: float,
+        delta_order: int,
+        out: Tensor) -> None:
+    """2-D Phase D only: current-union-normal force integration.
+
+    Reuses the fused-path body metadata and current union SDF produced by
+    the update stage, but consumes the current post-fluid-step fields.
+    """
+    return torch.ops.lilytorch_kernels.streaming_sdf_forces_post_2d.default(
+        F_flat, F_offsets,
+        body_shapes, body_meta, kin,
+        aabb_lo, aabb_dim,
+        gx, gy, float(h_grid), int(max_vol_per_body),
+        sdf_cc,
+        int(interp_method),
+        u_prev, v_prev, p_prev,
+        nu_rho_field,
+        float(eps_body), float(eps_solver), float(h2), int(delta_order),
+        out,
     )
 
 

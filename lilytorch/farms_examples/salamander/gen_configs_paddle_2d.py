@@ -17,8 +17,8 @@ class SimConfig(BaseSimConfig):
 
         # ── Hardware ──────────────────────────────────────────────────
         self.use_bdim     = True
-        self.use_gpu      = False
-        self.compute_sdf  = False
+        self.use_gpu      = True
+        self.compute_sdf  = True
         self.wall_height  = 0.02
         self.water_height = 0.015
         self.stack_folder = "salamander"
@@ -42,6 +42,13 @@ class SimConfig(BaseSimConfig):
                 "pose"      : [0, 0, 0.015, 0, 0, 3.141592653589793],
             },
         ]
+
+        self.solver_method    = "fused"
+        self.poisson_compile  = False
+        self.compile_adv_diff = False
+        self.compile_forces   = True
+        self.compile_sdf      = True
+
 
         # ── 2-D grid ─────────────────────────────────────────────────
         self.Nx   = 1024
@@ -82,8 +89,8 @@ class SimConfig(BaseSimConfig):
         self.bc_values_v = [0, 0, 0, 0]
 
         # ── Body ─────────────────────────────────────────────────────
-        self.contour_mask = True
-        self.n_samples    = (2000, 2000)
+        self.contour_mask = False
+        # self.n_samples    = (2000, 2000)
 
     # ── Hooks ─────────────────────────────────────────────────────────
 

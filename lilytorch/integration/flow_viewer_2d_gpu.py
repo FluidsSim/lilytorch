@@ -384,7 +384,7 @@ class _CudaGlQuadOverlay:
         state = self._states.pop(renderer_id, None)
         self._release_state(state)
 
-    def upload(self, renderer, texture_u8: torch.Tensor):
+    def upload(self, renderer, texture_u8: torch.Tensor, synchronize: bool = True):
         if not self.available:
             raise RuntimeError(
                 "CUDA-OpenGL overlay upload is unavailable: need torch CUDA, "
@@ -400,7 +400,8 @@ class _CudaGlQuadOverlay:
         state = self._ensure_state(renderer, texture_u8.shape)
         renderer._gl_context.make_current()
         self._clear_gl_errors()
-        torch.cuda.synchronize(texture_u8.device)
+        if synchronize:
+            torch.cuda.current_stream(texture_u8.device).synchronize()
 
         resource = state["resource"]
         self._cuda_check(
@@ -768,6 +769,7 @@ class FlowViewer2DGPU(TaskExtension):
         smooth_sigma: float = 1.5,
         crop_boundary: int = 2,
         update_every: int | None = None,
+        synchronize_cuda: bool = True,
     ):
         super().__init__()
         self.experiment_options = experiment_options
@@ -781,6 +783,7 @@ class FlowViewer2DGPU(TaskExtension):
         self.smooth_sigma = float(smooth_sigma)
         self.crop_boundary = int(crop_boundary)
         self.update_every = update_every
+        self.synchronize_cuda = bool(synchronize_cuda)
 
         self._fluid_ext = None
         self._field_fn = FIELD_MAP_2D_GPU.get(field)
@@ -794,6 +797,8 @@ class FlowViewer2DGPU(TaskExtension):
 
         self._plane_center: np.ndarray | None = None
         self._plane_size: np.ndarray | None = None
+        self._plane_center_f32: np.ndarray | None = None
+        self._plane_size_xy_f32: np.ndarray | None = None
 
         self._renderer_patch_id: int | None = None
 
@@ -820,6 +825,7 @@ class FlowViewer2DGPU(TaskExtension):
             smooth_sigma=config.get("smooth_sigma", 1.5),
             crop_boundary=config.get("crop_boundary", 2),
             update_every=config.get("update_every", None),
+            synchronize_cuda=config.get("synchronize_cuda", True),
         )
 
     def initialize_episode(self, task: ExperimentTask, physics: Physics):
@@ -916,8 +922,18 @@ class FlowViewer2DGPU(TaskExtension):
             return
 
         self._set_latest_texture(texture_rgb)
-        if gl_hook is not None and self._plane_center is not None and self._plane_size is not None:
-            gl_hook.update(texture_rgb, self._plane_center, self._plane_size, self.alpha)
+        if (
+            gl_hook is not None
+            and self._plane_center_f32 is not None
+            and self._plane_size_xy_f32 is not None
+        ):
+            gl_hook.update(
+                texture_rgb,
+                self._plane_center_f32,
+                self._plane_size_xy_f32,
+                self.alpha,
+                synchronize=self.synchronize_cuda,
+            )
 
     def end_episode(self, task: ExperimentTask, physics: Physics):
         del task
@@ -956,6 +972,8 @@ class FlowViewer2DGPU(TaskExtension):
             [(xmax - xmin) * 0.5, (ymax - ymin) * 0.5, 5e-4],
             dtype=np.float64,
         )
+        self._plane_center_f32 = self._plane_center.astype(np.float32, copy=True)
+        self._plane_size_xy_f32 = self._plane_size[:2].astype(np.float32, copy=True)
 
         if renderer is not None:
             neutral = torch.full(
@@ -1053,6 +1071,7 @@ class FlowViewer2DGPU(TaskExtension):
         self._renderer_texture_uploader.upload(
             renderer,
             self._latest_texture_gpu,
+            synchronize=self.synchronize_cuda,
         )
         if not self._logged_renderer_gpu_notice:
             print(
@@ -1074,9 +1093,26 @@ class FlowViewer2DGPU(TaskExtension):
         flow_viewer = self
 
         def _render_with_gpu_plane(out=None):
-            result = original_render(out=out)
             if renderer._depth_rendering or renderer._segmentation_rendering:
-                return result
+                return original_render(out=out)
+
+            if renderer._mjr_context is None:
+                raise RuntimeError("render cannot be called after close.")
+
+            if renderer._gl_context:
+                renderer._gl_context.make_current()
+
+            out_shape = (renderer.height, renderer.width, 3)
+            if out is None:
+                result = np.empty(out_shape, dtype=np.uint8)
+            else:
+                if out.shape != out_shape:
+                    raise ValueError(
+                        f"Expected `out.shape == {out_shape}`. Got `out.shape={out.shape}` instead."
+                    )
+                result = out
+
+            mujoco._render.mjr_render(renderer._rect, renderer._scene, renderer._mjr_context)
 
             flow_viewer._upload_texture_to_renderer(renderer)
             flow_viewer._draw_renderer_overlay(renderer)

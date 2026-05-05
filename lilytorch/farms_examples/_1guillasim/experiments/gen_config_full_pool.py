@@ -24,8 +24,7 @@ class SimConfig(BaseSimConfig):
         self.headless             = False
         self.smagorinsky_cs       = 0.
 
-        self.use_kernels      = True
-        self.fused_sdf_forces = True
+        self.solver_method    = "fused"
         self.poisson_compile  = True
         self.compile_adv_diff = True
         self.compile_forces   = True

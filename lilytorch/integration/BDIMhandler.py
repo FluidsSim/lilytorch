@@ -25,7 +25,7 @@ from lilytorch.src.solver import FluidSolver
 from lilytorch.src.body import (rotate_grid_2d, rotate_grid_3d,
                                 _rotate_grid_3d_compiled)
 from lilytorch.src.kernels import streaming_sdf_forces_fused_3d_multi
-from lilytorch.src.kernels import streaming_sdf_forces_fused_2d_multi
+from lilytorch.src.kernels import streaming_sdf_min_rho_2d_multi
 from lilytorch.src.kernels import RegularGridInterpolator3D
 from lilytorch.src.kernels import streaming_sdf_min_2d_multi
 from lilytorch.src.kernels import streaming_sdf_min_3d
@@ -80,7 +80,7 @@ class BDIMhandler:
                 f"got {self.dtype}."
             )
         self.dtype_np = np.float32 if self.dtype == torch.float32 else np.float64
-        self._prev_body_index = ()
+        self._prev_body_index = () # used for 2D contour-mask neighbor only
         self._next_body_index = ()
 
         # ---- bookkeeping ----
@@ -177,18 +177,24 @@ class BDIMhandler:
         # dispatch in :meth:`step` already short-circuits to method 2
         # regardless of ``self.force_method`` — no extra check needed
         # for 3-D.
+        _solver_cfg = self.pars["solver"]
+        _kernel_path_active = (
+            _solver_cfg.get("solver_method", None) in ("kernels", "fused")
+            or (_solver_cfg.get("solver_method", None) is None
+                and bool(_solver_cfg.get("use_kernels", True)))
+        )
         if (self.ndim == 2
                 and self.force_method == "method1"
-                and bool(self.pars["solver"].get("use_kernels", True))):
+                and _kernel_path_active):
             raise ValueError(
                 "force_method='method1' is incompatible with "
-                "use_kernels=True: forces_method1 is a contour-integral "
-                "implementation that does not consume the per-body "
-                "cc-SDF produced by the streaming/fused kernels. "
-                "Either set solver.use_kernels=False (pure-Python "
-                "path) or switch to force_method='method2' (default), "
-                "which integrates the smoothed delta with full "
-                "kernel-mode acceleration."
+                "solver_method ∈ {'kernels', 'fused'}: forces_method1 "
+                "is a contour-integral implementation that does not "
+                "consume the per-body cc-SDF produced by the streaming/"
+                "fused kernels. Either set solver.solver_method='python' "
+                "(pure-Python path) or switch to force_method='method2' "
+                "(default), which integrates the smoothed delta with "
+                "full kernel-mode acceleration."
             )
 
         # ---- FARMS-style buoyancy parameters ----
@@ -379,6 +385,7 @@ class BDIMhandler:
         # using their callable SDF).  This mirrors the 3-D streaming
         # dispatch (see ``_update_3d_streaming``); both use the same
         # "all-mesh → batched kernel; mixed → per-body fallback" rule.
+
         if getattr(self.fluid_solver, '_streaming_sdf_2d', False):
             comp_check = self.fluid_solver.composite_body
             if all(getattr(b, '_stream_meta', None) is not None
@@ -1072,6 +1079,24 @@ class BDIMhandler:
 
         h_grid = float(comp.h)
 
+        # The fused force kernel computes SDF samples and optional |∇φ|
+        # correction on the fly, but force stress still needs lagged CC
+        # normals.  On the first fused step these attributes may not exist
+        # yet because normal recomputation happens after the SDF update in
+        # BDIMhandler.step().  Initialize them once from the pre-update
+        # union SDF before resetting fields below.
+        if (
+            getattr(fs, '_fused_sdf_forces_3d', False)
+            and (
+                getattr(fs, 'normal_x', None) is None
+                or getattr(fs, 'normal_y', None) is None
+                or getattr(fs, 'normal_z', None) is None
+            )
+        ):
+            fs.normal_x, fs.normal_y, fs.normal_z = comp.compute_normals(
+                comp.sdf_val
+            )
+
         # Reset running-min fields
         comp._sdf_sparse = [None] * B
         comp.sdf_val.fill_(_FAR)
@@ -1103,10 +1128,7 @@ class BDIMhandler:
         # device-side bytes per static cache.
         # ------------------------------------------------------------------
         fs_for_cache = self.fluid_solver
-        _use_fused_cache = (
-            getattr(fs_for_cache, '_fused_sdf_forces_3d', False)
-            and getattr(fs_for_cache, 'normal_x', None) is not None
-        )
+        _use_fused_cache = getattr(fs_for_cache, '_fused_sdf_forces_3d', False)
 
         sm = getattr(comp, '_stream_multi_static', None)
         if sm is None:
@@ -1330,10 +1352,7 @@ class BDIMhandler:
         cell_off_h = cell_off_h_np.tolist()
 
         fs = self.fluid_solver
-        _use_fused = (
-            getattr(fs, '_fused_sdf_forces_3d', False)
-            and getattr(fs, 'normal_x', None) is not None
-        )
+        _use_fused = getattr(fs, '_fused_sdf_forces_3d', False)
 
         if _use_fused:
             # Per-body densities: use rho_body per body (same for all for now;
@@ -1828,32 +1847,77 @@ class BDIMhandler:
     def _init_custom_trilinear_2d(self):
         """2-D analogue of :meth:`_init_custom_trilinear_3d`.
 
-        For each 2-D mesh body, stash the metadata needed by the
+        For each 2-D body, stash the metadata needed by the
         ``streaming_sdf_min_2d_multi`` kernel directly on
-        ``body._stream_meta``.  Unlike the 3-D path we don't construct
-        a separate ``RegularGridInterpolator2D`` instance — the
-        streaming kernel does its own bilinear / biquadratic sampling
-        from ``F``, ``bx``, ``by`` and the cached scalars below.
+        ``body._stream_meta``.  The streaming kernel does its own
+        bilinear / biquadratic sampling from ``F``, ``bx``, ``by``
+        and the cached scalars below.
 
-        Analytical (non-mesh) bodies — those whose ``body.sdf`` has no
-        ``F``/``x``/``y`` attributes — keep ``_stream_meta = None`` and
-        will cause the streaming dispatch to fall through to the legacy
-        batched ``grid_sample`` path.
+        Mesh bodies use the precomputed ``body.sdf.{F, x, y}`` table.
+
+        Analytical bodies (callable SDF, no precomputed table) are
+        handled by pre-sampling the callable onto a regular local-frame
+        grid derived from ``body.local_aabb`` (auto-derived from the
+        contour in :meth:`BodyAnalytical._initialize_2d`).
+
+        Raises ``RuntimeError`` if any body has neither a precomputed SDF
+        grid nor a ``local_aabb`` descriptor.  Silent fallback to the
+        Python path is intentionally forbidden when ``use_kernels=True``.
         """
         comp = self.fluid_solver.composite_body
+        h    = float(self.fluid_solver.h)
         n_built = 0
+        n_sampled = 0
         for body in comp.bodies:
-            if not (hasattr(body, 'sdf')
+            # ── Mesh body: has a precomputed regular-grid SDF ──────────
+            if (hasattr(body, 'sdf')
                     and hasattr(body.sdf, 'F')
                     and hasattr(body.sdf, 'x')
                     and hasattr(body.sdf, 'y')):
+                F  = body.sdf.F.contiguous()
+                bx = body.sdf.x.contiguous()
+                by = body.sdf.y.contiguous()
+                dx_b = float(bx[1].item() - bx[0].item())
+                dy_b = float(by[1].item() - by[0].item())
+                body._stream_meta = {
+                    'F':       F,
+                    'bx':      bx,
+                    'by':      by,
+                    'bx0':     float(bx[0].item()),
+                    'by0':     float(by[0].item()),
+                    'bx_last': float(bx[-1].item()),
+                    'by_last': float(by[-1].item()),
+                    'inv_dx':  1.0 / dx_b,
+                    'inv_dy':  1.0 / dy_b,
+                    'inv_vol': 1.0 / (dx_b * dy_b),
+                }
+                n_built += 1
+                continue
+
+            # ── Analytical body: sample SDF onto a grid from local_aabb ─
+            # local_aabb is in body-local frame relative to the URDF origin,
+            # derived from the zero-level-set contour during _initialize_2d.
+            # We sample at fluid-grid resolution so the streaming kernel's
+            # bilinear interpolation is as accurate as the mesh-body path.
+            local_aabb  = getattr(body, 'local_aabb', None)
+            sdf_callable = getattr(body, 'sdf', None)
+            if local_aabb is None or not callable(sdf_callable):
                 body._stream_meta = None
                 continue
-            F  = body.sdf.F.contiguous()
-            bx = body.sdf.x.contiguous()
-            by = body.sdf.y.contiguous()
-            dx_b = float(bx[1].item() - bx[0].item())
-            dy_b = float(by[1].item() - by[0].item())
+
+            lo = local_aabb[0].cpu()
+            hi = local_aabb[1].cpu()
+            Mx = max(2, int(round(float(hi[0] - lo[0]) / h)) + 1)
+            My = max(2, int(round(float(hi[1] - lo[1]) / h)) + 1)
+            bx = torch.linspace(float(lo[0]), float(hi[0]), Mx,
+                                dtype=self.dtype, device=self.device)
+            by = torch.linspace(float(lo[1]), float(hi[1]), My,
+                                dtype=self.dtype, device=self.device)
+            X, Y = torch.meshgrid(bx, by, indexing='ij')
+            with torch.no_grad():
+                F = sdf_callable(X, Y).contiguous()
+            dx_b = float(bx[1].item() - bx[0].item()) if Mx > 1 else h
+            dy_b = float(by[1].item() - by[0].item()) if My > 1 else h
             body._stream_meta = {
                 'F':       F,
                 'bx':      bx,
@@ -1866,18 +1930,20 @@ class BDIMhandler:
                 'inv_dy':  1.0 / dy_b,
                 'inv_vol': 1.0 / (dx_b * dy_b),
             }
-            n_built += 1
+            n_sampled += 1
+
         print(f"  [stream-meta-2D] built {n_built}/{len(comp.bodies)} "
-              f"per-body 2-D streaming-SDF metadata records")
+              f"per-body 2-D streaming-SDF metadata records "
+              f"({n_sampled} sampled from analytical SDF)")
 
     def _update_2d_streaming_multi(self, t, iteration, dt=1):
         """2-D analogue of :meth:`_update_3d_streaming_multi`.
 
         Single Python op call dispatches B per-body 2-D streaming-SDF
         kernels in C++/CUDA, eliminating B torch.ops dispatches/step.
-        Requires that ALL bodies expose ``_stream_meta`` (regular-grid
-        SDF; analytical bodies fall through to the legacy batched
-        grid_sample path before this method is called).
+        Requires that ALL bodies expose ``_stream_meta`` (set by
+        ``_init_custom_trilinear_2d`` for both mesh bodies and analytical
+        bodies whose ``local_aabb`` is available).
 
         Side-effects per call:
             * fills ``comp.sdf_val``, ``comp.sdf_val_u``, ``comp.sdf_val_v``,
@@ -1939,6 +2005,25 @@ class BDIMhandler:
             )
 
         h_grid = float(comp.h)
+
+        # ── Lagged CC normals for the fused 2-D force kernel ──────
+        # The fused 2-D Phase-D kernel reads ``fs.normal_x/normal_y`` at
+        # the previous step's SDF (true lagged-normals BDIM).  Before
+        # the running-min fields are wiped to ``_FAR`` below we must
+        # seed these from the *current* (= previous-step) ``comp.sdf_val``
+        # if they have not yet been populated by ``_recompute_mu_normals_2d``.
+        # Computing them after the reset would feed the kernel normals
+        # taken from a flat ``_FAR`` field — the gradients vanish, the
+        # delta-band integrand picks an arbitrary direction, and the 2-D
+        # forces oscillate.  This is the analogue of the same
+        # initialization performed in ``_update_3d_streaming_multi``
+        # before the 3-D SDF reset.
+        if getattr(fs, '_fused_sdf_forces_2d', False):
+            if (
+                getattr(fs, 'normal_x', None) is None
+                or getattr(fs, 'normal_y', None) is None
+            ):
+                (fs.normal_x, fs.normal_y) = comp.compute_normals(comp.sdf_val)
 
         # Reset running-min fields and per-body sparse storage
         comp._sdf_sparse = [None] * B
@@ -2010,9 +2095,9 @@ class BDIMhandler:
             sdf_lo_np   = np.empty((B, 2), dtype=self.dtype_np)
             sdf_hi_np   = np.empty((B, 2), dtype=self.dtype_np)
             for b, body in enumerate(comp.bodies):
-                sx, sy = body.sdf.x, body.sdf.y
-                sdf_lo_np[b] = (float(sx[0].item()),  float(sy[0].item()))
-                sdf_hi_np[b] = (float(sx[-1].item()), float(sy[-1].item()))
+                m = body._stream_meta  # set for both mesh and analytical bodies
+                sdf_lo_np[b] = (m['bx0'],     m['by0'])
+                sdf_hi_np[b] = (m['bx_last'], m['by_last'])
             kin_static = {
                 'body_ids':     body_ids_np,
                 'local_lt':     local_lt_np,
@@ -2073,6 +2158,10 @@ class BDIMhandler:
         i_hi = np.floor((w_max - g0) * inv_h).astype(np.int64) + 1 + pad
         np.maximum(i_lo, 0, out=i_lo)
         np.minimum(i_hi, gs_np[None, :], out=i_hi)
+        # Bodies partially or entirely outside the grid produce i_hi < i_lo
+        # (i_hi is clamped above by gs_np but not from below by i_lo).
+        # Clamp to zero-size AABB for out-of-bounds bodies.
+        np.maximum(i_hi, i_lo, out=i_hi)
 
         dims     = i_hi - i_lo
         sub_vol  = dims.prod(axis=1)
@@ -2166,7 +2255,7 @@ class BDIMhandler:
 
             fused_out = getattr(self, '_fused_out_buf_2d', None)
             if fused_out is None or fused_out.shape[0] != B:
-                fused_out = torch.zeros((B, 8), dtype=torch.float64, device=self.device)
+                fused_out = torch.zeros((B, 6), dtype=torch.float64, device=self.device)
                 self._fused_out_buf_2d = fused_out
             else:
                 fused_out.zero_()
@@ -2193,6 +2282,22 @@ class BDIMhandler:
             nx_cc_t = getattr(fs, 'normal_x', None)
             ny_cc_t = getattr(fs, 'normal_y', None)
             if nx_cc_t is None or ny_cc_t is None:
+                # Defensive fallback only.  ``_update_2d_streaming_multi``
+                # seeds these from the previous-step ``comp.sdf_val``
+                # *before* the running-min reset above, so under normal
+                # operation this branch is not taken.  If it is, the
+                # SDF fields have already been wiped to ``_FAR`` and the
+                # resulting normals will be degenerate; warn so the
+                # caller can investigate.
+                import warnings
+                warnings.warn(
+                    "fused 2-D path: CC normals were missing after the "
+                    "running-min reset; computing them from the wiped "
+                    "SDF will yield degenerate normals.  Ensure "
+                    "fs.normal_x/normal_y are seeded before "
+                    "_update_2d_streaming_multi runs.",
+                    stacklevel=2,
+                )
                 (nx_cc_t, ny_cc_t) = comp.compute_normals(comp.sdf_val)
 
             if not getattr(self, '_fused_contig_checked_2d', False):
@@ -2209,7 +2314,7 @@ class BDIMhandler:
                         )
                 self._fused_contig_checked_2d = True
 
-            streaming_sdf_forces_fused_2d_multi(
+            streaming_sdf_min_rho_2d_multi(
                 sm['F_flat'], sm['F_offsets'],
                 sm['body_shapes'], sm['body_meta'], kin,
                 aabb_lo, aabb_dim,
@@ -2218,19 +2323,15 @@ class BDIMhandler:
                 comp.body_u, comp.body_v,
                 interp_method,
                 rho_bodies_buf, winning_rho_cc,
-                fs.u0.contiguous(), fs.v0.contiguous(), fs.p0.contiguous(),
-                nx_cc_t.contiguous(), ny_cc_t.contiguous(),
-                nu_rho_field,
-                eps_body_val, eps_solver_val,
-                fs.h2,
-                getattr(fs, 'force_delta_order', 1),
-                fused_out,
             )
 
             for b in range(B):
                 comp._sdf_sparse[b] = None
 
-            comp._fused_forces_out = fused_out
+            # 2-D fused force integration is computed in the later force
+            # stage by the native Phase-D-only op, so the update stage only
+            # maintains the fused/memory-saving geometry state here.
+            comp._fused_forces_out = None
             comp._winning_rho_cc   = winning_rho_cc
 
             comp._stream_multi_step = {
@@ -2243,9 +2344,20 @@ class BDIMhandler:
             }
 
         else:
-            sparse_flat = torch.zeros(
-                int(cell_off_h_np[-1]), device=self.device, dtype=self.dtype,
-            )
+            sparse_n = int(cell_off_h_np[-1])
+            sparse_flat = getattr(self, '_stream_sparse_flat_2d', None)
+            if (
+                sparse_flat is None
+                or sparse_flat.numel() < sparse_n
+                or sparse_flat.device != self.device
+                or sparse_flat.dtype != self.dtype
+            ):
+                sparse_flat = torch.empty(
+                    sparse_n, device=self.device, dtype=self.dtype,
+                )
+                self._stream_sparse_flat_2d = sparse_flat
+            else:
+                sparse_flat = sparse_flat[:sparse_n]
 
             streaming_sdf_min_2d_multi(
                 sm['F_flat'],  sm['F_offsets'],

@@ -168,6 +168,7 @@ class RealtimeMonitor(TaskExtension):
         self._window = window
         self._times: collections.deque = collections.deque(maxlen=window)
         self._last_t: float | None = None
+        self._last_display_t: float = 0.0
         self._physics_dt: float = 0.0
         self._rt_model: _RTColumnModel | None = None
 
@@ -204,6 +205,11 @@ class RealtimeMonitor(TaskExtension):
         if self._last_t is not None:
             self._times.append(now - self._last_t)
         self._last_t = now
+
+        # Rate-limit viewer updates to ~5 Hz to avoid starving the render thread.
+        if now - self._last_display_t < 0.2:
+            return
+        self._last_display_t = now
 
         if self._times:
             mean_dt = sum(self._times) / len(self._times)

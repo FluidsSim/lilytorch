@@ -4,13 +4,12 @@
 multi-body scene (rotated disc SDFs, random kinematics, random stress /
 pressure-force fields), runs ``streaming_sdf_min_2d_multi`` to populate
 ``sparse_cc_flat``, then runs ``bdim_forces_2d_multi`` and compares the
-8-channel (B, 8) result against a pure-PyTorch reference using the same
+6-channel (B, 6) result against a pure-PyTorch reference using the same
 δ-kernel.
 
 Layout of ``out`` per body:
-    [fv_x, fv_y, t_v, fp_x, fp_y, t_p, 0, 0]
+    [fv_x, fv_y, t_v, fp_x, fp_y, t_p]
 where t_v = arm_x*fv_y - arm_y*fv_x and t_p = arm_x*fp_y - arm_y*fp_x.
-The trailing two slots are reserved by the kernel and must be zero.
 
 Runs on CPU.  When CUDA is available, the same problem is run on CUDA
 and cross-checked against the CPU output.
@@ -74,7 +73,7 @@ def _reference_forces_2d(
 ):
     """Pure-PyTorch reference matching the kernel's math, no atomics."""
     B = aabb_dim.shape[0]
-    out = torch.zeros((B, 8), dtype=torch.float64, device=sparse_cc_flat.device)
+    out = torch.zeros((B, 6), dtype=torch.float64, device=sparse_cc_flat.device)
     pi_v = math.pi
     inv_2eps = 0.5 / eps_body
 
@@ -222,7 +221,7 @@ def _run_forces(scene, stress, *, dtype, device):
     eps_solver = 2.0 * h
     h2 = h * h
 
-    out_kernel = torch.zeros((B, 8), dtype=torch.float64, device=device)
+    out_kernel = torch.zeros((B, 6), dtype=torch.float64, device=device)
     bdim_forces_2d_multi(
         scene["sparse_cc_flat"], scene["cell_off_t"],
         scene["kin_t"],

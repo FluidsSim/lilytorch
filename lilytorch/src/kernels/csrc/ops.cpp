@@ -158,13 +158,31 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " int interp_method=0"
         ") -> ()");
 
+    // 2-D fused/memory-saving update path: identical Phase C union SDF /
+    // face-velocity update as streaming_sdf_forces_fused_2d_multi, but
+    // without force accumulation and without sparse_cc_flat output.
+    // ``winning_rho_cc`` is pre-filled with rho_fluid by the caller and
+    // stamped with the winning body density on cc cells.
+    m.def(
+        "streaming_sdf_min_rho_2d_multi("
+        "Tensor F_flat, Tensor F_offsets,"
+        " Tensor body_shapes, Tensor body_meta, Tensor kin,"
+        " Tensor aabb_lo, Tensor aabb_dim,"
+        " Tensor gx, Tensor gy, float h_grid,"
+        " int max_vol_per_body,"
+        " Tensor(a!) sdf_cc, Tensor(b!) sdf_u, Tensor(c!) sdf_v,"
+        " Tensor(d!) body_u, Tensor(e!) body_v,"
+        " int interp_method,"
+        " Tensor rho_bodies,"
+        " Tensor(f!) winning_rho_cc"
+        ") -> ()");
+
     // 2-D forces kernel — analogue of bdim_forces_3d_multi.  Reads the
     // per-body cc-SDF cached in ``sparse_cc_flat`` (populated by
-    // streaming_sdf_min_2d_multi).  ``out`` is float64 and has 8
+    // streaming_sdf_min_2d_multi).  ``out`` is float64 and has 6
     // channels per body:
-    //   [fv_x, fv_y, t_v, fp_x, fp_y, t_p, 0, 0]
-    // where t_* are the scalar out-of-plane torques and the trailing
-    // two slots are reserved (always written as 0).
+    //   [fv_x, fv_y, t_v, fp_x, fp_y, t_p]
+    // where t_* are the scalar out-of-plane torques.
     m.def(
         "bdim_forces_2d_multi("
         "Tensor sparse_cc_flat, Tensor cell_offsets,"
@@ -198,6 +216,25 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " float eps_body, float eps_solver, float h2,"
         " int delta_order,"
         " Tensor(g!) out"
+        ") -> ()");
+
+    // 2-D Phase D only: recompute body forces/torques from the current
+    // union SDF and the current fluid fields without redoing the fused
+    // Phase C update.
+    m.def(
+        "streaming_sdf_forces_post_2d("
+        "Tensor F_flat, Tensor F_offsets,"
+        " Tensor body_shapes, Tensor body_meta, Tensor kin,"
+        " Tensor aabb_lo, Tensor aabb_dim,"
+        " Tensor gx, Tensor gy, float h_grid,"
+        " int max_vol_per_body,"
+        " Tensor sdf_cc,"
+        " int interp_method,"
+        " Tensor u_prev, Tensor v_prev, Tensor p_prev,"
+        " Tensor nu_rho_field,"
+        " float eps_body, float eps_solver, float h2,"
+        " int delta_order,"
+        " Tensor(a!) out"
         ") -> ()");
 
     // 2-D fused boundary-condition writes — analogue of apply_bcs_3d.
