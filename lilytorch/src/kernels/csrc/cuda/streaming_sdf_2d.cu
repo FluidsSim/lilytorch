@@ -857,21 +857,70 @@ __global__ void streaming_sdf_forces_fused_2d_multi_kernel(
             const scalar_t nx = nx_cc[g_idx];
             const scalar_t ny = ny_cc[g_idx];
 
-            const int im1 = (i > 0)     ? i-1 : 0;
-            const int ip1 = (i+1 < Ngx) ? i+1 : i;
-            const int jm1 = (j > 0)     ? j-1 : 0;
-            const int jp1 = (j+1 < Ngy) ? j+1 : j;
+            const int im1 = (i > 0)         ? i-1 : 0;
+            const int ip1 = (i+1 < Ngx)     ? i+1 : i;
+            const int im2 = (i > 1)         ? i-2 : 0;
+            const int ip2 = (i+2 < Ngx)     ? i+2 : (Ngx - 1);
+            const int jm1 = (j > 0)         ? j-1 : 0;
+            const int jp1 = (j+1 < Ngy)     ? j+1 : j;
+            const int jm2 = (j > 1)         ? j-2 : 0;
+            const int jp2 = (j+2 < Ngy)     ? j+2 : (Ngy - 1);
 
-            const scalar_t dudx = (u_prev[ip1 * Ngy + j] - u_prev[i * Ngy + j]) * inv_h;
-            const scalar_t dvdy = (v_prev[i * Ngy + jp1] - v_prev[i * Ngy + j]) * inv_h;
+            scalar_t dudx;
+            if (i + 1 < Ngx) {
+                dudx = (u_prev[ip1 * Ngy + j] - u_prev[i * Ngy + j]) * inv_h;
+            } else {
+                dudx = (u_prev[i * Ngy + j] - u_prev[im1 * Ngy + j]) * inv_h;
+            }
 
-            const scalar_t u_cc_jp1 = (scalar_t)0.5 * (u_prev[i * Ngy + jp1] + u_prev[ip1 * Ngy + jp1]);
+            scalar_t dvdy;
+            if (j + 1 < Ngy) {
+                dvdy = (v_prev[i * Ngy + jp1] - v_prev[i * Ngy + j]) * inv_h;
+            } else {
+                dvdy = (v_prev[i * Ngy + j] - v_prev[i * Ngy + jm1]) * inv_h;
+            }
+
+            const scalar_t u_cc_jm2 = (scalar_t)0.5 * (u_prev[i * Ngy + jm2] + u_prev[ip1 * Ngy + jm2]);
             const scalar_t u_cc_jm1 = (scalar_t)0.5 * (u_prev[i * Ngy + jm1] + u_prev[ip1 * Ngy + jm1]);
-            const scalar_t dudy = (u_cc_jp1 - u_cc_jm1) * (scalar_t)0.5 * inv_h;
+            const scalar_t u_cc_j0  = (scalar_t)0.5 * (u_prev[i * Ngy + j  ] + u_prev[ip1 * Ngy + j  ]);
+            const scalar_t u_cc_jp1 = (scalar_t)0.5 * (u_prev[i * Ngy + jp1] + u_prev[ip1 * Ngy + jp1]);
+            const scalar_t u_cc_jp2 = (scalar_t)0.5 * (u_prev[i * Ngy + jp2] + u_prev[ip1 * Ngy + jp2]);
 
-            const scalar_t v_cc_ip1 = (scalar_t)0.5 * (v_prev[ip1 * Ngy + j] + v_prev[ip1 * Ngy + jp1]);
+            scalar_t dudy;
+            if (Ngy >= 3) {
+                if (j == 0) {
+                    dudy = ((scalar_t)(-3) * u_cc_j0 + (scalar_t)4 * u_cc_jp1 - u_cc_jp2)
+                         * (scalar_t)0.5 * inv_h;
+                } else if (j == Ngy - 1) {
+                    dudy = ((scalar_t)3 * u_cc_j0 - (scalar_t)4 * u_cc_jm1 + u_cc_jm2)
+                         * (scalar_t)0.5 * inv_h;
+                } else {
+                    dudy = (u_cc_jp1 - u_cc_jm1) * (scalar_t)0.5 * inv_h;
+                }
+            } else {
+                dudy = (u_cc_jp1 - u_cc_jm1) * (scalar_t)0.5 * inv_h;
+            }
+
+            const scalar_t v_cc_im2 = (scalar_t)0.5 * (v_prev[im2 * Ngy + j] + v_prev[im2 * Ngy + jp1]);
             const scalar_t v_cc_im1 = (scalar_t)0.5 * (v_prev[im1 * Ngy + j] + v_prev[im1 * Ngy + jp1]);
-            const scalar_t dvdx = (v_cc_ip1 - v_cc_im1) * (scalar_t)0.5 * inv_h;
+            const scalar_t v_cc_i0  = (scalar_t)0.5 * (v_prev[i   * Ngy + j] + v_prev[i   * Ngy + jp1]);
+            const scalar_t v_cc_ip1 = (scalar_t)0.5 * (v_prev[ip1 * Ngy + j] + v_prev[ip1 * Ngy + jp1]);
+            const scalar_t v_cc_ip2 = (scalar_t)0.5 * (v_prev[ip2 * Ngy + j] + v_prev[ip2 * Ngy + jp1]);
+
+            scalar_t dvdx;
+            if (Ngx >= 3) {
+                if (i == 0) {
+                    dvdx = ((scalar_t)(-3) * v_cc_i0 + (scalar_t)4 * v_cc_ip1 - v_cc_ip2)
+                         * (scalar_t)0.5 * inv_h;
+                } else if (i == Ngx - 1) {
+                    dvdx = ((scalar_t)3 * v_cc_i0 - (scalar_t)4 * v_cc_im1 + v_cc_im2)
+                         * (scalar_t)0.5 * inv_h;
+                } else {
+                    dvdx = (v_cc_ip1 - v_cc_im1) * (scalar_t)0.5 * inv_h;
+                }
+            } else {
+                dvdx = (v_cc_ip1 - v_cc_im1) * (scalar_t)0.5 * inv_h;
+            }
 
             const scalar_t xs = nu_rho_val * (2*dudx*nx + (dudy+dvdx)*ny);
             const scalar_t ys = nu_rho_val * ((dvdx+dudy)*nx + 2*dvdy*ny);

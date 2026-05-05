@@ -160,11 +160,10 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
 
     // 2-D forces kernel — analogue of bdim_forces_3d_multi.  Reads the
     // per-body cc-SDF cached in ``sparse_cc_flat`` (populated by
-    // streaming_sdf_min_2d_multi).  ``out`` is float64 and has 8
+    // streaming_sdf_min_2d_multi).  ``out`` is float64 and has 6
     // channels per body:
-    //   [fv_x, fv_y, t_v, fp_x, fp_y, t_p, 0, 0]
-    // where t_* are the scalar out-of-plane torques and the trailing
-    // two slots are reserved (always written as 0).
+    //   [fv_x, fv_y, t_v, fp_x, fp_y, t_p]
+    // where t_* are the scalar out-of-plane torques.
     m.def(
         "bdim_forces_2d_multi("
         "Tensor sparse_cc_flat, Tensor cell_offsets,"

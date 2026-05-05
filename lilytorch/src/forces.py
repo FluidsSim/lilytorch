@@ -625,7 +625,7 @@ def forces_method2(self, u, v, p, iteration):
         u_i0, u_j0 = 0, 0
         Sj = Nj
 
-        # Persistent (B, 8) accumulator (mirrors the 3-D Phase D buffer).
+        # Persistent (B, 6) accumulator.
         out2d = getattr(self, '_phaseD_out_buf_2d', None)
         if out2d is None or out2d.shape[0] != B:
             out2d = torch.zeros((B, 6), dtype=torch.float64, device=self.device)
@@ -648,7 +648,7 @@ def forces_method2(self, u, v, p, iteration):
         )
 
         out_s = out2d if out2d.dtype == u.dtype else out2d.to(u.dtype)
-        # 8-channel layout: [fv_x, fv_y, t_v, fp_x, fp_y, t_p, 0, 0]
+        # 6-channel layout: [fv_x, fv_y, t_v, fp_x, fp_y, t_p]
         self.viscous_drag_record[:B, 0, iteration]  = out_s[:, 0]
         self.viscous_drag_record[:B, 1, iteration]  = out_s[:, 1]
         self.pressure_drag_record[:B, 0, iteration] = out_s[:, 3]
@@ -1217,4 +1217,3 @@ def forces_method2_3d(self, u, v, w, p, iteration):
             self.pressure_torque_record[i, 0, iteration] = tp_x
             self.pressure_torque_record[i, 1, iteration] = tp_y
             self.pressure_torque_record[i, 2, iteration] = tp_z
-

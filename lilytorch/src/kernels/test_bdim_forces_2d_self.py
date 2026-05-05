@@ -8,9 +8,8 @@ pressure-force fields), runs ``streaming_sdf_min_2d_multi`` to populate
 δ-kernel.
 
 Layout of ``out`` per body:
-    [fv_x, fv_y, t_v, fp_x, fp_y, t_p, 0, 0]
+    [fv_x, fv_y, t_v, fp_x, fp_y, t_p]
 where t_v = arm_x*fv_y - arm_y*fv_x and t_p = arm_x*fp_y - arm_y*fp_x.
-The trailing two slots are reserved by the kernel and must be zero.
 
 Runs on CPU.  When CUDA is available, the same problem is run on CUDA
 and cross-checked against the CPU output.
