@@ -1078,6 +1078,24 @@ class BDIMhandler:
 
         h_grid = float(comp.h)
 
+        # The fused force kernel computes SDF samples and optional |∇φ|
+        # correction on the fly, but force stress still needs lagged CC
+        # normals.  On the first fused step these attributes may not exist
+        # yet because normal recomputation happens after the SDF update in
+        # BDIMhandler.step().  Initialize them once from the pre-update
+        # union SDF before resetting fields below.
+        if (
+            getattr(fs, '_fused_sdf_forces_3d', False)
+            and (
+                getattr(fs, 'normal_x', None) is None
+                or getattr(fs, 'normal_y', None) is None
+                or getattr(fs, 'normal_z', None) is None
+            )
+        ):
+            fs.normal_x, fs.normal_y, fs.normal_z = comp.compute_normals(
+                comp.sdf_val
+            )
+
         # Reset running-min fields
         comp._sdf_sparse = [None] * B
         comp.sdf_val.fill_(_FAR)
@@ -1109,10 +1127,7 @@ class BDIMhandler:
         # device-side bytes per static cache.
         # ------------------------------------------------------------------
         fs_for_cache = self.fluid_solver
-        _use_fused_cache = (
-            getattr(fs_for_cache, '_fused_sdf_forces_3d', False)
-            and getattr(fs_for_cache, 'normal_x', None) is not None
-        )
+        _use_fused_cache = getattr(fs_for_cache, '_fused_sdf_forces_3d', False)
 
         sm = getattr(comp, '_stream_multi_static', None)
         if sm is None:
@@ -1336,10 +1351,7 @@ class BDIMhandler:
         cell_off_h = cell_off_h_np.tolist()
 
         fs = self.fluid_solver
-        _use_fused = (
-            getattr(fs, '_fused_sdf_forces_3d', False)
-            and getattr(fs, 'normal_x', None) is not None
-        )
+        _use_fused = getattr(fs, '_fused_sdf_forces_3d', False)
 
         if _use_fused:
             # Per-body densities: use rho_body per body (same for all for now;
