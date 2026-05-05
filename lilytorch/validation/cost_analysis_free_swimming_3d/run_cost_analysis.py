@@ -608,7 +608,7 @@ def gen_simulation_config_lean(output_folder):
             if args.no_kernels:
                 solver_cfg["solver_method"] = "python"
             elif args.use_kernels or _legacy_on:
-                solver_cfg["solver_method"] = "fused"
+                solver_cfg["solver_method"] = "kernel"
 
     with open(yaml_path, "w") as f:
         yaml.dump(sim_dict, f, default_flow_style=False, sort_keys=False)

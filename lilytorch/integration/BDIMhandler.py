@@ -24,7 +24,7 @@ from scipy.spatial.transform import Rotation
 from lilytorch.src.solver import FluidSolver
 from lilytorch.src.body import (rotate_grid_2d, rotate_grid_3d,
                                 _rotate_grid_3d_compiled)
-from lilytorch.src.kernels import streaming_sdf_forces_fused_3d_multi
+from lilytorch.src.kernels import streaming_sdf_min_rho_3d_multi
 from lilytorch.src.kernels import streaming_sdf_min_rho_2d_multi
 from lilytorch.src.kernels import RegularGridInterpolator3D
 from lilytorch.src.kernels import streaming_sdf_min_2d_multi
@@ -179,7 +179,7 @@ class BDIMhandler:
         # for 3-D.
         _solver_cfg = self.pars["solver"]
         _kernel_path_active = (
-            _solver_cfg.get("solver_method", None) in ("kernels", "fused")
+            _solver_cfg.get("solver_method", None) == "kernel"
             or (_solver_cfg.get("solver_method", None) is None
                 and bool(_solver_cfg.get("use_kernels", True)))
         )
@@ -188,10 +188,10 @@ class BDIMhandler:
                 and _kernel_path_active):
             raise ValueError(
                 "force_method='method1' is incompatible with "
-                "solver_method ∈ {'kernels', 'fused'}: forces_method1 "
+                "solver_method='kernel': forces_method1 "
                 "is a contour-integral implementation that does not "
                 "consume the per-body cc-SDF produced by the streaming/"
-                "fused kernels. Either set solver.solver_method='python' "
+                "kernel path. Either set solver.solver_method='python' "
                 "(pure-Python path) or switch to force_method='method2' "
                 "(default), which integrates the smoothed delta with "
                 "full kernel-mode acceleration."
@@ -1086,7 +1086,7 @@ class BDIMhandler:
         # BDIMhandler.step().  Initialize them once from the pre-update
         # union SDF before resetting fields below.
         if (
-            getattr(fs, '_fused_sdf_forces_3d', False)
+            getattr(fs, '_kernel_sdf_forces_3d', False)
             and (
                 getattr(fs, 'normal_x', None) is None
                 or getattr(fs, 'normal_y', None) is None
@@ -1128,7 +1128,7 @@ class BDIMhandler:
         # device-side bytes per static cache.
         # ------------------------------------------------------------------
         fs_for_cache = self.fluid_solver
-        _use_fused_cache = getattr(fs_for_cache, '_fused_sdf_forces_3d', False)
+        _use_fused_cache = getattr(fs_for_cache, '_kernel_sdf_forces_3d', False)
 
         sm = getattr(comp, '_stream_multi_static', None)
         if sm is None:
@@ -1352,7 +1352,7 @@ class BDIMhandler:
         cell_off_h = cell_off_h_np.tolist()
 
         fs = self.fluid_solver
-        _use_fused = getattr(fs, '_fused_sdf_forces_3d', False)
+        _use_fused = getattr(fs, '_kernel_sdf_forces_3d', False)
 
         if _use_fused:
             # Per-body densities: use rho_body per body (same for all for now;
@@ -1453,7 +1453,7 @@ class BDIMhandler:
                         )
                 comp._fused_contig_checked = True
 
-            streaming_sdf_forces_fused_3d_multi(
+            streaming_sdf_min_rho_3d_multi(
                 sm['F_flat'], sm['F_offsets'],
                 sm['body_shapes'], sm['body_meta'], kin,
                 aabb_lo, aabb_dim,
@@ -1489,8 +1489,8 @@ class BDIMhandler:
                 if _k1 > _u_k1: _u_k1 = _k1
             comp._fused_union_aabb = (_u_i0, _u_i1, _u_j0, _u_j1, _u_k0, _u_k1)
 
-            # Store fused outputs on the composite body for downstream use.
-            comp._fused_forces_out  = fused_out
+            # Kernel forces are evaluated later from post-fluid-step fields.
+            comp._fused_forces_out  = None
             comp._winning_rho_cc    = winning_rho_cc
 
             # Stash per-step metadata (kin/aabb without sparse_cc_flat).
@@ -2018,7 +2018,7 @@ class BDIMhandler:
         # forces oscillate.  This is the analogue of the same
         # initialization performed in ``_update_3d_streaming_multi``
         # before the 3-D SDF reset.
-        if getattr(fs, '_fused_sdf_forces_2d', False):
+        if getattr(fs, '_kernel_sdf_forces_2d', False):
             if (
                 getattr(fs, 'normal_x', None) is None
                 or getattr(fs, 'normal_y', None) is None
@@ -2239,7 +2239,7 @@ class BDIMhandler:
         fs = self.fluid_solver
         interp_method = getattr(fs, '_sdf_interp_method', 0)
 
-        if fs._fused_sdf_forces_2d:
+        if fs._kernel_sdf_forces_2d:
             rho_bodies_buf = getattr(self, '_fused_rho_bodies_2d', None)
             if rho_bodies_buf is None or rho_bodies_buf.shape[0] != B:
                 rho_bodies_buf = torch.full(
@@ -2476,33 +2476,55 @@ class BDIMhandler:
         comp = self.fluid_solver.composite_body
         n_built = 0
         for body in comp.bodies:
-            if not (hasattr(body, 'sdf')
+            if (hasattr(body, 'sdf')
                     and hasattr(body.sdf, 'F')
                     and hasattr(body.sdf, 'x')
                     and hasattr(body.sdf, 'y')
                     and hasattr(body.sdf, 'z')):
-                # Analytical / non-mesh body — keep the existing sampler.
+                body._sdf_tri3d = RegularGridInterpolator3D(
+                    (body.sdf.x.contiguous(),
+                     body.sdf.y.contiguous(),
+                     body.sdf.z.contiguous()),
+                    body.sdf.F.contiguous(),
+                    fill_value="nearest",
+                )
+                F_t = body._sdf_tri3d.F
+                bx_t = body._sdf_tri3d.x
+                by_t = body._sdf_tri3d.y
+                bz_t = body._sdf_tri3d.z
+                dx_b = float(body._sdf_tri3d.dx)
+                dy_b = float(body._sdf_tri3d.dy)
+                dz_b = float(body._sdf_tri3d.dz)
+                n_built += 1
+            else:
+                local_aabb = getattr(body, 'local_aabb', None)
+                sdf_callable = getattr(body, 'sdf', None)
+                if local_aabb is None or not callable(sdf_callable):
+                    body._sdf_tri3d = None
+                    body._stream_meta = None
+                    continue
+                lo = local_aabb[0].cpu()
+                hi = local_aabb[1].cpu()
+                h = float(self.fluid_solver.h)
+                Mx = max(2, int(round(float(hi[0] - lo[0]) / h)) + 1)
+                My = max(2, int(round(float(hi[1] - lo[1]) / h)) + 1)
+                Mz = max(2, int(round(float(hi[2] - lo[2]) / h)) + 1)
+                bx_t = torch.linspace(float(lo[0]), float(hi[0]), Mx, dtype=self.dtype, device=self.device)
+                by_t = torch.linspace(float(lo[1]), float(hi[1]), My, dtype=self.dtype, device=self.device)
+                bz_t = torch.linspace(float(lo[2]), float(hi[2]), Mz, dtype=self.dtype, device=self.device)
+                X, Y, Z = torch.meshgrid(bx_t, by_t, bz_t, indexing='ij')
+                with torch.no_grad():
+                    F_t = sdf_callable(X, Y, Z).contiguous()
+                dx_b = float(bx_t[1].item() - bx_t[0].item())
+                dy_b = float(by_t[1].item() - by_t[0].item())
+                dz_b = float(bz_t[1].item() - bz_t[0].item())
                 body._sdf_tri3d = None
-                continue
-            body._sdf_tri3d = RegularGridInterpolator3D(
-                (body.sdf.x.contiguous(),
-                 body.sdf.y.contiguous(),
-                 body.sdf.z.contiguous()),
-                body.sdf.F.contiguous(),
-                fill_value="nearest",
-            )
-            # Cache scalars for the streaming_sdf_min_3d kernel
-            bx_t = body._sdf_tri3d.x
-            by_t = body._sdf_tri3d.y
-            bz_t = body._sdf_tri3d.z
-            dx_b = float(body._sdf_tri3d.dx)
-            dy_b = float(body._sdf_tri3d.dy)
-            dz_b = float(body._sdf_tri3d.dz)
+
             body._stream_meta = {
-                'F':       body._sdf_tri3d.F,
-                'bx':      bx_t,
-                'by':      by_t,
-                'bz':      bz_t,
+                'F':       F_t.contiguous(),
+                'bx':      bx_t.contiguous(),
+                'by':      by_t.contiguous(),
+                'bz':      bz_t.contiguous(),
                 'bx0':     float(bx_t[0].item()),
                 'by0':     float(by_t[0].item()),
                 'bz0':     float(bz_t[0].item()),
@@ -2514,9 +2536,8 @@ class BDIMhandler:
                 'inv_dz':  1.0 / dz_b,
                 'inv_vol': 1.0 / (dx_b * dy_b * dz_b),
             }
-            n_built += 1
         print(f"  [custom-trilinear-3D] built {n_built}/{len(comp.bodies)} "
-              f"per-body C++/CUDA trilinear samplers (replacing grid_sample)")
+              f"mesh 3-D stream metadata records; analytical bodies are sampled when needed")
 
     # ==================================================================
     #  apply_forces: fluid -> body forces via MuJoCo xfrc_applied

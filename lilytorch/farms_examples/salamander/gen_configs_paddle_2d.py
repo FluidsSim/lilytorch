@@ -43,7 +43,7 @@ class SimConfig(BaseSimConfig):
             },
         ]
 
-        self.solver_method    = "fused"
+        self.solver_method    = "kernel"
         self.poisson_compile  = False
         self.compile_adv_diff = False
         self.compile_forces   = True

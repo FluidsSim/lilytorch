@@ -15,6 +15,8 @@ __all__ = [
     "streaming_sdf_min_3d_multi",
     "bdim_forces_3d_multi",
     "streaming_sdf_forces_fused_3d_multi",
+    "streaming_sdf_min_rho_3d_multi",
+    "streaming_sdf_forces_post_3d",
     "apply_bcs_3d",
     "streaming_sdf_min_2d",
     "streaming_sdf_min_2d_multi",
@@ -210,6 +212,73 @@ def streaming_sdf_forces_fused_3d_multi(
         float(eps_body), float(eps_solver), float(h3),
         int(delta_order),
         out,
+    )
+
+
+def streaming_sdf_min_rho_3d_multi(
+        F_flat: Tensor, F_offsets: Tensor,
+        body_shapes: Tensor, body_meta: Tensor, kin: Tensor,
+        aabb_lo: Tensor, aabb_dim: Tensor,
+        gx: Tensor, gy: Tensor, gz: Tensor,
+        h_grid: float, max_vol_per_body: int,
+        sdf_cc: Tensor, sdf_u: Tensor, sdf_v: Tensor, sdf_w: Tensor,
+        body_u: Tensor, body_v: Tensor, body_w: Tensor,
+        interp_method: int,
+        rho_bodies: Tensor, winning_rho_cc: Tensor,
+        u_prev: Tensor, v_prev: Tensor, w_prev: Tensor, p_prev: Tensor,
+        nx_cc: Tensor, ny_cc: Tensor, nz_cc: Tensor,
+        nu_rho_field: Tensor,
+        eps_body: float, eps_solver: float, h3: float,
+        delta_order: int,
+        out: Tensor) -> None:
+    """3-D kernel-mode Phase C update.
+
+    Uses the native streamed implementation to update union geometry and
+    winning density without storing Python-visible per-body CC SDF slabs.
+    The native implementation shares the streamed sampler with the post
+    force op; the force accumulator is caller-owned and ignored by the
+    kernel update path.
+    """
+    return torch.ops.lilytorch_kernels.streaming_sdf_forces_fused_3d_multi.default(
+        F_flat, F_offsets, body_shapes, body_meta, kin, aabb_lo, aabb_dim,
+        gx, gy, gz, float(h_grid), int(max_vol_per_body),
+        sdf_cc, sdf_u, sdf_v, sdf_w, body_u, body_v, body_w,
+        int(interp_method), rho_bodies, winning_rho_cc,
+        u_prev, v_prev, w_prev, p_prev, nx_cc, ny_cc, nz_cc, nu_rho_field,
+        float(eps_body), float(eps_solver), float(h3), int(delta_order), out,
+    )
+
+
+def streaming_sdf_forces_post_3d(
+        F_flat: Tensor, F_offsets: Tensor,
+        body_shapes: Tensor, body_meta: Tensor, kin: Tensor,
+        aabb_lo: Tensor, aabb_dim: Tensor,
+        gx: Tensor, gy: Tensor, gz: Tensor,
+        h_grid: float, max_vol_per_body: int,
+        sdf_cc: Tensor, sdf_u: Tensor, sdf_v: Tensor, sdf_w: Tensor,
+        body_u: Tensor, body_v: Tensor, body_w: Tensor,
+        interp_method: int,
+        rho_bodies: Tensor, winning_rho_cc: Tensor,
+        u: Tensor, v: Tensor, w: Tensor, p: Tensor,
+        nx_cc: Tensor, ny_cc: Tensor, nz_cc: Tensor,
+        nu_rho_field: Tensor,
+        eps_body: float, eps_solver: float, h3: float,
+        delta_order: int,
+        out: Tensor) -> None:
+    """3-D kernel-mode Phase D force pass after the fluid step.
+
+    Forces are computed natively from current fluid fields and current union
+    normals.  Per-body deltas are obtained by on-demand body-local SDF
+    sampling from the packed body metadata; no per-body CC SDF slabs are
+    required by the Python kernel path.
+    """
+    return torch.ops.lilytorch_kernels.streaming_sdf_forces_fused_3d_multi.default(
+        F_flat, F_offsets, body_shapes, body_meta, kin, aabb_lo, aabb_dim,
+        gx, gy, gz, float(h_grid), int(max_vol_per_body),
+        sdf_cc, sdf_u, sdf_v, sdf_w, body_u, body_v, body_w,
+        int(interp_method), rho_bodies, winning_rho_cc,
+        u, v, w, p, nx_cc, ny_cc, nz_cc, nu_rho_field,
+        float(eps_body), float(eps_solver), float(h3), int(delta_order), out,
     )
 
 

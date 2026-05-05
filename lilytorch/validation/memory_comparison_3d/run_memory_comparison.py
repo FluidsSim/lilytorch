@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-GPU memory comparison across the three solver paths.
+GPU memory comparison across the solver paths.
 
 This is the *measurement* counterpart to ``docs/memory_analysis.md``.  It
-runs the same FARMS-coupled 3-D 1guilla free-swimming scenario under three
-configurations and reports per-phase / per-tensor memory usage so the
-biggest bottlenecks of each path can be identified directly on hardware.
+runs the same FARMS-coupled 3-D 1guilla free-swimming scenario under the
+reference Python path and the native streamed kernel path, and reports
+per-phase / per-tensor memory usage so the biggest bottlenecks can be
+identified directly on hardware.
 
 Modes
 -----
@@ -14,17 +15,12 @@ Modes
                          No batching, no per-body cropping, no streaming
                          kernels.  Per-body SDF / body-velocity fields are
                          materialised on the *full* fluid grid.
-* ``kernels_separate`` — streaming C++/CUDA kernel path
-                         (``solver.solver_method = "kernels"``).
-                         Two-pass: streaming SDF kernel followed by a
-                         separate force/torque kernel that consumes the
-                         per-body ``sparse_cc_flat`` slabs.
-* ``kernels_fused``    — streaming kernel path with the new fused
-                         SDF + force pass
-                         (``solver.solver_method = "fused"``).
-                         Eliminates ``sparse_cc_flat`` and inlines the
-                         lagged force loop into ``streaming_sdf_forces_
-                         fused_3d_multi``.
+* ``kernels_separate`` / ``kernels_fused``
+                       — native streamed kernel path
+                         (``solver.solver_method = "kernel"``).  Both
+                         historical labels now exercise the same final
+                         update-only geometry pass plus post-fluid-step
+                         native force pass.
 
 Driver vs. worker
 -----------------
@@ -262,9 +258,9 @@ def _run_worker(args: argparse.Namespace) -> None:
     if mode == "no_kernels":
         cfg.solver_method = "python"
     elif mode == "kernels_separate":
-        cfg.solver_method = "kernels"
+        cfg.solver_method = "kernel"
     elif mode == "kernels_fused":
-        cfg.solver_method = "fused"
+        cfg.solver_method = "kernel"
     else:
         raise ValueError(f"unknown mode '{mode}'")
 

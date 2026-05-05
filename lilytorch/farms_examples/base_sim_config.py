@@ -161,9 +161,9 @@ class BaseSimConfig:
         self.zero_pressure_inside    = None
         self.force_method            = None
         self.time_integration        = None
-        # Solver method: ``"python"`` | ``"kernels"`` | ``"fused"``.
+        # Solver method: ``"python"`` | ``"kernel"``.
         # See :class:`FluidSolver` for what each method does. ``None``
-        # → solver default (``"fused"``).
+        # → solver default (``"kernel"``).
         self.solver_method           = None
         # DEPRECATED.  Kept for backward compatibility — superseded by
         # ``solver_method``.  When set, they are mapped onto
