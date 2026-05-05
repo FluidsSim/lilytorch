@@ -385,11 +385,12 @@ class BDIMhandler:
         # using their callable SDF).  This mirrors the 3-D streaming
         # dispatch (see ``_update_3d_streaming``); both use the same
         # "all-mesh → batched kernel; mixed → per-body fallback" rule.
-        if getattr(self.fluid_solver, '_streaming_sdf_2d', False):
-            comp_check = self.fluid_solver.composite_body
-            if all(getattr(b, '_stream_meta', None) is not None
-                   for b in comp_check.bodies):
-                return self._update_2d_streaming_multi(t, iteration, dt)
+
+        # if getattr(self.fluid_solver, '_streaming_sdf_2d', False):
+        #     comp_check = self.fluid_solver.composite_body
+        #     if all(getattr(b, '_stream_meta', None) is not None
+        #            for b in comp_check.bodies):
+        #         return self._update_2d_streaming_multi(t, iteration, dt)
 
         fs   = self.fluid_solver
         comp = fs.composite_body

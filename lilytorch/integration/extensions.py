@@ -188,7 +188,6 @@ class RealtimeMonitor(TaskExtension):
             self.experiment_options.simulation.physics.timestep
         )
         self._last_t = None
-        self._last_display_t = 0.0
         self._times.clear()
         self._rt_model = None
 

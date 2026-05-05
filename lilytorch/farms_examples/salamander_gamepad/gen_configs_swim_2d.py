@@ -24,7 +24,7 @@ class SimConfig(BaseSimConfig):
         self.water_height = 0.015
         self.stack_folder = "salamander"
 
-        self.solver_method    = "python"
+        self.solver_method    = "kernels"
         # self.poisson_compile  = True
         # self.compile_adv_diff = False
         # self.compile_forces   = True
@@ -39,9 +39,9 @@ class SimConfig(BaseSimConfig):
                 "gains"       : [0.001, .0002, 0],
                 "controller_config": {
                     'path'      : "lilytorch.farms_examples.salamander_gamepad.control.PositionController",
-                    'freq'      : 1,
+                    'freq'      : 2,
                     'twl'       : 10,
-                    'amp'       : 200,
+                    'amp'       : 400,
                     'limb_pose1': -0.35 * 3.141592653589793,
                     'limb_pose2': -0.2 * 3.141592653589793,
                 },
@@ -114,22 +114,22 @@ class SimConfig(BaseSimConfig):
     def extra_simulation_extensions(self, output_folder):
         extensions = []
 
-        # FlowViewer2D – overlay 2-D flow field on the MuJoCo viewer
-        extensions.append({
-            "loader": "lilytorch.integration.flow_viewer_2d_gpu.FlowViewer2D",
-            "config": {
-                "field"         : "curl",
-                "nx_vis"        : 512,
-                "ny_vis"        : 128,
-                "alpha"         : 0.65,
-                "z_offset"      : 0.015,
-                "smooth_sigma"  : 0,
-                "crop_boundary" : 0,
-                "update_every"  : 5,
-                "vmin"          : -10,
-                "vmax"          : 10,
-            },
-        })
+        # # FlowViewer2D – overlay 2-D flow field on the MuJoCo viewer
+        # extensions.append({
+        #     "loader": "lilytorch.integration.flow_viewer_2d_gpu.FlowViewer2D",
+        #     "config": {
+        #         "field"         : "curl",
+        #         "nx_vis"        : 1024,
+        #         "ny_vis"        : 256,
+        #         "alpha"         : 1,
+        #         "z_offset"      : 0.015,
+        #         "smooth_sigma"  : 0,
+        #         "crop_boundary" : 0,
+        #         "update_every"  : 1,
+        #         "vmin"          : -10,
+        #         "vmax"          : 10,
+        #     },
+        # })
 
         extensions.append({
             "loader": "lilytorch.integration.extensions.RealtimeMonitor",
