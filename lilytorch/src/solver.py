@@ -616,8 +616,9 @@ class FluidSolver(PlottingMixin):
                         "forces_method2)"),
             "kernels": ("separate CUDA kernels (atomic-min union SDF + "
                         "bdim_forces_*_multi force kernel)"),
-            "fused":   ("fused CUDA kernel (streaming_sdf_forces_fused_*_multi: "
-                        "SDF + per-body forces in one pass)"),
+            "fused":   ("fused CUDA path (memory-saving streamed geometry; "
+                        "3-D keeps SDF+forces fused, 2-D uses fused update "
+                        "+ native post-force Phase D)"),
         }
         print(f"  [solver_method={_method!r}] {_METHOD_DESCR[_method]}")
         # Body-SDF sampling method used inside the streaming C++/CUDA

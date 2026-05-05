@@ -1,8 +1,9 @@
 """Self-contained CPU parity test for ``streaming_sdf_forces_fused_2d_multi``.
 
 2-D analogue of ``test_streaming_sdf_forces_fused_self.py``.  The op
-fuses Phase C (per-body SDF/face union update) with Phase D (lagged
-force/torque integration).  This test extends the existing 2-D
+fuses Phase C (per-body SDF/face union update) with a compact Phase D
+force pass that uses CURRENT union-SDF normals and CURRENT per-body
+delta support.  This test extends the existing 2-D
 ``streaming_sdf_min`` parity test (``test_streaming_sdf_2d_self.py``)
 with checks for the additional fused-only outputs:
 
@@ -34,69 +35,19 @@ from lilytorch.src.kernels.test_bdim_forces_2d_self import _reference_forces_2d
 
 def _ref_winning_rho_and_forces_2d(
         bodies, aabbs, rho_bodies, gx, gy, h,
-        u_prev, v_prev, p_prev, nx_cc, ny_cc,
-        nu_rho_field, eps_body, eps_solver, rho_fluid,
+        rho_fluid,
         *, dtype, device):
-    """Pure-PyTorch reference for ``winning_rho_cc`` and 6-channel ``out``.
+    """Pure-PyTorch reference for ``winning_rho_cc``.
 
-    Mirrors the 2-D fused kernel's Phase C cc-SDF tracking and the
-    *working* 2-D shared-force path (`_forces_shared_2d` + per-body
-    integration), so this checks fused Phase D against the separate
-    `kernels` method rather than only against its previous inline
-    approximation.
+    The force reference is built separately from the current union SDF
+    normals plus the current per-body sparse CC-SDF slabs so the test
+    matches the stable 2-D `kernels` force path.
     """
     Nx, Ny = gx.numel(), gy.numel()
     FAR = 1e4
     sdf_cc_ref = torch.full((Nx, Ny), FAR, dtype=dtype, device=device)
     winning_rho_ref = torch.full((Nx, Ny), float(rho_fluid),
                                  dtype=dtype, device=device)
-
-    h_grid = float(h)
-    inv_h = 1.0 / h_grid
-    eps_b = float(eps_body)
-    eps_s = float(eps_solver)
-    pi_over_eb = math.pi / eps_b
-    inv_2eps = 0.5 / eps_b
-
-    out_ref = torch.zeros((len(bodies), 6), dtype=torch.float64, device=device)
-    nu_rho_is_scalar = (nu_rho_field.numel() == 1)
-
-    def cc_avg(u, axis):
-        ip = u.roll(-1, dims=axis)
-        result = 0.5 * (u + ip)
-        last_slc = [slice(None)] * u.dim()
-        last_slc[axis] = slice(-1, None)
-        result[tuple(last_slc)] = u[tuple(last_slc)]
-        return result
-
-    def fwd_diff_copy_last(u, axis):
-        out = torch.empty_like(u)
-        if axis == 0:
-            out[:-1, :] = (u[1:, :] - u[:-1, :]) * inv_h
-            out[-1, :] = out[-2, :]
-        else:
-            out[:, :-1] = (u[:, 1:] - u[:, :-1]) * inv_h
-            out[:, -1] = out[:, -2]
-        return out
-
-    def central_diff_edge2(u_field, axis):
-        out = torch.empty_like(u_field)
-        if axis == 0:
-            out[1:-1, :] = (u_field[2:, :] - u_field[:-2, :]) * 0.5 * inv_h
-            out[0, :] = (-3.0 * u_field[0, :] + 4.0 * u_field[1, :] - u_field[2, :]) * 0.5 * inv_h
-            out[-1, :] = (3.0 * u_field[-1, :] - 4.0 * u_field[-2, :] + u_field[-3, :]) * 0.5 * inv_h
-        else:
-            out[:, 1:-1] = (u_field[:, 2:] - u_field[:, :-2]) * 0.5 * inv_h
-            out[:, 0] = (-3.0 * u_field[:, 0] + 4.0 * u_field[:, 1] - u_field[:, 2]) * 0.5 * inv_h
-            out[:, -1] = (3.0 * u_field[:, -1] - 4.0 * u_field[:, -2] + u_field[:, -3]) * 0.5 * inv_h
-        return out
-
-    u_cc = cc_avg(u_prev, 0)
-    v_cc = cc_avg(v_prev, 1)
-    dudx = fwd_diff_copy_last(u_prev, 0)
-    dvdy = fwd_diff_copy_last(v_prev, 1)
-    dudy = central_diff_edge2(u_cc, 1)
-    dvdx = central_diff_edge2(v_cc, 0)
 
     for b, (bd, ab) in enumerate(zip(bodies, aabbs)):
         i0, i1, j0, j1 = ab
@@ -125,63 +76,14 @@ def _ref_winning_rho_and_forces_2d(
         sub_rho = winning_rho_ref[i0:i1, j0:j1]
         winning_rho_ref[i0:i1, j0:j1] = torch.where(
             win, torch.full_like(sub_rho, rho_b), sub_rho)
+    return winning_rho_ref
 
-        # Phase D: cosine smoothed delta forces.
-        band_lo = min(eps_s - eps_b, -eps_b)
-        band_hi = max(eps_s + eps_b,  eps_b)
-        in_band = (s_cc_body > band_lo) & (s_cc_body < band_hi)
 
-        d_visc = s_cc_body - eps_s
-        delta_visc = torch.where(
-            (d_visc > -eps_b) & (d_visc < eps_b),
-            (1.0 + torch.cos(pi_over_eb * d_visc)) * inv_2eps,
-            torch.zeros_like(d_visc),
-        )
-        delta_pres = torch.where(
-            (s_cc_body > -eps_b) & (s_cc_body < eps_b),
-            (1.0 + torch.cos(pi_over_eb * s_cc_body)) * inv_2eps,
-            torch.zeros_like(s_cc_body),
-        )
-
-        nx_b = nx_cc[i0:i1, j0:j1]
-        ny_b = ny_cc[i0:i1, j0:j1]
-
-        if nu_rho_is_scalar:
-            nu_rho_b = nu_rho_field.item()
-        else:
-            nu_rho_b = nu_rho_field[i0:i1, j0:j1]
-
-        dudx_b = dudx[i0:i1, j0:j1]
-        dvdy_b = dvdy[i0:i1, j0:j1]
-        dudy_b = dudy[i0:i1, j0:j1]
-        dvdx_b = dvdx[i0:i1, j0:j1]
-
-        xs_v = nu_rho_b * (2*dudx_b*nx_b + (dudy_b+dvdx_b)*ny_b)
-        ys_v = nu_rho_b * ((dvdx_b+dudy_b)*nx_b + 2*dvdy_b*ny_b)
-
-        p_c = p_prev[i0:i1, j0:j1]
-        pxv = -p_c * nx_b
-        pyv = -p_c * ny_b
-
-        zero = torch.zeros_like(xs_v)
-        fv_x = (xs_v * delta_visc).where(in_band, zero)
-        fv_y = (ys_v * delta_visc).where(in_band, zero)
-        fp_x = (pxv  * delta_pres).where(in_band, zero)
-        fp_y = (pyv  * delta_pres).where(in_band, zero)
-
-        arm_x = (xc - cm[0]).to(torch.float64)
-        arm_y = (yc - cm[1]).to(torch.float64)
-        fv_x_d, fv_y_d = fv_x.to(torch.float64), fv_y.to(torch.float64)
-        fp_x_d, fp_y_d = fp_x.to(torch.float64), fp_y.to(torch.float64)
-
-        h2 = h_grid ** 2
-        out_ref[b, 0] += fv_x_d.sum().item() * h2
-        out_ref[b, 1] += fv_y_d.sum().item() * h2
-        out_ref[b, 2] += (arm_x * fv_y_d - arm_y * fv_x_d).sum().item() * h2
-        out_ref[b, 3] += fp_x_d.sum().item() * h2
-        out_ref[b, 4] += fp_y_d.sum().item() * h2
-        out_ref[b, 5] += (arm_x * fp_y_d - arm_y * fp_x_d).sum().item() * h2
-    return winning_rho_ref, out_ref
+def _current_union_normals_2d(sdf_cc, h):
+    gx_cc, gy_cc = torch.gradient(sdf_cc, spacing=[h, h], edge_order=2)
+    norm = torch.sqrt(gx_cc**2 + gy_cc**2)
+    inv_norm = torch.where(norm > 0, norm.reciprocal(), torch.zeros_like(norm))
+    return gx_cc * inv_norm, gy_cc * inv_norm
 
 
 def main():
@@ -264,10 +166,9 @@ def main():
             bodies, aabbs, gx, gy, h, dtype=dtype, device=device,
             interp_method=interp_method,
         )
-        rwinning_rho, rout = _ref_winning_rho_and_forces_2d(
+        rwinning_rho = _ref_winning_rho_and_forces_2d(
             bodies, aabbs, rho_bodies, gx, gy, h,
-            u_prev, v_prev, p_prev, nx_cc, ny_cc,
-            nu_rho_field, eps_body, eps_solver, rho_fluid,
+            rho_fluid,
             dtype=dtype, device=device,
         )
 
@@ -289,10 +190,10 @@ def main():
         cmp("body_u",          bU,          rbU,           1e-12)
         cmp("body_v",          bV,          rbV,           1e-12)
         cmp("winning_rho_cc",  winning_rho, rwinning_rho,  1e-15)
-        cmp("out (forces)",    out[:, :6],  rout[:, :6],   1e-10)
 
         # Also compare the fused Phase D result against the separate
-        # `kernels` force path fed with the same per-body sparse CC-SDFs.
+        # `kernels` force path fed with the same current union normals
+        # and per-body sparse CC-SDFs.
         u_cc = 0.5 * (u_prev + u_prev.roll(-1, dims=0))
         u_cc[-1, :] = u_prev[-1, :]
         v_cc = 0.5 * (v_prev + v_prev.roll(-1, dims=1))
@@ -315,10 +216,11 @@ def main():
         dvdx[0, :] = (-3.0 * v_cc[0, :] + 4.0 * v_cc[1, :] - v_cc[2, :]) * 0.5 / h
         dvdx[-1, :] = (3.0 * v_cc[-1, :] - 4.0 * v_cc[-2, :] + v_cc[-3, :]) * 0.5 / h
 
-        xstress = nu_rho_field * (2 * dudx * nx_cc + (dudy + dvdx) * ny_cc)
-        ystress = nu_rho_field * ((dvdx + dudy) * nx_cc + 2 * dvdy * ny_cc)
-        pforce_x = -p_prev * nx_cc
-        pforce_y = -p_prev * ny_cc
+        nx_cur, ny_cur = _current_union_normals_2d(rsdf_cc, h)
+        xstress = nu_rho_field * (2 * dudx * nx_cur + (dudy + dvdx) * ny_cur)
+        ystress = nu_rho_field * ((dvdx + dudy) * nx_cur + 2 * dvdy * ny_cur)
+        pforce_x = -p_prev * nx_cur
+        pforce_y = -p_prev * ny_cur
 
         cell_off = [0]
         for ab in aabbs:
@@ -338,6 +240,7 @@ def main():
             xstress, ystress, pforce_x, pforce_y,
             eps_body, eps_solver, h2,
         )
+        cmp("out (forces)",    out[:, :6],     out_sep_ref[:, :6], 1e-10)
         cmp("separate out",     out_sep[:, :6], out_sep_ref[:, :6], 1e-10)
         cmp("fused vs separate", out[:, :6], out_sep[:, :6], 1e-10)
 

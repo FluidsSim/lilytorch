@@ -562,12 +562,8 @@ __global__ void bdim_forces_2d_multi_kernel(
     const scalar_t eps_solver,
     const scalar_t h2,
     const int delta_order,
-    double* __restrict__ out)  // (B, 6)
+    double* __restrict__ out)
 {
-    // Body index dispatched via gridDim.y; single launch covers all B
-    // bodies (see 3-D analog kernel for rationale).  Atomic-adds into
-    // ``out[b*6 + c]`` use ``b = blockIdx.y``, so different bodies
-    // target disjoint output rows — no cross-body races.
     const int b     = blockIdx.y;
     const int local = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -584,7 +580,8 @@ __global__ void bdim_forces_2d_multi_kernel(
         const int dj = local - di * Aj;
         const int i0 = (int)aabb_lo[b*2 + 0];
         const int j0 = (int)aabb_lo[b*2 + 1];
-        const int i = i0 + di, j = j0 + dj;
+        const int i = i0 + di;
+        const int j = j0 + dj;
 
         const int64_t sparse_base = cell_offsets[b];
         const scalar_t sdf = sparse_cc_flat[sparse_base + (int64_t)local];
@@ -596,9 +593,9 @@ __global__ void bdim_forces_2d_multi_kernel(
             (eps_solver + eps_body) > ( eps_body)
                 ? (eps_solver + eps_body) : ( eps_body);
         if (sdf > band_lo && sdf < band_hi) {
-            // 2-D kin row (11 floats); cm_xy at offsets 6..7.
             const scalar_t* K = kin + b*11;
-            const scalar_t cm_x = K[6], cm_y = K[7];
+            const scalar_t cm_x = K[6];
+            const scalar_t cm_y = K[7];
 
             const scalar_t xc = gx[i];
             const scalar_t yc = gy[j];
@@ -616,7 +613,6 @@ __global__ void bdim_forces_2d_multi_kernel(
                 delta_pres = ((scalar_t)1 + cos(pi_over_eb * sdf)) * inv_2eps;
             }
 
-            // Towers (2008) 2nd-order correction: δ_S = δ_ε(φ) / |∇φ|
             if (delta_order == 2 && (delta_visc > (scalar_t)0 || delta_pres > (scalar_t)0)) {
                 const scalar_t h_grid = gx[1] - gx[0];
                 const scalar_t inv_h  = (scalar_t)1.0 / h_grid;
@@ -643,8 +639,10 @@ __global__ void bdim_forces_2d_multi_kernel(
             const int sub_i = i - u_i0;
             const int sub_j = j - u_j0;
             const int s_idx = sub_i * Sj + sub_j;
-            const scalar_t xs_v = xs[s_idx], ys_v = ys[s_idx];
-            const scalar_t px_v = px[s_idx], py_v = py[s_idx];
+            const scalar_t xs_v = xs[s_idx];
+            const scalar_t ys_v = ys[s_idx];
+            const scalar_t px_v = px[s_idx];
+            const scalar_t py_v = py[s_idx];
 
             const scalar_t arm_x = xc - cm_x;
             const scalar_t arm_y = yc - cm_y;
@@ -663,10 +661,7 @@ __global__ void bdim_forces_2d_multi_kernel(
         }
     }
 
-    // Parallel 6-channel block reduction: all channels stored simultaneously
-    // in shared memory (channel-major layout: sdata[c * bdim + tid]).
-    // Reduces __syncthreads from 6*(log2(bdim)+1) = 54 to log2(bdim)+1 = 9.
-    extern __shared__ double sdata[];  // [6 * blockDim.x]
+    extern __shared__ double sdata[];
     const int tid = threadIdx.x;
     const int bdim = blockDim.x;
     const double h2_d = (double)h2;
@@ -708,14 +703,14 @@ void bdim_forces_2d_multi_cuda(
     const double h2,
     const int64_t max_vol_per_body,
     const int64_t delta_order,
-    at::Tensor out)  // (B, 6) float64
+    at::Tensor out)
 {
     const int B = (int)aabb_dim.size(0);
     if (B <= 0 || max_vol_per_body <= 0) return;
 
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
     const int blockSize = 256;
-    const size_t shmem  = (size_t)blockSize * 6 * sizeof(double);  // 6-channel parallel reduction
+    const size_t shmem  = (size_t)blockSize * 6 * sizeof(double);
 
     AT_DISPATCH_FLOATING_TYPES(sparse_cc_flat.scalar_type(), "bdim_forces_2d_multi_cuda", [&] {
         const int blocksPerBody = (int)((max_vol_per_body + blockSize - 1) / blockSize);
@@ -738,7 +733,7 @@ void bdim_forces_2d_multi_cuda(
 }
 
 // =====================================================================
-//  streaming_sdf_forces_fused_2d_multi  (Phase C+D fused, lagged normals)
+//  streaming_sdf_forces_fused_2d_multi  (Phase C + current-normal Phase D)
 // =====================================================================
 
 template <typename scalar_t>
@@ -758,12 +753,87 @@ __global__ void streaming_sdf_forces_fused_2d_multi_kernel(
     uint64_t* __restrict__ key_cc,
     uint64_t* __restrict__ key_u,
     uint64_t* __restrict__ key_v,
+    const int interp_method)
+{
+    const int b     = blockIdx.y;
+    const int local = blockIdx.x * blockDim.x + threadIdx.x;
+
+    const int Ai = (int)aabb_dim[b*2 + 0];
+    const int Aj = (int)aabb_dim[b*2 + 1];
+    const int vol = Ai * Aj;
+    if (local >= vol) return;
+
+    const int di = local / Aj;
+    const int dj = local - di * Aj;
+
+    const int i0 = (int)aabb_lo[b*2 + 0];
+    const int j0 = (int)aabb_lo[b*2 + 1];
+    const int i  = i0 + di;
+    const int j  = j0 + dj;
+    const int g_idx = i * Ngy + j;
+
+    const scalar_t* F  = F_flat + F_offsets[b];
+    const int Mx = (int)body_shapes[b*2 + 0];
+    const int My = (int)body_shapes[b*2 + 1];
+
+    const scalar_t* M  = body_meta + b*7;
+    const scalar_t bx0 = M[0], by0 = M[1];
+    const scalar_t idx_ = M[4], idy_ = M[5];
+
+    const scalar_t* K  = kin + b*11;
+    const scalar_t r00 = K[0], r01 = K[1];
+    const scalar_t r10 = K[2], r11 = K[3];
+    const scalar_t bp_x = K[4], bp_y = K[5];
+
+    const scalar_t xc = gx[i];
+    const scalar_t yc = gy[j];
+    const scalar_t dx_w = xc - bp_x;
+    const scalar_t dy_w = yc - bp_y;
+    const scalar_t bxq = r00 * dx_w + r01 * dy_w;
+    const scalar_t byq = r10 * dx_w + r11 * dy_w;
+
+    const scalar_t neg_hh = -half_h;
+    const scalar_t du_x = neg_hh * r00;
+    const scalar_t du_y = neg_hh * r10;
+    const scalar_t dv_x = neg_hh * r01;
+    const scalar_t dv_y = neg_hh * r11;
+
+    const scalar_t s_cc = sdf_sample_dispatch_2d(
+        interp_method, F, Mx, My, bx0, by0, idx_, idy_, bxq, byq);
+    atomicMin((unsigned long long*)&key_cc[g_idx],
+              (unsigned long long)pack_sdf_body_key(s_cc, b));
+
+    const scalar_t s_u = sdf_sample_dispatch_2d(
+        interp_method, F, Mx, My, bx0, by0, idx_, idy_,
+        bxq + du_x, byq + du_y);
+    atomicMin((unsigned long long*)&key_u[g_idx],
+              (unsigned long long)pack_sdf_body_key(s_u, b));
+
+    const scalar_t s_v = sdf_sample_dispatch_2d(
+        interp_method, F, Mx, My, bx0, by0, idx_, idy_,
+        bxq + dv_x, byq + dv_y);
+    atomicMin((unsigned long long*)&key_v[g_idx],
+              (unsigned long long)pack_sdf_body_key(s_v, b));
+}
+
+template <typename scalar_t>
+__global__ void streaming_sdf_forces_post_2d_kernel(
+    const scalar_t* __restrict__ F_flat,
+    const int64_t*  __restrict__ F_offsets,
+    const int64_t*  __restrict__ body_shapes,
+    const scalar_t* __restrict__ body_meta,
+    const scalar_t* __restrict__ kin,
+    const int64_t*  __restrict__ aabb_lo,
+    const int64_t*  __restrict__ aabb_dim,
+    const scalar_t* __restrict__ gx,
+    const scalar_t* __restrict__ gy,
+    const int Ngx,
+    const int Ngy,
+    const scalar_t* __restrict__ sdf_cc,
     const int interp_method,
     const scalar_t* __restrict__ u_prev,
     const scalar_t* __restrict__ v_prev,
     const scalar_t* __restrict__ p_prev,
-    const scalar_t* __restrict__ nx_cc,
-    const scalar_t* __restrict__ ny_cc,
     const scalar_t* __restrict__ nu_rho_field,
     const int64_t   nu_rho_field_size,
     const scalar_t inv_h,
@@ -773,11 +843,6 @@ __global__ void streaming_sdf_forces_fused_2d_multi_kernel(
     const int delta_order,
     double* __restrict__ out)
 {
-    // Parallel-B dispatch: one body per ``blockIdx.y``.  See the 3-D
-    // analog ``streaming_sdf_forces_fused_3d_multi_kernel`` for the
-    // packed-key atomicMin rationale.  The 6-channel force accumulator
-    // ``out[b*6 + c]`` writes to per-body-disjoint output rows so the
-    // ``atomicAdd`` reduction is race-free when fanned across B.
     const int b     = blockIdx.y;
     const int local = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -815,47 +880,78 @@ __global__ void streaming_sdf_forces_fused_2d_multi_kernel(
 
         const scalar_t xc = gx[i];
         const scalar_t yc = gy[j];
-
-        const scalar_t dx_w = xc - bp_x, dy_w = yc - bp_y;
+        const scalar_t dx_w = xc - bp_x;
+        const scalar_t dy_w = yc - bp_y;
         const scalar_t bxq = r00 * dx_w + r01 * dy_w;
         const scalar_t byq = r10 * dx_w + r11 * dy_w;
 
-        const scalar_t neg_hh = -half_h;
-        const scalar_t du_x = neg_hh * r00, du_y = neg_hh * r10;
-        const scalar_t dv_x = neg_hh * r01, dv_y = neg_hh * r11;
-
-        const scalar_t s_cc = sdf_sample_dispatch_2d(
+        const scalar_t s_cc_body = sdf_sample_dispatch_2d(
             interp_method, F, Mx, My, bx0, by0, idx_, idy_, bxq, byq);
-
-        atomicMin((unsigned long long*)&key_cc[g_idx],
-                  (unsigned long long)pack_sdf_body_key(s_cc, b));
-
-        {
-            const scalar_t s = sdf_sample_dispatch_2d(
-                interp_method, F, Mx, My, bx0, by0, idx_, idy_,
-                bxq + du_x, byq + du_y);
-            atomicMin((unsigned long long*)&key_u[g_idx],
-                      (unsigned long long)pack_sdf_body_key(s, b));
-        }
-        {
-            const scalar_t s = sdf_sample_dispatch_2d(
-                interp_method, F, Mx, My, bx0, by0, idx_, idy_,
-                bxq + dv_x, byq + dv_y);
-            atomicMin((unsigned long long*)&key_v[g_idx],
-                      (unsigned long long)pack_sdf_body_key(s, b));
-        }
 
         const scalar_t band_lo = (eps_solver - eps_body) < (-eps_body)
             ? (eps_solver - eps_body) : (-eps_body);
         const scalar_t band_hi = (eps_solver + eps_body) > (eps_body)
             ? (eps_solver + eps_body) : (eps_body);
 
-        if (s_cc > band_lo && s_cc < band_hi) {
+        if (s_cc_body > band_lo && s_cc_body < band_hi) {
             const scalar_t nu_rho_val = (nu_rho_field_size == 1)
                 ? nu_rho_field[0] : nu_rho_field[g_idx];
 
-            const scalar_t nx = nx_cc[g_idx];
-            const scalar_t ny = ny_cc[g_idx];
+            scalar_t dsdx_union = 0;
+            if (Ngx >= 3) {
+                if (i == 0) {
+                    dsdx_union = (
+                        (scalar_t)(-3) * sdf_cc[j]
+                        + (scalar_t)4 * sdf_cc[Ngy + j]
+                        - sdf_cc[2 * Ngy + j]
+                    ) * (scalar_t)0.5 * inv_h;
+                } else if (i == Ngx - 1) {
+                    dsdx_union = (
+                        (scalar_t)3 * sdf_cc[(Ngx - 1) * Ngy + j]
+                        - (scalar_t)4 * sdf_cc[(Ngx - 2) * Ngy + j]
+                        + sdf_cc[(Ngx - 3) * Ngy + j]
+                    ) * (scalar_t)0.5 * inv_h;
+                } else {
+                    dsdx_union = (
+                        sdf_cc[(i + 1) * Ngy + j]
+                        - sdf_cc[(i - 1) * Ngy + j]
+                    ) * (scalar_t)0.5 * inv_h;
+                }
+            } else if (Ngx == 2) {
+                dsdx_union = (sdf_cc[Ngy + j] - sdf_cc[j]) * inv_h;
+            }
+
+            scalar_t dsdy_union = 0;
+            if (Ngy >= 3) {
+                const int row = i * Ngy;
+                if (j == 0) {
+                    dsdy_union = (
+                        (scalar_t)(-3) * sdf_cc[row]
+                        + (scalar_t)4 * sdf_cc[row + 1]
+                        - sdf_cc[row + 2]
+                    ) * (scalar_t)0.5 * inv_h;
+                } else if (j == Ngy - 1) {
+                    dsdy_union = (
+                        (scalar_t)3 * sdf_cc[row + (Ngy - 1)]
+                        - (scalar_t)4 * sdf_cc[row + (Ngy - 2)]
+                        + sdf_cc[row + (Ngy - 3)]
+                    ) * (scalar_t)0.5 * inv_h;
+                } else {
+                    dsdy_union = (
+                        sdf_cc[row + (j + 1)]
+                        - sdf_cc[row + (j - 1)]
+                    ) * (scalar_t)0.5 * inv_h;
+                }
+            } else if (Ngy == 2) {
+                dsdy_union = (sdf_cc[i * Ngy + 1] - sdf_cc[i * Ngy]) * inv_h;
+            }
+
+            const scalar_t union_norm = sqrt(dsdx_union * dsdx_union + dsdy_union * dsdy_union);
+            const scalar_t union_inv_norm = union_norm > (scalar_t)0
+                ? ((scalar_t)1.0 / union_norm)
+                : (scalar_t)0;
+            const scalar_t nx = dsdx_union * union_inv_norm;
+            const scalar_t ny = dsdy_union * union_inv_norm;
 
             const int im1 = (i > 0)         ? i-1 : 0;
             const int ip1 = (i+1 < Ngx)     ? i+1 : i;
@@ -933,15 +1029,14 @@ __global__ void streaming_sdf_forces_fused_2d_multi_kernel(
             const scalar_t inv_2eps = (scalar_t)0.5 / eps_body;
             const scalar_t pi_ov_eb = pi_v / eps_body;
 
-            scalar_t delta_visc = 0, delta_pres = 0;
-            const scalar_t d_visc = s_cc - eps_solver;
+            scalar_t delta_visc = 0;
+            scalar_t delta_pres = 0;
+            const scalar_t d_visc = s_cc_body - eps_solver;
             if (d_visc > -eps_body && d_visc < eps_body)
                 delta_visc = ((scalar_t)1 + cos(pi_ov_eb * d_visc)) * inv_2eps;
-            if (s_cc > -eps_body && s_cc < eps_body)
-                delta_pres = ((scalar_t)1 + cos(pi_ov_eb * s_cc)) * inv_2eps;
+            if (s_cc_body > -eps_body && s_cc_body < eps_body)
+                delta_pres = ((scalar_t)1 + cos(pi_ov_eb * s_cc_body)) * inv_2eps;
 
-            // delta_order == 2: reuse inv_grad (already computed above for
-            // the normal direction) to also normalise the delta functions.
             if (delta_order == 2 && (delta_visc > 0 || delta_pres > 0)) {
                 const scalar_t h_grid = (scalar_t)1.0 / inv_h;
                 const scalar_t s_xp = sdf_sample_dispatch_2d(
@@ -983,9 +1078,8 @@ __global__ void streaming_sdf_forces_fused_2d_multi_kernel(
         }
     }
 
-    // Parallel 6-channel block reduction (same layout as bdim_forces_2d_multi_kernel).
-    extern __shared__ double sdata[];  // [6 * blockDim.x]
-    const int tid  = threadIdx.x;
+    extern __shared__ double sdata[];
+    const int tid = threadIdx.x;
     const int bdim = blockDim.x;
     const double h2_d = (double)h2;
 
@@ -1070,6 +1164,89 @@ __global__ void streaming_sdf_decode_keys_fused_2d_kernel(
     }
 }
 
+void streaming_sdf_min_rho_2d_multi_cuda(
+    const at::Tensor& F_flat, const at::Tensor& F_offsets,
+    const at::Tensor& body_shapes,
+    const at::Tensor& body_meta,
+    const at::Tensor& kin,
+    const at::Tensor& aabb_lo,
+    const at::Tensor& aabb_dim,
+    const at::Tensor& gx, const at::Tensor& gy,
+    const double h_grid,
+    const int64_t max_vol_per_body,
+    at::Tensor sdf_cc, at::Tensor sdf_u, at::Tensor sdf_v,
+    at::Tensor body_u, at::Tensor body_v,
+    const int64_t interp_method,
+    const at::Tensor& rho_bodies,
+    at::Tensor winning_rho_cc)
+{
+    const int B = (int)aabb_dim.size(0);
+    if (B <= 0 || max_vol_per_body <= 0) return;
+
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    const int Ngx = (int)gx.numel();
+    const int Ngy = (int)gy.numel();
+    const int64_t Ngrid = (int64_t)Ngx * Ngy;
+
+    const int blockSize = (max_vol_per_body <= 128) ? 32
+                        : (max_vol_per_body <= 4096) ? 128 : 256;
+
+    auto key_opts = at::TensorOptions()
+        .dtype(at::kLong).device(sdf_cc.device());
+    auto key_cc_t = at::empty({Ngrid}, key_opts);
+    auto key_u_t  = at::empty({Ngrid}, key_opts);
+    auto key_v_t  = at::empty({Ngrid}, key_opts);
+
+    AT_DISPATCH_FLOATING_TYPES_AND_HALF(F_flat.scalar_type(), "streaming_sdf_min_rho_2d_multi_cuda", [&] {
+        const int initBlock = 256;
+        const int initBlocks = (int)((Ngrid + initBlock - 1) / initBlock);
+        streaming_sdf_init_keys_2d_kernel<scalar_t>
+            <<<initBlocks, initBlock, 0, stream>>>(
+                sdf_cc.data_ptr<scalar_t>(),
+                sdf_u .data_ptr<scalar_t>(),
+                sdf_v .data_ptr<scalar_t>(),
+                (uint64_t*)key_cc_t.data_ptr<int64_t>(),
+                (uint64_t*)key_u_t .data_ptr<int64_t>(),
+                (uint64_t*)key_v_t .data_ptr<int64_t>(),
+                (int)Ngrid, B);
+
+        const int blocksPerBody = (int)((max_vol_per_body + blockSize - 1) / blockSize);
+        streaming_sdf_forces_fused_2d_multi_kernel<scalar_t>
+            <<<dim3(blocksPerBody, B, 1), dim3(blockSize, 1, 1), 0, stream>>>(
+                F_flat.data_ptr<scalar_t>(),
+                F_offsets.data_ptr<int64_t>(),
+                body_shapes.data_ptr<int64_t>(),
+                body_meta.data_ptr<scalar_t>(),
+                kin.data_ptr<scalar_t>(),
+                aabb_lo.data_ptr<int64_t>(),
+                aabb_dim.data_ptr<int64_t>(),
+                gx.data_ptr<scalar_t>(),
+                gy.data_ptr<scalar_t>(),
+                Ngx, Ngy,
+                (scalar_t)(0.5 * h_grid),
+                (uint64_t*)key_cc_t.data_ptr<int64_t>(),
+                (uint64_t*)key_u_t .data_ptr<int64_t>(),
+                (uint64_t*)key_v_t .data_ptr<int64_t>(),
+                (int)interp_method);
+
+        streaming_sdf_decode_keys_fused_2d_kernel<scalar_t>
+            <<<initBlocks, initBlock, 0, stream>>>(
+                (const uint64_t*)key_cc_t.data_ptr<int64_t>(),
+                (const uint64_t*)key_u_t .data_ptr<int64_t>(),
+                (const uint64_t*)key_v_t .data_ptr<int64_t>(),
+                kin.data_ptr<scalar_t>(),
+                rho_bodies.data_ptr<scalar_t>(),
+                gx.data_ptr<scalar_t>(), gy.data_ptr<scalar_t>(),
+                Ngx, Ngy, B,
+                sdf_cc.data_ptr<scalar_t>(),
+                sdf_u .data_ptr<scalar_t>(),
+                sdf_v .data_ptr<scalar_t>(),
+                body_u.data_ptr<scalar_t>(),
+                body_v.data_ptr<scalar_t>(),
+                winning_rho_cc.data_ptr<scalar_t>());
+    });
+}
+
 void streaming_sdf_forces_fused_2d_multi_cuda(
     const at::Tensor& F_flat, const at::Tensor& F_offsets,
     const at::Tensor& body_shapes, const at::Tensor& body_meta, const at::Tensor& kin,
@@ -1087,6 +1264,9 @@ void streaming_sdf_forces_fused_2d_multi_cuda(
     const int64_t delta_order,
     at::Tensor out)
 {
+    (void)nx_cc;
+    (void)ny_cc;
+
     const int B = (int)aabb_dim.size(0);
     if (B <= 0 || max_vol_per_body <= 0) return;
 
@@ -1137,20 +1317,7 @@ void streaming_sdf_forces_fused_2d_multi_cuda(
                 (uint64_t*)key_cc_t.data_ptr<int64_t>(),
                 (uint64_t*)key_u_t .data_ptr<int64_t>(),
                 (uint64_t*)key_v_t .data_ptr<int64_t>(),
-                (int)interp_method,
-                u_prev.data_ptr<scalar_t>(),
-                v_prev.data_ptr<scalar_t>(),
-                p_prev.data_ptr<scalar_t>(),
-                nx_cc.data_ptr<scalar_t>(),
-                ny_cc.data_ptr<scalar_t>(),
-                nu_rho_field.data_ptr<scalar_t>(),
-                (int64_t)nu_rho_field.numel(),
-                (scalar_t)(1.0 / h_grid),
-                (scalar_t)eps_body,
-                (scalar_t)eps_solver,
-                (scalar_t)h2,
-                (int)delta_order,
-                out.data_ptr<double>());
+                (int)interp_method);
 
         // Phase 3: decode winning keys → ``sdf_*`` / ``bU/bV`` /
         // ``winning_rho_cc`` (per-cell, no atomics needed).
@@ -1169,6 +1336,91 @@ void streaming_sdf_forces_fused_2d_multi_cuda(
                 body_u.data_ptr<scalar_t>(),
                 body_v.data_ptr<scalar_t>(),
                 winning_rho_cc.data_ptr<scalar_t>());
+
+        // Phase 4: per-body force integration using the CURRENT union SDF
+        // normals from ``sdf_cc`` and the CURRENT per-body SDF support
+        // re-sampled from the body table. This matches the separate
+        // streaming+kernels force path while avoiding the lagged-normal
+        // instability for rapidly-rotating analytical bodies.
+        streaming_sdf_forces_post_2d_kernel<scalar_t>
+            <<<dim3(nblocks, B, 1), dim3(blockSize, 1, 1), shmem, stream>>>(
+                F_flat.data_ptr<scalar_t>(),
+                F_offsets.data_ptr<int64_t>(),
+                body_shapes.data_ptr<int64_t>(),
+                body_meta.data_ptr<scalar_t>(),
+                kin.data_ptr<scalar_t>(),
+                aabb_lo.data_ptr<int64_t>(),
+                aabb_dim.data_ptr<int64_t>(),
+                gx.data_ptr<scalar_t>(),
+                gy.data_ptr<scalar_t>(),
+                Ngx, Ngy,
+                sdf_cc.data_ptr<scalar_t>(),
+                (int)interp_method,
+                u_prev.data_ptr<scalar_t>(),
+                v_prev.data_ptr<scalar_t>(),
+                p_prev.data_ptr<scalar_t>(),
+                nu_rho_field.data_ptr<scalar_t>(),
+                (int64_t)nu_rho_field.numel(),
+                (scalar_t)(1.0 / h_grid),
+                (scalar_t)eps_body,
+                (scalar_t)eps_solver,
+                (scalar_t)h2,
+                (int)delta_order,
+                out.data_ptr<double>());
+    });
+}
+
+void streaming_sdf_forces_post_2d_cuda(
+    const at::Tensor& F_flat, const at::Tensor& F_offsets,
+    const at::Tensor& body_shapes, const at::Tensor& body_meta,
+    const at::Tensor& kin,
+    const at::Tensor& aabb_lo, const at::Tensor& aabb_dim,
+    const at::Tensor& gx, const at::Tensor& gy,
+    const double h_grid, const int64_t max_vol_per_body,
+    const at::Tensor& sdf_cc,
+    const int64_t interp_method,
+    const at::Tensor& u_prev, const at::Tensor& v_prev, const at::Tensor& p_prev,
+    const at::Tensor& nu_rho_field,
+    const double eps_body, const double eps_solver, const double h2,
+    const int64_t delta_order,
+    at::Tensor out)
+{
+    const int B = (int)aabb_dim.size(0);
+    if (B <= 0 || max_vol_per_body <= 0) return;
+
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    const int Ngx = (int)gx.numel();
+    const int Ngy = (int)gy.numel();
+    const int blockSize = 256;
+    const int nblocks = (int)((max_vol_per_body + blockSize - 1) / blockSize);
+    const size_t shmem = (size_t)blockSize * 6 * sizeof(double);
+
+    AT_DISPATCH_FLOATING_TYPES_AND_HALF(F_flat.scalar_type(), "streaming_sdf_forces_post_2d_cuda", [&] {
+        streaming_sdf_forces_post_2d_kernel<scalar_t>
+            <<<dim3(nblocks, B, 1), dim3(blockSize, 1, 1), shmem, stream>>>(
+                F_flat.data_ptr<scalar_t>(),
+                F_offsets.data_ptr<int64_t>(),
+                body_shapes.data_ptr<int64_t>(),
+                body_meta.data_ptr<scalar_t>(),
+                kin.data_ptr<scalar_t>(),
+                aabb_lo.data_ptr<int64_t>(),
+                aabb_dim.data_ptr<int64_t>(),
+                gx.data_ptr<scalar_t>(),
+                gy.data_ptr<scalar_t>(),
+                Ngx, Ngy,
+                sdf_cc.data_ptr<scalar_t>(),
+                (int)interp_method,
+                u_prev.data_ptr<scalar_t>(),
+                v_prev.data_ptr<scalar_t>(),
+                p_prev.data_ptr<scalar_t>(),
+                nu_rho_field.data_ptr<scalar_t>(),
+                (int64_t)nu_rho_field.numel(),
+                (scalar_t)(1.0 / h_grid),
+                (scalar_t)eps_body,
+                (scalar_t)eps_solver,
+                (scalar_t)h2,
+                (int)delta_order,
+                out.data_ptr<double>());
     });
 }
 
@@ -1368,8 +1620,10 @@ void interpolate_2d_cuda(
 TORCH_LIBRARY_IMPL(lilytorch_kernels, CUDA, m) {
     m.impl("streaming_sdf_min_2d",                  &streaming_sdf_min_2d_cuda);
     m.impl("streaming_sdf_min_2d_multi",            &streaming_sdf_min_2d_multi_cuda);
+    m.impl("streaming_sdf_min_rho_2d_multi",        &streaming_sdf_min_rho_2d_multi_cuda);
     m.impl("bdim_forces_2d_multi",                  &bdim_forces_2d_multi_cuda);
     m.impl("streaming_sdf_forces_fused_2d_multi",   &streaming_sdf_forces_fused_2d_multi_cuda);
+    m.impl("streaming_sdf_forces_post_2d",          &streaming_sdf_forces_post_2d_cuda);
     m.impl("apply_bcs_2d",                          &apply_bcs_2d_cuda);
     m.impl("interpolate_2d",                        &interpolate_2d_cuda);
 }

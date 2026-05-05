@@ -708,27 +708,37 @@ class FlowViewerGLHook:
     def clear(self):
         self._lib.lily_flow_viewer_hook_clear()
 
-    def update(self, texture_rgb: torch.Tensor, plane_center, plane_size, alpha: float):
-      if not texture_rgb.is_cuda:
-        raise RuntimeError("FlowViewerGLHook requires a CUDA tensor.")
-      torch.cuda.synchronize(texture_rgb.device)
-      center = np.asarray(plane_center, dtype=np.float32)
-      size_xy = np.asarray(plane_size[:2], dtype=np.float32)
-      if center.shape != (3,):
-        raise ValueError(f"Expected plane_center shape (3,), got {center.shape}.")
-      if size_xy.shape != (2,):
-        raise ValueError(f"Expected plane_size shape (2,), got {size_xy.shape}.")
-      self._generation += 1
-      self._lib.lily_flow_viewer_hook_set_overlay(
-        center.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
-        size_xy.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
-        ctypes.c_float(float(alpha)),
-        ctypes.c_void_p(int(texture_rgb.data_ptr())),
-        ctypes.c_int(int(texture_rgb.shape[1])),
-        ctypes.c_int(int(texture_rgb.shape[0])),
-        ctypes.c_int(int(texture_rgb.device.index or 0)),
-        ctypes.c_int(self._generation),
-      )
+    def update(
+        self,
+        texture_rgb: torch.Tensor,
+        plane_center,
+        plane_size,
+        alpha: float,
+        synchronize: bool = True,
+    ):
+        if not texture_rgb.is_cuda:
+            raise RuntimeError("FlowViewerGLHook requires a CUDA tensor.")
+        if synchronize:
+            torch.cuda.current_stream(texture_rgb.device).synchronize()
+
+        center = np.asarray(plane_center, dtype=np.float32)
+        size_xy = np.asarray(plane_size, dtype=np.float32)
+        if center.shape != (3,):
+            raise ValueError(f"Expected plane_center shape (3,), got {center.shape}.")
+        if size_xy.shape != (2,):
+            raise ValueError(f"Expected plane_size shape (2,), got {size_xy.shape}.")
+
+        self._generation += 1
+        self._lib.lily_flow_viewer_hook_set_overlay(
+            center.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            size_xy.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            ctypes.c_float(float(alpha)),
+            ctypes.c_void_p(int(texture_rgb.data_ptr())),
+            ctypes.c_int(int(texture_rgb.shape[1])),
+            ctypes.c_int(int(texture_rgb.shape[0])),
+            ctypes.c_int(int(texture_rgb.device.index or 0)),
+            ctypes.c_int(self._generation),
+        )
 
 
 def prepare_mujoco_gl_hook_env(base_env: dict | None = None) -> dict:

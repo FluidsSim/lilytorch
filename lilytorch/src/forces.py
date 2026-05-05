@@ -546,28 +546,13 @@ def forces_method1(self, u, v, p, iteration):
 
 
 def forces_method2(self, u, v, p, iteration):
-
-    _fused_out = getattr(self.composite_body, '_fused_forces_out', None)
-    if _fused_out is not None:
-        comp = self.composite_body
-        B = len(comp.bodies)
-        out_s = _fused_out if _fused_out.dtype == u.dtype else _fused_out.to(u.dtype)
-        self.viscous_drag_record[:B, 0, iteration]  = out_s[:, 0]
-        self.viscous_drag_record[:B, 1, iteration]  = out_s[:, 1]
-        self.pressure_drag_record[:B, 0, iteration] = out_s[:, 3]
-        self.pressure_drag_record[:B, 1, iteration] = out_s[:, 4]
-        self.friction_force_lin_x = self.viscous_drag_record[:B, 0, iteration]
-        self.friction_force_lin_y = self.viscous_drag_record[:B, 1, iteration]
-        self.friction_force_ang_z = out_s[:, 2].clone()
-        self.pressure_force_x     = self.pressure_drag_record[:B, 0, iteration]
-        self.pressure_force_y     = self.pressure_drag_record[:B, 1, iteration]
-        self.pressure_force_ang_z = out_s[:, 5].clone()
-        self.xstress_tensor = None
-        self.ystress_tensor = None
-        comp._fused_forces_out = None
-        return
-
     comp = self.composite_body
+    # 2-D fused update-time force caches are intentionally ignored here.
+    # The current-step force pass below recomputes forces from the same
+    # streamed geometry using post-fluid-step u/v/p.
+    if getattr(comp, '_fused_forces_out', None) is not None:
+        comp._fused_forces_out = None
+
     B = len(comp.bodies)
 
     _stream_step = getattr(comp, '_stream_multi_step', None)
@@ -581,6 +566,71 @@ def forces_method2(self, u, v, p, iteration):
         and _have_sparse_2d
         and _stream_step is not None
     )
+    _use_fused_post_forces_2d = (
+        getattr(self, '_fused_sdf_forces_2d', False)
+        and not _have_sparse_2d
+        and _stream_step is not None
+        and getattr(comp, '_stream_multi_static_2d', None) is not None
+    )
+
+    if _use_fused_post_forces_2d:
+        from lilytorch.src.kernels import streaming_sdf_forces_post_2d
+
+        sm = comp._stream_multi_static_2d
+
+        out2d = getattr(self, '_fused_post_out_buf_2d', None)
+        if out2d is None or out2d.shape != (B, 6):
+            out2d = torch.zeros((B, 6), dtype=torch.float64, device=self.device)
+            self._fused_post_out_buf_2d = out2d
+        else:
+            out2d.zero_()
+
+        if self.use_variable_viscosity:
+            nu_rho_field = self._compute_nu_rho_for_forces(u, v)
+        else:
+            nu_rho_scalar = getattr(self, '_fused_post_nu_rho_scalar_2d', None)
+            if nu_rho_scalar is None:
+                nu_rho_scalar = torch.empty(
+                    (1,), device=self.device, dtype=self.dtype,
+                )
+                self._fused_post_nu_rho_scalar_2d = nu_rho_scalar
+            nu_rho_scalar.fill_(float(self.nu) * float(self.rho))
+            nu_rho_field = nu_rho_scalar
+
+        eps_body = comp.bodies[0].eps
+        interp_method = int(getattr(self, '_sdf_interp_method', 0))
+
+        streaming_sdf_forces_post_2d(
+            sm['F_flat'], sm['F_offsets'],
+            sm['body_shapes'], sm['body_meta'], _stream_step['kin'],
+            _stream_step['aabb_lo'], _stream_step['aabb_dim'],
+            _stream_step['gx'], _stream_step['gy'],
+            self.h, _stream_step['max_vol'],
+            comp.sdf_val,
+            interp_method,
+            u.contiguous(), v.contiguous(), p.contiguous(),
+            nu_rho_field,
+            eps_body, self.eps, self.h2,
+            self.force_delta_order,
+            out2d,
+        )
+
+        out_s = out2d if out2d.dtype == u.dtype else out2d.to(u.dtype)
+        self.viscous_drag_record[:B, 0, iteration]  = out_s[:, 0]
+        self.viscous_drag_record[:B, 1, iteration]  = out_s[:, 1]
+        self.pressure_drag_record[:B, 0, iteration] = out_s[:, 3]
+        self.pressure_drag_record[:B, 1, iteration] = out_s[:, 4]
+        self.friction_force_lin_x = self.viscous_drag_record[:B, 0, iteration]
+        self.friction_force_lin_y = self.viscous_drag_record[:B, 1, iteration]
+        self.friction_force_ang_z = out_s[:, 2].clone()
+        self.pressure_force_x     = self.pressure_drag_record[:B, 0, iteration]
+        self.pressure_force_y     = self.pressure_drag_record[:B, 1, iteration]
+        self.pressure_force_ang_z = out_s[:, 5].clone()
+        self.xstress_tensor = None
+        self.ystress_tensor = None
+        self.pforce_x = None
+        self.pforce_y = None
+        return
 
     # ---- CC normals ------------------------------------------------
     # The 2-D update path recomputes and caches these in

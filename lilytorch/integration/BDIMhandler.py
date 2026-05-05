@@ -25,7 +25,7 @@ from lilytorch.src.solver import FluidSolver
 from lilytorch.src.body import (rotate_grid_2d, rotate_grid_3d,
                                 _rotate_grid_3d_compiled)
 from lilytorch.src.kernels import streaming_sdf_forces_fused_3d_multi
-from lilytorch.src.kernels import streaming_sdf_forces_fused_2d_multi
+from lilytorch.src.kernels import streaming_sdf_min_rho_2d_multi
 from lilytorch.src.kernels import RegularGridInterpolator3D
 from lilytorch.src.kernels import streaming_sdf_min_2d_multi
 from lilytorch.src.kernels import streaming_sdf_min_3d
@@ -2314,7 +2314,7 @@ class BDIMhandler:
                         )
                 self._fused_contig_checked_2d = True
 
-            streaming_sdf_forces_fused_2d_multi(
+            streaming_sdf_min_rho_2d_multi(
                 sm['F_flat'], sm['F_offsets'],
                 sm['body_shapes'], sm['body_meta'], kin,
                 aabb_lo, aabb_dim,
@@ -2323,19 +2323,15 @@ class BDIMhandler:
                 comp.body_u, comp.body_v,
                 interp_method,
                 rho_bodies_buf, winning_rho_cc,
-                fs.u0.contiguous(), fs.v0.contiguous(), fs.p0.contiguous(),
-                nx_cc_t.contiguous(), ny_cc_t.contiguous(),
-                nu_rho_field,
-                eps_body_val, eps_solver_val,
-                fs.h2,
-                getattr(fs, 'force_delta_order', 1),
-                fused_out,
             )
 
             for b in range(B):
                 comp._sdf_sparse[b] = None
 
-            comp._fused_forces_out = fused_out
+            # 2-D fused force integration is computed in the later force
+            # stage by the native Phase-D-only op, so the update stage only
+            # maintains the fused/memory-saving geometry state here.
+            comp._fused_forces_out = None
             comp._winning_rho_cc   = winning_rho_cc
 
             comp._stream_multi_step = {

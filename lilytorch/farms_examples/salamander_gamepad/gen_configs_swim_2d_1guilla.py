@@ -20,8 +20,9 @@ class SimConfig(BaseSimConfig):
         self.use_bdim     = True
         self.use_gpu      = True
         self.compute_sdf  = True
-        self.wall_height  = 0.02
-        self.water_height = 0.015
+        self.convexify    = True
+        self.wall_height  = 0.2
+        self.water_height = 0.1
         self.stack_folder = "salamander"
 
         self.solver_method    = "fused"
@@ -33,32 +34,38 @@ class SimConfig(BaseSimConfig):
         # ── Animats ───────────────────────────────────────────────────
         self.animats_pars = [
             {
-                "model_name"  : "salamander_v4",
-                "sdf_name"    : "sdf/salamander_no_passive.sdf",
-                "control_type": "position",
-                "gains"       : [0.001, .0002, 0],
-                "controller_config": {
-                    'path'      : "lilytorch.farms_examples.salamander_gamepad.control.PositionController",
-                    'freq'      : 1,
-                    'twl'       : 10,
-                    'amp'       : 300,
-                    'limb_pose1': -0.35 * 3.141592653589793,
-                    'limb_pose2': -0.2 * 3.141592653589793,
+                "model_name"     : "1guilla",
+                "sdf_name"       : "1guilla.sdf",
+                "control_type"   : "position",
+                "gains"          : [100.0, 1., 0],
+                "spawn_mode"     : SpawnMode.TRANSVERSE,
+                "pose"           : [0, 0., 0.1, 0, 0, 3.141592653589793],
+                # "controller_config": {
+                #     'path'      : "lilytorch.farms_examples.salamander_gamepad.control.PositionController",
+                #     'freq'      : 1,
+                #     'twl'       : 10,
+                #     'amp'       : 100,
+                #     'limb_pose1': -0.35 * 3.141592653589793,
+                #     'limb_pose2': -0.2 * 3.141592653589793,
+                # },
+                "controller_path": "lilytorch.farms_examples._1guillasim.experiments.controller.PositionController",
+                "control_pars"   : {
+                    "file_path": os.path.join(
+                        self.data_folder, "/data/andreaferrario/1guilla_experiments/swim/log/ms007mpt001log.csv"
+                    ),
                 },
-                "spawn_mode": SpawnMode.TRANSVERSE,
-                "pose"      : [0, 0, 0.015, 0, 0, 3.141592653589793],
             },
         ]
 
         # ── 2-D grid ─────────────────────────────────────────────────
         self.Nx   = 1024
-        self.Ny   = 256
+        self.Ny   = 512
         # self.Nx   = 1024
         # self.Ny   = 256
-        self.xmin = -0.4
-        self.xmax =  0.4
-        self.ymin = -0.1
-        self.ymax =  0.1
+        self.xmin = -0.9
+        self.xmax =  5.1
+        self.ymin = -1.5
+        self.ymax =  1.5
 
         # ── Physics ───────────────────────────────────────────────────
         self.poisson_method    = "fft"
@@ -68,9 +75,9 @@ class SimConfig(BaseSimConfig):
         self.save_frames       = False
         self.num_sub_steps     = 1
 
-        # ── MuJoCo ───────────────────────────────────────────────────
-        self.visual_scale = 10.0
-        self.extent       = 10.0
+        # # ── MuJoCo ───────────────────────────────────────────────────
+        # self.visual_scale = 10.0
+        # self.extent       = 10.0
 
         # ── Arena ────────────────────────────────────────────────────
         self.wall_thickness = 0.003
@@ -80,21 +87,15 @@ class SimConfig(BaseSimConfig):
         self.water_buoyancy = False
 
         # ── BDIM solver ──────────────────────────────────────────────
-        # self.convexify    = True
         self.bdim_dt      = self.timestep
         self.bdim_nt      = self.n_iterations
-        self.rho_body     = 900.0
-
-        # ── Boundary conditions ──────────────────────────────────────
-        self.bc_type_u   = ["N", "N", "D", "D"]
-        self.bc_values_u = [0, 0, 0, 0]
-        self.bc_type_v   = ["D", "D", "N", "N"]
-        self.bc_values_v = [0, 0, 0, 0]
+        self.rho_body = 800.0
 
         # ── Body ─────────────────────────────────────────────────────
         self.contour_mask = False
         self.zero_pressure_inside = True
         # self.n_samples    = (2000, 2000)
+        self.force_scaling = 0.04
 
     # ── Hooks ─────────────────────────────────────────────────────────
 
