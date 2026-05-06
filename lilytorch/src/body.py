@@ -2265,14 +2265,14 @@ class CompositeBodyMesh(Body):
         # so skip the dense (B, Nx, Ny, Nz) allocations entirely for 3-D.
         # For streaming 2-D, BDIMhandler.__init__ deletes sdf_vals after init
         # since _update_2d_streaming_multi / bdim_forces_2d_multi never read it.
-        if not is_3d:
-            self.sdf_vals   = torch.zeros((self.nbodies, *gs), device=device)
-            self.sdf_vals_u = torch.zeros((self.nbodies, *gs), device=device)
-            self.sdf_vals_v = torch.zeros((self.nbodies, *gs), device=device)
-            self.u_vals     = torch.zeros((self.nbodies, *gs), device=device)
-            self.v_vals     = torch.zeros((self.nbodies, *gs), device=device)
-            self.sdf_val_u  = torch.zeros_like(self.X)
-            self.sdf_val_v  = torch.zeros_like(self.X)
+        # if not is_3d:
+        #     self.sdf_vals   = torch.zeros((self.nbodies, *gs), device=device)
+        #     self.sdf_vals_u = torch.zeros((self.nbodies, *gs), device=device)
+        #     self.sdf_vals_v = torch.zeros((self.nbodies, *gs), device=device)
+        #     self.u_vals     = torch.zeros((self.nbodies, *gs), device=device)
+        #     self.v_vals     = torch.zeros((self.nbodies, *gs), device=device)
+        #     self.sdf_val_u  = torch.zeros_like(self.X)
+        #     self.sdf_val_v  = torch.zeros_like(self.X)
 
         self.com_pos   = torch.zeros((self.nbodies, self.ndim), device=device)
 
@@ -2729,112 +2729,5 @@ class MultiAnimatBodies(Body):
             body.sdf    = body.sdf if not isinstance(body.sdf, torch.Tensor) else None
             if self.ndim == 3:
                 body.body_w = None
-
-
-class CompositeSegmentBody:
-
-    def __init__(self, device, x, y, sdf_folder, sdf_name, eps=0.05, grids=None):
-        """
-        sdf_folder = folder of the sdf file
-        sdf_name = name of the sdf file
-        """
-        self.device          = device
-        self.thk             = 0.0005
-        self.sdf_folder      = sdf_folder
-        self.sdf             = _import_model_sdf().read(sdf_folder+sdf_name)[0]
-        self.n               = len(self.sdf.links)
-        self.body            = Body(device,x,y,eps=eps,grids=grids)
-        self.nlinks          = len(self.sdf.links)
-        self.initial_poses   = torch.tensor([link.pose[:2] for link in self.sdf.links],device=device)
-        self.initial_lin_vel = torch.zeros((self.initial_poses.shape[0]),2,device=device)
-        self.initial_ang_vel = torch.zeros(self.initial_poses.shape[0],device=device)
-
-        self.ds=torch.zeros((self.n-1,self.body.stacked_xy.shape[1]),device=device)
-        self.us=torch.zeros((self.n-1,self.body.X.shape[0],self.body.X.shape[1]),device=device)
-        self.vs=torch.zeros((self.n-1,self.body.X.shape[0],self.body.X.shape[1]),device=device)
-        self.uv=torch.zeros((self.n-1,2,self.body.stacked_xy.shape[1]),device=device)
-
-        self.compute_sdf_and_velocities(-self.initial_poses, self.initial_lin_vel, self.initial_ang_vel, dt=1)
-
-    def compute_sdf_and_velocities(self, p, com_lin_vel, com_ang_vel, dt=1, plotting=False):
-        """
-        p: link poses - dim n
-        com_lin_vel: com linear vel - dim n
-        com_ang_vel: com ang vel - dim n
-        """
-
-        for i in range(self.n-1):
-            e=p[i+1]-p[i]
-            p_o=self.body.stacked_xy-p[i][:,None]
-            h=torch.clamp((p_o*e[:,None]).sum(axis=0)/torch.dot(e,e),0.0,1.0)
-            pq=p_o-e[:,None]*h
-            self.ds[i]=(torch.linalg.norm(pq,axis=0)-self.thk)
-
-            c=torch.cos(com_ang_vel[i])
-            s=torch.sin(com_ang_vel[i])
-            R1=torch.tensor([[c,-s],[s,c]],device=self.device)
-            c=torch.cos(com_ang_vel[i+1])
-            s=torch.sin(com_ang_vel[i+1])
-            R2=torch.tensor([[c,-s],[s,c]],device=self.device)
-
-            line_point=e[:,None]*h+p[i][:,None]
-            self.uv[i]=(
-                (1-h)*(0*com_lin_vel[i][:,None]+R1@line_point)+
-                h*(0*com_lin_vel[i+1][:,None]+R2@line_point)+
-                -line_point
-            ) #/ dt
-
-
-        idx=self.ds.argmin(0).unsqueeze(0).expand(self.ds.shape)
-        self.sdf=self.ds.gather(0,idx)[0].reshape(self.body.nx,self.body.ny).contiguous()
-        self.body_u=self.uv[:,0,:].gather(0,idx)[0].reshape(self.body.nx,self.body.ny).contiguous()
-        self.body_v=self.uv[:,1,:].gather(0,idx)[0].reshape(self.body.nx,self.body.ny).contiguous()
-
-
-
-        # ==== plotting ====
-        if plotting:
-            import matplotlib.pyplot as plt
-            X=self.body.X.cpu()
-            Y=self.body.Y.cpu()
-            x=self.body.x.cpu()
-            y=self.body.y.cpu()
-            var=self.sdf.cpu()
-            pcpu=p.cpu()
-            plt.figure()
-            plt.imshow(
-                    var.T,
-                    extent = (
-                        torch.min(x.cpu()), torch.max(x.cpu()),
-                        torch.min(y.cpu()), torch.max(y.cpu())
-                    ),
-                    origin = "lower",
-                    cmap = "Greys"
-                )
-            plt.colorbar()
-            plt.contour(X,Y,var, colors='k', levels=[0], linestyles='-')
-            cset1 = plt.contourf(X,Y, var, levels=20, cmap="Greys")
-            plt.plot(pcpu[:,0],pcpu[:,1],'r',marker='o')
-            subsample_n = 2**3
-            plt.quiver(
-                X[::subsample_n,::subsample_n],
-                Y[::subsample_n,::subsample_n],
-                self.body_u[::subsample_n,::subsample_n].cpu(),
-                self.body_v[::subsample_n,::subsample_n].cpu(),
-                color='g',
-                scale=dt, scale_units='xy'
-            )
-
-            plt.show()
-
-
-# ---------------------------------------------------------------------------
-# Module-level test entry point (kept minimal; detailed tests belong in a
-# dedicated test file).
-# ---------------------------------------------------------------------------
-if __name__ == "__main__":
-    pass
-
-
 
 

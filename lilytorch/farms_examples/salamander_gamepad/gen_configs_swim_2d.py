@@ -62,8 +62,8 @@ class SimConfig(BaseSimConfig):
 
         # ── Physics ───────────────────────────────────────────────────
         self.poisson_method    = "fft"
-        self.timestep          = 0.001
-        self.convection_method = "quick"
+        self.timestep          = 0.01
+        self.convection_method = "implicit"
         self.n_iterations      = 80001
         self.save_frames       = False
         self.num_sub_steps     = 1
@@ -119,8 +119,8 @@ class SimConfig(BaseSimConfig):
             "loader": "lilytorch.integration.flow_viewer_2d_gpu.FlowViewer2D",
             "config": {
                 "field"         : "curl",
-                "nx_vis"        : 512,
-                "ny_vis"        : 128,
+                "nx_vis"        : 1024,
+                "ny_vis"        : 256,
                 "alpha"         : 1,
                 "z_offset"      : 0.015,
                 "smooth_sigma"  : 0,

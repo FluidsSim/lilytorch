@@ -59,28 +59,12 @@ class BDIMhandler:
         # We intentionally delegate parsing so that strings like "double"
         # / "single" / "float64" / "float32" all behave the same here as
         # they do in :class:`FluidSolver`.
-        if dtype is not None:
-            self.dtype = dtype
-        else:
-            dtype_str = self.pars["solver"].get("dtype", "float32")
-            if isinstance(dtype_str, torch.dtype):
-                self.dtype = dtype_str
-            else:
-                _dtype_map = {"float32": torch.float32, "float64": torch.float64,
-                              "double":  torch.float64, "single":  torch.float32}
-                if dtype_str not in _dtype_map:
-                    raise ValueError(
-                        f"Unknown solver.dtype '{dtype_str}'. "
-                        f"Expected one of {sorted(_dtype_map)}."
-                    )
-                self.dtype = _dtype_map[dtype_str]
-        if self.dtype not in (torch.float32, torch.float64):
-            raise ValueError(
-                f"BDIMhandler dtype must be torch.float32 or torch.float64, "
-                f"got {self.dtype}."
-            )
+        self.dtype = self.pars["solver"].get("dtype", torch.float32) if dtype is None else dtype
+
         self.dtype_np = np.float32 if self.dtype == torch.float32 else np.float64
-        self._prev_body_index = () # used for 2D contour-mask neighbor only
+
+        # used for 2D contour-mask neighbor only
+        self._prev_body_index = ()
         self._next_body_index = ()
 
         # ---- bookkeeping ----
@@ -177,15 +161,10 @@ class BDIMhandler:
         # dispatch in :meth:`step` already short-circuits to method 2
         # regardless of ``self.force_method`` — no extra check needed
         # for 3-D.
-        _solver_cfg = self.pars["solver"]
-        _kernel_path_active = (
-            _solver_cfg.get("solver_method", None) == "kernel"
-            or (_solver_cfg.get("solver_method", None) is None
-                and bool(_solver_cfg.get("use_kernels", True)))
-        )
+
         if (self.ndim == 2
                 and self.force_method == "method1"
-                and _kernel_path_active):
+                and self.fluid_solver._solver_method=="kernel"):
             raise ValueError(
                 "force_method='method1' is incompatible with "
                 "solver_method='kernel': forces_method1 "
@@ -197,12 +176,7 @@ class BDIMhandler:
                 "full kernel-mode acceleration."
             )
 
-        # ---- FARMS-style buoyancy parameters ----
-        # With all-Neumann BCs the BDIM pressure field is purely dynamic;
-        # no hydrostatic gradient builds up, so buoyancy must be added
-        # explicitly.  We replicate FARMS' compute_buoyancy() formula from
-        # drag.pyx which uses MuJoCo body mass, bounding-sphere half-height,
-        # and a linear submersion fraction.
+        # ---- buoyancy parameters ----
         self.gravity_z = float(physics.model.opt.gravity[2])  # e.g. -9.81
         # water_surface: height at which buoyancy becomes full.
         # 3-D:        MuJoCo z ↔ fluid z  → use solver.zmax
@@ -225,65 +199,205 @@ class BDIMhandler:
         # ---- allocate per-body SDF / velocity arrays if missing ----
         comp = self.fluid_solver.composite_body
         gs = self.fluid_solver.grid_shape
-        if self.ndim == 3:
-            # 3-D never uses comp.sdf_vals — all update paths write comp._sdf_sparse
-            # and forces_method2_3d reads _sdf_sparse or _fused_forces_out directly.
-            # body.py skips the 3-D allocation; nothing to reassign here.
-            # Streaming fused-CUDA path requires the per-body C++/CUDA
-            # trilinear samplers (re-uses body._stream_meta cached there).
-            # When ``streaming_sdf_3d`` is on, ``custom_trilinear_3d`` is
-            # auto-set in ``solver.py``.
-            if getattr(self.fluid_solver, '_custom_trilinear_3d', False):
-                self._init_custom_trilinear_3d()
-            if getattr(self.fluid_solver, '_streaming_sdf_3d', False):
-                print("  [streaming-sdf-3D] fused per-body C++/CUDA SDF "
-                      "min-update enabled (replaces _update_3d streaming "
-                      "Python loop)")
-        else:
-            # 2-D update uses per-body SDF stacks for argmin-based union
-            # and force integration.  body.py pre-allocates these for 2-D;
-            # the guards below are safety nets for unusual construction paths.
-            _streaming_2d = getattr(self.fluid_solver, '_streaming_sdf_2d', False)
+        if self.fluid_solver._solver_method == "kernel":
+            if self.ndim == 3:
+                self._init_interp_3d()
+            elif self.ndim == 2:
+                self._init_interp_2d()
 
-            # sdf_vals is always kept: _update_2d falls back to the batched
-            # grid_sample path when any body lacks _stream_meta, and that
-            # path writes/reads comp.sdf_vals.
-            if not hasattr(comp, 'sdf_vals'):
-                comp.sdf_vals = torch.zeros(
-                    (comp.nbodies, *gs), device=self.device, dtype=self.dtype)
+    # ------------------------------------------------------------------
+    #  Custom-interp (C++/CUDA) per-body SDF samplers
+    # ------------------------------------------------------------------
+    def _init_interp_2d(self):
+        """
 
-            if not hasattr(comp, 'sdf_vals_u'):
-                comp.sdf_vals_u = torch.zeros(
-                    (comp.nbodies, *gs), device=self.device, dtype=self.dtype)
-            if not hasattr(comp, 'sdf_vals_v'):
-                comp.sdf_vals_v = torch.zeros(
-                    (comp.nbodies, *gs), device=self.device, dtype=self.dtype)
-            if not hasattr(comp, 'u_vals'):
-                comp.u_vals = torch.zeros(
-                    (comp.nbodies, *gs), device=self.device, dtype=self.dtype)
-            if not hasattr(comp, 'v_vals'):
-                comp.v_vals = torch.zeros(
-                    (comp.nbodies, *gs), device=self.device, dtype=self.dtype)
+        For each 2-D body, stash the metadata needed by the
+        ``streaming_sdf_min_2d_multi`` kernel directly on
+        ``body._stream_meta``.  The streaming kernel does its own
+        bilinear / biquadratic sampling from ``F``, ``bx``, ``by``
+        and the cached scalars below.
 
-            # ``comp.body_ids`` is built once with the composite body, so the
-            # per-animat previous/next body links are static as well.
-            self._init_body_neighbors_2d()
+        Mesh bodies use the precomputed ``body.sdf.{F, x, y}`` table.
 
-            # NOTE: the 2-D Python path no longer pre-samples / pads / stacks
-            # bodies for grid_sample.  It now mirrors the 3-D Python path
-            # (per-body AABB-cropped sub-grid + ``torch.where`` running-min
-            # union); analytical bodies are evaluated directly on the
-            # sub-grid via ``body.sdf(X, Y)``.
+        Analytical bodies (callable SDF, no precomputed table) are
+        handled by pre-sampling the callable onto a regular local-frame
+        grid derived from ``body.local_aabb`` (auto-derived from the
+        contour in :meth:`BodyAnalytical._initialize_2d`).
 
-            # ── 2-D streaming fused-CUDA path (Phase C analogue of 3-D) ──
-            # Opt-in via solver.streaming_sdf_2d.  Builds per-body
-            # `_stream_meta` from each body's own `sdf.{F, x, y}` so the
-            # `streaming_sdf_min_2d_multi` kernel can run.
-            if _streaming_2d:
-                self._init_custom_trilinear_2d()
-                print("  [streaming-sdf-2D] fused per-body C++/CUDA SDF "
-                      "min-update enabled (replaces _update_2d batched "
-                      "grid_sample loop)")
+        Raises ``RuntimeError`` if any body has neither a precomputed SDF
+        grid nor a ``local_aabb`` descriptor.  Silent fallback to the
+        Python path is intentionally forbidden when ``use_kernels=True``.
+        """
+        comp = self.fluid_solver.composite_body
+        h    = float(self.fluid_solver.h)
+        n_built = 0
+        n_sampled = 0
+        for body in comp.bodies:
+            # ── Mesh body: has a precomputed regular-grid SDF ──────────
+            if (hasattr(body, 'sdf')
+                    and hasattr(body.sdf, 'F')
+                    and hasattr(body.sdf, 'x')
+                    and hasattr(body.sdf, 'y')):
+                F  = body.sdf.F.contiguous()
+                bx = body.sdf.x.contiguous()
+                by = body.sdf.y.contiguous()
+                dx_b = float(bx[1].item() - bx[0].item())
+                dy_b = float(by[1].item() - by[0].item())
+                body._stream_meta = {
+                    'F':       F,
+                    'bx':      bx,
+                    'by':      by,
+                    'bx0':     float(bx[0].item()),
+                    'by0':     float(by[0].item()),
+                    'bx_last': float(bx[-1].item()),
+                    'by_last': float(by[-1].item()),
+                    'inv_dx':  1.0 / dx_b,
+                    'inv_dy':  1.0 / dy_b,
+                    'inv_vol': 1.0 / (dx_b * dy_b),
+                }
+                n_built += 1
+                n_sampled += 1
+
+            elif hasattr(body, 'local_aabb') and callable(getattr(body, 'sdf', None)):
+
+                local_aabb = getattr(body, 'local_aabb', None)
+                sdf_callable = getattr(body, 'sdf', None)
+
+                lo = local_aabb[0].cpu()
+                hi = local_aabb[1].cpu()
+                Mx = max(2, int(round(float(hi[0] - lo[0]) / h)) + 1)
+                My = max(2, int(round(float(hi[1] - lo[1]) / h)) + 1)
+                bx = torch.linspace(float(lo[0]), float(hi[0]), Mx,
+                                    dtype=self.dtype, device=self.device)
+                by = torch.linspace(float(lo[1]), float(hi[1]), My,
+                                    dtype=self.dtype, device=self.device)
+                X, Y = torch.meshgrid(bx, by, indexing='ij')
+                with torch.no_grad():
+                    F = sdf_callable(X, Y).contiguous()
+                dx_b = float(bx[1].item() - bx[0].item()) if Mx > 1 else h
+                dy_b = float(by[1].item() - by[0].item()) if My > 1 else h
+                body._stream_meta = {
+                    'F':       F,
+                    'bx':      bx,
+                    'by':      by,
+                    'bx0':     float(bx[0].item()),
+                    'by0':     float(by[0].item()),
+                    'bx_last': float(bx[-1].item()),
+                    'by_last': float(by[-1].item()),
+                    'inv_dx':  1.0 / dx_b,
+                    'inv_dy':  1.0 / dy_b,
+                    'inv_vol': 1.0 / (dx_b * dy_b),
+                }
+                n_sampled += 1
+            else:
+                raise RuntimeError(
+                    "2-D bodies must have either a precomputed SDF grid "
+                    "(body.sdf.{F,x,y}) or a callable SDF and local_aabb "
+                    "(for on-the-fly sampling).  Found body with neither; "
+                    "cannot build the per-body streaming-SDF metadata "
+                    "required by the kernel path.  If you want to use "
+                    "the kernel path, please ensure all bodies meet these "
+                    "requirements.  Otherwise, set solver_method='python' "
+                    "to use the pure-Python path, which supports arbitrary "
+                    "bodies but without the kernel-mode acceleration."
+                )
+
+        print(f"  [stream-meta-2D] built {n_built}/{len(comp.bodies)} "
+              f"per-body 2-D streaming-SDF metadata records "
+              f"({n_sampled} sampled from analytical SDF)")
+
+
+    def _init_interp_3d(self):
+        """Build a per-body ``RegularGridInterpolator3D`` (C++/CUDA
+        trilinear) and stash it on ``body._sdf_tri3d``.
+
+        Used by the streaming ``_update_3d`` path to bypass
+        ``grid_sample`` (the default backend of
+        ``RegularGridInterpolatorAutomatic`` for 3-D, which the bodies
+        construct in ``_initialize_3d_mesh``).  The custom kernel skips
+        coordinate normalisation and the 5-D reshape, and matches
+        ``grid_sample(padding_mode='border')`` semantics via
+        ``fill_method=3``.
+        """
+
+        comp = self.fluid_solver.composite_body
+        n_built = 0
+        for body in comp.bodies:
+            if (hasattr(body, 'sdf')
+                    and hasattr(body.sdf, 'F')
+                    and hasattr(body.sdf, 'x')
+                    and hasattr(body.sdf, 'y')
+                    and hasattr(body.sdf, 'z')):
+                body._sdf_tri3d = RegularGridInterpolator3D(
+                    (body.sdf.x.contiguous(),
+                     body.sdf.y.contiguous(),
+                     body.sdf.z.contiguous()),
+                    body.sdf.F.contiguous(),
+                    fill_value="nearest",
+                )
+                F_t = body._sdf_tri3d.F
+                bx_t = body._sdf_tri3d.x
+                by_t = body._sdf_tri3d.y
+                bz_t = body._sdf_tri3d.z
+                dx_b = float(body._sdf_tri3d.dx)
+                dy_b = float(body._sdf_tri3d.dy)
+                dz_b = float(body._sdf_tri3d.dz)
+                n_built += 1
+            elif hasattr(body, 'local_aabb') and callable(getattr(body, 'sdf', None)):
+                local_aabb = getattr(body, 'local_aabb', None)
+                sdf_callable = getattr(body, 'sdf', None)
+                if local_aabb is None or not callable(sdf_callable):
+                    body._sdf_tri3d = None
+                    body._stream_meta = None
+                    continue
+                lo = local_aabb[0].cpu()
+                hi = local_aabb[1].cpu()
+                h = float(self.fluid_solver.h)
+                Mx = max(2, int(round(float(hi[0] - lo[0]) / h)) + 1)
+                My = max(2, int(round(float(hi[1] - lo[1]) / h)) + 1)
+                Mz = max(2, int(round(float(hi[2] - lo[2]) / h)) + 1)
+                bx_t = torch.linspace(float(lo[0]), float(hi[0]), Mx, dtype=self.dtype, device=self.device)
+                by_t = torch.linspace(float(lo[1]), float(hi[1]), My, dtype=self.dtype, device=self.device)
+                bz_t = torch.linspace(float(lo[2]), float(hi[2]), Mz, dtype=self.dtype, device=self.device)
+                X, Y, Z = torch.meshgrid(bx_t, by_t, bz_t, indexing='ij')
+                with torch.no_grad():
+                    F_t = sdf_callable(X, Y, Z).contiguous()
+                dx_b = float(bx_t[1].item() - bx_t[0].item())
+                dy_b = float(by_t[1].item() - by_t[0].item())
+                dz_b = float(bz_t[1].item() - bz_t[0].item())
+                body._sdf_tri3d = None
+            else:
+                raise RuntimeError(
+                    "3-D bodies must have either a precomputed SDF grid "
+                    "(body.sdf.{F,x,y,z}) or a callable SDF and local_aabb "
+                    "(for on-the-fly sampling).  Found body with neither; "
+                    "cannot build the per-body streaming-SDF metadata "
+                    "required by the kernel path.  If you want to use "
+                    "the kernel path, please ensure all bodies meet these "
+                    "requirements.  Otherwise, set solver_method='python' "
+                    "to use the pure-Python path, which supports arbitrary "
+                    "bodies but without the kernel-mode acceleration."
+                )
+
+            body._stream_meta = {
+                'F':       F_t.contiguous(),
+                'bx':      bx_t.contiguous(),
+                'by':      by_t.contiguous(),
+                'bz':      bz_t.contiguous(),
+                'bx0':     float(bx_t[0].item()),
+                'by0':     float(by_t[0].item()),
+                'bz0':     float(bz_t[0].item()),
+                'bx_last': float(bx_t[-1].item()),
+                'by_last': float(by_t[-1].item()),
+                'bz_last': float(bz_t[-1].item()),
+                'inv_dx':  1.0 / dx_b,
+                'inv_dy':  1.0 / dy_b,
+                'inv_dz':  1.0 / dz_b,
+                'inv_vol': 1.0 / (dx_b * dy_b * dz_b),
+            }
+        print(f"  [custom-trilinear-3D] built {n_built}/{len(comp.bodies)} "
+              f"mesh 3-D stream metadata records; analytical bodies are sampled when needed")
+
 
     # ------------------------------------------------------------------
     # helpers
@@ -367,6 +481,10 @@ class BDIMhandler:
     # ==================================================================
     #  update: FARMS kinematics  ->  SDF fields + body velocities
     # ==================================================================
+
+    # def
+
+
     def update(self, t, iteration, dt=1):
         if self.ndim == 3:
             self._update_3d(t, iteration, dt)
@@ -466,7 +584,7 @@ class BDIMhandler:
             # ``body.local_aabb`` derived from the contour with a
             # band-radius safety margin).  Bodies without either
             # descriptor fall through to the full-grid path.
-            aabb = self._body_aabb_indices_2d(
+            aabb = self._body_aabb_local_2d(
                 body, R, urdf_pos,
                 comp.x, comp.y,
                 h_grid, gs, pad=3,
@@ -628,7 +746,7 @@ class BDIMhandler:
         return None
 
     @staticmethod
-    def _body_aabb_indices_2d(body, R, urdf_pos, comp_x, comp_y,
+    def _body_aabb_local_2d(body, R, urdf_pos, comp_x, comp_y,
                               h, gs, pad=3):
         """2-D analogue of :meth:`_body_aabb_indices`.
 
@@ -897,7 +1015,7 @@ class BDIMhandler:
                 (i0, i1, j0, j1, k0, k1) = aabb
                 sl = (slice(i0, i1), slice(j0, j1), slice(k0, k1))
 
-                px, py, pz = rotate_grid_3d(
+                px, py, pz = _rotate_grid_3d_compiled(
                     comp.X[sl], comp.Y[sl], comp.Z_grid[sl],
                     R_T, body_pos,
                 )
@@ -908,17 +1026,17 @@ class BDIMhandler:
 
                 # Evaluate SDF directly at staggered face locations
                 # (exact interpolation instead of CC averaging)
-                px_u, py_u, pz_u = rotate_grid_3d(
+                px_u, py_u, pz_u = _rotate_grid_3d_compiled(
                     comp.Xu_stag[sl], comp.Yu_stag[sl], comp.Zu_stag[sl],
                     R_T, body_pos)
                 sdf_sub_u = sdf_eval(px_u, py_u, pz_u)
 
-                px_v, py_v, pz_v = rotate_grid_3d(
+                px_v, py_v, pz_v = _rotate_grid_3d_compiled(
                     comp.Xv_stag[sl], comp.Yv_stag[sl], comp.Zv_stag[sl],
                     R_T, body_pos)
                 sdf_sub_v = sdf_eval(px_v, py_v, pz_v)
 
-                px_w, py_w, pz_w = rotate_grid_3d(
+                px_w, py_w, pz_w = _rotate_grid_3d_compiled(
                     comp.Xw_stag[sl], comp.Yw_stag[sl], comp.Zw_stag[sl],
                     R_T, body_pos)
                 sdf_sub_w = sdf_eval(px_w, py_w, pz_w)
@@ -972,26 +1090,24 @@ class BDIMhandler:
 
             else:
                 # ── Full-grid path (body covers >90 % of grid) ─────
-                _rotate = (_rotate_grid_3d_compiled
-                           if fs._compile_sdf else rotate_grid_3d)
-                px, py, pz = _rotate(comp.X, comp.Y, comp.Z_grid,
+                px, py, pz = _rotate_grid_3d_compiled(comp.X, comp.Y, comp.Z_grid,
                                      R_T, body_pos)
                 sdf_cc = sdf_eval(px, py, pz)
                 comp._sdf_sparse[body_i] = (None, sdf_cc)  # None = full grid
 
                 # Evaluate SDF directly at staggered face locations
                 # (exact interpolation instead of CC averaging)
-                px_u, py_u, pz_u = _rotate(
+                px_u, py_u, pz_u = _rotate_grid_3d_compiled(
                     comp.Xu_stag, comp.Yu_stag, comp.Zu_stag,
                     R_T, body_pos)
                 sdf_u = sdf_eval(px_u, py_u, pz_u)
 
-                px_v, py_v, pz_v = _rotate(
+                px_v, py_v, pz_v = _rotate_grid_3d_compiled(
                     comp.Xv_stag, comp.Yv_stag, comp.Zv_stag,
                     R_T, body_pos)
                 sdf_v = sdf_eval(px_v, py_v, pz_v)
 
-                px_w, py_w, pz_w = _rotate(
+                px_w, py_w, pz_w = _rotate_grid_3d_compiled(
                     comp.Xw_stag, comp.Yw_stag, comp.Zw_stag,
                     R_T, body_pos)
                 sdf_w = sdf_eval(px_w, py_w, pz_w)
@@ -1637,27 +1753,12 @@ class BDIMhandler:
             lin_vel_np  = lin_vels_np[animat_id][link_id]
             ang_vel_np  = ang_vels_np[animat_id][link_id]
 
-            meta = getattr(body, '_stream_meta', None)
-            if meta is None:
-                # Analytical / non-mesh body: fall back to Python path
-                # by using the cached `_sdf_tri3d` (custom trilinear) or
-                # plain `body.sdf` at full grid.  Re-emit kinematics as
-                # device tensors for that path.
-                com_pos  = torch.as_tensor(com_pos_np,  device=self.device, dtype=self.dtype)
-                urdf_pos = torch.as_tensor(urdf_pos_np, device=self.device, dtype=self.dtype)
-                R        = torch.as_tensor(R_np,        device=self.device, dtype=self.dtype)
-                lin_vel  = torch.as_tensor(lin_vel_np,  device=self.device, dtype=self.dtype)
-                ang_vel  = torch.as_tensor(ang_vel_np,  device=self.device, dtype=self.dtype)
-                self._fallback_update_one_body_3d(
-                    body, body_i, com_pos, urdf_pos, R, lin_vel, ang_vel,
-                    h_grid, gs, comp,
-                )
-                continue
+            meta = body._stream_meta
 
             # Compose body frame in numpy (small, cheap)
             local_translation = getattr(body, "_local_translation_t", None)
             local_rotation    = getattr(body, "_local_rotation_t",    None)
-            local_pose = getattr(body, "local_pose", None)
+            local_pose        = getattr(body, "local_pose", None)
             if local_pose is not None:
                 if local_translation is None or local_rotation is None:
                     local_pose_np = np.asarray(local_pose, dtype=self.dtype_np)
@@ -1723,218 +1824,6 @@ class BDIMhandler:
             comp.com_pos[body_i] = torch.as_tensor(
                 com_pos_np, device=self.device, dtype=self.dtype)
             body.com_pos = comp.com_pos[body_i]
-
-    def _fallback_update_one_body_3d(self, body, body_i,
-                                     com_pos, urdf_pos, R,
-                                     lin_vel, ang_vel,
-                                     h_grid, gs, comp):
-        """Single-body PyTorch fallback used by `_update_3d_streaming`
-        for bodies without a regular SDF table (analytical / etc.).
-
-        Mirrors the per-body block of `_update_3d` for one body.
-        """
-        body_pos, body_rot = self._compose_body_frame_3d(body, urdf_pos, R)
-        R_T = body_rot.T
-
-        # AABB-clip via either the mesh axis tensors or analytical
-        # bodies' ``local_aabb`` descriptor (handled inside the
-        # helper).  Returns ``None`` when no descriptor is available
-        # — the body then takes the full-grid fallback below.
-        aabb = self._body_aabb_indices(
-            body, body_rot, body_pos,
-            comp.x, comp.y, comp.z,
-            h_grid, gs, pad=3,
-        )
-        comp._body_aabbs[body_i] = aabb
-        sdf_eval = getattr(body, '_sdf_tri3d', None) or body.sdf
-
-        if aabb is not None:
-            (i0, i1, j0, j1, k0, k1) = aabb
-            sl = (slice(i0, i1), slice(j0, j1), slice(k0, k1))
-
-            px, py, pz = rotate_grid_3d(
-                comp.X[sl], comp.Y[sl], comp.Z_grid[sl], R_T, body_pos)
-            sdf_sub = sdf_eval(px, py, pz)
-            comp._sdf_sparse[body_i] = (aabb, sdf_sub)
-
-            px_u, py_u, pz_u = rotate_grid_3d(
-                comp.Xu_stag[sl], comp.Yu_stag[sl], comp.Zu_stag[sl],
-                R_T, body_pos)
-            sdf_sub_u = sdf_eval(px_u, py_u, pz_u)
-            px_v, py_v, pz_v = rotate_grid_3d(
-                comp.Xv_stag[sl], comp.Yv_stag[sl], comp.Zv_stag[sl],
-                R_T, body_pos)
-            sdf_sub_v = sdf_eval(px_v, py_v, pz_v)
-            px_w, py_w, pz_w = rotate_grid_3d(
-                comp.Xw_stag[sl], comp.Yw_stag[sl], comp.Zw_stag[sl],
-                R_T, body_pos)
-            sdf_sub_w = sdf_eval(px_w, py_w, pz_w)
-
-            vel_sub_u = (lin_vel[0]
-                         + ang_vel[1] * (comp.Zu_stag[sl] - com_pos[2])
-                         - ang_vel[2] * (comp.Yu_stag[sl] - com_pos[1]))
-            vel_sub_v = (lin_vel[1]
-                         + ang_vel[2] * (comp.Xv_stag[sl] - com_pos[0])
-                         - ang_vel[0] * (comp.Zv_stag[sl] - com_pos[2]))
-            vel_sub_w = (lin_vel[2]
-                         + ang_vel[0] * (comp.Yw_stag[sl] - com_pos[1])
-                         - ang_vel[1] * (comp.Xw_stag[sl] - com_pos[0]))
-
-            old_cc = comp.sdf_val[sl].contiguous()
-            comp.sdf_val[sl] = torch.where(sdf_sub < old_cc, sdf_sub, old_cc)
-
-            old_u = comp.sdf_val_u[sl].contiguous()
-            mask_u = sdf_sub_u < old_u
-            comp.sdf_val_u[sl] = torch.where(mask_u, sdf_sub_u, old_u)
-            comp.body_u[sl] = torch.where(
-                mask_u, vel_sub_u, comp.body_u[sl].contiguous())
-
-            old_v = comp.sdf_val_v[sl].contiguous()
-            mask_v = sdf_sub_v < old_v
-            comp.sdf_val_v[sl] = torch.where(mask_v, sdf_sub_v, old_v)
-            comp.body_v[sl] = torch.where(
-                mask_v, vel_sub_v, comp.body_v[sl].contiguous())
-
-            old_w = comp.sdf_val_w[sl].contiguous()
-            mask_w = sdf_sub_w < old_w
-            comp.sdf_val_w[sl] = torch.where(mask_w, sdf_sub_w, old_w)
-            comp.body_w[sl] = torch.where(
-                mask_w, vel_sub_w, comp.body_w[sl].contiguous())
-        else:
-            px, py, pz = rotate_grid_3d(
-                comp.X, comp.Y, comp.Z_grid, R_T, body_pos)
-            sdf_cc = sdf_eval(px, py, pz)
-            comp._sdf_sparse[body_i] = (None, sdf_cc)
-
-            px_u, py_u, pz_u = rotate_grid_3d(
-                comp.Xu_stag, comp.Yu_stag, comp.Zu_stag, R_T, body_pos)
-            sdf_u = sdf_eval(px_u, py_u, pz_u)
-            px_v, py_v, pz_v = rotate_grid_3d(
-                comp.Xv_stag, comp.Yv_stag, comp.Zv_stag, R_T, body_pos)
-            sdf_v = sdf_eval(px_v, py_v, pz_v)
-            px_w, py_w, pz_w = rotate_grid_3d(
-                comp.Xw_stag, comp.Yw_stag, comp.Zw_stag, R_T, body_pos)
-            sdf_w = sdf_eval(px_w, py_w, pz_w)
-
-            vel_u = (lin_vel[0]
-                     + ang_vel[1] * (comp.Zu_stag - com_pos[2])
-                     - ang_vel[2] * (comp.Yu_stag - com_pos[1]))
-            vel_v = (lin_vel[1]
-                     + ang_vel[2] * (comp.Xv_stag - com_pos[0])
-                     - ang_vel[0] * (comp.Zv_stag - com_pos[2]))
-            vel_w = (lin_vel[2]
-                     + ang_vel[0] * (comp.Yw_stag - com_pos[1])
-                     - ang_vel[1] * (comp.Xw_stag - com_pos[0]))
-
-            mask_cc = sdf_cc < comp.sdf_val
-            comp.sdf_val = torch.where(mask_cc, sdf_cc, comp.sdf_val)
-            mask_u = sdf_u < comp.sdf_val_u
-            comp.sdf_val_u = torch.where(mask_u, sdf_u, comp.sdf_val_u)
-            comp.body_u    = torch.where(mask_u, vel_u, comp.body_u)
-            mask_v = sdf_v < comp.sdf_val_v
-            comp.sdf_val_v = torch.where(mask_v, sdf_v, comp.sdf_val_v)
-            comp.body_v    = torch.where(mask_v, vel_v, comp.body_v)
-            mask_w = sdf_w < comp.sdf_val_w
-            comp.sdf_val_w = torch.where(mask_w, sdf_w, comp.sdf_val_w)
-            comp.body_w    = torch.where(mask_w, vel_w, comp.body_w)
-
-        comp.com_pos[body_i] = com_pos
-        body.com_pos = com_pos
-
-    # ------------------------------------------------------------------
-    #  Custom-trilinear (C++/CUDA) per-body SDF samplers
-    # ------------------------------------------------------------------
-    def _init_custom_trilinear_2d(self):
-        """2-D analogue of :meth:`_init_custom_trilinear_3d`.
-
-        For each 2-D body, stash the metadata needed by the
-        ``streaming_sdf_min_2d_multi`` kernel directly on
-        ``body._stream_meta``.  The streaming kernel does its own
-        bilinear / biquadratic sampling from ``F``, ``bx``, ``by``
-        and the cached scalars below.
-
-        Mesh bodies use the precomputed ``body.sdf.{F, x, y}`` table.
-
-        Analytical bodies (callable SDF, no precomputed table) are
-        handled by pre-sampling the callable onto a regular local-frame
-        grid derived from ``body.local_aabb`` (auto-derived from the
-        contour in :meth:`BodyAnalytical._initialize_2d`).
-
-        Raises ``RuntimeError`` if any body has neither a precomputed SDF
-        grid nor a ``local_aabb`` descriptor.  Silent fallback to the
-        Python path is intentionally forbidden when ``use_kernels=True``.
-        """
-        comp = self.fluid_solver.composite_body
-        h    = float(self.fluid_solver.h)
-        n_built = 0
-        n_sampled = 0
-        for body in comp.bodies:
-            # ── Mesh body: has a precomputed regular-grid SDF ──────────
-            if (hasattr(body, 'sdf')
-                    and hasattr(body.sdf, 'F')
-                    and hasattr(body.sdf, 'x')
-                    and hasattr(body.sdf, 'y')):
-                F  = body.sdf.F.contiguous()
-                bx = body.sdf.x.contiguous()
-                by = body.sdf.y.contiguous()
-                dx_b = float(bx[1].item() - bx[0].item())
-                dy_b = float(by[1].item() - by[0].item())
-                body._stream_meta = {
-                    'F':       F,
-                    'bx':      bx,
-                    'by':      by,
-                    'bx0':     float(bx[0].item()),
-                    'by0':     float(by[0].item()),
-                    'bx_last': float(bx[-1].item()),
-                    'by_last': float(by[-1].item()),
-                    'inv_dx':  1.0 / dx_b,
-                    'inv_dy':  1.0 / dy_b,
-                    'inv_vol': 1.0 / (dx_b * dy_b),
-                }
-                n_built += 1
-                continue
-
-            # ── Analytical body: sample SDF onto a grid from local_aabb ─
-            # local_aabb is in body-local frame relative to the URDF origin,
-            # derived from the zero-level-set contour during _initialize_2d.
-            # We sample at fluid-grid resolution so the streaming kernel's
-            # bilinear interpolation is as accurate as the mesh-body path.
-            local_aabb  = getattr(body, 'local_aabb', None)
-            sdf_callable = getattr(body, 'sdf', None)
-            if local_aabb is None or not callable(sdf_callable):
-                body._stream_meta = None
-                continue
-
-            lo = local_aabb[0].cpu()
-            hi = local_aabb[1].cpu()
-            Mx = max(2, int(round(float(hi[0] - lo[0]) / h)) + 1)
-            My = max(2, int(round(float(hi[1] - lo[1]) / h)) + 1)
-            bx = torch.linspace(float(lo[0]), float(hi[0]), Mx,
-                                dtype=self.dtype, device=self.device)
-            by = torch.linspace(float(lo[1]), float(hi[1]), My,
-                                dtype=self.dtype, device=self.device)
-            X, Y = torch.meshgrid(bx, by, indexing='ij')
-            with torch.no_grad():
-                F = sdf_callable(X, Y).contiguous()
-            dx_b = float(bx[1].item() - bx[0].item()) if Mx > 1 else h
-            dy_b = float(by[1].item() - by[0].item()) if My > 1 else h
-            body._stream_meta = {
-                'F':       F,
-                'bx':      bx,
-                'by':      by,
-                'bx0':     float(bx[0].item()),
-                'by0':     float(by[0].item()),
-                'bx_last': float(bx[-1].item()),
-                'by_last': float(by[-1].item()),
-                'inv_dx':  1.0 / dx_b,
-                'inv_dy':  1.0 / dy_b,
-                'inv_vol': 1.0 / (dx_b * dy_b),
-            }
-            n_sampled += 1
-
-        print(f"  [stream-meta-2D] built {n_built}/{len(comp.bodies)} "
-              f"per-body 2-D streaming-SDF metadata records "
-              f"({n_sampled} sampled from analytical SDF)")
 
     def _update_2d_streaming_multi(self, t, iteration, dt=1):
         """2-D analogue of :meth:`_update_3d_streaming_multi`.
@@ -2460,84 +2349,6 @@ class BDIMhandler:
     # ------------------------------------------------------------------
     #  Custom-trilinear (C++/CUDA) per-body SDF samplers
     # ------------------------------------------------------------------
-    def _init_custom_trilinear_3d(self):
-        """Build a per-body ``RegularGridInterpolator3D`` (C++/CUDA
-        trilinear) and stash it on ``body._sdf_tri3d``.
-
-        Used by the streaming ``_update_3d`` path to bypass
-        ``grid_sample`` (the default backend of
-        ``RegularGridInterpolatorAutomatic`` for 3-D, which the bodies
-        construct in ``_initialize_3d_mesh``).  The custom kernel skips
-        coordinate normalisation and the 5-D reshape, and matches
-        ``grid_sample(padding_mode='border')`` semantics via
-        ``fill_method=3``.
-        """
-
-        comp = self.fluid_solver.composite_body
-        n_built = 0
-        for body in comp.bodies:
-            if (hasattr(body, 'sdf')
-                    and hasattr(body.sdf, 'F')
-                    and hasattr(body.sdf, 'x')
-                    and hasattr(body.sdf, 'y')
-                    and hasattr(body.sdf, 'z')):
-                body._sdf_tri3d = RegularGridInterpolator3D(
-                    (body.sdf.x.contiguous(),
-                     body.sdf.y.contiguous(),
-                     body.sdf.z.contiguous()),
-                    body.sdf.F.contiguous(),
-                    fill_value="nearest",
-                )
-                F_t = body._sdf_tri3d.F
-                bx_t = body._sdf_tri3d.x
-                by_t = body._sdf_tri3d.y
-                bz_t = body._sdf_tri3d.z
-                dx_b = float(body._sdf_tri3d.dx)
-                dy_b = float(body._sdf_tri3d.dy)
-                dz_b = float(body._sdf_tri3d.dz)
-                n_built += 1
-            else:
-                local_aabb = getattr(body, 'local_aabb', None)
-                sdf_callable = getattr(body, 'sdf', None)
-                if local_aabb is None or not callable(sdf_callable):
-                    body._sdf_tri3d = None
-                    body._stream_meta = None
-                    continue
-                lo = local_aabb[0].cpu()
-                hi = local_aabb[1].cpu()
-                h = float(self.fluid_solver.h)
-                Mx = max(2, int(round(float(hi[0] - lo[0]) / h)) + 1)
-                My = max(2, int(round(float(hi[1] - lo[1]) / h)) + 1)
-                Mz = max(2, int(round(float(hi[2] - lo[2]) / h)) + 1)
-                bx_t = torch.linspace(float(lo[0]), float(hi[0]), Mx, dtype=self.dtype, device=self.device)
-                by_t = torch.linspace(float(lo[1]), float(hi[1]), My, dtype=self.dtype, device=self.device)
-                bz_t = torch.linspace(float(lo[2]), float(hi[2]), Mz, dtype=self.dtype, device=self.device)
-                X, Y, Z = torch.meshgrid(bx_t, by_t, bz_t, indexing='ij')
-                with torch.no_grad():
-                    F_t = sdf_callable(X, Y, Z).contiguous()
-                dx_b = float(bx_t[1].item() - bx_t[0].item())
-                dy_b = float(by_t[1].item() - by_t[0].item())
-                dz_b = float(bz_t[1].item() - bz_t[0].item())
-                body._sdf_tri3d = None
-
-            body._stream_meta = {
-                'F':       F_t.contiguous(),
-                'bx':      bx_t.contiguous(),
-                'by':      by_t.contiguous(),
-                'bz':      bz_t.contiguous(),
-                'bx0':     float(bx_t[0].item()),
-                'by0':     float(by_t[0].item()),
-                'bz0':     float(bz_t[0].item()),
-                'bx_last': float(bx_t[-1].item()),
-                'by_last': float(by_t[-1].item()),
-                'bz_last': float(bz_t[-1].item()),
-                'inv_dx':  1.0 / dx_b,
-                'inv_dy':  1.0 / dy_b,
-                'inv_dz':  1.0 / dz_b,
-                'inv_vol': 1.0 / (dx_b * dy_b * dz_b),
-            }
-        print(f"  [custom-trilinear-3D] built {n_built}/{len(comp.bodies)} "
-              f"mesh 3-D stream metadata records; analytical bodies are sampled when needed")
 
     # ==================================================================
     #  apply_forces: fluid -> body forces via MuJoCo xfrc_applied
