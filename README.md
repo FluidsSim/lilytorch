@@ -205,7 +205,6 @@ Four git submodules from [farmsim](https://github.com/farmsim), pinned to the `a
 | `farms_core` | Core framework: simulation options, sensor conventions, data structures, extensions API. |
 | `farms_mujoco` | MuJoCo backend: physics simulation, task management, swimming/drag handlers. |
 | `farms_sim` | Simulation launcher: `setup_from_clargs()`, `run_simulation()`. |
-| `farms_amphibious` | Amphibious animal models: animat options, kinematics, neural controllers. |
 
 ## Installation
 

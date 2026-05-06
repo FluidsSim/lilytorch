@@ -1,4 +1,4 @@
-"""Simple keyboard-controlled PD swim controller for salamander_gamepad."""
+"""Simple keyboard/gamepad-controlled PD swim controller."""
 
 from __future__ import annotations
 
@@ -120,6 +120,125 @@ class _KeyboardInputState:
 _KEYBOARD_INPUT = _KeyboardInputState()
 
 
+class _GamepadInputState:
+    """Process-wide gamepad state shared by the local swim controller."""
+
+    def __init__(self):
+        self._handler = None
+        self._announced = False
+        self._forward_threshold = 0.35
+        self._turn_threshold = 0.35
+
+    def start(
+            self,
+            deadzone: float = 0.1,
+            forward_threshold: float = 0.35,
+            turn_threshold: float = 0.35,
+    ) -> bool:
+        if self._handler is not None:
+            self._forward_threshold = forward_threshold
+            self._turn_threshold = turn_threshold
+            return True
+
+        self._forward_threshold = forward_threshold
+        self._turn_threshold = turn_threshold
+
+        try:
+            from lilytorch.integration.gamepad import GamepadHandler
+        except Exception as exc:
+            pylog.warning(
+                "Gamepad control disabled: could not import SDL support (%s).",
+                exc,
+            )
+            return False
+
+        try:
+            handler = GamepadHandler(deadzone=deadzone)
+        except Exception as exc:
+            pylog.warning(
+                "Gamepad control disabled: could not initialize controller (%s).",
+                exc,
+            )
+            return False
+
+        if handler.controller is None:
+            pylog.warning(
+                "Gamepad control enabled but no compatible controller was detected."
+            )
+            return False
+
+        self._handler = handler
+        return True
+
+    def announce_once(self):
+        if self._announced:
+            return
+        pylog.info(
+            "Gamepad controls active: left stick up=swim forward, left stick "
+            "left/right=turn, D-pad up/left/right mirror the same commands, "
+            "Cross/Triangle=forward, Square/L1=left, Circle/R1=right."
+        )
+        self._announced = True
+
+    def snapshot(self) -> dict[str, float]:
+        if self._handler is None or not self._handler.update():
+            return {"forward": 0.0, "turn": 0.0}
+
+        state = self._handler.get_state()
+        left_x = float(state.js_left_x)
+        left_y = float(state.js_left_y)
+        right_x = float(state.js_right_x)
+        right_y = float(state.js_right_y)
+
+        # Some PS3 controllers on Linux expose all analog axes as -1 until the
+        # first valid motion sample arrives. Treat that sentinel pattern as idle
+        # so the swimmer does not steer on its own at startup.
+        if all(axis <= -0.99 for axis in (left_x, left_y, right_x, right_y)):
+            left_x = 0.0
+            left_y = 0.0
+
+        forward = max(0.0, -left_y)
+        if (
+                (state.button_dpad_up and not state.button_dpad_down)
+                or state.button_bottom
+                or state.button_top
+        ):
+            forward = 1.0
+        elif forward < self._forward_threshold:
+            forward = 0.0
+        else:
+            forward = 1.0
+
+        if (
+                (state.button_dpad_left and not state.button_dpad_right)
+                or state.button_left
+                or state.button_shoulder_left
+        ):
+            turn = -1.0
+        elif (
+                (state.button_dpad_right and not state.button_dpad_left)
+                or state.button_right
+                or state.button_shoulder_right
+        ):
+            turn = 1.0
+        else:
+            turn_raw = left_x
+            if turn_raw <= -self._turn_threshold:
+                turn = -1.0
+            elif turn_raw >= self._turn_threshold:
+                turn = 1.0
+            else:
+                turn = 0.0
+
+        return {
+            "forward": float(np.clip(forward, 0.0, 1.0)),
+            "turn": float(np.clip(turn, -1.0, 1.0)),
+        }
+
+
+_GAMEPAD_INPUT = _GamepadInputState()
+
+
 class PositionController(AnimatController):
     """Simple oscillatory position controller based on pd_controller_swim."""
 
@@ -201,6 +320,25 @@ class PositionController(AnimatController):
                     "keyboard-only control."
                 )
 
+        self.gamepad = None
+        if bool(getattr(self.config, "gamepad_enabled", True)):
+            gamepad_deadzone = float(
+                getattr(self.config, "gamepad_deadzone", 0.1)
+            )
+            gamepad_forward_threshold = float(
+                getattr(self.config, "gamepad_forward_threshold", 0.35)
+            )
+            gamepad_turn_threshold = float(
+                getattr(self.config, "gamepad_turn_threshold", 0.35)
+            )
+            if _GAMEPAD_INPUT.start(
+                    deadzone=gamepad_deadzone,
+                    forward_threshold=gamepad_forward_threshold,
+                    turn_threshold=gamepad_turn_threshold,
+            ):
+                self.gamepad = _GAMEPAD_INPUT
+                self.gamepad.announce_once()
+
     @classmethod
     def from_options(
             cls,
@@ -251,44 +389,108 @@ class PositionController(AnimatController):
         x_coord = (indices + 1.0) / n_body_joints
         return 0.05 - 0.13*x_coord + 0.28*x_coord**2
 
-    def _input_modifiers(self) -> tuple[bool, float, float, float]:
-        if self.keyboard is None:
-            return True, self.swim_freq, 1.0, 1.0
-
-        keyboard_state = self.keyboard.snapshot()
-        if keyboard_state["turn_less"] and not self._turn_less_pressed:
+    def _update_turn_strength(
+            self,
+            turn_less_pressed: bool,
+            turn_more_pressed: bool,
+    ):
+        if turn_less_pressed and not self._turn_less_pressed:
             self.turn_strength = max(
                 self.min_turn_strength,
                 self.turn_strength - self.turn_strength_step,
             )
-        if keyboard_state["turn_more"] and not self._turn_more_pressed:
+        if turn_more_pressed and not self._turn_more_pressed:
             self.turn_strength = min(
                 self.max_turn_strength,
                 self.turn_strength + self.turn_strength_step,
             )
-        self._turn_less_pressed = keyboard_state["turn_less"]
-        self._turn_more_pressed = keyboard_state["turn_more"]
+        self._turn_less_pressed = turn_less_pressed
+        self._turn_more_pressed = turn_more_pressed
 
+    def _keyboard_modifiers(
+            self,
+            keyboard_state: dict[str, bool],
+    ) -> tuple[bool, float, float, float] | None:
         straight = keyboard_state["move_straight"]
         left = keyboard_state["move_left"]
         right = keyboard_state["move_right"]
 
-        if straight:
-            if left and not right:
-                return (
-                    True,
-                    self.swim_freq,
-                    1.0 - self.turn_strength,
-                    1.0 + self.turn_strength,
-                )
-            if right and not left:
-                return (
-                    True,
-                    self.swim_freq,
-                    1.0 + self.turn_strength,
-                    1.0 - self.turn_strength,
-                )
-            return True, self.swim_freq, 1.0, 1.0
+        if not straight:
+            return None
+
+        if left and not right:
+            return (
+                True,
+                self.swim_freq,
+                1.0 - self.turn_strength,
+                1.0 + self.turn_strength,
+            )
+        if right and not left:
+            return (
+                True,
+                self.swim_freq,
+                1.0 + self.turn_strength,
+                1.0 - self.turn_strength,
+            )
+        return True, self.swim_freq, 1.0, 1.0
+
+    def _gamepad_modifiers(
+            self,
+            gamepad_state: dict[str, float],
+    ) -> tuple[bool, float, float, float] | None:
+        if (
+            gamepad_state["forward"] <= 0.0
+            and abs(gamepad_state["turn"]) <= 0.0
+        ):
+            return None
+
+        turn = float(gamepad_state["turn"])
+        turn_amount = self.turn_strength*abs(turn)
+        if turn < 0.0:
+            return (
+                True,
+                self.swim_freq,
+                1.0 - turn_amount,
+                1.0 + turn_amount,
+            )
+        if turn > 0.0:
+            return (
+                True,
+                self.swim_freq,
+                1.0 + turn_amount,
+                1.0 - turn_amount,
+            )
+        return True, self.swim_freq, 1.0, 1.0
+
+    def _input_modifiers(self) -> tuple[bool, float, float, float]:
+        if self.keyboard is None and self.gamepad is None:
+            return False, 0.0, 0.0, 0.0
+
+        keyboard_state = {
+            "move_left": False,
+            "move_right": False,
+            "move_straight": False,
+            "turn_less": False,
+            "turn_more": False,
+        }
+        if self.keyboard is not None:
+            keyboard_state = self.keyboard.snapshot()
+
+        self._update_turn_strength(
+            keyboard_state["turn_less"],
+            keyboard_state["turn_more"],
+        )
+
+        keyboard_modifiers = self._keyboard_modifiers(keyboard_state)
+        if keyboard_modifiers is not None:
+            return keyboard_modifiers
+
+        if self.gamepad is not None:
+            gamepad_modifiers = self._gamepad_modifiers(
+                self.gamepad.snapshot()
+            )
+            if gamepad_modifiers is not None:
+                return gamepad_modifiers
 
         return False, 0.0, 0.0, 0.0
 
@@ -332,7 +534,7 @@ class PositionController(AnimatController):
             time: float,
             timestep: float,
     ) -> dict[str, float]:
-        """Return PD position targets for the current keyboard state."""
+        """Return PD position targets for the current input state."""
         del timestep
         if iteration != self.last_iteration:
             self._update_positions(time)

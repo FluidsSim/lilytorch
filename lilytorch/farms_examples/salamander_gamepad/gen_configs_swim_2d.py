@@ -125,7 +125,7 @@ class SimConfig(BaseSimConfig):
                 "z_offset"      : 0.015,
                 "smooth_sigma"  : 0,
                 "crop_boundary" : 0,
-                "update_every"  : 5,
+                "update_every"  : 1,
                 "synchronize_cuda": False,
                 "vmin"          : -10,
                 "vmax"          : 10,

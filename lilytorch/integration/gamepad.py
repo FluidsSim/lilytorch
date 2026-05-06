@@ -52,7 +52,7 @@ D-Pad Right        | D-Right   | D-Right    | h0.2: DPAD_RIGHT | 0/1          | 
 
 LINUX TESTING COMMANDS:
 -----------------------
-- `jstest /dev/input/js0` - Test joystick functionality 
+- `jstest /dev/input/js0` - Test joystick functionality
 """
 
 try:
@@ -81,26 +81,26 @@ class GamepadState:
         # Triggers: normalized between 0.0 (home) and 1.0 (fully pressed)
         self.trigger_left = 0.0     # SDL_CONTROLLER_AXIS_TRIGGERLEFT (Xbox: LT, PS4: L2)
         self.trigger_right = 0.0    # SDL_CONTROLLER_AXIS_TRIGGERRIGHT (Xbox: RT, PS4: R2)
-        
+
         # Right: action pad buttons
         self.button_bottom = False    # SDL_CONTROLLER_BUTTON_A (Xbox: A, PS4: Cross)
         self.button_right  = False    # SDL_CONTROLLER_BUTTON_B (Xbox: B, PS4: Circle)
         self.button_left   = False    # SDL_CONTROLLER_BUTTON_X (Xbox: X, PS4: Square)
         self.button_top    = False    # SDL_CONTROLLER_BUTTON_Y (Xbox: Y, PS4: Triangle)
-        
+
         # Middle: Menu/System buttons
         self.button_middle_right = False   # SDL_CONTROLLER_BUTTON_START (Xbox: Menu, PS4: Options)
         self.button_middle_left = False  # SDL_CONTROLLER_BUTTON_BACK (Xbox: View, PS4: Share)
         self.button_middle_logo = False  # SDL_CONTROLLER_BUTTON_GUIDE (Xbox: XBOX, PS4: PS)
-        
+
         # Shoulder buttons
         self.button_shoulder_left = False   # SDL_CONTROLLER_BUTTON_LEFTSHOULDER (Xbox: LB, PS4: L1)
         self.button_shoulder_right = False  # SDL_CONTROLLER_BUTTON_RIGHTSHOULDER (Xbox: RB, PS4: R1)
-        
+
         # Stick buttons
         self.button_stick_left = False      # SDL_CONTROLLER_BUTTON_LEFTSTICK (Xbox: LS, PS4: L3)
         self.button_stick_right = False     # SDL_CONTROLLER_BUTTON_RIGHTSTICK (Xbox: RS, PS4: R3)
-        
+
         # D-pad - digital directional buttons
         self.button_dpad_up = False        # SDL_CONTROLLER_BUTTON_DPAD_UP
         self.button_dpad_down = False      # SDL_CONTROLLER_BUTTON_DPAD_DOWN
@@ -146,51 +146,51 @@ class GamepadState:
     def copy(self):
         """Create a deep copy of the current gamepad state"""
         new_state = GamepadState()
-        
+
         # Copy joystick axes
         new_state.js_left_x = self.js_left_x
         new_state.js_left_y = self.js_left_y
         new_state.js_right_x = self.js_right_x
         new_state.js_right_y = self.js_right_y
-        
+
         # Copy triggers
         new_state.trigger_left = self.trigger_left
         new_state.trigger_right = self.trigger_right
-        
+
         # Copy action pad buttons
         new_state.button_bottom = self.button_bottom
         new_state.button_right = self.button_right
         new_state.button_left = self.button_left
         new_state.button_top = self.button_top
-        
+
         # Copy menu/system buttons
         new_state.button_middle_right = self.button_middle_right
         new_state.button_middle_left = self.button_middle_left
         new_state.button_middle_logo = self.button_middle_logo
-        
+
         # Copy shoulder buttons
         new_state.button_shoulder_left = self.button_shoulder_left
         new_state.button_shoulder_right = self.button_shoulder_right
-        
+
         # Copy stick buttons
         new_state.button_stick_left = self.button_stick_left
         new_state.button_stick_right = self.button_stick_right
-        
+
         # Copy D-pad buttons
         new_state.button_dpad_up = self.button_dpad_up
         new_state.button_dpad_down = self.button_dpad_down
         new_state.button_dpad_left = self.button_dpad_left
         new_state.button_dpad_right = self.button_dpad_right
-        
+
         return new_state
 
 
-class GamepadHandler:    
-    
+class GamepadHandler:
+
     def __init__(self, deadzone=0.1):
         """
         Initialize the gamepad handler with PySDL2.
-        
+
         Args:
             deadzone: Minimum stick movement to register (0.0 to 1.0)
         """
@@ -199,187 +199,269 @@ class GamepadHandler:
         else:
             print("Warning: Invalid deadzone value, using default 0.1")
             self.deadzone = 0.1  # Default deadzone value
-        
+
         self.state = GamepadState()
         self._running = False
         self.controller = None
-        
+        self.joystick = None
+        self.using_game_controller = False
+
         if not SDL2_AVAILABLE:
             raise RuntimeError("PySDL2 module is required for gamepad functionality. Install with: pip install pysdl2")
-        
+
         # Initialize SDL2
-        if sdl2.SDL_Init(sdl2.SDL_INIT_GAMECONTROLLER) < 0:
+        if sdl2.SDL_Init(sdl2.SDL_INIT_GAMECONTROLLER | sdl2.SDL_INIT_JOYSTICK) < 0:
             raise RuntimeError(f"Failed to initialize SDL2: {sdl2.SDL_GetError()}")
-        
+
         # Find and open the first available game controller
         self._initialize_controller()
-    
+
     def _initialize_controller(self):
         """Find and initialize the first available game controller"""
         num_joysticks = sdl2.SDL_NumJoysticks()
-        
+
         if num_joysticks == 0:
             print("Warning: No joysticks detected. Check permissions.")
             return
-        
+
         # Find first game controller
         for i in range(num_joysticks):
             if sdl2.SDL_IsGameController(i):
                 self.controller = sdl2.SDL_GameControllerOpen(i)
                 if self.controller:
+                    self.using_game_controller = True
                     controller_name = sdl2.SDL_GameControllerName(self.controller)
                     if controller_name:
                         print(f"Opened game controller: {controller_name.decode('utf-8')}")
                     else:
                         print(f"Opened game controller #{i}")
                     break
-        
+
         if not self.controller:
-            print("Warning: No compatible game controllers found")
-    
-    def __del__(self):
-        """Cleanup SDL2 resources"""
+            for i in range(num_joysticks):
+                self.joystick = sdl2.SDL_JoystickOpen(i)
+                if self.joystick:
+                    joystick_name = sdl2.SDL_JoystickName(self.joystick)
+                    if joystick_name:
+                        print(
+                            f"Opened generic joystick: {joystick_name.decode('utf-8')}"
+                        )
+                    else:
+                        print(f"Opened generic joystick #{i}")
+                    self.using_game_controller = False
+                    break
+
+        if not self.controller and not self.joystick:
+            print("Warning: No compatible game controllers or joysticks found")
+
+    def _close_device(self):
         if hasattr(self, 'controller') and self.controller:
             sdl2.SDL_GameControllerClose(self.controller)
+            self.controller = None
+        if hasattr(self, 'joystick') and self.joystick:
+            sdl2.SDL_JoystickClose(self.joystick)
+            self.joystick = None
+        self.using_game_controller = False
+
+    def __del__(self):
+        """Cleanup SDL2 resources"""
+        self._close_device()
         if SDL2_AVAILABLE:
             sdl2.SDL_Quit()
-    
+
+    def _joystick_axis(self, axis_index):
+        if self.joystick is None:
+            return 0
+        if sdl2.SDL_JoystickNumAxes(self.joystick) <= axis_index:
+            return 0
+        return sdl2.SDL_JoystickGetAxis(self.joystick, axis_index)
+
+    def _joystick_button(self, button_index):
+        if self.joystick is None:
+            return False
+        if sdl2.SDL_JoystickNumButtons(self.joystick) <= button_index:
+            return False
+        return bool(sdl2.SDL_JoystickGetButton(self.joystick, button_index))
+
+    def _update_generic_joystick_state(self):
+        # Generic joystick fallback for devices such as some PS3 pads that do
+        # not advertise an SDL GameController mapping.
+        self.state.js_left_x = self.normalize_stick_input(self._joystick_axis(0))
+        self.state.js_left_y = self.normalize_stick_input(self._joystick_axis(1))
+        self.state.js_right_x = self.normalize_stick_input(self._joystick_axis(3))
+        self.state.js_right_y = self.normalize_stick_input(self._joystick_axis(4))
+        self.state.trigger_left = 0.0
+        self.state.trigger_right = 0.0
+
+        self.state.button_bottom = self._joystick_button(0)
+        self.state.button_right = self._joystick_button(1)
+        self.state.button_top = self._joystick_button(2)
+        self.state.button_left = self._joystick_button(3)
+        self.state.button_shoulder_left = self._joystick_button(4)
+        self.state.button_shoulder_right = self._joystick_button(5)
+        self.state.button_middle_left = self._joystick_button(8)
+        self.state.button_middle_right = self._joystick_button(9)
+        self.state.button_middle_logo = self._joystick_button(10)
+        self.state.button_stick_left = self._joystick_button(11)
+        self.state.button_stick_right = self._joystick_button(12)
+
+        if sdl2.SDL_JoystickNumHats(self.joystick) > 0:
+            hat = sdl2.SDL_JoystickGetHat(self.joystick, 0)
+            self.state.button_dpad_up = bool(hat & sdl2.SDL_HAT_UP)
+            self.state.button_dpad_down = bool(hat & sdl2.SDL_HAT_DOWN)
+            self.state.button_dpad_left = bool(hat & sdl2.SDL_HAT_LEFT)
+            self.state.button_dpad_right = bool(hat & sdl2.SDL_HAT_RIGHT)
+        else:
+            self.state.button_dpad_up = self._joystick_button(13)
+            self.state.button_dpad_down = self._joystick_button(14)
+            self.state.button_dpad_left = self._joystick_button(15)
+            self.state.button_dpad_right = self._joystick_button(16)
+
+        return True
+
+    def _update_game_controller_state(self):
+        # Update analog sticks
+        # Left stick X-axis
+        left_x = sdl2.SDL_GameControllerGetAxis(self.controller, sdl2.SDL_CONTROLLER_AXIS_LEFTX)
+        self.state.js_left_x = self.normalize_stick_input(left_x)
+        # Left stick Y-axis
+        left_y = sdl2.SDL_GameControllerGetAxis(self.controller, sdl2.SDL_CONTROLLER_AXIS_LEFTY)
+        self.state.js_left_y = self.normalize_stick_input(left_y)
+
+        # Right stick X-axis
+        right_x = sdl2.SDL_GameControllerGetAxis(self.controller, sdl2.SDL_CONTROLLER_AXIS_RIGHTX)
+        self.state.js_right_x = self.normalize_stick_input(right_x)
+
+        # Right stick Y-axis
+        right_y = sdl2.SDL_GameControllerGetAxis(self.controller, sdl2.SDL_CONTROLLER_AXIS_RIGHTY)
+        self.state.js_right_y = self.normalize_stick_input(right_y)
+
+        # Left trigger
+        left_trigger = sdl2.SDL_GameControllerGetAxis(self.controller, sdl2.SDL_CONTROLLER_AXIS_TRIGGERLEFT)
+        self.state.trigger_left = self.normalize_trigger_input(left_trigger)
+
+        # Right trigger
+        right_trigger = sdl2.SDL_GameControllerGetAxis(self.controller, sdl2.SDL_CONTROLLER_AXIS_TRIGGERRIGHT)
+        self.state.trigger_right = self.normalize_trigger_input(right_trigger)
+
+        # Update action pad buttons
+        self.state.button_bottom = bool(sdl2.SDL_GameControllerGetButton(self.controller, sdl2.SDL_CONTROLLER_BUTTON_A))
+        self.state.button_right = bool(sdl2.SDL_GameControllerGetButton(self.controller, sdl2.SDL_CONTROLLER_BUTTON_B))
+        self.state.button_left = bool(sdl2.SDL_GameControllerGetButton(self.controller, sdl2.SDL_CONTROLLER_BUTTON_X))
+        self.state.button_top = bool(sdl2.SDL_GameControllerGetButton(self.controller, sdl2.SDL_CONTROLLER_BUTTON_Y))
+
+        # Update middle panel buttons
+        self.state.button_middle_right = bool(sdl2.SDL_GameControllerGetButton(self.controller, sdl2.SDL_CONTROLLER_BUTTON_START))
+        self.state.button_middle_left = bool(sdl2.SDL_GameControllerGetButton(self.controller, sdl2.SDL_CONTROLLER_BUTTON_BACK))
+        self.state.button_middle_logo = bool(sdl2.SDL_GameControllerGetButton(self.controller, sdl2.SDL_CONTROLLER_BUTTON_GUIDE))
+
+        # Update shoulder buttons
+        self.state.button_shoulder_left = bool(sdl2.SDL_GameControllerGetButton(self.controller, sdl2.SDL_CONTROLLER_BUTTON_LEFTSHOULDER))
+        self.state.button_shoulder_right = bool(sdl2.SDL_GameControllerGetButton(self.controller, sdl2.SDL_CONTROLLER_BUTTON_RIGHTSHOULDER))
+
+        # Update stick click buttons
+        self.state.button_stick_left = bool(sdl2.SDL_GameControllerGetButton(self.controller, sdl2.SDL_CONTROLLER_BUTTON_LEFTSTICK))
+        self.state.button_stick_right = bool(sdl2.SDL_GameControllerGetButton(self.controller, sdl2.SDL_CONTROLLER_BUTTON_RIGHTSTICK))
+
+        # Update D-pad
+        self.state.button_dpad_up = bool(sdl2.SDL_GameControllerGetButton(self.controller, sdl2.SDL_CONTROLLER_BUTTON_DPAD_UP))
+        self.state.button_dpad_down = bool(sdl2.SDL_GameControllerGetButton(self.controller, sdl2.SDL_CONTROLLER_BUTTON_DPAD_DOWN))
+        self.state.button_dpad_left = bool(sdl2.SDL_GameControllerGetButton(self.controller, sdl2.SDL_CONTROLLER_BUTTON_DPAD_LEFT))
+        self.state.button_dpad_right = bool(sdl2.SDL_GameControllerGetButton(self.controller, sdl2.SDL_CONTROLLER_BUTTON_DPAD_RIGHT))
+
+        return True
+
     def apply_deadzone(self, value):
         """Apply deadzone to stick input"""
         if abs(value) < self.deadzone:
             return 0.0
-        result = value - self.deadzone if value > 0 else value + self.deadzone # Calculate value after deadzone        
+        result = value - self.deadzone if value > 0 else value + self.deadzone # Calculate value after deadzone
         result /= (1.0 - self.deadzone) # Re-map from 0.0 to +- 1.0
         # Clamp result to -1.0 to 1.0
         result = result if result < 1.0 else 1.0
         result = result if result > -1.0 else -1.0
         return result
-    
+
     def normalize_stick_input(self, raw_value):
         """
         Normalize stick input from SDL2 range to desired output range.
-        
+
         Args:
             raw_value: Raw value from SDL2 (typically -32767 to 32767)
-        
+
         Returns:
             Normalized value between -1.0 and 1.0
         """
         normalized = raw_value / 32768.0
         normalized = self.apply_deadzone(normalized)
         return normalized
-    
+
     def normalize_trigger_input(self, raw_value):
         """
         Normalize trigger input from SDL2 range to 0.0 (home) - 1.0 (fully pressed).
-        
+
         Args:
             raw_value: Raw value from SDL2 (-32767 to 32767)
-        
+
         Returns:
             Normalized value between 0.0 and 1.0
         """
         normalized = raw_value / 32767.0
         normalized = self.apply_deadzone(normalized)
         return normalized
-    
+
     def update(self):
         """
         Update gamepad state by reading SDL2 events.
-        
+
         Returns:
             True if controller is available, False otherwise
         """
-        if not self.controller:
+        if not self.controller and not self.joystick:
             return False
-        
-        # Clear the SDL event queue to prevent memory buildup
-        # SDL_PumpEvents() adds events to queue but doesn't remove them
-        # We poll and discard all events since we're reading state in loops
-        event = sdl2.SDL_Event()
-        while sdl2.SDL_PollEvent(event) != 0:
-            pass  # Drain event queue without processing
-        
-        # Check if controller is still connected
-        if not sdl2.SDL_GameControllerGetAttached(self.controller):
-            print("Controller disconnected, attempting to reconnect...")
-            sdl2.SDL_GameControllerClose(self.controller)
-            self.controller = None
+
+        # Refresh SDL input state without draining the event queue that other
+        # parts of the application may be using.
+        sdl2.SDL_PumpEvents()
+
+        # Check if the current device is still connected.
+        if self.using_game_controller:
+            attached = bool(sdl2.SDL_GameControllerGetAttached(self.controller))
+            disconnected_name = "Controller"
+        else:
+            attached = bool(sdl2.SDL_JoystickGetAttached(self.joystick))
+            disconnected_name = "Joystick"
+
+        if not attached:
+            print(f"{disconnected_name} disconnected, attempting to reconnect...")
+            self._close_device()
             self._initialize_controller()
             return False
-        
+
         try:
-            # Update analog sticks
-            # Left stick X-axis
-            left_x = sdl2.SDL_GameControllerGetAxis(self.controller, sdl2.SDL_CONTROLLER_AXIS_LEFTX)
-            self.state.js_left_x = self.normalize_stick_input(left_x)            
-            # Left stick Y-axis
-            left_y = sdl2.SDL_GameControllerGetAxis(self.controller, sdl2.SDL_CONTROLLER_AXIS_LEFTY)
-            self.state.js_left_y = self.normalize_stick_input(left_y)
-            
-            # Right stick X-axis
-            right_x = sdl2.SDL_GameControllerGetAxis(self.controller, sdl2.SDL_CONTROLLER_AXIS_RIGHTX)
-            self.state.js_right_x = self.normalize_stick_input(right_x)
-            
-            # Right stick Y-axis
-            right_y = sdl2.SDL_GameControllerGetAxis(self.controller, sdl2.SDL_CONTROLLER_AXIS_RIGHTY)
-            self.state.js_right_y = self.normalize_stick_input(right_y)
-            
-            # Left trigger
-            left_trigger = sdl2.SDL_GameControllerGetAxis(self.controller, sdl2.SDL_CONTROLLER_AXIS_TRIGGERLEFT)
-            self.state.trigger_left = self.normalize_trigger_input(left_trigger)
-            
-            # Right trigger
-            right_trigger = sdl2.SDL_GameControllerGetAxis(self.controller, sdl2.SDL_CONTROLLER_AXIS_TRIGGERRIGHT)
-            self.state.trigger_right = self.normalize_trigger_input(right_trigger)
-            
-            # Update action pad buttons
-            self.state.button_bottom = bool(sdl2.SDL_GameControllerGetButton(self.controller, sdl2.SDL_CONTROLLER_BUTTON_A))
-            self.state.button_right = bool(sdl2.SDL_GameControllerGetButton(self.controller, sdl2.SDL_CONTROLLER_BUTTON_B))
-            self.state.button_left = bool(sdl2.SDL_GameControllerGetButton(self.controller, sdl2.SDL_CONTROLLER_BUTTON_X))
-            self.state.button_top = bool(sdl2.SDL_GameControllerGetButton(self.controller, sdl2.SDL_CONTROLLER_BUTTON_Y))
-            
-            # Update middle panel buttons
-            self.state.button_middle_right = bool(sdl2.SDL_GameControllerGetButton(self.controller, sdl2.SDL_CONTROLLER_BUTTON_START))
-            self.state.button_middle_left = bool(sdl2.SDL_GameControllerGetButton(self.controller, sdl2.SDL_CONTROLLER_BUTTON_BACK))
-            self.state.button_middle_logo = bool(sdl2.SDL_GameControllerGetButton(self.controller, sdl2.SDL_CONTROLLER_BUTTON_GUIDE))
-            
-            # Update shoulder buttons
-            self.state.button_shoulder_left = bool(sdl2.SDL_GameControllerGetButton(self.controller, sdl2.SDL_CONTROLLER_BUTTON_LEFTSHOULDER))
-            self.state.button_shoulder_right = bool(sdl2.SDL_GameControllerGetButton(self.controller, sdl2.SDL_CONTROLLER_BUTTON_RIGHTSHOULDER))
-            
-            # Update stick click buttons
-            self.state.button_stick_left = bool(sdl2.SDL_GameControllerGetButton(self.controller, sdl2.SDL_CONTROLLER_BUTTON_LEFTSTICK))
-            self.state.button_stick_right = bool(sdl2.SDL_GameControllerGetButton(self.controller, sdl2.SDL_CONTROLLER_BUTTON_RIGHTSTICK))
-            
-            # Update D-pad
-            # Check if D-pad buttons are recognized as buttons or axes
-            self.state.button_dpad_up = bool(sdl2.SDL_GameControllerGetButton(self.controller, sdl2.SDL_CONTROLLER_BUTTON_DPAD_UP))
-            self.state.button_dpad_down = bool(sdl2.SDL_GameControllerGetButton(self.controller, sdl2.SDL_CONTROLLER_BUTTON_DPAD_DOWN))
-            self.state.button_dpad_left = bool(sdl2.SDL_GameControllerGetButton(self.controller, sdl2.SDL_CONTROLLER_BUTTON_DPAD_LEFT))
-            self.state.button_dpad_right = bool(sdl2.SDL_GameControllerGetButton(self.controller, sdl2.SDL_CONTROLLER_BUTTON_DPAD_RIGHT))
-            
-            return True
-         
+            if self.using_game_controller:
+                return self._update_game_controller_state()
+            return self._update_generic_joystick_state()
+
         except Exception as e:
             print(f"Gamepad error: {e}")
             return False
-    
+
     def update_events(self):
         """
         Process SDL2 controller events (event-driven approach).
         Uses SDL2's native event system - more efficient than polling.
-        
+
         This method processes the SDL event queue and yields SDL_Event objects
         for controller-related events. The state of the gamepad handler is automatically updated in this process.
-        
+
         Yields:
             sdl2.SDL_Event: SDL2 events for controller button/axis/device changes
                 - SDL_CONTROLLERBUTTONDOWN: event.cbutton has button, state, timestamp
-                - SDL_CONTROLLERBUTTONUP: event.cbutton has button, state, timestamp  
+                - SDL_CONTROLLERBUTTONUP: event.cbutton has button, state, timestamp
                 - SDL_CONTROLLERAXISMOTION: event.caxis has axis, value, timestamp
                 - SDL_CONTROLLERDEVICEADDED/REMOVED: device connection changes
-        
+
         Example:
             for event in handler.update_events():
                 event_name = handler.state.EVENT_NAMES.get(event.type)
@@ -390,27 +472,27 @@ class GamepadHandler:
         """
         if not self.controller:
             return
-        
+
         event = sdl2.SDL_Event()
         while sdl2.SDL_PollEvent(event) != 0:
             # Filter for controller events from our controller
             if event.type in (sdl2.SDL_CONTROLLERBUTTONDOWN, sdl2.SDL_CONTROLLERBUTTONUP):
                 self._update_button_state(button = event.cbutton.button, pressed = (event.type == sdl2.SDL_CONTROLLERBUTTONDOWN))
                 yield event
-                    
+
             elif event.type == sdl2.SDL_CONTROLLERAXISMOTION:
                 if event.caxis.axis in (sdl2.SDL_CONTROLLER_AXIS_TRIGGERLEFT, sdl2.SDL_CONTROLLER_AXIS_TRIGGERRIGHT): # Trigger axes
                     self._update_axis_state(axis = event.caxis.axis, normalized_value = self.normalize_trigger_input(event.caxis.value))
                 else: # Joystick axes
                     self._update_axis_state(axis = event.caxis.axis, normalized_value = self.normalize_stick_input(event.caxis.value))
                 yield event
-                    
+
             elif event.type == sdl2.SDL_CONTROLLERDEVICEADDED:
                 if not self.controller:
                     print("Controller connected")
                     self._initialize_controller()
                 yield event
-                
+
             elif event.type == sdl2.SDL_CONTROLLERDEVICEREMOVED:
                 if event.cdevice.which == sdl2.SDL_JoystickInstanceID(
                     sdl2.SDL_GameControllerGetJoystick(self.controller)
@@ -419,33 +501,33 @@ class GamepadHandler:
                     sdl2.SDL_GameControllerClose(self.controller)
                     self.controller = None
                 yield event
-    
+
     def _update_button_state(self, button, pressed):
         """Update internal state from button event"""
         attr_name = self.state.BUTTON_NAMES.get(button)
         if attr_name:
             setattr(self.state, attr_name, pressed)
-    
+
     def _update_axis_state(self, axis, normalized_value):
-        """Update internal state from axis event"""        
+        """Update internal state from axis event"""
         attr_name = self.state.AXIS_NAMES.get(axis)
         if attr_name:
             setattr(self.state, attr_name, normalized_value)
-    
+
     def get_state(self):
         """Get current gamepad state"""
         return self.state
-    
+
     def run_loop(self, update_rate_hz=20.0):
         """
         Run continuous update loop.
-        
+
         Args:
             update_rate_hz: Update frequency in Hz
         """
         self._running = True
         sleep_time = 1.0 / update_rate_hz
-        
+
         print(f"Starting gamepad loop at {update_rate_hz} Hz")
         try:
             while self._running:
@@ -455,7 +537,7 @@ class GamepadHandler:
             print("Gamepad loop interrupted by user")
         finally:
             self.stop()
-    
+
     def run_loop_events(self, update_rate_hz=20.0):
         """
         Run continuous event-based update loop.
@@ -484,13 +566,13 @@ class GamepadHandler:
 # Example usage for standalone testing
 def example_usage():
     """Example of how to use the GamepadHandler standalone"""
-    
+
     # Create handler
     handler = GamepadHandler(deadzone=0.1)
-    
+
     print("Gamepad handler example")
     print("Use gamepad sticks and buttons, press Ctrl+C to quit")
-    
+
     try:
         while True:
             # Print out the states of all the buttons and axes
@@ -506,7 +588,7 @@ def example_usage():
                     f"D-pad: ↑{int(state.button_dpad_up)}↓{int(state.button_dpad_down)}←{int(state.button_dpad_left)}→{int(state.button_dpad_right)}"
                 )
                 print(output, end='', flush=True)
-            
+
             time.sleep(0.05)  # 20 Hz
     except KeyboardInterrupt:
         print("Example stopped")
@@ -514,14 +596,14 @@ def example_usage():
 
 def example_usage_events():
     """Example using SDL2's native event system (more efficient)"""
-    
+
     # Create handler
     handler = GamepadHandler(deadzone=0.1)
-    
+
     print("SDL2 Event-Based Gamepad Example")
     print("This uses SDL2's native event system - only actual changes are shown.")
     print("Use gamepad sticks and buttons, press Ctrl+C to quit")
-    
+
     try:
         print("Waiting for controller events...\n")
         while True:
@@ -548,14 +630,14 @@ def example_usage_events():
                     #         normalized = handler.normalize_stick_input(event.caxis.value)
                     # Method 2: Alternatively, get the current state from the handler
                     normalized = getattr(handler.state, axis_name)
-                    
+
                     # Only print if significant (avoid spam from noise)
                     if abs(normalized) > 0.01:
                         print(f"[{event.caxis.timestamp:10d}ms] AXIS:     {axis_name:10s} = {normalized:6.3f}")
-            
+
             # Small sleep to prevent busy loop (events are queued by SDL2)
             time.sleep(0.05)
-            
+
     except KeyboardInterrupt:
         print("\n\nEvent-based example stopped")
 
@@ -604,7 +686,7 @@ This reduces mapping issues compared to raw input libraries.
    - `lsusb` - List USB devices to identify controller
    - `evtest` - See raw Linux input events
    - `jstest /dev/input/js0` - Test basic joystick functionality
-   
+
    SDL2-specific:
    - Check SDL_GameControllerMapping() for your controller
    - Use SDL2 controller test programs

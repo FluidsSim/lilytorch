@@ -23,7 +23,7 @@ def main():
             ['farms_core', True],
             ['farms_mujoco', True],
             ['farms_sim', True],
-            ['farms_amphibious', True],
+            # ['farms_amphibious', True],
     ]:
         print(f'Setting up {package}')
         if install:
