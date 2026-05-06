@@ -199,6 +199,7 @@ class BDIMhandler:
         # ---- allocate per-body SDF / velocity arrays if missing ----
         comp = self.fluid_solver.composite_body
         gs = self.fluid_solver.grid_shape
+        self._init_static_body_metadata()
         if self.fluid_solver._solver_method == "kernel":
             if self.ndim == 3:
                 self._init_interp_3d()
@@ -208,6 +209,109 @@ class BDIMhandler:
     # ------------------------------------------------------------------
     #  Custom-interp (C++/CUDA) per-body SDF samplers
     # ------------------------------------------------------------------
+    def _init_static_body_metadata(self):
+        """Precompute immutable grid axes and body-local AABB bounds."""
+        comp = self.fluid_solver.composite_body
+        comp.gx_1d = comp.x.contiguous()
+        comp.gy_1d = comp.y.contiguous()
+        if self.ndim == 3:
+            comp.gz_1d = comp.z.contiguous()
+        comp._body_aabbs = [None] * len(comp.bodies)
+        for body in comp.bodies:
+            if self.ndim == 3:
+                body._bdim_local_aabb = self._body_local_aabb_3d(body)
+            else:
+                body._bdim_local_aabb = self._body_local_aabb_2d(body)
+
+    @staticmethod
+    def _make_stream_meta(F, axes):
+        inv = []
+        for axis in axes:
+            step = float(axis[1].item() - axis[0].item()) if axis.numel() > 1 else 1.0
+            inv.append(1.0 / step)
+        meta = {
+            'F': F.contiguous(),
+            'bx': axes[0].contiguous(),
+            'by': axes[1].contiguous(),
+            'bx0': float(axes[0][0].item()),
+            'by0': float(axes[1][0].item()),
+            'bx_last': float(axes[0][-1].item()),
+            'by_last': float(axes[1][-1].item()),
+            'inv_dx': inv[0],
+            'inv_dy': inv[1],
+        }
+        if len(axes) == 3:
+            meta.update({
+                'bz': axes[2].contiguous(),
+                'bz0': float(axes[2][0].item()),
+                'bz_last': float(axes[2][-1].item()),
+                'inv_dz': inv[2],
+                'inv_vol': inv[0] * inv[1] * inv[2],
+            })
+        else:
+            meta['inv_vol'] = inv[0] * inv[1]
+        return meta
+
+    def gather_data(self, iteration, *, as_numpy=False):
+        """Gather FARMS link poses/velocities once per update path."""
+        com_poses = []
+        urdf_poses = []
+        Rs = []
+        lin_vels = []
+        ang_vels = []
+        for exp_data in self.data:
+            sen = exp_data.sensors.links
+            if as_numpy:
+                com = np.asarray(sen.com_positions()[iteration, :], dtype=self.dtype_np)
+                urdf = np.asarray(sen.urdf_positions()[iteration, :], dtype=self.dtype_np)
+                R = Rotation.from_quat(sen.urdf_orientations()[iteration, :]).as_matrix().astype(self.dtype_np)
+                lin = np.asarray(sen.com_lin_velocities()[iteration, :], dtype=self.dtype_np)
+                nlinks = len(sen.names)
+                if self.ndim == 2:
+                    com = com[:, self.lin_axes]
+                    urdf = urdf[:, self.lin_axes]
+                    R = R[:, self.lin_axes, :][:, :, self.lin_axes]
+                    lin = lin[:, self.lin_axes]
+                    ang = np.asarray(
+                        [sen.com_ang_velocity(iteration, lk)[self._2d_ang_ax]
+                         for lk in range(nlinks)],
+                        dtype=self.dtype_np,
+                    )
+                else:
+                    ang = np.stack([
+                        np.asarray(sen.com_ang_velocity(iteration, lk), dtype=self.dtype_np)
+                        for lk in range(nlinks)
+                    ])
+            else:
+                com = self.cython2numpy(sen.com_positions()[iteration, :])
+                urdf = self.cython2numpy(sen.urdf_positions()[iteration, :])
+                R = self.cython2numpy(
+                    Rotation.from_quat(sen.urdf_orientations()[iteration, :])
+                    .as_matrix().astype(self.dtype_np)
+                )
+                lin = self.cython2numpy(sen.com_lin_velocities()[iteration, :])
+                nlinks = len(sen.names)
+                if self.ndim == 2:
+                    com = com[:, self.lin_axes]
+                    urdf = urdf[:, self.lin_axes]
+                    R = R[:, self.lin_axes, :][:, :, self.lin_axes]
+                    lin = lin[:, self.lin_axes]
+                    ang = self.cython2numpy(
+                        [sen.com_ang_velocity(iteration, lk)[self._2d_ang_ax]
+                         for lk in range(nlinks)]
+                    )
+                else:
+                    ang = self.cython2numpy(
+                        np.stack([sen.com_ang_velocity(iteration, lk)
+                                  for lk in range(nlinks)])
+                    )
+            com_poses.append(com)
+            urdf_poses.append(urdf)
+            Rs.append(R)
+            lin_vels.append(lin)
+            ang_vels.append(ang)
+        return com_poses, urdf_poses, Rs, lin_vels, ang_vels
+
     def _init_interp_2d(self):
         """
 
@@ -241,20 +345,7 @@ class BDIMhandler:
                 F  = body.sdf.F.contiguous()
                 bx = body.sdf.x.contiguous()
                 by = body.sdf.y.contiguous()
-                dx_b = float(bx[1].item() - bx[0].item())
-                dy_b = float(by[1].item() - by[0].item())
-                body._stream_meta = {
-                    'F':       F,
-                    'bx':      bx,
-                    'by':      by,
-                    'bx0':     float(bx[0].item()),
-                    'by0':     float(by[0].item()),
-                    'bx_last': float(bx[-1].item()),
-                    'by_last': float(by[-1].item()),
-                    'inv_dx':  1.0 / dx_b,
-                    'inv_dy':  1.0 / dy_b,
-                    'inv_vol': 1.0 / (dx_b * dy_b),
-                }
+                body._stream_meta = self._make_stream_meta(F, (bx, by))
                 n_built += 1
                 n_sampled += 1
 
@@ -274,20 +365,7 @@ class BDIMhandler:
                 X, Y = torch.meshgrid(bx, by, indexing='ij')
                 with torch.no_grad():
                     F = sdf_callable(X, Y).contiguous()
-                dx_b = float(bx[1].item() - bx[0].item()) if Mx > 1 else h
-                dy_b = float(by[1].item() - by[0].item()) if My > 1 else h
-                body._stream_meta = {
-                    'F':       F,
-                    'bx':      bx,
-                    'by':      by,
-                    'bx0':     float(bx[0].item()),
-                    'by0':     float(by[0].item()),
-                    'bx_last': float(bx[-1].item()),
-                    'by_last': float(by[-1].item()),
-                    'inv_dx':  1.0 / dx_b,
-                    'inv_dy':  1.0 / dy_b,
-                    'inv_vol': 1.0 / (dx_b * dy_b),
-                }
+                body._stream_meta = self._make_stream_meta(F, (bx, by))
                 n_sampled += 1
             else:
                 raise RuntimeError(
@@ -379,22 +457,7 @@ class BDIMhandler:
                     "bodies but without the kernel-mode acceleration."
                 )
 
-            body._stream_meta = {
-                'F':       F_t.contiguous(),
-                'bx':      bx_t.contiguous(),
-                'by':      by_t.contiguous(),
-                'bz':      bz_t.contiguous(),
-                'bx0':     float(bx_t[0].item()),
-                'by0':     float(by_t[0].item()),
-                'bz0':     float(bz_t[0].item()),
-                'bx_last': float(bx_t[-1].item()),
-                'by_last': float(by_t[-1].item()),
-                'bz_last': float(bz_t[-1].item()),
-                'inv_dx':  1.0 / dx_b,
-                'inv_dy':  1.0 / dy_b,
-                'inv_dz':  1.0 / dz_b,
-                'inv_vol': 1.0 / (dx_b * dy_b * dz_b),
-            }
+            body._stream_meta = self._make_stream_meta(F_t, (bx_t, by_t, bz_t))
         print(f"  [custom-trilinear-3D] built {n_built}/{len(comp.bodies)} "
               f"mesh 3-D stream metadata records; analytical bodies are sampled when needed")
 
@@ -482,9 +545,6 @@ class BDIMhandler:
     #  update: FARMS kinematics  ->  SDF fields + body velocities
     # ==================================================================
 
-    # def
-
-
     def update(self, t, iteration, dt=1):
         if self.ndim == 3:
             self._update_3d(t, iteration, dt)
@@ -493,18 +553,7 @@ class BDIMhandler:
 
     # ---- 2-D update --------------------------------------------------
     def _update_2d(self, t, iteration, dt=1):
-        # Streaming fused-CUDA path — opt-in via solver.streaming_sdf_2d.
-        # The streaming dispatch (``_update_2d_streaming_multi``) handles
-        # composites where every body exposes ``_stream_meta`` (regular-
-        # grid SDF table).  When any body is analytical, fall through to
-        # the Python path below — which itself supports mixed composites
-        # (it evaluates ``body.sdf`` per body, with mesh bodies using
-        # their grid_sample-backed interpolator and analytical bodies
-        # using their callable SDF).  This mirrors the 3-D streaming
-        # dispatch (see ``_update_3d_streaming``); both use the same
-        # "all-mesh → batched kernel; mixed → per-body fallback" rule.
-
-        if getattr(self.fluid_solver, '_streaming_sdf_2d', False):
+        if self.fluid_solver._use_kernels:
             comp_check = self.fluid_solver.composite_body
             if all(getattr(b, '_stream_meta', None) is not None
                    for b in comp_check.bodies):
@@ -517,37 +566,7 @@ class BDIMhandler:
 
         _FAR = 1e4   # far-field SDF sentinel (same as 3-D path)
 
-        # gather per-animat kinematics (kept as device tensors for the
-        # downstream contour-mask path which queries other bodies' SDFs).
-        com_poses  = []
-        urdf_poses = []
-        Rs         = []
-        lin_vels   = []
-        ang_vels   = []
-        for exp_data in self.data:
-            sen = exp_data.sensors.links
-            com_poses.append(
-                self.cython2numpy(sen.com_positions()[iteration, :])[:, self.lin_axes]
-            )
-            urdf_poses.append(
-                self.cython2numpy(sen.urdf_positions()[iteration, :])[:, self.lin_axes]
-            )
-            Rs.append(
-                self.cython2numpy(
-                    Rotation.from_quat(
-                        sen.urdf_orientations()[iteration, :]
-                    ).as_matrix().astype(self.dtype_np)
-                )[:, self.lin_axes, :][:, :, self.lin_axes]
-            )
-            lin_vels.append(
-                self.cython2numpy(sen.com_lin_velocities()[iteration, :])[:, self.lin_axes]
-            )
-            ang_vels.append(
-                self.cython2numpy(
-                    [sen.com_ang_velocity(iteration, lk)[self._2d_ang_ax]
-                     for lk in range(len(sen.names))]
-                )
-            )
+        com_poses, urdf_poses, Rs, lin_vels, ang_vels = self.gather_data(iteration)
 
         h_grid = comp.h          # uniform grid spacing
 
@@ -563,9 +582,6 @@ class BDIMhandler:
         comp.body_v.zero_()
 
         # Cache per-body AABBs for downstream use (e.g. narrow-band forces).
-        if not hasattr(comp, '_body_aabbs'):
-            comp._body_aabbs = [None] * B
-
         for body_i, body in enumerate(comp.bodies):
             (animat_id, link_id) = comp.body_ids[body_i]
 
@@ -733,6 +749,8 @@ class BDIMhandler:
         Returns ``None`` when neither source is available; callers
         should then use the full-grid evaluation path.
         """
+        if hasattr(body, '_bdim_local_aabb'):
+            return body._bdim_local_aabb
         local_aabb = getattr(body, 'local_aabb', None)
         if local_aabb is not None:
             return local_aabb[0], local_aabb[1]
@@ -821,6 +839,8 @@ class BDIMhandler:
 
         Returns ``None`` when neither source is available.
         """
+        if hasattr(body, '_bdim_local_aabb'):
+            return body._bdim_local_aabb
         local_aabb = getattr(body, 'local_aabb', None)
         if local_aabb is not None:
             return local_aabb[0], local_aabb[1]
@@ -914,8 +934,7 @@ class BDIMhandler:
 
     # ---- 3-D update --------------------------------------------------
     def _update_3d(self, t, iteration, dt=1):
-        # Streaming fused-CUDA path (Phase B) — opt-in via solver.streaming_sdf_3d
-        if getattr(self.fluid_solver, '_streaming_sdf_3d', False):
+        if self.fluid_solver._use_kernels:
             return self._update_3d_streaming(t, iteration, dt)
         fs   = self.fluid_solver
         comp = fs.composite_body
@@ -925,31 +944,7 @@ class BDIMhandler:
         # union-min always prefers the closest real body value.
         _FAR = 1e4
 
-        com_poses  = []
-        urdf_poses = []
-        Rs         = []
-        lin_vels   = []
-        ang_vels   = []
-
-        for exp_data in self.data:
-            sen = exp_data.sensors.links
-            com_poses.append(self.cython2numpy(sen.com_positions()[iteration, :]))
-            urdf_poses.append(self.cython2numpy(sen.urdf_positions()[iteration, :]))
-            Rs.append(
-                self.cython2numpy(
-                    Rotation.from_quat(
-                        sen.urdf_orientations()[iteration, :]
-                    ).as_matrix().astype(self.dtype_np)
-                )
-            )
-            lin_vels.append(self.cython2numpy(sen.com_lin_velocities()[iteration, :]))
-            nlinks = len(sen.names)
-            ang_vels.append(
-                self.cython2numpy(
-                    np.stack([sen.com_ang_velocity(iteration, lk)
-                              for lk in range(nlinks)])
-                )
-            )
+        com_poses, urdf_poses, Rs, lin_vels, ang_vels = self.gather_data(iteration)
 
         h_grid = comp.h          # uniform grid spacing
 
@@ -967,9 +962,6 @@ class BDIMhandler:
         comp.body_w.zero_()
 
         # Cache per-body AABBs for downstream use (e.g. narrow-band forces)
-        if not hasattr(comp, '_body_aabbs'):
-            comp._body_aabbs = [None] * len(comp.bodies)
-
         for body_i, body in enumerate(comp.bodies):
             (animat_id, link_id) = comp.body_ids[body_i]
 
@@ -1170,28 +1162,9 @@ class BDIMhandler:
         _FAR = 1e4
         B    = len(comp.bodies)
 
-        # Kinematics (host)
-        com_poses_np  = []
-        urdf_poses_np = []
-        Rs_np         = []
-        lin_vels_np   = []
-        ang_vels_np   = []
-        for exp_data in self.data:
-            sen = exp_data.sensors.links
-            com_poses_np.append(np.asarray(sen.com_positions()[iteration, :], dtype=self.dtype_np))
-            urdf_poses_np.append(np.asarray(sen.urdf_positions()[iteration, :], dtype=self.dtype_np))
-            Rs_np.append(
-                Rotation.from_quat(sen.urdf_orientations()[iteration, :])
-                .as_matrix().astype(self.dtype_np)
-            )
-            lin_vels_np.append(np.asarray(sen.com_lin_velocities()[iteration, :], dtype=self.dtype_np))
-            nlinks = len(sen.names)
-            ang_vels_np.append(
-                np.stack([
-                    np.asarray(sen.com_ang_velocity(iteration, lk), dtype=self.dtype_np)
-                    for lk in range(nlinks)
-                ])
-            )
+        com_poses_np, urdf_poses_np, Rs_np, lin_vels_np, ang_vels_np = (
+            self.gather_data(iteration, as_numpy=True)
+        )
 
         h_grid = float(comp.h)
 
@@ -1202,7 +1175,7 @@ class BDIMhandler:
         # BDIMhandler.step().  Initialize them once from the pre-update
         # union SDF before resetting fields below.
         if (
-            getattr(fs, '_kernel_sdf_forces_3d', False)
+            fs._use_kernels
             and (
                 getattr(fs, 'normal_x', None) is None
                 or getattr(fs, 'normal_y', None) is None
@@ -1223,16 +1196,7 @@ class BDIMhandler:
         comp.body_v.zero_()
         comp.body_w.zero_()
 
-        if not hasattr(comp, '_body_aabbs'):
-            comp._body_aabbs = [None] * B
-
-        if getattr(comp, '_grid_axes_1d', None) is None:
-            comp._grid_axes_1d = (
-                comp.x.contiguous(),
-                comp.y.contiguous(),
-                comp.z.contiguous(),
-            )
-        gx_1d, gy_1d, gz_1d = comp._grid_axes_1d
+        gx_1d, gy_1d, gz_1d = comp.gx_1d, comp.gy_1d, comp.gz_1d
 
         # ------------------------------------------------------------------
         # Build / refresh the static per-body packed device tensors once.
@@ -1244,9 +1208,9 @@ class BDIMhandler:
         # device-side bytes per static cache.
         # ------------------------------------------------------------------
         fs_for_cache = self.fluid_solver
-        _use_fused_cache = getattr(fs_for_cache, '_kernel_sdf_forces_3d', False)
+        _use_fused_cache = fs_for_cache._use_kernels
 
-        sm = getattr(comp, '_stream_multi_static', None)
+        sm = getattr(comp, '_kernel_static_3d', None)
         if sm is None:
             F_chunks  = []
             F_off  = [0]
@@ -1302,7 +1266,7 @@ class BDIMhandler:
             del F_chunks
             if not _use_fused_cache:
                 del bx_chunks, by_chunks, bz_chunks
-            comp._stream_multi_static = sm
+            comp._kernel_static_3d = sm
 
         # ------------------------------------------------------------------
         # Per-step: compose body frames, AABBs, kinematics, sparse buffers.
@@ -1330,7 +1294,11 @@ class BDIMhandler:
                         Rotation.from_euler('xyz', lp_np[3:])
                         .as_matrix().astype(self.dtype_np)
                     )
-                sx, sy, sz = body.sdf.x, body.sdf.y, body.sdf.z
+                sx, sy, sz = (
+                    body._stream_meta['bx'],
+                    body._stream_meta['by'],
+                    body._stream_meta['bz'],
+                )
                 sdf_lo_np[b] = (
                     float(sx[0].item()),  float(sy[0].item()),  float(sz[0].item()),
                 )
@@ -1468,7 +1436,7 @@ class BDIMhandler:
         cell_off_h = cell_off_h_np.tolist()
 
         fs = self.fluid_solver
-        _use_fused = getattr(fs, '_kernel_sdf_forces_3d', False)
+        _use_fused = fs._use_kernels
 
         if _use_fused:
             # Per-body densities: use rho_body per body (same for all for now;
@@ -1610,7 +1578,7 @@ class BDIMhandler:
             comp._winning_rho_cc    = winning_rho_cc
 
             # Stash per-step metadata (kin/aabb without sparse_cc_flat).
-            comp._stream_multi_step = {
+            comp._kernel_step = {
                 'kin':     kin,
                 'aabb_lo': aabb_lo,
                 'aabb_dim': aabb_dim,
@@ -1651,7 +1619,7 @@ class BDIMhandler:
             comp._winning_rho_cc   = None
             comp._fused_union_aabb = None   # clear stale fused-path cache
 
-            comp._stream_multi_step = {
+            comp._kernel_step = {
                 'kin':            kin,
                 'aabb_lo':        aabb_lo,
                 'aabb_dim':       aabb_dim,
@@ -1696,29 +1664,9 @@ class BDIMhandler:
         gs   = fs.grid_shape
         _FAR = 1e4
 
-        # Gather kinematics on the host (numpy).  Avoids the per-body
-        # device->host syncs that .tolist() on a CUDA tensor would cost.
-        com_poses_np  = []
-        urdf_poses_np = []
-        Rs_np         = []
-        lin_vels_np   = []
-        ang_vels_np   = []
-        for exp_data in self.data:
-            sen = exp_data.sensors.links
-            com_poses_np.append(np.asarray(sen.com_positions()[iteration, :], dtype=self.dtype_np))
-            urdf_poses_np.append(np.asarray(sen.urdf_positions()[iteration, :], dtype=self.dtype_np))
-            Rs_np.append(
-                Rotation.from_quat(sen.urdf_orientations()[iteration, :])
-                .as_matrix().astype(self.dtype_np)
-            )
-            lin_vels_np.append(np.asarray(sen.com_lin_velocities()[iteration, :], dtype=self.dtype_np))
-            nlinks = len(sen.names)
-            ang_vels_np.append(
-                np.stack([
-                    np.asarray(sen.com_ang_velocity(iteration, lk), dtype=self.dtype_np)
-                    for lk in range(nlinks)
-                ])
-            )
+        com_poses_np, urdf_poses_np, Rs_np, lin_vels_np, ang_vels_np = (
+            self.gather_data(iteration, as_numpy=True)
+        )
 
         h_grid = float(comp.h)
 
@@ -1732,17 +1680,7 @@ class BDIMhandler:
         comp.body_v.zero_()
         comp.body_w.zero_()
 
-        if not hasattr(comp, '_body_aabbs'):
-            comp._body_aabbs = [None] * len(comp.bodies)
-
-        # 1-D fluid grid axes (created lazily once)
-        if getattr(comp, '_grid_axes_1d', None) is None:
-            comp._grid_axes_1d = (
-                comp.x.contiguous(),
-                comp.y.contiguous(),
-                comp.z.contiguous(),
-            )
-        gx_1d, gy_1d, gz_1d = comp._grid_axes_1d
+        gx_1d, gy_1d, gz_1d = comp.gx_1d, comp.gy_1d, comp.gz_1d
 
         for body_i, body in enumerate(comp.bodies):
             (animat_id, link_id) = comp.body_ids[body_i]
@@ -1837,7 +1775,7 @@ class BDIMhandler:
         Side-effects per call:
             * fills ``comp.sdf_val``, ``comp.sdf_val_u``, ``comp.sdf_val_v``,
               ``comp.body_u``, ``comp.body_v`` (union over all bodies);
-            * stashes per-step packed tensors on ``comp._stream_multi_step``
+            * stashes per-step packed tensors on ``comp._kernel_step``
               for the fused 2-D forces kernel (``bdim_forces_2d_multi``);
             * splits the sparse cc-SDF into per-body slabs on
               ``comp._sdf_sparse[b] = (aabb, slab)`` for downstream code;
@@ -1852,46 +1790,9 @@ class BDIMhandler:
         _FAR = 1e4
         B    = len(comp.bodies)
 
-        # ── Kinematics (host) ─────────────────────────────────────
-        # Mirror the legacy ``_update_2d`` axis-projection: only the
-        # in-plane axes (``self.lin_axes``) and the out-of-plane angular
-        # axis (``self._2d_ang_ax``) are pulled from the FARMS sensors.
-        com_poses_np  = []
-        urdf_poses_np = []
-        Rs_np         = []
-        lin_vels_np   = []
-        ang_vels_np   = []
-        for exp_data in self.data:
-            sen = exp_data.sensors.links
-            com_poses_np.append(
-                self.cython2numpy(
-                    sen.com_positions()[iteration, :]
-                ).cpu().numpy()[:, self.lin_axes].astype(self.dtype_np)
-            )
-            urdf_poses_np.append(
-                self.cython2numpy(
-                    sen.urdf_positions()[iteration, :]
-                ).cpu().numpy()[:, self.lin_axes].astype(self.dtype_np)
-            )
-            R3 = (
-                Rotation.from_quat(sen.urdf_orientations()[iteration, :])
-                .as_matrix().astype(self.dtype_np)
-            )
-            # Project to the in-plane 2x2 rotation block.
-            Rs_np.append(R3[:, self.lin_axes, :][:, :, self.lin_axes])
-            lin_vels_np.append(
-                self.cython2numpy(
-                    sen.com_lin_velocities()[iteration, :]
-                ).cpu().numpy()[:, self.lin_axes].astype(self.dtype_np)
-            )
-            nlinks = len(sen.names)
-            ang_vels_np.append(
-                np.asarray(
-                    [sen.com_ang_velocity(iteration, lk)[self._2d_ang_ax]
-                     for lk in range(nlinks)],
-                    dtype=self.dtype_np,
-                )
-            )
+        com_poses_np, urdf_poses_np, Rs_np, lin_vels_np, ang_vels_np = (
+            self.gather_data(iteration, as_numpy=True)
+        )
 
         h_grid = float(comp.h)
 
@@ -1907,7 +1808,7 @@ class BDIMhandler:
         # forces oscillate.  This is the analogue of the same
         # initialization performed in ``_update_3d_streaming_multi``
         # before the 3-D SDF reset.
-        if getattr(fs, '_kernel_sdf_forces_2d', False):
+        if fs._use_kernels:
             if (
                 getattr(fs, 'normal_x', None) is None
                 or getattr(fs, 'normal_y', None) is None
@@ -1922,20 +1823,12 @@ class BDIMhandler:
         comp.body_u.zero_()
         comp.body_v.zero_()
 
-        if not hasattr(comp, '_body_aabbs'):
-            comp._body_aabbs = [None] * B
-
-        if getattr(comp, '_grid_axes_1d', None) is None:
-            comp._grid_axes_1d = (
-                comp.x.contiguous(),
-                comp.y.contiguous(),
-            )
-        gx_1d, gy_1d = comp._grid_axes_1d
+        gx_1d, gy_1d = comp.gx_1d, comp.gy_1d
 
         # ──────────────────────────────────────────────────────────
         # Build / refresh the static per-body packed device tensors once.
         # ──────────────────────────────────────────────────────────
-        sm = getattr(comp, '_stream_multi_static_2d', None)
+        sm = getattr(comp, '_kernel_static_2d', None)
         if sm is None:
             F_chunks  = []
             bx_chunks = []; by_chunks = []
@@ -1965,7 +1858,7 @@ class BDIMhandler:
                 'body_shapes':  torch.tensor(shapes, dtype=torch.int64, device=self.device),
                 'body_meta':    torch.tensor(meta,   dtype=self.dtype,  device=self.device),
             }
-            comp._stream_multi_static_2d = sm
+            comp._kernel_static_2d = sm
 
         # ──────────────────────────────────────────────────────────
         # Per-step: compose body frames, AABBs, kinematics (numpy host).
@@ -2128,7 +2021,7 @@ class BDIMhandler:
         fs = self.fluid_solver
         interp_method = getattr(fs, '_sdf_interp_method', 0)
 
-        if fs._kernel_sdf_forces_2d:
+        if fs._use_kernels:
             rho_bodies_buf = getattr(self, '_fused_rho_bodies_2d', None)
             if rho_bodies_buf is None or rho_bodies_buf.shape[0] != B:
                 rho_bodies_buf = torch.full(
@@ -2223,7 +2116,7 @@ class BDIMhandler:
             comp._fused_forces_out = None
             comp._winning_rho_cc   = winning_rho_cc
 
-            comp._stream_multi_step = {
+            comp._kernel_step = {
                 'kin':      kin,
                 'aabb_lo':  aabb_lo,
                 'aabb_dim': aabb_dim,
@@ -2269,7 +2162,7 @@ class BDIMhandler:
                 slab = sparse_flat[lo:hi].view(Ai, Aj)
                 comp._sdf_sparse[body_i] = (aabb, slab)
 
-            comp._stream_multi_step = {
+            comp._kernel_step = {
                 'kin':             kin,
                 'aabb_lo':         aabb_lo,
                 'aabb_dim':        aabb_dim,
@@ -2513,59 +2406,16 @@ class BDIMhandler:
         fs = self.fluid_solver
 
         if not fs.terminate:
-
-            # 1. update SDF + body velocities from FARMS kinematics
-            self.update(t, iteration, dt=timestep)
-
-            # 2. recompute mu / normal fields
             if self.ndim == 3:
-                fs._recompute_mu_normals_3d()
-            else:
-                fs._recompute_mu_normals_2d()
-
-            # 3. BDIM fluid step
-            if self.ndim == 3:
-                (u, v, w, p) = fs.fluid_step(
-                    fs.u0, fs.v0, fs.w0, fs.p0, timestep
+                (fs.u0, fs.v0, fs.p0, fs.w0, fs.terminate) = fs.step_(
+                    fs.u0, fs.v0, fs.p0, iteration, t, w_vel=fs.w0
                 )
-                if self.zero_pressure_inside:
-                    p = torch.where(fs.composite_body.sdf_val < 0, 0, p)
-                (fs.u0, fs.v0, fs.w0, fs.p0) = (u, v, w, p)
             else:
-                (u, v, p) = fs.fluid_step(
-                    fs.u0, fs.v0, fs.p0, timestep
+                (fs.u0, fs.v0, fs.p0, fs.terminate) = fs.step_(
+                    fs.u0, fs.v0, fs.p0, iteration, t
                 )
-                if self.zero_pressure_inside:
-                    p = torch.where(fs.composite_body.sdf_val < 0, 0, p)
-                (fs.u0, fs.v0, fs.p0) = (u, v, p)
-
-            # 3b. bail out immediately if the fluid blew up
-            fs.check_explosion(iteration)
-
-            # 4. compute fluid forces on each body
-            if self.ndim == 3:
-                fs.forces_method2_3d(fs.u0, fs.v0, fs.w0, fs.p0, iteration)
-            elif self.force_method == "method1":
-                fs.forces_method1(fs.u0, fs.v0, fs.p0, iteration)
-            else:
-                fs.forces_method2(fs.u0, fs.v0, fs.p0, iteration)
 
             fs.__dict__.update(_FS_FREE_AFTER_FORCES_3D)
-
-            # 5. plotting / saving
-            if self.ndim == 3:
-                fs.terminate = fs.plotting_and_saving(
-                    fs.u0, fs.v0, fs.p0, iteration, w_vel=fs.w0, check_termination=False
-                )
-            else:
-                fs.terminate = fs.plotting_and_saving(
-                    fs.u0, fs.v0, fs.p0, iteration, check_termination=False
-                )
-
-            # 6. apply forces to MuJoCo bodies
             self.apply_forces(task, physics)
-
-            # 7. free BDIM intermediates to reclaim GPU memory
-            fs._release_bdim_fields()
 
         self.iteration += 1

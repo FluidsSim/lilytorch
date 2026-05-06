@@ -454,9 +454,6 @@ class FluidSolver(PlottingMixin):
         self.time_integration = solver.get("time_integration", "euler")
         assert self.time_integration in ("heun", "euler"), \
             f"Unknown time_integration '{self.time_integration}'. Choose 'heun' or 'euler'."
-        # ---- time integration dispatch (set once, used every step) ----
-        self._solve = self.solve_heun if self.time_integration == "heun" else self.solve_euler
-
         print("Setting dt={}s, dx={}".format(self.dt, self.h))
         print(f"Time integration: {self.time_integration}")
 
@@ -517,6 +514,8 @@ class FluidSolver(PlottingMixin):
         self.force_delta_order = int(solver.get("force_delta_order", 1))
         if self.force_delta_order not in (1, 2):
             raise ValueError(f"force_delta_order must be 1 or 2, got {self.force_delta_order}")
+        self.force_method = solver.get("force_method", "method2")
+        self.zero_pressure_inside = solver.get("zero_pressure_inside", False)
 
         # ---- optional torch.compile for force computation -----
         self._compile_forces = solver.get("compile_forces", False)
@@ -532,18 +531,8 @@ class FluidSolver(PlottingMixin):
         _method = self._solver_method
         _kernel = (_method == "kernel")
 
-        self._use_kernels         = _kernel
-        self._forces_shared_union = _kernel
-        self._mu_normals_union    = _kernel
-        self._mu_union_ready      = False
-        self._bdim_union          = _kernel
-        self._streaming_sdf_3d    = _kernel
-        self._streaming_forces_3d = False
-        self._kernel_sdf_forces_3d = _kernel
-        self._custom_trilinear_3d = _kernel
-        self._streaming_sdf_2d    = _kernel
-        self._streaming_forces_2d = False
-        self._kernel_sdf_forces_2d = _kernel
+        self._use_kernels    = _kernel
+        self._mu_union_ready = False
 
         _METHOD_DESCR = {
             "python": "Python reference path",
@@ -746,19 +735,6 @@ class FluidSolver(PlottingMixin):
         # Populated only in 3-D BDIM paths for now.
         self.viscous_torque_record  = torch.zeros((self.n_bodies,n_torque_comp,self.nt),device=self.device,dtype=self.dtype)
         self.pressure_torque_record = torch.zeros((self.n_bodies,n_torque_comp,self.nt),device=self.device,dtype=self.dtype)
-
-        # ===== flow diagnostics (energy, enstrophy, CFL) =====
-        _diag_every  = solver.get("diagnostics_every", 1)
-        _energy_grow = solver.get("energy_growth_factor", 10.0)
-        self.diagnostics = FlowDiagnostics(
-            nt      = self.nt,
-            ndim    = self.ndim,
-            h       = self.h,
-            device  = self.device,
-            dtype   = self.dtype,
-            check_every          = _diag_every,
-            energy_growth_factor = _energy_grow,
-        )
 
         # NOTE: xstress_tensor, ystress_tensor, zstress_tensor, and div
         # are created on-the-fly in forces_method* and project() respectively
@@ -1107,7 +1083,7 @@ class FluidSolver(PlottingMixin):
                       normal_x, normal_y, normal_z):
         """Apply the BDIM2 meta-equation to a single 3-D staggered grid.
 
-        When ``self._bdim_union`` is on AND a union AABB is available
+        When kernel mode is on AND a union AABB is available
         (cached on ``self._bdim_union_aabb``), only the union sub-block
         is touched.  Outside the union mu0=1, mu1=0, body_vel=0 makes the
         meta-equation the identity, so phi[outside] is left unchanged
@@ -1121,7 +1097,7 @@ class FluidSolver(PlottingMixin):
         place), which is already an owned tensor.
         """
         _h = self.h
-        if self._bdim_union and getattr(self, '_bdim_union_aabb', None) is not None:
+        if self._use_kernels and getattr(self, '_bdim_union_aabb', None) is not None:
             ui0, ui1, uj0, uj1, uk0, uk1 = self._bdim_union_aabb
             usl = (slice(ui0, ui1), slice(uj0, uj1), slice(uk0, uk1))
             sub = self._bdim_meta_dyn_compiled(
@@ -1325,7 +1301,7 @@ class FluidSolver(PlottingMixin):
             # Cleared at end of step.  Cheap (Python loop over <~10 bodies).
             self._bdim_union_aabb = (
                 self._compute_union_aabb_3d(halo=2)
-                if self._bdim_union else None
+                if self._use_kernels else None
             )
 
             # BDIM2 meta-equation (fused when compiled)
@@ -1475,7 +1451,7 @@ class FluidSolver(PlottingMixin):
             # Cache union AABB for the BDIM pass.
             self._bdim_union_aabb = (
                 self._compute_union_aabb_3d(halo=2)
-                if self._bdim_union else None
+                if self._use_kernels else None
             )
 
             # BDIM2 meta-equation
@@ -1562,7 +1538,7 @@ class FluidSolver(PlottingMixin):
         # outside-body default values that never change, and only the
         # union sub-block is overwritten each step.
         keep = set()
-        if getattr(self, '_mu_normals_union', False):
+        if self._use_kernels:
             keep = {
                 'mu0_all_u', 'mu1_all_u', 'mu0_all_v', 'mu1_all_v',
                 'mu0_all_w', 'mu1_all_w', 'mu0_all', 'mu1_all',
@@ -1604,7 +1580,7 @@ class FluidSolver(PlottingMixin):
 
         When ``_compile_sdf`` is enabled, uses a batched+compiled kernel that
         processes all four grids (u, v, w, CC) in a single fused CUDA graph.
-        When ``_mu_normals_union`` is enabled, the kernel runs only on the
+        When kernel-mode union normals are enabled, the kernel runs only on the
         union AABB of all body sub-blocks (with halo) and results are
         slice-written into persistent full-grid buffers pre-filled with
         the outside-body defaults (mu0=1, mu1=0, normals=0).
@@ -1619,7 +1595,7 @@ class FluidSolver(PlottingMixin):
         # compiled kernel only recompiles a bounded number of times.
         # ------------------------------------------------------------------
         u_aabb = None
-        if self._mu_normals_union:
+        if self._use_kernels:
             u_aabb = self._compute_union_aabb_3d(halo=2, bucket=16)
 
         if u_aabb is not None:
@@ -1762,7 +1738,7 @@ class FluidSolver(PlottingMixin):
         _drho = float(self.rho) - self.rho_body
 
         if (self.ndim == 3
-                and getattr(self, '_mu_normals_union', False)
+                and self._use_kernels
                 and self.mu0_all_u is not None
                 and self.mu0_all_v is not None
                 and self.mu0_all_w is not None
@@ -1898,7 +1874,7 @@ class FluidSolver(PlottingMixin):
         self.adv_diff_solver.set_BCs(uprime, vprime, wprime)
 
         self._bdim_union_aabb = (
-            self._compute_union_aabb_3d(halo=2) if self._bdim_union else None
+            self._compute_union_aabb_3d(halo=2) if self._use_kernels else None
         )
         uprime = self._bdim_apply_3d(
             uprime, self.mu0_all_u,
@@ -2008,37 +1984,34 @@ class FluidSolver(PlottingMixin):
         )
 
     def step_(self, u, v, p, iteration, t, w_vel=None):
-
-        # update sdf_properties
         self.composite_body.update(t, iteration, dt=self.dt)
-
-        # --- recompute mu / normals on all staggered grids ---
         self._recompute_mu_normals()
-
-        ##### just for plotting
         self.sdf_properties = [[self.composite_body.sdf_val_u]]
 
         if self.ndim == 2:
-            (u, v, p) = self._solve(u, v, p, iteration)
+            (u, v, p) = self.fluid_step(u, v, p, self.dt)
+            if self.zero_pressure_inside:
+                p = torch.where(self.composite_body.sdf_val < 0, 0, p)
+            self.u0, self.v0, self.p0 = u, v, p
 
             if self.compute_forces:
-                self.forces_method2(u, v, p, iteration)
+                if self.force_method == "method1":
+                    self.forces_method1(u, v, p, iteration)
+                else:
+                    self.forces_method2(u, v, p, iteration)
                 self._apply_force_feedback(iteration, t)
 
         else:
-            (u, v, p, w_vel) = self._solve(u, v, p, iteration, w_vel=w_vel)
+            (u, v, w_vel, p) = self.fluid_step(u, v, w_vel, p, self.dt)
+            if self.zero_pressure_inside:
+                p = torch.where(self.composite_body.sdf_val < 0, 0, p)
+            self.u0, self.v0, self.w0, self.p0 = u, v, w_vel, p
 
             if self.compute_forces:
                 self.forces_method2_3d(u, v, w_vel, p, iteration)
                 self._apply_force_feedback(iteration, t)
 
-        # ---- flow diagnostics (energy, enstrophy, CFL, divergence) ----
-        self.diagnostics.update(
-            iteration, u, v, p, self.dt, self.nu,
-            divergence_fn=self.divergence,
-            vorticity_fn=self.vorticity,
-            w=w_vel,
-        )
+        self.check_explosion(iteration)
 
         # ---- free BDIM fields to reclaim GPU memory between steps ----
         self._release_bdim_fields()
@@ -2085,11 +2058,6 @@ class FluidSolver(PlottingMixin):
 
         if self.compute_forces and self.save:
             self.save_drags_h5()
-
-        # ---- save flow diagnostics ----
-        if self.save:
-            self._submit_io(self.diagnostics.save_h5,
-                            self.save_path, self._hdf5_lock)
 
         # Block until all background I/O is complete before returning
         self.flush_io()
