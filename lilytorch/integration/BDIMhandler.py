@@ -199,8 +199,8 @@ class BDIMhandler:
         # ---- allocate per-body SDF / velocity arrays if missing ----
         comp = self.fluid_solver.composite_body
         gs = self.fluid_solver.grid_shape
-        self._init_static_body_metadata()
         if self.fluid_solver._solver_method == "kernel":
+            self._init_static_body_metadata()
             if self.ndim == 3:
                 self._init_interp_3d()
             elif self.ndim == 2:
@@ -261,50 +261,27 @@ class BDIMhandler:
         ang_vels = []
         for exp_data in self.data:
             sen = exp_data.sensors.links
-            if as_numpy:
-                com = np.asarray(sen.com_positions()[iteration, :], dtype=self.dtype_np)
-                urdf = np.asarray(sen.urdf_positions()[iteration, :], dtype=self.dtype_np)
-                R = Rotation.from_quat(sen.urdf_orientations()[iteration, :]).as_matrix().astype(self.dtype_np)
-                lin = np.asarray(sen.com_lin_velocities()[iteration, :], dtype=self.dtype_np)
-                nlinks = len(sen.names)
-                if self.ndim == 2:
-                    com = com[:, self.lin_axes]
-                    urdf = urdf[:, self.lin_axes]
-                    R = R[:, self.lin_axes, :][:, :, self.lin_axes]
-                    lin = lin[:, self.lin_axes]
-                    ang = np.asarray(
-                        [sen.com_ang_velocity(iteration, lk)[self._2d_ang_ax]
-                         for lk in range(nlinks)],
-                        dtype=self.dtype_np,
-                    )
-                else:
-                    ang = np.stack([
-                        np.asarray(sen.com_ang_velocity(iteration, lk), dtype=self.dtype_np)
-                        for lk in range(nlinks)
-                    ])
-            else:
-                com = self.cython2numpy(sen.com_positions()[iteration, :])
-                urdf = self.cython2numpy(sen.urdf_positions()[iteration, :])
-                R = self.cython2numpy(
-                    Rotation.from_quat(sen.urdf_orientations()[iteration, :])
-                    .as_matrix().astype(self.dtype_np)
+
+            com = np.asarray(sen.com_positions()[iteration, :], dtype=self.dtype_np)
+            urdf = np.asarray(sen.urdf_positions()[iteration, :], dtype=self.dtype_np)
+            R = Rotation.from_quat(sen.urdf_orientations()[iteration, :]).as_matrix().astype(self.dtype_np)
+            lin = np.asarray(sen.com_lin_velocities()[iteration, :], dtype=self.dtype_np)
+            nlinks = len(sen.names)
+            if self.ndim == 2:
+                com = com[:, self.lin_axes]
+                urdf = urdf[:, self.lin_axes]
+                R = R[:, self.lin_axes, :][:, :, self.lin_axes]
+                lin = lin[:, self.lin_axes]
+                ang = np.asarray(
+                    [sen.com_ang_velocity(iteration, lk)[self._2d_ang_ax]
+                        for lk in range(nlinks)],
+                    dtype=self.dtype_np,
                 )
-                lin = self.cython2numpy(sen.com_lin_velocities()[iteration, :])
-                nlinks = len(sen.names)
-                if self.ndim == 2:
-                    com = com[:, self.lin_axes]
-                    urdf = urdf[:, self.lin_axes]
-                    R = R[:, self.lin_axes, :][:, :, self.lin_axes]
-                    lin = lin[:, self.lin_axes]
-                    ang = self.cython2numpy(
-                        [sen.com_ang_velocity(iteration, lk)[self._2d_ang_ax]
-                         for lk in range(nlinks)]
-                    )
-                else:
-                    ang = self.cython2numpy(
-                        np.stack([sen.com_ang_velocity(iteration, lk)
-                                  for lk in range(nlinks)])
-                    )
+            else:
+                ang = np.stack([
+                    np.asarray(sen.com_ang_velocity(iteration, lk), dtype=self.dtype_np)
+                    for lk in range(nlinks)
+                ])
             com_poses.append(com)
             urdf_poses.append(urdf)
             Rs.append(R)
@@ -535,11 +512,6 @@ class BDIMhandler:
             self._buoy_height[body_i] = 0.5 * max_rbound
 
         self._buoyancy_initialized = True
-
-    def cython2numpy(self, array):
-        return torch.from_numpy(
-            np.array(array).astype(self.dtype_np)
-        ).to(self.device)
 
     # ==================================================================
     #  update: FARMS kinematics  ->  SDF fields + body velocities
