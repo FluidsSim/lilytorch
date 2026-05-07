@@ -1059,9 +1059,10 @@ class PlottingMixin:
     def _snapshot_body_sdf_vals_for_plots(self, crop_slices=None):
         """Snapshot per-body SDFs on CPU for plot colouring.
 
-        2-D uses the dense ``composite_body.sdf_vals`` stack directly.
-        3-D reconstructs a dense stack from the sparse per-body SDF blocks
-        cached in ``composite_body._sdf_sparse``.
+        Prefer ``composite_body._sdf_sparse`` when available so plotting
+        matches the current per-step body update path. Fall back to the
+        legacy dense ``composite_body.sdf_vals`` stack when sparse storage
+        is unavailable.
         """
         comp = getattr(self, "composite_body", None)
         bodies = getattr(comp, "bodies", None) if comp is not None else None
@@ -1074,70 +1075,66 @@ class PlottingMixin:
         elif not isinstance(crop_slices, tuple):
             crop_slices = (crop_slices,) * ndim
 
-        if self.ndim == 2:
-            sdf_vals = getattr(comp, "sdf_vals", None)
-            if sdf_vals is None:
-                return None
-            sdf_vals_np = np.asarray(
-                sdf_vals.detach().cpu().numpy() if hasattr(sdf_vals, "detach") else sdf_vals,
-                dtype=np.float32,
-            )
-            return np.array(sdf_vals_np[(slice(None), *crop_slices)], dtype=np.float32, copy=True)
-
         sdf_sparse = getattr(comp, "_sdf_sparse", None)
-        if sdf_sparse is None:
+        if sdf_sparse is not None:
+            full_shape = tuple(int(n) for n in self.grid_shape)
+            crop_bounds = []
+            cropped_shape = []
+            for axis, sl in enumerate(crop_slices):
+                start = 0 if sl.start is None else (full_shape[axis] + sl.start if sl.start < 0 else sl.start)
+                stop = full_shape[axis] if sl.stop is None else (full_shape[axis] + sl.stop if sl.stop < 0 else sl.stop)
+                start = max(0, min(full_shape[axis], start))
+                stop = max(start, min(full_shape[axis], stop))
+                crop_bounds.append((start, stop))
+                cropped_shape.append(stop - start)
+
+            sdf_vals_np = np.full((len(bodies), *cropped_shape), 1e4, dtype=np.float32)
+
+            for body_i, sparse_entry in enumerate(sdf_sparse):
+                if sparse_entry is None:
+                    continue
+                aabb, sdf_body = sparse_entry
+                sdf_body_np = np.asarray(
+                    sdf_body.detach().cpu().numpy() if hasattr(sdf_body, "detach") else sdf_body,
+                    dtype=np.float32,
+                )
+
+                if aabb is None:
+                    sdf_vals_np[body_i] = np.array(sdf_body_np[crop_slices], dtype=np.float32, copy=True)
+                    continue
+
+                axis_ranges = [
+                    (aabb[2 * axis], aabb[2 * axis + 1])
+                    for axis in range(ndim)
+                ]
+                dst_slices = []
+                src_slices = []
+                intersects = True
+                for axis, (body_lo, body_hi) in enumerate(axis_ranges):
+                    crop_lo, crop_hi = crop_bounds[axis]
+                    src_lo = max(body_lo, crop_lo)
+                    src_hi = min(body_hi, crop_hi)
+                    if src_lo >= src_hi:
+                        intersects = False
+                        break
+                    dst_slices.append(slice(src_lo - crop_lo, src_hi - crop_lo))
+                    src_slices.append(slice(src_lo - body_lo, src_hi - body_lo))
+
+                if not intersects:
+                    continue
+
+                sdf_vals_np[(body_i, *dst_slices)] = sdf_body_np[tuple(src_slices)]
+
+            return sdf_vals_np
+
+        sdf_vals = getattr(comp, "sdf_vals", None)
+        if sdf_vals is None:
             return None
-
-        full_shape = tuple(int(n) for n in self.grid_shape)
-        crop_bounds = []
-        cropped_shape = []
-        for axis, sl in enumerate(crop_slices):
-            start = 0 if sl.start is None else (full_shape[axis] + sl.start if sl.start < 0 else sl.start)
-            stop = full_shape[axis] if sl.stop is None else (full_shape[axis] + sl.stop if sl.stop < 0 else sl.stop)
-            start = max(0, min(full_shape[axis], start))
-            stop = max(start, min(full_shape[axis], stop))
-            crop_bounds.append((start, stop))
-            cropped_shape.append(stop - start)
-
-        sdf_vals_np = np.full((len(bodies), *cropped_shape), 1e4, dtype=np.float32)
-
-        for body_i, sparse_entry in enumerate(sdf_sparse):
-            if sparse_entry is None:
-                continue
-            aabb, sdf_body = sparse_entry
-            sdf_body_np = np.asarray(
-                sdf_body.detach().cpu().numpy() if hasattr(sdf_body, "detach") else sdf_body,
-                dtype=np.float32,
-            )
-
-            if aabb is None:
-                sdf_vals_np[body_i] = np.array(sdf_body_np[crop_slices], dtype=np.float32, copy=True)
-                continue
-
-            axis_ranges = [
-                (aabb[0], aabb[1]),
-                (aabb[2], aabb[3]),
-                (aabb[4], aabb[5]),
-            ]
-            dst_slices = []
-            src_slices = []
-            intersects = True
-            for axis, (body_lo, body_hi) in enumerate(axis_ranges):
-                crop_lo, crop_hi = crop_bounds[axis]
-                src_lo = max(body_lo, crop_lo)
-                src_hi = min(body_hi, crop_hi)
-                if src_lo >= src_hi:
-                    intersects = False
-                    break
-                dst_slices.append(slice(src_lo - crop_lo, src_hi - crop_lo))
-                src_slices.append(slice(src_lo - body_lo, src_hi - body_lo))
-
-            if not intersects:
-                continue
-
-            sdf_vals_np[(body_i, *dst_slices)] = sdf_body_np[tuple(src_slices)]
-
-        return sdf_vals_np
+        sdf_vals_np = np.asarray(
+            sdf_vals.detach().cpu().numpy() if hasattr(sdf_vals, "detach") else sdf_vals,
+            dtype=np.float32,
+        )
+        return np.array(sdf_vals_np[(slice(None), *crop_slices)], dtype=np.float32, copy=True)
 
     def plotting_and_saving(self, u, v, p, iteration, *, w_vel=None, check_termination=True):
         """

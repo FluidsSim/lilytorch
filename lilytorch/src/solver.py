@@ -211,61 +211,34 @@ class FluidSolver(PlottingMixin):
     def vorticity_components(self, u, v, w):
         return ops.vorticity_components(u, v, w, self.h)
 
-    _VALID_SOLVER_METHODS = ("python", "kernels", "fused")
+    _VALID_SOLVER_METHODS = ("python", "kernel")
 
     @staticmethod
     def _resolve_solver_method(solver):
         """Resolve the user-facing ``solver.solver_method`` key.
 
-        Accepts the new ``solver_method`` ∈ ``{"python", "kernels", "fused"}``
-        and the legacy ``use_kernels`` / ``fused_sdf_forces`` keys (with a
-        :class:`DeprecationWarning`).  Returns the canonical string.
+        Only two active methods remain:
+          * ``"python"`` -- reference pure-Python/PyTorch path.
+          * ``"kernel"`` -- native streamed memory-saving path.
 
-        Mapping for the legacy keys (only used when ``solver_method`` is
-        absent):
-
-        =====================  =========================  ================
-        ``use_kernels``        ``fused_sdf_forces``       result
-        =====================  =========================  ================
-        ``False``              ignored                    ``"python"``
-        ``True``               ``False``                  ``"kernels"``
-        ``True`` (default)     ``True`` / unset           ``"fused"``
-        =====================  =========================  ================
-
-        If both the new and legacy keys are supplied the explicit
-        ``solver_method`` wins, and a warning is emitted if the mapping
-        of the legacy keys disagrees with it.
+        Legacy values/keys from the transitional implementation are accepted
+        as aliases and normalized to the two active methods.
         """
         import warnings
 
-        method      = solver.get("solver_method", None)
-        legacy_uk   = solver.get("use_kernels", None)
-        legacy_fsf  = solver.get("fused_sdf_forces", None)
-
-        # Compute the legacy-derived method (if any legacy key was set).
-        legacy_method = None
-        if legacy_uk is not None or legacy_fsf is not None:
-            if not bool(legacy_uk):
-                legacy_method = "python"
-            else:
-                # use_kernels=True; choose by fused_sdf_forces (default True).
-                legacy_method = "fused" if (legacy_fsf is None or bool(legacy_fsf)) else "kernels"
-            warnings.warn(
-                "solver.use_kernels / solver.fused_sdf_forces are deprecated; "
-                "use solver.solver_method ∈ {'python', 'kernels', 'fused'} "
-                f"instead (resolved to solver_method={legacy_method!r}).",
-                DeprecationWarning, stacklevel=3,
-            )
+        method = solver.get("solver_method", None)
+        legacy_uk = solver.get("use_kernels", None)
 
         if method is None:
-            method = legacy_method if legacy_method is not None else "fused"
-        elif legacy_method is not None and legacy_method != method:
-            warnings.warn(
-                f"solver.solver_method={method!r} overrides legacy "
-                f"use_kernels/fused_sdf_forces (which would have selected "
-                f"{legacy_method!r}).",
-                stacklevel=3,
-            )
+            if legacy_uk is None:
+                method = "kernel"
+            else:
+                warnings.warn(
+                    "solver.use_kernels is deprecated; use solver.solver_method "
+                    "('python' or 'kernel') instead.",
+                    DeprecationWarning, stacklevel=3,
+                )
+                method = "kernel" if bool(legacy_uk) else "python"
 
         if method not in FluidSolver._VALID_SOLVER_METHODS:
             raise ValueError(
@@ -474,9 +447,6 @@ class FluidSolver(PlottingMixin):
         self.time_integration = solver.get("time_integration", "euler")
         assert self.time_integration in ("heun", "euler"), \
             f"Unknown time_integration '{self.time_integration}'. Choose 'heun' or 'euler'."
-        # ---- time integration dispatch (set once, used every step) ----
-        self._solve = self.solve_heun if self.time_integration == "heun" else self.solve_euler
-
         print("Setting dt={}s, dx={}".format(self.dt, self.h))
         print(f"Time integration: {self.time_integration}")
 
@@ -537,6 +507,8 @@ class FluidSolver(PlottingMixin):
         self.force_delta_order = int(solver.get("force_delta_order", 1))
         if self.force_delta_order not in (1, 2):
             raise ValueError(f"force_delta_order must be 1 or 2, got {self.force_delta_order}")
+        self.force_method = solver.get("force_method", "method2")
+        self.zero_pressure_inside = solver.get("zero_pressure_inside", False)
 
         # ---- optional torch.compile for force computation -----
         self._compile_forces = solver.get("compile_forces", False)
@@ -544,81 +516,21 @@ class FluidSolver(PlottingMixin):
         # =====================================================================
         # Solver method selection
         # =====================================================================
-        # SINGLE user-facing key: ``solver.solver_method``.  Three values:
-        #
-        #   * ``"python"``  -- reference, mostly-Python path.
-        #     Per-body SDFs are computed via the body-specific C++/CUDA
-        #     SDF kernel called inside a Python ``for`` loop over bodies;
-        #     per-body CC SDFs are stored; body forces are computed using
-        #     the standard PyTorch ``forces_method2`` looping over each
-        #     body and reading the CC SDFs.  Slowest, simplest, used as
-        #     the parity baseline.
-        #
-        #   * ``"kernels"`` -- separate-kernels path.
-        #     The union SDF is computed in a dedicated CUDA kernel using
-        #     a packed (sdf, body-id) ``atomicMin`` to avoid race
-        #     conditions; the body forces are computed in a *separate*
-        #     CUDA kernel (``bdim_forces_*_multi``).  No per-body CC SDF
-        #     stack is allocated; only per-body sparse AABB-cropped slabs.
-        #
-        #   * ``"fused"``   -- fused experimental path (default).
-        #     A single C++/CUDA kernel
-        #     (``streaming_sdf_forces_fused_*_multi``) computes the union
-        #     SDF *and* the per-body force/torque accumulators in one
-        #     pass.  Avoids the extra ``sparse_cc_flat`` allocation and
-        #     a second pass over the union grid.
-        #
-        # All other internal dispatch flags (``_use_kernels``,
-        # ``_streaming_sdf_2d/3d``, ``_streaming_forces_2d/3d``,
-        # ``_fused_sdf_forces_2d/3d``, ``_custom_trilinear_3d``,
-        # ``_forces_shared_union``, ``_mu_normals_union``,
-        # ``_bdim_union``) are derived deterministically from
-        # ``solver_method`` below — they are NOT user-facing.
-        #
-        # Backward compatibility: the legacy keys ``use_kernels`` and
-        # ``fused_sdf_forces`` are still accepted (with a
-        # ``DeprecationWarning``) and mapped onto ``solver_method`` as:
-        #     use_kernels=False                          -> "python"
-        #     use_kernels=True,  fused_sdf_forces=False  -> "kernels"
-        #     use_kernels=True,  fused_sdf_forces=True   -> "fused"
-        # If both ``solver_method`` and a legacy key are supplied, the
-        # explicit ``solver_method`` value wins (and a warning is
-        # emitted if the two disagree).
+        # Only two user-facing methods remain:
+        #   * "python" -- reference path.
+        #   * "kernel" -- native streamed path: update-only geometry pass,
+        #     then post-fluid-step native forces from current fields.
         self._solver_method = self._resolve_solver_method(solver)
         _method = self._solver_method
-        _uk     = (_method != "python")          # any kernel path
-        _fused  = (_method == "fused")           # fused force kernel
+        _kernel = (_method == "kernel")
 
-        self._use_kernels         = _uk
-        # Shared-stress union-AABB crop (kernel paths only).
-        self._forces_shared_union = _uk
-        # mu + normals union-AABB crop (kernel paths only).
-        self._mu_normals_union    = _uk
-        self._mu_union_ready      = False   # persistent buffers allocated lazily
-        # BDIM meta-equation union-AABB crop (kernel paths only).
-        self._bdim_union          = _uk
-        # Streaming SDF (Phase B) + Phase D streaming forces (3-D).
-        self._streaming_sdf_3d    = _uk
-        self._streaming_forces_3d = _uk
-        # Fused SDF + inline lagged force in one kernel pass (3-D).
-        self._fused_sdf_forces_3d = _fused
-        # Per-body C++/CUDA trilinear samplers
-        # (built in ``BDIMhandler._init_custom_trilinear_3d``).
-        self._custom_trilinear_3d = _uk
-        # 2-D analogues.
-        self._streaming_sdf_2d    = _uk
-        self._streaming_forces_2d = _uk
-        self._fused_sdf_forces_2d = _fused
+        self._use_kernels    = _kernel
+        self._mu_union_ready = False
 
         _METHOD_DESCR = {
-            "python":  ("Python reference (per-body C++/CUDA SDF kernel "
-                        "in a Python for-loop, CC SDFs stored, "
-                        "forces_method2)"),
-            "kernels": ("separate CUDA kernels (atomic-min union SDF + "
-                        "bdim_forces_*_multi force kernel)"),
-            "fused":   ("fused CUDA path (memory-saving streamed geometry; "
-                        "3-D keeps SDF+forces fused, 2-D uses fused update "
-                        "+ native post-force Phase D)"),
+            "python": "Python reference path",
+            "kernel": ("native streamed path (update-only geometry + "
+                       "post-fluid-step force kernel)"),
         }
         print(f"  [solver_method={_method!r}] {_METHOD_DESCR[_method]}")
         # Body-SDF sampling method used inside the streaming C++/CUDA
@@ -816,19 +728,6 @@ class FluidSolver(PlottingMixin):
         # Populated only in 3-D BDIM paths for now.
         self.viscous_torque_record  = torch.zeros((self.n_bodies,n_torque_comp,self.nt),device=self.device,dtype=self.dtype)
         self.pressure_torque_record = torch.zeros((self.n_bodies,n_torque_comp,self.nt),device=self.device,dtype=self.dtype)
-
-        # ===== flow diagnostics (energy, enstrophy, CFL) =====
-        _diag_every  = solver.get("diagnostics_every", 1)
-        _energy_grow = solver.get("energy_growth_factor", 10.0)
-        self.diagnostics = FlowDiagnostics(
-            nt      = self.nt,
-            ndim    = self.ndim,
-            h       = self.h,
-            device  = self.device,
-            dtype   = self.dtype,
-            check_every          = _diag_every,
-            energy_growth_factor = _energy_grow,
-        )
 
         # NOTE: xstress_tensor, ystress_tensor, zstress_tensor, and div
         # are created on-the-fly in forces_method* and project() respectively
@@ -1177,7 +1076,7 @@ class FluidSolver(PlottingMixin):
                       normal_x, normal_y, normal_z):
         """Apply the BDIM2 meta-equation to a single 3-D staggered grid.
 
-        When ``self._bdim_union`` is on AND a union AABB is available
+        When kernel mode is on AND a union AABB is available
         (cached on ``self._bdim_union_aabb``), only the union sub-block
         is touched.  Outside the union mu0=1, mu1=0, body_vel=0 makes the
         meta-equation the identity, so phi[outside] is left unchanged
@@ -1191,7 +1090,7 @@ class FluidSolver(PlottingMixin):
         place), which is already an owned tensor.
         """
         _h = self.h
-        if self._bdim_union and getattr(self, '_bdim_union_aabb', None) is not None:
+        if self._use_kernels and getattr(self, '_bdim_union_aabb', None) is not None:
             ui0, ui1, uj0, uj1, uk0, uk1 = self._bdim_union_aabb
             usl = (slice(ui0, ui1), slice(uj0, uj1), slice(uk0, uk1))
             sub = self._bdim_meta_dyn_compiled(
@@ -1395,7 +1294,7 @@ class FluidSolver(PlottingMixin):
             # Cleared at end of step.  Cheap (Python loop over <~10 bodies).
             self._bdim_union_aabb = (
                 self._compute_union_aabb_3d(halo=2)
-                if self._bdim_union else None
+                if self._use_kernels else None
             )
 
             # BDIM2 meta-equation (fused when compiled)
@@ -1545,7 +1444,7 @@ class FluidSolver(PlottingMixin):
             # Cache union AABB for the BDIM pass.
             self._bdim_union_aabb = (
                 self._compute_union_aabb_3d(halo=2)
-                if self._bdim_union else None
+                if self._use_kernels else None
             )
 
             # BDIM2 meta-equation
@@ -1632,7 +1531,7 @@ class FluidSolver(PlottingMixin):
         # outside-body default values that never change, and only the
         # union sub-block is overwritten each step.
         keep = set()
-        if getattr(self, '_mu_normals_union', False):
+        if self._use_kernels:
             keep = {
                 'mu0_all_u', 'mu1_all_u', 'mu0_all_v', 'mu1_all_v',
                 'mu0_all_w', 'mu1_all_w', 'mu0_all', 'mu1_all',
@@ -1674,7 +1573,7 @@ class FluidSolver(PlottingMixin):
 
         When ``_compile_sdf`` is enabled, uses a batched+compiled kernel that
         processes all four grids (u, v, w, CC) in a single fused CUDA graph.
-        When ``_mu_normals_union`` is enabled, the kernel runs only on the
+        When kernel-mode union normals are enabled, the kernel runs only on the
         union AABB of all body sub-blocks (with halo) and results are
         slice-written into persistent full-grid buffers pre-filled with
         the outside-body defaults (mu0=1, mu1=0, normals=0).
@@ -1689,7 +1588,7 @@ class FluidSolver(PlottingMixin):
         # compiled kernel only recompiles a bounded number of times.
         # ------------------------------------------------------------------
         u_aabb = None
-        if self._mu_normals_union:
+        if self._use_kernels:
             u_aabb = self._compute_union_aabb_3d(halo=2, bucket=16)
 
         if u_aabb is not None:
@@ -1832,7 +1731,7 @@ class FluidSolver(PlottingMixin):
         _drho = float(self.rho) - self.rho_body
 
         if (self.ndim == 3
-                and getattr(self, '_mu_normals_union', False)
+                and self._use_kernels
                 and self.mu0_all_u is not None
                 and self.mu0_all_v is not None
                 and self.mu0_all_w is not None
@@ -1968,7 +1867,7 @@ class FluidSolver(PlottingMixin):
         self.adv_diff_solver.set_BCs(uprime, vprime, wprime)
 
         self._bdim_union_aabb = (
-            self._compute_union_aabb_3d(halo=2) if self._bdim_union else None
+            self._compute_union_aabb_3d(halo=2) if self._use_kernels else None
         )
         uprime = self._bdim_apply_3d(
             uprime, self.mu0_all_u,
@@ -2078,37 +1977,34 @@ class FluidSolver(PlottingMixin):
         )
 
     def step_(self, u, v, p, iteration, t, w_vel=None):
-
-        # update sdf_properties
         self.composite_body.update(t, iteration, dt=self.dt)
-
-        # --- recompute mu / normals on all staggered grids ---
         self._recompute_mu_normals()
-
-        ##### just for plotting
         self.sdf_properties = [[self.composite_body.sdf_val_u]]
 
         if self.ndim == 2:
-            (u, v, p) = self._solve(u, v, p, iteration)
+            (u, v, p) = self.fluid_step(u, v, p, self.dt)
+            if self.zero_pressure_inside:
+                p = torch.where(self.composite_body.sdf_val < 0, 0, p)
+            self.u0, self.v0, self.p0 = u, v, p
 
             if self.compute_forces:
-                self.forces_method2(u, v, p, iteration)
+                if self.force_method == "method1":
+                    self.forces_method1(u, v, p, iteration)
+                else:
+                    self.forces_method2(u, v, p, iteration)
                 self._apply_force_feedback(iteration, t)
 
         else:
-            (u, v, p, w_vel) = self._solve(u, v, p, iteration, w_vel=w_vel)
+            (u, v, w_vel, p) = self.fluid_step(u, v, w_vel, p, self.dt)
+            if self.zero_pressure_inside:
+                p = torch.where(self.composite_body.sdf_val < 0, 0, p)
+            self.u0, self.v0, self.w0, self.p0 = u, v, w_vel, p
 
             if self.compute_forces:
                 self.forces_method2_3d(u, v, w_vel, p, iteration)
                 self._apply_force_feedback(iteration, t)
 
-        # ---- flow diagnostics (energy, enstrophy, CFL, divergence) ----
-        self.diagnostics.update(
-            iteration, u, v, p, self.dt, self.nu,
-            divergence_fn=self.divergence,
-            vorticity_fn=self.vorticity,
-            w=w_vel,
-        )
+        self.check_explosion(iteration)
 
         # ---- free BDIM fields to reclaim GPU memory between steps ----
         self._release_bdim_fields()
@@ -2155,11 +2051,6 @@ class FluidSolver(PlottingMixin):
 
         if self.compute_forces and self.save:
             self.save_drags_h5()
-
-        # ---- save flow diagnostics ----
-        if self.save:
-            self._submit_io(self.diagnostics.save_h5,
-                            self.save_path, self._hdf5_lock)
 
         # Block until all background I/O is complete before returning
         self.flush_io()

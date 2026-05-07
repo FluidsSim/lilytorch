@@ -258,14 +258,6 @@ Solver mode
        reference path (no batching, no per-body cropping) which is
        useful for validation.  Independent of ``use_gpu``: kernel
        mode is supported on both CPU and CUDA.
-   * - ``fused_sdf_forces``
-     - bool
-     - true
-     - Inside the kernel path, fold the lagged force/torque integral
-       into the same kernel pass that computes the running-min SDF
-       (``streaming_sdf_forces_fused_3d_multi``).  Eliminates the
-       per-body ``sparse_cc_flat`` slabs.  Set to ``false`` only when
-       debugging the older two-pass kernel path.
    * - ``sdf_interp_method``
      - str
      - ``"trilinear"``

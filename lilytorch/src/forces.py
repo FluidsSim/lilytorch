@@ -555,28 +555,24 @@ def forces_method2(self, u, v, p, iteration):
 
     B = len(comp.bodies)
 
-    _stream_step = getattr(comp, '_stream_multi_step', None)
+    _stream_step = getattr(comp, '_kernel_step', None)
     _have_sparse_2d = (
         hasattr(comp, '_sdf_sparse')
         and len(comp._sdf_sparse) > 0
         and comp._sdf_sparse[0] is not None
     )
-    _use_streaming_forces_2d = (
-        getattr(self, '_streaming_forces_2d', False)
-        and _have_sparse_2d
-        and _stream_step is not None
-    )
+    _use_legacy_sparse_forces_2d = False
     _use_fused_post_forces_2d = (
-        getattr(self, '_fused_sdf_forces_2d', False)
+        self._use_kernels
         and not _have_sparse_2d
         and _stream_step is not None
-        and getattr(comp, '_stream_multi_static_2d', None) is not None
+        and getattr(comp, '_kernel_static_2d', None) is not None
     )
 
     if _use_fused_post_forces_2d:
         from lilytorch.src.kernels import streaming_sdf_forces_post_2d
 
-        sm = comp._stream_multi_static_2d
+        sm = comp._kernel_static_2d
 
         out2d = getattr(self, '_fused_post_out_buf_2d', None)
         if out2d is None or out2d.shape != (B, 6):
@@ -650,8 +646,8 @@ def forces_method2(self, u, v, p, iteration):
     # force kernel index relative to that cropped slab.
     u_aabb = None
     if (
-        _use_streaming_forces_2d
-        and getattr(self, '_forces_shared_union', False)
+        _use_legacy_sparse_forces_2d
+        and self._use_kernels
     ):
         u_i0, u_j0 = 1 << 30, 1 << 30
         u_i1, u_j1 = -1, -1
@@ -697,14 +693,14 @@ def forces_method2(self, u, v, p, iteration):
             nu_rho, self.h,
         )
 
-    if self._compile_forces and not _use_streaming_forces_2d:
+    if self._compile_forces:
         xstress  = xstress.clone()
         ystress  = ystress.clone()
         pforce_x = pforce_x.clone()
         pforce_y = pforce_y.clone()
 
     # Cache for post-processing
-    if _use_streaming_forces_2d:
+    if _use_legacy_sparse_forces_2d:
         self.xstress_tensor = None
         self.ystress_tensor = None
         self.pforce_x = None
@@ -723,7 +719,7 @@ def forces_method2(self, u, v, p, iteration):
     # over the full ``comp.sdf_vals`` stack — both saves the (B, Nx, Ny)
     # SDF tensor allocation in BDIMhandler and avoids the dense
     # ``_forces_body_batch_2d`` reduction over the full grid.
-    if _use_streaming_forces_2d:
+    if _use_legacy_sparse_forces_2d:
         from lilytorch.src.kernels import bdim_forces_2d_multi
 
         Sj = xstress.shape[1]
@@ -853,16 +849,69 @@ def forces_method2_3d(self, u, v, w, p, iteration):
     comp = self.composite_body
 
     # ============================================================
-    # Fused Phase C+D fast path: forces were pre-computed in the
-    # SDF update step using lagged velocity/normals.  Just store the
-    # cached result into the force records and return early.
-    # Checked before _compute_nu_rho_for_forces to skip the
-    # potentially expensive variable-viscosity field computation.
+    # Kernel path: post-fluid-step native force pass.  The update stage
+    # only maintains union geometry/winning density; forces are computed
+    # here from the current fluid fields and current union normals, with
+    # per-body deltas obtained by on-demand body-local SDF sampling.
     # ============================================================
-    _fused_out = getattr(comp, '_fused_forces_out', None)
-    if _fused_out is not None:
+    _stream_step = getattr(comp, '_kernel_step', None)
+    _stream_static = getattr(comp, '_kernel_static_3d', None)
+    _use_kernel_post = (
+        self._use_kernels
+        and _stream_step is not None
+        and _stream_static is not None
+    )
+    if _use_kernel_post:
+        from lilytorch.src.kernels import streaming_sdf_forces_post_3d
         B = len(comp.bodies)
-        out_s = _fused_out if _fused_out.dtype == u.dtype else _fused_out.to(u.dtype)
+        out = getattr(self, '_kernel_post_out_buf_3d', None)
+        if out is None or out.shape != (B, 12):
+            out = torch.zeros((B, 12), dtype=torch.float64, device=self.device)
+            self._kernel_post_out_buf_3d = out
+        else:
+            out.zero_()
+
+        if self.use_variable_viscosity:
+            nu_rho_field = self._compute_nu_rho_for_forces(u, v, w)
+        else:
+            nu_rho_scalar = getattr(self, '_kernel_post_nu_rho_scalar_3d', None)
+            if nu_rho_scalar is None:
+                nu_rho_scalar = torch.empty((1,), device=self.device, dtype=self.dtype)
+                self._kernel_post_nu_rho_scalar_3d = nu_rho_scalar
+            nu_rho_scalar.fill_(float(self.nu) * float(self.rho))
+            nu_rho_field = nu_rho_scalar
+
+        nx = getattr(self, 'normal_x', None)
+        ny = getattr(self, 'normal_y', None)
+        nz = getattr(self, 'normal_z', None)
+        if nx is None or ny is None or nz is None:
+            nx, ny, nz = comp.compute_normals(comp.sdf_val)
+
+        rho_bodies = getattr(comp, '_fused_rho_bodies', None)
+        if rho_bodies is None or rho_bodies.numel() != B:
+            rho_bodies = torch.full((B,), float(self.rho_body), device=self.device, dtype=self.dtype)
+            comp._fused_rho_bodies = rho_bodies
+        winning_rho_cc = getattr(comp, '_winning_rho_cc', None)
+        if winning_rho_cc is None or winning_rho_cc.shape != comp.sdf_val.shape:
+            winning_rho_cc = torch.empty_like(comp.sdf_val)
+            comp._winning_rho_cc = winning_rho_cc
+        winning_rho_cc.fill_(float(self.rho))
+
+        eps_body = comp.bodies[0].eps
+        streaming_sdf_forces_post_3d(
+            _stream_static['F_flat'], _stream_static['F_offsets'],
+            _stream_static['body_shapes'], _stream_static['body_meta'],
+            _stream_step['kin'], _stream_step['aabb_lo'], _stream_step['aabb_dim'],
+            _stream_step['gx'], _stream_step['gy'], _stream_step['gz'],
+            self.h, _stream_step['max_vol'],
+            comp.sdf_val, comp.sdf_val_u, comp.sdf_val_v, comp.sdf_val_w,
+            comp.body_u, comp.body_v, comp.body_w,
+            getattr(self, '_sdf_interp_method', 0), rho_bodies, winning_rho_cc,
+            u.contiguous(), v.contiguous(), w.contiguous(), p.contiguous(),
+            nx.contiguous(), ny.contiguous(), nz.contiguous(), nu_rho_field,
+            eps_body, self.eps, self.h3, self.force_delta_order, out,
+        )
+        out_s = out if out.dtype == u.dtype else out.to(u.dtype)
         self.viscous_drag_record[:B, :, iteration]    = out_s[:, 0:3]
         self.viscous_torque_record[:B, :, iteration]  = out_s[:, 3:6]
         self.pressure_drag_record[:B, :, iteration]   = out_s[:, 6:9]
@@ -879,10 +928,12 @@ def forces_method2_3d(self, u, v, w, p, iteration):
         self.pressure_force_ang_x = self.pressure_torque_record[:B, 0, iteration]
         self.pressure_force_ang_y = self.pressure_torque_record[:B, 1, iteration]
         self.pressure_force_ang_z = self.pressure_torque_record[:B, 2, iteration]
-        # Cache zero-out stress tensors (not computed in fused path)
         self.xstress_tensor = None
         self.ystress_tensor = None
         self.zstress_tensor = None
+        self.pforce_x = None
+        self.pforce_y = None
+        self.pforce_z = None
         return
 
     nu_rho = self._compute_nu_rho_for_forces(u, v, w)
@@ -906,7 +957,7 @@ def forces_method2_3d(self, u, v, w, p, iteration):
     # the bandwidth-bound _forces_shared_3d only on that sub-block.
     # Per-body integration then uses indices RELATIVE to the union.
     _have_sparse_for_union = (
-        self._forces_shared_union
+        self._use_kernels
         and hasattr(comp, '_sdf_sparse')
         and len(comp._sdf_sparse) > 0
         and comp._sdf_sparse[0] is not None
@@ -968,24 +1019,7 @@ def forces_method2_3d(self, u, v, w, p, iteration):
     # by the next compiled call.  Clone them here so the body-integrate
     # kernel can safely read them.
     #
-    # SKIPPED when Phase D streaming forces will fire: that kernel
-    # consumes stress / pforce in-place during this step and never
-    # reads them across step boundaries.  At low-N this saves 6
-    # full-grid memcpy launches per step.
-    _comp_for_stream = self.composite_body
-    _have_sparse_for_stream = (
-        hasattr(_comp_for_stream, '_sdf_sparse')
-        and len(_comp_for_stream._sdf_sparse) > 0
-        and _comp_for_stream._sdf_sparse[0] is not None
-    )
-    _will_stream_forces = (
-        self._streaming_forces_3d
-        and _have_sparse_for_stream
-        and getattr(_comp_for_stream, '_stream_multi_step', None) is not None
-        and getattr(_comp_for_stream, '_stream_multi_static', None) is not None
-        and self.force_delta_order == 1
-    )
-    if self._compile_forces and not _will_stream_forces:
+    if self._compile_forces:
         xstress  = xstress.clone()
         ystress  = ystress.clone()
         zstress  = zstress.clone()
@@ -1021,15 +1055,10 @@ def forces_method2_3d(self, u, v, w, p, iteration):
     )
 
     # ---- Phase D: fused per-body force integration --------------
-    _stream_step = getattr(comp, '_stream_multi_step', None)
-    _stream_static = getattr(comp, '_stream_multi_static', None)
-    _use_streaming_forces = (
-        self._streaming_forces_3d
-        and _have_sparse
-        and _stream_step is not None
-        and _stream_static is not None
-    )
-    if _use_streaming_forces:
+    _stream_step = getattr(comp, '_kernel_step', None)
+    _stream_static = getattr(comp, '_kernel_static_3d', None)
+    _use_legacy_sparse_forces = False
+    if _use_legacy_sparse_forces:
         from lilytorch.src.kernels import bdim_forces_3d_multi
         if u_aabb is not None:
             ui0, ui1, uj0, uj1, uk0, uk1 = u_aabb

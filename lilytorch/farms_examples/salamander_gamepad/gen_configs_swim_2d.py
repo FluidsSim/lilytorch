@@ -24,7 +24,7 @@ class SimConfig(BaseSimConfig):
         self.water_height = 0.015
         self.stack_folder = "salamander"
 
-        self.solver_method    = "fused"
+        self.solver_method    = "kernel"
         # self.poisson_compile  = True
         # self.compile_adv_diff = True
         # self.compile_forces   = True
@@ -119,13 +119,13 @@ class SimConfig(BaseSimConfig):
             "loader": "lilytorch.integration.flow_viewer_2d_gpu.FlowViewer2D",
             "config": {
                 "field"         : "curl",
-                "nx_vis"        : 512,
-                "ny_vis"        : 128,
+                "nx_vis"        : 1024,
+                "ny_vis"        : 256,
                 "alpha"         : 1,
                 "z_offset"      : 0.015,
                 "smooth_sigma"  : 0,
                 "crop_boundary" : 0,
-                "update_every"  : 5,
+                "update_every"  : 1,
                 "synchronize_cuda": False,
                 "vmin"          : -10,
                 "vmax"          : 10,

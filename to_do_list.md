@@ -1,6 +1,52 @@
 
+You are working starting from the copilot/optimize_speed_memory branch. Checkout from there and create a new branch for your implementations. Now it is time to cleanup the code, remove unnecessary parts, and finalizing the repo. Implement the cleanup. 2d and 3d methods should be unified as much as possible. These are a number of things to work on, but look for other improvements too. The main implementations are in solver.py, BDIMhandler.py and forces.py:
+
+
+
+- in solver a bunch of variables are defined:
+        self._use_kernels         = _kernel
+        self._forces_shared_union = _kernel
+        self._mu_normals_union    = _kernel
+        self._mu_union_ready      = False
+        self._bdim_union          = _kernel
+        self._streaming_sdf_3d    = _kernel
+        self._streaming_forces_3d = False
+        self._kernel_sdf_forces_3d = _kernel
+        self._custom_trilinear_3d = _kernel
+        self._streaming_sdf_2d    = _kernel
+        self._streaming_forces_2d = False
+        self._kernel_sdf_forces_2d = _kernel
+Some of these are not used and most are equal to _kernel, and therefore can be replaced by _use_kernels and removed
+
+- there must be a unique and efficient way to collect the sensor data, com_poses, etc across update_2d_... and update_3d_... methods, across different methods and 2d and 3d options. Write a gather_data function that is called for the different methods.
+
+- the computations:
+        if getattr(comp, '_grid_axes_1d', None) is None:
+            comp._grid_axes_1d = (
+                comp.x.contiguous(),
+                comp.y.contiguous(),
+                comp.z.contiguous(),
+  should be done at init, storing gx_1d, gy_1d, gz_1d and _grid_axes_1d removed
+
+
+- _body_local_aabb_2d and _body_local_aabb_3d are unnecessarily called at every update. These can called once at init.
+
+- a bunch of code is commented and outdated, it should be removed
+
+- _init_interp_2d and _init_interp_3d use very similar code. Is it possible to set a unique function for to reduce the lines of code?
+
+- _streaming_sdf_2d/3d: these are old outdated flags which are now set directly by _kernel. Remove these flags in the codebase. Everything should simply depend on the mode used ("python" or "kernel")
+
+- Unify stepping functions: solver.step_ is similar to BDIMhandler.step. the BDIMhandler.step should use the solver.step_, but the latter needs to be modified to use the BDIMhandler one more closely. More specifically, solver.step_ should incorporate the same calls of BDIMhandler.step. For the body update, since self.fluid_solver.composite_body.update = self.update, no change should be done. The zero_pressure_inside should be included in the unified solver.step_, self.diagnostics should be dropped, and fs.check_explosion included instead. self._solve should be replaced by self.fluid_step, to follow the BDIMhandler step function. In other words, all the functions in the solver.step_ function should be made the same as BDIMhandler.step, with the exception of self.apply_forces (mujoco specific), which should be added in the BDIMhandler step (which should consist of fs.step+self.apply_forces). The zero pressure inside method should be ported in solver.py
+
+- the _will_stream_forces, _stream_multi_step and _stream_multi_static should be removed. These should depend on the kernel method or python method. If kernel=true
+
+
+
+
+
 # instructions
-You are working starting from the optimize_speed_memory branch. Checkout from there and create a new branch for your implementations. Read the HIGH PRIORITY todo list to implement (in to_do_list.md) and start to work on from top to bottom (higher to lower priority list). Then give me a step to step guide for testing the various implementations.
+Read the HIGH PRIORITY todo list to implement (in to_do_list.md) and start to work on from top to bottom (higher to lower priority list). Then give me a step to step guide for testing the various implementations.
 <!--
 be independent and self testing. Install the necessary packages explained in the README under the installation instructions (you can install pytorch in C++ mode, but you also must install the FARMS packages). Read the HIGH PRIORITY next steps to implement in the repository and start to work on from top to bottom (higher to lower priority list). -->
 
@@ -36,20 +82,18 @@ diff_u, diff_v, diff_w
 can be released after the loop of that body is computed. This should, in my logic, save a lot of memory, whist maintaining the same accuracy.
 - Check that the code works for dtype float32 and float64 (double). Especially the cuda/c++ kernels (but also the rest of the code) should be using one or the other depending on the user request.
 - Implement a gamepad connected with the fluid solver. The implementation should be restricted to the salamander_gamepad/ folder. The current gen_configs_swim_2d.py is copied from the salamander/ folder, but should be modifies to use the salamander_gamepad/control.py. Also you need to modify this latter file to make it work as a pd controller as the salamander.pd_controller_swim.PositionController, and allow it to make the animal turn speedup/slowdown and turn left/right as in a videogame, following the rules indicated in the current control.py script.
-
-
-# HIGH PRIORITY:
-- The streaming fused kerb
-- The _init_costum_trilinear_2d should be called just init_costum_2d. And also the other function with _3d. The current approach here is to build interpolation functions for both mesh and analytical bodies. However, i do not like this approach. Instead analytical bodies have an exact sdf definition (body.sdf). So their sdf should not be interpolated.
-
-
-- Is _stream_kin_static_2d ever used? If not delete it
 - Safely parallelise the multi-body SDF-write CUDA kernels (`streaming_sdf_min_*_multi`, `streaming_sdf_forces_fused_*_multi`). They are currently launched sequentially per body in a host-side `for` loop because their multi-field compare-swap (`if (s < sdf_cc[g]) { sdf_cc[g]=s; bU[g]=...; winning_rho_cc[g]=... }`) races on cells covered by overlapping per-body AABBs when fanned across `gridDim.y`. Two viable strategies:
   1. **Per-cell `int32` spinlock**: allocate `Ngrid` lock array, acquire via `atomicCAS(lock,0,1)`, do the multi-field compare-swap under the lock, release via `atomicExch`. Requires Volta+ for forward-progress guarantees, costs `Ngrid * 4 B` extra memory; portable but spinning under contention is wasteful.
   2. **`(s, body_id)` 64-bit `atomicMin` + scatter pass**: encode the signed float SDF into a sortable `uint64_t` key with the body index in the low bits, do a single 64-bit `atomicMin` per cell (no spinning, no consistency window), then a cheap second kernel decodes the winning body and recomputes the linked velocity / density from `(b, g)` directly (no need to store `bU/bV/bW` during phase 1). Preferred path; needs careful float→uint encoding (flip sign bit; for negatives flip all bits) and a packing scheme that fits `(B + 1) ≤ 2^k` body IDs alongside an fp32 mantissa+exponent.
 
   Either approach must be benchmarked on a real GPU against the current sequential-launch baseline; the win is largest when many small bodies overlap in their AABB regions. Forces-only kernels (`bdim_forces_*_multi`) are already parallel over `B` via `gridDim.y` (their `atomicAdd` reduction targets per-body-disjoint output rows — race-free).
-- Fix flow 2d gpu viewer (remove calls in base_sim_config), simulations sometimes stops midway, advection compilation generates flickering, multigrid method does not work with poisson_compile  = True.
+
+
+# HIGH PRIORITY:
+- The _init_costum_trilinear_2d should be called just init_costum_2d. And also the other function with _3d. The current approach here is to build interpolation functions for both mesh and analytical bodies. However, i do not like this approach. Instead analytical bodies have an exact sdf definition (body.sdf). So their sdf should not be interpolated.
+- It seems that _streaming_forces_3d and _streaming_forces_2d are always set to false, so the related kernels are never used. If so, the code related to these should be removed. There are several setting options that should be remove, such as _custom_trilinear_3d,
+
+
 - Do a systematic memory cost analysis. I think that the latest method with cuda kernels dynamically rewrites the body velocities and writed the forces computation inside the kernel whenever body properties are needed. This reduces the memory footprint by not storing the sdfs/body velocities of each rigid body (just a unique composite union body properties are stored).
 - Combine solver.py and BDIMhandler in a single simulation file (just solver.py). BDIMhandler should only keep whatever is necessary for handling the coupling with FARMS, if possible. Ideally the follwing should be done: the BDIMhandler step function should use the solver.py step function. This solver step function should contain: a compute_forces boolean that computed body forces for any simulation type (mujoco coupled or not), recompute normals, fluid_step, check_explosion, [i am not sute, need to clarify]
 

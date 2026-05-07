@@ -181,15 +181,16 @@ def instrument_handler(handler):
 
     _orig_step       = type(handler).step
     _orig_update     = type(handler).update
-    _orig_fluid_step = type(handler).fluid_step
+    _orig_fluid_step = type(fs).fluid_step
     _orig_apply      = type(handler).apply_forces
     _orig_forces     = type(fs).forces_method2
     _orig_recompute  = type(fs)._recompute_mu_normals_2d
 
     _precompile_count = [0]
-    _precompile_done  = [False]
+    _precompile_done  = [args.precompile <= 0]
     _settle_count     = [0]
     _settle_done      = [False]
+    _deep_patches_installed = [False]
 
     def detailed_step(self, task, physics):
         # Pre-compilation phase
@@ -232,7 +233,7 @@ def instrument_handler(handler):
         t   = iteration * timestep
         ffs = self.fluid_solver
 
-        if not self.terminate:
+        if not ffs.terminate:
 
             # ── 1. SDF update ────────────────────────────────────
             with T("1  SDF update (body kinematics + SDF eval)"):
@@ -244,7 +245,7 @@ def instrument_handler(handler):
 
             # ── 3. Fluid step (2-D PDE) ───────────────────────────
             with T("3  fluid_step (total PDE)"):
-                (u, v, p) = _orig_fluid_step(self,
+                (u, v, p) = _orig_fluid_step(ffs,
                     ffs.u0, ffs.v0, ffs.p0, timestep)
 
             (ffs.u0, ffs.v0, ffs.p0) = (u, v, p)
@@ -258,7 +259,7 @@ def instrument_handler(handler):
             ffs.__dict__.update(_FS_FREE_AFTER_FORCES_3D)
 
             # ── 5. Plotting / saving — SKIPPED for pure solver cost
-            self.terminate = False
+            ffs.terminate = False
 
             # ── 6. Apply forces (FARMS) ───────────────────────────
             with T("6  apply_forces (FARMS)"):
@@ -282,11 +283,15 @@ def instrument_handler(handler):
     _orig_adv_solve_bound = adv.solve
     _orig_bdim_meta    = fs._bdim_meta_compiled
     _orig_project      = type(fs).project
-    _orig_vardens      = type(handler)._compute_variable_density_coefficients
+    _orig_vardens      = type(fs)._compute_variable_density_coefficients
 
     poisson_mg = getattr(fs, "poisson_solver", None)
 
     def _install_deep_patches():
+        if _deep_patches_installed[0]:
+            return
+        _deep_patches_installed[0] = True
+
         # ── 1b. Timed SDF eval sub-step ──────────────────────────
         def timed_update_detailed(self_h, t, iteration, dt=1):
             with T("1b   SDF eval (per-body × 3 grids)"):
@@ -335,11 +340,11 @@ def instrument_handler(handler):
         adv.set_BCs = types.MethodType(timed_set_bcs, adv)
 
         # ── Wrap variable-density coefficients ────────────────────
-        def timed_vardens(self_h, *a, **kw):
+        def timed_vardens(self_fs, *a, **kw):
             with T("3e   var-density coeffs [ch cv ch_cc]"):
-                return _orig_vardens(self_h, *a, **kw)
-        handler._compute_variable_density_coefficients = types.MethodType(
-            timed_vardens, handler)
+                return _orig_vardens(self_fs, *a, **kw)
+        fs._compute_variable_density_coefficients = types.MethodType(
+            timed_vardens, fs)
 
         # ── Wrap _release_bdim_fields ─────────────────────────────
         _orig_release = type(fs)._release_bdim_fields
@@ -373,6 +378,12 @@ def instrument_handler(handler):
 
         print(f"  [profiler] Deep patches installed (SDF, advection, BDIM, project"
               f"{', Poisson internals' if _instrument_poisson_internals and poisson_mg else ''})",
+              flush=True)
+
+    if _precompile_done[0]:
+        _install_deep_patches()
+        print(f"  [profiler] Pre-compilation complete (0 steps).  "
+              f"Settling physics for {args.settle_steps} more steps…\n",
               flush=True)
 
     print(f"  [profiler] Instrumented handler (grid {fs.grid_shape}, "
@@ -479,7 +490,7 @@ def gen_simulation_config_lean(output_folder):
             if args.no_kernels:
                 solver_cfg["solver_method"] = "python"
             elif args.use_kernels or args.streaming_sdf_2d:
-                solver_cfg["solver_method"] = "fused"
+                solver_cfg["solver_method"] = "kernel"
 
     with open(yaml_path, "w") as f:
         yaml.dump(sim_dict, f, default_flow_style=False, sort_keys=False)

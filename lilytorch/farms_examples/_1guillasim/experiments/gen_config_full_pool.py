@@ -24,11 +24,11 @@ class SimConfig(BaseSimConfig):
         self.headless             = False
         self.smagorinsky_cs       = 0.
 
-        self.solver_method    = "fused"
-        self.poisson_compile  = True
-        self.compile_adv_diff = True
-        self.compile_forces   = True
-        self.compile_sdf      = True
+        self.solver_method    = "kernel"
+        # self.poisson_compile  = True
+        # self.compile_adv_diff = True
+        # self.compile_forces   = True
+        # self.compile_sdf      = True
 
         # ── Animats ───────────────────────────────────────────────────
         self.animats_pars = [

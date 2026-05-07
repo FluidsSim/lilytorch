@@ -25,13 +25,13 @@ Notation: `N = Nx·Ny·Nz` (3-D) or `Nx·Ny` (2-D), `B = number of bodies`,
 | **Composite mu / normals**  | `solver.py: _mu_pack` (lazy)                         | `(21, Nx, Ny, Nz)`                   | `21·N·s`                 | Pre-allocated once when `_mu_normals_union` is on (default with `use_kernels=True`). Holds `mu0_{u,v,w,cc}`, `mu1_{...}`, `n_{x,y,z}_{u,v,w,cc}`, `1−mu0_cc` in a single contiguous tensor. |
 | **Variable-density coeffs** | `_ch_persist, _cv_persist, _cw_persist, _ch_cc_persist` | 4 × `(Nx, Ny, Nz)`                | `4·N·s`                  | Allocated only when FSI variable density is active. |
 | **Body SDF batch** (3-D)    | BDIM streaming setup: `F_flat`, `bx_off`, `by_off`, `bz_off` | `Σ_b (Mx_b · My_b · Mz_b)`     | `(Σ_b Mx·My·Mz)·s`       | This is the body-local SDF grid — *not* the fluid grid. For a typical swimmer with 9–13 segments at 64³ each: `B·64³·s ≈ 2–3 MB` at fp32. Negligible relative to fluid-grid buffers. |
-| **Sparse cc-SDF slabs**     | `sparse_cc_flat` + `cell_offsets`                    | `Σ_b Ai·Aj·Ak` (per-body AABB cells) | `(Σ_b vol_AABB)·s` + `(B+1)·8` | Fully obsoleted when `fused_sdf_forces=True`: the fused C+D kernel inlines the lagged force loop and never writes the cell-centred SDF slabs. **Setting `fused_sdf_forces=True` saves `Σ_b vol_AABB · s` bytes**, which on a small swimmer in a large pool is `~0.05·N·s` and on a tight-fit pool can rise to `0.3·N·s`. |
+| **Sparse cc-SDF slabs**     | `sparse_cc_flat` + `cell_offsets`                    | `Σ_b Ai·Aj·Ak` (per-body AABB cells) | `(Σ_b vol_AABB)·s` + `(B+1)·8` | Historical two-phase kernel path only. The current `solver_method='kernel'` runtime evaluates forces from packed body metadata and current union fields, so these slabs are no longer materialized on the active path. |
 | **Drag / torque records**   | `*_drag_record`, `*_torque_record`                   | 4 × `(B, 3, nt)`                     | `12·B·nt·s`              | This dominates **long runs**. At `nt = 10⁶`, `B = 13`, fp32 → 624 MB on device. **Move to CPU pinned memory (TODO F2 in `to_do_list.md`).** |
 | **Diagnostics**             | `FlowDiagnostics.kinetic_energy, enstrophy, max_divergence, cfl_number` | 4 × `(nt,)`            | `32·nt`                  | Always present, tiny (4 MB at `nt=10⁶`). |
 | **Sponge fields**           | `_sponge_sigma_{u,v,w}` (optional)                   | up to 3 × `N`                        | up to `3·N·s`            | Allocated only with `solver.sponge`. |
 | **Compiled CUDA-graph buffers** | `torch.compile` of `_bdim_meta`, `_forces_*`, etc. | implementation-defined            | several × `N·s`          | These appear in `nvidia-smi` but are not counted by `torch.cuda.memory_allocated()`; they are the main reason `reduce-overhead` mode shows ~1.5–2× the "logical" peak in practice. |
 
-### Persistent total (3-D, swimmer-in-pool, `fused_sdf_forces=True`, no Carreau, no sponge)
+### Persistent total (3-D, swimmer-in-pool, `solver_method='kernel'`, no Carreau, no sponge)
 
 ```
   velocity/pressure :   8·N·s
@@ -111,24 +111,17 @@ per-AABB kernel — see *§3. Remaining levers* and the proposal in
    `tensor.pin_memory()` + `non_blocking=True`.  Saves up to several
    hundred MB on multi-million-step runs.  Effort: low; risk: low.
 
-2. **`fused_sdf_forces=True` everywhere.**
-   Already the default in `solver.py` (`use_kernels and
-   solver.get("fused_sdf_forces", True)`).  Just make sure no
-   `farms_examples/*` config sets `fused_sdf_forces=False` on inertia.
-   Saves the `sparse_cc_flat` slabs.
-
-3. **Kill the union mu-pack channels that are unused per step.**
+2. **Kill the union mu-pack channels that are unused per step.**
    `_mu_pack` carries 21 channels but a single Euler step never reads more
    than ~13 of them (`mu0_{u,v,w,cc}`, `mu1_{u,v,w,cc}`, `m_m0_all`).  The
-   normal fields are only used for the diffusive force, which in
-   `use_kernels=True` mode is folded into `streaming_sdf_forces_fused_3d`
-   inside the AABB.  Reorganising `_mu_pack` to (8, Nx, Ny, Nz) and
+  normal fields are only used for the native post-step force pass in
+  `use_kernels=True` mode. Reorganising `_mu_pack` to (8, Nx, Ny, Nz) and
    computing CC normals on demand would save **13·N·s per resident
    instance** (~875 MB at 256³ fp32).  Effort: medium; risk: moderate
    (touches `_mu_normals_batched_3d` + every site that aliases through
    `pack[0..20]`).
 
-4. **Half-precision (bf16/fp16) velocity transport.**
+3. **Half-precision (bf16/fp16) velocity transport.**
    The kernels already dispatch over `AT_DISPATCH_FLOATING_TYPES_AND_HALF`
    for the streaming SDF path.  Running advection–diffusion in bf16 with
    fp32 master copies for divergence + Poisson would halve `N·s` for the
@@ -137,7 +130,7 @@ per-AABB kernel — see *§3. Remaining levers* and the proposal in
    accumulates error fast in bf16 — and not part of the HIGH PRIORITY
    list.
 
-5. **Per-AABB BDIM/mu/forces kernel.**
+4. **Per-AABB BDIM/mu/forces kernel.**
    The fundamentally largest remaining lever.  This is exactly the
    suggestion at the bottom of the **DONE** list in `to_do_list.md`
    ("…bdim update, setting of the variable coefficients, mu/normals could
@@ -167,11 +160,11 @@ There are three validation tools in the repo:
   rather than just the resident footprint — it is the transient that
   tends to OOM the GPU.
 
-* **Side-by-side comparison across the three solver paths:**
+* **Side-by-side comparison across the two solver paths:**
   `lilytorch/validation/memory_comparison_3d/run_memory_comparison.py`.
   This is the **measurement counterpart of this document**.  It runs
   the same FARMS in-process scenario under
-  ``no_kernels`` / ``kernels_separate`` / ``kernels_fused``
+  ``no_kernels`` / ``kernels``
   (each in its own subprocess so CUDA contexts and ``torch.compile``
   caches are isolated), captures per-phase ``alloc / peak / reserved``
   snapshots for a chosen "peak step", takes a tensor census attributing
