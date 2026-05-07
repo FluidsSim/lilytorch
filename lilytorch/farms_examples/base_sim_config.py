@@ -169,7 +169,6 @@ class BaseSimConfig:
         # ``solver_method``.  When set, they are mapped onto
         # ``solver_method`` inside :class:`FluidSolver`.
         self.use_kernels             = None
-        self.fused_sdf_forces        = None
         # Body-SDF sampling method for the streaming kernels:
         #   "trilinear" (default) | "triquadratic"
         self.sdf_interp_method       = None
@@ -694,7 +693,6 @@ class BaseSimConfig:
             ("compile_forces",          self.compile_forces),
             ("compile_sdf",             self.compile_sdf),
             ("solver_method",           self.solver_method),
-            ("fused_sdf_forces",        self.fused_sdf_forces),
             ("dtype",                   self.dtype),
             ("zero_pressure_inside",    self.zero_pressure_inside),
             ("force_method",            self.force_method),

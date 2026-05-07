@@ -10,17 +10,15 @@ identified directly on hardware.
 
 Modes
 -----
-* ``no_kernels``       — pure-PyTorch reference path
-                         (``solver.solver_method = "python"``).
-                         No batching, no per-body cropping, no streaming
-                         kernels.  Per-body SDF / body-velocity fields are
-                         materialised on the *full* fluid grid.
-* ``kernels_separate`` / ``kernels_fused``
-                       — native streamed kernel path
-                         (``solver.solver_method = "kernel"``).  Both
-                         historical labels now exercise the same final
-                         update-only geometry pass plus post-fluid-step
-                         native force pass.
+* ``no_kernels``  — pure-PyTorch reference path
+                                        (``solver.solver_method = "python"``).
+                                        No batching, no per-body cropping, no streaming
+                                        kernels.  Per-body SDF / body-velocity fields are
+                                        materialised on the *full* fluid grid.
+* ``kernels``     — native streamed kernel path
+                                        (``solver.solver_method = "kernel"``).
+                                        Uses the final update-only geometry pass plus the
+                                        post-fluid-step native force pass.
 
 Driver vs. worker
 -----------------
@@ -38,16 +36,16 @@ Typical usage
 -------------
 ::
 
-    # Run all three modes and emit a comparison table:
+    # Run both modes and emit a comparison table:
     python run_memory_comparison.py --Nx 256 --Ny 64 --Nz 64 --n_steps 80
 
     # Re-run a single mode:
-    python run_memory_comparison.py --mode kernels_fused \\
+    python run_memory_comparison.py --mode kernels \
         --Nx 256 --Ny 64 --Nz 64 --n_steps 80
 
 The script intentionally uses a coarsened grid by default so that all
-three modes fit on a 12 GB GPU (the ``no_kernels`` path needs roughly
-2× the memory of the fused-kernel path on the same grid).
+two modes fit on a 12 GB GPU (the ``no_kernels`` path needs roughly
+2× the memory of the kernel path on the same grid).
 """
 
 from __future__ import annotations
@@ -65,14 +63,14 @@ import time
 #  CLI parsing — shared by driver and worker
 # ════════════════════════════════════════════════════════════════════════
 
-_MODES = ("no_kernels", "kernels_separate", "kernels_fused")
+_MODES = ("no_kernels", "kernels")
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "GPU memory comparison across no_kernels / "
-            "kernels_separate / kernels_fused solver paths."
+            "kernels solver paths."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -257,9 +255,7 @@ def _run_worker(args: argparse.Namespace) -> None:
     # bdim_yaml.solver and is read by FluidSolver.
     if mode == "no_kernels":
         cfg.solver_method = "python"
-    elif mode == "kernels_separate":
-        cfg.solver_method = "kernel"
-    elif mode == "kernels_fused":
+    elif mode == "kernels":
         cfg.solver_method = "kernel"
     else:
         raise ValueError(f"unknown mode '{mode}'")
@@ -427,9 +423,9 @@ def _run_worker(args: argparse.Namespace) -> None:
         # 7. release BDIM intermediates.
         # _release_bdim_fields behaviour is mode-specific:
         #   no_kernels      → frees mu/normals + force fields + div
-        #   kernels_separate/fused → keeps mu/normal packed buffers
-        #                            alive (they are persistent across steps
-        #                            when _mu_normals_union=True)
+        #   kernels         → keeps mu/normal packed buffers alive
+        #                     (they are persistent across steps when
+        #                     _mu_normals_union=True)
         fs._release_bdim_fields()
         _record(f"step {idx:03d} [{mode}]: after release")
 
@@ -599,7 +595,7 @@ def _phase_deltas(rows: list[dict]) -> list[tuple[str, float, float]]:
     out = []
     for prev, cur in zip(rows, rows[1:]):
         # Pull the phase name out of the record label, which looks like
-        # ``step 040 [kernels_fused]: after fluid_step``.
+        # ``step 040 [kernels]: after fluid_step``.
         cur_phase = cur["label"].split(":", 1)[1].strip() if ":" in cur["label"] else cur["label"]
         out.append((cur_phase, cur["alloc_mb"] - prev["alloc_mb"], cur["peak_mb"]))
     return out

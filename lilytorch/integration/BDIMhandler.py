@@ -27,7 +27,6 @@ from lilytorch.src.body import (rotate_grid_2d, rotate_grid_3d,
 from lilytorch.src.kernels import streaming_sdf_min_rho_3d_multi
 from lilytorch.src.kernels import streaming_sdf_min_rho_2d_multi
 from lilytorch.src.kernels import streaming_sdf_min_2d_multi
-from lilytorch.src.kernels import streaming_sdf_min_3d
 from lilytorch.src.kernels import streaming_sdf_min_3d_multi
 
 import torch
@@ -200,6 +199,20 @@ class BDIMhandler:
             self._init_static_body_metadata()
             self._init_interp()
 
+        self._init_update()
+
+    def _init_update(self):
+        if self.ndim == 3:
+            if self.fluid_solver._solver_method == "kernel":
+                self.update = self._update_3d_streaming_multi
+            else:
+                self.update = self._update_3d
+        else:
+            if self.fluid_solver._solver_method == "kernel":
+                self.update = self._update_2d_streaming_multi
+            else:
+                self.update = self._update_2d
+
     # ------------------------------------------------------------------
     #  Kernel-path per-body SDF metadata
     # ------------------------------------------------------------------
@@ -302,11 +315,8 @@ class BDIMhandler:
 
         for body in comp.bodies:
             sdf = getattr(body, 'sdf', None)
-            if (
-                sdf is not None
-                and hasattr(sdf, 'F')
-                and all(hasattr(sdf, axis_name) for axis_name in axis_names)
-            ):
+            # Mesh bodies with precomputed SDF tables
+            if hasattr(body, 'mesh_file'):
                 F = sdf.F.contiguous()
                 axes = tuple(
                     getattr(sdf, axis_name).contiguous()
@@ -315,10 +325,10 @@ class BDIMhandler:
                 body._stream_meta = self._make_stream_meta(F, axes)
                 n_tabulated += 1
                 continue
-
-            local_aabb = getattr(body, 'local_aabb', None)
-            sdf_callable = getattr(body, 'sdf', None)
-            if local_aabb is not None and callable(sdf_callable):
+            # Analytical bodies with callable SDFs
+            else:
+                local_aabb = getattr(body, 'local_aabb', None)
+                sdf_callable = getattr(body, 'sdf', None)
                 lo = local_aabb[0].cpu()
                 hi = local_aabb[1].cpu()
                 sizes = [
@@ -339,18 +349,6 @@ class BDIMhandler:
                 n_sampled += 1
                 continue
 
-            axis_list = ','.join(axis_names)
-            raise RuntimeError(
-                f"{self.ndim}-D bodies must have either a precomputed SDF "
-                f"grid (body.sdf.{{F,{axis_list}}}) or a callable SDF and "
-                "local_aabb (for on-the-fly sampling). Found body with "
-                "neither; cannot build the per-body streaming-SDF metadata "
-                "required by the kernel path. If you want to use the "
-                "kernel path, please ensure all bodies meet these "
-                "requirements. Otherwise, set solver_method='python' to "
-                "use the pure-Python path, which supports arbitrary bodies "
-                "but without the kernel-mode acceleration."
-            )
 
         print(
             f"  [stream-meta-{self.ndim}D] built {len(comp.bodies)}/{len(comp.bodies)} "
@@ -437,19 +435,8 @@ class BDIMhandler:
     #  update: FARMS kinematics  ->  SDF fields + body velocities
     # ==================================================================
 
-    def update(self, t, iteration, dt=1):
-        if self.ndim == 3:
-            self._update_3d(t, iteration, dt)
-        else:
-            self._update_2d(t, iteration, dt)
-
     # ---- 2-D update --------------------------------------------------
     def _update_2d(self, t, iteration, dt=1):
-        if self.fluid_solver._use_kernels:
-            comp_check = self.fluid_solver.composite_body
-            if all(getattr(b, '_stream_meta', None) is not None
-                   for b in comp_check.bodies):
-                return self._update_2d_streaming_multi(t, iteration, dt)
 
         fs   = self.fluid_solver
         comp = fs.composite_body
@@ -826,8 +813,7 @@ class BDIMhandler:
 
     # ---- 3-D update --------------------------------------------------
     def _update_3d(self, t, iteration, dt=1):
-        if self.fluid_solver._use_kernels:
-            return self._update_3d_streaming(t, iteration, dt)
+
         fs   = self.fluid_solver
         comp = fs.composite_body
         gs   = fs.grid_shape
@@ -1522,138 +1508,6 @@ class BDIMhandler:
                 'sparse_cc_flat': sparse_flat,
                 'cell_offsets':   cell_off,
             }
-
-    # ------------------------------------------------------------------
-    def _update_3d_streaming(self, t, iteration, dt=1):
-
-        # Multi-body batched fast path (Phase C): one Python op call
-        # handles all bodies, eliminating ~B torch.ops dispatches/step
-        # and the per-body launch+sync overhead.  Falls back to the
-        # per-body sequential loop below if any body lacks meta.
-        #
-        # Mixed analytical + mesh composites
-        # ----------------------------------
-        # When ``_stream_meta`` is missing on at least one body (i.e. an
-        # analytical body without a regular-grid SDF table) this gate
-        # falls through to the per-body sequential loop below.  That
-        # loop correctly handles mixed composites:
-        #   * mesh bodies                    → ``streaming_sdf_min_3d``
-        #     (single-body C++/CUDA kernel)
-        #   * analytical / non-meta bodies   → ``_fallback_update_one_body_3d``
-        #     (per-body PyTorch AABB + ``torch.where`` running-min).
-        # Both write into the same union fields with running-min
-        # semantics, so order is irrelevant and the result is correct.
-        # The only thing lost in mixed mode is the multi-body batching
-        # of the fast path (and the fused SDF+forces kernel, which is
-        # SDF-table-only by design).
-        comp_check = self.fluid_solver.composite_body
-        if all(getattr(b, '_stream_meta', None) is not None
-               for b in comp_check.bodies):
-            return self._update_3d_streaming_multi(t, iteration, dt)
-
-        fs   = self.fluid_solver
-        comp = fs.composite_body
-        gs   = fs.grid_shape
-        _FAR = 1e4
-
-        com_poses_np, urdf_poses_np, Rs_np, lin_vels_np, ang_vels_np = (
-            self.gather_data(iteration, as_numpy=True)
-        )
-
-        h_grid = float(comp.h)
-
-        # Reset running-min fields and per-body sparse storage
-        comp._sdf_sparse = [None] * len(comp.bodies)
-        comp.sdf_val.fill_(_FAR)
-        comp.sdf_val_u.fill_(_FAR)
-        comp.sdf_val_v.fill_(_FAR)
-        comp.sdf_val_w.fill_(_FAR)
-        comp.body_u.zero_()
-        comp.body_v.zero_()
-        comp.body_w.zero_()
-
-        gx_1d, gy_1d, gz_1d = comp.gx_1d, comp.gy_1d, comp.gz_1d
-
-        for body_i, body in enumerate(comp.bodies):
-            (animat_id, link_id) = comp.body_ids[body_i]
-
-            com_pos_np  = com_poses_np[animat_id][link_id]
-            urdf_pos_np = urdf_poses_np[animat_id][link_id]
-            R_np        = Rs_np[animat_id][link_id]
-            lin_vel_np  = lin_vels_np[animat_id][link_id]
-            ang_vel_np  = ang_vels_np[animat_id][link_id]
-
-            meta = body._stream_meta
-
-            # Compose body frame in numpy (small, cheap)
-            local_translation = getattr(body, "_local_translation_t", None)
-            local_rotation    = getattr(body, "_local_rotation_t",    None)
-            local_pose        = getattr(body, "local_pose", None)
-            if local_pose is not None:
-                if local_translation is None or local_rotation is None:
-                    local_pose_np = np.asarray(local_pose, dtype=self.dtype_np)
-                    body._local_translation_t = torch.tensor(
-                        local_pose_np[:3], device=self.device, dtype=self.dtype)
-                    body._local_rotation_t = torch.tensor(
-                        Rotation.from_euler("xyz", local_pose_np[3:])
-                        .as_matrix().astype(self.dtype_np),
-                        device=self.device, dtype=self.dtype)
-                local_pose_np = np.asarray(local_pose, dtype=self.dtype_np)
-                lt_np = local_pose_np[:3]
-                lr_np = Rotation.from_euler("xyz", local_pose_np[3:]) \
-                    .as_matrix().astype(self.dtype_np)
-                body_pos_np = urdf_pos_np + R_np @ lt_np
-                body_rot_np = R_np @ lr_np
-            else:
-                body_pos_np = urdf_pos_np
-                body_rot_np = R_np
-
-            # Compute AABB on grid (need device tensors for the existing helper)
-            R_t        = torch.as_tensor(body_rot_np, device=self.device, dtype=self.dtype)
-            body_pos_t = torch.as_tensor(body_pos_np, device=self.device, dtype=self.dtype)
-
-            aabb = self._body_aabb_indices(
-                body, R_t, body_pos_t,
-                comp.x, comp.y, comp.z,
-                h_grid, gs, pad=3,
-            )
-            comp._body_aabbs[body_i] = aabb
-
-            if aabb is None:
-                # Body covers ~entire grid: clamp AABB to full grid.
-                aabb = (0, gs[0], 0, gs[1], 0, gs[2])
-                comp._body_aabbs[body_i] = aabb
-
-            i0, i1, j0, j1, k0, k1 = aabb
-            Ai, Aj, Ak = i1 - i0, j1 - j0, k1 - k0
-            sparse_cc = torch.empty(
-                (Ai, Aj, Ak), device=self.device, dtype=self.dtype)
-
-            R_T_np = body_rot_np.T  # (3,3) row-major
-
-            streaming_sdf_min_3d(
-                meta['F'], meta['bx'], meta['by'], meta['bz'],
-                meta['bx0'], meta['by0'], meta['bz0'],
-                meta['bx_last'], meta['by_last'], meta['bz_last'],
-                meta['inv_dx'], meta['inv_dy'], meta['inv_dz'], meta['inv_vol'],
-                R_T_np.flatten().tolist(),
-                body_pos_np.tolist(),
-                com_pos_np.tolist(),
-                lin_vel_np.tolist(),
-                ang_vel_np.tolist(),
-                gx_1d, gy_1d, gz_1d, h_grid,
-                i0, i1, j0, j1, k0, k1,
-                comp.sdf_val, comp.sdf_val_u, comp.sdf_val_v, comp.sdf_val_w,
-                comp.body_u,  comp.body_v,    comp.body_w,
-                sparse_cc,
-                getattr(self.fluid_solver, '_sdf_interp_method', 0),
-            )
-
-            comp._sdf_sparse[body_i] = (aabb, sparse_cc)
-
-            comp.com_pos[body_i] = torch.as_tensor(
-                com_pos_np, device=self.device, dtype=self.dtype)
-            body.com_pos = comp.com_pos[body_i]
 
     def _update_2d_streaming_multi(self, t, iteration, dt=1):
         """2-D analogue of :meth:`_update_3d_streaming_multi`.

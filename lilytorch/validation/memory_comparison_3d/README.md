@@ -2,7 +2,7 @@
 
 This directory contains a runnable counterpart to
 `docs/memory_analysis.md`.  The script measures GPU memory usage of the
-three solver configurations on identical hardware so you can ground-truth
+two solver configurations on identical hardware so you can ground-truth
 the analysis numbers and identify the dominant memory bottleneck of each
 path.
 
@@ -11,20 +11,19 @@ path.
 | Mode               | YAML keys                                                      | Description |
 |--------------------|----------------------------------------------------------------|-------------|
 | `no_kernels`       | `solver.use_kernels: false`                                    | Pure-PyTorch reference path. Per-body SDFs and body velocities are materialised on the **full** fluid grid. |
-| `kernels_separate` | `solver.use_kernels: true`,&nbsp;`solver.fused_sdf_forces: false` | Streaming C++/CUDA kernel path with a **two-pass** force integration: streaming SDF kernel writes per-body `sparse_cc_flat` slabs, then a separate force kernel reads them. |
-| `kernels_fused`    | `solver.use_kernels: true`,&nbsp;`solver.fused_sdf_forces: true`  | Streaming kernel path with the **fused SDF + force** kernel (`streaming_sdf_forces_fused_3d_multi`). Eliminates `sparse_cc_flat` and inlines the lagged force integral into the SDF pass. |
+| `kernels`          | `solver.solver_method: "kernel"`                              | Current native streamed kernel path. Geometry is updated through the kernel-mode body metadata path and per-body forces are evaluated later from the post-fluid-step fields without exposing the retired historical force-path toggle. |
 
 ## Usage
 
 ```bash
-# Run all three modes and emit a comparison table.
+# Run both modes and emit a comparison table.
 # (Default grid is 256x64x64; shrink for smaller GPUs.)
 python lilytorch/validation/memory_comparison_3d/run_memory_comparison.py \
     --Nx 256 --Ny 64 --Nz 64 --n_steps 80
 
 # Re-run a single mode (clean CUDA context):
 python lilytorch/validation/memory_comparison_3d/run_memory_comparison.py \
-    --mode kernels_fused --Nx 256 --n_steps 80
+  --mode kernels --Nx 256 --n_steps 80
 
 # Reuse JSON files from a previous run (skip already-computed modes):
 python lilytorch/validation/memory_comparison_3d/run_memory_comparison.py \
@@ -82,13 +81,13 @@ Each `memory_<mode>.json` is:
 
 ```json
 {
-  "mode": "kernels_fused",
+  "mode": "kernels",
   "Nx": 256, "Ny": 64, "Nz": 64,
   "n_steps": 80, "warmup_steps": 15, "peak_step": 48,
   "device": "NVIDIA RTX 4080 SUPER",
   "torch":  "2.4.0+cu121",
   "records": [
-    {"label": "step 048 [kernels_fused]: before",
+    {"label": "step 048 [kernels]: before",
      "alloc_mb": 1234.5, "peak_mb": 1234.5, "rsrvd_mb": 1280.0},
     ...
   ],
@@ -107,7 +106,7 @@ these files directly without re-running the simulation.
 
 ## Caveats
 
-* **Not bit-equal across modes.**  The three paths use different
+* **Not bit-equal across modes.**  The two paths use different
   reduction orders and (for `no_kernels`) different masking
   conventions, so trajectories diverge after a few hundred steps.
   Memory measurement is unaffected — the script does not assume the

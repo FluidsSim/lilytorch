@@ -240,13 +240,6 @@ class FluidSolver(PlottingMixin):
                 )
                 method = "kernel" if bool(legacy_uk) else "python"
 
-        if solver.get("fused_sdf_forces", None) is not None:
-            warnings.warn(
-                "solver.fused_sdf_forces is obsolete; solver_method='kernel' "
-                "always uses the streamed update plus post-step native forces.",
-                DeprecationWarning, stacklevel=3,
-            )
-
         if method not in FluidSolver._VALID_SOLVER_METHODS:
             raise ValueError(
                 f"solver.solver_method must be one of "
