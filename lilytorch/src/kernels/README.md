@@ -1,66 +1,30 @@
 # lilytorch.src.kernels
 
-Native CUDA ops for BDIM-IB CFD, ported from
-[`pytorch_interpolation`](https://github.com/ferrarioa5/pytorch_interpolation).
-This sub-package owns the kernels lilytorch needs at run time so that
-the repository no longer has to depend on the external project for the
-SDF / force / BC fused operators.
+Native CUDA/CPU ops for the lilytorch streamed BDIM path.
 
-## Operators
-
-Registered under the `lilytorch_kernels` torch library:
+## Active operators
 
 | op | Python wrapper | purpose |
 | --- | --- | --- |
-| `streaming_sdf_min_3d`       | `kernels.streaming_sdf_min_3d`       | one-body fused SDF + face-velocity running-min update |
-| `streaming_sdf_min_3d_multi` | `kernels.streaming_sdf_min_3d_multi` | multi-body fused SDF + face-velocity running-min update |
-| `bdim_forces_3d_multi`       | `kernels.bdim_forces_3d_multi`       | per-body force / torque integration |
-| `apply_bcs_3d`               | `kernels.apply_bcs_3d`               | fused Neumann + Dirichlet BC writes |
+| `streaming_sdf_min_rho_3d_multi` | `kernels.streaming_sdf_min_rho_3d_multi` | 3-D memory-saving SDF/face-velocity update with winning density |
+| `streaming_sdf_forces_post_3d` | `kernels.streaming_sdf_forces_post_3d` | 3-D post-fluid-step force/torque integration |
+| `streaming_sdf_min_rho_2d_multi` | `kernels.streaming_sdf_min_rho_2d_multi` | 2-D memory-saving SDF/face-velocity update with winning density |
+| `streaming_sdf_forces_post_2d` | `kernels.streaming_sdf_forces_post_2d` | 2-D post-fluid-step force/torque integration |
+| `apply_bcs_3d` / `apply_bcs_2d` | `kernels.apply_bcs_3d` / `kernels.apply_bcs_2d` | boundary-condition writes |
+| `interpolate_3d` / `interpolate_2d` | `kernels.interp_3d` / `kernels.interp_2d` | uniform-grid interpolation |
 
-All ops have CUDA and CPU implementations. The CPU path is OpenMP-parallelised and mirrors the CUDA kernels line-for-line; it covers float32 / float64 (half precision is CUDA-only).
-
-## Layout
-
-```
-kernels/
-  __init__.py            # imports _C and re-exports Python wrappers
-  ops.py                 # thin Python wrappers around torch.ops.lilytorch_kernels.*
-  build.sh               # convenience in-place rebuild
-  csrc/
-    ops.cpp              # PyInit__C, schemas
-    streaming_sdf_cpu.cpp # OpenMP CPU kernels + launchers + CPU registration
-    cuda/
-      streaming_sdf.cu   # all CUDA kernels + launchers + CUDA registration
-```
+The SDF update and force integration are separate kernels in both 2-D and
+3-D. The memory-saving SDF update avoids Python-visible per-body CC SDF slabs;
+the post force pass re-samples body-local SDF support and uses current union SDF
+normals.
 
 ## Building
 
-The extension is built by the top-level `setup.py`:
-
 ```bash
-# editable / in-place build (preferred during development)
-pip install -e . --no-build-isolation  # builds lilytorch.src.kernels._C
-# or just rebuild the extension after editing CUDA / cpp sources:
+pip install -e . --no-build-isolation
+# or
 PYTHON=$(which python) bash lilytorch/src/kernels/build.sh
 ```
 
-The extension must be compiled against the same PyTorch installation you
-will import at runtime. ``pip install -e .`` with build isolation can
-use a temporary torch build and leave ``_C.so`` with unresolved symbols.
-
-You can disable the CUDA build entirely by exporting `LILYTORCH_NO_CUDA=1`
-before installing — the extension will be skipped and the Python
-wrappers will raise on first call.
-
-## Usage
-
-```python
-from lilytorch.src.kernels import (
-    streaming_sdf_min_3d_multi,
-    bdim_forces_3d_multi,
-    apply_bcs_3d,
-)
-```
-
-Signatures match the original `pytorch_interpolation` exports
-1-for-1, so migrating call sites is a `from ... import` change.
+The extension must be compiled against the same PyTorch installation used at
+runtime.

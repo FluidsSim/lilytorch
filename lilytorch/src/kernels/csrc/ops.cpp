@@ -34,62 +34,7 @@ namespace lilytorch_kernels {
 // ----------------------- schemas -----------------------
 TORCH_LIBRARY(lilytorch_kernels, m) {
     m.def(
-        "streaming_sdf_min_3d("
-        "Tensor F, Tensor bx, Tensor by, Tensor bz,"
-        " float bx0, float by0, float bz0,"
-        " float bx_last, float by_last, float bz_last,"
-        " float inv_dx, float inv_dy, float inv_dz, float inv_vol,"
-        " float[] R_T, float[] body_pos, float[] com_pos,"
-        " float[] lin_vel, float[] ang_vel,"
-        " Tensor gx, Tensor gy, Tensor gz, float h_grid,"
-        " int i0, int i1, int j0, int j1, int k0, int k1,"
-        " Tensor(a!) sdf_cc, Tensor(b!) sdf_u, Tensor(c!) sdf_v, Tensor(d!) sdf_w,"
-        " Tensor(e!) body_u, Tensor(f!) body_v, Tensor(g!) body_w,"
-        " Tensor(h!) sparse_cc,"
-        " int interp_method=0"
-        ") -> ()");
-    m.def(
-        "streaming_sdf_min_3d_multi("
-        "Tensor F_flat, Tensor F_offsets,"
-        " Tensor bx_flat, Tensor bx_offsets,"
-        " Tensor by_flat, Tensor by_offsets,"
-        " Tensor bz_flat, Tensor bz_offsets,"
-        " Tensor body_shapes, Tensor body_meta, Tensor kin,"
-        " Tensor aabb_lo, Tensor aabb_dim, Tensor cell_offsets,"
-        " Tensor gx, Tensor gy, Tensor gz, float h_grid,"
-        " int max_vol_per_body,"
-        " Tensor(a!) sdf_cc, Tensor(b!) sdf_u, Tensor(c!) sdf_v, Tensor(d!) sdf_w,"
-        " Tensor(e!) body_u, Tensor(f!) body_v, Tensor(g!) body_w,"
-        " Tensor(h!) sparse_cc_flat,"
-        " int interp_method=0"
-        ") -> ()");
-    // Forces kernel: reads the per-body cc-SDF cached in `sparse_cc_flat`
-    // (populated by streaming_sdf_min_3d_multi), so it no longer needs the
-    // body SDF grid / axis tensors / body_meta. `kin` is still passed for
-    // the per-body COM (rows 12..14 of each 21-stride block).
-    m.def(
-        "bdim_forces_3d_multi("
-        "Tensor sparse_cc_flat, Tensor cell_offsets,"
-        " Tensor kin,"
-        " Tensor aabb_lo, Tensor aabb_dim,"
-        " Tensor gx, Tensor gy, Tensor gz,"
-        " int u_i0, int u_j0, int u_k0, int Sj, int Sk,"
-        " Tensor xs, Tensor ys, Tensor zs,"
-        " Tensor px, Tensor py, Tensor pz,"
-        " float eps_body, float eps_solver, float h3,"
-        " int max_vol_per_body,"
-        " int delta_order,"
-        " Tensor(a!) out"
-        ") -> ()");
-
-    // Fused Phase C+D: SDF update + inline force integration (lagged forces).
-    // Replaces streaming_sdf_min_3d_multi + bdim_forces_3d_multi in one pass.
-    // Eliminates sparse_cc_flat and union-AABB stress tensors.
-    // Forces are one-step lagged (prev-step u/v/w/p/normals).
-    // nu_rho_field: size=1 (scalar ν·ρ) or size=grid (per-cell, Smagorinsky/Carreau).
-    // delta_order: 1 = cosine, 2 = Towers 2008 |∇φ| correction.
-    m.def(
-        "streaming_sdf_forces_fused_3d_multi("
+        "streaming_sdf_min_rho_3d_multi("
         "Tensor F_flat, Tensor F_offsets,"
         " Tensor body_shapes, Tensor body_meta, Tensor kin,"
         " Tensor aabb_lo, Tensor aabb_dim,"
@@ -99,14 +44,25 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " Tensor(e!) body_u, Tensor(f!) body_v, Tensor(g!) body_w,"
         " int interp_method,"
         " Tensor rho_bodies,"
-        " Tensor(h!) winning_rho_cc,"
-        " Tensor u_prev, Tensor v_prev, Tensor w_prev, Tensor p_prev,"
-        " Tensor nx_cc,  Tensor ny_cc,  Tensor nz_cc,"
+        " Tensor(h!) winning_rho_cc"
+        ") -> ()");
+
+    m.def(
+        "streaming_sdf_forces_post_3d("
+        "Tensor F_flat, Tensor F_offsets,"
+        " Tensor body_shapes, Tensor body_meta, Tensor kin,"
+        " Tensor aabb_lo, Tensor aabb_dim,"
+        " Tensor gx, Tensor gy, Tensor gz, float h_grid,"
+        " int max_vol_per_body,"
+        " Tensor sdf_cc,"
+        " int interp_method,"
+        " Tensor u, Tensor v, Tensor w, Tensor p,"
         " Tensor nu_rho_field,"
         " float eps_body, float eps_solver, float h3,"
         " int delta_order,"
-        " Tensor(i!) out"
+        " Tensor(a!) out"
         ") -> ()");
+
     m.def(
         "apply_bcs_3d("
         "Tensor(a!) u, Tensor(b!) v, Tensor(c!) w,"
@@ -114,55 +70,6 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " int max_plane_dim"
         ") -> ()");
 
-    // ---------------- 2-D analogues ----------------
-    // Single-body 2-D streaming SDF / face-velocity update.
-    // R_T is column-major 2x2 (4 floats); body_pos/com_pos/lin_vel are
-    // 2-element; angular velocity is the scalar omega (out-of-plane).
-    // bx/by axis tables and bx_last/by_last/inv_vol are accepted for
-    // signature symmetry with the 3-D op but unused by the kernel,
-    // which infers corner weights analytically on uniform body grids.
-    m.def(
-        "streaming_sdf_min_2d("
-        "Tensor F, Tensor bx, Tensor by,"
-        " float bx0, float by0,"
-        " float bx_last, float by_last,"
-        " float inv_dx, float inv_dy, float inv_vol,"
-        " float[] R_T, float[] body_pos, float[] com_pos,"
-        " float[] lin_vel, float omega,"
-        " Tensor gx, Tensor gy, float h_grid,"
-        " int i0, int i1, int j0, int j1,"
-        " Tensor(a!) sdf_cc, Tensor(b!) sdf_u, Tensor(c!) sdf_v,"
-        " Tensor(d!) body_u, Tensor(e!) body_v,"
-        " Tensor(f!) sparse_cc,"
-        " int interp_method=0"
-        ") -> ()");
-    // Multi-body 2-D streaming SDF / face-velocity update.
-    //   body_shapes : int64 [B,2]   (Mx, My)
-    //   body_meta   : float [B,7]   (bx0, by0, bxL, byL, inv_dx, inv_dy, inv_vol)
-    //   kin         : float [B,11]  (R_T[0..3], bp_xy, cm_xy, lv_xy, omega)
-    //   aabb_lo     : int64 [B,2]   (i0, j0)
-    //   aabb_dim    : int64 [B,2]   (Ai, Aj)
-    //   cell_offsets: int64 [B+1]
-    m.def(
-        "streaming_sdf_min_2d_multi("
-        "Tensor F_flat, Tensor F_offsets,"
-        " Tensor bx_flat, Tensor bx_offsets,"
-        " Tensor by_flat, Tensor by_offsets,"
-        " Tensor body_shapes, Tensor body_meta, Tensor kin,"
-        " Tensor aabb_lo, Tensor aabb_dim, Tensor cell_offsets,"
-        " Tensor gx, Tensor gy, float h_grid,"
-        " int max_vol_per_body,"
-        " Tensor(a!) sdf_cc, Tensor(b!) sdf_u, Tensor(c!) sdf_v,"
-        " Tensor(d!) body_u, Tensor(e!) body_v,"
-        " Tensor(f!) sparse_cc_flat,"
-        " int interp_method=0"
-        ") -> ()");
-
-    // 2-D fused/memory-saving update path: identical Phase C union SDF /
-    // face-velocity update as streaming_sdf_forces_fused_2d_multi, but
-    // without force accumulation and without sparse_cc_flat output.
-    // ``winning_rho_cc`` is pre-filled with rho_fluid by the caller and
-    // stamped with the winning body density on cc cells.
     m.def(
         "streaming_sdf_min_rho_2d_multi("
         "Tensor F_flat, Tensor F_offsets,"
@@ -177,50 +84,6 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " Tensor(f!) winning_rho_cc"
         ") -> ()");
 
-    // 2-D forces kernel — analogue of bdim_forces_3d_multi.  Reads the
-    // per-body cc-SDF cached in ``sparse_cc_flat`` (populated by
-    // streaming_sdf_min_2d_multi).  ``out`` is float64 and has 6
-    // channels per body:
-    //   [fv_x, fv_y, t_v, fp_x, fp_y, t_p]
-    // where t_* are the scalar out-of-plane torques.
-    m.def(
-        "bdim_forces_2d_multi("
-        "Tensor sparse_cc_flat, Tensor cell_offsets,"
-        " Tensor kin,"
-        " Tensor aabb_lo, Tensor aabb_dim,"
-        " Tensor gx, Tensor gy,"
-        " int u_i0, int u_j0, int Sj,"
-        " Tensor xs, Tensor ys,"
-        " Tensor px, Tensor py,"
-        " float eps_body, float eps_solver, float h2,"
-        " int max_vol_per_body,"
-        " int delta_order,"
-        " Tensor(a!) out"
-        ") -> ()");
-
-    m.def(
-        "streaming_sdf_forces_fused_2d_multi("
-        "Tensor F_flat, Tensor F_offsets,"
-        " Tensor body_shapes, Tensor body_meta, Tensor kin,"
-        " Tensor aabb_lo, Tensor aabb_dim,"
-        " Tensor gx, Tensor gy, float h_grid,"
-        " int max_vol_per_body,"
-        " Tensor(a!) sdf_cc, Tensor(b!) sdf_u, Tensor(c!) sdf_v,"
-        " Tensor(d!) body_u, Tensor(e!) body_v,"
-        " int interp_method,"
-        " Tensor rho_bodies,"
-        " Tensor(f!) winning_rho_cc,"
-        " Tensor u_prev, Tensor v_prev, Tensor p_prev,"
-        " Tensor nx_cc, Tensor ny_cc,"
-        " Tensor nu_rho_field,"
-        " float eps_body, float eps_solver, float h2,"
-        " int delta_order,"
-        " Tensor(g!) out"
-        ") -> ()");
-
-    // 2-D Phase D only: recompute body forces/torques from the current
-    // union SDF and the current fluid fields without redoing the fused
-    // Phase C update.
     m.def(
         "streaming_sdf_forces_post_2d("
         "Tensor F_flat, Tensor F_offsets,"
@@ -237,11 +100,6 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " Tensor(a!) out"
         ") -> ()");
 
-    // 2-D fused boundary-condition writes — analogue of apply_bcs_3d.
-    //   shapes  : int64 [2,2]    -> (Nx, Ny) per component (u, v)
-    //   neu_desc: int32 [N_neu, 3] -> (comp, axis, side)
-    //   dir_desc: int32 [N_dir, 3] -> (comp, axis, offset)
-    //   dir_val : float[N_dir]
     m.def(
         "apply_bcs_2d("
         "Tensor(a!) u, Tensor(b!) v,"

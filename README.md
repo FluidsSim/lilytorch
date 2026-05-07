@@ -153,7 +153,7 @@ self.sponge = {
 | `operations.py` | Stencil-level operators — gradients, divergence, vorticity, normal derivative, strain-rate magnitude, etc. |
 | `poisson_fft.py` | FFT-based Poisson solver for the pressure equation using Green's-function convolution. Pre-computes and caches Green's functions to disk. |
 | `poisson_mult.py` | Multigrid Poisson solver (variable-coefficient Jacobi smoother + V-cycle hierarchy + PCG outer iteration). |
-| `kernels/` | C++/CUDA extension implementing the streaming SDF + fused force kernels (`streaming_sdf_min_3d_multi`, `bdim_forces_3d_multi`, `streaming_sdf_forces_fused_3d_multi`, `apply_bcs_3d` and the 2-D analogues). Activated by `solver.use_kernels = true`. |
+| `kernels/` | C++/CUDA extension implementing the streaming SDF + post force kernels (`streaming_sdf_min_rho_3d_multi`, `streaming_sdf_forces_post_3d`, `streaming_sdf_forces_post_3d`, `apply_bcs_3d` and the 2-D analogues). Activated by `solver.use_kernels = true`. |
 | `runsim.py` | Standalone driver entry point — parses CLI arguments, loads a YAML config, instantiates `FluidSolver`, and runs the time loop. |
 | `plotting.py` | Visualisation of velocity fields, vorticity, pressure, SDFs, and time histories. |
 | `video_postprocess.py` | Utility to assemble saved PNG frames into MP4 or GIF videos. |

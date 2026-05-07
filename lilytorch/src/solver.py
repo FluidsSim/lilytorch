@@ -534,7 +534,7 @@ class FluidSolver(PlottingMixin):
         }
         print(f"  [solver_method={_method!r}] {_METHOD_DESCR[_method]}")
         # Body-SDF sampling method used inside the streaming C++/CUDA
-        # kernels (``streaming_sdf_min_3d`` / ``..._multi``):
+        # kernels (``streaming_sdf_min_rho_3d_multi`` / ``..._multi``):
         #   * ``"trilinear"`` (default) -- 2x2x2 stencil, matches the
         #     historical behaviour;
         #   * ``"triquadratic"`` -- 3x3x3 Lagrange stencil for higher-order
@@ -1134,7 +1134,7 @@ class FluidSolver(PlottingMixin):
             # Fused SDF+forces path does not populate _sdf_sparse; instead it
             # stores the union AABB directly so the cheap sub-block path can
             # still activate without the CC-SDF per-body slabs.
-            raw = getattr(comp, '_fused_union_aabb', None)
+            raw = getattr(comp, '_combined_union_aabb', None)
             if raw is None:
                 return None
             u_i0, u_i1, u_j0, u_j1, u_k0, u_k1 = raw

@@ -26,8 +26,6 @@ from lilytorch.src.body import (rotate_grid_2d, rotate_grid_3d,
                                 _rotate_grid_3d_compiled)
 from lilytorch.src.kernels import streaming_sdf_min_rho_3d_multi
 from lilytorch.src.kernels import streaming_sdf_min_rho_2d_multi
-from lilytorch.src.kernels import streaming_sdf_min_2d_multi
-from lilytorch.src.kernels import streaming_sdf_min_3d_multi
 
 import torch
 
@@ -149,7 +147,7 @@ class BDIMhandler:
         # ``force_method == "method1"`` is a 2-D-only contour-integral
         # variant that lives entirely in pure-Python (``forces_method1``
         # in ``forces.py``).  It does not consume the per-body cc-SDF
-        # produced by the streaming/fused C++/CUDA kernels (it samples
+        # produced by the streaming/combined C++/CUDA kernels (it samples
         # CC stress / pressure-force tensors at the body contour via
         # ``interp_utility``), so combining it with ``use_kernels=True``
         # would silently bypass the kernel-mode optimisations on the
@@ -1011,7 +1009,7 @@ class BDIMhandler:
             body.com_pos = com_pos
 
     # ------------------------------------------------------------------
-    #  Streaming fused-CUDA 3-D SDF update (Phase B)
+    #  Streaming combined-CUDA 3-D SDF update (Phase B)
     # ------------------------------------------------------------------
     #
     #  Per body, a single C++/CUDA kernel call replaces:
@@ -1046,9 +1044,9 @@ class BDIMhandler:
 
         h_grid = float(comp.h)
 
-        # The fused force kernel computes SDF samples and optional |∇φ|
+        # The combined force kernel computes SDF samples and optional |∇φ|
         # correction on the fly, but force stress still needs lagged CC
-        # normals.  On the first fused step these attributes may not exist
+        # normals.  On the first combined step these attributes may not exist
         # yet because normal recomputation happens after the SDF update in
         # BDIMhandler.step().  Initialize them once from the pre-update
         # union SDF before resetting fields below.
@@ -1079,14 +1077,14 @@ class BDIMhandler:
         # ------------------------------------------------------------------
         # Build / refresh the static per-body packed device tensors once.
         #
-        # Memory note: the fused SDF+force path does NOT consume the
+        # Memory note: the combined SDF+force path does NOT consume the
         # per-axis bx/by/bz_flat tables (it computes body-frame coords
         # analytically inside the kernel via the rotation matrix in
-        # ``kin``).  Skip them in fused mode to avoid Σ_b (Mx+My+Mz)
+        # ``kin``).  Skip them in combined mode to avoid Σ_b (Mx+My+Mz)
         # device-side bytes per static cache.
         # ------------------------------------------------------------------
         fs_for_cache = self.fluid_solver
-        _use_fused_cache = fs_for_cache._use_kernels
+        _use_combined_cache = fs_for_cache._use_kernels
 
         sm = getattr(comp, '_kernel_static_3d', None)
         if sm is None:
@@ -1094,7 +1092,7 @@ class BDIMhandler:
             F_off  = [0]
             shapes = []
             meta   = []
-            if not _use_fused_cache:
+            if not _use_combined_cache:
                 bx_chunks = []; by_chunks = []; bz_chunks = []
                 bx_off = [0]; by_off = [0]; bz_off = [0]
             for body in comp.bodies:
@@ -1107,7 +1105,7 @@ class BDIMhandler:
                     m['bx_last'], m['by_last'], m['bz_last'],
                     m['inv_dx'], m['inv_dy'], m['inv_dz'], m['inv_vol'],
                 ])
-                if not _use_fused_cache:
+                if not _use_combined_cache:
                     bx_chunks.append(m['bx']); by_chunks.append(m['by']); bz_chunks.append(m['bz'])
                     bx_off.append(bx_off[-1] + m['bx'].numel())
                     by_off.append(by_off[-1] + m['by'].numel())
@@ -1119,7 +1117,7 @@ class BDIMhandler:
                 'body_shapes':  torch.tensor(shapes, dtype=torch.int64, device=self.device),
                 'body_meta':    torch.tensor(meta,   dtype=self.dtype,  device=self.device),
             }
-            if not _use_fused_cache:
+            if not _use_combined_cache:
                 sm['bx_flat']    = torch.cat(bx_chunks).contiguous()
                 sm['bx_offsets'] = torch.tensor(bx_off, dtype=torch.int64, device=self.device)
                 sm['by_flat']    = torch.cat(by_chunks).contiguous()
@@ -1142,7 +1140,7 @@ class BDIMhandler:
             # `m['F'].flatten()` views don't pin storage longer than
             # needed.
             del F_chunks
-            if not _use_fused_cache:
+            if not _use_combined_cache:
                 del bx_chunks, by_chunks, bz_chunks
             comp._kernel_static_3d = sm
 
@@ -1314,23 +1312,23 @@ class BDIMhandler:
         cell_off_h = cell_off_h_np.tolist()
 
         fs = self.fluid_solver
-        _use_fused = fs._use_kernels
+        _use_combined = fs._use_kernels
 
-        if _use_fused:
+        if _use_combined:
             # Per-body densities: use rho_body per body (same for all for now;
             # per-link densities can be wired here in future).
             # Persistent buffer: re-allocate only when B changes.
-            _rho_buf = getattr(comp, '_fused_rho_bodies', None)
+            _rho_buf = getattr(comp, '_combined_rho_bodies', None)
             if _rho_buf is None or _rho_buf.numel() != B \
                     or _rho_buf.dtype != self.dtype \
                     or _rho_buf.device != self.device:
                 _rho_buf = torch.empty(
                     (B,), device=self.device, dtype=self.dtype,
                 )
-                comp._fused_rho_bodies = _rho_buf
+                comp._combined_rho_bodies = _rho_buf
             _rho_buf.fill_(float(fs.rho_body))
             rho_bodies = _rho_buf
-            # winning_rho_cc: pre-filled with rho_fluid; the fused kernel
+            # winning_rho_cc: pre-filled with rho_fluid; the combined kernel
             # stamps each cell with the winning body's density.
             # Reuse the persistent buffer to avoid a full-grid allocation
             # every step (saves ~56 MB on a 900×300×52 grid).
@@ -1341,80 +1339,6 @@ class BDIMhandler:
                 )
             winning_rho_cc = _wrcc
             winning_rho_cc.fill_(float(fs.rho))
-            # (B, 12) force accumulator, pre-zeroed.
-            # Persistent buffer: re-allocate only when B changes.
-            _out_buf = getattr(comp, '_fused_out_buf', None)
-            if _out_buf is None or _out_buf.shape != (B, 12) \
-                    or _out_buf.device != self.device:
-                _out_buf = torch.empty(
-                    (B, 12), dtype=torch.float64, device=self.device,
-                )
-                comp._fused_out_buf = _out_buf
-            _out_buf.zero_()
-            fused_out = _out_buf
-            # nu_rho_field: size=1 for constant viscosity, full-grid for variable.
-            if fs.use_variable_viscosity:
-                # Persistent full-grid buffer for variable viscosity ν·ρ.
-                # Reused every step; reallocates only when grid shape changes.
-                _nu_rho_buf = getattr(comp, '_fused_nu_rho_buf', None)
-                if _nu_rho_buf is None \
-                        or _nu_rho_buf.shape != comp.sdf_val.shape \
-                        or _nu_rho_buf.dtype != self.dtype \
-                        or _nu_rho_buf.device != self.device:
-                    _nu_rho_buf = torch.empty(
-                        comp.sdf_val.shape,
-                        device=self.device, dtype=self.dtype,
-                    )
-                    comp._fused_nu_rho_buf = _nu_rho_buf
-                nu_rho_field = fs._compute_nu_rho_for_forces(
-                    fs.u0, fs.v0, fs.w0, out=_nu_rho_buf,
-                )
-            else:
-                # Tiny scalar buffer (size=1); persist to avoid even a
-                # 1-element allocation per step.
-                _nu_rho_scalar = getattr(comp, '_fused_nu_rho_scalar', None)
-                if _nu_rho_scalar is None \
-                        or _nu_rho_scalar.dtype != self.dtype \
-                        or _nu_rho_scalar.device != self.device:
-                    _nu_rho_scalar = torch.empty(
-                        (1,), device=self.device, dtype=self.dtype,
-                    )
-                    comp._fused_nu_rho_scalar = _nu_rho_scalar
-                _nu_rho_scalar.fill_(float(fs.nu) * float(fs.rho))
-                nu_rho_field = _nu_rho_scalar
-            delta_order = int(getattr(fs, 'force_delta_order', 1))
-            eps_body   = float(comp.bodies[0].eps)
-            eps_solver = float(fs.eps)
-            h3         = float(fs.h ** 3)
-
-            # Loud, one-time contiguity check on the full-grid inputs so
-            # any non-contiguous tensor is caught here instead of being
-            # silently duplicated by a `.contiguous()` copy at every
-            # call site.  Fluid solver fields are constructed contiguous
-            # (torch.zeros / torch.ones / torch.full), and normals come
-            # from element-wise arithmetic on contiguous gradients, so
-            # this assertion should always hold.
-            if not getattr(comp, '_fused_contig_checked', False):
-                _required_contig = {
-                    'fs.u0': fs.u0, 'fs.v0': fs.v0,
-                    'fs.w0': fs.w0, 'fs.p0': fs.p0,
-                    'fs.normal_x': fs.normal_x,
-                    'fs.normal_y': fs.normal_y,
-                    'fs.normal_z': fs.normal_z,
-                }
-                for _name, _t in _required_contig.items():
-                    if not _t.is_contiguous():
-                        raise RuntimeError(
-                            f"streaming_sdf_forces_fused_3d_multi requires "
-                            f"contiguous full-grid inputs, but {_name} is "
-                            f"non-contiguous (shape={tuple(_t.shape)}, "
-                            f"strides={_t.stride()}). Calling .contiguous() "
-                            f"here would silently allocate a full-grid copy "
-                            f"every step. Fix the upstream construction of "
-                            f"{_name} to return a contiguous tensor."
-                        )
-                comp._fused_contig_checked = True
-
             streaming_sdf_min_rho_3d_multi(
                 sm['F_flat'], sm['F_offsets'],
                 sm['body_shapes'], sm['body_meta'], kin,
@@ -1424,14 +1348,9 @@ class BDIMhandler:
                 comp.body_u,  comp.body_v,    comp.body_w,
                 getattr(fs, '_sdf_interp_method', 0),
                 rho_bodies, winning_rho_cc,
-                fs.u0, fs.v0, fs.w0, fs.p0,
-                fs.normal_x, fs.normal_y, fs.normal_z,
-                nu_rho_field, eps_body, eps_solver, h3,
-                delta_order,
-                fused_out,
             )
 
-            # Fused path does not populate per-body CC-SDF slabs.
+            # Kernel path does not populate per-body CC-SDF slabs.
             for body_i in range(B):
                 comp._sdf_sparse[body_i] = None
             # Cache the union AABB directly so _compute_union_aabb_3d can
@@ -1449,10 +1368,10 @@ class BDIMhandler:
                 if _i1 > _u_i1: _u_i1 = _i1
                 if _j1 > _u_j1: _u_j1 = _j1
                 if _k1 > _u_k1: _u_k1 = _k1
-            comp._fused_union_aabb = (_u_i0, _u_i1, _u_j0, _u_j1, _u_k0, _u_k1)
+            comp._combined_union_aabb = (_u_i0, _u_i1, _u_j0, _u_j1, _u_k0, _u_k1)
 
             # Kernel forces are evaluated later from post-fluid-step fields.
-            comp._fused_forces_out  = None
+            comp._combined_forces_out  = None
             comp._winning_rho_cc    = winning_rho_cc
 
             # Stash per-step metadata (kin/aabb without sparse_cc_flat).
@@ -1466,48 +1385,8 @@ class BDIMhandler:
                 'gz':      gz_1d,
             }
         else:
-            # ---- Two-phase path (original) ----
-            sparse_flat = torch.zeros(
-                int(cell_off_h_np[-1]), device=self.device, dtype=self.dtype,
-            )
-            streaming_sdf_min_3d_multi(
-                sm['F_flat'],  sm['F_offsets'],
-                sm['bx_flat'], sm['bx_offsets'],
-                sm['by_flat'], sm['by_offsets'],
-                sm['bz_flat'], sm['bz_offsets'],
-                sm['body_shapes'], sm['body_meta'], kin,
-                aabb_lo, aabb_dim, cell_off,
-                gx_1d, gy_1d, gz_1d, h_grid, max_vol,
-                comp.sdf_val, comp.sdf_val_u, comp.sdf_val_v, comp.sdf_val_w,
-                comp.body_u,  comp.body_v,    comp.body_w,
-                sparse_flat,
-                getattr(fs, '_sdf_interp_method', 0),
-            )
+            raise RuntimeError("The legacy sparse 3-D kernel path has been removed; use solver_method='kernel' or 'python'.")
 
-            # Split sparse_flat into per-body slabs and store
-            for body_i, aabb in enumerate(aabbs_for_split):
-                i0, i1, j0, j1, k0, k1 = aabb
-                Ai, Aj, Ak = i1 - i0, j1 - j0, k1 - k0
-                lo = cell_off_h[body_i]
-                hi = cell_off_h[body_i + 1]
-                slab = sparse_flat[lo:hi].view(Ai, Aj, Ak)
-                comp._sdf_sparse[body_i] = (aabb, slab)
-
-            comp._fused_forces_out = None
-            comp._winning_rho_cc   = None
-            comp._fused_union_aabb = None   # clear stale fused-path cache
-
-            comp._kernel_step = {
-                'kin':            kin,
-                'aabb_lo':        aabb_lo,
-                'aabb_dim':       aabb_dim,
-                'max_vol':        max_vol,
-                'gx':             gx_1d,
-                'gy':             gy_1d,
-                'gz':             gz_1d,
-                'sparse_cc_flat': sparse_flat,
-                'cell_offsets':   cell_off,
-            }
 
     def _update_2d_streaming_multi(self, t, iteration, dt=1):
         """2-D analogue of :meth:`_update_3d_streaming_multi`.
@@ -1522,7 +1401,7 @@ class BDIMhandler:
             * fills ``comp.sdf_val``, ``comp.sdf_val_u``, ``comp.sdf_val_v``,
               ``comp.body_u``, ``comp.body_v`` (union over all bodies);
             * stashes per-step packed tensors on ``comp._kernel_step``
-              for the fused 2-D forces kernel (``bdim_forces_2d_multi``);
+              for the post-fluid-step 2-D force kernel;
             * splits the sparse cc-SDF into per-body slabs on
               ``comp._sdf_sparse[b] = (aabb, slab)`` for downstream code;
             * maintains ``comp.com_pos[b]``, ``body.com_pos``,
@@ -1542,8 +1421,8 @@ class BDIMhandler:
 
         h_grid = float(comp.h)
 
-        # ── Lagged CC normals for the fused 2-D force kernel ──────
-        # The fused 2-D Phase-D kernel reads ``fs.normal_x/normal_y`` at
+        # ── Lagged CC normals kept for compatibility ──────
+        # The combined 2-D Phase-D kernel reads ``fs.normal_x/normal_y`` at
         # the previous step's SDF (true lagged-normals BDIM).  Before
         # the running-min fields are wiped to ``_FAR`` below we must
         # seed these from the *current* (= previous-step) ``comp.sdf_val``
@@ -1762,85 +1641,24 @@ class BDIMhandler:
 
         cell_off_h = cell_off_h_np.tolist()
 
-        comp._fused_forces_out = None
+        comp._combined_forces_out = None
 
         fs = self.fluid_solver
         interp_method = getattr(fs, '_sdf_interp_method', 0)
 
         if fs._use_kernels:
-            rho_bodies_buf = getattr(self, '_fused_rho_bodies_2d', None)
+            rho_bodies_buf = getattr(self, '_combined_rho_bodies_2d', None)
             if rho_bodies_buf is None or rho_bodies_buf.shape[0] != B:
                 rho_bodies_buf = torch.full(
                     (B,), fs.rho_body, device=self.device, dtype=self.dtype,
                 )
-                self._fused_rho_bodies_2d = rho_bodies_buf
+                self._combined_rho_bodies_2d = rho_bodies_buf
 
             winning_rho_cc = getattr(self, '_winning_rho_cc_2d', None)
             if winning_rho_cc is None or winning_rho_cc.shape != comp.sdf_val.shape:
                 winning_rho_cc = torch.empty_like(comp.sdf_val)
                 self._winning_rho_cc_2d = winning_rho_cc
             winning_rho_cc.fill_(fs.rho)
-
-            fused_out = getattr(self, '_fused_out_buf_2d', None)
-            if fused_out is None or fused_out.shape[0] != B:
-                fused_out = torch.zeros((B, 6), dtype=torch.float64, device=self.device)
-                self._fused_out_buf_2d = fused_out
-            else:
-                fused_out.zero_()
-
-            if getattr(fs, 'use_variable_viscosity', False):
-                nu_rho_buf = getattr(self, '_fused_nu_rho_buf_2d', None)
-                if nu_rho_buf is None or nu_rho_buf.shape != comp.sdf_val.shape:
-                    nu_rho_buf = torch.empty_like(comp.sdf_val)
-                    self._fused_nu_rho_buf_2d = nu_rho_buf
-                nu_rho_field = fs._compute_nu_rho_for_forces(fs.u0, fs.v0, out=nu_rho_buf)
-            else:
-                nu_rho_scalar_buf = getattr(self, '_fused_nu_rho_scalar_2d', None)
-                if nu_rho_scalar_buf is None:
-                    nu_rho_scalar_buf = torch.empty(
-                        (1,), device=self.device, dtype=self.dtype,
-                    )
-                    self._fused_nu_rho_scalar_2d = nu_rho_scalar_buf
-                nu_rho_scalar_buf.fill_(fs.nu * fs.rho)
-                nu_rho_field = nu_rho_scalar_buf
-
-            eps_body_val = float(comp.bodies[0].eps)
-            eps_solver_val = float(fs.eps)
-
-            nx_cc_t = getattr(fs, 'normal_x', None)
-            ny_cc_t = getattr(fs, 'normal_y', None)
-            if nx_cc_t is None or ny_cc_t is None:
-                # Defensive fallback only.  ``_update_2d_streaming_multi``
-                # seeds these from the previous-step ``comp.sdf_val``
-                # *before* the running-min reset above, so under normal
-                # operation this branch is not taken.  If it is, the
-                # SDF fields have already been wiped to ``_FAR`` and the
-                # resulting normals will be degenerate; warn so the
-                # caller can investigate.
-                import warnings
-                warnings.warn(
-                    "fused 2-D path: CC normals were missing after the "
-                    "running-min reset; computing them from the wiped "
-                    "SDF will yield degenerate normals.  Ensure "
-                    "fs.normal_x/normal_y are seeded before "
-                    "_update_2d_streaming_multi runs.",
-                    stacklevel=2,
-                )
-                (nx_cc_t, ny_cc_t) = comp.compute_normals(comp.sdf_val)
-
-            if not getattr(self, '_fused_contig_checked_2d', False):
-                for _t, _name in [
-                    (fs.u0, 'u0'), (fs.v0, 'v0'), (fs.p0, 'p0'),
-                    (nx_cc_t, 'normal_x'), (ny_cc_t, 'normal_y'),
-                ]:
-                    if not _t.is_contiguous():
-                        import warnings
-                        warnings.warn(
-                            f"streaming_sdf_forces_fused_2d_multi: {_name} is not "
-                            "contiguous; forcing contiguous copy.",
-                            stacklevel=2,
-                        )
-                self._fused_contig_checked_2d = True
 
             streaming_sdf_min_rho_2d_multi(
                 sm['F_flat'], sm['F_offsets'],
@@ -1856,10 +1674,10 @@ class BDIMhandler:
             for b in range(B):
                 comp._sdf_sparse[b] = None
 
-            # 2-D fused force integration is computed in the later force
-            # stage by the native Phase-D-only op, so the update stage only
-            # maintains the fused/memory-saving geometry state here.
-            comp._fused_forces_out = None
+            # 2-D force integration is computed in the later force stage by
+            # the native Phase-D-only op, so the update stage only maintains
+            # the memory-saving geometry state here.
+            comp._combined_forces_out = None
             comp._winning_rho_cc   = winning_rho_cc
 
             comp._kernel_step = {
@@ -1872,65 +1690,17 @@ class BDIMhandler:
             }
 
         else:
-            sparse_n = int(cell_off_h_np[-1])
-            sparse_flat = getattr(self, '_stream_sparse_flat_2d', None)
-            if (
-                sparse_flat is None
-                or sparse_flat.numel() < sparse_n
-                or sparse_flat.device != self.device
-                or sparse_flat.dtype != self.dtype
-            ):
-                sparse_flat = torch.empty(
-                    sparse_n, device=self.device, dtype=self.dtype,
-                )
-                self._stream_sparse_flat_2d = sparse_flat
-            else:
-                sparse_flat = sparse_flat[:sparse_n]
-
-            streaming_sdf_min_2d_multi(
-                sm['F_flat'],  sm['F_offsets'],
-                sm['bx_flat'], sm['bx_offsets'],
-                sm['by_flat'], sm['by_offsets'],
-                sm['body_shapes'], sm['body_meta'], kin,
-                aabb_lo, aabb_dim, cell_off,
-                gx_1d, gy_1d, h_grid, max_vol,
-                comp.sdf_val, comp.sdf_val_u, comp.sdf_val_v,
-                comp.body_u,  comp.body_v,
-                sparse_flat,
-                interp_method,
-            )
-
-            for body_i, aabb in enumerate(aabbs_for_split):
-                i0, i1, j0, j1 = aabb
-                Ai, Aj = i1 - i0, j1 - j0
-                lo = cell_off_h[body_i]
-                hi = cell_off_h[body_i + 1]
-                slab = sparse_flat[lo:hi].view(Ai, Aj)
-                comp._sdf_sparse[body_i] = (aabb, slab)
-
-            comp._kernel_step = {
-                'kin':             kin,
-                'aabb_lo':         aabb_lo,
-                'aabb_dim':        aabb_dim,
-                'max_vol':         max_vol,
-                'gx':              gx_1d,
-                'gy':              gy_1d,
-                'sparse_cc_flat':  sparse_flat,
-                'cell_offsets':    cell_off,
-            }
+            raise RuntimeError("The legacy sparse 2-D kernel path has been removed; use solver_method='kernel' or 'python'.")
 
         # ── Per-body: contour update + (optional) contour mask ──
         # 2-D bodies expose 1-D contours; the legacy ``_update_2d`` keeps
-        # them consistent with the per-step rotation/translation.  We
-        # mirror that loop here so downstream code (force projection,
-        # plotting) sees the same per-body tensors.
+        # them consistent with the per-step rotation/translation. Mirror that
+        # loop here so downstream code sees the same per-body tensors.
         for body_i, body in enumerate(comp.bodies):
             (animat_id, link_id) = comp.body_ids[body_i]
 
-            # contour update (world frame)
             body.cnt_update = R_t[body_i] @ body.cnt + urdf_pos_t[body_i, :, None]
 
-            # optional contour mask for overlapping links
             if self.contour_mask:
                 x_cnt = body.cnt_update[0]
                 y_cnt = body.cnt_update[1]
@@ -1940,8 +1710,6 @@ class BDIMhandler:
                 if prev_body_i is None and next_body_i is None:
                     mask = torch.ones_like(x_cnt, dtype=torch.bool)
                 else:
-                    # Per-animat numpy snapshots are stored above; rebuild
-                    # the device tensors needed for the SDF query.
                     Rs_a = torch.as_tensor(
                         Rs_np[animat_id], device=self.device, dtype=self.dtype,
                     )
@@ -1982,8 +1750,7 @@ class BDIMhandler:
                         mask = (sdf_m >= 0) & (sdf_p >= 0)
                 body.mask = mask
 
-            body.r_com   = body.cnt_update - com_pos_t[body_i, :, None]
-            # body.com_pos already set above.
+            body.r_com = body.cnt_update - com_pos_t[body_i, :, None]
 
     # ==================================================================
     #  apply_forces: fluid -> body forces via MuJoCo xfrc_applied
@@ -1993,6 +1760,7 @@ class BDIMhandler:
             self._apply_forces_3d(task, physics)
         else:
             self._apply_forces_2d(task, physics)
+
 
     def _apply_forces_2d(self, task, physics):
         fs = self.fluid_solver

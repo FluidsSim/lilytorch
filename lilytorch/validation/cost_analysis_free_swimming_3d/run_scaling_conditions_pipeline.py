@@ -34,10 +34,10 @@ visible.
 
     nboff         : reference baseline, all narrow-band flags off
                     (no cropping, no batching).
-    nbforces_opt  : production method — streaming SDF + fused forces +
+    nbforces_opt  : production method — streaming SDF + post-force integration +
                     union cropping + narrow-band batching, with the
                     rotation-CSE / uniform-grid trilinear optimisation
-                    of ``streaming_sdf_min_3d_multi``.
+                    of ``streaming_sdf_min_rho_3d_multi``.
 
 Output layout
 -------------
@@ -98,7 +98,7 @@ CONDITION_SPECS = {
         "color": "#37474f",
     },
     # Production method.  Kernel-level optimisation of
-    # ``streaming_sdf_min_3d_multi`` (rotation CSE + uniform-grid
+    # ``streaming_sdf_min_rho_3d_multi`` (rotation CSE + uniform-grid
     # trilinear, commit 722c4cf) baked into every ``--streaming_sdf_3d``
     # path.  After substantial testing (see git history) this is the
     # best of every method that was previously benchmarked, so it is
