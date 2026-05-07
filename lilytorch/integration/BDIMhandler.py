@@ -258,7 +258,7 @@ class BDIMhandler:
             meta['inv_vol'] = inv[0] * inv[1]
         return meta
 
-    def gather_data(self, iteration, *, as_numpy=False):
+    def gather_data(self, iteration):
         """Gather FARMS link poses/velocities once per update path."""
         com_poses = []
         urdf_poses = []
