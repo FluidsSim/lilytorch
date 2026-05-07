@@ -34,7 +34,7 @@ visible.
 
     nboff         : reference baseline, all narrow-band flags off
                     (no cropping, no batching).
-    nbforces_opt  : production method — streaming SDF + fused forces +
+    nbforces_opt  : production method — streaming SDF + post-force integration +
                     union cropping + narrow-band batching, with the
                     rotation-CSE / uniform-grid trilinear optimisation
                     of ``streaming_sdf_min_rho_3d_multi``.
