@@ -1692,6 +1692,75 @@ class BDIMhandler:
         else:
             raise RuntimeError("The legacy sparse 2-D kernel path has been removed; use solver_method='kernel' or 'python'.")
 
+        # ── Per-body: contour update + (optional) contour mask ──
+        # 2-D bodies expose 1-D contours; the legacy ``_update_2d`` keeps
+        # them consistent with the per-step rotation/translation. Mirror that
+        # loop here so downstream code sees the same per-body tensors.
+        for body_i, body in enumerate(comp.bodies):
+            (animat_id, link_id) = comp.body_ids[body_i]
+
+            body.cnt_update = R_t[body_i] @ body.cnt + urdf_pos_t[body_i, :, None]
+
+            if self.contour_mask:
+                x_cnt = body.cnt_update[0]
+                y_cnt = body.cnt_update[1]
+                prev_body_i = self._prev_body_index[body_i]
+                next_body_i = self._next_body_index[body_i]
+
+                if prev_body_i is None and next_body_i is None:
+                    mask = torch.ones_like(x_cnt, dtype=torch.bool)
+                else:
+                    Rs_a = torch.as_tensor(
+                        Rs_np[animat_id], device=self.device, dtype=self.dtype,
+                    )
+                    urdf_a = torch.as_tensor(
+                        urdf_poses_np[animat_id], device=self.device, dtype=self.dtype,
+                    )
+                    if prev_body_i is None:
+                        (_, next_link_id) = comp.body_ids[next_body_i]
+                        body_p = comp.bodies[next_body_i]
+                        pt = Rs_a[next_link_id].T @ (
+                            torch.stack((x_cnt, y_cnt))
+                            - urdf_a[next_link_id][:, None]
+                        )
+                        mask = (body_p.sdf(pt[0], pt[1]) - body.h) >= 0
+                    elif next_body_i is None:
+                        (_, prev_link_id) = comp.body_ids[prev_body_i]
+                        body_m = comp.bodies[prev_body_i]
+                        pt = Rs_a[prev_link_id].T @ (
+                            torch.stack((x_cnt, y_cnt))
+                            - urdf_a[prev_link_id][:, None]
+                        )
+                        mask = (body_m.sdf(pt[0], pt[1]) - body.h) >= 0
+                    else:
+                        (_, prev_link_id) = comp.body_ids[prev_body_i]
+                        body_m = comp.bodies[prev_body_i]
+                        pt_m = Rs_a[prev_link_id].T @ (
+                            torch.stack((x_cnt, y_cnt))
+                            - urdf_a[prev_link_id][:, None]
+                        )
+                        (_, next_link_id) = comp.body_ids[next_body_i]
+                        body_p = comp.bodies[next_body_i]
+                        pt_p = Rs_a[next_link_id].T @ (
+                            torch.stack((x_cnt, y_cnt))
+                            - urdf_a[next_link_id][:, None]
+                        )
+                        sdf_m = body_m.sdf(pt_m[0], pt_m[1]) - body.h
+                        sdf_p = body_p.sdf(pt_p[0], pt_p[1]) - body.h
+                        mask = (sdf_m >= 0) & (sdf_p >= 0)
+                body.mask = mask
+
+            body.r_com = body.cnt_update - com_pos_t[body_i, :, None]
+
+    # ==================================================================
+    #  apply_forces: fluid -> body forces via MuJoCo xfrc_applied
+    # ==================================================================
+    def apply_forces(self, task, physics):
+        if self.ndim == 3:
+            self._apply_forces_3d(task, physics)
+        else:
+            self._apply_forces_2d(task, physics)
+
 
     def _apply_forces_2d(self, task, physics):
         fs = self.fluid_solver

@@ -1,11 +1,11 @@
 
-from cmath import inf
+from math import inf
 import os
 from farms_core.io.yaml import pyobject2yaml
 from farms_core.model.options import SpawnMode
 
 sim_sir      = "lilytorch/farms_examples/zebrafishsim/test_configs/"
-handler_path = "lilytorch.farms_examples.zebrafishsim.BDIMhandler.BDIMhandler"
+handler_path = "lilytorch.integration.BDIMhandler.BDIMhandler"
 sdf_folder   = "../../sdfs/zebrafish/"
 sdf_path     = '../../sdfs/zebrafish/zebrafish_v1_triangulated/sdf/zebrafish.sdf'
 
@@ -32,7 +32,8 @@ njoints = 14
 
 spawn_mode = SpawnMode.TRANSVERSE
 
-density = 1000.0
+density       = 800.0   # robot body density [kg/m^3]
+water_density = 1000.0  # water density [kg/m^3]
 
 
 link_names  = ["link_" + str(i) for i in range(nlinks+1)]
@@ -40,8 +41,6 @@ joint_names = ["joint_" + str(i) for i in range(njoints+1)]
 
 
 def gen_animat_config():
-
-    animat_dict = {}
 
     animat_dict = {
         "spawn": {},
@@ -138,7 +137,7 @@ def gen_arena_config():
             "height": 0,
             "velocity": [0, 0, 0],
             "viscosity": 1.0,
-            "density": 1000.0,
+            "density": water_density,
             "maps": ["", ""],
         },
         "ground_height": -1.0,
@@ -166,7 +165,7 @@ def gen_experiment_config():
             "arenas_options": [
                 "farms_core.model.options.ArenaOptions"
             ],
-            "experiment_data": "farms_amphibious.data.data.ExperimentData",
+            "experiment_data": "farms_core.experiment.data.ExperimentData",
             "animats_data": [
                 "farms_core.model.data.AnimatData"
             ]
@@ -284,7 +283,11 @@ def gen_simulation_config():
                     "jacobi_weight": 0.6,
                     "poisson_nsmoothing": 5,
                     "poisson_verbose": False,
-                    "poisson_folder": "data/"
+                    "poisson_folder": "data/",
+                    "dtype"         : "float64",
+                    "rho_body"      : 800.0,
+                    "zero_pressure_inside": True,
+                    "force_method"  : "method1"
                 },
                 "boundary_conditions": {
                     "BC_type_u": ["N", "N", "N", "N"],
@@ -314,7 +317,8 @@ def gen_simulation_config():
                     "save_every": 100,
                     "vmin": -50,
                     "vmax": 50,
-                    "save_uv": False
+                    "save_uv": False,
+                    "save": False
                 }
                 }
             }

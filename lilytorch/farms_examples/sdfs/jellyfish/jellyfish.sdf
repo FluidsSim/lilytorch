@@ -1,0 +1,66 @@
+<?xml version="1.0" ?>
+<sdf version="1.6">
+  <world name="world">
+    <model name="jellyfish">
+      <pose>0 0 0 0 0 0</pose>
+      <link name="base_link">
+        <pose>0 0 0 0 0 0</pose>
+        <!--
+          Mass and inertia of the jellyfish bell treated as a uniformly-
+          dense rigid body, computed from the analytical SDF in
+          generate_jellyfish_mesh.py:
+
+              SDF:        sphere_shell(R=0.05, t=3*R/(2*32)=2.343e-3)
+                          intersected with  z > h=0
+              Density:    rho_body = 1025 kg/m^3 (near sea water)
+              Volume:     ~7.36e-5 m^3           (analytical 2πR² · 2t)
+              Mass:       ~7.547e-2 kg
+              COM:        (0, 0, R/2 = 2.504e-2) relative to link frame
+              Inertia about COM (axisymmetric):
+                  Ixx = Iyy = 7.893e-5 kg m^2
+                  Izz       = 1.2625e-4 kg m^2
+
+          These values are the parameters of Newton's equations of motion
+          (F = m a, tau = I alpha + omega x I omega) that MuJoCo / FARMS
+          integrate for the single free-floating rigid body.
+        -->
+        <inertial>
+          <pose>0 0 0.025037438901 0 0 0</pose>
+          <mass>0.07546768732</mass>
+          <inertia>
+            <ixx>7.893193369e-05</ixx>
+            <ixy>0</ixy>
+            <ixz>0</ixz>
+            <iyy>7.893193369e-05</iyy>
+            <iyz>0</iyz>
+            <izz>1.262487591e-04</izz>
+          </inertia>
+        </inertial>
+        <collision name="base_link_collision">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <mesh>
+              <uri>meshes/jellyfish.stl</uri>
+              <scale>1.0 1.0 1.0</scale>
+            </mesh>
+          </geometry>
+        </collision>
+        <visual name="base_link_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <mesh>
+              <uri>meshes/jellyfish.stl</uri>
+              <scale>1.0 1.0 1.0</scale>
+            </mesh>
+          </geometry>
+          <material>
+            <ambient>0.6 0.3 0.7 0.45</ambient>
+            <diffuse>0.8 0.5 0.9 0.45</diffuse>
+            <specular>0.9 0.9 0.9 0.5</specular>
+            <emissive>0.1 0.05 0.15 1</emissive>
+          </material>
+        </visual>
+      </link>
+    </model>
+  </world>
+</sdf>

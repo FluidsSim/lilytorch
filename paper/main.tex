@@ -1,0 +1,703 @@
+% =====================================================================
+% LilyTorch: GPU-Accelerated Immersed-Boundary CFD for
+% Neuromechanical Simulation of Aquatic Locomotion
+%
+% IEEE Robotics and Automation Letters (RA-L) submission template.
+% Uses IEEEtran with the "journal" option, which is the format
+% required by RA-L.
+% =====================================================================
+
+\documentclass[journal,twoside,10pt]{IEEEtran}
+
+% ---- Packages --------------------------------------------------------
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{cite}
+\usepackage{algorithmic}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{url}
+\usepackage[hidelinks]{hyperref}
+\usepackage{bm}
+\usepackage{siunitx}
+\usepackage{subcaption}
+\usepackage{xcolor}
+\usepackage{xspace}
+
+% ---- Convenience macros ---------------------------------------------
+\newcommand{\lilytorch}{\textsc{LilyTorch}\xspace}
+\newcommand{\farms}{\textsc{FARMS}\xspace}
+\newcommand{\mujoco}{\textsc{MuJoCo}\xspace}
+\newcommand{\pytorch}{\textsc{PyTorch}\xspace}
+\newcommand{\waterlily}{\textsc{WaterLily.jl}\xspace}
+\newcommand{\bdim}{BDIM\xspace}
+
+% ---- Paper metadata --------------------------------------------------
+\title{\lilytorch: A GPU-Accelerated Immersed-Boundary \\
+       Navier--Stokes Solver for Closed-Loop
+       Neuromechanical Simulation of Aquatic Locomotion}
+
+\author{Andrea~Ferrario~\IEEEmembership{}%
+        \thanks{Manuscript submitted to IEEE Robotics and Automation
+        Letters.  The author is with the BioRobotics Laboratory,
+        EPFL, Lausanne, Switzerland.
+        E-mail: \texttt{andrea.ferrario@epfl.ch}.}%
+}
+
+% RA-L running heads
+\markboth{IEEE Robotics and Automation Letters. Preprint Version.}%
+{Ferrario: \lilytorch --- GPU Immersed-Boundary CFD for Aquatic Locomotion}
+
+\IEEEtitleabstractindextext{%
+\begin{abstract}
+Simulating freely-swimming robots and animals requires coupling a
+multibody dynamics engine with a fluid solver that is fast enough for
+closed-loop neuromechanical experiments yet accurate enough to capture
+viscous boundary layers and unsteady wakes.  We present \lilytorch, an
+open-source, GPU-accelerated incompressible Navier--Stokes solver that
+implements a second-order Boundary Data Immersion Method (BDIM2) on a
+staggered Cartesian grid and couples two-way with the \mujoco physics
+engine through the \farms framework.  The solver supports both
+analytical signed-distance functions (spheres, capsules, boxes, fish
+spines) and mesh-based bodies (STL/OBJ through \textsc{Open3D} and
+fast-marching), handles per-link articulated kinematics, and offers a
+choice of spectral (DCT / free-space Green's function) or
+variable-coefficient multigrid pressure-projection solvers.  Optional
+Smagorinsky large-eddy closure, Carreau / Herschel--Bulkley
+non-Newtonian rheology, and a sponge damping layer extend the solver to
+a range of bio- and soft-robotic scenarios.  Because the complete
+pipeline (advection--diffusion, projection, BDIM, force integration) is
+expressed in \pytorch tensors, every hot kernel is JIT-compiled via
+\texttt{torch.compile} and runs on a single GPU without domain
+decomposition.  We describe the continuous and discrete formulations,
+detail how rigid, articulated, and mesh bodies are integrated with
+\mujoco, and discuss the implications of the proposed coupling for
+embodied studies of aquatic locomotion.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Biologically-inspired robots, Computational fluid dynamics,
+Fluid--structure interaction, Immersed boundary method, Simulation,
+Swimming robots.
+\end{IEEEkeywords}}
+
+\begin{document}
+\maketitle
+\IEEEdisplaynontitleabstractindextext
+\IEEEpeerreviewmaketitle
+
+
+% =====================================================================
+\section{Introduction}
+% =====================================================================
+\IEEEPARstart{U}{nderstanding} how neural control, body mechanics, and
+the surrounding fluid interact during swimming is a long-standing
+question in both neuroscience and robotics.  Anguilliform
+swimmers~\cite{tytell2004hydrodynamics}, zebrafish
+larvae~\cite{muller2008larval,kern2006simulations}, salamanders
+walking and swimming~\cite{ijspeert2007salamander}, and an increasing
+number of soft and articulated aquatic
+robots~\cite{porez2014improved,katzschmann2018exploration} all exhibit
+behaviour that can only be explained by closing the loop between the
+controller, the body, and the hydrodynamic
+environment~\cite{tytell2010interplay}.  Building computational
+platforms that \emph{embody} this loop --- i.e.\ that simulate
+controller, multibody dynamics, and fluid together in real- or
+near-real-time --- remains a key methodological challenge.
+
+Classical body-conforming Navier--Stokes solvers based on finite volumes
+or spectral elements
+(e.g.\ \textsc{OpenFOAM}~\cite{weller1998openfoam},
+\textsc{Nek5000}~\cite{fischer2007nek5000}) deliver excellent fidelity
+but require mesh motion or remeshing when the geometry is articulated
+or freely moving; they are also too slow to be driven interactively
+from a robotics engine.  Immersed-boundary (IB)
+methods~\cite{peskin2002immersed,mittal2005immersed} circumvent these
+issues by solving the fluid on a fixed Cartesian grid and representing
+the body as a forcing or blending term.  Among IB variants, the
+\emph{Boundary Data Immersion Method}
+(BDIM)~\cite{weymouth2011boundary,maertens2015accurate} blends the
+fluid velocity with the prescribed body velocity through a smoothed
+Heaviside function derived from a signed-distance field, and has been
+shown to achieve second-order accuracy on a wide range of
+bio-inspired flows~\cite{lauder2015fish,bhalla2013unified}.  The
+\waterlily package~\cite{weymouth2024waterlily} demonstrated that BDIM
+can be implemented concisely on top of modern array frameworks; our
+work adopts the same philosophy in \pytorch and extends it to two-way
+coupling with a general-purpose multibody engine.
+
+On the robotics side, \mujoco~\cite{todorov2012mujoco} has become the
+reference engine for articulated rigid-body dynamics and is widely used
+for legged and swimming locomotion.  The
+\farms framework~\cite{arreguit2023farms} provides a high-level
+neuromechanical abstraction on top of \mujoco, with central-pattern
+generators~\cite{ijspeert2008central}, sensor buses, and extension
+hooks.  However, neither \mujoco nor \farms natively models a viscous
+fluid: aquatic experiments have historically relied on drag
+coefficients or added-mass approximations, which cannot reproduce wake
+reattachment, vortex shedding, or inter-body interference.  Plugging a
+fully-resolved CFD solver into this stack requires:
+(i) a fluid formulation that accepts arbitrarily-moving, articulated
+geometry at every time step;
+(ii) a body representation that covers analytical primitives as well
+as arbitrary triangular meshes (for which \mujoco uses STL/OBJ); and
+(iii) a pressure-projection path that tolerates per-step changes in
+body mask, density, and viscosity.
+
+This paper describes \lilytorch, an open-source
+\pytorch-based~\cite{paszke2019pytorch} incompressible Navier--Stokes
+solver that we designed to fill this gap.  Its contributions are:
+
+\begin{itemize}
+\item \textbf{A single-GPU, two-way coupled CFD+\mujoco pipeline.}
+  Every time step the fluid solver reads link poses from \mujoco,
+  recomputes per-link signed-distance functions (SDFs), performs a
+  BDIM2 Heun predictor--corrector step, integrates hydrodynamic
+  forces, and writes them back as external wrenches.  The entire
+  pipeline runs on one GPU without inter-process communication.
+\item \textbf{Unified analytical / mesh body handling.}  A common
+  \texttt{Body} abstraction exposes spheres, capsules, boxes, NACA
+  fish-spine profiles, and STL/OBJ meshes (loaded via
+  \textsc{Open3D}~\cite{zhou2018open3d} with fast-marching sign
+  propagation~\cite{sethian1996fastmarch}) through the same BDIM
+  interface.  Articulated animats are supported through composite
+  bodies that take the pointwise union of per-link SDFs.
+\item \textbf{Choice of pressure solvers.}
+  A spectral DCT solver (Neumann boundaries), a free-space Green's
+  function convolution~\cite{hejlesen2013high} for unbounded domains,
+  and a geometric multigrid~\cite{trottenberg2001multigrid}
+  preconditioned CG (MGCG) solver for variable-coefficient problems
+  arising from the BDIM mask or variable density.
+\item \textbf{Advection, turbulence, and rheology models.}  Six
+  advection schemes (QUICK~\cite{leonard1979quick},
+  ADBQUICKEST, CUBISTA~\cite{alves2003convergent},
+  van~Leer~\cite{vanleer1979towards}, CDS, and semi-Lagrangian
+  backtracing~\cite{stam1999stable}); an optional
+  Smagorinsky~\cite{smagorinsky1963general} large-eddy closure;
+  Carreau and Herschel--Bulkley non-Newtonian
+  models~\cite{bird1987dynamics}; and a quadratic sponge layer for
+  open-domain emulation.
+\item \textbf{GPU kernel fusion.}  All hot paths
+  (advection--diffusion, multigrid smoother and V-cycle, force
+  integration, SDF evaluation) are expressed as pure functions that
+  can be JIT-fused through \texttt{torch.compile}, taking advantage
+  of CUDA-graph capture.
+\end{itemize}
+
+The remainder of this paper is organised as follows.
+Section~\ref{sec:methods} presents the continuous equations, the
+discrete numerical schemes, the BDIM2 immersed-boundary formulation,
+the analytical and mesh body classes, and the coupling with \mujoco
+through \farms.  Section~\ref{sec:discussion} discusses design
+trade-offs, comparisons with existing tools, limitations, and
+planned extensions.  Experimental validation and quantitative results
+are deferred to a companion section.
+
+
+% =====================================================================
+\section{Methods}\label{sec:methods}
+% =====================================================================
+
+\subsection{Governing equations}\label{sec:governing}
+
+\lilytorch solves the incompressible Navier--Stokes equations in
+primitive variables,
+\begin{align}
+  \frac{\partial \mathbf u}{\partial t}
+  + (\mathbf u\!\cdot\!\nabla)\mathbf u
+  &= -\frac{1}{\rho}\nabla p + \nu\,\nabla^{2}\mathbf u,
+  \label{eq:momentum}\\[2pt]
+  \nabla\!\cdot\!\mathbf u &= 0,
+  \label{eq:continuity}
+\end{align}
+where $\mathbf u=(u,v)$ in 2-D or $(u,v,w)$ in 3-D, $p$ is the
+pressure, $\rho$ the (constant) fluid density, and $\nu$ the kinematic
+viscosity.  The incompressibility constraint~\eqref{eq:continuity} is
+enforced by the classical Chorin--T\'emam fractional-step
+method~\cite{chorin1968numerical,temam1969approximation}:
+an explicit provisional velocity $\tilde{\mathbf u}$ is first advanced
+with the momentum terms, and a Poisson problem is then solved to
+obtain the pressure correction.
+
+
+\subsection{Staggered MAC grid and time integration}\label{sec:grid}
+
+The domain $\Omega\!\subset\!\mathbb R^{d}$ ($d\!\in\!\{2,3\}$) is
+discretised on a Marker-and-Cell (MAC) staggered
+grid~\cite{harlow1965numerical}: pressure is stored at cell centres
+and each velocity component on its own face grid
+($u$ at $x$-faces, $v$ at $y$-faces, $w$ at $z$-faces).  One ghost
+cell is added on each side of $\Omega$, giving array shapes
+$(N_x{+}2)\!\times\!(N_y{+}2)\,[\times(N_z{+}2)]$; boundary conditions
+are enforced through image/mirror ghost values for Dirichlet or
+zero-gradient ghost values for Neumann faces.
+
+Time integration follows Heun's method (explicit RK2) as in
+\waterlily~\cite{weymouth2024waterlily}:
+\begin{enumerate}
+\item \textbf{Predictor:} advection--diffusion of $\mathbf u^{n}$
+  gives $\mathbf u^{*}$; BDIM blends $\mathbf u^{*}$ with the
+  body velocity (Section~\ref{sec:bdim}); pressure projection with
+  weight $w{=}1$ produces $\tilde{\mathbf u}$.
+\item \textbf{Corrector:} advection--diffusion of $\tilde{\mathbf u}$
+  gives $\mathbf u^{**}$; a half-step rebase
+  $\mathbf u^{**}\!\leftarrow\!\tfrac12(\mathbf u^{**}+\mathbf u^{n})$
+  is applied; BDIM is re-blended; a second pressure projection with
+  weight $w{=}\tfrac12$ returns $\mathbf u^{n+1}$.
+\end{enumerate}
+The advection--diffusion sub-step itself uses forward Euler.  CFL
+stability requires
+$\Delta t \le \min(h)\,/\,(v_{\max} + 3(\nu+\nu_t^{\max}))$,
+where $\nu_t$ is the (optional) Smagorinsky eddy viscosity.
+
+\paragraph{Advection schemes}  Six choices are exposed for the flux
+$\nabla\!\cdot\!(\mathbf u\!\otimes\!\phi)$:
+third-order upwind QUICK~\cite{leonard1979quick} with median limiter;
+a TVD-limited variant (ADBQUICKEST); the high-resolution
+CUBISTA~\cite{alves2003convergent}; van~Leer's
+limiter~\cite{vanleer1979towards}; plain central differences; and
+Stam's unconditionally stable semi-Lagrangian
+back-tracing~\cite{stam1999stable} for very large $\Delta t$ at the
+cost of numerical diffusion.
+
+\paragraph{Optional Smagorinsky LES}  When the grid is too coarse to
+resolve all eddies, the subgrid-scale closure of
+Smagorinsky~\cite{smagorinsky1963general} adds an eddy viscosity
+$\nu_t=(C_s\Delta)^{2}|\bar S|$, with
+$|\bar S|=\sqrt{2\,\bar S_{ij}\bar S_{ij}}$ the resolved strain-rate
+magnitude and $\Delta=h$.  The momentum diffusion becomes the
+variable-coefficient operator
+$\nabla\!\cdot\!\bigl[(\nu+\nu_t)\nabla\mathbf u\bigr]$,
+discretised by arithmetic averaging of $(\nu+\nu_t)$ at the MAC
+faces.  Setting $C_s{=}0$ recovers the constant-viscosity path at
+zero overhead.
+
+
+\subsection{Boundary Data Immersion Method}\label{sec:bdim}
+
+Bodies are represented by a signed-distance function (SDF)
+$d(\mathbf x)$, with $d>0$ in the fluid, $d=0$ on the surface, and
+$d<0$ inside the body.  Two smooth kernel functions of half-width
+$\varepsilon{=}1.5h$ are built from $d$: a Heaviside-like indicator
+\begin{equation}
+  \mu_0(d)\!=\!
+  \begin{cases}
+    0,& d\!\le\!-\varepsilon,\\
+    \tfrac12\!\left[1+\tfrac{d}{\varepsilon}
+      +\tfrac{\sin(\pi d/\varepsilon)}{\pi}\right],
+      & |d|\!<\!\varepsilon,\\
+    1,& d\!\ge\!\varepsilon,
+  \end{cases}
+  \label{eq:mu0}
+\end{equation}
+and a first-moment kernel $\mu_1(d)$ obtained by integrating
+$\mu_0$.  At each RK2 sub-step the provisional velocity $\phi$ is
+blended with the prescribed body velocity $\mathbf v_b$ via the
+BDIM2 \emph{meta-equation}~\cite{maertens2015accurate,weymouth2011boundary}:
+\begin{equation}
+  \phi_\mathrm{out}
+  = \mu_0\,(\phi-\mathbf v_b)
+  + \mathbf v_b
+  + \mu_1\,\hat{\mathbf n}\!\cdot\!\nabla(\phi-\mathbf v_b),
+  \label{eq:bdim}
+\end{equation}
+with $\hat{\mathbf n}\!=\!\nabla d/|\nabla d|$.  Inside the body
+$\mu_0,\mu_1\!\to\!0$ and $\phi_\mathrm{out}\!=\!\mathbf v_b$; in the
+fluid $\mu_0\!\to\!1,\mu_1\!\to\!0$ and $\phi$ is recovered; the
+transition layer provides second-order enforcement of the no-slip
+boundary condition without sub-grid reconstruction.
+
+The pressure-projection step is likewise modified to respect the
+body mask,
+\begin{equation}
+  \nabla\!\cdot\!\!\left(\frac{w\,\Delta t}{\rho}\,\mu_0\,\nabla p\right)
+  = \nabla\!\cdot\!\tilde{\mathbf u},
+  \label{eq:poisson}
+\end{equation}
+so that the pressure gradient vanishes inside the body and the
+projection remains well-posed at the surface.
+
+\paragraph{Force integration}
+Hydrodynamic forces on a body are recovered by integrating the
+Cauchy stress tensor over a smoothed surface using an $\varepsilon$-
+width mollified Dirac:
+\begin{align}
+  \mathbf F_\mathrm{visc}
+  &=\int(\bm\sigma\!\cdot\!\hat{\mathbf n})\,
+      \delta_\varepsilon(d-\varepsilon)\,\mathrm dV,\\
+  \mathbf F_\mathrm{pres}
+  &=-\int p\,\hat{\mathbf n}\,
+      \delta_\varepsilon(d)\,\mathrm dV,
+\end{align}
+with
+$\delta_\varepsilon(d)=[1+\cos(\pi d/\varepsilon)]/(2\varepsilon)$.
+Torques are accumulated directly from component sums to avoid
+allocating full moment-arm tensors on the GPU.
+
+
+\subsection{Pressure-projection solvers}\label{sec:poisson}
+
+\lilytorch provides three Poisson back-ends.
+
+\paragraph{FFT / DCT (Neumann)}  When every face carries
+$\partial p/\partial n{=}0$, the discrete Neumann Laplacian is
+diagonalised by the type-II Discrete Cosine
+Transform~\cite{makhoul1980dct},
+$\lambda_k=(2/h^2)[\cos(\pi k/N)-1]$, and the solve reduces to
+DCT--divide--iDCT.  This is the fastest path and is used for the
+majority of validation benchmarks.
+
+\paragraph{Free-space Green's function}  For unbounded domains the
+RHS is zero-padded to $2N$ and convolved with a regularised Green's
+function.  In 2-D we use the eighth-order algebraic smoothing of
+Hejlesen et al.~\cite{hejlesen2013high}; in 3-D the Gaussian/erf
+regularisation $G(r)=-(4\pi r)^{-1}\mathrm{erf}(r/\sqrt 2\sigma)$
+with $\sigma{=}h$.  Green's functions are precomputed once and cached
+on disk.
+
+\paragraph{Geometric multigrid / MGCG}  When the BDIM mask or a
+variable fluid/body density makes~\eqref{eq:poisson} genuinely
+variable-coefficient, we solve it with a V-cycle
+multigrid~\cite{trottenberg2001multigrid} wrapped, if requested,
+inside a conjugate-gradient iteration (MGCG).  The discrete stencil
+along dimension $d$ reads
+\begin{equation*}
+  \frac{c_{d+}p_{i+1}-(c_{d+}+c_{d-})p_{i}+c_{d-}p_{i-1}}{h^{2}},
+\end{equation*}
+with face coefficients $c_{d\pm}$ taken as the harmonic average of
+$\mu_0$ (or $\Delta t/\rho$ in the variable-density case) at cell
+faces.  Available smoothers are weighted Jacobi
+($\omega{=}0.7$ default) and red/black Gauss--Seidel; full-weighting
+restriction and bilinear (2-D) or trilinear (3-D) prolongation are
+used.  The coarsest level is a trivial $2\times 2\,(\times 2)$ direct
+solve.
+
+\paragraph{Variable-density extension for \mujoco coupling}  When the
+body density $\rho_b$ differs from the fluid $\rho_f$ we assemble an
+effective density
+$\rho(\mathbf x)=\rho_b+(\rho_f-\rho_b)\mu_0(\mathbf x)$ and face
+coefficients $c=\Delta t/\rho$ directly on the MAC faces.  This
+coupled variable-density operator departs from the single-density
+BDIM form of \waterlily and is therefore solved exclusively by the
+multigrid path.
+
+
+\subsection{Body representation: analytical vs mesh}\label{sec:bodies}
+
+The abstract \texttt{Body} class exposes three operations:
+(i) \texttt{compute\_sdf} evaluates $d$ on the (possibly staggered)
+grid; (ii) \texttt{compute\_velocity} returns $\mathbf v_b$; and
+(iii) \texttt{update(t, it)} advances the body kinematics.  Two
+concrete families are provided.
+
+\subsubsection{Analytical bodies}  For primitives whose SDF admits a
+closed form we evaluate $d$ directly on the staggered grid at each
+step.  Built-in shapes are spheres / circles, axis-aligned boxes,
+capsules (useful for articulated fish tails), and NACA-foil fish
+spines parameterised by a cubic spline of centre-line
+positions~\cite{kern2006simulations}.  Because $d$ is evaluated
+analytically at every time step, arbitrary kinematics (prescribed or
+driven by \mujoco) cost only a small number of elementwise GPU
+kernels.
+
+\subsubsection{Mesh bodies}  For arbitrary
+triangulated geometry (STL/OBJ) the SDF is computed in a
+pre-processing pass and then transformed rigidly at run time.  The
+pipeline is: closest-point queries through
+\textsc{Open3D}~\cite{zhou2018open3d} ray-casting; sign determination
+via winding numbers; narrow-band fast
+marching~\cite{sethian1996fastmarch} (scikit-fmm) to extend the
+distance field beyond the mesh; and projection onto the three MAC
+face grids.  At simulation time the body pose (from \mujoco or from
+a prescribed trajectory) rigidly transforms the cached SDF via a
+\texttt{pytorch-interpolation} regular-grid trilinear interpolator,
+so that mesh updates are a single GPU interpolation rather than a
+re-triangulation.
+
+\subsubsection{Composite and articulated bodies}
+The union of two bodies is represented through the pointwise minimum
+of their SDFs, $d_\mathrm{union}=\min(d_1,d_2)$.  A
+\texttt{CompositeSegmentBody} stacks the per-link SDFs of an
+articulated animat, while \texttt{MultiAnimatBodies} aggregates
+independent swimmers in the same domain.  An axis-aligned
+bounding-box optimisation avoids evaluating each link's SDF over the
+full grid whenever it occupies less than $\approx 90\%$ of the
+domain, which is the common case for small animats in large pools.
+
+
+\subsection{Coupling with \mujoco through \farms}\label{sec:coupling}
+
+In standalone mode the \texttt{FluidSolver} simply advances
+Eqs.~\eqref{eq:momentum}--\eqref{eq:continuity} together with
+prescribed body kinematics.  In coupled mode, the solver is invoked
+as a \farms \texttt{TaskExtension} (\texttt{FluidExtension}), which
+participates in \mujoco's \texttt{before\_step} callback.  One
+coupled time step proceeds as follows:
+\begin{enumerate}
+\item \emph{Pose read-out.}  \farms sensors expose link positions,
+      orientations, and linear/angular velocities; these are copied
+      into \pytorch tensors.
+\item \emph{SDF assembly.}  Each link updates its cached SDF
+      (analytical re-evaluation for primitives, rigid-transform
+      interpolation for meshes) inside a narrow AABB; the union
+      over links is taken via $\min$.
+\item \emph{Fluid step.}  The Heun predictor--corrector advances the
+      velocity field, applying BDIM at every RK2 stage and solving
+      the pressure Poisson equation on the current mask.
+\item \emph{Force integration.}  Viscous and pressure contributions
+      are integrated per link, plus a hydrostatic buoyancy term
+      $F_{z,\mathrm{buoy}}=-\rho_w (m_\ell/\rho_b) g\,
+      \min\!\bigl((z_\mathrm{surf}+h_\ell-z_\ell)/(2h_\ell),1\bigr)$
+      that smoothly switches on as a link crosses a prescribed free
+      surface.
+\item \emph{Wrench write-back.}  The six-vector per-link wrench is
+      written to \mujoco's \texttt{xfrc\_applied} buffer and
+      integrated by the rigid-body engine during its next step.
+\end{enumerate}
+Because \lilytorch and \mujoco share a single Python process, no
+inter-process communication is required; the GPU and CPU execute in
+alternation once per simulation step.  A complementary
+\texttt{WaterDynamicsCallback} feeds the CFD velocity field back to
+\mujoco's native drag solver for cheaper, lower-fidelity scenarios
+(e.g.\ shallow-water robots), and a \texttt{FlowViewer} extension
+renders vorticity isosurfaces directly inside the \mujoco GUI and
+recorded video, aiding debugging.
+
+\paragraph{Body density and buoyancy}  Hydrodynamic and inertial
+properties of the multibody model are inherited from the \mujoco XML
+(masses, inertias, collision meshes).  The fluid solver additionally
+queries a \emph{body density} $\rho_b$: when it equals the fluid
+density the projection reduces to the standard BDIM form; otherwise
+the variable-density multigrid path is taken and buoyancy is computed
+from the displaced volume.  For mesh-based animats (e.g.\ the
+pleurodeles and salamander models shipped with the repository) the
+displaced volume is tabulated once from the SDF and reused; for
+analytical composites it is the sum of the primitive volumes.
+
+
+\subsection{Non-Newtonian rheology and sponge layer}\label{sec:extras}
+
+Two additional physical models extend the solver to soft-robotic and
+open-domain scenarios.  A Carreau fluid
+model~\cite{bird1987dynamics}
+$\nu(\dot\gamma)=\nu_\infty+(\nu_0-\nu_\infty)[1+(\lambda\dot\gamma)^2]^{(n-1)/2}$
+captures shear-thinning behaviour (e.g.\ swimming in
+carboxymethyl-cellulose gels), and a Herschel--Bulkley extension
+adds a yield-stress term
+$\tau_y/[\rho\max(\dot\gamma,\epsilon)]$ that is clamped from above
+by the CFL diffusion limit.  A quadratic sponge layer of thickness
+$L_s$ and strength $\sigma_\mathrm{max}$ damps outgoing disturbances
+through the post-projection update
+$\mathbf u\!\leftarrow\!\mathbf u/(1+\Delta t\,\sigma)$, which
+emulates an infinite far-field at a fraction of the cost of
+perfectly-matched layers.
+
+
+\subsection{Implementation and GPU kernel fusion}\label{sec:impl}
+
+The solver is written in approximately 10\,k lines of Python on top
+of \pytorch~\cite{paszke2019pytorch}.  All tensors live on a single
+CUDA device; multi-GPU domain decomposition is not required for the
+problem sizes considered here ($N_x N_y N_z\!\lesssim\!256^{3}$
+typical, $512^3$ achievable).  Hot paths --- the advection--diffusion
+kernel, the multigrid smoother and full V-cycle, the SDF and
+$\mu_0$/$\mu_1$ evaluation, and the force integration --- are
+expressed as \emph{module-level pure functions} rather than methods,
+so that \texttt{torch.compile} with \texttt{mode="reduce-overhead"}
+can fuse them and capture CUDA graphs.  Variants are generated per
+spatial dimension and per smoother choice.
+
+YAML configuration files drive every simulation: the
+\texttt{solver}, \texttt{boundary\_conditions}, \texttt{body}, and
+\texttt{output} blocks select grid, BCs, bodies, and logging; an
+additional \texttt{physics} block is used only when coupling with
+\farms.  State checkpoints are written to HDF5 and can be resumed.
+
+
+\subsection{Union narrow-band optimisation for articulated bodies}\label{sec:union-narrow-band}
+
+Articulated animats are represented as a collection of $N_b$ rigid
+links, each carrying its own SDF lookup table.  The naive pipeline
+evaluates, at every fractional step, a \emph{separate} per-link SDF
+interpolation, $\mu_0$/$\mu_1$ kernel, shared stress tensor, and BDIM
+meta-equation, all on the \emph{full} grid.  This produces
+$\mathcal O(N_b N)$ memory traffic and $\mathcal O(N_b N_{\text{ops}})$
+kernel launches, which dominates the step cost well before the linear
+solves do: the operators involved are bandwidth-bound, and the GPU
+spends most of its time on launch overhead rather than arithmetic.
+
+The key observation is that each body occupies a small axis-aligned
+bounding box (AABB), and the \emph{union} of all per-link AABBs
+(padded by a 2-cell halo to keep finite-difference stencils in bounds)
+still covers only a fraction of the domain,
+$N_\cup \ll N$.  \lilytorch therefore restricts the bandwidth-bound
+operators --- the shared viscous-stress tensor, the $\mu_0$/$\mu_1$
+and normals fields, and the BDIM2 meta-equation itself --- to this
+union sub-block, and further replaces the per-link Python loop over
+\texttt{grid\_sample} calls by a single batched
+\texttt{grid\_sample} over a padded tensor of stacked LUTs of shape
+$(N_b,\,1,\,N_x^{\max},\,N_y^{\max},\,N_z^{\max})$, combined by a
+\texttt{min}-reduction along the body axis.  Per-link rigid-body
+velocities $\mathbf v_i = \mathbf l_i + \boldsymbol\omega_i \times
+(\mathbf r - \mathbf c_i)$ are assembled in a single batched tensor
+expression and \texttt{gather}-ed at the per-cell
+$\arg\min$ of the union SDF.  Because the sub-block shape changes
+with body pose, the crop kernels are compiled with
+\texttt{dynamic=True}; the outer envelope is rounded up to a bucket
+of 16 cells per axis so that \texttt{torch.compile} sees only a
+bounded number of shape specialisations during a long run.  The
+static-shape, full-grid kernels (advection--diffusion, Poisson) retain
+\texttt{mode="reduce-overhead"} and the associated CUDA-graph
+capture.
+
+The four ingredients --- union-cropped forces, union-cropped
+$\mu$/normals, union-cropped BDIM, and batched SDF --- share the same
+AABB bookkeeping, so their savings are additive and are all toggled
+by a single user flag, \texttt{solver.union\_narrow\_band}.  The
+expected speed-up grows both with $N_b$ (kernel-launch overhead
+amortised over all links in one launch) and with $N/N_\cup$ (memory
+traffic amortised over the occupied sub-block), which makes the
+optimisation \emph{most} effective for simulations with \emph{many}
+moving bodies and \emph{large} grids --- precisely the regime we
+target.  For the 9-link 1guilla free-swimmer on an RTX 4080 SUPER,
+the body-update stage drops from 8.2 to 2.9\,ms at
+$256{\times}64{\times}64$ ($2.8\times$) and from 8.4 to
+3.4\,ms at $512{\times}128{\times}128$ ($2.5\times$); hydrodynamic
+forces speed up by $\sim\!2.3\times$ and the BDIM meta-equation by
+$6$--$11\times$ across the swept grid sizes.
+
+
+% =====================================================================
+\section{Discussion}\label{sec:discussion}
+% =====================================================================
+
+\subsection{Design trade-offs}
+
+\lilytorch occupies a middle ground in the landscape of
+immersed-boundary solvers.  Highly-optimised C++/CUDA codes such as
+\textsc{IBAMR}~\cite{bhalla2013unified} and
+\textsc{AMReX}-based solvers offer adaptive mesh refinement and
+distributed-memory scaling, at the cost of a steep learning curve
+and a much less flexible body
+interface.  \waterlily~\cite{weymouth2024waterlily} pioneered the
+idea of a BDIM solver that is short enough to be re-read and
+hackable; our work preserves that philosophy but moves the
+implementation to \pytorch, which grants three practical
+advantages.  First, \pytorch's autograd and \texttt{torch.compile}
+infrastructure are readily available for \emph{adjoint}-based shape
+and control optimisation~\cite{kochkov2021machinelearned}, without
+any additional code.  Second, the Python ecosystem makes it trivial
+to embed the solver inside \mujoco, \farms, or reinforcement-learning
+training loops, which is our primary use case.  Third, every
+research group already familiar with \pytorch can modify the solver
+--- for instance by swapping the advection scheme or plugging in a
+learned closure~\cite{brunton2020machine} --- without cross-language
+FFI.
+
+The price paid is a single-GPU ceiling: with $512^3$ grids at single
+precision we are memory-bound on a 40\,GB accelerator and cannot
+(yet) scale out.  For the 3-D experiments reported in the companion
+section (free-swimming anguilliform animats, salamander paddling,
+single-sphere sedimentation benchmarks against
+Koumoutsakos \& Leonard~\cite{koumoutsakos1995high} and
+Bergmann \& Iollo~\cite{bergmann2011accurate}) this ceiling is
+comfortable; beyond it, either domain decomposition or the existing
+PETSc back-end~\cite{balay2019petsc} is the most promising path.
+
+
+\subsection{Comparison with analytical drag models}
+
+Most robotics-oriented swimming simulators approximate hydrodynamics
+through link-wise drag and added-mass
+tensors~\cite{porez2014improved}, which are computationally cheap but
+discard wake-induced effects, inter-link shielding, and boundary
+corrections.  By solving the full Navier--Stokes equations on a
+staggered MAC grid with BDIM2, \lilytorch reproduces phenomena that
+are structurally absent from drag-based pipelines: vortex shedding
+behind a pinned cylinder (validated against
+Koumoutsakos \& Leonard~\cite{koumoutsakos1995high}), thrust
+enhancement from body undulation, and wake--wake interaction between
+swimmers.  The cost is roughly two to three orders of magnitude
+higher wall-clock time per step than a pure drag simulator, which is
+acceptable for scientific studies (hours to days per trajectory) but
+precludes, for the moment, training full reinforcement-learning
+policies at scale unless low-resolution proxies are used.
+
+
+\subsection{Body-representation considerations}
+
+The dual analytical/mesh body path is crucial for embodied robotics
+experiments.  Analytical primitives keep the SDF computation
+tractable when an articulated animat has dozens of links whose
+shapes would otherwise be expensive to interpolate every step; they
+also sidestep the mesh-resolution / grid-resolution mismatch that
+can introduce high-frequency noise at the BDIM boundary.  Conversely,
+mesh bodies are indispensable whenever the geometry comes from
+imaging data (fish micro-CT, salamander body scans) or has been
+optimised offline.  Our use of \textsc{Open3D} ray-casting, winding
+numbers, and fast marching yields an SDF of quality comparable to
+signed-distance generators built on top of
+\textsc{CGAL}~\cite{alliez2009cgal}, but in pure Python and without
+C++ toolchain dependencies --- a practical advantage for a library
+that must be installable on a wide variety of robotics workstations.
+The rigid-transform interpolation performed at run time preserves
+single-GPU throughput: a typical STL body costs only a few extra
+milliseconds per step, independent of the number of triangles.
+
+
+\subsection{Coupling stability and time-step considerations}
+
+Two-way coupling with \mujoco exposes two numerical pitfalls.
+\emph{Added-mass instability} can arise when $\rho_b\!\approx\!\rho_f$
+and the fluid forces dominate the body inertia~\cite{causin2005added};
+for the neutrally-buoyant animats studied here we mitigate it with
+the variable-density projection
+$\rho=\rho_b+(\rho_f-\rho_b)\mu_0$, which absorbs the fluid's
+virtual mass into the Poisson operator rather than treating it as an
+explicit body force.  \emph{Temporal resolution mismatch}
+between the fluid (CFL-limited at $\Delta t\!\sim\!10^{-4}$~s on a
+$1$~cm grid) and \mujoco (typically $10^{-3}$~s for contact
+stability) is handled by running both engines at the fluid time
+step; the overhead on the rigid-body side is negligible compared to
+the fluid cost.
+
+Finally, the sponge layer (Section~\ref{sec:extras}) is particularly
+important for low-Reynolds swimmers whose pressure Poisson equation
+instantaneously communicates the body motion to the whole domain; a
+few-centimetre layer at the walls suppresses spurious recirculation
+without contaminating the near-field, as verified on single-sphere
+sedimentation benchmarks.
+
+
+\subsection{Limitations and outlook}
+
+At present \lilytorch is limited to uniform Cartesian grids and
+single-phase flow; free-surface extensions through a volume-of-fluid
+or level-set approach, and local grid refinement through an AMReX
+back-end, are natural next steps.  Adaptive time stepping is
+currently manual and could be automated from the flow diagnostics
+already tracked by the solver (kinetic energy, enstrophy, max-CFL,
+max-divergence).  On the robotics side, a tighter integration of the
+fluid forces into \mujoco's semi-implicit integrator would address
+the residual added-mass instability for fully hollow bodies.  Finally,
+because all kernels are \pytorch-native and differentiable, end-to-end
+adjoint optimisation of gait parameters or morphology appears
+feasible~\cite{kochkov2021machinelearned,brunton2020machine} and will
+be the subject of follow-up work.
+
+
+% =====================================================================
+% Acknowledgments (placeholder)
+% =====================================================================
+\section*{Acknowledgments}
+The author thanks the members of the BioRobotics Laboratory for
+discussions and for providing the experimental datasets used in the
+companion validation section.
+
+
+% =====================================================================
+\bibliographystyle{IEEEtran}
+\bibliography{references}
+% =====================================================================
+
+\end{document}
