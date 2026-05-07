@@ -30,6 +30,8 @@ class SimConfig(BaseSimConfig):
         # self.compile_forces   = True
         # self.compile_sdf      = True
 
+        self.bdim_physics = {"solref": [0.01, 0.1]}
+
         # ── Animats ───────────────────────────────────────────────────
         self.animats_pars = [
             {
@@ -73,7 +75,7 @@ class SimConfig(BaseSimConfig):
         self.extent       = 10.0
 
         # ── Arena ────────────────────────────────────────────────────
-        self.wall_thickness = 0.003
+        self.wall_thickness = 0.03
         self.wall_height    = 0.03
         self.arena_pose     = [0, 0, 0, 0, 0, 0]
         self.water_drag     = False

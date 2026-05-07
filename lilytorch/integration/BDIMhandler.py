@@ -76,8 +76,6 @@ class BDIMhandler:
         )
         self.device = self.fluid_solver.device
 
-        # override composite-body update with our FARMS-driven version
-        self.fluid_solver.composite_body.update = self.update
 
         # ---- initialise u0 from inlet BC ----
         u_inlet = self.fluid_solver.adv_diff_solver.BC_values_u[1]
@@ -192,12 +190,14 @@ class BDIMhandler:
             physics.model.geom_solref[:, 0] = solref[0]
             physics.model.geom_solref[:, 1] = solref[1]
 
+
         # ---- allocate per-body SDF / velocity arrays if missing ----
         if self.fluid_solver._solver_method == "kernel":
-            self._init_static_body_metadata()
             self._init_interp()
-
+        self._init_static_body_metadata()
         self._init_update()
+        # override composite-body update with our FARMS-driven version
+        self.fluid_solver.composite_body.update = self.update
 
     def _init_update(self):
         if self.ndim == 3:
@@ -287,11 +287,11 @@ class BDIMhandler:
                     np.asarray(sen.com_ang_velocity(iteration, lk), dtype=self.dtype_np)
                     for lk in range(nlinks)
                 ])
-            com_poses.append(com)
-            urdf_poses.append(urdf)
-            Rs.append(R)
-            lin_vels.append(lin)
-            ang_vels.append(ang)
+            com_poses.append(torch.from_numpy(com).to(self.device))
+            urdf_poses.append(torch.from_numpy(urdf).to(self.device))
+            Rs.append(torch.from_numpy(R).to(self.device))
+            lin_vels.append(torch.from_numpy(lin).to(self.device))
+            ang_vels.append(torch.from_numpy(ang).to(self.device))
         return com_poses, urdf_poses, Rs, lin_vels, ang_vels
 
     def _init_interp(self):
@@ -433,179 +433,6 @@ class BDIMhandler:
     #  update: FARMS kinematics  ->  SDF fields + body velocities
     # ==================================================================
 
-    # ---- 2-D update --------------------------------------------------
-    def _update_2d(self, t, iteration, dt=1):
-
-        fs   = self.fluid_solver
-        comp = fs.composite_body
-        gs   = fs.grid_shape
-        B    = comp.nbodies
-
-        _FAR = 1e4   # far-field SDF sentinel (same as 3-D path)
-
-        com_poses, urdf_poses, Rs, lin_vels, ang_vels = self.gather_data(iteration)
-
-        h_grid = comp.h          # uniform grid spacing
-
-        # Per-body sparse SDF storage (mirrors the 3-D path).  Replaces
-        # the legacy dense (B, Nx, Ny) ``comp.sdf_vals`` stack.
-        comp._sdf_sparse = [None] * B
-
-        # Initialise union fields to _FAR / zero (once per step).
-        comp.sdf_val.fill_(_FAR)
-        comp.sdf_val_u.fill_(_FAR)
-        comp.sdf_val_v.fill_(_FAR)
-        comp.body_u.zero_()
-        comp.body_v.zero_()
-
-        # Cache per-body AABBs for downstream use (e.g. narrow-band forces).
-        for body_i, body in enumerate(comp.bodies):
-            (animat_id, link_id) = comp.body_ids[body_i]
-
-            com_pos  = com_poses[animat_id][link_id]
-            urdf_pos = urdf_poses[animat_id][link_id]
-            R        = Rs[animat_id][link_id]
-            lin_vel  = lin_vels[animat_id][link_id]
-            ang_vel  = ang_vels[animat_id][link_id]
-
-            R_T = R.T  # (2, 2) transposed rotation
-
-            # ── AABB-clipped SDF evaluation ─────────────────────────
-            # Mirror the 3-D pattern: AABB-clip whenever the body
-            # provides a local-frame bounding-box descriptor (mesh
-            # bodies via ``body.sdf.x/y`` axes; analytical bodies via
-            # ``body.local_aabb`` derived from the contour with a
-            # band-radius safety margin).  Bodies without either
-            # descriptor fall through to the full-grid path.
-            aabb = self._body_aabb_local_2d(
-                body, R, urdf_pos,
-                comp.x, comp.y,
-                h_grid, gs, pad=3,
-            )
-            comp._body_aabbs[body_i] = aabb
-
-            sdf_eval = body.sdf
-
-            if aabb is not None:
-                # ── Sub-block path (main saving) ────────────────────
-                (i0, i1, j0, j1) = aabb
-                sl = (slice(i0, i1), slice(j0, j1))
-
-                px, py = rotate_grid_2d(
-                    comp.X[sl], comp.Y[sl], R_T, urdf_pos)
-                sdf_sub = sdf_eval(px, py)
-
-                # Per-body SDF (sparse: store sub-block + AABB for forces)
-                comp._sdf_sparse[body_i] = (aabb, sdf_sub)
-
-                # Evaluate SDF directly at staggered face locations
-                px_u, py_u = rotate_grid_2d(
-                    comp.Xu_stag[sl], comp.Yu_stag[sl], R_T, urdf_pos)
-                sdf_sub_u = sdf_eval(px_u, py_u)
-
-                px_v, py_v = rotate_grid_2d(
-                    comp.Xv_stag[sl], comp.Yv_stag[sl], R_T, urdf_pos)
-                sdf_sub_v = sdf_eval(px_v, py_v)
-
-                # Sub-block body velocity (rigid-body: lv - ω × r in 2-D
-                # collapses to ω being a scalar out-of-plane).
-                vel_sub_u = lin_vel[0] - ang_vel * (
-                    comp.Yu_stag[sl] - com_pos[1])
-                vel_sub_v = lin_vel[1] + ang_vel * (
-                    comp.Xv_stag[sl] - com_pos[0])
-
-                # Sub-block union min ─ contiguous read avoids slow
-                # strided reads inside torch.where.
-                old_cc = comp.sdf_val[sl].contiguous()
-                comp.sdf_val[sl] = torch.where(sdf_sub < old_cc, sdf_sub, old_cc)
-
-                old_u = comp.sdf_val_u[sl].contiguous()
-                mask_u = sdf_sub_u < old_u
-                comp.sdf_val_u[sl] = torch.where(mask_u, sdf_sub_u, old_u)
-                comp.body_u[sl] = torch.where(
-                    mask_u, vel_sub_u, comp.body_u[sl].contiguous())
-
-                old_v = comp.sdf_val_v[sl].contiguous()
-                mask_v = sdf_sub_v < old_v
-                comp.sdf_val_v[sl] = torch.where(mask_v, sdf_sub_v, old_v)
-                comp.body_v[sl] = torch.where(
-                    mask_v, vel_sub_v, comp.body_v[sl].contiguous())
-
-            else:
-                # ── Full-grid path (body covers >90 % of grid) ─────
-                px, py = rotate_grid_2d(comp.X, comp.Y, R_T, urdf_pos)
-                sdf_cc = sdf_eval(px, py)
-                comp._sdf_sparse[body_i] = (None, sdf_cc)
-
-                px_u, py_u = rotate_grid_2d(
-                    comp.Xu_stag, comp.Yu_stag, R_T, urdf_pos)
-                sdf_u = sdf_eval(px_u, py_u)
-                px_v, py_v = rotate_grid_2d(
-                    comp.Xv_stag, comp.Yv_stag, R_T, urdf_pos)
-                sdf_v = sdf_eval(px_v, py_v)
-
-                vel_u = lin_vel[0] - ang_vel * (comp.Yu_stag - com_pos[1])
-                vel_v = lin_vel[1] + ang_vel * (comp.Xv_stag - com_pos[0])
-
-                mask_cc = sdf_cc < comp.sdf_val
-                comp.sdf_val = torch.where(mask_cc, sdf_cc, comp.sdf_val)
-                mask_u = sdf_u < comp.sdf_val_u
-                comp.sdf_val_u = torch.where(mask_u, sdf_u, comp.sdf_val_u)
-                comp.body_u    = torch.where(mask_u, vel_u, comp.body_u)
-                mask_v = sdf_v < comp.sdf_val_v
-                comp.sdf_val_v = torch.where(mask_v, sdf_v, comp.sdf_val_v)
-                comp.body_v    = torch.where(mask_v, vel_v, comp.body_v)
-
-            comp.com_pos[body_i] = com_pos
-            body.com_pos = com_pos
-
-            # contour update (world frame)
-            body.cnt_update = R @ body.cnt + urdf_pos[:, None]
-
-            # optional contour mask for overlapping links
-            if self.contour_mask:
-                x_cnt = body.cnt_update[0]
-                y_cnt = body.cnt_update[1]
-                prev_body_i = self._prev_body_index[body_i]
-                next_body_i = self._next_body_index[body_i]
-
-                if prev_body_i is None and next_body_i is None:
-                    mask = torch.ones_like(x_cnt, dtype=torch.bool)
-                elif prev_body_i is None:
-                    (_, next_link_id) = comp.body_ids[next_body_i]
-                    body_p = comp.bodies[next_body_i]
-                    pt = Rs[animat_id][next_link_id].T @ (
-                        torch.stack((x_cnt, y_cnt))
-                        - urdf_poses[animat_id][next_link_id][:, None]
-                    )
-                    mask = (body_p.sdf(pt[0], pt[1]) - body.h) >= 0
-                elif next_body_i is None:
-                    (_, prev_link_id) = comp.body_ids[prev_body_i]
-                    body_m = comp.bodies[prev_body_i]
-                    pt = Rs[animat_id][prev_link_id].T @ (
-                        torch.stack((x_cnt, y_cnt))
-                        - urdf_poses[animat_id][prev_link_id][:, None]
-                    )
-                    mask = (body_m.sdf(pt[0], pt[1]) - body.h) >= 0
-                else:
-                    (_, prev_link_id) = comp.body_ids[prev_body_i]
-                    body_m = comp.bodies[prev_body_i]
-                    pt_m = Rs[animat_id][prev_link_id].T @ (
-                        torch.stack((x_cnt, y_cnt))
-                        - urdf_poses[animat_id][prev_link_id][:, None]
-                    )
-                    (_, next_link_id) = comp.body_ids[next_body_i]
-                    body_p = comp.bodies[next_body_i]
-                    pt_p = Rs[animat_id][next_link_id].T @ (
-                        torch.stack((x_cnt, y_cnt))
-                        - urdf_poses[animat_id][next_link_id][:, None]
-                    )
-                    sdf_m = body_m.sdf(pt_m[0], pt_m[1]) - body.h
-                    sdf_p = body_p.sdf(pt_p[0], pt_p[1]) - body.h
-                    mask = (sdf_m >= 0) & (sdf_p >= 0)
-                body.mask = mask
-
-            body.r_com = body.cnt_update - com_pos[:, None]
 
     @staticmethod
     def _body_local_aabb_2d(body):
@@ -808,6 +635,175 @@ class BDIMhandler:
         body_rot = R @ local_rotation
         return body_pos, body_rot
 
+    @staticmethod
+    def _slice_from_aabb(aabb, ndim):
+        """Return a region slice tuple and whether it spans the full grid."""
+        if aabb is None:
+            return (slice(None),) * ndim, True
+        return tuple(
+            slice(aabb[2 * axis], aabb[2 * axis + 1])
+            for axis in range(ndim)
+        ), False
+
+    @staticmethod
+    def _store_sparse_sdf(comp, body_i, aabb, sdf_region):
+        comp._sdf_sparse[body_i] = (
+            (None, sdf_region) if aabb is None else (aabb, sdf_region)
+        )
+
+    @staticmethod
+    def _merge_region_sdf(target_sdf, sdf_region, sl, full_region):
+        if full_region:
+            mask = sdf_region < target_sdf
+            target_sdf.copy_(torch.where(mask, sdf_region, target_sdf))
+            return
+
+        old_sdf = target_sdf[sl].contiguous()
+        mask = sdf_region < old_sdf
+        target_sdf[sl] = torch.where(mask, sdf_region, old_sdf)
+
+    @staticmethod
+    def _merge_region_sdf_and_velocity(target_sdf, target_vel, sdf_region,
+                                       vel_region, sl, full_region):
+        if full_region:
+            mask = sdf_region < target_sdf
+            target_sdf.copy_(torch.where(mask, sdf_region, target_sdf))
+            target_vel.copy_(torch.where(mask, vel_region, target_vel))
+            return
+
+        old_sdf = target_sdf[sl].contiguous()
+        mask = sdf_region < old_sdf
+        target_sdf[sl] = torch.where(mask, sdf_region, old_sdf)
+        target_vel[sl] = torch.where(
+            mask, vel_region, target_vel[sl].contiguous())
+
+    # ---- 2-D update --------------------------------------------------
+    def _update_2d(self, t, iteration, dt=1):
+
+        fs   = self.fluid_solver
+        comp = fs.composite_body
+        gs   = fs.grid_shape
+        B    = comp.nbodies
+
+        _FAR = 1e4   # far-field SDF sentinel (same as 3-D path)
+
+        com_poses, urdf_poses, Rs, lin_vels, ang_vels = self.gather_data(iteration)
+
+        h_grid = comp.h          # uniform grid spacing
+
+        # Per-body sparse SDF storage (mirrors the 3-D path).  Replaces
+        # the legacy dense (B, Nx, Ny) ``comp.sdf_vals`` stack.
+        comp._sdf_sparse = [None] * B
+
+        # Initialise union fields to _FAR / zero (once per step).
+        comp.sdf_val.fill_(_FAR)
+        comp.sdf_val_u.fill_(_FAR)
+        comp.sdf_val_v.fill_(_FAR)
+        comp.body_u.zero_()
+        comp.body_v.zero_()
+
+        # Cache per-body AABBs for downstream use (e.g. narrow-band forces).
+        for body_i, body in enumerate(comp.bodies):
+            (animat_id, link_id) = comp.body_ids[body_i]
+
+            com_pos  = com_poses[animat_id][link_id]
+            urdf_pos = urdf_poses[animat_id][link_id]
+            R        = Rs[animat_id][link_id]
+            lin_vel  = lin_vels[animat_id][link_id]
+            ang_vel  = ang_vels[animat_id][link_id]
+
+            R_T = R.T  # (2, 2) transposed rotation
+
+            # ── AABB-clipped SDF evaluation ─────────────────────────
+            # Mirror the 3-D pattern: AABB-clip whenever the body
+            # provides a local-frame bounding-box descriptor (mesh
+            # bodies via ``body.sdf.x/y`` axes; analytical bodies via
+            # ``body.local_aabb`` derived from the contour with a
+            # band-radius safety margin).  Bodies without either
+            # descriptor fall through to the full-grid path.
+            aabb = self._body_aabb_local_2d(
+                body, R, urdf_pos,
+                comp.x, comp.y,
+                h_grid, gs, pad=3,
+            )
+            comp._body_aabbs[body_i] = aabb
+            sl, full_region = self._slice_from_aabb(aabb, self.ndim)
+
+            sdf_eval = body.sdf
+
+            px, py = rotate_grid_2d(comp.X[sl], comp.Y[sl], R_T, urdf_pos)
+            sdf_cc = sdf_eval(px, py)
+            self._store_sparse_sdf(comp, body_i, aabb, sdf_cc)
+
+            # Evaluate SDF directly at staggered face locations and merge the
+            # resulting region, whether it is a narrow AABB or the full grid.
+            px_u, py_u = rotate_grid_2d(
+                comp.Xu_stag[sl], comp.Yu_stag[sl], R_T, urdf_pos)
+            sdf_u = sdf_eval(px_u, py_u)
+
+            px_v, py_v = rotate_grid_2d(
+                comp.Xv_stag[sl], comp.Yv_stag[sl], R_T, urdf_pos)
+            sdf_v = sdf_eval(px_v, py_v)
+
+            vel_u = lin_vel[0] - ang_vel * (comp.Yu_stag[sl] - com_pos[1])
+            vel_v = lin_vel[1] + ang_vel * (comp.Xv_stag[sl] - com_pos[0])
+
+            self._merge_region_sdf(comp.sdf_val, sdf_cc, sl, full_region)
+            self._merge_region_sdf_and_velocity(
+                comp.sdf_val_u, comp.body_u, sdf_u, vel_u, sl, full_region)
+            self._merge_region_sdf_and_velocity(
+                comp.sdf_val_v, comp.body_v, sdf_v, vel_v, sl, full_region)
+
+            comp.com_pos[body_i] = com_pos
+            body.com_pos = com_pos
+
+            # contour update (world frame)
+            body.cnt_update = R @ body.cnt + urdf_pos[:, None]
+
+            # optional contour mask for overlapping links
+            if self.contour_mask:
+                x_cnt = body.cnt_update[0]
+                y_cnt = body.cnt_update[1]
+                prev_body_i = self._prev_body_index[body_i]
+                next_body_i = self._next_body_index[body_i]
+
+                if prev_body_i is None and next_body_i is None:
+                    mask = torch.ones_like(x_cnt, dtype=torch.bool)
+                elif prev_body_i is None:
+                    (_, next_link_id) = comp.body_ids[next_body_i]
+                    body_p = comp.bodies[next_body_i]
+                    pt = Rs[animat_id][next_link_id].T @ (
+                        torch.stack((x_cnt, y_cnt))
+                        - urdf_poses[animat_id][next_link_id][:, None]
+                    )
+                    mask = (body_p.sdf(pt[0], pt[1]) - body.h) >= 0
+                elif next_body_i is None:
+                    (_, prev_link_id) = comp.body_ids[prev_body_i]
+                    body_m = comp.bodies[prev_body_i]
+                    pt = Rs[animat_id][prev_link_id].T @ (
+                        torch.stack((x_cnt, y_cnt))
+                        - urdf_poses[animat_id][prev_link_id][:, None]
+                    )
+                    mask = (body_m.sdf(pt[0], pt[1]) - body.h) >= 0
+                else:
+                    (_, prev_link_id) = comp.body_ids[prev_body_i]
+                    body_m = comp.bodies[prev_body_i]
+                    pt_m = Rs[animat_id][prev_link_id].T @ (
+                        torch.stack((x_cnt, y_cnt))
+                        - urdf_poses[animat_id][prev_link_id][:, None]
+                    )
+                    (_, next_link_id) = comp.body_ids[next_body_i]
+                    body_p = comp.bodies[next_body_i]
+                    pt_p = Rs[animat_id][next_link_id].T @ (
+                        torch.stack((x_cnt, y_cnt))
+                        - urdf_poses[animat_id][next_link_id][:, None]
+                    )
+                    sdf_m = body_m.sdf(pt_m[0], pt_m[1]) - body.h
+                    sdf_p = body_p.sdf(pt_p[0], pt_p[1]) - body.h
+                    mask = (sdf_m >= 0) & (sdf_p >= 0)
+                body.mask = mask
+
+            body.r_com = body.cnt_update - com_pos[:, None]
 
     # ---- 3-D update --------------------------------------------------
     def _update_3d(self, t, iteration, dt=1):
@@ -865,6 +861,7 @@ class BDIMhandler:
                 h_grid, gs, pad=3,
             )
             comp._body_aabbs[body_i] = aabb   # cache for force integration
+            sl, full_region = self._slice_from_aabb(aabb, self.ndim)
 
             # Default `body.sdf` (grid_sample-backed) per-body SDF evaluator.
             # The kernel-path regular-grid sampler is only used by the
@@ -872,157 +869,56 @@ class BDIMhandler:
             # this function at the top.
             sdf_eval = body.sdf
 
-            if aabb is not None:
-                # ── Sub-block path (main saving) ────────────────────
-                # Only rotate + interpolate the AABB sub-block of the
-                # grid, then evaluate SDF directly at staggered
-                # locations / velocity / union-min ALL on the sub-block
-                # with contiguous intermediates.  Strided reads of
-                # union fields are small (~3-5 MB per body) and fit in
-                # L2 cache.
-                (i0, i1, j0, j1, k0, k1) = aabb
-                sl = (slice(i0, i1), slice(j0, j1), slice(k0, k1))
+            px, py, pz = _rotate_grid_3d_compiled(
+                comp.X[sl], comp.Y[sl], comp.Z_grid[sl],
+                R_T, body_pos,
+            )
+            sdf_cc = sdf_eval(px, py, pz)
+            self._store_sparse_sdf(comp, body_i, aabb, sdf_cc)
 
-                px, py, pz = _rotate_grid_3d_compiled(
-                    comp.X[sl], comp.Y[sl], comp.Z_grid[sl],
-                    R_T, body_pos,
-                )
-                sdf_sub = sdf_eval(px, py, pz)       # contiguous
+            # Evaluate SDF directly at staggered face locations
+            # (exact interpolation instead of CC averaging).
+            px_u, py_u, pz_u = _rotate_grid_3d_compiled(
+                comp.Xu_stag[sl], comp.Yu_stag[sl], comp.Zu_stag[sl],
+                R_T, body_pos)
+            sdf_u = sdf_eval(px_u, py_u, pz_u)
 
-                # Per-body SDF (sparse: store sub-block + AABB for forces)
-                comp._sdf_sparse[body_i] = (aabb, sdf_sub)
+            px_v, py_v, pz_v = _rotate_grid_3d_compiled(
+                comp.Xv_stag[sl], comp.Yv_stag[sl], comp.Zv_stag[sl],
+                R_T, body_pos)
+            sdf_v = sdf_eval(px_v, py_v, pz_v)
 
-                # Evaluate SDF directly at staggered face locations
-                # (exact interpolation instead of CC averaging)
-                px_u, py_u, pz_u = _rotate_grid_3d_compiled(
-                    comp.Xu_stag[sl], comp.Yu_stag[sl], comp.Zu_stag[sl],
-                    R_T, body_pos)
-                sdf_sub_u = sdf_eval(px_u, py_u, pz_u)
+            px_w, py_w, pz_w = _rotate_grid_3d_compiled(
+                comp.Xw_stag[sl], comp.Yw_stag[sl], comp.Zw_stag[sl],
+                R_T, body_pos)
+            sdf_w = sdf_eval(px_w, py_w, pz_w)
 
-                px_v, py_v, pz_v = _rotate_grid_3d_compiled(
-                    comp.Xv_stag[sl], comp.Yv_stag[sl], comp.Zv_stag[sl],
-                    R_T, body_pos)
-                sdf_sub_v = sdf_eval(px_v, py_v, pz_v)
+            vel_u = (
+                lin_vel[0]
+                + ang_vel[1] * (comp.Zu_stag[sl] - com_pos[2])
+                - ang_vel[2] * (comp.Yu_stag[sl] - com_pos[1]))
+            vel_v = (
+                lin_vel[1]
+                + ang_vel[2] * (comp.Xv_stag[sl] - com_pos[0])
+                - ang_vel[0] * (comp.Zv_stag[sl] - com_pos[2]))
+            vel_w = (
+                lin_vel[2]
+                + ang_vel[0] * (comp.Yw_stag[sl] - com_pos[1])
+                - ang_vel[1] * (comp.Xw_stag[sl] - com_pos[0]))
 
-                px_w, py_w, pz_w = _rotate_grid_3d_compiled(
-                    comp.Xw_stag[sl], comp.Yw_stag[sl], comp.Zw_stag[sl],
-                    R_T, body_pos)
-                sdf_sub_w = sdf_eval(px_w, py_w, pz_w)
-
-                # Sub-block body velocity (strided coord reads →
-                # contiguous output from element-wise arithmetic)
-                vel_sub_u = (
-                    lin_vel[0]
-                    + ang_vel[1] * (comp.Zu_stag[sl] - com_pos[2])
-                    - ang_vel[2] * (comp.Yu_stag[sl] - com_pos[1]))
-                vel_sub_v = (
-                    lin_vel[1]
-                    + ang_vel[2] * (comp.Xv_stag[sl] - com_pos[0])
-                    - ang_vel[0] * (comp.Zv_stag[sl] - com_pos[2]))
-                vel_sub_w = (
-                    lin_vel[2]
-                    + ang_vel[0] * (comp.Yw_stag[sl] - com_pos[1])
-                    - ang_vel[1] * (comp.Xw_stag[sl] - com_pos[0]))
-
-                # Sub-block union min  ─  read old union values
-                # (contiguous copy avoids slow strided reads inside
-                # torch.where), then write result back (strided write).
-                old_cc = comp.sdf_val[sl].contiguous()
-                mask_cc = sdf_sub < old_cc
-                comp.sdf_val[sl] = torch.where(
-                    mask_cc, sdf_sub, old_cc)
-
-                old_u = comp.sdf_val_u[sl].contiguous()
-                mask_u = sdf_sub_u < old_u
-                comp.sdf_val_u[sl] = torch.where(
-                    mask_u, sdf_sub_u, old_u)
-                comp.body_u[sl] = torch.where(
-                    mask_u, vel_sub_u,
-                    comp.body_u[sl].contiguous())
-
-                old_v = comp.sdf_val_v[sl].contiguous()
-                mask_v = sdf_sub_v < old_v
-                comp.sdf_val_v[sl] = torch.where(
-                    mask_v, sdf_sub_v, old_v)
-                comp.body_v[sl] = torch.where(
-                    mask_v, vel_sub_v,
-                    comp.body_v[sl].contiguous())
-
-                old_w = comp.sdf_val_w[sl].contiguous()
-                mask_w = sdf_sub_w < old_w
-                comp.sdf_val_w[sl] = torch.where(
-                    mask_w, sdf_sub_w, old_w)
-                comp.body_w[sl] = torch.where(
-                    mask_w, vel_sub_w,
-                    comp.body_w[sl].contiguous())
-
-            else:
-                # ── Full-grid path (body covers >90 % of grid) ─────
-                px, py, pz = _rotate_grid_3d_compiled(comp.X, comp.Y, comp.Z_grid,
-                                     R_T, body_pos)
-                sdf_cc = sdf_eval(px, py, pz)
-                comp._sdf_sparse[body_i] = (None, sdf_cc)  # None = full grid
-
-                # Evaluate SDF directly at staggered face locations
-                # (exact interpolation instead of CC averaging)
-                px_u, py_u, pz_u = _rotate_grid_3d_compiled(
-                    comp.Xu_stag, comp.Yu_stag, comp.Zu_stag,
-                    R_T, body_pos)
-                sdf_u = sdf_eval(px_u, py_u, pz_u)
-
-                px_v, py_v, pz_v = _rotate_grid_3d_compiled(
-                    comp.Xv_stag, comp.Yv_stag, comp.Zv_stag,
-                    R_T, body_pos)
-                sdf_v = sdf_eval(px_v, py_v, pz_v)
-
-                px_w, py_w, pz_w = _rotate_grid_3d_compiled(
-                    comp.Xw_stag, comp.Yw_stag, comp.Zw_stag,
-                    R_T, body_pos)
-                sdf_w = sdf_eval(px_w, py_w, pz_w)
-
-                vel_u = (lin_vel[0]
-                         + ang_vel[1] * (comp.Zu_stag - com_pos[2])
-                         - ang_vel[2] * (comp.Yu_stag - com_pos[1]))
-                vel_v = (lin_vel[1]
-                         + ang_vel[2] * (comp.Xv_stag - com_pos[0])
-                         - ang_vel[0] * (comp.Zv_stag - com_pos[2]))
-                vel_w = (lin_vel[2]
-                         + ang_vel[0] * (comp.Yw_stag - com_pos[1])
-                         - ang_vel[1] * (comp.Xw_stag - com_pos[0]))
-
-                mask_cc = sdf_cc < comp.sdf_val
-                comp.sdf_val = torch.where(mask_cc, sdf_cc, comp.sdf_val)
-
-                mask_u = sdf_u < comp.sdf_val_u
-                comp.sdf_val_u = torch.where(mask_u, sdf_u, comp.sdf_val_u)
-                comp.body_u    = torch.where(mask_u, vel_u, comp.body_u)
-
-                mask_v = sdf_v < comp.sdf_val_v
-                comp.sdf_val_v = torch.where(mask_v, sdf_v, comp.sdf_val_v)
-                comp.body_v    = torch.where(mask_v, vel_v, comp.body_v)
-
-                mask_w = sdf_w < comp.sdf_val_w
-                comp.sdf_val_w = torch.where(mask_w, sdf_w, comp.sdf_val_w)
-                comp.body_w    = torch.where(mask_w, vel_w, comp.body_w)
+            self._merge_region_sdf(comp.sdf_val, sdf_cc, sl, full_region)
+            self._merge_region_sdf_and_velocity(
+                comp.sdf_val_u, comp.body_u, sdf_u, vel_u, sl, full_region)
+            self._merge_region_sdf_and_velocity(
+                comp.sdf_val_v, comp.body_v, sdf_v, vel_v, sl, full_region)
+            self._merge_region_sdf_and_velocity(
+                comp.sdf_val_w, comp.body_w, sdf_w, vel_w, sl, full_region)
 
             comp.com_pos[body_i] = com_pos
             body.com_pos = com_pos
 
     # ------------------------------------------------------------------
     #  Streaming combined-CUDA 3-D SDF update (Phase B)
-    # ------------------------------------------------------------------
-    #
-    #  Per body, a single C++/CUDA kernel call replaces:
-    #      * AABB sub-block rotate_grid_3d (× 4: cc + 3 faces)
-    #      * 4 trilinear samples
-    #      * 3 strided body-velocity expressions
-    #      * 4 strided where()-based union-min writes
-    #      * 4 strided body-velocity where() writes
-    #  ...and writes the per-body sparse SDF (cc) into a pre-allocated
-    #  AABB-shaped tensor used by the force integration.
-    #
-    #  Bodies without a regular SDF table (analytical) fall through to
-    #  the streaming Python path used by `_update_3d`.
     # ------------------------------------------------------------------
     def _update_3d_streaming_multi(self, t, iteration, dt=1):
         """Phase C: batched multi-body streaming SDF update.
@@ -1038,8 +934,8 @@ class BDIMhandler:
         _FAR = 1e4
         B    = len(comp.bodies)
 
-        com_poses_np, urdf_poses_np, Rs_np, lin_vels_np, ang_vels_np = (
-            self.gather_data(iteration, as_numpy=True)
+        com_poses, urdf_poses, Rs, lin_vels, ang_vels = self.gather_data(
+            iteration
         )
 
         h_grid = float(comp.h)
@@ -1076,12 +972,6 @@ class BDIMhandler:
 
         # ------------------------------------------------------------------
         # Build / refresh the static per-body packed device tensors once.
-        #
-        # Memory note: the combined SDF+force path does NOT consume the
-        # per-axis bx/by/bz_flat tables (it computes body-frame coords
-        # analytically inside the kernel via the rotation matrix in
-        # ``kin``).  Skip them in combined mode to avoid Σ_b (Mx+My+Mz)
-        # device-side bytes per static cache.
         # ------------------------------------------------------------------
         fs_for_cache = self.fluid_solver
         _use_combined_cache = fs_for_cache._use_kernels
@@ -1147,161 +1037,160 @@ class BDIMhandler:
         # ------------------------------------------------------------------
         # Per-step: compose body frames, AABBs, kinematics, sparse buffers.
         #
-        # Vectorised path: avoids per-body torch ops (Rotation, AABB.item()
-        # syncs, B individual H2D copies). All host-side work is done with
-        # numpy in a single batched pass; tensors are uploaded once.
+        # Vectorised path: keep the batched frame/AABB composition in torch so
+        # it remains compatible with gather_data() returning tensors.
         # ------------------------------------------------------------------
         kin_static = getattr(comp, '_stream_kin_static', None)
-        if kin_static is None:
-            body_ids_np = np.asarray(
+        if kin_static is None or not torch.is_tensor(kin_static['local_lt']):
+            body_ids = torch.tensor(
                 [(int(a), int(l)) for (a, l) in comp.body_ids],
-                dtype=np.int64,
+                dtype=torch.int64,
             )
-            local_lt_np = np.zeros((B, 3), dtype=self.dtype_np)
-            local_lr_np = np.tile(np.eye(3, dtype=self.dtype_np), (B, 1, 1))
-            sdf_lo_np   = np.empty((B, 3), dtype=self.dtype_np)
-            sdf_hi_np   = np.empty((B, 3), dtype=self.dtype_np)
+            local_lt = torch.zeros((B, 3), dtype=self.dtype, device=self.device)
+            local_lr = torch.eye(
+                3, dtype=self.dtype, device=self.device,
+            ).repeat(B, 1, 1)
+            sdf_lo = torch.empty((B, 3), dtype=self.dtype, device=self.device)
+            sdf_hi = torch.empty((B, 3), dtype=self.dtype, device=self.device)
             for b, body in enumerate(comp.bodies):
                 lp = getattr(body, 'local_pose', None)
                 if lp is not None:
-                    lp_np = np.asarray(lp, dtype=self.dtype_np)
-                    local_lt_np[b] = lp_np[:3]
-                    local_lr_np[b] = (
-                        Rotation.from_euler('xyz', lp_np[3:])
-                        .as_matrix().astype(self.dtype_np)
+                    lp_t = torch.as_tensor(
+                        lp, dtype=self.dtype, device=self.device,
+                    )
+                    local_lt[b] = lp_t[:3]
+                    local_lr[b] = torch.as_tensor(
+                        Rotation.from_euler(
+                            'xyz', lp_t[3:].detach().cpu().numpy(),
+                        ).as_matrix(),
+                        dtype=self.dtype,
+                        device=self.device,
                     )
                 sx, sy, sz = (
                     body._stream_meta['bx'],
                     body._stream_meta['by'],
                     body._stream_meta['bz'],
                 )
-                sdf_lo_np[b] = (
-                    float(sx[0].item()),  float(sy[0].item()),  float(sz[0].item()),
+                sdf_lo[b] = torch.stack(
+                    (sx[0], sy[0], sz[0])
                 )
-                sdf_hi_np[b] = (
-                    float(sx[-1].item()), float(sy[-1].item()), float(sz[-1].item()),
+                sdf_hi[b] = torch.stack(
+                    (sx[-1], sy[-1], sz[-1])
                 )
             kin_static = {
-                'body_ids':     body_ids_np,
-                'local_lt':     local_lt_np,
-                'local_lr':     local_lr_np,
-                'local_center': 0.5 * (sdf_lo_np + sdf_hi_np),
-                'local_half':   0.5 * (sdf_hi_np - sdf_lo_np),
-                'grid_origin':  np.array([
+                'body_ids':     body_ids,
+                'local_lt':     local_lt,
+                'local_lr':     local_lr,
+                'local_center': 0.5 * (sdf_lo + sdf_hi),
+                'local_half':   0.5 * (sdf_hi - sdf_lo),
+                'grid_origin':  torch.tensor([
                     float(comp.x[0].item()),
                     float(comp.y[0].item()),
                     float(comp.z[0].item()),
-                ], dtype=self.dtype_np),
+                ], dtype=self.dtype, device=self.device),
                 'inv_h':        1.0 / float(comp.h),
-                'gs':           np.asarray(gs, dtype=np.int64),
+                'gs':           torch.tensor(
+                    gs, dtype=torch.int64, device=self.device,
+                ),
                 'pad':          3,
             }
             comp._stream_kin_static = kin_static
 
-        body_ids_np = kin_static['body_ids']
+        body_ids = kin_static['body_ids']
 
-        # Gather per-body kinematics from the per-animat numpy snapshots above.
-        urdf_pos = np.empty((B, 3), dtype=self.dtype_np)
-        com_pos  = np.empty((B, 3), dtype=self.dtype_np)
-        R_link   = np.empty((B, 3, 3), dtype=self.dtype_np)
-        lin_vel  = np.empty((B, 3), dtype=self.dtype_np)
-        ang_vel  = np.empty((B, 3), dtype=self.dtype_np)
+        # Gather per-body kinematics from the per-animat tensor snapshots above.
+        urdf_pos = torch.empty((B, 3), dtype=self.dtype, device=self.device)
+        com_pos  = torch.empty((B, 3), dtype=self.dtype, device=self.device)
+        R_link   = torch.empty((B, 3, 3), dtype=self.dtype, device=self.device)
+        lin_vel  = torch.empty((B, 3), dtype=self.dtype, device=self.device)
+        ang_vel  = torch.empty((B, 3), dtype=self.dtype, device=self.device)
         for b in range(B):
-            a_id = int(body_ids_np[b, 0])
-            l_id = int(body_ids_np[b, 1])
-            urdf_pos[b] = urdf_poses_np[a_id][l_id]
-            com_pos[b]  = com_poses_np[a_id][l_id]
-            R_link[b]   = Rs_np[a_id][l_id]
-            lin_vel[b]  = lin_vels_np[a_id][l_id]
-            ang_vel[b]  = ang_vels_np[a_id][l_id]
+            a_id = int(body_ids[b, 0])
+            l_id = int(body_ids[b, 1])
+            urdf_pos[b] = urdf_poses[a_id][l_id]
+            com_pos[b]  = com_poses[a_id][l_id]
+            R_link[b]   = Rs[a_id][l_id]
+            lin_vel[b]  = lin_vels[a_id][l_id]
+            ang_vel[b]  = ang_vels[a_id][l_id]
 
         # Compose with per-body local pose: body_pos = urdf + R @ lt; body_R = R @ lr
-        body_pos = urdf_pos + np.einsum(
+        body_pos = urdf_pos + torch.einsum(
             'bij,bj->bi', R_link, kin_static['local_lt'],
         )
-        body_R = np.einsum(
+        body_R = torch.einsum(
             'bij,bjk->bik', R_link, kin_static['local_lr'],
         )  # (B,3,3)
 
         # Vectorised AABB of the oriented body-SDF box in world space.
-        abs_R        = np.abs(body_R)
-        world_half   = np.einsum('bij,bj->bi', abs_R, kin_static['local_half'])
+        abs_R        = body_R.abs()
+        world_half   = torch.einsum(
+            'bij,bj->bi', abs_R, kin_static['local_half'],
+        )
         world_center = (
-            np.einsum('bij,bj->bi', body_R, kin_static['local_center']) + body_pos
+            torch.einsum(
+                'bij,bj->bi', body_R, kin_static['local_center'],
+            ) + body_pos
         )
         w_min = world_center - world_half
         w_max = world_center + world_half
 
         g0    = kin_static['grid_origin']
         inv_h = kin_static['inv_h']
-        gs_np = kin_static['gs']
+        gs_t  = kin_static['gs']
         pad   = kin_static['pad']
 
-        i_lo = np.floor((w_min - g0) * inv_h).astype(np.int64) - pad
-        i_hi = np.floor((w_max - g0) * inv_h).astype(np.int64) + 1 + pad
-        np.maximum(i_lo, 0, out=i_lo)
-        np.minimum(i_hi, gs_np[None, :], out=i_hi)
+        i_lo = torch.floor((w_min - g0) * inv_h).to(torch.int64) - pad
+        i_hi = torch.floor((w_max - g0) * inv_h).to(torch.int64) + 1 + pad
+        i_lo.clamp_(min=0)
+        i_hi = torch.minimum(i_hi, gs_t.unsqueeze(0))
 
         dims     = i_hi - i_lo
-        sub_vol  = dims.prod(axis=1)
-        full_vol = int(gs_np.prod())
+        sub_vol  = dims.prod(dim=1)
+        full_vol = int(gs_t.prod().item())
         # Bodies covering >90 % of the grid: fall back to full grid (matches
         # the scalar `_body_aabb_indices` heuristic).
         fallback = sub_vol > int(0.9 * full_vol)
-        if fallback.any():
+        if fallback.any().item():
             i_lo[fallback] = 0
-            i_hi[fallback] = gs_np[None, :]
+            i_hi[fallback] = gs_t
             dims = i_hi - i_lo
 
-        aabb_lo_h_np  = np.ascontiguousarray(i_lo, dtype=np.int64)
-        aabb_dim_h_np = np.ascontiguousarray(dims, dtype=np.int64)
-        cell_vols     = dims.prod(axis=1)
-        cell_off_h_np = np.empty(B + 1, dtype=np.int64)
-        cell_off_h_np[0] = 0
-        np.cumsum(cell_vols, out=cell_off_h_np[1:])
-        max_vol = int(cell_vols.max()) if B > 0 else 0
+        aabb_lo  = i_lo.contiguous()
+        aabb_dim = dims.contiguous()
+        cell_vols = dims.prod(dim=1)
+        cell_off = torch.empty(B + 1, dtype=torch.int64, device=self.device)
+        cell_off[0] = 0
+        if B > 0:
+            cell_off[1:] = torch.cumsum(cell_vols, dim=0)
+        max_vol = int(cell_vols.max().item()) if B > 0 else 0
 
         # kin row layout (matches the original scalar path):
         #   [R^T (9) | body_pos (3) | com_pos (3) | lin_vel (3) | ang_vel (3)]  = 21
         # Row-major flatten of R^T equals body_R.transpose(0,2,1).reshape(B,9).
-        kin_h_np = np.empty((B, 21), dtype=self.dtype_np)
-        kin_h_np[:, 0:9]   = np.ascontiguousarray(
-            body_R.transpose(0, 2, 1)
-        ).reshape(B, 9)
-        kin_h_np[:, 9:12]  = body_pos
-        kin_h_np[:, 12:15] = com_pos
-        kin_h_np[:, 15:18] = lin_vel
-        kin_h_np[:, 18:21] = ang_vel
+        kin = torch.empty((B, 21), dtype=self.dtype, device=self.device)
+        kin[:, 0:9]   = body_R.transpose(1, 2).reshape(B, 9)
+        kin[:, 9:12]  = body_pos
+        kin[:, 12:15] = com_pos
+        kin[:, 15:18] = lin_vel
+        kin[:, 18:21] = ang_vel
+
+        aabb_lo_host = aabb_lo.detach().cpu()
+        aabb_dim_host = aabb_dim.detach().cpu()
 
         # Update Python-side AABB metadata used downstream (slab split, forces).
         aabbs_for_split = []
         for b in range(B):
-            i0 = int(aabb_lo_h_np[b, 0])
-            j0 = int(aabb_lo_h_np[b, 1])
-            k0 = int(aabb_lo_h_np[b, 2])
-            Ai = int(aabb_dim_h_np[b, 0])
-            Aj = int(aabb_dim_h_np[b, 1])
-            Ak = int(aabb_dim_h_np[b, 2])
+            i0 = int(aabb_lo_host[b, 0])
+            j0 = int(aabb_lo_host[b, 1])
+            k0 = int(aabb_lo_host[b, 2])
+            Ai = int(aabb_dim_host[b, 0])
+            Aj = int(aabb_dim_host[b, 1])
+            Ak = int(aabb_dim_host[b, 2])
             aabb = (i0, i0 + Ai, j0, j0 + Aj, k0, k0 + Ak)
             comp._body_aabbs[b] = aabb
             aabbs_for_split.append(aabb)
 
-        # Single H2D per packed tensor (instead of B individual transfers).
-        kin       = torch.from_numpy(kin_h_np).to(
-            self.device, dtype=self.dtype, non_blocking=True,
-        )
-        aabb_lo   = torch.from_numpy(aabb_lo_h_np).to(
-            self.device, non_blocking=True,
-        )
-        aabb_dim  = torch.from_numpy(aabb_dim_h_np).to(
-            self.device, non_blocking=True,
-        )
-        cell_off  = torch.from_numpy(cell_off_h_np).to(
-            self.device, non_blocking=True,
-        )
-        com_pos_t = torch.from_numpy(com_pos).to(
-            self.device, dtype=self.dtype, non_blocking=True,
-        )
+        com_pos_t = com_pos
 
         # Maintain `comp.com_pos[b]` and `body.com_pos` views for downstream code.
         for b, body in enumerate(comp.bodies):
@@ -1309,7 +1198,7 @@ class BDIMhandler:
             body.com_pos = comp.com_pos[b]
 
         # Python-list copy of cell offsets for the per-body slab split below.
-        cell_off_h = cell_off_h_np.tolist()
+        cell_off_h = cell_off.detach().cpu().tolist()
 
         fs = self.fluid_solver
         _use_combined = fs._use_kernels
@@ -1692,65 +1581,6 @@ class BDIMhandler:
         else:
             raise RuntimeError("The legacy sparse 2-D kernel path has been removed; use solver_method='kernel' or 'python'.")
 
-        # ── Per-body: contour update + (optional) contour mask ──
-        # 2-D bodies expose 1-D contours; the legacy ``_update_2d`` keeps
-        # them consistent with the per-step rotation/translation. Mirror that
-        # loop here so downstream code sees the same per-body tensors.
-        for body_i, body in enumerate(comp.bodies):
-            (animat_id, link_id) = comp.body_ids[body_i]
-
-            body.cnt_update = R_t[body_i] @ body.cnt + urdf_pos_t[body_i, :, None]
-
-            if self.contour_mask:
-                x_cnt = body.cnt_update[0]
-                y_cnt = body.cnt_update[1]
-                prev_body_i = self._prev_body_index[body_i]
-                next_body_i = self._next_body_index[body_i]
-
-                if prev_body_i is None and next_body_i is None:
-                    mask = torch.ones_like(x_cnt, dtype=torch.bool)
-                else:
-                    Rs_a = torch.as_tensor(
-                        Rs_np[animat_id], device=self.device, dtype=self.dtype,
-                    )
-                    urdf_a = torch.as_tensor(
-                        urdf_poses_np[animat_id], device=self.device, dtype=self.dtype,
-                    )
-                    if prev_body_i is None:
-                        (_, next_link_id) = comp.body_ids[next_body_i]
-                        body_p = comp.bodies[next_body_i]
-                        pt = Rs_a[next_link_id].T @ (
-                            torch.stack((x_cnt, y_cnt))
-                            - urdf_a[next_link_id][:, None]
-                        )
-                        mask = (body_p.sdf(pt[0], pt[1]) - body.h) >= 0
-                    elif next_body_i is None:
-                        (_, prev_link_id) = comp.body_ids[prev_body_i]
-                        body_m = comp.bodies[prev_body_i]
-                        pt = Rs_a[prev_link_id].T @ (
-                            torch.stack((x_cnt, y_cnt))
-                            - urdf_a[prev_link_id][:, None]
-                        )
-                        mask = (body_m.sdf(pt[0], pt[1]) - body.h) >= 0
-                    else:
-                        (_, prev_link_id) = comp.body_ids[prev_body_i]
-                        body_m = comp.bodies[prev_body_i]
-                        pt_m = Rs_a[prev_link_id].T @ (
-                            torch.stack((x_cnt, y_cnt))
-                            - urdf_a[prev_link_id][:, None]
-                        )
-                        (_, next_link_id) = comp.body_ids[next_body_i]
-                        body_p = comp.bodies[next_body_i]
-                        pt_p = Rs_a[next_link_id].T @ (
-                            torch.stack((x_cnt, y_cnt))
-                            - urdf_a[next_link_id][:, None]
-                        )
-                        sdf_m = body_m.sdf(pt_m[0], pt_m[1]) - body.h
-                        sdf_p = body_p.sdf(pt_p[0], pt_p[1]) - body.h
-                        mask = (sdf_m >= 0) & (sdf_p >= 0)
-                body.mask = mask
-
-            body.r_com = body.cnt_update - com_pos_t[body_i, :, None]
 
     # ==================================================================
     #  apply_forces: fluid -> body forces via MuJoCo xfrc_applied
