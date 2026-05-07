@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-GPU memory comparison across the solver paths.
+GPU memory comparison across the solver modes.
 
 This is the *measurement* counterpart to ``docs/memory_analysis.md``.  It
 runs the same FARMS-coupled 3-D 1guilla free-swimming scenario under the
@@ -10,15 +10,15 @@ identified directly on hardware.
 
 Modes
 -----
-* ``no_kernels``  — pure-PyTorch reference path
-                                        (``solver.solver_method = "python"``).
-                                        No batching, no per-body cropping, no streaming
-                                        kernels.  Per-body SDF / body-velocity fields are
-                                        materialised on the *full* fluid grid.
-* ``kernels``     — native streamed kernel path
-                                        (``solver.solver_method = "kernel"``).
-                                        Uses the final update-only geometry pass plus the
-                                        post-fluid-step native force pass.
+* ``python``  — pure-PyTorch reference path
+                (``solver.solver_method = "python"``).
+                No batching, no per-body cropping, no streaming kernels.
+                Per-body SDF / body-velocity fields are materialised on the
+                *full* fluid grid.
+* ``kernel``  — native streamed kernel path
+                (``solver.solver_method = "kernel"``).
+                Uses the final update-only geometry pass plus the
+                post-fluid-step native force pass.
 
 Driver vs. worker
 -----------------
@@ -40,11 +40,11 @@ Typical usage
     python run_memory_comparison.py --Nx 256 --Ny 64 --Nz 64 --n_steps 80
 
     # Re-run a single mode:
-    python run_memory_comparison.py --mode kernels \
+    python run_memory_comparison.py --mode kernel \
         --Nx 256 --Ny 64 --Nz 64 --n_steps 80
 
 The script intentionally uses a coarsened grid by default so that all
-two modes fit on a 12 GB GPU (the ``no_kernels`` path needs roughly
+two modes fit on a 12 GB GPU (the ``python`` path needs roughly
 2× the memory of the kernel path on the same grid).
 """
 
@@ -63,19 +63,53 @@ import time
 #  CLI parsing — shared by driver and worker
 # ════════════════════════════════════════════════════════════════════════
 
-_MODES = ("no_kernels", "kernels")
+_MODES = ("python", "kernel")
+_MODE_ALIASES = {
+    "no_kernels": "python",
+    "kernels": "kernel",
+}
+_LEGACY_RESULT_FILES = {
+    "python": "memory_no_kernels.json",
+    "kernel": "memory_kernels.json",
+}
+
+
+def _canonical_mode(text: str) -> str:
+    mode = _MODE_ALIASES.get(text.strip(), text.strip())
+    if mode not in _MODES:
+        valid = ", ".join(_MODES)
+        raise argparse.ArgumentTypeError(
+            f"invalid mode '{text}' (expected one of: {valid})"
+        )
+    return mode
+
+
+def _result_path(out_dir: str, mode: str) -> str:
+    return os.path.join(out_dir, f"memory_{mode}.json")
+
+
+def _existing_result_path(out_dir: str, mode: str) -> str:
+    canonical = _result_path(out_dir, mode)
+    if os.path.exists(canonical):
+        return canonical
+    legacy_name = _LEGACY_RESULT_FILES.get(mode)
+    if legacy_name is not None:
+        legacy = os.path.join(out_dir, legacy_name)
+        if os.path.exists(legacy):
+            return legacy
+    return canonical
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "GPU memory comparison across no_kernels / "
-            "kernels solver paths."
+            "GPU memory comparison across python / "
+            "kernel solver modes."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
-        "--mode", choices=_MODES, default=None,
+        "--mode", type=_canonical_mode, choices=_MODES, default=None,
         help=(
             "Run a single configuration (worker mode).  Without this flag "
             "the script becomes the driver and spawns one subprocess per "
@@ -149,7 +183,7 @@ def _mb(b: int) -> float:
 
 def _snap(label: str) -> dict:
     """One memory snapshot.  CUDA-only by design — CPU footprint is not
-    the bottleneck for the three paths under study."""
+    the bottleneck for the two paths under study."""
     import torch
     torch.cuda.synchronize()
     return {
@@ -253,9 +287,9 @@ def _run_worker(args: argparse.Namespace) -> None:
 
     # Mode-specific solver method — flows through base_sim_config into
     # bdim_yaml.solver and is read by FluidSolver.
-    if mode == "no_kernels":
+    if mode == "python":
         cfg.solver_method = "python"
-    elif mode == "kernels":
+    elif mode == "kernel":
         cfg.solver_method = "kernel"
     else:
         raise ValueError(f"unknown mode '{mode}'")
@@ -422,8 +456,8 @@ def _run_worker(args: argparse.Namespace) -> None:
 
         # 7. release BDIM intermediates.
         # _release_bdim_fields behaviour is mode-specific:
-        #   no_kernels      → frees mu/normals + force fields + div
-        #   kernels         → keeps mu/normal packed buffers alive
+        #   python          → frees mu/normals + force fields + div
+        #   kernel          → keeps mu/normal packed buffers alive
         #                     (they are persistent across steps when
         #                     _mu_normals_union=True)
         fs._release_bdim_fields()
@@ -480,7 +514,7 @@ def _run_worker(args: argparse.Namespace) -> None:
         "final_rsrv_mb": final_rsrv_mb,
     }
     os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, f"memory_{mode}.json")
+    out_path = _result_path(out_dir, mode)
     with open(out_path, "w") as f:
         json.dump(out, f, indent=2)
     print(f"\n[memory_comparison worker] wrote {out_path}", flush=True)
@@ -517,7 +551,7 @@ def _run_driver(args: argparse.Namespace) -> None:
     os.makedirs(out_dir, exist_ok=True)
 
     print("=" * 78)
-    print(" GPU memory comparison: pure-PyTorch vs streaming-kernel paths")
+    print(" GPU memory comparison: python vs kernel solver modes")
     print("=" * 78)
     ny_str = str(args.Ny) if args.Ny is not None else "auto"
     nz_str = str(args.Nz) if args.Nz is not None else "auto"
@@ -529,9 +563,9 @@ def _run_driver(args: argparse.Namespace) -> None:
 
     results: dict[str, dict] = {}
     for mode in _MODES:
-        out_path = os.path.join(out_dir, f"memory_{mode}.json")
-        if args.keep_existing and os.path.exists(out_path):
-            print(f"  [{mode}] reusing existing {out_path}")
+        existing_path = _existing_result_path(out_dir, mode)
+        if args.keep_existing and os.path.exists(existing_path):
+            print(f"  [{mode}] reusing existing {existing_path}")
         else:
             print(f"\n  ── Running mode = {mode} ──────────────────────")
             cmd = [
@@ -556,9 +590,11 @@ def _run_driver(args: argparse.Namespace) -> None:
                       f"skipping in summary")
                 continue
             print(f"  [{mode}] completed in {dt:.1f}s")
+        out_path = _existing_result_path(out_dir, mode)
         try:
             with open(out_path) as f:
                 results[mode] = json.load(f)
+            results[mode]["mode"] = mode
         except FileNotFoundError:
             continue
 
@@ -595,7 +631,7 @@ def _phase_deltas(rows: list[dict]) -> list[tuple[str, float, float]]:
     out = []
     for prev, cur in zip(rows, rows[1:]):
         # Pull the phase name out of the record label, which looks like
-        # ``step 040 [kernels]: after fluid_step``.
+        # ``step 040 [kernel]: after fluid_step``.
         cur_phase = cur["label"].split(":", 1)[1].strip() if ":" in cur["label"] else cur["label"]
         out.append((cur_phase, cur["alloc_mb"] - prev["alloc_mb"], cur["peak_mb"]))
     return out
@@ -669,18 +705,18 @@ def _print_comparison(results: dict[str, dict]) -> None:
             print(f"  {shape:<35s}  {row['dtype']:<18s}  "
                   f"{row['count']:>5d}  {_mb(row['bytes']):>10.1f}")
 
-    # ── 5. Pairwise savings (kernel paths vs no_kernels) ──────────────
-    if "no_kernels" in results:
-        print("\n\nSAVINGS RELATIVE TO no_kernels (negative = kernel path uses LESS memory)")
+    # ── 5. Pairwise savings (kernel vs python baseline) ───────────────
+    if "python" in results:
+        print("\n\nSAVINGS RELATIVE TO python (negative = kernel path uses LESS memory)")
         print("=" * 78)
-        ref_rec     = results["no_kernels"]
+        ref_rec     = results["python"]
         ref_persist = _persistent_baseline(ref_rec)
         ref_peak    = max(
             (r["peak_mb"] for r in _peak_step_rows(ref_rec)),
             default=ref_rec.get("final_peak_mb", float("nan")),
         )
         for mode, rec in results.items():
-            if mode == "no_kernels":
+            if mode == "python":
                 continue
             persist_mb = _persistent_baseline(rec)
             peak_mb    = max(

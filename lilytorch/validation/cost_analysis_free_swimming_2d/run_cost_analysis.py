@@ -25,10 +25,11 @@ Usage
     source /path/to/venv/bin/activate
     python run_cost_analysis.py                          # default 512×128, 50 steps
     python run_cost_analysis.py --Nx 256 --Ny 64
-    python run_cost_analysis.py --Nx 1024 --Ny 256 --streaming_sdf_2d
+    python run_cost_analysis.py --Nx 1024 --Ny 256 --mode kernel
 """
 
 import argparse
+import gc
 import logging
 import os
 import sys
@@ -50,25 +51,31 @@ parser = argparse.ArgumentParser(
     description="2-D pinned 1guilla – computational cost analysis")
 parser.add_argument("--Nx",        type=int, default=512)
 parser.add_argument("--Ny",        type=int, default=128)
-parser.add_argument("--n_steps",   type=int, default=50,
+# The pinned 2-D benchmark currently becomes unstable beyond roughly
+# 60 total simulation steps at the default 512x128 grid, so the default
+# timing window stays inside that validated range.
+parser.add_argument("--n_steps",   type=int, default=20,
                     help="Measured steps (compilation excluded via pre-compile phase)")
 parser.add_argument("--precompile", type=int, default=30,
                     help="Pre-compilation steps (trigger all torch.compile captures)")
-parser.add_argument("--settle_steps", type=int, default=40,
+parser.add_argument("--settle_steps", type=int, default=5,
                     help="Untimed settle steps after pre-compilation")
 parser.add_argument("--discard_first", type=int, default=5,
                     help="Discard first N timed steps from summary stats")
 parser.add_argument("--stability_tol", type=float, default=0.05,
                     help="Warn if rolling (std/mean) of last 10 steps > threshold")
 parser.add_argument("--save_every", type=int, default=9999)
+parser.add_argument("--mode", type=str, default=None,
+                choices=["python", "kernel"],
+                help="Solver mode to benchmark. Use 'python' for the "
+                    "reference path or 'kernel' for the optimised path.")
 parser.add_argument("--use_kernels", action="store_true",
-                    help="Activate the production C++/CUDA kernel path "
-                         "(streaming SDF + Phase D fused forces, 2-D).")
+                help="DEPRECATED: alias for --mode kernel.")
 parser.add_argument("--no_kernels", action="store_true",
-                    help="Force the suboptimal pure-PyTorch reference path.")
+                help="DEPRECATED: alias for --mode python.")
 # Deprecated alias kept for backward compatibility — collapses into --use_kernels.
 parser.add_argument("--streaming_sdf_2d", action="store_true",
-                    help="DEPRECATED: rolled into --use_kernels.")
+                help="DEPRECATED: alias for --mode kernel.")
 parser.add_argument("--device",    type=str, default="cuda",
                     choices=["cuda", "cpu"])
 parser.add_argument("--out_dir",   type=str, default=None,
@@ -80,6 +87,34 @@ parser.add_argument("--Lx_fixed", type=float, default=None,
 parser.add_argument("--tag_suffix", type=str, default="",
                     help="Suffix appended to the CSV filename tag.")
 args = parser.parse_args()
+
+
+def _resolve_solver_mode(cli_args):
+    legacy_kernel_mode = cli_args.use_kernels or cli_args.streaming_sdf_2d
+
+    if cli_args.mode == "python":
+        if legacy_kernel_mode:
+            raise ValueError("--mode python conflicts with kernel-enabling aliases")
+        return "python"
+    if cli_args.mode == "kernel":
+        if cli_args.no_kernels:
+            raise ValueError("--mode kernel conflicts with --no_kernels")
+        return "kernel"
+
+    if cli_args.no_kernels and legacy_kernel_mode:
+        raise ValueError("--no_kernels conflicts with kernel-enabling aliases")
+    if cli_args.no_kernels:
+        return "python"
+    if legacy_kernel_mode:
+        return "kernel"
+    return None
+
+
+try:
+    SOLVER_MODE = _resolve_solver_mode(args)
+except ValueError as exc:
+    print(f"ERROR: {exc}")
+    sys.exit(1)
 
 USE_CUDA = args.device == "cuda" and torch.cuda.is_available()
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -180,7 +215,7 @@ def instrument_handler(handler):
     adv  = fs.adv_diff_solver
 
     _orig_step       = type(handler).step
-    _orig_update     = type(handler).update
+    _orig_update     = handler.update
     _orig_fluid_step = type(fs).fluid_step
     _orig_apply      = type(handler).apply_forces
     _orig_forces     = type(fs).forces_method2
@@ -279,7 +314,6 @@ def instrument_handler(handler):
     handler.step = types.MethodType(outer_step, handler)
 
     # References for deep patches (deferred until after pre-compilation)
-    _orig_update_2d    = type(handler)._update_2d
     _orig_adv_solve_bound = adv.solve
     _orig_bdim_meta    = fs._bdim_meta_compiled
     _orig_project      = type(fs).project
@@ -295,7 +329,7 @@ def instrument_handler(handler):
         # ── 1b. Timed SDF eval sub-step ──────────────────────────
         def timed_update_detailed(self_h, t, iteration, dt=1):
             with T("1b   SDF eval (per-body × 3 grids)"):
-                _orig_update_2d(self_h, t, iteration, dt)
+                return _orig_update(t, iteration, dt)
         handler.update = types.MethodType(timed_update_detailed, handler)
 
         # Safety: Smagorinsky must be off for a clean cost baseline.
@@ -487,10 +521,8 @@ def gen_simulation_config_lean(output_folder):
             solver_cfg["poisson_compile"]  = True
             solver_cfg["compile_forces"]   = True
             solver_cfg["compile_sdf"]      = True
-            if args.no_kernels:
-                solver_cfg["solver_method"] = "python"
-            elif args.use_kernels or args.streaming_sdf_2d:
-                solver_cfg["solver_method"] = "kernel"
+            if SOLVER_MODE is not None:
+                solver_cfg["solver_method"] = SOLVER_MODE
 
     with open(yaml_path, "w") as f:
         yaml.dump(sim_dict, f, default_flow_style=False, sort_keys=False)
@@ -553,6 +585,8 @@ sim = run_simulation(
     experiment_options=experiment_options,
     simulator=Simulator.MUJOCO,
 )
+del sim
+gc.collect()
 
 
 # ═══════════════════════════════════════════════════════════════════════

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Body-fraction cost analysis: narrow-band vs full-grid.
+Body-fraction cost analysis: python vs kernel.
 
 Sweeps grid resolution N at TWO FIXED domain sizes so that the linear
 body coverage ``L_body / L_domain`` stays constant within each sweep
@@ -9,20 +9,17 @@ longitudinal axis, with matched transverse fractions because the 4:1:1
 grid ratio carries (Lx, Ly, Lz) together).
 
 For every (domain × N) combination the script runs
-``run_cost_analysis.py`` TWICE — once with every narrow-band /
-streaming flag on (the production ``nbforces_opt`` flag set), once
-with every narrow-band flag off — so the per-category cost curves can
-be compared directly.
+``run_cost_analysis.py`` TWICE — once in ``python`` mode and once in
+``kernel`` mode — so the per-category cost curves can be compared
+directly at fixed body fraction.
 
 Motivation
 ----------
-Narrow-band (union-AABB) kernels are expected to be a large win when
-the swimmer occupies a small fraction of the fluid domain (because the
-union sub-block then covers a small fraction of cells) but to approach
-or even fall behind the full-grid baseline as the body fills the
-domain and the dynamic-shape recompile / crop bookkeeping starts to
-dominate.  The default cost analysis scales the domain with N so the
-body fraction shrinks with N — it cannot answer this question.  This
+The optimised ``kernel`` path is expected to be a large win when the
+swimmer occupies a small fraction of the fluid domain, but that win can
+shrink as the body fills more of the box and the kernel path has less
+work to skip. The default cost analysis scales the domain with N so the
+body fraction shrinks with N — it cannot answer this question. This
 runner fixes the domain so the fraction is held constant as N grows.
 
 Default sweep
@@ -35,11 +32,12 @@ Default sweep
   ⇒ "body comprises ~ 30 % of the domain".
 
 Each domain is swept over **5 N points** (4:1:1 cubic-ish triplets);
-combined with the default {nboff, nbcrop, nbon} mode toggle this gives
-**30 runs** total (5 N × 2 domains × 3 NB modes).  Expected outcome: in
-the small domain NB-on ≈ NB-off (cropping does not save much because
-the body already covers ~ 70 % of the cells); in the large domain
-NB-on ≪ NB-off because the body union covers only ~ 1/30 of the cells.
+combined with the default {python, kernel} mode toggle this gives
+**20 runs** total (5 N × 2 domains × 2 modes). Expected outcome: in
+the small domain kernel ≈ python (little work to skip because the body
+already covers ~ 70 % of the cells); in the large domain kernel should
+sit well below python because the body union covers only a small subset
+of cells.
 
 Usage
 -----
@@ -61,10 +59,10 @@ Usage
 Output
 ------
 CSVs land in ``figures/body_fraction/`` with the tag
-``{Nx}x{Ny}x{Nz}_{domain}_{nb}`` where ``nb`` is one of the selected
-narrow-band modes.  The
+``{Nx}x{Ny}x{Nz}_{domain}_{mode}`` where ``mode`` is one of the selected
+solver modes. The
 companion ``plot_body_fraction.py`` reads those CSVs and produces
-log-log cost curves per domain plus a narrow-band vs full-grid
+log-log cost curves per domain plus a python vs kernel
 speed-up summary.
 """
 
@@ -117,11 +115,11 @@ PLOT_SCRIPT = os.path.join(SCRIPT_DIR, "plot_body_fraction.py")
 #
 # Expected outcome:
 #   * "small" domain — body ~ 70 %, very few cells outside the body-
-#     union AABB.  Narrow-band trims little work: NB-on ≈ NB-off, with
-#     NB-on possibly slower at small N due to dynamic-shape bookkeeping.
+#     union AABB.  Kernel mode trims little work: kernel ≈ python, with
+#     kernel possibly slower at small N due to dynamic-shape bookkeeping.
 #   * "large" domain — body ~ 30 %, the body-union AABB covers ≲ 1/30
-#     of the cells.  Narrow-band kernels skip the bulk of the grid →
-#     large NB speed-up that grows with N.
+#     of the cells.  Kernel mode skips the bulk of the grid →
+#     large kernel speed-up that grows with N.
 # Both domains use the SAME 5 N points so the log-log plots overlay
 # cell-for-cell.  The Nx range is constrained to the intersection of
 # each domain's stable dx band:
@@ -194,7 +192,7 @@ DOMAIN_PRESETS = {
 # CLI
 # ─────────────────────────────────────────────────────────────────────
 parser = argparse.ArgumentParser(
-    description="Body-fraction cost analysis (narrow-band vs full-grid)",
+    description="Body-fraction cost analysis (python vs kernel)",
     formatter_class=argparse.RawDescriptionHelpFormatter,
     epilog="""\
 Grid presets:
@@ -250,19 +248,11 @@ parser.add_argument(
     "--continue-on-error", action="store_true",
     help="Continue to next run if one fails")
 parser.add_argument(
-    "--nb_modes", type=str, default="nboff,nbcrop,nbon",
-    help="Which narrow-band modes to measure. Each mode is a different "
-         "subset of solver flags:\n"
-         "  nboff  – every flag off (true baseline)\n"
-         "  nbcrop – only the 3 AABB-cropping flags on "
-         "(force_shared_union, mu_normals_union, bdim_union)\n"
-         "  nbon   – every narrow-band / streaming flag on "
-         "(matches the production ``nbforces_opt`` set)\n"
-         "Default measures all three of nboff, nbcrop, nbon so the plot "
-         "decomposes the combined win into 'cropping alone' vs "
-         "'cropping + streaming/batching added on top' (cropping is "
-         "body-fraction dependent; streaming/batching is a uniform "
-         "launch-count reduction).")
+    "--modes", type=str, default="python,kernel",
+    help="Comma-separated solver modes to measure. Valid: python, kernel.")
+parser.add_argument(
+    "--nb_modes", type=str, default=None,
+    help="DEPRECATED: alias for --modes. Legacy names nboff and nbon are mapped automatically.")
 args = parser.parse_args()
 
 # ── Parse domains ────────────────────────────────────────────────────
@@ -322,34 +312,25 @@ else:
         g.sort(key=lambda t: t[0] * t[1] * t[2])
         grids_per_domain[d] = g
 
-# ── Parse nb_modes ───────────────────────────────────────────────────
-# Each mode maps to a list of flags appended to the run_cost_analysis.py
-# command.  Modes are chosen to factor the combined narrow-band win into
-# the two functional groups whose effects scale very differently:
-#   * cropping  — body-fraction dependent (wins on sparse domains)
-#   * streaming/batching  — body-fraction independent (uniform launch
-#                           reduction, plus fused-CUDA SDF/forces).
-# ``nbon`` therefore mirrors the production ``nbforces_opt`` set used by
-# ``run_scaling_conditions_pipeline.py``.
-NB_MODE_FLAGS = {
-    "nboff":  [],                              # true baseline
-    "nbcrop": ["--force_shared_union",         # AABB cropping only
-               "--mu_normals_union",
-               "--bdim_union"],
-    "nbon":   ["--force_shared_union",         # production set (nbforces_opt)
-               "--mu_normals_union",
-               "--bdim_union",
-               "--force_narrow_batch",
-               "--streaming_sdf_3d",
-               "--streaming_forces_3d"],
+# ── Parse modes ──────────────────────────────────────────────────────
+MODE_FLAGS = {
+    "python": ["--mode", "python"],
+    "kernel": ["--mode", "kernel"],
+}
+MODE_ALIASES = {
+    "nboff": "python",
+    "nbon": "kernel",
+    "nbforces_opt": "kernel",
 }
 
-nb_modes = [m.strip() for m in args.nb_modes.split(",") if m.strip()]
-for m in nb_modes:
-    if m not in NB_MODE_FLAGS:
-        print(f"ERROR: unknown nb_mode '{m}'. "
-              f"Use one of {list(NB_MODE_FLAGS)}.")
+raw_modes = args.nb_modes if args.nb_modes is not None else args.modes
+modes = []
+for raw in [m.strip() for m in raw_modes.split(",") if m.strip()]:
+    mode = MODE_ALIASES.get(raw, raw)
+    if mode not in MODE_FLAGS:
+        print(f"ERROR: unknown mode '{raw}'. Use one of {list(MODE_FLAGS)}.")
         sys.exit(1)
+    modes.append(mode)
 
 # ── Output directory ─────────────────────────────────────────────────
 if args.out_dir is None:
@@ -361,9 +342,9 @@ os.makedirs(args.out_dir, exist_ok=True)
 # ═══════════════════════════════════════════════════════════════════════
 # Banner
 # ═══════════════════════════════════════════════════════════════════════
-total_runs = sum(len(grids_per_domain[d]) for d in domains) * len(nb_modes)
+total_runs = sum(len(grids_per_domain[d]) for d in domains) * len(modes)
 print("\n" + "=" * 72)
-print("  Body-Fraction Cost Analysis — Narrow-Band vs Full-Grid")
+print("  Body-Fraction Cost Analysis — Python vs Kernel")
 print("=" * 72)
 print(f"  Grid policy  : {args.grid_policy}")
 print(f"  Domains      : {', '.join(domains)}")
@@ -374,7 +355,7 @@ for d in domains:
                      for nx, _, _ in grids_per_domain[d])
     print(f"    {d:<6s}: Lx={p['Lx_fixed']:.2f} m  ({p['note']})")
     print(f"             grids = {gstr}   dx = {dxs} mm")
-print(f"  NB modes     : {', '.join(nb_modes)}")
+print(f"  Modes        : {', '.join(modes)}")
 print(f"  Steps/run    : {args.n_steps} measured + {args.precompile} precompile")
 print(f"  Total runs   : {total_runs}")
 print(f"  Device       : {args.device.upper()}")
@@ -386,7 +367,7 @@ print("=" * 72)
 # ═══════════════════════════════════════════════════════════════════════
 # Run every (domain, grid, nb_mode)
 # ═══════════════════════════════════════════════════════════════════════
-results = []        # list of dicts: domain, grid, nb, rc, elapsed, csv
+results = []        # list of dicts: domain, grid, mode, rc, elapsed, csv
 failed  = []
 python_exe = sys.executable
 wall_start = time.time()
@@ -395,15 +376,15 @@ run_idx = 0
 for domain in domains:
     p = DOMAIN_PRESETS[domain]
     for (nx, ny, nz) in grids_per_domain[domain]:
-        for nb in nb_modes:
+        for mode in modes:
             run_idx += 1
-            suffix = f"_{domain}_{nb}"
+            suffix = f"_{domain}_{mode}"
             tag = f"{nx}x{ny}x{nz}{suffix}"
             n_cells = nx * ny * nz
             header = (f"\n{'─' * 72}\n"
                       f"  [{run_idx}/{total_runs}]  domain={domain}  "
                       f"grid={nx}×{ny}×{nz}  ({n_cells:,} cells)  "
-                      f"nb={nb}\n{'─' * 72}")
+                      f"mode={mode}\n{'─' * 72}")
             print(header)
 
             cmd = [
@@ -420,7 +401,7 @@ for domain in domains:
                 "--Lx_fixed", str(p["Lx_fixed"]),
                 "--tag_suffix", suffix,
             ]
-            cmd.extend(NB_MODE_FLAGS[nb])
+            cmd.extend(MODE_FLAGS[mode])
 
             print(f"  CMD: {' '.join(cmd)}")
 
@@ -437,7 +418,7 @@ for domain in domains:
             rec = {
                 "domain":  domain,
                 "grid":    (nx, ny, nz),
-                "nb":      nb,
+                "mode":    mode,
                 "rc":      proc.returncode,
                 "elapsed": elapsed,
                 "csv":     csv_path if os.path.isfile(csv_path) else "",
@@ -468,7 +449,7 @@ total_wall = time.time() - wall_start
 print("\n" + "=" * 72)
 print("  BODY-FRACTION SWEEP SUMMARY")
 print("=" * 72)
-print(f"{'Domain':<8} {'Grid':<16} {'NB':<6} {'Cells':>12}  {'Status':<10} "
+print(f"{'Domain':<8} {'Grid':<16} {'Mode':<8} {'Cells':>12}  {'Status':<10} "
       f"{'Wall':>8}  CSV")
 print("-" * 72)
 for r in results:
@@ -477,7 +458,7 @@ for r in results:
     cells = nx * ny * nz
     status = "OK" if r["rc"] == 0 else f"FAIL({r['rc']})"
     csv_str = "yes" if r["csv"] else "no"
-    print(f"{r['domain']:<8} {grid_str:<16} {r['nb']:<6} {cells:>12,}  "
+    print(f"{r['domain']:<8} {grid_str:<16} {r['mode']:<8} {cells:>12,}  "
           f"{status:<10} {r['elapsed']:>6.1f} s  {csv_str}")
 print("=" * 72)
 print(f"  Total wall-time: {total_wall:.1f} s ({total_wall / 60:.1f} min)")

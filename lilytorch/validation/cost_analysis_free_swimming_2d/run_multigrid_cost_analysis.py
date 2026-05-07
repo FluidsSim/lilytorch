@@ -22,8 +22,11 @@ Usage
     # Custom grids (comma-separated Nx:Ny pairs)
     python run_multigrid_cost_analysis.py --grids 128:32,256:64,512:128
 
+    # Compare one solver mode across the grid ladder
+    python run_multigrid_cost_analysis.py --mode kernel
+
     # Override step counts
-    python run_multigrid_cost_analysis.py --n_steps 80 --precompile 40
+    python run_multigrid_cost_analysis.py --n_steps 80 --precompile 40 --settle_steps 10
 
     # Dry-run to see commands without executing
     python run_multigrid_cost_analysis.py --dry-run
@@ -101,11 +104,14 @@ parser.add_argument(
     "--preset", type=str, default="medium", choices=list(PRESETS.keys()),
     help="Use a predefined grid set (default: medium)")
 parser.add_argument(
-    "--n_steps", type=int, default=50,
-    help="Measured steps per grid (default: 50)")
+    "--n_steps", type=int, default=20,
+    help="Measured steps per grid (default: 20)")
 parser.add_argument(
     "--precompile", type=int, default=30,
     help="Pre-compilation steps per grid (default: 30)")
+parser.add_argument(
+    "--settle_steps", type=int, default=5,
+    help="Untimed settle steps per grid after pre-compilation (default: 5)")
 parser.add_argument(
     "--discard_first", type=int, default=3,
     help="Discard first N timed steps (default: 3)")
@@ -126,9 +132,31 @@ parser.add_argument(
 parser.add_argument(
     "--save_every", type=int, default=9999)
 parser.add_argument(
+    "--mode", type=str, default=None, choices=["python", "kernel"],
+    help="Solver mode to benchmark across the grid ladder.")
+parser.add_argument(
     "--streaming_sdf_2d", action="store_true",
-    help="Enable fused 2-D streaming SDF + forces path (always coupled).")
+    help="DEPRECATED: alias for --mode kernel.")
 args = parser.parse_args()
+
+
+def _resolve_solver_mode(cli_args):
+    if cli_args.mode == "python":
+        if cli_args.streaming_sdf_2d:
+            raise ValueError("--mode python conflicts with --streaming_sdf_2d")
+        return "python"
+    if cli_args.mode == "kernel":
+        return "kernel"
+    if cli_args.streaming_sdf_2d:
+        return "kernel"
+    return None
+
+
+try:
+    SOLVER_MODE = _resolve_solver_mode(args)
+except ValueError as exc:
+    print(f"ERROR: {exc}")
+    sys.exit(1)
 
 if args.out_dir is None:
     args.out_dir = os.path.join(SCRIPT_DIR, "figures")
@@ -162,8 +190,11 @@ print("  Multi-Grid Cost Analysis — Pinned 1guilla (2-D)")
 print("=" * 72)
 print(f"  Grids:       {', '.join(grid_strs)}")
 print(f"  Total cells: {', '.join(f'{c:,}' for c in total_cells)}")
-print(f"  Steps:       {args.n_steps} measured + {args.precompile} precompile per grid")
+print(f"  Steps:       {args.n_steps} measured + {args.precompile} precompile + "
+    f"{args.settle_steps} settle per grid")
 print(f"  Device:      {args.device.upper()}")
+if SOLVER_MODE is not None:
+    print(f"  Mode:        {SOLVER_MODE}")
 print(f"  Output:      {args.out_dir}")
 print(f"  Timestamp:   {datetime.now().isoformat()}")
 print("=" * 72)
@@ -195,13 +226,14 @@ for i, (nx, ny) in enumerate(grids):
         "--Ny", str(ny),
         "--n_steps",      str(args.n_steps),
         "--precompile",   str(args.precompile),
+        "--settle_steps", str(args.settle_steps),
         "--discard_first", str(args.discard_first),
         "--save_every",   str(args.save_every),
         "--device",       args.device,
         "--out_dir",      args.out_dir,
     ]
-    if args.streaming_sdf_2d:
-        cmd.append("--streaming_sdf_2d")
+    if SOLVER_MODE is not None:
+        cmd.extend(["--mode", SOLVER_MODE])
 
     print(f"  CMD: {' '.join(cmd)}")
 

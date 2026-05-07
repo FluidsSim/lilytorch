@@ -23,6 +23,9 @@ Usage
     # Custom grids (comma-separated Nx:Ny:Nz triplets)
     python run_multigrid_cost_analysis.py --grids 128:32:32,256:64:64,512:128:128
 
+    # Compare one solver mode across the grid ladder
+    python run_multigrid_cost_analysis.py --mode kernel
+
     # Override step counts
     python run_multigrid_cost_analysis.py --n_steps 80 --precompile 40
 
@@ -171,25 +174,54 @@ parser.add_argument(
     "--save_every", type=int, default=9999,
     help="Save interval (default: 9999 = effectively never)")
 parser.add_argument(
+    "--mode", type=str, default=None, choices=["python", "kernel"],
+    help="Solver mode to benchmark across the grid ladder.")
+parser.add_argument(
     "--force_shared_union", action="store_true",
-    help="Crop shared-stress kernel to union of body AABBs (big win at ≥512³)")
+    help="DEPRECATED: alias for --mode kernel.")
 parser.add_argument(
     "--force_narrow_batch", action="store_true",
-    help="Use padded-batched narrow-band forces kernel")
+    help="DEPRECATED: alias for --mode kernel.")
 parser.add_argument(
     "--mu_normals_union", action="store_true",
-    help="Crop mu/normals kernel to union of body AABBs")
+    help="DEPRECATED: alias for --mode kernel.")
 parser.add_argument(
     "--bdim_union", action="store_true",
-    help="Crop BDIM2 meta-equation kernel to union of body AABBs")
+    help="DEPRECATED: alias for --mode kernel.")
 parser.add_argument(
     "--streaming_sdf_3d", action="store_true",
-    help="Phase B: fused C++/CUDA streaming SDF/face-velocity update.")
+    help="DEPRECATED: alias for --mode kernel.")
 parser.add_argument(
     "--streaming_forces_3d", action="store_true",
-    help="Phase D: fused C++/CUDA per-body force/torque integration "
-         "(implies --streaming_sdf_3d and --force_shared_union).")
+    help="DEPRECATED: alias for --mode kernel.")
 args = parser.parse_args()
+
+
+def _resolve_solver_mode(cli_args):
+    legacy_kernel_mode = (
+        cli_args.force_shared_union
+        or cli_args.force_narrow_batch
+        or cli_args.mu_normals_union
+        or cli_args.bdim_union
+        or cli_args.streaming_sdf_3d
+        or cli_args.streaming_forces_3d
+    )
+    if cli_args.mode == "python":
+        if legacy_kernel_mode:
+            raise ValueError("--mode python conflicts with kernel-enabling aliases")
+        return "python"
+    if cli_args.mode == "kernel":
+        return "kernel"
+    if legacy_kernel_mode:
+        return "kernel"
+    return None
+
+
+try:
+    SOLVER_MODE = _resolve_solver_mode(args)
+except ValueError as exc:
+    print(f"ERROR: {exc}")
+    sys.exit(1)
 
 if args.out_dir is None:
     args.out_dir = os.path.join(SCRIPT_DIR, "figures")
@@ -226,6 +258,8 @@ print(f"  Grids:       {', '.join(grid_strs)}")
 print(f"  Total cells: {', '.join(f'{c:,}' for c in total_cells)}")
 print(f"  Steps:       {args.n_steps} measured + {args.precompile} precompile per grid")
 print(f"  Device:      {args.device.upper()}")
+if SOLVER_MODE is not None:
+    print(f"  Mode:        {SOLVER_MODE}")
 print(f"  Output:      {args.out_dir}")
 print(f"  Timestamp:   {datetime.now().isoformat()}")
 print("=" * 72)
@@ -264,18 +298,8 @@ for i, (nx, ny, nz) in enumerate(grids):
         "--device", args.device,
         "--out_dir", args.out_dir,
     ]
-    if args.force_shared_union:
-        cmd.append("--force_shared_union")
-    if args.force_narrow_batch:
-        cmd.append("--force_narrow_batch")
-    if args.mu_normals_union:
-        cmd.append("--mu_normals_union")
-    if args.bdim_union:
-        cmd.append("--bdim_union")
-    if args.streaming_sdf_3d:
-        cmd.append("--streaming_sdf_3d")
-    if args.streaming_forces_3d:
-        cmd.append("--streaming_forces_3d")
+    if SOLVER_MODE is not None:
+        cmd.extend(["--mode", SOLVER_MODE])
 
     print(f"  CMD: {' '.join(cmd)}")
 

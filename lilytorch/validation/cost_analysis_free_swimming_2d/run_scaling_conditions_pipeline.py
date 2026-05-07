@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """
-Run the full multi-grid scaling pipeline under multiple narrow-band modes
+Run the full multi-grid scaling pipeline under the two solver modes
 for the 2-D pinned 1guilla.
 
-Conditions
-----------
-    nboff         : baseline — no streaming flags, no cropping.
-    nbforces_opt  : production — streaming_sdf_2d + streaming_forces_2d
-                    (always coupled in 2-D because there is no narrow-band
-                    forces fallback; enabling either flag activates both).
+Modes
+-----
+    python  : reference path with ``solver_method = "python"``.
+    kernel  : optimised path with ``solver_method = "kernel"``.
 
 Default grid ladder
 -------------------
@@ -21,8 +19,8 @@ Default grid ladder
 Output layout
 -------------
     figures/scaling_conditions/
-        nboff/
-        nbforces_opt/
+        python/
+        kernel/
         cost_scaling_loglog_conditions.pdf
         cost_scaling_speedup_conditions.pdf
         cost_residual_vs_total_conditions.pdf
@@ -31,7 +29,7 @@ Usage
 -----
     python run_scaling_conditions_pipeline.py
 
-    python run_scaling_conditions_pipeline.py --conditions nboff,nbforces_opt
+    python run_scaling_conditions_pipeline.py --modes python,kernel
 
     python run_scaling_conditions_pipeline.py --grids 256:64,512:128,1024:256
 
@@ -64,23 +62,28 @@ DEFAULT_GRIDS = [
     (2048, 512),
 ]
 
-CONDITION_SPECS = {
-    "nboff": {
-        "label": "baseline (all flags off — no streaming, no fused forces)",
-        "short_label": "baseline",
-        "flags": [],
+MODE_SPECS = {
+    "python": {
+        "label": "python mode (reference path)",
+        "short_label": "python",
+        "mode": "python",
         "linestyle": "--",
         "marker": "s",
         "color": "#37474f",
     },
-    "nbforces_opt": {
-        "label": "streaming 2-D SDF + fused forces (streaming_sdf_2d + streaming_forces_2d)",
-        "short_label": "production",
-        "flags": ["--streaming_sdf_2d"],
+    "kernel": {
+        "label": "kernel mode (optimised path)",
+        "short_label": "kernel",
+        "mode": "kernel",
         "linestyle": "-",
         "marker": "*",
         "color": "#f9a825",
     },
+}
+
+MODE_ALIASES = {
+    "nboff": "python",
+    "nbforces_opt": "kernel",
 }
 
 
@@ -218,7 +221,7 @@ def _plot_combined_loglog(root_dir, condition_ids):
         grids    = sorted(records, key=_grid_cells)
         cells    = np.array([_grid_cells(g) for g in grids], dtype=float)
         total_ms = np.array([records[g]     for g in grids], dtype=float)
-        style = CONDITION_SPECS[cond]
+        style = MODE_SPECS[cond]
         ax.loglog(cells, total_ms,
                   linestyle=style["linestyle"], marker=style["marker"],
                   markersize=6, linewidth=1.8, color=style["color"],
@@ -234,7 +237,7 @@ def _plot_combined_loglog(root_dir, condition_ids):
 
     ax.set_xlabel("Total cells  $N_x N_y$")
     ax.set_ylabel("Time per step (ms)")
-    ax.set_title("Cost scaling across streaming conditions (2-D)")
+    ax.set_title("Cost scaling across solver modes (2-D)")
     ax.legend(loc="upper left", framealpha=0.9, fontsize=8.5)
     fig.tight_layout()
     out_path = os.path.join(root_dir, "cost_scaling_loglog_conditions.pdf")
@@ -244,13 +247,13 @@ def _plot_combined_loglog(root_dir, condition_ids):
 
     _plot_residual_vs_total(root_dir, condition_ids, condition_breakdowns)
 
-    if "nboff" not in condition_records:
+    if "python" not in condition_records:
         return True
 
-    base = condition_records["nboff"]
+    base = condition_records["python"]
     fig2, ax2 = plt.subplots(figsize=(6.6, 4.4))
     for cond in condition_ids:
-        if cond == "nboff":
+        if cond == "python":
             continue
         records = condition_records.get(cond)
         if not records:
@@ -260,7 +263,7 @@ def _plot_combined_loglog(root_dir, condition_ids):
             continue
         cells   = np.array([_grid_cells(g) for g in common], dtype=float)
         speedup = np.array([base[g] / records[g] for g in common], dtype=float)
-        style   = CONDITION_SPECS[cond]
+        style   = MODE_SPECS[cond]
         ax2.semilogx(cells, speedup,
                      linestyle=style["linestyle"], marker=style["marker"],
                      markersize=6, linewidth=1.6, color=style["color"],
@@ -269,8 +272,8 @@ def _plot_combined_loglog(root_dir, condition_ids):
     ax2.axhline(1.0, color="#9e9e9e", linestyle=":", linewidth=1.0,
                 label="break-even (1×)")
     ax2.set_xlabel("Total cells  $N_x N_y$")
-    ax2.set_ylabel(r"Speed-up  $T_\mathrm{off}\,/\,T_\mathrm{mode}$")
-    ax2.set_title("Speed-up vs baseline — streaming 2-D conditions")
+    ax2.set_ylabel(r"Speed-up  $T_\mathrm{python}\,/\,T_\mathrm{mode}$")
+    ax2.set_title("Speed-up vs python baseline — 2-D solver modes")
     ax2.legend(loc="best", framealpha=0.9, fontsize=8)
     fig2.tight_layout()
     out_path2 = os.path.join(root_dir, "cost_scaling_speedup_conditions.pdf")
@@ -304,7 +307,7 @@ def _plot_residual_vs_total(root_dir, condition_ids, condition_breakdowns):
         grids   = sorted(breakdown, key=_grid_cells)
         cells   = np.array([_grid_cells(g) for g in grids], dtype=float)
         totals  = np.array([breakdown[g]["total"] for g in grids], dtype=float)
-        style   = CONDITION_SPECS[cond]
+        style   = MODE_SPECS[cond]
         ax.loglog(cells, totals,
                   linestyle="-", marker=style["marker"], markersize=6,
                   linewidth=1.8, color=style["color"], markeredgewidth=1.0,
@@ -345,17 +348,21 @@ def _plot_residual_vs_total(root_dir, condition_ids, condition_breakdowns):
 
 # ── CLI ──────────────────────────────────────────────────────────────
 parser = argparse.ArgumentParser(
-    description="Run the full 2-D multi-grid scaling pipeline under multiple conditions",
+    description="Run the full 2-D multi-grid scaling pipeline under both solver modes",
     formatter_class=argparse.RawDescriptionHelpFormatter,
 )
 parser.add_argument(
     "--grids", type=str, default=None,
     help="Comma-separated Nx:Ny pairs, e.g. '256:64,512:128,1024:256'")
 parser.add_argument(
-    "--conditions", type=str, default="nboff,nbforces_opt",
-    help="Comma-separated condition ids. Valid: nboff, nbforces_opt.")
-parser.add_argument("--n_steps",      type=int, default=50)
+    "--modes", type=str, default="python,kernel",
+    help="Comma-separated solver modes. Valid: python, kernel.")
+parser.add_argument(
+    "--conditions", type=str, default=None,
+    help="DEPRECATED: alias for --modes. Legacy names nboff and nbforces_opt are mapped automatically.")
+parser.add_argument("--n_steps",      type=int, default=20)
 parser.add_argument("--precompile",   type=int, default=30)
+parser.add_argument("--settle_steps", type=int, default=5)
 parser.add_argument("--discard_first", type=int, default=3)
 parser.add_argument("--save_every",   type=int, default=9999)
 parser.add_argument("--device",       type=str, default="cuda",
@@ -388,22 +395,26 @@ except ValueError as exc:
 
 grids.sort(key=_grid_cells)
 
-conditions = [c.strip() for c in args.conditions.split(",") if c.strip()]
-for cond in conditions:
-    if cond not in CONDITION_SPECS:
-        print(f"ERROR: Unknown condition '{cond}'. Valid: {list(CONDITION_SPECS)}")
+raw_modes = args.conditions if args.conditions is not None else args.modes
+conditions = []
+for raw in [c.strip() for c in raw_modes.split(",") if c.strip()]:
+    cond = MODE_ALIASES.get(raw, raw)
+    if cond not in MODE_SPECS:
+        print(f"ERROR: Unknown mode '{raw}'. Valid: {list(MODE_SPECS)}")
         sys.exit(1)
+    conditions.append(cond)
 
 args.out_dir = os.path.abspath(args.out_dir)
 os.makedirs(args.out_dir, exist_ok=True)
 
 print("\n" + "=" * 72)
-print("  Multi-Condition Scaling Pipeline — Pinned 1guilla (2-D)")
+print("  Multi-Mode Scaling Pipeline — Pinned 1guilla (2-D)")
 print("=" * 72)
-print(f"  Conditions:  {', '.join(conditions)}")
+print(f"  Modes:       {', '.join(conditions)}")
 print(f"  Grids:       {', '.join(_grid_label(g) for g in grids)}")
 print(f"  Total cells: {', '.join(f'{_grid_cells(g):,}' for g in grids)}")
-print(f"  Steps:       {args.n_steps} measured + {args.precompile} precompile per grid")
+print(f"  Steps:       {args.n_steps} measured + {args.precompile} precompile + "
+    f"{args.settle_steps} settle per grid")
 print(f"  Device:      {args.device.upper()}")
 print(f"  Output:      {args.out_dir}")
 print(f"  Timestamp:   {datetime.now().isoformat()}")
@@ -419,7 +430,7 @@ failed_conditions = []
 if not args.plot_only:
     grid_arg = _grid_arg(grids)
     for index, cond in enumerate(conditions, start=1):
-        spec     = CONDITION_SPECS[cond]
+        spec     = MODE_SPECS[cond]
         cond_out = os.path.join(args.out_dir, cond)
         os.makedirs(cond_out, exist_ok=True)
         cmd = [
@@ -427,19 +438,20 @@ if not args.plot_only:
             "--grids",         grid_arg,
             "--n_steps",       str(args.n_steps),
             "--precompile",    str(args.precompile),
+            "--settle_steps",  str(args.settle_steps),
             "--discard_first", str(args.discard_first),
             "--save_every",    str(args.save_every),
             "--device",        args.device,
             "--out_dir",       cond_out,
+            "--mode",          spec["mode"],
         ]
-        cmd.extend(spec["flags"])
         if args.continue_on_error:
             cmd.append("--continue-on-error")
         if args.dry_run:
             cmd.append("--dry-run")
 
         print(f"\n{'─' * 72}")
-        print(f"  [{index}/{len(conditions)}]  Condition {cond}  —  {spec['label']}")
+        print(f"  [{index}/{len(conditions)}]  Mode {cond}  —  {spec['label']}")
         print(f"{'─' * 72}")
         print(f"  CMD: {' '.join(cmd)}")
 
@@ -449,7 +461,7 @@ if not args.plot_only:
         proc = subprocess.run(cmd, cwd=SCRIPT_DIR, stdout=sys.stdout, stderr=sys.stderr)
         if proc.returncode != 0:
             failed_conditions.append(cond)
-            print(f"\n  FAILED: condition {cond} exited with code {proc.returncode}")
+            print(f"\n  FAILED: mode {cond} exited with code {proc.returncode}")
             if not args.continue_on_error:
                 break
 
@@ -458,7 +470,7 @@ if args.dry_run:
     sys.exit(0)
 
 print(f"\n{'─' * 72}")
-print("  Generating combined condition plots…")
+print("  Generating combined mode plots…")
 print(f"{'─' * 72}")
 
 combined_ok = _plot_combined_loglog(args.out_dir, conditions)

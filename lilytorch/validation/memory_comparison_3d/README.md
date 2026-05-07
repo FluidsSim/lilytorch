@@ -1,4 +1,4 @@
-# GPU memory comparison: kernel vs no-kernel solver paths
+# GPU memory comparison: python vs kernel solver modes
 
 This directory contains a runnable counterpart to
 `docs/memory_analysis.md`.  The script measures GPU memory usage of the
@@ -8,10 +8,10 @@ path.
 
 ## What it compares
 
-| Mode               | YAML keys                                                      | Description |
-|--------------------|----------------------------------------------------------------|-------------|
-| `no_kernels`       | `solver.use_kernels: false`                                    | Pure-PyTorch reference path. Per-body SDFs and body velocities are materialised on the **full** fluid grid. |
-| `kernels`          | `solver.solver_method: "kernel"`                              | Current native streamed kernel path. Geometry is updated through the kernel-mode body metadata path and per-body forces are evaluated later from the post-fluid-step fields without exposing the retired historical force-path toggle. |
+| Mode               | YAML key                              | Description |
+|--------------------|---------------------------------------|-------------|
+| `python`           | `solver.solver_method: "python"`     | Pure-PyTorch reference path. Per-body SDFs and body velocities are materialised on the **full** fluid grid. |
+| `kernel`           | `solver.solver_method: "kernel"`     | Current native streamed kernel path. Geometry is updated through the kernel-mode body metadata path and per-body forces are evaluated later from the post-fluid-step fields. |
 
 ## Usage
 
@@ -23,7 +23,7 @@ python lilytorch/validation/memory_comparison_3d/run_memory_comparison.py \
 
 # Re-run a single mode (clean CUDA context):
 python lilytorch/validation/memory_comparison_3d/run_memory_comparison.py \
-  --mode kernels --Nx 256 --n_steps 80
+  --mode kernel --Nx 256 --n_steps 80
 
 # Reuse JSON files from a previous run (skip already-computed modes):
 python lilytorch/validation/memory_comparison_3d/run_memory_comparison.py \
@@ -48,7 +48,7 @@ For each mode the worker captures:
    chosen peak step (default ≈ 0.6·`n_steps`), and the last step.
 3. **Tensor census at the peak step** — top-30 tensors grouped by
    `(shape, dtype)`.  This is what attributes the memory difference to
-   specific buffers (e.g. shows directly that `no_kernels` allocates a
+  specific buffers (e.g. shows directly that `python` allocates a
    `(B, Nx, Ny, Nz)` per-body SDF that the kernel paths do not).
 4. **Final peak** — `torch.cuda.max_memory_allocated()` over the
    whole run.
@@ -60,7 +60,7 @@ The driver then prints:
   modes — this is where the *which phase* of which path uses the most
   memory becomes obvious.
 * Top-10 largest tensors per mode at the peak step.
-* Savings of each kernel path relative to `no_kernels` in MB and as
+* Savings of the `kernel` path relative to `python` in MB and as
   a percentage of step peak.
 
 ## Requirements
@@ -81,13 +81,13 @@ Each `memory_<mode>.json` is:
 
 ```json
 {
-  "mode": "kernels",
+  "mode": "kernel",
   "Nx": 256, "Ny": 64, "Nz": 64,
   "n_steps": 80, "warmup_steps": 15, "peak_step": 48,
   "device": "NVIDIA RTX 4080 SUPER",
   "torch":  "2.4.0+cu121",
   "records": [
-    {"label": "step 048 [kernels]: before",
+    {"label": "step 048 [kernel]: before",
      "alloc_mb": 1234.5, "peak_mb": 1234.5, "rsrvd_mb": 1280.0},
     ...
   ],
@@ -107,7 +107,7 @@ these files directly without re-running the simulation.
 ## Caveats
 
 * **Not bit-equal across modes.**  The two paths use different
-  reduction orders and (for `no_kernels`) different masking
+  reduction orders and (for `python`) different masking
   conventions, so trajectories diverge after a few hundred steps.
   Memory measurement is unaffected — the script does not assume the
   states match — but do not draw physical conclusions from this tool.

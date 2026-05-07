@@ -10,19 +10,24 @@ breakdowns across grid resolutions and produces paper-quality figures.
 |------|---------|
 | `run_cost_analysis.py`          | Single-grid benchmark. Runs FARMS in-process with CUDA-synced timers around every major sub-kernel; writes CSV + per-grid figures. |
 | `run_multigrid_cost_analysis.py`| Driver that launches the single-grid script in isolated subprocesses across several grids, then calls `plot_scaling.py`. |
-| `run_scaling_conditions_pipeline.py` | Multi-condition wrapper around the multigrid driver. After substantial testing only two methods are exposed: the production method (`nbforces_opt`) and a no-cropping / no-batching reference (`nboff`). |
+| `run_scaling_conditions_pipeline.py` | Multi-mode wrapper around the multigrid driver. It compares the two live solver methods directly: `python` and `kernel`. |
 | `plot_scaling.py`               | Reads all `cost_breakdown_*.csv` files and produces multi-resolution scaling figures (stacked bars, log–log, % distribution). |
 
 ## Running
 
 ```bash
 # Single grid
-python run_cost_analysis.py --Nx 128 --Ny 32 --Nz 32
+python run_cost_analysis.py --Nx 128 --Ny 32 --Nz 32 --mode python
+python run_cost_analysis.py --Nx 128 --Ny 32 --Nz 32 --mode kernel
 
-# Multi-grid scan (default "medium" preset)
-python run_multigrid_cost_analysis.py
+# Multi-grid scan for one mode (default "medium" preset)
+python run_multigrid_cost_analysis.py --mode python
+python run_multigrid_cost_analysis.py --mode kernel
 python run_multigrid_cost_analysis.py --preset production
 python run_multigrid_cost_analysis.py --grids 128:32:32,256:64:64,512:128:128
+
+# Compare both modes across the same grid ladder
+python run_scaling_conditions_pipeline.py --modes python,kernel
 
 # Regenerate only the combined scaling plots
 python plot_scaling.py --data_dir figures/

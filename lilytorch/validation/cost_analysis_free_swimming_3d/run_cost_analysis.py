@@ -26,7 +26,7 @@ Usage
     source /path/to/venv/bin/activate
     python run_cost_analysis.py                                      # default 128×32×32, 20 steps
     python run_cost_analysis.py --Nx 256 --Ny 64 --Nz 64 --n_steps 50
-    python run_cost_analysis.py --Nx 512 --Ny 128 --Nz 128 --n_steps 30
+    python run_cost_analysis.py --Nx 512 --Ny 128 --Nz 128 --n_steps 30 --mode kernel
 """
 
 import argparse
@@ -75,31 +75,29 @@ parser.add_argument("--stability_tol", type=float, default=0.05,
                     help="Warn if rolling (std/mean) of the last 10 timed "
                          "steps exceeds this threshold after warm-up.")
 parser.add_argument("--save_every",type=int, default=9999)
+parser.add_argument("--mode", type=str, default=None,
+                choices=["python", "kernel"],
+                help="Solver mode to benchmark. Use 'python' for the "
+                    "reference path or 'kernel' for the optimised path.")
 parser.add_argument("--use_kernels", action="store_true",
-                    help="Activate the production C++/CUDA kernel path "
-                         "(streaming SDF + Phase D fused forces + union-AABB "
-                         "crops for shared stress / mu-normals / BDIM meta). "
-                         "Mutually exclusive with --no_kernels (which is the "
-                         "pure-PyTorch reference path, no batching/cropping).")
+                help="DEPRECATED: alias for --mode kernel.")
 parser.add_argument("--no_kernels", action="store_true",
-                    help="Force the suboptimal pure-PyTorch reference path "
-                         "(no batching, no cropping, no streaming kernels). "
-                         "Useful as the no-cropping reference baseline.")
+                help="DEPRECATED: alias for --mode python.")
 # Deprecated aliases — kept so existing wrappers keep parsing.  All of
 # them now collapse to ``use_kernels=True`` since the per-feature flags
 # were removed from the solver.
 parser.add_argument("--force_narrow_batch", action="store_true",
-                    help="DEPRECATED: rolled into --use_kernels.")
+                help="DEPRECATED: alias for --mode kernel.")
 parser.add_argument("--force_shared_union", action="store_true",
-                    help="DEPRECATED: rolled into --use_kernels.")
+                help="DEPRECATED: alias for --mode kernel.")
 parser.add_argument("--mu_normals_union", action="store_true",
-                    help="DEPRECATED: rolled into --use_kernels.")
+                help="DEPRECATED: alias for --mode kernel.")
 parser.add_argument("--bdim_union", action="store_true",
-                    help="DEPRECATED: rolled into --use_kernels.")
+                help="DEPRECATED: alias for --mode kernel.")
 parser.add_argument("--streaming_sdf_3d", action="store_true",
-                    help="DEPRECATED: rolled into --use_kernels.")
+                help="DEPRECATED: alias for --mode kernel.")
 parser.add_argument("--streaming_forces_3d", action="store_true",
-                    help="DEPRECATED: rolled into --use_kernels.")
+                help="DEPRECATED: alias for --mode kernel.")
 parser.add_argument("--device",    type=str, default="cuda",
                     choices=["cuda", "cpu"])
 parser.add_argument("--out_dir",   type=str, default=None,
@@ -112,8 +110,44 @@ parser.add_argument("--Lx_fixed", type=float, default=None,
                          "(dx = max(dx_ref, 1.05/Nx); domain grows with N).")
 parser.add_argument("--tag_suffix", type=str, default="",
                     help="Suffix appended to the CSV filename tag "
-                         "(e.g. '_small_nbon'). Defaults to empty string.")
+                    "(e.g. '_small_kernel'). Defaults to empty string.")
 args = parser.parse_args()
+
+
+def _resolve_solver_mode(cli_args):
+    legacy_kernel_mode = (
+        cli_args.use_kernels
+        or cli_args.force_narrow_batch
+        or cli_args.force_shared_union
+        or cli_args.mu_normals_union
+        or cli_args.bdim_union
+        or cli_args.streaming_sdf_3d
+        or cli_args.streaming_forces_3d
+    )
+
+    if cli_args.mode == "python":
+        if legacy_kernel_mode:
+            raise ValueError("--mode python conflicts with kernel-enabling aliases")
+        return "python"
+    if cli_args.mode == "kernel":
+        if cli_args.no_kernels:
+            raise ValueError("--mode kernel conflicts with --no_kernels")
+        return "kernel"
+
+    if cli_args.no_kernels and legacy_kernel_mode:
+        raise ValueError("--no_kernels conflicts with kernel-enabling aliases")
+    if cli_args.no_kernels:
+        return "python"
+    if legacy_kernel_mode:
+        return "kernel"
+    return None
+
+
+try:
+    SOLVER_MODE = _resolve_solver_mode(args)
+except ValueError as exc:
+    print(f"ERROR: {exc}")
+    sys.exit(1)
 
 USE_CUDA = args.device == "cuda" and torch.cuda.is_available()
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -226,8 +260,8 @@ def instrument_handler(handler):
 
     # Keep originals (unbound class methods)
     _orig_step       = type(handler).step
-    _orig_update     = type(handler).update
-    _orig_fluid_step = type(handler).fluid_step
+    _orig_update     = handler.update
+    _orig_fluid_step = type(fs).fluid_step
     _orig_apply      = type(handler).apply_forces
     _orig_forces     = type(fs).forces_method2_3d
     _orig_plot       = type(fs).plotting_and_saving
@@ -235,9 +269,10 @@ def instrument_handler(handler):
 
     # ── Pre-compilation / settle gates ───────────────────────────
     _precompile_count = [0]
-    _precompile_done  = [False]
+    _precompile_done  = [args.precompile <= 0]
     _settle_count     = [0]
     _settle_done      = [False]
+    _deep_patches_installed = [False]
 
     # ── Replacement for handler.step ─────────────────────────────
     def detailed_step(self, task, physics):
@@ -285,7 +320,7 @@ def instrument_handler(handler):
         t   = iteration * timestep
         ffs = self.fluid_solver
 
-        if not self.terminate:
+        if not ffs.terminate:
 
             # ── 1. SDF update ────────────────────────────────────
             with T("1  SDF update (body kinematics + SDF eval)"):
@@ -300,7 +335,7 @@ def instrument_handler(handler):
             # production methods (adv.solve, _bdim_meta_compiled,
             # fs.project) — see _install_deep_patches().
             with T("3  fluid_step (total PDE)"):
-                (u, v, w, p) = _orig_fluid_step(self,
+                (u, v, w, p) = _orig_fluid_step(ffs,
                     ffs.u0, ffs.v0, ffs.w0, ffs.p0, timestep)
 
             (ffs.u0, ffs.v0, ffs.w0, ffs.p0) = (u, v, w, p)
@@ -357,14 +392,13 @@ def instrument_handler(handler):
     # from precompile is preserved.* Important: the patches MUST
     # NOT change the function signature or break compiled wrappers.
 
-    _orig_update_3d = type(handler)._update_3d   # unbound method
-
     # We'll need references to the actual bound/compiled methods
     # for sub-step wrapping inside fluid_step.
     _orig_adv_solve_bound = adv.solve   # possibly compiled
     _orig_set_bcs = type(adv).set_BCs
     _orig_bdim_meta = fs._bdim_meta_compiled  # compiled or eager
     _orig_project = type(fs).project
+    _orig_vardens = type(fs)._compute_variable_density_coefficients
 
     poisson_mg  = getattr(fs, "poisson_solver", None)
 
@@ -374,11 +408,14 @@ def instrument_handler(handler):
         The wrappers call the ORIGINAL (possibly compiled) methods, so
         CUDA-graph recordings from precompile are replayed correctly.
         """
+        if _deep_patches_installed[0]:
+            return
+        _deep_patches_installed[0] = True
 
         # ── 1b. Timed SDF update sub-step ────────────────────────
         def timed_update_detailed(self_h, t, iteration, dt=1):
             with T("1b   SDF eval (per-body × 4 grids)"):
-                _orig_update_3d(self_h, t, iteration, dt)
+                return _orig_update(t, iteration, dt)
         handler.update = types.MethodType(timed_update_detailed, handler)
 
         # ── Wrap Smagorinsky ν_t computation ─────────────────────
@@ -434,12 +471,11 @@ def instrument_handler(handler):
         adv.set_BCs = types.MethodType(timed_set_bcs, adv)
 
         # ── Wrap variable-density coefficients (4 full-grid tensors) ──
-        _orig_vardens = type(handler)._compute_variable_density_coefficients
         def timed_vardens(self_h, *a, **kw):
             with T("3e   var-density coeffs [ch cv cw ch_cc]"):
                 return _orig_vardens(self_h, *a, **kw)
-        handler._compute_variable_density_coefficients = types.MethodType(
-            timed_vardens, handler)
+        fs._compute_variable_density_coefficients = types.MethodType(
+            timed_vardens, fs)
 
         # ── Wrap _release_bdim_fields (O(N) tensor dealloc + sync) ──
         _orig_release = type(fs)._release_bdim_fields
@@ -474,6 +510,12 @@ def instrument_handler(handler):
         print(f"  [profiler] Deep patches installed (SDF, "
               f"advection, BDIM, project"
               f"{', Poisson internals' if _instrument_poisson_internals and poisson_mg else ''})",
+              flush=True)
+
+        if _precompile_done[0]:
+          _install_deep_patches()
+          print(f"  [profiler] Pre-compilation complete (0 steps).  "
+              f"Settling physics for {args.settle_steps} more steps…\n",
               flush=True)
 
     print(f"  [profiler] Instrumented handler (grid {fs.grid_shape}, "
@@ -596,19 +638,8 @@ def gen_simulation_config_lean(output_folder):
             solver_cfg["poisson_compile"]  = True
             solver_cfg["compile_forces"]   = True
             solver_cfg["compile_sdf"]      = True
-            # Map the --use_kernels / --no_kernels switch (and the
-            # legacy --streaming_*, --force_shared_union, --mu_normals_union,
-            # --bdim_union, --force_narrow_batch deprecation aliases) to
-            # the single solver-level ``solver_method`` config key.
-            _legacy_on = (
-                args.force_narrow_batch or args.force_shared_union
-                or args.mu_normals_union or args.bdim_union
-                or args.streaming_sdf_3d or args.streaming_forces_3d
-            )
-            if args.no_kernels:
-                solver_cfg["solver_method"] = "python"
-            elif args.use_kernels or _legacy_on:
-                solver_cfg["solver_method"] = "kernel"
+            if SOLVER_MODE is not None:
+                solver_cfg["solver_method"] = SOLVER_MODE
 
     with open(yaml_path, "w") as f:
         yaml.dump(sim_dict, f, default_flow_style=False, sort_keys=False)

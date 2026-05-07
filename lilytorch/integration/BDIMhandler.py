@@ -55,9 +55,17 @@ class BDIMhandler:
         # We intentionally delegate parsing so that strings like "double"
         # / "single" / "float64" / "float32" all behave the same here as
         # they do in :class:`FluidSolver`.
-        self.dtype = self.pars["solver"].get("dtype", torch.float32) if dtype is None else dtype
 
-        self.dtype_np = np.float32 if self.dtype == torch.float32 else np.float64
+        # ---- create fluid solver ----
+        self.fluid_solver = FluidSolver(
+            self.pars,
+            dtype=dtype,
+            custom_update=True,
+            compute_forces=True,
+        )
+        self.device = self.fluid_solver.device
+        self.dtype = self.fluid_solver.dtype
+        self.dtype_np = np.float64 if self.dtype == torch.float64 else np.float32
 
         # used for 2D contour-mask neighbor only
         self._prev_body_index = ()
@@ -67,14 +75,7 @@ class BDIMhandler:
         self.data = data          # list[AnimatData] from FARMS
         self.iteration = 0
 
-        # ---- create fluid solver ----
-        self.fluid_solver = FluidSolver(
-            self.pars,
-            dtype=self.dtype,
-            custom_update=True,
-            compute_forces=True,
-        )
-        self.device = self.fluid_solver.device
+
 
 
         # ---- initialise u0 from inlet BC ----
@@ -1304,8 +1305,8 @@ class BDIMhandler:
         _FAR = 1e4
         B    = len(comp.bodies)
 
-        com_poses_np, urdf_poses_np, Rs_np, lin_vels_np, ang_vels_np = (
-            self.gather_data(iteration, as_numpy=True)
+        com_poses, urdf_poses, Rs, lin_vels, ang_vels = (
+            self.gather_data(iteration)
         )
 
         h_grid = float(comp.h)
@@ -1379,156 +1380,152 @@ class BDIMhandler:
         # ──────────────────────────────────────────────────────────
         kin_static = getattr(comp, '_stream_kin_static_2d', None)
         if kin_static is None:
-            body_ids_np = np.asarray(
+            body_ids = torch.tensor(
                 [(int(a), int(l)) for (a, l) in comp.body_ids],
-                dtype=np.int64,
+                dtype=torch.int64,
+                device=self.device,
             )
             # 2-D bodies have no `local_pose` concept (rigid-body links
             # in the 2-D projection collapse to identity local frames),
             # so the local translation / rotation are trivial.
-            local_lt_np = np.zeros((B, 2), dtype=self.dtype_np)
-            local_lr_np = np.tile(np.eye(2, dtype=self.dtype_np), (B, 1, 1))
-            sdf_lo_np   = np.empty((B, 2), dtype=self.dtype_np)
-            sdf_hi_np   = np.empty((B, 2), dtype=self.dtype_np)
+            local_lt = torch.zeros((B, 2), dtype=self.dtype, device=self.device)
+            local_lr = torch.eye(2, dtype=self.dtype, device=self.device).unsqueeze(0).repeat(B, 1, 1)
+            sdf_lo = torch.empty((B, 2), dtype=self.dtype, device=self.device)
+            sdf_hi = torch.empty((B, 2), dtype=self.dtype, device=self.device)
             for b, body in enumerate(comp.bodies):
                 m = body._stream_meta  # set for both mesh and analytical bodies
-                sdf_lo_np[b] = (m['bx0'],     m['by0'])
-                sdf_hi_np[b] = (m['bx_last'], m['by_last'])
+                sdf_lo[b] = torch.stack((
+                    torch.as_tensor(m['bx0'], dtype=self.dtype, device=self.device),
+                    torch.as_tensor(m['by0'], dtype=self.dtype, device=self.device),
+                ))
+                sdf_hi[b] = torch.stack((
+                    torch.as_tensor(m['bx_last'], dtype=self.dtype, device=self.device),
+                    torch.as_tensor(m['by_last'], dtype=self.dtype, device=self.device),
+                ))
             kin_static = {
-                'body_ids':     body_ids_np,
-                'local_lt':     local_lt_np,
-                'local_lr':     local_lr_np,
-                'local_center': 0.5 * (sdf_lo_np + sdf_hi_np),
-                'local_half':   0.5 * (sdf_hi_np - sdf_lo_np),
-                'grid_origin':  np.array([
+                'body_ids':     body_ids,
+                'local_lt':     local_lt,
+                'local_lr':     local_lr,
+                'local_center': 0.5 * (sdf_lo + sdf_hi),
+                'local_half':   0.5 * (sdf_hi - sdf_lo),
+                'grid_origin':  torch.tensor([
                     float(comp.x[0].item()),
                     float(comp.y[0].item()),
-                ], dtype=self.dtype_np),
+                ], dtype=self.dtype, device=self.device),
                 'inv_h':        1.0 / float(comp.h),
-                'gs':           np.asarray(gs, dtype=np.int64),
+                'gs':           torch.tensor(gs, dtype=torch.int64, device=self.device),
                 'pad':          3,
             }
             comp._stream_kin_static_2d = kin_static
 
-        body_ids_np = kin_static['body_ids']
+        body_ids = kin_static['body_ids']
 
         # Gather per-body kinematics from the per-animat numpy snapshots.
-        urdf_pos = np.empty((B, 2), dtype=self.dtype_np)
-        com_pos  = np.empty((B, 2), dtype=self.dtype_np)
-        R_link   = np.empty((B, 2, 2), dtype=self.dtype_np)
-        lin_vel  = np.empty((B, 2), dtype=self.dtype_np)
-        ang_vel  = np.empty((B,),    dtype=self.dtype_np)  # scalar in 2-D
+        urdf_pos = torch.empty((B, 2), dtype=self.dtype, device=self.device)
+        com_pos  = torch.empty((B, 2), dtype=self.dtype, device=self.device)
+        R_link   = torch.empty((B, 2, 2), dtype=self.dtype, device=self.device)
+        lin_vel  = torch.empty((B, 2), dtype=self.dtype, device=self.device)
+        ang_vel  = torch.empty((B,),    dtype=self.dtype, device=self.device)  # scalar in 2-D
         for b in range(B):
-            a_id = int(body_ids_np[b, 0])
-            l_id = int(body_ids_np[b, 1])
-            urdf_pos[b] = urdf_poses_np[a_id][l_id]
-            com_pos[b]  = com_poses_np[a_id][l_id]
-            R_link[b]   = Rs_np[a_id][l_id]
-            lin_vel[b]  = lin_vels_np[a_id][l_id]
-            ang_vel[b]  = ang_vels_np[a_id][l_id]
+            a_id = int(body_ids[b, 0])
+            l_id = int(body_ids[b, 1])
+            urdf_pos[b] = urdf_poses[a_id][l_id]
+            com_pos[b]  = com_poses[a_id][l_id]
+            R_link[b]   = Rs[a_id][l_id]
+            lin_vel[b]  = lin_vels[a_id][l_id]
+            ang_vel[b]  = ang_vels[a_id][l_id]
 
         # Compose with per-body local pose (identity in 2-D, kept for
         # symmetry with the 3-D path).
-        body_pos = urdf_pos + np.einsum(
+        body_pos = urdf_pos + torch.einsum(
             'bij,bj->bi', R_link, kin_static['local_lt'],
         )
-        body_R = np.einsum(
+        body_R = torch.einsum(
             'bij,bjk->bik', R_link, kin_static['local_lr'],
         )  # (B, 2, 2)
 
         # Vectorised AABB of the oriented body-SDF box in world space.
-        abs_R        = np.abs(body_R)
-        world_half   = np.einsum('bij,bj->bi', abs_R, kin_static['local_half'])
+        abs_R        = torch.abs(body_R)
+        world_half   = torch.einsum('bij,bj->bi', abs_R, kin_static['local_half'])
         world_center = (
-            np.einsum('bij,bj->bi', body_R, kin_static['local_center']) + body_pos
+            torch.einsum('bij,bj->bi', body_R, kin_static['local_center']) + body_pos
         )
         w_min = world_center - world_half
         w_max = world_center + world_half
 
         g0    = kin_static['grid_origin']
         inv_h = kin_static['inv_h']
-        gs_np = kin_static['gs']
+        gs    = kin_static['gs']
         pad   = kin_static['pad']
 
-        i_lo = np.floor((w_min - g0) * inv_h).astype(np.int64) - pad
-        i_hi = np.floor((w_max - g0) * inv_h).astype(np.int64) + 1 + pad
-        np.maximum(i_lo, 0, out=i_lo)
-        np.minimum(i_hi, gs_np[None, :], out=i_hi)
+        i_lo = torch.floor((w_min - g0) * inv_h).to(torch.int64) - pad
+        i_hi = torch.floor((w_max - g0) * inv_h).to(torch.int64) + 1 + pad
+        i_lo.clamp_(min=0)
+        i_hi = torch.minimum(i_hi, gs[None, :])
         # Bodies partially or entirely outside the grid produce i_hi < i_lo
-        # (i_hi is clamped above by gs_np but not from below by i_lo).
+        # (i_hi is clamped above by gs but not from below by i_lo).
         # Clamp to zero-size AABB for out-of-bounds bodies.
-        np.maximum(i_hi, i_lo, out=i_hi)
+        torch.maximum(i_hi, i_lo, out=i_hi)
 
         dims     = i_hi - i_lo
-        sub_vol  = dims.prod(axis=1)
-        full_vol = int(gs_np.prod())
+        sub_vol  = dims.prod(dim=1)
+        full_vol = int(gs.prod().item())
         # Bodies covering >90 % of the grid: fall back to full grid (matches
         # the 3-D heuristic).
         fallback = sub_vol > int(0.9 * full_vol)
-        if fallback.any():
+        if fallback.any().item():
             i_lo[fallback] = 0
-            i_hi[fallback] = gs_np[None, :]
+            i_hi[fallback] = gs[None, :]
             dims = i_hi - i_lo
 
-        aabb_lo_h_np  = np.ascontiguousarray(i_lo, dtype=np.int64)
-        aabb_dim_h_np = np.ascontiguousarray(dims, dtype=np.int64)
-        cell_vols     = dims.prod(axis=1)
-        cell_off_h_np = np.empty(B + 1, dtype=np.int64)
-        cell_off_h_np[0] = 0
-        np.cumsum(cell_vols, out=cell_off_h_np[1:])
-        max_vol = int(cell_vols.max()) if B > 0 else 0
+        aabb_lo_h  = i_lo.contiguous()
+        aabb_dim_h = dims.contiguous()
+        cell_vols  = dims.prod(dim=1)
+        cell_off_h = torch.empty(B + 1, dtype=torch.int64, device=self.device)
+        cell_off_h[0] = 0
+        if B > 0:
+            cell_off_h[1:] = torch.cumsum(cell_vols, dim=0)
+        max_vol = int(cell_vols.max().item()) if B > 0 else 0
 
         # 2-D kin row layout (matches the kernel signature):
         #   [R^T (4) | bp (2) | cm (2) | lv (2) | omega (1)]  = 11
-        # Row-major flatten of R^T equals body_R.transpose(0,2,1).reshape(B,4).
-        kin_h_np = np.empty((B, 11), dtype=self.dtype_np)
-        kin_h_np[:, 0:4]   = np.ascontiguousarray(
-            body_R.transpose(0, 2, 1)
-        ).reshape(B, 4)
-        kin_h_np[:, 4:6]   = body_pos
-        kin_h_np[:, 6:8]   = com_pos
-        kin_h_np[:, 8:10]  = lin_vel
-        kin_h_np[:, 10]    = ang_vel
+        # Row-major flatten of R^T equals body_R.transpose(1, 2).reshape(B, 4).
+        kin_h = torch.empty((B, 11), dtype=self.dtype, device=self.device)
+        kin_h[:, 0:4]   = body_R.transpose(1, 2).reshape(B, 4)
+        kin_h[:, 4:6]   = body_pos
+        kin_h[:, 6:8]   = com_pos
+        kin_h[:, 8:10]  = lin_vel
+        kin_h[:, 10]    = ang_vel
+
+        aabb_lo_host = aabb_lo_h.detach().cpu()
+        aabb_dim_host = aabb_dim_h.detach().cpu()
 
         # Update Python-side AABB metadata used downstream.
         aabbs_for_split = []
         for b in range(B):
-            i0 = int(aabb_lo_h_np[b, 0])
-            j0 = int(aabb_lo_h_np[b, 1])
-            Ai = int(aabb_dim_h_np[b, 0])
-            Aj = int(aabb_dim_h_np[b, 1])
+            i0 = int(aabb_lo_host[b, 0])
+            j0 = int(aabb_lo_host[b, 1])
+            Ai = int(aabb_dim_host[b, 0])
+            Aj = int(aabb_dim_host[b, 1])
             aabb = (i0, i0 + Ai, j0, j0 + Aj)
             comp._body_aabbs[b] = aabb
             aabbs_for_split.append(aabb)
 
         # Single H2D per packed tensor.
-        kin       = torch.from_numpy(kin_h_np).to(
-            self.device, dtype=self.dtype, non_blocking=True,
-        )
-        aabb_lo   = torch.from_numpy(aabb_lo_h_np).to(
-            self.device, non_blocking=True,
-        )
-        aabb_dim  = torch.from_numpy(aabb_dim_h_np).to(
-            self.device, non_blocking=True,
-        )
-        cell_off  = torch.from_numpy(cell_off_h_np).to(
-            self.device, non_blocking=True,
-        )
-        com_pos_t = torch.from_numpy(com_pos).to(
-            self.device, dtype=self.dtype, non_blocking=True,
-        )
-        urdf_pos_t = torch.from_numpy(urdf_pos).to(
-            self.device, dtype=self.dtype, non_blocking=True,
-        )
-        R_t        = torch.from_numpy(body_R).to(
-            self.device, dtype=self.dtype, non_blocking=True,
-        )
+        kin       = kin_h
+        aabb_lo   = aabb_lo_h
+        aabb_dim  = aabb_dim_h
+        cell_off  = cell_off_h
+        com_pos_t = com_pos
+        urdf_pos_t = urdf_pos
+        R_t        = body_R
+
         # Maintain `comp.com_pos[b]` views for downstream code.
         for b, body in enumerate(comp.bodies):
             comp.com_pos[b] = com_pos_t[b]
             body.com_pos = comp.com_pos[b]
 
-        cell_off_h = cell_off_h_np.tolist()
+        cell_off_h = cell_off_h.detach().cpu().tolist()
 
         comp._combined_forces_out = None
 

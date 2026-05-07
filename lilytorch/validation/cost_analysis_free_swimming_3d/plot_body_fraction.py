@@ -3,13 +3,13 @@
 Paper-quality plots for the body-fraction cost analysis.
 
 Reads CSVs produced by ``run_body_fraction_analysis.py`` and generates
-per-domain log-log cost curves comparing narrow-band on vs off, plus
-a stacked-bar breakdown and a narrow-band speed-up summary.
+per-domain log-log cost curves comparing ``python`` vs ``kernel``, plus
+a stacked-bar breakdown and a kernel speed-up summary.
 
 Expected filename pattern:
-    cost_breakdown_{Nx}x{Ny}x{Nz}_{domain}_{nb}.csv
-where ``nb ∈ {nbon, nboff}`` and ``domain`` is one of the preset names
-in ``run_body_fraction_analysis.py``.
+    cost_breakdown_{Nx}x{Ny}x{Nz}_{domain}_{mode}.csv
+where ``mode ∈ {python, kernel}`` and ``domain`` is one of the preset
+names in ``run_body_fraction_analysis.py``.
 
 Usage
 -----
@@ -96,20 +96,18 @@ CAT_COLOURS = {
     _OTHER_LABEL:              "#90a4ae",
 }
 
-NB_STYLES = {
-    "nboff":   {"linestyle": "--", "marker": "s",
-                "label": "baseline (all flags off)"},
-    "nbcrop":  {"linestyle": "-.", "marker": "^",
-                "label": "cropping only"},
-    "nbbatch": {"linestyle": ":",  "marker": "D",
-                "label": "batching only"},
-    "nbon":    {"linestyle": "-",  "marker": "o",
-                "label": "all flags on (cropping + batching)"},
+MODE_STYLES = {
+    "python": {"linestyle": "--", "marker": "s",
+                "label": "python mode"},
+    "kernel": {"linestyle": "-",  "marker": "o",
+                "label": "kernel mode"},
 }
-
-# Order modes for plotting & legends so the visual reads
-# off → crop → batch → on (least to most enabled).
-NB_PLOT_ORDER = ["nboff", "nbcrop", "nbbatch", "nbon"]
+MODE_ALIASES = {
+    "nboff": "python",
+    "nbon": "kernel",
+    "nbforces_opt": "kernel",
+}
+MODE_PLOT_ORDER = ["python", "kernel"]
 
 DOMAIN_LABEL = {
     "small": "Small domain (Lx = 1.2 m,  body ≈ 70 % of domain)",
@@ -124,14 +122,14 @@ DOMAIN_ORDER = ["small", "large"]
 # Parse CSV filenames
 # ─────────────────────────────────────────────────────────────────────
 CSV_RE = re.compile(
-    r"cost_breakdown_(\d+)x(\d+)x(\d+)_([A-Za-z]+)_(nbon|nboff|nbcrop|nbbatch)\.csv$")
+    r"cost_breakdown_(\d+)x(\d+)x(\d+)_([A-Za-z]+)_(python|kernel|nboff|nbon|nbforces_opt)\.csv$")
 
 csv_files = glob.glob(os.path.join(args.data_dir, "cost_breakdown_*.csv"))
 if not csv_files:
     print(f"ERROR: No cost_breakdown_*.csv files found in {args.data_dir}")
     raise SystemExit(1)
 
-# Organise: records[domain][nb] -> list of (nx, ny, nz, cell_counts, cat_ms)
+# Organise: records[domain][mode] -> list of (nx, ny, nz, cell_counts, cat_ms)
 records = {}
 
 for csv_f in csv_files:
@@ -140,7 +138,7 @@ for csv_f in csv_files:
         continue
     nx, ny, nz = int(m.group(1)), int(m.group(2)), int(m.group(3))
     domain = m.group(4)
-    nb     = m.group(5)
+    nb     = MODE_ALIASES.get(m.group(5), m.group(5))
 
     df = pd.read_csv(csv_f)
     total_row = df[df["component"] == "TOTAL step"]
@@ -200,7 +198,7 @@ for csv_f in csv_files:
 
 if not records:
     print("ERROR: No recognisable CSVs (expected "
-          "cost_breakdown_{Nx}x{Ny}x{Nz}_{domain}_{nbon|nboff}.csv)")
+        "cost_breakdown_{Nx}x{Ny}x{Nz}_{domain}_{python|kernel}.csv)")
     raise SystemExit(1)
 
 # Sort each list by cell count
@@ -221,7 +219,7 @@ print(f"  Loaded {sum(len(v) for d in records.values() for v in d.values())} "
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Figure 1 — per-domain log-log scaling, NB on vs NB off
+# Figure 1 — per-domain log-log scaling, python vs kernel
 # ─────────────────────────────────────────────────────────────────────
 for domain, by_nb in records.items():
     if not by_nb:
@@ -232,7 +230,7 @@ for domain, by_nb in records.items():
             continue
         cells = np.array([r["cells"] for r in runs], dtype=float)
         total = np.array([r["cat_ms"]["TOTAL step"] for r in runs])
-        style = NB_STYLES[nb]
+        style = MODE_STYLES[nb]
         ax.loglog(cells, total,
                   linestyle=style["linestyle"],
                   marker=style["marker"], markersize=6,
@@ -248,27 +246,25 @@ for domain, by_nb in records.items():
                       linewidth=1.0, alpha=0.9,
                       color=CAT_COLOURS.get(cat_name, "#bdbdbd"),
                       label=f"{cat_name}  ({style['label']})"
-                            if nb == "nbon" else None)
+                            if nb == "kernel" else None)
 
     # Reference slope lines (ideal O(N) at arbitrary y-anchor)
     all_cells = sorted({r["cells"]
                         for runs in by_nb.values() for r in runs})
     if len(all_cells) >= 2:
         x_ref = np.array([all_cells[0], all_cells[-1]], dtype=float)
-        # Anchor at TOTAL of smallest grid (NB-off if available else first nb)
-        base_nb = "nboff" if "nboff" in by_nb and by_nb["nboff"] else next(iter(by_nb))
+        # Anchor at TOTAL of smallest grid (python if available else first mode)
+        base_nb = "python" if "python" in by_nb and by_nb["python"] else next(iter(by_nb))
         y_anchor = by_nb[base_nb][0]["cat_ms"]["TOTAL step"]
         y_ref = y_anchor * x_ref / x_ref[0]
         ax.loglog(x_ref, y_ref, color="#9e9e9e",
                   linestyle=":", linewidth=1.0, alpha=0.7,
                   label="O(N) reference")
 
-        # ── a + b·N reference fitted to the most-enabled NB mode ─
-        # Surfaces the constant-cost floor.  Pick the most aggressive
-        # narrow-band mode available so the fit reflects the curve we
-        # actually want to drive flat at high N.
+        # ── a + b·N reference fitted to the kernel mode ─
+        # Surfaces the constant-cost floor of the optimised path.
         fit_nb = None
-        for cand in ("nbon", "nbbatch", "nbcrop", "nboff"):
+        for cand in ("kernel", "python"):
             if cand in by_nb and len(by_nb[cand]) >= 2:
                 fit_nb = cand
                 break
@@ -304,12 +300,12 @@ for domain, by_nb in records.items():
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Figure 2 — stacked bars per domain comparing nbon vs nboff
+# Figure 2 — stacked bars per domain comparing kernel vs python
 # ─────────────────────────────────────────────────────────────────────
 for domain, by_nb in records.items():
     if len(by_nb) < 1:
         continue
-    # Build cell-count axis from the union of nbon/nboff grids.
+    # Build cell-count axis from the union of python/kernel grids.
     all_grids = sorted({tuple(r["grid"])
                         for runs in by_nb.values() for r in runs},
                        key=lambda g: g[0] * g[1] * g[2])
@@ -317,7 +313,7 @@ for domain, by_nb in records.items():
     if n_g == 0:
         continue
 
-    nb_order = [nb for nb in ("nboff", "nbon") if nb in by_nb]
+    nb_order = [nb for nb in ("python", "kernel") if nb in by_nb]
     n_nb = len(nb_order)
 
     fig, ax = plt.subplots(
@@ -340,7 +336,7 @@ for domain, by_nb in records.items():
                    color=CAT_COLOURS.get(cat_name, "#bdbdbd"),
                    edgecolor="white", linewidth=0.4,
                    label=cat_name if j == 0 else None,
-                   hatch="" if nb == "nbon" else "//")
+                   hatch="" if nb == "kernel" else "//")
             bottoms += vals
         # Totals
         for xi, b in zip(xs, bottoms):
@@ -348,7 +344,7 @@ for domain, by_nb in records.items():
                     ha="center", va="bottom", fontsize=7)
         # nb label under each group column
         for xi, g in zip(xs, all_grids):
-            ax.text(xi, -0.02 * bottoms.max(), NB_STYLES[nb]["label"].split()[0],
+            ax.text(xi, -0.02 * bottoms.max(), MODE_STYLES[nb]["label"].split()[0],
                     ha="center", va="top", fontsize=6.5, color="#455a64")
 
     ax.set_xticks(group_x)
@@ -356,7 +352,7 @@ for domain, by_nb in records.items():
     ax.set_xlabel("Grid resolution")
     ax.set_ylabel("Time per step (ms)")
     ax.set_title(DOMAIN_LABEL.get(domain, f"Domain: {domain}")
-                 + "  —  hatched = full-grid baseline")
+                 + "  —  hatched = python baseline")
     ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0),
               framealpha=0.9, fontsize=8)
     ax.set_ylim(bottom=0)
@@ -369,18 +365,17 @@ for domain, by_nb in records.items():
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Figure 3 — combined 4-condition log-log view (all conditions overlaid)
+# Figure 3 — combined 4-curve log-log view (all domain × mode curves)
 # ─────────────────────────────────────────────────────────────────────
-# Headline plot for the body-fraction comparison: every (domain, NB-mode)
-# combination on the same log-log axes so the narrow-band benefit
+# Headline plot for the body-fraction comparison: every (domain, mode)
+# combination on the same log-log axes so the kernel benefit
 # emerges directly from the curve spacing.
 #
 # Expected pattern at convergence:
-#   * "small" domain: nbon and nboff curves nearly overlap (body fills
-#     ~ 70 % of cells, so cropping does not save much work).
-#   * "large" domain: nbon sits well below nboff, with the gap widening
-#     as N grows (body covers ~ 1/30 of cells, so cropping skips the
-#     bulk of the per-step work).
+#   * "small" domain: kernel and python curves nearly overlap (body fills
+#     ~ 70 % of cells, so the optimised path has less work to skip).
+#   * "large" domain: kernel sits well below python, with the gap widening
+#     as N grows.
 DOMAIN_COND_COLOURS = {
     "small": "#1976d2",   # blue
     "large": "#d32f2f",   # red
@@ -388,19 +383,16 @@ DOMAIN_COND_COLOURS = {
 
 if records:
     fig, ax = plt.subplots(figsize=(7.2, 4.8))
-    # Open marker face for "more enabled" modes so the visual cleanly
-    # reads off → crop → batch → on as the curve gets lower (= faster).
-    _MARKER_FACE = {"nboff": "filled", "nbcrop": "filled",
-                    "nbbatch": "white", "nbon": "white"}
+    _MARKER_FACE = {"python": "filled", "kernel": "white"}
     for domain, by_nb in records.items():
         col = DOMAIN_COND_COLOURS.get(domain, "#455a64")
-        for nb in NB_PLOT_ORDER:
+        for nb in MODE_PLOT_ORDER:
             runs = by_nb.get(nb, [])
             if not runs:
                 continue
             cells = np.array([r["cells"] for r in runs], dtype=float)
             total = np.array([r["cat_ms"]["TOTAL step"] for r in runs])
-            style = NB_STYLES[nb]
+            style = MODE_STYLES[nb]
             label = (f"{DOMAIN_LABEL.get(domain, domain).split('(')[0].strip()} "
                      f"— {style['label']}")
             face = "white" if _MARKER_FACE.get(nb) == "white" else col
@@ -412,8 +404,7 @@ if records:
                       markeredgewidth=1.4,
                       label=label)
 
-    # O(N) reference slope, anchored at the smallest "large nboff" point
-    # if available, otherwise at the smallest data point overall.
+    # O(N) reference slope, anchored at the smallest data point overall.
     all_pts = [(r["cells"], r["cat_ms"]["TOTAL step"])
                for by_nb in records.values()
                for runs in by_nb.values() for r in runs]
@@ -428,7 +419,7 @@ if records:
 
     ax.set_xlabel("Total cells  $N_x N_y N_z$")
     ax.set_ylabel("Time per step (ms)")
-    ax.set_title("Cost scaling: 4 conditions (domain × narrow-band)")
+    ax.set_title("Cost scaling: domain × solver mode")
     ax.legend(loc="upper left", framealpha=0.9, fontsize=8.5)
     fig.tight_layout()
     path = os.path.join(args.out_dir, "body_fraction_loglog_combined.pdf")
@@ -439,27 +430,20 @@ if records:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Figure 4 — speed-ups vs baseline (nboff), per (domain, mode), vs N.
+# Figure 4 — speed-ups vs python baseline, per domain, vs N.
 # ─────────────────────────────────────────────────────────────────────
-# Plots TIME(nboff) / TIME(mode) for each non-baseline mode so the
-# decomposition is visible at a glance:
-#   * "batching only"  → uniform speed-up across N for both domains
-#                        (justifies defaulting batching).
-#   * "cropping only"  → small-domain curve hugs 1.0× (or dips below)
-#                        because cropping has nothing to skip and adds
-#                        dynamic-shape overhead; large-domain curve
-#                        sits well above 1.0× and grows with N.
-#   * "cropping+batching" → product of the two effects.
-if any(any(nb != "nboff" for nb in by_nb) and "nboff" in by_nb
+# Plots TIME(python) / TIME(kernel) so the body-fraction-dependent win of
+# the optimised path is visible at a glance.
+if any(any(nb != "python" for nb in by_nb) and "python" in by_nb
        for by_nb in records.values()):
     fig, ax = plt.subplots(figsize=(6.6, 4.4))
     for domain, by_nb in records.items():
-        if "nboff" not in by_nb:
+        if "python" not in by_nb:
             continue
         col = DOMAIN_COND_COLOURS.get(domain, "#455a64")
-        off = {tuple(r["grid"]): r for r in by_nb["nboff"]}
-        for nb in NB_PLOT_ORDER:
-            if nb == "nboff" or nb not in by_nb:
+        off = {tuple(r["grid"]): r for r in by_nb["python"]}
+        for nb in MODE_PLOT_ORDER:
+            if nb == "python" or nb not in by_nb:
                 continue
             other = {tuple(r["grid"]): r for r in by_nb[nb]}
             common = sorted(set(off) & set(other),
@@ -473,7 +457,7 @@ if any(any(nb != "nboff" for nb in by_nb) and "nboff" in by_nb
                 / other[g]["cat_ms"]["TOTAL step"]
                 for g in common
             ])
-            style = NB_STYLES[nb]
+            style = MODE_STYLES[nb]
             dom_short = DOMAIN_LABEL.get(domain, domain).split("(")[0].strip()
             ax.semilogx(cells, speedup,
                         linestyle=style["linestyle"],
@@ -484,8 +468,8 @@ if any(any(nb != "nboff" for nb in by_nb) and "nboff" in by_nb
     ax.axhline(1.0, color="#9e9e9e", linestyle=":", linewidth=1.0,
                label="break-even (1×)")
     ax.set_xlabel("Total cells  $N_x N_y N_z$")
-    ax.set_ylabel(r"Speed-up  $T_\mathrm{off}\,/\,T_\mathrm{mode}$")
-    ax.set_title("Speed-up decomposition: cropping vs batching vs combined")
+    ax.set_ylabel(r"Speed-up  $T_\mathrm{python}\,/\,T_\mathrm{mode}$")
+    ax.set_title("Kernel speed-up vs python baseline")
     ax.legend(loc="best", framealpha=0.9, fontsize=7.5)
     fig.tight_layout()
     path = os.path.join(args.out_dir, "body_fraction_speedup.pdf")
