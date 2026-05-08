@@ -217,9 +217,9 @@ def instrument_handler(handler):
     _orig_step       = type(handler).step
     _orig_update     = handler.update
     _orig_fluid_step = type(fs).fluid_step
-    _orig_apply      = type(handler).apply_forces
+    _orig_apply      = type(handler)._apply_forces
     _orig_forces     = type(fs).forces_method2
-    _orig_recompute  = type(fs)._recompute_mu_normals_2d
+    _orig_recompute  = type(fs)._recompute_mu_normals
 
     _precompile_count = [0]
     _precompile_done  = [args.precompile <= 0]

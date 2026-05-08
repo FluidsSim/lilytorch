@@ -1330,10 +1330,10 @@ class BDIMhandler:
             # Kernel path does not populate per-body CC-SDF slabs.
             for body_i in range(B):
                 comp._sdf_sparse[body_i] = None
-            # Cache the union AABB directly so _compute_union_aabb_3d can
+            # Cache the union AABB directly so _compute_union_aabb can
             # activate the cheap sub-block mu/normals path without reading
-            # _sdf_sparse.  Without this, _compute_union_aabb_3d returns
-            # None → _recompute_mu_normals_3d falls into the full-grid
+            # _sdf_sparse.  Without this, _compute_union_aabb returns
+            # None → _recompute_mu_normals falls into the full-grid
             # CUDA-graph (reduce-overhead) path, which statically holds
             # ~2-3 GB of output + intermediate buffers for the full grid.
             _u_i0 = _u_j0 = _u_k0 = 1 << 30
@@ -1403,7 +1403,7 @@ class BDIMhandler:
         # the previous step's SDF (true lagged-normals BDIM).  Before
         # the running-min fields are wiped to ``_FAR`` below we must
         # seed these from the *current* (= previous-step) ``comp.sdf_val``
-        # if they have not yet been populated by ``_recompute_mu_normals_2d``.
+        # if they have not yet been populated by ``_recompute_mu_normals``.
         # Computing them after the reset would feed the kernel normals
         # taken from a flat ``_FAR`` field — the gradients vanish, the
         # delta-band integrand picks an arbitrary direction, and the 2-D
@@ -1662,7 +1662,7 @@ class BDIMhandler:
             for b in range(B):
                 comp._sdf_sparse[b] = None
 
-            # Cache the union AABB so _recompute_mu_normals_2d can activate
+            # Cache the union AABB so _recompute_mu_normals can activate
             # the sub-block path without reading _sdf_sparse.
             _u_i0 = _u_j0 = 1 << 30
             _u_i1 = _u_j1 = -1

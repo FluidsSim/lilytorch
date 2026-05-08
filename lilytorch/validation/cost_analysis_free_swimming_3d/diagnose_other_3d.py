@@ -92,7 +92,7 @@ def install_patch():
 
         with B.time("F.4  union AABB compute"):
             fs._bdim_union_aabb = (
-                fs._compute_union_aabb_3d(halo=2)
+                fs._compute_union_aabb(halo=2)
                 if getattr(fs, '_bdim_union', False) else None
             )
 

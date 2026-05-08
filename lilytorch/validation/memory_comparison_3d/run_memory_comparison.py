@@ -400,9 +400,9 @@ def _run_worker(args: argparse.Namespace) -> None:
 
         # 2. mu / normals
         if self.ndim == 3:
-            fs._recompute_mu_normals_3d()
+            fs._recompute_mu_normals()
         else:
-            fs._recompute_mu_normals_2d()
+            fs._recompute_mu_normals()
         _record(f"step {idx:03d} [{mode}]: after mu/normals")
 
         # 3. fluid step (Heun: predictor + corrector)

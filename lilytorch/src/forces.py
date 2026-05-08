@@ -436,7 +436,7 @@ def forces_method2(self, u, v, p, iteration):
 
     # ---- CC normals ------------------------------------------------
     # The 2-D update path recomputes and caches these in
-    # ``_recompute_mu_normals_2d``.  Reuse them here instead of launching
+    # ``_recompute_mu_normals``.  Reuse them here instead of launching
     # another full-grid normal computation for the force pass.
     normal_x = getattr(self, 'normal_x', None)
     normal_y = getattr(self, 'normal_y', None)

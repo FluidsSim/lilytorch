@@ -273,34 +273,6 @@ except Exception:
     _mu_normals_batched_compiled = _mu_normals_batched
 
 
-def _mu_normals_batched_2d(sdf_u, sdf_v, sdf_cc, h, eps):
-    """2-D wrapper: [u, v, cc] → (mu0, mu1, nx, ny), each (3, Nx, Ny)."""
-    mu0, mu1, nx, ny = _mu_normals_batched(
-        torch.stack([sdf_u, sdf_v, sdf_cc]), h, eps)
-    return mu0, mu1, nx, ny
-
-
-try:
-    _mu_normals_batched_2d_compiled = torch.compile(
-        _mu_normals_batched_2d, mode="reduce-overhead")
-except Exception:
-    _mu_normals_batched_2d_compiled = _mu_normals_batched_2d
-
-
-def _mu_normals_batched_3d(sdf_u, sdf_v, sdf_w, sdf_cc, h, eps):
-    """3-D wrapper: [u, v, w, cc] → (mu0, mu1, nx, ny, nz), each (4, Nx, Ny, Nz)."""
-    mu0, mu1, nx, ny, nz = _mu_normals_batched(
-        torch.stack([sdf_u, sdf_v, sdf_w, sdf_cc]), h, eps)
-    return mu0, mu1, nx, ny, nz
-
-
-try:
-    _mu_normals_batched_3d_compiled = torch.compile(
-        _mu_normals_batched_3d, mode="reduce-overhead")
-except Exception:
-    _mu_normals_batched_3d_compiled = _mu_normals_batched_3d
-
-
 # Module-level cache:  (data_ptr_x, data_ptr_y, data_ptr_z) -> _StaggeredGrids
 _grid_cache: dict[tuple, _StaggeredGrids] = {}
 

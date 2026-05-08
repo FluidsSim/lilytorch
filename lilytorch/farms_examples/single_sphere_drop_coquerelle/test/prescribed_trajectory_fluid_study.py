@@ -96,7 +96,7 @@ def run_case(case: dict, t_ref, x_ref, y_ref, vx_ref, vy_ref, rho_fluid, rho_bod
         comp.com_pos[0, 0] = body.com_pos[0]
         comp.com_pos[0, 1] = body.com_pos[1]
 
-        fs._recompute_mu_normals_2d()
+        fs._recompute_mu_normals()
 
         u, v, p = _fluid_step_2d_like_bdimhandler(
             fs,

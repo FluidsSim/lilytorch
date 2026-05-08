@@ -14,10 +14,8 @@ from tqdm import tqdm
 
 from lilytorch.src.adv_diff import AdvDiffSolver
 from lilytorch.src.body import (body_from_yaml, _StaggeredGrids,
-                                _mu_normals_batched_2d,
-                                _mu_normals_batched_2d_compiled,
-                                _mu_normals_batched_3d,
-                                _mu_normals_batched_3d_compiled)
+                                _mu_normals_batched,
+                                _mu_normals_batched_compiled)
 from lilytorch.src import operations as ops
 from lilytorch.src import plotting
 from lilytorch.src.plotting import PlottingMixin
@@ -590,9 +588,11 @@ class FluidSolver(PlottingMixin):
                 _forces_body_integrate_3d, dynamic=True,
             )
             # Dynamic-shape batched mu/normals kernel for the union-AABB
-            # crop path (same rationale).
-            self._mu_normals_batched_3d_dyn_compiled = torch.compile(
-                _mu_normals_batched_3d, dynamic=True,
+            # crop path (sub-block shape varies as bodies move).  Built
+            # from the dim-agnostic ``_mu_normals_batched`` helper so a
+            # single compiled artifact serves both 2-D and 3-D.
+            self._mu_normals_dyn_compiled = torch.compile(
+                _mu_normals_batched, dynamic=True,
             )
             print(
                 "  [compile] forces_shared + forces_body_batch compiled "
@@ -603,7 +603,7 @@ class FluidSolver(PlottingMixin):
             self._forces_body_batch_compiled = _forces_body_batch
             self._forces_shared_dyn_compiled = _forces_shared
             self._forces_body_compiled       = _forces_body_integrate_3d
-            self._mu_normals_batched_3d_dyn_compiled = _mu_normals_batched_3d
+            self._mu_normals_dyn_compiled = _mu_normals_batched
 
         # ---- optional torch.compile for SDF / mu / normals ----
         self._compile_sdf = solver.get("compile_sdf", False)
@@ -818,12 +818,12 @@ class FluidSolver(PlottingMixin):
         # ----------------------------------------------------------------
         if self.ndim == 3:
             self._fluid_step          = self._fluid_step_3d
-            self._recompute_mu_normals = self._recompute_mu_normals_3d
             self._bdim_apply          = self._bdim_apply_3d
         else:
             self._fluid_step          = self._fluid_step_2d
-            self._recompute_mu_normals = self._recompute_mu_normals_2d
             self._bdim_apply          = self._bdim_apply_2d
+        # ``_recompute_mu_normals`` is a dim-agnostic class method — no
+        # per-D dispatch binding needed.
 
         # ----------------------------------------------------------------
         # Per-instance BDIM-intermediate free-dicts (Step 4 of unification).
@@ -1183,33 +1183,43 @@ class FluidSolver(PlottingMixin):
         return tuple(out)
 
     # ------------------------------------------------------------------
-    #   Union AABB across all body sub-blocks (3-D)
+    #   Union AABB across all body sub-blocks (dim-agnostic)
     # ------------------------------------------------------------------
-    def _compute_union_aabb_3d(self, halo=2, bucket=16):
-        """Return (i0,i1,j0,j1,k0,k1) union AABB over all body sparse
-        SDFs, expanded by ``halo`` cells and clipped to grid extent.
-        Returns ``None`` if any body lacks a sparse AABB.
+    def _compute_union_aabb(self, halo=2, bucket=16):
+        """Return the union AABB over all body sparse SDFs as a flat
+        ``(lo_0, hi_0, lo_1, hi_1, ...)`` tuple of length ``2 * ndim``,
+        expanded by ``halo`` cells and clipped to grid extent.  Returns
+        ``None`` if no body has a sparse AABB OR if the union covers more
+        than 50 % of the full grid volume (above that, the full-grid
+        kernel is faster than the cropped-then-slice-write path).
 
-        When ``bucket > 1`` each extent (i1-i0, j1-j0, k1-k0) is rounded
-        up to a multiple of ``bucket`` by expanding the high side first
-        and, if we hit the grid boundary, the low side.  This stabilizes
-        the sub-block shape to a small discrete set so that
-        ``dynamic=True`` compiled kernels only pay the recompile cost a
-        bounded number of times (once per bucket combination seen during
-        warmup) instead of every time the swimmer deforms.
+        Reads ``comp._sdf_sparse`` (per-body slabs) when available; falls
+        back to ``comp._combined_union_aabb`` (fused-kernel populated) when
+        ``_sdf_sparse`` is absent or empty.
+
+        When ``bucket > 1`` each extent is rounded up to a multiple of
+        ``bucket`` by expanding the high side first and spilling into the
+        low side if clipped at the grid boundary.  This stabilizes the
+        sub-block shape to a bounded set so that ``dynamic=True``
+        compiled kernels only pay the recompile cost once per bucket
+        combination seen during warmup, instead of every step.
         """
         comp = self.composite_body
+        D = self.ndim
+        grid_shape = comp.sdf_val.shape  # (N0, N1[, N2])
+
+        lo = [1 << 30] * D
+        hi = [-1] * D
         sparse = getattr(comp, '_sdf_sparse', None)
-        u_i0 = u_j0 = u_k0 = 1 << 30
-        u_i1 = u_j1 = u_k1 = -1
+
         if not sparse or sparse[0] is None:
-            # Fused SDF+forces path does not populate _sdf_sparse; instead it
-            # stores the union AABB directly so the cheap sub-block path can
-            # still activate without the CC-SDF per-body slabs.
+            # Fused SDF+forces path stores the union AABB directly so the
+            # cheap sub-block path can still activate without per-body slabs.
             raw = getattr(comp, '_combined_union_aabb', None)
             if raw is None:
                 return None
-            u_i0, u_i1, u_j0, u_j1, u_k0, u_k1 = raw
+            for d in range(D):
+                lo[d], hi[d] = raw[2 * d], raw[2 * d + 1]
         else:
             for entry in sparse:
                 if entry is None:
@@ -1217,50 +1227,52 @@ class FluidSolver(PlottingMixin):
                 aabb_i = entry[0]
                 if aabb_i is None:
                     return None
-                i0, i1, j0, j1, k0, k1 = aabb_i
-                if i0 < u_i0: u_i0 = i0
-                if j0 < u_j0: u_j0 = j0
-                if k0 < u_k0: u_k0 = k0
-                if i1 > u_i1: u_i1 = i1
-                if j1 > u_j1: u_j1 = j1
-                if k1 > u_k1: u_k1 = k1
-        Ni, Nj, Nk = comp.sdf_val.shape
-        u_i0 = max(0, u_i0 - halo); u_i1 = min(Ni, u_i1 + halo)
-        u_j0 = max(0, u_j0 - halo); u_j1 = min(Nj, u_j1 + halo)
-        u_k0 = max(0, u_k0 - halo); u_k1 = min(Nk, u_k1 + halo)
+                # aabb_i is a flat 2D-tuple (lo0, hi0, lo1, hi1, ...)
+                for d in range(D):
+                    if aabb_i[2 * d] < lo[d]:
+                        lo[d] = aabb_i[2 * d]
+                    if aabb_i[2 * d + 1] > hi[d]:
+                        hi[d] = aabb_i[2 * d + 1]
 
+        # Halo expansion + clipping
+        for d in range(D):
+            lo[d] = max(0, lo[d] - halo)
+            hi[d] = min(grid_shape[d], hi[d] + halo)
+
+        # Bucket-rounding so dynamic-shape compiled kernels see a small
+        # discrete set of sub-block shapes.
         if bucket is not None and bucket > 1:
-            def _pad(lo, hi, N, b):
-                extent = hi - lo
-                target = ((extent + b - 1) // b) * b
+            for d in range(D):
+                extent = hi[d] - lo[d]
+                target = ((extent + bucket - 1) // bucket) * bucket
+                N = grid_shape[d]
                 if target > N:
                     target = N
                 pad = target - extent
-                # Expand high side first, then spill to low side if clipped.
-                new_hi = hi + pad
+                new_hi = hi[d] + pad
+                new_lo = lo[d]
                 if new_hi > N:
                     over = new_hi - N
                     new_hi = N
-                    lo = max(0, lo - over)
-                return lo, new_hi
-            u_i0, u_i1 = _pad(u_i0, u_i1, Ni, bucket)
-            u_j0, u_j1 = _pad(u_j0, u_j1, Nj, bucket)
-            u_k0, u_k1 = _pad(u_k0, u_k1, Nk, bucket)
+                    new_lo = max(0, new_lo - over)
+                lo[d], hi[d] = new_lo, new_hi
 
-        # Cropping is only a net win when the union AABB covers a small
-        # fraction of the grid: each BDIM apply pays a fixed launch-
-        # overhead cost (7 .contiguous() slice copies + 1 slice-assign,
-        # ~9 kernel launches) that only beats the full-grid kernel when
-        # the saved kernel work exceeds ~9 × launch_overhead. Empirically
-        # the break-even point is around 50 % of the full volume; above
-        # that, return None so the caller falls back to the full-grid
-        # compiled kernel.
-        sub_vol  = (u_i1 - u_i0) * (u_j1 - u_j0) * (u_k1 - u_k0)
-        full_vol = Ni * Nj * Nk
+        # Skip the crop fast-path when the sub-block covers >50 % of the
+        # full grid volume — at that point the slice-and-write overhead
+        # exceeds the saved kernel work.
+        sub_vol = 1
+        full_vol = 1
+        for d in range(D):
+            sub_vol *= (hi[d] - lo[d])
+            full_vol *= grid_shape[d]
         if sub_vol > 0.5 * full_vol:
             return None
 
-        return (u_i0, u_i1, u_j0, u_j1, u_k0, u_k1)
+        out = []
+        for d in range(D):
+            out.append(lo[d])
+            out.append(hi[d])
+        return tuple(out)
 
     def solver_iteration_heun(self, u, v, p, iteration, w_vel=None):
         """
@@ -1365,7 +1377,7 @@ class FluidSolver(PlottingMixin):
             # Cache union AABB for both BDIM passes (predictor + corrector).
             # Cleared at end of step.  Cheap (Python loop over <~10 bodies).
             self._bdim_union_aabb = (
-                self._compute_union_aabb_3d(halo=2)
+                self._compute_union_aabb(halo=2)
                 if self._use_kernels else None
             )
 
@@ -1515,7 +1527,7 @@ class FluidSolver(PlottingMixin):
 
             # Cache union AABB for the BDIM pass.
             self._bdim_union_aabb = (
-                self._compute_union_aabb_3d(halo=2)
+                self._compute_union_aabb(halo=2)
                 if self._use_kernels else None
             )
 
@@ -1584,7 +1596,7 @@ class FluidSolver(PlottingMixin):
         'mu0_all_w', 'mu1_all_w',
         'normal_x_w', 'normal_y_w',
         'normal_z_u', 'normal_z_v', 'normal_z_w',
-        # CC-grid mu / normals (recomputed in _recompute_mu_normals_3d)
+        # CC-grid mu / normals (recomputed in _recompute_mu_normals)
         'mu0_all', 'mu1_all', 'm_m0_all',
         'normal_x', 'normal_y', 'normal_z',
         # force intermediates (recomputed in forces_method2 / forces_method2_3d)
@@ -1622,153 +1634,122 @@ class FluidSolver(PlottingMixin):
     # ------------------------------------------------------------------
     #   mu / normal recomputation  (shared by step_() and BDIMhandler)
     # ------------------------------------------------------------------
-    def _recompute_mu_normals_2d(self):
-        """Recompute mu0/mu1 and normals on u-, v-, and CC grids (2-D).
+    def _recompute_mu_normals(self):
+        """Recompute mu0/mu1 and CC/staggered unit normals — dim-agnostic.
 
-        Processes all three grids [u, v, cc] in a single batched pass,
-        optionally using the torch.compile-d kernel when _compile_sdf is set.
-        CC-grid normals are cached here and reused by forces_method2.
+        Processes all ``ndim + 1`` SDF grids ([u, v, [w,] cc]) in a single
+        batched pass via the dim-agnostic ``_mu_normals_batched`` helper.
+
+        When the kernel mode is on AND the union-AABB sub-block covers
+        less than 50 % of the grid (see :meth:`_compute_union_aabb`),
+        the compiled kernel runs only on the union sub-block and results
+        are slice-written into a single persistent packed buffer
+        ``self._mu_pack`` pre-filled with outside-body defaults
+        (mu0 = 1, mu1 = 0, normals = 0).  Every downstream
+        ``mu0_all_<a>`` / ``mu1_all_<a>`` / ``normal_<n>_<a>`` attribute
+        is a *view* into the pack, so a sub-block update is one fused
+        slice-write rather than ``(2 + ndim) * (ndim + 1) + 1`` separate
+        slice writes.
+
+        Pack layout along dim-0 (D = ndim, n_grids = D + 1):
+            ``[0 .. n_grids)``                  : mu0  for [u, v, [w,] cc]
+            ``[n_grids .. 2*n_grids)``          : mu1  for the same grids
+            ``[2*n_grids .. 3*n_grids)``        : normal_x for the same
+            ``[3*n_grids .. 4*n_grids)``        : normal_y for the same
+            ``[4*n_grids .. 5*n_grids)``        : normal_z (3-D only)
+            ``[-1]``                            : m_m0_all (= 1 - mu0_cc)
+
+        When kernel mode is off or the union covers >50 % of the grid,
+        falls back to the full-grid compiled kernel (no pack buffer).
         """
-        comp = self.composite_body
+        comp   = self.composite_body
+        D      = self.ndim
+        ngrids = D + 1
+        cc     = D                       # CC slot index along the stack
+        axes   = self._bdim_axis_names   # ('u', 'v') or ('u', 'v', 'w')
+        norms  = self._bdim_normal_names # ('x', 'y') or ('x', 'y', 'z')
 
-        if self._compile_sdf:
-            _fn = _mu_normals_batched_2d_compiled
-            mu0, mu1, nx, ny = _fn(
-                comp.sdf_val_u, comp.sdf_val_v, comp.sdf_val,
-                comp.h, comp.eps,
-            )
-            mu0, mu1 = mu0.clone(), mu1.clone()
-            nx, ny   = nx.clone(),  ny.clone()
-        else:
-            mu0, mu1, nx, ny = _mu_normals_batched_2d(
-                comp.sdf_val_u, comp.sdf_val_v, comp.sdf_val,
-                comp.h, comp.eps,
-            )
-
-        self.mu0_all_u, self.mu1_all_u = mu0[0], mu1[0]
-        self.normal_x_u, self.normal_y_u = nx[0], ny[0]
-
-        self.mu0_all_v, self.mu1_all_v = mu0[1], mu1[1]
-        self.normal_x_v, self.normal_y_v = nx[1], ny[1]
-
-        self.mu0_all, self.mu1_all = mu0[2], mu1[2]
-        self.normal_x, self.normal_y = nx[2], ny[2]
-
-    def _recompute_mu_normals_3d(self):
-        """Recompute mu0/mu1 and normals on all staggered + CC grids (3-D).
-
-        When ``_compile_sdf`` is enabled, uses a batched+compiled kernel that
-        processes all four grids (u, v, w, CC) in a single fused CUDA graph.
-        When kernel-mode union normals are enabled, the kernel runs only on the
-        union AABB of all body sub-blocks (with halo) and results are
-        slice-written into persistent full-grid buffers pre-filled with
-        the outside-body defaults (mu0=1, mu1=0, normals=0).
-        """
-        comp = self.composite_body
+        # Build the stacked SDF input: (ngrids, *spatial).
+        sdf_attrs = tuple(f'sdf_val_{a}' for a in axes) + ('sdf_val',)
+        sdf_stack = torch.stack([getattr(comp, n) for n in sdf_attrs])
 
         # ------------------------------------------------------------------
         # Union-AABB crop path — outside the union SDF is _FAR so mu0=1,
         # mu1=0, normals=0 (these defaults never change between steps).
-        # Uses the shared _compute_union_aabb_3d helper which rounds the
-        # sub-block extents up to a bucket multiple so the dynamic-shape
-        # compiled kernel only recompiles a bounded number of times.
         # ------------------------------------------------------------------
         u_aabb = None
         if self._use_kernels:
-            u_aabb = self._compute_union_aabb_3d(halo=2, bucket=16)
+            u_aabb = self._compute_union_aabb(halo=2, bucket=16)
 
         if u_aabb is not None:
-            # Lazy-allocate a single packed persistent buffer of shape
-            # (21, Nx, Ny, Nz) pre-filled with outside-body defaults
-            # (mu0=1, mu1=0, normals=0, m_m0=0).  All downstream mu /
-            # normal attributes are *views* into this packed tensor, so
-            # the union sub-block can be written with a single slice
-            # assignment instead of 21 separate slice-writes.
-            #
-            # Pack layout along dim-0:
-            #    0- 3  : mu0 for [u, v, w, cc]
-            #    4- 7  : mu1 for [u, v, w, cc]
-            #    8-11  : normal_x for [u, v, w, cc]
-            #   12-15  : normal_y for [u, v, w, cc]
-            #   16-19  : normal_z for [u, v, w, cc]
-            #      20  : m_m0_all  (= 1 - mu0_cc)
-            if getattr(self, '_mu_pack', None) is None or \
-               self._mu_pack.shape[1:] != comp.sdf_val.shape or \
-               self._mu_pack.dtype != comp.sdf_val.dtype or \
-               self._mu_pack.device != comp.sdf_val.device:
+            n_pack = (2 + D) * ngrids + 1   # 13 for 2-D, 21 for 3-D
+
+            if (getattr(self, '_mu_pack', None) is None
+                or self._mu_pack.shape[1:] != comp.sdf_val.shape
+                or self._mu_pack.shape[0] != n_pack
+                or self._mu_pack.dtype  != comp.sdf_val.dtype
+                or self._mu_pack.device != comp.sdf_val.device):
                 pack = torch.zeros(
-                    (21, *comp.sdf_val.shape),
+                    (n_pack, *comp.sdf_val.shape),
                     device=comp.sdf_val.device, dtype=comp.sdf_val.dtype,
                 )
-                pack[0:4].fill_(1.0)  # mu0 defaults to 1 outside body
+                pack[0:ngrids].fill_(1.0)   # mu0 defaults to 1 outside body
                 self._mu_pack = pack
                 self._mu_union_ready = True
             pack = self._mu_pack
 
-            # (Re-)alias every step: cheap Python, and robust to any
+            # (Re-)alias every step — cheap Python, robust to any
             # non-union path overwriting these attributes.
-            self.mu0_all_u, self.mu0_all_v, self.mu0_all_w, self.mu0_all = (
-                pack[0], pack[1], pack[2], pack[3])
-            self.mu1_all_u, self.mu1_all_v, self.mu1_all_w, self.mu1_all = (
-                pack[4], pack[5], pack[6], pack[7])
-            self.normal_x_u, self.normal_x_v, self.normal_x_w, self.normal_x = (
-                pack[8], pack[9], pack[10], pack[11])
-            self.normal_y_u, self.normal_y_v, self.normal_y_w, self.normal_y = (
-                pack[12], pack[13], pack[14], pack[15])
-            self.normal_z_u, self.normal_z_v, self.normal_z_w, self.normal_z = (
-                pack[16], pack[17], pack[18], pack[19])
-            self.m_m0_all = pack[20]
+            for i, ax in enumerate(axes):
+                setattr(self, f'mu0_all_{ax}', pack[i])
+                setattr(self, f'mu1_all_{ax}', pack[ngrids + i])
+                for d, n in enumerate(norms):
+                    setattr(self, f'normal_{n}_{ax}',
+                            pack[(2 + d) * ngrids + i])
+            self.mu0_all = pack[cc]
+            self.mu1_all = pack[ngrids + cc]
+            for d, n in enumerate(norms):
+                setattr(self, f'normal_{n}', pack[(2 + d) * ngrids + cc])
+            self.m_m0_all = pack[-1]
 
-            ui0, ui1, uj0, uj1, uk0, uk1 = u_aabb
-            usl = (slice(ui0, ui1), slice(uj0, uj1), slice(uk0, uk1))
-
-            mu0_s, mu1_s, nx_s, ny_s, nz_s = self._mu_normals_batched_3d_dyn_compiled(
-                comp.sdf_val_u[usl].contiguous(),
-                comp.sdf_val_v[usl].contiguous(),
-                comp.sdf_val_w[usl].contiguous(),
-                comp.sdf_val[usl].contiguous(),
-                comp.h, comp.eps,
+            slices = tuple(
+                slice(u_aabb[2 * d], u_aabb[2 * d + 1]) for d in range(D)
             )
+            sdf_sub = sdf_stack[(slice(None),) + slices].contiguous()
 
-            # Fused slice-write: stack all 21 sub-block outputs along
+            out = self._mu_normals_dyn_compiled(sdf_sub, comp.h, comp.eps)
+            mu0_s, mu1_s = out[0], out[1]
+            normals_s = out[2:]   # length-D tuple of (ngrids, *sub_spatial)
+
+            # Fused slice-write: stack mu0, mu1, normals, m_m0_cc along
             # dim-0 and scatter into the packed buffer with ONE assign.
-            # Order must match the pack layout above.
             stacked = torch.cat(
-                (mu0_s, mu1_s, nx_s, ny_s, nz_s, 1.0 - mu0_s[3:4]),
+                (mu0_s, mu1_s) + tuple(normals_s) + (1.0 - mu0_s[cc:cc + 1],),
                 dim=0,
-            )  # (21, sub_Nx, sub_Ny, sub_Nz)
-            self._mu_pack[:, ui0:ui1, uj0:uj1, uk0:uk1] = stacked
+            )
+            self._mu_pack[(slice(None),) + slices] = stacked
             return
 
+        # ── Full-grid path: batched + compiled, all grids in one pass ──
+        if self._compile_sdf:
+            out = _mu_normals_batched_compiled(sdf_stack, comp.h, comp.eps)
+            # Clone — CUDA graph buffers are overwritten on subsequent replays.
+            out = tuple(t.clone() for t in out)
+        else:
+            out = _mu_normals_batched(sdf_stack, comp.h, comp.eps)
+        mu0, mu1 = out[0], out[1]
+        normals = out[2:]
 
-        # ── Batched + compiled path: all 4 grids in one fused pass ──
-        _fn = _mu_normals_batched_3d_compiled
-        mu0, mu1, nx, ny, nz = _fn(
-            comp.sdf_val_u, comp.sdf_val_v, comp.sdf_val_w,
-            comp.sdf_val, comp.h, comp.eps,
-        )
-        # Clone outputs — CUDA graph buffers are overwritten on
-        # subsequent replays, so we must detach before storing.
-        mu0, mu1 = mu0.clone(), mu1.clone()
-        nx, ny, nz = nx.clone(), ny.clone(), nz.clone()
-
-        # Unstack: order is [u, v, w, cc]
-        self.mu0_all_u, self.mu1_all_u = mu0[0], mu1[0]
-        self.normal_x_u, self.normal_y_u, self.normal_z_u = nx[0], ny[0], nz[0]
-
-        self.mu0_all_v, self.mu1_all_v = mu0[1], mu1[1]
-        self.normal_x_v, self.normal_y_v, self.normal_z_v = nx[1], ny[1], nz[1]
-
-        self.mu0_all_w, self.mu1_all_w = mu0[2], mu1[2]
-        self.normal_x_w, self.normal_y_w, self.normal_z_w = nx[2], ny[2], nz[2]
-
-        self.mu0_all, self.mu1_all = mu0[3], mu1[3]
+        for i, ax in enumerate(axes):
+            setattr(self, f'mu0_all_{ax}', mu0[i])
+            setattr(self, f'mu1_all_{ax}', mu1[i])
+            for d, n in enumerate(norms):
+                setattr(self, f'normal_{n}_{ax}', normals[d][i])
+        self.mu0_all = mu0[cc]
+        self.mu1_all = mu1[cc]
+        for d, n in enumerate(norms):
+            setattr(self, f'normal_{n}', normals[d][cc])
         self.m_m0_all = 1 - self.mu0_all
-        self.normal_x, self.normal_y, self.normal_z = nx[3], ny[3], nz[3]
-
-    def _recompute_normals(self):
-        """Dispatch to 2-D or 3-D mu/normal recomputation."""
-        self._recompute_mu_normals()
 
     # ==================================================================
     #  Variable-density FSI fluid step  (called by BDIMhandler.step)
@@ -1801,7 +1782,7 @@ class FluidSolver(PlottingMixin):
                 and self.mu0_all_v is not None
                 and self.mu0_all_w is not None
                 and self.mu0_all   is not None):
-            u_aabb = self._compute_union_aabb_3d(halo=2, bucket=16)
+            u_aabb = self._compute_union_aabb(halo=2, bucket=16)
             if u_aabb is not None:
                 _dt_over_rhofluid = float(timestep / float(self.rho))
                 mu0_u = self.mu0_all_u
@@ -1917,7 +1898,7 @@ class FluidSolver(PlottingMixin):
         self.adv_diff_solver.set_BCs(uprime, vprime, wprime)
 
         self._bdim_union_aabb = (
-            self._compute_union_aabb_3d(halo=2) if self._use_kernels else None
+            self._compute_union_aabb(halo=2) if self._use_kernels else None
         )
         uprime, vprime, wprime = self._apply_bdim_all_axes(
             (uprime, vprime, wprime))
@@ -2015,7 +1996,7 @@ class FluidSolver(PlottingMixin):
 
     def step_(self, u, v, p, iteration, t, w_vel=None):
         self.composite_body.update(t, iteration, dt=self.dt)
-        self._recompute_normals()
+        self._recompute_mu_normals()
         self.sdf_properties = [[self.composite_body.sdf_val_u]]
 
         if self.ndim == 2:
