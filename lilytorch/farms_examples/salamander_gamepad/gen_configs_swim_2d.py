@@ -30,7 +30,7 @@ class SimConfig(BaseSimConfig):
         # self.compile_forces   = True
         # self.compile_sdf      = True
 
-        self.bdim_physics = {"solref": [0.01, 0.1]}
+        self.bdim_physics = {"solref": [-0.1, -1]}
 
         # ── Animats ───────────────────────────────────────────────────
         self.animats_pars = [

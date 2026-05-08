@@ -288,11 +288,11 @@ class BDIMhandler:
                     np.asarray(sen.com_ang_velocity(iteration, lk), dtype=self.dtype_np)
                     for lk in range(nlinks)
                 ])
-            com_poses.append(torch.from_numpy(com).to(self.device))
-            urdf_poses.append(torch.from_numpy(urdf).to(self.device))
-            Rs.append(torch.from_numpy(R).to(self.device))
-            lin_vels.append(torch.from_numpy(lin).to(self.device))
-            ang_vels.append(torch.from_numpy(ang).to(self.device))
+            com_poses.append(com)
+            urdf_poses.append(urdf)
+            Rs.append(R)
+            lin_vels.append(lin)
+            ang_vels.append(ang)
         return com_poses, urdf_poses, Rs, lin_vels, ang_vels
 
     def _init_interp(self):
@@ -690,6 +690,13 @@ class BDIMhandler:
 
         com_poses, urdf_poses, Rs, lin_vels, ang_vels = self.gather_data(iteration)
 
+        # Convert per-animat kinematics to device tensors for torch operations.
+        com_poses_t  = [torch.from_numpy(a).to(self.device) for a in com_poses]
+        urdf_poses_t = [torch.from_numpy(a).to(self.device) for a in urdf_poses]
+        Rs_t         = [torch.from_numpy(a).to(self.device) for a in Rs]
+        lin_vels_t   = [torch.from_numpy(a).to(self.device) for a in lin_vels]
+        ang_vels_t   = [torch.from_numpy(a).to(self.device) for a in ang_vels]
+
         h_grid = comp.h          # uniform grid spacing
 
         # Per-body sparse SDF storage (mirrors the 3-D path).  Replaces
@@ -707,11 +714,11 @@ class BDIMhandler:
         for body_i, body in enumerate(comp.bodies):
             (animat_id, link_id) = comp.body_ids[body_i]
 
-            com_pos  = com_poses[animat_id][link_id]
-            urdf_pos = urdf_poses[animat_id][link_id]
-            R        = Rs[animat_id][link_id]
-            lin_vel  = lin_vels[animat_id][link_id]
-            ang_vel  = ang_vels[animat_id][link_id]
+            com_pos  = com_poses_t[animat_id][link_id]
+            urdf_pos = urdf_poses_t[animat_id][link_id]
+            R        = Rs_t[animat_id][link_id]
+            lin_vel  = lin_vels_t[animat_id][link_id]
+            ang_vel  = ang_vels_t[animat_id][link_id]
 
             R_T = R.T  # (2, 2) transposed rotation
 
@@ -758,11 +765,9 @@ class BDIMhandler:
             comp.com_pos[body_i] = com_pos
             body.com_pos = com_pos
 
-            # contour update (world frame)
-            body.cnt_update = R @ body.cnt + urdf_pos[:, None]
-
             # optional contour mask for overlapping links
             if self.contour_mask:
+                body.cnt_update = R @ body.cnt + urdf_pos[:, None]
                 x_cnt = body.cnt_update[0]
                 y_cnt = body.cnt_update[1]
                 prev_body_i = self._prev_body_index[body_i]
@@ -773,31 +778,31 @@ class BDIMhandler:
                 elif prev_body_i is None:
                     (_, next_link_id) = comp.body_ids[next_body_i]
                     body_p = comp.bodies[next_body_i]
-                    pt = Rs[animat_id][next_link_id].T @ (
+                    pt = Rs_t[animat_id][next_link_id].T @ (
                         torch.stack((x_cnt, y_cnt))
-                        - urdf_poses[animat_id][next_link_id][:, None]
+                        - urdf_poses_t[animat_id][next_link_id][:, None]
                     )
                     mask = (body_p.sdf(pt[0], pt[1]) - body.h) >= 0
                 elif next_body_i is None:
                     (_, prev_link_id) = comp.body_ids[prev_body_i]
                     body_m = comp.bodies[prev_body_i]
-                    pt = Rs[animat_id][prev_link_id].T @ (
+                    pt = Rs_t[animat_id][prev_link_id].T @ (
                         torch.stack((x_cnt, y_cnt))
-                        - urdf_poses[animat_id][prev_link_id][:, None]
+                        - urdf_poses_t[animat_id][prev_link_id][:, None]
                     )
                     mask = (body_m.sdf(pt[0], pt[1]) - body.h) >= 0
                 else:
                     (_, prev_link_id) = comp.body_ids[prev_body_i]
                     body_m = comp.bodies[prev_body_i]
-                    pt_m = Rs[animat_id][prev_link_id].T @ (
+                    pt_m = Rs_t[animat_id][prev_link_id].T @ (
                         torch.stack((x_cnt, y_cnt))
-                        - urdf_poses[animat_id][prev_link_id][:, None]
+                        - urdf_poses_t[animat_id][prev_link_id][:, None]
                     )
                     (_, next_link_id) = comp.body_ids[next_body_i]
                     body_p = comp.bodies[next_body_i]
-                    pt_p = Rs[animat_id][next_link_id].T @ (
+                    pt_p = Rs_t[animat_id][next_link_id].T @ (
                         torch.stack((x_cnt, y_cnt))
-                        - urdf_poses[animat_id][next_link_id][:, None]
+                        - urdf_poses_t[animat_id][next_link_id][:, None]
                     )
                     sdf_m = body_m.sdf(pt_m[0], pt_m[1]) - body.h
                     sdf_p = body_p.sdf(pt_p[0], pt_p[1]) - body.h
@@ -819,6 +824,13 @@ class BDIMhandler:
 
         com_poses, urdf_poses, Rs, lin_vels, ang_vels = self.gather_data(iteration)
 
+        # Convert per-animat kinematics to device tensors for torch operations.
+        com_poses_t  = [torch.from_numpy(a).to(self.device) for a in com_poses]
+        urdf_poses_t = [torch.from_numpy(a).to(self.device) for a in urdf_poses]
+        Rs_t         = [torch.from_numpy(a).to(self.device) for a in Rs]
+        lin_vels_t   = [torch.from_numpy(a).to(self.device) for a in lin_vels]
+        ang_vels_t   = [torch.from_numpy(a).to(self.device) for a in ang_vels]
+
         h_grid = comp.h          # uniform grid spacing
 
         # Per-body SDF storage for forces (reset sparse list each step)
@@ -838,11 +850,11 @@ class BDIMhandler:
         for body_i, body in enumerate(comp.bodies):
             (animat_id, link_id) = comp.body_ids[body_i]
 
-            com_pos  = com_poses[animat_id][link_id]
-            urdf_pos = urdf_poses[animat_id][link_id]
-            R        = Rs[animat_id][link_id]
-            lin_vel  = lin_vels[animat_id][link_id]
-            ang_vel  = ang_vels[animat_id][link_id]
+            com_pos  = com_poses_t[animat_id][link_id]
+            urdf_pos = urdf_poses_t[animat_id][link_id]
+            R        = Rs_t[animat_id][link_id]
+            lin_vel  = lin_vels_t[animat_id][link_id]
+            ang_vel  = ang_vels_t[animat_id][link_id]
 
             body_pos, body_rot = self._compose_body_frame_3d(body, urdf_pos, R)
 
@@ -1042,7 +1054,7 @@ class BDIMhandler:
         # it remains compatible with gather_data() returning tensors.
         # ------------------------------------------------------------------
         kin_static = getattr(comp, '_stream_kin_static', None)
-        if kin_static is None or not torch.is_tensor(kin_static['local_lt']):
+        if kin_static is None or 'local_lt_np' not in kin_static:
             body_ids = torch.tensor(
                 [(int(a), int(l)) for (a, l) in comp.body_ids],
                 dtype=torch.int64,
@@ -1094,112 +1106,108 @@ class BDIMhandler:
                     gs, dtype=torch.int64, device=self.device,
                 ),
                 'pad':          3,
+                # numpy mirrors used by the host-side kinematics assembly
+                'body_ids_np':     body_ids.numpy(),
+                'local_lt_np':     local_lt.detach().cpu().numpy().copy(),
+                'local_lr_np':     local_lr.detach().cpu().numpy().copy(),
+                'local_center_np': (0.5 * (sdf_lo + sdf_hi)).detach().cpu().numpy().copy(),
+                'local_half_np':   (0.5 * (sdf_hi - sdf_lo)).detach().cpu().numpy().copy(),
+                'grid_origin_np':  np.array([
+                    float(comp.x[0].item()),
+                    float(comp.y[0].item()),
+                    float(comp.z[0].item()),
+                ], dtype=self.dtype_np),
+                'gs_np':           np.array(gs, dtype=np.int64),
             }
             comp._stream_kin_static = kin_static
 
-        body_ids = kin_static['body_ids']
+        body_ids_np = kin_static['body_ids_np']
 
-        # Gather per-body kinematics from the per-animat tensor snapshots above.
-        urdf_pos = torch.empty((B, 3), dtype=self.dtype, device=self.device)
-        com_pos  = torch.empty((B, 3), dtype=self.dtype, device=self.device)
-        R_link   = torch.empty((B, 3, 3), dtype=self.dtype, device=self.device)
-        lin_vel  = torch.empty((B, 3), dtype=self.dtype, device=self.device)
-        ang_vel  = torch.empty((B, 3), dtype=self.dtype, device=self.device)
+        # Gather per-body kinematics on the host (numpy) – avoids B×5 small
+        # GPU indexed-tensor writes and defers the H2D to a single packed copy.
+        urdf_pos_np = np.empty((B, 3), dtype=self.dtype_np)
+        com_pos_np  = np.empty((B, 3), dtype=self.dtype_np)
+        R_link_np   = np.empty((B, 3, 3), dtype=self.dtype_np)
+        lin_vel_np  = np.empty((B, 3), dtype=self.dtype_np)
+        ang_vel_np  = np.empty((B, 3), dtype=self.dtype_np)
         for b in range(B):
-            a_id = int(body_ids[b, 0])
-            l_id = int(body_ids[b, 1])
-            urdf_pos[b] = urdf_poses[a_id][l_id]
-            com_pos[b]  = com_poses[a_id][l_id]
-            R_link[b]   = Rs[a_id][l_id]
-            lin_vel[b]  = lin_vels[a_id][l_id]
-            ang_vel[b]  = ang_vels[a_id][l_id]
+            a_id = int(body_ids_np[b, 0])
+            l_id = int(body_ids_np[b, 1])
+            urdf_pos_np[b] = urdf_poses[a_id][l_id]
+            com_pos_np[b]  = com_poses[a_id][l_id]
+            R_link_np[b]   = Rs[a_id][l_id]
+            lin_vel_np[b]  = lin_vels[a_id][l_id]
+            ang_vel_np[b]  = ang_vels[a_id][l_id]
 
         # Compose with per-body local pose: body_pos = urdf + R @ lt; body_R = R @ lr
-        body_pos = urdf_pos + torch.einsum(
-            'bij,bj->bi', R_link, kin_static['local_lt'],
-        )
-        body_R = torch.einsum(
-            'bij,bjk->bik', R_link, kin_static['local_lr'],
-        )  # (B,3,3)
+        local_lt_np     = kin_static['local_lt_np']
+        local_lr_np     = kin_static['local_lr_np']
+        local_center_np = kin_static['local_center_np']
+        local_half_np   = kin_static['local_half_np']
+        g0_np           = kin_static['grid_origin_np']
+        inv_h           = kin_static['inv_h']
+        gs_np           = kin_static['gs_np']
+        pad             = kin_static['pad']
+
+        body_pos_np = urdf_pos_np + np.einsum('bij,bj->bi', R_link_np, local_lt_np)
+        body_R_np   = np.einsum('bij,bjk->bik', R_link_np, local_lr_np)  # (B, 3, 3)
 
         # Vectorised AABB of the oriented body-SDF box in world space.
-        abs_R        = body_R.abs()
-        world_half   = torch.einsum(
-            'bij,bj->bi', abs_R, kin_static['local_half'],
-        )
-        world_center = (
-            torch.einsum(
-                'bij,bj->bi', body_R, kin_static['local_center'],
-            ) + body_pos
-        )
+        abs_R_np     = np.abs(body_R_np)
+        world_half   = np.einsum('bij,bj->bi', abs_R_np, local_half_np)
+        world_center = np.einsum('bij,bj->bi', body_R_np, local_center_np) + body_pos_np
         w_min = world_center - world_half
         w_max = world_center + world_half
 
-        g0    = kin_static['grid_origin']
-        inv_h = kin_static['inv_h']
-        gs_t  = kin_static['gs']
-        pad   = kin_static['pad']
+        i_lo = np.floor((w_min - g0_np) * inv_h).astype(np.int64) - pad
+        i_hi = np.floor((w_max - g0_np) * inv_h).astype(np.int64) + 1 + pad
+        np.clip(i_lo, 0, None, out=i_lo)
+        np.minimum(i_hi, gs_np[None, :], out=i_hi)
 
-        i_lo = torch.floor((w_min - g0) * inv_h).to(torch.int64) - pad
-        i_hi = torch.floor((w_max - g0) * inv_h).to(torch.int64) + 1 + pad
-        i_lo.clamp_(min=0)
-        i_hi = torch.minimum(i_hi, gs_t.unsqueeze(0))
-
-        dims     = i_hi - i_lo
-        sub_vol  = dims.prod(dim=1)
-        full_vol = int(gs_t.prod().item())
-        # Bodies covering >90 % of the grid: fall back to full grid (matches
-        # the scalar `_body_aabb_indices` heuristic).
+        dims    = i_hi - i_lo
+        sub_vol = dims.prod(axis=1)
+        full_vol = int(np.prod(gs_np))
+        # Bodies covering >90 % of the grid: fall back to full grid.
         fallback = sub_vol > int(0.9 * full_vol)
-        if fallback.any().item():
-            i_lo[fallback] = 0
-            i_hi[fallback] = gs_t
+        if fallback.any():
+            i_lo[fallback, :] = 0
+            i_hi[fallback, :] = gs_np
             dims = i_hi - i_lo
 
-        aabb_lo  = i_lo.contiguous()
-        aabb_dim = dims.contiguous()
-        cell_vols = dims.prod(dim=1)
-        cell_off = torch.empty(B + 1, dtype=torch.int64, device=self.device)
-        cell_off[0] = 0
-        if B > 0:
-            cell_off[1:] = torch.cumsum(cell_vols, dim=0)
-        max_vol = int(cell_vols.max().item()) if B > 0 else 0
+        max_vol = int(dims.prod(axis=1).max()) if B > 0 else 0
 
-        # kin row layout (matches the original scalar path):
-        #   [R^T (9) | body_pos (3) | com_pos (3) | lin_vel (3) | ang_vel (3)]  = 21
-        # Row-major flatten of R^T equals body_R.transpose(0,2,1).reshape(B,9).
-        kin = torch.empty((B, 21), dtype=self.dtype, device=self.device)
-        kin[:, 0:9]   = body_R.transpose(1, 2).reshape(B, 9)
-        kin[:, 9:12]  = body_pos
-        kin[:, 12:15] = com_pos
-        kin[:, 15:18] = lin_vel
-        kin[:, 18:21] = ang_vel
+        # Assemble kin on the host.
+        # Layout: [R^T (9) | body_pos (3) | com_pos (3) | lin_vel (3) | ang_vel (3)] = 21
+        # Row-major flatten of R^T = body_R.transpose(0,2,1).reshape(B,9).
+        kin_np = np.empty((B, 21), dtype=self.dtype_np)
+        kin_np[:, 0:9]   = body_R_np.transpose(0, 2, 1).reshape(B, 9)
+        kin_np[:, 9:12]  = body_pos_np
+        kin_np[:, 12:15] = com_pos_np
+        kin_np[:, 15:18] = lin_vel_np
+        kin_np[:, 18:21] = ang_vel_np
 
-        aabb_lo_host = aabb_lo.detach().cpu()
-        aabb_dim_host = aabb_dim.detach().cpu()
+        aabb_lo_np  = np.ascontiguousarray(i_lo)
+        aabb_dim_np = np.ascontiguousarray(dims)
+
+        # Single H2D transfer for all packed per-step device tensors.
+        kin      = torch.from_numpy(np.ascontiguousarray(kin_np)).to(self.device)
+        aabb_lo  = torch.from_numpy(aabb_lo_np).to(self.device)
+        aabb_dim = torch.from_numpy(aabb_dim_np).to(self.device)
+        com_pos_t = torch.from_numpy(np.ascontiguousarray(com_pos_np)).to(self.device)
 
         # Update Python-side AABB metadata used downstream (slab split, forces).
         aabbs_for_split = []
         for b in range(B):
-            i0 = int(aabb_lo_host[b, 0])
-            j0 = int(aabb_lo_host[b, 1])
-            k0 = int(aabb_lo_host[b, 2])
-            Ai = int(aabb_dim_host[b, 0])
-            Aj = int(aabb_dim_host[b, 1])
-            Ak = int(aabb_dim_host[b, 2])
+            i0 = int(i_lo[b, 0]); j0 = int(i_lo[b, 1]); k0 = int(i_lo[b, 2])
+            Ai = int(dims[b, 0]);  Aj = int(dims[b, 1]);  Ak = int(dims[b, 2])
             aabb = (i0, i0 + Ai, j0, j0 + Aj, k0, k0 + Ak)
             comp._body_aabbs[b] = aabb
             aabbs_for_split.append(aabb)
-
-        com_pos_t = com_pos
 
         # Maintain `comp.com_pos[b]` and `body.com_pos` views for downstream code.
         for b, body in enumerate(comp.bodies):
             comp.com_pos[b] = com_pos_t[b]
             body.com_pos = comp.com_pos[b]
-
-        # Python-list copy of cell offsets for the per-body slab split below.
-        cell_off_h = cell_off.detach().cpu().tolist()
 
         fs = self.fluid_solver
         _use_combined = fs._use_kernels
@@ -1379,7 +1387,7 @@ class BDIMhandler:
         # Per-step: compose body frames, AABBs, kinematics (numpy host).
         # ──────────────────────────────────────────────────────────
         kin_static = getattr(comp, '_stream_kin_static_2d', None)
-        if kin_static is None:
+        if kin_static is None or 'local_center_np' not in kin_static:
             body_ids = torch.tensor(
                 [(int(a), int(l)) for (a, l) in comp.body_ids],
                 dtype=torch.int64,
@@ -1415,119 +1423,107 @@ class BDIMhandler:
                 'inv_h':        1.0 / float(comp.h),
                 'gs':           torch.tensor(gs, dtype=torch.int64, device=self.device),
                 'pad':          3,
+                # numpy mirrors used by the host-side kinematics assembly
+                'body_ids_np':     body_ids.detach().cpu().numpy().copy(),
+                'local_center_np': (0.5 * (sdf_lo + sdf_hi)).detach().cpu().numpy().copy(),
+                'local_half_np':   (0.5 * (sdf_hi - sdf_lo)).detach().cpu().numpy().copy(),
+                'grid_origin_np':  np.array([
+                    float(comp.x[0].item()),
+                    float(comp.y[0].item()),
+                ], dtype=self.dtype_np),
+                'gs_np':           np.array(gs, dtype=np.int64),
             }
             comp._stream_kin_static_2d = kin_static
 
-        body_ids = kin_static['body_ids']
+        body_ids_np = kin_static['body_ids_np']
 
-        # Gather per-body kinematics from the per-animat numpy snapshots.
-        urdf_pos = torch.empty((B, 2), dtype=self.dtype, device=self.device)
-        com_pos  = torch.empty((B, 2), dtype=self.dtype, device=self.device)
-        R_link   = torch.empty((B, 2, 2), dtype=self.dtype, device=self.device)
-        lin_vel  = torch.empty((B, 2), dtype=self.dtype, device=self.device)
-        ang_vel  = torch.empty((B,),    dtype=self.dtype, device=self.device)  # scalar in 2-D
+        # Gather per-body kinematics on the host (numpy) – avoids B×5 small
+        # GPU indexed-tensor writes and defers the H2D to a single packed copy.
+        # In 2-D, local_lt = 0 and local_lr = I by construction, so
+        # body_pos = urdf_pos and body_R = R_link directly.
+        urdf_pos_np = np.empty((B, 2), dtype=self.dtype_np)
+        com_pos_np  = np.empty((B, 2), dtype=self.dtype_np)
+        R_link_np   = np.empty((B, 2, 2), dtype=self.dtype_np)
+        lin_vel_np  = np.empty((B, 2), dtype=self.dtype_np)
+        ang_vel_np  = np.empty((B,),    dtype=self.dtype_np)
         for b in range(B):
-            a_id = int(body_ids[b, 0])
-            l_id = int(body_ids[b, 1])
-            urdf_pos[b] = urdf_poses[a_id][l_id]
-            com_pos[b]  = com_poses[a_id][l_id]
-            R_link[b]   = Rs[a_id][l_id]
-            lin_vel[b]  = lin_vels[a_id][l_id]
-            ang_vel[b]  = ang_vels[a_id][l_id]
+            a_id = int(body_ids_np[b, 0])
+            l_id = int(body_ids_np[b, 1])
+            urdf_pos_np[b] = urdf_poses[a_id][l_id]
+            com_pos_np[b]  = com_poses[a_id][l_id]
+            R_link_np[b]   = Rs[a_id][l_id]
+            lin_vel_np[b]  = lin_vels[a_id][l_id]
+            ang_vel_np[b]  = ang_vels[a_id][l_id]
 
-        # Compose with per-body local pose (identity in 2-D, kept for
-        # symmetry with the 3-D path).
-        body_pos = urdf_pos + torch.einsum(
-            'bij,bj->bi', R_link, kin_static['local_lt'],
-        )
-        body_R = torch.einsum(
-            'bij,bjk->bik', R_link, kin_static['local_lr'],
-        )  # (B, 2, 2)
+        # body_pos = urdf_pos (local_lt = 0); body_R = R_link (local_lr = I)
+        body_pos_np = urdf_pos_np
+        body_R_np   = R_link_np
 
         # Vectorised AABB of the oriented body-SDF box in world space.
-        abs_R        = torch.abs(body_R)
-        world_half   = torch.einsum('bij,bj->bi', abs_R, kin_static['local_half'])
-        world_center = (
-            torch.einsum('bij,bj->bi', body_R, kin_static['local_center']) + body_pos
-        )
+        local_center_np = kin_static['local_center_np']
+        local_half_np   = kin_static['local_half_np']
+        g0_np           = kin_static['grid_origin_np']
+        inv_h           = kin_static['inv_h']
+        gs_np           = kin_static['gs_np']
+        pad             = kin_static['pad']
+
+        abs_R_np     = np.abs(body_R_np)
+        world_half   = np.einsum('bij,bj->bi', abs_R_np, local_half_np)
+        world_center = np.einsum('bij,bj->bi', body_R_np, local_center_np) + body_pos_np
         w_min = world_center - world_half
         w_max = world_center + world_half
 
-        g0    = kin_static['grid_origin']
-        inv_h = kin_static['inv_h']
-        gs    = kin_static['gs']
-        pad   = kin_static['pad']
-
-        i_lo = torch.floor((w_min - g0) * inv_h).to(torch.int64) - pad
-        i_hi = torch.floor((w_max - g0) * inv_h).to(torch.int64) + 1 + pad
-        i_lo.clamp_(min=0)
-        i_hi = torch.minimum(i_hi, gs[None, :])
-        # Bodies partially or entirely outside the grid produce i_hi < i_lo
-        # (i_hi is clamped above by gs but not from below by i_lo).
+        i_lo = np.floor((w_min - g0_np) * inv_h).astype(np.int64) - pad
+        i_hi = np.floor((w_max - g0_np) * inv_h).astype(np.int64) + 1 + pad
+        np.clip(i_lo, 0, None, out=i_lo)
+        np.minimum(i_hi, gs_np[None, :], out=i_hi)
+        # Bodies partially or entirely outside the grid produce i_hi < i_lo.
         # Clamp to zero-size AABB for out-of-bounds bodies.
-        torch.maximum(i_hi, i_lo, out=i_hi)
+        np.maximum(i_hi, i_lo, out=i_hi)
 
-        dims     = i_hi - i_lo
-        sub_vol  = dims.prod(dim=1)
-        full_vol = int(gs.prod().item())
-        # Bodies covering >90 % of the grid: fall back to full grid (matches
-        # the 3-D heuristic).
+        dims    = i_hi - i_lo
+        sub_vol = dims.prod(axis=1)
+        full_vol = int(np.prod(gs_np))
+        # Bodies covering >90 % of the grid: fall back to full grid.
         fallback = sub_vol > int(0.9 * full_vol)
-        if fallback.any().item():
-            i_lo[fallback] = 0
-            i_hi[fallback] = gs[None, :]
+        if fallback.any():
+            i_lo[fallback, :] = 0
+            i_hi[fallback, :] = gs_np
             dims = i_hi - i_lo
 
-        aabb_lo_h  = i_lo.contiguous()
-        aabb_dim_h = dims.contiguous()
-        cell_vols  = dims.prod(dim=1)
-        cell_off_h = torch.empty(B + 1, dtype=torch.int64, device=self.device)
-        cell_off_h[0] = 0
-        if B > 0:
-            cell_off_h[1:] = torch.cumsum(cell_vols, dim=0)
-        max_vol = int(cell_vols.max().item()) if B > 0 else 0
+        max_vol = int(dims.prod(axis=1).max()) if B > 0 else 0
 
-        # 2-D kin row layout (matches the kernel signature):
-        #   [R^T (4) | bp (2) | cm (2) | lv (2) | omega (1)]  = 11
-        # Row-major flatten of R^T equals body_R.transpose(1, 2).reshape(B, 4).
-        kin_h = torch.empty((B, 11), dtype=self.dtype, device=self.device)
-        kin_h[:, 0:4]   = body_R.transpose(1, 2).reshape(B, 4)
-        kin_h[:, 4:6]   = body_pos
-        kin_h[:, 6:8]   = com_pos
-        kin_h[:, 8:10]  = lin_vel
-        kin_h[:, 10]    = ang_vel
+        # Assemble kin on the host.
+        # 2-D kin row layout: [R^T (4) | bp (2) | cm (2) | lv (2) | omega (1)] = 11
+        kin_np = np.empty((B, 11), dtype=self.dtype_np)
+        kin_np[:, 0:4]  = body_R_np.transpose(0, 2, 1).reshape(B, 4)
+        kin_np[:, 4:6]  = body_pos_np
+        kin_np[:, 6:8]  = com_pos_np
+        kin_np[:, 8:10] = lin_vel_np
+        kin_np[:, 10]   = ang_vel_np
 
-        aabb_lo_host = aabb_lo_h.detach().cpu()
-        aabb_dim_host = aabb_dim_h.detach().cpu()
+        aabb_lo_np  = np.ascontiguousarray(i_lo)
+        aabb_dim_np = np.ascontiguousarray(dims)
+
+        # Single H2D transfer for all packed per-step device tensors.
+        kin       = torch.from_numpy(np.ascontiguousarray(kin_np)).to(self.device)
+        aabb_lo   = torch.from_numpy(aabb_lo_np).to(self.device)
+        aabb_dim  = torch.from_numpy(aabb_dim_np).to(self.device)
+        com_pos_t = torch.from_numpy(np.ascontiguousarray(com_pos_np)).to(self.device)
 
         # Update Python-side AABB metadata used downstream.
         aabbs_for_split = []
         for b in range(B):
-            i0 = int(aabb_lo_host[b, 0])
-            j0 = int(aabb_lo_host[b, 1])
-            Ai = int(aabb_dim_host[b, 0])
-            Aj = int(aabb_dim_host[b, 1])
+            i0 = int(i_lo[b, 0]); j0 = int(i_lo[b, 1])
+            Ai = int(dims[b, 0]);  Aj = int(dims[b, 1])
             aabb = (i0, i0 + Ai, j0, j0 + Aj)
             comp._body_aabbs[b] = aabb
             aabbs_for_split.append(aabb)
-
-        # Single H2D per packed tensor.
-        kin       = kin_h
-        aabb_lo   = aabb_lo_h
-        aabb_dim  = aabb_dim_h
-        cell_off  = cell_off_h
-        com_pos_t = com_pos
-        urdf_pos_t = urdf_pos
-        R_t        = body_R
 
         # Maintain `comp.com_pos[b]` views for downstream code.
         for b, body in enumerate(comp.bodies):
             comp.com_pos[b] = com_pos_t[b]
             body.com_pos = comp.com_pos[b]
-
-        cell_off_h = cell_off_h.detach().cpu().tolist()
-
-        comp._combined_forces_out = None
 
         fs = self.fluid_solver
         interp_method = getattr(fs, '_sdf_interp_method', 0)
