@@ -179,19 +179,26 @@ from lilytorch.src.forces import (
 )
 from lilytorch.src import forces, extras
 
-# Pre-built dicts for releasing BDIM intermediate tensors in the FSI hot path.
-# Used by _fluid_step_3d and check_explosion via __dict__.update().
-_FS_FREE_AFTER_BDIM_3D = {
-    'mu1_all_u': None, 'mu1_all_v': None, 'mu1_all_w': None,
-    'normal_x_u': None, 'normal_y_u': None, 'normal_z_u': None,
-    'normal_x_v': None, 'normal_y_v': None, 'normal_z_v': None,
-    'normal_x_w': None, 'normal_y_w': None, 'normal_z_w': None,
-    'mu1_all': None, 'm_m0_all': None,
-}
-_FS_FREE_AFTER_VAR_DENS_3D = {
-    'mu0_all_u': None, 'mu0_all_v': None, 'mu0_all_w': None,
-    'mu0_all': None,
-}
+def _build_fs_free_dicts(ndim):
+    """Build the ``_FS_FREE_AFTER_BDIM`` / ``_FS_FREE_AFTER_VAR_DENS`` dicts
+    for a given spatial dimensionality.
+
+    The hot path uses ``self.__dict__.update(<dict>)`` to drop references to
+    BDIM intermediates between sub-steps so the CUDA allocator can reclaim
+    them.  Building the dicts here from ``ndim`` keeps the field list in
+    one place and makes the 2-D path mechanically parallel to 3-D.
+    """
+    axes = ('u', 'v', 'w')[:ndim]
+    norms = ('x', 'y', 'z')[:ndim]
+    after_bdim = {f'mu1_all_{a}': None for a in axes}
+    for a in axes:
+        for n in norms:
+            after_bdim[f'normal_{n}_{a}'] = None
+    after_bdim['mu1_all'] = None
+    after_bdim['m_m0_all'] = None
+    after_var_dens = {f'mu0_all_{a}': None for a in axes}
+    after_var_dens['mu0_all'] = None
+    return after_bdim, after_var_dens
 
 
 class FluidSolver(PlottingMixin):
@@ -827,6 +834,21 @@ class FluidSolver(PlottingMixin):
             self._recompute_mu_normals = self._recompute_mu_normals_2d
             self._bdim_apply          = self._bdim_apply_2d
 
+        # ----------------------------------------------------------------
+        # Per-instance BDIM-intermediate free-dicts (Step 4 of unification).
+        # Replaces the module-level ``_FS_FREE_AFTER_BDIM_3D`` /
+        # ``_FS_FREE_AFTER_VAR_DENS_3D`` constants — these are now built
+        # from ``self.ndim`` so the 2-D path can use the same mechanism.
+        # ----------------------------------------------------------------
+        (self._FS_FREE_AFTER_BDIM,
+         self._FS_FREE_AFTER_VAR_DENS) = _build_fs_free_dicts(self.ndim)
+
+        # Pre-built per-axis attribute names for ``_apply_bdim_all_axes``.
+        # Stored once at __init__ so the hot path is a single attribute
+        # read + getattr loop, with no per-step Python branching on ndim.
+        self._bdim_axis_names   = ('u', 'v', 'w')[:self.ndim]
+        self._bdim_normal_names = ('x', 'y', 'z')[:self.ndim]
+
     def inside(self, x):
         """
         Return True if all bodies' x are inside the domain
@@ -1140,6 +1162,34 @@ class FluidSolver(PlottingMixin):
             phi, mu0, body_vel, mu1,
             normal_x, normal_y, normal_z, _h, 3,
         ).clone()
+
+    # ------------------------------------------------------------------
+    #   Per-axis BDIM apply — dim-agnostic loop over MAC axes
+    # ------------------------------------------------------------------
+    def _apply_bdim_all_axes(self, vels):
+        """Apply BDIM to each velocity component on its own staggered grid.
+
+        For each axis ``a`` in ``('u', 'v'[, 'w'])`` reads the per-axis
+        ``mu0_all_a``, ``mu1_all_a``, ``body_a`` and per-(axis,normal-component)
+        ``normal_<n>_<a>`` attributes, and dispatches through
+        ``self._bdim_apply`` (bound to the per-D method at __init__).
+
+        Used by both ``_fluid_step_2d`` and ``_fluid_step_3d`` (Step 4 of
+        the 2-D/3-D unification refactor) to remove the 12-line per-axis
+        BDIM blocks duplicated across the two methods.
+        """
+        comp = self.composite_body
+        out = []
+        for i, ax in enumerate(self._bdim_axis_names):
+            mu0 = getattr(self, f'mu0_all_{ax}')
+            mu1 = getattr(self, f'mu1_all_{ax}')
+            body_vel = getattr(comp, f'body_{ax}')
+            normals = tuple(
+                getattr(self, f'normal_{n}_{ax}')
+                for n in self._bdim_normal_names
+            )
+            out.append(self._bdim_apply(vels[i], mu0, body_vel, mu1, *normals))
+        return tuple(out)
 
     # ------------------------------------------------------------------
     #   Union AABB across all body sub-blocks (3-D)
@@ -1821,9 +1871,6 @@ class FluidSolver(PlottingMixin):
         return self._fluid_step(*args)
 
     def _fluid_step_2d(self, u, v, p, timestep):
-        _bdim_apply = self._bdim_apply
-        comp        = self.composite_body
-
         _ch, _cv, _ch_cc = self._compute_variable_density_coefficients(timestep)
 
         def _advect_bdim(u_in, v_in, nu_t=None, u_rebase=None, v_rebase=None):
@@ -1834,16 +1881,7 @@ class FluidSolver(PlottingMixin):
                 up = u_rebase + (up - u_in)
             if v_rebase is not None:
                 vp = v_rebase + (vp - v_in)
-            up = _bdim_apply(
-                up, self.mu0_all_u,
-                comp.body_u, self.mu1_all_u,
-                self.normal_x_u, self.normal_y_u,
-            )
-            vp = _bdim_apply(
-                vp, self.mu0_all_v,
-                comp.body_v, self.mu1_all_v,
-                self.normal_x_v, self.normal_y_v,
-            )
+            up, vp = self._apply_bdim_all_axes((up, vp))
             self.adv_diff_solver.set_BCs(up, vp)
             return up, vp
 
@@ -1890,28 +1928,15 @@ class FluidSolver(PlottingMixin):
         self._bdim_union_aabb = (
             self._compute_union_aabb_3d(halo=2) if self._use_kernels else None
         )
-        uprime = self._bdim_apply(
-            uprime, self.mu0_all_u,
-            self.composite_body.body_u, self.mu1_all_u,
-            self.normal_x_u, self.normal_y_u, self.normal_z_u,
-        )
-        vprime = self._bdim_apply(
-            vprime, self.mu0_all_v,
-            self.composite_body.body_v, self.mu1_all_v,
-            self.normal_x_v, self.normal_y_v, self.normal_z_v,
-        )
-        wprime = self._bdim_apply(
-            wprime, self.mu0_all_w,
-            self.composite_body.body_w, self.mu1_all_w,
-            self.normal_x_w, self.normal_y_w, self.normal_z_w,
-        )
+        uprime, vprime, wprime = self._apply_bdim_all_axes(
+            (uprime, vprime, wprime))
         self._bdim_union_aabb = None
 
-        self.__dict__.update(_FS_FREE_AFTER_BDIM_3D)
+        self.__dict__.update(self._FS_FREE_AFTER_BDIM)
 
         ch, cv, cw, ch_cc = self._compute_variable_density_coefficients(timestep)
 
-        self.__dict__.update(_FS_FREE_AFTER_VAR_DENS_3D)
+        self.__dict__.update(self._FS_FREE_AFTER_VAR_DENS)
 
         if self.poisson_method == "fft":
             (u, v, w, p) = self.project(uprime, vprime, p,

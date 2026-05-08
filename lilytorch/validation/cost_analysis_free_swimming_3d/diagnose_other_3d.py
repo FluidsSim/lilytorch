@@ -115,15 +115,13 @@ def install_patch():
             fs._bdim_union_aabb = None
 
         with B.time("F.6  release mu1+normals (dict.update)"):
-            from lilytorch.integration.BDIMhandler import _FS_FREE_AFTER_BDIM_3D
-            fs.__dict__.update(_FS_FREE_AFTER_BDIM_3D)
+            fs.__dict__.update(fs._FS_FREE_AFTER_BDIM)
 
         with B.time("F.7  var-density coeffs"):
             ch, cv, cw, ch_cc = self._compute_variable_density_coefficients(timestep)
 
         with B.time("F.8  release mu0 (dict.update)"):
-            from lilytorch.integration.BDIMhandler import _FS_FREE_AFTER_VAR_DENS_3D
-            fs.__dict__.update(_FS_FREE_AFTER_VAR_DENS_3D)
+            fs.__dict__.update(fs._FS_FREE_AFTER_VAR_DENS)
 
         with B.time("F.9  project"):
             poisson_method = getattr(fs, "poisson_method", "multigrid")
