@@ -173,9 +173,8 @@ class FlowDiagnostics:
 # torch.compile setup in FluidSolver.__init__ continues to work
 # unchanged via the module-local names.
 from lilytorch.src.forces import (
-    _forces_shared_3d, _forces_body_integrate_3d,
-    _forces_body_batch_3d,
-    _forces_shared_2d, _forces_body_batch_2d,
+    _forces_shared, _forces_body_batch,
+    _forces_body_integrate_3d,
 )
 from lilytorch.src import forces, extras
 
@@ -567,52 +566,44 @@ class FluidSolver(PlottingMixin):
                     "sdf_interp_method int form must be 0 (trilinear) or "
                     f"1 (triquadratic); got {self._sdf_interp_method}"
                 )
-        # Lazy-allocated per-body compiled-wrapper plumbing.
+        # Compiled bindings for the dim-agnostic force kernels.
+        # ``_forces_shared`` and ``_forces_body_batch`` take tuple-of-tensor
+        # inputs; Dynamo guards on tuple length (``len(vels)``), so calling
+        # with D=2 and D=3 yields two shape-specialized compiled artifacts
+        # automatically — no per-D Python wrappers needed.
         if self._compile_forces and self.device.type == "cuda":
-            # 3-D kernels
             self._forces_shared_compiled = torch.compile(
-                _forces_shared_3d, mode="reduce-overhead",
-            )
-            # ``_forces_body_integrate_3d`` runs on per-body AABB sub-blocks
-            # whose shapes change slowly as the body rotates.  Use
-            # ``dynamic=True`` so we get kernel fusion without a recompile
-            # for every orientation (CUDA-graph mode is incompatible with
-            # variable shapes).
-            self._forces_body_compiled = torch.compile(
-                _forces_body_integrate_3d, dynamic=True,
+                _forces_shared, mode="reduce-overhead",
             )
             self._forces_body_batch_compiled = torch.compile(
-                _forces_body_batch_3d, mode="reduce-overhead",
+                _forces_body_batch, mode="reduce-overhead",
             )
             # Dynamic-shape shared kernel for the union-AABB crop path
             # (sub-block shape varies with body kinematics).
             self._forces_shared_dyn_compiled = torch.compile(
-                _forces_shared_3d, dynamic=True,
+                _forces_shared, dynamic=True,
+            )
+            # ``_forces_body_integrate_3d`` runs on per-body AABB sub-blocks
+            # whose shapes change slowly; ``dynamic=True`` gives fusion
+            # without a recompile for every orientation.
+            self._forces_body_compiled = torch.compile(
+                _forces_body_integrate_3d, dynamic=True,
             )
             # Dynamic-shape batched mu/normals kernel for the union-AABB
             # crop path (same rationale).
             self._mu_normals_batched_3d_dyn_compiled = torch.compile(
                 _mu_normals_batched_3d, dynamic=True,
             )
-            # 2-D kernels
-            self._forces_shared_2d_compiled = torch.compile(
-                _forces_shared_2d, mode="reduce-overhead",
-            )
-            self._forces_body_batch_2d_compiled = torch.compile(
-                _forces_body_batch_2d, mode="reduce-overhead",
-            )
             print(
                 "  [compile] forces_shared + forces_body_batch compiled "
-                "(reduce-overhead, 2D+3D)"
+                "(reduce-overhead, dim-agnostic)"
             )
         else:
-            self._forces_shared_compiled = _forces_shared_3d
-            self._forces_body_compiled = _forces_body_integrate_3d
-            self._forces_body_batch_compiled = _forces_body_batch_3d
-            self._forces_shared_dyn_compiled = _forces_shared_3d
+            self._forces_shared_compiled     = _forces_shared
+            self._forces_body_batch_compiled = _forces_body_batch
+            self._forces_shared_dyn_compiled = _forces_shared
+            self._forces_body_compiled       = _forces_body_integrate_3d
             self._mu_normals_batched_3d_dyn_compiled = _mu_normals_batched_3d
-            self._forces_shared_2d_compiled = _forces_shared_2d
-            self._forces_body_batch_2d_compiled = _forces_body_batch_2d
 
         # ---- optional torch.compile for SDF / mu / normals ----
         self._compile_sdf = solver.get("compile_sdf", False)

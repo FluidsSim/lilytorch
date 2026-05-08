@@ -26,10 +26,9 @@ def _forces_shared(vels, p, normals, nu_rho, h):
 
     Inputs are pure tensors / scalars — no ``self`` access — so this
     function is safe for ``torch.compile(mode='reduce-overhead')``.  The
-    Python-level loops over ``range(D)`` unroll at trace time because the
-    per-D wrappers (:func:`_forces_shared_2d`, :func:`_forces_shared_3d`)
-    fix the component count when compiled, so each compiled artifact still
-    sees a fully unrolled, shape-specialized graph.
+    Python-level loops over ``range(D)`` unroll at trace time and Dynamo
+    guards on ``len(vels)``, so calling with D=2 and D=3 produces two
+    fully shape-specialized compiled artifacts (no per-D wrappers needed).
 
     * **Diagonal** (∂u_i/∂x_i) uses the compact MAC stencil — exact at CC.
     * **Cross** (∂u_i/∂x_j, i≠j) interpolates u_i to CC along its stagger
@@ -47,7 +46,7 @@ def _forces_shared(vels, p, normals, nu_rho, h):
 
     Returns
     -------
-    Flat tuple ``(stress_0, …, stress_{D-1}, pforce_0, …, pforce_{D-1})``.
+    ``(stresses, pforces)`` — each a length-D tuple of CC tensors.
     """
     D = len(vels)
     rng = range(D)
@@ -105,15 +104,7 @@ def _forces_shared(vels, p, normals, nu_rho, h):
     # interface, so both sides contribute correctly to the surface integral.
     pforces = [-p * normals[i] for i in rng]
 
-    return tuple(stresses) + tuple(pforces)
-
-
-def _forces_shared_3d(u, v, w, p, sdf_val, nx, ny, nz, nu_rho, h):
-    """3-D wrapper around :func:`_forces_shared` (kept for compile shape
-    specialization).  ``sdf_val`` is unused; preserved for API stability."""
-    s0, s1, s2, p0, p1, p2 = _forces_shared(
-        (u, v, w), p, (nx, ny, nz), nu_rho, h)
-    return s0, s1, s2, p0, p1, p2
+    return tuple(stresses), tuple(pforces)
 
 
 def _forces_body_integrate_3d(
@@ -256,57 +247,8 @@ def _forces_body_batch(
         raw_p_kj = (Xu[k] * fpres[j]).to(_d).sum(dim=spatial).to(_dt) * h_pow
         tp.append(raw_p_jk - com[j] * fp[k] - raw_p_kj + com[k] * fp[j])
 
-    return fv, tv, fp, tp
+    return tuple(fv), tuple(tv), tuple(fp), tuple(tp)
 
-
-def _forces_body_batch_3d(
-    xstress, ystress, zstress,
-    pforce_x, pforce_y, pforce_z,
-    sdf_all, eps_body, eps_solver,
-    com_x, com_y, com_z,
-    X, Y, Z, h3,
-    sdf_grad_mag=None,
-):
-    """3-D wrapper around :func:`_forces_body_batch`.  Returns 12 tensors
-    of shape (B,): fv_xyz, tv_xyz, fp_xyz, tp_xyz."""
-    fv, tv, fp, tp = _forces_body_batch(
-        [xstress, ystress, zstress], [pforce_x, pforce_y, pforce_z],
-        sdf_all, eps_body, eps_solver,
-        [com_x, com_y, com_z], [X, Y, Z], h3, sdf_grad_mag,
-    )
-    return (fv[0], fv[1], fv[2], tv[0], tv[1], tv[2],
-            fp[0], fp[1], fp[2], tp[0], tp[1], tp[2])
-
-
-# ======================================================================
-# 2-D wrappers — keep distinct symbols so torch.compile produces a
-# shape-specialized graph per dimension.
-# ======================================================================
-
-def _forces_shared_2d(u, v, p, sdf_val, nx, ny, nu_rho, h):
-    """2-D wrapper around :func:`_forces_shared`.  ``sdf_val`` is unused;
-    preserved for API stability."""
-    s0, s1, p0, p1 = _forces_shared((u, v), p, (nx, ny), nu_rho, h)
-    return s0, s1, p0, p1
-
-
-def _forces_body_batch_2d(
-    xstress, ystress,
-    pforce_x, pforce_y,
-    sdf_vals_cc,
-    eps_body, eps_solver,
-    com_x, com_y,
-    X, Y, h2,
-    sdf_grad_mag=None,
-):
-    """2-D wrapper around :func:`_forces_body_batch`.  Returns 6 tensors of
-    shape (B,): fv_x, fv_y, tv_z, fp_x, fp_y, tp_z."""
-    fv, tv, fp, tp = _forces_body_batch(
-        [xstress, ystress], [pforce_x, pforce_y],
-        sdf_vals_cc, eps_body, eps_solver,
-        [com_x, com_y], [X, Y], h2, sdf_grad_mag,
-    )
-    return fv[0], fv[1], tv[0], fp[0], fp[1], tp[0]
 
 # ======================================================================
 # Methods bound to FluidSolver (take ``self`` as first argument).
@@ -324,12 +266,11 @@ def forces_method1(self, u, v, p, iteration):
     # different staggered grids, which produced noisy force/torque pairs
     # at moving contour points and destabilized MuJoCo coupling.
     nu_rho = self._compute_nu_rho_for_forces(u, v)
-    (xstress, ystress,
-     pforce_x, pforce_y) = self._forces_shared_2d_compiled(
-        u, v, p, self.composite_body.sdf_val,
-        normal_x, normal_y,
-        nu_rho, self.h,
+    stresses, pforces = self._forces_shared_compiled(
+        (u, v), p, (normal_x, normal_y), nu_rho, self.h,
     )
+    xstress, ystress = stresses
+    pforce_x, pforce_y = pforces
 
     if self._compile_forces:
         xstress = xstress.clone()
@@ -542,21 +483,19 @@ def forces_method2(self, u, v, p, iteration):
             if torch.is_tensor(nu_rho) and nu_rho.ndim == 2
             else nu_rho
         )
-        (xstress, ystress,
-         pforce_x, pforce_y) = self._forces_shared_2d_compiled(
-            u[usl].contiguous(), v[usl].contiguous(),
-            p[usl].contiguous(), comp.sdf_val[usl].contiguous(),
-            normal_x[usl].contiguous(), normal_y[usl].contiguous(),
+        stresses, pforces = self._forces_shared_compiled(
+            (u[usl].contiguous(), v[usl].contiguous()),
+            p[usl].contiguous(),
+            (normal_x[usl].contiguous(), normal_y[usl].contiguous()),
             nu_rho_sub, self.h,
         )
     else:
         u_i0, u_j0 = 0, 0
-        (xstress, ystress,
-         pforce_x, pforce_y) = self._forces_shared_2d_compiled(
-            u, v, p, comp.sdf_val,
-            normal_x, normal_y,
-            nu_rho, self.h,
+        stresses, pforces = self._forces_shared_compiled(
+            (u, v), p, (normal_x, normal_y), nu_rho, self.h,
         )
+    xstress, ystress = stresses
+    pforce_x, pforce_y = pforces
 
     if self._compile_forces:
         xstress  = xstress.clone()
@@ -613,16 +552,19 @@ def forces_method2(self, u, v, p, iteration):
         gy = torch.gradient(sdf_vals, spacing=self.h, dim=2, edge_order=2)[0]
         sdf_grad_mag_2d = torch.sqrt(gx**2 + gy**2)
 
-    (fv_x, fv_y, tv_z,
-     fp_x, fp_y, tp_z) = self._forces_body_batch_2d_compiled(
-        xstress, ystress,
-        pforce_x, pforce_y,
+    fv, tv, fp, tp = self._forces_body_batch_compiled(
+        (xstress, ystress),
+        (pforce_x, pforce_y),
         sdf_vals,
         eps_body, self.eps,
-        comp.com_pos[:, 0], comp.com_pos[:, 1],
-        self.grids.X, self.grids.Y, self.h2,
+        (comp.com_pos[:, 0], comp.com_pos[:, 1]),
+        (self.grids.X, self.grids.Y), self.h2,
         sdf_grad_mag_2d,
     )
+    fv_x, fv_y = fv
+    tv_z,      = tv
+    fp_x, fp_y = fp
+    tp_z,      = tp
 
     if self._compile_forces:
         fv_x = fv_x.clone(); fv_y = fv_y.clone(); tv_z = tv_z.clone()
@@ -661,7 +603,7 @@ def forces_method2_3d(self, u, v, w, p, iteration):
     Torques are computed about each body's centre of mass via r × f.
 
     When ``compile_forces=True``, the heavy tensor work is delegated to
-    two ``torch.compile``-d kernels (``_forces_shared_3d`` and
+    two ``torch.compile``-d kernels (``_forces_shared`` and
     ``_forces_body_integrate_3d``) that fuse ~40 CUDA kernels into one
     or two CUDA-graph launches, giving ~6× wall-clock speedup.
     """
@@ -756,7 +698,7 @@ def forces_method2_3d(self, u, v, w, p, iteration):
     # ---- decide whether to crop shared kernel to union AABB ------
     # Only worthwhile when narrow-band path is on and sparse SDFs are
     # available.  We compute the union AABB across all bodies and run
-    # the bandwidth-bound _forces_shared_3d only on that sub-block.
+    # the bandwidth-bound _forces_shared only on that sub-block.
     # Per-body integration then uses indices RELATIVE to the union.
     _have_sparse_for_union = (
         self._use_kernels
@@ -801,20 +743,19 @@ def forces_method2_3d(self, u, v, w, p, iteration):
         # tensor; crop it to the union sub-block to match the other
         # cropped inputs.  Constant viscosity stays a scalar.
         nu_rho_sub = nu_rho[usl].contiguous() if torch.is_tensor(nu_rho) and nu_rho.ndim == 3 else nu_rho
-        (xstress, ystress, zstress,
-         pforce_x, pforce_y, pforce_z) = self._forces_shared_dyn_compiled(
-            u[usl].contiguous(), v[usl].contiguous(), w[usl].contiguous(),
-            p[usl].contiguous(), comp.sdf_val[usl].contiguous(),
-            nx[usl].contiguous(), ny[usl].contiguous(), nz[usl].contiguous(),
+        stresses, pforces = self._forces_shared_dyn_compiled(
+            (u[usl].contiguous(), v[usl].contiguous(), w[usl].contiguous()),
+            p[usl].contiguous(),
+            (nx[usl].contiguous(), ny[usl].contiguous(), nz[usl].contiguous()),
             nu_rho_sub, h,
         )
     else:
         # ---- full-grid shared kernel (default path) --------------
-        (xstress, ystress, zstress,
-         pforce_x, pforce_y, pforce_z) = self._forces_shared_compiled(
-            u, v, w, p, comp.sdf_val, nx, ny, nz,
-            nu_rho, h,
+        stresses, pforces = self._forces_shared_compiled(
+            (u, v, w), p, (nx, ny, nz), nu_rho, h,
         )
+    xstress, ystress, zstress = stresses
+    pforce_x, pforce_y, pforce_z = pforces
 
     # When compiled with CUDA graphs (reduce-overhead), the returned
     # tensors live in the graph's replay buffer and will be overwritten
@@ -897,17 +838,18 @@ def forces_method2_3d(self, u, v, w, p, iteration):
             gz = torch.gradient(sdf_all, spacing=h, dim=3, edge_order=2)[0]
             sdf_grad_mag_3d = torch.sqrt(gx**2 + gy**2 + gz**2)
 
-        (fv_x, fv_y, fv_z,
-         tv_x, tv_y, tv_z,
-         fp_x, fp_y, fp_z,
-         tp_x, tp_y, tp_z) = self._forces_body_batch_compiled(
-            xstress, ystress, zstress,
-            pforce_x, pforce_y, pforce_z,
+        fv, tv, fp, tp = self._forces_body_batch_compiled(
+            (xstress, ystress, zstress),
+            (pforce_x, pforce_y, pforce_z),
             sdf_all, eps_body, self.eps,
-            self._com_buf_x, self._com_buf_y, self._com_buf_z,
-            X, Y, Z, h3,
+            (self._com_buf_x, self._com_buf_y, self._com_buf_z),
+            (X, Y, Z), h3,
             sdf_grad_mag_3d,
         )
+        fv_x, fv_y, fv_z = fv
+        tv_x, tv_y, tv_z = tv
+        fp_x, fp_y, fp_z = fp
+        tp_x, tp_y, tp_z = tp
 
         # Clone outputs (CUDA graph buffer reuse)
         fv_x = fv_x.clone(); fv_y = fv_y.clone(); fv_z = fv_z.clone()
