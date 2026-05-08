@@ -214,17 +214,56 @@ class BDIMhandler:
                 self.update = self._update_2d
 
     def _init_apply_forces(self):
-        """Bind the dim-specialized fluid->body force-application path.
+        """Bind ``self.apply_forces`` and precompute per-D force-axis maps.
 
-        Mirror of :meth:`_init_update`: ``self.apply_forces`` is a bound
-        instance attribute pointing at ``_apply_forces_2d`` or
-        ``_apply_forces_3d`` so that callers (notably :meth:`step`) do
-        not branch on ``self.ndim`` every step.
+        The 2-D and 3-D paths are now collapsed into a single
+        :meth:`_apply_forces` (Step 6 of the unification refactor).  The
+        per-D ``xfrc_applied`` index mapping, the buoyancy axis, and the
+        FluidSolver field names to gather are precomputed here so the hot
+        path is a single attribute read + list iteration with zero
+        per-step Python branching on ``self.ndim`` or ``_2d_plane``.
         """
+        self.apply_forces = self._apply_forces
+
         if self.ndim == 3:
-            self.apply_forces = self._apply_forces_3d
+            self._lin_xfrc_idx      = (0, 1, 2)
+            self._ang_xfrc_idx      = (3, 4, 5)
+            self._buoyancy_xfrc_idx = 2          # fz
+            self._buoyancy_pos_idx  = 2          # com_pos[i][2]
+            self._has_buoyancy      = True
+            self._lin_visc_attrs = ('friction_force_lin_x',
+                                    'friction_force_lin_y',
+                                    'friction_force_lin_z')
+            self._ang_visc_attrs = ('friction_force_ang_x',
+                                    'friction_force_ang_y',
+                                    'friction_force_ang_z')
+            self._lin_pres_attrs = ('pressure_force_x',
+                                    'pressure_force_y',
+                                    'pressure_force_z')
+            self._ang_pres_attrs = ('pressure_force_ang_x',
+                                    'pressure_force_ang_y',
+                                    'pressure_force_ang_z')
         else:
-            self.apply_forces = self._apply_forces_2d
+            # 2-D xz plane: MuJoCo (x, z) → fluid (x, y); buoyancy on z.
+            # 2-D xy plane: MuJoCo (x, y) → fluid (x, y); no buoyancy.
+            self._lin_xfrc_idx      = self._2d_force_axes[:2]
+            self._ang_xfrc_idx      = (self._2d_force_axes[2],)
+            self._has_buoyancy      = self._2d_has_buoyancy
+            if self._2d_has_buoyancy:                # xz plane
+                # Buoyancy is added to the fluid-y xfrc index, which is
+                # the second linear xfrc index.  com_pos uses fluid-y
+                # (= MuJoCo z) for the surface comparison.
+                self._buoyancy_xfrc_idx = self._2d_force_axes[1]
+                self._buoyancy_pos_idx  = 1
+            else:                                    # xy plane
+                self._buoyancy_xfrc_idx = None
+                self._buoyancy_pos_idx  = None
+            self._lin_visc_attrs = ('friction_force_lin_x',
+                                    'friction_force_lin_y')
+            self._ang_visc_attrs = ('friction_force_ang_z',)
+            self._lin_pres_attrs = ('pressure_force_x',
+                                    'pressure_force_y')
+            self._ang_pres_attrs = ('pressure_force_ang_z',)
 
     # ------------------------------------------------------------------
     #  Kernel-path per-body SDF metadata
@@ -1656,149 +1695,69 @@ class BDIMhandler:
     # ==================================================================
     #  apply_forces: fluid -> body forces via MuJoCo xfrc_applied
     # ==================================================================
-    # NOTE: ``self.apply_forces`` is bound in ``_init_apply_forces`` to
-    # either ``_apply_forces_2d`` or ``_apply_forces_3d`` — callers must
-    # not branch on ``self.ndim`` here.
+    def _apply_forces(self, task, physics):
+        """Dim-agnostic fluid → body force application via MuJoCo xfrc.
 
-    def _apply_forces_2d(self, task, physics):
+        Replaces the legacy ``_apply_forces_2d`` / ``_apply_forces_3d``
+        pair (Step 6 of the 2-D/3-D unification refactor).  The per-D
+        xfrc index map, buoyancy axis, and FluidSolver field names are
+        precomputed in :meth:`_init_apply_forces`, so this method has
+        zero per-step Python branching on ``ndim`` or ``_2d_plane``.
+
+        FARMS-style buoyancy is applied additively to a single linear
+        xfrc index (``_buoyancy_xfrc_idx``); for the 2-D xy plane, where
+        no buoyancy is needed, that index is ``None`` and the buoyancy
+        block is skipped entirely.
+        """
         fs = self.fluid_solver
         s  = self.force_scaling
-        fx_idx, fy_idx, torque_idx = self._2d_force_axes
+        D  = self.ndim
+        Nt = len(self._ang_xfrc_idx)
 
-        # Single GPU→CPU transfer instead of 6 separate .cpu().numpy() calls
-        forces_gpu = torch.stack([
-            fs.friction_force_lin_x,
-            fs.friction_force_lin_y,
-            fs.friction_force_ang_z,
-            fs.pressure_force_x,
-            fs.pressure_force_y,
-            fs.pressure_force_ang_z,
-        ])                                          # (6, B)
-        forces_cpu = (s * forces_gpu).cpu().numpy() # single sync
-        friction_force_lin_x = forces_cpu[0]
-        friction_force_lin_y = forces_cpu[1]
-        friction_force_ang_z = forces_cpu[2]
-        pressure_force_x     = forces_cpu[3]
-        pressure_force_y     = forces_cpu[4]
-        pressure_force_ang_z = forces_cpu[5]
+        # Single GPU→CPU transfer (4 groups: lin_visc, ang_visc, lin_pres, ang_pres).
+        attrs = (self._lin_visc_attrs + self._ang_visc_attrs
+                 + self._lin_pres_attrs + self._ang_pres_attrs)
+        forces_gpu = torch.stack([getattr(fs, a) for a in attrs])  # (2D + 2Nt, B)
+        forces_cpu = (s * forces_gpu).cpu().numpy()                # single sync
 
-        # Lazy-init buoyancy parameters (xz plane only)
-        if self._2d_has_buoyancy and not self._buoyancy_initialized:
+        # Total per-axis (viscous + pressure) at CPU level.
+        lin_total = forces_cpu[:D] + forces_cpu[D + Nt: 2 * D + Nt]   # (D, B)
+        ang_total = forces_cpu[D: D + Nt] + forces_cpu[2 * D + Nt:]   # (Nt, B)
+
+        # FARMS-identical buoyancy (drag.pyx ``compute_buoyancy``).
+        if self._has_buoyancy and not self._buoyancy_initialized:
             self._init_buoyancy_params(task, physics)
 
         comp    = fs.composite_body
         surface = self.water_surface
         g_z     = self.gravity_z
+        units_N = task.units.newtons
+        buoy_xidx = self._buoyancy_xfrc_idx
+        buoy_pidx = self._buoyancy_pos_idx
+        has_buoy  = self._has_buoyancy
 
         for body_i in range(len(comp.bodies)):
             (animat_id, link_id) = comp.body_ids[body_i]
             ind = task.maps[animat_id]["sensors"]["data2xfrc"][link_id]
 
-            # FARMS-style buoyancy: only active for xz plane (fluid y = MuJoCo z)
-            buoyancy_y = 0.0
-            if self._2d_has_buoyancy:
-                mass   = self._buoy_mass[body_i]
+            buoyancy = 0.0
+            if has_buoy:
+                mass    = self._buoy_mass[body_i]
                 density = self._buoy_density[body_i]
-                height = self._buoy_height[body_i]
-                # comp.com_pos[body_i][1] = fluid y = MuJoCo z (vertical)
-                pos_z  = float(comp.com_pos[body_i][1])
+                height  = self._buoy_height[body_i]
+                pos_z   = float(comp.com_pos[body_i][buoy_pidx])
                 if mass > 0 and height > 0 and pos_z - height < surface:
                     frac = min((surface + height - pos_z) / (2.0 * height), 1.0)
-                    buoyancy_y = -self.rho_fluid * mass * g_z / density * frac
+                    buoyancy = -self.rho_fluid * mass * g_z / density * frac
 
-            physics.data.xfrc_applied[ind, fx_idx] = (
-                friction_force_lin_x[body_i] + pressure_force_x[body_i]
-            ) * task.units.newtons
-            physics.data.xfrc_applied[ind, fy_idx] = (
-                friction_force_lin_y[body_i] + pressure_force_y[body_i] + buoyancy_y
-            ) * task.units.newtons
-            physics.data.xfrc_applied[ind, torque_idx] = (
-                friction_force_ang_z[body_i] + pressure_force_ang_z[body_i]
-            ) * task.units.newtons
+            for d, xidx in enumerate(self._lin_xfrc_idx):
+                val = lin_total[d][body_i] * units_N
+                if xidx == buoy_xidx:
+                    val += buoyancy * units_N
+                physics.data.xfrc_applied[ind, xidx] = val
 
-    def _apply_forces_3d(self, task, physics):
-        fs = self.fluid_solver
-        s  = self.force_scaling
-
-        # Single GPU→CPU transfer instead of 12 separate .cpu().numpy()
-        # calls (each one was an implicit sync + DtoH copy and the single
-        # biggest contributor to "Other (residual)" at low N).
-        # Mirrors the 2-D batched transfer in _apply_forces_2d.
-        forces_gpu = torch.stack([
-            fs.friction_force_lin_x,
-            fs.friction_force_lin_y,
-            fs.friction_force_lin_z,
-            fs.friction_force_ang_x,
-            fs.friction_force_ang_y,
-            fs.friction_force_ang_z,
-            fs.pressure_force_x,
-            fs.pressure_force_y,
-            fs.pressure_force_z,
-            fs.pressure_force_ang_x,
-            fs.pressure_force_ang_y,
-            fs.pressure_force_ang_z,
-        ])                                          # (12, B)
-        forces_cpu = (s * forces_gpu).cpu().numpy() # single sync
-        friction_force_lin_x = forces_cpu[0]
-        friction_force_lin_y = forces_cpu[1]
-        friction_force_lin_z = forces_cpu[2]
-        friction_force_ang_x = forces_cpu[3]
-        friction_force_ang_y = forces_cpu[4]
-        friction_force_ang_z = forces_cpu[5]
-        pressure_force_x     = forces_cpu[6]
-        pressure_force_y     = forces_cpu[7]
-        pressure_force_z     = forces_cpu[8]
-        pressure_force_ang_x = forces_cpu[9]
-        pressure_force_ang_y = forces_cpu[10]
-        pressure_force_ang_z = forces_cpu[11]
-
-        # ---- FARMS-identical buoyancy (drag.pyx  compute_buoyancy) ----
-        # Lazy-init per-body mass & half-height on first call
-        if not self._buoyancy_initialized:
-            self._init_buoyancy_params(task, physics)
-
-        comp    = fs.composite_body
-        surface = self.water_surface
-        g_z     = self.gravity_z          # e.g. -9.81
-
-        for body_i in range(len(comp.bodies)):
-            (animat_id, link_id) = comp.body_ids[body_i]
-            ind = task.maps[animat_id]["sensors"]["data2xfrc"][link_id]
-
-            # FARMS buoyancy per link
-            mass   = self._buoy_mass[body_i]
-            density = self._buoy_density[body_i]
-            height = self._buoy_height[body_i]
-            pos_z  = float(comp.com_pos[body_i][2])
-
-            buoyancy_z = 0.0
-            if mass > 0 and height > 0 and pos_z - height < surface:
-                frac = min((surface + height - pos_z) / (2.0 * height), 1.0)
-                # -rho_water * (mass/density) * gravity * frac
-                # = -rho_water * V_link * gravity * frac  (upward when g<0)
-                buoyancy_z = (
-                    -self.rho_fluid * mass * g_z / density * frac
-                )
-
-            physics.data.xfrc_applied[ind, 0] = (
-                friction_force_lin_x[body_i] + pressure_force_x[body_i]
-            ) * task.units.newtons
-            physics.data.xfrc_applied[ind, 1] = (
-                friction_force_lin_y[body_i] + pressure_force_y[body_i]
-            ) * task.units.newtons
-            physics.data.xfrc_applied[ind, 2] = (
-                friction_force_lin_z[body_i] + pressure_force_z[body_i]
-                + buoyancy_z
-            ) * task.units.newtons
-            physics.data.xfrc_applied[ind, 3] = (
-                friction_force_ang_x[body_i] + pressure_force_ang_x[body_i]
-            ) * task.units.newtons
-            physics.data.xfrc_applied[ind, 4] = (
-                friction_force_ang_y[body_i] + pressure_force_ang_y[body_i]
-            ) * task.units.newtons
-            physics.data.xfrc_applied[ind, 5] = (
-                friction_force_ang_z[body_i] + pressure_force_ang_z[body_i]
-            ) * task.units.newtons
+            for d, xidx in enumerate(self._ang_xfrc_idx):
+                physics.data.xfrc_applied[ind, xidx] = ang_total[d][body_i] * units_N
 
     # ==================================================================
     #  step: one full coupled step (called by FluidExtension.before_step)
