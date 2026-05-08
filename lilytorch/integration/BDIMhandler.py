@@ -197,6 +197,7 @@ class BDIMhandler:
             self._init_interp()
         self._init_static_body_metadata()
         self._init_update()
+        self._init_apply_forces()
         # override composite-body update with our FARMS-driven version
         self.fluid_solver.composite_body.update = self.update
 
@@ -211,6 +212,19 @@ class BDIMhandler:
                 self.update = self._update_2d_streaming_multi
             else:
                 self.update = self._update_2d
+
+    def _init_apply_forces(self):
+        """Bind the dim-specialized fluid->body force-application path.
+
+        Mirror of :meth:`_init_update`: ``self.apply_forces`` is a bound
+        instance attribute pointing at ``_apply_forces_2d`` or
+        ``_apply_forces_3d`` so that callers (notably :meth:`step`) do
+        not branch on ``self.ndim`` every step.
+        """
+        if self.ndim == 3:
+            self.apply_forces = self._apply_forces_3d
+        else:
+            self.apply_forces = self._apply_forces_2d
 
     # ------------------------------------------------------------------
     #  Kernel-path per-body SDF metadata
@@ -1642,12 +1656,9 @@ class BDIMhandler:
     # ==================================================================
     #  apply_forces: fluid -> body forces via MuJoCo xfrc_applied
     # ==================================================================
-    def apply_forces(self, task, physics):
-        if self.ndim == 3:
-            self._apply_forces_3d(task, physics)
-        else:
-            self._apply_forces_2d(task, physics)
-
+    # NOTE: ``self.apply_forces`` is bound in ``_init_apply_forces`` to
+    # either ``_apply_forces_2d`` or ``_apply_forces_3d`` — callers must
+    # not branch on ``self.ndim`` here.
 
     def _apply_forces_2d(self, task, physics):
         fs = self.fluid_solver

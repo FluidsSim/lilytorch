@@ -812,6 +812,21 @@ class FluidSolver(PlottingMixin):
                 pyobject = pars,
             )
 
+        # ----------------------------------------------------------------
+        # Dim-dispatch table.  Bind the right per-step method once so the
+        # FSI hot path does not branch on ``self.ndim`` every step.  The
+        # ``if`` here lives in __init__ — that's the only place it is
+        # allowed to remain (Step 1 of the 2-D/3-D unification refactor).
+        # ----------------------------------------------------------------
+        if self.ndim == 3:
+            self._fluid_step          = self._fluid_step_3d
+            self._recompute_mu_normals = self._recompute_mu_normals_3d
+            self._bdim_apply          = self._bdim_apply_3d
+        else:
+            self._fluid_step          = self._fluid_step_2d
+            self._recompute_mu_normals = self._recompute_mu_normals_2d
+            self._bdim_apply          = self._bdim_apply_2d
+
     def inside(self, x):
         """
         Return True if all bodies' x are inside the domain
@@ -1074,6 +1089,20 @@ class FluidSolver(PlottingMixin):
     # ------------------------------------------------------------------
     #   3-D BDIM apply with optional union-AABB narrow band
     # ------------------------------------------------------------------
+    def _bdim_apply_2d(self, phi, mu0, body_vel, mu1, normal_x, normal_y):
+        """Apply the BDIM2 meta-equation to a single 2-D staggered grid.
+
+        Mirror of :meth:`_bdim_apply_3d` for the 2-D path.  The 2-D code
+        currently has no union-AABB crop fast path (mesh-body kernel
+        path is 3-D-only), so this is a thin wrapper around the
+        compiled meta-equation that returns a fresh tensor the caller
+        can keep across CUDA-graph replays.
+        """
+        return self._bdim_meta_compiled(
+            phi, mu0, body_vel, mu1,
+            normal_x, normal_y, self.h, 2,
+        ).clone()
+
     def _bdim_apply_3d(self, phi, mu0, body_vel, mu1,
                       normal_x, normal_y, normal_z):
         """Apply the BDIM2 meta-equation to a single 3-D staggered grid.
@@ -1698,10 +1727,7 @@ class FluidSolver(PlottingMixin):
 
     def _recompute_normals(self):
         """Dispatch to 2-D or 3-D mu/normal recomputation."""
-        if self.ndim == 2:
-            self._recompute_mu_normals_2d()
-        else:
-            self._recompute_mu_normals_3d()
+        self._recompute_mu_normals()
 
     # ==================================================================
     #  Variable-density FSI fluid step  (called by BDIMhandler.step)
@@ -1792,14 +1818,11 @@ class FluidSolver(PlottingMixin):
 
     def fluid_step(self, *args):
         """One FSI fluid step (advect-BDIM-project).  Called by BDIMhandler."""
-        if self.ndim == 3:
-            return self._fluid_step_3d(*args)
-        return self._fluid_step_2d(*args)
+        return self._fluid_step(*args)
 
     def _fluid_step_2d(self, u, v, p, timestep):
-        _bdim = self._bdim_meta_compiled
-        _h    = self.h
-        comp  = self.composite_body
+        _bdim_apply = self._bdim_apply
+        comp        = self.composite_body
 
         _ch, _cv, _ch_cc = self._compute_variable_density_coefficients(timestep)
 
@@ -1811,16 +1834,16 @@ class FluidSolver(PlottingMixin):
                 up = u_rebase + (up - u_in)
             if v_rebase is not None:
                 vp = v_rebase + (vp - v_in)
-            up = _bdim(
+            up = _bdim_apply(
                 up, self.mu0_all_u,
                 comp.body_u, self.mu1_all_u,
-                self.normal_x_u, self.normal_y_u, _h, 2,
-            ).clone()
-            vp = _bdim(
+                self.normal_x_u, self.normal_y_u,
+            )
+            vp = _bdim_apply(
                 vp, self.mu0_all_v,
                 comp.body_v, self.mu1_all_v,
-                self.normal_x_v, self.normal_y_v, _h, 2,
-            ).clone()
+                self.normal_x_v, self.normal_y_v,
+            )
             self.adv_diff_solver.set_BCs(up, vp)
             return up, vp
 
@@ -1867,17 +1890,17 @@ class FluidSolver(PlottingMixin):
         self._bdim_union_aabb = (
             self._compute_union_aabb_3d(halo=2) if self._use_kernels else None
         )
-        uprime = self._bdim_apply_3d(
+        uprime = self._bdim_apply(
             uprime, self.mu0_all_u,
             self.composite_body.body_u, self.mu1_all_u,
             self.normal_x_u, self.normal_y_u, self.normal_z_u,
         )
-        vprime = self._bdim_apply_3d(
+        vprime = self._bdim_apply(
             vprime, self.mu0_all_v,
             self.composite_body.body_v, self.mu1_all_v,
             self.normal_x_v, self.normal_y_v, self.normal_z_v,
         )
-        wprime = self._bdim_apply_3d(
+        wprime = self._bdim_apply(
             wprime, self.mu0_all_w,
             self.composite_body.body_w, self.mu1_all_w,
             self.normal_x_w, self.normal_y_w, self.normal_z_w,
