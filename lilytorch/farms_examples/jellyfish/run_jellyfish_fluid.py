@@ -96,7 +96,7 @@ def build_solver(config_path: str, dtype=torch.float32) -> FluidSolver:
     # Prime the force / mu / normal fields so the very first step starts
     # with consistent masks.
     jelly.update(solver.starting_time, 0, dt=float(solver.dt))
-    solver._recompute_mu_normals()
+    solver._recompute_normals()
     jelly.clear_history()
 
     return solver

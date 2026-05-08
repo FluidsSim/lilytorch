@@ -230,38 +230,67 @@ except Exception:
     _stagger_sdf_3d_compiled = _stagger_sdf_3d
 
 
-def _mu_normals_batched_3d(sdf_u, sdf_v, sdf_w, sdf_cc, h, eps):
-    """Compute mu0, mu1, normals for all 4 grids (u, v, w, cc) in one pass.
+def _mu_normals_batched(sdf_stack, h, eps):
+    """Batched mu0/mu1 and unit normals for N SDF grids (2-D or 3-D).
+
+    Parameters
+    ----------
+    sdf_stack : (N, *spatial) tensor — N grids stacked along dim 0.
+                ``spatial`` is ``(Nx, Ny)`` for 2-D or ``(Nx, Ny, Nz)`` for 3-D.
+    h, eps    : grid spacing and BDIM half-width.
 
     Returns
     -------
-    mu0    : (4, Nx, Ny, Nz) — order [u, v, w, cc]
-    mu1    : (4, Nx, Ny, Nz)
-    nx, ny, nz : (4, Nx, Ny, Nz) — unit normals
+    mu0, mu1  : (N, *spatial) Heaviside and delta weightings.
+    normals   : (nx, ny) for 2-D or (nx, ny, nz) for 3-D, each (N, *spatial).
     """
-    stacked = torch.stack([sdf_u, sdf_v, sdf_w, sdf_cc])  # (4, Nx, Ny, Nz)
+    ndim = sdf_stack.ndim - 1          # number of spatial dims
+    dims = list(range(1, 1 + ndim))
+    spacing = [h] * ndim
 
-    # ---- Heaviside mu functions (batched) ----
-    deps = stacked / eps
+    deps = sdf_stack / eps
     s = torch.sin(torch.pi * deps)
     c = torch.cos(torch.pi * deps)
     mu0 = torch.where(
-        stacked <= -eps, torch.zeros_like(stacked),
-        torch.where(stacked >= eps, torch.ones_like(stacked),
+        sdf_stack <= -eps, torch.zeros_like(sdf_stack),
+        torch.where(sdf_stack >= eps, torch.ones_like(sdf_stack),
                     0.5 * (1 + deps + s / torch.pi)))
     mu1 = torch.where(
-        torch.abs(stacked) >= eps, torch.zeros_like(stacked),
+        torch.abs(sdf_stack) >= eps, torch.zeros_like(sdf_stack),
         eps * (0.25 - (0.5 * deps) ** 2
                - (s * deps + (1 + c) / torch.pi) / (2 * torch.pi)))
 
-    # ---- Unit normals from SDF gradient (batched) ----
-    gx, gy, gz = torch.gradient(stacked, spacing=[h, h, h],
-                                dim=[1, 2, 3], edge_order=2)
-    norm = torch.sqrt(gx ** 2 + gy ** 2 + gz ** 2)
+    grads = torch.gradient(sdf_stack, spacing=spacing, dim=dims, edge_order=2)
+    norm = torch.sqrt(sum(g ** 2 for g in grads))
     inv_norm = torch.where(norm > 0, norm.reciprocal(), torch.zeros_like(norm))
-    nx = gx * inv_norm
-    ny = gy * inv_norm
-    nz = gz * inv_norm
+    return (mu0, mu1) + tuple(g * inv_norm for g in grads)
+
+
+try:
+    _mu_normals_batched_compiled = torch.compile(
+        _mu_normals_batched, mode="reduce-overhead")
+except Exception:
+    _mu_normals_batched_compiled = _mu_normals_batched
+
+
+def _mu_normals_batched_2d(sdf_u, sdf_v, sdf_cc, h, eps):
+    """2-D wrapper: [u, v, cc] → (mu0, mu1, nx, ny), each (3, Nx, Ny)."""
+    mu0, mu1, nx, ny = _mu_normals_batched(
+        torch.stack([sdf_u, sdf_v, sdf_cc]), h, eps)
+    return mu0, mu1, nx, ny
+
+
+try:
+    _mu_normals_batched_2d_compiled = torch.compile(
+        _mu_normals_batched_2d, mode="reduce-overhead")
+except Exception:
+    _mu_normals_batched_2d_compiled = _mu_normals_batched_2d
+
+
+def _mu_normals_batched_3d(sdf_u, sdf_v, sdf_w, sdf_cc, h, eps):
+    """3-D wrapper: [u, v, w, cc] → (mu0, mu1, nx, ny, nz), each (4, Nx, Ny, Nz)."""
+    mu0, mu1, nx, ny, nz = _mu_normals_batched(
+        torch.stack([sdf_u, sdf_v, sdf_w, sdf_cc]), h, eps)
     return mu0, mu1, nx, ny, nz
 
 
@@ -1046,7 +1075,7 @@ class BodyAnalytical(Body):
         # ``self.cnt`` traces the (offset) zero-level set of the local
         # SDF.  Expand its extent by ``band_margin`` so that any point
         # outside the AABB is guaranteed to lie outside the BDIM band
-        # of width ``~4*eps`` (Lipschitz-1 SDF ⇒ |sdf| ≥ band_margin
+        # of width ``2*eps`` (Lipschitz-1 SDF ⇒ |sdf| ≥ band_margin
         # outside the box).  Outside the band the body contributes
         # only ``mu=1`` (pure fluid), so cells outside the AABB can be
         # safely skipped during the per-body running-min union — they
@@ -1055,7 +1084,7 @@ class BodyAnalytical(Body):
         # here" for downstream BDIM/forces stages.
         # An explicit ``local_aabb`` provided in the constructor wins.
         if self.local_aabb is None:
-            band_margin = 4.0 * float(self.eps) + 4.0 * float(self.h)
+            band_margin = float(self.eps) + 4.0 * float(self.h)
             cnt_lo = self.cnt.min(dim=1).values - band_margin
             cnt_hi = self.cnt.max(dim=1).values + band_margin
             self.local_aabb = torch.stack([cnt_lo, cnt_hi], dim=0)
@@ -1115,7 +1144,7 @@ class BodyAnalytical(Body):
         # body-local centred grid built from ``self.x/y/z``, run
         # marching cubes at level ``self.h`` to extract the (offset)
         # zero-level set, and use the min/max of the surface vertices
-        # plus ``band_margin = 4*eps + 4*h`` as the AABB.  Lipschitz-1
+        # plus ``band_margin = eps + 4*h`` as the AABB.  Lipschitz-1
         # SDF ⇒ |sdf| ≥ band_margin outside that box, so cells outside
         # contribute only ``mu=1`` (pure fluid) and can be safely
         # skipped during the per-body running-min union.
@@ -1153,7 +1182,7 @@ class BodyAnalytical(Body):
                 vy = ynp[0] + verts[:, 1] * (ynp[1] - ynp[0])
                 vz = znp[0] + verts[:, 2] * (znp[1] - znp[0])
 
-                band_margin = 4.0 * float(self.eps) + 4.0 * float(self.h)
+                band_margin = float(self.eps) + 4.0 * float(self.h)
                 cnt_lo = torch.tensor(
                     [float(vx.min()) - band_margin,
                      float(vy.min()) - band_margin,
@@ -2529,9 +2558,9 @@ class MultiAnimatBodies(Body):
                         # The SDF callables (capsule_3d / sdUnevenCapsule) are
                         # defined at the local origin (0,0[,0]), so the AABB
                         # is derived purely from the geometric parameters plus
-                        # the BDIM band margin (4*eps + 4*h).
+                        # the BDIM band margin (eps + 4*h).
                         _h_grid = float(x[1].item() - x[0].item())
-                        _bm = 4.0 * float(eps) + 4.0 * _h_grid
+                        _bm = float(eps) + 4.0 * _h_grid
                         _r = float(radius.item())
                         _l = float(length.item())
                         if self.ndim == 3:
@@ -2604,7 +2633,7 @@ class MultiAnimatBodies(Body):
                         # centred at the body origin — AABB is just [-r-bm, r+bm]
                         # per axis.
                         _h_grid = float(x[1].item() - x[0].item())
-                        _bm = 4.0 * float(eps) + 4.0 * _h_grid
+                        _bm = float(eps) + 4.0 * _h_grid
                         _r = float(radius.item())
                         if self.ndim == 3:
                             _local_aabb = torch.tensor(
@@ -2669,7 +2698,7 @@ class MultiAnimatBodies(Body):
                         # box / box_3d SDF is centred at origin with half-extents
                         # (xb, yb[, zb]) = half_size — AABB is [-hs-bm, hs+bm].
                         _h_grid = float(x[1].item() - x[0].item())
-                        _bm = 4.0 * float(eps) + 4.0 * _h_grid
+                        _bm = float(eps) + 4.0 * _h_grid
                         _hs = half_size.detach().cpu().tolist()
                         if self.ndim == 3:
                             _local_aabb = torch.tensor(

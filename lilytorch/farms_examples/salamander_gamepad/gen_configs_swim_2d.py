@@ -17,20 +17,20 @@ class SimConfig(BaseSimConfig):
         )
 
         # ── Hardware ──────────────────────────────────────────────────
-        self.use_bdim     = True
-        self.use_gpu      = True
-        self.compute_sdf  = True
-        self.wall_height  = 0.02
-        self.water_height = 0.015
-        self.stack_folder = "salamander"
+        self.use_bdim       = True
+        self.water_drag     = False
+        self.water_buoyancy = False
+        self.use_gpu        = True
+        self.compute_sdf    = True
+        self.stack_folder   = "salamander"
 
         self.solver_method    = "kernel"
         self.poisson_compile  = True
         # self.compile_adv_diff = True
         # self.compile_forces   = True
-        # self.compile_sdf      = True
+        self.compile_sdf      = True
 
-        self.bdim_physics = {"solref": [-0.1, -1]}
+        self.bdim_physics = {"solref": [-100000.0, -2000.0]}
 
         # ── Animats ───────────────────────────────────────────────────
         self.animats_pars = [
@@ -64,33 +64,34 @@ class SimConfig(BaseSimConfig):
 
         # ── Physics ───────────────────────────────────────────────────
         self.poisson_method    = "fft"
+        self.poisson_bc_type   = "neumann"
         self.timestep          = 0.01
         self.convection_method = "implicit"
         self.n_iterations      = 80001
         self.save_frames       = False
-        self.num_sub_steps     = 1
+        self.num_sub_steps     = 5
 
         # ── MuJoCo ───────────────────────────────────────────────────
         self.visual_scale = 10.0
         self.extent       = 10.0
 
         # ── Arena ────────────────────────────────────────────────────
-        self.wall_thickness = 0.03
+        self.wall_thickness = 0.01
         self.wall_height    = 0.03
+        self.water_height   = 0.015
         self.arena_pose     = [0, 0, 0, 0, 0, 0]
-        self.water_drag     = False
-        self.water_buoyancy = False
+
 
         # ── BDIM solver ──────────────────────────────────────────────
         # self.convexify    = True
         self.bdim_dt      = self.timestep
         self.bdim_nt      = self.n_iterations
-        self.rho_body     = 900.0
+        self.rho_body     = 1000.0
 
         # ── Boundary conditions ──────────────────────────────────────
-        self.bc_type_u   = ["N", "N", "D", "D"]
+        self.bc_type_u   = ["D", "D", "D", "D"]
         self.bc_values_u = [0, 0, 0, 0]
-        self.bc_type_v   = ["D", "D", "N", "N"]
+        self.bc_type_v   = ["D", "D", "D", "D"]
         self.bc_values_v = [0, 0, 0, 0]
 
         # ── Body ─────────────────────────────────────────────────────
@@ -99,7 +100,6 @@ class SimConfig(BaseSimConfig):
         # self.n_samples    = (2000, 2000)
 
     # ── Hooks ─────────────────────────────────────────────────────────
-
     def customize_joint_initials(self, joints_list):
         for joint in joints_list:
             if joint['name'] in ("joint_leg_0_L_0", "joint_leg_0_R_0"):
@@ -111,8 +111,19 @@ class SimConfig(BaseSimConfig):
             if joint['name'] in ("joint_leg_1_L_3", "joint_leg_1_R_3"):
                 joint['initial'] = [-np.pi / 4, 0.0]
 
-    # ── Extensions ────────────────────────────────────────────────────
+    def customize_morphology_links(self, links_list, animat_i, animat_pars, index):
+        del animat_i, animat_pars, index
 
+        for link in links_list:
+            link["density"] = self.rho_body
+            link["friction"] = [0.7, 0.0, 0.0]
+            link["fluid_interaction"] = True
+            if "foot" not in link["name"] and "leg" not in link["name"]:
+                link["drag_coefficients"] = [[-0.001, -0.3, -0.3], [-1e-9, -1e-9, -1e-9]]
+            else:
+                link["drag_coefficients"] = [[-0.001, -0.01, -0.01], [-1e-9, -1e-9, -1e-9]]
+
+    # ── Extensions ────────────────────────────────────────────────────
     def extra_simulation_extensions(self, output_folder):
         extensions = []
 

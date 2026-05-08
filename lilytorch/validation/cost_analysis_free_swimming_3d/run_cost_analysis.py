@@ -1157,31 +1157,29 @@ if _h is not None:
     # AABB).  That is by design — the BDIM μ₀ smoothed Heaviside only
     # depends on SDF values within a few ``h`` of the surface, so the
     # solver never evaluates the true distance far from any body.  For
-    # plotting we mask the sentinel band and clip the colour range to a
-    # few cells so the visualisation shows the meaningful narrow band.
+    # Show the full union AABB: grey = _FAR (outside all AABBs),
+    # colour = within the union AABB.
     dx_cell = (cfg.xmax - cfg.xmin) / args.Nx
-    _FAR_SENTINEL = 1e3                         # any value ≥ this is sentinel
-    sdf_clip = 8.0 * dx_cell                    # display range: ±8 cells
-    sdf_plot = np.ma.masked_where(
-        np.abs(sdf_slice) > _FAR_SENTINEL, sdf_slice
-    )
+    _FAR_SENTINEL = 1e3
+    sdf_plot = np.ma.masked_where(np.abs(sdf_slice) >= _FAR_SENTINEL, sdf_slice)
+    non_far = sdf_slice[np.abs(sdf_slice) < _FAR_SENTINEL]
+    _vabs = float(np.percentile(np.abs(non_far), 98)) if non_far.size else 1.0
     cmap_sdf = plt.get_cmap("coolwarm").copy()
-    cmap_sdf.set_bad(color="#dddddd")           # light grey = "far from body"
+    cmap_sdf.set_bad(color="#dddddd")           # grey = _FAR / outside AABB
     im_sdf = axes[1, 1].imshow(
         sdf_plot.T, origin="lower", aspect="equal", cmap=cmap_sdf,
         extent=[x_1d[0], x_1d[-1], y_1d[0], y_1d[-1]],
-        vmin=-sdf_clip, vmax=sdf_clip,
+        vmin=-_vabs, vmax=_vabs,
     )
-    # Contour at SDF=0: restrict to non-sentinel region
     sdf_for_contour = np.where(
-        np.abs(sdf_slice) > _FAR_SENTINEL, np.nan, sdf_slice
+        np.abs(sdf_slice) >= _FAR_SENTINEL, np.nan, sdf_slice
     )
     axes[1, 1].contour(
         x_1d, y_1d, sdf_for_contour.T, levels=[0], colors="k",
         linewidths=0.8, linestyles="-",
     )
     axes[1, 1].set_title(
-        f"SDF (narrow-band, ±{sdf_clip*1e3:.1f} mm ≈ ±8·h)", fontsize=10,
+        f"SDF union (grey=_FAR, ±{_vabs*1e3:.1f} mm p98)", fontsize=10,
     )
     axes[1, 1].set_xlabel("x (m)", fontsize=8)
     axes[1, 1].set_ylabel("y (m)", fontsize=8)

@@ -14,6 +14,8 @@ from tqdm import tqdm
 
 from lilytorch.src.adv_diff import AdvDiffSolver
 from lilytorch.src.body import (body_from_yaml, _StaggeredGrids,
+                                _mu_normals_batched_2d,
+                                _mu_normals_batched_2d_compiled,
                                 _mu_normals_batched_3d,
                                 _mu_normals_batched_3d_compiled)
 from lilytorch.src import operations as ops
@@ -812,7 +814,7 @@ class FluidSolver(PlottingMixin):
 
     def inside(self, x):
         """
-        Return True if all elements in x are inside the domain
+        Return True if all bodies' x are inside the domain
         """
         in_xy = torch.logical_and(
             x[:,0]>self.xmin,
@@ -1551,22 +1553,36 @@ class FluidSolver(PlottingMixin):
     #   mu / normal recomputation  (shared by step_() and BDIMhandler)
     # ------------------------------------------------------------------
     def _recompute_mu_normals_2d(self):
-        """Recompute mu0/mu1 and normals on u- and v-staggered grids (2-D).
+        """Recompute mu0/mu1 and normals on u-, v-, and CC grids (2-D).
 
+        Processes all three grids [u, v, cc] in a single batched pass,
+        optionally using the torch.compile-d kernel when _compile_sdf is set.
         CC-grid normals are cached here and reused by forces_method2.
         """
         comp = self.composite_body
 
-        (self.mu0_all_u, self.mu1_all_u) = comp.mu_funcs(comp.sdf_val_u)
-        (self.normal_x_u, self.normal_y_u) = comp.compute_normals(comp.sdf_val_u)
+        if self._compile_sdf:
+            _fn = _mu_normals_batched_2d_compiled
+            mu0, mu1, nx, ny = _fn(
+                comp.sdf_val_u, comp.sdf_val_v, comp.sdf_val,
+                comp.h, comp.eps,
+            )
+            mu0, mu1 = mu0.clone(), mu1.clone()
+            nx, ny   = nx.clone(),  ny.clone()
+        else:
+            mu0, mu1, nx, ny = _mu_normals_batched_2d(
+                comp.sdf_val_u, comp.sdf_val_v, comp.sdf_val,
+                comp.h, comp.eps,
+            )
 
-        (self.mu0_all_v, self.mu1_all_v) = comp.mu_funcs(comp.sdf_val_v)
-        (self.normal_x_v, self.normal_y_v) = comp.compute_normals(comp.sdf_val_v)
+        self.mu0_all_u, self.mu1_all_u = mu0[0], mu1[0]
+        self.normal_x_u, self.normal_y_u = nx[0], ny[0]
 
-        # CC-grid mu0 — used for smooth pressure masking in forces_method2
-        (self.mu0_all, self.mu1_all) = comp.mu_funcs(comp.sdf_val)
+        self.mu0_all_v, self.mu1_all_v = mu0[1], mu1[1]
+        self.normal_x_v, self.normal_y_v = nx[1], ny[1]
 
-        (self.normal_x, self.normal_y) = comp.compute_normals(comp.sdf_val)
+        self.mu0_all, self.mu1_all = mu0[2], mu1[2]
+        self.normal_x, self.normal_y = nx[2], ny[2]
 
     def _recompute_mu_normals_3d(self):
         """Recompute mu0/mu1 and normals on all staggered + CC grids (3-D).
@@ -1654,51 +1670,33 @@ class FluidSolver(PlottingMixin):
             self._mu_pack[:, ui0:ui1, uj0:uj1, uk0:uk1] = stacked
             return
 
-        if self._compile_sdf:
-            # ── Batched + compiled path: all 4 grids in one fused pass ──
-            _fn = _mu_normals_batched_3d_compiled
-            mu0, mu1, nx, ny, nz = _fn(
-                comp.sdf_val_u, comp.sdf_val_v, comp.sdf_val_w,
-                comp.sdf_val, comp.h, comp.eps,
-            )
-            # Clone outputs — CUDA graph buffers are overwritten on
-            # subsequent replays, so we must detach before storing.
-            mu0, mu1 = mu0.clone(), mu1.clone()
-            nx, ny, nz = nx.clone(), ny.clone(), nz.clone()
 
-            # Unstack: order is [u, v, w, cc]
-            self.mu0_all_u, self.mu1_all_u = mu0[0], mu1[0]
-            self.normal_x_u, self.normal_y_u, self.normal_z_u = nx[0], ny[0], nz[0]
+        # ── Batched + compiled path: all 4 grids in one fused pass ──
+        _fn = _mu_normals_batched_3d_compiled
+        mu0, mu1, nx, ny, nz = _fn(
+            comp.sdf_val_u, comp.sdf_val_v, comp.sdf_val_w,
+            comp.sdf_val, comp.h, comp.eps,
+        )
+        # Clone outputs — CUDA graph buffers are overwritten on
+        # subsequent replays, so we must detach before storing.
+        mu0, mu1 = mu0.clone(), mu1.clone()
+        nx, ny, nz = nx.clone(), ny.clone(), nz.clone()
 
-            self.mu0_all_v, self.mu1_all_v = mu0[1], mu1[1]
-            self.normal_x_v, self.normal_y_v, self.normal_z_v = nx[1], ny[1], nz[1]
+        # Unstack: order is [u, v, w, cc]
+        self.mu0_all_u, self.mu1_all_u = mu0[0], mu1[0]
+        self.normal_x_u, self.normal_y_u, self.normal_z_u = nx[0], ny[0], nz[0]
 
-            self.mu0_all_w, self.mu1_all_w = mu0[2], mu1[2]
-            self.normal_x_w, self.normal_y_w, self.normal_z_w = nx[2], ny[2], nz[2]
+        self.mu0_all_v, self.mu1_all_v = mu0[1], mu1[1]
+        self.normal_x_v, self.normal_y_v, self.normal_z_v = nx[1], ny[1], nz[1]
 
-            self.mu0_all, self.mu1_all = mu0[3], mu1[3]
-            self.m_m0_all = 1 - self.mu0_all
-            self.normal_x, self.normal_y, self.normal_z = nx[3], ny[3], nz[3]
-        else:
-            # ── Eager path: 4 × individual mu_funcs + compute_normals ──
-            # u-grid
-            (self.mu0_all_u, self.mu1_all_u) = comp.mu_funcs(comp.sdf_val_u)
-            (self.normal_x_u, self.normal_y_u, self.normal_z_u) = comp.compute_normals(comp.sdf_val_u)
+        self.mu0_all_w, self.mu1_all_w = mu0[2], mu1[2]
+        self.normal_x_w, self.normal_y_w, self.normal_z_w = nx[2], ny[2], nz[2]
 
-            # v-grid
-            (self.mu0_all_v, self.mu1_all_v) = comp.mu_funcs(comp.sdf_val_v)
-            (self.normal_x_v, self.normal_y_v, self.normal_z_v) = comp.compute_normals(comp.sdf_val_v)
+        self.mu0_all, self.mu1_all = mu0[3], mu1[3]
+        self.m_m0_all = 1 - self.mu0_all
+        self.normal_x, self.normal_y, self.normal_z = nx[3], ny[3], nz[3]
 
-            # w-grid
-            (self.mu0_all_w, self.mu1_all_w) = comp.mu_funcs(comp.sdf_val_w)
-            (self.normal_x_w, self.normal_y_w, self.normal_z_w) = comp.compute_normals(comp.sdf_val_w)
-
-            # CC-grid (p) — cached for forces_method2_3d
-            (self.mu0_all, self.mu1_all) = comp.mu_funcs(comp.sdf_val)
-            self.m_m0_all = 1 - self.mu0_all
-            (self.normal_x, self.normal_y, self.normal_z) = comp.compute_normals(comp.sdf_val)
-
-    def _recompute_mu_normals(self):
+    def _recompute_normals(self):
         """Dispatch to 2-D or 3-D mu/normal recomputation."""
         if self.ndim == 2:
             self._recompute_mu_normals_2d()
@@ -1978,7 +1976,7 @@ class FluidSolver(PlottingMixin):
 
     def step_(self, u, v, p, iteration, t, w_vel=None):
         self.composite_body.update(t, iteration, dt=self.dt)
-        self._recompute_mu_normals()
+        self._recompute_normals()
         self.sdf_properties = [[self.composite_body.sdf_val_u]]
 
         if self.ndim == 2:

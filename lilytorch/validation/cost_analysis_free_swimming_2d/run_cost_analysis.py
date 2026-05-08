@@ -959,19 +959,22 @@ if _h is not None:
     _format_ax(axes[1, 0], "Vorticity $\\omega_z$",    omega_z, "RdBu_r", symmetric=True)
 
     _FAR_SENTINEL = 1e3
-    sdf_clip = 8.0 * dx
-    sdf_plot = np.ma.masked_where(np.abs(sdf) > _FAR_SENTINEL, sdf)
+    # Mask only the _FAR sentinel — show the full union AABB extent.
+    # Grey = outside all body AABBs (_FAR); colour = within union AABB.
+    sdf_plot = np.ma.masked_where(np.abs(sdf) >= _FAR_SENTINEL, sdf)
+    non_far = sdf[np.abs(sdf) < _FAR_SENTINEL]
+    _vabs = float(np.percentile(np.abs(non_far), 98)) if non_far.size else 1.0
     cmap_sdf = plt.get_cmap("coolwarm").copy()
-    cmap_sdf.set_bad(color="#dddddd")
+    cmap_sdf.set_bad(color="#dddddd")  # grey = _FAR / outside AABB
     im_sdf = axes[1, 1].imshow(
         sdf_plot.T, origin="lower", aspect="auto", cmap=cmap_sdf,
         extent=[x_1d[0], x_1d[-1], y_1d[0], y_1d[-1]],
-        vmin=-sdf_clip, vmax=sdf_clip,
+        vmin=-_vabs, vmax=_vabs,
     )
-    sdf_for_contour = np.where(np.abs(sdf) > _FAR_SENTINEL, np.nan, sdf)
+    sdf_for_contour = np.where(np.abs(sdf) >= _FAR_SENTINEL, np.nan, sdf)
     axes[1, 1].contour(x_1d, y_1d, sdf_for_contour.T, levels=[0], colors="k",
                        linewidths=0.8, linestyles="-")
-    axes[1, 1].set_title(f"SDF (±{sdf_clip*1e3:.1f} mm ≈ ±8·h)", fontsize=10)
+    axes[1, 1].set_title(f"SDF union (grey=_FAR, ±{_vabs*1e3:.1f} mm p98)", fontsize=10)
     axes[1, 1].set_xlabel("x (m)", fontsize=8)
     axes[1, 1].set_ylabel("y (m)", fontsize=8)
     axes[1, 1].tick_params(labelsize=7)

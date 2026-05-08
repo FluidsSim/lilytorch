@@ -13,7 +13,7 @@ class SimConfig(BaseSimConfig):
 
         self.use_bdim       = True
         self.headless       = False
-        self.compute_sdf    = False
+        self.compute_sdf    = True
         self.wall_thickness = 0.3
         self.wall_height    = 0.3
 

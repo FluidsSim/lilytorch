@@ -322,6 +322,20 @@ class BDIMhandler:
                     for axis_name in axis_names
                 )
                 body._stream_meta = self._make_stream_meta(F, axes)
+                # The precomputed SDF table axes may be padded much larger than
+                # the BDIM band (legacy tables sometimes have hundreds of mm of
+                # padding).  Store a tight contour-based AABB so that
+                # _update_*_streaming_multi uses it for world-space cell selection
+                # rather than the full padded table bounds.
+                cnt = getattr(body, 'cnt', None)
+                if cnt is not None and cnt.numel() > 2:
+                    _bm = float(getattr(body, 'eps', 0.05)) + 4.0 * h
+                    body._stream_meta['local_aabb_lo'] = (
+                        cnt.min(dim=1).values - _bm
+                    )
+                    body._stream_meta['local_aabb_hi'] = (
+                        cnt.max(dim=1).values + _bm
+                    )
                 n_tabulated += 1
                 continue
             # Analytical bodies with callable SDFs
@@ -445,11 +459,12 @@ class BDIMhandler:
            analytical bodies (auto-derived from the contour with a
            safety margin in :meth:`BodyAnalytical._initialize_2d`,
            or user-provided).
-        2. ``body.sdf.x`` / ``body.sdf.y`` — for mesh bodies whose
-           local SDF table carries axis tensors.  These tables are
-           padded with a ``_FAR`` sentinel outside the mesh, so
-           ``grid_sample(padding_mode='border')`` returns far-field
-           values for queries beyond the AABB.
+        2. ``body.cnt`` — contour-based tight AABB for mesh bodies.
+           The precomputed SDF table (``body.sdf.x/y``) may be padded
+           far beyond the BDIM band; the contour gives the actual body
+           outline and yields a much tighter bound.
+        3. ``body.sdf.x`` / ``body.sdf.y`` — fallback to full SDF
+           table bounds when no contour is available.
 
         Returns ``None`` when neither source is available; callers
         should then use the full-grid evaluation path.
@@ -459,6 +474,17 @@ class BDIMhandler:
         local_aabb = getattr(body, 'local_aabb', None)
         if local_aabb is not None:
             return local_aabb[0], local_aabb[1]
+        # Contour-based tight AABB: use body surface + eps+4h margin.
+        cnt = getattr(body, 'cnt', None)
+        if cnt is not None and cnt.numel() > 2:
+            eps_m = float(getattr(body, 'eps', 0.05))
+            h_m   = float(getattr(body, 'h',   0.001))
+            band  = eps_m + 4.0 * h_m
+            lo = cnt.min(dim=1).values - band
+            hi = cnt.max(dim=1).values + band
+            return lo, hi
+        # Last resort: full SDF-table bounds (may be very large for old
+        # precomputed mesh SDF tables with excessive padding).
         if (hasattr(body, 'sdf')
                 and hasattr(body.sdf, 'x')
                 and hasattr(body.sdf, 'y')):
@@ -479,7 +505,7 @@ class BDIMhandler:
 
         Supports both mesh bodies (``body.sdf`` exposes ``x``/``y``
         axis tensors) and analytical bodies that provide an explicit
-        ``body.local_aabb`` covering the SDF band of width ``~4*eps``
+        ``body.local_aabb`` covering the SDF band of width ``~2*eps``
         (auto-derived from ``body.cnt`` for :class:`BodyAnalytical`
         instances; user-supplied otherwise).  When neither AABB
         descriptor is available, returns ``None`` and the caller falls
@@ -532,10 +558,10 @@ class BDIMhandler:
 
         1. ``body.local_aabb`` — an explicit ``(2, 3)`` tensor for
            analytical or otherwise tabulated bodies that provide an
-           AABB covering their SDF band of width ``~4*eps``.  For
+           AABB covering their SDF band of width ``~2*eps``.  For
            ``BodyAnalytical`` this is auto-derived during
            ``_initialize_3d`` via marching cubes on the local SDF
-           plus a ``4*eps + 4*h`` Lipschitz-safe margin (mirrors the
+           plus a ``eps + 4*h`` Lipschitz-safe margin (mirrors the
            2-D contour-based path); users may still override it via
            the constructor when they want a tighter / looser bound.
         2. ``body.sdf.x`` / ``body.sdf.y`` / ``body.sdf.z`` — for mesh
@@ -1351,36 +1377,50 @@ class BDIMhandler:
         # ──────────────────────────────────────────────────────────
         # Build / refresh the static per-body packed device tensors once.
         # ──────────────────────────────────────────────────────────
+        _use_combined_cache = fs._use_kernels
+
         sm = getattr(comp, '_kernel_static_2d', None)
         if sm is None:
-            F_chunks  = []
-            bx_chunks = []; by_chunks = []
-            F_off  = [0]; bx_off = [0]; by_off = [0]
-            shapes = []
-            meta   = []
+            F_chunks = []
+            F_off    = [0]
+            shapes   = []
+            meta     = []
+            if not _use_combined_cache:
+                bx_chunks = []; by_chunks = []
+                bx_off = [0]; by_off = [0]
             for body in comp.bodies:
                 m = body._stream_meta
                 F_chunks.append(m['F'].flatten())
-                bx_chunks.append(m['bx']); by_chunks.append(m['by'])
-                F_off.append(F_off[-1]   + m['F'].numel())
-                bx_off.append(bx_off[-1] + m['bx'].numel())
-                by_off.append(by_off[-1] + m['by'].numel())
+                F_off.append(F_off[-1] + m['F'].numel())
                 shapes.append([m['F'].shape[0], m['F'].shape[1]])
                 meta.append([
                     m['bx0'], m['by0'],
                     m['bx_last'], m['by_last'],
                     m['inv_dx'], m['inv_dy'], m['inv_vol'],
                 ])
+                if not _use_combined_cache:
+                    bx_chunks.append(m['bx']); by_chunks.append(m['by'])
+                    bx_off.append(bx_off[-1] + m['bx'].numel())
+                    by_off.append(by_off[-1] + m['by'].numel())
+            F_flat = torch.cat(F_chunks).contiguous()
             sm = {
-                'F_flat':       torch.cat(F_chunks).contiguous(),
-                'F_offsets':    torch.tensor(F_off,  dtype=torch.int64, device=self.device),
-                'bx_flat':      torch.cat(bx_chunks).contiguous(),
-                'bx_offsets':   torch.tensor(bx_off, dtype=torch.int64, device=self.device),
-                'by_flat':      torch.cat(by_chunks).contiguous(),
-                'by_offsets':   torch.tensor(by_off, dtype=torch.int64, device=self.device),
-                'body_shapes':  torch.tensor(shapes, dtype=torch.int64, device=self.device),
-                'body_meta':    torch.tensor(meta,   dtype=self.dtype,  device=self.device),
+                'F_flat':      F_flat,
+                'F_offsets':   torch.tensor(F_off,  dtype=torch.int64, device=self.device),
+                'body_shapes': torch.tensor(shapes, dtype=torch.int64, device=self.device),
+                'body_meta':   torch.tensor(meta,   dtype=self.dtype,  device=self.device),
             }
+            if not _use_combined_cache:
+                sm['bx_flat']    = torch.cat(bx_chunks).contiguous()
+                sm['bx_offsets'] = torch.tensor(bx_off, dtype=torch.int64, device=self.device)
+                sm['by_flat']    = torch.cat(by_chunks).contiguous()
+                sm['by_offsets'] = torch.tensor(by_off, dtype=torch.int64, device=self.device)
+                del bx_chunks, by_chunks
+            # De-duplicate per-body body-template SDFs into the packed F_flat buffer.
+            for b, body in enumerate(comp.bodies):
+                m = body._stream_meta
+                Mx, My = shapes[b]
+                m['F'] = F_flat[F_off[b]:F_off[b + 1]].view(Mx, My)
+            del F_chunks
             comp._kernel_static_2d = sm
 
         # ──────────────────────────────────────────────────────────
@@ -1391,7 +1431,6 @@ class BDIMhandler:
             body_ids = torch.tensor(
                 [(int(a), int(l)) for (a, l) in comp.body_ids],
                 dtype=torch.int64,
-                device=self.device,
             )
             # 2-D bodies have no `local_pose` concept (rigid-body links
             # in the 2-D projection collapse to identity local frames),
@@ -1402,14 +1441,22 @@ class BDIMhandler:
             sdf_hi = torch.empty((B, 2), dtype=self.dtype, device=self.device)
             for b, body in enumerate(comp.bodies):
                 m = body._stream_meta  # set for both mesh and analytical bodies
-                sdf_lo[b] = torch.stack((
-                    torch.as_tensor(m['bx0'], dtype=self.dtype, device=self.device),
-                    torch.as_tensor(m['by0'], dtype=self.dtype, device=self.device),
-                ))
-                sdf_hi[b] = torch.stack((
-                    torch.as_tensor(m['bx_last'], dtype=self.dtype, device=self.device),
-                    torch.as_tensor(m['by_last'], dtype=self.dtype, device=self.device),
-                ))
+                # Prefer the tight contour-based AABB (set by _init_interp for
+                # mesh bodies whose SDF table is padded far beyond the BDIM band).
+                if 'local_aabb_lo' in m:
+                    sdf_lo[b] = m['local_aabb_lo'].to(
+                        dtype=self.dtype, device=self.device)
+                    sdf_hi[b] = m['local_aabb_hi'].to(
+                        dtype=self.dtype, device=self.device)
+                else:
+                    sdf_lo[b] = torch.stack((
+                        torch.as_tensor(m['bx0'], dtype=self.dtype, device=self.device),
+                        torch.as_tensor(m['by0'], dtype=self.dtype, device=self.device),
+                    ))
+                    sdf_hi[b] = torch.stack((
+                        torch.as_tensor(m['bx_last'], dtype=self.dtype, device=self.device),
+                        torch.as_tensor(m['by_last'], dtype=self.dtype, device=self.device),
+                    ))
             kin_static = {
                 'body_ids':     body_ids,
                 'local_lt':     local_lt,
@@ -1424,7 +1471,7 @@ class BDIMhandler:
                 'gs':           torch.tensor(gs, dtype=torch.int64, device=self.device),
                 'pad':          3,
                 # numpy mirrors used by the host-side kinematics assembly
-                'body_ids_np':     body_ids.detach().cpu().numpy().copy(),
+                'body_ids_np':     body_ids.numpy(),
                 'local_center_np': (0.5 * (sdf_lo + sdf_hi)).detach().cpu().numpy().copy(),
                 'local_half_np':   (0.5 * (sdf_hi - sdf_lo)).detach().cpu().numpy().copy(),
                 'grid_origin_np':  np.array([
@@ -1529,18 +1576,24 @@ class BDIMhandler:
         interp_method = getattr(fs, '_sdf_interp_method', 0)
 
         if fs._use_kernels:
-            rho_bodies_buf = getattr(self, '_combined_rho_bodies_2d', None)
-            if rho_bodies_buf is None or rho_bodies_buf.shape[0] != B:
-                rho_bodies_buf = torch.full(
-                    (B,), fs.rho_body, device=self.device, dtype=self.dtype,
+            _rho_buf = getattr(comp, '_combined_rho_bodies', None)
+            if _rho_buf is None or _rho_buf.numel() != B \
+                    or _rho_buf.dtype != self.dtype \
+                    or _rho_buf.device != self.device:
+                _rho_buf = torch.empty(
+                    (B,), device=self.device, dtype=self.dtype,
                 )
-                self._combined_rho_bodies_2d = rho_bodies_buf
+                comp._combined_rho_bodies = _rho_buf
+            _rho_buf.fill_(float(fs.rho_body))
+            rho_bodies = _rho_buf
 
-            winning_rho_cc = getattr(self, '_winning_rho_cc_2d', None)
-            if winning_rho_cc is None or winning_rho_cc.shape != comp.sdf_val.shape:
-                winning_rho_cc = torch.empty_like(comp.sdf_val)
-                self._winning_rho_cc_2d = winning_rho_cc
-            winning_rho_cc.fill_(fs.rho)
+            _wrcc = getattr(comp, '_winning_rho_cc', None)
+            if _wrcc is None or _wrcc.shape != comp.sdf_val.shape:
+                _wrcc = torch.empty(
+                    comp.sdf_val.shape, device=self.device, dtype=self.dtype,
+                )
+            winning_rho_cc = _wrcc
+            winning_rho_cc.fill_(float(fs.rho))
 
             streaming_sdf_min_rho_2d_multi(
                 sm['F_flat'], sm['F_offsets'],
@@ -1550,17 +1603,28 @@ class BDIMhandler:
                 comp.sdf_val, comp.sdf_val_u, comp.sdf_val_v,
                 comp.body_u, comp.body_v,
                 interp_method,
-                rho_bodies_buf, winning_rho_cc,
+                rho_bodies, winning_rho_cc,
             )
 
             for b in range(B):
                 comp._sdf_sparse[b] = None
 
+            # Cache the union AABB so _recompute_mu_normals_2d can activate
+            # the sub-block path without reading _sdf_sparse.
+            _u_i0 = _u_j0 = 1 << 30
+            _u_i1 = _u_j1 = -1
+            for _i0, _i1, _j0, _j1 in aabbs_for_split:
+                if _i0 < _u_i0: _u_i0 = _i0
+                if _j0 < _u_j0: _u_j0 = _j0
+                if _i1 > _u_i1: _u_i1 = _i1
+                if _j1 > _u_j1: _u_j1 = _j1
+            comp._combined_union_aabb = (_u_i0, _u_i1, _u_j0, _u_j1)
+
             # 2-D force integration is computed in the later force stage by
             # the native Phase-D-only op, so the update stage only maintains
             # the memory-saving geometry state here.
             comp._combined_forces_out = None
-            comp._winning_rho_cc   = winning_rho_cc
+            comp._winning_rho_cc      = winning_rho_cc
 
             comp._kernel_step = {
                 'kin':      kin,

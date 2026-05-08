@@ -679,7 +679,7 @@ void streaming_sdf_min_rho_2d_multi_cuda(
     auto key_u_t  = at::empty({Ngrid}, key_opts);
     auto key_v_t  = at::empty({Ngrid}, key_opts);
 
-    AT_DISPATCH_FLOATING_TYPES_AND_HALF(F_flat.scalar_type(), "streaming_sdf_min_rho_2d_multi_cuda", [&] {
+    AT_DISPATCH_FLOATING_TYPES(F_flat.scalar_type(), "streaming_sdf_min_rho_2d_multi_cuda", [&] {
         const int initBlock = 256;
         const int initBlocks = (int)((Ngrid + initBlock - 1) / initBlock);
         streaming_sdf_init_keys_2d_kernel<scalar_t>
@@ -754,7 +754,7 @@ void streaming_sdf_forces_post_2d_cuda(
     const int nblocks = (int)((max_vol_per_body + blockSize - 1) / blockSize);
     const size_t shmem = (size_t)blockSize * 6 * sizeof(double);
 
-    AT_DISPATCH_FLOATING_TYPES_AND_HALF(F_flat.scalar_type(), "streaming_sdf_forces_post_2d_cuda", [&] {
+    AT_DISPATCH_FLOATING_TYPES(F_flat.scalar_type(), "streaming_sdf_forces_post_2d_cuda", [&] {
         streaming_sdf_forces_post_2d_kernel<scalar_t>
             <<<dim3(nblocks, B, 1), dim3(blockSize, 1, 1), shmem, stream>>>(
                 F_flat.data_ptr<scalar_t>(),
@@ -800,10 +800,9 @@ __global__ void apply_bcs_2d_kernel(
     const int N_neu,
     const int* __restrict__ dir_desc,
     const scalar_t* __restrict__ dir_val,
-    const int N_dir,
-    const int op_offset)
+    const int N_dir)
 {
-    const int op = blockIdx.y + op_offset;
+    const int op = blockIdx.y;
     const int total = N_neu + N_dir;
     if (op >= total) return;
 
@@ -876,44 +875,17 @@ void apply_bcs_2d_cuda(
     const int blockX = 256;
     const int gridX  = (int)((max_line_dim + blockX - 1) / blockX);
 
-    // Ops are serialized (one kernel launch per op on the same CUDA stream)
-    // because they can share ghost cells.  Two failure modes if launched in
-    // parallel via blockIdx.y:
-    //
-    //   Neumann–Neumann corner race: the x-axis op writes u[0,:] = u[1,:] and
-    //   the y-axis op writes u[:,0] = u[:,1] simultaneously, so u[0,0] has an
-    //   undefined winner.  Under sequential application the second op reads the
-    //   already-updated slice, so u[0,0] ends up holding the diagonal interior
-    //   value u_orig[1,1] (axis-0 runs first: u[0,1] ← u_orig[1,1]; axis-1
-    //   then reads that: u[0,0] ← u[0,1] = u_orig[1,1]).
-    //
-    //   Neumann–Dirichlet override race: a Neumann op and a subsequent Dirichlet
-    //   op that targets the same face must not overlap — the Dirichlet value
-    //   must win.
-    //
-    // Corner ghost cells (e.g. u[0,0]) are never read by interior 5-point
-    // stencils, so their exact value is physically irrelevant.  Many solvers
-    // leave corners untouched; this implementation writes a diagonal-interior
-    // value as a side-effect of the sequential application order, which is kept
-    // for exact reproducibility of the CPU serial-loop reference.
+    // All ops launched in a single kernel with blockIdx.y as the op index,
+    // matching apply_bcs_3d.  Corner ghost cells (e.g. u[0,0]) are never
+    // read by interior stencils, so concurrent writes to corners are harmless.
     AT_DISPATCH_FLOATING_TYPES(u.scalar_type(), "apply_bcs_2d_cuda", [&] {
-        const int* neu_p = (N_neu > 0) ? neu_desc.data_ptr<int>() : nullptr;
-        const int* dir_p = (N_dir > 0) ? dir_desc.data_ptr<int>() : nullptr;
-        const scalar_t* dir_val_p =
-            (N_dir > 0) ? dir_val.data_ptr<scalar_t>() : nullptr;
-
-        scalar_t* u_p = u.data_ptr<scalar_t>();
-        scalar_t* v_p = v.data_ptr<scalar_t>();
-        const int64_t* sh_p = shapes.data_ptr<int64_t>();
-
-        for (int op = 0; op < total; ++op) {
-            apply_bcs_2d_kernel<scalar_t>
-                <<<dim3(gridX, 1, 1), dim3(blockX, 1, 1), 0, stream>>>(
-                    u_p, v_p, sh_p,
-                    neu_p, N_neu,
-                    dir_p, dir_val_p, N_dir,
-                    op);
-        }
+        apply_bcs_2d_kernel<scalar_t>
+            <<<dim3(gridX, total, 1), dim3(blockX, 1, 1), 0, stream>>>(
+                u.data_ptr<scalar_t>(), v.data_ptr<scalar_t>(),
+                shapes.data_ptr<int64_t>(),
+                (N_neu > 0) ? neu_desc.data_ptr<int>() : nullptr, N_neu,
+                (N_dir > 0) ? dir_desc.data_ptr<int>() : nullptr,
+                (N_dir > 0) ? dir_val.data_ptr<scalar_t>() : nullptr, N_dir);
     });
 }
 

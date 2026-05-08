@@ -33,50 +33,6 @@
 
 namespace lilytorch_kernels {
 
-template <typename scalar_t>
-__device__ __forceinline__ scalar_t trilinear_sample_border(
-    const scalar_t* __restrict__ F,
-    const scalar_t* __restrict__ bx,
-    const scalar_t* __restrict__ by,
-    const scalar_t* __restrict__ bz,
-    const int Mx, const int My, const int Mz,
-    const scalar_t bx0, const scalar_t by0, const scalar_t bz0,
-    const scalar_t bx_last, const scalar_t by_last, const scalar_t bz_last,
-    const scalar_t inv_dx, const scalar_t inv_dy, const scalar_t inv_dz,
-    const scalar_t inv_vol,
-    scalar_t xq, scalar_t yq, scalar_t zq)
-{
-    xq = max(bx0, min(xq, bx_last));
-    yq = max(by0, min(yq, by_last));
-    zq = max(bz0, min(zq, bz_last));
-
-    int ix = (int)floor((xq - bx0) * inv_dx);
-    int iy = (int)floor((yq - by0) * inv_dy);
-    int iz = (int)floor((zq - bz0) * inv_dz);
-    ix = max(0, min(ix, Mx - 2));
-    iy = max(0, min(iy, My - 2));
-    iz = max(0, min(iz, Mz - 2));
-    const int ixp = ix + 1, iyp = iy + 1, izp = iz + 1;
-
-    const scalar_t wx0 = bx[ixp] - xq, wx1 = xq - bx[ix];
-    const scalar_t wy0 = by[iyp] - yq, wy1 = yq - by[iy];
-    const scalar_t wz0 = bz[izp] - zq, wz1 = zq - bz[iz];
-
-    const int s2 = Mz;
-    const int s1 = My * Mz;
-
-    return (
-        wx0 * wy0 * wz0 * F[ix  * s1 + iy  * s2 + iz ]
-      + wx0 * wy0 * wz1 * F[ix  * s1 + iy  * s2 + izp]
-      + wx0 * wy1 * wz0 * F[ix  * s1 + iyp * s2 + iz ]
-      + wx0 * wy1 * wz1 * F[ix  * s1 + iyp * s2 + izp]
-      + wx1 * wy0 * wz0 * F[ixp * s1 + iy  * s2 + iz ]
-      + wx1 * wy0 * wz1 * F[ixp * s1 + iy  * s2 + izp]
-      + wx1 * wy1 * wz0 * F[ixp * s1 + iyp * s2 + iz ]
-      + wx1 * wy1 * wz1 * F[ixp * s1 + iyp * s2 + izp]
-    ) * inv_vol;
-}
-
 // =====================================================================
 //  Trilinear sample on a UNIFORM body grid.
 //
@@ -569,39 +525,105 @@ __global__ void streaming_sdf_forces_post_3d_kernel(
 
             const int im1 = (i > 0)       ? i-1 : 0;
             const int ip1 = (i+1 < Ngx)   ? i+1 : i;
+            const int im2 = (i > 1)       ? i-2 : 0;
+            const int ip2 = (i+2 < Ngx)   ? i+2 : (Ngx - 1);
             const int jm1 = (j > 0)       ? j-1 : 0;
             const int jp1 = (j+1 < Ngy)   ? j+1 : j;
+            const int jm2 = (j > 1)       ? j-2 : 0;
+            const int jp2 = (j+2 < Ngy)   ? j+2 : (Ngy - 1);
             const int km1 = (k > 0)       ? k-1 : 0;
             const int kp1 = (k+1 < Ngz)   ? k+1 : k;
-            const scalar_t u_ijk = u_prev[(i   * Ngy + j) * Ngz + k];
-            const scalar_t u_ip1 = u_prev[(ip1 * Ngy + j) * Ngz + k];
-            const scalar_t dudx  = (u_ip1 - u_ijk) * inv_h;
-            const scalar_t v_ijk = v_prev[(i * Ngy + j   ) * Ngz + k];
-            const scalar_t v_jp1 = v_prev[(i * Ngy + jp1 ) * Ngz + k];
-            const scalar_t dvdy  = (v_jp1 - v_ijk) * inv_h;
-            const scalar_t w_ijk = w_prev[(i * Ngy + j) * Ngz + k   ];
-            const scalar_t w_kp1 = w_prev[(i * Ngy + j) * Ngz + kp1 ];
-            const scalar_t dwdz  = (w_kp1 - w_ijk) * inv_h;
-            const scalar_t u_cc_jp1 = (scalar_t)0.5 * (u_prev[(i*Ngy+jp1)*Ngz+k] + u_prev[(ip1*Ngy+jp1)*Ngz+k]);
+            const int km2 = (k > 1)       ? k-2 : 0;
+            const int kp2 = (k+2 < Ngz)   ? k+2 : (Ngz - 1);
+
+            // Normal derivatives: forward diff; backward at upper boundary
+            scalar_t dudx;
+            if (i + 1 < Ngx) dudx = (u_prev[(ip1*Ngy+j)*Ngz+k] - u_prev[(i*Ngy+j)*Ngz+k]) * inv_h;
+            else              dudx = (u_prev[(i*Ngy+j)*Ngz+k]   - u_prev[(im1*Ngy+j)*Ngz+k]) * inv_h;
+            scalar_t dvdy;
+            if (j + 1 < Ngy) dvdy = (v_prev[(i*Ngy+jp1)*Ngz+k] - v_prev[(i*Ngy+j)*Ngz+k]) * inv_h;
+            else              dvdy = (v_prev[(i*Ngy+j)*Ngz+k]   - v_prev[(i*Ngy+jm1)*Ngz+k]) * inv_h;
+            scalar_t dwdz;
+            if (k + 1 < Ngz) dwdz = (w_prev[(i*Ngy+j)*Ngz+kp1] - w_prev[(i*Ngy+j)*Ngz+k]) * inv_h;
+            else              dwdz = (w_prev[(i*Ngy+j)*Ngz+k]   - w_prev[(i*Ngy+j)*Ngz+km1]) * inv_h;
+
+            // dudy: O(h²) one-sided at j boundaries; u staggered in x → CC: 0.5*(u[i,j]+u[i+1,j])
+            const scalar_t u_cc_jm2 = (scalar_t)0.5 * (u_prev[(i*Ngy+jm2)*Ngz+k] + u_prev[(ip1*Ngy+jm2)*Ngz+k]);
             const scalar_t u_cc_jm1 = (scalar_t)0.5 * (u_prev[(i*Ngy+jm1)*Ngz+k] + u_prev[(ip1*Ngy+jm1)*Ngz+k]);
-            const scalar_t dudy = (u_cc_jp1 - u_cc_jm1) * (scalar_t)0.5 * inv_h;
-            const scalar_t u_cc_kp1 = (scalar_t)0.5 * (u_prev[(i*Ngy+j)*Ngz+kp1] + u_prev[(ip1*Ngy+j)*Ngz+kp1]);
+            const scalar_t u_cc_j0  = (scalar_t)0.5 * (u_prev[(i*Ngy+j  )*Ngz+k] + u_prev[(ip1*Ngy+j  )*Ngz+k]);
+            const scalar_t u_cc_jp1 = (scalar_t)0.5 * (u_prev[(i*Ngy+jp1)*Ngz+k] + u_prev[(ip1*Ngy+jp1)*Ngz+k]);
+            const scalar_t u_cc_jp2 = (scalar_t)0.5 * (u_prev[(i*Ngy+jp2)*Ngz+k] + u_prev[(ip1*Ngy+jp2)*Ngz+k]);
+            scalar_t dudy;
+            if (Ngy >= 3) {
+                if (j == 0)          dudy = ((scalar_t)(-3)*u_cc_j0 + (scalar_t)4*u_cc_jp1 - u_cc_jp2) * (scalar_t)0.5 * inv_h;
+                else if (j == Ngy-1) dudy = ((scalar_t)3*u_cc_j0 - (scalar_t)4*u_cc_jm1 + u_cc_jm2) * (scalar_t)0.5 * inv_h;
+                else                 dudy = (u_cc_jp1 - u_cc_jm1) * (scalar_t)0.5 * inv_h;
+            } else { dudy = (u_cc_jp1 - u_cc_jm1) * (scalar_t)0.5 * inv_h; }
+
+            // dudz: O(h²) one-sided at k boundaries
+            const scalar_t u_cc_km2 = (scalar_t)0.5 * (u_prev[(i*Ngy+j)*Ngz+km2] + u_prev[(ip1*Ngy+j)*Ngz+km2]);
             const scalar_t u_cc_km1 = (scalar_t)0.5 * (u_prev[(i*Ngy+j)*Ngz+km1] + u_prev[(ip1*Ngy+j)*Ngz+km1]);
-            const scalar_t dudz = (u_cc_kp1 - u_cc_km1) * (scalar_t)0.5 * inv_h;
-            const int jp1v = (j+1 < Ngy) ? j+1 : j;
-            const scalar_t v_cc_ip1 = (scalar_t)0.5 * (v_prev[(ip1*Ngy+j)*Ngz+k] + v_prev[(ip1*Ngy+jp1v)*Ngz+k]);
-            const scalar_t v_cc_im1 = (scalar_t)0.5 * (v_prev[(im1*Ngy+j)*Ngz+k] + v_prev[(im1*Ngy+jp1v)*Ngz+k]);
-            const scalar_t dvdx = (v_cc_ip1 - v_cc_im1) * (scalar_t)0.5 * inv_h;
-            const scalar_t v_cc_kp1 = (scalar_t)0.5 * (v_prev[(i*Ngy+j)*Ngz+kp1] + v_prev[(i*Ngy+jp1v)*Ngz+kp1]);
-            const scalar_t v_cc_km1 = (scalar_t)0.5 * (v_prev[(i*Ngy+j)*Ngz+km1] + v_prev[(i*Ngy+jp1v)*Ngz+km1]);
-            const scalar_t dvdz = (v_cc_kp1 - v_cc_km1) * (scalar_t)0.5 * inv_h;
-            const int kp1w = (k+1 < Ngz) ? k+1 : k;
-            const scalar_t w_cc_ip1 = (scalar_t)0.5 * (w_prev[(ip1*Ngy+j)*Ngz+k] + w_prev[(ip1*Ngy+j)*Ngz+kp1w]);
-            const scalar_t w_cc_im1 = (scalar_t)0.5 * (w_prev[(im1*Ngy+j)*Ngz+k] + w_prev[(im1*Ngy+j)*Ngz+kp1w]);
-            const scalar_t dwdx = (w_cc_ip1 - w_cc_im1) * (scalar_t)0.5 * inv_h;
-            const scalar_t w_cc_jp1 = (scalar_t)0.5 * (w_prev[(i*Ngy+jp1)*Ngz+k] + w_prev[(i*Ngy+jp1)*Ngz+kp1w]);
-            const scalar_t w_cc_jm1 = (scalar_t)0.5 * (w_prev[(i*Ngy+jm1)*Ngz+k] + w_prev[(i*Ngy+jm1)*Ngz+kp1w]);
-            const scalar_t dwdy = (w_cc_jp1 - w_cc_jm1) * (scalar_t)0.5 * inv_h;
+            const scalar_t u_cc_k0  = (scalar_t)0.5 * (u_prev[(i*Ngy+j)*Ngz+k  ] + u_prev[(ip1*Ngy+j)*Ngz+k  ]);
+            const scalar_t u_cc_kp1 = (scalar_t)0.5 * (u_prev[(i*Ngy+j)*Ngz+kp1] + u_prev[(ip1*Ngy+j)*Ngz+kp1]);
+            const scalar_t u_cc_kp2 = (scalar_t)0.5 * (u_prev[(i*Ngy+j)*Ngz+kp2] + u_prev[(ip1*Ngy+j)*Ngz+kp2]);
+            scalar_t dudz;
+            if (Ngz >= 3) {
+                if (k == 0)          dudz = ((scalar_t)(-3)*u_cc_k0 + (scalar_t)4*u_cc_kp1 - u_cc_kp2) * (scalar_t)0.5 * inv_h;
+                else if (k == Ngz-1) dudz = ((scalar_t)3*u_cc_k0 - (scalar_t)4*u_cc_km1 + u_cc_km2) * (scalar_t)0.5 * inv_h;
+                else                 dudz = (u_cc_kp1 - u_cc_km1) * (scalar_t)0.5 * inv_h;
+            } else { dudz = (u_cc_kp1 - u_cc_km1) * (scalar_t)0.5 * inv_h; }
+
+            // dvdx: O(h²) one-sided at i boundaries; v staggered in y → CC: 0.5*(v[i,j]+v[i,j+1])
+            const scalar_t v_cc_im2 = (scalar_t)0.5 * (v_prev[(im2*Ngy+j)*Ngz+k] + v_prev[(im2*Ngy+jp1)*Ngz+k]);
+            const scalar_t v_cc_im1 = (scalar_t)0.5 * (v_prev[(im1*Ngy+j)*Ngz+k] + v_prev[(im1*Ngy+jp1)*Ngz+k]);
+            const scalar_t v_cc_i0  = (scalar_t)0.5 * (v_prev[(i  *Ngy+j)*Ngz+k] + v_prev[(i  *Ngy+jp1)*Ngz+k]);
+            const scalar_t v_cc_ip1 = (scalar_t)0.5 * (v_prev[(ip1*Ngy+j)*Ngz+k] + v_prev[(ip1*Ngy+jp1)*Ngz+k]);
+            const scalar_t v_cc_ip2 = (scalar_t)0.5 * (v_prev[(ip2*Ngy+j)*Ngz+k] + v_prev[(ip2*Ngy+jp1)*Ngz+k]);
+            scalar_t dvdx;
+            if (Ngx >= 3) {
+                if (i == 0)          dvdx = ((scalar_t)(-3)*v_cc_i0 + (scalar_t)4*v_cc_ip1 - v_cc_ip2) * (scalar_t)0.5 * inv_h;
+                else if (i == Ngx-1) dvdx = ((scalar_t)3*v_cc_i0 - (scalar_t)4*v_cc_im1 + v_cc_im2) * (scalar_t)0.5 * inv_h;
+                else                 dvdx = (v_cc_ip1 - v_cc_im1) * (scalar_t)0.5 * inv_h;
+            } else { dvdx = (v_cc_ip1 - v_cc_im1) * (scalar_t)0.5 * inv_h; }
+
+            // dvdz: O(h²) one-sided at k boundaries
+            const scalar_t v_cc_km2 = (scalar_t)0.5 * (v_prev[(i*Ngy+j)*Ngz+km2] + v_prev[(i*Ngy+jp1)*Ngz+km2]);
+            const scalar_t v_cc_km1 = (scalar_t)0.5 * (v_prev[(i*Ngy+j)*Ngz+km1] + v_prev[(i*Ngy+jp1)*Ngz+km1]);
+            const scalar_t v_cc_k0  = (scalar_t)0.5 * (v_prev[(i*Ngy+j)*Ngz+k  ] + v_prev[(i*Ngy+jp1)*Ngz+k  ]);
+            const scalar_t v_cc_kp1 = (scalar_t)0.5 * (v_prev[(i*Ngy+j)*Ngz+kp1] + v_prev[(i*Ngy+jp1)*Ngz+kp1]);
+            const scalar_t v_cc_kp2 = (scalar_t)0.5 * (v_prev[(i*Ngy+j)*Ngz+kp2] + v_prev[(i*Ngy+jp1)*Ngz+kp2]);
+            scalar_t dvdz;
+            if (Ngz >= 3) {
+                if (k == 0)          dvdz = ((scalar_t)(-3)*v_cc_k0 + (scalar_t)4*v_cc_kp1 - v_cc_kp2) * (scalar_t)0.5 * inv_h;
+                else if (k == Ngz-1) dvdz = ((scalar_t)3*v_cc_k0 - (scalar_t)4*v_cc_km1 + v_cc_km2) * (scalar_t)0.5 * inv_h;
+                else                 dvdz = (v_cc_kp1 - v_cc_km1) * (scalar_t)0.5 * inv_h;
+            } else { dvdz = (v_cc_kp1 - v_cc_km1) * (scalar_t)0.5 * inv_h; }
+
+            // dwdx: O(h²) one-sided at i boundaries; w staggered in z → CC: 0.5*(w[i,j,k]+w[i,j,k+1])
+            const scalar_t w_cc_im2 = (scalar_t)0.5 * (w_prev[(im2*Ngy+j)*Ngz+k] + w_prev[(im2*Ngy+j)*Ngz+kp1]);
+            const scalar_t w_cc_im1 = (scalar_t)0.5 * (w_prev[(im1*Ngy+j)*Ngz+k] + w_prev[(im1*Ngy+j)*Ngz+kp1]);
+            const scalar_t w_cc_i0  = (scalar_t)0.5 * (w_prev[(i  *Ngy+j)*Ngz+k] + w_prev[(i  *Ngy+j)*Ngz+kp1]);
+            const scalar_t w_cc_ip1 = (scalar_t)0.5 * (w_prev[(ip1*Ngy+j)*Ngz+k] + w_prev[(ip1*Ngy+j)*Ngz+kp1]);
+            const scalar_t w_cc_ip2 = (scalar_t)0.5 * (w_prev[(ip2*Ngy+j)*Ngz+k] + w_prev[(ip2*Ngy+j)*Ngz+kp1]);
+            scalar_t dwdx;
+            if (Ngx >= 3) {
+                if (i == 0)          dwdx = ((scalar_t)(-3)*w_cc_i0 + (scalar_t)4*w_cc_ip1 - w_cc_ip2) * (scalar_t)0.5 * inv_h;
+                else if (i == Ngx-1) dwdx = ((scalar_t)3*w_cc_i0 - (scalar_t)4*w_cc_im1 + w_cc_im2) * (scalar_t)0.5 * inv_h;
+                else                 dwdx = (w_cc_ip1 - w_cc_im1) * (scalar_t)0.5 * inv_h;
+            } else { dwdx = (w_cc_ip1 - w_cc_im1) * (scalar_t)0.5 * inv_h; }
+
+            // dwdy: O(h²) one-sided at j boundaries
+            const scalar_t w_cc_jm2 = (scalar_t)0.5 * (w_prev[(i*Ngy+jm2)*Ngz+k] + w_prev[(i*Ngy+jm2)*Ngz+kp1]);
+            const scalar_t w_cc_jm1 = (scalar_t)0.5 * (w_prev[(i*Ngy+jm1)*Ngz+k] + w_prev[(i*Ngy+jm1)*Ngz+kp1]);
+            const scalar_t w_cc_j0  = (scalar_t)0.5 * (w_prev[(i*Ngy+j  )*Ngz+k] + w_prev[(i*Ngy+j  )*Ngz+kp1]);
+            const scalar_t w_cc_jp1 = (scalar_t)0.5 * (w_prev[(i*Ngy+jp1)*Ngz+k] + w_prev[(i*Ngy+jp1)*Ngz+kp1]);
+            const scalar_t w_cc_jp2 = (scalar_t)0.5 * (w_prev[(i*Ngy+jp2)*Ngz+k] + w_prev[(i*Ngy+jp2)*Ngz+kp1]);
+            scalar_t dwdy;
+            if (Ngy >= 3) {
+                if (j == 0)          dwdy = ((scalar_t)(-3)*w_cc_j0 + (scalar_t)4*w_cc_jp1 - w_cc_jp2) * (scalar_t)0.5 * inv_h;
+                else if (j == Ngy-1) dwdy = ((scalar_t)3*w_cc_j0 - (scalar_t)4*w_cc_jm1 + w_cc_jm2) * (scalar_t)0.5 * inv_h;
+                else                 dwdy = (w_cc_jp1 - w_cc_jm1) * (scalar_t)0.5 * inv_h;
+            } else { dwdy = (w_cc_jp1 - w_cc_jm1) * (scalar_t)0.5 * inv_h; }
 
             const scalar_t xs = nu_rho_val * (2*dudx*nx + (dudy+dvdx)*ny + (dudz+dwdx)*nz);
             const scalar_t ys = nu_rho_val * ((dvdx+dudy)*nx + 2*dvdy*ny + (dvdz+dwdy)*nz);
