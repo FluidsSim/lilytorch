@@ -266,12 +266,6 @@ def _mu_normals_batched(sdf_stack, h, eps):
     return (mu0, mu1) + tuple(g * inv_norm for g in grads)
 
 
-try:
-    _mu_normals_batched_compiled = torch.compile(
-        _mu_normals_batched, mode="reduce-overhead")
-except Exception:
-    _mu_normals_batched_compiled = _mu_normals_batched
-
 
 # Module-level cache:  (data_ptr_x, data_ptr_y, data_ptr_z) -> _StaggeredGrids
 _grid_cache: dict[tuple, _StaggeredGrids] = {}

@@ -15,6 +15,7 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <cub/block/block_reduce.cuh>
 #include "packed_key.cuh"
 
 namespace lilytorch_kernels {
@@ -298,7 +299,7 @@ __global__ void streaming_sdf_min_rho_2d_multi_kernel(
               (unsigned long long)pack_sdf_body_key(s_v, b));
 }
 
-template <typename scalar_t>
+template <typename scalar_t, int BLOCK_SIZE>
 __global__ void streaming_sdf_forces_post_2d_kernel(
     const scalar_t* __restrict__ F_flat,
     const int64_t*  __restrict__ F_offsets,
@@ -560,29 +561,19 @@ __global__ void streaming_sdf_forces_post_2d_kernel(
         }
     }
 
-    extern __shared__ double sdata[];
-    const int tid = threadIdx.x;
-    const int bdim = blockDim.x;
+    // Block-wide sum via CUB BlockReduce (warp shuffles + 1 shmem slot per
+    // warp).  Replaces the previous 12 KB / block manual reduction; new
+    // shmem footprint is the BlockReduce TempStorage (~128 B), lifting
+    // the occupancy cap on consumer SMs.
+    using BlockReduceD = cub::BlockReduce<double, BLOCK_SIZE>;
+    __shared__ typename BlockReduceD::TempStorage tmp;
     const double h2_d = (double)h2;
-
 #pragma unroll
-    for (int c = 0; c < 6; ++c)
-        sdata[c * bdim + tid] = acc[c];
-    __syncthreads();
-
-    for (int s = bdim >> 1; s > 0; s >>= 1) {
-        if (tid < s) {
-#pragma unroll
-            for (int c = 0; c < 6; ++c)
-                sdata[c * bdim + tid] += sdata[c * bdim + tid + s];
-        }
+    for (int c = 0; c < 6; ++c) {
+        const double s = BlockReduceD(tmp).Sum(acc[c]);
+        if (threadIdx.x == 0)
+            atomicAdd(&out[b*6 + c], s * h2_d);
         __syncthreads();
-    }
-
-    if (tid == 0) {
-#pragma unroll
-        for (int c = 0; c < 6; ++c)
-            atomicAdd(&out[b*6 + c], sdata[c * bdim] * h2_d);
     }
 }
 
@@ -750,36 +741,49 @@ void streaming_sdf_forces_post_2d_cuda(
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
     const int Ngx = (int)gx.numel();
     const int Ngy = (int)gy.numel();
-    const int blockSize = 256;
+
+    // Adaptive blockSize matching the streaming_sdf_min_rho launcher; CUB's
+    // BlockReduce takes block size as a compile-time template parameter,
+    // so we fan out to one of the three configured sizes.
+    const int blockSize = (max_vol_per_body <= 128)  ? 32
+                        : (max_vol_per_body <= 4096) ? 128
+                                                     : 256;
     const int nblocks = (int)((max_vol_per_body + blockSize - 1) / blockSize);
-    const size_t shmem = (size_t)blockSize * 6 * sizeof(double);
 
     AT_DISPATCH_FLOATING_TYPES(F_flat.scalar_type(), "streaming_sdf_forces_post_2d_cuda", [&] {
-        streaming_sdf_forces_post_2d_kernel<scalar_t>
-            <<<dim3(nblocks, B, 1), dim3(blockSize, 1, 1), shmem, stream>>>(
-                F_flat.data_ptr<scalar_t>(),
-                F_offsets.data_ptr<int64_t>(),
-                body_shapes.data_ptr<int64_t>(),
-                body_meta.data_ptr<scalar_t>(),
-                kin.data_ptr<scalar_t>(),
-                aabb_lo.data_ptr<int64_t>(),
-                aabb_dim.data_ptr<int64_t>(),
-                gx.data_ptr<scalar_t>(),
-                gy.data_ptr<scalar_t>(),
-                Ngx, Ngy,
-                sdf_cc.data_ptr<scalar_t>(),
-                (int)interp_method,
-                u_prev.data_ptr<scalar_t>(),
-                v_prev.data_ptr<scalar_t>(),
-                p_prev.data_ptr<scalar_t>(),
-                nu_rho_field.data_ptr<scalar_t>(),
-                (int64_t)nu_rho_field.numel(),
-                (scalar_t)(1.0 / h_grid),
-                (scalar_t)eps_body,
-                (scalar_t)eps_solver,
-                (scalar_t)h2,
-                (int)delta_order,
-                out.data_ptr<double>());
+        auto launch = [&](auto block_size_ic) {
+            constexpr int BS = decltype(block_size_ic)::value;
+            streaming_sdf_forces_post_2d_kernel<scalar_t, BS>
+                <<<dim3(nblocks, B, 1), dim3(BS, 1, 1), 0, stream>>>(
+                    F_flat.data_ptr<scalar_t>(),
+                    F_offsets.data_ptr<int64_t>(),
+                    body_shapes.data_ptr<int64_t>(),
+                    body_meta.data_ptr<scalar_t>(),
+                    kin.data_ptr<scalar_t>(),
+                    aabb_lo.data_ptr<int64_t>(),
+                    aabb_dim.data_ptr<int64_t>(),
+                    gx.data_ptr<scalar_t>(),
+                    gy.data_ptr<scalar_t>(),
+                    Ngx, Ngy,
+                    sdf_cc.data_ptr<scalar_t>(),
+                    (int)interp_method,
+                    u_prev.data_ptr<scalar_t>(),
+                    v_prev.data_ptr<scalar_t>(),
+                    p_prev.data_ptr<scalar_t>(),
+                    nu_rho_field.data_ptr<scalar_t>(),
+                    (int64_t)nu_rho_field.numel(),
+                    (scalar_t)(1.0 / h_grid),
+                    (scalar_t)eps_body,
+                    (scalar_t)eps_solver,
+                    (scalar_t)h2,
+                    (int)delta_order,
+                    out.data_ptr<double>());
+        };
+        switch (blockSize) {
+            case 32:  launch(std::integral_constant<int, 32>{}); break;
+            case 128: launch(std::integral_constant<int, 128>{}); break;
+            default:  launch(std::integral_constant<int, 256>{}); break;
+        }
     });
 }
 
@@ -934,11 +938,19 @@ void interpolate_2d_cuda(
     const int blockSize = (N <= 128) ? 32 : (N <= 4096) ? 128 : 256;
     const int numBlocks = (N + blockSize - 1) / blockSize;
 
+    // Bind temporaries to named locals: ``.contiguous().to(...)`` may return
+    // a fresh tensor whose storage is freed at the end of the full-expression
+    // unless held.  The CUDA launch is asynchronous, so a dangling pointer
+    // could be read by the kernel after the storage has been recycled.
+    auto F_c  = F.contiguous();
+    auto xq_c = xq.contiguous().to(F.scalar_type());
+    auto yq_c = yq.contiguous().to(F.scalar_type());
+
     AT_DISPATCH_FLOATING_TYPES(F.scalar_type(), "interpolate_2d_cuda", [&] {
         interpolate_2d_kernel<scalar_t><<<numBlocks, blockSize, 0, stream>>>(
-            F.contiguous().data_ptr<scalar_t>(),
-            xq.contiguous().to(F.scalar_type()).data_ptr<scalar_t>(),
-            yq.contiguous().to(F.scalar_type()).data_ptr<scalar_t>(),
+            F_c.data_ptr<scalar_t>(),
+            xq_c.data_ptr<scalar_t>(),
+            yq_c.data_ptr<scalar_t>(),
             N,
             (int)Mx, (int)My,
             (scalar_t)bx0, (scalar_t)by0,

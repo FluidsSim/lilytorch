@@ -14,14 +14,17 @@ from tqdm import tqdm
 
 from lilytorch.src.adv_diff import AdvDiffSolver
 from lilytorch.src.body import (body_from_yaml, _StaggeredGrids,
-                                _mu_normals_batched,
-                                _mu_normals_batched_compiled)
+                                _mu_normals_batched)
 from lilytorch.src import operations as ops
-from lilytorch.src import plotting
 from lilytorch.src.plotting import PlottingMixin
 from lilytorch.src.poisson_fft import PoissonSolverFFT
 from lilytorch.src.poisson_mult import PoissonSolver
 from lilytorch.util.yaml_operations import pyobject2yaml
+from lilytorch.src.forces import (
+    _forces_shared, _forces_body_batch,
+    _forces_body_integrate_3d,
+)
+from lilytorch.src import forces, extras
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +33,8 @@ logger = logging.getLogger(__name__)
 # Flow diagnostics — energy, enstrophy, divergence, CFL monitoring
 # ======================================================================
 
+
+# unused for now
 class FlowDiagnostics:
     """Lightweight monitor for kinetic energy, enstrophy, max-divergence,
     and CFL number.  Records scalar time-series and optionally warns when
@@ -166,15 +171,6 @@ class FlowDiagnostics:
                     f.create_dataset(name, data=arr)
         logger.info("Saved flow diagnostics to %s", h5_path)
 
-# Module-level force kernels and method implementations are now
-# in lilytorch/src/forces.py (item #8). Re-import the kernels so
-# torch.compile setup in FluidSolver.__init__ continues to work
-# unchanged via the module-local names.
-from lilytorch.src.forces import (
-    _forces_shared, _forces_body_batch,
-    _forces_body_integrate_3d,
-)
-from lilytorch.src import forces, extras
 
 def _build_fs_free_dicts(ndim):
     """Build the ``_FS_FREE_AFTER_BDIM`` / ``_FS_FREE_AFTER_VAR_DENS`` dicts
@@ -564,6 +560,11 @@ class FluidSolver(PlottingMixin):
                     "sdf_interp_method int form must be 0 (trilinear) or "
                     f"1 (triquadratic); got {self._sdf_interp_method}"
                 )
+
+        self._mu_normals_dyn_compiled = torch.compile(
+                _mu_normals_batched, dynamic=True,
+            )
+
         # Compiled bindings for the dim-agnostic force kernels.
         # ``_forces_shared`` and ``_forces_body_batch`` take tuple-of-tensor
         # inputs; Dynamo guards on tuple length (``len(vels)``), so calling
@@ -591,9 +592,6 @@ class FluidSolver(PlottingMixin):
             # crop path (sub-block shape varies as bodies move).  Built
             # from the dim-agnostic ``_mu_normals_batched`` helper so a
             # single compiled artifact serves both 2-D and 3-D.
-            self._mu_normals_dyn_compiled = torch.compile(
-                _mu_normals_batched, dynamic=True,
-            )
             print(
                 "  [compile] forces_shared + forces_body_batch compiled "
                 "(reduce-overhead, dim-agnostic)"
@@ -603,12 +601,6 @@ class FluidSolver(PlottingMixin):
             self._forces_body_batch_compiled = _forces_body_batch
             self._forces_shared_dyn_compiled = _forces_shared
             self._forces_body_compiled       = _forces_body_integrate_3d
-            self._mu_normals_dyn_compiled = _mu_normals_batched
-
-        # ---- optional torch.compile for SDF / mu / normals ----
-        self._compile_sdf = solver.get("compile_sdf", False)
-        if self._compile_sdf and self.device.type == "cuda":
-            print("  [compile] SDF rotation, staggering, mu+normals compiled (reduce-overhead)")
 
         # =============  poisson solver =============
         self.poisson_method = solver.get("poisson_method", "multigrid")
@@ -1731,12 +1723,7 @@ class FluidSolver(PlottingMixin):
             return
 
         # ── Full-grid path: batched + compiled, all grids in one pass ──
-        if self._compile_sdf:
-            out = _mu_normals_batched_compiled(sdf_stack, comp.h, comp.eps)
-            # Clone — CUDA graph buffers are overwritten on subsequent replays.
-            out = tuple(t.clone() for t in out)
-        else:
-            out = _mu_normals_batched(sdf_stack, comp.h, comp.eps)
+        out = self._mu_normals_dyn_compiled(sdf_stack, comp.h, comp.eps)
         mu0, mu1 = out[0], out[1]
         normals = out[2:]
 

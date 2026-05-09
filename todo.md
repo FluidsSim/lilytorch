@@ -167,3 +167,59 @@ Functions to merge:
 - If a step blows up (e.g. `torch.compile` retracing every step, perf regression, numerical drift), STOP, write a `BLOCKER-stepN.md` next to this file describing the failure mode, and wait for the user. Do not work around it silently.
 - Do not modify [FARMS_V2/](lilytorch/FARMS_V2/) — those are git submodules.
 - `forces_method2_3d` is bound onto `FluidSolver` via `forces_method2_3d = forces.forces_method2_3d` at [solver.py:914](lilytorch/src/solver.py#L914). Same pattern for the 2D method. Keep that binding mechanism after unification (rename target if needed).
+
+---
+
+## Kernel parity audit (2D vs 3D, CPU + CUDA)
+
+Audit of [streaming_sdf.cu](lilytorch/src/kernels/csrc/cuda/streaming_sdf.cu), [streaming_sdf_2d.cu](lilytorch/src/kernels/csrc/cuda/streaming_sdf_2d.cu), [streaming_sdf_cpu.cpp](lilytorch/src/kernels/csrc/streaming_sdf_cpu.cpp), [streaming_sdf_cpu_2d.cpp](lilytorch/src/kernels/csrc/streaming_sdf_cpu_2d.cpp). Operators (`min_rho`, `forces_post`, `apply_bcs`, `interpolate`) match in shape/intent across 2D and 3D, but several correctness and performance gaps remain. Items are listed in fix-order.
+
+### Correctness (must fix before perf work)
+
+- [x] **K1 — 3D CPU `forces_post` ignores `delta_order`.** *(fixed; CPU↔CUDA parity verified at ~1e-15 rel-err on delta_order∈{1,2}.)*
+  [streaming_sdf_cpu.cpp:647](lilytorch/src/kernels/csrc/streaming_sdf_cpu.cpp#L647) declared the parameter; the function body never branched on it. CUDA-3D, CUDA-2D, and CPU-2D all apply the `(1/|∇sdf|)` correction when `delta_order == 2`. CPU-3D and CUDA-3D therefore returned different forces on the same input.
+  **Fix landed:** ported the `delta_order==2` block from [streaming_sdf.cu:644-657](lilytorch/src/kernels/csrc/cuda/streaming_sdf.cu#L644-L657) — 6 extra body-SDF samples at `bxq ± r··*h` then divide both deltas by clamped `|∇|`.
+
+- [x] **K2 — 2D CPU vs 2D CUDA `delta_order==2` use different gradient sources.** *(fixed; CPU↔CUDA parity verified at ~1e-15 rel-err.)*
+  CUDA-2D ([streaming_sdf_2d.cu:524-543](lilytorch/src/kernels/csrc/cuda/streaming_sdf_2d.cu#L524-L543)) re-sampled body SDF at `bxq ± r··*h`. CPU-2D used cached `sparse_buf` neighbors with one-sided diffs at AABB edges (`cx = 1.0` when `di==0` or `di==Ai-1`). Disagreed at AABB-edge cells when bodies are tightly fitted.
+  **Fix landed:** switched CPU-2D to resampling and dropped the two-pass `sparse_buf` design — single fused `at::parallel_for` now does cc-sample, band check, and (if `delta_order==2`) 4 extra resamples for `|∇|`. Closes K7 as well.
+
+- [x] **K3 — `interpolate_*` (CPU and CUDA) dangling-pointer pattern.** *(fixed; verified with non-contiguous fp32 strided views into a fp64 grid on both CPU and CUDA, max|diff|=0 vs eager-cast reference.)*
+  [streaming_sdf.cu:1083-1085](lilytorch/src/kernels/csrc/cuda/streaming_sdf.cu#L1083-L1085), [streaming_sdf_2d.cu:939-941](lilytorch/src/kernels/csrc/cuda/streaming_sdf_2d.cu#L939-L941), and the CPU equivalents called `xq.contiguous().to(F.scalar_type()).data_ptr<scalar_t>()`. The temporary tensor returned by `.to(...)` was destroyed at the next semicolon; the pointer dangled unless input was already contiguous and dtype-matched. CUDA worsened this — async kernel can read freed memory.
+  **Fix landed:** bound temporaries to named locals before reading `data_ptr` in all four sites (CPU 2D/3D + CUDA 2D/3D).
+
+### Performance parity
+
+- [x] **K4 — 3D CPU paths are not parallelized.** *(fixed; 8-thread bench shows forces_post ~5× faster, min_rho ~1.6× faster vs 1-thread; CPU↔CUDA parity preserved at ~1e-15 rel-err.)*
+  `streaming_sdf_min_rho_3d_multi_cpu` ([streaming_sdf_cpu.cpp:614](lilytorch/src/kernels/csrc/streaming_sdf_cpu.cpp#L614)) and `streaming_sdf_forces_post_3d_cpu` ([:711](lilytorch/src/kernels/csrc/streaming_sdf_cpu.cpp#L711)) iterated cells with plain `for`. Largest CPU-side perf gap.
+  **Fix landed:** wrapped both per-body cell loops in `at::parallel_for` (grain 1024 for min_rho, 2048 for forces). Forces uses a per-body `acc[12]` + `std::mutex` with thread-local `local12[12]` chunks — matches the 2-D pattern. min_rho needs no merge because each cell touches its own `g`. K8 (replace mutex with thread-local indexed array) tracked separately.
+
+- [ ] **K5 — 3D CUDA `forces_post` shared-memory pressure.**
+  [streaming_sdf.cu:883](lilytorch/src/kernels/csrc/cuda/streaming_sdf.cu#L883): `12 × 256 × 8 = 24 KB` per block. Caps occupancy at 2 blocks/SM on 48 KB-shmem devices.
+  **Fix:** warp-shuffle reduction (one shmem slot per warp = 768 B), or split into two passes (visc / pres) at 6 channels each.
+
+- [ ] **K6 — Forces kernels use fixed `blockSize = 256`.**
+  `min_rho` adapts (`<=128 → 32`, `<=4096 → 128`, else 256). Forces don't ([streaming_sdf.cu:881](lilytorch/src/kernels/csrc/cuda/streaming_sdf.cu#L881), [streaming_sdf_2d.cu:753](lilytorch/src/kernels/csrc/cuda/streaming_sdf_2d.cu#L753)). For small bodies most threads are masked; reduction still runs over 256 lanes of zeros.
+  **Fix:** copy the adaptive sizing from `min_rho`.
+
+- [x] **K7 — CPU-2D `sparse_buf` allocated/freed per body per call.** *(fixed as a side effect of K2 — the entire two-pass design is gone.)*
+
+- [ ] **K8 — CPU-2D forces uses `std::mutex` for per-body merge.**
+  [streaming_sdf_cpu_2d.cpp:611-799](lilytorch/src/kernels/csrc/streaming_sdf_cpu_2d.cpp#L611-L799). Functional but slower than thread-local accumulators indexed by `at::get_thread_num()` and summed after the parallel_for.
+
+### Minor
+
+- [ ] **K9 — 2D CUDA `apply_bcs_2d` lacks `is_cuda` TORCH_CHECK.**
+  3D version checks at [streaming_sdf.cu:991](lilytorch/src/kernels/csrc/cuda/streaming_sdf.cu#L991); 2D ([streaming_sdf_2d.cu:861-867](lilytorch/src/kernels/csrc/cuda/streaming_sdf_2d.cu#L861-L867)) checks contiguity / dtype only.
+
+- [ ] **K10 — Dirichlet branch in `apply_bcs_*_kernel` writes dead `src_lin = 0`.**
+  Harmless. Can drop or `[[maybe_unused]]`.
+
+### Out of scope (noted, not actionable without restructuring)
+
+- 3D `min_rho` allocates 4 × `Ngrid` × int64 of scratch ([streaming_sdf.cu:803-807](lilytorch/src/kernels/csrc/cuda/streaming_sdf.cu#L803-L807)) — 512 MB at 256³. Inherent to the parallel-B atomicMin design.
+- `s_cc` is sampled twice per body per cell (once in `min_rho`, again in `forces_post`). True fusion would require restructuring the pipeline because `forces_post` needs the **decoded union** `sdf_cc` from all bodies.
+
+### Recommended order
+
+K1 → K3 → K4 → K2 (kills K7) → K5 + K6 → K8 → K9, K10. Each is a self-contained patch; K1 and K3 are correctness and should land first.

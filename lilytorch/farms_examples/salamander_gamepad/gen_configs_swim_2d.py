@@ -24,7 +24,7 @@ class SimConfig(BaseSimConfig):
         self.compute_sdf    = True
         self.stack_folder   = "salamander"
 
-        self.solver_method    = "kernel"
+        self.solver_method    = "python"
         self.poisson_compile  = True
         # self.compile_adv_diff = True
         # self.compile_forces   = True
