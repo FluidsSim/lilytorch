@@ -16,6 +16,7 @@ class SimConfig(BaseSimConfig):
         self.compute_sdf    = True
         self.wall_thickness = 0.3
         self.wall_height    = 0.3
+        self.convexify      = True
 
         self.poisson_method = "fft"
 

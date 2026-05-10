@@ -144,7 +144,6 @@ class BaseSimConfig:
         self.poisson_compile         = False
         self.compile_adv_diff        = False
         self.compile_forces          = False
-        self.compile_sdf             = False
         self.smagorinsky_cs          = 0.0
         self.carreau                 = None   # dict with keys: nu_0, nu_inf, lam, n
         self.sponge                  = None   # dict with keys: width, strength
@@ -691,7 +690,6 @@ class BaseSimConfig:
             ("poisson_bc_type",         self.poisson_bc_type),
             ("compile_adv_diff",        self.compile_adv_diff),
             ("compile_forces",          self.compile_forces),
-            ("compile_sdf",             self.compile_sdf),
             ("solver_method",           self.solver_method),
             ("dtype",                   self.dtype),
             ("zero_pressure_inside",    self.zero_pressure_inside),

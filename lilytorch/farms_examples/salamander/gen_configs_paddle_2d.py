@@ -47,7 +47,6 @@ class SimConfig(BaseSimConfig):
         self.poisson_compile  = False
         self.compile_adv_diff = False
         self.compile_forces   = True
-        self.compile_sdf      = True
 
 
         # ── 2-D grid ─────────────────────────────────────────────────

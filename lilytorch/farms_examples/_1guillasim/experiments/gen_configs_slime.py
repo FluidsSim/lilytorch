@@ -103,7 +103,6 @@ class SimConfig(BaseSimConfig):
         self.poisson_bc_type         = "neumann"
         self.compile_adv_diff        = True
         self.compile_forces          = True
-        self.compile_sdf             = True
         self.poisson_compile         = True
 
         # # ── Boundary conditions (3-D, all no-slip Dirichlet) ────────

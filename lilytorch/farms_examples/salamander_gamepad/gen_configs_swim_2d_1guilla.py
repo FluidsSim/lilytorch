@@ -29,7 +29,6 @@ class SimConfig(BaseSimConfig):
         # self.poisson_compile  = True
         # self.compile_adv_diff = True
         # self.compile_forces   = True
-        # self.compile_sdf      = True
 
         # ── Animats ───────────────────────────────────────────────────
         self.animats_pars = [

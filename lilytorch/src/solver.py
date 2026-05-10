@@ -188,7 +188,6 @@ def _build_fs_free_dicts(ndim):
         for n in norms:
             after_bdim[f'normal_{n}_{a}'] = None
     after_bdim['mu1_all'] = None
-    after_bdim['m_m0_all'] = None
     after_var_dens = {f'mu0_all_{a}': None for a in axes}
     after_var_dens['mu0_all'] = None
     return after_bdim, after_var_dens
@@ -445,21 +444,9 @@ class FluidSolver(PlottingMixin):
             self._sponge_sigma_v = None
             self._sponge_sigma_w = None
 
-        # ============= time integration =============
-        self.time_integration = solver.get("time_integration", "euler")
-        assert self.time_integration in ("heun", "euler"), \
-            f"Unknown time_integration '{self.time_integration}'. Choose 'heun' or 'euler'."
-        print("Setting dt={}s, dx={}".format(self.dt, self.h))
-        print(f"Time integration: {self.time_integration}")
-
-        # ---- FSI variable-density and explosion-detection state ----
         self.rho_body = float(solver.get("rho_body", 1000.0))
-        _heun_flag = solver.get("heun", None)
-        if _heun_flag is not None:
-            self._fsi_use_heun = bool(_heun_flag) and (self.ndim == 2)
-        else:
-            self._fsi_use_heun = (self.time_integration == "heun") and (self.ndim == 2)
-        self.terminate = False
+
+        self.terminate = False   # flag for early termination (e.g. from NaN detection)
 
         # ============= convection solver =============
         adv_diff_kwargs = dict(
@@ -487,18 +474,12 @@ class FluidSolver(PlottingMixin):
             self.adv_diff_solver.solve = torch.compile(
                 self.adv_diff_solver.solve, mode="reduce-overhead",
             )
-            self._bdim_meta_compiled = torch.compile(
-                FluidSolver._bdim_meta, mode="reduce-overhead",
-            )
-            # Dynamic-shape variant for the union-AABB crop path
-            # (sub-block shape varies with body kinematics).
-            self._bdim_meta_dyn_compiled = torch.compile(
-                FluidSolver._bdim_meta, dynamic=True,
-            )
-            print("  [compile] adv_diff_solver.solve + BDIM meta-equation compiled (reduce-overhead)")
-        else:
-            self._bdim_meta_compiled = FluidSolver._bdim_meta
-            self._bdim_meta_dyn_compiled = FluidSolver._bdim_meta
+
+        # Dynamic-shape variant for the union-AABB crop path
+        # (sub-block shape varies with body kinematics).
+        self._bdim_meta_dyn_compiled = torch.compile(
+            FluidSolver._bdim_meta, dynamic=True,
+        )
 
         # ---- optional Towers (2008) 2nd-order delta correction -----------
         # When force_delta_order=2, the smoothed delta is divided by |∇SDF|
@@ -565,42 +546,48 @@ class FluidSolver(PlottingMixin):
                 _mu_normals_batched, dynamic=True,
             )
 
-        # Compiled bindings for the dim-agnostic force kernels.
-        # ``_forces_shared`` and ``_forces_body_batch`` take tuple-of-tensor
-        # inputs; Dynamo guards on tuple length (``len(vels)``), so calling
-        # with D=2 and D=3 yields two shape-specialized compiled artifacts
-        # automatically — no per-D Python wrappers needed.
-        if self._compile_forces and self.device.type == "cuda":
-            self._forces_shared_compiled = torch.compile(
-                _forces_shared, mode="reduce-overhead",
-            )
-            self._forces_body_batch_compiled = torch.compile(
-                _forces_body_batch, mode="reduce-overhead",
-            )
-            # Dynamic-shape shared kernel for the union-AABB crop path
-            # (sub-block shape varies with body kinematics).
-            self._forces_shared_dyn_compiled = torch.compile(
-                _forces_shared, dynamic=True,
-            )
-            # ``_forces_body_integrate_3d`` runs on per-body AABB sub-blocks
-            # whose shapes change slowly; ``dynamic=True`` gives fusion
-            # without a recompile for every orientation.
-            self._forces_body_compiled = torch.compile(
-                _forces_body_integrate_3d, dynamic=True,
-            )
-            # Dynamic-shape batched mu/normals kernel for the union-AABB
-            # crop path (sub-block shape varies as bodies move).  Built
-            # from the dim-agnostic ``_mu_normals_batched`` helper so a
-            # single compiled artifact serves both 2-D and 3-D.
-            print(
-                "  [compile] forces_shared + forces_body_batch compiled "
-                "(reduce-overhead, dim-agnostic)"
-            )
-        else:
-            self._forces_shared_compiled     = _forces_shared
-            self._forces_body_batch_compiled = _forces_body_batch
-            self._forces_shared_dyn_compiled = _forces_shared
-            self._forces_body_compiled       = _forces_body_integrate_3d
+        self._forces_shared_compiled     = _forces_shared
+        self._forces_body_batch_compiled = _forces_body_batch
+        self._forces_shared_dyn_compiled = _forces_shared
+        self._forces_body_compiled       = _forces_body_integrate_3d
+
+
+        # # Compiled bindings for the dim-agnostic force kernels.
+        # # ``_forces_shared`` and ``_forces_body_batch`` take tuple-of-tensor
+        # # inputs; Dynamo guards on tuple length (``len(vels)``), so calling
+        # # with D=2 and D=3 yields two shape-specialized compiled artifacts
+        # # automatically — no per-D Python wrappers needed.
+        # if self._compile_forces and self.device.type == "cuda":
+        #     self._forces_shared_compiled = torch.compile(
+        #         _forces_shared, mode="reduce-overhead",
+        #     )
+        #     self._forces_body_batch_compiled = torch.compile(
+        #         _forces_body_batch, mode="reduce-overhead",
+        #     )
+        #     # Dynamic-shape shared kernel for the union-AABB crop path
+        #     # (sub-block shape varies with body kinematics).
+        #     self._forces_shared_dyn_compiled = torch.compile(
+        #         _forces_shared, dynamic=True,
+        #     )
+        #     # ``_forces_body_integrate_3d`` runs on per-body AABB sub-blocks
+        #     # whose shapes change slowly; ``dynamic=True`` gives fusion
+        #     # without a recompile for every orientation.
+        #     self._forces_body_compiled = torch.compile(
+        #         _forces_body_integrate_3d, dynamic=True,
+        #     )
+        #     # Dynamic-shape batched mu/normals kernel for the union-AABB
+        #     # crop path (sub-block shape varies as bodies move).  Built
+        #     # from the dim-agnostic ``_mu_normals_batched`` helper so a
+        #     # single compiled artifact serves both 2-D and 3-D.
+        #     print(
+        #         "  [compile] forces_shared + forces_body_batch compiled "
+        #         "(reduce-overhead, dim-agnostic)"
+        #     )
+        # else:
+        #     self._forces_shared_compiled     = _forces_shared
+        #     self._forces_body_batch_compiled = _forces_body_batch
+        #     self._forces_shared_dyn_compiled = _forces_shared
+        #     self._forces_body_compiled       = _forces_body_integrate_3d
 
         # =============  poisson solver =============
         self.poisson_method = solver.get("poisson_method", "multigrid")
@@ -1103,7 +1090,7 @@ class FluidSolver(PlottingMixin):
         compiled meta-equation that returns a fresh tensor the caller
         can keep across CUDA-graph replays.
         """
-        return self._bdim_meta_compiled(
+        return self._bdim_meta_dyn_compiled(
             phi, mu0, body_vel, mu1,
             normal_x, normal_y, self.h, 2,
         ).clone()
@@ -1126,25 +1113,28 @@ class FluidSolver(PlottingMixin):
         place), which is already an owned tensor.
         """
         _h = self.h
-        if self._use_kernels and getattr(self, '_bdim_union_aabb', None) is not None:
-            ui0, ui1, uj0, uj1, uk0, uk1 = self._bdim_union_aabb
-            usl = (slice(ui0, ui1), slice(uj0, uj1), slice(uk0, uk1))
-            sub = self._bdim_meta_dyn_compiled(
-                phi[usl].contiguous(),
-                mu0[usl].contiguous(),
-                body_vel[usl].contiguous(),
-                mu1[usl].contiguous(),
-                normal_x[usl].contiguous(),
-                normal_y[usl].contiguous(),
-                normal_z[usl].contiguous(),
+        u_aabb = self._bdim_union_aabb
+        if u_aabb is None:
+            return self._bdim_meta_dyn_compiled(
+                phi, mu0, body_vel, mu1,
+                normal_x, normal_y, normal_z,
                 _h, 3,
             )
-            phi[usl] = sub
-            return phi
-        return self._bdim_meta_compiled(
-            phi, mu0, body_vel, mu1,
-            normal_x, normal_y, normal_z, _h, 3,
-        ).clone()
+
+        ui0, ui1, uj0, uj1, uk0, uk1 = u_aabb
+        usl = (slice(ui0, ui1), slice(uj0, uj1), slice(uk0, uk1))
+        sub = self._bdim_meta_dyn_compiled(
+            phi[usl].contiguous(),
+            mu0[usl].contiguous(),
+            body_vel[usl].contiguous(),
+            mu1[usl].contiguous(),
+            normal_x[usl].contiguous(),
+            normal_y[usl].contiguous(),
+            normal_z[usl].contiguous(),
+            _h, 3,
+        )
+        phi[usl] = sub
+        return phi
 
     # ------------------------------------------------------------------
     #   Per-axis BDIM apply — dim-agnostic loop over MAC axes
@@ -1266,317 +1256,6 @@ class FluidSolver(PlottingMixin):
             out.append(hi[d])
         return tuple(out)
 
-    def solver_iteration_heun(self, u, v, p, iteration, w_vel=None):
-        """
-        Heun (RK2 predictor-corrector) time integration with BDIM2.
-
-        1. **Predictor** (w = 1):
-            adv-diff on u^n → BDIM → project → BCs → u_pred (div-free)
-
-        2. **Corrector** (w = 0.5):
-            adv-diff on u_pred → rebase from u^n → BDIM →
-            average with **projected** predictor → project(w=0.5)
-
-        The corrector average is ``0.5*(u_pred + BDIM(u^n + dt·RHS(u_pred)))``.
-        Because ``u_pred`` is divergence-free, ``div(u_avg)`` equals half
-        the corrector's BDIM divergence.  ``w=0.5`` compensates this
-        halving in the Poisson coefficient so that the stored pressure
-        equals the physical dynamic pressure (needed for correct force
-        computation).  The velocity correction is ``w``-independent.
-        """
-
-        if self.ndim == 2:
-            # ====== PREDICTOR ======
-            nu_t = self._compute_nu_t(u, v)
-            (uprime, vprime) = self.adv_diff_solver.solve(u, v, nu_t=nu_t)
-            # Clone CUDA-graph outputs before passing to _bdim.
-            uprime = uprime.clone()
-            vprime = vprime.clone()
-
-            # BDIM2 meta-equation (fused when compiled)
-            _bdim = self._bdim_meta_compiled
-            _h    = self.h
-            uprime = _bdim(
-                uprime, self.mu0_all_u,
-                self.composite_body.body_u, self.mu1_all_u,
-                self.normal_x_u, self.normal_y_u, _h, 2,
-            ).clone()
-            vprime = _bdim(
-                vprime, self.mu0_all_v,
-                self.composite_body.body_v, self.mu1_all_v,
-                self.normal_x_v, self.normal_y_v, _h, 2,
-            ).clone()
-
-            self.adv_diff_solver.set_BCs(uprime, vprime)
-            (u1, v1, p1) = self.project(uprime, vprime, p)
-            # Re-apply BCs after projection
-            # BC!(a.u,...) after every project! call).
-            self.adv_diff_solver.set_BCs(u1, v1)
-
-            # ====== CORRECTOR ======
-            # Evaluate RHS at the projected predicted velocity
-            nu_t = self._compute_nu_t(u1, v1)
-            (uprime2, vprime2) = self.adv_diff_solver.solve(u1, v1, nu_t=nu_t)
-            # adv_diff.solve returns u1 + dt*RHS(u1).
-            # Rebase from u^n: u^n + dt*RHS(u_pred), matching
-            # with u⁰ = u^n (saved once at the top of mom_step!).
-            uprime2 = u + (uprime2 - u1)
-            vprime2 = v + (vprime2 - v1)
-
-            # BDIM2 meta-equation on corrector (fused when compiled)
-            uprime2 = _bdim(
-                uprime2, self.mu0_all_u,
-                self.composite_body.body_u, self.mu1_all_u,
-                self.normal_x_u, self.normal_y_u, _h, 2,
-            ).clone()
-            vprime2 = _bdim(
-                vprime2, self.mu0_all_v,
-                self.composite_body.body_v, self.mu1_all_v,
-                self.normal_x_v, self.normal_y_v, _h, 2,
-            ).clone()
-
-            # Average the PROJECTED predictor with the corrector's BDIM
-            # halves  u_pred + BDIM(u^n + dt*RHS(u_pred)).
-            u_avg = 0.5 * (u1 + uprime2)
-            v_avg = 0.5 * (v1 + vprime2)
-
-            self.adv_diff_solver.set_BCs(u_avg, v_avg)
-            # w=0.5: the corrector average halves the divergence (u_pred
-            # is div-free), so w=0.5 doubles the Poisson coefficient to
-            # recover the physical pressure.  Velocity correction is
-            # w-independent; only the stored pressure changes.
-            (u_out, v_out, p_out) = self.project(u_avg, v_avg, p, w=0.5)
-
-            # Sponge damping (2-D)
-            if self.use_sponge:
-                (u_out, v_out) = self.apply_sponge_damping(u_out, v_out)
-
-            # Yield-stress damping (2-D)
-            if self.use_yield_damping:
-                (u_out, v_out) = self.apply_yield_damping(u_out, v_out)
-
-            return (u_out, v_out, p_out)
-
-        else:  # 3D
-            # ====== PREDICTOR ======
-            nu_t = self._compute_nu_t(u, v, w_vel)
-            (uprime, vprime, wprime) = self.adv_diff_solver.solve(u, v, w_vel, nu_t=nu_t)
-            # Clone CUDA-graph outputs before passing to _bdim.
-            uprime = uprime.clone()
-            vprime = vprime.clone()
-            wprime = wprime.clone()
-
-            # Cache union AABB for both BDIM passes (predictor + corrector).
-            # Cleared at end of step.  Cheap (Python loop over <~10 bodies).
-            self._bdim_union_aabb = (
-                self._compute_union_aabb(halo=2)
-                if self._use_kernels else None
-            )
-
-            # BDIM2 meta-equation (fused when compiled)
-            _bdim = self._bdim_meta_compiled
-            _h    = self.h
-            uprime = self._bdim_apply_3d(
-                uprime, self.mu0_all_u,
-                self.composite_body.body_u, self.mu1_all_u,
-                self.normal_x_u, self.normal_y_u, self.normal_z_u,
-            )
-            vprime = self._bdim_apply_3d(
-                vprime, self.mu0_all_v,
-                self.composite_body.body_v, self.mu1_all_v,
-                self.normal_x_v, self.normal_y_v, self.normal_z_v,
-            )
-            wprime = self._bdim_apply_3d(
-                wprime, self.mu0_all_w,
-                self.composite_body.body_w, self.mu1_all_w,
-                self.normal_x_w, self.normal_y_w, self.normal_z_w,
-            )
-
-            self.adv_diff_solver.set_BCs(uprime, vprime, wprime)
-            (u1, v1, w1, p1) = self.project(uprime, vprime, p, w_vel=wprime)
-            # Re-apply BCs after projection
-            self.adv_diff_solver.set_BCs(u1, v1, w1)
-
-            # ====== CORRECTOR ======
-            nu_t = self._compute_nu_t(u1, v1, w1)
-            (uprime2, vprime2, wprime2) = self.adv_diff_solver.solve(u1, v1, w1, nu_t=nu_t)
-            # Rebase from u^n
-            uprime2 = u     + (uprime2 - u1)
-            vprime2 = v     + (vprime2 - v1)
-            wprime2 = w_vel + (wprime2 - w1)
-
-            # BDIM2 meta-equation on corrector (fused when compiled)
-            uprime2 = self._bdim_apply_3d(
-                uprime2, self.mu0_all_u,
-                self.composite_body.body_u, self.mu1_all_u,
-                self.normal_x_u, self.normal_y_u, self.normal_z_u,
-            )
-            vprime2 = self._bdim_apply_3d(
-                vprime2, self.mu0_all_v,
-                self.composite_body.body_v, self.mu1_all_v,
-                self.normal_x_v, self.normal_y_v, self.normal_z_v,
-            )
-            wprime2 = self._bdim_apply_3d(
-                wprime2, self.mu0_all_w,
-                self.composite_body.body_w, self.mu1_all_w,
-                self.normal_x_w, self.normal_y_w, self.normal_z_w,
-            )
-
-            # Drop the cached union AABB now that both BDIM passes are done.
-            self._bdim_union_aabb = None
-
-            # Free mu1 + staggered normals after both BDIM passes
-            for _attr in ('mu1_all_u', 'mu1_all_v', 'mu1_all_w',
-                          'normal_x_u', 'normal_y_u', 'normal_z_u',
-                          'normal_x_v', 'normal_y_v', 'normal_z_v',
-                          'normal_x_w', 'normal_y_w', 'normal_z_w'):
-                if hasattr(self, _attr):
-                    setattr(self, _attr, None)
-
-            # Average the PROJECTED predictor (div-free) with the
-            # corrector's BDIM output
-            u_avg = 0.5 * (u1 + uprime2)
-            v_avg = 0.5 * (v1 + vprime2)
-            w_avg = 0.5 * (w1 + wprime2)
-
-            self.adv_diff_solver.set_BCs(u_avg, v_avg, w_avg)
-            # w=0.5: see 2-D comment.
-            (u_out, v_out, w_out, p_out) = self.project(u_avg, v_avg, p, w_vel=w_avg, w=0.5)
-
-            # Free mu0 after project
-            for _attr in ('mu0_all_u', 'mu0_all_v', 'mu0_all_w'):
-                if hasattr(self, _attr):
-                    setattr(self, _attr, None)
-
-            # Sponge damping: damp velocity near domain boundaries
-            if self.use_sponge:
-                (u_out, v_out, w_out) = self.apply_sponge_damping(u_out, v_out, w_out)
-
-            # Yield-stress damping (3-D)
-            if self.use_yield_damping:
-                (u_out, v_out, w_out) = self.apply_yield_damping(u_out, v_out, w_out)
-
-            return (u_out, v_out, p_out, w_out)
-
-    def solve_heun(self, u, v, p, iteration, w_vel=None):
-        if self.ndim == 2:
-            return self.solver_iteration_heun(u, v, p, iteration)
-        else:
-            return self.solver_iteration_heun(u, v, p, iteration, w_vel=w_vel)
-
-    def solver_iteration_euler(self, u, v, p, iteration, w_vel=None):
-        """Forward Euler time integration with BDIM2.
-
-        Single-stage scheme:
-          adv-diff → BDIM → project(w=1)
-
-        Cheaper per step than Heun (one RHS evaluation instead of two),
-        but only first-order accurate in time.
-        """
-
-        _bdim = self._bdim_meta_compiled
-        _h    = self.h
-
-        if self.ndim == 2:
-            nu_t = self._compute_nu_t(u, v)
-            (uprime, vprime) = self.adv_diff_solver.solve(u, v, nu_t=nu_t)
-            # Clone CUDA-graph outputs before passing to _bdim.
-            uprime = uprime.clone()
-            vprime = vprime.clone()
-
-            # BDIM2 meta-equation
-            uprime = _bdim(
-                uprime, self.mu0_all_u,
-                self.composite_body.body_u, self.mu1_all_u,
-                self.normal_x_u, self.normal_y_u, _h, 2,
-            ).clone()
-            vprime = _bdim(
-                vprime, self.mu0_all_v,
-                self.composite_body.body_v, self.mu1_all_v,
-                self.normal_x_v, self.normal_y_v, _h, 2,
-            ).clone()
-
-            self.adv_diff_solver.set_BCs(uprime, vprime)
-            (u_out, v_out, p_out) = self.project(uprime, vprime, p)
-
-            # Sponge damping (2-D)
-            if self.use_sponge:
-                (u_out, v_out) = self.apply_sponge_damping(u_out, v_out)
-
-            # Yield-stress damping (2-D Euler)
-            if self.use_yield_damping:
-                (u_out, v_out) = self.apply_yield_damping(u_out, v_out)
-
-            return (u_out, v_out, p_out)
-
-        else:  # 3D
-            nu_t = self._compute_nu_t(u, v, w_vel)
-            (uprime, vprime, wprime) = self.adv_diff_solver.solve(u, v, w_vel, nu_t=nu_t)
-            # Clone CUDA-graph outputs before passing to _bdim.
-            uprime = uprime.clone()
-            vprime = vprime.clone()
-            wprime = wprime.clone()
-
-            # Cache union AABB for the BDIM pass.
-            self._bdim_union_aabb = (
-                self._compute_union_aabb(halo=2)
-                if self._use_kernels else None
-            )
-
-            # BDIM2 meta-equation
-            uprime = self._bdim_apply_3d(
-                uprime, self.mu0_all_u,
-                self.composite_body.body_u, self.mu1_all_u,
-                self.normal_x_u, self.normal_y_u, self.normal_z_u,
-            )
-            vprime = self._bdim_apply_3d(
-                vprime, self.mu0_all_v,
-                self.composite_body.body_v, self.mu1_all_v,
-                self.normal_x_v, self.normal_y_v, self.normal_z_v,
-            )
-            wprime = self._bdim_apply_3d(
-                wprime, self.mu0_all_w,
-                self.composite_body.body_w, self.mu1_all_w,
-                self.normal_x_w, self.normal_y_w, self.normal_z_w,
-            )
-            self._bdim_union_aabb = None
-
-            # Free mu1 and staggered normals — no longer needed after
-            # BDIM.  project() only uses mu0_{u,v,w}, and forces
-            # recomputes CC normals on-the-fly.  This releases
-            # 12 × grid_shape × 4 bytes ≈ 1.5 GB for typical 3-D grids.
-            for _attr in ('mu1_all_u', 'mu1_all_v', 'mu1_all_w',
-                          'normal_x_u', 'normal_y_u', 'normal_z_u',
-                          'normal_x_v', 'normal_y_v', 'normal_z_v',
-                          'normal_x_w', 'normal_y_w', 'normal_z_w'):
-                if hasattr(self, _attr):
-                    setattr(self, _attr, None)
-
-            self.adv_diff_solver.set_BCs(uprime, vprime, wprime)
-            (u_out, v_out, w_out, p_out) = self.project(uprime, vprime, p, w_vel=wprime)
-
-            # Free mu0 — no longer needed after project.  Reduces peak
-            # memory during force computation by another ~0.4 GB.
-            for _attr in ('mu0_all_u', 'mu0_all_v', 'mu0_all_w'):
-                if hasattr(self, _attr):
-                    setattr(self, _attr, None)
-
-            # Sponge damping: damp velocity near domain boundaries
-            if self.use_sponge:
-                (u_out, v_out, w_out) = self.apply_sponge_damping(u_out, v_out, w_out)
-
-            # Yield-stress damping (3-D Euler)
-            if self.use_yield_damping:
-                (u_out, v_out, w_out) = self.apply_yield_damping(u_out, v_out, w_out)
-
-            return (u_out, v_out, p_out, w_out)
-
-    def solve_euler(self, u, v, p, iteration, w_vel=None):
-        if self.ndim == 2:
-            return self.solver_iteration_euler(u, v, p, iteration)
-        else:
-            return self.solver_iteration_euler(u, v, p, iteration, w_vel=w_vel)
-
     # ------------------------------------------------------------------
     #   BDIM field cleanup  —  free intermediate tensors between steps
     # ------------------------------------------------------------------
@@ -1589,7 +1268,7 @@ class FluidSolver(PlottingMixin):
         'normal_x_w', 'normal_y_w',
         'normal_z_u', 'normal_z_v', 'normal_z_w',
         # CC-grid mu / normals (recomputed in _recompute_mu_normals)
-        'mu0_all', 'mu1_all', 'm_m0_all',
+        'mu0_all', 'mu1_all',
         'normal_x', 'normal_y', 'normal_z',
         # force intermediates (recomputed in forces_method2 / forces_method2_3d)
         'xstress_tensor', 'ystress_tensor', 'zstress_tensor',
@@ -1611,7 +1290,6 @@ class FluidSolver(PlottingMixin):
             keep = {
                 'mu0_all_u', 'mu1_all_u', 'mu0_all_v', 'mu1_all_v',
                 'mu0_all_w', 'mu1_all_w', 'mu0_all', 'mu1_all',
-                'm_m0_all',
                 'normal_x_u', 'normal_y_u', 'normal_z_u',
                 'normal_x_v', 'normal_y_v', 'normal_z_v',
                 'normal_x_w', 'normal_y_w', 'normal_z_w',
@@ -1649,7 +1327,6 @@ class FluidSolver(PlottingMixin):
             ``[2*n_grids .. 3*n_grids)``        : normal_x for the same
             ``[3*n_grids .. 4*n_grids)``        : normal_y for the same
             ``[4*n_grids .. 5*n_grids)``        : normal_z (3-D only)
-            ``[-1]``                            : m_m0_all (= 1 - mu0_cc)
 
         When kernel mode is off or the union covers >50 % of the grid,
         falls back to the full-grid compiled kernel (no pack buffer).
@@ -1669,58 +1346,55 @@ class FluidSolver(PlottingMixin):
         # Union-AABB crop path — outside the union SDF is _FAR so mu0=1,
         # mu1=0, normals=0 (these defaults never change between steps).
         # ------------------------------------------------------------------
-        u_aabb = None
         if self._use_kernels:
             u_aabb = self._compute_union_aabb(halo=2, bucket=16)
+            if u_aabb is not None:
+                n_pack = (2 + D) * ngrids   # 12 for 2-D, 20 for 3-D
 
-        if u_aabb is not None:
-            n_pack = (2 + D) * ngrids + 1   # 13 for 2-D, 21 for 3-D
+                if (getattr(self, '_mu_pack', None) is None
+                    or self._mu_pack.shape[1:] != comp.sdf_val.shape
+                    or self._mu_pack.shape[0] != n_pack
+                    or self._mu_pack.dtype  != comp.sdf_val.dtype
+                    or self._mu_pack.device != comp.sdf_val.device):
+                    pack = torch.zeros(
+                        (n_pack, *comp.sdf_val.shape),
+                        device=comp.sdf_val.device, dtype=comp.sdf_val.dtype,
+                    )
+                    pack[0:ngrids].fill_(1.0)   # mu0 defaults to 1 outside body
+                    self._mu_pack = pack
+                    self._mu_union_ready = True
+                pack = self._mu_pack
 
-            if (getattr(self, '_mu_pack', None) is None
-                or self._mu_pack.shape[1:] != comp.sdf_val.shape
-                or self._mu_pack.shape[0] != n_pack
-                or self._mu_pack.dtype  != comp.sdf_val.dtype
-                or self._mu_pack.device != comp.sdf_val.device):
-                pack = torch.zeros(
-                    (n_pack, *comp.sdf_val.shape),
-                    device=comp.sdf_val.device, dtype=comp.sdf_val.dtype,
-                )
-                pack[0:ngrids].fill_(1.0)   # mu0 defaults to 1 outside body
-                self._mu_pack = pack
-                self._mu_union_ready = True
-            pack = self._mu_pack
-
-            # (Re-)alias every step — cheap Python, robust to any
-            # non-union path overwriting these attributes.
-            for i, ax in enumerate(axes):
-                setattr(self, f'mu0_all_{ax}', pack[i])
-                setattr(self, f'mu1_all_{ax}', pack[ngrids + i])
+                # (Re-)alias every step — cheap Python, robust to any
+                # non-union path overwriting these attributes.
+                for i, ax in enumerate(axes):
+                    setattr(self, f'mu0_all_{ax}', pack[i])
+                    setattr(self, f'mu1_all_{ax}', pack[ngrids + i])
+                    for d, n in enumerate(norms):
+                        setattr(self, f'normal_{n}_{ax}',
+                                pack[(2 + d) * ngrids + i])
+                self.mu0_all = pack[cc]
+                self.mu1_all = pack[ngrids + cc]
                 for d, n in enumerate(norms):
-                    setattr(self, f'normal_{n}_{ax}',
-                            pack[(2 + d) * ngrids + i])
-            self.mu0_all = pack[cc]
-            self.mu1_all = pack[ngrids + cc]
-            for d, n in enumerate(norms):
-                setattr(self, f'normal_{n}', pack[(2 + d) * ngrids + cc])
-            self.m_m0_all = pack[-1]
+                    setattr(self, f'normal_{n}', pack[(2 + d) * ngrids + cc])
 
-            slices = tuple(
-                slice(u_aabb[2 * d], u_aabb[2 * d + 1]) for d in range(D)
-            )
-            sdf_sub = sdf_stack[(slice(None),) + slices].contiguous()
+                slices = tuple(
+                    slice(u_aabb[2 * d], u_aabb[2 * d + 1]) for d in range(D)
+                )
+                sdf_sub = sdf_stack[(slice(None),) + slices].contiguous()
 
-            out = self._mu_normals_dyn_compiled(sdf_sub, comp.h, comp.eps)
-            mu0_s, mu1_s = out[0], out[1]
-            normals_s = out[2:]   # length-D tuple of (ngrids, *sub_spatial)
+                out = self._mu_normals_dyn_compiled(sdf_sub, comp.h, comp.eps)
+                mu0_s, mu1_s = out[0], out[1]
+                normals_s = out[2:]   # length-D tuple of (ngrids, *sub_spatial)
 
-            # Fused slice-write: stack mu0, mu1, normals, m_m0_cc along
-            # dim-0 and scatter into the packed buffer with ONE assign.
-            stacked = torch.cat(
-                (mu0_s, mu1_s) + tuple(normals_s) + (1.0 - mu0_s[cc:cc + 1],),
-                dim=0,
-            )
-            self._mu_pack[(slice(None),) + slices] = stacked
-            return
+                # Fused slice-write: stack mu0, mu1, normals along dim-0 and
+                # scatter into the packed buffer with ONE assign.
+                stacked = torch.cat(
+                    (mu0_s, mu1_s) + tuple(normals_s),
+                    dim=0,
+                )
+                self._mu_pack[(slice(None),) + slices] = stacked
+                return
 
         # ── Full-grid path: batched + compiled, all grids in one pass ──
         out = self._mu_normals_dyn_compiled(sdf_stack, comp.h, comp.eps)
@@ -1736,7 +1410,6 @@ class FluidSolver(PlottingMixin):
         self.mu1_all = mu1[cc]
         for d, n in enumerate(norms):
             setattr(self, f'normal_{n}', normals[d][cc])
-        self.m_m0_all = 1 - self.mu0_all
 
     # ==================================================================
     #  Variable-density FSI fluid step  (called by BDIMhandler.step)
@@ -1846,27 +1519,9 @@ class FluidSolver(PlottingMixin):
 
         nu_t = self._compute_nu_t(u, v)
 
-        if self._fsi_use_heun:
-            # Heun (RK2) predictor-corrector — matches WaterLily.jl mom_step!
-            uprime, vprime = _advect_bdim(u, v, nu_t=nu_t)
-            u1, v1, p1 = self.project(uprime, vprime, p, ch=_ch, cv=_cv, ch_cc=_ch_cc)
-            self.adv_diff_solver.set_BCs(u1, v1)
-
-            nu_t = self._compute_nu_t(u1, v1)
-            uprime2, vprime2 = _advect_bdim(u1, v1, nu_t=nu_t, u_rebase=u, v_rebase=v)
-
-            u_avg = 0.5 * (u1 + uprime2)
-            v_avg = 0.5 * (v1 + vprime2)
-            self.adv_diff_solver.set_BCs(u_avg, v_avg)
-
-            u_out, v_out, p_out = self.project(
-                u_avg, v_avg, p1,
-                ch=0.5 * _ch, cv=0.5 * _cv, ch_cc=0.5 * _ch_cc,
-            )
-        else:
-            uprime, vprime = _advect_bdim(u, v, nu_t=nu_t)
-            u_out, v_out, p_out = self.project(uprime, vprime, p,
-                                               ch=_ch, cv=_cv, ch_cc=_ch_cc)
+        uprime, vprime = _advect_bdim(u, v, nu_t=nu_t)
+        u_out, v_out, p_out = self.project(uprime, vprime, p,
+                                            ch=_ch, cv=_cv, ch_cc=_ch_cc)
 
         if self.use_sponge:
             (u_out, v_out) = self.apply_sponge_damping(u_out, v_out)

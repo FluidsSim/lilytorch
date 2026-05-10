@@ -205,30 +205,6 @@ except Exception:
     _rotate_grid_3d_compiled = rotate_grid_3d
 
 
-def _stagger_sdf_3d(sdf_cc):
-    """Derive staggered (MAC face) SDFs from cell-centre SDF via averaging.
-
-    Returns (sdf_u, sdf_v, sdf_w) — each the same shape as sdf_cc.
-    """
-    sdf_u = torch.empty_like(sdf_cc)
-    sdf_u[1:, :, :] = 0.5 * (sdf_cc[:-1, :, :] + sdf_cc[1:, :, :])
-    sdf_u[0,  :, :] = sdf_cc[0, :, :]
-
-    sdf_v = torch.empty_like(sdf_cc)
-    sdf_v[:, 1:, :] = 0.5 * (sdf_cc[:, :-1, :] + sdf_cc[:, 1:, :])
-    sdf_v[:,  0, :] = sdf_cc[:, 0, :]
-
-    sdf_w = torch.empty_like(sdf_cc)
-    sdf_w[:, :, 1:] = 0.5 * (sdf_cc[:, :, :-1] + sdf_cc[:, :, 1:])
-    sdf_w[:, :,  0] = sdf_cc[:, :, 0]
-    return sdf_u, sdf_v, sdf_w
-
-
-try:
-    _stagger_sdf_3d_compiled = torch.compile(_stagger_sdf_3d, mode="reduce-overhead")
-except Exception:
-    _stagger_sdf_3d_compiled = _stagger_sdf_3d
-
 
 def _mu_normals_batched(sdf_stack, h, eps):
     """Batched mu0/mu1 and unit normals for N SDF grids (2-D or 3-D).

@@ -194,18 +194,16 @@ Audit of [streaming_sdf.cu](lilytorch/src/kernels/csrc/cuda/streaming_sdf.cu), [
   `streaming_sdf_min_rho_3d_multi_cpu` ([streaming_sdf_cpu.cpp:614](lilytorch/src/kernels/csrc/streaming_sdf_cpu.cpp#L614)) and `streaming_sdf_forces_post_3d_cpu` ([:711](lilytorch/src/kernels/csrc/streaming_sdf_cpu.cpp#L711)) iterated cells with plain `for`. Largest CPU-side perf gap.
   **Fix landed:** wrapped both per-body cell loops in `at::parallel_for` (grain 1024 for min_rho, 2048 for forces). Forces uses a per-body `acc[12]` + `std::mutex` with thread-local `local12[12]` chunks — matches the 2-D pattern. min_rho needs no merge because each cell touches its own `g`. K8 (replace mutex with thread-local indexed array) tracked separately.
 
-- [ ] **K5 — 3D CUDA `forces_post` shared-memory pressure.**
-  [streaming_sdf.cu:883](lilytorch/src/kernels/csrc/cuda/streaming_sdf.cu#L883): `12 × 256 × 8 = 24 KB` per block. Caps occupancy at 2 blocks/SM on 48 KB-shmem devices.
-  **Fix:** warp-shuffle reduction (one shmem slot per warp = 768 B), or split into two passes (visc / pres) at 6 channels each.
+- [x] **K5 — 3D CUDA `forces_post` shared-memory pressure.** *(fixed via CUB BlockReduce; CPU↔CUDA parity preserved at ~1e-15 rel-err.)*
+  Replaced the hand-rolled 24 KB / block reduction with `cub::BlockReduce<double, BLOCK_SIZE>::Sum` called once per channel ([streaming_sdf.cu:672-686](lilytorch/src/kernels/csrc/cuda/streaming_sdf.cu#L672-L686), [streaming_sdf_2d.cu:564-577](lilytorch/src/kernels/csrc/cuda/streaming_sdf_2d.cu#L564-L577)). Internally CUB does warp shuffles + ~one shmem slot per warp; net per-block shmem drops from 24 KB → ~256 B (3D) and 12 KB → ~128 B (2D). Lifts the 2-block-per-SM occupancy ceiling on 48 KB-shmem consumer SMs. Direct kernel-level A/B not measured in-session — relies on parity check + CUB's well-known reduction perf.
 
-- [ ] **K6 — Forces kernels use fixed `blockSize = 256`.**
-  `min_rho` adapts (`<=128 → 32`, `<=4096 → 128`, else 256). Forces don't ([streaming_sdf.cu:881](lilytorch/src/kernels/csrc/cuda/streaming_sdf.cu#L881), [streaming_sdf_2d.cu:753](lilytorch/src/kernels/csrc/cuda/streaming_sdf_2d.cu#L753)). For small bodies most threads are masked; reduction still runs over 256 lanes of zeros.
-  **Fix:** copy the adaptive sizing from `min_rho`.
+- [x] **K6 — Forces kernels use fixed `blockSize = 256`.** *(fixed; bench confirms small-body launches now use bs=32, large bs=256.)*
+  Forces launchers now mirror the `min_rho` adaptive sizing: `<=128 → 32`, `<=4096 → 128`, else 256. Required templating the kernels on `BLOCK_SIZE` (CUB's `BlockReduce` is compile-time-typed) and a 3-way `switch` in the launcher to dispatch to the right instantiation. Sites: [streaming_sdf.cu:885-907](lilytorch/src/kernels/csrc/cuda/streaming_sdf.cu#L885-L907), [streaming_sdf_2d.cu:744-783](lilytorch/src/kernels/csrc/cuda/streaming_sdf_2d.cu#L744-L783).
 
 - [x] **K7 — CPU-2D `sparse_buf` allocated/freed per body per call.** *(fixed as a side effect of K2 — the entire two-pass design is gone.)*
 
-- [ ] **K8 — CPU-2D forces uses `std::mutex` for per-body merge.**
-  [streaming_sdf_cpu_2d.cpp:611-799](lilytorch/src/kernels/csrc/streaming_sdf_cpu_2d.cpp#L611-L799). Functional but slower than thread-local accumulators indexed by `at::get_thread_num()` and summed after the parallel_for.
+- [x] **K8 — CPU-2D forces uses `std::mutex` for per-body merge.** *(fixed; bench shows ~30% additional speedup at 8 threads on top of K4 for A=32 bodies — 4.5× → 6.4× vs single-thread.)*
+  Replaced the per-body `std::mutex` + `lock_guard` with a per-thread accumulator stripe `tls[t * N]` indexed by `at::get_thread_num()` ([streaming_sdf_cpu.cpp:707-769](lilytorch/src/kernels/csrc/streaming_sdf_cpu.cpp#L707-L769) for 3D 12-ch, [streaming_sdf_cpu_2d.cpp:601-810](lilytorch/src/kernels/csrc/streaming_sdf_cpu_2d.cpp#L601-L810) for 2D 6-ch). Each worker writes only its own stripe, so no locking is needed; final reduction across threads runs single-thread after the `parallel_for`.
 
 ### Minor
 

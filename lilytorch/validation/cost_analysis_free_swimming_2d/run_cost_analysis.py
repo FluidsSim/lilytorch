@@ -520,7 +520,6 @@ def gen_simulation_config_lean(output_folder):
             solver_cfg["compile_adv_diff"] = True
             solver_cfg["poisson_compile"]  = True
             solver_cfg["compile_forces"]   = True
-            solver_cfg["compile_sdf"]      = True
             if SOLVER_MODE is not None:
                 solver_cfg["solver_method"] = SOLVER_MODE
 

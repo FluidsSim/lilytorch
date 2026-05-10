@@ -16,7 +16,7 @@ class SimConfig(BaseSimConfig):
         )
 
         # ── Hardware ──────────────────────────────────────────────────
-        self.compute_sdf = False
+        self.compute_sdf = True
         self.convexify   = True
         self.n_samples   = (200, 200)
         self.use_gpu     = True
@@ -77,7 +77,6 @@ class SimConfig(BaseSimConfig):
         self.poisson_compile         = False
         self.compile_adv_diff        = False
         self.compile_forces          = False
-        self.compile_sdf             = False
 
         # ── Boundary conditions (3-D, Dirichlet inlet) ───────────────
         self.bc_type_u   = ["D", "D", "N", "N", "N", "N"]
