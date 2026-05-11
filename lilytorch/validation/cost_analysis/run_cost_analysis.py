@@ -448,13 +448,22 @@ def _apply_cfg_overrides(cfg):
     if hasattr(cfg, "time_integration"):
         cfg.time_integration = "euler"
 
-    cfg.poisson_tol = getattr(cfg, "poisson_tol", 1.0e-5)
-    cfg.poisson_max_cycles = getattr(cfg, "poisson_max_cycles", 3)
-    cfg.poisson_max_mgcg_cycles = getattr(cfg, "poisson_max_mgcg_cycles", 3)
-    cfg.poisson_precond_vcycles = getattr(cfg, "poisson_precond_vcycles", 1)
-    cfg.poisson_warm_start = getattr(cfg, "poisson_warm_start", True)
-    cfg.poisson_smoother = getattr(cfg, "poisson_smoother", "jacobi")
-    cfg.poisson_nsmoothing = getattr(cfg, "poisson_nsmoothing", 5)
+    # Tuned defaults: warm-start + RBGS with few sweeps + MGCG for BDIM
+    # coefficient-jump robustness.  Direct assignment (not getattr) so we
+    # override BaseSimConfig.
+    #
+    # Tolerance: kept at 1e-7 absolute (BaseSimConfig default), NOT loosened.
+    # The Poisson residual b = -h²·f scales with h², so an absolute tol
+    # near machine-h²·||f|| is the right scale; loosening to 1e-4 makes
+    # MGCG init-exit on a zero warm-start every step and the pressure
+    # never gets updated (visible as a flat-zero pressure plot).
+    cfg.poisson_tol = 1.0e-7
+    cfg.poisson_max_cycles = 10
+    cfg.poisson_max_mgcg_cycles = 10
+    cfg.poisson_precond_vcycles = 1
+    cfg.poisson_warm_start = True
+    cfg.poisson_smoother = "rbgs"
+    cfg.poisson_nsmoothing = 2
     cfg.zero_pressure_inside = getattr(cfg, "zero_pressure_inside", False)
 
     cfg.save_every = args.save_every
@@ -845,6 +854,11 @@ if handler is not None:
         u = fs.u0.detach().cpu().float().numpy()[1:-1, 1:-1]
         v = fs.v0.detach().cpu().float().numpy()[1:-1, 1:-1]
         sdf = comp.sdf_val.detach().cpu().float().numpy()[1:-1, 1:-1]
+        # eps_val: BDIM transition-zone half-width in metres.
+        # Cells with 0 ≤ sdf < eps are in the smearing zone and can carry
+        # anomalously high body-motion velocities that corrupt p2/p98 on
+        # smaller grids (where the zone is a larger fraction of total cells).
+        eps_val = float(fs.eps)
 
         vmag = np.sqrt(u**2 + v**2)
         dx = (cfg.xmax - cfg.xmin) / args.Nx
@@ -855,23 +869,32 @@ if handler is not None:
         x_1d = np.linspace(cfg.xmin, cfg.xmax, p.shape[0])
         y_1d = np.linspace(cfg.ymin, cfg.ymax, p.shape[1])
         fig4.suptitle(
-            f"Flow fields - {grid_label(args.grid)} ({grid_n:,} cells, step {step_index})",
-            fontsize=12,
+            f"Flow fields - {grid_label(args.grid)} ({grid_n:,} cells, step {step_index}, dx={dx*1e3:.2f} mm, eps={eps_val*1e3:.2f} mm)",
+            fontsize=11,
             fontweight="bold",
         )
 
         def _format_ax(ax, title, data, cmap, symmetric=False):
+            # Use sdf >= eps (far-field fluid, outside BDIM smearing zone) for
+            # percentile-based colormap range, but display the full fluid region
+            # (sdf >= 0, shown in colour; sdf < 0 body interior shown in grey).
+            farfield_mask = sdf >= eps_val
+            data_farfield = np.where(farfield_mask, data, np.nan)
+            fluid_mask = sdf >= 0
+            data_display = np.where(fluid_mask, data, np.nan)
             if symmetric:
-                vmax = max(abs(np.nanpercentile(data, 2)), abs(np.nanpercentile(data, 98)))
+                vmax = max(abs(np.nanpercentile(data_farfield, 2)), abs(np.nanpercentile(data_farfield, 98)))
                 vmin = -vmax
             else:
-                vmin = np.nanpercentile(data, 2)
-                vmax = np.nanpercentile(data, 98)
+                vmin = np.nanpercentile(data_farfield, 2)
+                vmax = np.nanpercentile(data_farfield, 98)
+            cmap_obj = plt.get_cmap(cmap).copy()
+            cmap_obj.set_bad(color="#cccccc")
             im = ax.imshow(
-                data.T,
+                data_display.T,
                 origin="lower",
                 aspect="auto",
-                cmap=cmap,
+                cmap=cmap_obj,
                 extent=[x_1d[0], x_1d[-1], y_1d[0], y_1d[-1]],
                 vmin=vmin,
                 vmax=vmax,
@@ -914,6 +937,7 @@ if handler is not None:
         u = fs.u0.detach().cpu().float().numpy()
         v = fs.v0.detach().cpu().float().numpy()
         sdf = comp.sdf_val.detach().cpu().float().numpy()
+        eps_val = float(fs.eps)
 
         kz = p.shape[2] // 2
         p_slice = p[1:-1, 1:-1, kz]
@@ -930,23 +954,31 @@ if handler is not None:
         x_1d = np.linspace(cfg.xmin, cfg.xmax, p_slice.shape[0])
         y_1d = np.linspace(cfg.ymin, cfg.ymax, p_slice.shape[1])
         fig4.suptitle(
-            f"Flow fields (mid-z plane) - {grid_label(args.grid)} ({grid_n:,} cells, step {step_index})",
-            fontsize=12,
+            f"Flow fields (mid-z plane) - {grid_label(args.grid)} ({grid_n:,} cells, step {step_index}, dx={dx*1e3:.2f} mm, eps={eps_val*1e3:.2f} mm)",
+            fontsize=11,
             fontweight="bold",
         )
 
         def _format_ax(ax, title, data, cmap, symmetric=False):
+            # Use sdf >= eps (far-field, outside BDIM smearing zone) for
+            # percentile-based colormap range; display full fluid sdf >= 0.
+            farfield_mask = sdf_slice >= eps_val
+            data_farfield = np.where(farfield_mask, data, np.nan)
+            fluid_mask = sdf_slice >= 0
+            data_display = np.where(fluid_mask, data, np.nan)
             if symmetric:
-                vmax = max(abs(np.nanpercentile(data, 2)), abs(np.nanpercentile(data, 98)))
+                vmax = max(abs(np.nanpercentile(data_farfield, 2)), abs(np.nanpercentile(data_farfield, 98)))
                 vmin = -vmax
             else:
-                vmin = np.nanpercentile(data, 2)
-                vmax = np.nanpercentile(data, 98)
+                vmin = np.nanpercentile(data_farfield, 2)
+                vmax = np.nanpercentile(data_farfield, 98)
+            cmap_obj = plt.get_cmap(cmap).copy()
+            cmap_obj.set_bad(color="#cccccc")
             im = ax.imshow(
-                data.T,
+                data_display.T,
                 origin="lower",
                 aspect="equal",
-                cmap=cmap,
+                cmap=cmap_obj,
                 extent=[x_1d[0], x_1d[-1], y_1d[0], y_1d[-1]],
                 vmin=vmin,
                 vmax=vmax,

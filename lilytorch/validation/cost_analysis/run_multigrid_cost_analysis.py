@@ -20,6 +20,8 @@ from lilytorch.validation.cost_analysis.common import (
     DEFAULT_POISSON_METHOD,
     DEFAULT_SPAWN_X,
     DEFAULT_TIMESTEP,
+    DX_REF,
+    MIN_LX_FISH,
     default_results_dir,
     get_dimension_spec,
     grid_arg,
@@ -103,6 +105,14 @@ else:
     grids = list(spec.presets[args.preset])
 grids.sort(key=grid_cells)
 
+# When the user does not pin a physical domain explicitly, use a *per-grid*
+# domain Lx = Nx * DX_REF so that dx stays fixed at DX_REF across all grids
+# and the tank grows proportionally with Nx.  This keeps the BDIM smoothing
+# band (eps ∝ dx) constant in grid cells across resolutions, which is correct
+# for a performance scaling study.  Pass --Lx_fixed explicitly to override
+# (e.g. for a grid-convergence study with a shared physical domain).
+_lx_fixed_user = args.Lx_fixed is not None
+
 single_run_script = os.path.join(SCRIPT_DIR, "run_cost_analysis.py")
 if not os.path.isfile(single_run_script):
     print(f"ERROR: single-run script not found: {single_run_script}")
@@ -117,6 +127,11 @@ print(
     f"  Steps:       {args.n_steps} measured + {args.precompile} precompile + {args.settle_steps} settle per grid"
 )
 print(f"  Solver:      {args.poisson_method}, dtype={args.dtype}, mode={SOLVER_MODE or 'default'}")
+if _lx_fixed_user:
+    print(f"  Domain:      Lx_fixed = {args.Lx_fixed:.3f} m  [user-specified, same domain for all grids]")
+else:
+    per_lx = [f"{grid_label(g)}→{max(g[0] * DX_REF, MIN_LX_FISH):.4f} m" for g in grids]
+    print(f"  Domain:      per-grid Lx = max(Nx×DX_REF, {MIN_LX_FISH}) (dx≈{DX_REF:.6f} m)  [{', '.join(per_lx)}]")
 print(f"  Device:      {args.device.upper()}")
 print(f"  Output:      {args.out_dir}")
 print(f"  Timestamp:   {datetime.now().isoformat()}")
@@ -155,8 +170,12 @@ for index, grid in enumerate(grids):
         "--twl", str(args.twl),
         "--amp", str(args.amp),
     ]
-    if args.Lx_fixed is not None:
+    if _lx_fixed_user:
         cmd.extend(["--Lx_fixed", str(args.Lx_fixed)])
+    else:
+        # Fixed dx = DX_REF; domain scales with Nx, but at least MIN_LX_FISH
+        # so the fish always fits inside the tank even for coarse grids.
+        cmd.extend(["--Lx_fixed", str(max(grid[0] * DX_REF, MIN_LX_FISH))])
     if SOLVER_MODE is not None:
         cmd.extend(["--mode", SOLVER_MODE])
     for field, value in zip(spec.grid_fields, grid):

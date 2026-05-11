@@ -18,7 +18,7 @@ import pandas as pd
 
 
 DEFAULT_DTYPE = "float32"
-DEFAULT_POISSON_METHOD = "multigrid"
+DEFAULT_POISSON_METHOD = "mgcg"
 DEFAULT_TIMESTEP = 1.0e-4
 DEFAULT_SPAWN_X = -0.65
 
