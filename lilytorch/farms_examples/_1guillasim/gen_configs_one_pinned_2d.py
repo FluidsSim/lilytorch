@@ -75,6 +75,7 @@ class SimConfig(BaseSimConfig):
         # ── Body ─────────────────────────────────────────────────────
         self.force_scaling         = 0.04
         self.interp_data_subfolder = "interp_data_2d"
+        self.zero_pressure_inside  = True
 
     # ── Extensions ────────────────────────────────────────────────────
 

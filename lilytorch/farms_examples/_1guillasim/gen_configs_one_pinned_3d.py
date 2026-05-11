@@ -71,7 +71,7 @@ class SimConfig(BaseSimConfig):
         self.poisson_nsmoothing      = 5
         self.poisson_bc_type         = "neumann"
         self.rho_body                = 800.0
-        self.zero_pressure_inside    = False
+        self.zero_pressure_inside    = True
 
         # Disable compilation to speed up startup
         self.poisson_compile         = False

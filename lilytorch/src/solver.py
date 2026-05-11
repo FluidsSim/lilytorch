@@ -212,42 +212,6 @@ class FluidSolver(PlottingMixin):
     def vorticity_components(self, u, v, w):
         return ops.vorticity_components(u, v, w, self.h)
 
-    _VALID_SOLVER_METHODS = ("python", "kernel")
-
-    @staticmethod
-    def _resolve_solver_method(solver):
-        """Resolve the user-facing ``solver.solver_method`` key.
-
-        Only two active methods remain:
-          * ``"python"`` -- reference pure-Python/PyTorch path.
-          * ``"kernel"`` -- native streamed memory-saving path.
-
-        Legacy values/keys from the transitional implementation are accepted
-        as aliases and normalized to the two active methods.
-        """
-        import warnings
-
-        method = solver.get("solver_method", None)
-        legacy_uk = solver.get("use_kernels", None)
-
-        if method is None:
-            if legacy_uk is None:
-                method = "kernel"
-            else:
-                warnings.warn(
-                    "solver.use_kernels is deprecated; use solver.solver_method "
-                    "('python' or 'kernel') instead.",
-                    DeprecationWarning, stacklevel=3,
-                )
-                method = "kernel" if bool(legacy_uk) else "python"
-
-        if method not in FluidSolver._VALID_SOLVER_METHODS:
-            raise ValueError(
-                f"solver.solver_method must be one of "
-                f"{FluidSolver._VALID_SOLVER_METHODS}, got {method!r}."
-            )
-        return method
-
     def __init__(self, pars, dtype=None, custom_update=None, compute_forces=True):
         """
         BDIM2 solver for fluid structure interaction.
@@ -271,6 +235,7 @@ class FluidSolver(PlottingMixin):
         output    = pars["output"]
         body_pars = pars["body"]
 
+        # Device selection
         use_gpu = solver["use_gpu"]
         if torch.cuda.is_available() and use_gpu:
             print(f"Using GPU: {torch.cuda.get_device_name(0)} is available.")
@@ -280,12 +245,7 @@ class FluidSolver(PlottingMixin):
             self.device = torch.device("cpu")
             torch.set_num_threads(solver["nthreads"])
 
-        # ---- Resolve dtype: explicit kwarg > YAML > float32 default ----
-        # The Python kwarg takes precedence so existing callers that pass
-        # ``dtype=torch.float64`` keep working unchanged.  Otherwise the
-        # YAML key ``solver.dtype`` is consulted (matching BDIMhandler's
-        # behaviour) so that ``base_sim_config.dtype = "float64"`` alone
-        # is sufficient to switch the entire solver to double precision.
+        # dtype selection
         if dtype is None:
             dtype = solver.get("dtype", "float32")
         if isinstance(dtype, str):
@@ -480,6 +440,10 @@ class FluidSolver(PlottingMixin):
         self._bdim_meta_dyn_compiled = torch.compile(
             FluidSolver._bdim_meta, dynamic=True,
         )
+        # Per-step union AABB across all body sub-blocks.  Set inside the
+        # _fluid_step_* methods just before _apply_bdim_all_axes; left None
+        # everywhere else so the full-grid path runs.
+        self._bdim_union_aabb = None
 
         # ---- optional Towers (2008) 2nd-order delta correction -----------
         # When force_delta_order=2, the smoothed delta is divided by |∇SDF|
@@ -496,14 +460,14 @@ class FluidSolver(PlottingMixin):
         # ---- optional torch.compile for force computation -----
         self._compile_forces = solver.get("compile_forces", False)
 
-        # =====================================================================
-        # Solver method selection
-        # =====================================================================
-        # Only two user-facing methods remain:
-        #   * "python" -- reference path.
-        #   * "kernel" -- native streamed path: update-only geometry pass,
-        #     then post-fluid-step native forces from current fields.
-        self._solver_method = self._resolve_solver_method(solver)
+        self._solver_method = solver.get("solver_method", "kernel")
+        method = solver.get("solver_method", "kernel")
+        if method not in ("python", "kernel"):
+            raise ValueError(
+                f"solver.solver_method must be one of "
+                f"('python', 'kernel'), got {method!r}."
+            )
+
         _method = self._solver_method
         _kernel = (_method == "kernel")
 
@@ -545,6 +509,8 @@ class FluidSolver(PlottingMixin):
         self._mu_normals_dyn_compiled = torch.compile(
                 _mu_normals_batched, dynamic=True,
             )
+
+        # self.`_mu_normals_dyn_compiled = _mu_normals_batched
 
         self._forces_shared_compiled     = _forces_shared
         self._forces_body_batch_compiled = _forces_body_batch
@@ -655,29 +621,6 @@ class FluidSolver(PlottingMixin):
         self.X, self.Y = self.grids.X, self.grids.Y
         if self.ndim == 3:
             self.Z_grid = self.grids.Z_grid
-
-
-        # interpolators (2D only — used by force computation)
-        if self.ndim == 2:
-            self.force_x_interp = RegularGridInterpolator(
-                (self.grids.x_stag, self.y),
-                torch.zeros_like(self.X, device=self.device, dtype=self.dtype),
-                method="quadratic",
-                fill_value=None
-            )
-            self.force_y_interp = RegularGridInterpolator(
-                (self.x, self.grids.y_stag),
-                torch.zeros_like(self.Y, device=self.device, dtype=self.dtype),
-                method="quadratic",
-                fill_value=None
-            )
-
-            self.interp_utility = RegularGridInterpolator(
-                (self.x,self.y),
-                torch.zeros_like(self.X, device=self.device, dtype=self.dtype),
-                method="quadratic",
-                fill_value=None
-            )
 
         self.n_bodies = len(self.composite_body.bodies)
 
@@ -795,14 +738,8 @@ class FluidSolver(PlottingMixin):
         # ``if`` here lives in __init__ — that's the only place it is
         # allowed to remain (Step 1 of the 2-D/3-D unification refactor).
         # ----------------------------------------------------------------
-        if self.ndim == 3:
-            self._fluid_step          = self._fluid_step_3d
-            self._bdim_apply          = self._bdim_apply_3d
-        else:
-            self._fluid_step          = self._fluid_step_2d
-            self._bdim_apply          = self._bdim_apply_2d
-        # ``_recompute_mu_normals`` is a dim-agnostic class method — no
-        # per-D dispatch binding needed.
+        # ``_fluid_step``, ``_recompute_mu_normals`` and ``_bdim_apply``
+        # are dim-agnostic class methods — no per-D dispatch binding needed.
 
         # ----------------------------------------------------------------
         # Per-instance BDIM-intermediate free-dicts (Step 4 of unification).
@@ -1079,59 +1016,44 @@ class FluidSolver(PlottingMixin):
         return mu0 * diff + body_vel + mu1 * nd
 
     # ------------------------------------------------------------------
-    #   3-D BDIM apply with optional union-AABB narrow band
+    #   BDIM apply with optional union-AABB narrow band  (dim-agnostic)
     # ------------------------------------------------------------------
-    def _bdim_apply_2d(self, phi, mu0, body_vel, mu1, normal_x, normal_y):
-        """Apply the BDIM2 meta-equation to a single 2-D staggered grid.
+    def _bdim_apply(self, phi, mu0, body_vel, mu1, *normals):
+        """Apply the BDIM2 meta-equation to a single staggered grid.
 
-        Mirror of :meth:`_bdim_apply_3d` for the 2-D path.  The 2-D code
-        currently has no union-AABB crop fast path (mesh-body kernel
-        path is 3-D-only), so this is a thin wrapper around the
-        compiled meta-equation that returns a fresh tensor the caller
-        can keep across CUDA-graph replays.
-        """
-        return self._bdim_meta_dyn_compiled(
-            phi, mu0, body_vel, mu1,
-            normal_x, normal_y, self.h, 2,
-        ).clone()
-
-    def _bdim_apply_3d(self, phi, mu0, body_vel, mu1,
-                      normal_x, normal_y, normal_z):
-        """Apply the BDIM2 meta-equation to a single 3-D staggered grid.
-
-        When kernel mode is on AND a union AABB is available
-        (cached on ``self._bdim_union_aabb``), only the union sub-block
-        is touched.  Outside the union mu0=1, mu1=0, body_vel=0 makes the
+        Dim-agnostic: handles both 2-D (two normals) and 3-D (three
+        normals).  When a union AABB is available (cached on
+        ``self._bdim_union_aabb`` as a flat ``(lo_0, hi_0, lo_1, hi_1, ...)``
+        tuple of length ``2 * ndim``), only the union sub-block is
+        touched.  Outside the union mu0=1, mu1=0, body_vel=0 makes the
         meta-equation the identity, so phi[outside] is left unchanged
         (we slice-write the cropped result back into phi).
 
-        Otherwise falls back to the full-grid CUDA-graph kernel.
-        Returns a tensor that the caller can safely consume; the caller
-        is responsible for cloning if it needs to keep a reference past
-        the next CUDA-graph replay (full-grid path) — in the union path
-        the returned tensor is the input ``phi`` itself (mutated in
-        place), which is already an owned tensor.
+        Otherwise falls back to the full-grid kernel.  Returns a tensor
+        the caller can safely consume; the caller is responsible for
+        cloning if it needs to keep a reference past the next CUDA-graph
+        replay (full-grid path) — in the union path the returned tensor
+        is the input ``phi`` itself (mutated in place), which is already
+        an owned tensor.
         """
+        D = self.ndim
         _h = self.h
         u_aabb = self._bdim_union_aabb
         if u_aabb is None:
             return self._bdim_meta_dyn_compiled(
-                phi, mu0, body_vel, mu1,
-                normal_x, normal_y, normal_z,
-                _h, 3,
+                phi, mu0, body_vel, mu1, *normals, _h, D,
             )
 
-        ui0, ui1, uj0, uj1, uk0, uk1 = u_aabb
-        usl = (slice(ui0, ui1), slice(uj0, uj1), slice(uk0, uk1))
+        usl = tuple(
+            slice(u_aabb[2 * d], u_aabb[2 * d + 1]) for d in range(D)
+        )
         sub = self._bdim_meta_dyn_compiled(
             phi[usl].contiguous(),
             mu0[usl].contiguous(),
             body_vel[usl].contiguous(),
             mu1[usl].contiguous(),
-            normal_x[usl].contiguous(),
-            normal_y[usl].contiguous(),
-            normal_z[usl].contiguous(),
-            _h, 3,
+            *(n[usl].contiguous() for n in normals),
+            _h, D,
         )
         phi[usl] = sub
         return phi
@@ -1144,12 +1066,9 @@ class FluidSolver(PlottingMixin):
 
         For each axis ``a`` in ``('u', 'v'[, 'w'])`` reads the per-axis
         ``mu0_all_a``, ``mu1_all_a``, ``body_a`` and per-(axis,normal-component)
-        ``normal_<n>_<a>`` attributes, and dispatches through
-        ``self._bdim_apply`` (bound to the per-D method at __init__).
-
-        Used by both ``_fluid_step_2d`` and ``_fluid_step_3d`` (Step 4 of
-        the 2-D/3-D unification refactor) to remove the 12-line per-axis
-        BDIM blocks duplicated across the two methods.
+        ``normal_<n>_<a>`` attributes, and dispatches through the
+        dim-agnostic ``self._bdim_apply``.  Used by ``_fluid_step`` to
+        avoid per-axis duplication.
         """
         comp = self.composite_body
         out = []
@@ -1338,13 +1257,14 @@ class FluidSolver(PlottingMixin):
         axes   = self._bdim_axis_names   # ('u', 'v') or ('u', 'v', 'w')
         norms  = self._bdim_normal_names # ('x', 'y') or ('x', 'y', 'z')
 
-        # Build the stacked SDF input: (ngrids, *spatial).
+        # SDF attribute names: (sdf_val_u, sdf_val_v, [sdf_val_w,] sdf_val)
         sdf_attrs = tuple(f'sdf_val_{a}' for a in axes) + ('sdf_val',)
-        sdf_stack = torch.stack([getattr(comp, n) for n in sdf_attrs])
 
         # ------------------------------------------------------------------
         # Union-AABB crop path — outside the union SDF is _FAR so mu0=1,
         # mu1=0, normals=0 (these defaults never change between steps).
+        # Slice each SDF to the sub-block BEFORE stacking so the torch.stack
+        # allocation is O(sub-block) rather than O(full grid).
         # ------------------------------------------------------------------
         if self._use_kernels:
             u_aabb = self._compute_union_aabb(halo=2, bucket=16)
@@ -1381,7 +1301,11 @@ class FluidSolver(PlottingMixin):
                 slices = tuple(
                     slice(u_aabb[2 * d], u_aabb[2 * d + 1]) for d in range(D)
                 )
-                sdf_sub = sdf_stack[(slice(None),) + slices].contiguous()
+                # Stack only the sub-block — O(sub-block * ngrids) copy,
+                # not O(full-grid * ngrids).
+                sdf_sub = torch.stack(
+                    [getattr(comp, n)[slices] for n in sdf_attrs]
+                )
 
                 out = self._mu_normals_dyn_compiled(sdf_sub, comp.h, comp.eps)
                 mu0_s, mu1_s = out[0], out[1]
@@ -1397,6 +1321,7 @@ class FluidSolver(PlottingMixin):
                 return
 
         # ── Full-grid path: batched + compiled, all grids in one pass ──
+        sdf_stack = torch.stack([getattr(comp, n) for n in sdf_attrs])
         out = self._mu_normals_dyn_compiled(sdf_stack, comp.h, comp.eps)
         mu0, mu1 = out[0], out[1]
         normals = out[2:]
@@ -1415,6 +1340,13 @@ class FluidSolver(PlottingMixin):
     #  Variable-density FSI fluid step  (called by BDIMhandler.step)
     # ==================================================================
 
+    # ------------------------------------------------------------------
+    #   Persistent-buffer attribute names for the var-density fast path.
+    #   Position 0..D-1 → face-grid (axis u, v[, w]); position D → CC.
+    # ------------------------------------------------------------------
+    _VAR_DENS_PERSIST_NAMES = ('_ch_persist', '_cv_persist', '_cw_persist',
+                               '_ch_cc_persist')
+
     def _compute_variable_density_coefficients(self, timestep):
         """Compute variable-density Poisson coefficients for FSI coupling.
 
@@ -1426,146 +1358,150 @@ class FluidSolver(PlottingMixin):
 
         Effective density: ``rho_eff(x) = rho_body + (rho_fluid - rho_body) * mu0(x)``.
 
-        Narrow-band fast-path (3-D, mu_normals_union active)
-        ---------------------------------------------------
-        Outside the union AABB ``mu0 = 1`` everywhere, so
-        ``ch = cv = cw = ch_cc = dt / rho_fluid`` is constant.  Persistent
-        full-grid buffers are pre-filled once with that default and only the
-        union sub-block is overwritten each step, avoiding four full-grid
-        divisions.
-        """
-        _drho = float(self.rho) - self.rho_body
+        Narrow-band fast-path (kernel mode + sparse bodies, 2-D and 3-D)
+        ----------------------------------------------------------------
+        Outside the union AABB ``mu0 = 1`` everywhere, so the coefficients
+        are constant (``dt / rho_fluid``).  Persistent full-grid buffers
+        (``_ch_persist``, ``_cv_persist``, ``_cw_persist`` (3-D only),
+        ``_ch_cc_persist``) are pre-filled once with that default and only
+        the union sub-block is overwritten each step, avoiding ``D + 1``
+        full-grid divisions.
 
-        if (self.ndim == 3
-                and self._use_kernels
-                and self.mu0_all_u is not None
-                and self.mu0_all_v is not None
-                and self.mu0_all_w is not None
-                and self.mu0_all   is not None):
+        When the composite body has populated ``_winning_rho_cc`` (per-cell
+        winning-body density, from the fused SDF+forces kernel) the
+        sub-block uses that per-cell density; otherwise it falls back to
+        the scalar ``self.rho_body``.
+        """
+        D       = self.ndim
+        _drho   = float(self.rho) - self.rho_body
+        axes    = self._bdim_axis_names
+        # All D+1 grids ([u, v, [w,] cc]) share the same shape in this
+        # codebase (staggering is a coord offset, not a shape change),
+        # so a single slice tuple indexes every grid identically.
+        mu_grids = tuple(getattr(self, f'mu0_all_{a}') for a in axes) + (self.mu0_all,)
+
+        # ---- narrow-band fast path -------------------------------------
+        if self._use_kernels and all(m is not None for m in mu_grids):
             u_aabb = self._compute_union_aabb(halo=2, bucket=16)
             if u_aabb is not None:
                 _dt_over_rhofluid = float(timestep / float(self.rho))
-                mu0_u = self.mu0_all_u
+                names    = self._VAR_DENS_PERSIST_NAMES
+                face_names = names[:D]
+                cc_name    = names[3]   # always '_ch_cc_persist'
+                mu_ref     = mu_grids[0]
+
                 needs_realloc = (
                     getattr(self, '_ch_persist', None) is None
-                    or self._ch_persist.shape  != mu0_u.shape
-                    or self._ch_persist.dtype  != mu0_u.dtype
-                    or self._ch_persist.device != mu0_u.device
+                    or self._ch_persist.shape  != mu_ref.shape
+                    or self._ch_persist.dtype  != mu_ref.dtype
+                    or self._ch_persist.device != mu_ref.device
                     or self._ch_outside_val    != _dt_over_rhofluid
                 )
                 if needs_realloc:
-                    self._ch_persist     = torch.full_like(self.mu0_all_u, _dt_over_rhofluid)
-                    self._cv_persist     = torch.full_like(self.mu0_all_v, _dt_over_rhofluid)
-                    self._cw_persist     = torch.full_like(self.mu0_all_w, _dt_over_rhofluid)
-                    self._ch_cc_persist  = torch.full_like(self.mu0_all,   _dt_over_rhofluid)
+                    for name, mu in zip(face_names + (cc_name,), mu_grids):
+                        setattr(self, name, torch.full_like(mu, _dt_over_rhofluid))
                     self._ch_outside_val = _dt_over_rhofluid
 
-                ui0, ui1, uj0, uj1, uk0, uk1 = u_aabb
-                usl = (slice(ui0, ui1), slice(uj0, uj1), slice(uk0, uk1))
+                usl = tuple(
+                    slice(u_aabb[2 * d], u_aabb[2 * d + 1]) for d in range(D)
+                )
 
-                # Use per-cell winning body density when available (fused path).
-                # winning_rho_cc[x] = rho_body of the body closest to x,
-                # pre-filled with rho_fluid outside all bodies.
+                # Per-cell winning body density when the fused kernel
+                # populated it; otherwise scalar rho_body.
                 _winning = getattr(self.composite_body, '_winning_rho_cc', None)
                 if _winning is not None:
-                    _rho_b_u   = _winning[usl]
                     _rho_fluid = float(self.rho)
-                    self._ch_persist[usl]    = timestep / (
-                        _rho_b_u * (1 - self.mu0_all_u[usl]) +
-                        _rho_fluid * self.mu0_all_u[usl])
-                    self._cv_persist[usl]    = timestep / (
-                        _winning[usl] * (1 - self.mu0_all_v[usl]) +
-                        _rho_fluid * self.mu0_all_v[usl])
-                    self._cw_persist[usl]    = timestep / (
-                        _winning[usl] * (1 - self.mu0_all_w[usl]) +
-                        _rho_fluid * self.mu0_all_w[usl])
-                    self._ch_cc_persist[usl] = timestep / (
-                        _winning[usl] * (1 - self.mu0_all[usl]) +
-                        _rho_fluid * self.mu0_all[usl])
+                    _rho_b     = _winning[usl]
+                    for name, mu in zip(face_names + (cc_name,), mu_grids):
+                        mu_sub = mu[usl]
+                        getattr(self, name)[usl] = (
+                            timestep / (_rho_b * (1 - mu_sub) + _rho_fluid * mu_sub)
+                        )
                 else:
-                    self._ch_persist[usl]    = timestep / (self.rho_body + _drho * self.mu0_all_u[usl])
-                    self._cv_persist[usl]    = timestep / (self.rho_body + _drho * self.mu0_all_v[usl])
-                    self._cw_persist[usl]    = timestep / (self.rho_body + _drho * self.mu0_all_w[usl])
-                    self._ch_cc_persist[usl] = timestep / (self.rho_body + _drho * self.mu0_all[usl])
-                return (self._ch_persist, self._cv_persist,
-                        self._cw_persist, self._ch_cc_persist)
+                    for name, mu in zip(face_names + (cc_name,), mu_grids):
+                        getattr(self, name)[usl] = (
+                            timestep / (self.rho_body + _drho * mu[usl])
+                        )
 
-        ch    = timestep / (self.rho_body + _drho * self.mu0_all_u)
-        cv    = timestep / (self.rho_body + _drho * self.mu0_all_v)
-        ch_cc = timestep / (self.rho_body + _drho * self.mu0_all)
-        if self.ndim == 3:
-            cw = timestep / (self.rho_body + _drho * self.mu0_all_w)
-            return ch, cv, cw, ch_cc
-        return ch, cv, ch_cc
+                return (*(getattr(self, n) for n in face_names),
+                        getattr(self, cc_name))
+
+        # ---- full-grid fallback ----------------------------------------
+        return tuple(timestep / (self.rho_body + _drho * mu) for mu in mu_grids)
 
     def fluid_step(self, *args):
-        """One FSI fluid step (advect-BDIM-project).  Called by BDIMhandler."""
-        return self._fluid_step(*args)
+        """One FSI fluid step (advect-BDIM-project).  Called by BDIMhandler.
 
-    def _fluid_step_2d(self, u, v, p, timestep):
-        _ch, _cv, _ch_cc = self._compute_variable_density_coefficients(timestep)
+        Dim-agnostic.  Signature: ``(u, v, p, timestep)`` in 2-D,
+        ``(u, v, w, p, timestep)`` in 3-D.  Pipeline (same for both D):
 
-        def _advect_bdim(u_in, v_in, nu_t=None, u_rebase=None, v_rebase=None):
-            (up, vp) = self.adv_diff_solver.solve(u_in, v_in, nu_t=nu_t)
-            up = up.clone()
-            vp = vp.clone()
-            if u_rebase is not None:
-                up = u_rebase + (up - u_in)
-            if v_rebase is not None:
-                vp = v_rebase + (vp - v_in)
-            up, vp = self._apply_bdim_all_axes((up, vp))
-            self.adv_diff_solver.set_BCs(up, vp)
-            return up, vp
+        1. eddy viscosity (Smagorinsky / Carreau) on the cell-centred field
+        2. advection-diffusion → clone outputs
+        3. BDIM2 forcing on staggered grids, with union-AABB narrow band
+           when ``_use_kernels`` is on and bodies are sparse
+        4. ``set_BCs`` after BDIM so ghost cells are consistent for project
+        5. free BDIM intermediates (mu1, normals) before var-density solve
+        6. variable-density Poisson coefficients on staggered + CC grids
+        7. free mu0 fields before project (no longer needed)
+        8. pressure projection
+        9. optional sponge / yield damping
+        10. final ``set_BCs`` on the projected velocity
+        """
+        D = self.ndim
+        vels     = args[:D]
+        p        = args[D]
+        timestep = args[D + 1]
 
-        nu_t = self._compute_nu_t(u, v)
+        # 1-2. eddy viscosity + advection-diffusion
+        nu_t   = self._compute_nu_t(*vels)
+        primes = self.adv_diff_solver.solve(*vels, nu_t=nu_t)
+        primes = tuple(pp.clone() for pp in primes)
 
-        uprime, vprime = _advect_bdim(u, v, nu_t=nu_t)
-        u_out, v_out, p_out = self.project(uprime, vprime, p,
-                                            ch=_ch, cv=_cv, ch_cc=_ch_cc)
-
-        if self.use_sponge:
-            (u_out, v_out) = self.apply_sponge_damping(u_out, v_out)
-        if self.use_yield_damping:
-            (u_out, v_out) = self.apply_yield_damping(u_out, v_out)
-
-        self.adv_diff_solver.set_BCs(u_out, v_out)
-        return (u_out, v_out, p_out)
-
-    def _fluid_step_3d(self, u, v, w, p, timestep):
-        nu_t = self._compute_nu_t(u, v, w)
-        (uprime, vprime, wprime) = self.adv_diff_solver.solve(u, v, w, nu_t=nu_t)
-        uprime = uprime.clone()
-        vprime = vprime.clone()
-        wprime = wprime.clone()
-        self.adv_diff_solver.set_BCs(uprime, vprime, wprime)
-
+        # 3. BDIM with optional union-AABB narrow band (2-D harmlessly
+        #    falls back to full-grid when no sparse SDFs are available).
         self._bdim_union_aabb = (
             self._compute_union_aabb(halo=2) if self._use_kernels else None
         )
-        uprime, vprime, wprime = self._apply_bdim_all_axes(
-            (uprime, vprime, wprime))
+        primes = self._apply_bdim_all_axes(primes)
         self._bdim_union_aabb = None
 
+        # 4. enforce BCs on the post-BDIM field (BDIM may touch ghosts
+        #    when bodies straddle the domain boundary).
+        self.adv_diff_solver.set_BCs(*primes)
+
+        # 5. drop mu1 / normals — projected coefficients only need mu0.
         self.__dict__.update(self._FS_FREE_AFTER_BDIM)
 
-        ch, cv, cw, ch_cc = self._compute_variable_density_coefficients(timestep)
+        # 6. variable-density Poisson coefficients.
+        #    2-D returns (ch, cv, ch_cc); 3-D returns (ch, cv, cw, ch_cc).
+        coeffs       = self._compute_variable_density_coefficients(timestep)
+        ch_cc        = coeffs[-1]
+        face_coeffs  = coeffs[:-1]
 
+        # 7. drop mu0 fields — projection consumes ch/cv/cw/ch_cc only.
         self.__dict__.update(self._FS_FREE_AFTER_VAR_DENS)
 
-        if self.poisson_method == "fft":
-            (u, v, w, p) = self.project(uprime, vprime, p,
-                                        w_vel=wprime, ch=ch, cv=cv, cw=cw, ch_cc=ch_cc)
-        else:
-            (u, v, w, p) = self.project(uprime, vprime, p,
-                                        w_vel=wprime, ch=ch, cv=cv, cw=cw)
+        # 8. pressure projection.  ``ch_cc`` is consumed by the FFT path
+        #    only; the multigrid/MGCG path ignores it, so passing it
+        #    unconditionally is harmless and removes a branch.
+        proj_kwargs = {'ch': face_coeffs[0], 'cv': face_coeffs[1], 'ch_cc': ch_cc}
+        if D == 3:
+            proj_kwargs['cw']    = face_coeffs[2]
+            proj_kwargs['w_vel'] = primes[2]
+        out      = self.project(primes[0], primes[1], p, **proj_kwargs)
+        vels_out = out[:-1]
+        p_out    = out[-1]
 
+        # 9. boundary / yield damping.
         if self.use_sponge:
-            (u, v, w) = self.apply_sponge_damping(u, v, w)
+            vels_out = self.apply_sponge_damping(*vels_out)
         if self.use_yield_damping:
-            (u, v, w) = self.apply_yield_damping(u, v, w)
+            vels_out = self.apply_yield_damping(*vels_out)
 
-        self.adv_diff_solver.set_BCs(u, v, w)
-        return (u, v, w, p)
+        # 10. final BC pass on the projected velocity.
+        self.adv_diff_solver.set_BCs(*vels_out)
+
+        return (*vels_out, p_out)
 
     def check_explosion(self, iteration):
         """Abort if fluid fields are non-finite or velocities exceed _vmax_abort."""
@@ -1652,7 +1588,6 @@ class FluidSolver(PlottingMixin):
                     self.forces_method1(u, v, p, iteration)
                 else:
                     self.forces_method2(u, v, p, iteration)
-                self._apply_force_feedback(iteration, t)
 
         else:
             (u, v, w_vel, p) = self.fluid_step(u, v, w_vel, p, self.dt)
@@ -1662,8 +1597,8 @@ class FluidSolver(PlottingMixin):
 
             if self.compute_forces:
                 self.forces_method2_3d(u, v, w_vel, p, iteration)
-                self._apply_force_feedback(iteration, t)
 
+        self._apply_force_feedback(iteration, t)
         self.check_explosion(iteration)
 
         # ---- free BDIM fields to reclaim GPU memory between steps ----

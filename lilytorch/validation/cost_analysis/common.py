@@ -124,8 +124,17 @@ DIMENSION_SPECS = {
             "small": [(128, 32), (256, 64), (512, 128)],
             "medium": [(256, 64), (512, 128), (1024, 256)],
             "large": [(256, 64), (512, 128), (1024, 256), (2048, 512)],
-            "full": [(128, 32), (256, 64), (512, 128), (1024, 256), (2048, 512)],
-            "production": [(256, 64), (512, 128), (1024, 256)],
+            "full": [
+                (128, 32),
+                (256, 64),
+                (512, 128),
+                (1024, 256),
+                (2048, 512),
+                (4096, 1024),
+                (4096, 2048),
+                (8192, 2048),
+                ],
+            "production": [(256, 64), (512, 128), (1024, 256), (2048, 512)],
         },
         state_names=("u0", "v0", "p0"),
         update_leaf_label="1b   SDF eval (per-body x 3 grids)",
@@ -146,7 +155,7 @@ DIMENSION_SPECS = {
             "small": [(128, 32, 32), (256, 64, 64), (256, 128, 64)],
             "medium": [(256, 64, 64), (256, 128, 64), (512, 128, 128)],
             "large": [(256, 64, 64), (256, 128, 64), (256, 128, 128), (512, 128, 128)],
-            "full": [(128, 32, 32), (256, 64, 64), (256, 128, 64), (256, 128, 128), (512, 128, 128)],
+            "full": [(128, 32, 32), (256, 64, 64), (256, 128, 64), (256, 128, 128), (512, 128, 128), (1024, 256, 128)],
             "production": [(256, 64, 64), (256, 128, 64), (512, 128, 128)],
         },
         state_names=("u0", "v0", "w0", "p0"),
@@ -403,21 +412,24 @@ def plot_multigrid_summary(out_dir: str, spec: DimensionSpec, mode_tag: str, rec
         return False
 
     grids = sorted(records, key=grid_cells)
+    n_grids = len(grids)
     category_order = [
         category for category in list(CATEGORY_PREFIXES.keys()) + [OTHER_LABEL]
         if any(records[grid]["category_ms"].get(category, 0.0) > 0 for grid in grids)
     ]
 
-    fig, ax = plt.subplots(figsize=(7.0, 4.3))
-    x = np.arange(len(grids), dtype=float)
-    bottom = np.zeros(len(grids), dtype=float)
+    x = np.arange(n_grids, dtype=float)
+    bar_width = 0.55
+
+    # ── Figure 1: stacked bar chart ────────────────────────────────────
+    fig, ax = plt.subplots(figsize=(max(4.5, 1.2 * n_grids + 2), 4.3))
+    bottom = np.zeros(n_grids, dtype=float)
     for category in category_order:
         values = np.array([records[grid]["category_ms"].get(category, 0.0) for grid in grids], dtype=float)
         if np.allclose(values, 0.0):
             continue
         ax.bar(
-            x,
-            values,
+            x, values, bar_width,
             bottom=bottom,
             color=CAT_COLOURS.get(category, CAT_COLOURS[OTHER_LABEL]),
             edgecolor="white",
@@ -426,29 +438,97 @@ def plot_multigrid_summary(out_dir: str, spec: DimensionSpec, mode_tag: str, rec
         )
         bottom += values
 
+    for i in range(n_grids):
+        ax.text(x[i], bottom[i] + 0.02 * bottom.max(),
+                f"{bottom[i]:.1f} ms", ha="center", fontsize=8, fontweight="bold")
+
     ax.set_xticks(x)
     ax.set_xticklabels([grid_label(grid) for grid in grids], rotation=20, ha="right")
     ax.set_ylabel("Median time per step (ms)")
     ax.set_title(f"Cost breakdown - {spec.benchmark_label} ({spec.label}, {mode_tag})")
     ax.legend(loc="upper left", fontsize=8, framealpha=0.9)
+    ax.set_ylim(0, bottom.max() * 1.15)
     _save_figure(fig, os.path.join(out_dir, "cost_scaling_stacked.pdf"))
     _save_figure(fig, os.path.join(out_dir, f"cost_breakdown_{mode_tag}.pdf"))
 
+    # ── Figure 2: per-category log-log scaling ─────────────────────────
     cells = np.array([grid_cells(grid) for grid in grids], dtype=float)
     totals = np.array([records[grid]["total"] for grid in grids], dtype=float)
-    fig2, ax2 = plt.subplots(figsize=(6.8, 4.2))
-    ax2.loglog(cells, totals, marker="o", linewidth=1.9, color="#1565c0")
+    fig2, ax2 = plt.subplots(figsize=(6.8, 4.6))
+    _markers = ["o", "s", "D", "^", "v", "p", "h", "X", "*", "P", "<", ">"]
+    for i, category in enumerate(category_order):
+        values = np.array([records[grid]["category_ms"].get(category, 0.0) for grid in grids], dtype=float)
+        if np.allclose(values, 0.0) or not np.any(values > 0):
+            continue
+        ax2.loglog(
+            cells, values,
+            marker=_markers[i % len(_markers)], markersize=5,
+            label=category.replace("\n", " "), linewidth=1.4,
+            color=CAT_COLOURS.get(category, CAT_COLOURS[OTHER_LABEL]),
+        )
+
     if len(cells) >= 2:
         x_ref = np.array([cells[0], cells[-1]], dtype=float)
-        y_ref = totals[0] * x_ref / x_ref[0]
-        ax2.loglog(x_ref, y_ref, linestyle=":", color="#9e9e9e", linewidth=1.0, label="O(N) reference")
-        ax2.legend(loc="upper left", fontsize=8.5)
+        y0_proj = records[grids[0]]["category_ms"].get("Projection\n(pressure)", 0.0)
+        y0 = 0.3 * y0_proj if y0_proj > 0 else totals[0]
+        scale_lin = y0 * x_ref / x_ref[0]
+        scale_nln = y0 * (x_ref / x_ref[0]) * np.log2(x_ref) / max(np.log2(x_ref[0]), 1.0)
+        ax2.loglog(x_ref, scale_lin, "k--", alpha=0.35, linewidth=1.0, label=r"$\mathcal{O}(N)$")
+        ax2.loglog(x_ref, scale_nln, "k:",  alpha=0.35, linewidth=1.0, label=r"$\mathcal{O}(N\log N)$")
+
+        if np.all(totals > 0):
+            A = np.column_stack([np.ones_like(cells), cells])
+            coef, *_ = np.linalg.lstsq(A, totals, rcond=None)
+            a_fit, b_fit = float(coef[0]), float(coef[1])
+            if a_fit > 0 and b_fit > 0:
+                x_dense = np.geomspace(cells[0], cells[-1], 64)
+                ax2.loglog(
+                    x_dense, a_fit + b_fit * x_dense,
+                    color="#37474f", linestyle=(0, (4, 2)), linewidth=1.2, alpha=0.7,
+                    label=(fr"$a + b\,N$  ($a={a_fit:.2f}$ ms, "
+                           fr"$b={b_fit * 1e6:.2f}$ ns/cell)"),
+                )
+
     axis_suffix = "N_x N_y" if spec.dim == 2 else "N_x N_y N_z"
     ax2.set_xlabel(f"Total cells  ${axis_suffix}$")
     ax2.set_ylabel("Median time per step (ms)")
     ax2.set_title(f"Computational scaling - {spec.benchmark_label} ({spec.label}, {mode_tag})")
+    ax2.legend(loc="upper left", framealpha=0.9, fontsize=7.5, ncol=2)
     _save_figure(fig2, os.path.join(out_dir, "cost_scaling_loglog.pdf"))
     _save_figure(fig2, os.path.join(out_dir, f"cost_scaling_loglog_{mode_tag}.pdf"))
+
+    # ── Figure 3: percentage stacked bar ──────────────────────────────
+    fig3, ax3 = plt.subplots(figsize=(max(4.5, 1.2 * n_grids + 2), 4.0))
+    bottoms3 = np.zeros(n_grids, dtype=float)
+    cat_totals = np.zeros(n_grids, dtype=float)
+    for category in category_order:
+        cat_totals += np.array([records[grid]["category_ms"].get(category, 0.0) for grid in grids], dtype=float)
+
+    for category in category_order:
+        values = np.array([records[grid]["category_ms"].get(category, 0.0) for grid in grids], dtype=float)
+        if np.allclose(values, 0.0):
+            continue
+        pcts = 100.0 * values / np.maximum(cat_totals, 1e-12)
+        ax3.bar(x, pcts, bar_width, bottom=bottoms3,
+                color=CAT_COLOURS.get(category, CAT_COLOURS[OTHER_LABEL]),
+                edgecolor="white", linewidth=0.5,
+                label=category.replace("\n", " "))
+        for j in range(n_grids):
+            if pcts[j] >= 8:
+                ax3.text(x[j], bottoms3[j] + pcts[j] / 2,
+                         f"{pcts[j]:.0f}%", ha="center", va="center",
+                         fontsize=7, color="white", fontweight="bold")
+        bottoms3 += pcts
+
+    ax3.set_xticks(x)
+    ax3.set_xticklabels([grid_label(grid) for grid in grids], rotation=20, ha="right")
+    ax3.set_ylabel("Fraction of step time (%)")
+    ax3.set_title(f"Relative cost distribution - {spec.benchmark_label} ({spec.label}, {mode_tag})")
+    ax3.set_ylim(0, 105)
+    ax3.legend(loc="upper right", framealpha=0.9, fontsize=7.5, ncol=1)
+    _save_figure(fig3, os.path.join(out_dir, "cost_scaling_pct.pdf"))
+    _save_figure(fig3, os.path.join(out_dir, f"cost_scaling_pct_{mode_tag}.pdf"))
+
     return True
 
 

@@ -72,55 +72,6 @@ git checkout -b unify-2d-3d/<step-name>
 
 ---
 
-## Step 2 — Unify `_mu_normals_batched_2d` / `_3d`
-
-**Goal:** one Python function with two compiled wrappers.
-
-**File:** [lilytorch/src/body.py:276-301](lilytorch/src/body.py#L276-L301)
-
-**Tasks:**
-1. Define `_mu_normals_batched(sdf_stag, sdf_cc, h, eps)` where `sdf_stag` is either a tuple/list of `(sdf_u, sdf_v)` or `(sdf_u, sdf_v, sdf_w)`. Loop over the axis dimension; the math is identical.
-2. Keep two compiled artifacts: `_mu_normals_batched_2d_compiled = torch.compile(lambda *a: _mu_normals_batched(...))` etc. so `torch.compile` still specializes per-D.
-3. The standalone `compute_normals_3d_batched` at [body.py:924](lilytorch/src/body.py#L924) is already dim-agnostic via input — point its 2D callers at the unified function.
-4. Update imports in `solver.py` ([solver.py:17-20](lilytorch/src/solver.py#L17-L20)) — keep the two compiled symbol names so `solver.py` does not change.
-
-**Acceptance:** body.py shrinks by ~25 lines, no behavior change.
-
----
-
-## Step 3 — Unify forces leaves
-
-**Files:** [lilytorch/src/forces.py](lilytorch/src/forces.py)
-
-Functions to merge:
-- `_forces_shared_2d` ([forces.py:294](lilytorch/src/forces.py#L294)) + `_forces_shared_3d` ([forces.py:24](lilytorch/src/forces.py#L24))
-- `_forces_body_batch_2d` ([forces.py:357](lilytorch/src/forces.py#L357)) + `_forces_body_batch_3d` ([forces.py:175](lilytorch/src/forces.py#L175))
-- `_forces_body_integrate_3d` ([forces.py:96](lilytorch/src/forces.py#L96)) — has no 2D counterpart; leave alone.
-
-**Tasks:**
-1. Express viscous stress and pressure-gradient projection in terms of stacked component lists; use `torch.stack` for cross-products. The 2D "torque is a scalar" case becomes `cross_2d(a, b) = a[0]*b[1] - a[1]*b[0]` — keep a small helper.
-2. Replace the two compiled-symbol bindings in [solver.py:566-608](lilytorch/src/solver.py#L566-L608) with calls into the unified function compiled twice (once per D).
-3. `forces_method2_3d` at [forces.py:783](lilytorch/src/forces.py#L783) — rename to `forces_method2` once the 2D path (`forces_method2` in the same file) collapses into the same code. Currently the 2D path is the longer code at [forces.py:559-781](lilytorch/src/forces.py#L559-L781). They are NOT structurally identical — the 2D path has the legacy sparse fallback and the kernel-post path. Keep those branches but merge everything outside them.
-
-**Acceptance:** forces.py shrinks by ~300-400 lines. Same numerical results to <1e-6.
-
----
-
-## Step 4 — Unify `_fluid_step_2d` / `_3d`
-
-**File:** [lilytorch/src/solver.py:1799 and 1859](lilytorch/src/solver.py#L1799)
-
-**Prereq:** Steps 1-3 done. Reason: once mu/normals and forces are unified, the two `_fluid_step` methods differ only in `(u, v)` vs `(u, v, w)` plumbing.
-
-**Tasks:**
-1. Adopt a stacked velocity convention internally to `_fluid_step`: a tuple `vels = (u, v)` or `(u, v, w)`. Loop over components for advection-diffusion, BDIM, and pressure correction.
-2. Pressure projection is already dim-agnostic ([poisson_fft.py](lilytorch/src/poisson_fft.py), [poisson_mult.py](lilytorch/src/poisson_mult.py)) — no change there.
-3. Extend the `_FS_FREE_AFTER_BDIM_3D` / `_FS_FREE_AFTER_VAR_DENS_3D` memory-free dicts ([solver.py:184-191](lilytorch/src/solver.py#L184)) to a single dict keyed by component count, OR build them from a list comprehension over component names. The 2D path currently does NOT free intermediates between substeps — fix that as part of this step (stand-alone perf win).
-
-**Acceptance:** one `_fluid_step` method, ~200 lines deleted from solver.py, 2D memory footprint reduced.
-
----
-
 ## Step 5 — Stacked-tensor storage (the deep refactor)
 
 **Goal:** replace `(u0, v0, w0)`, `(nx, ny, nz)`, `(mu0_u, mu0_v, mu0_w)`, etc. with single tensors of shape `(D, *grid)`.

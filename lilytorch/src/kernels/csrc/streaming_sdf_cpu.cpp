@@ -379,7 +379,8 @@ void apply_bcs_3d_cpu(
     const at::Tensor& neu_desc,
     const at::Tensor& dir_desc,
     const at::Tensor& dir_val,
-    const int64_t /*max_plane_dim*/)
+    const int64_t /*max_dim0*/,
+    const int64_t /*max_dim1*/)
 {
     TORCH_CHECK(u.is_contiguous() && v.is_contiguous() && w.is_contiguous(),
                 "apply_bcs_3d_cpu: u/v/w must be contiguous");
@@ -563,7 +564,9 @@ void streaming_sdf_min_rho_3d_multi_cpu(
     at::Tensor body_u, at::Tensor body_v, at::Tensor body_w,
     const int64_t interp_method,
     const at::Tensor& rho_bodies,
-    at::Tensor winning_rho_cc)
+    at::Tensor winning_rho_cc,
+    const int64_t /*dirty_i0*/, const int64_t /*dirty_j0*/, const int64_t /*dirty_k0*/,
+    const int64_t /*dirty_Ai*/, const int64_t /*dirty_Aj*/, const int64_t /*dirty_Ak*/)
 {
     const int B = (int)aabb_dim.size(0);
     if (B <= 0) return;

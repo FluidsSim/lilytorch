@@ -97,17 +97,17 @@ def install_patch():
             )
 
         with B.time("F.5  bdim_apply x3"):
-            uprime = fs._bdim_apply_3d(
+            uprime = fs._bdim_apply(
                 uprime, fs.mu0_all_u,
                 fs.composite_body.body_u, fs.mu1_all_u,
                 fs.normal_x_u, fs.normal_y_u, fs.normal_z_u,
             )
-            vprime = fs._bdim_apply_3d(
+            vprime = fs._bdim_apply(
                 vprime, fs.mu0_all_v,
                 fs.composite_body.body_v, fs.mu1_all_v,
                 fs.normal_x_v, fs.normal_y_v, fs.normal_z_v,
             )
-            wprime = fs._bdim_apply_3d(
+            wprime = fs._bdim_apply(
                 wprime, fs.mu0_all_w,
                 fs.composite_body.body_w, fs.mu1_all_w,
                 fs.normal_x_w, fs.normal_y_w, fs.normal_z_w,

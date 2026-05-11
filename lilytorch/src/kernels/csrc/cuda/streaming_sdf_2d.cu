@@ -131,6 +131,8 @@ __device__ __forceinline__ scalar_t sdf_sample_dispatch_2d(
 //  rationale and the init / decode pipeline.
 // =====================================================================
 
+// Initialises key arrays only within the dirty sub-block
+// [di0, di0+dAi) x [dj0, dj0+dAj), the union of prev and curr union AABBs.
 template <typename scalar_t>
 __global__ void streaming_sdf_init_keys_2d_kernel(
     const scalar_t* __restrict__ sdf_cc,
@@ -139,11 +141,17 @@ __global__ void streaming_sdf_init_keys_2d_kernel(
     uint64_t* __restrict__ key_cc,
     uint64_t* __restrict__ key_u,
     uint64_t* __restrict__ key_v,
-    const int Ngrid,
-    const int B_sentinel)
+    const int dirty_vol,
+    const int B_sentinel,
+    const int di0, const int dj0,
+    const int dAi, const int dAj,
+    const int Ngy)
 {
-    const int g = blockIdx.x * blockDim.x + threadIdx.x;
-    if (g >= Ngrid) return;
+    const int local = blockIdx.x * blockDim.x + threadIdx.x;
+    if (local >= dirty_vol) return;
+    const int dj = local % dAj;
+    const int di = local / dAj;
+    const int g  = (di0 + di) * Ngy + (dj0 + dj);
     key_cc[g] = pack_sdf_body_key(sdf_cc[g], B_sentinel);
     key_u [g] = pack_sdf_body_key(sdf_u [g], B_sentinel);
     key_v [g] = pack_sdf_body_key(sdf_v [g], B_sentinel);
@@ -588,21 +596,25 @@ __global__ void streaming_sdf_decode_keys_rho_2d_kernel(
     const scalar_t* __restrict__ rho_bodies,
     const scalar_t* __restrict__ gx,
     const scalar_t* __restrict__ gy,
-    const int Ngx, const int Ngy,
+    const int Ngy,
     const int B_sentinel,
     scalar_t* __restrict__ sdf_cc,
     scalar_t* __restrict__ sdf_u,
     scalar_t* __restrict__ sdf_v,
     scalar_t* __restrict__ bU,
     scalar_t* __restrict__ bV,
-    scalar_t* __restrict__ winning_rho_cc)
+    scalar_t* __restrict__ winning_rho_cc,
+    const int dirty_vol,
+    const int di0, const int dj0,
+    const int dAi, const int dAj)
 {
-    const int g = blockIdx.x * blockDim.x + threadIdx.x;
-    const int Ngrid = Ngx * Ngy;
-    if (g >= Ngrid) return;
-
-    const int j = g % Ngy;
-    const int i = g / Ngy;
+    const int local = blockIdx.x * blockDim.x + threadIdx.x;
+    if (local >= dirty_vol) return;
+    const int dj = local % dAj;
+    const int di = local / dAj;
+    const int i  = di0 + di;
+    const int j  = dj0 + dj;
+    const int g  = i * Ngy + j;
 
     const uint64_t kc = key_cc[g];
     const uint64_t ku = key_u [g];
@@ -651,7 +663,9 @@ void streaming_sdf_min_rho_2d_multi_cuda(
     at::Tensor body_u, at::Tensor body_v,
     const int64_t interp_method,
     const at::Tensor& rho_bodies,
-    at::Tensor winning_rho_cc)
+    at::Tensor winning_rho_cc,
+    const int64_t dirty_i0, const int64_t dirty_j0,
+    const int64_t dirty_Ai, const int64_t dirty_Aj)
 {
     const int B = (int)aabb_dim.size(0);
     if (B <= 0 || max_vol_per_body <= 0) return;
@@ -670,9 +684,11 @@ void streaming_sdf_min_rho_2d_multi_cuda(
     auto key_u_t  = at::empty({Ngrid}, key_opts);
     auto key_v_t  = at::empty({Ngrid}, key_opts);
 
+    const int64_t dirty_vol = dirty_Ai * dirty_Aj;
+
     AT_DISPATCH_FLOATING_TYPES(F_flat.scalar_type(), "streaming_sdf_min_rho_2d_multi_cuda", [&] {
         const int initBlock = 256;
-        const int initBlocks = (int)((Ngrid + initBlock - 1) / initBlock);
+        const int initBlocks = (int)((dirty_vol + initBlock - 1) / initBlock);
         streaming_sdf_init_keys_2d_kernel<scalar_t>
             <<<initBlocks, initBlock, 0, stream>>>(
                 sdf_cc.data_ptr<scalar_t>(),
@@ -681,7 +697,10 @@ void streaming_sdf_min_rho_2d_multi_cuda(
                 (uint64_t*)key_cc_t.data_ptr<int64_t>(),
                 (uint64_t*)key_u_t .data_ptr<int64_t>(),
                 (uint64_t*)key_v_t .data_ptr<int64_t>(),
-                (int)Ngrid, B);
+                (int)dirty_vol, B,
+                (int)dirty_i0, (int)dirty_j0,
+                (int)dirty_Ai, (int)dirty_Aj,
+                Ngy);
 
         const int blocksPerBody = (int)((max_vol_per_body + blockSize - 1) / blockSize);
         streaming_sdf_min_rho_2d_multi_kernel<scalar_t>
@@ -710,13 +729,16 @@ void streaming_sdf_min_rho_2d_multi_cuda(
                 kin.data_ptr<scalar_t>(),
                 rho_bodies.data_ptr<scalar_t>(),
                 gx.data_ptr<scalar_t>(), gy.data_ptr<scalar_t>(),
-                Ngx, Ngy, B,
+                Ngy, B,
                 sdf_cc.data_ptr<scalar_t>(),
                 sdf_u .data_ptr<scalar_t>(),
                 sdf_v .data_ptr<scalar_t>(),
                 body_u.data_ptr<scalar_t>(),
                 body_v.data_ptr<scalar_t>(),
-                winning_rho_cc.data_ptr<scalar_t>());
+                winning_rho_cc.data_ptr<scalar_t>(),
+                (int)dirty_vol,
+                (int)dirty_i0, (int)dirty_j0,
+                (int)dirty_Ai, (int)dirty_Aj);
     });
 }
 

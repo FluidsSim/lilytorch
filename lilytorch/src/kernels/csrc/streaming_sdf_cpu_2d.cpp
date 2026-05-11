@@ -226,7 +226,9 @@ void streaming_sdf_min_rho_2d_multi_cpu(
     at::Tensor body_u, at::Tensor body_v,
     const int64_t interp_method,
     const at::Tensor& rho_bodies,
-    at::Tensor winning_rho_cc)
+    at::Tensor winning_rho_cc,
+    const int64_t /*dirty_i0*/, const int64_t /*dirty_j0*/,
+    const int64_t /*dirty_Ai*/, const int64_t /*dirty_Aj*/)
 {
     const int B = (int)aabb_dim.size(0);
     if (B <= 0) return;

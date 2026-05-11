@@ -20,12 +20,14 @@ from lilytorch.validation.cost_analysis.common import (
     DEFAULT_SPAWN_X,
     DEFAULT_TIMESTEP,
     default_pipeline_dir,
+    discover_cost_records,
     get_dimension_spec,
     grid_arg,
     grid_label,
     parse_grid_list,
     parse_modes,
     plot_mode_comparison,
+    plot_multigrid_summary,
 )
 
 
@@ -36,7 +38,7 @@ parser.add_argument("--dim", type=int, default=2, choices=[2, 3])
 parser.add_argument("--sim", type=str, default="pinned", choices=["pinned"])
 parser.add_argument("--modes", type=str, default="python,kernel")
 parser.add_argument("--grids", type=str, default=None)
-parser.add_argument("--preset", type=str, default="medium")
+parser.add_argument("--preset", type=str, default="full")
 parser.add_argument("--n_steps", type=int, default=20)
 parser.add_argument("--precompile", type=int, default=30)
 parser.add_argument("--settle_steps", type=int, default=5)
@@ -160,6 +162,23 @@ if plot_generated:
     print(f"\n  Combined mode-comparison figures saved in {args.out_dir}")
 else:
     print("\n  ERROR: No mode CSVs were found.")
+
+# Regenerate per-condition summary plots (stacked, loglog, pct) from
+# existing CSVs in each mode subfolder.  This ensures --plot-only
+# refreshes both the combined conditions figures AND the per-condition
+# cost_scaling_loglog / cost_scaling_pct figures.
+print(f"\n  Regenerating per-condition summary plots...")
+for mode in modes:
+    cond_dir = os.path.join(args.out_dir, mode)
+    records = discover_cost_records(cond_dir, spec.dim)
+    if not records:
+        print(f"    {mode}: no CSV records found, skipping.")
+        continue
+    ok = plot_multigrid_summary(cond_dir, spec, mode, records)
+    if ok:
+        print(f"    {mode}: figures updated in {cond_dir}")
+    else:
+        print(f"    {mode}: plot_multigrid_summary returned False.")
 
 if failed_modes:
     print(f"\n  Failed modes: {', '.join(failed_modes)}")

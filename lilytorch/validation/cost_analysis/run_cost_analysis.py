@@ -319,15 +319,6 @@ def instrument_handler(handler):
 
         fs._bdim_meta_dyn_compiled = timed_bdim
 
-        if hasattr(fs, "_bdim_meta_dyn_compiled"):
-            _saved_bdim_dyn = fs._bdim_meta_dyn_compiled
-
-            def timed_bdim_dyn(*call_args, **call_kwargs):
-                with T("3b   BDIM meta-equation"):
-                    return _saved_bdim_dyn(*call_args, **call_kwargs)
-
-            fs._bdim_meta_dyn_compiled = timed_bdim_dyn
-
         def timed_project(self_fs, *call_args, **call_kwargs):
             with T("3c   projection (Poisson+gradient+correction)"):
                 return _orig_project(self_fs, *call_args, **call_kwargs)
@@ -458,12 +449,12 @@ def _apply_cfg_overrides(cfg):
     # MGCG init-exit on a zero warm-start every step and the pressure
     # never gets updated (visible as a flat-zero pressure plot).
     cfg.poisson_tol = 1.0e-7
-    cfg.poisson_max_cycles = 10
+    cfg.poisson_max_cycles = 2
     cfg.poisson_max_mgcg_cycles = 10
     cfg.poisson_precond_vcycles = 1
     cfg.poisson_warm_start = True
     cfg.poisson_smoother = "rbgs"
-    cfg.poisson_nsmoothing = 2
+    cfg.poisson_nsmoothing = 4
     cfg.zero_pressure_inside = getattr(cfg, "zero_pressure_inside", False)
 
     cfg.save_every = args.save_every

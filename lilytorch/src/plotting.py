@@ -1194,12 +1194,11 @@ class PlottingMixin:
                     eff_vmin = self.vmin if vmin is None else (None if vmin == "auto" else vmin)
                     eff_vmax = self.vmax if vmax is None else (None if vmax == "auto" else vmax)
                     save_path = self.save_path
-                    _bodies  = bodies if show_body else None
                     self._submit_io(
                         plot_field_2d,
                         field_np, _phys_extent,
                         name, iteration, save_path,
-                        vmin=eff_vmin, vmax=eff_vmax, bodies=_bodies,
+                        vmin=eff_vmin, vmax=eff_vmax, bodies=None,
                         sdf_2d=_sdf_2d if show_body else None,
                         body_mu0_rgba=_body_mu0_rgba if show_body else None,
                         body_com_positions=_com_positions if show_body else None,

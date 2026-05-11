@@ -44,7 +44,9 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " Tensor(e!) body_u, Tensor(f!) body_v, Tensor(g!) body_w,"
         " int interp_method,"
         " Tensor rho_bodies,"
-        " Tensor(h!) winning_rho_cc"
+        " Tensor(h!) winning_rho_cc,"
+        " int dirty_i0, int dirty_j0, int dirty_k0,"
+        " int dirty_Ai, int dirty_Aj, int dirty_Ak"
         ") -> ()");
 
     m.def(
@@ -67,7 +69,7 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         "apply_bcs_3d("
         "Tensor(a!) u, Tensor(b!) v, Tensor(c!) w,"
         " Tensor shapes, Tensor neu_desc, Tensor dir_desc, Tensor dir_val,"
-        " int max_plane_dim"
+        " int max_dim0, int max_dim1"
         ") -> ()");
 
     m.def(
@@ -81,7 +83,8 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " Tensor(d!) body_u, Tensor(e!) body_v,"
         " int interp_method,"
         " Tensor rho_bodies,"
-        " Tensor(f!) winning_rho_cc"
+        " Tensor(f!) winning_rho_cc,"
+        " int dirty_i0, int dirty_j0, int dirty_Ai, int dirty_Aj"
         ") -> ()");
 
     m.def(
