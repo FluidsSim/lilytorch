@@ -548,7 +548,6 @@ def _apply_cfg_overrides(cfg):
                 # as a single CUDA graph call (~5 µs) instead of ~140+
                 # individual kernel dispatches (~140 µs with mode='default').
                 solver_cfg["poisson_compile_mode"] = "reduce-overhead"
-                solver_cfg["compile_forces"] = True
                 solver_cfg["dtype"] = args.dtype
                 solver_cfg["poisson_method"] = args.poisson_method
                 if SOLVER_MODE is not None:
