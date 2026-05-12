@@ -24,6 +24,7 @@ import ctypes.util
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 from pathlib import Path
@@ -83,6 +84,9 @@ typedef struct {
   int width;
   int height;
   int device;
+  int resource_width;
+  int resource_height;
+  int resource_device;
   int generation;
   int uploaded_generation;
   uintptr_t cuda_ptr;
@@ -106,6 +110,9 @@ static FlowViewerHookState g_state = {
     .width = 0,
     .height = 0,
     .device = 0,
+  .resource_width = 0,
+  .resource_height = 0,
+  .resource_device = -1,
     .generation = 0,
     .uploaded_generation = -1,
     .cuda_ptr = 0,
@@ -236,6 +243,9 @@ static int create_program(GLuint* program_out, GLint* alpha_location, GLint* tex
 
 static void destroy_gl_resources_locked(void) {
   if (g_state.resource) {
+    if (g_state.resource_device >= 0) {
+      cudaSetDevice(g_state.resource_device);
+    }
     cudaGraphicsUnregisterResource(g_state.resource);
     g_state.resource = NULL;
   }
@@ -261,13 +271,22 @@ static void destroy_gl_resources_locked(void) {
   }
   g_state.gl_ready = 0;
   g_state.uploaded_generation = -1;
+  g_state.resource_width = 0;
+  g_state.resource_height = 0;
+  g_state.resource_device = -1;
 }
 
 static int ensure_gl_resources_locked(void) {
   GLsizeiptr vertex_bytes = (GLsizeiptr)(4 * 5 * (int)sizeof(float));
 
-  if (g_state.gl_ready) {
+  if (g_state.gl_ready &&
+      g_state.resource_width == g_state.width &&
+      g_state.resource_height == g_state.height &&
+      g_state.resource_device == g_state.device) {
     return 1;
+  }
+  if (g_state.gl_ready) {
+    destroy_gl_resources_locked();
   }
 
   glGenTextures(1, &g_state.texture);
@@ -297,6 +316,11 @@ static int ensure_gl_resources_locked(void) {
       GL_STREAM_DRAW);
   glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
 
+  if (!cuda_ok(cudaSetDevice(g_state.device), "cudaSetDevice")) {
+    destroy_gl_resources_locked();
+    return 0;
+  }
+
   if (!cuda_ok(cudaGraphicsGLRegisterBuffer(
           &g_state.resource,
           g_state.pbo,
@@ -323,6 +347,9 @@ static int ensure_gl_resources_locked(void) {
   glBindBuffer(GL_ARRAY_BUFFER, 0);
   glBindVertexArray(0);
 
+  g_state.resource_width = g_state.width;
+  g_state.resource_height = g_state.height;
+  g_state.resource_device = g_state.device;
   g_state.gl_ready = 1;
   return 1;
 }
@@ -520,9 +547,6 @@ void lily_flow_viewer_hook_set_overlay(
     int device,
     int generation) {
   pthread_mutex_lock(&g_state.mutex);
-  if (g_state.gl_ready && (g_state.width != width || g_state.height != height)) {
-    destroy_gl_resources_locked();
-  }
   g_state.enabled = 1;
   g_state.width = width;
   g_state.height = height;
@@ -748,6 +772,22 @@ def prepare_mujoco_gl_hook_env(base_env: dict | None = None) -> dict:
     from process startup (required for LD_PRELOAD to intercept mjr_render).
     """
     env = dict(os.environ if base_env is None else base_env)
+
+    # CUDA-OpenGL interop requires the viewer's GL context to live on the same
+    # GPU as the CUDA device. On hybrid Linux laptops, GLFW commonly lands on
+    # the integrated Mesa stack unless the subprocess is nudged toward the
+    # NVIDIA GLX vendor up front.
+    if (
+        sys.platform.startswith("linux")
+        and env.get("DISPLAY")
+        and env.get("MUJOCO_GL", "glfw") == "glfw"
+        and env.get("XDG_SESSION_TYPE", "x11") == "x11"
+        and shutil.which("nvidia-smi") is not None
+    ):
+        env.setdefault("__NV_PRIME_RENDER_OFFLOAD", "1")
+        env.setdefault("__GLX_VENDOR_LIBRARY_NAME", "nvidia")
+        env.setdefault("__VK_LAYER_NV_optimus", "NVIDIA_only")
+
     try:
         library_path = ensure_flow_viewer_gl_hook_built()
     except Exception as exc:

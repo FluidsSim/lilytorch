@@ -506,11 +506,11 @@ class FluidSolver(PlottingMixin):
                     f"1 (triquadratic); got {self._sdf_interp_method}"
                 )
 
-        self._mu_normals_dyn_compiled = torch.compile(
-                _mu_normals_batched, dynamic=True,
-            )
+        # self._mu_normals_dyn_compiled = torch.compile(
+        #         _mu_normals_batched, dynamic=True,
+        #     )
 
-        # self.`_mu_normals_dyn_compiled = _mu_normals_batched
+        self._mu_normals_dyn_compiled = _mu_normals_batched
 
         self._forces_shared_compiled     = _forces_shared
         self._forces_body_batch_compiled = _forces_body_batch

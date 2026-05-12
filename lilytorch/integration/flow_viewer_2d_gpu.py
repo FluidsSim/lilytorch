@@ -89,6 +89,8 @@ def _load_cudart():
         return None
 
     lib = ctypes.CDLL(lib_name)
+    lib.cudaSetDevice.argtypes = [ctypes.c_int]
+    lib.cudaSetDevice.restype = ctypes.c_int
     lib.cudaGraphicsGLRegisterBuffer.argtypes = [
         ctypes.POINTER(ctypes.c_void_p),
         ctypes.c_uint,
@@ -168,10 +170,12 @@ class _CudaGlTextureUploader:
                 "Expected a CUDA uint8 tensor with shape (height, width, 3)."
             )
 
-        state = self._ensure_state(renderer, texture_slot, texture_u8.shape)
+        device_index = int(texture_u8.device.index or 0)
+        state = self._ensure_state(renderer, texture_slot, texture_u8.shape, device_index)
 
         renderer._gl_context.make_current()
         self._clear_gl_errors()
+        self._cuda_check(self._cudart.cudaSetDevice(device_index), "cudaSetDevice")
         torch.cuda.synchronize(texture_u8.device)
 
         resource = state["resource"]
@@ -229,7 +233,13 @@ class _CudaGlTextureUploader:
         self._clear_gl_errors()
         return True
 
-    def _ensure_state(self, renderer, texture_slot: int, shape: tuple[int, int, int]):
+    def _ensure_state(
+        self,
+        renderer,
+        texture_slot: int,
+        shape: tuple[int, int, int],
+        device_index: int,
+    ):
         renderer_id = id(renderer)
         height, width, channels = shape
         if channels != 3:
@@ -254,6 +264,7 @@ class _CudaGlTextureUploader:
             and state["height"] == height
             and state["texture_slot"] == texture_slot
             and state["gl_texture"] == gl_texture
+            and state["device_index"] == device_index
         ):
             return state
 
@@ -266,6 +277,7 @@ class _CudaGlTextureUploader:
         GL.glBindBuffer(GL.GL_PIXEL_UNPACK_BUFFER, 0)
 
         resource = ctypes.c_void_p()
+        self._cuda_check(self._cudart.cudaSetDevice(device_index), "cudaSetDevice")
         self._cuda_check(
             self._cudart.cudaGraphicsGLRegisterBuffer(
                 ctypes.byref(resource),
@@ -284,6 +296,7 @@ class _CudaGlTextureUploader:
             "num_bytes": num_bytes,
             "pbo": pbo,
             "resource": resource,
+            "device_index": device_index,
         }
         self._states[renderer_id] = state
         return state
@@ -295,6 +308,10 @@ class _CudaGlTextureUploader:
         resource = state.get("resource")
         if resource is not None and resource.value:
             try:
+                self._cuda_check(
+                    self._cudart.cudaSetDevice(int(state.get("device_index", 0))),
+                    "cudaSetDevice",
+                )
                 self._cuda_check(
                     self._cudart.cudaGraphicsUnregisterResource(resource),
                     "cudaGraphicsUnregisterResource",
@@ -397,9 +414,11 @@ class _CudaGlQuadOverlay:
                 "Expected a CUDA uint8 tensor with shape (height, width, 3)."
             )
 
-        state = self._ensure_state(renderer, texture_u8.shape)
+        device_index = int(texture_u8.device.index or 0)
+        state = self._ensure_state(renderer, texture_u8.shape, device_index)
         renderer._gl_context.make_current()
         self._clear_gl_errors()
+        self._cuda_check(self._cudart.cudaSetDevice(device_index), "cudaSetDevice")
         if synchronize:
             torch.cuda.current_stream(texture_u8.device).synchronize()
 
@@ -491,14 +510,19 @@ class _CudaGlQuadOverlay:
         GL.glEnable(GL.GL_DEPTH_TEST)
         self._clear_gl_errors()
 
-    def _ensure_state(self, renderer, shape: tuple[int, int, int]):
+    def _ensure_state(self, renderer, shape: tuple[int, int, int], device_index: int):
         renderer_id = id(renderer)
         height, width, channels = shape
         if channels != 3:
             raise ValueError("Expected RGB texture data.")
 
         state = self._states.get(renderer_id)
-        if state is not None and state["width"] == width and state["height"] == height:
+        if (
+            state is not None
+            and state["width"] == width
+            and state["height"] == height
+            and state["device_index"] == device_index
+        ):
             return state
 
         self.release_renderer(renderer_id)
@@ -531,6 +555,7 @@ class _CudaGlQuadOverlay:
         GL.glBindBuffer(GL.GL_PIXEL_UNPACK_BUFFER, 0)
 
         resource = ctypes.c_void_p()
+        self._cuda_check(self._cudart.cudaSetDevice(device_index), "cudaSetDevice")
         self._cuda_check(
             self._cudart.cudaGraphicsGLRegisterBuffer(
                 ctypes.byref(resource),
@@ -562,6 +587,7 @@ class _CudaGlQuadOverlay:
             "texture": texture,
             "pbo": pbo,
             "resource": resource,
+            "device_index": device_index,
             "program": program,
             "vao": vao,
             "vbo": vbo,
@@ -579,6 +605,10 @@ class _CudaGlQuadOverlay:
         resource = state.get("resource")
         if resource is not None and resource.value:
             try:
+                self._cuda_check(
+                    self._cudart.cudaSetDevice(int(state.get("device_index", 0))),
+                    "cudaSetDevice",
+                )
                 self._cuda_check(
                     self._cudart.cudaGraphicsUnregisterResource(resource),
                     "cudaGraphicsUnregisterResource",
