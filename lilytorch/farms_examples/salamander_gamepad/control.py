@@ -161,11 +161,17 @@ class _GamepadInputState:
             )
             return False
 
-        if handler.controller is None:
+        if handler.controller is None and handler.joystick is None:
             pylog.warning(
                 "Gamepad control enabled but no compatible controller was detected."
             )
             return False
+
+        if handler.controller is None:
+            pylog.warning(
+                "Gamepad opened as a generic joystick. Bluetooth/gamepad mappings "
+                "may vary, but fallback input is enabled."
+            )
 
         self._handler = handler
         return True
