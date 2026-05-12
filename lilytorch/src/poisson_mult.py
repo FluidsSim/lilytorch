@@ -20,30 +20,17 @@ Usage (backward-compatible with old 2-D interface)::
 
 import torch
 
-# ── Optional native RBGS kernels ────────────────────────────────────────────
-# Loaded at module import time so torch.compile can trace through them.
-# Falls back gracefully when the extension is not built.
-_NATIVE_RBGS = False
-_native_rbgs_2d = None
-_native_rbgs_3d = None
-_NATIVE_JAC = False
-_native_jac_2d = None
-_native_jac_3d = None
-try:
-    from lilytorch.src.kernels.ops import (  # noqa: F401 (registers abstract impls)
-        rbgs_sweep_2d as _native_rbgs_2d,
-        rbgs_sweep_3d as _native_rbgs_3d,
-        jacobi_sweep_2d as _native_jac_2d,
-        jacobi_sweep_3d as _native_jac_3d,
-    )
-    _NATIVE_RBGS = True
-    _NATIVE_JAC  = True
-except Exception:
-    pass
+# ── Native CUDA smoother kernels ─────────────────────────────────────────────
+from lilytorch.src.kernels.ops import (  # noqa: F401 (registers abstract impls)
+    rbgs_sweep_2d as _native_rbgs_2d,
+    rbgs_sweep_3d as _native_rbgs_3d,
+    jacobi_sweep_2d as _native_jac_2d,
+    jacobi_sweep_3d as _native_jac_3d,
+)
 
 
 # =====================================================================
-# Compilable smoother kernels  (module-level, for torch.compile)
+# Smoother kernels (module-level)
 # =====================================================================
 
 def _bc_2d(q):
@@ -167,7 +154,7 @@ def _rbgs_2d(f, p, cp0, cm0, cp1, cm1, jcap_tol, nsmoothing,
 
 
 # =====================================================================
-# Compilable V-cycle helpers (3-D, for torch.compile)
+# V-cycle helpers (3-D)
 # =====================================================================
 
 def _restrict_face_3d(ch, cv, cw):
@@ -241,20 +228,9 @@ def _rb_masks_3d(nx, ny, nz, device):
     return (parity == 0), (parity == 1)
 
 
-# ── Full 3-D V-cycle with Jacobi (compilable, recursive) ────────────
+# ── Full 3-D V-cycle with Jacobi (coarse-level recursive) ──────────────────
 def _vcycle_jac_3d(f, p, ch, cv, cw, w, jcap_tol, nsmoothing):
-    """Complete 3-D V-cycle with Jacobi smoother.
-
-    torch.compile unrolls the recursion at trace time, producing a single
-    flat computation graph that fuses ALL operations across all multigrid
-    levels — restriction, smoothing, prolongation — into a handful of
-    CUDA kernels.
-    """
-    # Clone p so the input tensor is not mutated in-place (via _bc_3d inside
-    # the smoothers).  Without this clone, torch.compile's reduce-overhead mode
-    # warns "skipping cudagraphs due to mutated inputs" and silently falls back
-    # to default (inductor) mode — preventing CUDA-graph capture.
-    p = p.clone()
+    """Complete 3-D V-cycle with Jacobi smoother (used at coarse levels)."""
     cp0, cm0 = ch[1:, :, :], ch[:-1, :, :]
     cp1, cm1 = cv[:, 1:, :], cv[:, :-1, :]
     cp2, cm2 = cw[:, :, 1:], cw[:, :, :-1]
@@ -271,7 +247,6 @@ def _vcycle_jac_3d(f, p, ch, cv, cw, w, jcap_tol, nsmoothing):
         coarse_shape = (r_c.shape[0] + 2, r_c.shape[1] + 2, r_c.shape[2] + 2)
         p_c = torch.zeros(coarse_shape, device=p.device, dtype=p.dtype)
 
-        # recursive call (unrolled by torch.compile tracer)
         err_c, _ = _vcycle_jac_3d(r_c, p_c, ch_c, cv_c, cw_c,
                                    w, jcap_tol, nsmoothing)
 
@@ -288,11 +263,9 @@ def _vcycle_jac_3d(f, p, ch, cv, cw, w, jcap_tol, nsmoothing):
     return p, r
 
 
-# ── Full 3-D V-cycle with RBGS (compilable, recursive) ──────────────
+# ── Full 3-D V-cycle with RBGS (coarse-level recursive) ────────────────────
 def _vcycle_rbgs_3d(f, p, ch, cv, cw, jcap_tol, nsmoothing):
-    """Complete 3-D V-cycle with Red-Black Gauss-Seidel smoother."""
-    # Clone p to avoid mutating the input — required for CUDA graph capture.
-    p = p.clone()
+    """Complete 3-D V-cycle with RBGS smoother (used at coarse levels)."""
     cp0, cm0 = ch[1:, :, :], ch[:-1, :, :]
     cp1, cm1 = cv[:, 1:, :], cv[:, :-1, :]
     cp2, cm2 = cw[:, :, 1:], cw[:, :, :-1]
@@ -325,8 +298,6 @@ def _vcycle_rbgs_3d(f, p, ch, cv, cw, jcap_tol, nsmoothing):
     return p, r
 
 
-# =====================================================================
-# Compilable V-cycle helpers (2-D, for torch.compile)
 # =====================================================================
 
 def _restrict_face_2d(ch, cv):
@@ -392,7 +363,6 @@ def _rb_masks_2d(nx, ny, device):
 # provides the memory-bandwidth speedup at the dominant fine level.
 def _vcycle_rbgs_2d_native(f, p, ch, cv, jcap_tol, nsmoothing):
     """Hybrid 2-D V-cycle: tiled native RBGS at fine level, PyTorch at coarse."""
-    p = p.clone()
     # The CUDA kernel indexes coefficients as cp0[gi*Ny + gj], assuming a
     # C-contiguous (Nx, Ny) layout.  ch/cv arrive as non-contiguous slices
     # of the ghost-padded pressure grid (row stride Ny+2, not Ny), so we
@@ -440,7 +410,6 @@ def _vcycle_rbgs_2d_native(f, p, ch, cv, jcap_tol, nsmoothing):
 # only; PyTorch _vcycle_rbgs_3d for the coarse correction.
 def _vcycle_rbgs_3d_native(f, p, ch, cv, cw, jcap_tol, nsmoothing):
     """Hybrid 3-D V-cycle: thread-per-cell native RBGS at fine level, PyTorch at coarse."""
-    p = p.clone()
     # Same non-contiguity fix as the 2-D variant: ch/cv/cw arrive as slices
     # of the ghost-padded grid (strides (Ny+2)*(Nz+2), Nz+2, 1), but the
     # kernel assumes C-contiguous layout (strides Ny*Nz, Nz, 1).
@@ -488,7 +457,6 @@ def _vcycle_rbgs_3d_native(f, p, ch, cv, cw, jcap_tol, nsmoothing):
 # ── Full 2-D V-cycle with native Jacobi kernel (hybrid) ────────────────
 def _vcycle_jac_2d_native(f, p, ch, cv, w, jcap_tol, nsmoothing):
     """Hybrid 2-D V-cycle: tiled native Jacobi at fine level, PyTorch at coarse."""
-    p = p.clone()
     ch = ch.contiguous()
     cv = cv.contiguous()
     cp0, cm0 = ch[1:, :], ch[:-1, :]
@@ -529,7 +497,6 @@ def _vcycle_jac_2d_native(f, p, ch, cv, w, jcap_tol, nsmoothing):
 # ── Full 3-D V-cycle with native Jacobi kernel (hybrid) ────────────────
 def _vcycle_jac_3d_native(f, p, ch, cv, cw, w, jcap_tol, nsmoothing):
     """Hybrid 3-D V-cycle: native Jacobi at fine level, PyTorch at coarse."""
-    p = p.clone()
     ch = ch.contiguous()
     cv = cv.contiguous()
     cw = cw.contiguous()
@@ -570,11 +537,9 @@ def _vcycle_jac_3d_native(f, p, ch, cv, cw, w, jcap_tol, nsmoothing):
     return p, r
 
 
-# ── Full 2-D V-cycle with Jacobi (compilable, recursive) ────────────
+# ── Full 2-D V-cycle with Jacobi (coarse-level recursive) ──────────────────
 def _vcycle_jac_2d(f, p, ch, cv, w, jcap_tol, nsmoothing):
-    """Complete 2-D V-cycle with Jacobi smoother."""
-    # Clone p to avoid mutating the input — required for CUDA graph capture.
-    p = p.clone()
+    """Complete 2-D V-cycle with Jacobi smoother (used at coarse levels)."""
     cp0, cm0 = ch[1:, :], ch[:-1, :]
     cp1, cm1 = cv[:, 1:], cv[:, :-1]
 
@@ -599,16 +564,14 @@ def _vcycle_jac_2d(f, p, ch, cv, w, jcap_tol, nsmoothing):
         cp0, cm0 = ch[1:, :], ch[:-1, :]
         cp1, cm1 = cv[:, 1:], cv[:, :-1]
         p, r = _jacobi_2d(f, p, cp0, cm0, cp1, cm1,
-                           w, jcap_tol, nsmoothing) 
+                           w, jcap_tol, nsmoothing)
 
     return p, r
 
 
-# ── Full 2-D V-cycle with RBGS (compilable, recursive) ──────────────
+# ── Full 2-D V-cycle with RBGS (coarse-level recursive) ────────────────────
 def _vcycle_rbgs_2d(f, p, ch, cv, jcap_tol, nsmoothing):
-    """Complete 2-D V-cycle with Red-Black Gauss-Seidel smoother."""
-    # Clone p to avoid mutating the input — required for CUDA graph capture.
-    p = p.clone()
+    """Complete 2-D V-cycle with RBGS smoother (used at coarse levels)."""
     cp0, cm0 = ch[1:, :], ch[:-1, :]
     cp1, cm1 = cv[:, 1:], cv[:, :-1]
 
@@ -684,13 +647,12 @@ class PoissonSolver:
         precond_vcycles=1,
         smoother="jacobi",
         compile_smoother=False,
-        compile_mode="reduce-overhead",
-        compile_dynamic=True,
     ):
         self.dtype       = dtype
         self.h2          = h * h
         self.device      = device
-        self.tol         = tol
+        self.tol         = torch.tensor(tol, dtype=torch.float32, device=device)
+        self._tol_float  = tol   # keep raw float for print formatting
         self.max_cycles  = max_cycles
         self.max_vcycles = max_vcycles
         self.nsmoothing  = nsmoothing
@@ -703,25 +665,8 @@ class PoissonSolver:
             f"smoother must be 'jacobi' or 'rbgs', got '{smoother}'"
         self.smoother = smoother
         self.compile_smoother = compile_smoother
-        # 'reduce-overhead' enables CUDA graph capture inside torch.compile.
-        # The compiled recursive V-cycle (all O(log N) levels) is captured as
-        # a single CUDA graph and replayed with ~5 µs overhead per call
-        # (vs ~140+ separate CUDA kernel dispatches with mode='default').
-        # Falls back to 'default' on CPU (no CUDA graphs on CPU).
-        self.compile_mode = compile_mode
-        self.compile_dynamic = compile_dynamic
-        self._compiled_fn = {}    # lazily populated {ndim: compiled_fn}
+        self._compiled_fn = {}    # lazily populated {key: compiled_fn}
         self._rb_mask_cache = {}  # {(shape, device): (red, black)}
-
-        # Pre-warm the compiled V-cycle objects for both 2-D and 3-D at
-        # construction time so the first call to _dispatch_vcycle never pays
-        # the torch.compile overhead during a time step.  The actual CUDA
-        # graph is captured on the first *execution* (not here), but having
-        # the compiled function object ready avoids the key-lookup branch and
-        # the torch.compile() call at solve time.
-        if compile_smoother:
-            for ndim in (2, 3):
-                self._get_compiled_vcycle(ndim)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -860,41 +805,8 @@ class PoissonSolver:
     # ------------------------------------------------------------------
     # Smoother dispatch
     # ------------------------------------------------------------------
-    def _get_compiled_fn(self, ndim):
-        """Lazily compile the smoother for the given dimensionality."""
-        if ndim not in self._compiled_fn:
-            if self.smoother == "rbgs":
-                raw = _rbgs_3d if ndim == 3 else _rbgs_2d
-            else:
-                raw = _jacobi_3d if ndim == 3 else _jacobi_2d
-            self._compiled_fn[ndim] = torch.compile(
-                raw, mode=self.compile_mode, dynamic=self.compile_dynamic,
-            )
-        return self._compiled_fn[ndim]
-
-    def _smooth_compiled(self, f, p, cfaces):
-        """Compiled smoother path — flattens cfaces for the compiled kernel."""
-        ndim = p.ndim
-        fn   = self._get_compiled_fn(ndim)
-
-        # Flatten cfaces list into positional args
-        flat = []
-        for cp, cm in cfaces:
-            flat.extend([cp, cm])
-
-        if self.smoother == "rbgs":
-            interior_shape = p[_inner(ndim)].shape
-            red, black = self._build_rb_masks(interior_shape)
-            return fn(f, p, *flat, self.jcap_tol,
-                      self.nsmoothing, red, black)
-        else:
-            return fn(f, p, *flat, self.w, self.jcap_tol,
-                      self.nsmoothing)
-
     def smooth(self, f, p, cfaces):
-        """Dispatch to the configured smoother."""
-        if self.compile_smoother:
-            return self._smooth_compiled(f, p, cfaces)
+        """Dispatch to the configured smoother (used by the Python-recursive _vcycle)."""
         if self.smoother == "rbgs":
             return self.RBGS(f, p, cfaces)
         return self.Jacobi(f, p, cfaces)
@@ -949,81 +861,51 @@ class PoissonSolver:
         return face_arrs, remaining
 
     # ------------------------------------------------------------------
-    # Compiled full V-cycle dispatch
+    # V-cycle dispatch
     # ------------------------------------------------------------------
     def _get_compiled_vcycle(self, ndim):
-        """Lazily compile the full V-cycle for given dimensionality.
+        """Lazily compile the full V-cycle for the given dimensionality.
 
-        Recursive Python tracing — each input shape produces a single
-        flat compiled graph that fuses every level's smoother +
-        restriction + prolongation into a handful of CUDA kernels.
-        ``dynamic=False`` ensures the recursion is fully unrolled at
-        trace time; we accept one compile per grid shape.
+        ``mode='reduce-overhead'`` enables CUDA graph capture: the full
+        recursive V-cycle (all O(log N) levels) is replayed as a single
+        CUDA graph call (~5 µs) instead of many individual kernel
+        dispatches.  ``dynamic=False`` ensures the recursion is fully
+        unrolled at trace time so the graph covers every level.
         """
         key = f"vcycle_{ndim}d_{self.smoother}"
         if key not in self._compiled_fn:
             if self.smoother == "rbgs":
-                use_native = _NATIVE_RBGS
-                if use_native:
-                    raw = _vcycle_rbgs_2d_native if ndim == 2 else _vcycle_rbgs_3d_native
-                elif ndim == 3:
-                    raw = _vcycle_rbgs_3d
-                else:
-                    raw = _vcycle_rbgs_2d
-            else:  # jacobi
-                use_native = _NATIVE_JAC
-                if use_native:
-                    raw = _vcycle_jac_2d_native if ndim == 2 else _vcycle_jac_3d_native
-                elif ndim == 3:
-                    raw = _vcycle_jac_3d
-                else:
-                    raw = _vcycle_jac_2d
-            self._compiled_fn[key] = torch.compile(
-                raw, mode=self.compile_mode, dynamic=False,
-            )
+                raw = _vcycle_rbgs_2d_native if ndim == 2 else _vcycle_rbgs_3d_native
+            else:
+                raw = _vcycle_jac_2d_native if ndim == 2 else _vcycle_jac_3d_native
+            self._compiled_fn[key] = torch.compile(raw, mode="reduce-overhead", dynamic=False)
         return self._compiled_fn[key]
 
-    def _run_compiled_vcycle(self, f, p, face_arrs):
-        """Run the compiled V-cycle (2-D or 3-D).
-
-        ``torch.compiler.cudagraph_mark_step_begin()`` is called before
-        each invocation so that CUDA graph output buffers are not aliased
-        across successive V-cycle calls (e.g. the two calls inside the
-        ``max_vcycles`` loop in ``solve_multigrid``).  Without this,
-        PyTorch raises "accessing tensor output of CUDAGraphs that has been
-        overwritten by a subsequent run" when the compiled function is
-        called more than once per solve.
-        """
-        torch.compiler.cudagraph_mark_step_begin()
+    def _dispatch_vcycle(self, f, p, face_arrs):
+        """Run one V-cycle, optionally through the compiled path."""
+        if self.compile_smoother:
+            # Marks a new CUDA graph step so the graph pool allocates fresh
+            # output buffers for this replay, preventing aliasing when the
+            # compiled function is called multiple times per solve.
+            torch.compiler.cudagraph_mark_step_begin()
         ndim = f.ndim
-        fn = self._get_compiled_vcycle(ndim)
+        fn = self._get_compiled_vcycle(ndim) if self.compile_smoother else None
         if ndim == 3:
             ch, cv, cw = face_arrs
             if self.smoother == "rbgs":
-                return fn(f, p, ch, cv, cw,
-                          self.jcap_tol, self.nsmoothing)
+                call = fn or _vcycle_rbgs_3d_native
+                return call(f, p, ch, cv, cw, self.jcap_tol, self.nsmoothing)
             else:
-                return fn(f, p, ch, cv, cw,
-                          self.w, self.jcap_tol, self.nsmoothing)
+                call = fn or _vcycle_jac_3d_native
+                return call(f, p, ch, cv, cw, self.w, self.jcap_tol, self.nsmoothing)
         else:
             ch, cv = face_arrs
             if self.smoother == "rbgs":
-                return fn(f, p, ch, cv,
-                          self.jcap_tol, self.nsmoothing)
+                call = fn or _vcycle_rbgs_2d_native
+                return call(f, p, ch, cv, self.jcap_tol, self.nsmoothing)
             else:
-                return fn(f, p, ch, cv,
-                          self.w, self.jcap_tol, self.nsmoothing)
-
-    def _dispatch_vcycle(self, f, p, face_arrs):
-        """Run one V-cycle.  Uses the fully-fused compiled V-cycle when
-        ``compile_smoother`` is set, otherwise the Python-recursive
-        ``_vcycle`` (which only fuses the inner smoother).  The compiled
-        path collapses restriction / prolongation / smoothing across all
-        levels into a single CUDA graph and is ~3-10x faster on small
-        grids where launch overhead dominates."""
-        if self.compile_smoother:
-            return self._run_compiled_vcycle(f, p, face_arrs)
-        return self._vcycle(f, p, face_arrs)
+                call = fn or _vcycle_jac_2d_native
+                return call(f, p, ch, cv, self.w, self.jcap_tol, self.nsmoothing)
 
     # ------------------------------------------------------------------
     # V-cycle  (dimension-agnostic, recursive)
@@ -1151,33 +1033,28 @@ class PoissonSolver:
 
         p = p0.clone().detach()
         f_scaled = self.h2 * f
-        # Run exactly max_vcycles V-cycles with no per-cycle convergence check.
-        # Rationale: checking convergence inside the loop forces a CUDA
-        # synchronisation at every iteration (Python must read the residual
-        # value back from the GPU before it can evaluate the `if` branch).
-        # This stalls the GPU pipeline max_vcycles times per solve, adding
-        # ~10–50 µs per stall regardless of grid size—a constant overhead
-        # that dominates at small N and makes multigrid appear to scale as
-        # O(N log N) rather than O(N) relative to FFT.
-        # The residual is only read back once at the end when verbose=True.
+        cycles_run = self.max_vcycles
         for i in range(self.max_vcycles):
             p, r = self._dispatch_vcycle(f_scaled, p, face_arrs)
-            # When using compiled V-cycles (reduce-overhead CUDA graph), the
-            # returned p aliases the graph's internal output buffer. If we pass
-            # this tensor as the input to the *next* graph replay, PyTorch's
-            # CUDA-graph-tree infrastructure raises "accessing tensor output of
-            # CUDAGraphs that has been overwritten by a subsequent run".
-            # Cloning p *outside* of torch.compile() between iterations breaks
-            # this aliasing (a ~267 KB GPU memcpy for 512x128, < 1 µs).
+            # When using reduce-overhead CUDA graphs, the compiled function
+            # returns p pointing to the graph's output buffer.  Cloning p
+            # before the next replay breaks the aliasing so the next call
+            # reads the correct (current) values.  The guard i < max_vcycles-1
+            # means this is a no-op for the common max_vcycles=1 warm-start
+            # case — zero extra cost.
             if self.compile_smoother and i < self.max_vcycles - 1:
                 p = p.clone()
+            r_err = self._convergence_norm(r)
+            if r_err < self.tol:
+                cycles_run = i + 1
+                break
         # float64 mean subtraction: GPU parallel-reduction of float32 gives
         # a different value than CPU sequential sum.
         p -= p.to(torch.float64).mean().to(p.dtype)
         if self.verbose:
             print(
-                f"Multigrid residual = {self.l2_norm(r):.2e}/{self.tol:.2e} "
-                f"with {self.max_vcycles}/{self.max_vcycles} cycles"
+                f"Multigrid residual = {self.l2_norm(r):.2e}/{self._tol_float:.2e} "
+                f"with {cycles_run}/{self.max_vcycles} cycles"
             )
         return p, r
 
@@ -1306,7 +1183,7 @@ class PoissonSolver:
         if self.verbose:
             cg_iters = min(k + 1, self.max_cycles)
             print(
-                f"MGCG residual = {r_norm_final:.2e}/{self.tol:.2e} "
+                f"MGCG residual = {r_norm_final:.2e}/{self._tol_float:.2e} "
                 f"with {cg_iters}/{self.max_cycles} CG iterations "
                 f"({self.precond_vcycles} V-cycle{'s' if self.precond_vcycles > 1 else ''}/iter)"
             )

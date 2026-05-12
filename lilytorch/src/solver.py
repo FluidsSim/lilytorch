@@ -428,21 +428,18 @@ class FluidSolver(PlottingMixin):
         _u_inlet = float(self.adv_diff_solver.BC_values_u[1])
         self._vmax_abort = float(solver.get("vmax_abort", max(100.0 * abs(_u_inlet), 100.0)))
 
-        # ---- optional torch.compile for adv-diff + BDIM kernels -----
+        # ---- optional torch.compile for adv-diff -----
         self._compile_adv_diff = solver.get("compile_adv_diff", False)
         if self._compile_adv_diff and self.device.type == "cuda":
             self.adv_diff_solver.solve = torch.compile(
                 self.adv_diff_solver.solve, mode="reduce-overhead",
             )
 
-        # Dynamic-shape variant for the union-AABB crop path
+        # Dynamic BDIM META compilation for the union-AABB crop path
         # (sub-block shape varies with body kinematics).
         self._bdim_meta_dyn_compiled = torch.compile(
             FluidSolver._bdim_meta, dynamic=True,
         )
-        # Per-step union AABB across all body sub-blocks.  Set inside the
-        # _fluid_step_* methods just before _apply_bdim_all_axes; left None
-        # everywhere else so the full-grid path runs.
         self._bdim_union_aabb = None
 
         # ---- optional Towers (2008) 2nd-order delta correction -----------
@@ -457,7 +454,7 @@ class FluidSolver(PlottingMixin):
         self.force_method = solver.get("force_method", "method2")
         self.zero_pressure_inside = solver.get("zero_pressure_inside", False)
 
-        # ---- optional torch.compile for force computation -----
+        # ---- optional compile force computation -----
         self._compile_forces = solver.get("compile_forces", False)
 
         self._solver_method = solver.get("solver_method", "kernel")
@@ -574,8 +571,6 @@ class FluidSolver(PlottingMixin):
             precond_vcycles = solver.get("poisson_precond_vcycles", 1),
             smoother        = solver.get("poisson_smoother", "rbgs"),
             compile_smoother= solver.get("poisson_compile", False),
-            compile_mode    = solver.get("poisson_compile_mode", "reduce-overhead"),
-            compile_dynamic = solver.get("poisson_compile_dynamic", True),
         )
 
         # Warm-start: reuse previous pressure as Poisson initial guess
