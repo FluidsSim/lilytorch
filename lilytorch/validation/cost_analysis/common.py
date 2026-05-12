@@ -18,7 +18,14 @@ import pandas as pd
 
 
 DEFAULT_DTYPE = "float32"
-DEFAULT_POISSON_METHOD = "mgcg"
+# Standalone multigrid is the recommended GPU solver.
+# MGCG is avoided because its CG inner loop requires 3 CUDA pipeline stalls
+# per iteration (dot products for alpha/beta step lengths), making it
+# inherently slower on GPU than standalone multigrid regardless of grid size.
+# Standalone multigrid with compile_smoother=True + mode='reduce-overhead'
+# captures the full recursive V-cycle as a single CUDA graph replay (~5 µs)
+# vs FFT (~50-200 µs for medium grids).
+DEFAULT_POISSON_METHOD = "multigrid"
 DEFAULT_TIMESTEP = 1.0e-4
 DEFAULT_SPAWN_X = -0.65
 

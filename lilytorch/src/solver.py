@@ -574,7 +574,7 @@ class FluidSolver(PlottingMixin):
             precond_vcycles = solver.get("poisson_precond_vcycles", 1),
             smoother        = solver.get("poisson_smoother", "rbgs"),
             compile_smoother= solver.get("poisson_compile", False),
-            compile_mode    = solver.get("poisson_compile_mode", "default"),
+            compile_mode    = solver.get("poisson_compile_mode", "reduce-overhead"),
             compile_dynamic = solver.get("poisson_compile_dynamic", True),
         )
 
