@@ -19,12 +19,12 @@ class SimConfig(BaseSimConfig):
         # ── Hardware ──────────────────────────────────────────────────
         self.use_gpu              = True
         self.use_bdim             = True
-        self.compute_sdf          = False
+        self.compute_sdf          = True
         self.convexify            = True
         self.headless             = False
         self.smagorinsky_cs       = 0.
 
-        self.solver_method    = "kernel"
+        # self.solver_method    = "python"
         self.poisson_compile  = True
         self.compile_adv_diff = True
         self.compile_forces   = True
@@ -80,7 +80,7 @@ class SimConfig(BaseSimConfig):
         self.poisson_max_mgcg_cycles = 10
         self.poisson_precond_vcycles = 1
         self.poisson_warm_start      = True
-        self.poisson_method          = "multigrid"
+        self.poisson_method          = "fft"
         self.poisson_smoother        = "jacobi"
         self.poisson_nsmoothing      = 5
         self.poisson_bc_type         = "free"
