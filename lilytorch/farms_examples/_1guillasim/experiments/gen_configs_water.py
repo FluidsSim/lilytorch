@@ -105,7 +105,6 @@ class SimConfig(BaseSimConfig):
 
         self.poisson_compile         = False
         self.compile_adv_diff        = False
-        self.compile_forces          = False
 
         # # u: no-penetration on x-walls, free-slip on y/z-walls
         # self.bc_type_u   = ["D", "D", "N", "N", "N", "N"]

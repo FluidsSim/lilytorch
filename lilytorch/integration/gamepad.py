@@ -107,6 +107,12 @@ class GamepadState:
         self.button_dpad_left = False      # SDL_CONTROLLER_BUTTON_DPAD_LEFT
         self.button_dpad_right = False     # SDL_CONTROLLER_BUTTON_DPAD_RIGHT
 
+        # PS3-style digital trigger buttons (Linux joystick buttons 6 and 7)
+        # On PS3 pads that expose as generic joystick, L2/R2 appear as
+        # digital buttons (indices 6 and 7) rather than analog axes.
+        self.button_trigger_left = False   # Linux joystick button 6 (PS3 L2 digital)
+        self.button_trigger_right = False  # Linux joystick button 7 (PS3 R2 digital)
+
         # Define mappings betweeen SDL2 button/axis names and the fields above
         # Remapped to be more intuitive for non-gamers
         self.BUTTON_NAMES = {
@@ -181,6 +187,10 @@ class GamepadState:
         new_state.button_dpad_down = self.button_dpad_down
         new_state.button_dpad_left = self.button_dpad_left
         new_state.button_dpad_right = self.button_dpad_right
+
+        # Copy digital trigger buttons
+        new_state.button_trigger_left = self.button_trigger_left
+        new_state.button_trigger_right = self.button_trigger_right
 
         return new_state
 
@@ -299,6 +309,8 @@ class GamepadHandler:
         self.state.button_left = self._joystick_button(3)
         self.state.button_shoulder_left = self._joystick_button(4)
         self.state.button_shoulder_right = self._joystick_button(5)
+        self.state.button_trigger_left = self._joystick_button(6)
+        self.state.button_trigger_right = self._joystick_button(7)
         self.state.button_middle_left = self._joystick_button(8)
         self.state.button_middle_right = self._joystick_button(9)
         self.state.button_middle_logo = self._joystick_button(10)

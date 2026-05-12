@@ -715,7 +715,6 @@ def _strip_yaml_extensions(yaml_path: str) -> None:
             solver_cfg["compile_adv_diff"]   = True
             solver_cfg["poisson_compile"]    = True
             solver_cfg["poisson_compile_mode"] = "reduce-overhead"
-            solver_cfg["compile_forces"]     = True
     with open(yaml_path, "w") as f:
         yaml.dump(sim_dict, f, default_flow_style=False, sort_keys=False)
 

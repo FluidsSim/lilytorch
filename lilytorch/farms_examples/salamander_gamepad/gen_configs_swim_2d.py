@@ -27,7 +27,6 @@ class SimConfig(BaseSimConfig):
         self.solver_method    = "kernel"
         self.poisson_compile  = True
         # self.compile_adv_diff = True
-        # self.compile_forces   = True
 
         self.bdim_physics = {"solref": [-100000.0, -2000.0]}
 
@@ -37,7 +36,7 @@ class SimConfig(BaseSimConfig):
                 "model_name"  : "salamander_v4",
                 "sdf_name"    : "sdf/salamander_no_passive.sdf",
                 "control_type": "position",
-                "gains"       : [0.001, .0002, 0],
+                "gains"       : [0.0001, .00002, 0],
                 "controller_config": {
                     'path'      : "lilytorch.farms_examples.salamander_gamepad.control.PositionController",
                     'freq'      : 1,

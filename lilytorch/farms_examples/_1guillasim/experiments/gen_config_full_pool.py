@@ -27,7 +27,6 @@ class SimConfig(BaseSimConfig):
         # self.solver_method    = "python"
         self.poisson_compile  = True
         self.compile_adv_diff = True
-        self.compile_forces   = True
 
         # ── Animats ───────────────────────────────────────────────────
         self.animats_pars = [

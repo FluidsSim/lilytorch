@@ -97,7 +97,6 @@ class SimConfig(BaseSimConfig):
 
         self.poisson_compile          = False
         self.compile_adv_diff         = False
-        self.compile_forces           = False
 
         # ── Boundary conditions (3-D, all Dirichlet no-slip) ────────
         self.bc_type_u   = ["D", "D", "N", "N", "N", "N"]

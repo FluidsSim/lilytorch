@@ -454,9 +454,6 @@ class FluidSolver(PlottingMixin):
         self.force_method = solver.get("force_method", "method2")
         self.zero_pressure_inside = solver.get("zero_pressure_inside", False)
 
-        # ---- optional compile force computation -----
-        self._compile_forces = solver.get("compile_forces", False)
-
         self._solver_method = solver.get("solver_method", "kernel")
         method = solver.get("solver_method", "kernel")
         if method not in ("python", "kernel"):
@@ -513,44 +510,6 @@ class FluidSolver(PlottingMixin):
         self._forces_body_batch_compiled = _forces_body_batch
         self._forces_shared_dyn_compiled = _forces_shared
         self._forces_body_compiled       = _forces_body_integrate_3d
-
-
-        # # Compiled bindings for the dim-agnostic force kernels.
-        # # ``_forces_shared`` and ``_forces_body_batch`` take tuple-of-tensor
-        # # inputs; Dynamo guards on tuple length (``len(vels)``), so calling
-        # # with D=2 and D=3 yields two shape-specialized compiled artifacts
-        # # automatically — no per-D Python wrappers needed.
-        # if self._compile_forces and self.device.type == "cuda":
-        #     self._forces_shared_compiled = torch.compile(
-        #         _forces_shared, mode="reduce-overhead",
-        #     )
-        #     self._forces_body_batch_compiled = torch.compile(
-        #         _forces_body_batch, mode="reduce-overhead",
-        #     )
-        #     # Dynamic-shape shared kernel for the union-AABB crop path
-        #     # (sub-block shape varies with body kinematics).
-        #     self._forces_shared_dyn_compiled = torch.compile(
-        #         _forces_shared, dynamic=True,
-        #     )
-        #     # ``_forces_body_integrate_3d`` runs on per-body AABB sub-blocks
-        #     # whose shapes change slowly; ``dynamic=True`` gives fusion
-        #     # without a recompile for every orientation.
-        #     self._forces_body_compiled = torch.compile(
-        #         _forces_body_integrate_3d, dynamic=True,
-        #     )
-        #     # Dynamic-shape batched mu/normals kernel for the union-AABB
-        #     # crop path (sub-block shape varies as bodies move).  Built
-        #     # from the dim-agnostic ``_mu_normals_batched`` helper so a
-        #     # single compiled artifact serves both 2-D and 3-D.
-        #     print(
-        #         "  [compile] forces_shared + forces_body_batch compiled "
-        #         "(reduce-overhead, dim-agnostic)"
-        #     )
-        # else:
-        #     self._forces_shared_compiled     = _forces_shared
-        #     self._forces_body_batch_compiled = _forces_body_batch
-        #     self._forces_shared_dyn_compiled = _forces_shared
-        #     self._forces_body_compiled       = _forces_body_integrate_3d
 
         # =============  poisson solver =============
         self.poisson_method = solver.get("poisson_method", "multigrid")

@@ -272,12 +272,6 @@ def forces_method1(self, u, v, p, iteration):
     xstress, ystress = stresses
     pforce_x, pforce_y = pforces
 
-    if self._compile_forces:
-        xstress = xstress.clone()
-        ystress = ystress.clone()
-        pforce_x = pforce_x.clone()
-        pforce_y = pforce_y.clone()
-
     self.xstress_tensor = xstress
     self.ystress_tensor = ystress
     self.pforce_x = pforce_x
@@ -497,12 +491,6 @@ def forces_method2(self, u, v, p, iteration):
     xstress, ystress = stresses
     pforce_x, pforce_y = pforces
 
-    if self._compile_forces:
-        xstress  = xstress.clone()
-        ystress  = ystress.clone()
-        pforce_x = pforce_x.clone()
-        pforce_y = pforce_y.clone()
-
     # Cache for post-processing
     if _use_legacy_sparse_forces_2d:
         self.xstress_tensor = None
@@ -566,10 +554,6 @@ def forces_method2(self, u, v, p, iteration):
     fp_x, fp_y = fp
     tp_z,      = tp
 
-    if self._compile_forces:
-        fv_x = fv_x.clone(); fv_y = fv_y.clone(); tv_z = tv_z.clone()
-        fp_x = fp_x.clone(); fp_y = fp_y.clone(); tp_z = tp_z.clone()
-
     for i in range(B):
         self.friction_force_lin_x[i] = fv_x[i]
         self.friction_force_lin_y[i] = fv_y[i]
@@ -601,11 +585,6 @@ def forces_method2_3d(self, u, v, w, p, iteration):
         F_pres = -∫ p n δ_ε(d) dV
 
     Torques are computed about each body's centre of mass via r × f.
-
-    When ``compile_forces=True``, the heavy tensor work is delegated to
-    two ``torch.compile``-d kernels (``_forces_shared`` and
-    ``_forces_body_integrate_3d``) that fuse ~40 CUDA kernels into one
-    or two CUDA-graph launches, giving ~6× wall-clock speedup.
     """
     comp = self.composite_body
 
@@ -757,19 +736,6 @@ def forces_method2_3d(self, u, v, w, p, iteration):
     xstress, ystress, zstress = stresses
     pforce_x, pforce_y, pforce_z = pforces
 
-    # When compiled with CUDA graphs (reduce-overhead), the returned
-    # tensors live in the graph's replay buffer and will be overwritten
-    # by the next compiled call.  Clone them here so the body-integrate
-    # kernel can safely read them.
-    #
-    if self._compile_forces:
-        xstress  = xstress.clone()
-        ystress  = ystress.clone()
-        zstress  = zstress.clone()
-        pforce_x = pforce_x.clone()
-        pforce_y = pforce_y.clone()
-        pforce_z = pforce_z.clone()
-
     # Cache stress / pforce for post-processing if needed
     self.xstress_tensor = xstress
     self.ystress_tensor = ystress
@@ -785,195 +751,93 @@ def forces_method2_3d(self, u, v, w, p, iteration):
     comp = self.composite_body
     B = len(comp.bodies)
 
-    # Prefer the narrow-band per-body path whenever sparse SDFs are
-    # available: it integrates each body only over its AABB sub-block
-    # (~50³ cells × B) instead of scattering to (B, Nx, Ny, Nz) and
-    # reducing over the full volume.  This is ~50–100× less work for
-    # typical thin-body geometries and removes the large Triton kernel
-    # shape-dependent cliff seen on 512×128×128 grids.
-    _have_sparse = (
-        hasattr(comp, '_sdf_sparse')
-        and len(comp._sdf_sparse) > 0
-        and comp._sdf_sparse[0] is not None
-    )
+    _use_sparse = hasattr(comp, '_sdf_sparse') and comp._sdf_sparse[0] is not None
+    for i, body in enumerate(comp.bodies):
+        eps_body = body.eps
 
-
-
-
-    if self._compile_forces:
-        # ---- BATCHED path (compiled CUDA graph) ----------------
-        # Process all bodies in one fused kernel launch.
-        # Reconstruct dense sdf_vals from sparse storage if needed.
-        if hasattr(comp, '_sdf_sparse') and comp._sdf_sparse[0] is not None:
-            _FAR = 1e6
-            sdf_all = torch.full(
-                (B, *self.grid_shape), _FAR,
-                device=self.device, dtype=self.dtype,
-            )
-            for bi in range(B):
-                aabb_i, sdf_sub_i = comp._sdf_sparse[bi]
-                if aabb_i is not None:
-                    i0, i1, j0, j1, k0, k1 = aabb_i
-                    sdf_all[bi, i0:i1, j0:j1, k0:k1] = sdf_sub_i
-                else:
-                    sdf_all[bi] = sdf_sub_i
-        else:
-            sdf_all = comp.sdf_vals                # legacy dense path
-        eps_body = comp.bodies[0].eps
-
-        if not hasattr(self, '_com_buf_x'):
-            self._com_buf_x = torch.empty(B, device=self.device, dtype=self.dtype)
-            self._com_buf_y = torch.empty(B, device=self.device, dtype=self.dtype)
-            self._com_buf_z = torch.empty(B, device=self.device, dtype=self.dtype)
-        for i, body in enumerate(comp.bodies):
-            self._com_buf_x[i] = body.com_pos[0]
-            self._com_buf_y[i] = body.com_pos[1]
-            self._com_buf_z[i] = body.com_pos[2]
-
-        # Towers (2008) 2nd-order: per-body |∇SDF|  (B, Ni, Nj, Nk)
-        sdf_grad_mag_3d = None
-        if self.force_delta_order == 2:
-            gx = torch.gradient(sdf_all, spacing=h, dim=1, edge_order=2)[0]
-            gy = torch.gradient(sdf_all, spacing=h, dim=2, edge_order=2)[0]
-            gz = torch.gradient(sdf_all, spacing=h, dim=3, edge_order=2)[0]
-            sdf_grad_mag_3d = torch.sqrt(gx**2 + gy**2 + gz**2)
-
-        fv, tv, fp, tp = self._forces_body_batch_compiled(
-            (xstress, ystress, zstress),
-            (pforce_x, pforce_y, pforce_z),
-            sdf_all, eps_body, self.eps,
-            (self._com_buf_x, self._com_buf_y, self._com_buf_z),
-            (X, Y, Z), h3,
-            sdf_grad_mag_3d,
-        )
-        fv_x, fv_y, fv_z = fv
-        tv_x, tv_y, tv_z = tv
-        fp_x, fp_y, fp_z = fp
-        tp_x, tp_y, tp_z = tp
-
-        # Clone outputs (CUDA graph buffer reuse)
-        fv_x = fv_x.clone(); fv_y = fv_y.clone(); fv_z = fv_z.clone()
-        tv_x = tv_x.clone(); tv_y = tv_y.clone(); tv_z = tv_z.clone()
-        fp_x = fp_x.clone(); fp_y = fp_y.clone(); fp_z = fp_z.clone()
-        tp_x = tp_x.clone(); tp_y = tp_y.clone(); tp_z = tp_z.clone()
-
-        for i in range(B):
-            self.friction_force_lin_x[i] = fv_x[i]
-            self.friction_force_lin_y[i] = fv_y[i]
-            self.friction_force_lin_z[i] = fv_z[i]
-            self.friction_force_ang_x[i] = tv_x[i]
-            self.friction_force_ang_y[i] = tv_y[i]
-            self.friction_force_ang_z[i] = tv_z[i]
-            self.pressure_force_x[i] = fp_x[i]
-            self.pressure_force_y[i] = fp_y[i]
-            self.pressure_force_z[i] = fp_z[i]
-            self.pressure_force_ang_x[i] = tp_x[i]
-            self.pressure_force_ang_y[i] = tp_y[i]
-            self.pressure_force_ang_z[i] = tp_z[i]
-            self.viscous_drag_record[i, 0, iteration]  = fv_x[i]
-            self.viscous_drag_record[i, 1, iteration]  = fv_y[i]
-            self.viscous_drag_record[i, 2, iteration]  = fv_z[i]
-            self.pressure_drag_record[i, 0, iteration] = fp_x[i]
-            self.pressure_drag_record[i, 1, iteration] = fp_y[i]
-            self.pressure_drag_record[i, 2, iteration] = fp_z[i]
-            self.viscous_torque_record[i, 0, iteration]  = tv_x[i]
-            self.viscous_torque_record[i, 1, iteration]  = tv_y[i]
-            self.viscous_torque_record[i, 2, iteration]  = tv_z[i]
-            self.pressure_torque_record[i, 0, iteration] = tp_x[i]
-            self.pressure_torque_record[i, 1, iteration] = tp_y[i]
-            self.pressure_torque_record[i, 2, iteration] = tp_z[i]
-    else:
-        # ---- PER-BODY path (un-compiled fallback) --------------
-        # Use sparse SDF storage when available: integrate forces
-        # only over the body's AABB sub-block (much less memory
-        # and faster than iterating the full grid).
-        _use_sparse = hasattr(comp, '_sdf_sparse') and comp._sdf_sparse[0] is not None
-        for i, body in enumerate(comp.bodies):
-            eps_body = body.eps
-
-            if _use_sparse:
-                aabb_i, sdf_sub_i = comp._sdf_sparse[i]
-                if aabb_i is not None:
-                    i0, i1, j0, j1, k0, k1 = aabb_i
-                    sl = (slice(i0, i1), slice(j0, j1), slice(k0, k1))
-                    grad_mag_i = None
-                    if self.force_delta_order == 2:
-                        gx = torch.gradient(sdf_sub_i, spacing=h, dim=0, edge_order=2)[0]
-                        gy = torch.gradient(sdf_sub_i, spacing=h, dim=1, edge_order=2)[0]
-                        gz = torch.gradient(sdf_sub_i, spacing=h, dim=2, edge_order=2)[0]
-                        grad_mag_i = torch.sqrt(gx**2 + gy**2 + gz**2)
-                    (fv_x, fv_y, fv_z,
-                     tv_x, tv_y, tv_z,
-                     fp_x, fp_y, fp_z,
-                     tp_x, tp_y, tp_z) = _forces_body_integrate_3d(
-                        xstress[sl], ystress[sl], zstress[sl],
-                        pforce_x[sl], pforce_y[sl], pforce_z[sl],
-                        sdf_sub_i, eps_body, self.eps,
-                        body.com_pos[0], body.com_pos[1], body.com_pos[2],
-                        X[sl], Y[sl], Z[sl], h3,
-                        grad_mag_i,
-                    )
-                else:
-                    # Full-grid SDF (rare: body covers most of grid)
-                    grad_mag_i = None
-                    if self.force_delta_order == 2:
-                        gx = torch.gradient(sdf_sub_i, spacing=h, dim=0, edge_order=2)[0]
-                        gy = torch.gradient(sdf_sub_i, spacing=h, dim=1, edge_order=2)[0]
-                        gz = torch.gradient(sdf_sub_i, spacing=h, dim=2, edge_order=2)[0]
-                        grad_mag_i = torch.sqrt(gx**2 + gy**2 + gz**2)
-                    (fv_x, fv_y, fv_z,
-                     tv_x, tv_y, tv_z,
-                     fp_x, fp_y, fp_z,
-                     tp_x, tp_y, tp_z) = _forces_body_integrate_3d(
-                        xstress, ystress, zstress,
-                        pforce_x, pforce_y, pforce_z,
-                        sdf_sub_i, eps_body, self.eps,
-                        body.com_pos[0], body.com_pos[1], body.com_pos[2],
-                        X, Y, Z, h3,
-                        grad_mag_i,
-                    )
-            else:
-                # Legacy dense path (comp.sdf_vals exists)
-                sdf_i = comp.sdf_vals[i]
+        if _use_sparse:
+            aabb_i, sdf_sub_i = comp._sdf_sparse[i]
+            if aabb_i is not None:
+                i0, i1, j0, j1, k0, k1 = aabb_i
+                sl = (slice(i0, i1), slice(j0, j1), slice(k0, k1))
                 grad_mag_i = None
                 if self.force_delta_order == 2:
-                    gx = torch.gradient(sdf_i, spacing=h, dim=0, edge_order=2)[0]
-                    gy = torch.gradient(sdf_i, spacing=h, dim=1, edge_order=2)[0]
-                    gz = torch.gradient(sdf_i, spacing=h, dim=2, edge_order=2)[0]
+                    gx = torch.gradient(sdf_sub_i, spacing=h, dim=0, edge_order=2)[0]
+                    gy = torch.gradient(sdf_sub_i, spacing=h, dim=1, edge_order=2)[0]
+                    gz = torch.gradient(sdf_sub_i, spacing=h, dim=2, edge_order=2)[0]
                     grad_mag_i = torch.sqrt(gx**2 + gy**2 + gz**2)
                 (fv_x, fv_y, fv_z,
                  tv_x, tv_y, tv_z,
                  fp_x, fp_y, fp_z,
-                 tp_x, tp_y, tp_z) = self._forces_body_compiled(
+                 tp_x, tp_y, tp_z) = _forces_body_integrate_3d(
+                    xstress[sl], ystress[sl], zstress[sl],
+                    pforce_x[sl], pforce_y[sl], pforce_z[sl],
+                    sdf_sub_i, eps_body, self.eps,
+                    body.com_pos[0], body.com_pos[1], body.com_pos[2],
+                    X[sl], Y[sl], Z[sl], h3,
+                    grad_mag_i,
+                )
+            else:
+                # Full-grid SDF (rare: body covers most of grid)
+                grad_mag_i = None
+                if self.force_delta_order == 2:
+                    gx = torch.gradient(sdf_sub_i, spacing=h, dim=0, edge_order=2)[0]
+                    gy = torch.gradient(sdf_sub_i, spacing=h, dim=1, edge_order=2)[0]
+                    gz = torch.gradient(sdf_sub_i, spacing=h, dim=2, edge_order=2)[0]
+                    grad_mag_i = torch.sqrt(gx**2 + gy**2 + gz**2)
+                (fv_x, fv_y, fv_z,
+                 tv_x, tv_y, tv_z,
+                 fp_x, fp_y, fp_z,
+                 tp_x, tp_y, tp_z) = _forces_body_integrate_3d(
                     xstress, ystress, zstress,
                     pforce_x, pforce_y, pforce_z,
-                    sdf_i, eps_body, self.eps,
+                    sdf_sub_i, eps_body, self.eps,
                     body.com_pos[0], body.com_pos[1], body.com_pos[2],
                     X, Y, Z, h3,
                     grad_mag_i,
                 )
+        else:
+            # Legacy dense path (comp.sdf_vals exists)
+            sdf_i = comp.sdf_vals[i]
+            grad_mag_i = None
+            if self.force_delta_order == 2:
+                gx = torch.gradient(sdf_i, spacing=h, dim=0, edge_order=2)[0]
+                gy = torch.gradient(sdf_i, spacing=h, dim=1, edge_order=2)[0]
+                gz = torch.gradient(sdf_i, spacing=h, dim=2, edge_order=2)[0]
+                grad_mag_i = torch.sqrt(gx**2 + gy**2 + gz**2)
+            (fv_x, fv_y, fv_z,
+             tv_x, tv_y, tv_z,
+             fp_x, fp_y, fp_z,
+             tp_x, tp_y, tp_z) = self._forces_body_compiled(
+                xstress, ystress, zstress,
+                pforce_x, pforce_y, pforce_z,
+                sdf_i, eps_body, self.eps,
+                body.com_pos[0], body.com_pos[1], body.com_pos[2],
+                X, Y, Z, h3,
+                grad_mag_i,
+            )
 
-            self.friction_force_lin_x[i] = fv_x
-            self.friction_force_lin_y[i] = fv_y
-            self.friction_force_lin_z[i] = fv_z
-            self.friction_force_ang_x[i] = tv_x
-            self.friction_force_ang_y[i] = tv_y
-            self.friction_force_ang_z[i] = tv_z
-            self.pressure_force_x[i] = fp_x
-            self.pressure_force_y[i] = fp_y
-            self.pressure_force_z[i] = fp_z
-            self.pressure_force_ang_x[i] = tp_x
-            self.pressure_force_ang_y[i] = tp_y
-            self.pressure_force_ang_z[i] = tp_z
-            self.viscous_drag_record[i, 0, iteration]  = fv_x
-            self.viscous_drag_record[i, 1, iteration]  = fv_y
-            self.viscous_drag_record[i, 2, iteration]  = fv_z
-            self.pressure_drag_record[i, 0, iteration] = fp_x
-            self.pressure_drag_record[i, 1, iteration] = fp_y
-            self.pressure_drag_record[i, 2, iteration] = fp_z
-            self.viscous_torque_record[i, 0, iteration]  = tv_x
-            self.viscous_torque_record[i, 1, iteration]  = tv_y
-            self.viscous_torque_record[i, 2, iteration]  = tv_z
-            self.pressure_torque_record[i, 0, iteration] = tp_x
-            self.pressure_torque_record[i, 1, iteration] = tp_y
-            self.pressure_torque_record[i, 2, iteration] = tp_z
+        self.friction_force_lin_x[i] = fv_x
+        self.friction_force_lin_y[i] = fv_y
+        self.friction_force_lin_z[i] = fv_z
+        self.friction_force_ang_x[i] = tv_x
+        self.friction_force_ang_y[i] = tv_y
+        self.friction_force_ang_z[i] = tv_z
+        self.pressure_force_x[i] = fp_x
+        self.pressure_force_y[i] = fp_y
+        self.pressure_force_z[i] = fp_z
+        self.pressure_force_ang_x[i] = tp_x
+        self.pressure_force_ang_y[i] = tp_y
+        self.pressure_force_ang_z[i] = tp_z
+        self.viscous_drag_record[i, 0, iteration]  = fv_x
+        self.viscous_drag_record[i, 1, iteration]  = fv_y
+        self.viscous_drag_record[i, 2, iteration]  = fv_z
+        self.pressure_drag_record[i, 0, iteration] = fp_x
+        self.pressure_drag_record[i, 1, iteration] = fp_y
+        self.pressure_drag_record[i, 2, iteration] = fp_z
+        self.viscous_torque_record[i, 0, iteration]  = tv_x
+        self.viscous_torque_record[i, 1, iteration]  = tv_y
+        self.viscous_torque_record[i, 2, iteration]  = tv_z
+        self.pressure_torque_record[i, 0, iteration] = tp_x
+        self.pressure_torque_record[i, 1, iteration] = tp_y
+        self.pressure_torque_record[i, 2, iteration] = tp_z

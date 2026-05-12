@@ -46,7 +46,6 @@ class SimConfig(BaseSimConfig):
         self.solver_method    = "kernel"
         self.poisson_compile  = False
         self.compile_adv_diff = False
-        self.compile_forces   = True
 
 
         # ── 2-D grid ─────────────────────────────────────────────────

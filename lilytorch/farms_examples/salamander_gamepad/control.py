@@ -35,12 +35,14 @@ _KP_VK_MAP: dict[int, str] = {
     0xFF96: "kp_4",  # KP_Left
     0xFF9D: "kp_5",  # KP_Begin
     0xFF98: "kp_6",  # KP_Right
+    0xFF95: "kp_7",  # KP_Home
+    0xFF9A: "kp_9",  # KP_Prior / Page Up
     # Num Lock ON keysyms (some pynput versions / distros report these)
     0xFFB1: "kp_1",  0xFFB3: "kp_3",  0xFFB4: "kp_4",
-    0xFFB5: "kp_5",  0xFFB6: "kp_6",
+    0xFFB5: "kp_5",  0xFFB6: "kp_6",  0xFFB7: "kp_7",  0xFFB9: "kp_9",
     # Windows VK_NUMPAD codes
     0x61: "kp_1",    0x63: "kp_3",    0x64: "kp_4",
-    0x65: "kp_5",    0x66: "kp_6",
+    0x65: "kp_5",    0x66: "kp_6",    0x67: "kp_7",    0x69: "kp_9",
 }
 
 # Set LILY_DEBUG_KEYS=1 to print raw pynput key info on every key press.
@@ -73,7 +75,8 @@ class _KeyboardInputState:
             return
         pylog.info(
             "Keyboard controls active: 5=swim straight, 5+3=turn right, "
-            "5+1=turn left, 4/6=decrease/increase turn strength. "
+            "5+1=turn left, 4/6=decrease/increase turn strength, "
+            "7=swim mode, 9=paddle mode. "
             "No key pressed = all amplitudes zero."
         )
         self._announced = True
@@ -86,6 +89,8 @@ class _KeyboardInputState:
             "move_straight": "kp_5" in pressed,
             "turn_less": "kp_4" in pressed,
             "turn_more": "kp_6" in pressed,
+            "mode_swim": "kp_7" in pressed,
+            "mode_paddle": "kp_9" in pressed,
         }
 
     def _on_press(self, key):
@@ -108,7 +113,7 @@ class _KeyboardInputState:
     def _normalize_key(key):
         # Regular number-row keys: pynput sets key.char to the character.
         char = getattr(key, "char", None)
-        if char in {"1", "3", "4", "5", "6"}:
+        if char in {"1", "3", "4", "5", "6", "7", "9"}:
             return f"kp_{char}"
         # Numpad keys on X11: key.char is None; the X11 keysym lives in key.vk.
         vk = getattr(key, "vk", None)
@@ -182,13 +187,17 @@ class _GamepadInputState:
         pylog.info(
             "Gamepad controls active: left stick up=swim forward, left stick "
             "left/right=turn, D-pad up/left/right mirror the same commands, "
-            "Cross/Triangle=forward, Square/L1=left, Circle/R1=right."
+            "Cross/Triangle=forward, Square/L1=left, Circle/R1=right. "
+            "L2 or Select=swim mode, R2 or Start=paddle mode."
         )
         self._announced = True
 
     def snapshot(self) -> dict[str, float]:
         if self._handler is None or not self._handler.update():
-            return {"forward": 0.0, "turn": 0.0}
+            return {
+                "forward": 0.0, "turn": 0.0,
+                "mode_swim": False, "mode_paddle": False,
+            }
 
         state = self._handler.get_state()
         left_x = float(state.js_left_x)
@@ -239,6 +248,18 @@ class _GamepadInputState:
         return {
             "forward": float(np.clip(forward, 0.0, 1.0)),
             "turn": float(np.clip(turn, -1.0, 1.0)),
+            # L2 analog, L2 digital (PS3 generic joystick btn 6), or Select/Back button
+            "mode_swim": bool(
+                state.trigger_left > 0.5
+                or state.button_trigger_left
+                or state.button_middle_left
+            ),
+            # R2 analog, R2 digital (PS3 generic joystick btn 7), or Start button
+            "mode_paddle": bool(
+                state.trigger_right > 0.5
+                or state.button_trigger_right
+                or state.button_middle_right
+            ),
         }
 
 
@@ -309,6 +330,30 @@ class PositionController(AnimatController):
         )
         self._turn_less_pressed = False
         self._turn_more_pressed = False
+
+        # ── Paddle mode ──────────────────────────────────────────────
+        self._mode: str = "swim"          # "swim" or "paddle"
+        self._prev_mode_swim   = False
+        self._prev_mode_paddle = False
+
+        # IK parameters (match pd_controller_paddle.py defaults)
+        self.paddle_freq     = float(getattr(self.config, "paddle_freq",     2.0))
+        self.paddle_radius   = float(getattr(self.config, "paddle_radius",   0.01))
+        self.paddle_center_x = float(getattr(self.config, "paddle_center_x", 0.01))
+        self.paddle_center_y = float(getattr(self.config, "paddle_center_y", 0.0))
+        self.paddle_l1       = float(getattr(self.config, "paddle_l1",       0.006))
+        self.paddle_l2       = float(getattr(self.config, "paddle_l2",       0.006))
+        self._precompute_paddle_trajectory()
+
+        # Cached inputs (set each step by _input_modifiers)
+        self._last_inputs: tuple = (
+            {
+                "move_left": False, "move_right": False,
+                "move_straight": False, "turn_less": False, "turn_more": False,
+                "mode_swim": False, "mode_paddle": False,
+            },
+            {"forward": 0.0, "turn": 0.0, "mode_swim": False, "mode_paddle": False},
+        )
 
         self.last_iteration = -1
         self.cached_positions = {
@@ -395,6 +440,161 @@ class PositionController(AnimatController):
         x_coord = (indices + 1.0) / n_body_joints
         return 0.05 - 0.13*x_coord + 0.28*x_coord**2
 
+    # ── Paddle IK helpers ─────────────────────────────────────────────
+
+    @staticmethod
+    def _compute_ik_2d(elbow_id, x, y, d1, d2):
+        """2-D inverse kinematics (matching pd_controller_paddle.py)."""
+        D = np.clip(
+            (x**2 + y**2 - d1**2 - d2**2) / (2.0 * d1 * d2), -1.0, 1.0
+        )
+        elbow = elbow_id * np.arccos(D)
+        k1 = d1 + d2 * np.cos(elbow)
+        k2 = d2 * np.sin(elbow)
+        thigh = np.arctan2(y, x) - np.arctan2(k2, k1)
+        return thigh, elbow
+
+    def _precompute_paddle_trajectory(self, k: float = 0.8, n_samples: int = 1000):
+        """
+        Precompute one full period of the asymmetric IK paddle trajectory and
+        store it as a lookup table for real-time interpolation.
+        """
+        freq         = self.paddle_freq
+        radius       = self.paddle_radius
+        cx, cy       = self.paddle_center_x, self.paddle_center_y
+        l1, l2       = self.paddle_l1, self.paddle_l2
+        phase_shift  = np.pi  # right leg is π out of phase with left
+
+        # Exact period of the autonomous oscillator ds/dt = 2π·f·(1+k·cos(s))
+        # Period = 1 / (f · sqrt(1 - k²))
+        T  = 1.0 / (freq * np.sqrt(1.0 - k**2))
+        dt = T / n_samples
+
+        # Integrate left leg (phase=0) and right leg (phase=π)
+        s_left  = np.zeros(n_samples)
+        s_right = np.zeros(n_samples)
+        for i in range(1, n_samples):
+            s_left[i]  = s_left[i-1]  + 2*np.pi*freq*(1 + k*np.cos(s_left[i-1]))*dt
+            s_right[i] = s_right[i-1] + 2*np.pi*freq*(1 + k*np.cos(s_right[i-1] + phase_shift))*dt
+
+        x_left  = cx + radius * np.cos(-s_left)
+        y_left  = cy + radius * np.sin(-s_left)
+        x_right = cx + radius * np.cos(-s_right + phase_shift)
+        y_right = cy + radius * np.sin(-s_right + phase_shift)
+
+        tl, el = self._compute_ik_2d(-1, x_left,  y_left,  l1, l2)
+        tr, er = self._compute_ik_2d(-1, x_right, y_right, l1, l2)
+
+        self._paddle_period    = T
+        self._paddle_n_samples = n_samples
+        self._paddle_thigh_left  = tl
+        self._paddle_elbow_left  = el
+        self._paddle_thigh_right = tr
+        self._paddle_elbow_right = er
+
+        # Rest pose: foot at trajectory centre
+        rest_thigh, rest_elbow = self._compute_ik_2d(-1, cx, cy, l1, l2)
+        self._paddle_rest_thigh = float(rest_thigh)
+        self._paddle_rest_elbow = float(rest_elbow)
+        pylog.warning(
+            "[Paddle IK] precomputed %.0f-sample LUT  "
+            "period=%.3f s  rest=(%.3f, %.3f) rad",
+            n_samples, T, self._paddle_rest_thigh, self._paddle_rest_elbow,
+        )
+
+    def _paddle_ik_sample(self, time: float) -> dict:
+        """Look up IK angles for the current simulation time."""
+        t_mod = time % self._paddle_period
+        idx = int(t_mod / self._paddle_period * self._paddle_n_samples) % self._paddle_n_samples
+        return {
+            "thigh_left":  float(self._paddle_thigh_left[idx]),
+            "elbow_left":  float(self._paddle_elbow_left[idx]),
+            "thigh_right": float(self._paddle_thigh_right[idx]),
+            "elbow_right": float(self._paddle_elbow_right[idx]),
+        }
+
+    def _paddle_limb_target(
+            self, joint_name: str, time: float, direction: str | None
+    ) -> float:
+        """
+        IK-based limb target for paddle mode.
+
+        Straight  → both front legs active, synchronous (same phase).
+        Left      → only left front leg active, right holds swim pose.
+        Right     → only right front leg active, left holds swim pose.
+        None/idle → all limbs hold their swim pose (no burst on mode switch).
+        Hind limbs always use the fixed swim-rest pose.
+        """
+        is_front_left  = "leg_0_L" in joint_name
+        is_front_right = "leg_0_R" in joint_name
+
+        if not (is_front_left or is_front_right):
+            # Hind limbs: same fixed poses as swim mode
+            return self._limb_target(joint_name)
+
+        is_active = (
+            direction is not None
+            and (
+                (is_front_left  and direction in ("straight", "left"))
+                or (is_front_right and direction in ("straight", "right"))
+            )
+        )
+
+        if is_active:
+            ik = self._paddle_ik_sample(time)
+            # Both legs use the same (left / phase-0) trajectory → synchronous
+            if joint_name.endswith("_0"):
+                return ik["thigh_left"]
+            if joint_name.endswith("_3"):
+                return ik["elbow_left"]
+            return 0.0
+
+        # Inactive / idle → stay at swim pose so mode switch has no burst
+        return self._limb_target(joint_name)
+
+    # ── Mode management ───────────────────────────────────────────────
+
+    def _update_mode(self, mode_swim: bool, mode_paddle: bool):
+        """Switch between swim/paddle on rising edge of mode inputs."""
+        if mode_swim and not self._prev_mode_swim:
+            self._mode = "swim"
+            pylog.warning("Controller mode → SWIM  (body undulation active)")
+        if mode_paddle and not self._prev_mode_paddle:
+            self._mode = "paddle"
+            pylog.warning("Controller mode → PADDLE  (forelimb IK active)")
+        self._prev_mode_swim   = mode_swim
+        self._prev_mode_paddle = mode_paddle
+
+    def _paddle_direction(
+            self, ks: dict, gs: dict
+    ) -> str | None:
+        """
+        Determine paddle direction from current inputs.
+
+        Returns 'straight', 'left', 'right', or None (idle/stop).
+        Keyboard is checked first; falls back to gamepad.
+        """
+        straight = ks["move_straight"]
+        left     = ks["move_left"]
+        right    = ks["move_right"]
+        if straight or left or right:
+            if left and not right:
+                return "left"
+            if right and not left:
+                return "right"
+            return "straight"
+
+        forward = gs["forward"]
+        turn    = gs["turn"]
+        if forward > 0.0 or abs(turn) > 0.0:
+            if turn < 0.0:
+                return "left"
+            if turn > 0.0:
+                return "right"
+            return "straight"
+
+        return None
+
     def _update_turn_strength(
             self,
             turn_less_pressed: bool,
@@ -469,34 +669,52 @@ class PositionController(AnimatController):
         return True, self.swim_freq, 1.0, 1.0
 
     def _input_modifiers(self) -> tuple[bool, float, float, float]:
-        if self.keyboard is None and self.gamepad is None:
-            return False, 0.0, 0.0, 0.0
-
         keyboard_state = {
             "move_left": False,
             "move_right": False,
             "move_straight": False,
             "turn_less": False,
             "turn_more": False,
+            "mode_swim": False,
+            "mode_paddle": False,
         }
         if self.keyboard is not None:
             keyboard_state = self.keyboard.snapshot()
+
+        gamepad_state = {
+            "forward": 0.0,
+            "turn": 0.0,
+            "mode_swim": False,
+            "mode_paddle": False,
+        }
+        if self.gamepad is not None:
+            gamepad_state = self.gamepad.snapshot()
+
+        # Cache for paddle-mode helpers
+        self._last_inputs = (keyboard_state, gamepad_state)
 
         self._update_turn_strength(
             keyboard_state["turn_less"],
             keyboard_state["turn_more"],
         )
 
+        self._update_mode(
+            keyboard_state.get("mode_swim",   False)
+            or gamepad_state.get("mode_swim",   False),
+            keyboard_state.get("mode_paddle", False)
+            or gamepad_state.get("mode_paddle", False),
+        )
+
+        if self.keyboard is None and self.gamepad is None:
+            return False, 0.0, 0.0, 0.0
+
         keyboard_modifiers = self._keyboard_modifiers(keyboard_state)
         if keyboard_modifiers is not None:
             return keyboard_modifiers
 
-        if self.gamepad is not None:
-            gamepad_modifiers = self._gamepad_modifiers(
-                self.gamepad.snapshot()
-            )
-            if gamepad_modifiers is not None:
-                return gamepad_modifiers
+        gamepad_modifiers = self._gamepad_modifiers(gamepad_state)
+        if gamepad_modifiers is not None:
+            return gamepad_modifiers
 
         return False, 0.0, 0.0, 0.0
 
@@ -520,14 +738,35 @@ class PositionController(AnimatController):
         return 0.0
 
     def _update_positions(self, time: float):
-        joint_positions = {}
-        for joint_name, joint_target in zip(
-                self.body_joint_names,
-                self._body_targets(time),
-        ):
-            joint_positions[joint_name] = float(joint_target)
-        for joint_name in self.limb_joint_names:
-            joint_positions[joint_name] = self._limb_target(joint_name)
+        # Read all inputs, update turn strength and mode (side-effects inside).
+        is_swimming, freq, left_scale, right_scale = self._input_modifiers()
+        ks, gs = self._last_inputs
+
+        joint_positions: dict[str, float] = {}
+
+        if self._mode == "paddle":
+            # ── Paddle mode ───────────────────────────────────────────
+            direction = self._paddle_direction(ks, gs)
+            for joint_name in self.body_joint_names:
+                joint_positions[joint_name] = 0.0
+            for joint_name in self.limb_joint_names:
+                joint_positions[joint_name] = self._paddle_limb_target(
+                    joint_name, time, direction
+                )
+        else:
+            # ── Swim mode ─────────────────────────────────────────────
+            if is_swimming:
+                indices = np.arange(len(self.body_joint_names), dtype=float)
+                wave = self.base_amp * self.body_amp_profile * np.sin(
+                    2.0 * np.pi * (indices / self.twl - freq * time)
+                )
+                targets = np.where(wave >= 0.0, left_scale * wave, right_scale * wave)
+            else:
+                targets = np.zeros(len(self.body_joint_names), dtype=float)
+            for joint_name, target in zip(self.body_joint_names, targets):
+                joint_positions[joint_name] = float(target)
+            for joint_name in self.limb_joint_names:
+                joint_positions[joint_name] = self._limb_target(joint_name)
 
         self.cached_positions = {
             joint_name: joint_positions.get(joint_name, 0.0)

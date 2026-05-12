@@ -78,7 +78,6 @@ class SimConfig(BaseSimConfig):
 
         # ── GPU performance ──────────────────────────────────────────
         self.compile_adv_diff = True  # fuse advection-diffusion + BDIM meta kernels
-        self.compile_forces   = True  # fuse batched force computation kernels
 
         # ── BDIM physics ─────────────────────────────────────────────
         self.bdim_physics = {"solref": [0.001, 0.5]}
