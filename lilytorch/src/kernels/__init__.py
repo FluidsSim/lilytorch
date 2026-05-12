@@ -61,6 +61,8 @@ from .ops import (
     apply_bcs_2d,
     interp_2d,
     interp_3d,
+    rbgs_sweep_2d,
+    rbgs_sweep_3d,
 )
 
 from .interpolation import (
@@ -78,6 +80,8 @@ __all__ = [
     "apply_bcs_2d",
     "interp_2d",
     "interp_3d",
+    "rbgs_sweep_2d",
+    "rbgs_sweep_3d",
     "RegularGridInterpolator",
     "RegularGridInterpolator3D",
     "RegularGridInterpolatorAutomatic",

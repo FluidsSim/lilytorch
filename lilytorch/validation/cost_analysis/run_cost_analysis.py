@@ -117,6 +117,7 @@ USE_CUDA = args.device == "cuda" and torch.cuda.is_available()
 if args.out_dir is None:
     args.out_dir = default_results_dir(SCRIPT_DIR, spec)
 args.out_dir = os.path.abspath(args.out_dir)
+os.makedirs(args.out_dir, exist_ok=True)
 
 
 class TimerBank:
@@ -449,6 +450,7 @@ def _apply_cfg_overrides(cfg):
     # MGCG init-exit on a zero warm-start every step and the pressure
     # never gets updated (visible as a flat-zero pressure plot).
     cfg.poisson_tol = 1.0e-7
+    cfg.poisson_max_cycles = 2
     # With tol=1e-7 and cold-start, MGCG typically needs ~25-35 CG
     # iterations to converge for typical fish-swimming flows
     # (initial residual r0 = h²·f ≈ O(7), 50% reduction per step →
@@ -579,7 +581,6 @@ print(f"  Solver: {args.poisson_method}, dtype={args.dtype}, mode={SOLVER_MODE o
 print(f"  Device: {'CUDA' if USE_CUDA else 'CPU'}")
 print("=" * 72)
 
-os.makedirs(args.out_dir, exist_ok=True)
 recompile_log_path = os.path.join(args.out_dir, f"recompiles_{grid_tag(args.grid)}.log")
 open(recompile_log_path, "w").close()
 rc_handler = logging.FileHandler(recompile_log_path, mode="a")

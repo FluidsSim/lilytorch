@@ -140,6 +140,7 @@ DIMENSION_SPECS = {
                 (4096, 1024),
                 (4096, 2048),
                 (8192, 2048),
+                (8192, 4096),
                 ],
             "production": [(256, 64), (512, 128), (1024, 256), (2048, 512)],
         },
@@ -263,8 +264,11 @@ def default_results_dir(script_dir: str, spec: DimensionSpec) -> str:
     return os.path.join(script_dir, "figures", spec.short_tag)
 
 
-def default_pipeline_dir(script_dir: str, spec: DimensionSpec) -> str:
-    return os.path.join(script_dir, "figures", f"scaling_conditions_{spec.short_tag}")
+def default_pipeline_dir(script_dir: str, spec: DimensionSpec, poisson_method: str | None = None) -> str:
+    tag = spec.short_tag
+    if poisson_method:
+        tag = f"{tag}_{poisson_method}"
+    return os.path.join(script_dir, "figures", f"scaling_conditions_{tag}")
 
 
 def resolve_solver_mode(cli_args):

@@ -110,6 +110,47 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " int max_line_dim"
         ") -> ()");
 
+    // ---- Multigrid RBGS sweeper kernels --------------------------------
+    // rbgs_sweep_2d: tiled 2-D RBGS smoother (all nsmoothing sweeps fused).
+    //   p is updated in-place (includes Neumann BC application).
+    //   f, cp0, cm0, cp1, cm1 are the interior-cell RHS and face coefficients.
+    m.def(
+        "rbgs_sweep_2d("
+        "Tensor(a!) p, Tensor f,"
+        " Tensor cp0, Tensor cm0, Tensor cp1, Tensor cm1,"
+        " float jcap_tol, int nsmoothing"
+        ") -> ()");
+
+    // rbgs_sweep_3d: thread-per-cell 3-D RBGS smoother.
+    //   p is updated in-place; cp2/cm2 are the z-face coefficients.
+    m.def(
+        "rbgs_sweep_3d("
+        "Tensor(a!) p, Tensor f,"
+        " Tensor cp0, Tensor cm0, Tensor cp1, Tensor cm1,"
+        " Tensor cp2, Tensor cm2,"
+        " float jcap_tol, int nsmoothing"
+        ") -> ()");
+
+    // ---- Multigrid Jacobi sweeper kernels ------------------------------
+    // jacobi_sweep_2d: tiled 2-D weighted Jacobi smoother.
+    //   p is updated in-place.  w is the relaxation weight (w=1: plain Jacobi).
+    m.def(
+        "jacobi_sweep_2d("
+        "Tensor(a!) p, Tensor f,"
+        " Tensor cp0, Tensor cm0, Tensor cp1, Tensor cm1,"
+        " float jcap_tol, float w, int nsmoothing"
+        ") -> ()");
+
+    // jacobi_sweep_3d: double-buffer 3-D weighted Jacobi smoother.
+    //   p is updated in-place via an internal temp buffer.
+    m.def(
+        "jacobi_sweep_3d("
+        "Tensor(a!) p, Tensor f,"
+        " Tensor cp0, Tensor cm0, Tensor cp1, Tensor cm1,"
+        " Tensor cp2, Tensor cm2,"
+        " float jcap_tol, float w, int nsmoothing"
+        ") -> ()");
+
     // ---- Scattered-point interpolation --------------------------------
     // Reusable bilinear/biquadratic (2-D) and trilinear/triquadratic (3-D)
     // samplers backed by the same device functions as streaming_sdf.

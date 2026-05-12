@@ -888,11 +888,7 @@ class FluidSolver(PlottingMixin):
             coefficient (constant-density behaviour).
         """
 
-        # for general deforming bodies
-        if self.ndim == 2:
-            self.div  = self.divergence(u, v)
-        else:
-            self.div  = self.divergence(u, v, w_vel)
+        self.div  = self.divergence(u, v, w=w_vel)
 
         coeff = w * self.dt / self.rho
 

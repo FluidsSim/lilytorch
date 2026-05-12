@@ -73,7 +73,7 @@ except ValueError as exc:
     sys.exit(1)
 
 if args.out_dir is None:
-    args.out_dir = default_pipeline_dir(SCRIPT_DIR, spec)
+    args.out_dir = default_pipeline_dir(SCRIPT_DIR, spec, args.poisson_method)
 args.out_dir = os.path.abspath(args.out_dir)
 os.makedirs(args.out_dir, exist_ok=True)
 

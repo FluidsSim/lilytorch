@@ -20,6 +20,27 @@ Usage (backward-compatible with old 2-D interface)::
 
 import torch
 
+# ── Optional native RBGS kernels ────────────────────────────────────────────
+# Loaded at module import time so torch.compile can trace through them.
+# Falls back gracefully when the extension is not built.
+_NATIVE_RBGS = False
+_native_rbgs_2d = None
+_native_rbgs_3d = None
+_NATIVE_JAC = False
+_native_jac_2d = None
+_native_jac_3d = None
+try:
+    from lilytorch.src.kernels.ops import (  # noqa: F401 (registers abstract impls)
+        rbgs_sweep_2d as _native_rbgs_2d,
+        rbgs_sweep_3d as _native_rbgs_3d,
+        jacobi_sweep_2d as _native_jac_2d,
+        jacobi_sweep_3d as _native_jac_3d,
+    )
+    _NATIVE_RBGS = True
+    _NATIVE_JAC  = True
+except Exception:
+    pass
+
 
 # =====================================================================
 # Compilable smoother kernels  (module-level, for torch.compile)
@@ -357,6 +378,198 @@ def _rb_masks_2d(nx, ny, device):
     return (parity == 0), (parity == 1)
 
 
+# ── Full 2-D V-cycle with native RBGS kernel (hybrid) ──────────────────
+# Uses the tiled CUDA kernel ONLY at the finest level for pre- and
+# post-smoothing.  All coarse-level corrections fall back to the standard
+# PyTorch _vcycle_rbgs_2d path.
+#
+# Why:  The tiled kernel loads a global-memory snapshot at the start of
+# each kernel call and propagates red→black updates only within a tile
+# (block-boundary approximation).  This is negligible on large grids but
+# degrades the smoothing factor on coarse grids where adjacent blocks cover
+# a large fraction of the total cells.  Using PyTorch RBGS for all coarse
+# levels preserves the full V-cycle convergence rate while the native kernel
+# provides the memory-bandwidth speedup at the dominant fine level.
+def _vcycle_rbgs_2d_native(f, p, ch, cv, jcap_tol, nsmoothing):
+    """Hybrid 2-D V-cycle: tiled native RBGS at fine level, PyTorch at coarse."""
+    p = p.clone()
+    # The CUDA kernel indexes coefficients as cp0[gi*Ny + gj], assuming a
+    # C-contiguous (Nx, Ny) layout.  ch/cv arrive as non-contiguous slices
+    # of the ghost-padded pressure grid (row stride Ny+2, not Ny), so we
+    # must materialise them before extracting cp/cm pairs.
+    ch = ch.contiguous()
+    cv = cv.contiguous()
+    cp0, cm0 = ch[1:, :], ch[:-1, :]
+    cp1, cm1 = cv[:, 1:], cv[:, :-1]
+
+    # Pre-smooth (fine level): native tiled kernel
+    _native_rbgs_2d(p, f, cp0, cm0, cp1, cm1, jcap_tol, nsmoothing)
+    # Residual
+    J = _J2d(cp0, cm0, cp1, cm1)
+    active = torch.abs(J) >= jcap_tol
+    s = _sum2d(cp0, cm0, cp1, cm1, p)
+    Au = s - J * p[1:-1, 1:-1]
+    r = torch.where(active, f - Au, torch.zeros_like(f))
+
+    nx, ny = f.shape
+    if nx > 2 and ny > 2:
+        ch_c, cv_c = _restrict_face_2d(ch, cv)
+        r_c = _restrict_residual_2d(r)
+        coarse_shape = (r_c.shape[0] + 2, r_c.shape[1] + 2)
+        p_c = torch.zeros(coarse_shape, device=p.device, dtype=p.dtype)
+        # Coarse correction: PyTorch V-cycle (reliable convergence at all sizes)
+        err_c, _ = _vcycle_rbgs_2d(r_c, p_c, ch_c, cv_c, jcap_tol, nsmoothing)
+        err = _prolongate_2d(err_c, r.shape)
+        p[1:-1, 1:-1] = p[1:-1, 1:-1] + err
+
+        # Post-smooth (fine level): native tiled kernel
+        cp0, cm0 = ch[1:, :], ch[:-1, :]
+        cp1, cm1 = cv[:, 1:], cv[:, :-1]
+        _native_rbgs_2d(p, f, cp0, cm0, cp1, cm1, jcap_tol, nsmoothing)
+        J = _J2d(cp0, cm0, cp1, cm1)
+        active = torch.abs(J) >= jcap_tol
+        s = _sum2d(cp0, cm0, cp1, cm1, p)
+        Au = s - J * p[1:-1, 1:-1]
+        r = torch.where(active, f - Au, torch.zeros_like(f))
+
+    return p, r
+
+
+# ── Full 3-D V-cycle with native RBGS kernel (hybrid) ──────────────────
+# Same hybrid strategy as the 2-D version: native kernel at the finest level
+# only; PyTorch _vcycle_rbgs_3d for the coarse correction.
+def _vcycle_rbgs_3d_native(f, p, ch, cv, cw, jcap_tol, nsmoothing):
+    """Hybrid 3-D V-cycle: thread-per-cell native RBGS at fine level, PyTorch at coarse."""
+    p = p.clone()
+    # Same non-contiguity fix as the 2-D variant: ch/cv/cw arrive as slices
+    # of the ghost-padded grid (strides (Ny+2)*(Nz+2), Nz+2, 1), but the
+    # kernel assumes C-contiguous layout (strides Ny*Nz, Nz, 1).
+    ch = ch.contiguous()
+    cv = cv.contiguous()
+    cw = cw.contiguous()
+    cp0, cm0 = ch[1:, :, :], ch[:-1, :, :]
+    cp1, cm1 = cv[:, 1:, :], cv[:, :-1, :]
+    cp2, cm2 = cw[:, :, 1:], cw[:, :, :-1]
+
+    # Pre-smooth (fine level): native kernel
+    _native_rbgs_3d(p, f, cp0, cm0, cp1, cm1, cp2, cm2, jcap_tol, nsmoothing)
+    # Residual
+    J = _J3d(cp0, cm0, cp1, cm1, cp2, cm2)
+    active = torch.abs(J) >= jcap_tol
+    s = _sum3d(cp0, cm0, cp1, cm1, cp2, cm2, p)
+    Au = s - J * p[1:-1, 1:-1, 1:-1]
+    r = torch.where(active, f - Au, torch.zeros_like(f))
+
+    nx, ny, nz = f.shape
+    if nx > 2 and ny > 2 and nz > 2:
+        ch_c, cv_c, cw_c = _restrict_face_3d(ch, cv, cw)
+        r_c = _restrict_residual_3d(r)
+        coarse_shape = (r_c.shape[0] + 2, r_c.shape[1] + 2, r_c.shape[2] + 2)
+        p_c = torch.zeros(coarse_shape, device=p.device, dtype=p.dtype)
+        # Coarse correction: PyTorch V-cycle (reliable convergence at all sizes)
+        err_c, _ = _vcycle_rbgs_3d(r_c, p_c, ch_c, cv_c, cw_c, jcap_tol, nsmoothing)
+        err = _prolongate_3d(err_c, r.shape)
+        p[1:-1, 1:-1, 1:-1] = p[1:-1, 1:-1, 1:-1] + err
+
+        # Post-smooth (fine level): native kernel
+        cp0, cm0 = ch[1:, :, :], ch[:-1, :, :]
+        cp1, cm1 = cv[:, 1:, :], cv[:, :-1, :]
+        cp2, cm2 = cw[:, :, 1:], cw[:, :, :-1]
+        _native_rbgs_3d(p, f, cp0, cm0, cp1, cm1, cp2, cm2, jcap_tol, nsmoothing)
+        J = _J3d(cp0, cm0, cp1, cm1, cp2, cm2)
+        active = torch.abs(J) >= jcap_tol
+        s = _sum3d(cp0, cm0, cp1, cm1, cp2, cm2, p)
+        Au = s - J * p[1:-1, 1:-1, 1:-1]
+        r = torch.where(active, f - Au, torch.zeros_like(f))
+
+    return p, r
+
+
+# ── Full 2-D V-cycle with native Jacobi kernel (hybrid) ────────────────
+def _vcycle_jac_2d_native(f, p, ch, cv, w, jcap_tol, nsmoothing):
+    """Hybrid 2-D V-cycle: tiled native Jacobi at fine level, PyTorch at coarse."""
+    p = p.clone()
+    ch = ch.contiguous()
+    cv = cv.contiguous()
+    cp0, cm0 = ch[1:, :], ch[:-1, :]
+    cp1, cm1 = cv[:, 1:], cv[:, :-1]
+
+    # Pre-smooth (fine level): native tiled kernel
+    _native_jac_2d(p, f, cp0, cm0, cp1, cm1, jcap_tol, w, nsmoothing)
+    J = _J2d(cp0, cm0, cp1, cm1)
+    active = torch.abs(J) >= jcap_tol
+    s = _sum2d(cp0, cm0, cp1, cm1, p)
+    Au = s - J * p[1:-1, 1:-1]
+    r = torch.where(active, f - Au, torch.zeros_like(f))
+
+    nx, ny = f.shape
+    if nx > 2 and ny > 2:
+        ch_c, cv_c = _restrict_face_2d(ch, cv)
+        r_c = _restrict_residual_2d(r)
+        coarse_shape = (r_c.shape[0] + 2, r_c.shape[1] + 2)
+        p_c = torch.zeros(coarse_shape, device=p.device, dtype=p.dtype)
+        # Coarse correction: PyTorch V-cycle
+        err_c, _ = _vcycle_jac_2d(r_c, p_c, ch_c, cv_c, w, jcap_tol, nsmoothing)
+        err = _prolongate_2d(err_c, r.shape)
+        p[1:-1, 1:-1] = p[1:-1, 1:-1] + err
+
+        # Post-smooth (fine level): native tiled kernel
+        cp0, cm0 = ch[1:, :], ch[:-1, :]
+        cp1, cm1 = cv[:, 1:], cv[:, :-1]
+        _native_jac_2d(p, f, cp0, cm0, cp1, cm1, jcap_tol, w, nsmoothing)
+        J = _J2d(cp0, cm0, cp1, cm1)
+        active = torch.abs(J) >= jcap_tol
+        s = _sum2d(cp0, cm0, cp1, cm1, p)
+        Au = s - J * p[1:-1, 1:-1]
+        r = torch.where(active, f - Au, torch.zeros_like(f))
+
+    return p, r
+
+
+# ── Full 3-D V-cycle with native Jacobi kernel (hybrid) ────────────────
+def _vcycle_jac_3d_native(f, p, ch, cv, cw, w, jcap_tol, nsmoothing):
+    """Hybrid 3-D V-cycle: native Jacobi at fine level, PyTorch at coarse."""
+    p = p.clone()
+    ch = ch.contiguous()
+    cv = cv.contiguous()
+    cw = cw.contiguous()
+    cp0, cm0 = ch[1:, :, :], ch[:-1, :, :]
+    cp1, cm1 = cv[:, 1:, :], cv[:, :-1, :]
+    cp2, cm2 = cw[:, :, 1:], cw[:, :, :-1]
+
+    # Pre-smooth (fine level): native double-buffer kernel
+    _native_jac_3d(p, f, cp0, cm0, cp1, cm1, cp2, cm2, jcap_tol, w, nsmoothing)
+    J = _J3d(cp0, cm0, cp1, cm1, cp2, cm2)
+    active = torch.abs(J) >= jcap_tol
+    s = _sum3d(cp0, cm0, cp1, cm1, cp2, cm2, p)
+    Au = s - J * p[1:-1, 1:-1, 1:-1]
+    r = torch.where(active, f - Au, torch.zeros_like(f))
+
+    nx, ny, nz = f.shape
+    if nx > 2 and ny > 2 and nz > 2:
+        ch_c, cv_c, cw_c = _restrict_face_3d(ch, cv, cw)
+        r_c = _restrict_residual_3d(r)
+        coarse_shape = (r_c.shape[0] + 2, r_c.shape[1] + 2, r_c.shape[2] + 2)
+        p_c = torch.zeros(coarse_shape, device=p.device, dtype=p.dtype)
+        # Coarse correction: PyTorch V-cycle
+        err_c, _ = _vcycle_jac_3d(r_c, p_c, ch_c, cv_c, cw_c, w, jcap_tol, nsmoothing)
+        err = _prolongate_3d(err_c, r.shape)
+        p[1:-1, 1:-1, 1:-1] = p[1:-1, 1:-1, 1:-1] + err
+
+        # Post-smooth (fine level): native double-buffer kernel
+        cp0, cm0 = ch[1:, :, :], ch[:-1, :, :]
+        cp1, cm1 = cv[:, 1:, :], cv[:, :-1, :]
+        cp2, cm2 = cw[:, :, 1:], cw[:, :, :-1]
+        _native_jac_3d(p, f, cp0, cm0, cp1, cm1, cp2, cm2, jcap_tol, w, nsmoothing)
+        J = _J3d(cp0, cm0, cp1, cm1, cp2, cm2)
+        active = torch.abs(J) >= jcap_tol
+        s = _sum3d(cp0, cm0, cp1, cm1, cp2, cm2, p)
+        Au = s - J * p[1:-1, 1:-1, 1:-1]
+        r = torch.where(active, f - Au, torch.zeros_like(f))
+
+    return p, r
+
+
 # ── Full 2-D V-cycle with Jacobi (compilable, recursive) ────────────
 def _vcycle_jac_2d(f, p, ch, cv, w, jcap_tol, nsmoothing):
     """Complete 2-D V-cycle with Jacobi smoother."""
@@ -386,7 +599,7 @@ def _vcycle_jac_2d(f, p, ch, cv, w, jcap_tol, nsmoothing):
         cp0, cm0 = ch[1:, :], ch[:-1, :]
         cp1, cm1 = cv[:, 1:], cv[:, :-1]
         p, r = _jacobi_2d(f, p, cp0, cm0, cp1, cm1,
-                           w, jcap_tol, nsmoothing)
+                           w, jcap_tol, nsmoothing) 
 
     return p, r
 
@@ -499,6 +712,16 @@ class PoissonSolver:
         self.compile_dynamic = compile_dynamic
         self._compiled_fn = {}    # lazily populated {ndim: compiled_fn}
         self._rb_mask_cache = {}  # {(shape, device): (red, black)}
+
+        # Pre-warm the compiled V-cycle objects for both 2-D and 3-D at
+        # construction time so the first call to _dispatch_vcycle never pays
+        # the torch.compile overhead during a time step.  The actual CUDA
+        # graph is captured on the first *execution* (not here), but having
+        # the compiled function object ready avoids the key-lookup branch and
+        # the torch.compile() call at solve time.
+        if compile_smoother:
+            for ndim in (2, 3):
+                self._get_compiled_vcycle(ndim)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -739,10 +962,22 @@ class PoissonSolver:
         """
         key = f"vcycle_{ndim}d_{self.smoother}"
         if key not in self._compiled_fn:
-            if ndim == 3:
-                raw = _vcycle_rbgs_3d if self.smoother == "rbgs" else _vcycle_jac_3d
-            else:
-                raw = _vcycle_rbgs_2d if self.smoother == "rbgs" else _vcycle_jac_2d
+            if self.smoother == "rbgs":
+                use_native = _NATIVE_RBGS
+                if use_native:
+                    raw = _vcycle_rbgs_2d_native if ndim == 2 else _vcycle_rbgs_3d_native
+                elif ndim == 3:
+                    raw = _vcycle_rbgs_3d
+                else:
+                    raw = _vcycle_rbgs_2d
+            else:  # jacobi
+                use_native = _NATIVE_JAC
+                if use_native:
+                    raw = _vcycle_jac_2d_native if ndim == 2 else _vcycle_jac_3d_native
+                elif ndim == 3:
+                    raw = _vcycle_jac_3d
+                else:
+                    raw = _vcycle_jac_2d
             self._compiled_fn[key] = torch.compile(
                 raw, mode=self.compile_mode, dynamic=False,
             )

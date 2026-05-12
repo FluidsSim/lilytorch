@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
 """
-GPU memory comparison across the solver modes.
+GPU memory comparison across solver modes — 2-D and 3-D pinned 1guilla.
 
 This is the *measurement* counterpart to ``docs/memory_analysis.md``.  It
-runs the same FARMS-coupled 3-D 1guilla free-swimming scenario under the
-reference Python path and the native streamed kernel path, and reports
-per-phase / per-tensor memory usage so the biggest bottlenecks can be
-identified directly on hardware.
+runs the same FARMS-coupled pinned 1guilla scenario used in the cost
+analysis (``lilytorch/validation/cost_analysis/``) under the reference
+Python path and the optimised kernel path, and reports per-phase /
+per-tensor memory usage so the biggest bottlenecks can be identified
+directly on hardware.
+
+Using the **pinned** 1guilla benchmark (same as cost_analysis/) means:
+  * Memory numbers are directly comparable to the timing numbers produced
+    by ``run_cost_analysis.py``.
+  * Both 2-D and 3-D dimensions are supported with the same script.
+  * The same Poisson settings, domain sizing, and compile flags are used.
 
 Modes
 -----
@@ -18,7 +25,13 @@ Modes
 * ``kernel``  — native streamed kernel path
                 (``solver.solver_method = "kernel"``).
                 Uses the final update-only geometry pass plus the
-                post-fluid-step native force pass.
+                post-fluid-step native force pass.  Persistent packed
+                mu/normals buffers are kept across steps (union AABB mode).
+
+Dimensions
+----------
+* ``--dim 2`` — 2-D grid, ``gen_configs_one_pinned_2d.SimConfig``
+* ``--dim 3`` — 3-D grid, ``gen_configs_one_pinned_3d.SimConfig`` (default)
 
 Driver vs. worker
 -----------------
@@ -36,27 +49,55 @@ Typical usage
 -------------
 ::
 
-    # Run both modes and emit a comparison table:
-    python run_memory_comparison.py --Nx 256 --Ny 64 --Nz 64 --n_steps 80
+    # 2-D: run both modes and emit a comparison table
+    python run_memory_comparison.py --dim 2 --Nx 512 --Ny 128 --n_steps 80
+
+    # 3-D: same
+    python run_memory_comparison.py --dim 3 --Nx 256 --Ny 64 --Nz 64 --n_steps 80
 
     # Re-run a single mode:
-    python run_memory_comparison.py --mode kernel \
+    python run_memory_comparison.py --dim 3 --mode kernel \\
         --Nx 256 --Ny 64 --Nz 64 --n_steps 80
 
-The script intentionally uses a coarsened grid by default so that all
-two modes fit on a 12 GB GPU (the ``python`` path needs roughly
-2× the memory of the kernel path on the same grid).
+    # Reuse existing JSON files:
+    python run_memory_comparison.py --dim 2 --Nx 512 --keep_existing
+
+The script intentionally uses coarsened grids by default so that both
+modes fit on a 12 GB GPU (the ``python`` path needs roughly 2× the memory
+of the ``kernel`` path on the same grid).
 """
 
 from __future__ import annotations
 
 import argparse
 import gc
+import importlib
 import json
 import os
 import subprocess
 import sys
 import time
+import types
+
+# Make cost_analysis/common.py importable by adding the parent dir to sys.path
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_COST_ANALYSIS_DIR = os.path.join(_SCRIPT_DIR, "..", "cost_analysis")
+if _COST_ANALYSIS_DIR not in sys.path:
+    sys.path.insert(0, _COST_ANALYSIS_DIR)
+
+from common import (  # noqa: E402 — deferred import after path setup
+    BODY_CENTER_OFFSET,
+    DEFAULT_DTYPE,
+    DEFAULT_POISSON_METHOD,
+    DEFAULT_SPAWN_X,
+    DEFAULT_TIMESTEP,
+    DX_REF,
+    MIN_LX_FISH,
+    get_dimension_spec,
+    grid_cells,
+    grid_label,
+    grid_tag,
+)
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -67,10 +108,6 @@ _MODES = ("python", "kernel")
 _MODE_ALIASES = {
     "no_kernels": "python",
     "kernels": "kernel",
-}
-_LEGACY_RESULT_FILES = {
-    "python": "memory_no_kernels.json",
-    "kernel": "memory_kernels.json",
 }
 
 
@@ -89,10 +126,12 @@ def _result_path(out_dir: str, mode: str) -> str:
 
 
 def _existing_result_path(out_dir: str, mode: str) -> str:
+    # Legacy file names from the old (3-D only) version of this script.
+    _LEGACY = {"python": "memory_no_kernels.json", "kernel": "memory_kernels.json"}
     canonical = _result_path(out_dir, mode)
     if os.path.exists(canonical):
         return canonical
-    legacy_name = _LEGACY_RESULT_FILES.get(mode)
+    legacy_name = _LEGACY.get(mode)
     if legacy_name is not None:
         legacy = os.path.join(out_dir, legacy_name)
         if os.path.exists(legacy):
@@ -103,10 +142,14 @@ def _existing_result_path(out_dir: str, mode: str) -> str:
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "GPU memory comparison across python / "
-            "kernel solver modes."
+            "GPU memory comparison across python / kernel solver modes "
+            "for 2-D and 3-D pinned 1guilla."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--dim", type=int, default=3, choices=[2, 3],
+        help="Simulation dimensionality (default: 3).",
     )
     parser.add_argument(
         "--mode", type=_canonical_mode, choices=_MODES, default=None,
@@ -116,27 +159,28 @@ def _parse_args() -> argparse.Namespace:
             "mode."
         ),
     )
-    parser.add_argument("--Nx", type=int, default=256)
+    parser.add_argument(
+        "--Nx", type=int, default=None,
+        help="Grid cells in x.  Defaults to the dimension spec's default_grid.",
+    )
     parser.add_argument(
         "--Ny", type=int, default=None,
-        help=(
-            "Grid cells in y.  If omitted, derived from --Nx and the "
-            "SimConfig domain extents to ensure isotropic spacing."
-        ),
+        help="Grid cells in y.  Defaults to the dimension spec's default_grid.",
     )
     parser.add_argument(
         "--Nz", type=int, default=None,
-        help=(
-            "Grid cells in z.  If omitted, derived from --Nx and the "
-            "SimConfig domain extents to ensure isotropic spacing."
-        ),
+        help="Grid cells in z (3-D only).  Defaults to the dimension spec's default_grid.",
     )
     parser.add_argument(
         "--n_steps", type=int, default=80,
         help=(
             "Total simulation steps to run inside each worker.  Snapshots "
-            "are taken at warm-up (~10), peak (~n_steps/2), and end."
+            "are taken at warm-up, peak (~0.6·n_steps), and end."
         ),
+    )
+    parser.add_argument(
+        "--precompile", type=int, default=30,
+        help="Untimed pre-compilation steps before measurement begins.",
     )
     parser.add_argument(
         "--warmup_steps", type=int, default=15,
@@ -153,10 +197,18 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--poisson_method", type=str, default=DEFAULT_POISSON_METHOD,
+        choices=["multigrid", "mgcg", "fft"],
+    )
+    parser.add_argument("--dtype", type=str, default=DEFAULT_DTYPE,
+                        choices=["float32", "float64"])
+    parser.add_argument("--timestep", type=float, default=DEFAULT_TIMESTEP)
+    parser.add_argument("--spawn_x", type=float, default=DEFAULT_SPAWN_X)
+    parser.add_argument(
         "--out_dir", default=None,
         help=(
             "Directory where worker JSON results land.  Defaults to "
-            "``./results/`` next to this script."
+            "``./results/dim<N>/`` next to this script."
         ),
     )
     parser.add_argument(
@@ -170,7 +222,18 @@ def _parse_args() -> argparse.Namespace:
             "Useful for incremental sweeps."
         ),
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    # Fill in grid defaults from the DimensionSpec when not supplied
+    spec = get_dimension_spec(args.dim)
+    if args.Nx is None:
+        args.Nx = spec.default_grid[0]
+    if args.Ny is None:
+        args.Ny = spec.default_grid[1]
+    if args.dim == 3 and args.Nz is None:
+        args.Nz = spec.default_grid[2]
+
+    return args
 
 
 # ════════════════════════════════════════════════════════════════════════

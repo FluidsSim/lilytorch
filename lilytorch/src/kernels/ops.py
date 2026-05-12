@@ -17,6 +17,8 @@ __all__ = [
     "apply_bcs_2d",
     "interp_2d",
     "interp_3d",
+    "rbgs_sweep_2d",
+    "rbgs_sweep_3d",
 ]
 _METHOD_MAP = {"linear": 0, "quadratic": 1}
 
@@ -285,3 +287,132 @@ def apply_bcs_2d(
         shapes, neu_desc, dir_desc, dir_val,
         int(max_line_dim),
     )
+
+
+# =====================================================================
+# Multigrid RBGS smoother kernels
+# =====================================================================
+
+def rbgs_sweep_2d(
+        p: Tensor,
+        f: Tensor,
+        cp0: Tensor, cm0: Tensor,
+        cp1: Tensor, cm1: Tensor,
+        jcap_tol: float,
+        nsmoothing: int) -> None:
+    """Tiled 2-D RBGS smoother: ``nsmoothing`` full sweeps in one CUDA call.
+
+    Mutates ``p`` (shape ``(Nx+2, Ny+2)``) in place.  Applies Neumann BCs
+    on ghost rows before and after the sweeps.  ``f``, ``cp0``, ``cm0``,
+    ``cp1``, ``cm1`` are the interior-cell RHS and face coefficients, all
+    of shape ``(Nx, Ny)``.
+    """
+    # Coefficient arrays may arrive as non-contiguous slices (e.g. strides
+    # from a ghost-padded grid).  The CUDA kernel assumes C-contiguous layout,
+    # so materialise them here before dispatch.
+    torch.ops.lilytorch_kernels.rbgs_sweep_2d.default(
+        p, f,
+        cp0.contiguous(), cm0.contiguous(),
+        cp1.contiguous(), cm1.contiguous(),
+        float(jcap_tol), int(nsmoothing),
+    )
+
+
+def rbgs_sweep_3d(
+        p: Tensor,
+        f: Tensor,
+        cp0: Tensor, cm0: Tensor,
+        cp1: Tensor, cm1: Tensor,
+        cp2: Tensor, cm2: Tensor,
+        jcap_tol: float,
+        nsmoothing: int) -> None:
+    """Thread-per-cell 3-D RBGS smoother: ``nsmoothing`` full sweeps.
+
+    Mutates ``p`` (shape ``(Nx+2, Ny+2, Nz+2)``) in place.  Applies
+    Neumann BCs between every half-sweep.  ``f``, ``cp{0,1,2}``,
+    ``cm{0,1,2}`` are interior-cell arrays of shape ``(Nx, Ny, Nz)``.
+    """
+    # Same non-contiguity guard as the 2-D wrapper.
+    torch.ops.lilytorch_kernels.rbgs_sweep_3d.default(
+        p, f,
+        cp0.contiguous(), cm0.contiguous(),
+        cp1.contiguous(), cm1.contiguous(),
+        cp2.contiguous(), cm2.contiguous(),
+        float(jcap_tol), int(nsmoothing),
+    )
+
+
+# ── FakeTensor (abstract) implementations for torch.compile ──────────
+# These let torch.compile / TorchInductor trace through the custom ops
+# without executing CUDA.  Both ops return () and mutate p in place, so
+# the abstract implementation is a no-op.
+
+@torch.library.register_fake("lilytorch_kernels::rbgs_sweep_2d")
+def _rbgs_sweep_2d_abstract(p, f, cp0, cm0, cp1, cm1,
+                              jcap_tol, nsmoothing):
+    pass   # p is mutated in place; no new tensors created
+
+
+@torch.library.register_fake("lilytorch_kernels::rbgs_sweep_3d")
+def _rbgs_sweep_3d_abstract(p, f, cp0, cm0, cp1, cm1, cp2, cm2,
+                              jcap_tol, nsmoothing):
+    pass   # p is mutated in place; no new tensors created
+
+
+def jacobi_sweep_2d(
+        p: Tensor,
+        f: Tensor,
+        cp0: Tensor, cm0: Tensor,
+        cp1: Tensor, cm1: Tensor,
+        jcap_tol: float,
+        w: float,
+        nsmoothing: int) -> None:
+    """Tiled 2-D weighted Jacobi smoother: ``nsmoothing`` sweeps in one CUDA call.
+
+    Mutates ``p`` (shape ``(Nx+2, Ny+2)``) in place.  Applies Neumann BCs
+    on ghost rows before and after the sweeps.  ``f``, ``cp0``, ``cm0``,
+    ``cp1``, ``cm1`` are the interior-cell RHS and face coefficients, all
+    of shape ``(Nx, Ny)``.  ``w`` is the relaxation weight (1.0 = plain Jacobi).
+    """
+    torch.ops.lilytorch_kernels.jacobi_sweep_2d.default(
+        p, f,
+        cp0.contiguous(), cm0.contiguous(),
+        cp1.contiguous(), cm1.contiguous(),
+        float(jcap_tol), float(w), int(nsmoothing),
+    )
+
+
+def jacobi_sweep_3d(
+        p: Tensor,
+        f: Tensor,
+        cp0: Tensor, cm0: Tensor,
+        cp1: Tensor, cm1: Tensor,
+        cp2: Tensor, cm2: Tensor,
+        jcap_tol: float,
+        w: float,
+        nsmoothing: int) -> None:
+    """Double-buffer 3-D weighted Jacobi smoother: ``nsmoothing`` sweeps.
+
+    Mutates ``p`` (shape ``(Nx+2, Ny+2, Nz+2)``) in place.  Uses an
+    internal ping-pong buffer so every read sees the previous iteration's
+    values (true synchronous Jacobi).
+    """
+    torch.ops.lilytorch_kernels.jacobi_sweep_3d.default(
+        p, f,
+        cp0.contiguous(), cm0.contiguous(),
+        cp1.contiguous(), cm1.contiguous(),
+        cp2.contiguous(), cm2.contiguous(),
+        float(jcap_tol), float(w), int(nsmoothing),
+    )
+
+
+@torch.library.register_fake("lilytorch_kernels::jacobi_sweep_2d")
+def _jacobi_sweep_2d_abstract(p, f, cp0, cm0, cp1, cm1,
+                                jcap_tol, w, nsmoothing):
+    pass   # p is mutated in place; no new tensors created
+
+
+@torch.library.register_fake("lilytorch_kernels::jacobi_sweep_3d")
+def _jacobi_sweep_3d_abstract(p, f, cp0, cm0, cp1, cm1, cp2, cm2,
+                                jcap_tol, w, nsmoothing):
+    pass   # p is mutated in place; no new tensors created
