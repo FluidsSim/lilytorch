@@ -425,36 +425,14 @@ def compute_inertias_2d(sdf_fun, inside_mask, x, y, x_g, y_g, density=1000.0):
     return mass, I_x_centroid, I_y_centroid, I_xy_centroid
 
 
-
-
 def body_from_yaml(device, x, y, body_pars, eps=0.05, custom_update=None, starting_time=0, z=None, grids=None, **kwargs):
 
     if custom_update is not None:
         update_map = custom_update
 
     body_type = body_pars["type"]
-    if body_type == "analytical":
-        sdf_fun = eval(body_pars["sdf"])
-        plotting = body_pars["plotting"]
-        update_maps = body_pars["update_maps"]
-        transl_strs = update_maps["translation"]
-        transl = tuple(eval(s) for s in transl_strs)
-        update_map = (
-            eval(update_maps["rotation"]),
-            transl
-        )
-        return BodyAnalytical(
-            device,
-            x, y,
-            sdf_fun,
-            update_map,
-            z=z,
-            eps=eps,
-            plotting=plotting,
-            grids=grids,
-        )
 
-    elif body_type == "composite_analytical":
+    if body_type == "composite_analytical":
         sdf_funs = body_pars["sdf"]
         plotting=body_pars["plotting"]
         update_maps = body_pars["update_maps"]
@@ -470,27 +448,6 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, custom_update=None, starti
             z=z,
             eps=eps,
             plotting=plotting,
-            grids=grids,
-        )
-
-    elif body_type == "mesh":
-        update_map = [None,None]
-        mesh_file = body_pars["mesh_file"]
-        nsamples, msamples, ksamples = None, None, None
-        if "n_samples" in body_pars and body_pars["n_samples"] is not None:
-            _ns = eval(body_pars["n_samples"])
-            nsamples, msamples = _ns[0], _ns[1]
-            if len(_ns) >= 3:
-                ksamples = _ns[2]
-        return BodyMesh(
-            device,
-            x, y,
-            mesh_file,
-            update_map,
-            eps=eps,
-            plotting_meshes=body_pars["plotting_meshes"],
-            compute_interp=body_pars["compute_interp"],
-            nsamples=nsamples, msamples=msamples, ksamples=ksamples,
             grids=grids,
         )
 

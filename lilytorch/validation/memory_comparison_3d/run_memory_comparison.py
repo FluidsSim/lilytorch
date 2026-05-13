@@ -292,35 +292,175 @@ def _reset_peak() -> None:
     torch.cuda.reset_peak_memory_stats()
 
 
-def _tensor_census(top_k: int = 30) -> list[dict]:
+def _build_name_map(*objs) -> dict[int, str]:
+    """Map CUDA storage data_ptr → attribute name by inspecting object __dict__s.
+
+    Pass any live Python objects (e.g. a FluidSolver and a BDIMhandler instance)
+    and the function returns a dict from storage pointer to the *first* matching
+    attribute name found.  When multiple attributes share the same storage
+    (views / aliases) the names are joined with '/'.
+
+    Also walks ``composite_body.bodies[i]`` (with prefix ``bodies[i].``) so that
+    per-body SDF interpolation caches and similar nested tensors are identified.
+
+    FakeTensors (from ``torch.compile`` tracing) are silently skipped because
+    they carry no real GPU allocation.
+    """
+    import torch
+    try:
+        from torch._subclasses.fake_tensor import FakeTensor as _FakeTensor
+    except ImportError:
+        _FakeTensor = None  # older torch — no FakeTensor
+
+    def _is_real_cuda(val) -> bool:
+        if not (torch.is_tensor(val) and val.is_cuda):
+            return False
+        if _FakeTensor is not None and isinstance(val, _FakeTensor):
+            return False
+        return True
+
+    name_map: dict[int, str] = {}
+
+    def _register(attr_path: str, val) -> None:
+        try:
+            if not _is_real_cuda(val):
+                return
+            ptr = val.untyped_storage().data_ptr()
+            if ptr in name_map:
+                if attr_path not in name_map[ptr].split("/"):
+                    name_map[ptr] = name_map[ptr] + "/" + attr_path
+            else:
+                name_map[ptr] = attr_path
+        except Exception:
+            pass
+
+    def _walk(obj, prefix: str = "") -> None:
+        try:
+            items = list(vars(obj).items())
+        except TypeError:
+            return
+        for attr, val in items:
+            full = (prefix + attr) if prefix else attr
+            _register(full, val)
+
+    for obj in objs:
+        _walk(obj)
+        # also walk direct sub-objects of each top-level object
+        try:
+            for attr, sub in vars(obj).items():
+                if sub is None or torch.is_tensor(sub):
+                    continue
+                _walk(sub, prefix=f"{attr}.")
+        except TypeError:
+            pass
+        # dive into composite_body.bodies[i] and their .sdf interpolator
+        comp = getattr(obj, "composite_body", None) or getattr(
+            getattr(obj, "fluid_solver", None), "composite_body", None)
+        if comp is not None:
+            _walk(comp, prefix="composite_body.")
+            bodies = getattr(comp, "bodies", []) or []
+            for i, body in enumerate(bodies):
+                _walk(body, prefix=f"bodies[{i}].")
+                # one more level: e.g. body.sdf._F (RegularGridInterpolator)
+                for sub_attr in vars(body):
+                    sub_val = getattr(body, sub_attr, None)
+                    if sub_val is not None and not torch.is_tensor(sub_val):
+                        _walk(sub_val, prefix=f"bodies[{i}].{sub_attr}.")
+
+    # Fallback: for any large CUDA tensor not yet mapped, use gc.get_referrers
+    # to find the owner object and attribute name.
+    import gc as _gc
+    for t in _gc.get_objects():
+        try:
+            if not _is_real_cuda(t):
+                continue
+            ptr = t.untyped_storage().data_ptr()
+            if ptr in name_map:
+                continue  # already identified
+            if t.nelement() < 1_000_000:
+                continue  # skip small tensors for performance
+            found = False
+            for ref in _gc.get_referrers(t):
+                if isinstance(ref, dict):
+                    for rref in _gc.get_referrers(ref):
+                        if hasattr(rref, "__dict__") and rref.__dict__ is ref:
+                            for attr_name, val in ref.items():
+                                if val is t:
+                                    name_map[ptr] = f"{type(rref).__name__}.{attr_name}"
+                                    found = True
+                                    break
+                        if found:
+                            break
+                elif isinstance(ref, (list, tuple)):
+                    for rref in _gc.get_referrers(ref):
+                        if hasattr(rref, "__dict__"):
+                            for attr_name, val in vars(rref).items():
+                                if val is ref:
+                                    idx = None
+                                    try:
+                                        idx = list(ref).index(t)
+                                    except ValueError:
+                                        pass
+                                    if idx is not None:
+                                        name_map[ptr] = (
+                                            f"{type(rref).__name__}.{attr_name}[{idx}]"
+                                        )
+                                        found = True
+                                    break
+                        if found:
+                            break
+                if found:
+                    break
+        except Exception:
+            pass
+
+    return name_map
+
+
+def _tensor_census(top_k: int = 30,
+                   name_map: dict[int, str] | None = None) -> list[dict]:
     """Walk the Python heap and group every unique CUDA storage by (shape, dtype).
 
     Deduplicates by untyped_storage().data_ptr() so that views / slices that
     share the same underlying allocation are counted only once.  For each
     unique storage we keep the tensor with the most elements as the
     representative shape (closest to the base allocation).
+
+    If ``name_map`` is provided (storage_ptr → attr_name string), the matching
+    attribute names are stored in each census row under the key ``"names"``.
     """
     import torch
-    # storage_ptr → (storage_nbytes, shape, dtype) of the largest tensor seen
+    try:
+        from torch._subclasses.fake_tensor import FakeTensor as _FakeTensor
+    except ImportError:
+        _FakeTensor = None
+    # storage_ptr → (storage_nbytes, nel, shape, dtype) of the largest tensor seen
     unique: dict[int, tuple] = {}
     for obj in gc.get_objects():
         try:
             if not (torch.is_tensor(obj) and obj.is_cuda):
                 continue
-            stor  = obj.untyped_storage()
-            ptr   = stor.data_ptr()
+            if _FakeTensor is not None and isinstance(obj, _FakeTensor):
+                continue  # skip torch.compile tracing artefacts
+            stor   = obj.untyped_storage()
+            ptr    = stor.data_ptr()
             nbytes = stor.nbytes()
             if ptr not in unique or obj.nelement() > unique[ptr][1]:
                 unique[ptr] = (nbytes, obj.nelement(), list(obj.shape), str(obj.dtype))
         except Exception:
             continue
     grouped: dict[tuple, dict] = {}
-    for nbytes, _nel, shape, dtype in unique.values():
+    for ptr, (nbytes, _nel, shape, dtype) in unique.items():
         key = (tuple(shape), dtype)
         if key not in grouped:
-            grouped[key] = {"shape": shape, "dtype": dtype, "count": 0, "bytes": 0}
+            grouped[key] = {"shape": shape, "dtype": dtype, "count": 0,
+                            "bytes": 0, "names": []}
         grouped[key]["count"] += 1
         grouped[key]["bytes"] += nbytes
+        if name_map and ptr in name_map:
+            name = name_map[ptr]
+            if name not in grouped[key]["names"]:
+                grouped[key]["names"].append(name)
     rows = sorted(grouped.values(), key=lambda r: -r["bytes"])
     return rows[:top_k]
 
@@ -419,8 +559,10 @@ def _run_worker(args: argparse.Namespace) -> None:
     smod.FluidSolver.__init__ = _profiled_init_fs
 
     step_idx  = [0]
-    peak_step = args.peak_step or max(args.warmup_steps + 5,
-                                      int(args.n_steps * 0.6))
+    peak_step = min(
+        args.peak_step or max(args.warmup_steps + 5, int(args.n_steps * 0.6)),
+        args.n_steps - 1,
+    )
 
     def _profiled_step(self, task, physics):
         idx = step_idx[0]
@@ -518,7 +660,8 @@ def _run_worker(args: argparse.Namespace) -> None:
         #           of how many bodies are in the scene.
         if is_peak:
             gc.collect()
-            census_at_peak.extend(_tensor_census(top_k=30))
+            nm = _build_name_map(fs, self)
+            census_at_peak.extend(_tensor_census(top_k=30, name_map=nm))
 
         self.iteration += 1
 
@@ -699,7 +842,7 @@ def _strip_yaml_extensions(yaml_path: str) -> None:
     """Strip every non-fluid extension from ``simulation_config.yaml``."""
     import yaml
     with open(yaml_path, "r") as f:
-        sim_dict = yaml.safe_load(f) or {}
+        sim_dict = yaml.full_load(f) or {}
     keep = {"lilytorch.integration.extensions.FluidExtension"}
     sim_dict["extensions"] = [
         ext for ext in sim_dict.get("extensions", [])
@@ -714,7 +857,6 @@ def _strip_yaml_extensions(yaml_path: str) -> None:
         if solver_cfg:
             solver_cfg["compile_adv_diff"]   = True
             solver_cfg["poisson_compile"]    = True
-            solver_cfg["poisson_compile_mode"] = "reduce-overhead"
     with open(yaml_path, "w") as f:
         yaml.dump(sim_dict, f, default_flow_style=False, sort_keys=False)
 
@@ -806,6 +948,7 @@ def _run_driver(args: argparse.Namespace) -> None:
         return
 
     _print_comparison(all_results, args)
+    _plot_comparison(all_results, args, out_dir)
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -959,12 +1102,13 @@ def _print_comparison(
             if rec is None or not rec.get("census_at_peak"):
                 continue
             print(f"\n  [mode={mode}  n_bodies={n_bodies}]")
-            print(f"  {'Shape':<38s}  {'Dtype':<18s}  {'Count':>5s}  {'Total MB':>10s}")
-            print("  " + "-" * 78)
+            print(f"  {'Shape':<32s}  {'Dtype':<14s}  {'Count':>5s}  {'Total MB':>9s}  Attribute names")
+            print("  " + "-" * 100)
             for row in rec["census_at_peak"][:10]:
-                shape = "(" + ", ".join(str(s) for s in row["shape"]) + ")"
-                print(f"  {shape:<38s}  {row['dtype']:<18s}  "
-                      f"{row['count']:>5d}  {_mb(row['bytes']):>10.1f}")
+                shape  = "(" + ", ".join(str(s) for s in row["shape"]) + ")"
+                names  = ", ".join(row.get("names", []))
+                print(f"  {shape:<32s}  {row['dtype']:<14s}  "
+                      f"{row['count']:>5d}  {_mb(row['bytes']):>9.1f}  {names}")
 
     # ── 4. python vs kernel savings at n_bodies=1 ────────────────────
     if "python" in single_body_results and "kernel" in single_body_results:
@@ -980,6 +1124,146 @@ def _print_comparison(
         print(f"  ΔPersistent = {k_p - ref_p:+.1f} MB   "
               f"ΔStep peak = {k_sp - ref_sp:+.1f} MB   "
               f"({(k_sp - ref_sp) / max(ref_sp, 1.0) * 100:+.1f}% of python step peak)")
+
+
+def _plot_comparison(
+    all_results: dict[tuple[str, int], dict],
+    args: argparse.Namespace,
+    out_dir: str,
+) -> None:
+    """Save a matplotlib figure summarising the memory comparison.
+
+    Three subplots:
+      1. Body-scaling — persistent baseline MB vs N bodies (python vs kernel).
+      2. Per-phase waterfall — allocated MB at each step phase for n_bodies=1.
+      3. Tensor census — top tensors at peak step for each mode (n_bodies=1).
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    spec = get_dimension_spec(args.dim)
+    body_counts = sorted({k[1] for k in all_results})
+    modes_present = [m for m in _MODES if any(k[0] == m for k in all_results)]
+    colors = {"python": "#1f77b4", "kernel": "#ff7f0e"}
+
+    single_body_results = {
+        m: all_results[(m, 1)]
+        for m in modes_present
+        if (m, 1) in all_results
+    }
+
+    # ── decide layout ──────────────────────────────────────────────────
+    n_cols = 3 if single_body_results else 1
+    fig, axes = plt.subplots(1, n_cols, figsize=(6 * n_cols, 5))
+    if n_cols == 1:
+        axes = [axes]
+    fig.suptitle(
+        f"GPU memory — {spec.label} pinned 1guilla  "
+        f"(grid {grid_label((args.Nx, args.Ny) if spec.dim == 2 else (args.Nx, args.Ny, args.Nz))},"
+        f"  {args.poisson_method},  {args.dtype})",
+        fontsize=11,
+    )
+
+    # ── subplot 1 : body-scaling ───────────────────────────────────────
+    ax1 = axes[0]
+    x = np.array(body_counts)
+    for mode in modes_present:
+        ys = [
+            _persistent_baseline(all_results[(mode, nb)])
+            if (mode, nb) in all_results else float("nan")
+            for nb in body_counts
+        ]
+        ax1.plot(x, ys, "o-", color=colors.get(mode, None), label=mode, linewidth=2)
+    ax1.set_xlabel("Number of bodies (B)")
+    ax1.set_ylabel("Persistent baseline (MB)")
+    ax1.set_title("Body-scaling: persistent memory")
+    ax1.set_xticks(x)
+    ax1.legend()
+    ax1.grid(True, linestyle="--", alpha=0.5)
+
+    if n_cols < 2:
+        plt.tight_layout()
+        out_path = os.path.join(out_dir, f"memory_comparison_{spec.short_tag}.png")
+        plt.savefig(out_path, dpi=150)
+        plt.close(fig)
+        print(f"\n[memory_comparison] figure saved → {out_path}")
+        return
+
+    # ── subplot 2 : per-phase waterfall (n_bodies=1) ───────────────────
+    ax2 = axes[1]
+    phase_names: list[str] = []
+    for mode, rec in single_body_results.items():
+        rows = _peak_step_rows(rec)
+        if rows:
+            phase_names = [
+                (r["label"].split(":", 1)[1].strip() if ":" in r["label"] else r["label"])
+                for r in rows
+            ]
+            break
+
+    bar_w = 0.8 / max(len(single_body_results), 1)
+    x_idx = np.arange(len(phase_names))
+    for i, (mode, rec) in enumerate(single_body_results.items()):
+        rows = _peak_step_rows(rec)
+        alloc_vals = [r["alloc_mb"] for r in rows] if rows else []
+        offset = (i - (len(single_body_results) - 1) / 2) * bar_w
+        ax2.bar(x_idx + offset, alloc_vals[:len(phase_names)],
+                width=bar_w, color=colors.get(mode, None),
+                alpha=0.8, label=mode)
+    ax2.set_xticks(x_idx)
+    ax2.set_xticklabels(
+        [p.replace("after ", "").replace("(union SDF+body_vel)", "update") for p in phase_names],
+        rotation=35, ha="right", fontsize=8,
+    )
+    ax2.set_ylabel("Allocated MB")
+    ax2.set_title("Per-phase alloc (n_bodies=1, peak step)")
+    ax2.legend()
+    ax2.grid(True, axis="y", linestyle="--", alpha=0.5)
+
+    # ── subplot 3 : tensor census (n_bodies=1) ─────────────────────────
+    ax3 = axes[2]
+    census_data: dict[str, list[tuple[str, float]]] = {}
+    for mode, rec in single_body_results.items():
+        census = rec.get("census_at_peak", [])
+        census_data[mode] = [
+            (
+                # names first (if known), then shape+dtype as fallback
+                (", ".join(row["names"]) if row.get("names") else "")
+                + "\n(" + "×".join(str(s) for s in row["shape"]) + ")  " + row["dtype"],
+                _mb(row["bytes"]),
+            )
+            for row in census[:10]
+        ]
+
+    # merge tensor labels (union of top-10 from each mode)
+    seen: dict[str, dict[str, float]] = {}
+    for mode, entries in census_data.items():
+        for label, mb in entries:
+            seen.setdefault(label, {})[mode] = mb
+    # sort by max across modes
+    sorted_labels = sorted(seen, key=lambda l: max(seen[l].values()), reverse=True)[:12]
+    y_idx = np.arange(len(sorted_labels))
+    bar_h = 0.8 / max(len(single_body_results), 1)
+    for i, mode in enumerate(single_body_results):
+        vals = [seen.get(lbl, {}).get(mode, 0.0) for lbl in sorted_labels]
+        offset = (i - (len(single_body_results) - 1) / 2) * bar_h
+        ax3.barh(y_idx + offset, vals, height=bar_h,
+                 color=colors.get(mode, None), alpha=0.8, label=mode)
+    ax3.set_yticks(y_idx)
+    ax3.set_yticklabels(sorted_labels, fontsize=7)
+    ax3.invert_yaxis()
+    ax3.set_xlabel("Total MB (unique storages)")
+    ax3.set_title("Tensor census at peak step (n_bodies=1)")
+    ax3.legend()
+    ax3.grid(True, axis="x", linestyle="--", alpha=0.5)
+
+    plt.tight_layout()
+    out_path = os.path.join(out_dir, f"memory_comparison_{spec.short_tag}.png")
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"\n[memory_comparison] figure saved → {out_path}")
 
 
 # ════════════════════════════════════════════════════════════════════════
