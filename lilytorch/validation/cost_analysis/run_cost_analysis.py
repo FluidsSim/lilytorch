@@ -117,7 +117,6 @@ USE_CUDA = args.device == "cuda" and torch.cuda.is_available()
 if args.out_dir is None:
     args.out_dir = default_results_dir(SCRIPT_DIR, spec)
 args.out_dir = os.path.abspath(args.out_dir)
-os.makedirs(args.out_dir, exist_ok=True)
 
 
 class TimerBank:
@@ -451,32 +450,11 @@ def _apply_cfg_overrides(cfg):
     # never gets updated (visible as a flat-zero pressure plot).
     cfg.poisson_tol = 1.0e-7
     cfg.poisson_max_cycles = 2
-    # With tol=1e-7 and cold-start, MGCG typically needs ~25-35 CG
-    # iterations to converge for typical fish-swimming flows
-    # (initial residual r0 = h²·f ≈ O(7), 50% reduction per step →
-    # ~27 iterations).  Any max_mgcg_cycles < 25 means we always exhaust
-    # the budget without converging.  Using 5 instead of 10 gives the
-    # same (unconverged) accuracy at half the CG overhead.
-    cfg.poisson_max_mgcg_cycles = 5
+    cfg.poisson_max_mgcg_cycles = 10
     cfg.poisson_precond_vcycles = 1
     cfg.poisson_warm_start = True
     cfg.poisson_smoother = "rbgs"
-    # nsmoothing=2: each V-cycle does 2 RBGS sweeps per level (pre + post).
-    # nsmoothing=4 does 2× more bandwidth work without proportional convergence
-    # gain when using warm_start=True (initial guess is already close).
-    # At 4096×1024: nsmoothing=4 → ~10 ms, nsmoothing=2 → ~5.7 ms, so FFT
-    # (3.9 ms) is approached and crossed with max_vcycles=1 (~2.9 ms).
-    cfg.poisson_nsmoothing = 2
-    # max_vcycles=1 with warm_start: since the pressure guess from the previous
-    # step is close, a single V-cycle (2 sweeps/level) satisfies the tolerance.
-    # Use 2 for the first few cold-start steps where the guess may be poor.
-    cfg.poisson_max_cycles = 1
-    # compile_smoother=True fuses the recursive V-cycle (all O(log N) levels)
-    # into a single compiled CUDA graph, eliminating the O(log N) Python
-    # dispatch overhead that otherwise makes multigrid scale as O(N log N)
-    # instead of O(N).  Set here so it flows through _bdim_extension() →
-    # YAML and is visible in the simulation_config.yaml.
-    cfg.poisson_compile = True
+    cfg.poisson_nsmoothing = 4
     cfg.zero_pressure_inside = getattr(cfg, "zero_pressure_inside", False)
 
     cfg.save_every = args.save_every
@@ -543,15 +521,12 @@ def _apply_cfg_overrides(cfg):
             if solver_cfg:
                 solver_cfg["compile_adv_diff"] = True
                 solver_cfg["poisson_compile"] = True
-                # 'reduce-overhead' enables torch.compile CUDA graph capture:
-                # the full recursive V-cycle (all log N levels) is replayed
-                # as a single CUDA graph call (~5 µs) instead of ~140+
-                # individual kernel dispatches (~140 µs with mode='default').
-                solver_cfg["poisson_compile_mode"] = "reduce-overhead"
+                solver_cfg["compile_forces"] = True
                 solver_cfg["dtype"] = args.dtype
                 solver_cfg["poisson_method"] = args.poisson_method
                 if SOLVER_MODE is not None:
                     solver_cfg["solver_method"] = SOLVER_MODE
+
         with open(yaml_path, "w") as handle:
             yaml.dump(sim_dict, handle, default_flow_style=False, sort_keys=False)
 
@@ -580,6 +555,7 @@ print(f"  Solver: {args.poisson_method}, dtype={args.dtype}, mode={SOLVER_MODE o
 print(f"  Device: {'CUDA' if USE_CUDA else 'CPU'}")
 print("=" * 72)
 
+os.makedirs(args.out_dir, exist_ok=True)
 recompile_log_path = os.path.join(args.out_dir, f"recompiles_{grid_tag(args.grid)}.log")
 open(recompile_log_path, "w").close()
 rc_handler = logging.FileHandler(recompile_log_path, mode="a")

@@ -310,8 +310,9 @@ class PositionController(AnimatController):
                 "'joint_body_*'."
             )
 
-        self.base_amp = np.deg2rad(float(self.config.amp))
-        self.swim_freq = self.config.freq
+
+        self.base_amp = np.deg2rad(float(getattr(self.config, "amp",     300)))
+        self.swim_freq = float(getattr(self.config, "freq", 2))
         self.turn_strength = float(getattr(self.config, "turn_strength", 0.8))
         self.turn_strength_step = float(
             getattr(self.config, "turn_strength_step", 0.)
@@ -322,9 +323,9 @@ class PositionController(AnimatController):
         self.max_turn_strength = float(
             getattr(self.config, "max_turn_strength", 0.95)
         )
-        self.twl = float(self.config.twl)
-        self.limb_pose1 = float(self.config.limb_pose1)
-        self.limb_pose2 = float(self.config.limb_pose2)
+        self.twl = float(getattr(self.config, "twl", 10))
+        self.limb_pose1 = float(getattr(self.config, "limb_pose1", -0.35 * 3.141592653589793))
+        self.limb_pose2 = float(getattr(self.config, "limb_pose2", -0.2 * 3.141592653589793))
         self.body_amp_profile = self._body_amplitude_profile(
             len(self.body_joint_names)
         )
