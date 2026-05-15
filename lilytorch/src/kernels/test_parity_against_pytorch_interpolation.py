@@ -210,11 +210,13 @@ dir_desc = torch.tensor([
 ], dtype=torch.int32, device=device)
 dir_val  = torch.tensor([0.1, -0.2, 0.5], dtype=dtype, device=device)
 max_plane_dim = max(Nx+1, Ny+1, Nz+1)
+max_dim0 = max(Ny, Nx+1)   # axis-0 face: Ny; axis-1,2 faces: Nx+1 / Nx
+max_dim1 = max(Nz, Ny+1)   # axis-0: Nz; axis-1: Nz; axis-2: Ny+1
 
 uA, vA, wA = make_uvw()
 uB, vB, wB = uA.clone(), vA.clone(), wA.clone()
-ext.apply_bcs_3d(uA, vA, wA, shapes_t, neu_desc, dir_desc, dir_val, max_plane_dim)
-lly.apply_bcs_3d(uB, vB, wB, shapes_t, neu_desc, dir_desc, dir_val, max_plane_dim)
+ext.apply_bcs_3d(uA, vA, wA, shapes_t, neu_desc, dir_desc, dir_val, max_dim0, max_dim1)
+lly.apply_bcs_3d(uB, vB, wB, shapes_t, neu_desc, dir_desc, dir_val, max_dim0, max_dim1)
 torch.cuda.synchronize()
 for a, b, name in zip([uA,vA,wA], [uB,vB,wB], ["u","v","w"]):
     if not torch.equal(a, b):

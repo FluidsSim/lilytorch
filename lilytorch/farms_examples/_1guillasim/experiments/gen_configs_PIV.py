@@ -76,8 +76,6 @@ class SimConfig(BaseSimConfig):
         # Disable compilation to speed up startup
         self.poisson_compile         = False
         self.compile_adv_diff        = False
-        self.compile_forces          = False
-        self.compile_sdf             = False
 
         # ── Boundary conditions (3-D, Dirichlet inlet) ───────────────
         self.bc_type_u   = ["D", "D", "N", "N", "N", "N"]

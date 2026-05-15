@@ -253,7 +253,7 @@ def run_case(case_name: str, dt: float, t_end: float, heun: bool) -> dict:
         comp.com_pos[0, 1] = body.com_pos[1]
 
         # 2) Recompute mu and normals from current body position.
-        fs._recompute_mu_normals_2d()
+        fs._recompute_mu_normals()
 
         # 3) Fluid step (Heun or Euler) with variable-density coefficients.
         u, v, p = _fluid_step_2d_like_bdimhandler(

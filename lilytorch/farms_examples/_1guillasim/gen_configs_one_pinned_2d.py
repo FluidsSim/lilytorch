@@ -11,20 +11,22 @@ class SimConfig(BaseSimConfig):
     def __init__(self):
         super().__init__()
 
+        self.use_gpu = True
         self.use_bdim       = True
+        self.water_drag     = False
+        self.water_buoyancy = False
         self.headless       = False
         self.compute_sdf    = True
         self.wall_thickness = 0.3
         self.wall_height    = 0.3
+        self.convexify      = True
+        self.solver_method = "python"
 
         self.poisson_method = "fft"
 
         self.data_folder = os.path.join(
             lilytorch_repo_root, 'farms_examples', '_1guillasim',
         )
-
-        # ── Hardware ──────────────────────────────────────────────────
-        self.use_gpu = True
 
         # ── Animats ───────────────────────────────────────────────────
         self.animats_pars = [
@@ -73,6 +75,7 @@ class SimConfig(BaseSimConfig):
         # ── Body ─────────────────────────────────────────────────────
         self.force_scaling         = 0.04
         self.interp_data_subfolder = "interp_data_2d"
+        self.zero_pressure_inside  = True
 
     # ── Extensions ────────────────────────────────────────────────────
 

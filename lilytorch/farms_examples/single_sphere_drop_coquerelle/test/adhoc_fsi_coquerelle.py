@@ -258,7 +258,7 @@ def _evaluate_fluid_and_force(fs: FluidSolver, body, comp, state: RigidState,
     comp.com_pos[0, 0] = body.com_pos[0]
     comp.com_pos[0, 1] = body.com_pos[1]
 
-    fs._recompute_mu_normals_2d()
+    fs._recompute_mu_normals()
 
     u_out, v_out, p_out = _fluid_step_2d_like_bdimhandler(
         fs,

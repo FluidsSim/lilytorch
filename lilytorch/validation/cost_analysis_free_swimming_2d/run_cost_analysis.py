@@ -217,9 +217,9 @@ def instrument_handler(handler):
     _orig_step       = type(handler).step
     _orig_update     = handler.update
     _orig_fluid_step = type(fs).fluid_step
-    _orig_apply      = type(handler).apply_forces
+    _orig_apply      = type(handler)._apply_forces
     _orig_forces     = type(fs).forces_method2
-    _orig_recompute  = type(fs)._recompute_mu_normals_2d
+    _orig_recompute  = type(fs)._recompute_mu_normals
 
     _precompile_count = [0]
     _precompile_done  = [args.precompile <= 0]
@@ -519,8 +519,6 @@ def gen_simulation_config_lean(output_folder):
         if solver_cfg:
             solver_cfg["compile_adv_diff"] = True
             solver_cfg["poisson_compile"]  = True
-            solver_cfg["compile_forces"]   = True
-            solver_cfg["compile_sdf"]      = True
             if SOLVER_MODE is not None:
                 solver_cfg["solver_method"] = SOLVER_MODE
 

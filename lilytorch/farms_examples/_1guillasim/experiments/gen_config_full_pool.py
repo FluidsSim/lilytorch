@@ -19,16 +19,14 @@ class SimConfig(BaseSimConfig):
         # ── Hardware ──────────────────────────────────────────────────
         self.use_gpu              = True
         self.use_bdim             = True
-        self.compute_sdf          = False
+        self.compute_sdf          = True
         self.convexify            = True
         self.headless             = False
         self.smagorinsky_cs       = 0.
 
-        self.solver_method    = "kernel"
+        # self.solver_method    = "python"
         self.poisson_compile  = True
         self.compile_adv_diff = True
-        self.compile_forces   = True
-        self.compile_sdf      = True
 
         # ── Animats ───────────────────────────────────────────────────
         self.animats_pars = [

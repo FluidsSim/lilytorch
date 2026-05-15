@@ -27,8 +27,6 @@ class SimConfig(BaseSimConfig):
         self.solver_method    = "kernel"
         self.poisson_compile  = True
         # self.compile_adv_diff = True
-        # self.compile_forces   = True
-        self.compile_sdf      = True
 
         self.bdim_physics = {"solref": [-100000.0, -2000.0]}
 
@@ -38,14 +36,9 @@ class SimConfig(BaseSimConfig):
                 "model_name"  : "salamander_v4",
                 "sdf_name"    : "sdf/salamander_no_passive.sdf",
                 "control_type": "position",
-                "gains"       : [0.001, .0002, 0],
+                "gains"       : [0.0001, .00002, 0],
                 "controller_config": {
                     'path'      : "lilytorch.farms_examples.salamander_gamepad.control.PositionController",
-                    'freq'      : 1,
-                    'twl'       : 10,
-                    'amp'       : 300,
-                    'limb_pose1': -0.35 * 3.141592653589793,
-                    'limb_pose2': -0.2 * 3.141592653589793,
                 },
                 "spawn_mode": SpawnMode.TRANSVERSE,
                 "pose"      : [0, 0, 0.015, 0, 0, 3.141592653589793],
@@ -74,6 +67,9 @@ class SimConfig(BaseSimConfig):
         # ── MuJoCo ───────────────────────────────────────────────────
         self.visual_scale = 10.0
         self.extent       = 10.0
+        # top-view trackcom camera distance: pool is 0.8 m x 0.2 m,
+        # camera fovy=70° → 0.5 m gives a comfortable fit
+        self.camera_dist  = 0.5
 
         # ── Arena ────────────────────────────────────────────────────
         self.wall_thickness = 0.01

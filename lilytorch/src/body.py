@@ -94,61 +94,6 @@ class _StaggeredGrids:
             self.Xv_stag, self.Yv_stag, self.Zv_stag = torch.meshgrid(x, self.y_stag, z, indexing="ij")
             self.Xw_stag, self.Yw_stag, self.Zw_stag = torch.meshgrid(x, y, self.z_stag, indexing="ij")
 
-        self._ndim = ndim
-
-    # ---- Lazy backward-compat properties  ----------------------------
-    # These used to be pre-allocated tensors.  They are now computed on
-    # demand so that GPU memory is not consumed permanently.  The main
-    # code paths (BDIMhandler, solver) no longer use them; they exist
-    # only for legacy farms_examples handlers.
-
-    @property
-    def xflat(self):
-        return self.X.flatten()
-
-    @property
-    def yflat(self):
-        return self.Y.flatten()
-
-    @property
-    def zflat(self):
-        return self.Z_grid.flatten() if self.Z_grid is not None else None
-
-    @property
-    def stacked_xy(self):
-        if self._ndim == 2:
-            return torch.stack((self.X.flatten(), self.Y.flatten()))
-        return torch.stack((self.X.flatten(), self.Y.flatten(),
-                            self.Z_grid.flatten()))
-
-    @property
-    def stacked_xy_u(self):
-        if self._ndim == 2:
-            return torch.stack((self.Xu_stag.flatten(), self.Yu_stag.flatten()))
-        return torch.stack((self.Xu_stag.flatten(), self.Yu_stag.flatten(),
-                            self.Zu_stag.flatten()))
-
-    @property
-    def stacked_xy_v(self):
-        if self._ndim == 2:
-            return torch.stack((self.Xv_stag.flatten(), self.Yv_stag.flatten()))
-        return torch.stack((self.Xv_stag.flatten(), self.Yv_stag.flatten(),
-                            self.Zv_stag.flatten()))
-
-    @property
-    def stacked_xy_w(self):
-        if self.Zw_stag is None:
-            return None
-        return torch.stack((self.Xw_stag.flatten(), self.Yw_stag.flatten(),
-                            self.Zw_stag.flatten()))
-
-    @property
-    def ones_stacked(self):
-        n = 1
-        for s in self.grid_shape:
-            n *= s
-        return torch.ones(n, device=self.X.device, dtype=self.X.dtype)
-
 
 # =====================================================================
 # Rotation helpers for meshgrid-based SDF evaluation
@@ -205,30 +150,6 @@ except Exception:
     _rotate_grid_3d_compiled = rotate_grid_3d
 
 
-def _stagger_sdf_3d(sdf_cc):
-    """Derive staggered (MAC face) SDFs from cell-centre SDF via averaging.
-
-    Returns (sdf_u, sdf_v, sdf_w) — each the same shape as sdf_cc.
-    """
-    sdf_u = torch.empty_like(sdf_cc)
-    sdf_u[1:, :, :] = 0.5 * (sdf_cc[:-1, :, :] + sdf_cc[1:, :, :])
-    sdf_u[0,  :, :] = sdf_cc[0, :, :]
-
-    sdf_v = torch.empty_like(sdf_cc)
-    sdf_v[:, 1:, :] = 0.5 * (sdf_cc[:, :-1, :] + sdf_cc[:, 1:, :])
-    sdf_v[:,  0, :] = sdf_cc[:, 0, :]
-
-    sdf_w = torch.empty_like(sdf_cc)
-    sdf_w[:, :, 1:] = 0.5 * (sdf_cc[:, :, :-1] + sdf_cc[:, :, 1:])
-    sdf_w[:, :,  0] = sdf_cc[:, :, 0]
-    return sdf_u, sdf_v, sdf_w
-
-
-try:
-    _stagger_sdf_3d_compiled = torch.compile(_stagger_sdf_3d, mode="reduce-overhead")
-except Exception:
-    _stagger_sdf_3d_compiled = _stagger_sdf_3d
-
 
 def _mu_normals_batched(sdf_stack, h, eps):
     """Batched mu0/mu1 and unit normals for N SDF grids (2-D or 3-D).
@@ -265,40 +186,6 @@ def _mu_normals_batched(sdf_stack, h, eps):
     inv_norm = torch.where(norm > 0, norm.reciprocal(), torch.zeros_like(norm))
     return (mu0, mu1) + tuple(g * inv_norm for g in grads)
 
-
-try:
-    _mu_normals_batched_compiled = torch.compile(
-        _mu_normals_batched, mode="reduce-overhead")
-except Exception:
-    _mu_normals_batched_compiled = _mu_normals_batched
-
-
-def _mu_normals_batched_2d(sdf_u, sdf_v, sdf_cc, h, eps):
-    """2-D wrapper: [u, v, cc] → (mu0, mu1, nx, ny), each (3, Nx, Ny)."""
-    mu0, mu1, nx, ny = _mu_normals_batched(
-        torch.stack([sdf_u, sdf_v, sdf_cc]), h, eps)
-    return mu0, mu1, nx, ny
-
-
-try:
-    _mu_normals_batched_2d_compiled = torch.compile(
-        _mu_normals_batched_2d, mode="reduce-overhead")
-except Exception:
-    _mu_normals_batched_2d_compiled = _mu_normals_batched_2d
-
-
-def _mu_normals_batched_3d(sdf_u, sdf_v, sdf_w, sdf_cc, h, eps):
-    """3-D wrapper: [u, v, w, cc] → (mu0, mu1, nx, ny, nz), each (4, Nx, Ny, Nz)."""
-    mu0, mu1, nx, ny, nz = _mu_normals_batched(
-        torch.stack([sdf_u, sdf_v, sdf_w, sdf_cc]), h, eps)
-    return mu0, mu1, nx, ny, nz
-
-
-try:
-    _mu_normals_batched_3d_compiled = torch.compile(
-        _mu_normals_batched_3d, mode="reduce-overhead")
-except Exception:
-    _mu_normals_batched_3d_compiled = _mu_normals_batched_3d
 
 
 # Module-level cache:  (data_ptr_x, data_ptr_y, data_ptr_z) -> _StaggeredGrids
@@ -483,36 +370,14 @@ def compute_inertias_2d(sdf_fun, inside_mask, x, y, x_g, y_g, density=1000.0):
     return mass, I_x_centroid, I_y_centroid, I_xy_centroid
 
 
-
-
-def body_from_yaml(device, x, y, body_pars, eps=0.05, custom_update=None, starting_time=0, z=None, grids=None, **kwargs):
+def body_from_yaml(device, x, y, body_pars, eps=0.05, custom_update=None, starting_time=0, z=None, **kwargs):
 
     if custom_update is not None:
         update_map = custom_update
 
     body_type = body_pars["type"]
-    if body_type == "analytical":
-        sdf_fun = eval(body_pars["sdf"])
-        plotting = body_pars["plotting"]
-        update_maps = body_pars["update_maps"]
-        transl_strs = update_maps["translation"]
-        transl = tuple(eval(s) for s in transl_strs)
-        update_map = (
-            eval(update_maps["rotation"]),
-            transl
-        )
-        return BodyAnalytical(
-            device,
-            x, y,
-            sdf_fun,
-            update_map,
-            z=z,
-            eps=eps,
-            plotting=plotting,
-            grids=grids,
-        )
 
-    elif body_type == "composite_analytical":
+    if body_type == "composite_analytical":
         sdf_funs = body_pars["sdf"]
         plotting=body_pars["plotting"]
         update_maps = body_pars["update_maps"]
@@ -528,28 +393,6 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, custom_update=None, starti
             z=z,
             eps=eps,
             plotting=plotting,
-            grids=grids,
-        )
-
-    elif body_type == "mesh":
-        update_map = [None,None]
-        mesh_file = body_pars["mesh_file"]
-        nsamples, msamples, ksamples = None, None, None
-        if "n_samples" in body_pars and body_pars["n_samples"] is not None:
-            _ns = eval(body_pars["n_samples"])
-            nsamples, msamples = _ns[0], _ns[1]
-            if len(_ns) >= 3:
-                ksamples = _ns[2]
-        return BodyMesh(
-            device,
-            x, y,
-            mesh_file,
-            update_map,
-            eps=eps,
-            plotting_meshes=body_pars["plotting_meshes"],
-            compute_interp=body_pars["compute_interp"],
-            nsamples=nsamples, msamples=msamples, ksamples=ksamples,
-            grids=grids,
         )
 
     elif body_type == "composite_mesh":
@@ -578,7 +421,6 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, custom_update=None, starti
             suit            = body_pars["suit"],
             convexify       = body_pars["convexify"],
             scale           = body_pars["scale"],
-            grids           = grids,
             **kwargs
         )
 
@@ -606,7 +448,7 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, custom_update=None, starti
             convexify          = body_pars["convexify"],
             scale              = body_pars["scale"],
             save_folder        = body_pars["save_folder"],
-            grids              = grids,
+            use_kernels        = kwargs.pop("use_kernels", False),
             **kwargs
         )
 
@@ -621,7 +463,6 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, custom_update=None, starti
             c1=control_pars["c1"], c2=control_pars["c2"], c3=control_pars["c3"],
             xshift=control_pars["xshift"], yshift=control_pars["yshift"],
             sb=control_pars["sb"], wh=control_pars["wh"], st=control_pars["st"], wt=control_pars["wt"], thk=control_pars["thk"],
-            grids=grids,
         )
 
     elif body_type == "fish_experimental":
@@ -644,7 +485,6 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, custom_update=None, starti
             xshift          = control_pars["xshift"],
             yshift          = control_pars["yshift"],
             initial_time    = starting_time,
-            grids           = grids,
         )
 
     elif body_type == "composite_segment_body":
@@ -654,7 +494,6 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, custom_update=None, starti
                     device, x, y,
                     sdf_folder, sdf_name,
                     eps=eps,
-                    grids=grids,
                 )
 
 class mesh2sdf():
@@ -797,19 +636,17 @@ class COMPOSITEmesh2sdf():
 
 class Body:
 
-    def __init__(self, device, x, y, z=None, eps=0.05, grids=None):
+    def __init__(self, device, x, y, z=None, eps=0.05):
         """Base class for immersed bodies on a MAC staggered grid.
 
         Works in 2-D (z is None) or 3-D (z is a 1-D tensor).
-        Staggered meshgrids are shared across all Body instances that live
-        on the same (x, y, z) coordinate vectors.
 
-        Parameters
-        ----------
-        grids : _StaggeredGrids or None
-            Pre-built staggered grids to reuse.  When provided the grids
-            are used directly (zero extra memory).  When *None* the legacy
-            ``_get_staggered_grids`` cache is used as a fallback.
+        Staggered meshgrids (``X``, ``Xu_stag``, etc.) are *not* stored here.
+        Each composite / standalone body class calls ``_setup_grids()`` after
+        ``super().__init__()`` to bind the shared ``_StaggeredGrids`` object
+        (and its meshgrid attributes) to *that* body only.  Child bodies
+        inside a ``CompositeBodyAnalytical`` / ``MultiAnimatBodies`` do not
+        call ``_setup_grids()``, so they carry no redundant grid references.
         """
         self.device = device
         self.dtype  = x.dtype
@@ -827,22 +664,38 @@ class Body:
         if z is not None:
             self.nz = len(z)
 
-        # ---- shared grids ---------------------------------------------
-        g = grids if grids is not None else _get_staggered_grids(x, y, z)
+        # grid_shape is always available (no meshgrid allocation needed)
+        if z is None:
+            self.grid_shape = (self.nx, self.ny)
+        else:
+            self.grid_shape = (self.nx, self.ny, self.nz)
 
-        self.X = g.X
-        self.Y = g.Y
-        self.grid_shape = g.grid_shape
+        self.rad_conv   = (torch.pi / 180)
+
+    def _setup_grids(self):
+        """Bind full staggered meshgrids to this body instance.
+
+        Called eagerly by composite / standalone body classes (e.g.
+        ``CompositeBodyAnalytical``, ``BodyFishAnalytical``,
+        ``CompositeBodyMesh``) after ``super().__init__()``, and by
+        ``MultiAnimatBodies`` when ``use_kernels=False`` (python mode).
+        In kernel mode ``MultiAnimatBodies`` skips this call entirely so
+        no staggered-grid tensors are allocated.  Child ``BodyAnalytical``
+        instances inside a
+        composite do *not* call this.
+        """
+        g = _get_staggered_grids(self.x, self.y, self.z)
+        self._grids  = g
+        self.X       = g.X
+        self.Y       = g.Y
         if self.ndim == 3:
             self.Z_grid = g.Z_grid
-
-        self.x_stag = g.x_stag
-        self.y_stag = g.y_stag
+        self.x_stag  = g.x_stag
+        self.y_stag  = g.y_stag
         self.Xu_stag = g.Xu_stag
         self.Yu_stag = g.Yu_stag
         self.Xv_stag = g.Xv_stag
         self.Yv_stag = g.Yv_stag
-
         if self.ndim == 3:
             self.z_stag  = g.z_stag
             self.Zu_stag = g.Zu_stag
@@ -850,58 +703,6 @@ class Body:
             self.Xw_stag = g.Xw_stag
             self.Yw_stag = g.Yw_stag
             self.Zw_stag = g.Zw_stag
-
-        # ---- reference to shared grids (for lazy properties) ----------
-        self._grids = g
-
-        # ---- body velocity fields --------------------------------
-        # NOTE: self.sdf is NOT pre-allocated here; every subclass
-        # (BodyAnalytical, BodyMesh, etc.) sets it to a callable or
-        # interpolator before it is ever read.
-        self.body_u = torch.zeros(self.grid_shape, device=self.device, dtype=self.dtype)
-        self.body_v = torch.zeros(self.grid_shape, device=self.device, dtype=self.dtype)
-        if self.ndim == 3:
-            self.body_w = torch.zeros(self.grid_shape, device=self.device, dtype=self.dtype)
-
-        self.rad_conv   = (torch.pi / 180)
-
-    # ---- lazy property delegates (computed on demand) ----------------
-    # These forward to the _StaggeredGrids lazy properties so that
-    # legacy code doing  body.stacked_xy  still works without
-    # permanently consuming GPU memory.
-
-    @property
-    def xflat(self):
-        return self._grids.xflat
-
-    @property
-    def yflat(self):
-        return self._grids.yflat
-
-    @property
-    def zflat(self):
-        return self._grids.zflat
-
-    @property
-    def stacked_xy(self):
-        return self._grids.stacked_xy
-
-    @property
-    def stacked_xy_u(self):
-        return self._grids.stacked_xy_u
-
-    @property
-    def stacked_xy_v(self):
-        return self._grids.stacked_xy_v
-
-    @property
-    def stacked_xy_w(self):
-        return self._grids.stacked_xy_w
-
-    @property
-    def ones_stacked(self):
-        return self._grids.ones_stacked
-
 
     def compute_normals(self, sdf_val):
         """Compute unit normals from an SDF field (2-D or 3-D).
@@ -1001,8 +802,8 @@ class Body:
 
 class BodyAnalytical(Body):
 
-    def __init__(self, device, x, y, sdf, update_maps, z=None, eps=0.05, plotting=False, pre_update=True, grids=None, local_aabb=None):
-        super().__init__(device, x, y, z=z, eps=eps, grids=grids)
+    def __init__(self, device, x, y, sdf, update_maps, z=None, eps=0.05, plotting=False, pre_update=True, local_aabb=None):
+        super().__init__(device, x, y, z=z, eps=eps)
         self.sdf = sdf
         self.update_theta = update_maps[0]
         self.update_translation = update_maps[1]
@@ -1288,7 +1089,17 @@ class BodyAnalytical(Body):
     # ------------------------------------------------------------------
     # Update
     # ------------------------------------------------------------------
-    def update(self, t, iteration, dt=1, update_cnt=True):
+    def update(self, t, iteration, dt=1, update_cnt=True, grids=None):
+        """Update SDF and body-velocity fields on all staggered grids.
+
+        Parameters
+        ----------
+        grids : _StaggeredGrids
+            Staggered meshgrid container.  When called from
+            ``CompositeBodyAnalytical.update()`` this is the composite's
+            ``_grids``; when called standalone (e.g. from tests) pass the
+            body's own ``_StaggeredGrids`` or use ``_get_staggered_grids``.
+        """
         (transl, rot) = self.rototranslate_points(t)
         R_T = rot.T
 
@@ -1314,22 +1125,22 @@ class BodyAnalytical(Body):
             ang_vel = _safe_grad(w, t_var)
 
             # SDF at cell-centres (meshgrid broadcasting)
-            px, py = rotate_grid_2d(self.X, self.Y, R_T, transl)
+            px, py = rotate_grid_2d(grids.X, grids.Y, R_T, transl)
             self.sdf_val = self.sdf(px, py)
 
             # SDF at u-faces
-            px, py = rotate_grid_2d(self.Xu_stag, self.Yu_stag, R_T, transl)
+            px, py = rotate_grid_2d(grids.Xu_stag, grids.Yu_stag, R_T, transl)
             self.sdf_u = self.sdf(px, py)
 
             # SDF at v-faces
-            px, py = rotate_grid_2d(self.Xv_stag, self.Yv_stag, R_T, transl)
+            px, py = rotate_grid_2d(grids.Xv_stag, grids.Yv_stag, R_T, transl)
             self.sdf_v = self.sdf(px, py)
 
             # body velocities (staggered)
             # v = v_lin + ω × r  (2-D:  ω×r = (-ω*ry, ω*rx))
-            ry_u = self.Yu_stag - transl[1]
+            ry_u = grids.Yu_stag - transl[1]
             self.body_u = lin_vel_x - ang_vel * ry_u
-            rx_v = self.Xv_stag - transl[0]
+            rx_v = grids.Xv_stag - transl[0]
             self.body_v = lin_vel_y + ang_vel * rx_v
 
             # Aliases so standalone BodyAnalytical works directly with solver
@@ -1371,10 +1182,10 @@ class BodyAnalytical(Body):
                 px, py, pz = rotate_grid_3d(X, Y, Z, R_T, transl)
                 return self.sdf(px, py, pz)
 
-            self.sdf_val = _eval_sdf(self.X, self.Y, self.Z_grid)
-            self.sdf_u = _eval_sdf(self.Xu_stag, self.Yu_stag, self.Zu_stag)
-            self.sdf_v = _eval_sdf(self.Xv_stag, self.Yv_stag, self.Zv_stag)
-            self.sdf_w = _eval_sdf(self.Xw_stag, self.Yw_stag, self.Zw_stag)
+            self.sdf_val = _eval_sdf(grids.X, grids.Y, grids.Z_grid)
+            self.sdf_u = _eval_sdf(grids.Xu_stag, grids.Yu_stag, grids.Zu_stag)
+            self.sdf_v = _eval_sdf(grids.Xv_stag, grids.Yv_stag, grids.Zv_stag)
+            self.sdf_w = _eval_sdf(grids.Xw_stag, grids.Yw_stag, grids.Zw_stag)
 
             # body velocities: v = v_lin + ω × r
             # ω × r = (ωy*rz - ωz*ry, ωz*rx - ωx*rz, ωx*ry - ωy*rx)
@@ -1388,11 +1199,11 @@ class BodyAnalytical(Body):
                 return bu, bv, bw
 
             self.body_u, _, _ = _body_vel_component(
-                self.Xu_stag, self.Yu_stag, self.Zu_stag)
+                grids.Xu_stag, grids.Yu_stag, grids.Zu_stag)
             _, self.body_v, _ = _body_vel_component(
-                self.Xv_stag, self.Yv_stag, self.Zv_stag)
+                grids.Xv_stag, grids.Yv_stag, grids.Zv_stag)
             _, _, self.body_w = _body_vel_component(
-                self.Xw_stag, self.Yw_stag, self.Zw_stag)
+                grids.Xw_stag, grids.Yw_stag, grids.Zw_stag)
 
             # Aliases so standalone BodyAnalytical works directly with solver
             self.sdf_val_u = self.sdf_u
@@ -1407,9 +1218,15 @@ class CompositeBodyAnalytical(Body):
     def __init__(self, device, x, y, sdf_funs, update_maps, z=None, plotting=False, **kwargs):
         """Composite body: union of several BodyAnalytical objects."""
         super().__init__(device, x, y, z=z, **kwargs)
+        self._setup_grids()
+
         self.nbodies = len(sdf_funs)
         assert self.nbodies == len(update_maps), "Number of sdf functions and update maps must be the same"
 
+        # Child BodyAnalytical instances are created with pre_update=False so
+        # they don't call update() (which requires grids) during __init__.
+        # CompositeBodyAnalytical.initialize() drives the first update and
+        # passes self._grids to each child.
         self.bodies = [
             BodyAnalytical(
                 device, x, y,
@@ -1417,6 +1234,7 @@ class CompositeBodyAnalytical(Body):
                 update_maps[i],
                 z=z,
                 plotting=plotting,
+                pre_update=False,
                 **kwargs
             ) for i in range(self.nbodies)
         ]
@@ -1432,7 +1250,7 @@ class CompositeBodyAnalytical(Body):
         # Streaming union: process bodies one at a time to avoid
         # allocating (nbodies, *grid_shape) stacks.
         for i, body in enumerate(self.bodies):
-            body.update(t, iteration, dt=dt)
+            body.update(t, iteration, dt=dt, grids=self._grids)
             if i == 0:
                 self.sdf_val   = body.sdf_val
                 self.sdf_val_u = body.sdf_u
@@ -1482,13 +1300,13 @@ class BodyFishAnalytical(Body):
         st            = 0.95,
         wt            = 0.01,
         thk           = False,
-        grids         = None,
 
     ):
-        super().__init__(device, x, y, eps=eps, grids=grids)
+        super().__init__(device, x, y, eps=eps)
         """
 
         """
+        self._setup_grids()
         self.L=L
         self.A=A
         self.f=f
@@ -1635,9 +1453,9 @@ class BodyFishExperimental(Body):
         yshift       = 0.0,
         eps          = 0.05,
         initial_time = 0.0,
-        grids        = None,
     ):
-        super().__init__(device, x, y, eps=eps, grids=grids)
+        super().__init__(device, x, y, eps=eps)
+        self._setup_grids()
 
         self.L               = body_length
         self.folder_name     = folder_name
@@ -1828,8 +1646,7 @@ class BodyMesh(Body):
     def __init__(self, device, x, y, mesh_file, update_maps, z=None, eps=0.05,
                  compute_interp=True, nsamples=None, msamples=None, ksamples=None,
                  suit=0, plotting_meshes=False, zpos=0, **kwargs):
-        grids = kwargs.pop("grids", None)
-        super().__init__(device, x, y, z=z, eps=eps, grids=grids)
+        super().__init__(device, x, y, z=z, eps=eps)
         self.mesh_file           = mesh_file
         self.compute_interp      = compute_interp
         self.save_folder         = kwargs.pop("save_folder", "")
@@ -2245,8 +2062,8 @@ class CompositeBodyMesh(Body):
                  compute_interp=True, nsamples=None, msamples=None, ksamples=None,
                  plotting=False, plotting_meshes=False, suit=0.0, **kwargs):
         """Composite body built from a multi-link SDF model file."""
-        grids = kwargs.pop("grids", None)
-        super().__init__(device, x, y, eps=eps, grids=grids)
+        super().__init__(device, x, y, eps=eps)
+        self._setup_grids()
 
         self.sdf_folder      = sdf_folder
         self.sdf             = _import_model_sdf().read(sdf_folder+sdf_name)[0]
@@ -2274,7 +2091,6 @@ class CompositeBodyMesh(Body):
                 nsamples=nsamples, msamples=msamples, ksamples=ksamples,
                 suit=suit,
                 plotting_meshes=plotting_meshes,
-                grids=grids,
                 **kwargs
             )
             body.id = link_i
@@ -2305,14 +2121,11 @@ class CompositeBodyMesh(Body):
 
         self.com_pos   = torch.zeros((self.nbodies, self.ndim), device=device)
 
-        # Free per-child body-velocity fields that the composite never
-        # uses (the BDIMhandler operates on the composite's union fields).
-        # Saves ~2.6 GB for 10 children on a large 3-D grid.
+        # Composite-level body-velocity output fields (written by BDIMhandler).
+        self.body_u = torch.zeros(gs, device=device, dtype=self.dtype)
+        self.body_v = torch.zeros(gs, device=device, dtype=self.dtype)
         if is_3d:
-            for body in self.bodies:
-                for attr in ('body_u', 'body_v', 'body_w'):
-                    if hasattr(body, attr):
-                        delattr(body, attr)
+            self.body_w = torch.zeros(gs, device=device, dtype=self.dtype)
 
         if not self.custom_update:
             self.initialize()
@@ -2384,7 +2197,7 @@ class MultiAnimatBodies(Body):
 
     def __init__(self, device, x, y, experiment_options, z=None, eps=0.05, compute_interp=True,
                  nsamples=None, msamples=None, ksamples=None, plotting=False, plotting_meshes=False,
-                 suit=0.0, **kwargs):
+                 suit=0.0, use_kernels=False, **kwargs):
         """Union of bodies from one or more MuJoCo/SDF model files.
 
         Mesh-based bodies that share the same mesh file (and scale) are
@@ -2392,8 +2205,9 @@ class MultiAnimatBodies(Body):
         pipeline runs only once per unique mesh, and the resulting BodyMesh
         is reused (with its own pose) for every duplicate.
         """
-        grids = kwargs.pop("grids", None)
-        super().__init__(device, x, y, z=z, eps=eps, grids=grids)
+        super().__init__(device, x, y, z=z, eps=eps)
+        if not use_kernels:
+            self._setup_grids()
 
         self.suit = suit
         self.plotting        = plotting
@@ -2489,7 +2303,6 @@ class MultiAnimatBodies(Body):
                                 ksamples=template.ksamples,
                                 suit=suit,
                                 plotting_meshes=False,
-                                grids=grids,
                                 **local_kwargs
                             )
                             # Copy the pre-computed SDF interpolation data
@@ -2513,7 +2326,6 @@ class MultiAnimatBodies(Body):
                                 nsamples=nsamples, msamples=msamples, ksamples=ksamples,
                                 suit=suit,
                                 plotting_meshes=plotting_meshes,
-                                grids=grids,
                                 **local_kwargs
                             )
                             _mesh_body_cache[cache_key] = body
@@ -2590,7 +2402,7 @@ class MultiAnimatBodies(Body):
                                 )
                         body = BodyAnalytical(
                             device, x, y, sdf_fun, update_maps, z=self.z,
-                            eps=eps, plotting=False, pre_update=False, grids=grids,
+                            eps=eps, plotting=False, pre_update=False,
                             local_aabb=_local_aabb,
                         )
                         radius_cpu = radius.detach().cpu()
@@ -2649,7 +2461,7 @@ class MultiAnimatBodies(Body):
                             )
                         body = BodyAnalytical(
                             device, x, y, sdf_fun, update_maps, z=self.z,
-                            eps=eps, plotting=False, pre_update=False, grids=grids,
+                            eps=eps, plotting=False, pre_update=False,
                             local_aabb=_local_aabb,
                         )
                         radius_cpu = radius.detach().cpu()
@@ -2714,7 +2526,7 @@ class MultiAnimatBodies(Body):
                             )
                         body = BodyAnalytical(
                             device, x, y, sdf_fun, update_maps, z=self.z,
-                            eps=eps, plotting=False, pre_update=False, grids=grids,
+                            eps=eps, plotting=False, pre_update=False,
                             local_aabb=_local_aabb,
                         )
                         body.bb = [
@@ -2748,15 +2560,9 @@ class MultiAnimatBodies(Body):
             self.body_w    = torch.zeros(gs, device=device, dtype=self.dtype)
         self.com_pos   = torch.zeros((self.nbodies, self.ndim), device=device)
 
-        # Free per-body velocity/SDF tensors that are only used by default
-        # update methods.  MultiAnimatBodies always uses an external update
-        # (e.g. BDIMhandler3D) that writes directly to the output fields
-        # above, so these per-body fields would just waste GPU memory.
+        # Null out any SDF tensor that was stored directly on a child body
+        # (interpolators / callables are kept; raw Tensor SDFs are freed).
         for body in self.bodies:
-            body.body_u = None
-            body.body_v = None
-            body.sdf    = body.sdf if not isinstance(body.sdf, torch.Tensor) else None
-            if self.ndim == 3:
-                body.body_w = None
+            body.sdf = body.sdf if not isinstance(body.sdf, torch.Tensor) else None
 
 

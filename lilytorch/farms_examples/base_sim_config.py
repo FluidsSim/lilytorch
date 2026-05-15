@@ -123,6 +123,7 @@ class BaseSimConfig:
         self.cb_sub_steps  = 1
         self.visual_scale  = 1.0
         self.extent        = 400.0
+        self.camera_dist   = 3.0
         self.shadow_size   = 0
         self.viewer_native_body_colors = True
         self.viewer_body_alpha = None
@@ -143,8 +144,6 @@ class BaseSimConfig:
         self.poisson_bc_type         = "neumann"
         self.poisson_compile         = False
         self.compile_adv_diff        = False
-        self.compile_forces          = False
-        self.compile_sdf             = False
         self.smagorinsky_cs          = 0.0
         self.carreau                 = None   # dict with keys: nu_0, nu_inf, lam, n
         self.sponge                  = None   # dict with keys: width, strength
@@ -602,10 +601,18 @@ class BaseSimConfig:
         )
 
     def gen_sh_config(self, output_folder, index=0):
+        camera_dist = getattr(self, 'camera_dist', 3.0)
+        # Build a one-liner that optionally monkey-patches add_cameras before
+        # starting farms_sim, so that ] in the viewer uses the right distance.
+        patch = (
+            f"import farms_mujoco.simulation.mjcf as _m;"
+            f"_o=_m.add_cameras;"
+            f"_m.add_cameras=lambda link,dist={camera_dist!r},rot=None,simulation_options=None:_o(link,dist=dist,rot=rot,simulation_options=simulation_options);"
+        )
         sh_str = (
             "#!/bin/bash\n"
             "set -e\n"
-            f'"{sys.executable}" -c "from farms_sim._bootstrap import main; main()" '
+            f'"{sys.executable}" -c "{patch}from farms_sim._bootstrap import main; main()" '
             '--experiment_config experiment_config.yaml "$@"\n'
         )
         with open(os.path.join(output_folder, 'run.sh'), 'w') as f:
@@ -690,8 +697,6 @@ class BaseSimConfig:
             ("poisson_compile",         self.poisson_compile),
             ("poisson_bc_type",         self.poisson_bc_type),
             ("compile_adv_diff",        self.compile_adv_diff),
-            ("compile_forces",          self.compile_forces),
-            ("compile_sdf",             self.compile_sdf),
             ("solver_method",           self.solver_method),
             ("dtype",                   self.dtype),
             ("zero_pressure_inside",    self.zero_pressure_inside),

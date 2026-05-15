@@ -226,7 +226,9 @@ void streaming_sdf_min_rho_2d_multi_cpu(
     at::Tensor body_u, at::Tensor body_v,
     const int64_t interp_method,
     const at::Tensor& rho_bodies,
-    at::Tensor winning_rho_cc)
+    at::Tensor winning_rho_cc,
+    const int64_t /*dirty_i0*/, const int64_t /*dirty_j0*/,
+    const int64_t /*dirty_Ai*/, const int64_t /*dirty_Aj*/)
 {
     const int B = (int)aabb_dim.size(0);
     if (B <= 0) return;
@@ -469,10 +471,19 @@ static void interpolate_2d_cpu(
     const int N = (int)xq.numel();
     if (N == 0) return;
 
+    // Bind temporaries to named locals: ``.contiguous().to(...)`` returns a
+    // fresh tensor whose storage is freed at the end of the full-expression
+    // unless held.  Without this the raw ``data_ptr`` would dangle for
+    // non-contiguous or differently-dtyped inputs and the parallel_for loop
+    // below would read freed memory.
+    auto F_c  = F.contiguous();
+    auto xq_c = xq.contiguous().to(F.scalar_type());
+    auto yq_c = yq.contiguous().to(F.scalar_type());
+
     AT_DISPATCH_FLOATING_TYPES(F.scalar_type(), "interpolate_2d_cpu", [&] {
-        const scalar_t* Fp  = F.contiguous().data_ptr<scalar_t>();
-        const scalar_t* xqp = xq.contiguous().to(F.scalar_type()).data_ptr<scalar_t>();
-        const scalar_t* yqp = yq.contiguous().to(F.scalar_type()).data_ptr<scalar_t>();
+        const scalar_t* Fp  = F_c.data_ptr<scalar_t>();
+        const scalar_t* xqp = xq_c.data_ptr<scalar_t>();
+        const scalar_t* yqp = yq_c.data_ptr<scalar_t>();
         scalar_t* Gp = G.data_ptr<scalar_t>();
         const int iMx = (int)Mx, iMy = (int)My;
         const scalar_t bx0s = (scalar_t)bx0, by0s = (scalar_t)by0;
@@ -583,13 +594,29 @@ void streaming_sdf_forces_post_2d_cpu(
             const scalar_t bp_x = K[4], bp_y = K[5];
             const scalar_t cm_x = K[6], cm_y = K[7];
 
-            std::vector<scalar_t> sparse_buf(vol);
-            at::parallel_for(0, vol, 1024, [&](int64_t _begin, int64_t _end) {
+            // Single fused pass: sample the body cc-SDF on the fly inside the
+            // parallel_for, do the band check, and (for delta_order==2)
+            // re-sample at world-aligned ±h offsets to recover |grad(sdf_body)|.
+            // This replaces the previous two-pass design with a sparse_buf
+            // scratch + AABB-edge one-sided diffs, which disagreed with CUDA-2D
+            // at AABB-boundary cells.  Now matches streaming_sdf_2d.cu:524-543.
+            //
+            // Per-thread accumulator slice (no locking): each worker writes
+            // only its own 6-channel stripe of ``tls``, merged single-thread
+            // into ``lb`` after the parallel region.  Replaces the previous
+            // std::mutex/lock_guard that serialised every chunk's epilogue.
+            double* lb = accs.data() + (size_t)b * 6;
+            const int nT = at::get_num_threads();
+            std::vector<double> tls((size_t)nT * 6, 0.0);
+
+            at::parallel_for(0, vol, 2048, [&](int64_t _begin, int64_t _end) {
+            double local8[6] = {0,0,0,0,0,0};
             for (int local = (int)_begin; local < (int)_end; ++local) {
                 const int di = local / Aj;
                 const int dj = local - di * Aj;
                 const int i  = i0_b + di;
                 const int j  = j0_b + dj;
+                const std::int64_t g_idx = (std::int64_t)i * Ngy + j;
 
                 const scalar_t xc = gx_ptr[i];
                 const scalar_t yc = gy_ptr[j];
@@ -597,30 +624,12 @@ void streaming_sdf_forces_post_2d_cpu(
                 const scalar_t bxq = r00 * dxw + r01 * dyw;
                 const scalar_t byq = r10 * dxw + r11 * dyw;
 
-                if (interp_method == 1) {
-                    sparse_buf[local] = biquadratic_sample_uniform_2d<scalar_t>(
-                        F_b, Mx, My, bx0, by0, idx_, idy_, bxq, byq);
-                } else {
-                    sparse_buf[local] = bilinear_sample_uniform_2d<scalar_t>(
-                        F_b, Mx, My, bx0, by0, idx_, idy_, bxq, byq);
-                }
-            }
-            });
-
-            double* lb = accs.data() + (size_t)b * 6;
-            std::mutex acc_mtx;
-
-            at::parallel_for(0, vol, 2048, [&](int64_t _begin, int64_t _end) {
-            double local8[6] = {0,0,0,0,0,0};
-            for (int local = (int)_begin; local < (int)_end; ++local) {
-                const scalar_t sdf = sparse_buf[local];
+                const scalar_t sdf = (interp_method == 1)
+                    ? biquadratic_sample_uniform_2d<scalar_t>(
+                          F_b, Mx, My, bx0, by0, idx_, idy_, bxq, byq)
+                    : bilinear_sample_uniform_2d<scalar_t>(
+                          F_b, Mx, My, bx0, by0, idx_, idy_, bxq, byq);
                 if (sdf <= band_lo || sdf >= band_hi) continue;
-
-                const int di = local / Aj;
-                const int dj = local - di * Aj;
-                const int i  = i0_b + di;
-                const int j  = j0_b + dj;
-                const std::int64_t g_idx = (std::int64_t)i * Ngy + j;
 
                 scalar_t delta_visc = 0;
                 const scalar_t d_visc = sdf - eps_s;
@@ -631,15 +640,21 @@ void streaming_sdf_forces_post_2d_cpu(
                     delta_pres = ((scalar_t)1 + std::cos(pi_over_eb * sdf)) * inv_2eps;
                 if (delta_visc == (scalar_t)0 && delta_pres == (scalar_t)0) continue;
 
-                if (delta_order == 2) {
-                    const scalar_t s_xp = (di < Ai-1) ? sparse_buf[local + Aj] : sdf;
-                    const scalar_t s_xm = (di > 0)    ? sparse_buf[local - Aj] : sdf;
-                    const scalar_t cx   = (di > 0 && di < Ai-1) ? (scalar_t)0.5 : (scalar_t)1.0;
-                    const scalar_t dsdx = cx * (s_xp - s_xm) * inv_h_s;
-                    const scalar_t s_yp = (dj < Aj-1) ? sparse_buf[local + 1] : sdf;
-                    const scalar_t s_ym = (dj > 0)    ? sparse_buf[local - 1] : sdf;
-                    const scalar_t cy   = (dj > 0 && dj < Aj-1) ? (scalar_t)0.5 : (scalar_t)1.0;
-                    const scalar_t dsdy = cy * (s_yp - s_ym) * inv_h_s;
+                if (delta_order == 2 && (delta_visc > 0 || delta_pres > 0)) {
+                    const scalar_t hg = (scalar_t)1.0 / inv_h_s;
+                    auto smp = [&](scalar_t xqs, scalar_t yqs) -> scalar_t {
+                        return (interp_method == 1)
+                            ? biquadratic_sample_uniform_2d<scalar_t>(
+                                  F_b, Mx, My, bx0, by0, idx_, idy_, xqs, yqs)
+                            : bilinear_sample_uniform_2d<scalar_t>(
+                                  F_b, Mx, My, bx0, by0, idx_, idy_, xqs, yqs);
+                    };
+                    const scalar_t s_xp = smp(bxq + r00*hg, byq + r10*hg);
+                    const scalar_t s_xm = smp(bxq - r00*hg, byq - r10*hg);
+                    const scalar_t s_yp = smp(bxq + r01*hg, byq + r11*hg);
+                    const scalar_t s_ym = smp(bxq - r01*hg, byq - r11*hg);
+                    const scalar_t dsdx = (s_xp - s_xm) * (scalar_t)0.5 * inv_h_s;
+                    const scalar_t dsdy = (s_yp - s_ym) * (scalar_t)0.5 * inv_h_s;
                     scalar_t grad_mag = std::sqrt(dsdx*dsdx + dsdy*dsdy);
                     if (grad_mag < (scalar_t)1e-3) grad_mag = (scalar_t)1e-3;
                     const scalar_t inv_grad = (scalar_t)1.0 / grad_mag;
@@ -777,8 +792,6 @@ void streaming_sdf_forces_post_2d_cpu(
                 const scalar_t pxv  = -p_c * nx;
                 const scalar_t pyv  = -p_c * ny;
 
-                const scalar_t xc = gx_ptr[i];
-                const scalar_t yc = gy_ptr[j];
                 const scalar_t arm_x = xc - cm_x;
                 const scalar_t arm_y = yc - cm_y;
 
@@ -794,9 +807,11 @@ void streaming_sdf_forces_post_2d_cpu(
                 local8[4] += fp_y;
                 local8[5] += (double)arm_x * fp_y - (double)arm_y * fp_x;
             }
-            std::lock_guard<std::mutex> lk(acc_mtx);
-            for (int c = 0; c < 6; ++c) lb[c] += local8[c];
+            const int t = at::get_thread_num();
+            for (int c = 0; c < 6; ++c) tls[(size_t)t*6 + c] += local8[c];
             });
+            for (int t = 0; t < nT; ++t)
+                for (int c = 0; c < 6; ++c) lb[c] += tls[(size_t)t*6 + c];
         }
 
         double* out_ptr = out.data_ptr<double>();

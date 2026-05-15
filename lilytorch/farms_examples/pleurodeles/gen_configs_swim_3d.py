@@ -5,6 +5,7 @@ from farms_core.model.options import SpawnMode
 
 from lilytorch.util.paths import lilytorch_repo_root
 from lilytorch.farms_examples.base_sim_config import BaseSimConfig
+from lilytorch.integration.camera import top_down_camera_config
 
 
 class SimConfig(BaseSimConfig):
@@ -14,17 +15,18 @@ class SimConfig(BaseSimConfig):
 
         # Reuse the existing pleurodeles mesh SDF and generate a separate
         # 3-D interpolation cache so it does not clash with the 2-D data.
-        self.compute_sdf = True
-        self.save        = True
+        self.compute_sdf    = False
+        self.save           = True
 
         self.data_folder = os.path.join(
             lilytorch_repo_root, 'farms_examples', 'pleurodeles',
         )
 
         # Hardware / runtime
-        self.use_bdim = True
-        self.use_gpu = True
-        self.headless = False
+        self.use_bdim       = True
+        self.use_gpu        = True
+        self.headless       = False
+        self.poisson_method = "multigrid"
 
         # Animat
         self.animats_pars = [
@@ -80,14 +82,13 @@ class SimConfig(BaseSimConfig):
         self.bdim_nt = self.n_iterations
         self.zero_pressure_inside = False
         self.rho_body = 1000.0
-        self.poisson_method = "fft"
         self.poisson_tol = 1.0e-4
-        self.poisson_max_cycles = 30
+        self.poisson_max_cycles = 3
         self.poisson_max_mgcg_cycles = 10
         self.poisson_precond_vcycles = 1
         self.poisson_warm_start = True
         self.poisson_smoother = "jacobi"
-        self.poisson_compile = True
+        # self.poisson_compile = True
         self.poisson_nsmoothing = 5
         self.poisson_bc_type = "neumann"
         self.compile_adv_diff = True
@@ -120,6 +121,30 @@ class SimConfig(BaseSimConfig):
                 joint["initial"] = [-0.35 * np.pi, -0.0]
             if joint["name"] in ("joint_leg_1_L_1", "joint_leg_1_R_1"):
                 joint["initial"] = [-0.2 * np.pi, -0.0]
+
+    def extra_simulation_extensions(self, output_folder):
+        extensions = []
+
+        # Top-down camera auto-fitted to the pool
+        cam = top_down_camera_config(
+            self.xmin, self.xmax,
+            self.ymin, self.ymax,
+            self.zmin, self.zmax,
+            overshoot=1
+        )
+        extensions.append({
+            "loader": "farms_mujoco.sensors.camera.CameraRecording",
+            "config": {
+                "path"            : os.path.join(output_folder, "output", "video.mp4"),
+                "animat_id"       : None,
+                "fps"             : 30,
+                "speed"           : 1.0,
+                "angular_velocity": 0,
+                **cam,
+            },
+        })
+
+        return extensions
 
 
 if __name__ == "__main__":

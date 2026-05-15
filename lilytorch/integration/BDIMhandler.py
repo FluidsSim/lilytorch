@@ -197,6 +197,7 @@ class BDIMhandler:
             self._init_interp()
         self._init_static_body_metadata()
         self._init_update()
+        self._init_apply_forces()
         # override composite-body update with our FARMS-driven version
         self.fluid_solver.composite_body.update = self.update
 
@@ -211,6 +212,58 @@ class BDIMhandler:
                 self.update = self._update_2d_streaming_multi
             else:
                 self.update = self._update_2d
+
+    def _init_apply_forces(self):
+        """Bind ``self.apply_forces`` and precompute per-D force-axis maps.
+
+        The 2-D and 3-D paths are now collapsed into a single
+        :meth:`_apply_forces` (Step 6 of the unification refactor).  The
+        per-D ``xfrc_applied`` index mapping, the buoyancy axis, and the
+        FluidSolver field names to gather are precomputed here so the hot
+        path is a single attribute read + list iteration with zero
+        per-step Python branching on ``self.ndim`` or ``_2d_plane``.
+        """
+        self.apply_forces = self._apply_forces
+
+        if self.ndim == 3:
+            self._lin_xfrc_idx      = (0, 1, 2)
+            self._ang_xfrc_idx      = (3, 4, 5)
+            self._buoyancy_xfrc_idx = 2          # fz
+            self._buoyancy_pos_idx  = 2          # com_pos[i][2]
+            self._has_buoyancy      = True
+            self._lin_visc_attrs = ('friction_force_lin_x',
+                                    'friction_force_lin_y',
+                                    'friction_force_lin_z')
+            self._ang_visc_attrs = ('friction_force_ang_x',
+                                    'friction_force_ang_y',
+                                    'friction_force_ang_z')
+            self._lin_pres_attrs = ('pressure_force_x',
+                                    'pressure_force_y',
+                                    'pressure_force_z')
+            self._ang_pres_attrs = ('pressure_force_ang_x',
+                                    'pressure_force_ang_y',
+                                    'pressure_force_ang_z')
+        else:
+            # 2-D xz plane: MuJoCo (x, z) → fluid (x, y); buoyancy on z.
+            # 2-D xy plane: MuJoCo (x, y) → fluid (x, y); no buoyancy.
+            self._lin_xfrc_idx      = self._2d_force_axes[:2]
+            self._ang_xfrc_idx      = (self._2d_force_axes[2],)
+            self._has_buoyancy      = self._2d_has_buoyancy
+            if self._2d_has_buoyancy:                # xz plane
+                # Buoyancy is added to the fluid-y xfrc index, which is
+                # the second linear xfrc index.  com_pos uses fluid-y
+                # (= MuJoCo z) for the surface comparison.
+                self._buoyancy_xfrc_idx = self._2d_force_axes[1]
+                self._buoyancy_pos_idx  = 1
+            else:                                    # xy plane
+                self._buoyancy_xfrc_idx = None
+                self._buoyancy_pos_idx  = None
+            self._lin_visc_attrs = ('friction_force_lin_x',
+                                    'friction_force_lin_y')
+            self._ang_visc_attrs = ('friction_force_ang_z',)
+            self._lin_pres_attrs = ('pressure_force_x',
+                                    'pressure_force_y')
+            self._ang_pres_attrs = ('pressure_force_ang_z',)
 
     # ------------------------------------------------------------------
     #  Kernel-path per-body SDF metadata
@@ -997,87 +1050,11 @@ class BDIMhandler:
                 comp.sdf_val
             )
 
-        # Reset running-min fields
-        comp._sdf_sparse = [None] * B
-        comp.sdf_val.fill_(_FAR)
-        comp.sdf_val_u.fill_(_FAR)
-        comp.sdf_val_v.fill_(_FAR)
-        comp.sdf_val_w.fill_(_FAR)
-        comp.body_u.zero_()
-        comp.body_v.zero_()
-        comp.body_w.zero_()
-
-        gx_1d, gy_1d, gz_1d = comp.gx_1d, comp.gy_1d, comp.gz_1d
-
         # ------------------------------------------------------------------
-        # Build / refresh the static per-body packed device tensors once.
-        # ------------------------------------------------------------------
-        fs_for_cache = self.fluid_solver
-        _use_combined_cache = fs_for_cache._use_kernels
-
-        sm = getattr(comp, '_kernel_static_3d', None)
-        if sm is None:
-            F_chunks  = []
-            F_off  = [0]
-            shapes = []
-            meta   = []
-            if not _use_combined_cache:
-                bx_chunks = []; by_chunks = []; bz_chunks = []
-                bx_off = [0]; by_off = [0]; bz_off = [0]
-            for body in comp.bodies:
-                m = body._stream_meta
-                F_chunks.append(m['F'].flatten())
-                F_off.append(F_off[-1]   + m['F'].numel())
-                shapes.append([m['F'].shape[0], m['F'].shape[1], m['F'].shape[2]])
-                meta.append([
-                    m['bx0'], m['by0'], m['bz0'],
-                    m['bx_last'], m['by_last'], m['bz_last'],
-                    m['inv_dx'], m['inv_dy'], m['inv_dz'], m['inv_vol'],
-                ])
-                if not _use_combined_cache:
-                    bx_chunks.append(m['bx']); by_chunks.append(m['by']); bz_chunks.append(m['bz'])
-                    bx_off.append(bx_off[-1] + m['bx'].numel())
-                    by_off.append(by_off[-1] + m['by'].numel())
-                    bz_off.append(bz_off[-1] + m['bz'].numel())
-            F_flat = torch.cat(F_chunks).contiguous()
-            sm = {
-                'F_flat':       F_flat,
-                'F_offsets':    torch.tensor(F_off,  dtype=torch.int64, device=self.device),
-                'body_shapes':  torch.tensor(shapes, dtype=torch.int64, device=self.device),
-                'body_meta':    torch.tensor(meta,   dtype=self.dtype,  device=self.device),
-            }
-            if not _use_combined_cache:
-                sm['bx_flat']    = torch.cat(bx_chunks).contiguous()
-                sm['bx_offsets'] = torch.tensor(bx_off, dtype=torch.int64, device=self.device)
-                sm['by_flat']    = torch.cat(by_chunks).contiguous()
-                sm['by_offsets'] = torch.tensor(by_off, dtype=torch.int64, device=self.device)
-                sm['bz_flat']    = torch.cat(bz_chunks).contiguous()
-                sm['bz_offsets'] = torch.tensor(bz_off, dtype=torch.int64, device=self.device)
-            # De-duplicate per-body body-template SDFs: replace each
-            # body's `_stream_meta['F']` with a view into the packed
-            # `F_flat` buffer.  After this the `torch.cat` copy is the
-            # only owner of body-template storage, so when no other
-            # references exist the per-body originals can be released
-            # by the allocator.  This saves up to Σ_b Mx·My·Mz floats
-            # of duplicated body-template memory and therefore scales
-            # linearly with the number of bodies.
-            for b, body in enumerate(comp.bodies):
-                m = body._stream_meta
-                Mx, My, Mz = shapes[b]
-                m['F'] = F_flat[F_off[b]:F_off[b + 1]].view(Mx, My, Mz)
-            # Free the temporary chunk lists eagerly so the original
-            # `m['F'].flatten()` views don't pin storage longer than
-            # needed.
-            del F_chunks
-            if not _use_combined_cache:
-                del bx_chunks, by_chunks, bz_chunks
-            comp._kernel_static_3d = sm
-
-        # ------------------------------------------------------------------
-        # Per-step: compose body frames, AABBs, kinematics, sparse buffers.
-        #
-        # Vectorised path: keep the batched frame/AABB composition in torch so
-        # it remains compatible with gather_data() returning tensors.
+        # Compute per-body AABBs on CPU (all numpy, no GPU I/O) BEFORE any
+        # GPU fills.  This lets us restrict the fills and the CUDA
+        # init/decode passes to the dirty sub-block = prev∪curr union-AABB,
+        # reducing them from O(Nx*Ny*Nz) to O(dirty_vol).
         # ------------------------------------------------------------------
         kin_static = getattr(comp, '_stream_kin_static', None)
         if kin_static is None or 'local_lt_np' not in kin_static:
@@ -1149,8 +1126,7 @@ class BDIMhandler:
 
         body_ids_np = kin_static['body_ids_np']
 
-        # Gather per-body kinematics on the host (numpy) – avoids B×5 small
-        # GPU indexed-tensor writes and defers the H2D to a single packed copy.
+        # Gather per-body kinematics on the host (numpy).
         urdf_pos_np = np.empty((B, 3), dtype=self.dtype_np)
         com_pos_np  = np.empty((B, 3), dtype=self.dtype_np)
         R_link_np   = np.empty((B, 3, 3), dtype=self.dtype_np)
@@ -1200,6 +1176,113 @@ class BDIMhandler:
             i_hi[fallback, :] = gs_np
             dims = i_hi - i_lo
 
+        # Dirty region = union(prev_union_aabb, curr_union_aabb).
+        # Restricting fills and the CUDA init/decode passes to this sub-block
+        # makes body update O(dirty_vol) not O(Nx*Ny*Nz).
+        _curr_ui0 = int(i_lo[:, 0].min()) if B > 0 else 0
+        _curr_uj0 = int(i_lo[:, 1].min()) if B > 0 else 0
+        _curr_uk0 = int(i_lo[:, 2].min()) if B > 0 else 0
+        _curr_ui1 = int(i_hi[:, 0].max()) if B > 0 else gs[0]
+        _curr_uj1 = int(i_hi[:, 1].max()) if B > 0 else gs[1]
+        _curr_uk1 = int(i_hi[:, 2].max()) if B > 0 else gs[2]
+        _prev = getattr(comp, '_combined_union_aabb', None)
+        if _prev is not None:
+            _p_i0, _p_i1, _p_j0, _p_j1, _p_k0, _p_k1 = _prev
+            d_i0 = min(_p_i0, _curr_ui0); d_i1 = max(_p_i1, _curr_ui1)
+            d_j0 = min(_p_j0, _curr_uj0); d_j1 = max(_p_j1, _curr_uj1)
+            d_k0 = min(_p_k0, _curr_uk0); d_k1 = max(_p_k1, _curr_uk1)
+        else:
+            # First step: use full grid to be safe.
+            d_i0 = d_j0 = d_k0 = 0
+            d_i1, d_j1, d_k1 = gs[0], gs[1], gs[2]
+
+        # Reset running-min fields in dirty sub-block only (O(dirty_vol) not O(N)).
+        comp._sdf_sparse = [None] * B
+        comp.sdf_val[d_i0:d_i1, d_j0:d_j1, d_k0:d_k1].fill_(_FAR)
+        _su = comp.sdf_val_u.shape
+        _sv = comp.sdf_val_v.shape
+        _sw = comp.sdf_val_w.shape
+        comp.sdf_val_u[d_i0:min(d_i1 + 1, _su[0]), d_j0:d_j1, d_k0:d_k1].fill_(_FAR)
+        comp.sdf_val_v[d_i0:d_i1, d_j0:min(d_j1 + 1, _sv[1]), d_k0:d_k1].fill_(_FAR)
+        comp.sdf_val_w[d_i0:d_i1, d_j0:d_j1, d_k0:min(d_k1 + 1, _sw[2])].fill_(_FAR)
+        _bu = comp.body_u.shape
+        _bv = comp.body_v.shape
+        _bw = comp.body_w.shape
+        comp.body_u[d_i0:min(d_i1 + 1, _bu[0]), d_j0:d_j1, d_k0:d_k1].zero_()
+        comp.body_v[d_i0:d_i1, d_j0:min(d_j1 + 1, _bv[1]), d_k0:d_k1].zero_()
+        comp.body_w[d_i0:d_i1, d_j0:d_j1, d_k0:min(d_k1 + 1, _bw[2])].zero_()
+
+        gx_1d, gy_1d, gz_1d = comp.gx_1d, comp.gy_1d, comp.gz_1d
+
+        # ------------------------------------------------------------------
+        # Build / refresh the static per-body packed device tensors once.
+        # ------------------------------------------------------------------
+        fs_for_cache = self.fluid_solver
+        _use_combined_cache = fs_for_cache._use_kernels
+
+        sm = getattr(comp, '_kernel_static_3d', None)
+        if sm is None:
+            F_chunks  = []
+            F_off  = [0]
+            shapes = []
+            meta   = []
+            if not _use_combined_cache:
+                bx_chunks = []; by_chunks = []; bz_chunks = []
+                bx_off = [0]; by_off = [0]; bz_off = [0]
+            for body in comp.bodies:
+                m = body._stream_meta
+                F_chunks.append(m['F'].flatten())
+                F_off.append(F_off[-1]   + m['F'].numel())
+                shapes.append([m['F'].shape[0], m['F'].shape[1], m['F'].shape[2]])
+                meta.append([
+                    m['bx0'], m['by0'], m['bz0'],
+                    m['bx_last'], m['by_last'], m['bz_last'],
+                    m['inv_dx'], m['inv_dy'], m['inv_dz'], m['inv_vol'],
+                ])
+                if not _use_combined_cache:
+                    bx_chunks.append(m['bx']); by_chunks.append(m['by']); bz_chunks.append(m['bz'])
+                    bx_off.append(bx_off[-1] + m['bx'].numel())
+                    by_off.append(by_off[-1] + m['by'].numel())
+                    bz_off.append(bz_off[-1] + m['bz'].numel())
+            F_flat = torch.cat(F_chunks).contiguous()
+            sm = {
+                'F_flat':       F_flat,
+                'F_offsets':    torch.tensor(F_off,  dtype=torch.int64, device=self.device),
+                'body_shapes':  torch.tensor(shapes, dtype=torch.int64, device=self.device),
+                'body_meta':    torch.tensor(meta,   dtype=self.dtype,  device=self.device),
+            }
+            if not _use_combined_cache:
+                sm['bx_flat']    = torch.cat(bx_chunks).contiguous()
+                sm['bx_offsets'] = torch.tensor(bx_off, dtype=torch.int64, device=self.device)
+                sm['by_flat']    = torch.cat(by_chunks).contiguous()
+                sm['by_offsets'] = torch.tensor(by_off, dtype=torch.int64, device=self.device)
+                sm['bz_flat']    = torch.cat(bz_chunks).contiguous()
+                sm['bz_offsets'] = torch.tensor(bz_off, dtype=torch.int64, device=self.device)
+            # De-duplicate per-body body-template SDFs: replace each
+            # body's `_stream_meta['F']` with a view into the packed
+            # `F_flat` buffer.  After this the `torch.cat` copy is the
+            # only owner of body-template storage, so when no other
+            # references exist the per-body originals can be released
+            # by the allocator.  This saves up to Σ_b Mx·My·Mz floats
+            # of duplicated body-template memory and therefore scales
+            # linearly with the number of bodies.
+            for b, body in enumerate(comp.bodies):
+                m = body._stream_meta
+                Mx, My, Mz = shapes[b]
+                m['F'] = F_flat[F_off[b]:F_off[b + 1]].view(Mx, My, Mz)
+            # Free the temporary chunk lists eagerly so the original
+            # `m['F'].flatten()` views don't pin storage longer than
+            # needed.
+            del F_chunks
+            if not _use_combined_cache:
+                del bx_chunks, by_chunks, bz_chunks
+            comp._kernel_static_3d = sm
+
+        # ------------------------------------------------------------------
+        # Per-step: kin_static, per-body kin, AABB, dirty region, and sub-
+        # block fills were all computed above (before the sm cache block).
+        # Continue from max_vol and kin assembly.
+        # ------------------------------------------------------------------
         max_vol = int(dims.prod(axis=1).max()) if B > 0 else 0
 
         # Assemble kin on the host.
@@ -1262,7 +1345,8 @@ class BDIMhandler:
                     comp.sdf_val.shape, device=self.device, dtype=self.dtype,
                 )
             winning_rho_cc = _wrcc
-            winning_rho_cc.fill_(float(fs.rho))
+            # Sub-block fill: O(dirty_vol) not O(N)
+            winning_rho_cc[d_i0:d_i1, d_j0:d_j1, d_k0:d_k1].fill_(float(fs.rho))
             streaming_sdf_min_rho_3d_multi(
                 sm['F_flat'], sm['F_offsets'],
                 sm['body_shapes'], sm['body_meta'], kin,
@@ -1272,15 +1356,17 @@ class BDIMhandler:
                 comp.body_u,  comp.body_v,    comp.body_w,
                 getattr(fs, '_sdf_interp_method', 0),
                 rho_bodies, winning_rho_cc,
+                d_i0, d_j0, d_k0,
+                d_i1 - d_i0, d_j1 - d_j0, d_k1 - d_k0,
             )
 
             # Kernel path does not populate per-body CC-SDF slabs.
             for body_i in range(B):
                 comp._sdf_sparse[body_i] = None
-            # Cache the union AABB directly so _compute_union_aabb_3d can
+            # Cache the union AABB directly so _compute_union_aabb can
             # activate the cheap sub-block mu/normals path without reading
-            # _sdf_sparse.  Without this, _compute_union_aabb_3d returns
-            # None → _recompute_mu_normals_3d falls into the full-grid
+            # _sdf_sparse.  Without this, _compute_union_aabb returns
+            # None → _recompute_mu_normals falls into the full-grid
             # CUDA-graph (reduce-overhead) path, which statically holds
             # ~2-3 GB of output + intermediate buffers for the full grid.
             _u_i0 = _u_j0 = _u_k0 = 1 << 30
@@ -1350,7 +1436,7 @@ class BDIMhandler:
         # the previous step's SDF (true lagged-normals BDIM).  Before
         # the running-min fields are wiped to ``_FAR`` below we must
         # seed these from the *current* (= previous-step) ``comp.sdf_val``
-        # if they have not yet been populated by ``_recompute_mu_normals_2d``.
+        # if they have not yet been populated by ``_recompute_mu_normals``.
         # Computing them after the reset would feed the kernel normals
         # taken from a flat ``_FAR`` field — the gradients vanish, the
         # delta-band integrand picks an arbitrary direction, and the 2-D
@@ -1364,13 +1450,8 @@ class BDIMhandler:
             ):
                 (fs.normal_x, fs.normal_y) = comp.compute_normals(comp.sdf_val)
 
-        # Reset running-min fields and per-body sparse storage
+        # Reset per-body sparse storage
         comp._sdf_sparse = [None] * B
-        comp.sdf_val.fill_(_FAR)
-        comp.sdf_val_u.fill_(_FAR)
-        comp.sdf_val_v.fill_(_FAR)
-        comp.body_u.zero_()
-        comp.body_v.zero_()
 
         gx_1d, gy_1d = comp.gx_1d, comp.gy_1d
 
@@ -1567,6 +1648,40 @@ class BDIMhandler:
             comp._body_aabbs[b] = aabb
             aabbs_for_split.append(aabb)
 
+        # Compute current union AABB (i0, i1, j0, j1).
+        _curr_ui0 = _curr_uj0 = 1 << 30
+        _curr_ui1 = _curr_uj1 = -1
+        for _i0, _i1, _j0, _j1 in aabbs_for_split:
+            if _i0 < _curr_ui0: _curr_ui0 = _i0
+            if _j0 < _curr_uj0: _curr_uj0 = _j0
+            if _i1 > _curr_ui1: _curr_ui1 = _i1
+            if _j1 > _curr_uj1: _curr_uj1 = _j1
+
+        # Dirty region = prev union AABB ∪ curr union AABB.
+        _prev_union = getattr(comp, '_combined_union_aabb', None)
+        if _prev_union is not None:
+            _p_i0, _p_i1, _p_j0, _p_j1 = _prev_union
+            d_i0 = min(_p_i0, _curr_ui0)
+            d_i1 = max(_p_i1, _curr_ui1)
+            d_j0 = min(_p_j0, _curr_uj0)
+            d_j1 = max(_p_j1, _curr_uj1)
+        else:
+            # First step: dirty region is the full grid.
+            d_i0 = d_j0 = 0
+            d_i1 = int(gs_np[0])
+            d_j1 = int(gs_np[1])
+
+        # Restrict fills to the dirty sub-block.
+        _su = comp.sdf_val_u.shape
+        _sv = comp.sdf_val_v.shape
+        _bu = comp.body_u.shape
+        _bv = comp.body_v.shape
+        comp.sdf_val[d_i0:d_i1, d_j0:d_j1].fill_(_FAR)
+        comp.sdf_val_u[d_i0:min(d_i1 + 1, _su[0]), d_j0:d_j1].fill_(_FAR)
+        comp.sdf_val_v[d_i0:d_i1, d_j0:min(d_j1 + 1, _sv[1])].fill_(_FAR)
+        comp.body_u[d_i0:min(d_i1 + 1, _bu[0]), d_j0:d_j1].zero_()
+        comp.body_v[d_i0:d_i1, d_j0:min(d_j1 + 1, _bv[1])].zero_()
+
         # Maintain `comp.com_pos[b]` views for downstream code.
         for b, body in enumerate(comp.bodies):
             comp.com_pos[b] = com_pos_t[b]
@@ -1593,7 +1708,7 @@ class BDIMhandler:
                     comp.sdf_val.shape, device=self.device, dtype=self.dtype,
                 )
             winning_rho_cc = _wrcc
-            winning_rho_cc.fill_(float(fs.rho))
+            winning_rho_cc[d_i0:d_i1, d_j0:d_j1].fill_(float(fs.rho))
 
             streaming_sdf_min_rho_2d_multi(
                 sm['F_flat'], sm['F_offsets'],
@@ -1604,20 +1719,19 @@ class BDIMhandler:
                 comp.body_u, comp.body_v,
                 interp_method,
                 rho_bodies, winning_rho_cc,
+                dirty_i0=d_i0, dirty_j0=d_j0,
+                dirty_Ai=d_i1 - d_i0, dirty_Aj=d_j1 - d_j0,
             )
 
             for b in range(B):
                 comp._sdf_sparse[b] = None
 
-            # Cache the union AABB so _recompute_mu_normals_2d can activate
+            # Cache the union AABB so _recompute_mu_normals can activate
             # the sub-block path without reading _sdf_sparse.
-            _u_i0 = _u_j0 = 1 << 30
-            _u_i1 = _u_j1 = -1
-            for _i0, _i1, _j0, _j1 in aabbs_for_split:
-                if _i0 < _u_i0: _u_i0 = _i0
-                if _j0 < _u_j0: _u_j0 = _j0
-                if _i1 > _u_i1: _u_i1 = _i1
-                if _j1 > _u_j1: _u_j1 = _j1
+            _u_i0 = _curr_ui0
+            _u_j0 = _curr_uj0
+            _u_i1 = _curr_ui1
+            _u_j1 = _curr_uj1
             comp._combined_union_aabb = (_u_i0, _u_i1, _u_j0, _u_j1)
 
             # 2-D force integration is computed in the later force stage by
@@ -1642,152 +1756,69 @@ class BDIMhandler:
     # ==================================================================
     #  apply_forces: fluid -> body forces via MuJoCo xfrc_applied
     # ==================================================================
-    def apply_forces(self, task, physics):
-        if self.ndim == 3:
-            self._apply_forces_3d(task, physics)
-        else:
-            self._apply_forces_2d(task, physics)
+    def _apply_forces(self, task, physics):
+        """Dim-agnostic fluid → body force application via MuJoCo xfrc.
 
+        Replaces the legacy ``_apply_forces_2d`` / ``_apply_forces_3d``
+        pair (Step 6 of the 2-D/3-D unification refactor).  The per-D
+        xfrc index map, buoyancy axis, and FluidSolver field names are
+        precomputed in :meth:`_init_apply_forces`, so this method has
+        zero per-step Python branching on ``ndim`` or ``_2d_plane``.
 
-    def _apply_forces_2d(self, task, physics):
+        FARMS-style buoyancy is applied additively to a single linear
+        xfrc index (``_buoyancy_xfrc_idx``); for the 2-D xy plane, where
+        no buoyancy is needed, that index is ``None`` and the buoyancy
+        block is skipped entirely.
+        """
         fs = self.fluid_solver
         s  = self.force_scaling
-        fx_idx, fy_idx, torque_idx = self._2d_force_axes
+        D  = self.ndim
+        Nt = len(self._ang_xfrc_idx)
 
-        # Single GPU→CPU transfer instead of 6 separate .cpu().numpy() calls
-        forces_gpu = torch.stack([
-            fs.friction_force_lin_x,
-            fs.friction_force_lin_y,
-            fs.friction_force_ang_z,
-            fs.pressure_force_x,
-            fs.pressure_force_y,
-            fs.pressure_force_ang_z,
-        ])                                          # (6, B)
-        forces_cpu = (s * forces_gpu).cpu().numpy() # single sync
-        friction_force_lin_x = forces_cpu[0]
-        friction_force_lin_y = forces_cpu[1]
-        friction_force_ang_z = forces_cpu[2]
-        pressure_force_x     = forces_cpu[3]
-        pressure_force_y     = forces_cpu[4]
-        pressure_force_ang_z = forces_cpu[5]
+        # Single GPU→CPU transfer (4 groups: lin_visc, ang_visc, lin_pres, ang_pres).
+        attrs = (self._lin_visc_attrs + self._ang_visc_attrs
+                 + self._lin_pres_attrs + self._ang_pres_attrs)
+        forces_gpu = torch.stack([getattr(fs, a) for a in attrs])  # (2D + 2Nt, B)
+        forces_cpu = (s * forces_gpu).cpu().numpy()                # single sync
 
-        # Lazy-init buoyancy parameters (xz plane only)
-        if self._2d_has_buoyancy and not self._buoyancy_initialized:
+        # Total per-axis (viscous + pressure) at CPU level.
+        lin_total = forces_cpu[:D] + forces_cpu[D + Nt: 2 * D + Nt]   # (D, B)
+        ang_total = forces_cpu[D: D + Nt] + forces_cpu[2 * D + Nt:]   # (Nt, B)
+
+        # FARMS-identical buoyancy (drag.pyx ``compute_buoyancy``).
+        if self._has_buoyancy and not self._buoyancy_initialized:
             self._init_buoyancy_params(task, physics)
 
         comp    = fs.composite_body
         surface = self.water_surface
         g_z     = self.gravity_z
+        units_N = task.units.newtons
+        buoy_xidx = self._buoyancy_xfrc_idx
+        buoy_pidx = self._buoyancy_pos_idx
+        has_buoy  = self._has_buoyancy
 
         for body_i in range(len(comp.bodies)):
             (animat_id, link_id) = comp.body_ids[body_i]
             ind = task.maps[animat_id]["sensors"]["data2xfrc"][link_id]
 
-            # FARMS-style buoyancy: only active for xz plane (fluid y = MuJoCo z)
-            buoyancy_y = 0.0
-            if self._2d_has_buoyancy:
-                mass   = self._buoy_mass[body_i]
+            buoyancy = 0.0
+            if has_buoy:
+                mass    = self._buoy_mass[body_i]
                 density = self._buoy_density[body_i]
-                height = self._buoy_height[body_i]
-                # comp.com_pos[body_i][1] = fluid y = MuJoCo z (vertical)
-                pos_z  = float(comp.com_pos[body_i][1])
+                height  = self._buoy_height[body_i]
+                pos_z   = float(comp.com_pos[body_i][buoy_pidx])
                 if mass > 0 and height > 0 and pos_z - height < surface:
                     frac = min((surface + height - pos_z) / (2.0 * height), 1.0)
-                    buoyancy_y = -self.rho_fluid * mass * g_z / density * frac
+                    buoyancy = -self.rho_fluid * mass * g_z / density * frac
 
-            physics.data.xfrc_applied[ind, fx_idx] = (
-                friction_force_lin_x[body_i] + pressure_force_x[body_i]
-            ) * task.units.newtons
-            physics.data.xfrc_applied[ind, fy_idx] = (
-                friction_force_lin_y[body_i] + pressure_force_y[body_i] + buoyancy_y
-            ) * task.units.newtons
-            physics.data.xfrc_applied[ind, torque_idx] = (
-                friction_force_ang_z[body_i] + pressure_force_ang_z[body_i]
-            ) * task.units.newtons
+            for d, xidx in enumerate(self._lin_xfrc_idx):
+                val = lin_total[d][body_i] * units_N
+                if xidx == buoy_xidx:
+                    val += buoyancy * units_N
+                physics.data.xfrc_applied[ind, xidx] = val
 
-    def _apply_forces_3d(self, task, physics):
-        fs = self.fluid_solver
-        s  = self.force_scaling
-
-        # Single GPU→CPU transfer instead of 12 separate .cpu().numpy()
-        # calls (each one was an implicit sync + DtoH copy and the single
-        # biggest contributor to "Other (residual)" at low N).
-        # Mirrors the 2-D batched transfer in _apply_forces_2d.
-        forces_gpu = torch.stack([
-            fs.friction_force_lin_x,
-            fs.friction_force_lin_y,
-            fs.friction_force_lin_z,
-            fs.friction_force_ang_x,
-            fs.friction_force_ang_y,
-            fs.friction_force_ang_z,
-            fs.pressure_force_x,
-            fs.pressure_force_y,
-            fs.pressure_force_z,
-            fs.pressure_force_ang_x,
-            fs.pressure_force_ang_y,
-            fs.pressure_force_ang_z,
-        ])                                          # (12, B)
-        forces_cpu = (s * forces_gpu).cpu().numpy() # single sync
-        friction_force_lin_x = forces_cpu[0]
-        friction_force_lin_y = forces_cpu[1]
-        friction_force_lin_z = forces_cpu[2]
-        friction_force_ang_x = forces_cpu[3]
-        friction_force_ang_y = forces_cpu[4]
-        friction_force_ang_z = forces_cpu[5]
-        pressure_force_x     = forces_cpu[6]
-        pressure_force_y     = forces_cpu[7]
-        pressure_force_z     = forces_cpu[8]
-        pressure_force_ang_x = forces_cpu[9]
-        pressure_force_ang_y = forces_cpu[10]
-        pressure_force_ang_z = forces_cpu[11]
-
-        # ---- FARMS-identical buoyancy (drag.pyx  compute_buoyancy) ----
-        # Lazy-init per-body mass & half-height on first call
-        if not self._buoyancy_initialized:
-            self._init_buoyancy_params(task, physics)
-
-        comp    = fs.composite_body
-        surface = self.water_surface
-        g_z     = self.gravity_z          # e.g. -9.81
-
-        for body_i in range(len(comp.bodies)):
-            (animat_id, link_id) = comp.body_ids[body_i]
-            ind = task.maps[animat_id]["sensors"]["data2xfrc"][link_id]
-
-            # FARMS buoyancy per link
-            mass   = self._buoy_mass[body_i]
-            density = self._buoy_density[body_i]
-            height = self._buoy_height[body_i]
-            pos_z  = float(comp.com_pos[body_i][2])
-
-            buoyancy_z = 0.0
-            if mass > 0 and height > 0 and pos_z - height < surface:
-                frac = min((surface + height - pos_z) / (2.0 * height), 1.0)
-                # -rho_water * (mass/density) * gravity * frac
-                # = -rho_water * V_link * gravity * frac  (upward when g<0)
-                buoyancy_z = (
-                    -self.rho_fluid * mass * g_z / density * frac
-                )
-
-            physics.data.xfrc_applied[ind, 0] = (
-                friction_force_lin_x[body_i] + pressure_force_x[body_i]
-            ) * task.units.newtons
-            physics.data.xfrc_applied[ind, 1] = (
-                friction_force_lin_y[body_i] + pressure_force_y[body_i]
-            ) * task.units.newtons
-            physics.data.xfrc_applied[ind, 2] = (
-                friction_force_lin_z[body_i] + pressure_force_z[body_i]
-                + buoyancy_z
-            ) * task.units.newtons
-            physics.data.xfrc_applied[ind, 3] = (
-                friction_force_ang_x[body_i] + pressure_force_ang_x[body_i]
-            ) * task.units.newtons
-            physics.data.xfrc_applied[ind, 4] = (
-                friction_force_ang_y[body_i] + pressure_force_ang_y[body_i]
-            ) * task.units.newtons
-            physics.data.xfrc_applied[ind, 5] = (
-                friction_force_ang_z[body_i] + pressure_force_ang_z[body_i]
-            ) * task.units.newtons
+            for d, xidx in enumerate(self._ang_xfrc_idx):
+                physics.data.xfrc_applied[ind, xidx] = ang_total[d][body_i] * units_N
 
     # ==================================================================
     #  step: one full coupled step (called by FluidExtension.before_step)

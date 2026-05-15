@@ -629,7 +629,16 @@ class AdvDiffSolver:
             [list(u.shape), list(v.shape), list(w.shape)],
             dtype=torch.int64, device=device,
         )
-        max_plane_dim = int(max(max(u.shape), max(v.shape), max(w.shape)))
+        # Separate max extents for the two thread-block grid dimensions.
+        # Per-face dim0/dim1 in apply_bcs_3d_kernel:
+        #   axis 0 (x-face): dim0 = Ny, dim1 = Nz
+        #   axis 1 (y-face): dim0 = Nx, dim1 = Nz
+        #   axis 2 (z-face): dim0 = Nx, dim1 = Ny
+        # max_dim0 = max over all faces of dim0 = max(Ny, Nx, Nx) = Nx
+        # max_dim1 = max over all faces of dim1 = max(Nz, Nz, Ny) = max(Ny, Nz)
+        Nx, Ny, Nz = u.shape
+        max_dim0 = int(max(Ny, Nx))   # = Nx (always Nx ≥ Ny for normal grids)
+        max_dim1 = int(max(Nz, Ny))
 
         packed = self._bc_fused_3d_packed
         # Move int descriptors to vel's device if they're not already.
@@ -653,7 +662,8 @@ class AdvDiffSolver:
             "neu_desc": neu_desc,
             "dir_desc": dir_desc,
             "dir_val": dir_val,
-            "max_plane_dim": max_plane_dim,
+            "max_dim0": max_dim0,
+            "max_dim1": max_dim1,
         }
         # Persist updated descriptor device too, so future calls skip the move.
         self._bc_fused_3d_packed["neu_desc"] = neu_desc
@@ -741,7 +751,8 @@ class AdvDiffSolver:
                 cache["neu_desc"],
                 cache["dir_desc"],
                 cache["dir_val"],
-                cache["max_plane_dim"],
+                cache["max_dim0"],
+                cache["max_dim1"],
             )
             return
 
@@ -768,30 +779,6 @@ class AdvDiffSolver:
             vel[comp][dst] = vel[comp][src]
         for comp, dst, val in self._bc_dirichlet_ops:
             vel[comp][dst] = val
-
-    # =================================================================
-    # CFL helper
-    # =================================================================
-    def clf(self, *vel, nu_t_max=0.0):
-        """Adjust dt to satisfy CFL.
-
-        Parameters
-        ----------
-        *vel    : velocity component tensors.
-        nu_t_max : float — maximum eddy viscosity (0 when Smagorinsky is off).
-        """
-        vel_max = max(torch.max(torch.abs(v)).item() for v in vel)
-        nu_total = float(self.nu) + float(nu_t_max)
-        self.dt = min(self.dh) / (vel_max + 3.0 * nu_total)
-        self._dt_dh = [self.dt / h for h in self.dh]
-        # legacy
-        self.dtdx = self._dt_dh[0]
-        self.dtdy = self._dt_dh[1]
-        self.dtdx2 = self.dtdx / self.dh[0]
-        self.dtdy2 = self.dtdy / self.dh[1]
-        if self.ndim == 3:
-            self.dtdz  = self._dt_dh[2]
-            self.dtdz2 = self.dtdz / self.dh[2]
 
 
 # =====================================================================

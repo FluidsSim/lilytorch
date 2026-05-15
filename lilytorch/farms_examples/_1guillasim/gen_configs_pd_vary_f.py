@@ -17,9 +17,10 @@ class SimConfig(BaseSimConfig):
         )
 
         # ── Simulation flags ──────────────────────────────────────────
-        self.use_bdim    = True
-        self.compute_sdf = True
-        self.convexify   = True
+        self.use_bdim             = True
+        self.compute_sdf          = True
+        self.convexify            = True
+        self.zero_pressure_inside = True
 
         # ── Animats ───────────────────────────────────────────────────
         self.filter_fixed_joints = False

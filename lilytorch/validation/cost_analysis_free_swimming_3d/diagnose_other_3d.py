@@ -92,22 +92,22 @@ def install_patch():
 
         with B.time("F.4  union AABB compute"):
             fs._bdim_union_aabb = (
-                fs._compute_union_aabb_3d(halo=2)
+                fs._compute_union_aabb(halo=2)
                 if getattr(fs, '_bdim_union', False) else None
             )
 
         with B.time("F.5  bdim_apply x3"):
-            uprime = fs._bdim_apply_3d(
+            uprime = fs._bdim_apply(
                 uprime, fs.mu0_all_u,
                 fs.composite_body.body_u, fs.mu1_all_u,
                 fs.normal_x_u, fs.normal_y_u, fs.normal_z_u,
             )
-            vprime = fs._bdim_apply_3d(
+            vprime = fs._bdim_apply(
                 vprime, fs.mu0_all_v,
                 fs.composite_body.body_v, fs.mu1_all_v,
                 fs.normal_x_v, fs.normal_y_v, fs.normal_z_v,
             )
-            wprime = fs._bdim_apply_3d(
+            wprime = fs._bdim_apply(
                 wprime, fs.mu0_all_w,
                 fs.composite_body.body_w, fs.mu1_all_w,
                 fs.normal_x_w, fs.normal_y_w, fs.normal_z_w,
@@ -115,15 +115,13 @@ def install_patch():
             fs._bdim_union_aabb = None
 
         with B.time("F.6  release mu1+normals (dict.update)"):
-            from lilytorch.integration.BDIMhandler import _FS_FREE_AFTER_BDIM_3D
-            fs.__dict__.update(_FS_FREE_AFTER_BDIM_3D)
+            fs.__dict__.update(fs._FS_FREE_AFTER_BDIM)
 
         with B.time("F.7  var-density coeffs"):
             ch, cv, cw, ch_cc = self._compute_variable_density_coefficients(timestep)
 
         with B.time("F.8  release mu0 (dict.update)"):
-            from lilytorch.integration.BDIMhandler import _FS_FREE_AFTER_VAR_DENS_3D
-            fs.__dict__.update(_FS_FREE_AFTER_VAR_DENS_3D)
+            fs.__dict__.update(fs._FS_FREE_AFTER_VAR_DENS)
 
         with B.time("F.9  project"):
             poisson_method = getattr(fs, "poisson_method", "multigrid")

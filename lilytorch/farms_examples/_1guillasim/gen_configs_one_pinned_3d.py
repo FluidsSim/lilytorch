@@ -16,9 +16,9 @@ class SimConfig(BaseSimConfig):
         )
 
         # ── Hardware ──────────────────────────────────────────────────
-        self.compute_sdf = False
+        self.compute_sdf = True
         self.convexify   = True
-        self.n_samples   = (200, 200)
+        # self.n_samples   = (200, 200)
         self.use_gpu     = True
         self.headless    = False
 
@@ -71,13 +71,11 @@ class SimConfig(BaseSimConfig):
         self.poisson_nsmoothing      = 5
         self.poisson_bc_type         = "neumann"
         self.rho_body                = 800.0
-        self.zero_pressure_inside    = False
+        self.zero_pressure_inside    = True
 
         # Disable compilation to speed up startup
         self.poisson_compile         = False
         self.compile_adv_diff        = False
-        self.compile_forces          = False
-        self.compile_sdf             = False
 
         # ── Boundary conditions (3-D, Dirichlet inlet) ───────────────
         self.bc_type_u   = ["D", "D", "N", "N", "N", "N"]

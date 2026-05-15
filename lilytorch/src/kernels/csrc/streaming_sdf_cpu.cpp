@@ -379,7 +379,8 @@ void apply_bcs_3d_cpu(
     const at::Tensor& neu_desc,
     const at::Tensor& dir_desc,
     const at::Tensor& dir_val,
-    const int64_t /*max_plane_dim*/)
+    const int64_t /*max_dim0*/,
+    const int64_t /*max_dim1*/)
 {
     TORCH_CHECK(u.is_contiguous() && v.is_contiguous() && w.is_contiguous(),
                 "apply_bcs_3d_cpu: u/v/w must be contiguous");
@@ -468,11 +469,21 @@ static void interpolate_3d_cpu(
     const int N = (int)xq.numel();
     if (N == 0) return;
 
+    // Bind temporaries to named locals: ``.contiguous().to(...)`` returns a
+    // fresh tensor whose storage is freed at the end of the full-expression
+    // unless held.  Without this the raw ``data_ptr`` would dangle for
+    // non-contiguous or differently-dtyped inputs and the parallel_for loop
+    // below would read freed memory.
+    auto F_c  = F.contiguous();
+    auto xq_c = xq.contiguous().to(F.scalar_type());
+    auto yq_c = yq.contiguous().to(F.scalar_type());
+    auto zq_c = zq.contiguous().to(F.scalar_type());
+
     AT_DISPATCH_FLOATING_TYPES(F.scalar_type(), "interpolate_3d_cpu", [&] {
-        const scalar_t* Fp  = F.contiguous().data_ptr<scalar_t>();
-        const scalar_t* xqp = xq.contiguous().to(F.scalar_type()).data_ptr<scalar_t>();
-        const scalar_t* yqp = yq.contiguous().to(F.scalar_type()).data_ptr<scalar_t>();
-        const scalar_t* zqp = zq.contiguous().to(F.scalar_type()).data_ptr<scalar_t>();
+        const scalar_t* Fp  = F_c.data_ptr<scalar_t>();
+        const scalar_t* xqp = xq_c.data_ptr<scalar_t>();
+        const scalar_t* yqp = yq_c.data_ptr<scalar_t>();
+        const scalar_t* zqp = zq_c.data_ptr<scalar_t>();
         scalar_t* Gp = G.data_ptr<scalar_t>();
         const int iMx = (int)Mx, iMy = (int)My, iMz = (int)Mz;
         const scalar_t bx0s = (scalar_t)bx0, by0s = (scalar_t)by0, bz0s = (scalar_t)bz0;
@@ -553,7 +564,9 @@ void streaming_sdf_min_rho_3d_multi_cpu(
     at::Tensor body_u, at::Tensor body_v, at::Tensor body_w,
     const int64_t interp_method,
     const at::Tensor& rho_bodies,
-    at::Tensor winning_rho_cc)
+    at::Tensor winning_rho_cc,
+    const int64_t /*dirty_i0*/, const int64_t /*dirty_j0*/, const int64_t /*dirty_k0*/,
+    const int64_t /*dirty_Ai*/, const int64_t /*dirty_Aj*/, const int64_t /*dirty_Ak*/)
 {
     const int B = (int)aabb_dim.size(0);
     if (B <= 0) return;
@@ -601,7 +614,12 @@ void streaming_sdf_min_rho_3d_multi_cpu(
             const scalar_t dv_x=neg_hh*r01, dv_y=neg_hh*r11, dv_z=neg_hh*r21;
             const scalar_t dw_x=neg_hh*r02, dw_y=neg_hh*r12, dw_z=neg_hh*r22;
             const scalar_t rho_b = rho_ptr[b];
-            for (int local = 0; local < vol; ++local) {
+            // Cells of a single body's AABB are disjoint from one another in
+            // ``g`` index space, so concurrent compare-swaps into ``sdf_*[g]``
+            // are race-free within one body.  Bodies are still serialised by
+            // the outer ``for (b)`` loop, matching the 2-D path.
+            at::parallel_for(0, vol, /*grain_size=*/1024, [&](int64_t _begin, int64_t _end) {
+            for (int local = (int)_begin; local < (int)_end; ++local) {
                 const int di = local / (Aj*Ak);
                 const int rem = local - di*(Aj*Ak);
                 const int dj = rem / Ak;
@@ -622,6 +640,7 @@ void streaming_sdf_min_rho_3d_multi_cpu(
                 const scalar_t sw = sample_dispatch_cpu<scalar_t>(interp,F_b,Mx,My,Mz,bx0,by0,bz0,idx,idy,idz,bxq+dw_x,byq+dw_y,bzq+dw_z);
                 if (sw < sdf_w_p[g]) { sdf_w_p[g]=sw; bW_p[g]=lv_z + av_x*(yc-cm_y) - av_y*(xc-cm_x); }
             }
+            });
         }
     });
 }
@@ -687,8 +706,15 @@ void streaming_sdf_forces_post_3d_cpu(
             const scalar_t* K=kin_ptr+b*21;
             const scalar_t r00=K[0],r01=K[1],r02=K[2],r10=K[3],r11=K[4],r12=K[5],r20=K[6],r21=K[7],r22=K[8];
             const scalar_t bp_x=K[9],bp_y=K[10],bp_z=K[11],cm_x=K[12],cm_y=K[13],cm_z=K[14];
-            double acc[12]={0,0,0,0,0,0,0,0,0,0,0,0};
-            for(int local=0;local<vol;++local){
+            // Cells of one body's AABB are independent; parallelise across
+            // them and accumulate into a per-thread 12-channel slice of a
+            // shared scratch buffer (no locking).  Final reduction across
+            // threads runs single-threaded after the parallel region.
+            const int nT = at::get_num_threads();
+            std::vector<double> tls((size_t)nT * 12, 0.0);
+            at::parallel_for(0, vol, /*grain_size=*/2048, [&](int64_t _begin, int64_t _end) {
+            double local12[12]={0,0,0,0,0,0,0,0,0,0,0,0};
+            for(int local=(int)_begin;local<(int)_end;++local){
                 const int di=local/(Aj*Ak), rem=local-di*(Aj*Ak), dj=rem/Ak, dk=rem-dj*Ak;
                 const int i=i0+di,j=j0+dj,k=k0+dk; const int64_t g=((int64_t)i*Ngy+j)*Ngz+k;
                 const scalar_t xc=gx_ptr[i], yc=gy_ptr[j], zc=gz_ptr[k];
@@ -714,11 +740,37 @@ void streaming_sdf_forces_post_3d_cpu(
                 const scalar_t nrv=nr_size==1?nr[0]:nr[g];
                 const scalar_t xs=nrv*(2*dudx*nx+(dudy+dvdx)*ny+(dudz+dwdx)*nz), ys=nrv*((dvdx+dudy)*nx+2*dvdy*ny+(dvdz+dwdy)*nz), zs=nrv*((dwdx+dudz)*nx+(dwdy+dvdz)*ny+2*dwdz*nz);
                 scalar_t dv=0,dp=0; const scalar_t sd=sbody-eps_s; if(sd>-eps_b&&sd<eps_b) dv=(1+std::cos(pi_eb*sd))*inv_2eps; if(sbody>-eps_b&&sbody<eps_b) dp=(1+std::cos(pi_eb*sbody))*inv_2eps;
+                // delta_order==2: divide both deltas by |grad(sdf_body)| evaluated by
+                // re-sampling at world-aligned ±h offsets.  Matches the CUDA-3D path
+                // at streaming_sdf.cu:644-657; without this the CPU path silently
+                // skipped the gradient correction and disagreed with CUDA forces.
+                if(delta_order==2 && (dv>0 || dp>0)){
+                    const scalar_t hg=(scalar_t)1.0/inv_h;
+                    const scalar_t s_xp=sample_dispatch_cpu<scalar_t>((int)interp_method,Fb,Mx,My,Mz,bx0,by0,bz0,idx,idy,idz,bxq+r00*hg,byq+r10*hg,bzq+r20*hg);
+                    const scalar_t s_xm=sample_dispatch_cpu<scalar_t>((int)interp_method,Fb,Mx,My,Mz,bx0,by0,bz0,idx,idy,idz,bxq-r00*hg,byq-r10*hg,bzq-r20*hg);
+                    const scalar_t s_yp=sample_dispatch_cpu<scalar_t>((int)interp_method,Fb,Mx,My,Mz,bx0,by0,bz0,idx,idy,idz,bxq+r01*hg,byq+r11*hg,bzq+r21*hg);
+                    const scalar_t s_ym=sample_dispatch_cpu<scalar_t>((int)interp_method,Fb,Mx,My,Mz,bx0,by0,bz0,idx,idy,idz,bxq-r01*hg,byq-r11*hg,bzq-r21*hg);
+                    const scalar_t s_zp=sample_dispatch_cpu<scalar_t>((int)interp_method,Fb,Mx,My,Mz,bx0,by0,bz0,idx,idy,idz,bxq+r02*hg,byq+r12*hg,bzq+r22*hg);
+                    const scalar_t s_zm=sample_dispatch_cpu<scalar_t>((int)interp_method,Fb,Mx,My,Mz,bx0,by0,bz0,idx,idy,idz,bxq-r02*hg,byq-r12*hg,bzq-r22*hg);
+                    scalar_t gm=std::sqrt(((s_xp-s_xm)*(s_xp-s_xm)+(s_yp-s_ym)*(s_yp-s_ym)+(s_zp-s_zm)*(s_zp-s_zm))*(scalar_t)0.25*inv_h*inv_h);
+                    if(gm<(scalar_t)1e-3) gm=(scalar_t)1e-3;
+                    const scalar_t ig=(scalar_t)1.0/gm;
+                    dv*=ig; dp*=ig;
+                }
                 const scalar_t px=-pp[g]*nx, py=-pp[g]*ny, pz=-pp[g]*nz, ax=xc-cm_x, ay=yc-cm_y, az=zc-cm_z;
                 const double fvx=xs*dv, fvy=ys*dv, fvz=zs*dv, fpx=px*dp, fpy=py*dp, fpz=pz*dp;
-                acc[0]+=fvx; acc[1]+=fvy; acc[2]+=fvz; acc[3]+=ay*fvz-az*fvy; acc[4]+=az*fvx-ax*fvz; acc[5]+=ax*fvy-ay*fvx;
-                acc[6]+=fpx; acc[7]+=fpy; acc[8]+=fpz; acc[9]+=ay*fpz-az*fpy; acc[10]+=az*fpx-ax*fpz; acc[11]+=ax*fpy-ay*fpx;
+                local12[0]+=fvx; local12[1]+=fvy; local12[2]+=fvz; local12[3]+=ay*fvz-az*fvy; local12[4]+=az*fvx-ax*fvz; local12[5]+=ax*fvy-ay*fvx;
+                local12[6]+=fpx; local12[7]+=fpy; local12[8]+=fpz; local12[9]+=ay*fpz-az*fpy; local12[10]+=az*fpx-ax*fpz; local12[11]+=ax*fpy-ay*fpx;
             }
+            // Per-thread slice; no race because each thread t writes only
+            // tls[t*12 + c..c+11].  Multiple chunks assigned to the same
+            // thread accumulate sequentially.
+            const int t = at::get_thread_num();
+            for(int c=0;c<12;++c) tls[(size_t)t*12+c]+=local12[c];
+            });
+            double acc[12]={0,0,0,0,0,0,0,0,0,0,0,0};
+            for(int t=0;t<nT;++t)
+                for(int c=0;c<12;++c) acc[c]+=tls[(size_t)t*12+c];
             for(int c=0;c<12;++c) outp[b*12+c]+=acc[c]*h3d;
         }
     });
