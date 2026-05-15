@@ -49,6 +49,41 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " int dirty_Ai, int dirty_Aj, int dirty_Ak"
         ") -> ()");
 
+    // Phase-I fused-BDIM memory variant of streaming_sdf_min_rho_3d_multi:
+    // drops the winning_rho_cc / rho_bodies machinery.  Kernel B computes
+    // rho_eff from mu0 in registers.
+    m.def(
+        "streaming_sdf_stag_3d_multi("
+        "Tensor F_flat, Tensor F_offsets,"
+        " Tensor body_shapes, Tensor body_meta, Tensor kin,"
+        " Tensor aabb_lo, Tensor aabb_dim,"
+        " Tensor gx, Tensor gy, Tensor gz, float h_grid,"
+        " int max_vol_per_body,"
+        " Tensor(a!) sdf_cc, Tensor(b!) sdf_u, Tensor(c!) sdf_v, Tensor(d!) sdf_w,"
+        " Tensor(e!) body_u, Tensor(f!) body_v, Tensor(g!) body_w,"
+        " int interp_method,"
+        " int dirty_i0, int dirty_j0, int dirty_k0,"
+        " int dirty_Ai, int dirty_Aj, int dirty_Ak"
+        ") -> ()");
+
+    // Phase-I fused BDIM2 + variable-density Poisson coefficient kernel.
+    // Reads advdiff outputs + Kernel-A face SDFs / body velocities, writes
+    // the persistent velocity fields u0/v0/w0 and Poisson coefficients
+    // ch/cv/cw inside the dirty AABB.  mu0, mu1 and unit normals are
+    // computed in CUDA thread registers and never stored globally.
+    m.def(
+        "bdim_vardens_3d("
+        "Tensor u_prime, Tensor v_prime, Tensor w_prime,"
+        " Tensor sdf_u, Tensor sdf_v, Tensor sdf_w,"
+        " Tensor body_u, Tensor body_v, Tensor body_w,"
+        " Tensor(a!) u0, Tensor(b!) v0, Tensor(c!) w0,"
+        " Tensor(d!) ch, Tensor(e!) cv, Tensor(f!) cw,"
+        " float eps, float rho_body, float rho_f, float dt,"
+        " float h_grid,"
+        " int dirty_i0, int dirty_j0, int dirty_k0,"
+        " int dirty_Ai, int dirty_Aj, int dirty_Ak"
+        ") -> ()");
+
     m.def(
         "streaming_sdf_forces_post_3d("
         "Tensor F_flat, Tensor F_offsets,"

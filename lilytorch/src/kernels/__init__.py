@@ -54,6 +54,8 @@ _C = _load_native_extension()
 
 from .ops import (
     streaming_sdf_min_rho_3d_multi,
+    streaming_sdf_stag_3d_multi,
+    bdim_vardens_3d,
     streaming_sdf_forces_post_3d,
     apply_bcs_3d,
     streaming_sdf_min_rho_2d_multi,
@@ -73,6 +75,8 @@ from .interpolation import (
 
 __all__ = [
     "streaming_sdf_min_rho_3d_multi",
+    "streaming_sdf_stag_3d_multi",
+    "bdim_vardens_3d",
     "streaming_sdf_forces_post_3d",
     "apply_bcs_3d",
     "streaming_sdf_min_rho_2d_multi",

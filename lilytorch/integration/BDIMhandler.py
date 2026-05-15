@@ -24,7 +24,6 @@ from scipy.spatial.transform import Rotation
 from lilytorch.src.solver import FluidSolver
 from lilytorch.src.body import (rotate_grid_2d, rotate_grid_3d,
                                 _rotate_grid_3d_compiled)
-from lilytorch.src.kernels import streaming_sdf_min_rho_3d_multi
 from lilytorch.src.kernels import streaming_sdf_min_rho_2d_multi
 
 import torch
@@ -1032,23 +1031,11 @@ class BDIMhandler:
 
         h_grid = float(comp.h)
 
-        # The combined force kernel computes SDF samples and optional |∇φ|
-        # correction on the fly, but force stress still needs lagged CC
-        # normals.  On the first combined step these attributes may not exist
-        # yet because normal recomputation happens after the SDF update in
-        # BDIMhandler.step().  Initialize them once from the pre-update
-        # union SDF before resetting fields below.
-        if (
-            fs._use_kernels
-            and (
-                getattr(fs, 'normal_x', None) is None
-                or getattr(fs, 'normal_y', None) is None
-                or getattr(fs, 'normal_z', None) is None
-            )
-        ):
-            fs.normal_x, fs.normal_y, fs.normal_z = comp.compute_normals(
-                comp.sdf_val
-            )
+        # Phase I removed the persistent CC normal buffers from the
+        # kernel-mode 3-D path: ``streaming_sdf_forces_post_3d`` derives
+        # surface normals internally from the body SDF table at query
+        # time, so the solver no longer needs ``fs.normal_x/y/z``.  No
+        # defensive init is required here.
 
         # ------------------------------------------------------------------
         # Compute per-body AABBs on CPU (all numpy, no GPU I/O) BEFORE any
@@ -1196,21 +1183,13 @@ class BDIMhandler:
             d_i0 = d_j0 = d_k0 = 0
             d_i1, d_j1, d_k1 = gs[0], gs[1], gs[2]
 
-        # Reset running-min fields in dirty sub-block only (O(dirty_vol) not O(N)).
+        # Reset running-min CC SDF in the dirty sub-block (O(dirty_vol) not
+        # O(N)).  Phase I removed the persistent staggered SDF and body
+        # velocity buffers: those are now per-step temporaries owned by
+        # FluidSolver.fluid_step and Kernel A fills them from _FAR each
+        # time the kernel runs, so no Python-side reset is needed here.
         comp._sdf_sparse = [None] * B
         comp.sdf_val[d_i0:d_i1, d_j0:d_j1, d_k0:d_k1].fill_(_FAR)
-        _su = comp.sdf_val_u.shape
-        _sv = comp.sdf_val_v.shape
-        _sw = comp.sdf_val_w.shape
-        comp.sdf_val_u[d_i0:min(d_i1 + 1, _su[0]), d_j0:d_j1, d_k0:d_k1].fill_(_FAR)
-        comp.sdf_val_v[d_i0:d_i1, d_j0:min(d_j1 + 1, _sv[1]), d_k0:d_k1].fill_(_FAR)
-        comp.sdf_val_w[d_i0:d_i1, d_j0:d_j1, d_k0:min(d_k1 + 1, _sw[2])].fill_(_FAR)
-        _bu = comp.body_u.shape
-        _bv = comp.body_v.shape
-        _bw = comp.body_w.shape
-        comp.body_u[d_i0:min(d_i1 + 1, _bu[0]), d_j0:d_j1, d_k0:d_k1].zero_()
-        comp.body_v[d_i0:d_i1, d_j0:min(d_j1 + 1, _bv[1]), d_k0:d_k1].zero_()
-        comp.body_w[d_i0:d_i1, d_j0:d_j1, d_k0:min(d_k1 + 1, _bw[2])].zero_()
 
         gx_1d, gy_1d, gz_1d = comp.gx_1d, comp.gy_1d, comp.gz_1d
 
@@ -1322,44 +1301,6 @@ class BDIMhandler:
         _use_combined = fs._use_kernels
 
         if _use_combined:
-            # Per-body densities: use rho_body per body (same for all for now;
-            # per-link densities can be wired here in future).
-            # Persistent buffer: re-allocate only when B changes.
-            _rho_buf = getattr(comp, '_combined_rho_bodies', None)
-            if _rho_buf is None or _rho_buf.numel() != B \
-                    or _rho_buf.dtype != self.dtype \
-                    or _rho_buf.device != self.device:
-                _rho_buf = torch.empty(
-                    (B,), device=self.device, dtype=self.dtype,
-                )
-                comp._combined_rho_bodies = _rho_buf
-            _rho_buf.fill_(float(fs.rho_body))
-            rho_bodies = _rho_buf
-            # winning_rho_cc: pre-filled with rho_fluid; the combined kernel
-            # stamps each cell with the winning body's density.
-            # Reuse the persistent buffer to avoid a full-grid allocation
-            # every step (saves ~56 MB on a 900×300×52 grid).
-            _wrcc = getattr(comp, '_winning_rho_cc', None)
-            if _wrcc is None or _wrcc.shape != comp.sdf_val.shape:
-                _wrcc = torch.empty(
-                    comp.sdf_val.shape, device=self.device, dtype=self.dtype,
-                )
-            winning_rho_cc = _wrcc
-            # Sub-block fill: O(dirty_vol) not O(N)
-            winning_rho_cc[d_i0:d_i1, d_j0:d_j1, d_k0:d_k1].fill_(float(fs.rho))
-            streaming_sdf_min_rho_3d_multi(
-                sm['F_flat'], sm['F_offsets'],
-                sm['body_shapes'], sm['body_meta'], kin,
-                aabb_lo, aabb_dim,
-                gx_1d, gy_1d, gz_1d, h_grid, max_vol,
-                comp.sdf_val, comp.sdf_val_u, comp.sdf_val_v, comp.sdf_val_w,
-                comp.body_u,  comp.body_v,    comp.body_w,
-                getattr(fs, '_sdf_interp_method', 0),
-                rho_bodies, winning_rho_cc,
-                d_i0, d_j0, d_k0,
-                d_i1 - d_i0, d_j1 - d_j0, d_k1 - d_k0,
-            )
-
             # Kernel path does not populate per-body CC-SDF slabs.
             for body_i in range(B):
                 comp._sdf_sparse[body_i] = None
@@ -1382,9 +1323,13 @@ class BDIMhandler:
 
             # Kernel forces are evaluated later from post-fluid-step fields.
             comp._combined_forces_out  = None
-            comp._winning_rho_cc    = winning_rho_cc
 
-            # Stash per-step metadata (kin/aabb without sparse_cc_flat).
+            # Stash per-step metadata.  Phase I added the dirty-AABB
+            # bounds so FluidSolver.fluid_step can launch Kernel A
+            # (streaming SDF + body velocity update) and Kernel B (fused
+            # BDIM2 + variable-density Poisson coefficients) over the
+            # same sub-block this update prepared.  The SDF kernel call
+            # itself has moved into fluid_step.
             comp._kernel_step = {
                 'kin':     kin,
                 'aabb_lo': aabb_lo,
@@ -1393,6 +1338,12 @@ class BDIMhandler:
                 'gx':      gx_1d,
                 'gy':      gy_1d,
                 'gz':      gz_1d,
+                'dirty_i0': int(d_i0),
+                'dirty_j0': int(d_j0),
+                'dirty_k0': int(d_k0),
+                'dirty_Ai': int(d_i1 - d_i0),
+                'dirty_Aj': int(d_j1 - d_j0),
+                'dirty_Ak': int(d_k1 - d_k0),
             }
         else:
             raise RuntimeError("The legacy sparse 3-D kernel path has been removed; use solver_method='kernel' or 'python'.")

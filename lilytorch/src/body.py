@@ -2551,13 +2551,20 @@ class MultiAnimatBodies(Body):
         # Output fields — filled by streaming union in update() or
         # BDIMhandler3D.update().  No (nbodies, *gs) stacks needed.
         self.sdf_val   = torch.zeros(gs, device=device, dtype=self.dtype)
-        self.sdf_val_u = torch.zeros(gs, device=device, dtype=self.dtype)
-        self.sdf_val_v = torch.zeros(gs, device=device, dtype=self.dtype)
-        self.body_u    = torch.zeros(gs, device=device, dtype=self.dtype)
-        self.body_v    = torch.zeros(gs, device=device, dtype=self.dtype)
-        if self.ndim == 3:
-            self.sdf_val_w = torch.zeros(gs, device=device, dtype=self.dtype)
-            self.body_w    = torch.zeros(gs, device=device, dtype=self.dtype)
+        # In kernel mode the staggered face-SDF and rigid-body face-velocity
+        # tensors are per-step temporaries owned by FluidSolver.fluid_step —
+        # they live only between Kernel A (streaming SDF) and Kernel B
+        # (fused BDIM2 + var-dens) of the same step.  Skip the persistent
+        # full-grid allocations here to save 6 * Ngrid * sizeof(float)
+        # of permanent GPU storage per composite body.
+        if not use_kernels:
+            self.sdf_val_u = torch.zeros(gs, device=device, dtype=self.dtype)
+            self.sdf_val_v = torch.zeros(gs, device=device, dtype=self.dtype)
+            self.body_u    = torch.zeros(gs, device=device, dtype=self.dtype)
+            self.body_v    = torch.zeros(gs, device=device, dtype=self.dtype)
+            if self.ndim == 3:
+                self.sdf_val_w = torch.zeros(gs, device=device, dtype=self.dtype)
+                self.body_w    = torch.zeros(gs, device=device, dtype=self.dtype)
         self.com_pos   = torch.zeros((self.nbodies, self.ndim), device=device)
 
         # Null out any SDF tensor that was stored directly on a child body

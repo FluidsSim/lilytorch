@@ -10,6 +10,8 @@ from torch import Tensor
 
 __all__ = [
     "streaming_sdf_min_rho_3d_multi",
+    "streaming_sdf_stag_3d_multi",
+    "bdim_vardens_3d",
     "streaming_sdf_forces_post_3d",
     "apply_bcs_3d",
     "streaming_sdf_min_rho_2d_multi",
@@ -49,6 +51,74 @@ def streaming_sdf_min_rho_3d_multi(
         gx, gy, gz, float(h_grid), int(max_vol_per_body),
         sdf_cc, sdf_u, sdf_v, sdf_w, body_u, body_v, body_w,
         int(interp_method), rho_bodies, winning_rho_cc,
+        int(dirty_i0), int(dirty_j0), int(dirty_k0),
+        int(dirty_Ai), int(dirty_Aj), int(dirty_Ak),
+    )
+
+
+def streaming_sdf_stag_3d_multi(
+        F_flat: Tensor, F_offsets: Tensor,
+        body_shapes: Tensor, body_meta: Tensor, kin: Tensor,
+        aabb_lo: Tensor, aabb_dim: Tensor,
+        gx: Tensor, gy: Tensor, gz: Tensor,
+        h_grid: float, max_vol_per_body: int,
+        sdf_cc: Tensor, sdf_u: Tensor, sdf_v: Tensor, sdf_w: Tensor,
+        body_u: Tensor, body_v: Tensor, body_w: Tensor,
+        interp_method: int,
+        dirty_i0: int, dirty_j0: int, dirty_k0: int,
+        dirty_Ai: int, dirty_Aj: int, dirty_Ak: int) -> None:
+    """Phase-I 3-D streaming SDF + face velocity update (no rho).
+
+    Companion to ``bdim_vardens_3d``: fills ``sdf_cc`` (persistent),
+    ``sdf_u/v/w`` and ``body_u/v/w`` (per-step temporaries) inside the
+    dirty AABB.  Does NOT touch ``winning_rho_cc`` because Kernel B
+    computes rho_eff from mu0 in registers.
+    """
+    return torch.ops.lilytorch_kernels.streaming_sdf_stag_3d_multi.default(
+        F_flat, F_offsets, body_shapes, body_meta, kin, aabb_lo, aabb_dim,
+        gx, gy, gz, float(h_grid), int(max_vol_per_body),
+        sdf_cc, sdf_u, sdf_v, sdf_w, body_u, body_v, body_w,
+        int(interp_method),
+        int(dirty_i0), int(dirty_j0), int(dirty_k0),
+        int(dirty_Ai), int(dirty_Aj), int(dirty_Ak),
+    )
+
+
+def bdim_vardens_3d(
+        u_prime: Tensor, v_prime: Tensor, w_prime: Tensor,
+        sdf_u: Tensor, sdf_v: Tensor, sdf_w: Tensor,
+        body_u: Tensor, body_v: Tensor, body_w: Tensor,
+        u0: Tensor, v0: Tensor, w0: Tensor,
+        ch: Tensor, cv: Tensor, cw: Tensor,
+        eps: float, rho_body: float, rho_f: float, dt: float,
+        h_grid: float,
+        dirty_i0: int, dirty_j0: int, dirty_k0: int,
+        dirty_Ai: int, dirty_Aj: int, dirty_Ak: int) -> None:
+    """Phase-I fused BDIM2 + variable-density Poisson coefficient kernel.
+
+    Reads advdiff outputs (``u_prime/v_prime/w_prime``) plus the Kernel-A
+    face SDFs and rigid-body face velocities.  Writes the persistent
+    velocity fields ``u0/v0/w0`` and Poisson coefficients ``ch/cv/cw``
+    inside the dirty AABB.  ``mu0``, ``mu1`` and the unit normals live
+    only in CUDA thread registers.
+
+    Caller responsibilities:
+      * ``u_prime/v_prime/w_prime`` must be distinct allocations from
+        ``u0/v0/w0`` (otherwise central-difference reads at neighbouring
+        cells race with writes).
+      * Cells outside the dirty AABB are NOT touched.  Caller must
+        ensure ``u0/v0/w0`` already contain the advdiff result there
+        (e.g. via ``u0.copy_(u_prime)`` before this call) and that
+        ``ch/cv/cw`` already hold the outside-body default
+        ``dt / rho_fluid``.
+    """
+    return torch.ops.lilytorch_kernels.bdim_vardens_3d.default(
+        u_prime, v_prime, w_prime,
+        sdf_u, sdf_v, sdf_w,
+        body_u, body_v, body_w,
+        u0, v0, w0, ch, cv, cw,
+        float(eps), float(rho_body), float(rho_f), float(dt),
+        float(h_grid),
         int(dirty_i0), int(dirty_j0), int(dirty_k0),
         int(dirty_Ai), int(dirty_Aj), int(dirty_Ak),
     )
