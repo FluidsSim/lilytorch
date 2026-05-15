@@ -198,9 +198,10 @@ def _rotate_components(rotation: torch.Tensor, x, y, z):
 class JellyfishBody(Body):
     """WaterLily jellyfish bell plus a rigid 6D free-swimming state."""
 
-    def __init__(self, device, x, y, z, eps=0.05, grids=None,
+    def __init__(self, device, x, y, z, eps=0.05,
                  params: JellyfishParams | None = None):
-        super().__init__(device, x, y, z=z, eps=eps, grids=grids)
+        super().__init__(device, x, y, z=z, eps=eps)
+        self._setup_grids()
         assert self.ndim == 3, "JellyfishBody is 3-D only"
 
         self.params = params if params is not None else JellyfishParams()

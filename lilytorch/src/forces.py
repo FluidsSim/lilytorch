@@ -15,6 +15,7 @@ while moving ~1500 LoC of force code out of ``solver.py``.
 import torch
 
 from lilytorch.src import operations as ops
+from lilytorch.src.kernels import streaming_sdf_forces_post_2d, streaming_sdf_forces_post_3d
 
 
 # ======================================================================
@@ -370,7 +371,6 @@ def forces_method2(self, u, v, p, iteration):
     )
 
     if _use_kernel_post_forces_2d:
-        from lilytorch.src.kernels import streaming_sdf_forces_post_2d
 
         sm = comp._kernel_static_2d
 
@@ -546,7 +546,7 @@ def forces_method2(self, u, v, p, iteration):
         sdf_vals,
         eps_body, self.eps,
         (comp.com_pos[:, 0], comp.com_pos[:, 1]),
-        (self.grids.X, self.grids.Y), self.h2,
+        (comp._grids.X, comp._grids.Y), self.h2,
         sdf_grad_mag_2d,
     )
     fv_x, fv_y = fv
@@ -602,7 +602,6 @@ def forces_method2_3d(self, u, v, w, p, iteration):
         and _stream_static is not None
     )
     if _use_kernel_post:
-        from lilytorch.src.kernels import streaming_sdf_forces_post_3d
         B = len(comp.bodies)
         out = getattr(self, '_kernel_post_out_buf_3d', None)
         if out is None or out.shape != (B, 12):

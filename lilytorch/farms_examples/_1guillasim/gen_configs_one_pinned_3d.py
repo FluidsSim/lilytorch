@@ -18,7 +18,7 @@ class SimConfig(BaseSimConfig):
         # ── Hardware ──────────────────────────────────────────────────
         self.compute_sdf = True
         self.convexify   = True
-        self.n_samples   = (200, 200)
+        # self.n_samples   = (200, 200)
         self.use_gpu     = True
         self.headless    = False
 

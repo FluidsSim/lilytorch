@@ -13,7 +13,7 @@ from lilytorch.src.kernels import RegularGridInterpolator
 from tqdm import tqdm
 
 from lilytorch.src.adv_diff import AdvDiffSolver
-from lilytorch.src.body import (body_from_yaml, _StaggeredGrids,
+from lilytorch.src.body import (body_from_yaml,
                                 _mu_normals_batched)
 from lilytorch.src import operations as ops
 from lilytorch.src.plotting import PlottingMixin
@@ -557,9 +557,6 @@ class FluidSolver(PlottingMixin):
         else:
             self.poisson_solverFFT = None
 
-        # ---- staggered grids (shared by all bodies) ------------------
-        self.grids = _StaggeredGrids(self.x, self.y, self.z)
-
         self.composite_body = body_from_yaml(
             self.device,
             self.x, self.y,
@@ -568,13 +565,8 @@ class FluidSolver(PlottingMixin):
             eps           = self.eps,
             custom_update = custom_update,
             starting_time = self.starting_time,
-            grids         = self.grids,
+            use_kernels   = self._use_kernels,
         )
-
-
-        self.X, self.Y = self.grids.X, self.grids.Y
-        if self.ndim == 3:
-            self.Z_grid = self.grids.Z_grid
 
         self.n_bodies = len(self.composite_body.bodies)
 
@@ -1525,7 +1517,7 @@ class FluidSolver(PlottingMixin):
     def step_(self, u, v, p, iteration, t, w_vel=None):
         self.composite_body.update(t, iteration, dt=self.dt)
         self._recompute_mu_normals()
-        self.sdf_properties = [[self.composite_body.sdf_val_u]]
+        # self.sdf_properties = [[self.composite_body.sdf_val_u]]
 
         if self.ndim == 2:
             (u, v, p) = self.fluid_step(u, v, p, self.dt)

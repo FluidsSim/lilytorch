@@ -234,7 +234,8 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--n_bodies_sweep", type=str, default="1,2,4",
+        "--n_bodies_sweep", type=str, default="1",
+        # "--n_bodies_sweep", type=str, default="1,2,4",
         help=(
             "(Driver only) Comma-separated list of body counts to sweep, "
             "e.g. '1,2,4,8'.  Default: '1,2,4'.  "
@@ -335,6 +336,18 @@ def _build_name_map(*objs) -> dict[int, str]:
             pass
 
     def _walk(obj, prefix: str = "") -> None:
+        # Handle plain dicts (e.g. _kernel_static_3d, _kernel_step,
+        # _stream_meta) whose tensor values are NOT reachable via vars().
+        if isinstance(obj, dict):
+            for key, val in obj.items():
+                full = (prefix + str(key)) if prefix else str(key)
+                _register(full, val)
+            return
+        # Handle lists/tuples (e.g. _dct_idx, _dct_twiddle in FFT Poisson).
+        if isinstance(obj, (list, tuple)):
+            for i, val in enumerate(obj):
+                _register(f"{prefix}[{i}]" if prefix else f"[{i}]", val)
+            return
         try:
             items = list(vars(obj).items())
         except TypeError:
@@ -343,25 +356,51 @@ def _build_name_map(*objs) -> dict[int, str]:
             full = (prefix + attr) if prefix else attr
             _register(full, val)
 
+    def _walk_sub(obj, prefix: str = "") -> None:
+        """Walk one level of sub-objects (both regular objects and dicts)."""
+        if isinstance(obj, dict):
+            iterator = obj.items()
+        else:
+            try:
+                iterator = vars(obj).items()
+            except TypeError:
+                return
+        for attr, sub in iterator:
+            if sub is None or torch.is_tensor(sub):
+                continue
+            _walk(sub, prefix=f"{prefix}{attr}.")
+            # One more level for dict-valued sub-objects (e.g. _fused_bc_cache)
+            # and for nested sub-objects of known deep structures.
+            if isinstance(sub, dict):
+                for k2, v2 in sub.items():
+                    if v2 is None or torch.is_tensor(v2):
+                        continue
+                    _walk(v2, prefix=f"{prefix}{attr}.{k2}.")
+
     for obj in objs:
         _walk(obj)
-        # also walk direct sub-objects of each top-level object
-        try:
-            for attr, sub in vars(obj).items():
-                if sub is None or torch.is_tensor(sub):
-                    continue
-                _walk(sub, prefix=f"{attr}.")
-        except TypeError:
-            pass
+        # also walk direct sub-objects of each top-level object, including
+        # dict-valued attributes like _kernel_static_3d / _kernel_step
+        _walk_sub(obj)
+        # one extra level for known deep sub-objects (Poisson / adv_diff
+        # solvers carry 3-level-deep caches with small auxiliary tensors)
+        _DEEP_ATTRS = ('poisson_solverFFT', 'poisson_solverMG',
+                       'adv_diff_solver', 'poisson_solver')
+        for deep_attr in _DEEP_ATTRS:
+            deep_sub = getattr(obj, deep_attr, None)
+            if deep_sub is not None:
+                _walk_sub(deep_sub, prefix=f"{deep_attr}.")
         # dive into composite_body.bodies[i] and their .sdf interpolator
         comp = getattr(obj, "composite_body", None) or getattr(
             getattr(obj, "fluid_solver", None), "composite_body", None)
         if comp is not None:
             _walk(comp, prefix="composite_body.")
+            _walk_sub(comp, prefix="composite_body.")
             bodies = getattr(comp, "bodies", []) or []
             for i, body in enumerate(bodies):
                 _walk(body, prefix=f"bodies[{i}].")
                 # one more level: e.g. body.sdf._F (RegularGridInterpolator)
+                # and body._stream_meta (dict with per-body kernel data)
                 for sub_attr in vars(body):
                     sub_val = getattr(body, sub_attr, None)
                     if sub_val is not None and not torch.is_tensor(sub_val):
@@ -444,7 +483,14 @@ def _tensor_census(top_k: int = 30,
                 continue  # skip torch.compile tracing artefacts
             stor   = obj.untyped_storage()
             ptr    = stor.data_ptr()
-            nbytes = stor.nbytes()
+            # Use nelement × element_size, NOT stor.nbytes().
+            # stor.nbytes() returns the full parent-storage size even for
+            # views/slices, causing massive double-counting when a slice
+            # (e.g. normal_x = _mu_pack[0]) outlives the parent tensor.
+            # nelement × element_size equals the representative tensor's
+            # actual data footprint, so the census total matches
+            # torch.cuda.memory_allocated().
+            nbytes = obj.nelement() * obj.element_size()
             if ptr not in unique or obj.nelement() > unique[ptr][1]:
                 unique[ptr] = (nbytes, obj.nelement(), list(obj.shape), str(obj.dtype))
         except Exception:
