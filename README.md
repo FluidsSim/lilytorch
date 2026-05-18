@@ -146,7 +146,7 @@ self.sponge = {
 | Module | Description |
 |---|---|
 | `solver.py` | Main `FluidSolver` class implementing the BDIM2 Navier–Stokes solver: grid setup, Heun / Euler time stepping, pressure projection, IBM forcing, force computation on immersed bodies, sponge / Carreau / Smagorinsky / yield-damping dispatchers. |
-| `body.py` | Immersed body representation via SDFs. Class hierarchy: `Body` → `BodyAnalytical`, `BodyMesh`, `BodyFishAnalytical`, `BodyFishExperimental`, plus composite wrappers for multi-link articulated models. Includes `body_from_yaml()` factory. |
+| `body.py` | Immersed body representation via SDFs. Only composite bodies are user-facing: `body_from_yaml()` accepts the `composite_analytical` and `composite_mesh` body types, which wrap the internal `BodyAnalytical`, `BodyMesh`, `BodyFishAnalytical`, and `BodyFishExperimental` building blocks into multi-link articulated models. |
 | `adv_diff.py` | Advection–diffusion solver for velocity transport. Supports implicit / explicit / QUICK / ABDQUICKEST / Adams–Bashforth schemes with Dirichlet / Neumann BCs. Optional Smagorinsky LES and Carreau non-Newtonian eddy-viscosity fields. |
 | `forces.py` | Hydrodynamic force / torque integrators (`forces_method1`, `forces_method2`, `forces_method2_3d`, plus the compiled / batched variants `_forces_shared_*`, `_forces_body_batch_*`). |
 | `extras.py` | Optional add-on physics: sponge layer, Smagorinsky LES, Carreau / Herschel-Bulkley, yield-stress damping, and the unified `_compute_nu_t` / `_compute_nu_rho_for_forces` dispatchers. |
@@ -165,9 +165,11 @@ self.sponge = {
 | `BDIMhandler.py` | **Unified** 2-D / 3-D FARMS↔lilytorch coupling layer. Reads MuJoCo body kinematics, drives `FluidSolver` per-step, and writes hydrodynamic forces back into `xfrc_applied`. A single class covers every animat (1guilla, pleurodeles, zebrafish, salamander, submarine, …) — examples *no longer* ship a per-folder copy. |
 | `kinematics.py` | Helpers for converting FARMS sensor frames to the per-body rotations / translations consumed by `BDIMhandler.update`. |
 | `extensions.py` | `FluidExtension` — FARMS `TaskExtension` subclass that initialises the fluid solver at episode start and applies hydrodynamic forces at each `before_step`. Also hosts `DataLogger` for HDF5 logging. |
-| `flow_viewer.py`, `flow_viewer_2d.py` | `FlowViewer` — FARMS `TaskExtension` that renders fluid fields (vorticity, pressure, velocity) as coloured spheres / 2-D tiles directly inside the MuJoCo viewer. See [FlowViewer](#flowviewer--in-viewer-flow-visualisation). |
-| `particle_viewer.py`, `native_body_colors.py`, `camera.py` | Viewer extras — particle-tracer overlay, per-body colouring, camera controllers. |
-| `control.py`, `gamepad.py` | Optional interactive controllers (keyboard, gamepad) for steering coupled simulations live. |
+| `flow_viewer.py`, `flow_viewer_2d.py` | `FlowViewer` — FARMS `TaskExtension` that renders fluid fields (vorticity, pressure, velocity) as coloured spheres (3-D) or 2-D tiles directly inside the MuJoCo viewer. See [FlowViewer](#flowviewer--in-viewer-flow-visualisation). |
+| `flow_viewer_2d_gpu.py` | GPU-accelerated 2-D flow overlay that uploads the field directly from CUDA tensors to an OpenGL texture, avoiding the CPU round-trip used by `flow_viewer_2d.py`. |
+| `flow_viewer_gl_hook.py` | `LD_PRELOAD` OpenGL interception shim (Python wrapper around an embedded C source) that injects flow textures into MuJoCo's passive viewer when the standard `user_scn` path is not available. |
+| `particle_viewer.py`, `native_body_colors.py`, `camera.py` | Viewer extras — Lagrangian particle-tracer overlay, per-body colouring, camera controllers. |
+| `gamepad.py` | Optional interactive gamepad controller (incl. paddling mode) for steering coupled simulations live. |
 | `gen_pool_sdf.py` | Generates SDF XML files defining rectangular pool arenas with collision walls for MuJoCo. |
 
 ### Utilities (`lilytorch/util/`)
@@ -339,49 +341,6 @@ python lilytorch/src/video_postprocess.py /path/to/run_dir --fields omega_z_3d -
 - **ffmpeg** is the preferred backend (H.264, concat demuxer, optional drawtext overlay). If ffmpeg is not installed, the script falls back to OpenCV `VideoWriter`.
 - Output files are saved alongside the PNG sub-folders inside the run directory (e.g. `omega_z_3d.mp4` or `omega_z_3d.gif`).
 - GIF output uses a two-pass palette approach via ffmpeg for high quality. If ffmpeg is unavailable, the script falls back to Pillow.
-
-## Projected PIV-Style Curl From HDF5
-
-When you want a top-view curl movie that is reconstructed from the full recorded 3-D velocity volume, use `projected_field_postprocess.py` instead of `video_postprocess.py`.
-
-The projected-field tool reads `u`, `v`, `w` from `fields.h5`, collapses the in-plane velocity through a user-selected depth slab, computes a 2-D curl on that projected velocity field, writes PNG frames into a dedicated folder, and then encodes them into MP4 or GIF.
-
-### Example
-
-```bash
-python lilytorch/src/projected_field_postprocess.py /path/to/run_dir \
-    --camera-axis -z \
-    --projection-mode gaussian \
-    --zlim -0.04 0.04 \
-    --focus-depth 0.0 \
-    --depth-sigma 0.015 \
-    --xlim -0.8 0.6 \
-    --ylim -0.25 0.25 \
-    --output-tag top_piv
-```
-
-### Useful Parameters
-
-| Flag | Meaning |
-|---|---|
-| `--camera-axis` | Orthographic viewing direction (`-z` is the standard top view) |
-| `--xlim`, `--ylim` | Camera window in the image plane |
-| `--zlim` | Depth slab to include in the projection |
-| `--projection-mode` | How the transparent-water depth is collapsed (`mean`, `sum`, `max_abs`, `gaussian`) |
-| `--coarsen` | Block-average the projected velocity before curl to mimic a larger interrogation window |
-| `--velocity-sigma` | Gaussian smoothing on projected velocity before curl; this is the main control for suppressing tiny vortices |
-| `--curl-sigma` | Optional extra smoothing on the final curl image |
-| `--focus-depth`, `--depth-sigma` | Depth emphasis for Gaussian weighting |
-| `--camera-roll` | In-plane image rotation after projection |
-| `--flip-horizontal`, `--flip-vertical` | Image mirroring for camera matching |
-| `--output-tag` | Suffix for the generated frame folder and video |
-| `--no-video` | Keep PNG frames only, without encoding a movie |
-
-### Notes
-
-- This tool is intentionally separate from `video_postprocess.py`: `video_postprocess.py` only stitches existing frame folders into videos.
-- For matching an experimental top camera, the most important controls are the view axis, the physical crop limits, the depth slab, and the projection rule. Those are the parameters that change which fluid motion is actually visible in the synthetic movie.
-- If you see many more tiny vortices than in the experiment, first increase `--velocity-sigma` and then `--coarsen`. That is the right direction physically, because real PIV returns an interrogation-window average before vorticity is computed.
 
 ## FlowViewer — In-Viewer Flow Visualisation
 

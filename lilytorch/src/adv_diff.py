@@ -33,8 +33,34 @@ def median(a, b, c):
 
 
 def quick(u, c, d):
-    """QUICK scheme -- 3rd-order, median-based (WaterLily default)."""
-    return median((5 * c + 2 * d - u) / 6, c, median(10 * c - 9 * u, c, d))
+    """QUICK scheme -- 3rd-order.
+
+    Uses in-place operations to keep simultaneous intermediate tensors at 3
+    (vs. the 5-6 created by the original nested ``median`` calls), cutting
+    the peak transient allocation roughly in half at large grid sizes.
+    """
+    # inner_median = median(10*c - 9*u, c, d)
+    t  = 10.0 * c - 9.0 * u       # owned temp #1
+    lo = torch.minimum(t, c)       # owned temp #2  (= min(t, c))
+    t.maximum_(c)                  # t = max(t, c), in-place
+    torch.minimum(t, d, out=t)     # t = min(max(t, c), d), in-place
+    lo.maximum_(t)                 # lo = median(10c-9u, c, d)
+    del t                          # free; lo holds inner_median
+
+    # outer = (5*c + 2*d - u) / 6
+    outer = 5.0 * c
+    outer.add_(d, alpha=2.0)       # in-place: 5c + 2d
+    outer.add_(u, alpha=-1.0)      # in-place: 5c + 2d - u
+    outer.div_(6.0)                # in-place: / 6
+
+    # result = median(outer, c, lo)  -- lo is inner_median
+    # Peak: lo + outer + lo2 = 3 tensors
+    lo2 = torch.minimum(outer, c)
+    outer.maximum_(c)
+    torch.minimum(outer, lo, out=outer)
+    lo2.maximum_(outer)
+    del outer, lo
+    return lo2
 
 
 def van_leer(u, c, d):
@@ -56,37 +82,53 @@ def _tvd_face(c, d, psi):
 
 
 def abdquickest(u, c, d, C=0.1):
-    """ADBQUICKEST scheme -- 3rd-order TVD, Courant-number dependent."""
-    C2 = C * C
-    denom = d - c
-    rf = (c - u) / (denom + 1e-30)
-    psi = torch.clamp(
-        torch.minimum(
-            2.0 * rf * (1.0 - C),
-            torch.minimum(
-                (2.0 + C2 - 3.0 * C + (1.0 - C2) * rf) / (3.0 - 3.0 * C),
-                torch.full_like(rf, 2.0 * (1.0 - C)),
-            ),
-        ),
-        min=0.0,
-    )
+    """ADBQUICKEST scheme -- 3rd-order TVD, Courant-number dependent.
+
+    Refactored to keep peak simultaneous tensor count at 4 (was 5) by
+    replacing ``torch.full_like(rf, C_upper)`` with a scalar clamp and
+    sequencing A / B so only one extra tensor beyond {denom, rf, psi} is
+    live at the peak moment.  Saves ~1 full-grid tensor (~0.5 GiB at 512³).
+    """
+    C2      = C * C
+    C_upper = 2.0 * (1.0 - C)                             # scalar
+
+    denom = d - c                                          # owned temp #1
+    rf    = (c - u) / (denom + 1e-30)                     # owned temp #2
+
+    # Compute psi = clamp(min(A, B, C_upper), 0)
+    #   A = C_upper * rf
+    #   B = [(2+C2-3C) + (1-C2)*rf] / (3-3C)
+    # Order: B → scalar-clamp at C_upper → min with A → scalar-clamp at 0
+    # Peak: denom + rf + psi + A_temp = 4 tensors (vs 5 in the original).
+    _scale  = (1.0 - C2) / (3.0 - 3.0 * C)
+    _offset = (2.0 + C2 - 3.0 * C) / (3.0 - 3.0 * C)
+    psi  = rf * _scale                                     # owned temp #3
+    psi += _offset                                         # in-place: psi = B
+    psi.clamp_(max=C_upper)                                # in-place: min(B, C_upper)
+    torch.minimum(psi, rf * C_upper, out=psi)              # rf*C_upper = temp #4 (brief)
+    del rf
+    psi.clamp_(min=0.0)
+
     return torch.where(denom.abs() < 1e-30, c, _tvd_face(c, d, psi))
 
 
 def cubista(u, c, d):
-    """CUBISTA scheme -- 2nd-order TVD (Alves, Oliveira & Pinho, 2003)."""
+    """CUBISTA scheme -- 2nd-order TVD (Alves, Oliveira & Pinho, 2003).
+
+    Same tensor-sequencing improvement as ``abdquickest``: scalar clamp
+    replaces ``torch.full_like(rf, 1.5)`` to avoid a 5th simultaneous
+    tensor at the peak moment.
+    """
     denom = d - c
-    rf = (c - u) / (denom + 1e-30)
-    psi = torch.clamp(
-        torch.minimum(
-            1.5 * rf,
-            torch.minimum(
-                0.75 * rf + 0.25,
-                torch.full_like(rf, 1.5),
-            ),
-        ),
-        min=0.0,
-    )
+    rf    = (c - u) / (denom + 1e-30)
+
+    psi  = 0.75 * rf                                       # owned temp
+    psi += 0.25                                            # in-place: 0.75*rf + 0.25
+    psi.clamp_(max=1.5)                                    # in-place: min(0.75*rf+0.25, 1.5)
+    torch.minimum(psi, rf * 1.5, out=psi)                  # min with 1.5*rf (brief temp)
+    del rf
+    psi.clamp_(min=0.0)
+
     return torch.where(denom.abs() < 1e-30, c, _tvd_face(c, d, psi))
 
 
@@ -293,12 +335,15 @@ class AdvDiffSolver:
         S   = lambda s: _sl(p.ndim, D, s)
 
         # interior faces (full 3-point stencil available)
+        # Compute B1 and B2 as separate named tensors so cond, B1, B2 can
+        # be freed immediately after torch.where, reducing the live-tensor
+        # count at the torch.cat step.
         fv_in = fv[S(slice(1, -1))]
-        flux_in = torch.where(
-            fv_in > 0,
-            fv_in * lam(p[S(slice(None, -3))], p[S(slice(1, -2))], p[S(slice(2, -1))]),
-            fv_in * lam(p[S(slice(3, None))],  p[S(slice(2, -1))], p[S(slice(1, -2))]),
-        )
+        cond  = fv_in > 0
+        B1    = fv_in * lam(p[S(slice(None, -3))], p[S(slice(1, -2))], p[S(slice(2, -1))])
+        B2    = fv_in * lam(p[S(slice(3, None))],  p[S(slice(2, -1))], p[S(slice(1, -2))])
+        flux_in = torch.where(cond, B1, B2)
+        del cond, B1, B2
 
         # lo boundary face — CDS fallback for positive flow
         fv_lo = fv[S(slice(0, 1))]
@@ -412,7 +457,15 @@ class AdvDiffSolver:
         Accepts (u, v) in 2-D or (u, v, w) in 3-D.
         """
         ndim    = self.ndim
-        vel_new = [v.clone() for v in vel]
+        # Lazy clone: start with aliases of the input velocity components.
+        # We replace ``vel_new[i]`` with a real clone only at the END of
+        # iteration ``i`` (just before mutating it via ``+= rhs``).  During
+        # iteration i's _flux peak, only the i already-cloned earlier
+        # components are alive; the not-yet-mutated components are still
+        # aliases of ``vel`` (the persistent u0/v0/w0) and cost zero extra
+        # memory.  Net peak saving on 512³ fp32: (ndim-1) × ~543 MB ≈ 1 GiB
+        # for 3-D vs the previous ``vel_new = [v.clone() for v in vel]``.
+        vel_new = list(vel)
         inner   = _inner(ndim)
 
         for i in range(ndim):
@@ -427,11 +480,20 @@ class AdvDiffSolver:
                 fv = self._face_vel(vel, i, d)
                 p  = self._field_for_flux(vel[i], d, ndim)
                 F  = self._flux(fv, p, d)
-                rhs = rhs + self._dt_dh[d] * (
-                    F[_sl(ndim, d, slice(None, -1))]
-                    - F[_sl(ndim, d, slice(1, None))]
-                )
+                # In-place accumulation: rhs += dt_dh * (F[:-1] - F[1:]).
+                # Replaces ``rhs = rhs + dt_dh * (...)`` which transiently held
+                # the old rhs, the (F[:-1]-F[1:]) temp, the (dt_dh*(...)) temp,
+                # and the new rhs at the same time.
+                F_diff = (F[_sl(ndim, d, slice(None, -1))]
+                          - F[_sl(ndim, d, slice(1, None))])
+                rhs.add_(F_diff, alpha=float(self._dt_dh[d]))
+                del fv, F, F_diff  # free before next d-iteration to avoid stacking
+            # NOW materialise the clone of vel[i] — we mutate it immediately.
+            # The clone happens AFTER the d-loop peak, so it never coexists
+            # with the scheme's transient face-grid temps.
+            vel_new[i] = vel[i].clone()
             vel_new[i][inner] += rhs
+            del rhs  # free this component's rhs before the next i-iteration
 
         return tuple(vel_new)
 

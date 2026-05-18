@@ -53,6 +53,68 @@ structure should be as follows: BDIMhandler should have a compute a body update
 Review options and propose what to do. This should have a careful modifications in all the examples scipts in farms_examples/.
 - Polish the repository, review and correct outdated documentation, also in the docs/ folder.
 
+# MEMORY OPTIMIZATION (follow-up after May 2026 memory analysis):
+Current state at 512³ fp32 kernel-mode, 1 body, multigrid:
+- persistent baseline: 4.06 GiB (u0/v0/w0/p0/sdf_val + _ch/_cv/_cw_persist)
+- peak alloc during step: 9.23 GiB
+- peak reserved: 10.01 GiB
+- nvidia-smi peak: 10.30 GiB
+The all-time peak (9.23 GiB) is set by the **multigrid V-cycle inside project()** (9.02 GiB
+on its own, +0.22 GiB from post-project set_BCs/forces). Adv-diff is close second at 8.82 GiB
+during the scheme function (`abdquickest`/`quick`) inside `_flux`. Kernel A's full-grid
+sdf/body temps reach only 8.63 GiB → already below adv-diff and multigrid peaks.
+
+## Tier 1 — Python-only (each <4 hours, low risk)
+- [ ] **T1a Inline `_tvd_face` into `abdquickest`/`cubista` + chain remaining temps in-place.**
+  Saves ~0.5 GiB peak inside the scheme function. Bit-exact testable. Files: `lilytorch/src/adv_diff.py`.
+- [ ] **T1b Free `self.div` immediately after `_poisson_solve` returns** (it's only read once
+  for the RHS, never used after). Saves ~0.5 GiB transient peak. File: `lilytorch/src/solver.py:project()`.
+- [ ] **T1c Consolidate `_compute_variable_density_coefficients` 2-D/3-D return paths** so the 2-D
+  `ch_cc` temp can be dropped earlier on the FFT Poisson path. Marginal effect in 3-D.
+
+Expected combined: ~1 GiB off peak → **~8 GiB peak alloc, ~9.2 GB nvidia-smi.**
+
+## Tier 2 — Targeted CUDA work (1-3 days each)
+- [ ] **T2a Fused CUDA kernel for `_flux`.** One kernel reads `fv` + 4 cells of `p`, computes the
+  QUICK/ABDQUICKEST stencil in registers, writes one flux value. Drops
+  `denom, rf, psi, B1, B2, cond, flux_in, cat output` materialisation entirely. **~3 GiB peak**
+  (adv-diff drops 8.82 → ~5.5 GiB) and 5-10× speedup as a side effect. Only pays off when
+  combined with multigrid optimisation (T3 below), otherwise multigrid still sets the peak.
+- [ ] **T2b Dirty-AABB-sized Kernel-A temps** (the originally-deferred #1 from the May session).
+  `sdf_*_tmp` and `b*_tmp` go from full-grid (6 × ~543 MB = 3.26 GiB) to AABB+halo (~10 MB
+  for one fish at 512³). Needs CUDA kernel changes in `streaming_sdf.cu` (init, min_rho,
+  decode, BDIM kernels — AABB-local indexing with 1-cell halo handling). Saves ~3 GiB at
+  marker 4 `cur` but **doesn't move the peak** until T2a is done.
+- [ ] **T2c Two-pass Kernel B for `primes` elimination.** Write BDIM result to dirty-AABB-sized
+  scratch (~0.5 MB), then copy back to `u0[AABB]`. Lets us `del primes` immediately after
+  `self.u0.copy_(primes[0])`. Saves 1.5 GiB at marker 4 `cur`, **no peak movement until T2a.**
+
+## Tier 3 — Multigrid memory (each ~1 day)
+- [ ] **T3a Eliminate the `div` field.** Currently `divergence(u, v, w)` returns a full-grid
+  tensor stored on `self.div`. Inline it into the multigrid RHS computation so no full-grid
+  `div` tensor exists. Saves 543 MB persistent + ~0.5 GiB transient.
+- [ ] **T3b Preallocate V-cycle coarse-level pyramid.** `_vcycle_rbgs_3d` currently calls
+  `torch.zeros(coarse_shape, …)` inside the recursion (one alloc per level per V-cycle).
+  Allocate a static pyramid at `__init__` and reuse. Saves ~0.5-1 GiB transient at fine level.
+- [ ] **T3c Try `solve_mgcg` with `precond_vcycles=1`.** MGCG converges with fewer V-cycle calls
+  and the working set inside CG is smaller (no need to keep restricted face arrays alive across
+  recursion). Already supported via `poisson_method="mgcg"` — just benchmark and decide.
+
+## Tier 4 — Bigger architectural (1+ week)
+- [ ] **T4a fp16 SDF + body-vel** for kernel-mode temps. Adv-diff and project stay fp32.
+  Saves ~1.5 GiB persistent (sdf_val) + ~1.5 GiB transient (if combined with T2b).
+- [ ] **T4b Mixed-precision velocity fields.** fp16 storage for u0/v0/w0, fp32 compute.
+  ~1 GiB persistent + ~0.5 GiB transient. Needs careful BDIM2 + multigrid stability checks.
+- [ ] **T4c Try `--poisson_compile` flag.** CUDA-graph capture of the V-cycle. Mostly helps
+  allocator pool fragmentation; effect on peak varies — just measure.
+
+## Recommended sequence
+1. T1a → ~8.7 GiB peak (free, an hour).
+2. T3a + T3b → ~7.5-8 GiB peak (half-day, eliminates multigrid as the limiting factor).
+3. Stop and remeasure. If headroom is enough, stop here.
+4. Else T2a (fused `_flux` kernel) → ~5.5 GiB peak + adv-diff speedup. Then T2b + T2c become
+   the new limiting factors.
+
 # LOW PRIORITY:
 - Can advection/poisson solvers be improved? I.e. by implementing a cuda/c++ kernel instead of torch.compile?
 - Test an analytical 2d swimmer simulation of the salamander swimming in 2d (use the control.py and gamepad.py extension and figure out how to set it up)

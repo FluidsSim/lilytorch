@@ -2550,7 +2550,15 @@ class MultiAnimatBodies(Body):
         gs = self.grid_shape
         # Output fields — filled by streaming union in update() or
         # BDIMhandler3D.update().  No (nbodies, *gs) stacks needed.
-        self.sdf_val   = torch.zeros(gs, device=device, dtype=self.dtype)
+        # Initialised to the SDF sentinel _FAR=1e4 (i.e. "outside body
+        # everywhere") rather than zeros.  This lets BDIMhandler restrict
+        # the first-step "dirty AABB" (the region reset to _FAR + recomputed
+        # by Kernel A) to only the bodies' current footprint instead of the
+        # whole grid — which on a 512³ run shrinks the int64 key buffers
+        # from 4×1 GiB = 4 GiB to a few MB.  Cells the bodies never visit
+        # keep their _FAR value, which is the correct "outside body" answer
+        # for the BDIM stencil.
+        self.sdf_val   = torch.full(gs, 1e4, device=device, dtype=self.dtype)
         # In kernel mode the staggered face-SDF and rigid-body face-velocity
         # tensors are per-step temporaries owned by FluidSolver.fluid_step —
         # they live only between Kernel A (streaming SDF) and Kernel B

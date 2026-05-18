@@ -235,11 +235,13 @@ __global__ void streaming_sdf_init_keys_3d_kernel(
     const int rem = local / dAk;
     const int dj = rem % dAj;
     const int di = rem / dAj;
+    // Global flat index for reading SDF tensors (full-grid layout).
     const int g  = (di0 + di) * Ngy * Ngz + (dj0 + dj) * Ngz + (dk0 + dk);
-    key_cc[g] = pack_sdf_body_key(sdf_cc[g], B_sentinel);
-    key_u [g] = pack_sdf_body_key(sdf_u [g], B_sentinel);
-    key_v [g] = pack_sdf_body_key(sdf_v [g], B_sentinel);
-    key_w [g] = pack_sdf_body_key(sdf_w [g], B_sentinel);
+    // AABB-local flat index for writing key arrays (dirty_vol-sized buffer).
+    key_cc[local] = pack_sdf_body_key(sdf_cc[g], B_sentinel);
+    key_u [local] = pack_sdf_body_key(sdf_u [g], B_sentinel);
+    key_v [local] = pack_sdf_body_key(sdf_v [g], B_sentinel);
+    key_w [local] = pack_sdf_body_key(sdf_w [g], B_sentinel);
 }
 
 // Decode kernel: scatter winning ``(s, body_id)`` back to ``sdf_*`` and
@@ -347,7 +349,11 @@ __global__ void streaming_sdf_min_rho_3d_multi_kernel(
     uint64_t* __restrict__ key_u,
     uint64_t* __restrict__ key_v,
     uint64_t* __restrict__ key_w,
-    const int interp_method)
+    const int interp_method,
+    // Dirty AABB origin and stride for AABB-local key indexing.
+    // key arrays are sized dirty_Ai*dirty_Aj*dirty_Ak (not full Ngrid).
+    const int dirty_i0, const int dirty_j0, const int dirty_k0,
+    const int dirty_Aj, const int dirty_Ak)
 {
     const int b     = blockIdx.y;
     const int local = blockIdx.x * blockDim.x + threadIdx.x;
@@ -369,7 +375,8 @@ __global__ void streaming_sdf_min_rho_3d_multi_kernel(
     const int i  = i0 + di;
     const int j  = j0 + dj;
     const int k  = k0 + dk;
-    const int g_idx = (i * Ngy + j) * Ngz + k;
+    // AABB-local flat index into the dirty_vol-sized key buffers.
+    const int g_local = ((i - dirty_i0) * dirty_Aj + (j - dirty_j0)) * dirty_Ak + (k - dirty_k0);
 
     const scalar_t* F  = F_flat + F_offsets[b];
     const int Mx = (int)body_shapes[b*3 + 0];
@@ -402,25 +409,25 @@ __global__ void streaming_sdf_min_rho_3d_multi_kernel(
     const scalar_t s_cc = sdf_sample_dispatch(
         interp_method, F, Mx, My, Mz, bx0, by0, bz0, idx_, idy_, idz_,
         bxq, byq, bzq);
-    atomicMin((unsigned long long*)&key_cc[g_idx],
+    atomicMin((unsigned long long*)&key_cc[g_local],
               (unsigned long long)pack_sdf_body_key(s_cc, b));
 
     const scalar_t s_u = sdf_sample_dispatch(
         interp_method, F, Mx, My, Mz, bx0, by0, bz0, idx_, idy_, idz_,
         bxq+du_x, byq+du_y, bzq+du_z);
-    atomicMin((unsigned long long*)&key_u[g_idx],
+    atomicMin((unsigned long long*)&key_u[g_local],
               (unsigned long long)pack_sdf_body_key(s_u, b));
 
     const scalar_t s_v = sdf_sample_dispatch(
         interp_method, F, Mx, My, Mz, bx0, by0, bz0, idx_, idy_, idz_,
         bxq+dv_x, byq+dv_y, bzq+dv_z);
-    atomicMin((unsigned long long*)&key_v[g_idx],
+    atomicMin((unsigned long long*)&key_v[g_local],
               (unsigned long long)pack_sdf_body_key(s_v, b));
 
     const scalar_t s_w = sdf_sample_dispatch(
         interp_method, F, Mx, My, Mz, bx0, by0, bz0, idx_, idy_, idz_,
         bxq+dw_x, byq+dw_y, bzq+dw_z);
-    atomicMin((unsigned long long*)&key_w[g_idx],
+    atomicMin((unsigned long long*)&key_w[g_local],
               (unsigned long long)pack_sdf_body_key(s_w, b));
 }
 
@@ -742,10 +749,11 @@ __global__ void streaming_sdf_decode_keys_rho_3d_kernel(
     const int k  = dk0 + dk;
     const int g  = i * Ngy * Ngz + j * Ngz + k;
 
-    const uint64_t kc = key_cc[g];
-    const uint64_t ku = key_u [g];
-    const uint64_t kv = key_v [g];
-    const uint64_t kw = key_w [g];
+    // Key buffers use AABB-local flat indexing (size = dirty_vol).
+    const uint64_t kc = key_cc[local];
+    const uint64_t ku = key_u [local];
+    const uint64_t kv = key_v [local];
+    const uint64_t kw = key_w [local];
 
     const uint32_t bc = unpack_body_id(kc);
     const uint32_t bu = unpack_body_id(ku);
@@ -826,10 +834,11 @@ __global__ void streaming_sdf_decode_keys_stag_3d_kernel(
     const int k  = dk0 + dk;
     const int g  = i * Ngy * Ngz + j * Ngz + k;
 
-    const uint64_t kc = key_cc[g];
-    const uint64_t ku = key_u [g];
-    const uint64_t kv = key_v [g];
-    const uint64_t kw = key_w [g];
+    // Key buffers use AABB-local flat indexing (size = dirty_vol).
+    const uint64_t kc = key_cc[local];
+    const uint64_t ku = key_u [local];
+    const uint64_t kv = key_v [local];
+    const uint64_t kw = key_w [local];
 
     const uint32_t bc = unpack_body_id(kc);
     const uint32_t bu = unpack_body_id(ku);
@@ -882,6 +891,7 @@ void streaming_sdf_stag_3d_multi_cuda(
     const int64_t max_vol_per_body,
     at::Tensor sdf_cc, at::Tensor sdf_u, at::Tensor sdf_v, at::Tensor sdf_w,
     at::Tensor body_u, at::Tensor body_v, at::Tensor body_w,
+    at::Tensor key_cc_t, at::Tensor key_u_t, at::Tensor key_v_t, at::Tensor key_w_t,
     const int64_t interp_method,
     const int64_t dirty_i0, const int64_t dirty_j0, const int64_t dirty_k0,
     const int64_t dirty_Ai, const int64_t dirty_Aj, const int64_t dirty_Ak)
@@ -893,15 +903,10 @@ void streaming_sdf_stag_3d_multi_cuda(
     const int Ngx = (int)gx.numel();
     const int Ngy = (int)gy.numel();
     const int Ngz = (int)gz.numel();
-    const int64_t Ngrid = (int64_t)Ngx * Ngy * Ngz;
     const int blockSize = (max_vol_per_body <= 128) ? 32
                         : (max_vol_per_body <= 4096) ? 128 : 256;
-
-    auto key_opts = at::TensorOptions().dtype(at::kLong).device(sdf_cc.device());
-    auto key_cc_t = at::empty({Ngrid}, key_opts);
-    auto key_u_t  = at::empty({Ngrid}, key_opts);
-    auto key_v_t  = at::empty({Ngrid}, key_opts);
-    auto key_w_t  = at::empty({Ngrid}, key_opts);
+    // key_cc_t, key_u_t, key_v_t, key_w_t are pre-allocated int64 buffers
+    // of size >= Ngx*Ngy*Ngz, passed in from Python to avoid per-call allocs.
 
     const int64_t dirty_vol = dirty_Ai * dirty_Aj * dirty_Ak;
 
@@ -934,7 +939,9 @@ void streaming_sdf_stag_3d_multi_cuda(
                 (uint64_t*)key_u_t.data_ptr<int64_t>(),
                 (uint64_t*)key_v_t.data_ptr<int64_t>(),
                 (uint64_t*)key_w_t.data_ptr<int64_t>(),
-                (int)interp_method);
+                (int)interp_method,
+                (int)dirty_i0, (int)dirty_j0, (int)dirty_k0,
+                (int)dirty_Aj, (int)dirty_Ak);
 
         streaming_sdf_decode_keys_stag_3d_kernel<scalar_t>
             <<<initBlocks, initBlock, 0, stream>>>(
@@ -989,7 +996,12 @@ __device__ __forceinline__ void bdim_one_axis_3d(
     const int Ngx, const int Ngy, const int Ngz,
     const int i, const int j, const int k,
     scalar_t* __restrict__ phi_out,
-    scalar_t* __restrict__ c_out)
+    scalar_t* __restrict__ c_out,
+    const int c_stride_i,
+    const int c_stride_j,
+    const int c_hi_i,
+    const int c_hi_j,
+    const int c_hi_k)
 {
     const int stride_i = Ngy * Ngz;
     const int stride_j = Ngz;
@@ -1082,7 +1094,13 @@ __device__ __forceinline__ void bdim_one_axis_3d(
     const scalar_t nd = nx * ddx + ny * ddy + nz * ddz;
 
     phi_out[g] = mu0 * diff_c + b_c + mu1 * nd;
-    c_out[g]   = dt / (rho_body + (rho_f - rho_body) * mu0);
+    // Write coefficient into the face-grid-shaped c_out tensor.
+    // The face grid excludes ghost cells: valid range is [1, c_hi_*] in
+    // padded coordinates; the face-grid index is (i-1, j-1, k-1).
+    if (i >= 1 && j >= 1 && k >= 1 && i <= c_hi_i && j <= c_hi_j && k <= c_hi_k) {
+        c_out[(i - 1) * c_stride_i + (j - 1) * c_stride_j + (k - 1)] =
+            dt / (rho_body + (rho_f - rho_body) * mu0);
+    }
 }
 
 template <typename scalar_t>
@@ -1122,18 +1140,27 @@ __global__ void bdim_vardens_3d_kernel(
     const int j = dj0 + dj;
     const int k = dk0 + dk;
 
+    // ch: x-face grid (Ngx-1, Ngy-2, Ngz-2), strides ((Ngy-2)*(Ngz-2), Ngz-2, 1)
     bdim_one_axis_3d<scalar_t>(
         u_prime, sdf_u, body_u,
         eps, rho_body, rho_f, dt, inv_2h,
-        Ngx, Ngy, Ngz, i, j, k, u0, ch);
+        Ngx, Ngy, Ngz, i, j, k, u0, ch,
+        (Ngy - 2) * (Ngz - 2), (Ngz - 2),
+        Ngx - 1, Ngy - 2, Ngz - 2);
+    // cv: y-face grid (Ngx-2, Ngy-1, Ngz-2), strides ((Ngy-1)*(Ngz-2), Ngz-2, 1)
     bdim_one_axis_3d<scalar_t>(
         v_prime, sdf_v, body_v,
         eps, rho_body, rho_f, dt, inv_2h,
-        Ngx, Ngy, Ngz, i, j, k, v0, cv);
+        Ngx, Ngy, Ngz, i, j, k, v0, cv,
+        (Ngy - 1) * (Ngz - 2), (Ngz - 2),
+        Ngx - 2, Ngy - 1, Ngz - 2);
+    // cw: z-face grid (Ngx-2, Ngy-2, Ngz-1), strides ((Ngy-2)*(Ngz-1), Ngz-1, 1)
     bdim_one_axis_3d<scalar_t>(
         w_prime, sdf_w, body_w,
         eps, rho_body, rho_f, dt, inv_2h,
-        Ngx, Ngy, Ngz, i, j, k, w0, cw);
+        Ngx, Ngy, Ngz, i, j, k, w0, cw,
+        (Ngy - 2) * (Ngz - 1), (Ngz - 1),
+        Ngx - 2, Ngy - 2, Ngz - 1);
 }
 
 void bdim_vardens_3d_cuda(
@@ -1228,15 +1255,15 @@ void streaming_sdf_min_rho_3d_multi_cuda(
     const int blockSize = (max_vol_per_body <= 128) ? 32
                         : (max_vol_per_body <= 4096) ? 128 : 256;
 
-    // Key arrays at full-grid size so global indexing is preserved.
-    // Only the dirty sub-block is written by init/decode kernels.
+    // Key arrays sized to dirty_vol (AABB-local indexing).
+    // Only dirty sub-block cells are written; AABB-local flat index avoids
+    // allocating O(Ngrid) buffers when dirty_vol << Ngrid.
     auto key_opts = at::TensorOptions().dtype(at::kLong).device(sdf_cc.device());
-    auto key_cc_t = at::empty({Ngrid}, key_opts);
-    auto key_u_t  = at::empty({Ngrid}, key_opts);
-    auto key_v_t  = at::empty({Ngrid}, key_opts);
-    auto key_w_t  = at::empty({Ngrid}, key_opts);
-
     const int64_t dirty_vol = dirty_Ai * dirty_Aj * dirty_Ak;
+    auto key_cc_t = at::empty({dirty_vol}, key_opts);
+    auto key_u_t  = at::empty({dirty_vol}, key_opts);
+    auto key_v_t  = at::empty({dirty_vol}, key_opts);
+    auto key_w_t  = at::empty({dirty_vol}, key_opts);
 
     AT_DISPATCH_FLOATING_TYPES(F_flat.scalar_type(), "streaming_sdf_min_rho_3d_multi_cuda", [&] {
         const int initBlock  = 256;
@@ -1267,7 +1294,9 @@ void streaming_sdf_min_rho_3d_multi_cuda(
                 (uint64_t*)key_u_t.data_ptr<int64_t>(),
                 (uint64_t*)key_v_t.data_ptr<int64_t>(),
                 (uint64_t*)key_w_t.data_ptr<int64_t>(),
-                (int)interp_method);
+                (int)interp_method,
+                (int)dirty_i0, (int)dirty_j0, (int)dirty_k0,
+                (int)dirty_Aj, (int)dirty_Ak);
 
         streaming_sdf_decode_keys_rho_3d_kernel<scalar_t>
             <<<initBlocks, initBlock, 0, stream>>>(

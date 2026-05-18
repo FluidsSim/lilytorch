@@ -1149,6 +1149,13 @@ class PlottingMixin:
                 return self.check_termination(iteration, u, v, p)
             return False
 
+        # Invalidate vorticity cache so each frame recomputes it from the
+        # current velocity tensors.  The cache key is id(u), which stays
+        # constant when project() modif ies u in-place (kernel mode), so
+        # without this reset the stale step-0 zeros would be returned
+        # for every frame.
+        self._vort_cache_id = -1
+
         # ---- snapshot tensors to CPU numpy *once* (still on main thread
         #      so the GPU transfer is overlapped with the previous kernel)
         # We clone/detach to decouple from the live computation graph.

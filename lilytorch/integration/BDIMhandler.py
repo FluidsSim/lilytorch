@@ -24,7 +24,6 @@ from scipy.spatial.transform import Rotation
 from lilytorch.src.solver import FluidSolver
 from lilytorch.src.body import (rotate_grid_2d, rotate_grid_3d,
                                 _rotate_grid_3d_compiled)
-from lilytorch.src.kernels import streaming_sdf_min_rho_2d_multi
 
 import torch
 
@@ -1179,9 +1178,17 @@ class BDIMhandler:
             d_j0 = min(_p_j0, _curr_uj0); d_j1 = max(_p_j1, _curr_uj1)
             d_k0 = min(_p_k0, _curr_uk0); d_k1 = max(_p_k1, _curr_uk1)
         else:
-            # First step: use full grid to be safe.
-            d_i0 = d_j0 = d_k0 = 0
-            d_i1, d_j1, d_k1 = gs[0], gs[1], gs[2]
+            # First step: there is no previous body footprint to union with.
+            # Use the current union AABB only — safe because comp.sdf_val is
+            # initialised to _FAR=1e4 ("outside body everywhere") in
+            # CompositeBody.__init__, so cells outside this AABB already hold
+            # the correct "no body here" value.  Using the current AABB
+            # (instead of the full grid) shrinks the dirty_vol-sized int64
+            # key buffers in Kernel A by ~1000× for a single-body scene at
+            # 512³, eliminating the ~4 GiB first-step memory spike.
+            d_i0, d_i1 = _curr_ui0, _curr_ui1
+            d_j0, d_j1 = _curr_uj0, _curr_uj1
+            d_k0, d_k1 = _curr_uk0, _curr_uk1
 
         # Reset running-min CC SDF in the dirty sub-block (O(dirty_vol) not
         # O(N)).  Phase I removed the persistent staggered SDF and body
@@ -1382,24 +1389,11 @@ class BDIMhandler:
 
         h_grid = float(comp.h)
 
-        # ── Lagged CC normals kept for compatibility ──────
-        # The combined 2-D Phase-D kernel reads ``fs.normal_x/normal_y`` at
-        # the previous step's SDF (true lagged-normals BDIM).  Before
-        # the running-min fields are wiped to ``_FAR`` below we must
-        # seed these from the *current* (= previous-step) ``comp.sdf_val``
-        # if they have not yet been populated by ``_recompute_mu_normals``.
-        # Computing them after the reset would feed the kernel normals
-        # taken from a flat ``_FAR`` field — the gradients vanish, the
-        # delta-band integrand picks an arbitrary direction, and the 2-D
-        # forces oscillate.  This is the analogue of the same
-        # initialization performed in ``_update_3d_streaming_multi``
-        # before the 3-D SDF reset.
-        if fs._use_kernels:
-            if (
-                getattr(fs, 'normal_x', None) is None
-                or getattr(fs, 'normal_y', None) is None
-            ):
-                (fs.normal_x, fs.normal_y) = comp.compute_normals(comp.sdf_val)
+        # Phase I removed the persistent CC normal buffers from the
+        # kernel-mode 2-D path: ``streaming_sdf_forces_post_2d``
+        # derives surface normals internally from the body SDF table at
+        # query time, so the solver no longer needs ``fs.normal_x/y``.
+        # No defensive init is required here.
 
         # Reset per-body sparse storage
         comp._sdf_sparse = [None] * B
@@ -1617,21 +1611,20 @@ class BDIMhandler:
             d_j0 = min(_p_j0, _curr_uj0)
             d_j1 = max(_p_j1, _curr_uj1)
         else:
-            # First step: dirty region is the full grid.
-            d_i0 = d_j0 = 0
-            d_i1 = int(gs_np[0])
-            d_j1 = int(gs_np[1])
+            # First step: use current union AABB only.  Safe because
+            # comp.sdf_val starts at the _FAR sentinel (see CompositeBody),
+            # so cells outside this AABB already encode "no body here".
+            # Matches the 3-D path's first-step optimisation.
+            d_i0, d_i1 = _curr_ui0, _curr_ui1
+            d_j0, d_j1 = _curr_uj0, _curr_uj1
 
-        # Restrict fills to the dirty sub-block.
-        _su = comp.sdf_val_u.shape
-        _sv = comp.sdf_val_v.shape
-        _bu = comp.body_u.shape
-        _bv = comp.body_v.shape
+        # Phase I: in kernel mode the staggered SDF and body-velocity
+        # tensors are per-step temporaries owned by
+        # FluidSolver.fluid_step (Kernel A fills them from _FAR each
+        # call), so no Python-side reset is needed here.  Only the CC
+        # SDF dirty sub-block is wiped — Kernel A still writes into the
+        # persistent ``comp.sdf_val`` for the force kernel to consume.
         comp.sdf_val[d_i0:d_i1, d_j0:d_j1].fill_(_FAR)
-        comp.sdf_val_u[d_i0:min(d_i1 + 1, _su[0]), d_j0:d_j1].fill_(_FAR)
-        comp.sdf_val_v[d_i0:d_i1, d_j0:min(d_j1 + 1, _sv[1])].fill_(_FAR)
-        comp.body_u[d_i0:min(d_i1 + 1, _bu[0]), d_j0:d_j1].zero_()
-        comp.body_v[d_i0:d_i1, d_j0:min(d_j1 + 1, _bv[1])].zero_()
 
         # Maintain `comp.com_pos[b]` views for downstream code.
         for b, body in enumerate(comp.bodies):
@@ -1639,45 +1632,12 @@ class BDIMhandler:
             body.com_pos = comp.com_pos[b]
 
         fs = self.fluid_solver
-        interp_method = getattr(fs, '_sdf_interp_method', 0)
 
         if fs._use_kernels:
-            _rho_buf = getattr(comp, '_combined_rho_bodies', None)
-            if _rho_buf is None or _rho_buf.numel() != B \
-                    or _rho_buf.dtype != self.dtype \
-                    or _rho_buf.device != self.device:
-                _rho_buf = torch.empty(
-                    (B,), device=self.device, dtype=self.dtype,
-                )
-                comp._combined_rho_bodies = _rho_buf
-            _rho_buf.fill_(float(fs.rho_body))
-            rho_bodies = _rho_buf
-
-            _wrcc = getattr(comp, '_winning_rho_cc', None)
-            if _wrcc is None or _wrcc.shape != comp.sdf_val.shape:
-                _wrcc = torch.empty(
-                    comp.sdf_val.shape, device=self.device, dtype=self.dtype,
-                )
-            winning_rho_cc = _wrcc
-            winning_rho_cc[d_i0:d_i1, d_j0:d_j1].fill_(float(fs.rho))
-
-            streaming_sdf_min_rho_2d_multi(
-                sm['F_flat'], sm['F_offsets'],
-                sm['body_shapes'], sm['body_meta'], kin,
-                aabb_lo, aabb_dim,
-                gx_1d, gy_1d, h_grid, max_vol,
-                comp.sdf_val, comp.sdf_val_u, comp.sdf_val_v,
-                comp.body_u, comp.body_v,
-                interp_method,
-                rho_bodies, winning_rho_cc,
-                dirty_i0=d_i0, dirty_j0=d_j0,
-                dirty_Ai=d_i1 - d_i0, dirty_Aj=d_j1 - d_j0,
-            )
-
             for b in range(B):
                 comp._sdf_sparse[b] = None
 
-            # Cache the union AABB so _recompute_mu_normals can activate
+            # Cache the union AABB so _compute_union_aabb can activate
             # the sub-block path without reading _sdf_sparse.
             _u_i0 = _curr_ui0
             _u_j0 = _curr_uj0
@@ -1689,8 +1649,13 @@ class BDIMhandler:
             # the native Phase-D-only op, so the update stage only maintains
             # the memory-saving geometry state here.
             comp._combined_forces_out = None
-            comp._winning_rho_cc      = winning_rho_cc
 
+            # Stash per-step metadata.  Phase I added the dirty-AABB
+            # bounds so FluidSolver.fluid_step can launch Kernel A
+            # (streaming SDF + body velocity update) and Kernel B (fused
+            # BDIM2 + variable-density Poisson coefficients) over the
+            # same sub-block this update prepared.  The SDF kernel call
+            # itself has moved into fluid_step.
             comp._kernel_step = {
                 'kin':      kin,
                 'aabb_lo':  aabb_lo,
@@ -1698,6 +1663,10 @@ class BDIMhandler:
                 'max_vol':  max_vol,
                 'gx':       gx_1d,
                 'gy':       gy_1d,
+                'dirty_i0': int(d_i0),
+                'dirty_j0': int(d_j0),
+                'dirty_Ai': int(d_i1 - d_i0),
+                'dirty_Aj': int(d_j1 - d_j0),
             }
 
         else:

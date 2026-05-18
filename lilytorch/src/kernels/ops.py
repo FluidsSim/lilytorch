@@ -1,59 +1,24 @@
-"""Thin Python wrappers around ``torch.ops.lilytorch_kernels.*``.
-
-Mirrors the call signatures of the original ``pytorch_interpolation``
-ops so that callers can switch their imports with a one-line change:
-
-    from lilytorch.src.kernels import streaming_sdf_min_rho_3d_multi
-"""
+"""Thin Python wrappers around ``torch.ops.lilytorch_kernels.*``."""
 import torch
 from torch import Tensor
 
 __all__ = [
-    "streaming_sdf_min_rho_3d_multi",
     "streaming_sdf_stag_3d_multi",
     "bdim_vardens_3d",
     "streaming_sdf_forces_post_3d",
     "apply_bcs_3d",
-    "streaming_sdf_min_rho_2d_multi",
+    "streaming_sdf_stag_2d_multi",
+    "bdim_vardens_2d",
     "streaming_sdf_forces_post_2d",
     "apply_bcs_2d",
     "interp_2d",
     "interp_3d",
     "rbgs_sweep_2d",
     "rbgs_sweep_3d",
+    "mg_residual_2d",
+    "mg_residual_3d",
 ]
 _METHOD_MAP = {"linear": 0, "quadratic": 1}
-
-
-def streaming_sdf_min_rho_3d_multi(
-        F_flat: Tensor, F_offsets: Tensor,
-        body_shapes: Tensor, body_meta: Tensor, kin: Tensor,
-        aabb_lo: Tensor, aabb_dim: Tensor,
-        gx: Tensor, gy: Tensor, gz: Tensor,
-        h_grid: float, max_vol_per_body: int,
-        sdf_cc: Tensor, sdf_u: Tensor, sdf_v: Tensor, sdf_w: Tensor,
-        body_u: Tensor, body_v: Tensor, body_w: Tensor,
-        interp_method: int,
-        rho_bodies: Tensor, winning_rho_cc: Tensor,
-        dirty_i0: int, dirty_j0: int, dirty_k0: int,
-        dirty_Ai: int, dirty_Aj: int, dirty_Ak: int) -> None:
-    """3-D memory-saving Phase C update with winning-body density.
-
-    Updates the union SDF / face velocities and stamps ``winning_rho_cc``
-    without materializing per-body CC SDF slabs and without computing forces.
-
-    ``dirty_i0/j0/k0`` + ``dirty_Ai/Aj/Ak`` define the dirty sub-block (union
-    of previous and current union-AABB).  The init/decode kernels only touch
-    this region, reducing them from O(Nx*Ny*Nz) to O(dirty_vol).
-    """
-    return torch.ops.lilytorch_kernels.streaming_sdf_min_rho_3d_multi.default(
-        F_flat, F_offsets, body_shapes, body_meta, kin, aabb_lo, aabb_dim,
-        gx, gy, gz, float(h_grid), int(max_vol_per_body),
-        sdf_cc, sdf_u, sdf_v, sdf_w, body_u, body_v, body_w,
-        int(interp_method), rho_bodies, winning_rho_cc,
-        int(dirty_i0), int(dirty_j0), int(dirty_k0),
-        int(dirty_Ai), int(dirty_Aj), int(dirty_Ak),
-    )
 
 
 def streaming_sdf_stag_3d_multi(
@@ -64,6 +29,7 @@ def streaming_sdf_stag_3d_multi(
         h_grid: float, max_vol_per_body: int,
         sdf_cc: Tensor, sdf_u: Tensor, sdf_v: Tensor, sdf_w: Tensor,
         body_u: Tensor, body_v: Tensor, body_w: Tensor,
+        key_cc_t: Tensor, key_u_t: Tensor, key_v_t: Tensor, key_w_t: Tensor,
         interp_method: int,
         dirty_i0: int, dirty_j0: int, dirty_k0: int,
         dirty_Ai: int, dirty_Aj: int, dirty_Ak: int) -> None:
@@ -73,11 +39,18 @@ def streaming_sdf_stag_3d_multi(
     ``sdf_u/v/w`` and ``body_u/v/w`` (per-step temporaries) inside the
     dirty AABB.  Does NOT touch ``winning_rho_cc`` because Kernel B
     computes rho_eff from mu0 in registers.
+
+    ``key_cc_t``, ``key_u_t``, ``key_v_t``, ``key_w_t`` are caller-allocated
+    int64 scratch buffers of size ``>= Ngx*Ngy*Ngz`` (one per stagger)
+    that the kernel uses to pack/unpack per-cell winning-body keys.  Pass
+    persistent buffers (allocated once at solver init) to avoid the 4×
+    empty-tensor allocation that the kernel used to do internally.
     """
     return torch.ops.lilytorch_kernels.streaming_sdf_stag_3d_multi.default(
         F_flat, F_offsets, body_shapes, body_meta, kin, aabb_lo, aabb_dim,
         gx, gy, gz, float(h_grid), int(max_vol_per_body),
         sdf_cc, sdf_u, sdf_v, sdf_w, body_u, body_v, body_w,
+        key_cc_t, key_u_t, key_v_t, key_w_t,
         int(interp_method),
         int(dirty_i0), int(dirty_j0), int(dirty_k0),
         int(dirty_Ai), int(dirty_Aj), int(dirty_Ak),
@@ -174,44 +147,57 @@ def apply_bcs_3d(
 
 # =====================================================================
 
-def streaming_sdf_min_rho_2d_multi(
+def streaming_sdf_stag_2d_multi(
         F_flat: Tensor, F_offsets: Tensor,
-        body_shapes: Tensor,
-        body_meta: Tensor,
-        kin: Tensor,
-        aabb_lo: Tensor,
-        aabb_dim: Tensor,
+        body_shapes: Tensor, body_meta: Tensor, kin: Tensor,
+        aabb_lo: Tensor, aabb_dim: Tensor,
         gx: Tensor, gy: Tensor,
-        h_grid: float,
-        max_vol_per_body: int,
+        h_grid: float, max_vol_per_body: int,
         sdf_cc: Tensor, sdf_u: Tensor, sdf_v: Tensor,
         body_u: Tensor, body_v: Tensor,
         interp_method: int,
-        rho_bodies: Tensor,
-        winning_rho_cc: Tensor,
         dirty_i0: int, dirty_j0: int,
         dirty_Ai: int, dirty_Aj: int) -> None:
-    """Multi-body memory-saving 2-D Phase C update with winning-body density.
+    """Phase-I 2-D streaming SDF + face velocity update (no rho).
 
-    This is the memory-saving 2-D update path: it
-    updates the union SDF / face velocities and stamps ``winning_rho_cc``
-    without materializing ``sparse_cc_flat`` and without computing forces.
-    The ``dirty_i0, dirty_j0, dirty_Ai, dirty_Aj`` parameters define the
-    dirty sub-block (union of previous and current body union-AABBs) so
-    that the init / decode kernel passes only touch O(dirty_area) cells
-    instead of the full O(Nx*Ny) grid.
+    Companion to ``bdim_vardens_2d``: fills ``sdf_cc`` (persistent),
+    ``sdf_u/v`` and ``body_u/v`` (per-step temporaries) inside the
+    dirty AABB.  Does NOT touch ``winning_rho_cc`` -- Kernel B computes
+    rho_eff from mu0 in registers.
     """
-    return torch.ops.lilytorch_kernels.streaming_sdf_min_rho_2d_multi.default(
-        F_flat, F_offsets,
-        body_shapes, body_meta, kin,
+    return torch.ops.lilytorch_kernels.streaming_sdf_stag_2d_multi.default(
+        F_flat, F_offsets, body_shapes, body_meta, kin,
         aabb_lo, aabb_dim,
-        gx, gy, float(h_grid),
-        int(max_vol_per_body),
-        sdf_cc, sdf_u, sdf_v,
-        body_u, body_v,
+        gx, gy, float(h_grid), int(max_vol_per_body),
+        sdf_cc, sdf_u, sdf_v, body_u, body_v,
         int(interp_method),
-        rho_bodies,
-        winning_rho_cc,
+        int(dirty_i0), int(dirty_j0),
+        int(dirty_Ai), int(dirty_Aj),
+    )
+
+
+def bdim_vardens_2d(
+        u_prime: Tensor, v_prime: Tensor,
+        sdf_u: Tensor, sdf_v: Tensor,
+        body_u: Tensor, body_v: Tensor,
+        u0: Tensor, v0: Tensor,
+        ch: Tensor, cv: Tensor,
+        eps: float, rho_body: float, rho_f: float, dt: float,
+        h_grid: float,
+        dirty_i0: int, dirty_j0: int,
+        dirty_Ai: int, dirty_Aj: int) -> None:
+    """Phase-I fused BDIM2 + variable-density Poisson coefficient kernel (2-D).
+
+    2-D analogue of :func:`bdim_vardens_3d`.  See that wrapper for the
+    documentation of caller responsibilities.
+    """
+    return torch.ops.lilytorch_kernels.bdim_vardens_2d.default(
+        u_prime, v_prime,
+        sdf_u, sdf_v,
+        body_u, body_v,
+        u0, v0, ch, cv,
+        float(eps), float(rho_body), float(rho_f), float(dt),
+        float(h_grid),
         int(dirty_i0), int(dirty_j0),
         int(dirty_Ai), int(dirty_Aj),
     )
@@ -486,3 +472,77 @@ def _jacobi_sweep_2d_abstract(p, f, cp0, cm0, cp1, cm1,
 def _jacobi_sweep_3d_abstract(p, f, cp0, cm0, cp1, cm1, cp2, cm2,
                                 jcap_tol, w, nsmoothing):
     pass   # p is mutated in place; no new tensors created
+
+
+# =====================================================================
+# Multigrid residual kernels (no global J / active allocations)
+# =====================================================================
+
+def mg_residual_2d(
+        p: Tensor,
+        f: Tensor,
+        cp0: Tensor, cm0: Tensor,
+        cp1: Tensor, cm1: Tensor,
+        jcap_tol: float) -> Tensor:
+    """Compute the 2-D multigrid residual
+
+        r = (f - A(p)) * (|J| >= jcap_tol)
+
+    where A(p) = sum(c * p_neighbours) - J * p   and
+    J = (cp0 + cm0 + cp1 + cm1).  J and the active mask are computed in
+    CUDA registers; nothing of that size is ever materialised as a tensor.
+
+    Parameters
+    ----------
+    p   : ghost-padded pressure, shape ``(Nx+2, Ny+2)``.
+    f   : interior RHS, shape ``(Nx, Ny)``.
+    cp0/cm0/cp1/cm1 : interior-shape face coefficients, must be contiguous.
+    jcap_tol : cells with ``|J| < jcap_tol`` get ``r = 0``.
+
+    Returns
+    -------
+    Tensor of shape ``(Nx, Ny)`` (same dtype/device as ``f``).
+    """
+    r = torch.empty_like(f)
+    torch.ops.lilytorch_kernels.mg_residual_2d.default(
+        p, f,
+        cp0.contiguous(), cm0.contiguous(),
+        cp1.contiguous(), cm1.contiguous(),
+        float(jcap_tol), r,
+    )
+    return r
+
+
+def mg_residual_3d(
+        p: Tensor,
+        f: Tensor,
+        cp0: Tensor, cm0: Tensor,
+        cp1: Tensor, cm1: Tensor,
+        cp2: Tensor, cm2: Tensor,
+        jcap_tol: float) -> Tensor:
+    """3-D analogue of :func:`mg_residual_2d`.
+
+    ``p`` is ghost-padded ``(Nx+2, Ny+2, Nz+2)``; ``f`` and all coefficient
+    tensors are interior-shape ``(Nx, Ny, Nz)``.  Returns ``r`` of shape
+    ``(Nx, Ny, Nz)`` without ever allocating ``J`` or ``active`` globally.
+    """
+    r = torch.empty_like(f)
+    torch.ops.lilytorch_kernels.mg_residual_3d.default(
+        p, f,
+        cp0.contiguous(), cm0.contiguous(),
+        cp1.contiguous(), cm1.contiguous(),
+        cp2.contiguous(), cm2.contiguous(),
+        float(jcap_tol), r,
+    )
+    return r
+
+
+@torch.library.register_fake("lilytorch_kernels::mg_residual_2d")
+def _mg_residual_2d_abstract(p, f, cp0, cm0, cp1, cm1, jcap_tol, r):
+    pass   # r is filled in place; no new tensors created
+
+
+@torch.library.register_fake("lilytorch_kernels::mg_residual_3d")
+def _mg_residual_3d_abstract(p, f, cp0, cm0, cp1, cm1, cp2, cm2,
+                              jcap_tol, r):
+    pass   # r is filled in place; no new tensors created

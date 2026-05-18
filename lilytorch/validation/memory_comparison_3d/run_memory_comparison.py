@@ -79,6 +79,12 @@ import sys
 import time
 import types
 
+# Expandable segments cut allocator-pool fragmentation drastically for workloads
+# that repeatedly allocate/free tensors of different shapes within one step
+# (advdiff primes, SDF/body-vel temps, multigrid clones, gradient buffers).
+# Must be set BEFORE torch initializes CUDA, hence at module top.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 # Make cost_analysis/common.py importable by adding the parent dir to sys.path
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _COST_ANALYSIS_DIR = os.path.join(_SCRIPT_DIR, "..", "cost_analysis")
@@ -250,7 +256,27 @@ def _parse_args() -> argparse.Namespace:
             "Useful for incremental sweeps."
         ),
     )
+    parser.add_argument(
+        "--poisson_compile", action="store_true", default=False,
+        help="Enable torch.compile for the Poisson V-cycle smoother (default: off).",
+    )
+    parser.add_argument(
+        "--compile_adv_diff", action="store_true", default=False,
+        help="Enable torch.compile for the advection-diffusion solver (default: off).",
+    )
+    parser.add_argument(
+        "--mem_dbg", action="store_true", default=False,
+        help=(
+            "Enable LILYTORCH_MEM_DBG=1 inside _fluid_step_kernel_3d so the "
+            "per-sub-step alloc/peak is printed.  This is the only way to see "
+            "which phase (Kernel A, Kernel B, projection, V-cycle) drives the "
+            "transient peak that the post-step gc-based census cannot capture."
+        ),
+    )
     args = parser.parse_args()
+    # Propagate the MEM_DBG flag to the C++/CUDA solver via env var.
+    if getattr(args, "mem_dbg", False):
+        os.environ["LILYTORCH_MEM_DBG"] = "1"
 
     # Fill in grid defaults from the DimensionSpec when not supplied
     spec = get_dimension_spec(args.dim)
@@ -453,6 +479,41 @@ def _build_name_map(*objs) -> dict[int, str]:
         except Exception:
             pass
 
+    # Last-resort: label remaining large tensors by their shape so the
+    # census can at least print a useful heuristic name.  CUDA-graph pool
+    # tensors (from torch.compile reduce-overhead) are not reachable via
+    # normal object graphs; we recognise them by checking whether any
+    # referrer is a CompiledFunction / _CudaGraphCache type.
+    _compile_type_names = frozenset((
+        "CompiledFunction", "_CudaGraphCache", "CUDAGraphCache",
+        "_CompiledAutograd", "_InductorGraphCache",
+    ))
+    for t in _gc.get_objects():
+        try:
+            if not (torch.is_tensor(t) and t.is_cuda):
+                continue
+            ptr = t.untyped_storage().data_ptr()
+            if ptr in name_map:
+                continue
+            if t.nelement() < 1_000_000:
+                continue
+            # Check if any referrer looks like a torch.compile artifact
+            for ref in _gc.get_referrers(t):
+                ref_type = type(ref).__name__
+                if ref_type in _compile_type_names:
+                    name_map[ptr] = f"cuda_graph_pool<{ref_type}>"
+                    break
+                # Also catch lists/tuples that are graph I/O buffers
+                if isinstance(ref, (list, tuple)):
+                    for rref in _gc.get_referrers(ref):
+                        if type(rref).__name__ in _compile_type_names:
+                            name_map[ptr] = f"cuda_graph_pool<{type(rref).__name__}>"
+                            break
+                if ptr in name_map:
+                    break
+        except Exception:
+            pass
+
     return name_map
 
 
@@ -573,6 +634,20 @@ def _run_worker(args: argparse.Namespace) -> None:
     # ── 3. Install profiler hooks ────────────────────────────────────
     records: list[dict] = []
     census_at_peak: list[dict] = []
+    # Mutable containers so the inner closure can write back to the outer scope
+    census_at_peak_alloc: list[float] = [0.0]   # alloc_mb at census time
+    census_at_peak_rsrv:  list[float] = [0.0]   # reserved_mb at census time
+    census_at_peak_nvml:  list[float] = [None]  # nvidia-smi MiB at census time
+    peak_step_nvml:       list[float] = [None]  # nvidia-smi MiB right after fluid_step (before cleanup)
+    # TRUE-peak census — taken right after fluid_step (before forces & release),
+    # so it includes the transient buffers responsible for the nvidia-smi peak.
+    # The pre-existing 'census_at_peak' is taken AFTER release+empty_cache and
+    # only captures the PERSISTENT baseline. Compare the two to see exactly
+    # which tensors caused the observed peak.
+    census_at_true_peak: list[dict] = []
+    census_at_true_peak_alloc: list[float] = [0.0]
+    census_at_true_peak_rsrv:  list[float] = [0.0]
+    census_at_true_peak_nvml:  list[float] = [None]
 
     def _record(label: str) -> dict:
         s = _snap(label)
@@ -643,8 +718,15 @@ def _run_worker(args: argparse.Namespace) -> None:
         _record(f"step {idx:03d} [{mode}]: after update (union SDF+body_vel)")
 
         # 2. mu / normals
-        fs._recompute_mu_normals()
-        _record(f"step {idx:03d} [{mode}]: after mu/normals")
+        # In kernel 3-D mode, mu0/mu1 and normals are computed inside
+        # the CUDA kernel during fluid_step (Phase I). sdf_val_u/v/w
+        # are not allocated on MultiAnimatBodies in that mode, so
+        # _recompute_mu_normals must not be called (mirrors step_() guard).
+        if not (fs._use_kernels and fs.ndim == 3):
+            fs._recompute_mu_normals()
+            _record(f"step {idx:03d} [{mode}]: after mu/normals")
+        else:
+            _record(f"step {idx:03d} [{mode}]: mu/normals (computed in fluid_step kernel)")
 
         # 3. fluid step
         if self.ndim == 3:
@@ -658,6 +740,54 @@ def _run_worker(args: argparse.Namespace) -> None:
                 p = torch.where(fs.composite_body.sdf_val < 0, 0, p)
             (fs.u0, fs.v0, fs.p0) = (u, v, p)
         _record(f"step {idx:03d} [{mode}]: after fluid_step")
+
+        # Capture nvidia-smi at peak (before forces + cleanup).
+        # This is the maximum this process consumes; add system background
+        # processes (Xorg, GNOME, etc.) to get what `watch nvidia-smi` shows.
+        if is_peak and peak_step_nvml[0] is None:
+            try:
+                import subprocess as _sp_peak, os as _os_peak
+                _r_peak = _sp_peak.run(
+                    ["nvidia-smi", "--query-compute-apps=pid,used_memory",
+                     "--format=csv,noheader,nounits"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                _pid_str_peak = str(_os_peak.getpid())
+                for _ln2 in _r_peak.stdout.strip().split("\n"):
+                    _p2 = _ln2.strip().split(",")
+                    if len(_p2) == 2 and _p2[0].strip() == _pid_str_peak:
+                        peak_step_nvml[0] = float(_p2[1].strip())
+                        break
+            except Exception:
+                pass
+
+        # TRUE-peak tensor census — taken HERE (right after fluid_step, BEFORE
+        # release/empty_cache) so transient tensors that survive past the kernel
+        # but are still alive (force outputs, pressure-correction temps, divergence
+        # buffers, multigrid coarse-level allocations not yet GC'd) are visible.
+        # This is the answer to "what occupies the 14 GB the user saw in nvidia-smi".
+        if is_peak:
+            gc.collect()
+            _nm_true = _build_name_map(fs, self)
+            census_at_true_peak.extend(_tensor_census(top_k=40, name_map=_nm_true))
+            import torch as _t_true
+            census_at_true_peak_alloc[0] = _mb(_t_true.cuda.memory_allocated())
+            census_at_true_peak_rsrv[0]  = _mb(_t_true.cuda.memory_reserved())
+            try:
+                import subprocess as _sp_true, os as _os_true
+                _r_true = _sp_true.run(
+                    ["nvidia-smi", "--query-compute-apps=pid,used_memory",
+                     "--format=csv,noheader,nounits"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                _pid_str_true = str(_os_true.getpid())
+                for _ln_true in _r_true.stdout.strip().split("\n"):
+                    _p_true = _ln_true.strip().split(",")
+                    if len(_p_true) == 2 and _p_true[0].strip() == _pid_str_true:
+                        census_at_true_peak_nvml[0] = float(_p_true[1].strip())
+                        break
+            except Exception:
+                pass
 
         fs.check_explosion(iteration)
 
@@ -696,6 +826,12 @@ def _run_worker(args: argparse.Namespace) -> None:
         #   outside-body defaults; only the union AABB sub-block is
         #   overwritten next step).
         fs._release_bdim_fields()
+        # Flush the CUDA caching allocator (mirrors step_() behaviour).
+        # This returns freed blocks from _release_bdim_fields + forces
+        # back to the driver so nvidia-smi / memory_reserved() reflects
+        # the true working set rather than a high-water-mark cache.
+        if fs.device.type == "cuda":
+            torch.cuda.empty_cache()
         _record(f"step {idx:03d} [{mode}]: after release")
 
         # Tensor census at peak step — identifies WHICH buffers dominate.
@@ -704,10 +840,37 @@ def _run_worker(args: argparse.Namespace) -> None:
         #           with the number of bodies.
         #   kernel: only ONE union SDF grid (shape Nx×Ny×Nz) regardless
         #           of how many bodies are in the scene.
+        # Census at 'after fluid_step / before release' — captures the
+        # persistent fields PLUS any force-output tensors that are still
+        # alive at this point.  Taken before empty_cache so the caching
+        # allocator pool is still warm.  Stored separately from the
+        # post-cleanup census so the caller can compare the two.
         if is_peak:
             gc.collect()
             nm = _build_name_map(fs, self)
             census_at_peak.extend(_tensor_census(top_k=30, name_map=nm))
+            # Also record alloc/reserved at the moment the census is taken
+            # (after release + empty_cache, i.e. the persistent baseline)
+            import torch as _t_census
+            census_at_peak_alloc[0] = _mb(_t_census.cuda.memory_allocated())
+            census_at_peak_rsrv[0]  = _mb(_t_census.cuda.memory_reserved())
+            # nvidia-smi measured HERE so all 4 layers are at the same step.
+            # subprocess is safe between steps (no GPU kernel running).
+            try:
+                import subprocess as _sp_census, os as _os_census
+                _r_nvml = _sp_census.run(
+                    ["nvidia-smi", "--query-compute-apps=pid,used_memory",
+                     "--format=csv,noheader,nounits"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                _pid_str = str(_os_census.getpid())
+                for _ln in _r_nvml.stdout.strip().split("\n"):
+                    _p = _ln.strip().split(",")
+                    if len(_p) == 2 and _p[0].strip() == _pid_str:
+                        census_at_peak_nvml[0] = float(_p[1].strip())
+                        break
+            except Exception:
+                pass
 
         self.iteration += 1
 
@@ -734,8 +897,51 @@ def _run_worker(args: argparse.Namespace) -> None:
     )
     _record("after simulation complete")
 
-    final_peak_mb = _mb(torch.cuda.max_memory_allocated())
-    final_rsrv_mb = _mb(torch.cuda.memory_reserved())
+    # Flush GC + allocator so final_rsrv_mb reflects live tensors only,
+    # not freed-but-cached blocks that accumulated since the last step's
+    # empty_cache() call.
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    final_peak_mb  = _mb(torch.cuda.max_memory_allocated())
+    final_alloc_mb = _mb(torch.cuda.memory_allocated())
+    final_rsrv_mb  = _mb(torch.cuda.memory_reserved())
+
+    # nvidia-smi "used" for this process — includes PyTorch pool + CUDA
+    # runtime + compiled Triton CUBIN code + MuJoCo GPU buffers etc.
+    # This is the number the user sees in nvidia-smi.
+    _nvml_mb = None
+    try:
+        import pynvml
+        pynvml.nvmlInit()
+        _handle = pynvml.nvmlDeviceGetHandleByIndex(
+            torch.cuda.current_device()
+        )
+        _procs = pynvml.nvmlDeviceGetComputeRunningProcesses(_handle)
+        _pid = os.getpid()
+        for _p in _procs:
+            if _p.pid == _pid:
+                _nvml_mb = _p.usedGpuMemory / (1024 ** 2)
+                break
+    except Exception:
+        pass  # pynvml not available or failed — not critical
+
+    # Post-simulation tensor census (after cleanup) so we can see
+    # exactly what's live at steady state.
+    _fs_live = None
+    _bh_live = None
+    try:
+        import lilytorch.integration.BDIMhandler as _bmod2
+        import gc as _gc2
+        for _o in _gc2.get_objects():
+            if isinstance(_o, _bmod2.BDIMhandler):
+                _bh_live = _o
+                _fs_live = getattr(_o, "fluid_solver", None)
+                break
+    except Exception:
+        pass
+    nm_final = _build_name_map(*filter(None, [_fs_live, _bh_live]))
+    census_final = _tensor_census(top_k=20, name_map=nm_final)
 
     # ── 5. Persist results ───────────────────────────────────────────
     out = {
@@ -752,14 +958,263 @@ def _run_worker(args: argparse.Namespace) -> None:
         "torch":        torch.__version__,
         "records":      records,
         "census_at_peak": census_at_peak,
-        "final_peak_mb": final_peak_mb,
-        "final_rsrv_mb": final_rsrv_mb,
+        "census_at_peak_alloc_mb": census_at_peak_alloc[0],
+        "census_at_peak_rsrv_mb":  census_at_peak_rsrv[0],
+        "census_at_peak_nvml_mb":  census_at_peak_nvml[0],
+        "peak_step_nvml_mb":       peak_step_nvml[0],
+        # TRUE-peak census (taken at the actual nvidia-smi peak moment,
+        # right after fluid_step, BEFORE release+empty_cache).
+        "census_at_true_peak": census_at_true_peak,
+        "census_at_true_peak_alloc_mb": census_at_true_peak_alloc[0],
+        "census_at_true_peak_rsrv_mb":  census_at_true_peak_rsrv[0],
+        "census_at_true_peak_nvml_mb":  census_at_true_peak_nvml[0],
+        "census_final":  census_final,
+        "final_peak_mb":  final_peak_mb,
+        "final_alloc_mb": final_alloc_mb,
+        "final_rsrv_mb":  final_rsrv_mb,
+        "final_nvml_mb":  _nvml_mb,
     }
     os.makedirs(out_dir, exist_ok=True)
     out_path = _worker_result_path(out_dir, mode, args.n_bodies)
     with open(out_path, "w") as f:
         json.dump(out, f, indent=2)
     print(f"\n[memory_comparison worker] wrote {out_path}", flush=True)
+
+    # ── 6. Inline summary (mirrors the driver's _print_comparison) ───
+    sep = "=" * 82
+    persistent_mb = _persistent_baseline(out)
+    step_peak     = _step_peak_mb(out)
+
+    # Extract between-step reserved from records (the "before" snapshot of
+    # the peak step has alloc=persistent_mb and reflects the allocator pool
+    # between steps, including Inductor static buffers when compile=True).
+    between_step_rsrv = None
+    for rec in records:
+        label = rec.get("label", "")
+        if "before" in label and abs(rec["alloc_mb"] - persistent_mb) < 10:
+            between_step_rsrv = rec["rsrvd_mb"]
+            break
+    # Also find peak reserved from the after-fluid_step snapshot
+    peak_rsrv = None
+    for rec in records:
+        label = rec.get("label", "")
+        if "after fluid_step" in label or "after_fluid_step" in label:
+            if peak_rsrv is None or rec["rsrvd_mb"] > peak_rsrv:
+                peak_rsrv = rec["rsrvd_mb"]
+
+    # nvidia-smi for this process — use pynvml result if available,
+    # else the step-hook subprocess result (measured at the census step,
+    # so all 4 layers are at the same point in time).
+    _nvml_final = _nvml_mb if _nvml_mb is not None else census_at_peak_nvml[0]
+    _nvml_peak  = out.get("peak_step_nvml_mb") or peak_step_nvml[0]
+
+    print(f"\n{sep}")
+    print(f" MEMORY SUMMARY — mode={mode}  dim={args.dim}  "
+          f"grid={grid_label((args.Nx, args.Ny) if args.dim == 2 else (args.Nx, args.Ny, args.Nz))}"
+          f"  n_bodies={args.n_bodies}")
+    print(f"  compile: poisson={getattr(args,'poisson_compile',False)}  "
+          f"adv_diff={getattr(args,'compile_adv_diff',False)}")
+    print(sep)
+    print(f"  Persistent baseline (after warmup):  {persistent_mb:8.1f} MB  [torch.cuda.memory_allocated()]")
+    print(f"  Step peak (alloc):                   {step_peak:8.1f} MB  [torch.cuda.max_memory_allocated()]")
+    if peak_rsrv is not None:
+        print(f"  Step peak (reserved):                {peak_rsrv:8.1f} MB  [torch.cuda.memory_reserved() at peak]")
+    if between_step_rsrv is not None:
+        _inductor_pool = between_step_rsrv - persistent_mb
+        print(f"  Between-step reserved:               {between_step_rsrv:8.1f} MB  "
+              f"[persistent {persistent_mb:.0f} + pool {_inductor_pool:.0f} MB]")
+    print()
+
+    # ── 4-layer memory stack ─────────────────────────────────────────
+    # Two checkpoints: BETWEEN STEPS and AT PEAK STEP (after fluid_step, before cleanup).
+    # The "watch nvidia-smi" total you see in the terminal includes other GPU processes
+    # (Xorg, GNOME compositor, other terminals, etc.) on top of this process.
+    print(f"  ── Memory stack — THIS PROCESS ONLY (not system total) ──────────────────")
+    _census_total_peak = sum(r["bytes"] for r in census_at_peak) / (1024**2) if census_at_peak else None
+    _census_alloc = census_at_peak_alloc[0]
+    _census_rsrv  = census_at_peak_rsrv[0]
+
+    print(f"  Checkpoint A: BETWEEN STEPS (after empty_cache) ─────────────────────────")
+    if _census_total_peak is not None:
+        print(f"  [1] census (gc-visible Python tensors):  {_census_total_peak:8.1f} MB")
+        _gap_census_alloc = _census_alloc - _census_total_peak
+        if _gap_census_alloc >= 0:
+            _gap_census_note = "(C++-owned objects not in gc: MuJoCo interop, torch internals)"
+        else:
+            _gap_census_note = ("(compile=True: Inductor wrapper tensors in gc but "
+                                "storage is in CUDA graph pool → not in alloc)")
+        print(f"      └─ gap to alloc = {_gap_census_alloc:+.1f} MB  {_gap_census_note}")
+    print(f"  [2] allocated (torch.cuda.memory_allocated()): {_census_alloc:8.1f} MB")
+    _gap_alloc_rsrv = _census_rsrv - _census_alloc
+    print(f"      └─ gap to reserved = {_gap_alloc_rsrv:+.1f} MB  "
+          f"(caching allocator pool; Inductor static bufs when compile=True)")
+    print(f"  [3] reserved (torch.cuda.memory_reserved()):   {_census_rsrv:8.1f} MB")
+    if _nvml_final is not None:
+        _gap_rsrv_nvml = _nvml_final - _census_rsrv
+        print(f"      └─ gap to nvidia-smi = {_gap_rsrv_nvml:+.1f} MB  "
+              f"(CUDA context + CUBIN code — constant regardless of workload)")
+        print(f"  [4] nvidia-smi THIS process (between steps): {_nvml_final:8.1f} MB")
+    else:
+        print(f"  [4] nvidia-smi (between steps): n/a  "
+              f"(grep PID {os.getpid()} in:  nvidia-smi --query-compute-apps=pid,used_memory "
+              f"--format=csv,noheader,nounits)")
+
+    print()
+    print(f"  Checkpoint B: AT PEAK STEP (right after fluid_step, before cleanup) ─────")
+    if peak_rsrv is not None:
+        print(f"  [3] reserved (torch.cuda.memory_reserved()):   {peak_rsrv:8.1f} MB")
+    if _nvml_peak is not None:
+        _ctx_est = _nvml_final - _census_rsrv if _nvml_final is not None else None
+        print(f"  [4] nvidia-smi THIS process (at peak step):  {_nvml_peak:8.1f} MB")
+        if peak_rsrv is not None:
+            _gap_peak = _nvml_peak - peak_rsrv
+            print(f"      └─ gap reserved→nvml = {_gap_peak:+.1f} MB  (same CUDA context constant as above)")
+        print()
+        print(f"  NOTE: 'watch nvidia-smi' or the default nvidia-smi output shows the SYSTEM TOTAL")
+        print(f"        (all processes on the GPU).  Subtract background (Xorg, compositor, etc.)")
+        print(f"        to get this process's contribution.  Typical background: 500–1500 MB.")
+        if _nvml_peak is not None:
+            print(f"  => If you see ~{_nvml_peak/1024:.1f} GB in nvidia-smi that is just this process.")
+            print(f"     Add desktop GPU processes to get the system total you observe.")
+    else:
+        print(f"  [4] nvidia-smi (peak step): n/a")
+        print()
+        print(f"  NOTE: 'watch nvidia-smi' shows the SYSTEM TOTAL (all GPU processes).")
+        print(f"        This process peak ≈ reserved({peak_rsrv:.0f} MB) + CUDA context(~286 MB)"
+              f" = {(peak_rsrv or 0) + 286:.0f} MB ≈ {((peak_rsrv or 0) + 286)/1024:.1f} GB.")
+        print(f"        Add desktop GPU processes (Xorg, compositor, etc.) to get system total.")
+    print()
+
+    peak_rows = _peak_step_rows(out)
+    if len(peak_rows) > 1:
+        print(f"Per-phase breakdown at peak step (step {out['peak_step']:03d}):")
+        print(f"  {'Phase':<44s}  {'Alloc MB':>10s}  {'Delta MB':>10s}  {'Peak MB':>10s}  {'Rsvd MB':>10s}")
+        print("  " + "-" * 96)
+        for prev, cur in zip(peak_rows, peak_rows[1:]):
+            phase = (cur["label"].split(":", 1)[1].strip()
+                     if ":" in cur["label"] else cur["label"])
+            delta = cur["alloc_mb"] - prev["alloc_mb"]
+            print(f"  {phase:<44s}  {cur['alloc_mb']:>10.1f}  {delta:>+10.1f}  "
+                  f"{cur['peak_mb']:>10.1f}  {cur['rsrvd_mb']:>10.1f}")
+
+    # ── TRUE-peak tensor census (taken at the actual nvidia-smi peak) ────
+    # This is the answer to "what occupies the GB the user saw in nvidia-smi".
+    # It captures BOTH the persistent fields AND every transient tensor that
+    # was still alive when fluid_step returned (force-output temps, multigrid
+    # coarse-level allocations, division-buffer intermediates, etc.).
+    if census_at_true_peak:
+        _true_total = sum(r["bytes"] for r in census_at_true_peak) / (1024 ** 2)
+        _true_alloc = census_at_true_peak_alloc[0]
+        _true_rsrv  = census_at_true_peak_rsrv[0]
+        _true_nvml  = census_at_true_peak_nvml[0]
+        print(f"\nTensor census at TRUE PEAK (right after fluid_step, BEFORE cleanup):")
+        print(f"  alloc={_true_alloc:.1f} MB  reserved={_true_rsrv:.1f} MB  "
+              f"nvml={_true_nvml if _true_nvml is not None else 'n/a'} MB  "
+              f"(census-visible total: {_true_total:.1f} MB)")
+        _gap_true = _true_alloc - _true_total
+        if abs(_gap_true) > 50:
+            print(f"  └─ alloc − census = {_gap_true:+.1f} MB "
+                  f"(C++-owned / not gc-visible: cuBLAS workspace, MuJoCo interop, "
+                  f"torch.compile buffers if compile=True)")
+        print(f"  {'Shape':<32s}  {'Dtype':<14s}  {'Count':>5s}  {'Total MB':>9s}  Attribute names")
+        print("  " + "-" * 100)
+        for row in census_at_true_peak[:20]:
+            shape = "(" + ", ".join(str(s) for s in row["shape"]) + ")"
+            names = ", ".join(row.get("names", []))
+            print(f"  {shape:<32s}  {row['dtype']:<14s}  "
+                  f"{row['count']:>5d}  {_mb(row['bytes']):>9.1f}  {names}")
+        if len(census_at_true_peak) > 20:
+            _remaining = sum(r["bytes"] for r in census_at_true_peak[20:]) / (1024**2)
+            print(f"  ... ({len(census_at_true_peak)-20} more groups, {_remaining:.1f} MB)")
+
+    if census_at_peak:
+        _census_total_str = f"{_census_total_peak:.1f} MB" if _census_total_peak else "?"
+        print(f"\nTensor census at peak step (AFTER cleanup, {len(census_at_peak)} groups, "
+              f"total={_census_total_str}; alloc at census={_census_alloc:.1f} MB):")
+        print(f"  NOTE: this is the PERSISTENT BASELINE (after release+empty_cache).")
+        print(f"        For the actual peak working set, see TRUE PEAK census above.")
+        print(f"  {'Shape':<32s}  {'Dtype':<14s}  {'Count':>5s}  {'Total MB':>9s}  Attribute names")
+        print("  " + "-" * 100)
+        for row in census_at_peak[:10]:
+            shape = "(" + ", ".join(str(s) for s in row["shape"]) + ")"
+            names = ", ".join(row.get("names", []))
+            print(f"  {shape:<32s}  {row['dtype']:<14s}  "
+                  f"{row['count']:>5d}  {_mb(row['bytes']):>9.1f}  {names}")
+        if len(census_at_peak) > 10:
+            _remaining = sum(r["bytes"] for r in census_at_peak[10:]) / (1024**2)
+            print(f"  ... ({len(census_at_peak)-10} more groups, {_remaining:.1f} MB)")
+
+    # ── Memory budget decomposition (the answer to "where do the GB go") ───
+    # Three distinct allocation snapshots matter and they are NOT the same:
+    #   1. census/alloc AT the snapshot moment (right after fluid_step)
+    #      — what gc.get_objects() can find and what memory_allocated() reports
+    #   2. peak alloc DURING the step (max_memory_allocated, since reset)
+    #      — captures transients that lived briefly inside fluid_step and were
+    #        freed before the snapshot ran (Python locals: primes, sdf/body
+    #        temps, multigrid V-cycle clones, the inline projection diff, etc.)
+    #   3. peak reserved (memory_reserved at the snapshot, which equals the
+    #      caching-allocator high-water mark) and nvidia-smi (reserved+context)
+    if census_at_true_peak:
+        _persistent       = _census_alloc      # alloc post-cleanup ≈ persistent
+        _snapshot_alloc   = _true_alloc        # alloc when census ran
+        _peak_alloc_in_step = step_peak        # max_memory_allocated during step
+        _peak_rsrv_in_step  = (peak_rsrv if peak_rsrv is not None
+                               else _true_rsrv)
+        _peak_nvml        = _true_nvml         # nvml at snapshot ≈ peak
+        _post_step_trans  = _snapshot_alloc - _persistent
+        _freed_in_step    = max(0.0, _peak_alloc_in_step - _snapshot_alloc)
+        _pool_gap         = _peak_rsrv_in_step - _peak_alloc_in_step
+        _ctx_gap          = (_peak_nvml - _peak_rsrv_in_step
+                             if _peak_nvml is not None else None)
+        print(f"\n── DECOMPOSITION OF PEAK MEMORY (what nvidia-smi shows) ────────────────")
+        print(f"  IMPORTANT: the TRUE PEAK census above shows only tensors STILL ALIVE")
+        print(f"  at snapshot time. Transients allocated and freed inside fluid_step are")
+        print(f"  invisible to gc but still drove the actual peak.")
+        print()
+        print(f"  [persistent fields, post-cleanup]      {_persistent:8.1f} MB"
+              f"  ← gc-visible in TRUE PEAK census")
+        print(f"  [+ still-live transients at snapshot]  +{_post_step_trans:8.1f} MB"
+              f"  ← gc-visible in TRUE PEAK census")
+        print(f"  ──────────────────────────────────────────────────────────")
+        print(f"  = alloc AT snapshot                    {_snapshot_alloc:8.1f} MB"
+              f"  [= census total above]")
+        print(f"  [+ freed-inside-fluid_step transients] +{_freed_in_step:8.1f} MB"
+              f"  ← INVISIBLE to gc (primes, sdf/body temps,")
+        print(f"  {'':41s}      multigrid clones, projection diff, etc.)")
+        print(f"  ──────────────────────────────────────────────────────────")
+        print(f"  = peak alloc DURING step               {_peak_alloc_in_step:8.1f} MB"
+              f"  [from max_memory_allocated]")
+        print(f"  [+ caching-allocator pool overhead]    +{_pool_gap:8.1f} MB"
+              f"  (freed slabs kept warm by the allocator)")
+        print(f"  ──────────────────────────────────────────────────────────")
+        print(f"  = peak reserved (PyTorch holds)        {_peak_rsrv_in_step:8.1f} MB"
+              f"  [from memory_reserved]")
+        if _ctx_gap is not None:
+            print(f"  [+ CUDA context / CUBIN / cuBLAS]      +{_ctx_gap:8.1f} MB"
+                  f"  (constant ~286 MB; cuBLAS handle etc.)")
+            print(f"  ──────────────────────────────────────────────────────────")
+            print(f"  = nvidia-smi (this process)            {_peak_nvml:8.1f} MB")
+        print()
+        print(f"  To SEE the {_freed_in_step:.0f} MB of inside-step transients while they are alive,")
+        print(f"  re-run with LILYTORCH_MEM_DBG=1 — that env var enables alloc/peak prints")
+        print(f"  before each sub-step inside _fluid_step_kernel_3d() so you can pinpoint")
+        print(f"  which phase (Kernel A, Kernel B, projection, V-cycle) drove the peak.")
+
+    if census_final:
+        census_total = sum(r["bytes"] for r in census_final) / (1024 ** 2)
+        print(f"\nTensor census at END (after gc+empty_cache) — top 20 by size:")
+        print(f"  Total PyTorch tensors found: {census_total:.1f} MB")
+        print(f"  {'Shape':<32s}  {'Dtype':<14s}  {'Count':>5s}  {'Total MB':>9s}  Attribute names")
+        print("  " + "-" * 100)
+        for row in census_final[:20]:
+            shape = "(" + ", ".join(str(s) for s in row["shape"]) + ")"
+            names = ", ".join(row.get("names", []))
+            print(f"  {shape:<32s}  {row['dtype']:<14s}  "
+                  f"{row['count']:>5d}  {_mb(row['bytes']):>9.1f}  {names}")
+        if final_alloc_mb - census_total > 50:
+            print(f"  NOTE: {final_alloc_mb - census_total:.1f} MB allocated but not found "
+                  f"by gc — likely C++-owned tensors (torch.compile static bufs, etc.)")
+    print(sep, flush=True)
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -804,7 +1259,8 @@ def _build_cfg(args: argparse.Namespace, mode: str):
     cfg.poisson_warm_start      = True
     cfg.poisson_smoother        = "rbgs"
     cfg.poisson_nsmoothing      = 2
-    cfg.poisson_compile         = True
+    cfg.poisson_compile         = getattr(args, 'poisson_compile', False)
+    cfg.compile_adv_diff        = getattr(args, 'compile_adv_diff', False)
     cfg.dtype                   = args.dtype
     cfg.timestep                = args.timestep
     if hasattr(cfg, "bdim_dt"):
@@ -895,14 +1351,6 @@ def _strip_yaml_extensions(yaml_path: str) -> None:
         if ext.get("loader", "") in keep
     ]
     sim_dict.setdefault("runtime", {})["headless"] = True
-    # Enable the same compile flags used in run_cost_analysis.py so the
-    # memory footprint reflects the production kernel path.
-    for ext in sim_dict["extensions"]:
-        bdim_yaml  = ext.get("config", {}).get("bdim_yaml", {})
-        solver_cfg = bdim_yaml.get("solver", {})
-        if solver_cfg:
-            solver_cfg["compile_adv_diff"]   = True
-            solver_cfg["poisson_compile"]    = True
     with open(yaml_path, "w") as f:
         yaml.dump(sim_dict, f, default_flow_style=False, sort_keys=False)
 
@@ -977,7 +1425,10 @@ def _run_driver(args: argparse.Namespace) -> None:
                 if args.peak_step is not None:
                     cmd += ["--peak_step", str(args.peak_step)]
                 t0  = time.time()
-                ret = subprocess.call(cmd)
+                _env = os.environ.copy()
+                _env.setdefault("PYTORCH_CUDA_ALLOC_CONF",
+                                "expandable_segments:True")
+                ret = subprocess.call(cmd, env=_env)
                 dt  = time.time() - t0
                 if ret != 0:
                     print(f"  [mode={mode}, B={n_bodies}] subprocess failed "

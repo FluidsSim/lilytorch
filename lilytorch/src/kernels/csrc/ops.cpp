@@ -33,25 +33,14 @@ namespace lilytorch_kernels {
 
 // ----------------------- schemas -----------------------
 TORCH_LIBRARY(lilytorch_kernels, m) {
-    m.def(
-        "streaming_sdf_min_rho_3d_multi("
-        "Tensor F_flat, Tensor F_offsets,"
-        " Tensor body_shapes, Tensor body_meta, Tensor kin,"
-        " Tensor aabb_lo, Tensor aabb_dim,"
-        " Tensor gx, Tensor gy, Tensor gz, float h_grid,"
-        " int max_vol_per_body,"
-        " Tensor(a!) sdf_cc, Tensor(b!) sdf_u, Tensor(c!) sdf_v, Tensor(d!) sdf_w,"
-        " Tensor(e!) body_u, Tensor(f!) body_v, Tensor(g!) body_w,"
-        " int interp_method,"
-        " Tensor rho_bodies,"
-        " Tensor(h!) winning_rho_cc,"
-        " int dirty_i0, int dirty_j0, int dirty_k0,"
-        " int dirty_Ai, int dirty_Aj, int dirty_Ak"
-        ") -> ()");
-
-    // Phase-I fused-BDIM memory variant of streaming_sdf_min_rho_3d_multi:
-    // drops the winning_rho_cc / rho_bodies machinery.  Kernel B computes
-    // rho_eff from mu0 in registers.
+    // Phase-I 3-D streaming SDF / face velocity update.  Kernel B
+    // computes rho_eff from mu0 in registers, so no per-cell
+    // winning-density tensor or rho_bodies input is needed.
+    //
+    // key_cc_t / key_u_t / key_v_t / key_w_t are caller-allocated int64
+    // scratch buffers of size >= Ngx*Ngy*Ngz (one per stagger) used to
+    // pack/unpack per-cell winning-body keys.  Moving them out of the
+    // kernel avoids a 4× empty allocation per call.
     m.def(
         "streaming_sdf_stag_3d_multi("
         "Tensor F_flat, Tensor F_offsets,"
@@ -61,6 +50,7 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " int max_vol_per_body,"
         " Tensor(a!) sdf_cc, Tensor(b!) sdf_u, Tensor(c!) sdf_v, Tensor(d!) sdf_w,"
         " Tensor(e!) body_u, Tensor(f!) body_v, Tensor(g!) body_w,"
+        " Tensor(h!) key_cc_t, Tensor(i!) key_u_t, Tensor(j!) key_v_t, Tensor(k!) key_w_t,"
         " int interp_method,"
         " int dirty_i0, int dirty_j0, int dirty_k0,"
         " int dirty_Ai, int dirty_Aj, int dirty_Ak"
@@ -107,8 +97,9 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " int max_dim0, int max_dim1"
         ") -> ()");
 
+    // Phase-I 2-D streaming SDF / face velocity update.
     m.def(
-        "streaming_sdf_min_rho_2d_multi("
+        "streaming_sdf_stag_2d_multi("
         "Tensor F_flat, Tensor F_offsets,"
         " Tensor body_shapes, Tensor body_meta, Tensor kin,"
         " Tensor aabb_lo, Tensor aabb_dim,"
@@ -117,9 +108,21 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " Tensor(a!) sdf_cc, Tensor(b!) sdf_u, Tensor(c!) sdf_v,"
         " Tensor(d!) body_u, Tensor(e!) body_v,"
         " int interp_method,"
-        " Tensor rho_bodies,"
-        " Tensor(f!) winning_rho_cc,"
         " int dirty_i0, int dirty_j0, int dirty_Ai, int dirty_Aj"
+        ") -> ()");
+
+    // Phase-I fused BDIM2 + variable-density Poisson coefficient kernel (2-D).
+    m.def(
+        "bdim_vardens_2d("
+        "Tensor u_prime, Tensor v_prime,"
+        " Tensor sdf_u, Tensor sdf_v,"
+        " Tensor body_u, Tensor body_v,"
+        " Tensor(a!) u0, Tensor(b!) v0,"
+        " Tensor(c!) ch, Tensor(d!) cv,"
+        " float eps, float rho_body, float rho_f, float dt,"
+        " float h_grid,"
+        " int dirty_i0, int dirty_j0,"
+        " int dirty_Ai, int dirty_Aj"
         ") -> ()");
 
     m.def(
@@ -184,6 +187,31 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " Tensor cp0, Tensor cm0, Tensor cp1, Tensor cm1,"
         " Tensor cp2, Tensor cm2,"
         " float jcap_tol, float w, int nsmoothing"
+        ") -> ()");
+
+    // ---- Multigrid residual kernels ------------------------------------
+    // mg_residual_2d / mg_residual_3d: compute
+    //   r = (f - A(p)) * (|J| >= jcap_tol)    where A(p) = sum - J*p
+    // with J and the active mask in registers only (no global allocations).
+    // r must be a pre-allocated interior-shape tensor (no ghost cells);
+    // p is ghost-padded.  Used to replace the J/active/sum/addcmul_/neg_
+    // chain inside the multigrid V-cycle so neither J (~64 MB) nor active
+    // (~16 MB bool) is ever materialised as a tensor.
+    m.def(
+        "mg_residual_2d("
+        "Tensor p, Tensor f,"
+        " Tensor cp0, Tensor cm0, Tensor cp1, Tensor cm1,"
+        " float jcap_tol,"
+        " Tensor(a!) r"
+        ") -> ()");
+
+    m.def(
+        "mg_residual_3d("
+        "Tensor p, Tensor f,"
+        " Tensor cp0, Tensor cm0, Tensor cp1, Tensor cm1,"
+        " Tensor cp2, Tensor cm2,"
+        " float jcap_tol,"
+        " Tensor(a!) r"
         ") -> ()");
 
     // ---- Scattered-point interpolation --------------------------------

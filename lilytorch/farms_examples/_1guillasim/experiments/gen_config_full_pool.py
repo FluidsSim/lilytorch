@@ -25,7 +25,7 @@ class SimConfig(BaseSimConfig):
         self.smagorinsky_cs       = 0.
 
         # self.solver_method    = "python"
-        self.poisson_compile  = True
+        self.poisson_compile  = False
         self.compile_adv_diff = True
 
         # ── Animats ───────────────────────────────────────────────────
