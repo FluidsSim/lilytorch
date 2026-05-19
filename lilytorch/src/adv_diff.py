@@ -202,7 +202,7 @@ class AdvDiffSolver:
         """
         self.device = device
         self.dtype  = x.dtype
-        self.dt     = dt
+        self.dt     = float(dt)   # ensure Python float so _dt_dh never holds tensors
         self.nu     = nu
 
         # ---- dimension-agnostic grid setup ----------------------------
@@ -211,7 +211,7 @@ class AdvDiffSolver:
         self.n      = [len(c) for c in self.coords]
         self.dh     = [float(c[1] - c[0]) for c in self.coords]
 
-        self._dt_dh  = [dt / h for h in self.dh]
+        self._dt_dh  = [self.dt / h for h in self.dh]   # self.dt is already float
         self._inv_dh2 = [1.0 / (h * h) for h in self.dh]
 
         # ---- legacy accessors (backward-compat with solver.py) -------

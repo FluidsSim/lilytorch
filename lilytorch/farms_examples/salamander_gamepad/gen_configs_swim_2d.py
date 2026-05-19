@@ -24,7 +24,7 @@ class SimConfig(BaseSimConfig):
         self.compute_sdf    = True
         self.stack_folder   = "salamander"
 
-        self.solver_method    = "python"
+        self.solver_method    = "kernel"
         # self.compile_adv_diff = True
 
         self.bdim_physics = {"solref": [-100000.0, -2000.0]}

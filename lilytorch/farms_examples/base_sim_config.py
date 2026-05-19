@@ -67,6 +67,10 @@ class BaseSimConfig:
 
         # ── Drag ──────────────────────────────────────────────────────────
         self._use_drag_override = None   # None → auto (not use_bdim)
+        # Either a single drag entry applied to every link:
+        #   [linear_3vec, quadratic_3vec]  e.g. [[-0.1,-5,-5],[-0.001,-0.001,-0.001]]
+        # or a per-link list of length == number-of-links, each element being
+        # one such entry.  All entries must be identical when constant.
         self.constant_drags = [
             [-0.1, -5.0, -5.0],
             [-0.001, -0.001, -0.001],
@@ -328,7 +332,19 @@ class BaseSimConfig:
                     "config": ext_config,
                 })
 
-            drag_coefficients = [self.constant_drags for _ in range(nlinks)]
+            _drags = self.constant_drags
+            if isinstance(_drags[0][0], (list, tuple)):
+                # Per-link list: validate length then use directly
+                if len(_drags) != nlinks:
+                    raise ValueError(
+                        f"constant_drags has {len(_drags)} entries but the "
+                        f"model has {nlinks} links; provide either a single "
+                        f"entry or exactly one entry per link."
+                    )
+                drag_coefficients = list(_drags)
+            else:
+                # Single constant entry: replicate for every link
+                drag_coefficients = [_drags for _ in range(nlinks)]
 
             # == Build animat dict ==
             animat_dict = {

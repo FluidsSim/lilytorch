@@ -436,7 +436,7 @@ class FluidSolver(PlottingMixin):
         self._compile_adv_diff = solver.get("compile_adv_diff", False)
         if self._compile_adv_diff and self.device.type == "cuda":
             self.adv_diff_solver.solve = torch.compile(
-                self.adv_diff_solver.solve, mode="reduce-overhead",
+                self.adv_diff_solver.solve, mode="default",
             )
 
         # Dynamic BDIM META compilation for the union-AABB crop path

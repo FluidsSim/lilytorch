@@ -130,7 +130,7 @@ class SimConfig(BaseSimConfig):
         self.bc_values_w = [0, 0, 0, 0, 0, 0]
 
         # ── Body ─────────────────────────────────────────────────────
-        self.contour_mask = True
+        self.contour_mask = False
         self.interp_data_subfolder = "interp_data_3d"
 
     # ── Hooks ─────────────────────────────────────────────────────────
