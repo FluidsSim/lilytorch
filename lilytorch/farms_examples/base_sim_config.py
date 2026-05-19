@@ -142,7 +142,6 @@ class BaseSimConfig:
         self.poisson_nsmoothing      = 10
         self.poisson_verbose         = False
         self.poisson_bc_type         = "neumann"
-        self.poisson_compile         = False
         self.compile_adv_diff        = False
         self.smagorinsky_cs          = 0.0
         self.carreau                 = None   # dict with keys: nu_0, nu_inf, lam, n
@@ -346,7 +345,7 @@ class BaseSimConfig:
                         {
                             'name'             : ln,
                             'collisions'       : True,
-                            'friction'         : [0.2, 0, 0],
+                            'friction'         : [0., 0, 0],
                             'extras'           : {},
                             'fluid_interaction': self._fluid_interaction,
                             'density'          : self.rho_body,
@@ -694,7 +693,6 @@ class BaseSimConfig:
             ("poisson_precond_vcycles", self.poisson_precond_vcycles),
             ("poisson_warm_start",      self.poisson_warm_start),
             ("poisson_smoother",        self.poisson_smoother),
-            ("poisson_compile",         self.poisson_compile),
             ("poisson_bc_type",         self.poisson_bc_type),
             ("compile_adv_diff",        self.compile_adv_diff),
             ("solver_method",           self.solver_method),

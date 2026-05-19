@@ -26,7 +26,6 @@ class SimConfig(BaseSimConfig):
         self.stack_folder = "salamander"
 
         self.solver_method    = "kernel"
-        # self.poisson_compile  = True
         # self.compile_adv_diff = True
 
         # ── Animats ───────────────────────────────────────────────────

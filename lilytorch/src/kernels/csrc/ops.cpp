@@ -94,6 +94,7 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         "apply_bcs_3d("
         "Tensor(a!) u, Tensor(b!) v, Tensor(c!) w,"
         " Tensor shapes, Tensor neu_desc, Tensor dir_desc, Tensor dir_val,"
+        " Tensor ref_desc, Tensor ref_val,"
         " int max_dim0, int max_dim1"
         ") -> ()");
 
@@ -145,6 +146,7 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         "apply_bcs_2d("
         "Tensor(a!) u, Tensor(b!) v,"
         " Tensor shapes, Tensor neu_desc, Tensor dir_desc, Tensor dir_val,"
+        " Tensor ref_desc, Tensor ref_val,"
         " int max_line_dim"
         ") -> ()");
 
@@ -238,6 +240,53 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " int interp_method,"
         " Tensor(a!) G"
         ") -> ()");
+
+    // ---- Multigrid grid-transfer kernels --------------------------------
+    // Residual restriction: sum of 4 (2-D) or 8 (3-D) fine children into rc.
+    m.def("restrict_residual_2d(Tensor r, Tensor(a!) rc) -> ()");
+    m.def("restrict_residual_3d(Tensor r, Tensor(a!) rc) -> ()");
+    // Face restriction (WaterLily): stride-2 in face_dim, sum-of-pairs in
+    // transverse, single 0.5 factor. face_dim in {0,1} (2-D) or {0,1,2} (3-D).
+    m.def("restrict_face_2d(Tensor src, Tensor(a!) dst, int face_dim) -> ()");
+    m.def("restrict_face_3d(Tensor src, Tensor(a!) dst, int face_dim) -> ()");
+    // Prolongation + in-place correction: bilinear/trilinear align_corners=False
+    // interpolation of ec[interior] added into p[interior] (both ghost-padded).
+    m.def("prolongate_add_2d(Tensor ec, Tensor(a!) p) -> ()");
+    m.def("prolongate_add_3d(Tensor ec, Tensor(a!) p) -> ()");
+
+    // ---- Monolithic multigrid Poisson drivers --------------------------
+    // Run the full multi-V-cycle solve in C++: scale f by h², N V-cycles
+    // (with L∞ early-exit at ``tol``), final float64 mean subtraction.
+    // ``p`` is ghost-padded and mutated in place; returns the final residual.
+    // ``smoother_id``: 0 = RBGS, 1 = weighted Jacobi (uses ``w``).
+    m.def(
+        "poisson_solve_multigrid_2d("
+        "Tensor(a!) p, Tensor f, Tensor ch, Tensor cv,"
+        " float h2, float jcap_tol, float w,"
+        " int nsmoothing, int max_vcycles, float tol, int smoother_id"
+        ") -> Tensor");
+    m.def(
+        "poisson_solve_multigrid_3d("
+        "Tensor(a!) p, Tensor f, Tensor ch, Tensor cv, Tensor cw,"
+        " float h2, float jcap_tol, float w,"
+        " int nsmoothing, int max_vcycles, float tol, int smoother_id"
+        ") -> Tensor");
+
+    // MGCG (multigrid-preconditioned conjugate gradient).
+    m.def(
+        "poisson_solve_mgcg_2d("
+        "Tensor(a!) p, Tensor f, Tensor ch, Tensor cv,"
+        " float h2, float jcap_tol, float w,"
+        " int nsmoothing, int max_cycles, int precond_vcycles,"
+        " float tol, int smoother_id"
+        ") -> Tensor");
+    m.def(
+        "poisson_solve_mgcg_3d("
+        "Tensor(a!) p, Tensor f, Tensor ch, Tensor cv, Tensor cw,"
+        " float h2, float jcap_tol, float w,"
+        " int nsmoothing, int max_cycles, int precond_vcycles,"
+        " float tol, int smoother_id"
+        ") -> Tensor");
 }
 
 }  // namespace lilytorch_kernels

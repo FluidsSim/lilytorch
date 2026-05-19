@@ -17,6 +17,16 @@ __all__ = [
     "rbgs_sweep_3d",
     "mg_residual_2d",
     "mg_residual_3d",
+    "restrict_residual_2d",
+    "restrict_residual_3d",
+    "restrict_face_2d",
+    "restrict_face_3d",
+    "prolongate_add_2d",
+    "prolongate_add_3d",
+    "poisson_solve_multigrid_2d",
+    "poisson_solve_multigrid_3d",
+    "poisson_solve_mgcg_2d",
+    "poisson_solve_mgcg_3d",
 ]
 _METHOD_MAP = {"linear": 0, "quadratic": 1}
 
@@ -130,17 +140,26 @@ def apply_bcs_3d(
         neu_desc: Tensor,
         dir_desc: Tensor,
         dir_val: Tensor,
+        ref_desc: Tensor,
+        ref_val: Tensor,
         max_dim0: int,
         max_dim1: int) -> None:
-    """Phase H: fused 3-D boundary-condition writes (Neumann + Dirichlet).
+    """Phase H: fused 3-D boundary-condition writes.
+
+    Three op kinds, packed into separate descriptor tensors:
+      * ``neu_desc`` (int32 [N_neu, 3]) — Neumann copies
+        ``base[ghost] = base[adjacent]``.
+      * ``dir_desc`` (int32 [N_dir, 3]) + ``dir_val`` — direct writes
+        ``base[offset] = value`` (wall-normal staggered Dirichlet).
+      * ``ref_desc`` (int32 [N_ref, 4]) + ``ref_val`` — reflective
+        writes ``base[dst] = 2*value - base[src]`` (tangential
+        Dirichlet, WaterLily-style).
 
     Mutates ``u``, ``v``, ``w`` in place.
-    Uses a rectangular (max_dim0 × max_dim1) CUDA thread-block grid so that
-    non-square faces (e.g. Nx × Nz with Nx >> Nz) do not waste thread blocks.
     """
     return torch.ops.lilytorch_kernels.apply_bcs_3d.default(
         u, v, w,
-        shapes, neu_desc, dir_desc, dir_val,
+        shapes, neu_desc, dir_desc, dir_val, ref_desc, ref_val,
         int(max_dim0), int(max_dim1),
     )
 
@@ -331,8 +350,11 @@ def apply_bcs_2d(
         neu_desc: Tensor,
         dir_desc: Tensor,
         dir_val: Tensor,
+        ref_desc: Tensor,
+        ref_val: Tensor,
         max_line_dim: int) -> None:
-    """Fused 2-D boundary-condition writes (Neumann + Dirichlet).
+    """Fused 2-D boundary-condition writes (Neumann + Dirichlet direct +
+    reflective).
 
     Mutates ``u`` and ``v`` in place.  See :func:`apply_bcs_3d` for the
     descriptor layout; here ``shapes`` is int64 ``[2, 2]`` with rows
@@ -340,7 +362,7 @@ def apply_bcs_2d(
     """
     return torch.ops.lilytorch_kernels.apply_bcs_2d.default(
         u, v,
-        shapes, neu_desc, dir_desc, dir_val,
+        shapes, neu_desc, dir_desc, dir_val, ref_desc, ref_val,
         int(max_line_dim),
     )
 
@@ -546,3 +568,161 @@ def _mg_residual_2d_abstract(p, f, cp0, cm0, cp1, cm1, jcap_tol, r):
 def _mg_residual_3d_abstract(p, f, cp0, cm0, cp1, cm1, cp2, cm2,
                               jcap_tol, r):
     pass   # r is filled in place; no new tensors created
+
+
+# =====================================================================
+# Multigrid grid-transfer kernels (restriction + prolongation)
+# =====================================================================
+
+def restrict_residual_2d(r: Tensor, rc: Tensor) -> None:
+    """Sum-of-4-children residual restriction (2-D), bit-exact with the
+    PyTorch slicing chain used in poisson_mult._restrict_residual_2d."""
+    torch.ops.lilytorch_kernels.restrict_residual_2d.default(r.contiguous(), rc)
+
+
+def restrict_residual_3d(r: Tensor, rc: Tensor) -> None:
+    """Sum-of-8-children residual restriction (3-D)."""
+    torch.ops.lilytorch_kernels.restrict_residual_3d.default(r.contiguous(), rc)
+
+
+def restrict_face_2d(src: Tensor, dst: Tensor, face_dim: int) -> None:
+    """WaterLily face restriction (2-D): stride-2 in ``face_dim``,
+    sum-of-pairs in transverse, single 0.5 factor."""
+    torch.ops.lilytorch_kernels.restrict_face_2d.default(
+        src.contiguous(), dst, int(face_dim))
+
+
+def restrict_face_3d(src: Tensor, dst: Tensor, face_dim: int) -> None:
+    """WaterLily face restriction (3-D)."""
+    torch.ops.lilytorch_kernels.restrict_face_3d.default(
+        src.contiguous(), dst, int(face_dim))
+
+
+def prolongate_add_2d(ec: Tensor, p: Tensor) -> None:
+    """Bilinear (align_corners=False) prolongation of ec[interior]
+    added in place into p[interior].  Both tensors are ghost-padded
+    ``(N+2, N+2)``."""
+    torch.ops.lilytorch_kernels.prolongate_add_2d.default(ec.contiguous(), p)
+
+
+def prolongate_add_3d(ec: Tensor, p: Tensor) -> None:
+    """Trilinear prolongation + in-place add (3-D)."""
+    torch.ops.lilytorch_kernels.prolongate_add_3d.default(ec.contiguous(), p)
+
+
+@torch.library.register_fake("lilytorch_kernels::restrict_residual_2d")
+def _restrict_residual_2d_abstract(r, rc): pass
+
+@torch.library.register_fake("lilytorch_kernels::restrict_residual_3d")
+def _restrict_residual_3d_abstract(r, rc): pass
+
+@torch.library.register_fake("lilytorch_kernels::restrict_face_2d")
+def _restrict_face_2d_abstract(src, dst, face_dim): pass
+
+@torch.library.register_fake("lilytorch_kernels::restrict_face_3d")
+def _restrict_face_3d_abstract(src, dst, face_dim): pass
+
+@torch.library.register_fake("lilytorch_kernels::prolongate_add_2d")
+def _prolongate_add_2d_abstract(ec, p): pass
+
+@torch.library.register_fake("lilytorch_kernels::prolongate_add_3d")
+def _prolongate_add_3d_abstract(ec, p): pass
+
+
+# =====================================================================
+# Monolithic multigrid Poisson solvers
+# =====================================================================
+
+_SMOOTHER_MAP = {"rbgs": 0, "jacobi": 1}
+
+
+def poisson_solve_multigrid_2d(
+        p: Tensor, f: Tensor, ch: Tensor, cv: Tensor,
+        h2: float, jcap_tol: float, w: float,
+        nsmoothing: int, max_vcycles: int,
+        tol: float, smoother: str = "rbgs") -> Tensor:
+    """Native multigrid Poisson driver (2-D).
+
+    Replaces the Python multi-V-cycle loop in PoissonSolver.solve_multigrid:
+    scales ``f`` by ``h2``, runs up to ``max_vcycles`` V-cycles with L∞
+    early-exit at ``tol``, then subtracts the float64-computed mean from
+    ``p``.  ``p`` (ghost-padded) is mutated in place; the returned tensor
+    is the final residual on the interior grid.
+    """
+    sid = _SMOOTHER_MAP[smoother]
+    return torch.ops.lilytorch_kernels.poisson_solve_multigrid_2d.default(
+        p, f, ch, cv,
+        float(h2), float(jcap_tol), float(w),
+        int(nsmoothing), int(max_vcycles), float(tol), int(sid),
+    )
+
+
+def poisson_solve_multigrid_3d(
+        p: Tensor, f: Tensor, ch: Tensor, cv: Tensor, cw: Tensor,
+        h2: float, jcap_tol: float, w: float,
+        nsmoothing: int, max_vcycles: int,
+        tol: float, smoother: str = "rbgs") -> Tensor:
+    """Native multigrid Poisson driver (3-D).  See 2-D for semantics."""
+    sid = _SMOOTHER_MAP[smoother]
+    return torch.ops.lilytorch_kernels.poisson_solve_multigrid_3d.default(
+        p, f, ch, cv, cw,
+        float(h2), float(jcap_tol), float(w),
+        int(nsmoothing), int(max_vcycles), float(tol), int(sid),
+    )
+
+
+@torch.library.register_fake("lilytorch_kernels::poisson_solve_multigrid_2d")
+def _poisson_solve_multigrid_2d_abstract(
+        p, f, ch, cv, h2, jcap_tol, w,
+        nsmoothing, max_vcycles, tol, smoother_id):
+    return torch.empty_like(f)
+
+@torch.library.register_fake("lilytorch_kernels::poisson_solve_multigrid_3d")
+def _poisson_solve_multigrid_3d_abstract(
+        p, f, ch, cv, cw, h2, jcap_tol, w,
+        nsmoothing, max_vcycles, tol, smoother_id):
+    return torch.empty_like(f)
+
+
+def poisson_solve_mgcg_2d(
+        p: Tensor, f: Tensor, ch: Tensor, cv: Tensor,
+        h2: float, jcap_tol: float, w: float,
+        nsmoothing: int, max_cycles: int, precond_vcycles: int,
+        tol: float, smoother: str = "rbgs") -> Tensor:
+    """Native MGCG Poisson driver (2-D).  ``p`` is mutated in place; returns final residual."""
+    sid = _SMOOTHER_MAP[smoother]
+    return torch.ops.lilytorch_kernels.poisson_solve_mgcg_2d.default(
+        p, f, ch, cv,
+        float(h2), float(jcap_tol), float(w),
+        int(nsmoothing), int(max_cycles), int(precond_vcycles),
+        float(tol), int(sid),
+    )
+
+
+def poisson_solve_mgcg_3d(
+        p: Tensor, f: Tensor, ch: Tensor, cv: Tensor, cw: Tensor,
+        h2: float, jcap_tol: float, w: float,
+        nsmoothing: int, max_cycles: int, precond_vcycles: int,
+        tol: float, smoother: str = "rbgs") -> Tensor:
+    """Native MGCG Poisson driver (3-D)."""
+    sid = _SMOOTHER_MAP[smoother]
+    return torch.ops.lilytorch_kernels.poisson_solve_mgcg_3d.default(
+        p, f, ch, cv, cw,
+        float(h2), float(jcap_tol), float(w),
+        int(nsmoothing), int(max_cycles), int(precond_vcycles),
+        float(tol), int(sid),
+    )
+
+
+@torch.library.register_fake("lilytorch_kernels::poisson_solve_mgcg_2d")
+def _poisson_solve_mgcg_2d_abstract(
+        p, f, ch, cv, h2, jcap_tol, w,
+        nsmoothing, max_cycles, precond_vcycles, tol, smoother_id):
+    return torch.empty_like(f)
+
+
+@torch.library.register_fake("lilytorch_kernels::poisson_solve_mgcg_3d")
+def _poisson_solve_mgcg_3d_abstract(
+        p, f, ch, cv, cw, h2, jcap_tol, w,
+        nsmoothing, max_cycles, precond_vcycles, tol, smoother_id):
+    return torch.empty_like(f)

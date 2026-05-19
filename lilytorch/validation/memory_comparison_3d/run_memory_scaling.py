@@ -84,8 +84,6 @@ def _parse_args() -> argparse.Namespace:
                    help="Python interpreter used to launch workers.")
     p.add_argument("--keep_existing", action="store_true",
                    help="Skip a worker run if its JSON already exists.")
-    p.add_argument("--poisson_compile", action="store_true", default=False,
-                   help="Forward to worker: enable CUDA-graph V-cycle.")
     p.add_argument("--compile_adv_diff", action="store_true", default=False,
                    help="Forward to worker: torch.compile the adv-diff solver.")
     args = p.parse_args()
@@ -126,8 +124,6 @@ def _run_one(args: argparse.Namespace, N: int) -> dict | None:
             "--dtype", args.dtype,
             "--out_dir", sub_dir,
         ]
-        if args.poisson_compile:
-            cmd.append("--poisson_compile")
         if args.compile_adv_diff:
             cmd.append("--compile_adv_diff")
 

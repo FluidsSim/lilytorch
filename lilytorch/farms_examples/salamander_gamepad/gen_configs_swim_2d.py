@@ -24,8 +24,7 @@ class SimConfig(BaseSimConfig):
         self.compute_sdf    = True
         self.stack_folder   = "salamander"
 
-        self.solver_method    = "kernel"
-        self.poisson_compile  = True
+        self.solver_method    = "python"
         # self.compile_adv_diff = True
 
         self.bdim_physics = {"solref": [-100000.0, -2000.0]}
@@ -47,13 +46,13 @@ class SimConfig(BaseSimConfig):
 
         # ── 2-D grid ─────────────────────────────────────────────────
         self.Nx   = 1024
-        self.Ny   = 256
+        self.Ny   = 512
         # self.Nx   = 1024
         # self.Ny   = 256
         self.xmin = -0.4
         self.xmax =  0.4
-        self.ymin = -0.1
-        self.ymax =  0.1
+        self.ymin = -0.2
+        self.ymax =  0.2
 
         # ── Physics ───────────────────────────────────────────────────
         self.poisson_method    = "fft"
@@ -129,7 +128,7 @@ class SimConfig(BaseSimConfig):
             "config": {
                 "field"         : "curl",
                 "nx_vis"        : 1024,
-                "ny_vis"        : 256,
+                "ny_vis"        : 512,
                 "alpha"         : 1,
                 "z_offset"      : 0.015,
                 "smooth_sigma"  : 0,

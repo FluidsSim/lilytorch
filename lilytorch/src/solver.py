@@ -533,7 +533,7 @@ class FluidSolver(PlottingMixin):
             verbose         = solver["poisson_verbose"],
             precond_vcycles = solver.get("poisson_precond_vcycles", 1),
             smoother        = solver.get("poisson_smoother", "rbgs"),
-            compile_smoother= solver.get("poisson_compile", False),
+            use_kernels     = self._use_kernels,
         )
 
         # Warm-start: reuse previous pressure as Poisson initial guess

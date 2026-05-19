@@ -221,9 +221,10 @@ static void apply_bcs_2d_one_line(
     const int Ny,
     const int axis,
     const int dst_along, const int src_along,
-    const bool is_neu, const scalar_t value,
+    const int kind, const scalar_t value,
     const int dim0_max)
 {
+    // kind: 0 = Neumann copy, 1 = Dirichlet direct write, 2 = reflective.
     // Flat layout: base[i, j] = base[i*Ny + j].
     at::parallel_for(0, dim0_max, /*grain_size=*/1024, [&](int64_t _begin, int64_t _end) {
     for (int64_t t = _begin; t < _end; ++t) {
@@ -231,12 +232,14 @@ static void apply_bcs_2d_one_line(
         std::int64_t dst_lin, src_lin = 0;
         if (axis == 0) {
             dst_lin = (std::int64_t)dst_along * Ny + i;
-            if (is_neu) src_lin = (std::int64_t)src_along * Ny + i;
+            if (kind != 1) src_lin = (std::int64_t)src_along * Ny + i;
         } else {
             dst_lin = (std::int64_t)i * Ny + dst_along;
-            if (is_neu) src_lin = (std::int64_t)i * Ny + src_along;
+            if (kind != 1) src_lin = (std::int64_t)i * Ny + src_along;
         }
-        base[dst_lin] = is_neu ? base[src_lin] : value;
+        if      (kind == 0) base[dst_lin] = base[src_lin];
+        else if (kind == 1) base[dst_lin] = value;
+        else                base[dst_lin] = scalar_t(2) * value - base[src_lin];
     }
     });
 }
@@ -247,6 +250,8 @@ void apply_bcs_2d_cpu(
     const at::Tensor& neu_desc,
     const at::Tensor& dir_desc,
     const at::Tensor& dir_val,
+    const at::Tensor& ref_desc,
+    const at::Tensor& ref_val,
     const int64_t /*max_line_dim*/)
 {
     TORCH_CHECK(u.is_contiguous() && v.is_contiguous(),
@@ -262,42 +267,59 @@ void apply_bcs_2d_cpu(
     TORCH_CHECK(dir_desc.scalar_type() == at::kInt && dir_desc.dim() == 2 &&
                 dir_desc.size(1) == 3,
                 "apply_bcs_2d_cpu: dir_desc must be int32[N,3]");
+    TORCH_CHECK(ref_desc.scalar_type() == at::kInt && ref_desc.dim() == 2 &&
+                ref_desc.size(1) == 4,
+                "apply_bcs_2d_cpu: ref_desc must be int32[N,4]");
 
     const int N_neu = (int)neu_desc.size(0);
     const int N_dir = (int)dir_desc.size(0);
-    if (N_neu + N_dir == 0) return;
+    const int N_ref = (int)ref_desc.size(0);
+    if (N_neu + N_dir + N_ref == 0) return;
 
     AT_DISPATCH_FLOATING_TYPES(u.scalar_type(), "apply_bcs_2d_cpu", [&] {
         const int64_t*  shapes_p  = shapes.data_ptr<int64_t>();
         const int*      neu_p     = (N_neu > 0) ? neu_desc.data_ptr<int>() : nullptr;
         const int*      dir_p     = (N_dir > 0) ? dir_desc.data_ptr<int>() : nullptr;
         const scalar_t* dir_val_p = (N_dir > 0) ? dir_val.data_ptr<scalar_t>() : nullptr;
+        const int*      ref_p     = (N_ref > 0) ? ref_desc.data_ptr<int>() : nullptr;
+        const scalar_t* ref_val_p = (N_ref > 0) ? ref_val.data_ptr<scalar_t>() : nullptr;
 
         scalar_t* u_p = u.data_ptr<scalar_t>();
         scalar_t* v_p = v.data_ptr<scalar_t>();
 
-        const int total = N_neu + N_dir;
+        const int total = N_neu + N_dir + N_ref;
         for (int op = 0; op < total; ++op) {
-            const bool is_neu = (op < N_neu);
-            int comp, axis, dst_along, src_along;
+            int kind, comp, axis, dst_along, src_along = 0;
             scalar_t value = scalar_t(0);
 
-            if (is_neu) {
+            if (op < N_neu) {
+                kind = 0;
                 comp = neu_p[op*3 + 0];
                 axis = neu_p[op*3 + 1];
                 const int side = neu_p[op*3 + 2];
                 const int sz = (int)shapes_p[comp*2 + axis];
                 if (side == 0) { dst_along = 0;      src_along = 1; }
                 else           { dst_along = sz - 1; src_along = sz - 2; }
-            } else {
+            } else if (op < N_neu + N_dir) {
                 const int d = op - N_neu;
+                kind = 1;
                 comp = dir_p[d*3 + 0];
                 axis = dir_p[d*3 + 1];
                 const int offset = dir_p[d*3 + 2];
                 const int sz = (int)shapes_p[comp*2 + axis];
                 dst_along = (offset >= 0) ? offset : (sz + offset);
-                src_along = 0;
                 value = dir_val_p[d];
+            } else {
+                const int r = op - N_neu - N_dir;
+                kind = 2;
+                comp = ref_p[r*4 + 0];
+                axis = ref_p[r*4 + 1];
+                const int dst_off = ref_p[r*4 + 2];
+                const int src_off = ref_p[r*4 + 3];
+                const int sz = (int)shapes_p[comp*2 + axis];
+                dst_along = (dst_off >= 0) ? dst_off : (sz + dst_off);
+                src_along = (src_off >= 0) ? src_off : (sz + src_off);
+                value = ref_val_p[r];
             }
 
             const int Nx = (int)shapes_p[comp*2 + 0];
@@ -310,7 +332,7 @@ void apply_bcs_2d_cpu(
 
             apply_bcs_2d_one_line<scalar_t>(
                 base, Ny, axis,
-                dst_along, src_along, is_neu, value,
+                dst_along, src_along, kind, value,
                 dim0_max);
         }
     });

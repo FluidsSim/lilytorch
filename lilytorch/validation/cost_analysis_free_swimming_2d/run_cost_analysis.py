@@ -276,7 +276,12 @@ def instrument_handler(handler):
 
             # ── 2. mu + normals ───────────────────────────────────
             with T("2  mu+normals (recompute)"):
-                _orig_recompute(ffs)
+                # Kernel mode fuses mu+normals into Kernel B during
+                # fluid_step; the python recompute is intentionally
+                # unreachable in step_() and would AttributeError on
+                # ``comp.sdf_val_u`` (not allocated when use_kernels=True).
+                if not ffs._use_kernels:
+                    _orig_recompute(ffs)
 
             # ── 3. Fluid step (2-D PDE) ───────────────────────────
             with T("3  fluid_step (total PDE)"):
@@ -518,7 +523,6 @@ def gen_simulation_config_lean(output_folder):
         solver_cfg = bdim_yaml.get("solver", {})
         if solver_cfg:
             solver_cfg["compile_adv_diff"] = True
-            solver_cfg["poisson_compile"]  = True
             if SOLVER_MODE is not None:
                 solver_cfg["solver_method"] = SOLVER_MODE
 

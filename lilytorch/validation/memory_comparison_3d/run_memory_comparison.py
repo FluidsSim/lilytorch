@@ -257,10 +257,6 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--poisson_compile", action="store_true", default=False,
-        help="Enable torch.compile for the Poisson V-cycle smoother (default: off).",
-    )
-    parser.add_argument(
         "--compile_adv_diff", action="store_true", default=False,
         help="Enable torch.compile for the advection-diffusion solver (default: off).",
     )
@@ -1012,8 +1008,7 @@ def _run_worker(args: argparse.Namespace) -> None:
     print(f" MEMORY SUMMARY — mode={mode}  dim={args.dim}  "
           f"grid={grid_label((args.Nx, args.Ny) if args.dim == 2 else (args.Nx, args.Ny, args.Nz))}"
           f"  n_bodies={args.n_bodies}")
-    print(f"  compile: poisson={getattr(args,'poisson_compile',False)}  "
-          f"adv_diff={getattr(args,'compile_adv_diff',False)}")
+    print(f"  compile: adv_diff={getattr(args,'compile_adv_diff',False)}")
     print(sep)
     print(f"  Persistent baseline (after warmup):  {persistent_mb:8.1f} MB  [torch.cuda.memory_allocated()]")
     print(f"  Step peak (alloc):                   {step_peak:8.1f} MB  [torch.cuda.max_memory_allocated()]")
@@ -1259,7 +1254,6 @@ def _build_cfg(args: argparse.Namespace, mode: str):
     cfg.poisson_warm_start      = True
     cfg.poisson_smoother        = "rbgs"
     cfg.poisson_nsmoothing      = 2
-    cfg.poisson_compile         = getattr(args, 'poisson_compile', False)
     cfg.compile_adv_diff        = getattr(args, 'compile_adv_diff', False)
     cfg.dtype                   = args.dtype
     cfg.timestep                = args.timestep

@@ -88,7 +88,6 @@ class SimConfig(BaseSimConfig):
         self.poisson_precond_vcycles = 1
         self.poisson_warm_start = True
         self.poisson_smoother = "jacobi"
-        # self.poisson_compile = True
         self.poisson_nsmoothing = 5
         self.poisson_bc_type = "neumann"
         self.compile_adv_diff = True

@@ -248,7 +248,13 @@ def instrument_handler(handler):
                 self_h.update(t, iteration, dt=timestep)
 
             with T("2  mu+normals (recompute)"):
-                _orig_recompute(ffs)
+                # Kernel mode fuses mu+normals into Kernel B during
+                # fluid_step, so the python recompute is intentionally
+                # unreachable in step_().  Skip it here too — calling it
+                # would try to read ``comp.sdf_val_u``, which is not
+                # allocated on MultiAnimatBodies when use_kernels=True.
+                if not ffs._use_kernels:
+                    _orig_recompute(ffs)
 
             with T("3  fluid_step (total PDE)"):
                 state = _orig_fluid_step(ffs, *_get_state(), timestep)
@@ -520,7 +526,6 @@ def _apply_cfg_overrides(cfg):
             solver_cfg = bdim_yaml.get("solver", {})
             if solver_cfg:
                 solver_cfg["compile_adv_diff"] = True
-                solver_cfg["poisson_compile"] = True
                 solver_cfg["compile_forces"] = True
                 solver_cfg["dtype"] = args.dtype
                 solver_cfg["poisson_method"] = args.poisson_method

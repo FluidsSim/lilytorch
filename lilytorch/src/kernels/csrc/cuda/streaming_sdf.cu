@@ -1401,32 +1401,47 @@ __global__ void apply_bcs_3d_kernel(
     const int N_neu,
     const int* __restrict__ dir_desc,
     const scalar_t* __restrict__ dir_val,
-    const int N_dir)
+    const int N_dir,
+    const int* __restrict__ ref_desc,
+    const scalar_t* __restrict__ ref_val,
+    const int N_ref)
 {
     const int op = blockIdx.z;
-    const int total = N_neu + N_dir;
+    const int total = N_neu + N_dir + N_ref;
     if (op >= total) return;
 
-    const bool is_neu = (op < N_neu);
-    int comp, axis, dst_along, src_along;
+    // 0 = Neumann copy, 1 = Dirichlet direct write, 2 = reflective.
+    int kind, comp, axis, dst_along, src_along = 0;
     scalar_t value = scalar_t(0);
 
-    if (is_neu) {
+    if (op < N_neu) {
+        kind = 0;
         comp = neu_desc[op * 3 + 0];
         axis = neu_desc[op * 3 + 1];
         const int side = neu_desc[op * 3 + 2];
         const int sz = (int)shapes[comp * 3 + axis];
         if (side == 0) { dst_along = 0;      src_along = 1; }
         else           { dst_along = sz - 1; src_along = sz - 2; }
-    } else {
+    } else if (op < N_neu + N_dir) {
         const int d = op - N_neu;
+        kind = 1;
         comp = dir_desc[d * 3 + 0];
         axis = dir_desc[d * 3 + 1];
         const int offset = dir_desc[d * 3 + 2];
         const int sz = (int)shapes[comp * 3 + axis];
         dst_along = (offset >= 0) ? offset : (sz + offset);
-        src_along = 0;
         value = dir_val[d];
+    } else {
+        const int r = op - N_neu - N_dir;
+        kind = 2;
+        comp = ref_desc[r * 4 + 0];
+        axis = ref_desc[r * 4 + 1];
+        const int dst_off = ref_desc[r * 4 + 2];
+        const int src_off = ref_desc[r * 4 + 3];
+        const int sz = (int)shapes[comp * 3 + axis];
+        dst_along = (dst_off >= 0) ? dst_off : (sz + dst_off);
+        src_along = (src_off >= 0) ? src_off : (sz + src_off);
+        value = ref_val[r];
     }
 
     const int Nx = (int)shapes[comp * 3 + 0];
@@ -1449,17 +1464,18 @@ __global__ void apply_bcs_3d_kernel(
     int64_t dst_lin, src_lin = 0;
     if (axis == 0) {
         dst_lin = (int64_t)dst_along * s1 + (int64_t)i * s2 + j;
-        if (is_neu) src_lin = (int64_t)src_along * s1 + (int64_t)i * s2 + j;
+        if (kind != 1) src_lin = (int64_t)src_along * s1 + (int64_t)i * s2 + j;
     } else if (axis == 1) {
         dst_lin = (int64_t)i * s1 + (int64_t)dst_along * s2 + j;
-        if (is_neu) src_lin = (int64_t)i * s1 + (int64_t)src_along * s2 + j;
+        if (kind != 1) src_lin = (int64_t)i * s1 + (int64_t)src_along * s2 + j;
     } else {
         dst_lin = (int64_t)i * s1 + (int64_t)j * s2 + dst_along;
-        if (is_neu) src_lin = (int64_t)i * s1 + (int64_t)j * s2 + src_along;
+        if (kind != 1) src_lin = (int64_t)i * s1 + (int64_t)j * s2 + src_along;
     }
 
-    if (is_neu) base[dst_lin] = base[src_lin];
-    else        base[dst_lin] = value;
+    if      (kind == 0) base[dst_lin] = base[src_lin];
+    else if (kind == 1) base[dst_lin] = value;
+    else                base[dst_lin] = scalar_t(2) * value - base[src_lin];
 }
 
 void apply_bcs_3d_cuda(
@@ -1468,6 +1484,8 @@ void apply_bcs_3d_cuda(
     const at::Tensor& neu_desc,
     const at::Tensor& dir_desc,
     const at::Tensor& dir_val,
+    const at::Tensor& ref_desc,
+    const at::Tensor& ref_val,
     const int64_t max_dim0,
     const int64_t max_dim1)
 {
@@ -1487,11 +1505,14 @@ void apply_bcs_3d_cuda(
     TORCH_CHECK(dir_desc.scalar_type() == at::kInt && dir_desc.dim() == 2 &&
                 dir_desc.size(1) == 3,
         "apply_bcs_3d: dir_desc must be int32[N,3]");
+    TORCH_CHECK(ref_desc.scalar_type() == at::kInt && ref_desc.dim() == 2 &&
+                ref_desc.size(1) == 4,
+        "apply_bcs_3d: ref_desc must be int32[N,4]");
 
     const int N_neu = (int)neu_desc.size(0);
     const int N_dir = (int)dir_desc.size(0);
-    const int total = N_neu + N_dir;
-    if (total == 0) return;
+    const int N_ref = (int)ref_desc.size(0);
+    if (N_neu + N_dir + N_ref == 0) return;
 
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
     const int TILE = 16;
@@ -1502,20 +1523,39 @@ void apply_bcs_3d_cuda(
     // 4:1:1 grid where max_dim0 = Nx but max_dim1 = Nz = Nx/4).
     const int blocks_x = (int)((max_dim0 + TILE - 1) / TILE);
     const int blocks_y = (int)((max_dim1 + TILE - 1) / TILE);
-    const dim3 grid((unsigned)blocks_x, (unsigned)blocks_y, (unsigned)total);
     const dim3 block(TILE, TILE, 1);
 
+    // Two-stage launch on the same stream:
+    //   Stage 1: Neumann + Direct ops.
+    //   Stage 2: Reflective ops (RMW against adjacent interior — must
+    //            run AFTER stage 1 so any direct write that touched the
+    //            source cell is already committed).
     AT_DISPATCH_FLOATING_TYPES(u.scalar_type(), "apply_bcs_3d_cuda", [&] {
-        apply_bcs_3d_kernel<scalar_t><<<grid, block, 0, stream>>>(
-            u.data_ptr<scalar_t>(),
-            v.data_ptr<scalar_t>(),
-            w.data_ptr<scalar_t>(),
-            shapes.data_ptr<int64_t>(),
-            neu_desc.data_ptr<int>(),
-            N_neu,
-            dir_desc.data_ptr<int>(),
-            dir_val.data_ptr<scalar_t>(),
-            N_dir);
+        const int stage1 = N_neu + N_dir;
+        if (stage1 > 0) {
+            const dim3 grid1((unsigned)blocks_x, (unsigned)blocks_y, (unsigned)stage1);
+            apply_bcs_3d_kernel<scalar_t><<<grid1, block, 0, stream>>>(
+                u.data_ptr<scalar_t>(),
+                v.data_ptr<scalar_t>(),
+                w.data_ptr<scalar_t>(),
+                shapes.data_ptr<int64_t>(),
+                (N_neu > 0) ? neu_desc.data_ptr<int>() : nullptr, N_neu,
+                (N_dir > 0) ? dir_desc.data_ptr<int>() : nullptr,
+                (N_dir > 0) ? dir_val.data_ptr<scalar_t>() : nullptr, N_dir,
+                /*ref_desc=*/nullptr, /*ref_val=*/nullptr, /*N_ref=*/0);
+        }
+        if (N_ref > 0) {
+            const dim3 grid2((unsigned)blocks_x, (unsigned)blocks_y, (unsigned)N_ref);
+            apply_bcs_3d_kernel<scalar_t><<<grid2, block, 0, stream>>>(
+                u.data_ptr<scalar_t>(),
+                v.data_ptr<scalar_t>(),
+                w.data_ptr<scalar_t>(),
+                shapes.data_ptr<int64_t>(),
+                /*neu_desc=*/nullptr, /*N_neu=*/0,
+                /*dir_desc=*/nullptr, /*dir_val=*/nullptr, /*N_dir=*/0,
+                ref_desc.data_ptr<int>(),
+                ref_val.data_ptr<scalar_t>(), N_ref);
+        }
     });
 }
 

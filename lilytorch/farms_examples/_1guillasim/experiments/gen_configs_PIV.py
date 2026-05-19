@@ -74,7 +74,6 @@ class SimConfig(BaseSimConfig):
         self.zero_pressure_inside    = True
 
         # Disable compilation to speed up startup
-        self.poisson_compile         = False
         self.compile_adv_diff        = False
 
         # ── Boundary conditions (3-D, Dirichlet inlet) ───────────────
