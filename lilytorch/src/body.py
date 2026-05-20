@@ -37,6 +37,10 @@ def _import_measure():
     from skimage import measure
     return measure
 
+def _import_ndimage():
+    from scipy import ndimage
+    return ndimage
+
 def _import_cubic_spline():
     from scipy.interpolate import CubicSpline
     return CubicSpline
@@ -1880,6 +1884,8 @@ class BodyMesh(Body):
     def _compute_sdfs_3d(self, pad):
         """Build a 3-D SDF field from the mesh using open3d + skfmm."""
         skfmm = _import_skfmm()
+        measure = _import_measure()
+        ndimage = _import_ndimage()
         centres = [(self.bb[i, 1] + self.bb[i, 0]) / 2 for i in range(3)]
         halves = [(self.bb[i, 1] - self.bb[i, 0]) / 2 + float(pad) for i in range(3)]
         xnp = np.linspace(centres[0] - halves[0], centres[0] + halves[0], self.nsamples)
@@ -1894,7 +1900,29 @@ class BodyMesh(Body):
         if self.plotting:
             self.m2s.visualize()
 
-        binary_3d = np.where(sdf_val_o3d.reshape(X.shape) < 0, -1, 1)
+        inside_mask = sdf_val_o3d.reshape(X.shape) < 0
+
+        # Non-watertight meshes (small holes, near-coincident triangles at
+        # link joints, self-intersections) make open3d's ray-parity sign
+        # test flip in a handful of voxels.  Without cleanup, skfmm.distance
+        # then propagates from every disconnected piece of zero level-set
+        # it finds, producing spurious positive isolas inside the body and
+        # tiny negative specks far from the surface.  Mirror the 2-D path
+        # and patch both pathologies before fast marching.
+        filled = ndimage.binary_fill_holes(inside_mask)
+        n_pockets = int(np.count_nonzero(filled & ~inside_mask))
+        if n_pockets > 0:
+            print(f"  filled {n_pockets} internal outside-pockets (non-watertight mesh)")
+        inside_mask = filled
+
+        labels = measure.label(inside_mask, connectivity=1)
+        component_ids, component_sizes = np.unique(labels[labels > 0], return_counts=True)
+        tiny_components = component_ids[component_sizes < 8]
+        if len(tiny_components) > 0:
+            print(f"  dropped {len(tiny_components)} tiny inside-islands")
+            inside_mask = inside_mask & ~np.isin(labels, tiny_components)
+
+        binary_3d = np.where(inside_mask, -1, 1)
 
         dx, dy, dz = xnp[1] - xnp[0], ynp[1] - ynp[0], znp[1] - znp[0]
         print(f"  skfmm distance with spacing ({dx:.6f},{dy:.6f},{dz:.6f})")

@@ -176,6 +176,15 @@ class BaseSimConfig:
         self.sdf_interp_method       = None
         # Fluid-explosion guard (forwarded into bdim_yaml.solver)
         self.vmax_abort              = None   # m/s; None = auto
+        # BDIM interface-thickness multiplier: eps = eps_multiplier * h.
+        # Default 2.0 in the solver.  For mesh bodies set to 1.5 or lower
+        # (min ~1.0) to reduce the effective body size and drag inflation.
+        self.eps_multiplier          = None   # None → solver default (2.0)
+        # Delta-function order for force integration:
+        #   1 (default) – first-order smoothed delta
+        #   2           – Towers (2008) correction δ/|∇φ|, recommended for
+        #                 mesh bodies where |∇SDF| ≠ 1 near joints/corners.
+        self.force_delta_order       = None   # None → solver default (1)
 
         # ── BDIM boundary conditions ──────────────────────────────────────
         # 2-D: 4 entries;  3-D: 6 entries
@@ -719,6 +728,8 @@ class BaseSimConfig:
             ("use_kernels",             self.use_kernels),
             ("sdf_interp_method",       self.sdf_interp_method),
             ("vmax_abort",              self.vmax_abort),
+            ("eps_multiplier",          self.eps_multiplier),
+            ("force_delta_order",       self.force_delta_order),
         ]:
             if val is not None:
                 solver[key] = val

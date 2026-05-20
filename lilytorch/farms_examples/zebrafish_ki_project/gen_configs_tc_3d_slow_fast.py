@@ -26,8 +26,6 @@ class SimConfig(BaseSimConfig):
 
     def __init__(self):
 
-        self.freqs = [3,8,12]
-
         super().__init__()
 
         self.data_folder = os.path.join(
@@ -39,11 +37,12 @@ class SimConfig(BaseSimConfig):
         )
 
         # ── Hardware ──────────────────────────────────────────────────
-        self.compute_sdf = True
-        self.use_gpu     = True
-        self.use_bdim    = True
-        self.use_drag    = False
-        self.headless    = False
+        self.compute_sdf    = True
+        self.use_gpu        = True
+        self.use_bdim       = True
+        self.use_drag       = False
+        self.headless       = False
+        self.water_buoyancy = True
 
         # ── Animats ───────────────────────────────────────────────────
         self.filter_fixed_joints = False
@@ -51,7 +50,7 @@ class SimConfig(BaseSimConfig):
         self.animats_pars = [
 
             {
-                "sdf_file"       : os.path.join(sdfs_path, "zebrafish", "zebrafish_v1_triangulated", "sdf", "zebrafish_old.sdf"),
+                "sdf_file"       : os.path.join(sdfs_path, "zebrafish", "zebrafish_v1_triangulated", "sdf", "zebrafish.sdf"),
                 "control_type" : "torque",
                 "muscle_loader": "farms_ekeberg.src.ekeberg.EkebergMuscleController",
                 "muscle_config": {
@@ -81,10 +80,23 @@ class SimConfig(BaseSimConfig):
         ]
 
         # ── 3-D grid ─────────────────────────────────────────────────
-        # Body length ~4 mm; domain ~10× body length in x
-        # self.Nx   = 1024
-        # self.Ny   = 256
-        # self.Nz   = 128
+        # Fish body length ~17 mm, cross-section radius ~0.65 mm.
+        # BDIM accuracy requires ε/r < 0.3 where ε = 2h.
+        # 512×128×64  → h≈0.195 mm, ε/r≈0.60 → ~1.6× speed deficit (current)
+        # 1024×256×128 → h≈0.098 mm, ε/r≈0.30 → ~1.3× deficit (recommended)
+        # 2048×512×256 → h≈0.049 mm, ε/r≈0.15 → within ~5% (accurate but costly)
+
+        # self.Nx   = 256
+        # self.Ny   = 64
+        # self.Nz   = 64
+
+        # self.xmin = -0.02
+        # self.xmax =  0.03
+        # self.ymin = -0.00625
+        # self.ymax =  0.00625
+        # self.zmin = -0.00625
+        # self.zmax =  0.00625
+
 
         self.Nx   = 512
         self.Ny   = 128
@@ -97,27 +109,38 @@ class SimConfig(BaseSimConfig):
         self.zmin = -0.00625
         self.zmax =  0.00625
 
+        # self.Nx   = 1024
+        # self.Ny   = 256
+        # self.Nz   = 128
+
+
+        # self.xmin = -0.02
+        # self.xmax =  0.18
+        # self.ymin = -0.025
+        # self.ymax =  0.025
+        # self.zmin = -0.0125
+        # self.zmax =  0.0125
+
         # ── Physics ───────────────────────────────────────────────────
         self.rho_body          = 1000.0
+        # self.timestep          = 0.0005
+        # self.convection_method = "quick"
         self.timestep          = 0.0005
-        self.convection_method = "quick"
-        self.n_iterations      = 5001
+        self.convection_method = "abdquickest"
+        self.n_iterations      = 2001
         self.save_every        = 50
-        self.cb_sub_steps      = 2
+        # self.cb_sub_steps      = 2
         self.vmin              = -10.0
         self.vmax              = 10.0
         self.save              = False
 
-        # ── MuJoCo ───────────────────────────────────────────────────
-        self.visual_scale = 100.0
-        self.extent       = 10.0
 
         # ── Arena ────────────────────────────────────────────────────
         self.wall_thickness = 0.003
         self.wall_height    = 0.01
 
         # ── BDIM solver ──────────────────────────────────────────────
-        self.dtype                   = "float64"
+        self.dtype                   = "float32"
         self.zero_pressure_inside    = True
         self.bdim_dt                 = self.timestep
         self.bdim_nt                 = self.n_iterations + 1
@@ -131,13 +154,16 @@ class SimConfig(BaseSimConfig):
         self.poisson_nsmoothing      = 5
         self.poisson_bc_type         = "neumann"
         self.compile_adv_diff        = True
+        # order-2 delta (Towers 2008) corrects |∇SDF|≠1 at mesh joints/corners;
+        # recommended for mesh bodies, no-op for analytical SDFs.
+        self.force_delta_order       = 2
 
-        # ── Boundary conditions (3-D, all Dirichlet no-slip) ────────
-        self.bc_type_u   = ["D", "D", "N", "N", "N", "N"]
+        # ── Boundary conditions (3-D, all Neumann / zero-gradient) ──
+        self.bc_type_u   = ["N", "N", "N", "N", "N", "N"]
         self.bc_values_u = [0, 0, 0, 0, 0, 0]
-        self.bc_type_v   = ["N", "N", "D", "D", "N", "N"]
+        self.bc_type_v   = ["N", "N", "N", "N", "N", "N"]
         self.bc_values_v = [0, 0, 0, 0, 0, 0]
-        self.bc_type_w   = ["N", "N", "N", "N", "D", "D"]
+        self.bc_type_w   = ["N", "N", "N", "N", "N", "N"]
         self.bc_values_w = [0, 0, 0, 0, 0, 0]
 
         # ── Body ─────────────────────────────────────────────────────
@@ -146,7 +172,7 @@ class SimConfig(BaseSimConfig):
 
         # ── MuJoCo ───────────────────────────────────────────────────
         self.visual_scale = 20.0
-        self.extent       = 10.0
+        self.extent       = 3.0
         self.camera_dist  = 0.1
 
         self.iso_3d_specs = [
@@ -173,51 +199,100 @@ class SimConfig(BaseSimConfig):
         #     },
         # })
 
+        # extensions.append({
+        #     "loader": "lilytorch.integration.particle_viewer.ParticleViewer",
+        #     "config": {
+        #         "max_particles"   : 800000,
+        #         "seed_n_particles": 3,
+        #         "seed_interval"   : 1,
+        #         "turb_diffusivity": 0.,
+        #         "sphere_size"     : 0.0001,
+        #         "particle_color"  : [255/256, 0.0, 166/256, 0.85],   #FF00A6
+        #         "trail_length"    : 0,
+        #         "update_every"    : None,
+        #         "n_z_layers"      : 3,
+        #         "floor_color"     : "#FFFFFF",                       # dark blue floor
+        #         "save_particles"   : True,
+        #         "save_dir"         : os.path.join(output_folder, "particles"),
+        #         "save_every"       : self.save_every,
+        #     }
+        # })
+
         extensions.append({
-            "loader": "lilytorch.integration.particle_viewer.ParticleViewer",
+            "loader": "lilytorch.integration.flow_iso_gl_viewer.FlowIsoGLViewer",
             "config": {
-                "max_particles"   : 800000,
-                "seed_n_particles": 3,
-                "seed_interval"   : 1,
-                "turb_diffusivity": 0.,
-                "sphere_size"     : 0.0001,
-                "particle_color"  : [255/256, 0.0, 166/256, 0.85],   #FF00A6
-                "trail_length"    : 0,
-                "update_every"    : None,
-                "n_z_layers"      : 1,
-                "floor_color"     : "#FFFFFF",                       # dark blue floor
-                "save_particles"   : True,
-                "save_dir"         : os.path.join(output_folder, "particles"),
-                "save_every"       : self.save_every,
-            }
+                "field"              : "omega_z",
+                "alpha"              : 0.2,
+                "update_every"       : 1,
+                "max_vertices"       : 300000,
+                "smooth_sigma"       : 0, # heavier smoothing → fewer noisy lobes
+                "crop_boundary"      : 0, # drop 8 cells per face → kills wall noise
+                "exclude_body"       : True,
+                "iso_value"          : 30.0,
+                "debug_force_visible": False,
+                "record_viewer"      : True,
+                "record_path"        : os.path.join(output_folder, "output", "viewer.mp4"),
+                "record_fps"         : 30.0,
+            },
         })
 
-
-
-
-    # def extra_simulation_extensions(self, output_folder):
-    #     extensions = []
-
-        # # Top-down camera auto-fitted to the domain
-        # cam = top_down_camera_config(
-        #     self.xmin, self.xmax,
-        #     self.ymin, self.ymax,
-        #     self.zmin, self.zmax,
-        #     overshoot=1,
+        # extensions.append({
+        #     "loader": "lilytorch.integration.flow_iso_viewer.FlowIsoViewer",
+        #     "config": {
+        #         "field": "omega_z",
+        #         "max_tiles": 8000,
+        #         "iso_fraction": 0.15,
+        #         "smooth_sigma": 0,
+        #         "crop_boundary": 3,
+        #         "tile_size": 0.0005,
+        #         "tile_thickness": 0.0001,
+        #         "tile_alpha": 0.7,
+        #     },
+        # },
         # )
+
+        # Top-down camera auto-fitted to the domain
+        cam = top_down_camera_config(
+            self.xmin, self.xmax,
+            self.ymin, self.ymax,
+            self.zmin, self.zmax,
+            overshoot=1,
+        )
         extensions.append({
             "loader": "farms_mujoco.sensors.camera.CameraRecording",
             "config": {
                 "path"            : os.path.join(output_folder, "output", "video.mp4"),
                 "animat_id"       : None,
                 "fps"             : 30,
-                "speed"           : 1.0,
+                "speed"           : 0.1,
                 "angular_velocity": 0,
-                # **cam,
+                **cam,
             },
         })
 
         return extensions
+
+    def single_run(self, index=0):
+        import subprocess
+        from lilytorch.util.paths import gen_new_folder
+        from lilytorch.integration.flow_viewer_2d_gpu import prepare_flow_viewer_2d_gpu_env
+        from lilytorch.integration.flow_iso_gl_viewer import prepare_iso_gl_hook_env
+
+        output_folder = gen_new_folder(self.stack_folder)
+        os.makedirs(output_folder, exist_ok=True)
+        print("Saving configs to folder:", output_folder)
+        self.gen_animat_config(output_folder, index)
+        self.gen_arena_config(output_folder, index)
+        self.gen_simulation_config(output_folder, index)
+        self.gen_experiment_config(output_folder, index)
+        self.gen_sh_config(output_folder, index)
+        os.chdir(output_folder)
+
+        env = prepare_flow_viewer_2d_gpu_env(
+            os.environ.copy(), self._generated_simulation_extensions,
+        )
+        env = prepare_iso_gl_hook_env(env, self._generated_simulation_extensions)
+        subprocess.run(['bash', 'run.sh'], check=True, env=env)
 
 
 if __name__ == "__main__":

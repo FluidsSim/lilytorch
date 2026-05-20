@@ -116,8 +116,8 @@ def main():
     parser.add_argument(
         "--bl",
         type=float,
-        default=0.02,
-        help="Body length in metres for normalisation (default: 0.02 m).",
+        default=0.017,
+        help="Body length in metres for normalisation (default: 0.017 m).",
     )
     parser.add_argument(
         "--out",

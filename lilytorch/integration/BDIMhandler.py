@@ -1679,16 +1679,20 @@ class BDIMhandler:
     def _apply_forces(self, task, physics):
         """Dim-agnostic fluid → body force application via MuJoCo xfrc.
 
-        Replaces the legacy ``_apply_forces_2d`` / ``_apply_forces_3d``
-        pair (Step 6 of the 2-D/3-D unification refactor).  The per-D
-        xfrc index map, buoyancy axis, and FluidSolver field names are
-        precomputed in :meth:`_init_apply_forces`, so this method has
-        zero per-step Python branching on ``ndim`` or ``_2d_plane``.
+        Per-D xfrc index map, buoyancy axis, and FluidSolver field names
+        are precomputed in :meth:`_init_apply_forces`, so this method
+        has zero per-step Python branching on ``ndim`` or ``_2d_plane``.
 
         FARMS-style buoyancy is applied additively to a single linear
         xfrc index (``_buoyancy_xfrc_idx``); for the 2-D xy plane, where
         no buoyancy is needed, that index is ``None`` and the buoyancy
         block is skipped entirely.
+
+        This method only reads cached force tensors on the FluidSolver
+        (``friction_force_*``, ``pressure_force_*``) — it does not
+        advance the fluid solver, so it is safe to call once per MuJoCo
+        substep to keep ``xfrc_applied`` fresh between full BDIM steps
+        (mirroring ``SwimmingExtension`` with ``substep=True``).
         """
         fs = self.fluid_solver
         s  = self.force_scaling

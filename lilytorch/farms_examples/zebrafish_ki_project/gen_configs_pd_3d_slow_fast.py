@@ -1,0 +1,205 @@
+
+import csv
+import os
+from farms_core.model.options import SpawnMode
+from lilytorch.util.paths import lilytorch_repo_root, sdfs_path
+from lilytorch.farms_examples.base_sim_config import BaseSimConfig
+from lilytorch.integration.camera import top_down_camera_config
+
+
+def _load_drags_csv(path):
+    """Load per-link drag coefficients from *path*."""
+    drags = []
+    with open(path, newline="") as f:
+        for row in csv.DictReader(f):
+            drags.append([
+                [float(row["lin_x"]),  float(row["lin_y"]),  float(row["lin_z"])],
+                [float(row["quad_x"]), float(row["quad_y"]), float(row["quad_z"])],
+            ])
+    return drags
+
+class SimConfig(BaseSimConfig):
+
+    def __init__(self):
+
+        super().__init__()
+
+        self.data_folder = os.path.join(
+            lilytorch_repo_root, 'farms_examples', 'zebrafish_ki_project',
+        )
+
+        self.constant_drags = _load_drags_csv(
+            os.path.join(self.data_folder, "drag_coefficients.csv")
+        )
+
+        # ── Hardware ──────────────────────────────────────────────────
+        self.compute_sdf    = True
+        self.use_gpu        = True
+        self.use_bdim       = False
+        self.use_drag       = True
+        self.headless       = False
+        self.water_buoyancy = True
+
+        # ── Animats ───────────────────────────────────────────────────
+        self.filter_fixed_joints = False
+
+        self.animats_pars = [
+
+            {
+                "sdf_file"       : os.path.join(sdfs_path, "zebrafish", "zebrafish_v1_triangulated", "sdf", "zebrafish.sdf"),
+                "control_type"   : "position",
+                "controller_path": "lilytorch.farms_examples.zebrafish_ki_project.pd_controller.PositionController",
+                "control_pars"   : {
+                    "data_folder": self.data_folder,
+                    "mode"       : "slow",
+                },
+                "gains"     : [0.001, 0.00002, 0],
+                "spawn_mode": SpawnMode.TRANSVERSE,
+                "pose"      : [0, 0, 0, 0, 0, 3.141592653589793],
+            },
+
+        ]
+
+        # ── 3-D grid ─────────────────────────────────────────────────
+        # Fish body length ~17 mm, cross-section radius ~0.65 mm.
+        # BDIM accuracy requires ε/r < 0.3 where ε = 2h.
+        # 512×128×64  → h≈0.195 mm, ε/r≈0.60 → ~1.6× speed deficit (current)
+        # 1024×256×128 → h≈0.098 mm, ε/r≈0.30 → ~1.3× deficit (recommended)
+        # 2048×512×256 → h≈0.049 mm, ε/r≈0.15 → within ~5% (accurate but costly)
+
+        self.Nx   = 512
+        self.Ny   = 128
+        self.Nz   = 64
+
+        self.xmin = -0.02
+        self.xmax =  0.08
+        self.ymin = -0.0125
+        self.ymax =  0.0125
+        self.zmin = -0.00625
+        self.zmax =  0.00625
+
+        # ── Physics ───────────────────────────────────────────────────
+        self.rho_body          = 1000.0
+        self.timestep          = 0.0001
+        self.convection_method = "abdquickest"
+        self.n_iterations      = 10001
+        self.save_every        = 50
+        self.vmin              = -10.0
+        self.vmax              = 10.0
+        self.save              = False
+
+
+        # ── Arena ────────────────────────────────────────────────────
+        self.wall_thickness = 0.003
+        self.wall_height    = 0.01
+
+        # ── BDIM solver ──────────────────────────────────────────────
+        self.dtype                   = "float32"
+        self.zero_pressure_inside    = False
+        self.bdim_dt                 = self.timestep
+        self.bdim_nt                 = self.n_iterations + 1
+        self.poisson_tol             = 1.0e-4
+        self.poisson_max_cycles      = 30
+        self.poisson_max_mgcg_cycles = 10
+        self.poisson_precond_vcycles = 1
+        self.poisson_warm_start      = False
+        self.poisson_method          = "multigrid"
+        self.poisson_smoother        = "jacobi"
+        self.poisson_nsmoothing      = 5
+        self.poisson_bc_type         = "neumann"
+        self.compile_adv_diff        = True
+        # order-2 delta (Towers 2008) corrects |∇SDF|≠1 at mesh joints/corners;
+        # recommended for mesh bodies, no-op for analytical SDFs.
+        self.force_delta_order       = 2
+
+        # ── Boundary conditions (3-D, all Neumann / zero-gradient) ──
+        self.bc_type_u   = ["N", "N", "N", "N", "N", "N"]
+        self.bc_values_u = [0, 0, 0, 0, 0, 0]
+        self.bc_type_v   = ["N", "N", "N", "N", "N", "N"]
+        self.bc_values_v = [0, 0, 0, 0, 0, 0]
+        self.bc_type_w   = ["N", "N", "N", "N", "N", "N"]
+        self.bc_values_w = [0, 0, 0, 0, 0, 0]
+
+        # ── Body ─────────────────────────────────────────────────────
+        self.convexify             = False
+        self.interp_data_subfolder = "interp_data"
+
+        # ── MuJoCo ───────────────────────────────────────────────────
+        self.visual_scale = 20.0
+        self.extent       = 3.0
+        self.camera_dist  = 0.1
+
+        self.iso_3d_specs = [
+            {"name": "omega_mag", "iso_value": 80.0},
+            {"name": "vel_mag",   "iso_value": 2e-02},
+        ]
+
+    # ── Extensions ────────────────────────────────────────────────────
+
+    def extra_simulation_extensions(self, output_folder):
+        extensions = []
+
+        extensions.append({
+            "loader": "lilytorch.integration.flow_iso_gl_viewer.FlowIsoGLViewer",
+            "config": {
+                "field"              : "omega_z",
+                "alpha"              : 0.2,
+                "update_every"       : 1,
+                "max_vertices"       : 300000,
+                "smooth_sigma"       : 0,
+                "crop_boundary"      : 0,
+                "exclude_body"       : True,
+                "iso_value"          : 30.0,
+                "debug_force_visible": False,
+                "record_viewer"      : True,
+                "record_path"        : os.path.join(output_folder, "output", "viewer.mp4"),
+                "record_fps"         : 30.0,
+            },
+        })
+
+        # Top-down camera auto-fitted to the domain
+        cam = top_down_camera_config(
+            self.xmin, self.xmax,
+            self.ymin, self.ymax,
+            self.zmin, self.zmax,
+            overshoot=1,
+        )
+        extensions.append({
+            "loader": "farms_mujoco.sensors.camera.CameraRecording",
+            "config": {
+                "path"            : os.path.join(output_folder, "output", "video.mp4"),
+                "animat_id"       : None,
+                "fps"             : 30,
+                "speed"           : 0.1,
+                "angular_velocity": 0,
+                **cam,
+            },
+        })
+
+        return extensions
+
+    def single_run(self, index=0):
+        import subprocess
+        from lilytorch.util.paths import gen_new_folder
+        from lilytorch.integration.flow_viewer_2d_gpu import prepare_flow_viewer_2d_gpu_env
+        from lilytorch.integration.flow_iso_gl_viewer import prepare_iso_gl_hook_env
+
+        output_folder = gen_new_folder(self.stack_folder)
+        os.makedirs(output_folder, exist_ok=True)
+        print("Saving configs to folder:", output_folder)
+        self.gen_animat_config(output_folder, index)
+        self.gen_arena_config(output_folder, index)
+        self.gen_simulation_config(output_folder, index)
+        self.gen_experiment_config(output_folder, index)
+        self.gen_sh_config(output_folder, index)
+        os.chdir(output_folder)
+
+        env = prepare_flow_viewer_2d_gpu_env(
+            os.environ.copy(), self._generated_simulation_extensions,
+        )
+        env = prepare_iso_gl_hook_env(env, self._generated_simulation_extensions)
+        subprocess.run(['bash', 'run.sh'], check=True, env=env)
+
+
+if __name__ == "__main__":
+    SimConfig().single_run()
