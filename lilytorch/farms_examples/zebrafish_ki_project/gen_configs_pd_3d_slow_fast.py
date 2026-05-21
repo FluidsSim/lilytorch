@@ -36,9 +36,15 @@ class SimConfig(BaseSimConfig):
         # ── Hardware ──────────────────────────────────────────────────
         self.compute_sdf    = True
         self.use_gpu        = True
-        self.use_bdim       = True
+        self.use_bdim       = False
         self.headless       = False
         self.water_buoyancy = True
+
+        self.bdim_physics = {
+            "solref": [-2e4, -30e1],
+            "solimp": [0., 0.95, 0.001, 0.5, 2],
+        }
+
 
         # ── Animats ───────────────────────────────────────────────────
         self.filter_fixed_joints = False
@@ -52,9 +58,9 @@ class SimConfig(BaseSimConfig):
                 "control_pars"   : {
                     "data_folder"        : self.data_folder,
                     "mode"               : "slow",
-                    "kinematics_sampling": 0.00025,  # xlsx recorded at 4000 Hz
+                    "kinematics_sampling": 0.00025,
                 },
-                "gains"     : [0.6, 0.0002, 0],
+                "gains"     : [0.2, 0.001, 0],
                 "spawn_mode": SpawnMode.TRANSVERSE,
                 "pose"      : [0, 0, 0, 0, 0, 3.141592653589793],
             },
@@ -94,7 +100,7 @@ class SimConfig(BaseSimConfig):
         self.vmax              = 10.0
         self.save              = False
 
-        self.eps_multiplier = 2.0
+        self.eps_multiplier = 1.0
         # BDIM-σ correction for thin zebrafish body links (r < eps).
         # self.apply_bdim_sigma = True
 
@@ -112,13 +118,13 @@ class SimConfig(BaseSimConfig):
         self.poisson_max_mgcg_cycles = 10
         self.poisson_precond_vcycles = 1
         self.poisson_warm_start      = False
-        self.poisson_method          = "fft"
+        self.poisson_method          = "multigrid"
         self.poisson_smoother        = "jacobi"
         self.poisson_nsmoothing      = 5
         self.poisson_bc_type         = "neumann"
         self.compile_adv_diff        = True
-        self.force_delta_order       = 2
-        self.sdf_interp_method       = "triquadratic"
+        # self.force_delta_order       = 2
+        # self.sdf_interp_method       = "triquadratic"
 
         # ── Boundary conditions (3-D, all Neumann / zero-gradient) ──
         self.bc_type_u   = ["D", "D", "N", "N", "N", "N"]
@@ -164,15 +170,19 @@ class SimConfig(BaseSimConfig):
         extensions.append({
             "loader": "lilytorch.integration.flow_iso_gl_viewer.FlowIsoGLViewer",
             "config": {
-                "field"              : "omega_mag",
+                "field"              : "omega_z",
+                # "field"              : "omega_mag",
                 "alpha"              : 0.25,
                 "update_every"       : 1,
                 "max_vertices"       : 4 * self.Nx * self.Ny,
                 "smooth_sigma"       : 0,
                 "crop_boundary"      : 0,
                 "exclude_body"       : True,
-                "iso_value"          : 80.0,
+                "iso_value"          : 40.0,
                 "debug_force_visible": False,
+                "color_uni"          : "#00FFFF",
+                "color_pos"          : "#FF4500",
+                "color_neg"          : "#00FFFF",
             },
         })
 
@@ -192,6 +202,7 @@ class SimConfig(BaseSimConfig):
                 "fps"             : 30,
                 "speed"           : 0.1,
                 "angular_velocity": 0,
+                "resolution"      : [3840, 2160],
                 **cam,
             },
         })

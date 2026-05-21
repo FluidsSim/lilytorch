@@ -92,7 +92,6 @@ class SimConfig(BaseSimConfig):
         # ── Body ─────────────────────────────────────────────────────
         self.contour_mask = False
         self.zero_pressure_inside = True
-        # self.n_samples    = (2000, 2000)
 
     # ── Hooks ─────────────────────────────────────────────────────────
     def customize_joint_initials(self, joints_list):

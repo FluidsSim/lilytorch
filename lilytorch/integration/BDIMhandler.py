@@ -17,6 +17,8 @@ New config keys (add to ``bdim_yaml``):
     body.force_scaling           : "auto" | float          (default "auto")
     body.contour_mask            : bool                    (default False)
     physics.solref               : [float, float] | null   (default null)
+    physics.solimp               : [float, float, float, float, float] | null
+                                   (default null)
 """
 
 import numpy as np
@@ -183,11 +185,19 @@ class BDIMhandler:
             self.water_surface = 0.0
         self._buoyancy_initialized = False
 
-        # ---- optional physics solref tweak ----
+        # ---- optional physics contact tweaks ----
         solref = self.pars.get("physics", {}).get("solref", None)
         if solref is not None:
             physics.model.geom_solref[:, 0] = solref[0]
             physics.model.geom_solref[:, 1] = solref[1]
+        solimp = self.pars.get("physics", {}).get("solimp", None)
+        if solimp is not None:
+            physics.model.geom_solimp[:, 0] = solimp[0]
+            physics.model.geom_solimp[:, 1] = solimp[1]
+            physics.model.geom_solimp[:, 2] = solimp[2]
+            physics.model.geom_solimp[:, 3] = solimp[3]
+            physics.model.geom_solimp[:, 4] = solimp[4]
+
 
 
         # ---- allocate per-body SDF / velocity arrays if missing ----

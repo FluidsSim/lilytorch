@@ -35,7 +35,7 @@ class PositionController(KinematicsController):
         data_folder = config["data_folder"]
         mode = config["mode"]
         if mode == "slow":
-            file_path = os.path.join(data_folder, "joints_positions_slow.xlsx")
+            file_path = os.path.join(data_folder, "joints_positions_slow_sigmoid.xlsx")
         elif mode == "fast":
             file_path = os.path.join(data_folder, "joints_positions_fast.xlsx")
         else:

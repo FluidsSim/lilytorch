@@ -923,6 +923,9 @@ class FlowIsoGLViewer(_BaseExtension):
         show_time: bool = True,
         time_format: str = "t = {t:.3f} s",
         time_grid_pos: int = 0,
+        color_pos: str | tuple[float, float, float] = (0.95, 0.20, 0.18),
+        color_neg: str | tuple[float, float, float] = (0.18, 0.40, 0.95),
+        color_uni: str | tuple[float, float, float] = (0.95, 0.55, 0.20),
     ):
         super().__init__()
         self.experiment_options = experiment_options
@@ -958,6 +961,9 @@ class FlowIsoGLViewer(_BaseExtension):
         self.show_time = bool(show_time)
         self.time_format = str(time_format)
         self.time_grid_pos = int(time_grid_pos)
+        self.color_pos = self._parse_iso_color(color_pos)
+        self.color_neg = self._parse_iso_color(color_neg)
+        self.color_uni = self._parse_iso_color(color_uni)
 
         self._fluid_ext = None
         self._field_fn = FIELD_MAP.get(field)
@@ -971,6 +977,14 @@ class FlowIsoGLViewer(_BaseExtension):
         # Persistent device buffer for the interleaved mesh (avoids
         # reallocation per frame; resized only when overflowing).
         self._mesh_buffer: torch.Tensor | None = None
+
+    @staticmethod
+    def _parse_iso_color(c) -> tuple[float, float, float]:
+        """Accept an RGB hex string ('#RRGGBB') or a (R, G, B) float tuple."""
+        if isinstance(c, str):
+            h = c.lstrip("#")
+            return tuple(int(h[i:i+2], 16) / 255.0 for i in range(0, 6, 2))
+        return tuple(float(v) for v in c)
 
     # FARMS factory
     @classmethod
@@ -998,6 +1012,9 @@ class FlowIsoGLViewer(_BaseExtension):
             show_time=config.get("show_time", True),
             time_format=config.get("time_format", "t = {t:.3f} s"),
             time_grid_pos=config.get("time_grid_pos", 0),
+            color_pos=config.get("color_pos", (0.95, 0.20, 0.18)),
+            color_neg=config.get("color_neg", (0.18, 0.40, 0.95)),
+            color_uni=config.get("color_uni", (0.95, 0.55, 0.20)),
         )
 
     # ── lifecycle ────────────────────────────────────────────────────────
@@ -1328,10 +1345,10 @@ class FlowIsoGLViewer(_BaseExtension):
             chunks.append(torch.cat([tri_pos, n, color], dim=1))
 
         if bipolar:
-            _run(threshold,  (0.95, 0.20, 0.18), sign=+1.0)
-            _run(-threshold, (0.18, 0.40, 0.95), sign=-1.0)
+            _run(threshold,  self.color_pos, sign=+1.0)
+            _run(-threshold, self.color_neg, sign=-1.0)
         else:
-            _run(threshold,  (0.95, 0.55, 0.20), sign=+1.0)
+            _run(threshold,  self.color_uni, sign=+1.0)
 
         if not chunks:
             return None

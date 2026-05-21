@@ -154,7 +154,7 @@ class SimConfig(BaseSimConfig):
                 "seed_interval"   : 1,
                 "turb_diffusivity": 0.0000,
                 "sphere_size"     : 0.003,
-                "particle_color"  : [255/256, 0.0, 166/256, 0.6],
+                "particle_color"  : "#FF00A699",
                 "trail_length"    : 0,
                 "update_every"    : None,
                 "n_z_layers"      : 1,

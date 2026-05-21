@@ -636,12 +636,37 @@ class BaseSimConfig:
 
     def gen_sh_config(self, output_folder, index=0):
         camera_dist = getattr(self, 'camera_dist', 3.0)
+
+        # Write the offscreen-buffer fix to a helper file so we avoid
+        # shell-quoting issues with complex multi-line Python inside -c "...".
+        # It patches setup_mjcf_xml to widen MuJoCo's offscreen framebuffer
+        # to match the largest CameraRecording resolution requested.
+        with open(os.path.join(output_folder, '_offscreen_patch.py'), 'w') as f:
+            f.write(
+                "import farms_mujoco.simulation.mjcf as _m\n"
+                "_orig_smx = _m.setup_mjcf_xml\n"
+                "def _patched_smx(experiment_options, **kw):\n"
+                "    r = _orig_smx(experiment_options=experiment_options, **kw)\n"
+                "    g = r[0].visual.get_children('global')\n"
+                "    ow, oh = g.offwidth, g.offheight\n"
+                "    for e in experiment_options.simulation.extensions:\n"
+                "        if 'CameraRecording' in e.loader:\n"
+                "            res = e.config.get('resolution', [640, 480])\n"
+                "            ow = max(ow, res[0])\n"
+                "            oh = max(oh, res[1])\n"
+                "    g.offwidth = ow\n"
+                "    g.offheight = oh\n"
+                "    return r\n"
+                "_m.setup_mjcf_xml = _patched_smx\n"
+            )
+
         # Build a one-liner that optionally monkey-patches add_cameras before
         # starting farms_sim, so that ] in the viewer uses the right distance.
         patch = (
             f"import farms_mujoco.simulation.mjcf as _m;"
             f"_o=_m.add_cameras;"
             f"_m.add_cameras=lambda link,dist={camera_dist!r},rot=None,simulation_options=None:_o(link,dist=dist,rot=rot,simulation_options=simulation_options);"
+            f"exec(open('_offscreen_patch.py').read());"
         )
         patch += self._extra_run_patch()
         sh_str = (
