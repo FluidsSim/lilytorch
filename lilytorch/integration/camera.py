@@ -35,12 +35,10 @@ def top_down_camera_config(
     overshoot : float
         Safety factor applied to the computed distance.
     max_width, max_height : int
-        Maximum pixel dimensions of the output frame (must not exceed the
-        MuJoCo offscreen framebuffer set in the model XML).  The resolution
-        is scaled to fill as much of this budget as possible while keeping
-        the aspect ratio equal to the true padded-tank shape.  Both
-        dimensions are rounded to the nearest even integer as required by
-        most video codecs.
+        Pixel dimensions of the output frame (must not exceed the MuJoCo
+        offscreen framebuffer set in the model XML).  The full resolution is
+        always used; the camera distance is set so the entire tank fits
+        within the FOV with any extra space showing the surrounding fluid.
 
     Returns
     -------
@@ -60,21 +58,17 @@ def top_down_camera_config(
     padded_dy = pool_dy + 2 * wt_cam
     half_fov = tan(radians(fovy / 2))
 
-    # Largest uniform scale that keeps both axes within the framebuffer budget.
-    # This fills the available resolution while preserving the true tank aspect
-    # ratio.  Round to nearest even integer (required by most video codecs).
-    scale = min(max_width / padded_dx, max_height / padded_dy)
-    pix_dx = 2 * max(1, round(padded_dx * scale / 2))
-    pix_dy = 2 * max(1, round(padded_dy * scale / 2))
-
     if padded_dx >= padded_dy:
         azimuth = 90
-        cam_res = [pix_dx, pix_dy]
         dim_horiz, dim_vert = padded_dx, padded_dy
     else:
         azimuth = 0
-        cam_res = [pix_dy, pix_dx]
         dim_horiz, dim_vert = padded_dy, padded_dx
+
+    # Always render at the full frame budget.  The camera distance is set to
+    # fit the entire tank within the FOV; any remaining space shows the
+    # surrounding fluid domain rather than compressing the resolution.
+    cam_res = [max_width, max_height]
 
     aspect_ratio = cam_res[0] / cam_res[1]
     d_for_vert = (dim_vert / 2) / half_fov
@@ -157,12 +151,10 @@ def side_camera_config(
 
     half_fov = tan(radians(fovy / 2))
 
-    scale   = min(max_width / dim_horiz_phys, max_height / dim_vert_phys)
-    pix_h   = 2 * max(1, round(dim_horiz_phys * scale / 2))
-    pix_v   = 2 * max(1, round(dim_vert_phys  * scale / 2))
-    cam_res = [pix_h, pix_v]
+    # Always render at the full frame budget (same policy as top_down_camera_config).
+    cam_res = [max_width, max_height]
 
-    aspect_ratio = pix_h / pix_v
+    aspect_ratio = cam_res[0] / cam_res[1]
     d_for_vert   = (dim_vert_phys  / 2) / half_fov
     d_for_horiz  = (dim_horiz_phys / 2) / (half_fov * aspect_ratio)
     distance     = max(d_for_vert, d_for_horiz) * overshoot

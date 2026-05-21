@@ -46,7 +46,7 @@ class SimConfig(BaseSimConfig):
         self.animats_pars = [
 
             {
-                "sdf_file"       : os.path.join(sdfs_path, "zebrafish", "zebrafish_v1_triangulated", "sdf", "zebrafish_old.sdf"),
+                "sdf_file"       : os.path.join(sdfs_path, "zebrafish", "zebrafish_v1_triangulated", "sdf", "zebrafish.sdf"),
                 "control_type"   : "position",
                 "controller_path": "lilytorch.farms_examples.zebrafish_ki_project.pd_controller.PositionController",
                 "control_pars"   : {
@@ -54,37 +54,37 @@ class SimConfig(BaseSimConfig):
                     "mode"               : "slow",
                     "kinematics_sampling": 0.00025,  # xlsx recorded at 4000 Hz
                 },
-                "gains"     : [0.06, 0.0002, 0],
+                "gains"     : [0.6, 0.0002, 0],
                 "spawn_mode": SpawnMode.TRANSVERSE,
                 "pose"      : [0, 0, 0, 0, 0, 3.141592653589793],
             },
 
         ]
 
-        # # ── 3-D grid ─────────────────────────────────────────────────
-        # self.Nx   = 512
-        # self.Ny   = 128
-        # self.Nz   = 64
-        # self.xmin = -0.02
-        # self.xmax =  0.08
-        # self.ymin = -0.0125
-        # self.ymax =  0.0125
-        # self.zmin = -0.00625
-        # self.zmax =  0.00625
-        # self.timestep          = 0.0005
-        # self.n_iterations      = 2001
-
-        self.Nx           = 1024
-        self.Ny           = 256
-        self.Nz           = 128
+        # ── 3-D grid ─────────────────────────────────────────────────
+        self.Nx           = 512
+        self.Ny           = 128
+        self.Nz           = 64
         self.xmin         = -0.02
         self.xmax         = 0.08
         self.ymin         = -0.0125
         self.ymax         = 0.0125
         self.zmin         = -0.00625
         self.zmax         = 0.00625
-        self.timestep     = 0.00025
-        self.n_iterations = 8001
+        self.timestep     = 0.0005
+        self.n_iterations = 4001
+
+        # self.Nx           = 1024
+        # self.Ny           = 256
+        # self.Nz           = 128
+        # self.xmin         = -0.02
+        # self.xmax         = 0.08
+        # self.ymin         = -0.0125
+        # self.ymax         = 0.0125
+        # self.zmin         = -0.00625
+        # self.zmax         = 0.00625
+        # self.timestep     = 0.00025
+        # self.n_iterations = 8001
 
         # ── Physics ───────────────────────────────────────────────────
         self.rho_body          = 1000.0
@@ -94,9 +94,9 @@ class SimConfig(BaseSimConfig):
         self.vmax              = 10.0
         self.save              = False
 
-        self.eps_multiplier = 1.0
+        self.eps_multiplier = 2.0
         # BDIM-σ correction for thin zebrafish body links (r < eps).
-        self.apply_bdim_sigma = True
+        # self.apply_bdim_sigma = True
 
         # ── Arena ────────────────────────────────────────────────────
         self.wall_thickness = 0.003
@@ -112,7 +112,7 @@ class SimConfig(BaseSimConfig):
         self.poisson_max_mgcg_cycles = 10
         self.poisson_precond_vcycles = 1
         self.poisson_warm_start      = False
-        self.poisson_method          = "multigrid"
+        self.poisson_method          = "fft"
         self.poisson_smoother        = "jacobi"
         self.poisson_nsmoothing      = 5
         self.poisson_bc_type         = "neumann"
@@ -164,14 +164,14 @@ class SimConfig(BaseSimConfig):
         extensions.append({
             "loader": "lilytorch.integration.flow_iso_gl_viewer.FlowIsoGLViewer",
             "config": {
-                "field"              : "omega_z",
+                "field"              : "omega_mag",
                 "alpha"              : 0.25,
                 "update_every"       : 1,
                 "max_vertices"       : 4 * self.Nx * self.Ny,
                 "smooth_sigma"       : 0,
                 "crop_boundary"      : 0,
                 "exclude_body"       : True,
-                "iso_value"          : 40.0,
+                "iso_value"          : 80.0,
                 "debug_force_visible": False,
             },
         })
@@ -190,7 +190,7 @@ class SimConfig(BaseSimConfig):
                 "path"            : os.path.join(output_folder, "output", "video.mp4"),
                 "animat_id"       : None,
                 "fps"             : 30,
-                "speed"           : 0.2,
+                "speed"           : 0.1,
                 "angular_velocity": 0,
                 **cam,
             },

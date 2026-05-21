@@ -1366,21 +1366,41 @@ class FluidSolver(PlottingMixin):
         consumption by the CUDA/CPU σ kernels.
         """
         shifts = []
-        for body in self.composite_body.bodies:
-            sdf_val = getattr(body, 'sdf_val', None)
-            if sdf_val is not None:
-                sigma_min = float(sdf_val.min().item())
-                shift = max(0.0, sigma_min + float(self.eps))
+        eps_val = float(self.eps)
+        comp    = self.composite_body
+
+        # In kernel mode body.sdf_val is never populated.  The per-body SDF
+        # table lives in _kernel_static_{3,2}d['F_flat'] (mesh bodies: h/2
+        # resolution, accurate; analytical bodies: h resolution).  In Python
+        # mode fall back to the full-domain body.sdf_val.
+        sm = getattr(comp, '_kernel_static_3d', None) \
+            or getattr(comp, '_kernel_static_2d', None)
+
+        ndim_b           = self.ndim
+        F_flat           = sm['F_flat']           if sm is not None else None
+        F_offsets        = sm['F_offsets']        if sm is not None else None
+        body_shapes_flat = sm['body_shapes'].reshape(-1) if sm is not None else None
+
+        for b, body in enumerate(comp.bodies):
+            if F_flat is not None:
+                i0   = int(F_offsets[b])
+                size = int(body_shapes_flat[b * ndim_b:(b + 1) * ndim_b].prod().item())
+                smin = float(F_flat[i0:i0 + size].min().item())
+                shifts.append(max(0.0, smin + eps_val))
             else:
-                shift = 0.0
-            shifts.append(shift)
+                sdf_val = getattr(body, 'sdf_val', None)
+                if sdf_val is not None:
+                    shifts.append(max(0.0, float(sdf_val.min().item()) + eps_val))
+                else:
+                    shifts.append(0.0)
+
         self._sigma_shifts = torch.tensor(
             shifts, dtype=torch.float32, device=self.device)
         nonzero = [(i, s) for i, s in enumerate(shifts) if s > 0]
         print(f"[BDIM-σ] sigma_shifts computed: {len(nonzero)} thin "
               f"body/bodies need correction")
         for i, s in nonzero:
-            print(f"  body {i}: shift = {s:.6f} m")
+            print(f"  body {i}: shift = {s*1e3:.4f} mm")
 
     def _compute_sigma_mu_grids(self, mu_grids):
         """Recompute ``mu0`` from σ-shifted union SDFs for each stagger axis.
