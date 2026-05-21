@@ -50,8 +50,8 @@ class SimConfig(BaseSimConfig):
         # ── Simulation flags ──────────────────────────────────────────
         self.use_bdim = True
         # With BDIM enabled, links do not automatically opt into fluid
-        # forces because BaseSimConfig otherwise ties fluid interaction
-        # to use_drag. Force it on explicitly for the submarine bodies.
+        # forces (fluid interaction defaults to not use_bdim, i.e. False
+        # when BDIM is on). Force it on explicitly for the submarine bodies.
         self.animat_fluid_interaction = True
 
         submarine_sdf_dir = os.path.join(

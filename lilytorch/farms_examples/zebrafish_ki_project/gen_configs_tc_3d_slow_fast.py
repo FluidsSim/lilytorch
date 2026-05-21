@@ -4,7 +4,7 @@ import os
 from farms_core.model.options import SpawnMode
 from lilytorch.util.paths import lilytorch_repo_root, sdfs_path
 from lilytorch.farms_examples.base_sim_config import BaseSimConfig
-from lilytorch.integration.camera import top_down_camera_config
+from lilytorch.integration.camera import top_down_camera_config, side_camera_config
 
 
 def _load_drags_csv(path):
@@ -40,7 +40,6 @@ class SimConfig(BaseSimConfig):
         self.compute_sdf    = True
         self.use_gpu        = True
         self.use_bdim       = True
-        self.use_drag       = False
         self.headless       = False
         self.water_buoyancy = True
 
@@ -185,6 +184,12 @@ class SimConfig(BaseSimConfig):
     def extra_simulation_extensions(self, output_folder):
         extensions = []
 
+        # Soft, reflection-free lighting for tank recordings
+        extensions.append({
+            "loader": "lilytorch.integration.light_modifier.LightModifier",
+            "config": {},
+        })
+
         # FlowViewer (works headless via CameraRecording)
         # extensions.append({
         #     "loader": "lilytorch.integration.flow_viewer.FlowViewer",
@@ -256,7 +261,7 @@ class SimConfig(BaseSimConfig):
             self.xmin, self.xmax,
             self.ymin, self.ymax,
             self.zmin, self.zmax,
-            overshoot=1,
+            overshoot=1.10,  # controls CameraRecording distance (not camera_dist)
         )
         extensions.append({
             "loader": "farms_mujoco.sensors.camera.CameraRecording",
@@ -270,29 +275,27 @@ class SimConfig(BaseSimConfig):
             },
         })
 
-        return extensions
-
-    def single_run(self, index=0):
-        import subprocess
-        from lilytorch.util.paths import gen_new_folder
-        from lilytorch.integration.flow_viewer_2d_gpu import prepare_flow_viewer_2d_gpu_env
-        from lilytorch.integration.flow_iso_gl_viewer import prepare_iso_gl_hook_env
-
-        output_folder = gen_new_folder(self.stack_folder)
-        os.makedirs(output_folder, exist_ok=True)
-        print("Saving configs to folder:", output_folder)
-        self.gen_animat_config(output_folder, index)
-        self.gen_arena_config(output_folder, index)
-        self.gen_simulation_config(output_folder, index)
-        self.gen_experiment_config(output_folder, index)
-        self.gen_sh_config(output_folder, index)
-        os.chdir(output_folder)
-
-        env = prepare_flow_viewer_2d_gpu_env(
-            os.environ.copy(), self._generated_simulation_extensions,
+        # Side view: looking along Y axis (shows swimming direction vs tank depth)
+        side = side_camera_config(
+            self.xmin, self.xmax,
+            self.ymin, self.ymax,
+            self.zmin, self.zmax,
+            view_axis="y",
+            overshoot=1.10,
         )
-        env = prepare_iso_gl_hook_env(env, self._generated_simulation_extensions)
-        subprocess.run(['bash', 'run.sh'], check=True, env=env)
+        extensions.append({
+            "loader": "farms_mujoco.sensors.camera.CameraRecording",
+            "config": {
+                "path"            : os.path.join(output_folder, "output", "video_side.mp4"),
+                "animat_id"       : None,
+                "fps"             : 30,
+                "speed"           : 0.1,
+                "angular_velocity": 0,
+                **side,
+            },
+        })
+
+        return extensions
 
 
 if __name__ == "__main__":

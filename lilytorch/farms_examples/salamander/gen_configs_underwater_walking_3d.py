@@ -18,9 +18,6 @@ class SimConfig(BaseSimConfig):
         # ── Hardware ──────────────────────────────────────────────────
         self.use_bdim     = True
         self.headless     = True
-        # BDIM already supplies hydrodynamic forces; enabling the legacy
-        # swimming drag path on top destabilizes multi-animat runs.
-        self.use_drag     = False
         self.use_gpu      = True
         self.compute_sdf  = True
         self.wall_height  = 0.02

@@ -66,7 +66,6 @@ class BaseSimConfig:
         self.fast     = False
 
         # ── Drag ──────────────────────────────────────────────────────────
-        self._use_drag_override = None   # None → auto (not use_bdim)
         # Either a single drag entry applied to every link:
         #   [linear_3vec, quadratic_3vec]  e.g. [[-0.1,-5,-5],[-0.001,-0.001,-0.001]]
         # or a per-link list of length == number-of-links, each element being
@@ -113,14 +112,16 @@ class BaseSimConfig:
         self.generate_pool  = True   # generate pool/water SDFs; False → use flat arena
         self.wall_thickness = None   # None → auto for 3-D, 0.3 for 2-D
         self.wall_height    = None   # None → 0.3 for 2-D (ignored for 3-D)
+        self.wall_alpha     = None   # None → keep default (0.3); 0.0=transparent, 1.0=opaque
+        self.water_alpha    = None   # None → keep default (0.18); 0.0=transparent, 1.0=opaque
         self.arena_pose     = [0, 0, 0, 0, 0, 0]
-        self.water_drag     = None   # None → use_drag
-        self.water_buoyancy = None   # None → use_drag
+        self.water_drag     = None   # None → not use_bdim
+        self.water_buoyancy = None   # None → not use_bdim
         self.water_height   = 0
         self.ground_height  = 0.0
 
         # ── Animat fluid interaction ──────────────────────────────────────
-        self.animat_fluid_interaction = None  # None → use_drag
+        self.animat_fluid_interaction = None  # None → not use_bdim
 
         # ── MuJoCo ────────────────────────────────────────────────────────
         self.num_sub_steps = 1
@@ -234,28 +235,18 @@ class BaseSimConfig:
         return self.Nz is not None
 
     @property
-    def use_drag(self):
-        if self._use_drag_override is not None:
-            return self._use_drag_override
-        return not self.use_bdim
-
-    @use_drag.setter
-    def use_drag(self, value):
-        self._use_drag_override = value
-
-    @property
     def _fluid_interaction(self):
         if self.animat_fluid_interaction is not None:
             return self.animat_fluid_interaction
-        return self.use_drag
+        return not self.use_bdim
 
     @property
     def _water_drag(self):
-        return self.water_drag if self.water_drag is not None else self.use_drag
+        return self.water_drag if self.water_drag is not None else not self.use_bdim
 
     @property
     def _water_buoyancy(self):
-        return self.water_buoyancy if self.water_buoyancy is not None else self.use_drag
+        return self.water_buoyancy if self.water_buoyancy is not None else not self.use_bdim
 
     # ── Hooks (override in subclasses) ────────────────────────────────────
 
@@ -412,7 +403,7 @@ class BaseSimConfig:
             }
 
             # Add drag coefficients when using drag model
-            if self.use_drag:
+            if not self.use_bdim:
                 for i, link in enumerate(animat_dict["morphology"]["links"]):
                     link["drag_coefficients"] = drag_coefficients[i]
 
@@ -429,7 +420,7 @@ class BaseSimConfig:
             )
 
             # Swimming extension for drag-based sims
-            if self.use_drag:
+            if not self.use_bdim:
                 animat_dict["extensions"].append({
                     "loader": "farms_mujoco.swimming.extension.SwimmingExtension",
                     "config": {"water_properties": None},
@@ -454,11 +445,13 @@ class BaseSimConfig:
                     self.xmin, self.xmax, self.ymin, self.ymax,
                     zmin=self.zmin, zmax=self.zmax,
                     wall_thickness=wt, plotting=False,
+                    wall_alpha=self.wall_alpha,
                 )
                 water_sdf = create_water_sdf(
                     self.xmin, self.xmax, self.ymin, self.ymax,
                     zmin=self.zmin, zmax=self.zmax,
                     water_height=self.zmax,
+                    water_alpha=self.water_alpha,
                 )
                 water_h = self.water_height if self.water_height != 0 else self.zmax
             else:
@@ -467,11 +460,13 @@ class BaseSimConfig:
                 create_pool_sdf(
                     self.xmin, self.xmax, self.ymin, self.ymax,
                     wall_thickness=wt, wall_height=wh, plotting=False,
+                    wall_alpha=self.wall_alpha,
                 )
                 water_sdf = create_water_sdf(
                     self.xmin, self.xmax, self.ymin, self.ymax,
                     water_height=self.water_height,
                     wall_height=wh,
+                    water_alpha=self.water_alpha,
                 )
                 water_h = self.water_height
             arena_sdf = os.path.join(sdfs_path, "pool", "sdf", "pool.sdf")
@@ -656,15 +651,13 @@ class BaseSimConfig:
         self.gen_sh_config(output_folder, index)
         os.chdir(output_folder)
         from lilytorch.integration.flow_viewer_2d_gpu import prepare_flow_viewer_2d_gpu_env
+        from lilytorch.integration.flow_iso_gl_viewer import prepare_iso_gl_hook_env
 
-        subprocess.run(
-            ['bash', 'run.sh'],
-            check=True,
-            env=prepare_flow_viewer_2d_gpu_env(
-                os.environ.copy(),
-                self._generated_simulation_extensions,
-            ),
+        env = prepare_flow_viewer_2d_gpu_env(
+            os.environ.copy(), self._generated_simulation_extensions,
         )
+        env = prepare_iso_gl_hook_env(env, self._generated_simulation_extensions)
+        subprocess.run(['bash', 'run.sh'], check=True, env=env)
 
     def run(self):
         """Run all configurations. Override for multi-run sweeps."""

@@ -47,7 +47,7 @@ class PositionController(KinematicsController):
             "kinematics_sampling",
             experiment_options.simulation.physics.timestep,
         )
-        kinematics_invert = False
+        kinematics_invert = True
         kinematics_degrees = False  # xlsx values are already in radians
         kinematics_start = 0.0
         kinematics_end = (
