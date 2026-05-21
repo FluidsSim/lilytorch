@@ -7,6 +7,7 @@ from lilytorch.farms_examples.base_sim_config import BaseSimConfig
 from lilytorch.integration.camera import top_down_camera_config, side_camera_config
 
 
+
 def _load_drags_csv(path):
     """Load per-link drag coefficients from *path*."""
     drags = []
@@ -53,37 +54,37 @@ class SimConfig(BaseSimConfig):
                     "mode"               : "slow",
                     "kinematics_sampling": 0.00025,  # xlsx recorded at 4000 Hz
                 },
-                "gains"     : [0.6, 0.0002, 0],
+                "gains"     : [0.06, 0.0002, 0],
                 "spawn_mode": SpawnMode.TRANSVERSE,
                 "pose"      : [0, 0, 0, 0, 0, 3.141592653589793],
             },
 
         ]
 
-        # ── 3-D grid ─────────────────────────────────────────────────
-        self.Nx   = 512
-        self.Ny   = 128
-        self.Nz   = 64
-        self.xmin = -0.02
-        self.xmax =  0.08
-        self.ymin = -0.0125
-        self.ymax =  0.0125
-        self.zmin = -0.00625
-        self.zmax =  0.00625
-        self.timestep          = 0.0005
-        self.n_iterations      = 2001
+        # # ── 3-D grid ─────────────────────────────────────────────────
+        # self.Nx   = 512
+        # self.Ny   = 128
+        # self.Nz   = 64
+        # self.xmin = -0.02
+        # self.xmax =  0.08
+        # self.ymin = -0.0125
+        # self.ymax =  0.0125
+        # self.zmin = -0.00625
+        # self.zmax =  0.00625
+        # self.timestep          = 0.0005
+        # self.n_iterations      = 2001
 
-        # self.Nx           = 1024
-        # self.Ny           = 256
-        # self.Nz           = 128
-        # self.xmin         = -0.02
-        # self.xmax         = 0.08
-        # self.ymin         = -0.0125
-        # self.ymax         = 0.0125
-        # self.zmin         = -0.00625
-        # self.zmax         = 0.00625
-        # self.timestep     = 0.00025
-        # self.n_iterations = 4001
+        self.Nx           = 1024
+        self.Ny           = 256
+        self.Nz           = 128
+        self.xmin         = -0.02
+        self.xmax         = 0.08
+        self.ymin         = -0.0125
+        self.ymax         = 0.0125
+        self.zmin         = -0.00625
+        self.zmax         = 0.00625
+        self.timestep     = 0.00025
+        self.n_iterations = 8001
 
         # ── Physics ───────────────────────────────────────────────────
         self.rho_body          = 1000.0
@@ -101,7 +102,7 @@ class SimConfig(BaseSimConfig):
 
         # ── BDIM solver ──────────────────────────────────────────────
         self.dtype                   = "float32"
-        self.zero_pressure_inside    = False
+        self.zero_pressure_inside    = True
         self.bdim_dt                 = self.timestep
         self.bdim_nt                 = self.n_iterations + 1
         self.poisson_tol             = 1.0e-7
@@ -140,7 +141,9 @@ class SimConfig(BaseSimConfig):
         ]
 
         self.wall_alpha = 0.
-        self.water_alpha = 0.
+        self.water_alpha = 0.05
+        self.grid_spacing = 0.0125  # lines on background floor
+
 
     # ── Extensions ────────────────────────────────────────────────────
 
@@ -166,7 +169,7 @@ class SimConfig(BaseSimConfig):
                 "smooth_sigma"       : 0,
                 "crop_boundary"      : 0,
                 "exclude_body"       : True,
-                "iso_value"          : 20.0,
+                "iso_value"          : 40.0,
                 "debug_force_visible": False,
             },
         })
@@ -178,13 +181,14 @@ class SimConfig(BaseSimConfig):
             self.zmin, self.zmax,
             overshoot=1.0,  # controls CameraRecording distance (not camera_dist)
         )
+        cam["elevation"] = -45   # tilt 20° from straight-down (−90 = top-down)
         extensions.append({
             "loader": "farms_mujoco.sensors.camera.CameraRecording",
             "config": {
                 "path"            : os.path.join(output_folder, "output", "video.mp4"),
                 "animat_id"       : None,
                 "fps"             : 30,
-                "speed"           : 0.1,
+                "speed"           : 0.2,
                 "angular_velocity": 0,
                 **cam,
             },
@@ -196,7 +200,7 @@ class SimConfig(BaseSimConfig):
             self.ymin, self.ymax,
             self.zmin, self.zmax,
             view_axis="y",
-            overshoot=1.10,
+            overshoot=1.0,
         )
         extensions.append({
             "loader": "farms_mujoco.sensors.camera.CameraRecording",
@@ -210,7 +214,22 @@ class SimConfig(BaseSimConfig):
             },
         })
 
+        # SkyModifier must be LAST so all CameraRecording renderers already
+        # exist when initialize_episode runs the GPU texture upload.
+        extensions.append({
+            "loader": "lilytorch.integration.sky_modifier.SkyModifier",
+            "config": {"rgb": [0.0, 0.0, 0.0]},
+        })
+
         return extensions
+
+    def _extra_run_patch(self):
+        # Replace FARMS starry-night sky with flat black in the subprocess.
+        return (
+            "_m.night_sky=lambda mjcf_model:mjcf_model.asset.add("
+            "'texture',name='skybox',type='skybox',"
+            "builtin='flat',rgb1=[0,0,0],rgb2=[0,0,0],width=8,height=8);"
+        )
 
 
 if __name__ == "__main__":

@@ -297,6 +297,14 @@ class SimConfig(BaseSimConfig):
 
         return extensions
 
+    def _extra_run_patch(self):
+        # Replace FARMS starry-night sky with flat black in the subprocess.
+        return (
+            "_m.night_sky=lambda mjcf_model:mjcf_model.asset.add("
+            "'texture',name='skybox',type='skybox',"
+            "builtin='flat',rgb1=[0,0,0],rgb2=[0,0,0],width=8,height=8);"
+        )
+
 
 if __name__ == "__main__":
     SimConfig().single_run()

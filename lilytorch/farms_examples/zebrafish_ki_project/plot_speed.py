@@ -25,9 +25,11 @@ import os
 import h5py
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import yaml
 from farms_core.sensors.sensor_convention import sc
 
+from lilytorch.integration.kinematics import kinematics_interpolation
 from lilytorch.util.metrics import compute_speed_PCA
 
 # ── style ─────────────────────────────────────────────────────────────────────
@@ -96,6 +98,284 @@ def _load_com_velocity(run_dir: str):
     v_forward, v_lateral = compute_speed_PCA(links_pos, links_vel)
 
     return times, np.asarray(v_forward), np.asarray(v_lateral)
+
+
+def _reconstruct_desired_positions(run_dir: str, n_joints: int, nt: int, timestep: float):
+    """Reconstruct desired joint positions from the source xlsx kinematics file.
+
+    Mirrors the interpolation logic in KinematicsController.__init__ exactly:
+    load xlsx → trim columns → negate (invert_motors=True) → pad end → interpolate.
+    Returns an (nt, n_joints) array, or None if the config / xlsx is unavailable.
+    """
+    cfg_path = os.path.join(run_dir, "animat_config_0.yaml")
+    if not os.path.exists(cfg_path):
+        return None
+    try:
+        with open(cfg_path) as f:
+            cfg = yaml.unsafe_load(f)
+        ctrl_cfg = next(
+            (e["config"] for e in cfg.get("extensions", [])
+             if "pd_controller" in e.get("loader", "")),
+            None,
+        )
+        if ctrl_cfg is None:
+            return None
+        data_folder = ctrl_cfg["data_folder"]
+        mode        = ctrl_cfg.get("mode", "slow")
+        sampling    = float(ctrl_cfg.get("kinematics_sampling", timestep))
+    except Exception:
+        return None
+
+    fname = "joints_positions_slow.xlsx" if mode == "slow" else "joints_positions_fast.xlsx"
+    xlsx_path = os.path.join(data_folder, fname)
+    if not os.path.exists(xlsx_path):
+        return None
+
+    kin = pd.read_excel(xlsx_path).to_numpy(dtype=float)[:, :n_joints]
+    kin = -kin  # invert_motors=True
+
+    # Build source time vector (no init_time padding, init_time=0)
+    data_duration = kin.shape[0] * sampling
+    time_vector   = np.arange(0, data_duration, sampling)
+
+    # Pad at end so interpolation covers the full simulation
+    # n_iterations (for interpolation) = nt-1 to match FARMS convention:
+    # FARMS stores nt = n_iterations+1 frames (iter 0 .. n_iterations)
+    n_iter   = nt - 1
+    end_time = timestep * n_iter
+    n_pad    = int(end_time / sampling) + 1
+    kin         = np.concatenate([kin, np.tile(kin[-1], (n_pad, 1))], axis=0)
+    time_vector = np.concatenate([
+        time_vector,
+        np.linspace(time_vector[-1] + timestep, time_vector[-1] + end_time, n_pad),
+    ])
+
+    # Interpolate to simulation timesteps: gives n_iter rows (iter 0 .. n_iter-1)
+    interp = kinematics_interpolation(
+        kin_times=time_vector,
+        kinematics=kin,
+        timestep=timestep,
+        n_iterations=n_iter,
+    )  # shape (n_iter, n_joints)
+
+    # Append last row so shape matches (nt, n_joints)
+    return np.concatenate([interp, interp[[-1]]], axis=0)
+
+
+def _load_joint_tracking(run_dir: str):
+    """Return (times, pos_actual, pos_desired, vel_actual, joint_names).
+
+    pos_actual:  (nt, n_joints) measured joint positions   [rad]
+    pos_desired: (nt, n_joints) commanded joint positions  [rad]
+    vel_actual:  (nt, n_joints) measured joint velocities  [rad/s]
+
+    If sc.joint_cmd_position is not recorded (all zeros), desired positions are
+    reconstructed from the source xlsx via _reconstruct_desired_positions().
+    """
+    hdf5_path = os.path.join(run_dir, "output", "simulation.hdf5")
+    if not os.path.exists(hdf5_path):
+        raise FileNotFoundError(f"simulation.hdf5 not found in {run_dir}/output/")
+
+    with h5py.File(hdf5_path, "r") as f:
+        joints_group = f["FARMSLISTanimats"]["0"]["sensors"]["joints"]
+        joints_array = np.array(joints_group["array"])
+        joint_names = [
+            n.decode() if isinstance(n, bytes) else n
+            for n in np.array(joints_group["names"])
+        ]
+        if "times" in f:
+            times    = np.array(f["times"])[: joints_array.shape[0]]
+            timestep = float(times[1] - times[0]) if len(times) > 1 else float(np.array(f["timestep"]))
+        else:
+            timestep = float(np.array(f["timestep"]))
+            times    = timestep * np.arange(joints_array.shape[0])
+
+    pos_actual  = joints_array[:, :, sc.joint_position]      # (nt, n_joints)
+    pos_desired = joints_array[:, :, sc.joint_cmd_position]  # (nt, n_joints)
+    vel_actual  = joints_array[:, :, sc.joint_velocity]      # (nt, n_joints)
+
+    # Fallback: reconstruct desired positions from source xlsx when not stored
+    if not np.any(pos_desired != 0):
+        reconstructed = _reconstruct_desired_positions(
+            run_dir, pos_actual.shape[1], joints_array.shape[0], timestep
+        )
+        if reconstructed is not None:
+            pos_desired = reconstructed
+
+    return times, pos_actual, pos_desired, vel_actual, joint_names
+
+
+def _make_joint_figure(n_rows, n_cols):
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 3 * n_rows), sharex=True)
+    return fig, np.asarray(axes).flatten()
+
+
+def _finalise_joint_figure(fig, axes, n_joints, n_cols, n_rows, ylabel, title):
+    for j in range(n_joints, len(axes)):
+        axes[j].set_visible(False)
+    for row in range(n_rows):
+        axes[row * n_cols].set_ylabel(ylabel)
+    last_row_start = (n_rows - 1) * n_cols
+    for col in range(n_cols):
+        idx_ax = last_row_start + col
+        if idx_ax < len(axes):
+            axes[idx_ax].set_xlabel("Time [s]")
+    axes[0].legend(fontsize=8)
+    fig.suptitle(title, y=1.01)
+    fig.tight_layout()
+
+
+def _plot_joint_grids(run_dirs, out_path):
+    """Create joint-position, joint-velocity tracking, velocity consistency, and error figures.
+
+    Saves:
+        <stem>_joint_pos.png                    — desired (--) vs actual (—) positions per joint
+        <stem>_joint_vel.png                    — dΘ_des/dt (--) vs actual (—) velocities per joint
+        <stem>_joint_vel_consistency.png        — dΘ_act/dt (--) vs recorded vel (—) per joint
+        <stem>_joint_pos_error.png              — position tracking error (actual − desired) per joint
+        <stem>_joint_vel_error.png              — velocity tracking error (actual − dΘ_des/dt) per joint
+        <stem>_joint_vel_consistency_error.png  — consistency error (recorded vel − dΘ_act/dt) per joint
+    """
+    tracking_data = []
+    joint_names_global = None
+
+    for run_dir in run_dirs:
+        try:
+            t, pa, pd, va, jnames = _load_joint_tracking(run_dir)
+        except FileNotFoundError as exc:
+            print(f"[skip joints] {exc}")
+            tracking_data.append(None)
+            continue
+        tracking_data.append((t, pa, pd, va))
+        if joint_names_global is None:
+            joint_names_global = jnames
+
+    if joint_names_global is None:
+        return  # nothing to plot
+
+    n_joints = len(joint_names_global)
+    n_cols = 5
+    n_rows = (n_joints + n_cols - 1) // n_cols
+
+    colors = plt.cm.tab10(np.linspace(0, 0.9, max(len(run_dirs), 1)))
+
+    fig_pos,  axes_pos  = _make_joint_figure(n_rows, n_cols)
+    fig_vel,  axes_vel  = _make_joint_figure(n_rows, n_cols)
+    fig_con,  axes_con  = _make_joint_figure(n_rows, n_cols)
+    fig_epos, axes_epos = _make_joint_figure(n_rows, n_cols)
+    fig_evel, axes_evel = _make_joint_figure(n_rows, n_cols)
+    fig_econ, axes_econ = _make_joint_figure(n_rows, n_cols)
+
+    for idx, (run_dir, data) in enumerate(zip(run_dirs, tracking_data)):
+        if data is None:
+            continue
+        times_j, pos_act, pos_des, vel_act = data
+        color = colors[idx]
+        label = _label_for_dir(run_dir)
+        dt = times_j[1] - times_j[0] if len(times_j) > 1 else 1e-3
+        vel_des       = np.diff(pos_des, axis=0) / dt  # (nt-1, n_joints)
+        vel_from_pos  = np.diff(pos_act, axis=0) / dt  # (nt-1, n_joints)
+        pos_err       = pos_act - pos_des                # (nt,   n_joints)
+        vel_err       = vel_act[1:] - vel_des            # (nt-1, n_joints)
+        vel_con_err   = vel_act[1:] - vel_from_pos       # (nt-1, n_joints)
+
+        for j in range(n_joints):
+            leg = j == 0
+            jname = joint_names_global[j]
+
+            axes_pos[j].plot(
+                times_j, np.degrees(pos_act[:, j]),
+                color=color, label=(f"{label} actual" if leg else "_nolegend_"),
+            )
+            axes_pos[j].plot(
+                times_j, np.degrees(pos_des[:, j]),
+                "--", color=color, alpha=0.7,
+                label=(f"{label} desired" if leg else "_nolegend_"),
+            )
+            axes_pos[j].set_title(jname, fontsize=9)
+
+            axes_vel[j].plot(
+                times_j[1:], np.degrees(vel_act[1:, j]),
+                color=color, label=(f"{label} actual" if leg else "_nolegend_"),
+            )
+            axes_vel[j].plot(
+                times_j[1:], np.degrees(vel_des[:, j]),
+                "--", color=color, alpha=0.7,
+                label=(f"{label} dΘ_des/dt" if leg else "_nolegend_"),
+            )
+            axes_vel[j].set_title(jname, fontsize=9)
+
+            axes_con[j].plot(
+                times_j[1:], np.degrees(vel_act[1:, j]),
+                color=color, label=(f"{label} recorded" if leg else "_nolegend_"),
+            )
+            axes_con[j].plot(
+                times_j[1:], np.degrees(vel_from_pos[:, j]),
+                "--", color=color, alpha=0.7,
+                label=(f"{label} dΘ_act/dt" if leg else "_nolegend_"),
+            )
+            axes_con[j].set_title(jname, fontsize=9)
+
+            axes_epos[j].plot(
+                times_j, np.degrees(pos_err[:, j]),
+                color=color, label=(label if leg else "_nolegend_"),
+            )
+            axes_epos[j].axhline(0, color="k", linewidth=0.6, linestyle=":")
+            axes_epos[j].set_title(jname, fontsize=9)
+
+            axes_evel[j].plot(
+                times_j[1:], np.degrees(vel_err[:, j]),
+                color=color, label=(label if leg else "_nolegend_"),
+            )
+            axes_evel[j].axhline(0, color="k", linewidth=0.6, linestyle=":")
+            axes_evel[j].set_title(jname, fontsize=9)
+
+            axes_econ[j].plot(
+                times_j[1:], np.degrees(vel_con_err[:, j]),
+                color=color, label=(label if leg else "_nolegend_"),
+            )
+            axes_econ[j].axhline(0, color="k", linewidth=0.6, linestyle=":")
+            axes_econ[j].set_title(jname, fontsize=9)
+
+    _finalise_joint_figure(
+        fig_pos, axes_pos, n_joints, n_cols, n_rows,
+        "Position [deg]", "Joint position tracking — desired (--) vs actual (—)",
+    )
+    _finalise_joint_figure(
+        fig_vel, axes_vel, n_joints, n_cols, n_rows,
+        "Velocity [deg/s]", "Joint velocity tracking — dΘ_des/dt (--) vs actual (—)",
+    )
+    _finalise_joint_figure(
+        fig_con, axes_con, n_joints, n_cols, n_rows,
+        "Velocity [deg/s]",
+        "Joint velocity consistency — recorded (—) vs dΘ_act/dt (--)",
+    )
+    _finalise_joint_figure(
+        fig_epos, axes_epos, n_joints, n_cols, n_rows,
+        "Error [deg]", "Joint position tracking error (actual − desired)",
+    )
+    _finalise_joint_figure(
+        fig_evel, axes_evel, n_joints, n_cols, n_rows,
+        "Error [deg/s]", "Joint velocity tracking error (actual − dΘ_des/dt)",
+    )
+    _finalise_joint_figure(
+        fig_econ, axes_econ, n_joints, n_cols, n_rows,
+        "Error [deg/s]", "Joint velocity consistency error (recorded − dΘ_act/dt)",
+    )
+
+    base = out_path[:-4] if out_path.endswith(".png") else out_path
+    for fig, suffix in [
+        (fig_pos,  "_joint_pos.png"),
+        (fig_vel,  "_joint_vel.png"),
+        (fig_con,  "_joint_vel_consistency.png"),
+        (fig_epos, "_joint_pos_error.png"),
+        (fig_evel, "_joint_vel_error.png"),
+        (fig_econ, "_joint_vel_consistency_error.png"),
+    ]:
+        path = base + suffix
+        fig.savefig(path)
+        print(f"Saved: {path}")
+        plt.close(fig)
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
@@ -169,6 +449,9 @@ def main():
     plt.savefig(out_path)
     print(f"Saved: {out_path}")
     plt.close(fig)
+
+    # ── Joint tracking figures ─────────────────────────────────────────────
+    _plot_joint_grids(run_dirs, out_path)
 
 
 if __name__ == "__main__":

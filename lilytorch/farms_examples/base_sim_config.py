@@ -110,6 +110,7 @@ class BaseSimConfig:
 
         # ── Arena ─────────────────────────────────────────────────────────
         self.generate_pool  = True   # generate pool/water SDFs; False → use flat arena
+        self.grid_spacing   = None   # None → no floor grid; float → white grid line spacing (m)
         self.wall_thickness = None   # None → auto for 3-D, 0.3 for 2-D
         self.wall_height    = None   # None → 0.3 for 2-D (ignored for 3-D)
         self.wall_alpha     = None   # None → keep default (0.3); 0.0=transparent, 1.0=opaque
@@ -446,6 +447,7 @@ class BaseSimConfig:
                     zmin=self.zmin, zmax=self.zmax,
                     wall_thickness=wt, plotting=False,
                     wall_alpha=self.wall_alpha,
+                    grid_spacing=self.grid_spacing,
                 )
                 water_sdf = create_water_sdf(
                     self.xmin, self.xmax, self.ymin, self.ymax,
@@ -461,6 +463,7 @@ class BaseSimConfig:
                     self.xmin, self.xmax, self.ymin, self.ymax,
                     wall_thickness=wt, wall_height=wh, plotting=False,
                     wall_alpha=self.wall_alpha,
+                    grid_spacing=self.grid_spacing,
                 )
                 water_sdf = create_water_sdf(
                     self.xmin, self.xmax, self.ymin, self.ymax,
@@ -619,6 +622,14 @@ class BaseSimConfig:
             simulation_dict,
         )
 
+    def _extra_run_patch(self):
+        """Return extra Python one-liner code injected into run.sh before main().
+
+        Subclasses can override to patch farms_mujoco internals (e.g. night_sky)
+        without modifying the farms_mujoco package.
+        """
+        return ""
+
     def gen_sh_config(self, output_folder, index=0):
         camera_dist = getattr(self, 'camera_dist', 3.0)
         # Build a one-liner that optionally monkey-patches add_cameras before
@@ -628,6 +639,7 @@ class BaseSimConfig:
             f"_o=_m.add_cameras;"
             f"_m.add_cameras=lambda link,dist={camera_dist!r},rot=None,simulation_options=None:_o(link,dist=dist,rot=rot,simulation_options=simulation_options);"
         )
+        patch += self._extra_run_patch()
         sh_str = (
             "#!/bin/bash\n"
             "set -e\n"

@@ -13,10 +13,10 @@
             </box>
           </geometry>
           <material>
-            <ambient>0.25 0.45 0.75 0.0000</ambient>
-            <diffuse>0.30 0.50 0.80 0.0000</diffuse>
-            <specular>0.60 0.60 0.65 0.0000</specular>
-            <emissive>0.05 0.08 0.15 0.0000</emissive>
+            <ambient>0.25 0.45 0.75 0.0500</ambient>
+            <diffuse>0.30 0.50 0.80 0.0500</diffuse>
+            <specular>0.60 0.60 0.65 0.0500</specular>
+            <emissive>0.05 0.08 0.15 0.0500</emissive>
           </material>
         </visual>
       </link>
