@@ -5,10 +5,12 @@ from torch import Tensor
 __all__ = [
     "streaming_sdf_stag_3d_multi",
     "bdim_vardens_3d",
+    "bdim_vardens_sigma_3d",
     "streaming_sdf_forces_post_3d",
     "apply_bcs_3d",
     "streaming_sdf_stag_2d_multi",
     "bdim_vardens_2d",
+    "bdim_vardens_sigma_2d",
     "streaming_sdf_forces_post_2d",
     "apply_bcs_2d",
     "interp_2d",
@@ -107,6 +109,38 @@ def bdim_vardens_3d(
     )
 
 
+def bdim_vardens_sigma_3d(
+        u_prime: Tensor, v_prime: Tensor, w_prime: Tensor,
+        sdf_u: Tensor, sdf_v: Tensor, sdf_w: Tensor,
+        body_u: Tensor, body_v: Tensor, body_w: Tensor,
+        u0: Tensor, v0: Tensor, w0: Tensor,
+        ch: Tensor, cv: Tensor, cw: Tensor,
+        key_u: Tensor, key_v: Tensor, key_w: Tensor,
+        sigma_shifts: Tensor,
+        eps: float, rho_body: float, rho_f: float, dt: float,
+        h_grid: float,
+        dirty_i0: int, dirty_j0: int, dirty_k0: int,
+        dirty_Ai: int, dirty_Aj: int, dirty_Ak: int) -> None:
+    """BDIM-σ variant of :func:`bdim_vardens_3d` (Lauber et al. 2022).
+
+    For each cell the Poisson coefficient is evaluated with ``mu0`` of a
+    shifted SDF ``phi - sigma_shifts[body_id]`` where ``body_id`` is
+    decoded from the Kernel-A AABB-local key buffer.  The velocity BDIM
+    field (``u0/v0/w0``) uses the unmodified ``mu0`` — only the
+    ``ch/cv/cw`` Poisson coefficient line uses the shifted ``mu0``.
+    """
+    return torch.ops.lilytorch_kernels.bdim_vardens_sigma_3d.default(
+        u_prime, v_prime, w_prime,
+        sdf_u, sdf_v, sdf_w,
+        body_u, body_v, body_w,
+        u0, v0, w0, ch, cv, cw,
+        key_u, key_v, key_w, sigma_shifts,
+        float(eps), float(rho_body), float(rho_f), float(dt), float(h_grid),
+        int(dirty_i0), int(dirty_j0), int(dirty_k0),
+        int(dirty_Ai), int(dirty_Aj), int(dirty_Ak),
+    )
+
+
 def streaming_sdf_forces_post_3d(
         F_flat: Tensor, F_offsets: Tensor,
         body_shapes: Tensor, body_meta: Tensor, kin: Tensor,
@@ -174,6 +208,7 @@ def streaming_sdf_stag_2d_multi(
         h_grid: float, max_vol_per_body: int,
         sdf_cc: Tensor, sdf_u: Tensor, sdf_v: Tensor,
         body_u: Tensor, body_v: Tensor,
+        key_cc_t: Tensor, key_u_t: Tensor, key_v_t: Tensor,
         interp_method: int,
         dirty_i0: int, dirty_j0: int,
         dirty_Ai: int, dirty_Aj: int) -> None:
@@ -183,12 +218,18 @@ def streaming_sdf_stag_2d_multi(
     ``sdf_u/v`` and ``body_u/v`` (per-step temporaries) inside the
     dirty AABB.  Does NOT touch ``winning_rho_cc`` -- Kernel B computes
     rho_eff from mu0 in registers.
+
+    ``key_cc_t/key_u_t/key_v_t`` are caller-allocated int64 scratch
+    buffers of size ``>= Ngx*Ngy`` (one per stagger) that the kernel
+    uses to pack/unpack per-cell winning-body keys; required by the
+    BDIM-σ path so Kernel B can decode body_id per cell.
     """
     return torch.ops.lilytorch_kernels.streaming_sdf_stag_2d_multi.default(
         F_flat, F_offsets, body_shapes, body_meta, kin,
         aabb_lo, aabb_dim,
         gx, gy, float(h_grid), int(max_vol_per_body),
         sdf_cc, sdf_u, sdf_v, body_u, body_v,
+        key_cc_t, key_u_t, key_v_t,
         int(interp_method),
         int(dirty_i0), int(dirty_j0),
         int(dirty_Ai), int(dirty_Aj),
@@ -217,6 +258,31 @@ def bdim_vardens_2d(
         u0, v0, ch, cv,
         float(eps), float(rho_body), float(rho_f), float(dt),
         float(h_grid),
+        int(dirty_i0), int(dirty_j0),
+        int(dirty_Ai), int(dirty_Aj),
+    )
+
+
+def bdim_vardens_sigma_2d(
+        u_prime: Tensor, v_prime: Tensor,
+        sdf_u: Tensor, sdf_v: Tensor,
+        body_u: Tensor, body_v: Tensor,
+        u0: Tensor, v0: Tensor,
+        ch: Tensor, cv: Tensor,
+        key_u: Tensor, key_v: Tensor,
+        sigma_shifts: Tensor,
+        eps: float, rho_body: float, rho_f: float, dt: float,
+        h_grid: float,
+        dirty_i0: int, dirty_j0: int,
+        dirty_Ai: int, dirty_Aj: int) -> None:
+    """2-D analogue of :func:`bdim_vardens_sigma_3d`."""
+    return torch.ops.lilytorch_kernels.bdim_vardens_sigma_2d.default(
+        u_prime, v_prime,
+        sdf_u, sdf_v,
+        body_u, body_v,
+        u0, v0, ch, cv,
+        key_u, key_v, sigma_shifts,
+        float(eps), float(rho_body), float(rho_f), float(dt), float(h_grid),
         int(dirty_i0), int(dirty_j0),
         int(dirty_Ai), int(dirty_Aj),
     )
