@@ -95,6 +95,8 @@ class SimConfig(BaseSimConfig):
         self.save              = False
 
         self.eps_multiplier = 1.0
+        # BDIM-σ correction for thin zebrafish body links (r < eps).
+        self.apply_bdim_sigma = True
 
         # ── Arena ────────────────────────────────────────────────────
         self.wall_thickness = 0.003

@@ -13,8 +13,10 @@ from concurrent.futures import ThreadPoolExecutor
 from lilytorch.src.kernels import (
     streaming_sdf_stag_3d_multi,
     bdim_vardens_3d,
+    bdim_vardens_sigma_3d,
     streaming_sdf_stag_2d_multi,
     bdim_vardens_2d,
+    bdim_vardens_sigma_2d,
 )
 from lilytorch.src.adv_diff import AdvDiffSolver
 from lilytorch.src.body import (body_from_yaml,
@@ -315,6 +317,13 @@ class FluidSolver(PlottingMixin):
 
         self.eps  = solver.get("eps_multiplier",
                                 torch.tensor(2.0, device=self.device, dtype=self.dtype)) * self.h
+
+        # BDIM-σ (Lauber et al. 2022): per-body Poisson-coefficient shift
+        # to enforce mu0_poisson → 0 inside thin bodies (r < eps).  When
+        # enabled, ``_sigma_shifts`` is lazily computed at the first
+        # fluid step (once body SDFs are populated) and static thereafter.
+        self.apply_bdim_sigma = bool(solver.get("apply_bdim_sigma", False))
+        self._sigma_shifts    = None   # lazily computed at first fluid step
 
         self.starting_iteration      = solver.get("starting_iteration", 0)
         self.starting_iteration_path = solver.get("starting_iteration_path", None)
@@ -1344,6 +1353,90 @@ class FluidSolver(PlottingMixin):
         for d, n in enumerate(norms):
             setattr(self, f'normal_{n}', normals[d][cc])
 
+    def _compute_sigma_shifts(self):
+        """Compute per-body BDIM-σ shifts (Lauber et al. 2022).
+
+        For each body ``b``, ``shift_b = max(0, eps + phi_min_b)`` where
+        ``phi_min_b`` is the minimum body SDF.  Thick bodies (r ≥ eps)
+        get ``shift = 0`` and behave unchanged; thin bodies (r < eps)
+        get a positive shift so the Poisson coefficient
+        ``mu0(phi - shift_b)`` reaches 0 inside the body.
+
+        Stored as a float32 device tensor for direct ``data_ptr<float>()``
+        consumption by the CUDA/CPU σ kernels.
+        """
+        shifts = []
+        for body in self.composite_body.bodies:
+            sdf_val = getattr(body, 'sdf_val', None)
+            if sdf_val is not None:
+                sigma_min = float(sdf_val.min().item())
+                shift = max(0.0, sigma_min + float(self.eps))
+            else:
+                shift = 0.0
+            shifts.append(shift)
+        self._sigma_shifts = torch.tensor(
+            shifts, dtype=torch.float32, device=self.device)
+        nonzero = [(i, s) for i, s in enumerate(shifts) if s > 0]
+        print(f"[BDIM-σ] sigma_shifts computed: {len(nonzero)} thin "
+              f"body/bodies need correction")
+        for i, s in nonzero:
+            print(f"  body {i}: shift = {s:.6f} m")
+
+    def _compute_sigma_mu_grids(self, mu_grids):
+        """Recompute ``mu0`` from σ-shifted union SDFs for each stagger axis.
+
+        Used by ``_compute_variable_density_coefficients`` (Python-mode
+        path) to substitute ``mu0_poisson`` for ``mu0_all_*`` when
+        BDIM-σ is enabled.  The velocity BDIM mu0 is unchanged.
+
+        Returns a tuple of the same length / shape as ``mu_grids``
+        (``(mu0_u, mu0_v, [mu0_w,] mu0_cc)``).  Falls back to the
+        original ``mu_grids`` when the per-body SDF attributes
+        (``sdf_val_u/v/w``, ``sdf_val``) required to rebuild the
+        union SDF are not populated (kernel mode does not store them).
+        """
+        comp  = self.composite_body
+        axes  = self._bdim_axis_names
+        sdf_attrs = tuple(f'sdf_val_{a}' for a in axes) + ('sdf_val',)
+        eps_val   = float(self.eps)
+
+        # Without per-body SDFs (kernel mode skips populating them)
+        # there is no Python-side σ correction to apply.
+        if not all(getattr(b, sdf_attrs[-1], None) is not None
+                   for b in comp.bodies):
+            return mu_grids
+
+        # Re-build a σ-shifted union SDF per stagger axis by min-reducing
+        # over per-body ``sdf_val_<attr> - shift_b``.  Start from a copy
+        # of the unshifted union and tighten with each thin body.
+        unions = []
+        for attr in sdf_attrs:
+            base = getattr(comp, attr, None)
+            if base is None:
+                return mu_grids
+            unions.append(base.clone())
+
+        for b, body in enumerate(comp.bodies):
+            shift = float(self._sigma_shifts[b])
+            if shift <= 0.0:
+                continue
+            for u_idx, attr in enumerate(sdf_attrs):
+                sdf_b = getattr(body, attr, None)
+                if sdf_b is None:
+                    continue
+                torch.minimum(unions[u_idx], sdf_b - shift, out=unions[u_idx])
+
+        # Smooth Heaviside mu0(d/eps) — same formula as Body.mu_funcs.
+        new_mu = []
+        for u in unions:
+            d    = u
+            mu0  = (d >= 0).to(d.dtype)
+            band = (d > -eps_val) & (d < eps_val)
+            deps = d[band] / eps_val
+            mu0[band] = 0.5 * (1.0 + deps + torch.sin(torch.pi * deps) / torch.pi)
+            new_mu.append(mu0)
+        return tuple(new_mu)
+
     # ==================================================================
     #  Variable-density FSI fluid step  (called by BDIMhandler.step)
     # ==================================================================
@@ -1387,6 +1480,14 @@ class FluidSolver(PlottingMixin):
         # codebase (staggering is a coord offset, not a shape change),
         # so a single slice tuple indexes every grid identically.
         mu_grids = tuple(getattr(self, f'mu0_all_{a}') for a in axes) + (self.mu0_all,)
+
+        # ---- BDIM-σ: substitute σ-shifted mu0 for the Poisson coefficient.
+        # The velocity BDIM (mu0_all_* used in _bdim_apply) is *not* changed
+        # — only the Poisson coefficient line uses these shifted grids.
+        if (self.apply_bdim_sigma
+                and self._sigma_shifts is not None
+                and bool(self._sigma_shifts.any())):
+            mu_grids = self._compute_sigma_mu_grids(mu_grids)
 
         # ---- narrow-band fast path -------------------------------------
         if self._use_kernels and all(m is not None for m in mu_grids):
@@ -1507,6 +1608,12 @@ class FluidSolver(PlottingMixin):
             )
         sm = comp._kernel_static_2d
 
+        # BDIM-σ: lazily compute per-body sigma shifts on the first
+        # fluid step (body SDFs are populated by BDIMhandler.update by
+        # now).  Static thereafter.
+        if self.apply_bdim_sigma and self._sigma_shifts is None:
+            self._compute_sigma_shifts()
+
         # 1-2. eddy viscosity + advection-diffusion.
         nu_t   = self._compute_nu_t(u, v)
         primes = self.adv_diff_solver.solve(u, v, nu_t=nu_t)
@@ -1527,6 +1634,14 @@ class FluidSolver(PlottingMixin):
         sdf_v_tmp = torch.full(gs, _FAR, **_opts)
         bU_tmp    = torch.zeros(gs, **_opts)
         bV_tmp    = torch.zeros(gs, **_opts)
+        # int64 key scratch buffers for Kernel A (packed body-id + SDF).
+        # 2-D keys are full-grid sized so Kernel B's σ path can index by
+        # the same flat ``g`` as the SDF/body tensors.
+        Ngrid = int(gs[0]) * int(gs[1])
+        _key_opts = dict(dtype=torch.int64, device=self.device)
+        key_cc_t  = torch.empty(Ngrid, **_key_opts)
+        key_u_t   = torch.empty(Ngrid, **_key_opts)
+        key_v_t   = torch.empty(Ngrid, **_key_opts)
 
         # 5. Kernel A.
         streaming_sdf_stag_2d_multi(
@@ -1537,26 +1652,45 @@ class FluidSolver(PlottingMixin):
             float(comp.h), int(ks['max_vol']),
             comp.sdf_val, sdf_u_tmp, sdf_v_tmp,
             bU_tmp, bV_tmp,
+            key_cc_t, key_u_t, key_v_t,
             int(getattr(self, '_sdf_interp_method', 0)),
             int(ks['dirty_i0']), int(ks['dirty_j0']),
             int(ks['dirty_Ai']), int(ks['dirty_Aj']),
         )
 
         # 6. Kernel B: fused BDIM2 + variable-density coefficients.
-        bdim_vardens_2d(
-            primes[0], primes[1],
-            sdf_u_tmp, sdf_v_tmp,
-            bU_tmp, bV_tmp,
-            self.u0, self.v0,
-            self._ch_persist, self._cv_persist,
-            float(comp.eps), float(self.rho_body), float(self.rho),
-            float(timestep), float(comp.h),
-            int(ks['dirty_i0']), int(ks['dirty_j0']),
-            int(ks['dirty_Ai']), int(ks['dirty_Aj']),
-        )
+        if (self.apply_bdim_sigma
+                and self._sigma_shifts is not None
+                and bool(self._sigma_shifts.any())):
+            bdim_vardens_sigma_2d(
+                primes[0], primes[1],
+                sdf_u_tmp, sdf_v_tmp,
+                bU_tmp, bV_tmp,
+                self.u0, self.v0,
+                self._ch_persist, self._cv_persist,
+                key_u_t, key_v_t,
+                self._sigma_shifts,
+                float(comp.eps), float(self.rho_body), float(self.rho),
+                float(timestep), float(comp.h),
+                int(ks['dirty_i0']), int(ks['dirty_j0']),
+                int(ks['dirty_Ai']), int(ks['dirty_Aj']),
+            )
+        else:
+            bdim_vardens_2d(
+                primes[0], primes[1],
+                sdf_u_tmp, sdf_v_tmp,
+                bU_tmp, bV_tmp,
+                self.u0, self.v0,
+                self._ch_persist, self._cv_persist,
+                float(comp.eps), float(self.rho_body), float(self.rho),
+                float(timestep), float(comp.h),
+                int(ks['dirty_i0']), int(ks['dirty_j0']),
+                int(ks['dirty_Ai']), int(ks['dirty_Aj']),
+            )
 
         # 7. Free per-step temporaries before the pressure projection.
         del sdf_u_tmp, sdf_v_tmp, bU_tmp, bV_tmp, primes
+        del key_cc_t, key_u_t, key_v_t
 
         # 8. Boundary conditions on the BDIM-corrected velocity.
         self.adv_diff_solver.set_BCs(self.u0, self.v0)
@@ -1615,6 +1749,12 @@ class FluidSolver(PlottingMixin):
                       flush=True)
 
         _chk("0-baseline (step start)", reset=True)
+        # BDIM-σ: lazily compute per-body sigma shifts on the first
+        # fluid step (body SDFs are populated by BDIMhandler.update by
+        # now).  Static thereafter.
+        if self.apply_bdim_sigma and self._sigma_shifts is None:
+            self._compute_sigma_shifts()
+
         # 1-2. eddy viscosity + advection-diffusion.
         nu_t   = self._compute_nu_t(u, v, w_vel)
         _chk("1-after compute_nu_t")
@@ -1682,20 +1822,39 @@ class FluidSolver(PlottingMixin):
         #    Reads primes / SDF / body face velocities; writes u0/v0/w0
         #    and ch/cv/cw inside the dirty AABB.  mu0/mu1/normals are
         #    computed only in registers.
-        bdim_vardens_3d(
-            primes[0], primes[1], primes[2],
-            sdf_u_tmp, sdf_v_tmp, sdf_w_tmp,
-            bU_tmp, bV_tmp, bW_tmp,
-            self.u0, self.v0, self.w0,
-            self._ch_persist, self._cv_persist, self._cw_persist,
-            float(comp.eps), float(self.rho_body), float(self.rho),
-            float(timestep), float(comp.h),
-            int(ks['dirty_i0']), int(ks['dirty_j0']), int(ks['dirty_k0']),
-            int(ks['dirty_Ai']), int(ks['dirty_Aj']), int(ks['dirty_Ak']),
-        )
+        if (self.apply_bdim_sigma
+                and self._sigma_shifts is not None
+                and bool(self._sigma_shifts.any())):
+            bdim_vardens_sigma_3d(
+                primes[0], primes[1], primes[2],
+                sdf_u_tmp, sdf_v_tmp, sdf_w_tmp,
+                bU_tmp, bV_tmp, bW_tmp,
+                self.u0, self.v0, self.w0,
+                self._ch_persist, self._cv_persist, self._cw_persist,
+                key_u_t, key_v_t, key_w_t,
+                self._sigma_shifts,
+                float(comp.eps), float(self.rho_body), float(self.rho),
+                float(timestep), float(comp.h),
+                int(ks['dirty_i0']), int(ks['dirty_j0']), int(ks['dirty_k0']),
+                int(ks['dirty_Ai']), int(ks['dirty_Aj']), int(ks['dirty_Ak']),
+            )
+        else:
+            bdim_vardens_3d(
+                primes[0], primes[1], primes[2],
+                sdf_u_tmp, sdf_v_tmp, sdf_w_tmp,
+                bU_tmp, bV_tmp, bW_tmp,
+                self.u0, self.v0, self.w0,
+                self._ch_persist, self._cv_persist, self._cw_persist,
+                float(comp.eps), float(self.rho_body), float(self.rho),
+                float(timestep), float(comp.h),
+                int(ks['dirty_i0']), int(ks['dirty_j0']), int(ks['dirty_k0']),
+                int(ks['dirty_Ai']), int(ks['dirty_Aj']), int(ks['dirty_Ak']),
+            )
 
         # 7. Free per-step temporaries before the pressure projection
         #    so its peak working set is not stacked on top of them.
+        #    Key tensors must outlive Kernel B (read by the BDIM-σ path),
+        #    so they are freed here together with the other temporaries.
         del sdf_u_tmp, sdf_v_tmp, sdf_w_tmp, bU_tmp, bV_tmp, bW_tmp, primes
         del key_cc_t, key_u_t, key_v_t, key_w_t
         _chk("7-after del temps+primes (pre-project baseline)")

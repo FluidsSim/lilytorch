@@ -182,6 +182,10 @@ class BaseSimConfig:
         # Default 2.0 in the solver.  For mesh bodies set to 1.5 or lower
         # (min ~1.0) to reduce the effective body size and drag inflation.
         self.eps_multiplier          = None   # None → solver default (2.0)
+        # BDIM-σ (Lauber et al. 2022): per-body Poisson-coefficient shift
+        # so thin bodies (r < eps) reach mu0_poisson = 0 inside and the
+        # pressure BC is correctly enforced.  None → solver default (False).
+        self.apply_bdim_sigma        = None   # None → solver default (False)
         # Delta-function order for force integration:
         #   1 (default) – first-order smoothed delta
         #   2           – Towers (2008) correction δ/|∇φ|, recommended for
@@ -734,6 +738,7 @@ class BaseSimConfig:
             ("sdf_interp_method",       self.sdf_interp_method),
             ("vmax_abort",              self.vmax_abort),
             ("eps_multiplier",          self.eps_multiplier),
+            ("apply_bdim_sigma",        self.apply_bdim_sigma),
             ("force_delta_order",       self.force_delta_order),
         ]:
             if val is not None:
