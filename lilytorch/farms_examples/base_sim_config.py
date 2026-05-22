@@ -102,6 +102,7 @@ class BaseSimConfig:
         self.save_frames = True
         self.save_every  = 200
         self.save        = False   # save fields (u, v, [w], p, sdf) to HDF5
+        self.save_drags  = False   # save drag/force records to drags.h5
         self.vmin        = -10.0
         self.vmax        = 10.0
         self.plot_specs  = ["curl", "pressure"]
@@ -815,6 +816,7 @@ class BaseSimConfig:
             "iso_3d_specs"   : None if self.iso_3d_specs is None else list(self.iso_3d_specs),
             "iso_3d_value"   : self.iso_3d_value,
             "save"           : self.save,
+            "save_drags"     : self.save_drags,
         }
 
         bdim_yaml = {

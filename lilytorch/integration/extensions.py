@@ -140,7 +140,7 @@ class FluidExtension(TaskExtension):
         fs = getattr(self.BDIMhandler, "fluid_solver", None)
         if fs is None:
             return
-        if getattr(fs, "compute_forces", False) and getattr(fs, "save", False):
+        if getattr(fs, "compute_forces", False) and getattr(fs, "save_drags", False):
             try:
                 fs.save_drags_h5()
                 fs.flush_io()

@@ -647,6 +647,7 @@ class FluidSolver(PlottingMixin):
         self.save             = output.get("save",
                                     output.get("save_uv", False)
                                     or output.get("save_vtk", False))
+        self.save_drags       = output.get("save_drags", False)
         # vmin/vmax: a number → fixed colour limits; "auto" → auto-scale per field
         _vmin = output["vmin"]
         _vmax = output["vmax"]
@@ -2135,7 +2136,7 @@ class FluidSolver(PlottingMixin):
                 t                      = iteration*self.dt
                 (u,v,p,w,stop_sim) = self.step_(u, v, p, iteration, t, w_vel=w)
 
-        if self.compute_forces and self.save:
+        if self.compute_forces and self.save_drags:
             self.save_drags_h5()
 
         # Block until all background I/O is complete before returning

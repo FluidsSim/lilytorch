@@ -14,6 +14,7 @@ class SimConfig(BaseSimConfig):
         self.data_folder = os.path.join(
             lilytorch_repo_root, 'farms_examples', 'pleurodeles',
         )
+        self.compute_sdf = True
 
         # ── Hardware ──────────────────────────────────────────────────
         self.use_gpu  = True
@@ -34,15 +35,15 @@ class SimConfig(BaseSimConfig):
         ]
 
         # ── 2-D grid ─────────────────────────────────────────────────
-        self.Nx   = 1024
-        self.Ny   = 256
+        self.Nx   = 2048
+        self.Ny   = 512
         self.xmin = -0.13 * 2
         self.xmax =  0.27 * 2
         self.ymin = -0.05 * 2
         self.ymax =  0.05 * 2
 
         # ── Physics ───────────────────────────────────────────────────
-        self.timestep          = 0.0005
+        self.timestep          = 0.00025
         self.convection_method = "quick"
         self.n_iterations      = 10001
         self.save_every        = 50

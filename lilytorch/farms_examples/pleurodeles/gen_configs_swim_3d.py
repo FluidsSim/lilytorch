@@ -15,8 +15,7 @@ class SimConfig(BaseSimConfig):
 
         # Reuse the existing pleurodeles mesh SDF and generate a separate
         # 3-D interpolation cache so it does not clash with the 2-D data.
-        self.compute_sdf    = False
-        self.save           = True
+        self.compute_sdf    = True
 
         self.data_folder = os.path.join(
             lilytorch_repo_root, 'farms_examples', 'pleurodeles',
@@ -27,6 +26,8 @@ class SimConfig(BaseSimConfig):
         self.use_gpu        = True
         self.headless       = False
         self.poisson_method = "multigrid"
+
+        # self.apply_bdim_sigma = True
 
         # Animat
         self.animats_pars = [
