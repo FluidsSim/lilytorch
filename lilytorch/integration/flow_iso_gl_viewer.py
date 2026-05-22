@@ -1355,13 +1355,10 @@ class FlowIsoGLViewer(_BaseExtension):
 
         mesh = torch.cat(chunks, dim=0)
         if mesh.shape[0] > self.max_vertices:
-            # Stratified subsample to stay within the budget.
-            n_tris = mesh.shape[0] // 3
+            # Keep the newest triangles (MC scans from low-x to high-x, so
+            # the earliest triangles are the upstream/older ones).
             keep_tris = max(1, self.max_vertices // 3)
-            sel = torch.randperm(n_tris, device=mesh.device)[:keep_tris]
-            tri_starts = sel * 3
-            idx = torch.stack([tri_starts, tri_starts + 1, tri_starts + 2], dim=1).reshape(-1)
-            mesh = mesh.index_select(0, idx)
+            mesh = mesh[-(keep_tris * 3):]
 
         # Persistent CUDA buffer of the right size — the GL hook reads from
         # this pointer asynchronously, so we must keep the tensor alive.

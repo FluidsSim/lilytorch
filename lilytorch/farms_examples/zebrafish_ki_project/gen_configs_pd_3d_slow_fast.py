@@ -36,7 +36,7 @@ class SimConfig(BaseSimConfig):
         # ── Hardware ──────────────────────────────────────────────────
         self.compute_sdf    = True
         self.use_gpu        = True
-        self.use_bdim       = False
+        self.use_bdim       = True
         self.headless       = False
         self.water_buoyancy = True
 
@@ -167,18 +167,30 @@ class SimConfig(BaseSimConfig):
             },
         })
 
+        # Interactive viewer: keep the camera locked on the fish CoM
+        extensions.append({
+            "loader": "farms_mujoco.simulation.extensions.CameraFollower",
+            "config": {
+                "animat_id"       : 0,
+                "azimuth"         : 90,
+                "elevation"       : -30,
+                "distance"        : 0.04,
+                "angular_velocity": 0,
+            },
+        })
+
         extensions.append({
             "loader": "lilytorch.integration.flow_iso_gl_viewer.FlowIsoGLViewer",
             "config": {
-                "field"              : "omega_z",
-                # "field"              : "omega_mag",
-                "alpha"              : 0.25,
+                # "field"              : "omega_z",
+                "field"              : "omega_mag",
+                "alpha"              : 0.2,
                 "update_every"       : 1,
                 "max_vertices"       : 4 * self.Nx * self.Ny,
                 "smooth_sigma"       : 0,
                 "crop_boundary"      : 0,
                 "exclude_body"       : True,
-                "iso_value"          : 40.0,
+                "iso_value"          : 70.0,
                 "debug_force_visible": False,
                 "color_uni"          : "#00FFFF",
                 "color_pos"          : "#FF4500",
@@ -192,8 +204,9 @@ class SimConfig(BaseSimConfig):
             self.ymin, self.ymax,
             self.zmin, self.zmax,
             overshoot=1.0,  # controls CameraRecording distance (not camera_dist)
+            max_width=3840, max_height=2160,
         )
-        cam["elevation"] = -45   # tilt 20° from straight-down (−90 = top-down)
+        cam["elevation"] = -30   # tilt 20° from straight-down (−90 = top-down)
         extensions.append({
             "loader": "farms_mujoco.sensors.camera.CameraRecording",
             "config": {
@@ -202,30 +215,47 @@ class SimConfig(BaseSimConfig):
                 "fps"             : 30,
                 "speed"           : 0.1,
                 "angular_velocity": 0,
-                "resolution"      : [3840, 2160],
                 **cam,
             },
         })
 
-        # Side view: looking along Y axis (shows swimming direction vs tank depth)
-        side = side_camera_config(
-            self.xmin, self.xmax,
-            self.ymin, self.ymax,
-            self.zmin, self.zmax,
-            view_axis="y",
-            overshoot=1.0,
-        )
+        # # Side view: looking along Y axis (shows swimming direction vs tank depth)
+        # side = side_camera_config(
+        #     self.xmin, self.xmax,
+        #     self.ymin, self.ymax,
+        #     self.zmin, self.zmax,
+        #     view_axis="y",
+        #     overshoot=1.0,
+        # )
+        # extensions.append({
+        #     "loader": "farms_mujoco.sensors.camera.CameraRecording",
+        #     "config": {
+        #         "path"            : os.path.join(output_folder, "output", "video_side.mp4"),
+        #         "animat_id"       : None,
+        #         "fps"             : 30,
+        #         "speed"           : 0.1,
+        #         "angular_velocity": 0,
+        #         **side,
+        #     },
+        # })
+
+        # Following camera: tight view locked on fish CoM
         extensions.append({
             "loader": "farms_mujoco.sensors.camera.CameraRecording",
             "config": {
-                "path"            : os.path.join(output_folder, "output", "video_side.mp4"),
-                "animat_id"       : None,
+                "path"            : os.path.join(output_folder, "output", "video_follow.mp4"),
+                "animat_id"       : 0,
                 "fps"             : 30,
                 "speed"           : 0.1,
                 "angular_velocity": 0,
-                **side,
+                "azimuth"         : 90,
+                "elevation"       : -30,
+                "distance"        : 0.04,
+                "offset"          : [0, 0, 0],
+                "resolution"      : [3840, 2160],
             },
         })
+
 
         # SkyModifier must be LAST so all CameraRecording renderers already
         # exist when initialize_episode runs the GPU texture upload.
