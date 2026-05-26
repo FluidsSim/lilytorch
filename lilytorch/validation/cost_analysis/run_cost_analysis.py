@@ -248,7 +248,13 @@ def instrument_handler(handler):
                 self_h.update(t, iteration, dt=timestep)
 
             with T("2  mu+normals (recompute)"):
-                _orig_recompute(ffs)
+                # Kernel mode fuses mu+normals into Kernel B during
+                # fluid_step, so the python recompute is intentionally
+                # unreachable in step_().  Skip it here too — calling it
+                # would try to read ``comp.sdf_val_u``, which is not
+                # allocated on MultiAnimatBodies when use_kernels=True.
+                if not ffs._use_kernels:
+                    _orig_recompute(ffs)
 
             with T("3  fluid_step (total PDE)"):
                 state = _orig_fluid_step(ffs, *_get_state(), timestep)
@@ -372,8 +378,39 @@ def instrument_handler(handler):
 
             poisson_mg._vcycle = types.MethodType(timed_vcycle, poisson_mg)
 
+        # Kernel-mode patches: intercept Kernel A (streaming SDF) and Kernel B
+        # (fused BDIM+vardens) at the solver module level so they are attributed
+        # to the "Body update (SDF eval)" and "BDIM meta-equation" categories
+        # respectively (prefixes "1b" and "3b").
+        kern_patched = False
+        if getattr(fs, '_use_kernels', False):
+            import lilytorch.src.solver as _solver_mod
+            if spec.dim == 3:
+                _orig_kern_a = _solver_mod.streaming_sdf_stag_3d_multi
+                _orig_kern_b = _solver_mod.bdim_vardens_3d
+            else:
+                _orig_kern_a = _solver_mod.streaming_sdf_stag_2d_multi
+                _orig_kern_b = _solver_mod.bdim_vardens_2d
+
+            def _timed_kern_a(*ca, **ckw):
+                with T("1b.ka   Kernel A (streaming SDF)"):
+                    return _orig_kern_a(*ca, **ckw)
+
+            def _timed_kern_b(*ca, **ckw):
+                with T("3b.kb   Kernel B (fused BDIM+vardens)"):
+                    return _orig_kern_b(*ca, **ckw)
+
+            if spec.dim == 3:
+                _solver_mod.streaming_sdf_stag_3d_multi = _timed_kern_a
+                _solver_mod.bdim_vardens_3d = _timed_kern_b
+            else:
+                _solver_mod.streaming_sdf_stag_2d_multi = _timed_kern_a
+                _solver_mod.bdim_vardens_2d = _timed_kern_b
+            kern_patched = True
+
+        kern_info = ", Kernel A+B" if kern_patched else ""
         extra = ", Poisson internals" if instrument_poisson_internals and poisson_mg else ""
-        print(f"  [profiler] Deep patches installed (SDF, advection, BDIM, project{extra})", flush=True)
+        print(f"  [profiler] Deep patches installed (SDF, advection, BDIM, project{kern_info}{extra})", flush=True)
 
     if _precompile_done[0]:
         _install_deep_patches()
@@ -520,7 +557,6 @@ def _apply_cfg_overrides(cfg):
             solver_cfg = bdim_yaml.get("solver", {})
             if solver_cfg:
                 solver_cfg["compile_adv_diff"] = True
-                solver_cfg["poisson_compile"] = True
                 solver_cfg["compile_forces"] = True
                 solver_cfg["dtype"] = args.dtype
                 solver_cfg["poisson_method"] = args.poisson_method
@@ -865,7 +901,7 @@ if handler is not None:
             fontweight="bold",
         )
 
-        def _format_ax(ax, title, data, cmap, symmetric=False):
+        def _format_ax(ax, title, data, cmap, symmetric=False, vmin=None, vmax=None):
             # Use sdf >= eps (far-field fluid, outside BDIM smearing zone) for
             # percentile-based colormap range, but display the full fluid region
             # (sdf >= 0, shown in colour; sdf < 0 body interior shown in grey).
@@ -873,12 +909,13 @@ if handler is not None:
             data_farfield = np.where(farfield_mask, data, np.nan)
             fluid_mask = sdf >= 0
             data_display = np.where(fluid_mask, data, np.nan)
-            if symmetric:
-                vmax = max(abs(np.nanpercentile(data_farfield, 2)), abs(np.nanpercentile(data_farfield, 98)))
-                vmin = -vmax
-            else:
-                vmin = np.nanpercentile(data_farfield, 2)
-                vmax = np.nanpercentile(data_farfield, 98)
+            if vmin is None or vmax is None:
+                if symmetric:
+                    vmax = max(abs(np.nanpercentile(data_farfield, 2)), abs(np.nanpercentile(data_farfield, 98)))
+                    vmin = -vmax
+                else:
+                    vmin = np.nanpercentile(data_farfield, 2)
+                    vmax = np.nanpercentile(data_farfield, 98)
             cmap_obj = plt.get_cmap(cmap).copy()
             cmap_obj.set_bad(color="#cccccc")
             im = ax.imshow(
@@ -897,9 +934,9 @@ if handler is not None:
             ax.tick_params(labelsize=7)
             plt.colorbar(im, ax=ax, shrink=0.85, pad=0.02)
 
-        _format_ax(axes[0, 0], "Pressure $p$", p, "RdBu_r", symmetric=True)
-        _format_ax(axes[0, 1], "Velocity magnitude $|u|$", vmag, "viridis")
-        _format_ax(axes[1, 0], "Vorticity $\\omega_z$", omega_z, "RdBu_r", symmetric=True)
+        _format_ax(axes[0, 0], "Pressure $p$", p, "RdBu_r", symmetric=True, vmin=-200.0, vmax=200.0)
+        _format_ax(axes[0, 1], "Velocity magnitude $|u|$", vmag, "viridis", vmin=0.0, vmax=0.4)
+        _format_ax(axes[1, 0], "Vorticity $\\omega_z$", omega_z, "RdBu_r", symmetric=True, vmin=-5.0, vmax=5.0)
 
         far_sentinel = 1e3
         sdf_plot = np.ma.masked_where(np.abs(sdf) >= far_sentinel, sdf)
@@ -950,19 +987,20 @@ if handler is not None:
             fontweight="bold",
         )
 
-        def _format_ax(ax, title, data, cmap, symmetric=False):
+        def _format_ax(ax, title, data, cmap, symmetric=False, vmin=None, vmax=None):
             # Use sdf >= eps (far-field, outside BDIM smearing zone) for
             # percentile-based colormap range; display full fluid sdf >= 0.
             farfield_mask = sdf_slice >= eps_val
             data_farfield = np.where(farfield_mask, data, np.nan)
             fluid_mask = sdf_slice >= 0
             data_display = np.where(fluid_mask, data, np.nan)
-            if symmetric:
-                vmax = max(abs(np.nanpercentile(data_farfield, 2)), abs(np.nanpercentile(data_farfield, 98)))
-                vmin = -vmax
-            else:
-                vmin = np.nanpercentile(data_farfield, 2)
-                vmax = np.nanpercentile(data_farfield, 98)
+            if vmin is None or vmax is None:
+                if symmetric:
+                    vmax = max(abs(np.nanpercentile(data_farfield, 2)), abs(np.nanpercentile(data_farfield, 98)))
+                    vmin = -vmax
+                else:
+                    vmin = np.nanpercentile(data_farfield, 2)
+                    vmax = np.nanpercentile(data_farfield, 98)
             cmap_obj = plt.get_cmap(cmap).copy()
             cmap_obj.set_bad(color="#cccccc")
             im = ax.imshow(
@@ -981,9 +1019,9 @@ if handler is not None:
             ax.tick_params(labelsize=7)
             plt.colorbar(im, ax=ax, shrink=0.85, pad=0.02)
 
-        _format_ax(axes[0, 0], "Pressure $p$", p_slice, "RdBu_r", symmetric=True)
-        _format_ax(axes[0, 1], "Velocity magnitude $|u|$", vmag_slice, "viridis")
-        _format_ax(axes[1, 0], "Vorticity $\\omega_z$", omega_z, "RdBu_r", symmetric=True)
+        _format_ax(axes[0, 0], "Pressure $p$", p_slice, "RdBu_r", symmetric=True, vmin=-200.0, vmax=200.0)
+        _format_ax(axes[0, 1], "Velocity magnitude $|u|$", vmag_slice, "viridis", vmin=0.0, vmax=0.4)
+        _format_ax(axes[1, 0], "Vorticity $\\omega_z$", omega_z, "RdBu_r", symmetric=True, vmin=-5.0, vmax=5.0)
 
         far_sentinel = 1e3
         sdf_plot = np.ma.masked_where(np.abs(sdf_slice) >= far_sentinel, sdf_slice)

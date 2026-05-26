@@ -554,6 +554,7 @@ def plot_field_3d(
     iso_fraction=0.15,  # threshold = iso_fraction * max(|smoothed field|)
     smooth_sigma=0,   # Gaussian smoothing (in grid-cells) before isosurface extraction
     crop_boundary=0,    # number of cells to crop from each domain face before rendering
+    realtime=None,      # physical simulation time in seconds (for annotation)
     window_size=(3840, 2160),
     image_scale=2,          # multiplier on window_size for the saved image
     fmt="png",
@@ -594,6 +595,7 @@ def plot_field_3d(
             body_colors=body_colors, body_default_color=body_default_color,
             iso_value=iso_value, iso_fraction=iso_fraction,
             smooth_sigma=smooth_sigma, crop_boundary=crop_boundary,
+            realtime=realtime,
             window_size=window_size, image_scale=image_scale, fmt=fmt,
         )
 
@@ -604,6 +606,7 @@ def _plot_field_3d_locked(
     body_colors=None, body_default_color=None,
     iso_value=None, iso_fraction=0.15,
     smooth_sigma=0, crop_boundary=0,
+    realtime=None,
     window_size=(3840, 2160), image_scale=2, fmt="png",
 ):
     """Inner implementation of plot_field_3d – must be called under _vtk_lock."""
@@ -787,6 +790,8 @@ def _plot_field_3d_locked(
     # ---- text annotation with field range + threshold ----
     if threshold is not None:
         info_lines = [f"{name}"]
+        if realtime is not None:
+            info_lines.append(f"t = {float(realtime):.4f} s")
         info_lines.append(f"range: [{fmin:.2e}, {fmax:.2e}]")
         if is_bipolar:
             info_lines.append(f"iso: ±{threshold:.2e}")
@@ -797,7 +802,7 @@ def _plot_field_3d_locked(
             pl.add_text(
                 info_text,
                 position="upper_left",
-                font_size=35,
+                font_size=60,
                 color="white",
                 shadow=True,
             )
@@ -1149,6 +1154,13 @@ class PlottingMixin:
                 return self.check_termination(iteration, u, v, p)
             return False
 
+        # Invalidate vorticity cache so each frame recomputes it from the
+        # current velocity tensors.  The cache key is id(u), which stays
+        # constant when project() modif ies u in-place (kernel mode), so
+        # without this reset the stale step-0 zeros would be returned
+        # for every frame.
+        self._vort_cache_id = -1
+
         # ---- snapshot tensors to CPU numpy *once* (still on main thread
         #      so the GPU transfer is overlapped with the previous kernel)
         # We clone/detach to decouple from the live computation graph.
@@ -1300,6 +1312,7 @@ class PlottingMixin:
                         iso_value=iso_thresh,
                         bodies=bodies,
                         sdf_vals=_body_sdf_vals_np,
+                        realtime=float(iteration * self.dt_np),
                     )
 
         # ---- raw data save (2-D) ----

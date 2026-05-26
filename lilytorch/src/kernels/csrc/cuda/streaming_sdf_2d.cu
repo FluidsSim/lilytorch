@@ -1,8 +1,8 @@
 // =====================================================================
 //  streaming_sdf_2d.cu
 //
-//  CUDA implementations of ``streaming_sdf_min_rho_2d_multi`` and
-//  ``streaming_sdf_min_rho_2d_multi``.  Mirrors ``streaming_sdf.cu``
+//  CUDA implementations of ``streaming_sdf_stag_2d_multi`` and
+//  ``streaming_sdf_stag_2d_multi``.  Mirrors ``streaming_sdf.cu``
 //  line-for-line with the z-axis stripped.  See the matching helpers
 //  in ``streaming_sdf_cpu_2d.cpp`` for the algorithmic rationale.
 // =====================================================================
@@ -122,9 +122,9 @@ __device__ __forceinline__ scalar_t sdf_sample_dispatch_2d(
 //  CUDA dispatch (single body)
 // =====================================================================
 // =====================================================================
-//  streaming_sdf_min_rho_2d_multi  (Phase C: parallel-B atomicMin64)
+//  streaming_sdf_stag_2d_multi  (Phase C: parallel-B atomicMin64)
 //
-//  2-D analogue of ``streaming_sdf_min_rho_3d_multi``.  Single launch
+//  2-D analogue of ``streaming_sdf_stag_3d_multi``.  Single launch
 //  fanned across ``gridDim.y == B`` with packed ``(s, body_id)``
 //  64-bit ``atomicMin`` per union SDF field (cc, u, v).  See
 //  ``packed_key.cuh`` and the 3-D implementation for the encoding
@@ -157,62 +157,6 @@ __global__ void streaming_sdf_init_keys_2d_kernel(
     key_v [g] = pack_sdf_body_key(sdf_v [g], B_sentinel);
 }
 
-// Decode kernel: scatter winning ``(s, body_id)`` back to ``sdf_*`` and
-// recompute ``bU/bV[g]`` from the winning body's planar kinematics.
-// In 2-D the angular velocity is the scalar ``om = K[10]``.
-template <typename scalar_t>
-__global__ void streaming_sdf_decode_keys_2d_kernel(
-    const uint64_t* __restrict__ key_cc,
-    const uint64_t* __restrict__ key_u,
-    const uint64_t* __restrict__ key_v,
-    const scalar_t* __restrict__ kin,           // [B,11]
-    const scalar_t* __restrict__ gx,
-    const scalar_t* __restrict__ gy,
-    const int Ngx, const int Ngy,
-    const int B_sentinel,
-    scalar_t* __restrict__ sdf_cc,
-    scalar_t* __restrict__ sdf_u,
-    scalar_t* __restrict__ sdf_v,
-    scalar_t* __restrict__ bU,
-    scalar_t* __restrict__ bV)
-{
-    const int g = blockIdx.x * blockDim.x + threadIdx.x;
-    const int Ngrid = Ngx * Ngy;
-    if (g >= Ngrid) return;
-
-    const int j = g % Ngy;
-    const int i = g / Ngy;
-
-    const uint64_t kc = key_cc[g];
-    const uint64_t ku = key_u [g];
-    const uint64_t kv = key_v [g];
-
-    const uint32_t bc = unpack_body_id(kc);
-    const uint32_t bu = unpack_body_id(ku);
-    const uint32_t bv = unpack_body_id(kv);
-
-    if ((int)bc < B_sentinel) sdf_cc[g] = unpack_sdf<scalar_t>(kc);
-    if ((int)bu < B_sentinel) sdf_u [g] = unpack_sdf<scalar_t>(ku);
-    if ((int)bv < B_sentinel) sdf_v [g] = unpack_sdf<scalar_t>(kv);
-
-    if ((int)bu < B_sentinel) {
-        const scalar_t* K = kin + (int)bu * 11;
-        const scalar_t cm_y = K[7];
-        const scalar_t lv_x = K[8];
-        const scalar_t om   = K[10];
-        const scalar_t yc = gy[j];
-        bU[g] = lv_x - om * (yc - cm_y);
-    }
-    if ((int)bv < B_sentinel) {
-        const scalar_t* K = kin + (int)bv * 11;
-        const scalar_t cm_x = K[6];
-        const scalar_t lv_y = K[9];
-        const scalar_t om   = K[10];
-        const scalar_t xc = gx[i];
-        bV[g] = lv_y + om * (xc - cm_x);
-    }
-}
-
 // =====================================================================
 //  streaming_sdf_forces_post_2d (CUDA)
 //
@@ -224,11 +168,11 @@ __global__ void streaming_sdf_decode_keys_2d_kernel(
 // =====================================================================
 
 // =====================================================================
-//  streaming_sdf_min_rho_2d_multi  (Phase C only)
+//  streaming_sdf_stag_2d_multi  (Phase C only)
 // =====================================================================
 
 template <typename scalar_t>
-__global__ void streaming_sdf_min_rho_2d_multi_kernel(
+__global__ void streaming_sdf_stag_2d_multi_kernel(
     const scalar_t* __restrict__ F_flat,
     const int64_t*  __restrict__ F_offsets,
     const int64_t*  __restrict__ body_shapes,
@@ -585,163 +529,6 @@ __global__ void streaming_sdf_forces_post_2d_kernel(
     }
 }
 
-// 2-D memory-saving decode kernel: extends the basic 2-D decode by also
-// stamping ``winning_rho_cc[g]`` for the body that won the cc-SDF.
-template <typename scalar_t>
-__global__ void streaming_sdf_decode_keys_rho_2d_kernel(
-    const uint64_t* __restrict__ key_cc,
-    const uint64_t* __restrict__ key_u,
-    const uint64_t* __restrict__ key_v,
-    const scalar_t* __restrict__ kin,
-    const scalar_t* __restrict__ rho_bodies,
-    const scalar_t* __restrict__ gx,
-    const scalar_t* __restrict__ gy,
-    const int Ngy,
-    const int B_sentinel,
-    scalar_t* __restrict__ sdf_cc,
-    scalar_t* __restrict__ sdf_u,
-    scalar_t* __restrict__ sdf_v,
-    scalar_t* __restrict__ bU,
-    scalar_t* __restrict__ bV,
-    scalar_t* __restrict__ winning_rho_cc,
-    const int dirty_vol,
-    const int di0, const int dj0,
-    const int dAi, const int dAj)
-{
-    const int local = blockIdx.x * blockDim.x + threadIdx.x;
-    if (local >= dirty_vol) return;
-    const int dj = local % dAj;
-    const int di = local / dAj;
-    const int i  = di0 + di;
-    const int j  = dj0 + dj;
-    const int g  = i * Ngy + j;
-
-    const uint64_t kc = key_cc[g];
-    const uint64_t ku = key_u [g];
-    const uint64_t kv = key_v [g];
-
-    const uint32_t bc = unpack_body_id(kc);
-    const uint32_t bu = unpack_body_id(ku);
-    const uint32_t bv = unpack_body_id(kv);
-
-    if ((int)bc < B_sentinel) {
-        sdf_cc[g] = unpack_sdf<scalar_t>(kc);
-        winning_rho_cc[g] = rho_bodies[(int)bc];
-    }
-    if ((int)bu < B_sentinel) sdf_u[g] = unpack_sdf<scalar_t>(ku);
-    if ((int)bv < B_sentinel) sdf_v[g] = unpack_sdf<scalar_t>(kv);
-
-    if ((int)bu < B_sentinel) {
-        const scalar_t* K = kin + (int)bu * 11;
-        const scalar_t cm_y = K[7];
-        const scalar_t lv_x = K[8];
-        const scalar_t om   = K[10];
-        const scalar_t yc = gy[j];
-        bU[g] = lv_x - om * (yc - cm_y);
-    }
-    if ((int)bv < B_sentinel) {
-        const scalar_t* K = kin + (int)bv * 11;
-        const scalar_t cm_x = K[6];
-        const scalar_t lv_y = K[9];
-        const scalar_t om   = K[10];
-        const scalar_t xc = gx[i];
-        bV[g] = lv_y + om * (xc - cm_x);
-    }
-}
-
-void streaming_sdf_min_rho_2d_multi_cuda(
-    const at::Tensor& F_flat, const at::Tensor& F_offsets,
-    const at::Tensor& body_shapes,
-    const at::Tensor& body_meta,
-    const at::Tensor& kin,
-    const at::Tensor& aabb_lo,
-    const at::Tensor& aabb_dim,
-    const at::Tensor& gx, const at::Tensor& gy,
-    const double h_grid,
-    const int64_t max_vol_per_body,
-    at::Tensor sdf_cc, at::Tensor sdf_u, at::Tensor sdf_v,
-    at::Tensor body_u, at::Tensor body_v,
-    const int64_t interp_method,
-    const at::Tensor& rho_bodies,
-    at::Tensor winning_rho_cc,
-    const int64_t dirty_i0, const int64_t dirty_j0,
-    const int64_t dirty_Ai, const int64_t dirty_Aj)
-{
-    const int B = (int)aabb_dim.size(0);
-    if (B <= 0 || max_vol_per_body <= 0) return;
-
-    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-    const int Ngx = (int)gx.numel();
-    const int Ngy = (int)gy.numel();
-    const int64_t Ngrid = (int64_t)Ngx * Ngy;
-
-    const int blockSize = (max_vol_per_body <= 128) ? 32
-                        : (max_vol_per_body <= 4096) ? 128 : 256;
-
-    auto key_opts = at::TensorOptions()
-        .dtype(at::kLong).device(sdf_cc.device());
-    auto key_cc_t = at::empty({Ngrid}, key_opts);
-    auto key_u_t  = at::empty({Ngrid}, key_opts);
-    auto key_v_t  = at::empty({Ngrid}, key_opts);
-
-    const int64_t dirty_vol = dirty_Ai * dirty_Aj;
-
-    AT_DISPATCH_FLOATING_TYPES(F_flat.scalar_type(), "streaming_sdf_min_rho_2d_multi_cuda", [&] {
-        const int initBlock = 256;
-        const int initBlocks = (int)((dirty_vol + initBlock - 1) / initBlock);
-        streaming_sdf_init_keys_2d_kernel<scalar_t>
-            <<<initBlocks, initBlock, 0, stream>>>(
-                sdf_cc.data_ptr<scalar_t>(),
-                sdf_u .data_ptr<scalar_t>(),
-                sdf_v .data_ptr<scalar_t>(),
-                (uint64_t*)key_cc_t.data_ptr<int64_t>(),
-                (uint64_t*)key_u_t .data_ptr<int64_t>(),
-                (uint64_t*)key_v_t .data_ptr<int64_t>(),
-                (int)dirty_vol, B,
-                (int)dirty_i0, (int)dirty_j0,
-                (int)dirty_Ai, (int)dirty_Aj,
-                Ngy);
-
-        const int blocksPerBody = (int)((max_vol_per_body + blockSize - 1) / blockSize);
-        streaming_sdf_min_rho_2d_multi_kernel<scalar_t>
-            <<<dim3(blocksPerBody, B, 1), dim3(blockSize, 1, 1), 0, stream>>>(
-                F_flat.data_ptr<scalar_t>(),
-                F_offsets.data_ptr<int64_t>(),
-                body_shapes.data_ptr<int64_t>(),
-                body_meta.data_ptr<scalar_t>(),
-                kin.data_ptr<scalar_t>(),
-                aabb_lo.data_ptr<int64_t>(),
-                aabb_dim.data_ptr<int64_t>(),
-                gx.data_ptr<scalar_t>(),
-                gy.data_ptr<scalar_t>(),
-                Ngx, Ngy,
-                (scalar_t)(0.5 * h_grid),
-                (uint64_t*)key_cc_t.data_ptr<int64_t>(),
-                (uint64_t*)key_u_t .data_ptr<int64_t>(),
-                (uint64_t*)key_v_t .data_ptr<int64_t>(),
-                (int)interp_method);
-
-        streaming_sdf_decode_keys_rho_2d_kernel<scalar_t>
-            <<<initBlocks, initBlock, 0, stream>>>(
-                (const uint64_t*)key_cc_t.data_ptr<int64_t>(),
-                (const uint64_t*)key_u_t .data_ptr<int64_t>(),
-                (const uint64_t*)key_v_t .data_ptr<int64_t>(),
-                kin.data_ptr<scalar_t>(),
-                rho_bodies.data_ptr<scalar_t>(),
-                gx.data_ptr<scalar_t>(), gy.data_ptr<scalar_t>(),
-                Ngy, B,
-                sdf_cc.data_ptr<scalar_t>(),
-                sdf_u .data_ptr<scalar_t>(),
-                sdf_v .data_ptr<scalar_t>(),
-                body_u.data_ptr<scalar_t>(),
-                body_v.data_ptr<scalar_t>(),
-                winning_rho_cc.data_ptr<scalar_t>(),
-                (int)dirty_vol,
-                (int)dirty_i0, (int)dirty_j0,
-                (int)dirty_Ai, (int)dirty_Aj);
-    });
-}
-
 void streaming_sdf_forces_post_2d_cuda(
     const at::Tensor& F_flat, const at::Tensor& F_offsets,
     const at::Tensor& body_shapes, const at::Tensor& body_meta,
@@ -764,7 +551,7 @@ void streaming_sdf_forces_post_2d_cuda(
     const int Ngx = (int)gx.numel();
     const int Ngy = (int)gy.numel();
 
-    // Adaptive blockSize matching the streaming_sdf_min_rho launcher; CUB's
+    // Adaptive blockSize matching the streaming_sdf_stag launcher; CUB's
     // BlockReduce takes block size as a compile-time template parameter,
     // so we fan out to one of the three configured sizes.
     const int blockSize = (max_vol_per_body <= 128)  ? 32
@@ -826,32 +613,47 @@ __global__ void apply_bcs_2d_kernel(
     const int N_neu,
     const int* __restrict__ dir_desc,
     const scalar_t* __restrict__ dir_val,
-    const int N_dir)
+    const int N_dir,
+    const int* __restrict__ ref_desc,
+    const scalar_t* __restrict__ ref_val,
+    const int N_ref)
 {
     const int op = blockIdx.y;
-    const int total = N_neu + N_dir;
+    const int total = N_neu + N_dir + N_ref;
     if (op >= total) return;
 
-    const bool is_neu = (op < N_neu);
-    int comp, axis, dst_along, src_along;
+    // 0 = Neumann copy, 1 = Dirichlet direct write, 2 = reflective.
+    int kind, comp, axis, dst_along, src_along = 0;
     scalar_t value = scalar_t(0);
 
-    if (is_neu) {
+    if (op < N_neu) {
+        kind = 0;
         comp = neu_desc[op * 3 + 0];
         axis = neu_desc[op * 3 + 1];
         const int side = neu_desc[op * 3 + 2];
         const int sz = (int)shapes[comp * 2 + axis];
         if (side == 0) { dst_along = 0;      src_along = 1; }
         else           { dst_along = sz - 1; src_along = sz - 2; }
-    } else {
+    } else if (op < N_neu + N_dir) {
         const int d = op - N_neu;
+        kind = 1;
         comp = dir_desc[d * 3 + 0];
         axis = dir_desc[d * 3 + 1];
         const int offset = dir_desc[d * 3 + 2];
         const int sz = (int)shapes[comp * 2 + axis];
         dst_along = (offset >= 0) ? offset : (sz + offset);
-        src_along = 0;
         value = dir_val[d];
+    } else {
+        const int r = op - N_neu - N_dir;
+        kind = 2;
+        comp = ref_desc[r * 4 + 0];
+        axis = ref_desc[r * 4 + 1];
+        const int dst_off = ref_desc[r * 4 + 2];
+        const int src_off = ref_desc[r * 4 + 3];
+        const int sz = (int)shapes[comp * 2 + axis];
+        dst_along = (dst_off >= 0) ? dst_off : (sz + dst_off);
+        src_along = (src_off >= 0) ? src_off : (sz + src_off);
+        value = ref_val[r];
     }
 
     const int Nx = (int)shapes[comp * 2 + 0];
@@ -866,14 +668,15 @@ __global__ void apply_bcs_2d_kernel(
     int64_t dst_lin, src_lin = 0;
     if (axis == 0) {
         dst_lin = (int64_t)dst_along * Ny + i;
-        if (is_neu) src_lin = (int64_t)src_along * Ny + i;
+        if (kind != 1) src_lin = (int64_t)src_along * Ny + i;
     } else {
         dst_lin = (int64_t)i * Ny + dst_along;
-        if (is_neu) src_lin = (int64_t)i * Ny + src_along;
+        if (kind != 1) src_lin = (int64_t)i * Ny + src_along;
     }
 
-    if (is_neu) base[dst_lin] = base[src_lin];
-    else        base[dst_lin] = value;
+    if      (kind == 0) base[dst_lin] = base[src_lin];
+    else if (kind == 1) base[dst_lin] = value;
+    else                base[dst_lin] = scalar_t(2) * value - base[src_lin];
 }
 
 void apply_bcs_2d_cuda(
@@ -882,6 +685,8 @@ void apply_bcs_2d_cuda(
     const at::Tensor& neu_desc,
     const at::Tensor& dir_desc,
     const at::Tensor& dir_val,
+    const at::Tensor& ref_desc,
+    const at::Tensor& ref_val,
     const int64_t max_line_dim)
 {
     TORCH_CHECK(u.is_contiguous() && v.is_contiguous(),
@@ -891,27 +696,51 @@ void apply_bcs_2d_cuda(
     TORCH_CHECK(shapes.scalar_type() == at::kLong &&
                 shapes.dim() == 2 && shapes.size(0) == 2 && shapes.size(1) == 2,
                 "apply_bcs_2d_cuda: shapes must be int64[2,2]");
+    TORCH_CHECK(ref_desc.scalar_type() == at::kInt && ref_desc.dim() == 2 &&
+                ref_desc.size(1) == 4,
+                "apply_bcs_2d_cuda: ref_desc must be int32[N,4]");
 
     const int N_neu = (int)neu_desc.size(0);
     const int N_dir = (int)dir_desc.size(0);
-    const int total = N_neu + N_dir;
-    if (total == 0 || max_line_dim <= 0) return;
+    const int N_ref = (int)ref_desc.size(0);
+    if (N_neu + N_dir + N_ref == 0 || max_line_dim <= 0) return;
 
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
     const int blockX = 256;
     const int gridX  = (int)((max_line_dim + blockX - 1) / blockX);
 
-    // All ops launched in a single kernel with blockIdx.y as the op index,
-    // matching apply_bcs_3d.  Corner ghost cells (e.g. u[0,0]) are never
-    // read by interior stencils, so concurrent writes to corners are harmless.
+    // Two-stage launch on the same stream:
+    //   Stage 1: Neumann + Direct ops (independent of each other and of
+    //            reflective; corner overlaps among them are intentionally
+    //            order-undefined but harmless — corners aren't read by
+    //            interior stencils).
+    //   Stage 2: Reflective ops (read-modify-write against the adjacent
+    //            interior cell).  Must run AFTER stage 1 so that any
+    //            direct write to that adjacent cell is already visible.
+    // Same kernel function, just called with the other op-kind counts
+    // zeroed so the kernel only dispatches the remaining op category.
     AT_DISPATCH_FLOATING_TYPES(u.scalar_type(), "apply_bcs_2d_cuda", [&] {
-        apply_bcs_2d_kernel<scalar_t>
-            <<<dim3(gridX, total, 1), dim3(blockX, 1, 1), 0, stream>>>(
-                u.data_ptr<scalar_t>(), v.data_ptr<scalar_t>(),
-                shapes.data_ptr<int64_t>(),
-                (N_neu > 0) ? neu_desc.data_ptr<int>() : nullptr, N_neu,
-                (N_dir > 0) ? dir_desc.data_ptr<int>() : nullptr,
-                (N_dir > 0) ? dir_val.data_ptr<scalar_t>() : nullptr, N_dir);
+        const int stage1 = N_neu + N_dir;
+        if (stage1 > 0) {
+            apply_bcs_2d_kernel<scalar_t>
+                <<<dim3(gridX, stage1, 1), dim3(blockX, 1, 1), 0, stream>>>(
+                    u.data_ptr<scalar_t>(), v.data_ptr<scalar_t>(),
+                    shapes.data_ptr<int64_t>(),
+                    (N_neu > 0) ? neu_desc.data_ptr<int>() : nullptr, N_neu,
+                    (N_dir > 0) ? dir_desc.data_ptr<int>() : nullptr,
+                    (N_dir > 0) ? dir_val.data_ptr<scalar_t>() : nullptr, N_dir,
+                    /*ref_desc=*/nullptr, /*ref_val=*/nullptr, /*N_ref=*/0);
+        }
+        if (N_ref > 0) {
+            apply_bcs_2d_kernel<scalar_t>
+                <<<dim3(gridX, N_ref, 1), dim3(blockX, 1, 1), 0, stream>>>(
+                    u.data_ptr<scalar_t>(), v.data_ptr<scalar_t>(),
+                    shapes.data_ptr<int64_t>(),
+                    /*neu_desc=*/nullptr, /*N_neu=*/0,
+                    /*dir_desc=*/nullptr, /*dir_val=*/nullptr, /*N_dir=*/0,
+                    ref_desc.data_ptr<int>(),
+                    ref_val.data_ptr<scalar_t>(), N_ref);
+        }
     });
 }
 
@@ -919,7 +748,7 @@ void apply_bcs_2d_cuda(
 //  interpolate_2d: scattered-point bilinear / biquadratic sampling
 //
 //  One thread per query point.  Calls the same sdf_sample_dispatch_2d
-//  device function used by streaming_sdf_min_rho_2d_multi (interp_method 0 =
+//  device function used by streaming_sdf_stag_2d_multi (interp_method 0 =
 //  bilinear / "linear", 1 = biquadratic / "quadratic").
 // =====================================================================
 template <typename scalar_t>
@@ -982,8 +811,539 @@ void interpolate_2d_cuda(
     });
 }
 
+// =====================================================================
+//  Phase-I memory-reduction 2-D pipeline.  Kernel A streams the union
+//  SDF / face velocities without the legacy per-cell winning-density
+//  scratch tensor; Kernel B fuses the BDIM2 velocity update with the
+//  variable-density Poisson coefficient calculation, computing mu0,
+//  mu1 and the unit normal in CUDA thread registers.
+// =====================================================================
+
+// 2-D decode kernel without winning_rho_cc / rho_bodies.  Mirrors
+// streaming_sdf_decode_keys_rho_2d_kernel but drops both.
+template <typename scalar_t>
+__global__ void streaming_sdf_decode_keys_stag_2d_kernel(
+    const uint64_t* __restrict__ key_cc,
+    const uint64_t* __restrict__ key_u,
+    const uint64_t* __restrict__ key_v,
+    const scalar_t* __restrict__ kin,
+    const scalar_t* __restrict__ gx,
+    const scalar_t* __restrict__ gy,
+    const int Ngy,
+    const int B_sentinel,
+    scalar_t* __restrict__ sdf_cc,
+    scalar_t* __restrict__ sdf_u,
+    scalar_t* __restrict__ sdf_v,
+    scalar_t* __restrict__ bU,
+    scalar_t* __restrict__ bV,
+    const int dirty_vol,
+    const int di0, const int dj0,
+    const int dAi, const int dAj)
+{
+    const int local = blockIdx.x * blockDim.x + threadIdx.x;
+    if (local >= dirty_vol) return;
+    const int dj = local % dAj;
+    const int di = local / dAj;
+    const int i  = di0 + di;
+    const int j  = dj0 + dj;
+    const int g  = i * Ngy + j;
+
+    const uint64_t kc = key_cc[g];
+    const uint64_t ku = key_u [g];
+    const uint64_t kv = key_v [g];
+
+    const uint32_t bc = unpack_body_id(kc);
+    const uint32_t bu = unpack_body_id(ku);
+    const uint32_t bv = unpack_body_id(kv);
+
+    if ((int)bc < B_sentinel) sdf_cc[g] = unpack_sdf<scalar_t>(kc);
+    if ((int)bu < B_sentinel) sdf_u [g] = unpack_sdf<scalar_t>(ku);
+    if ((int)bv < B_sentinel) sdf_v [g] = unpack_sdf<scalar_t>(kv);
+
+    if ((int)bu < B_sentinel) {
+        const scalar_t* K = kin + (int)bu * 11;
+        const scalar_t cm_y = K[7];
+        const scalar_t lv_x = K[8];
+        const scalar_t om   = K[10];
+        const scalar_t yc = gy[j];
+        bU[g] = lv_x - om * (yc - cm_y);
+    }
+    if ((int)bv < B_sentinel) {
+        const scalar_t* K = kin + (int)bv * 11;
+        const scalar_t cm_x = K[6];
+        const scalar_t lv_y = K[9];
+        const scalar_t om   = K[10];
+        const scalar_t xc = gx[i];
+        bV[g] = lv_y + om * (xc - cm_x);
+    }
+}
+
+void streaming_sdf_stag_2d_multi_cuda(
+    const at::Tensor& F_flat, const at::Tensor& F_offsets,
+    const at::Tensor& body_shapes,
+    const at::Tensor& body_meta,
+    const at::Tensor& kin,
+    const at::Tensor& aabb_lo,
+    const at::Tensor& aabb_dim,
+    const at::Tensor& gx, const at::Tensor& gy,
+    const double h_grid,
+    const int64_t max_vol_per_body,
+    at::Tensor sdf_cc, at::Tensor sdf_u, at::Tensor sdf_v,
+    at::Tensor body_u, at::Tensor body_v,
+    at::Tensor key_cc_t, at::Tensor key_u_t, at::Tensor key_v_t,
+    const int64_t interp_method,
+    const int64_t dirty_i0, const int64_t dirty_j0,
+    const int64_t dirty_Ai, const int64_t dirty_Aj)
+{
+    const int B = (int)aabb_dim.size(0);
+    if (B <= 0 || max_vol_per_body <= 0) return;
+
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    const int Ngx = (int)gx.numel();
+    const int Ngy = (int)gy.numel();
+
+    const int blockSize = (max_vol_per_body <= 128) ? 32
+                        : (max_vol_per_body <= 4096) ? 128 : 256;
+
+    const int64_t dirty_vol = dirty_Ai * dirty_Aj;
+
+    AT_DISPATCH_FLOATING_TYPES(F_flat.scalar_type(), "streaming_sdf_stag_2d_multi_cuda", [&] {
+        const int initBlock = 256;
+        const int initBlocks = (int)((dirty_vol + initBlock - 1) / initBlock);
+        streaming_sdf_init_keys_2d_kernel<scalar_t>
+            <<<initBlocks, initBlock, 0, stream>>>(
+                sdf_cc.data_ptr<scalar_t>(),
+                sdf_u .data_ptr<scalar_t>(),
+                sdf_v .data_ptr<scalar_t>(),
+                (uint64_t*)key_cc_t.data_ptr<int64_t>(),
+                (uint64_t*)key_u_t .data_ptr<int64_t>(),
+                (uint64_t*)key_v_t .data_ptr<int64_t>(),
+                (int)dirty_vol, B,
+                (int)dirty_i0, (int)dirty_j0,
+                (int)dirty_Ai, (int)dirty_Aj,
+                Ngy);
+
+        const int blocksPerBody = (int)((max_vol_per_body + blockSize - 1) / blockSize);
+        streaming_sdf_stag_2d_multi_kernel<scalar_t>
+            <<<dim3(blocksPerBody, B, 1), dim3(blockSize, 1, 1), 0, stream>>>(
+                F_flat.data_ptr<scalar_t>(),
+                F_offsets.data_ptr<int64_t>(),
+                body_shapes.data_ptr<int64_t>(),
+                body_meta.data_ptr<scalar_t>(),
+                kin.data_ptr<scalar_t>(),
+                aabb_lo.data_ptr<int64_t>(),
+                aabb_dim.data_ptr<int64_t>(),
+                gx.data_ptr<scalar_t>(),
+                gy.data_ptr<scalar_t>(),
+                Ngx, Ngy,
+                (scalar_t)(0.5 * h_grid),
+                (uint64_t*)key_cc_t.data_ptr<int64_t>(),
+                (uint64_t*)key_u_t .data_ptr<int64_t>(),
+                (uint64_t*)key_v_t .data_ptr<int64_t>(),
+                (int)interp_method);
+
+        streaming_sdf_decode_keys_stag_2d_kernel<scalar_t>
+            <<<initBlocks, initBlock, 0, stream>>>(
+                (const uint64_t*)key_cc_t.data_ptr<int64_t>(),
+                (const uint64_t*)key_u_t .data_ptr<int64_t>(),
+                (const uint64_t*)key_v_t .data_ptr<int64_t>(),
+                kin.data_ptr<scalar_t>(),
+                gx.data_ptr<scalar_t>(), gy.data_ptr<scalar_t>(),
+                Ngy, B,
+                sdf_cc.data_ptr<scalar_t>(),
+                sdf_u .data_ptr<scalar_t>(),
+                sdf_v .data_ptr<scalar_t>(),
+                body_u.data_ptr<scalar_t>(),
+                body_v.data_ptr<scalar_t>(),
+                (int)dirty_vol,
+                (int)dirty_i0, (int)dirty_j0,
+                (int)dirty_Ai, (int)dirty_Aj);
+    });
+}
+
+// =====================================================================
+//  Kernel B (2-D): fused BDIM2 + variable-density Poisson coefficients.
+//  Mirrors bdim_vardens_3d_cuda from streaming_sdf.cu, with the z axis
+//  removed.  See the 3-D version for documentation of the formulas.
+// =====================================================================
+template <typename scalar_t>
+__device__ __forceinline__ void bdim_one_axis_2d(
+    const scalar_t* __restrict__ phi_prime,
+    const scalar_t* __restrict__ sdf,
+    const scalar_t* __restrict__ body,
+    const scalar_t eps,
+    const scalar_t rho_body,
+    const scalar_t rho_f,
+    const scalar_t dt,
+    const scalar_t inv_2h,
+    const int Ngx, const int Ngy,
+    const int i, const int j,
+    scalar_t* __restrict__ phi_out,
+    scalar_t* __restrict__ c_out)
+{
+    const int stride_i = Ngy;
+    const int g  = i * stride_i + j;
+
+    const int im = (i > 0)         ? (i - 1) : 0;
+    const int ip = (i < Ngx - 1)   ? (i + 1) : Ngx - 1;
+    const int jm = (j > 0)         ? (j - 1) : 0;
+    const int jp = (j < Ngy - 1)   ? (j + 1) : Ngy - 1;
+
+    const int g_im = im * stride_i + j;
+    const int g_ip = ip * stride_i + j;
+    const int g_jm = i  * stride_i + jm;
+    const int g_jp = i  * stride_i + jp;
+
+    const scalar_t phi = sdf[g];
+    scalar_t mu0, mu1;
+    if (phi <= -eps) {
+        mu0 = scalar_t(0);
+        mu1 = scalar_t(0);
+    } else if (phi >= eps) {
+        mu0 = scalar_t(1);
+        mu1 = scalar_t(0);
+    } else {
+        const scalar_t deps = phi / eps;
+        const scalar_t pi   = scalar_t(M_PI);
+        const scalar_t s    = sin(pi * deps);
+        const scalar_t c    = cos(pi * deps);
+        mu0 = scalar_t(0.5) * (scalar_t(1) + deps + s / pi);
+        mu1 = eps * (
+            scalar_t(0.25)
+            - scalar_t(0.25) * deps * deps
+            - (s * deps + (scalar_t(1) + c) / pi) / (scalar_t(2) * pi)
+        );
+    }
+
+    scalar_t nx = (sdf[g_ip] - sdf[g_im]) * inv_2h;
+    scalar_t ny = (sdf[g_jp] - sdf[g_jm]) * inv_2h;
+    const scalar_t nn = sqrt(nx*nx + ny*ny);
+    if (nn > scalar_t(0)) {
+        const scalar_t inv_nn = scalar_t(1) / nn;
+        nx *= inv_nn;
+        ny *= inv_nn;
+    }
+
+    const scalar_t b_c    = body[g];
+    const scalar_t pp_c   = phi_prime[g];
+    const scalar_t diff_c = pp_c - b_c;
+
+    scalar_t ddx, ddy;
+    if (i > 0 && i < Ngx - 1) {
+        ddx = ((phi_prime[g_ip] - body[g_ip]) -
+               (phi_prime[g_im] - body[g_im])) * inv_2h;
+    } else {
+        ddx = scalar_t(0);
+    }
+    if (j > 0 && j < Ngy - 1) {
+        ddy = ((phi_prime[g_jp] - body[g_jp]) -
+               (phi_prime[g_jm] - body[g_jm])) * inv_2h;
+    } else {
+        ddy = scalar_t(0);
+    }
+    const scalar_t nd = nx * ddx + ny * ddy;
+
+    phi_out[g] = mu0 * diff_c + b_c + mu1 * nd;
+    c_out[g]   = dt * mu0 / (rho_body + (rho_f - rho_body) * mu0);
+}
+
+template <typename scalar_t>
+__global__ void bdim_vardens_2d_kernel(
+    const scalar_t* __restrict__ u_prime,
+    const scalar_t* __restrict__ v_prime,
+    const scalar_t* __restrict__ sdf_u,
+    const scalar_t* __restrict__ sdf_v,
+    const scalar_t* __restrict__ body_u,
+    const scalar_t* __restrict__ body_v,
+    scalar_t* __restrict__ u0,
+    scalar_t* __restrict__ v0,
+    scalar_t* __restrict__ ch,
+    scalar_t* __restrict__ cv,
+    const scalar_t eps,
+    const scalar_t rho_body,
+    const scalar_t rho_f,
+    const scalar_t dt,
+    const scalar_t inv_2h,
+    const int Ngx, const int Ngy,
+    const int di0, const int dj0,
+    const int dAi, const int dAj,
+    const int dirty_vol)
+{
+    const int local = blockIdx.x * blockDim.x + threadIdx.x;
+    if (local >= dirty_vol) return;
+    const int dj = local % dAj;
+    const int di = local / dAj;
+    const int i = di0 + di;
+    const int j = dj0 + dj;
+
+    bdim_one_axis_2d<scalar_t>(
+        u_prime, sdf_u, body_u,
+        eps, rho_body, rho_f, dt, inv_2h,
+        Ngx, Ngy, i, j, u0, ch);
+    bdim_one_axis_2d<scalar_t>(
+        v_prime, sdf_v, body_v,
+        eps, rho_body, rho_f, dt, inv_2h,
+        Ngx, Ngy, i, j, v0, cv);
+}
+
+void bdim_vardens_2d_cuda(
+    const at::Tensor& u_prime,
+    const at::Tensor& v_prime,
+    const at::Tensor& sdf_u,
+    const at::Tensor& sdf_v,
+    const at::Tensor& body_u,
+    const at::Tensor& body_v,
+    at::Tensor u0, at::Tensor v0,
+    at::Tensor ch, at::Tensor cv,
+    const double eps,
+    const double rho_body,
+    const double rho_f,
+    const double dt,
+    const double h_grid,
+    const int64_t dirty_i0, const int64_t dirty_j0,
+    const int64_t dirty_Ai, const int64_t dirty_Aj)
+{
+    const int64_t dirty_vol = dirty_Ai * dirty_Aj;
+    if (dirty_vol <= 0) return;
+
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    const int Ngx = (int)u0.size(0);
+    const int Ngy = (int)u0.size(1);
+
+    const int blockSize = 256;
+    const int nblocks   = (int)((dirty_vol + blockSize - 1) / blockSize);
+
+    AT_DISPATCH_FLOATING_TYPES(u0.scalar_type(), "bdim_vardens_2d_cuda", [&] {
+        bdim_vardens_2d_kernel<scalar_t>
+            <<<nblocks, blockSize, 0, stream>>>(
+                u_prime.data_ptr<scalar_t>(),
+                v_prime.data_ptr<scalar_t>(),
+                sdf_u.data_ptr<scalar_t>(),
+                sdf_v.data_ptr<scalar_t>(),
+                body_u.data_ptr<scalar_t>(),
+                body_v.data_ptr<scalar_t>(),
+                u0.data_ptr<scalar_t>(),
+                v0.data_ptr<scalar_t>(),
+                ch.data_ptr<scalar_t>(),
+                cv.data_ptr<scalar_t>(),
+                (scalar_t)eps,
+                (scalar_t)rho_body,
+                (scalar_t)rho_f,
+                (scalar_t)dt,
+                (scalar_t)(0.5 / h_grid),
+                Ngx, Ngy,
+                (int)dirty_i0, (int)dirty_j0,
+                (int)dirty_Ai, (int)dirty_Aj,
+                (int)dirty_vol);
+    });
+}
+
+// =====================================================================
+//  BDIM-σ variant of bdim_one_axis_2d / bdim_vardens_2d.
+//  See the 3-D σ variant in streaming_sdf.cu for full documentation.
+//  Note: 2-D key buffers are full-grid sized (Ngrid) and indexed by g.
+// =====================================================================
+template <typename scalar_t>
+__device__ __forceinline__ void bdim_one_axis_sigma_2d(
+    const scalar_t* __restrict__ phi_prime,
+    const scalar_t* __restrict__ sdf,
+    const scalar_t* __restrict__ body,
+    const scalar_t eps,
+    const scalar_t rho_body,
+    const scalar_t rho_f,
+    const scalar_t dt,
+    const scalar_t inv_2h,
+    const int Ngx, const int Ngy,
+    const int i, const int j,
+    scalar_t* __restrict__ phi_out,
+    scalar_t* __restrict__ c_out,
+    const int64_t* __restrict__ key,
+    const float*   __restrict__ sigma_shifts,
+    const int n_sigma)
+{
+    const int stride_i = Ngy;
+    const int g  = i * stride_i + j;
+
+    const int im = (i > 0)         ? (i - 1) : 0;
+    const int ip = (i < Ngx - 1)   ? (i + 1) : Ngx - 1;
+    const int jm = (j > 0)         ? (j - 1) : 0;
+    const int jp = (j < Ngy - 1)   ? (j + 1) : Ngy - 1;
+
+    const int g_im = im * stride_i + j;
+    const int g_ip = ip * stride_i + j;
+    const int g_jm = i  * stride_i + jm;
+    const int g_jp = i  * stride_i + jp;
+
+    const scalar_t phi = sdf[g];
+    scalar_t mu0, mu1;
+    if (phi <= -eps) {
+        mu0 = scalar_t(0); mu1 = scalar_t(0);
+    } else if (phi >= eps) {
+        mu0 = scalar_t(1); mu1 = scalar_t(0);
+    } else {
+        const scalar_t deps = phi / eps;
+        const scalar_t pi   = scalar_t(M_PI);
+        const scalar_t s    = sin(pi * deps);
+        const scalar_t c    = cos(pi * deps);
+        mu0 = scalar_t(0.5) * (scalar_t(1) + deps + s / pi);
+        mu1 = eps * (
+            scalar_t(0.25)
+            - scalar_t(0.25) * deps * deps
+            - (s * deps + (scalar_t(1) + c) / pi) / (scalar_t(2) * pi)
+        );
+    }
+
+    // BDIM-σ: shifted mu0 for the Poisson coefficient only.
+    const int32_t body_idx = (int32_t)((uint32_t)((uint64_t)key[g] & 0xFFFFFFFFull));
+    const scalar_t sigma_shift = (body_idx < n_sigma)
+        ? (scalar_t)sigma_shifts[body_idx] : scalar_t(0);
+    const scalar_t phi_sigma = phi - sigma_shift;
+    scalar_t mu0_poisson;
+    if      (phi_sigma <= -eps) { mu0_poisson = scalar_t(0); }
+    else if (phi_sigma >=  eps) { mu0_poisson = scalar_t(1); }
+    else {
+        const scalar_t deps_s = phi_sigma / eps;
+        const scalar_t pi     = scalar_t(M_PI);
+        mu0_poisson = scalar_t(0.5) * (scalar_t(1) + deps_s + sin(pi * deps_s) / pi);
+    }
+
+    scalar_t nx = (sdf[g_ip] - sdf[g_im]) * inv_2h;
+    scalar_t ny = (sdf[g_jp] - sdf[g_jm]) * inv_2h;
+    const scalar_t nn = sqrt(nx*nx + ny*ny);
+    if (nn > scalar_t(0)) {
+        const scalar_t inv_nn = scalar_t(1) / nn;
+        nx *= inv_nn; ny *= inv_nn;
+    }
+
+    const scalar_t b_c    = body[g];
+    const scalar_t pp_c   = phi_prime[g];
+    const scalar_t diff_c = pp_c - b_c;
+
+    scalar_t ddx, ddy;
+    if (i > 0 && i < Ngx - 1) {
+        ddx = ((phi_prime[g_ip] - body[g_ip]) -
+               (phi_prime[g_im] - body[g_im])) * inv_2h;
+    } else { ddx = scalar_t(0); }
+    if (j > 0 && j < Ngy - 1) {
+        ddy = ((phi_prime[g_jp] - body[g_jp]) -
+               (phi_prime[g_jm] - body[g_jm])) * inv_2h;
+    } else { ddy = scalar_t(0); }
+    const scalar_t nd = nx * ddx + ny * ddy;
+
+    phi_out[g] = mu0 * diff_c + b_c + mu1 * nd;
+    c_out[g]   = dt * mu0_poisson / (rho_body + (rho_f - rho_body) * mu0_poisson);
+}
+
+template <typename scalar_t>
+__global__ void bdim_vardens_sigma_2d_kernel(
+    const scalar_t* __restrict__ u_prime,
+    const scalar_t* __restrict__ v_prime,
+    const scalar_t* __restrict__ sdf_u,
+    const scalar_t* __restrict__ sdf_v,
+    const scalar_t* __restrict__ body_u,
+    const scalar_t* __restrict__ body_v,
+    scalar_t* __restrict__ u0,
+    scalar_t* __restrict__ v0,
+    scalar_t* __restrict__ ch,
+    scalar_t* __restrict__ cv,
+    const int64_t* __restrict__ key_u,
+    const int64_t* __restrict__ key_v,
+    const float*   __restrict__ sigma_shifts,
+    const int n_sigma,
+    const scalar_t eps,
+    const scalar_t rho_body,
+    const scalar_t rho_f,
+    const scalar_t dt,
+    const scalar_t inv_2h,
+    const int Ngx, const int Ngy,
+    const int di0, const int dj0,
+    const int dAi, const int dAj,
+    const int dirty_vol)
+{
+    const int local = blockIdx.x * blockDim.x + threadIdx.x;
+    if (local >= dirty_vol) return;
+    const int dj = local % dAj;
+    const int di = local / dAj;
+    const int i = di0 + di;
+    const int j = dj0 + dj;
+    (void)dAi;
+
+    bdim_one_axis_sigma_2d<scalar_t>(
+        u_prime, sdf_u, body_u,
+        eps, rho_body, rho_f, dt, inv_2h,
+        Ngx, Ngy, i, j, u0, ch,
+        key_u, sigma_shifts, n_sigma);
+    bdim_one_axis_sigma_2d<scalar_t>(
+        v_prime, sdf_v, body_v,
+        eps, rho_body, rho_f, dt, inv_2h,
+        Ngx, Ngy, i, j, v0, cv,
+        key_v, sigma_shifts, n_sigma);
+}
+
+void bdim_vardens_sigma_2d_cuda(
+    const at::Tensor& u_prime,
+    const at::Tensor& v_prime,
+    const at::Tensor& sdf_u,
+    const at::Tensor& sdf_v,
+    const at::Tensor& body_u,
+    const at::Tensor& body_v,
+    at::Tensor u0, at::Tensor v0,
+    at::Tensor ch, at::Tensor cv,
+    const at::Tensor& key_u,
+    const at::Tensor& key_v,
+    const at::Tensor& sigma_shifts,
+    const double eps,
+    const double rho_body,
+    const double rho_f,
+    const double dt,
+    const double h_grid,
+    const int64_t dirty_i0, const int64_t dirty_j0,
+    const int64_t dirty_Ai, const int64_t dirty_Aj)
+{
+    const int64_t dirty_vol = dirty_Ai * dirty_Aj;
+    if (dirty_vol <= 0) return;
+
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+    const int Ngx = (int)u0.size(0);
+    const int Ngy = (int)u0.size(1);
+    const int n_sigma = (int)sigma_shifts.numel();
+
+    const int blockSize = 256;
+    const int nblocks   = (int)((dirty_vol + blockSize - 1) / blockSize);
+
+    AT_DISPATCH_FLOATING_TYPES(u0.scalar_type(), "bdim_vardens_sigma_2d_cuda", [&] {
+        bdim_vardens_sigma_2d_kernel<scalar_t>
+            <<<nblocks, blockSize, 0, stream>>>(
+                u_prime.data_ptr<scalar_t>(),
+                v_prime.data_ptr<scalar_t>(),
+                sdf_u.data_ptr<scalar_t>(),
+                sdf_v.data_ptr<scalar_t>(),
+                body_u.data_ptr<scalar_t>(),
+                body_v.data_ptr<scalar_t>(),
+                u0.data_ptr<scalar_t>(),
+                v0.data_ptr<scalar_t>(),
+                ch.data_ptr<scalar_t>(),
+                cv.data_ptr<scalar_t>(),
+                key_u.data_ptr<int64_t>(),
+                key_v.data_ptr<int64_t>(),
+                sigma_shifts.data_ptr<float>(),
+                n_sigma,
+                (scalar_t)eps,
+                (scalar_t)rho_body,
+                (scalar_t)rho_f,
+                (scalar_t)dt,
+                (scalar_t)(0.5 / h_grid),
+                Ngx, Ngy,
+                (int)dirty_i0, (int)dirty_j0,
+                (int)dirty_Ai, (int)dirty_Aj,
+                (int)dirty_vol);
+    });
+}
+
 TORCH_LIBRARY_IMPL(lilytorch_kernels, CUDA, m) {
-    m.impl("streaming_sdf_min_rho_2d_multi",        &streaming_sdf_min_rho_2d_multi_cuda);
+    m.impl("streaming_sdf_stag_2d_multi",           &streaming_sdf_stag_2d_multi_cuda);
+    m.impl("bdim_vardens_2d",                       &bdim_vardens_2d_cuda);
+    m.impl("bdim_vardens_sigma_2d",                 &bdim_vardens_sigma_2d_cuda);
     m.impl("streaming_sdf_forces_post_2d",          &streaming_sdf_forces_post_2d_cuda);
     m.impl("apply_bcs_2d",                          &apply_bcs_2d_cuda);
     m.impl("interpolate_2d",                        &interpolate_2d_cuda);

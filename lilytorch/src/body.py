@@ -37,6 +37,10 @@ def _import_measure():
     from skimage import measure
     return measure
 
+def _import_ndimage():
+    from scipy import ndimage
+    return ndimage
+
 def _import_cubic_spline():
     from scipy.interpolate import CubicSpline
     return CubicSpline
@@ -1880,6 +1884,8 @@ class BodyMesh(Body):
     def _compute_sdfs_3d(self, pad):
         """Build a 3-D SDF field from the mesh using open3d + skfmm."""
         skfmm = _import_skfmm()
+        measure = _import_measure()
+        ndimage = _import_ndimage()
         centres = [(self.bb[i, 1] + self.bb[i, 0]) / 2 for i in range(3)]
         halves = [(self.bb[i, 1] - self.bb[i, 0]) / 2 + float(pad) for i in range(3)]
         xnp = np.linspace(centres[0] - halves[0], centres[0] + halves[0], self.nsamples)
@@ -1894,7 +1900,29 @@ class BodyMesh(Body):
         if self.plotting:
             self.m2s.visualize()
 
-        binary_3d = np.where(sdf_val_o3d.reshape(X.shape) < 0, -1, 1)
+        inside_mask = sdf_val_o3d.reshape(X.shape) < 0
+
+        # Non-watertight meshes (small holes, near-coincident triangles at
+        # link joints, self-intersections) make open3d's ray-parity sign
+        # test flip in a handful of voxels.  Without cleanup, skfmm.distance
+        # then propagates from every disconnected piece of zero level-set
+        # it finds, producing spurious positive isolas inside the body and
+        # tiny negative specks far from the surface.  Mirror the 2-D path
+        # and patch both pathologies before fast marching.
+        filled = ndimage.binary_fill_holes(inside_mask)
+        n_pockets = int(np.count_nonzero(filled & ~inside_mask))
+        if n_pockets > 0:
+            print(f"  filled {n_pockets} internal outside-pockets (non-watertight mesh)")
+        inside_mask = filled
+
+        labels = measure.label(inside_mask, connectivity=1)
+        component_ids, component_sizes = np.unique(labels[labels > 0], return_counts=True)
+        tiny_components = component_ids[component_sizes < 8]
+        if len(tiny_components) > 0:
+            print(f"  dropped {len(tiny_components)} tiny inside-islands")
+            inside_mask = inside_mask & ~np.isin(labels, tiny_components)
+
+        binary_3d = np.where(inside_mask, -1, 1)
 
         dx, dy, dz = xnp[1] - xnp[0], ynp[1] - ynp[0], znp[1] - znp[0]
         print(f"  skfmm distance with spacing ({dx:.6f},{dy:.6f},{dz:.6f})")
@@ -2550,14 +2578,29 @@ class MultiAnimatBodies(Body):
         gs = self.grid_shape
         # Output fields — filled by streaming union in update() or
         # BDIMhandler3D.update().  No (nbodies, *gs) stacks needed.
-        self.sdf_val   = torch.zeros(gs, device=device, dtype=self.dtype)
-        self.sdf_val_u = torch.zeros(gs, device=device, dtype=self.dtype)
-        self.sdf_val_v = torch.zeros(gs, device=device, dtype=self.dtype)
-        self.body_u    = torch.zeros(gs, device=device, dtype=self.dtype)
-        self.body_v    = torch.zeros(gs, device=device, dtype=self.dtype)
-        if self.ndim == 3:
-            self.sdf_val_w = torch.zeros(gs, device=device, dtype=self.dtype)
-            self.body_w    = torch.zeros(gs, device=device, dtype=self.dtype)
+        # Initialised to the SDF sentinel _FAR=1e4 (i.e. "outside body
+        # everywhere") rather than zeros.  This lets BDIMhandler restrict
+        # the first-step "dirty AABB" (the region reset to _FAR + recomputed
+        # by Kernel A) to only the bodies' current footprint instead of the
+        # whole grid — which on a 512³ run shrinks the int64 key buffers
+        # from 4×1 GiB = 4 GiB to a few MB.  Cells the bodies never visit
+        # keep their _FAR value, which is the correct "outside body" answer
+        # for the BDIM stencil.
+        self.sdf_val   = torch.full(gs, 1e4, device=device, dtype=self.dtype)
+        # In kernel mode the staggered face-SDF and rigid-body face-velocity
+        # tensors are per-step temporaries owned by FluidSolver.fluid_step —
+        # they live only between Kernel A (streaming SDF) and Kernel B
+        # (fused BDIM2 + var-dens) of the same step.  Skip the persistent
+        # full-grid allocations here to save 6 * Ngrid * sizeof(float)
+        # of permanent GPU storage per composite body.
+        if not use_kernels:
+            self.sdf_val_u = torch.zeros(gs, device=device, dtype=self.dtype)
+            self.sdf_val_v = torch.zeros(gs, device=device, dtype=self.dtype)
+            self.body_u    = torch.zeros(gs, device=device, dtype=self.dtype)
+            self.body_v    = torch.zeros(gs, device=device, dtype=self.dtype)
+            if self.ndim == 3:
+                self.sdf_val_w = torch.zeros(gs, device=device, dtype=self.dtype)
+                self.body_w    = torch.zeros(gs, device=device, dtype=self.dtype)
         self.com_pos   = torch.zeros((self.nbodies, self.ndim), device=device)
 
         # Null out any SDF tensor that was stored directly on a child body

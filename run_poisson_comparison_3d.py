@@ -88,7 +88,7 @@ class StepTimer:
 # ═══════════════════════════════════════════════════════════════════════
 
 def run_one_method(method_name, nx, ny, nz, n_steps, warmup,
-                   smoother="jacobi", compile_smoother=False):
+                   smoother="jacobi"):
     """Run simulation with given Poisson method, return StepTimer."""
 
     # IMPORTANT: We need to reimport the config module to get fresh state.
@@ -125,13 +125,12 @@ def run_one_method(method_name, nx, ny, nz, n_steps, warmup,
         ]
         sim_dict.setdefault("runtime", {})["headless"] = True
 
-        # Inject poisson_method + smoother + compile into solver config
+        # Inject poisson_method + smoother into solver config
         for ext in sim_dict["extensions"]:
             if ext.get("loader") == "lilytorch.integration.extensions.FluidExtension":
                 solver_cfg = ext["config"]["bdim_yaml"]["solver"]
                 solver_cfg["poisson_method"] = method_name
                 solver_cfg["poisson_smoother"] = smoother
-                solver_cfg["poisson_compile"] = compile_smoother
                 # For FFT, ensure poisson_folder exists
                 if method_name == "fft":
                     pf = solver_cfg.get("poisson_folder", "lilytorch/data/")
@@ -211,15 +210,12 @@ if __name__ == "__main__":
     sys.path.insert(0, SCRIPT_DIR)
     os.chdir(SCRIPT_DIR)
 
-    # Each entry: (label, poisson_method, smoother, compile)
+    # Each entry: (label, poisson_method, smoother)
     configs = [
-        ("mg-jacobi",          "multigrid", "jacobi", False),
-        ("mg-jacobi-compile",  "multigrid", "jacobi", True),
-        ("mg-rbgs",            "multigrid", "rbgs",   False),
-        ("mg-rbgs-compile",    "multigrid", "rbgs",   True),
-        ("mgcg-jacobi",        "mgcg",      "jacobi", False),
-        ("mgcg-jacobi-compile","mgcg",      "jacobi", True),
-        ("fft",                "fft",        "jacobi", False),
+        ("mg-jacobi",   "multigrid", "jacobi"),
+        ("mg-rbgs",     "multigrid", "rbgs"),
+        ("mgcg-jacobi", "mgcg",      "jacobi"),
+        ("fft",         "fft",       "jacobi"),
     ]
     results = {}
 
@@ -232,7 +228,7 @@ if __name__ == "__main__":
     print(f"  Device: {'CUDA' if USE_CUDA else 'CPU'}")
     print("=" * 72)
 
-    for label, method, smoother, do_compile in configs:
+    for label, method, smoother in configs:
         print(f"\n{'─'*72}")
         print(f"  Running: {label}")
         print(f"{'─'*72}")
@@ -247,7 +243,6 @@ if __name__ == "__main__":
                 method, args.Nx, args.Ny, args.Nz,
                 args.n_steps, args.warmup,
                 smoother=smoother,
-                compile_smoother=do_compile,
             )
             peak_mem = torch.cuda.max_memory_allocated() / 1e9 if USE_CUDA else 0
             results[label] = {

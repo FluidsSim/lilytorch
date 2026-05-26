@@ -44,7 +44,14 @@ class FluidExtension(TaskExtension):
             handler_path: str,
             bdim_yaml: str,
     ):
-        super().__init__()
+        # substep=True so that ``before_step`` runs on every MuJoCo
+        # substep (cb_sub_steps).  The fluid solver itself is still
+        # advanced only on the full step; the substep calls only
+        # re-apply the cached body forces to xfrc_applied, mirroring
+        # the way FARMS' SwimmingExtension keeps xfrc fresh against
+        # anything that may clear it between substeps (e.g. the
+        # interactive viewer's perturbation handling).
+        super().__init__(substep=True)
         self.experiment_options = experiment_options
         self.data: ExperimentData | None = None
         self.n_animats = len(self.experiment_options.animats)
@@ -110,8 +117,16 @@ class FluidExtension(TaskExtension):
 
     # def after_step(self, task: ExperimentTask, physics: Physics):
     def before_step(self, task: ExperimentTask, action, physics: Physics):
-
-        self.BDIMhandler.step(task, physics)
+        # Full step: advance the fluid solver one timestep, compute new
+        # body forces, and write them to xfrc_applied.
+        # Sub-step: do not advance the fluid solver — re-apply the
+        # previously cached body forces to xfrc_applied so they survive
+        # any clearing that may happen between MuJoCo substeps.
+        full_step = not task.sim_iteration % task.cb_sub_steps
+        if full_step:
+            self.BDIMhandler.step(task, physics)
+        else:
+            self.BDIMhandler.apply_forces(task, physics)
 
     def end_episode(self, task: ExperimentTask, physics: Physics):
         """Flush per-link force/torque histories to ``<save_path>/drags.h5``.
@@ -125,7 +140,7 @@ class FluidExtension(TaskExtension):
         fs = getattr(self.BDIMhandler, "fluid_solver", None)
         if fs is None:
             return
-        if getattr(fs, "compute_forces", False) and getattr(fs, "save", False):
+        if getattr(fs, "compute_forces", False) and getattr(fs, "save_drags", False):
             try:
                 fs.save_drags_h5()
                 fs.flush_io()

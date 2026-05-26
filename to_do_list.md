@@ -18,40 +18,66 @@ mu0_v, mu1_v
 mu0_w, mu1_w
 diff_u, diff_v, diff_w
 
-# DONE:
-- Implement cuda kernels for 2d simulations in the style used for 3d simulations: `streaming_sdf_min_rho_2d_multi` / `streaming_sdf_min_rho_2d_multi` (CC + face-staggered SDF + body velocity running-min, with bilinear and biquadratic-Lagrange interpolation), `streaming_sdf_forces_post_2d` (Phase-D post-force/torque integration over each body's AABB, re-sampling body-local cc-SDF support) and `apply_bcs_2d` (Phase-H fused Neumann + Dirichlet ghost-line writes for `(u, v)`).  CPU + CUDA implementations validated against pure-PyTorch references at machine precision in `test_streaming_sdf_2d_self.py`, `test_bdim_forces_2d_self.py`, `test_apply_bcs_2d_self.py`.  Wired through the solver: `BDIMhandler._update_2d_streaming_multi` (mirrors `_update_3d_streaming_multi`), `solver.streaming_sdf_2d` / `streaming_forces_2d` config flags (coupled together because 2-D has no narrow-band forces fallback), and `AdvDiffSolver.set_BCs` dispatches to the fused CUDA op in 2-D when the velocity tensors are CUDA + contiguous + same-floating-dtype.  TODO follow-up: 2-D analogue of the cost-analysis pipeline (`validation/cost_analysis_free_swimming_2d/`).
-- Build the 2-D cost-analysis pipeline `validation/cost_analysis_free_swimming_2d/` (copy + adapt of `run_cost_analysis.py`, `run_multigrid_cost_analysis.py`, `run_scaling_conditions_pipeline.py`, `plot_scaling.py`) targeting a 2-D scene exercising the new `streaming_sdf_2d` / `streaming_forces_2d` path.
-- The streaming_sdf_forces_post_3d_kernel recompute the body cc sdf on the fly. I think this is a waste of computation. Indeed i think that forces can be computed together with the union sdf in streaming_sdf_min_rho_3d_multi_kernel. Inside this kernel the body sdf is computed, there is where the delta force functions, and forces can be computed. This should save significant computational time.
-- the gen_config_full_pool.py simulation in cpu mode does not seem to utilize multiple cores.
-- Investigate and document why nbforces cost scaling in cost_scaling_loglog.png shows residual and Body update (SDF) costs scaling despite AABB cropping; verify whether fixed-domain grid refinement increases the body-covered cell count enough to explain the trend.
-- Simplify methods for cost optimization. After substantial testing of the different methods for running the cost analysis in run_scaling_conditions_pipeline.py the best method is nbforces_opt. Remove all the other methods, except for keeping the old one for reference (no cropping, no batching method for reference).
-- Implement triquadratic interpolation option for evaluating the sdf functions in the cuda/C++ kernels (`streaming_sdf_min_rho_3d_multi`, `streaming_sdf_min_rho_3d_multi`). Mirrors the pytorch_interpolation biquadratic-Lagrange algorithm extended to 3D (3x3x3 stencil, falls back to trilinear in the boundary layer). Optionally enabled by the user via the `sdf_interp_method` solver config key (`"trilinear"` (default) | `"triquadratic"`), exposed on `BaseSimConfig`. CPU implementation validated against a pure-PyTorch reference in `lilytorch/src/kernels/test_streaming_sdf_self.py`.
-- Move all non standard computations (sponge layer, carreau, etc) in a dedicated file in src/extras.py
-- Move force computations in an ad-hoc file (src/forces.py)
-- Implement 2nd order accurate force method also for the cuda/C++ kernel solver version (currently only in non cuda/c++ kernel mode)
-- replace pytorch_interpolation with existing precompiled cuda/c++ kernels or write new ones if necessary in the kernel/ folder.
-- [STAGE 1 IN PROGRESS — branch `copilot/stage1-variant-cleanup`] There are a number of strange settings in solver.py (and maybe BDIMhandler.py) that depend on some old code, where different variants of the solvers were implemented, such as cropping, batching, streaming, etc methods. Currently (and this is how i want it to be), there should only be two solver variants. One is in pure python code, it should be suboptimal (no batching, no cropping), and another should use the cuda/c++ kernels in kernels/. The first approach should also allow compilation of advection+diff, forces, sdf, poisson. The second version should compile forces and sdf by default, but there should also be an option to compile the other two. You should read through the code and clean this feature.
-  - The 9 individual variant flags (`force_narrow_band`, `force_narrow_batch`, `force_shared_union`, `mu_normals_union`, `bdim_union`, `streaming_sdf_3d`, `streaming_forces_3d`, `streaming_sdf_2d`, `streaming_forces_2d`) are collapsed into a single user-facing switch `solver.use_kernels` (default `True`).  `use_kernels` is independent of `use_gpu` — the latter still selects CPU vs CUDA device.
-- Confirm that the sdf and force computations done with the cuda/c++ kernels is computing on each body aabb boxes, and not on the union aabb (narrow band on individual bodies). This is the most efficient approach, as the sdf/force computations are restricted to where it is needed. Is it possible to implement this method also for the bdim update, setting of the variable coefficients, mu/normals, and perhaps other parts? I think that, whilst currently the cuda/c++ kernels separately handle force and sdf computation, this could be merged, in the sense that the forces could be computed for each body at the same time (at the same body iteration) when the sdf is computed. This would avoid the need to store several CC sdfs for later force computation, saving memory, and reusing the body normals (although these are not cell centered). Additionally, bdim update, setting of the variable coefficients, mu/normals could in my view also be computed in the same kernel function locally. At the end, to save memory, the mu0 of the union sdf is needed for the correction step so it must be computed, but the memory of each body velocity, sdfs, normals, etc
-can be released after the loop of that body is computed. This should, in my logic, save a lot of memory, whist maintaining the same accuracy.
-- Check that the code works for dtype float32 and float64 (double). Especially the cuda/c++ kernels (but also the rest of the code) should be using one or the other depending on the user request.
-- Implement a gamepad connected with the fluid solver. The implementation should be restricted to the salamander_gamepad/ folder. The current gen_configs_swim_2d.py is copied from the salamander/ folder, but should be modifies to use the salamander_gamepad/control.py. Also you need to modify this latter file to make it work as a pd controller as the salamander.pd_controller_swim.PositionController, and allow it to make the animal turn speedup/slowdown and turn left/right as in a videogame, following the rules indicated in the current control.py script.
-- Safely parallelise the multi-body SDF-write CUDA kernels (`streaming_sdf_min_*_multi`, `streaming_sdf_min_rho_*_multi`). They are currently launched sequentially per body in a host-side `for` loop because their multi-field compare-swap (`if (s < sdf_cc[g]) { sdf_cc[g]=s; bU[g]=...; winning_rho_cc[g]=... }`) races on cells covered by overlapping per-body AABBs when fanned across `gridDim.y`. Two viable strategies:
-  1. **Per-cell `int32` spinlock**: allocate `Ngrid` lock array, acquire via `atomicCAS(lock,0,1)`, do the multi-field compare-swap under the lock, release via `atomicExch`. Requires Volta+ for forward-progress guarantees, costs `Ngrid * 4 B` extra memory; portable but spinning under contention is wasteful.
-  2. **`(s, body_id)` 64-bit `atomicMin` + scatter pass**: encode the signed float SDF into a sortable `uint64_t` key with the body index in the low bits, do a single 64-bit `atomicMin` per cell (no spinning, no consistency window), then a cheap second kernel decodes the winning body and recomputes the linked velocity / density from `(b, g)` directly (no need to store `bU/bV/bW` during phase 1). Preferred path; needs careful float→uint encoding (flip sign bit; for negatives flip all bits) and a packing scheme that fits `(B + 1) ≤ 2^k` body IDs alongside an fp32 mantissa+exponent.
-
-  Either approach must be benchmarked on a real GPU against the current sequential-launch baseline; the win is largest when many small bodies overlap in their AABB regions. Forces-only kernels (`bdim_forces_*_multi`) are already parallel over `B` via `gridDim.y` (their `atomicAdd` reduction targets per-body-disjoint output rows — race-free).
-
 
 # HIGH PRIORITY:
+- Dropping _compute_variable_density_coefficients: Opus 4.7 suggested to completely remove the rho = rho_body + (rho−rho_body)·μ₀ terms (unless dealing with problems where rho_body<<rho_fluid, i.e. where added mass causes instabilities. It suggested to use the original BDIM2 implementation for c_h = dt·μ₀/(rho_body + (rho−rho_body)·μ₀)
 - Change the printing to use pylog, with info, warning and error colors.
-- Do a systematic memory cost analysis. I think that the latest method with cuda kernels dynamically rewrites the body velocities and writed the forces computation inside the kernel whenever body properties are needed. This reduces the memory footprint by not storing the sdfs/body velocities of each rigid body (just a unique composite union body properties are stored).
-- Combine solver.py and BDIMhandler in a single simulation file (just solver.py). BDIMhandler should only keep whatever is necessary for handling the coupling with FARMS, if possible. Ideally the follwing should be done: the BDIMhandler step function should use the solver.py step function. This solver step function should contain: a compute_forces boolean that computed body forces for any simulation type (mujoco coupled or not), recompute normals, fluid_step, check_explosion, [i am not sute, need to clarify]
 
 structure should be as follows: BDIMhandler should have a compute a body update
 
 Review options and propose what to do. This should have a careful modifications in all the examples scipts in farms_examples/.
 - Polish the repository, review and correct outdated documentation, also in the docs/ folder.
+
+## Tier 1 — Python-only (each <4 hours, low risk)
+- [ ] **T1a Inline `_tvd_face` into `abdquickest`/`cubista` + chain remaining temps in-place.**
+  Saves ~0.5 GiB peak inside the scheme function. Bit-exact testable. Files: `lilytorch/src/adv_diff.py`.
+- [ ] **T1b Free `self.div` immediately after `_poisson_solve` returns** (it's only read once
+  for the RHS, never used after). Saves ~0.5 GiB transient peak. File: `lilytorch/src/solver.py:project()`.
+- [ ] **T1c Consolidate `_compute_variable_density_coefficients` 2-D/3-D return paths** so the 2-D
+  `ch_cc` temp can be dropped earlier on the FFT Poisson path. Marginal effect in 3-D.
+
+Expected combined: ~1 GiB off peak → **~8 GiB peak alloc, ~9.2 GB nvidia-smi.**
+
+## Tier 2 — Targeted CUDA work (1-3 days each)
+- [ ] **T2a Fused CUDA kernel for `_flux`.** One kernel reads `fv` + 4 cells of `p`, computes the
+  QUICK/ABDQUICKEST stencil in registers, writes one flux value. Drops
+  `denom, rf, psi, B1, B2, cond, flux_in, cat output` materialisation entirely. **~3 GiB peak**
+  (adv-diff drops 8.82 → ~5.5 GiB) and 5-10× speedup as a side effect. Only pays off when
+  combined with multigrid optimisation (T3 below), otherwise multigrid still sets the peak.
+- [ ] **T2b Dirty-AABB-sized Kernel-A temps** (the originally-deferred #1 from the May session).
+  `sdf_*_tmp` and `b*_tmp` go from full-grid (6 × ~543 MB = 3.26 GiB) to AABB+halo (~10 MB
+  for one fish at 512³). Needs CUDA kernel changes in `streaming_sdf.cu` (init, min_rho,
+  decode, BDIM kernels — AABB-local indexing with 1-cell halo handling). Saves ~3 GiB at
+  marker 4 `cur` but **doesn't move the peak** until T2a is done.
+- [ ] **T2c Two-pass Kernel B for `primes` elimination.** Write BDIM result to dirty-AABB-sized
+  scratch (~0.5 MB), then copy back to `u0[AABB]`. Lets us `del primes` immediately after
+  `self.u0.copy_(primes[0])`. Saves 1.5 GiB at marker 4 `cur`, **no peak movement until T2a.**
+
+## Tier 3 — Multigrid memory (each ~1 day)
+- [ ] **T3a Eliminate the `div` field.** Currently `divergence(u, v, w)` returns a full-grid
+  tensor stored on `self.div`. Inline it into the multigrid RHS computation so no full-grid
+  `div` tensor exists. Saves 543 MB persistent + ~0.5 GiB transient.
+- [ ] **T3b Preallocate V-cycle coarse-level pyramid.** `_vcycle_rbgs_3d` currently calls
+  `torch.zeros(coarse_shape, …)` inside the recursion (one alloc per level per V-cycle).
+  Allocate a static pyramid at `__init__` and reuse. Saves ~0.5-1 GiB transient at fine level.
+- [ ] **T3c Try `solve_mgcg` with `precond_vcycles=1`.** MGCG converges with fewer V-cycle calls
+  and the working set inside CG is smaller (no need to keep restricted face arrays alive across
+  recursion). Already supported via `poisson_method="mgcg"` — just benchmark and decide.
+
+## Tier 4 — Bigger architectural (1+ week)
+- [ ] **T4a fp16 SDF + body-vel** for kernel-mode temps. Adv-diff and project stay fp32.
+  Saves ~1.5 GiB persistent (sdf_val) + ~1.5 GiB transient (if combined with T2b).
+- [ ] **T4b Mixed-precision velocity fields.** fp16 storage for u0/v0/w0, fp32 compute.
+  ~1 GiB persistent + ~0.5 GiB transient. Needs careful BDIM2 + multigrid stability checks.
+- [ ] **T4c Try `--poisson_compile` flag.** CUDA-graph capture of the V-cycle. Mostly helps
+  allocator pool fragmentation; effect on peak varies — just measure.
+
+## Recommended sequence
+1. T1a → ~8.7 GiB peak (free, an hour).
+2. T3a + T3b → ~7.5-8 GiB peak (half-day, eliminates multigrid as the limiting factor).
+3. Stop and remeasure. If headroom is enough, stop here.
+4. Else T2a (fused `_flux` kernel) → ~5.5 GiB peak + adv-diff speedup. Then T2b + T2c become
+   the new limiting factors.
 
 # LOW PRIORITY:
 - Can advection/poisson solvers be improved? I.e. by implementing a cuda/c++ kernel instead of torch.compile?

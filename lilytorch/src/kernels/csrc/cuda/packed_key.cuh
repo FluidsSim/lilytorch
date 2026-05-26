@@ -2,8 +2,7 @@
 //  packed_key.cuh
 //
 //  Packed (sdf, body_id) 64-bit key helpers shared by the 2-D and 3-D
-//  multi-body SDF-write CUDA kernels (``streaming_sdf_min_*_multi``,
-//  ``streaming_sdf_min_rho_*_multi``).
+//  multi-body SDF-write CUDA kernels (``streaming_sdf_stag_*_multi``).
 //
 //  These let those kernels run with a single launch fanned across
 //  ``gridDim.y == B`` instead of B sequential per-body launches.  The

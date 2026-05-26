@@ -50,8 +50,8 @@ class SimConfig(BaseSimConfig):
         # ── Simulation flags ──────────────────────────────────────────
         self.use_bdim = True
         # With BDIM enabled, links do not automatically opt into fluid
-        # forces because BaseSimConfig otherwise ties fluid interaction
-        # to use_drag. Force it on explicitly for the submarine bodies.
+        # forces (fluid interaction defaults to not use_bdim, i.e. False
+        # when BDIM is on). Force it on explicitly for the submarine bodies.
         self.animat_fluid_interaction = True
 
         submarine_sdf_dir = os.path.join(
@@ -152,7 +152,6 @@ class SimConfig(BaseSimConfig):
         self.poisson_precond_vcycles = 1
         self.poisson_warm_start      = True
         self.poisson_smoother        = "jacobi"
-        # self.poisson_compile         = True
         self.poisson_nsmoothing      = 5
         self.poisson_bc_type         = "free"
         # self.compile_adv_diff        = True

@@ -33,8 +33,16 @@ namespace lilytorch_kernels {
 
 // ----------------------- schemas -----------------------
 TORCH_LIBRARY(lilytorch_kernels, m) {
+    // Phase-I 3-D streaming SDF / face velocity update.  Kernel B
+    // computes rho_eff from mu0 in registers, so no per-cell
+    // winning-density tensor or rho_bodies input is needed.
+    //
+    // key_cc_t / key_u_t / key_v_t / key_w_t are caller-allocated int64
+    // scratch buffers of size >= Ngx*Ngy*Ngz (one per stagger) used to
+    // pack/unpack per-cell winning-body keys.  Moving them out of the
+    // kernel avoids a 4× empty allocation per call.
     m.def(
-        "streaming_sdf_min_rho_3d_multi("
+        "streaming_sdf_stag_3d_multi("
         "Tensor F_flat, Tensor F_offsets,"
         " Tensor body_shapes, Tensor body_meta, Tensor kin,"
         " Tensor aabb_lo, Tensor aabb_dim,"
@@ -42,9 +50,48 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " int max_vol_per_body,"
         " Tensor(a!) sdf_cc, Tensor(b!) sdf_u, Tensor(c!) sdf_v, Tensor(d!) sdf_w,"
         " Tensor(e!) body_u, Tensor(f!) body_v, Tensor(g!) body_w,"
+        " Tensor(h!) key_cc_t, Tensor(i!) key_u_t, Tensor(j!) key_v_t, Tensor(k!) key_w_t,"
         " int interp_method,"
-        " Tensor rho_bodies,"
-        " Tensor(h!) winning_rho_cc,"
+        " int dirty_i0, int dirty_j0, int dirty_k0,"
+        " int dirty_Ai, int dirty_Aj, int dirty_Ak"
+        ") -> ()");
+
+    // Phase-I fused BDIM2 + variable-density Poisson coefficient kernel.
+    // Reads advdiff outputs + Kernel-A face SDFs / body velocities, writes
+    // the persistent velocity fields u0/v0/w0 and Poisson coefficients
+    // ch/cv/cw inside the dirty AABB.  mu0, mu1 and unit normals are
+    // computed in CUDA thread registers and never stored globally.
+    m.def(
+        "bdim_vardens_3d("
+        "Tensor u_prime, Tensor v_prime, Tensor w_prime,"
+        " Tensor sdf_u, Tensor sdf_v, Tensor sdf_w,"
+        " Tensor body_u, Tensor body_v, Tensor body_w,"
+        " Tensor(a!) u0, Tensor(b!) v0, Tensor(c!) w0,"
+        " Tensor(d!) ch, Tensor(e!) cv, Tensor(f!) cw,"
+        " float eps, float rho_body, float rho_f, float dt,"
+        " float h_grid,"
+        " int dirty_i0, int dirty_j0, int dirty_k0,"
+        " int dirty_Ai, int dirty_Aj, int dirty_Ak"
+        ") -> ()");
+
+    // BDIM-σ variant of bdim_vardens_3d (Lauber et al. 2022).
+    // For each cell the Poisson coefficient is evaluated with mu0 of a
+    // shifted SDF phi - sigma_shifts[body_id] (lookup via key_u/v/w), so
+    // thin bodies (r < eps) reach mu0_poisson = 0 inside the body and the
+    // pressure BC is correctly enforced.  The velocity BDIM fields
+    // (phi_out) are unchanged — only the Poisson coefficient line uses
+    // the shifted mu0.
+    m.def(
+        "bdim_vardens_sigma_3d("
+        "Tensor u_prime, Tensor v_prime, Tensor w_prime,"
+        " Tensor sdf_u, Tensor sdf_v, Tensor sdf_w,"
+        " Tensor body_u, Tensor body_v, Tensor body_w,"
+        " Tensor(a!) u0, Tensor(b!) v0, Tensor(c!) w0,"
+        " Tensor(d!) ch, Tensor(e!) cv, Tensor(f!) cw,"
+        " Tensor key_u, Tensor key_v, Tensor key_w,"
+        " Tensor sigma_shifts,"
+        " float eps, float rho_body, float rho_f, float dt,"
+        " float h_grid,"
         " int dirty_i0, int dirty_j0, int dirty_k0,"
         " int dirty_Ai, int dirty_Aj, int dirty_Ak"
         ") -> ()");
@@ -69,11 +116,18 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         "apply_bcs_3d("
         "Tensor(a!) u, Tensor(b!) v, Tensor(c!) w,"
         " Tensor shapes, Tensor neu_desc, Tensor dir_desc, Tensor dir_val,"
+        " Tensor ref_desc, Tensor ref_val,"
         " int max_dim0, int max_dim1"
         ") -> ()");
 
+    // Phase-I 2-D streaming SDF / face velocity update.
+    //
+    // key_cc_t / key_u_t / key_v_t are caller-allocated int64 scratch buffers
+    // of size >= Ngx*Ngy used to pack/unpack per-cell winning-body keys.
+    // Mirrors the 3-D version; required by BDIM-σ so the keys can be read
+    // by Kernel B (bdim_vardens_sigma_2d) after Kernel A populates them.
     m.def(
-        "streaming_sdf_min_rho_2d_multi("
+        "streaming_sdf_stag_2d_multi("
         "Tensor F_flat, Tensor F_offsets,"
         " Tensor body_shapes, Tensor body_meta, Tensor kin,"
         " Tensor aabb_lo, Tensor aabb_dim,"
@@ -81,10 +135,40 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " int max_vol_per_body,"
         " Tensor(a!) sdf_cc, Tensor(b!) sdf_u, Tensor(c!) sdf_v,"
         " Tensor(d!) body_u, Tensor(e!) body_v,"
+        " Tensor(f!) key_cc_t, Tensor(g!) key_u_t, Tensor(h!) key_v_t,"
         " int interp_method,"
-        " Tensor rho_bodies,"
-        " Tensor(f!) winning_rho_cc,"
         " int dirty_i0, int dirty_j0, int dirty_Ai, int dirty_Aj"
+        ") -> ()");
+
+    // Phase-I fused BDIM2 + variable-density Poisson coefficient kernel (2-D).
+    m.def(
+        "bdim_vardens_2d("
+        "Tensor u_prime, Tensor v_prime,"
+        " Tensor sdf_u, Tensor sdf_v,"
+        " Tensor body_u, Tensor body_v,"
+        " Tensor(a!) u0, Tensor(b!) v0,"
+        " Tensor(c!) ch, Tensor(d!) cv,"
+        " float eps, float rho_body, float rho_f, float dt,"
+        " float h_grid,"
+        " int dirty_i0, int dirty_j0,"
+        " int dirty_Ai, int dirty_Aj"
+        ") -> ()");
+
+    // BDIM-σ variant of bdim_vardens_2d (Lauber et al. 2022).  See the
+    // 3-D variant above for documentation.
+    m.def(
+        "bdim_vardens_sigma_2d("
+        "Tensor u_prime, Tensor v_prime,"
+        " Tensor sdf_u, Tensor sdf_v,"
+        " Tensor body_u, Tensor body_v,"
+        " Tensor(a!) u0, Tensor(b!) v0,"
+        " Tensor(c!) ch, Tensor(d!) cv,"
+        " Tensor key_u, Tensor key_v,"
+        " Tensor sigma_shifts,"
+        " float eps, float rho_body, float rho_f, float dt,"
+        " float h_grid,"
+        " int dirty_i0, int dirty_j0,"
+        " int dirty_Ai, int dirty_Aj"
         ") -> ()");
 
     m.def(
@@ -107,6 +191,7 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         "apply_bcs_2d("
         "Tensor(a!) u, Tensor(b!) v,"
         " Tensor shapes, Tensor neu_desc, Tensor dir_desc, Tensor dir_val,"
+        " Tensor ref_desc, Tensor ref_val,"
         " int max_line_dim"
         ") -> ()");
 
@@ -151,6 +236,31 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " float jcap_tol, float w, int nsmoothing"
         ") -> ()");
 
+    // ---- Multigrid residual kernels ------------------------------------
+    // mg_residual_2d / mg_residual_3d: compute
+    //   r = (f - A(p)) * (|J| >= jcap_tol)    where A(p) = sum - J*p
+    // with J and the active mask in registers only (no global allocations).
+    // r must be a pre-allocated interior-shape tensor (no ghost cells);
+    // p is ghost-padded.  Used to replace the J/active/sum/addcmul_/neg_
+    // chain inside the multigrid V-cycle so neither J (~64 MB) nor active
+    // (~16 MB bool) is ever materialised as a tensor.
+    m.def(
+        "mg_residual_2d("
+        "Tensor p, Tensor f,"
+        " Tensor cp0, Tensor cm0, Tensor cp1, Tensor cm1,"
+        " float jcap_tol,"
+        " Tensor(a!) r"
+        ") -> ()");
+
+    m.def(
+        "mg_residual_3d("
+        "Tensor p, Tensor f,"
+        " Tensor cp0, Tensor cm0, Tensor cp1, Tensor cm1,"
+        " Tensor cp2, Tensor cm2,"
+        " float jcap_tol,"
+        " Tensor(a!) r"
+        ") -> ()");
+
     // ---- Scattered-point interpolation --------------------------------
     // Reusable bilinear/biquadratic (2-D) and trilinear/triquadratic (3-D)
     // samplers backed by the same device functions as streaming_sdf.
@@ -175,6 +285,53 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " int interp_method,"
         " Tensor(a!) G"
         ") -> ()");
+
+    // ---- Multigrid grid-transfer kernels --------------------------------
+    // Residual restriction: sum of 4 (2-D) or 8 (3-D) fine children into rc.
+    m.def("restrict_residual_2d(Tensor r, Tensor(a!) rc) -> ()");
+    m.def("restrict_residual_3d(Tensor r, Tensor(a!) rc) -> ()");
+    // Face restriction (WaterLily): stride-2 in face_dim, sum-of-pairs in
+    // transverse, single 0.5 factor. face_dim in {0,1} (2-D) or {0,1,2} (3-D).
+    m.def("restrict_face_2d(Tensor src, Tensor(a!) dst, int face_dim) -> ()");
+    m.def("restrict_face_3d(Tensor src, Tensor(a!) dst, int face_dim) -> ()");
+    // Prolongation + in-place correction: bilinear/trilinear align_corners=False
+    // interpolation of ec[interior] added into p[interior] (both ghost-padded).
+    m.def("prolongate_add_2d(Tensor ec, Tensor(a!) p) -> ()");
+    m.def("prolongate_add_3d(Tensor ec, Tensor(a!) p) -> ()");
+
+    // ---- Monolithic multigrid Poisson drivers --------------------------
+    // Run the full multi-V-cycle solve in C++: scale f by h², N V-cycles
+    // (with L∞ early-exit at ``tol``), final float64 mean subtraction.
+    // ``p`` is ghost-padded and mutated in place; returns the final residual.
+    // ``smoother_id``: 0 = RBGS, 1 = weighted Jacobi (uses ``w``).
+    m.def(
+        "poisson_solve_multigrid_2d("
+        "Tensor(a!) p, Tensor f, Tensor ch, Tensor cv,"
+        " float h2, float jcap_tol, float w,"
+        " int nsmoothing, int max_vcycles, float tol, int smoother_id"
+        ") -> Tensor");
+    m.def(
+        "poisson_solve_multigrid_3d("
+        "Tensor(a!) p, Tensor f, Tensor ch, Tensor cv, Tensor cw,"
+        " float h2, float jcap_tol, float w,"
+        " int nsmoothing, int max_vcycles, float tol, int smoother_id"
+        ") -> Tensor");
+
+    // MGCG (multigrid-preconditioned conjugate gradient).
+    m.def(
+        "poisson_solve_mgcg_2d("
+        "Tensor(a!) p, Tensor f, Tensor ch, Tensor cv,"
+        " float h2, float jcap_tol, float w,"
+        " int nsmoothing, int max_cycles, int precond_vcycles,"
+        " float tol, int smoother_id"
+        ") -> Tensor");
+    m.def(
+        "poisson_solve_mgcg_3d("
+        "Tensor(a!) p, Tensor f, Tensor ch, Tensor cv, Tensor cw,"
+        " float h2, float jcap_tol, float w,"
+        " int nsmoothing, int max_cycles, int precond_vcycles,"
+        " float tol, int smoother_id"
+        ") -> Tensor");
 }
 
 }  // namespace lilytorch_kernels

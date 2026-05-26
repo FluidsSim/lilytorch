@@ -15,18 +15,21 @@ class SimConfig(BaseSimConfig):
 
         # Reuse the existing pleurodeles mesh SDF and generate a separate
         # 3-D interpolation cache so it does not clash with the 2-D data.
-        self.compute_sdf    = False
-        self.save           = True
+        self.compute_sdf    = True
 
         self.data_folder = os.path.join(
             lilytorch_repo_root, 'farms_examples', 'pleurodeles',
         )
 
         # Hardware / runtime
-        self.use_bdim       = True
-        self.use_gpu        = True
-        self.headless       = False
-        self.poisson_method = "multigrid"
+        self.use_bdim          = True
+        self.use_gpu           = True
+        self.headless          = False
+        self.poisson_method    = "multigrid"
+        self.sdf_interp_method = "quadratic"
+        self.force_delta_order = 2
+
+        # self.apply_bdim_sigma = True
 
         # Animat
         self.animats_pars = [
@@ -47,8 +50,8 @@ class SimConfig(BaseSimConfig):
         self.Nx = 1024
         self.Ny = 192
         self.Nz = 96
-        self.xmin = -0.13 * 2
-        self.xmax = 0.27 * 2
+        self.xmin = -0.2
+        self.xmax = 0.5
 
         # Keep the long swimming domain in x and derive the transverse
         # extents from the same cell size so dx = dy = dz. With the FFT
@@ -61,11 +64,11 @@ class SimConfig(BaseSimConfig):
         self.zmax = 0.5 * self.Nz * dx
 
         # Physics
-        self.timestep = 0.0005
-        self.convection_method = "quick"
-        self.n_iterations = 8001
-        self.save_every = 50
-        self.num_sub_steps = 1
+        self.timestep          = 0.0005
+        self.convection_method = "abdquickest"
+        self.n_iterations      = 8001
+        self.save_every        = 50
+        self.save              = False
 
         # MuJoCo
         self.visual_scale = 10.0
@@ -73,25 +76,24 @@ class SimConfig(BaseSimConfig):
 
         # Arena
         self.wall_thickness = 0.003
-        self.arena_pose = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-        self.water_drag = False
+        self.arena_pose     = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        self.water_drag     = False
         self.water_buoyancy = False
 
         # BDIM solver
-        self.bdim_dt = self.timestep
-        self.bdim_nt = self.n_iterations
-        self.zero_pressure_inside = False
-        self.rho_body = 1000.0
-        self.poisson_tol = 1.0e-4
-        self.poisson_max_cycles = 3
+        self.bdim_dt                 = self.timestep
+        self.bdim_nt                 = self.n_iterations
+        self.zero_pressure_inside    = False
+        self.rho_body                = 1000.0
+        self.poisson_tol             = 1.0e-4
+        self.poisson_max_cycles      = 3
         self.poisson_max_mgcg_cycles = 10
         self.poisson_precond_vcycles = 1
-        self.poisson_warm_start = True
-        self.poisson_smoother = "jacobi"
-        # self.poisson_compile = True
-        self.poisson_nsmoothing = 5
-        self.poisson_bc_type = "neumann"
-        self.compile_adv_diff = True
+        self.poisson_warm_start      = True
+        self.poisson_smoother        = "jacobi"
+        self.poisson_nsmoothing      = 5
+        self.poisson_bc_type         = "neumann"
+        self.compile_adv_diff        = True
 
         # Boundary conditions
         self.bc_type_u = ["D", "D", "N", "N", "N", "N"]
@@ -102,14 +104,17 @@ class SimConfig(BaseSimConfig):
         self.bc_values_w = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
         # Body
-        self.convexify = False
-        self.contour_mask = True
-        # self.n_samples = (2000, 2000)
-        self.force_scaling = 1.0
+        self.convexify    = False
+        self.contour_mask = False
         self.interp_data_subfolder = "interp_data_3d"
 
         # BDIM physics
         self.bdim_physics = {"solref": [0.001, 0.5]}
+
+        self.wall_alpha   = 0.
+        self.water_alpha  = 0.05
+        self.grid_spacing = 0.5*(self.ymax - self.ymin)  # lines on background floor
+
 
     def customize_joint_initials(self, joints_list):
         for joint in joints_list:
@@ -125,13 +130,43 @@ class SimConfig(BaseSimConfig):
     def extra_simulation_extensions(self, output_folder):
         extensions = []
 
+
+        # Soft, reflection-free lighting for tank recordings
+        extensions.append({
+            "loader": "lilytorch.integration.light_modifier.LightModifier",
+            "config": {
+                "diffuse": [1, 1, 1],
+                "ambient": [0.7, 0.7, 0.7],
+            },
+        })
+        extensions.append({
+            "loader": "lilytorch.integration.flow_iso_gl_viewer.FlowIsoGLViewer",
+            "config": {
+                # "field"              : "omega_z",
+                "field"              : "omega_mag",
+                "alpha"              : 0.2,
+                "update_every"       : 1,
+                "max_vertices"       : 20 * self.Nx * self.Ny,
+                "smooth_sigma"       : 0,
+                "crop_boundary"      : 0,
+                "exclude_body"       : True,
+                "iso_value"          : 40.0,
+                "debug_force_visible": False,
+                "color_uni"          : "#FF4500",
+                "color_pos"          : "#FF4500",
+                "color_neg"          : "#00FFFF",
+            },
+        })
+
         # Top-down camera auto-fitted to the pool
         cam = top_down_camera_config(
             self.xmin, self.xmax,
             self.ymin, self.ymax,
             self.zmin, self.zmax,
-            overshoot=1
+            overshoot=1,
+            max_width=3840, max_height=2160,
         )
+        cam["elevation"] = -30   # tilt 20° from straight-down (−90 = top-down)
         extensions.append({
             "loader": "farms_mujoco.sensors.camera.CameraRecording",
             "config": {
@@ -144,7 +179,42 @@ class SimConfig(BaseSimConfig):
             },
         })
 
+
+        # Following camera: tight view locked on fish CoM
+        extensions.append({
+            "loader": "farms_mujoco.sensors.camera.CameraRecording",
+            "config": {
+                "path"            : os.path.join(output_folder, "output", "video_follow.mp4"),
+                "animat_id"       : 0,
+                "fps"             : 30,
+                "speed"           : 1.0,
+                "angular_velocity": 0,
+                "azimuth"         : 90,
+                "elevation"       : -50,
+                "distance"        : 0.4,
+                "offset"          : [0, 0, 0],
+                "resolution"      : [3840, 2160],
+            },
+        })
+
+
+        # SkyModifier must be LAST so all CameraRecording renderers already
+        # exist when initialize_episode runs the GPU texture upload.
+        extensions.append({
+            "loader": "lilytorch.integration.sky_modifier.SkyModifier",
+            "config": {"rgb": [0.0, 0.0, 0.0]},
+        })
+
+
         return extensions
+
+    def _extra_run_patch(self):
+        # Replace FARMS starry-night sky with flat black in the subprocess.
+        return (
+            "_m.night_sky=lambda mjcf_model:mjcf_model.asset.add("
+            "'texture',name='skybox',type='skybox',"
+            "builtin='flat',rgb1=[0,0,0],rgb2=[0,0,0],width=8,height=8);"
+        )
 
 
 if __name__ == "__main__":

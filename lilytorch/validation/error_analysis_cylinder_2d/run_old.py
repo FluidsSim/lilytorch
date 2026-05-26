@@ -5,8 +5,12 @@ Setup (non-dimensional, following MW2015 Section 3.1):
   - Diameter D = 1
   - Domain  30D × 30D  (30 × 30)
   - Grid: power-of-2 Nx for multigrid compatibility
-      Nx ∈ {128, 256, 512, 1024}   →   dx = 30/Nx
-      D/dx ∈ {4.27, 8.53, 17.07, 34.13}
+      Nx ∈ {128, 256, 512, 1024, 2048}   →   dx = 30/Nx
+      D/dx ∈ {4.27, 8.53, 17.07, 34.13, 68.27}
+  - NOTE: D/dx < 16 is pre-asymptotic for BDIM2; 2nd-order rates emerge at
+    D/dx ≥ 16 (Nx ≥ 512 on this 30D domain).  For a cleaner convergence study
+    reduce the domain to 10D × 10D (half_L = 5) to shift the range to
+    D/dx ∈ {12.8 … 102.4} for the same Nx values.
       Refinement ratio = 2 between successive levels
   - Re = 100  (MW2015 Section 3.1: "circular cylinder at Re = 100")
   - CFL = 0.1  →  dt = 0.1 * dx / U
@@ -38,8 +42,7 @@ nu = U * D / Re   # kinematic viscosity = 0.01
 
 rho = 1.0         # density
 
-# Domain: 30D × 30D, centred at origin
-half_L = 15 * D   # 15
+half_L = 5 * D
 xmin, xmax = -half_L, half_L
 ymin, ymax = -half_L, half_L
 
@@ -92,11 +95,27 @@ for Nx in nxs:
     # --- Physics ---
     pars["solver"]["nu"]  = nu
     pars["solver"]["rho"] = rho
+    # Single-phase rigid cylinder: use the pure mu0-weighted BDIM2 projection
+    # (Maertens & Weymouth 2015), ch = dt*mu0/rho.  The config default uses the
+    # variable-density coefficient dt/(rho_body + (rho-rho_body)*mu0) with
+    # rho_body=1000, i.e. a 1000:1 density jump across the immersed boundary;
+    # that makes the variable-coefficient Poisson degenerate where mu0->0 and
+    # blows up the pressure in the BDIM transition band to O(10) (decaying only
+    # 1st order), destroying the 2nd-order pressure convergence of MW2015.
+    # The mu0 form vanishes exactly inside the body and stays smooth across the
+    # band, recovering physical O(1/2 rho U^2) pressure.  (Requires
+    # solver_method='python'.)
+    pars["solver"]["bdim_mu0_projection"] = True
+
+    # --- Solver method: CompositeBodyAnalytical does not use BDIMhandler,
+    #     so the kernel path (_kernel_step bookkeeping) is unavailable.
+    pars["solver"]["solver_method"] = "python"
 
     # --- Poisson solver: increase iterations for larger grids ---
-    pars["solver"]["poisson_max_cycles"]      = 30   # V-cycles (was 10)
-    pars["solver"]["poisson_nsmoothing"]      = 10   # Jacobi sweeps per level (was 5)
-    pars["solver"]["poisson_tol"]             = 1e-5 # relax tolerance slightly
+    pars["solver"]["poisson_method"]     = "multigrid"
+    pars["solver"]["poisson_max_cycles"] = 30           # V-cycles (was 10)
+    pars["solver"]["poisson_nsmoothing"] = 10           # Jacobi sweeps per level (was 5)
+    pars["solver"]["poisson_tol"]        = 1e-8         # relax tolerance slightly
 
     # --- Body: cylinder centred at (cx, cy) ---
     pars["body"]["sdf"] = [
@@ -124,7 +143,7 @@ for Nx in nxs:
     print(f"  eps = 2·dx = {2*dx:.6f}")
 
     # =========== Run simulation ===========
-    solver = FluidSolver(pars, dtype=torch.float32, compute_forces=True)
+    solver = FluidSolver(pars, dtype=torch.float32, compute_forces=False)
     solver.save_path = save_path
     os.makedirs(solver.save_path, exist_ok=True)
     solver.set_initial_conditions()

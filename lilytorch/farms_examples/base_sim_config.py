@@ -45,7 +45,7 @@ class BaseSimConfig:
 
     * ``customize_animat``          – per-animat / per-index tweaks
     * ``customize_morphology_links`` – override per-link morphology fields
-    * ``customize_joint_initials``  – override joint initial positions
+    * ``customize_joint_initials``  – override joint initials / damping / stiffness / limits
     * ``extra_simulation_extensions`` – add FlowViewer, CameraRecording, etc.
     """
 
@@ -66,7 +66,10 @@ class BaseSimConfig:
         self.fast     = False
 
         # ── Drag ──────────────────────────────────────────────────────────
-        self._use_drag_override = None   # None → auto (not use_bdim)
+        # Either a single drag entry applied to every link:
+        #   [linear_3vec, quadratic_3vec]  e.g. [[-0.1,-5,-5],[-0.001,-0.001,-0.001]]
+        # or a per-link list of length == number-of-links, each element being
+        # one such entry.  All entries must be identical when constant.
         self.constant_drags = [
             [-0.1, -5.0, -5.0],
             [-0.001, -0.001, -0.001],
@@ -75,6 +78,18 @@ class BaseSimConfig:
         # ── Animats ───────────────────────────────────────────────────────
         self.animats_pars = []
         self.filter_fixed_joints = True  # skip joints with type=="fixed"
+
+        # ── Joint defaults (applied to every non-fixed joint) ─────────────
+        # Defaults baked into each joint dict in ``gen_animat_config``.
+        # Set ``joint_damping > 0`` to stabilise *passive* DOFs that are
+        # driven by fluid forces: the FARMS↔BDIM coupling is an explicit
+        # staggered scheme, so light / neutrally-buoyant passive links are
+        # prone to the added-mass instability — a little joint damping is
+        # the cheapest mitigation.  Override per-joint in
+        # ``customize_joint_initials`` for finer control.
+        self.joint_damping   = 0.0
+        self.joint_stiffness = 0.0
+        self.joint_springref = 0.0
 
         # ── Grid (2-D by default; set Nz/zmin/zmax for 3-D) ──────────────
         self.Nx   = 512
@@ -99,6 +114,7 @@ class BaseSimConfig:
         self.save_frames = True
         self.save_every  = 200
         self.save        = False   # save fields (u, v, [w], p, sdf) to HDF5
+        self.save_drags  = False   # save drag/force records to drags.h5
         self.vmin        = -10.0
         self.vmax        = 10.0
         self.plot_specs  = ["curl", "pressure"]
@@ -107,16 +123,19 @@ class BaseSimConfig:
 
         # ── Arena ─────────────────────────────────────────────────────────
         self.generate_pool  = True   # generate pool/water SDFs; False → use flat arena
+        self.grid_spacing   = None   # None → no floor grid; float → white grid line spacing (m)
         self.wall_thickness = None   # None → auto for 3-D, 0.3 for 2-D
         self.wall_height    = None   # None → 0.3 for 2-D (ignored for 3-D)
+        self.wall_alpha     = None   # None → keep default (0.3); 0.0=transparent, 1.0=opaque
+        self.water_alpha    = None   # None → keep default (0.18); 0.0=transparent, 1.0=opaque
         self.arena_pose     = [0, 0, 0, 0, 0, 0]
-        self.water_drag     = None   # None → use_drag
-        self.water_buoyancy = None   # None → use_drag
+        self.water_drag     = None   # None → not use_bdim
+        self.water_buoyancy = None   # None → not use_bdim
         self.water_height   = 0
         self.ground_height  = 0.0
 
         # ── Animat fluid interaction ──────────────────────────────────────
-        self.animat_fluid_interaction = None  # None → use_drag
+        self.animat_fluid_interaction = None  # None → not use_bdim
 
         # ── MuJoCo ────────────────────────────────────────────────────────
         self.num_sub_steps = 1
@@ -142,7 +161,6 @@ class BaseSimConfig:
         self.poisson_nsmoothing      = 10
         self.poisson_verbose         = False
         self.poisson_bc_type         = "neumann"
-        self.poisson_compile         = False
         self.compile_adv_diff        = False
         self.smagorinsky_cs          = 0.0
         self.carreau                 = None   # dict with keys: nu_0, nu_inf, lam, n
@@ -173,6 +191,19 @@ class BaseSimConfig:
         self.sdf_interp_method       = None
         # Fluid-explosion guard (forwarded into bdim_yaml.solver)
         self.vmax_abort              = None   # m/s; None = auto
+        # BDIM interface-thickness multiplier: eps = eps_multiplier * h.
+        # Default 2.0 in the solver.  For mesh bodies set to 1.5 or lower
+        # (min ~1.0) to reduce the effective body size and drag inflation.
+        self.eps_multiplier          = None   # None → solver default (2.0)
+        # BDIM-σ (Lauber et al. 2022): per-body Poisson-coefficient shift
+        # so thin bodies (r < eps) reach mu0_poisson = 0 inside and the
+        # pressure BC is correctly enforced.  None → solver default (False).
+        self.apply_bdim_sigma        = None   # None → solver default (False)
+        # Delta-function order for force integration:
+        #   1 (default) – first-order smoothed delta
+        #   2           – Towers (2008) correction δ/|∇φ|, recommended for
+        #                 mesh bodies where |∇SDF| ≠ 1 near joints/corners.
+        self.force_delta_order       = None   # None → solver default (1)
 
         # ── BDIM boundary conditions ──────────────────────────────────────
         # 2-D: 4 entries;  3-D: 6 entries
@@ -222,28 +253,18 @@ class BaseSimConfig:
         return self.Nz is not None
 
     @property
-    def use_drag(self):
-        if self._use_drag_override is not None:
-            return self._use_drag_override
-        return not self.use_bdim
-
-    @use_drag.setter
-    def use_drag(self, value):
-        self._use_drag_override = value
-
-    @property
     def _fluid_interaction(self):
         if self.animat_fluid_interaction is not None:
             return self.animat_fluid_interaction
-        return self.use_drag
+        return not self.use_bdim
 
     @property
     def _water_drag(self):
-        return self.water_drag if self.water_drag is not None else self.use_drag
+        return self.water_drag if self.water_drag is not None else not self.use_bdim
 
     @property
     def _water_buoyancy(self):
-        return self.water_buoyancy if self.water_buoyancy is not None else self.use_drag
+        return self.water_buoyancy if self.water_buoyancy is not None else not self.use_bdim
 
     # ── Hooks (override in subclasses) ────────────────────────────────────
 
@@ -262,10 +283,21 @@ class BaseSimConfig:
         """
 
     def customize_joint_initials(self, joints_list):
-        """Called after the joints list is built.
+        """Called after the joints list is built (mutates ``joints_list`` in place).
 
-        Override to set initial positions for specific joints
-        (e.g. leg joints for salamanders).
+        Each entry is the full joint dict, so override to set any field
+        per joint — not just the initial position:
+
+        * ``initial`` – initial position/velocity (e.g. leg joints for
+          salamanders).
+        * ``damping`` / ``stiffness`` / ``springref`` – make a joint
+          passive / compliant.  Adding damping to fluid-driven passive
+          joints stabilises the explicit FARMS↔BDIM coupling (mitigates
+          the added-mass instability for light / neutrally-buoyant links).
+        * ``limits`` – per-joint position/velocity limits.
+
+        For a single value applied to *every* joint, set ``joint_damping``
+        / ``joint_stiffness`` / ``joint_springref`` in ``__init__`` instead.
         """
 
     def extra_simulation_extensions(self, output_folder):
@@ -329,7 +361,19 @@ class BaseSimConfig:
                     "config": ext_config,
                 })
 
-            drag_coefficients = [self.constant_drags for _ in range(nlinks)]
+            _drags = self.constant_drags
+            if isinstance(_drags[0][0], (list, tuple)):
+                # Per-link list: validate length then use directly
+                if len(_drags) != nlinks:
+                    raise ValueError(
+                        f"constant_drags has {len(_drags)} entries but the "
+                        f"model has {nlinks} links; provide either a single "
+                        f"entry or exactly one entry per link."
+                    )
+                drag_coefficients = list(_drags)
+            else:
+                # Single constant entry: replicate for every link
+                drag_coefficients = [_drags for _ in range(nlinks)]
 
             # == Build animat dict ==
             animat_dict = {
@@ -346,7 +390,7 @@ class BaseSimConfig:
                         {
                             'name'             : ln,
                             'collisions'       : True,
-                            'friction'         : [0.2, 0, 0],
+                            'friction'         : [0., 0, 0],
                             'extras'           : {},
                             'fluid_interaction': self._fluid_interaction,
                             'density'          : self.rho_body,
@@ -357,9 +401,9 @@ class BaseSimConfig:
                             'name'     : jn,
                             'initial'  : [0, 0],
                             'limits'   : [[-inf, inf], [-inf, inf]],
-                            'stiffness': 0,
-                            'springref': 0,
-                            'damping'  : 0,
+                            'stiffness': self.joint_stiffness,
+                            'springref': self.joint_springref,
+                            'damping'  : self.joint_damping,
                             'extras'   : {},
                         } for jn in joint_names
                     ],
@@ -388,7 +432,7 @@ class BaseSimConfig:
             }
 
             # Add drag coefficients when using drag model
-            if self.use_drag:
+            if not self.use_bdim:
                 for i, link in enumerate(animat_dict["morphology"]["links"]):
                     link["drag_coefficients"] = drag_coefficients[i]
 
@@ -405,7 +449,7 @@ class BaseSimConfig:
             )
 
             # Swimming extension for drag-based sims
-            if self.use_drag:
+            if not self.use_bdim:
                 animat_dict["extensions"].append({
                     "loader": "farms_mujoco.swimming.extension.SwimmingExtension",
                     "config": {"water_properties": None},
@@ -430,11 +474,14 @@ class BaseSimConfig:
                     self.xmin, self.xmax, self.ymin, self.ymax,
                     zmin=self.zmin, zmax=self.zmax,
                     wall_thickness=wt, plotting=False,
+                    wall_alpha=self.wall_alpha,
+                    grid_spacing=self.grid_spacing,
                 )
                 water_sdf = create_water_sdf(
                     self.xmin, self.xmax, self.ymin, self.ymax,
                     zmin=self.zmin, zmax=self.zmax,
                     water_height=self.zmax,
+                    water_alpha=self.water_alpha,
                 )
                 water_h = self.water_height if self.water_height != 0 else self.zmax
             else:
@@ -443,11 +490,14 @@ class BaseSimConfig:
                 create_pool_sdf(
                     self.xmin, self.xmax, self.ymin, self.ymax,
                     wall_thickness=wt, wall_height=wh, plotting=False,
+                    wall_alpha=self.wall_alpha,
+                    grid_spacing=self.grid_spacing,
                 )
                 water_sdf = create_water_sdf(
                     self.xmin, self.xmax, self.ymin, self.ymax,
                     water_height=self.water_height,
                     wall_height=wh,
+                    water_alpha=self.water_alpha,
                 )
                 water_h = self.water_height
             arena_sdf = os.path.join(sdfs_path, "pool", "sdf", "pool.sdf")
@@ -600,15 +650,49 @@ class BaseSimConfig:
             simulation_dict,
         )
 
+    def _extra_run_patch(self):
+        """Return extra Python one-liner code injected into run.sh before main().
+
+        Subclasses can override to patch farms_mujoco internals (e.g. night_sky)
+        without modifying the farms_mujoco package.
+        """
+        return ""
+
     def gen_sh_config(self, output_folder, index=0):
         camera_dist = getattr(self, 'camera_dist', 3.0)
+
+        # Write the offscreen-buffer fix to a helper file so we avoid
+        # shell-quoting issues with complex multi-line Python inside -c "...".
+        # It patches setup_mjcf_xml to widen MuJoCo's offscreen framebuffer
+        # to match the largest CameraRecording resolution requested.
+        with open(os.path.join(output_folder, '_offscreen_patch.py'), 'w') as f:
+            f.write(
+                "import farms_mujoco.simulation.mjcf as _m\n"
+                "_orig_smx = _m.setup_mjcf_xml\n"
+                "def _patched_smx(experiment_options, **kw):\n"
+                "    r = _orig_smx(experiment_options=experiment_options, **kw)\n"
+                "    g = r[0].visual.get_children('global')\n"
+                "    ow, oh = g.offwidth, g.offheight\n"
+                "    for e in experiment_options.simulation.extensions:\n"
+                "        if 'CameraRecording' in e.loader:\n"
+                "            res = e.config.get('resolution', [640, 480])\n"
+                "            ow = max(ow, res[0])\n"
+                "            oh = max(oh, res[1])\n"
+                "    g.offwidth = ow\n"
+                "    g.offheight = oh\n"
+                "    return r\n"
+                "_m.setup_mjcf_xml = _patched_smx\n"
+            )
+
         # Build a one-liner that optionally monkey-patches add_cameras before
         # starting farms_sim, so that ] in the viewer uses the right distance.
         patch = (
             f"import farms_mujoco.simulation.mjcf as _m;"
             f"_o=_m.add_cameras;"
             f"_m.add_cameras=lambda link,dist={camera_dist!r},rot=None,simulation_options=None:_o(link,dist=dist,rot=rot,simulation_options=simulation_options);"
+            f"exec(open('_offscreen_patch.py').read());"
         )
+        patch += self._extra_run_patch()
         sh_str = (
             "#!/bin/bash\n"
             "set -e\n"
@@ -632,15 +716,13 @@ class BaseSimConfig:
         self.gen_sh_config(output_folder, index)
         os.chdir(output_folder)
         from lilytorch.integration.flow_viewer_2d_gpu import prepare_flow_viewer_2d_gpu_env
+        from lilytorch.integration.flow_iso_gl_viewer import prepare_iso_gl_hook_env
 
-        subprocess.run(
-            ['bash', 'run.sh'],
-            check=True,
-            env=prepare_flow_viewer_2d_gpu_env(
-                os.environ.copy(),
-                self._generated_simulation_extensions,
-            ),
+        env = prepare_flow_viewer_2d_gpu_env(
+            os.environ.copy(), self._generated_simulation_extensions,
         )
+        env = prepare_iso_gl_hook_env(env, self._generated_simulation_extensions)
+        subprocess.run(['bash', 'run.sh'], check=True, env=env)
 
     def run(self):
         """Run all configurations. Override for multi-run sweeps."""
@@ -694,7 +776,6 @@ class BaseSimConfig:
             ("poisson_precond_vcycles", self.poisson_precond_vcycles),
             ("poisson_warm_start",      self.poisson_warm_start),
             ("poisson_smoother",        self.poisson_smoother),
-            ("poisson_compile",         self.poisson_compile),
             ("poisson_bc_type",         self.poisson_bc_type),
             ("compile_adv_diff",        self.compile_adv_diff),
             ("solver_method",           self.solver_method),
@@ -705,6 +786,9 @@ class BaseSimConfig:
             ("use_kernels",             self.use_kernels),
             ("sdf_interp_method",       self.sdf_interp_method),
             ("vmax_abort",              self.vmax_abort),
+            ("eps_multiplier",          self.eps_multiplier),
+            ("apply_bdim_sigma",        self.apply_bdim_sigma),
+            ("force_delta_order",       self.force_delta_order),
         ]:
             if val is not None:
                 solver[key] = val
@@ -755,6 +839,7 @@ class BaseSimConfig:
             "iso_3d_specs"   : None if self.iso_3d_specs is None else list(self.iso_3d_specs),
             "iso_3d_value"   : self.iso_3d_value,
             "save"           : self.save,
+            "save_drags"     : self.save_drags,
         }
 
         bdim_yaml = {

@@ -20,26 +20,20 @@ FLOOR_MATERIAL = {
     'emissive': '0.0  0.0  0.0  0.3',
 }
 
-# Checker tile colours (Mediterranean blue-teal)
-TILE_LIGHT = {
-    'ambient':  '0.22 0.58 0.68 1.0',
-    'diffuse':  '0.28 0.65 0.75 1.0',
-    'specular': '0.35 0.40 0.45 1.0',
-    'emissive': '0.0  0.0  0.0  1.0',
-}
-TILE_DARK = {
-    'ambient':  '0.12 0.38 0.52 1.0',
-    'diffuse':  '0.16 0.45 0.60 1.0',
-    'specular': '0.25 0.30 0.35 1.0',
-    'emissive': '0.0  0.0  0.0  1.0',
+# Large background ground plane (black)
+GROUND_BG_MATERIAL = {
+    'ambient':  '0.0 0.0 0.0 1.0',
+    'diffuse':  '0.0 0.0 0.0 1.0',
+    'specular': '0.0 0.0 0.0 1.0',
+    'emissive': '0.0 0.0 0.0 1.0',
 }
 
-# Large background ground plane (dark slate grey)
-GROUND_BG_MATERIAL = {
-    'ambient':  '0.28 0.32 0.36 1.0',
-    'diffuse':  '0.35 0.40 0.44 1.0',
-    'specular': '0.10 0.10 0.12 1.0',
-    'emissive': '0.0  0.0  0.0  1.0',
+# Subtle grid lines overlaid on the background floor
+GRID_LINE_MATERIAL = {
+    'ambient':  '0.55 0.55 0.55 1.0',
+    'diffuse':  '0.55 0.55 0.55 1.0',
+    'specular': '0.0 0.0 0.0 1.0',
+    'emissive': '0.0 0.0 0.0 1.0',
 }
 
 
@@ -53,6 +47,17 @@ WATER_MATERIAL = {
 
 
 # ── Helpers ────────────────────────────────────────────────────────────
+
+def _set_alpha(mat_dict, alpha):
+    """Return a copy of *mat_dict* with the 4th (alpha) component overridden."""
+    result = {}
+    for key, value in mat_dict.items():
+        parts = value.split()
+        if len(parts) == 4:
+            parts[3] = f'{float(alpha):.4f}'
+        result[key] = ' '.join(parts)
+    return result
+
 
 def _add_material(visual_elem, mat_dict):
     """Append <material> with ambient/diffuse/specular/emissive children."""
@@ -139,7 +144,8 @@ def _write_sdf(sdf_elem, rel_path):
 # ── Public API ─────────────────────────────────────────────────────────
 
 def create_pool_sdf(xmin, xmax, ymin, ymax, zmin=None, zmax=None,
-                    wall_thickness=None, wall_height=0.3, plotting=False):
+                    wall_thickness=None, wall_height=0.3, plotting=False,
+                    wall_alpha=None, grid_spacing=None):
     """Generate a rectangular pool SDF with textured walls and floor.
 
     Parameters
@@ -157,6 +163,14 @@ def create_pool_sdf(xmin, xmax, ymin, ymax, zmin=None, zmax=None,
         Wall extent in z -- only used when *zmin*/*zmax* are not given.
     plotting : bool
         Pop up a top-view matplotlib figure of the pool.
+    wall_alpha : float or None
+        Override the alpha (transparency) of the walls and floor.  ``0.0``
+        = fully transparent, ``1.0`` = fully opaque.  *None* keeps the
+        defaults from ``WALL_MATERIAL`` / ``FLOOR_MATERIAL`` (0.3).
+    grid_spacing : float or None
+        When set, white grid lines of this spacing (in metres) are drawn
+        over the background floor across the inner fluid domain.  *None*
+        disables the grid (default).
     """
     is_3d = zmin is not None and zmax is not None
 
@@ -200,57 +214,64 @@ def create_pool_sdf(xmin, xmax, ymin, ymax, zmin=None, zmax=None,
          f'{dx + 2*wt} {wt} {wz}'),
     ]
 
+    wall_mat  = _set_alpha(WALL_MATERIAL,  wall_alpha) if wall_alpha is not None else WALL_MATERIAL
+    floor_mat = _set_alpha(FLOOR_MATERIAL, wall_alpha) if wall_alpha is not None else FLOOR_MATERIAL
+
     for name, pose_text, size_text in sides:
-        _add_box_link(model, name, pose_text, size_text, WALL_MATERIAL)
+        _add_box_link(model, name, pose_text, size_text, wall_mat)
 
     # ---- floor (z-min face) ------------------------------------------
     fz = (zmin - wt / 2) if is_3d else (-wt / 2)
-    # Full collision+visual slab (tiles cover it visually; opaque floor
-    # blocks light so no rectangular shadow appears on ground_bg below)
     _add_box_link(
         model, 'floor',
         f'{(xmin+xmax)/2} {(ymin+ymax)/2} {fz} 0 0 0',
         f'{dx + 2*wt} {dy + 2*wt} {wt}',
-        FLOOR_MATERIAL,
+        floor_mat,
     )
 
-    # Checker-pattern visual tiles only cover the inner fluid footprint
-    # and are sunk slightly into the floor so they appear painted on.
-    floor_dx = dx
-    floor_dy = dy
-    floor_top_z = zmin if is_3d else 0.0
-    tile_h   = 0.002
-    tile_z   = floor_top_z - tile_h / 2 + 1.0e-4
-
-    # Choose tile count so tiles are roughly square
-    _target_tile = max(floor_dx, floor_dy) / 24.0
-    n_tx = max(2, round(floor_dx / _target_tile))
-    n_ty = max(2, round(floor_dy / _target_tile))
-    t_dx = floor_dx / n_tx
-    t_dy = floor_dy / n_ty
-    x0   = xmin + t_dx / 2
-    y0   = ymin + t_dy / 2
-
-    for i in range(n_tx):
-        for j in range(n_ty):
-            mat = TILE_LIGHT if (i + j) % 2 == 0 else TILE_DARK
-            cx  = x0 + i * t_dx
-            cy  = y0 + j * t_dy
-            _add_visual_only_link(
-                model, f'tile_{i}_{j}',
-                f'{cx} {cy} {tile_z} 0 0 0',
-                f'{t_dx} {t_dy} {tile_h}',
-                mat,
-            )
-
-    # ---- large background ground (visual-only, hides skybox/stars) ---
-    # Place well below the tank so it never appears above the walls
+    # ---- large background ground (visual-only, black backdrop) ------
+    ground_bg_z = fz - wt - 0.01
     _add_visual_only_link(
         model, 'ground_bg',
-        f'{(xmin+xmax)/2} {(ymin+ymax)/2} {fz - wt - 0.01} 0 0 0',
+        f'{(xmin+xmax)/2} {(ymin+ymax)/2} {ground_bg_z} 0 0 0',
         '100 100 0.002',
         GROUND_BG_MATERIAL,
     )
+
+    # ---- white grid lines over the fluid domain ---------------------
+    if grid_spacing is not None:
+        line_w = grid_spacing * 0.003         # line width = 4 % of spacing
+        line_h = 0.0002                       # 0.2 mm thick
+        # Place grid lines at the INNER floor surface (inside the tank),
+        # visible through the transparent floor material.
+        inner_floor_z = fz + wt / 2           # = zmin (3-D) or 0 (2-D)
+        gz = inner_floor_z + 0.0001 + line_h / 2
+
+        # Lines running along X (constant y, span full x extent)
+        i = 0
+        y = ymin
+        while y <= ymax + 1e-9:
+            _add_visual_only_link(
+                model, f'gridh_{i}',
+                f'{(xmin + xmax) / 2} {y} {gz} 0 0 0',
+                f'{dx} {line_w} {line_h}',
+                GRID_LINE_MATERIAL,
+            )
+            y += grid_spacing
+            i += 1
+
+        # Lines running along Y (constant x, span full y extent)
+        j = 0
+        x = xmin
+        while x <= xmax + 1e-9:
+            _add_visual_only_link(
+                model, f'gridv_{j}',
+                f'{x} {(ymin + ymax) / 2} {gz} 0 0 0',
+                f'{line_w} {dy} {line_h}',
+                GRID_LINE_MATERIAL,
+            )
+            x += grid_spacing
+            j += 1
 
     # ── Optional matplotlib top-view ──────────────────────────────────
     if plotting:
@@ -294,7 +315,7 @@ def create_pool_sdf(xmin, xmax, ymin, ymax, zmin=None, zmax=None,
 
 
 def create_water_sdf(xmin, xmax, ymin, ymax, zmin=None, zmax=None,
-                     water_height=0.0, wall_height=0.3):
+                     water_height=0.0, wall_height=0.3, water_alpha=None):
     """Generate a visual-only water-volume SDF sized to the pool interior.
 
     Parameters
@@ -345,6 +366,7 @@ def create_water_sdf(xmin, xmax, ymin, ymax, zmin=None, zmax=None,
     vs  = ET.SubElement(vb, 'size')
     vs.text = f'{dx} {dy} {dz}'
 
-    _add_material(vis, WATER_MATERIAL)
+    water_mat = _set_alpha(WATER_MATERIAL, water_alpha) if water_alpha is not None else WATER_MATERIAL
+    _add_material(vis, water_mat)
 
     return _write_sdf(sdf, 'arena_water/sdf/arena_water.sdf')

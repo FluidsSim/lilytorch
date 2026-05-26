@@ -33,8 +33,34 @@ def median(a, b, c):
 
 
 def quick(u, c, d):
-    """QUICK scheme -- 3rd-order, median-based (WaterLily default)."""
-    return median((5 * c + 2 * d - u) / 6, c, median(10 * c - 9 * u, c, d))
+    """QUICK scheme -- 3rd-order.
+
+    Uses in-place operations to keep simultaneous intermediate tensors at 3
+    (vs. the 5-6 created by the original nested ``median`` calls), cutting
+    the peak transient allocation roughly in half at large grid sizes.
+    """
+    # inner_median = median(10*c - 9*u, c, d)
+    t  = 10.0 * c - 9.0 * u       # owned temp #1
+    lo = torch.minimum(t, c)       # owned temp #2  (= min(t, c))
+    torch.maximum(t, c, out=t)     # t = max(t, c), in-place
+    torch.minimum(t, d, out=t)     # t = min(max(t, c), d), in-place
+    torch.maximum(lo, t, out=lo)   # lo = median(10c-9u, c, d)
+    del t                          # free; lo holds inner_median
+
+    # outer = (5*c + 2*d - u) / 6
+    outer = 5.0 * c
+    outer.add_(d, alpha=2.0)       # in-place: 5c + 2d
+    outer.add_(u, alpha=-1.0)      # in-place: 5c + 2d - u
+    outer.div_(6.0)                # in-place: / 6
+
+    # result = median(outer, c, lo)  -- lo is inner_median
+    # Peak: lo + outer + lo2 = 3 tensors
+    lo2 = torch.minimum(outer, c)
+    torch.maximum(outer, c, out=outer)
+    torch.minimum(outer, lo, out=outer)
+    torch.maximum(lo2, outer, out=lo2)
+    del outer, lo
+    return lo2
 
 
 def van_leer(u, c, d):
@@ -56,37 +82,53 @@ def _tvd_face(c, d, psi):
 
 
 def abdquickest(u, c, d, C=0.1):
-    """ADBQUICKEST scheme -- 3rd-order TVD, Courant-number dependent."""
-    C2 = C * C
-    denom = d - c
-    rf = (c - u) / (denom + 1e-30)
-    psi = torch.clamp(
-        torch.minimum(
-            2.0 * rf * (1.0 - C),
-            torch.minimum(
-                (2.0 + C2 - 3.0 * C + (1.0 - C2) * rf) / (3.0 - 3.0 * C),
-                torch.full_like(rf, 2.0 * (1.0 - C)),
-            ),
-        ),
-        min=0.0,
-    )
+    """ADBQUICKEST scheme -- 3rd-order TVD, Courant-number dependent.
+
+    Refactored to keep peak simultaneous tensor count at 4 (was 5) by
+    replacing ``torch.full_like(rf, C_upper)`` with a scalar clamp and
+    sequencing A / B so only one extra tensor beyond {denom, rf, psi} is
+    live at the peak moment.  Saves ~1 full-grid tensor (~0.5 GiB at 512³).
+    """
+    C2      = C * C
+    C_upper = 2.0 * (1.0 - C)                             # scalar
+
+    denom = d - c                                          # owned temp #1
+    rf    = (c - u) / (denom + 1e-30)                     # owned temp #2
+
+    # Compute psi = clamp(min(A, B, C_upper), 0)
+    #   A = C_upper * rf
+    #   B = [(2+C2-3C) + (1-C2)*rf] / (3-3C)
+    # Order: B → scalar-clamp at C_upper → min with A → scalar-clamp at 0
+    # Peak: denom + rf + psi + A_temp = 4 tensors (vs 5 in the original).
+    _scale  = (1.0 - C2) / (3.0 - 3.0 * C)
+    _offset = (2.0 + C2 - 3.0 * C) / (3.0 - 3.0 * C)
+    psi  = rf * _scale                                     # owned temp #3
+    psi += _offset                                         # in-place: psi = B
+    psi.clamp_(max=C_upper)                                # in-place: min(B, C_upper)
+    torch.minimum(psi, rf * C_upper, out=psi)              # rf*C_upper = temp #4 (brief)
+    del rf
+    psi.clamp_(min=0.0)
+
     return torch.where(denom.abs() < 1e-30, c, _tvd_face(c, d, psi))
 
 
 def cubista(u, c, d):
-    """CUBISTA scheme -- 2nd-order TVD (Alves, Oliveira & Pinho, 2003)."""
+    """CUBISTA scheme -- 2nd-order TVD (Alves, Oliveira & Pinho, 2003).
+
+    Same tensor-sequencing improvement as ``abdquickest``: scalar clamp
+    replaces ``torch.full_like(rf, 1.5)`` to avoid a 5th simultaneous
+    tensor at the peak moment.
+    """
     denom = d - c
-    rf = (c - u) / (denom + 1e-30)
-    psi = torch.clamp(
-        torch.minimum(
-            1.5 * rf,
-            torch.minimum(
-                0.75 * rf + 0.25,
-                torch.full_like(rf, 1.5),
-            ),
-        ),
-        min=0.0,
-    )
+    rf    = (c - u) / (denom + 1e-30)
+
+    psi  = 0.75 * rf                                       # owned temp
+    psi += 0.25                                            # in-place: 0.75*rf + 0.25
+    psi.clamp_(max=1.5)                                    # in-place: min(0.75*rf+0.25, 1.5)
+    torch.minimum(psi, rf * 1.5, out=psi)                  # min with 1.5*rf (brief temp)
+    del rf
+    psi.clamp_(min=0.0)
+
     return torch.where(denom.abs() < 1e-30, c, _tvd_face(c, d, psi))
 
 
@@ -160,7 +202,7 @@ class AdvDiffSolver:
         """
         self.device = device
         self.dtype  = x.dtype
-        self.dt     = dt
+        self.dt     = float(dt)   # ensure Python float so _dt_dh never holds tensors
         self.nu     = nu
 
         # ---- dimension-agnostic grid setup ----------------------------
@@ -169,7 +211,7 @@ class AdvDiffSolver:
         self.n      = [len(c) for c in self.coords]
         self.dh     = [float(c[1] - c[0]) for c in self.coords]
 
-        self._dt_dh  = [dt / h for h in self.dh]
+        self._dt_dh  = [self.dt / h for h in self.dh]   # self.dt is already float
         self._inv_dh2 = [1.0 / (h * h) for h in self.dh]
 
         # ---- legacy accessors (backward-compat with solver.py) -------
@@ -215,7 +257,9 @@ class AdvDiffSolver:
             self.BC_values_w = self._bc_values[2]
 
         # ---- precompute BC operations (avoid per-call allocations) ---
-        self._bc_neumann_ops, self._bc_dirichlet_ops = self._build_bc_ops()
+        (self._bc_neumann_ops,
+         self._bc_dirichlet_ops,
+         self._bc_reflect_ops) = self._build_bc_ops()
 
         # ---- packed descriptors for the fused set_BCs CUDA op --------
         # Built once here (shape-independent); ``shapes`` and ``dir_val``
@@ -293,12 +337,15 @@ class AdvDiffSolver:
         S   = lambda s: _sl(p.ndim, D, s)
 
         # interior faces (full 3-point stencil available)
+        # Compute B1 and B2 as separate named tensors so cond, B1, B2 can
+        # be freed immediately after torch.where, reducing the live-tensor
+        # count at the torch.cat step.
         fv_in = fv[S(slice(1, -1))]
-        flux_in = torch.where(
-            fv_in > 0,
-            fv_in * lam(p[S(slice(None, -3))], p[S(slice(1, -2))], p[S(slice(2, -1))]),
-            fv_in * lam(p[S(slice(3, None))],  p[S(slice(2, -1))], p[S(slice(1, -2))]),
-        )
+        cond  = fv_in > 0
+        B1    = fv_in * lam(p[S(slice(None, -3))], p[S(slice(1, -2))], p[S(slice(2, -1))])
+        B2    = fv_in * lam(p[S(slice(3, None))],  p[S(slice(2, -1))], p[S(slice(1, -2))])
+        flux_in = torch.where(cond, B1, B2)
+        del cond, B1, B2
 
         # lo boundary face — CDS fallback for positive flow
         fv_lo = fv[S(slice(0, 1))]
@@ -412,7 +459,15 @@ class AdvDiffSolver:
         Accepts (u, v) in 2-D or (u, v, w) in 3-D.
         """
         ndim    = self.ndim
-        vel_new = [v.clone() for v in vel]
+        # Lazy clone: start with aliases of the input velocity components.
+        # We replace ``vel_new[i]`` with a real clone only at the END of
+        # iteration ``i`` (just before mutating it via ``+= rhs``).  During
+        # iteration i's _flux peak, only the i already-cloned earlier
+        # components are alive; the not-yet-mutated components are still
+        # aliases of ``vel`` (the persistent u0/v0/w0) and cost zero extra
+        # memory.  Net peak saving on 512³ fp32: (ndim-1) × ~543 MB ≈ 1 GiB
+        # for 3-D vs the previous ``vel_new = [v.clone() for v in vel]``.
+        vel_new = list(vel)
         inner   = _inner(ndim)
 
         for i in range(ndim):
@@ -427,11 +482,20 @@ class AdvDiffSolver:
                 fv = self._face_vel(vel, i, d)
                 p  = self._field_for_flux(vel[i], d, ndim)
                 F  = self._flux(fv, p, d)
-                rhs = rhs + self._dt_dh[d] * (
-                    F[_sl(ndim, d, slice(None, -1))]
-                    - F[_sl(ndim, d, slice(1, None))]
-                )
+                # In-place accumulation: rhs += dt_dh * (F[:-1] - F[1:]).
+                # Replaces ``rhs = rhs + dt_dh * (...)`` which transiently held
+                # the old rhs, the (F[:-1]-F[1:]) temp, the (dt_dh*(...)) temp,
+                # and the new rhs at the same time.
+                F_diff = (F[_sl(ndim, d, slice(None, -1))]
+                          - F[_sl(ndim, d, slice(1, None))])
+                rhs.add_(F_diff, alpha=float(self._dt_dh[d]))
+                del fv, F, F_diff  # free before next d-iteration to avoid stacking
+            # NOW materialise the clone of vel[i] — we mutate it immediately.
+            # The clone happens AFTER the d-loop peak, so it never coexists
+            # with the scheme's transient face-grid temps.
+            vel_new[i] = vel[i].clone()
             vel_new[i][inner] += rhs
+            del rhs  # free this component's rhs before the next i-iteration
 
         return tuple(vel_new)
 
@@ -483,69 +547,91 @@ class AdvDiffSolver:
     # Boundary conditions  (dimension-agnostic)
     # =================================================================
     def _build_bc_ops(self):
-        """Precompute BC operations as two flat lists (run once at init).
+        """Precompute BC operations as three flat lists (run once at init).
 
-        Reproduces the original two-pass semantics exactly:
-          1. Neumann zero-gradient copy on every ghost face
-          2. Dirichlet overwrite on specified faces
+        WaterLily-style MAC-grid BCs.  Component i is staggered in
+        direction i (u in x, v in y, w in z).  For each face d, side s:
 
-        Returns ``(neumann_ops, dirichlet_ops)`` where each entry is a
-        tuple of precomputed index tuples — no allocations or string
-        comparisons needed at runtime.
+          * ``bc[d,s] == "N"`` (free-slip / zero-gradient): copy the
+            adjacent interior into the ghost, ``base[ghost] = base[adj]``.
+          * ``bc[d,s] == "D"`` (Dirichlet wall value ``g``):
+              - if ``d == i`` (component normal to the wall — the
+                staggered face *is* the wall): direct-write the wall
+                value into the wall slot (index 1 on LO, -1 on HI).
+                On LO additionally constant-extrapolate the ghost
+                (index 0 ← ``g``) so interior stencils that reach
+                across see a sensible value.  On HI there is no slot
+                beyond the wall — one write suffices.
+              - else (component tangential to the wall): reflective
+                ghost ``base[ghost] = 2*g - base[adj]`` so the average
+                of ghost and first interior equals ``g``.  No interior
+                clamp.
+
+        Returns ``(neumann_ops, dirichlet_ops, reflect_ops)``:
+          * ``neumann_ops``:   ``(component, dst_idx, src_idx)``
+          * ``dirichlet_ops``: ``(component, dst_idx, value)``
+          * ``reflect_ops``:   ``(component, dst_idx, src_idx, value)``
+            (semantics: ``base[dst] = 2*value - base[src]``)
         """
         ndim = self.ndim
         n_components = len(self._bc_types)
-        neumann_ops   = []   # (component, dst_idx, src_idx)
-        dirichlet_ops = []   # (component, dst_idx, value)
+        neumann_ops   = []
+        dirichlet_ops = []
+        reflect_ops   = []
+
+        def _idx(d, off):
+            return tuple(off if k == d else slice(None) for k in range(ndim))
 
         for i in range(n_components):
             bc_t = self._bc_types[i]
             bc_v = self._bc_values[i]
 
-            # --- pass 1: Neumann on every face ---
-            for d in range(ndim):
-                dst_lo = tuple(0  if k == d else slice(None) for k in range(ndim))
-                src_lo = tuple(1  if k == d else slice(None) for k in range(ndim))
-                neumann_ops.append((i, dst_lo, src_lo))
-
-                dst_hi = tuple(-1 if k == d else slice(None) for k in range(ndim))
-                src_hi = tuple(-2 if k == d else slice(None) for k in range(ndim))
-                neumann_ops.append((i, dst_hi, src_hi))
-
-            # --- pass 2: Dirichlet overwrite where specified ---
-            # Each Dirichlet face zeroes both boundary layers:
-            #   lo: interior cell (1) AND ghost cell (0)
-            #   hi: ghost cell (-1) AND last interior cell (-2)
-            # This is required for non-staggered components at hi walls:
-            # e.g. v at east wall — v[-1,:] is outside the domain (ghost),
-            # so v[-2,:] (last interior) must also be constrained.
-            # For staggered components the extra cell is harmless.
             for face in range(2 * ndim):
-                if bc_t[face] == "D":
-                    d    = face // 2
-                    side = face % 2          # 0 = lo, 1 = hi
-                    for offset in ((1, 0) if side == 0 else (-1, -2)):
-                        idx = tuple(
-                            offset if k == d else slice(None)
-                            for k in range(ndim)
-                        )
-                        dirichlet_ops.append((i, idx, bc_v[face]))
+                d    = face // 2
+                side = face % 2          # 0 = lo, 1 = hi
 
-        return neumann_ops, dirichlet_ops
+                if bc_t[face] == "N":
+                    if side == 0:
+                        neumann_ops.append((i, _idx(d, 0), _idx(d, 1)))
+                    else:
+                        neumann_ops.append((i, _idx(d, -1), _idx(d, -2)))
+                elif bc_t[face] == "D":
+                    value = bc_v[face]
+                    if d == i:
+                        # Wall-normal staggered: wall sits on the face.
+                        wall_off = 1 if side == 0 else -1
+                        dirichlet_ops.append((i, _idx(d, wall_off), value))
+                        if side == 0:
+                            # Constant-extrapolate the ghost beyond the wall.
+                            dirichlet_ops.append((i, _idx(d, 0), value))
+                    else:
+                        # Tangential: reflective ghost write so the wall
+                        # value g is enforced at the half-cell midpoint:
+                        #   (base[ghost] + base[adj])/2 = g
+                        if side == 0:
+                            dst_off, src_off = 0, 1
+                        else:
+                            dst_off, src_off = -1, -2
+                        reflect_ops.append(
+                            (i, _idx(d, dst_off), _idx(d, src_off), value)
+                        )
+
+        return neumann_ops, dirichlet_ops, reflect_ops
 
     def _pack_bc_descriptors_3d(self):
-        """Pack ``_bc_neumann_ops`` / ``_bc_dirichlet_ops`` into compact
-        int32 / float descriptor tensors for the fused
-        ``apply_bcs_2d`` / ``apply_bcs_3d`` CUDA ops.
+        """Pack ``_bc_neumann_ops`` / ``_bc_dirichlet_ops`` / ``_bc_reflect_ops``
+        into compact int32 / float descriptor tensors for the fused
+        ``apply_bcs_2d`` / ``apply_bcs_3d`` CUDA / CPU ops.
 
-        Each Neumann tuple ``(comp, dst_idx, src_idx)`` is reduced to
-        ``(comp, axis, side)`` -- where *axis* is the dimension along
-        which the index is a scalar and *side* is 0 (lo: dst=0, src=1)
-        or 1 (hi: dst=N-1, src=N-2).
-
-        Each Dirichlet tuple ``(comp, dst_idx, value)`` is reduced to
-        ``(comp, axis, offset)`` plus a separate value array, where
-        ``offset`` is one of ``{0, 1, -1, -2}``.
+        Descriptors:
+          * ``neu_desc`` int32 [N_neu, 3] — ``(comp, axis, side)``.
+            side 0 → dst=0, src=1.  side 1 → dst=-1, src=-2.
+          * ``dir_desc`` int32 [N_dir, 3] — ``(comp, axis, offset)``.
+            offset is the *signed* index along ``axis`` (``{0, 1, -1, -2}``);
+            kernel runs ``base[offset] = dir_val``.
+          * ``ref_desc`` int32 [N_ref, 4] — ``(comp, axis, dst_off, src_off)``.
+            kernel runs ``base[dst_off] = 2 * ref_val - base[src_off]``
+            (reflective ghost for tangential Dirichlet walls).
 
         The descriptor format is ndim-agnostic — the only difference
         between 2-D and 3-D is that ``axis`` is restricted to ``{0, 1}``
@@ -585,12 +671,20 @@ class AdvDiffSolver:
             dir_rows.append((int(comp), int(axis_d), int(dst_v)))
             dir_vals.append(float(val))
 
+        ref_rows = []
+        ref_vals = []
+        for comp, dst, src, val in self._bc_reflect_ops:
+            axis_d, dst_v = _axis_and_index(dst)
+            axis_s, src_v = _axis_and_index(src)
+            assert axis_d == axis_s, "Reflective dst/src axes must match"
+            ref_rows.append((int(comp), int(axis_d), int(dst_v), int(src_v)))
+            ref_vals.append(float(val))
+
         device = "cuda" if torch.cuda.is_available() else "cpu"
         neu_desc = torch.tensor(
             neu_rows if neu_rows else [[0, 0, 0]],
             dtype=torch.int32, device=device,
         )
-        # Empty rows: we still need a 0-row tensor with 3 columns.
         if not neu_rows:
             neu_desc = neu_desc[:0].contiguous()
 
@@ -601,10 +695,19 @@ class AdvDiffSolver:
         if not dir_rows:
             dir_desc = dir_desc[:0].contiguous()
 
+        ref_desc = torch.tensor(
+            ref_rows if ref_rows else [[0, 0, 0, 0]],
+            dtype=torch.int32, device=device,
+        )
+        if not ref_rows:
+            ref_desc = ref_desc[:0].contiguous()
+
         return {
             "neu_desc": neu_desc,
             "dir_desc": dir_desc,
             "dir_vals_py": dir_vals,  # cast to vel dtype on first use
+            "ref_desc": ref_desc,
+            "ref_vals_py": ref_vals,
         }
 
     def _build_fused_bc_cache(self, vel):
@@ -644,10 +747,13 @@ class AdvDiffSolver:
         # Move int descriptors to vel's device if they're not already.
         neu_desc = packed["neu_desc"]
         dir_desc = packed["dir_desc"]
+        ref_desc = packed["ref_desc"]
         if neu_desc.device != device:
             neu_desc = neu_desc.to(device)
         if dir_desc.device != device:
             dir_desc = dir_desc.to(device)
+        if ref_desc.device != device:
+            ref_desc = ref_desc.to(device)
 
         dir_val = torch.tensor(
             packed["dir_vals_py"] if packed["dir_vals_py"] else [0.0],
@@ -656,18 +762,28 @@ class AdvDiffSolver:
         if not packed["dir_vals_py"]:
             dir_val = dir_val[:0].contiguous()
 
+        ref_val = torch.tensor(
+            packed["ref_vals_py"] if packed["ref_vals_py"] else [0.0],
+            dtype=u.dtype, device=device,
+        )
+        if not packed["ref_vals_py"]:
+            ref_val = ref_val[:0].contiguous()
+
         cache = {
             "sig": sig,
             "shapes": shapes,
             "neu_desc": neu_desc,
             "dir_desc": dir_desc,
             "dir_val": dir_val,
+            "ref_desc": ref_desc,
+            "ref_val": ref_val,
             "max_dim0": max_dim0,
             "max_dim1": max_dim1,
         }
         # Persist updated descriptor device too, so future calls skip the move.
         self._bc_fused_3d_packed["neu_desc"] = neu_desc
         self._bc_fused_3d_packed["dir_desc"] = dir_desc
+        self._bc_fused_3d_packed["ref_desc"] = ref_desc
         self._bc_fused_3d_cache = cache
         return cache
 
@@ -697,10 +813,13 @@ class AdvDiffSolver:
         packed = self._bc_fused_2d_packed
         neu_desc = packed["neu_desc"]
         dir_desc = packed["dir_desc"]
+        ref_desc = packed["ref_desc"]
         if neu_desc.device != device:
             neu_desc = neu_desc.to(device)
         if dir_desc.device != device:
             dir_desc = dir_desc.to(device)
+        if ref_desc.device != device:
+            ref_desc = ref_desc.to(device)
 
         dir_val = torch.tensor(
             packed["dir_vals_py"] if packed["dir_vals_py"] else [0.0],
@@ -709,16 +828,26 @@ class AdvDiffSolver:
         if not packed["dir_vals_py"]:
             dir_val = dir_val[:0].contiguous()
 
+        ref_val = torch.tensor(
+            packed["ref_vals_py"] if packed["ref_vals_py"] else [0.0],
+            dtype=u.dtype, device=device,
+        )
+        if not packed["ref_vals_py"]:
+            ref_val = ref_val[:0].contiguous()
+
         cache = {
             "sig": sig,
             "shapes": shapes,
             "neu_desc": neu_desc,
             "dir_desc": dir_desc,
             "dir_val": dir_val,
+            "ref_desc": ref_desc,
+            "ref_val": ref_val,
             "max_line_dim": max_line_dim,
         }
         self._bc_fused_2d_packed["neu_desc"] = neu_desc
         self._bc_fused_2d_packed["dir_desc"] = dir_desc
+        self._bc_fused_2d_packed["ref_desc"] = ref_desc
         self._bc_fused_2d_cache = cache
         return cache
 
@@ -751,6 +880,8 @@ class AdvDiffSolver:
                 cache["neu_desc"],
                 cache["dir_desc"],
                 cache["dir_val"],
+                cache["ref_desc"],
+                cache["ref_val"],
                 cache["max_dim0"],
                 cache["max_dim1"],
             )
@@ -771,14 +902,24 @@ class AdvDiffSolver:
                 cache["neu_desc"],
                 cache["dir_desc"],
                 cache["dir_val"],
+                cache["ref_desc"],
+                cache["ref_val"],
                 cache["max_line_dim"],
             )
             return
 
+        # Eager fallback: apply ops in stable order
+        # Neumann → direct Dirichlet → reflective Dirichlet.
+        # Reflective is last because it reads the *current* interior cell
+        # and writes the ghost; running it after the Dirichlet pass means
+        # any wall-face direct write (staggered-normal case) is already
+        # committed and the reflective form uses up-to-date values.
         for comp, dst, src in self._bc_neumann_ops:
             vel[comp][dst] = vel[comp][src]
         for comp, dst, val in self._bc_dirichlet_ops:
             vel[comp][dst] = val
+        for comp, dst, src, val in self._bc_reflect_ops:
+            vel[comp][dst] = 2 * val - vel[comp][src]
 
 
 # =====================================================================

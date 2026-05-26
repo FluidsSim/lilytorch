@@ -11,7 +11,7 @@ class SimConfig(BaseSimConfig):
     def __init__(self):
         super().__init__()
 
-        self.use_gpu = True
+        self.use_gpu        = True
         self.use_bdim       = True
         self.water_drag     = False
         self.water_buoyancy = False
@@ -20,7 +20,7 @@ class SimConfig(BaseSimConfig):
         self.wall_thickness = 0.3
         self.wall_height    = 0.3
         self.convexify      = True
-        self.solver_method = "python"
+        self.solver_method  = "kernel"
 
         self.poisson_method = "fft"
 

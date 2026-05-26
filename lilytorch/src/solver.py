@@ -4,14 +4,20 @@ import logging
 import os
 import threading
 import warnings
-
 import h5py
 import numpy as np
 import torch
-from concurrent.futures import ThreadPoolExecutor
-from lilytorch.src.kernels import RegularGridInterpolator
 from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor
 
+from lilytorch.src.kernels import (
+    streaming_sdf_stag_3d_multi,
+    bdim_vardens_3d,
+    bdim_vardens_sigma_3d,
+    streaming_sdf_stag_2d_multi,
+    bdim_vardens_2d,
+    bdim_vardens_sigma_2d,
+)
 from lilytorch.src.adv_diff import AdvDiffSolver
 from lilytorch.src.body import (body_from_yaml,
                                 _mu_normals_batched)
@@ -312,6 +318,13 @@ class FluidSolver(PlottingMixin):
         self.eps  = solver.get("eps_multiplier",
                                 torch.tensor(2.0, device=self.device, dtype=self.dtype)) * self.h
 
+        # BDIM-σ (Lauber et al. 2022): per-body Poisson-coefficient shift
+        # to enforce mu0_poisson → 0 inside thin bodies (r < eps).  When
+        # enabled, ``_sigma_shifts`` is lazily computed at the first
+        # fluid step (once body SDFs are populated) and static thereafter.
+        self.apply_bdim_sigma = bool(solver.get("apply_bdim_sigma", False))
+        self._sigma_shifts    = None   # lazily computed at first fluid step
+
         self.starting_iteration      = solver.get("starting_iteration", 0)
         self.starting_iteration_path = solver.get("starting_iteration_path", None)
         self.starting_time           = self.starting_iteration * self.dt
@@ -432,7 +445,7 @@ class FluidSolver(PlottingMixin):
         self._compile_adv_diff = solver.get("compile_adv_diff", False)
         if self._compile_adv_diff and self.device.type == "cuda":
             self.adv_diff_solver.solve = torch.compile(
-                self.adv_diff_solver.solve, mode="reduce-overhead",
+                self.adv_diff_solver.solve, mode="default",
             )
 
         # Dynamic BDIM META compilation for the union-AABB crop path
@@ -475,7 +488,7 @@ class FluidSolver(PlottingMixin):
         }
         print(f"  [solver_method={_method!r}] {_METHOD_DESCR[_method]}")
         # Body-SDF sampling method used inside the streaming C++/CUDA
-        # kernels (``streaming_sdf_min_rho_3d_multi`` / ``..._multi``):
+        # kernels (``streaming_sdf_stag_{2d,3d}_multi``):
         #   * ``"trilinear"`` (default) -- 2x2x2 stencil, matches the
         #     historical behaviour;
         #   * ``"triquadratic"`` -- 3x3x3 Lagrange stencil for higher-order
@@ -529,7 +542,7 @@ class FluidSolver(PlottingMixin):
             verbose         = solver["poisson_verbose"],
             precond_vcycles = solver.get("poisson_precond_vcycles", 1),
             smoother        = solver.get("poisson_smoother", "rbgs"),
-            compile_smoother= solver.get("poisson_compile", False),
+            use_kernels     = self._use_kernels,
         )
 
         # Warm-start: reuse previous pressure as Poisson initial guess
@@ -634,6 +647,7 @@ class FluidSolver(PlottingMixin):
         self.save             = output.get("save",
                                     output.get("save_uv", False)
                                     or output.get("save_vtk", False))
+        self.save_drags       = output.get("save_drags", False)
         # vmin/vmax: a number → fixed colour limits; "auto" → auto-scale per field
         _vmin = output["vmin"]
         _vmax = output["vmax"]
@@ -701,6 +715,17 @@ class FluidSolver(PlottingMixin):
         # read + getattr loop, with no per-step Python branching on ndim.
         self._bdim_axis_names   = ('u', 'v', 'w')[:self.ndim]
         self._bdim_normal_names = ('x', 'y', 'z')[:self.ndim]
+
+        # Eagerly allocate the kernel-mode persistent face-coefficient
+        # buffers (_ch/_cv/_cw_persist) so the ~1.5 GiB cost at 512³ fp32
+        # is paid HERE (and counted in the persistent baseline) instead of
+        # mid-step on the first fluid_step.  If the runtime timestep differs
+        # from self.dt these buffers will be reallocated on the first call,
+        # at no worse cost than the previous lazy-init path.
+        if self._use_kernels and self.ndim == 3:
+            self._init_var_dens_persist_3d(self.dt)
+        elif self._use_kernels and self.ndim == 2:
+            self._init_var_dens_persist_2d(self.dt)
 
     def inside(self, x):
         """
@@ -787,7 +812,13 @@ class FluidSolver(PlottingMixin):
         # and artificial vorticity at t=0.  Each staggered velocity component
         # is masked with its own staggered-grid mu0 for consistency with the
         # rest of the BDIM pipeline.
-        if hasattr(self, "composite_body") and hasattr(self.composite_body, "sdf_val"):
+        # In Phase-I kernel-mode 3-D the composite body does not carry
+        # persistent staggered SDF tensors, so this masking step is
+        # skipped (BDIM correction on the very first solver step will
+        # apply the equivalent in-body mask).
+        if (hasattr(self, "composite_body")
+                and hasattr(self.composite_body, "sdf_val")
+                and hasattr(self.composite_body, "sdf_val_u")):
             cb = self.composite_body
             mu0_u, _ = cb.mu_funcs(cb.sdf_val_u)
             mu0_v, _ = cb.mu_funcs(cb.sdf_val_v)
@@ -855,8 +886,14 @@ class FluidSolver(PlottingMixin):
                     w_vel = w_vel - cw * p_z
             else:
                 # Constant-density fallback: single scalar coefficient.
-                # If ch was provided, use it as the scalar (backward compat).
-                fft_coeff = coeff if ch is None else ch
+                # If ch was provided as a scalar, use it (backward compat).
+                # If ch is a face-grid tensor (kernel mode), fall back to
+                # the scalar coeff for the Poisson RHS and apply in-place
+                # face-grid correction (same logic as the multigrid path).
+                _face_grid_fft = (ch is not None
+                                  and isinstance(ch, torch.Tensor)
+                                  and ch.shape[0] < u.shape[0])
+                fft_coeff = coeff if (ch is None or _face_grid_fft) else ch
                 p = self.poisson_solverFFT.solve(self.div / fft_coeff)
                 if self.ndim == 2:
                     (p_x, p_y) = self.gradient(p)
@@ -864,9 +901,14 @@ class FluidSolver(PlottingMixin):
                     v = v - fft_coeff * p_y
                 else:
                     (p_x, p_y, p_z) = self.gradient(p)
-                    u     = u - fft_coeff * p_x
-                    v     = v - fft_coeff * p_y
-                    w_vel = w_vel - fft_coeff * p_z
+                    if _face_grid_fft:
+                        u[1:, 1:-1, 1:-1]     -= ch * p_x[1:, 1:-1, 1:-1]
+                        v[1:-1, 1:, 1:-1]     -= cv * p_y[1:-1, 1:, 1:-1]
+                        w_vel[1:-1, 1:-1, 1:] -= cw * p_z[1:-1, 1:-1, 1:]
+                    else:
+                        u     = u - fft_coeff * p_x
+                        v     = v - fft_coeff * p_y
+                        w_vel = w_vel - fft_coeff * p_z
         else:
             # ---- Multigrid / MGCG solver (variable-coefficient Poisson) ----
             has_custom_coeffs = any(arr is not None for arr in (ch, cv, cw))
@@ -902,18 +944,62 @@ class FluidSolver(PlottingMixin):
             else:
                 if cw is None:
                     cw = coeff * self.mu0_all_w
+                # Detect face-grid coefficients (shape Ngx-1, Ngy-2, Ngz-2)
+                # vs padded coefficients (shape Ngx, Ngy, Ngz).  The kernel
+                # path stores ch/cv/cw directly at the staggered face-grid
+                # size so the Poisson solver receives contiguous arrays.
+                _face_grid = ch.shape[0] < u.shape[0]
                 p, _ = _poisson_solve(
                     self.div[1:-1, 1:-1, 1:-1],
                     p0,
-                    ch=ch[1:, 1:-1, 1:-1],
-                    cv=cv[1:-1, 1:, 1:-1],
-                    cw=cw[1:-1, 1:-1, 1:],
+                    ch=(ch               if _face_grid else ch[1:, 1:-1, 1:-1]),
+                    cv=(cv               if _face_grid else cv[1:-1, 1:, 1:-1]),
+                    cw=(cw               if _face_grid else cw[1:-1, 1:-1, 1:]),
                 )
+                if bool(int(os.environ.get('LILYTORCH_MEM_DBG', '0'))):
+                    torch.cuda.synchronize()
+                    _gb = torch.cuda.memory_allocated() / 1024**3
+                    _mx = torch.cuda.max_memory_allocated() / 1024**3
+                    print(f"[MEM_DBG] {'project:after multigrid solve (pre-gradient)':55s}"
+                          f"  cur={_gb:.3f} GiB  peak={_mx:.3f} GiB", flush=True)
                 # ====== projection step ======
-                (p_x, p_y, p_z) = self.gradient(p)
-                u    = u - ch * p_x
-                v    = v - cv * p_y
-                w_vel = w_vel - cw * p_z
+                # Per-axis fused correction: avoids materialising (p_x, p_y, p_z)
+                # as three full-grid tensors (~1.5 GB transient at 512³ float32).
+                # Each axis allocates ONE diff tensor, applied with addcmul_,
+                # then released before the next axis. Boundary face is zeroed
+                # to preserve the original gradient() semantics (the operator
+                # returns 0 at index 0 and at index N-1; the slice [1:] picks
+                # up indices 1..N-1, so the LAST element of the diff must be 0
+                # to match — set_BCs overwrites it shortly afterward anyway).
+                inv_h = 1.0 / self.h
+                if _face_grid:
+                    diff = p[1:, 1:-1, 1:-1] - p[:-1, 1:-1, 1:-1]
+                    diff[-1, :, :] = 0
+                    u[1:, 1:-1, 1:-1].addcmul_(ch, diff, value=-inv_h)
+                    del diff
+                    diff = p[1:-1, 1:, 1:-1] - p[1:-1, :-1, 1:-1]
+                    diff[:, -1, :] = 0
+                    v[1:-1, 1:, 1:-1].addcmul_(cv, diff, value=-inv_h)
+                    del diff
+                    diff = p[1:-1, 1:-1, 1:] - p[1:-1, 1:-1, :-1]
+                    diff[:, :, -1] = 0
+                    w_vel[1:-1, 1:-1, 1:].addcmul_(cw, diff, value=-inv_h)
+                    del diff
+                else:
+                    # Padded-coefficient path (non-kernel): keep the original
+                    # gradient() call. The padded coefficients are full-grid
+                    # so the savings vs the inline path are marginal.
+                    (p_x, p_y, p_z) = self.gradient(p)
+                    u     = u - ch * p_x
+                    v     = v - cv * p_y
+                    w_vel = w_vel - cw * p_z
+                    del p_x, p_y, p_z
+                if bool(int(os.environ.get('LILYTORCH_MEM_DBG', '0'))):
+                    torch.cuda.synchronize()
+                    _gb = torch.cuda.memory_allocated() / 1024**3
+                    _mx = torch.cuda.max_memory_allocated() / 1024**3
+                    print(f"[MEM_DBG] {'project:after inline projection correction':55s}"
+                          f"  cur={_gb:.3f} GiB  peak={_mx:.3f} GiB", flush=True)
 
         if self.ndim == 2:
             return (u, v, p)
@@ -1141,24 +1227,14 @@ class FluidSolver(PlottingMixin):
     def _release_bdim_fields(self):
         """Set BDIM intermediate fields to *None* so their GPU memory
         can be reclaimed between time-steps (they are recomputed at the
-        beginning of every step anyway)."""
-        # When mu/normals union crop is active, keep the persistent
-        # full-grid mu/normal buffers alive across steps — they hold the
-        # outside-body default values that never change, and only the
-        # union sub-block is overwritten each step.
-        keep = set()
-        if self._use_kernels:
-            keep = {
-                'mu0_all_u', 'mu1_all_u', 'mu0_all_v', 'mu1_all_v',
-                'mu0_all_w', 'mu1_all_w', 'mu0_all', 'mu1_all',
-                'normal_x_u', 'normal_y_u', 'normal_z_u',
-                'normal_x_v', 'normal_y_v', 'normal_z_v',
-                'normal_x_w', 'normal_y_w', 'normal_z_w',
-                'normal_x', 'normal_y', 'normal_z',
-            }
+        beginning of every step anyway).
+
+        Phase I: the kernel-mode paths (2-D and 3-D) no longer
+        materialise any of the staggered or CC mu / normal tensors as
+        full-grid buffers — they live only in CUDA thread registers
+        inside Kernel B — so the keep-set is empty in both modes.
+        """
         for attr in self._BDIM_FIELD_NAMES:
-            if attr in keep:
-                continue
             if hasattr(self, attr):
                 setattr(self, attr, None)
 
@@ -1278,6 +1354,110 @@ class FluidSolver(PlottingMixin):
         for d, n in enumerate(norms):
             setattr(self, f'normal_{n}', normals[d][cc])
 
+    def _compute_sigma_shifts(self):
+        """Compute per-body BDIM-σ shifts (Lauber et al. 2022).
+
+        For each body ``b``, ``shift_b = max(0, eps + phi_min_b)`` where
+        ``phi_min_b`` is the minimum body SDF.  Thick bodies (r ≥ eps)
+        get ``shift = 0`` and behave unchanged; thin bodies (r < eps)
+        get a positive shift so the Poisson coefficient
+        ``mu0(phi - shift_b)`` reaches 0 inside the body.
+
+        Stored as a float32 device tensor for direct ``data_ptr<float>()``
+        consumption by the CUDA/CPU σ kernels.
+        """
+        shifts = []
+        eps_val = float(self.eps)
+        comp    = self.composite_body
+
+        # In kernel mode body.sdf_val is never populated.  The per-body SDF
+        # table lives in _kernel_static_{3,2}d['F_flat'] (mesh bodies: h/2
+        # resolution, accurate; analytical bodies: h resolution).  In Python
+        # mode fall back to the full-domain body.sdf_val.
+        sm = getattr(comp, '_kernel_static_3d', None) \
+            or getattr(comp, '_kernel_static_2d', None)
+
+        ndim_b           = self.ndim
+        F_flat           = sm['F_flat']           if sm is not None else None
+        F_offsets        = sm['F_offsets']        if sm is not None else None
+        body_shapes_flat = sm['body_shapes'].reshape(-1) if sm is not None else None
+
+        for b, body in enumerate(comp.bodies):
+            if F_flat is not None:
+                i0   = int(F_offsets[b])
+                size = int(body_shapes_flat[b * ndim_b:(b + 1) * ndim_b].prod().item())
+                smin = float(F_flat[i0:i0 + size].min().item())
+                shifts.append(max(0.0, smin + eps_val))
+            else:
+                sdf_val = getattr(body, 'sdf_val', None)
+                if sdf_val is not None:
+                    shifts.append(max(0.0, float(sdf_val.min().item()) + eps_val))
+                else:
+                    shifts.append(0.0)
+
+        self._sigma_shifts = torch.tensor(
+            shifts, dtype=torch.float32, device=self.device)
+        nonzero = [(i, s) for i, s in enumerate(shifts) if s > 0]
+        print(f"[BDIM-σ] sigma_shifts computed: {len(nonzero)} thin "
+              f"body/bodies need correction")
+        for i, s in nonzero:
+            print(f"  body {i}: shift = {s*1e3:.4f} mm")
+
+    def _compute_sigma_mu_grids(self, mu_grids):
+        """Recompute ``mu0`` from σ-shifted union SDFs for each stagger axis.
+
+        Used by ``_compute_variable_density_coefficients`` (Python-mode
+        path) to substitute ``mu0_poisson`` for ``mu0_all_*`` when
+        BDIM-σ is enabled.  The velocity BDIM mu0 is unchanged.
+
+        Returns a tuple of the same length / shape as ``mu_grids``
+        (``(mu0_u, mu0_v, [mu0_w,] mu0_cc)``).  Falls back to the
+        original ``mu_grids`` when the per-body SDF attributes
+        (``sdf_val_u/v/w``, ``sdf_val``) required to rebuild the
+        union SDF are not populated (kernel mode does not store them).
+        """
+        comp  = self.composite_body
+        axes  = self._bdim_axis_names
+        sdf_attrs = tuple(f'sdf_val_{a}' for a in axes) + ('sdf_val',)
+        eps_val   = float(self.eps)
+
+        # Without per-body SDFs (kernel mode skips populating them)
+        # there is no Python-side σ correction to apply.
+        if not all(getattr(b, sdf_attrs[-1], None) is not None
+                   for b in comp.bodies):
+            return mu_grids
+
+        # Re-build a σ-shifted union SDF per stagger axis by min-reducing
+        # over per-body ``sdf_val_<attr> - shift_b``.  Start from a copy
+        # of the unshifted union and tighten with each thin body.
+        unions = []
+        for attr in sdf_attrs:
+            base = getattr(comp, attr, None)
+            if base is None:
+                return mu_grids
+            unions.append(base.clone())
+
+        for b, body in enumerate(comp.bodies):
+            shift = float(self._sigma_shifts[b])
+            if shift <= 0.0:
+                continue
+            for u_idx, attr in enumerate(sdf_attrs):
+                sdf_b = getattr(body, attr, None)
+                if sdf_b is None:
+                    continue
+                torch.minimum(unions[u_idx], sdf_b - shift, out=unions[u_idx])
+
+        # Smooth Heaviside mu0(d/eps) — same formula as Body.mu_funcs.
+        new_mu = []
+        for u in unions:
+            d    = u
+            mu0  = (d >= 0).to(d.dtype)
+            band = (d > -eps_val) & (d < eps_val)
+            deps = d[band] / eps_val
+            mu0[band] = 0.5 * (1.0 + deps + torch.sin(torch.pi * deps) / torch.pi)
+            new_mu.append(mu0)
+        return tuple(new_mu)
+
     # ==================================================================
     #  Variable-density FSI fluid step  (called by BDIMhandler.step)
     # ==================================================================
@@ -1295,10 +1475,15 @@ class FluidSolver(PlottingMixin):
         Returns ``(ch, cv, ch_cc)`` for 2-D or ``(ch, cv, cw, ch_cc)``
         for 3-D, where:
 
-            * ``ch, cv, cw`` -- staggered ``dt / rho_eff`` on face grids.
-            * ``ch_cc`` -- cell-centred ``dt / rho_eff_cc`` for FFT RHS.
+            * ``ch, cv, cw`` -- staggered ``dt * mu0 / rho_eff`` on face grids.
+            * ``ch_cc`` -- cell-centred ``dt * mu0 / rho_eff_cc`` for FFT RHS.
 
-        Effective density: ``rho_eff(x) = rho_body + (rho_fluid - rho_body) * mu0(x)``.
+        BDIM2 mu0-weighted, variable-density Poisson coefficient:
+        ``ch = dt * mu0 / (rho_body + (rho_fluid - rho_body) * mu0)``.
+        The ``mu0`` factor makes the velocity-correction vanish EXACTLY inside
+        the body (mu0=0), preserving the imposed body velocity and avoiding the
+        ill-conditioned band Poisson.  When ``rho_body == rho_fluid`` it reduces
+        to the original BDIM2 form ``dt * mu0 / rho`` (Maertens & Weymouth 2015).
 
         Narrow-band fast-path (kernel mode + sparse bodies, 2-D and 3-D)
         ----------------------------------------------------------------
@@ -1321,6 +1506,14 @@ class FluidSolver(PlottingMixin):
         # codebase (staggering is a coord offset, not a shape change),
         # so a single slice tuple indexes every grid identically.
         mu_grids = tuple(getattr(self, f'mu0_all_{a}') for a in axes) + (self.mu0_all,)
+
+        # ---- BDIM-σ: substitute σ-shifted mu0 for the Poisson coefficient.
+        # The velocity BDIM (mu0_all_* used in _bdim_apply) is *not* changed
+        # — only the Poisson coefficient line uses these shifted grids.
+        if (self.apply_bdim_sigma
+                and self._sigma_shifts is not None
+                and bool(self._sigma_shifts.any())):
+            mu_grids = self._compute_sigma_mu_grids(mu_grids)
 
         # ---- narrow-band fast path -------------------------------------
         if self._use_kernels and all(m is not None for m in mu_grids):
@@ -1357,19 +1550,366 @@ class FluidSolver(PlottingMixin):
                     for name, mu in zip(face_names + (cc_name,), mu_grids):
                         mu_sub = mu[usl]
                         getattr(self, name)[usl] = (
-                            timestep / (_rho_b * (1 - mu_sub) + _rho_fluid * mu_sub)
+                            timestep * mu_sub
+                            / (_rho_b * (1 - mu_sub) + _rho_fluid * mu_sub)
                         )
                 else:
                     for name, mu in zip(face_names + (cc_name,), mu_grids):
                         getattr(self, name)[usl] = (
-                            timestep / (self.rho_body + _drho * mu[usl])
+                            timestep * mu[usl] / (self.rho_body + _drho * mu[usl])
                         )
 
                 return (*(getattr(self, n) for n in face_names),
                         getattr(self, cc_name))
 
         # ---- full-grid fallback ----------------------------------------
-        return tuple(timestep / (self.rho_body + _drho * mu) for mu in mu_grids)
+        return tuple(timestep * mu / (self.rho_body + _drho * mu) for mu in mu_grids)
+
+    # ------------------------------------------------------------------
+    #   Phase-I kernel-mode 3-D fluid step  (Kernel A + Kernel B)
+    # ------------------------------------------------------------------
+    def _init_var_dens_persist_3d(self, timestep):
+        """Lazy-allocate the persistent ``ch/cv/cw`` Poisson-coefficient
+        buffers for the kernel-mode 3-D path.
+
+        Outside any immersed body ``mu0 = 1`` everywhere, so the
+        coefficients reduce to the constant ``dt / rho_fluid``.  The
+        buffers are pre-filled once with that default; Kernel B
+        overwrites only the dirty AABB sub-block each step.
+        """
+        Ngx, Ngy, Ngz = self.grid_shape
+        device = self.device
+        dtype  = self.dtype
+        _dt_over_rhofluid = float(timestep) / float(self.rho)
+        # Face-grid shapes: each buffer covers only the staggered faces of
+        # the interior region, excluding ghost-cell rows.  The kernel writes
+        # directly into these shapes (no padded ghost-cell rows needed).
+        ch_gs = (Ngx - 1, Ngy - 2, Ngz - 2)   # x-faces: (Nx+1, Ny, Nz)
+        cv_gs = (Ngx - 2, Ngy - 1, Ngz - 2)   # y-faces: (Nx, Ny+1, Nz)
+        cw_gs = (Ngx - 2, Ngy - 2, Ngz - 1)   # z-faces: (Nx, Ny, Nz+1)
+        needs_realloc = (
+            getattr(self, '_ch_persist', None) is None
+            or self._ch_persist.shape  != ch_gs
+            or self._ch_persist.dtype  != dtype
+            or self._ch_persist.device != device
+            or getattr(self, '_ch_outside_val', None) != _dt_over_rhofluid
+        )
+        if needs_realloc:
+            self._ch_persist = torch.full(ch_gs, _dt_over_rhofluid, device=device, dtype=dtype)
+            self._cv_persist = torch.full(cv_gs, _dt_over_rhofluid, device=device, dtype=dtype)
+            self._cw_persist = torch.full(cw_gs, _dt_over_rhofluid, device=device, dtype=dtype)
+            self._ch_outside_val = _dt_over_rhofluid
+
+    def _init_var_dens_persist_2d(self, timestep):
+        """2-D analogue of :meth:`_init_var_dens_persist_3d`."""
+        gs = self.grid_shape
+        device = self.device
+        dtype  = self.dtype
+        _dt_over_rhofluid = float(timestep) / float(self.rho)
+        needs_realloc = (
+            getattr(self, '_ch_persist', None) is None
+            or self._ch_persist.shape  != gs
+            or self._ch_persist.dtype  != dtype
+            or self._ch_persist.device != device
+            or getattr(self, '_ch_outside_val', None) != _dt_over_rhofluid
+        )
+        if needs_realloc:
+            self._ch_persist = torch.full(gs, _dt_over_rhofluid, device=device, dtype=dtype)
+            self._cv_persist = torch.full(gs, _dt_over_rhofluid, device=device, dtype=dtype)
+            self._ch_outside_val = _dt_over_rhofluid
+
+    def _fluid_step_kernel_2d(self, u, v, p, timestep):
+        """Phase-I 2-D kernel fluid step.  2-D analogue of
+        :meth:`_fluid_step_kernel_3d`; see that method for the full
+        rationale.  Calls Kernel A (streaming SDF + body face velocities
+        into per-step temporaries) then Kernel B (fused BDIM2 update +
+        variable-density Poisson coefficients).
+        """
+        comp = self.composite_body
+        ks = getattr(comp, '_kernel_step', None)
+        if ks is None or 'dirty_i0' not in ks:
+            raise RuntimeError(
+                "_fluid_step_kernel_2d called but composite_body has no "
+                "Phase-I _kernel_step bookkeeping; was BDIMhandler.update() "
+                "invoked first?"
+            )
+        sm = comp._kernel_static_2d
+
+        # BDIM-σ: lazily compute per-body sigma shifts on the first
+        # fluid step (body SDFs are populated by BDIMhandler.update by
+        # now).  Static thereafter.
+        if self.apply_bdim_sigma and self._sigma_shifts is None:
+            self._compute_sigma_shifts()
+
+        # 1-2. eddy viscosity + advection-diffusion.
+        nu_t   = self._compute_nu_t(u, v)
+        primes = self.adv_diff_solver.solve(u, v, nu_t=nu_t)
+
+        # Copy primes -> persistent u0/v0 so cells outside the dirty
+        # AABB hold the advdiff result (Kernel B only touches the AABB).
+        self.u0.copy_(primes[0])
+        self.v0.copy_(primes[1])
+
+        # 3. Init persistent var-dens coefficients (once / on resize).
+        self._init_var_dens_persist_2d(timestep)
+
+        # 4. Per-step temporaries for Kernel A -> Kernel B.
+        _opts = dict(device=self.device, dtype=self.dtype)
+        _FAR  = 1e4
+        gs    = self.grid_shape
+        sdf_u_tmp = torch.full(gs, _FAR, **_opts)
+        sdf_v_tmp = torch.full(gs, _FAR, **_opts)
+        bU_tmp    = torch.zeros(gs, **_opts)
+        bV_tmp    = torch.zeros(gs, **_opts)
+        # int64 key scratch buffers for Kernel A (packed body-id + SDF).
+        # 2-D keys are full-grid sized so Kernel B's σ path can index by
+        # the same flat ``g`` as the SDF/body tensors.
+        Ngrid = int(gs[0]) * int(gs[1])
+        _key_opts = dict(dtype=torch.int64, device=self.device)
+        key_cc_t  = torch.empty(Ngrid, **_key_opts)
+        key_u_t   = torch.empty(Ngrid, **_key_opts)
+        key_v_t   = torch.empty(Ngrid, **_key_opts)
+
+        # 5. Kernel A.
+        streaming_sdf_stag_2d_multi(
+            sm['F_flat'], sm['F_offsets'],
+            sm['body_shapes'], sm['body_meta'], ks['kin'],
+            ks['aabb_lo'], ks['aabb_dim'],
+            ks['gx'], ks['gy'],
+            float(comp.h), int(ks['max_vol']),
+            comp.sdf_val, sdf_u_tmp, sdf_v_tmp,
+            bU_tmp, bV_tmp,
+            key_cc_t, key_u_t, key_v_t,
+            int(getattr(self, '_sdf_interp_method', 0)),
+            int(ks['dirty_i0']), int(ks['dirty_j0']),
+            int(ks['dirty_Ai']), int(ks['dirty_Aj']),
+        )
+
+        # 6. Kernel B: fused BDIM2 + variable-density coefficients.
+        if (self.apply_bdim_sigma
+                and self._sigma_shifts is not None
+                and bool(self._sigma_shifts.any())):
+            bdim_vardens_sigma_2d(
+                primes[0], primes[1],
+                sdf_u_tmp, sdf_v_tmp,
+                bU_tmp, bV_tmp,
+                self.u0, self.v0,
+                self._ch_persist, self._cv_persist,
+                key_u_t, key_v_t,
+                self._sigma_shifts,
+                float(comp.eps), float(self.rho_body), float(self.rho),
+                float(timestep), float(comp.h),
+                int(ks['dirty_i0']), int(ks['dirty_j0']),
+                int(ks['dirty_Ai']), int(ks['dirty_Aj']),
+            )
+        else:
+            bdim_vardens_2d(
+                primes[0], primes[1],
+                sdf_u_tmp, sdf_v_tmp,
+                bU_tmp, bV_tmp,
+                self.u0, self.v0,
+                self._ch_persist, self._cv_persist,
+                float(comp.eps), float(self.rho_body), float(self.rho),
+                float(timestep), float(comp.h),
+                int(ks['dirty_i0']), int(ks['dirty_j0']),
+                int(ks['dirty_Ai']), int(ks['dirty_Aj']),
+            )
+
+        # 7. Free per-step temporaries before the pressure projection.
+        del sdf_u_tmp, sdf_v_tmp, bU_tmp, bV_tmp, primes
+        del key_cc_t, key_u_t, key_v_t
+
+        # 8. Boundary conditions on the BDIM-corrected velocity.
+        self.adv_diff_solver.set_BCs(self.u0, self.v0)
+
+        # 9. Pressure projection.
+        out = self.project(
+            self.u0, self.v0, p,
+            ch=self._ch_persist, cv=self._cv_persist,
+            ch_cc=getattr(self, '_ch_cc_persist', None),
+        )
+        vels_out = out[:-1]
+        p_out    = out[-1]
+
+        # 10. Optional sponge / yield damping + final BC pass.
+        if self.use_sponge:
+            vels_out = self.apply_sponge_damping(*vels_out)
+        if self.use_yield_damping:
+            vels_out = self.apply_yield_damping(*vels_out)
+        self.adv_diff_solver.set_BCs(*vels_out)
+
+        return (*vels_out, p_out)
+
+    def _fluid_step_kernel_3d(self, u, v, w_vel, p, timestep):
+        """Phase-I 3-D kernel fluid step.
+
+        Replaces the chain
+            _apply_bdim_all_axes -> _compute_variable_density_coefficients
+        with two CUDA kernels (Kernel A + Kernel B).  Kernel A streams
+        the union SDF and rigid body face velocities into per-step
+        temporaries; Kernel B fuses the BDIM2 velocity update with the
+        variable-density Poisson coefficient calculation, computing
+        ``mu0``, ``mu1`` and the unit normals in CUDA thread registers
+        only.  No persistent staggered SDF / body-velocity /
+        winning_rho_cc / mu-pack tensors are required.
+        """
+        comp = self.composite_body
+        ks = getattr(comp, '_kernel_step', None)
+        if ks is None or 'dirty_i0' not in ks:
+            raise RuntimeError(
+                "_fluid_step_kernel_3d called but composite_body has no "
+                "Phase-I _kernel_step bookkeeping; was BDIMhandler.update() "
+                "invoked first?"
+            )
+        sm = comp._kernel_static_3d
+
+        # Lightweight memory debug helper (enabled via LILYTORCH_MEM_DBG=1).
+        _mem_dbg = bool(int(os.environ.get('LILYTORCH_MEM_DBG', '0')))
+        def _chk(tag, reset=False):
+            if _mem_dbg:
+                torch.cuda.synchronize()
+                if reset:
+                    torch.cuda.reset_peak_memory_stats()
+                gb = torch.cuda.memory_allocated() / 1024**3
+                mx = torch.cuda.max_memory_allocated() / 1024**3
+                print(f"[MEM_DBG] {tag:55s}  cur={gb:.3f} GiB  peak={mx:.3f} GiB",
+                      flush=True)
+
+        _chk("0-baseline (step start)", reset=True)
+        # BDIM-σ: lazily compute per-body sigma shifts on the first
+        # fluid step (body SDFs are populated by BDIMhandler.update by
+        # now).  Static thereafter.
+        if self.apply_bdim_sigma and self._sigma_shifts is None:
+            self._compute_sigma_shifts()
+
+        # 1-2. eddy viscosity + advection-diffusion.
+        nu_t   = self._compute_nu_t(u, v, w_vel)
+        _chk("1-after compute_nu_t")
+        primes = self.adv_diff_solver.solve(u, v, w_vel, nu_t=nu_t)
+        _chk("2-after adv_diff.solve (primes allocated)")
+        del nu_t   # no longer needed; free before the large temporaries below
+        # primes are fresh tensors from solve(); use them as the
+        # advdiff inputs to Kernel B and (after the copy below) as the
+        # ``u'/v'/w'`` outside-AABB values written into u0/v0/w0.
+
+        # Copy primes -> persistent u0/v0/w0.  Cells outside the dirty
+        # AABB carry the advdiff result; Kernel B overrides the AABB
+        # sub-block with the BDIM2 result.  This is the same total
+        # number of writes the python path performs via clone+inplace.
+        self.u0.copy_(primes[0])
+        self.v0.copy_(primes[1])
+        self.w0.copy_(primes[2])
+
+        # 3. Init persistent var-dens coefficients (once / on resize).
+        self._init_var_dens_persist_3d(timestep)
+
+        # 4. Per-step temporaries for Kernel A -> Kernel B.  Allocated
+        # only inside the step; freed (via del below) before the pressure
+        # projection so its peak working set is not stacked on top of them.
+        _opts = dict(device=self.device, dtype=self.dtype)
+        _FAR  = 1e4
+        gs    = self.grid_shape
+        # int64 key scratch buffers for Kernel A (packed body-id + SDF).
+        # Sized to dirty_vol (AABB-local indexing) — much smaller than
+        # the full grid, reducing transient peak by ~4×(n_grid - dirty_vol)×8 B.
+        dirty_vol = int(ks['dirty_Ai']) * int(ks['dirty_Aj']) * int(ks['dirty_Ak'])
+        sdf_u_tmp = torch.full(gs, _FAR, **_opts)
+        sdf_v_tmp = torch.full(gs, _FAR, **_opts)
+        sdf_w_tmp = torch.full(gs, _FAR, **_opts)
+        bU_tmp    = torch.zeros(gs, **_opts)
+        bV_tmp    = torch.zeros(gs, **_opts)
+        bW_tmp    = torch.zeros(gs, **_opts)
+        # int64 key scratch buffers for Kernel A (packed body-id + SDF).
+        # Allocated per step so they are freed before the pressure projection
+        # and do not contribute to persistent baseline memory.
+        _key_opts = dict(dtype=torch.int64, device=self.device)
+        key_cc_t = torch.empty(dirty_vol, **_key_opts)
+        key_u_t  = torch.empty(dirty_vol, **_key_opts)
+        key_v_t  = torch.empty(dirty_vol, **_key_opts)
+        key_w_t  = torch.empty(dirty_vol, **_key_opts)
+        _chk("4-after alloc sdf/bUVW/key temps (before Kernel A)")
+
+        # 5. Kernel A: stream SDF + body velocities into the temps,
+        #    CC SDF into comp.sdf_val (persistent, used by forces).
+        streaming_sdf_stag_3d_multi(
+            sm['F_flat'], sm['F_offsets'],
+            sm['body_shapes'], sm['body_meta'], ks['kin'],
+            ks['aabb_lo'], ks['aabb_dim'],
+            ks['gx'], ks['gy'], ks['gz'],
+            float(comp.h), int(ks['max_vol']),
+            comp.sdf_val, sdf_u_tmp, sdf_v_tmp, sdf_w_tmp,
+            bU_tmp, bV_tmp, bW_tmp,
+            key_cc_t, key_u_t, key_v_t, key_w_t,
+            int(getattr(self, '_sdf_interp_method', 0)),
+            int(ks['dirty_i0']), int(ks['dirty_j0']), int(ks['dirty_k0']),
+            int(ks['dirty_Ai']), int(ks['dirty_Aj']), int(ks['dirty_Ak']),
+        )
+
+        # 6. Kernel B: fused BDIM2 + variable-density coefficients.
+        #    Reads primes / SDF / body face velocities; writes u0/v0/w0
+        #    and ch/cv/cw inside the dirty AABB.  mu0/mu1/normals are
+        #    computed only in registers.
+        if (self.apply_bdim_sigma
+                and self._sigma_shifts is not None
+                and bool(self._sigma_shifts.any())):
+            bdim_vardens_sigma_3d(
+                primes[0], primes[1], primes[2],
+                sdf_u_tmp, sdf_v_tmp, sdf_w_tmp,
+                bU_tmp, bV_tmp, bW_tmp,
+                self.u0, self.v0, self.w0,
+                self._ch_persist, self._cv_persist, self._cw_persist,
+                key_u_t, key_v_t, key_w_t,
+                self._sigma_shifts,
+                float(comp.eps), float(self.rho_body), float(self.rho),
+                float(timestep), float(comp.h),
+                int(ks['dirty_i0']), int(ks['dirty_j0']), int(ks['dirty_k0']),
+                int(ks['dirty_Ai']), int(ks['dirty_Aj']), int(ks['dirty_Ak']),
+            )
+        else:
+            bdim_vardens_3d(
+                primes[0], primes[1], primes[2],
+                sdf_u_tmp, sdf_v_tmp, sdf_w_tmp,
+                bU_tmp, bV_tmp, bW_tmp,
+                self.u0, self.v0, self.w0,
+                self._ch_persist, self._cv_persist, self._cw_persist,
+                float(comp.eps), float(self.rho_body), float(self.rho),
+                float(timestep), float(comp.h),
+                int(ks['dirty_i0']), int(ks['dirty_j0']), int(ks['dirty_k0']),
+                int(ks['dirty_Ai']), int(ks['dirty_Aj']), int(ks['dirty_Ak']),
+            )
+
+        # 7. Free per-step temporaries before the pressure projection
+        #    so its peak working set is not stacked on top of them.
+        #    Key tensors must outlive Kernel B (read by the BDIM-σ path),
+        #    so they are freed here together with the other temporaries.
+        del sdf_u_tmp, sdf_v_tmp, sdf_w_tmp, bU_tmp, bV_tmp, bW_tmp, primes
+        del key_cc_t, key_u_t, key_v_t, key_w_t
+        _chk("7-after del temps+primes (pre-project baseline)")
+
+        # 8. Boundary conditions on the BDIM-corrected velocity.
+        self.adv_diff_solver.set_BCs(self.u0, self.v0, self.w0)
+
+        # 9. Pressure projection.  Multigrid only needs ch/cv/cw;
+        #    FFT also wants ch_cc but Phase I does not allocate a
+        #    cell-centred coefficient buffer.
+        out = self.project(
+            self.u0, self.v0, p,
+            ch=self._ch_persist, cv=self._cv_persist, cw=self._cw_persist,
+            ch_cc=getattr(self, '_ch_cc_persist', None),
+            w_vel=self.w0,
+        )
+        vels_out = out[:-1]
+        p_out    = out[-1]
+        _chk("9-after project()")
+
+        # 10. Optional sponge / yield damping + final BC pass.
+        if self.use_sponge:
+            vels_out = self.apply_sponge_damping(*vels_out)
+        if self.use_yield_damping:
+            vels_out = self.apply_yield_damping(*vels_out)
+        self.adv_diff_solver.set_BCs(*vels_out)
+
+        return (*vels_out, p_out)
 
     def fluid_step(self, *args):
         """One FSI fluid step (advect-BDIM-project).  Called by BDIMhandler.
@@ -1393,6 +1933,16 @@ class FluidSolver(PlottingMixin):
         vels     = args[:D]
         p        = args[D]
         timestep = args[D + 1]
+
+        # Phase-I fused-kernel fast path (2-D and 3-D).  The python
+        # reference path stays on the legacy implementation below.
+        if self._use_kernels:
+            if D == 3:
+                return self._fluid_step_kernel_3d(vels[0], vels[1], vels[2],
+                                                  p, timestep)
+            if D == 2:
+                return self._fluid_step_kernel_2d(vels[0], vels[1],
+                                                  p, timestep)
 
         # 1-2. eddy viscosity + advection-diffusion
         nu_t   = self._compute_nu_t(*vels)
@@ -1516,7 +2066,13 @@ class FluidSolver(PlottingMixin):
 
     def step_(self, u, v, p, iteration, t, w_vel=None):
         self.composite_body.update(t, iteration, dt=self.dt)
-        self._recompute_mu_normals()
+        # Phase I: in kernel mode (2-D and 3-D), mu0/mu1 and normals are
+        # computed in CUDA thread registers inside Kernel B during
+        # fluid_step.  No persistent mu/normal buffers are allocated, so
+        # the python ``_recompute_mu_normals`` is unused (and would
+        # allocate the per-axis mu/normal pack it depends on).
+        if not self._use_kernels:
+            self._recompute_mu_normals()
         # self.sdf_properties = [[self.composite_body.sdf_val_u]]
 
         if self.ndim == 2:
@@ -1586,7 +2142,7 @@ class FluidSolver(PlottingMixin):
                 t                      = iteration*self.dt
                 (u,v,p,w,stop_sim) = self.step_(u, v, p, iteration, t, w_vel=w)
 
-        if self.compute_forces and self.save:
+        if self.compute_forces and self.save_drags:
             self.save_drags_h5()
 
         # Block until all background I/O is complete before returning

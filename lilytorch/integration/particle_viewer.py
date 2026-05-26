@@ -265,8 +265,9 @@ class ParticleViewer(TaskExtension):
         self.seed_interval = max(1, seed_interval)
         self.turb_diffusivity = turb_diffusivity
         self.sphere_size = sphere_size
-        self.particle_rgba = np.array(
-            particle_color or [1.0, 0.0, 0.65, 0.85], dtype=np.float32
+        _pc = self._parse_color(particle_color) if particle_color is not None else None
+        self.particle_rgba = _pc if _pc is not None else np.array(
+            [1.0, 0.0, 0.65, 0.85], dtype=np.float32
         )
         self.trail_length = trail_length
         self.update_every = update_every

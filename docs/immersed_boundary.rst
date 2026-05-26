@@ -139,19 +139,23 @@ enforced in cells where :math:`\mu_0 < \text{threshold}`.
 Body hierarchy
 --------------
 
-The class hierarchy in :mod:`lilytorch.src.body` is:
+Only **composite bodies** are user-instantiable. The
+:func:`~lilytorch.src.body.body_from_yaml` factory accepts the
+``composite_analytical`` and ``composite_mesh`` body types; the other
+classes are internal building blocks that exist to be wrapped by a
+composite. The class hierarchy in :mod:`lilytorch.src.body` is:
 
 .. code-block:: text
 
    Body (base)                     # mu_funcs, compute_normals
-   ├── BodyAnalytical              # Analytical SDFs
-   │   ├── CompositeBodyAnalytical # Union of analytical bodies
-   │   ├── BodyFishAnalytical      # NACA-foil fish spine
-   │   └── BodyFishExperimental    # Experimental kinematics replay
-   ├── BodyMesh                    # Mesh-based SDF
-   │   ├── CompositeBodyMesh       # Union of mesh bodies
-   │   └── CompositeSegmentBody    # Articulated segments
-   └── MultiAnimatBodies           # Multiple swimming animats
+   ├── BodyAnalytical              # internal: analytical SDFs
+   │   ├── CompositeBodyAnalytical # USER: union of analytical bodies
+   │   ├── BodyFishAnalytical      # internal: NACA-foil fish spine
+   │   └── BodyFishExperimental    # internal: experimental kinematics
+   ├── BodyMesh                    # internal: mesh-based SDF
+   │   ├── CompositeBodyMesh       # USER: union of mesh bodies
+   │   └── CompositeSegmentBody    # internal: articulated segments
+   └── MultiAnimatBodies           # internal: multiple swimming animats
 
 Each body exposes:
 

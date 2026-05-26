@@ -418,30 +418,23 @@ Supported body types
    * - ``type`` value
      - Class
      - Description
-   * - ``analytical``
-     - :class:`~lilytorch.src.body.BodyAnalytical`
-     - Single analytical shape (circle, box, capsule, segment).
    * - ``composite_analytical``
      - :class:`~lilytorch.src.body.CompositeBodyAnalytical`
-     - Union of analytical shapes.
-   * - ``mesh``
-     - :class:`~lilytorch.src.body.BodyMesh`
-     - Single 3-D mesh (STL/OBJ).
+     - Union of analytical shapes (circle, box, capsule, segment, NACA
+       fish spine, ...). The only user-facing analytical body type.
    * - ``composite_mesh``
      - :class:`~lilytorch.src.body.CompositeBodyMesh`
-     - Union of 3-D meshes.
-   * - ``multi_animat``
-     - :class:`~lilytorch.src.body.MultiAnimatBodies`
-     - Multiple swimming animats.
-   * - ``fish_analytical``
-     - :class:`~lilytorch.src.body.BodyFishAnalytical`
-     - NACA-foil fish with analytical spine.
-   * - ``fish_experimental``
-     - :class:`~lilytorch.src.body.BodyFishExperimental`
-     - Fish with experimental kinematics replay.
-   * - ``composite_segment_body``
-     - :class:`~lilytorch.src.body.CompositeSegmentBody`
-     - Articulated segment chain.
+     - Union of 3-D meshes (STL / OBJ). The only user-facing mesh body
+       type.
+
+.. note::
+
+   Direct (non-composite) body types — ``analytical``, ``mesh``,
+   ``fish_analytical``, ``fish_experimental``, ``multi_animat``,
+   ``composite_segment_body`` — were removed from
+   :func:`~lilytorch.src.body.body_from_yaml`. The underlying classes
+   still exist as internal building blocks used by the two composite
+   wrappers above and by the FARMS coupling layer.
 
 Analytical-specific keys
 ^^^^^^^^^^^^^^^^^^^^^^^^^

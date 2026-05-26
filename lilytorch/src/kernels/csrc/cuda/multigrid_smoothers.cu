@@ -706,12 +706,206 @@ void jacobi_sweep_3d_cuda(
     });
 }
 
+// =====================================================================
+// Multigrid residual kernels — compute r = (f - A(p)) * (|J| >= jcap_tol)
+// where A(p) = sum(c * p_neighbors) - J * p   and J = sum_d (c_{d+}+c_{d-}).
+//
+// J and the active mask live ONLY in thread registers; no global tensors.
+// This replaces the PyTorch ``_J*d`` + ``torch.abs(...) >= jcap_tol`` +
+// ``_sum*d`` + addcmul_/neg_/mul_ chain in ``_vcycle_*_native``, which used
+// to allocate 64 MB (J) + 16 MB (active bool) per fine-level V-cycle.
+//
+// Thread-per-cell layout matches the existing 3-D smoother kernel: simple,
+// bandwidth-bound, no shared memory needed for a single-pass stencil.
+// =====================================================================
+
+template <typename scalar_t>
+__global__ void mg_residual_2d_kernel(
+        const scalar_t* __restrict__ p,
+        const scalar_t* __restrict__ f,
+        const scalar_t* __restrict__ cp0,
+        const scalar_t* __restrict__ cm0,
+        const scalar_t* __restrict__ cp1,
+        const scalar_t* __restrict__ cm1,
+        scalar_t* __restrict__ r,
+        int Nx, int Ny,
+        scalar_t jcap_tol)
+{
+    const int gj = blockIdx.x * blockDim.x + threadIdx.x;   // fast/coalesced
+    const int gi = blockIdx.y * blockDim.y + threadIdx.y;
+    if (gi >= Nx || gj >= Ny) return;
+
+    const int sp     = Ny + 2;                       // row stride in padded p
+    const int p_base = (gi + 1) * sp + (gj + 1);
+    const int idx_c  = gi * Ny + gj;
+
+    const scalar_t a_cp0 = cp0[idx_c];
+    const scalar_t a_cm0 = cm0[idx_c];
+    const scalar_t a_cp1 = cp1[idx_c];
+    const scalar_t a_cm1 = cm1[idx_c];
+    const scalar_t J = a_cp0 + a_cm0 + a_cp1 + a_cm1;
+
+    if (J < jcap_tol && J > -jcap_tol) {
+        r[idx_c] = (scalar_t)0;
+        return;
+    }
+
+    const scalar_t sum = a_cp0 * p[p_base + sp]      // p[i+1, j]
+                       + a_cm0 * p[p_base - sp]      // p[i-1, j]
+                       + a_cp1 * p[p_base + 1]       // p[i, j+1]
+                       + a_cm1 * p[p_base - 1];      // p[i, j-1]
+    const scalar_t pc  = p[p_base];
+
+    r[idx_c] = f[idx_c] - sum + J * pc;
+}
+
+void mg_residual_2d_cuda(
+        at::Tensor p, at::Tensor f,
+        at::Tensor cp0, at::Tensor cm0,
+        at::Tensor cp1, at::Tensor cm1,
+        double jcap_tol,
+        at::Tensor r)
+{
+    TORCH_CHECK(p.is_contiguous(),   "mg_residual_2d: p must be contiguous");
+    TORCH_CHECK(f.is_contiguous(),   "mg_residual_2d: f must be contiguous");
+    TORCH_CHECK(cp0.is_contiguous(), "mg_residual_2d: cp0 must be contiguous");
+    TORCH_CHECK(cm0.is_contiguous(), "mg_residual_2d: cm0 must be contiguous");
+    TORCH_CHECK(cp1.is_contiguous(), "mg_residual_2d: cp1 must be contiguous");
+    TORCH_CHECK(cm1.is_contiguous(), "mg_residual_2d: cm1 must be contiguous");
+    TORCH_CHECK(r.is_contiguous(),   "mg_residual_2d: r must be contiguous");
+    TORCH_CHECK(p.device().is_cuda(), "mg_residual_2d: tensors must be on CUDA");
+    TORCH_CHECK(p.dim() == 2 && f.dim() == 2,
+                "mg_residual_2d: p and f must be 2-D");
+    TORCH_CHECK(p.size(0) == f.size(0) + 2 && p.size(1) == f.size(1) + 2,
+                "mg_residual_2d: p must be ghost-padded (Nx+2, Ny+2)");
+    TORCH_CHECK(r.sizes() == f.sizes(),
+                "mg_residual_2d: r must have the same shape as f");
+
+    const int Nx = (int)f.size(0);
+    const int Ny = (int)f.size(1);
+    auto stream  = at::cuda::getCurrentCUDAStream();
+
+    const dim3 blk(32, 8);
+    const dim3 grd(cdiv(Ny, 32), cdiv(Nx, 8));
+
+    AT_DISPATCH_FLOATING_TYPES(p.scalar_type(), "mg_residual_2d", [&] {
+        mg_residual_2d_kernel<scalar_t><<<grd, blk, 0, stream>>>(
+            p.data_ptr<scalar_t>(),
+            f.data_ptr<scalar_t>(),
+            cp0.data_ptr<scalar_t>(), cm0.data_ptr<scalar_t>(),
+            cp1.data_ptr<scalar_t>(), cm1.data_ptr<scalar_t>(),
+            r.data_ptr<scalar_t>(),
+            Nx, Ny,
+            static_cast<scalar_t>(jcap_tol)
+        );
+    });
+}
+
+template <typename scalar_t>
+__global__ void mg_residual_3d_kernel(
+        const scalar_t* __restrict__ p,
+        const scalar_t* __restrict__ f,
+        const scalar_t* __restrict__ cp0,
+        const scalar_t* __restrict__ cm0,
+        const scalar_t* __restrict__ cp1,
+        const scalar_t* __restrict__ cm1,
+        const scalar_t* __restrict__ cp2,
+        const scalar_t* __restrict__ cm2,
+        scalar_t* __restrict__ r,
+        int Nx, int Ny, int Nz,
+        scalar_t jcap_tol)
+{
+    const int gk = blockIdx.x * blockDim.x + threadIdx.x;   // k (fast)
+    const int gj = blockIdx.y * blockDim.y + threadIdx.y;
+    const int gi = blockIdx.z * blockDim.z + threadIdx.z;
+    if (gi >= Nx || gj >= Ny || gk >= Nz) return;
+
+    const int si     = (Ny + 2) * (Nz + 2);
+    const int sj     = Nz + 2;
+    const int p_base = (gi + 1) * si + (gj + 1) * sj + (gk + 1);
+    const int idx_c  = gi * (Ny * Nz) + gj * Nz + gk;
+
+    const scalar_t a_cp0 = cp0[idx_c];
+    const scalar_t a_cm0 = cm0[idx_c];
+    const scalar_t a_cp1 = cp1[idx_c];
+    const scalar_t a_cm1 = cm1[idx_c];
+    const scalar_t a_cp2 = cp2[idx_c];
+    const scalar_t a_cm2 = cm2[idx_c];
+    const scalar_t J = a_cp0 + a_cm0 + a_cp1 + a_cm1 + a_cp2 + a_cm2;
+
+    if (J < jcap_tol && J > -jcap_tol) {
+        r[idx_c] = (scalar_t)0;
+        return;
+    }
+
+    const scalar_t sum = a_cp0 * p[p_base + si]    // p[i+1, j, k]
+                       + a_cm0 * p[p_base - si]    // p[i-1, j, k]
+                       + a_cp1 * p[p_base + sj]    // p[i, j+1, k]
+                       + a_cm1 * p[p_base - sj]    // p[i, j-1, k]
+                       + a_cp2 * p[p_base + 1]     // p[i, j, k+1]
+                       + a_cm2 * p[p_base - 1];    // p[i, j, k-1]
+    const scalar_t pc  = p[p_base];
+
+    r[idx_c] = f[idx_c] - sum + J * pc;
+}
+
+void mg_residual_3d_cuda(
+        at::Tensor p, at::Tensor f,
+        at::Tensor cp0, at::Tensor cm0,
+        at::Tensor cp1, at::Tensor cm1,
+        at::Tensor cp2, at::Tensor cm2,
+        double jcap_tol,
+        at::Tensor r)
+{
+    TORCH_CHECK(p.is_contiguous(),   "mg_residual_3d: p must be contiguous");
+    TORCH_CHECK(f.is_contiguous(),   "mg_residual_3d: f must be contiguous");
+    TORCH_CHECK(cp0.is_contiguous(), "mg_residual_3d: cp0 must be contiguous");
+    TORCH_CHECK(cm0.is_contiguous(), "mg_residual_3d: cm0 must be contiguous");
+    TORCH_CHECK(cp1.is_contiguous(), "mg_residual_3d: cp1 must be contiguous");
+    TORCH_CHECK(cm1.is_contiguous(), "mg_residual_3d: cm1 must be contiguous");
+    TORCH_CHECK(cp2.is_contiguous(), "mg_residual_3d: cp2 must be contiguous");
+    TORCH_CHECK(cm2.is_contiguous(), "mg_residual_3d: cm2 must be contiguous");
+    TORCH_CHECK(r.is_contiguous(),   "mg_residual_3d: r must be contiguous");
+    TORCH_CHECK(p.device().is_cuda(), "mg_residual_3d: tensors must be on CUDA");
+    TORCH_CHECK(p.dim() == 3 && f.dim() == 3,
+                "mg_residual_3d: p and f must be 3-D");
+    TORCH_CHECK(p.size(0) == f.size(0) + 2 &&
+                p.size(1) == f.size(1) + 2 &&
+                p.size(2) == f.size(2) + 2,
+                "mg_residual_3d: p must be ghost-padded (Nx+2, Ny+2, Nz+2)");
+    TORCH_CHECK(r.sizes() == f.sizes(),
+                "mg_residual_3d: r must have the same shape as f");
+
+    const int Nx = (int)f.size(0);
+    const int Ny = (int)f.size(1);
+    const int Nz = (int)f.size(2);
+    auto stream  = at::cuda::getCurrentCUDAStream();
+
+    const dim3 blk(16, 8, 4);
+    const dim3 grd(cdiv(Nz, 16), cdiv(Ny, 8), cdiv(Nx, 4));
+
+    AT_DISPATCH_FLOATING_TYPES(p.scalar_type(), "mg_residual_3d", [&] {
+        mg_residual_3d_kernel<scalar_t><<<grd, blk, 0, stream>>>(
+            p.data_ptr<scalar_t>(),
+            f.data_ptr<scalar_t>(),
+            cp0.data_ptr<scalar_t>(), cm0.data_ptr<scalar_t>(),
+            cp1.data_ptr<scalar_t>(), cm1.data_ptr<scalar_t>(),
+            cp2.data_ptr<scalar_t>(), cm2.data_ptr<scalar_t>(),
+            r.data_ptr<scalar_t>(),
+            Nx, Ny, Nz,
+            static_cast<scalar_t>(jcap_tol)
+        );
+    });
+}
+
 // ── CUDA dispatch registration ─────────────────────────────────────────
 TORCH_LIBRARY_IMPL(lilytorch_kernels, CUDA, m) {
     m.impl("rbgs_sweep_2d", &rbgs_sweep_2d_cuda);
     m.impl("rbgs_sweep_3d", &rbgs_sweep_3d_cuda);
     m.impl("jacobi_sweep_2d", &jacobi_sweep_2d_cuda);
     m.impl("jacobi_sweep_3d", &jacobi_sweep_3d_cuda);
+    m.impl("mg_residual_2d", &mg_residual_2d_cuda);
+    m.impl("mg_residual_3d", &mg_residual_3d_cuda);
 }
 
 }  // namespace lilytorch_kernels

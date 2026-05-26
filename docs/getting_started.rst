@@ -264,9 +264,18 @@ Project layout
    │   ├── kernels/         CUDA / C++ fused kernels (streaming SDF, BDIM forces, BCs)
    │   └── configs/         Stand-alone YAML configs (cylinders, spheres, …)
    ├── integration/         FARMS / MuJoCo coupling layer
-   │   ├── extensions.py    FluidExtension, DataLogger
-   │   ├── flow_viewer.py   In-viewer flow visualisation
-   │   └── BDIMhandler.py   Body ↔ MuJoCo bridge
+   │   ├── BDIMhandler.py   Unified 2-D / 3-D body ↔ MuJoCo bridge
+   │   ├── extensions.py    FluidExtension, DataLogger (FARMS hooks)
+   │   ├── kinematics.py    FARMS sensor frames → body transforms
+   │   ├── flow_viewer.py   In-viewer 3-D flow (sphere field)
+   │   ├── flow_viewer_2d.py        In-viewer 2-D flow (tile overlay)
+   │   ├── flow_viewer_2d_gpu.py    CUDA→GL fast path for 2-D overlay
+   │   ├── flow_viewer_gl_hook.py   LD_PRELOAD GL shim for passive viewer
+   │   ├── particle_viewer.py       Lagrangian dye particle overlay
+   │   ├── native_body_colors.py    Per-body colouring extension
+   │   ├── camera.py        Camera presets / controllers
+   │   ├── gamepad.py       Optional gamepad input (incl. paddling mode)
+   │   └── gen_pool_sdf.py  Generate pool / arena SDF XML for MuJoCo
    ├── FARMS_V2/            FARMS submodules setup
    ├── farms_examples/      Ready-to-run examples (2-D & 3-D)
    ├── util/                I/O, YAML, path helpers

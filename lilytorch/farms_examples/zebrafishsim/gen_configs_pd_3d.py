@@ -95,7 +95,6 @@ class SimConfig(BaseSimConfig):
         self.poisson_nsmoothing       = 5
         self.poisson_bc_type          = "neumann"
 
-        self.poisson_compile          = False
         self.compile_adv_diff         = False
 
         # ── Boundary conditions (3-D, all Dirichlet no-slip) ────────
