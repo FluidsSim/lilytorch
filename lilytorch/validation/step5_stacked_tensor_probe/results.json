@@ -1,0 +1,369 @@
+{
+  "meta": {
+    "torch_version": "2.12.0+cu130",
+    "num_threads": 1,
+    "dtype": "float64"
+  },
+  "cylinder_2d": {
+    "baseline": {
+      "wall_s": 0.12098355300031471,
+      "per_step_ms": 6.049177650015736,
+      "ke": 22.213569382780733,
+      "drag_signature": 5.1674444196590015,
+      "shadow_bytes": 0,
+      "groups": [
+        {
+          "label": "velocity",
+          "member_attrs": [
+            "u0",
+            "v0"
+          ],
+          "tuple_bytes": 69696,
+          "stacked_bytes": 69696,
+          "shape": [
+            2,
+            66,
+            66
+          ]
+        },
+        {
+          "label": "sdf_val_face",
+          "member_attrs": [
+            "sdf_val_u",
+            "sdf_val_v"
+          ],
+          "tuple_bytes": 69696,
+          "stacked_bytes": 69696,
+          "shape": [
+            2,
+            66,
+            66
+          ]
+        },
+        {
+          "label": "body_face",
+          "member_attrs": [
+            "body_u",
+            "body_v"
+          ],
+          "tuple_bytes": 69696,
+          "stacked_bytes": 69696,
+          "shape": [
+            2,
+            66,
+            66
+          ]
+        }
+      ],
+      "roundtrip_max_abs_diff": {
+        "velocity": 0.0,
+        "sdf_val_face": 0.0,
+        "body_face": 0.0
+      }
+    },
+    "stacked_shadow": {
+      "wall_s": 0.11964356599992243,
+      "per_step_ms": 5.9821782999961215,
+      "ke": 22.213569382780733,
+      "drag_signature": 5.1674444196590015,
+      "shadow_bytes": 209088,
+      "groups": [
+        {
+          "label": "velocity",
+          "member_attrs": [
+            "u0",
+            "v0"
+          ],
+          "tuple_bytes": 69696,
+          "stacked_bytes": 69696,
+          "shape": [
+            2,
+            66,
+            66
+          ]
+        },
+        {
+          "label": "sdf_val_face",
+          "member_attrs": [
+            "sdf_val_u",
+            "sdf_val_v"
+          ],
+          "tuple_bytes": 69696,
+          "stacked_bytes": 69696,
+          "shape": [
+            2,
+            66,
+            66
+          ]
+        },
+        {
+          "label": "body_face",
+          "member_attrs": [
+            "body_u",
+            "body_v"
+          ],
+          "tuple_bytes": 69696,
+          "stacked_bytes": 69696,
+          "shape": [
+            2,
+            66,
+            66
+          ]
+        }
+      ],
+      "roundtrip_max_abs_diff": {
+        "velocity": 0.0,
+        "sdf_val_face": 0.0,
+        "body_face": 0.0
+      }
+    }
+  },
+  "sphere_3d": {
+    "baseline": {
+      "wall_s": 0.1344248560003507,
+      "per_step_ms": 13.44248560003507,
+      "ke": 87.97458627430116,
+      "drag_signature": 0.4620506172073727,
+      "shadow_bytes": 0,
+      "groups": [
+        {
+          "label": "velocity",
+          "member_attrs": [
+            "u0",
+            "v0",
+            "w0"
+          ],
+          "tuple_bytes": 421824,
+          "stacked_bytes": 421824,
+          "shape": [
+            3,
+            26,
+            26,
+            26
+          ]
+        },
+        {
+          "label": "sdf_val_face",
+          "member_attrs": [
+            "sdf_val_u",
+            "sdf_val_v",
+            "sdf_val_w"
+          ],
+          "tuple_bytes": 421824,
+          "stacked_bytes": 421824,
+          "shape": [
+            3,
+            26,
+            26,
+            26
+          ]
+        },
+        {
+          "label": "body_face",
+          "member_attrs": [
+            "body_u",
+            "body_v",
+            "body_w"
+          ],
+          "tuple_bytes": 421824,
+          "stacked_bytes": 421824,
+          "shape": [
+            3,
+            26,
+            26,
+            26
+          ]
+        }
+      ],
+      "roundtrip_max_abs_diff": {
+        "velocity": 0.0,
+        "sdf_val_face": 0.0,
+        "body_face": 0.0
+      }
+    },
+    "stacked_shadow": {
+      "wall_s": 0.13842420199989647,
+      "per_step_ms": 13.842420199989647,
+      "ke": 87.97458627430116,
+      "drag_signature": 0.4620506172073727,
+      "shadow_bytes": 1265472,
+      "groups": [
+        {
+          "label": "velocity",
+          "member_attrs": [
+            "u0",
+            "v0",
+            "w0"
+          ],
+          "tuple_bytes": 421824,
+          "stacked_bytes": 421824,
+          "shape": [
+            3,
+            26,
+            26,
+            26
+          ]
+        },
+        {
+          "label": "sdf_val_face",
+          "member_attrs": [
+            "sdf_val_u",
+            "sdf_val_v",
+            "sdf_val_w"
+          ],
+          "tuple_bytes": 421824,
+          "stacked_bytes": 421824,
+          "shape": [
+            3,
+            26,
+            26,
+            26
+          ]
+        },
+        {
+          "label": "body_face",
+          "member_attrs": [
+            "body_u",
+            "body_v",
+            "body_w"
+          ],
+          "tuple_bytes": 421824,
+          "stacked_bytes": 421824,
+          "shape": [
+            3,
+            26,
+            26,
+            26
+          ]
+        }
+      ],
+      "roundtrip_max_abs_diff": {
+        "velocity": 0.0,
+        "sdf_val_face": 0.0,
+        "body_face": 0.0
+      }
+    }
+  },
+  "microbench": {
+    "2d_128": {
+      "A_mu0_mask": {
+        "tuple_ms": 0.01048038000590168,
+        "stack_ms": 0.009041939993039705,
+        "speedup_x": 1.1590853305783113
+      },
+      "B_bdim_blend": {
+        "tuple_ms": 0.034435620000294875,
+        "stack_ms": 0.029101760001140065,
+        "speedup_x": 1.1832830728775805
+      },
+      "C_where_merge": {
+        "tuple_ms": 0.13545523999709985,
+        "stack_ms": 0.13344872000743635,
+        "speedup_x": 1.01503588786428
+      },
+      "D_ke_reduce": {
+        "tuple_ms": 0.02588620000096853,
+        "stack_ms": 0.021722040000895504,
+        "speedup_x": 1.1917020684936293
+      },
+      "_max_abs_diff": {
+        "A": 0.0,
+        "B": 0.0
+      },
+      "_bytes": {
+        "tuple_bytes": 1835008,
+        "stack_bytes": 1867776
+      }
+    },
+    "2d_256": {
+      "A_mu0_mask": {
+        "tuple_ms": 0.16437021999990975,
+        "stack_ms": 0.1274224000007962,
+        "speedup_x": 1.2899633031467206
+      },
+      "B_bdim_blend": {
+        "tuple_ms": 0.33566410000275937,
+        "stack_ms": 0.26906117999715207,
+        "speedup_x": 1.2475381993281687
+      },
+      "C_where_merge": {
+        "tuple_ms": 0.426217620006355,
+        "stack_ms": 0.3912418199979584,
+        "speedup_x": 1.089396885048176
+      },
+      "D_ke_reduce": {
+        "tuple_ms": 0.25838933999693836,
+        "stack_ms": 0.17780283999854873,
+        "speedup_x": 1.4532351676668798
+      },
+      "_max_abs_diff": {
+        "A": 0.0,
+        "B": 0.0
+      },
+      "_bytes": {
+        "tuple_bytes": 7340032,
+        "stack_bytes": 7471104
+      }
+    },
+    "3d_32": {
+      "A_mu0_mask": {
+        "tuple_ms": 0.08203934000448498,
+        "stack_ms": 0.10337416000766098,
+        "speedup_x": 0.7936155418182369
+      },
+      "B_bdim_blend": {
+        "tuple_ms": 0.14946847999453894,
+        "stack_ms": 0.1996056200005114,
+        "speedup_x": 0.7488189961492867
+      },
+      "C_where_merge": {
+        "tuple_ms": 0.4691616400032217,
+        "stack_ms": 0.34620252000422624,
+        "speedup_x": 1.3551652945723631
+      },
+      "D_ke_reduce": {
+        "tuple_ms": 0.0797260999934224,
+        "stack_ms": 0.1398345200050244,
+        "speedup_x": 0.5701460554272133
+      },
+      "_max_abs_diff": {
+        "A": 0.0,
+        "B": 0.0
+      },
+      "_bytes": {
+        "tuple_bytes": 5505024,
+        "stack_bytes": 5603328
+      }
+    },
+    "3d_64": {
+      "A_mu0_mask": {
+        "tuple_ms": 0.749248179999995,
+        "stack_ms": 0.6432062199928623,
+        "speedup_x": 1.1648646370495446
+      },
+      "B_bdim_blend": {
+        "tuple_ms": 2.037109720004082,
+        "stack_ms": 1.5333618000022398,
+        "speedup_x": 1.32852515303375
+      },
+      "C_where_merge": {
+        "tuple_ms": 2.5181235800027935,
+        "stack_ms": 2.260784620002596,
+        "speedup_x": 1.1138272782481606
+      },
+      "D_ke_reduce": {
+        "tuple_ms": 0.9626644999934797,
+        "stack_ms": 0.8413365600063116,
+        "speedup_x": 1.1442085673612685
+      },
+      "_max_abs_diff": {
+        "A": 0.0,
+        "B": 0.0
+      },
+      "_bytes": {
+        "tuple_bytes": 44040192,
+        "stack_bytes": 44826624
+      }
+    }
+  }
+}
