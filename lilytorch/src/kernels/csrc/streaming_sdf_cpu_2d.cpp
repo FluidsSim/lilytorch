@@ -899,7 +899,7 @@ static inline void bdim_one_axis_2d_cpu(
     const scalar_t nd = nx * ddx + ny * ddy;
 
     phi_out[g] = mu0 * diff_c + b_c + mu1 * nd;
-    c_out[g]   = dt / (rho_body + (rho_f - rho_body) * mu0);
+    c_out[g]   = dt * mu0 / (rho_body + (rho_f - rho_body) * mu0);
 }
 
 void bdim_vardens_2d_cpu(
@@ -1051,7 +1051,7 @@ static inline void bdim_one_axis_sigma_2d_cpu(
     const scalar_t nd = nx * ddx + ny * ddy;
 
     phi_out[g] = mu0 * diff_c + b_c + mu1 * nd;
-    c_out[g]   = dt / (rho_body + (rho_f - rho_body) * mu0_poisson);
+    c_out[g]   = dt * mu0_poisson / (rho_body + (rho_f - rho_body) * mu0_poisson);
 }
 
 void bdim_vardens_sigma_2d_cpu(

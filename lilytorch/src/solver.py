@@ -1475,10 +1475,15 @@ class FluidSolver(PlottingMixin):
         Returns ``(ch, cv, ch_cc)`` for 2-D or ``(ch, cv, cw, ch_cc)``
         for 3-D, where:
 
-            * ``ch, cv, cw`` -- staggered ``dt / rho_eff`` on face grids.
-            * ``ch_cc`` -- cell-centred ``dt / rho_eff_cc`` for FFT RHS.
+            * ``ch, cv, cw`` -- staggered ``dt * mu0 / rho_eff`` on face grids.
+            * ``ch_cc`` -- cell-centred ``dt * mu0 / rho_eff_cc`` for FFT RHS.
 
-        Effective density: ``rho_eff(x) = rho_body + (rho_fluid - rho_body) * mu0(x)``.
+        BDIM2 mu0-weighted, variable-density Poisson coefficient:
+        ``ch = dt * mu0 / (rho_body + (rho_fluid - rho_body) * mu0)``.
+        The ``mu0`` factor makes the velocity-correction vanish EXACTLY inside
+        the body (mu0=0), preserving the imposed body velocity and avoiding the
+        ill-conditioned band Poisson.  When ``rho_body == rho_fluid`` it reduces
+        to the original BDIM2 form ``dt * mu0 / rho`` (Maertens & Weymouth 2015).
 
         Narrow-band fast-path (kernel mode + sparse bodies, 2-D and 3-D)
         ----------------------------------------------------------------
@@ -1545,19 +1550,20 @@ class FluidSolver(PlottingMixin):
                     for name, mu in zip(face_names + (cc_name,), mu_grids):
                         mu_sub = mu[usl]
                         getattr(self, name)[usl] = (
-                            timestep / (_rho_b * (1 - mu_sub) + _rho_fluid * mu_sub)
+                            timestep * mu_sub
+                            / (_rho_b * (1 - mu_sub) + _rho_fluid * mu_sub)
                         )
                 else:
                     for name, mu in zip(face_names + (cc_name,), mu_grids):
                         getattr(self, name)[usl] = (
-                            timestep / (self.rho_body + _drho * mu[usl])
+                            timestep * mu[usl] / (self.rho_body + _drho * mu[usl])
                         )
 
                 return (*(getattr(self, n) for n in face_names),
                         getattr(self, cc_name))
 
         # ---- full-grid fallback ----------------------------------------
-        return tuple(timestep / (self.rho_body + _drho * mu) for mu in mu_grids)
+        return tuple(timestep * mu / (self.rho_body + _drho * mu) for mu in mu_grids)
 
     # ------------------------------------------------------------------
     #   Phase-I kernel-mode 3-D fluid step  (Kernel A + Kernel B)

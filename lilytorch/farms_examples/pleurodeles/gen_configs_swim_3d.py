@@ -22,10 +22,12 @@ class SimConfig(BaseSimConfig):
         )
 
         # Hardware / runtime
-        self.use_bdim       = True
-        self.use_gpu        = True
-        self.headless       = False
-        self.poisson_method = "multigrid"
+        self.use_bdim          = True
+        self.use_gpu           = True
+        self.headless          = False
+        self.poisson_method    = "multigrid"
+        self.sdf_interp_method = "quadratic"
+        self.force_delta_order = 2
 
         # self.apply_bdim_sigma = True
 

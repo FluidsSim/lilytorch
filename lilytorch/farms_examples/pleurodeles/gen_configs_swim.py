@@ -35,12 +35,12 @@ class SimConfig(BaseSimConfig):
         ]
 
         # ── 2-D grid ─────────────────────────────────────────────────
-        self.Nx   = 2048
-        self.Ny   = 512
-        self.xmin = -0.13 * 2
-        self.xmax =  0.27 * 2
-        self.ymin = -0.05 * 2
-        self.ymax =  0.05 * 2
+        self.Nx                  = 2048
+        self.Ny                  = 512
+        self.xmin                = -0.13 * 2
+        self.xmax                = 0.27 * 2
+        self.ymin                = -0.05 * 2
+        self.ymax                = 0.05 * 2
 
         # ── Physics ───────────────────────────────────────────────────
         self.timestep          = 0.00025

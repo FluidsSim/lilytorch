@@ -34,11 +34,14 @@ class SimConfig(BaseSimConfig):
         )
 
         # ── Hardware ──────────────────────────────────────────────────
-        self.compute_sdf    = True
-        self.use_gpu        = True
-        self.use_bdim       = True
-        self.headless       = False
-        self.water_buoyancy = True
+        self.compute_sdf         = True
+        self.use_gpu             = True
+        self.use_bdim            = True
+        self.headless            = False
+        self.water_buoyancy      = True
+        # self.force_delta_order   = 2
+        self.sdf_interp_method   = "triquadratic"
+        # self.solver_method       = "python"
 
         self.bdim_physics = {
             "solref": [-2e4, -30e1],
@@ -190,7 +193,7 @@ class SimConfig(BaseSimConfig):
                 "smooth_sigma"       : 0,
                 "crop_boundary"      : 0,
                 "exclude_body"       : True,
-                "iso_value"          : 70.0,
+                "iso_value"          : 100.0,
                 "debug_force_visible": False,
                 "color_uni"          : "#00FFFF",
                 "color_pos"          : "#FF4500",

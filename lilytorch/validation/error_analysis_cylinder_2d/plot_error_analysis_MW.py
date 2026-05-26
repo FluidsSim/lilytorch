@@ -40,7 +40,7 @@ xmin, xmax = -half_L, half_L
 ymin, ymax = -half_L, half_L
 Lx = xmax - xmin   # 30
 
-maindir = "/data/andreaferrario/ns_data/flow_past_cylinder_error_tests_MW/abdquickest/"
+maindir = "/data/andreaferrario/ns_data/flow_past_cylinder_error_tests_MW/data/abdquickest/"
 figdir  = maindir
 
 # Detect Nx values from directory names  (Nx256/, Nx512/, Nx1024/)
@@ -79,6 +79,45 @@ def rate(e1, e2, h1, h2):
         return float('nan')
     return np.log(e1 / e2) / np.log(h1 / h2)
 
+def restrict_to(interior, N, kind):
+    """Restrict an interior field (Nf, Nf) to (N, N), staggering-aware.
+
+    Staggered direction → stride (faces align); cell-centred direction →
+    block-average (avoids the O(h) positional error of striding a CC field).
+    ``kind``: 'u' (staggered x, CC y), 'v' (CC x, staggered y), 'p' (CC both).
+
+    When N == Nf (di == 1) returns the field unchanged — so the same call
+    yields the *native* coarse field and the reference *restricted to N*.
+    """
+    Nf = interior.shape[0]
+    di = Nf // N
+    if di == 1:
+        return interior
+    if kind == 'u':                       # staggered x (stride), CC y (avg)
+        return interior[::di, :].reshape(N, N, di).mean(axis=2)
+    if kind == 'v':                       # CC x (avg), staggered y (stride)
+        return interior.reshape(N, di, -1).mean(axis=1)[:, ::di]
+    # 'p': CC in both x and y (average both)
+    return interior.reshape(N, di, -1).mean(axis=1).reshape(N, N, di).mean(axis=2)
+
+def coarsen_p_fluid(p_int, Nc):
+    """Block-average cell-centred pressure (Nf x Nf) -> (Nc x Nc), EXCLUDING
+    body-interior (sdf < 0) fine cells.  Pressure floats inside the body
+    (mu0 -> 0), so a plain block-average of near-surface cells mixes in those
+    gauge-arbitrary, non-converging values and fakes a 1st-order rate.  Velocity
+    needs NO mask (inside the body it is the well-defined imposed u_b)."""
+    Nf = p_int.shape[0]
+    di = Nf // Nc
+    if di == 1:
+        return p_int
+    dxf = Lx / Nf
+    Xf, Yf = make_grid(Nf, Nf, dxf, dxf)
+    w = (sdf_cylinder(Xf, Yf) > 0).astype(p_int.dtype)
+    def _blk(a):
+        return a.reshape(Nc, di, -1).mean(axis=1).reshape(Nc, Nc, di).mean(axis=2)
+    num, den, plain = _blk(p_int * w), _blk(w), _blk(p_int)
+    return np.where(den > 0, num / np.maximum(den, 1e-30), plain)
+
 # ================================================================
 # Load finest-grid reference
 # ================================================================
@@ -115,68 +154,24 @@ for Nx in nxs:
     v = np.load(os.path.join(maindir, f"Nx{Nx}", "uv_field", "v.npy"))
     p = np.load(os.path.join(maindir, f"Nx{Nx}", "uv_field", "p.npy"))
 
-    # Down-sample to common comparison grid (coarsest).
-    # All Nx are powers-of-2, so di = Nx / Nx_coarsest is exact integer.
-    #
-    # IMPORTANT – staggered vs. cell-centred alignment:
-    #   u is stored at x-FACE positions (staggered in x, CC in y).
-    #   v is stored at y-FACE positions (CC in x, staggered in y).
-    #   p is CC in both x and y.
-    #
-    #   For staggered directions, stride-sampling aligns exactly with
-    #   the coarser face positions (x_stag = x - h/2, so face k·di
-    #   lands on coarse face k).
-    #   For CC directions, stride-sampling gives positions xmin + 0.5*h
-    #   + k·di·h, while coarse CC positions are xmin + 0.5*h_c + k·h_c
-    #   = xmin + 0.5·di·h + k·di·h.  The offset (di-1)·h/2 introduces
-    #   an O(h) interpolation error that caps apparent convergence at
-    #   first order even when the true solution is second order.
-    #
-    #   Fix: average di·di (or 1·di / di·1) cells in the CC direction(s).
-    di     = Nx // Nx_coarsest
-    di_ref = Nx_finest // Nx_coarsest
-    Nc     = Nx_coarsest
+    # RAW per-grid comparison (no coarsening/smoothing): the coarse solution
+    # stays native; only the finest-grid reference is restricted onto THIS grid
+    # (staggered dirs stride, CC dirs block-average — the necessary alignment).
+    u_c  = restrict_to(u[1:-1, 1:-1],     Nx, 'u')   # di=1 -> native coarse
+    ur_c = restrict_to(u_ref[1:-1, 1:-1], Nx, 'u')   # reference -> this Nx
+    v_c  = restrict_to(v[1:-1, 1:-1],     Nx, 'v')
+    vr_c = restrict_to(v_ref[1:-1, 1:-1], Nx, 'v')
+    p_c  = restrict_to(p[1:-1, 1:-1],     Nx, 'p')
+    pr_c = restrict_to(p_ref[1:-1, 1:-1], Nx, 'p')
 
-    def _restrict(field, di_x, di_y):
-        """Restrict interior of 'field' to (Nc, Nc) by striding in staggered
-        directions and averaging in cell-centred directions.
-        di_x / di_y: stride factor for x/y respectively.
-          stride → just take every di-th index (faces align).
-          average → average di adjacent cells (CC alignment fix).
-        """
-        interior = field[1:-1, 1:-1]          # strip ghost cells → (Nx, Ny)
-        if di_x == 1:                          # stride in x (staggered)
-            tmp = interior[::di_y, :]
-        else:                                  # average in x (CC), stride in y
-            tmp = interior.reshape(Nc, di_x, -1).mean(axis=1)
-        if di_y == 1:
-            out = tmp[:, ::di_x]               # stride in y (staggered)
-        else:
-            out = tmp.reshape(-1, Nc, di_y).mean(axis=2)
-        return out
-
-    # u: staggered in x (stride), CC in y (average)
-    u_c  = _restrict(u,     1,     di)
-    ur_c = _restrict(u_ref, 1,     di_ref)
-    # v: CC in x (average), staggered in y (stride)
-    v_c  = _restrict(v,     di,    1)
-    vr_c = _restrict(v_ref, di_ref, 1)
-    # p: CC in both x and y (average in both)
-    p_c  = _restrict(p,     di,    di)
-    pr_c = _restrict(p_ref, di_ref, di_ref)
-
-    # SDF on comparison grid
-    X, Y = make_grid(u_c.shape[0], u_c.shape[1], dx_coarsest, dx_coarsest)
+    # SDF / masks on THIS grid (own dx)
+    X, Y = make_grid(Nx, Nx, dx, dx)
     sdf = sdf_cylinder(X, Y)
 
     # Masks
     fluid    = sdf > 0                     # strictly outside body
-    # Exclude the BDIM transition band (half-width ε = 2·dx_coarsest).
-    # Pressure and velocity inside the band are O(1)-corrected by BDIM
-    # and do not converge in Linf as dx → 0 (the band always contains
-    # O(1)-error cells regardless of resolution).  The interior mask
-    # removes these cells to expose the true convergence rate.
-    bdim_eps  = 2.0 * dx_coarsest
+    # Exclude the BDIM transition band (half-width ε = 2·dx on THIS grid).
+    bdim_eps  = 2.0 * dx
     interior  = sdf > bdim_eps                # outside BDIM band
     far       = sdf >= body_band_R * R        # far-field (>5R from surface)
 
@@ -189,11 +184,13 @@ for Nx in nxs:
     ep = (p_c - p_c[fluid_mask_c].mean()) - (pr_c - pr_c[fluid_mask_c].mean())
     emag = np.sqrt(eu**2 + ev**2)
 
-    # Global
-    metrics["L2_u_global"].append(rms(emag))
-    metrics["Linf_u_global"].append(l_inf(emag))
-    metrics["L2_p_global"].append(rms(ep))
-    metrics["Linf_p_global"].append(l_inf(np.abs(ep)))
+    # Global = fluid domain only (sdf > 0): body interior excluded because
+    # pressure is unconstrained there (mu0→0, Poisson degenerates) and
+    # including it inflates Linf with non-physical values.
+    metrics["L2_u_global"].append(rms(emag[fluid]))
+    metrics["Linf_u_global"].append(l_inf(emag[fluid]))
+    metrics["L2_p_global"].append(rms(ep[fluid]))
+    metrics["Linf_p_global"].append(l_inf(np.abs(ep[fluid])))
 
     # Fluid only (sdf > 0)
     metrics["L2_u_fluid"].append(rms(emag[fluid]))
@@ -331,24 +328,22 @@ if n_cols == 1:
     axes2 = axes2.reshape(2, 1)
 
 for i, Nx in enumerate(nxs):
-    dx     = Lx / Nx
-    di     = Nx // Nx_coarsest
-    di_ref = Nx_finest // Nx_coarsest
-    Nc     = Nx_coarsest
+    dx = Lx / Nx
 
     u = np.load(os.path.join(maindir, f"Nx{Nx}", "uv_field", "u.npy"))
     v = np.load(os.path.join(maindir, f"Nx{Nx}", "uv_field", "v.npy"))
     p = np.load(os.path.join(maindir, f"Nx{Nx}", "uv_field", "p.npy"))
 
-    # ---- velocity magnitude error (strided – acceptable for visualisation) ----
-    eu   = u[1:-1:di, 1:-1:di] - u_ref[1:-1:di_ref, 1:-1:di_ref]
-    ev   = v[1:-1:di, 1:-1:di] - v_ref[1:-1:di_ref, 1:-1:di_ref]
+    # Error fields at THIS grid's own level (native coarse vs reference
+    # restricted to Nx), matching the convergence-table comparison.
+    eu   = restrict_to(u[1:-1, 1:-1], Nx, 'u') - restrict_to(u_ref[1:-1, 1:-1], Nx, 'u')
+    ev   = restrict_to(v[1:-1, 1:-1], Nx, 'v') - restrict_to(v_ref[1:-1, 1:-1], Nx, 'v')
     emag = np.sqrt(eu**2 + ev**2)
 
-    # ---- pressure error (block-averaged, gauge-corrected, same as metrics) ----
-    p_c  = _restrict(p,     di,     di)
-    pr_c = _restrict(p_ref, di_ref, di_ref)
-    X, Y = make_grid(p_c.shape[0], p_c.shape[1], dx_coarsest, dx_coarsest)
+    # ---- pressure error (gauge-corrected, same as metrics) ----
+    p_c  = restrict_to(p[1:-1, 1:-1],     Nx, 'p')
+    pr_c = restrict_to(p_ref[1:-1, 1:-1], Nx, 'p')
+    X, Y = make_grid(Nx, Nx, dx, dx)
     sdf_c = sdf_cylinder(X, Y)
     fmask = sdf_c > 0
     ep = (p_c - p_c[fmask].mean()) - (pr_c - pr_c[fmask].mean())
@@ -369,13 +364,11 @@ for i, Nx in enumerate(nxs):
     plt.colorbar(im0, ax=ax, shrink=0.8)
 
     # ---- row 1: p_err (signed, diverging colormap) ----
-    # Mask body interior (pressure unconstrained there) and set colour
-    # scale from the interior fluid only (sdf > bdim_eps) so that the
-    # O(1) errors in the BDIM transition band don't wash out the plot.
+    # Colorscale from the full fluid domain (sdf > 0) so it matches
+    # Linf_p_global/fluid in the convergence table.
     ep_plot = ep.copy()
     ep_plot[sdf_c <= 0] = np.nan          # hide body interior
-    int_mask = sdf_c > bdim_eps
-    ep_max = max(np.abs(ep[int_mask]).max(), 1e-8) if int_mask.any() else max(np.abs(ep[fmask]).max(), 1e-8)
+    ep_max = max(np.abs(ep[fmask]).max(), 1e-8)
     ax = axes2[1, i]
     im1 = ax.imshow(ep_plot.T, origin="lower",
                     extent=[xmin, xmax, ymin, ymax],

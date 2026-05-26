@@ -1099,7 +1099,7 @@ __device__ __forceinline__ void bdim_one_axis_3d(
     // padded coordinates; the face-grid index is (i-1, j-1, k-1).
     if (i >= 1 && j >= 1 && k >= 1 && i <= c_hi_i && j <= c_hi_j && k <= c_hi_k) {
         c_out[(i - 1) * c_stride_i + (j - 1) * c_stride_j + (k - 1)] =
-            dt / (rho_body + (rho_f - rho_body) * mu0);
+            dt * mu0 / (rho_body + (rho_f - rho_body) * mu0);
     }
 }
 
@@ -1347,7 +1347,7 @@ __device__ __forceinline__ void bdim_one_axis_sigma_3d(
     phi_out[g] = mu0 * diff_c + b_c + mu1 * nd;
     if (i >= 1 && j >= 1 && k >= 1 && i <= c_hi_i && j <= c_hi_j && k <= c_hi_k) {
         c_out[(i - 1) * c_stride_i + (j - 1) * c_stride_j + (k - 1)] =
-            dt / (rho_body + (rho_f - rho_body) * mu0_poisson);
+            dt * mu0_poisson / (rho_body + (rho_f - rho_body) * mu0_poisson);
     }
 }
 

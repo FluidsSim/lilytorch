@@ -95,6 +95,17 @@ for Nx in nxs:
     # --- Physics ---
     pars["solver"]["nu"]  = nu
     pars["solver"]["rho"] = rho
+    # Single-phase rigid cylinder: use the pure mu0-weighted BDIM2 projection
+    # (Maertens & Weymouth 2015), ch = dt*mu0/rho.  The config default uses the
+    # variable-density coefficient dt/(rho_body + (rho-rho_body)*mu0) with
+    # rho_body=1000, i.e. a 1000:1 density jump across the immersed boundary;
+    # that makes the variable-coefficient Poisson degenerate where mu0->0 and
+    # blows up the pressure in the BDIM transition band to O(10) (decaying only
+    # 1st order), destroying the 2nd-order pressure convergence of MW2015.
+    # The mu0 form vanishes exactly inside the body and stays smooth across the
+    # band, recovering physical O(1/2 rho U^2) pressure.  (Requires
+    # solver_method='python'.)
+    pars["solver"]["bdim_mu0_projection"] = True
 
     # --- Solver method: CompositeBodyAnalytical does not use BDIMhandler,
     #     so the kernel path (_kernel_step bookkeeping) is unavailable.
