@@ -45,7 +45,7 @@ class BaseSimConfig:
 
     * ``customize_animat``          – per-animat / per-index tweaks
     * ``customize_morphology_links`` – override per-link morphology fields
-    * ``customize_joint_initials``  – override joint initial positions
+    * ``customize_joint_initials``  – override joint initials / damping / stiffness / limits
     * ``extra_simulation_extensions`` – add FlowViewer, CameraRecording, etc.
     """
 
@@ -78,6 +78,18 @@ class BaseSimConfig:
         # ── Animats ───────────────────────────────────────────────────────
         self.animats_pars = []
         self.filter_fixed_joints = True  # skip joints with type=="fixed"
+
+        # ── Joint defaults (applied to every non-fixed joint) ─────────────
+        # Defaults baked into each joint dict in ``gen_animat_config``.
+        # Set ``joint_damping > 0`` to stabilise *passive* DOFs that are
+        # driven by fluid forces: the FARMS↔BDIM coupling is an explicit
+        # staggered scheme, so light / neutrally-buoyant passive links are
+        # prone to the added-mass instability — a little joint damping is
+        # the cheapest mitigation.  Override per-joint in
+        # ``customize_joint_initials`` for finer control.
+        self.joint_damping   = 0.0
+        self.joint_stiffness = 0.0
+        self.joint_springref = 0.0
 
         # ── Grid (2-D by default; set Nz/zmin/zmax for 3-D) ──────────────
         self.Nx   = 512
@@ -271,10 +283,21 @@ class BaseSimConfig:
         """
 
     def customize_joint_initials(self, joints_list):
-        """Called after the joints list is built.
+        """Called after the joints list is built (mutates ``joints_list`` in place).
 
-        Override to set initial positions for specific joints
-        (e.g. leg joints for salamanders).
+        Each entry is the full joint dict, so override to set any field
+        per joint — not just the initial position:
+
+        * ``initial`` – initial position/velocity (e.g. leg joints for
+          salamanders).
+        * ``damping`` / ``stiffness`` / ``springref`` – make a joint
+          passive / compliant.  Adding damping to fluid-driven passive
+          joints stabilises the explicit FARMS↔BDIM coupling (mitigates
+          the added-mass instability for light / neutrally-buoyant links).
+        * ``limits`` – per-joint position/velocity limits.
+
+        For a single value applied to *every* joint, set ``joint_damping``
+        / ``joint_stiffness`` / ``joint_springref`` in ``__init__`` instead.
         """
 
     def extra_simulation_extensions(self, output_folder):
@@ -378,9 +401,9 @@ class BaseSimConfig:
                             'name'     : jn,
                             'initial'  : [0, 0],
                             'limits'   : [[-inf, inf], [-inf, inf]],
-                            'stiffness': 0,
-                            'springref': 0,
-                            'damping'  : 0,
+                            'stiffness': self.joint_stiffness,
+                            'springref': self.joint_springref,
+                            'damping'  : self.joint_damping,
                             'extras'   : {},
                         } for jn in joint_names
                     ],
