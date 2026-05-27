@@ -112,8 +112,8 @@ class SimConfig(BaseSimConfig):
         self.bdim_physics = {"solref": [0.001, 0.5]}
 
         self.wall_alpha   = 0.
-        self.water_alpha  = 0 #0.05
-        self.grid_spacing = None #0.5*(self.ymax - self.ymin)  # lines on background floor
+        self.water_alpha  = 0.05
+        self.grid_spacing = 0.5*(self.ymax - self.ymin)  # lines on background floor
 
 
     def customize_joint_initials(self, joints_list):
@@ -139,6 +139,7 @@ class SimConfig(BaseSimConfig):
                 "ambient": [0.7, 0.7, 0.7],
             },
         })
+
         extensions.append({
             "loader": "lilytorch.integration.flow_iso_gl_viewer.FlowIsoGLViewer",
             "config": {
@@ -166,7 +167,6 @@ class SimConfig(BaseSimConfig):
             overshoot=1,
             max_width=3840, max_height=2160,
         )
-        cam["elevation"] = -30   # tilt 20° from straight-down (−90 = top-down)
         extensions.append({
             "loader": "farms_mujoco.sensors.camera.CameraRecording",
             "config": {
@@ -211,7 +211,7 @@ class SimConfig(BaseSimConfig):
         extensions.append({
             "loader": "lilytorch.integration.force_viewer.ForceViewer",
             "config": {
-                "force_scale" : 30,     # metres of arrow per Newton
+                "force_scale" : 60,     # metres of arrow per Newton
                 "force_width" : 0.001,    # shaft (circular) radius in metres
                 "color"       : "#0011FF",
                 # "force_source": "hydro",  # viscous+pressure (no buoyancy)

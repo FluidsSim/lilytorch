@@ -128,7 +128,7 @@ class ForceViewer(TaskExtension):
         self._n_active = 0              # arrows currently visible
         self._iteration = 0
         self._slots_reserved = False
-        self._cam_renderer_patched = False
+        self._patched_renderers = set()   # id() of already-wrapped renderers
         self._warned_hydro = False
 
         # Shared arrow data (interactive viewer + offscreen renderer).
@@ -219,23 +219,33 @@ class ForceViewer(TaskExtension):
 
         self._slots_reserved = True
 
-    def _patch_camera_renderer(self, task: ExperimentTask):
-        """Inject arrows into CameraRecording's offscreen renderer so they
-        appear in the saved video (same trick as FlowViewer)."""
-        if self._cam_renderer_patched:
+    def _patch_camera_renderers(self, task: ExperimentTask):
+        """Inject arrows into every CameraRecording offscreen renderer so they
+        appear in the saved videos / PNG frames (same trick as FlowViewer).
+
+        Matches by ``isinstance`` so subclasses such as ``CameraRecordingFrames``
+        (used for the follow-camera video) are patched too, and patches *all*
+        recorders, not just the first one.
+        """
+        try:
+            from farms_mujoco.sensors.camera import CameraRecording
+        except Exception:  # noqa: BLE001
             return
 
-        cam_ext = None
         for ext in task.extensions:
-            if type(ext).__name__ == "CameraRecording":
-                cam_ext = ext
-                break
-        if cam_ext is None:
-            return
-        renderer = getattr(cam_ext, "renderer", None)
-        if renderer is None:
-            return
+            if not isinstance(ext, CameraRecording):
+                continue
+            renderer = getattr(ext, "renderer", None)
+            if renderer is None or id(renderer) in self._patched_renderers:
+                continue
+            self._patch_one_renderer(renderer)
+            self._patched_renderers.add(id(renderer))
+            print(f"[ForceViewer] Patched {type(ext).__name__} renderer "
+                  f"({getattr(getattr(ext, 'video', None), 'path', '?')}) "
+                  f"for video output.")
 
+    def _patch_one_renderer(self, renderer):
+        """Wrap a single ``mujoco.Renderer.render`` to append our arrow geoms."""
         viewer_self = self
         original_render = renderer.render
         _eye3 = np.eye(3, dtype=np.float64).ravel()
@@ -257,12 +267,11 @@ class ForceViewer(TaskExtension):
                         g, _ARROW, float(viewer_self._width[i]),
                         viewer_self._from[i], viewer_self._to[i],
                     )
+                    g.category = mujoco.mjtCatBit.mjCAT_DECOR
                     scn.ngeom += 1
             return original_render(out=out)
 
         renderer.render = _render_with_arrows
-        self._cam_renderer_patched = True
-        print("[ForceViewer] Patched CameraRecording renderer for video output.")
 
     # ── per-step update ──────────────────────────────────────────────
 
@@ -271,9 +280,10 @@ class ForceViewer(TaskExtension):
             self._iteration += 1
             return
 
-        # Deferred CameraRecording patch (renderer may not exist at init).
-        if not self._cam_renderer_patched:
-            self._patch_camera_renderer(task)
+        # Deferred CameraRecording patch (renderers are created in each
+        # recorder's initialize_episode, so they exist by the first step).
+        # Cheap idempotent re-scan: skips renderers already wrapped.
+        self._patch_camera_renderers(task)
 
         handler = self._handler()
         if handler is None:

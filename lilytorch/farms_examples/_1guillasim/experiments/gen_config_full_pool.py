@@ -112,49 +112,42 @@ class SimConfig(BaseSimConfig):
     def extra_simulation_extensions(self, output_folder):
         extensions = []
 
-        # # FlowViewer (works headless via CameraRecording)
-        # extensions.append({
-        #     "loader": "lilytorch.integration.flow_viewer.FlowViewer",
-        #     "config": {
-        #         "field"        : "omega_z",
-        #         "max_spheres"  : 800000,
-        #         "iso_fraction" : 0.15,
-        #         "smooth_sigma" : 2.5,
-        #         "crop_boundary": 3,
-        #         "sphere_size"  : 0.01,
-        #         "update_every" : None,
-        #     },
-        # })
 
-        # extensions.append({
-        #     "loader": "lilytorch.integration.particle_viewer.ParticleViewer",
-        #     "config": {
-        #         "seed_mode"       : "boundary",
-        #         "max_particles"   : 800000,
-        #         "seed_n_particles": 3,
-        #         "seed_interval"   : 1,
-        #         "turb_diffusivity": 0.00001,
-        #         "sphere_size"     : 0.003,
-        #         "particle_color"  : [255/256, 0.0, 0.0, 0.6],
-        #         "trail_length"    : 0,
-        #         "update_every"    : None,
-        #         "n_z_layers"      : 1,
-        #         "floor_color"     : "#5B5B5B63",
-        #         "body_color"      : "#B5A425",
-        #         # "light_color"      : [0.05, 0.12, 0.85, 1.0], # blue lamp
-        #         # "emissive_particles": True,                   # glow independent of light
-        #         "save_particles"   : True,
-        #         "save_dir"         : os.path.join(output_folder, "particles"),
-        #         "save_every"       : self.save_every,
-        #     }
-        # })
+        # Soft, reflection-free lighting for tank recordings
+        extensions.append({
+            "loader": "lilytorch.integration.light_modifier.LightModifier",
+            "config": {
+                "diffuse": [1, 1, 1],
+                "ambient": [0.7, 0.7, 0.7],
+            },
+        })
+
+        extensions.append({
+            "loader": "lilytorch.integration.flow_iso_gl_viewer.FlowIsoGLViewer",
+            "config": {
+                # "field"              : "omega_z",
+                "field"              : "omega_mag",
+                "alpha"              : 0.2,
+                "update_every"       : 1,
+                "max_vertices"       : 20 * self.Nx * self.Ny,
+                "smooth_sigma"       : 0,
+                "crop_boundary"      : 0,
+                "exclude_body"       : True,
+                "iso_value"          : 10.0,
+                "debug_force_visible": False,
+                "color_uni"          : "#FF4500",
+                "color_pos"          : "#FF4500",
+                "color_neg"          : "#00FFFF",
+            },
+        })
 
         # Top-down camera auto-fitted to the pool
         cam = top_down_camera_config(
             self.xmin, self.xmax,
             self.ymin, self.ymax,
             self.zmin, self.zmax,
-            overshoot=1
+            overshoot=1,
+            max_width=3840, max_height=2160,
         )
         extensions.append({
             "loader": "farms_mujoco.sensors.camera.CameraRecording",
@@ -168,8 +161,23 @@ class SimConfig(BaseSimConfig):
             },
         })
 
+        # SkyModifier must be LAST so all CameraRecording renderers already
+        # exist when initialize_episode runs the GPU texture upload.
+        extensions.append({
+            "loader": "lilytorch.integration.sky_modifier.SkyModifier",
+            "config": {"rgb": [0.0, 0.0, 0.0]},
+        })
+
+
         return extensions
 
+    def _extra_run_patch(self):
+        # Replace FARMS starry-night sky with flat black in the subprocess.
+        return (
+            "_m.night_sky=lambda mjcf_model:mjcf_model.asset.add("
+            "'texture',name='skybox',type='skybox',"
+            "builtin='flat',rgb1=[0,0,0],rgb2=[0,0,0],width=8,height=8);"
+        )
 
 if __name__ == "__main__":
     SimConfig().run()
