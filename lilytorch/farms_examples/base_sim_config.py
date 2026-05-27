@@ -123,7 +123,7 @@ class BaseSimConfig:
 
         # ── Arena ─────────────────────────────────────────────────────────
         self.generate_pool  = True   # generate pool/water SDFs; False → use flat arena
-        self.grid_spacing   = None   # None → no floor grid; float → white grid line spacing (m)
+        self.grid_spacing   = None   # None or 0 → no floor grid; positive float → white grid line spacing (m)
         self.wall_thickness = None   # None → auto for 3-D, 0.3 for 2-D
         self.wall_height    = None   # None → 0.3 for 2-D (ignored for 3-D)
         self.wall_alpha     = None   # None → keep default (0.3); 0.0=transparent, 1.0=opaque

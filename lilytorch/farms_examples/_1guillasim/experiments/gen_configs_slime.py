@@ -16,12 +16,13 @@ class SimConfig(BaseSimConfig):
         )
 
         # ── Hardware ──────────────────────────────────────────────────
-        self.compute_sdf    = False
-        self.convexify      = True
-        self.use_gpu        = True
-        self.use_bdim       = True
-        self.headless       = False
-        self.smagorinsky_cs = 0.
+        self.compute_sdf          = True
+        self.convexify            = False
+        self.use_gpu              = True
+        self.use_bdim             = True
+        self.headless             = False
+        self.smagorinsky_cs       = 0.
+        self.zero_pressure_inside = True
 
         # self.carreau = {
         #     "nu_0"  : 450.0e-6,
@@ -53,10 +54,10 @@ class SimConfig(BaseSimConfig):
                 "gains"          : [100.0, 1., 0],
                 "spawn_mode"     : SpawnMode.FREE,
                 "pose"           : [0., -0.15, 0., 0, 0, 2.9],
-                "controller_path": "lilytorch.farms_examples._1guillasim.dye_experiments.controller.PositionController",
+                "controller_path": "lilytorch.farms_examples._1guillasim.experiments.controller.PositionController",
                 "control_pars"   : {
                     "file_path": os.path.join(
-                        self.data_folder, "dye_experiments/robot_data/robot_data_log_2025-09-01_19_09_17.csv"
+                        self.data_folder, "experiments/robot_data/robot_data_log_2025-09-01_19_09_17.csv"
                     ),
                 },
             },

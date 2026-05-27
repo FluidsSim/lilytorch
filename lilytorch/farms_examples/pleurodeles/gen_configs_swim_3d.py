@@ -15,7 +15,7 @@ class SimConfig(BaseSimConfig):
 
         # Reuse the existing pleurodeles mesh SDF and generate a separate
         # 3-D interpolation cache so it does not clash with the 2-D data.
-        self.compute_sdf    = True
+        self.compute_sdf    = False
 
         self.data_folder = os.path.join(
             lilytorch_repo_root, 'farms_examples', 'pleurodeles',
@@ -26,8 +26,8 @@ class SimConfig(BaseSimConfig):
         self.use_gpu           = True
         self.headless          = False
         self.poisson_method    = "multigrid"
-        self.sdf_interp_method = "quadratic"
-        self.force_delta_order = 2
+        # self.sdf_interp_method = "triquadratic"
+        # self.force_delta_order = 2
 
         # self.apply_bdim_sigma = True
 
@@ -83,7 +83,7 @@ class SimConfig(BaseSimConfig):
         # BDIM solver
         self.bdim_dt                 = self.timestep
         self.bdim_nt                 = self.n_iterations
-        self.zero_pressure_inside    = False
+        self.zero_pressure_inside    = True
         self.rho_body                = 1000.0
         self.poisson_tol             = 1.0e-4
         self.poisson_max_cycles      = 3
@@ -112,8 +112,8 @@ class SimConfig(BaseSimConfig):
         self.bdim_physics = {"solref": [0.001, 0.5]}
 
         self.wall_alpha   = 0.
-        self.water_alpha  = 0.05
-        self.grid_spacing = 0.5*(self.ymax - self.ymin)  # lines on background floor
+        self.water_alpha  = 0 #0.05
+        self.grid_spacing = None #0.5*(self.ymax - self.ymin)  # lines on background floor
 
 
     def customize_joint_initials(self, joints_list):
@@ -180,9 +180,13 @@ class SimConfig(BaseSimConfig):
         })
 
 
-        # Following camera: tight view locked on fish CoM
+        # Following camera: tight view locked on fish CoM.
+        # CameraRecordingFrames == CameraRecording + per-frame PNG export; the
+        # PNGs are exactly the frames that make up video_follow.mp4. Swap the
+        # loader back to farms_mujoco.sensors.camera.CameraRecording to skip the
+        # PNGs, or set "save_video": False to keep only the frames.
         extensions.append({
-            "loader": "farms_mujoco.sensors.camera.CameraRecording",
+            "loader": "lilytorch.integration.camera_frame_recorder.CameraRecordingFrames",
             "config": {
                 "path"            : os.path.join(output_folder, "output", "video_follow.mp4"),
                 "animat_id"       : 0,
@@ -194,6 +198,31 @@ class SimConfig(BaseSimConfig):
                 "distance"        : 0.4,
                 "offset"          : [0, 0, 0],
                 "resolution"      : [3840, 2160],
+                # # PNG frames -> output/video_follow_frames/frame_%06d.png
+                # "frames_dir"      : os.path.join(output_folder, "output", "video_follow_frames"),
+                # "save_video"      : True,
+            },
+        })
+
+
+        # ForceViewer – draw the fluid force on each body as a scalable arrow.
+        # force_scale sets the arrow length (m per N); force_width sets the
+        # circular shaft radius (m). Tune both to taste.
+        extensions.append({
+            "loader": "lilytorch.integration.force_viewer.ForceViewer",
+            "config": {
+                "force_scale" : 30,     # metres of arrow per Newton
+                "force_width" : 0.001,    # shaft (circular) radius in metres
+                "color"       : "#0011FF",
+                # "force_source": "hydro",  # viscous+pressure (no buoyancy)
+                # "max_length"  : 0.3,      # clamp arrow length (m); null = off
+                # "min_force"   : 0.0,      # hide arrows below this magnitude (N)
+                # "show_torque" : True,     # also draw a torque arrow per body
+                # "torque_scale": 30,       # m per N·m (default: force_scale)
+                # "torque_width": 0.001,    # shaft radius (default: force_width)
+                # "torque_color": "#00B0FF",
+                # "min_torque"  : 0.0,      # hide torque arrows below this (N·m)
+                "update_every": 1,     # null -> solver.save_every cadence
             },
         })
 

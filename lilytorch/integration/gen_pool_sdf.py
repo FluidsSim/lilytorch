@@ -168,9 +168,9 @@ def create_pool_sdf(xmin, xmax, ymin, ymax, zmin=None, zmax=None,
         = fully transparent, ``1.0`` = fully opaque.  *None* keeps the
         defaults from ``WALL_MATERIAL`` / ``FLOOR_MATERIAL`` (0.3).
     grid_spacing : float or None
-        When set, white grid lines of this spacing (in metres) are drawn
-        over the background floor across the inner fluid domain.  *None*
-        disables the grid (default).
+        When set to a positive value, white grid lines of this spacing (in
+        metres) are drawn over the background floor across the inner fluid
+        domain.  *None* (default) or ``0`` disables the grid.
     """
     is_3d = zmin is not None and zmax is not None
 
@@ -239,7 +239,9 @@ def create_pool_sdf(xmin, xmax, ymin, ymax, zmin=None, zmax=None,
     )
 
     # ---- white grid lines over the fluid domain ---------------------
-    if grid_spacing is not None:
+    # Guard against grid_spacing <= 0: 0 (or a negative) would otherwise enter
+    # this branch and loop forever since `y += grid_spacing` never advances.
+    if grid_spacing is not None and grid_spacing > 0:
         line_w = grid_spacing * 0.003         # line width = 4 % of spacing
         line_h = 0.0002                       # 0.2 mm thick
         # Place grid lines at the INNER floor surface (inside the tank),
