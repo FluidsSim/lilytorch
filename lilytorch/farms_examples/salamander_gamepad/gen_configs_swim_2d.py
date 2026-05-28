@@ -61,7 +61,7 @@ class SimConfig(BaseSimConfig):
         self.convection_method = "implicit"
         self.n_iterations      = 80001
         self.save_frames       = False
-        self.num_sub_steps     = 5
+        self.num_sub_steps     = 1
 
         # ── MuJoCo ───────────────────────────────────────────────────
         self.visual_scale = 10.0
@@ -82,6 +82,9 @@ class SimConfig(BaseSimConfig):
         self.bdim_dt      = self.timestep
         self.bdim_nt      = self.n_iterations
         self.rho_body     = 1000.0
+
+        self.bdim_mu0_projection = False
+
 
         # ── Boundary conditions ──────────────────────────────────────
         self.bc_type_u   = ["D", "D", "D", "D"]

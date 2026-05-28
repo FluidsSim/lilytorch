@@ -335,18 +335,6 @@ class FluidSolver(PlottingMixin):
         # low-mu0 cells the degenerate solve cannot remove.
         self.bdim_mu0_projection = bool(solver.get("bdim_mu0_projection", True))
 
-        # Softmin SDF blending scale for the per-link body velocity write
-        # (resolves the inter-link velocity discontinuity at overlap surfaces
-        # that drives the multibody projection blow-up).  None or
-        # non-positive → winning-body (current behaviour).  Positive float
-        # σ → smooth SDF-weighted blending with that scale.  Honoured by
-        # BDIMhandler's per-body velocity merge in both the kernel and the
-        # full-Python update paths; see ``_softmin_blend_3d/_softmin_blend_2d``.
-        _sigma = solver.get("sigma_softmin", None)
-        self.sigma_softmin = (float(_sigma)
-                              if (_sigma is not None and float(_sigma) > 0.0)
-                              else None)
-
         self.starting_iteration      = solver.get("starting_iteration", 0)
         self.starting_iteration_path = solver.get("starting_iteration_path", None)
         self.starting_time           = self.starting_iteration * self.dt
@@ -1712,15 +1700,6 @@ class FluidSolver(PlottingMixin):
             int(ks['dirty_Ai']), int(ks['dirty_Aj']),
         )
 
-        # 5b. Softmin SDF blending of multibody face velocities (2-D).
-        #     No-op when sigma_softmin is None / ≤ 0.  See the 3-D step
-        #     for the rationale.
-        _softmin = getattr(comp, '_softmin_blend_callable', None)
-        if (_softmin is not None
-                and self.sigma_softmin is not None
-                and self.sigma_softmin > 0.0):
-            _softmin(sdf_u_tmp, sdf_v_tmp, bU_tmp, bV_tmp)
-
         # 6. Kernel B: fused BDIM2 + variable-density coefficients.
         if (self.apply_bdim_sigma
                 and self._sigma_shifts is not None
@@ -1882,22 +1861,6 @@ class FluidSolver(PlottingMixin):
             int(ks['dirty_i0']), int(ks['dirty_j0']), int(ks['dirty_k0']),
             int(ks['dirty_Ai']), int(ks['dirty_Aj']), int(ks['dirty_Ak']),
         )
-
-        # 5b. Softmin SDF blending of multibody face velocities.
-        #     Replaces the winning per-link body_u/v/w (just written by
-        #     streaming_sdf_stag_3d_multi) with a smooth SDF-weighted
-        #     average, removing the velocity discontinuity at
-        #     link-intersection surfaces that drives the multibody
-        #     projection blow-up.  No-op when sigma_softmin is None / ≤ 0
-        #     (the callable returns immediately).  Reads the per-body
-        #     kinematics that BDIMhandler stashed on ``comp`` during
-        #     ``_update_3d_streaming_multi``.
-        _softmin = getattr(comp, '_softmin_blend_callable', None)
-        if (_softmin is not None
-                and self.sigma_softmin is not None
-                and self.sigma_softmin > 0.0):
-            _softmin(sdf_u_tmp, sdf_v_tmp, sdf_w_tmp,
-                     bU_tmp,    bV_tmp,    bW_tmp)
 
         # 6. Kernel B: fused BDIM2 + variable-density coefficients.
         #    Reads primes / SDF / body face velocities; writes u0/v0/w0
