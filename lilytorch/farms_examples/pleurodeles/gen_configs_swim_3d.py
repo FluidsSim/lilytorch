@@ -29,11 +29,13 @@ class SimConfig(BaseSimConfig):
             lilytorch_repo_root, 'farms_examples', 'pleurodeles',
         )
 
-          # Hardware / runtime
-        self.use_bdim       = True
-        self.use_gpu        = True
-        self.headless       = False
-        self.poisson_method = "multigrid"
+        # Hardware / runtime
+        self.use_bdim          = True
+        self.use_gpu           = True
+        self.headless          = False
+        self.poisson_method    = "multigrid"
+
+        self.force_method = "lagrangian"
         # self.sdf_interp_method = "triquadratic"
         # self.force_delta_order = 2
 

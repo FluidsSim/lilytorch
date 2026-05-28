@@ -12,8 +12,8 @@ New config keys (add to ``bdim_yaml``):
     solver.dtype                 : "float32" | "float64"   (default "float32")
     solver.rho_body              : float                   (default 800.0)
     solver.zero_pressure_inside  : bool                    (default False)
-    solver.force_method          : "method1" | "method2"   (default "method2";
-                                   3-D always uses method2_3d)
+    solver.force_method          : "eulerian" | "lagrangian"   (default "eulerian";
+                                   legacy "method1"/"method2" accepted with a DeprecationWarning)
     body.force_scaling           : "auto" | float          (default "auto")
     body.contour_mask            : bool                    (default False)
     physics.solref               : [float, float] | null   (default null)
@@ -141,35 +141,19 @@ class BDIMhandler:
             "zero_pressure_inside", False
         )
         self.contour_mask = self.pars.get("body", {}).get("contour_mask", False)
-        self.force_method = self.pars["solver"].get("force_method", "method2")
+        self.force_method = self.pars["solver"].get("force_method", "eulerian")
 
-        # ``force_method == "method1"`` is a 2-D-only contour-integral
-        # variant that lives entirely in pure-Python (``forces_method1``
-        # in ``forces.py``).  It does not consume the per-body cc-SDF
-        # produced by the streaming/combined C++/CUDA kernels (it samples
-        # CC stress / pressure-force tensors at the body contour via
-        # ``interp_utility``), so combining it with ``use_kernels=True``
-        # would silently bypass the kernel-mode optimisations on the
-        # forces stage.  Raise here so users get a clear error instead
-        # of a confusing performance regression.  Method 1 has no 3-D
-        # analogue (only ``forces_method2_3d`` exists), and the 3-D
-        # dispatch in :meth:`step` already short-circuits to method 2
-        # regardless of ``self.force_method`` — no extra check needed
-        # for 3-D.
-
-        if (self.ndim == 2
-                and self.force_method == "method1"
-                and self.fluid_solver._solver_method=="kernel"):
-            raise ValueError(
-                "force_method='method1' is incompatible with "
-                "solver_method='kernel': forces_method1 "
-                "is a contour-integral implementation that does not "
-                "consume the per-body cc-SDF produced by the streaming/"
-                "kernel path. Either set solver.solver_method='python' "
-                "(pure-Python path) or switch to force_method='method2' "
-                "(default), which integrates the smoothed delta with "
-                "full kernel-mode acceleration."
+        # Resolve legacy aliases ("method1" → "lagrangian", "method2" → "eulerian").
+        # Actual dispatch is handled by FluidSolver.step_() via FluidSolver.force_method.
+        _fm_aliases = {"method1": "lagrangian", "method2": "eulerian"}
+        if self.force_method in _fm_aliases:
+            import warnings
+            warnings.warn(
+                f"force_method={self.force_method!r} is deprecated; use "
+                f"{_fm_aliases[self.force_method]!r} instead.",
+                DeprecationWarning, stacklevel=2,
             )
+            self.force_method = _fm_aliases[self.force_method]
 
         # ---- buoyancy parameters ----
         self.gravity_z = float(physics.model.opt.gravity[2])  # e.g. -9.81

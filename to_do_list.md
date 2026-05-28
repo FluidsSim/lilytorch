@@ -23,6 +23,43 @@ diff_u, diff_v, diff_w
 - Dropping _compute_variable_density_coefficients: Opus 4.7 suggested to completely remove the rho = rho_body + (rho−rho_body)·μ₀ terms (unless dealing with problems where rho_body<<rho_fluid, i.e. where added mass causes instabilities. It suggested to use the original BDIM2 implementation for c_h = dt·μ₀/(rho_body + (rho−rho_body)·μ₀)
 - Change the printing to use pylog, with info, warning and error colors.
 
+- **(suggestion) Softmin SDF blending of multibody body velocities.**
+  Multibody swimmers (eel, salamander, pleurodeles) currently force
+  `bdim_mu0_projection = False` to avoid the blow-up that the BDIM2
+  μ₀-weighted coefficient `c = dt·μ₀/ρ_eff` causes when bodies (rigid
+  links connected by joints) interpenetrate.  Root cause: per-cell
+  *winning-body* assignment makes `body_u/v/w` discontinuous on the
+  SDF-intersection curve between two links moving at different velocities;
+  in low-μ₀ cells that discontinuity becomes a large `div(u*)` the
+  degenerate μ₀-weighted projection cannot remove.  **Fix**: replace
+  winning-body with a smooth SDF-weighted blend
+  `u(x) = Σ_k exp(-(sdf_k - sdf_min)/σ)·u_k / Σ_k exp(...)`
+  so `body_u` is continuous across intersection surfaces.  This would
+  let multibody swimmers keep `bdim_mu0_projection = True` (better
+  BDIM2 surface accuracy) without blowing up.
+  Status (2026-05-28): a pure-Python prototype was implemented + removed
+  — correctness was verified on a synthetic 2-body case (σ→0 recovers
+  winning-body; σ=ε matches the softmin formula to 1e-10), but it
+  slowed kernel-mode steps too much (per-step Python re-iteration over
+  bodies with `body.sdf(...)` evaluation) and the visible improvement
+  on the salamander_gamepad swim_2d sim did not justify the cost.
+  Required for viability: a **fused CUDA accumulation kernel** that
+  mirrors `streaming_sdf_min_rho_3d_multi_kernel`'s per-(body, cell)
+  iteration but uses `atomicAdd` of `(exp(-Δ/σ)·u_k, exp(-Δ/σ))` into
+  per-stagger accumulators, plus a finalize divide.  Cost would then
+  be ~1 SDF eval per body-cell + a few FMAs + one `exp` (≪ 5% of step
+  time).  Wiring (config knob, BDIMhandler callable stash,
+  fluid_step hook) is documented in the conversation that removed the
+  prototype — re-implement starting from a CUDA kernel rather than the
+  Python loop.
+  **Engineering gotcha for any future re-implementation**: kernel mode
+  deliberately skips `_bind_staggered_grids` (memory optimisation —
+  see `body.py:_StaggeredGrids` docstring), so `comp.Xu_stag/Yu_stag
+  /Zu_stag` are NOT allocated.  Build per-AABB staggered coords on
+  the fly via ``torch.meshgrid(fluid_solver.x[i0:i1] - h/2, ...)`` —
+  never touch `comp.X*_stag` (the previous Python prototype crashed
+  on pleurodeles 3D for this reason).
+
 structure should be as follows: BDIMhandler should have a compute a body update
 
 Review options and propose what to do. This should have a careful modifications in all the examples scipts in farms_examples/.

@@ -15,6 +15,8 @@ __all__ = [
     "apply_bcs_2d",
     "interp_2d",
     "interp_3d",
+    "lagrangian_forces_2d",
+    "lagrangian_forces_3d",
     "rbgs_sweep_2d",
     "rbgs_sweep_3d",
     "mg_residual_2d",
@@ -416,6 +418,97 @@ def interp_3d(
         G,
     )
     return G
+
+
+# =====================================================================
+# Lagrangian (surface-integral) force kernels
+# =====================================================================
+
+def lagrangian_forces_2d(
+        eps_xx: Tensor, eps_xy: Tensor, eps_yy: Tensor,
+        p: Tensor, nu_rho_field: Tensor,
+        cnt_flat: Tensor, cnt_offsets: Tensor,
+        com_pos: Tensor,
+        bx0: float, by0: float,
+        inv_dx: float, inv_dy: float,
+        Mx: int, My: int,
+        method: str = "linear",
+        out: Tensor = None) -> Tensor:
+    """Fused 2-D Lagrangian surface-integral forces.
+
+    Parameters mirror the schema in ``ops.cpp``.  Returns the per-body
+    force/torque tensor of shape ``(B, 6)`` float64 with column layout
+    ``[fv_x, fv_y, t_v, fp_x, fp_y, t_p]``.
+
+    ``cnt_flat`` is the concatenation of every body's contour ``(2, M_b)``
+    along the marker axis (shape ``(2, sum_b M_b)``).  ``cnt_offsets`` is
+    the int64 prefix-offset tensor of shape ``(B+1,)`` such that body
+    ``b`` owns markers ``[cnt_offsets[b], cnt_offsets[b+1])``.
+
+    ``nu_rho_field`` may be either a 1-element tensor (constant ν·ρ) or
+    a full CC field of shape ``(Mx, My)``.
+    """
+    interp_method = _METHOD_MAP.get(method)
+    if interp_method is None:
+        raise ValueError(f"method must be 'linear' or 'quadratic', got {method!r}")
+    B = int(com_pos.shape[0])
+    if out is None:
+        out = torch.zeros(B, 6, dtype=torch.float64, device=p.device)
+    torch.ops.lilytorch_kernels.lagrangian_forces_2d.default(
+        eps_xx, eps_xy, eps_yy,
+        p, nu_rho_field,
+        cnt_flat, cnt_offsets,
+        com_pos,
+        float(bx0), float(by0),
+        float(inv_dx), float(inv_dy),
+        int(Mx), int(My),
+        int(interp_method),
+        out,
+    )
+    return out
+
+
+def lagrangian_forces_3d(
+        eps_xx: Tensor, eps_yy: Tensor, eps_zz: Tensor,
+        eps_xy: Tensor, eps_xz: Tensor, eps_yz: Tensor,
+        p: Tensor, nu_rho_field: Tensor,
+        tri_centroid: Tensor, tri_normal: Tensor, tri_area: Tensor,
+        tri_offsets: Tensor, com_pos: Tensor,
+        bx0: float, by0: float, bz0: float,
+        inv_dx: float, inv_dy: float, inv_dz: float,
+        Mx: int, My: int, Mz: int,
+        method: str = "linear",
+        out: Tensor = None) -> Tensor:
+    """Fused 3-D Lagrangian surface-integral forces.
+
+    Inputs mirror :func:`lagrangian_forces_2d`.  ``tri_centroid``,
+    ``tri_normal`` have shape ``(3, T_total)`` (concatenated across all
+    bodies along the triangle axis); ``tri_area`` has shape ``(T_total,)``.
+    ``tri_offsets`` is the int64 ``(B+1,)`` prefix-offset tensor.
+
+    Returns ``(B, 12)`` float64 with column layout
+    ``[fv_x, fv_y, fv_z, tv_x, tv_y, tv_z,
+       fp_x, fp_y, fp_z, tp_x, tp_y, tp_z]``.
+    """
+    interp_method = _METHOD_MAP.get(method)
+    if interp_method is None:
+        raise ValueError(f"method must be 'linear' or 'quadratic', got {method!r}")
+    B = int(com_pos.shape[0])
+    if out is None:
+        out = torch.zeros(B, 12, dtype=torch.float64, device=p.device)
+    torch.ops.lilytorch_kernels.lagrangian_forces_3d.default(
+        eps_xx, eps_yy, eps_zz,
+        eps_xy, eps_xz, eps_yz,
+        p, nu_rho_field,
+        tri_centroid, tri_normal, tri_area,
+        tri_offsets, com_pos,
+        float(bx0), float(by0), float(bz0),
+        float(inv_dx), float(inv_dy), float(inv_dz),
+        int(Mx), int(My), int(Mz),
+        int(interp_method),
+        out,
+    )
+    return out
 
 
 def apply_bcs_2d(
