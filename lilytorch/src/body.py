@@ -124,6 +124,14 @@ class _StaggeredGrids:
         ndim = 2 if z is None else 3
         nx, ny = len(x), len(y)
 
+        # ---- 1-D cell-centre coordinate vectors ----------------------
+        # Kept around so callers that only need axes (e.g. the lagrangian
+        # force kernels' (bx0, by0, bz0, Mx, My, Mz) setup) don't have to
+        # carry a separate reference to the body's 1-D x/y/z.
+        self.x = x
+        self.y = y
+        self.z = z
+
         # ---- cell-centre meshgrid ------------------------------------
         if ndim == 2:
             self.X, self.Y = torch.meshgrid(x, y, indexing="ij")

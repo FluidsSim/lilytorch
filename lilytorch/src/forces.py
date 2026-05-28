@@ -545,13 +545,17 @@ def forces_method2(self, u, v, p, iteration):
         gy = torch.gradient(sdf_vals, spacing=self.h, dim=2, edge_order=2)[0]
         sdf_grad_mag_2d = torch.sqrt(gx**2 + gy**2)
 
+    # Build the 2-D cell-centred meshgrid on the fly — comp._grids may
+    # not be allocated in kernel mode (memory optimisation; see
+    # body.py:_StaggeredGrids).  Small for 2-D grids.
+    _Xcc, _Ycc = torch.meshgrid(comp.x, comp.y, indexing='ij')
     fv, tv, fp, tp = self._forces_body_batch_compiled(
         (xstress, ystress),
         (pforce_x, pforce_y),
         sdf_vals,
         eps_body, self.eps,
         (comp.com_pos[:, 0], comp.com_pos[:, 1]),
-        (comp._grids.X, comp._grids.Y), self.h2,
+        (_Xcc, _Ycc), self.h2,
         sdf_grad_mag_2d,
     )
     fv_x, fv_y = fv
@@ -1011,10 +1015,12 @@ def forces_lagrangian_2d(self, u, v, p, iteration):
         nu_rho_field = torch.tensor(
             [float(nu_rho)], dtype=p.dtype, device=p.device)
 
-    grids = comp._grids
-    Mx = int(grids.x.numel())
-    My = int(grids.y.numel())
-    bx0 = float(grids.x[0]); by0 = float(grids.y[0])
+    # Use comp.x/comp.y (always allocated 1-D coord vectors) instead of
+    # comp._grids — the staggered-grid bundle is skipped by kernel-mode
+    # MultiAnimatBodies as a memory optimisation (see body.py:_StaggeredGrids).
+    Mx = int(comp.x.numel())
+    My = int(comp.y.numel())
+    bx0 = float(comp.x[0]); by0 = float(comp.y[0])
     inv_dx = 1.0 / h; inv_dy = 1.0 / h
 
     out = _lagrangian_forces_2d_kernel(
@@ -1069,8 +1075,9 @@ def forces_lagrangian_2d(self, u, v, p, iteration):
     # 2-D/3-D and runs on CPU or CUDA via the existing dispatched
     # ``interp_2d`` / ``interp_3d`` ops).
     from lilytorch.src.kernels import RegularGridInterpolator
-    grids = comp._grids
-    axes_2d = (grids.x, grids.y)
+    # Use comp.x/comp.y (always allocated) — comp._grids may be missing
+    # in kernel mode (see body.py:_StaggeredGrids).
+    axes_2d = (comp.x, comp.y)
 
     # Bilinear interpolation of σ_ij and p at every contour marker of
     # every body.  We share one interpolator instance per field by
@@ -1163,13 +1170,15 @@ def _forces_lagrangian_2d_python_ref(self, u, v, p, iteration):
     fused ``lagrangian_forces_2d`` C++/CUDA kernel.  This reference
     mirrors that kernel one-to-one and is what was used to validate it.
     """
+    comp = self.composite_body
 
     # Build per-axis interpolators (RegularGridInterpolator handles
     # 2-D/3-D and runs on CPU or CUDA via the existing dispatched
     # ``interp_2d`` / ``interp_3d`` ops).
     from lilytorch.src.kernels import RegularGridInterpolator
-    grids = comp._grids
-    axes_2d = (grids.x, grids.y)
+    # Use comp.x/comp.y (always allocated) — comp._grids may be missing
+    # in kernel mode (see body.py:_StaggeredGrids).
+    axes_2d = (comp.x, comp.y)
 
     # Bilinear interpolation of σ_ij and p at every contour marker of
     # every body.  We share one interpolator instance per field by
@@ -1312,9 +1321,11 @@ def forces_lagrangian_3d(self, u, v, w, p, iteration):
         nu_rho_field = torch.tensor(
             [float(nu_rho)], dtype=p.dtype, device=p.device)
 
-    grids = comp._grids
-    Mx = int(grids.x.numel()); My = int(grids.y.numel()); Mz = int(grids.z.numel())
-    bx0 = float(grids.x[0]); by0 = float(grids.y[0]); bz0 = float(grids.z[0])
+    # Use comp.x/y/z (always allocated) instead of comp._grids — the
+    # staggered-grid bundle is skipped by kernel-mode MultiAnimatBodies
+    # as a memory optimisation (see body.py:_StaggeredGrids).
+    Mx = int(comp.x.numel()); My = int(comp.y.numel()); Mz = int(comp.z.numel())
+    bx0 = float(comp.x[0]); by0 = float(comp.y[0]); bz0 = float(comp.z[0])
     inv_dx = 1.0 / h; inv_dy = 1.0 / h; inv_dz = 1.0 / h
 
     out = _lagrangian_forces_3d_kernel(
@@ -1375,8 +1386,9 @@ def _forces_lagrangian_3d_python_ref(self, u, v, w, p, iteration):
     eps_ij = _viscous_stress_tensor((u, v, w), h)
 
     from lilytorch.src.kernels import RegularGridInterpolator
-    grids = comp._grids
-    axes_3d = (grids.x, grids.y, grids.z)
+    # Use comp.x/y/z (always allocated) — comp._grids may be missing in
+    # kernel mode (see body.py:_StaggeredGrids).
+    axes_3d = (comp.x, comp.y, comp.z)
     interp = RegularGridInterpolator(axes_3d, p, method="linear")
 
     def _sample(field, qx, qy, qz):
