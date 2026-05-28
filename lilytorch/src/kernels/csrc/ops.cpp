@@ -175,6 +175,66 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " int mu0_projection"
         ") -> ()");
 
+    // ---- Lagrangian (surface-integral) force kernels ------------------
+    //
+    // ``lagrangian_forces_{2d,3d}``: fused per-body surface integration
+    // of ``∮ (ν·ρ·ε·n - p n) dS`` and the associated torque about
+    // ``com_pos``.  Replaces the per-body Python loop in
+    // ``forces.forces_lagrangian_{2d,3d}`` with a single kernel launch
+    // (rigid-body only — the markers / triangles must be in the
+    // world frame and are precomputed by the caller).
+    //
+    // 2-D inputs:
+    //   * ``eps_xx``, ``eps_xy``, ``eps_yy`` — CC strain-rate components,
+    //     each shape ``(Mx, My)`` (built once per step by
+    //     ``forces._viscous_stress_tensor``).
+    //   * ``p`` — CC pressure ``(Mx, My)``.
+    //   * ``nu_rho_field`` — either a 0-D / 1-element tensor (constant
+    //     viscosity ⇒ scalar ν·ρ) or a full CC field of shape ``(Mx, My)``.
+    //   * ``cnt_flat`` — concatenated contours of all bodies, shape
+    //     ``(2, M_total)`` (rows are x and y).
+    //   * ``cnt_offsets`` — int64 prefix offsets, shape ``(B+1,)``.
+    //     Body ``b`` owns markers ``[cnt_offsets[b], cnt_offsets[b+1])``;
+    //     within each body the marker list is CCW-oriented and *closed*
+    //     (segment ``i → i+1`` wraps at the end of the body's slice).
+    //   * ``com_pos`` — per-body COM, shape ``(B, 2)``.
+    //   * Grid metadata: ``bx0, by0, inv_dx, inv_dy, Mx, My``.
+    //   * ``interp_method`` — 0=bilinear, 1=biquadratic.
+    //   * ``out`` — preallocated ``(B, 6)`` float64; column layout is
+    //     ``[fv_x, fv_y, t_v, fp_x, fp_y, t_p]``.  Writes are
+    //     accumulated atomically (CUDA) or reduced per-body (CPU).
+    m.def(
+        "lagrangian_forces_2d("
+        "Tensor eps_xx, Tensor eps_xy, Tensor eps_yy,"
+        " Tensor p, Tensor nu_rho_field,"
+        " Tensor cnt_flat, Tensor cnt_offsets,"
+        " Tensor com_pos,"
+        " float bx0, float by0,"
+        " float inv_dx, float inv_dy,"
+        " int Mx, int My,"
+        " int interp_method,"
+        " Tensor(a!) out"
+        ") -> ()");
+
+    // 3-D inputs mirror the 2-D op with the symmetric 6 strain-rate
+    // components + per-triangle (centroid, normal, area) packed across
+    // all bodies.  Output is ``(B, 12)`` float64 with column layout
+    //   ``[fv_x, fv_y, fv_z, tv_x, tv_y, tv_z,
+    //      fp_x, fp_y, fp_z, tp_x, tp_y, tp_z]``.
+    m.def(
+        "lagrangian_forces_3d("
+        "Tensor eps_xx, Tensor eps_yy, Tensor eps_zz,"
+        " Tensor eps_xy, Tensor eps_xz, Tensor eps_yz,"
+        " Tensor p, Tensor nu_rho_field,"
+        " Tensor tri_centroid, Tensor tri_normal, Tensor tri_area,"
+        " Tensor tri_offsets, Tensor com_pos,"
+        " float bx0, float by0, float bz0,"
+        " float inv_dx, float inv_dy, float inv_dz,"
+        " int Mx, int My, int Mz,"
+        " int interp_method,"
+        " Tensor(a!) out"
+        ") -> ()");
+
     m.def(
         "streaming_sdf_forces_post_2d("
         "Tensor F_flat, Tensor F_offsets,"
