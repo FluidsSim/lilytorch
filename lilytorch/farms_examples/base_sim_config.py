@@ -199,6 +199,11 @@ class BaseSimConfig:
         # so thin bodies (r < eps) reach mu0_poisson = 0 inside and the
         # pressure BC is correctly enforced.  None → solver default (False).
         self.apply_bdim_sigma        = None   # None → solver default (False)
+        # BDIM2 mu0-weighted Poisson coefficient (dt*mu0/rho_eff).  None →
+        # solver default (True).  Set False to use the plain dt/rho_eff
+        # coefficient, which keeps the projection non-degenerate — needed for
+        # stable multibody swimmers (inter-link velocity seams).
+        self.bdim_mu0_projection     = None   # None → solver default (True)
         # Delta-function order for force integration:
         #   1 (default) – first-order smoothed delta
         #   2           – Towers (2008) correction δ/|∇φ|, recommended for
@@ -788,6 +793,7 @@ class BaseSimConfig:
             ("vmax_abort",              self.vmax_abort),
             ("eps_multiplier",          self.eps_multiplier),
             ("apply_bdim_sigma",        self.apply_bdim_sigma),
+            ("bdim_mu0_projection",     self.bdim_mu0_projection),
             ("force_delta_order",       self.force_delta_order),
         ]:
             if val is not None:

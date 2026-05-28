@@ -140,20 +140,39 @@ class SimConfig(BaseSimConfig):
             },
         })
 
+        # extensions.append({
+        #     "loader": "lilytorch.integration.flow_iso_gl_viewer.FlowIsoGLViewer",
+        #     "config": {
+        #         "field"              : "omega_z",
+        #         "alpha"              : 0.2,
+        #         "update_every"       : 1,
+        #         "max_vertices"       : 20 * self.Nx * self.Ny,
+        #         "smooth_sigma"       : 0,
+        #         "crop_boundary"      : 0,
+        #         "exclude_body"       : True,
+        #         "iso_value"          : 40.0,
+        #         "debug_force_visible": False,
+        #         "color_uni"          : "#FF4500",
+        #         "color_pos"          : "#FF4500",
+        #         "color_neg"          : "#00FFFF",
+        #     },
+        # })
+
+
         extensions.append({
             "loader": "lilytorch.integration.flow_iso_gl_viewer.FlowIsoGLViewer",
             "config": {
                 # "field"              : "omega_z",
-                "field"              : "omega_mag",
+                "field"              : "pressure",
                 "alpha"              : 0.2,
                 "update_every"       : 1,
                 "max_vertices"       : 20 * self.Nx * self.Ny,
                 "smooth_sigma"       : 0,
                 "crop_boundary"      : 0,
                 "exclude_body"       : True,
-                "iso_value"          : 40.0,
+                "iso_value"          : 5.0,
                 "debug_force_visible": False,
-                "color_uni"          : "#FF4500",
+                # "color_uni"          : "#FF4500",
                 "color_pos"          : "#FF4500",
                 "color_neg"          : "#00FFFF",
             },
@@ -211,17 +230,30 @@ class SimConfig(BaseSimConfig):
         extensions.append({
             "loader": "lilytorch.integration.force_viewer.ForceViewer",
             "config": {
-                "force_scale" : 60,     # metres of arrow per Newton
+                "force_scale" : 80,     # metres of arrow per Newton
                 "force_width" : 0.001,    # shaft (circular) radius in metres
                 "color"       : "#0011FF",
-                # "force_source": "hydro",  # viscous+pressure (no buoyancy)
+                "update_every": 1,     # null -> solver.save_every cadence
+            },
+        })
+
+
+        # VelocityViewer – draw the linear (and optional angular) velocity of
+        # each body as an arrow. Anchored at the body CoM, world-frame axes.
+        # vel_scale sets arrow length (m per m/s); vel_width sets shaft radius.
+        extensions.append({
+            "loader": "lilytorch.integration.velocity_viewer.VelocityViewer",
+            "config": {
+                "vel_scale"   : 0.2,      # metres of arrow per (m/s)
+                "vel_width"   : 0.001,    # shaft (circular) radius in metres
+                "color"       : "#00FF66",
                 # "max_length"  : 0.3,      # clamp arrow length (m); null = off
-                # "min_force"   : 0.0,      # hide arrows below this magnitude (N)
-                # "show_torque" : True,     # also draw a torque arrow per body
-                # "torque_scale": 30,       # m per N·m (default: force_scale)
-                # "torque_width": 0.001,    # shaft radius (default: force_width)
-                # "torque_color": "#00B0FF",
-                # "min_torque"  : 0.0,      # hide torque arrows below this (N·m)
+                # "min_vel"     : 0.0,      # hide arrows below this speed (m/s)
+                # "show_angular": True,     # also draw an ω arrow per body
+                # "ang_scale"   : 0.05,     # m per (rad/s) (default: vel_scale)
+                # "ang_width"   : 0.001,    # shaft radius (default: vel_width)
+                # "ang_color"   : "#FFAA00",
+                # "min_ang"     : 0.0,      # hide ω arrows below this (rad/s)
                 "update_every": 1,     # null -> solver.save_every cadence
             },
         })

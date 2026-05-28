@@ -1001,7 +1001,8 @@ __device__ __forceinline__ void bdim_one_axis_3d(
     const int c_stride_j,
     const int c_hi_i,
     const int c_hi_j,
-    const int c_hi_k)
+    const int c_hi_k,
+    const int mu0_proj)
 {
     const int stride_i = Ngy * Ngz;
     const int stride_j = Ngz;
@@ -1098,8 +1099,11 @@ __device__ __forceinline__ void bdim_one_axis_3d(
     // The face grid excludes ghost cells: valid range is [1, c_hi_*] in
     // padded coordinates; the face-grid index is (i-1, j-1, k-1).
     if (i >= 1 && j >= 1 && k >= 1 && i <= c_hi_i && j <= c_hi_j && k <= c_hi_k) {
+        // mu0_proj != 0 → BDIM2 mu0-weighted coefficient (dt*mu0/rho_eff).
+        // mu0_proj == 0 → plain variable-density coefficient (dt/rho_eff),
+        // which keeps the projection non-degenerate for multibody swimmers.
         c_out[(i - 1) * c_stride_i + (j - 1) * c_stride_j + (k - 1)] =
-            dt * mu0 / (rho_body + (rho_f - rho_body) * mu0);
+            (mu0_proj ? dt * mu0 : dt) / (rho_body + (rho_f - rho_body) * mu0);
     }
 }
 
@@ -1128,7 +1132,8 @@ __global__ void bdim_vardens_3d_kernel(
     const int Ngx, const int Ngy, const int Ngz,
     const int di0, const int dj0, const int dk0,
     const int dAi, const int dAj, const int dAk,
-    const int dirty_vol)
+    const int dirty_vol,
+    const int mu0_proj)
 {
     const int local = blockIdx.x * blockDim.x + threadIdx.x;
     if (local >= dirty_vol) return;
@@ -1146,21 +1151,21 @@ __global__ void bdim_vardens_3d_kernel(
         eps, rho_body, rho_f, dt, inv_2h,
         Ngx, Ngy, Ngz, i, j, k, u0, ch,
         (Ngy - 2) * (Ngz - 2), (Ngz - 2),
-        Ngx - 1, Ngy - 2, Ngz - 2);
+        Ngx - 1, Ngy - 2, Ngz - 2, mu0_proj);
     // cv: y-face grid (Ngx-2, Ngy-1, Ngz-2), strides ((Ngy-1)*(Ngz-2), Ngz-2, 1)
     bdim_one_axis_3d<scalar_t>(
         v_prime, sdf_v, body_v,
         eps, rho_body, rho_f, dt, inv_2h,
         Ngx, Ngy, Ngz, i, j, k, v0, cv,
         (Ngy - 1) * (Ngz - 2), (Ngz - 2),
-        Ngx - 2, Ngy - 1, Ngz - 2);
+        Ngx - 2, Ngy - 1, Ngz - 2, mu0_proj);
     // cw: z-face grid (Ngx-2, Ngy-2, Ngz-1), strides ((Ngy-2)*(Ngz-1), Ngz-1, 1)
     bdim_one_axis_3d<scalar_t>(
         w_prime, sdf_w, body_w,
         eps, rho_body, rho_f, dt, inv_2h,
         Ngx, Ngy, Ngz, i, j, k, w0, cw,
         (Ngy - 2) * (Ngz - 1), (Ngz - 1),
-        Ngx - 2, Ngy - 2, Ngz - 1);
+        Ngx - 2, Ngy - 2, Ngz - 1, mu0_proj);
 }
 
 void bdim_vardens_3d_cuda(
@@ -1181,7 +1186,8 @@ void bdim_vardens_3d_cuda(
     const double dt,
     const double h_grid,
     const int64_t dirty_i0, const int64_t dirty_j0, const int64_t dirty_k0,
-    const int64_t dirty_Ai, const int64_t dirty_Aj, const int64_t dirty_Ak)
+    const int64_t dirty_Ai, const int64_t dirty_Aj, const int64_t dirty_Ak,
+    const int64_t mu0_projection)
 {
     const int64_t dirty_vol = dirty_Ai * dirty_Aj * dirty_Ak;
     if (dirty_vol <= 0) return;
@@ -1220,7 +1226,8 @@ void bdim_vardens_3d_cuda(
                 Ngx, Ngy, Ngz,
                 (int)dirty_i0, (int)dirty_j0, (int)dirty_k0,
                 (int)dirty_Ai, (int)dirty_Aj, (int)dirty_Ak,
-                (int)dirty_vol);
+                (int)dirty_vol,
+                (int)mu0_projection);
     });
 }
 
@@ -1259,7 +1266,8 @@ __device__ __forceinline__ void bdim_one_axis_sigma_3d(
     const float*   __restrict__ sigma_shifts,
     const int n_sigma,
     const int di0, const int dj0, const int dk0,
-    const int dAj, const int dAk)
+    const int dAj, const int dAk,
+    const int mu0_proj)
 {
     const int stride_i = Ngy * Ngz;
     const int stride_j = Ngz;
@@ -1346,8 +1354,10 @@ __device__ __forceinline__ void bdim_one_axis_sigma_3d(
 
     phi_out[g] = mu0 * diff_c + b_c + mu1 * nd;
     if (i >= 1 && j >= 1 && k >= 1 && i <= c_hi_i && j <= c_hi_j && k <= c_hi_k) {
+        // mu0_proj == 0 → drop the mu0 numerator (plain dt/rho_eff).
         c_out[(i - 1) * c_stride_i + (j - 1) * c_stride_j + (k - 1)] =
-            dt * mu0_poisson / (rho_body + (rho_f - rho_body) * mu0_poisson);
+            (mu0_proj ? dt * mu0_poisson : dt)
+            / (rho_body + (rho_f - rho_body) * mu0_poisson);
     }
 }
 
@@ -1381,7 +1391,8 @@ __global__ void bdim_vardens_sigma_3d_kernel(
     const int Ngx, const int Ngy, const int Ngz,
     const int di0, const int dj0, const int dk0,
     const int dAi, const int dAj, const int dAk,
-    const int dirty_vol)
+    const int dirty_vol,
+    const int mu0_proj)
 {
     const int local = blockIdx.x * blockDim.x + threadIdx.x;
     if (local >= dirty_vol) return;
@@ -1400,7 +1411,7 @@ __global__ void bdim_vardens_sigma_3d_kernel(
         (Ngy - 2) * (Ngz - 2), (Ngz - 2),
         Ngx - 1, Ngy - 2, Ngz - 2,
         key_u, sigma_shifts, n_sigma,
-        di0, dj0, dk0, dAj, dAk);
+        di0, dj0, dk0, dAj, dAk, mu0_proj);
     bdim_one_axis_sigma_3d<scalar_t>(
         v_prime, sdf_v, body_v,
         eps, rho_body, rho_f, dt, inv_2h,
@@ -1408,7 +1419,7 @@ __global__ void bdim_vardens_sigma_3d_kernel(
         (Ngy - 1) * (Ngz - 2), (Ngz - 2),
         Ngx - 2, Ngy - 1, Ngz - 2,
         key_v, sigma_shifts, n_sigma,
-        di0, dj0, dk0, dAj, dAk);
+        di0, dj0, dk0, dAj, dAk, mu0_proj);
     bdim_one_axis_sigma_3d<scalar_t>(
         w_prime, sdf_w, body_w,
         eps, rho_body, rho_f, dt, inv_2h,
@@ -1416,7 +1427,7 @@ __global__ void bdim_vardens_sigma_3d_kernel(
         (Ngy - 2) * (Ngz - 1), (Ngz - 1),
         Ngx - 2, Ngy - 2, Ngz - 1,
         key_w, sigma_shifts, n_sigma,
-        di0, dj0, dk0, dAj, dAk);
+        di0, dj0, dk0, dAj, dAk, mu0_proj);
 }
 
 void bdim_vardens_sigma_3d_cuda(
@@ -1441,7 +1452,8 @@ void bdim_vardens_sigma_3d_cuda(
     const double dt,
     const double h_grid,
     const int64_t dirty_i0, const int64_t dirty_j0, const int64_t dirty_k0,
-    const int64_t dirty_Ai, const int64_t dirty_Aj, const int64_t dirty_Ak)
+    const int64_t dirty_Ai, const int64_t dirty_Aj, const int64_t dirty_Ak,
+    const int64_t mu0_projection)
 {
     const int64_t dirty_vol = dirty_Ai * dirty_Aj * dirty_Ak;
     if (dirty_vol <= 0) return;
@@ -1486,7 +1498,8 @@ void bdim_vardens_sigma_3d_cuda(
                 Ngx, Ngy, Ngz,
                 (int)dirty_i0, (int)dirty_j0, (int)dirty_k0,
                 (int)dirty_Ai, (int)dirty_Aj, (int)dirty_Ak,
-                (int)dirty_vol);
+                (int)dirty_vol,
+                (int)mu0_projection);
     });
 }
 

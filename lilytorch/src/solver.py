@@ -325,6 +325,16 @@ class FluidSolver(PlottingMixin):
         self.apply_bdim_sigma = bool(solver.get("apply_bdim_sigma", False))
         self._sigma_shifts    = None   # lazily computed at first fluid step
 
+        # BDIM2 mu0-weighted Poisson coefficient.  When True (default) the
+        # variable-density coefficient is ``dt*mu0/rho_eff`` (Maertens &
+        # Weymouth 2015), which sharpens the body interface but makes the
+        # Poisson operator degenerate inside/near the body.  When False the
+        # coefficient is the plain ``dt/rho_eff`` (no mu0 numerator), keeping
+        # the operator non-degenerate — required for stable multibody
+        # swimmers where inter-link velocity seams create divergence in
+        # low-mu0 cells the degenerate solve cannot remove.
+        self.bdim_mu0_projection = bool(solver.get("bdim_mu0_projection", True))
+
         self.starting_iteration      = solver.get("starting_iteration", 0)
         self.starting_iteration_path = solver.get("starting_iteration_path", None)
         self.starting_time           = self.starting_iteration * self.dt
@@ -1501,6 +1511,9 @@ class FluidSolver(PlottingMixin):
         """
         D       = self.ndim
         _drho   = float(self.rho) - self.rho_body
+        # mu0-weighted (BDIM2) numerator vs plain dt/rho_eff — see the
+        # ``bdim_mu0_projection`` flag set in __init__.
+        _mu0w   = self.bdim_mu0_projection
         axes    = self._bdim_axis_names
         # All D+1 grids ([u, v, [w,] cc]) share the same shape in this
         # codebase (staggering is a coord offset, not a shape change),
@@ -1550,20 +1563,22 @@ class FluidSolver(PlottingMixin):
                     for name, mu in zip(face_names + (cc_name,), mu_grids):
                         mu_sub = mu[usl]
                         getattr(self, name)[usl] = (
-                            timestep * mu_sub
+                            (timestep * mu_sub if _mu0w else timestep)
                             / (_rho_b * (1 - mu_sub) + _rho_fluid * mu_sub)
                         )
                 else:
                     for name, mu in zip(face_names + (cc_name,), mu_grids):
                         getattr(self, name)[usl] = (
-                            timestep * mu[usl] / (self.rho_body + _drho * mu[usl])
+                            (timestep * mu[usl] if _mu0w else timestep)
+                            / (self.rho_body + _drho * mu[usl])
                         )
 
                 return (*(getattr(self, n) for n in face_names),
                         getattr(self, cc_name))
 
         # ---- full-grid fallback ----------------------------------------
-        return tuple(timestep * mu / (self.rho_body + _drho * mu) for mu in mu_grids)
+        return tuple((timestep * mu if _mu0w else timestep)
+                     / (self.rho_body + _drho * mu) for mu in mu_grids)
 
     # ------------------------------------------------------------------
     #   Phase-I kernel-mode 3-D fluid step  (Kernel A + Kernel B)
@@ -1701,6 +1716,7 @@ class FluidSolver(PlottingMixin):
                 float(timestep), float(comp.h),
                 int(ks['dirty_i0']), int(ks['dirty_j0']),
                 int(ks['dirty_Ai']), int(ks['dirty_Aj']),
+                int(self.bdim_mu0_projection),
             )
         else:
             bdim_vardens_2d(
@@ -1713,6 +1729,7 @@ class FluidSolver(PlottingMixin):
                 float(timestep), float(comp.h),
                 int(ks['dirty_i0']), int(ks['dirty_j0']),
                 int(ks['dirty_Ai']), int(ks['dirty_Aj']),
+                int(self.bdim_mu0_projection),
             )
 
         # 7. Free per-step temporaries before the pressure projection.
@@ -1864,6 +1881,7 @@ class FluidSolver(PlottingMixin):
                 float(timestep), float(comp.h),
                 int(ks['dirty_i0']), int(ks['dirty_j0']), int(ks['dirty_k0']),
                 int(ks['dirty_Ai']), int(ks['dirty_Aj']), int(ks['dirty_Ak']),
+                int(self.bdim_mu0_projection),
             )
         else:
             bdim_vardens_3d(
@@ -1876,6 +1894,7 @@ class FluidSolver(PlottingMixin):
                 float(timestep), float(comp.h),
                 int(ks['dirty_i0']), int(ks['dirty_j0']), int(ks['dirty_k0']),
                 int(ks['dirty_Ai']), int(ks['dirty_Aj']), int(ks['dirty_Ak']),
+                int(self.bdim_mu0_projection),
             )
 
         # 7. Free per-step temporaries before the pressure projection

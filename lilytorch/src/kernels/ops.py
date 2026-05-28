@@ -78,7 +78,8 @@ def bdim_vardens_3d(
         eps: float, rho_body: float, rho_f: float, dt: float,
         h_grid: float,
         dirty_i0: int, dirty_j0: int, dirty_k0: int,
-        dirty_Ai: int, dirty_Aj: int, dirty_Ak: int) -> None:
+        dirty_Ai: int, dirty_Aj: int, dirty_Ak: int,
+        mu0_projection: int = 1) -> None:
     """Phase-I fused BDIM2 + variable-density Poisson coefficient kernel.
 
     Reads advdiff outputs (``u_prime/v_prime/w_prime``) plus the Kernel-A
@@ -106,6 +107,7 @@ def bdim_vardens_3d(
         float(h_grid),
         int(dirty_i0), int(dirty_j0), int(dirty_k0),
         int(dirty_Ai), int(dirty_Aj), int(dirty_Ak),
+        int(mu0_projection),
     )
 
 
@@ -120,7 +122,8 @@ def bdim_vardens_sigma_3d(
         eps: float, rho_body: float, rho_f: float, dt: float,
         h_grid: float,
         dirty_i0: int, dirty_j0: int, dirty_k0: int,
-        dirty_Ai: int, dirty_Aj: int, dirty_Ak: int) -> None:
+        dirty_Ai: int, dirty_Aj: int, dirty_Ak: int,
+        mu0_projection: int = 1) -> None:
     """BDIM-σ variant of :func:`bdim_vardens_3d` (Lauber et al. 2022).
 
     For each cell the Poisson coefficient is evaluated with ``mu0`` of a
@@ -138,6 +141,7 @@ def bdim_vardens_sigma_3d(
         float(eps), float(rho_body), float(rho_f), float(dt), float(h_grid),
         int(dirty_i0), int(dirty_j0), int(dirty_k0),
         int(dirty_Ai), int(dirty_Aj), int(dirty_Ak),
+        int(mu0_projection),
     )
 
 
@@ -245,7 +249,8 @@ def bdim_vardens_2d(
         eps: float, rho_body: float, rho_f: float, dt: float,
         h_grid: float,
         dirty_i0: int, dirty_j0: int,
-        dirty_Ai: int, dirty_Aj: int) -> None:
+        dirty_Ai: int, dirty_Aj: int,
+        mu0_projection: int = 1) -> None:
     """Phase-I fused BDIM2 + variable-density Poisson coefficient kernel (2-D).
 
     2-D analogue of :func:`bdim_vardens_3d`.  See that wrapper for the
@@ -260,6 +265,7 @@ def bdim_vardens_2d(
         float(h_grid),
         int(dirty_i0), int(dirty_j0),
         int(dirty_Ai), int(dirty_Aj),
+        int(mu0_projection),
     )
 
 
@@ -274,7 +280,8 @@ def bdim_vardens_sigma_2d(
         eps: float, rho_body: float, rho_f: float, dt: float,
         h_grid: float,
         dirty_i0: int, dirty_j0: int,
-        dirty_Ai: int, dirty_Aj: int) -> None:
+        dirty_Ai: int, dirty_Aj: int,
+        mu0_projection: int = 1) -> None:
     """2-D analogue of :func:`bdim_vardens_sigma_3d`."""
     return torch.ops.lilytorch_kernels.bdim_vardens_sigma_2d.default(
         u_prime, v_prime,
@@ -285,6 +292,7 @@ def bdim_vardens_sigma_2d(
         float(eps), float(rho_body), float(rho_f), float(dt), float(h_grid),
         int(dirty_i0), int(dirty_j0),
         int(dirty_Ai), int(dirty_Aj),
+        int(mu0_projection),
     )
 
 

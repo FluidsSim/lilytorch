@@ -810,7 +810,8 @@ static inline void bdim_one_axis_3d_cpu(
     const int Ngx, const int Ngy, const int Ngz,
     const int i, const int j, const int k,
     scalar_t* phi_out,
-    scalar_t* c_out)
+    scalar_t* c_out,
+    const int mu0_proj)
 {
     const int64_t stride_i = (int64_t)Ngy * Ngz;
     const int64_t stride_j = (int64_t)Ngz;
@@ -877,7 +878,8 @@ static inline void bdim_one_axis_3d_cpu(
     const scalar_t nd = nx * ddx + ny * ddy + nz * ddz;
 
     phi_out[g] = mu0 * diff_c + b_c + mu1 * nd;
-    c_out[g]   = dt * mu0 / (rho_body + (rho_f - rho_body) * mu0);
+    // mu0_proj == 0 → plain dt/rho_eff (non-degenerate, multibody-safe).
+    c_out[g]   = (mu0_proj ? dt * mu0 : dt) / (rho_body + (rho_f - rho_body) * mu0);
 }
 
 void bdim_vardens_3d_cpu(
@@ -898,7 +900,8 @@ void bdim_vardens_3d_cpu(
     const double dt,
     const double h_grid,
     const int64_t dirty_i0, const int64_t dirty_j0, const int64_t dirty_k0,
-    const int64_t dirty_Ai, const int64_t dirty_Aj, const int64_t dirty_Ak)
+    const int64_t dirty_Ai, const int64_t dirty_Aj, const int64_t dirty_Ak,
+    const int64_t mu0_projection)
 {
     const int64_t dirty_vol = dirty_Ai * dirty_Aj * dirty_Ak;
     if (dirty_vol <= 0) return;
@@ -907,6 +910,7 @@ void bdim_vardens_3d_cpu(
     const int Ngz = (int)u0.size(2);
     const int di0 = (int)dirty_i0, dj0 = (int)dirty_j0, dk0 = (int)dirty_k0;
     const int dAj = (int)dirty_Aj, dAk = (int)dirty_Ak;
+    const int mu0p = (int)mu0_projection;
     (void)dirty_Ai;
 
     AT_DISPATCH_FLOATING_TYPES(u0.scalar_type(), "bdim_vardens_3d_cpu", [&] {
@@ -942,13 +946,13 @@ void bdim_vardens_3d_cpu(
                 const int k = dk0 + dk;
                 bdim_one_axis_3d_cpu<scalar_t>(
                     upp, su, bu, eps_t, rho_b_t, rho_f_t, dt_t, inv_2h,
-                    Ngx, Ngy, Ngz, i, j, k, u0p, chp);
+                    Ngx, Ngy, Ngz, i, j, k, u0p, chp, mu0p);
                 bdim_one_axis_3d_cpu<scalar_t>(
                     vpp, sv, bv, eps_t, rho_b_t, rho_f_t, dt_t, inv_2h,
-                    Ngx, Ngy, Ngz, i, j, k, v0p, cvp);
+                    Ngx, Ngy, Ngz, i, j, k, v0p, cvp, mu0p);
                 bdim_one_axis_3d_cpu<scalar_t>(
                     wpp, sw, bw, eps_t, rho_b_t, rho_f_t, dt_t, inv_2h,
-                    Ngx, Ngy, Ngz, i, j, k, w0p, cwp);
+                    Ngx, Ngy, Ngz, i, j, k, w0p, cwp, mu0p);
             }
         });
     });
@@ -975,7 +979,8 @@ static inline void bdim_one_axis_sigma_3d_cpu(
     const float*   sigma_shifts,
     const int n_sigma,
     const int di0, const int dj0, const int dk0,
-    const int dAj, const int dAk)
+    const int dAj, const int dAk,
+    const int mu0_proj)
 {
     const int64_t stride_i = (int64_t)Ngy * Ngz;
     const int64_t stride_j = (int64_t)Ngz;
@@ -1062,7 +1067,9 @@ static inline void bdim_one_axis_sigma_3d_cpu(
     const scalar_t nd = nx * ddx + ny * ddy + nz * ddz;
 
     phi_out[g] = mu0 * diff_c + b_c + mu1 * nd;
-    c_out[g]   = dt * mu0_poisson / (rho_body + (rho_f - rho_body) * mu0_poisson);
+    // mu0_proj == 0 → drop the mu0 numerator (plain dt/rho_eff).
+    c_out[g]   = (mu0_proj ? dt * mu0_poisson : dt)
+               / (rho_body + (rho_f - rho_body) * mu0_poisson);
 }
 
 void bdim_vardens_sigma_3d_cpu(
@@ -1087,7 +1094,8 @@ void bdim_vardens_sigma_3d_cpu(
     const double dt,
     const double h_grid,
     const int64_t dirty_i0, const int64_t dirty_j0, const int64_t dirty_k0,
-    const int64_t dirty_Ai, const int64_t dirty_Aj, const int64_t dirty_Ak)
+    const int64_t dirty_Ai, const int64_t dirty_Aj, const int64_t dirty_Ak,
+    const int64_t mu0_projection)
 {
     const int64_t dirty_vol = dirty_Ai * dirty_Aj * dirty_Ak;
     if (dirty_vol <= 0) return;
@@ -1096,6 +1104,7 @@ void bdim_vardens_sigma_3d_cpu(
     const int Ngz = (int)u0.size(2);
     const int di0 = (int)dirty_i0, dj0 = (int)dirty_j0, dk0 = (int)dirty_k0;
     const int dAj = (int)dirty_Aj, dAk = (int)dirty_Ak;
+    const int mu0p = (int)mu0_projection;
     (void)dirty_Ai;
     const int n_sigma = (int)sigma_shifts.numel();
     const int64_t* key_u_p = key_u.data_ptr<int64_t>();
@@ -1137,15 +1146,15 @@ void bdim_vardens_sigma_3d_cpu(
                 bdim_one_axis_sigma_3d_cpu<scalar_t>(
                     upp, su, bu, eps_t, rho_b_t, rho_f_t, dt_t, inv_2h,
                     Ngx, Ngy, Ngz, i, j, k, u0p, chp,
-                    key_u_p, sshifts, n_sigma, di0, dj0, dk0, dAj, dAk);
+                    key_u_p, sshifts, n_sigma, di0, dj0, dk0, dAj, dAk, mu0p);
                 bdim_one_axis_sigma_3d_cpu<scalar_t>(
                     vpp, sv, bv, eps_t, rho_b_t, rho_f_t, dt_t, inv_2h,
                     Ngx, Ngy, Ngz, i, j, k, v0p, cvp,
-                    key_v_p, sshifts, n_sigma, di0, dj0, dk0, dAj, dAk);
+                    key_v_p, sshifts, n_sigma, di0, dj0, dk0, dAj, dAk, mu0p);
                 bdim_one_axis_sigma_3d_cpu<scalar_t>(
                     wpp, sw, bw, eps_t, rho_b_t, rho_f_t, dt_t, inv_2h,
                     Ngx, Ngy, Ngz, i, j, k, w0p, cwp,
-                    key_w_p, sshifts, n_sigma, di0, dj0, dk0, dAj, dAk);
+                    key_w_p, sshifts, n_sigma, di0, dj0, dk0, dAj, dAk, mu0p);
             }
         });
     });

@@ -979,7 +979,8 @@ __device__ __forceinline__ void bdim_one_axis_2d(
     const int Ngx, const int Ngy,
     const int i, const int j,
     scalar_t* __restrict__ phi_out,
-    scalar_t* __restrict__ c_out)
+    scalar_t* __restrict__ c_out,
+    const int mu0_proj)
 {
     const int stride_i = Ngy;
     const int g  = i * stride_i + j;
@@ -1044,7 +1045,8 @@ __device__ __forceinline__ void bdim_one_axis_2d(
     const scalar_t nd = nx * ddx + ny * ddy;
 
     phi_out[g] = mu0 * diff_c + b_c + mu1 * nd;
-    c_out[g]   = dt * mu0 / (rho_body + (rho_f - rho_body) * mu0);
+    // mu0_proj == 0 → plain dt/rho_eff (non-degenerate, multibody-safe).
+    c_out[g]   = (mu0_proj ? dt * mu0 : dt) / (rho_body + (rho_f - rho_body) * mu0);
 }
 
 template <typename scalar_t>
@@ -1067,7 +1069,8 @@ __global__ void bdim_vardens_2d_kernel(
     const int Ngx, const int Ngy,
     const int di0, const int dj0,
     const int dAi, const int dAj,
-    const int dirty_vol)
+    const int dirty_vol,
+    const int mu0_proj)
 {
     const int local = blockIdx.x * blockDim.x + threadIdx.x;
     if (local >= dirty_vol) return;
@@ -1079,11 +1082,11 @@ __global__ void bdim_vardens_2d_kernel(
     bdim_one_axis_2d<scalar_t>(
         u_prime, sdf_u, body_u,
         eps, rho_body, rho_f, dt, inv_2h,
-        Ngx, Ngy, i, j, u0, ch);
+        Ngx, Ngy, i, j, u0, ch, mu0_proj);
     bdim_one_axis_2d<scalar_t>(
         v_prime, sdf_v, body_v,
         eps, rho_body, rho_f, dt, inv_2h,
-        Ngx, Ngy, i, j, v0, cv);
+        Ngx, Ngy, i, j, v0, cv, mu0_proj);
 }
 
 void bdim_vardens_2d_cuda(
@@ -1101,7 +1104,8 @@ void bdim_vardens_2d_cuda(
     const double dt,
     const double h_grid,
     const int64_t dirty_i0, const int64_t dirty_j0,
-    const int64_t dirty_Ai, const int64_t dirty_Aj)
+    const int64_t dirty_Ai, const int64_t dirty_Aj,
+    const int64_t mu0_projection)
 {
     const int64_t dirty_vol = dirty_Ai * dirty_Aj;
     if (dirty_vol <= 0) return;
@@ -1134,7 +1138,8 @@ void bdim_vardens_2d_cuda(
                 Ngx, Ngy,
                 (int)dirty_i0, (int)dirty_j0,
                 (int)dirty_Ai, (int)dirty_Aj,
-                (int)dirty_vol);
+                (int)dirty_vol,
+                (int)mu0_projection);
     });
 }
 
@@ -1159,7 +1164,8 @@ __device__ __forceinline__ void bdim_one_axis_sigma_2d(
     scalar_t* __restrict__ c_out,
     const int64_t* __restrict__ key,
     const float*   __restrict__ sigma_shifts,
-    const int n_sigma)
+    const int n_sigma,
+    const int mu0_proj)
 {
     const int stride_i = Ngy;
     const int g  = i * stride_i + j;
@@ -1231,7 +1237,9 @@ __device__ __forceinline__ void bdim_one_axis_sigma_2d(
     const scalar_t nd = nx * ddx + ny * ddy;
 
     phi_out[g] = mu0 * diff_c + b_c + mu1 * nd;
-    c_out[g]   = dt * mu0_poisson / (rho_body + (rho_f - rho_body) * mu0_poisson);
+    // mu0_proj == 0 → drop the mu0 numerator (plain dt/rho_eff).
+    c_out[g]   = (mu0_proj ? dt * mu0_poisson : dt)
+               / (rho_body + (rho_f - rho_body) * mu0_poisson);
 }
 
 template <typename scalar_t>
@@ -1258,7 +1266,8 @@ __global__ void bdim_vardens_sigma_2d_kernel(
     const int Ngx, const int Ngy,
     const int di0, const int dj0,
     const int dAi, const int dAj,
-    const int dirty_vol)
+    const int dirty_vol,
+    const int mu0_proj)
 {
     const int local = blockIdx.x * blockDim.x + threadIdx.x;
     if (local >= dirty_vol) return;
@@ -1272,12 +1281,12 @@ __global__ void bdim_vardens_sigma_2d_kernel(
         u_prime, sdf_u, body_u,
         eps, rho_body, rho_f, dt, inv_2h,
         Ngx, Ngy, i, j, u0, ch,
-        key_u, sigma_shifts, n_sigma);
+        key_u, sigma_shifts, n_sigma, mu0_proj);
     bdim_one_axis_sigma_2d<scalar_t>(
         v_prime, sdf_v, body_v,
         eps, rho_body, rho_f, dt, inv_2h,
         Ngx, Ngy, i, j, v0, cv,
-        key_v, sigma_shifts, n_sigma);
+        key_v, sigma_shifts, n_sigma, mu0_proj);
 }
 
 void bdim_vardens_sigma_2d_cuda(
@@ -1298,7 +1307,8 @@ void bdim_vardens_sigma_2d_cuda(
     const double dt,
     const double h_grid,
     const int64_t dirty_i0, const int64_t dirty_j0,
-    const int64_t dirty_Ai, const int64_t dirty_Aj)
+    const int64_t dirty_Ai, const int64_t dirty_Aj,
+    const int64_t mu0_projection)
 {
     const int64_t dirty_vol = dirty_Ai * dirty_Aj;
     if (dirty_vol <= 0) return;
@@ -1336,7 +1346,8 @@ void bdim_vardens_sigma_2d_cuda(
                 Ngx, Ngy,
                 (int)dirty_i0, (int)dirty_j0,
                 (int)dirty_Ai, (int)dirty_Aj,
-                (int)dirty_vol);
+                (int)dirty_vol,
+                (int)mu0_projection);
     });
 }
 

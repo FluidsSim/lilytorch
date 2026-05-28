@@ -20,7 +20,7 @@ class SimConfig(BaseSimConfig):
         self.use_gpu              = True
         self.use_bdim             = True
         self.compute_sdf          = True
-        self.convexify            = True
+        # self.convexify            = True
         self.headless             = False
         self.smagorinsky_cs       = 0.
 
@@ -78,11 +78,16 @@ class SimConfig(BaseSimConfig):
         self.poisson_max_mgcg_cycles = 10
         self.poisson_precond_vcycles = 1
         self.poisson_warm_start      = True
-        self.poisson_method          = "multigrid"
+        self.poisson_method          = "mgcg"
         self.poisson_smoother        = "jacobi"
         self.poisson_nsmoothing      = 5
         self.poisson_bc_type         = "free"
         self.zero_pressure_inside    = True
+        # Multibody swimmer: drop the mu0 factor in the Poisson coefficient so
+        # the variable-density operator stays non-degenerate (dt/rho_eff).
+        # The mu0-weighted form (default True) creates divergence at the
+        # inter-link seams that the degenerate solve cannot remove → blow-up.
+        # self.bdim_mu0_projection     = False
 
 
         # # u: no-penetration on x-walls, free-slip on y/z-walls
@@ -106,6 +111,11 @@ class SimConfig(BaseSimConfig):
         # ── Body ─────────────────────────────────────────────────────
         self.force_scaling         = 1.0
         self.interp_data_subfolder = "interp_data_3d"
+
+        # ──
+        self.wall_alpha   = 0.
+        self.water_alpha  = 0.05
+        self.grid_spacing = 0.5*(self.ymax - self.ymin)  # lines on background floor
 
     # ── Extensions ────────────────────────────────────────────────────
 
@@ -133,9 +143,9 @@ class SimConfig(BaseSimConfig):
                 "smooth_sigma"       : 0,
                 "crop_boundary"      : 0,
                 "exclude_body"       : True,
-                "iso_value"          : 10.0,
+                "iso_value"          : 3.0,
                 "debug_force_visible": False,
-                "color_uni"          : "#FF4500",
+                "color_uni"          : "#00FFFF",
                 "color_pos"          : "#FF4500",
                 "color_neg"          : "#00FFFF",
             },

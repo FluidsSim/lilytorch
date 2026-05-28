@@ -71,7 +71,8 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " float eps, float rho_body, float rho_f, float dt,"
         " float h_grid,"
         " int dirty_i0, int dirty_j0, int dirty_k0,"
-        " int dirty_Ai, int dirty_Aj, int dirty_Ak"
+        " int dirty_Ai, int dirty_Aj, int dirty_Ak,"
+        " int mu0_projection"
         ") -> ()");
 
     // BDIM-σ variant of bdim_vardens_3d (Lauber et al. 2022).
@@ -93,7 +94,8 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " float eps, float rho_body, float rho_f, float dt,"
         " float h_grid,"
         " int dirty_i0, int dirty_j0, int dirty_k0,"
-        " int dirty_Ai, int dirty_Aj, int dirty_Ak"
+        " int dirty_Ai, int dirty_Aj, int dirty_Ak,"
+        " int mu0_projection"
         ") -> ()");
 
     m.def(
@@ -151,7 +153,8 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " float eps, float rho_body, float rho_f, float dt,"
         " float h_grid,"
         " int dirty_i0, int dirty_j0,"
-        " int dirty_Ai, int dirty_Aj"
+        " int dirty_Ai, int dirty_Aj,"
+        " int mu0_projection"
         ") -> ()");
 
     // BDIM-σ variant of bdim_vardens_2d (Lauber et al. 2022).  See the
@@ -168,7 +171,8 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " float eps, float rho_body, float rho_f, float dt,"
         " float h_grid,"
         " int dirty_i0, int dirty_j0,"
-        " int dirty_Ai, int dirty_Aj"
+        " int dirty_Ai, int dirty_Aj,"
+        " int mu0_projection"
         ") -> ()");
 
     m.def(

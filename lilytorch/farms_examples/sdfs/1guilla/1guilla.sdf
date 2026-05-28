@@ -6,16 +6,16 @@
 			<link name="link0">
 				<pose>0 0 0 0 0 0</pose>
 				<inertial>
-					<pose>0.0888341 0.000178365 0.000263476 0 0 0</pose>
-					<mass>0.113545</mass>
+					<pose>0.089486 0.000183329 0.00273009 0 0 0</pose>
+					<mass>0.121553</mass>
 					<density>1000.0</density>
 					<inertia>
-						<ixx>6.57627e-05</ixx>
-						<ixy>2.89168e-07</ixy>
-						<ixz>5.5762e-06</ixz>
-						<iyy>0.000274608</iyy>
-						<iyz>1.72868e-07</iyz>
-						<izz>0.000273198</izz>
+						<ixx>7.56729e-05</ixx>
+						<ixy>3.33775e-07</ixy>
+						<ixz>1.97751e-06</ixz>
+						<iyy>0.000291121</iyy>
+						<iyz>1.8348e-07</iyz>
+						<izz>0.000281833</izz>
 					</inertia>
 				</inertial>
 				<collision name="link0_collision">
@@ -41,7 +41,7 @@
 				<pose>0.17701 0 0 0 0 0</pose>
 				<inertial>
 					<pose>0.0164588 0.000161189 -0.000893398 0 0 0</pose>
-					<mass>0.0600394</mass>
+					<mass>0.0600393</mass>
 					<density>1000.0</density>
 					<inertia>
 						<ixx>1.33767e-05</ixx>
@@ -79,7 +79,7 @@
 					<density>1000.0</density>
 					<inertia>
 						<ixx>1.33738e-05</ixx>
-						<ixy>-3.17619e-08</ixy>
+						<ixy>-3.1762e-08</ixy>
 						<ixz>-1.48203e-07</ixz>
 						<iyy>2.336e-05</iyy>
 						<iyz>2.1843e-09</iyz>
@@ -112,7 +112,7 @@
 					<mass>0.0599985</mass>
 					<density>1000.0</density>
 					<inertia>
-						<ixx>1.33702e-05</ixx>
+						<ixx>1.33701e-05</ixx>
 						<ixy>-3.14402e-08</ixy>
 						<ixz>-1.36302e-07</ixz>
 						<iyy>2.3337e-05</iyy>
@@ -211,7 +211,7 @@
 				<pose>0.477111 0 0 0 0 0</pose>
 				<inertial>
 					<pose>0.0163977 -2.15328e-05 0.000430453 0 0 0</pose>
-					<mass>0.060131</mass>
+					<mass>0.0601311</mass>
 					<density>1000.0</density>
 					<inertia>
 						<ixx>1.33976e-05</ixx>
@@ -278,15 +278,15 @@
 			<link name="link8">
 				<pose>0.59691 0 0 0 0 0</pose>
 				<inertial>
-					<pose>0.0590153 5.92088e-05 0.00210109 0 0 0</pose>
+					<pose>0.0590153 5.92122e-05 0.00210109 0 0 0</pose>
 					<mass>0.125359</mass>
 					<density>1000.0</density>
 					<inertia>
 						<ixx>3.44218e-05</ixx>
-						<ixy>-2.4595e-06</ixy>
+						<ixy>-2.45953e-06</ixy>
 						<ixz>-1.98289e-06</ixz>
 						<iyy>0.000460324</iyy>
-						<iyz>2.49715e-08</iyz>
+						<iyz>2.49714e-08</iyz>
 						<izz>0.000450205</izz>
 					</inertia>
 				</inertial>
@@ -406,7 +406,7 @@
 				</axis>
 			</joint>
 			<linkend name="link8">
-				<pose>0.615777 0 0</pose>
+				<pose>0.8133 0 0</pose>
 			</linkend>
 		</model>
 	</world>
