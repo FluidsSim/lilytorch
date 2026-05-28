@@ -34,6 +34,8 @@ class SimConfig(BaseSimConfig):
         self.use_gpu           = True
         self.headless          = False
         self.poisson_method    = "multigrid"
+
+        self.force_method = "lagrangian"
         # self.sdf_interp_method = "triquadratic"
         # self.force_delta_order = 2
 

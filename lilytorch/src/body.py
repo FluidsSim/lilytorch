@@ -41,6 +41,60 @@ def _import_ndimage():
     from scipy import ndimage
     return ndimage
 
+def _extract_surface_triangulation_3d(sdf_val_np, xnp, ynp, znp, device, dtype):
+    """Run marching cubes on a 3-D SDF grid and return triangle data.
+
+    Inputs are body-local: ``sdf_val_np`` is the SDF on the centred grid
+    ``(xnp, ynp, znp)`` with origin at the body centre.  Returns
+    ``(tri_c, tri_n, tri_area)`` torch tensors with shapes ``(3, T)``,
+    ``(3, T)`` and ``(T,)`` respectively, or ``(None, None, None)`` if
+    no zero level-set is present or skimage isn't importable.
+
+    Marching cubes orients faces so that ``(v1-v0) × (v2-v0)`` points in
+    the +SDF direction, which equals the outward normal for an SDF
+    (negative inside).  Degenerate (zero-area) triangles are dropped.
+    """
+    try:
+        measure = _import_measure()
+        verts, faces, _normals, _vals = measure.marching_cubes(
+            sdf_val_np, level=0.0
+        )
+    except (RuntimeError, ValueError, ImportError):
+        return None, None, None
+
+    if len(faces) == 0:
+        return None, None, None
+
+    # voxel index → physical body-local coords (axis-uniform spacing assumed)
+    vx = xnp[0] + verts[:, 0] * (xnp[1] - xnp[0])
+    vy = ynp[0] + verts[:, 1] * (ynp[1] - ynp[0])
+    vz = znp[0] + verts[:, 2] * (znp[1] - znp[0])
+    verts_phys = np.stack([vx, vy, vz], axis=1)            # (V, 3)
+    tri_verts  = verts_phys[faces]                         # (T, 3, 3)
+    tri_c      = tri_verts.mean(axis=1)                    # (T, 3)
+    e1 = tri_verts[:, 1] - tri_verts[:, 0]
+    e2 = tri_verts[:, 2] - tri_verts[:, 0]
+    cross = np.cross(e1, e2)                               # (T, 3)
+    tri_area_np = 0.5 * np.linalg.norm(cross, axis=1)      # (T,)
+    norm_mag = np.linalg.norm(cross, axis=1, keepdims=True)
+    norm_mag = np.maximum(norm_mag, 1e-30)
+    tri_n = cross / norm_mag                               # (T, 3)
+
+    ok = tri_area_np > 1e-20
+    tri_c = tri_c[ok]
+    tri_n = tri_n[ok]
+    tri_area_np = tri_area_np[ok]
+
+    if tri_c.shape[0] == 0:
+        return None, None, None
+
+    return (
+        torch.tensor(tri_c.T,        device=device, dtype=dtype),  # (3, T)
+        torch.tensor(tri_n.T,        device=device, dtype=dtype),  # (3, T)
+        torch.tensor(tri_area_np,    device=device, dtype=dtype),  # (T,)
+    )
+
+
 def _import_cubic_spline():
     from scipy.interpolate import CubicSpline
     return CubicSpline
@@ -69,6 +123,14 @@ class _StaggeredGrids:
         h = float(x[1] - x[0])
         ndim = 2 if z is None else 3
         nx, ny = len(x), len(y)
+
+        # ---- 1-D cell-centre coordinate vectors ----------------------
+        # Kept around so callers that only need axes (e.g. the lagrangian
+        # force kernels' (bx0, by0, bz0, Mx, My, Mz) setup) don't have to
+        # carry a separate reference to the body's 1-D x/y/z.
+        self.x = x
+        self.y = y
+        self.z = z
 
         # ---- cell-centre meshgrid ------------------------------------
         if ndim == 2:
@@ -1007,8 +1069,81 @@ class BodyAnalytical(Body):
                 # BDIMhandler falls through to the full-grid path.
                 self.local_aabb = None
 
+        # ──────────────────────────────────────────────────────────────
+        # Lagrangian surface triangulation (used by force_method="lagrangian")
+        # ──────────────────────────────────────────────────────────────
+        # Extract the zero-level set as a closed triangle mesh on the
+        # same body-local centred SDF grid used for the AABB above.
+        # Triangle centroids / outward normals / areas are stored in
+        # body-local frame; ``_update_surface_world_3d`` (called from
+        # ``update``) bakes them into world-frame each step.
+        self._build_surface_3d()
+
         if self.pre_update:
             self.update(torch.tensor(0.0), 0, update_cnt=False)
+
+    def _build_surface_3d(self):
+        """Extract body-local surface triangulation via marching cubes.
+
+        Populates:
+            ``self.tri_centroid_local``  (3, T)
+            ``self.tri_normal_local``    (3, T)
+            ``self.tri_area``            (T,)   (rigid-invariant)
+
+        These are consumed by the lagrangian force method (see
+        ``forces.forces_lagrangian_3d``).  Triangulation density is
+        controlled by the local SDF grid spacing (≈ ``self.h``), so each
+        triangle covers roughly one grid cell -- the integration error
+        scales with the grid as desired.
+
+        Failure mode: if the body has no zero-level set in the local
+        grid or ``skimage.measure`` is unavailable, the triangulation
+        attributes are set to ``None`` and
+        ``force_method="lagrangian"`` will raise a clear error.
+        """
+        xmid = (self.x.min() + self.x.max()) / 2
+        ymid = (self.y.min() + self.y.max()) / 2
+        zmid = (self.z.min() + self.z.max()) / 2
+        xcnt = self.x - xmid
+        ycnt = self.y - ymid
+        zcnt = self.z - zmid
+        Xg, Yg, Zg = torch.meshgrid(xcnt, ycnt, zcnt, indexing="ij")
+        sdf_cnt = self.sdf(Xg, Yg, Zg)
+        sdf_np = sdf_cnt.cpu().numpy()
+        xnp = xcnt.cpu().numpy()
+        ynp = ycnt.cpu().numpy()
+        znp = zcnt.cpu().numpy()
+
+        tri_c, tri_n, tri_a = _extract_surface_triangulation_3d(
+            sdf_np, xnp, ynp, znp, self.device, self.dtype,
+        )
+        self.tri_centroid_local = tri_c
+        self.tri_normal_local   = tri_n
+        self.tri_area           = tri_a
+        if tri_c is not None:
+            self.tri_centroid_world = tri_c.clone()
+            self.tri_normal_world   = tri_n.clone()
+        else:
+            self.tri_centroid_world = None
+            self.tri_normal_world   = None
+
+    def _update_surface_world_3d(self, rot, transl):
+        """Bake body-local surface triangulation into world frame.
+
+        Called from ``update`` after the rigid roto-translation
+        ``(rot, transl)`` is computed.  Applies:
+
+            tri_c_world = rot @ tri_c_local + transl
+            tri_n_world = rot @ tri_n_local
+
+        ``tri_area`` is rigid-invariant; we don't touch it.
+        """
+        if self.tri_centroid_local is None:
+            return
+        # rot is (3,3) on device; tri_*_local are (3, T)
+        self.tri_centroid_world = rot @ self.tri_centroid_local
+        self.tri_centroid_world = self.tri_centroid_world + transl.view(3, 1)
+        self.tri_normal_world = rot @ self.tri_normal_local
 
     # ------------------------------------------------------------------
     # Roto-translation
@@ -1213,6 +1348,14 @@ class BodyAnalytical(Body):
             self.sdf_val_u = self.sdf_u
             self.sdf_val_v = self.sdf_v
             self.sdf_val_w = self.sdf_w
+
+            # Bake Lagrangian surface triangulation into world frame.
+            # Stores tri_centroid_world / tri_normal_world; tri_area is
+            # rigid-invariant.  No-op if the body has no triangulation
+            # (e.g. body wholly outside the SDF grid -- see
+            # ``_build_surface_3d``).
+            if update_cnt:
+                self._update_surface_world_3d(rot, transl)
 
 
 
@@ -2077,6 +2220,33 @@ class BodyMesh(Body):
         self.cnt_w = torch.zeros(1, device=self.device, dtype=self.dtype)
         self.mask = torch.arange(1, device=self.device)
         self.sign_vec = torch.ones(1, device=self.device, dtype=self.dtype)
+
+        # ── Lagrangian surface triangulation (force_method="lagrangian")
+        # Build a body-local triangulation by re-centring the SDF grid on
+        # its own bounding-box centre.  ``BodyMesh.update`` is a no-op in
+        # 3-D, so the world-frame triangulation is just the local one
+        # (works for static bodies; composite/moving bodies will need to
+        # bake their own ``tri_*_world`` if they want lagrangian forces).
+        xc = (xnp[0] + xnp[-1]) / 2
+        yc = (ynp[0] + ynp[-1]) / 2
+        zc = (znp[0] + znp[-1]) / 2
+        tri_c, tri_n, tri_a = _extract_surface_triangulation_3d(
+            sdf_val, xnp - xc, ynp - yc, znp - zc, self.device, self.dtype,
+        )
+        self.tri_centroid_local = tri_c
+        self.tri_normal_local   = tri_n
+        self.tri_area           = tri_a
+        if tri_c is not None:
+            # Mesh body has no rigid transform exposed here; world == local
+            # plus the static centre offset.
+            offset = torch.tensor(
+                [xc, yc, zc], device=self.device, dtype=self.dtype,
+            ).view(3, 1)
+            self.tri_centroid_world = tri_c + offset
+            self.tri_normal_world   = tri_n.clone()
+        else:
+            self.tri_centroid_world = None
+            self.tri_normal_world   = None
 
     def update(self, t, iteration, dt=1):
         pass

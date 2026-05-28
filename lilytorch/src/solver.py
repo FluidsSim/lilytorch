@@ -335,18 +335,6 @@ class FluidSolver(PlottingMixin):
         # low-mu0 cells the degenerate solve cannot remove.
         self.bdim_mu0_projection = bool(solver.get("bdim_mu0_projection", True))
 
-        # Softmin SDF blending scale for the per-link body velocity write
-        # (resolves the inter-link velocity discontinuity at overlap surfaces
-        # that drives the multibody projection blow-up).  None or
-        # non-positive → winning-body (current behaviour).  Positive float
-        # σ → smooth SDF-weighted blending with that scale.  Honoured by
-        # BDIMhandler's per-body velocity merge in both the kernel and the
-        # full-Python update paths; see ``_softmin_blend_3d/_softmin_blend_2d``.
-        _sigma = solver.get("sigma_softmin", None)
-        self.sigma_softmin = (float(_sigma)
-                              if (_sigma is not None and float(_sigma) > 0.0)
-                              else None)
-
         self.starting_iteration      = solver.get("starting_iteration", 0)
         self.starting_iteration_path = solver.get("starting_iteration_path", None)
         self.starting_time           = self.starting_iteration * self.dt
@@ -486,7 +474,38 @@ class FluidSolver(PlottingMixin):
         self.force_delta_order = int(solver.get("force_delta_order", 1))
         if self.force_delta_order not in (1, 2):
             raise ValueError(f"force_delta_order must be 1 or 2, got {self.force_delta_order}")
-        self.force_method = solver.get("force_method", "method2")
+        # Force-integration method.
+        #
+        #   "eulerian"   — volumetric ∫ σ·δ_ε(φ) dV / pressure ∫ -p n δ_ε(φ) dV
+        #                  (default).  Implemented by ``forces_method2`` /
+        #                  ``forces_method2_3d``; works in both python and
+        #                  kernel solver modes.
+        #   "lagrangian" — surface integral ∫ σ·n dS on per-body Lagrangian
+        #                  markers (2-D: arc-length contour ``cnt_update``;
+        #                  3-D: per-body triangulation
+        #                  ``tri_centroid_world``/``tri_normal_world``/
+        #                  ``tri_area``).  Implemented by ``forces_lagrangian_2d``
+        #                  / ``forces_lagrangian_3d``.
+        #
+        # Legacy aliases (``method1`` → ``lagrangian``, ``method2`` →
+        # ``eulerian``) are accepted with a one-time DeprecationWarning so
+        # existing configs continue to load.
+        _fm_raw = solver.get("force_method", "eulerian")
+        _fm_aliases = {"method1": "lagrangian", "method2": "eulerian"}
+        if _fm_raw in _fm_aliases:
+            import warnings
+            warnings.warn(
+                f"force_method={_fm_raw!r} is deprecated; use "
+                f"{_fm_aliases[_fm_raw]!r} instead.",
+                DeprecationWarning, stacklevel=2,
+            )
+            _fm_raw = _fm_aliases[_fm_raw]
+        if _fm_raw not in ("eulerian", "lagrangian"):
+            raise ValueError(
+                f"solver.force_method must be one of "
+                f"('eulerian', 'lagrangian'), got {_fm_raw!r}."
+            )
+        self.force_method = _fm_raw
         self.zero_pressure_inside = solver.get("zero_pressure_inside", False)
 
         self._solver_method = solver.get("solver_method", "kernel")
@@ -855,6 +874,10 @@ class FluidSolver(PlottingMixin):
     forces_method1 = forces.forces_method1
     forces_method2 = forces.forces_method2
     forces_method2_3d = forces.forces_method2_3d
+    # Lagrangian (surface-integral) force methods — phase 2 of force_method
+    # rework.  See ``forces.forces_lagrangian_2d`` / ``forces_lagrangian_3d``.
+    forces_lagrangian_2d = forces.forces_lagrangian_2d
+    forces_lagrangian_3d = forces.forces_lagrangian_3d
 
 
 
@@ -1712,15 +1735,6 @@ class FluidSolver(PlottingMixin):
             int(ks['dirty_Ai']), int(ks['dirty_Aj']),
         )
 
-        # 5b. Softmin SDF blending of multibody face velocities (2-D).
-        #     No-op when sigma_softmin is None / ≤ 0.  See the 3-D step
-        #     for the rationale.
-        _softmin = getattr(comp, '_softmin_blend_callable', None)
-        if (_softmin is not None
-                and self.sigma_softmin is not None
-                and self.sigma_softmin > 0.0):
-            _softmin(sdf_u_tmp, sdf_v_tmp, bU_tmp, bV_tmp)
-
         # 6. Kernel B: fused BDIM2 + variable-density coefficients.
         if (self.apply_bdim_sigma
                 and self._sigma_shifts is not None
@@ -1882,22 +1896,6 @@ class FluidSolver(PlottingMixin):
             int(ks['dirty_i0']), int(ks['dirty_j0']), int(ks['dirty_k0']),
             int(ks['dirty_Ai']), int(ks['dirty_Aj']), int(ks['dirty_Ak']),
         )
-
-        # 5b. Softmin SDF blending of multibody face velocities.
-        #     Replaces the winning per-link body_u/v/w (just written by
-        #     streaming_sdf_stag_3d_multi) with a smooth SDF-weighted
-        #     average, removing the velocity discontinuity at
-        #     link-intersection surfaces that drives the multibody
-        #     projection blow-up.  No-op when sigma_softmin is None / ≤ 0
-        #     (the callable returns immediately).  Reads the per-body
-        #     kinematics that BDIMhandler stashed on ``comp`` during
-        #     ``_update_3d_streaming_multi``.
-        _softmin = getattr(comp, '_softmin_blend_callable', None)
-        if (_softmin is not None
-                and self.sigma_softmin is not None
-                and self.sigma_softmin > 0.0):
-            _softmin(sdf_u_tmp, sdf_v_tmp, sdf_w_tmp,
-                     bU_tmp,    bV_tmp,    bW_tmp)
 
         # 6. Kernel B: fused BDIM2 + variable-density coefficients.
         #    Reads primes / SDF / body face velocities; writes u0/v0/w0
@@ -2138,8 +2136,8 @@ class FluidSolver(PlottingMixin):
             self.u0, self.v0, self.p0 = u, v, p
 
             if self.compute_forces:
-                if self.force_method == "method1":
-                    self.forces_method1(u, v, p, iteration)
+                if self.force_method == "lagrangian":
+                    self.forces_lagrangian_2d(u, v, p, iteration)
                 else:
                     self.forces_method2(u, v, p, iteration)
 
@@ -2150,7 +2148,10 @@ class FluidSolver(PlottingMixin):
             self.u0, self.v0, self.w0, self.p0 = u, v, w_vel, p
 
             if self.compute_forces:
-                self.forces_method2_3d(u, v, w_vel, p, iteration)
+                if self.force_method == "lagrangian":
+                    self.forces_lagrangian_3d(u, v, w_vel, p, iteration)
+                else:
+                    self.forces_method2_3d(u, v, w_vel, p, iteration)
 
         self._apply_force_feedback(iteration, t)
         self.check_explosion(iteration)
