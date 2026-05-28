@@ -840,3 +840,373 @@ def forces_method2_3d(self, u, v, w, p, iteration):
         self.pressure_torque_record[i, 0, iteration] = tp_x
         self.pressure_torque_record[i, 1, iteration] = tp_y
         self.pressure_torque_record[i, 2, iteration] = tp_z
+
+
+# ======================================================================
+# Lagrangian (surface-integral) force methods
+# ======================================================================
+#
+# These functions implement the surface-integral form of the BDIM force
+# computation introduced in Uhlmann (2005), Vanella & Balaras (2009) and
+# Kempe & Fröhlich (2012):
+#
+#   F = ∮_∂Ω (σ·n - p n) dS
+#   τ = ∮_∂Ω (r-x_com) × (σ·n - p n) dS
+#
+# instead of the volumetric ``Σ stress·δ_ε(φ)·h^D`` quadrature used by
+# the eulerian path (``forces_method2`` / ``forces_method2_3d``).
+#
+# The surface is sampled at Lagrangian markers carried by each body:
+#
+#   * 2-D: contour points ``body.cnt_update`` (2, M) with arc-length
+#     coordinate ``body.curv_coord`` (M,).  The outward unit normal at
+#     each marker is computed on the fly from the local tangent
+#     ``t = ∂cnt/∂s`` via ``n = (t_y, -t_x)`` (CCW convention).
+#   * 3-D: triangulation with
+#     ``body.tri_centroid_world`` (3, T),
+#     ``body.tri_normal_world``   (3, T), and
+#     ``body.tri_area``           (T,).  See ``body._build_surface_3d``.
+#
+# For both dims:
+#   1. Compute the CC viscous-stress tensor σ_ij and the CC pressure
+#      ``p`` on (a sub-block of) the Eulerian grid -- the **same shared
+#      kernel** the eulerian path already builds.  Crop to the union
+#      AABB when the streaming sparse-SDF layout is available, otherwise
+#      use the full grid.
+#   2. For each body, interpolate σ_ij and p at the Lagrangian markers
+#      (bilinear / trilinear via ``RegularGridInterpolator``).
+#   3. Contract σ·n at the marker and integrate over the surface
+#      (trapezoidal in 2-D, simple sum in 3-D since triangle areas already
+#      carry the quadrature weight).
+#
+# These functions are dispatched from ``solver.step_`` when
+# ``solver.force_method == "lagrangian"``.  They are method-bound to
+# ``FluidSolver`` in ``solver.py`` at the bottom of the class body.
+
+def _viscous_stress_tensor(vels, h):
+    """Compute σ_ij = ν⁻¹ρ⁻¹ × (∂u_i/∂x_j + ∂u_j/∂x_i) at CC.
+
+    Returns
+    -------
+    stress : tensor of shape (D, D, *spatial)
+        Symmetric viscous strain-rate tensor (without ν·ρ); caller
+        multiplies by ν·ρ to obtain σ_ij.
+    """
+    D = len(vels)
+    rng = range(D)
+
+    # u_i interpolated to CC along its stagger dim i (used for cross
+    # derivatives).  Diagonal entries use the compact MAC stencil.
+    cc_vels = []
+    for i in rng:
+        u_i = vels[i]
+        u_cc = torch.empty_like(u_i)
+        sl_lo = [slice(None)] * D; sl_lo[i] = slice(0, -1); sl_lo = tuple(sl_lo)
+        sl_hi = [slice(None)] * D; sl_hi[i] = slice(1, None); sl_hi = tuple(sl_hi)
+        sl_last = [slice(None)] * D; sl_last[i] = -1; sl_last = tuple(sl_last)
+        u_cc[sl_lo] = 0.5 * (u_i[sl_lo] + u_i[sl_hi])
+        u_cc[sl_last] = u_i[sl_last]
+        cc_vels.append(u_cc)
+
+    grad = [[None] * D for _ in rng]
+    for i in rng:
+        u_i = vels[i]
+        d_ii = torch.empty_like(u_i)
+        sl_lo = [slice(None)] * D; sl_lo[i] = slice(0, -1); sl_lo = tuple(sl_lo)
+        sl_hi = [slice(None)] * D; sl_hi[i] = slice(1, None); sl_hi = tuple(sl_hi)
+        sl_last = [slice(None)] * D; sl_last[i] = -1; sl_last = tuple(sl_last)
+        sl_secondlast = [slice(None)] * D; sl_secondlast[i] = -2
+        sl_secondlast = tuple(sl_secondlast)
+        d_ii[sl_lo] = (u_i[sl_hi] - u_i[sl_lo]) / h
+        d_ii[sl_last] = d_ii[sl_secondlast]
+        grad[i][i] = d_ii
+        for j in rng:
+            if j != i:
+                grad[i][j] = torch.gradient(
+                    cc_vels[i], spacing=h, dim=j, edge_order=2,
+                )[0]
+
+    # Symmetric strain-rate ε_ij = (∂u_i/∂x_j + ∂u_j/∂x_i).  For the
+    # surface traction t_i = σ_ij n_j = ν·ρ·ε_ij n_j (Newtonian fluid,
+    # no isotropic part — the isotropic pressure is added separately).
+    eps_ij = [[None] * D for _ in rng]
+    for i in rng:
+        for j in rng:
+            eps_ij[i][j] = grad[i][j] + grad[j][i]
+    return eps_ij
+
+
+def _contour_normal_2d(cnt_update):
+    """Outward unit normal at each 2-D contour point.
+
+    Computes ``n = (t_y, -t_x)`` where ``t = ∂c/∂s`` is the unit tangent
+    obtained from central differences on the (assumed-ordered) contour
+    point list.
+
+    The CCW orientation convention is fixed by the analytical / mesh
+    body initialisers: marching-squares walks counter-clockwise around
+    the zero level set, so ``(t_y, -t_x)`` is the outward normal.
+    """
+    cx = cnt_update[0]
+    cy = cnt_update[1]
+    # central diff; cnt is closed → wrap with roll
+    tx = (torch.roll(cx, -1, 0) - torch.roll(cx, 1, 0)) * 0.5
+    ty = (torch.roll(cy, -1, 0) - torch.roll(cy, 1, 0)) * 0.5
+    L = torch.sqrt(tx * tx + ty * ty).clamp_min(1e-30)
+    tx = tx / L
+    ty = ty / L
+    # outward normal (CCW orientation ⇒ outward = +90° rotation of tangent)
+    nx = ty
+    ny = -tx
+    return nx, ny
+
+
+def forces_lagrangian_2d(self, u, v, p, iteration):
+    """Surface-integral viscous + pressure forces in 2-D.
+
+    Implements the Lagrangian-marker formulation of Uhlmann (2005) /
+    Kempe & Fröhlich (2012) on the existing per-body 2-D contour
+    ``body.cnt_update``.  Works in both ``solver_method="python"`` and
+    ``solver_method="kernel"`` modes -- it only reads u/v/p and the
+    per-body contour; the volumetric stress field σ is built once per
+    step from u/v via the same shared kernel the eulerian path uses.
+
+    Output channels match the legacy 2-D 6-channel layout:
+        [fv_x, fv_y, t_v, fp_x, fp_y, t_p]
+    written into ``viscous_drag_record`` / ``pressure_drag_record`` and
+    the per-body ``friction_force_lin_*`` / ``pressure_force_*`` caches.
+    """
+    comp = self.composite_body
+    B = len(comp.bodies)
+    h = self.h
+    nu_rho = self._compute_nu_rho_for_forces(u, v)
+    # Use scalar viscosity when constant; lagrangian path doesn't need a
+    # full nu_rho field on the band -- it's sampled at the marker points.
+    nu_rho_const = (
+        not (torch.is_tensor(nu_rho) and nu_rho.ndim == 2)
+    )
+
+    # Symmetric strain-rate tensor ε_ij at CC; viscous stress σ = ν·ρ·ε.
+    eps_ij = _viscous_stress_tensor((u, v), h)
+
+    # Build per-axis interpolators (RegularGridInterpolator handles
+    # 2-D/3-D and runs on CPU or CUDA via the existing dispatched
+    # ``interp_2d`` / ``interp_3d`` ops).
+    from lilytorch.src.kernels import RegularGridInterpolator
+    grids = comp._grids
+    axes_2d = (grids.x, grids.y)
+
+    # Bilinear interpolation of σ_ij and p at every contour marker of
+    # every body.  We share one interpolator instance per field by
+    # reassigning ``.F`` between bodies -- this avoids re-baking metadata.
+    interp = RegularGridInterpolator(axes_2d, p, method="linear")
+
+    def _sample(field, qx, qy):
+        interp.F = field.contiguous()
+        return interp(qx, qy)
+
+    # If nu_rho is a CC tensor, sample it at markers; else broadcast scalar.
+    for bi, body in enumerate(comp.bodies):
+        cnt = body.cnt_update                    # (2, M)
+        if cnt.shape[1] <= 1:
+            # Degenerate body (no surface contour); skip.
+            self.friction_force_lin_x[bi] = 0
+            self.friction_force_lin_y[bi] = 0
+            self.friction_force_ang_z[bi] = 0
+            self.pressure_force_x[bi] = 0
+            self.pressure_force_y[bi] = 0
+            self.pressure_force_ang_z[bi] = 0
+            continue
+
+        qx = cnt[0]
+        qy = cnt[1]
+        nx, ny = _contour_normal_2d(cnt)
+
+        # Sample ε_ij at markers
+        e_xx = _sample(eps_ij[0][0], qx, qy)
+        e_xy = _sample(eps_ij[0][1], qx, qy)
+        e_yy = _sample(eps_ij[1][1], qx, qy)
+        if nu_rho_const:
+            nu_rho_m = nu_rho  # scalar
+        else:
+            nu_rho_m = _sample(nu_rho, qx, qy)
+
+        # Viscous traction t_v = ν·ρ·(ε_ij n_j)
+        tvx = nu_rho_m * (e_xx * nx + e_xy * ny)
+        tvy = nu_rho_m * (e_xy * nx + e_yy * ny)
+
+        # Pressure traction t_p = -p n
+        p_m = _sample(p, qx, qy)
+        tpx = -p_m * nx
+        tpy = -p_m * ny
+
+        # Arc-length integration over the (closed) contour.  ``ds`` from
+        # consecutive cnt distances; trapz with the wrap-around endpoint.
+        dx = torch.roll(qx, -1, 0) - qx
+        dy = torch.roll(qy, -1, 0) - qy
+        ds_seg = torch.sqrt(dx * dx + dy * dy)  # (M,)
+        # midpoint quadrature: F = Σ_seg 0.5*(f_i + f_{i+1}) * ds_seg
+        def _line_integral(f):
+            return 0.5 * ((f + torch.roll(f, -1, 0)) * ds_seg).sum()
+
+        fv_x = _line_integral(tvx)
+        fv_y = _line_integral(tvy)
+        fp_x = _line_integral(tpx)
+        fp_y = _line_integral(tpy)
+
+        # Torques about com
+        com = body.com_pos
+        rx = qx - com[0]
+        ry = qy - com[1]
+        tv_torque = _line_integral(rx * tvy - ry * tvx)
+        tp_torque = _line_integral(rx * tpy - ry * tpx)
+
+        self.friction_force_lin_x[bi] = fv_x.to(self.dtype)
+        self.friction_force_lin_y[bi] = fv_y.to(self.dtype)
+        self.friction_force_ang_z[bi] = tv_torque.to(self.dtype)
+        self.pressure_force_x[bi] = fp_x.to(self.dtype)
+        self.pressure_force_y[bi] = fp_y.to(self.dtype)
+        self.pressure_force_ang_z[bi] = tp_torque.to(self.dtype)
+
+        self.viscous_drag_record[bi, 0, iteration]  = self.friction_force_lin_x[bi]
+        self.viscous_drag_record[bi, 1, iteration]  = self.friction_force_lin_y[bi]
+        self.pressure_drag_record[bi, 0, iteration] = self.pressure_force_x[bi]
+        self.pressure_drag_record[bi, 1, iteration] = self.pressure_force_y[bi]
+
+    # Lagrangian path doesn't expose volumetric stress / pforce tensors.
+    self.xstress_tensor = None
+    self.ystress_tensor = None
+    self.pforce_x = None
+    self.pforce_y = None
+
+
+def forces_lagrangian_3d(self, u, v, w, p, iteration):
+    """Surface-integral viscous + pressure forces in 3-D.
+
+    Integrates ``∮ (σ·n - p n) dS`` over each body's triangulated
+    surface (``tri_centroid_world`` / ``tri_normal_world`` / ``tri_area``
+    contract; see ``body._build_surface_3d``).
+
+    Strain-rate ε_ij = ∂u_i/∂x_j + ∂u_j/∂x_i is computed at CC on the
+    full grid (cropping to per-body AABB would require per-body
+    interpolator rebuilds and the current 3-D bodies are typically
+    small enough that the full-grid CC σ build is amortised across
+    bodies).  Pressure is sampled directly.
+
+    Output channels match the legacy 3-D 12-channel layout:
+        [fv_x, fv_y, fv_z, tv_x, tv_y, tv_z,
+         fp_x, fp_y, fp_z, tp_x, tp_y, tp_z]
+    written into ``viscous_drag_record`` / ``pressure_drag_record`` /
+    ``viscous_torque_record`` / ``pressure_torque_record`` and the
+    per-body ``friction_force_*`` / ``pressure_force_*`` caches.
+    """
+    comp = self.composite_body
+    B = len(comp.bodies)
+    h = self.h
+    nu_rho = self._compute_nu_rho_for_forces(u, v, w)
+    nu_rho_const = not (torch.is_tensor(nu_rho) and nu_rho.ndim == 3)
+
+    eps_ij = _viscous_stress_tensor((u, v, w), h)
+
+    from lilytorch.src.kernels import RegularGridInterpolator
+    grids = comp._grids
+    axes_3d = (grids.x, grids.y, grids.z)
+    interp = RegularGridInterpolator(axes_3d, p, method="linear")
+
+    def _sample(field, qx, qy, qz):
+        interp.F = field.contiguous()
+        return interp(qx, qy, qz)
+
+    for bi, body in enumerate(comp.bodies):
+        tri_c = getattr(body, 'tri_centroid_world', None)
+        tri_n = getattr(body, 'tri_normal_world', None)
+        tri_a = getattr(body, 'tri_area', None)
+        if tri_c is None or tri_n is None or tri_a is None:
+            raise RuntimeError(
+                f"Body {bi} ({type(body).__name__}) does not expose "
+                "tri_centroid_world/tri_normal_world/tri_area; cannot use "
+                "force_method='lagrangian' in 3-D.  Use 'eulerian' or "
+                "add a surface triangulation in the body's constructor."
+            )
+        qx = tri_c[0]
+        qy = tri_c[1]
+        qz = tri_c[2]
+        nx = tri_n[0]
+        ny = tri_n[1]
+        nz = tri_n[2]
+        area = tri_a
+
+        # Sample strain-rate
+        e_xx = _sample(eps_ij[0][0], qx, qy, qz)
+        e_yy = _sample(eps_ij[1][1], qx, qy, qz)
+        e_zz = _sample(eps_ij[2][2], qx, qy, qz)
+        e_xy = _sample(eps_ij[0][1], qx, qy, qz)
+        e_xz = _sample(eps_ij[0][2], qx, qy, qz)
+        e_yz = _sample(eps_ij[1][2], qx, qy, qz)
+        if nu_rho_const:
+            nu_rho_m = nu_rho
+        else:
+            nu_rho_m = _sample(nu_rho, qx, qy, qz)
+
+        # Viscous traction t_v = ν·ρ·(ε_ij n_j)
+        tvx = nu_rho_m * (e_xx * nx + e_xy * ny + e_xz * nz)
+        tvy = nu_rho_m * (e_xy * nx + e_yy * ny + e_yz * nz)
+        tvz = nu_rho_m * (e_xz * nx + e_yz * ny + e_zz * nz)
+
+        # Pressure traction t_p = -p n
+        p_m = _sample(p, qx, qy, qz)
+        tpx = -p_m * nx
+        tpy = -p_m * ny
+        tpz = -p_m * nz
+
+        # Integrate over surface (area already encodes the quadrature weight)
+        fv_x = (tvx * area).sum()
+        fv_y = (tvy * area).sum()
+        fv_z = (tvz * area).sum()
+        fp_x = (tpx * area).sum()
+        fp_y = (tpy * area).sum()
+        fp_z = (tpz * area).sum()
+
+        com = body.com_pos
+        rx = qx - com[0]
+        ry = qy - com[1]
+        rz = qz - com[2]
+        tv_x = ((ry * tvz - rz * tvy) * area).sum()
+        tv_y = ((rz * tvx - rx * tvz) * area).sum()
+        tv_z = ((rx * tvy - ry * tvx) * area).sum()
+        tp_x = ((ry * tpz - rz * tpy) * area).sum()
+        tp_y = ((rz * tpx - rx * tpz) * area).sum()
+        tp_z = ((rx * tpy - ry * tpx) * area).sum()
+
+        self.friction_force_lin_x[bi] = fv_x.to(self.dtype)
+        self.friction_force_lin_y[bi] = fv_y.to(self.dtype)
+        self.friction_force_lin_z[bi] = fv_z.to(self.dtype)
+        self.friction_force_ang_x[bi] = tv_x.to(self.dtype)
+        self.friction_force_ang_y[bi] = tv_y.to(self.dtype)
+        self.friction_force_ang_z[bi] = tv_z.to(self.dtype)
+        self.pressure_force_x[bi] = fp_x.to(self.dtype)
+        self.pressure_force_y[bi] = fp_y.to(self.dtype)
+        self.pressure_force_z[bi] = fp_z.to(self.dtype)
+        self.pressure_force_ang_x[bi] = tp_x.to(self.dtype)
+        self.pressure_force_ang_y[bi] = tp_y.to(self.dtype)
+        self.pressure_force_ang_z[bi] = tp_z.to(self.dtype)
+
+        self.viscous_drag_record[bi, 0, iteration]   = self.friction_force_lin_x[bi]
+        self.viscous_drag_record[bi, 1, iteration]   = self.friction_force_lin_y[bi]
+        self.viscous_drag_record[bi, 2, iteration]   = self.friction_force_lin_z[bi]
+        self.viscous_torque_record[bi, 0, iteration] = self.friction_force_ang_x[bi]
+        self.viscous_torque_record[bi, 1, iteration] = self.friction_force_ang_y[bi]
+        self.viscous_torque_record[bi, 2, iteration] = self.friction_force_ang_z[bi]
+        self.pressure_drag_record[bi, 0, iteration]   = self.pressure_force_x[bi]
+        self.pressure_drag_record[bi, 1, iteration]   = self.pressure_force_y[bi]
+        self.pressure_drag_record[bi, 2, iteration]   = self.pressure_force_z[bi]
+        self.pressure_torque_record[bi, 0, iteration] = self.pressure_force_ang_x[bi]
+        self.pressure_torque_record[bi, 1, iteration] = self.pressure_force_ang_y[bi]
+        self.pressure_torque_record[bi, 2, iteration] = self.pressure_force_ang_z[bi]
+
+    self.xstress_tensor = None
+    self.ystress_tensor = None
+    self.zstress_tensor = None
+    self.pforce_x = None
+    self.pforce_y = None
+    self.pforce_z = None

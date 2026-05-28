@@ -486,7 +486,38 @@ class FluidSolver(PlottingMixin):
         self.force_delta_order = int(solver.get("force_delta_order", 1))
         if self.force_delta_order not in (1, 2):
             raise ValueError(f"force_delta_order must be 1 or 2, got {self.force_delta_order}")
-        self.force_method = solver.get("force_method", "method2")
+        # Force-integration method.
+        #
+        #   "eulerian"   — volumetric ∫ σ·δ_ε(φ) dV / pressure ∫ -p n δ_ε(φ) dV
+        #                  (default).  Implemented by ``forces_method2`` /
+        #                  ``forces_method2_3d``; works in both python and
+        #                  kernel solver modes.
+        #   "lagrangian" — surface integral ∫ σ·n dS on per-body Lagrangian
+        #                  markers (2-D: arc-length contour ``cnt_update``;
+        #                  3-D: per-body triangulation
+        #                  ``tri_centroid_world``/``tri_normal_world``/
+        #                  ``tri_area``).  Implemented by ``forces_lagrangian_2d``
+        #                  / ``forces_lagrangian_3d``.
+        #
+        # Legacy aliases (``method1`` → ``lagrangian``, ``method2`` →
+        # ``eulerian``) are accepted with a one-time DeprecationWarning so
+        # existing configs continue to load.
+        _fm_raw = solver.get("force_method", "eulerian")
+        _fm_aliases = {"method1": "lagrangian", "method2": "eulerian"}
+        if _fm_raw in _fm_aliases:
+            import warnings
+            warnings.warn(
+                f"force_method={_fm_raw!r} is deprecated; use "
+                f"{_fm_aliases[_fm_raw]!r} instead.",
+                DeprecationWarning, stacklevel=2,
+            )
+            _fm_raw = _fm_aliases[_fm_raw]
+        if _fm_raw not in ("eulerian", "lagrangian"):
+            raise ValueError(
+                f"solver.force_method must be one of "
+                f"('eulerian', 'lagrangian'), got {_fm_raw!r}."
+            )
+        self.force_method = _fm_raw
         self.zero_pressure_inside = solver.get("zero_pressure_inside", False)
 
         self._solver_method = solver.get("solver_method", "kernel")
@@ -855,6 +886,10 @@ class FluidSolver(PlottingMixin):
     forces_method1 = forces.forces_method1
     forces_method2 = forces.forces_method2
     forces_method2_3d = forces.forces_method2_3d
+    # Lagrangian (surface-integral) force methods — phase 2 of force_method
+    # rework.  See ``forces.forces_lagrangian_2d`` / ``forces_lagrangian_3d``.
+    forces_lagrangian_2d = forces.forces_lagrangian_2d
+    forces_lagrangian_3d = forces.forces_lagrangian_3d
 
 
 
@@ -2138,8 +2173,8 @@ class FluidSolver(PlottingMixin):
             self.u0, self.v0, self.p0 = u, v, p
 
             if self.compute_forces:
-                if self.force_method == "method1":
-                    self.forces_method1(u, v, p, iteration)
+                if self.force_method == "lagrangian":
+                    self.forces_lagrangian_2d(u, v, p, iteration)
                 else:
                     self.forces_method2(u, v, p, iteration)
 
@@ -2150,7 +2185,10 @@ class FluidSolver(PlottingMixin):
             self.u0, self.v0, self.w0, self.p0 = u, v, w_vel, p
 
             if self.compute_forces:
-                self.forces_method2_3d(u, v, w_vel, p, iteration)
+                if self.force_method == "lagrangian":
+                    self.forces_lagrangian_3d(u, v, w_vel, p, iteration)
+                else:
+                    self.forces_method2_3d(u, v, w_vel, p, iteration)
 
         self._apply_force_feedback(iteration, t)
         self.check_explosion(iteration)
