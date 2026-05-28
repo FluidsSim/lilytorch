@@ -120,7 +120,7 @@ class ForceViewer(TaskExtension):
         self.update_every = update_every
 
         self._viewer = None
-        self._fluid_ext = None          # reference to FluidExtension
+        self._fluid_ext = None          # reference to FluidExtension (optional)
         self._geom_start = None         # first slot we own in user_scn
         self._n_bodies = 0              # number of bodies
         self._max_arrows = 0            # geom budget (bodies × arrows_per_body)
@@ -130,6 +130,8 @@ class ForceViewer(TaskExtension):
         self._slots_reserved = False
         self._patched_renderers = set()   # id() of already-wrapped renderers
         self._warned_hydro = False
+        self._body_mj_ids = None        # list of (animat_id, link_id, xfrc_row)
+        self._warned_no_bdim = False
 
         # Shared arrow data (interactive viewer + offscreen renderer).
         self._from = None               # (max_arrows, 3) float64 — arrow base
@@ -160,21 +162,56 @@ class ForceViewer(TaskExtension):
     def initialize_episode(self, task: ExperimentTask, physics: Physics):
         self._viewer = task.viewer
 
-        # Find the FluidExtension among sibling extensions.  The handler
-        # (and hence the body count) is not guaranteed to exist yet here,
-        # so geom-slot reservation is deferred to the first ``before_step``.
-        from lilytorch.integration.extensions import FluidExtension
-        for ext in task.extensions:
-            if isinstance(ext, FluidExtension):
-                self._fluid_ext = ext
-                break
-        if self._fluid_ext is None:
-            print("[ForceViewer] FluidExtension not found – disabled.")
+        # FluidExtension is optional. When present, ``force_source="hydro"``
+        # reconstructs viscous + pressure from the BDIM solver. When absent
+        # (e.g. ``use_bdim=False`` with FARMS' ``water_drag=True``), we read
+        # the drag forces that ``SwimmingExtension`` writes into
+        # ``physics.data.xfrc_applied`` and silently switch to "applied".
+        try:
+            from lilytorch.integration.extensions import FluidExtension
+            for ext in task.extensions:
+                if isinstance(ext, FluidExtension):
+                    self._fluid_ext = ext
+                    break
+        except Exception:  # noqa: BLE001
+            self._fluid_ext = None
 
     def _handler(self):
         if self._fluid_ext is None:
             return None
         return getattr(self._fluid_ext, "BDIMhandler", None)
+
+    def _resolve_body_ids(self, task: ExperimentTask, physics: Physics):
+        """Build the list of bodies to visualise.
+
+        Returns a list of ``(animat_id, link_id, xfrc_row)`` tuples.
+
+        Prefers the FluidExtension/CompositeBody body list (so we render
+        exactly the immersed links the solver knows about). Falls back to
+        every body declared by every animat's ``data2xfrc`` map — the FARMS
+        ``SwimmingExtension`` writes drag forces to exactly those rows.
+        """
+        handler = self._handler()
+        fs = getattr(handler, "fluid_solver", None) if handler is not None else None
+        comp = getattr(fs, "composite_body", None) if fs is not None else None
+
+        ids: list[tuple[int, int, int]] = []
+        if comp is not None:
+            for body_i in range(len(comp.bodies)):
+                animat_id, link_id = comp.body_ids[body_i]
+                row = int(task.maps[animat_id]["sensors"]["data2xfrc"][link_id])
+                ids.append((int(animat_id), int(link_id), row))
+            return ids
+
+        # Drag-only fallback: every link of every animat.
+        for animat_id, m in enumerate(task.maps):
+            try:
+                rows = m["sensors"]["data2xfrc"]
+            except Exception:  # noqa: BLE001
+                continue
+            for link_id, row in enumerate(rows):
+                ids.append((int(animat_id), int(link_id), int(row)))
+        return ids
 
     def _reserve_slots(self, n_bodies: int):
         """Allocate arrow storage and pre-create user_scn slots.
@@ -276,46 +313,63 @@ class ForceViewer(TaskExtension):
     # ── per-step update ──────────────────────────────────────────────
 
     def before_step(self, task: ExperimentTask, action, physics: Physics):
-        if self._fluid_ext is None:
-            self._iteration += 1
-            return
-
         # Deferred CameraRecording patch (renderers are created in each
         # recorder's initialize_episode, so they exist by the first step).
         # Cheap idempotent re-scan: skips renderers already wrapped.
         self._patch_camera_renderers(task)
 
         handler = self._handler()
-        if handler is None:
-            return
-        fs = getattr(handler, "fluid_solver", None)
-        if fs is None:
-            return
+        fs = getattr(handler, "fluid_solver", None) if handler is not None else None
 
-        comp = getattr(fs, "composite_body", None)
-        if comp is None:
-            return
+        # When the BDIM solver is absent we can only show ``xfrc_applied``
+        # (drag forces written by FARMS' SwimmingExtension). Force the
+        # source once and continue.
+        if handler is None and self.force_source != "applied":
+            if not self._warned_no_bdim:
+                print("[ForceViewer] No FluidExtension/BDIM solver – falling "
+                      "back to force_source='applied' (reads xfrc_applied, "
+                      "which includes FARMS' water_drag forces).")
+                self._warned_no_bdim = True
+            self.force_source = "applied"
+
+        if self._body_mj_ids is None:
+            self._body_mj_ids = self._resolve_body_ids(task, physics)
+            if not self._body_mj_ids:
+                return
 
         if not self._slots_reserved:
-            self._reserve_slots(len(comp.bodies))
+            self._reserve_slots(len(self._body_mj_ids))
 
-        every = self.update_every or getattr(fs, "save_every", 200)
-        iteration = getattr(handler, "iteration", self._iteration)
-        self._iteration = iteration
-        if iteration % every != 0:
+        # Cadence:
+        #   - explicit ``update_every`` always wins;
+        #   - else inherit the solver's ``save_every`` when BDIM is on;
+        #   - else fall back to every step.
+        if self.update_every is not None:
+            every = self.update_every
+        elif fs is not None:
+            every = getattr(fs, "save_every", 200)
+        else:
+            every = 1
+
+        if handler is not None:
+            iteration = getattr(handler, "iteration", self._iteration)
+            self._iteration = iteration
+        else:
+            self._iteration += 1
+            iteration = self._iteration
+        if every > 1 and iteration % every != 0:
             return
 
         # World-frame linear force (and angular torque) per body.
         lin, ang = self._gather_wrenches(
-            task, physics, handler, fs, comp, self.show_torque,
+            task, physics, handler, fs, self.show_torque,
         )
         if lin is None:
             return
 
         n_active = 0
-        for body_i in range(min(self._n_bodies, len(comp.bodies))):
-            (animat_id, link_id) = comp.body_ids[body_i]
-            ind = task.maps[animat_id]["sensors"]["data2xfrc"][link_id]
+        for body_i in range(min(self._n_bodies, len(self._body_mj_ids))):
+            (_animat_id, _link_id, ind) = self._body_mj_ids[body_i]
             base = np.asarray(physics.data.xipos[ind], dtype=np.float64).copy()
 
             # Force arrow.
@@ -354,28 +408,30 @@ class ForceViewer(TaskExtension):
         self._width[n_active] = width
         return n_active + 1
 
-    def _gather_wrenches(self, task, physics, handler, fs, comp, want_torque):
+    def _gather_wrenches(self, task, physics, handler, fs, want_torque):
         """Return ``(lin, ang)`` world-frame arrays, each ``(n_bodies, 3)``.
 
         ``ang`` is ``None`` when ``want_torque`` is False. Returns
         ``(None, None)`` on failure.
         """
-        n = len(comp.bodies)
+        n = len(self._body_mj_ids)
 
         if self.force_source == "applied":
             lin = np.zeros((n, 3), dtype=np.float64)
             ang = np.zeros((n, 3), dtype=np.float64) if want_torque else None
+            xfrc = physics.data.xfrc_applied
             for body_i in range(n):
-                (animat_id, link_id) = comp.body_ids[body_i]
-                ind = task.maps[animat_id]["sensors"]["data2xfrc"][link_id]
-                lin[body_i] = physics.data.xfrc_applied[ind, 0:3]
+                ind = self._body_mj_ids[body_i][2]
+                lin[body_i] = xfrc[ind, 0:3]
                 if want_torque:
-                    ang[body_i] = physics.data.xfrc_applied[ind, 3:6]
+                    ang[body_i] = xfrc[ind, 3:6]
             return lin, ang
 
         # "hydro": reconstruct viscous + pressure in world frame, exactly as
         # BDIMhandler._apply_forces does (minus buoyancy), so the arrows show
-        # the pure hydrodynamic load.
+        # the pure hydrodynamic load. Requires the BDIM handler.
+        if handler is None or fs is None:
+            return None, None
         try:
             D = handler.ndim
             Nt = len(handler._ang_xfrc_idx)
@@ -405,7 +461,7 @@ class ForceViewer(TaskExtension):
                 self._warned_hydro = True
             self.force_source = "applied"
             return self._gather_wrenches(
-                task, physics, handler, fs, comp, want_torque,
+                task, physics, handler, fs, want_torque,
             )
 
     def _update_viewer_arrows(self, n_active: int):

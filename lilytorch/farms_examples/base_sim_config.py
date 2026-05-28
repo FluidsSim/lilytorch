@@ -204,6 +204,15 @@ class BaseSimConfig:
         # coefficient, which keeps the projection non-degenerate — needed for
         # stable multibody swimmers (inter-link velocity seams).
         self.bdim_mu0_projection     = None   # None → solver default (True)
+        # Multibody body-velocity softmin blending scale.  When set to a
+        # positive float σ, body_u/v/w from overlapping/intersecting links
+        # is computed as a smooth SDF-weighted average
+        # ``u(x) = Σ_k exp(-(sdf_k-sdf_min)/σ)·u_k / Σ_k exp(-(sdf_k-sdf_min)/σ)``
+        # instead of the discontinuous winning-body lookup.  Removes the
+        # velocity discontinuity at link-intersection surfaces that drives
+        # the multibody blow-up.  None or non-positive → winning-body
+        # (current behaviour, no extra cost).
+        self.sigma_softmin           = None   # None → winning-body (off)
         # Delta-function order for force integration:
         #   1 (default) – first-order smoothed delta
         #   2           – Towers (2008) correction δ/|∇φ|, recommended for
@@ -794,6 +803,7 @@ class BaseSimConfig:
             ("eps_multiplier",          self.eps_multiplier),
             ("apply_bdim_sigma",        self.apply_bdim_sigma),
             ("bdim_mu0_projection",     self.bdim_mu0_projection),
+            ("sigma_softmin",           self.sigma_softmin),
             ("force_delta_order",       self.force_delta_order),
         ]:
             if val is not None:

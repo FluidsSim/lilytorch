@@ -67,6 +67,17 @@ class BDIMhandler:
         self.dtype = self.fluid_solver.dtype
         self.dtype_np = np.float64 if self.dtype == torch.float64 else np.float32
 
+        # Stash a callable on the composite so the fluid step (in
+        # solver.py) can invoke the softmin body-velocity blend after
+        # the streaming SDF kernel writes the winning fields, without
+        # importing BDIMhandler.  The callable returns early when
+        # ``fluid_solver.sigma_softmin`` is None / non-positive.
+        comp = self.fluid_solver.composite_body
+        comp._softmin_blend_callable = (
+            self._softmin_blend_body_velocity_3d if self.ndim == 3
+            else self._softmin_blend_body_velocity_2d
+        )
+
         # used for 2D contour-mask neighbor only
         self._prev_body_index = ()
         self._next_body_index = ()
@@ -765,6 +776,281 @@ class BDIMhandler:
         target_vel[sl] = torch.where(
             mask, vel_region, target_vel[sl].contiguous())
 
+    # ──────────────────────────────────────────────────────────────────
+    # Softmin SDF blending of multibody face velocities.
+    #
+    # The default per-link winning-body assignment makes ``body_u/v/w``
+    # discontinuous on the SDF-intersection surface between two
+    # interpenetrating links (different rigid velocities meet at the
+    # surface where the winner switches).  In the band that
+    # discontinuity becomes a huge ``div(u*)`` in low-mu0 cells, which
+    # the BDIM2 mu0-weighted projection cannot remove → blow-up.
+    #
+    # Softmin blending replaces the winner with a smooth weighted
+    # average:
+    #     u(x)  =  Σ_k  w_k(x) · u_k(x)  /  Σ_k  w_k(x)
+    #     w_k   =  exp( -(sdf_k(x) - sdf_min(x)) / σ )
+    # so band cells receive a continuous velocity across intersection
+    # surfaces.  The winner (smallest ``sdf_k``) gets ``w = 1``; the
+    # next-closest body gets ``exp(-Δ/σ) ≤ 1``.  Far bodies contribute
+    # negligibly.  σ has units of length; a reasonable choice is
+    # ``~comp.eps`` (BDIM band half-width), giving a smooth blend
+    # comparable to the BDIM transition.
+    #
+    # Requires that ``sdf_face`` already holds the per-cell *min* over
+    # all bodies (both the streaming kernel and ``_update_*_full``'s
+    # winning merge produce this).  Re-evaluates each body's SDF on its
+    # AABB-clipped staggered grids and overwrites ``body_face`` with
+    # the blended velocity.  Called from both the Python (full) and
+    # kernel update paths when ``self.fluid_solver.sigma_softmin`` is
+    # a positive float.
+    # ──────────────────────────────────────────────────────────────────
+    def _softmin_blend_body_velocity_3d(self, sdf_u, sdf_v, sdf_w,
+                                        body_u, body_v, body_w):
+        """Softmin-blend per-link body velocities into body_u/v/w (in place).
+
+        Reads sdf_u/v/w as the per-cell *min* over all bodies (already
+        populated by the caller).  Reads per-body kinematics stashed on
+        the composite body as ``comp._latest_link_kin_3d``.  Overwrites
+        body_u/v/w with the softmin-weighted average.
+        """
+        sigma = getattr(self.fluid_solver, 'sigma_softmin', None)
+        if sigma is None or sigma <= 0.0:
+            return  # off → caller's winning-body fields untouched
+        comp = self.fluid_solver.composite_body
+        kin  = getattr(comp, '_latest_link_kin_3d', None)
+        if kin is None:
+            return  # no kinematics stashed → silently skip
+
+        inv_sigma = 1.0 / float(sigma)
+        eps_floor = 1e-30
+        h_grid = float(comp.h)
+        gs     = sdf_u.shape
+
+        # Allocate per-step weight accumulators (same shape as the face
+        # tensors).  body_u/v/w become Σ w·v during the loop, then we
+        # divide by Σ w at the end.
+        sumw_u = torch.zeros_like(sdf_u)
+        sumw_v = torch.zeros_like(sdf_v)
+        sumw_w = torch.zeros_like(sdf_w)
+        body_u.zero_()
+        body_v.zero_()
+        body_w.zero_()
+
+        com_pos_t  = kin['com_pos']    # (B, 3)
+        urdf_pos_t = kin['urdf_pos']   # (B, 3)
+        R_t        = kin['R']          # (B, 3, 3)
+        lin_vel_t  = kin['lin_vel']    # (B, 3)
+        ang_vel_t  = kin['ang_vel']    # (B, 3)
+
+        for body_i, body in enumerate(comp.bodies):
+            com_pos  = com_pos_t[body_i]
+            urdf_pos = urdf_pos_t[body_i]
+            R        = R_t[body_i]
+            lin_vel  = lin_vel_t[body_i]
+            ang_vel  = ang_vel_t[body_i]
+
+            body_pos, body_rot = self._compose_body_frame_3d(
+                body, urdf_pos, R)
+            R_T = body_rot.T
+
+            aabb = self._body_aabb_indices(
+                body, body_rot, body_pos,
+                comp.x, comp.y, comp.z, h_grid, gs, pad=3,
+            )
+            sl, _full = self._slice_from_aabb(aabb, self.ndim)
+
+            # Per-body SDF at staggered faces.
+            px_u, py_u, pz_u = _rotate_grid_3d_compiled(
+                comp.Xu_stag[sl], comp.Yu_stag[sl], comp.Zu_stag[sl],
+                R_T, body_pos)
+            sdf_u_k = body.sdf(px_u, py_u, pz_u)
+
+            px_v, py_v, pz_v = _rotate_grid_3d_compiled(
+                comp.Xv_stag[sl], comp.Yv_stag[sl], comp.Zv_stag[sl],
+                R_T, body_pos)
+            sdf_v_k = body.sdf(px_v, py_v, pz_v)
+
+            px_w, py_w, pz_w = _rotate_grid_3d_compiled(
+                comp.Xw_stag[sl], comp.Yw_stag[sl], comp.Zw_stag[sl],
+                R_T, body_pos)
+            sdf_w_k = body.sdf(px_w, py_w, pz_w)
+
+            # Per-body rigid velocity at staggered faces (identical
+            # formula to the winning-merge path so the limiting case
+            # σ→0 recovers winning-body up to FP noise).
+            vel_u_k = (lin_vel[0]
+                       + ang_vel[1] * (comp.Zu_stag[sl] - com_pos[2])
+                       - ang_vel[2] * (comp.Yu_stag[sl] - com_pos[1]))
+            vel_v_k = (lin_vel[1]
+                       + ang_vel[2] * (comp.Xv_stag[sl] - com_pos[0])
+                       - ang_vel[0] * (comp.Zv_stag[sl] - com_pos[2]))
+            vel_w_k = (lin_vel[2]
+                       + ang_vel[0] * (comp.Yw_stag[sl] - com_pos[1])
+                       - ang_vel[1] * (comp.Xw_stag[sl] - com_pos[0]))
+
+            # Weights relative to the per-cell minimum SDF.  dphi ≥ 0
+            # by construction (sdf_face = min over all bodies), so the
+            # exponent is non-positive and weights are in (0, 1].
+            w_u = torch.exp(-(sdf_u_k - sdf_u[sl]) * inv_sigma)
+            w_v = torch.exp(-(sdf_v_k - sdf_v[sl]) * inv_sigma)
+            w_w = torch.exp(-(sdf_w_k - sdf_w[sl]) * inv_sigma)
+
+            sumw_u[sl] += w_u
+            sumw_v[sl] += w_v
+            sumw_w[sl] += w_w
+            body_u[sl] += w_u * vel_u_k
+            body_v[sl] += w_v * vel_v_k
+            body_w[sl] += w_w * vel_w_k
+
+        # Divide.  Cells outside every body's AABB keep sumw=0 and
+        # body=0 — clamp_min prevents division by zero; the numerator
+        # is also 0 there so the cell stays 0.
+        body_u.div_(sumw_u.clamp_min_(eps_floor))
+        body_v.div_(sumw_v.clamp_min_(eps_floor))
+        body_w.div_(sumw_w.clamp_min_(eps_floor))
+
+    def _softmin_blend_body_velocity_2d(self, sdf_u, sdf_v, body_u, body_v):
+        """2-D analogue of :meth:`_softmin_blend_body_velocity_3d`.
+
+        Uses the configured 2-D plane (xy or xz) for the rigid-body
+        velocity formula; mirrors the winning-merge logic in
+        :meth:`_update_2d`.
+        """
+        sigma = getattr(self.fluid_solver, 'sigma_softmin', None)
+        if sigma is None or sigma <= 0.0:
+            return
+        comp = self.fluid_solver.composite_body
+        kin  = getattr(comp, '_latest_link_kin_2d', None)
+        if kin is None:
+            return
+
+        inv_sigma = 1.0 / float(sigma)
+        eps_floor = 1e-30
+        h_grid    = float(comp.h)
+        gs        = sdf_u.shape
+
+        sumw_u = torch.zeros_like(sdf_u)
+        sumw_v = torch.zeros_like(sdf_v)
+        body_u.zero_()
+        body_v.zero_()
+
+        # Per-body kinematics for the 2D plane (already projected).
+        com_pos_t  = kin['com_pos']    # (B, 2) — in-plane coords
+        urdf_pos_t = kin['urdf_pos']   # (B, 2)
+        R_t        = kin['R']          # (B, 2, 2) or (B, 3, 3) depending
+        lin_vel_t  = kin['lin_vel']    # (B, 2)
+        ang_vel_t  = kin['ang_vel']    # (B,)   — scalar out-of-plane
+
+        for body_i, body in enumerate(comp.bodies):
+            com_pos  = com_pos_t[body_i]
+            urdf_pos = urdf_pos_t[body_i]
+            R        = R_t[body_i]
+            lin_vel  = lin_vel_t[body_i]
+            ang_vel  = ang_vel_t[body_i]
+
+            # Compose body frame (use the existing 2-D helper if any,
+            # else build from R + urdf_pos directly).  We piggyback on
+            # the same primitives used by ``_update_2d``.
+            body_pos, body_rot = self._compose_body_frame_2d(
+                body, urdf_pos, R)
+            R_T = body_rot.T
+
+            aabb = self._body_aabb_indices(
+                body, body_rot, body_pos,
+                comp.x, comp.y, None, h_grid, gs, pad=3,
+            )
+            sl, _full = self._slice_from_aabb(aabb, self.ndim)
+
+            from lilytorch.src.body import _rotate_grid_2d_compiled
+            px_u, py_u = _rotate_grid_2d_compiled(
+                comp.Xu_stag[sl], comp.Yu_stag[sl], R_T, body_pos)
+            sdf_u_k = body.sdf(px_u, py_u)
+
+            px_v, py_v = _rotate_grid_2d_compiled(
+                comp.Xv_stag[sl], comp.Yv_stag[sl], R_T, body_pos)
+            sdf_v_k = body.sdf(px_v, py_v)
+
+            # Rigid-body velocity in 2-D: u = lin + ω × (r - com).
+            vel_u_k = lin_vel[0] - ang_vel * (comp.Yu_stag[sl] - com_pos[1])
+            vel_v_k = lin_vel[1] + ang_vel * (comp.Xv_stag[sl] - com_pos[0])
+
+            w_u = torch.exp(-(sdf_u_k - sdf_u[sl]) * inv_sigma)
+            w_v = torch.exp(-(sdf_v_k - sdf_v[sl]) * inv_sigma)
+
+            sumw_u[sl] += w_u
+            sumw_v[sl] += w_v
+            body_u[sl] += w_u * vel_u_k
+            body_v[sl] += w_v * vel_v_k
+
+        body_u.div_(sumw_u.clamp_min_(eps_floor))
+        body_v.div_(sumw_v.clamp_min_(eps_floor))
+
+    # ─── per-body kinematics stash (consumed by the softmin blend) ───
+    def _stash_per_body_kin_3d(self, comp,
+                               com_poses_t, urdf_poses_t, Rs_t,
+                               lin_vels_t, ang_vels_t):
+        """Gather per-(animat, link) FARMS kinematics into per-body (B, …)
+        tensors and stash on ``comp._latest_link_kin_3d``.
+
+        The softmin blend reads this stash; both the Python update and
+        the kernel-mode fluid step call us when ``sigma_softmin > 0``.
+        """
+        B = len(comp.bodies)
+        dev, dt_ = self.device, self.dtype
+        com_pos  = torch.empty((B, 3),    dtype=dt_, device=dev)
+        urdf_pos = torch.empty((B, 3),    dtype=dt_, device=dev)
+        R_       = torch.empty((B, 3, 3), dtype=dt_, device=dev)
+        lin_vel  = torch.empty((B, 3),    dtype=dt_, device=dev)
+        ang_vel  = torch.empty((B, 3),    dtype=dt_, device=dev)
+        _as = lambda x: torch.as_tensor(x, dtype=dt_, device=dev)
+        for b, (a_id, l_id) in enumerate(comp.body_ids):
+            a_id = int(a_id); l_id = int(l_id)
+            com_pos[b]  = _as(com_poses_t[a_id][l_id])
+            urdf_pos[b] = _as(urdf_poses_t[a_id][l_id])
+            R_[b]       = _as(Rs_t[a_id][l_id])
+            lin_vel[b]  = _as(lin_vels_t[a_id][l_id])
+            ang_vel[b]  = _as(ang_vels_t[a_id][l_id])
+        comp._latest_link_kin_3d = {
+            'com_pos': com_pos, 'urdf_pos': urdf_pos, 'R': R_,
+            'lin_vel': lin_vel, 'ang_vel': ang_vel,
+        }
+
+    def _stash_per_body_kin_2d(self, comp,
+                               com_poses_t, urdf_poses_t, Rs_t,
+                               lin_vels_t, ang_vels_t):
+        """2-D analogue of :meth:`_stash_per_body_kin_3d`.
+
+        Stores in-plane coordinates / linear velocity (size 2) and a
+        scalar out-of-plane angular velocity, matching how
+        :meth:`_update_2d` indexes its kinematic arrays.
+        """
+        B = len(comp.bodies)
+        dev, dt_ = self.device, self.dtype
+        com_pos  = torch.empty((B, 2),    dtype=dt_, device=dev)
+        urdf_pos = torch.empty((B, 2),    dtype=dt_, device=dev)
+        R_       = torch.empty((B, 3, 3), dtype=dt_, device=dev)
+        lin_vel  = torch.empty((B, 2),    dtype=dt_, device=dev)
+        ang_vel  = torch.empty((B,),      dtype=dt_, device=dev)
+        ang_ax   = self._2d_ang_ax
+        ax0, ax1 = self.lin_axes
+        _as = lambda x: torch.as_tensor(x, dtype=dt_, device=dev)
+        for b, (a_id, l_id) in enumerate(comp.body_ids):
+            a_id = int(a_id); l_id = int(l_id)
+            cp = _as(com_poses_t[a_id][l_id])
+            up = _as(urdf_poses_t[a_id][l_id])
+            lv = _as(lin_vels_t[a_id][l_id])
+            av = _as(ang_vels_t[a_id][l_id])
+            com_pos[b]  = torch.stack((cp[ax0], cp[ax1]))
+            urdf_pos[b] = torch.stack((up[ax0], up[ax1]))
+            R_[b]       = _as(Rs_t[a_id][l_id])
+            lin_vel[b]  = torch.stack((lv[ax0], lv[ax1]))
+            ang_vel[b]  = av[ang_ax]
+        comp._latest_link_kin_2d = {
+            'com_pos': com_pos, 'urdf_pos': urdf_pos, 'R': R_,
+            'lin_vel': lin_vel, 'ang_vel': ang_vel,
+        }
+
     # ---- 2-D update --------------------------------------------------
     def _update_2d(self, t, iteration, dt=1):
 
@@ -898,6 +1184,17 @@ class BDIMhandler:
 
             body.r_com = body.cnt_update - com_pos[:, None]
 
+        # Softmin SDF blending (2-D) — see _update_3d for rationale.
+        sigma = getattr(self.fluid_solver, 'sigma_softmin', None)
+        if sigma is not None and sigma > 0.0:
+            self._stash_per_body_kin_2d(
+                comp, com_poses_t, urdf_poses_t, Rs_t, lin_vels_t, ang_vels_t,
+            )
+            self._softmin_blend_body_velocity_2d(
+                comp.sdf_val_u, comp.sdf_val_v,
+                comp.body_u,    comp.body_v,
+            )
+
     # ---- 3-D update --------------------------------------------------
     def _update_3d(self, t, iteration, dt=1):
 
@@ -1017,6 +1314,22 @@ class BDIMhandler:
             comp.com_pos[body_i] = com_pos
             body.com_pos = com_pos
 
+        # Softmin SDF blending of multibody face velocities (no-op when
+        # sigma_softmin is None / non-positive).  Replaces the winning
+        # per-link velocity stored above with a smooth weighted average,
+        # eliminating the velocity discontinuity at SDF-intersection
+        # surfaces of overlapping links — the root cause of multibody
+        # blow-up in the BDIM2 mu0-weighted projection.
+        sigma = getattr(self.fluid_solver, 'sigma_softmin', None)
+        if sigma is not None and sigma > 0.0:
+            self._stash_per_body_kin_3d(
+                comp, com_poses_t, urdf_poses_t, Rs_t, lin_vels_t, ang_vels_t,
+            )
+            self._softmin_blend_body_velocity_3d(
+                comp.sdf_val_u, comp.sdf_val_v, comp.sdf_val_w,
+                comp.body_u,    comp.body_v,    comp.body_w,
+            )
+
     # ------------------------------------------------------------------
     #  Streaming combined-CUDA 3-D SDF update (Phase B)
     # ------------------------------------------------------------------
@@ -1037,6 +1350,16 @@ class BDIMhandler:
         com_poses, urdf_poses, Rs, lin_vels, ang_vels = self.gather_data(
             iteration
         )
+
+        # Stash per-body kinematics for the softmin body-velocity blend
+        # (consumed in solver.py after streaming_sdf_stag_3d_multi).  No-op
+        # when sigma_softmin is off, so no wasted GPU traffic in the default
+        # path.
+        if (getattr(self.fluid_solver, 'sigma_softmin', None) is not None
+                and self.fluid_solver.sigma_softmin > 0.0):
+            self._stash_per_body_kin_3d(
+                comp, com_poses, urdf_poses, Rs, lin_vels, ang_vels,
+            )
 
         h_grid = float(comp.h)
 
@@ -1396,6 +1719,14 @@ class BDIMhandler:
         com_poses, urdf_poses, Rs, lin_vels, ang_vels = (
             self.gather_data(iteration)
         )
+
+        # Stash per-body kinematics for the softmin body-velocity blend
+        # consumed in solver.py after streaming_sdf_stag_2d_multi.
+        if (getattr(self.fluid_solver, 'sigma_softmin', None) is not None
+                and self.fluid_solver.sigma_softmin > 0.0):
+            self._stash_per_body_kin_2d(
+                comp, com_poses, urdf_poses, Rs, lin_vels, ang_vels,
+            )
 
         h_grid = float(comp.h)
 

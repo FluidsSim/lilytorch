@@ -1,4 +1,5 @@
 import os
+import yaml
 import numpy as np
 
 from farms_core.model.options import SpawnMode
@@ -9,6 +10,13 @@ from lilytorch.integration.camera import top_down_camera_config
 
 
 class SimConfig(BaseSimConfig):
+
+    # Path to a reference animat_config.yaml from which drag coefficients
+    # are read.  Override at the class level to point to a different YAML.
+    reference_animat_config = (
+        "/data/andreaferrario/farms_pleurodeles/experiments"
+        "/pleurodeles_wtr_swm_cpl_fst/animat_config.yaml"
+    )
 
     def __init__(self):
         super().__init__()
@@ -77,8 +85,9 @@ class SimConfig(BaseSimConfig):
         # Arena
         self.wall_thickness = 0.003
         self.arena_pose     = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-        self.water_drag     = False
         self.water_buoyancy = False
+
+
 
         # BDIM solver
         self.bdim_dt                 = self.timestep
@@ -115,6 +124,28 @@ class SimConfig(BaseSimConfig):
         self.water_alpha  = 0.05
         self.grid_spacing = 0.5*(self.ymax - self.ymin)  # lines on background floor
 
+    def _load_drag_map(self):
+        """Return a dict {link_name: drag_coefficients} parsed from the
+        reference animat_config YAML.  Unknown YAML tags are silently ignored."""
+        class _AnyLoader(yaml.FullLoader):
+            pass
+        _AnyLoader.add_multi_constructor(
+            "", lambda loader, tag_suffix, node: None
+        )
+        with open(self.reference_animat_config) as fh:
+            cfg = yaml.load(fh, Loader=_AnyLoader)
+        return {
+            lnk["name"]: lnk["drag_coefficients"]
+            for lnk in cfg["morphology"]["links"]
+            if "drag_coefficients" in lnk
+        }
+
+    def customize_morphology_links(self, links_list, animat_i, animat_pars, index):
+        drag_map = self._load_drag_map()
+        for link in links_list:
+            drag = drag_map.get(link["name"])
+            if drag is not None:
+                link["drag_coefficients"] = drag
 
     def customize_joint_initials(self, joints_list):
         for joint in joints_list:
@@ -140,43 +171,44 @@ class SimConfig(BaseSimConfig):
             },
         })
 
-        # extensions.append({
-        #     "loader": "lilytorch.integration.flow_iso_gl_viewer.FlowIsoGLViewer",
-        #     "config": {
-        #         "field"              : "omega_z",
-        #         "alpha"              : 0.2,
-        #         "update_every"       : 1,
-        #         "max_vertices"       : 20 * self.Nx * self.Ny,
-        #         "smooth_sigma"       : 0,
-        #         "crop_boundary"      : 0,
-        #         "exclude_body"       : True,
-        #         "iso_value"          : 40.0,
-        #         "debug_force_visible": False,
-        #         "color_uni"          : "#FF4500",
-        #         "color_pos"          : "#FF4500",
-        #         "color_neg"          : "#00FFFF",
-        #     },
-        # })
-
-
         extensions.append({
             "loader": "lilytorch.integration.flow_iso_gl_viewer.FlowIsoGLViewer",
             "config": {
+                "field"              : "omega_mag",
                 # "field"              : "omega_z",
-                "field"              : "pressure",
                 "alpha"              : 0.2,
                 "update_every"       : 1,
                 "max_vertices"       : 20 * self.Nx * self.Ny,
                 "smooth_sigma"       : 0,
                 "crop_boundary"      : 0,
                 "exclude_body"       : True,
-                "iso_value"          : 5.0,
+                "iso_value"          : 40.0,
                 "debug_force_visible": False,
-                # "color_uni"          : "#FF4500",
+                "color_uni"          : "#FF4500",
                 "color_pos"          : "#FF4500",
                 "color_neg"          : "#00FFFF",
             },
         })
+
+
+        # extensions.append({
+        #     "loader": "lilytorch.integration.flow_iso_gl_viewer.FlowIsoGLViewer",
+        #     "config": {
+        #         # "field"              : "omega_z",
+        #         "field"              : "pressure",
+        #         "alpha"              : 0.2,
+        #         "update_every"       : 1,
+        #         "max_vertices"       : 20 * self.Nx * self.Ny,
+        #         "smooth_sigma"       : 0,
+        #         "crop_boundary"      : 0,
+        #         "exclude_body"       : True,
+        #         "iso_value"          : 5.0,
+        #         "debug_force_visible": False,
+        #         # "color_uni"          : "#FF4500",
+        #         "color_pos"          : "#FF4500",
+        #         "color_neg"          : "#00FFFF",
+        #     },
+        # })
 
         # Top-down camera auto-fitted to the pool
         cam = top_down_camera_config(
@@ -219,7 +251,7 @@ class SimConfig(BaseSimConfig):
                 "resolution"      : [3840, 2160],
                 # # PNG frames -> output/video_follow_frames/frame_%06d.png
                 # "frames_dir"      : os.path.join(output_folder, "output", "video_follow_frames"),
-                # "save_video"      : True,
+                "save_video"      : True,
             },
         })
 
@@ -254,6 +286,28 @@ class SimConfig(BaseSimConfig):
                 # "ang_width"   : 0.001,    # shaft radius (default: vel_width)
                 # "ang_color"   : "#FFAA00",
                 # "min_ang"     : 0.0,      # hide ω arrows below this (rad/s)
+                "update_every": 1,     # null -> solver.save_every cadence
+            },
+        })
+
+
+        # AccelerationViewer – draw the linear (and optional angular)
+        # acceleration of each body as an arrow. Anchored at the body CoM,
+        # world-frame axes. Reads MuJoCo's qacc-derived spatial acceleration
+        # via mj_objectAcceleration (reflects the previous step's qacc).
+        extensions.append({
+            "loader": "lilytorch.integration.acceleration_viewer.AccelerationViewer",
+            "config": {
+                "acc_scale"   : 0.05,     # metres of arrow per (m/s²)
+                "acc_width"   : 0.00025,    # shaft (circular) radius in metres
+                "color"       : "#FF00AA",
+                # "max_length"  : 0.3,      # clamp arrow length (m); null = off
+                # "min_acc"     : 0.0,      # hide arrows below this |a| (m/s²)
+                # "show_angular": True,     # also draw an α arrow per body
+                # "ang_scale"   : 0.005,    # m per (rad/s²) (default: acc_scale)
+                # "ang_width"   : 0.001,    # shaft radius (default: acc_width)
+                # "ang_color"   : "#AA00FF",
+                # "min_ang"     : 0.0,      # hide α arrows below this (rad/s²)
                 "update_every": 1,     # null -> solver.save_every cadence
             },
         })
