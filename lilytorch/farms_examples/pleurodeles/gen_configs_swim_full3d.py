@@ -24,7 +24,7 @@ from lilytorch.integration.camera import top_down_camera_config
 # ── New full-3D mesh SDF (not available yet) ──────────────────────────────
 # TODO: replace with the actual filename once the full-3D SDF is ready.
 # It must live under ``farms_examples/sdfs/pleurodeles/``.
-FULL3D_SDF_NAME = "salamander_animal_fmsv0.21_3D.sdf"
+FULL3D_SDF_NAME = "salamander_animal_fmsv0.21_2D.sdf"
 
 
 class SimConfig(BaseSimConfig):
@@ -46,7 +46,7 @@ class SimConfig(BaseSimConfig):
         self.use_gpu           = True
         self.headless          = False
         self.poisson_method    = "multigrid"
-        self.sdf_interp_method = "quadratic"
+        self.sdf_interp_method = "triquadratic"
         self.force_delta_order = 2
 
         # self.apply_bdim_sigma = True

@@ -433,6 +433,7 @@ def lagrangian_forces_2d(
         inv_dx: float, inv_dy: float,
         Mx: int, My: int,
         method: str = "linear",
+        sample_offset: float = 0.0,
         out: Tensor = None) -> Tensor:
     """Fused 2-D Lagrangian surface-integral forces.
 
@@ -463,6 +464,7 @@ def lagrangian_forces_2d(
         float(inv_dx), float(inv_dy),
         int(Mx), int(My),
         int(interp_method),
+        float(sample_offset),
         out,
     )
     return out
@@ -478,6 +480,7 @@ def lagrangian_forces_3d(
         inv_dx: float, inv_dy: float, inv_dz: float,
         Mx: int, My: int, Mz: int,
         method: str = "linear",
+        sample_offset: float = 0.0,
         out: Tensor = None) -> Tensor:
     """Fused 3-D Lagrangian surface-integral forces.
 
@@ -506,6 +509,7 @@ def lagrangian_forces_3d(
         float(inv_dx), float(inv_dy), float(inv_dz),
         int(Mx), int(My), int(Mz),
         int(interp_method),
+        float(sample_offset),
         out,
     )
     return out

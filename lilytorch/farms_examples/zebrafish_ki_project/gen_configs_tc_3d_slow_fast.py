@@ -37,11 +37,20 @@ class SimConfig(BaseSimConfig):
         )
 
         # ── Hardware ──────────────────────────────────────────────────
-        self.compute_sdf    = True
-        self.use_gpu        = True
-        self.use_bdim       = True
-        self.headless       = False
-        self.water_buoyancy = True
+        self.compute_sdf         = True
+        self.use_gpu             = True
+        self.use_bdim            = True
+        self.headless            = False
+        self.water_buoyancy      = True
+        # self.force_delta_order   = 2
+        self.sdf_interp_method   = "triquadratic"
+        # self.solver_method       = "python"
+        self.force_method        = "lagrangian"
+
+        self.bdim_physics = {
+            "solref": [-2e4, -30e1],
+            "solimp": [0., 0.95, 0.001, 0.5, 2],
+        }
 
         # ── Animats ───────────────────────────────────────────────────
         self.filter_fixed_joints = False
@@ -79,59 +88,41 @@ class SimConfig(BaseSimConfig):
         ]
 
         # ── 3-D grid ─────────────────────────────────────────────────
-        # Fish body length ~17 mm, cross-section radius ~0.65 mm.
-        # BDIM accuracy requires ε/r < 0.3 where ε = 2h.
-        # 512×128×64  → h≈0.195 mm, ε/r≈0.60 → ~1.6× speed deficit (current)
-        # 1024×256×128 → h≈0.098 mm, ε/r≈0.30 → ~1.3× deficit (recommended)
-        # 2048×512×256 → h≈0.049 mm, ε/r≈0.15 → within ~5% (accurate but costly)
+        self.Nx           = 512
+        self.Ny           = 128
+        self.Nz           = 64
+        self.xmin         = -0.02
+        self.xmax         = 0.08
+        self.ymin         = -0.0125
+        self.ymax         = 0.0125
+        self.zmin         = -0.00625
+        self.zmax         = 0.00625
+        self.timestep     = 0.0005
+        self.n_iterations = 4001
 
-        # self.Nx   = 256
-        # self.Ny   = 64
-        # self.Nz   = 64
-
-        # self.xmin = -0.02
-        # self.xmax =  0.03
-        # self.ymin = -0.00625
-        # self.ymax =  0.00625
-        # self.zmin = -0.00625
-        # self.zmax =  0.00625
-
-
-        self.Nx   = 512
-        self.Ny   = 128
-        self.Nz   = 64
-
-        self.xmin = -0.02
-        self.xmax =  0.08
-        self.ymin = -0.0125
-        self.ymax =  0.0125
-        self.zmin = -0.00625
-        self.zmax =  0.00625
-
-        # self.Nx   = 1024
-        # self.Ny   = 256
-        # self.Nz   = 128
-
-
-        # self.xmin = -0.02
-        # self.xmax =  0.18
-        # self.ymin = -0.025
-        # self.ymax =  0.025
-        # self.zmin = -0.0125
-        # self.zmax =  0.0125
+        # self.Nx           = 1024
+        # self.Ny           = 256
+        # self.Nz           = 128
+        # self.xmin         = -0.02
+        # self.xmax         = 0.08
+        # self.ymin         = -0.0125
+        # self.ymax         = 0.0125
+        # self.zmin         = -0.00625
+        # self.zmax         = 0.00625
+        # self.timestep     = 0.00025
+        # self.n_iterations = 8001
 
         # ── Physics ───────────────────────────────────────────────────
         self.rho_body          = 1000.0
-        # self.timestep          = 0.0005
-        # self.convection_method = "quick"
-        self.timestep          = 0.0005
         self.convection_method = "abdquickest"
-        self.n_iterations      = 2001
         self.save_every        = 50
-        # self.cb_sub_steps      = 2
         self.vmin              = -10.0
         self.vmax              = 10.0
         self.save              = False
+
+        self.eps_multiplier = 2.0
+        # BDIM-σ correction for thin zebrafish body links (r < eps).
+        # self.apply_bdim_sigma = True
 
 
         # ── Arena ────────────────────────────────────────────────────
@@ -143,7 +134,7 @@ class SimConfig(BaseSimConfig):
         self.zero_pressure_inside    = True
         self.bdim_dt                 = self.timestep
         self.bdim_nt                 = self.n_iterations + 1
-        self.poisson_tol             = 1.0e-4
+        self.poisson_tol             = 1.0e-7
         self.poisson_max_cycles      = 30
         self.poisson_max_mgcg_cycles = 10
         self.poisson_precond_vcycles = 1
@@ -153,16 +144,15 @@ class SimConfig(BaseSimConfig):
         self.poisson_nsmoothing      = 5
         self.poisson_bc_type         = "neumann"
         self.compile_adv_diff        = True
-        # order-2 delta (Towers 2008) corrects |∇SDF|≠1 at mesh joints/corners;
-        # recommended for mesh bodies, no-op for analytical SDFs.
-        self.force_delta_order       = 2
+        # self.force_delta_order       = 2
+        # self.sdf_interp_method       = "triquadratic"
 
         # ── Boundary conditions (3-D, all Neumann / zero-gradient) ──
-        self.bc_type_u   = ["N", "N", "N", "N", "N", "N"]
+        self.bc_type_u   = ["D", "D", "N", "N", "N", "N"]
         self.bc_values_u = [0, 0, 0, 0, 0, 0]
-        self.bc_type_v   = ["N", "N", "N", "N", "N", "N"]
+        self.bc_type_v   = ["N", "N", "D", "D", "N", "N"]
         self.bc_values_v = [0, 0, 0, 0, 0, 0]
-        self.bc_type_w   = ["N", "N", "N", "N", "N", "N"]
+        self.bc_type_w   = ["N", "N", "N", "N", "D", "D"]
         self.bc_values_w = [0, 0, 0, 0, 0, 0]
 
         # ── Body ─────────────────────────────────────────────────────
@@ -172,12 +162,17 @@ class SimConfig(BaseSimConfig):
         # ── MuJoCo ───────────────────────────────────────────────────
         self.visual_scale = 20.0
         self.extent       = 3.0
-        self.camera_dist  = 0.1
+        self.camera_dist  = 0.02
 
         self.iso_3d_specs = [
             {"name": "omega_mag", "iso_value": 80.0},
             {"name": "vel_mag",   "iso_value": 2e-02},
         ]
+
+        self.wall_alpha = 0.
+        self.water_alpha = 0.05
+        self.grid_spacing = 0.0125  # lines on background floor
+
 
     # ── Extensions ────────────────────────────────────────────────────
 
@@ -187,82 +182,52 @@ class SimConfig(BaseSimConfig):
         # Soft, reflection-free lighting for tank recordings
         extensions.append({
             "loader": "lilytorch.integration.light_modifier.LightModifier",
-            "config": {},
+            "config": {
+                "diffuse": [0.70, 0.70, 0.70],
+                "ambient": [0.65, 0.65, 0.65],
+            },
         })
 
-        # FlowViewer (works headless via CameraRecording)
-        # extensions.append({
-        #     "loader": "lilytorch.integration.flow_viewer.FlowViewer",
-        #     "config": {
-        #         "field"        : "omega_z",
-        #         "max_spheres"  : 4000,
-        #         "iso_fraction" : 0.15,
-        #         "smooth_sigma" : 2.5,
-        #         "crop_boundary": 3,
-        #         "sphere_size"  : 0.01,
-        #         "update_every" : None,
-        #     },
-        # })
-
-        # extensions.append({
-        #     "loader": "lilytorch.integration.particle_viewer.ParticleViewer",
-        #     "config": {
-        #         "max_particles"   : 800000,
-        #         "seed_n_particles": 3,
-        #         "seed_interval"   : 1,
-        #         "turb_diffusivity": 0.,
-        #         "sphere_size"     : 0.0001,
-        #         "particle_color"  : [255/256, 0.0, 166/256, 0.85],   #FF00A6
-        #         "trail_length"    : 0,
-        #         "update_every"    : None,
-        #         "n_z_layers"      : 3,
-        #         "floor_color"     : "#FFFFFF",                       # dark blue floor
-        #         "save_particles"   : True,
-        #         "save_dir"         : os.path.join(output_folder, "particles"),
-        #         "save_every"       : self.save_every,
-        #     }
-        # })
+        # Interactive viewer: keep the camera locked on the fish CoM
+        extensions.append({
+            "loader": "farms_mujoco.simulation.extensions.CameraFollower",
+            "config": {
+                "animat_id"       : 0,
+                "azimuth"         : 90,
+                "elevation"       : -30,
+                "distance"        : 0.04,
+                "angular_velocity": 0,
+            },
+        })
 
         extensions.append({
             "loader": "lilytorch.integration.flow_iso_gl_viewer.FlowIsoGLViewer",
             "config": {
-                "field"              : "omega_z",
+                # "field"              : "omega_z",
+                "field"              : "omega_mag",
                 "alpha"              : 0.2,
                 "update_every"       : 1,
-                "max_vertices"       : 300000,
-                "smooth_sigma"       : 0, # heavier smoothing → fewer noisy lobes
-                "crop_boundary"      : 0, # drop 8 cells per face → kills wall noise
+                "max_vertices"       : 4 * self.Nx * self.Ny,
+                "smooth_sigma"       : 0,
+                "crop_boundary"      : 0,
                 "exclude_body"       : True,
-                "iso_value"          : 30.0,
+                "iso_value"          : 100.0,
                 "debug_force_visible": False,
-                "record_viewer"      : True,
-                "record_path"        : os.path.join(output_folder, "output", "viewer.mp4"),
-                "record_fps"         : 30.0,
+                "color_uni"          : "#00FFFF",
+                "color_pos"          : "#FF4500",
+                "color_neg"          : "#00FFFF",
             },
         })
-
-        # extensions.append({
-        #     "loader": "lilytorch.integration.flow_iso_viewer.FlowIsoViewer",
-        #     "config": {
-        #         "field": "omega_z",
-        #         "max_tiles": 8000,
-        #         "iso_fraction": 0.15,
-        #         "smooth_sigma": 0,
-        #         "crop_boundary": 3,
-        #         "tile_size": 0.0005,
-        #         "tile_thickness": 0.0001,
-        #         "tile_alpha": 0.7,
-        #     },
-        # },
-        # )
 
         # Top-down camera auto-fitted to the domain
         cam = top_down_camera_config(
             self.xmin, self.xmax,
             self.ymin, self.ymax,
             self.zmin, self.zmax,
-            overshoot=1.10,  # controls CameraRecording distance (not camera_dist)
+            overshoot=1.0,  # controls CameraRecording distance (not camera_dist)
+            max_width=3840, max_height=2160,
         )
+        cam["elevation"] = -30   # tilt 20° from straight-down (−90 = top-down)
         extensions.append({
             "loader": "farms_mujoco.sensors.camera.CameraRecording",
             "config": {
@@ -275,24 +240,49 @@ class SimConfig(BaseSimConfig):
             },
         })
 
-        # Side view: looking along Y axis (shows swimming direction vs tank depth)
-        side = side_camera_config(
-            self.xmin, self.xmax,
-            self.ymin, self.ymax,
-            self.zmin, self.zmax,
-            view_axis="y",
-            overshoot=1.10,
-        )
+        # # Side view: looking along Y axis (shows swimming direction vs tank depth)
+        # side = side_camera_config(
+        #     self.xmin, self.xmax,
+        #     self.ymin, self.ymax,
+        #     self.zmin, self.zmax,
+        #     view_axis="y",
+        #     overshoot=1.0,
+        # )
+        # extensions.append({
+        #     "loader": "farms_mujoco.sensors.camera.CameraRecording",
+        #     "config": {
+        #         "path"            : os.path.join(output_folder, "output", "video_side.mp4"),
+        #         "animat_id"       : None,
+        #         "fps"             : 30,
+        #         "speed"           : 0.1,
+        #         "angular_velocity": 0,
+        #         **side,
+        #     },
+        # })
+
+        # Following camera: tight view locked on fish CoM
         extensions.append({
             "loader": "farms_mujoco.sensors.camera.CameraRecording",
             "config": {
-                "path"            : os.path.join(output_folder, "output", "video_side.mp4"),
-                "animat_id"       : None,
+                "path"            : os.path.join(output_folder, "output", "video_follow.mp4"),
+                "animat_id"       : 0,
                 "fps"             : 30,
                 "speed"           : 0.1,
                 "angular_velocity": 0,
-                **side,
+                "azimuth"         : 90,
+                "elevation"       : -30,
+                "distance"        : 0.04,
+                "offset"          : [0, 0, 0],
+                "resolution"      : [3840, 2160],
             },
+        })
+
+
+        # SkyModifier must be LAST so all CameraRecording renderers already
+        # exist when initialize_episode runs the GPU texture upload.
+        extensions.append({
+            "loader": "lilytorch.integration.sky_modifier.SkyModifier",
+            "config": {"rgb": [0.0, 0.0, 0.0]},
         })
 
         return extensions

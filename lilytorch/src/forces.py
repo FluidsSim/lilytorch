@@ -536,8 +536,17 @@ def forces_method2(self, u, v, p, iteration):
                 sdf_vals[bi, i0:i1, j0:j1] = sdf_sub_i
             else:
                 sdf_vals[bi] = sdf_sub_i
-    else:
+    elif hasattr(comp, 'sdf_vals') and comp.sdf_vals is not None:
         sdf_vals = comp.sdf_vals  # legacy dense path
+    # else:
+    #     # Analytical single-body (or any composite without per-body SDF
+    #     # stack): sample each body's SDF on the CC grid on the fly.
+    #     Ni, Nj = comp.sdf_val.shape
+    #     Xcc, Ycc = torch.meshgrid(comp.x, comp.y, indexing='ij')
+    #     sdf_vals = torch.stack(
+    #         [body.sdf(Xcc, Ycc) for body in comp.bodies],
+    #         dim=0,
+    #     )
 
     sdf_grad_mag_2d = None
     if self.force_delta_order == 2:
@@ -1029,6 +1038,7 @@ def forces_lagrangian_2d(self, u, v, p, iteration):
         cnt_flat, cnt_offsets, com_pos,
         bx0, by0, inv_dx, inv_dy,
         Mx, My, method="linear",
+        sample_offset=float(self.lagrangian_sample_offset),
     )
 
     # Scatter the (B, 6) kernel output into the legacy per-body force
@@ -1052,109 +1062,6 @@ def forces_lagrangian_2d(self, u, v, p, iteration):
         self.viscous_drag_record[bi, 1, iteration]  = fv_y
         self.pressure_drag_record[bi, 0, iteration] = fp_x
         self.pressure_drag_record[bi, 1, iteration] = fp_y
-
-    # Lagrangian path doesn't expose volumetric stress / pforce tensors.
-    self.xstress_tensor = None
-    self.ystress_tensor = None
-    self.pforce_x = None
-    self.pforce_y = None
-    comp = self.composite_body
-    B = len(comp.bodies)
-    h = self.h
-    nu_rho = self._compute_nu_rho_for_forces(u, v)
-    # Use scalar viscosity when constant; lagrangian path doesn't need a
-    # full nu_rho field on the band -- it's sampled at the marker points.
-    nu_rho_const = (
-        not (torch.is_tensor(nu_rho) and nu_rho.ndim == 2)
-    )
-
-    # Symmetric strain-rate tensor ε_ij at CC; viscous stress σ = ν·ρ·ε.
-    eps_ij = _viscous_stress_tensor((u, v), h)
-
-    # Build per-axis interpolators (RegularGridInterpolator handles
-    # 2-D/3-D and runs on CPU or CUDA via the existing dispatched
-    # ``interp_2d`` / ``interp_3d`` ops).
-    from lilytorch.src.kernels import RegularGridInterpolator
-    # Use comp.x/comp.y (always allocated) — comp._grids may be missing
-    # in kernel mode (see body.py:_StaggeredGrids).
-    axes_2d = (comp.x, comp.y)
-
-    # Bilinear interpolation of σ_ij and p at every contour marker of
-    # every body.  We share one interpolator instance per field by
-    # reassigning ``.F`` between bodies -- this avoids re-baking metadata.
-    interp = RegularGridInterpolator(axes_2d, p, method="linear")
-
-    def _sample(field, qx, qy):
-        interp.F = field.contiguous()
-        return interp(qx, qy)
-
-    # If nu_rho is a CC tensor, sample it at markers; else broadcast scalar.
-    for bi, body in enumerate(comp.bodies):
-        cnt = body.cnt_update                    # (2, M)
-        if cnt.shape[1] <= 1:
-            # Degenerate body (no surface contour); skip.
-            self.friction_force_lin_x[bi] = 0
-            self.friction_force_lin_y[bi] = 0
-            self.friction_force_ang_z[bi] = 0
-            self.pressure_force_x[bi] = 0
-            self.pressure_force_y[bi] = 0
-            self.pressure_force_ang_z[bi] = 0
-            continue
-
-        qx = cnt[0]
-        qy = cnt[1]
-        nx, ny = _contour_normal_2d(cnt)
-
-        # Sample ε_ij at markers
-        e_xx = _sample(eps_ij[0][0], qx, qy)
-        e_xy = _sample(eps_ij[0][1], qx, qy)
-        e_yy = _sample(eps_ij[1][1], qx, qy)
-        if nu_rho_const:
-            nu_rho_m = nu_rho  # scalar
-        else:
-            nu_rho_m = _sample(nu_rho, qx, qy)
-
-        # Viscous traction t_v = ν·ρ·(ε_ij n_j)
-        tvx = nu_rho_m * (e_xx * nx + e_xy * ny)
-        tvy = nu_rho_m * (e_xy * nx + e_yy * ny)
-
-        # Pressure traction t_p = -p n
-        p_m = _sample(p, qx, qy)
-        tpx = -p_m * nx
-        tpy = -p_m * ny
-
-        # Arc-length integration over the (closed) contour.  ``ds`` from
-        # consecutive cnt distances; trapz with the wrap-around endpoint.
-        dx = torch.roll(qx, -1, 0) - qx
-        dy = torch.roll(qy, -1, 0) - qy
-        ds_seg = torch.sqrt(dx * dx + dy * dy)  # (M,)
-        # midpoint quadrature: F = Σ_seg 0.5*(f_i + f_{i+1}) * ds_seg
-        def _line_integral(f):
-            return 0.5 * ((f + torch.roll(f, -1, 0)) * ds_seg).sum()
-
-        fv_x = _line_integral(tvx)
-        fv_y = _line_integral(tvy)
-        fp_x = _line_integral(tpx)
-        fp_y = _line_integral(tpy)
-
-        # Torques about com
-        com = body.com_pos
-        rx = qx - com[0]
-        ry = qy - com[1]
-        tv_torque = _line_integral(rx * tvy - ry * tvx)
-        tp_torque = _line_integral(rx * tpy - ry * tpx)
-
-        self.friction_force_lin_x[bi] = fv_x.to(self.dtype)
-        self.friction_force_lin_y[bi] = fv_y.to(self.dtype)
-        self.friction_force_ang_z[bi] = tv_torque.to(self.dtype)
-        self.pressure_force_x[bi] = fp_x.to(self.dtype)
-        self.pressure_force_y[bi] = fp_y.to(self.dtype)
-        self.pressure_force_ang_z[bi] = tp_torque.to(self.dtype)
-
-        self.viscous_drag_record[bi, 0, iteration]  = self.friction_force_lin_x[bi]
-        self.viscous_drag_record[bi, 1, iteration]  = self.friction_force_lin_y[bi]
-        self.pressure_drag_record[bi, 0, iteration] = self.pressure_force_x[bi]
-        self.pressure_drag_record[bi, 1, iteration] = self.pressure_force_y[bi]
 
     # Lagrangian path doesn't expose volumetric stress / pforce tensors.
     self.xstress_tensor = None
@@ -1336,6 +1243,9 @@ def forces_lagrangian_3d(self, u, v, w, p, iteration):
         tri_offsets, com_pos,
         bx0, by0, bz0, inv_dx, inv_dy, inv_dz,
         Mx, My, Mz, method="linear",
+        # Tunable per config (``lagrangian_sample_offset``).  See the
+        # 2-D path / solver.py docstring.
+        sample_offset=float(self.lagrangian_sample_offset),
     )
 
     # Scatter (B, 12) into legacy per-body caches and per-iteration records.

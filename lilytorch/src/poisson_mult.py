@@ -699,6 +699,15 @@ class PoissonSolver:
             f"smoother must be 'jacobi' or 'rbgs', got '{smoother}'"
         self.smoother = smoother
         self._rb_mask_cache = {}  # {(shape, device): (red, black)}
+        # Optional cell-centred Dirichlet mask (inner shape, bool).
+        # When set (e.g. by the free-surface ghost-fluid layer), the
+        # smoother forces ``p == 0`` in masked cells after every sweep
+        # and at every multigrid level (coarse masks are built by OR
+        # downsampling: any-air → coarse-air).  This is the cheap way to
+        # enforce a homogeneous Dirichlet boundary on an arbitrary
+        # subset of interior cells without touching the per-face
+        # coefficient layout.
+        self.dirichlet_mask = None
         self.use_kernels = use_kernels
         if use_kernels:
             from lilytorch.src.kernels import _C  # noqa: F401  load .so
@@ -768,10 +777,13 @@ class PoissonSolver:
         active = torch.abs(J) >= self.jcap_tol          # fluid mask
         Jinv = torch.where(active, J.reciprocal(), torch.zeros_like(J))
         inner = _inner(p.ndim)
+        dmask = getattr(self, "_active_dirichlet_mask", None)
 
         for _ in range(self.nsmoothing):
             s = self.compute_sum(cfaces, p)
             p[inner] = self.w * (-f + s) * Jinv + (1 - self.w) * p[inner]
+            if dmask is not None:
+                p[inner].masked_fill_(dmask, 0.0)
             self.BC(p)
 
         # residual — zero at degenerate cells (cf. WaterLily residual!)
@@ -819,18 +831,23 @@ class PoissonSolver:
 
         interior_shape = p[inner].shape
         red, black = self._build_rb_masks(interior_shape)
+        dmask = getattr(self, "_active_dirichlet_mask", None)
 
         for _ in range(self.nsmoothing):
             # --- red sweep ---
             s = self.compute_sum(cfaces, p)
             p_new = (-f + s) * Jinv
             p[inner] = torch.where(red, p_new, p[inner])
+            if dmask is not None:
+                p[inner].masked_fill_(dmask, 0.0)
             self.BC(p)
 
             # --- black sweep ---
             s = self.compute_sum(cfaces, p)
             p_new = (-f + s) * Jinv
             p[inner] = torch.where(black, p_new, p[inner])
+            if dmask is not None:
+                p[inner].masked_fill_(dmask, 0.0)
             self.BC(p)
 
         # residual
@@ -845,8 +862,38 @@ class PoissonSolver:
     def smooth(self, f, p, cfaces):
         """Dispatch to the configured smoother (used by the Python-recursive _vcycle)."""
         if self.smoother == "rbgs":
-            return self.RBGS(f, p, cfaces)
-        return self.Jacobi(f, p, cfaces)
+            p, r = self.RBGS(f, p, cfaces)
+        else:
+            p, r = self.Jacobi(f, p, cfaces)
+        m = getattr(self, "_active_dirichlet_mask", None)
+        if m is not None:
+            # Force p = 0 in masked (air) cells AND zero the residual
+            # there so it does not pollute the coarse-grid restriction.
+            inner = _inner(p.ndim)
+            p[inner].masked_fill_(m, 0.0)
+            r.masked_fill_(m, 0.0)
+        return p, r
+
+    @staticmethod
+    def _coarsen_mask(mask):
+        """Coarsen a bool Dirichlet mask by stride-2 OR-downsampling.
+
+        Any fine cell flagged as Dirichlet causes the enclosing coarse
+        cell to also be flagged (conservative: more cells get pinned).
+        Returns ``None`` if the result would be smaller than 1 along
+        any axis (caller should skip recursion in that case).
+        """
+        if mask is None:
+            return None
+        m = mask
+        ndim = m.ndim
+        for d in range(ndim):
+            even = m[_sl(ndim, d, slice(0, None, 2))]
+            odd  = m[_sl(ndim, d, slice(1, None, 2))]
+            n = min(even.shape[d], odd.shape[d])
+            m = (even[_sl(ndim, d, slice(n))] |
+                 odd[_sl(ndim, d, slice(n))])
+        return m
 
     # ------------------------------------------------------------------
     # Face array helpers
@@ -930,6 +977,19 @@ class PoissonSolver:
         ndim  = f.ndim
         shape = f.shape
 
+        # ---- Dirichlet mask (free-surface): pick / save / restore ----
+        # The top-level caller stores the fine mask on self.dirichlet_mask;
+        # within a recursion we read the current-level mask off
+        # self._active_dirichlet_mask, restrict it for the coarse call,
+        # and restore on the way back up.
+        outer_mask = getattr(self, "_active_dirichlet_mask", None)
+        if outer_mask is None:
+            outer_mask = self.dirichlet_mask
+        self._active_dirichlet_mask = (
+            outer_mask if (outer_mask is None or outer_mask.shape == shape)
+            else None
+        )
+
         # extract (cp, cm) for the smoother
         cfaces = self._extract_cfaces(face_arrs, ndim)
 
@@ -982,11 +1042,15 @@ class PoissonSolver:
 
             # coarse-grid error
             coarse_shape = tuple(s + 2 for s in r_coarse.shape)
+            saved_mask = self._active_dirichlet_mask
+            coarse_mask = self._coarsen_mask(saved_mask)
+            self._active_dirichlet_mask = coarse_mask
             err_coarse, _ = self._vcycle(
                 r_coarse,
                 torch.zeros(coarse_shape, device=p.device, dtype=p.dtype),
                 face_arrs_coarse,
             )
+            self._active_dirichlet_mask = saved_mask
 
             # ---- prolongation (trilinear / bilinear) -----------------
             inner_c = _inner(ndim)
@@ -999,6 +1063,9 @@ class PoissonSolver:
 
             # correction
             p[_inner(ndim)] += err
+            m = self._active_dirichlet_mask
+            if m is not None:
+                p[_inner(ndim)].masked_fill_(m, 0.0)
 
             if on_gpu:
                 f         = f.cuda()
@@ -1108,7 +1175,11 @@ class PoissonSolver:
                 break
         # float64 mean subtraction: GPU parallel-reduction of float32 gives
         # a different value than CPU sequential sum.
-        p -= p.to(torch.float64).mean().to(p.dtype)
+        # Skip when a Dirichlet mask pins p in (a subset of) cells — the
+        # null space is removed by the Dirichlet condition, so the
+        # absolute level of p is meaningful and must NOT be shifted.
+        if self.dirichlet_mask is None:
+            p -= p.to(torch.float64).mean().to(p.dtype)
         if self.verbose:
             print(
                 f"Multigrid residual = {self.l2_norm(r):.2e}/{self._tol_float:.2e} "

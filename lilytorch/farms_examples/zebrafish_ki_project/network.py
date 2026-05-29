@@ -19,7 +19,7 @@ class WaveController(NNController):
         if config.mode == "slow":
             self.freq = np.array(SLOW_SWIMMING_CONTROLLER_PARAMETERS["frequency"])
             self.ipl_arr = np.array(SLOW_SWIMMING_CONTROLLER_PARAMETERS["ipl_arr"])
-            self.amp_arr = 2*np.array(SLOW_SWIMMING_CONTROLLER_PARAMETERS["amp_arr"])
+            self.amp_arr = np.array(SLOW_SWIMMING_CONTROLLER_PARAMETERS["amp_arr"])
             self.bsl_arr = np.array(SLOW_SWIMMING_CONTROLLER_PARAMETERS["bsl_arr"])
         elif config.mode == "fast":
             self.freq = np.array(FAST_SWIMMING_CONTROLLER_PARAMETERS["frequency"])

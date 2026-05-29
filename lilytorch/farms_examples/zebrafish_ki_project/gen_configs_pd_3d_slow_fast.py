@@ -42,6 +42,7 @@ class SimConfig(BaseSimConfig):
         # self.force_delta_order   = 2
         self.sdf_interp_method   = "triquadratic"
         # self.solver_method       = "python"
+        self.force_method        = "lagrangian"
 
         self.bdim_physics = {
             "solref": [-2e4, -30e1],

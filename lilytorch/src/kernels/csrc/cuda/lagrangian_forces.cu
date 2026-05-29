@@ -177,6 +177,7 @@ __global__ void lagrangian_forces_3d_kernel(
     const scalar_t bx0, const scalar_t by0, const scalar_t bz0,
     const scalar_t inv_dx, const scalar_t inv_dy, const scalar_t inv_dz,
     const int interp_method,
+    const scalar_t sample_offset,
     double* __restrict__ out)           // (B, 12)
 {
     const int b = blockIdx.y;
@@ -198,30 +199,40 @@ __global__ void lagrangian_forces_3d_kernel(
     const scalar_t nzv = nz_p[t];
     const scalar_t A   = area[t];
 
+    // Sample fields a distance ``sample_offset`` OUTSIDE the body
+    // along the outward normal — moves the query out of the BDIM band
+    // (where the blended velocity gives ε(u_blend) ≈ μ0·ε(u_fluid)
+    // and ``zero_pressure_inside`` zeros interior p), into the pure
+    // fluid where μ0=1 and the wall-side limits are recovered.  See
+    // ``forces.py:forces_lagrangian_3d`` for the choice of σ.
+    const scalar_t qxs = qx + sample_offset * nxv;
+    const scalar_t qys = qy + sample_offset * nyv;
+    const scalar_t qzs = qz + sample_offset * nzv;
+
     const scalar_t e_xx = lf_sample_3d_d<scalar_t>(
         interp_method, exx, Mx, My, Mz, bx0, by0, bz0,
-        inv_dx, inv_dy, inv_dz, qx, qy, qz);
+        inv_dx, inv_dy, inv_dz, qxs, qys, qzs);
     const scalar_t e_yy = lf_sample_3d_d<scalar_t>(
         interp_method, eyy, Mx, My, Mz, bx0, by0, bz0,
-        inv_dx, inv_dy, inv_dz, qx, qy, qz);
+        inv_dx, inv_dy, inv_dz, qxs, qys, qzs);
     const scalar_t e_zz = lf_sample_3d_d<scalar_t>(
         interp_method, ezz, Mx, My, Mz, bx0, by0, bz0,
-        inv_dx, inv_dy, inv_dz, qx, qy, qz);
+        inv_dx, inv_dy, inv_dz, qxs, qys, qzs);
     const scalar_t e_xy = lf_sample_3d_d<scalar_t>(
         interp_method, exy, Mx, My, Mz, bx0, by0, bz0,
-        inv_dx, inv_dy, inv_dz, qx, qy, qz);
+        inv_dx, inv_dy, inv_dz, qxs, qys, qzs);
     const scalar_t e_xz = lf_sample_3d_d<scalar_t>(
         interp_method, exz, Mx, My, Mz, bx0, by0, bz0,
-        inv_dx, inv_dy, inv_dz, qx, qy, qz);
+        inv_dx, inv_dy, inv_dz, qxs, qys, qzs);
     const scalar_t e_yz = lf_sample_3d_d<scalar_t>(
         interp_method, eyz, Mx, My, Mz, bx0, by0, bz0,
-        inv_dx, inv_dy, inv_dz, qx, qy, qz);
+        inv_dx, inv_dy, inv_dz, qxs, qys, qzs);
 
     const scalar_t nu_rho_m = nrho_scalar
         ? nrho[0]
         : lf_sample_3d_d<scalar_t>(
             interp_method, nrho, Mx, My, Mz, bx0, by0, bz0,
-            inv_dx, inv_dy, inv_dz, qx, qy, qz);
+            inv_dx, inv_dy, inv_dz, qxs, qys, qzs);
 
     const scalar_t tvx = nu_rho_m * (e_xx * nxv + e_xy * nyv + e_xz * nzv);
     const scalar_t tvy = nu_rho_m * (e_xy * nxv + e_yy * nyv + e_yz * nzv);
@@ -229,7 +240,7 @@ __global__ void lagrangian_forces_3d_kernel(
 
     const scalar_t p_m = lf_sample_3d_d<scalar_t>(
         interp_method, pp, Mx, My, Mz, bx0, by0, bz0,
-        inv_dx, inv_dy, inv_dz, qx, qy, qz);
+        inv_dx, inv_dy, inv_dz, qxs, qys, qzs);
     const scalar_t tpx = -p_m * nxv;
     const scalar_t tpy = -p_m * nyv;
     const scalar_t tpz = -p_m * nzv;
@@ -266,6 +277,7 @@ void lagrangian_forces_3d_cuda(
     const double inv_dx, const double inv_dy, const double inv_dz,
     const int64_t Mx, const int64_t My, const int64_t Mz,
     const int64_t interp_method,
+    const double sample_offset,
     at::Tensor out)
 {
     const int B = (int)com_pos.size(0);
@@ -338,6 +350,7 @@ void lagrangian_forces_3d_cuda(
                 (scalar_t)bx0, (scalar_t)by0, (scalar_t)bz0,
                 (scalar_t)inv_dx, (scalar_t)inv_dy, (scalar_t)inv_dz,
                 (int)interp_method,
+                (scalar_t)sample_offset,
                 out.data_ptr<double>());
     });
 }
