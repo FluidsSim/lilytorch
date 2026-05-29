@@ -131,6 +131,66 @@ A 5th-order Hermite smoothstep is more robust numerically and avoids sin/cos.
 - How to handle bodies outside the water (at the interface). Volume of fluids methods (?)
 - Add sph simulation support (?)
 - Strongly coupled solver - Monolithic fluid multi rigid body solver (?) --> hard, it would require dropping Mujoco
+
+- **Semi-implicit FSI coupling (Aitken-Picard ± Robin-flavoured update).**
+  Address added-mass instability when explicit + `force_relaxation` is not enough
+  (light-mass swimmers, floppy joints, large dt, anything with m_added/m_body ≳ 2).
+  Current state: pleurodeles 3D + salamander 2D both run stably via the
+  `force_relaxation` low-pass on the force feedback (β=0.3 sufficient). Implicit
+  coupling is the principled answer if relaxation's transient lag becomes a problem
+  or stability margin needs to be guaranteed across all configs.
+
+  **Why Colonius/Taira IBPM doesn't transfer directly**: their monolithic saddle-
+  point system treats the surface force as a Lagrange multiplier enforcing a sharp
+  Dirichlet no-slip. BDIM's velocity blend `u* = (1-μ₀)u_fluid + μ₀ u_body` has no
+  Lagrange multiplier — the body's effect on the fluid is implicit in the blending,
+  there's no sharp `Γ` to impose a BC on, and MuJoCo's body solver is a black-box
+  Neumann interface. The Colonius algebra doesn't apply.
+
+  **Practical extension (BDIM-MuJoCo)**:
+  1. **Aitken-Picard sub-iteration** (~2-3 days). Within each timestep, sub-iterate
+     fluid + body until (force, body_state) are self-consistent. Pseudo-code:
+     ```
+     for step n:
+         checkpoint MuJoCo state, fluid state
+         F^{(0)} = F^{n-1}  # extrapolate
+         for k = 0, 1, 2, ...:
+             apply F^{(k)} via xfrc_applied, sub-step MuJoCo → body_state^{(k+1)}
+             stamp u_body from body_state^{(k+1)} into fluid grid
+             run BDIM fluid step → compute F^{(k+1)}
+             apply Aitken Δ² acceleration on F^{(k+1)}
+             if |F^{(k+1)} - F^{(k)}| / |F| < tol: break
+             restore MuJoCo + fluid state to start of step
+         commit final F, body_state, fluid state
+     ```
+     Typically converges in 2-4 inner iterations → 2-4× per-step cost.
+     Main implementation challenge: MuJoCo state checkpoint/restore (mj_saveState/
+     mj_loadState) inside the FARMS lifecycle. Fluid checkpoint is straightforward
+     (u, v, [w], p tensor copies).
+
+  2. **Robin-flavoured update** (~1-2 more days, optional acceleration on top of
+     Aitken). Replace the plain stamp `u* = (1-μ₀)u_fluid + μ₀ u_body` with a
+     Robin-style update:
+     ```
+     u* = (1-μ₀)u_fluid + μ₀ (u_body + κ · (F_applied^{k} - F_predicted))
+     ```
+     where κ = compliance estimate (∝ 1/m_body) and F_predicted = current fluid
+     force on the current u_body. Encodes "added-mass preview" inside the iteration.
+     Typically drops Aitken iteration count from 3-4 → 1-2 (Badia, Nobile, Vergara
+     2008 + Causin, Gerbeau, Nobile 2005). Marginal complexity for marginal win;
+     only worth it if Aitken alone converges too slowly.
+
+  **When to do this**: only when at least one of the following is true:
+   (a) a real swimmer config can't be stabilised by `force_relaxation` at any β
+       (i.e., even β=0.05 still explodes — would mean m_added/m_body ≫ 2).
+   (b) the transient lag of low-β relaxation (~1/β iters) is unacceptable for the
+       application (e.g., gamepad control responsiveness).
+   (c) you want a stability guarantee across all parameter regimes for publication
+       / public release.
+  As of 2026-05-29 none of (a)-(c) apply; relaxation handles every tested swimmer
+  config with β ≤ 0.3. Document as a "if you ever need it, here's the recipe"
+  rather than a blocker.
+
 - AMR (Adaptive Mesh Refinement) - refine grid only near bodies and in the wake.
 
 

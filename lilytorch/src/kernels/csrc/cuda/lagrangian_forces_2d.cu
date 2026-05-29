@@ -139,6 +139,7 @@ __global__ void lagrangian_forces_2d_kernel(
     const scalar_t bx0, const scalar_t by0,
     const scalar_t inv_dx, const scalar_t inv_dy,
     const int interp_method,
+    const scalar_t sample_offset,
     double* __restrict__ out)             // (B, 6)
 {
     const int b = blockIdx.y;
@@ -169,22 +170,27 @@ __global__ void lagrangian_forces_2d_kernel(
     const scalar_t nx =  ty;
     const scalar_t ny = -tx;
 
+    // Sample fields ``sample_offset`` away from the contour along the
+    // outward normal (see lagrangian_forces.cu for the rationale).
+    const scalar_t qxs = qx + sample_offset * nx;
+    const scalar_t qys = qy + sample_offset * ny;
+
     const scalar_t e_xx = lf_sample_2d_d<scalar_t>(
-        interp_method, exx, Mx, My, bx0, by0, inv_dx, inv_dy, qx, qy);
+        interp_method, exx, Mx, My, bx0, by0, inv_dx, inv_dy, qxs, qys);
     const scalar_t e_xy = lf_sample_2d_d<scalar_t>(
-        interp_method, exy, Mx, My, bx0, by0, inv_dx, inv_dy, qx, qy);
+        interp_method, exy, Mx, My, bx0, by0, inv_dx, inv_dy, qxs, qys);
     const scalar_t e_yy = lf_sample_2d_d<scalar_t>(
-        interp_method, eyy, Mx, My, bx0, by0, inv_dx, inv_dy, qx, qy);
+        interp_method, eyy, Mx, My, bx0, by0, inv_dx, inv_dy, qxs, qys);
     const scalar_t nu_rho_m = nrho_scalar
         ? nrho[0]
         : lf_sample_2d_d<scalar_t>(
-            interp_method, nrho, Mx, My, bx0, by0, inv_dx, inv_dy, qx, qy);
+            interp_method, nrho, Mx, My, bx0, by0, inv_dx, inv_dy, qxs, qys);
 
     const scalar_t tvx = nu_rho_m * (e_xx * nx + e_xy * ny);
     const scalar_t tvy = nu_rho_m * (e_xy * nx + e_yy * ny);
 
     const scalar_t p_m = lf_sample_2d_d<scalar_t>(
-        interp_method, pp, Mx, My, bx0, by0, inv_dx, inv_dy, qx, qy);
+        interp_method, pp, Mx, My, bx0, by0, inv_dx, inv_dy, qxs, qys);
     const scalar_t tpx = -p_m * nx;
     const scalar_t tpy = -p_m * ny;
 
@@ -220,6 +226,7 @@ void lagrangian_forces_2d_cuda(
     const double inv_dx, const double inv_dy,
     const int64_t Mx, const int64_t My,
     const int64_t interp_method,
+    const double sample_offset,
     at::Tensor out)
 {
     const int B = (int)com_pos.size(0);
@@ -280,6 +287,7 @@ void lagrangian_forces_2d_cuda(
                 (scalar_t)bx0, (scalar_t)by0,
                 (scalar_t)inv_dx, (scalar_t)inv_dy,
                 (int)interp_method,
+                (scalar_t)sample_offset,
                 out.data_ptr<double>());
     });
 }

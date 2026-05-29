@@ -177,6 +177,22 @@ class BaseSimConfig:
         self.dtype                   = None
         self.zero_pressure_inside    = None
         self.force_method            = None
+        # Distance (units of length) to offset the sample point from the
+        # body surface along the outward normal when integrating
+        # Lagrangian surface forces.  0 (default) samples exactly at the
+        # triangle centroid / contour marker — but on BDIM-immersed
+        # bodies that point sits in the smoothed band where ε is
+        # computed from the blended velocity (≈ ½·fluid value) and
+        # ``zero_pressure_inside`` zeros adjacent interior cells, so
+        # forces are systematically under-estimated.  Setting this to
+        # roughly ``eps`` (BDIM half-bandwidth ≈ 2·h) or larger moves
+        # the sample into pure fluid and recovers a value comparable to
+        # the Eulerian volume integral.  Recommended: sweep
+        # ``{0, eps, 1.5·eps, 2·eps}`` and pick the smallest value that
+        # matches the Eulerian on a steady benchmark.  Too large can
+        # land the sample in a neighbouring link (concave multibody
+        # geometry) or off-grid → instability — start small.
+        self.lagrangian_sample_offset = None   # None → solver default (0.0)
         self.time_integration        = None
         # Solver method: ``"python"`` | ``"kernel"``.
         # See :class:`FluidSolver` for what each method does. ``None``
@@ -224,6 +240,13 @@ class BaseSimConfig:
         self.contour_mask   = None
         self.convexify      = False
         self.force_scaling  = None
+        # Temporal under-relaxation of fluid->body force feedback.
+        # F_applied^{n+1} = β · F_lag^{n+1} + (1-β) · F_applied^{n}
+        # β=1.0 (None): no filtering. β<1.0: damp explicit-coupling oscillation
+        # at the cost of slower transient response. DC (time-average) preserved.
+        # Useful for stabilising Lagrangian forces in multibody swimmer coupling
+        # without halving the physical force (which zero_pressure_inside hack did).
+        self.force_relaxation = None
         self.compute_sdf    = False
         self.suit           = 0.0
 
@@ -787,6 +810,7 @@ class BaseSimConfig:
             ("dtype",                   self.dtype),
             ("zero_pressure_inside",    self.zero_pressure_inside),
             ("force_method",            self.force_method),
+            ("lagrangian_sample_offset", self.lagrangian_sample_offset),
             ("time_integration",        self.time_integration),
             ("use_kernels",             self.use_kernels),
             ("sdf_interp_method",       self.sdf_interp_method),
@@ -831,6 +855,8 @@ class BaseSimConfig:
             body["n_samples"] = self.n_samples
         if self.force_scaling is not None:
             body["force_scaling"] = self.force_scaling
+        if self.force_relaxation is not None:
+            body["force_relaxation"] = self.force_relaxation
         if self.contour_mask is not None:
             body["contour_mask"] = self.contour_mask
 

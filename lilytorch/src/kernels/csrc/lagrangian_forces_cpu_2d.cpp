@@ -143,6 +143,7 @@ void lagrangian_forces_2d_cpu(
     const double inv_dx, const double inv_dy,
     const int64_t Mx, const int64_t My,
     const int64_t interp_method,
+    const double sample_offset,
     at::Tensor out)
 {
     const int B = (int)com_pos.size(0);
@@ -191,6 +192,9 @@ void lagrangian_forces_2d_cpu(
         const scalar_t bx0s = (scalar_t)bx0, by0s = (scalar_t)by0;
         const scalar_t idx  = (scalar_t)inv_dx, idy = (scalar_t)inv_dy;
         const int method = (int)interp_method;
+        // See lagrangian_forces.cu — sample fields offset away from the
+        // surface to escape the BDIM band.
+        const scalar_t soff = (scalar_t)sample_offset;
 
         at::parallel_for(0, B, 0, [&](int64_t b_start, int64_t b_end) {
             for (int64_t b = b_start; b < b_end; ++b) {
@@ -230,24 +234,26 @@ void lagrangian_forces_2d_cpu(
                     // CCW outward normal = (+t_y, -t_x)
                     const scalar_t nx =  ty;
                     const scalar_t ny = -tx;
+                    const scalar_t qxs = qx + soff * nx;
+                    const scalar_t qys = qy + soff * ny;
 
                     const scalar_t e_xx = lf_sample_2d<scalar_t>(
-                        method, exx, iMx, iMy, bx0s, by0s, idx, idy, qx, qy);
+                        method, exx, iMx, iMy, bx0s, by0s, idx, idy, qxs, qys);
                     const scalar_t e_xy = lf_sample_2d<scalar_t>(
-                        method, exy, iMx, iMy, bx0s, by0s, idx, idy, qx, qy);
+                        method, exy, iMx, iMy, bx0s, by0s, idx, idy, qxs, qys);
                     const scalar_t e_yy = lf_sample_2d<scalar_t>(
-                        method, eyy, iMx, iMy, bx0s, by0s, idx, idy, qx, qy);
+                        method, eyy, iMx, iMy, bx0s, by0s, idx, idy, qxs, qys);
 
                     const scalar_t nu_rho_m = nrho_scalar
                         ? nrho[0]
                         : lf_sample_2d<scalar_t>(
-                            method, nrho, iMx, iMy, bx0s, by0s, idx, idy, qx, qy);
+                            method, nrho, iMx, iMy, bx0s, by0s, idx, idy, qxs, qys);
 
                     tvx[k] = nu_rho_m * (e_xx * nx + e_xy * ny);
                     tvy[k] = nu_rho_m * (e_xy * nx + e_yy * ny);
 
                     const scalar_t p_m = lf_sample_2d<scalar_t>(
-                        method, pp, iMx, iMy, bx0s, by0s, idx, idy, qx, qy);
+                        method, pp, iMx, iMy, bx0s, by0s, idx, idy, qxs, qys);
                     tpx[k] = -p_m * nx;
                     tpy[k] = -p_m * ny;
                 }

@@ -63,7 +63,7 @@ def build_pars():
 
     pars = {
         "solver": {
-            "use_gpu": False,
+            "use_gpu": True,
             "nthreads": 1,
             "Nx": Nx, "Ny": Ny,
             "xmin": xmin, "xmax": xmax,
@@ -122,8 +122,8 @@ def build_pars():
         },
         "output": {
             "save_path": "/tmp/lilytorch_hydrostatic/",
-            "save_frames": False,
-            "save_every": 1000000,
+            "save_frames": True,
+            "save_every": 10,
             "save": False,
             "save_drags": False,
             "vmin": "auto", "vmax": "auto",

@@ -213,6 +213,7 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " float inv_dx, float inv_dy,"
         " int Mx, int My,"
         " int interp_method,"
+        " float sample_offset,"
         " Tensor(a!) out"
         ") -> ()");
 
@@ -232,6 +233,7 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " float inv_dx, float inv_dy, float inv_dz,"
         " int Mx, int My, int Mz,"
         " int interp_method,"
+        " float sample_offset,"
         " Tensor(a!) out"
         ") -> ()");
 

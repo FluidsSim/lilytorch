@@ -507,6 +507,13 @@ class FluidSolver(PlottingMixin):
                 f"('eulerian', 'lagrangian'), got {_fm_raw!r}."
             )
         self.force_method = _fm_raw
+        # Distance to offset the Lagrangian-force sample point along the
+        # outward surface normal (see lagrangian_forces.cu).  0 (default)
+        # = sample exactly at the centroid/contour marker (legacy
+        # behaviour, biased by BDIM band contamination).  Set to ~eps
+        # via config to escape the band.
+        self.lagrangian_sample_offset = float(
+            solver.get("lagrangian_sample_offset", 0.0))
         self.zero_pressure_inside = solver.get("zero_pressure_inside", False)
 
         self._solver_method = solver.get("solver_method", "kernel")
@@ -1178,7 +1185,20 @@ class FluidSolver(PlottingMixin):
             if ch_cc is not None:
                 # Variable-density path: RHS uses cell-centred density,
                 # correction uses the staggered ch/cv/cw coefficients.
-                p = self.poisson_solverFFT.solve(self.div / ch_cc)
+                # With bdim_mu0_projection=True, ch_cc=0 inside the body
+                # (mu0=0) — body cells decouple from the projection.
+                # Mask those cells (RHS=0) so we don't divide by zero;
+                # FFT then finds a harmonic extension that matches the
+                # fluid Poisson solution. Inside-body p doesn't affect
+                # u_new there because the correction is multiplied by
+                # ch (which is also zero).
+                _body_decoupled = (ch_cc <= 0)
+                _ch_safe = torch.where(_body_decoupled,
+                                       torch.ones_like(ch_cc), ch_cc)
+                _rhs = torch.where(_body_decoupled,
+                                   torch.zeros_like(self.div),
+                                   self.div / _ch_safe)
+                p = self.poisson_solverFFT.solve(_rhs)
                 if self.ndim == 2:
                     (p_x, p_y) = self.gradient(p)
                     u = u - ch * p_x
@@ -1198,7 +1218,23 @@ class FluidSolver(PlottingMixin):
                                   and isinstance(ch, torch.Tensor)
                                   and ch.shape[0] < u.shape[0])
                 fft_coeff = coeff if (ch is None or _face_grid_fft) else ch
-                p = self.poisson_solverFFT.solve(self.div / fft_coeff)
+                # With bdim_mu0_projection=True, fft_coeff can be 0 inside
+                # the body (mu0=0). The straight division self.div /
+                # fft_coeff then yields 0/0 = NaN there, corrupting the
+                # FFT solve. Mask body-decoupled cells (RHS=0); FFT
+                # produces a harmonic extension and the subsequent
+                # correction multiplies by fft_coeff=0 inside the body,
+                # so u_new equals u_star = u_body there as intended.
+                if isinstance(fft_coeff, torch.Tensor):
+                    _body_decoupled = (fft_coeff <= 0)
+                    _safe = torch.where(_body_decoupled,
+                                        torch.ones_like(fft_coeff), fft_coeff)
+                    _rhs = torch.where(_body_decoupled,
+                                       torch.zeros_like(self.div),
+                                       self.div / _safe)
+                else:
+                    _rhs = self.div / fft_coeff
+                p = self.poisson_solverFFT.solve(_rhs)
                 if self.ndim == 2:
                     (p_x, p_y) = self.gradient(p)
                     u = u - fft_coeff * p_x

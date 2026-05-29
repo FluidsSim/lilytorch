@@ -164,6 +164,7 @@ void lagrangian_forces_3d_cpu(
     const double inv_dx, const double inv_dy, const double inv_dz,
     const int64_t Mx, const int64_t My, const int64_t Mz,
     const int64_t interp_method,
+    const double sample_offset,
     at::Tensor out)
 {
     const int B = (int)com_pos.size(0);
@@ -221,6 +222,9 @@ void lagrangian_forces_3d_cpu(
         const scalar_t bx0s = (scalar_t)bx0, by0s = (scalar_t)by0, bz0s = (scalar_t)bz0;
         const scalar_t idx = (scalar_t)inv_dx, idy = (scalar_t)inv_dy, idz = (scalar_t)inv_dz;
         const int method = (int)interp_method;
+        // See lagrangian_forces.cu — sample fields offset away from the
+        // surface to escape the BDIM band.
+        const scalar_t soff = (scalar_t)sample_offset;
 
         at::parallel_for(0, B, 0, [&](int64_t b_start, int64_t b_end) {
             for (int64_t b = b_start; b < b_end; ++b) {
@@ -242,31 +246,34 @@ void lagrangian_forces_3d_cpu(
                     const scalar_t nyv = ny_p[t];
                     const scalar_t nzv = nz_p[t];
                     const scalar_t A   = area[t];
+                    const scalar_t qxs = qx + soff * nxv;
+                    const scalar_t qys = qy + soff * nyv;
+                    const scalar_t qzs = qz + soff * nzv;
 
                     const scalar_t e_xx = lf_sample_3d<scalar_t>(
                         method, exx, iMx, iMy, iMz, bx0s, by0s, bz0s,
-                        idx, idy, idz, qx, qy, qz);
+                        idx, idy, idz, qxs, qys, qzs);
                     const scalar_t e_yy = lf_sample_3d<scalar_t>(
                         method, eyy, iMx, iMy, iMz, bx0s, by0s, bz0s,
-                        idx, idy, idz, qx, qy, qz);
+                        idx, idy, idz, qxs, qys, qzs);
                     const scalar_t e_zz = lf_sample_3d<scalar_t>(
                         method, ezz, iMx, iMy, iMz, bx0s, by0s, bz0s,
-                        idx, idy, idz, qx, qy, qz);
+                        idx, idy, idz, qxs, qys, qzs);
                     const scalar_t e_xy = lf_sample_3d<scalar_t>(
                         method, exy, iMx, iMy, iMz, bx0s, by0s, bz0s,
-                        idx, idy, idz, qx, qy, qz);
+                        idx, idy, idz, qxs, qys, qzs);
                     const scalar_t e_xz = lf_sample_3d<scalar_t>(
                         method, exz, iMx, iMy, iMz, bx0s, by0s, bz0s,
-                        idx, idy, idz, qx, qy, qz);
+                        idx, idy, idz, qxs, qys, qzs);
                     const scalar_t e_yz = lf_sample_3d<scalar_t>(
                         method, eyz, iMx, iMy, iMz, bx0s, by0s, bz0s,
-                        idx, idy, idz, qx, qy, qz);
+                        idx, idy, idz, qxs, qys, qzs);
 
                     const scalar_t nu_rho_m = nrho_scalar
                         ? nrho[0]
                         : lf_sample_3d<scalar_t>(
                             method, nrho, iMx, iMy, iMz, bx0s, by0s, bz0s,
-                            idx, idy, idz, qx, qy, qz);
+                            idx, idy, idz, qxs, qys, qzs);
 
                     const scalar_t tvx = nu_rho_m * (e_xx * nxv + e_xy * nyv + e_xz * nzv);
                     const scalar_t tvy = nu_rho_m * (e_xy * nxv + e_yy * nyv + e_yz * nzv);
@@ -274,7 +281,7 @@ void lagrangian_forces_3d_cpu(
 
                     const scalar_t p_m = lf_sample_3d<scalar_t>(
                         method, pp, iMx, iMy, iMz, bx0s, by0s, bz0s,
-                        idx, idy, idz, qx, qy, qz);
+                        idx, idy, idz, qxs, qys, qzs);
                     const scalar_t tpx = -p_m * nxv;
                     const scalar_t tpy = -p_m * nyv;
                     const scalar_t tpz = -p_m * nzv;

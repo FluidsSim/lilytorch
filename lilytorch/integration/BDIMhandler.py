@@ -133,6 +133,19 @@ class BDIMhandler:
         else:
             self.force_scaling = float(fs_cfg)
 
+        # ---- temporal under-relaxation of force feedback (FSI stability) ----
+        # F_applied^{n+1} = β · F_lag^{n+1} + (1-β) · F_applied^{n}
+        # β=1.0 (default): no filtering, raw force applied each step.
+        # β<1.0: low-pass filter; damps the explicit-coupling oscillation
+        # (e.g. the 20Hz / 5-iter coupling-lag mode seen in salamander
+        # gamepad with Lagrangian forces) while preserving DC / time-
+        # average physical force. Lives at the coupling boundary; the
+        # raw per-step forces in FluidSolver are unchanged for analysis.
+        self.force_relaxation = float(
+            self.pars.get("body", {}).get("force_relaxation", 1.0))
+        self._fr_lin_prev = None   # numpy (D, B), set on first call
+        self._fr_ang_prev = None   # numpy (Nt, B)
+
         # ---- densities ----
         self.rho_fluid = self.pars["solver"]["rho"]
 
@@ -192,6 +205,10 @@ class BDIMhandler:
         self._init_apply_forces()
         # override composite-body update with our FARMS-driven version
         self.fluid_solver.composite_body.update = self.update
+        # back-pointer so downstream code (e.g. forces.py diagnostics) can
+        # reach FARMS kinematics through the composite without importing
+        # BDIMhandler directly.
+        self.fluid_solver.composite_body._bdim_handler = self
 
     def _init_update(self):
         if self.ndim == 3:
@@ -836,6 +853,26 @@ class BDIMhandler:
             comp.com_pos[body_i] = com_pos
             body.com_pos = com_pos
 
+            # Lagrangian forces sample at ``body.cnt_update`` — must be in
+            # world coords.  Historically only set inside the contour-mask
+            # branch, which left it as the body-local init for the common
+            # contour_mask=False case → wrong sample positions for Lagrangian
+            # forces.  Refresh unconditionally when Lagrangian is enabled.
+            if self.force_method == "lagrangian":
+                if body.cnt is not None and body.cnt.numel() > 0:
+                    # See _update_2d_streaming_multi for CCW orientation rationale.
+                    if not hasattr(body, '_cnt_ccw_oriented'):
+                        cl = body.cnt
+                        dx = torch.roll(cl[0], -1) - cl[0]
+                        dy = torch.roll(cl[1], -1) - cl[1]
+                        cx_mid = 0.5 * (cl[0] + torch.roll(cl[0], -1))
+                        cy_mid = 0.5 * (cl[1] + torch.roll(cl[1], -1))
+                        signed_area = (0.5 * (cx_mid * dy - cy_mid * dx).sum()).item()
+                        if signed_area < 0:
+                            body.cnt = body.cnt.flip(dims=[1]).contiguous()
+                        body._cnt_ccw_oriented = True
+                    body.cnt_update = R @ body.cnt.to(self.dtype) + urdf_pos[:, None]
+
             # optional contour mask for overlapping links
             if self.contour_mask:
                 body.cnt_update = R @ body.cnt + urdf_pos[:, None]
@@ -1133,6 +1170,27 @@ class BDIMhandler:
 
         body_pos_np = urdf_pos_np + np.einsum('bij,bj->bi', R_link_np, local_lt_np)
         body_R_np   = np.einsum('bij,bjk->bik', R_link_np, local_lr_np)  # (B, 3, 3)
+
+        # Lagrangian 3-D surface-integral forces sample fluid fields at
+        # ``body.tri_centroid_world`` with ``body.tri_normal_world``; these
+        # MUST be in world coords each step.  Direct analogue of the 2-D
+        # ``cnt_update`` refresh below — the kernel-mode streaming update
+        # historically left them at the body-local frame from init, which
+        # made the 3-D Lagrangian forces ~zero (samples were at wrong
+        # world locations).  Cheap: one matmul + add per body, skipped
+        # entirely for the default Eulerian path.
+        if self.force_method == "lagrangian":
+            R_b_t   = torch.from_numpy(np.ascontiguousarray(body_R_np)).to(self.device)
+            pos_b_t = torch.from_numpy(np.ascontiguousarray(body_pos_np)).to(self.device)
+            for b, body in enumerate(comp.bodies):
+                tcl = getattr(body, 'tri_centroid_local', None)
+                tnl = getattr(body, 'tri_normal_local', None)
+                if tcl is None or tnl is None:
+                    continue
+                tcl_d = tcl.to(dtype=self.dtype, device=self.device)
+                tnl_d = tnl.to(dtype=self.dtype, device=self.device)
+                body.tri_centroid_world = R_b_t[b] @ tcl_d + pos_b_t[b, :, None]
+                body.tri_normal_world   = R_b_t[b] @ tnl_d
 
         # Vectorised AABB of the oriented body-SDF box in world space.
         abs_R_np     = np.abs(body_R_np)
@@ -1522,6 +1580,37 @@ class BDIMhandler:
             lin_vel_np[b]  = lin_vels[a_id][l_id]
             ang_vel_np[b]  = ang_vels[a_id][l_id]
 
+        # Lagrangian surface-integral forces sample fluid fields at
+        # ``body.cnt_update``; that tensor MUST be in world coords for
+        # the kernel to read the right fields.  This streaming path (and
+        # the contour-mask=False ``_update_2d`` Python path) historically
+        # left ``cnt_update`` at the body-local frame from init, which
+        # made ``force_method="lagrangian"`` produce finite-but-bogus
+        # forces and eventually crashed MuJoCo (mjWARN_BADQACC).  Refresh
+        # it here when Lagrangian is enabled — cheap (one matmul + add
+        # per body) and skipped entirely for the default Eulerian path.
+        if self.force_method == "lagrangian":
+            R_t       = torch.from_numpy(np.ascontiguousarray(R_link_np)).to(self.device)
+            urdf_t    = torch.from_numpy(np.ascontiguousarray(urdf_pos_np)).to(self.device)
+            for b, body in enumerate(comp.bodies):
+                if body.cnt is None or body.cnt.numel() == 0:
+                    continue
+                # Ensure CCW orientation (kernel assumes CCW outward normal via
+                # ``nx = ty, ny = -tx``).  Mesh bodies' contour ordering depends
+                # on the source mesh and is often CW; analytical bodies are
+                # built CCW.  Check signed area once and cache per body.
+                if not hasattr(body, '_cnt_ccw_oriented'):
+                    cl = body.cnt
+                    dx = torch.roll(cl[0], -1) - cl[0]
+                    dy = torch.roll(cl[1], -1) - cl[1]
+                    cx_mid = 0.5 * (cl[0] + torch.roll(cl[0], -1))
+                    cy_mid = 0.5 * (cl[1] + torch.roll(cl[1], -1))
+                    signed_area = (0.5 * (cx_mid * dy - cy_mid * dx).sum()).item()
+                    if signed_area < 0:
+                        body.cnt = body.cnt.flip(dims=[1]).contiguous()
+                    body._cnt_ccw_oriented = True
+                body.cnt_update = R_t[b] @ body.cnt.to(self.dtype) + urdf_t[b, :, None]
+
         # body_pos = urdf_pos (local_lt = 0); body_R = R_link (local_lr = I)
         body_pos_np = urdf_pos_np
         body_R_np   = R_link_np
@@ -1702,6 +1791,20 @@ class BDIMhandler:
         # Total per-axis (viscous + pressure) at CPU level.
         lin_total = forces_cpu[:D] + forces_cpu[D + Nt: 2 * D + Nt]   # (D, B)
         ang_total = forces_cpu[D: D + Nt] + forces_cpu[2 * D + Nt:]   # (Nt, B)
+
+        # Temporal under-relaxation: low-pass at the coupling boundary
+        # to damp the explicit-coupling oscillation while preserving
+        # the DC / time-averaged physical force.
+        beta = self.force_relaxation
+        if beta < 1.0:
+            if self._fr_lin_prev is None or self._fr_lin_prev.shape != lin_total.shape:
+                self._fr_lin_prev = lin_total.copy()
+                self._fr_ang_prev = ang_total.copy()
+            else:
+                lin_total = beta * lin_total + (1.0 - beta) * self._fr_lin_prev
+                ang_total = beta * ang_total + (1.0 - beta) * self._fr_ang_prev
+                self._fr_lin_prev = lin_total.copy()
+                self._fr_ang_prev = ang_total.copy()
 
         # FARMS-identical buoyancy (drag.pyx ``compute_buoyancy``).
         if self._has_buoyancy and not self._buoyancy_initialized:

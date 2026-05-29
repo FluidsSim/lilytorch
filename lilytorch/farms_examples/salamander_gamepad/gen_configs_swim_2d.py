@@ -27,7 +27,7 @@ class SimConfig(BaseSimConfig):
         self.solver_method    = "kernel"
         # self.compile_adv_diff = True
 
-        self.bdim_physics = {"solref": [-100000.0, -2000.0]}
+        self.bdim_physics = {"solref": [-100000.0, -500.0]}
 
         # ── Animats ───────────────────────────────────────────────────
         self.animats_pars = [
@@ -55,13 +55,20 @@ class SimConfig(BaseSimConfig):
         self.ymax =  0.2
 
         # ── Physics ───────────────────────────────────────────────────
-        self.poisson_method    = "fft"
+        self.poisson_method    = "multigrid"
         self.poisson_bc_type   = "neumann"
         self.timestep          = 0.01
         self.convection_method = "implicit"
         self.n_iterations      = 80001
         self.save_frames       = False
         self.num_sub_steps     = 1
+
+
+        self.force_method         = "lagrangian"
+        self.force_relaxation     = 0.05
+        self.zero_pressure_inside = True
+        # self.lagrangian_sample_offset = 2*(self.xmax - self.xmin) / self.Nx
+        self.bdim_mu0_projection      = False
 
         # ── MuJoCo ───────────────────────────────────────────────────
         self.visual_scale = 10.0
@@ -83,7 +90,6 @@ class SimConfig(BaseSimConfig):
         self.bdim_nt      = self.n_iterations
         self.rho_body     = 1000.0
 
-        self.bdim_mu0_projection = False
 
 
         # ── Boundary conditions ──────────────────────────────────────
@@ -94,7 +100,6 @@ class SimConfig(BaseSimConfig):
 
         # ── Body ─────────────────────────────────────────────────────
         self.contour_mask = False
-        self.zero_pressure_inside = True
 
     # ── Hooks ─────────────────────────────────────────────────────────
     def customize_joint_initials(self, joints_list):
