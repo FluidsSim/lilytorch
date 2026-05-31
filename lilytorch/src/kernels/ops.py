@@ -46,7 +46,10 @@ def streaming_sdf_stag_3d_multi(
         key_cc_t: Tensor, key_u_t: Tensor, key_v_t: Tensor, key_w_t: Tensor,
         interp_method: int,
         dirty_i0: int, dirty_j0: int, dirty_k0: int,
-        dirty_Ai: int, dirty_Aj: int, dirty_Ak: int) -> None:
+        dirty_Ai: int, dirty_Aj: int, dirty_Ak: int,
+        num_u: Tensor, num_v: Tensor, num_w: Tensor,
+        den_u: Tensor, den_v: Tensor, den_w: Tensor,
+        blend_eps: float) -> None:
     """Phase-I 3-D streaming SDF + face velocity update (no rho).
 
     Companion to ``bdim_vardens_3d``: fills ``sdf_cc`` (persistent),
@@ -68,6 +71,7 @@ def streaming_sdf_stag_3d_multi(
         int(interp_method),
         int(dirty_i0), int(dirty_j0), int(dirty_k0),
         int(dirty_Ai), int(dirty_Aj), int(dirty_Ak),
+        num_u, num_v, num_w, den_u, den_v, den_w, float(blend_eps),
     )
 
 
@@ -217,7 +221,10 @@ def streaming_sdf_stag_2d_multi(
         key_cc_t: Tensor, key_u_t: Tensor, key_v_t: Tensor,
         interp_method: int,
         dirty_i0: int, dirty_j0: int,
-        dirty_Ai: int, dirty_Aj: int) -> None:
+        dirty_Ai: int, dirty_Aj: int,
+        num_u: Tensor, num_v: Tensor,
+        den_u: Tensor, den_v: Tensor,
+        blend_eps: float) -> None:
     """Phase-I 2-D streaming SDF + face velocity update (no rho).
 
     Companion to ``bdim_vardens_2d``: fills ``sdf_cc`` (persistent),
@@ -239,6 +246,7 @@ def streaming_sdf_stag_2d_multi(
         int(interp_method),
         int(dirty_i0), int(dirty_j0),
         int(dirty_Ai), int(dirty_Aj),
+        num_u, num_v, den_u, den_v, float(blend_eps),
     )
 
 

@@ -1,0 +1,2 @@
+iter,umax,divmax,pmax,pargmax_i,pargmax_j,pargmax_k,force_lin_sum,force_lin_max,visc_lin_max,pres_lin_max
+0,4.902669e+04,1.934028e+07,6.318888e+09,254,71,-1,2.451358e+08,6.329791e+07,8.801414e+01,6.329792e+07

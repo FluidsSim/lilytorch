@@ -139,19 +139,23 @@ enforced in cells where :math:`\mu_0 < \text{threshold}`.
 Body hierarchy
 --------------
 
-The class hierarchy in :mod:`lilytorch.src.body` is:
+Only **composite bodies** are user-instantiable. The
+:func:`~lilytorch.src.body.body_from_yaml` factory accepts the
+``composite_analytical`` and ``composite_mesh`` body types; the other
+classes are internal building blocks that exist to be wrapped by a
+composite. The class hierarchy in :mod:`lilytorch.src.body` is:
 
 .. code-block:: text
 
    Body (base)                     # mu_funcs, compute_normals
-   ├── BodyAnalytical              # Analytical SDFs
-   │   ├── CompositeBodyAnalytical # Union of analytical bodies
-   │   ├── BodyFishAnalytical      # NACA-foil fish spine
-   │   └── BodyFishExperimental    # Experimental kinematics replay
-   ├── BodyMesh                    # Mesh-based SDF
-   │   ├── CompositeBodyMesh       # Union of mesh bodies
-   │   └── CompositeSegmentBody    # Articulated segments
-   └── MultiAnimatBodies           # Multiple swimming animats
+   ├── BodyAnalytical              # internal: analytical SDFs
+   │   ├── CompositeBodyAnalytical # USER: union of analytical bodies
+   │   ├── BodyFishAnalytical      # internal: NACA-foil fish spine
+   │   └── BodyFishExperimental    # internal: experimental kinematics
+   ├── BodyMesh                    # internal: mesh-based SDF
+   │   ├── CompositeBodyMesh       # USER: union of mesh bodies
+   │   └── CompositeSegmentBody    # internal: articulated segments
+   └── MultiAnimatBodies           # internal: multiple swimming animats
 
 Each body exposes:
 
@@ -161,6 +165,72 @@ Each body exposes:
 
 Composite bodies take the **union** of their children via
 :math:`d_{\text{union}} = \min(d_1, d_2, \dots)`.
+
+
+.. _velocity-blend:
+
+Overlapping links: smooth velocity blend
+-----------------------------------------
+
+Articulated swimmers built from per-link meshes often have **overlapping
+links** — most commonly because ``convexify=True`` replaces each link
+mesh with its convex hull, which inflates the link and makes adjacent
+hulls intersect (for the 9-link 1guilla this is ≈16 % of each link's
+volume even in the straight pose, and more on the concave side of a
+bend).
+
+The geometry union :math:`d_{\text{union}} = \min_i d_i` handles the
+*shape* correctly, but the **imposed solid velocity** is ambiguous in the
+overlap band: two rigid links generally have different velocities
+:math:`\mathbf{v}_i = \mathbf{v}^{\text{lin}}_i + \boldsymbol{\omega}_i
+\times (\mathbf{x}-\mathbf{x}^{\text{com}}_i)` there. The legacy
+*winner-take-all* rule assigns each face the velocity of whichever link
+has the most-negative SDF. Where ownership switches, the imposed velocity
+**jumps**, which injects a grid-scale divergence the projection cannot
+remove — producing a pressure spike pinned at the seam. In the
+explicit FARMS coupling this corrupts the per-link forces and, for a
+fast undulating body, drives a per-step feedback blow-up (it is *not* a
+CFL/time-step instability — halving ``dt`` does not help; only damping
+the force feedback, e.g. ``force_relaxation`` < 1, masks it).
+
+The fix replaces the hard switch with a **smooth SDF-weighted blend** of
+the imposed velocity (the geometry SDF still uses the running-min):
+
+.. math::
+
+   \mathbf{v}_{\text{body}}(\mathbf{x}) =
+   \frac{\sum_i w_i\,\mathbf{v}_i}{\sum_i w_i},
+   \qquad
+   w_i = \sigma\!\left(-\,d_i/\varepsilon_w\right),
+
+where :math:`\sigma` is the logistic function. The weight :math:`w_i` is
+≈1 deep inside link :math:`i`, :math:`0.5` on its surface and decays to 0
+a band :math:`\varepsilon_w` outside. This is **continuous** across the
+seam (it equals :math:`\tfrac12(\mathbf{v}_A+\mathbf{v}_B)` exactly where
+:math:`d_A=d_B`) and is **exact for a single, non-overlapping body**
+(:math:`\mathbf{v}_{\text{body}} = \mathbf{v}_i`), so it has no effect
+away from overlaps.
+
+Enable it with the config parameter
+``body_velocity_blend_eps_cells`` (band width :math:`\varepsilon_w` in
+grid cells; ``None``/``0`` keeps the legacy winner-take-all). A value of
+``2.0`` matches the BDIM kernel half-width and is recommended:
+
+.. code-block:: python
+
+   self.convexify                     = True
+   self.body_velocity_blend_eps_cells = 2.0   # smooth seam blend
+   # force_relaxation no longer needed
+
+The blend is implemented identically in the pure-PyTorch union
+(:meth:`BDIMhandler._update_2d` / ``_update_3d``) and in the fused
+CUDA/C++ streaming-SDF kernels (``streaming_sdf*.cu`` /
+``streaming_sdf_cpu*.cpp``): the per-body reduction accumulates
+:math:`\sum_i w_i \mathbf{v}_i` and :math:`\sum_i w_i` alongside the
+existing running-min, and the decode step divides. Validated on the
+1guilla and zebrafish swimmers (``convexify=True``, no
+``force_relaxation``): the seam blow-up is removed and the run stays
+bounded with physical forces.
 
 
 FARMS coupling (3-D)
@@ -177,3 +247,165 @@ each MuJoCo link is an independent body.  At every time-step:
 
 An **AABB narrow-band optimisation** avoids evaluating the SDF over the
 full grid for links that occupy less than 90 % of the domain.
+
+
+Performance: union narrow-band
+-------------------------------
+
+Articulated swimmers (e.g. the 9-link 1guilla, salamander or pleurodeles)
+evaluate *many* per-link SDFs, normals and BDIM kernels on every
+fractional step.  For realistic grid sizes (:math:`\sim 10^6`–:math:`10^7`
+cells) the bodies only touch a tiny fraction of cells, yet the naive
+implementation touches the **full grid** for every link and for every
+operator.  This makes the whole pipeline **memory-bandwidth bound** and
+dominated by **kernel-launch overhead** — exactly the regime where GPUs
+perform worst.
+
+LilyTorch therefore implements a *union narrow-band* strategy that is
+activated by a single user flag and covers four different operators.
+
+Motivation
+^^^^^^^^^^
+
+For :math:`N_b` bodies on a grid of :math:`N` cells the naive per-body
+pipeline has cost
+
+.. math::
+
+   C_{\text{naive}}
+     = \mathcal{O}\!\bigl(N_b\,N\bigr)
+       \;+\;
+       \mathcal{O}\!\bigl(N_b\,N_{\text{ops}}\bigr)\;\text{kernel launches.}
+
+In practice every body lies in a small axis-aligned bounding box (AABB),
+and the *union* of all per-body AABBs, padded by a halo of a few cells,
+still covers only a small sub-block :math:`N_\cup \ll N` of the domain.
+Restricting the bandwidth-bound operators to the union sub-block and
+**batching** all bodies into a single launch converts the cost to
+
+.. math::
+
+   C_{\text{opt}}
+     = \mathcal{O}\!\bigl(N_\cup\bigr)
+       \;+\;
+       \mathcal{O}\!\bigl(N_{\text{ops}}\bigr)\;\text{kernel launches.}
+
+The speed-up therefore grows with both :math:`N_b` (launch-overhead
+amortisation) and :math:`N/N_\cup` (memory-traffic amortisation), so the
+approach is *most* useful for **many moving bodies** and **large grids**
+— precisely the scenarios that LilyTorch targets.
+
+Components
+^^^^^^^^^^
+
+The kernel-mode optimisation bundles five composable pieces, all of
+which are activated together by a single user-facing switch:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 28 72
+
+   * - Flag
+     - Effect when ``solver.use_kernels = true``
+   * - shared-stress union crop
+     - Shared viscous-stress tensor used by the hydrodynamic-force
+       integrator runs as one compiled kernel over the union AABB,
+       instead of one full-grid kernel per body.
+   * - mu/normals union crop
+     - :math:`\mu_0`, :math:`\mu_1` and the outward normals needed by
+       the BDIM meta-equation and by the variable-density Poisson
+       coefficients are computed only on union cells.
+   * - BDIM-meta union crop
+     - The BDIM2 meta-equation itself (Eq. :eq:`bdim-meta`), applied to
+       each face-velocity component only on union cells.
+   * - streaming SDF kernels (2-D and 3-D)
+     - Per-body fused C++/CUDA kernels (rotate + sample + running-min
+       + sparse-cc store) replace the Python per-body loop in
+       ``BDIMhandler._update_{2,3}d``.
+   * - streaming fused-force kernels (Phase D, 2-D and 3-D)
+     - Per-body force/torque integration is folded into the same
+       streaming op, removing the dense ``(B, Nx, Ny, Nz)`` SDF
+       reduction.
+
+These five pieces are no longer individually configurable — they are
+all enabled together by ``solver.use_kernels = true`` (the default)
+and disabled together by ``solver.use_kernels = false`` (which selects
+the suboptimal pure-PyTorch reference path).  ``use_kernels`` is
+**independent** of ``solver.use_gpu``: kernel mode is supported on
+both CPU and CUDA, and pure-Python mode also runs on either device.
+
+.. code-block:: yaml
+
+   solver:
+     use_kernels: true
+     # ... rest of the solver config
+
+or, in the cost-analysis harness,
+
+.. code-block:: bash
+
+   python run_multigrid_cost_analysis.py --preset full --use_kernels
+
+Implementation details
+^^^^^^^^^^^^^^^^^^^^^^
+
+* **Union AABB construction** — per-link AABBs in world coordinates are
+  expanded by a halo of 2 cells (so stencil operators remain in bounds)
+  and their outer envelope is rounded up to a **bucket of 16** cells per
+  axis.  The bucket rounding caps the number of distinct sub-block
+  shapes that ``torch.compile`` has to specialise for, keeping recompile
+  counts bounded while the swimmer moves.
+
+* **Dynamic-shape compilation** — the union-crop kernels are compiled
+  with ``dynamic=True`` instead of ``mode="reduce-overhead"``, because
+  the sub-block shape changes over time.  The static, full-grid kernels
+  (adv-diff, Poisson) keep the reduce-overhead mode.
+
+* **Streaming fused-CUDA SDF update** — when ``solver.use_kernels`` is
+  on, one C++/CUDA kernel per body fuses rotate + 4 trilinear samples +
+  4 running-min updates + per-body sparse cc store into a single op
+  call, replacing the Python per-body loop in ``BDIMhandler._update_3d``.
+
+Measured impact
+^^^^^^^^^^^^^^^
+
+On an RTX 4080 SUPER, for the 9-link 1guilla free-swimming benchmark:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 18 18 18
+
+   * - Grid
+     - Body update
+     - Forces
+     - BDIM meta
+   * - 256 × 64 × 64
+     - 8.24 → 2.93 ms  (**2.8×**)
+     - 2.3× faster
+     - 6–11× faster
+   * - 512 × 128 × 128
+     - 8.4 → 3.39 ms  (**2.5×**)
+     - 2.3× faster
+     - 6–11× faster
+
+Because the three operator flags share the *same* union AABB, their
+savings are additive: enabling them together eliminates most of the
+kernel-launch overhead that previously scaled linearly in :math:`N_b`.
+
+When to use it
+^^^^^^^^^^^^^^
+
+The meta-flag is enabled by default on the supplied multi-grid cost
+benchmarks and on all articulated FARMS cases.  You may want to
+**disable** it only when:
+
+* A single body occupies a large fraction of the domain
+  (:math:`N_\cup \approx N`), in which case the overhead of AABB
+  bookkeeping is not recovered.
+* You are debugging a new analytical SDF and prefer full-grid kernels
+  for numerical inspection.
+
+For every other scenario — and in particular for long multi-body
+swimming simulations on fine grids — the production flag set above
+should be on.
+

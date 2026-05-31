@@ -67,7 +67,6 @@ class SimConfig(BaseSimConfig):
         self.convection_method = "quick"
         self.n_iterations      = 10001
         self.save_every        = 50
-        self.cb_sub_steps      = 2
         self.vmin              = -10.0
         self.vmax              = 10.0
         self.save              = False

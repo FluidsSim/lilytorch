@@ -353,7 +353,18 @@ __global__ void streaming_sdf_min_rho_3d_multi_kernel(
     // Dirty AABB origin and stride for AABB-local key indexing.
     // key arrays are sized dirty_Ai*dirty_Aj*dirty_Ak (not full Ngrid).
     const int dirty_i0, const int dirty_j0, const int dirty_k0,
-    const int dirty_Aj, const int dirty_Ak)
+    const int dirty_Aj, const int dirty_Ak,
+    // Smooth velocity-blend accumulators (dirty-vol sized, AABB-local).
+    // Active when blend_eps > 0: instead of the running-min winner taking
+    // the face velocity, every body contributes  w_i * v_i  with
+    // w_i = sigmoid(-s_i/blend_eps), and the decode pass divides by Σ w_i.
+    // This replaces the hard velocity switch at inter-link seams with a
+    // continuous blend (the SDF/geometry still uses the running-min keys).
+    scalar_t* __restrict__ num_u, scalar_t* __restrict__ num_v,
+    scalar_t* __restrict__ num_w,
+    scalar_t* __restrict__ den_u, scalar_t* __restrict__ den_v,
+    scalar_t* __restrict__ den_w,
+    const scalar_t blend_eps)
 {
     const int b     = blockIdx.y;
     const int local = blockIdx.x * blockDim.x + threadIdx.x;
@@ -429,6 +440,26 @@ __global__ void streaming_sdf_min_rho_3d_multi_kernel(
         bxq+dw_x, byq+dw_y, bzq+dw_z);
     atomicMin((unsigned long long*)&key_w[g_local],
               (unsigned long long)pack_sdf_body_key(s_w, b));
+
+    // ---- smooth velocity blend: accumulate Σ w_i v_i and Σ w_i ----
+    if (blend_eps > scalar_t(0)) {
+        // This body's rigid face velocities (same formulas as the decode
+        // pass; u/v/w each independent of their own stagger direction).
+        const scalar_t cm_x = K[12], cm_y = K[13], cm_z = K[14];
+        const scalar_t lv_x = K[15], lv_y = K[16], lv_z = K[17];
+        const scalar_t av_x = K[18], av_y = K[19], av_z = K[20];
+        const scalar_t vU = lv_x + av_y*(zc - cm_z) - av_z*(yc - cm_y);
+        const scalar_t vV = lv_y + av_z*(xc - cm_x) - av_x*(zc - cm_z);
+        const scalar_t vW = lv_z + av_x*(yc - cm_y) - av_y*(xc - cm_x);
+        // w_i = sigmoid(-s/eps): ~1 inside body i, 0.5 on its surface, →0
+        // a band eps outside.  Evaluated per stagger from that face's SDF.
+        const scalar_t wU = scalar_t(1) / (scalar_t(1) + exp(s_u / blend_eps));
+        const scalar_t wV = scalar_t(1) / (scalar_t(1) + exp(s_v / blend_eps));
+        const scalar_t wW = scalar_t(1) / (scalar_t(1) + exp(s_w / blend_eps));
+        atomicAdd(&num_u[g_local], wU * vU); atomicAdd(&den_u[g_local], wU);
+        atomicAdd(&num_v[g_local], wV * vV); atomicAdd(&den_v[g_local], wV);
+        atomicAdd(&num_w[g_local], wW * vW); atomicAdd(&den_w[g_local], wW);
+    }
 }
 
 template <typename scalar_t, int BLOCK_SIZE>
@@ -821,7 +852,14 @@ __global__ void streaming_sdf_decode_keys_stag_3d_kernel(
     scalar_t* __restrict__ bW,
     const int dirty_vol,
     const int di0, const int dj0, const int dk0,
-    const int dAi, const int dAj, const int dAk)
+    const int dAi, const int dAj, const int dAk,
+    // Velocity-blend accumulators (see min kernel); when blend_eps > 0 the
+    // face velocity is Σ w_i v_i / Σ w_i instead of the single min-winner.
+    const scalar_t* __restrict__ num_u, const scalar_t* __restrict__ num_v,
+    const scalar_t* __restrict__ num_w,
+    const scalar_t* __restrict__ den_u, const scalar_t* __restrict__ den_v,
+    const scalar_t* __restrict__ den_w,
+    const scalar_t blend_eps)
 {
     const int local = blockIdx.x * blockDim.x + threadIdx.x;
     if (local >= dirty_vol) return;
@@ -850,7 +888,12 @@ __global__ void streaming_sdf_decode_keys_stag_3d_kernel(
     if ((int)bv < B_sentinel) sdf_v[g] = unpack_sdf<scalar_t>(kv);
     if ((int)bw < B_sentinel) sdf_w[g] = unpack_sdf<scalar_t>(kw);
 
-    if ((int)bu < B_sentinel) {
+    const bool blend = blend_eps > scalar_t(0);
+    const scalar_t den_tol = scalar_t(1e-6);
+
+    if (blend && den_u[local] > den_tol) {
+        bU[g] = num_u[local] / den_u[local];
+    } else if ((int)bu < B_sentinel) {
         const scalar_t* K = kin + (int)bu * 21;
         const scalar_t cm_y = K[13], cm_z = K[14];
         const scalar_t lv_x = K[15];
@@ -859,7 +902,9 @@ __global__ void streaming_sdf_decode_keys_stag_3d_kernel(
         const scalar_t zc = gz[k];
         bU[g] = lv_x + av_y*(zc - cm_z) - av_z*(yc - cm_y);
     }
-    if ((int)bv < B_sentinel) {
+    if (blend && den_v[local] > den_tol) {
+        bV[g] = num_v[local] / den_v[local];
+    } else if ((int)bv < B_sentinel) {
         const scalar_t* K = kin + (int)bv * 21;
         const scalar_t cm_x = K[12], cm_z = K[14];
         const scalar_t lv_y = K[16];
@@ -868,7 +913,9 @@ __global__ void streaming_sdf_decode_keys_stag_3d_kernel(
         const scalar_t zc = gz[k];
         bV[g] = lv_y + av_z*(xc - cm_x) - av_x*(zc - cm_z);
     }
-    if ((int)bw < B_sentinel) {
+    if (blend && den_w[local] > den_tol) {
+        bW[g] = num_w[local] / den_w[local];
+    } else if ((int)bw < B_sentinel) {
         const scalar_t* K = kin + (int)bw * 21;
         const scalar_t cm_x = K[12], cm_y = K[13];
         const scalar_t lv_z = K[17];
@@ -894,7 +941,10 @@ void streaming_sdf_stag_3d_multi_cuda(
     at::Tensor key_cc_t, at::Tensor key_u_t, at::Tensor key_v_t, at::Tensor key_w_t,
     const int64_t interp_method,
     const int64_t dirty_i0, const int64_t dirty_j0, const int64_t dirty_k0,
-    const int64_t dirty_Ai, const int64_t dirty_Aj, const int64_t dirty_Ak)
+    const int64_t dirty_Ai, const int64_t dirty_Aj, const int64_t dirty_Ak,
+    at::Tensor num_u, at::Tensor num_v, at::Tensor num_w,
+    at::Tensor den_u, at::Tensor den_v, at::Tensor den_w,
+    const double blend_eps)
 {
     const int B = (int)aabb_dim.size(0);
     if (B <= 0 || max_vol_per_body <= 0) return;
@@ -941,7 +991,12 @@ void streaming_sdf_stag_3d_multi_cuda(
                 (uint64_t*)key_w_t.data_ptr<int64_t>(),
                 (int)interp_method,
                 (int)dirty_i0, (int)dirty_j0, (int)dirty_k0,
-                (int)dirty_Aj, (int)dirty_Ak);
+                (int)dirty_Aj, (int)dirty_Ak,
+                num_u.data_ptr<scalar_t>(), num_v.data_ptr<scalar_t>(),
+                num_w.data_ptr<scalar_t>(),
+                den_u.data_ptr<scalar_t>(), den_v.data_ptr<scalar_t>(),
+                den_w.data_ptr<scalar_t>(),
+                (scalar_t)blend_eps);
 
         streaming_sdf_decode_keys_stag_3d_kernel<scalar_t>
             <<<initBlocks, initBlock, 0, stream>>>(
@@ -958,7 +1013,12 @@ void streaming_sdf_stag_3d_multi_cuda(
                 body_w.data_ptr<scalar_t>(),
                 (int)dirty_vol,
                 (int)dirty_i0, (int)dirty_j0, (int)dirty_k0,
-                (int)dirty_Ai, (int)dirty_Aj, (int)dirty_Ak);
+                (int)dirty_Ai, (int)dirty_Aj, (int)dirty_Ak,
+                num_u.data_ptr<scalar_t>(), num_v.data_ptr<scalar_t>(),
+                num_w.data_ptr<scalar_t>(),
+                den_u.data_ptr<scalar_t>(), den_v.data_ptr<scalar_t>(),
+                den_w.data_ptr<scalar_t>(),
+                (scalar_t)blend_eps);
     });
 }
 
@@ -1575,7 +1635,11 @@ void streaming_sdf_min_rho_3d_multi_cuda(
                 (uint64_t*)key_w_t.data_ptr<int64_t>(),
                 (int)interp_method,
                 (int)dirty_i0, (int)dirty_j0, (int)dirty_k0,
-                (int)dirty_Aj, (int)dirty_Ak);
+                (int)dirty_Aj, (int)dirty_Ak,
+                // velocity blend not used by the rho/decode variant
+                (scalar_t*)nullptr, (scalar_t*)nullptr, (scalar_t*)nullptr,
+                (scalar_t*)nullptr, (scalar_t*)nullptr, (scalar_t*)nullptr,
+                (scalar_t)(-1));
 
         streaming_sdf_decode_keys_rho_3d_kernel<scalar_t>
             <<<initBlocks, initBlock, 0, stream>>>(

@@ -34,15 +34,19 @@ class SimConfig(BaseSimConfig):
         )
 
         # ── Hardware ──────────────────────────────────────────────────
-        self.compute_sdf         = True
-        self.use_gpu             = True
-        self.use_bdim            = True
-        self.headless            = False
-        self.water_buoyancy      = True
+        self.compute_sdf                   = True
+        self.use_gpu                       = True
+        self.use_bdim                      = True
+        self.headless                      = False
+        self.water_buoyancy                = True
+        self.sdf_interp_method             = "triquadratic"
+        self.force_method                  = "lagrangian"
+        self.convexify                     = True
+        self.zero_pressure_inside          = True
+        self.body_velocity_blend_eps_cells = 2
+
         # self.force_delta_order   = 2
-        self.sdf_interp_method   = "triquadratic"
         # self.solver_method       = "python"
-        self.force_method        = "lagrangian"
 
         self.bdim_physics = {
             "solref": [-2e4, -30e1],
@@ -114,7 +118,6 @@ class SimConfig(BaseSimConfig):
 
         # ── BDIM solver ──────────────────────────────────────────────
         self.dtype                   = "float32"
-        self.zero_pressure_inside    = True
         self.bdim_dt                 = self.timestep
         self.bdim_nt                 = self.n_iterations + 1
         self.poisson_tol             = 1.0e-7
@@ -139,7 +142,6 @@ class SimConfig(BaseSimConfig):
         self.bc_values_w = [0, 0, 0, 0, 0, 0]
 
         # ── Body ─────────────────────────────────────────────────────
-        self.convexify             = False
         self.interp_data_subfolder = "interp_data"
 
         # ── MuJoCo ───────────────────────────────────────────────────

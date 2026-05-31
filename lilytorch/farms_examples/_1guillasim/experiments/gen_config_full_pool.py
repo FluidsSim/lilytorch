@@ -17,10 +17,16 @@ class SimConfig(BaseSimConfig):
         )
 
         # ── Hardware ──────────────────────────────────────────────────
-        self.use_gpu              = True
-        self.use_bdim             = True
-        self.compute_sdf          = True
-        # self.convexify            = True
+        self.use_gpu                       = True
+        self.use_bdim                      = True
+        self.compute_sdf                   = True
+        self.convexify                     = True
+        self.force_method                  = "lagrangian"
+        self.zero_pressure_inside          = False
+        # self.force_relaxation              = 0.3
+        self.body_velocity_blend_eps_cells = 0
+        self.bdim_mu0_projection           = False
+
         self.headless             = False
         self.smagorinsky_cs       = 0.
 
@@ -34,7 +40,7 @@ class SimConfig(BaseSimConfig):
                 "sdf_name"       : "1guilla.sdf",
                 "control_type"   : "position",
                 "gains"          : [100.0, 1., 0],
-                "spawn_mode"     : SpawnMode.FREE,
+                "spawn_mode"     : SpawnMode.TRANSVERSE,
                 "pose"           : [4.75, 0.1, 0.0, 0, 0, 0.05],
                 "controller_path": "lilytorch.farms_examples._1guillasim.experiments.controller.PositionController",
                 "control_pars"   : {
@@ -82,12 +88,10 @@ class SimConfig(BaseSimConfig):
         self.poisson_smoother        = "jacobi"
         self.poisson_nsmoothing      = 5
         self.poisson_bc_type         = "free"
-        self.zero_pressure_inside    = True
         # Multibody swimmer: drop the mu0 factor in the Poisson coefficient so
         # the variable-density operator stays non-degenerate (dt/rho_eff).
         # The mu0-weighted form (default True) creates divergence at the
         # inter-link seams that the degenerate solve cannot remove → blow-up.
-        # self.bdim_mu0_projection     = False
 
 
         # # u: no-penetration on x-walls, free-slip on y/z-walls

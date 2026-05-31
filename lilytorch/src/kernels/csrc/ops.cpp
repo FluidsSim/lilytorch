@@ -53,7 +53,10 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " Tensor(h!) key_cc_t, Tensor(i!) key_u_t, Tensor(j!) key_v_t, Tensor(k!) key_w_t,"
         " int interp_method,"
         " int dirty_i0, int dirty_j0, int dirty_k0,"
-        " int dirty_Ai, int dirty_Aj, int dirty_Ak"
+        " int dirty_Ai, int dirty_Aj, int dirty_Ak,"
+        " Tensor(l!) num_u, Tensor(m!) num_v, Tensor(n!) num_w,"
+        " Tensor(o!) den_u, Tensor(p!) den_v, Tensor(q!) den_w,"
+        " float blend_eps"
         ") -> ()");
 
     // Phase-I fused BDIM2 + variable-density Poisson coefficient kernel.
@@ -139,7 +142,10 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " Tensor(d!) body_u, Tensor(e!) body_v,"
         " Tensor(f!) key_cc_t, Tensor(g!) key_u_t, Tensor(h!) key_v_t,"
         " int interp_method,"
-        " int dirty_i0, int dirty_j0, int dirty_Ai, int dirty_Aj"
+        " int dirty_i0, int dirty_j0, int dirty_Ai, int dirty_Aj,"
+        " Tensor(l!) num_u, Tensor(m!) num_v,"
+        " Tensor(o!) den_u, Tensor(p!) den_v,"
+        " float blend_eps"
         ") -> ()");
 
     // Phase-I fused BDIM2 + variable-density Poisson coefficient kernel (2-D).

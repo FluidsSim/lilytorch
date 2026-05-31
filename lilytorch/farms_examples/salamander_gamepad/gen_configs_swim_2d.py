@@ -65,10 +65,11 @@ class SimConfig(BaseSimConfig):
 
 
         self.force_method         = "lagrangian"
-        self.force_relaxation     = 0.05
-        self.zero_pressure_inside = True
+        # self.force_relaxation     = 0.05
+        self.zero_pressure_inside = False
+        self.bdim_mu0_projection  = False
+        self.body_velocity_blend_eps_cells = 2
         # self.lagrangian_sample_offset = 2*(self.xmax - self.xmin) / self.Nx
-        self.bdim_mu0_projection      = False
 
         # ── MuJoCo ───────────────────────────────────────────────────
         self.visual_scale = 10.0

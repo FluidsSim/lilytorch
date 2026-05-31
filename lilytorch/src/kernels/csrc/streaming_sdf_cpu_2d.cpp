@@ -726,12 +726,16 @@ void streaming_sdf_stag_2d_multi_cpu(
     at::Tensor body_u, at::Tensor body_v,
     at::Tensor /*key_cc_t*/, at::Tensor /*key_u_t*/, at::Tensor /*key_v_t*/,
     const int64_t interp_method,
-    const int64_t /*dirty_i0*/, const int64_t /*dirty_j0*/,
-    const int64_t /*dirty_Ai*/, const int64_t /*dirty_Aj*/)
+    const int64_t dirty_i0, const int64_t dirty_j0,
+    const int64_t dirty_Ai, const int64_t dirty_Aj,
+    at::Tensor num_u, at::Tensor num_v,
+    at::Tensor den_u, at::Tensor den_v,
+    const double blend_eps)
 {
     const int B = (int)aabb_dim.size(0);
     if (B <= 0) return;
     const int Ngy = (int)gy.numel();
+    const bool blend = blend_eps > 0.0;
 
     AT_DISPATCH_FLOATING_TYPES(F_flat.scalar_type(), "streaming_sdf_stag_2d_multi_cpu", [&] {
         auto F_c  = F_flat.contiguous();
@@ -753,6 +757,11 @@ void streaming_sdf_stag_2d_multi_cpu(
         scalar_t* sdf_v_p  = sdf_v.data_ptr<scalar_t>();
         scalar_t* bU_p     = body_u.data_ptr<scalar_t>();
         scalar_t* bV_p     = body_v.data_ptr<scalar_t>();
+        scalar_t* numU = num_u.data_ptr<scalar_t>();
+        scalar_t* numV = num_v.data_ptr<scalar_t>();
+        scalar_t* denU = den_u.data_ptr<scalar_t>();
+        scalar_t* denV = den_v.data_ptr<scalar_t>();
+        const scalar_t beps = (scalar_t)blend_eps;
 
         const scalar_t neg_half_h = -(scalar_t)(0.5 * h_grid);
 
@@ -816,13 +825,39 @@ void streaming_sdf_stag_2d_multi_cpu(
                         bU_p[g_idx] = lv_x - om * (yc - cm_y);
                     }
                 }
+                const scalar_t s_v = sample(bxq + dv_x, byq + dv_y);
                 {
-                    const scalar_t s = sample(bxq + dv_x, byq + dv_y);
-                    if (s < sdf_v_p[g_idx]) {
-                        sdf_v_p[g_idx] = s;
+                    if (s_v < sdf_v_p[g_idx]) {
+                        sdf_v_p[g_idx] = s_v;
                         bV_p[g_idx] = lv_y + om * (xc - cm_x);
                     }
                 }
+                if (blend) {
+                    // Σ w_i v_i / Σ w_i (full-grid index); finalised below.
+                    const scalar_t s_u = sample(bxq + du_x, byq + du_y);
+                    const scalar_t vU = lv_x - om * (yc - cm_y);
+                    const scalar_t vV = lv_y + om * (xc - cm_x);
+                    const scalar_t wU = scalar_t(1)/(scalar_t(1)+std::exp(s_u/beps));
+                    const scalar_t wV = scalar_t(1)/(scalar_t(1)+std::exp(s_v/beps));
+                    numU[g_idx]+=wU*vU; denU[g_idx]+=wU;
+                    numV[g_idx]+=wV*vV; denV[g_idx]+=wV;
+                }
+            }
+            });
+        }
+
+        if (blend) {
+            // Finalise: SDF-weighted blend over the dirty rectangle.
+            const int di0 = (int)dirty_i0, dj0 = (int)dirty_j0;
+            const int dAi = (int)dirty_Ai, dAj = (int)dirty_Aj;
+            const scalar_t tol = (scalar_t)1e-6;
+            at::parallel_for(0, (int64_t)dAi*dAj, 4096, [&](int64_t _b, int64_t _e){
+            for (int loc = (int)_b; loc < (int)_e; ++loc) {
+                const int i = di0 + loc / dAj;
+                const int j = dj0 + loc % dAj;
+                const std::int64_t g = (std::int64_t)i * Ngy + j;
+                if (denU[g] > tol) bU_p[g] = numU[g]/denU[g];
+                if (denV[g] > tol) bV_p[g] = numV[g]/denV[g];
             }
             });
         }

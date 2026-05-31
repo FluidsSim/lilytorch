@@ -323,6 +323,15 @@ Miscellaneous
      - str
      - *null*
      - ``"method1"`` or ``"method2"`` — force integration variant.
+   * - ``body_velocity_blend_eps_cells``
+     - float
+     - *null*
+     - Width (in grid cells) of the smooth SDF-weighted velocity blend in
+       the overlap band between articulated links. ``null`` / ``0`` keeps the
+       legacy running-min winner-take-all (hard velocity switch at seams,
+       which can destabilise the coupling for overlapping links, e.g.
+       ``convexify=True``). ``2.0`` matches the BDIM kernel half-width and is
+       recommended. See :ref:`velocity-blend`.
 
 
 ``boundary_conditions`` — Velocity BCs

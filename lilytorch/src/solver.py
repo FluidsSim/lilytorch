@@ -515,6 +515,11 @@ class FluidSolver(PlottingMixin):
         self.lagrangian_sample_offset = float(
             solver.get("lagrangian_sample_offset", 0.0))
         self.zero_pressure_inside = solver.get("zero_pressure_inside", False)
+        # Smooth body-velocity blend in the overlap band (kernel path).
+        # Width given in grid cells; <=0 / None → legacy hard running-min
+        # winner-take-all.  See BDIMhandler / streaming_sdf.cu.
+        _bvb = solver.get("body_velocity_blend_eps_cells", None)
+        self._body_vel_blend_cells = float(_bvb) if _bvb else 0.0
 
         self._solver_method = solver.get("solver_method", "kernel")
         method = solver.get("solver_method", "kernel")
@@ -2024,6 +2029,14 @@ class FluidSolver(PlottingMixin):
         key_cc_t  = torch.empty(Ngrid, **_key_opts)
         key_u_t   = torch.empty(Ngrid, **_key_opts)
         key_v_t   = torch.empty(Ngrid, **_key_opts)
+        # Velocity-blend accumulators (full-grid, like the 2-D keys; zeroed).
+        blend_eps = self._body_vel_blend_cells * float(comp.h)
+        if blend_eps > 0.0:
+            num_u_t = torch.zeros(Ngrid, **_opts); num_v_t = torch.zeros(Ngrid, **_opts)
+            den_u_t = torch.zeros(Ngrid, **_opts); den_v_t = torch.zeros(Ngrid, **_opts)
+        else:
+            num_u_t = torch.empty(1, **_opts); num_v_t = torch.empty(1, **_opts)
+            den_u_t = torch.empty(1, **_opts); den_v_t = torch.empty(1, **_opts)
 
         # 5. Kernel A.
         streaming_sdf_stag_2d_multi(
@@ -2038,6 +2051,7 @@ class FluidSolver(PlottingMixin):
             int(getattr(self, '_sdf_interp_method', 0)),
             int(ks['dirty_i0']), int(ks['dirty_j0']),
             int(ks['dirty_Ai']), int(ks['dirty_Aj']),
+            num_u_t, num_v_t, den_u_t, den_v_t, float(blend_eps),
         )
 
         # 6. Kernel B: fused BDIM2 + variable-density coefficients.
@@ -2184,6 +2198,23 @@ class FluidSolver(PlottingMixin):
         key_u_t  = torch.empty(dirty_vol, **_key_opts)
         key_v_t  = torch.empty(dirty_vol, **_key_opts)
         key_w_t  = torch.empty(dirty_vol, **_key_opts)
+        # Velocity-blend accumulators (dirty-vol-local, zeroed each step).
+        # Only allocated when the blend is enabled; otherwise tiny stubs so
+        # the op signature is satisfied (blend_eps<=0 → kernel ignores them).
+        blend_eps = self._body_vel_blend_cells * float(comp.h)
+        if blend_eps > 0.0:
+            num_u_t = torch.zeros(dirty_vol, **_opts)
+            num_v_t = torch.zeros(dirty_vol, **_opts)
+            num_w_t = torch.zeros(dirty_vol, **_opts)
+            den_u_t = torch.zeros(dirty_vol, **_opts)
+            den_v_t = torch.zeros(dirty_vol, **_opts)
+            den_w_t = torch.zeros(dirty_vol, **_opts)
+        else:
+            # 6 distinct stubs — the op marks num/den as mutable (l!..q!),
+            # so they must not alias the same storage even when unused.
+            num_u_t = torch.empty(1, **_opts); num_v_t = torch.empty(1, **_opts)
+            num_w_t = torch.empty(1, **_opts); den_u_t = torch.empty(1, **_opts)
+            den_v_t = torch.empty(1, **_opts); den_w_t = torch.empty(1, **_opts)
         _chk("4-after alloc sdf/bUVW/key temps (before Kernel A)")
 
         # 5. Kernel A: stream SDF + body velocities into the temps,
@@ -2200,6 +2231,8 @@ class FluidSolver(PlottingMixin):
             int(getattr(self, '_sdf_interp_method', 0)),
             int(ks['dirty_i0']), int(ks['dirty_j0']), int(ks['dirty_k0']),
             int(ks['dirty_Ai']), int(ks['dirty_Aj']), int(ks['dirty_Ak']),
+            num_u_t, num_v_t, num_w_t, den_u_t, den_v_t, den_w_t,
+            float(blend_eps),
         )
 
         # 6. Kernel B: fused BDIM2 + variable-density coefficients.

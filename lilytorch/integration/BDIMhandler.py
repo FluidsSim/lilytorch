@@ -146,6 +146,25 @@ class BDIMhandler:
         self._fr_lin_prev = None   # numpy (D, B), set on first call
         self._fr_ang_prev = None   # numpy (Nt, B)
 
+        # ---- smooth body-velocity blend in the overlap band ----
+        # With convexify (or otherwise overlapping links), the running-min
+        # SDF union hard-switches the imposed solid velocity at the seam
+        # between two links, injecting a grid-scale divergence -> pressure
+        # spike -> explicit-coupling blow-up.  When ``body_velocity_blend``
+        # is on, the imposed face velocity in the band becomes an
+        # SDF-weighted average  v = Σ w_i v_i / Σ w_i ,  w_i = σ(-φ_i/ε_w),
+        # which is continuous across the seam (equals (v_A+v_B)/2 where
+        # φ_A=φ_B) and reduces to v_i exactly for a single (non-overlapping)
+        # body.  ``ε_w`` is given in cells via ``body_velocity_blend_eps_cells``.
+        # None / 0  -> legacy hard running-min winner-take-all.
+        _blend_cells = self.pars.get("body", {}).get(
+            "body_velocity_blend_eps_cells",
+            self.pars["solver"].get("body_velocity_blend_eps_cells", None))
+        self._blend_eps_cells = (
+            float(_blend_cells) if _blend_cells else None)
+        self._blend_eps = None      # set per-step from grid spacing h
+        self._blend_den = None      # lazily-allocated denominator buffers
+
         # ---- densities ----
         self.rho_fluid = self.pars["solver"]["rho"]
 
@@ -211,13 +230,14 @@ class BDIMhandler:
         self.fluid_solver.composite_body._bdim_handler = self
 
     def _init_update(self):
+        kernel_mode = self.fluid_solver._solver_method == "kernel"
         if self.ndim == 3:
-            if self.fluid_solver._solver_method == "kernel":
+            if kernel_mode:
                 self.update = self._update_3d_streaming_multi
             else:
                 self.update = self._update_3d
         else:
-            if self.fluid_solver._solver_method == "kernel":
+            if kernel_mode:
                 self.update = self._update_2d_streaming_multi
             else:
                 self.update = self._update_2d
@@ -766,6 +786,29 @@ class BDIMhandler:
         target_vel[sl] = torch.where(
             mask, vel_region, target_vel[sl].contiguous())
 
+    def _accum_region_velocity_blend(self, num, den, sdf_region, vel_region,
+                                     sl, full_region):
+        """Accumulate the SDF-weighted velocity blend for one body/stagger.
+
+        ``num`` holds Σ w_i v_i and ``den`` holds Σ w_i (both per-face,
+        zeroed at the start of the step).  ``w_i = σ(-φ_i/ε_w)`` is a smooth
+        per-body weight: ~1 deep inside body i, 0.5 on its surface, →0 a
+        band ε_w outside.  Finalised by :meth:`_finalize_velocity_blend`.
+        """
+        w = torch.sigmoid(-sdf_region / self._blend_eps)
+        wv = w * vel_region
+        if full_region:
+            num.add_(wv)
+            den.add_(w)
+        else:
+            num[sl] += wv
+            den[sl] += w
+
+    @staticmethod
+    def _finalize_velocity_blend(target_vel, num, den):
+        """Write body velocity = num/den (guarded where den≈0, i.e. fluid)."""
+        target_vel.copy_(num / den.clamp_min(1e-12))
+
     # ---- 2-D update --------------------------------------------------
     def _update_2d(self, t, iteration, dt=1):
 
@@ -797,6 +840,18 @@ class BDIMhandler:
         comp.sdf_val_v.fill_(_FAR)
         comp.body_u.zero_()
         comp.body_v.zero_()
+
+        # Smooth velocity-blend bookkeeping (see _update_3d): body_* hold the
+        # Σ w_i v_i numerator, den_* the Σ w_i denominator.
+        blend = self._blend_eps_cells is not None
+        if blend:
+            self._blend_eps = h_grid * self._blend_eps_cells
+            if (self._blend_den is None
+                    or self._blend_den[0].shape != comp.body_u.shape):
+                self._blend_den = [torch.zeros_like(comp.body_u)
+                                   for _ in range(2)]
+            den_u, den_v = self._blend_den
+            den_u.zero_(); den_v.zero_()
 
         # Cache per-body AABBs for downstream use (e.g. narrow-band forces).
         for body_i, body in enumerate(comp.bodies):
@@ -845,10 +900,18 @@ class BDIMhandler:
             vel_v = lin_vel[1] + ang_vel * (comp.Xv_stag[sl] - com_pos[0])
 
             self._merge_region_sdf(comp.sdf_val, sdf_cc, sl, full_region)
-            self._merge_region_sdf_and_velocity(
-                comp.sdf_val_u, comp.body_u, sdf_u, vel_u, sl, full_region)
-            self._merge_region_sdf_and_velocity(
-                comp.sdf_val_v, comp.body_v, sdf_v, vel_v, sl, full_region)
+            if blend:
+                self._merge_region_sdf(comp.sdf_val_u, sdf_u, sl, full_region)
+                self._merge_region_sdf(comp.sdf_val_v, sdf_v, sl, full_region)
+                self._accum_region_velocity_blend(
+                    comp.body_u, den_u, sdf_u, vel_u, sl, full_region)
+                self._accum_region_velocity_blend(
+                    comp.body_v, den_v, sdf_v, vel_v, sl, full_region)
+            else:
+                self._merge_region_sdf_and_velocity(
+                    comp.sdf_val_u, comp.body_u, sdf_u, vel_u, sl, full_region)
+                self._merge_region_sdf_and_velocity(
+                    comp.sdf_val_v, comp.body_v, sdf_v, vel_v, sl, full_region)
 
             comp.com_pos[body_i] = com_pos
             body.com_pos = com_pos
@@ -919,6 +982,10 @@ class BDIMhandler:
 
             body.r_com = body.cnt_update - com_pos[:, None]
 
+        if blend:
+            self._finalize_velocity_blend(comp.body_u, comp.body_u, den_u)
+            self._finalize_velocity_blend(comp.body_v, comp.body_v, den_v)
+
     # ---- 3-D update --------------------------------------------------
     def _update_3d(self, t, iteration, dt=1):
 
@@ -953,6 +1020,18 @@ class BDIMhandler:
         comp.body_u.zero_()
         comp.body_v.zero_()
         comp.body_w.zero_()
+
+        # Smooth velocity-blend bookkeeping: use comp.body_* as the Σw_i v_i
+        # numerator (already zeroed above) and a matching denominator Σw_i.
+        blend = self._blend_eps_cells is not None
+        if blend:
+            self._blend_eps = h_grid * self._blend_eps_cells
+            if (self._blend_den is None
+                    or self._blend_den[0].shape != comp.body_u.shape):
+                self._blend_den = [torch.zeros_like(comp.body_u)
+                                   for _ in range(3)]
+            den_u, den_v, den_w = self._blend_den
+            den_u.zero_(); den_v.zero_(); den_w.zero_()
 
         # Cache per-body AABBs for downstream use (e.g. narrow-band forces)
         for body_i, body in enumerate(comp.bodies):
@@ -1028,15 +1107,47 @@ class BDIMhandler:
                 - ang_vel[1] * (comp.Xw_stag[sl] - com_pos[0]))
 
             self._merge_region_sdf(comp.sdf_val, sdf_cc, sl, full_region)
-            self._merge_region_sdf_and_velocity(
-                comp.sdf_val_u, comp.body_u, sdf_u, vel_u, sl, full_region)
-            self._merge_region_sdf_and_velocity(
-                comp.sdf_val_v, comp.body_v, sdf_v, vel_v, sl, full_region)
-            self._merge_region_sdf_and_velocity(
-                comp.sdf_val_w, comp.body_w, sdf_w, vel_w, sl, full_region)
+            if blend:
+                # Geometry (sdf_val_*) stays running-min; velocity is the
+                # smooth SDF-weighted blend (continuous across seams).
+                self._merge_region_sdf(comp.sdf_val_u, sdf_u, sl, full_region)
+                self._merge_region_sdf(comp.sdf_val_v, sdf_v, sl, full_region)
+                self._merge_region_sdf(comp.sdf_val_w, sdf_w, sl, full_region)
+                self._accum_region_velocity_blend(
+                    comp.body_u, den_u, sdf_u, vel_u, sl, full_region)
+                self._accum_region_velocity_blend(
+                    comp.body_v, den_v, sdf_v, vel_v, sl, full_region)
+                self._accum_region_velocity_blend(
+                    comp.body_w, den_w, sdf_w, vel_w, sl, full_region)
+            else:
+                self._merge_region_sdf_and_velocity(
+                    comp.sdf_val_u, comp.body_u, sdf_u, vel_u, sl, full_region)
+                self._merge_region_sdf_and_velocity(
+                    comp.sdf_val_v, comp.body_v, sdf_v, vel_v, sl, full_region)
+                self._merge_region_sdf_and_velocity(
+                    comp.sdf_val_w, comp.body_w, sdf_w, vel_w, sl, full_region)
 
             comp.com_pos[body_i] = com_pos
             body.com_pos = com_pos
+
+            # Lagrangian 3-D forces sample fluid fields at the world-frame
+            # surface triangulation; refresh it here so the Python path
+            # matches the kernel path (which updates it in
+            # _update_3d_streaming_multi). Without this the markers stay at
+            # their body-local init and the 3-D Lagrangian force is ~zero.
+            if self.force_method == "lagrangian":
+                tcl = getattr(body, 'tri_centroid_local', None)
+                tnl = getattr(body, 'tri_normal_local', None)
+                if tcl is not None and tnl is not None:
+                    tcl_d = tcl.to(dtype=self.dtype, device=self.device)
+                    tnl_d = tnl.to(dtype=self.dtype, device=self.device)
+                    body.tri_centroid_world = body_rot @ tcl_d + body_pos[:, None]
+                    body.tri_normal_world   = body_rot @ tnl_d
+
+        if blend:
+            self._finalize_velocity_blend(comp.body_u, comp.body_u, den_u)
+            self._finalize_velocity_blend(comp.body_v, comp.body_v, den_v)
+            self._finalize_velocity_blend(comp.body_w, comp.body_w, den_w)
 
     # ------------------------------------------------------------------
     #  Streaming combined-CUDA 3-D SDF update (Phase B)

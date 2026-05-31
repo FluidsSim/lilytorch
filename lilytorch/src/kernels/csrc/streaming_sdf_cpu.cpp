@@ -723,13 +723,19 @@ void streaming_sdf_stag_3d_multi_cpu(
     at::Tensor body_u, at::Tensor body_v, at::Tensor body_w,
     at::Tensor /*key_cc_t*/, at::Tensor /*key_u_t*/, at::Tensor /*key_v_t*/, at::Tensor /*key_w_t*/,
     const int64_t interp_method,
-    const int64_t /*dirty_i0*/, const int64_t /*dirty_j0*/, const int64_t /*dirty_k0*/,
-    const int64_t /*dirty_Ai*/, const int64_t /*dirty_Aj*/, const int64_t /*dirty_Ak*/)
+    const int64_t dirty_i0, const int64_t dirty_j0, const int64_t dirty_k0,
+    const int64_t /*dirty_Ai*/, const int64_t dirty_Aj, const int64_t dirty_Ak,
+    at::Tensor num_u, at::Tensor num_v, at::Tensor num_w,
+    at::Tensor den_u, at::Tensor den_v, at::Tensor den_w,
+    const double blend_eps)
 {
     const int B = (int)aabb_dim.size(0);
     if (B <= 0) return;
     const int Ngy = (int)gy.numel();
     const int Ngz = (int)gz.numel();
+    const bool blend = blend_eps > 0.0;
+    const int dAj = (int)dirty_Aj, dAk = (int)dirty_Ak;
+    const int di0 = (int)dirty_i0, dj0 = (int)dirty_j0, dk0 = (int)dirty_k0;
 
     AT_DISPATCH_FLOATING_TYPES(F_flat.scalar_type(), "streaming_sdf_stag_3d_multi_cpu", [&] {
         const scalar_t* F_ptr = F_flat.data_ptr<scalar_t>();
@@ -749,6 +755,15 @@ void streaming_sdf_stag_3d_multi_cpu(
         scalar_t* bU_p     = body_u.data_ptr<scalar_t>();
         scalar_t* bV_p     = body_v.data_ptr<scalar_t>();
         scalar_t* bW_p     = body_w.data_ptr<scalar_t>();
+        // Velocity-blend accumulators (dirty-vol-local indexing), matching
+        // the CUDA path: num_*[local] = Σ w_i v_i, den_*[local] = Σ w_i.
+        scalar_t* numU = num_u.data_ptr<scalar_t>();
+        scalar_t* numV = num_v.data_ptr<scalar_t>();
+        scalar_t* numW = num_w.data_ptr<scalar_t>();
+        scalar_t* denU = den_u.data_ptr<scalar_t>();
+        scalar_t* denV = den_v.data_ptr<scalar_t>();
+        scalar_t* denW = den_w.data_ptr<scalar_t>();
+        const scalar_t beps = (scalar_t)blend_eps;
         const scalar_t half_h = (scalar_t)(0.5 * h_grid);
         const int interp = (int)interp_method;
 
@@ -790,6 +805,41 @@ void streaming_sdf_stag_3d_multi_cpu(
                 if (sv < sdf_v_p[g]) { sdf_v_p[g]=sv; bV_p[g]=lv_y + av_z*(xc-cm_x) - av_x*(zc-cm_z); }
                 const scalar_t sw = sample_dispatch_cpu<scalar_t>(interp,F_b,Mx,My,Mz,bx0,by0,bz0,idx,idy,idz,bxq+dw_x,byq+dw_y,bzq+dw_z);
                 if (sw < sdf_w_p[g]) { sdf_w_p[g]=sw; bW_p[g]=lv_z + av_x*(yc-cm_y) - av_y*(xc-cm_x); }
+
+                if (blend) {
+                    // Σ w_i v_i / Σ w_i  (dirty-local index); finalised below.
+                    const int loc = ((i - di0) * dAj + (j - dj0)) * dAk + (k - dk0);
+                    const scalar_t vU = lv_x + av_y*(zc-cm_z) - av_z*(yc-cm_y);
+                    const scalar_t vV = lv_y + av_z*(xc-cm_x) - av_x*(zc-cm_z);
+                    const scalar_t vW = lv_z + av_x*(yc-cm_y) - av_y*(xc-cm_x);
+                    const scalar_t wU = scalar_t(1)/(scalar_t(1)+std::exp(su/beps));
+                    const scalar_t wV = scalar_t(1)/(scalar_t(1)+std::exp(sv/beps));
+                    const scalar_t wW = scalar_t(1)/(scalar_t(1)+std::exp(sw/beps));
+                    numU[loc]+=wU*vU; denU[loc]+=wU;
+                    numV[loc]+=wV*vV; denV[loc]+=wV;
+                    numW[loc]+=wW*vW; denW[loc]+=wW;
+                }
+            }
+            });
+        }
+
+        if (blend) {
+            // Finalise: overwrite the running-min winner velocity with the
+            // SDF-weighted blend on every covered face (continuous across
+            // inter-link seams).  Iterate the dirty-vol-sized accumulators.
+            const int64_t nvol = (int64_t)den_u.numel();
+            const scalar_t tol = (scalar_t)1e-6;
+            at::parallel_for(0, nvol, 4096, [&](int64_t _b, int64_t _e){
+            for (int loc = (int)_b; loc < (int)_e; ++loc) {
+                const int dk = loc % dAk;
+                const int rem = loc / dAk;
+                const int dj = rem % dAj;
+                const int di = rem / dAj;
+                const int i = di0 + di, j = dj0 + dj, k = dk0 + dk;
+                const int64_t g = ((int64_t)i * Ngy + j) * Ngz + k;
+                if (denU[loc] > tol) bU_p[g] = numU[loc]/denU[loc];
+                if (denV[loc] > tol) bV_p[g] = numV[loc]/denV[loc];
+                if (denW[loc] > tol) bW_p[g] = numW[loc]/denW[loc];
             }
             });
         }

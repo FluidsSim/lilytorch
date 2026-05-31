@@ -193,6 +193,15 @@ class BaseSimConfig:
         # land the sample in a neighbouring link (concave multibody
         # geometry) or off-grid → instability — start small.
         self.lagrangian_sample_offset = None   # None → solver default (0.0)
+        # Smooth body-velocity blend in the overlap band (width in cells).
+        # Overlapping links (e.g. convexify=True) hard-switch the imposed
+        # solid velocity at the inter-link seam under the running-min SDF
+        # union, injecting grid-scale divergence → pressure spike → explicit
+        # coupling blow-up.  Setting this to a few cells replaces the hard
+        # switch with an SDF-weighted average  Σ w_i v_i / Σ w_i ,
+        # w_i = σ(-φ_i/ε_w), continuous across the seam and exact for a
+        # single (non-overlapping) body.  None/0 → legacy winner-take-all.
+        self.body_velocity_blend_eps_cells = None
         self.time_integration        = None
         # Solver method: ``"python"`` | ``"kernel"``.
         # See :class:`FluidSolver` for what each method does. ``None``
@@ -811,6 +820,7 @@ class BaseSimConfig:
             ("zero_pressure_inside",    self.zero_pressure_inside),
             ("force_method",            self.force_method),
             ("lagrangian_sample_offset", self.lagrangian_sample_offset),
+            ("body_velocity_blend_eps_cells", self.body_velocity_blend_eps_cells),
             ("time_integration",        self.time_integration),
             ("use_kernels",             self.use_kernels),
             ("sdf_interp_method",       self.sdf_interp_method),

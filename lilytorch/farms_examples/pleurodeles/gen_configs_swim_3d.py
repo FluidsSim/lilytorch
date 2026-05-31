@@ -36,8 +36,8 @@ class SimConfig(BaseSimConfig):
         self.poisson_method    = "multigrid"
 
         self.zero_pressure_inside = True
-        self.force_method = "lagrangian"
-        self.sdf_interp_method = "triquadratic"
+        self.force_method         = "lagrangian"
+        self.sdf_interp_method    = "triquadratic"
         # self.force_delta_order = 2
 
         # self.apply_bdim_sigma = True

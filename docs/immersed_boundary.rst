@@ -167,6 +167,92 @@ Composite bodies take the **union** of their children via
 :math:`d_{\text{union}} = \min(d_1, d_2, \dots)`.
 
 
+.. _velocity-blend:
+
+Overlapping links: smooth velocity blend
+-----------------------------------------
+
+Articulated swimmers built from per-link meshes often have **overlapping
+links** — most commonly because ``convexify=True`` replaces each link
+mesh with its convex hull, which inflates the link and makes adjacent
+hulls intersect (for the 9-link 1guilla this is ≈16 % of each link's
+volume even in the straight pose, and more on the concave side of a
+bend).
+
+The geometry union :math:`d_{\text{union}} = \min_i d_i` handles the
+*shape* correctly, but the **imposed solid velocity** is ambiguous in the
+overlap band: two rigid links generally have different velocities
+:math:`\mathbf{v}_i = \mathbf{v}^{\text{lin}}_i + \boldsymbol{\omega}_i
+\times (\mathbf{x}-\mathbf{x}^{\text{com}}_i)` there. The legacy
+*winner-take-all* rule assigns each face the velocity of whichever link
+has the most-negative SDF. Where ownership switches, the imposed velocity
+**jumps**, which injects a grid-scale divergence the projection cannot
+remove — producing a pressure spike pinned at the seam. In the
+explicit FARMS coupling this corrupts the per-link forces and, for a
+fast undulating body, drives a per-step feedback blow-up (it is *not* a
+CFL/time-step instability — halving ``dt`` does not help; only damping
+the force feedback, e.g. ``force_relaxation`` < 1, masks it).
+
+The fix replaces the hard switch with a **smooth SDF-weighted blend** of
+the imposed velocity (the geometry SDF still uses the running-min):
+
+.. math::
+
+   \mathbf{v}_{\text{body}}(\mathbf{x}) =
+   \frac{\sum_i w_i\,\mathbf{v}_i}{\sum_i w_i},
+   \qquad
+   w_i = \sigma\!\left(-\,d_i/\varepsilon_w\right),
+
+where :math:`\sigma` is the logistic function. The weight :math:`w_i` is
+≈1 deep inside link :math:`i`, :math:`0.5` on its surface and decays to 0
+a band :math:`\varepsilon_w` outside. This is **continuous** across the
+seam (it equals :math:`\tfrac12(\mathbf{v}_A+\mathbf{v}_B)` exactly where
+:math:`d_A=d_B`) and is **exact for a single, non-overlapping body**
+(:math:`\mathbf{v}_{\text{body}} = \mathbf{v}_i`), so it has no effect
+away from overlaps.
+
+Enable it with the config parameter
+``body_velocity_blend_eps_cells`` (band width :math:`\varepsilon_w` in
+grid cells; ``None``/``0`` keeps the legacy winner-take-all). A value of
+``2.0`` matches the BDIM kernel half-width and is recommended:
+
+.. code-block:: python
+
+   self.convexify                     = True
+   self.body_velocity_blend_eps_cells = 2.0   # smooth seam blend
+   # force_relaxation no longer needed
+
+The blend is implemented identically in the pure-PyTorch union
+(:meth:`BDIMhandler._update_2d` / ``_update_3d``) and in the fused
+CUDA/C++ streaming-SDF kernels (``streaming_sdf*.cu`` /
+``streaming_sdf_cpu*.cpp``): the per-body reduction accumulates
+:math:`\sum_i w_i \mathbf{v}_i` and :math:`\sum_i w_i` alongside the
+existing running-min, and the decode step divides.
+
+.. warning::
+
+   The blend **reduces** the overlap-induced divergence (it is a smoothed
+   average of two rigid fields, so :math:`\nabla\!\cdot\mathbf{v}_{\text{body}}
+   = \nabla w \cdot (\mathbf{v}_A-\mathbf{v}_B) \neq 0`, but with a much
+   smaller magnitude than the hard jump) — it does **not** make the imposed
+   velocity divergence-free.  For **heavy** overlap (e.g. ``convexify=True``
+   convex hulls, ~16 %+ per link) on a **fine production grid** it is *not*
+   sufficient on its own: the residual divergence still drives the velocity
+   past the (tighter) CFL limit. In practice it only *delays* the blow-up,
+   and combining it with ``force_relaxation`` < 1 delays it further but does
+   not guarantee stability. The blend is enough on coarser grids and for
+   *mild* overlap.
+
+   **The robust fix for overlapping links is to remove the overlap at the
+   source: ``convexify=False``** (use the raw watertight collision meshes,
+   which do not overlap). This is stable with no blend and no force
+   relaxation. Use the velocity blend only when overlap is unavoidable and
+   mild. (Verified at production resolution on the zebrafish swimmer:
+   ``convexify=False`` is stable indefinitely; ``convexify=True`` blows up
+   with the blend alone, with ``force_relaxation`` alone, and — later — with
+   both.)
+
+
 FARMS coupling (3-D)
 ---------------------
 

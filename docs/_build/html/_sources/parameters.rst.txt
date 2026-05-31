@@ -236,6 +236,38 @@ Compilation
      - *null*
      - ``torch.compile`` for SDF / :math:`\mu` / normals evaluation.
 
+Solver mode
+^^^^^^^^^^^
+
+.. list-table::
+   :header-rows: 1
+   :widths: 22 10 12 56
+
+   * - Key
+     - Type
+     - Default
+     - Description
+   * - ``use_kernels``
+     - bool
+     - true
+     - Single user-facing switch between the two solver variants.
+       ``true`` selects the streaming C++/CUDA kernel path
+       (per-body fused SDF + force kernels, union-AABB crops for
+       shared stress, :math:`\mu` / normals, and the BDIM
+       meta-equation).  ``false`` selects the suboptimal pure-PyTorch
+       reference path (no batching, no per-body cropping) which is
+       useful for validation.  Independent of ``use_gpu``: kernel
+       mode is supported on both CPU and CUDA.
+   * - ``sdf_interp_method``
+     - str
+     - ``"trilinear"``
+     - Body-SDF sampling stencil used inside the streaming kernels.
+       ``"trilinear"`` is the 2×2×2 stencil that matches the
+       historical behaviour; ``"triquadratic"`` uses a 3×3×3 Lagrange
+       stencil for higher-order SDF accuracy near the body surface
+       and falls back to trilinear in the boundary layer of the body
+       grid.
+
 Hardware
 ^^^^^^^^
 
@@ -257,8 +289,16 @@ Hardware
      - CPU threads (when ``use_gpu: false``).
    * - ``dtype``
      - str
-     - *null*
-     - ``"float32"`` or ``"float64"``.  Default is single precision.
+     - ``"float32"``
+     - ``"float32"`` or ``"float64"``.  Honoured by both the
+       pure-PyTorch path and the C++/CUDA streaming kernels (which
+       dispatch via ``AT_DISPATCH_FLOATING_TYPES``).  Set on the
+       :class:`~lilytorch.farms_examples.base_sim_config.BaseSimConfig`
+       — the value flows through to :class:`FluidSolver` and
+       :class:`BDIMhandler` automatically; passing
+       ``dtype=torch.float64`` to ``FluidSolver(...)`` directly is no
+       longer required.  The aliases ``"single"`` / ``"double"`` are
+       also accepted.
 
 Miscellaneous
 ^^^^^^^^^^^^^
@@ -283,6 +323,15 @@ Miscellaneous
      - str
      - *null*
      - ``"method1"`` or ``"method2"`` — force integration variant.
+   * - ``body_velocity_blend_eps_cells``
+     - float
+     - *null*
+     - Width (in grid cells) of the smooth SDF-weighted velocity blend in
+       the overlap band between articulated links. ``null`` / ``0`` keeps the
+       legacy running-min winner-take-all (hard velocity switch at seams,
+       which can destabilise the coupling for overlapping links, e.g.
+       ``convexify=True``). ``2.0`` matches the BDIM kernel half-width and is
+       recommended. See :ref:`velocity-blend`.
 
 
 ``boundary_conditions`` — Velocity BCs
@@ -378,30 +427,23 @@ Supported body types
    * - ``type`` value
      - Class
      - Description
-   * - ``analytical``
-     - :class:`~lilytorch.src.body.BodyAnalytical`
-     - Single analytical shape (circle, box, capsule, segment).
    * - ``composite_analytical``
      - :class:`~lilytorch.src.body.CompositeBodyAnalytical`
-     - Union of analytical shapes.
-   * - ``mesh``
-     - :class:`~lilytorch.src.body.BodyMesh`
-     - Single 3-D mesh (STL/OBJ).
+     - Union of analytical shapes (circle, box, capsule, segment, NACA
+       fish spine, ...). The only user-facing analytical body type.
    * - ``composite_mesh``
      - :class:`~lilytorch.src.body.CompositeBodyMesh`
-     - Union of 3-D meshes.
-   * - ``multi_animat``
-     - :class:`~lilytorch.src.body.MultiAnimatBodies`
-     - Multiple swimming animats.
-   * - ``fish_analytical``
-     - :class:`~lilytorch.src.body.BodyFishAnalytical`
-     - NACA-foil fish with analytical spine.
-   * - ``fish_experimental``
-     - :class:`~lilytorch.src.body.BodyFishExperimental`
-     - Fish with experimental kinematics replay.
-   * - ``composite_segment_body``
-     - :class:`~lilytorch.src.body.CompositeSegmentBody`
-     - Articulated segment chain.
+     - Union of 3-D meshes (STL / OBJ). The only user-facing mesh body
+       type.
+
+.. note::
+
+   Direct (non-composite) body types — ``analytical``, ``mesh``,
+   ``fish_analytical``, ``fish_experimental``, ``multi_animat``,
+   ``composite_segment_body`` — were removed from
+   :func:`~lilytorch.src.body.body_from_yaml`. The underlying classes
+   still exist as internal building blocks used by the two composite
+   wrappers above and by the FARMS coupling layer.
 
 Analytical-specific keys
 ^^^^^^^^^^^^^^^^^^^^^^^^^

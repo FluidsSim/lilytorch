@@ -86,9 +86,11 @@ A few top-level scripts profile the solver in isolation:
 
    python run_compile_advdiff_bench.py     # advection–diffusion micro-bench
    python run_compile_smoother_bench.py    # Poisson smoother micro-bench
-   python run_cost_analysis_3d.py          # end-to-end cost sweep
    python run_memory_profile_free_3d.py    # peak GPU memory vs. grid size
    python run_poisson_comparison_3d.py     # FFT vs. multigrid vs. MGCG
+
+   # End-to-end per-stage cost sweep (3-D free-swimming)
+   python lilytorch/validation/cost_analysis_free_swimming_3d/run_cost_analysis.py
 
 All of them import ``FluidSolver`` only; no MuJoCo / FARMS is needed.
 
