@@ -813,7 +813,7 @@ class Body:
     def mu_funcs_batched(self, d):
         """Heaviside mu_0 and mu_1 — works on any shape (including batched).
 
-        Narrow-band optimised: sin/cos are only evaluated where |d| < eps,
+        Narrow-band optimised: sin/cos are only evaluated where ``|d|`` < eps,
         which is typically < 5 % of the grid, giving a large speedup.
 
         Parameters
@@ -850,7 +850,7 @@ class Body:
 
 
     def mu_funcs(self, d):
-        """Narrow-band optimised: sin/cos only where |d| < eps."""
+        """Narrow-band optimised: sin/cos only where ``|d|`` < eps."""
         eps = self.eps
         mu_0 = (d >= 0).to(d.dtype)
         mu_1 = torch.zeros_like(d)
@@ -1847,11 +1847,14 @@ class BodyMesh(Body):
     def resample_closed_contour(self, points, spacing, keep_duplicate_endpoint=True):
         """
         Resample a closed contour for (approximately) uniform spacing.
+
         - points: (M,2) numpy array of (x,y). Can be closed (first==last) or open; treated as closed.
         - spacing: desired spacing between resampled points (float > 0).
-        - keep_duplicate_endpoint: if True, return N+1 points with last == first (explicit closure).
-                                if False, return N points (no duplicate at end).
+        - keep_duplicate_endpoint: if True, return N+1 points with last == first
+          (explicit closure); if False, return N points (no duplicate at end).
+
         Returns:
+
         - new_pts: (N+1,2) or (N,2) array of resampled points.
         - actual_spacing: total_length / N  (the spacing actually used)
         """

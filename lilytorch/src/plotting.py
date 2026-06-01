@@ -110,8 +110,10 @@ def build_body_mu0_rgba(
     Where multiple bodies overlap, the deepest (smallest SDF) wins.
 
     SDF source priority (per body *bi*):
-      1. ``sdf_vals[bi]``  – batched tensor from ``comp.sdf_vals``
-      2. ``body.sdf_val``  – set by ``BodyAnalytical.update()``
+
+    1. ``sdf_vals[bi]``  – batched tensor from ``comp.sdf_vals``
+    2. ``body.sdf_val``  – set by ``BodyAnalytical.update()``
+
     If neither is available the body is skipped.
 
     Parameters
@@ -565,7 +567,7 @@ def plot_field_3d(
 
     For fields that contain both positive and negative values (e.g. vorticity
     component, pressure), dual ±threshold isosurfaces are drawn (red/blue).
-    For non-negative fields (e.g. |curl| magnitude), a single isosurface is
+    For non-negative fields (e.g. ``|curl|`` magnitude), a single isosurface is
     drawn at `threshold` coloured by value.
 
     ``crop_boundary`` removes cells from each face so that zero-padded
@@ -575,7 +577,7 @@ def plot_field_3d(
     Threshold strategy
     ------------------
     Vorticity fields from backward-difference stencils are dominated by
-    near-zero noise: the 85th-percentile of |ω| can be 100,000× smaller
+    near-zero noise: the 85th-percentile of ``|ω|`` can be 100,000× smaller
     than the peak.  A percentile-based threshold would trace isosurfaces
     through this noise.  Instead we use a **fraction of the peak amplitude**
     of the *smoothed* field (default 15 %).  This cleanly selects the

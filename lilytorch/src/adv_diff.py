@@ -854,8 +854,10 @@ class AdvDiffSolver:
     def set_BCs(self, *vel):
         """Apply Dirichlet / Neumann BCs on the ghost layer.
 
-        Face ordering per component:
+        Face ordering per component::
+
             (dim0_lo, dim0_hi, dim1_lo, dim1_hi, [dim2_lo, dim2_hi])
+
         i.e. (west, east, south, north, [bottom, top]) in 3-D.
 
         With all-CUDA, contiguous, same-floating-dtype velocity tensors

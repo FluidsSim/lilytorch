@@ -598,11 +598,14 @@ def forces_method2_3d(self, u, v, w, p, iteration):
     Uses the same smoothed-delta volume-integration approach as the 2-D
     ``forces_method2`` but extended to three dimensions:
 
-    Viscous force:
+    Viscous force::
+
         F_visc = ∫ (σ · n) δ_ε(d - ε) dV
+
     where σ_{ij} = ν ρ (∂u_i/∂x_j + ∂u_j/∂x_i) is the viscous stress.
 
-    Pressure force:
+    Pressure force::
+
         F_pres = -∫ p n δ_ε(d) dV
 
     Torques are computed about each body's centre of mass via r × f.

@@ -8,7 +8,8 @@ All simulation-specific hyperparameters are read from the ``bdim_yaml``
 config dict, so a single class covers every animat (1guilla, pleurodeles,
 zebrafish, salamander, ...).
 
-New config keys (add to ``bdim_yaml``):
+New config keys (add to ``bdim_yaml``)::
+
     solver.dtype                 : "float32" | "float64"   (default "float32")
     solver.rho_body              : float                   (default 800.0)
     solver.zero_pressure_inside  : bool                    (default False)

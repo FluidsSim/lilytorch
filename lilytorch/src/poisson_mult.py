@@ -1231,7 +1231,7 @@ class PoissonSolver:
           with a guaranteed residual reduction at every step.
 
         Parameters  (identical to ``solve_multigrid``)
-        ----------
+        ----------------------------------------------
         f  : RHS on the interior grid  (no ghost cells)
         p0 : initial guess (with ghost cells)
         ch, cv[, cw] : pre-computed face-averaged coefficients

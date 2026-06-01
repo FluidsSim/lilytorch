@@ -3,6 +3,7 @@ FlowViewer – render a fluid field (e.g. omega_z) as coloured spheres
 directly inside the MuJoCo viewer **and** in the recorded video.
 
 Spheres are injected into both:
+
 - the interactive viewer's ``user_scn`` (visible in the MuJoCo GUI), and
 - the ``CameraRecording`` extension's offscreen renderer (visible in the
   saved MP4 video).

@@ -8,6 +8,7 @@ using RK2 (Heun's method), and optionally dispersed with a stochastic
 turbulent diffusivity model.
 
 Spheres are injected into both:
+
 - the interactive viewer's ``user_scn`` (visible in the MuJoCo GUI), and
 - the ``CameraRecording`` extension's offscreen renderer (visible in the
   saved MP4 video).

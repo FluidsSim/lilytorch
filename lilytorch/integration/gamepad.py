@@ -6,53 +6,54 @@ Uses PySDL2 for cross-platform gamepad support with better documentation.
 Differences between gamepads should have been handled by SDL2.
 Below are tables just for referencing.
 
-GAMEPAD BUTTON/AXIS MAPPING REFERENCE (PySDL2):
-===============================================
+GAMEPAD BUTTON/AXIS MAPPING REFERENCE (PySDL2)::
 
-PySDL2 Documentation: https://pysdl2.readthedocs.io/
-ROS2 joy (using SDL2) documentation: https://docs.ros.org/en/rolling/p/joy/
-SDL gamepad tool (can print mapping): https://generalarcade.com/gamepadtool/
-SDL2 GameController API provides standardized mapping across all platforms.
-Linux joystick: jstest & jstest-gtk (with GUI)
+   ===============================================
 
-Axes (SDL_GameController):
------------------------------------
-Component          | Xbox Name | PS4 Name   | SDL2 Axis        | Value (SDL2)                           | Linux js# | Linux event | Value (Linux js)
--------------------|-----------|----------- |------------------|----------------------------------------|-----------|-------------|------
-Left Stick X       | LS X      | L3 X       | 0: LEFTX         | -32768 (up/left) to 32767 (down/right) | Axis 0    | ABS_X       | -32767 (left) to 32767 (right)
-Left Stick Y       | LS Y      | L3 Y       | 1: LEFTY         | -32768 (up/left) to 32767 (down/right) | Axis 1    | ABS_Y       | -32767 (up)   to 32767 (down)
-Right Stick X      | RS X      | R3 X       | 3: RIGHTX        | -32768 (up/left) to 32767 (down/right) | Axis 3    | ABS_RX      | -32767 (left) to 32767 (right)
-Right Stick Y      | RS Y      | R3 Y       | 4: RIGHTY        | -32768 (up/left) to 32767 (down/right) | Axis 4    | ABS_RY      | -32767 (up)   to 32767 (down)
-Left Trigger       | LT        | L2         | 2: TRIGGERLEFT   | 0 (released) to 32767 (fully pressed)  | Axis 2    | ABS_Z       | -32767 (home) to 32767 (pressed)
-Right Trigger      | RT        | R2         | 5: TRIGGERRIGHT  | 0 (released) to 32767 (fully pressed)  | Axis 5    | ABS_RZ      | -32767 (home) to 32767 (pressed)
+   PySDL2 Documentation: https://pysdl2.readthedocs.io/
+   ROS2 joy (using SDL2) documentation: https://docs.ros.org/en/rolling/p/joy/
+   SDL gamepad tool (can print mapping): https://generalarcade.com/gamepadtool/
+   SDL2 GameController API provides standardized mapping across all platforms.
+   Linux joystick: jstest & jstest-gtk (with GUI)
 
-Buttons (SDL_GameController):
-----------------------------------
-Component          | Xbox Name | PS4 Name   | SDL2 Button      | Value (SDL2) | Linux js# | Linux event | Value
--------------------|-----------|------------|------------------|--------------|-----------|-------------|------
-Bottom Button      | A         | Cross (X)  | 0: A             | 0/1          | Button 0  | BTN_A       | 0/1
-Right Button       | B         | Circle (O) | 1: B             | 0/1          | Button 1  | BTN_B       | 0/1
-Left Button        | X         | Square     | 3: X             | 0/1          | Button 3  | BTN_Y       | 0/1
-Top Button         | Y         | Triangle   | 2: Y             | 0/1          | Button 2  | BTN_X       | 0/1
-Left Shoulder      | LB        | L1         | 4: LEFTSHOULDER  | 0/1          | Button 4  | BTN_TL      | 0/1
-Right Shoulder     | RB        | R1         | 5: RIGHTSHOULDER | 0/1          | Button 5  | BTN_TR      | 0/1
-Back/Select (left) | View      | Share      | 8: BACK          | 0/1          | Button 8  | BTN_SELECT  | 0/1
-Start/Menu (right) | Menu      | Options    | 9: START         | 0/1          | Button 9  | BTN_START   | 0/1
-Guide (middle)     | XBOX      | PS         | 10: GUIDE        | 0/1          | Button 10 | BTN_MODE    | 0/1
-Left Stick Click   | LS        | L3         | 11: LEFTSTICK    | 0/1          | Button 11 | BTN_THUMBL  | 0/1
-Right Stick Click  | RS        | R3         | 12: RIGHTSTICK   | 0/1          | Button 12 | BTN_THUMBR  | 0/1
-?                  | ?         | N/A        | ?                | 0/1          | Button 6  | BTN_TL2     | 0/1
-?                  | ?         | N/A        | ?                | 0/1          | Button 7  | BTN_TR2     | 0/1
-D-Pad Up           | D-Up      | D-Up       | h0.1: DPAD_UP    | 0/1          | Axis 7- (PS4) / Button 13   | ABS_HAT0Y (PS4) / BTN_DPAD_*  | 0/-32767 (PS4) / 0/1
-D-Pad Down         | D-Down    | D-Down     | h0.4: DPAD_DOWN  | 0/1          | Axis 7+ (PS4) / Button 14   | ABS_HAT0Y (PS4) / BTN_DPAD_*  | 0/ 32767 (PS4) / 0/1
-D-Pad Left         | D-Left    | D-Left     | h0.8: DPAD_LEFT  | 0/1          | Axis 6- (PS4) / Button 15   | ABS_HAT0X (PS4) / BTN_DPAD_*  | 0/-32767 (PS4) / 0/1
-D-Pad Right        | D-Right   | D-Right    | h0.2: DPAD_RIGHT | 0/1          | Axis 6+ (PS4) / Button 16   | ABS_HAT0X (PS4) / BTN_DPAD_*  | 0/ 32767 (PS4) / 0/1
+   Axes (SDL_GameController):
+   -----------------------------------
+   Component          | Xbox Name | PS4 Name   | SDL2 Axis        | Value (SDL2)                           | Linux js# | Linux event | Value (Linux js)
+   -------------------|-----------|----------- |------------------|----------------------------------------|-----------|-------------|------
+   Left Stick X       | LS X      | L3 X       | 0: LEFTX         | -32768 (up/left) to 32767 (down/right) | Axis 0    | ABS_X       | -32767 (left) to 32767 (right)
+   Left Stick Y       | LS Y      | L3 Y       | 1: LEFTY         | -32768 (up/left) to 32767 (down/right) | Axis 1    | ABS_Y       | -32767 (up)   to 32767 (down)
+   Right Stick X      | RS X      | R3 X       | 3: RIGHTX        | -32768 (up/left) to 32767 (down/right) | Axis 3    | ABS_RX      | -32767 (left) to 32767 (right)
+   Right Stick Y      | RS Y      | R3 Y       | 4: RIGHTY        | -32768 (up/left) to 32767 (down/right) | Axis 4    | ABS_RY      | -32767 (up)   to 32767 (down)
+   Left Trigger       | LT        | L2         | 2: TRIGGERLEFT   | 0 (released) to 32767 (fully pressed)  | Axis 2    | ABS_Z       | -32767 (home) to 32767 (pressed)
+   Right Trigger      | RT        | R2         | 5: TRIGGERRIGHT  | 0 (released) to 32767 (fully pressed)  | Axis 5    | ABS_RZ      | -32767 (home) to 32767 (pressed)
 
-* PS4 controller mapping checked with jstest and gamepad tool. XBOX and other controllers assumed to follow SDL2 standard.
+   Buttons (SDL_GameController):
+   ----------------------------------
+   Component          | Xbox Name | PS4 Name   | SDL2 Button      | Value (SDL2) | Linux js# | Linux event | Value
+   -------------------|-----------|------------|------------------|--------------|-----------|-------------|------
+   Bottom Button      | A         | Cross (X)  | 0: A             | 0/1          | Button 0  | BTN_A       | 0/1
+   Right Button       | B         | Circle (O) | 1: B             | 0/1          | Button 1  | BTN_B       | 0/1
+   Left Button        | X         | Square     | 3: X             | 0/1          | Button 3  | BTN_Y       | 0/1
+   Top Button         | Y         | Triangle   | 2: Y             | 0/1          | Button 2  | BTN_X       | 0/1
+   Left Shoulder      | LB        | L1         | 4: LEFTSHOULDER  | 0/1          | Button 4  | BTN_TL      | 0/1
+   Right Shoulder     | RB        | R1         | 5: RIGHTSHOULDER | 0/1          | Button 5  | BTN_TR      | 0/1
+   Back/Select (left) | View      | Share      | 8: BACK          | 0/1          | Button 8  | BTN_SELECT  | 0/1
+   Start/Menu (right) | Menu      | Options    | 9: START         | 0/1          | Button 9  | BTN_START   | 0/1
+   Guide (middle)     | XBOX      | PS         | 10: GUIDE        | 0/1          | Button 10 | BTN_MODE    | 0/1
+   Left Stick Click   | LS        | L3         | 11: LEFTSTICK    | 0/1          | Button 11 | BTN_THUMBL  | 0/1
+   Right Stick Click  | RS        | R3         | 12: RIGHTSTICK   | 0/1          | Button 12 | BTN_THUMBR  | 0/1
+   ?                  | ?         | N/A        | ?                | 0/1          | Button 6  | BTN_TL2     | 0/1
+   ?                  | ?         | N/A        | ?                | 0/1          | Button 7  | BTN_TR2     | 0/1
+   D-Pad Up           | D-Up      | D-Up       | h0.1: DPAD_UP    | 0/1          | Axis 7- (PS4) / Button 13   | ABS_HAT0Y (PS4) / BTN_DPAD_*  | 0/-32767 (PS4) / 0/1
+   D-Pad Down         | D-Down    | D-Down     | h0.4: DPAD_DOWN  | 0/1          | Axis 7+ (PS4) / Button 14   | ABS_HAT0Y (PS4) / BTN_DPAD_*  | 0/ 32767 (PS4) / 0/1
+   D-Pad Left         | D-Left    | D-Left     | h0.8: DPAD_LEFT  | 0/1          | Axis 6- (PS4) / Button 15   | ABS_HAT0X (PS4) / BTN_DPAD_*  | 0/-32767 (PS4) / 0/1
+   D-Pad Right        | D-Right   | D-Right    | h0.2: DPAD_RIGHT | 0/1          | Axis 6+ (PS4) / Button 16   | ABS_HAT0X (PS4) / BTN_DPAD_*  | 0/ 32767 (PS4) / 0/1
 
-LINUX TESTING COMMANDS:
------------------------
-- `jstest /dev/input/js0` - Test joystick functionality
+   * PS4 controller mapping checked with jstest and gamepad tool. XBOX and other controllers assumed to follow SDL2 standard.
+
+   LINUX TESTING COMMANDS:
+   -----------------------
+   - `jstest /dev/input/js0` - Test joystick functionality
 """
 
 try:
@@ -474,7 +475,8 @@ class GamepadHandler:
                 - SDL_CONTROLLERAXISMOTION: event.caxis has axis, value, timestamp
                 - SDL_CONTROLLERDEVICEADDED/REMOVED: device connection changes
 
-        Example:
+        Example::
+
             for event in handler.update_events():
                 event_name = handler.state.EVENT_NAMES.get(event.type)
                 if event_name == 'button_down':

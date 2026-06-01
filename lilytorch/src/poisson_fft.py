@@ -368,7 +368,7 @@ class PoissonSolverFFT:
         r"""Solve  :math:`\nabla^2\varphi = u`.
 
         Dispatches to the free-space or Neumann implementation depending
-        on :pyattr:`bc_type`.
+        on :attr:`bc_type`.
 
         Parameters
         ----------

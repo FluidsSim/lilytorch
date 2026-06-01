@@ -119,7 +119,7 @@ def vorticity(u, v, h, ndim, w=None):
     """
     Compute vorticity.
     2-D: scalar  omega = dv/dx - du/dy
-    3-D: magnitude |ω| = sqrt(ωx² + ωy² + ωz²)
+    3-D: magnitude ``|ω|`` = sqrt(ωx² + ωy² + ωz²)
     """
     inv_h = _recip(h)
     if ndim == 2 or w is None:
@@ -183,7 +183,7 @@ def vorticity_components(u, v, w, h):
 # Strain-rate magnitude and Smagorinsky eddy viscosity
 # ------------------------------------------------------------------
 def strain_rate_magnitude(vel, h, ndim):
-    """Compute |S̄| = sqrt(2 * S_ij * S_ij) on the cell-centred grid.
+    """Compute ``|S̄|`` = sqrt(2 * S_ij * S_ij) on the cell-centred grid.
 
     Parameters
     ----------
@@ -193,7 +193,7 @@ def strain_rate_magnitude(vel, h, ndim):
 
     Returns
     -------
-    |S̄| tensor with same shape as vel[0].  Ghost cells are zero.
+    ``|S̄|`` tensor with same shape as vel[0].  Ghost cells are zero.
     """
     if ndim == 2:
         u, v = vel
@@ -225,7 +225,7 @@ def strain_rate_magnitude(vel, h, ndim):
 
 
 def smagorinsky_viscosity(vel, h, ndim, cs=0.1):
-    """Compute the Smagorinsky eddy viscosity  ν_t = (Cs·Δ)² |S̄|.
+    """Compute the Smagorinsky eddy viscosity  ν_t = (Cs·Δ)² ``|S̄|``.
 
     Parameters
     ----------

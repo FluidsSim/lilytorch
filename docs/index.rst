@@ -57,6 +57,7 @@ Key features
    mathematical_formulation
    numerical_schemes
    immersed_boundary
+   strong_coupling
 
 .. toctree::
    :maxdepth: 2

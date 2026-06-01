@@ -171,6 +171,56 @@ self.sponge = {
 | `particle_viewer.py`, `native_body_colors.py`, `camera.py` | Viewer extras — Lagrangian particle-tracer overlay, per-body colouring, camera controllers. |
 | `gamepad.py` | Optional interactive gamepad controller (incl. paddling mode) for steering coupled simulations live. |
 | `gen_pool_sdf.py` | Generates SDF XML files defining rectangular pool arenas with collision walls for MuJoCo. |
+| `fsi_coupling.py` | preCICE-style interface accelerators for strong (implicit) FSI coupling: `ConstantUnderRelaxation`, `AitkenRelaxation`, `IQNILS` (quasi-Newton). |
+| `strong_coupling.py` | `StrongCoupledFSI` driver + `FluidSolverAdapter` for the standalone implicit path; `BDIMhandler` hosts the coupled (FARMS) implicit step. |
+
+### Strong (implicit) FSI coupling
+
+By default the fluid↔body coupling is **explicit** (weakly partitioned):
+the fluid advances once, the loads are pushed to the body, MuJoCo
+integrates. This is unstable when the displaced-fluid (added) mass is
+comparable to or larger than the body mass — i.e. light / neutrally-buoyant
+bodies in water — and is the reason the explicit path needs
+`force_relaxation` < 1 as a band-aid.
+
+An opt-in **strongly coupled (implicit)** scheme sub-iterates each step to a
+converged fixed point using a quasi-Newton accelerator (IQN-ILS, the preCICE
+workhorse), which is stable independent of the mass ratio. Enable it per
+simulation via a `coupling` block in the `body` section of the `bdim_yaml`:
+
+```yaml
+body:
+  coupling:
+    scheme: implicit        # "explicit" (default) | "implicit"
+    accelerator: iqn-ils    # iqn-ils | aitken | constant
+    reuse: 2                # IQN-ILS time-windows reused (0 disables)
+    tol: 1.0e-4             # relative interface-residual tolerance
+    max_iter: 30            # max coupling sweeps per step
+```
+
+For a `BaseSimConfig` swimmer set the attribute instead:
+
+```python
+self.coupling = {"scheme": "implicit", "accelerator": "iqn-ils",
+                 "reuse": 2, "tol": 1e-4, "max_iter": 30}
+```
+
+Notes:
+
+- `scheme: explicit` (or omitting `coupling`) keeps the default behaviour;
+  `force_relaxation` is ignored in implicit mode.
+- Cost is ~`N` fluid solves per step (`N` = sweeps, typically 2–4 after
+  warm-up), so implicit runs ~2× slower than explicit on a stable case but
+  stays stable where explicit diverges.
+- Requires `cb_sub_steps = 1`. Works with `poisson_method: fft` or
+  `multigrid`.
+- The body's morphology `density` (in its `.yaml`) must exceed the fluid
+  `rho` for it to sink; it should match the solver `rho_body`.
+
+See the [Strong (implicit) FSI coupling](docs/strong_coupling.rst)
+documentation for the theory and equations, and
+`lilytorch/integration/demo_real_fsi.py` for a runnable standalone demo
+(a light circle where explicit diverges and IQN-ILS converges).
 
 ### Utilities (`lilytorch/util/`)
 
