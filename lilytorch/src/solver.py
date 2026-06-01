@@ -1256,46 +1256,34 @@ class FluidSolver(PlottingMixin):
                     v     = v - cv * p_y
                     w_vel = w_vel - cw * p_z
             else:
-                # Constant-density fallback: single scalar coefficient.
-                # If ch was provided as a scalar, use it (backward compat).
-                # If ch is a face-grid tensor (kernel mode), fall back to
-                # the scalar coeff for the Poisson RHS and apply in-place
-                # face-grid correction (same logic as the multigrid path).
-                _face_grid_fft = (ch is not None
-                                  and isinstance(ch, torch.Tensor)
-                                  and ch.shape[0] < u.shape[0])
-                fft_coeff = coeff if (ch is None or _face_grid_fft) else ch
-                # With bdim_mu0_projection=True, fft_coeff can be 0 inside
-                # the body (mu0=0). The straight division self.div /
-                # fft_coeff then yields 0/0 = NaN there, corrupting the
-                # FFT solve. Mask body-decoupled cells (RHS=0); FFT
-                # produces a harmonic extension and the subsequent
-                # correction multiplies by fft_coeff=0 inside the body,
-                # so u_new equals u_star = u_body there as intended.
-                if isinstance(fft_coeff, torch.Tensor):
-                    _body_decoupled = (fft_coeff <= 0)
-                    _safe = torch.where(_body_decoupled,
-                                        torch.ones_like(fft_coeff), fft_coeff)
-                    _rhs = torch.where(_body_decoupled,
-                                       torch.zeros_like(self.div),
-                                       self.div / _safe)
-                else:
-                    _rhs = self.div / fft_coeff
+                # FFT with a BOUNDED RHS divisor + (optional) mu0-weighted
+                # correction.  The FFT solves a CONSTANT-coefficient Poisson,
+                # so its RHS divisor must stay bounded.  When ch/cv/cw are
+                # mu0-weighted tensors (BDIM2; kernel mode passes ``_ch_persist``)
+                # they vanish in the immersed-body band — using them as the RHS
+                # divisor makes ``div/ch`` singular there -> the f650945
+                # explosion.  So the RHS uses the bounded scalar
+                # ``coeff = w*dt/rho``; the mu0-weighted ch/cv/cw are applied
+                # only in the velocity correction, so it still vanishes inside
+                # the body (mu0=0) and preserves the imposed no-slip velocity.
+                # A scalar ``ch`` (backward compat / truly constant density) is
+                # used directly for both RHS and correction.
+                _ch_tensor = isinstance(ch, torch.Tensor)
+                _rhs_coeff = ch if (ch is not None and not _ch_tensor) else coeff
+                _rhs = self.div / _rhs_coeff
                 p = self.poisson_solverFFT.solve(_rhs)
+                _cu = ch if _ch_tensor else _rhs_coeff
+                _cv = cv if isinstance(cv, torch.Tensor) else _rhs_coeff
                 if self.ndim == 2:
                     (p_x, p_y) = self.gradient(p)
-                    u = u - fft_coeff * p_x
-                    v = v - fft_coeff * p_y
+                    u = u - _cu * p_x
+                    v = v - _cv * p_y
                 else:
                     (p_x, p_y, p_z) = self.gradient(p)
-                    if _face_grid_fft:
-                        u[1:, 1:-1, 1:-1]     -= ch * p_x[1:, 1:-1, 1:-1]
-                        v[1:-1, 1:, 1:-1]     -= cv * p_y[1:-1, 1:, 1:-1]
-                        w_vel[1:-1, 1:-1, 1:] -= cw * p_z[1:-1, 1:-1, 1:]
-                    else:
-                        u     = u - fft_coeff * p_x
-                        v     = v - fft_coeff * p_y
-                        w_vel = w_vel - fft_coeff * p_z
+                    _cw = cw if isinstance(cw, torch.Tensor) else _rhs_coeff
+                    u     = u - _cu * p_x
+                    v     = v - _cv * p_y
+                    w_vel = w_vel - _cw * p_z
         else:
             # ---- Multigrid / MGCG solver (variable-coefficient Poisson) ----
             has_custom_coeffs = any(arr is not None for arr in (ch, cv, cw))
@@ -1900,6 +1888,14 @@ class FluidSolver(PlottingMixin):
         _drho   = float(self.rho) - self.rho_body
         # mu0-weighted (BDIM2) numerator vs plain dt/rho_eff — see the
         # ``bdim_mu0_projection`` flag set in __init__.
+        #
+        # The cell-centred ``ch_cc`` (FFT-Poisson RHS divisor) must stay
+        # BOUNDED: the constant-coefficient FFT solver divides by it
+        # (``div / ch_cc``), and a mu0 factor drives ``ch_cc -> 0`` in the
+        # BDIM band -> singular -> the f650945 explosion.  So ch_cc omits mu0.
+        # The staggered correction coefficients (faces) KEEP mu0 so the
+        # velocity correction vanishes inside the body (mu0=0) and preserves
+        # the imposed no-slip body velocity.  ``_cc_no_mu0`` marks the cc grid.
         _mu0w   = self.bdim_mu0_projection
         axes    = self._bdim_axis_names
         # All D+1 grids ([u, v, [w,] cc]) share the same shape in this
@@ -1949,23 +1945,30 @@ class FluidSolver(PlottingMixin):
                     _rho_b     = _winning[usl]
                     for name, mu in zip(face_names + (cc_name,), mu_grids):
                         mu_sub = mu[usl]
+                        _num = timestep if (name == cc_name or not _mu0w) else timestep * mu_sub
                         getattr(self, name)[usl] = (
-                            (timestep * mu_sub if _mu0w else timestep)
+                            _num
                             / (_rho_b * (1 - mu_sub) + _rho_fluid * mu_sub)
                         )
                 else:
                     for name, mu in zip(face_names + (cc_name,), mu_grids):
+                        _num = timestep if (name == cc_name or not _mu0w) else timestep * mu[usl]
                         getattr(self, name)[usl] = (
-                            (timestep * mu[usl] if _mu0w else timestep)
-                            / (self.rho_body + _drho * mu[usl])
+                            _num / (self.rho_body + _drho * mu[usl])
                         )
 
                 return (*(getattr(self, n) for n in face_names),
                         getattr(self, cc_name))
 
         # ---- full-grid fallback ----------------------------------------
-        return tuple((timestep * mu if _mu0w else timestep)
-                     / (self.rho_body + _drho * mu) for mu in mu_grids)
+        # cc grid (FFT RHS, last element) omits mu0 so ch_cc stays bounded;
+        # the correction faces keep mu0 (preserve no-slip body velocity).
+        out = []
+        for i, mu in enumerate(mu_grids):
+            is_cc = (i == len(mu_grids) - 1)
+            _num = timestep if (is_cc or not _mu0w) else timestep * mu
+            out.append(_num / (self.rho_body + _drho * mu))
+        return tuple(out)
 
     # ------------------------------------------------------------------
     #   Phase-I kernel-mode 3-D fluid step  (Kernel A + Kernel B)
