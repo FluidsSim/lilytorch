@@ -35,10 +35,18 @@ class SimConfig(BaseSimConfig):
         self.headless          = False
         self.poisson_method    = "multigrid"
 
-        self.zero_pressure_inside = True
         self.force_method         = "lagrangian"
         self.sdf_interp_method    = "triquadratic"
         # self.force_delta_order = 2
+        self.convexify                     = False
+        self.zero_pressure_inside          = False
+        self.body_velocity_blend_eps_cells = 2
+        self.bdim_mu0_projection           = False
+        self.bdim_body_div_correction      = True
+
+        # self.force_relaxation              = 0.3
+        # self.body_velocity_blend_eps_cells = 2
+
 
         # self.apply_bdim_sigma = True
 
@@ -115,7 +123,6 @@ class SimConfig(BaseSimConfig):
         self.bc_values_w = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
           # Body
-        self.convexify             = False
         self.contour_mask          = False
         self.interp_data_subfolder = "interp_data_3d"
 

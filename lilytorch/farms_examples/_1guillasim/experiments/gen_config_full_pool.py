@@ -21,11 +21,13 @@ class SimConfig(BaseSimConfig):
         self.use_bdim                      = True
         self.compute_sdf                   = True
         self.convexify                     = True
-        self.force_method                  = "lagrangian"
-        self.zero_pressure_inside          = False
+        self.force_method                  = "eulerian"
+        self.zero_pressure_inside          = True
         # self.force_relaxation              = 0.3
-        self.body_velocity_blend_eps_cells = 0
+        self.body_velocity_blend_eps_cells = None
         self.bdim_mu0_projection           = False
+        self.convexify                     = True
+        self.bdim_body_div_correction      = True
 
         self.headless             = False
         self.smagorinsky_cs       = 0.

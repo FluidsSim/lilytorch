@@ -68,6 +68,7 @@ class SimConfig(BaseSimConfig):
         # self.force_relaxation     = 0.05
         self.zero_pressure_inside = False
         self.bdim_mu0_projection  = False
+        self.bdim_body_div_correction = True
         self.body_velocity_blend_eps_cells = 2
         # self.lagrangian_sample_offset = 2*(self.xmax - self.xmin) / self.Nx
 
@@ -86,7 +87,6 @@ class SimConfig(BaseSimConfig):
 
 
         # ── BDIM solver ──────────────────────────────────────────────
-        # self.convexify    = True
         self.bdim_dt      = self.timestep
         self.bdim_nt      = self.n_iterations
         self.rho_body     = 1000.0

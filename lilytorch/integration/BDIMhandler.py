@@ -1293,15 +1293,47 @@ class BDIMhandler:
         if self.force_method == "lagrangian":
             R_b_t   = torch.from_numpy(np.ascontiguousarray(body_R_np)).to(self.device)
             pos_b_t = torch.from_numpy(np.ascontiguousarray(body_pos_np)).to(self.device)
-            for b, body in enumerate(comp.bodies):
-                tcl = getattr(body, 'tri_centroid_local', None)
-                tnl = getattr(body, 'tri_normal_local', None)
-                if tcl is None or tnl is None:
-                    continue
-                tcl_d = tcl.to(dtype=self.dtype, device=self.device)
-                tnl_d = tnl.to(dtype=self.dtype, device=self.device)
-                body.tri_centroid_world = R_b_t[b] @ tcl_d + pos_b_t[b, :, None]
-                body.tri_normal_world   = R_b_t[b] @ tnl_d
+            # Batched world refresh of every triangle centroid + normal in a
+            # single ``bmm`` (see the 2-D ``cnt`` refresh).  Pack the static
+            # body-local triangulations once into flat (3, T_total) tensors
+            # with a per-triangle body index, then rotate(+translate) once.
+            pack = getattr(comp, '_lagr_tri_pack', None)
+            if pack is None:
+                cs, ns, idxs, offs, valid = [], [], [], [0], []
+                for b, body in enumerate(comp.bodies):
+                    tcl = getattr(body, 'tri_centroid_local', None)
+                    tnl = getattr(body, 'tri_normal_local', None)
+                    if tcl is None or tnl is None:
+                        offs.append(offs[-1]); valid.append(False); continue
+                    tcl_d = tcl.to(dtype=self.dtype, device=self.device)
+                    tnl_d = tnl.to(dtype=self.dtype, device=self.device)
+                    cs.append(tcl_d); ns.append(tnl_d)
+                    idxs.append(torch.full((tcl_d.shape[1],), b, dtype=torch.long, device=self.device))
+                    offs.append(offs[-1] + tcl_d.shape[1]); valid.append(True)
+                pack = {
+                    'cen':      torch.cat(cs, dim=1) if cs
+                                else torch.empty(3, 0, dtype=self.dtype, device=self.device),
+                    'nrm':      torch.cat(ns, dim=1) if ns
+                                else torch.empty(3, 0, dtype=self.dtype, device=self.device),
+                    'body_idx': torch.cat(idxs) if idxs
+                                else torch.empty(0, dtype=torch.long, device=self.device),
+                    'offs': offs, 'valid': valid,
+                }
+                comp._lagr_tri_pack = pack
+            cen = pack['cen']
+            if cen.shape[1] > 0:
+                nrm = pack['nrm']; body_idx = pack['body_idx']
+                offs = pack['offs']; valid = pack['valid']
+                Rm     = R_b_t.index_select(0, body_idx)                    # (T, 3, 3)
+                cw     = torch.bmm(Rm, cen.transpose(0, 1).unsqueeze(-1)).squeeze(-1) \
+                         + pos_b_t.index_select(0, body_idx)
+                nw     = torch.bmm(Rm, nrm.transpose(0, 1).unsqueeze(-1)).squeeze(-1)
+                cw_flat = cw.transpose(0, 1).contiguous()                   # (3, T)
+                nw_flat = nw.transpose(0, 1).contiguous()
+                for b, body in enumerate(comp.bodies):
+                    if valid[b]:
+                        body.tri_centroid_world = cw_flat[:, offs[b]:offs[b + 1]]
+                        body.tri_normal_world   = nw_flat[:, offs[b]:offs[b + 1]]
 
         # Vectorised AABB of the oriented body-SDF box in world space.
         abs_R_np     = np.abs(body_R_np)
@@ -1703,14 +1735,22 @@ class BDIMhandler:
         if self.force_method == "lagrangian":
             R_t       = torch.from_numpy(np.ascontiguousarray(R_link_np)).to(self.device)
             urdf_t    = torch.from_numpy(np.ascontiguousarray(urdf_pos_np)).to(self.device)
-            for b, body in enumerate(comp.bodies):
-                if body.cnt is None or body.cnt.numel() == 0:
-                    continue
-                # Ensure CCW orientation (kernel assumes CCW outward normal via
-                # ``nx = ty, ny = -tx``).  Mesh bodies' contour ordering depends
-                # on the source mesh and is often CW; analytical bodies are
-                # built CCW.  Check signed area once and cache per body.
-                if not hasattr(body, '_cnt_ccw_oriented'):
+            # Refresh every contour to world coords with a single batched
+            # ``bmm`` instead of B small per-body matmuls.  The body-local
+            # markers (CCW-oriented, dtype/device-cast) are packed once into
+            # a flat (2, M_total) tensor with a per-marker body index; per
+            # step we gather R per marker, rotate+translate in one launch,
+            # then hand each body a (cheap) view of its slice.
+            pack = getattr(comp, '_lagr_cnt_pack', None)
+            if pack is None:
+                locals_, idxs, offs, valid = [], [], [0], []
+                for b, body in enumerate(comp.bodies):
+                    if body.cnt is None or body.cnt.numel() == 0:
+                        offs.append(offs[-1]); valid.append(False); continue
+                    # Ensure CCW orientation (kernel assumes CCW outward
+                    # normal via ``nx = ty, ny = -tx``).  Mesh bodies' contour
+                    # ordering depends on the source mesh and is often CW;
+                    # analytical bodies are built CCW.  Check signed area once.
                     cl = body.cnt
                     dx = torch.roll(cl[0], -1) - cl[0]
                     dy = torch.roll(cl[1], -1) - cl[1]
@@ -1720,7 +1760,28 @@ class BDIMhandler:
                     if signed_area < 0:
                         body.cnt = body.cnt.flip(dims=[1]).contiguous()
                     body._cnt_ccw_oriented = True
-                body.cnt_update = R_t[b] @ body.cnt.to(self.dtype) + urdf_t[b, :, None]
+                    cl = body.cnt.to(dtype=self.dtype, device=self.device)
+                    locals_.append(cl)
+                    idxs.append(torch.full((cl.shape[1],), b, dtype=torch.long, device=self.device))
+                    offs.append(offs[-1] + cl.shape[1]); valid.append(True)
+                pack = {
+                    'local_flat': torch.cat(locals_, dim=1) if locals_
+                                  else torch.empty(2, 0, dtype=self.dtype, device=self.device),
+                    'body_idx':   torch.cat(idxs) if idxs
+                                  else torch.empty(0, dtype=torch.long, device=self.device),
+                    'offs': offs, 'valid': valid,
+                }
+                comp._lagr_cnt_pack = pack
+            local_flat = pack['local_flat']
+            if local_flat.shape[1] > 0:
+                body_idx = pack['body_idx']; offs = pack['offs']; valid = pack['valid']
+                Rm    = R_t.index_select(0, body_idx)                       # (M, 2, 2)
+                clq   = local_flat.transpose(0, 1).unsqueeze(-1)            # (M, 2, 1)
+                world = torch.bmm(Rm, clq).squeeze(-1) + urdf_t.index_select(0, body_idx)
+                world_flat = world.transpose(0, 1).contiguous()            # (2, M)
+                for b, body in enumerate(comp.bodies):
+                    if valid[b]:
+                        body.cnt_update = world_flat[:, offs[b]:offs[b + 1]]
 
         # body_pos = urdf_pos (local_lt = 0); body_R = R_link (local_lr = I)
         body_pos_np = urdf_pos_np

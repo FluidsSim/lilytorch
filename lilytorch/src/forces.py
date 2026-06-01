@@ -12,6 +12,8 @@ of ``solver.py`` -- they are NOT directly callable from this module's
 public API.  This keeps the public API of :class:`FluidSolver` unchanged
 while moving ~1500 LoC of force code out of ``solver.py``.
 """
+import math
+
 import torch
 
 from lilytorch.src import operations as ops
@@ -954,6 +956,66 @@ def _viscous_stress_tensor(vels, h):
     return eps_ij
 
 
+def _marker_aabb_slab(coords_flat, axes, sample_offset, inv_h, halo_extra=5):
+    """Grid-index slab tightly enclosing all surface markers (+ halo).
+
+    The Lagrangian force kernels only sample the strain-rate / pressure
+    fields at a body's surface markers, yet the legacy path built those
+    fields over the *whole* domain every step (the dominant cost).  This
+    helper returns the index window that the marker sampling actually
+    touches so the caller can crop the (bandwidth-heavy) field build to a
+    small slab around the union of all bodies — mirroring how the
+    Eulerian streaming path crops to per-body AABBs.
+
+    Parameters
+    ----------
+    coords_flat : tensor ``(D, M_total)``
+        World-frame coordinates of every marker of every body, packed
+        along the marker axis (``cnt_flat`` in 2-D, ``tri_centroid`` in
+        3-D).
+    axes : tuple of ``D`` 1-D tensors
+        Cell-centred coordinate vectors (``comp.x, comp.y[, comp.z]``).
+    sample_offset : float
+        Outward normal sampling offset (world units); widens the slab.
+    inv_h : float
+        ``1 / h`` (uniform grid spacing).
+    halo_extra : int
+        Extra cells beyond the marker extent to keep every sampling /
+        strain stencil in the slab *interior*, so cropped field values
+        match the full-grid build exactly.  Covers the biquadratic
+        sampler (±1), the strain stencil (±2), and slack.
+
+    Returns
+    -------
+    list[tuple[int, int]] or None
+        Per-dimension ``(lo, hi)`` half-open index ranges, or ``None``
+        when there are no markers (caller falls back to the full grid).
+    """
+    D = coords_flat.shape[0]
+    M = coords_flat.shape[1]
+    if M == 0:
+        return None
+    # One host sync for the whole AABB (vs. a full-grid gradient build).
+    mn = coords_flat.amin(dim=1).tolist()
+    mx = coords_flat.amax(dim=1).tolist()
+    halo = int(math.ceil(abs(float(sample_offset)) * inv_h)) + int(halo_extra)
+    ranges = []
+    for d in range(D):
+        n = int(axes[d].numel())
+        a0 = float(axes[d][0])
+        lo = int(math.floor((mn[d] - a0) * inv_h)) - halo
+        hi = int(math.ceil((mx[d] - a0) * inv_h)) + halo + 1
+        if lo < 0:
+            lo = 0
+        if hi > n:
+            hi = n
+        # Too thin for the edge_order=2 strain stencil: bail to full grid.
+        if hi - lo < 3:
+            return None
+        ranges.append((lo, hi))
+    return ranges
+
+
 def _contour_normal_2d(cnt_update):
     """Outward unit normal at each 2-D contour point.
 
@@ -994,12 +1056,14 @@ def forces_lagrangian_2d(self, u, v, p, iteration):
     comp = self.composite_body
     B = len(comp.bodies)
     h = self.h
-    nu_rho = self._compute_nu_rho_for_forces(u, v)
-    eps_ij = _viscous_stress_tensor((u, v), h)
+    inv_dx = 1.0 / h; inv_dy = 1.0 / h
+    soff = float(self.lagrangian_sample_offset)
 
     # Pack per-body contours into a single (2, M_total) tensor with int64
     # offsets.  Skip degenerate bodies (M <= 1) by emitting an empty slice
-    # for them -- the kernel zeros their output row.
+    # for them -- the kernel zeros their output row.  ``cnt_update`` is
+    # already in the solver dtype/device (refreshed each step by the
+    # BDIM handler), so ``.to`` is a no-op fast path here.
     cnts = []
     offs = [0]
     for body in comp.bodies:
@@ -1017,51 +1081,72 @@ def forces_lagrangian_2d(self, u, v, p, iteration):
         dim=0,
     ) if B > 0 else torch.empty(0, 2, dtype=p.dtype, device=p.device)
 
-    # nu_rho may be a Python float (constant viscosity) or a CC tensor.
-    if torch.is_tensor(nu_rho) and nu_rho.ndim == 2:
-        nu_rho_field = nu_rho
+    # ---- Crop the strain-rate / pressure build to the marker AABB -----
+    # The kernel only samples the fields at the surface markers, so build
+    # them on a small slab around the union of all contours instead of the
+    # whole domain (the dominant cost).  Field values in the slab interior
+    # match the full-grid build exactly (the halo keeps every sampling /
+    # strain stencil away from the slab edge), so results are unchanged.
+    nu_rho = self._compute_nu_rho_for_forces(u, v)
+    slab = _marker_aabb_slab(cnt_flat, (comp.x, comp.y), soff, inv_dx)
+    if slab is not None:
+        (i0, i1), (j0, j1) = slab
+        sl = (slice(i0, i1), slice(j0, j1))
+        eps_ij = _viscous_stress_tensor((u[sl].contiguous(), v[sl].contiguous()), h)
+        p_field = p[sl].contiguous()
+        bx0 = float(comp.x[i0]); by0 = float(comp.y[j0])
+        Mx = i1 - i0; My = j1 - j0
+        nu_rho_crop = sl
     else:
-        nu_rho_field = torch.tensor(
-            [float(nu_rho)], dtype=p.dtype, device=p.device)
+        eps_ij = _viscous_stress_tensor((u, v), h)
+        p_field = p
+        bx0 = float(comp.x[0]); by0 = float(comp.y[0])
+        Mx = int(comp.x.numel()); My = int(comp.y.numel())
+        nu_rho_crop = None
 
-    # Use comp.x/comp.y (always allocated 1-D coord vectors) instead of
-    # comp._grids — the staggered-grid bundle is skipped by kernel-mode
-    # MultiAnimatBodies as a memory optimisation (see body.py:_StaggeredGrids).
-    Mx = int(comp.x.numel())
-    My = int(comp.y.numel())
-    bx0 = float(comp.x[0]); by0 = float(comp.y[0])
-    inv_dx = 1.0 / h; inv_dy = 1.0 / h
+    # nu_rho may be a Python float / scalar (constant viscosity) or a CC
+    # tensor (variable viscosity).  Reuse a 1-element device buffer for
+    # the scalar case to avoid a per-step allocation.
+    if torch.is_tensor(nu_rho) and nu_rho.ndim == 2:
+        nu_rho_field = nu_rho[nu_rho_crop].contiguous() if nu_rho_crop is not None else nu_rho
+    else:
+        buf = getattr(self, '_lagr_nu_rho_buf_2d', None)
+        if buf is None:
+            buf = torch.empty(1, dtype=p.dtype, device=p.device)
+            self._lagr_nu_rho_buf_2d = buf
+        buf.fill_(float(nu_rho))
+        nu_rho_field = buf
 
-    out = _lagrangian_forces_2d_kernel(
+    # Persistent (B, 6) float64 output buffer (zeroed by the kernel).
+    out = getattr(self, '_lagr_out_buf_2d', None)
+    if out is None or out.shape[0] != B:
+        out = torch.zeros((B, 6), dtype=torch.float64, device=p.device)
+        self._lagr_out_buf_2d = out
+
+    _lagrangian_forces_2d_kernel(
         eps_ij[0][0], eps_ij[0][1], eps_ij[1][1],
-        p, nu_rho_field,
+        p_field, nu_rho_field,
         cnt_flat, cnt_offsets, com_pos,
         bx0, by0, inv_dx, inv_dy,
         Mx, My, method="linear",
-        sample_offset=float(self.lagrangian_sample_offset),
+        sample_offset=soff,
+        out=out,
     )
 
-    # Scatter the (B, 6) kernel output into the legacy per-body force
-    # caches and per-iteration records.
-    for bi in range(B):
-        fv_x = out[bi, 0].to(self.dtype)
-        fv_y = out[bi, 1].to(self.dtype)
-        tv_t = out[bi, 2].to(self.dtype)
-        fp_x = out[bi, 3].to(self.dtype)
-        fp_y = out[bi, 4].to(self.dtype)
-        tp_t = out[bi, 5].to(self.dtype)
+    # Vectorised scatter of the (B, 6) kernel output into the per-body
+    # force caches and per-iteration records (no Python per-body loop).
+    out_d = out.to(self.dtype)
+    self.friction_force_lin_x[:B] = out_d[:, 0]
+    self.friction_force_lin_y[:B] = out_d[:, 1]
+    self.friction_force_ang_z[:B] = out_d[:, 2]
+    self.pressure_force_x[:B]     = out_d[:, 3]
+    self.pressure_force_y[:B]     = out_d[:, 4]
+    self.pressure_force_ang_z[:B] = out_d[:, 5]
 
-        self.friction_force_lin_x[bi] = fv_x
-        self.friction_force_lin_y[bi] = fv_y
-        self.friction_force_ang_z[bi] = tv_t
-        self.pressure_force_x[bi]     = fp_x
-        self.pressure_force_y[bi]     = fp_y
-        self.pressure_force_ang_z[bi] = tp_t
-
-        self.viscous_drag_record[bi, 0, iteration]  = fv_x
-        self.viscous_drag_record[bi, 1, iteration]  = fv_y
-        self.pressure_drag_record[bi, 0, iteration] = fp_x
-        self.pressure_drag_record[bi, 1, iteration] = fp_y
+    self.viscous_drag_record[:B, 0, iteration]  = out_d[:, 0]
+    self.viscous_drag_record[:B, 1, iteration]  = out_d[:, 1]
+    self.pressure_drag_record[:B, 0, iteration] = out_d[:, 3]
+    self.pressure_drag_record[:B, 1, iteration] = out_d[:, 4]
 
     # Lagrangian path doesn't expose volumetric stress / pforce tensors.
     self.xstress_tensor = None
@@ -1189,8 +1274,8 @@ def forces_lagrangian_3d(self, u, v, w, p, iteration):
     comp = self.composite_body
     B = len(comp.bodies)
     h = self.h
-    nu_rho = self._compute_nu_rho_for_forces(u, v, w)
-    eps_ij = _viscous_stress_tensor((u, v, w), h)
+    inv_dx = 1.0 / h; inv_dy = 1.0 / h; inv_dz = 1.0 / h
+    soff = float(self.lagrangian_sample_offset)
 
     # Pack per-body triangulation into flat (3, T_total) / (T_total,)
     # tensors with int64 offsets.  Raise the same friendly error as the
@@ -1222,56 +1307,86 @@ def forces_lagrangian_3d(self, u, v, w, p, iteration):
         dim=0,
     ) if B > 0 else torch.empty(0, 3, dtype=p.dtype, device=p.device)
 
-    if torch.is_tensor(nu_rho) and nu_rho.ndim == 3:
-        nu_rho_field = nu_rho
+    # ---- Crop the strain-rate / pressure build to the triangle AABB ---
+    # See ``forces_lagrangian_2d``: the kernel only samples the fields at
+    # triangle centroids, so build the 6 strain components + pressure on a
+    # slab around the union of all triangulations instead of the full
+    # (Nx·Ny·Nz) domain.  This is the dominant 3-D cost (6 gradient fields).
+    nu_rho = self._compute_nu_rho_for_forces(u, v, w)
+    slab = _marker_aabb_slab(tri_centroid, (comp.x, comp.y, comp.z), soff, inv_dx)
+    if slab is not None:
+        (i0, i1), (j0, j1), (k0, k1) = slab
+        sl = (slice(i0, i1), slice(j0, j1), slice(k0, k1))
+        eps_ij = _viscous_stress_tensor(
+            (u[sl].contiguous(), v[sl].contiguous(), w[sl].contiguous()), h)
+        p_field = p[sl].contiguous()
+        bx0 = float(comp.x[i0]); by0 = float(comp.y[j0]); bz0 = float(comp.z[k0])
+        Mx = i1 - i0; My = j1 - j0; Mz = k1 - k0
+        nu_rho_crop = sl
     else:
-        nu_rho_field = torch.tensor(
-            [float(nu_rho)], dtype=p.dtype, device=p.device)
+        eps_ij = _viscous_stress_tensor((u, v, w), h)
+        p_field = p
+        bx0 = float(comp.x[0]); by0 = float(comp.y[0]); bz0 = float(comp.z[0])
+        Mx = int(comp.x.numel()); My = int(comp.y.numel()); Mz = int(comp.z.numel())
+        nu_rho_crop = None
 
-    # Use comp.x/y/z (always allocated) instead of comp._grids — the
-    # staggered-grid bundle is skipped by kernel-mode MultiAnimatBodies
-    # as a memory optimisation (see body.py:_StaggeredGrids).
-    Mx = int(comp.x.numel()); My = int(comp.y.numel()); Mz = int(comp.z.numel())
-    bx0 = float(comp.x[0]); by0 = float(comp.y[0]); bz0 = float(comp.z[0])
-    inv_dx = 1.0 / h; inv_dy = 1.0 / h; inv_dz = 1.0 / h
+    if torch.is_tensor(nu_rho) and nu_rho.ndim == 3:
+        nu_rho_field = nu_rho[nu_rho_crop].contiguous() if nu_rho_crop is not None else nu_rho
+    else:
+        buf = getattr(self, '_lagr_nu_rho_buf_3d', None)
+        if buf is None:
+            buf = torch.empty(1, dtype=p.dtype, device=p.device)
+            self._lagr_nu_rho_buf_3d = buf
+        buf.fill_(float(nu_rho))
+        nu_rho_field = buf
 
-    out = _lagrangian_forces_3d_kernel(
+    # Persistent (B, 12) float64 output buffer (zeroed by the kernel).
+    out = getattr(self, '_lagr_out_buf_3d', None)
+    if out is None or out.shape[0] != B:
+        out = torch.zeros((B, 12), dtype=torch.float64, device=p.device)
+        self._lagr_out_buf_3d = out
+
+    _lagrangian_forces_3d_kernel(
         eps_ij[0][0], eps_ij[1][1], eps_ij[2][2],
         eps_ij[0][1], eps_ij[0][2], eps_ij[1][2],
-        p, nu_rho_field,
+        p_field, nu_rho_field,
         tri_centroid, tri_normal, tri_area,
         tri_offsets, com_pos,
         bx0, by0, bz0, inv_dx, inv_dy, inv_dz,
         Mx, My, Mz, method="linear",
         # Tunable per config (``lagrangian_sample_offset``).  See the
         # 2-D path / solver.py docstring.
-        sample_offset=float(self.lagrangian_sample_offset),
+        sample_offset=soff,
+        out=out,
     )
 
-    # Scatter (B, 12) into legacy per-body caches and per-iteration records.
-    for bi in range(B):
-        fv_x = out[bi, 0].to(self.dtype); fv_y = out[bi, 1].to(self.dtype); fv_z = out[bi, 2].to(self.dtype)
-        tv_x = out[bi, 3].to(self.dtype); tv_y = out[bi, 4].to(self.dtype); tv_z = out[bi, 5].to(self.dtype)
-        fp_x = out[bi, 6].to(self.dtype); fp_y = out[bi, 7].to(self.dtype); fp_z = out[bi, 8].to(self.dtype)
-        tp_x = out[bi, 9].to(self.dtype); tp_y = out[bi, 10].to(self.dtype); tp_z = out[bi, 11].to(self.dtype)
+    # Vectorised scatter of the (B, 12) kernel output (no per-body loop).
+    out_d = out.to(self.dtype)
+    self.friction_force_lin_x[:B] = out_d[:, 0]
+    self.friction_force_lin_y[:B] = out_d[:, 1]
+    self.friction_force_lin_z[:B] = out_d[:, 2]
+    self.friction_force_ang_x[:B] = out_d[:, 3]
+    self.friction_force_ang_y[:B] = out_d[:, 4]
+    self.friction_force_ang_z[:B] = out_d[:, 5]
+    self.pressure_force_x[:B]     = out_d[:, 6]
+    self.pressure_force_y[:B]     = out_d[:, 7]
+    self.pressure_force_z[:B]     = out_d[:, 8]
+    self.pressure_force_ang_x[:B] = out_d[:, 9]
+    self.pressure_force_ang_y[:B] = out_d[:, 10]
+    self.pressure_force_ang_z[:B] = out_d[:, 11]
 
-        self.friction_force_lin_x[bi] = fv_x; self.friction_force_lin_y[bi] = fv_y; self.friction_force_lin_z[bi] = fv_z
-        self.friction_force_ang_x[bi] = tv_x; self.friction_force_ang_y[bi] = tv_y; self.friction_force_ang_z[bi] = tv_z
-        self.pressure_force_x[bi] = fp_x;     self.pressure_force_y[bi] = fp_y;     self.pressure_force_z[bi] = fp_z
-        self.pressure_force_ang_x[bi] = tp_x; self.pressure_force_ang_y[bi] = tp_y; self.pressure_force_ang_z[bi] = tp_z
-
-        self.viscous_drag_record[bi, 0, iteration]   = fv_x
-        self.viscous_drag_record[bi, 1, iteration]   = fv_y
-        self.viscous_drag_record[bi, 2, iteration]   = fv_z
-        self.viscous_torque_record[bi, 0, iteration] = tv_x
-        self.viscous_torque_record[bi, 1, iteration] = tv_y
-        self.viscous_torque_record[bi, 2, iteration] = tv_z
-        self.pressure_drag_record[bi, 0, iteration]   = fp_x
-        self.pressure_drag_record[bi, 1, iteration]   = fp_y
-        self.pressure_drag_record[bi, 2, iteration]   = fp_z
-        self.pressure_torque_record[bi, 0, iteration] = tp_x
-        self.pressure_torque_record[bi, 1, iteration] = tp_y
-        self.pressure_torque_record[bi, 2, iteration] = tp_z
+    self.viscous_drag_record[:B, 0, iteration]   = out_d[:, 0]
+    self.viscous_drag_record[:B, 1, iteration]   = out_d[:, 1]
+    self.viscous_drag_record[:B, 2, iteration]   = out_d[:, 2]
+    self.viscous_torque_record[:B, 0, iteration] = out_d[:, 3]
+    self.viscous_torque_record[:B, 1, iteration] = out_d[:, 4]
+    self.viscous_torque_record[:B, 2, iteration] = out_d[:, 5]
+    self.pressure_drag_record[:B, 0, iteration]   = out_d[:, 6]
+    self.pressure_drag_record[:B, 1, iteration]   = out_d[:, 7]
+    self.pressure_drag_record[:B, 2, iteration]   = out_d[:, 8]
+    self.pressure_torque_record[:B, 0, iteration] = out_d[:, 9]
+    self.pressure_torque_record[:B, 1, iteration] = out_d[:, 10]
+    self.pressure_torque_record[:B, 2, iteration] = out_d[:, 11]
 
     self.xstress_tensor = None
     self.ystress_tensor = None

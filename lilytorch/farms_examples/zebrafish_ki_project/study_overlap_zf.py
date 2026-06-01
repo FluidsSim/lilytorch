@@ -52,6 +52,33 @@ CONDITIONS = {
                             compute_sdf=True, bdim_mu0_projection=False,
                             interp_data_subfolder="interp_data_study_zf",
                             body_velocity_blend_eps_cells=2.0),
+    # Maertens-Weymouth RHS correction WITH the correct mu0-weighted operator.
+    "zf_cvx1_mwcorr": dict(convexify=True, force_relaxation=1.0,
+                            compute_sdf=True, bdim_body_div_correction=True,
+                            interp_data_subfolder="interp_data_study_zf",
+                            body_velocity_blend_eps_cells=None),
+    # FULL BDIM per user: non-degenerate operator (mu0_proj=False) + M&W RHS term
+    "zf_cvx1_mu0p0_mwcorr": dict(convexify=True, force_relaxation=1.0,
+                            compute_sdf=True, bdim_mu0_projection=False,
+                            bdim_body_div_correction=True,
+                            interp_data_subfolder="interp_data_study_zf",
+                            body_velocity_blend_eps_cells=None),
+    # faithful M&W (mu0_proj=True + correction) + raised degenerate-freeze tol
+    "zf_jcap8": dict(convexify=True, force_relaxation=1.0, compute_sdf=True,
+                     bdim_body_div_correction=True, poisson_jcap_tol=1e-8,
+                     interp_data_subfolder="interp_data_study_zf",
+                     body_velocity_blend_eps_cells=None),
+    "zf_jcap7": dict(convexify=True, force_relaxation=1.0, compute_sdf=True,
+                     bdim_body_div_correction=True, poisson_jcap_tol=1e-7,
+                     interp_data_subfolder="interp_data_study_zf",
+                     body_velocity_blend_eps_cells=None),
+    # faithful M&W + HUGE solver budget — tests under-convergence hypothesis
+    "zf_bigsolve": dict(convexify=True, force_relaxation=1.0, compute_sdf=True,
+                     bdim_body_div_correction=True,
+                     poisson_tol=1e-9, poisson_max_mgcg_cycles=400,
+                     poisson_max_cycles=80,
+                     interp_data_subfolder="interp_data_study_zf",
+                     body_velocity_blend_eps_cells=None),
 }
 
 
@@ -74,13 +101,15 @@ class StudyConfig(ZFConfig):
         return []
 
     def _extra_run_patch(self):
-        return "import lilytorch.integration._overlap_diag as _d;_d.install();"
+        return ("import lilytorch.integration._overlap_diag as _d;_d.install();"
+                "import lilytorch.integration._region_diag as _rd;_rd.install();")
 
 
 def main():
     name = sys.argv[1]
     os.makedirs(RESULTS_DIR, exist_ok=True)
     os.environ["LILY_DIAG_CSV"] = os.path.join(RESULTS_DIR, f"{name}.csv")
+    os.environ["LILY_REGION_CSV"] = os.path.join(RESULTS_DIR, f"{name}_region.csv")
     print(f"=== {name}: {CONDITIONS[name]} ===")
     StudyConfig(CONDITIONS[name]).run()
 

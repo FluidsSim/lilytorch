@@ -40,10 +40,12 @@ class SimConfig(BaseSimConfig):
         self.headless                      = False
         self.water_buoyancy                = True
         self.sdf_interp_method             = "triquadratic"
-        self.force_method                  = "lagrangian"
+        self.force_method                  = "eulerian"
         self.convexify                     = True
-        self.zero_pressure_inside          = True
+        self.zero_pressure_inside          = False
         self.body_velocity_blend_eps_cells = 2
+        self.bdim_mu0_projection           = False
+        self.bdim_body_div_correction      = True
 
         # self.force_delta_order   = 2
         # self.solver_method       = "python"
@@ -107,6 +109,7 @@ class SimConfig(BaseSimConfig):
         self.vmin              = -10.0
         self.vmax              = 10.0
         self.save              = False
+        self.save_frames       = False
 
         self.eps_multiplier = 1.0
         # BDIM-σ correction for thin zebrafish body links (r < eps).

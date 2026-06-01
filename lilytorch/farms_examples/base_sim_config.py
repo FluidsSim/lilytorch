@@ -229,6 +229,15 @@ class BaseSimConfig:
         # coefficient, which keeps the projection non-degenerate — needed for
         # stable multibody swimmers (inter-link velocity seams).
         self.bdim_mu0_projection     = None   # None → solver default (True)
+        # Maertens–Weymouth body-velocity-divergence RHS correction: subtract
+        # (1-mu0)∇·u_b from the Poisson RHS so the mu0-weighted projection
+        # stays consistent for OVERLAPPING links (e.g. convexify=True). No-op
+        # for single rigid bodies. Lets you keep bdim_mu0_projection=True.
+        self.bdim_body_div_correction = None  # None → solver default (False)
+        # Poisson degenerate-cell freeze threshold (|diagonal| < jcap_tol →
+        # frozen). Raise above the default 1e-12 to also freeze the near-
+        # degenerate mu0-weighted band for overlapping bodies. None → 1e-12.
+        self.poisson_jcap_tol = None
         # Delta-function order for force integration:
         #   1 (default) – first-order smoothed delta
         #   2           – Towers (2008) correction δ/|∇φ|, recommended for
@@ -828,6 +837,8 @@ class BaseSimConfig:
             ("eps_multiplier",          self.eps_multiplier),
             ("apply_bdim_sigma",        self.apply_bdim_sigma),
             ("bdim_mu0_projection",     self.bdim_mu0_projection),
+            ("bdim_body_div_correction", self.bdim_body_div_correction),
+            ("poisson_jcap_tol",         self.poisson_jcap_tol),
             ("force_delta_order",       self.force_delta_order),
         ]:
             if val is not None:

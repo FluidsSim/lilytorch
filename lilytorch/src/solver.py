@@ -335,6 +335,11 @@ class FluidSolver(PlottingMixin):
         # swimmers where inter-link velocity seams create divergence in
         # low-mu0 cells the degenerate solve cannot remove.
         self.bdim_mu0_projection = bool(solver.get("bdim_mu0_projection", True))
+        # Maertens–Weymouth body-velocity-divergence RHS correction. Keeps the
+        # mu0-weighted projection consistent for overlapping/deforming bodies
+        # (no-op for single rigid bodies). See _mw_body_div_correction.
+        self._bdim_body_div_correction = bool(
+            solver.get("bdim_body_div_correction", False))
 
         self.starting_iteration      = solver.get("starting_iteration", 0)
         self.starting_iteration_path = solver.get("starting_iteration_path", None)
@@ -598,6 +603,15 @@ class FluidSolver(PlottingMixin):
             smoother        = solver.get("poisson_smoother", "rbgs"),
             use_kernels     = self._use_kernels,
         )
+        # Degenerate-cell freeze threshold. Cells with |diagonal| < jcap_tol are
+        # frozen (iD=0, residual zeroed) — WaterLily's iszero(D) guard. The
+        # default 1e-12 is an ABSOLUTE threshold; for the mu0-weighted operator
+        # (dt*mu0/rho ~ 1e-7 scale) it only catches the exact-zero interior and
+        # leaves the tiny-mu0 band ill-conditioned. Raise it (relative to the
+        # ~dt/rho fluid coefficient) to also freeze the near-degenerate band.
+        _jct = solver.get("poisson_jcap_tol", None)
+        if _jct is not None:
+            self.poisson_solver.jcap_tol = float(_jct)
 
         # Warm-start: reuse previous pressure as Poisson initial guess
         self.poisson_warm_start = solver.get("poisson_warm_start", False)
@@ -1113,8 +1127,29 @@ class FluidSolver(PlottingMixin):
 
 
 
+    def _mw_body_div_correction(self, bU, bV, bW=None):
+        """Maertens–Weymouth body-velocity-divergence source term.
+
+        Returns the cell-centred field ``(1 - mu0) * (∇·u_body)`` that must be
+        **subtracted** from the Poisson RHS so the projection enforces
+        ``∇·u = (1-mu0)∇·u_b`` (fluid solenoidal; the solid is allowed to carry
+        the body's own divergence) instead of forcing ``∇·u = 0`` even inside
+        the body.  For a single rigid body ``∇·u_b = 0`` so this is a no-op; it
+        is nonzero only for overlapping / smoothed-overlap (e.g. convexify)
+        links, where it is exactly the term that keeps the mu0-weighted
+        (degenerate-inside) Poisson operator consistent and prevents the
+        seam blow-up.  See ``docs/immersed_boundary.rst``.
+        """
+        div_b = self.divergence(bU, bV, w=bW)        # ∇·u_b at cell centres
+        phi   = self.composite_body.sdf_val          # CC union SDF
+        eps   = float(self.eps)
+        deps  = (phi / eps).clamp(-1.0, 1.0)
+        # Smoothed Heaviside mu0 (matches bdim_one_axis / _mu_normals).
+        mu0   = 0.5 * (1.0 + deps + torch.sin(torch.pi * deps) / torch.pi)
+        return (1.0 - mu0) * div_b
+
     def project(self, u, v, p, w_vel=None, w=1.0, *,
-                ch=None, cv=None, cw=None, ch_cc=None):
+                ch=None, cv=None, cw=None, ch_cc=None, body_div_corr=None):
         """Pressure-Poisson projection.
 
         Parameters
@@ -1142,6 +1177,13 @@ class FluidSolver(PlottingMixin):
         """
 
         self.div  = self.divergence(u, v, w=w_vel)
+
+        # Maertens–Weymouth body-velocity-divergence source: subtract
+        # (1-mu0)∇·u_b so the mu0-weighted projection does not force the
+        # (overlapping) solid interior to be divergence-free.  No-op for
+        # rigid non-overlapping bodies (∇·u_b = 0).
+        if body_div_corr is not None:
+            self.div = self.div - body_div_corr
 
         coeff = w * self.dt / self.rho
 
@@ -2086,6 +2128,11 @@ class FluidSolver(PlottingMixin):
                 int(self.bdim_mu0_projection),
             )
 
+        # 6b. Maertens–Weymouth body-divergence RHS correction (before free).
+        _body_div_corr = (
+            self._mw_body_div_correction(bU_tmp, bV_tmp)
+            if self._bdim_body_div_correction else None)
+
         # 7. Free per-step temporaries before the pressure projection.
         del sdf_u_tmp, sdf_v_tmp, bU_tmp, bV_tmp, primes
         del key_cc_t, key_u_t, key_v_t
@@ -2098,6 +2145,7 @@ class FluidSolver(PlottingMixin):
             self.u0, self.v0, p,
             ch=self._ch_persist, cv=self._cv_persist,
             ch_cc=getattr(self, '_ch_cc_persist', None),
+            body_div_corr=_body_div_corr,
         )
         vels_out = out[:-1]
         p_out    = out[-1]
@@ -2270,6 +2318,12 @@ class FluidSolver(PlottingMixin):
                 int(self.bdim_mu0_projection),
             )
 
+        # 6b. Maertens–Weymouth body-divergence RHS correction (computed
+        #     from the body face velocities before they are freed).
+        _body_div_corr = (
+            self._mw_body_div_correction(bU_tmp, bV_tmp, bW_tmp)
+            if self._bdim_body_div_correction else None)
+
         # 7. Free per-step temporaries before the pressure projection
         #    so its peak working set is not stacked on top of them.
         #    Key tensors must outlive Kernel B (read by the BDIM-σ path),
@@ -2289,6 +2343,7 @@ class FluidSolver(PlottingMixin):
             ch=self._ch_persist, cv=self._cv_persist, cw=self._cw_persist,
             ch_cc=getattr(self, '_ch_cc_persist', None),
             w_vel=self.w0,
+            body_div_corr=_body_div_corr,
         )
         vels_out = out[:-1]
         p_out    = out[-1]
@@ -2372,6 +2427,11 @@ class FluidSolver(PlottingMixin):
         if D == 3:
             proj_kwargs['cw']    = face_coeffs[2]
             proj_kwargs['w_vel'] = primes[2]
+        if self._bdim_body_div_correction:
+            _cb = self.composite_body
+            proj_kwargs['body_div_corr'] = self._mw_body_div_correction(
+                _cb.body_u, _cb.body_v,
+                getattr(_cb, 'body_w', None) if D == 3 else None)
         out      = self.project(primes[0], primes[1], p, **proj_kwargs)
         vels_out = out[:-1]
         p_out    = out[-1]
