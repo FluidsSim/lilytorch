@@ -171,7 +171,7 @@ class SimConfig(BaseSimConfig):
         extensions = []
 
 
-          # Soft, reflection-free lighting for tank recordings
+        # Soft, reflection-free lighting for tank recordings
         extensions.append({
             "loader": "lilytorch.integration.light_modifier.LightModifier",
             "config": {
@@ -180,44 +180,44 @@ class SimConfig(BaseSimConfig):
             },
         })
 
+        # extensions.append({
+        #     "loader": "lilytorch.integration.flow_iso_gl_viewer.FlowIsoGLViewer",
+        #     "config": {
+        #         "field": "omega_mag",
+        #           # "field"              : "omega_z",
+        #         "alpha"              : 0.2,
+        #         "update_every"       : 1,
+        #         "max_vertices"       : 20 * self.Nx * self.Ny,
+        #         "smooth_sigma"       : 0,
+        #         "crop_boundary"      : 0,
+        #         "exclude_body"       : True,
+        #         "iso_value"          : 40.0,
+        #         "debug_force_visible": False,
+        #         "color_uni"          : "#FF4500",
+        #         "color_pos"          : "#FF4500",
+        #         "color_neg"          : "#00FFFF",
+        #     },
+        # })
+
+
         extensions.append({
             "loader": "lilytorch.integration.flow_iso_gl_viewer.FlowIsoGLViewer",
             "config": {
-                "field": "omega_mag",
-                  # "field"              : "omega_z",
+                # "field"              : "omega_z",
+                "field"              : "pressure",
                 "alpha"              : 0.2,
                 "update_every"       : 1,
                 "max_vertices"       : 20 * self.Nx * self.Ny,
                 "smooth_sigma"       : 0,
                 "crop_boundary"      : 0,
                 "exclude_body"       : True,
-                "iso_value"          : 40.0,
+                "iso_value"          : 5.0,
                 "debug_force_visible": False,
-                "color_uni"          : "#FF4500",
+                # "color_uni"          : "#FF4500",
                 "color_pos"          : "#FF4500",
                 "color_neg"          : "#00FFFF",
             },
         })
-
-
-          # extensions.append({
-          #     "loader": "lilytorch.integration.flow_iso_gl_viewer.FlowIsoGLViewer",
-          #     "config": {
-          #         # "field"              : "omega_z",
-          #         "field"              : "pressure",
-          #         "alpha"              : 0.2,
-          #         "update_every"       : 1,
-          #         "max_vertices"       : 20 * self.Nx * self.Ny,
-          #         "smooth_sigma"       : 0,
-          #         "crop_boundary"      : 0,
-          #         "exclude_body"       : True,
-          #         "iso_value"          : 5.0,
-          #         "debug_force_visible": False,
-          #         # "color_uni"          : "#FF4500",
-          #         "color_pos"          : "#FF4500",
-          #         "color_neg"          : "#00FFFF",
-          #     },
-          # })
 
           # Top-down camera auto-fitted to the pool
         cam = top_down_camera_config(
@@ -240,34 +240,34 @@ class SimConfig(BaseSimConfig):
         })
 
 
-          # Following camera: tight view locked on fish CoM.
-          # CameraRecordingFrames == CameraRecording + per-frame PNG export; the
-          # PNGs are exactly the frames that make up video_follow.mp4. Swap the
-          # loader back to farms_mujoco.sensors.camera.CameraRecording to skip the
-          # PNGs, or set "save_video": False to keep only the frames.
-        extensions.append({
-            "loader": "lilytorch.integration.streaming_camera.StreamingCameraRecordingFrames",
-            "config": {
-                "path"            : os.path.join(output_folder, "output", "video_follow.mp4"),
-                "animat_id"       : 0,
-                "fps"             : 30,
-                "speed"           : 0.2,
-                "angular_velocity": 0,
-                "azimuth"         : 90,
-                "elevation"       : -50,
-                "distance"        : 0.4,
-                "offset"          : [0, 0, 0],
-                "resolution"      : [3840, 2160],
-                  # # PNG frames -> output/video_follow_frames/frame_%06d.png
-                  # "frames_dir"      : os.path.join(output_folder, "output", "video_follow_frames"),
-                "save_video": True,
-            },
-        })
+        # # Following camera: tight view locked on fish CoM.
+        # # CameraRecordingFrames == CameraRecording + per-frame PNG export; the
+        # # PNGs are exactly the frames that make up video_follow.mp4. Swap the
+        # # loader back to farms_mujoco.sensors.camera.CameraRecording to skip the
+        # # PNGs, or set "save_video": False to keep only the frames.
+        # extensions.append({
+        #     "loader": "lilytorch.integration.streaming_camera.StreamingCameraRecordingFrames",
+        #     "config": {
+        #         "path"            : os.path.join(output_folder, "output", "video_follow.mp4"),
+        #         "animat_id"       : 0,
+        #         "fps"             : 30,
+        #         "speed"           : 0.2,
+        #         "angular_velocity": 0,
+        #         "azimuth"         : 90,
+        #         "elevation"       : -50,
+        #         "distance"        : 0.4,
+        #         "offset"          : [0, 0, 0],
+        #         "resolution"      : [3840, 2160],
+        #           # # PNG frames -> output/video_follow_frames/frame_%06d.png
+        #           # "frames_dir"      : os.path.join(output_folder, "output", "video_follow_frames"),
+        #         "save_video": True,
+        #     },
+        # })
 
 
-          # ForceViewer – draw the fluid force on each body as a scalable arrow.
-          # force_scale sets the arrow length (m per N); force_width sets the
-          # circular shaft radius (m). Tune both to taste.
+        # ForceViewer – draw the fluid force on each body as a scalable arrow.
+        # force_scale sets the arrow length (m per N); force_width sets the
+        # circular shaft radius (m). Tune both to taste.
         extensions.append({
             "loader": "lilytorch.integration.force_viewer.ForceViewer",
             "config": {
@@ -300,26 +300,26 @@ class SimConfig(BaseSimConfig):
         })
 
 
-          # AccelerationViewer – draw the linear (and optional angular)
-          # acceleration of each body as an arrow. Anchored at the body CoM,
-          # world-frame axes. Reads MuJoCo's qacc-derived spatial acceleration
-          # via mj_objectAcceleration (reflects the previous step's qacc).
-        # extensions.append({
-        #     "loader": "lilytorch.integration.acceleration_viewer.AccelerationViewer",
-        #     "config": {
-        #         "acc_scale": 0.05,        # metres of arrow per (m/s²)
-        #         "acc_width": 0.0005,     # shaft (circular) radius in metres
-        #         "color"    : "#FF00AA",
-        #                            # "max_length"  : 0.3,      # clamp arrow length (m); null = off
-        #                            # "min_acc"     : 0.0,      # hide arrows below this |a| (m/s²)
-        #                            # "show_angular": True,     # also draw an α arrow per body
-        #                            # "ang_scale"   : 0.005,    # m per (rad/s²) (default: acc_scale)
-        #                            # "ang_width"   : 0.001,    # shaft radius (default: acc_width)
-        #                            # "ang_color"   : "#AA00FF",
-        #                            # "min_ang"     : 0.0,      # hide α arrows below this (rad/s²)
-        #         "update_every": 1  # null -> solver.save_every cadence
-        #     },
-        # })
+        # AccelerationViewer – draw the linear (and optional angular)
+        # acceleration of each body as an arrow. Anchored at the body CoM,
+        # world-frame axes. Reads MuJoCo's qacc-derived spatial acceleration
+        # via mj_objectAcceleration (reflects the previous step's qacc).
+        extensions.append({
+            "loader": "lilytorch.integration.acceleration_viewer.AccelerationViewer",
+            "config": {
+                "acc_scale": 0.05,        # metres of arrow per (m/s²)
+                "acc_width": 0.001,     # shaft (circular) radius in metres
+                "color"    : "#FF00AA",
+                                   # "max_length"  : 0.3,      # clamp arrow length (m); null = off
+                                   # "min_acc"     : 0.0,      # hide arrows below this |a| (m/s²)
+                                   # "show_angular": True,     # also draw an α arrow per body
+                                   # "ang_scale"   : 0.005,    # m per (rad/s²) (default: acc_scale)
+                                   # "ang_width"   : 0.001,    # shaft radius (default: acc_width)
+                                   # "ang_color"   : "#AA00FF",
+                                   # "min_ang"     : 0.0,      # hide α arrows below this (rad/s²)
+                "update_every": 1  # null -> solver.save_every cadence
+            },
+        })
 
 
           # SkyModifier must be LAST so all CameraRecording renderers already
