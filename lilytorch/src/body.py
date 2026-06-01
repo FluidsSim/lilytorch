@@ -1239,6 +1239,12 @@ class BodyAnalytical(Body):
             ``_grids``; when called standalone (e.g. from tests) pass the
             body's own ``_StaggeredGrids`` or use ``_get_staggered_grids``.
         """
+        # Accept a plain Python/NumPy scalar for ``t`` (e.g. when called
+        # directly from FluidSolver.step_ with ``iteration * dt``); the
+        # autograd velocity computation below needs ``t`` as a tensor.
+        if not torch.is_tensor(t):
+            t = torch.tensor(float(t), device=self.device, dtype=self.dtype)
+
         (transl, rot) = self.rototranslate_points(t)
         R_T = rot.T
 

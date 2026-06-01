@@ -36,6 +36,42 @@ _FS_FREE_AFTER_FORCES_3D = {
 }
 
 
+class _MujocoCheckpoint:
+    """Save/restore the full MuJoCo integration state for sub-iteration.
+
+    ``mjSTATE_INTEGRATION`` bundles qpos, qvel, act, time, qacc_warmstart,
+    ctrl, qfrc_applied, xfrc_applied, mocap and eq_active — everything
+    needed to reproduce an integration step deterministically across a
+    checkpoint/restore.  Used by the implicit (strongly-coupled) step to
+    run throwaway prediction integrations that are each undone before the
+    next coupling sweep.  See STRONG_COUPLING_FARMS_DESIGN.md §5.
+    """
+
+    def __init__(self, physics):
+        import mujoco
+        self._mj = mujoco
+        self.spec = mujoco.mjtState.mjSTATE_INTEGRATION
+        self.m = physics.model.ptr
+        self.d = physics.data.ptr
+        self.n = mujoco.mj_stateSize(self.m, self.spec)
+        self._buf = np.zeros(self.n, dtype=np.float64)
+
+    def save(self):
+        self._mj.mj_getState(self.m, self.d, self._buf, self.spec)
+        return self._buf.copy()
+
+    def restore(self, state):
+        self._mj.mj_setState(self.m, self.d, state, self.spec)
+        self._mj.mj_forward(self.m, self.d)
+
+    def integrate(self, nstep=1):
+        """Advance ``nstep`` MuJoCo steps in place, then refresh derived
+        quantities (xpos/xipos/xquat/sensordata) for the new state so the
+        fluid's ``physics`` pose source reads the predicted pose."""
+        self._mj.mj_step(self.m, self.d, nstep)
+        self._mj.mj_forward(self.m, self.d)
+
+
 class BDIMhandler:
     """Unified boundary-data immersion method handler (2-D and 3-D)."""
 
@@ -74,6 +110,19 @@ class BDIMhandler:
         # ---- bookkeeping ----
         self.data = data          # list[AnimatData] from FARMS
         self.iteration = 0
+
+        # ---- pose source for gather_data (strong-coupling support) ----
+        # "sensors": read link poses/velocities from the FARMS AnimatData
+        #   sensor buffers at ``iteration`` (default; explicit coupling).
+        # "physics": read them live from ``physics.data`` (xpos/xipos/xquat
+        #   + framelinvel/frameangvel sensordata), mirroring
+        #   ``farms_mujoco...physics.physics2data``.  Used by the implicit
+        #   (strongly-coupled) loop so that an internal ``physics.step``
+        #   prediction is immediately visible to the fluid without a
+        #   ``task.update_sensors`` round-trip.  See STRONG_COUPLING_FARMS_DESIGN.md §14.
+        self._pose_source = "sensors"
+        self._physics = physics    # same Physics instance reused each step
+        self._task = None          # set by the implicit step / equivalence test
 
 
 
@@ -145,6 +194,41 @@ class BDIMhandler:
             self.pars.get("body", {}).get("force_relaxation", 1.0))
         self._fr_lin_prev = None   # numpy (D, B), set on first call
         self._fr_ang_prev = None   # numpy (Nt, B)
+
+        # ---- strong (implicit) coupling configuration ----
+        # body.coupling:
+        #   scheme: "explicit" (default) | "implicit"
+        #   accelerator: "iqn-ils" (default) | "aitken" | "constant"
+        #   reuse: int (IQN-ILS time-window reuse, default 2)
+        #   tol: relative interface-residual tolerance (default 1e-4)
+        #   max_iter: max coupling sweeps per step (default 30)
+        #   predict_substeps: MuJoCo steps per prediction (default 1; must
+        #     match the runtime integration cb_sub_steps*num_sub_steps).
+        # When scheme == "implicit", force_relaxation is ignored (the
+        # quasi-Newton fixed point replaces the constant low-pass).  See
+        # STRONG_COUPLING_FARMS_DESIGN.md.
+        _cpl = self.pars.get("body", {}).get("coupling", {}) or {}
+        self._coupling_scheme = str(_cpl.get("scheme", "explicit")).lower()
+        self.tol = float(_cpl.get("tol", 1e-4))
+        self.max_iter = int(_cpl.get("max_iter", 30))
+        self._predict_nstep = int(_cpl.get("predict_substeps", 1))
+        self.last_iters = 0
+        self.last_residual = 0.0
+        self._mj_ckpt = None
+        self._implicit_prev = None
+        self.accelerator = None
+        if self._coupling_scheme == "implicit":
+            from lilytorch.integration.fsi_coupling import make_accelerator
+            self.accelerator = make_accelerator(
+                _cpl.get("accelerator", "iqn-ils"),
+                **({"reuse": int(_cpl.get("reuse", 2))}
+                   if str(_cpl.get("accelerator", "iqn-ils")).lower().startswith("iqn")
+                   or str(_cpl.get("accelerator", "iqn-ils")).lower() in ("qn", "quasi-newton")
+                   else {}),
+            )
+            print(f"[BDIMhandler] strong (implicit) coupling: "
+                  f"accelerator={_cpl.get('accelerator', 'iqn-ils')}, "
+                  f"tol={self.tol}, max_iter={self.max_iter}")
 
         # ---- smooth body-velocity blend in the overlap band ----
         # With convexify (or otherwise overlapping links), the running-min
@@ -341,7 +425,19 @@ class BDIMhandler:
         return meta
 
     def gather_data(self, iteration):
-        """Gather FARMS link poses/velocities once per update path."""
+        """Gather FARMS link poses/velocities once per update path.
+
+        Reads from the ``AnimatData`` sensor buffers at ``iteration`` when
+        ``self._pose_source == "sensors"`` (default), or live from
+        ``physics.data`` when ``"physics"`` (strong coupling).  Both
+        sources return the same SI-scaled quantities — the physics path
+        mirrors ``physics2data`` field-for-field — so they agree at the
+        start-of-step pose (see :meth:`_gather_data_physics` and the
+        equivalence test).
+        """
+        if self._pose_source == "physics":
+            return self._gather_data_physics()
+
         com_poses = []
         urdf_poses = []
         Rs = []
@@ -370,6 +466,54 @@ class BDIMhandler:
                     np.asarray(sen.com_ang_velocity(iteration, lk), dtype=self.dtype_np)
                     for lk in range(nlinks)
                 ])
+            com_poses.append(com)
+            urdf_poses.append(urdf)
+            Rs.append(R)
+            lin_vels.append(lin)
+            ang_vels.append(ang)
+        return com_poses, urdf_poses, Rs, lin_vels, ang_vels
+
+    def _gather_data_physics(self):
+        """``gather_data`` variant reading live ``physics.data`` (strong coupling).
+
+        Mirrors ``farms_mujoco.simulation.physics.physics2data`` exactly so
+        the returned SI quantities match the ``"sensors"`` path at the same
+        physics state:
+
+        * ``urdf_pos`` ← ``data.xpos[xpos2data]   / units.meters``
+        * ``com_pos``  ← ``data.xipos[xipos2data] / units.meters``
+        * ``R``        ← ``Rotation.from_quat(data.xquat[xquat2data][:, [1,2,3,0]])``
+        * ``lin_vel``  ← ``data.sensordata[framelinvel2data] / units.velocity``
+        * ``ang_vel``  ← ``data.sensordata[frameangvel2data] / units.angular_velocity``
+
+        Because it reads ``physics.data`` directly, an internal
+        ``physics.step`` prediction in the implicit loop is seen here without
+        a ``task.update_sensors`` round-trip.  Requires ``self._task`` and
+        ``self._physics`` to be set (the implicit step / the test set them).
+        """
+        physics = self._physics
+        task    = self._task
+        units   = task.units
+        d       = physics.data
+
+        com_poses, urdf_poses, Rs, lin_vels, ang_vels = [], [], [], [], []
+        for animat_i, _exp in enumerate(self.data):
+            sm = task.maps[animat_i]["sensors"]
+
+            urdf  = np.asarray(d.xpos[sm["xpos2data"]],  dtype=self.dtype_np) / units.meters
+            com   = np.asarray(d.xipos[sm["xipos2data"]], dtype=self.dtype_np) / units.meters
+            quat  = np.asarray(d.xquat[sm["xquat2data"]], dtype=self.dtype_np)[:, [1, 2, 3, 0]]
+            R     = Rotation.from_quat(quat).as_matrix().astype(self.dtype_np)
+            lin   = np.asarray(d.sensordata[sm["framelinvel2data"]], dtype=self.dtype_np) / units.velocity
+            ang   = np.asarray(d.sensordata[sm["frameangvel2data"]], dtype=self.dtype_np) / units.angular_velocity
+
+            if self.ndim == 2:
+                com  = com[:, self.lin_axes]
+                urdf = urdf[:, self.lin_axes]
+                R    = R[:, self.lin_axes, :][:, :, self.lin_axes]
+                lin  = lin[:, self.lin_axes]
+                ang  = ang[:, self._2d_ang_ax]
+
             com_poses.append(com)
             urdf_poses.append(urdf)
             Rs.append(R)
@@ -1931,23 +2075,12 @@ class BDIMhandler:
     # ==================================================================
     #  apply_forces: fluid -> body forces via MuJoCo xfrc_applied
     # ==================================================================
-    def _apply_forces(self, task, physics):
-        """Dim-agnostic fluid → body force application via MuJoCo xfrc.
+    def _assemble_loads_scaled(self):
+        """Per-body force-scaled hydrodynamic loads ``(lin_total, ang_total)``.
 
-        Per-D xfrc index map, buoyancy axis, and FluidSolver field names
-        are precomputed in :meth:`_init_apply_forces`, so this method
-        has zero per-step Python branching on ``ndim`` or ``_2d_plane``.
-
-        FARMS-style buoyancy is applied additively to a single linear
-        xfrc index (``_buoyancy_xfrc_idx``); for the 2-D xy plane, where
-        no buoyancy is needed, that index is ``None`` and the buoyancy
-        block is skipped entirely.
-
-        This method only reads cached force tensors on the FluidSolver
-        (``friction_force_*``, ``pressure_force_*``) — it does not
-        advance the fluid solver, so it is safe to call once per MuJoCo
-        substep to keep ``xfrc_applied`` fresh between full BDIM steps
-        (mirroring ``SwimmingExtension`` with ``substep=True``).
+        Returns numpy ``(D, B)`` / ``(Nt, B)`` arrays = ``force_scaling`` *
+        (viscous + pressure), in solver load units (before ``units.newtons``).
+        Shared by the explicit apply path and the implicit coupling vector.
         """
         fs = self.fluid_solver
         s  = self.force_scaling
@@ -1960,23 +2093,52 @@ class BDIMhandler:
         forces_gpu = torch.stack([getattr(fs, a) for a in attrs])  # (2D + 2Nt, B)
         forces_cpu = (s * forces_gpu).cpu().numpy()                # single sync
 
-        # Total per-axis (viscous + pressure) at CPU level.
         lin_total = forces_cpu[:D] + forces_cpu[D + Nt: 2 * D + Nt]   # (D, B)
         ang_total = forces_cpu[D: D + Nt] + forces_cpu[2 * D + Nt:]   # (Nt, B)
+        return lin_total, ang_total
 
-        # Temporal under-relaxation: low-pass at the coupling boundary
-        # to damp the explicit-coupling oscillation while preserving
-        # the DC / time-averaged physical force.
-        beta = self.force_relaxation
-        if beta < 1.0:
-            if self._fr_lin_prev is None or self._fr_lin_prev.shape != lin_total.shape:
-                self._fr_lin_prev = lin_total.copy()
-                self._fr_ang_prev = ang_total.copy()
-            else:
-                lin_total = beta * lin_total + (1.0 - beta) * self._fr_lin_prev
-                ang_total = beta * ang_total + (1.0 - beta) * self._fr_ang_prev
-                self._fr_lin_prev = lin_total.copy()
-                self._fr_ang_prev = ang_total.copy()
+    def _apply_forces(self, task, physics, loads=None):
+        """Dim-agnostic fluid → body force application via MuJoCo xfrc.
+
+        Per-D xfrc index map, buoyancy axis, and FluidSolver field names
+        are precomputed in :meth:`_init_apply_forces`, so this method
+        has zero per-step Python branching on ``ndim`` or ``_2d_plane``.
+
+        FARMS-style buoyancy is applied additively to a single linear
+        xfrc index (``_buoyancy_xfrc_idx``); for the 2-D xy plane, where
+        no buoyancy is needed, that index is ``None`` and the buoyancy
+        block is skipped entirely.
+
+        When ``loads is None`` (explicit path) the per-body loads are read
+        from the FluidSolver and the ``force_relaxation`` low-pass is
+        applied; the method only *reads* cached force tensors, so it is safe
+        to call once per MuJoCo substep to keep ``xfrc_applied`` fresh.
+        When ``loads=(lin_total, ang_total)`` is given (implicit coupling)
+        those scaled loads are written verbatim (no low-pass) — the
+        strongly-coupled fixed point has already converged the force.
+        """
+        D  = self.ndim
+        Nt = len(self._ang_xfrc_idx)
+        fs = self.fluid_solver
+
+        if loads is None:
+            lin_total, ang_total = self._assemble_loads_scaled()
+
+            # Temporal under-relaxation: low-pass at the coupling boundary
+            # to damp the explicit-coupling oscillation while preserving
+            # the DC / time-averaged physical force.
+            beta = self.force_relaxation
+            if beta < 1.0:
+                if self._fr_lin_prev is None or self._fr_lin_prev.shape != lin_total.shape:
+                    self._fr_lin_prev = lin_total.copy()
+                    self._fr_ang_prev = ang_total.copy()
+                else:
+                    lin_total = beta * lin_total + (1.0 - beta) * self._fr_lin_prev
+                    ang_total = beta * ang_total + (1.0 - beta) * self._fr_ang_prev
+                    self._fr_lin_prev = lin_total.copy()
+                    self._fr_ang_prev = ang_total.copy()
+        else:
+            lin_total, ang_total = loads
 
         # FARMS-identical buoyancy (drag.pyx ``compute_buoyancy``).
         if self._has_buoyancy and not self._buoyancy_initialized:
@@ -2017,7 +2179,14 @@ class BDIMhandler:
     #  step: one full coupled step (called by FluidExtension.before_step)
     # ==================================================================
     def step(self, task, physics):
+        """Dispatch to the explicit or implicit (strong) coupling step."""
+        if self._coupling_scheme == "implicit":
+            self._step_implicit(task, physics)
+        else:
+            self._step_explicit(task, physics)
 
+    def _step_explicit(self, task, physics):
+        """Weakly-coupled (explicit) step: advance fluid once, push loads."""
         iteration = self.iteration
         timestep  = self.pars["solver"]["dt"]
         if iteration >= self.pars["solver"]["nt"]:
@@ -2038,5 +2207,147 @@ class BDIMhandler:
 
             fs.__dict__.update(_FS_FREE_AFTER_FORCES_3D)
             self.apply_forces(task, physics)
+
+        self.iteration += 1
+
+    # ==================================================================
+    #  implicit (strongly-coupled) step  — see STRONG_COUPLING_FARMS_DESIGN.md
+    # ==================================================================
+    def _fluid_snapshot(self):
+        fs = self.fluid_solver
+        snap = {"u0": fs.u0.clone(), "v0": fs.v0.clone(), "p0": fs.p0.clone()}
+        if self.ndim == 3:
+            snap["w0"] = fs.w0.clone()
+        return snap
+
+    def _fluid_restore(self, snap):
+        fs = self.fluid_solver
+        fs.u0 = snap["u0"].clone()
+        fs.v0 = snap["v0"].clone()
+        fs.p0 = snap["p0"].clone()
+        if self.ndim == 3:
+            fs.w0 = snap["w0"].clone()
+
+    def _loads_to_vector(self):
+        """Flatten the current scaled solver loads into the coupling vector
+        ``[lin_total(D,B).ravel(), ang_total(Nt,B).ravel()]``."""
+        lin_total, ang_total = self._assemble_loads_scaled()
+        return np.concatenate([lin_total.ravel(), ang_total.ravel()]), \
+            (lin_total.shape, ang_total.shape)
+
+    def _vector_to_loads(self, x, shapes):
+        (lin_shape, ang_shape) = shapes
+        nlin = int(np.prod(lin_shape))
+        lin_total = np.asarray(x[:nlin], dtype=np.float64).reshape(lin_shape)
+        ang_total = np.asarray(x[nlin:], dtype=np.float64).reshape(ang_shape)
+        return lin_total, ang_total
+
+    def _advance_fluid_at_current_pose(self, iteration, t):
+        """One fluid solve at the body pose currently in ``physics.data``
+        (read via the ``physics`` pose source).  Sets the solver loads."""
+        fs = self.fluid_solver
+        if self.ndim == 3:
+            fs.advance_and_compute_loads(fs.u0, fs.v0, fs.p0, iteration, t, w_vel=fs.w0)
+        else:
+            fs.advance_and_compute_loads(fs.u0, fs.v0, fs.p0, iteration, t)
+
+    def _step_implicit(self, task, physics):
+        """Strongly-coupled step (preCICE-style quasi-Newton on the force).
+
+        Runs the fixed-point loop entirely inside ``before_step`` using
+        throwaway MuJoCo predictions (each undone by checkpoint restore),
+        then leaves MuJoCo at the start-of-step state with ``xfrc_applied``
+        holding the converged force — so the runtime integrates once
+        (Option A).  Couples on the per-body scaled hydrodynamic load.
+        """
+        iteration = self.iteration
+        timestep  = self.pars["solver"]["dt"]
+        if iteration >= self.pars["solver"]["nt"]:
+            return
+        t  = iteration * timestep
+        fs = self.fluid_solver
+        self._task, self._physics = task, physics
+
+        if fs.terminate:
+            self.iteration += 1
+            return
+
+        if self._has_buoyancy and not self._buoyancy_initialized:
+            self._init_buoyancy_params(task, physics)
+
+        if self._mj_ckpt is None:
+            self._mj_ckpt = _MujocoCheckpoint(physics)
+        ckpt = self._mj_ckpt
+        acc  = self.accelerator
+        nsub = self._predict_nstep
+
+        # ---- checkpoints at start-of-step state sⁿ ----
+        mj_n    = ckpt.save()
+        fluid_n = self._fluid_snapshot()
+
+        # coupling-vector shape: (lin (D, B), ang (Nt, B))
+        B = len(fs.composite_body.bodies)
+        shapes = ((self.ndim, B), (len(self._ang_xfrc_idx), B))
+
+        # Read poses live from physics so each prediction step is visible to
+        # the fluid without a task.update_sensors round-trip.
+        prev_src = self._pose_source
+        self._pose_source = "physics"
+
+        x = self._implicit_prev            # warm-start (None on the first step)
+        x_tilde = None
+        converged = False
+
+        for k in range(1, self.max_iter + 1):
+            ckpt.restore(mj_n)              # MuJoCo -> sⁿ  (also mj_forward)
+            self._fluid_restore(fluid_n)    # fluid   -> fluidⁿ
+
+            # ---- structure: integrate sⁿ under candidate load x ----
+            if x is not None:
+                self._apply_forces(task, physics,
+                                   loads=self._vector_to_loads(x, shapes))
+            ckpt.integrate(nsub)            # mj_step×nsub + mj_forward -> s̃
+
+            # ---- fluid: solve at predicted pose s̃ -> new load x̃ ----
+            self._advance_fluid_at_current_pose(iteration, t)
+            fs.__dict__.update(_FS_FREE_AFTER_FORCES_3D)
+            x_tilde, _ = self._loads_to_vector()
+
+            if x is None:                   # very first sweep: no guess yet
+                x = np.zeros_like(x_tilde)
+
+            res = acc.residual_norm(x, x_tilde)
+            self.last_iters, self.last_residual = k, float(res)
+            if res < self.tol * (1.0 + np.linalg.norm(x)):
+                converged = True
+                break
+            if not np.isfinite(res):
+                break
+            x = np.asarray(acc.relax(x, x_tilde), dtype=np.float64)
+
+        acc.finalize_timestep()
+        self._pose_source = prev_src
+        self._implicit_prev = x            # warm-start next step
+
+        if not converged:
+            print(f"[BDIMhandler implicit] step {iteration}: not converged "
+                  f"in {self.max_iter} sweeps (res={self.last_residual:.3e})",
+                  flush=True)
+
+        # ---- commit (Option A): leave sⁿ + the (last candidate) force x ----
+        # The fluid is at the converged solve (pose s̃(x)); committing x makes
+        # the runtime's single integration reproduce exactly that pose.
+        ckpt.restore(mj_n)
+        self._apply_forces(task, physics, loads=self._vector_to_loads(x, shapes))
+        # NOTE: implicit mode requires cb_sub_steps == 1 (design §7.1), so the
+        # non-full-substep apply_forces(loads=None) path is never invoked
+        # between full steps; xfrc_applied set here is what the runtime
+        # integrates.
+
+        # ---- once-per-step fluid tail (plot / free-surface / release) ----
+        if self.ndim == 3:
+            fs.terminate = fs.finalize_step(fs.u0, fs.v0, fs.p0, iteration, w_vel=fs.w0)
+        else:
+            fs.terminate = fs.finalize_step(fs.u0, fs.v0, fs.p0, iteration)
 
         self.iteration += 1

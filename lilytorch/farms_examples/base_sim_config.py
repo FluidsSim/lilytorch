@@ -265,6 +265,13 @@ class BaseSimConfig:
         # Useful for stabilising Lagrangian forces in multibody swimmer coupling
         # without halving the physical force (which zero_pressure_inside hack did).
         self.force_relaxation = None
+        # Strong (implicit) FSI coupling: set to a dict, e.g.
+        #   {"scheme": "implicit", "accelerator": "iqn-ils", "reuse": 2,
+        #    "tol": 1e-4, "max_iter": 30}
+        # to replace the explicit force push with a quasi-Newton fixed point
+        # (see lilytorch/integration/STRONG_COUPLING_FARMS_DESIGN.md).
+        # None (default) -> explicit coupling.
+        self.coupling = None
         self.compute_sdf    = False
         self.suit           = 0.0
 
@@ -878,6 +885,8 @@ class BaseSimConfig:
             body["force_scaling"] = self.force_scaling
         if self.force_relaxation is not None:
             body["force_relaxation"] = self.force_relaxation
+        if self.coupling is not None:
+            body["coupling"] = self.coupling
         if self.contour_mask is not None:
             body["contour_mask"] = self.contour_mask
 

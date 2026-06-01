@@ -540,15 +540,16 @@ def forces_method2(self, u, v, p, iteration):
                 sdf_vals[bi] = sdf_sub_i
     elif hasattr(comp, 'sdf_vals') and comp.sdf_vals is not None:
         sdf_vals = comp.sdf_vals  # legacy dense path
-    # else:
-    #     # Analytical single-body (or any composite without per-body SDF
-    #     # stack): sample each body's SDF on the CC grid on the fly.
-    #     Ni, Nj = comp.sdf_val.shape
-    #     Xcc, Ycc = torch.meshgrid(comp.x, comp.y, indexing='ij')
-    #     sdf_vals = torch.stack(
-    #         [body.sdf(Xcc, Ycc) for body in comp.bodies],
-    #         dim=0,
-    #     )
+    else:
+        # Analytical composite (e.g. CompositeBodyAnalytical) keeps the
+        # current per-body CC SDF on each sub-body as ``body.sdf_val``
+        # (already rotated/translated in body.update), but populates
+        # neither ``_sdf_sparse`` nor a dense ``sdf_vals`` stack.  Rebuild
+        # the (B, Ni, Nj) stack from the per-body fields so the standalone
+        # (non-kernel) force path works for analytical bodies too.
+        sdf_vals = torch.stack(
+            [b.sdf_val for b in comp.bodies], dim=0,
+        )
 
     sdf_grad_mag_2d = None
     if self.force_delta_order == 2:

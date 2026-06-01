@@ -85,7 +85,16 @@ class FluidStepper(Protocol):
 
     def advance_and_read_loads(self, iteration: int, t: float, dt: float):
         """Advance the fluid one step (advect→project→correct), compute the
-        loads on the body, and return ``(force, torque)`` as flat arrays."""
+        loads on the body, and return ``(force, torque)`` (per-body arrays).
+
+        Must **not** run any once-per-step bookkeeping (free-surface
+        advection, plotting, field release) — that is deferred to
+        :meth:`finalize` so it happens once, on the converged state."""
+
+    def finalize(self, iteration: int) -> None:
+        """Run the once-per-step tail on the converged fluid state
+        (free-surface advection, plotting/saving, field release).  Called
+        exactly once per time step, after the coupling loop converges."""
 
 
 # ======================================================================
@@ -145,6 +154,9 @@ class StrongCoupledFSI:
         # loop and did not restore again afterwards.
         body.commit(x_tilde)
         acc.finalize_timestep()
+        # Run the once-per-step fluid tail exactly once, on the converged
+        # state (free-surface advection, plotting, field release).
+        fluid.finalize(iteration)
         self.iters_history.append(self.last_iters)
         return converged
 
@@ -155,15 +167,33 @@ class StrongCoupledFSI:
 class FluidSolverAdapter:
     """Wrap a :class:`FluidSolver` so :class:`StrongCoupledFSI` can drive it.
 
-    This reproduces the body-facing half of :meth:`FluidSolver.step_`
-    (``solver.py``) but (1) without committing and (2) returning the loads
-    instead of pushing them through ``apply_force_feedback`` — the driver
-    owns the structure integration so it can sub-iterate.
+    Crucially, this **calls** the solver's own stepping methods rather than
+    re-implementing them:
+
+    * :meth:`advance_and_read_loads` → ``FluidSolver.advance_and_compute_loads``
+      + ``FluidSolver.get_loads`` (the repeatable fluid core + load read-off),
+    * :meth:`finalize`              → ``FluidSolver.finalize_step`` (the
+      once-per-step tail, run only on the converged state).
+
+    Because it delegates, any change to how the fluid advances (gravity,
+    ``zero_pressure_inside``, kernel vs. python path, force method, …) is
+    picked up automatically — there is no copy of the stepping sequence to
+    drift out of sync with ``solver.py``.
+
+    The driver restores ``u0/v0/(w0)/p0`` from the checkpoint before each
+    sweep, so re-running ``advance_and_compute_loads`` re-solves the *same*
+    time step from the *same* initial fluid state under the candidate body
+    motion that ``body.set_coupling_state`` just imposed.
     """
 
     def __init__(self, fluid_solver):
         self.fs = fluid_solver
         self.ndim = fluid_solver.ndim
+        if not getattr(fluid_solver, "compute_forces", False):
+            raise ValueError(
+                "FluidSolverAdapter requires a FluidSolver built with "
+                "compute_forces=True (the coupler reads loads via get_loads())."
+            )
 
     # -- checkpoint / restore the mutable fluid state ------------------
     def snapshot(self):
@@ -181,57 +211,54 @@ class FluidSolverAdapter:
         if self.ndim == 3:
             fs.w0 = ckpt["w0"].clone()
 
-    # -- one fluid sweep + load read-out -------------------------------
+    # -- one fluid sweep + load read-out (delegates to the solver) -----
     def advance_and_read_loads(self, iteration, t, dt):
-        import torch
-
         fs = self.fs
-        # The body's SDF / no-slip velocity fields were just refreshed by
-        # body.set_coupling_state(); refresh BDIM weighting if needed.
-        if not fs._use_kernels:
-            fs._recompute_mu_normals()
-
+        # body.set_coupling_state() already imposed the candidate kinematics;
+        # advance_and_compute_loads() calls composite_body.update() which
+        # rebuilds the SDF / no-slip velocity from that state, applies
+        # gravity, runs fluid_step, and computes the loads.  It uses fs.dt
+        # internally (dt is passed for API symmetry / assertion only).
         if self.ndim == 2:
-            u, v, p = fs.fluid_step(fs.u0, fs.v0, fs.p0, dt)
-            fs.u0, fs.v0, fs.p0 = u, v, p
-            if fs.force_method == "lagrangian":
-                fs.forces_lagrangian_2d(u, v, p, iteration)
-            else:
-                fs.forces_method2(u, v, p, iteration)
-            fx = fs.friction_force_lin_x + fs.pressure_force_x
-            fy = fs.friction_force_lin_y + fs.pressure_force_y
-            tz = fs.friction_force_ang_z + fs.pressure_force_ang_z
-            force = torch.stack((fx, fy)).sum(dim=-1).detach().cpu().numpy().ravel()
-            torque = np.atleast_1d(float(tz.sum()))
+            fs.advance_and_compute_loads(fs.u0, fs.v0, fs.p0, iteration, t)
         else:
-            u, v, w, p = fs.fluid_step(fs.u0, fs.v0, fs.w0, fs.p0, dt)
-            fs.u0, fs.v0, fs.w0, fs.p0 = u, v, w, p
-            if fs.force_method == "lagrangian":
-                fs.forces_lagrangian_3d(u, v, w, p, iteration)
-            else:
-                fs.forces_method2_3d(u, v, w, p, iteration)
-            fx = fs.friction_force_lin_x + fs.pressure_force_x
-            fy = fs.friction_force_lin_y + fs.pressure_force_y
-            fz = fs.friction_force_lin_z + fs.pressure_force_z
-            tx = fs.friction_force_ang_x + fs.pressure_force_ang_x
-            ty = fs.friction_force_ang_y + fs.pressure_force_ang_y
-            tz = fs.friction_force_ang_z + fs.pressure_force_ang_z
-            force = torch.stack((fx, fy, fz)).sum(dim=-1).detach().cpu().numpy().ravel()
-            torque = torch.stack((tx, ty, tz)).sum(dim=-1).detach().cpu().numpy().ravel()
-        return force, torque
+            fs.advance_and_compute_loads(
+                fs.u0, fs.v0, fs.p0, iteration, t, w_vel=fs.w0
+            )
+
+        loads = fs.get_loads()
+        if loads is None:
+            raise RuntimeError(
+                "FluidSolver.get_loads() returned None during coupling; "
+                "ensure compute_forces=True."
+            )
+        force, torque = loads
+        return (force.detach().cpu().numpy(),
+                np.atleast_1d(torque.detach().cpu().numpy()))
+
+    # -- once-per-step tail on the converged state ---------------------
+    def finalize(self, iteration):
+        fs = self.fs
+        if self.ndim == 2:
+            return fs.finalize_step(fs.u0, fs.v0, fs.p0, iteration)
+        return fs.finalize_step(fs.u0, fs.v0, fs.p0, iteration, w_vel=fs.w0)
 
 
 # ----------------------------------------------------------------------
 #  Note on the FARMS/MuJoCo path
 # ----------------------------------------------------------------------
 # For the coupled FARMS path (BDIMhandler), the structure integrator is
-# MuJoCo, advanced by the FARMS task pipeline *outside* this driver.  To
-# sub-iterate there you would, inside one coupling iteration:
+# MuJoCo, advanced by the FARMS task pipeline *outside* this driver.  The
+# fluid half is already drift-free: BDIMhandler can call
+# FluidSolver.advance_and_compute_loads / get_loads / finalize_step exactly
+# like FluidSolverAdapter does.  The remaining piece is the *structure*
+# half — to sub-iterate MuJoCo, inside one coupling iteration you would:
 #   1. mj_saveState  (checkpoint MuJoCo) once at step start,
 #   2. restore fluid + MuJoCo each sweep,
 #   3. write the candidate loads to xfrc_applied and call mj_step1/mj_step2
 #      (or mj_forward + integrator) to get the predicted body pose,
 #   4. feed that pose back into BDIMhandler.update() and re-solve the fluid.
 # The accelerator and convergence logic are identical; only snapshot/
-# restore and the structure-predict call change.  Recommended next step
-# once this standalone prototype is validated on the sphere-drop case.
+# restore and the structure-predict call change.  This needs a live FARMS
+# sim to validate, so it is deferred until the standalone path is confirmed
+# on the sphere-drop case.

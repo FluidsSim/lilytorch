@@ -2482,16 +2482,27 @@ class FluidSolver(PlottingMixin):
                 f"|u|_max = {vmax:.3e} > vmax_abort = {self._vmax_abort:.3e}."
             )
 
-    def _apply_force_feedback(self, iteration, t):
-        """Advance any standalone body state that consumes solver loads.
+    def get_loads(self):
+        """Assemble the net hydrodynamic ``(force, torque)`` per body from
+        the viscous + pressure components computed by the most recent
+        :meth:`advance_and_compute_loads` (i.e. the ``forces_*`` call).
 
-        This is intentionally separate from the FARMS / MuJoCo path: it is
-        only used by ``FluidSolver.step_()`` after viscous and pressure loads
-        have been accumulated on the current standalone composite body.
+        Returns
+        -------
+        (force, torque) or None
+            2-D: ``force`` is ``(B, 2)``, ``torque`` is ``(B,)`` about the
+            out-of-plane axis.  3-D: ``force`` is ``(B, 3)``, ``torque`` is
+            ``(B, 3)``.  Returns ``None`` when no loads are available
+            (``compute_forces`` disabled).
+
+        The fluid solver only *reports* loads here; **applying** them to a
+        body is the consumer's job — the standalone rigid-body integrator,
+        FARMS/MuJoCo (``BDIMhandler``), or the implicit coupling driver.
         """
-        callback = getattr(self.composite_body, "apply_force_feedback", None)
-        if callback is None:
-            return
+        if not getattr(self, "compute_forces", False):
+            return None
+        if not hasattr(self, "friction_force_lin_x"):
+            return None
 
         force_x = self.friction_force_lin_x + self.pressure_force_x
         force_y = self.friction_force_lin_y + self.pressure_force_y
@@ -2507,6 +2518,26 @@ class FluidSolver(PlottingMixin):
             force = torch.stack((force_x, force_y, force_z), dim=-1)
             torque = torch.stack((torque_x, torque_y, torque_z), dim=-1)
 
+        return force, torque
+
+    def _apply_force_feedback(self, iteration, t):
+        """Hand the freshly computed loads to a *standalone* body's own
+        integrator via its ``apply_force_feedback`` callback.
+
+        This is the **explicit-coupling feedback** used by the standalone
+        orchestrators (:meth:`run_sim` / :meth:`run_from_initial`); it is
+        deliberately **not** called from :meth:`step_` / the fluid core, so
+        the fluid step itself never applies loads.  It is a no-op for
+        bodies without the callback (FARMS path, prescribed-motion
+        validation bodies), where load application is handled elsewhere.
+        """
+        callback = getattr(self.composite_body, "apply_force_feedback", None)
+        if callback is None:
+            return
+        loads = self.get_loads()
+        if loads is None:
+            return
+        force, torque = loads
         callback(
             force=force,
             torque=torque,
@@ -2516,7 +2547,23 @@ class FluidSolver(PlottingMixin):
             solver=self,
         )
 
-    def step_(self, u, v, p, iteration, t, w_vel=None):
+    def advance_and_compute_loads(self, u, v, p, iteration, t, w_vel=None):
+        """Repeatable per-step fluid core: body update → gravity → fluid_step
+        → (optional zero-pressure) → load computation.
+
+        Sets ``self.u0/v0/(w0)/p0`` and the ``friction_force_*`` /
+        ``pressure_force_*`` attributes, but does **not** apply the loads,
+        advance the free surface, release BDIM fields, or plot — those are
+        the once-per-step tail in :meth:`finalize_step`.
+
+        It is therefore safe to call this repeatedly inside a single time
+        step (implicit / strongly-coupled FSI) *provided the fluid fields
+        are restored to the start-of-step state between calls*, and the
+        loads can be consumed by any structure integrator without the
+        solver committing them.
+
+        Returns ``(u, v, p, w_vel)`` (``w_vel`` is ``None`` in 2-D).
+        """
         self.composite_body.update(t, iteration, dt=self.dt)
         # Phase I: in kernel mode (2-D and 3-D), mu0/mu1 and normals are
         # computed in CUDA thread registers inside Kernel B during
@@ -2561,7 +2608,16 @@ class FluidSolver(PlottingMixin):
                 else:
                     self.forces_method2_3d(u, v, w_vel, p, iteration)
 
-        self._apply_force_feedback(iteration, t)
+        return u, v, p, w_vel
+
+    def finalize_step(self, u, v, p, iteration, w_vel=None):
+        """Once-per-step tail: stability check, free-surface advection,
+        BDIM-field release, optional allocator flush, and plotting/saving.
+
+        For implicit coupling, call this exactly once *after* the coupling
+        iteration has converged, on the converged fluid state.  Returns the
+        ``terminate`` flag from :meth:`plotting_and_saving`.
+        """
         self.check_explosion(iteration)
 
         # ---- free-surface bookkeeping (advect + periodic reinit/extend) ----
@@ -2576,7 +2632,21 @@ class FluidSolver(PlottingMixin):
             torch.cuda.empty_cache()
 
         # ---- plotting / saving  (works for 2D and 3D) ----
-        terminate = self.plotting_and_saving(u, v, p, iteration, w_vel=w_vel)
+        return self.plotting_and_saving(u, v, p, iteration, w_vel=w_vel)
+
+    def step_(self, u, v, p, iteration, t, w_vel=None):
+        # One fluid time step: advance the fluid + compute the loads, then
+        # run the once-per-step tail.  The fluid step does **not** apply the
+        # loads to any body — that is the orchestrator's job (run_sim /
+        # BDIMhandler / the implicit coupler), which reads them via
+        # get_loads().  The three pieces are separate methods so the
+        # implicit / strongly-coupled driver can repeat the core
+        # (advance_and_compute_loads) under a checkpoint/restore loop and
+        # run the tail (finalize_step) only once, on convergence.
+        u, v, p, w_vel = self.advance_and_compute_loads(
+            u, v, p, iteration, t, w_vel=w_vel
+        )
+        terminate = self.finalize_step(u, v, p, iteration, w_vel=w_vel)
 
         if self.ndim == 2:
             return (u, v, p, terminate)
@@ -2584,32 +2654,55 @@ class FluidSolver(PlottingMixin):
             return (u, v, p, w_vel, terminate)
 
     def run_from_initial(self, u0, v0, w0=None):
+        """
+        Run the standalone (explicit) simulation loop starting from the
+        given initial velocity fields.
+
+        As an explicit-coupling orchestrator this drives the fluid core,
+        feeds the computed loads back to a standalone body, and runs the
+        once-per-step tail — in that order (load feedback before the tail,
+        matching the legacy ``step_`` sequencing).
+        """
         u = u0
         v = v0
         p = torch.zeros_like(u)
         if self.ndim == 2:
             for iteration in tqdm(range(self.nt)):
-                t                = iteration*self.dt
-                (u,v,p,stop_sim) = self.step_(u, v, p, iteration, t)
+                t = iteration*self.dt
+                u, v, p, _ = self.advance_and_compute_loads(u, v, p, iteration, t)
+                self._apply_force_feedback(iteration, t)
+                self.finalize_step(u, v, p, iteration)
         else:
             w = w0 if w0 is not None else torch.zeros_like(u)
             for iteration in tqdm(range(self.nt)):
-                t                      = iteration*self.dt
-                (u,v,p,w,stop_sim) = self.step_(u, v, p, iteration, t, w_vel=w)
+                t = iteration*self.dt
+                u, v, p, w = self.advance_and_compute_loads(u, v, p, iteration, t, w_vel=w)
+                self._apply_force_feedback(iteration, t)
+                self.finalize_step(u, v, p, iteration, w_vel=w)
 
     def run_sim(self):
+        """
+        Standalone (explicit-coupling) simulation loop.
+
+        Same orchestration as :meth:`run_from_initial`: fluid core → load
+        feedback to the standalone body → once-per-step tail.
+        """
         u = self.u0
         v = self.v0
         p = self.p0
         if self.ndim == 2:
             for iteration in tqdm(range(self.starting_iteration, self.nt)):
-                t                = iteration*self.dt
-                (u,v,p,stop_sim) = self.step_(u, v, p, iteration, t)
+                t = iteration*self.dt
+                u, v, p, _ = self.advance_and_compute_loads(u, v, p, iteration, t)
+                self._apply_force_feedback(iteration, t)
+                self.finalize_step(u, v, p, iteration)
         else:
             w = self.w0
             for iteration in tqdm(range(self.starting_iteration, self.nt)):
-                t                      = iteration*self.dt
-                (u,v,p,w,stop_sim) = self.step_(u, v, p, iteration, t, w_vel=w)
+                t = iteration*self.dt
+                u, v, p, w = self.advance_and_compute_loads(u, v, p, iteration, t, w_vel=w)
+                self._apply_force_feedback(iteration, t)
+                self.finalize_step(u, v, p, iteration, w_vel=w)
 
         if self.compute_forces and self.save_drags:
             self.save_drags_h5()

@@ -229,7 +229,7 @@ class SimConfig(BaseSimConfig):
         )
         cam["elevation"] = -30   # tilt 20° from straight-down (−90 = top-down)
         extensions.append({
-            "loader": "farms_mujoco.sensors.camera.CameraRecording",
+            "loader": "lilytorch.integration.streaming_camera.StreamingCameraRecording",
             "config": {
                 "path"            : os.path.join(output_folder, "output", "video.mp4"),
                 "animat_id"       : None,
@@ -249,7 +249,7 @@ class SimConfig(BaseSimConfig):
         #     overshoot=1.0,
         # )
         # extensions.append({
-        #     "loader": "farms_mujoco.sensors.camera.CameraRecording",
+        #     "loader": "lilytorch.integration.streaming_camera.StreamingCameraRecording",
         #     "config": {
         #         "path"            : os.path.join(output_folder, "output", "video_side.mp4"),
         #         "animat_id"       : None,
@@ -262,7 +262,7 @@ class SimConfig(BaseSimConfig):
 
         # Following camera: tight view locked on fish CoM
         extensions.append({
-            "loader": "farms_mujoco.sensors.camera.CameraRecording",
+            "loader": "lilytorch.integration.streaming_camera.StreamingCameraRecording",
             "config": {
                 "path"            : os.path.join(output_folder, "output", "video_follow.mp4"),
                 "animat_id"       : 0,

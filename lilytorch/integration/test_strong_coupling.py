@@ -48,6 +48,10 @@ class MockFluid:
         f = -self.m_added * a - self.drag * vel + self.buoyancy
         return np.array([f]), np.array([0.0])
 
+    def finalize(self, iteration):
+        # once-per-step fluid tail; nothing to do for the mock
+        self.n_finalize = getattr(self, "n_finalize", 0) + 1
+
 
 class MockBody:
     """1-DOF Newton-Euler body coupled through the mock fluid.
@@ -129,6 +133,22 @@ def test_checkpoint_restore_is_exercised_each_sweep():
     assert fluid.n_solves > 1
     # converged residual recorded
     assert drv.last_residual < 1e-8
+
+
+def test_finalize_called_once_per_step():
+    """The once-per-step fluid tail must run exactly once per step,
+    regardless of how many coupling sweeps were needed."""
+    fluid = MockFluid(m_added=4.0)
+    body = MockBody(fluid)
+    drv = StrongCoupledFSI(fluid=fluid, body=body,
+                           accelerator=IQNILS(omega_init=0.1),
+                           tol=1e-9, max_iter=80)
+    n_steps = 5
+    for it in range(n_steps):
+        fluid._state_n = body.state.copy()
+        drv.step(it, it * 1e-2, 1e-2)
+    assert fluid.n_solves > n_steps          # sub-iterated
+    assert getattr(fluid, "n_finalize", 0) == n_steps  # tail once per step
 
 
 def test_iqnils_terminal_velocity_matches_analytic():

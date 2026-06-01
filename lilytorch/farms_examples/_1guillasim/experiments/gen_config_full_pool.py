@@ -166,7 +166,7 @@ class SimConfig(BaseSimConfig):
             max_width=3840, max_height=2160,
         )
         extensions.append({
-            "loader": "farms_mujoco.sensors.camera.CameraRecording",
+            "loader": "lilytorch.integration.streaming_camera.StreamingCameraRecording",
             "config": {
                 "path"            : os.path.join(output_folder, "output", "video.mp4"),
                 "animat_id"       : None,

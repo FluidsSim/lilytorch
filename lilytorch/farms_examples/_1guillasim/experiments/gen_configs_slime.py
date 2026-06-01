@@ -181,7 +181,7 @@ class SimConfig(BaseSimConfig):
             overshoot=3
         )
         extensions.append({
-            "loader": "farms_mujoco.sensors.camera.CameraRecording",
+            "loader": "lilytorch.integration.streaming_camera.StreamingCameraRecording",
             "config": {
                 "path"            : os.path.join(output_folder, "output", "video.mp4"),
                 "animat_id"       : None,
