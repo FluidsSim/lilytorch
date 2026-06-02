@@ -213,6 +213,10 @@ class BDIMhandler:
         self.tol = float(_cpl.get("tol", 1e-4))
         self.max_iter = int(_cpl.get("max_iter", 30))
         self._predict_nstep = int(_cpl.get("predict_substeps", 1))
+        # Robustness: reject a candidate coupling-force whose norm exceeds
+        # ``force_bound`` x (running max load magnitude).  Prevents a runaway
+        # quasi-Newton iterate from being applied to MuJoCo and blowing up.
+        self._impl_force_bound = float(_cpl.get("force_bound", 100.0))
         self.last_iters = 0
         self.last_residual = 0.0
         self._mj_ckpt = None
@@ -2298,8 +2302,23 @@ class BDIMhandler:
         x = self._implicit_prev            # warm-start (None on the first step)
         x_tilde = None
         converged = False
+        # Robustness bookkeeping: track the best (min-residual, finite) load
+        # so a non-converging / oscillating step commits a sane force rather
+        # than a blown-up quasi-Newton iterate.  ``load_scale`` bounds the
+        # candidate force so a runaway step can never be applied to MuJoCo
+        # (which would teleport the body and crash the kernel AABB).
+        best_x, best_res = None, np.inf
+        load_scale = 1.0
+        diverged = False
 
         for k in range(1, self.max_iter + 1):
+            # ---- guard: never apply a non-finite or runaway candidate ----
+            if x is not None and (
+                    not np.all(np.isfinite(x))
+                    or np.linalg.norm(x) > self._impl_force_bound * load_scale):
+                diverged = True
+                break
+
             ckpt.restore(mj_n)              # MuJoCo -> sⁿ  (also mj_forward)
             self._fluid_restore(fluid_n)    # fluid   -> fluidⁿ
 
@@ -2317,29 +2336,56 @@ class BDIMhandler:
             if x is None:                   # very first sweep: no guess yet
                 x = np.zeros_like(x_tilde)
 
+            if np.all(np.isfinite(x_tilde)):
+                load_scale = max(load_scale, float(np.linalg.norm(x_tilde)))
+
             res = acc.residual_norm(x, x_tilde)
             self.last_iters, self.last_residual = k, float(res)
+            if np.isfinite(res) and res < best_res:
+                best_res, best_x = res, x_tilde.copy()
             if res < self.tol * (1.0 + np.linalg.norm(x)):
                 converged = True
                 break
             if not np.isfinite(res):
+                diverged = True
                 break
             x = np.asarray(acc.relax(x, x_tilde), dtype=np.float64)
 
         acc.finalize_timestep()
         self._pose_source = prev_src
-        self._implicit_prev = x            # warm-start next step
+
+        # ---- choose the committed load ----
+        # Converged: the last x̃.  Otherwise: the best-effort (min-residual)
+        # iterate seen — never a blown-up one.  Do NOT warm-start the next
+        # step from a non-converged guess.
+        x_commit = x_tilde if converged else best_x
+        if x_commit is None:               # not even one finite sweep
+            x_commit = np.zeros(int(np.prod(shapes[0])) + int(np.prod(shapes[1])))
+        self._implicit_prev = x_commit if converged else None
 
         if not converged:
-            print(f"[BDIMhandler implicit] step {iteration}: not converged "
-                  f"in {self.max_iter} sweeps (res={self.last_residual:.3e})",
-                  flush=True)
+            print(f"[BDIMhandler implicit] step {iteration}: NOT converged in "
+                  f"{self.last_iters} sweeps (res={self.last_residual:.3e}"
+                  f"{', diverged' if diverged else ''}); committing best-effort "
+                  f"load (res={best_res:.3e}). Strong coupling can be "
+                  f"ill-conditioned for articulated / position-controlled "
+                  f"swimmers (especially force_method='lagrangian'); if this "
+                  f"recurs, use body.coupling.scheme='explicit'.", flush=True)
+            # Re-solve once at the committed load so the fluid state matches
+            # the force we are about to leave on xfrc (the last sweep may have
+            # been a rejected/oscillating iterate).
+            ckpt.restore(mj_n)
+            self._fluid_restore(fluid_n)
+            self._apply_forces(task, physics, loads=self._vector_to_loads(x_commit, shapes))
+            ckpt.integrate(nsub)
+            self._advance_fluid_at_current_pose(iteration, t)
+            fs.__dict__.update(_FS_FREE_AFTER_FORCES_3D)
 
-        # ---- commit (Option A): leave sⁿ + the (last candidate) force x ----
-        # The fluid is at the converged solve (pose s̃(x)); committing x makes
-        # the runtime's single integration reproduce exactly that pose.
+        # ---- commit (Option A): leave sⁿ + the committed force ----
+        # The fluid is at the solve for the committed pose; committing the
+        # same force makes the runtime's single integration reproduce it.
         ckpt.restore(mj_n)
-        self._apply_forces(task, physics, loads=self._vector_to_loads(x, shapes))
+        self._apply_forces(task, physics, loads=self._vector_to_loads(x_commit, shapes))
         # NOTE: implicit mode requires cb_sub_steps == 1 (design §7.1), so the
         # non-full-substep apply_forces(loads=None) path is never invoked
         # between full steps; xfrc_applied set here is what the runtime
