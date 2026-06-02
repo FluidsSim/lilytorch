@@ -994,36 +994,46 @@ class FluidSolver(PlottingMixin):
     def _fs_post_step(self, u, v, w_vel, iteration):
         """Free-surface bookkeeping invoked once per outer time step:
 
-        1. advect ``phi_fs`` with the projected (divergence-free) velocity;
-        2. periodically reinitialise to ``|∇phi| = 1``;
-        3. periodically extend the cell-centred velocity into the air
-           narrow band (used by next-step advection of ``phi_fs`` and
-           by the divergence stencil at cut faces).
+        1. extend the water velocity into the air band on a **copy**, and
+           advect ``phi_fs`` with that copy (the air-side velocity is what
+           lets the interface track the flow);
+        2. periodically reinitialise to ``|∇phi| = 1``.
 
-        The cell-centred velocity extension is applied to **MAC velocity
-        components** in-place (a constant-along-normal extension on the
-        MAC grid is a defensible first approximation as long as the
-        narrow band has only a few cells of air on the air side of the
-        interface — within that band the staggered offset matters less
-        than the upwind direction itself).
+        Crucially, the velocity extension must **not** mutate the solver's
+        own ``u/v/w``.  Those are the projected, divergence-free fields the
+        next predictor + projection consume; overwriting the air band with
+        a constant-along-normal (non-divergence-free) extrapolation
+        re-injects divergence at the interface every step, which under
+        gravity feeds a growing near-surface velocity mode and eventually
+        blows up.  So we extend a throwaway copy used only to transport the
+        level set; the real velocity stays clean.
         """
         if self.free_surface is None:
             return
         fs = self.free_surface
-        if self.ndim == 2:
-            fs.advect(u, v, dt=float(self.dt))
+        do_extend = (self._fs_extend_every > 0
+                     and (iteration % self._fs_extend_every == 0))
+        dt = float(self.dt)
+
+        if do_extend:
+            # Extend a COPY into the air band, then advect phi with it.
+            full = self._fs_extend_full
+            if self.ndim == 2:
+                u_a, v_a = u.clone(), v.clone()
+                fs.extend_velocity(u_a, v_a, full=full)
+                fs.advect(u_a, v_a, dt=dt)
+            else:
+                u_a, v_a, w_a = u.clone(), v.clone(), w_vel.clone()
+                fs.extend_velocity(u_a, v_a, w_a, full=full)
+                fs.advect(u_a, v_a, w_a, dt=dt)
         else:
-            fs.advect(u, v, w_vel, dt=float(self.dt))
+            if self.ndim == 2:
+                fs.advect(u, v, dt=dt)
+            else:
+                fs.advect(u, v, w_vel, dt=dt)
 
         if self._fs_reinit_every > 0 and (iteration % self._fs_reinit_every == 0):
             fs.reinitialize()
-
-        if self._fs_extend_every > 0 and (iteration % self._fs_extend_every == 0):
-            full = self._fs_extend_full
-            if self.ndim == 2:
-                fs.extend_velocity(u, v, full=full)
-            else:
-                fs.extend_velocity(u, v, w_vel, full=full)
 
     def inside(self, x):
         """
