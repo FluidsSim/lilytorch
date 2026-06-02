@@ -40,7 +40,7 @@ class SimConfig(BaseSimConfig):
         self.headless                      = False
         self.water_buoyancy                = True
         self.sdf_interp_method             = "triquadratic"
-        self.force_method                  = "eulerian"
+        self.force_method                  = "lagrangian"
         self.convexify                     = True
         self.zero_pressure_inside          = False
         self.body_velocity_blend_eps_cells = 2
@@ -77,6 +77,15 @@ class SimConfig(BaseSimConfig):
 
         ]
 
+
+        self.coupling = {
+            "scheme": "implicit",
+            "accelerator": "iqn-ils",   # or "aitken" / "constant"
+            "reuse": 2,
+            "tol": 1e-4,
+            "max_iter": 30,
+        }
+
         # ── 3-D grid ─────────────────────────────────────────────────
         self.Nx           = 512
         self.Ny           = 128
@@ -88,7 +97,7 @@ class SimConfig(BaseSimConfig):
         self.zmin         = -0.00625
         self.zmax         = 0.00625
         self.timestep     = 0.0005
-        self.n_iterations = 4001
+        self.n_iterations = 401
 
         # self.Nx           = 1024
         # self.Ny           = 256

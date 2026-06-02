@@ -285,7 +285,7 @@ def _plot(data: dict[int, dict], args: argparse.Namespace) -> str:
     plt.tight_layout()
     out_path = os.path.join(
         args.out_dir,
-        f"scaling_{args.mode}_b{args.n_bodies:02d}_{args.poisson_method}.png",
+        f"scaling_{args.mode}_b{args.n_bodies:02d}_{args.poisson_method}.pdf",
     )
     plt.savefig(out_path, dpi=130, bbox_inches="tight")
     plt.close()

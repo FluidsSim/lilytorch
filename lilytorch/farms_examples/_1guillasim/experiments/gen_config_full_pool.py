@@ -21,19 +21,31 @@ class SimConfig(BaseSimConfig):
         self.use_bdim                      = True
         self.compute_sdf                   = True
         self.convexify                     = True
-        self.force_method                  = "eulerian"
+        self.force_method                  = "lagrangian"
         self.zero_pressure_inside          = True
         # self.force_relaxation              = 0.3
         self.body_velocity_blend_eps_cells = None
         self.bdim_mu0_projection           = False
-        self.convexify                     = True
         self.bdim_body_div_correction      = True
+        self.poisson_method                = "multigrid"
+
+
+        # self.coupling = {
+        #     "scheme": "implicit",
+        #     "accelerator": "iqn-ils",   # or "aitken" / "constant"
+        #     "reuse": 2,
+        #     "tol": 1e-4,
+        #     "max_iter": 30,
+        # }
+
 
         self.headless             = False
         self.smagorinsky_cs       = 0.
 
         # self.solver_method    = "python"
         self.compile_adv_diff = True
+
+
 
         # ── Animats ───────────────────────────────────────────────────
         self.animats_pars = [
@@ -86,7 +98,6 @@ class SimConfig(BaseSimConfig):
         self.poisson_max_mgcg_cycles = 10
         self.poisson_precond_vcycles = 1
         self.poisson_warm_start      = True
-        self.poisson_method          = "mgcg"
         self.poisson_smoother        = "jacobi"
         self.poisson_nsmoothing      = 5
         self.poisson_bc_type         = "free"
