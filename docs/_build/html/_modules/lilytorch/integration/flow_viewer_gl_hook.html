@@ -1,0 +1,1134 @@
+<!doctype html>
+<html class="no-js" lang="en" data-content_root="../../../">
+  <head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="light dark"><link rel="index" title="Index" href="../../../genindex.html"><link rel="search" title="Search" href="../../../search.html">
+
+    <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
+        <title>lilytorch.integration.flow_viewer_gl_hook - LilyTorch Documentation</title>
+      <link rel="stylesheet" type="text/css" href="../../../_static/pygments.css?v=d111a655" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/styles/furo.css?v=7bdb33bb" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/styles/furo-extensions.css?v=8dab3a3b" />
+    <link rel="stylesheet" type="text/css" href="../../../_static/custom.css?v=8556ca62" />
+    
+    
+
+
+<style>
+  body {
+    --color-code-background: #f2f2f2;
+  --color-code-foreground: #1e1e1e;
+  --color-brand-primary: #2962FF;
+  --color-brand-content: #2962FF;
+  
+  }
+  @media not print {
+    body[data-theme="dark"] {
+      --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  --color-brand-primary: #82B1FF;
+  --color-brand-content: #82B1FF;
+  
+    }
+    @media (prefers-color-scheme: dark) {
+      body:not([data-theme="light"]) {
+        --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  --color-brand-primary: #82B1FF;
+  --color-brand-content: #82B1FF;
+  
+      }
+    }
+  }
+</style></head>
+  <body>
+    
+    <script>
+      document.body.dataset.theme = localStorage.getItem("theme") || "auto";
+    </script>
+    
+
+<svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+  <symbol id="svg-toc" viewBox="0 0 24 24">
+    <title>Contents</title>
+    <svg stroke="currentColor" fill="currentColor" stroke-width="0" viewBox="0 0 1024 1024">
+      <path d="M408 442h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8zm-8 204c0 4.4 3.6 8 8 8h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56zm504-486H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zm0 632H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zM115.4 518.9L271.7 642c5.8 4.6 14.4.5 14.4-6.9V388.9c0-7.4-8.5-11.5-14.4-6.9L115.4 505.1a8.74 8.74 0 0 0 0 13.8z"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-menu" viewBox="0 0 24 24">
+    <title>Menu</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-menu">
+      <line x1="3" y1="12" x2="21" y2="12"></line>
+      <line x1="3" y1="6" x2="21" y2="6"></line>
+      <line x1="3" y1="18" x2="21" y2="18"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-arrow-right" viewBox="0 0 24 24">
+    <title>Expand</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-chevron-right">
+      <polyline points="9 18 15 12 9 6"></polyline>
+    </svg>
+  </symbol>
+  <symbol id="svg-sun" viewBox="0 0 24 24">
+    <title>Light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="feather-sun">
+      <circle cx="12" cy="12" r="5"></circle>
+      <line x1="12" y1="1" x2="12" y2="3"></line>
+      <line x1="12" y1="21" x2="12" y2="23"></line>
+      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+      <line x1="1" y1="12" x2="3" y2="12"></line>
+      <line x1="21" y1="12" x2="23" y2="12"></line>
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon" viewBox="0 0 24 24">
+    <title>Dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-moon">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z" />
+    </svg>
+  </symbol>
+  <symbol id="svg-sun-with-moon" viewBox="0 0 24 24">
+    <title>Auto light/dark, in light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path style="opacity: 50%" d="M 5.411 14.504 C 5.471 14.504 5.532 14.504 5.591 14.504 C 3.639 16.319 4.383 19.569 6.931 20.352 C 7.693 20.586 8.512 20.551 9.25 20.252 C 8.023 23.207 4.056 23.725 2.11 21.184 C 0.166 18.642 1.702 14.949 4.874 14.536 C 5.051 14.512 5.231 14.5 5.411 14.5 L 5.411 14.504 Z"/>
+      <line x1="14.5" y1="3.25" x2="14.5" y2="1.25"/>
+      <line x1="14.5" y1="15.85" x2="14.5" y2="17.85"/>
+      <line x1="10.044" y1="5.094" x2="8.63" y2="3.68"/>
+      <line x1="19" y1="14.05" x2="20.414" y2="15.464"/>
+      <line x1="8.2" y1="9.55" x2="6.2" y2="9.55"/>
+      <line x1="20.8" y1="9.55" x2="22.8" y2="9.55"/>
+      <line x1="10.044" y1="14.006" x2="8.63" y2="15.42"/>
+      <line x1="19" y1="5.05" x2="20.414" y2="3.636"/>
+      <circle cx="14.5" cy="9.55" r="3.6"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon-with-sun" viewBox="0 0 24 24">
+    <title>Auto light/dark, in dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path d="M 8.282 7.007 C 8.385 7.007 8.494 7.007 8.595 7.007 C 5.18 10.184 6.481 15.869 10.942 17.24 C 12.275 17.648 13.706 17.589 15 17.066 C 12.851 22.236 5.91 23.143 2.505 18.696 C -0.897 14.249 1.791 7.786 7.342 7.063 C 7.652 7.021 7.965 7 8.282 7 L 8.282 7.007 Z"/>
+      <line style="opacity: 50%" x1="18" y1="3.705" x2="18" y2="2.5"/>
+      <line style="opacity: 50%" x1="18" y1="11.295" x2="18" y2="12.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="4.816" x2="14.464" y2="3.964"/>
+      <line style="opacity: 50%" x1="20.711" y1="10.212" x2="21.563" y2="11.063"/>
+      <line style="opacity: 50%" x1="14.205" y1="7.5" x2="13.001" y2="7.5"/>
+      <line style="opacity: 50%" x1="21.795" y1="7.5" x2="23" y2="7.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="10.184" x2="14.464" y2="11.036"/>
+      <line style="opacity: 50%" x1="20.711" y1="4.789" x2="21.563" y2="3.937"/>
+      <circle style="opacity: 50%" cx="18" cy="7.5" r="2.169"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-pencil" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-pencil-code">
+      <path d="M4 20h4l10.5 -10.5a2.828 2.828 0 1 0 -4 -4l-10.5 10.5v4" />
+      <path d="M13.5 6.5l4 4" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+  <symbol id="svg-eye" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-eye-code">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M10 12a2 2 0 1 0 4 0a2 2 0 0 0 -4 0" />
+      <path
+        d="M11.11 17.958c-3.209 -.307 -5.91 -2.293 -8.11 -5.958c2.4 -4 5.4 -6 9 -6c3.6 0 6.6 2 9 6c-.21 .352 -.427 .688 -.647 1.008" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+</svg>
+
+<input type="checkbox" class="sidebar-toggle" name="__navigation" id="__navigation" aria-label="Toggle site navigation sidebar">
+<input type="checkbox" class="sidebar-toggle" name="__toc" id="__toc" aria-label="Toggle table of contents sidebar">
+<label class="overlay sidebar-overlay" for="__navigation"></label>
+<label class="overlay toc-overlay" for="__toc"></label>
+
+<a class="skip-to-content muted-link" href="#furo-main-content">Skip to content</a>
+
+
+
+<div class="page">
+  <header class="mobile-header">
+    <div class="header-left">
+      <label class="nav-overlay-icon" for="__navigation">
+        <span class="icon"><svg><use href="#svg-menu"></use></svg></span>
+      </label>
+    </div>
+    <div class="header-center">
+      <a href="../../../index.html"><div class="brand">LilyTorch Documentation</div></a>
+    </div>
+    <div class="header-right">
+      <div class="theme-toggle-container theme-toggle-header">
+        <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+          <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+          <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+          <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+          <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+        </button>
+      </div>
+      <label class="toc-overlay-icon toc-header-icon no-toc" for="__toc">
+        <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+      </label>
+    </div>
+  </header>
+  <aside class="sidebar-drawer">
+    <div class="sidebar-container">
+      
+      <div class="sidebar-sticky"><a class="sidebar-brand" href="../../../index.html">
+  
+  <span class="sidebar-brand-text">LilyTorch Documentation</span>
+  
+</a><form class="sidebar-search-container" method="get" action="../../../search.html" role="search">
+  <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
+  <input type="hidden" name="check_keywords" value="yes">
+  <input type="hidden" name="area" value="default">
+</form>
+<div id="searchbox"></div><div class="sidebar-scroll"><div class="sidebar-tree">
+  <p class="caption" role="heading"><span class="caption-text">User Guide</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../getting_started.html">Getting Started</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../examples.html">Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../parameters.html">Configuration Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../boundary_conditions.html">Boundary Conditions</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../visualization.html">Visualisation &amp; Post-processing</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Theory &amp; Numerics</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../mathematical_formulation.html">Mathematical Formulation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../numerical_schemes.html">Numerical Schemes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../immersed_boundary.html">Immersed Boundary Method — BDIM2</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../strong_coupling.html">Strong (implicit) FSI coupling</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">API Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../../../api/solver.html"><code class="docutils literal notranslate"><span class="pre">solver</span></code> — Navier–Stokes Solver</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../api/solver.html#forces-hydrodynamic-force-integrators"><code class="docutils literal notranslate"><span class="pre">forces</span></code> — Hydrodynamic Force Integrators</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../api/solver.html#extras-sponge-les-non-newtonian-viscosity"><code class="docutils literal notranslate"><span class="pre">extras</span></code> — Sponge, LES &amp; Non-Newtonian Viscosity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../api/adv_diff.html"><code class="docutils literal notranslate"><span class="pre">adv_diff</span></code> — Advection–Diffusion Solver</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../api/poisson.html"><code class="docutils literal notranslate"><span class="pre">poisson</span></code> — Pressure Solvers</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../api/body.html"><code class="docutils literal notranslate"><span class="pre">body</span></code> — Geometry, SDF &amp; Kinematics</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../api/operations.html"><code class="docutils literal notranslate"><span class="pre">operations</span></code> — Discrete Differential Operators</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../api/plotting.html"><code class="docutils literal notranslate"><span class="pre">plotting</span></code> — Visualisation Helpers</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../api/integration.html"><code class="docutils literal notranslate"><span class="pre">integration</span></code> — FARMS / MuJoCo Coupling Layer</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../api/util.html"><code class="docutils literal notranslate"><span class="pre">util</span></code> — Utilities</a></li>
+</ul>
+
+</div>
+</div>
+
+      </div>
+      
+    </div>
+  </aside>
+  <div class="main">
+    <div class="content">
+      <div class="article-container">
+        <a href="#" class="back-to-top muted-link">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+            <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+          </svg>
+          <span>Back to top</span>
+        </a>
+        <div class="content-icon-container">
+          <div class="theme-toggle-container theme-toggle-content">
+            <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+              <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+              <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+              <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+              <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+            </button>
+          </div>
+          <label class="toc-overlay-icon toc-content-icon no-toc" for="__toc">
+            <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+          </label>
+        </div>
+        <article role="main" id="furo-main-content">
+          <h1>Source code for lilytorch.integration.flow_viewer_gl_hook</h1><div class="highlight"><pre>
+<span></span><span class="sd">&quot;&quot;&quot;Passive-viewer GL hook for the 2-D flow overlay.</span>
+
+<span class="sd">The C source is embedded below as a Python string and compiled on first use</span>
+<span class="sd">(requires gcc).  No separate .c file is needed in the repository.</span>
+
+<span class="sd">The compiled shared library is loaded via ``LD_PRELOAD`` into the FARMS</span>
+<span class="sd">subprocess so that it can intercept ``mjr_render`` at the dynamic-linker</span>
+<span class="sd">level — the only reliable way to inject an OpenGL overlay into MuJoCo&#39;s</span>
+<span class="sd">passive viewer, whose rendering loop lives entirely in C/C++.</span>
+
+<span class="sd">Usage (from your gen_configs script or BaseSimConfig.single_run)::</span>
+
+<span class="sd">    from lilytorch.integration.flow_viewer_gl_hook import prepare_mujoco_gl_hook_env</span>
+<span class="sd">    subprocess.run([&#39;bash&#39;, &#39;run.sh&#39;], env=prepare_mujoco_gl_hook_env())</span>
+
+<span class="sd">Inside the simulation the FlowViewer2DGPU extension calls</span>
+<span class="sd">``get_flow_viewer_gl_hook()`` which returns the singleton controller.</span>
+<span class="sd">&quot;&quot;&quot;</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">__future__</span><span class="w"> </span><span class="kn">import</span> <span class="n">annotations</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">ctypes</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">ctypes.util</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">os</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">shutil</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">subprocess</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">sys</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">tempfile</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">threading</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
+
+<span class="kn">import</span><span class="w"> </span><span class="nn">numpy</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">np</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">torch</span>
+
+
+<span class="c1"># ── Embedded C source ─────────────────────────────────────────────────────────</span>
+
+<span class="n">_GL_HOOK_C_SOURCE</span> <span class="o">=</span> <span class="sa">r</span><span class="s2">&quot;&quot;&quot;</span>
+<span class="s2">#define _GNU_SOURCE</span>
+<span class="s2">#define GL_GLEXT_PROTOTYPES</span>
+
+<span class="s2">#include &lt;GL/gl.h&gt;</span>
+<span class="s2">#include &lt;GL/glext.h&gt;</span>
+<span class="s2">#include &lt;dlfcn.h&gt;</span>
+<span class="s2">#include &lt;math.h&gt;</span>
+<span class="s2">#include &lt;mujoco/mujoco.h&gt;</span>
+<span class="s2">#include &lt;pthread.h&gt;</span>
+<span class="s2">#include &lt;stdint.h&gt;</span>
+<span class="s2">#include &lt;stdio.h&gt;</span>
+<span class="s2">#include &lt;string.h&gt;</span>
+
+<span class="s2">#define CUDA_GRAPHICS_REGISTER_FLAGS_WRITE_DISCARD 2U</span>
+<span class="s2">#define CUDA_MEMCPY_DEVICE_TO_DEVICE 3</span>
+
+<span class="s2">typedef int cudaError_t;</span>
+<span class="s2">typedef void* cudaGraphicsResource_t;</span>
+
+<span class="s2">extern cudaError_t cudaSetDevice(int device);</span>
+<span class="s2">extern cudaError_t cudaGraphicsGLRegisterBuffer(</span>
+<span class="s2">  cudaGraphicsResource_t* resource,</span>
+<span class="s2">  unsigned int buffer,</span>
+<span class="s2">  unsigned int flags);</span>
+<span class="s2">extern cudaError_t cudaGraphicsMapResources(</span>
+<span class="s2">    int count,</span>
+<span class="s2">    cudaGraphicsResource_t* resources,</span>
+<span class="s2">    void* stream);</span>
+<span class="s2">extern cudaError_t cudaGraphicsResourceGetMappedPointer(</span>
+<span class="s2">  void** devPtr,</span>
+<span class="s2">  size_t* size,</span>
+<span class="s2">  cudaGraphicsResource_t resource);</span>
+<span class="s2">extern cudaError_t cudaGraphicsUnmapResources(</span>
+<span class="s2">    int count,</span>
+<span class="s2">    cudaGraphicsResource_t* resources,</span>
+<span class="s2">    void* stream);</span>
+<span class="s2">extern cudaError_t cudaGraphicsUnregisterResource(cudaGraphicsResource_t resource);</span>
+<span class="s2">extern cudaError_t cudaMemcpy(void* dst, const void* src, size_t count, int kind);</span>
+<span class="s2">extern const char* cudaGetErrorString(cudaError_t error);</span>
+
+<span class="s2">typedef void (*mjr_render_fn)(mjrRect viewport, mjvScene* scn, const mjrContext* con);</span>
+
+<span class="s2">typedef struct {</span>
+<span class="s2">  pthread_mutex_t mutex;</span>
+<span class="s2">  int enabled;</span>
+<span class="s2">  int width;</span>
+<span class="s2">  int height;</span>
+<span class="s2">  int device;</span>
+<span class="s2">  int resource_width;</span>
+<span class="s2">  int resource_height;</span>
+<span class="s2">  int resource_device;</span>
+<span class="s2">  int generation;</span>
+<span class="s2">  int uploaded_generation;</span>
+<span class="s2">  uintptr_t cuda_ptr;</span>
+<span class="s2">  float plane_center[3];</span>
+<span class="s2">  float plane_size[2];</span>
+<span class="s2">  float alpha;</span>
+<span class="s2">  GLuint texture;</span>
+<span class="s2">  GLuint pbo;</span>
+<span class="s2">  GLuint vao;</span>
+<span class="s2">  GLuint vbo;</span>
+<span class="s2">  GLuint program;</span>
+<span class="s2">  GLint alpha_location;</span>
+<span class="s2">  GLint texture_location;</span>
+<span class="s2">  cudaGraphicsResource_t resource;</span>
+<span class="s2">  int gl_ready;</span>
+<span class="s2">} FlowViewerHookState;</span>
+
+<span class="s2">static FlowViewerHookState g_state = {</span>
+<span class="s2">    .mutex = PTHREAD_MUTEX_INITIALIZER,</span>
+<span class="s2">    .enabled = 0,</span>
+<span class="s2">    .width = 0,</span>
+<span class="s2">    .height = 0,</span>
+<span class="s2">    .device = 0,</span>
+<span class="s2">  .resource_width = 0,</span>
+<span class="s2">  .resource_height = 0,</span>
+<span class="s2">  .resource_device = -1,</span>
+<span class="s2">    .generation = 0,</span>
+<span class="s2">    .uploaded_generation = -1,</span>
+<span class="s2">    .cuda_ptr = 0,</span>
+<span class="s2">    .plane_center = {0.0f, 0.0f, 0.0f},</span>
+<span class="s2">    .plane_size = {0.0f, 0.0f},</span>
+<span class="s2">    .alpha = 0.0f,</span>
+<span class="s2">    .texture = 0,</span>
+<span class="s2">    .pbo = 0,</span>
+<span class="s2">    .vao = 0,</span>
+<span class="s2">    .vbo = 0,</span>
+<span class="s2">    .program = 0,</span>
+<span class="s2">    .alpha_location = -1,</span>
+<span class="s2">    .texture_location = -1,</span>
+<span class="s2">    .resource = NULL,</span>
+<span class="s2">    .gl_ready = 0,</span>
+<span class="s2">};</span>
+
+<span class="s2">static mjr_render_fn real_mjr_render = NULL;</span>
+<span class="s2">static int logged_cuda_error = 0;</span>
+<span class="s2">static int logged_gl_error = 0;</span>
+
+<span class="s2">static const char* k_vertex_shader =</span>
+<span class="s2">    &quot;#version 330 core\n&quot;</span>
+<span class="s2">    &quot;layout (location = 0) in vec3 aClip;\n&quot;</span>
+<span class="s2">    &quot;layout (location = 1) in vec2 aUv;\n&quot;</span>
+<span class="s2">    &quot;out vec2 vUv;\n&quot;</span>
+<span class="s2">    &quot;void main() {\n&quot;</span>
+<span class="s2">    &quot;  vUv = aUv;\n&quot;</span>
+<span class="s2">    &quot;  gl_Position = vec4(aClip.xy, 0.0, aClip.z);\n&quot;</span>
+<span class="s2">    &quot;}\n&quot;;</span>
+
+<span class="s2">static const char* k_fragment_shader =</span>
+<span class="s2">    &quot;#version 330 core\n&quot;</span>
+<span class="s2">    &quot;in vec2 vUv;\n&quot;</span>
+<span class="s2">    &quot;out vec4 FragColor;\n&quot;</span>
+<span class="s2">    &quot;uniform sampler2D uTexture;\n&quot;</span>
+<span class="s2">    &quot;uniform float uAlpha;\n&quot;</span>
+<span class="s2">    &quot;void main() {\n&quot;</span>
+<span class="s2">    &quot;  vec3 color = texture(uTexture, vUv).rgb;\n&quot;</span>
+<span class="s2">    &quot;  vec3 delta = vec3(1.0) - color;\n&quot;</span>
+<span class="s2">    &quot;  float strength = clamp(max(delta.r, max(delta.g, delta.b)), 0.0, 1.0);\n&quot;</span>
+<span class="s2">    &quot;  float alpha = uAlpha * (0.30 + 0.70 * pow(strength, 0.4));\n&quot;</span>
+<span class="s2">    &quot;  FragColor = vec4(color, alpha);\n&quot;</span>
+<span class="s2">    &quot;}\n&quot;;</span>
+
+<span class="s2">static void ensure_real_mjr_render(void) {</span>
+<span class="s2">  if (!real_mjr_render) {</span>
+<span class="s2">    real_mjr_render = (mjr_render_fn)dlsym(RTLD_NEXT, &quot;mjr_render&quot;);</span>
+<span class="s2">  }</span>
+<span class="s2">}</span>
+
+<span class="s2">static int cuda_ok(cudaError_t error, const char* call) {</span>
+<span class="s2">  if (error == 0) {</span>
+<span class="s2">    return 1;</span>
+<span class="s2">  }</span>
+<span class="s2">  if (!logged_cuda_error) {</span>
+<span class="s2">    const char* message = cudaGetErrorString(error);</span>
+<span class="s2">    fprintf(</span>
+<span class="s2">        stderr,</span>
+<span class="s2">        &quot;[FlowViewerGLHook] </span><span class="si">%s</span><span class="s2"> failed with CUDA error </span><span class="si">%d</span><span class="s2">: </span><span class="si">%s</span><span class="s2">\n&quot;,</span>
+<span class="s2">        call,</span>
+<span class="s2">        error,</span>
+<span class="s2">        message ? message : &quot;unknown&quot;);</span>
+<span class="s2">    logged_cuda_error = 1;</span>
+<span class="s2">  }</span>
+<span class="s2">  return 0;</span>
+<span class="s2">}</span>
+
+<span class="s2">static int compile_shader(GLenum shader_type, const char* source, GLuint* shader_out) {</span>
+<span class="s2">  GLuint shader = glCreateShader(shader_type);</span>
+<span class="s2">  GLint compiled = 0;</span>
+<span class="s2">  glShaderSource(shader, 1, &amp;source, NULL);</span>
+<span class="s2">  glCompileShader(shader);</span>
+<span class="s2">  glGetShaderiv(shader, GL_COMPILE_STATUS, &amp;compiled);</span>
+<span class="s2">  if (!compiled) {</span>
+<span class="s2">    if (!logged_gl_error) {</span>
+<span class="s2">      char log_buffer[4096];</span>
+<span class="s2">      GLsizei log_size = 0;</span>
+<span class="s2">      glGetShaderInfoLog(shader, (GLsizei)sizeof(log_buffer), &amp;log_size, log_buffer);</span>
+<span class="s2">      fprintf(stderr, &quot;[FlowViewerGLHook] shader compile failed: </span><span class="si">%.*s</span><span class="s2">\n&quot;, (int)log_size, log_buffer);</span>
+<span class="s2">      logged_gl_error = 1;</span>
+<span class="s2">    }</span>
+<span class="s2">    glDeleteShader(shader);</span>
+<span class="s2">    return 0;</span>
+<span class="s2">  }</span>
+<span class="s2">  *shader_out = shader;</span>
+<span class="s2">  return 1;</span>
+<span class="s2">}</span>
+
+<span class="s2">static int create_program(GLuint* program_out, GLint* alpha_location, GLint* texture_location) {</span>
+<span class="s2">  GLuint vertex = 0;</span>
+<span class="s2">  GLuint fragment = 0;</span>
+<span class="s2">  GLuint program = 0;</span>
+<span class="s2">  GLint linked = 0;</span>
+
+<span class="s2">  if (!compile_shader(GL_VERTEX_SHADER, k_vertex_shader, &amp;vertex)) {</span>
+<span class="s2">    return 0;</span>
+<span class="s2">  }</span>
+<span class="s2">  if (!compile_shader(GL_FRAGMENT_SHADER, k_fragment_shader, &amp;fragment)) {</span>
+<span class="s2">    glDeleteShader(vertex);</span>
+<span class="s2">    return 0;</span>
+<span class="s2">  }</span>
+
+<span class="s2">  program = glCreateProgram();</span>
+<span class="s2">  glAttachShader(program, vertex);</span>
+<span class="s2">  glAttachShader(program, fragment);</span>
+<span class="s2">  glLinkProgram(program);</span>
+<span class="s2">  glDeleteShader(vertex);</span>
+<span class="s2">  glDeleteShader(fragment);</span>
+<span class="s2">  glGetProgramiv(program, GL_LINK_STATUS, &amp;linked);</span>
+<span class="s2">  if (!linked) {</span>
+<span class="s2">    if (!logged_gl_error) {</span>
+<span class="s2">      char log_buffer[4096];</span>
+<span class="s2">      GLsizei log_size = 0;</span>
+<span class="s2">      glGetProgramInfoLog(program, (GLsizei)sizeof(log_buffer), &amp;log_size, log_buffer);</span>
+<span class="s2">      fprintf(stderr, &quot;[FlowViewerGLHook] program link failed: </span><span class="si">%.*s</span><span class="s2">\n&quot;, (int)log_size, log_buffer);</span>
+<span class="s2">      logged_gl_error = 1;</span>
+<span class="s2">    }</span>
+<span class="s2">    glDeleteProgram(program);</span>
+<span class="s2">    return 0;</span>
+<span class="s2">  }</span>
+
+<span class="s2">  *alpha_location = glGetUniformLocation(program, &quot;uAlpha&quot;);</span>
+<span class="s2">  *texture_location = glGetUniformLocation(program, &quot;uTexture&quot;);</span>
+<span class="s2">  *program_out = program;</span>
+<span class="s2">  return 1;</span>
+<span class="s2">}</span>
+
+<span class="s2">static void destroy_gl_resources_locked(void) {</span>
+<span class="s2">  if (g_state.resource) {</span>
+<span class="s2">    if (g_state.resource_device &gt;= 0) {</span>
+<span class="s2">      cudaSetDevice(g_state.resource_device);</span>
+<span class="s2">    }</span>
+<span class="s2">    cudaGraphicsUnregisterResource(g_state.resource);</span>
+<span class="s2">    g_state.resource = NULL;</span>
+<span class="s2">  }</span>
+<span class="s2">  if (g_state.program) {</span>
+<span class="s2">    glDeleteProgram(g_state.program);</span>
+<span class="s2">    g_state.program = 0;</span>
+<span class="s2">  }</span>
+<span class="s2">  if (g_state.pbo) {</span>
+<span class="s2">    glDeleteBuffers(1, &amp;g_state.pbo);</span>
+<span class="s2">    g_state.pbo = 0;</span>
+<span class="s2">  }</span>
+<span class="s2">  if (g_state.vbo) {</span>
+<span class="s2">    glDeleteBuffers(1, &amp;g_state.vbo);</span>
+<span class="s2">    g_state.vbo = 0;</span>
+<span class="s2">  }</span>
+<span class="s2">  if (g_state.vao) {</span>
+<span class="s2">    glDeleteVertexArrays(1, &amp;g_state.vao);</span>
+<span class="s2">    g_state.vao = 0;</span>
+<span class="s2">  }</span>
+<span class="s2">  if (g_state.texture) {</span>
+<span class="s2">    glDeleteTextures(1, &amp;g_state.texture);</span>
+<span class="s2">    g_state.texture = 0;</span>
+<span class="s2">  }</span>
+<span class="s2">  g_state.gl_ready = 0;</span>
+<span class="s2">  g_state.uploaded_generation = -1;</span>
+<span class="s2">  g_state.resource_width = 0;</span>
+<span class="s2">  g_state.resource_height = 0;</span>
+<span class="s2">  g_state.resource_device = -1;</span>
+<span class="s2">}</span>
+
+<span class="s2">static int ensure_gl_resources_locked(void) {</span>
+<span class="s2">  GLsizeiptr vertex_bytes = (GLsizeiptr)(4 * 5 * (int)sizeof(float));</span>
+
+<span class="s2">  if (g_state.gl_ready &amp;&amp;</span>
+<span class="s2">      g_state.resource_width == g_state.width &amp;&amp;</span>
+<span class="s2">      g_state.resource_height == g_state.height &amp;&amp;</span>
+<span class="s2">      g_state.resource_device == g_state.device) {</span>
+<span class="s2">    return 1;</span>
+<span class="s2">  }</span>
+<span class="s2">  if (g_state.gl_ready) {</span>
+<span class="s2">    destroy_gl_resources_locked();</span>
+<span class="s2">  }</span>
+
+<span class="s2">  glGenTextures(1, &amp;g_state.texture);</span>
+<span class="s2">  glBindTexture(GL_TEXTURE_2D, g_state.texture);</span>
+<span class="s2">  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);</span>
+<span class="s2">  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);</span>
+<span class="s2">  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);</span>
+<span class="s2">  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);</span>
+<span class="s2">  glTexImage2D(</span>
+<span class="s2">      GL_TEXTURE_2D,</span>
+<span class="s2">      0,</span>
+<span class="s2">      GL_RGB8,</span>
+<span class="s2">      g_state.width,</span>
+<span class="s2">      g_state.height,</span>
+<span class="s2">      0,</span>
+<span class="s2">      GL_RGB,</span>
+<span class="s2">      GL_UNSIGNED_BYTE,</span>
+<span class="s2">      NULL);</span>
+<span class="s2">  glBindTexture(GL_TEXTURE_2D, 0);</span>
+
+<span class="s2">  glGenBuffers(1, &amp;g_state.pbo);</span>
+<span class="s2">  glBindBuffer(GL_PIXEL_UNPACK_BUFFER, g_state.pbo);</span>
+<span class="s2">  glBufferData(</span>
+<span class="s2">      GL_PIXEL_UNPACK_BUFFER,</span>
+<span class="s2">      (GLsizeiptr)(g_state.width * g_state.height * 3),</span>
+<span class="s2">      NULL,</span>
+<span class="s2">      GL_STREAM_DRAW);</span>
+<span class="s2">  glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);</span>
+
+<span class="s2">  if (!cuda_ok(cudaSetDevice(g_state.device), &quot;cudaSetDevice&quot;)) {</span>
+<span class="s2">    destroy_gl_resources_locked();</span>
+<span class="s2">    return 0;</span>
+<span class="s2">  }</span>
+
+<span class="s2">  if (!cuda_ok(cudaGraphicsGLRegisterBuffer(</span>
+<span class="s2">          &amp;g_state.resource,</span>
+<span class="s2">          g_state.pbo,</span>
+<span class="s2">          CUDA_GRAPHICS_REGISTER_FLAGS_WRITE_DISCARD),</span>
+<span class="s2">        &quot;cudaGraphicsGLRegisterBuffer&quot;)) {</span>
+<span class="s2">    destroy_gl_resources_locked();</span>
+<span class="s2">    return 0;</span>
+<span class="s2">  }</span>
+
+<span class="s2">  if (!create_program(&amp;g_state.program, &amp;g_state.alpha_location, &amp;g_state.texture_location)) {</span>
+<span class="s2">    destroy_gl_resources_locked();</span>
+<span class="s2">    return 0;</span>
+<span class="s2">  }</span>
+
+<span class="s2">  glGenVertexArrays(1, &amp;g_state.vao);</span>
+<span class="s2">  glGenBuffers(1, &amp;g_state.vbo);</span>
+<span class="s2">  glBindVertexArray(g_state.vao);</span>
+<span class="s2">  glBindBuffer(GL_ARRAY_BUFFER, g_state.vbo);</span>
+<span class="s2">  glBufferData(GL_ARRAY_BUFFER, vertex_bytes, NULL, GL_DYNAMIC_DRAW);</span>
+<span class="s2">  glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * (GLsizei)sizeof(float), (const void*)0);</span>
+<span class="s2">  glEnableVertexAttribArray(0);</span>
+<span class="s2">  glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * (GLsizei)sizeof(float), (const void*)(3 * sizeof(float)));</span>
+<span class="s2">  glEnableVertexAttribArray(1);</span>
+<span class="s2">  glBindBuffer(GL_ARRAY_BUFFER, 0);</span>
+<span class="s2">  glBindVertexArray(0);</span>
+
+<span class="s2">  g_state.resource_width = g_state.width;</span>
+<span class="s2">  g_state.resource_height = g_state.height;</span>
+<span class="s2">  g_state.resource_device = g_state.device;</span>
+<span class="s2">  g_state.gl_ready = 1;</span>
+<span class="s2">  return 1;</span>
+<span class="s2">}</span>
+
+<span class="s2">static int upload_texture_locked(void) {</span>
+<span class="s2">  void* mapped_ptr = NULL;</span>
+<span class="s2">  size_t mapped_size = 0;</span>
+<span class="s2">  size_t num_bytes = (size_t)(g_state.width * g_state.height * 3);</span>
+
+<span class="s2">  if (g_state.generation == g_state.uploaded_generation) {</span>
+<span class="s2">    return 1;</span>
+<span class="s2">  }</span>
+<span class="s2">  if (!g_state.cuda_ptr) {</span>
+<span class="s2">    return 0;</span>
+<span class="s2">  }</span>
+<span class="s2">  if (!ensure_gl_resources_locked()) {</span>
+<span class="s2">    return 0;</span>
+<span class="s2">  }</span>
+<span class="s2">  if (!cuda_ok(cudaSetDevice(g_state.device), &quot;cudaSetDevice&quot;)) {</span>
+<span class="s2">    return 0;</span>
+<span class="s2">  }</span>
+<span class="s2">  if (!cuda_ok(cudaGraphicsMapResources(1, &amp;g_state.resource, NULL), &quot;cudaGraphicsMapResources&quot;)) {</span>
+<span class="s2">    return 0;</span>
+<span class="s2">  }</span>
+<span class="s2">  if (!cuda_ok(cudaGraphicsResourceGetMappedPointer(&amp;mapped_ptr, &amp;mapped_size, g_state.resource),</span>
+<span class="s2">               &quot;cudaGraphicsResourceGetMappedPointer&quot;)) {</span>
+<span class="s2">    cudaGraphicsUnmapResources(1, &amp;g_state.resource, NULL);</span>
+<span class="s2">    return 0;</span>
+<span class="s2">  }</span>
+<span class="s2">  if (mapped_size &lt; num_bytes) {</span>
+<span class="s2">    cudaGraphicsUnmapResources(1, &amp;g_state.resource, NULL);</span>
+<span class="s2">    return 0;</span>
+<span class="s2">  }</span>
+<span class="s2">  if (!cuda_ok(cudaMemcpy(</span>
+<span class="s2">               mapped_ptr,</span>
+<span class="s2">               (const void*)g_state.cuda_ptr,</span>
+<span class="s2">               num_bytes,</span>
+<span class="s2">               CUDA_MEMCPY_DEVICE_TO_DEVICE),</span>
+<span class="s2">               &quot;cudaMemcpy&quot;)) {</span>
+<span class="s2">    cudaGraphicsUnmapResources(1, &amp;g_state.resource, NULL);</span>
+<span class="s2">    return 0;</span>
+<span class="s2">  }</span>
+<span class="s2">  if (!cuda_ok(cudaGraphicsUnmapResources(1, &amp;g_state.resource, NULL), &quot;cudaGraphicsUnmapResources&quot;)) {</span>
+<span class="s2">    return 0;</span>
+<span class="s2">  }</span>
+
+<span class="s2">  glBindTexture(GL_TEXTURE_2D, g_state.texture);</span>
+<span class="s2">  glPixelStorei(GL_UNPACK_ALIGNMENT, 1);</span>
+<span class="s2">  glBindBuffer(GL_PIXEL_UNPACK_BUFFER, g_state.pbo);</span>
+<span class="s2">  glTexSubImage2D(</span>
+<span class="s2">      GL_TEXTURE_2D,</span>
+<span class="s2">      0,</span>
+<span class="s2">      0,</span>
+<span class="s2">      0,</span>
+<span class="s2">      g_state.width,</span>
+<span class="s2">      g_state.height,</span>
+<span class="s2">      GL_RGB,</span>
+<span class="s2">      GL_UNSIGNED_BYTE,</span>
+<span class="s2">      0);</span>
+<span class="s2">  glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);</span>
+<span class="s2">  glBindTexture(GL_TEXTURE_2D, 0);</span>
+
+<span class="s2">  g_state.uploaded_generation = g_state.generation;</span>
+<span class="s2">  return 1;</span>
+<span class="s2">}</span>
+
+<span class="s2">static int build_vertices_locked(const mjvScene* scn, int viewport_width, int viewport_height, float vertices[20]) {</span>
+<span class="s2">  mjtNum headpos[3] = {0, 0, 0};</span>
+<span class="s2">  mjtNum forward[3] = {0, 0, 0};</span>
+<span class="s2">  mjtNum up[3] = {0, 0, 0};</span>
+<span class="s2">  mjtNum right[3] = {0, 0, 0};</span>
+<span class="s2">  mjtNum rel[3] = {0, 0, 0};</span>
+<span class="s2">  float uvs[4][2] = {{0.f, 0.f}, {1.f, 0.f}, {0.f, 1.f}, {1.f, 1.f}};</span>
+<span class="s2">  mjtNum x0 = (mjtNum)(g_state.plane_center[0] - g_state.plane_size[0]);</span>
+<span class="s2">  mjtNum x1 = (mjtNum)(g_state.plane_center[0] + g_state.plane_size[0]);</span>
+<span class="s2">  mjtNum y0 = (mjtNum)(g_state.plane_center[1] - g_state.plane_size[1]);</span>
+<span class="s2">  mjtNum y1 = (mjtNum)(g_state.plane_center[1] + g_state.plane_size[1]);</span>
+<span class="s2">  mjtNum z = (mjtNum)g_state.plane_center[2];</span>
+<span class="s2">  mjtNum corners[4][3] = {{x0, y0, z}, {x1, y0, z}, {x0, y1, z}, {x1, y1, z}};</span>
+<span class="s2">  mjtNum forward_norm;</span>
+<span class="s2">  mjtNum up_norm;</span>
+<span class="s2">  mjtNum right_norm;</span>
+<span class="s2">  mjtNum frustum_height;</span>
+<span class="s2">  mjtNum half_height_unit;</span>
+<span class="s2">  mjtNum half_width_unit;</span>
+<span class="s2">  int index;</span>
+
+<span class="s2">  mjv_cameraInModel(headpos, forward, up, scn);</span>
+<span class="s2">  forward_norm = sqrt(forward[0] * forward[0] + forward[1] * forward[1] + forward[2] * forward[2]);</span>
+<span class="s2">  up_norm = sqrt(up[0] * up[0] + up[1] * up[1] + up[2] * up[2]);</span>
+<span class="s2">  if (forward_norm &lt; 1e-8 || up_norm &lt; 1e-8) {</span>
+<span class="s2">    return 0;</span>
+<span class="s2">  }</span>
+<span class="s2">  forward[0] /= forward_norm;</span>
+<span class="s2">  forward[1] /= forward_norm;</span>
+<span class="s2">  forward[2] /= forward_norm;</span>
+<span class="s2">  up[0] /= up_norm;</span>
+<span class="s2">  up[1] /= up_norm;</span>
+<span class="s2">  up[2] /= up_norm;</span>
+
+<span class="s2">  right[0] = forward[1] * up[2] - forward[2] * up[1];</span>
+<span class="s2">  right[1] = forward[2] * up[0] - forward[0] * up[2];</span>
+<span class="s2">  right[2] = forward[0] * up[1] - forward[1] * up[0];</span>
+<span class="s2">  right_norm = sqrt(right[0] * right[0] + right[1] * right[1] + right[2] * right[2]);</span>
+<span class="s2">  if (right_norm &lt; 1e-8) {</span>
+<span class="s2">    return 0;</span>
+<span class="s2">  }</span>
+<span class="s2">  right[0] /= right_norm;</span>
+<span class="s2">  right[1] /= right_norm;</span>
+<span class="s2">  right[2] /= right_norm;</span>
+
+<span class="s2">  frustum_height = mjv_frustumHeight(scn);</span>
+<span class="s2">  if (frustum_height &lt;= 0) {</span>
+<span class="s2">    return 0;</span>
+<span class="s2">  }</span>
+<span class="s2">  half_height_unit = 0.5 * frustum_height;</span>
+<span class="s2">  half_width_unit = half_height_unit * ((mjtNum)viewport_width / (mjtNum)viewport_height);</span>
+
+<span class="s2">  for (index = 0; index &lt; 4; ++index) {</span>
+<span class="s2">    mjtNum depth;</span>
+<span class="s2">    mjtNum x_cam;</span>
+<span class="s2">    mjtNum y_cam;</span>
+
+<span class="s2">    rel[0] = corners[index][0] - headpos[0];</span>
+<span class="s2">    rel[1] = corners[index][1] - headpos[1];</span>
+<span class="s2">    rel[2] = corners[index][2] - headpos[2];</span>
+<span class="s2">    depth = rel[0] * forward[0] + rel[1] * forward[1] + rel[2] * forward[2];</span>
+<span class="s2">    if (depth &lt;= 1e-6) {</span>
+<span class="s2">      return 0;</span>
+<span class="s2">    }</span>
+<span class="s2">    x_cam = rel[0] * right[0] + rel[1] * right[1] + rel[2] * right[2];</span>
+<span class="s2">    y_cam = rel[0] * up[0] + rel[1] * up[1] + rel[2] * up[2];</span>
+<span class="s2">    vertices[index * 5 + 0] = (float)(x_cam / half_width_unit);</span>
+<span class="s2">    vertices[index * 5 + 1] = (float)(y_cam / half_height_unit);</span>
+<span class="s2">    vertices[index * 5 + 2] = (float)depth;</span>
+<span class="s2">    vertices[index * 5 + 3] = uvs[index][0];</span>
+<span class="s2">    vertices[index * 5 + 4] = uvs[index][1];</span>
+<span class="s2">  }</span>
+
+<span class="s2">  return 1;</span>
+<span class="s2">}</span>
+
+<span class="s2">static void draw_overlay_locked(const mjvScene* scn, mjrRect viewport) {</span>
+<span class="s2">  float vertices[20];</span>
+<span class="s2">  GLboolean depth_test_enabled = glIsEnabled(GL_DEPTH_TEST);</span>
+<span class="s2">  GLboolean blend_enabled = glIsEnabled(GL_BLEND);</span>
+
+<span class="s2">  if (!upload_texture_locked()) {</span>
+<span class="s2">    return;</span>
+<span class="s2">  }</span>
+<span class="s2">  if (!build_vertices_locked(scn, viewport.width, viewport.height, vertices)) {</span>
+<span class="s2">    return;</span>
+<span class="s2">  }</span>
+
+<span class="s2">  glViewport(viewport.left, viewport.bottom, viewport.width, viewport.height);</span>
+<span class="s2">  glDisable(GL_DEPTH_TEST);</span>
+<span class="s2">  glEnable(GL_BLEND);</span>
+<span class="s2">  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);</span>
+<span class="s2">  glUseProgram(g_state.program);</span>
+<span class="s2">  glUniform1f(g_state.alpha_location, g_state.alpha);</span>
+<span class="s2">  glActiveTexture(GL_TEXTURE0);</span>
+<span class="s2">  glBindTexture(GL_TEXTURE_2D, g_state.texture);</span>
+<span class="s2">  glUniform1i(g_state.texture_location, 0);</span>
+<span class="s2">  glBindVertexArray(g_state.vao);</span>
+<span class="s2">  glBindBuffer(GL_ARRAY_BUFFER, g_state.vbo);</span>
+<span class="s2">  glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)sizeof(vertices), vertices);</span>
+<span class="s2">  glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);</span>
+<span class="s2">  glBindBuffer(GL_ARRAY_BUFFER, 0);</span>
+<span class="s2">  glBindVertexArray(0);</span>
+<span class="s2">  glBindTexture(GL_TEXTURE_2D, 0);</span>
+<span class="s2">  glUseProgram(0);</span>
+<span class="s2">  if (!blend_enabled) {</span>
+<span class="s2">    glDisable(GL_BLEND);</span>
+<span class="s2">  }</span>
+<span class="s2">  if (depth_test_enabled) {</span>
+<span class="s2">    glEnable(GL_DEPTH_TEST);</span>
+<span class="s2">  }</span>
+<span class="s2">}</span>
+
+<span class="s2">__attribute__((visibility(&quot;default&quot;)))</span>
+<span class="s2">void lily_flow_viewer_hook_set_enabled(int enabled) {</span>
+<span class="s2">  pthread_mutex_lock(&amp;g_state.mutex);</span>
+<span class="s2">  g_state.enabled = enabled ? 1 : 0;</span>
+<span class="s2">  pthread_mutex_unlock(&amp;g_state.mutex);</span>
+<span class="s2">}</span>
+
+<span class="s2">__attribute__((visibility(&quot;default&quot;)))</span>
+<span class="s2">void lily_flow_viewer_hook_set_overlay(</span>
+<span class="s2">    const float plane_center[3],</span>
+<span class="s2">    const float plane_size[2],</span>
+<span class="s2">    float alpha,</span>
+<span class="s2">    const void* cuda_ptr,</span>
+<span class="s2">    int width,</span>
+<span class="s2">    int height,</span>
+<span class="s2">    int device,</span>
+<span class="s2">    int generation) {</span>
+<span class="s2">  pthread_mutex_lock(&amp;g_state.mutex);</span>
+<span class="s2">  g_state.enabled = 1;</span>
+<span class="s2">  g_state.width = width;</span>
+<span class="s2">  g_state.height = height;</span>
+<span class="s2">  g_state.device = device;</span>
+<span class="s2">  g_state.generation = generation;</span>
+<span class="s2">  g_state.cuda_ptr = (uintptr_t)cuda_ptr;</span>
+<span class="s2">  g_state.alpha = alpha;</span>
+<span class="s2">  memcpy(g_state.plane_center, plane_center, 3 * sizeof(float));</span>
+<span class="s2">  memcpy(g_state.plane_size, plane_size, 2 * sizeof(float));</span>
+<span class="s2">  pthread_mutex_unlock(&amp;g_state.mutex);</span>
+<span class="s2">}</span>
+
+<span class="s2">__attribute__((visibility(&quot;default&quot;)))</span>
+<span class="s2">void lily_flow_viewer_hook_clear(void) {</span>
+<span class="s2">  pthread_mutex_lock(&amp;g_state.mutex);</span>
+<span class="s2">  g_state.enabled = 0;</span>
+<span class="s2">  g_state.cuda_ptr = 0;</span>
+<span class="s2">  g_state.generation = 0;</span>
+<span class="s2">  g_state.uploaded_generation = -1;</span>
+<span class="s2">  pthread_mutex_unlock(&amp;g_state.mutex);</span>
+<span class="s2">}</span>
+
+<span class="s2">__attribute__((visibility(&quot;default&quot;)))</span>
+<span class="s2">void mjr_render(mjrRect viewport, mjvScene* scn, const mjrContext* con) {</span>
+<span class="s2">  ensure_real_mjr_render();</span>
+<span class="s2">  if (real_mjr_render) {</span>
+<span class="s2">    real_mjr_render(viewport, scn, con);</span>
+<span class="s2">  }</span>
+<span class="s2">  if (!con || !scn || con-&gt;currentBuffer != mjFB_WINDOW) {</span>
+<span class="s2">    return;</span>
+<span class="s2">  }</span>
+
+<span class="s2">  pthread_mutex_lock(&amp;g_state.mutex);</span>
+<span class="s2">  if (g_state.enabled &amp;&amp; g_state.width &gt; 0 &amp;&amp; g_state.height &gt; 0) {</span>
+<span class="s2">    draw_overlay_locked(scn, viewport);</span>
+<span class="s2">  }</span>
+<span class="s2">  pthread_mutex_unlock(&amp;g_state.mutex);</span>
+<span class="s2">}</span>
+<span class="s2">&quot;&quot;&quot;</span>
+
+
+<span class="c1"># ── Build helpers ─────────────────────────────────────────────────────────────</span>
+
+<span class="n">_HOOK_ENV_VAR</span> <span class="o">=</span> <span class="s2">&quot;LILYTORCH_FLOW_VIEWER_GL_HOOK_LIB&quot;</span>
+<span class="n">_BUILD_LOCK</span> <span class="o">=</span> <span class="n">threading</span><span class="o">.</span><span class="n">Lock</span><span class="p">()</span>
+<span class="n">_HOOK_INSTANCE</span> <span class="o">=</span> <span class="kc">None</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_locate_cudart</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="n">Path</span> <span class="o">|</span> <span class="kc">None</span><span class="p">:</span>
+    <span class="n">candidates</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">Path</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+
+    <span class="n">found</span> <span class="o">=</span> <span class="n">ctypes</span><span class="o">.</span><span class="n">util</span><span class="o">.</span><span class="n">find_library</span><span class="p">(</span><span class="s2">&quot;cudart&quot;</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">found</span><span class="p">:</span>
+        <span class="n">found_path</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">found</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">found_path</span><span class="o">.</span><span class="n">is_absolute</span><span class="p">()</span> <span class="ow">and</span> <span class="n">found_path</span><span class="o">.</span><span class="n">exists</span><span class="p">():</span>
+            <span class="n">candidates</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">found_path</span><span class="p">)</span>
+
+    <span class="n">cuda_home</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;CUDA_HOME&quot;</span><span class="p">)</span> <span class="ow">or</span> <span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;CUDA_PATH&quot;</span><span class="p">)</span>
+    <span class="k">if</span> <span class="n">cuda_home</span><span class="p">:</span>
+        <span class="n">home</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">cuda_home</span><span class="p">)</span>
+        <span class="n">candidates</span><span class="o">.</span><span class="n">extend</span><span class="p">([</span>
+            <span class="n">home</span> <span class="o">/</span> <span class="s2">&quot;targets&quot;</span> <span class="o">/</span> <span class="s2">&quot;x86_64-linux&quot;</span> <span class="o">/</span> <span class="s2">&quot;lib&quot;</span> <span class="o">/</span> <span class="s2">&quot;libcudart.so&quot;</span><span class="p">,</span>
+            <span class="n">home</span> <span class="o">/</span> <span class="s2">&quot;lib64&quot;</span> <span class="o">/</span> <span class="s2">&quot;libcudart.so&quot;</span><span class="p">,</span>
+        <span class="p">])</span>
+
+    <span class="k">for</span> <span class="n">cuda_root</span> <span class="ow">in</span> <span class="nb">sorted</span><span class="p">(</span><span class="n">Path</span><span class="p">(</span><span class="s2">&quot;/usr/local&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">glob</span><span class="p">(</span><span class="s2">&quot;cuda*&quot;</span><span class="p">)):</span>
+        <span class="n">candidates</span><span class="o">.</span><span class="n">extend</span><span class="p">([</span>
+            <span class="n">cuda_root</span> <span class="o">/</span> <span class="s2">&quot;targets&quot;</span> <span class="o">/</span> <span class="s2">&quot;x86_64-linux&quot;</span> <span class="o">/</span> <span class="s2">&quot;lib&quot;</span> <span class="o">/</span> <span class="s2">&quot;libcudart.so&quot;</span><span class="p">,</span>
+            <span class="n">cuda_root</span> <span class="o">/</span> <span class="s2">&quot;lib64&quot;</span> <span class="o">/</span> <span class="s2">&quot;libcudart.so&quot;</span><span class="p">,</span>
+        <span class="p">])</span>
+
+    <span class="k">for</span> <span class="n">candidate</span> <span class="ow">in</span> <span class="n">candidates</span><span class="p">:</span>
+        <span class="k">if</span> <span class="n">candidate</span><span class="o">.</span><span class="n">exists</span><span class="p">():</span>
+            <span class="k">return</span> <span class="n">candidate</span><span class="o">.</span><span class="n">resolve</span><span class="p">()</span>
+
+    <span class="k">return</span> <span class="kc">None</span>
+
+
+<span class="k">def</span><span class="w"> </span><span class="nf">_find_libmujoco</span><span class="p">(</span><span class="n">package_dir</span><span class="p">:</span> <span class="n">Path</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Path</span> <span class="o">|</span> <span class="kc">None</span><span class="p">:</span>
+    <span class="k">for</span> <span class="n">candidate</span> <span class="ow">in</span> <span class="nb">sorted</span><span class="p">(</span><span class="n">package_dir</span><span class="o">.</span><span class="n">glob</span><span class="p">(</span><span class="s2">&quot;libmujoco.so*&quot;</span><span class="p">)):</span>
+        <span class="k">if</span> <span class="n">candidate</span><span class="o">.</span><span class="n">is_file</span><span class="p">():</span>
+            <span class="k">return</span> <span class="n">candidate</span>
+    <span class="k">return</span> <span class="kc">None</span>
+
+
+<div class="viewcode-block" id="ensure_flow_viewer_gl_hook_built">
+<a class="viewcode-back" href="../../../api/integration.html#lilytorch.integration.flow_viewer_gl_hook.ensure_flow_viewer_gl_hook_built">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">ensure_flow_viewer_gl_hook_built</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="nb">str</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Compile the embedded C source into a shared library and return its path.&quot;&quot;&quot;</span>
+    <span class="k">with</span> <span class="n">_BUILD_LOCK</span><span class="p">:</span>
+        <span class="n">gcc</span> <span class="o">=</span> <span class="n">shutil</span><span class="o">.</span><span class="n">which</span><span class="p">(</span><span class="s2">&quot;gcc&quot;</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">gcc</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span><span class="s2">&quot;gcc is required to build the MuJoCo viewer GL hook.&quot;</span><span class="p">)</span>
+
+        <span class="kn">import</span><span class="w"> </span><span class="nn">mujoco</span>
+
+        <span class="n">package_dir</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="n">mujoco</span><span class="o">.</span><span class="vm">__file__</span><span class="p">)</span><span class="o">.</span><span class="n">resolve</span><span class="p">()</span><span class="o">.</span><span class="n">parent</span>
+        <span class="n">include_dir</span> <span class="o">=</span> <span class="n">package_dir</span> <span class="o">/</span> <span class="s2">&quot;include&quot;</span>
+        <span class="n">libmujoco</span> <span class="o">=</span> <span class="n">_find_libmujoco</span><span class="p">(</span><span class="n">package_dir</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">libmujoco</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span>
+                <span class="sa">f</span><span class="s2">&quot;Could not find libmujoco.so in </span><span class="si">{</span><span class="n">package_dir</span><span class="si">}</span><span class="s2">.&quot;</span>
+            <span class="p">)</span>
+
+        <span class="c1"># Cache the compiled library next to this Python file.</span>
+        <span class="c1"># Recompile whenever this Python file (which contains the C source) changes.</span>
+        <span class="n">build_dir</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="vm">__file__</span><span class="p">)</span><span class="o">.</span><span class="n">resolve</span><span class="p">()</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">parent</span><span class="o">.</span><span class="n">parent</span> <span class="o">/</span> <span class="s2">&quot;build&quot;</span> <span class="o">/</span> <span class="s2">&quot;flow_viewer_gl_hook&quot;</span>
+        <span class="n">output_path</span> <span class="o">=</span> <span class="n">build_dir</span> <span class="o">/</span> <span class="s2">&quot;libflow_viewer_gl_hook.so&quot;</span>
+        <span class="n">source_mtime</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="vm">__file__</span><span class="p">)</span><span class="o">.</span><span class="n">stat</span><span class="p">()</span><span class="o">.</span><span class="n">st_mtime</span>
+
+        <span class="k">if</span> <span class="n">output_path</span><span class="o">.</span><span class="n">exists</span><span class="p">()</span> <span class="ow">and</span> <span class="n">output_path</span><span class="o">.</span><span class="n">stat</span><span class="p">()</span><span class="o">.</span><span class="n">st_mtime</span> <span class="o">&gt;=</span> <span class="n">source_mtime</span><span class="p">:</span>
+            <span class="k">return</span> <span class="nb">str</span><span class="p">(</span><span class="n">output_path</span><span class="p">)</span>
+
+        <span class="n">build_dir</span><span class="o">.</span><span class="n">mkdir</span><span class="p">(</span><span class="n">parents</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">exist_ok</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+        <span class="n">cudart</span> <span class="o">=</span> <span class="n">_locate_cudart</span><span class="p">()</span>
+        <span class="k">if</span> <span class="n">cudart</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span>
+                <span class="s2">&quot;Could not locate libcudart.so for building the MuJoCo viewer GL hook.&quot;</span>
+            <span class="p">)</span>
+
+        <span class="c1"># Write embedded C source to a temp file for compilation</span>
+        <span class="k">with</span> <span class="n">tempfile</span><span class="o">.</span><span class="n">NamedTemporaryFile</span><span class="p">(</span>
+            <span class="n">suffix</span><span class="o">=</span><span class="s2">&quot;.c&quot;</span><span class="p">,</span> <span class="n">delete</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">mode</span><span class="o">=</span><span class="s2">&quot;w&quot;</span><span class="p">,</span> <span class="nb">dir</span><span class="o">=</span><span class="n">build_dir</span>
+        <span class="p">)</span> <span class="k">as</span> <span class="n">tmp</span><span class="p">:</span>
+            <span class="n">tmp</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="n">_GL_HOOK_C_SOURCE</span><span class="p">)</span>
+            <span class="n">tmp_c</span> <span class="o">=</span> <span class="n">tmp</span><span class="o">.</span><span class="n">name</span>
+
+        <span class="k">try</span><span class="p">:</span>
+            <span class="n">compile_cmd</span> <span class="o">=</span> <span class="p">[</span>
+                <span class="n">gcc</span><span class="p">,</span>
+                <span class="s2">&quot;-shared&quot;</span><span class="p">,</span> <span class="s2">&quot;-fPIC&quot;</span><span class="p">,</span> <span class="s2">&quot;-O3&quot;</span><span class="p">,</span> <span class="s2">&quot;-std=c11&quot;</span><span class="p">,</span>
+                <span class="s2">&quot;-Wall&quot;</span><span class="p">,</span> <span class="s2">&quot;-Wextra&quot;</span><span class="p">,</span> <span class="s2">&quot;-Wno-unused-parameter&quot;</span><span class="p">,</span>
+                <span class="s2">&quot;-I&quot;</span><span class="p">,</span> <span class="nb">str</span><span class="p">(</span><span class="n">include_dir</span><span class="p">),</span>
+                <span class="sa">f</span><span class="s2">&quot;-Wl,-rpath,</span><span class="si">{</span><span class="n">package_dir</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
+                <span class="s2">&quot;-o&quot;</span><span class="p">,</span> <span class="nb">str</span><span class="p">(</span><span class="n">output_path</span><span class="p">),</span>
+                <span class="n">tmp_c</span><span class="p">,</span>
+                <span class="nb">str</span><span class="p">(</span><span class="n">libmujoco</span><span class="p">),</span>
+                <span class="s2">&quot;-ldl&quot;</span><span class="p">,</span> <span class="s2">&quot;-lGL&quot;</span><span class="p">,</span> <span class="s2">&quot;-lpthread&quot;</span><span class="p">,</span>
+                <span class="sa">f</span><span class="s2">&quot;-Wl,-rpath,</span><span class="si">{</span><span class="n">cudart</span><span class="o">.</span><span class="n">parent</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
+                <span class="nb">str</span><span class="p">(</span><span class="n">cudart</span><span class="p">),</span>
+            <span class="p">]</span>
+            <span class="n">result</span> <span class="o">=</span> <span class="n">subprocess</span><span class="o">.</span><span class="n">run</span><span class="p">(</span>
+                <span class="n">compile_cmd</span><span class="p">,</span> <span class="n">capture_output</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">text</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">check</span><span class="o">=</span><span class="kc">False</span>
+            <span class="p">)</span>
+            <span class="k">if</span> <span class="n">result</span><span class="o">.</span><span class="n">returncode</span> <span class="o">!=</span> <span class="mi">0</span><span class="p">:</span>
+                <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span>
+                    <span class="s2">&quot;Failed to build flow viewer GL hook:</span><span class="se">\n</span><span class="s2">&quot;</span>
+                    <span class="sa">f</span><span class="s2">&quot;STDOUT:</span><span class="se">\n</span><span class="si">{</span><span class="n">result</span><span class="o">.</span><span class="n">stdout</span><span class="si">}</span><span class="se">\n</span><span class="s2">STDERR:</span><span class="se">\n</span><span class="si">{</span><span class="n">result</span><span class="o">.</span><span class="n">stderr</span><span class="si">}</span><span class="s2">&quot;</span>
+                <span class="p">)</span>
+        <span class="k">finally</span><span class="p">:</span>
+            <span class="k">try</span><span class="p">:</span>
+                <span class="n">os</span><span class="o">.</span><span class="n">unlink</span><span class="p">(</span><span class="n">tmp_c</span><span class="p">)</span>
+            <span class="k">except</span> <span class="ne">OSError</span><span class="p">:</span>
+                <span class="k">pass</span>
+
+        <span class="k">return</span> <span class="nb">str</span><span class="p">(</span><span class="n">output_path</span><span class="p">)</span></div>
+
+
+
+<span class="c1"># ── Public API ────────────────────────────────────────────────────────────────</span>
+
+<div class="viewcode-block" id="FlowViewerGLHook">
+<a class="viewcode-back" href="../../../api/integration.html#lilytorch.integration.flow_viewer_gl_hook.FlowViewerGLHook">[docs]</a>
+<span class="k">class</span><span class="w"> </span><span class="nc">FlowViewerGLHook</span><span class="p">:</span>
+    <span class="k">def</span><span class="w"> </span><span class="fm">__init__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">library_path</span><span class="p">:</span> <span class="nb">str</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">library_path</span> <span class="o">=</span> <span class="n">library_path</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_generation</span> <span class="o">=</span> <span class="mi">0</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_lib</span> <span class="o">=</span> <span class="n">ctypes</span><span class="o">.</span><span class="n">CDLL</span><span class="p">(</span><span class="n">library_path</span><span class="p">,</span> <span class="n">mode</span><span class="o">=</span><span class="n">ctypes</span><span class="o">.</span><span class="n">RTLD_GLOBAL</span><span class="p">)</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_lib</span><span class="o">.</span><span class="n">lily_flow_viewer_hook_set_enabled</span><span class="o">.</span><span class="n">argtypes</span> <span class="o">=</span> <span class="p">[</span><span class="n">ctypes</span><span class="o">.</span><span class="n">c_int</span><span class="p">]</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_lib</span><span class="o">.</span><span class="n">lily_flow_viewer_hook_set_enabled</span><span class="o">.</span><span class="n">restype</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_lib</span><span class="o">.</span><span class="n">lily_flow_viewer_hook_set_overlay</span><span class="o">.</span><span class="n">argtypes</span> <span class="o">=</span> <span class="p">[</span>
+            <span class="n">ctypes</span><span class="o">.</span><span class="n">POINTER</span><span class="p">(</span><span class="n">ctypes</span><span class="o">.</span><span class="n">c_float</span><span class="p">),</span>
+            <span class="n">ctypes</span><span class="o">.</span><span class="n">POINTER</span><span class="p">(</span><span class="n">ctypes</span><span class="o">.</span><span class="n">c_float</span><span class="p">),</span>
+            <span class="n">ctypes</span><span class="o">.</span><span class="n">c_float</span><span class="p">,</span>
+            <span class="n">ctypes</span><span class="o">.</span><span class="n">c_void_p</span><span class="p">,</span>
+            <span class="n">ctypes</span><span class="o">.</span><span class="n">c_int</span><span class="p">,</span>
+            <span class="n">ctypes</span><span class="o">.</span><span class="n">c_int</span><span class="p">,</span>
+            <span class="n">ctypes</span><span class="o">.</span><span class="n">c_int</span><span class="p">,</span>
+            <span class="n">ctypes</span><span class="o">.</span><span class="n">c_int</span><span class="p">,</span>
+        <span class="p">]</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_lib</span><span class="o">.</span><span class="n">lily_flow_viewer_hook_set_overlay</span><span class="o">.</span><span class="n">restype</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_lib</span><span class="o">.</span><span class="n">lily_flow_viewer_hook_clear</span><span class="o">.</span><span class="n">argtypes</span> <span class="o">=</span> <span class="p">[]</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_lib</span><span class="o">.</span><span class="n">lily_flow_viewer_hook_clear</span><span class="o">.</span><span class="n">restype</span> <span class="o">=</span> <span class="kc">None</span>
+
+<div class="viewcode-block" id="FlowViewerGLHook.set_enabled">
+<a class="viewcode-back" href="../../../api/integration.html#lilytorch.integration.flow_viewer_gl_hook.FlowViewerGLHook.set_enabled">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">set_enabled</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">enabled</span><span class="p">:</span> <span class="nb">bool</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_lib</span><span class="o">.</span><span class="n">lily_flow_viewer_hook_set_enabled</span><span class="p">(</span><span class="mi">1</span> <span class="k">if</span> <span class="n">enabled</span> <span class="k">else</span> <span class="mi">0</span><span class="p">)</span></div>
+
+
+<div class="viewcode-block" id="FlowViewerGLHook.clear">
+<a class="viewcode-back" href="../../../api/integration.html#lilytorch.integration.flow_viewer_gl_hook.FlowViewerGLHook.clear">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">clear</span><span class="p">(</span><span class="bp">self</span><span class="p">):</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_lib</span><span class="o">.</span><span class="n">lily_flow_viewer_hook_clear</span><span class="p">()</span></div>
+
+
+<div class="viewcode-block" id="FlowViewerGLHook.update">
+<a class="viewcode-back" href="../../../api/integration.html#lilytorch.integration.flow_viewer_gl_hook.FlowViewerGLHook.update">[docs]</a>
+    <span class="k">def</span><span class="w"> </span><span class="nf">update</span><span class="p">(</span>
+        <span class="bp">self</span><span class="p">,</span>
+        <span class="n">texture_rgb</span><span class="p">:</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">,</span>
+        <span class="n">plane_center</span><span class="p">,</span>
+        <span class="n">plane_size</span><span class="p">,</span>
+        <span class="n">alpha</span><span class="p">:</span> <span class="nb">float</span><span class="p">,</span>
+        <span class="n">synchronize</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">=</span> <span class="kc">True</span><span class="p">,</span>
+    <span class="p">):</span>
+        <span class="k">if</span> <span class="ow">not</span> <span class="n">texture_rgb</span><span class="o">.</span><span class="n">is_cuda</span><span class="p">:</span>
+            <span class="k">raise</span> <span class="ne">RuntimeError</span><span class="p">(</span><span class="s2">&quot;FlowViewerGLHook requires a CUDA tensor.&quot;</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">synchronize</span><span class="p">:</span>
+            <span class="n">torch</span><span class="o">.</span><span class="n">cuda</span><span class="o">.</span><span class="n">current_stream</span><span class="p">(</span><span class="n">texture_rgb</span><span class="o">.</span><span class="n">device</span><span class="p">)</span><span class="o">.</span><span class="n">synchronize</span><span class="p">()</span>
+
+        <span class="n">center</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">plane_center</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">float32</span><span class="p">)</span>
+        <span class="n">size_xy</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">plane_size</span><span class="p">,</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">float32</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">center</span><span class="o">.</span><span class="n">shape</span> <span class="o">!=</span> <span class="p">(</span><span class="mi">3</span><span class="p">,):</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Expected plane_center shape (3,), got </span><span class="si">{</span><span class="n">center</span><span class="o">.</span><span class="n">shape</span><span class="si">}</span><span class="s2">.&quot;</span><span class="p">)</span>
+        <span class="k">if</span> <span class="n">size_xy</span><span class="o">.</span><span class="n">shape</span> <span class="o">!=</span> <span class="p">(</span><span class="mi">2</span><span class="p">,):</span>
+            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Expected plane_size shape (2,), got </span><span class="si">{</span><span class="n">size_xy</span><span class="o">.</span><span class="n">shape</span><span class="si">}</span><span class="s2">.&quot;</span><span class="p">)</span>
+
+        <span class="bp">self</span><span class="o">.</span><span class="n">_generation</span> <span class="o">+=</span> <span class="mi">1</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_lib</span><span class="o">.</span><span class="n">lily_flow_viewer_hook_set_overlay</span><span class="p">(</span>
+            <span class="n">center</span><span class="o">.</span><span class="n">ctypes</span><span class="o">.</span><span class="n">data_as</span><span class="p">(</span><span class="n">ctypes</span><span class="o">.</span><span class="n">POINTER</span><span class="p">(</span><span class="n">ctypes</span><span class="o">.</span><span class="n">c_float</span><span class="p">)),</span>
+            <span class="n">size_xy</span><span class="o">.</span><span class="n">ctypes</span><span class="o">.</span><span class="n">data_as</span><span class="p">(</span><span class="n">ctypes</span><span class="o">.</span><span class="n">POINTER</span><span class="p">(</span><span class="n">ctypes</span><span class="o">.</span><span class="n">c_float</span><span class="p">)),</span>
+            <span class="n">ctypes</span><span class="o">.</span><span class="n">c_float</span><span class="p">(</span><span class="nb">float</span><span class="p">(</span><span class="n">alpha</span><span class="p">)),</span>
+            <span class="n">ctypes</span><span class="o">.</span><span class="n">c_void_p</span><span class="p">(</span><span class="nb">int</span><span class="p">(</span><span class="n">texture_rgb</span><span class="o">.</span><span class="n">data_ptr</span><span class="p">())),</span>
+            <span class="n">ctypes</span><span class="o">.</span><span class="n">c_int</span><span class="p">(</span><span class="nb">int</span><span class="p">(</span><span class="n">texture_rgb</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">1</span><span class="p">])),</span>
+            <span class="n">ctypes</span><span class="o">.</span><span class="n">c_int</span><span class="p">(</span><span class="nb">int</span><span class="p">(</span><span class="n">texture_rgb</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">])),</span>
+            <span class="n">ctypes</span><span class="o">.</span><span class="n">c_int</span><span class="p">(</span><span class="nb">int</span><span class="p">(</span><span class="n">texture_rgb</span><span class="o">.</span><span class="n">device</span><span class="o">.</span><span class="n">index</span> <span class="ow">or</span> <span class="mi">0</span><span class="p">)),</span>
+            <span class="n">ctypes</span><span class="o">.</span><span class="n">c_int</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">_generation</span><span class="p">),</span>
+        <span class="p">)</span></div>
+</div>
+
+
+
+<div class="viewcode-block" id="prepare_mujoco_gl_hook_env">
+<a class="viewcode-back" href="../../../api/integration.html#lilytorch.integration.flow_viewer_gl_hook.prepare_mujoco_gl_hook_env">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">prepare_mujoco_gl_hook_env</span><span class="p">(</span><span class="n">base_env</span><span class="p">:</span> <span class="nb">dict</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">dict</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Return an env dict with LD_PRELOAD set to the compiled GL hook library.</span>
+
+<span class="sd">    Call this before launching the FARMS subprocess so the hook is active</span>
+<span class="sd">    from process startup (required for LD_PRELOAD to intercept mjr_render).</span>
+<span class="sd">    &quot;&quot;&quot;</span>
+    <span class="n">env</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">environ</span> <span class="k">if</span> <span class="n">base_env</span> <span class="ow">is</span> <span class="kc">None</span> <span class="k">else</span> <span class="n">base_env</span><span class="p">)</span>
+
+    <span class="c1"># CUDA-OpenGL interop requires the viewer&#39;s GL context to live on the same</span>
+    <span class="c1"># GPU as the CUDA device. On hybrid Linux laptops, GLFW commonly lands on</span>
+    <span class="c1"># the integrated Mesa stack unless the subprocess is nudged toward the</span>
+    <span class="c1"># NVIDIA GLX vendor up front.</span>
+    <span class="k">if</span> <span class="p">(</span>
+        <span class="n">sys</span><span class="o">.</span><span class="n">platform</span><span class="o">.</span><span class="n">startswith</span><span class="p">(</span><span class="s2">&quot;linux&quot;</span><span class="p">)</span>
+        <span class="ow">and</span> <span class="n">env</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;DISPLAY&quot;</span><span class="p">)</span>
+        <span class="ow">and</span> <span class="n">env</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;MUJOCO_GL&quot;</span><span class="p">,</span> <span class="s2">&quot;glfw&quot;</span><span class="p">)</span> <span class="o">==</span> <span class="s2">&quot;glfw&quot;</span>
+        <span class="ow">and</span> <span class="n">env</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;XDG_SESSION_TYPE&quot;</span><span class="p">,</span> <span class="s2">&quot;x11&quot;</span><span class="p">)</span> <span class="o">==</span> <span class="s2">&quot;x11&quot;</span>
+        <span class="ow">and</span> <span class="n">shutil</span><span class="o">.</span><span class="n">which</span><span class="p">(</span><span class="s2">&quot;nvidia-smi&quot;</span><span class="p">)</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
+    <span class="p">):</span>
+        <span class="n">env</span><span class="o">.</span><span class="n">setdefault</span><span class="p">(</span><span class="s2">&quot;__NV_PRIME_RENDER_OFFLOAD&quot;</span><span class="p">,</span> <span class="s2">&quot;1&quot;</span><span class="p">)</span>
+        <span class="n">env</span><span class="o">.</span><span class="n">setdefault</span><span class="p">(</span><span class="s2">&quot;__GLX_VENDOR_LIBRARY_NAME&quot;</span><span class="p">,</span> <span class="s2">&quot;nvidia&quot;</span><span class="p">)</span>
+        <span class="n">env</span><span class="o">.</span><span class="n">setdefault</span><span class="p">(</span><span class="s2">&quot;__VK_LAYER_NV_optimus&quot;</span><span class="p">,</span> <span class="s2">&quot;NVIDIA_only&quot;</span><span class="p">)</span>
+
+    <span class="k">try</span><span class="p">:</span>
+        <span class="n">library_path</span> <span class="o">=</span> <span class="n">ensure_flow_viewer_gl_hook_built</span><span class="p">()</span>
+    <span class="k">except</span> <span class="ne">Exception</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>
+        <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;[FlowViewerGLHook] WARNING: could not build GL hook: </span><span class="si">{</span><span class="n">exc</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+        <span class="k">return</span> <span class="n">env</span>
+
+    <span class="n">entries</span> <span class="o">=</span> <span class="p">[</span><span class="n">e</span> <span class="k">for</span> <span class="n">e</span> <span class="ow">in</span> <span class="n">env</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;LD_PRELOAD&quot;</span><span class="p">,</span> <span class="s2">&quot;&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">split</span><span class="p">(</span><span class="s2">&quot;:&quot;</span><span class="p">)</span> <span class="k">if</span> <span class="n">e</span><span class="p">]</span>
+    <span class="k">if</span> <span class="n">library_path</span> <span class="ow">not</span> <span class="ow">in</span> <span class="n">entries</span><span class="p">:</span>
+        <span class="n">entries</span><span class="o">.</span><span class="n">insert</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">library_path</span><span class="p">)</span>
+    <span class="n">env</span><span class="p">[</span><span class="s2">&quot;LD_PRELOAD&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="s2">&quot;:&quot;</span><span class="o">.</span><span class="n">join</span><span class="p">(</span><span class="n">entries</span><span class="p">)</span>
+    <span class="n">env</span><span class="p">[</span><span class="n">_HOOK_ENV_VAR</span><span class="p">]</span> <span class="o">=</span> <span class="n">library_path</span>
+    <span class="k">return</span> <span class="n">env</span></div>
+
+
+
+<div class="viewcode-block" id="get_flow_viewer_gl_hook">
+<a class="viewcode-back" href="../../../api/integration.html#lilytorch.integration.flow_viewer_gl_hook.get_flow_viewer_gl_hook">[docs]</a>
+<span class="k">def</span><span class="w"> </span><span class="nf">get_flow_viewer_gl_hook</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="n">FlowViewerGLHook</span> <span class="o">|</span> <span class="kc">None</span><span class="p">:</span>
+<span class="w">    </span><span class="sd">&quot;&quot;&quot;Return the singleton hook controller if the library was preloaded.&quot;&quot;&quot;</span>
+    <span class="k">global</span> <span class="n">_HOOK_INSTANCE</span>
+
+    <span class="k">if</span> <span class="n">_HOOK_INSTANCE</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="k">return</span> <span class="n">_HOOK_INSTANCE</span>
+
+    <span class="n">library_path</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">environ</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">_HOOK_ENV_VAR</span><span class="p">)</span>
+    <span class="k">if</span> <span class="ow">not</span> <span class="n">library_path</span> <span class="ow">or</span> <span class="ow">not</span> <span class="n">os</span><span class="o">.</span><span class="n">path</span><span class="o">.</span><span class="n">exists</span><span class="p">(</span><span class="n">library_path</span><span class="p">):</span>
+        <span class="k">return</span> <span class="kc">None</span>
+
+    <span class="n">_HOOK_INSTANCE</span> <span class="o">=</span> <span class="n">FlowViewerGLHook</span><span class="p">(</span><span class="n">library_path</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">_HOOK_INSTANCE</span></div>
+
+</pre></div>
+        </article>
+      </div>
+      <footer>
+        
+        <div class="related-pages">
+          
+          
+        </div>
+        <div class="bottom-of-page">
+          <div class="left-details">
+            <div class="copyright">
+                Copyright &#169; 2024–2026, Andrea Ferrario
+            </div>
+            Made with <a href="https://www.sphinx-doc.org/">Sphinx</a> and <a class="muted-link" href="https://pradyunsg.me">@pradyunsg</a>'s
+            
+            <a href="https://github.com/pradyunsg/furo">Furo</a>
+            
+          </div>
+          <div class="right-details">
+            
+          </div>
+        </div>
+        
+      </footer>
+    </div>
+    <aside class="toc-drawer no-toc">
+      
+      
+      
+    </aside>
+  </div>
+</div><script src="../../../_static/documentation_options.js?v=38b66d78"></script>
+    <script src="../../../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../../../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../../../_static/scripts/furo.js?v=46bd48cc"></script>
+    </body>
+</html>

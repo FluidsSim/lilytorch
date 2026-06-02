@@ -1,0 +1,1276 @@
+<!doctype html>
+<html class="no-js" lang="en" data-content_root="./">
+  <head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="light dark"><link rel="index" title="Index" href="#"><link rel="search" title="Search" href="search.html">
+
+    <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 --><title>Index - LilyTorch Documentation</title>
+<link rel="stylesheet" type="text/css" href="_static/pygments.css?v=d111a655" />
+    <link rel="stylesheet" type="text/css" href="_static/styles/furo.css?v=7bdb33bb" />
+    <link rel="stylesheet" type="text/css" href="_static/styles/furo-extensions.css?v=8dab3a3b" />
+    <link rel="stylesheet" type="text/css" href="_static/custom.css?v=8556ca62" />
+    
+    
+
+
+<style>
+  body {
+    --color-code-background: #f2f2f2;
+  --color-code-foreground: #1e1e1e;
+  --color-brand-primary: #2962FF;
+  --color-brand-content: #2962FF;
+  
+  }
+  @media not print {
+    body[data-theme="dark"] {
+      --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  --color-brand-primary: #82B1FF;
+  --color-brand-content: #82B1FF;
+  
+    }
+    @media (prefers-color-scheme: dark) {
+      body:not([data-theme="light"]) {
+        --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  --color-brand-primary: #82B1FF;
+  --color-brand-content: #82B1FF;
+  
+      }
+    }
+  }
+</style></head>
+  <body>
+    
+    <script>
+      document.body.dataset.theme = localStorage.getItem("theme") || "auto";
+    </script>
+    
+
+<svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+  <symbol id="svg-toc" viewBox="0 0 24 24">
+    <title>Contents</title>
+    <svg stroke="currentColor" fill="currentColor" stroke-width="0" viewBox="0 0 1024 1024">
+      <path d="M408 442h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8zm-8 204c0 4.4 3.6 8 8 8h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56zm504-486H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zm0 632H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zM115.4 518.9L271.7 642c5.8 4.6 14.4.5 14.4-6.9V388.9c0-7.4-8.5-11.5-14.4-6.9L115.4 505.1a8.74 8.74 0 0 0 0 13.8z"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-menu" viewBox="0 0 24 24">
+    <title>Menu</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-menu">
+      <line x1="3" y1="12" x2="21" y2="12"></line>
+      <line x1="3" y1="6" x2="21" y2="6"></line>
+      <line x1="3" y1="18" x2="21" y2="18"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-arrow-right" viewBox="0 0 24 24">
+    <title>Expand</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-chevron-right">
+      <polyline points="9 18 15 12 9 6"></polyline>
+    </svg>
+  </symbol>
+  <symbol id="svg-sun" viewBox="0 0 24 24">
+    <title>Light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="feather-sun">
+      <circle cx="12" cy="12" r="5"></circle>
+      <line x1="12" y1="1" x2="12" y2="3"></line>
+      <line x1="12" y1="21" x2="12" y2="23"></line>
+      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+      <line x1="1" y1="12" x2="3" y2="12"></line>
+      <line x1="21" y1="12" x2="23" y2="12"></line>
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon" viewBox="0 0 24 24">
+    <title>Dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-moon">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z" />
+    </svg>
+  </symbol>
+  <symbol id="svg-sun-with-moon" viewBox="0 0 24 24">
+    <title>Auto light/dark, in light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path style="opacity: 50%" d="M 5.411 14.504 C 5.471 14.504 5.532 14.504 5.591 14.504 C 3.639 16.319 4.383 19.569 6.931 20.352 C 7.693 20.586 8.512 20.551 9.25 20.252 C 8.023 23.207 4.056 23.725 2.11 21.184 C 0.166 18.642 1.702 14.949 4.874 14.536 C 5.051 14.512 5.231 14.5 5.411 14.5 L 5.411 14.504 Z"/>
+      <line x1="14.5" y1="3.25" x2="14.5" y2="1.25"/>
+      <line x1="14.5" y1="15.85" x2="14.5" y2="17.85"/>
+      <line x1="10.044" y1="5.094" x2="8.63" y2="3.68"/>
+      <line x1="19" y1="14.05" x2="20.414" y2="15.464"/>
+      <line x1="8.2" y1="9.55" x2="6.2" y2="9.55"/>
+      <line x1="20.8" y1="9.55" x2="22.8" y2="9.55"/>
+      <line x1="10.044" y1="14.006" x2="8.63" y2="15.42"/>
+      <line x1="19" y1="5.05" x2="20.414" y2="3.636"/>
+      <circle cx="14.5" cy="9.55" r="3.6"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon-with-sun" viewBox="0 0 24 24">
+    <title>Auto light/dark, in dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path d="M 8.282 7.007 C 8.385 7.007 8.494 7.007 8.595 7.007 C 5.18 10.184 6.481 15.869 10.942 17.24 C 12.275 17.648 13.706 17.589 15 17.066 C 12.851 22.236 5.91 23.143 2.505 18.696 C -0.897 14.249 1.791 7.786 7.342 7.063 C 7.652 7.021 7.965 7 8.282 7 L 8.282 7.007 Z"/>
+      <line style="opacity: 50%" x1="18" y1="3.705" x2="18" y2="2.5"/>
+      <line style="opacity: 50%" x1="18" y1="11.295" x2="18" y2="12.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="4.816" x2="14.464" y2="3.964"/>
+      <line style="opacity: 50%" x1="20.711" y1="10.212" x2="21.563" y2="11.063"/>
+      <line style="opacity: 50%" x1="14.205" y1="7.5" x2="13.001" y2="7.5"/>
+      <line style="opacity: 50%" x1="21.795" y1="7.5" x2="23" y2="7.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="10.184" x2="14.464" y2="11.036"/>
+      <line style="opacity: 50%" x1="20.711" y1="4.789" x2="21.563" y2="3.937"/>
+      <circle style="opacity: 50%" cx="18" cy="7.5" r="2.169"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-pencil" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-pencil-code">
+      <path d="M4 20h4l10.5 -10.5a2.828 2.828 0 1 0 -4 -4l-10.5 10.5v4" />
+      <path d="M13.5 6.5l4 4" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+  <symbol id="svg-eye" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-eye-code">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M10 12a2 2 0 1 0 4 0a2 2 0 0 0 -4 0" />
+      <path
+        d="M11.11 17.958c-3.209 -.307 -5.91 -2.293 -8.11 -5.958c2.4 -4 5.4 -6 9 -6c3.6 0 6.6 2 9 6c-.21 .352 -.427 .688 -.647 1.008" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+</svg>
+
+<input type="checkbox" class="sidebar-toggle" name="__navigation" id="__navigation" aria-label="Toggle site navigation sidebar">
+<input type="checkbox" class="sidebar-toggle" name="__toc" id="__toc" aria-label="Toggle table of contents sidebar">
+<label class="overlay sidebar-overlay" for="__navigation"></label>
+<label class="overlay toc-overlay" for="__toc"></label>
+
+<a class="skip-to-content muted-link" href="#furo-main-content">Skip to content</a>
+
+
+
+<div class="page">
+  <header class="mobile-header">
+    <div class="header-left">
+      <label class="nav-overlay-icon" for="__navigation">
+        <span class="icon"><svg><use href="#svg-menu"></use></svg></span>
+      </label>
+    </div>
+    <div class="header-center">
+      <a href="index.html"><div class="brand">LilyTorch Documentation</div></a>
+    </div>
+    <div class="header-right">
+      <div class="theme-toggle-container theme-toggle-header">
+        <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+          <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+          <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+          <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+          <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+        </button>
+      </div>
+      <label class="toc-overlay-icon toc-header-icon no-toc" for="__toc">
+        <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+      </label>
+    </div>
+  </header>
+  <aside class="sidebar-drawer">
+    <div class="sidebar-container">
+      
+      <div class="sidebar-sticky"><a class="sidebar-brand" href="index.html">
+  
+  <span class="sidebar-brand-text">LilyTorch Documentation</span>
+  
+</a><form class="sidebar-search-container" method="get" action="search.html" role="search">
+  <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
+  <input type="hidden" name="check_keywords" value="yes">
+  <input type="hidden" name="area" value="default">
+</form>
+<div id="searchbox"></div><div class="sidebar-scroll"><div class="sidebar-tree">
+  <p class="caption" role="heading"><span class="caption-text">User Guide</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="getting_started.html">Getting Started</a></li>
+<li class="toctree-l1"><a class="reference internal" href="examples.html">Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="parameters.html">Configuration Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="boundary_conditions.html">Boundary Conditions</a></li>
+<li class="toctree-l1"><a class="reference internal" href="visualization.html">Visualisation &amp; Post-processing</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Theory &amp; Numerics</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="mathematical_formulation.html">Mathematical Formulation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="numerical_schemes.html">Numerical Schemes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="immersed_boundary.html">Immersed Boundary Method — BDIM2</a></li>
+<li class="toctree-l1"><a class="reference internal" href="strong_coupling.html">Strong (implicit) FSI coupling</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">API Reference</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="api/solver.html"><code class="docutils literal notranslate"><span class="pre">solver</span></code> — Navier–Stokes Solver</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api/solver.html#forces-hydrodynamic-force-integrators"><code class="docutils literal notranslate"><span class="pre">forces</span></code> — Hydrodynamic Force Integrators</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api/solver.html#extras-sponge-les-non-newtonian-viscosity"><code class="docutils literal notranslate"><span class="pre">extras</span></code> — Sponge, LES &amp; Non-Newtonian Viscosity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api/adv_diff.html"><code class="docutils literal notranslate"><span class="pre">adv_diff</span></code> — Advection–Diffusion Solver</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api/poisson.html"><code class="docutils literal notranslate"><span class="pre">poisson</span></code> — Pressure Solvers</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api/body.html"><code class="docutils literal notranslate"><span class="pre">body</span></code> — Geometry, SDF &amp; Kinematics</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api/operations.html"><code class="docutils literal notranslate"><span class="pre">operations</span></code> — Discrete Differential Operators</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api/plotting.html"><code class="docutils literal notranslate"><span class="pre">plotting</span></code> — Visualisation Helpers</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api/integration.html"><code class="docutils literal notranslate"><span class="pre">integration</span></code> — FARMS / MuJoCo Coupling Layer</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api/util.html"><code class="docutils literal notranslate"><span class="pre">util</span></code> — Utilities</a></li>
+</ul>
+
+</div>
+</div>
+
+      </div>
+      
+    </div>
+  </aside>
+  <div class="main">
+    <div class="content">
+      <div class="article-container">
+        <a href="#" class="back-to-top muted-link">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+            <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+          </svg>
+          <span>Back to top</span>
+        </a>
+        <div class="content-icon-container">
+          <div class="theme-toggle-container theme-toggle-content">
+            <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+              <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+              <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+              <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+              <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+            </button>
+          </div>
+          <label class="toc-overlay-icon toc-content-icon no-toc" for="__toc">
+            <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+          </label>
+        </div>
+        <article role="main" id="furo-main-content">
+          
+<section class="genindex-section">
+  <h1 id="index">Index</h1>
+  <div class="genindex-jumpbox"><a href="#_"><strong>_</strong></a> | <a href="#A"><strong>A</strong></a> | <a href="#B"><strong>B</strong></a> | <a href="#C"><strong>C</strong></a> | <a href="#D"><strong>D</strong></a> | <a href="#E"><strong>E</strong></a> | <a href="#F"><strong>F</strong></a> | <a href="#G"><strong>G</strong></a> | <a href="#I"><strong>I</strong></a> | <a href="#J"><strong>J</strong></a> | <a href="#K"><strong>K</strong></a> | <a href="#L"><strong>L</strong></a> | <a href="#M"><strong>M</strong></a> | <a href="#N"><strong>N</strong></a> | <a href="#P"><strong>P</strong></a> | <a href="#Q"><strong>Q</strong></a> | <a href="#R"><strong>R</strong></a> | <a href="#S"><strong>S</strong></a> | <a href="#T"><strong>T</strong></a> | <a href="#U"><strong>U</strong></a> | <a href="#V"><strong>V</strong></a> | <a href="#W"><strong>W</strong></a> | <a href="#Y"><strong>Y</strong></a></div>
+</section>
+<section id="_" class="genindex-section">
+  <h2>_</h2>
+  <table style="width: 100%" class="indextable genindextable"><tr>
+    <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/integration.html#lilytorch.integration.gamepad.GamepadHandler.__init__">__init__() (lilytorch.integration.gamepad.GamepadHandler method)</a>
+
+        <ul>
+          <li><a href="api/adv_diff.html#lilytorch.src.adv_diff.AdvDiffSolver.__init__">(lilytorch.src.adv_diff.AdvDiffSolver method)</a>
+</li>
+          <li><a href="api/body.html#lilytorch.src.body.Body.__init__">(lilytorch.src.body.Body method)</a>
+</li>
+          <li><a href="api/body.html#lilytorch.src.body.CompositeBodyAnalytical.__init__">(lilytorch.src.body.CompositeBodyAnalytical method)</a>
+</li>
+          <li><a href="api/body.html#lilytorch.src.body.CompositeBodyMesh.__init__">(lilytorch.src.body.CompositeBodyMesh method)</a>
+</li>
+          <li><a href="api/body.html#lilytorch.src.body.COMPOSITEmesh2sdf.__init__">(lilytorch.src.body.COMPOSITEmesh2sdf method)</a>
+</li>
+          <li><a href="api/body.html#lilytorch.src.body.MultiAnimatBodies.__init__">(lilytorch.src.body.MultiAnimatBodies method)</a>
+</li>
+          <li><a href="api/poisson.html#lilytorch.src.poisson_fft.PoissonSolverFFT.__init__">(lilytorch.src.poisson_fft.PoissonSolverFFT method)</a>
+</li>
+          <li><a href="api/solver.html#lilytorch.src.solver.FluidSolver.__init__">(lilytorch.src.solver.FluidSolver method)</a>
+</li>
+        </ul></li>
+    </ul></td>
+  </tr></table>
+</section>
+
+<section id="A" class="genindex-section">
+  <h2>A</h2>
+  <table style="width: 100%" class="indextable genindextable"><tr>
+    <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/adv_diff.html#lilytorch.src.adv_diff.abdquickest">abdquickest() (in module lilytorch.src.adv_diff)</a>
+</li>
+        <li><a href="api/solver.html#lilytorch.src.solver.FluidSolver.advance_and_compute_loads">advance_and_compute_loads() (lilytorch.src.solver.FluidSolver method)</a>
+</li>
+        <li><a href="api/adv_diff.html#lilytorch.src.adv_diff.AdvDiffSolver">AdvDiffSolver (class in lilytorch.src.adv_diff)</a>
+</li>
+        <li><a href="api/integration.html#lilytorch.integration.gamepad.GamepadHandler.apply_deadzone">apply_deadzone() (lilytorch.integration.gamepad.GamepadHandler method)</a>
+</li>
+    </ul></td>
+    <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/solver.html#lilytorch.src.extras.apply_sponge_damping">apply_sponge_damping() (in module lilytorch.src.extras)</a>
+
+        <ul>
+          <li><a href="api/solver.html#lilytorch.src.solver.FluidSolver.apply_sponge_damping">(lilytorch.src.solver.FluidSolver method)</a>
+</li>
+        </ul></li>
+        <li><a href="api/solver.html#lilytorch.src.extras.apply_yield_damping">apply_yield_damping() (in module lilytorch.src.extras)</a>
+
+        <ul>
+          <li><a href="api/solver.html#lilytorch.src.solver.FluidSolver.apply_yield_damping">(lilytorch.src.solver.FluidSolver method)</a>
+</li>
+        </ul></li>
+    </ul></td>
+  </tr></table>
+</section>
+
+<section id="B" class="genindex-section">
+  <h2>B</h2>
+  <table style="width: 100%" class="indextable genindextable"><tr>
+    <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/poisson.html#lilytorch.src.poisson_mult.PoissonSolver.BC">BC() (lilytorch.src.poisson_mult.PoissonSolver static method)</a>
+</li>
+        <li><a href="api/integration.html#lilytorch.integration.BDIMhandler.BDIMhandler">BDIMhandler (class in lilytorch.integration.BDIMhandler)</a>
+</li>
+        <li><a href="api/integration.html#lilytorch.integration.extensions.FluidExtension.before_step">before_step() (lilytorch.integration.extensions.FluidExtension method)</a>
+
+        <ul>
+          <li><a href="api/integration.html#lilytorch.integration.extensions.RealtimeMonitor.before_step">(lilytorch.integration.extensions.RealtimeMonitor method)</a>
+</li>
+          <li><a href="api/integration.html#lilytorch.integration.flow_viewer.FlowViewer.before_step">(lilytorch.integration.flow_viewer.FlowViewer method)</a>
+</li>
+          <li><a href="api/integration.html#lilytorch.integration.flow_viewer_2d.FlowViewer2D.before_step">(lilytorch.integration.flow_viewer_2d.FlowViewer2D method)</a>
+</li>
+          <li><a href="api/integration.html#lilytorch.integration.flow_viewer_2d_gpu.FlowViewer2DGPU.before_step">(lilytorch.integration.flow_viewer_2d_gpu.FlowViewer2DGPU method)</a>
+</li>
+          <li><a href="api/integration.html#lilytorch.integration.particle_viewer.ParticleViewer.before_step">(lilytorch.integration.particle_viewer.ParticleViewer method)</a>
+</li>
+        </ul></li>
+        <li><a href="api/body.html#lilytorch.src.body.Body">Body (class in lilytorch.src.body)</a>
+</li>
+    </ul></td>
+    <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/body.html#lilytorch.src.body.body_from_yaml">body_from_yaml() (in module lilytorch.src.body)</a>
+</li>
+        <li><a href="api/body.html#lilytorch.src.body.BodyAnalytical">BodyAnalytical (class in lilytorch.src.body)</a>
+</li>
+        <li><a href="api/body.html#lilytorch.src.body.BodyFishAnalytical">BodyFishAnalytical (class in lilytorch.src.body)</a>
+</li>
+        <li><a href="api/body.html#lilytorch.src.body.BodyFishExperimental">BodyFishExperimental (class in lilytorch.src.body)</a>
+</li>
+        <li><a href="api/body.html#lilytorch.src.body.BodyMesh">BodyMesh (class in lilytorch.src.body)</a>
+</li>
+        <li><a href="api/body.html#lilytorch.src.body.mesh2sdf.bounding_box">bounding_box() (lilytorch.src.body.mesh2sdf method)</a>
+</li>
+        <li><a href="api/body.html#lilytorch.src.body.box">box() (in module lilytorch.src.body)</a>
+</li>
+        <li><a href="api/body.html#lilytorch.src.body.box_3d">box_3d() (in module lilytorch.src.body)</a>
+</li>
+        <li><a href="api/plotting.html#lilytorch.src.plotting.build_body_mu0_rgba">build_body_mu0_rgba() (in module lilytorch.src.plotting)</a>
+</li>
+    </ul></td>
+  </tr></table>
+</section>
+
+<section id="C" class="genindex-section">
+  <h2>C</h2>
+  <table style="width: 100%" class="indextable genindextable"><tr>
+    <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/body.html#lilytorch.src.body.capsule_3d">capsule_3d() (in module lilytorch.src.body)</a>
+</li>
+        <li><a href="api/operations.html#lilytorch.src.operations.carreau_viscosity">carreau_viscosity() (in module lilytorch.src.operations)</a>
+</li>
+        <li><a href="api/adv_diff.html#lilytorch.src.adv_diff.cds">cds() (in module lilytorch.src.adv_diff)</a>
+</li>
+        <li><a href="api/solver.html#lilytorch.src.solver.FluidSolver.check_explosion">check_explosion() (lilytorch.src.solver.FluidSolver method)</a>
+</li>
+        <li><a href="api/plotting.html#lilytorch.src.plotting.PlottingMixin.check_termination">check_termination() (lilytorch.src.plotting.PlottingMixin method)</a>
+</li>
+        <li><a href="api/body.html#lilytorch.src.body.circle">circle() (in module lilytorch.src.body)</a>
+</li>
+        <li><a href="api/integration.html#lilytorch.integration.flow_viewer_gl_hook.FlowViewerGLHook.clear">clear() (lilytorch.integration.flow_viewer_gl_hook.FlowViewerGLHook method)</a>
+</li>
+        <li><a href="api/body.html#lilytorch.src.body.CompositeBodyAnalytical">CompositeBodyAnalytical (class in lilytorch.src.body)</a>
+</li>
+        <li><a href="api/body.html#lilytorch.src.body.CompositeBodyMesh">CompositeBodyMesh (class in lilytorch.src.body)</a>
+</li>
+        <li><a href="api/body.html#lilytorch.src.body.COMPOSITEmesh2sdf">COMPOSITEmesh2sdf (class in lilytorch.src.body)</a>
+</li>
+        <li><a href="api/operations.html#lilytorch.src.operations.compute_dpdx">compute_dpdx() (in module lilytorch.src.operations)</a>
+
+        <ul>
+          <li><a href="api/solver.html#lilytorch.src.solver.FluidSolver.compute_dpdx">(lilytorch.src.solver.FluidSolver method)</a>
+</li>
+        </ul></li>
+        <li><a href="api/operations.html#lilytorch.src.operations.compute_dpdy">compute_dpdy() (in module lilytorch.src.operations)</a>
+
+        <ul>
+          <li><a href="api/solver.html#lilytorch.src.solver.FluidSolver.compute_dpdy">(lilytorch.src.solver.FluidSolver method)</a>
+</li>
+        </ul></li>
+        <li><a href="api/operations.html#lilytorch.src.operations.compute_dpdz">compute_dpdz() (in module lilytorch.src.operations)</a>
+
+        <ul>
+          <li><a href="api/solver.html#lilytorch.src.solver.FluidSolver.compute_dpdz">(lilytorch.src.solver.FluidSolver method)</a>
+</li>
+        </ul></li>
+    </ul></td>
+    <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/body.html#lilytorch.src.body.compute_inertias_2d">compute_inertias_2d() (in module lilytorch.src.body)</a>
+</li>
+        <li><a href="api/poisson.html#lilytorch.src.poisson_mult.PoissonSolver.compute_J">compute_J() (lilytorch.src.poisson_mult.PoissonSolver static method)</a>
+</li>
+        <li><a href="api/body.html#lilytorch.src.body.Body.compute_normals">compute_normals() (lilytorch.src.body.Body method)</a>
+</li>
+        <li><a href="api/body.html#lilytorch.src.body.Body.compute_normals_3d_batched">compute_normals_3d_batched() (lilytorch.src.body.Body method)</a>
+</li>
+        <li><a href="api/body.html#lilytorch.src.body.BodyMesh.compute_sdfs">compute_sdfs() (lilytorch.src.body.BodyMesh method)</a>
+</li>
+        <li><a href="api/poisson.html#lilytorch.src.poisson_mult.PoissonSolver.compute_sum">compute_sum() (lilytorch.src.poisson_mult.PoissonSolver static method)</a>
+</li>
+        <li><a href="api/integration.html#lilytorch.integration.gamepad.GamepadState.copy">copy() (lilytorch.integration.gamepad.GamepadState method)</a>
+</li>
+        <li><a href="api/util.html#lilytorch.util.rw.copy_dir">copy_dir() (in module lilytorch.util.rw)</a>
+</li>
+        <li><a href="api/util.html#lilytorch.util.rw.copy_file">copy_file() (in module lilytorch.util.rw)</a>
+</li>
+        <li><a href="api/integration.html#lilytorch.integration.gen_pool_sdf.create_pool_sdf">create_pool_sdf() (in module lilytorch.integration.gen_pool_sdf)</a>
+</li>
+        <li><a href="api/util.html#lilytorch.util.rw.create_save_dir">create_save_dir() (in module lilytorch.util.rw)</a>
+</li>
+        <li><a href="api/integration.html#lilytorch.integration.gen_pool_sdf.create_water_sdf">create_water_sdf() (in module lilytorch.integration.gen_pool_sdf)</a>
+</li>
+        <li><a href="api/operations.html#lilytorch.src.operations.cross_product_2d">cross_product_2d() (in module lilytorch.src.operations)</a>
+</li>
+        <li><a href="api/operations.html#lilytorch.src.operations.cross_product_3d">cross_product_3d() (in module lilytorch.src.operations)</a>
+</li>
+        <li><a href="api/adv_diff.html#lilytorch.src.adv_diff.cubista">cubista() (in module lilytorch.src.adv_diff)</a>
+</li>
+    </ul></td>
+  </tr></table>
+</section>
+
+<section id="D" class="genindex-section">
+  <h2>D</h2>
+  <table style="width: 100%" class="indextable genindextable"><tr>
+    <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/integration.html#lilytorch.integration.extensions.DataLogger">DataLogger (class in lilytorch.integration.extensions)</a>
+</li>
+        <li><a href="api/plotting.html#lilytorch.src.plotting.PlottingMixin.DEFAULT_3D_ISO_SPECS">DEFAULT_3D_ISO_SPECS (lilytorch.src.plotting.PlottingMixin attribute)</a>
+</li>
+        <li><a href="api/plotting.html#lilytorch.src.plotting.PlottingMixin.DEFAULT_PLOT_SPECS">DEFAULT_PLOT_SPECS (lilytorch.src.plotting.PlottingMixin attribute)</a>
+</li>
+    </ul></td>
+    <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/util.html#lilytorch.util.rw.Dict2Class">Dict2Class (class in lilytorch.util.rw)</a>
+</li>
+        <li><a href="api/operations.html#lilytorch.src.operations.divergence">divergence() (in module lilytorch.src.operations)</a>
+
+        <ul>
+          <li><a href="api/solver.html#lilytorch.src.solver.FluidSolver.divergence">(lilytorch.src.solver.FluidSolver method)</a>
+</li>
+        </ul></li>
+        <li><a href="api/integration.html#lilytorch.integration.extensions.DummyOptionCallback">DummyOptionCallback (class in lilytorch.integration.extensions)</a>
+</li>
+    </ul></td>
+  </tr></table>
+</section>
+
+<section id="E" class="genindex-section">
+  <h2>E</h2>
+  <table style="width: 100%" class="indextable genindextable"><tr>
+    <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/integration.html#lilytorch.integration.extensions.DataLogger.end_episode">end_episode() (lilytorch.integration.extensions.DataLogger method)</a>
+
+        <ul>
+          <li><a href="api/integration.html#lilytorch.integration.extensions.FluidExtension.end_episode">(lilytorch.integration.extensions.FluidExtension method)</a>
+</li>
+          <li><a href="api/integration.html#lilytorch.integration.flow_viewer_2d_gpu.FlowViewer2DGPU.end_episode">(lilytorch.integration.flow_viewer_2d_gpu.FlowViewer2DGPU method)</a>
+</li>
+        </ul></li>
+    </ul></td>
+    <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/integration.html#lilytorch.integration.flow_viewer_gl_hook.ensure_flow_viewer_gl_hook_built">ensure_flow_viewer_gl_hook_built() (in module lilytorch.integration.flow_viewer_gl_hook)</a>
+</li>
+        <li><a href="api/body.html#lilytorch.src.body.BodyFishAnalytical.envelope">envelope() (lilytorch.src.body.BodyFishAnalytical method)</a>
+</li>
+        <li><a href="api/integration.html#lilytorch.integration.gamepad.example_usage">example_usage() (in module lilytorch.integration.gamepad)</a>
+</li>
+        <li><a href="api/integration.html#lilytorch.integration.gamepad.example_usage_events">example_usage_events() (in module lilytorch.integration.gamepad)</a>
+</li>
+    </ul></td>
+  </tr></table>
+</section>
+
+<section id="F" class="genindex-section">
+  <h2>F</h2>
+  <table style="width: 100%" class="indextable genindextable"><tr>
+    <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/solver.html#lilytorch.src.solver.FluidSolver.finalize_step">finalize_step() (lilytorch.src.solver.FluidSolver method)</a>
+</li>
+        <li><a href="api/solver.html#lilytorch.src.solver.FlowDiagnostics">FlowDiagnostics (class in lilytorch.src.solver)</a>
+</li>
+        <li><a href="api/integration.html#lilytorch.integration.flow_viewer.FlowViewer">FlowViewer (class in lilytorch.integration.flow_viewer)</a>
+</li>
+        <li><a href="api/integration.html#lilytorch.integration.flow_viewer_2d.FlowViewer2D">FlowViewer2D (class in lilytorch.integration.flow_viewer_2d)</a>
+
+        <ul>
+          <li><a href="api/integration.html#lilytorch.integration.flow_viewer_2d_gpu.FlowViewer2D">(in module lilytorch.integration.flow_viewer_2d_gpu)</a>
+</li>
+        </ul></li>
+        <li><a href="api/integration.html#lilytorch.integration.flow_viewer_2d_gpu.FlowViewer2DGPU">FlowViewer2DGPU (class in lilytorch.integration.flow_viewer_2d_gpu)</a>
+</li>
+        <li><a href="api/integration.html#lilytorch.integration.flow_viewer_gl_hook.FlowViewerGLHook">FlowViewerGLHook (class in lilytorch.integration.flow_viewer_gl_hook)</a>
+</li>
+        <li><a href="api/solver.html#lilytorch.src.solver.FluidSolver.fluid_step">fluid_step() (lilytorch.src.solver.FluidSolver method)</a>
+</li>
+        <li><a href="api/integration.html#lilytorch.integration.extensions.FluidExtension">FluidExtension (class in lilytorch.integration.extensions)</a>
+</li>
+        <li><a href="api/solver.html#lilytorch.src.solver.FluidSolver">FluidSolver (class in lilytorch.src.solver)</a>
+</li>
+        <li><a href="api/plotting.html#lilytorch.src.plotting.PlottingMixin.flush_io">flush_io() (lilytorch.src.plotting.PlottingMixin method)</a>
+</li>
+        <li><a href="api/solver.html#lilytorch.src.forces.forces_lagrangian_2d">forces_lagrangian_2d() (in module lilytorch.src.forces)</a>
+
+        <ul>
+          <li><a href="api/solver.html#lilytorch.src.solver.FluidSolver.forces_lagrangian_2d">(lilytorch.src.solver.FluidSolver method)</a>
+</li>
+        </ul></li>
+        <li><a href="api/solver.html#lilytorch.src.forces.forces_lagrangian_3d">forces_lagrangian_3d() (in module lilytorch.src.forces)</a>
+
+        <ul>
+          <li><a href="api/solver.html#lilytorch.src.solver.FluidSolver.forces_lagrangian_3d">(lilytorch.src.solver.FluidSolver method)</a>
+</li>
+        </ul></li>
+        <li><a href="api/solver.html#lilytorch.src.forces.forces_method1">forces_method1() (in module lilytorch.src.forces)</a>
+
+        <ul>
+          <li><a href="api/solver.html#lilytorch.src.solver.FluidSolver.forces_method1">(lilytorch.src.solver.FluidSolver method)</a>
+</li>
+        </ul></li>
+    </ul></td>
+    <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/solver.html#lilytorch.src.forces.forces_method2">forces_method2() (in module lilytorch.src.forces)</a>
+
+        <ul>
+          <li><a href="api/solver.html#lilytorch.src.solver.FluidSolver.forces_method2">(lilytorch.src.solver.FluidSolver method)</a>
+</li>
+        </ul></li>
+        <li><a href="api/solver.html#lilytorch.src.forces.forces_method2_3d">forces_method2_3d() (in module lilytorch.src.forces)</a>
+
+        <ul>
+          <li><a href="api/solver.html#lilytorch.src.solver.FluidSolver.forces_method2_3d">(lilytorch.src.solver.FluidSolver method)</a>
+</li>
+        </ul></li>
+        <li><a href="api/integration.html#lilytorch.integration.extensions.DataLogger.from_options">from_options() (lilytorch.integration.extensions.DataLogger class method)</a>
+
+        <ul>
+          <li><a href="api/integration.html#lilytorch.integration.extensions.DummyOptionCallback.from_options">(lilytorch.integration.extensions.DummyOptionCallback class method)</a>
+</li>
+          <li><a href="api/integration.html#lilytorch.integration.extensions.FluidExtension.from_options">(lilytorch.integration.extensions.FluidExtension class method)</a>
+</li>
+          <li><a href="api/integration.html#lilytorch.integration.extensions.PhysicsOptionsExtension.from_options">(lilytorch.integration.extensions.PhysicsOptionsExtension class method)</a>
+</li>
+          <li><a href="api/integration.html#lilytorch.integration.extensions.RealtimeMonitor.from_options">(lilytorch.integration.extensions.RealtimeMonitor class method)</a>
+</li>
+          <li><a href="api/integration.html#lilytorch.integration.flow_viewer.FlowViewer.from_options">(lilytorch.integration.flow_viewer.FlowViewer class method)</a>
+</li>
+          <li><a href="api/integration.html#lilytorch.integration.flow_viewer_2d.FlowViewer2D.from_options">(lilytorch.integration.flow_viewer_2d.FlowViewer2D class method)</a>
+</li>
+          <li><a href="api/integration.html#lilytorch.integration.flow_viewer_2d_gpu.FlowViewer2DGPU.from_options">(lilytorch.integration.flow_viewer_2d_gpu.FlowViewer2DGPU class method)</a>
+</li>
+          <li><a href="api/integration.html#lilytorch.integration.kinematics.KinematicsController.from_options">(lilytorch.integration.kinematics.KinematicsController class method)</a>
+</li>
+          <li><a href="api/integration.html#lilytorch.integration.native_body_colors.NativeBodyColors.from_options">(lilytorch.integration.native_body_colors.NativeBodyColors class method)</a>
+</li>
+          <li><a href="api/integration.html#lilytorch.integration.particle_viewer.ParticleViewer.from_options">(lilytorch.integration.particle_viewer.ParticleViewer class method)</a>
+</li>
+        </ul></li>
+    </ul></td>
+  </tr></table>
+</section>
+
+<section id="G" class="genindex-section">
+  <h2>G</h2>
+  <table style="width: 100%" class="indextable genindextable"><tr>
+    <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/integration.html#lilytorch.integration.gamepad.GamepadHandler">GamepadHandler (class in lilytorch.integration.gamepad)</a>
+</li>
+        <li><a href="api/integration.html#lilytorch.integration.gamepad.GamepadState">GamepadState (class in lilytorch.integration.gamepad)</a>
+</li>
+        <li><a href="api/integration.html#lilytorch.integration.BDIMhandler.BDIMhandler.gather_data">gather_data() (lilytorch.integration.BDIMhandler.BDIMhandler method)</a>
+</li>
+        <li><a href="api/body.html#lilytorch.src.body.CompositeBodyMesh.gaussian_kernel">gaussian_kernel() (lilytorch.src.body.CompositeBodyMesh method)</a>
+</li>
+        <li><a href="api/util.html#lilytorch.util.paths.gen_new_folder">gen_new_folder() (in module lilytorch.util.paths)</a>
+</li>
+    </ul></td>
+    <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/integration.html#lilytorch.integration.flow_viewer_gl_hook.get_flow_viewer_gl_hook">get_flow_viewer_gl_hook() (in module lilytorch.integration.flow_viewer_gl_hook)</a>
+</li>
+        <li><a href="api/solver.html#lilytorch.src.solver.FluidSolver.get_loads">get_loads() (lilytorch.src.solver.FluidSolver method)</a>
+</li>
+        <li><a href="api/integration.html#lilytorch.integration.gamepad.GamepadHandler.get_state">get_state() (lilytorch.integration.gamepad.GamepadHandler method)</a>
+</li>
+        <li><a href="api/operations.html#lilytorch.src.operations.gradient">gradient() (in module lilytorch.src.operations)</a>
+
+        <ul>
+          <li><a href="api/solver.html#lilytorch.src.solver.FluidSolver.gradient">(lilytorch.src.solver.FluidSolver method)</a>
+</li>
+        </ul></li>
+    </ul></td>
+  </tr></table>
+</section>
+
+<section id="I" class="genindex-section">
+  <h2>I</h2>
+  <table style="width: 100%" class="indextable genindextable"><tr>
+    <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/body.html#lilytorch.src.body.BodyAnalytical.initialize">initialize() (lilytorch.src.body.BodyAnalytical method)</a>
+
+        <ul>
+          <li><a href="api/body.html#lilytorch.src.body.BodyFishAnalytical.initialize">(lilytorch.src.body.BodyFishAnalytical method)</a>
+</li>
+          <li><a href="api/body.html#lilytorch.src.body.BodyFishExperimental.initialize">(lilytorch.src.body.BodyFishExperimental method)</a>
+</li>
+          <li><a href="api/body.html#lilytorch.src.body.BodyMesh.initialize">(lilytorch.src.body.BodyMesh method)</a>
+</li>
+          <li><a href="api/body.html#lilytorch.src.body.CompositeBodyAnalytical.initialize">(lilytorch.src.body.CompositeBodyAnalytical method)</a>
+</li>
+          <li><a href="api/body.html#lilytorch.src.body.CompositeBodyMesh.initialize">(lilytorch.src.body.CompositeBodyMesh method)</a>
+</li>
+        </ul></li>
+        <li><a href="api/integration.html#lilytorch.integration.extensions.DataLogger.initialize_episode">initialize_episode() (lilytorch.integration.extensions.DataLogger method)</a>
+
+        <ul>
+          <li><a href="api/integration.html#lilytorch.integration.extensions.FluidExtension.initialize_episode">(lilytorch.integration.extensions.FluidExtension method)</a>
+</li>
+          <li><a href="api/integration.html#lilytorch.integration.extensions.PhysicsOptionsExtension.initialize_episode">(lilytorch.integration.extensions.PhysicsOptionsExtension method)</a>
+</li>
+          <li><a href="api/integration.html#lilytorch.integration.extensions.RealtimeMonitor.initialize_episode">(lilytorch.integration.extensions.RealtimeMonitor method)</a>
+</li>
+          <li><a href="api/integration.html#lilytorch.integration.flow_viewer.FlowViewer.initialize_episode">(lilytorch.integration.flow_viewer.FlowViewer method)</a>
+</li>
+          <li><a href="api/integration.html#lilytorch.integration.flow_viewer_2d.FlowViewer2D.initialize_episode">(lilytorch.integration.flow_viewer_2d.FlowViewer2D method)</a>
+</li>
+          <li><a href="api/integration.html#lilytorch.integration.flow_viewer_2d_gpu.FlowViewer2DGPU.initialize_episode">(lilytorch.integration.flow_viewer_2d_gpu.FlowViewer2DGPU method)</a>
+</li>
+          <li><a href="api/integration.html#lilytorch.integration.native_body_colors.NativeBodyColors.initialize_episode">(lilytorch.integration.native_body_colors.NativeBodyColors method)</a>
+</li>
+          <li><a href="api/integration.html#lilytorch.integration.particle_viewer.ParticleViewer.initialize_episode">(lilytorch.integration.particle_viewer.ParticleViewer method)</a>
+</li>
+        </ul></li>
+    </ul></td>
+    <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/integration.html#lilytorch.integration.extensions.FluidExtension.initialize_forces">initialize_forces() (lilytorch.integration.extensions.FluidExtension method)</a>
+</li>
+        <li><a href="api/solver.html#lilytorch.src.solver.FluidSolver.inside">inside() (lilytorch.src.solver.FluidSolver method)</a>
+</li>
+    </ul></td>
+  </tr></table>
+</section>
+
+<section id="J" class="genindex-section">
+  <h2>J</h2>
+  <table style="width: 100%" class="indextable genindextable"><tr>
+    <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/poisson.html#lilytorch.src.poisson_mult.PoissonSolver.Jacobi">Jacobi() (lilytorch.src.poisson_mult.PoissonSolver method)</a>
+</li>
+    </ul></td>
+  </tr></table>
+</section>
+
+<section id="K" class="genindex-section">
+  <h2>K</h2>
+  <table style="width: 100%" class="indextable genindextable"><tr>
+    <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/integration.html#lilytorch.integration.kinematics.kinematics_interpolation">kinematics_interpolation() (in module lilytorch.integration.kinematics)</a>
+</li>
+    </ul></td>
+    <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/integration.html#lilytorch.integration.kinematics.KinematicsController">KinematicsController (class in lilytorch.integration.kinematics)</a>
+</li>
+    </ul></td>
+  </tr></table>
+</section>
+
+<section id="L" class="genindex-section">
+  <h2>L</h2>
+  <table style="width: 100%" class="indextable genindextable"><tr>
+    <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/poisson.html#lilytorch.src.poisson_mult.PoissonSolver.l2_norm">l2_norm() (lilytorch.src.poisson_mult.PoissonSolver static method)</a>
+</li>
+        <li>
+    lilytorch.integration.BDIMhandler
+
+        <ul>
+          <li><a href="api/integration.html#module-lilytorch.integration.BDIMhandler">module</a>
+</li>
+        </ul></li>
+        <li>
+    lilytorch.integration.camera
+
+        <ul>
+          <li><a href="api/integration.html#module-lilytorch.integration.camera">module</a>
+</li>
+        </ul></li>
+        <li>
+    lilytorch.integration.extensions
+
+        <ul>
+          <li><a href="api/integration.html#module-lilytorch.integration.extensions">module</a>
+</li>
+        </ul></li>
+        <li>
+    lilytorch.integration.flow_viewer
+
+        <ul>
+          <li><a href="api/integration.html#module-lilytorch.integration.flow_viewer">module</a>
+</li>
+        </ul></li>
+        <li>
+    lilytorch.integration.flow_viewer_2d
+
+        <ul>
+          <li><a href="api/integration.html#module-lilytorch.integration.flow_viewer_2d">module</a>
+</li>
+        </ul></li>
+        <li>
+    lilytorch.integration.flow_viewer_2d_gpu
+
+        <ul>
+          <li><a href="api/integration.html#module-lilytorch.integration.flow_viewer_2d_gpu">module</a>
+</li>
+        </ul></li>
+        <li>
+    lilytorch.integration.flow_viewer_gl_hook
+
+        <ul>
+          <li><a href="api/integration.html#module-lilytorch.integration.flow_viewer_gl_hook">module</a>
+</li>
+        </ul></li>
+        <li>
+    lilytorch.integration.gamepad
+
+        <ul>
+          <li><a href="api/integration.html#module-lilytorch.integration.gamepad">module</a>
+</li>
+        </ul></li>
+        <li>
+    lilytorch.integration.gen_pool_sdf
+
+        <ul>
+          <li><a href="api/integration.html#module-lilytorch.integration.gen_pool_sdf">module</a>
+</li>
+        </ul></li>
+        <li>
+    lilytorch.integration.kinematics
+
+        <ul>
+          <li><a href="api/integration.html#module-lilytorch.integration.kinematics">module</a>
+</li>
+        </ul></li>
+        <li>
+    lilytorch.integration.native_body_colors
+
+        <ul>
+          <li><a href="api/integration.html#module-lilytorch.integration.native_body_colors">module</a>
+</li>
+        </ul></li>
+        <li>
+    lilytorch.integration.particle_viewer
+
+        <ul>
+          <li><a href="api/integration.html#module-lilytorch.integration.particle_viewer">module</a>
+</li>
+        </ul></li>
+    </ul></td>
+    <td style="width: 33%; vertical-align: top;"><ul>
+        <li>
+    lilytorch.src.adv_diff
+
+        <ul>
+          <li><a href="api/adv_diff.html#module-lilytorch.src.adv_diff">module</a>
+</li>
+        </ul></li>
+        <li>
+    lilytorch.src.body
+
+        <ul>
+          <li><a href="api/body.html#module-lilytorch.src.body">module</a>
+</li>
+        </ul></li>
+        <li>
+    lilytorch.src.extras
+
+        <ul>
+          <li><a href="api/solver.html#module-lilytorch.src.extras">module</a>
+</li>
+        </ul></li>
+        <li>
+    lilytorch.src.forces
+
+        <ul>
+          <li><a href="api/solver.html#module-lilytorch.src.forces">module</a>
+</li>
+        </ul></li>
+        <li>
+    lilytorch.src.operations
+
+        <ul>
+          <li><a href="api/operations.html#module-lilytorch.src.operations">module</a>
+</li>
+        </ul></li>
+        <li>
+    lilytorch.src.plotting
+
+        <ul>
+          <li><a href="api/plotting.html#module-lilytorch.src.plotting">module</a>
+</li>
+        </ul></li>
+        <li>
+    lilytorch.src.poisson_fft
+
+        <ul>
+          <li><a href="api/poisson.html#module-lilytorch.src.poisson_fft">module</a>
+</li>
+        </ul></li>
+        <li>
+    lilytorch.src.poisson_mult
+
+        <ul>
+          <li><a href="api/poisson.html#module-lilytorch.src.poisson_mult">module</a>
+</li>
+        </ul></li>
+        <li>
+    lilytorch.src.solver
+
+        <ul>
+          <li><a href="api/solver.html#module-lilytorch.src.solver">module</a>
+</li>
+        </ul></li>
+        <li>
+    lilytorch.util.paths
+
+        <ul>
+          <li><a href="api/util.html#module-lilytorch.util.paths">module</a>
+</li>
+        </ul></li>
+        <li>
+    lilytorch.util.rw
+
+        <ul>
+          <li><a href="api/util.html#module-lilytorch.util.rw">module</a>
+</li>
+        </ul></li>
+        <li>
+    lilytorch.util.yaml_operations
+
+        <ul>
+          <li><a href="api/util.html#module-lilytorch.util.yaml_operations">module</a>
+</li>
+        </ul></li>
+        <li><a href="api/util.html#lilytorch.util.rw.load_object">load_object() (in module lilytorch.util.rw)</a>
+</li>
+    </ul></td>
+  </tr></table>
+</section>
+
+<section id="M" class="genindex-section">
+  <h2>M</h2>
+  <table style="width: 100%" class="indextable genindextable"><tr>
+    <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/adv_diff.html#lilytorch.src.adv_diff.median">median() (in module lilytorch.src.adv_diff)</a>
+</li>
+        <li><a href="api/body.html#lilytorch.src.body.mesh2sdf">mesh2sdf (class in lilytorch.src.body)</a>
+</li>
+        <li>
+    module
+
+        <ul>
+          <li><a href="api/integration.html#module-lilytorch.integration.BDIMhandler">lilytorch.integration.BDIMhandler</a>
+</li>
+          <li><a href="api/integration.html#module-lilytorch.integration.camera">lilytorch.integration.camera</a>
+</li>
+          <li><a href="api/integration.html#module-lilytorch.integration.extensions">lilytorch.integration.extensions</a>
+</li>
+          <li><a href="api/integration.html#module-lilytorch.integration.flow_viewer">lilytorch.integration.flow_viewer</a>
+</li>
+          <li><a href="api/integration.html#module-lilytorch.integration.flow_viewer_2d">lilytorch.integration.flow_viewer_2d</a>
+</li>
+          <li><a href="api/integration.html#module-lilytorch.integration.flow_viewer_2d_gpu">lilytorch.integration.flow_viewer_2d_gpu</a>
+</li>
+          <li><a href="api/integration.html#module-lilytorch.integration.flow_viewer_gl_hook">lilytorch.integration.flow_viewer_gl_hook</a>
+</li>
+          <li><a href="api/integration.html#module-lilytorch.integration.gamepad">lilytorch.integration.gamepad</a>
+</li>
+          <li><a href="api/integration.html#module-lilytorch.integration.gen_pool_sdf">lilytorch.integration.gen_pool_sdf</a>
+</li>
+          <li><a href="api/integration.html#module-lilytorch.integration.kinematics">lilytorch.integration.kinematics</a>
+</li>
+          <li><a href="api/integration.html#module-lilytorch.integration.native_body_colors">lilytorch.integration.native_body_colors</a>
+</li>
+          <li><a href="api/integration.html#module-lilytorch.integration.particle_viewer">lilytorch.integration.particle_viewer</a>
+</li>
+          <li><a href="api/adv_diff.html#module-lilytorch.src.adv_diff">lilytorch.src.adv_diff</a>
+</li>
+          <li><a href="api/body.html#module-lilytorch.src.body">lilytorch.src.body</a>
+</li>
+          <li><a href="api/solver.html#module-lilytorch.src.extras">lilytorch.src.extras</a>
+</li>
+          <li><a href="api/solver.html#module-lilytorch.src.forces">lilytorch.src.forces</a>
+</li>
+          <li><a href="api/operations.html#module-lilytorch.src.operations">lilytorch.src.operations</a>
+</li>
+          <li><a href="api/plotting.html#module-lilytorch.src.plotting">lilytorch.src.plotting</a>
+</li>
+          <li><a href="api/poisson.html#module-lilytorch.src.poisson_fft">lilytorch.src.poisson_fft</a>
+</li>
+          <li><a href="api/poisson.html#module-lilytorch.src.poisson_mult">lilytorch.src.poisson_mult</a>
+</li>
+          <li><a href="api/solver.html#module-lilytorch.src.solver">lilytorch.src.solver</a>
+</li>
+          <li><a href="api/util.html#module-lilytorch.util.paths">lilytorch.util.paths</a>
+</li>
+          <li><a href="api/util.html#module-lilytorch.util.rw">lilytorch.util.rw</a>
+</li>
+          <li><a href="api/util.html#module-lilytorch.util.yaml_operations">lilytorch.util.yaml_operations</a>
+</li>
+        </ul></li>
+    </ul></td>
+    <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/body.html#lilytorch.src.body.Body.mu_funcs">mu_funcs() (lilytorch.src.body.Body method)</a>
+</li>
+        <li><a href="api/body.html#lilytorch.src.body.Body.mu_funcs_batched">mu_funcs_batched() (lilytorch.src.body.Body method)</a>
+</li>
+        <li><a href="api/body.html#lilytorch.src.body.MultiAnimatBodies">MultiAnimatBodies (class in lilytorch.src.body)</a>
+</li>
+    </ul></td>
+  </tr></table>
+</section>
+
+<section id="N" class="genindex-section">
+  <h2>N</h2>
+  <table style="width: 100%" class="indextable genindextable"><tr>
+    <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/integration.html#lilytorch.integration.native_body_colors.NativeBodyColors">NativeBodyColors (class in lilytorch.integration.native_body_colors)</a>
+</li>
+        <li><a href="api/operations.html#lilytorch.src.operations.normal_derivative">normal_derivative() (in module lilytorch.src.operations)</a>
+
+        <ul>
+          <li><a href="api/solver.html#lilytorch.src.solver.FluidSolver.normal_derivative">(lilytorch.src.solver.FluidSolver method)</a>
+</li>
+        </ul></li>
+    </ul></td>
+    <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/integration.html#lilytorch.integration.gamepad.GamepadHandler.normalize_stick_input">normalize_stick_input() (lilytorch.integration.gamepad.GamepadHandler method)</a>
+</li>
+        <li><a href="api/integration.html#lilytorch.integration.gamepad.GamepadHandler.normalize_trigger_input">normalize_trigger_input() (lilytorch.integration.gamepad.GamepadHandler method)</a>
+</li>
+    </ul></td>
+  </tr></table>
+</section>
+
+<section id="P" class="genindex-section">
+  <h2>P</h2>
+  <table style="width: 100%" class="indextable genindextable"><tr>
+    <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/integration.html#lilytorch.integration.particle_viewer.ParticleViewer">ParticleViewer (class in lilytorch.integration.particle_viewer)</a>
+</li>
+        <li><a href="api/body.html#lilytorch.src.body.Body.phi">phi() (lilytorch.src.body.Body method)</a>
+</li>
+        <li><a href="api/integration.html#lilytorch.integration.extensions.PhysicsOptionsExtension">PhysicsOptionsExtension (class in lilytorch.integration.extensions)</a>
+</li>
+        <li><a href="api/plotting.html#lilytorch.src.plotting.plot_field_2d">plot_field_2d() (in module lilytorch.src.plotting)</a>
+</li>
+        <li><a href="api/plotting.html#lilytorch.src.plotting.plot_field_3d">plot_field_3d() (in module lilytorch.src.plotting)</a>
+</li>
+        <li><a href="api/plotting.html#lilytorch.src.plotting.plot_field_3d_slices">plot_field_3d_slices() (in module lilytorch.src.plotting)</a>
+</li>
+        <li><a href="api/plotting.html#lilytorch.src.plotting.PlottingMixin.plotting_and_saving">plotting_and_saving() (lilytorch.src.plotting.PlottingMixin method)</a>
+</li>
+        <li><a href="api/plotting.html#lilytorch.src.plotting.PlottingMixin.plotting_debug">plotting_debug() (lilytorch.src.plotting.PlottingMixin method)</a>
+</li>
+        <li><a href="api/plotting.html#lilytorch.src.plotting.PlottingMixin.plotting_saving">plotting_saving() (lilytorch.src.plotting.PlottingMixin method)</a>
+</li>
+    </ul></td>
+    <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/plotting.html#lilytorch.src.plotting.PlottingMixin">PlottingMixin (class in lilytorch.src.plotting)</a>
+</li>
+        <li><a href="api/poisson.html#lilytorch.src.poisson_mult.PoissonSolver">PoissonSolver (class in lilytorch.src.poisson_mult)</a>
+</li>
+        <li><a href="api/poisson.html#lilytorch.src.poisson_fft.PoissonSolverFFT">PoissonSolverFFT (class in lilytorch.src.poisson_fft)</a>
+</li>
+        <li><a href="api/integration.html#lilytorch.integration.kinematics.KinematicsController.positions">positions() (lilytorch.integration.kinematics.KinematicsController method)</a>
+</li>
+        <li><a href="api/integration.html#lilytorch.integration.flow_viewer_2d_gpu.prepare_flow_viewer_2d_gpu_env">prepare_flow_viewer_2d_gpu_env() (in module lilytorch.integration.flow_viewer_2d_gpu)</a>
+</li>
+        <li><a href="api/integration.html#lilytorch.integration.flow_viewer_gl_hook.prepare_mujoco_gl_hook_env">prepare_mujoco_gl_hook_env() (in module lilytorch.integration.flow_viewer_gl_hook)</a>
+</li>
+        <li><a href="api/util.html#lilytorch.util.rw.pretty">pretty() (in module lilytorch.util.rw)</a>
+</li>
+        <li><a href="api/solver.html#lilytorch.src.solver.FluidSolver.project">project() (lilytorch.src.solver.FluidSolver method)</a>
+</li>
+        <li><a href="api/util.html#lilytorch.util.yaml_operations.pyobject2yaml">pyobject2yaml() (in module lilytorch.util.yaml_operations)</a>
+</li>
+    </ul></td>
+  </tr></table>
+</section>
+
+<section id="Q" class="genindex-section">
+  <h2>Q</h2>
+  <table style="width: 100%" class="indextable genindextable"><tr>
+    <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/adv_diff.html#lilytorch.src.adv_diff.quick">quick() (in module lilytorch.src.adv_diff)</a>
+</li>
+    </ul></td>
+  </tr></table>
+</section>
+
+<section id="R" class="genindex-section">
+  <h2>R</h2>
+  <table style="width: 100%" class="indextable genindextable"><tr>
+    <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/poisson.html#lilytorch.src.poisson_mult.PoissonSolver.RBGS">RBGS() (lilytorch.src.poisson_mult.PoissonSolver method)</a>
+</li>
+        <li><a href="api/util.html#lilytorch.util.yaml_operations.read_yaml">read_yaml() (in module lilytorch.util.yaml_operations)</a>
+</li>
+        <li><a href="api/integration.html#lilytorch.integration.extensions.RealtimeMonitor">RealtimeMonitor (class in lilytorch.integration.extensions)</a>
+</li>
+        <li><a href="api/body.html#lilytorch.src.body.BodyMesh.resample_closed_contour">resample_closed_contour() (lilytorch.src.body.BodyMesh method)</a>
+</li>
+        <li><a href="api/body.html#lilytorch.src.body.resample_contour">resample_contour() (in module lilytorch.src.body)</a>
+</li>
+        <li><a href="api/body.html#lilytorch.src.body.resample_contour_exact_spacing">resample_contour_exact_spacing() (in module lilytorch.src.body)</a>
+</li>
+    </ul></td>
+    <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/body.html#lilytorch.src.body.rotate_grid_2d">rotate_grid_2d() (in module lilytorch.src.body)</a>
+</li>
+        <li><a href="api/body.html#lilytorch.src.body.rotate_grid_3d">rotate_grid_3d() (in module lilytorch.src.body)</a>
+</li>
+        <li><a href="api/body.html#lilytorch.src.body.BodyAnalytical.rototranslate_points">rototranslate_points() (lilytorch.src.body.BodyAnalytical method)</a>
+</li>
+        <li><a href="api/solver.html#lilytorch.src.solver.FluidSolver.run_from_initial">run_from_initial() (lilytorch.src.solver.FluidSolver method)</a>
+</li>
+        <li><a href="api/integration.html#lilytorch.integration.gamepad.GamepadHandler.run_loop">run_loop() (lilytorch.integration.gamepad.GamepadHandler method)</a>
+</li>
+        <li><a href="api/integration.html#lilytorch.integration.gamepad.GamepadHandler.run_loop_events">run_loop_events() (lilytorch.integration.gamepad.GamepadHandler method)</a>
+</li>
+        <li><a href="api/solver.html#lilytorch.src.solver.FluidSolver.run_sim">run_sim() (lilytorch.src.solver.FluidSolver method)</a>
+</li>
+    </ul></td>
+  </tr></table>
+</section>
+
+<section id="S" class="genindex-section">
+  <h2>S</h2>
+  <table style="width: 100%" class="indextable genindextable"><tr>
+    <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/util.html#lilytorch.util.rw.save_dat">save_dat() (in module lilytorch.util.rw)</a>
+</li>
+        <li><a href="api/plotting.html#lilytorch.src.plotting.PlottingMixin.save_drags_h5">save_drags_h5() (lilytorch.src.plotting.PlottingMixin method)</a>
+</li>
+        <li><a href="api/solver.html#lilytorch.src.solver.FlowDiagnostics.save_h5">save_h5() (lilytorch.src.solver.FlowDiagnostics method)</a>
+</li>
+        <li><a href="api/util.html#lilytorch.util.rw.save_object">save_object() (in module lilytorch.util.rw)</a>
+</li>
+        <li><a href="api/plotting.html#lilytorch.src.plotting.PlottingMixin.save_results">save_results() (lilytorch.src.plotting.PlottingMixin method)</a>
+</li>
+        <li><a href="api/body.html#lilytorch.src.body.BodyFishExperimental.save_signal">save_signal() (lilytorch.src.body.BodyFishExperimental method)</a>
+</li>
+        <li><a href="api/body.html#lilytorch.src.body.BodyFishAnalytical.sdf_fun">sdf_fun() (lilytorch.src.body.BodyFishAnalytical method)</a>
+
+        <ul>
+          <li><a href="api/body.html#lilytorch.src.body.BodyFishExperimental.sdf_fun">(lilytorch.src.body.BodyFishExperimental method)</a>
+</li>
+        </ul></li>
+        <li><a href="api/body.html#lilytorch.src.body.sdUnevenCapsule">sdUnevenCapsule() (in module lilytorch.src.body)</a>
+</li>
+        <li><a href="api/integration.html#lilytorch.integration.particle_viewer.seed_tail_from_sdf">seed_tail_from_sdf() (in module lilytorch.integration.particle_viewer)</a>
+</li>
+        <li><a href="api/body.html#lilytorch.src.body.segment">segment() (in module lilytorch.src.body)</a>
+</li>
+        <li><a href="api/adv_diff.html#lilytorch.src.adv_diff.AdvDiffSolver.set_BCs">set_BCs() (lilytorch.src.adv_diff.AdvDiffSolver method)</a>
+</li>
+        <li><a href="api/integration.html#lilytorch.integration.flow_viewer_gl_hook.FlowViewerGLHook.set_enabled">set_enabled() (lilytorch.integration.flow_viewer_gl_hook.FlowViewerGLHook method)</a>
+</li>
+    </ul></td>
+    <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/solver.html#lilytorch.src.solver.FluidSolver.set_initial_conditions">set_initial_conditions() (lilytorch.src.solver.FluidSolver method)</a>
+</li>
+        <li><a href="api/integration.html#lilytorch.integration.camera.side_camera_config">side_camera_config() (in module lilytorch.integration.camera)</a>
+</li>
+        <li><a href="api/operations.html#lilytorch.src.operations.smagorinsky_viscosity">smagorinsky_viscosity() (in module lilytorch.src.operations)</a>
+</li>
+        <li><a href="api/poisson.html#lilytorch.src.poisson_mult.PoissonSolver.smooth">smooth() (lilytorch.src.poisson_mult.PoissonSolver method)</a>
+</li>
+        <li><a href="api/poisson.html#lilytorch.src.poisson_fft.PoissonSolverFFT.solve">solve() (lilytorch.src.poisson_fft.PoissonSolverFFT method)</a>
+</li>
+        <li><a href="api/poisson.html#lilytorch.src.poisson_fft.PoissonSolverFFT.solve_free_space">solve_free_space() (lilytorch.src.poisson_fft.PoissonSolverFFT method)</a>
+</li>
+        <li><a href="api/poisson.html#lilytorch.src.poisson_mult.PoissonSolver.solve_mgcg">solve_mgcg() (lilytorch.src.poisson_mult.PoissonSolver method)</a>
+</li>
+        <li><a href="api/poisson.html#lilytorch.src.poisson_mult.PoissonSolver.solve_multigrid">solve_multigrid() (lilytorch.src.poisson_mult.PoissonSolver method)</a>
+</li>
+        <li><a href="api/body.html#lilytorch.src.body.sphere">sphere() (in module lilytorch.src.body)</a>
+</li>
+        <li><a href="api/integration.html#lilytorch.integration.BDIMhandler.BDIMhandler.step">step() (lilytorch.integration.BDIMhandler.BDIMhandler method)</a>
+</li>
+        <li><a href="api/solver.html#lilytorch.src.solver.FluidSolver.step_">step_() (lilytorch.src.solver.FluidSolver method)</a>
+</li>
+        <li><a href="api/integration.html#lilytorch.integration.gamepad.GamepadHandler.stop">stop() (lilytorch.integration.gamepad.GamepadHandler method)</a>
+</li>
+        <li><a href="api/operations.html#lilytorch.src.operations.strain_rate_magnitude">strain_rate_magnitude() (in module lilytorch.src.operations)</a>
+</li>
+    </ul></td>
+  </tr></table>
+</section>
+
+<section id="T" class="genindex-section">
+  <h2>T</h2>
+  <table style="width: 100%" class="indextable genindextable"><tr>
+    <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/body.html#lilytorch.src.body.BodyFishExperimental.thk">thk() (lilytorch.src.body.BodyFishExperimental method)</a>
+</li>
+        <li><a href="api/body.html#lilytorch.src.body.BodyFishExperimental.thk_gazzola">thk_gazzola() (lilytorch.src.body.BodyFishExperimental method)</a>
+</li>
+        <li><a href="api/body.html#lilytorch.src.body.BodyFishExperimental.thk_liu">thk_liu() (lilytorch.src.body.BodyFishExperimental method)</a>
+</li>
+    </ul></td>
+    <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/body.html#lilytorch.src.body.BodyFishAnalytical.thk_nonconst">thk_nonconst() (lilytorch.src.body.BodyFishAnalytical method)</a>
+</li>
+        <li><a href="api/integration.html#lilytorch.integration.camera.top_down_camera_config">top_down_camera_config() (in module lilytorch.integration.camera)</a>
+</li>
+        <li><a href="api/body.html#lilytorch.src.body.COMPOSITEmesh2sdf.transform_3d">transform_3d() (lilytorch.src.body.COMPOSITEmesh2sdf method)</a>
+</li>
+    </ul></td>
+  </tr></table>
+</section>
+
+<section id="U" class="genindex-section">
+  <h2>U</h2>
+  <table style="width: 100%" class="indextable genindextable"><tr>
+    <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/integration.html#lilytorch.integration.flow_viewer_gl_hook.FlowViewerGLHook.update">update() (lilytorch.integration.flow_viewer_gl_hook.FlowViewerGLHook method)</a>
+
+        <ul>
+          <li><a href="api/integration.html#lilytorch.integration.gamepad.GamepadHandler.update">(lilytorch.integration.gamepad.GamepadHandler method)</a>
+</li>
+          <li><a href="api/body.html#lilytorch.src.body.BodyAnalytical.update">(lilytorch.src.body.BodyAnalytical method)</a>
+</li>
+          <li><a href="api/body.html#lilytorch.src.body.BodyFishAnalytical.update">(lilytorch.src.body.BodyFishAnalytical method)</a>
+</li>
+          <li><a href="api/body.html#lilytorch.src.body.BodyFishExperimental.update">(lilytorch.src.body.BodyFishExperimental method)</a>
+</li>
+          <li><a href="api/body.html#lilytorch.src.body.BodyMesh.update">(lilytorch.src.body.BodyMesh method)</a>
+</li>
+          <li><a href="api/body.html#lilytorch.src.body.CompositeBodyAnalytical.update">(lilytorch.src.body.CompositeBodyAnalytical method)</a>
+</li>
+          <li><a href="api/body.html#lilytorch.src.body.CompositeBodyMesh.update">(lilytorch.src.body.CompositeBodyMesh method)</a>
+</li>
+          <li><a href="api/solver.html#lilytorch.src.solver.FlowDiagnostics.update">(lilytorch.src.solver.FlowDiagnostics method)</a>
+</li>
+          <li><a href="api/util.html#lilytorch.util.rw.Dict2Class.update">(lilytorch.util.rw.Dict2Class method)</a>
+</li>
+        </ul></li>
+    </ul></td>
+    <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/integration.html#lilytorch.integration.gamepad.GamepadHandler.update_events">update_events() (lilytorch.integration.gamepad.GamepadHandler method)</a>
+</li>
+        <li><a href="api/body.html#lilytorch.src.body.mesh2sdf.update_mesh">update_mesh() (lilytorch.src.body.mesh2sdf method)</a>
+</li>
+    </ul></td>
+  </tr></table>
+</section>
+
+<section id="V" class="genindex-section">
+  <h2>V</h2>
+  <table style="width: 100%" class="indextable genindextable"><tr>
+    <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/adv_diff.html#lilytorch.src.adv_diff.van_leer">van_leer() (in module lilytorch.src.adv_diff)</a>
+</li>
+        <li><a href="api/poisson.html#lilytorch.src.poisson_mult.PoissonSolver.vcycle">vcycle() (lilytorch.src.poisson_mult.PoissonSolver method)</a>
+</li>
+        <li><a href="api/integration.html#lilytorch.integration.kinematics.KinematicsController.velocities">velocities() (lilytorch.integration.kinematics.KinematicsController method)</a>
+</li>
+        <li><a href="api/body.html#lilytorch.src.body.BodyMesh.visualize">visualize() (lilytorch.src.body.BodyMesh method)</a>
+
+        <ul>
+          <li><a href="api/body.html#lilytorch.src.body.CompositeBodyMesh.visualize">(lilytorch.src.body.CompositeBodyMesh method)</a>
+</li>
+          <li><a href="api/body.html#lilytorch.src.body.COMPOSITEmesh2sdf.visualize">(lilytorch.src.body.COMPOSITEmesh2sdf method)</a>
+</li>
+          <li><a href="api/body.html#lilytorch.src.body.mesh2sdf.visualize">(lilytorch.src.body.mesh2sdf method)</a>
+</li>
+        </ul></li>
+    </ul></td>
+    <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/operations.html#lilytorch.src.operations.vorticity">vorticity() (in module lilytorch.src.operations)</a>
+
+        <ul>
+          <li><a href="api/solver.html#lilytorch.src.solver.FluidSolver.vorticity">(lilytorch.src.solver.FluidSolver method)</a>
+</li>
+        </ul></li>
+        <li><a href="api/operations.html#lilytorch.src.operations.vorticity_components">vorticity_components() (in module lilytorch.src.operations)</a>
+
+        <ul>
+          <li><a href="api/solver.html#lilytorch.src.solver.FluidSolver.vorticity_components">(lilytorch.src.solver.FluidSolver method)</a>
+</li>
+        </ul></li>
+    </ul></td>
+  </tr></table>
+</section>
+
+<section id="W" class="genindex-section">
+  <h2>W</h2>
+  <table style="width: 100%" class="indextable genindextable"><tr>
+    <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/util.html#lilytorch.util.yaml_operations.write_yaml">write_yaml() (in module lilytorch.util.yaml_operations)</a>
+</li>
+    </ul></td>
+  </tr></table>
+</section>
+
+<section id="Y" class="genindex-section">
+  <h2>Y</h2>
+  <table style="width: 100%" class="indextable genindextable"><tr>
+    <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/util.html#lilytorch.util.yaml_operations.yaml2pyobject">yaml2pyobject() (in module lilytorch.util.yaml_operations)</a>
+</li>
+    </ul></td>
+  </tr></table>
+</section>
+
+
+        </article>
+      </div>
+      <footer>
+        
+        <div class="related-pages">
+          
+          
+        </div>
+        <div class="bottom-of-page">
+          <div class="left-details">
+            <div class="copyright">
+                Copyright &#169; 2024–2026, Andrea Ferrario
+            </div>
+            Made with <a href="https://www.sphinx-doc.org/">Sphinx</a> and <a class="muted-link" href="https://pradyunsg.me">@pradyunsg</a>'s
+            
+            <a href="https://github.com/pradyunsg/furo">Furo</a>
+            
+          </div>
+          <div class="right-details">
+            
+          </div>
+        </div>
+        
+      </footer>
+    </div>
+    <aside class="toc-drawer no-toc">
+      
+      
+      
+    </aside>
+  </div>
+</div><script src="_static/documentation_options.js?v=38b66d78"></script>
+    <script src="_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="_static/scripts/furo.js?v=46bd48cc"></script>
+    </body>
+</html>

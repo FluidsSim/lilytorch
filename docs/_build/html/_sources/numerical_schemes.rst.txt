@@ -131,7 +131,7 @@ Smagorinsky LES — variable-coefficient diffusion
 -------------------------------------------------
 
 When the Smagorinsky subgrid-scale model is enabled
-(``smagorinsky_cs > 0``; see :ref:`smagorinsky eq <smagorinsky>`), the
+(``smagorinsky_cs > 0``; see :eq:`smagorinsky`), the
 constant-viscosity Laplacian :math:`\nu\,\nabla^{2}\phi` is replaced by
 a **variable-coefficient** diffusion operator:
 
@@ -224,6 +224,18 @@ Two FFT-based solvers are available, selected via ``poisson_bc_type``:
 
    See :doc:`mathematical_formulation` for the Green's function
    expressions.
+
+
+.. note::
+
+   The FFT solvers are **constant-coefficient**: for a variable-density /
+   :math:`\mu_0`-weighted BDIM projection the coefficient is moved to the
+   RHS as a division, which must stay **bounded** (the divisor uses the
+   scalar fluid coefficient :math:`w\Delta t/\rho`, *not* the
+   :math:`\mu_0`-weighted coefficient that vanishes in the body band — see
+   :ref:`fft-vs-multigrid-projection`). For genuinely variable-coefficient
+   operators with strong contrast, prefer the multigrid solver below, which
+   handles the variable coefficient directly.
 
 
 Multigrid / MGCG solver

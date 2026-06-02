@@ -121,16 +121,84 @@ This achieves:
 Pressure projection with BDIM
 -------------------------------
 
-The pressure Poisson equation is modified to account for the body mask:
+The pressure Poisson equation is modified to account for the body mask.
+For a single-density flow the BDIM2 projection solves
+
+.. math::
+   :label: bdim-proj
+
+   \nabla\cdot\!\left(c\,\nabla p\right) = \nabla\cdot\tilde{\mathbf{u}},
+   \qquad
+   c = \frac{w\,\Delta t}{\rho}\,\mu_0 ,
+   \qquad
+   \mathbf{u}^{n+1} = \tilde{\mathbf{u}} - c\,\nabla p .
+
+The :math:`\mu_0` factor in the coefficient :math:`c` makes the velocity
+correction :math:`c\,\nabla p` **vanish inside the body** (:math:`\mu_0=0`),
+so the no-slip body velocity imposed by the BDIM meta-equation is
+preserved exactly. This :math:`\mu_0`-weighting is controlled by the
+``bdim_mu0_projection`` flag (default ``True``).
+
+Variable-density (FSI) projection
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+When the body density :math:`\rho_b` differs from the fluid density
+:math:`\rho_f` (rigid-body sedimentation, FARMS coupling), the projection
+uses the **effective density** blended across the interface band,
 
 .. math::
 
-   \nabla\cdot\!\left(\frac{w\,\Delta t}{\rho}\,\mu_0\,\nabla p\right)
-   = \nabla\cdot\tilde{\mathbf{u}}
+   \rho_{\text{eff}}(\mathbf{x}) = \rho_b + (\rho_f - \rho_b)\,\mu_0(\mathbf{x}),
+   \qquad
+   c = \frac{w\,\Delta t}{\rho_{\text{eff}}}\,\mu_0 ,
 
-The face coefficients for the multigrid solver are
-:math:`c = (w\,\Delta t / \rho)\,\mu_0`, ensuring zero pressure gradient
-inside the body.
+so that the coefficient is :math:`w\Delta t/\rho_f` in the fluid
+(:math:`\mu_0=1`) and tends to :math:`0` inside the body
+(:math:`\mu_0\to0`). Set ``rho_body`` to the body density; it should match
+the body's morphology density (the value that sets its MuJoCo mass), or
+the body will be over/under-buoyant.
+
+.. _fft-vs-multigrid-projection:
+
+Multigrid vs FFT: why the RHS divisor must stay bounded
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The two Poisson backends treat the variable coefficient :math:`c`
+differently:
+
+* **Multigrid / MGCG** (``poisson_method: multigrid`` | ``mgcg``) solves
+  the *variable-coefficient* operator :eq:`bdim-proj` directly — the
+  smoother uses the face coefficients :math:`c` on both sides, so cells
+  with :math:`c\to0` simply decouple. This is robust for any
+  :math:`\mu_0`-weighting.
+
+* **FFT** (``poisson_method: fft``) can only solve a *constant-coefficient*
+  Laplacian :math:`\nabla^2 p = f`. The variable coefficient is therefore
+  moved to the right-hand side as a **division**,
+
+  .. math::
+
+     \nabla^2 p = \frac{\nabla\cdot\tilde{\mathbf{u}}}{c_{\text{rhs}}} ,
+     \qquad
+     \mathbf{u}^{n+1} = \tilde{\mathbf{u}} - c\,\nabla p .
+
+  If the :math:`\mu_0`-weighted coefficient :math:`c=(w\Delta t/\rho_{\text{eff}})\,\mu_0`
+  is used as the RHS divisor :math:`c_{\text{rhs}}`, then :math:`c_{\text{rhs}}\to0`
+  in the immersed-boundary band and :math:`\nabla\cdot\tilde{\mathbf{u}}/c_{\text{rhs}}`
+  becomes **singular** there — the constant-coefficient solver cannot
+  represent it, and the pressure (and velocity) blow up exponentially
+  (observed as a :math:`\sim\!10^5\times` per-step growth that aborts
+  coupled runs after a few iterations).
+
+  **Fix.** For the FFT path the RHS divisor uses the **bounded** scalar
+  fluid coefficient :math:`c_{\text{rhs}} = w\,\Delta t/\rho`, while the
+  :math:`\mu_0`-weighted :math:`c` is applied **only in the velocity
+  correction** :math:`\mathbf{u}^{n+1}=\tilde{\mathbf{u}}-c\,\nabla p`.
+  The correction therefore still vanishes inside the body (preserving the
+  no-slip velocity), but the Poisson RHS stays well posed.
+  ``flow_past_circle`` and other single-phase cases are unaffected
+  (:math:`c` is a scalar there). This fix lives in
+  :meth:`FluidSolver.project` and applies to both 2-D and 3-D.
 
 When ``zero_pressure_inside`` is enabled, :math:`p = 0` is explicitly
 enforced in cells where :math:`\mu_0 < \text{threshold}`.
@@ -227,10 +295,30 @@ The blend is implemented identically in the pure-PyTorch union
 CUDA/C++ streaming-SDF kernels (``streaming_sdf*.cu`` /
 ``streaming_sdf_cpu*.cpp``): the per-body reduction accumulates
 :math:`\sum_i w_i \mathbf{v}_i` and :math:`\sum_i w_i` alongside the
-existing running-min, and the decode step divides. Validated on the
-1guilla and zebrafish swimmers (``convexify=True``, no
-``force_relaxation``): the seam blow-up is removed and the run stays
-bounded with physical forces.
+existing running-min, and the decode step divides.
+
+.. warning::
+
+   The blend **reduces** the overlap-induced divergence (it is a smoothed
+   average of two rigid fields, so :math:`\nabla\!\cdot\mathbf{v}_{\text{body}}
+   = \nabla w \cdot (\mathbf{v}_A-\mathbf{v}_B) \neq 0`, but with a much
+   smaller magnitude than the hard jump) — it does **not** make the imposed
+   velocity divergence-free.  For **heavy** overlap (e.g. ``convexify=True``
+   convex hulls, ~16 %+ per link) on a **fine production grid** it is *not*
+   sufficient on its own: the residual divergence still drives the velocity
+   past the (tighter) CFL limit. In practice it only *delays* the blow-up,
+   and combining it with ``force_relaxation`` < 1 delays it further but does
+   not guarantee stability. The blend is enough on coarser grids and for
+   *mild* overlap.
+
+   **The robust fix for overlapping links is to remove the overlap at the
+   source: ``convexify=False``** (use the raw watertight collision meshes,
+   which do not overlap). This is stable with no blend and no force
+   relaxation. Use the velocity blend only when overlap is unavoidable and
+   mild. (Verified at production resolution on the zebrafish swimmer:
+   ``convexify=False`` is stable indefinitely; ``convexify=True`` blows up
+   with the blend alone, with ``force_relaxation`` alone, and — later — with
+   both.)
 
 
 FARMS coupling (3-D)

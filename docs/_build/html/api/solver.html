@@ -1,0 +1,882 @@
+<!doctype html>
+<html class="no-js" lang="en" data-content_root="../">
+  <head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <meta name="color-scheme" content="light dark"><meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="index" title="Index" href="../genindex.html"><link rel="search" title="Search" href="../search.html"><link rel="next" title="adv_diff — Advection–Diffusion Solver" href="adv_diff.html"><link rel="prev" title="Strong (implicit) FSI coupling" href="../strong_coupling.html">
+
+    <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
+        <title>solver — Navier–Stokes Solver - LilyTorch Documentation</title>
+      <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=d111a655" />
+    <link rel="stylesheet" type="text/css" href="../_static/styles/furo.css?v=7bdb33bb" />
+    <link rel="stylesheet" type="text/css" href="../_static/styles/furo-extensions.css?v=8dab3a3b" />
+    <link rel="stylesheet" type="text/css" href="../_static/custom.css?v=8556ca62" />
+    
+    
+
+
+<style>
+  body {
+    --color-code-background: #f2f2f2;
+  --color-code-foreground: #1e1e1e;
+  --color-brand-primary: #2962FF;
+  --color-brand-content: #2962FF;
+  
+  }
+  @media not print {
+    body[data-theme="dark"] {
+      --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  --color-brand-primary: #82B1FF;
+  --color-brand-content: #82B1FF;
+  
+    }
+    @media (prefers-color-scheme: dark) {
+      body:not([data-theme="light"]) {
+        --color-code-background: #202020;
+  --color-code-foreground: #d0d0d0;
+  --color-brand-primary: #82B1FF;
+  --color-brand-content: #82B1FF;
+  
+      }
+    }
+  }
+</style></head>
+  <body>
+    
+    <script>
+      document.body.dataset.theme = localStorage.getItem("theme") || "auto";
+    </script>
+    
+
+<svg xmlns="http://www.w3.org/2000/svg" style="display: none;">
+  <symbol id="svg-toc" viewBox="0 0 24 24">
+    <title>Contents</title>
+    <svg stroke="currentColor" fill="currentColor" stroke-width="0" viewBox="0 0 1024 1024">
+      <path d="M408 442h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8zm-8 204c0 4.4 3.6 8 8 8h480c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8v56zm504-486H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zm0 632H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zM115.4 518.9L271.7 642c5.8 4.6 14.4.5 14.4-6.9V388.9c0-7.4-8.5-11.5-14.4-6.9L115.4 505.1a8.74 8.74 0 0 0 0 13.8z"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-menu" viewBox="0 0 24 24">
+    <title>Menu</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-menu">
+      <line x1="3" y1="12" x2="21" y2="12"></line>
+      <line x1="3" y1="6" x2="21" y2="6"></line>
+      <line x1="3" y1="18" x2="21" y2="18"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-arrow-right" viewBox="0 0 24 24">
+    <title>Expand</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather-chevron-right">
+      <polyline points="9 18 15 12 9 6"></polyline>
+    </svg>
+  </symbol>
+  <symbol id="svg-sun" viewBox="0 0 24 24">
+    <title>Light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="feather-sun">
+      <circle cx="12" cy="12" r="5"></circle>
+      <line x1="12" y1="1" x2="12" y2="3"></line>
+      <line x1="12" y1="21" x2="12" y2="23"></line>
+      <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+      <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+      <line x1="1" y1="12" x2="3" y2="12"></line>
+      <line x1="21" y1="12" x2="23" y2="12"></line>
+      <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+      <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon" viewBox="0 0 24 24">
+    <title>Dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-moon">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454z" />
+    </svg>
+  </symbol>
+  <symbol id="svg-sun-with-moon" viewBox="0 0 24 24">
+    <title>Auto light/dark, in light mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path style="opacity: 50%" d="M 5.411 14.504 C 5.471 14.504 5.532 14.504 5.591 14.504 C 3.639 16.319 4.383 19.569 6.931 20.352 C 7.693 20.586 8.512 20.551 9.25 20.252 C 8.023 23.207 4.056 23.725 2.11 21.184 C 0.166 18.642 1.702 14.949 4.874 14.536 C 5.051 14.512 5.231 14.5 5.411 14.5 L 5.411 14.504 Z"/>
+      <line x1="14.5" y1="3.25" x2="14.5" y2="1.25"/>
+      <line x1="14.5" y1="15.85" x2="14.5" y2="17.85"/>
+      <line x1="10.044" y1="5.094" x2="8.63" y2="3.68"/>
+      <line x1="19" y1="14.05" x2="20.414" y2="15.464"/>
+      <line x1="8.2" y1="9.55" x2="6.2" y2="9.55"/>
+      <line x1="20.8" y1="9.55" x2="22.8" y2="9.55"/>
+      <line x1="10.044" y1="14.006" x2="8.63" y2="15.42"/>
+      <line x1="19" y1="5.05" x2="20.414" y2="3.636"/>
+      <circle cx="14.5" cy="9.55" r="3.6"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-moon-with-sun" viewBox="0 0 24 24">
+    <title>Auto light/dark, in dark mode</title>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round"
+      class="icon-custom-derived-from-feather-sun-and-tabler-moon">
+      <path d="M 8.282 7.007 C 8.385 7.007 8.494 7.007 8.595 7.007 C 5.18 10.184 6.481 15.869 10.942 17.24 C 12.275 17.648 13.706 17.589 15 17.066 C 12.851 22.236 5.91 23.143 2.505 18.696 C -0.897 14.249 1.791 7.786 7.342 7.063 C 7.652 7.021 7.965 7 8.282 7 L 8.282 7.007 Z"/>
+      <line style="opacity: 50%" x1="18" y1="3.705" x2="18" y2="2.5"/>
+      <line style="opacity: 50%" x1="18" y1="11.295" x2="18" y2="12.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="4.816" x2="14.464" y2="3.964"/>
+      <line style="opacity: 50%" x1="20.711" y1="10.212" x2="21.563" y2="11.063"/>
+      <line style="opacity: 50%" x1="14.205" y1="7.5" x2="13.001" y2="7.5"/>
+      <line style="opacity: 50%" x1="21.795" y1="7.5" x2="23" y2="7.5"/>
+      <line style="opacity: 50%" x1="15.316" y1="10.184" x2="14.464" y2="11.036"/>
+      <line style="opacity: 50%" x1="20.711" y1="4.789" x2="21.563" y2="3.937"/>
+      <circle style="opacity: 50%" cx="18" cy="7.5" r="2.169"/>
+    </svg>
+  </symbol>
+  <symbol id="svg-pencil" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-pencil-code">
+      <path d="M4 20h4l10.5 -10.5a2.828 2.828 0 1 0 -4 -4l-10.5 10.5v4" />
+      <path d="M13.5 6.5l4 4" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+  <symbol id="svg-eye" viewBox="0 0 24 24">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="icon-tabler-eye-code">
+      <path stroke="none" d="M0 0h24v24H0z" fill="none" />
+      <path d="M10 12a2 2 0 1 0 4 0a2 2 0 0 0 -4 0" />
+      <path
+        d="M11.11 17.958c-3.209 -.307 -5.91 -2.293 -8.11 -5.958c2.4 -4 5.4 -6 9 -6c3.6 0 6.6 2 9 6c-.21 .352 -.427 .688 -.647 1.008" />
+      <path d="M20 21l2 -2l-2 -2" />
+      <path d="M17 17l-2 2l2 2" />
+    </svg>
+  </symbol>
+</svg>
+
+<input type="checkbox" class="sidebar-toggle" name="__navigation" id="__navigation" aria-label="Toggle site navigation sidebar">
+<input type="checkbox" class="sidebar-toggle" name="__toc" id="__toc" aria-label="Toggle table of contents sidebar">
+<label class="overlay sidebar-overlay" for="__navigation"></label>
+<label class="overlay toc-overlay" for="__toc"></label>
+
+<a class="skip-to-content muted-link" href="#furo-main-content">Skip to content</a>
+
+
+
+<div class="page">
+  <header class="mobile-header">
+    <div class="header-left">
+      <label class="nav-overlay-icon" for="__navigation">
+        <span class="icon"><svg><use href="#svg-menu"></use></svg></span>
+      </label>
+    </div>
+    <div class="header-center">
+      <a href="../index.html"><div class="brand">LilyTorch Documentation</div></a>
+    </div>
+    <div class="header-right">
+      <div class="theme-toggle-container theme-toggle-header">
+        <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+          <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+          <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+          <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+          <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+        </button>
+      </div>
+      <label class="toc-overlay-icon toc-header-icon" for="__toc">
+        <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+      </label>
+    </div>
+  </header>
+  <aside class="sidebar-drawer">
+    <div class="sidebar-container">
+      
+      <div class="sidebar-sticky"><a class="sidebar-brand" href="../index.html">
+  
+  <span class="sidebar-brand-text">LilyTorch Documentation</span>
+  
+</a><form class="sidebar-search-container" method="get" action="../search.html" role="search">
+  <input class="sidebar-search" placeholder="Search" name="q" aria-label="Search">
+  <input type="hidden" name="check_keywords" value="yes">
+  <input type="hidden" name="area" value="default">
+</form>
+<div id="searchbox"></div><div class="sidebar-scroll"><div class="sidebar-tree">
+  <p class="caption" role="heading"><span class="caption-text">User Guide</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../getting_started.html">Getting Started</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../examples.html">Examples</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../parameters.html">Configuration Reference</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../boundary_conditions.html">Boundary Conditions</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../visualization.html">Visualisation &amp; Post-processing</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Theory &amp; Numerics</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="../mathematical_formulation.html">Mathematical Formulation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../numerical_schemes.html">Numerical Schemes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../immersed_boundary.html">Immersed Boundary Method — BDIM2</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../strong_coupling.html">Strong (implicit) FSI coupling</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">API Reference</span></p>
+<ul class="current">
+<li class="toctree-l1 current current-page"><a class="current reference internal" href="#"><code class="docutils literal notranslate"><span class="pre">solver</span></code> — Navier–Stokes Solver</a></li>
+<li class="toctree-l1"><a class="reference internal" href="#forces-hydrodynamic-force-integrators"><code class="docutils literal notranslate"><span class="pre">forces</span></code> — Hydrodynamic Force Integrators</a></li>
+<li class="toctree-l1"><a class="reference internal" href="#extras-sponge-les-non-newtonian-viscosity"><code class="docutils literal notranslate"><span class="pre">extras</span></code> — Sponge, LES &amp; Non-Newtonian Viscosity</a></li>
+<li class="toctree-l1"><a class="reference internal" href="adv_diff.html"><code class="docutils literal notranslate"><span class="pre">adv_diff</span></code> — Advection–Diffusion Solver</a></li>
+<li class="toctree-l1"><a class="reference internal" href="poisson.html"><code class="docutils literal notranslate"><span class="pre">poisson</span></code> — Pressure Solvers</a></li>
+<li class="toctree-l1"><a class="reference internal" href="body.html"><code class="docutils literal notranslate"><span class="pre">body</span></code> — Geometry, SDF &amp; Kinematics</a></li>
+<li class="toctree-l1"><a class="reference internal" href="operations.html"><code class="docutils literal notranslate"><span class="pre">operations</span></code> — Discrete Differential Operators</a></li>
+<li class="toctree-l1"><a class="reference internal" href="plotting.html"><code class="docutils literal notranslate"><span class="pre">plotting</span></code> — Visualisation Helpers</a></li>
+<li class="toctree-l1"><a class="reference internal" href="integration.html"><code class="docutils literal notranslate"><span class="pre">integration</span></code> — FARMS / MuJoCo Coupling Layer</a></li>
+<li class="toctree-l1"><a class="reference internal" href="util.html"><code class="docutils literal notranslate"><span class="pre">util</span></code> — Utilities</a></li>
+</ul>
+
+</div>
+</div>
+
+      </div>
+      
+    </div>
+  </aside>
+  <div class="main">
+    <div class="content">
+      <div class="article-container">
+        <a href="#" class="back-to-top muted-link">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+            <path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8v12z"></path>
+          </svg>
+          <span>Back to top</span>
+        </a>
+        <div class="content-icon-container">
+          <div class="view-this-page">
+  <a class="muted-link" href="../_sources/api/solver.rst.txt" title="View this page">
+    <svg><use href="#svg-eye"></use></svg>
+    <span class="visually-hidden">View this page</span>
+  </a>
+</div>
+<div class="theme-toggle-container theme-toggle-content">
+            <button class="theme-toggle" aria-label="Toggle Light / Dark / Auto color theme">
+              <svg class="theme-icon-when-auto-light"><use href="#svg-sun-with-moon"></use></svg>
+              <svg class="theme-icon-when-auto-dark"><use href="#svg-moon-with-sun"></use></svg>
+              <svg class="theme-icon-when-dark"><use href="#svg-moon"></use></svg>
+              <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
+            </button>
+          </div>
+          <label class="toc-overlay-icon toc-content-icon" for="__toc">
+            <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
+          </label>
+        </div>
+        <article role="main" id="furo-main-content">
+          <section id="module-lilytorch.src.solver">
+<span id="solver-navierstokes-solver"></span><span id="api-solver"></span><h1><code class="docutils literal notranslate"><span class="pre">solver</span></code> — Navier–Stokes Solver<a class="headerlink" href="#module-lilytorch.src.solver" title="Link to this heading">¶</a></h1>
+<dl class="py class">
+<dt class="sig sig-object py" id="lilytorch.src.solver.FlowDiagnostics">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-prename descclassname"><span class="pre">lilytorch.src.solver.</span></span><span class="sig-name descname"><span class="pre">FlowDiagnostics</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">nt</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ndim</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">h</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">device</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dtype</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">check_every</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">energy_growth_factor</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">10.0</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lilytorch/src/solver.html#FlowDiagnostics"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lilytorch.src.solver.FlowDiagnostics" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <a class="reference external" href="https://docs.python.org/3/library/functions.html#object" title="(in Python v3.14)"><code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></a></p>
+<p>Lightweight monitor for kinetic energy, enstrophy, max-divergence,
+and CFL number.  Records scalar time-series and optionally warns when
+energy grows beyond a user-specified factor of its initial value.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>nt</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><em>int</em></a>) – Total number of time steps (for pre-allocation).</p></li>
+<li><p><strong>ndim</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><em>int</em></a>) – Spatial dimension (2 or 3).</p></li>
+<li><p><strong>h</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.14)"><em>float</em></a><em> or </em><em>Tensor</em>) – Uniform grid spacing.</p></li>
+<li><p><strong>device</strong> – Torch device / dtype for the record arrays.</p></li>
+<li><p><strong>dtype</strong> – Torch device / dtype for the record arrays.</p></li>
+<li><p><strong>check_every</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><em>int</em></a>) – Diagnostics are computed every <em>check_every</em> steps.  1 = every step.</p></li>
+<li><p><strong>energy_growth_factor</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.14)"><em>float</em></a>) – Issue a warning when E_k exceeds <em>energy_growth_factor</em> × E_k(0).
+Set to <code class="docutils literal notranslate"><span class="pre">None</span></code> or <code class="docutils literal notranslate"><span class="pre">inf</span></code> to disable the energy blow-up check.</p></li>
+</ul>
+</dd>
+</dl>
+<dl class="py method">
+<dt class="sig sig-object py" id="lilytorch.src.solver.FlowDiagnostics.update">
+<span class="sig-name descname"><span class="pre">update</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">iteration</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">u</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">v</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">p</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dt</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">nu</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">divergence_fn</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">vorticity_fn</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">w</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lilytorch/src/solver.html#FlowDiagnostics.update"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lilytorch.src.solver.FlowDiagnostics.update" title="Link to this definition">¶</a></dt>
+<dd><p>Compute and record diagnostics for the current step.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>iteration</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#int" title="(in Python v3.14)"><em>int</em></a>) – Current time-step index.</p></li>
+<li><p><strong>u</strong> (<em>Tensor</em>) – Velocity components.  <em>w</em> is <code class="docutils literal notranslate"><span class="pre">None</span></code> in 2-D.</p></li>
+<li><p><strong>v</strong> (<em>Tensor</em>) – Velocity components.  <em>w</em> is <code class="docutils literal notranslate"><span class="pre">None</span></code> in 2-D.</p></li>
+<li><p><strong>p</strong> (<em>Tensor</em>) – Pressure (unused for now; kept for future pressure-energy).</p></li>
+<li><p><strong>dt</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.14)"><em>float</em></a><em> or </em><em>Tensor</em>) – Time step size (for CFL).</p></li>
+<li><p><strong>nu</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.14)"><em>float</em></a><em> or </em><em>Tensor</em>) – Kinematic viscosity (for CFL).</p></li>
+<li><p><strong>divergence_fn</strong> (<em>callable</em><em>(</em><em>u</em><em>, </em><em>v</em><em>, </em><em>w=None</em><em>) </em><em>-&gt; Tensor</em>) – Solver’s divergence method.</p></li>
+<li><p><strong>vorticity_fn</strong> (<em>callable</em><em>(</em><em>u</em><em>, </em><em>v</em><em>, </em><em>w=None</em><em>) </em><em>-&gt; Tensor</em>) – Solver’s vorticity method (returns scalar in 2-D,
+magnitude in 3-D).</p></li>
+<li><p><strong>w</strong> (<em>Tensor</em><em> or </em><em>None</em>) – z-velocity component (3-D only).</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="lilytorch.src.solver.FlowDiagnostics.save_h5">
+<span class="sig-name descname"><span class="pre">save_h5</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">path</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">lock</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lilytorch/src/solver.html#FlowDiagnostics.save_h5"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lilytorch.src.solver.FlowDiagnostics.save_h5" title="Link to this definition">¶</a></dt>
+<dd><p>Write diagnostics to <code class="docutils literal notranslate"><span class="pre">&lt;path&gt;/diagnostics.h5</span></code>.</p>
+</dd></dl>
+
+</dd></dl>
+
+<dl class="py class">
+<dt class="sig sig-object py" id="lilytorch.src.solver.FluidSolver">
+<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-prename descclassname"><span class="pre">lilytorch.src.solver.</span></span><span class="sig-name descname"><span class="pre">FluidSolver</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">pars</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dtype</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">custom_update</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">compute_forces</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lilytorch/src/solver.html#FluidSolver"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lilytorch.src.solver.FluidSolver" title="Link to this definition">¶</a></dt>
+<dd><p>Bases: <a class="reference internal" href="plotting.html#lilytorch.src.plotting.PlottingMixin" title="lilytorch.src.plotting.PlottingMixin"><code class="xref py py-class docutils literal notranslate"><span class="pre">PlottingMixin</span></code></a></p>
+<p>Solver class</p>
+<dl class="py method">
+<dt class="sig sig-object py" id="lilytorch.src.solver.FluidSolver.compute_dpdx">
+<span class="sig-name descname"><span class="pre">compute_dpdx</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">p</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lilytorch/src/solver.html#FluidSolver.compute_dpdx"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lilytorch.src.solver.FluidSolver.compute_dpdx" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="lilytorch.src.solver.FluidSolver.compute_dpdy">
+<span class="sig-name descname"><span class="pre">compute_dpdy</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">p</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lilytorch/src/solver.html#FluidSolver.compute_dpdy"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lilytorch.src.solver.FluidSolver.compute_dpdy" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="lilytorch.src.solver.FluidSolver.compute_dpdz">
+<span class="sig-name descname"><span class="pre">compute_dpdz</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">p</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lilytorch/src/solver.html#FluidSolver.compute_dpdz"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lilytorch.src.solver.FluidSolver.compute_dpdz" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="lilytorch.src.solver.FluidSolver.gradient">
+<span class="sig-name descname"><span class="pre">gradient</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">var</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lilytorch/src/solver.html#FluidSolver.gradient"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lilytorch.src.solver.FluidSolver.gradient" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="lilytorch.src.solver.FluidSolver.divergence">
+<span class="sig-name descname"><span class="pre">divergence</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">u</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">v</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">w</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lilytorch/src/solver.html#FluidSolver.divergence"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lilytorch.src.solver.FluidSolver.divergence" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="lilytorch.src.solver.FluidSolver.normal_derivative">
+<span class="sig-name descname"><span class="pre">normal_derivative</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">var</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">normal_x</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">normal_y</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">normal_z</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lilytorch/src/solver.html#FluidSolver.normal_derivative"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lilytorch.src.solver.FluidSolver.normal_derivative" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="lilytorch.src.solver.FluidSolver.vorticity">
+<span class="sig-name descname"><span class="pre">vorticity</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">u</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">v</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">w</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lilytorch/src/solver.html#FluidSolver.vorticity"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lilytorch.src.solver.FluidSolver.vorticity" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="lilytorch.src.solver.FluidSolver.vorticity_components">
+<span class="sig-name descname"><span class="pre">vorticity_components</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">u</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">v</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">w</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lilytorch/src/solver.html#FluidSolver.vorticity_components"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lilytorch.src.solver.FluidSolver.vorticity_components" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="lilytorch.src.solver.FluidSolver.__init__">
+<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">pars</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dtype</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">custom_update</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">compute_forces</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lilytorch/src/solver.html#FluidSolver.__init__"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lilytorch.src.solver.FluidSolver.__init__" title="Link to this definition">¶</a></dt>
+<dd><p>BDIM2 solver for fluid structure interaction.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>pars</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.14)"><em>dict</em></a>) – Full parameter dict.  <code class="docutils literal notranslate"><span class="pre">pars['solver']['dtype']</span></code> may be one of
+<code class="docutils literal notranslate"><span class="pre">&quot;float32&quot;</span></code> / <code class="docutils literal notranslate"><span class="pre">&quot;float64&quot;</span></code> (or the equivalent torch dtypes)
+and is honoured when the <code class="docutils literal notranslate"><span class="pre">dtype</span></code> keyword argument is left as
+<code class="docutils literal notranslate"><span class="pre">None</span></code> (the default).</p></li>
+<li><p><strong>dtype</strong> (<a class="reference external" href="https://docs.pytorch.org/docs/stable/tensor_attributes.html#torch.dtype" title="(in PyTorch v2.12)"><em>torch.dtype</em></a><em> or </em><a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#str" title="(in Python v3.14)"><em>str</em></a><em> or </em><em>None</em>) – Explicit override for the floating-point precision.  When
+<code class="docutils literal notranslate"><span class="pre">None</span></code> (default) the value is read from
+<code class="docutils literal notranslate"><span class="pre">pars['solver']['dtype']</span></code> if present, otherwise falls back
+to <code class="docutils literal notranslate"><span class="pre">torch.float32</span></code>.  Accepts <code class="docutils literal notranslate"><span class="pre">&quot;float32&quot;</span></code> / <code class="docutils literal notranslate"><span class="pre">&quot;float64&quot;</span></code>
+strings as a convenience for YAML-driven configs.</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="lilytorch.src.solver.FluidSolver.inside">
+<span class="sig-name descname"><span class="pre">inside</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">x</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lilytorch/src/solver.html#FluidSolver.inside"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lilytorch.src.solver.FluidSolver.inside" title="Link to this definition">¶</a></dt>
+<dd><p>Return True if all bodies’ x are inside the domain</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="lilytorch.src.solver.FluidSolver.set_initial_conditions">
+<span class="sig-name descname"><span class="pre">set_initial_conditions</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lilytorch/src/solver.html#FluidSolver.set_initial_conditions"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lilytorch.src.solver.FluidSolver.set_initial_conditions" title="Link to this definition">¶</a></dt>
+<dd><p>initial conditions</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="lilytorch.src.solver.FluidSolver.forces_method1">
+<span class="sig-name descname"><span class="pre">forces_method1</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">u</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">v</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">p</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">iteration</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#lilytorch.src.solver.FluidSolver.forces_method1" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="lilytorch.src.solver.FluidSolver.forces_method2">
+<span class="sig-name descname"><span class="pre">forces_method2</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">u</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">v</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">p</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">iteration</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#lilytorch.src.solver.FluidSolver.forces_method2" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="lilytorch.src.solver.FluidSolver.forces_method2_3d">
+<span class="sig-name descname"><span class="pre">forces_method2_3d</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">u</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">v</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">w</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">p</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">iteration</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#lilytorch.src.solver.FluidSolver.forces_method2_3d" title="Link to this definition">¶</a></dt>
+<dd><p>Compute viscous and pressure forces/torques on each body in 3-D.</p>
+<p>Uses the same smoothed-delta volume-integration approach as the 2-D
+<code class="docutils literal notranslate"><span class="pre">forces_method2</span></code> but extended to three dimensions:</p>
+<p>Viscous force:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>F_visc = ∫ (σ · n) δ_ε(d - ε) dV
+</pre></div>
+</div>
+<p>where σ_{ij} = ν ρ (∂u_i/∂x_j + ∂u_j/∂x_i) is the viscous stress.</p>
+<p>Pressure force:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>F_pres = -∫ p n δ_ε(d) dV
+</pre></div>
+</div>
+<p>Torques are computed about each body’s centre of mass via r × f.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="lilytorch.src.solver.FluidSolver.forces_lagrangian_2d">
+<span class="sig-name descname"><span class="pre">forces_lagrangian_2d</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">u</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">v</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">p</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">iteration</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#lilytorch.src.solver.FluidSolver.forces_lagrangian_2d" title="Link to this definition">¶</a></dt>
+<dd><p>Surface-integral viscous + pressure forces in 2-D (rigid bodies).</p>
+<p>Fused, multi-body native kernel path – builds the CC strain-rate
+tensor on the full grid once per step, packs every body’s contour
+into a single <code class="docutils literal notranslate"><span class="pre">(2,</span> <span class="pre">M_total)</span></code> tensor, and dispatches a single
+<code class="docutils literal notranslate"><span class="pre">lagrangian_forces_2d</span></code> call (CPU OpenMP or CUDA atomicAdd) that
+integrates <code class="docutils literal notranslate"><span class="pre">∮</span> <span class="pre">(ν·ρ·ε·n</span> <span class="pre">-</span> <span class="pre">p</span> <span class="pre">n)</span> <span class="pre">ds</span></code> per body in one launch.</p>
+<dl class="simple">
+<dt>Output channels match the legacy 2-D 6-channel layout:</dt><dd><p>[fv_x, fv_y, t_v, fp_x, fp_y, t_p]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="lilytorch.src.solver.FluidSolver.forces_lagrangian_3d">
+<span class="sig-name descname"><span class="pre">forces_lagrangian_3d</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">u</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">v</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">w</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">p</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">iteration</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#lilytorch.src.solver.FluidSolver.forces_lagrangian_3d" title="Link to this definition">¶</a></dt>
+<dd><p>Surface-integral viscous + pressure forces in 3-D (rigid bodies).</p>
+<p>Fused, multi-body native kernel path.  Builds the CC strain-rate
+tensor once per step, packs every body’s triangulation
+(<code class="docutils literal notranslate"><span class="pre">tri_centroid_world</span></code> / <code class="docutils literal notranslate"><span class="pre">tri_normal_world</span></code> / <code class="docutils literal notranslate"><span class="pre">tri_area</span></code>;
+see <code class="docutils literal notranslate"><span class="pre">body._build_surface_3d</span></code>) into single flat tensors with
+int64 per-body offsets, and dispatches a single
+<code class="docutils literal notranslate"><span class="pre">lagrangian_forces_3d</span></code> call (CPU OpenMP or CUDA atomicAdd) to
+integrate <code class="docutils literal notranslate"><span class="pre">Σ_T</span> <span class="pre">(ν·ρ·ε·n</span> <span class="pre">-</span> <span class="pre">p</span> <span class="pre">n)</span> <span class="pre">A_T</span></code> per body.</p>
+<dl class="simple">
+<dt>Output channels match the legacy 3-D 12-channel layout:</dt><dd><dl class="simple">
+<dt>[fv_x, fv_y, fv_z, tv_x, tv_y, tv_z,</dt><dd><p>fp_x, fp_y, fp_z, tp_x, tp_y, tp_z]</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="lilytorch.src.solver.FluidSolver.project">
+<span class="sig-name descname"><span class="pre">project</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">u</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">v</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">p</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">w_vel</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">w</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">1.0</span></span></em>, <em class="sig-param"><span class="keyword-only-separator o"><abbr title="Keyword-only parameters separator (PEP 3102)"><span class="pre">*</span></abbr></span></em>, <em class="sig-param"><span class="n"><span class="pre">ch</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">cv</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">cw</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ch_cc</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">body_div_corr</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lilytorch/src/solver.html#FluidSolver.project"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lilytorch.src.solver.FluidSolver.project" title="Link to this definition">¶</a></dt>
+<dd><p>Pressure-Poisson projection.</p>
+<dl class="field-list simple">
+<dt class="field-odd">Parameters<span class="colon">:</span></dt>
+<dd class="field-odd"><ul class="simple">
+<li><p><strong>u</strong> (<em>tensors</em>) – Velocity &amp; pressure fields.</p></li>
+<li><p><strong>v</strong> (<em>tensors</em>) – Velocity &amp; pressure fields.</p></li>
+<li><p><strong>p</strong> (<em>tensors</em>) – Velocity &amp; pressure fields.</p></li>
+<li><p><strong>w_vel</strong> (<em>tensor</em><em> or </em><em>None</em>) – z-velocity (3-D only).</p></li>
+<li><p><strong>w</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.14)"><em>float</em></a>) – Heun weight (1.0 = predictor, 0.5 = corrector).</p></li>
+<li><p><strong>ch</strong> (<em>tensor</em><em> or </em><em>None</em>) – Pre-computed Poisson coefficients for each staggered grid
+(<code class="docutils literal notranslate"><span class="pre">dt</span> <span class="pre">/</span> <span class="pre">rho_eff</span></code> on the respective face grids).
+When <em>None</em> (default), the standard BDIM coefficients
+<code class="docutils literal notranslate"><span class="pre">(w*dt/rho)</span> <span class="pre">*</span> <span class="pre">mu0</span></code> are used.  Pass custom coefficients
+for variable-density formulations (e.g. FARMS coupling where
+<code class="docutils literal notranslate"><span class="pre">ch</span> <span class="pre">=</span> <span class="pre">dt</span> <span class="pre">/</span> <span class="pre">(rho_body</span> <span class="pre">+</span> <span class="pre">drho</span> <span class="pre">*</span> <span class="pre">mu0_u)</span></code>).</p></li>
+<li><p><strong>cv</strong> (<em>tensor</em><em> or </em><em>None</em>) – Pre-computed Poisson coefficients for each staggered grid
+(<code class="docutils literal notranslate"><span class="pre">dt</span> <span class="pre">/</span> <span class="pre">rho_eff</span></code> on the respective face grids).
+When <em>None</em> (default), the standard BDIM coefficients
+<code class="docutils literal notranslate"><span class="pre">(w*dt/rho)</span> <span class="pre">*</span> <span class="pre">mu0</span></code> are used.  Pass custom coefficients
+for variable-density formulations (e.g. FARMS coupling where
+<code class="docutils literal notranslate"><span class="pre">ch</span> <span class="pre">=</span> <span class="pre">dt</span> <span class="pre">/</span> <span class="pre">(rho_body</span> <span class="pre">+</span> <span class="pre">drho</span> <span class="pre">*</span> <span class="pre">mu0_u)</span></code>).</p></li>
+<li><p><strong>cw</strong> (<em>tensor</em><em> or </em><em>None</em>) – Pre-computed Poisson coefficients for each staggered grid
+(<code class="docutils literal notranslate"><span class="pre">dt</span> <span class="pre">/</span> <span class="pre">rho_eff</span></code> on the respective face grids).
+When <em>None</em> (default), the standard BDIM coefficients
+<code class="docutils literal notranslate"><span class="pre">(w*dt/rho)</span> <span class="pre">*</span> <span class="pre">mu0</span></code> are used.  Pass custom coefficients
+for variable-density formulations (e.g. FARMS coupling where
+<code class="docutils literal notranslate"><span class="pre">ch</span> <span class="pre">=</span> <span class="pre">dt</span> <span class="pre">/</span> <span class="pre">(rho_body</span> <span class="pre">+</span> <span class="pre">drho</span> <span class="pre">*</span> <span class="pre">mu0_u)</span></code>).</p></li>
+<li><p><strong>ch_cc</strong> (<em>tensor</em><em> or </em><em>None</em>) – Cell-centred coefficient <code class="docutils literal notranslate"><span class="pre">dt</span> <span class="pre">/</span> <span class="pre">rho_eff_cc</span></code> for the FFT
+Poisson RHS.  When provided the FFT path solves
+<code class="docutils literal notranslate"><span class="pre">∇²p</span> <span class="pre">=</span> <span class="pre">div</span> <span class="pre">/</span> <span class="pre">ch_cc</span></code> (i.e. <code class="docutils literal notranslate"><span class="pre">div</span> <span class="pre">*</span> <span class="pre">rho_eff_cc</span> <span class="pre">/</span> <span class="pre">dt</span></code>) and
+then corrects using the staggered <em>ch/cv/cw</em>.  When <em>None</em>
+(default) the FFT path falls back to a single scalar
+coefficient (constant-density behaviour).</p></li>
+</ul>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="lilytorch.src.solver.FluidSolver.apply_sponge_damping">
+<span class="sig-name descname"><span class="pre">apply_sponge_damping</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">u</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">v</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">w</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#lilytorch.src.solver.FluidSolver.apply_sponge_damping" title="Link to this definition">¶</a></dt>
+<dd><p>Damp velocity towards zero near domain boundaries.</p>
+<p>u_new = u / (1 + dt·σ)</p>
+<p>Applied in-place via multiplication for efficiency.
+Returns (u, v) in 2-D or (u, v, w) in 3-D.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="lilytorch.src.solver.FluidSolver.apply_yield_damping">
+<span class="sig-name descname"><span class="pre">apply_yield_damping</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">u</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">v</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">w</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="headerlink" href="#lilytorch.src.solver.FluidSolver.apply_yield_damping" title="Link to this definition">¶</a></dt>
+<dd><p>Damp velocity in unyielded (low-shear-rate) regions.</p>
+<p>Where the local strain rate γ̇ is below γ̇_c, the fluid stress
+is below the yield stress and the material should behave as a
+solid.  We enforce this with an implicit penalty:</p>
+<blockquote>
+<div><p>u_new = u / (1 + dt · σ(γ̇))</p>
+</div></blockquote>
+<p>where σ(γ̇) = σ_max · max(0, 1 − γ̇/γ̇_c)².</p>
+<p>This is applied to the cell-centred velocity magnitude; the
+same scalar damping factor is used for all components.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="lilytorch.src.solver.FluidSolver.fluid_step">
+<span class="sig-name descname"><span class="pre">fluid_step</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="o"><span class="pre">*</span></span><span class="n"><span class="pre">args</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lilytorch/src/solver.html#FluidSolver.fluid_step"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lilytorch.src.solver.FluidSolver.fluid_step" title="Link to this definition">¶</a></dt>
+<dd><p>One FSI fluid step (advect-BDIM-project).  Called by BDIMhandler.</p>
+<p>Dim-agnostic.  Signature: <code class="docutils literal notranslate"><span class="pre">(u,</span> <span class="pre">v,</span> <span class="pre">p,</span> <span class="pre">timestep)</span></code> in 2-D,
+<code class="docutils literal notranslate"><span class="pre">(u,</span> <span class="pre">v,</span> <span class="pre">w,</span> <span class="pre">p,</span> <span class="pre">timestep)</span></code> in 3-D.  Pipeline (same for both D):</p>
+<ol class="arabic simple">
+<li><p>eddy viscosity (Smagorinsky / Carreau) on the cell-centred field</p></li>
+<li><p>advection-diffusion → clone outputs</p></li>
+<li><p>BDIM2 forcing on staggered grids, with union-AABB narrow band
+when <code class="docutils literal notranslate"><span class="pre">_use_kernels</span></code> is on and bodies are sparse</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">set_BCs</span></code> after BDIM so ghost cells are consistent for project</p></li>
+<li><p>free BDIM intermediates (mu1, normals) before var-density solve</p></li>
+<li><p>variable-density Poisson coefficients on staggered + CC grids</p></li>
+<li><p>free mu0 fields before project (no longer needed)</p></li>
+<li><p>pressure projection</p></li>
+<li><p>optional sponge / yield damping</p></li>
+<li><p>final <code class="docutils literal notranslate"><span class="pre">set_BCs</span></code> on the projected velocity</p></li>
+</ol>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="lilytorch.src.solver.FluidSolver.check_explosion">
+<span class="sig-name descname"><span class="pre">check_explosion</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">iteration</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lilytorch/src/solver.html#FluidSolver.check_explosion"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lilytorch.src.solver.FluidSolver.check_explosion" title="Link to this definition">¶</a></dt>
+<dd><p>Abort if fluid fields are non-finite or velocities exceed _vmax_abort.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="lilytorch.src.solver.FluidSolver.get_loads">
+<span class="sig-name descname"><span class="pre">get_loads</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lilytorch/src/solver.html#FluidSolver.get_loads"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lilytorch.src.solver.FluidSolver.get_loads" title="Link to this definition">¶</a></dt>
+<dd><p>Assemble the net hydrodynamic <code class="docutils literal notranslate"><span class="pre">(force,</span> <span class="pre">torque)</span></code> per body from
+the viscous + pressure components computed by the most recent
+<a class="reference internal" href="#lilytorch.src.solver.FluidSolver.advance_and_compute_loads" title="lilytorch.src.solver.FluidSolver.advance_and_compute_loads"><code class="xref py py-meth docutils literal notranslate"><span class="pre">advance_and_compute_loads()</span></code></a> (i.e. the <code class="docutils literal notranslate"><span class="pre">forces_*</span></code> call).</p>
+<dl class="field-list simple">
+<dt class="field-odd">Returns<span class="colon">:</span></dt>
+<dd class="field-odd"><p><ul class="simple">
+<li><p><em>(force, torque) or None</em> – 2-D: <code class="docutils literal notranslate"><span class="pre">force</span></code> is <code class="docutils literal notranslate"><span class="pre">(B,</span> <span class="pre">2)</span></code>, <code class="docutils literal notranslate"><span class="pre">torque</span></code> is <code class="docutils literal notranslate"><span class="pre">(B,)</span></code> about the
+out-of-plane axis.  3-D: <code class="docutils literal notranslate"><span class="pre">force</span></code> is <code class="docutils literal notranslate"><span class="pre">(B,</span> <span class="pre">3)</span></code>, <code class="docutils literal notranslate"><span class="pre">torque</span></code> is
+<code class="docutils literal notranslate"><span class="pre">(B,</span> <span class="pre">3)</span></code>.  Returns <code class="docutils literal notranslate"><span class="pre">None</span></code> when no loads are available
+(<code class="docutils literal notranslate"><span class="pre">compute_forces</span></code> disabled).</p></li>
+<li><p><em>The fluid solver only *reports</em> loads here; <strong>applying</strong> them to a*</p></li>
+<li><p><em>body is the consumer’s job — the standalone rigid-body integrator,</em></p></li>
+<li><p>FARMS/MuJoCo (<code class="docutils literal notranslate"><span class="pre">BDIMhandler</span></code>), or the implicit coupling driver.</p></li>
+</ul>
+</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="lilytorch.src.solver.FluidSolver.advance_and_compute_loads">
+<span class="sig-name descname"><span class="pre">advance_and_compute_loads</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">u</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">v</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">p</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">iteration</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">t</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">w_vel</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lilytorch/src/solver.html#FluidSolver.advance_and_compute_loads"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lilytorch.src.solver.FluidSolver.advance_and_compute_loads" title="Link to this definition">¶</a></dt>
+<dd><p>Repeatable per-step fluid core: body update → gravity → fluid_step
+→ (optional zero-pressure) → load computation.</p>
+<p>Sets <code class="docutils literal notranslate"><span class="pre">self.u0/v0/(w0)/p0</span></code> and the <code class="docutils literal notranslate"><span class="pre">friction_force_*</span></code> /
+<code class="docutils literal notranslate"><span class="pre">pressure_force_*</span></code> attributes, but does <strong>not</strong> apply the loads,
+advance the free surface, release BDIM fields, or plot — those are
+the once-per-step tail in <a class="reference internal" href="#lilytorch.src.solver.FluidSolver.finalize_step" title="lilytorch.src.solver.FluidSolver.finalize_step"><code class="xref py py-meth docutils literal notranslate"><span class="pre">finalize_step()</span></code></a>.</p>
+<p>It is therefore safe to call this repeatedly inside a single time
+step (implicit / strongly-coupled FSI) <em>provided the fluid fields
+are restored to the start-of-step state between calls</em>, and the
+loads can be consumed by any structure integrator without the
+solver committing them.</p>
+<p>Returns <code class="docutils literal notranslate"><span class="pre">(u,</span> <span class="pre">v,</span> <span class="pre">p,</span> <span class="pre">w_vel)</span></code> (<code class="docutils literal notranslate"><span class="pre">w_vel</span></code> is <code class="docutils literal notranslate"><span class="pre">None</span></code> in 2-D).</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="lilytorch.src.solver.FluidSolver.finalize_step">
+<span class="sig-name descname"><span class="pre">finalize_step</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">u</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">v</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">p</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">iteration</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">w_vel</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lilytorch/src/solver.html#FluidSolver.finalize_step"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lilytorch.src.solver.FluidSolver.finalize_step" title="Link to this definition">¶</a></dt>
+<dd><p>Once-per-step tail: stability check, free-surface advection,
+BDIM-field release, optional allocator flush, and plotting/saving.</p>
+<p>For implicit coupling, call this exactly once <em>after</em> the coupling
+iteration has converged, on the converged fluid state.  Returns the
+<code class="docutils literal notranslate"><span class="pre">terminate</span></code> flag from <code class="xref py py-meth docutils literal notranslate"><span class="pre">plotting_and_saving()</span></code>.</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="lilytorch.src.solver.FluidSolver.step_">
+<span class="sig-name descname"><span class="pre">step_</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">u</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">v</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">p</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">iteration</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">t</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">w_vel</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lilytorch/src/solver.html#FluidSolver.step_"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lilytorch.src.solver.FluidSolver.step_" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="lilytorch.src.solver.FluidSolver.run_from_initial">
+<span class="sig-name descname"><span class="pre">run_from_initial</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">u0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">v0</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">w0</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lilytorch/src/solver.html#FluidSolver.run_from_initial"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lilytorch.src.solver.FluidSolver.run_from_initial" title="Link to this definition">¶</a></dt>
+<dd><p>Run the standalone (explicit) simulation loop starting from the
+given initial velocity fields.</p>
+<p>As an explicit-coupling orchestrator this drives the fluid core,
+feeds the computed loads back to a standalone body, and runs the
+once-per-step tail — in that order (load feedback before the tail,
+matching the legacy <code class="docutils literal notranslate"><span class="pre">step_</span></code> sequencing).</p>
+</dd></dl>
+
+<dl class="py method">
+<dt class="sig sig-object py" id="lilytorch.src.solver.FluidSolver.run_sim">
+<span class="sig-name descname"><span class="pre">run_sim</span></span><span class="sig-paren">(</span><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lilytorch/src/solver.html#FluidSolver.run_sim"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lilytorch.src.solver.FluidSolver.run_sim" title="Link to this definition">¶</a></dt>
+<dd><p>Standalone (explicit-coupling) simulation loop.</p>
+<p>Same orchestration as <a class="reference internal" href="#lilytorch.src.solver.FluidSolver.run_from_initial" title="lilytorch.src.solver.FluidSolver.run_from_initial"><code class="xref py py-meth docutils literal notranslate"><span class="pre">run_from_initial()</span></code></a>: fluid core → load
+feedback to the standalone body → once-per-step tail.</p>
+</dd></dl>
+
+</dd></dl>
+
+</section>
+<section id="forces-hydrodynamic-force-integrators">
+<h1><code class="docutils literal notranslate"><span class="pre">forces</span></code> — Hydrodynamic Force Integrators<a class="headerlink" href="#forces-hydrodynamic-force-integrators" title="Link to this heading">¶</a></h1>
+<p>Hydrodynamic force and torque integration on immersed bodies. These
+routines were factored out of <code class="docutils literal notranslate"><span class="pre">solver.py</span></code> so the inner per-body loops
+can be <code class="docutils literal notranslate"><span class="pre">torch.compile</span></code>-d independently.</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">forces_method1</span></code> / <code class="docutils literal notranslate"><span class="pre">forces_method2</span></code> — 2-D viscous + pressure
+integration via Heaviside / smoothed-delta weighting.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">forces_method2_3d</span></code> — 3-D batched variant used by the unified
+<code class="docutils literal notranslate"><span class="pre">BDIMhandler</span></code>.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">_forces_shared</span></code> — shared per-cell stress / pressure kernel.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">_forces_body_batch</span></code> / <code class="docutils literal notranslate"><span class="pre">_forces_body_integrate_3d</span></code> — per-body
+reductions, designed for <code class="docutils literal notranslate"><span class="pre">torch.compile</span></code>.</p></li>
+</ul>
+<p id="module-lilytorch.src.forces">Force-and-torque computation for immersed bodies.</p>
+<p>Extracted from <code class="docutils literal notranslate"><span class="pre">solver.py</span></code> (item #8 of the HIGH PRIORITY backlog).</p>
+<p>Module-level kernels (<code class="docutils literal notranslate"><span class="pre">_forces_shared_*</span></code> / <code class="docutils literal notranslate"><span class="pre">_forces_body_*</span></code>) are pure
+tensor-in / tensor-out functions kept module-level so they can be wrapped
+by <a class="reference external" href="https://docs.pytorch.org/docs/stable/generated/torch.compile.html#torch.compile" title="(in PyTorch v2.12)"><code class="xref py py-func docutils literal notranslate"><span class="pre">torch.compile()</span></code></a>.</p>
+<p>The <code class="docutils literal notranslate"><span class="pre">forces_method*</span></code> functions take <code class="docutils literal notranslate"><span class="pre">self</span></code> (a <code class="docutils literal notranslate"><span class="pre">FluidSolver</span></code>) as their
+first argument and are bound to <code class="docutils literal notranslate"><span class="pre">FluidSolver</span></code> as methods at the bottom
+of <code class="docutils literal notranslate"><span class="pre">solver.py</span></code> – they are NOT directly callable from this module’s
+public API.  This keeps the public API of <code class="xref py py-class docutils literal notranslate"><span class="pre">FluidSolver</span></code> unchanged
+while moving ~1500 LoC of force code out of <code class="docutils literal notranslate"><span class="pre">solver.py</span></code>.</p>
+<dl class="py function">
+<dt class="sig sig-object py" id="lilytorch.src.forces.forces_method1">
+<span class="sig-prename descclassname"><span class="pre">lilytorch.src.forces.</span></span><span class="sig-name descname"><span class="pre">forces_method1</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">self</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">u</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">v</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">p</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">iteration</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lilytorch/src/forces.html#forces_method1"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lilytorch.src.forces.forces_method1" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="lilytorch.src.forces.forces_method2">
+<span class="sig-prename descclassname"><span class="pre">lilytorch.src.forces.</span></span><span class="sig-name descname"><span class="pre">forces_method2</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">self</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">u</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">v</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">p</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">iteration</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lilytorch/src/forces.html#forces_method2"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lilytorch.src.forces.forces_method2" title="Link to this definition">¶</a></dt>
+<dd></dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="lilytorch.src.forces.forces_method2_3d">
+<span class="sig-prename descclassname"><span class="pre">lilytorch.src.forces.</span></span><span class="sig-name descname"><span class="pre">forces_method2_3d</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">self</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">u</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">v</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">w</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">p</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">iteration</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lilytorch/src/forces.html#forces_method2_3d"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lilytorch.src.forces.forces_method2_3d" title="Link to this definition">¶</a></dt>
+<dd><p>Compute viscous and pressure forces/torques on each body in 3-D.</p>
+<p>Uses the same smoothed-delta volume-integration approach as the 2-D
+<code class="docutils literal notranslate"><span class="pre">forces_method2</span></code> but extended to three dimensions:</p>
+<p>Viscous force:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>F_visc = ∫ (σ · n) δ_ε(d - ε) dV
+</pre></div>
+</div>
+<p>where σ_{ij} = ν ρ (∂u_i/∂x_j + ∂u_j/∂x_i) is the viscous stress.</p>
+<p>Pressure force:</p>
+<div class="highlight-default notranslate"><div class="highlight"><pre><span></span>F_pres = -∫ p n δ_ε(d) dV
+</pre></div>
+</div>
+<p>Torques are computed about each body’s centre of mass via r × f.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="lilytorch.src.forces.forces_lagrangian_2d">
+<span class="sig-prename descclassname"><span class="pre">lilytorch.src.forces.</span></span><span class="sig-name descname"><span class="pre">forces_lagrangian_2d</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">self</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">u</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">v</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">p</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">iteration</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lilytorch/src/forces.html#forces_lagrangian_2d"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lilytorch.src.forces.forces_lagrangian_2d" title="Link to this definition">¶</a></dt>
+<dd><p>Surface-integral viscous + pressure forces in 2-D (rigid bodies).</p>
+<p>Fused, multi-body native kernel path – builds the CC strain-rate
+tensor on the full grid once per step, packs every body’s contour
+into a single <code class="docutils literal notranslate"><span class="pre">(2,</span> <span class="pre">M_total)</span></code> tensor, and dispatches a single
+<code class="docutils literal notranslate"><span class="pre">lagrangian_forces_2d</span></code> call (CPU OpenMP or CUDA atomicAdd) that
+integrates <code class="docutils literal notranslate"><span class="pre">∮</span> <span class="pre">(ν·ρ·ε·n</span> <span class="pre">-</span> <span class="pre">p</span> <span class="pre">n)</span> <span class="pre">ds</span></code> per body in one launch.</p>
+<dl class="simple">
+<dt>Output channels match the legacy 2-D 6-channel layout:</dt><dd><p>[fv_x, fv_y, t_v, fp_x, fp_y, t_p]</p>
+</dd>
+</dl>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="lilytorch.src.forces.forces_lagrangian_3d">
+<span class="sig-prename descclassname"><span class="pre">lilytorch.src.forces.</span></span><span class="sig-name descname"><span class="pre">forces_lagrangian_3d</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">self</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">u</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">v</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">w</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">p</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">iteration</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lilytorch/src/forces.html#forces_lagrangian_3d"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lilytorch.src.forces.forces_lagrangian_3d" title="Link to this definition">¶</a></dt>
+<dd><p>Surface-integral viscous + pressure forces in 3-D (rigid bodies).</p>
+<p>Fused, multi-body native kernel path.  Builds the CC strain-rate
+tensor once per step, packs every body’s triangulation
+(<code class="docutils literal notranslate"><span class="pre">tri_centroid_world</span></code> / <code class="docutils literal notranslate"><span class="pre">tri_normal_world</span></code> / <code class="docutils literal notranslate"><span class="pre">tri_area</span></code>;
+see <code class="docutils literal notranslate"><span class="pre">body._build_surface_3d</span></code>) into single flat tensors with
+int64 per-body offsets, and dispatches a single
+<code class="docutils literal notranslate"><span class="pre">lagrangian_forces_3d</span></code> call (CPU OpenMP or CUDA atomicAdd) to
+integrate <code class="docutils literal notranslate"><span class="pre">Σ_T</span> <span class="pre">(ν·ρ·ε·n</span> <span class="pre">-</span> <span class="pre">p</span> <span class="pre">n)</span> <span class="pre">A_T</span></code> per body.</p>
+<dl class="simple">
+<dt>Output channels match the legacy 3-D 12-channel layout:</dt><dd><dl class="simple">
+<dt>[fv_x, fv_y, fv_z, tv_x, tv_y, tv_z,</dt><dd><p>fp_x, fp_y, fp_z, tp_x, tp_y, tp_z]</p>
+</dd>
+</dl>
+</dd>
+</dl>
+</dd></dl>
+
+</section>
+<section id="extras-sponge-les-non-newtonian-viscosity">
+<h1><code class="docutils literal notranslate"><span class="pre">extras</span></code> — Sponge, LES &amp; Non-Newtonian Viscosity<a class="headerlink" href="#extras-sponge-les-non-newtonian-viscosity" title="Link to this heading">¶</a></h1>
+<p>Optional add-on physics dispatched from the solver:</p>
+<ul class="simple">
+<li><p><code class="docutils literal notranslate"><span class="pre">_build_sponge_fields</span></code> / <code class="docutils literal notranslate"><span class="pre">apply_sponge_damping</span></code> — quadratic
+damping ramp near domain walls.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">apply_yield_damping</span></code> — Herschel–Bulkley yield-stress damping.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">_compute_smagorinsky_nu_t</span></code> — Smagorinsky LES eddy viscosity.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">_compute_carreau_nu_t</span></code> — Carreau / Herschel–Bulkley shear-thinning
+viscosity.</p></li>
+<li><p><code class="docutils literal notranslate"><span class="pre">_compute_nu_t</span></code> / <code class="docutils literal notranslate"><span class="pre">_compute_nu_rho_for_forces</span></code> — unified
+dispatchers selecting the active viscosity model.</p></li>
+</ul>
+<p id="module-lilytorch.src.extras">Non-standard / optional solver features extracted from <code class="docutils literal notranslate"><span class="pre">solver.py</span></code>.</p>
+<p>Item #4 of the HIGH PRIORITY backlog: move sponge layer, yield damping,
+Smagorinsky LES, Carreau non-Newtonian, and the variable-viscosity
+dispatchers into a single auxiliary file so that the core
+<code class="xref py py-class docutils literal notranslate"><span class="pre">FluidSolver</span></code> is easier to read.</p>
+<p>All public symbols here take <code class="docutils literal notranslate"><span class="pre">self</span></code> (a <code class="docutils literal notranslate"><span class="pre">FluidSolver</span></code>) as their first
+argument and are bound to <code class="docutils literal notranslate"><span class="pre">FluidSolver</span></code> as methods at the bottom of
+<code class="docutils literal notranslate"><span class="pre">solver.py</span></code>.  The public API of <code class="xref py py-class docutils literal notranslate"><span class="pre">FluidSolver</span></code> is unchanged.</p>
+<dl class="py function">
+<dt class="sig sig-object py" id="lilytorch.src.extras.apply_sponge_damping">
+<span class="sig-prename descclassname"><span class="pre">lilytorch.src.extras.</span></span><span class="sig-name descname"><span class="pre">apply_sponge_damping</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">self</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">u</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">v</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">w</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lilytorch/src/extras.html#apply_sponge_damping"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lilytorch.src.extras.apply_sponge_damping" title="Link to this definition">¶</a></dt>
+<dd><p>Damp velocity towards zero near domain boundaries.</p>
+<p>u_new = u / (1 + dt·σ)</p>
+<p>Applied in-place via multiplication for efficiency.
+Returns (u, v) in 2-D or (u, v, w) in 3-D.</p>
+</dd></dl>
+
+<dl class="py function">
+<dt class="sig sig-object py" id="lilytorch.src.extras.apply_yield_damping">
+<span class="sig-prename descclassname"><span class="pre">lilytorch.src.extras.</span></span><span class="sig-name descname"><span class="pre">apply_yield_damping</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">self</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">u</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">v</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">w</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lilytorch/src/extras.html#apply_yield_damping"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lilytorch.src.extras.apply_yield_damping" title="Link to this definition">¶</a></dt>
+<dd><p>Damp velocity in unyielded (low-shear-rate) regions.</p>
+<p>Where the local strain rate γ̇ is below γ̇_c, the fluid stress
+is below the yield stress and the material should behave as a
+solid.  We enforce this with an implicit penalty:</p>
+<blockquote>
+<div><p>u_new = u / (1 + dt · σ(γ̇))</p>
+</div></blockquote>
+<p>where σ(γ̇) = σ_max · max(0, 1 − γ̇/γ̇_c)².</p>
+<p>This is applied to the cell-centred velocity magnitude; the
+same scalar damping factor is used for all components.</p>
+</dd></dl>
+
+</section>
+
+        </article>
+      </div>
+      <footer>
+        
+        <div class="related-pages">
+          <a class="next-page" href="adv_diff.html">
+              <div class="page-info">
+                <div class="context">
+                  <span>Next</span>
+                </div>
+                <div class="title"><code class="docutils literal notranslate"><span class="pre">adv_diff</span></code> — Advection–Diffusion Solver</div>
+              </div>
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+            </a>
+          <a class="prev-page" href="../strong_coupling.html">
+              <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
+              <div class="page-info">
+                <div class="context">
+                  <span>Previous</span>
+                </div>
+                
+                <div class="title">Strong (implicit) FSI coupling</div>
+                
+              </div>
+            </a>
+        </div>
+        <div class="bottom-of-page">
+          <div class="left-details">
+            <div class="copyright">
+                Copyright &#169; 2024–2026, Andrea Ferrario
+            </div>
+            Made with <a href="https://www.sphinx-doc.org/">Sphinx</a> and <a class="muted-link" href="https://pradyunsg.me">@pradyunsg</a>'s
+            
+            <a href="https://github.com/pradyunsg/furo">Furo</a>
+            
+          </div>
+          <div class="right-details">
+            
+          </div>
+        </div>
+        
+      </footer>
+    </div>
+    <aside class="toc-drawer">
+      
+      
+      <div class="toc-sticky toc-scroll">
+        <div class="toc-title-container">
+          <span class="toc-title">
+            On this page
+          </span>
+        </div>
+        <div class="toc-tree-container">
+          <div class="toc-tree">
+            <ul>
+<li><a class="reference internal" href="#"><code class="docutils literal notranslate"><span class="pre">solver</span></code> — Navier–Stokes Solver</a><ul>
+<li><a class="reference internal" href="#lilytorch.src.solver.FlowDiagnostics"><code class="docutils literal notranslate"><span class="pre">FlowDiagnostics</span></code></a><ul>
+<li><a class="reference internal" href="#lilytorch.src.solver.FlowDiagnostics.update"><code class="docutils literal notranslate"><span class="pre">FlowDiagnostics.update()</span></code></a></li>
+<li><a class="reference internal" href="#lilytorch.src.solver.FlowDiagnostics.save_h5"><code class="docutils literal notranslate"><span class="pre">FlowDiagnostics.save_h5()</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#lilytorch.src.solver.FluidSolver"><code class="docutils literal notranslate"><span class="pre">FluidSolver</span></code></a><ul>
+<li><a class="reference internal" href="#lilytorch.src.solver.FluidSolver.compute_dpdx"><code class="docutils literal notranslate"><span class="pre">FluidSolver.compute_dpdx()</span></code></a></li>
+<li><a class="reference internal" href="#lilytorch.src.solver.FluidSolver.compute_dpdy"><code class="docutils literal notranslate"><span class="pre">FluidSolver.compute_dpdy()</span></code></a></li>
+<li><a class="reference internal" href="#lilytorch.src.solver.FluidSolver.compute_dpdz"><code class="docutils literal notranslate"><span class="pre">FluidSolver.compute_dpdz()</span></code></a></li>
+<li><a class="reference internal" href="#lilytorch.src.solver.FluidSolver.gradient"><code class="docutils literal notranslate"><span class="pre">FluidSolver.gradient()</span></code></a></li>
+<li><a class="reference internal" href="#lilytorch.src.solver.FluidSolver.divergence"><code class="docutils literal notranslate"><span class="pre">FluidSolver.divergence()</span></code></a></li>
+<li><a class="reference internal" href="#lilytorch.src.solver.FluidSolver.normal_derivative"><code class="docutils literal notranslate"><span class="pre">FluidSolver.normal_derivative()</span></code></a></li>
+<li><a class="reference internal" href="#lilytorch.src.solver.FluidSolver.vorticity"><code class="docutils literal notranslate"><span class="pre">FluidSolver.vorticity()</span></code></a></li>
+<li><a class="reference internal" href="#lilytorch.src.solver.FluidSolver.vorticity_components"><code class="docutils literal notranslate"><span class="pre">FluidSolver.vorticity_components()</span></code></a></li>
+<li><a class="reference internal" href="#lilytorch.src.solver.FluidSolver.__init__"><code class="docutils literal notranslate"><span class="pre">FluidSolver.__init__()</span></code></a></li>
+<li><a class="reference internal" href="#lilytorch.src.solver.FluidSolver.inside"><code class="docutils literal notranslate"><span class="pre">FluidSolver.inside()</span></code></a></li>
+<li><a class="reference internal" href="#lilytorch.src.solver.FluidSolver.set_initial_conditions"><code class="docutils literal notranslate"><span class="pre">FluidSolver.set_initial_conditions()</span></code></a></li>
+<li><a class="reference internal" href="#lilytorch.src.solver.FluidSolver.forces_method1"><code class="docutils literal notranslate"><span class="pre">FluidSolver.forces_method1()</span></code></a></li>
+<li><a class="reference internal" href="#lilytorch.src.solver.FluidSolver.forces_method2"><code class="docutils literal notranslate"><span class="pre">FluidSolver.forces_method2()</span></code></a></li>
+<li><a class="reference internal" href="#lilytorch.src.solver.FluidSolver.forces_method2_3d"><code class="docutils literal notranslate"><span class="pre">FluidSolver.forces_method2_3d()</span></code></a></li>
+<li><a class="reference internal" href="#lilytorch.src.solver.FluidSolver.forces_lagrangian_2d"><code class="docutils literal notranslate"><span class="pre">FluidSolver.forces_lagrangian_2d()</span></code></a></li>
+<li><a class="reference internal" href="#lilytorch.src.solver.FluidSolver.forces_lagrangian_3d"><code class="docutils literal notranslate"><span class="pre">FluidSolver.forces_lagrangian_3d()</span></code></a></li>
+<li><a class="reference internal" href="#lilytorch.src.solver.FluidSolver.project"><code class="docutils literal notranslate"><span class="pre">FluidSolver.project()</span></code></a></li>
+<li><a class="reference internal" href="#lilytorch.src.solver.FluidSolver.apply_sponge_damping"><code class="docutils literal notranslate"><span class="pre">FluidSolver.apply_sponge_damping()</span></code></a></li>
+<li><a class="reference internal" href="#lilytorch.src.solver.FluidSolver.apply_yield_damping"><code class="docutils literal notranslate"><span class="pre">FluidSolver.apply_yield_damping()</span></code></a></li>
+<li><a class="reference internal" href="#lilytorch.src.solver.FluidSolver.fluid_step"><code class="docutils literal notranslate"><span class="pre">FluidSolver.fluid_step()</span></code></a></li>
+<li><a class="reference internal" href="#lilytorch.src.solver.FluidSolver.check_explosion"><code class="docutils literal notranslate"><span class="pre">FluidSolver.check_explosion()</span></code></a></li>
+<li><a class="reference internal" href="#lilytorch.src.solver.FluidSolver.get_loads"><code class="docutils literal notranslate"><span class="pre">FluidSolver.get_loads()</span></code></a></li>
+<li><a class="reference internal" href="#lilytorch.src.solver.FluidSolver.advance_and_compute_loads"><code class="docutils literal notranslate"><span class="pre">FluidSolver.advance_and_compute_loads()</span></code></a></li>
+<li><a class="reference internal" href="#lilytorch.src.solver.FluidSolver.finalize_step"><code class="docutils literal notranslate"><span class="pre">FluidSolver.finalize_step()</span></code></a></li>
+<li><a class="reference internal" href="#lilytorch.src.solver.FluidSolver.step_"><code class="docutils literal notranslate"><span class="pre">FluidSolver.step_()</span></code></a></li>
+<li><a class="reference internal" href="#lilytorch.src.solver.FluidSolver.run_from_initial"><code class="docutils literal notranslate"><span class="pre">FluidSolver.run_from_initial()</span></code></a></li>
+<li><a class="reference internal" href="#lilytorch.src.solver.FluidSolver.run_sim"><code class="docutils literal notranslate"><span class="pre">FluidSolver.run_sim()</span></code></a></li>
+</ul>
+</li>
+</ul>
+</li>
+<li><a class="reference internal" href="#forces-hydrodynamic-force-integrators"><code class="docutils literal notranslate"><span class="pre">forces</span></code> — Hydrodynamic Force Integrators</a><ul>
+<li><a class="reference internal" href="#lilytorch.src.forces.forces_method1"><code class="docutils literal notranslate"><span class="pre">forces_method1()</span></code></a></li>
+<li><a class="reference internal" href="#lilytorch.src.forces.forces_method2"><code class="docutils literal notranslate"><span class="pre">forces_method2()</span></code></a></li>
+<li><a class="reference internal" href="#lilytorch.src.forces.forces_method2_3d"><code class="docutils literal notranslate"><span class="pre">forces_method2_3d()</span></code></a></li>
+<li><a class="reference internal" href="#lilytorch.src.forces.forces_lagrangian_2d"><code class="docutils literal notranslate"><span class="pre">forces_lagrangian_2d()</span></code></a></li>
+<li><a class="reference internal" href="#lilytorch.src.forces.forces_lagrangian_3d"><code class="docutils literal notranslate"><span class="pre">forces_lagrangian_3d()</span></code></a></li>
+</ul>
+</li>
+<li><a class="reference internal" href="#extras-sponge-les-non-newtonian-viscosity"><code class="docutils literal notranslate"><span class="pre">extras</span></code> — Sponge, LES &amp; Non-Newtonian Viscosity</a><ul>
+<li><a class="reference internal" href="#lilytorch.src.extras.apply_sponge_damping"><code class="docutils literal notranslate"><span class="pre">apply_sponge_damping()</span></code></a></li>
+<li><a class="reference internal" href="#lilytorch.src.extras.apply_yield_damping"><code class="docutils literal notranslate"><span class="pre">apply_yield_damping()</span></code></a></li>
+</ul>
+</li>
+</ul>
+
+          </div>
+        </div>
+      </div>
+      
+      
+    </aside>
+  </div>
+</div><script src="../_static/documentation_options.js?v=38b66d78"></script>
+    <script src="../_static/doctools.js?v=fd6eb6e6"></script>
+    <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
+    <script src="../_static/scripts/furo.js?v=46bd48cc"></script>
+    </body>
+</html>
