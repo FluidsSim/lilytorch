@@ -20,7 +20,7 @@ from __future__ import annotations
 import torch
 
 import lilytorch.src.kernels  # noqa: F401  -- registers the namespace
-from lilytorch.src.adv_diff import AdvDiffSolver
+from lilytorch.src.advection import AdvDiffSolver
 
 
 def _make_solver(device, dtype):

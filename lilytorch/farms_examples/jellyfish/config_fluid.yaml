@@ -25,7 +25,7 @@ solver:
   zmax              :  0.05
 
   nt                : 40001
-  dt                : 0.0001
+  dt                : 0.001
   # ν chosen so that Re = U·R/ν ≈ 5·10²  (matches WaterLily's Re=5e2)
   nu                : 1.0e-5
   rho               : 1000.0
@@ -37,16 +37,51 @@ solver:
   # interface thickness shrinks with h, which triggers an early CFL blow-up.
   eps_multiplier    : 2.0
 
-  poisson_method         : "fft"
-  poisson_tol            : 1.0e-4
+  # The standalone jellyfish deforms its SDF every step, so it runs on the
+  # Python reference path (the fused-kernel path streams a *rigid* static
+  # SDF template and cannot represent the pulsing bell).
+  solver_method          : "python"
+  # MGCG (not FFT): the free-surface ghost-fluid Dirichlet BC (p = p_atm = 0
+  # at the z=0 interface) is imposed via per-face coefficient scaling + a
+  # Dirichlet pin in the multigrid smoother.  The constant-coefficient FFT
+  # solver cannot represent that interface condition, so a free surface
+  # requires the variable-coefficient multigrid/MGCG path.
+  poisson_method         : "mgcg"
+  # STRONG Poisson solve is REQUIRED here.  The free-surface GFM
+  # coefficients combined with the body's mu0/variable-density coefficients
+  # drive the Poisson operator's max/min coefficient ratio up by ~80x
+  # (~5 -> ~400) at certain body positions.  The light default (3 CG
+  # cycles, 1 V-cycle/iter, tol 1e-4) cannot resolve that ill-conditioned
+  # system and returns a garbage pressure -> fluid blow-up after ~45 steps.
+  # 50 CG cycles / 2 V-cycles per iter / tol 1e-7 solves it robustly
+  # (verified stable; the default values were tuned for the simpler
+  # FFT / non-free-surface cases).
+  poisson_tol            : 1.0e-7
   jacobi_weight          : 0.7
-  poisson_max_mgcg_cycles: 3
+  poisson_max_mgcg_cycles: 50
+  poisson_precond_vcycles: 2
   poisson_max_cycles     : 20
   poisson_nsmoothing     : 5
   poisson_verbose        : False
   poisson_folder         : "lilytorch/data/"
   poisson_bc_type        : "neumann"
   poisson_warm_start     : True
+
+  # ---- Free surface (water-air interface) ----------------------------
+  # Fluid gravity (downward in z) drives the hydrostatic free surface.
+  gravity                : [0.0, 0.0, -9.81]
+  # Level-set free surface at the z=0 plane: water below (phi<0), air above
+  # (phi>0).  The jellyfish (origin z=-0.22) starts well submerged and
+  # swims up toward the surface.  GFM pressure BC p=p_atm=0 at z=0.
+  free_surface:
+    phi_init          : "lambda X, Y, Z: Z"   # interface at z = 0
+    convection_method : "quick"   # match the solver's advection scheme
+    theta_min         : 0.01      # cut-face water-fraction clamp (1/theta)
+    reinit_iters      : 4
+    reinit_every      : 10
+    extend_iters      : 4
+    extend_every      : 1
+    extend_full       : true      # extend water velocity over the whole air band
 
 jellyfish:
   # Initial sphere-centre placement of the analytical bell. The bell sits
@@ -127,9 +162,6 @@ body:
     - "lambda t: 0*t"
 
 output:
-  # The runner uses this as the stack-folder label passed to
-  # lilytorch.util.paths.gen_new_folder(); the actual output directory is a
-  # timestamped folder under lilytorch's shared save root.
   save_path   : "jellyfish_fluid_output"
   save_frames : True
   save_every  : 50

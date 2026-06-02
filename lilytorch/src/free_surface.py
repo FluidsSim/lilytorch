@@ -44,6 +44,8 @@ from __future__ import annotations
 
 import torch
 
+from lilytorch.src.advection import advect_scalar, SCHEMES
+
 
 # =====================================================================
 # Small helpers
@@ -171,6 +173,7 @@ class FreeSurface:
     def __init__(self, x, y, h, phi_init, *,
                  z=None, theta_min=0.01, band_cells=4,
                  reinit_iters=4, extend_iters=4,
+                 convection_method="quick",
                  device=None, dtype=None):
         self.device = device if device is not None else x.device
         self.dtype  = dtype  if dtype  is not None else x.dtype
@@ -180,6 +183,19 @@ class FreeSurface:
         self.band_cells  = int(band_cells)
         self.reinit_iters = int(reinit_iters)
         self.extend_iters = int(extend_iters)
+
+        # Convective scheme for the level-set advection — reuses the same
+        # registry as the Navier–Stokes advection (advection.SCHEMES) so the
+        # interface is transported at the same order as the flow rather than
+        # with a bespoke first-order upwind.  Time integration is forward
+        # Euler (one substep per solver step on the projected velocity).
+        if convection_method not in SCHEMES:
+            raise ValueError(
+                f"Unknown free-surface convection_method "
+                f"'{convection_method}'. Choose from {sorted(SCHEMES)}."
+            )
+        self._scheme = SCHEMES[convection_method]
+        self._dh     = [self.h] * self.ndim
 
         # Mesh tensors
         if self.ndim == 2:
@@ -212,25 +228,25 @@ class FreeSurface:
     # ------------------------------------------------------------------
     @torch.no_grad()
     def advect(self, *vels, dt):
-        """Forward-Euler upwind advection of ``phi_fs`` by ``vels``.
+        """Forward-Euler advection of ``phi_fs`` by ``vels``.
+
+        Uses the shared convective schemes (QUICK / ADBQUICKEST / … via
+        :func:`lilytorch.src.advection.advect_scalar`) on the MAC velocity,
+        in conservative flux form.  For the divergence-free projected
+        velocity this is equivalent to ``∂φ/∂t + u·∇φ = 0`` but transported
+        at the scheme's order rather than first-order upwind.
 
         Parameters
         ----------
         *vels : MAC-staggered velocity tensors ``(u, v)`` in 2-D
-                or ``(u, v, w)`` in 3-D.
+                or ``(u, v, w)`` in 3-D (same grid shape as ``phi_fs``).
         dt : float
             Time step.
         """
-        if self.ndim == 2:
-            u_cc, v_cc = _cc_velocity_2d(vels[0], vels[1])
-            dphi = _upwind_grad(self.phi_fs, u_cc, self.h, 0) \
-                 + _upwind_grad(self.phi_fs, v_cc, self.h, 1)
-        else:
-            u_cc, v_cc, w_cc = _cc_velocity_3d(vels[0], vels[1], vels[2])
-            dphi = _upwind_grad(self.phi_fs, u_cc, self.h, 0) \
-                 + _upwind_grad(self.phi_fs, v_cc, self.h, 1) \
-                 + _upwind_grad(self.phi_fs, w_cc, self.h, 2)
-        self.phi_fs.sub_(dphi, alpha=float(dt))
+        self.phi_fs = advect_scalar(
+            self.phi_fs, *vels,
+            scheme=self._scheme, dt=float(dt), dh=self._dh,
+        )
         _neumann_pad(self.phi_fs)
 
     # ------------------------------------------------------------------
@@ -302,7 +318,7 @@ class FreeSurface:
     # Velocity extension (constant along normal in the air band)
     # ------------------------------------------------------------------
     @torch.no_grad()
-    def extend_velocity(self, *vels_cc, n_iter=None):
+    def extend_velocity(self, *vels_cc, n_iter=None, full=False):
         """Extend ``vels_cc`` from the fluid half-space (``phi<=0``)
         into the air half-space (``phi>0``) along ``∇phi``.
 
@@ -310,6 +326,16 @@ class FreeSurface:
         ----------
         *vels_cc : cell-centred velocity components (modified in-place).
         n_iter   : optional override of ``extend_iters``.
+        full     : if True, ignore ``n_iter`` and iterate enough sub-steps
+                   to sweep the **entire** air region (not just the
+                   near-interface band).  The extension front advances
+                   ~½ cell per sub-step (``Δτ = ½h``), so ``2·max(grid)``
+                   sub-steps guarantee full coverage; once a cell's value
+                   is constant along the normal it is a fixed point, so
+                   over-iterating is harmless.  This makes the air a clean
+                   normal-extension of the water velocity everywhere,
+                   preventing the predictor from accumulating spurious,
+                   undamped vorticity in the (decoupled) bulk air.
 
         Notes
         -----
@@ -318,7 +344,9 @@ class FreeSurface:
         forward-Euler with ``Δτ = 0.5 h``.  Only cells with ``phi > 0``
         are updated; fluid cells are frozen.
         """
-        if n_iter is None:
+        if full:
+            n_iter = 2 * max(self.phi_fs.shape)
+        elif n_iter is None:
             n_iter = self.extend_iters
         if n_iter <= 0:
             return
@@ -449,6 +477,56 @@ class FreeSurface:
             s_w = _scale_along(2)
             return s_u, s_v, s_w
         return s_u, s_v
+
+    # ------------------------------------------------------------------
+    # Gauge anchor (pressure datum at the free surface)
+    # ------------------------------------------------------------------
+    @torch.no_grad()
+    def interface_gauge_offset(self, p):
+        """Constant pressure offset ``C`` that anchors the free-surface gauge.
+
+        The ghost-fluid solve fixes the pressure *gradient* but leaves the
+        additive constant (the DC null-space mode) only weakly constrained:
+        air cells are decoupled (zero-coefficient air–air faces) and couple
+        to the water only through thin cut faces, so the (effectively
+        singular) coarse multigrid problems do **not** pin the water datum —
+        in practice it even drifts further with more V-cycles.  We instead
+        recover the datum from the physical condition ``p = p_atm = 0`` at
+        the interface: for every water cell adjacent to air, linearly
+        extrapolate the *water* pressure to the φ=0 crossing using the cut
+        face's water fraction ``θ`` and the next water cell inward,
+
+            C ≈ p_w + θ (p_w − p_w2),
+
+        which (for a locally linear pressure) equals the gauge constant
+        exactly.  Averaging over all cut faces gives a robust single
+        offset; subtract it from ``p`` to restore ``p ≈ 0`` at the free
+        surface.  This is ρ/g-agnostic and works for a deforming interface.
+
+        Returns a 0-d tensor (``0`` when there are no cut faces).
+        """
+        phi   = self.phi_fs
+        nd    = self.ndim
+        water = phi <= 0
+        aphi  = phi.abs()
+        tot = p.new_zeros(())
+        cnt = p.new_zeros(())
+        for d in range(nd):
+            for sgn in (1, -1):
+                # neighbour towards the candidate air side, and the opposite
+                # (deeper-water) cell, via roll; the single wrapped boundary
+                # row is masked out below.
+                phi_nb = torch.roll(phi, shifts=-sgn, dims=d)
+                p_opp  = torch.roll(p,   shifts=sgn,  dims=d)
+                cut = water & (phi_nb > 0)
+                idx = [slice(None)] * nd
+                idx[d] = (-1 if sgn == 1 else 0)
+                cut[tuple(idx)] = False
+                theta = aphi / (aphi + phi_nb.abs() + 1e-30)
+                C = p + theta * (p - p_opp)
+                tot = tot + torch.where(cut, C, torch.zeros_like(C)).sum()
+                cnt = cnt + cut.sum()
+        return tot / cnt.clamp(min=1)
 
     # ------------------------------------------------------------------
     # Air-cell pressure mask

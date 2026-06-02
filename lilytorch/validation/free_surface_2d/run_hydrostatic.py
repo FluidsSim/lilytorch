@@ -107,11 +107,14 @@ def build_pars():
             "BC_values_v": [0.0, 0.0, 0.0, 0.0],
         },
         "body": {
-            # A tiny circle parked in the corner so the BDIM pipeline has
-            # something to consume.  It does not intersect the column.
+            # A tiny circle parked FAR OUTSIDE the [0,1]^2 domain so the
+            # BDIM pipeline has something to consume but its SDF is positive
+            # everywhere in-domain (mu0 = 1 -> no immersed-boundary forcing,
+            # no footprint in the plotted fields).  This keeps the
+            # hydrostatic test purely about the free surface.
             "type": "composite_analytical",
             "plotting": False,
-            "sdf": ["lambda x, y: circle(x,y,xt=0.05,yt=0.05,r=0.02)"],
+            "sdf": ["lambda x, y: circle(x,y,xt=-0.5,yt=-0.5,r=0.02)"],
             "update_maps": [{
                 "rotation":    "lambda t: torch.tensor(0.0)",
                 "translation": [
@@ -126,7 +129,12 @@ def build_pars():
             "save_every": 10,
             "save": False,
             "save_drags": False,
-            "vmin": "auto", "vmax": "auto",
+            # Fixed curl colour scale: this is a *quiescent* test (the flow
+            # is at rest to ~1e-4), so symmetric auto-ranging would stretch
+            # the iterative-solver noise floor to full contrast and paint
+            # spurious "stripes".  A fixed scale shows the field as the
+            # near-zero it physically is.  (pressure auto-ranges separately.)
+            "vmin": -0.05, "vmax": 0.05,
         },
     }
     return pars, rho, abs(g_y)

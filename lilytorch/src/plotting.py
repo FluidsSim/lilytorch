@@ -266,16 +266,32 @@ def plot_field_2d(
     if cmap is None:
         cmap = "RdBu_r"
 
+    # Resolve to a Colormap object so masked (NaN) cells — e.g. the
+    # free-surface air half-space — render as a neutral colour rather than
+    # the colormap's extreme.
+    try:
+        import matplotlib as _mpl
+        _base_cmap = _mpl.colormaps[cmap] if isinstance(cmap, str) else cmap
+    except Exception:  # pragma: no cover - older matplotlib
+        from matplotlib import cm as _cm
+        _base_cmap = _cm.get_cmap(cmap) if isinstance(cmap, str) else cmap
+    cmap = _base_cmap.copy()
+    cmap.set_bad(color="#eeeeee")
+
     field_np = np.asarray(field)
 
     # ---- symmetric auto-range (only when vmin/vmax not set) ----
     if vmin is None or vmax is None:
-        # Ghost cells are already stripped by the caller, so use the
-        # full field for the auto-range (99.5-th percentile symmetric).
+        # Ghost cells are already stripped by the caller; ignore non-finite
+        # (NaN-masked) cells so the range reflects the physical field only.
         abs_f  = np.abs(field_np)
-        limit  = float(np.percentile(abs_f, 99.5))
-        if limit == 0:
-            limit = float(abs_f.max()) or 1.0
+        finite = abs_f[np.isfinite(abs_f)]
+        if finite.size:
+            limit = float(np.percentile(finite, 99.5))
+            if limit == 0:
+                limit = float(finite.max()) or 1.0
+        else:
+            limit = 1.0
         vmin, vmax = -limit, limit
 
     # ---- figure size from domain aspect ratio ----
@@ -1201,10 +1217,22 @@ class PlottingMixin:
                         sdf_vals=_body_sdf_vals_np,
                     )
 
+                # Free-surface: the air half-space is not a real fluid
+                # (single-fluid model — p pinned to 0, velocity is only a
+                # kinematic normal-extension of the water).  Blank it out of
+                # the physical-field plots so its non-physical values do not
+                # skew the auto colour-range or read as spurious structure.
+                _air_int_np = None
+                if self.free_surface is not None:
+                    _air_int_np = (self.free_surface.air_mask_cc[1:-1, 1:-1]
+                                   .detach().cpu().numpy())
+
                 for (name, field_fn, vmin, vmax, show_body) in specs:
                     field = field_fn(self, u, v, p, w_vel)
                     field_np = field.detach().cpu().numpy().copy() if hasattr(field, 'detach') else np.array(field)
                     field_np = field_np[1:-1, 1:-1]  # strip ghost cells
+                    if _air_int_np is not None:
+                        field_np = np.where(_air_int_np, np.nan, field_np)
                     eff_vmin = self.vmin if vmin is None else (None if vmin == "auto" else vmin)
                     eff_vmax = self.vmax if vmax is None else (None if vmax == "auto" else vmax)
                     save_path = self.save_path

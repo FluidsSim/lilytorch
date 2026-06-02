@@ -18,7 +18,7 @@ from lilytorch.src.kernels import (
     bdim_vardens_2d,
     bdim_vardens_sigma_2d,
 )
-from lilytorch.src.adv_diff import AdvDiffSolver
+from lilytorch.src.advection import AdvDiffSolver, SCHEMES as _ADV_SCHEMES
 from lilytorch.src.body import (body_from_yaml,
                                 _mu_normals_batched)
 from lilytorch.src.free_surface import FreeSurface
@@ -438,10 +438,11 @@ class FluidSolver(PlottingMixin):
         self.terminate = False   # flag for early termination (e.g. from NaN detection)
 
         # ============= convection solver =============
+        self.convection_method = solver["convection_method"]
         adv_diff_kwargs = dict(
             BC_type_u=bcs["BC_type_u"], BC_values_u=bcs["BC_values_u"],
             BC_type_v=bcs["BC_type_v"], BC_values_v=bcs["BC_values_v"],
-            method=solver["convection_method"],
+            method=self.convection_method,
         )
         if self.ndim == 3:
             adv_diff_kwargs.update(
@@ -853,6 +854,7 @@ class FluidSolver(PlottingMixin):
         self.free_surface = None
         self._fs_reinit_every = 5
         self._fs_extend_every = 1
+        self._fs_extend_full = True
         if fs_cfg is None:
             return
         phi_src = fs_cfg.get("phi_init")
@@ -877,6 +879,10 @@ class FluidSolver(PlottingMixin):
             band_cells  = int(fs_cfg.get("band_cells", 4)),
             reinit_iters= int(fs_cfg.get("reinit_iters", 4)),
             extend_iters= int(fs_cfg.get("extend_iters", 4)),
+            convection_method = fs_cfg.get(
+                "convection_method",
+                self.convection_method
+                if self.convection_method in _ADV_SCHEMES else "quick"),
             device      = self.device,
             dtype       = self.dtype,
         )
@@ -890,6 +896,11 @@ class FluidSolver(PlottingMixin):
             )
         self._fs_reinit_every = int(fs_cfg.get("reinit_every", 5))
         self._fs_extend_every = int(fs_cfg.get("extend_every", 1))
+        # Extend the water velocity into the WHOLE air region (not just a
+        # band) so the decoupled bulk air does not accumulate spurious,
+        # undamped vorticity from the predictor.  Cost scales with grid
+        # size; set False to restrict to the ``extend_iters`` band.
+        self._fs_extend_full = bool(fs_cfg.get("extend_full", True))
         print(
             f"Free-surface enabled: theta_min={kwargs['theta_min']}, "
             f"reinit every {self._fs_reinit_every} steps "
@@ -1008,10 +1019,11 @@ class FluidSolver(PlottingMixin):
             fs.reinitialize()
 
         if self._fs_extend_every > 0 and (iteration % self._fs_extend_every == 0):
+            full = self._fs_extend_full
             if self.ndim == 2:
-                fs.extend_velocity(u, v)
+                fs.extend_velocity(u, v, full=full)
             else:
-                fs.extend_velocity(u, v, w_vel)
+                fs.extend_velocity(u, v, w_vel, full=full)
 
     def inside(self, x):
         """
@@ -1228,62 +1240,40 @@ class FluidSolver(PlottingMixin):
             self.poisson_solver.dirichlet_mask = None
 
         if self.poisson_method == "fft":
-            # ---- FFT solver ----
-            if ch_cc is not None:
-                # Variable-density path: RHS uses cell-centred density,
-                # correction uses the staggered ch/cv/cw coefficients.
-                # With bdim_mu0_projection=True, ch_cc=0 inside the body
-                # (mu0=0) — body cells decouple from the projection.
-                # Mask those cells (RHS=0) so we don't divide by zero;
-                # FFT then finds a harmonic extension that matches the
-                # fluid Poisson solution. Inside-body p doesn't affect
-                # u_new there because the correction is multiplied by
-                # ch (which is also zero).
-                _body_decoupled = (ch_cc <= 0)
-                _ch_safe = torch.where(_body_decoupled,
-                                       torch.ones_like(ch_cc), ch_cc)
-                _rhs = torch.where(_body_decoupled,
-                                   torch.zeros_like(self.div),
-                                   self.div / _ch_safe)
-                p = self.poisson_solverFFT.solve(_rhs)
-                if self.ndim == 2:
-                    (p_x, p_y) = self.gradient(p)
-                    u = u - ch * p_x
-                    v = v - cv * p_y
-                else:
-                    (p_x, p_y, p_z) = self.gradient(p)
-                    u     = u - ch * p_x
-                    v     = v - cv * p_y
-                    w_vel = w_vel - cw * p_z
+            # ---- FFT solver: CONSTANT-coefficient projection ----
+            # The FFT solver only solves the constant-coefficient Poisson
+            # ``∇²p = div/c``.  It does NOT solve the variable-coefficient
+            # (mu0-weighted / variable-density) BDIM Poisson — that is the
+            # multigrid / MGCG path.  Using a mu0-weighted or variable-
+            # density coefficient in the velocity correction is therefore
+            # *inconsistent* with the constant-coefficient pressure: the
+            # mu0/ρ_eff terms belong to the BDIM variable-coefficient
+            # operator, which FFT does not invert.  A consistent FFT
+            # projection uses a single SCALAR coefficient for BOTH the RHS
+            # divisor and the velocity correction, which is exactly
+            # divergence-free:
+            #     ∇·(u − c∇p) = div − c∇²p = div − c·(div/c) = 0.
+            # i.e. a clean constant-density Chorin projection (WaterLily-
+            # style).  ``ch_cc`` and any mu0-weighted ``ch/cv/cw`` tensors
+            # are intentionally ignored on the FFT path; variable-density /
+            # BDIM-weighted projection requires poisson_method
+            # "multigrid"/"mgcg".  (Because the correction no longer
+            # multiplies the face-grid ``ch/cv/cw`` buffers, the FFT path is
+            # automatically compatible with kernel-mode coefficients too.)
+            # The RHS divisor is inherently bounded (a scalar), so the
+            # f650945 band-singularity cannot occur here.
+            c_scalar = ch if (ch is not None and not isinstance(ch, torch.Tensor)) else coeff
+            _rhs = self.div / c_scalar
+            p = self.poisson_solverFFT.solve(_rhs)
+            if self.ndim == 2:
+                (p_x, p_y) = self.gradient(p)
+                u = u - c_scalar * p_x
+                v = v - c_scalar * p_y
             else:
-                # FFT with a BOUNDED RHS divisor + (optional) mu0-weighted
-                # correction.  The FFT solves a CONSTANT-coefficient Poisson,
-                # so its RHS divisor must stay bounded.  When ch/cv/cw are
-                # mu0-weighted tensors (BDIM2; kernel mode passes ``_ch_persist``)
-                # they vanish in the immersed-body band — using them as the RHS
-                # divisor makes ``div/ch`` singular there -> the f650945
-                # explosion.  So the RHS uses the bounded scalar
-                # ``coeff = w*dt/rho``; the mu0-weighted ch/cv/cw are applied
-                # only in the velocity correction, so it still vanishes inside
-                # the body (mu0=0) and preserves the imposed no-slip velocity.
-                # A scalar ``ch`` (backward compat / truly constant density) is
-                # used directly for both RHS and correction.
-                _ch_tensor = isinstance(ch, torch.Tensor)
-                _rhs_coeff = ch if (ch is not None and not _ch_tensor) else coeff
-                _rhs = self.div / _rhs_coeff
-                p = self.poisson_solverFFT.solve(_rhs)
-                _cu = ch if _ch_tensor else _rhs_coeff
-                _cv = cv if isinstance(cv, torch.Tensor) else _rhs_coeff
-                if self.ndim == 2:
-                    (p_x, p_y) = self.gradient(p)
-                    u = u - _cu * p_x
-                    v = v - _cv * p_y
-                else:
-                    (p_x, p_y, p_z) = self.gradient(p)
-                    _cw = cw if isinstance(cw, torch.Tensor) else _rhs_coeff
-                    u     = u - _cu * p_x
-                    v     = v - _cv * p_y
-                    w_vel = w_vel - _cw * p_z
+                (p_x, p_y, p_z) = self.gradient(p)
+                u     = u - c_scalar * p_x
+                v     = v - c_scalar * p_y
+                w_vel = w_vel - c_scalar * p_z
         else:
             # ---- Multigrid / MGCG solver (variable-coefficient Poisson) ----
             has_custom_coeffs = any(arr is not None for arr in (ch, cv, cw))
@@ -1376,18 +1366,19 @@ class FluidSolver(PlottingMixin):
                     print(f"[MEM_DBG] {'project:after inline projection correction':55s}"
                           f"  cur={_gb:.3f} GiB  peak={_mx:.3f} GiB", flush=True)
 
-        # Free-surface post-projection: restore the Dirichlet ``p == 0``
-        # gauge in air cells.  The multigrid solver subtracts the field
-        # mean at the end of every solve to remove the constant null
-        # space (correct for purely Neumann boundaries); when a GFM
-        # Dirichlet BC is active that mean-shift breaks the gauge.  We
-        # undo it here by shifting the whole field by the post-solve
-        # air-cell mean (which, in absence of the shift, should be 0).
+        # Free-surface post-projection: anchor the pressure datum.
+        # The ghost-fluid solve fixes the pressure *gradient* but leaves
+        # the additive constant (DC null-space mode) only weakly pinned —
+        # air cells are decoupled and couple to water only through thin cut
+        # faces, so the constant is unconstrained and even drifts with more
+        # V-cycles.  Anchoring on the air-cell mean does nothing (air is
+        # already pinned to 0).  Instead recover the datum from the physical
+        # condition p = p_atm = 0 at the interface (extrapolated from the
+        # water side; see FreeSurface.interface_gauge_offset), then zero the
+        # air cells.
         if self.free_surface is not None:
-            air = self.free_surface.air_mask_cc
-            if air.any():
-                offset = p[air].mean()
-                p = p - offset
+            offset = self.free_surface.interface_gauge_offset(p)
+            p = p - offset
             self.free_surface.apply_pressure_mask(p)
 
         if self.ndim == 2:

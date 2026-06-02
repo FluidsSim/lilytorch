@@ -87,7 +87,6 @@ def build_solver(config_path: str, dtype=torch.float32) -> FluidSolver:
         y=solver.y,
         z=solver.z,
         eps=float(solver.eps),
-        grids=solver.grids,
         params=JellyfishParams.from_solver_config(pars),
     )
     solver.composite_body = jelly
