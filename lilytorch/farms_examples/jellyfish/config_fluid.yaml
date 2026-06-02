@@ -46,19 +46,24 @@ solver:
   # Dirichlet pin in the multigrid smoother.  The constant-coefficient FFT
   # solver cannot represent that interface condition, so a free surface
   # requires the variable-coefficient multigrid/MGCG path.
-  poisson_method         : "mgcg"
-  # STRONG Poisson solve is REQUIRED here.  The free-surface GFM
-  # coefficients combined with the body's mu0/variable-density coefficients
-  # drive the Poisson operator's max/min coefficient ratio up by ~80x
-  # (~5 -> ~400) at certain body positions.  The light default (3 CG
-  # cycles, 1 V-cycle/iter, tol 1e-4) cannot resolve that ill-conditioned
-  # system and returns a garbage pressure -> fluid blow-up after ~45 steps.
-  # 50 CG cycles / 2 V-cycles per iter / tol 1e-7 solves it robustly
-  # (verified stable; the default values were tuned for the simpler
-  # FFT / non-free-surface cases).
-  poisson_tol            : 1.0e-7
+  poisson_method     : "mgcg"
+  # bdim_mu0_projection: False is ESSENTIAL with a free surface.  With it
+  # True the projection coefficient is mu0-weighted (c = mu0*dt/rho), which
+  # -> 0 inside/around the body; combined with the free-surface GFM scaling
+  # that drives the Poisson operator's coefficient ratio up by ~80x and the
+  # ill-conditioned solve blows up (immediately at 256^3, where the thin
+  # bell shell samples mu0 close to 0).  False uses the bounded coefficient
+  # c = dt/rho -> well conditioned.  No-slip in the body is approximate but
+  # re-imposed every step by the BDIM meta-equation.
+  bdim_mu0_projection: False
+  # With the bounded coefficient the MGCG is well conditioned, so ~20 CG
+  # cycles converge (50 was needed only for the ill-conditioned mu0 case).
+  # NOTE: a free surface forces the iterative variable-coefficient MGCG
+  # (FFT cannot impose the p=0 interface BC), which is inherently slower
+  # than the spectral FFT used for single-phase runs.
+  poisson_tol            : 1.0e-6
   jacobi_weight          : 0.7
-  poisson_max_mgcg_cycles: 50
+  poisson_max_mgcg_cycles: 20
   poisson_precond_vcycles: 2
   poisson_max_cycles     : 20
   poisson_nsmoothing     : 5
@@ -79,9 +84,14 @@ solver:
     theta_min         : 0.01      # cut-face water-fraction clamp (1/theta)
     reinit_iters      : 4
     reinit_every      : 10
-    extend_iters      : 4
+    # BANDED velocity extension (extend_full: false).  extend_full does
+    # 2*max(grid) full-grid sweeps (O(N^4)) -> ~5 s/step at 256^3 and the
+    # bulk of the free-surface overhead.  A few-cell band is all phi
+    # advection needs (the body is far below the surface; bulk air is
+    # masked in plots and decoupled from the pressure solve).
+    extend_iters      : 8
     extend_every      : 1
-    extend_full       : true      # extend water velocity over the whole air band
+    extend_full       : false
 
 jellyfish:
   # Initial sphere-centre placement of the analytical bell. The bell sits
