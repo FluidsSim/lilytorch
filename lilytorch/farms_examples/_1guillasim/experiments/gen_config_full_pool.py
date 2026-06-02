@@ -21,7 +21,7 @@ class SimConfig(BaseSimConfig):
         self.use_bdim                      = True
         self.compute_sdf                   = True
         self.convexify                     = True
-        self.force_method                  = "lagrangian"
+        self.force_method                  = "eulerian"
         self.zero_pressure_inside          = True
         # self.force_relaxation              = 0.3
         self.body_velocity_blend_eps_cells = None
@@ -129,10 +129,13 @@ class SimConfig(BaseSimConfig):
         self.force_scaling         = 1.0
         self.interp_data_subfolder = "interp_data_3d"
 
-        # ──
-        self.wall_alpha   = 0.
-        self.water_alpha  = 0.05
-        self.grid_spacing = 0.5*(self.ymax - self.ymin)  # lines on background floor
+        # ── Visualization ───────────────────────────────────────────────
+        self.sky_color         = [0.02, 0.05, 0.15]
+        self.floor_color       = "#E0D4D4"
+        self.viewer_body_color = "#D09F23"
+        self.wall_alpha        = 1.
+        self.water_alpha       = 0.05
+        self.grid_spacing      = 0.5*(self.ymax - self.ymin)  # lines on background floor
 
     # ── Extensions ────────────────────────────────────────────────────
 
@@ -145,7 +148,7 @@ class SimConfig(BaseSimConfig):
             "loader": "lilytorch.integration.light_modifier.LightModifier",
             "config": {
                 "diffuse": [1, 1, 1],
-                "ambient": [0.7, 0.7, 0.7],
+                "ambient": [0.3, 0.3, 0.3],
             },
         })
 
@@ -188,22 +191,15 @@ class SimConfig(BaseSimConfig):
             },
         })
 
-        # SkyModifier must be LAST so all CameraRecording renderers already
-        # exist when initialize_episode runs the GPU texture upload.
-        extensions.append({
-            "loader": "lilytorch.integration.sky_modifier.SkyModifier",
-            "config": {"rgb": [0.0, 0.0, 0.0]},
-        })
-
-
         return extensions
 
     def _extra_run_patch(self):
-        # Replace FARMS starry-night sky with flat black in the subprocess.
+        # Replace FARMS starry-night sky with the chosen sky colour in the subprocess.
+        r, g, b = self.sky_color
         return (
-            "_m.night_sky=lambda mjcf_model:mjcf_model.asset.add("
-            "'texture',name='skybox',type='skybox',"
-            "builtin='flat',rgb1=[0,0,0],rgb2=[0,0,0],width=8,height=8);"
+            f"_m.night_sky=lambda mjcf_model:mjcf_model.asset.add("
+            f"'texture',name='skybox',type='skybox',"
+            f"builtin='flat',rgb1=[{r},{g},{b}],rgb2=[{r},{g},{b}],width=8,height=8);"
         )
 
 if __name__ == "__main__":

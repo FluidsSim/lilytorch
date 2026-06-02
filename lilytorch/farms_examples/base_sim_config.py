@@ -128,6 +128,8 @@ class BaseSimConfig:
         self.wall_height    = None   # None → 0.3 for 2-D (ignored for 3-D)
         self.wall_alpha     = None   # None → keep default (0.3); 0.0=transparent, 1.0=opaque
         self.water_alpha    = None   # None → keep default (0.18); 0.0=transparent, 1.0=opaque
+        self.floor_color    = None   # None → black; [r, g, b] in [0,1] for background ground plane
+        self.sky_color      = None   # None → black; [r, g, b] in [0,1] for skybox
         self.arena_pose     = [0, 0, 0, 0, 0, 0]
         self.water_drag     = None   # None → not use_bdim
         self.water_buoyancy = None   # None → not use_bdim
@@ -144,9 +146,7 @@ class BaseSimConfig:
         self.extent        = 400.0
         self.camera_dist   = 3.0
         self.shadow_size   = 0
-        self.viewer_native_body_colors = True
-        self.viewer_body_alpha = None
-        self.viewer_hide_collision_geoms_with_visuals = True
+        self.viewer_body_color = None  # None → keep mesh colours; [r,g,b] / [r,g,b,a] / "#rrggbb" → override
 
         # ── BDIM solver ───────────────────────────────────────────────────
         self.bdim_dt                 = 0.0001
@@ -529,6 +529,7 @@ class BaseSimConfig:
                     wall_thickness=wt, plotting=False,
                     wall_alpha=self.wall_alpha,
                     grid_spacing=self.grid_spacing,
+                    floor_color=self.floor_color,
                 )
                 water_sdf = create_water_sdf(
                     self.xmin, self.xmax, self.ymin, self.ymax,
@@ -545,6 +546,7 @@ class BaseSimConfig:
                     wall_thickness=wt, wall_height=wh, plotting=False,
                     wall_alpha=self.wall_alpha,
                     grid_spacing=self.grid_spacing,
+                    floor_color=self.floor_color,
                 )
                 water_sdf = create_water_sdf(
                     self.xmin, self.xmax, self.ymin, self.ymax,
@@ -670,13 +672,10 @@ class BaseSimConfig:
             ],
         }
 
-        if self.viewer_native_body_colors:
+        if self.viewer_body_color is not None:
             simulation_dict["extensions"].append({
-                "loader": "lilytorch.integration.native_body_colors.NativeBodyColors",
-                "config": {
-                    "alpha": self.viewer_body_alpha,
-                    "hide_collision_geoms_with_visuals": self.viewer_hide_collision_geoms_with_visuals,
-                },
+                "loader": "lilytorch.integration.body_color_override.BodyColorOverride",
+                "config": {"color": self.viewer_body_color},
             })
 
         if self.bdim_physics is not None:

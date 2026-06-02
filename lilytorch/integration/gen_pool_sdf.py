@@ -145,7 +145,7 @@ def _write_sdf(sdf_elem, rel_path):
 
 def create_pool_sdf(xmin, xmax, ymin, ymax, zmin=None, zmax=None,
                     wall_thickness=None, wall_height=0.3, plotting=False,
-                    wall_alpha=None, grid_spacing=None):
+                    wall_alpha=None, grid_spacing=None, floor_color=None):
     """Generate a rectangular pool SDF with textured walls and floor.
 
     Parameters
@@ -171,6 +171,9 @@ def create_pool_sdf(xmin, xmax, ymin, ymax, zmin=None, zmax=None,
         When set to a positive value, white grid lines of this spacing (in
         metres) are drawn over the background floor across the inner fluid
         domain.  *None* (default) or ``0`` disables the grid.
+    floor_color : list[float] or None
+        RGB colour of the large background ground plane, as ``[r, g, b]``
+        in [0, 1].  *None* keeps the default black.
     """
     is_3d = zmin is not None and zmax is not None
 
@@ -231,11 +234,24 @@ def create_pool_sdf(xmin, xmax, ymin, ymax, zmin=None, zmax=None,
 
     # ---- large background ground (visual-only, black backdrop) ------
     ground_bg_z = fz - wt - 0.01
+    if floor_color is not None:
+        if isinstance(floor_color, str):
+            h = floor_color.lstrip('#')
+            floor_color = [int(h[i:i+2], 16) / 255.0 for i in range(0, 6, 2)]
+        r, g, b = [f'{v:.4f}' for v in floor_color[:3]]
+        ground_mat = {
+            'ambient':  f'{r} {g} {b} 1.0',
+            'diffuse':  f'{r} {g} {b} 1.0',
+            'specular': '0.0 0.0 0.0 1.0',
+            'emissive': f'{r} {g} {b} 1.0',
+        }
+    else:
+        ground_mat = GROUND_BG_MATERIAL
     _add_visual_only_link(
         model, 'ground_bg',
         f'{(xmin+xmax)/2} {(ymin+ymax)/2} {ground_bg_z} 0 0 0',
         '100 100 0.002',
-        GROUND_BG_MATERIAL,
+        ground_mat,
     )
 
     # ---- white grid lines over the fluid domain ---------------------

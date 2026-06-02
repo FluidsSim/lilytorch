@@ -21,10 +21,10 @@
             </box>
           </geometry>
           <material>
-            <ambient>0.78 0.74 0.68 0.0000</ambient>
-            <diffuse>0.88 0.84 0.78 0.0000</diffuse>
-            <specular>0.30 0.28 0.25 0.0000</specular>
-            <emissive>0.0 0.0 0.0 0.0000</emissive>
+            <ambient>0.78 0.74 0.68 1.0000</ambient>
+            <diffuse>0.88 0.84 0.78 1.0000</diffuse>
+            <specular>0.30 0.28 0.25 1.0000</specular>
+            <emissive>0.0 0.0 0.0 1.0000</emissive>
           </material>
         </visual>
       </link>
@@ -46,10 +46,10 @@
             </box>
           </geometry>
           <material>
-            <ambient>0.78 0.74 0.68 0.0000</ambient>
-            <diffuse>0.88 0.84 0.78 0.0000</diffuse>
-            <specular>0.30 0.28 0.25 0.0000</specular>
-            <emissive>0.0 0.0 0.0 0.0000</emissive>
+            <ambient>0.78 0.74 0.68 1.0000</ambient>
+            <diffuse>0.88 0.84 0.78 1.0000</diffuse>
+            <specular>0.30 0.28 0.25 1.0000</specular>
+            <emissive>0.0 0.0 0.0 1.0000</emissive>
           </material>
         </visual>
       </link>
@@ -71,10 +71,10 @@
             </box>
           </geometry>
           <material>
-            <ambient>0.78 0.74 0.68 0.0000</ambient>
-            <diffuse>0.88 0.84 0.78 0.0000</diffuse>
-            <specular>0.30 0.28 0.25 0.0000</specular>
-            <emissive>0.0 0.0 0.0 0.0000</emissive>
+            <ambient>0.78 0.74 0.68 1.0000</ambient>
+            <diffuse>0.88 0.84 0.78 1.0000</diffuse>
+            <specular>0.30 0.28 0.25 1.0000</specular>
+            <emissive>0.0 0.0 0.0 1.0000</emissive>
           </material>
         </visual>
       </link>
@@ -96,10 +96,10 @@
             </box>
           </geometry>
           <material>
-            <ambient>0.78 0.74 0.68 0.0000</ambient>
-            <diffuse>0.88 0.84 0.78 0.0000</diffuse>
-            <specular>0.30 0.28 0.25 0.0000</specular>
-            <emissive>0.0 0.0 0.0 0.0000</emissive>
+            <ambient>0.78 0.74 0.68 1.0000</ambient>
+            <diffuse>0.88 0.84 0.78 1.0000</diffuse>
+            <specular>0.30 0.28 0.25 1.0000</specular>
+            <emissive>0.0 0.0 0.0 1.0000</emissive>
           </material>
         </visual>
       </link>
@@ -121,10 +121,10 @@
             </box>
           </geometry>
           <material>
-            <ambient>0.78 0.74 0.68 0.0000</ambient>
-            <diffuse>0.88 0.84 0.78 0.0000</diffuse>
-            <specular>0.30 0.28 0.25 0.0000</specular>
-            <emissive>0.0 0.0 0.0 0.0000</emissive>
+            <ambient>0.78 0.74 0.68 1.0000</ambient>
+            <diffuse>0.88 0.84 0.78 1.0000</diffuse>
+            <specular>0.30 0.28 0.25 1.0000</specular>
+            <emissive>0.0 0.0 0.0 1.0000</emissive>
           </material>
         </visual>
       </link>
@@ -138,10 +138,10 @@
             </box>
           </geometry>
           <material>
-            <ambient>0.0 0.0 0.0 1.0</ambient>
-            <diffuse>0.0 0.0 0.0 1.0</diffuse>
+            <ambient>0.8784 0.8314 0.8314 1.0</ambient>
+            <diffuse>0.8784 0.8314 0.8314 1.0</diffuse>
             <specular>0.0 0.0 0.0 1.0</specular>
-            <emissive>0.0 0.0 0.0 1.0</emissive>
+            <emissive>0.8784 0.8314 0.8314 1.0</emissive>
           </material>
         </visual>
       </link>
