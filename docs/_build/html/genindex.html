@@ -208,6 +208,7 @@
 <li class="toctree-l1"><a class="reference internal" href="mathematical_formulation.html">Mathematical Formulation</a></li>
 <li class="toctree-l1"><a class="reference internal" href="numerical_schemes.html">Numerical Schemes</a></li>
 <li class="toctree-l1"><a class="reference internal" href="immersed_boundary.html">Immersed Boundary Method — BDIM2</a></li>
+<li class="toctree-l1"><a class="reference internal" href="free_surface.html">Free Surface — Level-Set Fluid–Air</a></li>
 <li class="toctree-l1"><a class="reference internal" href="strong_coupling.html">Strong (implicit) FSI coupling</a></li>
 </ul>
 <p class="caption" role="heading"><span class="caption-text">API Reference</span></p>
@@ -217,6 +218,7 @@
 <li class="toctree-l1"><a class="reference internal" href="api/solver.html#extras-sponge-les-non-newtonian-viscosity"><code class="docutils literal notranslate"><span class="pre">extras</span></code> — Sponge, LES &amp; Non-Newtonian Viscosity</a></li>
 <li class="toctree-l1"><a class="reference internal" href="api/adv_diff.html"><code class="docutils literal notranslate"><span class="pre">adv_diff</span></code> — Advection–Diffusion Solver</a></li>
 <li class="toctree-l1"><a class="reference internal" href="api/poisson.html"><code class="docutils literal notranslate"><span class="pre">poisson</span></code> — Pressure Solvers</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api/free_surface.html"><code class="docutils literal notranslate"><span class="pre">free_surface</span></code> — Level-Set Free Surface</a></li>
 <li class="toctree-l1"><a class="reference internal" href="api/body.html"><code class="docutils literal notranslate"><span class="pre">body</span></code> — Geometry, SDF &amp; Kinematics</a></li>
 <li class="toctree-l1"><a class="reference internal" href="api/operations.html"><code class="docutils literal notranslate"><span class="pre">operations</span></code> — Discrete Differential Operators</a></li>
 <li class="toctree-l1"><a class="reference internal" href="api/plotting.html"><code class="docutils literal notranslate"><span class="pre">plotting</span></code> — Visualisation Helpers</a></li>
@@ -297,10 +299,16 @@
 </li>
         <li><a href="api/adv_diff.html#lilytorch.src.adv_diff.AdvDiffSolver">AdvDiffSolver (class in lilytorch.src.adv_diff)</a>
 </li>
-        <li><a href="api/integration.html#lilytorch.integration.gamepad.GamepadHandler.apply_deadzone">apply_deadzone() (lilytorch.integration.gamepad.GamepadHandler method)</a>
+        <li><a href="api/free_surface.html#lilytorch.src.free_surface.FreeSurface.advect">advect() (lilytorch.src.free_surface.FreeSurface method)</a>
+</li>
+        <li><a href="api/free_surface.html#lilytorch.src.free_surface.FreeSurface.air_mask_cc">air_mask_cc (lilytorch.src.free_surface.FreeSurface property)</a>
 </li>
     </ul></td>
     <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/integration.html#lilytorch.integration.gamepad.GamepadHandler.apply_deadzone">apply_deadzone() (lilytorch.integration.gamepad.GamepadHandler method)</a>
+</li>
+        <li><a href="api/free_surface.html#lilytorch.src.free_surface.FreeSurface.apply_pressure_mask">apply_pressure_mask() (lilytorch.src.free_surface.FreeSurface method)</a>
+</li>
         <li><a href="api/solver.html#lilytorch.src.extras.apply_sponge_damping">apply_sponge_damping() (in module lilytorch.src.extras)</a>
 
         <ul>
@@ -481,15 +489,17 @@
           <li><a href="api/integration.html#lilytorch.integration.flow_viewer_2d_gpu.FlowViewer2DGPU.end_episode">(lilytorch.integration.flow_viewer_2d_gpu.FlowViewer2DGPU method)</a>
 </li>
         </ul></li>
-    </ul></td>
-    <td style="width: 33%; vertical-align: top;"><ul>
         <li><a href="api/integration.html#lilytorch.integration.flow_viewer_gl_hook.ensure_flow_viewer_gl_hook_built">ensure_flow_viewer_gl_hook_built() (in module lilytorch.integration.flow_viewer_gl_hook)</a>
 </li>
+    </ul></td>
+    <td style="width: 33%; vertical-align: top;"><ul>
         <li><a href="api/body.html#lilytorch.src.body.BodyFishAnalytical.envelope">envelope() (lilytorch.src.body.BodyFishAnalytical method)</a>
 </li>
         <li><a href="api/integration.html#lilytorch.integration.gamepad.example_usage">example_usage() (in module lilytorch.integration.gamepad)</a>
 </li>
         <li><a href="api/integration.html#lilytorch.integration.gamepad.example_usage_events">example_usage_events() (in module lilytorch.integration.gamepad)</a>
+</li>
+        <li><a href="api/free_surface.html#lilytorch.src.free_surface.FreeSurface.extend_velocity">extend_velocity() (lilytorch.src.free_surface.FreeSurface method)</a>
 </li>
     </ul></td>
   </tr></table>
@@ -515,6 +525,8 @@
 </li>
         <li><a href="api/integration.html#lilytorch.integration.flow_viewer_gl_hook.FlowViewerGLHook">FlowViewerGLHook (class in lilytorch.integration.flow_viewer_gl_hook)</a>
 </li>
+        <li><a href="api/free_surface.html#lilytorch.src.free_surface.FreeSurface.fluid_mask_cc">fluid_mask_cc (lilytorch.src.free_surface.FreeSurface property)</a>
+</li>
         <li><a href="api/solver.html#lilytorch.src.solver.FluidSolver.fluid_step">fluid_step() (lilytorch.src.solver.FluidSolver method)</a>
 </li>
         <li><a href="api/integration.html#lilytorch.integration.extensions.FluidExtension">FluidExtension (class in lilytorch.integration.extensions)</a>
@@ -535,14 +547,14 @@
           <li><a href="api/solver.html#lilytorch.src.solver.FluidSolver.forces_lagrangian_3d">(lilytorch.src.solver.FluidSolver method)</a>
 </li>
         </ul></li>
+    </ul></td>
+    <td style="width: 33%; vertical-align: top;"><ul>
         <li><a href="api/solver.html#lilytorch.src.forces.forces_method1">forces_method1() (in module lilytorch.src.forces)</a>
 
         <ul>
           <li><a href="api/solver.html#lilytorch.src.solver.FluidSolver.forces_method1">(lilytorch.src.solver.FluidSolver method)</a>
 </li>
         </ul></li>
-    </ul></td>
-    <td style="width: 33%; vertical-align: top;"><ul>
         <li><a href="api/solver.html#lilytorch.src.forces.forces_method2">forces_method2() (in module lilytorch.src.forces)</a>
 
         <ul>
@@ -555,6 +567,8 @@
           <li><a href="api/solver.html#lilytorch.src.solver.FluidSolver.forces_method2_3d">(lilytorch.src.solver.FluidSolver method)</a>
 </li>
         </ul></li>
+        <li><a href="api/free_surface.html#lilytorch.src.free_surface.FreeSurface">FreeSurface (class in lilytorch.src.free_surface)</a>
+</li>
         <li><a href="api/integration.html#lilytorch.integration.extensions.DataLogger.from_options">from_options() (lilytorch.integration.extensions.DataLogger class method)</a>
 
         <ul>
@@ -573,8 +587,6 @@
           <li><a href="api/integration.html#lilytorch.integration.flow_viewer_2d_gpu.FlowViewer2DGPU.from_options">(lilytorch.integration.flow_viewer_2d_gpu.FlowViewer2DGPU class method)</a>
 </li>
           <li><a href="api/integration.html#lilytorch.integration.kinematics.KinematicsController.from_options">(lilytorch.integration.kinematics.KinematicsController class method)</a>
-</li>
-          <li><a href="api/integration.html#lilytorch.integration.native_body_colors.NativeBodyColors.from_options">(lilytorch.integration.native_body_colors.NativeBodyColors class method)</a>
 </li>
           <li><a href="api/integration.html#lilytorch.integration.particle_viewer.ParticleViewer.from_options">(lilytorch.integration.particle_viewer.ParticleViewer class method)</a>
 </li>
@@ -604,6 +616,8 @@
         <li><a href="api/solver.html#lilytorch.src.solver.FluidSolver.get_loads">get_loads() (lilytorch.src.solver.FluidSolver method)</a>
 </li>
         <li><a href="api/integration.html#lilytorch.integration.gamepad.GamepadHandler.get_state">get_state() (lilytorch.integration.gamepad.GamepadHandler method)</a>
+</li>
+        <li><a href="api/free_surface.html#lilytorch.src.free_surface.FreeSurface.ghost_fluid_face_scales">ghost_fluid_face_scales() (lilytorch.src.free_surface.FreeSurface method)</a>
 </li>
         <li><a href="api/operations.html#lilytorch.src.operations.gradient">gradient() (in module lilytorch.src.operations)</a>
 
@@ -647,8 +661,6 @@
           <li><a href="api/integration.html#lilytorch.integration.flow_viewer_2d.FlowViewer2D.initialize_episode">(lilytorch.integration.flow_viewer_2d.FlowViewer2D method)</a>
 </li>
           <li><a href="api/integration.html#lilytorch.integration.flow_viewer_2d_gpu.FlowViewer2DGPU.initialize_episode">(lilytorch.integration.flow_viewer_2d_gpu.FlowViewer2DGPU method)</a>
-</li>
-          <li><a href="api/integration.html#lilytorch.integration.native_body_colors.NativeBodyColors.initialize_episode">(lilytorch.integration.native_body_colors.NativeBodyColors method)</a>
 </li>
           <li><a href="api/integration.html#lilytorch.integration.particle_viewer.ParticleViewer.initialize_episode">(lilytorch.integration.particle_viewer.ParticleViewer method)</a>
 </li>
@@ -764,21 +776,12 @@
 </li>
         </ul></li>
         <li>
-    lilytorch.integration.native_body_colors
-
-        <ul>
-          <li><a href="api/integration.html#module-lilytorch.integration.native_body_colors">module</a>
-</li>
-        </ul></li>
-        <li>
     lilytorch.integration.particle_viewer
 
         <ul>
           <li><a href="api/integration.html#module-lilytorch.integration.particle_viewer">module</a>
 </li>
         </ul></li>
-    </ul></td>
-    <td style="width: 33%; vertical-align: top;"><ul>
         <li>
     lilytorch.src.adv_diff
 
@@ -786,6 +789,8 @@
           <li><a href="api/adv_diff.html#module-lilytorch.src.adv_diff">module</a>
 </li>
         </ul></li>
+    </ul></td>
+    <td style="width: 33%; vertical-align: top;"><ul>
         <li>
     lilytorch.src.body
 
@@ -805,6 +810,13 @@
 
         <ul>
           <li><a href="api/solver.html#module-lilytorch.src.forces">module</a>
+</li>
+        </ul></li>
+        <li>
+    lilytorch.src.free_surface
+
+        <ul>
+          <li><a href="api/free_surface.html#module-lilytorch.src.free_surface">module</a>
 </li>
         </ul></li>
         <li>
@@ -901,8 +913,6 @@
 </li>
           <li><a href="api/integration.html#module-lilytorch.integration.kinematics">lilytorch.integration.kinematics</a>
 </li>
-          <li><a href="api/integration.html#module-lilytorch.integration.native_body_colors">lilytorch.integration.native_body_colors</a>
-</li>
           <li><a href="api/integration.html#module-lilytorch.integration.particle_viewer">lilytorch.integration.particle_viewer</a>
 </li>
           <li><a href="api/adv_diff.html#module-lilytorch.src.adv_diff">lilytorch.src.adv_diff</a>
@@ -912,6 +922,8 @@
           <li><a href="api/solver.html#module-lilytorch.src.extras">lilytorch.src.extras</a>
 </li>
           <li><a href="api/solver.html#module-lilytorch.src.forces">lilytorch.src.forces</a>
+</li>
+          <li><a href="api/free_surface.html#module-lilytorch.src.free_surface">lilytorch.src.free_surface</a>
 </li>
           <li><a href="api/operations.html#module-lilytorch.src.operations">lilytorch.src.operations</a>
 </li>
@@ -946,8 +958,6 @@
   <h2>N</h2>
   <table style="width: 100%" class="indextable genindextable"><tr>
     <td style="width: 33%; vertical-align: top;"><ul>
-        <li><a href="api/integration.html#lilytorch.integration.native_body_colors.NativeBodyColors">NativeBodyColors (class in lilytorch.integration.native_body_colors)</a>
-</li>
         <li><a href="api/operations.html#lilytorch.src.operations.normal_derivative">normal_derivative() (in module lilytorch.src.operations)</a>
 
         <ul>
@@ -1029,6 +1039,8 @@
         <li><a href="api/util.html#lilytorch.util.yaml_operations.read_yaml">read_yaml() (in module lilytorch.util.yaml_operations)</a>
 </li>
         <li><a href="api/integration.html#lilytorch.integration.extensions.RealtimeMonitor">RealtimeMonitor (class in lilytorch.integration.extensions)</a>
+</li>
+        <li><a href="api/free_surface.html#lilytorch.src.free_surface.FreeSurface.reinitialize">reinitialize() (lilytorch.src.free_surface.FreeSurface method)</a>
 </li>
         <li><a href="api/body.html#lilytorch.src.body.BodyMesh.resample_closed_contour">resample_closed_contour() (lilytorch.src.body.BodyMesh method)</a>
 </li>

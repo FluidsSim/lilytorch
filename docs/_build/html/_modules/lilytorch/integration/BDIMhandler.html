@@ -209,6 +209,7 @@
 <li class="toctree-l1"><a class="reference internal" href="../../../mathematical_formulation.html">Mathematical Formulation</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../numerical_schemes.html">Numerical Schemes</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../immersed_boundary.html">Immersed Boundary Method — BDIM2</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../free_surface.html">Free Surface — Level-Set Fluid–Air</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../strong_coupling.html">Strong (implicit) FSI coupling</a></li>
 </ul>
 <p class="caption" role="heading"><span class="caption-text">API Reference</span></p>
@@ -218,6 +219,7 @@
 <li class="toctree-l1"><a class="reference internal" href="../../../api/solver.html#extras-sponge-les-non-newtonian-viscosity"><code class="docutils literal notranslate"><span class="pre">extras</span></code> — Sponge, LES &amp; Non-Newtonian Viscosity</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../api/adv_diff.html"><code class="docutils literal notranslate"><span class="pre">adv_diff</span></code> — Advection–Diffusion Solver</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../api/poisson.html"><code class="docutils literal notranslate"><span class="pre">poisson</span></code> — Pressure Solvers</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../api/free_surface.html"><code class="docutils literal notranslate"><span class="pre">free_surface</span></code> — Level-Set Free Surface</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../api/body.html"><code class="docutils literal notranslate"><span class="pre">body</span></code> — Geometry, SDF &amp; Kinematics</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../api/operations.html"><code class="docutils literal notranslate"><span class="pre">operations</span></code> — Discrete Differential Operators</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../api/plotting.html"><code class="docutils literal notranslate"><span class="pre">plotting</span></code> — Visualisation Helpers</a></li>
@@ -473,6 +475,10 @@
         <span class="bp">self</span><span class="o">.</span><span class="n">tol</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">_cpl</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;tol&quot;</span><span class="p">,</span> <span class="mf">1e-4</span><span class="p">))</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">max_iter</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">_cpl</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;max_iter&quot;</span><span class="p">,</span> <span class="mi">30</span><span class="p">))</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_predict_nstep</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">_cpl</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;predict_substeps&quot;</span><span class="p">,</span> <span class="mi">1</span><span class="p">))</span>
+        <span class="c1"># Robustness: reject a candidate coupling-force whose norm exceeds</span>
+        <span class="c1"># ``force_bound`` x (running max load magnitude).  Prevents a runaway</span>
+        <span class="c1"># quasi-Newton iterate from being applied to MuJoCo and blowing up.</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_impl_force_bound</span> <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">_cpl</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;force_bound&quot;</span><span class="p">,</span> <span class="mf">100.0</span><span class="p">))</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">last_iters</span> <span class="o">=</span> <span class="mi">0</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">last_residual</span> <span class="o">=</span> <span class="mf">0.0</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_mj_ckpt</span> <span class="o">=</span> <span class="kc">None</span>
@@ -2564,8 +2570,23 @@
         <span class="n">x</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_implicit_prev</span>            <span class="c1"># warm-start (None on the first step)</span>
         <span class="n">x_tilde</span> <span class="o">=</span> <span class="kc">None</span>
         <span class="n">converged</span> <span class="o">=</span> <span class="kc">False</span>
+        <span class="c1"># Robustness bookkeeping: track the best (min-residual, finite) load</span>
+        <span class="c1"># so a non-converging / oscillating step commits a sane force rather</span>
+        <span class="c1"># than a blown-up quasi-Newton iterate.  ``load_scale`` bounds the</span>
+        <span class="c1"># candidate force so a runaway step can never be applied to MuJoCo</span>
+        <span class="c1"># (which would teleport the body and crash the kernel AABB).</span>
+        <span class="n">best_x</span><span class="p">,</span> <span class="n">best_res</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span> <span class="n">np</span><span class="o">.</span><span class="n">inf</span>
+        <span class="n">load_scale</span> <span class="o">=</span> <span class="mf">1.0</span>
+        <span class="n">diverged</span> <span class="o">=</span> <span class="kc">False</span>
 
         <span class="k">for</span> <span class="n">k</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">max_iter</span> <span class="o">+</span> <span class="mi">1</span><span class="p">):</span>
+            <span class="c1"># ---- guard: never apply a non-finite or runaway candidate ----</span>
+            <span class="k">if</span> <span class="n">x</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="p">(</span>
+                    <span class="ow">not</span> <span class="n">np</span><span class="o">.</span><span class="n">all</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">isfinite</span><span class="p">(</span><span class="n">x</span><span class="p">))</span>
+                    <span class="ow">or</span> <span class="n">np</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">norm</span><span class="p">(</span><span class="n">x</span><span class="p">)</span> <span class="o">&gt;</span> <span class="bp">self</span><span class="o">.</span><span class="n">_impl_force_bound</span> <span class="o">*</span> <span class="n">load_scale</span><span class="p">):</span>
+                <span class="n">diverged</span> <span class="o">=</span> <span class="kc">True</span>
+                <span class="k">break</span>
+
             <span class="n">ckpt</span><span class="o">.</span><span class="n">restore</span><span class="p">(</span><span class="n">mj_n</span><span class="p">)</span>              <span class="c1"># MuJoCo -&gt; sⁿ  (also mj_forward)</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">_fluid_restore</span><span class="p">(</span><span class="n">fluid_n</span><span class="p">)</span>    <span class="c1"># fluid   -&gt; fluidⁿ</span>
 
@@ -2583,29 +2604,56 @@
             <span class="k">if</span> <span class="n">x</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>                   <span class="c1"># very first sweep: no guess yet</span>
                 <span class="n">x</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">zeros_like</span><span class="p">(</span><span class="n">x_tilde</span><span class="p">)</span>
 
+            <span class="k">if</span> <span class="n">np</span><span class="o">.</span><span class="n">all</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">isfinite</span><span class="p">(</span><span class="n">x_tilde</span><span class="p">)):</span>
+                <span class="n">load_scale</span> <span class="o">=</span> <span class="nb">max</span><span class="p">(</span><span class="n">load_scale</span><span class="p">,</span> <span class="nb">float</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">norm</span><span class="p">(</span><span class="n">x_tilde</span><span class="p">)))</span>
+
             <span class="n">res</span> <span class="o">=</span> <span class="n">acc</span><span class="o">.</span><span class="n">residual_norm</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">x_tilde</span><span class="p">)</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">last_iters</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">last_residual</span> <span class="o">=</span> <span class="n">k</span><span class="p">,</span> <span class="nb">float</span><span class="p">(</span><span class="n">res</span><span class="p">)</span>
+            <span class="k">if</span> <span class="n">np</span><span class="o">.</span><span class="n">isfinite</span><span class="p">(</span><span class="n">res</span><span class="p">)</span> <span class="ow">and</span> <span class="n">res</span> <span class="o">&lt;</span> <span class="n">best_res</span><span class="p">:</span>
+                <span class="n">best_res</span><span class="p">,</span> <span class="n">best_x</span> <span class="o">=</span> <span class="n">res</span><span class="p">,</span> <span class="n">x_tilde</span><span class="o">.</span><span class="n">copy</span><span class="p">()</span>
             <span class="k">if</span> <span class="n">res</span> <span class="o">&lt;</span> <span class="bp">self</span><span class="o">.</span><span class="n">tol</span> <span class="o">*</span> <span class="p">(</span><span class="mf">1.0</span> <span class="o">+</span> <span class="n">np</span><span class="o">.</span><span class="n">linalg</span><span class="o">.</span><span class="n">norm</span><span class="p">(</span><span class="n">x</span><span class="p">)):</span>
                 <span class="n">converged</span> <span class="o">=</span> <span class="kc">True</span>
                 <span class="k">break</span>
             <span class="k">if</span> <span class="ow">not</span> <span class="n">np</span><span class="o">.</span><span class="n">isfinite</span><span class="p">(</span><span class="n">res</span><span class="p">):</span>
+                <span class="n">diverged</span> <span class="o">=</span> <span class="kc">True</span>
                 <span class="k">break</span>
             <span class="n">x</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">asarray</span><span class="p">(</span><span class="n">acc</span><span class="o">.</span><span class="n">relax</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">x_tilde</span><span class="p">),</span> <span class="n">dtype</span><span class="o">=</span><span class="n">np</span><span class="o">.</span><span class="n">float64</span><span class="p">)</span>
 
         <span class="n">acc</span><span class="o">.</span><span class="n">finalize_timestep</span><span class="p">()</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_pose_source</span> <span class="o">=</span> <span class="n">prev_src</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">_implicit_prev</span> <span class="o">=</span> <span class="n">x</span>            <span class="c1"># warm-start next step</span>
+
+        <span class="c1"># ---- choose the committed load ----</span>
+        <span class="c1"># Converged: the last x̃.  Otherwise: the best-effort (min-residual)</span>
+        <span class="c1"># iterate seen — never a blown-up one.  Do NOT warm-start the next</span>
+        <span class="c1"># step from a non-converged guess.</span>
+        <span class="n">x_commit</span> <span class="o">=</span> <span class="n">x_tilde</span> <span class="k">if</span> <span class="n">converged</span> <span class="k">else</span> <span class="n">best_x</span>
+        <span class="k">if</span> <span class="n">x_commit</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>               <span class="c1"># not even one finite sweep</span>
+            <span class="n">x_commit</span> <span class="o">=</span> <span class="n">np</span><span class="o">.</span><span class="n">zeros</span><span class="p">(</span><span class="nb">int</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">prod</span><span class="p">(</span><span class="n">shapes</span><span class="p">[</span><span class="mi">0</span><span class="p">]))</span> <span class="o">+</span> <span class="nb">int</span><span class="p">(</span><span class="n">np</span><span class="o">.</span><span class="n">prod</span><span class="p">(</span><span class="n">shapes</span><span class="p">[</span><span class="mi">1</span><span class="p">])))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_implicit_prev</span> <span class="o">=</span> <span class="n">x_commit</span> <span class="k">if</span> <span class="n">converged</span> <span class="k">else</span> <span class="kc">None</span>
 
         <span class="k">if</span> <span class="ow">not</span> <span class="n">converged</span><span class="p">:</span>
-            <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;[BDIMhandler implicit] step </span><span class="si">{</span><span class="n">iteration</span><span class="si">}</span><span class="s2">: not converged &quot;</span>
-                  <span class="sa">f</span><span class="s2">&quot;in </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">max_iter</span><span class="si">}</span><span class="s2"> sweeps (res=</span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">last_residual</span><span class="si">:</span><span class="s2">.3e</span><span class="si">}</span><span class="s2">)&quot;</span><span class="p">,</span>
-                  <span class="n">flush</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+            <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;[BDIMhandler implicit] step </span><span class="si">{</span><span class="n">iteration</span><span class="si">}</span><span class="s2">: NOT converged in &quot;</span>
+                  <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">last_iters</span><span class="si">}</span><span class="s2"> sweeps (res=</span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">last_residual</span><span class="si">:</span><span class="s2">.3e</span><span class="si">}</span><span class="s2">&quot;</span>
+                  <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="s1">&#39;, diverged&#39;</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="n">diverged</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="s1">&#39;&#39;</span><span class="si">}</span><span class="s2">); committing best-effort &quot;</span>
+                  <span class="sa">f</span><span class="s2">&quot;load (res=</span><span class="si">{</span><span class="n">best_res</span><span class="si">:</span><span class="s2">.3e</span><span class="si">}</span><span class="s2">). Strong coupling can be &quot;</span>
+                  <span class="sa">f</span><span class="s2">&quot;ill-conditioned for articulated / position-controlled &quot;</span>
+                  <span class="sa">f</span><span class="s2">&quot;swimmers (especially force_method=&#39;lagrangian&#39;); if this &quot;</span>
+                  <span class="sa">f</span><span class="s2">&quot;recurs, use body.coupling.scheme=&#39;explicit&#39;.&quot;</span><span class="p">,</span> <span class="n">flush</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+            <span class="c1"># Re-solve once at the committed load so the fluid state matches</span>
+            <span class="c1"># the force we are about to leave on xfrc (the last sweep may have</span>
+            <span class="c1"># been a rejected/oscillating iterate).</span>
+            <span class="n">ckpt</span><span class="o">.</span><span class="n">restore</span><span class="p">(</span><span class="n">mj_n</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_fluid_restore</span><span class="p">(</span><span class="n">fluid_n</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_apply_forces</span><span class="p">(</span><span class="n">task</span><span class="p">,</span> <span class="n">physics</span><span class="p">,</span> <span class="n">loads</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">_vector_to_loads</span><span class="p">(</span><span class="n">x_commit</span><span class="p">,</span> <span class="n">shapes</span><span class="p">))</span>
+            <span class="n">ckpt</span><span class="o">.</span><span class="n">integrate</span><span class="p">(</span><span class="n">nsub</span><span class="p">)</span>
+            <span class="bp">self</span><span class="o">.</span><span class="n">_advance_fluid_at_current_pose</span><span class="p">(</span><span class="n">iteration</span><span class="p">,</span> <span class="n">t</span><span class="p">)</span>
+            <span class="n">fs</span><span class="o">.</span><span class="vm">__dict__</span><span class="o">.</span><span class="n">update</span><span class="p">(</span><span class="n">_FS_FREE_AFTER_FORCES_3D</span><span class="p">)</span>
 
-        <span class="c1"># ---- commit (Option A): leave sⁿ + the (last candidate) force x ----</span>
-        <span class="c1"># The fluid is at the converged solve (pose s̃(x)); committing x makes</span>
-        <span class="c1"># the runtime&#39;s single integration reproduce exactly that pose.</span>
+        <span class="c1"># ---- commit (Option A): leave sⁿ + the committed force ----</span>
+        <span class="c1"># The fluid is at the solve for the committed pose; committing the</span>
+        <span class="c1"># same force makes the runtime&#39;s single integration reproduce it.</span>
         <span class="n">ckpt</span><span class="o">.</span><span class="n">restore</span><span class="p">(</span><span class="n">mj_n</span><span class="p">)</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">_apply_forces</span><span class="p">(</span><span class="n">task</span><span class="p">,</span> <span class="n">physics</span><span class="p">,</span> <span class="n">loads</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">_vector_to_loads</span><span class="p">(</span><span class="n">x</span><span class="p">,</span> <span class="n">shapes</span><span class="p">))</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_apply_forces</span><span class="p">(</span><span class="n">task</span><span class="p">,</span> <span class="n">physics</span><span class="p">,</span> <span class="n">loads</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">_vector_to_loads</span><span class="p">(</span><span class="n">x_commit</span><span class="p">,</span> <span class="n">shapes</span><span class="p">))</span>
         <span class="c1"># NOTE: implicit mode requires cb_sub_steps == 1 (design §7.1), so the</span>
         <span class="c1"># non-full-substep apply_forces(loads=None) path is never invoked</span>
         <span class="c1"># between full steps; xfrc_applied set here is what the runtime</span>

@@ -57,6 +57,7 @@ Key features
    mathematical_formulation
    numerical_schemes
    immersed_boundary
+   free_surface
    strong_coupling
 
 .. toctree::
@@ -66,6 +67,7 @@ Key features
    api/solver
    api/adv_diff
    api/poisson
+   api/free_surface
    api/body
    api/operations
    api/plotting

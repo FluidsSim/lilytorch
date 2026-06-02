@@ -209,6 +209,7 @@
 <li class="toctree-l1"><a class="reference internal" href="../../../mathematical_formulation.html">Mathematical Formulation</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../numerical_schemes.html">Numerical Schemes</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../immersed_boundary.html">Immersed Boundary Method — BDIM2</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../free_surface.html">Free Surface — Level-Set Fluid–Air</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../strong_coupling.html">Strong (implicit) FSI coupling</a></li>
 </ul>
 <p class="caption" role="heading"><span class="caption-text">API Reference</span></p>
@@ -218,6 +219,7 @@
 <li class="toctree-l1"><a class="reference internal" href="../../../api/solver.html#extras-sponge-les-non-newtonian-viscosity"><code class="docutils literal notranslate"><span class="pre">extras</span></code> — Sponge, LES &amp; Non-Newtonian Viscosity</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../api/adv_diff.html"><code class="docutils literal notranslate"><span class="pre">adv_diff</span></code> — Advection–Diffusion Solver</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../api/poisson.html"><code class="docutils literal notranslate"><span class="pre">poisson</span></code> — Pressure Solvers</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../api/free_surface.html"><code class="docutils literal notranslate"><span class="pre">free_surface</span></code> — Level-Set Free Surface</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../api/body.html"><code class="docutils literal notranslate"><span class="pre">body</span></code> — Geometry, SDF &amp; Kinematics</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../api/operations.html"><code class="docutils literal notranslate"><span class="pre">operations</span></code> — Discrete Differential Operators</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../api/plotting.html"><code class="docutils literal notranslate"><span class="pre">plotting</span></code> — Visualisation Helpers</a></li>
@@ -405,7 +407,7 @@
 <a class="viewcode-back" href="../../../api/integration.html#lilytorch.integration.gen_pool_sdf.create_pool_sdf">[docs]</a>
 <span class="k">def</span><span class="w"> </span><span class="nf">create_pool_sdf</span><span class="p">(</span><span class="n">xmin</span><span class="p">,</span> <span class="n">xmax</span><span class="p">,</span> <span class="n">ymin</span><span class="p">,</span> <span class="n">ymax</span><span class="p">,</span> <span class="n">zmin</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">zmax</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span>
                     <span class="n">wall_thickness</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">wall_height</span><span class="o">=</span><span class="mf">0.3</span><span class="p">,</span> <span class="n">plotting</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
-                    <span class="n">wall_alpha</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">grid_spacing</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span>
+                    <span class="n">wall_alpha</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">grid_spacing</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">floor_color</span><span class="o">=</span><span class="kc">None</span><span class="p">):</span>
 <span class="w">    </span><span class="sd">&quot;&quot;&quot;Generate a rectangular pool SDF with textured walls and floor.</span>
 
 <span class="sd">    Parameters</span>
@@ -431,6 +433,9 @@
 <span class="sd">        When set to a positive value, white grid lines of this spacing (in</span>
 <span class="sd">        metres) are drawn over the background floor across the inner fluid</span>
 <span class="sd">        domain.  *None* (default) or ``0`` disables the grid.</span>
+<span class="sd">    floor_color : list[float] or None</span>
+<span class="sd">        RGB colour of the large background ground plane, as ``[r, g, b]``</span>
+<span class="sd">        in [0, 1].  *None* keeps the default black.</span>
 <span class="sd">    &quot;&quot;&quot;</span>
     <span class="n">is_3d</span> <span class="o">=</span> <span class="n">zmin</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">zmax</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
 
@@ -491,11 +496,21 @@
 
     <span class="c1"># ---- large background ground (visual-only, black backdrop) ------</span>
     <span class="n">ground_bg_z</span> <span class="o">=</span> <span class="n">fz</span> <span class="o">-</span> <span class="n">wt</span> <span class="o">-</span> <span class="mf">0.01</span>
+    <span class="k">if</span> <span class="n">floor_color</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+        <span class="n">r</span><span class="p">,</span> <span class="n">g</span><span class="p">,</span> <span class="n">b</span> <span class="o">=</span> <span class="p">[</span><span class="sa">f</span><span class="s1">&#39;</span><span class="si">{</span><span class="n">v</span><span class="si">:</span><span class="s1">.4f</span><span class="si">}</span><span class="s1">&#39;</span> <span class="k">for</span> <span class="n">v</span> <span class="ow">in</span> <span class="n">floor_color</span><span class="p">[:</span><span class="mi">3</span><span class="p">]]</span>
+        <span class="n">ground_mat</span> <span class="o">=</span> <span class="p">{</span>
+            <span class="s1">&#39;ambient&#39;</span><span class="p">:</span>  <span class="sa">f</span><span class="s1">&#39;</span><span class="si">{</span><span class="n">r</span><span class="si">}</span><span class="s1"> </span><span class="si">{</span><span class="n">g</span><span class="si">}</span><span class="s1"> </span><span class="si">{</span><span class="n">b</span><span class="si">}</span><span class="s1"> 1.0&#39;</span><span class="p">,</span>
+            <span class="s1">&#39;diffuse&#39;</span><span class="p">:</span>  <span class="sa">f</span><span class="s1">&#39;</span><span class="si">{</span><span class="n">r</span><span class="si">}</span><span class="s1"> </span><span class="si">{</span><span class="n">g</span><span class="si">}</span><span class="s1"> </span><span class="si">{</span><span class="n">b</span><span class="si">}</span><span class="s1"> 1.0&#39;</span><span class="p">,</span>
+            <span class="s1">&#39;specular&#39;</span><span class="p">:</span> <span class="s1">&#39;0.0 0.0 0.0 1.0&#39;</span><span class="p">,</span>
+            <span class="s1">&#39;emissive&#39;</span><span class="p">:</span> <span class="sa">f</span><span class="s1">&#39;</span><span class="si">{</span><span class="n">r</span><span class="si">}</span><span class="s1"> </span><span class="si">{</span><span class="n">g</span><span class="si">}</span><span class="s1"> </span><span class="si">{</span><span class="n">b</span><span class="si">}</span><span class="s1"> 1.0&#39;</span><span class="p">,</span>
+        <span class="p">}</span>
+    <span class="k">else</span><span class="p">:</span>
+        <span class="n">ground_mat</span> <span class="o">=</span> <span class="n">GROUND_BG_MATERIAL</span>
     <span class="n">_add_visual_only_link</span><span class="p">(</span>
         <span class="n">model</span><span class="p">,</span> <span class="s1">&#39;ground_bg&#39;</span><span class="p">,</span>
         <span class="sa">f</span><span class="s1">&#39;</span><span class="si">{</span><span class="p">(</span><span class="n">xmin</span><span class="o">+</span><span class="n">xmax</span><span class="p">)</span><span class="o">/</span><span class="mi">2</span><span class="si">}</span><span class="s1"> </span><span class="si">{</span><span class="p">(</span><span class="n">ymin</span><span class="o">+</span><span class="n">ymax</span><span class="p">)</span><span class="o">/</span><span class="mi">2</span><span class="si">}</span><span class="s1"> </span><span class="si">{</span><span class="n">ground_bg_z</span><span class="si">}</span><span class="s1"> 0 0 0&#39;</span><span class="p">,</span>
         <span class="s1">&#39;100 100 0.002&#39;</span><span class="p">,</span>
-        <span class="n">GROUND_BG_MATERIAL</span><span class="p">,</span>
+        <span class="n">ground_mat</span><span class="p">,</span>
     <span class="p">)</span>
 
     <span class="c1"># ---- white grid lines over the fluid domain ---------------------</span>

@@ -210,6 +210,7 @@
 <li class="toctree-l1"><a class="reference internal" href="../mathematical_formulation.html">Mathematical Formulation</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../numerical_schemes.html">Numerical Schemes</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../immersed_boundary.html">Immersed Boundary Method — BDIM2</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../free_surface.html">Free Surface — Level-Set Fluid–Air</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../strong_coupling.html">Strong (implicit) FSI coupling</a></li>
 </ul>
 <p class="caption" role="heading"><span class="caption-text">API Reference</span></p>
@@ -219,6 +220,7 @@
 <li class="toctree-l1"><a class="reference internal" href="solver.html#extras-sponge-les-non-newtonian-viscosity"><code class="docutils literal notranslate"><span class="pre">extras</span></code> — Sponge, LES &amp; Non-Newtonian Viscosity</a></li>
 <li class="toctree-l1"><a class="reference internal" href="adv_diff.html"><code class="docutils literal notranslate"><span class="pre">adv_diff</span></code> — Advection–Diffusion Solver</a></li>
 <li class="toctree-l1"><a class="reference internal" href="poisson.html"><code class="docutils literal notranslate"><span class="pre">poisson</span></code> — Pressure Solvers</a></li>
+<li class="toctree-l1"><a class="reference internal" href="free_surface.html"><code class="docutils literal notranslate"><span class="pre">free_surface</span></code> — Level-Set Free Surface</a></li>
 <li class="toctree-l1"><a class="reference internal" href="body.html"><code class="docutils literal notranslate"><span class="pre">body</span></code> — Geometry, SDF &amp; Kinematics</a></li>
 <li class="toctree-l1"><a class="reference internal" href="operations.html"><code class="docutils literal notranslate"><span class="pre">operations</span></code> — Discrete Differential Operators</a></li>
 <li class="toctree-l1"><a class="reference internal" href="plotting.html"><code class="docutils literal notranslate"><span class="pre">plotting</span></code> — Visualisation Helpers</a></li>
@@ -1241,59 +1243,8 @@ coloured spheres in the MuJoCo viewer and in the CameraRecording.</p>
 </dd></dl>
 
 </section>
-<section id="module-lilytorch.integration.native_body_colors">
-<span id="native-body-colours"></span><h2>Native body colours<a class="headerlink" href="#module-lilytorch.integration.native_body_colors" title="Link to this heading">¶</a></h2>
-<p>Restore animat body colours in the MuJoCo viewer.</p>
-<p>FARMS exports both visual and collision geoms. When both stay visible,
-the collision geoms can wash out the intended SDF colours in the viewer.
-This extension keeps native visual colours where available, hides
-duplicate collision geoms for links that already have visuals, and
-recolours collision-only links from the SDF material colour or a stable
-fallback palette.</p>
-<dl class="py class">
-<dt class="sig sig-object py" id="lilytorch.integration.native_body_colors.NativeBodyColors">
-<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-prename descclassname"><span class="pre">lilytorch.integration.native_body_colors.</span></span><span class="sig-name descname"><span class="pre">NativeBodyColors</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">experiment_options</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">alpha</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">hide_collision_geoms_with_visuals</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">True</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lilytorch/integration/native_body_colors.html#NativeBodyColors"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lilytorch.integration.native_body_colors.NativeBodyColors" title="Link to this definition">¶</a></dt>
-<dd><p>Bases: <code class="xref py py-class docutils literal notranslate"><span class="pre">TaskExtension</span></code></p>
-<p>Ensure animat bodies keep native-looking colours in MuJoCo.</p>
-<dl class="field-list simple">
-<dt class="field-odd">Parameters<span class="colon">:</span></dt>
-<dd class="field-odd"><ul class="simple">
-<li><p><strong>experiment_options</strong> (<em>ExperimentOptions</em>)</p></li>
-<li><p><strong>alpha</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.14)"><em>float</em></a><em> | </em><em>None</em>)</p></li>
-<li><p><strong>hide_collision_geoms_with_visuals</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#bool" title="(in Python v3.14)"><em>bool</em></a>)</p></li>
-</ul>
-</dd>
-</dl>
-<dl class="py method">
-<dt class="sig sig-object py" id="lilytorch.integration.native_body_colors.NativeBodyColors.from_options">
-<span class="property"><span class="k"><span class="pre">classmethod</span></span><span class="w"> </span></span><span class="sig-name descname"><span class="pre">from_options</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">config</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">experiment_options</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lilytorch/integration/native_body_colors.html#NativeBodyColors.from_options"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lilytorch.integration.native_body_colors.NativeBodyColors.from_options" title="Link to this definition">¶</a></dt>
-<dd><p>From options</p>
-<dl class="field-list simple">
-<dt class="field-odd">Parameters<span class="colon">:</span></dt>
-<dd class="field-odd"><ul class="simple">
-<li><p><strong>config</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#dict" title="(in Python v3.14)"><em>dict</em></a>)</p></li>
-<li><p><strong>experiment_options</strong> (<em>ExperimentOptions</em>)</p></li>
-</ul>
-</dd>
-</dl>
-</dd></dl>
-
-<dl class="py method">
-<dt class="sig sig-object py" id="lilytorch.integration.native_body_colors.NativeBodyColors.initialize_episode">
-<span class="sig-name descname"><span class="pre">initialize_episode</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">task</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">physics</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lilytorch/integration/native_body_colors.html#NativeBodyColors.initialize_episode"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lilytorch.integration.native_body_colors.NativeBodyColors.initialize_episode" title="Link to this definition">¶</a></dt>
-<dd><p>Initialize episode</p>
-<dl class="field-list simple">
-<dt class="field-odd">Parameters<span class="colon">:</span></dt>
-<dd class="field-odd"><ul class="simple">
-<li><p><strong>task</strong> (<em>ExperimentTask</em>)</p></li>
-<li><p><strong>physics</strong> (<em>Physics</em>)</p></li>
-</ul>
-</dd>
-</dl>
-</dd></dl>
-
-</dd></dl>
-
+<section id="native-body-colours">
+<h2>Native body colours<a class="headerlink" href="#native-body-colours" title="Link to this heading">¶</a></h2>
 </section>
 <section id="module-lilytorch.integration.camera">
 <span id="camera"></span><h2>Camera<a class="headerlink" href="#module-lilytorch.integration.camera" title="Link to this heading">¶</a></h2>
@@ -1591,7 +1542,7 @@ Uses SDL2’s native event system - more efficient than polling.</p>
 walls for MuJoCo.</p>
 <dl class="py function" id="module-lilytorch.integration.gen_pool_sdf">
 <dt class="sig sig-object py" id="lilytorch.integration.gen_pool_sdf.create_pool_sdf">
-<span class="sig-prename descclassname"><span class="pre">lilytorch.integration.gen_pool_sdf.</span></span><span class="sig-name descname"><span class="pre">create_pool_sdf</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">xmin</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">xmax</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ymin</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ymax</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">zmin</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">zmax</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">wall_thickness</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">wall_height</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0.3</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">plotting</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">wall_alpha</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">grid_spacing</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lilytorch/integration/gen_pool_sdf.html#create_pool_sdf"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lilytorch.integration.gen_pool_sdf.create_pool_sdf" title="Link to this definition">¶</a></dt>
+<span class="sig-prename descclassname"><span class="pre">lilytorch.integration.gen_pool_sdf.</span></span><span class="sig-name descname"><span class="pre">create_pool_sdf</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">xmin</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">xmax</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ymin</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">ymax</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">zmin</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">zmax</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">wall_thickness</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">wall_height</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0.3</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">plotting</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">False</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">wall_alpha</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">grid_spacing</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">floor_color</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lilytorch/integration/gen_pool_sdf.html#create_pool_sdf"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lilytorch.integration.gen_pool_sdf.create_pool_sdf" title="Link to this definition">¶</a></dt>
 <dd><p>Generate a rectangular pool SDF with textured walls and floor.</p>
 <dl class="field-list simple">
 <dt class="field-odd">Parameters<span class="colon">:</span></dt>
@@ -1616,6 +1567,8 @@ defaults from <code class="docutils literal notranslate"><span class="pre">WALL_
 <li><p><strong>grid_spacing</strong> (<a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.14)"><em>float</em></a><em> or </em><em>None</em>) – When set to a positive value, white grid lines of this spacing (in
 metres) are drawn over the background floor across the inner fluid
 domain.  <em>None</em> (default) or <code class="docutils literal notranslate"><span class="pre">0</span></code> disables the grid.</p></li>
+<li><p><strong>floor_color</strong> (<a class="reference external" href="https://docs.python.org/3/library/stdtypes.html#list" title="(in Python v3.14)"><em>list</em></a><em>[</em><a class="reference external" href="https://docs.python.org/3/library/functions.html#float" title="(in Python v3.14)"><em>float</em></a><em>] or </em><em>None</em>) – RGB colour of the large background ground plane, as <code class="docutils literal notranslate"><span class="pre">[r,</span> <span class="pre">g,</span> <span class="pre">b]</span></code>
+in [0, 1].  <em>None</em> keeps the default black.</p></li>
 </ul>
 </dd>
 </dl>
@@ -1797,14 +1750,7 @@ The water box is sized to fill the pool from the floor
 </li>
 </ul>
 </li>
-<li><a class="reference internal" href="#module-lilytorch.integration.native_body_colors">Native body colours</a><ul>
-<li><a class="reference internal" href="#lilytorch.integration.native_body_colors.NativeBodyColors"><code class="docutils literal notranslate"><span class="pre">NativeBodyColors</span></code></a><ul>
-<li><a class="reference internal" href="#lilytorch.integration.native_body_colors.NativeBodyColors.from_options"><code class="docutils literal notranslate"><span class="pre">NativeBodyColors.from_options()</span></code></a></li>
-<li><a class="reference internal" href="#lilytorch.integration.native_body_colors.NativeBodyColors.initialize_episode"><code class="docutils literal notranslate"><span class="pre">NativeBodyColors.initialize_episode()</span></code></a></li>
-</ul>
-</li>
-</ul>
-</li>
+<li><a class="reference internal" href="#native-body-colours">Native body colours</a></li>
 <li><a class="reference internal" href="#module-lilytorch.integration.camera">Camera</a><ul>
 <li><a class="reference internal" href="#lilytorch.integration.camera.top_down_camera_config"><code class="docutils literal notranslate"><span class="pre">top_down_camera_config()</span></code></a></li>
 <li><a class="reference internal" href="#lilytorch.integration.camera.side_camera_config"><code class="docutils literal notranslate"><span class="pre">side_camera_config()</span></code></a></li>
