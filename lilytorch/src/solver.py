@@ -952,7 +952,7 @@ class FluidSolver(PlottingMixin):
         return tuple(out)
 
     @torch.no_grad()
-    def _fs_apply_gfm_to_coeffs(self, ch, cv, cw):
+    def _fs_apply_gfm_to_coeffs(self, ch, cv, cw, solid_cc=None):
         """Multiply staggered Poisson face coefficients in-place by the
         ghost-fluid face scales.
 
@@ -960,10 +960,14 @@ class FluidSolver(PlottingMixin):
         path) the GFM scales — which are face-grid sized — are inserted
         into the appropriate inner slice; when they are face-grid
         (kernel path) we multiply directly.
+
+        ``solid_cc`` (optional body mask) is forwarded to
+        ``ghost_fluid_face_scales`` so faces touching the immersed body
+        keep scale 1 (the BDIM coefficient governs there).
         """
         if self.free_surface is None:
             return ch, cv, cw
-        scales = self.free_surface.ghost_fluid_face_scales()
+        scales = self.free_surface.ghost_fluid_face_scales(solid_cc=solid_cc)
         s_u = scales[0]
         s_v = scales[1]
         s_w = scales[2] if self.ndim == 3 else None
@@ -1218,6 +1222,20 @@ class FluidSolver(PlottingMixin):
         # Also force the divergence RHS to 0 in air cells so the
         # smoother sees no spurious driving term where p ≡ 0.
         if self.free_surface is not None:
+            # ---- Unified GFM + BDIM: make the free-surface ops body-aware.
+            # Wherever an immersed body occupies a cell, the free surface
+            # must DEFER (the BDIM no-slip / coefficient governs there); the
+            # GFM only acts on water↔air faces in the fluid.  Without this,
+            # when the body reaches the interface the GFM treats body cells
+            # as plain water/air (pins them to p_atm, computes a bogus θ)
+            # while BDIM imposes the body velocity — the two clobber each
+            # other's pressure BC and the solve blows up (water-entry/exit
+            # literature: Enright/Fedkiw + level-set IB, e.g. IBAMR).
+            solid_cc = None
+            cb = getattr(self, "composite_body", None)
+            if cb is not None and getattr(cb, "sdf_val", None) is not None:
+                solid_cc = (cb.sdf_val < 0)   # cells inside the body
+
             # If the legacy multigrid path will fall back to its default
             # constant-density coefficients, materialise them first so
             # the GFM rescale can be applied uniformly.
@@ -1228,20 +1246,22 @@ class FluidSolver(PlottingMixin):
                     cv = coeff * self.mu0_all_v
                 if self.ndim == 3 and cw is None:
                     cw = coeff * self.mu0_all_w
-            ch, cv, cw = self._fs_apply_gfm_to_coeffs(ch, cv, cw)
-            # Mask div in air cells (cell-centred).  This is a no-op on the
-            # boundary slice the Poisson solver actually sees, but it
-            # avoids any non-zero RHS leaking into ill-conditioned air
-            # cells when `_face_grid` slicing changes.
+            ch, cv, cw = self._fs_apply_gfm_to_coeffs(ch, cv, cw, solid_cc=solid_cc)
+            # Air cells to pin to p_atm = 0 — but NOT body cells (those are
+            # solved/penalised by BDIM even if they poke above the surface).
             air = self.free_surface.air_mask_cc
+            if solid_cc is not None:
+                air = air & (~solid_cc)
+            # Mask div in (non-body) air cells (cell-centred).
             self.div = torch.where(air, torch.zeros_like(self.div), self.div)
-            # Hand the **inner** air mask to the Poisson solver as a
-            # Dirichlet pin (p_air ≡ 0).  The GFM cut-face scaling makes
+            # Hand the **inner** (non-body) air mask to the Poisson solver as
+            # a Dirichlet pin (p_air ≡ 0).  The GFM cut-face scaling makes
             # the air cells adjacent to the interface non-degenerate
             # (J ≠ 0), so the smoother's J=0 mechanism alone is NOT
             # enough to enforce the Dirichlet BC there.  The mask hooks
             # into PoissonSolver.smooth to zero p in those cells after
             # every sweep at every multigrid level.
+            self._fs_solid_cc = solid_cc   # reused by the post-solve gauge/mask
             if self.ndim == 2:
                 self.poisson_solver.dirichlet_mask = air[1:-1, 1:-1].contiguous()
             else:
@@ -1387,9 +1407,10 @@ class FluidSolver(PlottingMixin):
         # water side; see FreeSurface.interface_gauge_offset), then zero the
         # air cells.
         if self.free_surface is not None:
-            offset = self.free_surface.interface_gauge_offset(p)
+            _solid_cc = getattr(self, "_fs_solid_cc", None)
+            offset = self.free_surface.interface_gauge_offset(p, solid_cc=_solid_cc)
             p = p - offset
-            self.free_surface.apply_pressure_mask(p)
+            self.free_surface.apply_pressure_mask(p, solid_cc=_solid_cc)
 
         if self.ndim == 2:
             return (u, v, p)

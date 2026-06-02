@@ -413,7 +413,7 @@ class FreeSurface:
     # Ghost-fluid pressure-Poisson coefficient scaling
     # ------------------------------------------------------------------
     @torch.no_grad()
-    def ghost_fluid_face_scales(self):
+    def ghost_fluid_face_scales(self, solid_cc=None):
         """Return per-face GFM rescaling factors ``s_u, s_v[, s_w]``.
 
         The host solver multiplies its existing staggered Poisson
@@ -429,6 +429,14 @@ class FreeSurface:
           where ``θ = |φ_fluid| / (|φ_fluid| + |φ_air|)`` is the fluid
           fraction of the cell-pair gap.  The lower clamp ``θ_min``
           stabilises the stencil when the interface grazes a face.
+
+        ``solid_cc`` (optional bool, cell-centred): mask of cells occupied
+        by an immersed body.  Faces touching a solid cell get scale ``= 1``
+        (no free-surface modification) so the BDIM coefficient / no-slip
+        governs there — the free surface only acts on water↔air faces in
+        the fluid.  This is the unified GFM+BDIM treatment that lets a body
+        cross the interface without the two models clobbering each other's
+        pressure BC.
 
         Returned tensors have **face-grid** shapes:
 
@@ -469,6 +477,15 @@ class FreeSurface:
             inv_theta = torch.where(cut, 1.0 / theta_clamped,
                                     torch.ones_like(theta))
             scale = torch.where(both_air, torch.zeros_like(theta), inv_theta)
+            if solid_cc is not None:
+                # Faces touching a body cell: defer to BDIM (scale = 1).
+                if dim == 0:
+                    solid_face = solid_cc[:-1, ...] | solid_cc[1:, ...]
+                elif dim == 1:
+                    solid_face = solid_cc[:, :-1, ...] | solid_cc[:, 1:, ...]
+                else:
+                    solid_face = solid_cc[:, :, :-1] | solid_cc[:, :, 1:]
+                scale = torch.where(solid_face, torch.ones_like(scale), scale)
             return scale.contiguous()
 
         s_u = _scale_along(0)
@@ -482,7 +499,7 @@ class FreeSurface:
     # Gauge anchor (pressure datum at the free surface)
     # ------------------------------------------------------------------
     @torch.no_grad()
-    def interface_gauge_offset(self, p):
+    def interface_gauge_offset(self, p, solid_cc=None):
         """Constant pressure offset ``C`` that anchors the free-surface gauge.
 
         The ghost-fluid solve fixes the pressure *gradient* but leaves the
@@ -503,11 +520,17 @@ class FreeSurface:
         offset; subtract it from ``p`` to restore ``p ≈ 0`` at the free
         surface.  This is ρ/g-agnostic and works for a deforming interface.
 
+        ``solid_cc`` (optional): exclude body-occupied cells from the
+        cut-face average (their pressure is set by BDIM, not the
+        hydrostatic water field, so they would bias the datum).
+
         Returns a 0-d tensor (``0`` when there are no cut faces).
         """
         phi   = self.phi_fs
         nd    = self.ndim
         water = phi <= 0
+        if solid_cc is not None:
+            water = water & (~solid_cc)
         aphi  = phi.abs()
         tot = p.new_zeros(())
         cnt = p.new_zeros(())
@@ -532,9 +555,17 @@ class FreeSurface:
     # Air-cell pressure mask
     # ------------------------------------------------------------------
     @torch.no_grad()
-    def apply_pressure_mask(self, p):
+    def apply_pressure_mask(self, p, solid_cc=None):
         """Zero ``p`` in air cells (defensive: the smoother should have
         done this already, but the FFT path and warm-start initial
-        guesses can leak non-zero air pressures)."""
-        p.masked_fill_(self.air_mask_cc, 0.0)
+        guesses can leak non-zero air pressures).
+
+        ``solid_cc`` (optional): do **not** zero body-occupied cells even
+        if they are on the air side of the interface — their pressure is
+        governed by the BDIM body, not the free surface.
+        """
+        mask = self.air_mask_cc
+        if solid_cc is not None:
+            mask = mask & (~solid_cc)
+        p.masked_fill_(mask, 0.0)
         return p
