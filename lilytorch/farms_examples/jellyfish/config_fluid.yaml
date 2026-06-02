@@ -30,8 +30,16 @@ solver:
   nu                : 1.0e-5
   rho               : 1000.0
 
-  convection_method : "quick"
-  time_integration  : "euler"
+  # van Leer (TVD, flux-limited) instead of QUICK.  The fluid step is explicit
+  # forward-Euler (see advection.py docstring); QUICK is dispersive/anti-diffusive
+  # and forward-Euler cannot damp it, so at Re=500 on the fine 256^3 grid (low
+  # numerical diffusion) the dispersive mode grows at the bell shell, |u| climbs
+  # past CFL=1 (~1.17 m/s at h=1.17mm, dt=1e-3) and the run blows up (~it=145).
+  # 192^3 is coarse enough that numerical diffusion masks it.  A TVD limiter is
+  # bounded -> stable under explicit Euler and adds dissipation only at extrema.
+  # (time_integration is dead config: the standalone jellyfish loop calls
+  # fluid_step once per step -> forward Euler regardless of this key.)
+  convection_method : "vanLeer"
   # Keep the immersed-boundary smoothing a bit wider than the default 2h.
   # The free-swimming 6D force feedback becomes too stiff at 256^3 when the
   # interface thickness shrinks with h, which triggers an early CFL blow-up.
@@ -50,12 +58,19 @@ solver:
   # bdim_mu0_projection: False is ESSENTIAL with a free surface.  With it
   # True the projection coefficient is mu0-weighted (c = mu0*dt/rho), which
   # -> 0 inside/around the body; combined with the free-surface GFM scaling
-  # that drives the Poisson operator's coefficient ratio up by ~80x and the
+  # that drives the Poisson operator's coefficient ratio up and the
   # ill-conditioned solve blows up (immediately at 256^3, where the thin
   # bell shell samples mu0 close to 0).  False uses the bounded coefficient
   # c = dt/rho -> well conditioned.  No-slip in the body is approximate but
   # re-imposed every step by the BDIM meta-equation.
   bdim_mu0_projection: False
+  # The jellyfish bell DEFORMS, so the body velocity field carries a nonzero
+  # divergence (∇·u_b != 0).  Without the Maertens–Weymouth body-div RHS term
+  # the projection forces ∇·u=0 even inside the bell, fighting the contraction
+  # and creating a spurious shell response that sharpens at finer resolution
+  # (the 256^3 ~it=123 body-region run-away; 192^3 is coarse enough to survive).
+  # Subtracting (1-mu0)∇·u_b lets the body carry its own divergence.
+  bdim_body_div_correction: True
   # With the bounded coefficient the MGCG is well conditioned, so ~20 CG
   # cycles converge (50 was needed only for the ill-conditioned mu0 case).
   # NOTE: a free surface forces the iterative variable-coefficient MGCG
@@ -80,7 +95,7 @@ solver:
   # swims up toward the surface.  GFM pressure BC p=p_atm=0 at z=0.
   free_surface:
     phi_init          : "lambda X, Y, Z: Z"   # interface at z = 0
-    convection_method : "quick"   # match the solver's advection scheme
+    convection_method : "vanLeer"   # match the solver's advection scheme
     theta_min         : 0.01      # cut-face water-fraction clamp (1/theta)
     reinit_iters      : 4
     reinit_every      : 10
