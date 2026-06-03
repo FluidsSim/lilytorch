@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 plt.rcParams['font.size'] = '20'
 
 
-RUN_DIR = os.path.join(save_path, "2026-04-13T16:54:39.182219")
+RUN_DIR = os.path.join(save_path, "1guilla_self_propelled/2026-06-02T16:48:32.413301")
 SIMULATION_PATH = os.path.join(RUN_DIR, "output", "simulation.hdf5")
 TRACK_CSV_PATH = "/data/andreaferrario/1guilla_experiments/swim/videos/ms004mpt003_track.csv"
 HEAD_LINK_NAME = "link0"

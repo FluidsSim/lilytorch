@@ -16,14 +16,14 @@ import matplotlib.pyplot as plt
 plt.rcParams['font.size'] = '20'
 
 
-RUN_DIR = os.path.join(save_path, "2026-05-01T09:28:05.499695")
+RUN_DIR = os.path.join(save_path, "1guilla_self_propelled/2026-06-02T10:58:54.544939")
 SIMULATION_PATH = os.path.join(RUN_DIR, "output", "simulation.hdf5")
 TRACK_CSV_PATH = "/data/andreaferrario/1guilla_experiments/swim/videos/ms007mpt001_track.csv"
 HEAD_LINK_NAME = "link0"
 IT_MAX = 20000
 LOWPASS_CUTOFF_HZ = 4.0
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "figures")
-OUTPUT_NAME = "vels_ms007mpt001.png"
+OUTPUT_NAME = "vels_ms007mpt001.svg"
 PLOT_TMAX = 13
 FORWARD_COLOR = "tab:orange"
 LATERAL_COLOR = "tab:green"
