@@ -25,88 +25,28 @@ solver:
   zmax              :  0.05
 
   nt                : 40001
-  dt                : 0.001
+  dt                : 0.0001
   # ν chosen so that Re = U·R/ν ≈ 5·10²  (matches WaterLily's Re=5e2)
   nu                : 1.0e-5
   rho               : 1000.0
 
-  # van Leer (TVD, flux-limited) instead of QUICK.  The fluid step is explicit
-  # forward-Euler (see advection.py docstring); QUICK is dispersive/anti-diffusive
-  # and forward-Euler cannot damp it, so at Re=500 on the fine 256^3 grid (low
-  # numerical diffusion) the dispersive mode grows at the bell shell, |u| climbs
-  # past CFL=1 (~1.17 m/s at h=1.17mm, dt=1e-3) and the run blows up (~it=145).
-  # 192^3 is coarse enough that numerical diffusion masks it.  A TVD limiter is
-  # bounded -> stable under explicit Euler and adds dissipation only at extrema.
-  # (time_integration is dead config: the standalone jellyfish loop calls
-  # fluid_step once per step -> forward Euler regardless of this key.)
-  convection_method : "vanLeer"
+  convection_method : "quick"
+  time_integration  : "euler"
   # Keep the immersed-boundary smoothing a bit wider than the default 2h.
   # The free-swimming 6D force feedback becomes too stiff at 256^3 when the
   # interface thickness shrinks with h, which triggers an early CFL blow-up.
   eps_multiplier    : 2.0
 
-  # The standalone jellyfish deforms its SDF every step, so it runs on the
-  # Python reference path (the fused-kernel path streams a *rigid* static
-  # SDF template and cannot represent the pulsing bell).
-  solver_method          : "python"
-  # MGCG (not FFT): the free-surface ghost-fluid Dirichlet BC (p = p_atm = 0
-  # at the z=0 interface) is imposed via per-face coefficient scaling + a
-  # Dirichlet pin in the multigrid smoother.  The constant-coefficient FFT
-  # solver cannot represent that interface condition, so a free surface
-  # requires the variable-coefficient multigrid/MGCG path.
-  poisson_method     : "mgcg"
-  # bdim_mu0_projection: False is ESSENTIAL with a free surface.  With it
-  # True the projection coefficient is mu0-weighted (c = mu0*dt/rho), which
-  # -> 0 inside/around the body; combined with the free-surface GFM scaling
-  # that drives the Poisson operator's coefficient ratio up and the
-  # ill-conditioned solve blows up (immediately at 256^3, where the thin
-  # bell shell samples mu0 close to 0).  False uses the bounded coefficient
-  # c = dt/rho -> well conditioned.  No-slip in the body is approximate but
-  # re-imposed every step by the BDIM meta-equation.
-  bdim_mu0_projection: False
-  # The jellyfish bell DEFORMS, so the body velocity field carries a nonzero
-  # divergence (∇·u_b != 0).  Without the Maertens–Weymouth body-div RHS term
-  # the projection forces ∇·u=0 even inside the bell, fighting the contraction
-  # and creating a spurious shell response that sharpens at finer resolution
-  # (the 256^3 ~it=123 body-region run-away; 192^3 is coarse enough to survive).
-  # Subtracting (1-mu0)∇·u_b lets the body carry its own divergence.
-  bdim_body_div_correction: True
-  # With the bounded coefficient the MGCG is well conditioned, so ~20 CG
-  # cycles converge (50 was needed only for the ill-conditioned mu0 case).
-  # NOTE: a free surface forces the iterative variable-coefficient MGCG
-  # (FFT cannot impose the p=0 interface BC), which is inherently slower
-  # than the spectral FFT used for single-phase runs.
-  poisson_tol            : 1.0e-6
+  poisson_method         : "fft"
+  poisson_tol            : 1.0e-4
   jacobi_weight          : 0.7
-  poisson_max_mgcg_cycles: 20
-  poisson_precond_vcycles: 2
+  poisson_max_mgcg_cycles: 3
   poisson_max_cycles     : 20
   poisson_nsmoothing     : 5
   poisson_verbose        : False
   poisson_folder         : "lilytorch/data/"
   poisson_bc_type        : "neumann"
   poisson_warm_start     : True
-
-  # ---- Free surface (water-air interface) ----------------------------
-  # Fluid gravity (downward in z) drives the hydrostatic free surface.
-  gravity                : [0.0, 0.0, -9.81]
-  # Level-set free surface at the z=0 plane: water below (phi<0), air above
-  # (phi>0).  The jellyfish (origin z=-0.22) starts well submerged and
-  # swims up toward the surface.  GFM pressure BC p=p_atm=0 at z=0.
-  free_surface:
-    phi_init          : "lambda X, Y, Z: Z"   # interface at z = 0
-    convection_method : "vanLeer"   # match the solver's advection scheme
-    theta_min         : 0.01      # cut-face water-fraction clamp (1/theta)
-    reinit_iters      : 4
-    reinit_every      : 10
-    # BANDED velocity extension (extend_full: false).  extend_full does
-    # 2*max(grid) full-grid sweeps (O(N^4)) -> ~5 s/step at 256^3 and the
-    # bulk of the free-surface overhead.  A few-cell band is all phi
-    # advection needs (the body is far below the surface; bulk air is
-    # masked in plots and decoupled from the pressure solve).
-    extend_iters      : 8
-    extend_every      : 1
-    extend_full       : false
 
 jellyfish:
   # Initial sphere-centre placement of the analytical bell. The bell sits
@@ -187,6 +127,9 @@ body:
     - "lambda t: 0*t"
 
 output:
+  # The runner uses this as the stack-folder label passed to
+  # lilytorch.util.paths.gen_new_folder(); the actual output directory is a
+  # timestamped folder under lilytorch's shared save root.
   save_path   : "jellyfish_fluid_output"
   save_frames : True
   save_every  : 50

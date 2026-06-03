@@ -16,12 +16,19 @@ class SimConfig(BaseSimConfig):
         )
 
         # ── Hardware ──────────────────────────────────────────────────
-        self.compute_sdf    = True
-        self.convexify      = True
-        self.use_gpu        = True
-        self.use_bdim       = True
-        self.headless       = False
-        self.smagorinsky_cs = 0.2
+        self.use_gpu                       = True
+        self.use_bdim                      = True
+        self.compute_sdf                   = True
+        self.convexify                     = True
+        self.force_method                  = "eulerian"
+        self.zero_pressure_inside          = True
+        self.body_velocity_blend_eps_cells = None
+        self.bdim_mu0_projection           = False
+        self.bdim_body_div_correction      = True
+        self.poisson_method                = "multigrid"
+        self.smagorinsky_cs                = 0.
+        self.compile_adv_diff              = True
+        self.poisson_warm_start            = True
 
         # ── Animats ───────────────────────────────────────────────────
         self.animats_pars = [
@@ -30,8 +37,8 @@ class SimConfig(BaseSimConfig):
                 "sdf_name"       : "1guilla.sdf",
                 "control_type"   : "position",
                 "gains"          : [100.0, 1., 0],
-                "spawn_mode"     : SpawnMode.FREE,
-                "pose"           : [-0.07, 0, 0.0, 0, 0, 3.1],
+                "spawn_mode"     : SpawnMode.TRANSVERSE,
+                "pose"           : [-0.07, 0, 0.0, 0, 0, 3.],
                 "controller_path": "lilytorch.farms_examples._1guillasim.experiments.controller.PositionController",
                 "control_pars"   : {
                     "file_path": os.path.join(
@@ -76,7 +83,7 @@ class SimConfig(BaseSimConfig):
 
 
         # ── Physics ───────────────────────────────────────────────────
-        self.rho_body          = 1000.0
+        self.rho_body          = 800.0
         self.timestep          = 0.001
         self.convection_method = "quick"
         self.n_iterations      = 15001
@@ -97,7 +104,6 @@ class SimConfig(BaseSimConfig):
         self.poisson_max_mgcg_cycles = 10
         self.poisson_precond_vcycles = 1
         self.poisson_warm_start      = False
-        self.poisson_method          = "multigrid"
         self.poisson_smoother        = "jacobi"
         self.poisson_nsmoothing      = 5
         self.poisson_bc_type         = "neumann"
@@ -105,27 +111,32 @@ class SimConfig(BaseSimConfig):
 
         self.compile_adv_diff        = False
 
-        # # u: no-penetration on x-walls, free-slip on y/z-walls
-        # self.bc_type_u   = ["D", "D", "N", "N", "N", "N"]
-        # self.bc_values_u = [0, 0, 0, 0, 0, 0]
-        # # v: free-slip on x/z-walls, no-penetration on y-walls
-        # self.bc_type_v   = ["N", "N", "D", "D", "N", "N"]
-        # self.bc_values_v = [0, 0, 0, 0, 0, 0]
-        # # w: free-slip on x/y-walls, no-penetration on z-walls
-        # self.bc_type_w   = ["N", "N", "N", "N", "D", "D"]
-        # self.bc_values_w = [0, 0, 0, 0, 0, 0]
-
-        # ── Boundary conditions (3-D, all Neumann) ───────────────────
-        self.bc_type_u   = ["D", "D", "D", "D", "D", "D"]
+        # u: no-penetration on x-walls, free-slip on y/z-walls
+        self.bc_type_u   = ["D", "D", "N", "N", "N", "N"]
         self.bc_values_u = [0, 0, 0, 0, 0, 0]
-        self.bc_type_v   = ["D", "D", "D", "D", "D", "D"]
+        # v: free-slip on x/z-walls, no-penetration on y-walls
+        self.bc_type_v   = ["N", "N", "D", "D", "N", "N"]
         self.bc_values_v = [0, 0, 0, 0, 0, 0]
-        self.bc_type_w   = ["D", "D", "D", "D", "D", "D"]
+        # w: free-slip on x/y-walls, no-penetration on z-walls
+        self.bc_type_w   = ["N", "N", "N", "N", "D", "D"]
         self.bc_values_w = [0, 0, 0, 0, 0, 0]
+
+        # # ── Boundary conditions  ───────────────────
+        # self.bc_type_u   = ["D", "D", "D", "D", "D", "D"]
+        # self.bc_values_u = [0, 0, 0, 0, 0, 0]
+        # self.bc_type_v   = ["D", "D", "D", "D", "D", "D"]
+        # self.bc_values_v = [0, 0, 0, 0, 0, 0]
+        # self.bc_type_w   = ["D", "D", "D", "D", "D", "D"]
+        # self.bc_values_w = [0, 0, 0, 0, 0, 0]
 
         # ── Body ─────────────────────────────────────────────────────
         self.force_scaling         = 1.0
         self.interp_data_subfolder = "interp_data_3d"
+
+        # ── Visualization ───────────────────────────────────────────────
+        self.floor_color       = "#484848"
+        self.wall_alpha        = 1.
+        self.water_alpha       = 0.05
 
     # ── Extensions ────────────────────────────────────────────────────
 
@@ -149,17 +160,19 @@ class SimConfig(BaseSimConfig):
         extensions.append({
             "loader": "lilytorch.integration.particle_viewer.ParticleViewer",
             "config": {
-                "max_particles"   : 800000,
+                "max_particles"   : 1800000,
                 "seed_n_particles": 3,
-                "seed_interval"   : 1,
+                "seed_interval"   : 5,
                 "turb_diffusivity": 0.0000,
                 "sphere_size"     : 0.003,
                 "particle_color"  : "#FF00A699",
                 "trail_length"    : 0,
-                "update_every"    : None,
-                "n_z_layers"      : 1,
+                "update_every"    : 1,
+                "n_z_layers"      : 3,
+                "z_spread_fraction": 0.1,     # fraction of body z-thickness (0.9=default, <0.5=tighter)
+                "z_center"        : 0.0,     # None=body midpoint; 0.0=domain mid-plane
                 "floor_color"     : "#5B5B5B63",
-                "body_color"      : "#B5A425",
+                "body_color"      : "#D09F23",
                 # "light_color"      : [0.05, 0.12, 0.85, 1.0], # blue lamp
                 # "emissive_particles": True,                   # glow independent of light
                 "save_particles"   : True,
@@ -173,8 +186,20 @@ class SimConfig(BaseSimConfig):
             self.xmin, self.xmax,
             self.ymin, self.ymax,
             self.zmin, self.zmax,
-            overshoot=2
+            overshoot=1.5,
+            max_width=3840, max_height=2160,
         )
+
+        # Soft, reflection-free lighting for tank recordings
+        extensions.append({
+            "loader": "lilytorch.integration.light_modifier.LightModifier",
+            "config": {
+                "diffuse": [1, 1, 1],
+                "ambient": [0.3, 0.3, 0.3],
+            },
+        })
+
+
         extensions.append({
             "loader": "lilytorch.integration.streaming_camera.StreamingCameraRecording",
             "config": {

@@ -59,7 +59,9 @@ class SimConfig(BaseSimConfig):
                 "controller_path": "lilytorch.farms_examples._1guillasim.experiments.controller.PositionController",
                 "control_pars"   : {
                     "file_path": os.path.join(
-                        self.data_folder, "/data/andreaferrario/1guilla_experiments/swim/log/ms007mpt001log.csv"
+                        self.data_folder, "/data/andreaferrario/1guilla_experiments/swim/log/ms004mpt003log.csv"
+                        # self.data_folder, "/data/andreaferrario/1guilla_experiments/swim/log/ms001mpt001log.csv"
+                        # self.data_folder, "/data/andreaferrario/1guilla_experiments/swim/log/ms007mpt001log.csv"
                     ),
                 },
             },
@@ -152,24 +154,24 @@ class SimConfig(BaseSimConfig):
             },
         })
 
-        extensions.append({
-            "loader": "lilytorch.integration.flow_iso_gl_viewer.FlowIsoGLViewer",
-            "config": {
-                # "field"              : "omega_z",
-                "field"              : "omega_mag",
-                "alpha"              : 0.2,
-                "update_every"       : 1,
-                "max_vertices"       : 20 * self.Nx * self.Ny,
-                "smooth_sigma"       : 0,
-                "crop_boundary"      : 0,
-                "exclude_body"       : True,
-                "iso_value"          : 3.0,
-                "debug_force_visible": False,
-                "color_uni"          : "#00FFFF",
-                "color_pos"          : "#FF4500",
-                "color_neg"          : "#00FFFF",
-            },
-        })
+        # extensions.append({
+        #     "loader": "lilytorch.integration.flow_iso_gl_viewer.FlowIsoGLViewer",
+        #     "config": {
+        #         # "field"              : "omega_z",
+        #         "field"              : "omega_mag",
+        #         "alpha"              : 0.2,
+        #         "update_every"       : 1,
+        #         "max_vertices"       : 20 * self.Nx * self.Ny,
+        #         "smooth_sigma"       : 0,
+        #         "crop_boundary"      : 0,
+        #         "exclude_body"       : True,
+        #         "iso_value"          : 3.0,
+        #         "debug_force_visible": False,
+        #         "color_uni"          : "#00FFFF",
+        #         "color_pos"          : "#FF4500",
+        #         "color_neg"          : "#00FFFF",
+        #     },
+        # })
 
         # Top-down camera auto-fitted to the pool
         cam = top_down_camera_config(

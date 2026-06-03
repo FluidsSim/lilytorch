@@ -21,7 +21,7 @@ class SimConfig(BaseSimConfig):
         self.use_gpu              = True
         self.use_bdim             = True
         self.headless             = False
-        self.smagorinsky_cs       = 0.
+        self.smagorinsky_cs       = 0.2
         self.zero_pressure_inside = True
 
         # self.carreau = {
