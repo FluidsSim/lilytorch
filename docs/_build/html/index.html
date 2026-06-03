@@ -218,7 +218,9 @@
 <li class="toctree-l1"><a class="reference internal" href="api/solver.html"><code class="docutils literal notranslate"><span class="pre">solver</span></code> — Navier–Stokes Solver</a></li>
 <li class="toctree-l1"><a class="reference internal" href="api/solver.html#forces-hydrodynamic-force-integrators"><code class="docutils literal notranslate"><span class="pre">forces</span></code> — Hydrodynamic Force Integrators</a></li>
 <li class="toctree-l1"><a class="reference internal" href="api/solver.html#extras-sponge-les-non-newtonian-viscosity"><code class="docutils literal notranslate"><span class="pre">extras</span></code> — Sponge, LES &amp; Non-Newtonian Viscosity</a></li>
-<li class="toctree-l1"><a class="reference internal" href="api/adv_diff.html"><code class="docutils literal notranslate"><span class="pre">adv_diff</span></code> — Advection–Diffusion Solver</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api/advection.html"><code class="docutils literal notranslate"><span class="pre">advection</span></code> — Convective Schemes &amp; AdvDiffSolver</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api/diffusion.html"><code class="docutils literal notranslate"><span class="pre">diffusion</span></code> — Diffusion Operators</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api/adv_diff.html"><code class="docutils literal notranslate"><span class="pre">adv_diff</span></code> — Advection–Diffusion (legacy)</a></li>
 <li class="toctree-l1"><a class="reference internal" href="api/poisson.html"><code class="docutils literal notranslate"><span class="pre">poisson</span></code> — Pressure Solvers</a></li>
 <li class="toctree-l1"><a class="reference internal" href="api/free_surface.html"><code class="docutils literal notranslate"><span class="pre">free_surface</span></code> — Level-Set Free Surface</a></li>
 <li class="toctree-l1"><a class="reference internal" href="api/body.html"><code class="docutils literal notranslate"><span class="pre">body</span></code> — Geometry, SDF &amp; Kinematics</a></li>
@@ -422,16 +424,25 @@ variable-coefficient multigrid / MGCG.</p></li>
 <li class="toctree-l2"><a class="reference internal" href="api/solver.html#lilytorch.src.extras.apply_yield_damping"><code class="docutils literal notranslate"><span class="pre">apply_yield_damping()</span></code></a></li>
 </ul>
 </li>
-<li class="toctree-l1"><a class="reference internal" href="api/adv_diff.html"><code class="docutils literal notranslate"><span class="pre">adv_diff</span></code> — Advection–Diffusion Solver</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="api/adv_diff.html#lilytorch.src.adv_diff.median"><code class="docutils literal notranslate"><span class="pre">median()</span></code></a></li>
-<li class="toctree-l2"><a class="reference internal" href="api/adv_diff.html#lilytorch.src.adv_diff.quick"><code class="docutils literal notranslate"><span class="pre">quick()</span></code></a></li>
-<li class="toctree-l2"><a class="reference internal" href="api/adv_diff.html#lilytorch.src.adv_diff.van_leer"><code class="docutils literal notranslate"><span class="pre">van_leer()</span></code></a></li>
-<li class="toctree-l2"><a class="reference internal" href="api/adv_diff.html#lilytorch.src.adv_diff.cds"><code class="docutils literal notranslate"><span class="pre">cds()</span></code></a></li>
-<li class="toctree-l2"><a class="reference internal" href="api/adv_diff.html#lilytorch.src.adv_diff.abdquickest"><code class="docutils literal notranslate"><span class="pre">abdquickest()</span></code></a></li>
-<li class="toctree-l2"><a class="reference internal" href="api/adv_diff.html#lilytorch.src.adv_diff.cubista"><code class="docutils literal notranslate"><span class="pre">cubista()</span></code></a></li>
-<li class="toctree-l2"><a class="reference internal" href="api/adv_diff.html#lilytorch.src.adv_diff.AdvDiffSolver"><code class="docutils literal notranslate"><span class="pre">AdvDiffSolver</span></code></a></li>
+<li class="toctree-l1"><a class="reference internal" href="api/advection.html"><code class="docutils literal notranslate"><span class="pre">advection</span></code> — Convective Schemes &amp; AdvDiffSolver</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="api/advection.html#lilytorch.src.advection.median"><code class="docutils literal notranslate"><span class="pre">median()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="api/advection.html#lilytorch.src.advection.quick"><code class="docutils literal notranslate"><span class="pre">quick()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="api/advection.html#lilytorch.src.advection.van_leer"><code class="docutils literal notranslate"><span class="pre">van_leer()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="api/advection.html#lilytorch.src.advection.cds"><code class="docutils literal notranslate"><span class="pre">cds()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="api/advection.html#lilytorch.src.advection.abdquickest"><code class="docutils literal notranslate"><span class="pre">abdquickest()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="api/advection.html#lilytorch.src.advection.cubista"><code class="docutils literal notranslate"><span class="pre">cubista()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="api/advection.html#lilytorch.src.advection.advect_momentum"><code class="docutils literal notranslate"><span class="pre">advect_momentum()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="api/advection.html#lilytorch.src.advection.advect_scalar"><code class="docutils literal notranslate"><span class="pre">advect_scalar()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="api/advection.html#lilytorch.src.advection.AdvDiffSolver"><code class="docutils literal notranslate"><span class="pre">AdvDiffSolver</span></code></a></li>
 </ul>
 </li>
+<li class="toctree-l1"><a class="reference internal" href="api/diffusion.html"><code class="docutils literal notranslate"><span class="pre">diffusion</span></code> — Diffusion Operators</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="api/diffusion.html#lilytorch.src.diffusion.laplacian"><code class="docutils literal notranslate"><span class="pre">laplacian()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="api/diffusion.html#lilytorch.src.diffusion.variable_laplacian"><code class="docutils literal notranslate"><span class="pre">variable_laplacian()</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="api/diffusion.html#lilytorch.src.diffusion.diffuse"><code class="docutils literal notranslate"><span class="pre">diffuse()</span></code></a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="api/adv_diff.html"><code class="docutils literal notranslate"><span class="pre">adv_diff</span></code> — Advection–Diffusion (legacy)</a></li>
 <li class="toctree-l1"><a class="reference internal" href="api/poisson.html"><code class="docutils literal notranslate"><span class="pre">poisson</span></code> — Pressure Solvers</a><ul>
 <li class="toctree-l2"><a class="reference internal" href="api/poisson.html#module-lilytorch.src.poisson_fft">FFT-based solver</a></li>
 <li class="toctree-l2"><a class="reference internal" href="api/poisson.html#module-lilytorch.src.poisson_mult">Multigrid / MGCG solver</a></li>

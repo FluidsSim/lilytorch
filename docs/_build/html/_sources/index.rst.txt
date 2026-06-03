@@ -65,6 +65,8 @@ Key features
    :caption: API Reference
 
    api/solver
+   api/advection
+   api/diffusion
    api/adv_diff
    api/poisson
    api/free_surface

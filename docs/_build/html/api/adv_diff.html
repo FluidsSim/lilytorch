@@ -3,10 +3,10 @@
   <head><meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <meta name="color-scheme" content="light dark"><meta name="viewport" content="width=device-width, initial-scale=1" />
-<link rel="index" title="Index" href="../genindex.html"><link rel="search" title="Search" href="../search.html"><link rel="next" title="poisson — Pressure Solvers" href="poisson.html"><link rel="prev" title="solver — Navier–Stokes Solver" href="solver.html">
+<link rel="index" title="Index" href="../genindex.html"><link rel="search" title="Search" href="../search.html"><link rel="next" title="poisson — Pressure Solvers" href="poisson.html"><link rel="prev" title="diffusion — Diffusion Operators" href="diffusion.html">
 
     <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
-        <title>adv_diff — Advection–Diffusion Solver - LilyTorch Documentation</title>
+        <title>adv_diff — Advection–Diffusion (legacy) - LilyTorch Documentation</title>
       <link rel="stylesheet" type="text/css" href="../_static/pygments.css?v=d111a655" />
     <link rel="stylesheet" type="text/css" href="../_static/styles/furo.css?v=7bdb33bb" />
     <link rel="stylesheet" type="text/css" href="../_static/styles/furo-extensions.css?v=8dab3a3b" />
@@ -179,7 +179,7 @@
           <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
         </button>
       </div>
-      <label class="toc-overlay-icon toc-header-icon" for="__toc">
+      <label class="toc-overlay-icon toc-header-icon no-toc" for="__toc">
         <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
       </label>
     </div>
@@ -210,6 +210,7 @@
 <li class="toctree-l1"><a class="reference internal" href="../mathematical_formulation.html">Mathematical Formulation</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../numerical_schemes.html">Numerical Schemes</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../immersed_boundary.html">Immersed Boundary Method — BDIM2</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../free_surface.html">Free Surface — Level-Set Fluid–Air</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../strong_coupling.html">Strong (implicit) FSI coupling</a></li>
 </ul>
 <p class="caption" role="heading"><span class="caption-text">API Reference</span></p>
@@ -217,8 +218,11 @@
 <li class="toctree-l1"><a class="reference internal" href="solver.html"><code class="docutils literal notranslate"><span class="pre">solver</span></code> — Navier–Stokes Solver</a></li>
 <li class="toctree-l1"><a class="reference internal" href="solver.html#forces-hydrodynamic-force-integrators"><code class="docutils literal notranslate"><span class="pre">forces</span></code> — Hydrodynamic Force Integrators</a></li>
 <li class="toctree-l1"><a class="reference internal" href="solver.html#extras-sponge-les-non-newtonian-viscosity"><code class="docutils literal notranslate"><span class="pre">extras</span></code> — Sponge, LES &amp; Non-Newtonian Viscosity</a></li>
-<li class="toctree-l1 current current-page"><a class="current reference internal" href="#"><code class="docutils literal notranslate"><span class="pre">adv_diff</span></code> — Advection–Diffusion Solver</a></li>
+<li class="toctree-l1"><a class="reference internal" href="advection.html"><code class="docutils literal notranslate"><span class="pre">advection</span></code> — Convective Schemes &amp; AdvDiffSolver</a></li>
+<li class="toctree-l1"><a class="reference internal" href="diffusion.html"><code class="docutils literal notranslate"><span class="pre">diffusion</span></code> — Diffusion Operators</a></li>
+<li class="toctree-l1 current current-page"><a class="current reference internal" href="#"><code class="docutils literal notranslate"><span class="pre">adv_diff</span></code> — Advection–Diffusion (legacy)</a></li>
 <li class="toctree-l1"><a class="reference internal" href="poisson.html"><code class="docutils literal notranslate"><span class="pre">poisson</span></code> — Pressure Solvers</a></li>
+<li class="toctree-l1"><a class="reference internal" href="free_surface.html"><code class="docutils literal notranslate"><span class="pre">free_surface</span></code> — Level-Set Free Surface</a></li>
 <li class="toctree-l1"><a class="reference internal" href="body.html"><code class="docutils literal notranslate"><span class="pre">body</span></code> — Geometry, SDF &amp; Kinematics</a></li>
 <li class="toctree-l1"><a class="reference internal" href="operations.html"><code class="docutils literal notranslate"><span class="pre">operations</span></code> — Discrete Differential Operators</a></li>
 <li class="toctree-l1"><a class="reference internal" href="plotting.html"><code class="docutils literal notranslate"><span class="pre">plotting</span></code> — Visualisation Helpers</a></li>
@@ -257,123 +261,23 @@
               <svg class="theme-icon-when-light"><use href="#svg-sun"></use></svg>
             </button>
           </div>
-          <label class="toc-overlay-icon toc-content-icon" for="__toc">
+          <label class="toc-overlay-icon toc-content-icon no-toc" for="__toc">
             <span class="icon"><svg><use href="#svg-toc"></use></svg></span>
           </label>
         </div>
         <article role="main" id="furo-main-content">
-          <section id="module-lilytorch.src.adv_diff">
-<span id="adv-diff-advectiondiffusion-solver"></span><span id="api-adv-diff"></span><h1><code class="docutils literal notranslate"><span class="pre">adv_diff</span></code> — Advection–Diffusion Solver<a class="headerlink" href="#module-lilytorch.src.adv_diff" title="Link to this heading">¶</a></h1>
-<p>Dimension-agnostic advection-diffusion solver for MAC staggered grids.</p>
-<p>Supports pluggable convective schemes (QUICK, ADBQUICKEST, CUBISTA, van Leer,
-CDS) and a semi-Lagrangian (Stam 1999) method.  Works in 2-D and 3-D with a
-single code path – inspired by WaterLily.jl.</p>
-<dl class="py function">
-<dt class="sig sig-object py" id="lilytorch.src.adv_diff.median">
-<span class="sig-prename descclassname"><span class="pre">lilytorch.src.adv_diff.</span></span><span class="sig-name descname"><span class="pre">median</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">a</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">b</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">c</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lilytorch/src/adv_diff.html#median"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lilytorch.src.adv_diff.median" title="Link to this definition">¶</a></dt>
-<dd><p>Element-wise median of three tensors.</p>
-</dd></dl>
-
-<dl class="py function">
-<dt class="sig sig-object py" id="lilytorch.src.adv_diff.quick">
-<span class="sig-prename descclassname"><span class="pre">lilytorch.src.adv_diff.</span></span><span class="sig-name descname"><span class="pre">quick</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">u</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">c</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">d</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lilytorch/src/adv_diff.html#quick"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lilytorch.src.adv_diff.quick" title="Link to this definition">¶</a></dt>
-<dd><p>QUICK scheme – 3rd-order.</p>
-<p>Uses in-place operations to keep simultaneous intermediate tensors at 3
-(vs. the 5-6 created by the original nested <code class="docutils literal notranslate"><span class="pre">median</span></code> calls), cutting
-the peak transient allocation roughly in half at large grid sizes.</p>
-</dd></dl>
-
-<dl class="py function">
-<dt class="sig sig-object py" id="lilytorch.src.adv_diff.van_leer">
-<span class="sig-prename descclassname"><span class="pre">lilytorch.src.adv_diff.</span></span><span class="sig-name descname"><span class="pre">van_leer</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">u</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">c</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">d</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lilytorch/src/adv_diff.html#van_leer"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lilytorch.src.adv_diff.van_leer" title="Link to this definition">¶</a></dt>
-<dd><p>Van Leer flux limiter – 2nd-order TVD.</p>
-</dd></dl>
-
-<dl class="py function">
-<dt class="sig sig-object py" id="lilytorch.src.adv_diff.cds">
-<span class="sig-prename descclassname"><span class="pre">lilytorch.src.adv_diff.</span></span><span class="sig-name descname"><span class="pre">cds</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">u</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">c</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">d</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lilytorch/src/adv_diff.html#cds"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lilytorch.src.adv_diff.cds" title="Link to this definition">¶</a></dt>
-<dd><p>Central difference scheme – 2nd-order, not TVD.</p>
-</dd></dl>
-
-<dl class="py function">
-<dt class="sig sig-object py" id="lilytorch.src.adv_diff.abdquickest">
-<span class="sig-prename descclassname"><span class="pre">lilytorch.src.adv_diff.</span></span><span class="sig-name descname"><span class="pre">abdquickest</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">u</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">c</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">d</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">C</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">0.1</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lilytorch/src/adv_diff.html#abdquickest"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lilytorch.src.adv_diff.abdquickest" title="Link to this definition">¶</a></dt>
-<dd><p>ADBQUICKEST scheme – 3rd-order TVD, Courant-number dependent.</p>
-<p>Refactored to keep peak simultaneous tensor count at 4 (was 5) by
-replacing <code class="docutils literal notranslate"><span class="pre">torch.full_like(rf,</span> <span class="pre">C_upper)</span></code> with a scalar clamp and
-sequencing A / B so only one extra tensor beyond {denom, rf, psi} is
-live at the peak moment.  Saves ~1 full-grid tensor (~0.5 GiB at 512³).</p>
-</dd></dl>
-
-<dl class="py function">
-<dt class="sig sig-object py" id="lilytorch.src.adv_diff.cubista">
-<span class="sig-prename descclassname"><span class="pre">lilytorch.src.adv_diff.</span></span><span class="sig-name descname"><span class="pre">cubista</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">u</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">c</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">d</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lilytorch/src/adv_diff.html#cubista"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lilytorch.src.adv_diff.cubista" title="Link to this definition">¶</a></dt>
-<dd><p>CUBISTA scheme – 2nd-order TVD (Alves, Oliveira &amp; Pinho, 2003).</p>
-<p>Same tensor-sequencing improvement as <code class="docutils literal notranslate"><span class="pre">abdquickest</span></code>: scalar clamp
-replaces <code class="docutils literal notranslate"><span class="pre">torch.full_like(rf,</span> <span class="pre">1.5)</span></code> to avoid a 5th simultaneous
-tensor at the peak moment.</p>
-</dd></dl>
-
-<dl class="py class">
-<dt class="sig sig-object py" id="lilytorch.src.adv_diff.AdvDiffSolver">
-<span class="property"><span class="k"><span class="pre">class</span></span><span class="w"> </span></span><span class="sig-prename descclassname"><span class="pre">lilytorch.src.adv_diff.</span></span><span class="sig-name descname"><span class="pre">AdvDiffSolver</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">device</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dt</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">x</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">y</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">nu</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">BC_type_u</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">('D',</span> <span class="pre">'D',</span> <span class="pre">'D',</span> <span class="pre">'D')</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">BC_values_u</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">(0,</span> <span class="pre">0,</span> <span class="pre">0,</span> <span class="pre">0)</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">BC_type_v</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">('D',</span> <span class="pre">'D',</span> <span class="pre">'D',</span> <span class="pre">'D')</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">BC_values_v</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">(0,</span> <span class="pre">0,</span> <span class="pre">0,</span> <span class="pre">0)</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">method</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'quick'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">z</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">BC_type_w</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">BC_values_w</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lilytorch/src/adv_diff.html#AdvDiffSolver"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lilytorch.src.adv_diff.AdvDiffSolver" title="Link to this definition">¶</a></dt>
-<dd><p>Bases: <a class="reference external" href="https://docs.python.org/3/library/functions.html#object" title="(in Python v3.14)"><code class="xref py py-class docutils literal notranslate"><span class="pre">object</span></code></a></p>
-<p>Dimension-agnostic advection-diffusion solver on a MAC staggered grid.</p>
-<p>Works identically in 2-D <code class="docutils literal notranslate"><span class="pre">(x,</span> <span class="pre">y)</span></code> and 3-D <code class="docutils literal notranslate"><span class="pre">(x,</span> <span class="pre">y,</span> <span class="pre">z)</span></code> by looping
-over spatial dimensions rather than duplicating code per axis.</p>
-<section id="supported-methods">
-<h2>Supported methods<a class="headerlink" href="#supported-methods" title="Link to this heading">¶</a></h2>
-<ul class="simple">
-<li><p><code class="docutils literal notranslate"><span class="pre">'quick'</span></code>                              – QUICK (default)</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">'abdquickest'</span></code>                        – ADBQUICKEST TVD</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">'cubista'</span></code>                            – CUBISTA TVD</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">'vanLeer'</span></code>                            – van Leer TVD</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">'cds'</span></code>                                – central difference</p></li>
-<li><p><code class="docutils literal notranslate"><span class="pre">'semi-lagrangian'</span></code> / <code class="docutils literal notranslate"><span class="pre">'implicit'</span></code>   – Stam 1999</p></li>
-</ul>
-<p>For explicit schemes the time integration is forward-Euler:</p>
-<blockquote>
-<div><p>u^{n+1} = u^n + dt * [-div(vel (x) u) + nu * laplacian(u)]</p>
-</div></blockquote>
-<dl class="py method">
-<dt class="sig sig-object py" id="lilytorch.src.adv_diff.AdvDiffSolver.__init__">
-<span class="sig-name descname"><span class="pre">__init__</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="n"><span class="pre">device</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">dt</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">x</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">y</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">nu</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">BC_type_u</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">('D',</span> <span class="pre">'D',</span> <span class="pre">'D',</span> <span class="pre">'D')</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">BC_values_u</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">(0,</span> <span class="pre">0,</span> <span class="pre">0,</span> <span class="pre">0)</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">BC_type_v</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">('D',</span> <span class="pre">'D',</span> <span class="pre">'D',</span> <span class="pre">'D')</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">BC_values_v</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">(0,</span> <span class="pre">0,</span> <span class="pre">0,</span> <span class="pre">0)</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">method</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">'quick'</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">z</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">BC_type_w</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em>, <em class="sig-param"><span class="n"><span class="pre">BC_values_w</span></span><span class="o"><span class="pre">=</span></span><span class="default_value"><span class="pre">None</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lilytorch/src/adv_diff.html#AdvDiffSolver.__init__"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lilytorch.src.adv_diff.AdvDiffSolver.__init__" title="Link to this definition">¶</a></dt>
-<dd><dl class="field-list simple">
-<dt class="field-odd">Parameters<span class="colon">:</span></dt>
-<dd class="field-odd"><ul class="simple">
-<li><p><strong>device</strong> (<a class="reference external" href="https://docs.pytorch.org/docs/stable/tensor_attributes.html#torch.device" title="(in PyTorch v2.12)"><em>torch.device</em></a>)</p></li>
-<li><p><strong>dt</strong> (<em>float -- time step</em>)</p></li>
-<li><p><strong>x</strong> (<em>1-D tensors -- cell-centre coordinates</em><em> (</em><em>incl. ghost cells</em><em>)</em>)</p></li>
-<li><p><strong>y</strong> (<em>1-D tensors -- cell-centre coordinates</em><em> (</em><em>incl. ghost cells</em><em>)</em>)</p></li>
-<li><p><strong>nu</strong> (<em>float -- kinematic viscosity</em>)</p></li>
-<li><p><strong>method</strong> (<em>str -- convection scheme name</em>)</p></li>
-<li><p><strong>z</strong> (<em>1-D tensor</em><em> or </em><em>None -- cell-centre z-coordinates</em><em> (</em><em>3-D mode</em><em>)</em>)</p></li>
-<li><p><strong>BC_type_w</strong> (<em>boundary conditions for w</em><em> (</em><em>3-D only</em><em>)</em>)</p></li>
-<li><p><strong>BC_values_w</strong> (<em>boundary conditions for w</em><em> (</em><em>3-D only</em><em>)</em>)</p></li>
-</ul>
-</dd>
-</dl>
-</dd></dl>
-
-<dl class="py method">
-<dt class="sig sig-object py" id="lilytorch.src.adv_diff.AdvDiffSolver.set_BCs">
-<span class="sig-name descname"><span class="pre">set_BCs</span></span><span class="sig-paren">(</span><em class="sig-param"><span class="o"><span class="pre">*</span></span><span class="n"><span class="pre">vel</span></span></em><span class="sig-paren">)</span><a class="reference internal" href="../_modules/lilytorch/src/adv_diff.html#AdvDiffSolver.set_BCs"><span class="viewcode-link"><span class="pre">[source]</span></span></a><a class="headerlink" href="#lilytorch.src.adv_diff.AdvDiffSolver.set_BCs" title="Link to this definition">¶</a></dt>
-<dd><p>Apply Dirichlet / Neumann BCs on the ghost layer.</p>
-<p>Face ordering per component:</p>
-<div class="highlight-default notranslate"><div class="highlight"><pre><span></span><span class="p">(</span><span class="n">dim0_lo</span><span class="p">,</span> <span class="n">dim0_hi</span><span class="p">,</span> <span class="n">dim1_lo</span><span class="p">,</span> <span class="n">dim1_hi</span><span class="p">,</span> <span class="p">[</span><span class="n">dim2_lo</span><span class="p">,</span> <span class="n">dim2_hi</span><span class="p">])</span>
-</pre></div>
+          <section id="adv-diff-advectiondiffusion-legacy">
+<span id="api-adv-diff"></span><h1><code class="docutils literal notranslate"><span class="pre">adv_diff</span></code> — Advection–Diffusion (legacy)<a class="headerlink" href="#adv-diff-advectiondiffusion-legacy" title="Link to this heading">¶</a></h1>
+<div class="admonition warning">
+<p class="admonition-title">Warning</p>
+<p><code class="docutils literal notranslate"><span class="pre">adv_diff.py</span></code> is <strong>legacy and no longer used</strong> by the live code path.
+It was split into <a class="reference internal" href="advection.html#module-lilytorch.src.advection" title="lilytorch.src.advection"><code class="xref py py-mod docutils literal notranslate"><span class="pre">lilytorch.src.advection</span></code></a> (convective schemes,
+flux, <code class="docutils literal notranslate"><span class="pre">AdvDiffSolver</span></code>) and <a class="reference internal" href="diffusion.html#module-lilytorch.src.diffusion" title="lilytorch.src.diffusion"><code class="xref py py-mod docutils literal notranslate"><span class="pre">lilytorch.src.diffusion</span></code></a> (diffusion
+operators). The file is kept on disk for reference only — do not import,
+edit, or extend it; add new advection/diffusion functionality to the
+split modules instead.</p>
 </div>
-<p>i.e. (west, east, south, north, [bottom, top]) in 3-D.</p>
-<p>With all-CUDA, contiguous, same-floating-dtype velocity tensors
-and a registered fused descriptor pack, dispatches to the
-<code class="docutils literal notranslate"><span class="pre">apply_bcs_2d</span></code> / <code class="docutils literal notranslate"><span class="pre">apply_bcs_3d</span></code> CUDA op (one kernel launch
-per BC op instead of many small slice copies).  Otherwise falls
-back to the precomputed Python loop.</p>
-</dd></dl>
-
-</section>
-</dd></dl>
-
+<p>See <a class="reference internal" href="advection.html"><span class="doc">advection — Convective Schemes &amp; AdvDiffSolver</span></a> and <a class="reference internal" href="diffusion.html"><span class="doc">diffusion — Diffusion Operators</span></a>.</p>
 </section>
 
         </article>
@@ -390,14 +294,14 @@ back to the precomputed Python loop.</p>
               </div>
               <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
             </a>
-          <a class="prev-page" href="solver.html">
+          <a class="prev-page" href="diffusion.html">
               <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
               <div class="page-info">
                 <div class="context">
                   <span>Previous</span>
                 </div>
                 
-                <div class="title"><code class="docutils literal notranslate"><span class="pre">solver</span></code> — Navier–Stokes Solver</div>
+                <div class="title"><code class="docutils literal notranslate"><span class="pre">diffusion</span></code> — Diffusion Operators</div>
                 
               </div>
             </a>
@@ -419,37 +323,8 @@ back to the precomputed Python loop.</p>
         
       </footer>
     </div>
-    <aside class="toc-drawer">
+    <aside class="toc-drawer no-toc">
       
-      
-      <div class="toc-sticky toc-scroll">
-        <div class="toc-title-container">
-          <span class="toc-title">
-            On this page
-          </span>
-        </div>
-        <div class="toc-tree-container">
-          <div class="toc-tree">
-            <ul>
-<li><a class="reference internal" href="#"><code class="docutils literal notranslate"><span class="pre">adv_diff</span></code> — Advection–Diffusion Solver</a><ul>
-<li><a class="reference internal" href="#lilytorch.src.adv_diff.median"><code class="docutils literal notranslate"><span class="pre">median()</span></code></a></li>
-<li><a class="reference internal" href="#lilytorch.src.adv_diff.quick"><code class="docutils literal notranslate"><span class="pre">quick()</span></code></a></li>
-<li><a class="reference internal" href="#lilytorch.src.adv_diff.van_leer"><code class="docutils literal notranslate"><span class="pre">van_leer()</span></code></a></li>
-<li><a class="reference internal" href="#lilytorch.src.adv_diff.cds"><code class="docutils literal notranslate"><span class="pre">cds()</span></code></a></li>
-<li><a class="reference internal" href="#lilytorch.src.adv_diff.abdquickest"><code class="docutils literal notranslate"><span class="pre">abdquickest()</span></code></a></li>
-<li><a class="reference internal" href="#lilytorch.src.adv_diff.cubista"><code class="docutils literal notranslate"><span class="pre">cubista()</span></code></a></li>
-<li><a class="reference internal" href="#lilytorch.src.adv_diff.AdvDiffSolver"><code class="docutils literal notranslate"><span class="pre">AdvDiffSolver</span></code></a><ul>
-<li><a class="reference internal" href="#lilytorch.src.adv_diff.AdvDiffSolver.__init__"><code class="docutils literal notranslate"><span class="pre">AdvDiffSolver.__init__()</span></code></a></li>
-<li><a class="reference internal" href="#lilytorch.src.adv_diff.AdvDiffSolver.set_BCs"><code class="docutils literal notranslate"><span class="pre">AdvDiffSolver.set_BCs()</span></code></a></li>
-</ul>
-</li>
-</ul>
-</li>
-</ul>
-
-          </div>
-        </div>
-      </div>
       
       
     </aside>

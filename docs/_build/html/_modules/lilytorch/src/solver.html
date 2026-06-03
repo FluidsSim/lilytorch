@@ -209,6 +209,7 @@
 <li class="toctree-l1"><a class="reference internal" href="../../../mathematical_formulation.html">Mathematical Formulation</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../numerical_schemes.html">Numerical Schemes</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../immersed_boundary.html">Immersed Boundary Method — BDIM2</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../free_surface.html">Free Surface — Level-Set Fluid–Air</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../strong_coupling.html">Strong (implicit) FSI coupling</a></li>
 </ul>
 <p class="caption" role="heading"><span class="caption-text">API Reference</span></p>
@@ -216,8 +217,11 @@
 <li class="toctree-l1"><a class="reference internal" href="../../../api/solver.html"><code class="docutils literal notranslate"><span class="pre">solver</span></code> — Navier–Stokes Solver</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../api/solver.html#forces-hydrodynamic-force-integrators"><code class="docutils literal notranslate"><span class="pre">forces</span></code> — Hydrodynamic Force Integrators</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../api/solver.html#extras-sponge-les-non-newtonian-viscosity"><code class="docutils literal notranslate"><span class="pre">extras</span></code> — Sponge, LES &amp; Non-Newtonian Viscosity</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../../../api/adv_diff.html"><code class="docutils literal notranslate"><span class="pre">adv_diff</span></code> — Advection–Diffusion Solver</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../api/advection.html"><code class="docutils literal notranslate"><span class="pre">advection</span></code> — Convective Schemes &amp; AdvDiffSolver</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../api/diffusion.html"><code class="docutils literal notranslate"><span class="pre">diffusion</span></code> — Diffusion Operators</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../api/adv_diff.html"><code class="docutils literal notranslate"><span class="pre">adv_diff</span></code> — Advection–Diffusion (legacy)</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../api/poisson.html"><code class="docutils literal notranslate"><span class="pre">poisson</span></code> — Pressure Solvers</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../api/free_surface.html"><code class="docutils literal notranslate"><span class="pre">free_surface</span></code> — Level-Set Free Surface</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../api/body.html"><code class="docutils literal notranslate"><span class="pre">body</span></code> — Geometry, SDF &amp; Kinematics</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../api/operations.html"><code class="docutils literal notranslate"><span class="pre">operations</span></code> — Discrete Differential Operators</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../api/plotting.html"><code class="docutils literal notranslate"><span class="pre">plotting</span></code> — Visualisation Helpers</a></li>
@@ -276,7 +280,7 @@
     <span class="n">bdim_vardens_2d</span><span class="p">,</span>
     <span class="n">bdim_vardens_sigma_2d</span><span class="p">,</span>
 <span class="p">)</span>
-<span class="kn">from</span><span class="w"> </span><span class="nn">lilytorch.src.adv_diff</span><span class="w"> </span><span class="kn">import</span> <span class="n">AdvDiffSolver</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">lilytorch.src.advection</span><span class="w"> </span><span class="kn">import</span> <span class="n">AdvDiffSolver</span><span class="p">,</span> <span class="n">SCHEMES</span> <span class="k">as</span> <span class="n">_ADV_SCHEMES</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">lilytorch.src.body</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span><span class="n">body_from_yaml</span><span class="p">,</span>
                                 <span class="n">_mu_normals_batched</span><span class="p">)</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">lilytorch.src.free_surface</span><span class="w"> </span><span class="kn">import</span> <span class="n">FreeSurface</span>
@@ -733,10 +737,11 @@
         <span class="bp">self</span><span class="o">.</span><span class="n">terminate</span> <span class="o">=</span> <span class="kc">False</span>   <span class="c1"># flag for early termination (e.g. from NaN detection)</span>
 
         <span class="c1"># ============= convection solver =============</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">convection_method</span> <span class="o">=</span> <span class="n">solver</span><span class="p">[</span><span class="s2">&quot;convection_method&quot;</span><span class="p">]</span>
         <span class="n">adv_diff_kwargs</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">(</span>
             <span class="n">BC_type_u</span><span class="o">=</span><span class="n">bcs</span><span class="p">[</span><span class="s2">&quot;BC_type_u&quot;</span><span class="p">],</span> <span class="n">BC_values_u</span><span class="o">=</span><span class="n">bcs</span><span class="p">[</span><span class="s2">&quot;BC_values_u&quot;</span><span class="p">],</span>
             <span class="n">BC_type_v</span><span class="o">=</span><span class="n">bcs</span><span class="p">[</span><span class="s2">&quot;BC_type_v&quot;</span><span class="p">],</span> <span class="n">BC_values_v</span><span class="o">=</span><span class="n">bcs</span><span class="p">[</span><span class="s2">&quot;BC_values_v&quot;</span><span class="p">],</span>
-            <span class="n">method</span><span class="o">=</span><span class="n">solver</span><span class="p">[</span><span class="s2">&quot;convection_method&quot;</span><span class="p">],</span>
+            <span class="n">method</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">convection_method</span><span class="p">,</span>
         <span class="p">)</span>
         <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">ndim</span> <span class="o">==</span> <span class="mi">3</span><span class="p">:</span>
             <span class="n">adv_diff_kwargs</span><span class="o">.</span><span class="n">update</span><span class="p">(</span>
@@ -1149,6 +1154,7 @@
         <span class="bp">self</span><span class="o">.</span><span class="n">free_surface</span> <span class="o">=</span> <span class="kc">None</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_fs_reinit_every</span> <span class="o">=</span> <span class="mi">5</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_fs_extend_every</span> <span class="o">=</span> <span class="mi">1</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_fs_extend_full</span> <span class="o">=</span> <span class="kc">True</span>
         <span class="k">if</span> <span class="n">fs_cfg</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
             <span class="k">return</span>
         <span class="n">phi_src</span> <span class="o">=</span> <span class="n">fs_cfg</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;phi_init&quot;</span><span class="p">)</span>
@@ -1173,6 +1179,10 @@
             <span class="n">band_cells</span>  <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">fs_cfg</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;band_cells&quot;</span><span class="p">,</span> <span class="mi">4</span><span class="p">)),</span>
             <span class="n">reinit_iters</span><span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">fs_cfg</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;reinit_iters&quot;</span><span class="p">,</span> <span class="mi">4</span><span class="p">)),</span>
             <span class="n">extend_iters</span><span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">fs_cfg</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;extend_iters&quot;</span><span class="p">,</span> <span class="mi">4</span><span class="p">)),</span>
+            <span class="n">convection_method</span> <span class="o">=</span> <span class="n">fs_cfg</span><span class="o">.</span><span class="n">get</span><span class="p">(</span>
+                <span class="s2">&quot;convection_method&quot;</span><span class="p">,</span>
+                <span class="bp">self</span><span class="o">.</span><span class="n">convection_method</span>
+                <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">convection_method</span> <span class="ow">in</span> <span class="n">_ADV_SCHEMES</span> <span class="k">else</span> <span class="s2">&quot;quick&quot;</span><span class="p">),</span>
             <span class="n">device</span>      <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">device</span><span class="p">,</span>
             <span class="n">dtype</span>       <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">dtype</span><span class="p">,</span>
         <span class="p">)</span>
@@ -1186,6 +1196,11 @@
             <span class="p">)</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_fs_reinit_every</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">fs_cfg</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;reinit_every&quot;</span><span class="p">,</span> <span class="mi">5</span><span class="p">))</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_fs_extend_every</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">fs_cfg</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;extend_every&quot;</span><span class="p">,</span> <span class="mi">1</span><span class="p">))</span>
+        <span class="c1"># Extend the water velocity into the WHOLE air region (not just a</span>
+        <span class="c1"># band) so the decoupled bulk air does not accumulate spurious,</span>
+        <span class="c1"># undamped vorticity from the predictor.  Cost scales with grid</span>
+        <span class="c1"># size; set False to restrict to the ``extend_iters`` band.</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_fs_extend_full</span> <span class="o">=</span> <span class="nb">bool</span><span class="p">(</span><span class="n">fs_cfg</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;extend_full&quot;</span><span class="p">,</span> <span class="kc">True</span><span class="p">))</span>
         <span class="nb">print</span><span class="p">(</span>
             <span class="sa">f</span><span class="s2">&quot;Free-surface enabled: theta_min=</span><span class="si">{</span><span class="n">kwargs</span><span class="p">[</span><span class="s1">&#39;theta_min&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2">, &quot;</span>
             <span class="sa">f</span><span class="s2">&quot;reinit every </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">_fs_reinit_every</span><span class="si">}</span><span class="s2"> steps &quot;</span>
@@ -1304,10 +1319,11 @@
             <span class="n">fs</span><span class="o">.</span><span class="n">reinitialize</span><span class="p">()</span>
 
         <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_fs_extend_every</span> <span class="o">&gt;</span> <span class="mi">0</span> <span class="ow">and</span> <span class="p">(</span><span class="n">iteration</span> <span class="o">%</span> <span class="bp">self</span><span class="o">.</span><span class="n">_fs_extend_every</span> <span class="o">==</span> <span class="mi">0</span><span class="p">):</span>
+            <span class="n">full</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_fs_extend_full</span>
             <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">ndim</span> <span class="o">==</span> <span class="mi">2</span><span class="p">:</span>
-                <span class="n">fs</span><span class="o">.</span><span class="n">extend_velocity</span><span class="p">(</span><span class="n">u</span><span class="p">,</span> <span class="n">v</span><span class="p">)</span>
+                <span class="n">fs</span><span class="o">.</span><span class="n">extend_velocity</span><span class="p">(</span><span class="n">u</span><span class="p">,</span> <span class="n">v</span><span class="p">,</span> <span class="n">full</span><span class="o">=</span><span class="n">full</span><span class="p">)</span>
             <span class="k">else</span><span class="p">:</span>
-                <span class="n">fs</span><span class="o">.</span><span class="n">extend_velocity</span><span class="p">(</span><span class="n">u</span><span class="p">,</span> <span class="n">v</span><span class="p">,</span> <span class="n">w_vel</span><span class="p">)</span>
+                <span class="n">fs</span><span class="o">.</span><span class="n">extend_velocity</span><span class="p">(</span><span class="n">u</span><span class="p">,</span> <span class="n">v</span><span class="p">,</span> <span class="n">w_vel</span><span class="p">,</span> <span class="n">full</span><span class="o">=</span><span class="n">full</span><span class="p">)</span>
 
 <div class="viewcode-block" id="FluidSolver.inside">
 <a class="viewcode-back" href="../../../api/solver.html#lilytorch.src.solver.FluidSolver.inside">[docs]</a>
@@ -1680,18 +1696,19 @@
                     <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;[MEM_DBG] </span><span class="si">{</span><span class="s1">&#39;project:after inline projection correction&#39;</span><span class="si">:</span><span class="s2">55s</span><span class="si">}</span><span class="s2">&quot;</span>
                           <span class="sa">f</span><span class="s2">&quot;  cur=</span><span class="si">{</span><span class="n">_gb</span><span class="si">:</span><span class="s2">.3f</span><span class="si">}</span><span class="s2"> GiB  peak=</span><span class="si">{</span><span class="n">_mx</span><span class="si">:</span><span class="s2">.3f</span><span class="si">}</span><span class="s2"> GiB&quot;</span><span class="p">,</span> <span class="n">flush</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
 
-        <span class="c1"># Free-surface post-projection: restore the Dirichlet ``p == 0``</span>
-        <span class="c1"># gauge in air cells.  The multigrid solver subtracts the field</span>
-        <span class="c1"># mean at the end of every solve to remove the constant null</span>
-        <span class="c1"># space (correct for purely Neumann boundaries); when a GFM</span>
-        <span class="c1"># Dirichlet BC is active that mean-shift breaks the gauge.  We</span>
-        <span class="c1"># undo it here by shifting the whole field by the post-solve</span>
-        <span class="c1"># air-cell mean (which, in absence of the shift, should be 0).</span>
+        <span class="c1"># Free-surface post-projection: anchor the pressure datum.</span>
+        <span class="c1"># The ghost-fluid solve fixes the pressure *gradient* but leaves</span>
+        <span class="c1"># the additive constant (DC null-space mode) only weakly pinned —</span>
+        <span class="c1"># air cells are decoupled and couple to water only through thin cut</span>
+        <span class="c1"># faces, so the constant is unconstrained and even drifts with more</span>
+        <span class="c1"># V-cycles.  Anchoring on the air-cell mean does nothing (air is</span>
+        <span class="c1"># already pinned to 0).  Instead recover the datum from the physical</span>
+        <span class="c1"># condition p = p_atm = 0 at the interface (extrapolated from the</span>
+        <span class="c1"># water side; see FreeSurface.interface_gauge_offset), then zero the</span>
+        <span class="c1"># air cells.</span>
         <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">free_surface</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
-            <span class="n">air</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">free_surface</span><span class="o">.</span><span class="n">air_mask_cc</span>
-            <span class="k">if</span> <span class="n">air</span><span class="o">.</span><span class="n">any</span><span class="p">():</span>
-                <span class="n">offset</span> <span class="o">=</span> <span class="n">p</span><span class="p">[</span><span class="n">air</span><span class="p">]</span><span class="o">.</span><span class="n">mean</span><span class="p">()</span>
-                <span class="n">p</span> <span class="o">=</span> <span class="n">p</span> <span class="o">-</span> <span class="n">offset</span>
+            <span class="n">offset</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">free_surface</span><span class="o">.</span><span class="n">interface_gauge_offset</span><span class="p">(</span><span class="n">p</span><span class="p">)</span>
+            <span class="n">p</span> <span class="o">=</span> <span class="n">p</span> <span class="o">-</span> <span class="n">offset</span>
             <span class="bp">self</span><span class="o">.</span><span class="n">free_surface</span><span class="o">.</span><span class="n">apply_pressure_mask</span><span class="p">(</span><span class="n">p</span><span class="p">)</span>
 
         <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">ndim</span> <span class="o">==</span> <span class="mi">2</span><span class="p">:</span>

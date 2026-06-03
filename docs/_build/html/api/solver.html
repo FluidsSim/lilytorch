@@ -3,7 +3,7 @@
   <head><meta charset="utf-8">
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <meta name="color-scheme" content="light dark"><meta name="viewport" content="width=device-width, initial-scale=1" />
-<link rel="index" title="Index" href="../genindex.html"><link rel="search" title="Search" href="../search.html"><link rel="next" title="adv_diff — Advection–Diffusion Solver" href="adv_diff.html"><link rel="prev" title="Strong (implicit) FSI coupling" href="../strong_coupling.html">
+<link rel="index" title="Index" href="../genindex.html"><link rel="search" title="Search" href="../search.html"><link rel="next" title="advection — Convective Schemes &amp; AdvDiffSolver" href="advection.html"><link rel="prev" title="Strong (implicit) FSI coupling" href="../strong_coupling.html">
 
     <!-- Generated with Sphinx 9.1.0 and Furo 2025.12.19 -->
         <title>solver — Navier–Stokes Solver - LilyTorch Documentation</title>
@@ -210,6 +210,7 @@
 <li class="toctree-l1"><a class="reference internal" href="../mathematical_formulation.html">Mathematical Formulation</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../numerical_schemes.html">Numerical Schemes</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../immersed_boundary.html">Immersed Boundary Method — BDIM2</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../free_surface.html">Free Surface — Level-Set Fluid–Air</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../strong_coupling.html">Strong (implicit) FSI coupling</a></li>
 </ul>
 <p class="caption" role="heading"><span class="caption-text">API Reference</span></p>
@@ -217,8 +218,11 @@
 <li class="toctree-l1 current current-page"><a class="current reference internal" href="#"><code class="docutils literal notranslate"><span class="pre">solver</span></code> — Navier–Stokes Solver</a></li>
 <li class="toctree-l1"><a class="reference internal" href="#forces-hydrodynamic-force-integrators"><code class="docutils literal notranslate"><span class="pre">forces</span></code> — Hydrodynamic Force Integrators</a></li>
 <li class="toctree-l1"><a class="reference internal" href="#extras-sponge-les-non-newtonian-viscosity"><code class="docutils literal notranslate"><span class="pre">extras</span></code> — Sponge, LES &amp; Non-Newtonian Viscosity</a></li>
-<li class="toctree-l1"><a class="reference internal" href="adv_diff.html"><code class="docutils literal notranslate"><span class="pre">adv_diff</span></code> — Advection–Diffusion Solver</a></li>
+<li class="toctree-l1"><a class="reference internal" href="advection.html"><code class="docutils literal notranslate"><span class="pre">advection</span></code> — Convective Schemes &amp; AdvDiffSolver</a></li>
+<li class="toctree-l1"><a class="reference internal" href="diffusion.html"><code class="docutils literal notranslate"><span class="pre">diffusion</span></code> — Diffusion Operators</a></li>
+<li class="toctree-l1"><a class="reference internal" href="adv_diff.html"><code class="docutils literal notranslate"><span class="pre">adv_diff</span></code> — Advection–Diffusion (legacy)</a></li>
 <li class="toctree-l1"><a class="reference internal" href="poisson.html"><code class="docutils literal notranslate"><span class="pre">poisson</span></code> — Pressure Solvers</a></li>
+<li class="toctree-l1"><a class="reference internal" href="free_surface.html"><code class="docutils literal notranslate"><span class="pre">free_surface</span></code> — Level-Set Free Surface</a></li>
 <li class="toctree-l1"><a class="reference internal" href="body.html"><code class="docutils literal notranslate"><span class="pre">body</span></code> — Geometry, SDF &amp; Kinematics</a></li>
 <li class="toctree-l1"><a class="reference internal" href="operations.html"><code class="docutils literal notranslate"><span class="pre">operations</span></code> — Discrete Differential Operators</a></li>
 <li class="toctree-l1"><a class="reference internal" href="plotting.html"><code class="docutils literal notranslate"><span class="pre">plotting</span></code> — Visualisation Helpers</a></li>
@@ -764,12 +768,12 @@ same scalar damping factor is used for all components.</p>
       <footer>
         
         <div class="related-pages">
-          <a class="next-page" href="adv_diff.html">
+          <a class="next-page" href="advection.html">
               <div class="page-info">
                 <div class="context">
                   <span>Next</span>
                 </div>
-                <div class="title"><code class="docutils literal notranslate"><span class="pre">adv_diff</span></code> — Advection–Diffusion Solver</div>
+                <div class="title"><code class="docutils literal notranslate"><span class="pre">advection</span></code> — Convective Schemes &amp; AdvDiffSolver</div>
               </div>
               <svg class="furo-related-icon"><use href="#svg-arrow-right"></use></svg>
             </a>

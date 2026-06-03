@@ -216,7 +216,9 @@
 <li class="toctree-l1"><a class="reference internal" href="api/solver.html"><code class="docutils literal notranslate"><span class="pre">solver</span></code> — Navier–Stokes Solver</a></li>
 <li class="toctree-l1"><a class="reference internal" href="api/solver.html#forces-hydrodynamic-force-integrators"><code class="docutils literal notranslate"><span class="pre">forces</span></code> — Hydrodynamic Force Integrators</a></li>
 <li class="toctree-l1"><a class="reference internal" href="api/solver.html#extras-sponge-les-non-newtonian-viscosity"><code class="docutils literal notranslate"><span class="pre">extras</span></code> — Sponge, LES &amp; Non-Newtonian Viscosity</a></li>
-<li class="toctree-l1"><a class="reference internal" href="api/adv_diff.html"><code class="docutils literal notranslate"><span class="pre">adv_diff</span></code> — Advection–Diffusion Solver</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api/advection.html"><code class="docutils literal notranslate"><span class="pre">advection</span></code> — Convective Schemes &amp; AdvDiffSolver</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api/diffusion.html"><code class="docutils literal notranslate"><span class="pre">diffusion</span></code> — Diffusion Operators</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api/adv_diff.html"><code class="docutils literal notranslate"><span class="pre">adv_diff</span></code> — Advection–Diffusion (legacy)</a></li>
 <li class="toctree-l1"><a class="reference internal" href="api/poisson.html"><code class="docutils literal notranslate"><span class="pre">poisson</span></code> — Pressure Solvers</a></li>
 <li class="toctree-l1"><a class="reference internal" href="api/free_surface.html"><code class="docutils literal notranslate"><span class="pre">free_surface</span></code> — Level-Set Free Surface</a></li>
 <li class="toctree-l1"><a class="reference internal" href="api/body.html"><code class="docutils literal notranslate"><span class="pre">body</span></code> — Geometry, SDF &amp; Kinematics</a></li>
@@ -268,7 +270,7 @@
         <li><a href="api/integration.html#lilytorch.integration.gamepad.GamepadHandler.__init__">__init__() (lilytorch.integration.gamepad.GamepadHandler method)</a>
 
         <ul>
-          <li><a href="api/adv_diff.html#lilytorch.src.adv_diff.AdvDiffSolver.__init__">(lilytorch.src.adv_diff.AdvDiffSolver method)</a>
+          <li><a href="api/advection.html#lilytorch.src.advection.AdvDiffSolver.__init__">(lilytorch.src.advection.AdvDiffSolver method)</a>
 </li>
           <li><a href="api/body.html#lilytorch.src.body.Body.__init__">(lilytorch.src.body.Body method)</a>
 </li>
@@ -293,18 +295,22 @@
   <h2>A</h2>
   <table style="width: 100%" class="indextable genindextable"><tr>
     <td style="width: 33%; vertical-align: top;"><ul>
-        <li><a href="api/adv_diff.html#lilytorch.src.adv_diff.abdquickest">abdquickest() (in module lilytorch.src.adv_diff)</a>
+        <li><a href="api/advection.html#lilytorch.src.advection.abdquickest">abdquickest() (in module lilytorch.src.advection)</a>
 </li>
         <li><a href="api/solver.html#lilytorch.src.solver.FluidSolver.advance_and_compute_loads">advance_and_compute_loads() (lilytorch.src.solver.FluidSolver method)</a>
 </li>
-        <li><a href="api/adv_diff.html#lilytorch.src.adv_diff.AdvDiffSolver">AdvDiffSolver (class in lilytorch.src.adv_diff)</a>
+        <li><a href="api/advection.html#lilytorch.src.advection.AdvDiffSolver">AdvDiffSolver (class in lilytorch.src.advection)</a>
 </li>
         <li><a href="api/free_surface.html#lilytorch.src.free_surface.FreeSurface.advect">advect() (lilytorch.src.free_surface.FreeSurface method)</a>
 </li>
-        <li><a href="api/free_surface.html#lilytorch.src.free_surface.FreeSurface.air_mask_cc">air_mask_cc (lilytorch.src.free_surface.FreeSurface property)</a>
+        <li><a href="api/advection.html#lilytorch.src.advection.advect_momentum">advect_momentum() (in module lilytorch.src.advection)</a>
+</li>
+        <li><a href="api/advection.html#lilytorch.src.advection.advect_scalar">advect_scalar() (in module lilytorch.src.advection)</a>
 </li>
     </ul></td>
     <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/free_surface.html#lilytorch.src.free_surface.FreeSurface.air_mask_cc">air_mask_cc (lilytorch.src.free_surface.FreeSurface property)</a>
+</li>
         <li><a href="api/integration.html#lilytorch.integration.gamepad.GamepadHandler.apply_deadzone">apply_deadzone() (lilytorch.integration.gamepad.GamepadHandler method)</a>
 </li>
         <li><a href="api/free_surface.html#lilytorch.src.free_surface.FreeSurface.apply_pressure_mask">apply_pressure_mask() (lilytorch.src.free_surface.FreeSurface method)</a>
@@ -381,7 +387,7 @@
 </li>
         <li><a href="api/operations.html#lilytorch.src.operations.carreau_viscosity">carreau_viscosity() (in module lilytorch.src.operations)</a>
 </li>
-        <li><a href="api/adv_diff.html#lilytorch.src.adv_diff.cds">cds() (in module lilytorch.src.adv_diff)</a>
+        <li><a href="api/advection.html#lilytorch.src.advection.cds">cds() (in module lilytorch.src.advection)</a>
 </li>
         <li><a href="api/solver.html#lilytorch.src.solver.FluidSolver.check_explosion">check_explosion() (lilytorch.src.solver.FluidSolver method)</a>
 </li>
@@ -445,7 +451,7 @@
 </li>
         <li><a href="api/operations.html#lilytorch.src.operations.cross_product_3d">cross_product_3d() (in module lilytorch.src.operations)</a>
 </li>
-        <li><a href="api/adv_diff.html#lilytorch.src.adv_diff.cubista">cubista() (in module lilytorch.src.adv_diff)</a>
+        <li><a href="api/advection.html#lilytorch.src.advection.cubista">cubista() (in module lilytorch.src.advection)</a>
 </li>
     </ul></td>
   </tr></table>
@@ -461,9 +467,11 @@
 </li>
         <li><a href="api/plotting.html#lilytorch.src.plotting.PlottingMixin.DEFAULT_PLOT_SPECS">DEFAULT_PLOT_SPECS (lilytorch.src.plotting.PlottingMixin attribute)</a>
 </li>
+        <li><a href="api/util.html#lilytorch.util.rw.Dict2Class">Dict2Class (class in lilytorch.util.rw)</a>
+</li>
     </ul></td>
     <td style="width: 33%; vertical-align: top;"><ul>
-        <li><a href="api/util.html#lilytorch.util.rw.Dict2Class">Dict2Class (class in lilytorch.util.rw)</a>
+        <li><a href="api/diffusion.html#lilytorch.src.diffusion.diffuse">diffuse() (in module lilytorch.src.diffusion)</a>
 </li>
         <li><a href="api/operations.html#lilytorch.src.operations.divergence">divergence() (in module lilytorch.src.operations)</a>
 
@@ -671,6 +679,8 @@
 </li>
         <li><a href="api/solver.html#lilytorch.src.solver.FluidSolver.inside">inside() (lilytorch.src.solver.FluidSolver method)</a>
 </li>
+        <li><a href="api/free_surface.html#lilytorch.src.free_surface.FreeSurface.interface_gauge_offset">interface_gauge_offset() (lilytorch.src.free_surface.FreeSurface method)</a>
+</li>
     </ul></td>
   </tr></table>
 </section>
@@ -704,6 +714,8 @@
   <table style="width: 100%" class="indextable genindextable"><tr>
     <td style="width: 33%; vertical-align: top;"><ul>
         <li><a href="api/poisson.html#lilytorch.src.poisson_mult.PoissonSolver.l2_norm">l2_norm() (lilytorch.src.poisson_mult.PoissonSolver static method)</a>
+</li>
+        <li><a href="api/diffusion.html#lilytorch.src.diffusion.laplacian">laplacian() (in module lilytorch.src.diffusion)</a>
 </li>
         <li>
     lilytorch.integration.BDIMhandler
@@ -783,10 +795,10 @@
 </li>
         </ul></li>
         <li>
-    lilytorch.src.adv_diff
+    lilytorch.src.advection
 
         <ul>
-          <li><a href="api/adv_diff.html#module-lilytorch.src.adv_diff">module</a>
+          <li><a href="api/advection.html#module-lilytorch.src.advection">module</a>
 </li>
         </ul></li>
     </ul></td>
@@ -796,6 +808,13 @@
 
         <ul>
           <li><a href="api/body.html#module-lilytorch.src.body">module</a>
+</li>
+        </ul></li>
+        <li>
+    lilytorch.src.diffusion
+
+        <ul>
+          <li><a href="api/diffusion.html#module-lilytorch.src.diffusion">module</a>
 </li>
         </ul></li>
         <li>
@@ -885,7 +904,7 @@
   <h2>M</h2>
   <table style="width: 100%" class="indextable genindextable"><tr>
     <td style="width: 33%; vertical-align: top;"><ul>
-        <li><a href="api/adv_diff.html#lilytorch.src.adv_diff.median">median() (in module lilytorch.src.adv_diff)</a>
+        <li><a href="api/advection.html#lilytorch.src.advection.median">median() (in module lilytorch.src.advection)</a>
 </li>
         <li><a href="api/body.html#lilytorch.src.body.mesh2sdf">mesh2sdf (class in lilytorch.src.body)</a>
 </li>
@@ -915,9 +934,11 @@
 </li>
           <li><a href="api/integration.html#module-lilytorch.integration.particle_viewer">lilytorch.integration.particle_viewer</a>
 </li>
-          <li><a href="api/adv_diff.html#module-lilytorch.src.adv_diff">lilytorch.src.adv_diff</a>
+          <li><a href="api/advection.html#module-lilytorch.src.advection">lilytorch.src.advection</a>
 </li>
           <li><a href="api/body.html#module-lilytorch.src.body">lilytorch.src.body</a>
+</li>
+          <li><a href="api/diffusion.html#module-lilytorch.src.diffusion">lilytorch.src.diffusion</a>
 </li>
           <li><a href="api/solver.html#module-lilytorch.src.extras">lilytorch.src.extras</a>
 </li>
@@ -1024,7 +1045,7 @@
   <h2>Q</h2>
   <table style="width: 100%" class="indextable genindextable"><tr>
     <td style="width: 33%; vertical-align: top;"><ul>
-        <li><a href="api/adv_diff.html#lilytorch.src.adv_diff.quick">quick() (in module lilytorch.src.adv_diff)</a>
+        <li><a href="api/advection.html#lilytorch.src.advection.quick">quick() (in module lilytorch.src.advection)</a>
 </li>
     </ul></td>
   </tr></table>
@@ -1096,7 +1117,7 @@
 </li>
         <li><a href="api/body.html#lilytorch.src.body.segment">segment() (in module lilytorch.src.body)</a>
 </li>
-        <li><a href="api/adv_diff.html#lilytorch.src.adv_diff.AdvDiffSolver.set_BCs">set_BCs() (lilytorch.src.adv_diff.AdvDiffSolver method)</a>
+        <li><a href="api/advection.html#lilytorch.src.advection.AdvDiffSolver.set_BCs">set_BCs() (lilytorch.src.advection.AdvDiffSolver method)</a>
 </li>
         <li><a href="api/integration.html#lilytorch.integration.flow_viewer_gl_hook.FlowViewerGLHook.set_enabled">set_enabled() (lilytorch.integration.flow_viewer_gl_hook.FlowViewerGLHook method)</a>
 </li>
@@ -1194,7 +1215,9 @@
   <h2>V</h2>
   <table style="width: 100%" class="indextable genindextable"><tr>
     <td style="width: 33%; vertical-align: top;"><ul>
-        <li><a href="api/adv_diff.html#lilytorch.src.adv_diff.van_leer">van_leer() (in module lilytorch.src.adv_diff)</a>
+        <li><a href="api/advection.html#lilytorch.src.advection.van_leer">van_leer() (in module lilytorch.src.advection)</a>
+</li>
+        <li><a href="api/diffusion.html#lilytorch.src.diffusion.variable_laplacian">variable_laplacian() (in module lilytorch.src.diffusion)</a>
 </li>
         <li><a href="api/poisson.html#lilytorch.src.poisson_mult.PoissonSolver.vcycle">vcycle() (lilytorch.src.poisson_mult.PoissonSolver method)</a>
 </li>

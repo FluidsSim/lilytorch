@@ -7,9 +7,11 @@ LilyTorch can track a **water–air free surface** with a level-set method
 (Osher & Sethian 1988; Sussman, Smereka & Osher 1994; the ghost-fluid
 treatment follows Fedkiw et al. 1999 / Gibou et al. 2002). The
 implementation lives in :class:`~lilytorch.src.free_surface.FreeSurface`
-and is fully **decoupled** from the BDIM solid-body machinery: it stores
-no body SDF, never touches ``composite_body``, and exposes only the
-plumbing the solver needs.
+and is **decoupled** from the BDIM solid-body machinery at the class level:
+it stores no body SDF, never touches ``composite_body``, and exposes only
+the plumbing the solver needs. The solver adds an *optional* body-aware
+coupling on top for a body that crosses the surface (see
+:ref:`fs-wetted-body`); when that is off the two are fully independent.
 
 .. contents:: On this page
    :local:
@@ -181,23 +183,30 @@ separately for each velocity component :math:`q`. Only cells with
 
 .. important::
 
-   **Extend over the whole air region, not just a band** (``extend_full:
-   true``, the default). The air is decoupled from the pressure solve
-   (zero-coefficient air–air faces) and gravity is gated to the water, so
-   the bulk air has *no* mechanism to damp velocity. If the extension only
-   fills a narrow band, the predictor (advection–diffusion still runs on
-   the full grid) slowly leaks the small water-surface residual into the
-   undamped bulk air, where it accumulates as growing spurious vorticity
-   (observed as faint, slowly-growing curl above the interface). Sweeping
-   the extension across the entire air half-space each step makes the air
-   a clean normal-extension of the water velocity — bounded and slaved to
-   the water rather than free-running. The front advances :math:`\sim\!½`
-   cell per sub-step, so the cost is :math:`O(\text{air depth})` sub-steps
-   of cheap cell-centred ops per step; set ``extend_full: false`` (and use
-   ``extend_iters``) to restrict to a band if that cost matters.
+   **The extension never mutates the solver's own** ``u/v/w``. It runs on a
+   throwaway *copy* of the velocity, which is then used only to advect the
+   level set (and, with the :ref:`fs-wetted-body` option, as the source for
+   the bulk-air damping). Overwriting the projected, divergence-free
+   velocity in the air band with the constant-along-normal
+   (non-divergence-free) extrapolation re-injects divergence at the
+   interface every step; under gravity that feeds a growing near-surface
+   velocity mode that eventually blows up. Extending a copy keeps the real
+   velocity clean. See :meth:`FluidSolver._fs_post_step
+   <lilytorch.src.solver.FluidSolver>`.
 
-   Note this only constrains the *air*; it does not remove the water's own
-   (tiny) projection residual, which a quiescent test's auto-ranged
+   ``extend_full`` therefore controls how far that **copy** is extended:
+   ``true`` sweeps the whole air half-space (the front advances
+   :math:`\sim\!½` cell per sub-step, so the cost is
+   :math:`O(\text{air depth})` cheap cell-centred sub-steps per step),
+   ``false`` restricts it to an ``extend_iters``-cell band (cheaper). It no
+   longer damps the *real* air velocity directly. For a quiescent /
+   deeply-submerged air that is fine — the air is at rest and the bulk
+   never accumulates anything to advect. When an immersed body sits **at**
+   the surface and drives the air, the :ref:`fs-wetted-body` bulk-air
+   damping is what bounds the air instead.
+
+   Note any residual is in the *air* only; it does not remove the water's
+   own (tiny) projection residual, which a quiescent test's auto-ranged
    vorticity plot will still amplify (see :ref:`fs-air-viz`).
 
 .. note::
@@ -349,6 +358,87 @@ to zero. See :meth:`FluidSolver._apply_gravity_body_force
 <lilytorch.src.solver.FluidSolver>`.
 
 
+.. _fs-wetted-body:
+
+Immersed body crossing the surface (wetted-body BDIM)
+-----------------------------------------------------
+
+The free surface and the BDIM solid body are independent machinery, and
+for a **fully submerged** body they need no special coordination: the body
+is surrounded by water, BDIM imposes its no-slip velocity, and the
+pressure projection (with the GFM interface condition far away at the
+surface) reacts to it normally.
+
+The two collide when a body **reaches and pokes through the surface**.
+BDIM imposes the body velocity *everywhere* the body SDF is negative —
+including the part that has emerged into the air. But the air is the
+fictitious single-fluid air: its pressure is pinned to :math:`p_{\text{atm}}=0`
+and it is decoupled from the incompressibility solve, so it offers **no
+pressure reaction** to the body. The emerged body then drives a velocity
+into a region that nothing can constrain, and :math:`|\mathbf{u}|` in that
+thin air layer grows without bound until the run explodes (observed for a
+buoyant, pulsing jellyfish bell breaking the surface).
+
+The **wetted-body** treatment (opt-in, ``free_surface.wetted_body: true``;
+default *off*, so submerged-only runs are byte-identical) makes the body
+interact with the water only. It combines three measures:
+
+1. **Gate the BDIM no-slip by the water side.** A smoothed water Heaviside
+
+   .. math::
+
+      H_w = \tfrac12\!\left(1 + d_\varepsilon + \tfrac{\sin\pi d_\varepsilon}{\pi}\right),
+      \qquad d_\varepsilon = \operatorname{clamp}(-\phi/\varepsilon,\,-1,\,1),
+
+   (1 in water, 0 in air, smooth over the same band :math:`\varepsilon` as
+   the body's ``mu0``) scales the body "solidness": ``mu0`` is replaced by
+   :math:`1-(1-\texttt{mu0})\,H_w` and ``mu1`` by :math:`\texttt{mu1}\,H_w`.
+   In the air :math:`H_w=0` so ``mu0`` :math:`\to 1`, ``mu1`` :math:`\to 0`
+   and the BDIM meta-equation is the identity — no body velocity is imposed
+   in the air. This is computed in :meth:`FluidSolver._fs_water_heaviside
+   <lilytorch.src.solver.FluidSolver>` and applied in
+   :meth:`_apply_bdim_all_axes
+   <lilytorch.src.solver.FluidSolver>` on per-axis copies (the cached
+   ``mu0_all_*`` that the Poisson coefficients also read are left intact).
+
+2. **Treat body-in-air cells as ordinary air for the pressure solve.** In
+   :meth:`~lilytorch.src.solver.FluidSolver.project` the GFM "defer to the
+   body" mask is gated, ``solid_cc &= fluid_mask_cc``, so only the
+   *submerged* body is excluded from the air pin. Cells where the body has
+   emerged fall into the ``air & ~solid_cc`` Dirichlet pin
+   (:math:`p = p_{\text{atm}} = 0`) like any other air cell, consistent
+   with the velocity gate in (1).
+
+3. **Damp the bulk air.** Because the extension no longer resets the real
+   air velocity (see :ref:`fs-extend`), the air near a body that drives it
+   would still free-run. :meth:`FluidSolver._fs_damp_bulk_air
+   <lilytorch.src.solver.FluidSolver>` overwrites the real velocity in the
+   **bulk** air (:math:`\phi > h`, i.e. more than one cell above the
+   interface) with the extended water velocity each step. The immediate
+   interface-air cell — which the water cut cells read in their divergence
+   stencil — is left as the projected, divergence-free field, so no
+   interface divergence is re-injected.
+
+.. tip::
+
+   When the body actually breaks the surface, its pulsing makes the water
+   interface **graze** the grid near the body, driving the cut-face water
+   fraction :math:`\theta \to 0` and the GFM :math:`1/\theta` coefficient
+   (and hence the velocity correction) very large. Raising ``theta_min``
+   from ``0.01`` to :math:`\sim\!0.1` caps that correction at
+   :math:`10\times` and is what keeps the interface layer stable in this
+   regime; it is harmless for the flat-surface phases where cut faces are
+   not grazing.
+
+With all three measures (plus the larger ``theta_min``), a buoyant
+jellyfish bell rises, reaches the surface and pokes through with the air
+velocity bounded and :math:`|\mathbf{u}|_{\max}` staying in the physical
+underwater wake. This is the single-fluid treatment of a partially
+submerged body: the emerged part feels (and displaces) no air. A genuinely
+violent splash or a body leaping fully clear of the water needs a real
+**two-phase** (resolved-air) model — outside the single-fluid scope here.
+
+
 Configuration
 -------------
 
@@ -364,13 +454,14 @@ usually ``solver.gravity``):
      free_surface:
        phi_init: "lambda X, Y: Y - 0.5"   # < 0 water, > 0 air; interface at y = 0.5
        convection_method: quick      # level-set advection scheme (advection.SCHEMES)
-       theta_min:    0.01            # cut-face water-fraction clamp (1/theta)
+       theta_min:    0.01            # cut-face water-fraction clamp (1/theta); raise to ~0.1 if a body crosses the surface
        band_cells:   4               # narrow-band half-width (informational)
        reinit_iters: 4               # reinit sub-steps per call
        reinit_every: 10              # reinitialise every N solver steps
        extend_iters: 2               # band extension sub-steps (used when extend_full: false)
        extend_every: 1               # extend every N solver steps
-       extend_full:  true            # extend over the WHOLE air region (recommended)
+       extend_full:  true            # extend the copy over the WHOLE air region
+       wetted_body:  false           # gate BDIM/air for a body crossing the surface (see fs-wetted-body)
 
 .. list-table::
    :header-rows: 1
@@ -396,6 +487,8 @@ usually ``solver.gravity``):
      - ``0.01``
      - Lower clamp on the cut-face water fraction :math:`\theta`, bounding
        the :math:`1/\theta` coefficient when the interface grazes a face.
+       Raise to :math:`\sim\!0.1` when an immersed body crosses the surface
+       (its pulsing grazes the interface; see :ref:`fs-wetted-body`).
    * - ``band_cells``
      - ``4``
      - Narrow-band half-width in cells. Informational only — the reinit /
@@ -415,10 +508,17 @@ usually ``solver.gravity``):
      - Extend every N solver steps (``0`` disables).
    * - ``extend_full``
      - ``True``
-     - Extend the water velocity across the **whole** air region each step
-       (recommended — keeps the decoupled bulk air from accumulating
-       spurious vorticity). ``False`` restricts to an ``extend_iters``
-       band (cheaper, but the bulk air free-runs).
+     - Extend the (throwaway) velocity **copy** across the whole air region
+       each step, vs. an ``extend_iters`` band (``False``, cheaper). The
+       copy advects the level set and feeds the wetted-body bulk-air
+       damping; it does not mutate the real ``u/v/w`` (see :ref:`fs-extend`).
+   * - ``wetted_body``
+     - ``False``
+     - Make the body interact with the **water only**, so it can poke
+       through the surface without the pressure-less air velocity running
+       away. Gates the BDIM no-slip and the GFM body mask by the water
+       Heaviside and damps the bulk air. See :ref:`fs-wetted-body`. Pair
+       with ``theta_min`` :math:`\approx 0.1`.
 
 The ``phi_init`` lambda uses the same evaluation convention as
 ``body.sdf`` (a callable or a string ``eval``\ ed against ``{"torch":

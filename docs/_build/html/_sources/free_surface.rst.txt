@@ -77,21 +77,37 @@ The interface moves with the flow,
 
    \frac{\partial \phi}{\partial t} + \mathbf{u}\cdot\nabla\phi = 0 .
 
-The MAC-staggered velocity is first averaged to cell centres (the same
-convention as ``ops.divergence``), then :eq:`fs-advect` is integrated
-with a **first-order upwind** spatial stencil and **forward Euler** in
-time: a backward difference where the velocity component is positive, a
-forward difference where it is negative. This is monotone and stable
-under the usual CFL condition
+The interface is advected with the **same convective schemes as the
+Navier–Stokes solver** (QUICK / ADBQUICKEST / CUBISTA / van Leer / CDS),
+shared from :mod:`lilytorch.src.advection`.
+:meth:`FreeSurface.advect <lilytorch.src.free_surface.FreeSurface.advect>`
+calls :func:`~lilytorch.src.advection.advect_scalar`, which applies the
+chosen scheme in **conservative flux form** on the MAC velocity and steps
+**forward Euler** in time. The MAC velocity component normal to each
+cell-centred face already sits at that face (no transverse averaging), so
+the level set is transported at the scheme's order rather than with a
+bespoke first-order upwind. Because the advecting velocity is the
+projected, divergence-free field, the conservative form
+:math:`\nabla\cdot(\mathbf{u}\phi)` equals the advective form
+:math:`\mathbf{u}\cdot\nabla\phi`. Stable under the usual CFL condition
 
 .. math::
 
    \Delta t \, \frac{|\mathbf{u}|_{\max}}{h} < 1 .
 
-Implemented in :meth:`FreeSurface.advect
-<lilytorch.src.free_surface.FreeSurface.advect>` via the
-``_upwind_grad`` helper. Boundary ghost cells are zero-gradient
+The scheme is selected with the ``convection_method`` key in the
+``free_surface`` config block (default ``"quick"``; falls back to
+``"quick"`` if the solver's own ``convection_method`` is a non-finite-volume
+method such as ``semi-lagrangian``). Boundary ghost cells are zero-gradient
 (Neumann) padded after every update.
+
+.. note::
+
+   Forward Euler is used deliberately (not Heun/RK2): the level set is
+   advected **once per solver step** in :meth:`finalize_step
+   <lilytorch.src.solver.FluidSolver.finalize_step>` on the already-converged
+   divergence-free velocity, so it is not wrapped in the predictor–corrector
+   loop that integrates the momentum equations.
 
 
 .. _fs-reinit:
@@ -159,9 +175,30 @@ separately for each velocity component :math:`q`. Only cells with
 :math:`\operatorname{sign}(\phi)` factor (folded into the unit normal in
 :meth:`_cc_unit_normal`) makes the upwind scheme transport values
 *outward* from the interface. Forward Euler with
-:math:`\Delta\tau = 0.5\,h`, run for ``extend_iters`` sub-steps every
-``extend_every`` solver steps. See :meth:`FreeSurface.extend_velocity
+:math:`\Delta\tau = 0.5\,h`, run every ``extend_every`` solver steps. See
+:meth:`FreeSurface.extend_velocity
 <lilytorch.src.free_surface.FreeSurface.extend_velocity>`.
+
+.. important::
+
+   **Extend over the whole air region, not just a band** (``extend_full:
+   true``, the default). The air is decoupled from the pressure solve
+   (zero-coefficient air–air faces) and gravity is gated to the water, so
+   the bulk air has *no* mechanism to damp velocity. If the extension only
+   fills a narrow band, the predictor (advection–diffusion still runs on
+   the full grid) slowly leaks the small water-surface residual into the
+   undamped bulk air, where it accumulates as growing spurious vorticity
+   (observed as faint, slowly-growing curl above the interface). Sweeping
+   the extension across the entire air half-space each step makes the air
+   a clean normal-extension of the water velocity — bounded and slaved to
+   the water rather than free-running. The front advances :math:`\sim\!½`
+   cell per sub-step, so the cost is :math:`O(\text{air depth})` sub-steps
+   of cheap cell-centred ops per step; set ``extend_full: false`` (and use
+   ``extend_iters``) to restrict to a band if that cost matters.
+
+   Note this only constrains the *air*; it does not remove the water's own
+   (tiny) projection residual, which a quiescent test's auto-ranged
+   vorticity plot will still amplify (see :ref:`fs-air-viz`).
 
 .. note::
 
@@ -171,6 +208,27 @@ separately for each velocity component :math:`q`. Only cells with
    the upwind *direction* matters more than the half-cell staggering
    offset there — and is documented as such in
    :meth:`FluidSolver._fs_post_step`.
+
+.. _fs-air-viz:
+
+Visualising the air
+^^^^^^^^^^^^^^^^^^^^
+
+The air is **not a real fluid** here — its pressure is pinned to 0 and
+its velocity is only a kinematic extension of the water — so plotting its
+fields can mislead. The 2-D field plots therefore **blank the air
+half-space** (cells with :math:`\phi>0` are set to ``NaN`` and rendered in
+neutral grey), and the symmetric auto colour-range is computed over the
+**water only** (NaN-aware), so it is not skewed by the air. This happens
+automatically whenever a free surface is active.
+
+This removes spurious air structure from the plots, but a *quiescent*
+case (e.g. the hydrostatic column, where the whole flow is at rest to
+:math:`\sim\!10^{-4}`) will still show faint grid-scale noise **in the
+water**, because symmetric auto-ranging stretches the velocity/vorticity
+noise floor to full contrast. That is a property of auto-ranging a
+near-zero field, not a solver defect — set fixed ``vmin``/``vmax`` (or
+plot a field with real dynamic range) to suppress it.
 
 
 .. _fs-ghost-fluid:
@@ -233,10 +291,40 @@ Solver integration (in :meth:`FluidSolver.project
   :math:`1/\theta` scaling makes the *first* layer of air cells
   non-degenerate (:math:`J\neq0`), so the smoother's :math:`J=0`
   mechanism alone would not pin them;
-* after the solve, the multigrid mean-subtraction (which removes the
-  pure-Neumann null space) is **undone** by re-subtracting the air-cell
-  mean, restoring the gauge, and :meth:`apply_pressure_mask` defensively
-  re-zeros air pressures.
+* after the solve, the **pressure datum is anchored** (see below) and
+  :meth:`apply_pressure_mask` defensively re-zeros air pressures.
+
+Pressure datum (gauge anchor)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The ghost-fluid solve fixes the pressure *gradient* but leaves the
+additive constant — the **DC null-space mode** — only weakly constrained.
+Because air cells are decoupled (zero-coefficient air–air faces) and
+couple to the water only through the thin layer of cut faces, the
+(effectively singular) coarse multigrid problems do not pin the water
+datum; in practice the constant even **drifts further with more
+V-cycles** (e.g. a hydrostatic column at 30 vs 200 V-cycles drifts to a
+larger uniform offset, with the gradient unchanged). Anchoring on the
+air-cell mean does nothing — the air is already pinned to 0.
+
+The datum is instead recovered from the physical condition
+:math:`p = p_{\text{atm}} = 0` **at the interface**. For every water cell
+adjacent to air, the water pressure is linearly extrapolated to the
+:math:`\phi=0` crossing using the cut-face water fraction :math:`\theta`
+and the next water cell inward,
+
+.. math::
+
+   C \approx p_w + \theta\,(p_w - p_{w2}),
+
+which equals the gauge constant exactly for a locally linear pressure.
+Averaging :math:`C` over all cut faces gives a single robust offset that
+is subtracted from the whole field (:meth:`FreeSurface.interface_gauge_offset
+<lilytorch.src.free_surface.FreeSurface.interface_gauge_offset>`). It is
+:math:`\rho`/:math:`g`-agnostic and valid for a deforming interface. On
+the hydrostatic-column validation this brings the water pressure error
+from :math:`\sim\!120\%` (pure-offset) down to the O(:math:`h`)
+discretisation floor (:math:`\sim\!0.25\%`).
 
 .. warning::
 
@@ -275,12 +363,14 @@ usually ``solver.gravity``):
      gravity: [0.0, -9.81]           # body force (length = ndim)
      free_surface:
        phi_init: "lambda X, Y: Y - 0.5"   # < 0 water, > 0 air; interface at y = 0.5
+       convection_method: quick      # level-set advection scheme (advection.SCHEMES)
        theta_min:    0.01            # cut-face water-fraction clamp (1/theta)
        band_cells:   4               # narrow-band half-width (informational)
        reinit_iters: 4               # reinit sub-steps per call
        reinit_every: 10              # reinitialise every N solver steps
-       extend_iters: 2               # velocity-extension sub-steps per call
+       extend_iters: 2               # band extension sub-steps (used when extend_full: false)
        extend_every: 1               # extend every N solver steps
+       extend_full:  true            # extend over the WHOLE air region (recommended)
 
 .. list-table::
    :header-rows: 1
@@ -295,6 +385,13 @@ usually ``solver.gravity``):
        returning the initial level set on the cell-centred grid:
        ``phi_init(X, Y)`` in 2-D, ``phi_init(X, Y, Z)`` in 3-D. Negative
        in water, positive in air.
+   * - ``convection_method``
+     - solver's, else ``"quick"``
+     - Convective scheme for the level-set advection, from
+       :data:`lilytorch.src.advection.SCHEMES` (``quick``, ``abdquickest``,
+       ``cubista``, ``vanLeer``, ``cds``). Defaults to the solver's
+       ``convection_method`` when it is a finite-volume scheme, otherwise
+       ``"quick"``.
    * - ``theta_min``
      - ``0.01``
      - Lower clamp on the cut-face water fraction :math:`\theta`, bounding
@@ -311,10 +408,17 @@ usually ``solver.gravity``):
      - Reinitialise every N solver steps (``0`` disables).
    * - ``extend_iters``
      - ``4``
-     - Velocity-extension sub-steps per :meth:`extend_velocity` call.
+     - Band velocity-extension sub-steps per :meth:`extend_velocity` call
+       (used only when ``extend_full`` is ``False``).
    * - ``extend_every``
      - ``1``
      - Extend every N solver steps (``0`` disables).
+   * - ``extend_full``
+     - ``True``
+     - Extend the water velocity across the **whole** air region each step
+       (recommended — keeps the decoupled bulk air from accumulating
+       spurious vorticity). ``False`` restricts to an ``extend_iters``
+       band (cheaper, but the bulk air free-runs).
 
 The ``phi_init`` lambda uses the same evaluation convention as
 ``body.sdf`` (a callable or a string ``eval``\ ed against ``{"torch":
