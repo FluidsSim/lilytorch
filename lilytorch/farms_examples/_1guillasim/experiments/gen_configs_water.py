@@ -36,7 +36,7 @@ class SimConfig(BaseSimConfig):
                 "model_name"     : "1guilla",
                 "sdf_name"       : "1guilla.sdf",
                 "control_type"   : "position",
-                "gains"          : [100.0, 1., 0],
+                "gains"          : [20.0, 4., 0],
                 "spawn_mode"     : SpawnMode.TRANSVERSE,
                 "pose"           : [-0.07, 0, 0.0, 0, 0, 3.],
                 "controller_path": "lilytorch.farms_examples._1guillasim.experiments.controller.PositionController",
@@ -85,7 +85,7 @@ class SimConfig(BaseSimConfig):
         # ── Physics ───────────────────────────────────────────────────
         self.rho_body          = 800.0
         self.timestep          = 0.001
-        self.convection_method = "quick"
+        self.convection_method = "abdquickest"
         self.n_iterations      = 15001
         self.save_every        = 200
         self.vmin              = -10.0
