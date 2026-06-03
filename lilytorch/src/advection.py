@@ -16,8 +16,8 @@ no longer imported).  This module owns:
   ``torch.compile``-able.
 
 Dependency rule: this module imports :mod:`diffusion` (a leaf) but **never**
-imports ``free_surface`` or ``solver``.  The free-surface model depends on
-this module, not the other way round.
+imports ``solver`` or ``two_phase``.  The two-phase model depends on this
+module (it reuses ``advect_scalar`` for VOF transport), not the other way round.
 
 Works identically in 2-D ``(x, y)`` and 3-D ``(x, y, z)`` by looping over
 spatial dimensions rather than duplicating code per axis -- inspired by

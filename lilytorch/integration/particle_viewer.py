@@ -45,6 +45,7 @@ Works with ``headless: false`` (viewer + video) and ``headless: true``
 
 from __future__ import annotations
 
+import os
 import numpy as np
 import torch
 import mujoco
@@ -88,8 +89,17 @@ def _body_z_extent(sdf, z):
     return None, None
 
 
-def _replicate_at_z_levels(pts_xy: np.ndarray, sdf, z, n_z_layers: int):
-    """Expand (2, N) → (3, N*n_z_layers) across the body z-extent."""
+def _replicate_at_z_levels(pts_xy: np.ndarray, sdf, z, n_z_layers: int,
+                          z_spread_fraction: float = 0.9):
+    """Expand (2, N) → (3, N*n_z_layers) across the body z-extent.
+
+    Parameters
+    ----------
+    z_spread_fraction : float
+        Fraction of the body's z-extent that the layers span.
+        0.9 = 90% of thickness (default, backward-compatible).
+        Smaller values (e.g. 0.3) concentrate layers near the mid-plane.
+    """
     if z is None:
         return pts_xy
     zlo, zhi = _body_z_extent(sdf, z)
@@ -97,10 +107,11 @@ def _replicate_at_z_levels(pts_xy: np.ndarray, sdf, z, n_z_layers: int):
         zmid = 0.5 * (float(z[1]) + float(z[-2]))
         zlo, zhi = zmid - 0.01, zmid + 0.01
     dz = zhi - zlo
+    margin = 0.5 * (1.0 - z_spread_fraction)
     if n_z_layers == 1:
         z_levels = np.array([0.5 * (zlo + zhi)])
     else:
-        z_levels = np.linspace(zlo + 0.05 * dz, zhi - 0.05 * dz, n_z_layers)
+        z_levels = np.linspace(zlo + margin * dz, zhi - margin * dz, n_z_layers)
     n = pts_xy.shape[1]
     layers = []
     for zl in z_levels:
@@ -112,6 +123,7 @@ def _replicate_at_z_levels(pts_xy: np.ndarray, sdf, z, n_z_layers: int):
 def seed_tail_from_sdf(sdf: np.ndarray, x: np.ndarray, y: np.ndarray,
                        n_particles: int = 24, z: np.ndarray | None = None,
                        n_z_layers: int = 3,
+                       z_spread_fraction: float = 0.9,
                        ) -> np.ndarray:
     """Seed *n_particles* near the tail tip — identical to
     ``_extract_body_tail_from_sdf`` in plot_particles_robot.py.
@@ -141,7 +153,8 @@ def seed_tail_from_sdf(sdf: np.ndarray, x: np.ndarray, y: np.ndarray,
 
     pts_xy = np.stack([ax_, ay_], axis=0)
     if sdf.ndim == 3 and z is not None:
-        return _replicate_at_z_levels(pts_xy, sdf, z, n_z_layers)
+        return _replicate_at_z_levels(pts_xy, sdf, z, n_z_layers,
+                                      z_spread_fraction)
     return pts_xy
 
 
@@ -245,6 +258,8 @@ class ParticleViewer(TaskExtension):
         trail_length: int = 0,
         update_every: int | None = None,
         n_z_layers: int = 3,
+        z_spread_fraction: float = 0.9,
+        z_center: float | None = None,
         body_cull_margin: float | None = None,
         cull_every: int = 10,
         floor_color: list[float] | str | None = None,
@@ -273,6 +288,8 @@ class ParticleViewer(TaskExtension):
         self.trail_length = trail_length
         self.update_every = update_every
         self.n_z_layers = n_z_layers
+        self.z_spread_fraction = float(z_spread_fraction)
+        self.z_center = None if z_center is None else float(z_center)
         self.body_cull_margin = body_cull_margin
         self.cull_every = max(1, cull_every)
         self.floor_color = self._parse_color(floor_color)
@@ -339,6 +356,8 @@ class ParticleViewer(TaskExtension):
             trail_length=config.get("trail_length", 0),
             update_every=config.get("update_every", None),
             n_z_layers=config.get("n_z_layers", 3),
+            z_spread_fraction=config.get("z_spread_fraction", 0.9),
+            z_center=config.get("z_center", None),
             body_cull_margin=config.get("body_cull_margin", None),
             cull_every=config.get("cull_every", 10),
             floor_color=config.get("floor_color", None),
@@ -370,9 +389,15 @@ class ParticleViewer(TaskExtension):
             print("[ParticleViewer] FluidExtension not found – disabled.")
             return
 
-        # Find CameraRecording (for later patching in before_step)
+        # Find CameraRecording (for later patching in before_step).
+        # StreamingCameraRecording subclasses also need the patch so
+        # particles appear in recorded video.
         for ext in task.extensions:
-            if type(ext).__name__ == 'CameraRecording':
+            if type(ext).__name__ in (
+                'CameraRecording',
+                'StreamingCameraRecording',
+                'StreamingCameraRecordingFrames',
+            ):
                 self._cam_ext = ext
                 break
 
@@ -501,14 +526,23 @@ class ParticleViewer(TaskExtension):
 
         def _cam_before_step_with_particles(task, action, physics):
             """Drop-in replacement for CameraRecording.before_step that
-            injects particle geoms between update_scene and render."""
+            injects particle geoms between update_scene and render.
+
+            Works for both CameraRecording (full frame buffer,
+            ``data[sample]``) and StreamingCameraRecording (single-frame
+            buffer, ``data[0]``).
+            """
             import traceback as _tb
             del action
             if task.iteration % (cam.skips + 1) != 0:
                 return
             try:
+                # Streaming cameras keep only data[0]; parent uses data[sample]
+                _stream = getattr(cam, '_streaming', False)
+                _idx = 0 if _stream else cam.sample
+
                 if cam.viewer == 'dm_control':
-                    cam.data[cam.sample, :, :, :] = physics.render(
+                    cam.data[_idx, :, :, :] = physics.render(
                         width=cam.width,
                         height=cam.height,
                         camera_id=cam.camera,
@@ -537,7 +571,7 @@ class ParticleViewer(TaskExtension):
                         injected = _inject_particles_into_scene(
                             cam.renderer)
                         cam.renderer.render(
-                            out=cam.data[cam.sample, :, :, :])
+                            out=cam.data[_idx, :, :, :])
 
                         if _frame[0] < 5 or _frame[0] % 200 == 0:
                             print(
@@ -551,7 +585,7 @@ class ParticleViewer(TaskExtension):
 
                 if cam.out is not None:
                     cam.out.write(
-                        cam.data[cam.sample, :, :, :][:, :, [2, 1, 0]])
+                        cam.data[_idx, :, :, :][:, :, [2, 1, 0]])
                 cam.sample += 1
             except Exception as exc:
                 print(f"[PV-video] EXCEPTION at frame={_frame[0]} "
@@ -751,6 +785,7 @@ class ParticleViewer(TaskExtension):
             sdf, x, y,
             n_particles=self.seed_n_particles,
             z=z, n_z_layers=self.n_z_layers,
+            z_spread_fraction=self.z_spread_fraction,
         )
         if pts.shape[1] == 0:
             print("[ParticleViewer] Cache deferred: no seed points from SDF")
@@ -893,6 +928,92 @@ class ParticleViewer(TaskExtension):
 
         return world_pts
 
+    def _seed_tail_live(self, fs, handler, iteration) -> np.ndarray | None:
+        """Re-extract tail-tip seeds from the **live** SDF every seed step.
+
+        Self-correcting replacement for the cache + rigid-transform path:
+        it reads the actual current body surface each step, so the seed
+        point can never drift as the body swims/turns.  Reproduces the
+        original ``seed_tail_from_sdf`` behaviour exactly — the trailing
+        edge is the global ``min-x`` boundary cluster (the eel swims +x,
+        tail trailing at −x) — but done live and on the GPU so only the
+        handful of selected boundary cells ever leave the device.
+        """
+        import torch.nn.functional as F
+
+        comp = fs.composite_body
+        sdf_t = getattr(comp, "sdf_val", None)
+        if sdf_t is None:
+            return None
+        x_t, y_t = fs.x, fs.y
+
+        # ── Interior body mask collapsed over z (matches _sdf_boundary_xy) ──
+        if self._ndim == 3:
+            core = sdf_t[1:-1, 1:-1, :]
+            inside = core.amin(dim=2) <= 0
+        else:
+            core = sdf_t[1:-1, 1:-1]
+            inside = core <= 0
+        if not bool(inside.any()):
+            return None
+
+        # Boundary = outside cells touching the body (3×3 dilation − inside).
+        insf = inside.float()[None, None]
+        dil = F.max_pool2d(insf, kernel_size=3, stride=1, padding=1)[0, 0] > 0
+        bound = dil & ~inside
+        bi, bj = torch.nonzero(bound, as_tuple=True)
+        if bi.numel() == 0:
+            return None
+
+        xp, yp = x_t[1:-1], y_t[1:-1]
+        bx = xp[bi].detach().cpu().numpy()
+        by = yp[bj].detach().cpu().numpy()
+
+        # ── Trailing edge = smallest-x boundary cells (the tail tip) ──
+        n_anchor = min(8, len(bx))
+        sel = np.argsort(bx)[:n_anchor]
+        ax_, ay_ = bx[sel], by[sel]
+
+        # Densify by interpolating along the anchor cluster.
+        if self.seed_n_particles > n_anchor:
+            t_anc = np.linspace(0, 1, n_anchor)
+            t_dense = np.linspace(0, 1, self.seed_n_particles)
+            ax_ = np.interp(t_dense, t_anc, ax_)
+            ay_ = np.interp(t_dense, t_anc, ay_)
+        pts_xy = np.stack([ax_, ay_], axis=0)
+
+        # ── Replicate across the body z-extent (3-D) ─────────────────
+        if self._ndim == 3:
+            zmask = (core <= 0).any(dim=(0, 1))
+            zidx = torch.nonzero(zmask, as_tuple=True)[0]
+            if zidx.numel() > 0:
+                zlo = float(fs.z[int(zidx[0])]); zhi = float(fs.z[int(zidx[-1])])
+            else:
+                zmid = 0.5 * (float(fs.z[1]) + float(fs.z[-2]))
+                zlo, zhi = zmid - 0.01, zmid + 0.01
+            dz = zhi - zlo
+            z_mid = 0.5 * (zlo + zhi) if self.z_center is None else self.z_center
+            half_span = 0.5 * self.z_spread_fraction * dz
+            if self.n_z_layers == 1:
+                z_levels = np.array([z_mid])
+            else:
+                z_levels = np.linspace(z_mid - half_span,
+                                       z_mid + half_span, self.n_z_layers)
+            n = pts_xy.shape[1]
+            pts = np.concatenate(
+                [np.vstack([pts_xy, np.full((1, n), zl)]) for zl in z_levels],
+                axis=1,
+            )
+        else:
+            pts = pts_xy
+
+        if os.environ.get("LILY_PARTICLE_DEBUG") and iteration % 200 == 0:
+            c = pts.mean(axis=1)
+            print(f"[ParticleViewer][DEBUG] iter={iteration} live-tail "
+                  f"seed_c=({c[0]:.4f},{c[1]:.4f}) "
+                  f"min_x={bx.min():.4f} n={pts.shape[1]}")
+        return pts
+
     # ── Initialise interpolators from solver ──────────────────────────
 
     def _init_from_solver(self, fs):
@@ -987,13 +1108,21 @@ class ParticleViewer(TaskExtension):
             if field is not None:
                 self._interps[i].F = field.contiguous()
 
-        # ── Cache tail seeds on first seeding opportunity ─────
-        if self._tail_seeds_local is None:
+        # Ring mode (seed_link_name) genuinely is a body-fixed ring on a
+        # rigid link, so its cached body-local seeds never drift — keep the
+        # cache + rigid-transform path for it.  The default tail path is
+        # re-extracted from the live SDF each step (no drift).
+        ring_mode = (self.seed_link_name is not None
+                     and self.seed_ring_radius is not None)
+        if ring_mode and self._tail_seeds_local is None:
             self._cache_tail_seeds_body_local(fs, handler, sensor_iteration)
 
         # ── Seed new particles ────────────────────────────────────
         if iteration % self.seed_interval == 0:
-            new_pts = self._seed_particles(fs, handler, sensor_iteration)
+            if ring_mode:
+                new_pts = self._seed_particles(fs, handler, sensor_iteration)
+            else:
+                new_pts = self._seed_tail_live(fs, handler, sensor_iteration)
             if new_pts is not None:
                 new_t = torch.as_tensor(
                     new_pts, device=self._device, dtype=self._dtype
@@ -1061,15 +1190,16 @@ class ParticleViewer(TaskExtension):
 
         n_show = min(n_pts, self.max_particles)
 
-        # Sub-sample with fixed stride when more particles than display slots.
-        # A stride-based approach is more visually stable than linspace because
-        # it always picks the same particles (0, stride, 2*stride, …) and only
-        # appends new ones — no frame-to-frame jitter.
+        # Sub-sample when more particles than display slots.
+        # Use linspace so BOTH the oldest (index 0) and newest (index -1)
+        # particles are always represented — the fresh tail seeds are never
+        # skipped.
         if n_pts > self.max_particles:
-            stride = max(1, n_pts // self.max_particles)
-            pts = self._particles[:, ::stride].cpu().numpy()  # (ndim, ~n_show)
-            if pts.shape[1] > self.max_particles:
-                pts = pts[:, :self.max_particles]
+            indices = torch.linspace(
+                0, n_pts - 1, self.max_particles,
+                dtype=torch.long, device=self._particles.device,
+            )
+            pts = self._particles[:, indices].cpu().numpy()
             n_show = pts.shape[1]
         else:
             pts = self._particles.cpu().numpy()  # (ndim, n_show)

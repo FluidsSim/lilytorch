@@ -1217,22 +1217,10 @@ class PlottingMixin:
                         sdf_vals=_body_sdf_vals_np,
                     )
 
-                # Free-surface: the air half-space is not a real fluid
-                # (single-fluid model — p pinned to 0, velocity is only a
-                # kinematic normal-extension of the water).  Blank it out of
-                # the physical-field plots so its non-physical values do not
-                # skew the auto colour-range or read as spurious structure.
-                _air_int_np = None
-                if self.free_surface is not None:
-                    _air_int_np = (self.free_surface.air_mask_cc[1:-1, 1:-1]
-                                   .detach().cpu().numpy())
-
                 for (name, field_fn, vmin, vmax, show_body) in specs:
                     field = field_fn(self, u, v, p, w_vel)
                     field_np = field.detach().cpu().numpy().copy() if hasattr(field, 'detach') else np.array(field)
                     field_np = field_np[1:-1, 1:-1]  # strip ghost cells
-                    if _air_int_np is not None:
-                        field_np = np.where(_air_int_np, np.nan, field_np)
                     eff_vmin = self.vmin if vmin is None else (None if vmin == "auto" else vmin)
                     eff_vmax = self.vmax if vmax is None else (None if vmax == "auto" else vmax)
                     save_path = self.save_path

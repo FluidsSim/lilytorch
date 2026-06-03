@@ -21,7 +21,6 @@ from lilytorch.src.kernels import (
 from lilytorch.src.advection import AdvDiffSolver, SCHEMES as _ADV_SCHEMES
 from lilytorch.src.body import (body_from_yaml,
                                 _mu_normals_batched)
-from lilytorch.src.free_surface import FreeSurface
 from lilytorch.src import operations as ops
 from lilytorch.src.plotting import PlottingMixin
 from lilytorch.src.poisson_fft import PoissonSolverFFT
@@ -797,30 +796,16 @@ class FluidSolver(PlottingMixin):
             self._init_var_dens_persist_2d(self.dt)
 
         # =====================================================================
-        # Free-surface (level-set fluid-air) + gravity body force
-        # ---------------------------------------------------------------------
-        # Both are opt-in via the ``solver.free_surface`` and ``solver.gravity``
-        # YAML blocks.  When neither is set every code path below short-circuits
-        # to its pre-existing behaviour, so the BDIM solid-body pipeline is
-        # unaffected.
-        #
-        #   solver.free_surface:
-        #     phi_init: "lambda X, Y: Y - 0.5"   # negative in fluid, positive in air
-        #     theta_min:    0.01      # GFM cut-face fluid-fraction clamp
-        #     band_cells:   4         # narrow-band half-width (informational)
-        #     reinit_iters: 4         # explicit reinit sub-steps per call
-        #     reinit_every: 5         # reinitialise every N solver steps
-        #     extend_iters: 4         # velocity-extension sub-steps per call
-        #     extend_every: 1
-        #
+        # Gravity body force (opt-in via the ``solver.gravity`` block).
         #   solver.gravity: [gx, gy]      # 2-D
         #   solver.gravity: [gx, gy, gz]  # 3-D
+        # Used by the two-phase solver (water+air) and any gravity-driven
+        # run; ``None`` disables it.
         # =====================================================================
         self._init_gravity(solver.get("gravity", None))
-        self._init_free_surface(solver.get("free_surface", None))
 
     # =====================================================================
-    # Free-surface + gravity body force (opt-in)
+    # Gravity body force (opt-in)
     # =====================================================================
     def _init_gravity(self, gravity_cfg):
         """Parse the optional ``solver.gravity`` block.
@@ -844,70 +829,6 @@ class FluidSolver(PlottingMixin):
         if self.use_gravity:
             print(f"Gravity body force enabled: g = {self._gravity}")
 
-    def _init_free_surface(self, fs_cfg):
-        """Parse ``solver.free_surface`` and build the :class:`FreeSurface`.
-
-        When the block is absent ``self.free_surface`` is ``None`` and
-        every downstream hook short-circuits.  See :class:`FreeSurface`
-        for the full list of accepted parameters.
-        """
-        self.free_surface = None
-        self._fs_reinit_every = 5
-        self._fs_extend_every = 1
-        self._fs_extend_full = True
-        if fs_cfg is None:
-            return
-        phi_src = fs_cfg.get("phi_init")
-        if phi_src is None:
-            raise ValueError(
-                "solver.free_surface.phi_init is required when "
-                "solver.free_surface is set."
-            )
-        # Allow either a raw callable or a YAML lambda string evaluated
-        # in a torch-only namespace (same convention as body.sdf).
-        if isinstance(phi_src, str):
-            phi_init = eval(phi_src, {"torch": torch})
-        else:
-            phi_init = phi_src
-        if not callable(phi_init):
-            raise ValueError(
-                "solver.free_surface.phi_init must be a callable or a "
-                "lambda-string evaluating to one."
-            )
-        kwargs = dict(
-            theta_min   = float(fs_cfg.get("theta_min", 0.01)),
-            band_cells  = int(fs_cfg.get("band_cells", 4)),
-            reinit_iters= int(fs_cfg.get("reinit_iters", 4)),
-            extend_iters= int(fs_cfg.get("extend_iters", 4)),
-            convection_method = fs_cfg.get(
-                "convection_method",
-                self.convection_method
-                if self.convection_method in _ADV_SCHEMES else "quick"),
-            device      = self.device,
-            dtype       = self.dtype,
-        )
-        if self.ndim == 2:
-            self.free_surface = FreeSurface(
-                self.x, self.y, self.h, phi_init, **kwargs,
-            )
-        else:
-            self.free_surface = FreeSurface(
-                self.x, self.y, self.h, phi_init, z=self.z, **kwargs,
-            )
-        self._fs_reinit_every = int(fs_cfg.get("reinit_every", 5))
-        self._fs_extend_every = int(fs_cfg.get("extend_every", 1))
-        # Extend the water velocity into the WHOLE air region (not just a
-        # band) so the decoupled bulk air does not accumulate spurious,
-        # undamped vorticity from the predictor.  Cost scales with grid
-        # size; set False to restrict to the ``extend_iters`` band.
-        self._fs_extend_full = bool(fs_cfg.get("extend_full", True))
-        print(
-            f"Free-surface enabled: theta_min={kwargs['theta_min']}, "
-            f"reinit every {self._fs_reinit_every} steps "
-            f"({kwargs['reinit_iters']} sub-iters), "
-            f"velocity extension every {self._fs_extend_every} steps "
-            f"({kwargs['extend_iters']} sub-iters)."
-        )
 
     @torch.no_grad()
     def _apply_gravity_body_force(self, *vels):
@@ -916,128 +837,19 @@ class FluidSolver(PlottingMixin):
         ``fluid_step`` so the projection can balance it through the
         Poisson solve.
 
-        When the free surface is active the body force is gated by the
-        cell-centred *fluid* mask: gravity only accelerates fluid cells.
-        Without this gate the air narrow-band cells free-fall through
-        the box and dominate ``|u|_max``, even though their pressure is
-        pinned to ``p_atm = 0`` by the ghost-fluid layer.
+        MAC-staggered: ``u`` is on x-faces, ``v`` on y-faces, etc.  A
+        uniform gravity vector adds the same constant to every face on the
+        corresponding component grid; this is consistent with the
+        cell-centred pressure projection that follows.
         """
         if not self.use_gravity:
             return vels
-        # MAC-staggered: ``u`` is on x-faces, ``v`` on y-faces, etc.
-        # A uniform gravity vector adds the same constant to every face
-        # on the corresponding component grid; this is consistent with
-        # the cell-centred pressure projection that follows.
-        fluid_mask = (None if self.free_surface is None
-                      else self.free_surface.fluid_mask_cc)
         out = []
         for vel, g_comp in zip(vels, self._gravity):
-            if g_comp == 0.0:
-                out.append(vel)
-            else:
-                if fluid_mask is not None:
-                    # The cell-centred fluid mask is a defensible proxy
-                    # for the staggered MAC component: gravity is a
-                    # local body force, so leaving the air band's MAC
-                    # cells un-accelerated is enough to keep them quiet
-                    # (the velocity extension step then propagates the
-                    # fluid value into the narrow band each step).
-                    vel.add_(
-                        (float(self.dt) * g_comp) * fluid_mask.to(vel.dtype)
-                    )
-                else:
-                    # In-place add to avoid an extra allocation.
-                    vel.add_(float(self.dt) * g_comp)
-                out.append(vel)
+            if g_comp != 0.0:
+                vel.add_(float(self.dt) * g_comp)   # in-place
+            out.append(vel)
         return tuple(out)
-
-    @torch.no_grad()
-    def _fs_apply_gfm_to_coeffs(self, ch, cv, cw, solid_cc=None):
-        """Multiply staggered Poisson face coefficients in-place by the
-        ghost-fluid face scales.
-
-        When the host coefficient arrays are full-grid (legacy python
-        path) the GFM scales — which are face-grid sized — are inserted
-        into the appropriate inner slice; when they are face-grid
-        (kernel path) we multiply directly.
-
-        ``solid_cc`` (optional body mask) is forwarded to
-        ``ghost_fluid_face_scales`` so faces touching the immersed body
-        keep scale 1 (the BDIM coefficient governs there).
-        """
-        if self.free_surface is None:
-            return ch, cv, cw
-        scales = self.free_surface.ghost_fluid_face_scales(solid_cc=solid_cc)
-        s_u = scales[0]
-        s_v = scales[1]
-        s_w = scales[2] if self.ndim == 3 else None
-        # Detect face-grid vs full-grid: project()'s ``_face_grid`` check
-        # is ``ch.shape[0] < grid_shape[0]`` — use the same here so the
-        # scaling slice matches.
-        if self.ndim == 2:
-            _face_grid = (ch.shape[0] < self.nx)
-            if _face_grid:
-                ch = ch * s_u[:, 1:-1]
-                cv = cv * s_v[1:-1, :]
-            else:
-                ch[1:, 1:-1] = ch[1:, 1:-1] * s_u[:, 1:-1]
-                cv[1:-1, 1:] = cv[1:-1, 1:] * s_v[1:-1, :]
-        else:
-            _face_grid = (ch.shape[0] < self.nx)
-            if _face_grid:
-                ch = ch * s_u[:, 1:-1, 1:-1]
-                cv = cv * s_v[1:-1, :, 1:-1]
-                cw = cw * s_w[1:-1, 1:-1, :]
-            else:
-                ch[1:, 1:-1, 1:-1] = ch[1:, 1:-1, 1:-1] * s_u[:, 1:-1, 1:-1]
-                cv[1:-1, 1:, 1:-1] = cv[1:-1, 1:, 1:-1] * s_v[1:-1, :, 1:-1]
-                cw[1:-1, 1:-1, 1:] = cw[1:-1, 1:-1, 1:] * s_w[1:-1, 1:-1, :]
-        return ch, cv, cw
-
-    @torch.no_grad()
-    def _fs_post_step(self, u, v, w_vel, iteration):
-        """Free-surface bookkeeping invoked once per outer time step:
-
-        1. extend the water velocity into the air band on a **copy**, and
-           advect ``phi_fs`` with that copy (the air-side velocity is what
-           lets the interface track the flow);
-        2. periodically reinitialise to ``|∇phi| = 1``.
-
-        Crucially, the velocity extension must **not** mutate the solver's
-        own ``u/v/w``.  Those are the projected, divergence-free fields the
-        next predictor + projection consume; overwriting the air band with
-        a constant-along-normal (non-divergence-free) extrapolation
-        re-injects divergence at the interface every step, which under
-        gravity feeds a growing near-surface velocity mode and eventually
-        blows up.  So we extend a throwaway copy used only to transport the
-        level set; the real velocity stays clean.
-        """
-        if self.free_surface is None:
-            return
-        fs = self.free_surface
-        do_extend = (self._fs_extend_every > 0
-                     and (iteration % self._fs_extend_every == 0))
-        dt = float(self.dt)
-
-        if do_extend:
-            # Extend a COPY into the air band, then advect phi with it.
-            full = self._fs_extend_full
-            if self.ndim == 2:
-                u_a, v_a = u.clone(), v.clone()
-                fs.extend_velocity(u_a, v_a, full=full)
-                fs.advect(u_a, v_a, dt=dt)
-            else:
-                u_a, v_a, w_a = u.clone(), v.clone(), w_vel.clone()
-                fs.extend_velocity(u_a, v_a, w_a, full=full)
-                fs.advect(u_a, v_a, w_a, dt=dt)
-        else:
-            if self.ndim == 2:
-                fs.advect(u, v, dt=dt)
-            else:
-                fs.advect(u, v, w_vel, dt=dt)
-
-        if self._fs_reinit_every > 0 and (iteration % self._fs_reinit_every == 0):
-            fs.reinitialize()
 
     def inside(self, x):
         """
@@ -1213,61 +1025,7 @@ class FluidSolver(PlottingMixin):
 
         coeff = w * self.dt / self.rho
 
-        # ---- Free-surface (level-set) ghost-fluid integration ----------
-        # When the optional free surface is active, multiply the
-        # staggered Poisson coefficients (face-grid `dt/ρ_eff` arrays)
-        # elementwise by the GFM scales: 1 in fluid, 0 across air-air
-        # faces (decouples air cells), 1/θ across cut faces (Dirichlet
-        # `p_atm = 0` on the interpolated zero-crossing of φ_fs).
-        # Also force the divergence RHS to 0 in air cells so the
-        # smoother sees no spurious driving term where p ≡ 0.
-        if self.free_surface is not None:
-            # ---- Unified GFM + BDIM: make the free-surface ops body-aware.
-            # Wherever an immersed body occupies a cell, the free surface
-            # must DEFER (the BDIM no-slip / coefficient governs there); the
-            # GFM only acts on water↔air faces in the fluid.  Without this,
-            # when the body reaches the interface the GFM treats body cells
-            # as plain water/air (pins them to p_atm, computes a bogus θ)
-            # while BDIM imposes the body velocity — the two clobber each
-            # other's pressure BC and the solve blows up (water-entry/exit
-            # literature: Enright/Fedkiw + level-set IB, e.g. IBAMR).
-            solid_cc = None
-            cb = getattr(self, "composite_body", None)
-            if cb is not None and getattr(cb, "sdf_val", None) is not None:
-                solid_cc = (cb.sdf_val < 0)   # cells inside the body
-
-            # If the legacy multigrid path will fall back to its default
-            # constant-density coefficients, materialise them first so
-            # the GFM rescale can be applied uniformly.
-            if self.poisson_method != "fft":
-                if ch is None:
-                    ch = coeff * self.mu0_all_u
-                if cv is None:
-                    cv = coeff * self.mu0_all_v
-                if self.ndim == 3 and cw is None:
-                    cw = coeff * self.mu0_all_w
-            ch, cv, cw = self._fs_apply_gfm_to_coeffs(ch, cv, cw, solid_cc=solid_cc)
-            # Air cells to pin to p_atm = 0 — but NOT body cells (those are
-            # solved/penalised by BDIM even if they poke above the surface).
-            air = self.free_surface.air_mask_cc
-            if solid_cc is not None:
-                air = air & (~solid_cc)
-            # Mask div in (non-body) air cells (cell-centred).
-            self.div = torch.where(air, torch.zeros_like(self.div), self.div)
-            # Hand the **inner** (non-body) air mask to the Poisson solver as
-            # a Dirichlet pin (p_air ≡ 0).  The GFM cut-face scaling makes
-            # the air cells adjacent to the interface non-degenerate
-            # (J ≠ 0), so the smoother's J=0 mechanism alone is NOT
-            # enough to enforce the Dirichlet BC there.  The mask hooks
-            # into PoissonSolver.smooth to zero p in those cells after
-            # every sweep at every multigrid level.
-            self._fs_solid_cc = solid_cc   # reused by the post-solve gauge/mask
-            if self.ndim == 2:
-                self.poisson_solver.dirichlet_mask = air[1:-1, 1:-1].contiguous()
-            else:
-                self.poisson_solver.dirichlet_mask = air[1:-1, 1:-1, 1:-1].contiguous()
-        else:
-            self.poisson_solver.dirichlet_mask = None
+        self.poisson_solver.dirichlet_mask = None
 
         if self.poisson_method == "fft":
             # ---- FFT solver: CONSTANT-coefficient projection ----
@@ -1395,22 +1153,6 @@ class FluidSolver(PlottingMixin):
                     _mx = torch.cuda.max_memory_allocated() / 1024**3
                     print(f"[MEM_DBG] {'project:after inline projection correction':55s}"
                           f"  cur={_gb:.3f} GiB  peak={_mx:.3f} GiB", flush=True)
-
-        # Free-surface post-projection: anchor the pressure datum.
-        # The ghost-fluid solve fixes the pressure *gradient* but leaves
-        # the additive constant (DC null-space mode) only weakly pinned —
-        # air cells are decoupled and couple to water only through thin cut
-        # faces, so the constant is unconstrained and even drifts with more
-        # V-cycles.  Anchoring on the air-cell mean does nothing (air is
-        # already pinned to 0).  Instead recover the datum from the physical
-        # condition p = p_atm = 0 at the interface (extrapolated from the
-        # water side; see FreeSurface.interface_gauge_offset), then zero the
-        # air cells.
-        if self.free_surface is not None:
-            _solid_cc = getattr(self, "_fs_solid_cc", None)
-            offset = self.free_surface.interface_gauge_offset(p, solid_cc=_solid_cc)
-            p = p - offset
-            self.free_surface.apply_pressure_mask(p, solid_cc=_solid_cc)
 
         if self.ndim == 2:
             return (u, v, p)
@@ -2644,10 +2386,6 @@ class FluidSolver(PlottingMixin):
         ``terminate`` flag from :meth:`plotting_and_saving`.
         """
         self.check_explosion(iteration)
-
-        # ---- free-surface bookkeeping (advect + periodic reinit/extend) ----
-        if self.free_surface is not None:
-            self._fs_post_step(u, v, w_vel, iteration)
 
         # ---- free BDIM fields to reclaim GPU memory between steps ----
         self._release_bdim_fields()
