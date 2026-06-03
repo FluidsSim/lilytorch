@@ -3,9 +3,11 @@
 The two-phase model represents the air as a *real* (light) fluid: the interface
 is carried by a **volume fraction** ``alpha`` (``1`` water, ``0`` air), and one
 set of Navier–Stokes equations is solved with a spatially varying density /
-viscosity. This class owns ``alpha``, transports it (bounded, mass-conservative,
-optionally interface-compressed), and builds the cell-centred / face density and
-viscosity fields that the variable-density pressure projection consumes.
+viscosity. This class owns ``alpha``, transports it with the Weymouth & Yue
+(2010) conservative VOF scheme (bounded, mass-conservative, no clamping or
+reconstruction — see :meth:`advect`), and builds the cell-centred / face
+density and viscosity fields that the variable-density pressure projection
+consumes.
 
 It is intentionally **decoupled** from the solver: it stores no body SDF, never
 touches ``composite_body``, and exposes only plain field accessors. The
@@ -149,75 +151,95 @@ class TwoPhase:
     # ------------------------------------------------------------------
     @torch.no_grad()
     def advect(self, *vels, dt):
-        """Advance ``alpha`` one forward-Euler step under the MAC velocity.
+        """Weymouth & Yue (2010) conservative VOF transport.
 
-        Conservative flux form with the configured bounded scheme, plus an
-        optional MULES-style interface-compression flux
-        ``-div(C_alpha |u| n_hat alpha(1-alpha))`` that counteracts numerical
-        smearing of the interface. ``alpha`` is clamped to ``[0,1]`` and
-        zero-gradient padded afterwards.
+        Dimensional operator split (Lie); per direction ``d`` the interior
+        update is
+
+            a_i += (dt/h) [ F_{i-1/2} - F_{i+1/2} + a_i (u_{i+1/2} - u_{i-1/2}) ]
+
+        with an upwind face flux ``F = u_face * a_upwind``.  The
+        **divergence-correction** term ``a_i (u_R - u_L)`` is the key
+        ingredient: it makes each 1-D sweep bounded in ``[0,1]`` (for
+        CFL <= 1) and, summed over the ``D`` sweeps with a discretely
+        divergence-free velocity, conserves total volume to round-off — with
+        **no clamping and no interface reconstruction**
+        (Weymouth & Yue, *Conservative VOF method...*, JCP **229** (2010) 2853;
+        the scheme used by lily-pad / WaterLily and the BDIM+VOF coupling).
+        The sweep order alternates each step to limit directional bias.  The
+        face value is the W&Y 2nd-order Courant-corrected, van-Leer-limited
+        donor extrapolation (see :meth:`_cvof_sweep`), which keeps the
+        interface sharp while staying bounded; the ``advection`` /
+        ``compression`` config knobs are unused by this conservative scheme.
         """
-        a = advect_scalar(self.alpha, *vels,
-                          scheme=self._scheme, dt=float(dt), dh=self._dh)
-        if self.compression > 0.0:
-            a = a + self._compression_increment(vels, float(dt))
-        # Conservative clamp: a bounded scheme can still over/undershoot
-        # [0,1] slightly; naive clamping would DISCARD that mass (a floating
-        # body would then spuriously sink/rise). Instead redistribute the
-        # clamped defect back into the interface band (weight alpha(1-alpha)),
-        # which conserves total volume to round-off while staying bounded.
-        inner = tuple(slice(1, -1) for _ in range(self.ndim))
-        ai     = a[inner]
-        ai_cl  = ai.clamp(0.0, 1.0)
-        defect = (ai - ai_cl).sum()
-        w      = ai_cl * (1.0 - ai_cl)
-        wsum   = w.sum()
-        if float(wsum) > 1e-12:
-            ai_cl = ai_cl + defect * (w / wsum)
-        a[inner] = ai_cl.clamp(0.0, 1.0)
+        dt = float(dt)
+        order = list(range(self.ndim))
+        self._sweep_parity = not getattr(self, "_sweep_parity", False)
+        if self._sweep_parity:
+            order = order[::-1]
+        a = self.alpha
+        for d in order:
+            _neumann_pad(a)
+            a = self._cvof_sweep(a, vels[d], d, dt)
+        _neumann_pad(a)
         self.alpha = a
-        _neumann_pad(self.alpha)
 
-    def _compression_increment(self, vels, dt):
-        """Conservative interface-compression increment on the interior.
+    def _shift(self, a, s, d):
+        """Shift ``a`` by ``s`` cells along dim ``d`` with **edge replication**
+        (Neumann-consistent), unlike ``torch.roll`` which wraps the boundary.
+        Supports ``s in (1, 2, -1)`` (the cVOF stencil offsets)."""
+        nd = self.ndim
+        S  = lambda sl: _sl(nd, d, sl)
+        if s == 1:                       # a[k-1], boundary -> a[0]
+            return torch.cat([a[S(slice(0, 1))], a[S(slice(0, -1))]], dim=d)
+        if s == 2:                       # a[k-2], boundary -> a[0]
+            return torch.cat([a[S(slice(0, 1))], a[S(slice(0, 1))],
+                              a[S(slice(0, -2))]], dim=d)
+        if s == -1:                      # a[k+1], boundary -> a[-1]
+            return torch.cat([a[S(slice(1, None))], a[S(slice(-1, None))]], dim=d)
+        raise ValueError(f"_shift: unsupported offset {s}")
 
-        Per axis ``d`` the compressive face flux is
-        ``F_d = C_alpha * |u_d|_face * n_hat_d|_face * (alpha(1-alpha))_face``;
-        the increment is ``-dt/h * (F[i+1] - F[i])``. Sharpens the interface
-        without moving its 0.5 contour (the ``alpha(1-alpha)`` factor and the
-        normal direction make it a self-limiting anti-diffusion).
+    def _cvof_sweep(self, a, u_d, d, dt):
+        """One Weymouth-Yue conservative directional sweep along dim ``d``.
+
+        MAC convention: ``u_d[k]`` is the face *left* of cell ``k`` (between
+        cells ``k-1`` and ``k``).  The face value is the W&Y 2nd-order
+        Courant-corrected, van-Leer-limited extrapolation of the **donor**
+        cell to the face (first-order upwind when the slope limiter kills the
+        gradient), plus the divergence correction.  Returns a new tensor with
+        the interior updated.
         """
         nd  = self.ndim
-        a   = self.alpha
-        # cell-centred normal n_hat = grad(alpha)/|grad(alpha)|
-        eps = 1.0e-12
-        grads = []
-        for d in range(nd):
-            gp = a[_sl(nd, d, slice(2, None))] - a[_sl(nd, d, slice(None, -2))]
-            g  = torch.zeros_like(a)
-            g[_sl(nd, d, slice(1, -1))] = gp / (2.0 * self.h)
-            grads.append(g)
-        gmag = torch.sqrt(sum(g * g for g in grads) + eps)
-        nhat = [g / gmag for g in grads]
+        S   = lambda s: _sl(nd, d, s)
+        cfl = dt / self.h
+        C   = u_d * cfl                                   # face Courant number
+        # neighbour shifts along d with EDGE-CLAMP (Neumann-consistent), NOT
+        # torch.roll: roll wraps top<->bottom / left<->right, which corrupts the
+        # face values at the domain corners in an order-dependent way and shows
+        # up as a one-corner asymmetry in an otherwise symmetric problem.
+        a_m1 = self._shift(a,  1, d)                      # a[k-1]
+        a_m2 = self._shift(a,  2, d)                      # a[k-2]
+        a_p1 = self._shift(a, -1, d)                      # a[k+1]
 
-        ab = (a * (1.0 - a))                       # interface indicator, cc
-        rhs = torch.zeros_like(a[tuple(slice(1, -1) for _ in range(nd))])
-        for d in range(nd):
-            # face-centred quantities on the d-faces (index i between i-1,i)
-            u_d   = vels[d]
-            uf    = u_d[_sl(nd, d, slice(1, None))]            # face vel (i>=1)
-            nf    = 0.5 * (nhat[d][_sl(nd, d, slice(1, None))]
-                           + nhat[d][_sl(nd, d, slice(None, -1))])
-            abf   = 0.5 * (ab[_sl(nd, d, slice(1, None))]
-                           + ab[_sl(nd, d, slice(None, -1))])
-            Fface = self.compression * uf.abs() * nf * abf    # on faces i>=1
-            # restrict transverse dims to interior to match rhs shape
-            inner_t = [slice(1, -1)] * nd
-            inner_t[d] = slice(None)
-            F = Fface[tuple(inner_t)]                          # (..., n_d-1, ...)
-            F_diff = (F[_sl(nd, d, slice(None, -1))]
-                      - F[_sl(nd, d, slice(1, None))])
-            rhs.add_(F_diff, alpha=dt / self.h)
-        out = torch.zeros_like(a)
-        out[tuple(slice(1, -1) for _ in range(nd))] = rhs
+        def _vleer(db, df):
+            # van Leer (harmonic) limited slope; 0 at extrema / sign changes.
+            denom = torch.where(db + df == 0.0,
+                                torch.ones_like(db), db + df)
+            s = 2.0 * db * df / denom
+            return torch.where(db * df > 0.0, s, torch.zeros_like(s))
+
+        # C >= 0: donor = cell k-1, extrapolate forward to the face
+        s_pos    = _vleer(a_m1 - a_m2, a - a_m1)
+        face_pos = a_m1 + 0.5 * (1.0 - C) * s_pos
+        # C < 0: donor = cell k, extrapolate backward to the face
+        s_neg    = _vleer(a - a_m1, a_p1 - a)
+        face_neg = a - 0.5 * (1.0 + C) * s_neg
+        F = u_d * torch.where(C >= 0.0, face_pos, face_neg)   # flux at face k
+        out = a.clone()
+        FL = F[S(slice(1, -1))]        # left face of interior cell i  (index i)
+        FR = F[S(slice(2, None))]      # right face of interior cell i (index i+1)
+        uL = u_d[S(slice(1, -1))]
+        uR = u_d[S(slice(2, None))]
+        ai = a[S(slice(1, -1))]
+        out[S(slice(1, -1))] = ai + cfl * (FL - FR + ai * (uR - uL))
         return out

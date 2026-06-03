@@ -57,7 +57,7 @@ Key features
    mathematical_formulation
    numerical_schemes
    immersed_boundary
-   free_surface
+   two_phase
    strong_coupling
 
 .. toctree::
@@ -69,7 +69,7 @@ Key features
    api/diffusion
    api/adv_diff
    api/poisson
-   api/free_surface
+   api/two_phase
    api/body
    api/operations
    api/plotting

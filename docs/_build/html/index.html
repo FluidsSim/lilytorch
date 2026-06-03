@@ -210,7 +210,7 @@
 <li class="toctree-l1"><a class="reference internal" href="mathematical_formulation.html">Mathematical Formulation</a></li>
 <li class="toctree-l1"><a class="reference internal" href="numerical_schemes.html">Numerical Schemes</a></li>
 <li class="toctree-l1"><a class="reference internal" href="immersed_boundary.html">Immersed Boundary Method — BDIM2</a></li>
-<li class="toctree-l1"><a class="reference internal" href="free_surface.html">Free Surface — Level-Set Fluid–Air</a></li>
+<li class="toctree-l1"><a class="reference internal" href="two_phase.html">Two-Phase Free Surface (Water + Air)</a></li>
 <li class="toctree-l1"><a class="reference internal" href="strong_coupling.html">Strong (implicit) FSI coupling</a></li>
 </ul>
 <p class="caption" role="heading"><span class="caption-text">API Reference</span></p>
@@ -222,7 +222,7 @@
 <li class="toctree-l1"><a class="reference internal" href="api/diffusion.html"><code class="docutils literal notranslate"><span class="pre">diffusion</span></code> — Diffusion Operators</a></li>
 <li class="toctree-l1"><a class="reference internal" href="api/adv_diff.html"><code class="docutils literal notranslate"><span class="pre">adv_diff</span></code> — Advection–Diffusion (legacy)</a></li>
 <li class="toctree-l1"><a class="reference internal" href="api/poisson.html"><code class="docutils literal notranslate"><span class="pre">poisson</span></code> — Pressure Solvers</a></li>
-<li class="toctree-l1"><a class="reference internal" href="api/free_surface.html"><code class="docutils literal notranslate"><span class="pre">free_surface</span></code> — Level-Set Free Surface</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api/two_phase.html"><code class="docutils literal notranslate"><span class="pre">two_phase</span></code> — Two-Phase (Water + Air) Solver</a></li>
 <li class="toctree-l1"><a class="reference internal" href="api/body.html"><code class="docutils literal notranslate"><span class="pre">body</span></code> — Geometry, SDF &amp; Kinematics</a></li>
 <li class="toctree-l1"><a class="reference internal" href="api/operations.html"><code class="docutils literal notranslate"><span class="pre">operations</span></code> — Discrete Differential Operators</a></li>
 <li class="toctree-l1"><a class="reference internal" href="api/plotting.html"><code class="docutils literal notranslate"><span class="pre">plotting</span></code> — Visualisation Helpers</a></li>
@@ -379,17 +379,14 @@ variable-coefficient multigrid / MGCG.</p></li>
 <li class="toctree-l2"><a class="reference internal" href="immersed_boundary.html#performance-union-narrow-band">Performance: union narrow-band</a></li>
 </ul>
 </li>
-<li class="toctree-l1"><a class="reference internal" href="free_surface.html">Free Surface — Level-Set Fluid–Air</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="free_surface.html#single-fluid-model">Single-fluid model</a></li>
-<li class="toctree-l2"><a class="reference internal" href="free_surface.html#the-per-step-cycle">The per-step cycle</a></li>
-<li class="toctree-l2"><a class="reference internal" href="free_surface.html#interface-advection">Interface advection</a></li>
-<li class="toctree-l2"><a class="reference internal" href="free_surface.html#reinitialisation">Reinitialisation</a></li>
-<li class="toctree-l2"><a class="reference internal" href="free_surface.html#velocity-extension">Velocity extension</a></li>
-<li class="toctree-l2"><a class="reference internal" href="free_surface.html#ghost-fluid-pressure-boundary-condition">Ghost-fluid pressure boundary condition</a></li>
-<li class="toctree-l2"><a class="reference internal" href="free_surface.html#gravity-coupling">Gravity coupling</a></li>
-<li class="toctree-l2"><a class="reference internal" href="free_surface.html#configuration">Configuration</a></li>
-<li class="toctree-l2"><a class="reference internal" href="free_surface.html#validation-hydrostatic-column">Validation: hydrostatic column</a></li>
-<li class="toctree-l2"><a class="reference internal" href="free_surface.html#references">References</a></li>
+<li class="toctree-l1"><a class="reference internal" href="two_phase.html">Two-Phase Free Surface (Water + Air)</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="two_phase.html#model">Model</a></li>
+<li class="toctree-l2"><a class="reference internal" href="two_phase.html#per-step-cycle">Per-step cycle</a></li>
+<li class="toctree-l2"><a class="reference internal" href="two_phase.html#vof-transport">VOF transport</a></li>
+<li class="toctree-l2"><a class="reference internal" href="two_phase.html#buoyancy-body-loads">Buoyancy &amp; body loads</a></li>
+<li class="toctree-l2"><a class="reference internal" href="two_phase.html#configuration">Configuration</a></li>
+<li class="toctree-l2"><a class="reference internal" href="two_phase.html#validation">Validation</a></li>
+<li class="toctree-l2"><a class="reference internal" href="two_phase.html#references">References</a></li>
 </ul>
 </li>
 <li class="toctree-l1"><a class="reference internal" href="strong_coupling.html">Strong (implicit) FSI coupling</a><ul>
@@ -448,9 +445,10 @@ variable-coefficient multigrid / MGCG.</p></li>
 <li class="toctree-l2"><a class="reference internal" href="api/poisson.html#module-lilytorch.src.poisson_mult">Multigrid / MGCG solver</a></li>
 </ul>
 </li>
-<li class="toctree-l1"><a class="reference internal" href="api/free_surface.html"><code class="docutils literal notranslate"><span class="pre">free_surface</span></code> — Level-Set Free Surface</a><ul>
-<li class="toctree-l2"><a class="reference internal" href="api/free_surface.html#sign-convention">Sign convention</a></li>
-<li class="toctree-l2"><a class="reference internal" href="api/free_surface.html#lilytorch.src.free_surface.FreeSurface"><code class="docutils literal notranslate"><span class="pre">FreeSurface</span></code></a></li>
+<li class="toctree-l1"><a class="reference internal" href="api/two_phase.html"><code class="docutils literal notranslate"><span class="pre">two_phase</span></code> — Two-Phase (Water + Air) Solver</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="api/two_phase.html#lilytorch.src.two_phase.TwoPhase"><code class="docutils literal notranslate"><span class="pre">TwoPhase</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="api/two_phase.html#lilytorch.src.two_phase_solver.TwoPhaseSolver"><code class="docutils literal notranslate"><span class="pre">TwoPhaseSolver</span></code></a></li>
+<li class="toctree-l2"><a class="reference internal" href="api/two_phase.html#lilytorch.src.two_phase_solver.build_two_phase_solver"><code class="docutils literal notranslate"><span class="pre">build_two_phase_solver()</span></code></a></li>
 </ul>
 </li>
 <li class="toctree-l1"><a class="reference internal" href="api/body.html"><code class="docutils literal notranslate"><span class="pre">body</span></code> — Geometry, SDF &amp; Kinematics</a><ul>

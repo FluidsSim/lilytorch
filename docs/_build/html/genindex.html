@@ -208,7 +208,7 @@
 <li class="toctree-l1"><a class="reference internal" href="mathematical_formulation.html">Mathematical Formulation</a></li>
 <li class="toctree-l1"><a class="reference internal" href="numerical_schemes.html">Numerical Schemes</a></li>
 <li class="toctree-l1"><a class="reference internal" href="immersed_boundary.html">Immersed Boundary Method — BDIM2</a></li>
-<li class="toctree-l1"><a class="reference internal" href="free_surface.html">Free Surface — Level-Set Fluid–Air</a></li>
+<li class="toctree-l1"><a class="reference internal" href="two_phase.html">Two-Phase Free Surface (Water + Air)</a></li>
 <li class="toctree-l1"><a class="reference internal" href="strong_coupling.html">Strong (implicit) FSI coupling</a></li>
 </ul>
 <p class="caption" role="heading"><span class="caption-text">API Reference</span></p>
@@ -220,7 +220,7 @@
 <li class="toctree-l1"><a class="reference internal" href="api/diffusion.html"><code class="docutils literal notranslate"><span class="pre">diffusion</span></code> — Diffusion Operators</a></li>
 <li class="toctree-l1"><a class="reference internal" href="api/adv_diff.html"><code class="docutils literal notranslate"><span class="pre">adv_diff</span></code> — Advection–Diffusion (legacy)</a></li>
 <li class="toctree-l1"><a class="reference internal" href="api/poisson.html"><code class="docutils literal notranslate"><span class="pre">poisson</span></code> — Pressure Solvers</a></li>
-<li class="toctree-l1"><a class="reference internal" href="api/free_surface.html"><code class="docutils literal notranslate"><span class="pre">free_surface</span></code> — Level-Set Free Surface</a></li>
+<li class="toctree-l1"><a class="reference internal" href="api/two_phase.html"><code class="docutils literal notranslate"><span class="pre">two_phase</span></code> — Two-Phase (Water + Air) Solver</a></li>
 <li class="toctree-l1"><a class="reference internal" href="api/body.html"><code class="docutils literal notranslate"><span class="pre">body</span></code> — Geometry, SDF &amp; Kinematics</a></li>
 <li class="toctree-l1"><a class="reference internal" href="api/operations.html"><code class="docutils literal notranslate"><span class="pre">operations</span></code> — Discrete Differential Operators</a></li>
 <li class="toctree-l1"><a class="reference internal" href="api/plotting.html"><code class="docutils literal notranslate"><span class="pre">plotting</span></code> — Visualisation Helpers</a></li>
@@ -301,7 +301,7 @@
 </li>
         <li><a href="api/advection.html#lilytorch.src.advection.AdvDiffSolver">AdvDiffSolver (class in lilytorch.src.advection)</a>
 </li>
-        <li><a href="api/free_surface.html#lilytorch.src.free_surface.FreeSurface.advect">advect() (lilytorch.src.free_surface.FreeSurface method)</a>
+        <li><a href="api/two_phase.html#lilytorch.src.two_phase.TwoPhase.advect">advect() (lilytorch.src.two_phase.TwoPhase method)</a>
 </li>
         <li><a href="api/advection.html#lilytorch.src.advection.advect_momentum">advect_momentum() (in module lilytorch.src.advection)</a>
 </li>
@@ -309,11 +309,9 @@
 </li>
     </ul></td>
     <td style="width: 33%; vertical-align: top;"><ul>
-        <li><a href="api/free_surface.html#lilytorch.src.free_surface.FreeSurface.air_mask_cc">air_mask_cc (lilytorch.src.free_surface.FreeSurface property)</a>
+        <li><a href="api/two_phase.html#lilytorch.src.two_phase.TwoPhase.air_mask_cc">air_mask_cc (lilytorch.src.two_phase.TwoPhase property)</a>
 </li>
         <li><a href="api/integration.html#lilytorch.integration.gamepad.GamepadHandler.apply_deadzone">apply_deadzone() (lilytorch.integration.gamepad.GamepadHandler method)</a>
-</li>
-        <li><a href="api/free_surface.html#lilytorch.src.free_surface.FreeSurface.apply_pressure_mask">apply_pressure_mask() (lilytorch.src.free_surface.FreeSurface method)</a>
 </li>
         <li><a href="api/solver.html#lilytorch.src.extras.apply_sponge_damping">apply_sponge_damping() (in module lilytorch.src.extras)</a>
 
@@ -374,6 +372,8 @@
         <li><a href="api/body.html#lilytorch.src.body.box_3d">box_3d() (in module lilytorch.src.body)</a>
 </li>
         <li><a href="api/plotting.html#lilytorch.src.plotting.build_body_mu0_rgba">build_body_mu0_rgba() (in module lilytorch.src.plotting)</a>
+</li>
+        <li><a href="api/two_phase.html#lilytorch.src.two_phase_solver.build_two_phase_solver">build_two_phase_solver() (in module lilytorch.src.two_phase_solver)</a>
 </li>
     </ul></td>
   </tr></table>
@@ -467,10 +467,14 @@
 </li>
         <li><a href="api/plotting.html#lilytorch.src.plotting.PlottingMixin.DEFAULT_PLOT_SPECS">DEFAULT_PLOT_SPECS (lilytorch.src.plotting.PlottingMixin attribute)</a>
 </li>
-        <li><a href="api/util.html#lilytorch.util.rw.Dict2Class">Dict2Class (class in lilytorch.util.rw)</a>
+        <li><a href="api/two_phase.html#lilytorch.src.two_phase.TwoPhase.density_cc">density_cc() (lilytorch.src.two_phase.TwoPhase method)</a>
+</li>
+        <li><a href="api/two_phase.html#lilytorch.src.two_phase.TwoPhase.density_face">density_face() (lilytorch.src.two_phase.TwoPhase method)</a>
 </li>
     </ul></td>
     <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/util.html#lilytorch.util.rw.Dict2Class">Dict2Class (class in lilytorch.util.rw)</a>
+</li>
         <li><a href="api/diffusion.html#lilytorch.src.diffusion.diffuse">diffuse() (in module lilytorch.src.diffusion)</a>
 </li>
         <li><a href="api/operations.html#lilytorch.src.operations.divergence">divergence() (in module lilytorch.src.operations)</a>
@@ -497,17 +501,15 @@
           <li><a href="api/integration.html#lilytorch.integration.flow_viewer_2d_gpu.FlowViewer2DGPU.end_episode">(lilytorch.integration.flow_viewer_2d_gpu.FlowViewer2DGPU method)</a>
 </li>
         </ul></li>
-        <li><a href="api/integration.html#lilytorch.integration.flow_viewer_gl_hook.ensure_flow_viewer_gl_hook_built">ensure_flow_viewer_gl_hook_built() (in module lilytorch.integration.flow_viewer_gl_hook)</a>
-</li>
     </ul></td>
     <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/integration.html#lilytorch.integration.flow_viewer_gl_hook.ensure_flow_viewer_gl_hook_built">ensure_flow_viewer_gl_hook_built() (in module lilytorch.integration.flow_viewer_gl_hook)</a>
+</li>
         <li><a href="api/body.html#lilytorch.src.body.BodyFishAnalytical.envelope">envelope() (lilytorch.src.body.BodyFishAnalytical method)</a>
 </li>
         <li><a href="api/integration.html#lilytorch.integration.gamepad.example_usage">example_usage() (in module lilytorch.integration.gamepad)</a>
 </li>
         <li><a href="api/integration.html#lilytorch.integration.gamepad.example_usage_events">example_usage_events() (in module lilytorch.integration.gamepad)</a>
-</li>
-        <li><a href="api/free_surface.html#lilytorch.src.free_surface.FreeSurface.extend_velocity">extend_velocity() (lilytorch.src.free_surface.FreeSurface method)</a>
 </li>
     </ul></td>
   </tr></table>
@@ -518,7 +520,11 @@
   <table style="width: 100%" class="indextable genindextable"><tr>
     <td style="width: 33%; vertical-align: top;"><ul>
         <li><a href="api/solver.html#lilytorch.src.solver.FluidSolver.finalize_step">finalize_step() (lilytorch.src.solver.FluidSolver method)</a>
+
+        <ul>
+          <li><a href="api/two_phase.html#lilytorch.src.two_phase_solver.TwoPhaseSolver.finalize_step">(lilytorch.src.two_phase_solver.TwoPhaseSolver method)</a>
 </li>
+        </ul></li>
         <li><a href="api/solver.html#lilytorch.src.solver.FlowDiagnostics">FlowDiagnostics (class in lilytorch.src.solver)</a>
 </li>
         <li><a href="api/integration.html#lilytorch.integration.flow_viewer.FlowViewer">FlowViewer (class in lilytorch.integration.flow_viewer)</a>
@@ -532,8 +538,6 @@
         <li><a href="api/integration.html#lilytorch.integration.flow_viewer_2d_gpu.FlowViewer2DGPU">FlowViewer2DGPU (class in lilytorch.integration.flow_viewer_2d_gpu)</a>
 </li>
         <li><a href="api/integration.html#lilytorch.integration.flow_viewer_gl_hook.FlowViewerGLHook">FlowViewerGLHook (class in lilytorch.integration.flow_viewer_gl_hook)</a>
-</li>
-        <li><a href="api/free_surface.html#lilytorch.src.free_surface.FreeSurface.fluid_mask_cc">fluid_mask_cc (lilytorch.src.free_surface.FreeSurface property)</a>
 </li>
         <li><a href="api/solver.html#lilytorch.src.solver.FluidSolver.fluid_step">fluid_step() (lilytorch.src.solver.FluidSolver method)</a>
 </li>
@@ -555,18 +559,20 @@
           <li><a href="api/solver.html#lilytorch.src.solver.FluidSolver.forces_lagrangian_3d">(lilytorch.src.solver.FluidSolver method)</a>
 </li>
         </ul></li>
-    </ul></td>
-    <td style="width: 33%; vertical-align: top;"><ul>
         <li><a href="api/solver.html#lilytorch.src.forces.forces_method1">forces_method1() (in module lilytorch.src.forces)</a>
 
         <ul>
           <li><a href="api/solver.html#lilytorch.src.solver.FluidSolver.forces_method1">(lilytorch.src.solver.FluidSolver method)</a>
 </li>
         </ul></li>
+    </ul></td>
+    <td style="width: 33%; vertical-align: top;"><ul>
         <li><a href="api/solver.html#lilytorch.src.forces.forces_method2">forces_method2() (in module lilytorch.src.forces)</a>
 
         <ul>
           <li><a href="api/solver.html#lilytorch.src.solver.FluidSolver.forces_method2">(lilytorch.src.solver.FluidSolver method)</a>
+</li>
+          <li><a href="api/two_phase.html#lilytorch.src.two_phase_solver.TwoPhaseSolver.forces_method2">(lilytorch.src.two_phase_solver.TwoPhaseSolver method)</a>
 </li>
         </ul></li>
         <li><a href="api/solver.html#lilytorch.src.forces.forces_method2_3d">forces_method2_3d() (in module lilytorch.src.forces)</a>
@@ -574,9 +580,9 @@
         <ul>
           <li><a href="api/solver.html#lilytorch.src.solver.FluidSolver.forces_method2_3d">(lilytorch.src.solver.FluidSolver method)</a>
 </li>
-        </ul></li>
-        <li><a href="api/free_surface.html#lilytorch.src.free_surface.FreeSurface">FreeSurface (class in lilytorch.src.free_surface)</a>
+          <li><a href="api/two_phase.html#lilytorch.src.two_phase_solver.TwoPhaseSolver.forces_method2_3d">(lilytorch.src.two_phase_solver.TwoPhaseSolver method)</a>
 </li>
+        </ul></li>
         <li><a href="api/integration.html#lilytorch.integration.extensions.DataLogger.from_options">from_options() (lilytorch.integration.extensions.DataLogger class method)</a>
 
         <ul>
@@ -624,8 +630,6 @@
         <li><a href="api/solver.html#lilytorch.src.solver.FluidSolver.get_loads">get_loads() (lilytorch.src.solver.FluidSolver method)</a>
 </li>
         <li><a href="api/integration.html#lilytorch.integration.gamepad.GamepadHandler.get_state">get_state() (lilytorch.integration.gamepad.GamepadHandler method)</a>
-</li>
-        <li><a href="api/free_surface.html#lilytorch.src.free_surface.FreeSurface.ghost_fluid_face_scales">ghost_fluid_face_scales() (lilytorch.src.free_surface.FreeSurface method)</a>
 </li>
         <li><a href="api/operations.html#lilytorch.src.operations.gradient">gradient() (in module lilytorch.src.operations)</a>
 
@@ -678,8 +682,6 @@
         <li><a href="api/integration.html#lilytorch.integration.extensions.FluidExtension.initialize_forces">initialize_forces() (lilytorch.integration.extensions.FluidExtension method)</a>
 </li>
         <li><a href="api/solver.html#lilytorch.src.solver.FluidSolver.inside">inside() (lilytorch.src.solver.FluidSolver method)</a>
-</li>
-        <li><a href="api/free_surface.html#lilytorch.src.free_surface.FreeSurface.interface_gauge_offset">interface_gauge_offset() (lilytorch.src.free_surface.FreeSurface method)</a>
 </li>
     </ul></td>
   </tr></table>
@@ -801,8 +803,6 @@
           <li><a href="api/advection.html#module-lilytorch.src.advection">module</a>
 </li>
         </ul></li>
-    </ul></td>
-    <td style="width: 33%; vertical-align: top;"><ul>
         <li>
     lilytorch.src.body
 
@@ -810,6 +810,8 @@
           <li><a href="api/body.html#module-lilytorch.src.body">module</a>
 </li>
         </ul></li>
+    </ul></td>
+    <td style="width: 33%; vertical-align: top;"><ul>
         <li>
     lilytorch.src.diffusion
 
@@ -829,13 +831,6 @@
 
         <ul>
           <li><a href="api/solver.html#module-lilytorch.src.forces">module</a>
-</li>
-        </ul></li>
-        <li>
-    lilytorch.src.free_surface
-
-        <ul>
-          <li><a href="api/free_surface.html#module-lilytorch.src.free_surface">module</a>
 </li>
         </ul></li>
         <li>
@@ -871,6 +866,20 @@
 
         <ul>
           <li><a href="api/solver.html#module-lilytorch.src.solver">module</a>
+</li>
+        </ul></li>
+        <li>
+    lilytorch.src.two_phase
+
+        <ul>
+          <li><a href="api/two_phase.html#module-lilytorch.src.two_phase">module</a>
+</li>
+        </ul></li>
+        <li>
+    lilytorch.src.two_phase_solver
+
+        <ul>
+          <li><a href="api/two_phase.html#module-lilytorch.src.two_phase_solver">module</a>
 </li>
         </ul></li>
         <li>
@@ -944,8 +953,6 @@
 </li>
           <li><a href="api/solver.html#module-lilytorch.src.forces">lilytorch.src.forces</a>
 </li>
-          <li><a href="api/free_surface.html#module-lilytorch.src.free_surface">lilytorch.src.free_surface</a>
-</li>
           <li><a href="api/operations.html#module-lilytorch.src.operations">lilytorch.src.operations</a>
 </li>
           <li><a href="api/plotting.html#module-lilytorch.src.plotting">lilytorch.src.plotting</a>
@@ -955,6 +962,10 @@
           <li><a href="api/poisson.html#module-lilytorch.src.poisson_mult">lilytorch.src.poisson_mult</a>
 </li>
           <li><a href="api/solver.html#module-lilytorch.src.solver">lilytorch.src.solver</a>
+</li>
+          <li><a href="api/two_phase.html#module-lilytorch.src.two_phase">lilytorch.src.two_phase</a>
+</li>
+          <li><a href="api/two_phase.html#module-lilytorch.src.two_phase_solver">lilytorch.src.two_phase_solver</a>
 </li>
           <li><a href="api/util.html#module-lilytorch.util.paths">lilytorch.util.paths</a>
 </li>
@@ -1061,8 +1072,6 @@
 </li>
         <li><a href="api/integration.html#lilytorch.integration.extensions.RealtimeMonitor">RealtimeMonitor (class in lilytorch.integration.extensions)</a>
 </li>
-        <li><a href="api/free_surface.html#lilytorch.src.free_surface.FreeSurface.reinitialize">reinitialize() (lilytorch.src.free_surface.FreeSurface method)</a>
-</li>
         <li><a href="api/body.html#lilytorch.src.body.BodyMesh.resample_closed_contour">resample_closed_contour() (lilytorch.src.body.BodyMesh method)</a>
 </li>
         <li><a href="api/body.html#lilytorch.src.body.resample_contour">resample_contour() (in module lilytorch.src.body)</a>
@@ -1163,13 +1172,17 @@
 </li>
         <li><a href="api/body.html#lilytorch.src.body.BodyFishExperimental.thk_liu">thk_liu() (lilytorch.src.body.BodyFishExperimental method)</a>
 </li>
-    </ul></td>
-    <td style="width: 33%; vertical-align: top;"><ul>
         <li><a href="api/body.html#lilytorch.src.body.BodyFishAnalytical.thk_nonconst">thk_nonconst() (lilytorch.src.body.BodyFishAnalytical method)</a>
 </li>
+    </ul></td>
+    <td style="width: 33%; vertical-align: top;"><ul>
         <li><a href="api/integration.html#lilytorch.integration.camera.top_down_camera_config">top_down_camera_config() (in module lilytorch.integration.camera)</a>
 </li>
         <li><a href="api/body.html#lilytorch.src.body.COMPOSITEmesh2sdf.transform_3d">transform_3d() (lilytorch.src.body.COMPOSITEmesh2sdf method)</a>
+</li>
+        <li><a href="api/two_phase.html#lilytorch.src.two_phase.TwoPhase">TwoPhase (class in lilytorch.src.two_phase)</a>
+</li>
+        <li><a href="api/two_phase.html#lilytorch.src.two_phase_solver.TwoPhaseSolver">TwoPhaseSolver (class in lilytorch.src.two_phase_solver)</a>
 </li>
     </ul></td>
   </tr></table>
@@ -1223,6 +1236,8 @@
 </li>
         <li><a href="api/integration.html#lilytorch.integration.kinematics.KinematicsController.velocities">velocities() (lilytorch.integration.kinematics.KinematicsController method)</a>
 </li>
+        <li><a href="api/two_phase.html#lilytorch.src.two_phase.TwoPhase.viscosity_cc">viscosity_cc() (lilytorch.src.two_phase.TwoPhase method)</a>
+</li>
         <li><a href="api/body.html#lilytorch.src.body.BodyMesh.visualize">visualize() (lilytorch.src.body.BodyMesh method)</a>
 
         <ul>
@@ -1255,6 +1270,12 @@
   <h2>W</h2>
   <table style="width: 100%" class="indextable genindextable"><tr>
     <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/two_phase.html#lilytorch.src.two_phase.TwoPhase.water_mask_cc">water_mask_cc (lilytorch.src.two_phase.TwoPhase property)</a>
+</li>
+    </ul></td>
+    <td style="width: 33%; vertical-align: top;"><ul>
+        <li><a href="api/two_phase.html#lilytorch.src.two_phase.TwoPhase.water_volume">water_volume() (lilytorch.src.two_phase.TwoPhase method)</a>
+</li>
         <li><a href="api/util.html#lilytorch.util.yaml_operations.write_yaml">write_yaml() (in module lilytorch.util.yaml_operations)</a>
 </li>
     </ul></td>

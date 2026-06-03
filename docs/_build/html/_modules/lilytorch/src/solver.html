@@ -209,7 +209,7 @@
 <li class="toctree-l1"><a class="reference internal" href="../../../mathematical_formulation.html">Mathematical Formulation</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../numerical_schemes.html">Numerical Schemes</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../immersed_boundary.html">Immersed Boundary Method — BDIM2</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../../../free_surface.html">Free Surface — Level-Set Fluid–Air</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../two_phase.html">Two-Phase Free Surface (Water + Air)</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../strong_coupling.html">Strong (implicit) FSI coupling</a></li>
 </ul>
 <p class="caption" role="heading"><span class="caption-text">API Reference</span></p>
@@ -221,7 +221,7 @@
 <li class="toctree-l1"><a class="reference internal" href="../../../api/diffusion.html"><code class="docutils literal notranslate"><span class="pre">diffusion</span></code> — Diffusion Operators</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../api/adv_diff.html"><code class="docutils literal notranslate"><span class="pre">adv_diff</span></code> — Advection–Diffusion (legacy)</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../api/poisson.html"><code class="docutils literal notranslate"><span class="pre">poisson</span></code> — Pressure Solvers</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../../../api/free_surface.html"><code class="docutils literal notranslate"><span class="pre">free_surface</span></code> — Level-Set Free Surface</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../../../api/two_phase.html"><code class="docutils literal notranslate"><span class="pre">two_phase</span></code> — Two-Phase (Water + Air) Solver</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../api/body.html"><code class="docutils literal notranslate"><span class="pre">body</span></code> — Geometry, SDF &amp; Kinematics</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../api/operations.html"><code class="docutils literal notranslate"><span class="pre">operations</span></code> — Discrete Differential Operators</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../../../api/plotting.html"><code class="docutils literal notranslate"><span class="pre">plotting</span></code> — Visualisation Helpers</a></li>
@@ -283,7 +283,6 @@
 <span class="kn">from</span><span class="w"> </span><span class="nn">lilytorch.src.advection</span><span class="w"> </span><span class="kn">import</span> <span class="n">AdvDiffSolver</span><span class="p">,</span> <span class="n">SCHEMES</span> <span class="k">as</span> <span class="n">_ADV_SCHEMES</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">lilytorch.src.body</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span><span class="n">body_from_yaml</span><span class="p">,</span>
                                 <span class="n">_mu_normals_batched</span><span class="p">)</span>
-<span class="kn">from</span><span class="w"> </span><span class="nn">lilytorch.src.free_surface</span><span class="w"> </span><span class="kn">import</span> <span class="n">FreeSurface</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">lilytorch.src</span><span class="w"> </span><span class="kn">import</span> <span class="n">operations</span> <span class="k">as</span> <span class="n">ops</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">lilytorch.src.plotting</span><span class="w"> </span><span class="kn">import</span> <span class="n">PlottingMixin</span>
 <span class="kn">from</span><span class="w"> </span><span class="nn">lilytorch.src.poisson_fft</span><span class="w"> </span><span class="kn">import</span> <span class="n">PoissonSolverFFT</span>
@@ -1096,31 +1095,17 @@
             <span class="bp">self</span><span class="o">.</span><span class="n">_init_var_dens_persist_2d</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">dt</span><span class="p">)</span>
 
         <span class="c1"># =====================================================================</span>
-        <span class="c1"># Free-surface (level-set fluid-air) + gravity body force</span>
-        <span class="c1"># ---------------------------------------------------------------------</span>
-        <span class="c1"># Both are opt-in via the ``solver.free_surface`` and ``solver.gravity``</span>
-        <span class="c1"># YAML blocks.  When neither is set every code path below short-circuits</span>
-        <span class="c1"># to its pre-existing behaviour, so the BDIM solid-body pipeline is</span>
-        <span class="c1"># unaffected.</span>
-        <span class="c1">#</span>
-        <span class="c1">#   solver.free_surface:</span>
-        <span class="c1">#     phi_init: &quot;lambda X, Y: Y - 0.5&quot;   # negative in fluid, positive in air</span>
-        <span class="c1">#     theta_min:    0.01      # GFM cut-face fluid-fraction clamp</span>
-        <span class="c1">#     band_cells:   4         # narrow-band half-width (informational)</span>
-        <span class="c1">#     reinit_iters: 4         # explicit reinit sub-steps per call</span>
-        <span class="c1">#     reinit_every: 5         # reinitialise every N solver steps</span>
-        <span class="c1">#     extend_iters: 4         # velocity-extension sub-steps per call</span>
-        <span class="c1">#     extend_every: 1</span>
-        <span class="c1">#</span>
+        <span class="c1"># Gravity body force (opt-in via the ``solver.gravity`` block).</span>
         <span class="c1">#   solver.gravity: [gx, gy]      # 2-D</span>
         <span class="c1">#   solver.gravity: [gx, gy, gz]  # 3-D</span>
+        <span class="c1"># Used by the two-phase solver (water+air) and any gravity-driven</span>
+        <span class="c1"># run; ``None`` disables it.</span>
         <span class="c1"># =====================================================================</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">_init_gravity</span><span class="p">(</span><span class="n">solver</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;gravity&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">))</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">_init_free_surface</span><span class="p">(</span><span class="n">solver</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;free_surface&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">))</span></div>
+        <span class="bp">self</span><span class="o">.</span><span class="n">_init_gravity</span><span class="p">(</span><span class="n">solver</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;gravity&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">))</span></div>
 
 
     <span class="c1"># =====================================================================</span>
-    <span class="c1"># Free-surface + gravity body force (opt-in)</span>
+    <span class="c1"># Gravity body force (opt-in)</span>
     <span class="c1"># =====================================================================</span>
     <span class="k">def</span><span class="w"> </span><span class="nf">_init_gravity</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">gravity_cfg</span><span class="p">):</span>
 <span class="w">        </span><span class="sd">&quot;&quot;&quot;Parse the optional ``solver.gravity`` block.</span>
@@ -1144,70 +1129,6 @@
         <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">use_gravity</span><span class="p">:</span>
             <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;Gravity body force enabled: g = </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">_gravity</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
 
-    <span class="k">def</span><span class="w"> </span><span class="nf">_init_free_surface</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">fs_cfg</span><span class="p">):</span>
-<span class="w">        </span><span class="sd">&quot;&quot;&quot;Parse ``solver.free_surface`` and build the :class:`FreeSurface`.</span>
-
-<span class="sd">        When the block is absent ``self.free_surface`` is ``None`` and</span>
-<span class="sd">        every downstream hook short-circuits.  See :class:`FreeSurface`</span>
-<span class="sd">        for the full list of accepted parameters.</span>
-<span class="sd">        &quot;&quot;&quot;</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">free_surface</span> <span class="o">=</span> <span class="kc">None</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">_fs_reinit_every</span> <span class="o">=</span> <span class="mi">5</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">_fs_extend_every</span> <span class="o">=</span> <span class="mi">1</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">_fs_extend_full</span> <span class="o">=</span> <span class="kc">True</span>
-        <span class="k">if</span> <span class="n">fs_cfg</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
-            <span class="k">return</span>
-        <span class="n">phi_src</span> <span class="o">=</span> <span class="n">fs_cfg</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;phi_init&quot;</span><span class="p">)</span>
-        <span class="k">if</span> <span class="n">phi_src</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
-            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
-                <span class="s2">&quot;solver.free_surface.phi_init is required when &quot;</span>
-                <span class="s2">&quot;solver.free_surface is set.&quot;</span>
-            <span class="p">)</span>
-        <span class="c1"># Allow either a raw callable or a YAML lambda string evaluated</span>
-        <span class="c1"># in a torch-only namespace (same convention as body.sdf).</span>
-        <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">phi_src</span><span class="p">,</span> <span class="nb">str</span><span class="p">):</span>
-            <span class="n">phi_init</span> <span class="o">=</span> <span class="nb">eval</span><span class="p">(</span><span class="n">phi_src</span><span class="p">,</span> <span class="p">{</span><span class="s2">&quot;torch&quot;</span><span class="p">:</span> <span class="n">torch</span><span class="p">})</span>
-        <span class="k">else</span><span class="p">:</span>
-            <span class="n">phi_init</span> <span class="o">=</span> <span class="n">phi_src</span>
-        <span class="k">if</span> <span class="ow">not</span> <span class="nb">callable</span><span class="p">(</span><span class="n">phi_init</span><span class="p">):</span>
-            <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
-                <span class="s2">&quot;solver.free_surface.phi_init must be a callable or a &quot;</span>
-                <span class="s2">&quot;lambda-string evaluating to one.&quot;</span>
-            <span class="p">)</span>
-        <span class="n">kwargs</span> <span class="o">=</span> <span class="nb">dict</span><span class="p">(</span>
-            <span class="n">theta_min</span>   <span class="o">=</span> <span class="nb">float</span><span class="p">(</span><span class="n">fs_cfg</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;theta_min&quot;</span><span class="p">,</span> <span class="mf">0.01</span><span class="p">)),</span>
-            <span class="n">band_cells</span>  <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">fs_cfg</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;band_cells&quot;</span><span class="p">,</span> <span class="mi">4</span><span class="p">)),</span>
-            <span class="n">reinit_iters</span><span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">fs_cfg</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;reinit_iters&quot;</span><span class="p">,</span> <span class="mi">4</span><span class="p">)),</span>
-            <span class="n">extend_iters</span><span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">fs_cfg</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;extend_iters&quot;</span><span class="p">,</span> <span class="mi">4</span><span class="p">)),</span>
-            <span class="n">convection_method</span> <span class="o">=</span> <span class="n">fs_cfg</span><span class="o">.</span><span class="n">get</span><span class="p">(</span>
-                <span class="s2">&quot;convection_method&quot;</span><span class="p">,</span>
-                <span class="bp">self</span><span class="o">.</span><span class="n">convection_method</span>
-                <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">convection_method</span> <span class="ow">in</span> <span class="n">_ADV_SCHEMES</span> <span class="k">else</span> <span class="s2">&quot;quick&quot;</span><span class="p">),</span>
-            <span class="n">device</span>      <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">device</span><span class="p">,</span>
-            <span class="n">dtype</span>       <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">dtype</span><span class="p">,</span>
-        <span class="p">)</span>
-        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">ndim</span> <span class="o">==</span> <span class="mi">2</span><span class="p">:</span>
-            <span class="bp">self</span><span class="o">.</span><span class="n">free_surface</span> <span class="o">=</span> <span class="n">FreeSurface</span><span class="p">(</span>
-                <span class="bp">self</span><span class="o">.</span><span class="n">x</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">y</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">h</span><span class="p">,</span> <span class="n">phi_init</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">,</span>
-            <span class="p">)</span>
-        <span class="k">else</span><span class="p">:</span>
-            <span class="bp">self</span><span class="o">.</span><span class="n">free_surface</span> <span class="o">=</span> <span class="n">FreeSurface</span><span class="p">(</span>
-                <span class="bp">self</span><span class="o">.</span><span class="n">x</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">y</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">h</span><span class="p">,</span> <span class="n">phi_init</span><span class="p">,</span> <span class="n">z</span><span class="o">=</span><span class="bp">self</span><span class="o">.</span><span class="n">z</span><span class="p">,</span> <span class="o">**</span><span class="n">kwargs</span><span class="p">,</span>
-            <span class="p">)</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">_fs_reinit_every</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">fs_cfg</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;reinit_every&quot;</span><span class="p">,</span> <span class="mi">5</span><span class="p">))</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">_fs_extend_every</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">fs_cfg</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;extend_every&quot;</span><span class="p">,</span> <span class="mi">1</span><span class="p">))</span>
-        <span class="c1"># Extend the water velocity into the WHOLE air region (not just a</span>
-        <span class="c1"># band) so the decoupled bulk air does not accumulate spurious,</span>
-        <span class="c1"># undamped vorticity from the predictor.  Cost scales with grid</span>
-        <span class="c1"># size; set False to restrict to the ``extend_iters`` band.</span>
-        <span class="bp">self</span><span class="o">.</span><span class="n">_fs_extend_full</span> <span class="o">=</span> <span class="nb">bool</span><span class="p">(</span><span class="n">fs_cfg</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;extend_full&quot;</span><span class="p">,</span> <span class="kc">True</span><span class="p">))</span>
-        <span class="nb">print</span><span class="p">(</span>
-            <span class="sa">f</span><span class="s2">&quot;Free-surface enabled: theta_min=</span><span class="si">{</span><span class="n">kwargs</span><span class="p">[</span><span class="s1">&#39;theta_min&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2">, &quot;</span>
-            <span class="sa">f</span><span class="s2">&quot;reinit every </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">_fs_reinit_every</span><span class="si">}</span><span class="s2"> steps &quot;</span>
-            <span class="sa">f</span><span class="s2">&quot;(</span><span class="si">{</span><span class="n">kwargs</span><span class="p">[</span><span class="s1">&#39;reinit_iters&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2"> sub-iters), &quot;</span>
-            <span class="sa">f</span><span class="s2">&quot;velocity extension every </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">_fs_extend_every</span><span class="si">}</span><span class="s2"> steps &quot;</span>
-            <span class="sa">f</span><span class="s2">&quot;(</span><span class="si">{</span><span class="n">kwargs</span><span class="p">[</span><span class="s1">&#39;extend_iters&#39;</span><span class="p">]</span><span class="si">}</span><span class="s2"> sub-iters).&quot;</span>
-        <span class="p">)</span>
 
     <span class="nd">@torch</span><span class="o">.</span><span class="n">no_grad</span><span class="p">()</span>
     <span class="k">def</span><span class="w"> </span><span class="nf">_apply_gravity_body_force</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="o">*</span><span class="n">vels</span><span class="p">):</span>
@@ -1216,114 +1137,19 @@
 <span class="sd">        ``fluid_step`` so the projection can balance it through the</span>
 <span class="sd">        Poisson solve.</span>
 
-<span class="sd">        When the free surface is active the body force is gated by the</span>
-<span class="sd">        cell-centred *fluid* mask: gravity only accelerates fluid cells.</span>
-<span class="sd">        Without this gate the air narrow-band cells free-fall through</span>
-<span class="sd">        the box and dominate ``|u|_max``, even though their pressure is</span>
-<span class="sd">        pinned to ``p_atm = 0`` by the ghost-fluid layer.</span>
+<span class="sd">        MAC-staggered: ``u`` is on x-faces, ``v`` on y-faces, etc.  A</span>
+<span class="sd">        uniform gravity vector adds the same constant to every face on the</span>
+<span class="sd">        corresponding component grid; this is consistent with the</span>
+<span class="sd">        cell-centred pressure projection that follows.</span>
 <span class="sd">        &quot;&quot;&quot;</span>
         <span class="k">if</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">use_gravity</span><span class="p">:</span>
             <span class="k">return</span> <span class="n">vels</span>
-        <span class="c1"># MAC-staggered: ``u`` is on x-faces, ``v`` on y-faces, etc.</span>
-        <span class="c1"># A uniform gravity vector adds the same constant to every face</span>
-        <span class="c1"># on the corresponding component grid; this is consistent with</span>
-        <span class="c1"># the cell-centred pressure projection that follows.</span>
-        <span class="n">fluid_mask</span> <span class="o">=</span> <span class="p">(</span><span class="kc">None</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">free_surface</span> <span class="ow">is</span> <span class="kc">None</span>
-                      <span class="k">else</span> <span class="bp">self</span><span class="o">.</span><span class="n">free_surface</span><span class="o">.</span><span class="n">fluid_mask_cc</span><span class="p">)</span>
         <span class="n">out</span> <span class="o">=</span> <span class="p">[]</span>
         <span class="k">for</span> <span class="n">vel</span><span class="p">,</span> <span class="n">g_comp</span> <span class="ow">in</span> <span class="nb">zip</span><span class="p">(</span><span class="n">vels</span><span class="p">,</span> <span class="bp">self</span><span class="o">.</span><span class="n">_gravity</span><span class="p">):</span>
-            <span class="k">if</span> <span class="n">g_comp</span> <span class="o">==</span> <span class="mf">0.0</span><span class="p">:</span>
-                <span class="n">out</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">vel</span><span class="p">)</span>
-            <span class="k">else</span><span class="p">:</span>
-                <span class="k">if</span> <span class="n">fluid_mask</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
-                    <span class="c1"># The cell-centred fluid mask is a defensible proxy</span>
-                    <span class="c1"># for the staggered MAC component: gravity is a</span>
-                    <span class="c1"># local body force, so leaving the air band&#39;s MAC</span>
-                    <span class="c1"># cells un-accelerated is enough to keep them quiet</span>
-                    <span class="c1"># (the velocity extension step then propagates the</span>
-                    <span class="c1"># fluid value into the narrow band each step).</span>
-                    <span class="n">vel</span><span class="o">.</span><span class="n">add_</span><span class="p">(</span>
-                        <span class="p">(</span><span class="nb">float</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">dt</span><span class="p">)</span> <span class="o">*</span> <span class="n">g_comp</span><span class="p">)</span> <span class="o">*</span> <span class="n">fluid_mask</span><span class="o">.</span><span class="n">to</span><span class="p">(</span><span class="n">vel</span><span class="o">.</span><span class="n">dtype</span><span class="p">)</span>
-                    <span class="p">)</span>
-                <span class="k">else</span><span class="p">:</span>
-                    <span class="c1"># In-place add to avoid an extra allocation.</span>
-                    <span class="n">vel</span><span class="o">.</span><span class="n">add_</span><span class="p">(</span><span class="nb">float</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">dt</span><span class="p">)</span> <span class="o">*</span> <span class="n">g_comp</span><span class="p">)</span>
-                <span class="n">out</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">vel</span><span class="p">)</span>
+            <span class="k">if</span> <span class="n">g_comp</span> <span class="o">!=</span> <span class="mf">0.0</span><span class="p">:</span>
+                <span class="n">vel</span><span class="o">.</span><span class="n">add_</span><span class="p">(</span><span class="nb">float</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">dt</span><span class="p">)</span> <span class="o">*</span> <span class="n">g_comp</span><span class="p">)</span>   <span class="c1"># in-place</span>
+            <span class="n">out</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">vel</span><span class="p">)</span>
         <span class="k">return</span> <span class="nb">tuple</span><span class="p">(</span><span class="n">out</span><span class="p">)</span>
-
-    <span class="nd">@torch</span><span class="o">.</span><span class="n">no_grad</span><span class="p">()</span>
-    <span class="k">def</span><span class="w"> </span><span class="nf">_fs_apply_gfm_to_coeffs</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">ch</span><span class="p">,</span> <span class="n">cv</span><span class="p">,</span> <span class="n">cw</span><span class="p">):</span>
-<span class="w">        </span><span class="sd">&quot;&quot;&quot;Multiply staggered Poisson face coefficients in-place by the</span>
-<span class="sd">        ghost-fluid face scales.</span>
-
-<span class="sd">        When the host coefficient arrays are full-grid (legacy python</span>
-<span class="sd">        path) the GFM scales — which are face-grid sized — are inserted</span>
-<span class="sd">        into the appropriate inner slice; when they are face-grid</span>
-<span class="sd">        (kernel path) we multiply directly.</span>
-<span class="sd">        &quot;&quot;&quot;</span>
-        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">free_surface</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
-            <span class="k">return</span> <span class="n">ch</span><span class="p">,</span> <span class="n">cv</span><span class="p">,</span> <span class="n">cw</span>
-        <span class="n">scales</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">free_surface</span><span class="o">.</span><span class="n">ghost_fluid_face_scales</span><span class="p">()</span>
-        <span class="n">s_u</span> <span class="o">=</span> <span class="n">scales</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span>
-        <span class="n">s_v</span> <span class="o">=</span> <span class="n">scales</span><span class="p">[</span><span class="mi">1</span><span class="p">]</span>
-        <span class="n">s_w</span> <span class="o">=</span> <span class="n">scales</span><span class="p">[</span><span class="mi">2</span><span class="p">]</span> <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">ndim</span> <span class="o">==</span> <span class="mi">3</span> <span class="k">else</span> <span class="kc">None</span>
-        <span class="c1"># Detect face-grid vs full-grid: project()&#39;s ``_face_grid`` check</span>
-        <span class="c1"># is ``ch.shape[0] &lt; grid_shape[0]`` — use the same here so the</span>
-        <span class="c1"># scaling slice matches.</span>
-        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">ndim</span> <span class="o">==</span> <span class="mi">2</span><span class="p">:</span>
-            <span class="n">_face_grid</span> <span class="o">=</span> <span class="p">(</span><span class="n">ch</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">&lt;</span> <span class="bp">self</span><span class="o">.</span><span class="n">nx</span><span class="p">)</span>
-            <span class="k">if</span> <span class="n">_face_grid</span><span class="p">:</span>
-                <span class="n">ch</span> <span class="o">=</span> <span class="n">ch</span> <span class="o">*</span> <span class="n">s_u</span><span class="p">[:,</span> <span class="mi">1</span><span class="p">:</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span>
-                <span class="n">cv</span> <span class="o">=</span> <span class="n">cv</span> <span class="o">*</span> <span class="n">s_v</span><span class="p">[</span><span class="mi">1</span><span class="p">:</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="p">:]</span>
-            <span class="k">else</span><span class="p">:</span>
-                <span class="n">ch</span><span class="p">[</span><span class="mi">1</span><span class="p">:,</span> <span class="mi">1</span><span class="p">:</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span> <span class="o">=</span> <span class="n">ch</span><span class="p">[</span><span class="mi">1</span><span class="p">:,</span> <span class="mi">1</span><span class="p">:</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span> <span class="o">*</span> <span class="n">s_u</span><span class="p">[:,</span> <span class="mi">1</span><span class="p">:</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span>
-                <span class="n">cv</span><span class="p">[</span><span class="mi">1</span><span class="p">:</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">:]</span> <span class="o">=</span> <span class="n">cv</span><span class="p">[</span><span class="mi">1</span><span class="p">:</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">:]</span> <span class="o">*</span> <span class="n">s_v</span><span class="p">[</span><span class="mi">1</span><span class="p">:</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="p">:]</span>
-        <span class="k">else</span><span class="p">:</span>
-            <span class="n">_face_grid</span> <span class="o">=</span> <span class="p">(</span><span class="n">ch</span><span class="o">.</span><span class="n">shape</span><span class="p">[</span><span class="mi">0</span><span class="p">]</span> <span class="o">&lt;</span> <span class="bp">self</span><span class="o">.</span><span class="n">nx</span><span class="p">)</span>
-            <span class="k">if</span> <span class="n">_face_grid</span><span class="p">:</span>
-                <span class="n">ch</span> <span class="o">=</span> <span class="n">ch</span> <span class="o">*</span> <span class="n">s_u</span><span class="p">[:,</span> <span class="mi">1</span><span class="p">:</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">:</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span>
-                <span class="n">cv</span> <span class="o">=</span> <span class="n">cv</span> <span class="o">*</span> <span class="n">s_v</span><span class="p">[</span><span class="mi">1</span><span class="p">:</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="p">:,</span> <span class="mi">1</span><span class="p">:</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span>
-                <span class="n">cw</span> <span class="o">=</span> <span class="n">cw</span> <span class="o">*</span> <span class="n">s_w</span><span class="p">[</span><span class="mi">1</span><span class="p">:</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">:</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="p">:]</span>
-            <span class="k">else</span><span class="p">:</span>
-                <span class="n">ch</span><span class="p">[</span><span class="mi">1</span><span class="p">:,</span> <span class="mi">1</span><span class="p">:</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">:</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span> <span class="o">=</span> <span class="n">ch</span><span class="p">[</span><span class="mi">1</span><span class="p">:,</span> <span class="mi">1</span><span class="p">:</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">:</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span> <span class="o">*</span> <span class="n">s_u</span><span class="p">[:,</span> <span class="mi">1</span><span class="p">:</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">:</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span>
-                <span class="n">cv</span><span class="p">[</span><span class="mi">1</span><span class="p">:</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">:,</span> <span class="mi">1</span><span class="p">:</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span> <span class="o">=</span> <span class="n">cv</span><span class="p">[</span><span class="mi">1</span><span class="p">:</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">:,</span> <span class="mi">1</span><span class="p">:</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span> <span class="o">*</span> <span class="n">s_v</span><span class="p">[</span><span class="mi">1</span><span class="p">:</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="p">:,</span> <span class="mi">1</span><span class="p">:</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span>
-                <span class="n">cw</span><span class="p">[</span><span class="mi">1</span><span class="p">:</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">:</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">:]</span> <span class="o">=</span> <span class="n">cw</span><span class="p">[</span><span class="mi">1</span><span class="p">:</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">:</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">:]</span> <span class="o">*</span> <span class="n">s_w</span><span class="p">[</span><span class="mi">1</span><span class="p">:</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">:</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="p">:]</span>
-        <span class="k">return</span> <span class="n">ch</span><span class="p">,</span> <span class="n">cv</span><span class="p">,</span> <span class="n">cw</span>
-
-    <span class="nd">@torch</span><span class="o">.</span><span class="n">no_grad</span><span class="p">()</span>
-    <span class="k">def</span><span class="w"> </span><span class="nf">_fs_post_step</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">u</span><span class="p">,</span> <span class="n">v</span><span class="p">,</span> <span class="n">w_vel</span><span class="p">,</span> <span class="n">iteration</span><span class="p">):</span>
-<span class="w">        </span><span class="sd">&quot;&quot;&quot;Free-surface bookkeeping invoked once per outer time step:</span>
-
-<span class="sd">        1. advect ``phi_fs`` with the projected (divergence-free) velocity;</span>
-<span class="sd">        2. periodically reinitialise to ``|∇phi| = 1``;</span>
-<span class="sd">        3. periodically extend the cell-centred velocity into the air</span>
-<span class="sd">           narrow band (used by next-step advection of ``phi_fs`` and</span>
-<span class="sd">           by the divergence stencil at cut faces).</span>
-
-<span class="sd">        The cell-centred velocity extension is applied to **MAC velocity</span>
-<span class="sd">        components** in-place (a constant-along-normal extension on the</span>
-<span class="sd">        MAC grid is a defensible first approximation as long as the</span>
-<span class="sd">        narrow band has only a few cells of air on the air side of the</span>
-<span class="sd">        interface — within that band the staggered offset matters less</span>
-<span class="sd">        than the upwind direction itself).</span>
-<span class="sd">        &quot;&quot;&quot;</span>
-        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">free_surface</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
-            <span class="k">return</span>
-        <span class="n">fs</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">free_surface</span>
-        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">ndim</span> <span class="o">==</span> <span class="mi">2</span><span class="p">:</span>
-            <span class="n">fs</span><span class="o">.</span><span class="n">advect</span><span class="p">(</span><span class="n">u</span><span class="p">,</span> <span class="n">v</span><span class="p">,</span> <span class="n">dt</span><span class="o">=</span><span class="nb">float</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">dt</span><span class="p">))</span>
-        <span class="k">else</span><span class="p">:</span>
-            <span class="n">fs</span><span class="o">.</span><span class="n">advect</span><span class="p">(</span><span class="n">u</span><span class="p">,</span> <span class="n">v</span><span class="p">,</span> <span class="n">w_vel</span><span class="p">,</span> <span class="n">dt</span><span class="o">=</span><span class="nb">float</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">dt</span><span class="p">))</span>
-
-        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_fs_reinit_every</span> <span class="o">&gt;</span> <span class="mi">0</span> <span class="ow">and</span> <span class="p">(</span><span class="n">iteration</span> <span class="o">%</span> <span class="bp">self</span><span class="o">.</span><span class="n">_fs_reinit_every</span> <span class="o">==</span> <span class="mi">0</span><span class="p">):</span>
-            <span class="n">fs</span><span class="o">.</span><span class="n">reinitialize</span><span class="p">()</span>
-
-        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">_fs_extend_every</span> <span class="o">&gt;</span> <span class="mi">0</span> <span class="ow">and</span> <span class="p">(</span><span class="n">iteration</span> <span class="o">%</span> <span class="bp">self</span><span class="o">.</span><span class="n">_fs_extend_every</span> <span class="o">==</span> <span class="mi">0</span><span class="p">):</span>
-            <span class="n">full</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_fs_extend_full</span>
-            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">ndim</span> <span class="o">==</span> <span class="mi">2</span><span class="p">:</span>
-                <span class="n">fs</span><span class="o">.</span><span class="n">extend_velocity</span><span class="p">(</span><span class="n">u</span><span class="p">,</span> <span class="n">v</span><span class="p">,</span> <span class="n">full</span><span class="o">=</span><span class="n">full</span><span class="p">)</span>
-            <span class="k">else</span><span class="p">:</span>
-                <span class="n">fs</span><span class="o">.</span><span class="n">extend_velocity</span><span class="p">(</span><span class="n">u</span><span class="p">,</span> <span class="n">v</span><span class="p">,</span> <span class="n">w_vel</span><span class="p">,</span> <span class="n">full</span><span class="o">=</span><span class="n">full</span><span class="p">)</span>
 
 <div class="viewcode-block" id="FluidSolver.inside">
 <a class="viewcode-back" href="../../../api/solver.html#lilytorch.src.solver.FluidSolver.inside">[docs]</a>
@@ -1507,103 +1333,43 @@
 
         <span class="n">coeff</span> <span class="o">=</span> <span class="n">w</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">dt</span> <span class="o">/</span> <span class="bp">self</span><span class="o">.</span><span class="n">rho</span>
 
-        <span class="c1"># ---- Free-surface (level-set) ghost-fluid integration ----------</span>
-        <span class="c1"># When the optional free surface is active, multiply the</span>
-        <span class="c1"># staggered Poisson coefficients (face-grid `dt/ρ_eff` arrays)</span>
-        <span class="c1"># elementwise by the GFM scales: 1 in fluid, 0 across air-air</span>
-        <span class="c1"># faces (decouples air cells), 1/θ across cut faces (Dirichlet</span>
-        <span class="c1"># `p_atm = 0` on the interpolated zero-crossing of φ_fs).</span>
-        <span class="c1"># Also force the divergence RHS to 0 in air cells so the</span>
-        <span class="c1"># smoother sees no spurious driving term where p ≡ 0.</span>
-        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">free_surface</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
-            <span class="c1"># If the legacy multigrid path will fall back to its default</span>
-            <span class="c1"># constant-density coefficients, materialise them first so</span>
-            <span class="c1"># the GFM rescale can be applied uniformly.</span>
-            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">poisson_method</span> <span class="o">!=</span> <span class="s2">&quot;fft&quot;</span><span class="p">:</span>
-                <span class="k">if</span> <span class="n">ch</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
-                    <span class="n">ch</span> <span class="o">=</span> <span class="n">coeff</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">mu0_all_u</span>
-                <span class="k">if</span> <span class="n">cv</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
-                    <span class="n">cv</span> <span class="o">=</span> <span class="n">coeff</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">mu0_all_v</span>
-                <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">ndim</span> <span class="o">==</span> <span class="mi">3</span> <span class="ow">and</span> <span class="n">cw</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
-                    <span class="n">cw</span> <span class="o">=</span> <span class="n">coeff</span> <span class="o">*</span> <span class="bp">self</span><span class="o">.</span><span class="n">mu0_all_w</span>
-            <span class="n">ch</span><span class="p">,</span> <span class="n">cv</span><span class="p">,</span> <span class="n">cw</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_fs_apply_gfm_to_coeffs</span><span class="p">(</span><span class="n">ch</span><span class="p">,</span> <span class="n">cv</span><span class="p">,</span> <span class="n">cw</span><span class="p">)</span>
-            <span class="c1"># Mask div in air cells (cell-centred).  This is a no-op on the</span>
-            <span class="c1"># boundary slice the Poisson solver actually sees, but it</span>
-            <span class="c1"># avoids any non-zero RHS leaking into ill-conditioned air</span>
-            <span class="c1"># cells when `_face_grid` slicing changes.</span>
-            <span class="n">air</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">free_surface</span><span class="o">.</span><span class="n">air_mask_cc</span>
-            <span class="bp">self</span><span class="o">.</span><span class="n">div</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">air</span><span class="p">,</span> <span class="n">torch</span><span class="o">.</span><span class="n">zeros_like</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">div</span><span class="p">),</span> <span class="bp">self</span><span class="o">.</span><span class="n">div</span><span class="p">)</span>
-            <span class="c1"># Hand the **inner** air mask to the Poisson solver as a</span>
-            <span class="c1"># Dirichlet pin (p_air ≡ 0).  The GFM cut-face scaling makes</span>
-            <span class="c1"># the air cells adjacent to the interface non-degenerate</span>
-            <span class="c1"># (J ≠ 0), so the smoother&#39;s J=0 mechanism alone is NOT</span>
-            <span class="c1"># enough to enforce the Dirichlet BC there.  The mask hooks</span>
-            <span class="c1"># into PoissonSolver.smooth to zero p in those cells after</span>
-            <span class="c1"># every sweep at every multigrid level.</span>
-            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">ndim</span> <span class="o">==</span> <span class="mi">2</span><span class="p">:</span>
-                <span class="bp">self</span><span class="o">.</span><span class="n">poisson_solver</span><span class="o">.</span><span class="n">dirichlet_mask</span> <span class="o">=</span> <span class="n">air</span><span class="p">[</span><span class="mi">1</span><span class="p">:</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">:</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span><span class="o">.</span><span class="n">contiguous</span><span class="p">()</span>
-            <span class="k">else</span><span class="p">:</span>
-                <span class="bp">self</span><span class="o">.</span><span class="n">poisson_solver</span><span class="o">.</span><span class="n">dirichlet_mask</span> <span class="o">=</span> <span class="n">air</span><span class="p">[</span><span class="mi">1</span><span class="p">:</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">:</span><span class="o">-</span><span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">:</span><span class="o">-</span><span class="mi">1</span><span class="p">]</span><span class="o">.</span><span class="n">contiguous</span><span class="p">()</span>
-        <span class="k">else</span><span class="p">:</span>
-            <span class="bp">self</span><span class="o">.</span><span class="n">poisson_solver</span><span class="o">.</span><span class="n">dirichlet_mask</span> <span class="o">=</span> <span class="kc">None</span>
+        <span class="bp">self</span><span class="o">.</span><span class="n">poisson_solver</span><span class="o">.</span><span class="n">dirichlet_mask</span> <span class="o">=</span> <span class="kc">None</span>
 
         <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">poisson_method</span> <span class="o">==</span> <span class="s2">&quot;fft&quot;</span><span class="p">:</span>
-            <span class="c1"># ---- FFT solver ----</span>
-            <span class="k">if</span> <span class="n">ch_cc</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
-                <span class="c1"># Variable-density path: RHS uses cell-centred density,</span>
-                <span class="c1"># correction uses the staggered ch/cv/cw coefficients.</span>
-                <span class="c1"># With bdim_mu0_projection=True, ch_cc=0 inside the body</span>
-                <span class="c1"># (mu0=0) — body cells decouple from the projection.</span>
-                <span class="c1"># Mask those cells (RHS=0) so we don&#39;t divide by zero;</span>
-                <span class="c1"># FFT then finds a harmonic extension that matches the</span>
-                <span class="c1"># fluid Poisson solution. Inside-body p doesn&#39;t affect</span>
-                <span class="c1"># u_new there because the correction is multiplied by</span>
-                <span class="c1"># ch (which is also zero).</span>
-                <span class="n">_body_decoupled</span> <span class="o">=</span> <span class="p">(</span><span class="n">ch_cc</span> <span class="o">&lt;=</span> <span class="mi">0</span><span class="p">)</span>
-                <span class="n">_ch_safe</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">_body_decoupled</span><span class="p">,</span>
-                                       <span class="n">torch</span><span class="o">.</span><span class="n">ones_like</span><span class="p">(</span><span class="n">ch_cc</span><span class="p">),</span> <span class="n">ch_cc</span><span class="p">)</span>
-                <span class="n">_rhs</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">where</span><span class="p">(</span><span class="n">_body_decoupled</span><span class="p">,</span>
-                                   <span class="n">torch</span><span class="o">.</span><span class="n">zeros_like</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">div</span><span class="p">),</span>
-                                   <span class="bp">self</span><span class="o">.</span><span class="n">div</span> <span class="o">/</span> <span class="n">_ch_safe</span><span class="p">)</span>
-                <span class="n">p</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">poisson_solverFFT</span><span class="o">.</span><span class="n">solve</span><span class="p">(</span><span class="n">_rhs</span><span class="p">)</span>
-                <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">ndim</span> <span class="o">==</span> <span class="mi">2</span><span class="p">:</span>
-                    <span class="p">(</span><span class="n">p_x</span><span class="p">,</span> <span class="n">p_y</span><span class="p">)</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">gradient</span><span class="p">(</span><span class="n">p</span><span class="p">)</span>
-                    <span class="n">u</span> <span class="o">=</span> <span class="n">u</span> <span class="o">-</span> <span class="n">ch</span> <span class="o">*</span> <span class="n">p_x</span>
-                    <span class="n">v</span> <span class="o">=</span> <span class="n">v</span> <span class="o">-</span> <span class="n">cv</span> <span class="o">*</span> <span class="n">p_y</span>
-                <span class="k">else</span><span class="p">:</span>
-                    <span class="p">(</span><span class="n">p_x</span><span class="p">,</span> <span class="n">p_y</span><span class="p">,</span> <span class="n">p_z</span><span class="p">)</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">gradient</span><span class="p">(</span><span class="n">p</span><span class="p">)</span>
-                    <span class="n">u</span>     <span class="o">=</span> <span class="n">u</span> <span class="o">-</span> <span class="n">ch</span> <span class="o">*</span> <span class="n">p_x</span>
-                    <span class="n">v</span>     <span class="o">=</span> <span class="n">v</span> <span class="o">-</span> <span class="n">cv</span> <span class="o">*</span> <span class="n">p_y</span>
-                    <span class="n">w_vel</span> <span class="o">=</span> <span class="n">w_vel</span> <span class="o">-</span> <span class="n">cw</span> <span class="o">*</span> <span class="n">p_z</span>
+            <span class="c1"># ---- FFT solver: CONSTANT-coefficient projection ----</span>
+            <span class="c1"># The FFT solver only solves the constant-coefficient Poisson</span>
+            <span class="c1"># ``∇²p = div/c``.  It does NOT solve the variable-coefficient</span>
+            <span class="c1"># (mu0-weighted / variable-density) BDIM Poisson — that is the</span>
+            <span class="c1"># multigrid / MGCG path.  Using a mu0-weighted or variable-</span>
+            <span class="c1"># density coefficient in the velocity correction is therefore</span>
+            <span class="c1"># *inconsistent* with the constant-coefficient pressure: the</span>
+            <span class="c1"># mu0/ρ_eff terms belong to the BDIM variable-coefficient</span>
+            <span class="c1"># operator, which FFT does not invert.  A consistent FFT</span>
+            <span class="c1"># projection uses a single SCALAR coefficient for BOTH the RHS</span>
+            <span class="c1"># divisor and the velocity correction, which is exactly</span>
+            <span class="c1"># divergence-free:</span>
+            <span class="c1">#     ∇·(u − c∇p) = div − c∇²p = div − c·(div/c) = 0.</span>
+            <span class="c1"># i.e. a clean constant-density Chorin projection (WaterLily-</span>
+            <span class="c1"># style).  ``ch_cc`` and any mu0-weighted ``ch/cv/cw`` tensors</span>
+            <span class="c1"># are intentionally ignored on the FFT path; variable-density /</span>
+            <span class="c1"># BDIM-weighted projection requires poisson_method</span>
+            <span class="c1"># &quot;multigrid&quot;/&quot;mgcg&quot;.  (Because the correction no longer</span>
+            <span class="c1"># multiplies the face-grid ``ch/cv/cw`` buffers, the FFT path is</span>
+            <span class="c1"># automatically compatible with kernel-mode coefficients too.)</span>
+            <span class="c1"># The RHS divisor is inherently bounded (a scalar), so the</span>
+            <span class="c1"># f650945 band-singularity cannot occur here.</span>
+            <span class="n">c_scalar</span> <span class="o">=</span> <span class="n">ch</span> <span class="k">if</span> <span class="p">(</span><span class="n">ch</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">ch</span><span class="p">,</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">))</span> <span class="k">else</span> <span class="n">coeff</span>
+            <span class="n">_rhs</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">div</span> <span class="o">/</span> <span class="n">c_scalar</span>
+            <span class="n">p</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">poisson_solverFFT</span><span class="o">.</span><span class="n">solve</span><span class="p">(</span><span class="n">_rhs</span><span class="p">)</span>
+            <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">ndim</span> <span class="o">==</span> <span class="mi">2</span><span class="p">:</span>
+                <span class="p">(</span><span class="n">p_x</span><span class="p">,</span> <span class="n">p_y</span><span class="p">)</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">gradient</span><span class="p">(</span><span class="n">p</span><span class="p">)</span>
+                <span class="n">u</span> <span class="o">=</span> <span class="n">u</span> <span class="o">-</span> <span class="n">c_scalar</span> <span class="o">*</span> <span class="n">p_x</span>
+                <span class="n">v</span> <span class="o">=</span> <span class="n">v</span> <span class="o">-</span> <span class="n">c_scalar</span> <span class="o">*</span> <span class="n">p_y</span>
             <span class="k">else</span><span class="p">:</span>
-                <span class="c1"># FFT with a BOUNDED RHS divisor + (optional) mu0-weighted</span>
-                <span class="c1"># correction.  The FFT solves a CONSTANT-coefficient Poisson,</span>
-                <span class="c1"># so its RHS divisor must stay bounded.  When ch/cv/cw are</span>
-                <span class="c1"># mu0-weighted tensors (BDIM2; kernel mode passes ``_ch_persist``)</span>
-                <span class="c1"># they vanish in the immersed-body band — using them as the RHS</span>
-                <span class="c1"># divisor makes ``div/ch`` singular there -&gt; the f650945</span>
-                <span class="c1"># explosion.  So the RHS uses the bounded scalar</span>
-                <span class="c1"># ``coeff = w*dt/rho``; the mu0-weighted ch/cv/cw are applied</span>
-                <span class="c1"># only in the velocity correction, so it still vanishes inside</span>
-                <span class="c1"># the body (mu0=0) and preserves the imposed no-slip velocity.</span>
-                <span class="c1"># A scalar ``ch`` (backward compat / truly constant density) is</span>
-                <span class="c1"># used directly for both RHS and correction.</span>
-                <span class="n">_ch_tensor</span> <span class="o">=</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">ch</span><span class="p">,</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">)</span>
-                <span class="n">_rhs_coeff</span> <span class="o">=</span> <span class="n">ch</span> <span class="k">if</span> <span class="p">(</span><span class="n">ch</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="ow">not</span> <span class="n">_ch_tensor</span><span class="p">)</span> <span class="k">else</span> <span class="n">coeff</span>
-                <span class="n">_rhs</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">div</span> <span class="o">/</span> <span class="n">_rhs_coeff</span>
-                <span class="n">p</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">poisson_solverFFT</span><span class="o">.</span><span class="n">solve</span><span class="p">(</span><span class="n">_rhs</span><span class="p">)</span>
-                <span class="n">_cu</span> <span class="o">=</span> <span class="n">ch</span> <span class="k">if</span> <span class="n">_ch_tensor</span> <span class="k">else</span> <span class="n">_rhs_coeff</span>
-                <span class="n">_cv</span> <span class="o">=</span> <span class="n">cv</span> <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">cv</span><span class="p">,</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">)</span> <span class="k">else</span> <span class="n">_rhs_coeff</span>
-                <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">ndim</span> <span class="o">==</span> <span class="mi">2</span><span class="p">:</span>
-                    <span class="p">(</span><span class="n">p_x</span><span class="p">,</span> <span class="n">p_y</span><span class="p">)</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">gradient</span><span class="p">(</span><span class="n">p</span><span class="p">)</span>
-                    <span class="n">u</span> <span class="o">=</span> <span class="n">u</span> <span class="o">-</span> <span class="n">_cu</span> <span class="o">*</span> <span class="n">p_x</span>
-                    <span class="n">v</span> <span class="o">=</span> <span class="n">v</span> <span class="o">-</span> <span class="n">_cv</span> <span class="o">*</span> <span class="n">p_y</span>
-                <span class="k">else</span><span class="p">:</span>
-                    <span class="p">(</span><span class="n">p_x</span><span class="p">,</span> <span class="n">p_y</span><span class="p">,</span> <span class="n">p_z</span><span class="p">)</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">gradient</span><span class="p">(</span><span class="n">p</span><span class="p">)</span>
-                    <span class="n">_cw</span> <span class="o">=</span> <span class="n">cw</span> <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">cw</span><span class="p">,</span> <span class="n">torch</span><span class="o">.</span><span class="n">Tensor</span><span class="p">)</span> <span class="k">else</span> <span class="n">_rhs_coeff</span>
-                    <span class="n">u</span>     <span class="o">=</span> <span class="n">u</span> <span class="o">-</span> <span class="n">_cu</span> <span class="o">*</span> <span class="n">p_x</span>
-                    <span class="n">v</span>     <span class="o">=</span> <span class="n">v</span> <span class="o">-</span> <span class="n">_cv</span> <span class="o">*</span> <span class="n">p_y</span>
-                    <span class="n">w_vel</span> <span class="o">=</span> <span class="n">w_vel</span> <span class="o">-</span> <span class="n">_cw</span> <span class="o">*</span> <span class="n">p_z</span>
+                <span class="p">(</span><span class="n">p_x</span><span class="p">,</span> <span class="n">p_y</span><span class="p">,</span> <span class="n">p_z</span><span class="p">)</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">gradient</span><span class="p">(</span><span class="n">p</span><span class="p">)</span>
+                <span class="n">u</span>     <span class="o">=</span> <span class="n">u</span> <span class="o">-</span> <span class="n">c_scalar</span> <span class="o">*</span> <span class="n">p_x</span>
+                <span class="n">v</span>     <span class="o">=</span> <span class="n">v</span> <span class="o">-</span> <span class="n">c_scalar</span> <span class="o">*</span> <span class="n">p_y</span>
+                <span class="n">w_vel</span> <span class="o">=</span> <span class="n">w_vel</span> <span class="o">-</span> <span class="n">c_scalar</span> <span class="o">*</span> <span class="n">p_z</span>
         <span class="k">else</span><span class="p">:</span>
             <span class="c1"># ---- Multigrid / MGCG solver (variable-coefficient Poisson) ----</span>
             <span class="n">has_custom_coeffs</span> <span class="o">=</span> <span class="nb">any</span><span class="p">(</span><span class="n">arr</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">for</span> <span class="n">arr</span> <span class="ow">in</span> <span class="p">(</span><span class="n">ch</span><span class="p">,</span> <span class="n">cv</span><span class="p">,</span> <span class="n">cw</span><span class="p">))</span>
@@ -1695,21 +1461,6 @@
                     <span class="n">_mx</span> <span class="o">=</span> <span class="n">torch</span><span class="o">.</span><span class="n">cuda</span><span class="o">.</span><span class="n">max_memory_allocated</span><span class="p">()</span> <span class="o">/</span> <span class="mi">1024</span><span class="o">**</span><span class="mi">3</span>
                     <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;[MEM_DBG] </span><span class="si">{</span><span class="s1">&#39;project:after inline projection correction&#39;</span><span class="si">:</span><span class="s2">55s</span><span class="si">}</span><span class="s2">&quot;</span>
                           <span class="sa">f</span><span class="s2">&quot;  cur=</span><span class="si">{</span><span class="n">_gb</span><span class="si">:</span><span class="s2">.3f</span><span class="si">}</span><span class="s2"> GiB  peak=</span><span class="si">{</span><span class="n">_mx</span><span class="si">:</span><span class="s2">.3f</span><span class="si">}</span><span class="s2"> GiB&quot;</span><span class="p">,</span> <span class="n">flush</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
-
-        <span class="c1"># Free-surface post-projection: anchor the pressure datum.</span>
-        <span class="c1"># The ghost-fluid solve fixes the pressure *gradient* but leaves</span>
-        <span class="c1"># the additive constant (DC null-space mode) only weakly pinned —</span>
-        <span class="c1"># air cells are decoupled and couple to water only through thin cut</span>
-        <span class="c1"># faces, so the constant is unconstrained and even drifts with more</span>
-        <span class="c1"># V-cycles.  Anchoring on the air-cell mean does nothing (air is</span>
-        <span class="c1"># already pinned to 0).  Instead recover the datum from the physical</span>
-        <span class="c1"># condition p = p_atm = 0 at the interface (extrapolated from the</span>
-        <span class="c1"># water side; see FreeSurface.interface_gauge_offset), then zero the</span>
-        <span class="c1"># air cells.</span>
-        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">free_surface</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
-            <span class="n">offset</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">free_surface</span><span class="o">.</span><span class="n">interface_gauge_offset</span><span class="p">(</span><span class="n">p</span><span class="p">)</span>
-            <span class="n">p</span> <span class="o">=</span> <span class="n">p</span> <span class="o">-</span> <span class="n">offset</span>
-            <span class="bp">self</span><span class="o">.</span><span class="n">free_surface</span><span class="o">.</span><span class="n">apply_pressure_mask</span><span class="p">(</span><span class="n">p</span><span class="p">)</span>
 
         <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">ndim</span> <span class="o">==</span> <span class="mi">2</span><span class="p">:</span>
             <span class="k">return</span> <span class="p">(</span><span class="n">u</span><span class="p">,</span> <span class="n">v</span><span class="p">,</span> <span class="n">p</span><span class="p">)</span>
@@ -2958,10 +2709,6 @@
 <span class="sd">        ``terminate`` flag from :meth:`plotting_and_saving`.</span>
 <span class="sd">        &quot;&quot;&quot;</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">check_explosion</span><span class="p">(</span><span class="n">iteration</span><span class="p">)</span>
-
-        <span class="c1"># ---- free-surface bookkeeping (advect + periodic reinit/extend) ----</span>
-        <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">free_surface</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
-            <span class="bp">self</span><span class="o">.</span><span class="n">_fs_post_step</span><span class="p">(</span><span class="n">u</span><span class="p">,</span> <span class="n">v</span><span class="p">,</span> <span class="n">w_vel</span><span class="p">,</span> <span class="n">iteration</span><span class="p">)</span>
 
         <span class="c1"># ---- free BDIM fields to reclaim GPU memory between steps ----</span>
         <span class="bp">self</span><span class="o">.</span><span class="n">_release_bdim_fields</span><span class="p">()</span>

@@ -80,7 +80,7 @@ def build_pars():
                                 "lambda t: torch.tensor(0.0)"],
             }],
         },
-        "output": {"save_path": "/tmp/lilytorch_tp_hydro/", "save_frames": False,
+        "output": {"save_path": "/tmp/lilytorch_tp_hydro/", "save_frames": True,
                    "save_every": 50, "save": False, "save_drags": False,
                    "vmin": -0.05, "vmax": 0.05},
     }
