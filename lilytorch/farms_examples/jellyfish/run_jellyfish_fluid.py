@@ -34,6 +34,7 @@ import time
 import torch
 
 from lilytorch.src.solver import FluidSolver
+from lilytorch.src.two_phase_solver import TwoPhaseSolver
 from lilytorch.util.paths import gen_new_folder
 from lilytorch.util.yaml_operations import yaml2pyobject
 
@@ -42,6 +43,24 @@ from lilytorch.farms_examples.jellyfish.jellyfish_body import JellyfishBody, Jel
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CONFIG = os.path.join(HERE, "config_fluid.yaml")
+
+# ---------------------------------------------------------------------------
+# Two-phase (water + real air) free-surface run settings — set MANUALLY here
+# (no CLI parser). Edit these constants to change the run; ``build_solver``
+# applies them to the loaded YAML before constructing the solver.
+#
+# The single-fluid free-surface model was retired; the jellyfish now crosses
+# the air/water interface through the validated variable-density VOF solver
+# (:class:`TwoPhaseSolver`). Buoyancy is EMERGENT from the fluid pressure, so
+# the free-swimming body also needs its own weight (same gravity, below).
+# ---------------------------------------------------------------------------
+TWO_PHASE  = True                      # False -> original submerged single-fluid run
+SURFACE_Z  = -0.05                     # free-surface height z (water below, air above)
+GRAVITY    = [0.0, 0.0, -9.81]         # m/s^2; applied to BOTH the fluid and the body weight
+RHO_WATER  = 1000.0
+RHO_AIR    = 1.0
+NU_AIR     = 1.5e-5                     # air kinematic viscosity (water nu taken from solver.nu)
+RHO_BODY   = 1000.0                    # ~neutrally-buoyant jellyfish (matches water in the BDIM band)
 
 
 def _resolve_output_folder(pars: dict) -> str:
@@ -60,7 +79,8 @@ def _resolve_output_folder(pars: dict) -> str:
 
 
 def build_solver(config_path: str, dtype=torch.float32) -> FluidSolver:
-    """Load the YAML, build the solver, and swap in the jellyfish body."""
+    """Load the YAML, apply the (manually-set) two-phase settings, build the
+    solver, and swap in the jellyfish body."""
     pars = yaml2pyobject(config_path)
 
     # Basic sanity check – this example is 3-D only.
@@ -70,8 +90,33 @@ def build_solver(config_path: str, dtype=torch.float32) -> FluidSolver:
             "(missing Nz/zmin/zmax in 'solver' section)."
         )
 
+    # ------------------------------------------------------------------
+    # Apply the two-phase free-surface settings (the module constants at the
+    # top of this file). No CLI parsing — edit those constants to change it.
+    # ------------------------------------------------------------------
+    s = pars["solver"]
+    if TWO_PHASE:
+        s["solver_method"]  = "python"     # deforming SDF -> no streaming kernel
+        s["poisson_method"] = "mgcg"       # FFT cannot do a variable-density Poisson
+        s["poisson_smoother"] = "rbgs"
+        s.setdefault("poisson_max_mgcg_cycles", 30)
+        s.setdefault("poisson_max_cycles", 30)
+        s["gravity"]  = GRAVITY
+        s["rho_body"] = RHO_BODY
+        s["two_phase"] = {
+            "alpha_init": f"lambda X, Y, Z: (Z < {SURFACE_Z}).double()",
+            "rho_water": RHO_WATER, "rho_air": RHO_AIR,
+            "nu_water": float(s.get("nu", 1.0e-5)), "nu_air": NU_AIR,
+            "face_density": "harmonic",
+        }
+        # free-swimming body weight: give the body the same gravity so its
+        # weight balances the emergent buoyancy (no double-count, no spurious
+        # rise) — see apply_force_feedback in jellyfish_body.py.
+        pars.setdefault("jellyfish", {})["gravity"] = GRAVITY
+
     output_dir = _resolve_output_folder(pars)
-    solver = FluidSolver(pars, dtype=dtype, compute_forces=True)
+    SolverCls = TwoPhaseSolver if TWO_PHASE else FluidSolver
+    solver = SolverCls(pars, dtype=dtype, compute_forces=True)
     solver.jellyfish_output_dir = output_dir
 
     # ------------------------------------------------------------------

@@ -1,0 +1,55 @@
+# Free rigid sphere (D=0.2) for the two-phase MuJoCo<->BDIM coupling demo.
+# Spawned just below the waterline (SURF=1.8, see simulation_config.yaml).
+# Default mass = density 0.5 (LIGHTER than water): the emergent two-phase
+# buoyancy pushes it up until it floats HALF-SUBMERGED (centre settling at the
+# waterline z=1.8). Validated: rises 1.70 -> ~1.81; the heavier ``sphere_sink``
+# variant (density 1.5) sinks. NOTE: the body MASS/inertia live in the SDF
+# (sphere.sdf <mass>/<inertia>) -- THAT is what sets the density, not this
+# ``density`` field (which FARMS ignores when the SDF carries inertials). Use
+# sphere_sink.{yaml,sdf} for the sinking case.
+sdf: sphere.sdf
+spawn:
+  loader: 0
+  mode: !!python/object/apply:farms_core.model.options.SpawnMode
+  - free
+  pose:
+  - 0.5
+  - 0.5
+  - 1.7
+  - 0
+  - 0
+  - 0
+  velocity:
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+  extras: {}
+morphology:
+  links:
+  - name: base_link
+    collisions: true
+    friction:
+    - 0.5
+    - 0.5
+    - 0
+    density: 0.5
+  self_collisions: []
+  joints: []
+control:
+  controller_loader: []
+  sensors:
+    links:
+    - base_link
+    joints: []
+    contacts: []
+    xfrc:
+    - base_link
+    muscles: []
+    adhesions: []
+    visuals: []
+  motors: []
+  hill_muscles: []
+extensions: []

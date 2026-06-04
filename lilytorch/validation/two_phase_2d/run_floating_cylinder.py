@@ -69,13 +69,22 @@ def build_pars(R=0.15, Hint=0.5):
             "BC_type_v": ["D", "D", "D", "D"], "BC_values_v": [0.0]*4,
         },
         "body": {   # FIXED cylinder, centre on the interface at real (0.5, Hint).
-            # NB the SDF is evaluated on REAL domain coords in the solve, so
-            # xt,yt are the real centre (NOT centred coords).
+            # Base the circle at the CENTRED-grid origin (xt=yt=0) and place it
+            # via a constant translation. Two grids are in play and BOTH must be
+            # satisfied: the SOLVE evaluates the SDF on REAL coords (so the body
+            # ends up at real (0.5, Hint)); the 2-D contour init samples the base
+            # SDF on the DOMAIN-CENTRED grid (x-xmid in [-L/2, L/2]). Basing at
+            # the origin keeps the full circle inside the contour window, so the
+            # Lagrangian surface contour (cnt_update) is the WHOLE circle.
+            # (circle(xt=0.5, yt=0.5) would put the centre at the centred-grid
+            # CORNER -> find_contours captures only a quarter-arc -> a broken
+            # contour and ~75% Lagrangian buoyancy error. The eulerian/displaced
+            # path uses sdf_val on the real grid and is unaffected either way.)
             "type": "composite_analytical", "plotting": False,
-            "sdf": [f"lambda x, y: circle(x,y,xt=0.5,yt={Hint},r={R})"],
-            "update_maps": [{"rotation": "lambda t: torch.tensor(0.0)",
-                             "translation": ["lambda t: torch.tensor(0.0)",
-                                             "lambda t: torch.tensor(0.0)"]}],
+            "sdf": [f"lambda x, y: circle(x,y,xt=0.0,yt=0.0,r={R})"],
+            "update_maps": [{"rotation": "lambda t: 0.0*t",
+                             "translation": ["lambda t: 0.5 + 0.0*t",
+                                             f"lambda t: {Hint} + 0.0*t"]}],
         },
         "output": {"save_path": "/tmp/lilytorch_tp_float/", "save_frames": True,
                    "save_every": 50, "save": False, "save_drags": False,

@@ -25,6 +25,7 @@ New config keys (add to ``bdim_yaml``)::
 import numpy as np
 from scipy.spatial.transform import Rotation
 from lilytorch.src.solver import FluidSolver
+from lilytorch.src.two_phase_solver import TwoPhaseSolver
 from lilytorch.src.body import (rotate_grid_2d, rotate_grid_3d,
                                 _rotate_grid_3d_compiled)
 
@@ -94,7 +95,16 @@ class BDIMhandler:
         # they do in :class:`FluidSolver`.
 
         # ---- create fluid solver ----
-        self.fluid_solver = FluidSolver(
+        # Auto-select the two-phase (water + real air) solver when the config
+        # carries a ``solver.two_phase`` block (mirrors the ``Nz`` -> 3-D
+        # detection above). ``TwoPhaseSolver`` is a thin subclass that reuses
+        # all of FluidSolver's state and step machinery, so the coupling loop,
+        # pose read and force application below are unchanged; only the
+        # projection coefficients, the once-per-step VOF advect (inside
+        # ``finalize_step``) and the now-emergent buoyancy differ.
+        self._two_phase = self.pars["solver"].get("two_phase") is not None
+        _SolverCls = TwoPhaseSolver if self._two_phase else FluidSolver
+        self.fluid_solver = _SolverCls(
             self.pars,
             dtype=dtype,
             custom_update=True,
@@ -311,6 +321,13 @@ class BDIMhandler:
         self._init_static_body_metadata()
         self._init_update()
         self._init_apply_forces()
+        # Two-phase: buoyancy is EMERGENT from the fluid pressure (it is already
+        # inside the loads returned by ``get_loads()`` / applied via xfrc), so
+        # the external FARMS-style buoyancy term must be turned OFF here to avoid
+        # double-counting. The ``_buoyancy_*`` indices then simply go unused and
+        # ``_init_buoyancy_params`` is never invoked.
+        if self._two_phase:
+            self._has_buoyancy = False
         # override composite-body update with our FARMS-driven version
         self.fluid_solver.composite_body.update = self.update
         # back-pointer so downstream code (e.g. forces.py diagnostics) can

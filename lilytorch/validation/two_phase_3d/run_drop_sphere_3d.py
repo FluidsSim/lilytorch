@@ -48,8 +48,13 @@ the entry physics near the interface is unaffected for this qualitative test.
 
 Checks: (1) stable through entry (no blow-up, peak ``|u|`` bounded),
 (2) VOF mass conserved, (3) ``F_z`` rises positive as the wetted area grows.
-Saves x-z mid-plane slice frames (interface ``alpha``, speed ``|u|``, in-plane
-vorticity ``omega_y``) so the cavity / splash can be inspected visually.
+
+Each save step writes TWO figures so the cavity / splash can be inspected:
+  * ``slice_NNNNN.png`` -- x-z mid-plane (interface ``alpha``, speed ``|u|``,
+    in-plane vorticity ``omega_y``);
+  * ``iso_NNNNN.png``   -- 3-D isosurfaces: the air/water interface (``alpha =
+    0.5`` -> open cavity + splash crown) + the sphere, and a
+    velocity-magnitude isosurface + the sphere.  Axes fixed to the full domain.
 """
 
 import math
@@ -92,9 +97,9 @@ def build_pars(D=0.10, pts_per_D=16, Fr=3.0, Re=500.0):
 
     # 3 x 3 x 6 diameter domain (z vertical), uniform h.
     Lx = Ly = 3.0 * D
-    Lz       = 12.0 * D
+    Lz       = 6.0 * D
     Nx = Ny  = int(round(3.0 * pts_per_D))
-    Nz       = int(round(12.0 * pts_per_D))
+    Nz       = int(round(6.0 * pts_per_D))
     h  = Lx / Nx                           # = Lz/Nz (dx==dy==dz)
 
     # Interface 2 D below the top (water below z=Hint, air above); sphere starts
@@ -119,7 +124,13 @@ def build_pars(D=0.10, pts_per_D=16, Fr=3.0, Re=500.0):
             "poisson_nsmoothing": 6, "poisson_verbose": False,
             "poisson_folder": "lilytorch/data/",
             "poisson_method": "multigrid", "poisson_smoother": "rbgs",
-            "dtype": "float32", "solver_method": "python", "rho_body": 1000.0,
+            "dtype": "float32", "solver_method": "python", "rho_body": 500.0,
+            # Lagrangian surface-integral forces on the REAL pressure: the
+            # watertight sphere triangulation gives Σ(A·n)=0, so the integral is
+            # gauge-invariant and recovers buoyancy + the dynamic impact load
+            # (Cz≈1, matching Weymouth & Yue 2011 Fig. 5). The TwoPhaseSolver
+            # default (displaced-volume buoyancy) drops the impact load.
+            "force_method": "lagrangian",
             "gravity": [0.0, 0.0, -g],
             "two_phase": {
                 "alpha_init": f"lambda X, Y, Z: (Z < {Hint}).double()",
@@ -204,6 +215,77 @@ def save_slice(solver, it, t, m, outdir):
     plt.close(fig)
 
 
+def _iso3d(vol, level, h, origin):
+    """Marching-cubes isosurface of ``vol`` at ``level`` in PHYSICAL coords
+    (``verts`` shifted to the grid origin, spacing ``h``).  Returns
+    ``(verts, faces)`` or ``None`` when there is no level crossing."""
+    from skimage import measure
+    vmin, vmax = float(vol.min()), float(vol.max())
+    if not (vmin < level < vmax):
+        return None
+    try:
+        verts, faces, _n, _v = measure.marching_cubes(vol, level=level,
+                                                       spacing=(h, h, h))
+    except (ValueError, RuntimeError):
+        return None
+    return verts + np.asarray(origin, dtype=verts.dtype), faces
+
+
+def save_isosurface(solver, it, t, m, outdir):
+    """Save a 3-D isosurface figure with axes fixed to the full domain:
+    (left) the air/water interface ``alpha = 0.5`` (open cavity + splash crown)
+    with the sphere inside; (right) a velocity-magnitude isosurface (the jet /
+    wake) with the sphere.  The sphere is the SDF zero-level set."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+
+    inn = (slice(1, -1),) * 3                          # strip ghost layer
+    alpha = solver.two_phase.alpha[inn].detach().float().cpu().numpy()
+    u = solver.u0[inn].detach().float().cpu().numpy()
+    v = solver.v0[inn].detach().float().cpu().numpy()
+    w = solver.w0[inn].detach().float().cpu().numpy()
+    speed = np.sqrt(u * u + v * v + w * w)
+    sdf = solver.composite_body.sdf_val[inn].detach().float().cpu().numpy()
+    h = float(m["h"])
+    origin = (float(solver.x[1]), float(solver.y[1]), float(solver.z[1]))
+    Lx, Ly, Lz, R, Hint, U = (m["Lx"], m["Ly"], m["Lz"], m["R"], m["Hint"], m["U"])
+    zc = m["z0"] - U * t
+    # adaptive: a shell just below the peak so the near-body flow / jet is
+    # always captured (flow around the body ~ U, impact jet > U).
+    spd_level = max(0.8 * U, 0.55 * float(speed.max()))
+
+    iso_sph = _iso3d(sdf, 0.0, h, origin)
+    panels = [("air/water interface + cavity", _iso3d(alpha, 0.5, h, origin),
+               "#1f77b4", 0.18),
+              (f"|u| = {spd_level:.1f} m/s isosurface", _iso3d(speed, spd_level, h, origin),
+               "#ff7f0e", 0.35)]
+    fig = plt.figure(figsize=(12, 6.4))
+    for col, (title, iso_field, fc, op) in enumerate(panels):
+        ax = fig.add_subplot(1, 2, col + 1, projection="3d")
+        if iso_field is not None:
+            vF, fF = iso_field
+            ax.add_collection3d(Poly3DCollection(vF[fF], alpha=op,
+                                facecolor=fc, edgecolor="none"))
+        if iso_sph is not None:
+            vF, fF = iso_sph
+            ax.add_collection3d(Poly3DCollection(vF[fF], alpha=0.9,
+                                facecolor="#555555", edgecolor="none"))
+        xx, yy = np.meshgrid([0, Lx], [0, Ly])         # rest waterline plane
+        ax.plot_surface(xx, yy, np.full_like(xx, Hint), alpha=0.06, color="#1f77b4")
+        ax.set_xlim(0, Lx); ax.set_ylim(0, Ly); ax.set_zlim(0, Lz)
+        ax.set_box_aspect((Lx, Ly, Lz))
+        ax.set_xlabel("x"); ax.set_ylabel("y"); ax.set_zlabel("z")
+        ax.set_title(title, fontsize=10)
+        ax.view_init(elev=12, azim=-60)
+    fig.suptitle(f"3-D sphere water-entry  it={it}  t={t:.4f}s  "
+                 f"z_c/R below surf = {(Hint-zc)/R:+.2f}", fontsize=11)
+    fig.tight_layout()
+    fig.savefig(os.path.join(outdir, f"iso_{it:05d}.png"), dpi=95)
+    plt.close(fig)
+
+
 def main(pts_per_D=16, Fr=3.0, Re=500.0, save_every=25,
          penetration_target=15.0):
     pars, m = build_pars(pts_per_D=pts_per_D, Fr=Fr, Re=Re)
@@ -253,6 +335,7 @@ def main(pts_per_D=16, Fr=3.0, Re=500.0, save_every=25,
 
     Fz_max = 0.0; umax_max = 0.0; blew = False; last = {}
     save_slice(solver, 0, 0.0, m, outdir)
+    save_isosurface(solver, 0, 0.0, m, outdir)
     for it in tqdm(range(n_steps)):
         try:
             u, v, p, w = solver.advance_and_compute_loads(u, v, p, it, it * dt, w_vel=w)
@@ -263,6 +346,7 @@ def main(pts_per_D=16, Fr=3.0, Re=500.0, save_every=25,
         umax_max = max(umax_max, umax)
         if (it + 1) % save_every == 0 or it == n_steps - 1:
             save_slice(solver, it + 1, (it + 1) * dt, m, outdir)
+            save_isosurface(solver, it + 1, (it + 1) * dt, m, outdir)
         if (it + 1) % 25 == 0 or it == n_steps - 1:
             zc = z0 - U * (it + 1) * dt
             Fz = float(solver.get_loads()[0][0, 2])

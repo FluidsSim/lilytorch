@@ -1,0 +1,164 @@
+# =============================================================================
+# Two-phase (water + real air) MuJoCo <-> BDIM coupling demo: a free rigid
+# sphere floating/sinking under the EMERGENT buoyancy of the two-phase fluid.
+#
+# WATERLINE (single source of truth): SURF = 1.8  (CGS-like units; box z in
+# [0, 2.5]).  It appears in exactly two places, which MUST agree:
+#   * the fluid VOF init below:  alpha_init  ->  water where Z < 1.8
+#   * the arena water height (cosmetic):       arena_config.yaml: water.height
+# The fluid VOF surface is what governs the physics; the arena water is visual.
+#
+# The sphere (sphere.yaml, density 0.5) spawns just below the surface and should
+# rise to float half-submerged (centre settling at z = 1.8).  No external FARMS
+# buoyancy is used — BDIMhandler auto-detects the ``two_phase`` block, builds a
+# TwoPhaseSolver, and turns the external buoyancy term off (buoyancy is emergent
+# in the fluid pressure / get_loads).
+# =============================================================================
+units:
+  meters: 1
+  seconds: 1
+  kilograms: 1
+runtime:
+  n_iterations: 1500
+  buffer_size: 1500
+  play: true
+  rtl: 1.0
+  fast: false
+  headless: true
+  show_progress: true
+physics:
+  timestep: 0.0001
+  gravity:
+  - 0
+  - 0
+  - -980
+  num_sub_steps: 1
+  cb_sub_steps: 1
+  n_solver_iters: 5000
+mujoco:
+  cone: elliptic
+  solver: CG
+  integrator: implicit
+  impratio: 10
+  ccd_iterations: 1000
+  ccd_tolerance: 1e-6
+  noslip_iterations: 10000
+  noslip_tolerance: 1e-6
+  viewer: MuJoCo
+  texture_repeat: 10
+  shadow_size: 1024
+  visual_scale: 1.0
+  extent: 10.0
+pybullet:
+  opengl2: false
+  lcp: dantzig
+  cfm: 1.0e-10
+  erp: 0
+  contact_erp: 0
+  friction_erp: 0
+  residual_threshold: 1.0e-06
+  max_num_cmd_per_1ms: 100000000
+  report_solver_analytics: 0
+extensions:
+- loader: lilytorch.integration.extensions.FluidExtension
+  config:
+    handler_path: lilytorch.integration.BDIMhandler.BDIMhandler
+    bdim_yaml:
+      solver:
+        use_gpu: True
+        nthreads: 16
+        dtype: "float32"
+
+        # h = 1/32 = 2.5/80 (uniform). ~6.4 cells across D=0.2. Runnable in a
+        # few minutes; raise to 48/120 (or 60/150) for a sharper interface.
+        Nx: 32
+        Ny: 32
+        Nz: 80
+        xmin: 0
+        ymin: 0
+        zmin: 0
+        xmax: 1
+        ymax: 1
+        zmax: 2.5
+
+        convection_method: "quick"
+        dt: 0.0001
+        nt: 1500
+        nu: 0.02
+        rho: 1
+        rho_body: 1.0           # body region matched to water in the BDIM band (well-conditioned)
+        eps_multiplier: 2
+
+        gravity: [0, 0, -980]   # fluid body force -> hydrostatic pressure -> emergent buoyancy
+        solver_method: "python"  # variable-density projection needs materialised mu0 (no kernel)
+
+        # FFT cannot do a variable-density Poisson; use MGCG.
+        poisson_tol: 1.0e-6
+        poisson_max_cycles: 30
+        poisson_max_mgcg_cycles: 30
+        jacobi_weight: 0.7
+        poisson_nsmoothing: 5
+        poisson_verbose: False
+        poisson_folder: "data/"
+        poisson_smoother: "rbgs"
+        poisson_method: "mgcg"
+        poisson_bc_type: "neumann"
+
+        time_integration: "euler"
+        heun: false
+        force_method: "method2"
+        force_delta_order: 1
+
+        # ---- two-phase (water + real air) free surface ----
+        two_phase:
+          alpha_init: "lambda X, Y, Z: (Z < 1.8).double()"
+          rho_water: 1.0
+          rho_air: 0.001
+          nu_water: 0.02
+          nu_air: 0.15
+          face_density: "harmonic"
+
+      boundary_conditions:
+        BC_type_u: ["D", "D", "D", "D", "D", "D"]
+        BC_values_u: [0, 0, 0, 0, 0, 0]
+        BC_type_v: ["D", "D", "D", "D", "D", "D"]
+        BC_values_v: [0, 0, 0, 0, 0, 0]
+        BC_type_w: ["D", "D", "D", "D", "D", "D"]
+        BC_values_w: [0, 0, 0, 0, 0, 0]
+
+      physics:
+        solref: [0.00001, 10]
+
+      body:
+        force_scaling: 1.0
+        type: multi_animat
+        plotting: False
+        compute_interp: False
+        plotting_meshes: False
+        save_folder: None
+        n_samples:
+        - 2000
+        - 2000
+        update_maps:
+          rotation: "None"
+          translation:
+          - None
+          - None
+          - None
+        suit: 0.0
+        convexify: True
+        scale: 1
+
+      output:
+        save_path: ""
+        existing_folder: /tmp/two_phase_sphere_drop
+        save_frames: True
+        save_every: 100
+        vmin: -10
+        vmax: 10
+        save_uv: False
+
+- loader: farms_core.simulation.extensions.ExperimentLogger
+  config:
+    log_path: /tmp/two_phase_sphere_drop/output
+    skip: 0

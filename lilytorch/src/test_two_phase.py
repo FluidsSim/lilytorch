@@ -22,7 +22,7 @@ def test_density_and_viscosity_blends():
     (x, y), h = _grid()
     tp = TwoPhase(x, y, h, lambda X, Y: (Y < 0.5).double(),
                   rho_water=1000.0, rho_air=1.0,
-                  nu_water=2.0, nu_air=0.5, compression=0.0)
+                  nu_water=2.0, nu_air=0.5)
     rho = tp.density_cc()
     assert torch.isclose(rho[tp.alpha == 1].max(), torch.tensor(1000.0, dtype=rho.dtype))
     assert torch.isclose(rho[tp.alpha == 0].min(), torch.tensor(1.0, dtype=rho.dtype))
@@ -37,10 +37,10 @@ def test_face_density_arithmetic_and_harmonic():
     # vertical step: left half water, right half air (jump along x = dim 0)
     tp_a = TwoPhase(x, y, h, lambda X, Y: (X < 0.5).double(),
                     rho_water=1000.0, rho_air=1.0,
-                    face_density="arithmetic", compression=0.0)
+                    face_density="arithmetic")
     tp_h = TwoPhase(x, y, h, lambda X, Y: (X < 0.5).double(),
                     rho_water=1000.0, rho_air=1.0,
-                    face_density="harmonic", compression=0.0)
+                    face_density="harmonic")
     fa = tp_a.density_face(0)
     fh = tp_h.density_face(0)
     # at a water/air cut face the arithmetic avg is ~500.5, harmonic ~2.0
@@ -68,7 +68,7 @@ def test_boundedness_and_mass_conservation_2d():
     cx = cy = 0.5; r = 0.2
     tp = TwoPhase(x, y, h,
                   lambda X, Y: ((X - cx)**2 + (Y - cy)**2 < r**2).double(),
-                  rho_water=1000.0, rho_air=1.0, compression=1.0)
+                  rho_water=1000.0, rho_air=1.0)
     u, v = _taylor_green((x, y), h)
     umax = max(u.abs().max().item(), v.abs().max().item())
     dt = 0.2 * h / umax
@@ -86,11 +86,10 @@ def test_boundedness_and_mass_conservation_2d():
     assert drift < 5e-3, f"water-volume drift too large: {drift:.2e}"
 
 
-def test_compression_keeps_bounds_3d():
+def test_boundedness_3d():
     h = 1.0 / 24
     x = y = z = torch.linspace(0.0, 1.0, 24, dtype=torch.float64)
-    tp = TwoPhase(x, y, h, lambda X, Y, Z: (Z < 0.5).double(), z=z,
-                  compression=1.0)
+    tp = TwoPhase(x, y, h, lambda X, Y, Z: (Z < 0.5).double(), z=z)
     u = torch.full_like(tp.alpha, 0.0)
     w = torch.full_like(tp.alpha, 0.1)
     dt = 0.2 * h / 0.1

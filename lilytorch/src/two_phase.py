@@ -23,7 +23,7 @@ Sign / value convention::
 
 import torch
 
-from lilytorch.src.advection import SCHEMES, advect_scalar, _sl
+from lilytorch.src.advection import _sl
 
 
 def _neumann_pad(q):
@@ -47,20 +47,17 @@ class TwoPhase:
     z : 1-D tensor or None -- enables 3-D when given.
     rho_water, rho_air : float -- phase densities (default 1000 / 1).
     nu_water, nu_air : float -- phase kinematic viscosities.
-    advection : str -- bounded convective scheme from
-        :data:`lilytorch.src.advection.SCHEMES` (default ``"cubista"``; use a
-        TVD scheme — ``cubista`` / ``vanLeer`` — so ``alpha`` stays bounded).
-    compression : float -- interface-compression strength ``C_alpha``
-        (0 disables; ~1 sharpens the interface against numerical smearing).
     face_density : ``"arithmetic"`` | ``"harmonic"`` -- face-density average
         used to build the projection coefficients.
+
+    Note: the interface scheme is the hardwired Weymouth & Yue conservative
+    VOF (:meth:`advect`); there is no scheme/compression choice to make.
     """
 
     def __init__(self, x, y, h, alpha_init, *,
                  z=None,
                  rho_water=1000.0, rho_air=1.0,
                  nu_water=1.0e-6, nu_air=1.5e-5,
-                 advection="cubista", compression=1.0,
                  face_density="harmonic",
                  device=None, dtype=None):
         self.device = device if device is not None else x.device
@@ -71,19 +68,9 @@ class TwoPhase:
         self.rho_air   = float(rho_air)
         self.nu_water  = float(nu_water)
         self.nu_air    = float(nu_air)
-        self.compression = float(compression)
         if face_density not in ("arithmetic", "harmonic"):
             raise ValueError("face_density must be 'arithmetic' or 'harmonic'")
         self.face_density = face_density
-
-        if advection not in SCHEMES:
-            raise ValueError(
-                f"Unknown two-phase advection scheme '{advection}'. "
-                f"Choose a bounded scheme from {sorted(SCHEMES)} "
-                f"(cubista / vanLeer recommended)."
-            )
-        self._scheme = SCHEMES[advection]
-        self._dh     = [self.h] * self.ndim
 
         if self.ndim == 2:
             X, Y = torch.meshgrid(x, y, indexing="ij")
@@ -169,8 +156,7 @@ class TwoPhase:
         The sweep order alternates each step to limit directional bias.  The
         face value is the W&Y 2nd-order Courant-corrected, van-Leer-limited
         donor extrapolation (see :meth:`_cvof_sweep`), which keeps the
-        interface sharp while staying bounded; the ``advection`` /
-        ``compression`` config knobs are unused by this conservative scheme.
+        interface sharp while staying bounded.
         """
         dt = float(dt)
         order = list(range(self.ndim))
