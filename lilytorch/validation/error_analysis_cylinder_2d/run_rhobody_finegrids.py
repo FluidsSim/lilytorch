@@ -31,7 +31,9 @@ for Nx in [256, 512, 1024, 2048]:
     pars["output"]["save_frames"] = False
     save_path = f"{output_base}/Nx{Nx}/"
     solver = FluidSolver(pars, dtype=torch.float32, compute_forces=False)
-    print(f"  rho_fluid={solver.rho}  rho_body={solver.rho_body}  nt={solver.nt}", flush=True)
+    # NOTE: rho_body no longer affects the solver (BDIM uses dt*mu0/rho_fluid);
+    # this study script is retained for grid-convergence only.
+    print(f"  rho_fluid={solver.rho}  nt={solver.nt}", flush=True)
     solver.save_path = save_path
     os.makedirs(solver.save_path, exist_ok=True)
     solver.set_initial_conditions()

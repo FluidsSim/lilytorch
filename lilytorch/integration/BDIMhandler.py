@@ -11,7 +11,6 @@ zebrafish, salamander, ...).
 New config keys (add to ``bdim_yaml``)::
 
     solver.dtype                 : "float32" | "float64"   (default "float32")
-    solver.rho_body              : float                   (default 800.0)
     solver.zero_pressure_inside  : bool                    (default False)
     solver.force_method          : "eulerian" | "lagrangian"   (default "eulerian";
                                    legacy "method1"/"method2" accepted with a DeprecationWarning)
@@ -660,8 +659,13 @@ class BDIMhandler:
         n = comp.nbodies
         experiment_options = self.pars.get("body", {}).get("experiment_options", None)
 
+        # Body density for the displaced-volume term (V = mass/density) comes
+        # from the ANIMAT config (morphology link density) below; this is the
+        # ONLY place the body density enters the coupling.  The fallback is the
+        # FLUID density (neutral buoyancy when an animat density is missing) --
+        # the solver no longer carries a ``rho_body``.
         self._buoy_mass   = np.zeros(n)
-        self._buoy_density = np.full(n, float(self.fluid_solver.rho_body))
+        self._buoy_density = np.full(n, float(self.fluid_solver.rho))
         self._buoy_height = np.zeros(n)
 
         for body_i in range(n):
@@ -676,7 +680,7 @@ class BDIMhandler:
                         .morphology.links[link_id].density
                     )
                 except Exception:
-                    density = float(self.fluid_solver.rho_body)
+                    density = float(self.fluid_solver.rho)
                 if density > 0.0:
                     self._buoy_density[body_i] = density
 

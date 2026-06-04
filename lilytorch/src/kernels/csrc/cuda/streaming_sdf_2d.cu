@@ -1086,8 +1086,10 @@ __device__ __forceinline__ void bdim_one_axis_2d(
     const scalar_t nd = nx * ddx + ny * ddy;
 
     phi_out[g] = mu0 * diff_c + b_c + mu1 * nd;
-    // mu0_proj == 0 → plain dt/rho_eff (non-degenerate, multibody-safe).
-    c_out[g]   = (mu0_proj ? dt * mu0 : dt) / (rho_body + (rho_f - rho_body) * mu0);
+    // BDIM2 coefficient dt*mu0/rho_fluid (Weymouth & Yue): the body enters via
+    // mu0 only, NOT its density.  mu0_proj == 0 → plain dt/rho (no mu0 numerator).
+    // ``rho_body`` is unused (kept in the signature for ABI stability).
+    c_out[g]   = (mu0_proj ? dt * mu0 : dt) / rho_f;
 }
 
 template <typename scalar_t>
@@ -1278,9 +1280,9 @@ __device__ __forceinline__ void bdim_one_axis_sigma_2d(
     const scalar_t nd = nx * ddx + ny * ddy;
 
     phi_out[g] = mu0 * diff_c + b_c + mu1 * nd;
-    // mu0_proj == 0 → drop the mu0 numerator (plain dt/rho_eff).
-    c_out[g]   = (mu0_proj ? dt * mu0_poisson : dt)
-               / (rho_body + (rho_f - rho_body) * mu0_poisson);
+    // BDIM2 coefficient dt*mu0/rho_fluid: body enters via mu0 only, not density.
+    // mu0_proj == 0 → drop the mu0 numerator (plain dt/rho).  rho_body unused.
+    c_out[g]   = (mu0_proj ? dt * mu0_poisson : dt) / rho_f;
 }
 
 template <typename scalar_t>

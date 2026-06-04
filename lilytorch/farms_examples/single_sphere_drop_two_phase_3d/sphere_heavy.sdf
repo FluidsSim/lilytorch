@@ -1,21 +1,21 @@
 <?xml version="1.0" ?>
 <sdf version="1.6">
   <world name="world">
-    <model name="sphere_D0p2">
+    <model name="sphere_heavy">
       <pose>0 0 0 0 0 0</pose>
       <link name="base_link">
         <pose>0 0 0 0 0 0</pose>
         <inertial>
           <pose>0 0 0 0 0 0</pose>
-          <!-- 3-D solid sphere: rho=900.0, r=0.0335 (tennis ball) -->
-          <mass>0.141731224691</mass>
+          <!-- 3-D solid sphere: rho=1500.0, r=0.0335 (tennis ball) -->
+          <mass>0.236218707818</mass>
           <inertia>
-            <ixx>6.36231467637e-05</ixx>
+            <ixx>0.000106038577939</ixx>
             <ixy>0</ixy>
             <ixz>0</ixz>
-            <iyy>6.36231467637e-05</iyy>
+            <iyy>0.000106038577939</iyy>
             <iyz>0</iyz>
-            <izz>6.36231467637e-05</izz>
+            <izz>0.000106038577939</izz>
           </inertia>
         </inertial>
         <collision name="base_link_collision">
@@ -30,7 +30,7 @@
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <mesh>
-              <uri>_striped_sphere.obj</uri>
+              <uri>_striped_sphere_sphere_heavy.obj</uri>
             </mesh>
           </geometry>
         </visual>

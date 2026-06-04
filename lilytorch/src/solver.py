@@ -432,7 +432,13 @@ class FluidSolver(PlottingMixin):
             self._sponge_sigma_v = None
             self._sponge_sigma_w = None
 
-        self.rho_body = float(solver.get("rho_body", 1000.0))
+        # NOTE: ``solver.rho_body`` is intentionally NOT read. The body density
+        # is no longer a fluid property: the BDIM Poisson coefficient is the
+        # constant-density ``dt*mu0/rho_fluid`` (Weymouth & Yue), the body
+        # entering only through ``mu0``. Body weight / buoyancy is the coupling's
+        # concern (MuJoCo mass + the external Archimedes term in BDIMhandler,
+        # which uses the ANIMAT density). Any ``rho_body`` key in a config is
+        # silently ignored.
 
         self.terminate = False   # flag for early termination (e.g. from NaN detection)
 
@@ -1000,11 +1006,12 @@ class FluidSolver(PlottingMixin):
             Heun weight (1.0 = predictor, 0.5 = corrector).
         ch, cv, cw : tensor or None
             Pre-computed Poisson coefficients for each staggered grid
-            (``dt / rho_eff`` on the respective face grids).
+            (``dt * mu0 / rho_fluid`` on the respective face grids).
             When *None* (default), the standard BDIM coefficients
             ``(w*dt/rho) * mu0`` are used.  Pass custom coefficients
-            for variable-density formulations (e.g. FARMS coupling where
-            ``ch = dt / (rho_body + drho * mu0_u)``).
+            for variable-density formulations (e.g. the two-phase solver,
+            where ``rho_fluid`` is the VOF water/air blend).  The body enters
+            only through ``mu0`` -- its density is never a fluid coefficient.
         ch_cc : tensor or None
             Cell-centred coefficient ``dt / rho_eff_cc`` for the FFT
             Poisson RHS.  When provided the FFT path solves
@@ -1619,20 +1626,23 @@ class FluidSolver(PlottingMixin):
                                '_ch_cc_persist')
 
     def _compute_variable_density_coefficients(self, timestep):
-        """Compute variable-density Poisson coefficients for FSI coupling.
+        """BDIM2 Poisson coefficients ``c = dt * mu0 / rho_fluid`` (FSI).
 
         Returns ``(ch, cv, ch_cc)`` for 2-D or ``(ch, cv, cw, ch_cc)``
         for 3-D, where:
 
-            * ``ch, cv, cw`` -- staggered ``dt * mu0 / rho_eff`` on face grids.
-            * ``ch_cc`` -- cell-centred ``dt * mu0 / rho_eff_cc`` for FFT RHS.
+            * ``ch, cv, cw`` -- staggered ``dt * mu0 / rho_fluid`` on faces.
+            * ``ch_cc`` -- cell-centred ``dt / rho_fluid`` (FFT RHS divisor).
 
-        BDIM2 mu0-weighted, variable-density Poisson coefficient:
-        ``ch = dt * mu0 / (rho_body + (rho_fluid - rho_body) * mu0)``.
+        This is the Weymouth & Yue (2011) / Maertens & Weymouth (2015) form:
+        the Poisson coefficient is ``(1 - delta^B) / rho = mu0 / rho_fluid``.
         The ``mu0`` factor makes the velocity-correction vanish EXACTLY inside
         the body (mu0=0), preserving the imposed body velocity and avoiding the
-        ill-conditioned band Poisson.  When ``rho_body == rho_fluid`` it reduces
-        to the original BDIM2 form ``dt * mu0 / rho`` (Maertens & Weymouth 2015).
+        ill-conditioned band Poisson.  The body enters ONLY through ``mu0`` (its
+        geometry) -- the body **density never appears here**: its weight /
+        inertia / buoyancy is the rigid-body coupling's concern (MuJoCo + the
+        external Archimedes term in ``BDIMhandler``), not a fluid property.
+        (``TwoPhaseSolver`` overrides this with the VOF water/air density.)
 
         Narrow-band fast-path (kernel mode + sparse bodies, 2-D and 3-D)
         ----------------------------------------------------------------
@@ -1642,15 +1652,10 @@ class FluidSolver(PlottingMixin):
         ``_ch_cc_persist``) are pre-filled once with that default and only
         the union sub-block is overwritten each step, avoiding ``D + 1``
         full-grid divisions.
-
-        When the composite body has populated ``_winning_rho_cc`` (per-cell
-        winning-body density, from the fused SDF+forces kernel) the
-        sub-block uses that per-cell density; otherwise it falls back to
-        the scalar ``self.rho_body``.
         """
         D       = self.ndim
-        _drho   = float(self.rho) - self.rho_body
-        # mu0-weighted (BDIM2) numerator vs plain dt/rho_eff — see the
+        _rho_f  = float(self.rho)
+        # mu0-weighted (BDIM2) numerator vs plain dt/rho — see the
         # ``bdim_mu0_projection`` flag set in __init__.
         #
         # The cell-centred ``ch_cc`` (FFT-Poisson RHS divisor) must stay
@@ -1701,25 +1706,11 @@ class FluidSolver(PlottingMixin):
                     slice(u_aabb[2 * d], u_aabb[2 * d + 1]) for d in range(D)
                 )
 
-                # Per-cell winning body density when the fused kernel
-                # populated it; otherwise scalar rho_body.
-                _winning = getattr(self.composite_body, '_winning_rho_cc', None)
-                if _winning is not None:
-                    _rho_fluid = float(self.rho)
-                    _rho_b     = _winning[usl]
-                    for name, mu in zip(face_names + (cc_name,), mu_grids):
-                        mu_sub = mu[usl]
-                        _num = timestep if (name == cc_name or not _mu0w) else timestep * mu_sub
-                        getattr(self, name)[usl] = (
-                            _num
-                            / (_rho_b * (1 - mu_sub) + _rho_fluid * mu_sub)
-                        )
-                else:
-                    for name, mu in zip(face_names + (cc_name,), mu_grids):
-                        _num = timestep if (name == cc_name or not _mu0w) else timestep * mu[usl]
-                        getattr(self, name)[usl] = (
-                            _num / (self.rho_body + _drho * mu[usl])
-                        )
+                # Constant-density BDIM2: faces ``dt*mu0/rho``, cc ``dt/rho``.
+                # The body enters via mu0 only -- no body density.
+                for name, mu in zip(face_names + (cc_name,), mu_grids):
+                    _num = timestep if (name == cc_name or not _mu0w) else timestep * mu[usl]
+                    getattr(self, name)[usl] = _num / _rho_f
 
                 return (*(getattr(self, n) for n in face_names),
                         getattr(self, cc_name))
@@ -1731,7 +1722,7 @@ class FluidSolver(PlottingMixin):
         for i, mu in enumerate(mu_grids):
             is_cc = (i == len(mu_grids) - 1)
             _num = timestep if (is_cc or not _mu0w) else timestep * mu
-            out.append(_num / (self.rho_body + _drho * mu))
+            out.append(_num / _rho_f)
         return tuple(out)
 
     # ------------------------------------------------------------------
@@ -1875,7 +1866,7 @@ class FluidSolver(PlottingMixin):
                 self._ch_persist, self._cv_persist,
                 key_u_t, key_v_t,
                 self._sigma_shifts,
-                float(comp.eps), float(self.rho_body), float(self.rho),
+                float(comp.eps), float(self.rho), float(self.rho),
                 float(timestep), float(comp.h),
                 int(ks['dirty_i0']), int(ks['dirty_j0']),
                 int(ks['dirty_Ai']), int(ks['dirty_Aj']),
@@ -1888,7 +1879,7 @@ class FluidSolver(PlottingMixin):
                 bU_tmp, bV_tmp,
                 self.u0, self.v0,
                 self._ch_persist, self._cv_persist,
-                float(comp.eps), float(self.rho_body), float(self.rho),
+                float(comp.eps), float(self.rho), float(self.rho),
                 float(timestep), float(comp.h),
                 int(ks['dirty_i0']), int(ks['dirty_j0']),
                 int(ks['dirty_Ai']), int(ks['dirty_Aj']),
@@ -2065,7 +2056,7 @@ class FluidSolver(PlottingMixin):
                 self._ch_persist, self._cv_persist, self._cw_persist,
                 key_u_t, key_v_t, key_w_t,
                 self._sigma_shifts,
-                float(comp.eps), float(self.rho_body), float(self.rho),
+                float(comp.eps), float(self.rho), float(self.rho),
                 float(timestep), float(comp.h),
                 int(ks['dirty_i0']), int(ks['dirty_j0']), int(ks['dirty_k0']),
                 int(ks['dirty_Ai']), int(ks['dirty_Aj']), int(ks['dirty_Ak']),
@@ -2078,7 +2069,7 @@ class FluidSolver(PlottingMixin):
                 bU_tmp, bV_tmp, bW_tmp,
                 self.u0, self.v0, self.w0,
                 self._ch_persist, self._cv_persist, self._cw_persist,
-                float(comp.eps), float(self.rho_body), float(self.rho),
+                float(comp.eps), float(self.rho), float(self.rho),
                 float(timestep), float(comp.h),
                 int(ks['dirty_i0']), int(ks['dirty_j0']), int(ks['dirty_k0']),
                 int(ks['dirty_Ai']), int(ks['dirty_Aj']), int(ks['dirty_Ak']),

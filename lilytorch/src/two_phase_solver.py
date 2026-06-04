@@ -14,7 +14,8 @@ methods are overridden:
 
 * ``__init__`` — build the :class:`~lilytorch.src.two_phase.TwoPhase` field.
 * ``_compute_variable_density_coefficients`` — projection coefficients
-  ``c = dt/ρ_eff`` from the VOF density (× the body via ``μ0``).
+  ``c = dt·μ0/ρ_fluid`` from the VOF water/air density (Weymouth & Yue 2011,
+  ``(1−δ^B)/ρ``; the body enters via ``μ0`` only, never its density).
 * ``finalize_step`` — transport the VOF field once per step.
 
 Everything else is inherited and reused unchanged:
@@ -27,7 +28,7 @@ Everything else is inherited and reused unchanged:
 * advection–diffusion, BDIM, the Poisson solver, force integration.
 
 The hydrostatic interface jump and the buoyancy on the body therefore emerge
-automatically from the density-weighted pressure (``∇p = ρ_eff g`` at rest).
+automatically from the density-weighted pressure (``∇p = ρ_fluid g`` at rest).
 """
 
 import torch
@@ -119,27 +120,32 @@ class TwoPhaseSolver(FluidSolver):
     #  Override: density-based projection coefficients
     # ------------------------------------------------------------------
     def _compute_variable_density_coefficients(self, timestep):
-        """``c = dt / ρ_eff`` on each staggered face grid (+ a cc entry).
+        """BDIM2 two-phase projection coefficients ``c = dt·μ0 / ρ_fluid`` on
+        each staggered face (+ a cc entry).
 
-        ``ρ_eff = μ0·ρ_fluid + (1-μ0)·ρ_body`` blends the two-phase fluid
-        density (water/air from the VOF field) with the immersed body density
-        via the BDIM ``μ0`` Heaviside. With no body (placeholder far away)
-        ``μ0 ≡ 1`` so ``ρ_eff = ρ_fluid``. Returns the same
-        ``(ch, cv[, cw], ch_cc)`` tuple shape the base ``fluid_step`` expects;
-        ``ch_cc`` is the FFT RHS divisor (unused on the MGCG path).
+        This is the Weymouth & Yue (2011) form (Eqs 24a/26a): the Poisson
+        coefficient is ``(1−δ^B)/ρ`` with ``(1−δ^B) = μ0`` the fluid fraction
+        and ``ρ`` the **fluid** density — here the water/air VOF blend
+        (``density_face``, their Eq 33). The body enters ONLY through ``μ0``
+        (the geometry), NOT through its density: ``μ0`` makes the velocity
+        correction vanish inside the body (``μ0=0`` ⇒ ``c=0``), preserving the
+        BDIM-imposed body velocity. The body's density/inertia is the
+        rigid-body coupling's concern (MuJoCo / external Archimedes), not a
+        fluid property — so ``rho_body`` does not appear here.
+
+        ``ch_cc`` is the FFT RHS divisor; it omits ``μ0`` to stay bounded and
+        is unused on the MGCG path two-phase requires (kept only for the
+        ``(ch, cv[, cw], ch_cc)`` tuple shape ``fluid_step`` expects).
         """
-        tp       = self.two_phase
-        dt       = float(timestep)
-        rho_body = float(self.rho_body)
-        out      = []
+        tp  = self.two_phase
+        dt  = float(timestep)
+        out = []
         for d, ax in enumerate(self._bdim_axis_names):       # 'u','v'[,'w']
-            rho_fluid_face = tp.density_face(d)
-            mu0     = getattr(self, f'mu0_all_{ax}')         # body on this face
-            rho_eff = mu0 * rho_fluid_face + (1.0 - mu0) * rho_body
-            out.append(dt / rho_eff)
-        # cell-centred entry (FFT RHS divisor; tuple-shape only on MGCG path)
-        rho_eff_cc = self.mu0_all * tp.density_cc() + (1.0 - self.mu0_all) * rho_body
-        out.append(dt / rho_eff_cc)
+            rho_fluid_face = tp.density_face(d)              # water/air VOF blend
+            mu0 = getattr(self, f'mu0_all_{ax}')             # (1−δ^B), fluid fraction
+            out.append(dt * mu0 / rho_fluid_face)
+        # cell-centred entry (FFT RHS divisor; no μ0 to stay bounded)
+        out.append(dt / tp.density_cc())
         return tuple(out)
 
     # ------------------------------------------------------------------

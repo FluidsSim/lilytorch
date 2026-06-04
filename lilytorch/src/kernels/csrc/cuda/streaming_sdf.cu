@@ -1037,8 +1037,9 @@ void streaming_sdf_stag_3d_multi_cuda(
 //        using central differences on (phi_prime - body_vel).
 //     5) Writes the BDIM2 meta-equation result
 //           u0[i,j,k] = mu0*(u' - body) + body + mu1*nd
-//        and the variable-density Poisson coefficient
-//           c[i,j,k]  = dt / (rho_body + (rho_f - rho_body) * mu0).
+//        and the BDIM2 Poisson coefficient (Weymouth & Yue; body enters via
+//        mu0 only, NOT its density)
+//           c[i,j,k]  = dt * mu0 / rho_f.
 //
 //  No race conditions: phi_prime tensors are distinct allocations from
 //  u0/v0/w0; each thread writes only its own cell.
@@ -1159,11 +1160,12 @@ __device__ __forceinline__ void bdim_one_axis_3d(
     // The face grid excludes ghost cells: valid range is [1, c_hi_*] in
     // padded coordinates; the face-grid index is (i-1, j-1, k-1).
     if (i >= 1 && j >= 1 && k >= 1 && i <= c_hi_i && j <= c_hi_j && k <= c_hi_k) {
-        // mu0_proj != 0 → BDIM2 mu0-weighted coefficient (dt*mu0/rho_eff).
-        // mu0_proj == 0 → plain variable-density coefficient (dt/rho_eff),
-        // which keeps the projection non-degenerate for multibody swimmers.
+        // BDIM2 coefficient dt*mu0/rho_fluid (Weymouth & Yue): the body enters
+        // via mu0 only, NOT its density.  mu0_proj == 0 → plain dt/rho (no mu0
+        // numerator), non-degenerate for multibody.  ``rho_body`` is unused
+        // (kept in the signature for ABI stability).
         c_out[(i - 1) * c_stride_i + (j - 1) * c_stride_j + (k - 1)] =
-            (mu0_proj ? dt * mu0 : dt) / (rho_body + (rho_f - rho_body) * mu0);
+            (mu0_proj ? dt * mu0 : dt) / rho_f;
     }
 }
 
@@ -1414,10 +1416,10 @@ __device__ __forceinline__ void bdim_one_axis_sigma_3d(
 
     phi_out[g] = mu0 * diff_c + b_c + mu1 * nd;
     if (i >= 1 && j >= 1 && k >= 1 && i <= c_hi_i && j <= c_hi_j && k <= c_hi_k) {
-        // mu0_proj == 0 → drop the mu0 numerator (plain dt/rho_eff).
+        // BDIM2 coefficient dt*mu0/rho_fluid: body enters via mu0 only, not
+        // density.  mu0_proj == 0 → drop the mu0 numerator.  rho_body unused.
         c_out[(i - 1) * c_stride_i + (j - 1) * c_stride_j + (k - 1)] =
-            (mu0_proj ? dt * mu0_poisson : dt)
-            / (rho_body + (rho_f - rho_body) * mu0_poisson);
+            (mu0_proj ? dt * mu0_poisson : dt) / rho_f;
     }
 }
 

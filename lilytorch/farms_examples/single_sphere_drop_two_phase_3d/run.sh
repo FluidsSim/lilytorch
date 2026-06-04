@@ -14,8 +14,7 @@ PYTHON_BIN="${PYTHON_BIN:-python3}"
 mkdir -p /tmp/two_phase_sphere_drop/output
 # (re)generate the open-tank + water SDFs sized to the fluid box
 "$PYTHON_BIN" gen_arena.py
-# sync the sphere SDF mass/inertia to the density set in sphere.yaml
-# (FARMS uses the SDF mass; editing sphere.yaml density alone is ignored)
+# sync the sphere SDFs (mass/inertia, striped mesh + texture)
 "$PYTHON_BIN" gen_sphere.py
 
 # FlowIsoGLViewer needs its OpenGL hook LD_PRELOAD-ed BEFORE the sim process

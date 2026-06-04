@@ -20,8 +20,6 @@ diff_u, diff_v, diff_w
 
 
 # HIGH PRIORITY:
-- Dropping _compute_variable_density_coefficients: Opus 4.7 suggested to completely remove the rho = rho_body + (rho−rho_body)·μ₀ terms (unless dealing with problems where rho_body<<rho_fluid, i.e. where added mass causes instabilities. It suggested to use the original BDIM2 implementation for c_h = dt·μ₀/(rho_body + (rho−rho_body)·μ₀)
-- Change the printing to use pylog, with info, warning and error colors.
 
 - **(suggestion) Softmin SDF blending of multibody body velocities.**
   Multibody swimmers (eel, salamander, pleurodeles) currently force
@@ -117,18 +115,14 @@ Expected combined: ~1 GiB off peak → **~8 GiB peak alloc, ~9.2 GB nvidia-smi.*
    the new limiting factors.
 
 # LOW PRIORITY:
-- Can advection/poisson solvers be improved? I.e. by implementing a cuda/c++ kernel instead of torch.compile?
 - Test an analytical 2d swimmer simulation of the salamander swimming in 2d (use the control.py and gamepad.py extension and figure out how to set it up)
 - Consider Crank-Nicolson for diffusion. Current explicit diffusion has stability limit dt < h²/(2ν·ndim). Not a bottleneck now (dt_diff ≈ 4.2s ≫ dt_cfl), but becomes relevant if dt is increased aggressively per A5.
 
 
 # LONG TERM GOALS:
-- Velocity gradients for the stress tensor use central differences, which degrade to
-1st-order near immersed boundaries. One-sided or ghost-cell stencils for cells near
-the body would improve force accuracy and reduce oscillations.
+- Velocity gradients for the stress tensor use central differences, which degrade to 1st-order near immersed boundaries. One-sided or ghost-cell stencils for cells near the body would improve force accuracy and reduce oscillations.
 - The expressions `0.5*(1 + d/ε + sin(π·d/ε)/π)` have cancellation when d ≈ ±ε.
 A 5th-order Hermite smoothstep is more robust numerically and avoids sin/cos.
-- How to handle bodies outside the water (at the interface). Volume of fluids methods (?)
 - Add sph simulation support (?)
 - Strongly coupled solver - Monolithic fluid multi rigid body solver (?) --> hard, it would require dropping Mujoco
 
