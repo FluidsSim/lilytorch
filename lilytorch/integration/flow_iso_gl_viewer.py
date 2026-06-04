@@ -800,6 +800,17 @@ def _field_omega_mag(fs, u, v, p, w): return _vort(fs, u, v, w)["omega_mag"]
 def _field_vel_mag(fs, u, v, p, w): return (u**2 + v**2 + w**2).sqrt()
 def _field_pressure(fs, u, v, p, w): return p
 
+def _field_alpha(fs, u, v, p, w):
+    """Two-phase VOF volume fraction (1 water, 0 air). Rendered at level 0.5
+    this is the air/water INTERFACE. Only meaningful for a TwoPhaseSolver."""
+    tp = getattr(fs, "two_phase", None)
+    if tp is None:
+        raise AttributeError(
+            "FlowIsoGLViewer field 'alpha'/'interface' requires a two-phase "
+            "solver (no fs.two_phase). Use it only with a solver.two_phase config."
+        )
+    return tp.alpha
+
 FIELD_MAP = {
     "omega_x":   _field_omega_x,
     "omega_y":   _field_omega_y,
@@ -807,6 +818,8 @@ FIELD_MAP = {
     "omega_mag": _field_omega_mag,
     "vel_mag":   _field_vel_mag,
     "pressure":  _field_pressure,
+    "alpha":     _field_alpha,   # two-phase VOF (level 0.5 = air/water interface)
+    "interface": _field_alpha,   # alias
 }
 
 

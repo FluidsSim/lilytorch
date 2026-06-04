@@ -55,6 +55,22 @@ class TwoPhaseSolver(FluidSolver):
                 "(the FFT solver cannot do a variable-density Poisson)."
             )
         self._init_two_phase(tp_cfg)
+        # Saved 3-D PyVista frames (plotting_and_saving -> plot_field_3d) render
+        # the air/water INTERFACE: the VOF field alpha at iso-level 0.5, plus the
+        # body SDF. This overrides the default vorticity iso-specs (the interface
+        # is the point for two-phase). field_fn signature is (solver,u,v,p,w);
+        # plot_field_3d draws a single isosurface at the fixed iso_value.
+        if self.ndim == 3:
+            # Each entry -> one saved PyVista frame series (plot_field_3d). The
+            # interface is the air/water surface (alpha=0.5); omega_mag adds the
+            # vorticity structures (auto-thresholded). Add/remove entries to
+            # control which 3-D fields are rendered.
+            self.iso_3d_specs = [
+                ("interface", lambda s, u, v, p, w: s.two_phase.alpha, 0.5),
+                ("omega_mag",
+                 lambda s, u, v, p, w: s.vorticity_components(u, v, w)["omega_mag"],
+                 None),
+            ]
 
     # ------------------------------------------------------------------
     def _init_two_phase(self, cfg):

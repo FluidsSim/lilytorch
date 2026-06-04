@@ -7,22 +7,22 @@
         <pose>0 0 0 0 0 0</pose>
         <inertial>
           <pose>0 0 0 0 0 0</pose>
-          <!-- 3-D solid sphere: rho=0.5 (floats), r=0.1 -->
-          <mass>0.0020943951023932</mass>
+          <!-- 3-D solid sphere: rho=900.0, r=0.0335 (tennis ball) -->
+          <mass>0.141731224691</mass>
           <inertia>
-            <ixx>8.37758040957278e-06</ixx>
+            <ixx>6.36231467637e-05</ixx>
             <ixy>0</ixy>
             <ixz>0</ixz>
-            <iyy>8.37758040957278e-06</iyy>
+            <iyy>6.36231467637e-05</iyy>
             <iyz>0</iyz>
-            <izz>8.37758040957278e-06</izz>
+            <izz>6.36231467637e-05</izz>
           </inertia>
         </inertial>
         <collision name="base_link_collision">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <sphere>
-              <radius>0.1</radius>
+              <radius>0.0335</radius>
             </sphere>
           </geometry>
         </collision>
@@ -30,7 +30,7 @@
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <sphere>
-              <radius>0.1</radius>
+              <radius>0.0335</radius>
             </sphere>
           </geometry>
           <material>
