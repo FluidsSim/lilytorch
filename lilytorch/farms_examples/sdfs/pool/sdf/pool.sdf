@@ -4,12 +4,12 @@
     <model name="pool">
       <pose>0 0 0 0 0 0</pose>
       <link name="wall_xmin">
-        <pose>-0.01 0.07 0.09999999999999999 0 0 0</pose>
+        <pose>-1.6 0.0 0.4 0 0 0</pose>
         <collision name="wall_xmin_collision">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.02 0.18000000000000002 0.19999999999999998</size>
+              <size>0.2 5.2 3.8000000000000003</size>
             </box>
           </geometry>
         </collision>
@@ -17,7 +17,7 @@
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.02 0.18000000000000002 0.19999999999999998</size>
+              <size>0.2 5.2 3.8000000000000003</size>
             </box>
           </geometry>
           <material>
@@ -29,12 +29,12 @@
         </visual>
       </link>
       <link name="wall_xmax">
-        <pose>0.29000000000000004 0.07 0.09999999999999999 0 0 0</pose>
+        <pose>8.2 0.0 0.4 0 0 0</pose>
         <collision name="wall_xmax_collision">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.02 0.18000000000000002 0.19999999999999998</size>
+              <size>0.2 5.2 3.8000000000000003</size>
             </box>
           </geometry>
         </collision>
@@ -42,7 +42,7 @@
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.02 0.18000000000000002 0.19999999999999998</size>
+              <size>0.2 5.2 3.8000000000000003</size>
             </box>
           </geometry>
           <material>
@@ -54,12 +54,12 @@
         </visual>
       </link>
       <link name="wall_ymin">
-        <pose>0.14 -0.01 0.09999999999999999 0 0 0</pose>
+        <pose>3.3 -2.5 0.4 0 0 0</pose>
         <collision name="wall_ymin_collision">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.32 0.02 0.19999999999999998</size>
+              <size>10.0 0.2 3.8000000000000003</size>
             </box>
           </geometry>
         </collision>
@@ -67,7 +67,7 @@
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.32 0.02 0.19999999999999998</size>
+              <size>10.0 0.2 3.8000000000000003</size>
             </box>
           </geometry>
           <material>
@@ -79,12 +79,12 @@
         </visual>
       </link>
       <link name="wall_ymax">
-        <pose>0.14 0.15000000000000002 0.09999999999999999 0 0 0</pose>
+        <pose>3.3 2.5 0.4 0 0 0</pose>
         <collision name="wall_ymax_collision">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.32 0.02 0.19999999999999998</size>
+              <size>10.0 0.2 3.8000000000000003</size>
             </box>
           </geometry>
         </collision>
@@ -92,7 +92,7 @@
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.32 0.02 0.19999999999999998</size>
+              <size>10.0 0.2 3.8000000000000003</size>
             </box>
           </geometry>
           <material>
@@ -104,12 +104,12 @@
         </visual>
       </link>
       <link name="floor">
-        <pose>0.14 0.07 -0.01 0 0 0</pose>
+        <pose>3.3 0.0 -1.6 0 0 0</pose>
         <collision name="floor_collision">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.32 0.18000000000000002 0.02</size>
+              <size>10.0 5.2 0.2</size>
             </box>
           </geometry>
         </collision>
@@ -117,7 +117,7 @@
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.32 0.18000000000000002 0.02</size>
+              <size>10.0 5.2 0.2</size>
             </box>
           </geometry>
           <material>
@@ -129,7 +129,7 @@
         </visual>
       </link>
       <link name="ground_bg">
-        <pose>0.14 0.07 -0.04 0 0 0</pose>
+        <pose>3.3 0.0 -1.81 0 0 0</pose>
         <visual name="ground_bg_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>

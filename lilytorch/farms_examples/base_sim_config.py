@@ -864,9 +864,9 @@ class BaseSimConfig:
         body = {
             "type"           : "multi_animat",
             "sdf_folder"     : None,
-            "plotting"       : False,
+            "plotting"       : True,
             "compute_interp" : self.compute_sdf,
-            "plotting_meshes": False,
+            "plotting_meshes": True,
             "save_folder"    : os.path.join(
                 self.data_folder, self.interp_data_subfolder
             ),

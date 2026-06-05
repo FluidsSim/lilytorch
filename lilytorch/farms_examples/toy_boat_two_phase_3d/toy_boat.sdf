@@ -5,192 +5,185 @@
       <pose>0 0 0 0 0 0</pose>
 
       <!-- =================================================================
-           Toy motorboat — analytical-primitive hull + spinning propeller.
+           DSYHS sailing-yacht hull (~6 m) built from three watertight OBJ
+           meshes (hull / keel / rudder) plus an analytical 3-blade
+           propeller (inspired by the submarine example).
 
-           The hull is a cylinder (cigar-shaped body) with a hemispherical
-           bow cap, a flat stern, a small deck cabin, and a thin keel fin
-           below for roll stability.  A two-blade propeller on a revolute
-           joint at the stern provides gentle forward thrust.
+           MESH FRAME (native, as exported from Blender):
+             X = length (fore-aft), 0 .. 6.04 m
+             Y = vertical (UP),     keel tip -0.48 .. deck +0.94 m
+             Z = beam (port-stbd),  -1.088 .. +1.088 m
+           The simulation is Z-up, so gen_configs.py spawns the model with
+           roll = +pi/2 (rotation about X) to map mesh-Y(up) -> world-Z(up).
 
-           ONE COLLISION PER LINK.  The BDIM fluid coupling turns every
-           collision geometry into its own fluid sub-body and pushes the
-           hydrodynamic load onto that body's link via ``xfrc_applied``.
-           A link with several collisions would back several fluid bodies
-           that all share one ``xfrc`` row, so only the last one's force
-           would survive (the rest get overwritten) and the body's
-           buoyancy collapses.  Each rigid part is therefore its own
-           uniquely-named link, welded to the hull by a fixed joint; this
-           also applies each part's force at its true location (correct
-           moment arms) instead of lumping everything at one COM.
+           ONE COLLISION PER LINK (each fluid sub-body needs a unique link
+           id, see the toy-boat history): hull = base_link, keel and rudder
+           are their own links welded to the hull by fixed joints.
 
-           Masses are distributed by volume at a uniform ~293 kg/m^3 so the
-           total is ~0.12 kg (light — floats with the hull part-submerged).
-
-           DIMENSIONS (SI):
-             Overall length  ~0.12 m  (bow sphere to stern)
-             Beam (width)    ~0.056 m (hull diameter)
-             Draft           ~0.028 m (hull radius)
-             Mass            ~0.12 kg (light)
+           Masses: the hull encloses ~0.85 m^3, so full-submersion buoyancy
+           is ~850 kg.  Total mass is set to ~420 kg (light sportboat) so it
+           floats at roughly half the hull volume.  Inertias are coarse
+           box approximations in the native (mesh) frame; tune as needed.
            ================================================================= -->
 
-      <!-- Hull: cylinder along X (its own link) -->
+      <!-- ===================== HULL (base link) ====================== -->
       <link name="base_link">
         <pose>0 0 0 0 0 0</pose>
         <inertial>
-          <pose>0 0 0 0 0 0</pose>
-          <mass>0.0866</mass>
+          <pose>3.02 0.474 0 0 0 0</pose>
+          <mass>280.0</mass>
           <inertia>
-            <ixx>3.4e-5</ixx>  <ixy>0</ixy>  <ixz>0</ixz>
-            <iyy>1.21e-4</iyy> <iyz>0</iyz>
-            <izz>1.21e-4</izz>
+            <ixx>131.0</ixx> <ixy>0</ixy> <ixz>0</ixz>
+            <iyy>962.0</iyy> <iyz>0</iyz>
+            <izz>870.0</izz>
           </inertia>
         </inertial>
         <collision name="hull_collision">
-          <pose>0 0 0 0 1.5707963267948966 0</pose>
-          <geometry><cylinder><radius>0.028</radius><length>0.12</length></cylinder></geometry>
+          <pose>0 0 0 0 0 0</pose>
+          <geometry><mesh><uri>../sdfs/DSYHS/OBJ/hull.obj</uri><scale>1 1 1</scale></mesh></geometry>
         </collision>
         <visual name="hull_visual">
-          <pose>0 0 0 0 1.5707963267948966 0</pose>
-          <geometry><cylinder><radius>0.028</radius><length>0.12</length></cylinder></geometry>
-          <material><ambient>0.9 0.15 0.1 1</ambient><diffuse>0.9 0.15 0.1 1</diffuse></material>
+          <pose>0 0 0 0 0 0</pose>
+          <geometry><mesh><uri>../sdfs/DSYHS/OBJ/hull.obj</uri><scale>1 1 1</scale></mesh></geometry>
+          <material><ambient>0.85 0.85 0.88 1</ambient><diffuse>0.85 0.85 0.88 1</diffuse></material>
         </visual>
       </link>
 
-      <!-- Bow cap: sphere for rounded nose (own link, welded to hull) -->
-      <link name="bow_link">
-        <pose>0.06 0 0 0 0 0</pose>
-        <inertial>
-          <pose>0 0 0 0 0 0</pose>
-          <mass>0.0269</mass>
-          <inertia>
-            <ixx>8.5e-6</ixx> <ixy>0</ixy> <ixz>0</ixz>
-            <iyy>8.5e-6</iyy> <iyz>0</iyz>
-            <izz>8.5e-6</izz>
-          </inertia>
-        </inertial>
-        <collision name="bow_collision">
-          <pose>0 0 0 0 0 0</pose>
-          <geometry><sphere><radius>0.028</radius></sphere></geometry>
-        </collision>
-        <visual name="bow_visual">
-          <pose>0 0 0 0 0 0</pose>
-          <geometry><sphere><radius>0.028</radius></sphere></geometry>
-          <material><ambient>0.9 0.15 0.1 1</ambient><diffuse>0.9 0.15 0.1 1</diffuse></material>
-        </visual>
-      </link>
-
-      <!-- Deck cabin (own link, welded to hull) -->
-      <link name="cabin_link">
-        <pose>0.0 0 0.024 0 0 0</pose>
-        <inertial>
-          <pose>0 0 0 0 0 0</pose>
-          <mass>0.00563</mass>
-          <inertia>
-            <ixx>4.6e-7</ixx> <ixy>0</ixy> <ixz>0</ixz>
-            <iyy>9.4e-7</iyy> <iyz>0</iyz>
-            <izz>1.0e-6</izz>
-          </inertia>
-        </inertial>
-        <collision name="cabin_collision">
-          <pose>0 0 0 0 0 0</pose>
-          <geometry><box><size>0.04 0.024 0.02</size></box></geometry>
-        </collision>
-        <visual name="cabin_visual">
-          <pose>0 0 0 0 0 0</pose>
-          <geometry><box><size>0.04 0.024 0.02</size></box></geometry>
-          <material><ambient>0.95 0.95 0.95 1</ambient><diffuse>0.95 0.95 0.95 1</diffuse></material>
-        </visual>
-      </link>
-
-      <!-- Keel fin (own link, welded to hull) -->
+      <!-- ===================== KEEL (ballast) ======================== -->
       <link name="keel_link">
-        <pose>0 0 -0.034 0 0 0</pose>
+        <pose>0 0 0 0 0 0</pose>
         <inertial>
-          <pose>0 0 0 0 0 0</pose>
-          <mass>0.000844</mass>
+          <pose>0.518 -0.05 0 0 0 0</pose>
+          <mass>120.0</mass>
           <inertia>
-            <ixx>1.1e-8</ixx> <ixy>0</ixy> <ixz>0</ixz>
-            <iyy>2.6e-7</iyy> <iyz>0</iyz>
-            <izz>2.5e-7</izz>
+            <ixx>5.5</ixx> <ixy>0</ixy> <ixz>0</ixz>
+            <iyy>1.31</iyy> <iyz>0</iyz>
+            <izz>6.78</izz>
           </inertia>
         </inertial>
         <collision name="keel_collision">
           <pose>0 0 0 0 0 0</pose>
-          <geometry><box><size>0.06 0.004 0.012</size></box></geometry>
+          <geometry><mesh><uri>../sdfs/DSYHS/OBJ/keel.obj</uri><scale>1 1 1</scale></mesh></geometry>
         </collision>
         <visual name="keel_visual">
           <pose>0 0 0 0 0 0</pose>
-          <geometry><box><size>0.06 0.004 0.012</size></box></geometry>
-          <material><ambient>0.6 0.6 0.6 1</ambient><diffuse>0.6 0.6 0.6 1</diffuse></material>
+          <geometry><mesh><uri>../sdfs/DSYHS/OBJ/keel.obj</uri><scale>1 1 1</scale></mesh></geometry>
+          <material><ambient>0.6 0.6 0.62 1</ambient><diffuse>0.6 0.6 0.62 1</diffuse></material>
         </visual>
       </link>
 
-      <!-- Rigid welds attaching the appendages to the hull -->
-      <joint name="joint_bow" type="fixed">
-        <parent>base_link</parent><child>bow_link</child><pose>0 0 0 0 0 0</pose>
-      </joint>
-      <joint name="joint_cabin" type="fixed">
-        <parent>base_link</parent><child>cabin_link</child><pose>0 0 0 0 0 0</pose>
-      </joint>
+      <!-- ===================== RUDDER ================================ -->
+      <link name="rudder_link">
+        <pose>0 0 0 0 0 0</pose>
+        <inertial>
+          <pose>2.93 -0.17 0 0 0 0</pose>
+          <mass>20.0</mass>
+          <inertia>
+            <ixx>0.67</ixx> <ixy>0</ixy> <ixz>0</ixz>
+            <iyy>3.55</iyy> <iyz>0</iyz>
+            <izz>4.12</izz>
+          </inertia>
+        </inertial>
+        <collision name="rudder_collision">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry><mesh><uri>../sdfs/DSYHS/OBJ/rudder.obj</uri><scale>1 1 1</scale></mesh></geometry>
+        </collision>
+        <visual name="rudder_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry><mesh><uri>../sdfs/DSYHS/OBJ/rudder.obj</uri><scale>1 1 1</scale></mesh></geometry>
+          <material><ambient>0.7 0.2 0.15 1</ambient><diffuse>0.7 0.2 0.15 1</diffuse></material>
+        </visual>
+      </link>
+
+      <!-- Rigid welds attaching keel + rudder to the hull -->
       <joint name="joint_keel" type="fixed">
         <parent>base_link</parent><child>keel_link</child><pose>0 0 0 0 0 0</pose>
       </joint>
+      <joint name="joint_rudder" type="fixed">
+        <parent>base_link</parent><child>rudder_link</child><pose>0 0 0 0 0 0</pose>
+      </joint>
 
-      <!-- Propeller hub -->
+      <!-- ============= ANALYTICAL PROPELLER (3 blades) ===============
+           Hub axis along X (the boat's long axis); spins via a revolute
+           joint driven by PropellerController torque.  Placed just forward
+           of the keel (keel spans X 0.34-0.70) at X=0.20, slightly below
+           the hull bottom (native Y=-0.10), on the centreline (Z=0).
+           Three box blades at 120 deg around the X axis, each pitched
+           0.35 rad about its radial span axis so rotation -> axial thrust.
+           Blade poses precomputed as Rx(theta)*Ry(pitch). ================ -->
       <link name="propeller_hub">
-        <pose>-0.068 0 0 0 0 0</pose>
+        <pose>0.20 -0.10 0 0 0 0</pose>
         <inertial>
           <pose>0 0 0 0 0 0</pose>
-          <mass>0.001357</mass>
-          <inertia><ixx>2.44e-8</ixx><ixy>0</ixy><ixz>0</ixz><iyy>2.85e-8</iyy><iyz>0</iyz><izz>2.85e-8</izz></inertia>
+          <mass>0.226</mass>
+          <inertia><ixx>1.02e-4</ixx><ixy>0</ixy><ixz>0</ixz><iyy>1.71e-4</iyy><iyz>0</iyz><izz>1.71e-4</izz></inertia>
         </inertial>
         <collision name="propeller_hub_collision">
           <pose>0 0 0 0 1.5707963267948966 0</pose>
-          <geometry><cylinder><radius>0.006</radius><length>0.012</length></cylinder></geometry>
+          <geometry><cylinder><radius>0.03</radius><length>0.08</length></cylinder></geometry>
         </collision>
         <visual name="propeller_hub_visual">
           <pose>0 0 0 0 1.5707963267948966 0</pose>
-          <geometry><cylinder><radius>0.006</radius><length>0.012</length></cylinder></geometry>
+          <geometry><cylinder><radius>0.03</radius><length>0.08</length></cylinder></geometry>
           <material><ambient>0.8 0.6 0.1 1</ambient><diffuse>0.8 0.6 0.1 1</diffuse></material>
         </visual>
       </link>
 
       <link name="blade_0">
-        <pose>-0.068 0.018 0 0 0.3 0</pose>
+        <pose>0.20 -0.015 0.0 0 0.35 0</pose>
         <inertial>
           <pose>0 0 0 0 0 0</pose>
-          <mass>0.00048</mass>
-          <inertia><ixx>3.86e-8</ixx><ixy>0</ixy><ixz>0</ixz><iyy>2.72e-9</iyy><iyz>0</iyz><izz>3.60e-8</izz></inertia>
+          <mass>0.036</mass>
+          <inertia><ixx>3.27e-5</ixx><ixy>0</ixy><ixz>0</ixz><iyy>3.13e-6</iyy><iyz>0</iyz><izz>3.04e-5</izz></inertia>
         </inertial>
         <collision name="blade_0_collision">
           <pose>0 0 0 0 0 0</pose>
-          <geometry><box><size>0.002 0.03 0.008</size></box></geometry>
+          <geometry><box><size>0.012 0.10 0.03</size></box></geometry>
         </collision>
         <visual name="blade_0_visual">
           <pose>0 0 0 0 0 0</pose>
-          <geometry><box><size>0.002 0.03 0.008</size></box></geometry>
+          <geometry><box><size>0.012 0.10 0.03</size></box></geometry>
           <material><ambient>0.9 0.7 0.1 1</ambient><diffuse>0.9 0.7 0.1 1</diffuse></material>
         </visual>
       </link>
 
       <link name="blade_1">
-        <pose>-0.068 -0.018 0 0 -0.3 0</pose>
+        <pose>0.20 -0.1425 0.0736 2.06775 -0.17230 0.30618</pose>
         <inertial>
           <pose>0 0 0 0 0 0</pose>
-          <mass>0.00048</mass>
-          <inertia><ixx>3.86e-8</ixx><ixy>0</ixy><ixz>0</ixz><iyy>2.72e-9</iyy><iyz>0</iyz><izz>3.60e-8</izz></inertia>
+          <mass>0.036</mass>
+          <inertia><ixx>3.27e-5</ixx><ixy>0</ixy><ixz>0</ixz><iyy>3.13e-6</iyy><iyz>0</iyz><izz>3.04e-5</izz></inertia>
         </inertial>
         <collision name="blade_1_collision">
           <pose>0 0 0 0 0 0</pose>
-          <geometry><box><size>0.002 0.03 0.008</size></box></geometry>
+          <geometry><box><size>0.012 0.10 0.03</size></box></geometry>
         </collision>
         <visual name="blade_1_visual">
           <pose>0 0 0 0 0 0</pose>
-          <geometry><box><size>0.002 0.03 0.008</size></box></geometry>
+          <geometry><box><size>0.012 0.10 0.03</size></box></geometry>
           <material><ambient>0.9 0.7 0.1 1</ambient><diffuse>0.9 0.7 0.1 1</diffuse></material>
         </visual>
       </link>
 
+      <link name="blade_2">
+        <pose>0.20 -0.1425 -0.0736 -2.06775 -0.17230 -0.30618</pose>
+        <inertial>
+          <pose>0 0 0 0 0 0</pose>
+          <mass>0.036</mass>
+          <inertia><ixx>3.27e-5</ixx><ixy>0</ixy><ixz>0</ixz><iyy>3.13e-6</iyy><iyz>0</iyz><izz>3.04e-5</izz></inertia>
+        </inertial>
+        <collision name="blade_2_collision">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry><box><size>0.012 0.10 0.03</size></box></geometry>
+        </collision>
+        <visual name="blade_2_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry><box><size>0.012 0.10 0.03</size></box></geometry>
+          <material><ambient>0.9 0.7 0.1 1</ambient><diffuse>0.9 0.7 0.1 1</diffuse></material>
+        </visual>
+      </link>
+
+      <!-- Revolute joint: propeller spins about the hull's long (X) axis -->
       <joint name="joint_propeller" type="revolute">
         <parent>base_link</parent><child>propeller_hub</child>
         <pose>0 0 0 0 0 0</pose>
@@ -201,6 +194,9 @@
       </joint>
       <joint name="joint_blade_1" type="fixed">
         <parent>propeller_hub</parent><child>blade_1</child><pose>0 0 0 0 0 0</pose>
+      </joint>
+      <joint name="joint_blade_2" type="fixed">
+        <parent>propeller_hub</parent><child>blade_2</child><pose>0 0 0 0 0 0</pose>
       </joint>
 
     </model>

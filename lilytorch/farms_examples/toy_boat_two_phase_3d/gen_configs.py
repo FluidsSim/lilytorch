@@ -28,14 +28,21 @@ from lilytorch.util.paths import lilytorch_repo_root
 from lilytorch.farms_examples.base_sim_config import BaseSimConfig
 
 
-# ── Toy boat geometry (SI units — reference only; mass comes from SDF) ────
-BOAT_LENGTH  = 0.12   # m  (X — long axis, cylinder hull + bow sphere)
-BOAT_RADIUS  = 0.028  # m  (hull cylinder radius → beam = 0.056 m)
-BOAT_MASS    = 0.12   # kg (total, from toy_boat.sdf <inertial>)
+# ── Boat geometry (DSYHS yacht hull from OBJ meshes; mass comes from SDF) ──
+# Native mesh frame: X = length (0..6.04), Y = vertical UP, Z = beam (±1.088).
+# The model is spawned with roll = +pi/2 so mesh-Y(up) -> world-Z(up).
+BOAT_LENGTH  = 6.04    # m  (X — long axis)
+BOAT_BEAM    = 2.18    # m  (Z in mesh frame → world Y after spawn)
+BOAT_MASS    = 420.0   # kg (total, from toy_boat.sdf <inertial> blocks)
 
-# ── Tank ──────────────────────────────────────────────────────────────────
-TANK_LX, TANK_LY, TANK_LZ = 0.28, 0.14, 0.18   # m  (comfortable for 0.12 m boat)
-WATERLINE = 0.10                                  # m  (z-coordinate of the surface)
+# ── Tank (sized for the ~6 m hull, with fore/aft + lateral margins) ─────────
+#   X: -1.5 .. 8.1 (boat 0..6.04)   Y: -2.4 .. 2.4 (beam ±1.09)
+#   Z: -1.5 .. 2.1 (keel/rudder hang to ~-0.2 below the waterline)
+WATERLINE = 0.40       # m  (world-z of the free surface)
+# Spawn the hull bottom (mesh-Y≈0) a little ABOVE the waterline so the big hull
+# does not straddle the sharp VOF interface at t=0 (that causes an impulsive
+# startup blow-up); the boat then drops the last few cm and settles.
+SPAWN_Z   = 1.10       # m  (world-z of the model origin; ≈40% hull draft)
 
 
 class SimConfig(BaseSimConfig):
@@ -53,29 +60,40 @@ class SimConfig(BaseSimConfig):
         self.headless = False
 
         # ── Simulation flags ──────────────────────────────────────────
-        self.use_bdim = False
+        self.use_bdim = True
         self.animat_fluid_interaction = True
-        # Keep fixed joints (blade attachments) filtered out so only the
-        # revolute propeller joint gets a control motor.
+        # Keep fixed joints (keel/rudder welds + blade attachments) filtered
+        # out so only the revolute propeller joint gets a control motor.
         self.filter_fixed_joints = True
+        # Hull / keel / rudder are OBJ meshes → build their fluid SDFs.
+        # Leave n_samples unset: the mesh SDF table is then auto-sized from
+        # the bounding box at h/2 spacing (a fixed (2000, 2000) would build a
+        # ~2000×2000×k table and OOM for a multi-metre hull).
+        self.compute_sdf = True
 
-        # ── 3-D grid ──────────────────────────────────────────────────
-        self.Nx   = 112
-        self.Ny   = 56
+        # ── 3-D grid (~0.05 m cells across the 6 m boat) ──────────────
+        # NOTE on resolution: the BDIM transition band is ≈2·h wide, so a
+        # coarse grid (h=0.1) makes the band ~0.2 m and it overlaps the free
+        # surface → the two-phase pressure solve degenerates and the run
+        # blows up almost immediately.  h=0.05 (below) is far more stable.
+        # The 0.04 m keel is still sub-cell even here; resolving it needs
+        # h≈0.02 (≈10 M cells) — a real compute cost to decide on.
+        self.Nx   = 192
+        self.Ny   = 96
         self.Nz   = 72
-        self.xmin = 0.0
-        self.xmax = TANK_LX
-        self.ymin = 0.0
-        self.ymax = TANK_LY
-        self.zmin = 0.0
-        self.zmax = TANK_LZ
+        self.xmin = -1.5
+        self.xmax = 8.1
+        self.ymin = -2.4
+        self.ymax = 2.4
+        self.zmin = -1.5
+        self.zmax = 2.1
 
         # ── Animats ───────────────────────────────────────────────────
         boat_sdf = os.path.join(self.data_folder, 'toy_boat.sdf')
         controller_config = {
             "path": "lilytorch.farms_examples.submarine."
                     "propeller_controller.PropellerController",
-            "tau": 0.0002,   # very gentle torque
+            "tau": 2.0,   # propeller torque (tune for thrust)
         }
         self.animats_pars = [
             {
@@ -85,24 +103,26 @@ class SimConfig(BaseSimConfig):
                 "gains"            : [0.0, 0.0, 0.0],
                 "controller_config": controller_config,
                 "spawn_mode"       : SpawnMode.FREE,
-                # Spawn above waterline (like sphere drop example), centred in XY.
+                # roll = +pi/2 rotates the mesh (Y-up) into the world (Z-up)
+                # frame; the boat floats at SPAWN_Z and settles to its draft.
                 "pose"             : [
-                    TANK_LX / 2,           # x = 0.14
-                    TANK_LY / 2,           # y = 0.07
-                    WATERLINE + 0.03,      # z = 0.13 (fully in air, will drop)
-                    0.0, 0.0, 0.0,
+                    0.0,                    # x: hull spans world-x 0..6.04
+                    0.0,                    # y: beam centred on y=0
+                    SPAWN_Z,                # z: hull bottom ≈ waterline
+                    1.5707963267948966,     # roll = +pi/2 (mesh Y-up → world Z-up)
+                    0.0, 0.0,
                 ],
             },
         ]
 
-        # ── Physics ───────────────────────────────────────────────────
+        # ── Physics (real ~6 m scale) ─────────────────────────────────
         self.rho_body     = 1000.0         # Poisson conditioning (not boat density)
         self.rho          = 1000.0         # water density
-        self.nu           = 2.0e-4         # effective viscosity → low Re
-        self.timestep     = 0.0001
-        self.n_iterations = 6000           # 0.6 s of simulation
+        self.nu           = 3.0e-3         # effective viscosity → Re ≈ U·L/ν ~ 1e3
+        self.timestep     = 0.0005
+        self.n_iterations = 8000           # 4 s of simulation
         self.num_sub_steps     = 1
-        self.save_every        = 100
+        self.save_every        = 50
 
         # ── BDIM solver ──────────────────────────────────────────────
         self.bdim_dt                 = self.timestep
@@ -119,15 +139,10 @@ class SimConfig(BaseSimConfig):
         self.poisson_bc_type         = "neumann"
         self.solver_method           = "kernel"
         self.time_integration        = "euler"
-        # Eulerian band-integral forces (NOT lagrangian): the hull is a UNION of
-        # overlapping analytical primitives (cylinder hull + bow sphere + cabin +
-        # keel).  The lagrangian surface integral sums each primitive's full
-        # closed triangle mesh independently, so faces buried inside a neighbour
-        # primitive sample the non-physical BDIM interior pressure and corrupt the
-        # net buoyancy -> the boat sinks.  Lagrangian only works on a single
-        # watertight mesh (e.g. the sphere-drop obj).  The Eulerian method
-        # integrates the smoothed delta of the *union* SDF, so overlaps are
-        # handled correctly (gauge-invariant; validated 3D drop Cz=1.00).
+        # Eulerian band-integral forces: hull, keel, rudder and propeller are
+        # separate (overlapping) fluid bodies, so the force is integrated over
+        # the smoothed delta of the *union* SDF rather than each body's closed
+        # surface (gauge-invariant; handles the overlaps correctly).
         self.force_method            = "eulerian"
         self.force_delta_order       = 1
         self.eps_multiplier          = 2
@@ -144,7 +159,7 @@ class SimConfig(BaseSimConfig):
         self.bc_values_w = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
         # ── Arena ────────────────────────────────────────────────────
-        self.wall_thickness = 0.02
+        self.wall_thickness = 0.2
         self.arena_pose     = [0, 0, 0, 0, 0, 0]
         self.water_drag     = False   # BDIM handles all hydrodynamics
         self.water_buoyancy = False
@@ -152,13 +167,13 @@ class SimConfig(BaseSimConfig):
 
         # ── MuJoCo ───────────────────────────────────────────────────
         self.visual_scale = 1.0
-        self.extent       = 10.0
+        self.extent       = 12.0
         self.shadow_size  = 1024
 
         # ── Output ───────────────────────────────────────────────────
         self.save_frames = True
-        self.vmin        = -5.0
-        self.vmax        = 5.0
+        self.vmin        = -2.0
+        self.vmax        = 2.0
 
     # ------------------------------------------------------------------
     # Override: inject the two-phase block into the BDIM YAML
@@ -178,7 +193,7 @@ class SimConfig(BaseSimConfig):
             "rho_water": 1000.0,
             "rho_air": 1.2,
             "nu_water": self.nu,
-            "nu_air": 3.0e-3,
+            "nu_air": 5.0e-2,
             "face_density": "harmonic",
         }
 
@@ -214,7 +229,7 @@ class SimConfig(BaseSimConfig):
             self.xmin, self.xmax, self.ymin, self.ymax,
             zmin=self.zmin, zmax=WATERLINE,
             water_height=0.0,
-            water_alpha=self.water_alpha,
+            water_alpha=0.0,
         )
         arena_sdf = os.path.join(sdfs_path, "pool", "sdf", "pool.sdf")
 
@@ -278,8 +293,8 @@ class SimConfig(BaseSimConfig):
                 "angular_velocity": 0,
                 "azimuth"         : 90,              # side view
                 "elevation"       : -15,             # slightly above horizontal
-                "distance"        : 0.35,            # close-up on the small tank
-                "offset"          : [TANK_LX / 2, TANK_LY / 2, WATERLINE],  # look at waterline centre
+                "distance"        : 11.0,            # whole ~6 m boat in frame
+                "offset"          : [3.0, 0.0, WATERLINE],  # look at the boat centre
                 "resolution"      : [1920, 1080],
             },
         })
