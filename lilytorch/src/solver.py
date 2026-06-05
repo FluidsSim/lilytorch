@@ -12,11 +12,11 @@ from concurrent.futures import ThreadPoolExecutor
 
 from lilytorch.src.kernels import (
     streaming_sdf_stag_3d_multi,
-    bdim_vardens_3d,
-    bdim_vardens_sigma_3d,
+    bdim_coeff_3d,
+    bdim_coeff_sigma_3d,
     streaming_sdf_stag_2d_multi,
-    bdim_vardens_2d,
-    bdim_vardens_sigma_2d,
+    bdim_coeff_2d,
+    bdim_coeff_sigma_2d,
 )
 from lilytorch.src.advection import AdvDiffSolver, SCHEMES as _ADV_SCHEMES
 from lilytorch.src.body import (body_from_yaml,
@@ -179,7 +179,7 @@ class FlowDiagnostics:
 
 
 def _build_fs_free_dicts(ndim):
-    """Build the ``_FS_FREE_AFTER_BDIM`` / ``_FS_FREE_AFTER_VAR_DENS`` dicts
+    """Build the ``_FS_FREE_AFTER_BDIM`` / ``_FS_FREE_AFTER_BDIM_COEFF`` dicts
     for a given spatial dimensionality.
 
     The hot path uses ``self.__dict__.update(<dict>)`` to drop references to
@@ -194,9 +194,9 @@ def _build_fs_free_dicts(ndim):
         for n in norms:
             after_bdim[f'normal_{n}_{a}'] = None
     after_bdim['mu1_all'] = None
-    after_var_dens = {f'mu0_all_{a}': None for a in axes}
-    after_var_dens['mu0_all'] = None
-    return after_bdim, after_var_dens
+    after_bdim_coeff = {f'mu0_all_{a}': None for a in axes}
+    after_bdim_coeff['mu0_all'] = None
+    return after_bdim, after_bdim_coeff
 
 
 class FluidSolver(PlottingMixin):
@@ -778,11 +778,11 @@ class FluidSolver(PlottingMixin):
         # ----------------------------------------------------------------
         # Per-instance BDIM-intermediate free-dicts (Step 4 of unification).
         # Replaces the module-level ``_FS_FREE_AFTER_BDIM_3D`` /
-        # ``_FS_FREE_AFTER_VAR_DENS_3D`` constants — these are now built
+        # ``_FS_FREE_AFTER_BDIM_COEFF_3D`` constants — these are now built
         # from ``self.ndim`` so the 2-D path can use the same mechanism.
         # ----------------------------------------------------------------
         (self._FS_FREE_AFTER_BDIM,
-         self._FS_FREE_AFTER_VAR_DENS) = _build_fs_free_dicts(self.ndim)
+         self._FS_FREE_AFTER_BDIM_COEFF) = _build_fs_free_dicts(self.ndim)
 
         # Pre-built per-axis attribute names for ``_apply_bdim_all_axes``.
         # Stored once at __init__ so the hot path is a single attribute
@@ -797,9 +797,9 @@ class FluidSolver(PlottingMixin):
         # from self.dt these buffers will be reallocated on the first call,
         # at no worse cost than the previous lazy-init path.
         if self._use_kernels and self.ndim == 3:
-            self._init_var_dens_persist_3d(self.dt)
+            self._init_bdim_coeff_persist_3d(self.dt)
         elif self._use_kernels and self.ndim == 2:
-            self._init_var_dens_persist_2d(self.dt)
+            self._init_bdim_coeff_persist_2d(self.dt)
 
         # =====================================================================
         # Gravity body force (opt-in via the ``solver.gravity`` block).
@@ -1562,7 +1562,7 @@ class FluidSolver(PlottingMixin):
     def _compute_sigma_mu_grids(self, mu_grids):
         """Recompute ``mu0`` from σ-shifted union SDFs for each stagger axis.
 
-        Used by ``_compute_variable_density_coefficients`` (Python-mode
+        Used by ``_compute_bdim_coefficients`` (Python-mode
         path) to substitute ``mu0_poisson`` for ``mu0_all_*`` when
         BDIM-σ is enabled.  The velocity BDIM mu0 is unchanged.
 
@@ -1622,10 +1622,10 @@ class FluidSolver(PlottingMixin):
     #   Persistent-buffer attribute names for the var-density fast path.
     #   Position 0..D-1 → face-grid (axis u, v[, w]); position D → CC.
     # ------------------------------------------------------------------
-    _VAR_DENS_PERSIST_NAMES = ('_ch_persist', '_cv_persist', '_cw_persist',
+    _BDIM_COEFF_PERSIST_NAMES = ('_ch_persist', '_cv_persist', '_cw_persist',
                                '_ch_cc_persist')
 
-    def _compute_variable_density_coefficients(self, timestep):
+    def _compute_bdim_coefficients(self, timestep):
         """BDIM2 Poisson coefficients ``c = dt * mu0 / rho_fluid`` (FSI).
 
         Returns ``(ch, cv, ch_cc)`` for 2-D or ``(ch, cv, cw, ch_cc)``
@@ -1685,7 +1685,7 @@ class FluidSolver(PlottingMixin):
             u_aabb = self._compute_union_aabb(halo=2, bucket=16)
             if u_aabb is not None:
                 _dt_over_rhofluid = float(timestep / float(self.rho))
-                names    = self._VAR_DENS_PERSIST_NAMES
+                names    = self._BDIM_COEFF_PERSIST_NAMES
                 face_names = names[:D]
                 cc_name    = names[3]   # always '_ch_cc_persist'
                 mu_ref     = mu_grids[0]
@@ -1728,7 +1728,7 @@ class FluidSolver(PlottingMixin):
     # ------------------------------------------------------------------
     #   Phase-I kernel-mode 3-D fluid step  (Kernel A + Kernel B)
     # ------------------------------------------------------------------
-    def _init_var_dens_persist_3d(self, timestep):
+    def _init_bdim_coeff_persist_3d(self, timestep):
         """Lazy-allocate the persistent ``ch/cv/cw`` Poisson-coefficient
         buffers for the kernel-mode 3-D path.
 
@@ -1760,8 +1760,8 @@ class FluidSolver(PlottingMixin):
             self._cw_persist = torch.full(cw_gs, _dt_over_rhofluid, device=device, dtype=dtype)
             self._ch_outside_val = _dt_over_rhofluid
 
-    def _init_var_dens_persist_2d(self, timestep):
-        """2-D analogue of :meth:`_init_var_dens_persist_3d`."""
+    def _init_bdim_coeff_persist_2d(self, timestep):
+        """2-D analogue of :meth:`_init_bdim_coeff_persist_3d`."""
         gs = self.grid_shape
         device = self.device
         dtype  = self.dtype
@@ -1811,7 +1811,7 @@ class FluidSolver(PlottingMixin):
         self.v0.copy_(primes[1])
 
         # 3. Init persistent var-dens coefficients (once / on resize).
-        self._init_var_dens_persist_2d(timestep)
+        self._init_bdim_coeff_persist_2d(timestep)
 
         # 4. Per-step temporaries for Kernel A -> Kernel B.
         _opts = dict(device=self.device, dtype=self.dtype)
@@ -1858,7 +1858,7 @@ class FluidSolver(PlottingMixin):
         if (self.apply_bdim_sigma
                 and self._sigma_shifts is not None
                 and bool(self._sigma_shifts.any())):
-            bdim_vardens_sigma_2d(
+            bdim_coeff_sigma_2d(
                 primes[0], primes[1],
                 sdf_u_tmp, sdf_v_tmp,
                 bU_tmp, bV_tmp,
@@ -1866,20 +1866,20 @@ class FluidSolver(PlottingMixin):
                 self._ch_persist, self._cv_persist,
                 key_u_t, key_v_t,
                 self._sigma_shifts,
-                float(comp.eps), float(self.rho), float(self.rho),
+                float(comp.eps), float(self.rho),
                 float(timestep), float(comp.h),
                 int(ks['dirty_i0']), int(ks['dirty_j0']),
                 int(ks['dirty_Ai']), int(ks['dirty_Aj']),
                 int(self.bdim_mu0_projection),
             )
         else:
-            bdim_vardens_2d(
+            bdim_coeff_2d(
                 primes[0], primes[1],
                 sdf_u_tmp, sdf_v_tmp,
                 bU_tmp, bV_tmp,
                 self.u0, self.v0,
                 self._ch_persist, self._cv_persist,
-                float(comp.eps), float(self.rho), float(self.rho),
+                float(comp.eps), float(self.rho),
                 float(timestep), float(comp.h),
                 int(ks['dirty_i0']), int(ks['dirty_j0']),
                 int(ks['dirty_Ai']), int(ks['dirty_Aj']),
@@ -1921,7 +1921,7 @@ class FluidSolver(PlottingMixin):
         """Phase-I 3-D kernel fluid step.
 
         Replaces the chain
-            _apply_bdim_all_axes -> _compute_variable_density_coefficients
+            _apply_bdim_all_axes -> _compute_bdim_coefficients
         with two CUDA kernels (Kernel A + Kernel B).  Kernel A streams
         the union SDF and rigid body face velocities into per-step
         temporaries; Kernel B fuses the BDIM2 velocity update with the
@@ -1978,7 +1978,7 @@ class FluidSolver(PlottingMixin):
         self.w0.copy_(primes[2])
 
         # 3. Init persistent var-dens coefficients (once / on resize).
-        self._init_var_dens_persist_3d(timestep)
+        self._init_bdim_coeff_persist_3d(timestep)
 
         # 4. Per-step temporaries for Kernel A -> Kernel B.  Allocated
         # only inside the step; freed (via del below) before the pressure
@@ -2048,7 +2048,7 @@ class FluidSolver(PlottingMixin):
         if (self.apply_bdim_sigma
                 and self._sigma_shifts is not None
                 and bool(self._sigma_shifts.any())):
-            bdim_vardens_sigma_3d(
+            bdim_coeff_sigma_3d(
                 primes[0], primes[1], primes[2],
                 sdf_u_tmp, sdf_v_tmp, sdf_w_tmp,
                 bU_tmp, bV_tmp, bW_tmp,
@@ -2056,20 +2056,20 @@ class FluidSolver(PlottingMixin):
                 self._ch_persist, self._cv_persist, self._cw_persist,
                 key_u_t, key_v_t, key_w_t,
                 self._sigma_shifts,
-                float(comp.eps), float(self.rho), float(self.rho),
+                float(comp.eps), float(self.rho),
                 float(timestep), float(comp.h),
                 int(ks['dirty_i0']), int(ks['dirty_j0']), int(ks['dirty_k0']),
                 int(ks['dirty_Ai']), int(ks['dirty_Aj']), int(ks['dirty_Ak']),
                 int(self.bdim_mu0_projection),
             )
         else:
-            bdim_vardens_3d(
+            bdim_coeff_3d(
                 primes[0], primes[1], primes[2],
                 sdf_u_tmp, sdf_v_tmp, sdf_w_tmp,
                 bU_tmp, bV_tmp, bW_tmp,
                 self.u0, self.v0, self.w0,
                 self._ch_persist, self._cv_persist, self._cw_persist,
-                float(comp.eps), float(self.rho), float(self.rho),
+                float(comp.eps), float(self.rho),
                 float(timestep), float(comp.h),
                 int(ks['dirty_i0']), int(ks['dirty_j0']), int(ks['dirty_k0']),
                 int(ks['dirty_Ai']), int(ks['dirty_Aj']), int(ks['dirty_Ak']),
@@ -2171,12 +2171,12 @@ class FluidSolver(PlottingMixin):
 
         # 6. variable-density Poisson coefficients.
         #    2-D returns (ch, cv, ch_cc); 3-D returns (ch, cv, cw, ch_cc).
-        coeffs       = self._compute_variable_density_coefficients(timestep)
+        coeffs       = self._compute_bdim_coefficients(timestep)
         ch_cc        = coeffs[-1]
         face_coeffs  = coeffs[:-1]
 
         # 7. drop mu0 fields — projection consumes ch/cv/cw/ch_cc only.
-        self.__dict__.update(self._FS_FREE_AFTER_VAR_DENS)
+        self.__dict__.update(self._FS_FREE_AFTER_BDIM_COEFF)
 
         # 8. pressure projection.  ``ch_cc`` is consumed by the FFT path
         #    only; the multigrid/MGCG path ignores it, so passing it

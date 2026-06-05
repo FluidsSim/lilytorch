@@ -765,14 +765,14 @@ void apply_bcs_2d_cuda(
 }
 
 // =====================================================================
-//  interpolate_2d: scattered-point bilinear / biquadratic sampling
+//  interp_2d: scattered-point bilinear / biquadratic sampling
 //
 //  One thread per query point.  Calls the same sdf_sample_dispatch_2d
 //  device function used by streaming_sdf_stag_2d_multi (interp_method 0 =
 //  bilinear / "linear", 1 = biquadratic / "quadratic").
 // =====================================================================
 template <typename scalar_t>
-__global__ void interpolate_2d_kernel(
+__global__ void interp_2d_kernel(
     const scalar_t* __restrict__ F,
     const scalar_t* __restrict__ xq,
     const scalar_t* __restrict__ yq,
@@ -793,7 +793,7 @@ __global__ void interpolate_2d_kernel(
         xq[tid], yq[tid]);
 }
 
-void interpolate_2d_cuda(
+void interp_2d_cuda(
     const at::Tensor& F,
     const at::Tensor& xq, const at::Tensor& yq,
     const double bx0, const double by0,
@@ -817,8 +817,8 @@ void interpolate_2d_cuda(
     auto xq_c = xq.contiguous().to(F.scalar_type());
     auto yq_c = yq.contiguous().to(F.scalar_type());
 
-    AT_DISPATCH_FLOATING_TYPES(F.scalar_type(), "interpolate_2d_cuda", [&] {
-        interpolate_2d_kernel<scalar_t><<<numBlocks, blockSize, 0, stream>>>(
+    AT_DISPATCH_FLOATING_TYPES(F.scalar_type(), "interp_2d_cuda", [&] {
+        interp_2d_kernel<scalar_t><<<numBlocks, blockSize, 0, stream>>>(
             F_c.data_ptr<scalar_t>(),
             xq_c.data_ptr<scalar_t>(),
             yq_c.data_ptr<scalar_t>(),
@@ -839,8 +839,9 @@ void interpolate_2d_cuda(
 //  mu1 and the unit normal in CUDA thread registers.
 // =====================================================================
 
-// 2-D decode kernel without winning_rho_cc / rho_bodies.  Mirrors
-// streaming_sdf_decode_keys_rho_2d_kernel but drops both.
+// 2-D decode kernel: writes back the winning body's SDF + recomputes bU/bV.
+// No per-cell winning-density tensor -- Kernel B (bdim_coeff) computes the
+// BDIM2 coefficient dt*mu0/rho_fluid from mu0 in register.
 template <typename scalar_t>
 __global__ void streaming_sdf_decode_keys_stag_2d_kernel(
     const uint64_t* __restrict__ key_cc,
@@ -1004,7 +1005,7 @@ void streaming_sdf_stag_2d_multi_cuda(
 
 // =====================================================================
 //  Kernel B (2-D): fused BDIM2 + variable-density Poisson coefficients.
-//  Mirrors bdim_vardens_3d_cuda from streaming_sdf.cu, with the z axis
+//  Mirrors bdim_coeff_3d_cuda from streaming_sdf.cu, with the z axis
 //  removed.  See the 3-D version for documentation of the formulas.
 // =====================================================================
 template <typename scalar_t>
@@ -1013,7 +1014,6 @@ __device__ __forceinline__ void bdim_one_axis_2d(
     const scalar_t* __restrict__ sdf,
     const scalar_t* __restrict__ body,
     const scalar_t eps,
-    const scalar_t rho_body,
     const scalar_t rho_f,
     const scalar_t dt,
     const scalar_t inv_2h,
@@ -1088,12 +1088,11 @@ __device__ __forceinline__ void bdim_one_axis_2d(
     phi_out[g] = mu0 * diff_c + b_c + mu1 * nd;
     // BDIM2 coefficient dt*mu0/rho_fluid (Weymouth & Yue): the body enters via
     // mu0 only, NOT its density.  mu0_proj == 0 → plain dt/rho (no mu0 numerator).
-    // ``rho_body`` is unused (kept in the signature for ABI stability).
     c_out[g]   = (mu0_proj ? dt * mu0 : dt) / rho_f;
 }
 
 template <typename scalar_t>
-__global__ void bdim_vardens_2d_kernel(
+__global__ void bdim_coeff_2d_kernel(
     const scalar_t* __restrict__ u_prime,
     const scalar_t* __restrict__ v_prime,
     const scalar_t* __restrict__ sdf_u,
@@ -1105,7 +1104,6 @@ __global__ void bdim_vardens_2d_kernel(
     scalar_t* __restrict__ ch,
     scalar_t* __restrict__ cv,
     const scalar_t eps,
-    const scalar_t rho_body,
     const scalar_t rho_f,
     const scalar_t dt,
     const scalar_t inv_2h,
@@ -1124,15 +1122,15 @@ __global__ void bdim_vardens_2d_kernel(
 
     bdim_one_axis_2d<scalar_t>(
         u_prime, sdf_u, body_u,
-        eps, rho_body, rho_f, dt, inv_2h,
+        eps, rho_f, dt, inv_2h,
         Ngx, Ngy, i, j, u0, ch, mu0_proj);
     bdim_one_axis_2d<scalar_t>(
         v_prime, sdf_v, body_v,
-        eps, rho_body, rho_f, dt, inv_2h,
+        eps, rho_f, dt, inv_2h,
         Ngx, Ngy, i, j, v0, cv, mu0_proj);
 }
 
-void bdim_vardens_2d_cuda(
+void bdim_coeff_2d_cuda(
     const at::Tensor& u_prime,
     const at::Tensor& v_prime,
     const at::Tensor& sdf_u,
@@ -1142,7 +1140,6 @@ void bdim_vardens_2d_cuda(
     at::Tensor u0, at::Tensor v0,
     at::Tensor ch, at::Tensor cv,
     const double eps,
-    const double rho_body,
     const double rho_f,
     const double dt,
     const double h_grid,
@@ -1160,8 +1157,8 @@ void bdim_vardens_2d_cuda(
     const int blockSize = 256;
     const int nblocks   = (int)((dirty_vol + blockSize - 1) / blockSize);
 
-    AT_DISPATCH_FLOATING_TYPES(u0.scalar_type(), "bdim_vardens_2d_cuda", [&] {
-        bdim_vardens_2d_kernel<scalar_t>
+    AT_DISPATCH_FLOATING_TYPES(u0.scalar_type(), "bdim_coeff_2d_cuda", [&] {
+        bdim_coeff_2d_kernel<scalar_t>
             <<<nblocks, blockSize, 0, stream>>>(
                 u_prime.data_ptr<scalar_t>(),
                 v_prime.data_ptr<scalar_t>(),
@@ -1174,7 +1171,6 @@ void bdim_vardens_2d_cuda(
                 ch.data_ptr<scalar_t>(),
                 cv.data_ptr<scalar_t>(),
                 (scalar_t)eps,
-                (scalar_t)rho_body,
                 (scalar_t)rho_f,
                 (scalar_t)dt,
                 (scalar_t)(0.5 / h_grid),
@@ -1187,7 +1183,7 @@ void bdim_vardens_2d_cuda(
 }
 
 // =====================================================================
-//  BDIM-σ variant of bdim_one_axis_2d / bdim_vardens_2d.
+//  BDIM-σ variant of bdim_one_axis_2d / bdim_coeff_2d.
 //  See the 3-D σ variant in streaming_sdf.cu for full documentation.
 //  Note: 2-D key buffers are full-grid sized (Ngrid) and indexed by g.
 // =====================================================================
@@ -1197,7 +1193,6 @@ __device__ __forceinline__ void bdim_one_axis_sigma_2d(
     const scalar_t* __restrict__ sdf,
     const scalar_t* __restrict__ body,
     const scalar_t eps,
-    const scalar_t rho_body,
     const scalar_t rho_f,
     const scalar_t dt,
     const scalar_t inv_2h,
@@ -1281,12 +1276,12 @@ __device__ __forceinline__ void bdim_one_axis_sigma_2d(
 
     phi_out[g] = mu0 * diff_c + b_c + mu1 * nd;
     // BDIM2 coefficient dt*mu0/rho_fluid: body enters via mu0 only, not density.
-    // mu0_proj == 0 → drop the mu0 numerator (plain dt/rho).  rho_body unused.
+    // mu0_proj == 0 → drop the mu0 numerator (plain dt/rho).
     c_out[g]   = (mu0_proj ? dt * mu0_poisson : dt) / rho_f;
 }
 
 template <typename scalar_t>
-__global__ void bdim_vardens_sigma_2d_kernel(
+__global__ void bdim_coeff_sigma_2d_kernel(
     const scalar_t* __restrict__ u_prime,
     const scalar_t* __restrict__ v_prime,
     const scalar_t* __restrict__ sdf_u,
@@ -1302,7 +1297,6 @@ __global__ void bdim_vardens_sigma_2d_kernel(
     const float*   __restrict__ sigma_shifts,
     const int n_sigma,
     const scalar_t eps,
-    const scalar_t rho_body,
     const scalar_t rho_f,
     const scalar_t dt,
     const scalar_t inv_2h,
@@ -1322,17 +1316,17 @@ __global__ void bdim_vardens_sigma_2d_kernel(
 
     bdim_one_axis_sigma_2d<scalar_t>(
         u_prime, sdf_u, body_u,
-        eps, rho_body, rho_f, dt, inv_2h,
+        eps, rho_f, dt, inv_2h,
         Ngx, Ngy, i, j, u0, ch,
         key_u, sigma_shifts, n_sigma, mu0_proj);
     bdim_one_axis_sigma_2d<scalar_t>(
         v_prime, sdf_v, body_v,
-        eps, rho_body, rho_f, dt, inv_2h,
+        eps, rho_f, dt, inv_2h,
         Ngx, Ngy, i, j, v0, cv,
         key_v, sigma_shifts, n_sigma, mu0_proj);
 }
 
-void bdim_vardens_sigma_2d_cuda(
+void bdim_coeff_sigma_2d_cuda(
     const at::Tensor& u_prime,
     const at::Tensor& v_prime,
     const at::Tensor& sdf_u,
@@ -1345,7 +1339,6 @@ void bdim_vardens_sigma_2d_cuda(
     const at::Tensor& key_v,
     const at::Tensor& sigma_shifts,
     const double eps,
-    const double rho_body,
     const double rho_f,
     const double dt,
     const double h_grid,
@@ -1364,8 +1357,8 @@ void bdim_vardens_sigma_2d_cuda(
     const int blockSize = 256;
     const int nblocks   = (int)((dirty_vol + blockSize - 1) / blockSize);
 
-    AT_DISPATCH_FLOATING_TYPES(u0.scalar_type(), "bdim_vardens_sigma_2d_cuda", [&] {
-        bdim_vardens_sigma_2d_kernel<scalar_t>
+    AT_DISPATCH_FLOATING_TYPES(u0.scalar_type(), "bdim_coeff_sigma_2d_cuda", [&] {
+        bdim_coeff_sigma_2d_kernel<scalar_t>
             <<<nblocks, blockSize, 0, stream>>>(
                 u_prime.data_ptr<scalar_t>(),
                 v_prime.data_ptr<scalar_t>(),
@@ -1382,7 +1375,6 @@ void bdim_vardens_sigma_2d_cuda(
                 sigma_shifts.data_ptr<float>(),
                 n_sigma,
                 (scalar_t)eps,
-                (scalar_t)rho_body,
                 (scalar_t)rho_f,
                 (scalar_t)dt,
                 (scalar_t)(0.5 / h_grid),
@@ -1396,11 +1388,11 @@ void bdim_vardens_sigma_2d_cuda(
 
 TORCH_LIBRARY_IMPL(lilytorch_kernels, CUDA, m) {
     m.impl("streaming_sdf_stag_2d_multi",           &streaming_sdf_stag_2d_multi_cuda);
-    m.impl("bdim_vardens_2d",                       &bdim_vardens_2d_cuda);
-    m.impl("bdim_vardens_sigma_2d",                 &bdim_vardens_sigma_2d_cuda);
+    m.impl("bdim_coeff_2d",                       &bdim_coeff_2d_cuda);
+    m.impl("bdim_coeff_sigma_2d",                 &bdim_coeff_sigma_2d_cuda);
     m.impl("streaming_sdf_forces_post_2d",          &streaming_sdf_forces_post_2d_cuda);
     m.impl("apply_bcs_2d",                          &apply_bcs_2d_cuda);
-    m.impl("interpolate_2d",                        &interpolate_2d_cuda);
+    m.impl("interp_2d",                        &interp_2d_cuda);
 }
 
 }  // namespace lilytorch_kernels

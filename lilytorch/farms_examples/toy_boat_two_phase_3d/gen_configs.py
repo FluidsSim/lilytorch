@@ -99,7 +99,7 @@ class SimConfig(BaseSimConfig):
         self.rho_body     = 1000.0         # Poisson conditioning (not boat density)
         self.rho          = 1000.0         # water density
         self.nu           = 2.0e-4         # effective viscosity → low Re
-        self.timestep     = 0.0001         # match sphere example
+        self.timestep     = 0.0001
         self.n_iterations = 6000           # 0.6 s of simulation
         self.num_sub_steps     = 1
         self.save_every        = 100
@@ -107,30 +107,31 @@ class SimConfig(BaseSimConfig):
         # ── BDIM solver ──────────────────────────────────────────────
         self.bdim_dt                 = self.timestep
         self.bdim_nt                 = self.n_iterations
-        self.convection_method       = "abdquickest"  # match sphere example
+        self.convection_method       = "abdquickest"
         self.poisson_method          = "multigrid"
         self.poisson_tol             = 1.0e-6
-        self.poisson_max_cycles      = 4             # match sphere example
+        self.poisson_max_cycles      = 4
         self.poisson_max_mgcg_cycles = 30
         self.poisson_precond_vcycles = 1
         self.poisson_warm_start      = True
         self.poisson_smoother        = "rbgs"
         self.poisson_nsmoothing      = 5
         self.poisson_bc_type         = "neumann"
-        self.solver_method           = "python"   # required for two-phase
-        self.time_integration        = "euler"     # match sphere example
-        self.force_method            = "lagrangian"  # match sphere example
+        self.solver_method           = "kernel"
+        self.time_integration        = "euler"
+        self.force_method            = "lagrangian"
         self.force_delta_order       = 1
         self.eps_multiplier          = 2
         self.zero_pressure_inside    = False
         self.dtype                   = "float32"
 
-        # ── Boundary conditions (all Dirichlet, no-slip tank) ────────
-        self.bc_type_u   = ["D", "D", "D", "D", "D", "D"]
+        # Boundary conditions — Neumann on lateral walls (like submarine),
+        # Dirichlet on top/bottom to avoid free-slip water loss.
+        self.bc_type_u   = ["D", "D", "N", "N", "N", "N"]
         self.bc_values_u = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-        self.bc_type_v   = ["D", "D", "D", "D", "D", "D"]
+        self.bc_type_v   = ["N", "N", "D", "D", "N", "N"]
         self.bc_values_v = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-        self.bc_type_w   = ["D", "D", "D", "D", "D", "D"]
+        self.bc_type_w   = ["N", "N", "N", "N", "D", "D"]
         self.bc_values_w = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
         # ── Arena ────────────────────────────────────────────────────
@@ -234,7 +235,7 @@ class SimConfig(BaseSimConfig):
         )
 
     # ------------------------------------------------------------------
-    # Extensions: FlowIsoGLViewer for the live air/water interface
+    # Extensions: FlowIsoGLViewer + video recording
     # ------------------------------------------------------------------
     def extra_simulation_extensions(self, output_folder):
         extensions = []
@@ -254,6 +255,23 @@ class SimConfig(BaseSimConfig):
                 "max_vertices": 800000,
                 "crop_boundary": 0,
                 "debug_force_visible": False,
+            },
+        })
+
+        # Fixed side-on camera recording the tank + boat at the waterline.
+        extensions.append({
+            "loader": "lilytorch.integration.streaming_camera.StreamingCameraRecording",
+            "config": {
+                "path"            : os.path.join(output_folder, "output", "video.mp4"),
+                "animat_id"       : None,            # fixed camera (not following the boat)
+                "fps"             : 30,
+                "speed"           : 0.5,
+                "angular_velocity": 0,
+                "azimuth"         : 90,              # side view
+                "elevation"       : -15,             # slightly above horizontal
+                "distance"        : 0.35,            # close-up on the small tank
+                "offset"          : [TANK_LX / 2, TANK_LY / 2, WATERLINE],  # look at waterline centre
+                "resolution"      : [1920, 1080],
             },
         })
 

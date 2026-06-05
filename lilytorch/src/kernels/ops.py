@@ -4,13 +4,13 @@ from torch import Tensor
 
 __all__ = [
     "streaming_sdf_stag_3d_multi",
-    "bdim_vardens_3d",
-    "bdim_vardens_sigma_3d",
+    "bdim_coeff_3d",
+    "bdim_coeff_sigma_3d",
     "streaming_sdf_forces_post_3d",
     "apply_bcs_3d",
     "streaming_sdf_stag_2d_multi",
-    "bdim_vardens_2d",
-    "bdim_vardens_sigma_2d",
+    "bdim_coeff_2d",
+    "bdim_coeff_sigma_2d",
     "streaming_sdf_forces_post_2d",
     "apply_bcs_2d",
     "interp_2d",
@@ -52,7 +52,7 @@ def streaming_sdf_stag_3d_multi(
         blend_eps: float) -> None:
     """Phase-I 3-D streaming SDF + face velocity update (no rho).
 
-    Companion to ``bdim_vardens_3d``: fills ``sdf_cc`` (persistent),
+    Companion to ``bdim_coeff_3d``: fills ``sdf_cc`` (persistent),
     ``sdf_u/v/w`` and ``body_u/v/w`` (per-step temporaries) inside the
     dirty AABB.  Does NOT touch ``winning_rho_cc`` because Kernel B
     computes rho_eff from mu0 in registers.
@@ -75,13 +75,13 @@ def streaming_sdf_stag_3d_multi(
     )
 
 
-def bdim_vardens_3d(
+def bdim_coeff_3d(
         u_prime: Tensor, v_prime: Tensor, w_prime: Tensor,
         sdf_u: Tensor, sdf_v: Tensor, sdf_w: Tensor,
         body_u: Tensor, body_v: Tensor, body_w: Tensor,
         u0: Tensor, v0: Tensor, w0: Tensor,
         ch: Tensor, cv: Tensor, cw: Tensor,
-        eps: float, rho_body: float, rho_f: float, dt: float,
+        eps: float, rho_f: float, dt: float,
         h_grid: float,
         dirty_i0: int, dirty_j0: int, dirty_k0: int,
         dirty_Ai: int, dirty_Aj: int, dirty_Ak: int,
@@ -104,12 +104,12 @@ def bdim_vardens_3d(
         ``ch/cv/cw`` already hold the outside-body default
         ``dt / rho_fluid``.
     """
-    return torch.ops.lilytorch_kernels.bdim_vardens_3d.default(
+    return torch.ops.lilytorch_kernels.bdim_coeff_3d.default(
         u_prime, v_prime, w_prime,
         sdf_u, sdf_v, sdf_w,
         body_u, body_v, body_w,
         u0, v0, w0, ch, cv, cw,
-        float(eps), float(rho_body), float(rho_f), float(dt),
+        float(eps), float(rho_f), float(dt),
         float(h_grid),
         int(dirty_i0), int(dirty_j0), int(dirty_k0),
         int(dirty_Ai), int(dirty_Aj), int(dirty_Ak),
@@ -117,7 +117,7 @@ def bdim_vardens_3d(
     )
 
 
-def bdim_vardens_sigma_3d(
+def bdim_coeff_sigma_3d(
         u_prime: Tensor, v_prime: Tensor, w_prime: Tensor,
         sdf_u: Tensor, sdf_v: Tensor, sdf_w: Tensor,
         body_u: Tensor, body_v: Tensor, body_w: Tensor,
@@ -125,12 +125,12 @@ def bdim_vardens_sigma_3d(
         ch: Tensor, cv: Tensor, cw: Tensor,
         key_u: Tensor, key_v: Tensor, key_w: Tensor,
         sigma_shifts: Tensor,
-        eps: float, rho_body: float, rho_f: float, dt: float,
+        eps: float, rho_f: float, dt: float,
         h_grid: float,
         dirty_i0: int, dirty_j0: int, dirty_k0: int,
         dirty_Ai: int, dirty_Aj: int, dirty_Ak: int,
         mu0_projection: int = 1) -> None:
-    """BDIM-σ variant of :func:`bdim_vardens_3d` (Lauber et al. 2022).
+    """BDIM-σ variant of :func:`bdim_coeff_3d` (Lauber et al. 2022).
 
     For each cell the Poisson coefficient is evaluated with ``mu0`` of a
     shifted SDF ``phi - sigma_shifts[body_id]`` where ``body_id`` is
@@ -138,13 +138,13 @@ def bdim_vardens_sigma_3d(
     field (``u0/v0/w0``) uses the unmodified ``mu0`` — only the
     ``ch/cv/cw`` Poisson coefficient line uses the shifted ``mu0``.
     """
-    return torch.ops.lilytorch_kernels.bdim_vardens_sigma_3d.default(
+    return torch.ops.lilytorch_kernels.bdim_coeff_sigma_3d.default(
         u_prime, v_prime, w_prime,
         sdf_u, sdf_v, sdf_w,
         body_u, body_v, body_w,
         u0, v0, w0, ch, cv, cw,
         key_u, key_v, key_w, sigma_shifts,
-        float(eps), float(rho_body), float(rho_f), float(dt), float(h_grid),
+        float(eps), float(rho_f), float(dt), float(h_grid),
         int(dirty_i0), int(dirty_j0), int(dirty_k0),
         int(dirty_Ai), int(dirty_Aj), int(dirty_Ak),
         int(mu0_projection),
@@ -227,7 +227,7 @@ def streaming_sdf_stag_2d_multi(
         blend_eps: float) -> None:
     """Phase-I 2-D streaming SDF + face velocity update (no rho).
 
-    Companion to ``bdim_vardens_2d``: fills ``sdf_cc`` (persistent),
+    Companion to ``bdim_coeff_2d``: fills ``sdf_cc`` (persistent),
     ``sdf_u/v`` and ``body_u/v`` (per-step temporaries) inside the
     dirty AABB.  Does NOT touch ``winning_rho_cc`` -- Kernel B computes
     rho_eff from mu0 in registers.
@@ -250,28 +250,28 @@ def streaming_sdf_stag_2d_multi(
     )
 
 
-def bdim_vardens_2d(
+def bdim_coeff_2d(
         u_prime: Tensor, v_prime: Tensor,
         sdf_u: Tensor, sdf_v: Tensor,
         body_u: Tensor, body_v: Tensor,
         u0: Tensor, v0: Tensor,
         ch: Tensor, cv: Tensor,
-        eps: float, rho_body: float, rho_f: float, dt: float,
+        eps: float, rho_f: float, dt: float,
         h_grid: float,
         dirty_i0: int, dirty_j0: int,
         dirty_Ai: int, dirty_Aj: int,
         mu0_projection: int = 1) -> None:
     """Phase-I fused BDIM2 + variable-density Poisson coefficient kernel (2-D).
 
-    2-D analogue of :func:`bdim_vardens_3d`.  See that wrapper for the
+    2-D analogue of :func:`bdim_coeff_3d`.  See that wrapper for the
     documentation of caller responsibilities.
     """
-    return torch.ops.lilytorch_kernels.bdim_vardens_2d.default(
+    return torch.ops.lilytorch_kernels.bdim_coeff_2d.default(
         u_prime, v_prime,
         sdf_u, sdf_v,
         body_u, body_v,
         u0, v0, ch, cv,
-        float(eps), float(rho_body), float(rho_f), float(dt),
+        float(eps), float(rho_f), float(dt),
         float(h_grid),
         int(dirty_i0), int(dirty_j0),
         int(dirty_Ai), int(dirty_Aj),
@@ -279,7 +279,7 @@ def bdim_vardens_2d(
     )
 
 
-def bdim_vardens_sigma_2d(
+def bdim_coeff_sigma_2d(
         u_prime: Tensor, v_prime: Tensor,
         sdf_u: Tensor, sdf_v: Tensor,
         body_u: Tensor, body_v: Tensor,
@@ -287,19 +287,19 @@ def bdim_vardens_sigma_2d(
         ch: Tensor, cv: Tensor,
         key_u: Tensor, key_v: Tensor,
         sigma_shifts: Tensor,
-        eps: float, rho_body: float, rho_f: float, dt: float,
+        eps: float, rho_f: float, dt: float,
         h_grid: float,
         dirty_i0: int, dirty_j0: int,
         dirty_Ai: int, dirty_Aj: int,
         mu0_projection: int = 1) -> None:
-    """2-D analogue of :func:`bdim_vardens_sigma_3d`."""
-    return torch.ops.lilytorch_kernels.bdim_vardens_sigma_2d.default(
+    """2-D analogue of :func:`bdim_coeff_sigma_3d`."""
+    return torch.ops.lilytorch_kernels.bdim_coeff_sigma_2d.default(
         u_prime, v_prime,
         sdf_u, sdf_v,
         body_u, body_v,
         u0, v0, ch, cv,
         key_u, key_v, sigma_shifts,
-        float(eps), float(rho_body), float(rho_f), float(dt), float(h_grid),
+        float(eps), float(rho_f), float(dt), float(h_grid),
         int(dirty_i0), int(dirty_j0),
         int(dirty_Ai), int(dirty_Aj),
         int(mu0_projection),
@@ -372,7 +372,7 @@ def interp_2d(
     if interp_method is None:
         raise ValueError(f"method must be 'linear' or 'quadratic', got {method!r}")
     G = torch.empty(xq.numel(), dtype=F.dtype, device=F.device)
-    torch.ops.lilytorch_kernels.interpolate_2d.default(
+    torch.ops.lilytorch_kernels.interp_2d.default(
         F, xq, yq,
         float(bx0), float(by0),
         float(inv_dx), float(inv_dy),
@@ -417,7 +417,7 @@ def interp_3d(
     if interp_method is None:
         raise ValueError(f"method must be 'linear' or 'quadratic', got {method!r}")
     G = torch.empty(xq.numel(), dtype=F.dtype, device=F.device)
-    torch.ops.lilytorch_kernels.interpolate_3d.default(
+    torch.ops.lilytorch_kernels.interp_3d.default(
         F, xq, yq, zq,
         float(bx0), float(by0), float(bz0),
         float(inv_dx), float(inv_dy), float(inv_dz),

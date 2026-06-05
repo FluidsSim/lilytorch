@@ -5,13 +5,13 @@ registers operators under the ``lilytorch_kernels`` torch library:
 
 3-D ops:
 * ``streaming_sdf_stag_3d_multi``  -- Phase-I streaming SDF + body velocities
-* ``bdim_vardens_3d``              -- Phase-I fused BDIM2 + Poisson coeffs
+* ``bdim_coeff_3d``              -- Phase-I fused BDIM2 + Poisson coeffs
 * ``streaming_sdf_forces_post_3d`` -- post-fluid-step force integration
 * ``apply_bcs_3d``                 -- 3-D BC writes (Neumann + Dirichlet)
 
 2-D ops (mirror the 3-D ones with the z-axis stripped):
 * ``streaming_sdf_stag_2d_multi``  -- Phase-I streaming SDF + body velocities
-* ``bdim_vardens_2d``              -- Phase-I fused BDIM2 + Poisson coeffs
+* ``bdim_coeff_2d``              -- Phase-I fused BDIM2 + Poisson coeffs
 * ``streaming_sdf_forces_post_2d`` -- post-fluid-step force integration
 * ``apply_bcs_2d``                 -- 2-D BC writes (Neumann + Dirichlet)
 
@@ -56,13 +56,13 @@ _C = _load_native_extension()
 
 from .ops import (
     streaming_sdf_stag_3d_multi,
-    bdim_vardens_3d,
-    bdim_vardens_sigma_3d,
+    bdim_coeff_3d,
+    bdim_coeff_sigma_3d,
     streaming_sdf_forces_post_3d,
     apply_bcs_3d,
     streaming_sdf_stag_2d_multi,
-    bdim_vardens_2d,
-    bdim_vardens_sigma_2d,
+    bdim_coeff_2d,
+    bdim_coeff_sigma_2d,
     streaming_sdf_forces_post_2d,
     apply_bcs_2d,
     interp_2d,
@@ -83,13 +83,13 @@ from .interpolation import (
 
 __all__ = [
     "streaming_sdf_stag_3d_multi",
-    "bdim_vardens_3d",
-    "bdim_vardens_sigma_3d",
+    "bdim_coeff_3d",
+    "bdim_coeff_sigma_3d",
     "streaming_sdf_forces_post_3d",
     "apply_bcs_3d",
     "streaming_sdf_stag_2d_multi",
-    "bdim_vardens_2d",
-    "bdim_vardens_sigma_2d",
+    "bdim_coeff_2d",
+    "bdim_coeff_sigma_2d",
     "streaming_sdf_forces_post_2d",
     "apply_bcs_2d",
     "interp_2d",

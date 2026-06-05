@@ -23,32 +23,43 @@ def test_density_and_viscosity_blends():
     tp = TwoPhase(x, y, h, lambda X, Y: (Y < 0.5).double(),
                   rho_water=1000.0, rho_air=1.0,
                   nu_water=2.0, nu_air=0.5)
-    rho = tp.density_cc()
-    assert torch.isclose(rho[tp.alpha == 1].max(), torch.tensor(1000.0, dtype=rho.dtype))
-    assert torch.isclose(rho[tp.alpha == 0].min(), torch.tensor(1.0, dtype=rho.dtype))
-    # explicit half-fraction cell
+    q = tp.recip_density_cc()
+    # reciprocal density: 1/ρ_water in water, 1/ρ_air in air
+    assert torch.isclose(q[tp.alpha == 1].min(), torch.tensor(1.0 / 1000.0, dtype=q.dtype))
+    assert torch.isclose(q[tp.alpha == 0].max(), torch.tensor(1.0 / 1.0, dtype=q.dtype))
+    # explicit half-fraction cell: ρ_cc = 500.5 → q = 1/500.5
     tp.alpha.fill_(0.5)
-    assert torch.allclose(tp.density_cc(), torch.full_like(tp.alpha, 500.5))
+    assert torch.allclose(tp.recip_density_cc(),
+                          torch.full_like(tp.alpha, 1.0 / 500.5))
     assert torch.allclose(tp.viscosity_cc(), torch.full_like(tp.alpha, 1.25))
 
 
-def test_face_density_arithmetic_and_harmonic():
+def test_recip_density_face_harmonic():
+    """recip_density_face is the arithmetic mean of 1/ρ = reciprocal of the
+    harmonic face density."""
     (x, y), h = _grid(N=8)
     # vertical step: left half water, right half air (jump along x = dim 0)
-    tp_a = TwoPhase(x, y, h, lambda X, Y: (X < 0.5).double(),
-                    rho_water=1000.0, rho_air=1.0,
-                    face_density="arithmetic")
-    tp_h = TwoPhase(x, y, h, lambda X, Y: (X < 0.5).double(),
-                    rho_water=1000.0, rho_air=1.0,
-                    face_density="harmonic")
-    fa = tp_a.density_face(0)
-    fh = tp_h.density_face(0)
-    # at a water/air cut face the arithmetic avg is ~500.5, harmonic ~2.0
-    assert fa.max() > 900.0           # interior all-water faces still 1000
-    cut_a = fa[(fa > 1.0) & (fa < 1000.0)]
-    cut_h = fh[(fh > 1.0) & (fh < 1000.0)]
-    assert torch.allclose(cut_a, torch.full_like(cut_a, 500.5))
-    assert (cut_h < 5.0).all()        # harmonic average dominated by the light phase
+    tp = TwoPhase(x, y, h, lambda X, Y: (X < 0.5).double(),
+                  rho_water=1000.0, rho_air=1.0)
+    qf = tp.recip_density_face(0)
+    # interior all-water / all-air faces reduce to the bulk reciprocal
+    assert torch.isclose(qf.min(), torch.tensor(1.0 / 1000.0, dtype=qf.dtype))
+    # at the water/air cut face: 0.5*(1/1000 + 1/1) = 0.50050
+    cut = qf[(qf > 1.0 / 1000.0 + 1e-9) & (qf < 1.0 / 1.0 - 1e-9)]
+    assert cut.numel() > 0
+    assert torch.allclose(cut, torch.full_like(cut, 0.5 * (1.0 / 1000.0 + 1.0 / 1.0)))
+    # equals the reciprocal of the harmonic density mean 2ρ_iρ_j/(ρ_i+ρ_j)
+    harm_density = 2.0 * 1000.0 * 1.0 / (1000.0 + 1.0)
+    assert torch.allclose(cut, torch.full_like(cut, 1.0 / harm_density))
+
+
+def test_arithmetic_face_density_rejected():
+    """The legacy arithmetic face-density option is no longer accepted."""
+    import pytest
+    (x, y), h = _grid(N=8)
+    with pytest.raises(TypeError):
+        TwoPhase(x, y, h, lambda X, Y: (X < 0.5).double(),
+                 face_density="arithmetic")
 
 
 # ---------------------------------------------------------------------------

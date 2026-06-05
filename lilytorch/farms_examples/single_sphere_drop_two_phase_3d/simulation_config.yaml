@@ -98,7 +98,7 @@ extensions:
         eps_multiplier: 2
 
         gravity: [0, 0, -9.81]   # fluid body force -> hydrostatic pressure -> emergent buoyancy
-        solver_method: "python"  # variable-density projection needs materialised mu0 (no kernel)
+        solver_method: "kernel"  # variable-density projection needs materialised mu0 (no kernel)
 
         poisson_tol: 1.0e-6
         poisson_max_cycles: 4
@@ -188,7 +188,7 @@ extensions:
   config:
     field: "interface"         # two-phase VOF alpha (level 0.5 = air/water surface)
     iso_value: 0.5
-    alpha: 0.45                # surface opacity
+    alpha: 0.2                # surface opacity
     color_uni: "#3399FF"       # water blue (single, non-signed isosurface)
     smooth_sigma: 0            # smooth the sharp 0/1 VOF step for a cleaner mesh
     exclude_body: False        # the ball is the MuJoCo animat, not part of the iso

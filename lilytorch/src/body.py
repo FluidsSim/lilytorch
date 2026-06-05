@@ -149,14 +149,6 @@ def _triangulate_box(half_x, half_y, half_z):
         [-1,  0,  0], [-1,  0,  0],
         [ 1,  0,  0], [ 1,  0,  0],
     ], dtype=np.float64)
-    normals = np.array([
-        [ 0,  0, -1], [ 0,  0, -1],
-        [ 0,  0,  1], [ 0,  0,  1],
-        [ 0, -1,  0], [ 0, -1,  0],
-        [ 0,  1,  0], [ 0,  1,  0],
-        [-1,  0,  0], [-1,  0,  0],
-        [ 1,  0,  0], [ 1,  0,  0],
-    ], dtype=np.float64)
     T = 12
     tri_c = np.empty((T, 3), dtype=np.float64)
     tri_n = np.empty((T, 3), dtype=np.float64)
@@ -184,8 +176,11 @@ def _triangulate_sphere(radius, n_theta=24, n_phi=16):
     n_ph = max(int(n_phi), 2)
 
     verts = []
-    # south pole
-    verts.append((0.0, 0.0, -r))
+    # First ring (j=1) is near z=+r, so the pole appended first (the
+    # "south-pole fan" connects to it) sits at +r; the pole appended last
+    # caps the j=n_ph-1 ring near z=-r.  Matching the pole z to the ring
+    # ordering keeps each fan a small cap instead of spanning the sphere.
+    verts.append((0.0, 0.0, r))
     for j in range(1, n_ph):
         phi = np.pi * j / n_ph
         z = r * np.cos(phi)
@@ -193,8 +188,7 @@ def _triangulate_sphere(radius, n_theta=24, n_phi=16):
         for i in range(n_th):
             th = 2.0 * np.pi * i / n_th
             verts.append((r_xy * np.cos(th), r_xy * np.sin(th), z))
-    # north pole
-    verts.append((0.0, 0.0, r))
+    verts.append((0.0, 0.0, -r))
     verts = np.array(verts, dtype=np.float64)
 
     tris_c, tris_n, tris_a = [], [], []
@@ -367,7 +361,10 @@ def _triangulate_capsule(radius, half_length, n_theta=24, n_phi_cap=6):
             _add_triangle_centroid_area(verts_top, v0, v1, v2, tris_c, tris_a)
             _add_triangle_centroid_area(verts_top, v0, v2, v3, tris_c, tris_a)
     pole = len(verts_top) - 1
-    base = (n_ph - 1) * n_th
+    # The top pole (z=hl+r) caps the near-pole ring (j=1), which is the
+    # first ring in verts_top (index 0); the equator ring is shared with
+    # the cylinder and stays open.
+    base = 0
     for i in range(n_th):
         v0, v1, v2 = base + i, base + (i + 1) % n_th, pole
         _add_triangle_centroid_area(verts_top, v0, v1, v2, tris_c, tris_a)

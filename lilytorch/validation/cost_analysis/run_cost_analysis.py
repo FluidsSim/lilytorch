@@ -289,7 +289,7 @@ def instrument_handler(handler):
     handler.step = types.MethodType(outer_step, handler)
 
     _orig_project = type(fs).project
-    _orig_vardens = type(fs)._compute_variable_density_coefficients
+    _orig_vardens = type(fs)._compute_bdim_coefficients
     poisson_mg = getattr(fs, "poisson_solver", None)
 
     def _install_deep_patches():
@@ -343,7 +343,7 @@ def instrument_handler(handler):
             with T(spec.vardens_leaf_label):
                 return _orig_vardens(self_fs, *call_args, **call_kwargs)
 
-        fs._compute_variable_density_coefficients = types.MethodType(timed_vardens, fs)
+        fs._compute_bdim_coefficients = types.MethodType(timed_vardens, fs)
 
         _orig_release = type(fs)._release_bdim_fields
 
@@ -387,10 +387,10 @@ def instrument_handler(handler):
             import lilytorch.src.solver as _solver_mod
             if spec.dim == 3:
                 _orig_kern_a = _solver_mod.streaming_sdf_stag_3d_multi
-                _orig_kern_b = _solver_mod.bdim_vardens_3d
+                _orig_kern_b = _solver_mod.bdim_coeff_3d
             else:
                 _orig_kern_a = _solver_mod.streaming_sdf_stag_2d_multi
-                _orig_kern_b = _solver_mod.bdim_vardens_2d
+                _orig_kern_b = _solver_mod.bdim_coeff_2d
 
             def _timed_kern_a(*ca, **ckw):
                 with T("1b.ka   Kernel A (streaming SDF)"):
@@ -402,10 +402,10 @@ def instrument_handler(handler):
 
             if spec.dim == 3:
                 _solver_mod.streaming_sdf_stag_3d_multi = _timed_kern_a
-                _solver_mod.bdim_vardens_3d = _timed_kern_b
+                _solver_mod.bdim_coeff_3d = _timed_kern_b
             else:
                 _solver_mod.streaming_sdf_stag_2d_multi = _timed_kern_a
-                _solver_mod.bdim_vardens_2d = _timed_kern_b
+                _solver_mod.bdim_coeff_2d = _timed_kern_b
             kern_patched = True
 
         kern_info = ", Kernel A+B" if kern_patched else ""

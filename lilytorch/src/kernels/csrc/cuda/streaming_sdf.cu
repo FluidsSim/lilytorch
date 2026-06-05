@@ -203,10 +203,11 @@ __device__ __forceinline__ scalar_t sdf_sample_dispatch(
 //    2. ``streaming_sdf_min_rho_3d_multi_kernel`` (this kernel) — fanned
 //       across B. Each thread does 4 ``atomicMin`` (cc, u, v, w) on
 //       its body's contribution.
-//    3. ``streaming_sdf_decode_keys_rho_3d_kernel`` — for each cell, if
+//    3. ``streaming_sdf_decode_keys_stag_3d_kernel`` — for each cell, if
 //       any body won this field, write back the decoded SDF to
 //       ``sdf_*[g]`` and recompute ``bU/bV/bW[g]`` from the winning
-//       body's kinematics.
+//       body's kinematics.  (Kernel B later computes rho_eff from mu0 in
+//       register, so no per-cell winning-density tensor is needed.)
 // =====================================================================
 
 // Initialises key arrays only within the dirty sub-block
@@ -738,99 +739,10 @@ __global__ void streaming_sdf_forces_post_3d_kernel(
     }
 }
 
-// Decode kernel for the memory-saving 3-D pipeline: extends the basic 3-D
-// decode by also stamping ``winning_rho_cc[g] = rho_bodies[bc]`` for
-// the body that won the cc-SDF at each cell.  When the sentinel
-// survived (no body touched the cell), all outputs are left untouched
-// (the init pass already encoded the prior value of ``sdf_*[g]``;
-// ``winning_rho_cc`` is pre-filled with ``rho_fluid`` by the caller).
-template <typename scalar_t>
-__global__ void streaming_sdf_decode_keys_rho_3d_kernel(
-    const uint64_t* __restrict__ key_cc,
-    const uint64_t* __restrict__ key_u,
-    const uint64_t* __restrict__ key_v,
-    const uint64_t* __restrict__ key_w,
-    const scalar_t* __restrict__ kin,           // [B,21]
-    const scalar_t* __restrict__ rho_bodies,    // [B]
-    const scalar_t* __restrict__ gx,
-    const scalar_t* __restrict__ gy,
-    const scalar_t* __restrict__ gz,
-    const int Ngy, const int Ngz,
-    const int B_sentinel,
-    scalar_t* __restrict__ sdf_cc,
-    scalar_t* __restrict__ sdf_u,
-    scalar_t* __restrict__ sdf_v,
-    scalar_t* __restrict__ sdf_w,
-    scalar_t* __restrict__ bU,
-    scalar_t* __restrict__ bV,
-    scalar_t* __restrict__ bW,
-    scalar_t* __restrict__ winning_rho_cc,
-    const int dirty_vol,
-    const int di0, const int dj0, const int dk0,
-    const int dAi, const int dAj, const int dAk)
-{
-    const int local = blockIdx.x * blockDim.x + threadIdx.x;
-    if (local >= dirty_vol) return;
-    const int dk = local % dAk;
-    const int rem = local / dAk;
-    const int dj = rem % dAj;
-    const int di = rem / dAj;
-    const int i  = di0 + di;
-    const int j  = dj0 + dj;
-    const int k  = dk0 + dk;
-    const int g  = i * Ngy * Ngz + j * Ngz + k;
-
-    // Key buffers use AABB-local flat indexing (size = dirty_vol).
-    const uint64_t kc = key_cc[local];
-    const uint64_t ku = key_u [local];
-    const uint64_t kv = key_v [local];
-    const uint64_t kw = key_w [local];
-
-    const uint32_t bc = unpack_body_id(kc);
-    const uint32_t bu = unpack_body_id(ku);
-    const uint32_t bv = unpack_body_id(kv);
-    const uint32_t bw = unpack_body_id(kw);
-
-    if ((int)bc < B_sentinel) {
-        sdf_cc[g] = unpack_sdf<scalar_t>(kc);
-        winning_rho_cc[g] = rho_bodies[(int)bc];
-    }
-    if ((int)bu < B_sentinel) sdf_u[g] = unpack_sdf<scalar_t>(ku);
-    if ((int)bv < B_sentinel) sdf_v[g] = unpack_sdf<scalar_t>(kv);
-    if ((int)bw < B_sentinel) sdf_w[g] = unpack_sdf<scalar_t>(kw);
-
-    if ((int)bu < B_sentinel) {
-        const scalar_t* K = kin + (int)bu * 21;
-        const scalar_t cm_y = K[13], cm_z = K[14];
-        const scalar_t lv_x = K[15];
-        const scalar_t av_y = K[19], av_z = K[20];
-        const scalar_t yc = gy[j];
-        const scalar_t zc = gz[k];
-        bU[g] = lv_x + av_y*(zc - cm_z) - av_z*(yc - cm_y);
-    }
-    if ((int)bv < B_sentinel) {
-        const scalar_t* K = kin + (int)bv * 21;
-        const scalar_t cm_x = K[12], cm_z = K[14];
-        const scalar_t lv_y = K[16];
-        const scalar_t av_x = K[18], av_z = K[20];
-        const scalar_t xc = gx[i];
-        const scalar_t zc = gz[k];
-        bV[g] = lv_y + av_z*(xc - cm_x) - av_x*(zc - cm_z);
-    }
-    if ((int)bw < B_sentinel) {
-        const scalar_t* K = kin + (int)bw * 21;
-        const scalar_t cm_x = K[12], cm_y = K[13];
-        const scalar_t lv_z = K[17];
-        const scalar_t av_x = K[18], av_y = K[19];
-        const scalar_t xc = gx[i];
-        const scalar_t yc = gy[j];
-        bW[g] = lv_z + av_x*(yc - cm_y) - av_y*(xc - cm_x);
-    }
-}
-
-// Phase-I memory-reduction variant of the rho decode: drops winning_rho_cc
-// and rho_bodies entirely.  Phase-I computes ``rho_eff`` from ``mu0`` in
-// register inside Kernel B, so no per-cell winning density tensor is needed.
+// Decode kernel: for each cell write back the winning body's SDF to
+// ``sdf_*[g]`` and recompute ``bU/bV/bW[g]`` from its kinematics. No per-cell
+// winning-density tensor is produced -- Kernel B (bdim_coeff) computes the
+// BDIM2 coefficient ``dt*mu0/rho_fluid`` from ``mu0`` in register.
 template <typename scalar_t>
 __global__ void streaming_sdf_decode_keys_stag_3d_kernel(
     const uint64_t* __restrict__ key_cc,
@@ -1050,7 +962,6 @@ __device__ __forceinline__ void bdim_one_axis_3d(
     const scalar_t* __restrict__ sdf,
     const scalar_t* __restrict__ body,
     const scalar_t eps,
-    const scalar_t rho_body,
     const scalar_t rho_f,
     const scalar_t dt,
     const scalar_t inv_2h,
@@ -1162,15 +1073,14 @@ __device__ __forceinline__ void bdim_one_axis_3d(
     if (i >= 1 && j >= 1 && k >= 1 && i <= c_hi_i && j <= c_hi_j && k <= c_hi_k) {
         // BDIM2 coefficient dt*mu0/rho_fluid (Weymouth & Yue): the body enters
         // via mu0 only, NOT its density.  mu0_proj == 0 → plain dt/rho (no mu0
-        // numerator), non-degenerate for multibody.  ``rho_body`` is unused
-        // (kept in the signature for ABI stability).
+        // numerator), non-degenerate for multibody.
         c_out[(i - 1) * c_stride_i + (j - 1) * c_stride_j + (k - 1)] =
             (mu0_proj ? dt * mu0 : dt) / rho_f;
     }
 }
 
 template <typename scalar_t>
-__global__ void bdim_vardens_3d_kernel(
+__global__ void bdim_coeff_3d_kernel(
     const scalar_t* __restrict__ u_prime,
     const scalar_t* __restrict__ v_prime,
     const scalar_t* __restrict__ w_prime,
@@ -1187,7 +1097,6 @@ __global__ void bdim_vardens_3d_kernel(
     scalar_t* __restrict__ cv,
     scalar_t* __restrict__ cw,
     const scalar_t eps,
-    const scalar_t rho_body,
     const scalar_t rho_f,
     const scalar_t dt,
     const scalar_t inv_2h,
@@ -1210,27 +1119,27 @@ __global__ void bdim_vardens_3d_kernel(
     // ch: x-face grid (Ngx-1, Ngy-2, Ngz-2), strides ((Ngy-2)*(Ngz-2), Ngz-2, 1)
     bdim_one_axis_3d<scalar_t>(
         u_prime, sdf_u, body_u,
-        eps, rho_body, rho_f, dt, inv_2h,
+        eps, rho_f, dt, inv_2h,
         Ngx, Ngy, Ngz, i, j, k, u0, ch,
         (Ngy - 2) * (Ngz - 2), (Ngz - 2),
         Ngx - 1, Ngy - 2, Ngz - 2, mu0_proj);
     // cv: y-face grid (Ngx-2, Ngy-1, Ngz-2), strides ((Ngy-1)*(Ngz-2), Ngz-2, 1)
     bdim_one_axis_3d<scalar_t>(
         v_prime, sdf_v, body_v,
-        eps, rho_body, rho_f, dt, inv_2h,
+        eps, rho_f, dt, inv_2h,
         Ngx, Ngy, Ngz, i, j, k, v0, cv,
         (Ngy - 1) * (Ngz - 2), (Ngz - 2),
         Ngx - 2, Ngy - 1, Ngz - 2, mu0_proj);
     // cw: z-face grid (Ngx-2, Ngy-2, Ngz-1), strides ((Ngy-2)*(Ngz-1), Ngz-1, 1)
     bdim_one_axis_3d<scalar_t>(
         w_prime, sdf_w, body_w,
-        eps, rho_body, rho_f, dt, inv_2h,
+        eps, rho_f, dt, inv_2h,
         Ngx, Ngy, Ngz, i, j, k, w0, cw,
         (Ngy - 2) * (Ngz - 1), (Ngz - 1),
         Ngx - 2, Ngy - 2, Ngz - 1, mu0_proj);
 }
 
-void bdim_vardens_3d_cuda(
+void bdim_coeff_3d_cuda(
     const at::Tensor& u_prime,
     const at::Tensor& v_prime,
     const at::Tensor& w_prime,
@@ -1243,7 +1152,6 @@ void bdim_vardens_3d_cuda(
     at::Tensor u0, at::Tensor v0, at::Tensor w0,
     at::Tensor ch, at::Tensor cv, at::Tensor cw,
     const double eps,
-    const double rho_body,
     const double rho_f,
     const double dt,
     const double h_grid,
@@ -1262,8 +1170,8 @@ void bdim_vardens_3d_cuda(
     const int blockSize = 256;
     const int nblocks   = (int)((dirty_vol + blockSize - 1) / blockSize);
 
-    AT_DISPATCH_FLOATING_TYPES(u0.scalar_type(), "bdim_vardens_3d_cuda", [&] {
-        bdim_vardens_3d_kernel<scalar_t>
+    AT_DISPATCH_FLOATING_TYPES(u0.scalar_type(), "bdim_coeff_3d_cuda", [&] {
+        bdim_coeff_3d_kernel<scalar_t>
             <<<nblocks, blockSize, 0, stream>>>(
                 u_prime.data_ptr<scalar_t>(),
                 v_prime.data_ptr<scalar_t>(),
@@ -1281,7 +1189,6 @@ void bdim_vardens_3d_cuda(
                 cv.data_ptr<scalar_t>(),
                 cw.data_ptr<scalar_t>(),
                 (scalar_t)eps,
-                (scalar_t)rho_body,
                 (scalar_t)rho_f,
                 (scalar_t)dt,
                 (scalar_t)(0.5 / h_grid),
@@ -1294,7 +1201,7 @@ void bdim_vardens_3d_cuda(
 }
 
 // =====================================================================
-//  BDIM-σ variant of bdim_one_axis_3d / bdim_vardens_3d.
+//  BDIM-σ variant of bdim_one_axis_3d / bdim_coeff_3d.
 //
 //  Per-cell Poisson coefficient is evaluated with mu0 of a shifted SDF
 //  phi - sigma_shifts[body_id] (body_id decoded from the AABB-local key
@@ -1311,7 +1218,6 @@ __device__ __forceinline__ void bdim_one_axis_sigma_3d(
     const scalar_t* __restrict__ sdf,
     const scalar_t* __restrict__ body,
     const scalar_t eps,
-    const scalar_t rho_body,
     const scalar_t rho_f,
     const scalar_t dt,
     const scalar_t inv_2h,
@@ -1417,14 +1323,14 @@ __device__ __forceinline__ void bdim_one_axis_sigma_3d(
     phi_out[g] = mu0 * diff_c + b_c + mu1 * nd;
     if (i >= 1 && j >= 1 && k >= 1 && i <= c_hi_i && j <= c_hi_j && k <= c_hi_k) {
         // BDIM2 coefficient dt*mu0/rho_fluid: body enters via mu0 only, not
-        // density.  mu0_proj == 0 → drop the mu0 numerator.  rho_body unused.
+        // density.  mu0_proj == 0 → drop the mu0 numerator.
         c_out[(i - 1) * c_stride_i + (j - 1) * c_stride_j + (k - 1)] =
             (mu0_proj ? dt * mu0_poisson : dt) / rho_f;
     }
 }
 
 template <typename scalar_t>
-__global__ void bdim_vardens_sigma_3d_kernel(
+__global__ void bdim_coeff_sigma_3d_kernel(
     const scalar_t* __restrict__ u_prime,
     const scalar_t* __restrict__ v_prime,
     const scalar_t* __restrict__ w_prime,
@@ -1446,7 +1352,6 @@ __global__ void bdim_vardens_sigma_3d_kernel(
     const float*   __restrict__ sigma_shifts,
     const int n_sigma,
     const scalar_t eps,
-    const scalar_t rho_body,
     const scalar_t rho_f,
     const scalar_t dt,
     const scalar_t inv_2h,
@@ -1468,7 +1373,7 @@ __global__ void bdim_vardens_sigma_3d_kernel(
 
     bdim_one_axis_sigma_3d<scalar_t>(
         u_prime, sdf_u, body_u,
-        eps, rho_body, rho_f, dt, inv_2h,
+        eps, rho_f, dt, inv_2h,
         Ngx, Ngy, Ngz, i, j, k, u0, ch,
         (Ngy - 2) * (Ngz - 2), (Ngz - 2),
         Ngx - 1, Ngy - 2, Ngz - 2,
@@ -1476,7 +1381,7 @@ __global__ void bdim_vardens_sigma_3d_kernel(
         di0, dj0, dk0, dAj, dAk, mu0_proj);
     bdim_one_axis_sigma_3d<scalar_t>(
         v_prime, sdf_v, body_v,
-        eps, rho_body, rho_f, dt, inv_2h,
+        eps, rho_f, dt, inv_2h,
         Ngx, Ngy, Ngz, i, j, k, v0, cv,
         (Ngy - 1) * (Ngz - 2), (Ngz - 2),
         Ngx - 2, Ngy - 1, Ngz - 2,
@@ -1484,7 +1389,7 @@ __global__ void bdim_vardens_sigma_3d_kernel(
         di0, dj0, dk0, dAj, dAk, mu0_proj);
     bdim_one_axis_sigma_3d<scalar_t>(
         w_prime, sdf_w, body_w,
-        eps, rho_body, rho_f, dt, inv_2h,
+        eps, rho_f, dt, inv_2h,
         Ngx, Ngy, Ngz, i, j, k, w0, cw,
         (Ngy - 2) * (Ngz - 1), (Ngz - 1),
         Ngx - 2, Ngy - 2, Ngz - 1,
@@ -1492,7 +1397,7 @@ __global__ void bdim_vardens_sigma_3d_kernel(
         di0, dj0, dk0, dAj, dAk, mu0_proj);
 }
 
-void bdim_vardens_sigma_3d_cuda(
+void bdim_coeff_sigma_3d_cuda(
     const at::Tensor& u_prime,
     const at::Tensor& v_prime,
     const at::Tensor& w_prime,
@@ -1509,7 +1414,6 @@ void bdim_vardens_sigma_3d_cuda(
     const at::Tensor& key_w,
     const at::Tensor& sigma_shifts,
     const double eps,
-    const double rho_body,
     const double rho_f,
     const double dt,
     const double h_grid,
@@ -1529,8 +1433,8 @@ void bdim_vardens_sigma_3d_cuda(
     const int blockSize = 256;
     const int nblocks   = (int)((dirty_vol + blockSize - 1) / blockSize);
 
-    AT_DISPATCH_FLOATING_TYPES(u0.scalar_type(), "bdim_vardens_sigma_3d_cuda", [&] {
-        bdim_vardens_sigma_3d_kernel<scalar_t>
+    AT_DISPATCH_FLOATING_TYPES(u0.scalar_type(), "bdim_coeff_sigma_3d_cuda", [&] {
+        bdim_coeff_sigma_3d_kernel<scalar_t>
             <<<nblocks, blockSize, 0, stream>>>(
                 u_prime.data_ptr<scalar_t>(),
                 v_prime.data_ptr<scalar_t>(),
@@ -1553,7 +1457,6 @@ void bdim_vardens_sigma_3d_cuda(
                 sigma_shifts.data_ptr<float>(),
                 n_sigma,
                 (scalar_t)eps,
-                (scalar_t)rho_body,
                 (scalar_t)rho_f,
                 (scalar_t)dt,
                 (scalar_t)(0.5 / h_grid),
@@ -1562,103 +1465,6 @@ void bdim_vardens_sigma_3d_cuda(
                 (int)dirty_Ai, (int)dirty_Aj, (int)dirty_Ak,
                 (int)dirty_vol,
                 (int)mu0_projection);
-    });
-}
-
-void streaming_sdf_min_rho_3d_multi_cuda(
-    const at::Tensor& F_flat, const at::Tensor& F_offsets,
-    const at::Tensor& body_shapes,
-    const at::Tensor& body_meta,
-    const at::Tensor& kin,
-    const at::Tensor& aabb_lo,
-    const at::Tensor& aabb_dim,
-    const at::Tensor& gx, const at::Tensor& gy, const at::Tensor& gz,
-    const double h_grid,
-    const int64_t max_vol_per_body,
-    at::Tensor sdf_cc, at::Tensor sdf_u, at::Tensor sdf_v, at::Tensor sdf_w,
-    at::Tensor body_u, at::Tensor body_v, at::Tensor body_w,
-    const int64_t interp_method,
-    const at::Tensor& rho_bodies,
-    at::Tensor winning_rho_cc,
-    // Dirty region: union of prev and curr union-AABB.  init/decode kernels
-    // only touch this sub-block, making them O(dirty_vol) not O(Ngrid).
-    const int64_t dirty_i0, const int64_t dirty_j0, const int64_t dirty_k0,
-    const int64_t dirty_Ai, const int64_t dirty_Aj, const int64_t dirty_Ak)
-{
-    const int B = (int)aabb_dim.size(0);
-    if (B <= 0 || max_vol_per_body <= 0) return;
-
-    cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-    const int Ngx = (int)gx.numel();
-    const int Ngy = (int)gy.numel();
-    const int Ngz = (int)gz.numel();
-    const int64_t Ngrid = (int64_t)Ngx * Ngy * Ngz;
-    const int blockSize = (max_vol_per_body <= 128) ? 32
-                        : (max_vol_per_body <= 4096) ? 128 : 256;
-
-    // Key arrays sized to dirty_vol (AABB-local indexing).
-    // Only dirty sub-block cells are written; AABB-local flat index avoids
-    // allocating O(Ngrid) buffers when dirty_vol << Ngrid.
-    auto key_opts = at::TensorOptions().dtype(at::kLong).device(sdf_cc.device());
-    const int64_t dirty_vol = dirty_Ai * dirty_Aj * dirty_Ak;
-    auto key_cc_t = at::empty({dirty_vol}, key_opts);
-    auto key_u_t  = at::empty({dirty_vol}, key_opts);
-    auto key_v_t  = at::empty({dirty_vol}, key_opts);
-    auto key_w_t  = at::empty({dirty_vol}, key_opts);
-
-    AT_DISPATCH_FLOATING_TYPES(F_flat.scalar_type(), "streaming_sdf_min_rho_3d_multi_cuda", [&] {
-        const int initBlock  = 256;
-        const int initBlocks = (int)((dirty_vol + initBlock - 1) / initBlock);
-        streaming_sdf_init_keys_3d_kernel<scalar_t>
-            <<<initBlocks, initBlock, 0, stream>>>(
-                sdf_cc.data_ptr<scalar_t>(), sdf_u.data_ptr<scalar_t>(),
-                sdf_v.data_ptr<scalar_t>(), sdf_w.data_ptr<scalar_t>(),
-                (uint64_t*)key_cc_t.data_ptr<int64_t>(),
-                (uint64_t*)key_u_t.data_ptr<int64_t>(),
-                (uint64_t*)key_v_t.data_ptr<int64_t>(),
-                (uint64_t*)key_w_t.data_ptr<int64_t>(),
-                (int)dirty_vol, B,
-                (int)dirty_i0, (int)dirty_j0, (int)dirty_k0,
-                (int)dirty_Ai, (int)dirty_Aj, (int)dirty_Ak,
-                Ngy, Ngz);
-
-        const int blocksPerBody = (int)((max_vol_per_body + blockSize - 1) / blockSize);
-        streaming_sdf_min_rho_3d_multi_kernel<scalar_t>
-            <<<dim3(blocksPerBody, B, 1), dim3(blockSize, 1, 1), 0, stream>>>(
-                F_flat.data_ptr<scalar_t>(), F_offsets.data_ptr<int64_t>(),
-                body_shapes.data_ptr<int64_t>(), body_meta.data_ptr<scalar_t>(),
-                kin.data_ptr<scalar_t>(), aabb_lo.data_ptr<int64_t>(),
-                aabb_dim.data_ptr<int64_t>(), gx.data_ptr<scalar_t>(),
-                gy.data_ptr<scalar_t>(), gz.data_ptr<scalar_t>(), Ngx, Ngy, Ngz,
-                (scalar_t)(0.5 * h_grid),
-                (uint64_t*)key_cc_t.data_ptr<int64_t>(),
-                (uint64_t*)key_u_t.data_ptr<int64_t>(),
-                (uint64_t*)key_v_t.data_ptr<int64_t>(),
-                (uint64_t*)key_w_t.data_ptr<int64_t>(),
-                (int)interp_method,
-                (int)dirty_i0, (int)dirty_j0, (int)dirty_k0,
-                (int)dirty_Aj, (int)dirty_Ak,
-                // velocity blend not used by the rho/decode variant
-                (scalar_t*)nullptr, (scalar_t*)nullptr, (scalar_t*)nullptr,
-                (scalar_t*)nullptr, (scalar_t*)nullptr, (scalar_t*)nullptr,
-                (scalar_t)(-1));
-
-        streaming_sdf_decode_keys_rho_3d_kernel<scalar_t>
-            <<<initBlocks, initBlock, 0, stream>>>(
-                (const uint64_t*)key_cc_t.data_ptr<int64_t>(),
-                (const uint64_t*)key_u_t.data_ptr<int64_t>(),
-                (const uint64_t*)key_v_t.data_ptr<int64_t>(),
-                (const uint64_t*)key_w_t.data_ptr<int64_t>(),
-                kin.data_ptr<scalar_t>(), rho_bodies.data_ptr<scalar_t>(),
-                gx.data_ptr<scalar_t>(), gy.data_ptr<scalar_t>(), gz.data_ptr<scalar_t>(),
-                Ngy, Ngz, B,
-                sdf_cc.data_ptr<scalar_t>(), sdf_u.data_ptr<scalar_t>(),
-                sdf_v.data_ptr<scalar_t>(), sdf_w.data_ptr<scalar_t>(),
-                body_u.data_ptr<scalar_t>(), body_v.data_ptr<scalar_t>(),
-                body_w.data_ptr<scalar_t>(), winning_rho_cc.data_ptr<scalar_t>(),
-                (int)dirty_vol,
-                (int)dirty_i0, (int)dirty_j0, (int)dirty_k0,
-                (int)dirty_Ai, (int)dirty_Aj, (int)dirty_Ak);
     });
 }
 
@@ -1906,14 +1712,14 @@ void apply_bcs_3d_cuda(
 
 
 // =====================================================================
-//  interpolate_3d: scattered-point trilinear / triquadratic sampling
+//  interp_3d: scattered-point trilinear / triquadratic sampling
 //
 //  One thread per query point.  Calls the same sdf_sample_dispatch
 //  device function used by streaming_sdf_min_rho_3d_multi (interp_method 0 =
 //  trilinear / "linear", 1 = triquadratic / "quadratic").
 // =====================================================================
 template <typename scalar_t>
-__global__ void interpolate_3d_kernel(
+__global__ void interp_3d_kernel(
     const scalar_t* __restrict__ F,
     const scalar_t* __restrict__ xq,
     const scalar_t* __restrict__ yq,
@@ -1935,7 +1741,7 @@ __global__ void interpolate_3d_kernel(
         xq[tid], yq[tid], zq[tid]);
 }
 
-void interpolate_3d_cuda(
+void interp_3d_cuda(
     const at::Tensor& F,
     const at::Tensor& xq, const at::Tensor& yq, const at::Tensor& zq,
     const double bx0, const double by0, const double bz0,
@@ -1960,8 +1766,8 @@ void interpolate_3d_cuda(
     auto yq_c = yq.contiguous().to(F.scalar_type());
     auto zq_c = zq.contiguous().to(F.scalar_type());
 
-    AT_DISPATCH_FLOATING_TYPES(F.scalar_type(), "interpolate_3d_cuda", [&] {
-        interpolate_3d_kernel<scalar_t><<<numBlocks, blockSize, 0, stream>>>(
+    AT_DISPATCH_FLOATING_TYPES(F.scalar_type(), "interp_3d_cuda", [&] {
+        interp_3d_kernel<scalar_t><<<numBlocks, blockSize, 0, stream>>>(
             F_c.data_ptr<scalar_t>(),
             xq_c.data_ptr<scalar_t>(),
             yq_c.data_ptr<scalar_t>(),
@@ -1976,13 +1782,12 @@ void interpolate_3d_cuda(
 }
 
 TORCH_LIBRARY_IMPL(lilytorch_kernels, CUDA, m) {
-    m.impl("streaming_sdf_min_rho_3d_multi", &streaming_sdf_min_rho_3d_multi_cuda);
     m.impl("streaming_sdf_stag_3d_multi",    &streaming_sdf_stag_3d_multi_cuda);
-    m.impl("bdim_vardens_3d",                &bdim_vardens_3d_cuda);
-    m.impl("bdim_vardens_sigma_3d",          &bdim_vardens_sigma_3d_cuda);
+    m.impl("bdim_coeff_3d",                &bdim_coeff_3d_cuda);
+    m.impl("bdim_coeff_sigma_3d",          &bdim_coeff_sigma_3d_cuda);
     m.impl("streaming_sdf_forces_post_3d", &streaming_sdf_forces_post_3d_cuda);
     m.impl("apply_bcs_3d", &apply_bcs_3d_cuda);
-    m.impl("interpolate_3d", &interpolate_3d_cuda);
+    m.impl("interp_3d", &interp_3d_cuda);
 }
 
 }  // namespace lilytorch_kernels

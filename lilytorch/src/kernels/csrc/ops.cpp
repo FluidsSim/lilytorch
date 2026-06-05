@@ -65,20 +65,20 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
     // ch/cv/cw inside the dirty AABB.  mu0, mu1 and unit normals are
     // computed in CUDA thread registers and never stored globally.
     m.def(
-        "bdim_vardens_3d("
+        "bdim_coeff_3d("
         "Tensor u_prime, Tensor v_prime, Tensor w_prime,"
         " Tensor sdf_u, Tensor sdf_v, Tensor sdf_w,"
         " Tensor body_u, Tensor body_v, Tensor body_w,"
         " Tensor(a!) u0, Tensor(b!) v0, Tensor(c!) w0,"
         " Tensor(d!) ch, Tensor(e!) cv, Tensor(f!) cw,"
-        " float eps, float rho_body, float rho_f, float dt,"
+        " float eps, float rho_f, float dt,"
         " float h_grid,"
         " int dirty_i0, int dirty_j0, int dirty_k0,"
         " int dirty_Ai, int dirty_Aj, int dirty_Ak,"
         " int mu0_projection"
         ") -> ()");
 
-    // BDIM-σ variant of bdim_vardens_3d (Lauber et al. 2022).
+    // BDIM-σ variant of bdim_coeff_3d (Lauber et al. 2022).
     // For each cell the Poisson coefficient is evaluated with mu0 of a
     // shifted SDF phi - sigma_shifts[body_id] (lookup via key_u/v/w), so
     // thin bodies (r < eps) reach mu0_poisson = 0 inside the body and the
@@ -86,7 +86,7 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
     // (phi_out) are unchanged — only the Poisson coefficient line uses
     // the shifted mu0.
     m.def(
-        "bdim_vardens_sigma_3d("
+        "bdim_coeff_sigma_3d("
         "Tensor u_prime, Tensor v_prime, Tensor w_prime,"
         " Tensor sdf_u, Tensor sdf_v, Tensor sdf_w,"
         " Tensor body_u, Tensor body_v, Tensor body_w,"
@@ -94,7 +94,7 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " Tensor(d!) ch, Tensor(e!) cv, Tensor(f!) cw,"
         " Tensor key_u, Tensor key_v, Tensor key_w,"
         " Tensor sigma_shifts,"
-        " float eps, float rho_body, float rho_f, float dt,"
+        " float eps, float rho_f, float dt,"
         " float h_grid,"
         " int dirty_i0, int dirty_j0, int dirty_k0,"
         " int dirty_Ai, int dirty_Aj, int dirty_Ak,"
@@ -130,7 +130,7 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
     // key_cc_t / key_u_t / key_v_t are caller-allocated int64 scratch buffers
     // of size >= Ngx*Ngy used to pack/unpack per-cell winning-body keys.
     // Mirrors the 3-D version; required by BDIM-σ so the keys can be read
-    // by Kernel B (bdim_vardens_sigma_2d) after Kernel A populates them.
+    // by Kernel B (bdim_coeff_sigma_2d) after Kernel A populates them.
     m.def(
         "streaming_sdf_stag_2d_multi("
         "Tensor F_flat, Tensor F_offsets,"
@@ -150,23 +150,23 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
 
     // Phase-I fused BDIM2 + variable-density Poisson coefficient kernel (2-D).
     m.def(
-        "bdim_vardens_2d("
+        "bdim_coeff_2d("
         "Tensor u_prime, Tensor v_prime,"
         " Tensor sdf_u, Tensor sdf_v,"
         " Tensor body_u, Tensor body_v,"
         " Tensor(a!) u0, Tensor(b!) v0,"
         " Tensor(c!) ch, Tensor(d!) cv,"
-        " float eps, float rho_body, float rho_f, float dt,"
+        " float eps, float rho_f, float dt,"
         " float h_grid,"
         " int dirty_i0, int dirty_j0,"
         " int dirty_Ai, int dirty_Aj,"
         " int mu0_projection"
         ") -> ()");
 
-    // BDIM-σ variant of bdim_vardens_2d (Lauber et al. 2022).  See the
+    // BDIM-σ variant of bdim_coeff_2d (Lauber et al. 2022).  See the
     // 3-D variant above for documentation.
     m.def(
-        "bdim_vardens_sigma_2d("
+        "bdim_coeff_sigma_2d("
         "Tensor u_prime, Tensor v_prime,"
         " Tensor sdf_u, Tensor sdf_v,"
         " Tensor body_u, Tensor body_v,"
@@ -174,7 +174,7 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " Tensor(c!) ch, Tensor(d!) cv,"
         " Tensor key_u, Tensor key_v,"
         " Tensor sigma_shifts,"
-        " float eps, float rho_body, float rho_f, float dt,"
+        " float eps, float rho_f, float dt,"
         " float h_grid,"
         " int dirty_i0, int dirty_j0,"
         " int dirty_Ai, int dirty_Aj,"
@@ -340,7 +340,7 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
     // F must be contiguous and row-major: F[ix, iy] or F[ix, iy, iz].
     // G is pre-allocated by the caller, same dtype and device as F.
     m.def(
-        "interpolate_2d("
+        "interp_2d("
         "Tensor F, Tensor xq, Tensor yq,"
         " float bx0, float by0,"
         " float inv_dx, float inv_dy,"
@@ -349,7 +349,7 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " Tensor(a!) G"
         ") -> ()");
     m.def(
-        "interpolate_3d("
+        "interp_3d("
         "Tensor F, Tensor xq, Tensor yq, Tensor zq,"
         " float bx0, float by0, float bz0,"
         " float inv_dx, float inv_dy, float inv_dz,"

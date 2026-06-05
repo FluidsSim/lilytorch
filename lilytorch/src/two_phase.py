@@ -47,8 +47,13 @@ class TwoPhase:
     z : 1-D tensor or None -- enables 3-D when given.
     rho_water, rho_air : float -- phase densities (default 1000 / 1).
     nu_water, nu_air : float -- phase kinematic viscosities.
-    face_density : ``"arithmetic"`` | ``"harmonic"`` -- face-density average
-        used to build the projection coefficients.
+
+    The face material coefficient is the **harmonic** density mean (Weymouth &
+    Yue 2011, Eq. 33) — the standard, well-conditioned choice for the
+    variable-density pressure Poisson. It is carried as the reciprocal density
+    ``1/rho`` (:meth:`recip_density_cc` / :meth:`recip_density_face`), because
+    the harmonic density mean is the *arithmetic* mean of ``1/rho`` and the
+    projection coefficient ``dt*mu0/rho`` only ever needs the reciprocal.
 
     Note: the interface scheme is the hardwired Weymouth & Yue conservative
     VOF (:meth:`advect`); there is no scheme/compression choice to make.
@@ -58,7 +63,6 @@ class TwoPhase:
                  z=None,
                  rho_water=1000.0, rho_air=1.0,
                  nu_water=1.0e-6, nu_air=1.5e-5,
-                 face_density="harmonic",
                  device=None, dtype=None):
         self.device = device if device is not None else x.device
         self.dtype  = dtype  if dtype  is not None else x.dtype
@@ -68,9 +72,6 @@ class TwoPhase:
         self.rho_air   = float(rho_air)
         self.nu_water  = float(nu_water)
         self.nu_air    = float(nu_air)
-        if face_density not in ("arithmetic", "harmonic"):
-            raise ValueError("face_density must be 'arithmetic' or 'harmonic'")
-        self.face_density = face_density
 
         if self.ndim == 2:
             X, Y = torch.meshgrid(x, y, indexing="ij")
@@ -100,32 +101,39 @@ class TwoPhase:
     # ------------------------------------------------------------------
     # Variable material fields
     # ------------------------------------------------------------------
-    def density_cc(self):
-        """Cell-centred fluid density ``alpha*rho_water + (1-alpha)*rho_air``."""
-        return self.alpha * self.rho_water + (1.0 - self.alpha) * self.rho_air
+    def recip_density_cc(self):
+        """Cell-centred **reciprocal** fluid density ``1 / rho_cc`` with
+        ``rho_cc = alpha*rho_water + (1-alpha)*rho_air``.
+
+        The variable-density projection only ever needs ``1/rho`` (the Poisson
+        coefficient is ``dt*mu0/rho`` and the harmonic face density mean is the
+        arithmetic mean of ``1/rho``). Carrying the reciprocal directly avoids
+        materialising the dimensional ``rho`` field and a separate harmonic
+        blend.
+        """
+        return 1.0 / (self.alpha * self.rho_water
+                      + (1.0 - self.alpha) * self.rho_air)
 
     def viscosity_cc(self):
         """Cell-centred kinematic viscosity (volume-weighted)."""
         return self.alpha * self.nu_water + (1.0 - self.alpha) * self.nu_air
 
-    def density_face(self, d):
-        """Fluid density on the staggered *d*-face grid (full-grid tensor).
+    def recip_density_face(self, d):
+        """Reciprocal fluid density ``1/rho`` on the staggered *d*-face grid
+        (full-grid tensor).
 
-        With the MAC convention used by the projection coefficients, the
-        *d*-face at index ``i`` lies between cells ``i-1`` and ``i``; the
-        boundary face (``i=0``) copies the adjacent cell. Arithmetic or
-        harmonic average per ``face_density``.
+        MAC convention: the *d*-face at index ``i`` lies between cells ``i-1``
+        and ``i``; the face reciprocal is the arithmetic mean
+        ``0.5*(1/rho_{i-1} + 1/rho_i)``. This is exactly the reciprocal of the
+        **harmonic** face density (Weymouth & Yue 2011, Eq. 33). The boundary
+        face (``i=0``) copies the adjacent cell.
         """
-        rho = self.density_cc()
+        q   = self.recip_density_cc()
         nd  = self.ndim
-        lo  = rho[_sl(nd, d, slice(None, -1))]   # cells i-1
-        hi  = rho[_sl(nd, d, slice(1, None))]    # cells i
-        if self.face_density == "harmonic":
-            face_in = 2.0 * lo * hi / (lo + hi)
-        else:
-            face_in = 0.5 * (lo + hi)
-        out = rho.clone()
-        out[_sl(nd, d, slice(1, None))] = face_in
+        lo  = q[_sl(nd, d, slice(None, -1))]   # cells i-1
+        hi  = q[_sl(nd, d, slice(1, None))]    # cells i
+        out = q.clone()
+        out[_sl(nd, d, slice(1, None))] = 0.5 * (lo + hi)
         return out
 
     def water_volume(self):

@@ -9,22 +9,31 @@ reaction — none of the single-fluid ghost-fluid / wetted-body machinery is use
 
 **Decoupling.** Nothing in :class:`FluidSolver` is modified. Subclassing only
 *overrides* methods on this class, so every existing example (single-phase,
-FARMS coupling) runs through the untouched base solver byte-for-byte. Only three
-methods are overridden:
+FARMS coupling) runs through the untouched base solver byte-for-byte. The
+overrides are:
 
 * ``__init__`` — build the :class:`~lilytorch.src.two_phase.TwoPhase` field.
-* ``_compute_variable_density_coefficients`` — projection coefficients
-  ``c = dt·μ0/ρ_fluid`` from the VOF water/air density (Weymouth & Yue 2011,
-  ``(1−δ^B)/ρ``; the body enters via ``μ0`` only, never its density).
+* ``_compute_bdim_coefficients`` — projection coefficients
+  ``c = dt·μ0·(1/ρ)_fluid`` from the VOF water/air density (Weymouth & Yue 2011,
+  ``(1−δ^B)/ρ``; the body enters via ``μ0`` only, never its density). Used by
+  the **Python** solver path.
+* ``project`` — the **kernel** path's fused CUDA Kernel B knows nothing of the
+  VOF field and writes a single-density ``dt·μ0/ρ_water`` coefficient; this
+  override rescales it by ``ρ_water·(1/ρ)_face`` to recover the identical
+  variable-density coefficient (reusing the kernel's ``μ0``). No CUDA/solver
+  edits; both paths solve the same Poisson.
 * ``finalize_step`` — transport the VOF field once per step.
+* ``forces_method2`` / ``forces_method2_3d`` — stack per-body SDFs so the
+  emergent (real-pressure) eulerian force loop sees them.
 
 Everything else is inherited and reused unchanged:
 
 * **gravity** — the base ``_apply_gravity_body_force`` adds ``dt·g`` to *all*
   cells (real air has mass), which is exactly what two-phase needs;
-* **projection** — the base ``project`` runs the variable-coefficient MGCG path
-  ``∇·(c∇p)=div`` → ``u -= c∇p`` (closed-box all-Neumann, ``dirichlet_mask =
-  None``); we just feed it the density-based ``c``;
+* **projection core** — the base ``project`` runs the variable-coefficient MGCG
+  path ``∇·(c∇p)=div`` → ``u -= c∇p`` (closed-box all-Neumann, ``dirichlet_mask
+  = None``); we just feed it the density-based ``c`` (directly on the Python
+  path, via the rescale on the kernel path);
 * advection–diffusion, BDIM, the Poisson solver, force integration.
 
 The hydrostatic interface jump and the buoyancy on the body therefore emerge
@@ -54,6 +63,19 @@ class TwoPhaseSolver(FluidSolver):
             raise ValueError(
                 "two_phase requires poisson_method 'multigrid' or 'mgcg' "
                 "(the FFT solver cannot do a variable-density Poisson)."
+            )
+        # Kernel-mode two-phase reuses the kernel's per-face coefficient
+        # ``dt*mu0/rho_water`` and rescales it by the VOF reciprocal-density
+        # blend (see :meth:`project`). That identity needs the kernel to keep
+        # ``mu0`` in the coefficient numerator, i.e. ``bdim_mu0_projection``
+        # must be True (the default). With it off the kernel writes a bare
+        # ``dt/rho_water`` and the rescale would silently drop the body's
+        # mu0 masking from the variable-density Poisson.
+        if self._use_kernels and not self.bdim_mu0_projection:
+            raise ValueError(
+                "two_phase kernel mode requires bdim_mu0_projection=True so the "
+                "kernel coefficient retains mu0 for the reciprocal-density "
+                "rescale; got bdim_mu0_projection=False."
             )
         self._init_two_phase(tp_cfg)
         # Saved 3-D PyVista frames (plotting_and_saving -> plot_field_3d) render
@@ -85,14 +107,25 @@ class TwoPhaseSolver(FluidSolver):
                 "solver.two_phase.alpha_init must be a callable or a "
                 "lambda-string evaluating to one."
             )
+        # The face material coefficient is the harmonic density mean only
+        # (carried as the reciprocal density; see TwoPhase). The legacy
+        # ``face_density`` key is accepted for backward-compat but only
+        # "harmonic" is supported — reject "arithmetic" loudly rather than
+        # silently ignoring it.
+        _fd = cfg.get("face_density", "harmonic")
+        if _fd != "harmonic":
+            raise ValueError(
+                f"solver.two_phase.face_density={_fd!r} is no longer supported; "
+                "the variable-density projection uses the harmonic density mean "
+                "(remove the key or set it to 'harmonic')."
+            )
         kwargs = dict(
-            rho_water    = float(cfg.get("rho_water", 1000.0)),
-            rho_air      = float(cfg.get("rho_air", 1.0)),
-            nu_water     = float(cfg.get("nu_water", 1.0e-6)),
-            nu_air       = float(cfg.get("nu_air", 1.5e-5)),
-            face_density = cfg.get("face_density", "harmonic"),
-            device       = self.device,
-            dtype        = self.dtype,
+            rho_water = float(cfg.get("rho_water", 1000.0)),
+            rho_air   = float(cfg.get("rho_air", 1.0)),
+            nu_water  = float(cfg.get("nu_water", 1.0e-6)),
+            nu_air    = float(cfg.get("nu_air", 1.5e-5)),
+            device    = self.device,
+            dtype     = self.dtype,
         )
         if self.ndim == 2:
             self.two_phase = TwoPhase(self.x, self.y, self.h, alpha_init, **kwargs)
@@ -102,7 +135,7 @@ class TwoPhaseSolver(FluidSolver):
         print(
             f"Two-phase enabled: rho {kwargs['rho_water']}/{kwargs['rho_air']} "
             f"(ratio {kwargs['rho_water']/kwargs['rho_air']:.0f}:1), "
-            f"face_density={kwargs['face_density']}, conservative Weymouth-Yue VOF."
+            f"harmonic face density, conservative Weymouth-Yue VOF."
         )
 
     # NOTE: gravity uses the inherited uniform ``dt*g`` body force (the base
@@ -119,34 +152,95 @@ class TwoPhaseSolver(FluidSolver):
     # ------------------------------------------------------------------
     #  Override: density-based projection coefficients
     # ------------------------------------------------------------------
-    def _compute_variable_density_coefficients(self, timestep):
+    def _compute_bdim_coefficients(self, timestep):
         """BDIM2 two-phase projection coefficients ``c = dt·μ0 / ρ_fluid`` on
-        each staggered face (+ a cc entry).
+        each staggered face (Python path).
 
         This is the Weymouth & Yue (2011) form (Eqs 24a/26a): the Poisson
         coefficient is ``(1−δ^B)/ρ`` with ``(1−δ^B) = μ0`` the fluid fraction
-        and ``ρ`` the **fluid** density — here the water/air VOF blend
-        (``density_face``, their Eq 33). The body enters ONLY through ``μ0``
-        (the geometry), NOT through its density: ``μ0`` makes the velocity
-        correction vanish inside the body (``μ0=0`` ⇒ ``c=0``), preserving the
-        BDIM-imposed body velocity. The body's density/inertia is the
-        rigid-body coupling's concern (MuJoCo / external Archimedes), not a
-        fluid property — so ``rho_body`` does not appear here.
+        and ``ρ`` the **fluid** density — here the water/air VOF blend. We carry
+        the reciprocal directly, ``c = dt·μ0·(1/ρ)_face`` with ``(1/ρ)_face`` the
+        harmonic face density's reciprocal (``recip_density_face``, their Eq 33),
+        avoiding the dimensional density field and a separate harmonic blend.
+        The body enters ONLY through ``μ0`` (the geometry), NOT through its
+        density: ``μ0`` makes the velocity correction vanish inside the body
+        (``μ0=0`` ⇒ ``c=0``), preserving the BDIM-imposed body velocity. The
+        body's density/inertia is the rigid-body coupling's concern (MuJoCo /
+        external Archimedes), not a fluid property — so ``rho_body`` does not
+        appear here.
 
-        ``ch_cc`` is the FFT RHS divisor; it omits ``μ0`` to stay bounded and
-        is unused on the MGCG path two-phase requires (kept only for the
-        ``(ch, cv[, cw], ch_cc)`` tuple shape ``fluid_step`` expects).
+        The trailing ``ch_cc`` entry is the FFT RHS divisor, which two-phase
+        never uses (the FFT path is forbidden; the MGCG path ignores it). It is
+        returned as ``None`` to skip an unused full-grid allocation, keeping the
+        ``(ch, cv[, cw], ch_cc)`` tuple shape ``fluid_step`` expects.
         """
         tp  = self.two_phase
         dt  = float(timestep)
         out = []
         for d, ax in enumerate(self._bdim_axis_names):       # 'u','v'[,'w']
-            rho_fluid_face = tp.density_face(d)              # water/air VOF blend
+            recip_face = tp.recip_density_face(d)            # (1/ρ) water/air blend
             mu0 = getattr(self, f'mu0_all_{ax}')             # (1−δ^B), fluid fraction
-            out.append(dt * mu0 / rho_fluid_face)
-        # cell-centred entry (FFT RHS divisor; no μ0 to stay bounded)
-        out.append(dt / tp.density_cc())
+            out.append(dt * mu0 * recip_face)
+        out.append(None)                                     # ch_cc: unused (no FFT)
         return tuple(out)
+
+    # ------------------------------------------------------------------
+    #  Override: variable density in the KERNEL-mode projection
+    # ------------------------------------------------------------------
+    def project(self, *args, ch=None, cv=None, cw=None, ch_cc=None, **kwargs):
+        """Inject the VOF variable density into the kernel-mode projection.
+
+        The fused CUDA Kernel B has no notion of the two-phase field: it writes
+        a single-density coefficient ``c_kernel = dt·μ0/ρ_water`` per face (and
+        the outside-AABB prefill is the same constant). The two-phase target is
+        ``c = dt·μ0/ρ_face``, which differs by the pure multiplicative field
+        ``ρ_water·(1/ρ)_face``. Rescaling the kernel coefficient by that factor
+        reproduces ``_compute_bdim_coefficients`` exactly (μ0 is
+        reused straight from ``c_kernel`` — no μ0/SDF/normal recompute), so both
+        paths solve the identical variable-density Poisson.
+
+        The Python path passes coefficients that are already two-phase-correct,
+        so the rescale is gated on ``_use_kernels``. FFT is forbidden for
+        two-phase, so the ``poisson_method != "fft"`` guard is belt-and-braces.
+        The rescale is out-of-place: the persistent ``_ch_persist`` buffers must
+        stay in their water-normalised form for the next step's prefill /
+        Kernel-B overwrite (an in-place rescale would compound on the static
+        region every step).
+        """
+        if (self._use_kernels and isinstance(ch, torch.Tensor)
+                and self.poisson_method != "fft"):
+            ch, cv, cw = self._rescale_kernel_coeffs_two_phase(ch, cv, cw)
+        return super().project(*args, ch=ch, cv=cv, cw=cw, ch_cc=ch_cc, **kwargs)
+
+    def _rescale_kernel_coeffs_two_phase(self, ch, cv, cw):
+        """Return fresh ``dt·μ0/ρ_face`` coefficients from the kernel's
+        water-normalised ``dt·μ0/ρ_water`` ones, multiplying by the face
+        reciprocal-density factor ``ρ_water·(1/ρ)_face``.
+
+        ``(1/ρ)_face`` is the arithmetic mean of the cell-centred reciprocal
+        density (= reciprocal of the harmonic face density). It is computed
+        inline from the single full-grid ``recip_density_cc`` field and cropped
+        to each staggered face-grid shape (3-D) or used full-grid (2-D, where
+        ``_ch_persist`` is padded), avoiding the full-grid clone in
+        ``recip_density_face``.
+        """
+        tp = self.two_phase
+        rw = tp.rho_water
+        if self.ndim == 3:
+            # Crop the cell-centred 1/ρ field to each face-grid shape and
+            # average the two adjacent cells inline (avoids the full-grid clone
+            # in recip_density_face; the 3-D grids are the memory-sensitive case).
+            q   = tp.recip_density_cc()                  # one full-grid 1/ρ field
+            ru  = rw * 0.5 * (q[1:,   1:-1, 1:-1] + q[:-1,  1:-1, 1:-1])
+            rv  = rw * 0.5 * (q[1:-1, 1:,   1:-1] + q[1:-1, :-1,  1:-1])
+            rw_ = rw * 0.5 * (q[1:-1, 1:-1, 1:  ] + q[1:-1, 1:-1, :-1 ])
+            return ch * ru, cv * rv, cw * rw_
+        # 2-D kernel coefficients are stored on the full (padded) grid, so the
+        # full-grid recip_density_face (boundary face = adjacent cell) aligns
+        # directly with the elementwise multiply.
+        return (ch * (rw * tp.recip_density_face(0)),
+                cv * (rw * tp.recip_density_face(1)),
+                cw)
 
     # ------------------------------------------------------------------
     #  Override: EMERGENT body force (viscous + real-pressure integral)

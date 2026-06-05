@@ -2,7 +2,7 @@
 //  streaming_sdf_cpu_2d.cpp
 //
 //  CPU implementations of the 2-D ``streaming_sdf_stag_2d_multi`` and
-//  ``bdim_vardens_2d`` ops.  Mirrors
+//  ``bdim_coeff_2d`` ops.  Mirrors
 //  ``streaming_sdf_cpu.cpp`` line-for-line with the z-axis stripped:
 //    * 3 face samples per cell (cc, u-stagger -h/2 in x, v-stagger -h/2 in y);
 //    * rotation R_T is a 2x2 column-major matrix (4 floats);
@@ -339,9 +339,9 @@ void apply_bcs_2d_cpu(
 }
 
 // =====================================================================
-//  interpolate_2d_cpu: scattered-point bilinear / biquadratic sampling
+//  interp_2d_cpu: scattered-point bilinear / biquadratic sampling
 // =====================================================================
-static void interpolate_2d_cpu(
+static void interp_2d_cpu(
     const at::Tensor& F,
     const at::Tensor& xq, const at::Tensor& yq,
     const double bx0, const double by0,
@@ -362,7 +362,7 @@ static void interpolate_2d_cpu(
     auto xq_c = xq.contiguous().to(F.scalar_type());
     auto yq_c = yq.contiguous().to(F.scalar_type());
 
-    AT_DISPATCH_FLOATING_TYPES(F.scalar_type(), "interpolate_2d_cpu", [&] {
+    AT_DISPATCH_FLOATING_TYPES(F.scalar_type(), "interp_2d_cpu", [&] {
         const scalar_t* Fp  = F_c.data_ptr<scalar_t>();
         const scalar_t* xqp = xq_c.data_ptr<scalar_t>();
         const scalar_t* yqp = yq_c.data_ptr<scalar_t>();
@@ -870,7 +870,6 @@ static inline void bdim_one_axis_2d_cpu(
     const scalar_t* sdf,
     const scalar_t* body,
     const scalar_t eps,
-    const scalar_t rho_body,
     const scalar_t rho_f,
     const scalar_t dt,
     const scalar_t inv_2h,
@@ -936,10 +935,10 @@ static inline void bdim_one_axis_2d_cpu(
 
     phi_out[g] = mu0 * diff_c + b_c + mu1 * nd;
     // mu0_proj == 0 → plain dt/rho_eff (non-degenerate, multibody-safe).
-    c_out[g]   = (mu0_proj ? dt * mu0 : dt) / (rho_body + (rho_f - rho_body) * mu0);
+    c_out[g]   = (mu0_proj ? dt * mu0 : dt) / rho_f;
 }
 
-void bdim_vardens_2d_cpu(
+void bdim_coeff_2d_cpu(
     const at::Tensor& u_prime,
     const at::Tensor& v_prime,
     const at::Tensor& sdf_u,
@@ -949,7 +948,6 @@ void bdim_vardens_2d_cpu(
     at::Tensor u0, at::Tensor v0,
     at::Tensor ch, at::Tensor cv,
     const double eps,
-    const double rho_body,
     const double rho_f,
     const double dt,
     const double h_grid,
@@ -966,10 +964,9 @@ void bdim_vardens_2d_cpu(
     const int mu0p = (int)mu0_projection;
     (void)dirty_Ai;
 
-    AT_DISPATCH_FLOATING_TYPES(u0.scalar_type(), "bdim_vardens_2d_cpu", [&] {
+    AT_DISPATCH_FLOATING_TYPES(u0.scalar_type(), "bdim_coeff_2d_cpu", [&] {
         const scalar_t inv_2h   = (scalar_t)(0.5 / h_grid);
         const scalar_t eps_t    = (scalar_t)eps;
-        const scalar_t rho_b_t  = (scalar_t)rho_body;
         const scalar_t rho_f_t  = (scalar_t)rho_f;
         const scalar_t dt_t     = (scalar_t)dt;
         const scalar_t* upp = u_prime.data_ptr<scalar_t>();
@@ -990,17 +987,17 @@ void bdim_vardens_2d_cpu(
                 const int i = di0 + di;
                 const int j = dj0 + dj;
                 bdim_one_axis_2d_cpu<scalar_t>(
-                    upp, su, bu, eps_t, rho_b_t, rho_f_t, dt_t, inv_2h,
+                    upp, su, bu, eps_t, rho_f_t, dt_t, inv_2h,
                     Ngx, Ngy, i, j, u0p, chp, mu0p);
                 bdim_one_axis_2d_cpu<scalar_t>(
-                    vpp, sv, bv, eps_t, rho_b_t, rho_f_t, dt_t, inv_2h,
+                    vpp, sv, bv, eps_t, rho_f_t, dt_t, inv_2h,
                     Ngx, Ngy, i, j, v0p, cvp, mu0p);
             }
         });
     });
 }
 
-// BDIM-σ variant of bdim_one_axis_2d_cpu / bdim_vardens_2d_cpu.
+// BDIM-σ variant of bdim_one_axis_2d_cpu / bdim_coeff_2d_cpu.
 // See the CUDA variant for documentation; CPU keys are full-grid sized
 // and indexed by g.
 template <typename scalar_t>
@@ -1009,7 +1006,6 @@ static inline void bdim_one_axis_sigma_2d_cpu(
     const scalar_t* sdf,
     const scalar_t* body,
     const scalar_t eps,
-    const scalar_t rho_body,
     const scalar_t rho_f,
     const scalar_t dt,
     const scalar_t inv_2h,
@@ -1093,10 +1089,10 @@ static inline void bdim_one_axis_sigma_2d_cpu(
     phi_out[g] = mu0 * diff_c + b_c + mu1 * nd;
     // mu0_proj == 0 → drop the mu0 numerator (plain dt/rho_eff).
     c_out[g]   = (mu0_proj ? dt * mu0_poisson : dt)
-               / (rho_body + (rho_f - rho_body) * mu0_poisson);
+               / rho_f;
 }
 
-void bdim_vardens_sigma_2d_cpu(
+void bdim_coeff_sigma_2d_cpu(
     const at::Tensor& u_prime,
     const at::Tensor& v_prime,
     const at::Tensor& sdf_u,
@@ -1109,7 +1105,6 @@ void bdim_vardens_sigma_2d_cpu(
     const at::Tensor& key_v,
     const at::Tensor& sigma_shifts,
     const double eps,
-    const double rho_body,
     const double rho_f,
     const double dt,
     const double h_grid,
@@ -1130,10 +1125,9 @@ void bdim_vardens_sigma_2d_cpu(
     const int64_t* key_v_p = key_v.data_ptr<int64_t>();
     const float*   sshifts = sigma_shifts.data_ptr<float>();
 
-    AT_DISPATCH_FLOATING_TYPES(u0.scalar_type(), "bdim_vardens_sigma_2d_cpu", [&] {
+    AT_DISPATCH_FLOATING_TYPES(u0.scalar_type(), "bdim_coeff_sigma_2d_cpu", [&] {
         const scalar_t inv_2h   = (scalar_t)(0.5 / h_grid);
         const scalar_t eps_t    = (scalar_t)eps;
-        const scalar_t rho_b_t  = (scalar_t)rho_body;
         const scalar_t rho_f_t  = (scalar_t)rho_f;
         const scalar_t dt_t     = (scalar_t)dt;
         const scalar_t* upp = u_prime.data_ptr<scalar_t>();
@@ -1154,11 +1148,11 @@ void bdim_vardens_sigma_2d_cpu(
                 const int i = di0 + di;
                 const int j = dj0 + dj;
                 bdim_one_axis_sigma_2d_cpu<scalar_t>(
-                    upp, su, bu, eps_t, rho_b_t, rho_f_t, dt_t, inv_2h,
+                    upp, su, bu, eps_t, rho_f_t, dt_t, inv_2h,
                     Ngx, Ngy, i, j, u0p, chp,
                     key_u_p, sshifts, n_sigma, mu0p);
                 bdim_one_axis_sigma_2d_cpu<scalar_t>(
-                    vpp, sv, bv, eps_t, rho_b_t, rho_f_t, dt_t, inv_2h,
+                    vpp, sv, bv, eps_t, rho_f_t, dt_t, inv_2h,
                     Ngx, Ngy, i, j, v0p, cvp,
                     key_v_p, sshifts, n_sigma, mu0p);
             }
@@ -1168,11 +1162,11 @@ void bdim_vardens_sigma_2d_cpu(
 
 TORCH_LIBRARY_IMPL(lilytorch_kernels, CPU, m) {
     m.impl("streaming_sdf_stag_2d_multi",           &streaming_sdf_stag_2d_multi_cpu);
-    m.impl("bdim_vardens_2d",                       &bdim_vardens_2d_cpu);
-    m.impl("bdim_vardens_sigma_2d",                 &bdim_vardens_sigma_2d_cpu);
+    m.impl("bdim_coeff_2d",                       &bdim_coeff_2d_cpu);
+    m.impl("bdim_coeff_sigma_2d",                 &bdim_coeff_sigma_2d_cpu);
     m.impl("streaming_sdf_forces_post_2d",          &streaming_sdf_forces_post_2d_cpu);
     m.impl("apply_bcs_2d",                          &apply_bcs_2d_cpu);
-    m.impl("interpolate_2d",                        &interpolate_2d_cpu);
+    m.impl("interp_2d",                        &interp_2d_cpu);
 }
 
 }  // namespace lilytorch_kernels

@@ -477,9 +477,9 @@ void apply_bcs_3d_cpu(
 }
 
 // =====================================================================
-//  interpolate_3d_cpu: scattered-point trilinear / triquadratic sampling
+//  interp_3d_cpu: scattered-point trilinear / triquadratic sampling
 // =====================================================================
-static void interpolate_3d_cpu(
+static void interp_3d_cpu(
     const at::Tensor& F,
     const at::Tensor& xq, const at::Tensor& yq, const at::Tensor& zq,
     const double bx0, const double by0, const double bz0,
@@ -501,7 +501,7 @@ static void interpolate_3d_cpu(
     auto yq_c = yq.contiguous().to(F.scalar_type());
     auto zq_c = zq.contiguous().to(F.scalar_type());
 
-    AT_DISPATCH_FLOATING_TYPES(F.scalar_type(), "interpolate_3d_cpu", [&] {
+    AT_DISPATCH_FLOATING_TYPES(F.scalar_type(), "interp_3d_cpu", [&] {
         const scalar_t* Fp  = F_c.data_ptr<scalar_t>();
         const scalar_t* xqp = xq_c.data_ptr<scalar_t>();
         const scalar_t* yqp = yq_c.data_ptr<scalar_t>();
@@ -541,7 +541,7 @@ static void interpolate_3d_cpu(
 //      channels into ``out`` (atomically combined across at::parallel_for
 //      workers via a final per-body merge).
 //    * Updates the union fields (sdf_cc / sdf_u / sdf_v / sdf_w / bU /
-//      bV / bW) and ``winning_rho_cc`` in place.
+//      bV / bW) in place.
 //
 //  Forces are one-step lagged: viscous stress and pressure force are
 //  computed from the beginning-of-step velocity / pressure fields
@@ -853,7 +853,6 @@ static inline void bdim_one_axis_3d_cpu(
     const scalar_t* sdf,
     const scalar_t* body,
     const scalar_t eps,
-    const scalar_t rho_body,
     const scalar_t rho_f,
     const scalar_t dt,
     const scalar_t inv_2h,
@@ -929,10 +928,10 @@ static inline void bdim_one_axis_3d_cpu(
 
     phi_out[g] = mu0 * diff_c + b_c + mu1 * nd;
     // mu0_proj == 0 → plain dt/rho_eff (non-degenerate, multibody-safe).
-    c_out[g]   = (mu0_proj ? dt * mu0 : dt) / (rho_body + (rho_f - rho_body) * mu0);
+    c_out[g]   = (mu0_proj ? dt * mu0 : dt) / rho_f;
 }
 
-void bdim_vardens_3d_cpu(
+void bdim_coeff_3d_cpu(
     const at::Tensor& u_prime,
     const at::Tensor& v_prime,
     const at::Tensor& w_prime,
@@ -945,7 +944,6 @@ void bdim_vardens_3d_cpu(
     at::Tensor u0, at::Tensor v0, at::Tensor w0,
     at::Tensor ch, at::Tensor cv, at::Tensor cw,
     const double eps,
-    const double rho_body,
     const double rho_f,
     const double dt,
     const double h_grid,
@@ -963,10 +961,9 @@ void bdim_vardens_3d_cpu(
     const int mu0p = (int)mu0_projection;
     (void)dirty_Ai;
 
-    AT_DISPATCH_FLOATING_TYPES(u0.scalar_type(), "bdim_vardens_3d_cpu", [&] {
+    AT_DISPATCH_FLOATING_TYPES(u0.scalar_type(), "bdim_coeff_3d_cpu", [&] {
         const scalar_t inv_2h    = (scalar_t)(0.5 / h_grid);
         const scalar_t eps_t     = (scalar_t)eps;
-        const scalar_t rho_b_t   = (scalar_t)rho_body;
         const scalar_t rho_f_t   = (scalar_t)rho_f;
         const scalar_t dt_t      = (scalar_t)dt;
         const scalar_t* upp = u_prime.data_ptr<scalar_t>();
@@ -995,20 +992,20 @@ void bdim_vardens_3d_cpu(
                 const int j = dj0 + dj;
                 const int k = dk0 + dk;
                 bdim_one_axis_3d_cpu<scalar_t>(
-                    upp, su, bu, eps_t, rho_b_t, rho_f_t, dt_t, inv_2h,
+                    upp, su, bu, eps_t, rho_f_t, dt_t, inv_2h,
                     Ngx, Ngy, Ngz, i, j, k, u0p, chp, mu0p);
                 bdim_one_axis_3d_cpu<scalar_t>(
-                    vpp, sv, bv, eps_t, rho_b_t, rho_f_t, dt_t, inv_2h,
+                    vpp, sv, bv, eps_t, rho_f_t, dt_t, inv_2h,
                     Ngx, Ngy, Ngz, i, j, k, v0p, cvp, mu0p);
                 bdim_one_axis_3d_cpu<scalar_t>(
-                    wpp, sw, bw, eps_t, rho_b_t, rho_f_t, dt_t, inv_2h,
+                    wpp, sw, bw, eps_t, rho_f_t, dt_t, inv_2h,
                     Ngx, Ngy, Ngz, i, j, k, w0p, cwp, mu0p);
             }
         });
     });
 }
 
-// BDIM-σ variant of bdim_one_axis_3d_cpu / bdim_vardens_3d_cpu.
+// BDIM-σ variant of bdim_one_axis_3d_cpu / bdim_coeff_3d_cpu.
 // See the CUDA σ variant for documentation; CPU 3D keys are AABB-local
 // (size = dirty_vol) — same as CUDA — and indexed by the dirty-local flat.
 template <typename scalar_t>
@@ -1017,7 +1014,6 @@ static inline void bdim_one_axis_sigma_3d_cpu(
     const scalar_t* sdf,
     const scalar_t* body,
     const scalar_t eps,
-    const scalar_t rho_body,
     const scalar_t rho_f,
     const scalar_t dt,
     const scalar_t inv_2h,
@@ -1119,10 +1115,10 @@ static inline void bdim_one_axis_sigma_3d_cpu(
     phi_out[g] = mu0 * diff_c + b_c + mu1 * nd;
     // mu0_proj == 0 → drop the mu0 numerator (plain dt/rho_eff).
     c_out[g]   = (mu0_proj ? dt * mu0_poisson : dt)
-               / (rho_body + (rho_f - rho_body) * mu0_poisson);
+               / rho_f;
 }
 
-void bdim_vardens_sigma_3d_cpu(
+void bdim_coeff_sigma_3d_cpu(
     const at::Tensor& u_prime,
     const at::Tensor& v_prime,
     const at::Tensor& w_prime,
@@ -1139,7 +1135,6 @@ void bdim_vardens_sigma_3d_cpu(
     const at::Tensor& key_w,
     const at::Tensor& sigma_shifts,
     const double eps,
-    const double rho_body,
     const double rho_f,
     const double dt,
     const double h_grid,
@@ -1162,10 +1157,9 @@ void bdim_vardens_sigma_3d_cpu(
     const int64_t* key_w_p = key_w.data_ptr<int64_t>();
     const float*   sshifts = sigma_shifts.data_ptr<float>();
 
-    AT_DISPATCH_FLOATING_TYPES(u0.scalar_type(), "bdim_vardens_sigma_3d_cpu", [&] {
+    AT_DISPATCH_FLOATING_TYPES(u0.scalar_type(), "bdim_coeff_sigma_3d_cpu", [&] {
         const scalar_t inv_2h    = (scalar_t)(0.5 / h_grid);
         const scalar_t eps_t     = (scalar_t)eps;
-        const scalar_t rho_b_t   = (scalar_t)rho_body;
         const scalar_t rho_f_t   = (scalar_t)rho_f;
         const scalar_t dt_t      = (scalar_t)dt;
         const scalar_t* upp = u_prime.data_ptr<scalar_t>();
@@ -1194,15 +1188,15 @@ void bdim_vardens_sigma_3d_cpu(
                 const int j = dj0 + dj;
                 const int k = dk0 + dk;
                 bdim_one_axis_sigma_3d_cpu<scalar_t>(
-                    upp, su, bu, eps_t, rho_b_t, rho_f_t, dt_t, inv_2h,
+                    upp, su, bu, eps_t, rho_f_t, dt_t, inv_2h,
                     Ngx, Ngy, Ngz, i, j, k, u0p, chp,
                     key_u_p, sshifts, n_sigma, di0, dj0, dk0, dAj, dAk, mu0p);
                 bdim_one_axis_sigma_3d_cpu<scalar_t>(
-                    vpp, sv, bv, eps_t, rho_b_t, rho_f_t, dt_t, inv_2h,
+                    vpp, sv, bv, eps_t, rho_f_t, dt_t, inv_2h,
                     Ngx, Ngy, Ngz, i, j, k, v0p, cvp,
                     key_v_p, sshifts, n_sigma, di0, dj0, dk0, dAj, dAk, mu0p);
                 bdim_one_axis_sigma_3d_cpu<scalar_t>(
-                    wpp, sw, bw, eps_t, rho_b_t, rho_f_t, dt_t, inv_2h,
+                    wpp, sw, bw, eps_t, rho_f_t, dt_t, inv_2h,
                     Ngx, Ngy, Ngz, i, j, k, w0p, cwp,
                     key_w_p, sshifts, n_sigma, di0, dj0, dk0, dAj, dAk, mu0p);
             }
@@ -1212,11 +1206,11 @@ void bdim_vardens_sigma_3d_cpu(
 
 TORCH_LIBRARY_IMPL(lilytorch_kernels, CPU, m) {
     m.impl("streaming_sdf_stag_3d_multi",    &streaming_sdf_stag_3d_multi_cpu);
-    m.impl("bdim_vardens_3d",                &bdim_vardens_3d_cpu);
-    m.impl("bdim_vardens_sigma_3d",          &bdim_vardens_sigma_3d_cpu);
+    m.impl("bdim_coeff_3d",                &bdim_coeff_3d_cpu);
+    m.impl("bdim_coeff_sigma_3d",          &bdim_coeff_sigma_3d_cpu);
     m.impl("streaming_sdf_forces_post_3d",   &streaming_sdf_forces_post_3d_cpu);
     m.impl("apply_bcs_3d",                   &apply_bcs_3d_cpu);
-    m.impl("interpolate_3d",                 &interpolate_3d_cpu);
+    m.impl("interp_3d",                 &interp_3d_cpu);
 }
 
 }  // namespace lilytorch_kernels
