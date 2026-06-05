@@ -53,7 +53,7 @@ class SimConfig(BaseSimConfig):
         self.headless = False
 
         # ── Simulation flags ──────────────────────────────────────────
-        self.use_bdim = True
+        self.use_bdim = False
         self.animat_fluid_interaction = True
         # Keep fixed joints (blade attachments) filtered out so only the
         # revolute propeller joint gets a control motor.
@@ -119,7 +119,16 @@ class SimConfig(BaseSimConfig):
         self.poisson_bc_type         = "neumann"
         self.solver_method           = "kernel"
         self.time_integration        = "euler"
-        self.force_method            = "lagrangian"
+        # Eulerian band-integral forces (NOT lagrangian): the hull is a UNION of
+        # overlapping analytical primitives (cylinder hull + bow sphere + cabin +
+        # keel).  The lagrangian surface integral sums each primitive's full
+        # closed triangle mesh independently, so faces buried inside a neighbour
+        # primitive sample the non-physical BDIM interior pressure and corrupt the
+        # net buoyancy -> the boat sinks.  Lagrangian only works on a single
+        # watertight mesh (e.g. the sphere-drop obj).  The Eulerian method
+        # integrates the smoothed delta of the *union* SDF, so overlaps are
+        # handled correctly (gauge-invariant; validated 3D drop Cz=1.00).
+        self.force_method            = "eulerian"
         self.force_delta_order       = 1
         self.eps_multiplier          = 2
         self.zero_pressure_inside    = False

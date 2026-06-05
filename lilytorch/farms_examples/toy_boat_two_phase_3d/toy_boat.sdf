@@ -12,26 +12,39 @@
            below for roll stability.  A two-blade propeller on a revolute
            joint at the stern provides gentle forward thrust.
 
+           ONE COLLISION PER LINK.  The BDIM fluid coupling turns every
+           collision geometry into its own fluid sub-body and pushes the
+           hydrodynamic load onto that body's link via ``xfrc_applied``.
+           A link with several collisions would back several fluid bodies
+           that all share one ``xfrc`` row, so only the last one's force
+           would survive (the rest get overwritten) and the body's
+           buoyancy collapses.  Each rigid part is therefore its own
+           uniquely-named link, welded to the hull by a fixed joint; this
+           also applies each part's force at its true location (correct
+           moment arms) instead of lumping everything at one COM.
+
+           Masses are distributed by volume at a uniform ~293 kg/m^3 so the
+           total is ~0.12 kg (light — floats with the hull part-submerged).
+
            DIMENSIONS (SI):
              Overall length  ~0.12 m  (bow sphere to stern)
              Beam (width)    ~0.056 m (hull diameter)
              Draft           ~0.028 m (hull radius)
-             Mass            ~0.12 kg (light — floats with ~40% submergence)
+             Mass            ~0.12 kg (light)
            ================================================================= -->
 
+      <!-- Hull: cylinder along X (its own link) -->
       <link name="base_link">
         <pose>0 0 0 0 0 0</pose>
         <inertial>
           <pose>0 0 0 0 0 0</pose>
-          <mass>0.12</mass>
+          <mass>0.0866</mass>
           <inertia>
-            <ixx>5.0e-5</ixx>  <ixy>0</ixy>  <ixz>0</ixz>
-            <iyy>1.6e-4</iyy>  <iyz>0</iyz>
-            <izz>1.6e-4</izz>
+            <ixx>3.4e-5</ixx>  <ixy>0</ixy>  <ixz>0</ixz>
+            <iyy>1.21e-4</iyy> <iyz>0</iyz>
+            <izz>1.21e-4</izz>
           </inertia>
         </inertial>
-
-        <!-- Hull: cylinder along X -->
         <collision name="hull_collision">
           <pose>0 0 0 0 1.5707963267948966 0</pose>
           <geometry><cylinder><radius>0.028</radius><length>0.12</length></cylinder></geometry>
@@ -41,40 +54,87 @@
           <geometry><cylinder><radius>0.028</radius><length>0.12</length></cylinder></geometry>
           <material><ambient>0.9 0.15 0.1 1</ambient><diffuse>0.9 0.15 0.1 1</diffuse></material>
         </visual>
+      </link>
 
-        <!-- Bow cap: sphere for rounded nose -->
+      <!-- Bow cap: sphere for rounded nose (own link, welded to hull) -->
+      <link name="bow_link">
+        <pose>0.06 0 0 0 0 0</pose>
+        <inertial>
+          <pose>0 0 0 0 0 0</pose>
+          <mass>0.0269</mass>
+          <inertia>
+            <ixx>8.5e-6</ixx> <ixy>0</ixy> <ixz>0</ixz>
+            <iyy>8.5e-6</iyy> <iyz>0</iyz>
+            <izz>8.5e-6</izz>
+          </inertia>
+        </inertial>
         <collision name="bow_collision">
-          <pose>0.06 0 0 0 0 0</pose>
+          <pose>0 0 0 0 0 0</pose>
           <geometry><sphere><radius>0.028</radius></sphere></geometry>
         </collision>
         <visual name="bow_visual">
-          <pose>0.06 0 0 0 0 0</pose>
+          <pose>0 0 0 0 0 0</pose>
           <geometry><sphere><radius>0.028</radius></sphere></geometry>
           <material><ambient>0.9 0.15 0.1 1</ambient><diffuse>0.9 0.15 0.1 1</diffuse></material>
         </visual>
+      </link>
 
-        <!-- Deck cabin -->
+      <!-- Deck cabin (own link, welded to hull) -->
+      <link name="cabin_link">
+        <pose>0.0 0 0.024 0 0 0</pose>
+        <inertial>
+          <pose>0 0 0 0 0 0</pose>
+          <mass>0.00563</mass>
+          <inertia>
+            <ixx>4.6e-7</ixx> <ixy>0</ixy> <ixz>0</ixz>
+            <iyy>9.4e-7</iyy> <iyz>0</iyz>
+            <izz>1.0e-6</izz>
+          </inertia>
+        </inertial>
         <collision name="cabin_collision">
-          <pose>0.0 0 0.024 0 0 0</pose>
+          <pose>0 0 0 0 0 0</pose>
           <geometry><box><size>0.04 0.024 0.02</size></box></geometry>
         </collision>
         <visual name="cabin_visual">
-          <pose>0.0 0 0.024 0 0 0</pose>
+          <pose>0 0 0 0 0 0</pose>
           <geometry><box><size>0.04 0.024 0.02</size></box></geometry>
           <material><ambient>0.95 0.95 0.95 1</ambient><diffuse>0.95 0.95 0.95 1</diffuse></material>
         </visual>
+      </link>
 
-        <!-- Keel fin -->
+      <!-- Keel fin (own link, welded to hull) -->
+      <link name="keel_link">
+        <pose>0 0 -0.034 0 0 0</pose>
+        <inertial>
+          <pose>0 0 0 0 0 0</pose>
+          <mass>0.000844</mass>
+          <inertia>
+            <ixx>1.1e-8</ixx> <ixy>0</ixy> <ixz>0</ixz>
+            <iyy>2.6e-7</iyy> <iyz>0</iyz>
+            <izz>2.5e-7</izz>
+          </inertia>
+        </inertial>
         <collision name="keel_collision">
-          <pose>0 0 -0.034 0 0 0</pose>
+          <pose>0 0 0 0 0 0</pose>
           <geometry><box><size>0.06 0.004 0.012</size></box></geometry>
         </collision>
         <visual name="keel_visual">
-          <pose>0 0 -0.034 0 0 0</pose>
+          <pose>0 0 0 0 0 0</pose>
           <geometry><box><size>0.06 0.004 0.012</size></box></geometry>
           <material><ambient>0.6 0.6 0.6 1</ambient><diffuse>0.6 0.6 0.6 1</diffuse></material>
         </visual>
       </link>
+
+      <!-- Rigid welds attaching the appendages to the hull -->
+      <joint name="joint_bow" type="fixed">
+        <parent>base_link</parent><child>bow_link</child><pose>0 0 0 0 0 0</pose>
+      </joint>
+      <joint name="joint_cabin" type="fixed">
+        <parent>base_link</parent><child>cabin_link</child><pose>0 0 0 0 0 0</pose>
+      </joint>
+      <joint name="joint_keel" type="fixed">
+        <parent>base_link</parent><child>keel_link</child><pose>0 0 0 0 0 0</pose>
+      </joint>
 
       <!-- Propeller hub -->
       <link name="propeller_hub">
