@@ -685,13 +685,17 @@ __global__ void apply_bcs_2d_kernel(
 
     scalar_t* base = (comp == 0) ? u : v;
 
-    int64_t dst_lin, src_lin = 0;
+    // src_lin is read only by the Neumann (kind==0) and reflective (kind==2)
+    // branches; for Dirichlet (kind==1) src_along defaults to 0, so the value
+    // computed here is harmlessly discarded.  Computing it unconditionally
+    // drops the old dead ``src_lin = 0`` init and the per-axis branch.
+    int64_t dst_lin, src_lin;
     if (axis == 0) {
         dst_lin = (int64_t)dst_along * Ny + i;
-        if (kind != 1) src_lin = (int64_t)src_along * Ny + i;
+        src_lin = (int64_t)src_along * Ny + i;
     } else {
         dst_lin = (int64_t)i * Ny + dst_along;
-        if (kind != 1) src_lin = (int64_t)i * Ny + src_along;
+        src_lin = (int64_t)i * Ny + src_along;
     }
 
     if      (kind == 0) base[dst_lin] = base[src_lin];
@@ -709,6 +713,8 @@ void apply_bcs_2d_cuda(
     const at::Tensor& ref_val,
     const int64_t max_line_dim)
 {
+    TORCH_CHECK(u.is_cuda() && v.is_cuda(),
+                "apply_bcs_2d_cuda: u/v must be CUDA tensors");
     TORCH_CHECK(u.is_contiguous() && v.is_contiguous(),
                 "apply_bcs_2d_cuda: u/v must be contiguous");
     TORCH_CHECK(u.scalar_type() == v.scalar_type(),

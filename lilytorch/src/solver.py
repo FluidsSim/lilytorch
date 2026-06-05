@@ -4,7 +4,6 @@ import logging
 import os
 import threading
 import warnings
-import h5py
 import numpy as np
 import torch
 from tqdm import tqdm
@@ -19,6 +18,7 @@ from lilytorch.src.kernels import (
     bdim_coeff_sigma_2d,
 )
 from lilytorch.src.advection import AdvDiffSolver, SCHEMES as _ADV_SCHEMES
+from lilytorch.src.diagnostics import FlowDiagnostics
 from lilytorch.src.body import (body_from_yaml,
                                 _mu_normals_batched)
 from lilytorch.src import operations as ops
@@ -33,149 +33,6 @@ from lilytorch.src.forces import (
 from lilytorch.src import forces, extras
 
 logger = logging.getLogger(__name__)
-
-
-# ======================================================================
-# Flow diagnostics — energy, enstrophy, divergence, CFL monitoring
-# ======================================================================
-
-
-# unused for now
-class FlowDiagnostics:
-    """Lightweight monitor for kinetic energy, enstrophy, max-divergence,
-    and CFL number.  Records scalar time-series and optionally warns when
-    energy grows beyond a user-specified factor of its initial value.
-
-    Parameters
-    ----------
-    nt : int
-        Total number of time steps (for pre-allocation).
-    ndim : int
-        Spatial dimension (2 or 3).
-    h : float or Tensor
-        Uniform grid spacing.
-    device, dtype
-        Torch device / dtype for the record arrays.
-    check_every : int
-        Diagnostics are computed every *check_every* steps.  1 = every step.
-    energy_growth_factor : float
-        Issue a warning when E_k exceeds *energy_growth_factor* × E_k(0).
-        Set to ``None`` or ``inf`` to disable the energy blow-up check.
-    """
-
-    def __init__(self, nt, ndim, h, device, dtype,
-                 check_every=1, energy_growth_factor=10.0):
-        self.nt    = nt
-        self.ndim  = ndim
-        self.h     = float(h)
-        self.hd    = self.h ** ndim          # cell volume  h^d
-        self.device = device
-        self.dtype  = dtype
-
-        self.check_every = max(1, int(check_every))
-        self.energy_growth_factor = energy_growth_factor
-
-        # Pre-allocated record arrays (filled with NaN so uncomputed slots
-        # are visually obvious when plotted).
-        self.kinetic_energy = torch.full((nt,), float('nan'), device=device, dtype=dtype)
-        self.enstrophy      = torch.full((nt,), float('nan'), device=device, dtype=dtype)
-        self.max_divergence  = torch.full((nt,), float('nan'), device=device, dtype=dtype)
-        self.cfl_number      = torch.full((nt,), float('nan'), device=device, dtype=dtype)
-
-        self._ek0 = None   # E_k at the first computed step (baseline)
-
-    # ------------------------------------------------------------------
-    @torch.no_grad()
-    def update(self, iteration, u, v, p, dt, nu, divergence_fn, vorticity_fn,
-               w=None):
-        """Compute and record diagnostics for the current step.
-
-        Parameters
-        ----------
-        iteration : int
-            Current time-step index.
-        u, v : Tensor
-            Velocity components.  *w* is ``None`` in 2-D.
-        p : Tensor
-            Pressure (unused for now; kept for future pressure-energy).
-        dt : float or Tensor
-            Time step size (for CFL).
-        nu : float or Tensor
-            Kinematic viscosity (for CFL).
-        divergence_fn : callable(u, v, w=None) -> Tensor
-            Solver's divergence method.
-        vorticity_fn  : callable(u, v, w=None) -> Tensor
-            Solver's vorticity method (returns scalar in 2-D,
-            magnitude in 3-D).
-        w : Tensor or None
-            z-velocity component (3-D only).
-        """
-        if iteration % self.check_every != 0:
-            return
-
-        h  = self.h
-        hd = self.hd
-        dt_val = float(dt)
-        nu_val = float(nu)
-
-        # ---- kinetic energy  E_k = 0.5 * h^d * Σ(u² + v² [+ w²]) ----
-        ke = u.square() + v.square()
-        if w is not None:
-            ke = ke + w.square()
-        ek = 0.5 * hd * ke.sum()
-        self.kinetic_energy[iteration] = ek
-
-        # ---- enstrophy  Z = 0.5 * h^d * Σ ω² ----
-        omega = vorticity_fn(u, v, w)
-        enst = 0.5 * hd * omega.square().sum()
-        self.enstrophy[iteration] = enst
-
-        # ---- max |div(u)| ----
-        div = divergence_fn(u, v, w=w)
-        self.max_divergence[iteration] = div.abs().max()
-
-        # ---- CFL = u_max * dt / h ----
-        vel_max = u.abs().max()
-        vel_max = max(vel_max, v.abs().max())
-        if w is not None:
-            vel_max = max(vel_max, w.abs().max())
-        self.cfl_number[iteration] = float(vel_max) * dt_val / h
-
-        # ---- energy blow-up warning ----
-        if self._ek0 is None:
-            self._ek0 = float(ek) if float(ek) > 0 else 1.0
-        if (self.energy_growth_factor is not None
-                and float(ek) > self.energy_growth_factor * self._ek0):
-            warnings.warn(
-                f"[FlowDiagnostics] E_k = {float(ek):.6e} at iter {iteration} "
-                f"exceeds {self.energy_growth_factor}x initial "
-                f"({self._ek0:.6e}).  Possible blow-up.",
-                RuntimeWarning, stacklevel=2,
-            )
-
-        # ---- CFL warning ----
-        cfl_val = float(self.cfl_number[iteration])
-        if cfl_val > 0.5:
-            warnings.warn(
-                f"[FlowDiagnostics] CFL = {cfl_val:.3f} > 0.5 at iter {iteration}",
-                RuntimeWarning, stacklevel=2,
-            )
-
-    # ------------------------------------------------------------------
-    def save_h5(self, path, lock):
-        """Write diagnostics to ``<path>/diagnostics.h5``."""
-        h5_path = os.path.join(path, "diagnostics.h5")
-        data = {
-            "kinetic_energy": self.kinetic_energy.cpu().numpy().copy(),
-            "enstrophy":      self.enstrophy.cpu().numpy().copy(),
-            "max_divergence":  self.max_divergence.cpu().numpy().copy(),
-            "cfl_number":      self.cfl_number.cpu().numpy().copy(),
-        }
-        with lock:
-            with h5py.File(h5_path, "w") as f:
-                for name, arr in data.items():
-                    f.create_dataset(name, data=arr)
-        logger.info("Saved flow diagnostics to %s", h5_path)
 
 
 def _build_fs_free_dicts(ndim):
@@ -311,6 +168,13 @@ class FluidSolver(PlottingMixin):
 
         self.nt   = solver["nt"]
         self.nu   = torch.tensor(solver["nu"], device=self.device, dtype=self.dtype)   # kinematic viscosity
+
+        # FlowDiagnostics cadence: compute energy / enstrophy / max-divergence
+        # / CFL every ``diagnostics_every`` steps and warn on blow-up / CFL>0.5.
+        # 0 (default) disables the monitor entirely; the actual FlowDiagnostics
+        # object is created after the output block (it reuses save_path/lock).
+        self.diagnostics_every = int(solver.get("diagnostics_every", 0) or 0)
+        self.diagnostics       = None
 
         self.rho  = torch.tensor(solver["rho"], device=self.device, dtype=self.dtype)  # density
         self.visc = self.nu*self.rho                                                   # dynamic viscosity
@@ -505,7 +369,6 @@ class FluidSolver(PlottingMixin):
         _fm_raw = solver.get("force_method", "eulerian")
         _fm_aliases = {"method1": "lagrangian", "method2": "eulerian"}
         if _fm_raw in _fm_aliases:
-            import warnings
             warnings.warn(
                 f"force_method={_fm_raw!r} is deprecated; use "
                 f"{_fm_aliases[_fm_raw]!r} instead.",
@@ -766,6 +629,14 @@ class FluidSolver(PlottingMixin):
                 pyobject = pars,
             )
 
+        # ---- flow diagnostics monitor (opt-in via diagnostics_every>0) ----
+        if self.diagnostics_every > 0:
+            self.diagnostics = FlowDiagnostics(
+                nt=self.nt, ndim=self.ndim, h=self.h,
+                device=self.device, dtype=self.dtype,
+                check_every=self.diagnostics_every,
+            )
+
         # ----------------------------------------------------------------
         # Dim-dispatch table.  Bind the right per-step method once so the
         # FSI hot path does not branch on ``self.ndim`` every step.  The
@@ -1021,14 +892,19 @@ class FluidSolver(PlottingMixin):
             coefficient (constant-density behaviour).
         """
 
-        self.div  = self.divergence(u, v, w=w_vel)
+        # T1b: ``div`` is a full-grid transient used only up to the Poisson
+        # solve.  Keep it as a local (not ``self.div``) so it is released on
+        # return instead of persisting between steps, and ``del`` it right
+        # after the solve so its memory is reclaimed before the gradient /
+        # correction allocations (~0.5 GiB peak reduction at large 3D grids).
+        div = self.divergence(u, v, w=w_vel)
 
         # Maertens–Weymouth body-velocity-divergence source: subtract
         # (1-mu0)∇·u_b so the mu0-weighted projection does not force the
         # (overlapping) solid interior to be divergence-free.  No-op for
         # rigid non-overlapping bodies (∇·u_b = 0).
         if body_div_corr is not None:
-            self.div = self.div - body_div_corr
+            div = div - body_div_corr
 
         coeff = w * self.dt / self.rho
 
@@ -1058,7 +934,8 @@ class FluidSolver(PlottingMixin):
             # The RHS divisor is inherently bounded (a scalar), so the
             # f650945 band-singularity cannot occur here.
             c_scalar = ch if (ch is not None and not isinstance(ch, torch.Tensor)) else coeff
-            _rhs = self.div / c_scalar
+            _rhs = div / c_scalar
+            del div                       # T1b: free transient before correction
             p = self.poisson_solverFFT.solve(_rhs)
             if self.ndim == 2:
                 (p_x, p_y) = self.gradient(p)
@@ -1092,11 +969,12 @@ class FluidSolver(PlottingMixin):
 
             if self.ndim == 2:
                 p, _ = _poisson_solve(
-                    self.div[1:-1,1:-1],
+                    div[1:-1,1:-1],
                     p0,
                     ch = ch[1:,1:-1],
                     cv = cv[1:-1,1:],
                 )
+                del div                   # T1b: free transient before correction
                 # ====== projection step ======
                 (p_x, p_y) = self.gradient(p)
                 u          = u - ch * p_x
@@ -1110,12 +988,13 @@ class FluidSolver(PlottingMixin):
                 # size so the Poisson solver receives contiguous arrays.
                 _face_grid = ch.shape[0] < u.shape[0]
                 p, _ = _poisson_solve(
-                    self.div[1:-1, 1:-1, 1:-1],
+                    div[1:-1, 1:-1, 1:-1],
                     p0,
                     ch=(ch               if _face_grid else ch[1:, 1:-1, 1:-1]),
                     cv=(cv               if _face_grid else cv[1:-1, 1:, 1:-1]),
                     cw=(cw               if _face_grid else cw[1:-1, 1:-1, 1:]),
                 )
+                del div                   # T1b: free transient before correction
                 if bool(int(os.environ.get('LILYTORCH_MEM_DBG', '0'))):
                     torch.cuda.synchronize()
                     _gb = torch.cuda.memory_allocated() / 1024**3
@@ -2378,6 +2257,15 @@ class FluidSolver(PlottingMixin):
         """
         self.check_explosion(iteration)
 
+        # ---- flow diagnostics on the post-projection field (every N steps) ----
+        # Runs before the BDIM-field release so it sees the converged u,v,[w],p
+        # and warns on energy blow-up / CFL>0.5 before they cascade to NaN.
+        if self.diagnostics is not None:
+            self.diagnostics.update(
+                iteration, u, v, p, self.dt, self.nu,
+                self.divergence, self.vorticity, w=w_vel,
+            )
+
         # ---- free BDIM fields to reclaim GPU memory between steps ----
         self._release_bdim_fields()
 
@@ -2407,6 +2295,15 @@ class FluidSolver(PlottingMixin):
         else:
             return (u, v, p, w_vel, terminate)
 
+    def _save_diagnostics_h5(self):
+        """Persist the FlowDiagnostics time-series to ``diagnostics.h5`` in the
+        run's save folder, if diagnostics are enabled and a save path exists."""
+        if self.diagnostics is None:
+            return
+        save_dir = getattr(self, "save_path", None)
+        if save_dir:
+            self.diagnostics.save_h5(save_dir, self._hdf5_lock)
+
     def run_from_initial(self, u0, v0, w0=None):
         """
         Run the standalone (explicit) simulation loop starting from the
@@ -2434,6 +2331,8 @@ class FluidSolver(PlottingMixin):
                 self._apply_force_feedback(iteration, t)
                 self.finalize_step(u, v, p, iteration, w_vel=w)
 
+        self._save_diagnostics_h5()
+
     def run_sim(self):
         """
         Standalone (explicit-coupling) simulation loop.
@@ -2460,6 +2359,8 @@ class FluidSolver(PlottingMixin):
 
         if self.compute_forces and self.save_drags:
             self.save_drags_h5()
+
+        self._save_diagnostics_h5()
 
         # Block until all background I/O is complete before returning
         self.flush_io()

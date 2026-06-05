@@ -1612,16 +1612,20 @@ __global__ void apply_bcs_3d_kernel(
     const int64_t s1 = (int64_t)Ny * Nz;
     const int64_t s2 = (int64_t)Nz;
 
-    int64_t dst_lin, src_lin = 0;
+    // src_lin is read only by the Neumann (kind==0) and reflective (kind==2)
+    // branches; for Dirichlet (kind==1) src_along defaults to 0, so the value
+    // computed here is harmlessly discarded.  Computing it unconditionally
+    // drops the old dead ``src_lin = 0`` init and the per-axis branch.
+    int64_t dst_lin, src_lin;
     if (axis == 0) {
         dst_lin = (int64_t)dst_along * s1 + (int64_t)i * s2 + j;
-        if (kind != 1) src_lin = (int64_t)src_along * s1 + (int64_t)i * s2 + j;
+        src_lin = (int64_t)src_along * s1 + (int64_t)i * s2 + j;
     } else if (axis == 1) {
         dst_lin = (int64_t)i * s1 + (int64_t)dst_along * s2 + j;
-        if (kind != 1) src_lin = (int64_t)i * s1 + (int64_t)src_along * s2 + j;
+        src_lin = (int64_t)i * s1 + (int64_t)src_along * s2 + j;
     } else {
         dst_lin = (int64_t)i * s1 + (int64_t)j * s2 + dst_along;
-        if (kind != 1) src_lin = (int64_t)i * s1 + (int64_t)j * s2 + src_along;
+        src_lin = (int64_t)i * s1 + (int64_t)j * s2 + src_along;
     }
 
     if      (kind == 0) base[dst_lin] = base[src_lin];

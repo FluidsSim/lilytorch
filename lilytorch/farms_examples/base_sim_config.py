@@ -115,6 +115,10 @@ class BaseSimConfig:
         self.save_every  = 200
         self.save        = False   # save fields (u, v, [w], p, sdf) to HDF5
         self.save_drags  = False   # save drag/force records to drags.h5
+        # FlowDiagnostics cadence: compute energy/enstrophy/max-div/CFL and warn
+        # on blow-up (E_k>10x initial) / CFL>0.5 every N steps. 0 = disabled.
+        # 100 catches Poisson under-convergence early at ~1% step overhead.
+        self.diagnostics_every = 100
         self.vmin        = -10.0
         self.vmax        = 10.0
         self.plot_specs  = ["curl", "pressure"]
@@ -806,6 +810,7 @@ class BaseSimConfig:
             "poisson_folder"         : os.path.join(self.data_folder, "data"),
             "rho_body"               : self.rho_body,
             "smagorinsky_cs"         : self.smagorinsky_cs,
+            "diagnostics_every"      : self.diagnostics_every,
         }
 
         if self.carreau is not None:

@@ -89,17 +89,18 @@ def van_leer(u, c, d):
     denom = d - c
     rf = (c - u) / (denom + 1e-30)
     psi = (rf + rf.abs()) / (1.0 + rf.abs())
-    return torch.where(denom.abs() < 1e-30, c, _tvd_face(c, d, psi))
+    # T1a: inline the TVD face value ``c + 0.5*(d-c)*psi`` in-place on the
+    # owned ``psi``, reusing the already-live ``denom == d-c`` instead of
+    # re-materialising it.  Ordering (×0.5 first) is bit-exact: ×0.5 is an
+    # exact power-of-two scale, so this is a single rounding of the same real
+    # product, and the final add is commutative in IEEE-754.
+    psi.mul_(0.5).mul_(denom).add_(c)
+    return torch.where(denom.abs() < 1e-30, c, psi)
 
 
 def cds(u, c, d):
     """Central difference scheme -- 2nd-order, not TVD."""
     return 0.5 * (c + d)
-
-
-def _tvd_face(c, d, psi):
-    """Generic TVD face value: c + 0.5*(d - c)*psi(rf)."""
-    return c + 0.5 * (d - c) * psi
 
 
 def abdquickest(u, c, d, C=0.1):
@@ -130,7 +131,10 @@ def abdquickest(u, c, d, C=0.1):
     del rf
     psi.clamp_(min=0.0)
 
-    return torch.where(denom.abs() < 1e-30, c, _tvd_face(c, d, psi))
+    # T1a: inline ``c + 0.5*(d-c)*psi`` in-place on the owned ``psi``,
+    # reusing the live ``denom`` (bit-exact — see van_leer).
+    psi.mul_(0.5).mul_(denom).add_(c)
+    return torch.where(denom.abs() < 1e-30, c, psi)
 
 
 def cubista(u, c, d):
@@ -150,7 +154,10 @@ def cubista(u, c, d):
     del rf
     psi.clamp_(min=0.0)
 
-    return torch.where(denom.abs() < 1e-30, c, _tvd_face(c, d, psi))
+    # T1a: inline ``c + 0.5*(d-c)*psi`` in-place on the owned ``psi``,
+    # reusing the live ``denom`` (bit-exact — see van_leer).
+    psi.mul_(0.5).mul_(denom).add_(c)
+    return torch.where(denom.abs() < 1e-30, c, psi)
 
 
 # Scheme registry — shared by AdvDiffSolver and the free-surface level set.
