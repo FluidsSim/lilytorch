@@ -183,7 +183,7 @@ extensions:
 
 # Live air/water INTERFACE in the MuJoCo viewer: the VOF field alpha at iso 0.5,
 # drawn as a translucent blue triangulated surface in MuJoCo's depth buffer (so
-# the ball correctly occludes / is occluded by it).
+# the ball correctly occludes / is occl++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++uded by it).
 - loader: lilytorch.integration.flow_iso_gl_viewer.FlowIsoGLViewer
   config:
     field: "interface"         # two-phase VOF alpha (level 0.5 = air/water surface)

@@ -59,6 +59,19 @@ if USE_CV2:
     import cv2
 
 
+def _ensure_offscreen_framebuffer(model_ptr, width, height):
+    """Grow MuJoCo's offscreen framebuffer if it is smaller than *width*×*height*.
+
+    This avoids ``ValueError: Image width W > framebuffer width F`` when
+    recording at resolutions above the default 1280×720.
+    """
+    vis_global = model_ptr.vis.global_
+    if width > vis_global.offwidth:
+        vis_global.offwidth = width
+    if height > vis_global.offheight:
+        vis_global.offheight = height
+
+
 class StreamingCameraRecording(CameraRecording):
     """CameraRecording that keeps only one frame in RAM at a time.
 
@@ -80,6 +93,9 @@ class StreamingCameraRecording(CameraRecording):
 
     def initialize_episode(self, task, physics):
         """Call the parent initialiser, then shrink the frame buffer to 1 row."""
+        # Widen MuJoCo's offscreen framebuffer if needed (belt-and-suspenders;
+        # SkyModifier also does this, but we guard against configs that omit it).
+        _ensure_offscreen_framebuffer(physics.model.ptr, self.width, self.height)
         super().initialize_episode(task, physics)
         # The parent re-allocates self.data with the full buffer; shrink it.
         if USE_CV2:

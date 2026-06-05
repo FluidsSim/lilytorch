@@ -1,0 +1,148 @@
+<?xml version="1.0" ?>
+<sdf version="1.6">
+  <world name="world">
+    <model name="toy_boat">
+      <pose>0 0 0 0 0 0</pose>
+
+      <!-- =================================================================
+           Toy motorboat — analytical-primitive hull + spinning propeller.
+
+           The hull is a cylinder (cigar-shaped body) with a hemispherical
+           bow cap, a flat stern, a small deck cabin, and a thin keel fin
+           below for roll stability.  A two-blade propeller on a revolute
+           joint at the stern provides gentle forward thrust.
+
+           DIMENSIONS (SI):
+             Overall length  ~0.12 m  (bow sphere to stern)
+             Beam (width)    ~0.056 m (hull diameter)
+             Draft           ~0.028 m (hull radius)
+             Mass            ~0.12 kg (light — floats with ~40% submergence)
+           ================================================================= -->
+
+      <link name="base_link">
+        <pose>0 0 0 0 0 0</pose>
+        <inertial>
+          <pose>0 0 0 0 0 0</pose>
+          <mass>0.12</mass>
+          <inertia>
+            <ixx>5.0e-5</ixx>  <ixy>0</ixy>  <ixz>0</ixz>
+            <iyy>1.6e-4</iyy>  <iyz>0</iyz>
+            <izz>1.6e-4</izz>
+          </inertia>
+        </inertial>
+
+        <!-- Hull: cylinder along X -->
+        <collision name="hull_collision">
+          <pose>0 0 0 0 1.5707963267948966 0</pose>
+          <geometry><cylinder><radius>0.028</radius><length>0.12</length></cylinder></geometry>
+        </collision>
+        <visual name="hull_visual">
+          <pose>0 0 0 0 1.5707963267948966 0</pose>
+          <geometry><cylinder><radius>0.028</radius><length>0.12</length></cylinder></geometry>
+          <material><ambient>0.9 0.15 0.1 1</ambient><diffuse>0.9 0.15 0.1 1</diffuse></material>
+        </visual>
+
+        <!-- Bow cap: sphere for rounded nose -->
+        <collision name="bow_collision">
+          <pose>0.06 0 0 0 0 0</pose>
+          <geometry><sphere><radius>0.028</radius></sphere></geometry>
+        </collision>
+        <visual name="bow_visual">
+          <pose>0.06 0 0 0 0 0</pose>
+          <geometry><sphere><radius>0.028</radius></sphere></geometry>
+          <material><ambient>0.9 0.15 0.1 1</ambient><diffuse>0.9 0.15 0.1 1</diffuse></material>
+        </visual>
+
+        <!-- Deck cabin -->
+        <collision name="cabin_collision">
+          <pose>0.0 0 0.024 0 0 0</pose>
+          <geometry><box><size>0.04 0.024 0.02</size></box></geometry>
+        </collision>
+        <visual name="cabin_visual">
+          <pose>0.0 0 0.024 0 0 0</pose>
+          <geometry><box><size>0.04 0.024 0.02</size></box></geometry>
+          <material><ambient>0.95 0.95 0.95 1</ambient><diffuse>0.95 0.95 0.95 1</diffuse></material>
+        </visual>
+
+        <!-- Keel fin -->
+        <collision name="keel_collision">
+          <pose>0 0 -0.034 0 0 0</pose>
+          <geometry><box><size>0.06 0.004 0.012</size></box></geometry>
+        </collision>
+        <visual name="keel_visual">
+          <pose>0 0 -0.034 0 0 0</pose>
+          <geometry><box><size>0.06 0.004 0.012</size></box></geometry>
+          <material><ambient>0.6 0.6 0.6 1</ambient><diffuse>0.6 0.6 0.6 1</diffuse></material>
+        </visual>
+      </link>
+
+      <!-- Propeller hub -->
+      <link name="propeller_hub">
+        <pose>-0.068 0 0 0 0 0</pose>
+        <inertial>
+          <pose>0 0 0 0 0 0</pose>
+          <mass>0.001357</mass>
+          <inertia><ixx>2.44e-8</ixx><ixy>0</ixy><ixz>0</ixz><iyy>2.85e-8</iyy><iyz>0</iyz><izz>2.85e-8</izz></inertia>
+        </inertial>
+        <collision name="propeller_hub_collision">
+          <pose>0 0 0 0 1.5707963267948966 0</pose>
+          <geometry><cylinder><radius>0.006</radius><length>0.012</length></cylinder></geometry>
+        </collision>
+        <visual name="propeller_hub_visual">
+          <pose>0 0 0 0 1.5707963267948966 0</pose>
+          <geometry><cylinder><radius>0.006</radius><length>0.012</length></cylinder></geometry>
+          <material><ambient>0.8 0.6 0.1 1</ambient><diffuse>0.8 0.6 0.1 1</diffuse></material>
+        </visual>
+      </link>
+
+      <link name="blade_0">
+        <pose>-0.068 0.018 0 0 0.3 0</pose>
+        <inertial>
+          <pose>0 0 0 0 0 0</pose>
+          <mass>0.00048</mass>
+          <inertia><ixx>3.86e-8</ixx><ixy>0</ixy><ixz>0</ixz><iyy>2.72e-9</iyy><iyz>0</iyz><izz>3.60e-8</izz></inertia>
+        </inertial>
+        <collision name="blade_0_collision">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry><box><size>0.002 0.03 0.008</size></box></geometry>
+        </collision>
+        <visual name="blade_0_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry><box><size>0.002 0.03 0.008</size></box></geometry>
+          <material><ambient>0.9 0.7 0.1 1</ambient><diffuse>0.9 0.7 0.1 1</diffuse></material>
+        </visual>
+      </link>
+
+      <link name="blade_1">
+        <pose>-0.068 -0.018 0 0 -0.3 0</pose>
+        <inertial>
+          <pose>0 0 0 0 0 0</pose>
+          <mass>0.00048</mass>
+          <inertia><ixx>3.86e-8</ixx><ixy>0</ixy><ixz>0</ixz><iyy>2.72e-9</iyy><iyz>0</iyz><izz>3.60e-8</izz></inertia>
+        </inertial>
+        <collision name="blade_1_collision">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry><box><size>0.002 0.03 0.008</size></box></geometry>
+        </collision>
+        <visual name="blade_1_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry><box><size>0.002 0.03 0.008</size></box></geometry>
+          <material><ambient>0.9 0.7 0.1 1</ambient><diffuse>0.9 0.7 0.1 1</diffuse></material>
+        </visual>
+      </link>
+
+      <joint name="joint_propeller" type="revolute">
+        <parent>base_link</parent><child>propeller_hub</child>
+        <pose>0 0 0 0 0 0</pose>
+        <axis><xyz>1 0 0</xyz><limit><lower>-1e16</lower><upper>1e16</upper></limit></axis>
+      </joint>
+      <joint name="joint_blade_0" type="fixed">
+        <parent>propeller_hub</parent><child>blade_0</child><pose>0 0 0 0 0 0</pose>
+      </joint>
+      <joint name="joint_blade_1" type="fixed">
+        <parent>propeller_hub</parent><child>blade_1</child><pose>0 0 0 0 0 0</pose>
+      </joint>
+
+    </model>
+  </world>
+</sdf>

@@ -27,6 +27,20 @@ import numpy as np
 from farms_core.simulation.extensions import TaskExtension
 
 
+def _widen_offscreen_framebuffer(model, **renderer_kwargs):
+    """Ensure ``model.vis.global_.off{width,height}`` are ≥ the requested
+    renderer dimensions so that ``mujoco.Renderer`` does not refuse to
+    create a high-resolution offscreen context (MuJoCo defaults to
+    1280×720)."""
+    req_w = renderer_kwargs.get('width', 640)
+    req_h = renderer_kwargs.get('height', 480)
+    vis_global = model.vis.global_
+    if req_w > vis_global.offwidth:
+        vis_global.offwidth = req_w
+    if req_h > vis_global.offheight:
+        vis_global.offheight = req_h
+
+
 class SkyModifier(TaskExtension):
     """Replace the MuJoCo skybox texture with a solid colour.
 
@@ -99,6 +113,9 @@ class SkyModifier(TaskExtension):
         sky_modifier = self  # closed over
 
         def _patched_init(renderer_self, model, *args, **kwargs):
+            # Widen the offscreen framebuffer to accommodate the requested
+            # resolution (MuJoCo defaults to 1280×720; 4K recordings need more).
+            _widen_offscreen_framebuffer(model, **kwargs)
             orig(renderer_self, model, *args, **kwargs)
             # Re-make the GL context current (mjr_makeContext may have released it)
             gl_ctx = getattr(renderer_self, '_gl_context', None)

@@ -95,6 +95,388 @@ def _extract_surface_triangulation_3d(sdf_val_np, xnp, ynp, znp, device, dtype):
     )
 
 
+# ======================================================================
+# Analytical surface triangulation for Lagrangian force integration.
+#
+# Marching cubes on the fluid grid can miss very thin bodies (e.g.
+# propeller blades) whose thickness is comparable to the grid spacing.
+# These functions generate exact triangle meshes from the primitive
+# parameters, independent of grid resolution.  Triangulation is done
+# once per body at init and never recomputed.
+# ======================================================================
+
+def _analytical_triangles_to_torch(tri_c_np, tri_n_np, tri_a_np, device, dtype):
+    """Convert (T,3) numpy arrays → torch (3,T), (3,T), (T,) tensors."""
+    if tri_c_np.shape[0] == 0:
+        return None, None, None
+    return (
+        torch.tensor(tri_c_np.T, device=device, dtype=dtype),
+        torch.tensor(tri_n_np.T, device=device, dtype=dtype),
+        torch.tensor(tri_a_np,   device=device, dtype=dtype),
+    )
+
+
+def _triangulate_box(half_x, half_y, half_z):
+    """Generate triangle mesh for an axis-aligned box centred at origin.
+
+    Each of the 6 faces is split into 2 triangles (12 total).
+    Outward normals point away from the origin.
+
+    Returns ``(tri_c, tri_n, tri_a)`` as numpy arrays of shape
+    ``(T, 3)``, ``(T, 3)``, ``(T,)`` with T = 12.
+    """
+    hx, hy, hz = float(half_x), float(half_y), float(half_z)
+    # 8 corner vertices
+    v = np.array([
+        [-hx, -hy, -hz], [ hx, -hy, -hz], [ hx,  hy, -hz], [-hx,  hy, -hz],
+        [-hx, -hy,  hz], [ hx, -hy,  hz], [ hx,  hy,  hz], [-hx,  hy,  hz],
+    ], dtype=np.float64)
+    # 6 faces, 2 triangles each (12 triangles), outward normals pre-computed.
+    # Winding doesn't affect area (we take ‖cross‖) and normals are explicit.
+    faces = np.array([
+        [0, 1, 2], [0, 2, 3],   # -Z face
+        [4, 5, 6], [4, 6, 7],   # +Z face
+        [0, 4, 5], [0, 5, 1],   # -Y face
+        [3, 2, 6], [3, 6, 7],   # +Y face
+        [0, 3, 7], [0, 7, 4],   # -X face
+        [1, 5, 6], [1, 6, 2],   # +X face
+    ], dtype=np.int64)
+    normals = np.array([
+        [ 0,  0, -1], [ 0,  0, -1],
+        [ 0,  0,  1], [ 0,  0,  1],
+        [ 0, -1,  0], [ 0, -1,  0],
+        [ 0,  1,  0], [ 0,  1,  0],
+        [-1,  0,  0], [-1,  0,  0],
+        [ 1,  0,  0], [ 1,  0,  0],
+    ], dtype=np.float64)
+    normals = np.array([
+        [ 0,  0, -1], [ 0,  0, -1],
+        [ 0,  0,  1], [ 0,  0,  1],
+        [ 0, -1,  0], [ 0, -1,  0],
+        [ 0,  1,  0], [ 0,  1,  0],
+        [-1,  0,  0], [-1,  0,  0],
+        [ 1,  0,  0], [ 1,  0,  0],
+    ], dtype=np.float64)
+    T = 12
+    tri_c = np.empty((T, 3), dtype=np.float64)
+    tri_n = np.empty((T, 3), dtype=np.float64)
+    tri_a = np.empty(T, dtype=np.float64)
+    for i in range(T):
+        i0, i1, i2 = faces[i, 0], faces[i, 1], faces[i, 2]
+        a = v[i0]; b = v[i1]; c = v[i2]
+        tri_c[i] = (a + b + c) / 3.0
+        tri_n[i] = normals[i]
+        cross = np.cross(b - a, c - a)
+        tri_a[i] = 0.5 * np.linalg.norm(cross)
+    return tri_c, tri_n, tri_a
+
+
+def _triangulate_sphere(radius, n_theta=24, n_phi=16):
+    """Generate triangle mesh for a sphere centred at origin.
+
+    Uses latitude (phi) / longitude (theta) subdivision.  Normals point
+    outward (radial direction from origin).
+
+    Returns ``(tri_c, tri_n, tri_a)`` as numpy arrays.
+    """
+    r = float(radius)
+    n_th = max(int(n_theta), 4)
+    n_ph = max(int(n_phi), 2)
+
+    verts = []
+    # south pole
+    verts.append((0.0, 0.0, -r))
+    for j in range(1, n_ph):
+        phi = np.pi * j / n_ph
+        z = r * np.cos(phi)
+        r_xy = r * np.sin(phi)
+        for i in range(n_th):
+            th = 2.0 * np.pi * i / n_th
+            verts.append((r_xy * np.cos(th), r_xy * np.sin(th), z))
+    # north pole
+    verts.append((0.0, 0.0, r))
+    verts = np.array(verts, dtype=np.float64)
+
+    tris_c, tris_n, tris_a = [], [], []
+    # south-pole fan
+    for i in range(n_th):
+        v0 = 0
+        v1 = 1 + i
+        v2 = 1 + (i + 1) % n_th
+        _add_triangle(verts, v0, v1, v2, tris_c, tris_n, tris_a)
+    # body rings
+    for j in range(n_ph - 2):
+        for i in range(n_th):
+            v0 = 1 +  j      * n_th + i
+            v1 = 1 + (j + 1) * n_th + i
+            v2 = 1 + (j + 1) * n_th + (i + 1) % n_th
+            v3 = 1 +  j      * n_th + (i + 1) % n_th
+            _add_triangle(verts, v0, v1, v2, tris_c, tris_n, tris_a)
+            _add_triangle(verts, v0, v2, v3, tris_c, tris_n, tris_a)
+    # north-pole fan
+    pole = len(verts) - 1
+    base = 1 + (n_ph - 2) * n_th
+    for i in range(n_th):
+        v0 = base + i
+        v1 = base + (i + 1) % n_th
+        v2 = pole
+        _add_triangle(verts, v0, v1, v2, tris_c, tris_n, tris_a)
+
+    return np.array(tris_c), np.array(tris_n), np.array(tris_a)
+
+
+def _triangulate_cylinder(radius, half_length, n_theta=24, capped=True):
+    """Generate triangle mesh for a cylinder centred at origin, axis along Z.
+
+    Returns ``(tri_c, tri_n, tri_a)`` as numpy arrays.
+    """
+    r = float(radius)
+    hl = float(half_length)
+    n_th = max(int(n_theta), 4)
+    N = 2 * n_th  # two rings: z=-hl, z=+hl
+
+    verts = np.empty((N, 3), dtype=np.float64)
+    for i in range(n_th):
+        th = 2.0 * np.pi * i / n_th
+        cx, cy = r * np.cos(th), r * np.sin(th)
+        verts[i]           = (cx, cy, -hl)
+        verts[i + n_th]    = (cx, cy,  hl)
+
+    tris_c, tris_a = [], []
+    # lateral surface: each quad → 2 triangles
+    for i in range(n_th):
+        ip1 = (i + 1) % n_th
+        v0, v1 = i, i + n_th           # bottom edge
+        v2, v3 = ip1, ip1 + n_th       # top edge
+        _add_triangle_centroid_area(verts, v0, v1, v2, tris_c, tris_a)
+        _add_triangle_centroid_area(verts, v0, v2, v3, tris_c, tris_a)
+
+    if capped:
+        # bottom cap (z = -hl): fan from centre
+        btm_centre = np.array([0.0, 0.0, -hl], dtype=np.float64)
+        for i in range(n_th):
+            ip1 = (i + 1) % n_th
+            _add_triangle_fan_centroid_area(btm_centre, verts[ip1], verts[i],
+                                            tris_c, tris_a)
+        # top cap (z = +hl): fan from centre
+        top_centre = np.array([0.0, 0.0, hl], dtype=np.float64)
+        for i in range(n_th):
+            ip1 = (i + 1) % n_th
+            _add_triangle_fan_centroid_area(top_centre, verts[i + n_th],
+                                            verts[ip1 + n_th], tris_c, tris_a)
+
+    tris_c = np.array(tris_c)
+    tris_a = np.array(tris_a)
+    T = len(tris_c)
+
+    # Compute correct outward normals analytically
+    tris_n = np.empty((T, 3), dtype=np.float64)
+    for i in range(T):
+        cx, cy, cz = tris_c[i]
+        if capped and cz < -hl + 1e-12:
+            tris_n[i] = (0.0, 0.0, -1.0)       # bottom cap
+        elif capped and cz > hl - 1e-12:
+            tris_n[i] = (0.0, 0.0, 1.0)         # top cap
+        else:
+            r_xy = np.sqrt(cx * cx + cy * cy)    # lateral surface
+            if r_xy > 1e-20:
+                tris_n[i] = (cx / r_xy, cy / r_xy, 0.0)
+            else:
+                tris_n[i] = (0.0, 0.0, 1.0)
+
+    return tris_c, tris_n, tris_a
+
+
+def _triangulate_capsule(radius, half_length, n_theta=24, n_phi_cap=6):
+    """Generate triangle mesh for a capsule (cylinder + 2 hemispherical caps).
+
+    Axis along Z, centred at origin.  The cylindrical section runs from
+    ``z = -half_length`` to ``z = +half_length``, with spherical caps
+    of *radius* at each end.  Normals are computed analytically:
+    radial-in-XY for the lateral section, radial-from-cap-centre for caps.
+
+    Returns ``(tri_c, tri_n, tri_a)`` as numpy arrays.
+    """
+    r = float(radius)
+    hl = float(half_length)
+    n_th = max(int(n_theta), 4)
+    n_ph = max(int(n_phi_cap), 2)
+
+    # ---- bottom hemispherical cap (z from -hl-r to -hl) ----
+    verts_bot = []
+    verts_bot.append((0.0, 0.0, -hl - r))  # south pole
+    for j in range(1, n_ph + 1):
+        phi = 0.5 * np.pi * j / n_ph
+        z = -hl - r * np.cos(phi)
+        r_xy = r * np.sin(phi)
+        for i in range(n_th):
+            th = 2.0 * np.pi * i / n_th
+            verts_bot.append((r_xy * np.cos(th), r_xy * np.sin(th), z))
+    verts_bot = np.array(verts_bot, dtype=np.float64)
+
+    # ---- cylindrical section (z from -hl to +hl) ----
+    verts_cyl = np.empty((2 * n_th, 3), dtype=np.float64)
+    for i in range(n_th):
+        th = 2.0 * np.pi * i / n_th
+        cx, cy = r * np.cos(th), r * np.sin(th)
+        verts_cyl[i]           = (cx, cy, -hl)
+        verts_cyl[i + n_th]    = (cx, cy,  hl)
+
+    # ---- top hemispherical cap (z from +hl to +hl+r) ----
+    verts_top = []
+    for j in range(1, n_ph + 1):
+        phi = 0.5 * np.pi * j / n_ph
+        z = hl + r * np.cos(phi)
+        r_xy = r * np.sin(phi)
+        for i in range(n_th):
+            th = 2.0 * np.pi * i / n_th
+            verts_top.append((r_xy * np.cos(th), r_xy * np.sin(th), z))
+    verts_top.append((0.0, 0.0, hl + r))  # north pole
+    verts_top = np.array(verts_top, dtype=np.float64)
+
+    tris_c, tris_a = [], []
+
+    # ---- bottom cap triangles ----
+    for i in range(n_th):
+        v0, v1, v2 = 0, 1 + i, 1 + (i + 1) % n_th
+        _add_triangle_centroid_area(verts_bot, v0, v1, v2, tris_c, tris_a)
+    for j in range(n_ph - 1):
+        for i in range(n_th):
+            v0 = 1 +  j      * n_th + i
+            v1 = 1 + (j + 1) * n_th + i
+            v2 = 1 + (j + 1) * n_th + (i + 1) % n_th
+            v3 = 1 +  j      * n_th + (i + 1) % n_th
+            _add_triangle_centroid_area(verts_bot, v0, v1, v2, tris_c, tris_a)
+            _add_triangle_centroid_area(verts_bot, v0, v2, v3, tris_c, tris_a)
+
+    # ---- cylindrical section ----
+    for i in range(n_th):
+        ip1 = (i + 1) % n_th
+        v0, v1 = i, i + n_th
+        v2, v3 = ip1, ip1 + n_th
+        _add_triangle_centroid_area(verts_cyl, v0, v1, v2, tris_c, tris_a)
+        _add_triangle_centroid_area(verts_cyl, v0, v2, v3, tris_c, tris_a)
+
+    # ---- top cap triangles ----
+    for j in range(n_ph - 1):
+        for i in range(n_th):
+            v0 = j * n_th + i
+            v1 = (j + 1) * n_th + i
+            v2 = (j + 1) * n_th + (i + 1) % n_th
+            v3 = j * n_th + (i + 1) % n_th
+            _add_triangle_centroid_area(verts_top, v0, v1, v2, tris_c, tris_a)
+            _add_triangle_centroid_area(verts_top, v0, v2, v3, tris_c, tris_a)
+    pole = len(verts_top) - 1
+    base = (n_ph - 1) * n_th
+    for i in range(n_th):
+        v0, v1, v2 = base + i, base + (i + 1) % n_th, pole
+        _add_triangle_centroid_area(verts_top, v0, v1, v2, tris_c, tris_a)
+
+    tris_c = np.array(tris_c)
+    tris_a = np.array(tris_a)
+    T = len(tris_c)
+
+    # Compute correct outward normals analytically per region
+    tris_n = np.empty((T, 3), dtype=np.float64)
+    for i in range(T):
+        cx, cy, cz = tris_c[i]
+        if cz < -hl:                              # bottom spherical cap
+            # radial from cap centre (0, 0, -hl)
+            dx, dy, dz = cx, cy, cz + hl
+            norm = np.sqrt(dx * dx + dy * dy + dz * dz)
+            if norm > 1e-20:
+                tris_n[i] = (dx / norm, dy / norm, dz / norm)
+            else:
+                tris_n[i] = (0.0, 0.0, -1.0)
+        elif cz > hl:                             # top spherical cap
+            # radial from cap centre (0, 0, +hl)
+            dx, dy, dz = cx, cy, cz - hl
+            norm = np.sqrt(dx * dx + dy * dy + dz * dz)
+            if norm > 1e-20:
+                tris_n[i] = (dx / norm, dy / norm, dz / norm)
+            else:
+                tris_n[i] = (0.0, 0.0, 1.0)
+        else:                                     # cylindrical section
+            r_xy = np.sqrt(cx * cx + cy * cy)
+            if r_xy > 1e-20:
+                tris_n[i] = (cx / r_xy, cy / r_xy, 0.0)
+            else:
+                tris_n[i] = (0.0, 0.0, 1.0)
+
+    return tris_c, tris_n, tris_a
+
+
+def _add_triangle_centroid_area(verts, i0, i1, i2, tris_c, tris_a):
+    """Append triangle centroid and area (normal computed later)."""
+    a = verts[i0]; b = verts[i1]; c = verts[i2]
+    tri_c = (a + b + c) / 3.0
+    e1 = b - a; e2 = c - a
+    cross = np.cross(e1, e2)
+    area = 0.5 * np.linalg.norm(cross)
+    if area < 1e-20:
+        return
+    tris_c.append(tri_c)
+    tris_a.append(area)
+
+
+def _add_triangle_fan_centroid_area(centre, v0, v1, tris_c, tris_a):
+    """Append fan triangle centroid and area (normal computed later)."""
+    a = centre; b = v0; c = v1
+    tri_c = (a + b + c) / 3.0
+    e1 = b - a; e2 = c - a
+    cross = np.cross(e1, e2)
+    area = 0.5 * np.linalg.norm(cross)
+    if area < 1e-20:
+        return
+    tris_c.append(tri_c)
+    tris_a.append(area)
+
+
+def _add_triangle(verts, i0, i1, i2, tris_c, tris_n, tris_a):
+    """Append one triangle (centroid, outward-normal, area) from vertex array.
+
+    The outward normal is computed as the centroid direction (centred
+    primitives), which is robust against winding-order errors.
+    """
+    a = verts[i0]; b = verts[i1]; c = verts[i2]
+    tri_c = (a + b + c) / 3.0
+    e1 = b - a; e2 = c - a
+    cross = np.cross(e1, e2)
+    area = 0.5 * np.linalg.norm(cross)
+    if area < 1e-20:
+        return
+    # Outward normal from centroid direction (works for any convex
+    # primitive centred at origin: sphere, cylinder lateral, capsule).
+    r = np.linalg.norm(tri_c)
+    if r > 1e-20:
+        n_dir = tri_c / r
+    else:
+        n_dir = cross / (2.0 * area)
+    tris_c.append(tri_c)
+    tris_n.append(n_dir)
+    tris_a.append(area)
+
+
+def _add_triangle_fan(centre, v0, v1, tris_c, tris_n, tris_a):
+    """Append a triangle from a centre point to two edge vertices."""
+    a = centre; b = v0; c = v1
+    tri_c = (a + b + c) / 3.0
+    e1 = b - a; e2 = c - a
+    cross = np.cross(e1, e2)
+    area = 0.5 * np.linalg.norm(cross)
+    if area < 1e-20:
+        return
+    # Outward normal from centroid direction
+    r = np.linalg.norm(tri_c)
+    if r > 1e-20:
+        n_dir = tri_c / r
+    else:
+        n_dir = cross / (2.0 * area)
+    tris_c.append(tri_c)
+    tris_n.append(n_dir)
+    tris_a.append(area)
+
+
 def _import_cubic_spline():
     from scipy.interpolate import CubicSpline
     return CubicSpline
@@ -868,7 +1250,7 @@ class Body:
 
 class BodyAnalytical(Body):
 
-    def __init__(self, device, x, y, sdf, update_maps, z=None, eps=0.05, plotting=False, pre_update=True, local_aabb=None):
+    def __init__(self, device, x, y, sdf, update_maps, z=None, eps=0.05, plotting=False, pre_update=True, local_aabb=None, triangulate=None):
         super().__init__(device, x, y, z=z, eps=eps)
         self.sdf = sdf
         self.update_theta = update_maps[0]
@@ -876,19 +1258,14 @@ class BodyAnalytical(Body):
         self.plotting = plotting
         self.body = self
         self.pre_update = pre_update
-        # Optional body-local AABB ``[[lo_x, lo_y[, lo_z]], [hi_x, hi_y[, hi_z]]]``
-        # used by :class:`BDIMhandler` to crop per-body SDF evaluation.
-        # In both 2-D and 3-D this is auto-derived from the analytical
-        # zero-level set during ``_initialize_2d`` / ``_initialize_3d``
-        # (2-D: ``measure.find_contours``; 3-D: ``measure.marching_cubes``)
-        # with a safety margin large enough that the analytical SDF
-        # outside the AABB is provably ≥ band radius, so cells outside
-        # don't affect the running-min union of bodies.  An explicit
-        # ``local_aabb=torch.tensor([[xmin,ymin,zmin],[xmax,ymax,zmax]])``
-        # passed in the constructor wins (used when the user knows a
-        # tighter / looser bound than the auto-derived one, or when
-        # the local grid does not capture a zero-level set).
+        # Optional body-local AABB ... (see class docstring)
         self.local_aabb = local_aabb
+        # Optional analytical triangulation callable for Lagrangian forces.
+        # ``triangulate()`` should return ``(tri_c, tri_n, tri_a)`` numpy
+        # arrays of shape ``(T,3)``, ``(T,3)``, ``(T,)``.  Used as a
+        # fallback when marching cubes produces no surface (e.g. very thin
+        # bodies).  Set by MultiAnimatBodies for known primitives.
+        self._triangulate = triangulate
         self.initialize()
 
     # ------------------------------------------------------------------
@@ -1083,40 +1460,51 @@ class BodyAnalytical(Body):
             self.update(torch.tensor(0.0), 0, update_cnt=False)
 
     def _build_surface_3d(self):
-        """Extract body-local surface triangulation via marching cubes.
+        """Extract body-local surface triangulation.
+
+        Tries marching cubes first (resolution tied to the fluid grid).
+        If that produces no triangles (body too thin, or skimage
+        unavailable), falls back to the analytical ``self._triangulate``
+        callable when provided — this is exact and resolution-independent.
 
         Populates:
             ``self.tri_centroid_local``  (3, T)
             ``self.tri_normal_local``    (3, T)
             ``self.tri_area``            (T,)   (rigid-invariant)
-
-        These are consumed by the lagrangian force method (see
-        ``forces.forces_lagrangian_3d``).  Triangulation density is
-        controlled by the local SDF grid spacing (≈ ``self.h``), so each
-        triangle covers roughly one grid cell -- the integration error
-        scales with the grid as desired.
-
-        Failure mode: if the body has no zero-level set in the local
-        grid or ``skimage.measure`` is unavailable, the triangulation
-        attributes are set to ``None`` and
-        ``force_method="lagrangian"`` will raise a clear error.
         """
-        xmid = (self.x.min() + self.x.max()) / 2
-        ymid = (self.y.min() + self.y.max()) / 2
-        zmid = (self.z.min() + self.z.max()) / 2
-        xcnt = self.x - xmid
-        ycnt = self.y - ymid
-        zcnt = self.z - zmid
-        Xg, Yg, Zg = torch.meshgrid(xcnt, ycnt, zcnt, indexing="ij")
-        sdf_cnt = self.sdf(Xg, Yg, Zg)
-        sdf_np = sdf_cnt.cpu().numpy()
-        xnp = xcnt.cpu().numpy()
-        ynp = ycnt.cpu().numpy()
-        znp = zcnt.cpu().numpy()
+        tri_c = tri_n = tri_a = None
 
-        tri_c, tri_n, tri_a = _extract_surface_triangulation_3d(
-            sdf_np, xnp, ynp, znp, self.device, self.dtype,
-        )
+        # ---- primary path: marching cubes on the fluid grid ----
+        try:
+            xmid = (self.x.min() + self.x.max()) / 2
+            ymid = (self.y.min() + self.y.max()) / 2
+            zmid = (self.z.min() + self.z.max()) / 2
+            xcnt = self.x - xmid
+            ycnt = self.y - ymid
+            zcnt = self.z - zmid
+            Xg, Yg, Zg = torch.meshgrid(xcnt, ycnt, zcnt, indexing="ij")
+            sdf_cnt = self.sdf(Xg, Yg, Zg)
+            sdf_np = sdf_cnt.cpu().numpy()
+            xnp = xcnt.cpu().numpy()
+            ynp = ycnt.cpu().numpy()
+            znp = zcnt.cpu().numpy()
+
+            tri_c, tri_n, tri_a = _extract_surface_triangulation_3d(
+                sdf_np, xnp, ynp, znp, self.device, self.dtype,
+            )
+        except Exception:
+            tri_c = tri_n = tri_a = None
+
+        # ---- fallback: analytical triangulation ----
+        if tri_c is None and self._triangulate is not None:
+            try:
+                tri_c_np, tri_n_np, tri_a_np = self._triangulate()
+                tri_c, tri_n, tri_a = _analytical_triangles_to_torch(
+                    tri_c_np, tri_n_np, tri_a_np, self.device, self.dtype,
+                )
+            except Exception:
+                tri_c = tri_n = tri_a = None
+
         self.tri_centroid_local = tri_c
         self.tri_normal_local   = tri_n
         self.tri_area           = tri_a
@@ -2591,6 +2979,11 @@ class MultiAnimatBodies(Body):
                                  [ _r + _bm,  _r + _bm,  (0.5 * _l + _r) + _bm]],
                                 dtype=x.dtype, device=x.device,
                             )
+                            # Analytical triangulation fallback for Lagrangian forces.
+                            # Capsule: cylinder section of half-length _l/2 + two
+                            # hemispherical caps of radius _r.  (SDF cylinders from
+                            # MuJoCo are approximated as capsules.)
+                            _triangulate = lambda r=_r, hl=0.5*_l: _triangulate_capsule(r, hl)
                         else:
                             # 2-D sdUnevenCapsule(x, y, r, r, l, side):
                             #   side="L": pill runs along -y, from y=0 to y=-l
@@ -2607,10 +3000,12 @@ class MultiAnimatBodies(Body):
                                      [ _r + _bm, (_l + _r) + _bm]],
                                     dtype=x.dtype, device=x.device,
                                 )
+                            _triangulate = None  # 2-D uses contours, not triangles
                         body = BodyAnalytical(
                             device, x, y, sdf_fun, update_maps, z=self.z,
                             eps=eps, plotting=False, pre_update=False,
                             local_aabb=_local_aabb,
+                            triangulate=_triangulate,
                         )
                         radius_cpu = radius.detach().cpu()
                         length_cpu = length.detach().cpu()
@@ -2660,16 +3055,19 @@ class MultiAnimatBodies(Body):
                                  [ _r + _bm,  _r + _bm,  _r + _bm]],
                                 dtype=x.dtype, device=x.device,
                             )
+                            _triangulate = lambda r=_r: _triangulate_sphere(r)
                         else:
                             _local_aabb = torch.tensor(
                                 [[-_r - _bm, -_r - _bm],
                                  [ _r + _bm,  _r + _bm]],
                                 dtype=x.dtype, device=x.device,
                             )
+                            _triangulate = None
                         body = BodyAnalytical(
                             device, x, y, sdf_fun, update_maps, z=self.z,
                             eps=eps, plotting=False, pre_update=False,
                             local_aabb=_local_aabb,
+                            triangulate=_triangulate,
                         )
                         radius_cpu = radius.detach().cpu()
                         body.bb = [
@@ -2725,16 +3123,19 @@ class MultiAnimatBodies(Body):
                                  [ _hs[0] + _bm,  _hs[1] + _bm,  _hs[2] + _bm]],
                                 dtype=x.dtype, device=x.device,
                             )
+                            _triangulate = lambda h=_hs: _triangulate_box(h[0], h[1], h[2])
                         else:
                             _local_aabb = torch.tensor(
                                 [[-_hs[0] - _bm, -_hs[1] - _bm],
                                  [ _hs[0] + _bm,  _hs[1] + _bm]],
                                 dtype=x.dtype, device=x.device,
                             )
+                            _triangulate = None
                         body = BodyAnalytical(
                             device, x, y, sdf_fun, update_maps, z=self.z,
                             eps=eps, plotting=False, pre_update=False,
                             local_aabb=_local_aabb,
+                            triangulate=_triangulate,
                         )
                         body.bb = [
                             [-half_size[0].cpu(), half_size[0].cpu()],
