@@ -1,7 +1,7 @@
 """Dimension-agnostic advection for MAC staggered grids + the AdvDiffSolver.
 
-Split out of the former monolithic ``adv_diff.py`` (kept on disk as legacy,
-no longer imported).  This module owns:
+Split out of the former monolithic ``adv_diff.py`` (since removed).  This
+module owns:
 
 * the pluggable convective **scheme functions** (QUICK, ADBQUICKEST, CUBISTA,
   van Leer, CDS) — pure ``f(upstream, center, downstream)`` kernels;

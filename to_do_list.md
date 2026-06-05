@@ -84,6 +84,28 @@ rel-err <1e-6 on integrated quantities. No semantics changes.
 
 ---
 
+# PER-STEP HOT-PATH OVERHEAD (measure first — found 2026-06-05 while doing T1/diagnostics)
+
+These run on EVERY step; none is measured for wall-clock cost yet. Time them
+(e.g. with the cost_analysis harness) before/after gating.
+
+- **H1 per-step `torch.cuda.empty_cache()`** — `solver.py` `finalize_step` calls it every
+  step ("to reduce nvidia-smi usage"). Confirmed via `bench_memory.py`: `cur` drops to the
+  resident floor after every step → the allocator cache is dumped and re-grown each step
+  (churn + fragmentation risk). Try gating to every N steps (or off) and time it. Likely a
+  real throughput cost; trades speed for a prettier `nvidia-smi`.
+- **H2 per-step host sync in `check_explosion`** — `torch.stack([isfinite…]) … .cpu().numpy()`
+  every step is a device→host sync on the critical path (pipeline stall). Throttle to every
+  N steps (reuse the `diagnostics_every` cadence idea). Blow-ups don't need per-step detection.
+- **H3 `diagnostics_every=100` is now default-ON** in `base_sim_config.py` (this session).
+  Adds a small recurring vorticity/divergence + host-sync cost. Defensible given the
+  blow-up-debugging history, but RATIFY: keep at 100, or set 0 (opt-in)?
+- ~~Delete legacy `adv_diff.py`~~ DONE (this session) — repointed the lone importer
+  (`run_compile_advdiff_bench.py`) to `lilytorch.src.advection` (drop-in: identical
+  `AdvDiffSolver` API), removed the file, fixed the "kept on disk as legacy" docstrings.
+
+---
+
 # LOW PRIORITY
 
 - Analytical 2D salamander swimmer sim (via `control.py` + `gamepad.py`).

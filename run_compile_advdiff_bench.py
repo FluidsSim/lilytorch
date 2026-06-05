@@ -23,7 +23,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from lilytorch.src.adv_diff import AdvDiffSolver
+from lilytorch.src.advection import AdvDiffSolver
 from lilytorch.src import operations as ops
 
 # ── CLI ──────────────────────────────────────────────────────────────

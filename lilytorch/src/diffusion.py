@@ -1,8 +1,8 @@
 """Dimension-agnostic diffusion operators for MAC staggered grids.
 
-Split out of the former monolithic ``adv_diff.py`` (kept on disk as legacy,
-no longer imported) so the advection schemes (:mod:`lilytorch.src.advection`)
-and the diffusion closures can grow and be ``torch.compile``-d independently.
+Split out of the former monolithic ``adv_diff.py`` (since removed) so the
+advection schemes (:mod:`lilytorch.src.advection`) and the diffusion closures
+can grow and be ``torch.compile``-d independently.
 
 These are **pure functions** — no class, no boundary conditions (the caller,
 e.g. :class:`~lilytorch.src.advection.AdvDiffSolver`, owns the ghost layer via
