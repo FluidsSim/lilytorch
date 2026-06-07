@@ -39,10 +39,14 @@ BOAT_MASS    = 420.0   # kg (total, from toy_boat.sdf <inertial> blocks)
 #   X: -1.5 .. 8.1 (boat 0..6.04)   Y: -2.4 .. 2.4 (beam ±1.09)
 #   Z: -1.5 .. 2.1 (keel/rudder hang to ~-0.2 below the waterline)
 WATERLINE = 0.40       # m  (world-z of the free surface)
-# Spawn the hull bottom (mesh-Y≈0) a little ABOVE the waterline so the big hull
-# does not straddle the sharp VOF interface at t=0 (that causes an impulsive
-# startup blow-up); the boat then drops the last few cm and settles.
-SPAWN_Z   = 1.10       # m  (world-z of the model origin; ≈40% hull draft)
+# Spawn the boat AT its floating draft so it starts in near-equilibrium and
+# does not free-fall.  Computed from the hull SDF: the boat displaces 0.83 m^3
+# (~800 kg) at a draft of 0.24 m, i.e. hull bottom (mesh-y -0.094) at world-z
+# 0.16 -> origin (mesh-y 0) at world-z 0.256.  The old 1.10 spawn free-fell
+# 0.7 m and slammed in at ~3.3 m/s, plunging far past the float line where the
+# violent, asymmetric entry pitched the boat (NOT a mass-balance problem: the
+# boat trims level at its design waterline, COM_x 2.215 vs COB_x 2.20).
+SPAWN_Z   = 0.256      # m  (world-z of the model origin = floating draft)
 
 
 class SimConfig(BaseSimConfig):
@@ -59,8 +63,12 @@ class SimConfig(BaseSimConfig):
         self.use_gpu  = True
         self.headless = False
 
-        # ── Simulation flags ──────────────────────────────────────────
+          # ── Simulation flags ──────────────────────────────────────────
         self.use_bdim = True
+        self.water_drag     = False      # BDIM handles all hydrodynamics
+        self.water_buoyancy = False
+        self.water_height   = WATERLINE
+
         self.animat_fluid_interaction = True
         # Keep fixed joints (keel/rudder welds + blade attachments) filtered
         # out so only the revolute propeller joint gets a control motor.
@@ -71,13 +79,12 @@ class SimConfig(BaseSimConfig):
         # ~2000×2000×k table and OOM for a multi-metre hull).
         self.compute_sdf = True
 
-        # ── 3-D grid (~0.05 m cells across the 6 m boat) ──────────────
-        # NOTE on resolution: the BDIM transition band is ≈2·h wide, so a
-        # coarse grid (h=0.1) makes the band ~0.2 m and it overlaps the free
-        # surface → the two-phase pressure solve degenerates and the run
-        # blows up almost immediately.  h=0.05 (below) is far more stable.
-        # The 0.04 m keel is still sub-cell even here; resolving it needs
-        # h≈0.02 (≈10 M cells) — a real compute cost to decide on.
+        # ── 3-D grid (h=0.05 m) ───────────────────────────────────────────
+        # NOTE (resolution experiment, 2026-06): refining to h=0.03 + dt=1e-4
+        # made the blow-up come SOONER (it~50 vs it~533), not later — so the
+        # instability is NOT under-resolution.  It is a μ0/SDF stiffness at the
+        # seams of the overlapping convex hulls (convexify=True, mandatory: the
+        # raw meshes are broken), which finer cells sharpen.  Keep h=0.05.
         self.Nx   = 192
         self.Ny   = 96
         self.Nz   = 72
@@ -115,6 +122,31 @@ class SimConfig(BaseSimConfig):
             },
         ]
 
+        # ── FSI coupling stability ────────────────────────────────────
+        # Explicit coupling with a light force low-pass.  NOTE: the violent
+        # rise+pitch on entry was NOT a coupling instability — it was a wrong
+        # FORCE (force_method="lagrangian" over-buoyed a surface-straddling body
+        # 3x with a huge spurious pitch torque; the fix is the eulerian band
+        # integral below).  Implicit coupling only delayed the symptom of that
+        # bad force, so it is left off (it re-solves the fluid many times per
+        # step → slow in 3-D).  Set scheme:"implicit" to re-enable if a genuine
+        # added-mass instability shows up once the residual blow-up is cured.
+        self.force_relaxation = 0.5
+        self.coupling = {
+            "scheme"     : "explicit",
+            "accelerator": "iqn-ils",
+            "reuse"      : 2,
+            "tol"        : 1.0e-4,
+            "max_iter"   : 30,
+        }
+        # convexify=True makes the hull/keel/rudder convex hulls overlap; the
+        # running-min SDF union then HARD-SWITCHES the imposed solid velocity at
+        # the seam between links, injecting a grid-scale divergence → pressure
+        # spike → blow-up (and finer cells make it WORSE, which is what we saw).
+        # Blend the imposed band velocity with an SDF-weighted softmin over a
+        # few cells to make it continuous across the seam.
+        self.body_velocity_blend_eps_cells = None
+
         # ── Physics (real ~6 m scale) ─────────────────────────────────
         self.rho_body     = 1000.0         # Poisson conditioning (not boat density)
         self.rho          = 1000.0         # water density
@@ -128,12 +160,13 @@ class SimConfig(BaseSimConfig):
         self.bdim_dt                 = self.timestep
         self.bdim_nt                 = self.n_iterations
         self.convection_method       = "abdquickest"
+        self.convexify                = True               # re-express the convection term in a more stable form (BDIM-specific)
         self.poisson_method          = "multigrid"
         self.poisson_tol             = 1.0e-6
         self.poisson_max_cycles      = 4
         self.poisson_max_mgcg_cycles = 30
         self.poisson_precond_vcycles = 1
-        self.poisson_warm_start      = True
+        # self.poisson_warm_start      = True
         self.poisson_smoother        = "rbgs"
         self.poisson_nsmoothing      = 5
         self.poisson_bc_type         = "neumann"
@@ -161,9 +194,7 @@ class SimConfig(BaseSimConfig):
         # ── Arena ────────────────────────────────────────────────────
         self.wall_thickness = 0.2
         self.arena_pose     = [0, 0, 0, 0, 0, 0]
-        self.water_drag     = False   # BDIM handles all hydrodynamics
-        self.water_buoyancy = False
-        self.water_height   = WATERLINE
+
 
         # ── MuJoCo ───────────────────────────────────────────────────
         self.visual_scale = 1.0
@@ -229,7 +260,7 @@ class SimConfig(BaseSimConfig):
             self.xmin, self.xmax, self.ymin, self.ymax,
             zmin=self.zmin, zmax=WATERLINE,
             water_height=0.0,
-            water_alpha=0.0,
+            water_alpha=0.1,
         )
         arena_sdf = os.path.join(sdfs_path, "pool", "sdf", "pool.sdf")
 

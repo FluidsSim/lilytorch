@@ -9,42 +9,50 @@
            meshes (hull / keel / rudder) plus an analytical 3-blade
            propeller (inspired by the submarine example).
 
-           MESH FRAME (native, as exported from Blender):
-             X = length (fore-aft), 0 .. 6.04 m
-             Y = vertical (UP),     keel tip -0.48 .. deck +0.94 m
-             Z = beam (port-stbd),  -1.088 .. +1.088 m
-           The simulation is Z-up, so gen_configs.py spawns the model with
-           roll = +pi/2 (rotation about X) to map mesh-Y(up) -> world-Z(up).
+           MESH SCALE: the OBJ files are exported in mm-ish units (hull
+           length 2224.7), so every mesh uses <scale>0.0026970</scale>
+           (= 6.0 / 2224.7) → hull length = 6.0 m.  The <scale> only scales
+           the mesh vertices, so the link/inertial/collision <pose> values
+           below are already given in the SCALED (metre) frame.
+
+           MESH FRAME (after scaling):
+             X = length (fore-aft), -0.78 .. 5.22 m   (bow at +X, stern at -X)
+             Y = vertical (UP),     keel tip -0.57 .. deck +0.84 m
+             Z = beam (port-stbd),  -1.11 .. +1.11 m
+           gen_configs.py spawns the model with roll = +pi/2 so mesh-Y(up)
+           maps to world-Z(up).
 
            ONE COLLISION PER LINK (each fluid sub-body needs a unique link
-           id, see the toy-boat history): hull = base_link, keel and rudder
-           are their own links welded to the hull by fixed joints.
+           id): hull = base_link, keel and rudder are their own links welded
+           to the hull by fixed joints.
 
-           Masses: the hull encloses ~0.85 m^3, so full-submersion buoyancy
-           is ~850 kg.  Total mass is set to ~420 kg (light sportboat) so it
-           floats at roughly half the hull volume.  Inertias are coarse
-           box approximations in the native (mesh) frame; tune as needed.
+           Masses: the hull encloses ~1.61 m^3 → full-submersion buoyancy
+           ~1610 kg.  Total mass ~800 kg (light yacht) → floats ~half draft.
+           Inertias are coarse box approximations in the scaled mesh frame.
            ================================================================= -->
 
       <!-- ===================== HULL (base link) ====================== -->
       <link name="base_link">
         <pose>0 0 0 0 0 0</pose>
         <inertial>
-          <pose>3.02 0.474 0 0 0 0</pose>
-          <mass>280.0</mass>
+          <!-- COM x=2.2206 sits over the centre of buoyancy at the design
+               waterline (submerged-volume centroid x≈2.20), so the boat trims
+               level: boat COM_x≈2.215 vs COB_x≈2.20 (offset +0.01 m). -->
+          <pose>2.2206 0.3664 0 0 0 0</pose>
+          <mass>600.0</mass>
           <inertia>
-            <ixx>131.0</ixx> <ixy>0</ixy> <ixz>0</ixz>
-            <iyy>962.0</iyy> <iyz>0</iyz>
-            <izz>870.0</izz>
+            <ixx>290.0</ixx>  <ixy>0</ixy> <ixz>0</ixz>
+            <iyy>2045.0</iyy> <iyz>0</iyz>
+            <izz>1845.0</izz>
           </inertia>
         </inertial>
         <collision name="hull_collision">
           <pose>0 0 0 0 0 0</pose>
-          <geometry><mesh><uri>../sdfs/DSYHS/OBJ/hull.obj</uri><scale>1 1 1</scale></mesh></geometry>
+          <geometry><mesh><uri>../sdfs/DSYHS/OBJ/hull.obj</uri><scale>0.0026970 0.0026970 0.0026970</scale></mesh></geometry>
         </collision>
         <visual name="hull_visual">
           <pose>0 0 0 0 0 0</pose>
-          <geometry><mesh><uri>../sdfs/DSYHS/OBJ/hull.obj</uri><scale>1 1 1</scale></mesh></geometry>
+          <geometry><mesh><uri>../sdfs/DSYHS/OBJ/hull.obj</uri><scale>0.0026970 0.0026970 0.0026970</scale></mesh></geometry>
           <material><ambient>0.85 0.85 0.88 1</ambient><diffuse>0.85 0.85 0.88 1</diffuse></material>
         </visual>
       </link>
@@ -53,21 +61,21 @@
       <link name="keel_link">
         <pose>0 0 0 0 0 0</pose>
         <inertial>
-          <pose>0.518 -0.05 0 0 0 0</pose>
-          <mass>120.0</mass>
+          <pose>2.4653 -0.2729 0 0 0 0</pose>
+          <mass>180.0</mass>
           <inertia>
-            <ixx>5.5</ixx> <ixy>0</ixy> <ixz>0</ixz>
-            <iyy>1.31</iyy> <iyz>0</iyz>
-            <izz>6.78</izz>
+            <ixx>5.64</ixx>  <ixy>0</ixy> <ixz>0</ixz>
+            <iyy>29.8</iyy>  <iyz>0</iyz>
+            <izz>34.6</izz>
           </inertia>
         </inertial>
         <collision name="keel_collision">
           <pose>0 0 0 0 0 0</pose>
-          <geometry><mesh><uri>../sdfs/DSYHS/OBJ/keel.obj</uri><scale>1 1 1</scale></mesh></geometry>
+          <geometry><mesh><uri>../sdfs/DSYHS/OBJ/keel.obj</uri><scale>0.0026970 0.0026970 0.0026970</scale></mesh></geometry>
         </collision>
         <visual name="keel_visual">
           <pose>0 0 0 0 0 0</pose>
-          <geometry><mesh><uri>../sdfs/DSYHS/OBJ/keel.obj</uri><scale>1 1 1</scale></mesh></geometry>
+          <geometry><mesh><uri>../sdfs/DSYHS/OBJ/keel.obj</uri><scale>0.0026970 0.0026970 0.0026970</scale></mesh></geometry>
           <material><ambient>0.6 0.6 0.62 1</ambient><diffuse>0.6 0.6 0.62 1</diffuse></material>
         </visual>
       </link>
@@ -76,21 +84,21 @@
       <link name="rudder_link">
         <pose>0 0 0 0 0 0</pose>
         <inertial>
-          <pose>2.93 -0.17 0 0 0 0</pose>
+          <pose>-0.2113 0.0233 0 0 0 0</pose>
           <mass>20.0</mass>
           <inertia>
-            <ixx>0.67</ixx> <ixy>0</ixy> <ixz>0</ixz>
-            <iyy>3.55</iyy> <iyz>0</iyz>
-            <izz>4.12</izz>
+            <ixx>0.86</ixx>  <ixy>0</ixy> <ixz>0</ixz>
+            <iyy>0.20</iyy>  <iyz>0</iyz>
+            <izz>1.06</izz>
           </inertia>
         </inertial>
         <collision name="rudder_collision">
           <pose>0 0 0 0 0 0</pose>
-          <geometry><mesh><uri>../sdfs/DSYHS/OBJ/rudder.obj</uri><scale>1 1 1</scale></mesh></geometry>
+          <geometry><mesh><uri>../sdfs/DSYHS/OBJ/rudder.obj</uri><scale>0.0026970 0.0026970 0.0026970</scale></mesh></geometry>
         </collision>
         <visual name="rudder_visual">
           <pose>0 0 0 0 0 0</pose>
-          <geometry><mesh><uri>../sdfs/DSYHS/OBJ/rudder.obj</uri><scale>1 1 1</scale></mesh></geometry>
+          <geometry><mesh><uri>../sdfs/DSYHS/OBJ/rudder.obj</uri><scale>0.0026970 0.0026970 0.0026970</scale></mesh></geometry>
           <material><ambient>0.7 0.2 0.15 1</ambient><diffuse>0.7 0.2 0.15 1</diffuse></material>
         </visual>
       </link>
@@ -106,13 +114,14 @@
       <!-- ============= ANALYTICAL PROPELLER (3 blades) ===============
            Hub axis along X (the boat's long axis); spins via a revolute
            joint driven by PropellerController torque.  Placed just forward
-           of the keel (keel spans X 0.34-0.70) at X=0.20, slightly below
-           the hull bottom (native Y=-0.10), on the centreline (Z=0).
-           Three box blades at 120 deg around the X axis, each pitched
-           0.35 rad about its radial span axis so rotation -> axial thrust.
-           Blade poses precomputed as Rx(theta)*Ry(pitch). ================ -->
+           (bow side, +X) of the keel — keel spans X 1.77..3.17 — at X=3.25,
+           below the hull bottom (Y=-0.25), on the centreline (Z=0).  To put
+           it aft instead (toward the stern/rudder at -X), move the hub +
+           blade X to e.g. ~1.7 and flip the blade pitch sign for reverse.
+           Three box blades at 120 deg around X, each pitched 0.35 rad about
+           its radial span axis so rotation -> axial thrust. ============== -->
       <link name="propeller_hub">
-        <pose>0.20 -0.10 0 0 0 0</pose>
+        <pose>3.25 -0.25 0 0 0 0</pose>
         <inertial>
           <pose>0 0 0 0 0 0</pose>
           <mass>0.226</mass>
@@ -130,7 +139,7 @@
       </link>
 
       <link name="blade_0">
-        <pose>0.20 -0.015 0.0 0 0.35 0</pose>
+        <pose>3.25 -0.165 0.0 0 0.35 0</pose>
         <inertial>
           <pose>0 0 0 0 0 0</pose>
           <mass>0.036</mass>
@@ -148,7 +157,7 @@
       </link>
 
       <link name="blade_1">
-        <pose>0.20 -0.1425 0.0736 2.06775 -0.17230 0.30618</pose>
+        <pose>3.25 -0.2925 0.0736 2.06775 -0.17230 0.30618</pose>
         <inertial>
           <pose>0 0 0 0 0 0</pose>
           <mass>0.036</mass>
@@ -166,7 +175,7 @@
       </link>
 
       <link name="blade_2">
-        <pose>0.20 -0.1425 -0.0736 -2.06775 -0.17230 -0.30618</pose>
+        <pose>3.25 -0.2925 -0.0736 -2.06775 -0.17230 -0.30618</pose>
         <inertial>
           <pose>0 0 0 0 0 0</pose>
           <mass>0.036</mass>
