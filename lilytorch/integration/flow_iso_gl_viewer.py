@@ -115,6 +115,10 @@ typedef struct {
   GLint  loc_cam_fwd;
   GLint  loc_half_w;
   GLint  loc_half_h;
+  GLint  loc_znear;
+  GLint  loc_zfar;
+  GLint  loc_clip_zero_to_one;
+  GLint  loc_reverse_z;
   GLint  loc_light_dir;
   GLint  loc_alpha;
   int    vbo_capacity;
@@ -175,6 +179,10 @@ static const char* k_vertex_shader =
     "uniform vec3  uCamFwd;\n"
     "uniform float uHalfW;\n"
     "uniform float uHalfH;\n"
+    "uniform float uZNear;\n"
+    "uniform float uZFar;\n"
+    "uniform int   uClipZeroToOne;  /* 1: GL_ZERO_TO_ONE, 0: GL_NEGATIVE_ONE_TO_ONE */\n"
+    "uniform int   uReverseZ;       /* 1: reversed depth (near maps to max) */\n"
     "out vec3 vNormalWorld;\n"
     "out vec3 vColor;\n"
     "void main() {\n"
@@ -182,8 +190,23 @@ static const char* k_vertex_shader =
     "  float depth = dot(rel, uCamFwd);\n"
     "  float xeye  = dot(rel, uCamRight);\n"
     "  float yeye  = dot(rel, uCamUp);\n"
-    "  /* No depth test will be used; emit z=0 so fragments aren't clipped. */\n"
-    "  gl_Position = vec4(xeye / uHalfW, yeye / uHalfH, 0.0, depth);\n"
+    "  /* Perspective depth matching MuJoCo's actual depth buffer so the iso\n"
+    "     correctly occludes / is occluded by scene geometry. w = depth\n"
+    "     (eye-space distance along view dir). The exact clip.z formula depends\n"
+    "     on the live GL clip-depth mode and whether MuJoCo uses reversed-Z\n"
+    "     (MuJoCo 3.x does: ZERO_TO_ONE + reversed). Both are queried from the\n"
+    "     context at draw time and passed in, so this stays convention-agnostic. */\n"
+    "  float n = uZNear;\n"
+    "  float f = uZFar;\n"
+    "  float zc;\n"
+    "  if (uClipZeroToOne == 1) {\n"
+    "    if (uReverseZ == 1) zc = n * (f - depth) / (f - n);   /* near->1, far->0 */\n"
+    "    else                zc = f * (depth - n) / (f - n);   /* near->0, far->1 */\n"
+    "  } else {\n"
+    "    float zf = ((f + n) / (f - n)) * depth - (2.0 * f * n) / (f - n);\n"
+    "    zc = (uReverseZ == 1) ? -zf : zf;   /* near->-/+1, far->+/-1 */\n"
+    "  }\n"
+    "  gl_Position = vec4(xeye / uHalfW, yeye / uHalfH, zc, depth);\n"
     "  vNormalWorld = aNormal;\n"
     "  vColor = aColor;\n"
     "}\n";
@@ -261,6 +284,10 @@ static int create_program_in_ctx(CtxResources* c) {
   c->loc_cam_fwd   = glGetUniformLocation(prog, "uCamFwd");
   c->loc_half_w    = glGetUniformLocation(prog, "uHalfW");
   c->loc_half_h    = glGetUniformLocation(prog, "uHalfH");
+  c->loc_znear     = glGetUniformLocation(prog, "uZNear");
+  c->loc_zfar      = glGetUniformLocation(prog, "uZFar");
+  c->loc_clip_zero_to_one = glGetUniformLocation(prog, "uClipZeroToOne");
+  c->loc_reverse_z = glGetUniformLocation(prog, "uReverseZ");
   c->loc_light_dir = glGetUniformLocation(prog, "uLightDir");
   c->loc_alpha     = glGetUniformLocation(prog, "uAlpha");
   return 1;
@@ -378,13 +405,39 @@ static void draw_iso_locked(CtxResources* c, const mjvScene* scn, mjrRect viewpo
   double half_h = 0.5 * frust_h;
   double half_w = half_h * ((double)viewport.width / (double)viewport.height);
 
+  /* Exact near/far planes MuJoCo used for THIS frame (it recomputes them per
+     frame from the scene bounds). Using these makes our perspective depth land
+     in the same [0,1] window buffer as the textured bodies, so depth-testing
+     against MuJoCo's freshly-rendered depth buffer is correct. Fall back to the
+     model-derived values if the scene didn't populate them. */
+  double znear = (double)scn->camera[0].frustum_near;
+  double zfar  = (double)scn->camera[0].frustum_far;
+  if (!(znear > 0.0) || !(zfar > znear)) {
+    znear = (double)g_state.znear;
+    zfar  = (double)g_state.zfar;
+  }
+
+  /* Match MuJoCo's depth convention exactly by querying the live GL state
+     instead of assuming one. MuJoCo 3.x renders reversed-Z with ZERO_TO_ONE
+     clip control and GL_GREATER; older/other paths use standard depth. */
+  GLint clip_depth_mode = GL_NEGATIVE_ONE_TO_ONE;
+  glGetIntegerv(GL_CLIP_DEPTH_MODE, &clip_depth_mode);
+  GLint depth_func = GL_LESS;
+  glGetIntegerv(GL_DEPTH_FUNC, &depth_func);
+  /* A GREATER/GEQUAL compare implies the buffer is reversed (near = max). */
+  int clip_zero_to_one = (clip_depth_mode == GL_ZERO_TO_ONE) ? 1 : 0;
+  int reverse_z = (depth_func == GL_GREATER || depth_func == GL_GEQUAL) ? 1 : 0;
+  drain_gl_errors_silent();  /* GL_CLIP_DEPTH_MODE may be unsupported pre-4.5 */
+
   if (draw_iso_call_count < 3) {
     fprintf(stderr,
             "[FlowIsoGLHook] draw call %d: ctx=%p verts=%d viewport=(%d,%d %dx%d) "
-            "prog=%u vao=%u vbo=%u cap=%d\n",
+            "prog=%u vao=%u vbo=%u cap=%d znear=%.4g zfar=%.4g "
+            "clipZeroToOne=%d reverseZ=%d\n",
             draw_iso_call_count, (const void*)c->key, g_state.vertex_count,
             viewport.left, viewport.bottom, viewport.width, viewport.height,
-            c->program, c->vao, c->vbo, c->vbo_capacity);
+            c->program, c->vao, c->vbo, c->vbo_capacity, znear, zfar,
+            clip_zero_to_one, reverse_z);
     draw_iso_call_count++;
   }
 
@@ -398,14 +451,22 @@ static void draw_iso_locked(CtxResources* c, const mjvScene* scn, mjrRect viewpo
   glGetIntegerv(GL_CURRENT_PROGRAM, &prev_prog);
 
   glViewport(viewport.left, viewport.bottom, viewport.width, viewport.height);
-  /* The iso is a translucent overlay; we don't try to depth-test against
-     MuJoCo's body geometry because the HUD pass invalidates the projection
-     matrix stack and we lack a reliable way to match MuJoCo's depth values.
-     debug_force_visible kept for compatibility — additionally turns alpha off. */
-  glDisable(GL_DEPTH_TEST);
+  /* Depth-test the iso against MuJoCo's just-rendered scene depth so bodies
+     (and anything else opaque) in front correctly hide the flow behind them.
+     The vertex shader now emits matching perspective depth (see uZNear/uZFar).
+     We test but DON'T write depth: the iso is translucent and unsorted, so
+     writing would make it self-occlude in draw order. debug_force_visible
+     restores the old always-on-top behaviour (no depth test, opaque). */
+  GLboolean depth_mask = GL_TRUE;
+  glGetBooleanv(GL_DEPTH_WRITEMASK, &depth_mask);
   if (g_state.debug_force_visible) {
+    glDisable(GL_DEPTH_TEST);
     glDisable(GL_BLEND);          /* opaque */
   } else {
+    /* Keep MuJoCo's own depth-compare function (matches its buffer's Z
+       direction); we only test, never write (iso is translucent + unsorted). */
+    glEnable(GL_DEPTH_TEST);
+    glDepthMask(GL_FALSE);
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
   }
@@ -418,6 +479,10 @@ static void draw_iso_locked(CtxResources* c, const mjvScene* scn, mjrRect viewpo
   glUniform3f(c->loc_cam_fwd,   (float)forward[0], (float)forward[1], (float)forward[2]);
   glUniform1f(c->loc_half_w,    (float)half_w);
   glUniform1f(c->loc_half_h,    (float)half_h);
+  glUniform1f(c->loc_znear,     (float)znear);
+  glUniform1f(c->loc_zfar,      (float)zfar);
+  glUniform1i(c->loc_clip_zero_to_one, clip_zero_to_one);
+  glUniform1i(c->loc_reverse_z, reverse_z);
   glUniform3f(c->loc_light_dir, g_state.light_dir[0], g_state.light_dir[1], g_state.light_dir[2]);
   glUniform1f(c->loc_alpha,     g_state.alpha);
 
@@ -434,9 +499,11 @@ static void draw_iso_locked(CtxResources* c, const mjvScene* scn, mjrRect viewpo
 
   /* Restore. */
   glUseProgram((GLuint)prev_prog);
+  glDepthMask(depth_mask);
   if (!blend) glDisable(GL_BLEND);
   if (cull_face) glEnable(GL_CULL_FACE);
   if (depth_test) glEnable(GL_DEPTH_TEST);
+  else glDisable(GL_DEPTH_TEST);
 }
 
 __attribute__((visibility("default")))

@@ -1,4 +1,13 @@
 import os
+import sys
+
+# Put THIS directory on the child sim's PYTHONPATH so the generated simulation
+# (run from a timestamped output folder) can import the local ``_verify_zlog``.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+os.environ["PYTHONPATH"] = _HERE + os.pathsep + os.environ.get("PYTHONPATH", "")
+
 from gen_configs import SimConfig
 
 class VerifyConfig(SimConfig):

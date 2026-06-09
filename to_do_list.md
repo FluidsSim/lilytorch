@@ -7,6 +7,49 @@ Memory vars: `sdf_val_{u,v,w}`, `{u,v,w,p}0`, `n{x,y,z}_{u,v,w}`, `body_{u,v,w}`
 
 # HIGH PRIORITY
 
+- **Two-phase body∩interface band instability (elongated static float)** — a body held in
+  a STATIC FLOAT straddling the air/water interface blows up (DSYHS boat `it~51`,
+  volume-matched 11:1 spheroid `it~47-61`), while a *compact* float (sphere) and the
+  *descending/entry* regime (three-sphere drop, water-entry) are STABLE. Localised to the
+  **air–water–solid triple point / waterline band**, with a ~static body — it is **not**
+  FSI (the free body moves <0.5 mm before blow-up), **not** the propeller/masses/CFL/mesh/
+  resolution/coupling, and **not** the pure two-phase transport (body-FREE hydrostatic is
+  stable for the same scheme). See `memory/project_toy_boat_two_phase_debug.md` for the full
+  bisection.
+  - ✅ **FIXED — air-transparent body** (`two_phase.air_transparent_body`, default ON).
+    Masks the BDIM fluid fraction μ₀ by the VOF water fraction α: μ₀_eff = 1 − α·(1−μ₀).
+    In water (α=1) → normal BDIM; in air (α=0) → body transparent (μ₀_eff=1). Eliminates
+    the triple-point singularity by ensuring c = dt·μ₀_eff/ρ never collapses to 0 in the
+    air phase. Physically justified: air forces ~1000× smaller than water. Implemented in
+    both kernel path (`_rescale_kernel_coeffs_two_phase`) and Python path
+    (`_compute_bdim_coefficients` + `_apply_bdim_all_axes`). Verified stable: sphere
+    (4000/4000), 11:1 spheroid (4000/4000), single-body hull at waterline (>3 min).
+  - ⚠️ **Multi-body convex-hull seams** remain unstable at coarse resolution (h≥0.05).
+    The hull, keel, and rudder convex hulls overlap; the running-min SDF union hard-switches
+    body velocity at the seams → grid-scale divergence → blow-up. Single-body hull-only is
+    stable; multi-body only stable at fine resolution (h=0.00333, `gen_configs_small.py`).
+    `body_velocity_blend_eps_cells` made it worse at 2.0 cells; untested at other values.
+  - *Tried, did NOT cure:* GFM/sharp-interface, `p_rgh` reduced-pressure, interface damping,
+    density smoothing, body-aware VOF (reinit / flux-mask / μ0-gated gravity), consistent
+    momentum alone, three-phase density EVERYWHERE (hurts — `ρ_s` must stay out of the
+    momentum/transport), `ρ_flow·g` gravity (hurts on BDIM), naive rigid re-imposition.
+  - *Path forward (research-grade, likely needs core / new FSI architecture):* explicit
+    **contact-line / triple-point** treatment at the waterline–body corner; or the
+    **DLM / Brinkman-penalization** multiphase-WSI scheme (Nangia 2019 `arXiv:1901.07892`;
+    Bhalla IBAMR `arXiv:1904.04078`; `github.com/IBAMR/IBAMR`). Note BDIM ≈ Brinkman, so the
+    fix should be replicable in the BDIM framework rather than swapping methods.
+
+- 🔴 **Lagrangian force method incompatible with two-phase flow** — `force_method="lagrangian"`
+  gives ~3× spurious buoyancy + large pitch torque for surface-straddling bodies, even at
+  fine resolution (explodes at iter 12, h=0.00333). Eulerian (`force_method="eulerian"`)
+  works correctly. Root cause NOT identified despite testing: pressure gauge (all-Neumann
+  mean subtraction → negative air pressure), `zero_pressure_inside`, `convexify`, and
+  `air_transparent_body`. The surface integral ∮ p n dS over the marching-cubes
+  triangulation diverges violently from the volumetric band integral ∫ p n δ_ε(φ) dV.
+  **Needs investigation:** compare forces from both methods on a single step, check marching-
+  cubes mesh quality (watertightness, normal consistency), verify interpolation stencil
+  doesn't sample interior cells with unphysical p. Currently workaround: use eulerian.
+
 - **Polish repo & docs** — review/correct outdated documentation, including `docs/`.
 
 - ~~**Wire in `FlowDiagnostics`.**~~ DONE. `FlowDiagnostics` moved to its own module

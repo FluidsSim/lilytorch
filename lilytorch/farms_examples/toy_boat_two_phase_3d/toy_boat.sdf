@@ -111,102 +111,50 @@
         <parent>base_link</parent><child>rudder_link</child><pose>0 0 0 0 0 0</pose>
       </joint>
 
-      <!-- ============= ANALYTICAL PROPELLER (3 blades) ===============
-           Hub axis along X (the boat's long axis); spins via a revolute
-           joint driven by PropellerController torque.  Placed just forward
-           (bow side, +X) of the keel — keel spans X 1.77..3.17 — at X=3.25,
-           below the hull bottom (Y=-0.25), on the centreline (Z=0).  To put
-           it aft instead (toward the stern/rudder at -X), move the hub +
-           blade X to e.g. ~1.7 and flip the blade pitch sign for reverse.
-           Three box blades at 120 deg around X, each pitched 0.35 rad about
-           its radial span axis so rotation -> axial thrust. ============== -->
+      <!-- ============= ANALYTICAL PROPELLER (2 blades) ===============
+           Submarine-style 2-blade propeller at the stern, just forward
+           of the rudder.  Hub cylinder R=0.06 L=0.12, blades 0.015×0.30×0.06
+           pitched ±0.3 rad about radial Y.  Hub on centreline (Y=0,Z=0),
+           fully submerged.  Revolute joint about X driven by torque. ====== -->
       <link name="propeller_hub">
-        <pose>3.25 -0.25 0 0 0 0</pose>
-        <inertial>
-          <pose>0 0 0 0 0 0</pose>
-          <mass>0.226</mass>
-          <inertia><ixx>1.02e-4</ixx><ixy>0</ixy><ixz>0</ixz><iyy>1.71e-4</iyy><iyz>0</iyz><izz>1.71e-4</izz></inertia>
-        </inertial>
-        <collision name="propeller_hub_collision">
-          <pose>0 0 0 0 1.5707963267948966 0</pose>
-          <geometry><cylinder><radius>0.03</radius><length>0.08</length></cylinder></geometry>
-        </collision>
-        <visual name="propeller_hub_visual">
-          <pose>0 0 0 0 1.5707963267948966 0</pose>
-          <geometry><cylinder><radius>0.03</radius><length>0.08</length></cylinder></geometry>
-          <material><ambient>0.8 0.6 0.1 1</ambient><diffuse>0.8 0.6 0.1 1</diffuse></material>
-        </visual>
+        <pose>-0.1 0.0 0.0 0 0 0</pose>
+        <inertial><pose>0 0 0 0 0 0</pose><mass>1.3572</mass>
+          <inertia><ixx>0.002443</ixx><ixy>0</ixy><ixz>0</ixz><iyy>0.002851</iyy><iyz>0</iyz><izz>0.002851</izz></inertia></inertial>
+        <collision name="propeller_hub_collision"><pose>0 0 0 0 1.5707963267948966 0</pose>
+          <geometry><cylinder><radius>0.06</radius><length>0.12</length></cylinder></geometry></collision>
+        <visual name="propeller_hub_visual"><pose>0 0 0 0 1.5707963267948966 0</pose>
+          <geometry><cylinder><radius>0.06</radius><length>0.12</length></cylinder></geometry>
+          <material><ambient>0.8 0.6 0.1 1</ambient><diffuse>0.8 0.6 0.1 1</diffuse><specular>0.4 0.4 0.4 1</specular></material></visual>
       </link>
 
       <link name="blade_0">
-        <pose>3.25 -0.165 0.0 0 0.35 0</pose>
-        <inertial>
-          <pose>0 0 0 0 0 0</pose>
-          <mass>0.036</mass>
-          <inertia><ixx>3.27e-5</ixx><ixy>0</ixy><ixz>0</ixz><iyy>3.13e-6</iyy><iyz>0</iyz><izz>3.04e-5</izz></inertia>
-        </inertial>
-        <collision name="blade_0_collision">
-          <pose>0 0 0 0 0 0</pose>
-          <geometry><box><size>0.012 0.10 0.03</size></box></geometry>
-        </collision>
-        <visual name="blade_0_visual">
-          <pose>0 0 0 0 0 0</pose>
-          <geometry><box><size>0.012 0.10 0.03</size></box></geometry>
-          <material><ambient>0.9 0.7 0.1 1</ambient><diffuse>0.9 0.7 0.1 1</diffuse></material>
-        </visual>
+        <pose>-0.1 -0.21 0.0 0 0.3 0</pose>
+        <inertial><pose>0 0 0 0 0 0</pose><mass>0.27</mass>
+          <inertia><ixx>0.002106</ixx><ixy>0</ixy><ixz>0</ixz><iyy>0.000086</iyy><iyz>0</iyz><izz>0.002030</izz></inertia></inertial>
+        <collision name="blade_0_collision"><pose>0 0 0 0 0 0</pose>
+          <geometry><box><size>0.015 0.30 0.06</size></box></geometry></collision>
+        <visual name="blade_0_visual"><pose>0 0 0 0 0 0</pose>
+          <geometry><box><size>0.015 0.30 0.06</size></box></geometry>
+          <material><ambient>0.9 0.7 0.1 1</ambient><diffuse>0.9 0.7 0.1 1</diffuse><specular>0.4 0.4 0.4 1</specular></material></visual>
       </link>
 
       <link name="blade_1">
-        <pose>3.25 -0.2925 0.0736 2.06775 -0.17230 0.30618</pose>
-        <inertial>
-          <pose>0 0 0 0 0 0</pose>
-          <mass>0.036</mass>
-          <inertia><ixx>3.27e-5</ixx><ixy>0</ixy><ixz>0</ixz><iyy>3.13e-6</iyy><iyz>0</iyz><izz>3.04e-5</izz></inertia>
-        </inertial>
-        <collision name="blade_1_collision">
-          <pose>0 0 0 0 0 0</pose>
-          <geometry><box><size>0.012 0.10 0.03</size></box></geometry>
-        </collision>
-        <visual name="blade_1_visual">
-          <pose>0 0 0 0 0 0</pose>
-          <geometry><box><size>0.012 0.10 0.03</size></box></geometry>
-          <material><ambient>0.9 0.7 0.1 1</ambient><diffuse>0.9 0.7 0.1 1</diffuse></material>
-        </visual>
+        <pose>-0.1 0.21 0.0 0 -0.3 0</pose>
+        <inertial><pose>0 0 0 0 0 0</pose><mass>0.27</mass>
+          <inertia><ixx>0.002106</ixx><ixy>0</ixy><ixz>0</ixz><iyy>0.000086</iyy><iyz>0</iyz><izz>0.002030</izz></inertia></inertial>
+        <collision name="blade_1_collision"><pose>0 0 0 0 0 0</pose>
+          <geometry><box><size>0.015 0.30 0.06</size></box></geometry></collision>
+        <visual name="blade_1_visual"><pose>0 0 0 0 0 0</pose>
+          <geometry><box><size>0.015 0.30 0.06</size></box></geometry>
+          <material><ambient>0.9 0.7 0.1 1</ambient><diffuse>0.9 0.7 0.1 1</diffuse><specular>0.4 0.4 0.4 1</specular></material></visual>
       </link>
 
-      <link name="blade_2">
-        <pose>3.25 -0.2925 -0.0736 -2.06775 -0.17230 -0.30618</pose>
-        <inertial>
-          <pose>0 0 0 0 0 0</pose>
-          <mass>0.036</mass>
-          <inertia><ixx>3.27e-5</ixx><ixy>0</ixy><ixz>0</ixz><iyy>3.13e-6</iyy><iyz>0</iyz><izz>3.04e-5</izz></inertia>
-        </inertial>
-        <collision name="blade_2_collision">
-          <pose>0 0 0 0 0 0</pose>
-          <geometry><box><size>0.012 0.10 0.03</size></box></geometry>
-        </collision>
-        <visual name="blade_2_visual">
-          <pose>0 0 0 0 0 0</pose>
-          <geometry><box><size>0.012 0.10 0.03</size></box></geometry>
-          <material><ambient>0.9 0.7 0.1 1</ambient><diffuse>0.9 0.7 0.1 1</diffuse></material>
-        </visual>
-      </link>
-
-      <!-- Revolute joint: propeller spins about the hull's long (X) axis -->
       <joint name="joint_propeller" type="revolute">
-        <parent>base_link</parent><child>propeller_hub</child>
-        <pose>0 0 0 0 0 0</pose>
+        <parent>base_link</parent><child>propeller_hub</child><pose>0 0 0 0 0 0</pose>
         <axis><xyz>1 0 0</xyz><limit><lower>-1e16</lower><upper>1e16</upper></limit></axis>
       </joint>
-      <joint name="joint_blade_0" type="fixed">
-        <parent>propeller_hub</parent><child>blade_0</child><pose>0 0 0 0 0 0</pose>
-      </joint>
-      <joint name="joint_blade_1" type="fixed">
-        <parent>propeller_hub</parent><child>blade_1</child><pose>0 0 0 0 0 0</pose>
-      </joint>
-      <joint name="joint_blade_2" type="fixed">
-        <parent>propeller_hub</parent><child>blade_2</child><pose>0 0 0 0 0 0</pose>
-      </joint>
+      <joint name="joint_blade_0" type="fixed"><parent>propeller_hub</parent><child>blade_0</child><pose>0 0 0 0 0 0</pose></joint>
+      <joint name="joint_blade_1" type="fixed"><parent>propeller_hub</parent><child>blade_1</child><pose>0 0 0 0 0 0</pose></joint>
 
     </model>
   </world>

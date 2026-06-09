@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-"""Toy motorboat in a small two-phase (water+air) tank with spinning propeller.
+"""Toy motorboat in a two-phase (water+air) tank with spinning propeller.
 
-A cigar-shaped hull (cylinder L=0.12 m, R=0.028 m, ~350 kg/m³) with a rounded
-bow, deck cabin, keel fin, and a two-blade propeller at the stern.  The
-propeller is driven by a constant-torque controller (same PropellerController
-used by the submarine example), and the BDIM fluid coupling turns blade
-rotation into forward thrust.
+Full DSYHS yacht hull (L=6.04 m) with keel, rudder, and a 3-blade propeller
+at the stern (just in front of the rudder).  The propeller is driven by a
+constant-torque controller, and the BDIM fluid coupling turns blade rotation
+into forward thrust.
 
 The two-phase VOF solver models both water and real air, so the boat
-experiences emergent buoyancy and dynamic pressure forces.
+experiences emergent buoyancy and dynamic pressure forces.  The air-transparent
+body fix (on by default) stabilises the waterline triple-point.
 
-Grid:  112 × 56 × 72  (h=0.0025 m, ~11 cells across the hull beam).
-The effective viscosity is raised (~2e-4 m²/s) to keep the Reynolds number low
-(Re ~ U·L/ν ≈ 0.05·0.12/2e-4 ≈ 30) so the flow is laminar and stable.
+Grid:  270 × 64 × 64  (h=0.10 m, ~1.1M cells, ~60 cells along the hull).
+Tank:  27 × 6.4 × 6.4 m  (18 m ahead of the bow for forward navigation).
 
 Run with::
 
@@ -35,9 +34,10 @@ BOAT_LENGTH  = 6.04    # m  (X — long axis)
 BOAT_BEAM    = 2.18    # m  (Z in mesh frame → world Y after spawn)
 BOAT_MASS    = 420.0   # kg (total, from toy_boat.sdf <inertial> blocks)
 
-# ── Tank (sized for the ~6 m hull, with fore/aft + lateral margins) ─────────
-#   X: -1.5 .. 8.1 (boat 0..6.04)   Y: -2.4 .. 2.4 (beam ±1.09)
-#   Z: -1.5 .. 2.1 (keel/rudder hang to ~-0.2 below the waterline)
+# ── Tank (sized for the ~6 m hull, with maneuvering room) ──────────────────
+#   X: -3 .. 24 (boat 0..6.04, 3 m behind, 18 m ahead for forward navigation)
+#   Y: -3.2 .. 3.2 (beam ±1.09, generous lateral clearance)
+#   Z: -2.8 .. 3.6 (keel/rudder hang below hull; 3.2 m air gap above)
 WATERLINE = 0.40       # m  (world-z of the free surface)
 # Spawn the boat AT its floating draft so it starts in near-equilibrium and
 # does not free-fall.  Computed from the hull SDF: the boat displaces 0.83 m^3
@@ -79,28 +79,27 @@ class SimConfig(BaseSimConfig):
         # ~2000×2000×k table and OOM for a multi-metre hull).
         self.compute_sdf = True
 
-        # ── 3-D grid (h=0.05 m) ───────────────────────────────────────────
-        # NOTE (resolution experiment, 2026-06): refining to h=0.03 + dt=1e-4
-        # made the blow-up come SOONER (it~50 vs it~533), not later — so the
-        # instability is NOT under-resolution.  It is a μ0/SDF stiffness at the
-        # seams of the overlapping convex hulls (convexify=True, mandatory: the
-        # raw meshes are broken), which finer cells sharpen.  Keep h=0.05.
-        self.Nx   = 192
-        self.Ny   = 96
-        self.Nz   = 72
-        self.xmin = -1.5
-        self.xmax = 8.1
-        self.ymin = -2.4
-        self.ymax = 2.4
-        self.zmin = -1.5
-        self.zmax = 2.1
+        # ── 3-D grid (h=0.10 m, ~1.1M cells) ─────────────────────────────
+        # Coarser grid to keep cell count manageable in the longer tank.
+        # ~60 cells along the 6 m hull, ~2.4 cells across the 0.24 m draft.
+        # With the air-transparent-body fix (on by default), the waterline
+        # triple-point is stable; multi-body seams may need blending.
+        self.Nx   = 270
+        self.Ny   = 64
+        self.Nz   = 64
+        self.xmin = -3.0
+        self.xmax = 24.0
+        self.ymin = -3.2
+        self.ymax = 3.2
+        self.zmin = -2.8
+        self.zmax = 3.6
 
         # ── Animats ───────────────────────────────────────────────────
         boat_sdf = os.path.join(self.data_folder, 'toy_boat.sdf')
         controller_config = {
             "path": "lilytorch.farms_examples.submarine."
                     "propeller_controller.PropellerController",
-            "tau": 2.0,   # propeller torque (tune for thrust)
+            "tau": 0.0,   # propeller torque (0 = stopped for debugging)
         }
         self.animats_pars = [
             {
@@ -176,7 +175,7 @@ class SimConfig(BaseSimConfig):
         # separate (overlapping) fluid bodies, so the force is integrated over
         # the smoothed delta of the *union* SDF rather than each body's closed
         # surface (gauge-invariant; handles the overlaps correctly).
-        self.force_method            = "eulerian"
+        self.force_method            = "lagrangian"
         self.force_delta_order       = 1
         self.eps_multiplier          = 2
         self.zero_pressure_inside    = False
@@ -192,13 +191,13 @@ class SimConfig(BaseSimConfig):
         self.bc_values_w = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
         # ── Arena ────────────────────────────────────────────────────
-        self.wall_thickness = 0.2
+        self.wall_thickness = 0.3       # slightly thicker walls for bigger tank
         self.arena_pose     = [0, 0, 0, 0, 0, 0]
 
 
         # ── MuJoCo ───────────────────────────────────────────────────
         self.visual_scale = 1.0
-        self.extent       = 12.0
+        self.extent       = 28.0        # scaled for ~27 m tank
         self.shadow_size  = 1024
 
         # ── Output ───────────────────────────────────────────────────
@@ -324,8 +323,8 @@ class SimConfig(BaseSimConfig):
                 "angular_velocity": 0,
                 "azimuth"         : 90,              # side view
                 "elevation"       : -15,             # slightly above horizontal
-                "distance"        : 11.0,            # whole ~6 m boat in frame
-                "offset"          : [3.0, 0.0, WATERLINE],  # look at the boat centre
+                "distance"        : 28.0,            # whole ~27 m tank in frame
+                "offset"          : [10.0, 0.0, WATERLINE],  # look at boat centre
                 "resolution"      : [1920, 1080],
             },
         })
