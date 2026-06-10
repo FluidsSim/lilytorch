@@ -1309,15 +1309,54 @@ class BDIMhandler:
                 tcl = getattr(body, 'tri_centroid_local', None)
                 tnl = getattr(body, 'tri_normal_local', None)
                 if tcl is not None and tnl is not None:
+                    # NOTE: capture the marker offset BEFORE overwriting
+                    # tri_centroid_world (it is read from the body's init value).
+                    off = self._lagr_marker_offset(comp, body_i, body)
                     tcl_d = tcl.to(dtype=self.dtype, device=self.device)
                     tnl_d = tnl.to(dtype=self.dtype, device=self.device)
-                    body.tri_centroid_world = body_rot @ tcl_d + body_pos[:, None]
+                    body.tri_centroid_world = body_rot @ (tcl_d + off) + body_pos[:, None]
                     body.tri_normal_world   = body_rot @ tnl_d
 
         if blend:
             self._finalize_velocity_blend(comp.body_u, comp.body_u, den_u)
             self._finalize_velocity_blend(comp.body_v, comp.body_v, den_v)
             self._finalize_velocity_blend(comp.body_w, comp.body_w, den_w)
+
+    # ------------------------------------------------------------------
+    #  Lagrangian 3-D surface-marker frame offset
+    # ------------------------------------------------------------------
+    def _lagr_marker_offset(self, comp, b, body):
+        """Body-local offset between the surface-triangulation frame and the
+        SDF-local frame, returned as a ``(3, 1)`` tensor (cached per body).
+
+        ``BodyMesh`` builds ``tri_centroid_local`` re-centred on the SDF
+        bounding-box centre, whereas the SDF interpolator / streaming kernel
+        anchor the body frame at the SDF-grid origin.  The world-marker
+        transform ``R @ tri_centroid_local + body_pos`` therefore lands
+        ``R @ local_center`` short of the real surface — for the boat hull/keel
+        that is ~2.2 m, placing every Lagrangian sample point well off the body
+        (→ spurious buoyancy + a large pitch torque).  The offset is captured
+        ONCE from the body's INIT ``tri_centroid_world`` (set in the body
+        constructor, before this handler first overwrites it): it equals
+        ``local_center`` for a bbox-centred mesh and is exactly zero for an
+        origin-centred analytical body (so the corrected transform is a no-op
+        there — analytical bodies, e.g. the validated drop-sphere, are
+        unchanged).
+        """
+        cache = comp.__dict__.setdefault('_lagr_marker_off_cache', {})
+        off = cache.get(b)
+        if off is None:
+            tcl = getattr(body, 'tri_centroid_local', None)
+            tcw = getattr(body, 'tri_centroid_world', None)
+            if (tcl is not None and tcw is not None
+                    and tuple(tcw.shape) == tuple(tcl.shape)):
+                off = (tcw.to(dtype=self.dtype, device=self.device)
+                       - tcl.to(dtype=self.dtype, device=self.device)
+                       ).mean(dim=1, keepdim=True)
+            else:
+                off = torch.zeros(3, 1, dtype=self.dtype, device=self.device)
+            cache[b] = off
+        return off
 
     # ------------------------------------------------------------------
     #  Streaming combined-CUDA 3-D SDF update (Phase B)
@@ -1477,7 +1516,12 @@ class BDIMhandler:
                         offs.append(offs[-1]); valid.append(False); continue
                     tcl_d = tcl.to(dtype=self.dtype, device=self.device)
                     tnl_d = tnl.to(dtype=self.dtype, device=self.device)
-                    cs.append(tcl_d); ns.append(tnl_d)
+                    # Shift bbox-centred mesh markers into the SDF-local frame
+                    # so ``R @ cen + body_pos`` lands ON the surface (the raw
+                    # ``tcl`` is short by ``R @ local_center``; see
+                    # ``_lagr_marker_offset``).  Baked into the cached pack once.
+                    cs.append(tcl_d + self._lagr_marker_offset(comp, b, body))
+                    ns.append(tnl_d)
                     idxs.append(torch.full((tcl_d.shape[1],), b, dtype=torch.long, device=self.device))
                     offs.append(offs[-1] + tcl_d.shape[1]); valid.append(True)
                 pack = {
