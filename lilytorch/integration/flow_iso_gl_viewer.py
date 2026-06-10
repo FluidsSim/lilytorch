@@ -48,6 +48,29 @@ Usage
            }
        }
 
+3. To render **several fields at once** (e.g. the two-phase interface plus a
+   vorticity shell), pass a ``fields`` list instead of/in addition to the
+   single ``field``. Each entry is a per-layer override dict; any key it omits
+   inherits the top-level value. ``color`` is a convenience alias for
+   ``color_uni``, and each layer carries its own ``alpha`` (per-vertex opacity,
+   so a translucent interface and a more opaque flow shell coexist correctly)::
+
+       "config": {
+           "smooth_sigma":  2.0,
+           "crop_boundary": 3,
+           "fields": [
+               {"field": "interface", "iso_value": 0.5, "smooth_sigma": 0.0,
+                "color": "#3a6fd0", "alpha": 0.30, "exclude_body": false},
+               {"field": "omega_mag", "iso_fraction": 0.15,
+                "color": "#e8421e", "alpha": 0.85},
+           ],
+       }
+
+   ``crop_boundary``, ``update_every``, ``max_vertices`` (split evenly across
+   layers) and ``mc_backend`` remain global. Per-layer keys: ``field``,
+   ``iso_fraction``, ``iso_value``, ``smooth_sigma``, ``alpha``,
+   ``exclude_body``, ``color``/``color_uni``, ``color_pos``, ``color_neg``.
+
 Notes
 -----
 - Recorded video (``CameraRecording``) uses a separate offscreen GL
@@ -96,7 +119,7 @@ _GL_HOOK_C_SOURCE = r"""
 
 typedef void (*mjr_render_fn)(mjrRect viewport, mjvScene* scn, const mjrContext* con);
 
-#define ISO_FLOATS_PER_VERTEX 9
+#define ISO_FLOATS_PER_VERTEX 10
 #define ISO_MIN_CAPACITY 4096
 #define ISO_MAX_CTX 4
 
@@ -173,6 +196,7 @@ static const char* k_vertex_shader =
     "layout (location = 0) in vec3 aPos;\n"
     "layout (location = 1) in vec3 aNormal;\n"
     "layout (location = 2) in vec3 aColor;\n"
+    "layout (location = 3) in float aAlpha;\n"
     "uniform vec3  uCamPos;\n"
     "uniform vec3  uCamRight;\n"
     "uniform vec3  uCamUp;\n"
@@ -185,6 +209,7 @@ static const char* k_vertex_shader =
     "uniform int   uReverseZ;       /* 1: reversed depth (near maps to max) */\n"
     "out vec3 vNormalWorld;\n"
     "out vec3 vColor;\n"
+    "out float vAlpha;\n"
     "void main() {\n"
     "  vec3 rel = aPos - uCamPos;\n"
     "  float depth = dot(rel, uCamFwd);\n"
@@ -209,12 +234,14 @@ static const char* k_vertex_shader =
     "  gl_Position = vec4(xeye / uHalfW, yeye / uHalfH, zc, depth);\n"
     "  vNormalWorld = aNormal;\n"
     "  vColor = aColor;\n"
+    "  vAlpha = aAlpha;\n"
     "}\n";
 
 static const char* k_fragment_shader =
     "#version 330 core\n"
     "in vec3 vNormalWorld;\n"
     "in vec3 vColor;\n"
+    "in float vAlpha;\n"
     "out vec4 FragColor;\n"
     "uniform vec3  uLightDir;\n"
     "uniform float uAlpha;\n"
@@ -223,7 +250,7 @@ static const char* k_fragment_shader =
     "  vec3 L = normalize(-uLightDir);\n"
     "  float diff = max(abs(dot(N, L)), 0.0);\n"
     "  float shade = 0.25 + 0.75 * diff;\n"
-    "  FragColor = vec4(vColor * shade, uAlpha);\n"
+    "  FragColor = vec4(vColor * shade, uAlpha * vAlpha);\n"
     "}\n";
 
 static void ensure_real_mjr_render(void) {
@@ -347,6 +374,8 @@ static int ensure_ctx_resources(CtxResources* c) {
   glEnableVertexAttribArray(1);
   glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, stride, (const void*)(6 * sizeof(float)));
   glEnableVertexAttribArray(2);
+  glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, stride, (const void*)(9 * sizeof(float)));
+  glEnableVertexAttribArray(3);
   glBindBuffer(GL_ARRAY_BUFFER, 0);
   glBindVertexArray(0);
 
@@ -763,17 +792,22 @@ class FlowIsoGLHook:
             arr,
         )
 
-    def update(self, interleaved_xyz_nrm_rgb: torch.Tensor, synchronize: bool = True):
-        """Submit a new mesh; (V, 9) float32 tensor (pos, normal, color).
+    def update(self, interleaved_xyz_nrm_rgb_a: torch.Tensor, synchronize: bool = True):
+        """Submit a new mesh; (V, 10) float32 tensor (pos3, normal3, rgb3, alpha).
+
+        The trailing per-vertex alpha lets several isosurface layers (e.g. a
+        translucent free-surface interface plus a more opaque vorticity shell)
+        coexist in one mesh, each with its own opacity. It is multiplied by the
+        global ``uAlpha`` uniform in the fragment shader.
 
         Accepts either CUDA or CPU tensor. The C side keeps a private mirror
         of the bytes (memcpy from this contiguous buffer), so per-GL-context
         VBO uploads work in both the live viewer and the offscreen renderer.
         """
-        t = interleaved_xyz_nrm_rgb
-        if t.dtype != torch.float32 or t.ndim != 2 or t.shape[1] != 9:
+        t = interleaved_xyz_nrm_rgb_a
+        if t.dtype != torch.float32 or t.ndim != 2 or t.shape[1] != 10:
             raise ValueError(
-                f"Expected (V, 9) float32 tensor, got shape {tuple(t.shape)} "
+                f"Expected (V, 10) float32 tensor, got shape {tuple(t.shape)} "
                 f"dtype {t.dtype}."
             )
         if t.is_cuda:
@@ -890,6 +924,46 @@ FIELD_MAP = {
 }
 
 
+class _IsoLayer:
+    """One isosurface layer: a field plus how to threshold, colour and shade it.
+
+    The viewer can render several of these at once (e.g. a translucent
+    two-phase interface together with a more opaque ``omega_mag`` vorticity
+    shell). Each layer becomes its own marching-cubes mesh; all layers are
+    concatenated into the single interleaved (V, 10) buffer the GL hook draws,
+    the trailing per-vertex ``alpha`` column carrying the layer opacity.
+    """
+
+    __slots__ = (
+        "field_name", "field_fn", "iso_fraction", "iso_value",
+        "smooth_sigma", "alpha", "exclude_body",
+        "color_pos", "color_neg", "color_uni",
+    )
+
+    def __init__(
+        self,
+        field_name: str,
+        iso_fraction: float,
+        iso_value: float | None,
+        smooth_sigma: float,
+        alpha: float,
+        exclude_body: bool,
+        color_pos: tuple[float, float, float],
+        color_neg: tuple[float, float, float],
+        color_uni: tuple[float, float, float],
+    ):
+        self.field_name = field_name
+        self.field_fn = FIELD_MAP.get(field_name)
+        self.iso_fraction = float(iso_fraction)
+        self.iso_value = float(iso_value) if iso_value is not None else None
+        self.smooth_sigma = float(smooth_sigma)
+        self.alpha = float(np.clip(alpha, 0.0, 1.0))
+        self.exclude_body = bool(exclude_body)
+        self.color_pos = color_pos
+        self.color_neg = color_neg
+        self.color_uni = color_uni
+
+
 # ── GPU helpers ──────────────────────────────────────────────────────────────
 
 def _separable_gaussian_3d(field: torch.Tensor, sigma: float) -> torch.Tensor:
@@ -983,6 +1057,7 @@ class FlowIsoGLViewer(_BaseExtension):
         self,
         experiment_options,
         field: str = "omega_z",
+        fields: list | None = None,
         iso_fraction: float = 0.15,
         iso_value: float | None = None,
         smooth_sigma: float = 2.5,
@@ -1045,8 +1120,13 @@ class FlowIsoGLViewer(_BaseExtension):
         self.color_neg = self._parse_iso_color(color_neg)
         self.color_uni = self._parse_iso_color(color_uni)
 
+        # One or more isosurface layers drawn together. ``fields`` (a list of
+        # per-layer override dicts) takes precedence; otherwise a single layer
+        # is built from the top-level ``field``/``iso_*``/``color_*`` args so
+        # existing single-field configs keep working unchanged.
+        self._layers = self._build_layers(field, fields)
+
         self._fluid_ext = None
-        self._field_fn = FIELD_MAP.get(field)
         self._iteration = 0
         self._initialized = False
         self._hook: FlowIsoGLHook | None = None
@@ -1066,12 +1146,42 @@ class FlowIsoGLViewer(_BaseExtension):
             return tuple(int(h[i:i+2], 16) / 255.0 for i in range(0, 6, 2))
         return tuple(float(v) for v in c)
 
+    def _build_layers(self, field: str, fields: list | None) -> list[_IsoLayer]:
+        """Build the list of isosurface layers to render together.
+
+        Each entry of ``fields`` is a dict of per-layer overrides; any key it
+        omits falls back to the top-level constructor argument, so a layer can
+        be as terse as ``{"field": "interface", "iso_value": 0.5}``. ``color``
+        is accepted as a convenience alias for ``color_uni``. When ``fields``
+        is empty/None a single layer is built from the top-level args.
+        """
+        def _mk(spec: dict) -> _IsoLayer:
+            col = spec.get("color", None)  # alias for color_uni (the common case)
+            return _IsoLayer(
+                field_name=spec.get("field", field),
+                iso_fraction=spec.get("iso_fraction", self.iso_fraction),
+                iso_value=spec.get("iso_value", self.iso_value),
+                smooth_sigma=spec.get("smooth_sigma", self.smooth_sigma),
+                alpha=spec.get("alpha", self.alpha),
+                exclude_body=spec.get("exclude_body", self.exclude_body),
+                color_pos=self._parse_iso_color(spec.get("color_pos", self.color_pos)),
+                color_neg=self._parse_iso_color(spec.get("color_neg", self.color_neg)),
+                color_uni=self._parse_iso_color(
+                    spec.get("color_uni", col if col is not None else self.color_uni)
+                ),
+            )
+
+        if fields:
+            return [_mk(s if isinstance(s, dict) else {"field": s}) for s in fields]
+        return [_mk({})]
+
     # FARMS factory
     @classmethod
     def from_options(cls, config: dict, experiment_options):
         return cls(
             experiment_options=experiment_options,
             field=config.get("field", "omega_z"),
+            fields=config.get("fields", None),
             iso_fraction=config.get("iso_fraction", 0.15),
             iso_value=config.get("iso_value", None),
             smooth_sigma=config.get("smooth_sigma", 2.5),
@@ -1111,8 +1221,9 @@ class FlowIsoGLViewer(_BaseExtension):
             print("[FlowIsoGLViewer] FluidExtension not found – disabled.")
             return
 
-        if self._field_fn is None:
-            print(f"[FlowIsoGLViewer] Unknown field '{self.field_name}', "
+        bad = [lyr.field_name for lyr in self._layers if lyr.field_fn is None]
+        if bad:
+            print(f"[FlowIsoGLViewer] Unknown field(s) {bad}, "
                   f"choose from: {list(FIELD_MAP)}. Disabled.")
             return
 
@@ -1143,13 +1254,18 @@ class FlowIsoGLViewer(_BaseExtension):
             zfar  = float(m.vis.map.zfar) * extent
         except Exception:
             znear, zfar = 0.02, 100.0
-        self._hook.set_render_params(self.alpha, znear, zfar, self.light_dir)
+        # Per-vertex alpha (one value per layer) carries the real opacity, so
+        # the global uniform is left at 1.0 as a pass-through multiplier.
+        self._hook.set_render_params(1.0, znear, zfar, self.light_dir)
         self._hook.set_debug_force_visible(self.debug_force_visible)
         self._hook.set_enabled(True)
 
+        layer_desc = ", ".join(
+            f"{lyr.field_name}(a={lyr.alpha:.2f})" for lyr in self._layers
+        )
         print(
             f"[FlowIsoGLViewer] MC backend: {self._mc_name}; "
-            f"max_vertices={self.max_vertices}; alpha={self.alpha:.2f}; "
+            f"max_vertices={self.max_vertices}; layers=[{layer_desc}]; "
             f"znear={znear:.4g}, zfar={zfar:.4g}; "
             f"video_tiles={self.video_tiles}."
         )
@@ -1324,17 +1440,25 @@ class FlowIsoGLViewer(_BaseExtension):
 
     def _print_diag(self, fs, u, v, p, w, mesh):
         try:
-            field = self._field_fn(fs, u, v, p, w)
-            if not isinstance(field, torch.Tensor):
-                field = torch.as_tensor(field)
-            field = field.detach()
-            fmin = float(field.min().item())
-            fmax = float(field.max().item())
-            peak = max(abs(fmin), abs(fmax))
-            thresh = (
-                self.iso_value if self.iso_value is not None
-                else self.iso_fraction * peak
-            )
+            parts = []
+            for layer in self._layers:
+                try:
+                    field = layer.field_fn(fs, u, v, p, w)
+                    if not isinstance(field, torch.Tensor):
+                        field = torch.as_tensor(field)
+                    field = field.detach()
+                    fmin = float(field.min().item())
+                    fmax = float(field.max().item())
+                    peak = max(abs(fmin), abs(fmax))
+                    thresh = (
+                        layer.iso_value if layer.iso_value is not None
+                        else layer.iso_fraction * peak
+                    )
+                    parts.append(
+                        f"{layer.field_name}[{fmin:.2e},{fmax:.2e}]thr={thresh:.2e}"
+                    )
+                except Exception as e:
+                    parts.append(f"{layer.field_name}(err:{e})")
             n_vertices = int(mesh.shape[0]) if mesh is not None else 0
             extra = ""
             if mesh is not None and n_vertices > 0:
@@ -1347,8 +1471,7 @@ class FlowIsoGLViewer(_BaseExtension):
                 )
             print(
                 f"[FlowIsoGLViewer] iter={self._iteration} "
-                f"field={self.field_name} range=[{fmin:.3e},{fmax:.3e}] "
-                f"peak={peak:.3e} thresh={thresh:.3e} mc={self._mc_name} "
+                f"layers={{{'; '.join(parts)}}} mc={self._mc_name} "
                 f"vertices={n_vertices}{extra}"
             )
         except Exception as e:
@@ -1356,8 +1479,67 @@ class FlowIsoGLViewer(_BaseExtension):
 
     # ── mesh extraction ──────────────────────────────────────────────────
     def _build_mesh(self, fs, u, v, p, w):
-        """Run MC + per-vertex normals; return (V, 9) float32 CUDA tensor."""
-        field = self._field_fn(fs, u, v, p, w)  # torch.Tensor on GPU
+        """Run MC + per-vertex normals for every layer; return one combined
+        (V, 10) float32 CUDA tensor (pos3, normal3, rgb3, alpha).
+
+        Each configured layer contributes its own isosurface(s) with its own
+        colour and per-vertex alpha; they are concatenated into a single buffer
+        so the GL hook draws them together (e.g. a translucent interface plus an
+        opaque vorticity shell)."""
+        device = u.device
+        c = self.crop_boundary
+
+        # Shared world-coordinate grid — identical for every layer.
+        x = fs.x.detach().to(device, torch.float32)
+        y = fs.y.detach().to(device, torch.float32)
+        z = fs.z.detach().to(device, torch.float32)
+        if c > 0:
+            x, y, z = x[c:-c], y[c:-c], z[c:-c]
+        dx = float((x[-1] - x[0]).item()) / max(1, x.numel() - 1)
+        dy = float((y[-1] - y[0]).item()) / max(1, y.numel() - 1)
+        dz = float((z[-1] - z[0]).item()) / max(1, z.numel() - 1)
+        origin = torch.tensor(
+            [float(x[0].item()), float(y[0].item()), float(z[0].item())],
+            device=device, dtype=torch.float32,
+        )
+
+        # Body SDF (cropped once) reused by any layer that excludes the body.
+        body_sdf = None
+        if hasattr(fs, "composite_body") and hasattr(fs.composite_body, "sdf_val"):
+            body_sdf = fs.composite_body.sdf_val.detach().to(device, torch.float32)
+            if c > 0:
+                body_sdf = body_sdf[c:-c, c:-c, c:-c]
+
+        # Split the vertex budget across layers so no single (e.g. large
+        # interface) layer can starve the others.
+        budget = max(3, self.max_vertices // max(1, len(self._layers)))
+
+        chunks: list[torch.Tensor] = []
+        for layer in self._layers:
+            ch = self._build_layer_chunks(
+                fs, u, v, p, w, layer, (dx, dy, dz), origin, body_sdf, budget,
+            )
+            if ch is not None:
+                chunks.append(ch)
+
+        if not chunks:
+            return None
+
+        mesh = torch.cat(chunks, dim=0)
+
+        # Persistent CUDA buffer of the right size — the GL hook reads from
+        # this pointer asynchronously, so we must keep the tensor alive.
+        if (self._mesh_buffer is None
+                or self._mesh_buffer.shape != mesh.shape
+                or self._mesh_buffer.dtype != mesh.dtype):
+            self._mesh_buffer = torch.empty_like(mesh)
+        self._mesh_buffer.copy_(mesh)
+        return self._mesh_buffer
+
+    def _build_layer_chunks(self, fs, u, v, p, w, layer, spacing, origin,
+                            body_sdf, budget):
+        """Build the (V, 10) mesh for one layer, or None if it is empty."""
+        field = layer.field_fn(fs, u, v, p, w)  # torch.Tensor on GPU
         if not isinstance(field, torch.Tensor):
             field = torch.as_tensor(field, device=u.device)
         field = field.detach().to(torch.float32)
@@ -1366,16 +1548,10 @@ class FlowIsoGLViewer(_BaseExtension):
         if c > 0:
             field = field[c:-c, c:-c, c:-c].contiguous()
 
-        if self.smooth_sigma > 0:
-            field = _separable_gaussian_3d(field, self.smooth_sigma)
+        if layer.smooth_sigma > 0:
+            field = _separable_gaussian_3d(field, layer.smooth_sigma)
 
-        # SDF mask (move to same shape as field)
-        sdf = None
-        if self.exclude_body and hasattr(fs, "composite_body") \
-                and hasattr(fs.composite_body, "sdf_val"):
-            sdf = fs.composite_body.sdf_val.detach().to(field.device, torch.float32)
-            if c > 0:
-                sdf = sdf[c:-c, c:-c, c:-c]
+        sdf = body_sdf if layer.exclude_body else None
 
         # Threshold
         if sdf is not None:
@@ -1384,32 +1560,19 @@ class FlowIsoGLViewer(_BaseExtension):
             abs_f = field.abs()
         peak = float(abs_f.max().item()) if abs_f.numel() > 0 else 0.0
 
-        if self.iso_value is not None and self.iso_value > 0:
-            threshold = float(self.iso_value)
+        if layer.iso_value is not None and layer.iso_value > 0:
+            threshold = float(layer.iso_value)
         elif peak < 1e-12:
             return None
         else:
-            threshold = self.iso_fraction * peak
+            threshold = layer.iso_fraction * peak
 
         fmin = float(field.min().item())
         fmax = float(field.max().item())
         bipolar = (fmin < -1e-12) and (fmax > 1e-12)
 
-        # World coords for vertex placement
-        x = fs.x.detach().to(field.device, torch.float32)
-        y = fs.y.detach().to(field.device, torch.float32)
-        z = fs.z.detach().to(field.device, torch.float32)
-        if c > 0:
-            x, y, z = x[c:-c], y[c:-c], z[c:-c]
-        dx = float((x[-1] - x[0]).item()) / max(1, x.numel() - 1)
-        dy = float((y[-1] - y[0]).item()) / max(1, y.numel() - 1)
-        dz = float((z[-1] - z[0]).item()) / max(1, z.numel() - 1)
-        origin = torch.tensor(
-            [float(x[0].item()), float(y[0].item()), float(z[0].item())],
-            device=field.device, dtype=torch.float32,
-        )
-
-        chunks: list[torch.Tensor] = []
+        dx, dy, dz = spacing
+        layer_chunks: list[torch.Tensor] = []
 
         def _run(level: float, color_rgb: tuple[float, float, float], sign: float):
             vt = self._run_mc(field, level, (dx, dy, dz), origin, sdf)
@@ -1422,32 +1585,28 @@ class FlowIsoGLViewer(_BaseExtension):
             n = _normals_from_field_gradient(field, tri_idx, sign)
             color = torch.tensor(color_rgb, device=field.device, dtype=torch.float32)
             color = color.expand(tri_pos.shape[0], 3)
-            chunks.append(torch.cat([tri_pos, n, color], dim=1))
+            a = torch.full(
+                (tri_pos.shape[0], 1), layer.alpha,
+                device=field.device, dtype=torch.float32,
+            )
+            layer_chunks.append(torch.cat([tri_pos, n, color, a], dim=1))
 
         if bipolar:
-            _run(threshold,  self.color_pos, sign=+1.0)
-            _run(-threshold, self.color_neg, sign=-1.0)
+            _run(threshold,  layer.color_pos, sign=+1.0)
+            _run(-threshold, layer.color_neg, sign=-1.0)
         else:
-            _run(threshold,  self.color_uni, sign=+1.0)
+            _run(threshold,  layer.color_uni, sign=+1.0)
 
-        if not chunks:
+        if not layer_chunks:
             return None
 
-        mesh = torch.cat(chunks, dim=0)
-        if mesh.shape[0] > self.max_vertices:
+        mesh = torch.cat(layer_chunks, dim=0)
+        if mesh.shape[0] > budget:
             # Keep the newest triangles (MC scans from low-x to high-x, so
             # the earliest triangles are the upstream/older ones).
-            keep_tris = max(1, self.max_vertices // 3)
+            keep_tris = max(1, budget // 3)
             mesh = mesh[-(keep_tris * 3):]
-
-        # Persistent CUDA buffer of the right size — the GL hook reads from
-        # this pointer asynchronously, so we must keep the tensor alive.
-        if (self._mesh_buffer is None
-                or self._mesh_buffer.shape != mesh.shape
-                or self._mesh_buffer.dtype != mesh.dtype):
-            self._mesh_buffer = torch.empty_like(mesh)
-        self._mesh_buffer.copy_(mesh)
-        return self._mesh_buffer
+        return mesh
 
     def _run_mc(self, field, level, spacing, origin, sdf):
         """Run the selected MC backend; return (vert_grid_idx, world_pos)
