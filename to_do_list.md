@@ -39,16 +39,28 @@ Memory vars: `sdf_val_{u,v,w}`, `{u,v,w,p}0`, `n{x,y,z}_{u,v,w}`, `body_{u,v,w}`
     Bhalla IBAMR `arXiv:1904.04078`; `github.com/IBAMR/IBAMR`). Note BDIM ≈ Brinkman, so the
     fix should be replicable in the BDIM framework rather than swapping methods.
 
-- 🔴 **Lagrangian force method incompatible with two-phase flow** — `force_method="lagrangian"`
-  gives ~3× spurious buoyancy + large pitch torque for surface-straddling bodies, even at
-  fine resolution (explodes at iter 12, h=0.00333). Eulerian (`force_method="eulerian"`)
-  works correctly. Root cause NOT identified despite testing: pressure gauge (all-Neumann
-  mean subtraction → negative air pressure), `zero_pressure_inside`, `convexify`, and
-  `air_transparent_body`. The surface integral ∮ p n dS over the marching-cubes
-  triangulation diverges violently from the volumetric band integral ∫ p n δ_ε(φ) dV.
-  **Needs investigation:** compare forces from both methods on a single step, check marching-
-  cubes mesh quality (watertightness, normal consistency), verify interpolation stencil
-  doesn't sample interior cells with unphysical p. Currently workaround: use eulerian.
+- 🟢 **Lagrangian "large pitch torque" — ROOT CAUSE FOUND & FIXED (2026-06-09).**
+  The lagrangian 3-D surface markers were placed **off the body surface** by the SDF
+  bbox-centre offset (`local_center`). `BodyMesh.tri_centroid_local` is built re-centred on
+  the SDF bounding-box centre, but the SDF interpolator / streaming kernel anchor the body
+  frame at the SDF-grid **origin**, so the BDIMhandler world transform
+  `R @ tri_centroid_local + body_pos` landed `R @ local_center` short of the real surface.
+  Empirically (cached boat SDFs): hull `|local_center|≈2.2 m`, markers ~0.43 m off the hull
+  (`|sdf|` 4e-4 on-surface → 0.43 buggy). Because the hull is watertight (`Σ(A·n)=0`) a
+  uniform marker shift cancels in the *net force* but NOT in the *torque* → a **7.5× spurious
+  pitch torque** (82.9k vs 11.0k N·m on the hull; spurious part = `local_center_x · Fz`
+  exactly) — the documented symptom. Centred meshes (`_float_sphere.obj`, `local_center=0`)
+  and origin-centred analytical bodies (the validated drop-sphere) are unaffected, explaining
+  why the sphere demo floated but the boat pitched.
+  **Fix:** `BDIMhandler._lagr_marker_offset` adds the offset back in both the python and
+  kernel/streaming marker transforms (offset captured once from the body's init
+  `tri_centroid_world`; zero for analytical bodies → no-op). Integration-layer only; core /
+  two-phase source untouched. Proof: `farms_examples/toy_boat_two_phase_3d/_diag_hull_force.py`.
+  ⚠️ **Separate, still-open:** the small-boat config currently explodes at iter 12 for BOTH
+  force methods (`non-finite in field u` — a fluid-side added-mass / waterline-conditioning
+  instability, upstream of force computation; see `project_toy_boat_two_phase_debug`). This
+  blocks end-to-end boat validation of the torque fix and means the old "eulerian works"
+  note no longer holds in the current repo state. Track this fluid explosion separately.
 
 - **Polish repo & docs** — review/correct outdated documentation, including `docs/`.
 
