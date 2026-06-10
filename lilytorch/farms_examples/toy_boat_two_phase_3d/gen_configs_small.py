@@ -64,6 +64,20 @@ class SmallSimConfig(SimConfig):
         self.bdim_dt           = self.timestep
         self.bdim_nt           = self.n_iterations
 
+        # Two-phase stability: the fused KERNEL two-phase path is less stable at
+        # the 833:1 density ratio (the bare hull blows up in the waterline body
+        # band at it=69).  The PYTHON path + rho_solid (see _bdim_extension) is
+        # the stable combination for a floating body at the waterline.
+        self.solver_method     = "python"
+
+        # Wall sponge: in this small tank the bobbing hull drives waves/air motion
+        # into the CLOSE lateral walls, where the light air phase piles up at the
+        # water/air/wall triple line and blows up (~it=438) even after rho_solid
+        # cures the body band.  A quadratic absorbing layer (~6 cells) damps it;
+        # the hull then settles to equilibrium (Fz≈weight) and runs indefinitely.
+        self.sponge            = {"width": 0.02, "strength": 500.0,
+                                  "axes": ["x", "y", "z"]}
+
         self.water_height = WATERLINE
 
         # Viewer: the full boat sets extent=12 for the ~10 m scene; at S=0.1 the
@@ -85,6 +99,12 @@ class SmallSimConfig(SimConfig):
             "nu_water": self.nu,
             "nu_air": 5.0e-2,
             "face_density": "harmonic",
+            # rho_solid (~rho_water) includes the body as a finite third density
+            # in the BDIM band INSTEAD of excluding it (c->0), regularizing the
+            # immersed-boundary Poisson at the waterline -> cures the body-band
+            # blow-up.  Python path only; optimum near rho_water (4000 was WORSE
+            # than 1000).  This is the active stabiliser for the hull-only sim.
+            "rho_solid": 1000.0,
         }
         return bdim_ext
 

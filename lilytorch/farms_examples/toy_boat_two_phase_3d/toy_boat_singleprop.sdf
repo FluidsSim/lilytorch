@@ -116,134 +116,96 @@
         <parent>base_link</parent><child>rudder_link</child><pose>0 0 0 0 0 0</pose>
       </joint>
 
-      <!-- ============= TWIN COUNTER-ROTATING PROPELLERS =============
-           Mirrored long-blade deep-scoop props at z=+/-0.55 (discs r=0.45
-           span |z| 0.10..1.00: no overlap, inside the 1.088 half-beam).
-           Port is the z-mirror of starboard (pitch signs flipped) and its
-           joint axis is (-1 0 0), so the SAME controller tau drives them
-           counter-rotating: torque reaction, prop walk and slipstream
-           swirl cancel by symmetry -> straight track, ~2x thrust. -->
-      <!-- S propeller: hub z=+0.55, mirrored pitch x+1;
-           counter-rotation via joint axis (1 0 0) with the same tau. -->
-      <link name="propeller_hub_s">
-        <pose>0.0 -0.58 0.55 0 0 0</pose>
+      <!-- ============= ANALYTICAL PROPELLER (2 blades, deep) ========
+           2-blade propeller at stern (X=0), centreline (Z=0), Y=-0.58.
+           LONG blades (span 0.34, tip radius 0.45 -> 1.86x swept area) with
+           the hub lowered so the up blade clears the hull bottom (Y≈-0.094):
+           blade 1 max Y = -0.58+0.45 = -0.13 < -0.094.
+           Horizontal shaft. ====== -->
+      <link name="propeller_hub">
+        <pose>0.0 -0.58 0.0 0 0 0</pose>
+        <!-- HEAVY assembly inertia (hub x10, blades x50): the ~2 kg propeller's
+             rotational ADDED MASS (~0.45 kg*m^2 about the shaft) exceeded its own
+             shaft inertia ~10x -> explicit-coupling added-mass divergence on the
+             free revolute DOF (blow-up at the blade, worse on finer grids; tau=0
+             and damping don't cure it).  Raising the assembly inertia to ~1.1
+             kg*m^2 (= real prop+shaft+gearbox reflected inertia) stabilises the
+             free joint; VERIFIED stable at tau=0 and tau=100. -->
         <inertial><pose>0 0 0 0 0 0</pose><mass>13.572</mass>
           <inertia><ixx>0.02443</ixx><ixy>0</ixy><ixz>0</ixz><iyy>0.02851</iyy><iyz>0</iyz><izz>0.02851</izz></inertia></inertial>
-        <collision name="propeller_hub_s_collision"><pose>0 0 0 0 1.5707963267948966 0</pose>
+        <collision name="propeller_hub_collision"><pose>0 0 0 0 1.5707963267948966 0</pose>
           <geometry><cylinder><radius>0.06</radius><length>0.12</length></cylinder></geometry></collision>
-        <visual name="propeller_hub_s_visual"><pose>0 0 0 0 1.5707963267948966 0</pose>
+        <visual name="propeller_hub_visual"><pose>0 0 0 0 1.5707963267948966 0</pose>
           <geometry><cylinder><radius>0.06</radius><length>0.12</length></cylinder></geometry>
-          <material><ambient>0.8 0.6 0.1 1</ambient><diffuse>0.8 0.6 0.1 1</diffuse></material></visual>
+          <material><ambient>0.8 0.6 0.1 1</ambient><diffuse>0.8 0.6 0.1 1</diffuse><specular>0.4 0.4 0.4 1</specular></material></visual>
       </link>
-      <link name="blade_s0">
-        <pose>0.0 -0.86 0.55 0 0.6 0</pose>
+
+      <!-- Blade 0: pointing -Y (down), pitched +0.6 about Y.
+           Span 0.34 (inner edge r=0.11, tip r=0.45), centre at r=0.28. -->
+      <link name="blade_0">
+        <pose>0.0 -0.86 0.0 0 0.6 0</pose>
         <inertial><pose>0 0 0 0 0 0</pose><mass>12.0</mass>
           <inertia><ixx>0.12560</ixx><ixy>0</ixy><ixz>0</ixz><iyy>0.02000</iyy><iyz>0</iyz><izz>0.12560</izz></inertia></inertial>
-        <collision name="blade_s0_collision"><pose>0 0 0 0 0 0</pose>
+        <collision name="blade_0_collision"><pose>0 0 0 0 0 0</pose>
           <geometry><box><size>0.10 0.34 0.10</size></box></geometry></collision>
-        <visual name="blade_s0_visual"><pose>0 0 0 0 0 0</pose>
+        <visual name="blade_0_visual"><pose>0 0 0 0 0 0</pose>
           <geometry><box><size>0.10 0.34 0.10</size></box></geometry>
-          <material><ambient>0.9 0.7 0.1 1</ambient><diffuse>0.9 0.7 0.1 1</diffuse></material></visual>
+          <material><ambient>0.9 0.7 0.1 1</ambient><diffuse>0.9 0.7 0.1 1</diffuse><specular>0.4 0.4 0.4 1</specular></material></visual>
       </link>
-      <link name="blade_s0_rib">
-        <pose>0.10729 -0.86 0.47660 0 0.6 0</pose>
+
+      <!-- Blade 1: pointing +Y (up), pitched -0.6 about Y (opposite).
+           Span 0.34, centre at r=0.28; tip at Y=-0.13, clears hull (-0.094). -->
+      <link name="blade_1">
+        <pose>0.0 -0.30 0.0 0 -0.6 0</pose>
+        <inertial><pose>0 0 0 0 0 0</pose><mass>12.0</mass>
+          <inertia><ixx>0.12560</ixx><ixy>0</ixy><ixz>0</ixz><iyy>0.02000</iyy><iyz>0</iyz><izz>0.12560</izz></inertia></inertial>
+        <collision name="blade_1_collision"><pose>0 0 0 0 0 0</pose>
+          <geometry><box><size>0.10 0.34 0.10</size></box></geometry></collision>
+        <visual name="blade_1_visual"><pose>0 0 0 0 0 0</pose>
+          <geometry><box><size>0.10 0.34 0.10</size></box></geometry>
+          <material><ambient>0.9 0.7 0.1 1</ambient><diffuse>0.9 0.7 0.1 1</diffuse><specular>0.4 0.4 0.4 1</specular></material></visual>
+      </link>
+
+      <!-- ASYMMETRIC blade ribs (T-section): a rib on each blade's PRESSURE
+           face (the local +x face for BOTH blades under rotation about +X)
+           makes that side scoop water (high drag) while the flat back sheds
+           it (low drag) -> more thrust per revolution at the same torque,
+           like the camber/cup of a real propeller blade.  Rib is centered
+           chordwise so no leading/trailing handedness is needed; pose offset
+           = R_y(+/-0.6) . (0.13, 0, 0) from the blade centre.
+           DEEP scoop: rib 0.16 long x 0.06 chord over the full 0.34 span. -->
+      <link name="blade_0_rib">
+        <pose>0.10729 -0.86 -0.07340 0 0.6 0</pose>
         <inertial><pose>0 0 0 0 0 0</pose><mass>3.0</mass>
           <inertia><ixx>0.02980</ixx><ixy>0</ixy><ixz>0</ixz><iyy>0.00730</iyy><iyz>0</iyz><izz>0.03530</izz></inertia></inertial>
-        <collision name="blade_s0_rib_collision"><pose>0 0 0 0 0 0</pose>
+        <collision name="blade_0_rib_collision"><pose>0 0 0 0 0 0</pose>
           <geometry><box><size>0.16 0.34 0.06</size></box></geometry></collision>
-        <visual name="blade_s0_rib_visual"><pose>0 0 0 0 0 0</pose>
+        <visual name="blade_0_rib_visual"><pose>0 0 0 0 0 0</pose>
           <geometry><box><size>0.16 0.34 0.06</size></box></geometry>
           <material><ambient>0.9 0.5 0.1 1</ambient><diffuse>0.9 0.5 0.1 1</diffuse></material></visual>
       </link>
-      <link name="blade_s1">
-        <pose>0.0 -0.3 0.55 0 -0.6 0</pose>
-        <inertial><pose>0 0 0 0 0 0</pose><mass>12.0</mass>
-          <inertia><ixx>0.12560</ixx><ixy>0</ixy><ixz>0</ixz><iyy>0.02000</iyy><iyz>0</iyz><izz>0.12560</izz></inertia></inertial>
-        <collision name="blade_s1_collision"><pose>0 0 0 0 0 0</pose>
-          <geometry><box><size>0.10 0.34 0.10</size></box></geometry></collision>
-        <visual name="blade_s1_visual"><pose>0 0 0 0 0 0</pose>
-          <geometry><box><size>0.10 0.34 0.10</size></box></geometry>
-          <material><ambient>0.9 0.7 0.1 1</ambient><diffuse>0.9 0.7 0.1 1</diffuse></material></visual>
-      </link>
-      <link name="blade_s1_rib">
-        <pose>0.10729 -0.3 0.62340 0 -0.6 0</pose>
+      <link name="blade_1_rib">
+        <pose>0.10729 -0.30 0.07340 0 -0.6 0</pose>
         <inertial><pose>0 0 0 0 0 0</pose><mass>3.0</mass>
           <inertia><ixx>0.02980</ixx><ixy>0</ixy><ixz>0</ixz><iyy>0.00730</iyy><iyz>0</iyz><izz>0.03530</izz></inertia></inertial>
-        <collision name="blade_s1_rib_collision"><pose>0 0 0 0 0 0</pose>
+        <collision name="blade_1_rib_collision"><pose>0 0 0 0 0 0</pose>
           <geometry><box><size>0.16 0.34 0.06</size></box></geometry></collision>
-        <visual name="blade_s1_rib_visual"><pose>0 0 0 0 0 0</pose>
-          <geometry><box><size>0.16 0.34 0.06</size></box></geometry>
-          <material><ambient>0.9 0.5 0.1 1</ambient><diffuse>0.9 0.5 0.1 1</diffuse></material></visual>
-      </link>
-      <!-- P propeller: hub z=-0.55, mirrored pitch x-1;
-           counter-rotation via joint axis (-1 0 0) with the same tau. -->
-      <link name="propeller_hub_p">
-        <pose>0.0 -0.58 -0.55 0 0 0</pose>
-        <inertial><pose>0 0 0 0 0 0</pose><mass>13.572</mass>
-          <inertia><ixx>0.02443</ixx><ixy>0</ixy><ixz>0</ixz><iyy>0.02851</iyy><iyz>0</iyz><izz>0.02851</izz></inertia></inertial>
-        <collision name="propeller_hub_p_collision"><pose>0 0 0 0 1.5707963267948966 0</pose>
-          <geometry><cylinder><radius>0.06</radius><length>0.12</length></cylinder></geometry></collision>
-        <visual name="propeller_hub_p_visual"><pose>0 0 0 0 1.5707963267948966 0</pose>
-          <geometry><cylinder><radius>0.06</radius><length>0.12</length></cylinder></geometry>
-          <material><ambient>0.8 0.6 0.1 1</ambient><diffuse>0.8 0.6 0.1 1</diffuse></material></visual>
-      </link>
-      <link name="blade_p0">
-        <pose>0.0 -0.86 -0.55 0 -0.6 0</pose>
-        <inertial><pose>0 0 0 0 0 0</pose><mass>12.0</mass>
-          <inertia><ixx>0.12560</ixx><ixy>0</ixy><ixz>0</ixz><iyy>0.02000</iyy><iyz>0</iyz><izz>0.12560</izz></inertia></inertial>
-        <collision name="blade_p0_collision"><pose>0 0 0 0 0 0</pose>
-          <geometry><box><size>0.10 0.34 0.10</size></box></geometry></collision>
-        <visual name="blade_p0_visual"><pose>0 0 0 0 0 0</pose>
-          <geometry><box><size>0.10 0.34 0.10</size></box></geometry>
-          <material><ambient>0.9 0.7 0.1 1</ambient><diffuse>0.9 0.7 0.1 1</diffuse></material></visual>
-      </link>
-      <link name="blade_p0_rib">
-        <pose>0.10729 -0.86 -0.47660 0 -0.6 0</pose>
-        <inertial><pose>0 0 0 0 0 0</pose><mass>3.0</mass>
-          <inertia><ixx>0.02980</ixx><ixy>0</ixy><ixz>0</ixz><iyy>0.00730</iyy><iyz>0</iyz><izz>0.03530</izz></inertia></inertial>
-        <collision name="blade_p0_rib_collision"><pose>0 0 0 0 0 0</pose>
-          <geometry><box><size>0.16 0.34 0.06</size></box></geometry></collision>
-        <visual name="blade_p0_rib_visual"><pose>0 0 0 0 0 0</pose>
-          <geometry><box><size>0.16 0.34 0.06</size></box></geometry>
-          <material><ambient>0.9 0.5 0.1 1</ambient><diffuse>0.9 0.5 0.1 1</diffuse></material></visual>
-      </link>
-      <link name="blade_p1">
-        <pose>0.0 -0.3 -0.55 0 0.6 0</pose>
-        <inertial><pose>0 0 0 0 0 0</pose><mass>12.0</mass>
-          <inertia><ixx>0.12560</ixx><ixy>0</ixy><ixz>0</ixz><iyy>0.02000</iyy><iyz>0</iyz><izz>0.12560</izz></inertia></inertial>
-        <collision name="blade_p1_collision"><pose>0 0 0 0 0 0</pose>
-          <geometry><box><size>0.10 0.34 0.10</size></box></geometry></collision>
-        <visual name="blade_p1_visual"><pose>0 0 0 0 0 0</pose>
-          <geometry><box><size>0.10 0.34 0.10</size></box></geometry>
-          <material><ambient>0.9 0.7 0.1 1</ambient><diffuse>0.9 0.7 0.1 1</diffuse></material></visual>
-      </link>
-      <link name="blade_p1_rib">
-        <pose>0.10729 -0.3 -0.62340 0 0.6 0</pose>
-        <inertial><pose>0 0 0 0 0 0</pose><mass>3.0</mass>
-          <inertia><ixx>0.02980</ixx><ixy>0</ixy><ixz>0</ixz><iyy>0.00730</iyy><iyz>0</iyz><izz>0.03530</izz></inertia></inertial>
-        <collision name="blade_p1_rib_collision"><pose>0 0 0 0 0 0</pose>
-          <geometry><box><size>0.16 0.34 0.06</size></box></geometry></collision>
-        <visual name="blade_p1_rib_visual"><pose>0 0 0 0 0 0</pose>
+        <visual name="blade_1_rib_visual"><pose>0 0 0 0 0 0</pose>
           <geometry><box><size>0.16 0.34 0.06</size></box></geometry>
           <material><ambient>0.9 0.5 0.1 1</ambient><diffuse>0.9 0.5 0.1 1</diffuse></material></visual>
       </link>
 
-      <joint name="joint_propeller_s" type="revolute">
-        <parent>base_link</parent><child>propeller_hub_s</child><pose>0 0 0 0 0 0</pose>
+      <joint name="joint_propeller" type="revolute">
+        <parent>base_link</parent><child>propeller_hub</child><pose>0 0 0 0 0 0</pose>
+        <!-- Horizontal shaft (no tilt): avoids P-factor yaw.  The 1000 kg
+             deep keel provides enough righting moment to resist the remaining
+             pitch from the thrust-line/COM offset (only 0.064 m now). -->
         <axis><xyz>1 0 0</xyz><limit><lower>-1e16</lower><upper>1e16</upper></limit></axis>
       </joint>
-      <joint name="joint_blade_s0" type="fixed"><parent>propeller_hub_s</parent><child>blade_s0</child><pose>0 0 0 0 0 0</pose></joint>
-      <joint name="joint_blade_s0_rib" type="fixed"><parent>blade_s0</parent><child>blade_s0_rib</child><pose>0 0 0 0 0 0</pose></joint>
-      <joint name="joint_blade_s1" type="fixed"><parent>propeller_hub_s</parent><child>blade_s1</child><pose>0 0 0 0 0 0</pose></joint>
-      <joint name="joint_blade_s1_rib" type="fixed"><parent>blade_s1</parent><child>blade_s1_rib</child><pose>0 0 0 0 0 0</pose></joint>
-      <joint name="joint_propeller_p" type="revolute">
-        <parent>base_link</parent><child>propeller_hub_p</child><pose>0 0 0 0 0 0</pose>
-        <axis><xyz>-1 0 0</xyz><limit><lower>-1e16</lower><upper>1e16</upper></limit></axis>
-      </joint>
-      <joint name="joint_blade_p0" type="fixed"><parent>propeller_hub_p</parent><child>blade_p0</child><pose>0 0 0 0 0 0</pose></joint>
-      <joint name="joint_blade_p0_rib" type="fixed"><parent>blade_p0</parent><child>blade_p0_rib</child><pose>0 0 0 0 0 0</pose></joint>
-      <joint name="joint_blade_p1" type="fixed"><parent>propeller_hub_p</parent><child>blade_p1</child><pose>0 0 0 0 0 0</pose></joint>
-      <joint name="joint_blade_p1_rib" type="fixed"><parent>blade_p1</parent><child>blade_p1_rib</child><pose>0 0 0 0 0 0</pose></joint>
+      <joint name="joint_blade_0" type="fixed"><parent>propeller_hub</parent><child>blade_0</child><pose>0 0 0 0 0 0</pose></joint>
+      <joint name="joint_blade_1" type="fixed"><parent>propeller_hub</parent><child>blade_1</child><pose>0 0 0 0 0 0</pose></joint>
+      <joint name="joint_blade_0_rib" type="fixed"><parent>blade_0</parent><child>blade_0_rib</child><pose>0 0 0 0 0 0</pose></joint>
+      <joint name="joint_blade_1_rib" type="fixed"><parent>blade_1</parent><child>blade_1_rib</child><pose>0 0 0 0 0 0</pose></joint>
 
     </model>
   </world>

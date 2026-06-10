@@ -5,9 +5,12 @@ from _verify_run_small import VerifySmall
 class VerifyHullOnly(VerifySmall):
     def __init__(self):
         super().__init__()
-        boat_sdf = os.path.join(self.data_folder, 'toy_boat_hullonly.sdf')
+        boat_sdf                           = os.path.join(self.data_folder, 'toy_boat_hullonly.sdf')
         self.animats_pars[0]["sdf_file"]   = boat_sdf
         self.animats_pars[0]["model_name"] = "toy_boat_hullonly"
+        # self.solver_method                 = "python"
+        self.headless                      = False
+        # self.bdim_mu0_projection           = False
 
 
 if __name__ == "__main__":

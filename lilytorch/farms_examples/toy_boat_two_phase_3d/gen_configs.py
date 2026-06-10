@@ -32,7 +32,9 @@ from lilytorch.farms_examples.base_sim_config import BaseSimConfig
 # The model is spawned with roll = +pi/2 so mesh-Y(up) -> world-Z(up).
 BOAT_LENGTH  = 6.04    # m  (X — long axis)
 BOAT_BEAM    = 2.18    # m  (Z in mesh frame → world Y after spawn)
-BOAT_MASS    = 420.0   # kg (total, from toy_boat.sdf <inertial> blocks)
+BOAT_MASS    = 2000.0  # kg (total: 1631 hull + 315 keel + 20 rudder + ~34 propeller; split chosen
+                       # for level trim COM_x=COB_x=2.045 on the convex BDIM envelope; the heavy
+                       # prop assembly stabilises the free revolute joint, see toy_boat.sdf)
 
 # ── Tank (sized for the ~6 m hull, with maneuvering room) ──────────────────
 #   X: -3 .. 24 (boat 0..6.04, 3 m behind, 18 m ahead for forward navigation)
@@ -40,13 +42,10 @@ BOAT_MASS    = 420.0   # kg (total, from toy_boat.sdf <inertial> blocks)
 #   Z: -2.8 .. 3.6 (keel/rudder hang below hull; 3.2 m air gap above)
 WATERLINE = 0.40       # m  (world-z of the free surface)
 # Spawn the boat AT its floating draft so it starts in near-equilibrium and
-# does not free-fall.  Computed from the hull SDF: the boat displaces 0.83 m^3
-# (~800 kg) at a draft of 0.24 m, i.e. hull bottom (mesh-y -0.094) at world-z
-# 0.16 -> origin (mesh-y 0) at world-z 0.256.  The old 1.10 spawn free-fell
-# 0.7 m and slammed in at ~3.3 m/s, plunging far past the float line where the
-# violent, asymmetric entry pitched the boat (NOT a mass-balance problem: the
-# boat trims level at its design waterline, COM_x 2.215 vs COB_x 2.20).
-SPAWN_Z   = 0.256      # m  (world-z of the model origin = floating draft)
+# does not free-fall.  At 2000 kg the boat displaces 2.0 m^3 = 30% of the convex
+# BDIM envelope -> equilibrium model-origin world-z = +0.081 (hull wetted depth
+# 0.41 m = 8.3 cells at h=0.05, well resolved).  See MASS_INERTIA_NOTES.md.
+SPAWN_Z   = 0.08     # m  (world-z of the model origin = floating draft)
 
 
 class SimConfig(BaseSimConfig):
@@ -84,22 +83,22 @@ class SimConfig(BaseSimConfig):
         # ~60 cells along the 6 m hull, ~2.4 cells across the 0.24 m draft.
         # With the air-transparent-body fix (on by default), the waterline
         # triple-point is stable; multi-body seams may need blending.
-        self.Nx   = 270
-        self.Ny   = 64
-        self.Nz   = 64
+        self.Nx   = 270*1
+        self.Ny   = 64*1
+        self.Nz   = 32*1
         self.xmin = -3.0
         self.xmax = 24.0
         self.ymin = -3.2
         self.ymax = 3.2
-        self.zmin = -2.8
-        self.zmax = 3.6
+        self.zmin = -1.4
+        self.zmax = 1.8
 
         # ── Animats ───────────────────────────────────────────────────
         boat_sdf = os.path.join(self.data_folder, 'toy_boat.sdf')
         controller_config = {
             "path": "lilytorch.farms_examples.submarine."
                     "propeller_controller.PropellerController",
-            "tau": 0.0,   # propeller torque (0 = stopped for debugging)
+            "tau": 200.0,    # propeller torque [N·m]
         }
         self.animats_pars = [
             {
@@ -109,7 +108,7 @@ class SimConfig(BaseSimConfig):
                 "gains"            : [0.0, 0.0, 0.0],
                 "controller_config": controller_config,
                 "spawn_mode"       : SpawnMode.FREE,
-                # roll = +pi/2 rotates the mesh (Y-up) into the world (Z-up)
+                # roll  = +pi/2 rotates the mesh (Y-up) into the world (Z-up)
                 # frame; the boat floats at SPAWN_Z and settles to its draft.
                 "pose"             : [
                     0.0,                    # x: hull spans world-x 0..6.04
@@ -122,15 +121,17 @@ class SimConfig(BaseSimConfig):
         ]
 
         # ── FSI coupling stability ────────────────────────────────────
-        # Explicit coupling with a light force low-pass.  NOTE: the violent
-        # rise+pitch on entry was NOT a coupling instability — it was a wrong
-        # FORCE (force_method="lagrangian" over-buoyed a surface-straddling body
-        # 3x with a huge spurious pitch torque; the fix is the eulerian band
-        # integral below).  Implicit coupling only delayed the symptom of that
-        # bad force, so it is left off (it re-solves the fluid many times per
-        # step → slow in 3-D).  Set scheme:"implicit" to re-enable if a genuine
-        # added-mass instability shows up once the residual blow-up is cured.
-        self.force_relaxation = 0.5
+        # EXPLICIT coupling (implicit DIVERGES here: res->inf — strong coupling is
+        # ill-conditioned with force_method='lagrangian' + the articulated
+        # propeller joint, per the BDIMhandler warning).  The stern-up pitch is
+        # NOT static (masses trim-balanced on the convex envelope: COM_x 2.254
+        # over COB_x 2.192, static pitch torque ~-594 N*m ~ 0.3deg) and persists
+        # under BOTH schemes -> it is not a coupling-scheme problem.  Prime
+        # suspect now: the convex hull floats only ~14.5% submerged (~2.5 cells of
+        # draft on h=0.10) while the lagrangian force band is ~2*eps=2 cells wide,
+        # so the wetted layer is under-resolved -> fore-aft-asymmetric pressure
+        # integration -> steady spurious pitch.  See MASS_INERTIA_NOTES.md.
+        # self.force_relaxation = 0.5
         self.coupling = {
             "scheme"     : "explicit",
             "accelerator": "iqn-ils",
@@ -138,38 +139,52 @@ class SimConfig(BaseSimConfig):
             "tol"        : 1.0e-4,
             "max_iter"   : 30,
         }
+        # ── Joint damping: prevent passive revolute joints (propeller)
+        # from spinning up due to tiny numerical fluid torques.  With
+        # Ixx≈0.03 kg·m², even τ≈1e-3 N·m gives α≈0.03 rad/s² and the
+        # angular velocity runs away over thousands of steps.
+        # damping=1.0 gives τ_damp = -1.0·ω, enough to kill numerical
+        # runaway while still letting the torque controller drive the
+        # propeller when tau>0.
+        self.joint_damping = 5.0
         # convexify=True makes the hull/keel/rudder convex hulls overlap; the
         # running-min SDF union then HARD-SWITCHES the imposed solid velocity at
         # the seam between links, injecting a grid-scale divergence → pressure
         # spike → blow-up (and finer cells make it WORSE, which is what we saw).
         # Blend the imposed band velocity with an SDF-weighted softmin over a
-        # few cells to make it continuous across the seam.
-        self.body_velocity_blend_eps_cells = None
+        # few cells to make it continuous across the seam.  This is the
+        # documented cure for the convexify-overlap μ0/SDF seam stiffness that
+        # drives the two-phase blow-up (sharpened by finer cells); 3 cells of
+        # sigmoid SDF weighting smooths body_{u,v,w} across the link seams.
+
+        # self.body_velocity_blend_eps_cells = 3
 
         # ── Physics (real ~6 m scale) ─────────────────────────────────
-        self.rho_body     = 1000.0         # Poisson conditioning (not boat density)
-        self.rho          = 1000.0         # water density
-        self.nu           = 3.0e-3         # effective viscosity → Re ≈ U·L/ν ~ 1e3
-        self.timestep     = 0.0005
-        self.n_iterations = 8000           # 4 s of simulation
-        self.num_sub_steps     = 1
-        self.save_every        = 50
+        self.rho_body      = 1000.0   # Poisson conditioning (not boat density)
+        self.rho           = 1000.0   # water density
+        self.nu            = 1.0e-6   # real water kinematic viscosity [m²/s]
+        self.timestep      = 0.001
+        self.n_iterations  = 8000
+        self.num_sub_steps = 1
+        self.save_every    = 50
 
         # ── BDIM solver ──────────────────────────────────────────────
         self.bdim_dt                 = self.timestep
         self.bdim_nt                 = self.n_iterations
         self.convection_method       = "abdquickest"
-        self.convexify                = True               # re-express the convection term in a more stable form (BDIM-specific)
+        self.convexify               = True
         self.poisson_method          = "multigrid"
         self.poisson_tol             = 1.0e-6
         self.poisson_max_cycles      = 4
         self.poisson_max_mgcg_cycles = 30
         self.poisson_precond_vcycles = 1
-        # self.poisson_warm_start      = True
         self.poisson_smoother        = "rbgs"
         self.poisson_nsmoothing      = 5
         self.poisson_bc_type         = "neumann"
-        self.solver_method           = "kernel"
+        # PYTHON path (not kernel): the fused kernel two-phase path is less stable
+        # at the 833:1 density ratio, and rho_solid (the waterline body-band
+        # stabiliser, see _bdim_extension) is python-only.
+        self.solver_method           = "python"
         self.time_integration        = "euler"
         # Eulerian band-integral forces: hull, keel, rudder and propeller are
         # separate (overlapping) fluid bodies, so the force is integrated over
@@ -222,9 +237,15 @@ class SimConfig(BaseSimConfig):
             "alpha_init": f"lambda X, Y, Z: (Z < {WATERLINE}).double()",
             "rho_water": 1000.0,
             "rho_air": 1.2,
-            "nu_water": self.nu,
-            "nu_air": 5.0e-2,
-            "face_density": "harmonic",
+            "nu_water": self.nu,       # 1.0e-6 — real water
+            "nu_air": 1.5e-5,          # was 1.0e-3; stabilises air pressure (67× real, 50× less than old 0.05)
+            # rho_solid (~rho_water) includes the body as a finite third density
+            # in the BDIM band instead of excluding it (c->0), regularizing the
+            # immersed-boundary Poisson at the waterline -> cures the body-band
+            # blow-up.  Python path only; optimum near rho_water (4000 was worse).
+            # NB: this stabilises the BODY band, NOT thin appendages — keep every
+            # fin/blade >=3 cells thick (the 1-cell propeller still blows up).
+            "rho_solid": 1000.0,
         }
 
         return bdim_ext
@@ -250,7 +271,7 @@ class SimConfig(BaseSimConfig):
             self.xmin, self.xmax, self.ymin, self.ymax,
             zmin=self.zmin, zmax=self.zmax,
             wall_thickness=wt, plotting=False,
-            wall_alpha=self.wall_alpha,
+            wall_alpha=0.0,
             grid_spacing=self.grid_spacing,
             floor_color=self.floor_color,
         )
@@ -258,7 +279,7 @@ class SimConfig(BaseSimConfig):
         water_sdf = create_water_sdf(
             self.xmin, self.xmax, self.ymin, self.ymax,
             zmin=self.zmin, zmax=WATERLINE,
-            water_height=0.0,
+            water_height=self.water_height,  # must match arena water.height for correct Z placement
             water_alpha=0.1,
         )
         arena_sdf = os.path.join(sdfs_path, "pool", "sdf", "pool.sdf")
@@ -294,21 +315,36 @@ class SimConfig(BaseSimConfig):
     def extra_simulation_extensions(self, output_folder):
         extensions = []
 
-        # Live air/water INTERFACE in the MuJoCo viewer: the VOF field
-        # alpha at iso 0.5, drawn as a translucent blue surface.
+        # Live two-field overlay in the MuJoCo viewer: the air/water INTERFACE
+        # (VOF alpha at iso 0.5, translucent blue) together with the vorticity
+        # magnitude shell (omega_mag, more opaque orange) so the wake under the
+        # surface is visible. Each layer keeps its own colour + opacity.
         extensions.append({
             "loader": "lilytorch.integration.flow_iso_gl_viewer.FlowIsoGLViewer",
             "config": {
-                "field": "interface",
-                "iso_value": 0.5,
-                "alpha": 0.45,
-                "color_uni": "#3399FF",
-                "smooth_sigma": 0,
-                "exclude_body": False,
+                # Global (shared) knobs.
                 "update_every": 1,
                 "max_vertices": 800000,
                 "crop_boundary": 0,
                 "debug_force_visible": False,
+                "fields": [
+                    {   # air/water interface
+                        "field": "interface",
+                        "iso_value": 0.5,
+                        "alpha": 0.45,
+                        "color": "#3399FF",
+                        "smooth_sigma": 0,
+                        "exclude_body": False,
+                    },
+                    {   # vorticity-magnitude shell (the wake)
+                        "field": "omega_mag",
+                        "iso_fraction": 10,
+                        "alpha": 0.3,
+                        "color": "#FF8C1A",
+                        "smooth_sigma": 0,
+                        "exclude_body": True,
+                    },
+                ],
             },
         })
 
