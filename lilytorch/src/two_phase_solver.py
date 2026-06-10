@@ -66,18 +66,24 @@ class TwoPhaseSolver(FluidSolver):
                 "two_phase requires poisson_method 'multigrid' or 'mgcg' "
                 "(the FFT solver cannot do a variable-density Poisson)."
             )
-        # Kernel-mode two-phase reuses the kernel's per-face coefficient
-        # ``dt*mu0/rho_water`` and rescales it by the VOF reciprocal-density
-        # blend (see :meth:`project`). That identity needs the kernel to keep
-        # ``mu0`` in the coefficient numerator, i.e. ``bdim_mu0_projection``
-        # must be True (the default). With it off the kernel writes a bare
-        # ``dt/rho_water`` and the rescale would silently drop the body's
-        # mu0 masking from the variable-density Poisson.
-        if self._use_kernels and not self.bdim_mu0_projection:
+        # KERNEL MODE IS NOT SUPPORTED for two-phase.  The fused CUDA BDIM is
+        # INCOMPLETE: air-transparent-body is applied to the projection
+        # COEFFICIENT (see _rescale_kernel_coeffs_two_phase) but NOT to the
+        # velocity BDIM imposition — the python ``_apply_bdim_all_axes`` override
+        # has no kernel counterpart, so the kernel imposes the body's rigid
+        # velocity into the AIR.  For a body straddling the waterline this drives
+        # a spurious air-side body-band current that blows up (PROVEN: python with
+        # ``mu0_free_coeff`` + ``air_transparent_body=False`` reproduces the kernel
+        # blow-up at the SAME iteration and location).  Porting the alpha-masking
+        # of mu0/mu1 into the kernel BDIM is a CUDA change; until then two-phase
+        # must run on the python path.  (The kernel-coefficient helpers below are
+        # kept but unreachable, ready for that future port.)
+        if self._use_kernels:
             raise ValueError(
-                "two_phase kernel mode requires bdim_mu0_projection=True so the "
-                "kernel coefficient retains mu0 for the reciprocal-density "
-                "rescale; got bdim_mu0_projection=False."
+                "TwoPhaseSolver does not support kernel mode "
+                "(solver_method='kernel'): the fused kernel BDIM is missing the "
+                "air-transparent velocity masking, so a body at the waterline "
+                "blows up.  Use solver_method='python' for two-phase simulations."
             )
         self._init_two_phase(tp_cfg)
         # Saved 3-D PyVista frames (plotting_and_saving -> plot_field_3d) render
@@ -158,6 +164,22 @@ class TwoPhaseSolver(FluidSolver):
         self._rho_solid = cfg.get("rho_solid", None)
         if self._rho_solid is not None:
             self._rho_solid = float(self._rho_solid)
+        # mu0-free coefficient: the cleanest statement of "no hole in the Poisson"
+        # -- the projection coefficient is simply c = dt/rho_fluid (the VOF
+        # water/air mobility) EVERYWHERE, with mu0 dropped, so the body is purely
+        # a velocity constraint and never zeros the coefficient. This is the
+        # rho_solid limit rho_solid -> rho_flow (the mu0 blend cancels), but uses
+        # the LOCAL VOF density inside the body instead of a pinned constant.
+        # Works on BOTH paths: the python coefficient builder skips mu0; the
+        # kernel-mode projection rescale returns dt/rho_face directly (discarding
+        # the kernel's mu0-laden coeff). Mutually exclusive with rho_solid.
+        self._mu0_free_coeff = bool(cfg.get("mu0_free_coeff", False))
+        if self._mu0_free_coeff and self._rho_solid is not None:
+            raise ValueError(
+                "two_phase.mu0_free_coeff and rho_solid both set the projection "
+                "coefficient; enable only one (mu0_free_coeff is the rho_solid="
+                "rho_flow limit)."
+            )
         # Fixed-point iteration cycles per step (Nangia Sec 4.2; n_cycles=2 gives
         # 2nd order + reconciles the body-inclusive projection with the rigid
         # constraint and the density). 1 = single forward-Euler pass (default).
@@ -177,6 +199,8 @@ class TwoPhaseSolver(FluidSolver):
         flags = []
         if self._consistent_momentum:
             flags.append("CONSISTENT momentum")
+        if self._mu0_free_coeff:
+            flags.append("mu0-free coeff (c=dt/rho_fluid everywhere)")
         if self._rho_solid is not None:
             flags.append(f"three-phase rho_solid={self._rho_solid}")
         if self._air_transparent_body:
@@ -231,6 +255,13 @@ class TwoPhaseSolver(FluidSolver):
         out = []
         for d, ax in enumerate(self._bdim_axis_names):       # 'u','v'[,'w']
             recip_face = tp.recip_density_face(d)            # (1/ρ) water/air blend
+            if self._mu0_free_coeff:
+                # mu0-FREE: c = dt/rho_fluid everywhere (no body hole); the body
+                # is purely a velocity constraint. Uses the LOCAL VOF density,
+                # so the body interior carries whatever fluid (water/air) the VOF
+                # places there. (rho_solid -> rho_flow limit; mu0 cancels.)
+                out.append(dt * recip_face)
+                continue
             mu0 = getattr(self, f'mu0_all_{ax}')             # (1−δ^B), fluid fraction
             if atb:
                 # Air-transparent body: mu0_eff = 1 - alpha_face*(1 - mu0)
@@ -404,6 +435,10 @@ class TwoPhaseSolver(FluidSolver):
             inv_rho_u = ru / rw
             inv_rho_v = rv / rw
             inv_rho_w = rw_ / rw
+            if self._mu0_free_coeff:
+                # mu0-FREE: c = dt/rho_face everywhere — discard the kernel's
+                # mu0-laden coeff and use the VOF mobility directly (no body hole).
+                return dt * inv_rho_u, dt * inv_rho_v, dt * inv_rho_w
             if atb:
                 a_u = self._alpha_face(0, full_grid=False)
                 a_v = self._alpha_face(1, full_grid=False)
@@ -416,6 +451,8 @@ class TwoPhaseSolver(FluidSolver):
         # 2-D kernel coefficients are stored on the full (padded) grid.
         r0 = rw * tp.recip_density_face(0)
         r1 = rw * tp.recip_density_face(1)
+        if self._mu0_free_coeff:
+            return dt * (r0 / rw), dt * (r1 / rw), cw   # c = dt/rho_face, no mu0
         if atb:
             a0 = self._alpha_face(0, full_grid=False)
             a1 = self._alpha_face(1, full_grid=False)
@@ -629,9 +666,62 @@ class TwoPhaseSolver(FluidSolver):
     # ------------------------------------------------------------------
     #  Override: VOF transport in the once-per-step tail
     # ------------------------------------------------------------------
+    def _umax_probe(self, u, v, w_vel, iteration):
+        """Diagnostic: find the max-|u| cell each step and report WHAT is there
+        (inside body / body-band / fluid; water / air / interface; nearest body;
+        wall distance).  Opt-in via ``LILYTORCH_UMAX_PROBE=1`` (and optional
+        ``LILYTORCH_UMAX_THR``); normal runs are untouched.  Run before
+        ``check_explosion`` so the blow-up step itself is captured."""
+        import os
+        comp = self.composite_body
+        D = self.ndim
+        comps = [u, v] + ([w_vel] if (D == 3 and w_vel is not None) else [])
+        speed = comps[0].abs().clone()
+        for c in comps[1:]:
+            speed = torch.maximum(speed, c.abs())
+        nonfin = not bool(torch.isfinite(speed).all())
+        speed = torch.nan_to_num(speed, nan=1e30, posinf=1e30, neginf=1e30)
+        umax = float(speed.max())
+        thr = float(os.environ.get("LILYTORCH_UMAX_THR", "2.0"))
+        if umax < thr and iteration % 25 != 0:
+            return
+        idx = int(torch.argmax(speed)); sh = tuple(speed.shape)
+        if D == 3:
+            i = idx // (sh[1] * sh[2]); rem = idx % (sh[1] * sh[2])
+            j = rem // sh[2]; k = rem % sh[2]; ijk = (i, j, k)
+            z = float(comp.z[k])
+        else:
+            i = idx // sh[1]; j = idx % sh[1]; ijk = (i, j); z = 0.0
+        x = float(comp.x[i]); y = float(comp.y[j]); h = float(self.h)
+        sdf = (float(comp.sdf_val[ijk]) if getattr(comp, 'sdf_val', None) is not None
+               else float('nan'))
+        a = float(self.two_phase.alpha[ijk])
+        loc = ("INSIDE-body" if sdf < 0 else
+               ("body-BAND" if abs(sdf) < 2 * h else "fluid"))
+        phase = "water" if a > 0.9 else ("air" if a < 0.1 else "INTERFACE")
+        nb = ""
+        sv = getattr(comp, 'sdf_vals', None)
+        if sv is not None:
+            try:
+                per = [abs(float(sv[b][ijk])) for b in range(sv.shape[0])]
+                bi = min(range(len(per)), key=lambda b: per[b])
+                name = getattr(comp.bodies[bi], 'name', None) or f"body{bi}"
+                nb = f" nearest={name}"
+            except Exception:
+                pass
+        dwall = min(i, sh[0] - 1 - i, j, sh[1] - 1 - j)
+        if D == 3:
+            dwall = min(dwall, k, sh[2] - 1 - k)
+        print(f"[umax] it={iteration:4d} |u|max={umax:9.2f} @({x:+.3f},{y:+.3f},{z:+.3f}) "
+              f"ijk={ijk} {loc}/{phase} sdf={sdf:+.3f} a={a:.2f} wall={dwall}c{nb}"
+              f"{' NONFINITE!' if nonfin else ''}", flush=True)
+
     def finalize_step(self, u, v, p, iteration, w_vel=None):
         """Once-per-step tail: stability check, VOF transport, BDIM-field
         release, optional allocator flush, and plotting/saving."""
+        import os
+        if os.environ.get("LILYTORCH_UMAX_PROBE", "0") == "1":
+            self._umax_probe(u, v, w_vel, iteration)
         self.check_explosion(iteration)
         # In consistent (evolve) mode the interface already rode the shared mass
         # flux inside fluid_step (alpha synced there); skip the standalone VOF.
