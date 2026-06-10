@@ -1597,11 +1597,22 @@ class FluidSolver(PlottingMixin):
         # ---- full-grid fallback ----------------------------------------
         # cc grid (FFT RHS, last element) omits mu0 so ch_cc stays bounded;
         # the correction faces keep mu0 (preserve no-slip body velocity).
+        #
+        # When ``bdim_mu0_projection`` is False the coefficient is the
+        # constant ``dt/rho`` everywhere; we must still produce a tensor
+        # of the same shape as the mu0 grid so that downstream slicing
+        # (``ch[1:, 1:-1]`` etc.) works.  The reference shape is taken
+        # from ``mu0_all_u`` (the first staggered mu0 grid).
+        _ref_shape = mu_grids[0].shape if mu_grids[0] is not None else self.grid_shape
+        _scalar_coeff = timestep / _rho_f
         out = []
         for i, mu in enumerate(mu_grids):
             is_cc = (i == len(mu_grids) - 1)
-            _num = timestep if (is_cc or not _mu0w) else timestep * mu
-            out.append(_num / _rho_f)
+            if is_cc or not _mu0w:
+                out.append(torch.full(_ref_shape, _scalar_coeff,
+                                      dtype=self.dtype, device=self.device))
+            else:
+                out.append(timestep * mu / _rho_f)
         return tuple(out)
 
     # ------------------------------------------------------------------

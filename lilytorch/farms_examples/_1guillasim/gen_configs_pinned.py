@@ -20,9 +20,10 @@ class SimConfig(BaseSimConfig):
         )
 
         # ── Hardware ──────────────────────────────────────────────────
-        self.use_gpu  = False
-        self.headless = True
-        self.use_bdim = False
+        self.use_gpu     = False
+        self.compute_sdf = True
+        self.headless    = True
+        self.use_bdim    = False
 
         # ── Animats ───────────────────────────────────────────────────
         self.filter_fixed_joints = False
@@ -86,7 +87,7 @@ class SimConfig(BaseSimConfig):
 
         # ── Body ─────────────────────────────────────────────────────
         self.force_scaling = 0.04
-        self.n_samples     = (2000, 2000)
+        # self.n_samples     = (2000, 2000)
 
     # ── Hooks ─────────────────────────────────────────────────────────
 

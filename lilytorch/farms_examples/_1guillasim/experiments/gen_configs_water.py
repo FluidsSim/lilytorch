@@ -20,7 +20,7 @@ class SimConfig(BaseSimConfig):
         self.use_bdim                      = True
         self.compute_sdf                   = True
         self.convexify                     = True
-        self.force_method                  = "eulerian"
+        self.force_method                  = "lagrangian"
         self.zero_pressure_inside          = True
         self.body_velocity_blend_eps_cells = None
         self.bdim_mu0_projection           = False
@@ -199,6 +199,23 @@ class SimConfig(BaseSimConfig):
             },
         })
 
+        # FlowViewer2D – overlay 2-D flow field on the MuJoCo viewer
+        extensions.append({
+            "loader": "lilytorch.integration.flow_viewer_2d_gpu.FlowViewer2D",
+            "config": {
+                "field"         : "curl",
+                "nx_vis"        : 1024,
+                "ny_vis"        : 512,
+                "alpha"         : 1,
+                "z_offset"      : 0.015,
+                "smooth_sigma"  : 0,
+                "crop_boundary" : 0,
+                "update_every"  : 1,
+                "synchronize_cuda": False,
+                "vmin"          : -10,
+                "vmax"          : 10,
+            },
+        })
 
         extensions.append({
             "loader": "lilytorch.integration.streaming_camera.StreamingCameraRecording",

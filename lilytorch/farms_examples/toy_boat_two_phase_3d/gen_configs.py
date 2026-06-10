@@ -98,7 +98,7 @@ class SimConfig(BaseSimConfig):
         controller_config = {
             "path": "lilytorch.farms_examples.submarine."
                     "propeller_controller.PropellerController",
-            "tau": 200.0,    # propeller torque [N·m]
+            "tau": 400.0,    # propeller torque [N·m]
         }
         self.animats_pars = [
             {

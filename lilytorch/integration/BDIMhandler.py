@@ -2416,7 +2416,19 @@ class BDIMhandler:
                 break
             x = np.asarray(acc.relax(x, x_tilde), dtype=np.float64)
 
-        acc.finalize_timestep()
+        if converged:
+            acc.finalize_timestep()
+        else:
+            # A diverged / non-converged step collected garbage secant
+            # pairs; finalize_timestep() would push them into the IQN-ILS
+            # reuse store, where they poison every subsequent step: the
+            # first quasi-Newton candidate built from them trips the force
+            # bound at sweep 1, a 1-sweep step appends no fresh columns to
+            # rotate the bad ones out, and the coupling degenerates
+            # permanently to explicit commits (added-mass unstable).  Drop
+            # ALL accelerator history instead — failures are rare and a
+            # cold secant restart costs only a few extra sweeps.
+            acc.reset()
         self._pose_source = prev_src
 
         # ---- choose the committed load ----

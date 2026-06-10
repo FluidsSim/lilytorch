@@ -4,12 +4,12 @@
     <model name="pool">
       <pose>0 0 0 0 0 0</pose>
       <link name="wall_xmin">
-        <pose>-0.15 0.0 0.3 0 0 0</pose>
+        <pose>-3.15 0.0 0.3500000000000001 0 0 0</pose>
         <collision name="wall_xmin_collision">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.3 2.6 0.6</size>
+              <size>0.3 7.0 3.5</size>
             </box>
           </geometry>
         </collision>
@@ -17,24 +17,24 @@
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.3 2.6 0.6</size>
+              <size>0.3 7.0 3.5</size>
             </box>
           </geometry>
           <material>
-            <ambient>0.78 0.74 0.68 1.0000</ambient>
-            <diffuse>0.88 0.84 0.78 1.0000</diffuse>
-            <specular>0.30 0.28 0.25 1.0000</specular>
-            <emissive>0.0 0.0 0.0 1.0000</emissive>
+            <ambient>0.78 0.74 0.68 0.0000</ambient>
+            <diffuse>0.88 0.84 0.78 0.0000</diffuse>
+            <specular>0.30 0.28 0.25 0.0000</specular>
+            <emissive>0.0 0.0 0.0 0.0000</emissive>
           </material>
         </visual>
       </link>
       <link name="wall_xmax">
-        <pose>6.15 0.0 0.3 0 0 0</pose>
+        <pose>24.15 0.0 0.3500000000000001 0 0 0</pose>
         <collision name="wall_xmax_collision">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.3 2.6 0.6</size>
+              <size>0.3 7.0 3.5</size>
             </box>
           </geometry>
         </collision>
@@ -42,24 +42,24 @@
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.3 2.6 0.6</size>
+              <size>0.3 7.0 3.5</size>
             </box>
           </geometry>
           <material>
-            <ambient>0.78 0.74 0.68 1.0000</ambient>
-            <diffuse>0.88 0.84 0.78 1.0000</diffuse>
-            <specular>0.30 0.28 0.25 1.0000</specular>
-            <emissive>0.0 0.0 0.0 1.0000</emissive>
+            <ambient>0.78 0.74 0.68 0.0000</ambient>
+            <diffuse>0.88 0.84 0.78 0.0000</diffuse>
+            <specular>0.30 0.28 0.25 0.0000</specular>
+            <emissive>0.0 0.0 0.0 0.0000</emissive>
           </material>
         </visual>
       </link>
       <link name="wall_ymin">
-        <pose>3.0 -1.15 0.3 0 0 0</pose>
+        <pose>10.5 -3.35 0.3500000000000001 0 0 0</pose>
         <collision name="wall_ymin_collision">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>6.6 0.3 0.6</size>
+              <size>27.6 0.3 3.5</size>
             </box>
           </geometry>
         </collision>
@@ -67,24 +67,24 @@
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>6.6 0.3 0.6</size>
+              <size>27.6 0.3 3.5</size>
             </box>
           </geometry>
           <material>
-            <ambient>0.78 0.74 0.68 1.0000</ambient>
-            <diffuse>0.88 0.84 0.78 1.0000</diffuse>
-            <specular>0.30 0.28 0.25 1.0000</specular>
-            <emissive>0.0 0.0 0.0 1.0000</emissive>
+            <ambient>0.78 0.74 0.68 0.0000</ambient>
+            <diffuse>0.88 0.84 0.78 0.0000</diffuse>
+            <specular>0.30 0.28 0.25 0.0000</specular>
+            <emissive>0.0 0.0 0.0 0.0000</emissive>
           </material>
         </visual>
       </link>
       <link name="wall_ymax">
-        <pose>3.0 1.15 0.3 0 0 0</pose>
+        <pose>10.5 3.35 0.3500000000000001 0 0 0</pose>
         <collision name="wall_ymax_collision">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>6.6 0.3 0.6</size>
+              <size>27.6 0.3 3.5</size>
             </box>
           </geometry>
         </collision>
@@ -92,24 +92,24 @@
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>6.6 0.3 0.6</size>
+              <size>27.6 0.3 3.5</size>
             </box>
           </geometry>
           <material>
-            <ambient>0.78 0.74 0.68 1.0000</ambient>
-            <diffuse>0.88 0.84 0.78 1.0000</diffuse>
-            <specular>0.30 0.28 0.25 1.0000</specular>
-            <emissive>0.0 0.0 0.0 1.0000</emissive>
+            <ambient>0.78 0.74 0.68 0.0000</ambient>
+            <diffuse>0.88 0.84 0.78 0.0000</diffuse>
+            <specular>0.30 0.28 0.25 0.0000</specular>
+            <emissive>0.0 0.0 0.0 0.0000</emissive>
           </material>
         </visual>
       </link>
       <link name="floor">
-        <pose>3.0 0.0 -0.15 0 0 0</pose>
+        <pose>10.5 0.0 -1.5499999999999998 0 0 0</pose>
         <collision name="floor_collision">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>6.6 2.6 0.3</size>
+              <size>27.6 7.0 0.3</size>
             </box>
           </geometry>
         </collision>
@@ -117,19 +117,19 @@
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>6.6 2.6 0.3</size>
+              <size>27.6 7.0 0.3</size>
             </box>
           </geometry>
           <material>
-            <ambient>0.78 0.74 0.68 1.0000</ambient>
-            <diffuse>0.88 0.84 0.78 1.0000</diffuse>
-            <specular>0.30 0.28 0.25 1.0000</specular>
-            <emissive>0.0 0.0 0.0 1.0000</emissive>
+            <ambient>0.78 0.74 0.68 0.0000</ambient>
+            <diffuse>0.88 0.84 0.78 0.0000</diffuse>
+            <specular>0.30 0.28 0.25 0.0000</specular>
+            <emissive>0.0 0.0 0.0 0.0000</emissive>
           </material>
         </visual>
       </link>
       <link name="ground_bg">
-        <pose>3.0 0.0 -0.45999999999999996 0 0 0</pose>
+        <pose>10.5 0.0 -1.8599999999999999 0 0 0</pose>
         <visual name="ground_bg_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
@@ -138,178 +138,8 @@
             </box>
           </geometry>
           <material>
-            <ambient>0.8784 0.8314 0.8314 1.0</ambient>
-            <diffuse>0.8784 0.8314 0.8314 1.0</diffuse>
-            <specular>0.0 0.0 0.0 1.0</specular>
-            <emissive>0.8784 0.8314 0.8314 1.0</emissive>
-          </material>
-        </visual>
-      </link>
-      <link name="gridh_0">
-        <pose>3.0 -1 0.0002 0 0 0</pose>
-        <visual name="gridh_0_visual">
-          <pose>0 0 0 0 0 0</pose>
-          <geometry>
-            <box>
-              <size>6 0.003 0.0002</size>
-            </box>
-          </geometry>
-          <material>
-            <ambient>0.55 0.55 0.55 1.0</ambient>
-            <diffuse>0.55 0.55 0.55 1.0</diffuse>
-            <specular>0.0 0.0 0.0 1.0</specular>
-            <emissive>0.0 0.0 0.0 1.0</emissive>
-          </material>
-        </visual>
-      </link>
-      <link name="gridh_1">
-        <pose>3.0 0.0 0.0002 0 0 0</pose>
-        <visual name="gridh_1_visual">
-          <pose>0 0 0 0 0 0</pose>
-          <geometry>
-            <box>
-              <size>6 0.003 0.0002</size>
-            </box>
-          </geometry>
-          <material>
-            <ambient>0.55 0.55 0.55 1.0</ambient>
-            <diffuse>0.55 0.55 0.55 1.0</diffuse>
-            <specular>0.0 0.0 0.0 1.0</specular>
-            <emissive>0.0 0.0 0.0 1.0</emissive>
-          </material>
-        </visual>
-      </link>
-      <link name="gridh_2">
-        <pose>3.0 1.0 0.0002 0 0 0</pose>
-        <visual name="gridh_2_visual">
-          <pose>0 0 0 0 0 0</pose>
-          <geometry>
-            <box>
-              <size>6 0.003 0.0002</size>
-            </box>
-          </geometry>
-          <material>
-            <ambient>0.55 0.55 0.55 1.0</ambient>
-            <diffuse>0.55 0.55 0.55 1.0</diffuse>
-            <specular>0.0 0.0 0.0 1.0</specular>
-            <emissive>0.0 0.0 0.0 1.0</emissive>
-          </material>
-        </visual>
-      </link>
-      <link name="gridv_0">
-        <pose>0 0.0 0.0002 0 0 0</pose>
-        <visual name="gridv_0_visual">
-          <pose>0 0 0 0 0 0</pose>
-          <geometry>
-            <box>
-              <size>0.003 2 0.0002</size>
-            </box>
-          </geometry>
-          <material>
-            <ambient>0.55 0.55 0.55 1.0</ambient>
-            <diffuse>0.55 0.55 0.55 1.0</diffuse>
-            <specular>0.0 0.0 0.0 1.0</specular>
-            <emissive>0.0 0.0 0.0 1.0</emissive>
-          </material>
-        </visual>
-      </link>
-      <link name="gridv_1">
-        <pose>1.0 0.0 0.0002 0 0 0</pose>
-        <visual name="gridv_1_visual">
-          <pose>0 0 0 0 0 0</pose>
-          <geometry>
-            <box>
-              <size>0.003 2 0.0002</size>
-            </box>
-          </geometry>
-          <material>
-            <ambient>0.55 0.55 0.55 1.0</ambient>
-            <diffuse>0.55 0.55 0.55 1.0</diffuse>
-            <specular>0.0 0.0 0.0 1.0</specular>
-            <emissive>0.0 0.0 0.0 1.0</emissive>
-          </material>
-        </visual>
-      </link>
-      <link name="gridv_2">
-        <pose>2.0 0.0 0.0002 0 0 0</pose>
-        <visual name="gridv_2_visual">
-          <pose>0 0 0 0 0 0</pose>
-          <geometry>
-            <box>
-              <size>0.003 2 0.0002</size>
-            </box>
-          </geometry>
-          <material>
-            <ambient>0.55 0.55 0.55 1.0</ambient>
-            <diffuse>0.55 0.55 0.55 1.0</diffuse>
-            <specular>0.0 0.0 0.0 1.0</specular>
-            <emissive>0.0 0.0 0.0 1.0</emissive>
-          </material>
-        </visual>
-      </link>
-      <link name="gridv_3">
-        <pose>3.0 0.0 0.0002 0 0 0</pose>
-        <visual name="gridv_3_visual">
-          <pose>0 0 0 0 0 0</pose>
-          <geometry>
-            <box>
-              <size>0.003 2 0.0002</size>
-            </box>
-          </geometry>
-          <material>
-            <ambient>0.55 0.55 0.55 1.0</ambient>
-            <diffuse>0.55 0.55 0.55 1.0</diffuse>
-            <specular>0.0 0.0 0.0 1.0</specular>
-            <emissive>0.0 0.0 0.0 1.0</emissive>
-          </material>
-        </visual>
-      </link>
-      <link name="gridv_4">
-        <pose>4.0 0.0 0.0002 0 0 0</pose>
-        <visual name="gridv_4_visual">
-          <pose>0 0 0 0 0 0</pose>
-          <geometry>
-            <box>
-              <size>0.003 2 0.0002</size>
-            </box>
-          </geometry>
-          <material>
-            <ambient>0.55 0.55 0.55 1.0</ambient>
-            <diffuse>0.55 0.55 0.55 1.0</diffuse>
-            <specular>0.0 0.0 0.0 1.0</specular>
-            <emissive>0.0 0.0 0.0 1.0</emissive>
-          </material>
-        </visual>
-      </link>
-      <link name="gridv_5">
-        <pose>5.0 0.0 0.0002 0 0 0</pose>
-        <visual name="gridv_5_visual">
-          <pose>0 0 0 0 0 0</pose>
-          <geometry>
-            <box>
-              <size>0.003 2 0.0002</size>
-            </box>
-          </geometry>
-          <material>
-            <ambient>0.55 0.55 0.55 1.0</ambient>
-            <diffuse>0.55 0.55 0.55 1.0</diffuse>
-            <specular>0.0 0.0 0.0 1.0</specular>
-            <emissive>0.0 0.0 0.0 1.0</emissive>
-          </material>
-        </visual>
-      </link>
-      <link name="gridv_6">
-        <pose>6.0 0.0 0.0002 0 0 0</pose>
-        <visual name="gridv_6_visual">
-          <pose>0 0 0 0 0 0</pose>
-          <geometry>
-            <box>
-              <size>0.003 2 0.0002</size>
-            </box>
-          </geometry>
-          <material>
-            <ambient>0.55 0.55 0.55 1.0</ambient>
-            <diffuse>0.55 0.55 0.55 1.0</diffuse>
+            <ambient>0.0 0.0 0.0 1.0</ambient>
+            <diffuse>0.0 0.0 0.0 1.0</diffuse>
             <specular>0.0 0.0 0.0 1.0</specular>
             <emissive>0.0 0.0 0.0 1.0</emissive>
           </material>
