@@ -60,17 +60,23 @@ class SimConfig(BaseSimConfig):
         self.compute_sdf                   = True
         self.convexify                     = True
         self.force_method                  = None   # Eulerian: stabler than Lagrangian in 2D
-        self.zero_pressure_inside          = True
+        self.zero_pressure_inside          = False
         self.body_velocity_blend_eps_cells = 3
         self.bdim_mu0_projection           = False  # plain dt/rho; mu0-weighted degenerates at inter-link seams
-        self.bdim_body_div_correction      = False  # only valid for convexify=True (overlapping links)
+        self.bdim_body_div_correction      = True   # needed: removes seam-velocity divergence from Poisson RHS (convexify=True)
         self.poisson_method                = "multigrid"
         self.compile_adv_diff              = True
 
         # self.force_scaling         = 0.04
-        self.force_relaxation              = 0.3
+        # self.force_relaxation              = 0.3
 
-        self.coupling = None   # explicit: position-controlled joints → implicit fixed-point has no meaning
+        self.coupling = {
+            "scheme": "implicit",
+            "accelerator": "iqn-ils",  # IQN-ILS: quadratic convergence near fixed point, handles ρ_body=ρ_fluid
+            "reuse": 2,
+            "tol": 1e-4,
+            "max_iter": 100,           # 30 was too few at peak swimming speed; 100 gives Aitken/IQN room
+        }
 
 
         self.bdim_dt                 = self.timestep

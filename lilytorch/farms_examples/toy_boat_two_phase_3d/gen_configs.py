@@ -125,24 +125,21 @@ class SimConfig(BaseSimConfig):
         ]
 
         # ── FSI coupling stability ────────────────────────────────────
-        # EXPLICIT coupling (implicit DIVERGES here: res->inf — strong coupling is
-        # ill-conditioned with force_method='lagrangian' + the articulated
-        # propeller joint, per the BDIMhandler warning).  The stern-up pitch is
-        # NOT static (masses trim-balanced on the convex envelope: COM_x 2.254
-        # over COB_x 2.192, static pitch torque ~-594 N*m ~ 0.3deg) and persists
-        # under BOTH schemes -> it is not a coupling-scheme problem.  Prime
-        # suspect now: the convex hull floats only ~14.5% submerged (~2.5 cells of
-        # draft on h=0.10) while the lagrangian force band is ~2*eps=2 cells wide,
-        # so the wetted layer is under-resolved -> fore-aft-asymmetric pressure
-        # integration -> steady spurious pitch.  See MASS_INERTIA_NOTES.md.
-        # self.force_relaxation = 0.5
-        # self.coupling = {
-        #     "scheme"     : "explicit",
-        #     "accelerator": "iqn-ils",
-        #     "reuse"      : 2,
-        #     "tol"        : 1.0e-4,
-        #     "max_iter"   : 30,
-        # }
+        # IMPLICIT coupling (Aitken accelerator) cures the explicit added-mass
+        # instability: boat mass ~2000 kg ≈ added mass → explicit diverges over
+        # thousands of steps.  Aitken is preferred over IQN-ILS (the reuse-store
+        # poisoning issue documented in memory caused IQN-ILS to fail for the 2D
+        # free-swimmer; Aitken has 0 failures).  The previous implicit block was
+        # commented out because it diverged with force_method='lagrangian' + the
+        # articulated propeller joint; the BDIMhandler warning says the
+        # ill-conditioning is "especially force_method='lagrangian'" — with
+        # Eulerian forces this is no longer a concern.
+        self.coupling = {
+            "scheme"     : "implicit",
+            "accelerator": "aitken",
+            "tol"        : 1.0e-4,
+            "max_iter"   : 20,
+        }
         # ── Joint damping: prevent passive revolute joints (propeller)
         # from spinning up due to tiny numerical fluid torques.  With
         # Ixx≈0.03 kg·m², even τ≈1e-3 N·m gives α≈0.03 rad/s² and the
@@ -161,7 +158,7 @@ class SimConfig(BaseSimConfig):
         # drives the two-phase blow-up (sharpened by finer cells); 3 cells of
         # sigmoid SDF weighting smooths body_{u,v,w} across the link seams.
 
-        # self.body_velocity_blend_eps_cells = 3
+        self.body_velocity_blend_eps_cells = 3
 
         # ── Physics (real ~6 m scale) ─────────────────────────────────
         self.rho_body      = 1000.0   # Poisson conditioning (not boat density)
@@ -191,11 +188,17 @@ class SimConfig(BaseSimConfig):
         # separate (overlapping) fluid bodies, so the force is integrated over
         # the smoothed delta of the *union* SDF rather than each body's closed
         # surface (gauge-invariant; handles the overlaps correctly).
-        self.force_method            = "lagrangian"
+        self.force_method            = "eulerian"
         self.force_delta_order       = 1
         self.eps_multiplier          = 2
         self.zero_pressure_inside    = False
         self.dtype                   = "float32"
+        # x-only sponge: absorbs the propeller wake + bow approaching the
+        # outlet Dirichlet wall (xmax=24).  Width=3 m keeps the boat's stern
+        # (starts at x=-0.78, 2.22 m from xmin=-3) just outside the inlet
+        # sponge at t=0.  strength=50 1/s gives ~5% residual per timestep at
+        # the wall face, enough to prevent the BDIM/Dirichlet collision blow-up.
+        self.sponge = {"width": 3.0, "strength": 50.0, "axes": ["x"]}
 
         # Boundary conditions — Neumann on lateral walls (like submarine),
         # Dirichlet on top/bottom to avoid free-slip water loss.
