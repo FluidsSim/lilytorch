@@ -58,7 +58,7 @@ class SimConfig(BaseSimConfig):
         self.use_gpu                       = True
         self.use_bdim                      = True
         self.compute_sdf                   = True
-        self.convexify                     = False
+        self.convexify                     = True
         self.force_method                  = None   # Eulerian: stabler than Lagrangian in 2D
         self.zero_pressure_inside          = True
         self.body_velocity_blend_eps_cells = 3
@@ -68,7 +68,7 @@ class SimConfig(BaseSimConfig):
         self.compile_adv_diff              = True
 
         # self.force_scaling         = 0.04
-        # self.force_relaxation              = 0.3
+        self.force_relaxation              = 0.3
 
         self.coupling = None   # explicit: position-controlled joints → implicit fixed-point has no meaning
 
