@@ -51,32 +51,26 @@ class SimConfig(BaseSimConfig):
         self.convection_method = "abdquickest"
         self.n_iterations      = 20001
         self.save_every        = 200
-        self.dtype             = "float64"
+        # self.dtype             = "float64"
 
         # ── BDIM solver ──────────────────────────────────────────────
         # self.solver_method                 = "python"
         self.use_gpu                       = True
         self.use_bdim                      = True
         self.compute_sdf                   = True
-        self.convexify                     = True
-        self.force_method                  = "eulerian"
-        self.zero_pressure_inside          = False
+        self.convexify                     = False
+        self.force_method                  = None   # Eulerian: stabler than Lagrangian in 2D
+        self.zero_pressure_inside          = True
         self.body_velocity_blend_eps_cells = 3
-        self.bdim_mu0_projection           = True
-        self.bdim_body_div_correction      = True
-        self.poisson_method                = "fft"
+        self.bdim_mu0_projection           = False  # plain dt/rho; mu0-weighted degenerates at inter-link seams
+        self.bdim_body_div_correction      = False  # only valid for convexify=True (overlapping links)
+        self.poisson_method                = "multigrid"
         self.compile_adv_diff              = True
 
-        self.force_scaling         = 0.04
+        # self.force_scaling         = 0.04
         # self.force_relaxation              = 0.3
 
-        self.coupling = {
-            "scheme": "implicit",
-            "accelerator": "aitken",   # or "aitken" / "constant"
-            "reuse": 2,
-            "tol": 1e-4,
-            "max_iter": 30,
-        }
+        self.coupling = None   # explicit: position-controlled joints → implicit fixed-point has no meaning
 
 
         self.bdim_dt                 = self.timestep

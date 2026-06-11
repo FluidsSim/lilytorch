@@ -3,35 +3,17 @@ from farms_core.model.control import AnimatController
 from farms_core.experiment.options import ExperimentOptions
 from farms_core.model.data import AnimatData
 from farms_core.model.options import AnimatOptions
-from farms_core.sensors.sensor_convention import sc
 from farms_core.model.control import ControlType
 import numpy as np
 from lilytorch.util.rw import Dict2Class
-from lilytorch.integration.kinematics import KinematicsController
-import matplotlib.pyplot as plt
 
-class PositionController(KinematicsController):
+
+class PositionController(AnimatController):
     def __init__(self, animat_data, animat_options, experiment_options, config, animat_i):
 
-        joints_names          = animat_options.control.joints_names()
-        kinematics_sampling   = experiment_options.simulation.physics.timestep
-        kinematics_indices    = [1,2,3,4,5,6,7,8]
-        kinematics_time_index = 0
-        kinematics_invert     = False
-        kinematics_degrees    = False
-        kinematics_start      = 0.0
-        kinematics_end        = experiment_options.simulation.physics.timestep*experiment_options.simulation.runtime.n_iterations
-        kinematics            = self.generate_positions(
-            tstop=kinematics_end,
-            sampling_rate=1/kinematics_sampling,
-            wlength=1,
-            amp_deg=config["amp"],
-            freq=config["freq"],
-            TWL=config["twl"],
-            nmotors=8,
-            plot=False
-        )
-        joints_control_types  = {
+        # --- Joint control setup (same as before) ---
+        joints_names = animat_options.control.joints_names()
+        joints_control_types = {
             motor.joint_name: ControlType.from_string_list(
                 motor.control_types,
             )
@@ -50,21 +32,13 @@ class PositionController(KinematicsController):
             max_torques=max_torques,
             joints_control_types=joints_control_types,
         )
+
+        # --- Parent init (AnimatController, no pre-computed kinematics) ---
         super().__init__(
             animat_i=animat_i,
             joints_names=joints_names_per_type,
-            kinematics=kinematics,
-            sampling=kinematics_sampling,
-            indices=kinematics_indices,
-            time_index=kinematics_time_index,
-            invert_motors=kinematics_invert,
-            degrees=kinematics_degrees,
-            timestep=experiment_options.simulation.physics.timestep,
-            n_iterations=experiment_options.simulation.runtime.n_iterations,
-            animat_data=animat_data,
+            muscles_names=[],
             max_torques=max_torques_per_type,
-            init_time=kinematics_start,
-            end_time=kinematics_end,
         )
 
         self.animat_data = animat_data
@@ -73,8 +47,24 @@ class PositionController(KinematicsController):
         self.config = Dict2Class(config)
         self.animat_i = animat_i
 
+        # --- Reference trajectory parameters ---
+        self._amp = config["amp"] * (np.pi / 180.0)  # deg → rad
+        self._freq = config["freq"]
+        self._twl = config["twl"]
+        self._nmotors = 8
+        self._wlength = 1
+        self._tau_rise = 1.0
+
+        # Pre-compute the amplitude envelope factor per motor
+        x = (np.arange(self._nmotors) + 1) / self._nmotors
+        self._factor = 1.0 + 0.323 * (x - 1.0) + 0.31 * (x ** 2 - 1.0)
+
+        # --- Sensor metadata ---
         self.n_joints = self.animat_data.sensors.joints.array.shape[1]
-        self.n_iterations = self.animat_data.sensors.links.array.shape[0]
+
+        # Map position-controlled joint names → sensor array indices
+        # self._pos_sensor_indices = self._build_sensor_mapping()
+
 
 
     @classmethod
@@ -96,45 +86,44 @@ class PositionController(KinematicsController):
             animat_i = animat_i,
         )
 
-    def generate_positions(
-            self,
-            tstop=3,
-            tau_rise=1,
-            sampling_rate=1000,
-            wlength=1,
-            amp_deg=20.0,
-            freq=1.0,
-            nmotors=8,
-            TWL=14,
-            plot=True
-        ):
-        amp = amp_deg * (np.pi / 180.0)
-        times = np.expand_dims(np.arange(0, tstop, 1 / sampling_rate), axis=1)
-        times_expanded = np.repeat(times, nmotors, axis=1)
+    def _build_sensor_mapping(self):
+        """Build array of sensor indices for position-controlled joints."""
+        pos_joint_names = self.joints_names[ControlType.POSITION]
+        sensor_names = list(self.animat_data.sensors.joints.names)
+        return np.array([
+            sensor_names.index(name) for name in pos_joint_names
+        ], dtype=int)
 
-        idxs = np.arange(nmotors)
-        x = (idxs + 1) / nmotors
-        factor = (1 + 0.323 * (x - 1) + 0.31 * (x ** 2 - 1))
+    def _envelope(self, t, joint_pos, joint_vel):
+        """Compute open-loop sine-wave reference positions at a single time t.
 
-        thetas = - amp * factor * np.sin(
-            2 * np.pi * (
-                wlength * idxs / TWL - freq * times_expanded
-            )
-            ) * (1-np.exp(-times_expanded/tau_rise))
+        Returns a 1D numpy array of length ``self._nmotors`` (radians).
+        """
+        idxs = np.arange(self._nmotors)
+        phase = 2.0 * np.pi * (
+            self._wlength * idxs / self._twl - self._freq * t
+        )
+        envelope = 1.0 - np.exp(-t / self._tau_rise)
+        return -self._amp * self._factor * np.sin(phase) * envelope
 
-        data = np.column_stack([times, thetas])
 
-        if plot:
-            x_plot = data[:, 0]
-            y_plot = data[:, 1:]
-            colors = plt.cm.jet(np.linspace(0, 1, y_plot.shape[1]))
-            for i in range(y_plot.shape[1]):
-                plt.plot(x_plot, y_plot[:, i], color=colors[i], label=f'Motor {i+1}')
-            plt.legend()
-            plt.show()
+    def positions(self, iteration, time, timestep):
+        """Return reference joint positions (implicit control).
 
-        return data
+        The sine-wave reference is evaluated on-the-fly at the current *time*.
+        MuJoCo's built-in position actuators (kp/kv gains configured in the
+        MJCF model) handle the low-level tracking.
 
-    def step(self, iteration, time, timestep):
-        """Postions"""
-        pass
+        Actual joint state is read from sensors and stored in
+        ``self.joint_positions`` / ``self.joint_velocities`` for optional
+        feedback use (e.g. in a subclass or external monitor).
+        """
+        # Read actual joint state for feedback (only position-controlled joints)
+        joint_pos = np.array(self.animat_data.sensors.joints.positions(iteration))
+        joint_vel = np.array(self.animat_data.sensors.joints.velocities(iteration))
+        # Implicit control: return reference only (MuJoCo actuators do the rest)
+        ref = self._envelope(time, joint_pos=joint_pos, joint_vel=joint_vel)
+        return dict(zip(
+            self.joints_names[ControlType.POSITION],
+            ref,
+        ))

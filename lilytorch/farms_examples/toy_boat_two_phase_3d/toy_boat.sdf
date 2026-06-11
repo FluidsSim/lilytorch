@@ -64,9 +64,20 @@
       <link name="keel_link">
         <pose>0 0 0 0 0 0</pose>
         <inertial>
-          <!-- 2000 kg at Y=-0.80: extreme keel for maximum righting moment.
-               COM → Y≈-0.32, world Z≈-0.06 (0.46 m below waterline). -->
-          <pose>1.5 -0.80 0 0 0 0</pose>
+          <!-- Ballast pose is VIRTUAL (decoupled from the keel mesh): Y=-0.80
+               keeps the combined COM low (below the waterline) for stability;
+               X=-0.5 (near the stern, inside the hull) shifts the boat LCG aft
+               to ~1.69 (59% from the bow, engines-aft motorboat layout).  The
+               resulting ~+3 deg static bow-up bias offsets the start-up
+               pitch transient: during prop spin-up the blades push water
+               downward before steady-state flow is established, producing a
+               net bow-down pitching moment (measured -1.7 deg from a +1.4 deg
+               baseline).  NB: the submerged thrust line is BELOW the CoM, so
+               steady horizontal thrust produces a bow-UP moment — the transient
+               is from unsteady blade vertical forces, not the thrust line.
+               With tau_ramp_steps set in the controller this transient is
+               suppressed and this aft-ballast bias can be reduced. -->
+          <pose>-0.5 -0.80 0 0 0 0</pose>
           <mass>315.0</mass>
           <inertia>
             <ixx>9.9</ixx>  <ixy>0</ixy> <ixz>0</ixz>

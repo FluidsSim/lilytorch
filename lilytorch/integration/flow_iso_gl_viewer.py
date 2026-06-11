@@ -936,7 +936,7 @@ class _IsoLayer:
 
     __slots__ = (
         "field_name", "field_fn", "iso_fraction", "iso_value",
-        "smooth_sigma", "alpha", "exclude_body",
+        "smooth_sigma", "alpha", "exclude_body", "phase_mask",
         "color_pos", "color_neg", "color_uni",
     )
 
@@ -948,6 +948,7 @@ class _IsoLayer:
         smooth_sigma: float,
         alpha: float,
         exclude_body: bool,
+        phase_mask: str | None,
         color_pos: tuple[float, float, float],
         color_neg: tuple[float, float, float],
         color_uni: tuple[float, float, float],
@@ -959,6 +960,7 @@ class _IsoLayer:
         self.smooth_sigma = float(smooth_sigma)
         self.alpha = float(np.clip(alpha, 0.0, 1.0))
         self.exclude_body = bool(exclude_body)
+        self.phase_mask = phase_mask  # None | "water" | "air"
         self.color_pos = color_pos
         self.color_neg = color_neg
         self.color_uni = color_uni
@@ -1067,6 +1069,7 @@ class FlowIsoGLViewer(_BaseExtension):
         max_vertices: int = 300_000,
         mc_backend: str = "auto",     # "auto" | "torchmcubes" | "skimage"
         exclude_body: bool = True,
+        phase_mask: str | None = None,  # None | "water" | "air" — restrict to one phase (two-phase only)
         light_dir: tuple[float, float, float] = (0.3, 0.4, -1.0),
         diag_every: int = 200,
         debug_force_visible: bool = False,
@@ -1094,6 +1097,7 @@ class FlowIsoGLViewer(_BaseExtension):
         self.max_vertices = int(max_vertices)
         self.mc_backend = str(mc_backend)
         self.exclude_body = bool(exclude_body)
+        self.phase_mask = phase_mask
         self.light_dir = tuple(float(c) for c in light_dir)
         self.diag_every = max(1, int(diag_every))
         self.debug_force_visible = bool(debug_force_visible)
@@ -1164,6 +1168,7 @@ class FlowIsoGLViewer(_BaseExtension):
                 smooth_sigma=spec.get("smooth_sigma", self.smooth_sigma),
                 alpha=spec.get("alpha", self.alpha),
                 exclude_body=spec.get("exclude_body", self.exclude_body),
+                phase_mask=spec.get("phase_mask", self.phase_mask),
                 color_pos=self._parse_iso_color(spec.get("color_pos", self.color_pos)),
                 color_neg=self._parse_iso_color(spec.get("color_neg", self.color_neg)),
                 color_uni=self._parse_iso_color(
@@ -1191,6 +1196,7 @@ class FlowIsoGLViewer(_BaseExtension):
             max_vertices=config.get("max_vertices", 300_000),
             mc_backend=config.get("mc_backend", "auto"),
             exclude_body=config.get("exclude_body", True),
+            phase_mask=config.get("phase_mask", None),
             light_dir=tuple(config.get("light_dir", (0.3, 0.4, -1.0))),
             diag_every=config.get("diag_every", 200),
             debug_force_visible=config.get("debug_force_visible", False),
@@ -1547,6 +1553,19 @@ class FlowIsoGLViewer(_BaseExtension):
         c = self.crop_boundary
         if c > 0:
             field = field[c:-c, c:-c, c:-c].contiguous()
+
+        # Phase mask: zero out the field in the excluded phase so the
+        # isosurface only appears inside water or air (two-phase only).
+        if layer.phase_mask is not None:
+            tp = getattr(fs, "two_phase", None)
+            if tp is not None:
+                alpha = tp.alpha.detach().to(device=field.device, dtype=torch.float32)
+                if c > 0:
+                    alpha = alpha[c:-c, c:-c, c:-c]
+                if layer.phase_mask == "water":
+                    field = field * (alpha > 0.5).to(field.dtype)
+                elif layer.phase_mask == "air":
+                    field = field * (alpha < 0.5).to(field.dtype)
 
         if layer.smooth_sigma > 0:
             field = _separable_gaussian_3d(field, layer.smooth_sigma)

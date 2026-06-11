@@ -87,6 +87,22 @@ class TwoPhase:
         # reference water volume for the mass-conservation diagnostic
         self.initial_water_volume = self.water_volume()
 
+    def reinit_alpha(self, alpha_init):
+        """Re-evaluate the interface field from ``alpha_init`` on the stored
+        grid (same path as ``__init__``) and reset the mass-diagnostic
+        reference.  Used by the deferred body-aware carve, which must wait for
+        the FARMS-coupled body poses (unknown at construction time)."""
+        if self.ndim == 2:
+            X, Y = torch.meshgrid(self._x, self._y, indexing="ij")
+            a = alpha_init(X, Y)
+        else:
+            X, Y, Z = torch.meshgrid(self._x, self._y, self._z, indexing="ij")
+            a = alpha_init(X, Y, Z)
+        self.alpha = a.to(device=self.device, dtype=self.dtype).contiguous()
+        self.alpha.clamp_(0.0, 1.0)
+        _neumann_pad(self.alpha)
+        self.initial_water_volume = self.water_volume()
+
     # ------------------------------------------------------------------
     # Masks (for plotting / diagnostics; the solve uses the smooth fields)
     # ------------------------------------------------------------------

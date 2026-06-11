@@ -29,6 +29,14 @@ class BoatZLogger(TaskExtension):
             nm = mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_BODY, b) or ""
             if "base_link" in nm:
                 self._bid = b; print(f"[zlog] tracking '{nm}' id={b}"); break
+        # propeller joint dof addresses (twin-screw spin-rate check)
+        self._prop_dofs = []
+        for j in range(m.njnt):
+            jn = mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_JOINT, j) or ""
+            if "propeller" in jn:
+                self._prop_dofs.append((jn, int(m.jnt_dofadr[j])))
+        if self._prop_dofs:
+            print(f"[zlog] prop joints: {[n for n, _ in self._prop_dofs]}")
 
     def _pitch_deg(self, physics):
         # xmat is row-major 3x3; body local x-axis in world = (m0, m3, m6).
@@ -51,9 +59,12 @@ class BoatZLogger(TaskExtension):
         ty = float(physics.data.xfrc_applied[self._bid][4])
         self._rows.append((self._it, t, x, z, pitch))
         if self._it % self.print_every == 0 or self._it < 5:
+            omegas = " ".join(
+                f"w[{n.split('propeller_')[-1]}]={float(physics.data.qvel[d]):+.2f}"
+                for n, d in getattr(self, "_prop_dofs", []))
             print(f"[zlog] it={self._it:5d} t={t:.3f}s x={x:+.4f} y={y:+.4f} z={z:.4f} "
                   f"pitch={pitch:+.2f}deg yaw={yaw:+.2f}deg Fx={fx:+.1f}N "
-                  f"Fz={fz:+.1f}N Ty={ty:+.1f}Nm",
+                  f"Fz={fz:+.1f}N Ty={ty:+.1f}Nm {omegas}",
                   flush=True)
         self._it += 1
 

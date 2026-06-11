@@ -13,15 +13,17 @@ FARMS coupling) runs through the untouched base solver byte-for-byte. The
 overrides are:
 
 * ``__init__`` — build the :class:`~lilytorch.src.two_phase.TwoPhase` field.
-* ``_compute_bdim_coefficients`` — projection coefficients
-  ``c = dt·μ0·(1/ρ)_fluid`` from the VOF water/air density (Weymouth & Yue 2011,
-  ``(1−δ^B)/ρ``; the body enters via ``μ0`` only, never its density). Used by
-  the **Python** solver path.
-* ``project`` — the **kernel** path's fused CUDA Kernel B knows nothing of the
-  VOF field and writes a single-density ``dt·μ0/ρ_water`` coefficient; this
-  override rescales it by ``ρ_water·(1/ρ)_face`` to recover the identical
-  variable-density coefficient (reusing the kernel's ``μ0``). No CUDA/solver
-  edits; both paths solve the same Poisson.
+* ``_compute_bdim_coefficients`` / ``_apply_bdim_all_axes`` — **Python path**:
+  projection coefficients ``c = dt·μ0_eff·(1/ρ)_fluid`` from the VOF water/air
+  density (Weymouth & Yue 2011, ``(1−δ^B)/ρ``; the body enters via ``μ0`` only,
+  never its density) and the air-transparent mu0/mu1 masking of the velocity
+  BDIM.
+* ``project`` — **kernel path**: between the fused single-phase Kernel B and
+  the Poisson solve, repair the velocity with the exact air-transparent
+  identity ``a·S + (1−a)·u′`` (u′ captured by wrapping
+  ``adv_diff_solver.solve``) and rescale the kernel's water-normalised
+  coefficients to the two-phase formulas. No CUDA or solver.py changes;
+  both paths solve the identical Poisson.
 * ``finalize_step`` — transport the VOF field once per step.
 * ``forces_method2`` / ``forces_method2_3d`` — stack per-body SDFs so the
   emergent (real-pressure) eulerian force loop sees them.
@@ -32,8 +34,8 @@ Everything else is inherited and reused unchanged:
   cells (real air has mass), which is exactly what two-phase needs;
 * **projection core** — the base ``project`` runs the variable-coefficient MGCG
   path ``∇·(c∇p)=div`` → ``u -= c∇p`` (closed-box all-Neumann, ``dirichlet_mask
-  = None``); we just feed it the density-based ``c`` (directly on the Python
-  path, via the rescale on the kernel path);
+  = None``); we just feed it the density-based ``c`` (built by the python
+  coefficient override or written by the two-phase Kernel B);
 * advection–diffusion, BDIM, the Poisson solver, force integration.
 
 The hydrostatic interface jump and the buoyancy on the body therefore emerge
@@ -47,6 +49,114 @@ from lilytorch.src import forces as _forces
 from lilytorch.src import diffusion as _diffusion
 from lilytorch.src.advection import _sl
 from lilytorch.src.two_phase import TwoPhase
+
+
+def body_aware_alpha_init(alpha_init, sdf_cc, eps, h, *,
+                          compensate=True, verbose=True):
+    """Make an ``alpha_init`` body-aware: carve the body interior out of the
+    initial water and (optionally) raise the free surface so the total initial
+    water volume still matches the uncarved init.
+
+    The plain flat-level init (``alpha = (Z < zlevel)``) puts water *inside*
+    any body straddling or below the interface. That phantom water is mostly
+    inert (BDIM imposes the body velocity there, so it rides along with the
+    body), but it offsets the mass diagnostic, puts the alpha=0.5 iso-surface
+    through the body, and can be shed as spurious blobs by a fast-moving body.
+
+    Carve
+        ``alpha *= mu0`` with ``mu0`` the BDIM smoothed Heaviside of the
+        cell-centred union SDF — the same band kernel as the projection, so no
+        sharp 0/1 cut is introduced at the wetted surface.
+
+    Compensation
+        Carving deletes the submerged body volume from the water. With
+        ``compensate`` the wrapped init shifts the vertical coordinate fed to
+        ``alpha_init`` (raising the surface) until the carved volume matches
+        the uncarved target, by bracketing + bisection on the shift. Sharp
+        (Heaviside) inits make the volume a staircase in the shift, so the
+        final field is the exact-volume linear blend of the two bracketing
+        fields — total volume matches the target to round-off. Body poses are
+        NEVER touched: the water level moves, the initial draft does not.
+
+    Parameters
+    ----------
+    alpha_init : callable -- ``alpha_init(X, Y[, Z])`` on the cell-centred grid.
+    sdf_cc : tensor -- cell-centred union body SDF on the same grid
+        (``composite_body.sdf_val``), evaluated at the initial body poses.
+    eps : float -- BDIM band half-width (``solver.eps``).
+    h : float -- uniform cell size (sets the bisection scales).
+    compensate : bool -- restore the uncarved total water volume (default True).
+
+    Returns
+    -------
+    callable with the same ``(X, Y[, Z])`` signature, suitable to pass to
+    :class:`~lilytorch.src.two_phase.TwoPhase`.
+    """
+    eps = float(eps)
+    h = float(h)
+    d = (sdf_cc / eps).clamp(-1.0, 1.0)
+    mu0 = 0.5 * (1.0 + d + torch.sin(torch.pi * d) / torch.pi)
+
+    def wrapped(*coords):
+        if mu0.shape != coords[0].shape:
+            raise ValueError(
+                "body_aware_alpha_init: composite_body.sdf_val shape "
+                f"{tuple(mu0.shape)} does not match the cell-centred grid "
+                f"{tuple(coords[0].shape)}."
+            )
+        m = mu0.to(device=coords[0].device)
+
+        def carved(dz):
+            cs = list(coords)
+            cs[-1] = coords[-1] - dz          # vertical = last axis (y/2D, z/3D)
+            return alpha_init(*cs).clamp(0.0, 1.0) * m
+
+        inner = tuple(slice(1, -1) for _ in coords)
+        vol = lambda a: float(a[inner].sum())
+
+        a_lo = carved(0.0)
+        if not compensate:
+            return a_lo
+        target = vol(alpha_init(*coords).clamp(0.0, 1.0))
+        v_lo = vol(a_lo)
+        deficit = target - v_lo               # submerged body volume (in cells)
+        if deficit <= 0.25:                   # < a quarter-cell: nothing to do
+            return a_lo
+        # Bracket the shift: grow hi until the carved volume reaches the target.
+        zc = coords[-1]
+        max_dz = 0.5 * float(zc.max() - zc.min())
+        lo, hi = 0.0, h
+        while vol(carved(hi)) < target and hi < max_dz:
+            hi *= 2.0
+        a_hi = carved(hi)
+        v_hi = vol(a_hi)
+        if v_hi < target:
+            print(f"body_aware_alpha_init: WARNING -- could not restore the "
+                  f"displaced volume ({deficit:.1f} cells) within a surface "
+                  f"rise of {hi:.3g}; short by {target - v_hi:.1f} cells.")
+        else:
+            # Bisection (volume is a staircase for sharp inits, so converge
+            # the bracket, not the residual), then exact-volume blend.
+            for _ in range(60):
+                if hi - lo < 1e-3 * h:
+                    break
+                mid = 0.5 * (lo + hi)
+                a_mid = carved(mid)
+                v_mid = vol(a_mid)
+                if v_mid < target:
+                    lo, a_lo, v_lo = mid, a_mid, v_mid
+                else:
+                    hi, a_hi, v_hi = mid, a_mid, v_mid
+            theta = 0.0 if v_hi <= v_lo else (target - v_lo) / (v_hi - v_lo)
+            a_lo = (a_lo + theta * (a_hi - a_lo)).clamp(0.0, 1.0)
+        if verbose:
+            print(f"body_aware_alpha_init: carved {deficit:.1f} cells of body "
+                  f"interior out of the water; surface raised by "
+                  f"~{0.5 * (lo + hi):.4g} to compensate "
+                  f"(volume {vol(a_lo):.1f} / target {target:.1f} cells).")
+        return a_lo
+
+    return wrapped
 
 
 class TwoPhaseSolver(FluidSolver):
@@ -66,26 +176,41 @@ class TwoPhaseSolver(FluidSolver):
                 "two_phase requires poisson_method 'multigrid' or 'mgcg' "
                 "(the FFT solver cannot do a variable-density Poisson)."
             )
-        # KERNEL MODE IS NOT SUPPORTED for two-phase.  The fused CUDA BDIM is
-        # INCOMPLETE: air-transparent-body is applied to the projection
-        # COEFFICIENT (see _rescale_kernel_coeffs_two_phase) but NOT to the
-        # velocity BDIM imposition — the python ``_apply_bdim_all_axes`` override
-        # has no kernel counterpart, so the kernel imposes the body's rigid
-        # velocity into the AIR.  For a body straddling the waterline this drives
-        # a spurious air-side body-band current that blows up (PROVEN: python with
-        # ``mu0_free_coeff`` + ``air_transparent_body=False`` reproduces the kernel
-        # blow-up at the SAME iteration and location).  Porting the alpha-masking
-        # of mu0/mu1 into the kernel BDIM is a CUDA change; until then two-phase
-        # must run on the python path.  (The kernel-coefficient helpers below are
-        # kept but unreachable, ready for that future port.)
-        if self._use_kernels:
+        # KERNEL MODE: supported, with the single-phase fused kernels left
+        # untouched.  The two-phase repairs run in ``project`` (see the
+        # kernel-mode override section below): the BDIM velocity is fixed by
+        # the exact identity ``a*S + (1-a)*u'`` (the historical blocker — the
+        # kernel imposing the body velocity into the air — needed only u',
+        # captured by wrapping ``adv_diff_solver.solve``), and the Poisson
+        # coefficient by the out-of-place rescale of the kernel's
+        # water-normalised ``dt*mu0/rho_water``.
+        if self._use_kernels and self.apply_bdim_sigma:
             raise ValueError(
-                "TwoPhaseSolver does not support kernel mode "
-                "(solver_method='kernel'): the fused kernel BDIM is missing the "
-                "air-transparent velocity masking, so a body at the waterline "
-                "blows up.  Use solver_method='python' for two-phase simulations."
+                "TwoPhaseSolver kernel mode does not support apply_bdim_sigma "
+                "(the σ-shifted coefficient breaks the mu0 reconstruction in "
+                "the two-phase rescale); disable one of them."
+            )
+        if self._use_kernels and not self.bdim_mu0_projection:
+            raise ValueError(
+                "TwoPhaseSolver kernel mode requires bdim_mu0_projection=True "
+                "(the two-phase coefficient rescale reconstructs mu0 from the "
+                "kernel's dt*mu0/rho_water coefficient)."
             )
         self._init_two_phase(tp_cfg)
+        # Kernel path: capture the advection output u' each step — the only
+        # input the air-transparent velocity identity needs.  The reference is
+        # dropped at the start of ``project``, before the Poisson solve, so
+        # peak memory matches the base kernel step.
+        self._kernel_primes = None
+        if self._use_kernels:
+            _orig_solve = self.adv_diff_solver.solve
+
+            def _solve_and_stash(*a, **k):
+                out = _orig_solve(*a, **k)
+                self._kernel_primes = out
+                return out
+
+            self.adv_diff_solver.solve = _solve_and_stash
         # Saved 3-D PyVista frames (plotting_and_saving -> plot_field_3d) render
         # the air/water INTERFACE: the VOF field alpha at iso-level 0.5, plus the
         # body SDF. This overrides the default vorticity iso-specs (the interface
@@ -115,6 +240,49 @@ class TwoPhaseSolver(FluidSolver):
                 "solver.two_phase.alpha_init must be a callable or a "
                 "lambda-string evaluating to one."
             )
+        # Body-aware initial interface: carve the body interior out of the
+        # initial water (alpha *= mu0, the BDIM smoothed Heaviside of the union
+        # SDF at the INITIAL body poses) and raise the surface to restore the
+        # displaced volume (see ``body_aware_alpha_init``). Init-time only — no
+        # per-step cost: alpha is advected with the BDIM composite velocity,
+        # which inside the body IS the body velocity, so the dry interior rides
+        # along with the body. Body poses / initial draft are never touched.
+        # Requires the sdf-gated transparency mask below (an air interior would
+        # otherwise make the wetted hull transparent under
+        # ``air_transparent_body``). Default OFF: every existing case unchanged.
+        self._alpha_exclude_body = bool(cfg.get("alpha_exclude_body", False))
+        self._alpha_carve_pending = False
+        if self._alpha_exclude_body:
+            sdf_cc = getattr(self.composite_body, "sdf_val", None)
+            if sdf_cc is None:
+                raise ValueError(
+                    "two_phase.alpha_exclude_body requires a composite body "
+                    "with a cell-centred SDF (composite_body.sdf_val)."
+                )
+            cb = self.composite_body
+            farms_coupled = (bool(getattr(cb, "custom_update", None))
+                             or type(cb).__name__ == "MultiAnimatBodies")
+            # Placeholder SDF (filled with _FAR=1e4): no body stamped on the
+            # grid yet — carving now would silently remove nothing.
+            no_body_yet = float(sdf_cc.min()) > 100.0
+            if farms_coupled or no_body_yet:
+                # FARMS-coupled: at construction the composite SDF still holds
+                # the YAML/default poses (MultiAnimatBodies: a _FAR placeholder)
+                # — the MuJoCo spawn transform (e.g. the boat's roll=pi/2 +
+                # SPAWN_Z) is only stamped in by the handler's first update().
+                # Carving NOW would dry the WRONG region (or nothing) and leave
+                # the real body interior wet.  Defer the carve to the first
+                # fluid_step (which runs after that update).
+                self._alpha_carve_pending = True
+                self._alpha_carve_raw = alpha_init
+                self._alpha_carve_compensate = bool(
+                    cfg.get("alpha_volume_compensate", True))
+            else:
+                # Standalone solver: bodies are posed at construction — carve now.
+                alpha_init = body_aware_alpha_init(
+                    alpha_init, sdf_cc, self.eps, self.h,
+                    compensate=bool(cfg.get("alpha_volume_compensate", True)),
+                )
         # The face material coefficient is the harmonic density mean only
         # (carried as the reciprocal density; see TwoPhase). The legacy
         # ``face_density`` key is accepted for backward-compat but only
@@ -205,6 +373,10 @@ class TwoPhaseSolver(FluidSolver):
             flags.append(f"three-phase rho_solid={self._rho_solid}")
         if self._air_transparent_body:
             flags.append("air-transparent-body")
+        if self._alpha_exclude_body:
+            flags.append("body-aware alpha init (carve"
+                         + ("+volume-compensate)" if cfg.get(
+                             "alpha_volume_compensate", True) else ")"))
         print(
             f"Two-phase enabled: rho {kwargs['rho_water']}/{kwargs['rho_air']} "
             f"(ratio {kwargs['rho_water']/kwargs['rho_air']:.0f}:1), "
@@ -267,7 +439,17 @@ class TwoPhaseSolver(FluidSolver):
                 # Air-transparent body: mu0_eff = 1 - alpha_face*(1 - mu0)
                 # = alpha_face*mu0 + (1-alpha_face). Body invisible in air.
                 a_face = self._alpha_face(d)
-                mu0 = a_face * mu0 + (1.0 - a_face)
+                mu0_t = a_face * mu0 + (1.0 - a_face)
+                if self._alpha_exclude_body:
+                    # Carved init: the body interior is alpha=0 (dry), so the
+                    # alpha proxy can no longer distinguish "above the free
+                    # surface" from "inside the hull" — unrestricted it would
+                    # make the body transparent in its own interior and let
+                    # water flow through the wetted hull. Gate on the face SDF:
+                    # transparency only OUTSIDE the body, plain mu0 inside.
+                    sdf_face = getattr(self.composite_body, f"sdf_val_{ax}")
+                    mu0_t = torch.where(sdf_face >= 0.0, mu0_t, mu0)
+                mu0 = mu0_t
             if rs is not None:
                 # THREE-PHASE: body included as density rho_solid (Nangia Eq. 23),
                 # c = dt / (mu0*rho_flow + (1-mu0)*rho_solid). No mu0 exclusion ->
@@ -284,57 +466,12 @@ class TwoPhaseSolver(FluidSolver):
     def _mu0_cc(self):
         """Cell-centred BDIM fluid fraction mu0 (1 in fluid, 0 in body, smoothed
         over the band) from the union body SDF -- the body Heaviside (= H_body)."""
-        phi = self.composite_body.sdf_val
-        eps = float(getattr(self, "eps", 2.0 * self.h))
-        d = (phi / eps).clamp(-1.0, 1.0)
-        return 0.5 * (1.0 + d + torch.sin(torch.pi * d) / torch.pi)
+        return self.composite_body.mu_funcs(self.composite_body.sdf_val)[0]
 
-    def _alpha_face(self, d, full_grid=True):
-        """Water fraction ``alpha`` interpolated to the staggered *d*-face grid.
-
-        The face value is the arithmetic mean of the two adjacent cell-centred
-        alpha values (MAC convention: face *i* sits between cells *i-1* and *i*).
-
-        Parameters
-        ----------
-        d : int
-            Stagger axis (0=x/u, 1=y/v, 2=z/w).
-        full_grid : bool
-            If True (default), returns the full-grid face values including ghost
-            cells, matching ``recip_density_face(d)`` and the Python-path mu0
-            tensors.  If False, returns cropped interior-only values matching
-            the kernel persistent-buffer shapes (``_ch_persist`` etc.).
-        """
-        a = self.two_phase.alpha              # cell-centred, includes ghost cells
-        nd = self.ndim
-        if nd == 3:
-            if full_grid:
-                # Full-grid: clone and fill face column (like recip_density_face)
-                out = a.clone()
-                if d == 0:       # x-faces: average along x
-                    out[1:, :, :] = 0.5 * (a[:-1, :, :] + a[1:, :, :])
-                elif d == 1:     # y-faces
-                    out[:, 1:, :] = 0.5 * (a[:, :-1, :] + a[:, 1:, :])
-                else:            # z-faces
-                    out[:, :, 1:] = 0.5 * (a[:, :, :-1] + a[:, :, 1:])
-                return out
-            else:
-                # Cropped to kernel persistent-buffer shapes
-                if d == 0:       # x-faces: (Nx+1, Ny, Nz)
-                    return 0.5 * (a[1:,   1:-1, 1:-1] + a[:-1,  1:-1, 1:-1])
-                elif d == 1:     # y-faces: (Nx, Ny+1, Nz)
-                    return 0.5 * (a[1:-1, 1:,   1:-1] + a[1:-1, :-1,  1:-1])
-                else:            # z-faces: (Nx, Ny, Nz+1)
-                    return 0.5 * (a[1:-1, 1:-1, 1:  ] + a[1:-1, 1:-1, :-1 ])
-        # 2-D: kernel persistent buffers have the same full-grid shape as the
-        # cell-centred fields (unlike 3-D, where they are cropped).  So both
-        # full_grid=True and full_grid=False return the same full-grid tensor.
-        out = a.clone()
-        if d == 0:           # x-faces
-            out[1:, :] = 0.5 * (a[:-1, :] + a[1:, :])
-        else:                # y-faces
-            out[:, 1:] = 0.5 * (a[:, :-1] + a[:, 1:])
-        return out
+    def _alpha_face(self, d):
+        """Water fraction ``alpha`` on the staggered *d*-face grid (full grid;
+        see :meth:`_face_mean`)."""
+        return self._face_mean(self.two_phase.alpha, d)
 
     # ------------------------------------------------------------------
     #  Override: BDIM velocity imposition — air-transparent body
@@ -346,8 +483,8 @@ class TwoPhaseSolver(FluidSolver):
         In the air (α=0) the body is invisible: μ0_eff = 1, μ1_eff = 0 →
         the BDIM meta-equation reduces to the identity (no body forcing).
         In the water (α=1) the standard BDIM is applied unchanged.
-        This is the Python-path companion to the kernel-path coefficient
-        rescaling in :meth:`_rescale_kernel_coeffs_two_phase`.
+        The kernel path applies the same masking via the equivalent blend
+        identity ``a*S + (1-a)*u'`` in :meth:`_kernel_blend_velocities`.
         """
         if not self._air_transparent_body:
             return super()._apply_bdim_all_axes(vels)
@@ -362,106 +499,145 @@ class TwoPhaseSolver(FluidSolver):
                 for n in self._bdim_normal_names
             )
             # Mask mu0, mu1 by the water fraction on this face grid
-            a_face = self._alpha_face(i, full_grid=True)
+            a_face = self._alpha_face(i)
             # mu0_eff = alpha*mu0 + (1-alpha) → 1 in air, mu0 in water
             mu0_eff = a_face * mu0 + (1.0 - a_face)
             # mu1_eff = alpha*mu1 → 0 in air (no normal-derivative correction)
             mu1_eff = a_face * mu1
+            if self._alpha_exclude_body:
+                # Carved init (alpha_exclude_body): the dry body interior is
+                # alpha=0, so the transparency mask must be gated on the face
+                # SDF or the body stops imposing its velocity inside itself
+                # (and the carved air pocket would not ride with the body).
+                sdf_face = getattr(comp, f"sdf_val_{ax}")
+                inside = sdf_face < 0.0
+                mu0_eff = torch.where(inside, mu0, mu0_eff)
+                mu1_eff = torch.where(inside, mu1, mu1_eff)
             out.append(self._bdim_apply(
                 vels[i], mu0_eff, body_vel, mu1_eff, *normals))
         return tuple(out)
 
     # ------------------------------------------------------------------
-    #  Override: variable density in the KERNEL-mode projection
+    #  Override: KERNEL-mode two-phase (velocity blend + coefficient rescale)
     # ------------------------------------------------------------------
-    def project(self, *args, ch=None, cv=None, cw=None, ch_cc=None, **kwargs):
-        """Inject the VOF variable density into the kernel-mode projection.
+    # The fused single-phase Kernel B writes ``S = mu0*(u'-b) + b + mu1*nd``
+    # and ``c_kernel = dt*mu0/rho_water`` — wrong for two-phase on BOTH
+    # counts.  Both are repaired here in a handful of python tensor ops, with
+    # NO custom kernels and NO solver.py changes, thanks to two identities:
+    #
+    # 1. VELOCITY.  The air-transparent masking (mu0_eff = a*mu0 + (1-a),
+    #    mu1_eff = a*mu1) satisfies EXACTLY
+    #
+    #        T = mu0_eff*(u'-b) + b + mu1_eff*nd  =  a*S + (1-a)*u'
+    #
+    #    — mu0, mu1, normals and the normal derivative all cancel, so the
+    #    masked result is just the alpha-blend of the kernel's BDIM output
+    #    with the raw advected velocity u'.  The only kernel temporary needed
+    #    is u' (the advection output), which we capture by wrapping
+    #    ``adv_diff_solver.solve``; the reference is dropped before the
+    #    Poisson solve, exactly where the base step frees it, so peak memory
+    #    is unchanged.  (This masking of the VELOCITY is what the historical
+    #    kernel-mode blow-up was missing: the coefficient rescale alone left
+    #    the kernel imposing the body velocity into the air.)
+    #
+    # 2. COEFFICIENT.  ``mu0 = c_kernel * rho_water/dt`` recovers the fluid
+    #    fraction from the kernel coefficient (requires bdim_mu0_projection,
+    #    enforced at init), after which the python-path formulas of
+    #    ``_compute_bdim_coefficients`` (standard / rho_solid three-phase /
+    #    mu0-free, with the air-transparent masking and the carved-init gate)
+    #    are evaluated directly on the face grids.  Out-of-place: the
+    #    persistent ``_ch_persist`` buffers must stay water-normalised for
+    #    the next step's Kernel-B overwrite.
+    #
+    # Both fixes run inside ``project`` (between BDIM and the Poisson solve —
+    # after the projection would be too late, the wrong velocity would
+    # already have seeded the pressure RHS).
 
-        The fused CUDA Kernel B has no notion of the two-phase field: it writes
-        a single-density coefficient ``c_kernel = dt·μ0/ρ_water`` per face (and
-        the outside-AABB prefill is the same constant). The two-phase target is
-        ``c = dt·μ0/ρ_face``, which differs by the pure multiplicative field
-        ``ρ_water·(1/ρ)_face``. Rescaling the kernel coefficient by that factor
-        reproduces ``_compute_bdim_coefficients`` exactly (μ0 is
-        reused straight from ``c_kernel`` — no μ0/SDF/normal recompute), so both
-        paths solve the identical variable-density Poisson.
+    def _face_mean(self, q, d):
+        """Cell-centred ``q`` averaged to the staggered *d*-face grid (full
+        grid; MAC: face *i* between cells *i-1* and *i*; boundary face copies
+        the adjacent cell, like ``recip_density_face``)."""
+        out = q.clone()
+        lo = _sl(self.ndim, d, slice(None, -1))
+        hi = _sl(self.ndim, d, slice(1, None))
+        out[hi] = 0.5 * (q[lo] + q[hi])
+        return out
 
-        The Python path passes coefficients that are already two-phase-correct,
-        so the rescale is gated on ``_use_kernels``. FFT is forbidden for
-        two-phase, so the ``poisson_method != "fft"`` guard is belt-and-braces.
-        The rescale is out-of-place: the persistent ``_ch_persist`` buffers must
-        stay in their water-normalised form for the next step's prefill /
-        Kernel-B overwrite (an in-place rescale would compound on the static
-        region every step).
-        """
-        if (self._use_kernels and isinstance(ch, torch.Tensor)
-                and self.poisson_method != "fft"):
-            ch, cv, cw = self._rescale_kernel_coeffs_two_phase(ch, cv, cw)
-        return super().project(*args, ch=ch, cv=cv, cw=cw, ch_cc=ch_cc, **kwargs)
+    def _kernel_face_mean(self, q, d):
+        """Like :meth:`_face_mean` but in the KERNEL coefficient-buffer
+        layout: full padded grid in 2-D, ghost-cropped staggered face grid in
+        3-D (the shapes of ``_ch_persist``/``_cv_persist``/``_cw_persist``)."""
+        if self.ndim == 2:
+            return self._face_mean(q, d)
+        lo = [slice(1, -1)] * 3
+        hi = [slice(1, -1)] * 3
+        lo[d] = slice(None, -1)
+        hi[d] = slice(1, None)
+        return 0.5 * (q[tuple(lo)] + q[tuple(hi)])
 
-    def _rescale_kernel_coeffs_two_phase(self, ch, cv, cw):
-        """Return fresh ``dt·μ0_eff/ρ_face`` coefficients from the kernel's
-        water-normalised ``dt·μ0/ρ_water`` ones.
+    def _kernel_blend_velocities(self, vels):
+        """Apply the air-transparent identity ``u0 := a*u0 + (1-a)*u'`` to the
+        kernel-path BDIM output (in place), using the u' stashed by the
+        ``adv_diff_solver.solve`` wrapper.  With ``alpha_exclude_body`` the
+        blend weight is zeroed inside the body (cell-centred union SDF
+        averaged to faces — kernel mode keeps no staggered SDFs), keeping the
+        carved dry interior rigidly attached.  Re-applies the BCs afterwards
+        so ghost cells match the python path."""
+        primes, self._kernel_primes = getattr(self, "_kernel_primes", None), None
+        if primes is None or not self._air_transparent_body:
+            return
+        comp = self.composite_body
+        for d, (vel, prime) in enumerate(zip(vels, primes)):
+            w = 1.0 - self._alpha_face(d)          # lerp weight toward u' (air)
+            if self._alpha_exclude_body:
+                w = w * (self._face_mean(comp.sdf_val, d) >= 0).to(w.dtype)
+            vel.lerp_(prime, w)
+        self.adv_diff_solver.set_BCs(*vels)
 
-        The kernel writes ``c_kernel = dt·μ0/ρ_water`` (μ0 = body fluid fraction).
-        The two-phase target is ``c = dt·μ0_eff/ρ_face`` where:
-
-        * Without air-transparent body: μ0_eff = μ0 (body present in both phases).
-          We multiply by ``ρ_water·(1/ρ)_face`` → ``dt·μ0/ρ_face``.
-
-        * With air-transparent body (default): μ0_eff = 1 − α·(1−μ0) =
-          α·μ0 + (1−α).  Reconstructing μ0 from c_kernel = dt·μ0/ρ_water:
-            c_target = dt/ρ_face · [α·μ0 + (1−α)]
-                     = α · (ρ_water/ρ_face) · c_kernel + (1−α) · dt/ρ_face
-          The first term is α times the legacy rescaling; the second term is
-          the "free air" contribution where the body is transparent.
-
-        ``(1/ρ)_face`` is computed inline from the cell-centred reciprocal
-        density field and cropped to each staggered face-grid shape (3-D) or
-        used full-grid (2-D), avoiding the full-grid clone in
-        ``recip_density_face``.
-        """
+    def _rescale_kernel_coeffs_two_phase(self, coeffs):
+        """Return fresh two-phase Poisson coefficients from the kernel's
+        water-normalised ``c_kernel = dt*mu0/rho_water`` ones, evaluating the
+        same per-mode formulas as ``_compute_bdim_coefficients``."""
         tp = self.two_phase
-        rw = tp.rho_water
         dt = float(self.dt)
-        atb = self._air_transparent_body
-        if self.ndim == 3:
-            q   = tp.recip_density_cc()                  # one full-grid 1/ρ field
-            # Face reciprocal-density rescaling factors ρ_water/ρ_face
-            ru  = rw * 0.5 * (q[1:,   1:-1, 1:-1] + q[:-1,  1:-1, 1:-1])
-            rv  = rw * 0.5 * (q[1:-1, 1:,   1:-1] + q[1:-1, :-1,  1:-1])
-            rw_ = rw * 0.5 * (q[1:-1, 1:-1, 1:  ] + q[1:-1, 1:-1, :-1 ])
-            # Face reciprocal density 1/ρ_face (for the free-air term)
-            inv_rho_u = ru / rw
-            inv_rho_v = rv / rw
-            inv_rho_w = rw_ / rw
+        rs = self._rho_solid
+        q = tp.recip_density_cc()                  # one full-grid 1/rho field
+        comp = self.composite_body
+        out = []
+        for d, c_kernel in enumerate(coeffs):
+            if c_kernel is None:                   # cw in 2-D
+                out.append(None)
+                continue
+            inv_rho = self._kernel_face_mean(q, d)
             if self._mu0_free_coeff:
-                # mu0-FREE: c = dt/rho_face everywhere — discard the kernel's
-                # mu0-laden coeff and use the VOF mobility directly (no body hole).
-                return dt * inv_rho_u, dt * inv_rho_v, dt * inv_rho_w
-            if atb:
-                a_u = self._alpha_face(0, full_grid=False)
-                a_v = self._alpha_face(1, full_grid=False)
-                a_w = self._alpha_face(2, full_grid=False)
-                # c_target = α·(ρ_w/ρ_face)·c_kernel + (1−α)·dt/ρ_face
-                return (a_u * ch * ru + (1.0 - a_u) * dt * inv_rho_u,
-                        a_v * cv * rv + (1.0 - a_v) * dt * inv_rho_v,
-                        a_w * cw * rw_ + (1.0 - a_w) * dt * inv_rho_w)
-            return ch * ru, cv * rv, cw * rw_
-        # 2-D kernel coefficients are stored on the full (padded) grid.
-        r0 = rw * tp.recip_density_face(0)
-        r1 = rw * tp.recip_density_face(1)
-        if self._mu0_free_coeff:
-            return dt * (r0 / rw), dt * (r1 / rw), cw   # c = dt/rho_face, no mu0
-        if atb:
-            a0 = self._alpha_face(0, full_grid=False)
-            a1 = self._alpha_face(1, full_grid=False)
-            inv_rho0 = r0 / rw
-            inv_rho1 = r1 / rw
-            return (a0 * ch * r0 + (1.0 - a0) * dt * inv_rho0,
-                    a1 * cv * r1 + (1.0 - a1) * dt * inv_rho1,
-                    cw)
-        return ch * r0, cv * r1, cw
+                out.append(dt * inv_rho)
+                continue
+            mu0 = c_kernel * (tp.rho_water / dt)
+            if self._air_transparent_body:
+                a = self._kernel_face_mean(tp.alpha, d)
+                mu0_t = a * mu0 + (1.0 - a)
+                if self._alpha_exclude_body:
+                    sdf_face = self._kernel_face_mean(comp.sdf_val, d)
+                    mu0_t = torch.where(sdf_face >= 0.0, mu0_t, mu0)
+                mu0 = mu0_t
+            if rs is not None:
+                out.append(dt / (mu0 / inv_rho + (1.0 - mu0) * rs))
+            else:
+                out.append(dt * mu0 * inv_rho)
+        return tuple(out)
+
+    def project(self, *args, ch=None, cv=None, cw=None, ch_cc=None, **kwargs):
+        """Kernel path only: blend the BDIM velocity with u' (air-transparent
+        identity) and rescale the coefficients to the two-phase formulas, then
+        run the base variable-coefficient projection.  The python path arrives
+        here with velocity and coefficients already two-phase-correct."""
+        if self._use_kernels and isinstance(ch, torch.Tensor):
+            vels = list(args[:2])
+            if self.ndim == 3:
+                vels.append(kwargs["w_vel"])
+            self._kernel_blend_velocities(vels)
+            ch, cv, cw = self._rescale_kernel_coeffs_two_phase((ch, cv, cw))
+        return super().project(*args, ch=ch, cv=cv, cw=cw, ch_cc=ch_cc, **kwargs)
 
     # ------------------------------------------------------------------
     #  Override: EMERGENT body force (viscous + real-pressure integral)
@@ -523,6 +699,7 @@ class TwoPhaseSolver(FluidSolver):
         advection is replaced by consistent conservative momentum transport.
         BDIM, the variable-density coefficients, and the projection are reused
         unchanged. Dimension-agnostic; python path only."""
+        self._try_deferred_alpha_carve()
         if not self._consistent_momentum or self._use_kernels:
             return super().fluid_step(*args)
         D = self.ndim
@@ -716,6 +893,43 @@ class TwoPhaseSolver(FluidSolver):
               f"ijk={ijk} {loc}/{phase} sdf={sdf:+.3f} a={a:.2f} wall={dwall}c{nb}"
               f"{' NONFINITE!' if nonfin else ''}", flush=True)
 
+    def _try_deferred_alpha_carve(self, iteration=None):
+        """One-shot deferred body-aware carve (FARMS-coupled paths).
+
+        The MuJoCo spawn poses are unknown when ``alpha_init`` is evaluated at
+        construction, so the carve waits until the composite ``sdf_val``
+        actually CONTAINS the body and retries until then: the python path
+        stamps it in the handler update before the first ``fluid_step``; the
+        kernel/streaming path only materialises it in the post-step force
+        kernel, so the carve fires at the first ``finalize_step`` instead
+        (one step with the wet interior — negligible at these timesteps).
+        Gives up with a warning if the SDF never arrives.
+        """
+        if not self._alpha_carve_pending:
+            return
+        sdf_cc = self.composite_body.sdf_val
+        if float(sdf_cc.min()) > 100.0:          # still the _FAR placeholder
+            if iteration is not None and iteration >= 3:
+                self._alpha_carve_pending = False
+                print("body_aware_alpha_init: WARNING -- composite sdf_val "
+                      "never received the body within the first steps; the "
+                      "alpha_exclude_body carve was SKIPPED on this path.",
+                      flush=True)
+            return
+        self._alpha_carve_pending = False
+        self.two_phase.reinit_alpha(body_aware_alpha_init(
+            self._alpha_carve_raw, sdf_cc, self.eps, self.h,
+            compensate=self._alpha_carve_compensate,
+        ))
+        del self._alpha_carve_raw
+        wet_inside = int(((self.two_phase.alpha > 0.5)
+                          & (sdf_cc < -self.eps)).sum())
+        interior = int((sdf_cc < -self.eps).sum())
+        print(f"body_aware_alpha_init: deferred carve applied "
+              f"(body interior cells: {interior}, sdf min "
+              f"{float(sdf_cc.min()):+.3f}); wet cells left inside the "
+              f"body: {wet_inside}", flush=True)
+
     def finalize_step(self, u, v, p, iteration, w_vel=None):
         """Once-per-step tail: stability check, VOF transport, BDIM-field
         release, optional allocator flush, and plotting/saving."""
@@ -723,6 +937,10 @@ class TwoPhaseSolver(FluidSolver):
         if os.environ.get("LILYTORCH_UMAX_PROBE", "0") == "1":
             self._umax_probe(u, v, w_vel, iteration)
         self.check_explosion(iteration)
+        # Deferred body-aware carve: on the kernel/streaming path the composite
+        # sdf_val is first materialised by the post-step force kernel, so the
+        # carve can only fire here (before this step's VOF transport).
+        self._try_deferred_alpha_carve(iteration)
         # In consistent (evolve) mode the interface already rode the shared mass
         # flux inside fluid_step (alpha synced there); skip the standalone VOF.
         if not self._consistent_momentum:

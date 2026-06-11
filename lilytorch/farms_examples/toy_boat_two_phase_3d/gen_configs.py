@@ -63,7 +63,7 @@ class SimConfig(BaseSimConfig):
         self.headless = False
 
           # ── Simulation flags ──────────────────────────────────────────
-        self.use_bdim = True
+        self.use_bdim       = True
         self.water_drag     = False      # BDIM handles all hydrodynamics
         self.water_buoyancy = False
         self.water_height   = WATERLINE
@@ -90,8 +90,8 @@ class SimConfig(BaseSimConfig):
         self.xmax = 24.0
         self.ymin = -3.2
         self.ymax = 3.2
-        self.zmin = -1.4
-        self.zmax = 1.8
+        self.zmin = -2.
+        self.zmax = 1.2
 
         # ── Animats ───────────────────────────────────────────────────
         boat_sdf = os.path.join(self.data_folder, 'toy_boat.sdf')
@@ -99,6 +99,10 @@ class SimConfig(BaseSimConfig):
             "path": "lilytorch.farms_examples.submarine."
                     "propeller_controller.PropellerController",
             "tau": 400.0,    # propeller torque [N·m]
+            # Ramp torque linearly from 0 → tau over this many steps (0.5 s at
+            # dt=0.001).  Prevents the blade spin-up vertical-force transient
+            # that pitches the bow down before steady-state flow is established.
+            "tau_ramp_steps": 500,
         }
         self.animats_pars = [
             {
@@ -132,13 +136,13 @@ class SimConfig(BaseSimConfig):
         # so the wetted layer is under-resolved -> fore-aft-asymmetric pressure
         # integration -> steady spurious pitch.  See MASS_INERTIA_NOTES.md.
         # self.force_relaxation = 0.5
-        self.coupling = {
-            "scheme"     : "explicit",
-            "accelerator": "iqn-ils",
-            "reuse"      : 2,
-            "tol"        : 1.0e-4,
-            "max_iter"   : 30,
-        }
+        # self.coupling = {
+        #     "scheme"     : "explicit",
+        #     "accelerator": "iqn-ils",
+        #     "reuse"      : 2,
+        #     "tol"        : 1.0e-4,
+        #     "max_iter"   : 30,
+        # }
         # ── Joint damping: prevent passive revolute joints (propeller)
         # from spinning up due to tiny numerical fluid torques.  With
         # Ixx≈0.03 kg·m², even τ≈1e-3 N·m gives α≈0.03 rad/s² and the
@@ -181,10 +185,7 @@ class SimConfig(BaseSimConfig):
         self.poisson_smoother        = "rbgs"
         self.poisson_nsmoothing      = 5
         self.poisson_bc_type         = "neumann"
-        # PYTHON path (not kernel): the fused kernel two-phase path is less stable
-        # at the 833:1 density ratio, and rho_solid (the waterline body-band
-        # stabiliser, see _bdim_extension) is python-only.
-        self.solver_method           = "python"
+        # self.solver_method           = "python"
         self.time_integration        = "euler"
         # Eulerian band-integral forces: hull, keel, rudder and propeller are
         # separate (overlapping) fluid bodies, so the force is integrated over
@@ -246,6 +247,8 @@ class SimConfig(BaseSimConfig):
             # NB: this stabilises the BODY band, NOT thin appendages — keep every
             # fin/blade >=3 cells thick (the 1-cell propeller still blows up).
             "rho_solid": 1000.0,
+            "alpha_exclude_body": True,        # carve body interior out of the initial water
+            "alpha_volume_compensate": True   # default; restore the displaced volume
         }
 
         return bdim_ext
@@ -271,7 +274,7 @@ class SimConfig(BaseSimConfig):
             self.xmin, self.xmax, self.ymin, self.ymax,
             zmin=self.zmin, zmax=self.zmax,
             wall_thickness=wt, plotting=False,
-            wall_alpha=0.0,
+            wall_alpha=0.02,
             grid_spacing=self.grid_spacing,
             floor_color=self.floor_color,
         )
@@ -336,15 +339,28 @@ class SimConfig(BaseSimConfig):
                         "smooth_sigma": 0,
                         "exclude_body": False,
                     },
-                    {   # vorticity-magnitude shell (the wake)
+                    {   # vorticity-magnitude shell (the wake), water-only
                         "field": "omega_mag",
-                        "iso_fraction": 10,
+                        "iso_value": 50,
                         "alpha": 0.3,
                         "color": "#FF8C1A",
                         "smooth_sigma": 0,
                         "exclude_body": True,
+                        "phase_mask": "water",    # only show vorticity in the water phase
                     },
                 ],
+            },
+        })
+
+        # CoM trail: draws a fading orange line tracing the boat's centre of mass
+        # in the MuJoCo viewer, one segment every `spacing` steps.
+        extensions.append({
+            "loader": "farms_mujoco.simulation.extensions.TrailCoMViewer",
+            "config": {
+                "animat_id": 0,                      # track the first (only) animat
+                "width"    : 20,                     # line width in pixels
+                "rgba"     : [1.0, 0.3, 0.0, 0.6],   # orange, semi-transparent
+                "spacing"  : 25,                     # draw a new segment every 25 steps
             },
         })
 
@@ -359,7 +375,7 @@ class SimConfig(BaseSimConfig):
                 "angular_velocity": 0,
                 "azimuth"         : 90,              # side view
                 "elevation"       : -15,             # slightly above horizontal
-                "distance"        : 28.0,            # whole ~27 m tank in frame
+                "distance"        : 20.0,            # whole ~27 m tank in frame
                 "offset"          : [10.0, 0.0, WATERLINE],  # look at boat centre
                 "resolution"      : [1920, 1080],
             },

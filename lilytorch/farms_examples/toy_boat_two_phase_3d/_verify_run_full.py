@@ -57,6 +57,8 @@ class VerifyFull(SimConfig):
     def _bdim_extension(self, output_folder):
         ext = super()._bdim_extension(output_folder)
         tp = ext["config"]["bdim_yaml"]["solver"]["two_phase"]
+        if os.environ.get("VERIFY_NOCARVE", "0") == "1":
+            tp["alpha_exclude_body"] = False
         if os.environ.get("VERIFY_CM", "0") == "1":
             tp["consistent_momentum"] = True
         rho_solid = os.environ.get("VERIFY_RHO_SOLID", "")
