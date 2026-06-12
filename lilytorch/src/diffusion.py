@@ -64,9 +64,12 @@ def variable_laplacian(phi, nu_eff, dh):
     for d in range(ndim):
         fwd = list(inner); fwd[d] = slice(2, None)
         bwd = list(inner); bwd[d] = slice(None, -2)
-        # face-averaged viscosity
-        nu_fwd = 0.5 * (nu_eff[inner] + nu_eff[tuple(fwd)])
-        nu_bwd = 0.5 * (nu_eff[inner] + nu_eff[tuple(bwd)])
+        # Harmonic-mean face viscosity: 2*nu_i*nu_j/(nu_i+nu_j).
+        # More accurate than arithmetic mean for strongly varying nu
+        # (Carreau / Herschel-Bulkley); identical to arithmetic mean for constant nu.
+        _ni = nu_eff[inner]
+        nu_fwd = 2.0 * _ni * nu_eff[tuple(fwd)] / (_ni + nu_eff[tuple(fwd)] + 1e-30)
+        nu_bwd = 2.0 * _ni * nu_eff[tuple(bwd)] / (_ni + nu_eff[tuple(bwd)] + 1e-30)
         inv_dh2 = 1.0 / (dh[d] * dh[d])
         lap += (nu_fwd * (phi[tuple(fwd)] - phi[inner])
                 - nu_bwd * (phi[inner] - phi[tuple(bwd)])) * inv_dh2

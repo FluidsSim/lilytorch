@@ -118,7 +118,13 @@ class BaseSimConfig:
         # FlowDiagnostics cadence: compute energy/enstrophy/max-div/CFL and warn
         # on blow-up (E_k>10x initial) / CFL>0.5 every N steps. 0 = disabled.
         # 100 catches Poisson under-convergence early at ~1% step overhead.
-        self.diagnostics_every = 100
+        self.diagnostics_every     = 100
+        # GPU→CPU sync cadence for NaN / |u|_max checks (H2).  50 is fast enough
+        # to catch blow-ups well before they cascade to all-NaN.
+        self.check_explosion_every = 50
+        # CUDA allocator cache flush cadence (H1).  200 keeps nvidia-smi readable
+        # without the per-step churn that re-grows the cache every step.
+        self.empty_cache_every     = 200
         self.vmin        = -10.0
         self.vmax        = 10.0
         self.plot_specs  = ["curl", "pressure"]
@@ -166,6 +172,9 @@ class BaseSimConfig:
         self.poisson_verbose         = False
         self.poisson_bc_type         = "neumann"
         self.compile_adv_diff        = False
+        self.adv_diff_streams        = False   # parallel u/v/w on separate CUDA streams
+        self.compile_project         = False   # torch.compile the pressure projection
+        self.use_cuda_graphs         = False   # CUDA graph for adv-diff (no abdquickest/LES)
         self.smagorinsky_cs          = 0.0
         self.carreau                 = None   # dict with keys: nu_0, nu_inf, lam, n
         self.sponge                  = None   # dict with keys: width, strength
@@ -811,6 +820,8 @@ class BaseSimConfig:
             "rho_body"               : self.rho_body,
             "smagorinsky_cs"         : self.smagorinsky_cs,
             "diagnostics_every"      : self.diagnostics_every,
+            "check_explosion_every"  : self.check_explosion_every,
+            "empty_cache_every"      : self.empty_cache_every,
         }
 
         if self.carreau is not None:
@@ -835,6 +846,9 @@ class BaseSimConfig:
             ("poisson_smoother",        self.poisson_smoother),
             ("poisson_bc_type",         self.poisson_bc_type),
             ("compile_adv_diff",        self.compile_adv_diff),
+            ("adv_diff_streams",        self.adv_diff_streams),
+            ("compile_project",         self.compile_project),
+            ("use_cuda_graphs",         self.use_cuda_graphs),
             ("solver_method",           self.solver_method),
             ("dtype",                   self.dtype),
             ("zero_pressure_inside",    self.zero_pressure_inside),

@@ -101,6 +101,25 @@ def divergence(u, v, dx, dy, w=None, dz=None):
     return div
 
 
+def divergence_interior(u, v, dx, dy, w=None, dz=None):
+    """Interior-only divergence: returns shape (Nx, Ny) or (Nx, Ny, Nz).
+
+    Equivalent to ``divergence(...)[1:-1, 1:-1, ...]`` but allocates only the
+    interior cells, skipping the ghost-cell wrapper.  Used by the multigrid
+    path (T3a) to eliminate the full-grid ``div`` buffer during the Poisson
+    solve.
+    """
+    inv_dx = _recip(dx)
+    inv_dy = _recip(dy)
+    if w is None:
+        return ((u[2:, 1:-1] - u[1:-1, 1:-1]) * inv_dx
+              + (v[1:-1, 2:] - v[1:-1, 1:-1]) * inv_dy)
+    inv_dz = _recip(dz)
+    return ((u[2:, 1:-1, 1:-1] - u[1:-1, 1:-1, 1:-1]) * inv_dx
+          + (v[1:-1, 2:, 1:-1] - v[1:-1, 1:-1, 1:-1]) * inv_dy
+          + (w[1:-1, 1:-1, 2:] - w[1:-1, 1:-1, 1:-1]) * inv_dz)
+
+
 # ------------------------------------------------------------------
 # Normal derivative
 # ------------------------------------------------------------------
@@ -182,6 +201,25 @@ def vorticity_components(u, v, w, h):
 # ------------------------------------------------------------------
 # Strain-rate magnitude and Smagorinsky eddy viscosity
 # ------------------------------------------------------------------
+def _stag_to_cc(t, dim):
+    """Average stagger-face field to cell centres along *dim*.
+
+    On a MAC grid ``t`` is sampled at face positions `(i − ½)·h` in the
+    given dimension.  The adjacent-pair mean `½·(t[i] + t[i+1])` lands
+    exactly on the cell-centre `i·h`.  The result has one fewer element in
+    *dim*; a Neumann (replicate-edge) pad restores the original shape so
+    the caller doesn't need to handle different sizes.
+    """
+    lo = [slice(None)] * t.ndim
+    hi = [slice(None)] * t.ndim
+    lo[dim] = slice(None, -1)
+    hi[dim] = slice(1, None)
+    mid = 0.5 * (t[tuple(lo)] + t[tuple(hi)])
+    last = [slice(None)] * t.ndim
+    last[dim] = slice(-1, None)
+    return torch.cat([mid, mid[tuple(last)]], dim=dim)
+
+
 def strain_rate_magnitude(vel, h, ndim):
     """Compute ``|S̄|`` = sqrt(2 * S_ij * S_ij) on the cell-centred grid.
 
@@ -201,6 +239,11 @@ def strain_rate_magnitude(vel, h, ndim):
         dudy = torch.gradient(u, spacing=h, dim=1, edge_order=2)[0]
         dvdx = torch.gradient(v, spacing=h, dim=0, edge_order=2)[0]
         dvdy = torch.gradient(v, spacing=h, dim=1, edge_order=2)[0]
+        # Cross derivatives are at different stagger locations (dudy at
+        # x-faces, dvdx at y-faces).  Average each to cell centres before
+        # combining into S12 = 0.5*(dudy + dvdx).
+        dudy = _stag_to_cc(dudy, dim=0)   # x-face → CC
+        dvdx = _stag_to_cc(dvdx, dim=1)   # y-face → CC
         # S_ij S_ij = S11² + S22² + 2*S12²
         # S11 = dudx, S22 = dvdy, S12 = 0.5*(dudy + dvdx)
         S2 = dudx**2 + dvdy**2 + 0.5 * (dudy + dvdx)**2
@@ -216,6 +259,13 @@ def strain_rate_magnitude(vel, h, ndim):
         dwdx = torch.gradient(w, spacing=h, dim=0, edge_order=2)[0]
         dwdy = torch.gradient(w, spacing=h, dim=1, edge_order=2)[0]
         dwdz = torch.gradient(w, spacing=h, dim=2, edge_order=2)[0]
+        # Average each cross-derivative to cell centres before combining.
+        dudy = _stag_to_cc(dudy, dim=0)   # x-face → CC in x
+        dvdx = _stag_to_cc(dvdx, dim=1)   # y-face → CC in y
+        dudz = _stag_to_cc(dudz, dim=0)   # x-face → CC in x
+        dwdx = _stag_to_cc(dwdx, dim=2)   # z-face → CC in z
+        dvdz = _stag_to_cc(dvdz, dim=1)   # y-face → CC in y
+        dwdy = _stag_to_cc(dwdy, dim=2)   # z-face → CC in z
         # S_ij S_ij = S11² + S22² + S33² + 2*(S12² + S13² + S23²)
         S2 = (dudx**2 + dvdy**2 + dwdz**2
               + 0.5 * (dudy + dvdx)**2

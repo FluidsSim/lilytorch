@@ -57,14 +57,15 @@ class SimConfig(BaseSimConfig):
         # self.solver_method                 = "python"
         self.use_gpu                       = True
         self.use_bdim                      = True
+        self.water_height                  = self.zmax   # needed so drag model sees links as submerged
         self.compute_sdf                   = True
         self.convexify                     = True
-        self.force_method                  = None   # Eulerian: stabler than Lagrangian in 2D
+        self.force_method                  = None         # Eulerian: stabler than Lagrangian in 2D
         self.zero_pressure_inside          = False
         self.body_velocity_blend_eps_cells = 3
-        self.bdim_mu0_projection           = False  # plain dt/rho; mu0-weighted degenerates at inter-link seams
-        self.bdim_body_div_correction      = True   # needed: removes seam-velocity divergence from Poisson RHS (convexify=True)
-        self.poisson_method                = "multigrid"
+        self.bdim_mu0_projection           = False        # plain dt/rho; mu0-weighted degenerates at inter-link seams
+        self.bdim_body_div_correction      = True         # needed: removes seam-velocity divergence from Poisson RHS (convexify=True)
+        self.poisson_method                = "fft"
         self.compile_adv_diff              = True
 
         # self.force_scaling         = 0.04
@@ -89,6 +90,7 @@ class SimConfig(BaseSimConfig):
         self.poisson_smoother        = "jacobi"
         self.poisson_nsmoothing      = 5
         self.poisson_bc_type         = "neumann"
+        self.compile_project         = True
 
         # ── Boundary conditions (2-D, Dirichlet inlet) ───────────────
         self.bc_type_u   = ["D", "D", "N", "N"]
@@ -126,25 +128,25 @@ class SimConfig(BaseSimConfig):
         })
 
 
-        # Top-down camera auto-fitted to the pool
-        cam = top_down_camera_config(
-            self.xmin, self.xmax,
-            self.ymin, self.ymax,
-            self.zmin, self.zmax,
-            overshoot=1,
-            max_width=3840, max_height=2160,
-        )
-        extensions.append({
-            "loader": "lilytorch.integration.streaming_camera.StreamingCameraRecording",
-            "config": {
-                "path"            : os.path.join(output_folder, "output", "video.mp4"),
-                "animat_id"       : None,
-                "fps"             : 30,
-                "speed"           : 1.0,
-                "angular_velocity": 0,
-                **cam,
-            },
-        })
+        # # Top-down camera auto-fitted to the pool
+        # cam = top_down_camera_config(
+        #     self.xmin, self.xmax,
+        #     self.ymin, self.ymax,
+        #     self.zmin, self.zmax,
+        #     overshoot=1,
+        #     max_width=3840, max_height=2160,
+        # )
+        # extensions.append({
+        #     "loader": "lilytorch.integration.streaming_camera.StreamingCameraRecording",
+        #     "config": {
+        #         "path"            : os.path.join(output_folder, "output", "video.mp4"),
+        #         "animat_id"       : None,
+        #         "fps"             : 30,
+        #         "speed"           : 1.0,
+        #         "angular_velocity": 0,
+        #         **cam,
+        #     },
+        # })
 
         return extensions
 

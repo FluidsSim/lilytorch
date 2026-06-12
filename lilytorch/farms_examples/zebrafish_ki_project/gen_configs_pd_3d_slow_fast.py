@@ -4,7 +4,7 @@ import os
 from farms_core.model.options import SpawnMode
 from lilytorch.util.paths import lilytorch_repo_root, sdfs_path
 from lilytorch.farms_examples.base_sim_config import BaseSimConfig
-from lilytorch.integration.camera import top_down_camera_config, side_camera_config
+from lilytorch.integration.camera import top_down_camera_config, side_camera_config, back_camera_config
 
 
 
@@ -274,6 +274,26 @@ class SimConfig(BaseSimConfig):
             },
         })
 
+        # Back camera: looking along +X from behind the fish.
+        back_cam = back_camera_config(
+            self.xmin, self.xmax,
+            self.ymin, self.ymax,
+            self.zmin, self.zmax,
+            overshoot=1.0,
+            max_width=3840, max_height=2160,
+        )
+        back_cam["elevation"] = -30   # match the top-down / follow camera tilt
+        extensions.append({
+            "loader": "lilytorch.integration.streaming_camera.StreamingCameraRecording",
+            "config": {
+                "path"            : os.path.join(output_folder, "output", "video_back.mp4"),
+                "animat_id"       : None,
+                "fps"             : 30,
+                "speed"           : 0.1,
+                "angular_velocity": 0,
+                **back_cam,
+            },
+        })
 
         # SkyModifier must be LAST so all CameraRecording renderers already
         # exist when initialize_episode runs the GPU texture upload.

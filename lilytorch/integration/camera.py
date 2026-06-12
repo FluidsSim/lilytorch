@@ -168,3 +168,70 @@ def side_camera_config(
                        (zmin + zmax) / 2],
         "resolution": cam_res,
     }
+
+
+def back_camera_config(
+    xmin: float,
+    xmax: float,
+    ymin: float,
+    ymax: float,
+    zmin: float,
+    zmax: float,
+    *,
+    fovy: float = 45.0,
+    margin_factor: float = 0.08,
+    min_margin: float = 0.01,
+    overshoot: float = 1.10,
+    max_width: int = 1280,
+    max_height: int = 720,
+) -> dict:
+    """Compute camera parameters for a back view looking along +X.
+
+    The camera is placed on the **−X** side (behind the animat) and looks
+    toward +X, showing the **YZ** plane (lateral width vs. tank depth).
+    This is useful for recording the wake / flow structures developing
+    behind a fish or boat that swims in the +X direction.
+
+    Parameters
+    ----------
+    xmin, xmax, ymin, ymax, zmin, zmax : float
+        Full domain extents.
+    fovy, margin_factor, min_margin, overshoot, max_width, max_height
+        Same semantics as :func:`top_down_camera_config`.
+
+    Returns
+    -------
+    dict
+        Keys: ``azimuth``, ``elevation``, ``distance``, ``offset``,
+        ``resolution`` — ready to be merged into a ``CameraRecording`` config.
+    """
+    pool_dx = xmax - xmin
+    pool_dy = ymax - ymin
+    pool_dz = zmax - zmin
+
+    pool_dims = [d for d in (pool_dx, pool_dy, pool_dz) if d > 0]
+    wt_cam = max(round(margin_factor * min(pool_dims), 4), min_margin) if pool_dims else min_margin
+
+    # Looking along +X from behind: horizontal span = Y, vertical span = Z.
+    # azimuth=180 places the camera on the −X side looking toward +X.
+    dim_horiz_phys = pool_dy + 2 * wt_cam
+    dim_vert_phys  = pool_dz + 2 * wt_cam
+
+    half_fov = tan(radians(fovy / 2))
+
+    cam_res = [max_width, max_height]
+
+    aspect_ratio = cam_res[0] / cam_res[1]
+    d_for_vert   = (dim_vert_phys  / 2) / half_fov
+    d_for_horiz  = (dim_horiz_phys / 2) / (half_fov * aspect_ratio)
+    distance     = max(d_for_vert, d_for_horiz) * overshoot
+
+    return {
+        "azimuth":    180,
+        "elevation":  0,
+        "distance":   distance,
+        "offset":     [(xmin + xmax) / 2,
+                       (ymin + ymax) / 2,
+                       (zmin + zmax) / 2],
+        "resolution": cam_res,
+    }

@@ -311,7 +311,7 @@ def _vcycle_rbgs_3d(f, p, ch, cv, cw, jcap_tol, nsmoothing):
         cp0, cm0 = ch[1:, :, :], ch[:-1, :, :]
         cp1, cm1 = cv[:, 1:, :], cv[:, :-1, :]
         cp2, cm2 = cw[:, :, 1:], cw[:, :, :-1]
-        red, black = _rb_masks_3d(f.shape[0], f.shape[1], f.shape[2], p.device)
+        # red/black masks are shape-dependent only; reuse from pre-smooth.
         p, r = _rbgs_3d(f, p, cp0, cm0, cp1, cm1, cp2, cm2,
                          jcap_tol, nsmoothing, red, black)
 
@@ -629,7 +629,7 @@ def _vcycle_rbgs_2d(f, p, ch, cv, jcap_tol, nsmoothing):
 
         cp0, cm0 = ch[1:, :], ch[:-1, :]
         cp1, cm1 = cv[:, 1:], cv[:, :-1]
-        red, black = _rb_masks_2d(f.shape[0], f.shape[1], p.device)
+        # red/black masks are shape-dependent only; reuse from pre-smooth.
         p, r = _rbgs_2d(f, p, cp0, cm0, cp1, cm1,
                          jcap_tol, nsmoothing, red, black)
 
@@ -1150,7 +1150,13 @@ class PoissonSolver:
         f  : RHS on the interior grid  (no ghost cells)
         p0 : initial guess (with ghost cells)
         ch, cv[, cw] : pre-computed face-averaged coefficients
+        pre_scaled : bool, optional
+            When True, *f* is already scaled by ``h²``, so the internal
+            ``f_scaled = h² * f`` multiplication is skipped (T3a: saves one
+            interior-sized allocation on the Python path).  Ignored when
+            ``use_kernels=True`` — the native solver applies h² internally.
         """
+        pre_scaled = kwargs.pop('pre_scaled', False)
         ndim = f.ndim
         face_arrs, _ = self._face_arrs_from_kwargs(kwargs, ndim)
         if face_arrs is None:
@@ -1165,7 +1171,8 @@ class PoissonSolver:
         # p0 is passed directly; the vcycle clones its input internally,
         # so the redundant clone here is unnecessary and wastes 128-131 MB.
         p = p0
-        f_scaled = self.h2 * f
+        # T3a: skip h² multiplication when caller has pre-scaled f.
+        f_scaled = f if pre_scaled else self.h2 * f
         cycles_run = self.max_vcycles
         for i in range(self.max_vcycles):
             p, r = self._dispatch_vcycle(f_scaled, p, face_arrs)
@@ -1236,6 +1243,7 @@ class PoissonSolver:
         p0 : initial guess (with ghost cells)
         ch, cv[, cw] : pre-computed face-averaged coefficients
         """
+        pre_scaled = kwargs.pop('pre_scaled', False)
         ndim = f.ndim
         face_arrs, extra = self._face_arrs_from_kwargs(kwargs, ndim)
         if face_arrs is None:
@@ -1250,7 +1258,8 @@ class PoissonSolver:
         inner  = _inner(ndim)
 
         # ------ SPD system:  B(x) = b  where B = Jp - S,  b = -(h²·f) ------
-        b = -(self.h2 * f)
+        # T3a: when f is already h²-scaled, skip the multiplication.
+        b = -f if pre_scaled else -(self.h2 * f)
 
         x = p0.clone().detach()
         self.BC(x)

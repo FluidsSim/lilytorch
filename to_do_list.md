@@ -64,11 +64,65 @@ Memory vars: `sdf_val_{u,v,w}`, `{u,v,w,p}0`, `n{x,y,z}_{u,v,w}`, `body_{u,v,w}`
 
 - **Polish repo & docs** — review/correct outdated documentation, including `docs/`.
 
-- ~~**Wire in `FlowDiagnostics`.**~~ DONE. `FlowDiagnostics` moved to its own module
+- ~~**Wire in `FlowDiagnostics`.**~~ ✅ `FlowDiagnostics` moved to its own module
   `lilytorch/src/diagnostics.py` (out of solver.py), instantiated in `FluidSolver.__init__`
   when `diagnostics_every > 0`, called from `finalize_step` on the post-projection field,
   and saved to `diagnostics.h5` at the end of `run_sim`/`run_from_initial`. Default
   `diagnostics_every = 100` in `base_sim_config.py` (0 disables). Subsumes the old F4 item.
+
+---
+
+# BUGS
+
+- ✅ **`_forces_lagrangian_2d_python_ref` undefined variables (2026-06-11)** —
+  `eps_ij`, `nu_rho`, and `nu_rho_const` were used inside the per-body loop but never
+  computed in this function.  The production `forces_lagrangian_2d` computes them before
+  the loop via `_viscous_stress_tensor` + `_compute_nu_rho_for_forces`; the reference was
+  missing the same preamble → silently crashes at runtime when called for tests/debugging.
+  **Fix:** added the preamble (mirror of `forces_lagrangian_2d` lines 1094-1122) before
+  the body loop in `_forces_lagrangian_2d_python_ref`.
+
+- ✅ **ABDQUICKEST hardcoded `C=0.1` (2026-06-11)** — `abdquickest(u, c, d, C=0.1)` used
+  a fixed Courant number regardless of the actual flow CFL.  For CFL > 0.1 the TVD limiter
+  is overly optimistic (less diffusive than it should be), and for CFL→0.5 the scheme is
+  no longer TVD-guaranteed.  `C` should be `|u|·dt/h` (the actual advective Courant).
+  **Fix:** in `AdvDiffSolver._solve_convective`, compute the step's max CFL before the
+  flux loop and pass it as `C` to `abdquickest`.  Stored on `self._scheme_name` to avoid
+  checking at every (i,d) iteration.
+
+- ✅ **Semi-Lagrangian back-tracing upgraded to RK2 (2026-06-11)** — `_solve_semi_lagrangian`
+  used 1st-order Euler back-tracing `x_dep = x − u(x)·dt`.  Replaced with the 2-stage
+  midpoint method: `x_mid = x − 0.5·dt·u(x)`, then `x_dep = x − dt·u(x_mid)`.  This is
+  2nd-order accurate in the Lagrangian path at the cost of one extra interpolation per
+  component per step.  Also removed the spurious `.clone().detach()` calls (unnecessary
+  under `torch.no_grad()`) — now plain `.clone()`.
+
+- ✅ **Dead `_use_legacy_sparse_forces_2d` code removed (2026-06-11)** — the flag was
+  hardcoded `False` since the sparse-AABB force path was unified; the dead AABB-union
+  block (lines 455-476) and the `if/else` cache branch (lines 502-511) were removed from
+  `forces_method2`.
+
+- ✅ **`_vcycle_rbgs_2d/3d`: red/black masks reused between pre-smooth and post-smooth
+  (2026-06-11)** — masks are shape-dependent only so the post-smooth can reuse the ones
+  built for the pre-smooth at the same level; removed the duplicate `_rb_masks_*` call.
+
+- **Multigrid residual restriction over-scaled (LOW priority, DEFER — regression risk)**
+  — `_restrict_residual_2d/3d` in `poisson_mult.py` sums over fine cells without
+  normalization (×4 in 2D, ×8 in 3D).  WaterLily uses `0.5 × sum` (×2/×4); the face-
+  coefficient restriction uses `0.5 × sum` (×1/×2).  Lilytorch residual:face ratio = 4,
+  WaterLily ratio = 2.  **Investigated 2026-06-11:** analysis confirms 2× discrepancy vs
+  WaterLily; solver converges in all tests anyway — the over-scaling is absorbed by the
+  post-smooth.  The potential fix is `* 0.5` on `_restrict_residual_*` (not `* 0.25`).
+  Deferred: changing normalization on a working solver needs full regression coverage
+  before merging.
+
+- ✅ **`strain_rate_magnitude` cross-derivative stagger fix (2026-06-11)** — `dudy` (at
+  x-faces) and `dvdx` (at y-faces) were at different stagger positions before being summed
+  into S12 = 0.5·(∂u/∂y + ∂v/∂x); this made the Smagorinsky eddy viscosity physically
+  inconsistent in the cross terms.  **Fix:** added `_stag_to_cc` helper in `operations.py`
+  that averages each cross-derivative to cell centres before combining.  Verified: pure
+  shear gives `|S|=1.0`, solid rotation gives `|S|≈0` (machine precision) — previous code
+  gave spurious non-zero for solid rotation.
 
 ---
 
@@ -86,26 +140,41 @@ Target: ~8 GiB peak alloc on 3D runs. Do in sequence; remeasure after each stage
 > before T3a/T3b/T2a can be prioritised by measurement. The python-path standalone bench
 > proved the wrong path for these items. See `lilytorch/validation/cost_analysis/MEMORY_BASELINE.md`.
 
-- ~~**T1a**~~ DONE. Inlined `_tvd_face` into `van_leer`/`abdquickest`/`cubista` in
+- ~~**H1 per-step `torch.cuda.empty_cache()`**~~ ✅ (2026-06-11). Gated to every
+  `empty_cache_every` steps (default 200, config key `empty_cache_every` in
+  `base_sim_config.py`).
+- ~~**H2 per-step host sync in `check_explosion`**~~ ✅ (2026-06-11). Throttled to every
+  `check_explosion_every` steps (default 50, config key `check_explosion_every` in
+  `base_sim_config.py`).
+- ~~**T1a**~~ ✅ Inlined `_tvd_face` into `van_leer`/`abdquickest`/`cubista` in
   `advection.py`, chaining in-place on the owned `psi` and reusing the live `denom`;
   `_tvd_face` helper removed. Verified bit-exact (fp32+fp64, incl. denom≈0 branch).
-- ~~**T1b**~~ DONE. `div` is now a local in `solver.py:project()` (was a persistent
+- ~~**T1b**~~ ✅ `div` is now a local in `solver.py:project()` (was a persistent
   `self.div`) and is `del`-ed right after each `_poisson_solve` returns, before the
   gradient/correction allocations. ~0.5 GiB transient + removes a persistent field.
-- **T3a** Eliminate the `div` field — inline `divergence()` into the multigrid RHS.
-  ~543 MB persistent + ~0.5 GiB transient. (Persistent part already captured by T1b.
-  Needs kernel-path re-baseline to confirm transient peak benefit — python-path multigrid
-  solve was only ~1 GiB over resident.)
+- ~~**T3a**~~ ✅ (2026-06-11) Eliminated the `div` field on the multigrid/MGCG path:
+  `ops.divergence_interior()` computes the interior-only RHS (no ghost cells) directly
+  in `project()`; for the Python path it is scaled in-place by `h²` before the solve
+  (`pre_scaled=True` kwarg skips the redundant `f_scaled = h²·f` copy inside
+  `solve_multigrid`/`solve_mgcg`).  Kernel path (`use_kernels=True`) is unaffected
+  (native CUDA kernel applies h² internally).  FFT path unchanged (still uses full-grid
+  `div`).  Dead `'div'` entry removed from `_BDIM_FIELD_NAMES`.
 - **T3b** Preallocate the V-cycle coarse-level pyramid at `__init__` instead of
   `torch.zeros` inside the recursion. ~0.5-1 GiB transient. (Python-path multigrid solve
   stayed ≤3.58 GiB; re-baseline on kernel path before judging peak benefit.)
-- **T2a** Fused CUDA `_flux` kernel (QUICK/ABDQUICKEST stencil in registers; the
-  `_flux` in `advection.py`, NOT `adv_diff.py`). ~3 GiB + 5-10× adv-diff speedup.
-  NOTE: there is currently **NO native advection kernel** — `AdvDiffSolver.solve` is
-  pure-PyTorch (many ATen ops + full-grid temps), optionally `torch.compile`d (which did
-  NOT lower peak in testing). T2a = write a new `.cu` flux kernel. On the python path
-  advection was only ~0.7 GiB transient; the "~3 GiB" estimate likely refers to the
-  kernel path — re-baseline on kernel mode first.
+- ~~**T2a**~~ ✅ (2026-06-12) Fused CUDA `advect_flux_add` kernel written in
+  `lilytorch/src/kernels/csrc/cuda/advection_flux.cu` and registered as
+  `torch.ops.lilytorch_kernels.advect_flux_add`. Replaces the Python
+  `_flux → F[:-1]-F[1:] → rhs.add_()` chain (which allocated ~4 full-grid tensors per
+  (i,d) pair) with a single kernel launch that accumulates the flux divergence in
+  registers and writes directly into rhs.  Handles all 5 schemes (QUICK, ABDQUICKEST,
+  vanLeer, CDS, CUBISTA) via compile-time template specialisation.  Handles
+  non-contiguous fv/p views via explicit stride parameters; rhs strides are also passed
+  so face_dim-dependent layout is handled correctly.  Activated automatically in
+  `AdvDiffSolver._solve_convective` on CUDA (skips `_get_step_scheme` sync for
+  ABDQUICKEST).  Measured **3.5–3.9× speedup** on 128³; 260/260 flux parity checks +
+  10/10 full `_solve_convective` parity checks passed at machine precision (fp64 rel_err
+  ≤ 1e-16).
 - **T2b** Dirty-AABB-sized Kernel-A temps (`sdf_*_tmp`, `b*_tmp`: full-grid → AABB+halo).
   Needs `streaming_sdf.cu` changes; no peak movement until T2a.
 - **T2c** Two-pass Kernel B for `primes` elimination (write to AABB scratch, copy back).
@@ -118,7 +187,7 @@ Target: ~8 GiB peak alloc on 3D runs. Do in sequence; remeasure after each stage
 
 # 2D/3D SOLVER UNIFICATION (remaining)
 
-Steps 1-4 + apply_forces merge DONE. Remaining:
+Steps 1-4 + apply_forces merge ✅. Remaining:
 
 - **Step 5 — stacked-tensor storage.** Replace `(u0,v0,w0)`, `(nx,ny,nz)`,
   `(mu0_{u,v,w})` etc. with `(D, *grid)` tensors. Deepest refactor (every callsite,
@@ -132,10 +201,40 @@ Per-step rules: branch from `optimize_speed_memory`, one PR per step, validate 2
 rel-err <1e-6 on integrated quantities. No semantics changes.
 
 ### Kernel parity (remaining minor)
-- ~~**K9**~~ DONE. Added `is_cuda` TORCH_CHECK to `apply_bcs_2d_cuda` (mirrors 3D).
-- ~~**K10**~~ DONE. `apply_bcs_2d/3d_kernel` now compute `src_lin` unconditionally
+- ~~**K9**~~ ✅ Added `is_cuda` TORCH_CHECK to `apply_bcs_2d_cuda` (mirrors 3D).
+- ~~**K10**~~ ✅ `apply_bcs_2d/3d_kernel` now compute `src_lin` unconditionally
   (Dirichlet's value is harmlessly discarded), dropping the dead `src_lin = 0` init and
   the `if (kind != 1)` branch. Rebuilt `_C.so`; CPU↔CUDA parity exact (fp32+fp64).
+
+---
+
+# GPU UTILISATION (small-tank / small-grid regime) — benchmark 2026-06-11
+
+At small grid sizes the GPU is underutilised because **Python kernel-dispatch overhead
+dominates compute** (each multigrid V-cycle dispatches 50-100+ small kernels, each ~10-50 µs
+Python cost). Three strategies benchmarked on an RTX 4080 SUPER:
+
+| Strategy | 2D 128×64 | 3D 64×32×32 | 3D 128×64×64 | Δmem |
+|----------|-----------|-------------|--------------|------|
+| `adv_diff_streams` | 0.98× | 0.99× | 1.01× | 0 |
+| **`compile_project`** | **2.74×** | **2.32×** | **2.62×** | **≈0** |
+| `use_cuda_graphs` | 1.11× | 1.17× | 1.03× | +14 MiB |
+| `compile_project` + streams | 2.78× | 2.27× | 2.70× | 0 |
+
+- **`compile_project=True`** is the clear winner: 2.3–2.8× speedup, zero memory overhead,
+  works with all schemes including abdquickest. Enable in `solver.solver.compile_project`.
+- **`use_cuda_graphs`** gives modest 1.03–1.17×; benefit shrinks with grid size; +14 MiB
+  at 128³. Incompatible with abdquickest (gracefully skips with a log message).
+- **`adv_diff_streams`** never helps — dispatch overhead is in the Poisson V-cycle, not
+  advection; streams add overhead. Not worth enabling alone.
+- Combined `compile_project + adv_diff_streams` gives marginal extra gain over compile alone.
+
+✅ **All three config options implemented (2026-06-12):** `solver.compile_project`,
+`solver.use_cuda_graphs`, `solver.adv_diff_streams` wired into `FluidSolver.__init__`
+and exposed in `BaseSimConfig` (all default `False`). `compile_project=True` is the
+recommended opt-in for GPU production runs; `torch.compile` has a 30–100 s first-compile
+overhead (amortised over long sims). Benchmark script:
+`lilytorch/validation/cost_analysis/bench_gpu_util.py`.
 
 ---
 
@@ -144,18 +243,12 @@ rel-err <1e-6 on integrated quantities. No semantics changes.
 These run on EVERY step; none is measured for wall-clock cost yet. Time them
 (e.g. with the cost_analysis harness) before/after gating.
 
-- **H1 per-step `torch.cuda.empty_cache()`** — `solver.py` `finalize_step` calls it every
-  step ("to reduce nvidia-smi usage"). Confirmed via `bench_memory.py`: `cur` drops to the
-  resident floor after every step → the allocator cache is dumped and re-grown each step
-  (churn + fragmentation risk). Try gating to every N steps (or off) and time it. Likely a
-  real throughput cost; trades speed for a prettier `nvidia-smi`.
-- **H2 per-step host sync in `check_explosion`** — `torch.stack([isfinite…]) … .cpu().numpy()`
-  every step is a device→host sync on the critical path (pipeline stall). Throttle to every
-  N steps (reuse the `diagnostics_every` cadence idea). Blow-ups don't need per-step detection.
-- **H3 `diagnostics_every=100` is now default-ON** in `base_sim_config.py` (this session).
+- ~~**H1 per-step `torch.cuda.empty_cache()`**~~ ✅ (2026-06-11) — see BUGS section above.
+- ~~**H2 per-step host sync in `check_explosion`**~~ ✅ (2026-06-11) — see BUGS section above.
+- **H3 `diagnostics_every=100` is now default-ON** in `base_sim_config.py` (2026-06-11).
   Adds a small recurring vorticity/divergence + host-sync cost. Defensible given the
   blow-up-debugging history, but RATIFY: keep at 100, or set 0 (opt-in)?
-- ~~Delete legacy `adv_diff.py`~~ DONE (this session) — repointed the lone importer
+- ~~Delete legacy `adv_diff.py`~~ ✅ (2026-06-11) — repointed the lone importer
   (`run_compile_advdiff_bench.py`) to `lilytorch.src.advection` (drop-in: identical
   `AdvDiffSolver` API), removed the file, fixed the "kept on disk as legacy" docstrings.
 
@@ -168,11 +261,23 @@ These run on EVERY step; none is measured for wall-clock cost yet. Time them
   bottleneck now, relevant only if dt is pushed aggressively.
 - **eps configurable** — BDIM transition thickness is hardcoded `2h`; add `eps_cells`
   config key (3h-4h smoother on coarse grids).
+- ~~**Cache `_compute_union_aabb` across BDIM + coefficient passes**~~ ✅ (2026-06-11).
+  The AABB was computed twice per step on the kernel path: once in `_apply_bdim_all_axes`
+  and once inside `_compute_bdim_coefficients`.  Now computed once in
+  `_fluid_step_kernel_{2,3}d` and reused by both; `_bdim_union_aabb` is reset to `None`
+  only after `_compute_bdim_coefficients` returns.
+- ~~**Harmonic mean for variable viscosity**~~ ✅ (2026-06-11). `diffusion.py:
+  variable_laplacian` now uses the harmonic mean `2·νᵢ·νⱼ/(νᵢ+νⱼ)` for face viscosity
+  instead of the arithmetic mean.  More accurate for strongly varying viscosity
+  (Carreau/Herschel-Bulkley); backward-compatible (identical for constant ν).
 - **F1 AABB cull force integration** — δ(sdf−ε) is evaluated over the whole domain per
   body but is nonzero only within ε. Slice to each body's AABB+ε. 10-100× for small
   swimmers in big pools.
-- **F3 cache CC normals** — recomputed via `torch.gradient` every force call; cache
-  alongside staggered normals at body update.
+- ~~**F3 cache CC normals**~~ ✅ (2026-06-11). `forces_method1/2/2_3d` now store
+  `self.normal_{x,y,z}` on the first call in a step; `_release_bdim_fields` clears them
+  after the step.  On the python path `_recompute_mu_normals` already sets them, so no
+  change.  On the kernel path and for implicit coupling sub-iterations this avoids a
+  redundant `torch.gradient` call per iteration.
 - **F2** drag records: CPU pinned memory + async copy instead of GPU `nt` pre-alloc.
 
 ---

@@ -31,6 +31,7 @@ from lilytorch.src.kernels import _C as _lilytorch_kernels_C  # noqa: F401  -- r
 from lilytorch.src import diffusion
 
 
+
 # =====================================================================
 # Convective scheme functions:  f(upstream, center, downstream)
 # =====================================================================
@@ -165,6 +166,17 @@ SCHEMES = {
     "quick": quick, "abdquickest": abdquickest,
     "vanLeer": van_leer, "van_leer": van_leer,
     "cds": cds, "cubista": cubista,
+}
+
+# Scheme IDs for the fused CUDA ``advect_flux_add`` kernel (T2a).
+# Must match the compile-time enum in advection_flux.cu.
+_CUDA_SCHEME_IDS: dict[str, int] = {
+    "quick": 0,
+    "abdquickest": 1,
+    "vanLeer": 2,
+    "van_leer": 2,
+    "cds": 3,
+    "cubista": 4,
 }
 
 
@@ -490,9 +502,11 @@ class AdvDiffSolver:
 
         # ---- method dispatch -----------------------------------------
         if method in SCHEMES:
-            self._scheme = SCHEMES[method]
-            self.solve   = self._solve_convective
+            self._scheme      = SCHEMES[method]
+            self._scheme_name = method        # used by _get_step_scheme
+            self.solve        = self._solve_convective
         elif method in ("semi-lagrangian", "implicit"):
+            self._scheme_name = method
             self._init_semi_lagrangian()
             self.solve = self._solve_semi_lagrangian
         else:
@@ -500,6 +514,14 @@ class AdvDiffSolver:
                 f"Unknown convection method '{method}'. Choose from: "
                 f"{sorted(set(list(SCHEMES.keys()) + ['semi-lagrangian', 'implicit']))}"
             )
+
+        # Multi-stream dispatch: set True externally (e.g. from FluidSolver)
+        # when device is CUDA.  Lazy-initialised per-component streams stored
+        # in _adv_streams; None until first use.
+        _dev = device if isinstance(device, torch.device) else torch.device(device)
+        self._is_cuda     = _dev.type == "cuda"
+        self._use_streams = False
+        self._adv_streams = None
 
         print(f"Using the {method} method for the adv-diff equation ({self.ndim}D)")
 
@@ -532,6 +554,23 @@ class AdvDiffSolver:
     # =================================================================
     # Convective-scheme solve  (advection + diffusion, dimension-agnostic)
     # =================================================================
+
+    def _get_step_scheme(self, vel):
+        """Return the advection scheme callable for this step.
+
+        For ABDQUICKEST the TVD limiter parameter C must equal the actual
+        advective Courant number |u|·dt/h.  Computing max-|u| requires one
+        GPU→CPU sync (.amax().item()), so it is done HERE — once per step,
+        outside any CUDA stream — and captured in a closure passed to _flux.
+        All other schemes return self._scheme unchanged (no sync).
+        """
+        if self._scheme_name == 'abdquickest':
+            h_min  = min(self.dh)
+            umax   = float(max(v.abs().amax() for v in vel))
+            C_step = min(max(umax * self.dt / h_min, 0.1), 0.99)
+            return lambda u, c, d, _C=C_step: self._scheme(u, c, d, C=_C)
+        return self._scheme
+
     def _solve_convective(self, *vel, nu_t=None, iteration=0):
         """Forward-Euler advection-diffusion step.
 
@@ -551,11 +590,90 @@ class AdvDiffSolver:
         components are alive; the not-yet-mutated components are still
         aliases of ``vel`` (the persistent u0/v0/w0) and cost zero extra
         memory.
+
+        Multi-stream: when ``self._use_streams`` is True and device is CUDA,
+        each velocity component is processed on a separate CUDA stream.
+        The components are mutually independent (all read from the original
+        ``vel`` tuple), so concurrent execution is safe.  Trade-off: all
+        ``ndim`` rhs tensors are live simultaneously (vs one at a time in the
+        sequential path), so peak intermediate memory is ~ndim× higher for
+        the adv-diff phase.
         """
         ndim    = self.ndim
         vel_new = list(vel)
         inner   = _inner(ndim)
 
+        # ---- CUDA fused-flux path (T2a) ----
+        # One kernel call per (velocity component i, spatial direction d)
+        # directly accumulates dt_dh*(F_left - F_right) into rhs without
+        # materialising the intermediate F tensor.  Not combined with the
+        # multi-stream path: both are forms of CUDA parallelism that are
+        # alternatives at this level.
+        use_cuda_kernel = (
+            self._is_cuda
+            and self._scheme_name in _CUDA_SCHEME_IDS
+            and not (self._use_streams and ndim > 1)
+        )
+        if use_cuda_kernel:
+            scheme_id = _CUDA_SCHEME_IDS[self._scheme_name]
+            if self._scheme_name == 'abdquickest':
+                h_min     = min(self.dh)
+                umax      = float(max(v.abs().amax() for v in vel))
+                C_courant = float(min(max(umax * self.dt / h_min, 0.1), 0.99))
+            else:
+                C_courant = 0.0
+            for i in range(ndim):
+                rhs = diffusion.diffuse(
+                    vel[i], self.dt, nu=self.nu, nu_t=nu_t,
+                    inv_dh2=self._inv_dh2, dh=self.dh,
+                )
+                for d in range(ndim):
+                    fv = _face_vel(vel, i, d, ndim)
+                    p  = _field_for_flux(vel[i], d, ndim)
+                    torch.ops.lilytorch_kernels.advect_flux_add(
+                        fv, p, rhs,
+                        float(self._dt_dh[d]), C_courant,
+                        scheme_id, d,
+                    )
+                    del fv, p
+                vel_new[i] = vel[i].clone()
+                vel_new[i][inner] += rhs
+                del rhs
+            return tuple(vel_new)
+
+        # ABDQUICKEST has a .amax().item() sync — must happen BEFORE any
+        # stream dispatch so all streams see the same C value.
+        scheme = self._get_step_scheme(vel)
+
+        # ---- multi-stream path (CUDA only, ndim > 1) ----
+        if self._use_streams and self._is_cuda and ndim > 1:
+            if self._adv_streams is None:
+                self._adv_streams = [
+                    torch.cuda.Stream(device=self.device) for _ in range(ndim)
+                ]
+            cur = torch.cuda.current_stream()
+            for i, s in enumerate(self._adv_streams):
+                s.wait_stream(cur)          # inherit prior work from main stream
+                with torch.cuda.stream(s):
+                    rhs = diffusion.diffuse(
+                        vel[i], self.dt, nu=self.nu, nu_t=nu_t,
+                        inv_dh2=self._inv_dh2, dh=self.dh,
+                    )
+                    for d in range(ndim):
+                        fv = _face_vel(vel, i, d, ndim)
+                        p  = _field_for_flux(vel[i], d, ndim)
+                        F  = _flux(scheme, fv, p, d)
+                        F_diff = (F[_sl(ndim, d, slice(None, -1))]
+                                  - F[_sl(ndim, d, slice(1, None))])
+                        rhs.add_(F_diff, alpha=float(self._dt_dh[d]))
+                        del fv, F, F_diff
+                    vel_new[i] = vel[i].clone()
+                    vel_new[i][inner] += rhs
+            for s in self._adv_streams:
+                cur.wait_stream(s)          # main stream waits for all components
+            return tuple(vel_new)
+
+        # ---- sequential path (CPU, single-stream, or 1-D) ----
         for i in range(ndim):
             # diffusion increment (fresh, writable tensor)
             rhs = diffusion.diffuse(
@@ -568,7 +686,7 @@ class AdvDiffSolver:
             for d in range(ndim):
                 fv = _face_vel(vel, i, d, ndim)
                 p  = _field_for_flux(vel[i], d, ndim)
-                F  = _flux(self._scheme, fv, p, d)
+                F  = _flux(scheme, fv, p, d)
                 F_diff = (F[_sl(ndim, d, slice(None, -1))]
                           - F[_sl(ndim, d, slice(1, None))])
                 rhs.add_(F_diff, alpha=float(self._dt_dh[d]))
@@ -584,7 +702,15 @@ class AdvDiffSolver:
     # Semi-Lagrangian solve  (Stam 1999, dimension-agnostic)
     # =================================================================
     def _solve_semi_lagrangian(self, *vel, nu_t=None, iteration=0):
-        """Unconditionally-stable advection via back-tracing."""
+        """Unconditionally-stable advection via RK2 back-tracing (midpoint method).
+
+        Uses a two-stage departure: first trace to x - 0.5*dt*u(x) (midpoint),
+        then evaluate u at the midpoint to get the full-step departure
+        x - dt*u(x_mid).  This is 2nd-order accurate in the Lagrangian path
+        (vs. 1st-order for the original Euler back-trace) with the same number
+        of field evaluations per component as one full Euler step needs
+        (ndim interpolations at current position + ndim at midpoint).
+        """
         ndim  = self.ndim
         shape = tuple(self.n)
 
@@ -593,21 +719,27 @@ class AdvDiffSolver:
             self._interps[i].F = vel[i]
 
         vel_new = list(vel)
+        half_dt = 0.5 * self.dt
         for i in range(ndim):
-            # all velocity components interpolated to component-i's grid
+            # Stage 1: velocity at current grid position → midpoint departure
             vel_at_i = [
-                self._interps[d](*self._flat_coords[i]).clone().detach()
+                self._interps[d](*self._flat_coords[i]).clone()
                 for d in range(ndim)
             ]
-            # departure points
+            midpoint = [
+                self._flat_coords[i][d] - half_dt * vel_at_i[d]
+                for d in range(ndim)
+            ]
+            # Stage 2: velocity at midpoint → full-step departure
+            vel_at_mid = [
+                self._interps[d](*midpoint).clone()
+                for d in range(ndim)
+            ]
             departure = [
-                self._flat_coords[i][d] - vel_at_i[d] * self.dt
+                self._flat_coords[i][d] - self.dt * vel_at_mid[d]
                 for d in range(ndim)
             ]
-            vel_new[i] = (
-                self._interps[i](*departure)
-                .reshape(shape).clone().detach()
-            )
+            vel_new[i] = self._interps[i](*departure).reshape(shape).clone()
 
         # explicit diffusion
         inner = _inner(ndim)

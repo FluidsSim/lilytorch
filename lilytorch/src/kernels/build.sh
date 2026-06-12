@@ -12,6 +12,7 @@ PYTHON_BIN="${PYTHON:-python}"
 # Force recompile of all source files.
 touch lilytorch/src/kernels/csrc/cuda/streaming_sdf.cu
 touch lilytorch/src/kernels/csrc/cuda/streaming_sdf_2d.cu
+touch lilytorch/src/kernels/csrc/cuda/advection_flux.cu
 touch lilytorch/src/kernels/csrc/ops.cpp
 touch lilytorch/src/kernels/csrc/streaming_sdf_cpu.cpp
 touch lilytorch/src/kernels/csrc/streaming_sdf_cpu_2d.cpp

@@ -176,6 +176,14 @@ class FluidSolver(PlottingMixin):
         self.diagnostics_every = int(solver.get("diagnostics_every", 0) or 0)
         self.diagnostics       = None
 
+        # Per-step overhead controls (H1/H2 TODO items).
+        # check_explosion_every: GPU→CPU sync cadence for NaN/vmax checks.
+        #   Default 50 — fast enough to catch blow-ups before they cascade.
+        # empty_cache_every: how often to flush the CUDA allocator cache.
+        #   Default 200 — reduces nvidia-smi pressure without per-step churn.
+        self.check_explosion_every = int(solver.get("check_explosion_every", 50))
+        self.empty_cache_every     = int(solver.get("empty_cache_every", 200))
+
         self.rho  = torch.tensor(solver["rho"], device=self.device, dtype=self.dtype)  # density
         self.visc = self.nu*self.rho                                                   # dynamic viscosity
 
@@ -333,6 +341,34 @@ class FluidSolver(PlottingMixin):
             self.adv_diff_solver.solve = torch.compile(
                 self.adv_diff_solver.solve, mode="default",
             )
+
+        # ---- multi-stream advection (CUDA only) -----
+        # Each velocity component is dispatched on a separate CUDA stream so
+        # u/v/w adv-diff can overlap.  Peak intermediate memory is ~ndim× the
+        # sequential path (all rhs tensors are live simultaneously); disable
+        # on memory-constrained runs.  No-op on CPU.
+        if solver.get("adv_diff_streams", False) and self.device.type == "cuda":
+            self.adv_diff_solver._use_streams = True
+
+        # ---- optional torch.compile for project() -----
+        # Fuses divergence + Poisson + velocity-correction ops into fewer
+        # kernels.  Graph-breaks at Python branches (poisson_method check,
+        # body_div_corr guard), so benefit is partial but non-zero.
+        if solver.get("compile_project", False) and self.device.type == "cuda":
+            self.project = torch.compile(self.project, mode="default")
+
+        # ---- CUDA graph capture of adv-diff solve -----
+        # Eliminates Python dispatch overhead on every adv-diff call.
+        # Only supported for constant-viscosity runs (nu_t=None) and schemes
+        # without host syncs (not abdquickest).  Lazily captured on the first
+        # fluid_step call via _adv_graph_pending flag.
+        self._use_cuda_graphs = (
+            solver.get("use_cuda_graphs", False)
+            and self.device.type == "cuda"
+            and not self._compile_adv_diff          # graphs + compile = redundant
+            and not solver.get("adv_diff_streams", False)  # graphs + streams = conflict
+        )
+        self._adv_graph_captured = False
 
         # Dynamic BDIM META compilation for the union-AABB crop path
         # (sub-block shape varies with body kinematics).
@@ -892,26 +928,14 @@ class FluidSolver(PlottingMixin):
             coefficient (constant-density behaviour).
         """
 
-        # T1b: ``div`` is a full-grid transient used only up to the Poisson
-        # solve.  Keep it as a local (not ``self.div``) so it is released on
-        # return instead of persisting between steps, and ``del`` it right
-        # after the solve so its memory is reclaimed before the gradient /
-        # correction allocations (~0.5 GiB peak reduction at large 3D grids).
-        div = self.divergence(u, v, w=w_vel)
-
-        # Maertens–Weymouth body-velocity-divergence source: subtract
-        # (1-mu0)∇·u_b so the mu0-weighted projection does not force the
-        # (overlapping) solid interior to be divergence-free.  No-op for
-        # rigid non-overlapping bodies (∇·u_b = 0).
-        if body_div_corr is not None:
-            div = div - body_div_corr
-
         coeff = w * self.dt / self.rho
 
         self.poisson_solver.dirichlet_mask = None
 
         if self.poisson_method == "fft":
             # ---- FFT solver: CONSTANT-coefficient projection ----
+            # Full-grid div is computed here (FFT solver needs the ghost-cell
+            # wrapper; body_div_corr is also full-grid).
             # The FFT solver only solves the constant-coefficient Poisson
             # ``∇²p = div/c``.  It does NOT solve the variable-coefficient
             # (mu0-weighted / variable-density) BDIM Poisson — that is the
@@ -933,9 +957,12 @@ class FluidSolver(PlottingMixin):
             # automatically compatible with kernel-mode coefficients too.)
             # The RHS divisor is inherently bounded (a scalar), so the
             # f650945 band-singularity cannot occur here.
+            div = self.divergence(u, v, w=w_vel)
+            if body_div_corr is not None:
+                div = div - body_div_corr
             c_scalar = ch if (ch is not None and not isinstance(ch, torch.Tensor)) else coeff
             _rhs = div / c_scalar
-            del div                       # T1b: free transient before correction
+            del div
             p = self.poisson_solverFFT.solve(_rhs)
             if self.ndim == 2:
                 (p_x, p_y) = self.gradient(p)
@@ -948,6 +975,28 @@ class FluidSolver(PlottingMixin):
                 w_vel = w_vel - c_scalar * p_z
         else:
             # ---- Multigrid / MGCG solver (variable-coefficient Poisson) ----
+            # T3a: compute interior-only divergence directly — no full-grid
+            # ghost-cell wrapper — so the buffer is interior-sized from the
+            # start.  For the Python path, pre-scale by h² in-place and pass
+            # pre_scaled=True to skip the redundant h²·f copy inside
+            # solve_multigrid / solve_mgcg (~1 interior-field saved at peak).
+            # Maertens–Weymouth correction is sliced to the interior before
+            # the optional in-place h² scaling.
+            div = ops.divergence_interior(
+                u, v, self.dx, self.dy,
+                w=w_vel, dz=getattr(self, 'dz', None),
+            )
+            if body_div_corr is not None:
+                _sl = (slice(1, -1),) * self.ndim
+                div.sub_(body_div_corr[_sl])
+
+            # Pre-scale only on the Python path; the native CUDA solver
+            # applies h² internally (h2=self.h2 kernel parameter) so
+            # passing a pre-scaled RHS would double-scale.
+            _pre_scaled = not self.poisson_solver.use_kernels
+            if _pre_scaled:
+                div.mul_(self.poisson_solver.h2)
+
             has_custom_coeffs = any(arr is not None for arr in (ch, cv, cw))
             if ch is None:
                 ch = coeff * self.mu0_all_u
@@ -969,12 +1018,13 @@ class FluidSolver(PlottingMixin):
 
             if self.ndim == 2:
                 p, _ = _poisson_solve(
-                    div[1:-1,1:-1],
+                    div,
                     p0,
-                    ch = ch[1:,1:-1],
-                    cv = cv[1:-1,1:],
+                    ch=ch[1:, 1:-1],
+                    cv=cv[1:-1, 1:],
+                    pre_scaled=_pre_scaled,
                 )
-                del div                   # T1b: free transient before correction
+                del div                   # T3a: free interior RHS before correction
                 # ====== projection step ======
                 (p_x, p_y) = self.gradient(p)
                 u          = u - ch * p_x
@@ -988,13 +1038,14 @@ class FluidSolver(PlottingMixin):
                 # size so the Poisson solver receives contiguous arrays.
                 _face_grid = ch.shape[0] < u.shape[0]
                 p, _ = _poisson_solve(
-                    div[1:-1, 1:-1, 1:-1],
+                    div,
                     p0,
-                    ch=(ch               if _face_grid else ch[1:, 1:-1, 1:-1]),
-                    cv=(cv               if _face_grid else cv[1:-1, 1:, 1:-1]),
-                    cw=(cw               if _face_grid else cw[1:-1, 1:-1, 1:]),
+                    ch=(ch  if _face_grid else ch[1:, 1:-1, 1:-1]),
+                    cv=(cv  if _face_grid else cv[1:-1, 1:, 1:-1]),
+                    cw=(cw  if _face_grid else cw[1:-1, 1:-1, 1:]),
+                    pre_scaled=_pre_scaled,
                 )
-                del div                   # T1b: free transient before correction
+                del div                   # T3a: free interior RHS before correction
                 if bool(int(os.environ.get('LILYTORCH_MEM_DBG', '0'))):
                     torch.cuda.synchronize()
                     _gb = torch.cuda.memory_allocated() / 1024**3
@@ -1255,8 +1306,6 @@ class FluidSolver(PlottingMixin):
         # force intermediates (recomputed in forces_method2 / forces_method2_3d)
         'xstress_tensor', 'ystress_tensor', 'zstress_tensor',
         'pforce_x', 'pforce_y', 'pforce_z',
-        # divergence from project()
-        'div',
     )
 
     def _release_bdim_fields(self):
@@ -1561,7 +1610,11 @@ class FluidSolver(PlottingMixin):
 
         # ---- narrow-band fast path -------------------------------------
         if self._use_kernels and all(m is not None for m in mu_grids):
-            u_aabb = self._compute_union_aabb(halo=2, bucket=16)
+            # Reuse the AABB cached in _fluid_step_kernel_{2,3}d when available
+            # (it was computed at step 3 and kept alive through step 6).
+            u_aabb = (self._bdim_union_aabb
+                      if self._bdim_union_aabb is not None
+                      else self._compute_union_aabb(halo=2, bucket=16))
             if u_aabb is not None:
                 _dt_over_rhofluid = float(timestep / float(self.rho))
                 names    = self._BDIM_COEFF_PERSIST_NAMES
@@ -2039,6 +2092,12 @@ class FluidSolver(PlottingMixin):
                 return self._fluid_step_kernel_2d(vels[0], vels[1],
                                                   p, timestep)
 
+        # Lazy CUDA graph capture: first call after construction, once the
+        # body SDFs are valid (so warmup runs inside the capture are physical).
+        if self._use_cuda_graphs and not self._adv_graph_captured:
+            self._capture_adv_cuda_graph()
+            self._adv_graph_captured = True
+
         # 1-2. eddy viscosity + advection-diffusion
         nu_t   = self._compute_nu_t(*vels)
         primes = self.adv_diff_solver.solve(*vels, nu_t=nu_t)
@@ -2046,11 +2105,13 @@ class FluidSolver(PlottingMixin):
 
         # 3. BDIM with optional union-AABB narrow band (2-D harmlessly
         #    falls back to full-grid when no sparse SDFs are available).
+        # Compute the AABB once and keep it alive through step 6 so that
+        # _compute_bdim_coefficients can reuse it without a second call.
         self._bdim_union_aabb = (
             self._compute_union_aabb(halo=2) if self._use_kernels else None
         )
         primes = self._apply_bdim_all_axes(primes)
-        self._bdim_union_aabb = None
+        # Do NOT reset _bdim_union_aabb here — _compute_bdim_coefficients reuses it.
 
         # 4. enforce BCs on the post-BDIM field (BDIM may touch ghosts
         #    when bodies straddle the domain boundary).
@@ -2062,6 +2123,7 @@ class FluidSolver(PlottingMixin):
         # 6. variable-density Poisson coefficients.
         #    2-D returns (ch, cv, ch_cc); 3-D returns (ch, cv, cw, ch_cc).
         coeffs       = self._compute_bdim_coefficients(timestep)
+        self._bdim_union_aabb = None   # release after both step-3 and step-6 are done
         ch_cc        = coeffs[-1]
         face_coeffs  = coeffs[:-1]
 
@@ -2094,6 +2156,52 @@ class FluidSolver(PlottingMixin):
         self.adv_diff_solver.set_BCs(*vels_out)
 
         return (*vels_out, p_out)
+
+    def _capture_adv_cuda_graph(self):
+        """Capture a CUDA graph for the adv-diff solve (constant-viscosity path).
+
+        Uses ``torch.cuda.make_graphed_callables``, which internally runs
+        ``num_warmup_iters`` un-captured passes then records one replay graph.
+        Input tensors are copied in each call; outputs are freshly allocated.
+
+        Constraints (checked here, silently skip if violated):
+        - Scheme must not have host syncs (abdquickest uses .item()).
+        - nu_t must be None (Smagorinsky not supported in graph path).
+        - Not compatible with multi-stream (separate streams inside a graph
+          are not captured by make_graphed_callables).
+        """
+        adv = self.adv_diff_solver
+        if adv._scheme_name == 'abdquickest':
+            print("[cuda_graph] skip — abdquickest requires host sync for CFL")
+            return
+        if getattr(self, '_smagorinsky_cs', 0.0) > 0:
+            print("[cuda_graph] skip — Smagorinsky requires nu_t tensor input")
+            return
+
+        D = self.ndim
+        samples = (self.u0.clone(), self.v0.clone())
+        if D == 3:
+            samples = (*samples, self.w0.clone())
+
+        _base = adv.solve  # bind current solve (possibly already compiled)
+
+        # make_graphed_callables needs a module or plain function with only
+        # Tensor positional args.  Wrap with a class to avoid closure issues.
+        class _Wrapper(torch.nn.Module):
+            def forward(self_, *v):  # noqa: N805
+                return _base(*v)
+
+        wrapper = _Wrapper().to(self.device)
+        try:
+            graphed = torch.cuda.make_graphed_callables(
+                wrapper, samples, num_warmup_iters=3,
+            )
+        except Exception as e:
+            print(f"[cuda_graph] capture failed ({e}); falling back to eager")
+            return
+
+        adv.solve = lambda *v, nu_t=None, iteration=0: graphed(*v)
+        print(f"[cuda_graph] adv-diff graph captured ({D}D, scheme={adv._scheme_name})")
 
     def check_explosion(self, iteration):
         """Abort if fluid fields are non-finite or velocities exceed _vmax_abort."""
@@ -2266,7 +2374,8 @@ class FluidSolver(PlottingMixin):
         iteration has converged, on the converged fluid state.  Returns the
         ``terminate`` flag from :meth:`plotting_and_saving`.
         """
-        self.check_explosion(iteration)
+        if iteration % self.check_explosion_every == 0:
+            self.check_explosion(iteration)
 
         # ---- flow diagnostics on the post-projection field (every N steps) ----
         # Runs before the BDIM-field release so it sees the converged u,v,[w],p
@@ -2281,7 +2390,7 @@ class FluidSolver(PlottingMixin):
         self._release_bdim_fields()
 
         # ---- flush CUDA allocator cache to reduce nvidia-smi usage ----
-        if self.device.type == "cuda":
+        if self.device.type == "cuda" and iteration % self.empty_cache_every == 0:
             torch.cuda.empty_cache()
 
         # ---- plotting / saving  (works for 2D and 3D) ----

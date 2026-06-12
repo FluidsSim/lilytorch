@@ -264,10 +264,16 @@ def _forces_body_batch(
 
 def forces_method1(self, u, v, p, iteration):
 
-    # ---- CC normals (computed on-the-fly, not cached on self) ------
-    normal_x, normal_y = self.composite_body.compute_normals(
-        self.composite_body.sdf_val
-    )
+    # ---- CC normals (reuse cached values when available) ---------
+    normal_x = getattr(self, 'normal_x', None)
+    if normal_x is None:
+        normal_x, normal_y = self.composite_body.compute_normals(
+            self.composite_body.sdf_val
+        )
+        self.normal_x = normal_x
+        self.normal_y = normal_y
+    else:
+        normal_y = self.normal_y
 
     # Build a co-located CC traction field before contour interpolation.
     # The legacy method1 mixed x/y traction components sampled from
@@ -369,7 +375,6 @@ def forces_method2(self, u, v, p, iteration):
         and len(comp._sdf_sparse) > 0
         and comp._sdf_sparse[0] is not None
     )
-    _use_legacy_sparse_forces_2d = False
     _use_kernel_post_forces_2d = (
         self._use_kernels
         and not _have_sparse_2d
@@ -436,13 +441,17 @@ def forces_method2(self, u, v, p, iteration):
         return
 
     # ---- CC normals ------------------------------------------------
-    # The 2-D update path recomputes and caches these in
-    # ``_recompute_mu_normals``.  Reuse them here instead of launching
-    # another full-grid normal computation for the force pass.
+    # Python path: cached by _recompute_mu_normals (called before step).
+    # Kernel path: no persistent mu/normal buffers exist, so compute once
+    # here and store on self — _release_bdim_fields clears them after the
+    # step.  This avoids a redundant torch.gradient call on every implicit
+    # coupling sub-iteration.
     normal_x = getattr(self, 'normal_x', None)
     normal_y = getattr(self, 'normal_y', None)
     if normal_x is None or normal_y is None:
         normal_x, normal_y = comp.compute_normals(comp.sdf_val)
+        self.normal_x = normal_x
+        self.normal_y = normal_y
 
     # ==============================================================
     # BATCHED path — all bodies in one fused call
@@ -452,28 +461,6 @@ def forces_method2(self, u, v, p, iteration):
     # body AABBs (with a halo for derivative stencils) and let the sparse
     # force kernel index relative to that cropped slab.
     u_aabb = None
-    if (
-        _use_legacy_sparse_forces_2d
-        and self._use_kernels
-    ):
-        u_i0, u_j0 = 1 << 30, 1 << 30
-        u_i1, u_j1 = -1, -1
-        for aabb_i, _ in comp._sdf_sparse:
-            if aabb_i is None:
-                u_i0 = -1
-                break
-            i0, i1, j0, j1 = aabb_i
-            if i0 < u_i0: u_i0 = i0
-            if j0 < u_j0: u_j0 = j0
-            if i1 > u_i1: u_i1 = i1
-            if j1 > u_j1: u_j1 = j1
-        if u_i0 != -1:
-            Ni, Nj = u.shape
-            halo = 2
-            u_i0 = max(0, u_i0 - halo); u_i1 = min(Ni, u_i1 + halo)
-            u_j0 = max(0, u_j0 - halo); u_j1 = min(Nj, u_j1 + halo)
-            if u_i1 > u_i0 and u_j1 > u_j0:
-                u_aabb = (u_i0, u_i1, u_j0, u_j1)
 
     nu_rho = self._compute_nu_rho_for_forces(u, v)
     if u_aabb is not None:
@@ -499,16 +486,10 @@ def forces_method2(self, u, v, p, iteration):
     pforce_x, pforce_y = pforces
 
     # Cache for post-processing
-    if _use_legacy_sparse_forces_2d:
-        self.xstress_tensor = None
-        self.ystress_tensor = None
-        self.pforce_x = None
-        self.pforce_y = None
-    else:
-        self.xstress_tensor = xstress
-        self.ystress_tensor = ystress
-        self.pforce_x = pforce_x
-        self.pforce_y = pforce_y
+    self.xstress_tensor = xstress
+    self.ystress_tensor = ystress
+    self.pforce_x = pforce_x
+    self.pforce_y = pforce_y
 
     eps_body = comp.bodies[0].eps
 
@@ -687,9 +668,12 @@ def forces_method2_3d(self, u, v, w, p, iteration):
     h3     = self.h3
 
     # ---- CC normals (reuse cached values when available) ---------
+    # Kernel path: compute once and cache on self so implicit coupling
+    # sub-iterations don't repeat the torch.gradient call.
     nx = getattr(self, 'normal_x', None)
     if nx is None:
         nx, ny, nz = comp.compute_normals(comp.sdf_val)
+        self.normal_x, self.normal_y, self.normal_z = nx, ny, nz
     else:
         ny, nz = self.normal_y, self.normal_z
 
@@ -1185,7 +1169,12 @@ def _forces_lagrangian_2d_python_ref(self, u, v, p, iteration):
         interp.F = field.contiguous()
         return interp(qx, qy)
 
-    # If nu_rho is a CC tensor, sample it at markers; else broadcast scalar.
+    # Viscous stress tensor and nu·ρ (mirrors production path in forces_lagrangian_2d).
+    h = self.h
+    nu_rho = self._compute_nu_rho_for_forces(u, v)
+    eps_ij = _viscous_stress_tensor((u, v), h)
+    nu_rho_const = not (torch.is_tensor(nu_rho) and nu_rho.ndim == 2)
+
     for bi, body in enumerate(comp.bodies):
         cnt = body.cnt_update                    # (2, M)
         if cnt.shape[1] <= 1:

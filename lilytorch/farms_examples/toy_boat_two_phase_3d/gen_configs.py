@@ -25,6 +25,7 @@ from farms_core.model.options import SpawnMode
 
 from lilytorch.util.paths import lilytorch_repo_root
 from lilytorch.farms_examples.base_sim_config import BaseSimConfig
+from lilytorch.integration.camera import back_camera_config
 
 
 # ── Boat geometry (DSYHS yacht hull from OBJ meshes; mass comes from SDF) ──
@@ -83,9 +84,9 @@ class SimConfig(BaseSimConfig):
         # ~60 cells along the 6 m hull, ~2.4 cells across the 0.24 m draft.
         # With the air-transparent-body fix (on by default), the waterline
         # triple-point is stable; multi-body seams may need blending.
-        self.Nx   = 270*1
-        self.Ny   = 64*1
-        self.Nz   = 32*1
+        self.Nx   = 270*2
+        self.Ny   = 64*2
+        self.Nz   = 32*2
         self.xmin = -3.0
         self.xmax = 24.0
         self.ymin = -3.2
@@ -98,7 +99,7 @@ class SimConfig(BaseSimConfig):
         controller_config = {
             "path": "lilytorch.farms_examples.submarine."
                     "propeller_controller.PropellerController",
-            "tau": 400.0,    # propeller torque [N·m]
+            "tau": 600.0,    # propeller torque [N·m]
             # Ramp torque linearly from 0 → tau over this many steps (0.5 s at
             # dt=0.001).  Prevents the blade spin-up vertical-force transient
             # that pitches the bow down before steady-state flow is established.
@@ -125,21 +126,18 @@ class SimConfig(BaseSimConfig):
         ]
 
         # ── FSI coupling stability ────────────────────────────────────
-        # IMPLICIT coupling (Aitken accelerator) cures the explicit added-mass
-        # instability: boat mass ~2000 kg ≈ added mass → explicit diverges over
-        # thousands of steps.  Aitken is preferred over IQN-ILS (the reuse-store
-        # poisoning issue documented in memory caused IQN-ILS to fail for the 2D
-        # free-swimmer; Aitken has 0 failures).  The previous implicit block was
-        # commented out because it diverged with force_method='lagrangian' + the
-        # articulated propeller joint; the BDIMhandler warning says the
-        # ill-conditioning is "especially force_method='lagrangian'" — with
-        # Eulerian forces this is no longer a concern.
-        self.coupling = {
-            "scheme"     : "implicit",
-            "accelerator": "aitken",
-            "tol"        : 1.0e-4,
-            "max_iter"   : 20,
-        }
+        # Explicit coupling (default) — no added-mass blow-up observed in
+        # short test runs (~8000 steps).  Implicit Aitken is available but
+        # step-1 fails to converge when starting from a cold waterline (large
+        # initial buoyancy transient); use explicit unless running very long.
+        # self.coupling = {
+        #     "scheme": "implicit",
+        #     "accelerator": "iqn-ils",  # IQN-ILS: quadratic convergence near fixed point, handles ρ_body=ρ_fluid
+        #     "reuse": 2,
+        #     "tol": 1e-4,
+        #     "max_iter": 100,           # 30 was too few at peak swimming speed; 100 gives Aitken/IQN room
+        # }
+
         # ── Joint damping: prevent passive revolute joints (propeller)
         # from spinning up due to tiny numerical fluid torques.  With
         # Ixx≈0.03 kg·m², even τ≈1e-3 N·m gives α≈0.03 rad/s² and the
@@ -158,14 +156,14 @@ class SimConfig(BaseSimConfig):
         # drives the two-phase blow-up (sharpened by finer cells); 3 cells of
         # sigmoid SDF weighting smooths body_{u,v,w} across the link seams.
 
-        self.body_velocity_blend_eps_cells = 3
+        # self.body_velocity_blend_eps_cells = 3
 
         # ── Physics (real ~6 m scale) ─────────────────────────────────
         self.rho_body      = 1000.0   # Poisson conditioning (not boat density)
         self.rho           = 1000.0   # water density
         self.nu            = 1.0e-6   # real water kinematic viscosity [m²/s]
         self.timestep      = 0.001
-        self.n_iterations  = 8000
+        self.n_iterations  = 14000
         self.num_sub_steps = 1
         self.save_every    = 50
 
@@ -182,13 +180,16 @@ class SimConfig(BaseSimConfig):
         self.poisson_smoother        = "rbgs"
         self.poisson_nsmoothing      = 5
         self.poisson_bc_type         = "neumann"
-        # self.solver_method           = "python"
+        self.compile_project         = True
+        # self.compile_adv_diff        = True
+
+        # self.solver_method           = "python"  # kernel mode re-enabled in 6bab103
         self.time_integration        = "euler"
         # Eulerian band-integral forces: hull, keel, rudder and propeller are
         # separate (overlapping) fluid bodies, so the force is integrated over
         # the smoothed delta of the *union* SDF rather than each body's closed
         # surface (gauge-invariant; handles the overlaps correctly).
-        self.force_method            = "eulerian"
+        self.force_method            = "lagrangian"
         self.force_delta_order       = 1
         self.eps_multiplier          = 2
         self.zero_pressure_inside    = False
@@ -198,10 +199,13 @@ class SimConfig(BaseSimConfig):
         # (starts at x=-0.78, 2.22 m from xmin=-3) just outside the inlet
         # sponge at t=0.  strength=50 1/s gives ~5% residual per timestep at
         # the wall face, enough to prevent the BDIM/Dirichlet collision blow-up.
-        self.sponge = {"width": 3.0, "strength": 50.0, "axes": ["x"]}
+        # self.sponge = {"width": 3.0, "strength": 50.0, "axes": ["x"]}
 
-        # Boundary conditions — Neumann on lateral walls (like submarine),
-        # Dirichlet on top/bottom to avoid free-slip water loss.
+        # Boundary conditions — inlet (xmin) hard wall u=0, outlet (xmax) open
+        # (Neumann ∂u/∂x=0): the boat sails out through xmax without a
+        # Dirichlet/BDIM conflict.  Lateral and top/bottom walls are Neumann
+        # on the flow-parallel velocity (no lateral forcing) and Dirichlet on
+        # the wall-normal velocity (no penetration / no free-slip water loss).
         self.bc_type_u   = ["D", "D", "N", "N", "N", "N"]
         self.bc_values_u = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         self.bc_type_v   = ["N", "N", "D", "D", "N", "N"]
@@ -330,7 +334,7 @@ class SimConfig(BaseSimConfig):
             "config": {
                 # Global (shared) knobs.
                 "update_every": 1,
-                "max_vertices": 800000,
+                "max_vertices": 1500000,
                 "crop_boundary": 0,
                 "debug_force_visible": False,
                 "fields": [
@@ -355,17 +359,17 @@ class SimConfig(BaseSimConfig):
             },
         })
 
-        # CoM trail: draws a fading orange line tracing the boat's centre of mass
-        # in the MuJoCo viewer, one segment every `spacing` steps.
-        extensions.append({
-            "loader": "farms_mujoco.simulation.extensions.TrailCoMViewer",
-            "config": {
-                "animat_id": 0,                      # track the first (only) animat
-                "width"    : 20,                     # line width in pixels
-                "rgba"     : [1.0, 0.3, 0.0, 0.6],   # orange, semi-transparent
-                "spacing"  : 25,                     # draw a new segment every 25 steps
-            },
-        })
+        # # CoM trail: draws a fading orange line tracing the boat's centre of mass
+        # # in the MuJoCo viewer, one segment every `spacing` steps.
+        # extensions.append({
+        #     "loader": "farms_mujoco.simulation.extensions.TrailCoMViewer",
+        #     "config": {
+        #         "animat_id": 0,                      # track the first (only) animat
+        #         "width"    : 20,                     # line width in pixels
+        #         "rgba"     : [1.0, 0.3, 0.0, 0.6],   # orange, semi-transparent
+        #         "spacing"  : 25,                     # draw a new segment every 25 steps
+        #     },
+        # })
 
         # Fixed side-on camera recording the tank + boat at the waterline.
         extensions.append({
@@ -374,13 +378,34 @@ class SimConfig(BaseSimConfig):
                 "path"            : os.path.join(output_folder, "output", "video.mp4"),
                 "animat_id"       : None,            # fixed camera (not following the boat)
                 "fps"             : 30,
-                "speed"           : 0.5,
+                "speed"           : 1,
                 "angular_velocity": 0,
                 "azimuth"         : 90,              # side view
                 "elevation"       : -15,             # slightly above horizontal
                 "distance"        : 20.0,            # whole ~27 m tank in frame
                 "offset"          : [10.0, 0.0, WATERLINE],  # look at boat centre
                 "resolution"      : [1920, 1080],
+            },
+        })
+
+        # Fixed back camera: looking along +X from behind the boat.
+        back_cam = back_camera_config(
+            self.xmin, self.xmax,
+            self.ymin, self.ymax,
+            self.zmin, self.zmax,
+            overshoot=1.10,
+            max_width=1920, max_height=1080,
+        )
+        back_cam["elevation"] = -15   # slightly above horizontal
+        extensions.append({
+            "loader": "lilytorch.integration.streaming_camera.StreamingCameraRecording",
+            "config": {
+                "path"            : os.path.join(output_folder, "output", "video_back.mp4"),
+                "animat_id"       : None,
+                "fps"             : 30,
+                "speed"           : 1,
+                "angular_velocity": 0,
+                **back_cam,
             },
         })
 
