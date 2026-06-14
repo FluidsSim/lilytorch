@@ -261,8 +261,8 @@ static at::Tensor poisson_solve_multigrid_2d_cuda(
         vcycle_2d(p, f_scaled, ch, cv, r,
                   jcap_tol, w, nsmoothing, smoother_id);
         // L∞ early-exit (one D→H sync per cycle — matches Python).
-        const double rnorm = r.abs().max().item<double>();
-        if (rnorm < tol) break;
+        const double rnorm = (tol >= 0.0) ? r.abs().max().item<double>() : 1.0;
+        if (tol >= 0.0 && rnorm < tol) break;
     }
 
     // float64 mean subtraction (matches Python: p -= p.to(f64).mean().to(p.dtype)).
@@ -299,8 +299,8 @@ static at::Tensor poisson_solve_multigrid_3d_cuda(
     for (int64_t i = 0; i < max_vcycles; ++i) {
         vcycle_3d(p, f_scaled, ch, cv, cw, r,
                   jcap_tol, w, nsmoothing, smoother_id);
-        const double rnorm = r.abs().max().item<double>();
-        if (rnorm < tol) break;
+        const double rnorm = (tol >= 0.0) ? r.abs().max().item<double>() : 1.0;
+        if (tol >= 0.0 && rnorm < tol) break;
     }
 
     auto pmean = p.to(at::kDouble).mean();
@@ -370,7 +370,7 @@ static at::Tensor poisson_solve_mgcg_2d_cuda(
     mg_residual_2d_cuda(p, f_zero, cp0, cm0, cp1, cm1, jcap_tol, Bx);
     auto r = b.sub(Bx);
 
-    double r_norm = r.abs().max().item<double>();
+    double r_norm = (tol >= 0.0) ? r.abs().max().item<double>() : 1.0;
     if (r_norm < tol) {
         auto pmean = p.to(at::kDouble).mean();
         p.sub_(pmean.to(p.scalar_type()));
@@ -414,8 +414,11 @@ static at::Tensor poisson_solve_mgcg_2d_cuda(
         apply_neumann_bc(p);
         r.addcmul_(q, alpha, -1.0);            // r -= alpha·q   (no D→H copy)
 
-        double rn = r.abs().max().item<double>();
-        if (rn < tol) break;
+        // tol < 0  ⇒  no early-exit: skip the residual-norm D→H sync entirely
+        // (short-circuit avoids .item()) so the whole solve is host-sync-free
+        // and CUDA-graph capturable.  Runs the full max_cycles budget.
+        double rn = (tol >= 0.0) ? r.abs().max().item<double>() : 1.0;
+        if (tol >= 0.0 && rn < tol) break;
 
         z.zero_();
         r.neg_(); // reuse buffer: r → −r
@@ -470,7 +473,7 @@ static at::Tensor poisson_solve_mgcg_3d_cuda(
     mg_residual_3d_cuda(p, f_zero, cp0, cm0, cp1, cm1, cp2, cm2, jcap_tol, Bx);
     auto r = b.sub(Bx);
 
-    double r_norm = r.abs().max().item<double>();
+    double r_norm = (tol >= 0.0) ? r.abs().max().item<double>() : 1.0;
     if (r_norm < tol) {
         auto pmean = p.to(at::kDouble).mean();
         p.sub_(pmean.to(p.scalar_type()));
@@ -505,8 +508,11 @@ static at::Tensor poisson_solve_mgcg_3d_cuda(
         apply_neumann_bc(p);
         r.addcmul_(q, alpha, -1.0);
 
-        double rn = r.abs().max().item<double>();
-        if (rn < tol) break;
+        // tol < 0  ⇒  no early-exit: skip the residual-norm D→H sync entirely
+        // (short-circuit avoids .item()) so the whole solve is host-sync-free
+        // and CUDA-graph capturable.  Runs the full max_cycles budget.
+        double rn = (tol >= 0.0) ? r.abs().max().item<double>() : 1.0;
+        if (tol >= 0.0 && rn < tol) break;
 
         z.zero_();
         r.neg_();
@@ -588,7 +594,7 @@ static std::tuple<at::Tensor, at::Tensor, int64_t> poisson_solve_rmgcg_2d_cuda(
     auto D = at::zeros({std::max<int64_t>(harvest_k, 1), Nx + 2, Ny + 2}, opts);
     int64_t niter = 0;
 
-    double r_norm = r.abs().max().item<double>();
+    double r_norm = (tol >= 0.0) ? r.abs().max().item<double>() : 1.0;
     if (r_norm < tol) {
         auto pmean = p.to(at::kDouble).mean();
         p.sub_(pmean.to(p.scalar_type()));
@@ -628,8 +634,11 @@ static std::tuple<at::Tensor, at::Tensor, int64_t> poisson_solve_rmgcg_2d_cuda(
         if (harvest_k > 0) D.index({k % harvest_k}).copy_(d);
         niter = k + 1;
 
-        double rn = r.abs().max().item<double>();
-        if (rn < tol) break;
+        // tol < 0  ⇒  no early-exit: skip the residual-norm D→H sync entirely
+        // (short-circuit avoids .item()) so the whole solve is host-sync-free
+        // and CUDA-graph capturable.  Runs the full max_cycles budget.
+        double rn = (tol >= 0.0) ? r.abs().max().item<double>() : 1.0;
+        if (tol >= 0.0 && rn < tol) break;
 
         z.zero_();
         r.neg_();
@@ -705,7 +714,7 @@ static std::tuple<at::Tensor, at::Tensor, int64_t> poisson_solve_rmgcg_3d_cuda(
     auto D = at::zeros({std::max<int64_t>(harvest_k, 1), Nx + 2, Ny + 2, Nz + 2}, opts);
     int64_t niter = 0;
 
-    double r_norm = r.abs().max().item<double>();
+    double r_norm = (tol >= 0.0) ? r.abs().max().item<double>() : 1.0;
     if (r_norm < tol) {
         auto pmean = p.to(at::kDouble).mean();
         p.sub_(pmean.to(p.scalar_type()));
@@ -744,8 +753,11 @@ static std::tuple<at::Tensor, at::Tensor, int64_t> poisson_solve_rmgcg_3d_cuda(
         if (harvest_k > 0) D.index({k % harvest_k}).copy_(d);
         niter = k + 1;
 
-        double rn = r.abs().max().item<double>();
-        if (rn < tol) break;
+        // tol < 0  ⇒  no early-exit: skip the residual-norm D→H sync entirely
+        // (short-circuit avoids .item()) so the whole solve is host-sync-free
+        // and CUDA-graph capturable.  Runs the full max_cycles budget.
+        double rn = (tol >= 0.0) ? r.abs().max().item<double>() : 1.0;
+        if (tol >= 0.0 && rn < tol) break;
 
         z.zero_();
         r.neg_();
