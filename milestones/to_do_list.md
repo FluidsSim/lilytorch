@@ -202,6 +202,33 @@ recommended opt-in for GPU production runs; `torch.compile` has a 30–100 s fir
 overhead (amortised over long sims). Benchmark script:
 `lilytorch/validation/cost_analysis/bench_gpu_util.py`.
 
+### Native-path GPU-util — RE-PROFILED 2026-06-14 (after the native CUDA Poisson port)
+
+The 2026-06-11 analysis above is for the **Python** projection path (the
+`compile_project` knob compiles that path). Production now runs the **native CUDA
+Poisson** path (mgcg/rmgcg), which is already 10–17× faster than Python. Re-profiling
+*that* path (`bench_python_overhead.py`) shows it is **NOT Python-dispatch bound** (the
+whole solve is a single Python op call) and **NOT sync bound** (MP11 removed the
+alpha/beta syncs). The residual low GPU-util (22% @ 2D-N64 → 50% @ 3D-N96) is
+**CUDA kernel-launch latency**: the C++ V-cycle issues ~2100 *tiny* kernels per solve and
+the GPU idles between launches. Confirmed: idle ≈ (#launches) × ~1.5 µs.
+
+GU5. ~~**Fuse the per-axis Neumann BC into one launch**~~ ✅ (2026-06-14) The BC mirror
+  (`apply_neumann_bc_2d/3d` in `multigrid_smoothers.cu`) was the single largest launch-count
+  contributor — one kernel **per axis pair** (3 in 3D), called by every smoother half-sweep
+  and residual eval (~1170 launches/solve @ 3D-N96). Fused into ONE launch using
+  `blockIdx.{y,z}` as the axis-pair selector. Safe because the 5-/7-point stencils only read
+  **face** ghosts (each axis pair writes a disjoint interior-face slab → race-free; the
+  never-read edge/corner ghosts are left stale). **Measured:** launches/solve 2101→1321
+  (−37%), wall-clock **−10% (2D-N64) to −25% (3D-N48)**, −17% (3D-N96). multigrid/mgcg/rmgcg
+  self-tests still PASS (BC exercised through the full solve vs Python ref).
+GU6. **(open, larger) CUDA-graph capture of the native solve** — the real ceiling-lift for
+  launch-bound small grids: replay the ~1300 kernels with ~1 host launch. Blocked on the
+  last per-iter host sync (the residual-norm `.item()`); needs a device-side convergence
+  flag (check every K iters, or fixed iteration budget) before the loop can be graphed.
+  This is the T4 `--poisson_compile` prerequisite MP11 flagged. RBGS red/black can't be
+  fused (Gauss-Seidel data dependency); the win has to come from graphs, not more fusion.
+
 ---
 
 # PER-STEP HOT-PATH OVERHEAD (measure first — found 2026-06-05 while doing T1/diagnostics)

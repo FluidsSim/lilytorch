@@ -58,28 +58,36 @@ static __host__ __device__ __forceinline__ int cdiv(int a, int b) {
 // Neumann BC helpers (ghost-row = interior-edge copy)
 // =====================================================================
 
-// 2-D: two kernel launches — one per axis pair
-template <typename scalar_t>
-__global__ void neumann_bc_2d_xfaces(scalar_t* __restrict__ p,
-                                      int Nx, int Ny) {
-    // Handles j = 0..Ny+1  (full column width including ghost cols)
-    int j = blockIdx.x * blockDim.x + threadIdx.x;
-    if (j >= Ny + 2) return;
-    const int stride = Ny + 2;
-    p[j]                    = p[stride + j];          // p[0,j] = p[1,j]
-    p[(Nx + 1) * stride + j] = p[Nx * stride + j];   // p[Nx+1,j] = p[Nx,j]
-}
+// Neumann BC = ghost-row mirror of the interior-adjacent row.  Fused into a
+// SINGLE launch per call (was one launch per axis pair) to cut kernel-launch
+// latency — the small-grid Poisson solve is launch-bound, and the BC was the
+// single largest contributor to the per-solve launch count.
+//
+// Only the FACE ghosts that the 5-/7-point stencil actually reads are written
+// (interior-face range [1,N] per axis); the never-read edge/corner ghosts are
+// left untouched.  Each axis pair therefore writes a DISJOINT set of cells
+// (distinct boundary index in distinct dims) → no write-race between the pairs,
+// and the read face-ghosts are bit-identical to the old per-axis passes.  The
+// axis pair is selected by blockIdx.{y,z} so the whole BC is one grid launch.
 
+// 2-D: one launch, gridDim.y = 2 selects the x/y face pair.
 template <typename scalar_t>
-__global__ void neumann_bc_2d_yfaces(scalar_t* __restrict__ p,
-                                      int Nx, int Ny) {
-    // Handles i = 0..Nx+1  (full row height including ghost rows)
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= Nx + 2) return;
+__global__ void neumann_bc_2d_fused(scalar_t* __restrict__ p,
+                                     int Nx, int Ny) {
+    const int t      = blockIdx.x * blockDim.x + threadIdx.x;
     const int stride = Ny + 2;
-    const int base   = i * stride;
-    p[base]          = p[base + 1];           // p[i,0] = p[i,1]
-    p[base + Ny + 1] = p[base + Ny];         // p[i,Ny+1] = p[i,Ny]
+    if (blockIdx.y == 0) {                       // x-faces: vary j ∈ [1,Ny]
+        const int j = t + 1;
+        if (j > Ny) return;
+        p[j]                     = p[stride + j];        // p[0,j]   = p[1,j]
+        p[(Nx + 1) * stride + j] = p[Nx * stride + j];   // p[Nx+1,j]= p[Nx,j]
+    } else {                                     // y-faces: vary i ∈ [1,Nx]
+        const int i = t + 1;
+        if (i > Nx) return;
+        const int base   = i * stride;
+        p[base]          = p[base + 1];          // p[i,0]    = p[i,1]
+        p[base + Ny + 1] = p[base + Ny];         // p[i,Ny+1] = p[i,Ny]
+    }
 }
 
 template <typename scalar_t>
@@ -87,49 +95,38 @@ static void apply_neumann_bc_2d(scalar_t* p,
                                   int Nx, int Ny,
                                   cudaStream_t stream) {
     constexpr int BLOCK = 256;
-    neumann_bc_2d_xfaces<scalar_t>
-        <<<cdiv(Ny + 2, BLOCK), BLOCK, 0, stream>>>(p, Nx, Ny);
-    neumann_bc_2d_yfaces<scalar_t>
-        <<<cdiv(Nx + 2, BLOCK), BLOCK, 0, stream>>>(p, Nx, Ny);
+    const int span = max(Nx, Ny);
+    neumann_bc_2d_fused<scalar_t>
+        <<<dim3(cdiv(span, BLOCK), 2), BLOCK, 0, stream>>>(p, Nx, Ny);
 }
 
-// 3-D: three kernel launches — one per axis pair
+// 3-D: one launch, gridDim.z = 3 selects the x/y/z face pair.
 template <typename scalar_t>
-__global__ void neumann_bc_3d_xfaces(scalar_t* __restrict__ p,
-                                      int Nx, int Ny, int Nz) {
-    const int j = blockIdx.y * blockDim.y + threadIdx.y;
-    const int k = blockIdx.x * blockDim.x + threadIdx.x;
-    if (j >= Ny + 2 || k >= Nz + 2) return;
-    const int si = (Ny + 2) * (Nz + 2);
-    const int jk = j * (Nz + 2) + k;
-    p[jk]               = p[si + jk];              // p[0,j,k]  = p[1,j,k]
-    p[(Nx+1)*si + jk]   = p[Nx*si + jk];           // p[Nx+1,j,k] = p[Nx,j,k]
-}
-
-template <typename scalar_t>
-__global__ void neumann_bc_3d_yfaces(scalar_t* __restrict__ p,
-                                      int Nx, int Ny, int Nz) {
-    const int i = blockIdx.y * blockDim.y + threadIdx.y;
-    const int k = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= Nx + 2 || k >= Nz + 2) return;
+__global__ void neumann_bc_3d_fused(scalar_t* __restrict__ p,
+                                     int Nx, int Ny, int Nz) {
+    const int a  = blockIdx.x * blockDim.x + threadIdx.x;   // fast
+    const int b  = blockIdx.y * blockDim.y + threadIdx.y;
     const int si = (Ny + 2) * (Nz + 2);
     const int sj = Nz + 2;
-    const int base = i * si + k;
-    p[base]               = p[base + sj];             // p[i,0,k] = p[i,1,k]
-    p[base + (Ny+1)*sj]   = p[base + Ny*sj];         // p[i,Ny+1,k] = p[i,Ny,k]
-}
-
-template <typename scalar_t>
-__global__ void neumann_bc_3d_zfaces(scalar_t* __restrict__ p,
-                                      int Nx, int Ny, int Nz) {
-    const int i = blockIdx.y * blockDim.y + threadIdx.y;
-    const int j = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= Nx + 2 || j >= Ny + 2) return;
-    const int si   = (Ny + 2) * (Nz + 2);
-    const int sj   = Nz + 2;
-    const int base = i * si + j * sj;
-    p[base]          = p[base + 1];           // p[i,j,0] = p[i,j,1]
-    p[base + Nz + 1] = p[base + Nz];         // p[i,j,Nz+1] = p[i,j,Nz]
+    if (blockIdx.z == 0) {                        // x-faces: a=k∈[1,Nz], b=j∈[1,Ny]
+        const int k = a + 1, j = b + 1;
+        if (k > Nz || j > Ny) return;
+        const int jk = j * sj + k;
+        p[jk]             = p[si + jk];           // p[0,j,k]    = p[1,j,k]
+        p[(Nx+1)*si + jk] = p[Nx*si + jk];        // p[Nx+1,j,k] = p[Nx,j,k]
+    } else if (blockIdx.z == 1) {                 // y-faces: a=k∈[1,Nz], b=i∈[1,Nx]
+        const int k = a + 1, i = b + 1;
+        if (k > Nz || i > Nx) return;
+        const int base = i * si + k;
+        p[base]             = p[base + sj];       // p[i,0,k]    = p[i,1,k]
+        p[base + (Ny+1)*sj] = p[base + Ny*sj];    // p[i,Ny+1,k] = p[i,Ny,k]
+    } else {                                      // z-faces: a=j∈[1,Ny], b=i∈[1,Nx]
+        const int j = a + 1, i = b + 1;
+        if (j > Ny || i > Nx) return;
+        const int base = i * si + j * sj;
+        p[base]          = p[base + 1];           // p[i,j,0]    = p[i,j,1]
+        p[base + Nz + 1] = p[base + Nz];          // p[i,j,Nz+1] = p[i,j,Nz]
+    }
 }
 
 template <typename scalar_t>
@@ -137,12 +134,11 @@ static void apply_neumann_bc_3d(scalar_t* p,
                                   int Nx, int Ny, int Nz,
                                   cudaStream_t stream) {
     const dim3 blk(16, 8);
-    neumann_bc_3d_xfaces<scalar_t>
-        <<<dim3(cdiv(Nz+2,16), cdiv(Ny+2,8)), blk, 0, stream>>>(p, Nx, Ny, Nz);
-    neumann_bc_3d_yfaces<scalar_t>
-        <<<dim3(cdiv(Nz+2,16), cdiv(Nx+2,8)), blk, 0, stream>>>(p, Nx, Ny, Nz);
-    neumann_bc_3d_zfaces<scalar_t>
-        <<<dim3(cdiv(Ny+2,16), cdiv(Nx+2,8)), blk, 0, stream>>>(p, Nx, Ny, Nz);
+    const int span_a = max(Ny, Nz);              // fast-axis span across pairs
+    const int span_b = max(Nx, max(Ny, Nz));     // slow-axis span across pairs
+    neumann_bc_3d_fused<scalar_t>
+        <<<dim3(cdiv(span_a, 16), cdiv(span_b, 8), 3), blk, 0, stream>>>(
+            p, Nx, Ny, Nz);
 }
 
 // =====================================================================
