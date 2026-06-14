@@ -222,12 +222,23 @@ GU5. ~~**Fuse the per-axis Neumann BC into one launch**~~ ✅ (2026-06-14) The B
   never-read edge/corner ghosts are left stale). **Measured:** launches/solve 2101→1321
   (−37%), wall-clock **−10% (2D-N64) to −25% (3D-N48)**, −17% (3D-N96). multigrid/mgcg/rmgcg
   self-tests still PASS (BC exercised through the full solve vs Python ref).
-GU6. **(open, larger) CUDA-graph capture of the native solve** — the real ceiling-lift for
-  launch-bound small grids: replay the ~1300 kernels with ~1 host launch. Blocked on the
-  last per-iter host sync (the residual-norm `.item()`); needs a device-side convergence
-  flag (check every K iters, or fixed iteration budget) before the loop can be graphed.
-  This is the T4 `--poisson_compile` prerequisite MP11 flagged. RBGS red/black can't be
-  fused (Gauss-Seidel data dependency); the win has to come from graphs, not more fusion.
+GU6. **CUDA-graph capture of the native solve — PROVEN (POC), not yet wired in (2026-06-14).**
+  The real ceiling-lift for launch-bound small grids: replay the ~1300 kernels with ~1 host
+  launch. **Enabler DONE:** the native drivers now take `tol < 0` = sync-free fixed-cycle mode
+  (skips the residual-norm `.item()` via short-circuit), so the solve is host-sync-free and
+  CUDA-graph-capturable; `tol >= 0` unchanged (self-tests pass bit-for-bit). **POC measured**
+  (`/tmp/graph_poc.py`, fp32, mc=3 = production cycle count, graph vs eager+sync, |dp|=0):
+  2D-N64 **2.05×**, 2D-N128 **1.53×**, 3D-N48 **1.49×**, 3D-N96 **0.91×**, 3D-N128 **0.84×**.
+  ⇒ **Graphs are a SMALL-GRID-ONLY win** (launch-bound); they are net-NEGATIVE on large 3D
+  (compute-bound + the static-buffer `copy_` + cannot early-exit). A full megakernel rewrite
+  would share this large-grid limitation AND hit a cooperative-launch occupancy ceiling
+  (~64³ max) — so graphs, size-gated, are the right tool; the rewrite is not worth it.
+  **Remaining work to productionise (regime-gated, hot-path):** capture per grid-shape into
+  static p/f/face buffers, copy live RHS+BDIM faces in & warm-start p before each replay,
+  **gate ON only below a cell threshold** (≈ ≤64³ / 2D), opt-in config flag, fixed cycle
+  budget (= `poisson_max_mgcg_cycles`). Start with mgcg+multigrid (rmgcg deflation has
+  changing U/W; fft N/A). RBGS red/black can't be fused (Gauss-Seidel dep) — the win has to
+  come from graphs, not more fusion. This is also the T4 `--poisson_compile` prerequisite.
 
 ---
 
