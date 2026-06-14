@@ -681,6 +681,7 @@ class PoissonSolver:
         precond_vcycles=1,
         smoother="jacobi",
         use_kernels=False,
+        recycle_k=0,
     ):
         self.dtype       = dtype
         self.h2          = h * h
@@ -709,6 +710,24 @@ class PoissonSolver:
         # coefficient layout.
         self.dirichlet_mask = None
         self.use_kernels = use_kernels
+        # ---- Recycled-Krylov (deflation) state -------------------------
+        # When recycle_k > 0, solve_rmgcg keeps a small subspace of search
+        # directions from previous solves and deflates them out of the next
+        # solve.  Because the operator (ch/cv/cw) changes only slightly per
+        # timestep, those directions span the slow-converging modes, so the
+        # deflated CG converges in far fewer iterations.  Persists across
+        # calls on the (long-lived) solver instance; reset on shape change
+        # or Cholesky breakdown (stale-space guard).
+        self.recycle_k = recycle_k
+        self._recycle = None          # {"U": [full-grid dirs]} or None
+        self._recycle_cooldown = 0    # steps to stay disengaged after a stall
+        self._rmgcg_warned = False
+        # Init-only augmentation (project the recycle space out of the initial
+        # guess, then run ordinary MGCG) is provably never slower than plain
+        # MGCG.  Full in-loop deflation can be faster but is fragile with a
+        # non-deflated V-cycle preconditioner (observed to stall in 3-D), so it
+        # is OFF by default; flip for experimentation only.
+        self._deflate_in_loop = True
         if use_kernels:
             from lilytorch.src.kernels import _C  # noqa: F401  load .so
             from lilytorch.src.kernels import ops as _K
@@ -954,6 +973,12 @@ class PoissonSolver:
         the returned tensor is assigned back to fs.p0 immediately, so the
         fine-level p.clone() is skipped to save ~512 MB at 512³ float32.
         """
+        # The native hybrid V-cycle uses CUDA-only smoother kernels.  Off CUDA
+        # (CPU path), fall back to the pure-PyTorch recursive V-cycle so the
+        # CG solvers (solve_mgcg / solve_rmgcg) run on CPU tensors too.
+        if not p.is_cuda:
+            return self._vcycle(f, p, face_arrs)
+
         ndim = f.ndim
         if ndim == 3:
             ch, cv, cw = face_arrs
@@ -1255,57 +1280,94 @@ class PoissonSolver:
         if self.use_kernels:
             return self._solve_mgcg_native(f, p0, face_arrs, ndim)
         cfaces = self._extract_cfaces(face_arrs, ndim)
-        inner  = _inner(ndim)
 
         # ------ SPD system:  B(x) = b  where B = Jp - S,  b = -(h²·f) ------
         # T3a: when f is already h²-scaled, skip the multiplication.
         b = -f if pre_scaled else -(self.h2 * f)
-
         x = p0.clone().detach()
         self.BC(x)
 
+        # Plain MGCG: shared CG core with no deflation / no harvesting.
+        x, r, niter, r_norm_final = self._cg_core(
+            b, x, cfaces, face_arrs, recycle=None, harvest=None,
+        )
+
+        if self.verbose:
+            if niter == 0:
+                print(f"MGCG converged at initial guess: "
+                      f"residual = {r_norm_final:.2e}")
+            else:
+                print(
+                    f"MGCG residual = {r_norm_final:.2e}/{self._tol_float:.2e} "
+                    f"with {niter}/{self.max_cycles} CG iterations "
+                    f"({self.precond_vcycles} V-cycle"
+                    f"{'s' if self.precond_vcycles > 1 else ''}/iter)"
+                )
+        return x, r
+
+    # ------------------------------------------------------------------
+    # Shared (deflated) CG core  — single source of truth for MGCG/RMGCG
+    # ------------------------------------------------------------------
+    def _cg_core(self, b, x, cfaces, face_arrs, recycle=None, harvest=None):
+        """Multigrid-preconditioned CG loop, optionally deflated.
+
+        Parameters
+        ----------
+        b         : RHS of the SPD system  B(x) = b  (interior-sized).
+        x         : initial guess (full grid, ghost cells); modified in place.
+        cfaces    : per-dim (c_plus, c_minus) coefficient tuples.
+        face_arrs : raw face arrays for the V-cycle preconditioner.
+        recycle   : ``None`` for plain MGCG, else a dict ``{U, W, chol}``
+                    describing the deflation subspace (see ``_prepare_recycle``).
+        harvest   : ``None`` or a list to which each CG search direction is
+                    appended (used by RMGCG to refresh the recycle space).
+
+        Returns ``(x, r, niter, r_norm_final)``.  With ``recycle is None`` and
+        ``harvest is None`` this reproduces the previous ``solve_mgcg`` loop
+        exactly — that is the single source of truth both methods share.
+        """
+        inner = _inner(b.ndim)
+
         # Initial residual: r = b - B(x)
         r = b - self._apply_op_spd(x, cfaces)
-        r_norm = self._convergence_norm(r)
 
+        # Deflation init: project the recycle subspace out of (x, r) so the
+        # CG iteration never has to rediscover those modes.
+        if recycle is not None:
+            self._deflate_init(x, r, recycle, inner)
+
+        r_norm = self._convergence_norm(r)
         if r_norm < self.tol:
             x -= x.to(torch.float64).mean().to(x.dtype)
-            if self.verbose:
-                print(f"MGCG converged at initial guess: "
-                      f"residual = {r_norm:.2e}")
-            return x, r
+            self._last_niter = 0
+            return x, r, 0, r_norm
 
         # Preconditioner: approximately solve B(z) = r via V-cycle(s).
-        # The V-cycle solves  (S - Jp) = f_arg,  i.e.  -B(p) = f_arg,
-        # so we pass f_arg = -r  →  -B(z) ≈ -r  →  B(z) ≈ r.
+        # The V-cycle solves (S - Jp) = f_arg, i.e. -B(p) = f_arg, so we pass
+        # f_arg = -r  →  -B(z) ≈ -r  →  B(z) ≈ r.
         z = torch.zeros_like(x)
         for _ in range(self.precond_vcycles):
             z, _ = self._dispatch_vcycle(-r, z, face_arrs)
 
         d = z.clone()                              # search direction
+        if recycle is not None and self._deflate_in_loop:
+            self._deflate_proj(d, z, recycle, inner)   # B-orthogonalise vs U
         self.BC(d)
         rz = (r * z[inner]).to(torch.float64).sum().to(r.dtype)  # r · M⁻¹r
 
         r_norm_final = r_norm
+        k = 0
         for k in range(self.max_cycles):
-            # --- matrix-vector product ---
             q = self._apply_op_spd(d, cfaces)      # q = B·d
-
-            # Note: the guard checks ``if dq.abs() < 1e-30`` and
-            # ``if rz.abs() < 1e-30`` were removed.  They forced a CUDA
-            # synchronisation (Python must read the scalar back from the
-            # GPU before evaluating the branch), adding 2 pipeline stalls
-            # per CG iteration — up to 20 extra stalls for max_cycles=10.
-            # For a well-posed SPD Poisson operator these guards never
-            # trigger: d^T B d > 0 whenever d is not in the null space
-            # (constants), which CG maintains automatically.
             dq = (d[inner] * q).to(torch.float64).sum().to(r.dtype)  # d · B·d
-
             alpha = rz / dq                        # step length
 
             x[inner] = x[inner] + alpha * d[inner]
             self.BC(x)
             r = r - alpha * q
+
+            if harvest is not None:
+                harvest.append(d.clone())
 
             r_norm_final = self._convergence_norm(r)
             if r_norm_final < self.tol:
@@ -1319,17 +1381,249 @@ class PoissonSolver:
             rz_new = (r * z[inner]).to(torch.float64).sum().to(r.dtype)
             beta = rz_new / rz
             d[inner] = z[inner] + beta * d[inner]
+            if recycle is not None and self._deflate_in_loop:
+                self._deflate_proj(d, z, recycle, inner)
             self.BC(d)
             rz = rz_new
 
         x -= x.to(torch.float64).mean().to(x.dtype)
-        if self.verbose:
-            cg_iters = min(k + 1, self.max_cycles)
-            print(
-                f"MGCG residual = {r_norm_final:.2e}/{self._tol_float:.2e} "
-                f"with {cg_iters}/{self.max_cycles} CG iterations "
-                f"({self.precond_vcycles} V-cycle{'s' if self.precond_vcycles > 1 else ''}/iter)"
+        niter = min(k + 1, self.max_cycles)
+        self._last_niter = niter          # exposed for benchmarking/diagnostics
+        return x, r, niter, r_norm_final
+
+    # ------------------------------------------------------------------
+    # Recycled-Krylov (deflated MGCG) helpers
+    # ------------------------------------------------------------------
+    # The recycle space is kept B-ORTHONORMAL (Qᵀ B Q = I) under the current
+    # operator, so the Gram matrix is the identity — no matrix solve, and the
+    # deflation cannot be poisoned by near-dependent stored directions (they
+    # are dropped during re-orthonormalisation).  ``rec["U"]`` holds the
+    # B-orthonormal basis q_j and ``rec["W"]`` the matching w_j = B q_j.
+    def _deflate_init(self, x, r, rec, inner):
+        """Galerkin solve in the recycle space (C = I):
+        x += Σ_j (q_jᵀr) q_j ;  r -= Σ_j (q_jᵀr) w_j   ⟹   Qᵀr = 0 afterwards."""
+        for q, w in zip(rec["U"], rec["W"]):
+            mu = (q[inner] * r).to(torch.float64).sum().to(r.dtype)  # q_jᵀ r
+            x[inner] += mu * q[inner]
+            r -= mu * w
+        self.BC(x)
+
+    def _deflate_proj(self, d, z, rec, inner):
+        """B-orthogonalise the search direction against the recycle space:
+        d -= Σ_j (w_jᵀz) q_j   (so d_new is B-orthogonal to every q_j)."""
+        for q, w in zip(rec["U"], rec["W"]):
+            nu = (w * z[inner]).to(torch.float64).sum().to(d.dtype)  # (B q_j)ᵀ z
+            d[inner] -= nu * q[inner]
+
+    def _prepare_recycle(self, cfaces, shape, inner):
+        """B-orthonormalise the stored directions under the *current* operator.
+
+        The raw directions saved last step were B-orthonormal under last step's
+        operator; here we re-orthonormalise them under the current B via
+        modified Gram-Schmidt in the B-inner-product, dropping any vector whose
+        B-norm collapses (linearly dependent / stale).  The result satisfies
+        Qᵀ B Q = I exactly, so no Gram-matrix inversion is needed and the
+        deflation is numerically robust even when the operator has drifted.
+        Returns ``None`` (→ plain MGCG this step) if nothing survives.
+        """
+        if self.recycle_k <= 0 or self._recycle is None:
+            return None
+        raw = self._recycle["U"]
+        if not raw or tuple(raw[0].shape) != tuple(shape):
+            self._recycle = None
+            return None
+
+        # Relative drop tolerance on the Rayleigh quotient uᵀBu/uᵀu.  Vectors
+        # whose B-norm collapses relative to the strongest survivor are either
+        # linearly dependent or live in the (near-)null space of B — the
+        # all-Neumann constant mode and its numerical neighbours.  Deflating
+        # those is both useless (the gauge handles the constant) and unstable
+        # (catastrophic cancellation in w = B u corrupts orthonormality), so
+        # they are dropped rather than amplified by the 1/β normalisation.
+        droptol = 1e-4
+        Q, W = [], []
+        rq_max = 0.0
+        for u0 in raw:
+            u = u0.clone()
+            u[inner] -= u[inner].to(torch.float64).mean().to(u.dtype)  # kill constant
+            unorm2 = (u[inner] * u[inner]).to(torch.float64).sum()
+            if unorm2 <= 0:
+                continue
+            w = self._apply_op_spd(u, cfaces)        # w = B u (interior)
+            # MGS in the B-inner-product against the accepted basis.
+            for q, wq in zip(Q, W):
+                proj = (q[inner] * w).to(torch.float64).sum()   # q_jᵀ B u
+                u[inner] -= proj.to(u.dtype) * q[inner]
+                w -= proj.to(w.dtype) * wq                       # keep w = B u
+            bnorm2 = (u[inner] * w).to(torch.float64).sum()      # uᵀ B u
+            rq = (bnorm2 / unorm2).item()                        # Rayleigh quotient
+            rq_max = max(rq_max, rq)
+            if bnorm2 <= 0 or rq <= droptol * rq_max:
+                continue                                          # drop near-null/dependent
+            beta = bnorm2.sqrt()
+            Q.append(u / beta.to(u.dtype))
+            W.append(w / beta.to(w.dtype))
+
+        if not Q:
+            self._recycle = None
+            return None
+        return {"U": Q, "W": W}
+
+    def _update_recycle(self, harvest, inner):
+        """Refresh the stored directions with this solve's search directions.
+
+        Pools the previous (orthonormal) basis with the newly harvested,
+        L2-normalised directions and subsamples evenly across the pool to keep
+        ``recycle_k`` vectors.  Even sampling (rather than newest-k) favours
+        spectral diversity, which matters because consecutive late CG
+        directions are nearly dependent.  Conditioning is guaranteed by the
+        B-orthonormalisation in ``_prepare_recycle`` regardless of this choice.
+        """
+        if not harvest:
+            return
+        pool = [] if self._recycle is None else list(self._recycle["U"])
+        for d in harvest:
+            n = torch.linalg.vector_norm(d[inner])
+            if n > 0:
+                pool.append(d / n)
+        if len(pool) > self.recycle_k:
+            idx = torch.linspace(0, len(pool) - 1, self.recycle_k)
+            keep = sorted(set(int(round(v)) for v in idx.tolist()))
+            pool = [pool[i] for i in keep]
+        self._recycle = {"U": pool}
+
+    def _finalize_recycle(self, niter, deflated, harvest_list, inner):
+        """Apply the recycle-space guards after a solve (shared py/native).
+
+        Stall-safety: a *deflated* solve that hit the iteration cap means the
+        space is actively hurting (poisoned CG recurrence) — discard it AND back
+        off for a few steps so we don't immediately rebuild from the next plain
+        solve and re-stall (the IQN-ILS reuse-poisoning lesson, [[project_iqn_reuse_poisoning]]).
+        Harvest guard: only (re)build from genuinely iteration-bound solves
+        (niter >= recycle_k); fast solves' directions don't approximate the slow
+        modes, so deflating them next step would only misalign CG.
+        """
+        if self.recycle_k <= 0:
+            return
+        if deflated and niter >= self.max_cycles:
+            self._recycle = None
+            self._recycle_cooldown = 5
+        elif self._recycle_cooldown > 0:
+            self._recycle_cooldown -= 1
+            self._recycle = None
+        elif niter >= self.recycle_k:
+            self._update_recycle(harvest_list, inner)
+        else:
+            self._recycle = None
+
+    def _solve_rmgcg_native(self, f, p0, face_arrs, cfaces, ndim, inner):
+        """Dispatch recycled MGCG to the native CUDA driver.
+
+        The persistent recycle bookkeeping (``_prepare_recycle`` B-ortho­
+        normalisation, ``_finalize_recycle`` guards) stays in Python; only the
+        deflated CG loop runs natively.  The driver harvests the last
+        ``recycle_k`` search directions into ``D`` for the next refresh.
+        """
+        p = p0.clone().detach()
+        if not p.is_contiguous():
+            p = p.contiguous()
+        self.BC(p)
+        f_c = f.contiguous()
+
+        recycle = self._prepare_recycle(cfaces, p.shape, inner)
+        if recycle is not None and recycle["U"]:
+            U = torch.stack(recycle["U"]).contiguous()
+            W = torch.stack(recycle["W"]).contiguous()
+        else:
+            U = p.new_empty((0, *p.shape))
+            W = f_c.new_empty((0, *f_c.shape))
+        hk = self.recycle_k
+
+        if ndim == 2:
+            ch, cv = face_arrs
+            r, D, niter = self._K.poisson_solve_rmgcg_2d(
+                p, f_c, ch.contiguous(), cv.contiguous(), U, W, hk,
+                h2=self.h2, jcap_tol=self.jcap_tol, w=self.w,
+                nsmoothing=self.nsmoothing, max_cycles=self.max_cycles,
+                precond_vcycles=self.precond_vcycles,
+                tol=self._tol_float, smoother=self.smoother,
             )
+        else:
+            ch, cv, cw = face_arrs
+            r, D, niter = self._K.poisson_solve_rmgcg_3d(
+                p, f_c, ch.contiguous(), cv.contiguous(), cw.contiguous(),
+                U, W, hk,
+                h2=self.h2, jcap_tol=self.jcap_tol, w=self.w,
+                nsmoothing=self.nsmoothing, max_cycles=self.max_cycles,
+                precond_vcycles=self.precond_vcycles,
+                tol=self._tol_float, smoother=self.smoother,
+            )
+
+        deflated = U.shape[0] > 0
+        harvest_list = list(D.unbind(0)) if hk > 0 else None
+        self._last_niter = niter
+        self._finalize_recycle(niter, deflated, harvest_list, inner)
+
+        if self.verbose:
+            n_rec = 0 if self._recycle is None else len(self._recycle["U"])
+            print(
+                f"RMGCG[native] residual = {r.abs().max().item():.2e}"
+                f"/{self._tol_float:.2e} with {niter}/{self.max_cycles} CG "
+                f"iterations (deflated {U.shape[0]} → recycle dim {n_rec})"
+            )
+        return p, r
+
+    def solve_rmgcg(self, f, p0, **kwargs):
+        """Recycled MGCG: ``solve_mgcg`` plus cross-timestep Krylov recycling.
+
+        Identical interface and (with ``recycle_k == 0``) identical behaviour
+        to ``solve_mgcg``.  With ``recycle_k > 0`` it deflates the subspace of
+        slow-converging modes carried over from previous solves, cutting CG
+        iterations for time-stepping problems whose operator changes little
+        per step (e.g. slow swimmers).  Runs the native CUDA driver when
+        ``use_kernels`` is set, else the PyTorch CG core; both share the recycle
+        bookkeeping and guards below.
+        """
+        pre_scaled = kwargs.pop('pre_scaled', False)
+        ndim = f.ndim
+        face_arrs, _ = self._face_arrs_from_kwargs(kwargs, ndim)
+        if face_arrs is None:
+            raise ValueError(
+                "solve_rmgcg: ch/cv (2-D) or ch/cv/cw (3-D) keyword "
+                "arguments are required."
+            )
+
+        cfaces = self._extract_cfaces(face_arrs, ndim)
+        inner  = _inner(ndim)
+
+        if self.use_kernels:
+            return self._solve_rmgcg_native(f, p0, face_arrs, cfaces, ndim, inner)
+
+        b = -f if pre_scaled else -(self.h2 * f)
+        x = p0.clone().detach()
+        self.BC(x)
+
+        recycle = self._prepare_recycle(cfaces, x.shape, inner)
+        harvest = [] if self.recycle_k > 0 else None
+
+        x, r, niter, r_norm_final = self._cg_core(
+            b, x, cfaces, face_arrs, recycle=recycle, harvest=harvest,
+        )
+
+        self._finalize_recycle(niter, recycle is not None, harvest, inner)
+
+        if self.verbose:
+            n_def = 0 if recycle is None else len(recycle["U"])
+            n_rec = 0 if self._recycle is None else len(self._recycle["U"])
+            if niter == 0:
+                print(f"RMGCG converged at initial guess: "
+                      f"residual = {r_norm_final:.2e} (deflated {n_def})")
+            else:
+                print(
+                    f"RMGCG residual = {r_norm_final:.2e}/{self._tol_float:.2e} "
+                    f"with {niter}/{self.max_cycles} CG iterations "
+                    f"(deflated {n_def} → recycle dim {n_rec})"
+                )
         return x, r
 
 

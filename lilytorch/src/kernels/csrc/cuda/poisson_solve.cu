@@ -29,6 +29,8 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <vector>
+#include <tuple>
+#include <algorithm>
 
 namespace lilytorch_kernels {
 
@@ -520,12 +522,257 @@ static at::Tensor poisson_solve_mgcg_3d_cuda(
     return r;
 }
 
+// =====================================================================
+// RMGCG — recycled (deflated) MGCG.  Identical to the MGCG drivers above
+// plus:
+//   * deflation: a B-orthonormal recycle basis U (kdef, full grid) with
+//     W = B·U (kdef, interior) is projected out of the initial residual
+//     (Galerkin) and out of every search direction (B-orthogonalisation).
+//     kdef == 0 → behaves exactly like plain MGCG.
+//   * harvesting: the last ``harvest_k`` search directions are written
+//     into D (harvest_k, full grid) as a ring buffer, for the Python
+//     driver to refresh the recycle space.
+// Returns (r, D, niter).  All deflation math is batched ATen (no per-vector
+// host syncs); only alpha/beta/residual-norm sync, exactly as MGCG.
+// =====================================================================
+static std::tuple<at::Tensor, at::Tensor, int64_t> poisson_solve_rmgcg_2d_cuda(
+        at::Tensor p, at::Tensor f,
+        at::Tensor ch, at::Tensor cv,
+        at::Tensor U, at::Tensor W,
+        int64_t harvest_k,
+        double h2, double jcap_tol, double w,
+        int64_t nsmoothing, int64_t max_cycles, int64_t precond_vcycles,
+        double tol, int64_t smoother_id)
+{
+    TORCH_CHECK(p.is_contiguous() && f.is_contiguous(),
+                "poisson_solve_rmgcg_2d: p and f must be contiguous");
+    TORCH_CHECK(p.device().is_cuda(), "poisson_solve_rmgcg_2d: tensors must be on CUDA");
+    TORCH_CHECK(p.dim() == 2 && f.dim() == 2, "poisson_solve_rmgcg_2d: p and f must be 2-D");
+
+    auto opts = p.options();
+    const int Nx = (int)f.size(0);
+    const int Ny = (int)f.size(1);
+    const int64_t kdef = U.size(0);
+    using namespace torch::indexing;
+
+    auto cp0 = ch.slice(0, 1, Nx + 1).contiguous();
+    auto cm0 = ch.slice(0, 0, Nx    ).contiguous();
+    auto cp1 = cv.slice(1, 1, Ny + 1).contiguous();
+    auto cm1 = cv.slice(1, 0, Ny    ).contiguous();
+
+    auto b = f.mul(-h2);
+    apply_neumann_bc(p);
+
+    auto f_zero = at::zeros({Nx, Ny}, opts);
+    auto Bx = at::empty({Nx, Ny}, opts);
+    mg_residual_2d_cuda(p, f_zero, cp0, cm0, cp1, cm1, jcap_tol, Bx);
+    auto r = b.sub(Bx);
+
+    auto x_in = p.index({Slice(1, -1), Slice(1, -1)});
+    auto U_in = (kdef > 0) ? U.index({Slice(), Slice(1, -1), Slice(1, -1)}) : U;
+
+    // ---- deflation init:  x += U Uᵀr ;  r -= W Uᵀr   (C = I) ----
+    if (kdef > 0) {
+        auto c = (U_in * r.unsqueeze(0)).to(at::kDouble).sum({1, 2})
+                     .to(p.scalar_type());               // (kdef,)
+        x_in.add_((c.view({kdef, 1, 1}) * U_in).sum(0));
+        apply_neumann_bc(p);
+        r.sub_((c.view({kdef, 1, 1}) * W).sum(0));
+    }
+
+    auto D = at::zeros({std::max<int64_t>(harvest_k, 1), Nx + 2, Ny + 2}, opts);
+    int64_t niter = 0;
+
+    double r_norm = r.abs().max().item<double>();
+    if (r_norm < tol) {
+        auto pmean = p.to(at::kDouble).mean();
+        p.sub_(pmean.to(p.scalar_type()));
+        return std::make_tuple(r, D, niter);
+    }
+
+    auto z     = at::zeros({Nx + 2, Ny + 2}, opts);
+    auto r_buf = at::empty({Nx, Ny}, opts);
+    auto neg_r = r.neg();
+    for (int64_t i = 0; i < precond_vcycles; ++i)
+        vcycle_2d(z, neg_r, ch, cv, r_buf, jcap_tol, w, nsmoothing, smoother_id);
+
+    auto d    = z.clone();
+    auto d_in = d.index({Slice(1, -1), Slice(1, -1)});
+    auto z_in = z.index({Slice(1, -1), Slice(1, -1)});
+
+    // proj d B-orthogonal to U:  d -= U (Wᵀz)
+    if (kdef > 0) {
+        auto nu = (W * z_in.unsqueeze(0)).to(at::kDouble).sum({1, 2})
+                      .to(p.scalar_type());
+        d_in.sub_((nu.view({kdef, 1, 1}) * U_in).sum(0));
+    }
+    apply_neumann_bc(d);
+
+    auto rz = (r * z_in).to(at::kDouble).sum();
+    auto q  = at::empty({Nx, Ny}, opts);
+
+    for (int64_t k = 0; k < max_cycles; ++k) {
+        mg_residual_2d_cuda(d, f_zero, cp0, cm0, cp1, cm1, jcap_tol, q);
+        auto dq = (d_in * q).to(at::kDouble).sum();
+        auto alpha = (rz / dq).to(p.scalar_type());
+
+        x_in.add_(d_in, alpha.item());
+        apply_neumann_bc(p);
+        r.sub_(q, alpha.item());
+
+        if (harvest_k > 0) D.index({k % harvest_k}).copy_(d);
+        niter = k + 1;
+
+        double rn = r.abs().max().item<double>();
+        if (rn < tol) break;
+
+        z.zero_();
+        r.neg_();
+        for (int64_t i = 0; i < precond_vcycles; ++i)
+            vcycle_2d(z, r, ch, cv, r_buf, jcap_tol, w, nsmoothing, smoother_id);
+        r.neg_();
+
+        auto rz_new = (r * z_in).to(at::kDouble).sum();
+        auto beta = (rz_new / rz).to(p.scalar_type());
+        d_in.mul_(beta.item()).add_(z_in);
+        if (kdef > 0) {
+            auto nu = (W * z_in.unsqueeze(0)).to(at::kDouble).sum({1, 2})
+                          .to(p.scalar_type());
+            d_in.sub_((nu.view({kdef, 1, 1}) * U_in).sum(0));
+        }
+        apply_neumann_bc(d);
+        rz = rz_new;
+    }
+
+    auto pmean = p.to(at::kDouble).mean();
+    p.sub_(pmean.to(p.scalar_type()));
+    return std::make_tuple(r, D, niter);
+}
+
+static std::tuple<at::Tensor, at::Tensor, int64_t> poisson_solve_rmgcg_3d_cuda(
+        at::Tensor p, at::Tensor f,
+        at::Tensor ch, at::Tensor cv, at::Tensor cw,
+        at::Tensor U, at::Tensor W,
+        int64_t harvest_k,
+        double h2, double jcap_tol, double w,
+        int64_t nsmoothing, int64_t max_cycles, int64_t precond_vcycles,
+        double tol, int64_t smoother_id)
+{
+    TORCH_CHECK(p.is_contiguous() && f.is_contiguous(),
+                "poisson_solve_rmgcg_3d: p and f must be contiguous");
+    TORCH_CHECK(p.device().is_cuda(), "poisson_solve_rmgcg_3d: tensors must be on CUDA");
+    TORCH_CHECK(p.dim() == 3 && f.dim() == 3, "poisson_solve_rmgcg_3d: p and f must be 3-D");
+
+    auto opts = p.options();
+    const int Nx = (int)f.size(0);
+    const int Ny = (int)f.size(1);
+    const int Nz = (int)f.size(2);
+    const int64_t kdef = U.size(0);
+    using namespace torch::indexing;
+
+    auto cp0 = ch.slice(0, 1, Nx + 1).contiguous();
+    auto cm0 = ch.slice(0, 0, Nx    ).contiguous();
+    auto cp1 = cv.slice(1, 1, Ny + 1).contiguous();
+    auto cm1 = cv.slice(1, 0, Ny    ).contiguous();
+    auto cp2 = cw.slice(2, 1, Nz + 1).contiguous();
+    auto cm2 = cw.slice(2, 0, Nz    ).contiguous();
+
+    auto b = f.mul(-h2);
+    apply_neumann_bc(p);
+
+    auto f_zero = at::zeros({Nx, Ny, Nz}, opts);
+    auto Bx = at::empty({Nx, Ny, Nz}, opts);
+    mg_residual_3d_cuda(p, f_zero, cp0, cm0, cp1, cm1, cp2, cm2, jcap_tol, Bx);
+    auto r = b.sub(Bx);
+
+    auto x_in = p.index({Slice(1, -1), Slice(1, -1), Slice(1, -1)});
+    auto U_in = (kdef > 0)
+        ? U.index({Slice(), Slice(1, -1), Slice(1, -1), Slice(1, -1)}) : U;
+
+    if (kdef > 0) {
+        auto c = (U_in * r.unsqueeze(0)).to(at::kDouble).sum({1, 2, 3})
+                     .to(p.scalar_type());
+        x_in.add_((c.view({kdef, 1, 1, 1}) * U_in).sum(0));
+        apply_neumann_bc(p);
+        r.sub_((c.view({kdef, 1, 1, 1}) * W).sum(0));
+    }
+
+    auto D = at::zeros({std::max<int64_t>(harvest_k, 1), Nx + 2, Ny + 2, Nz + 2}, opts);
+    int64_t niter = 0;
+
+    double r_norm = r.abs().max().item<double>();
+    if (r_norm < tol) {
+        auto pmean = p.to(at::kDouble).mean();
+        p.sub_(pmean.to(p.scalar_type()));
+        return std::make_tuple(r, D, niter);
+    }
+
+    auto z     = at::zeros({Nx + 2, Ny + 2, Nz + 2}, opts);
+    auto r_buf = at::empty({Nx, Ny, Nz}, opts);
+    auto neg_r = r.neg();
+    for (int64_t i = 0; i < precond_vcycles; ++i)
+        vcycle_3d(z, neg_r, ch, cv, cw, r_buf, jcap_tol, w, nsmoothing, smoother_id);
+
+    auto d    = z.clone();
+    auto d_in = d.index({Slice(1, -1), Slice(1, -1), Slice(1, -1)});
+    auto z_in = z.index({Slice(1, -1), Slice(1, -1), Slice(1, -1)});
+
+    if (kdef > 0) {
+        auto nu = (W * z_in.unsqueeze(0)).to(at::kDouble).sum({1, 2, 3})
+                      .to(p.scalar_type());
+        d_in.sub_((nu.view({kdef, 1, 1, 1}) * U_in).sum(0));
+    }
+    apply_neumann_bc(d);
+
+    auto rz = (r * z_in).to(at::kDouble).sum();
+    auto q  = at::empty({Nx, Ny, Nz}, opts);
+
+    for (int64_t k = 0; k < max_cycles; ++k) {
+        mg_residual_3d_cuda(d, f_zero, cp0, cm0, cp1, cm1, cp2, cm2, jcap_tol, q);
+        auto dq = (d_in * q).to(at::kDouble).sum();
+        auto alpha = (rz / dq).to(p.scalar_type());
+
+        x_in.add_(d_in, alpha.item());
+        apply_neumann_bc(p);
+        r.sub_(q, alpha.item());
+
+        if (harvest_k > 0) D.index({k % harvest_k}).copy_(d);
+        niter = k + 1;
+
+        double rn = r.abs().max().item<double>();
+        if (rn < tol) break;
+
+        z.zero_();
+        r.neg_();
+        for (int64_t i = 0; i < precond_vcycles; ++i)
+            vcycle_3d(z, r, ch, cv, cw, r_buf, jcap_tol, w, nsmoothing, smoother_id);
+        r.neg_();
+
+        auto rz_new = (r * z_in).to(at::kDouble).sum();
+        auto beta = (rz_new / rz).to(p.scalar_type());
+        d_in.mul_(beta.item()).add_(z_in);
+        if (kdef > 0) {
+            auto nu = (W * z_in.unsqueeze(0)).to(at::kDouble).sum({1, 2, 3})
+                          .to(p.scalar_type());
+            d_in.sub_((nu.view({kdef, 1, 1, 1}) * U_in).sum(0));
+        }
+        apply_neumann_bc(d);
+        rz = rz_new;
+    }
+
+    auto pmean = p.to(at::kDouble).mean();
+    p.sub_(pmean.to(p.scalar_type()));
+    return std::make_tuple(r, D, niter);
+}
+
 // ---- CUDA dispatch registration -------------------------------------
 TORCH_LIBRARY_IMPL(lilytorch_kernels, CUDA, m) {
     m.impl("poisson_solve_multigrid_2d", &poisson_solve_multigrid_2d_cuda);
     m.impl("poisson_solve_multigrid_3d", &poisson_solve_multigrid_3d_cuda);
     m.impl("poisson_solve_mgcg_2d", &poisson_solve_mgcg_2d_cuda);
     m.impl("poisson_solve_mgcg_3d", &poisson_solve_mgcg_3d_cuda);
+    m.impl("poisson_solve_rmgcg_2d", &poisson_solve_rmgcg_2d_cuda);
+    m.impl("poisson_solve_rmgcg_3d", &poisson_solve_rmgcg_3d_cuda);
 }
 
 }  // namespace lilytorch_kernels

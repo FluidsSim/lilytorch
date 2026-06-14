@@ -490,8 +490,8 @@ class FluidSolver(PlottingMixin):
 
         # =============  poisson solver =============
         self.poisson_method = solver.get("poisson_method", "multigrid")
-        assert self.poisson_method in ("multigrid", "mgcg", "fft"), \
-            f"Unknown poisson_method '{self.poisson_method}'. Choose 'multigrid', 'mgcg', or 'fft'."
+        assert self.poisson_method in ("multigrid", "mgcg", "rmgcg", "fft"), \
+            f"Unknown poisson_method '{self.poisson_method}'. Choose 'multigrid', 'mgcg', 'rmgcg', or 'fft'."
         print(f"Poisson solver: {self.poisson_method}")
 
         self.poisson_solver  = PoissonSolver(
@@ -507,6 +507,7 @@ class FluidSolver(PlottingMixin):
             precond_vcycles = solver.get("poisson_precond_vcycles", 1),
             smoother        = solver.get("poisson_smoother", "rbgs"),
             use_kernels     = self._use_kernels,
+            recycle_k       = solver.get("poisson_recycle_k", 0),
         )
         # Degenerate-cell freeze threshold. Cells with |diagonal| < jcap_tol are
         # frozen (iD=0, residual zeroed) — WaterLily's iszero(D) guard. The
@@ -1003,10 +1004,11 @@ class FluidSolver(PlottingMixin):
             if cv is None:
                 cv = coeff * self.mu0_all_v
 
-            # Select solve method: MGCG or standalone multigrid
-            _poisson_solve = (self.poisson_solver.solve_mgcg
-                              if self.poisson_method == "mgcg"
-                              else self.poisson_solver.solve_multigrid)
+            # Select solve method: recycled MGCG, MGCG, or standalone multigrid
+            _poisson_solve = {
+                "rmgcg": self.poisson_solver.solve_rmgcg,
+                "mgcg":  self.poisson_solver.solve_mgcg,
+            }.get(self.poisson_method, self.poisson_solver.solve_multigrid)
 
             # Variable-density custom coefficients are coupled to a moving
             # immersed geometry; reusing the previous pressure field can carry

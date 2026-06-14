@@ -423,6 +423,26 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " int nsmoothing, int max_cycles, int precond_vcycles,"
         " float tol, int smoother_id"
         ") -> Tensor");
+
+    // RMGCG (recycled / deflated MGCG).  U,W carry the B-orthonormal recycle
+    // basis (kdef may be 0 → plain MGCG); returns (residual, harvested last-k
+    // search directions D, iterations performed).
+    m.def(
+        "poisson_solve_rmgcg_2d("
+        "Tensor(a!) p, Tensor f, Tensor ch, Tensor cv,"
+        " Tensor U, Tensor W, int harvest_k,"
+        " float h2, float jcap_tol, float w,"
+        " int nsmoothing, int max_cycles, int precond_vcycles,"
+        " float tol, int smoother_id"
+        ") -> (Tensor, Tensor, int)");
+    m.def(
+        "poisson_solve_rmgcg_3d("
+        "Tensor(a!) p, Tensor f, Tensor ch, Tensor cv, Tensor cw,"
+        " Tensor U, Tensor W, int harvest_k,"
+        " float h2, float jcap_tol, float w,"
+        " int nsmoothing, int max_cycles, int precond_vcycles,"
+        " float tol, int smoother_id"
+        ") -> (Tensor, Tensor, int)");
 }
 
 }  // namespace lilytorch_kernels

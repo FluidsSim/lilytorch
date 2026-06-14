@@ -6,17 +6,17 @@
       <link name="water">
         <pose>0 0 0 0 0 0</pose>
         <visual name="water_visual">
-          <pose>10.5 0.0 -1.2000000000000002 0 0 0</pose>
+          <pose>0.33 0.0 -0.065 0 0 0</pose>
           <geometry>
             <box>
-              <size>27.0 6.4 2.4</size>
+              <size>0.9600000000000001 0.48 0.16999999999999998</size>
             </box>
           </geometry>
           <material>
-            <ambient>0.25 0.45 0.75 0.1000</ambient>
-            <diffuse>0.30 0.50 0.80 0.1000</diffuse>
-            <specular>0.60 0.60 0.65 0.1000</specular>
-            <emissive>0.05 0.08 0.15 0.1000</emissive>
+            <ambient>0.25 0.45 0.75 0.0000</ambient>
+            <diffuse>0.30 0.50 0.80 0.0000</diffuse>
+            <specular>0.60 0.60 0.65 0.0000</specular>
+            <emissive>0.05 0.08 0.15 0.0000</emissive>
           </material>
         </visual>
       </link>

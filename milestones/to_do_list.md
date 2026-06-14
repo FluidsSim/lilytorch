@@ -282,6 +282,71 @@ These run on EVERY step; none is measured for wall-clock cost yet. Time them
 
 ---
 
+# ARCHITECTURE / PORTABILITY (strategy 2026-06-14)
+
+## Part 1 — Drop FARMS; support pluggable rigid-body engines (Isaac Sim, MuJoCo)
+Goal: get rid of FARMS entirely and make the rigid-body engine swappable
+(MuJoCo today, Isaac Sim / Isaac Lab next).
+
+Coupling map (investigated): **`BDIMhandler` already does NOT import FARMS** — it
+speaks MuJoCo directly (`data.xpos/xquat/xipos`, `model.body_mass`, `geom_*`,
+`xfrc_applied`/`mj_applyFT`). FARMS only owns the *outer* layer:
+  - `integration/extensions.py` — `FluidExtension(TaskExtension)` hooks
+    (`initialize_episode`, `before_step`), experiment options, HDF5 IO.
+  - `farms_examples/base_sim_config.py` + `gen_configs_*` — animat model + scene gen.
+  - swimmer controllers (CPG networks, PD controllers).
+  - the viewers (all `import farms` for the MuJoCo viewer).
+
+- [ ] **Define a `RigidBodyBackend` adapter** = the only surface BDIMhandler needs:
+      `get_body_poses() -> pos,quat,com`, `get_body_velocities()`,
+      `get_body_mass_inertia()`, `apply_force_torque(body,F,T)`, `step(dt)`, `gravity`.
+      Refactor BDIMhandler's ~10 MuJoCo-specific access sites behind it.
+      **This single refactor both decouples FARMS and enables Isaac.** Do it FIRST.
+- [ ] **MuJoCo backend** implementing the adapter from raw `mujoco.MjModel/MjData`
+      (or dm_control `Physics`) — no FARMS dependency.
+- [ ] **Standalone driver loop** (~100 lines): load model, step physics, call
+      `BDIMhandler.step()` each tick (replaces the `before_step` hook).
+- [ ] Replace controllers/viewers (FARMS-based) with engine-native equivalents
+      (`mujoco.viewer`; note `xfrc_applied` viewer pitfall — use `qfrc_applied`).
+- [ ] **Isaac Lab backend** — exposes body state as **torch GPU tensors**, so the
+      coupling becomes GPU-resident (no numpy/CPU round-trip the MuJoCo path pays).
+      Strong fit; the adapter is the enabler. (MuJoCo-Warp/MJX is a GPU alternative.)
+Feasibility: MODERATE — numerics are already FARMS-free; the work is outer-loop
+(driver/config/controllers/viewers), not the solver.
+
+## Part 2 — Single-source CPU+GPU kernels (kill the .cpp/.cu double-write)
+Pain: kernels are hand-written TWICE (CPU `.cpp` + CUDA `.cu`) → more code, more bugs.
+Double-written today: **streaming_sdf (2d/3d), lagrangian_forces (2d/3d), rbgs**.
+(Poisson driver/transfer/advection are CUDA-only + pure-PyTorch CPU fallback.)
+
+Strategy (two kernel classes):
+- [ ] **Fusible stencil/pointwise** (rbgs sweep, residual, restriction, advection
+      flux) → push through **`torch.compile`/Inductor**: write once in PyTorch,
+      auto-generates C++ (CPU) + Triton (GPU, incl. ROCm). No hand kernel.
+- [ ] **Irregular scatter/gather** (streaming_sdf, lagrangian_forces) → **Warp**
+      (chosen): single Python `@wp.kernel` → CPU + CUDA, zero-copy torch interop.
+      Driver-style kernels (poisson_solve mgcg/multigrid loops) stay `.cu` — Warp is
+      kernel-level, no C++ driver-with-control-flow equivalent (use CUDA-graph capture
+      if unified). AMD: Warp's HIP backend is weak — if AMD becomes hard-required,
+      Taichi (Vulkan) or SYCL/Kokkos (HIP) for those kernels instead.
+
+**Warp RBGS POC done 2026-06-14** (`/tmp/poc_warp_rbgs.py`, pure test):
+  - Interop: zero-copy `wp.from_torch` (warp wrote the torch tensor, same ptr); a
+    native `torch.ops` CUDA kernel consumed warp output on one stream; same
+    `@wp.kernel` ran on CPU and CUDA. Correctness within 0.9% of native.
+  - Perf (ms/2-sweep): 256² native 0.010 / warp 0.094 / warp+graph 0.019;
+    2048² native 0.179 / warp 0.664 / warp+graph 0.650; pytorch 5–35× slower than warp.
+  - Findings: eager Warp is launch-bound (6 launches vs native's 1 fused) → **CUDA
+    graph capture** removes most of it (~2× native at typical sizes). Residual gap
+    (2–3.6×) at large grids = native is hand-TILED (shared mem, all sweeps fused, 1
+    global pass) vs naive warp's 6 global passes. **To match native, write a tiled
+    warp kernel (`wp.tile`).** Net: Warp gives single-source + crushes the PyTorch
+    path; matching a hand-tuned kernel needs tiling work.
+- [ ] Port streaming_sdf + lagrangian_forces to Warp (tiled where bandwidth-bound);
+      keep self-tests as oracles; retire the `.cpp` twins.
+
+---
+
 # LONG TERM
 
 - **LES for high-Reynolds** — extend the existing Smagorinsky SGS model into a full LES

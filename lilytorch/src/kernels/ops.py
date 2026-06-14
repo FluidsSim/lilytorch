@@ -31,6 +31,8 @@ __all__ = [
     "poisson_solve_multigrid_3d",
     "poisson_solve_mgcg_2d",
     "poisson_solve_mgcg_3d",
+    "poisson_solve_rmgcg_2d",
+    "poisson_solve_rmgcg_3d",
 ]
 _METHOD_MAP = {"linear": 0, "quadratic": 1}
 
@@ -905,3 +907,59 @@ def _poisson_solve_mgcg_3d_abstract(
         p, f, ch, cv, cw, h2, jcap_tol, w,
         nsmoothing, max_cycles, precond_vcycles, tol, smoother_id):
     return torch.empty_like(f)
+
+
+def poisson_solve_rmgcg_2d(
+        p: Tensor, f: Tensor, ch: Tensor, cv: Tensor,
+        U: Tensor, W: Tensor, harvest_k: int,
+        h2: float, jcap_tol: float, w: float,
+        nsmoothing: int, max_cycles: int, precond_vcycles: int,
+        tol: float, smoother: str = "rbgs"):
+    """Native recycled-MGCG driver (2-D).
+
+    ``U`` (kdef, Nx+2, Ny+2) is the B-orthonormal recycle basis and ``W``
+    (kdef, Nx, Ny) = B·U; pass empty (kdef=0) tensors for a plain solve.
+    ``p`` is mutated in place.  Returns ``(r, D, niter)`` where ``D`` holds the
+    last ``harvest_k`` search directions (full grid) for refreshing the space.
+    """
+    sid = _SMOOTHER_MAP[smoother]
+    return torch.ops.lilytorch_kernels.poisson_solve_rmgcg_2d.default(
+        p, f, ch, cv, U, W, int(harvest_k),
+        float(h2), float(jcap_tol), float(w),
+        int(nsmoothing), int(max_cycles), int(precond_vcycles),
+        float(tol), int(sid),
+    )
+
+
+def poisson_solve_rmgcg_3d(
+        p: Tensor, f: Tensor, ch: Tensor, cv: Tensor, cw: Tensor,
+        U: Tensor, W: Tensor, harvest_k: int,
+        h2: float, jcap_tol: float, w: float,
+        nsmoothing: int, max_cycles: int, precond_vcycles: int,
+        tol: float, smoother: str = "rbgs"):
+    """Native recycled-MGCG driver (3-D).  See :func:`poisson_solve_rmgcg_2d`."""
+    sid = _SMOOTHER_MAP[smoother]
+    return torch.ops.lilytorch_kernels.poisson_solve_rmgcg_3d.default(
+        p, f, ch, cv, cw, U, W, int(harvest_k),
+        float(h2), float(jcap_tol), float(w),
+        int(nsmoothing), int(max_cycles), int(precond_vcycles),
+        float(tol), int(sid),
+    )
+
+
+@torch.library.register_fake("lilytorch_kernels::poisson_solve_rmgcg_2d")
+def _poisson_solve_rmgcg_2d_abstract(
+        p, f, ch, cv, U, W, harvest_k, h2, jcap_tol, w,
+        nsmoothing, max_cycles, precond_vcycles, tol, smoother_id):
+    hk = max(int(harvest_k), 1)
+    D = f.new_empty((hk, f.shape[0] + 2, f.shape[1] + 2))
+    return torch.empty_like(f), D, 0
+
+
+@torch.library.register_fake("lilytorch_kernels::poisson_solve_rmgcg_3d")
+def _poisson_solve_rmgcg_3d_abstract(
+        p, f, ch, cv, cw, U, W, harvest_k, h2, jcap_tol, w,
+        nsmoothing, max_cycles, precond_vcycles, tol, smoother_id):
+    hk = max(int(harvest_k), 1)
+    D = f.new_empty((hk, f.shape[0] + 2, f.shape[1] + 2, f.shape[2] + 2))
+    return torch.empty_like(f), D, 0
