@@ -406,9 +406,13 @@ static at::Tensor poisson_solve_mgcg_2d_cuda(
         auto dq = (d_in * q).to(at::kDouble).sum();
         auto alpha = (rz / dq).to(p.scalar_type());
 
-        x_in.add_(d_in, alpha.item());            // host scalar avoids extra kernels
+        // Pipelined CG: keep alpha/beta as 0-dim device scalars and fuse the
+        // axpy updates with addcmul_/mul_ (broadcast, no extra temps).  This
+        // removes the per-iter alpha/beta D→H syncs; the only host sync left
+        // is the residual-norm convergence check below (~1 sync/iter).
+        x_in.addcmul_(d_in, alpha);            // x += alpha·d   (no D→H copy)
         apply_neumann_bc(p);
-        r.sub_(q, alpha.item());
+        r.addcmul_(q, alpha, -1.0);            // r -= alpha·q   (no D→H copy)
 
         double rn = r.abs().max().item<double>();
         if (rn < tol) break;
@@ -422,7 +426,7 @@ static at::Tensor poisson_solve_mgcg_2d_cuda(
         auto rz_new = (r * z_in).to(at::kDouble).sum();
         auto beta = (rz_new / rz).to(p.scalar_type());
         // d[in] = z[in] + beta * d[in]
-        d_in.mul_(beta.item()).add_(z_in);
+        d_in.mul_(beta).add_(z_in);
         apply_neumann_bc(d);
         rz = rz_new;
     }
@@ -497,9 +501,9 @@ static at::Tensor poisson_solve_mgcg_3d_cuda(
         auto dq = (d_in * q).to(at::kDouble).sum();
         auto alpha = (rz / dq).to(p.scalar_type());
 
-        x_in.add_(d_in, alpha.item());
+        x_in.addcmul_(d_in, alpha);
         apply_neumann_bc(p);
-        r.sub_(q, alpha.item());
+        r.addcmul_(q, alpha, -1.0);
 
         double rn = r.abs().max().item<double>();
         if (rn < tol) break;
@@ -512,7 +516,7 @@ static at::Tensor poisson_solve_mgcg_3d_cuda(
 
         auto rz_new = (r * z_in).to(at::kDouble).sum();
         auto beta = (rz_new / rz).to(p.scalar_type());
-        d_in.mul_(beta.item()).add_(z_in);
+        d_in.mul_(beta).add_(z_in);
         apply_neumann_bc(d);
         rz = rz_new;
     }
@@ -533,7 +537,8 @@ static at::Tensor poisson_solve_mgcg_3d_cuda(
 //     into D (harvest_k, full grid) as a ring buffer, for the Python
 //     driver to refresh the recycle space.
 // Returns (r, D, niter).  All deflation math is batched ATen (no per-vector
-// host syncs); only alpha/beta/residual-norm sync, exactly as MGCG.
+// host syncs); alpha/beta stay on-device (fused addcmul_/mul_ updates), so the
+// only host sync per iteration is the residual-norm check — exactly as MGCG.
 // =====================================================================
 static std::tuple<at::Tensor, at::Tensor, int64_t> poisson_solve_rmgcg_2d_cuda(
         at::Tensor p, at::Tensor f,
@@ -616,9 +621,9 @@ static std::tuple<at::Tensor, at::Tensor, int64_t> poisson_solve_rmgcg_2d_cuda(
         auto dq = (d_in * q).to(at::kDouble).sum();
         auto alpha = (rz / dq).to(p.scalar_type());
 
-        x_in.add_(d_in, alpha.item());
+        x_in.addcmul_(d_in, alpha);
         apply_neumann_bc(p);
-        r.sub_(q, alpha.item());
+        r.addcmul_(q, alpha, -1.0);
 
         if (harvest_k > 0) D.index({k % harvest_k}).copy_(d);
         niter = k + 1;
@@ -634,7 +639,7 @@ static std::tuple<at::Tensor, at::Tensor, int64_t> poisson_solve_rmgcg_2d_cuda(
 
         auto rz_new = (r * z_in).to(at::kDouble).sum();
         auto beta = (rz_new / rz).to(p.scalar_type());
-        d_in.mul_(beta.item()).add_(z_in);
+        d_in.mul_(beta).add_(z_in);
         if (kdef > 0) {
             auto nu = (W * z_in.unsqueeze(0)).to(at::kDouble).sum({1, 2})
                           .to(p.scalar_type());
@@ -732,9 +737,9 @@ static std::tuple<at::Tensor, at::Tensor, int64_t> poisson_solve_rmgcg_3d_cuda(
         auto dq = (d_in * q).to(at::kDouble).sum();
         auto alpha = (rz / dq).to(p.scalar_type());
 
-        x_in.add_(d_in, alpha.item());
+        x_in.addcmul_(d_in, alpha);
         apply_neumann_bc(p);
-        r.sub_(q, alpha.item());
+        r.addcmul_(q, alpha, -1.0);
 
         if (harvest_k > 0) D.index({k % harvest_k}).copy_(d);
         niter = k + 1;
@@ -750,7 +755,7 @@ static std::tuple<at::Tensor, at::Tensor, int64_t> poisson_solve_rmgcg_3d_cuda(
 
         auto rz_new = (r * z_in).to(at::kDouble).sum();
         auto beta = (rz_new / rz).to(p.scalar_type());
-        d_in.mul_(beta.item()).add_(z_in);
+        d_in.mul_(beta).add_(z_in);
         if (kdef > 0) {
             auto nu = (W * z_in.unsqueeze(0)).to(at::kDouble).sum({1, 2, 3})
                           .to(p.scalar_type());

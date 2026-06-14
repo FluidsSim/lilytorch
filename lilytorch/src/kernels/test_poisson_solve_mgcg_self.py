@@ -19,7 +19,7 @@ torch.manual_seed(0)
 FAIL = False
 
 
-def run_2d_const(N, dtype, smoother, precond_vcycles=1):
+def run_2d_const(N, dtype, smoother, precond_vcycles=1, max_cycles=20):
     L = 2 * math.pi
     h = L / N
     nx = ny = N + 2
@@ -32,7 +32,7 @@ def run_2d_const(N, dtype, smoother, precond_vcycles=1):
     cv = 0.5 * (c[1:-1, 1:] + c[1:-1, :-1])
 
     ps = PoissonSolver(dtype=dtype, device=device, h=h, tol=1e-10,
-                       max_cycles=20, precond_vcycles=precond_vcycles,
+                       max_cycles=max_cycles, precond_vcycles=precond_vcycles,
                        nsmoothing=2, smoother=smoother, w=1.0,
                        verbose=False)
     p_ref, r_ref = ps.solve_mgcg(f_inner, torch.zeros(nx, ny, dtype=dtype, device=device),
@@ -127,7 +127,14 @@ print(f"  diff |p|={diff_p:.3e}")
 if err_got > 2 * err_ref + 1e-10 or rn_got > 1e-8: FAIL = True
 
 print("\n2-D MGCG N=16 const-coeff float32 rbgs")
-err_ref, err_got, diff_p, rn_ref, rn_got = run_2d_const(16, torch.float32, "rbgs")
+# float32 CG hits its rounding floor (~1.5e-6) by ~6 cycles on this tiny
+# problem; iterating well past it (the tol=1e-10/20-cycle f64 setting) drives
+# CG into a loss-of-orthogonality regime where the residual random-walks back
+# up to ~1e-3 for BOTH the native and the Python paths (they no longer track,
+# being independent finite-precision trajectories).  Compare parity in the
+# converged regime instead.  Production runs only 3 MGCG cycles, far below this.
+err_ref, err_got, diff_p, rn_ref, rn_got = run_2d_const(16, torch.float32, "rbgs",
+                                                        max_cycles=6)
 print(f"  Python:  |p-phi|={err_ref:.3e}  |r|={rn_ref:.3e}")
 print(f"  Native:  |p-phi|={err_got:.3e}  |r|={rn_got:.3e}")
 print(f"  diff |p|={diff_p:.3e}")
