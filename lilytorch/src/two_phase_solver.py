@@ -364,6 +364,19 @@ class TwoPhaseSolver(FluidSolver):
         # approximation.  Default ON; set to False to restore legacy behaviour.
         self._air_transparent_body = bool(
             cfg.get("air_transparent_body", True))
+        # Gauge-anchor the force pressure (see _anchor_pressure_for_forces): the
+        # eulerian band integral -Sum p n delta is gauge-invariant only if the
+        # discrete Sum n delta = 0, which fails for a coarsely-resolved body, so
+        # the DC pressure level at the body leaks into a spurious force. In two-
+        # phase that level is the LARGE hydrostatic head + the unpinned all-
+        # Neumann gauge (~hundreds-to-thousands of Pa), so it swamps the real
+        # hydrodynamic load -> a static body gets a fake force, an undulating one
+        # a fake thrust (single-phase is immune: its dynamic pressure is ~10 Pa).
+        # Subtracting the BDIM-band-mean pressure removes the leak while
+        # preserving buoyancy (pressure VARIATION across the body) and thrust.
+        # Default OFF: every existing two-phase case byte-for-byte unchanged;
+        # enable for free-surface swimmers (e.g. the surface-pool eel).
+        self._gauge_anchor_forces = bool(cfg.get("gauge_anchor_forces", False))
         flags = []
         if self._consistent_momentum:
             flags.append("CONSISTENT momentum")
@@ -373,6 +386,8 @@ class TwoPhaseSolver(FluidSolver):
             flags.append(f"three-phase rho_solid={self._rho_solid}")
         if self._air_transparent_body:
             flags.append("air-transparent-body")
+        if self._gauge_anchor_forces:
+            flags.append("gauge-anchored forces")
         if self._alpha_exclude_body:
             flags.append("body-aware alpha init (carve"
                          + ("+volume-compensate)" if cfg.get(
@@ -673,8 +688,44 @@ class TwoPhaseSolver(FluidSolver):
                   and cb._sdf_sparse[0] is not None)
         if not sparse and all(hasattr(b, 'sdf_val') for b in cb.bodies):
             cb.sdf_vals = torch.stack([b.sdf_val for b in cb.bodies])
+        if self._gauge_anchor_forces:
+            p = self._anchor_pressure_for_forces(p)    # kill the gauge/hydrostatic leak
         base = _forces.forces_method2_3d if fn3d else _forces.forces_method2
         base(self, *vels, p, iteration)                # REAL pressure → emergent
+
+    def _anchor_pressure_for_forces(self, p):
+        """Gauge-anchor the pressure at the body before the band force integral.
+
+        The eulerian band integral ``F = -Sum p n delta_eps`` is gauge-invariant
+        only if the discrete ``Sum n delta_eps = 0``; for a coarsely-resolved
+        body it is not, so the DC pressure level sitting at the body leaks into a
+        spurious force ``~ -p_baseline * Sum n delta_eps``. In two-phase that
+        baseline is the hydrostatic head plus the unpinned all-Neumann gauge
+        (~hundreds-to-thousands of Pa), which swamps the real load.
+
+        Subtracting a single CONSTANT -- the mean pressure in the BDIM band
+        around the body -- removes the baseline while leaving the physical force
+        intact: buoyancy is the pressure VARIATION across the body and thrust the
+        dynamic part, both invariant under a uniform shift (continuously
+        ``integral C n dS = 0``). Verified on a static sphere: surface-straddling
+        spurious Fx -19.2 N -> -0.006 N; deep-submerged 4.3 N -> 0.6 N.
+
+        Out-of-place (never touches ``self.p0`` / the field evolution) and works
+        on both the python and kernel force paths (``comp.sdf_val`` is current at
+        force time; the _FAR=1e4 sentinel outside the body is excluded by the
+        band). No-op when the band is empty (e.g. a placeholder SDF). A single
+        global constant assumes the bodies sit at a similar pressure level (true
+        for a near-surface swimmer); per-body anchoring would generalise to
+        bodies at very different depths.
+        """
+        sdf = getattr(self.composite_body, "sdf_val", None)
+        if sdf is None or sdf.shape != p.shape:
+            return p
+        band = sdf.abs() < 2.0 * self.h
+        if not bool(band.any()):
+            return p
+        pref = p[band].to(torch.float64).mean().to(p.dtype)
+        return p - pref
 
     def forces_method2(self, u, v, p, iteration):
         self._two_phase_forces(False, (u, v), p, iteration)

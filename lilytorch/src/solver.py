@@ -1013,6 +1013,12 @@ class FluidSolver(PlottingMixin):
             # Variable-density custom coefficients are coupled to a moving
             # immersed geometry; reusing the previous pressure field can carry
             # stale body-interior/interface values and destabilize the solve.
+            # (Confirmed by A/B on the two-phase surface-pool case: warm-start
+            # made the solve 2.6-4x SLOWER and less stable -- with
+            # zero_pressure_inside zeroing the body interior, the previous p is
+            # a poor guess whose sharp body-boundary mismatch the smoother must
+            # undo, so multigrid runs its full cycle budget every step instead
+            # of early-exiting. Kept disabled for the custom-coeff path.)
             if self.poisson_warm_start and not has_custom_coeffs:
                 p0 = p
             else:
