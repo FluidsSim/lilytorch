@@ -1,0 +1,56 @@
+farms_muscle not installed
+PositionController: joints_names=['joint_body_00', 'joint_body_01', 'joint_body_02', 'joint_body_03', 'joint_body_04', 'joint_body_05', 'joint_body_06', 'joint_body_07']
+  0%|          | 0/300 [00:00<?, ?it/s]  0%|          | 0/300 [00:00<?, ?it/s]
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+  File "/data/andreaferrario/lilytorch/lilytorch/FARMS_V2/farms_sim/farms_sim/_bootstrap.py", line 33, in main
+    profile_simulation()
+  File "/data/andreaferrario/lilytorch/lilytorch/FARMS_V2/farms_sim/farms_sim/farmsim.py", line 40, in profile_simulation
+    profile(function=main, profile_filename=clargs.profile)
+  File "/data/andreaferrario/lilytorch/lilytorch/FARMS_V2/farms_core/farms_core/utils/profile.py", line 24, in profile
+    result = prof.runcall(function, *args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/cProfile.py", line 111, in runcall
+    return func(*args, **kw)
+           ^^^^^^^^^^^^^^^^^
+  File "/data/andreaferrario/lilytorch/lilytorch/FARMS_V2/farms_sim/farms_sim/farmsim.py", line 29, in main
+    run_simulation(
+  File "/data/andreaferrario/lilytorch/lilytorch/FARMS_V2/farms_sim/farms_sim/simulation.py", line 171, in run_simulation
+    sim.run()
+  File "/data/andreaferrario/lilytorch/lilytorch/FARMS_V2/farms_mujoco/farms_mujoco/simulation/simulation.py", line 311, in run
+    self._env.step(action=None)
+  File "/data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/dm_control/rl/control.py", line 103, in step
+    return self.reset()
+           ^^^^^^^^^^^^
+  File "/data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/dm_control/rl/control.py", line 87, in reset
+    self._task.initialize_episode(self._physics)
+  File "/data/andreaferrario/lilytorch/lilytorch/FARMS_V2/farms_mujoco/farms_mujoco/simulation/task.py", line 239, in initialize_episode
+    extension.initialize_episode(task=self, physics=physics)
+  File "/data/andreaferrario/lilytorch/lilytorch/integration/extensions.py", line 114, in initialize_episode
+    self.BDIMhandler = self.BDIMhandler_class(self.bdim_yaml, task.data.animats, physics)
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data/andreaferrario/lilytorch/lilytorch/integration/BDIMhandler.py", line 106, in __init__
+    self.fluid_solver = _SolverCls(
+                        ^^^^^^^^^^^
+  File "/data/andreaferrario/lilytorch/lilytorch/src/two_phase_solver.py", line 166, in __init__
+    super().__init__(pars, dtype=dtype, custom_update=custom_update,
+  File "/data/andreaferrario/lilytorch/lilytorch/src/solver.py", line 154, in __init__
+    assert abs(float(self.dx - self.dz)) < 1e-10, \
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: Grid spacing in x = 0.006666666666666667 and z = 0.0033333333333333335 must be equal
+[BodyColorOverride] Painted 18 geoms with [0.8156863  0.62352943 0.13725491 1.        ].
+[FluidExtension] overriding bdim_yaml.solver.nt (301) with runtime.n_iterations (300).
+Using GPU: NVIDIA GeForce RTX 4080 SUPER is available.
+Using dtype: torch.float32
+Saving configs to folder: /data/andreaferrario/ns_data/2026-06-15T11:03:27.742305
+farms_muscle not installed
+Traceback (most recent call last):
+  File "/data/andreaferrario/lilytorch/lilytorch/farms_examples/_1guillasim/experiments/gen_config_diag.py", line 61, in <module>
+    SimConfig().run()
+  File "/data/andreaferrario/lilytorch/lilytorch/farms_examples/base_sim_config.py", line 794, in run
+    self.single_run()
+  File "/data/andreaferrario/lilytorch/lilytorch/farms_examples/base_sim_config.py", line 790, in single_run
+    subprocess.run(['bash', 'run.sh'], check=True, env=env)
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['bash', 'run.sh']' returned non-zero exit status 1.

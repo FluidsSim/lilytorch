@@ -24,12 +24,24 @@ class SimConfig(BaseSimConfig):
         self.use_bdim                      = True
         self.compute_sdf                   = True
         self.convexify                     = True
+        # Eulerian (band integral on real pressure) is much more robust than the
+        # Lagrangian surface-marker integral for this thin body at the free
+        # surface on the coarse grid: uniform-800 then floats with the head out
+        # instead of sinking to the floor. (Lagrangian wins only when the body
+        # is well resolved.)
         self.force_method                  = "lagrangian"
         self.zero_pressure_inside          = True
         self.body_velocity_blend_eps_cells = None
         self.bdim_mu0_projection           = True
         self.bdim_body_div_correction      = True
-        self.poisson_method                = "multigrid"
+        # mgcg (CG-accelerated multigrid) is ~2.2x faster than standalone
+        # `multigrid` V-cycles at the same accuracy for this variable-density
+        # (833:1) two-phase Poisson on the production grid (measured native:
+        # 505ms -> 234ms/solve at 900x300x52). CG compensates for the weak
+        # V-cycles on this 17:1-anisotropic grid, where standalone multigrid
+        # stalls. (Poisson warm-start was tested and is a net loss here -- 2.6-4x
+        # SLOWER + less stable -- so it stays disabled on the two-phase path.)
+        self.poisson_method                = "mgcg"
 
         self.headless             = False
         self.smagorinsky_cs       = 0.
@@ -46,11 +58,19 @@ class SimConfig(BaseSimConfig):
         self.animats_pars = [
             {
                 "model_name"     : "1guilla",
-                "sdf_name"       : "1guilla_800.sdf",
+                # Ventral-ballast SDF: identical mass/inertia/geometry to
+                # 1guilla_800.sdf (still uniform rho=800, same weight + BDIM
+                # buoyancy) but each link's COM lowered 3 cm, giving a passive
+                # righting moment that keeps the planar gait from rolling the
+                # body over (gait roll 24.5deg -> ~5deg). Regenerate/tune with
+                # sdfs/1guilla/make_ballast_sdf.py.
+                "sdf_name"       : "1guilla_ballast.sdf",
                 "control_type"   : "position",
                 "gains"          : [100.0, 1., 0],
                 "spawn_mode"     : SpawnMode.FREE,
-                "pose"           : [4.75, 0.1, -0., 0, 0, 0.05],
+                # spawn at the true floating equilibrium (centreline ~1.1 cm
+                # below the waterline) to avoid the initial heave-overshoot.
+                "pose"           : [4.75, 0.1, -0.0115, 0, 0, 0.05],
                 "controller_path": "lilytorch.farms_examples._1guillasim.experiments.controller.PositionController",
                 "control_pars"   : {
                     "file_path": os.path.join(
@@ -137,9 +157,16 @@ class SimConfig(BaseSimConfig):
             "rho_air"               : 1.2,
             "nu_water"              : self.nu,
             "nu_air"                : 1.5e-5,
-            "rho_solid"             : 1000.0,
+            "rho_solid"             : 800.0,
             "alpha_exclude_body"    : True,
             "alpha_volume_compensate": True,
+            # Subtract the body-band-mean pressure before the force integral.
+            # The eulerian band integral leaks the body's DC pressure level, which
+            # in two-phase is the large hydrostatic/gauge baseline -> spurious
+            # thrust (the eel swam unrealistically fast). Anchoring removes it
+            # while preserving buoyancy + true thrust. Verified: static surface
+            # body spurious Fx -19.2 N -> -0.006 N.
+            "gauge_anchor_forces"   : True,
         }
 
         return bdim_ext
@@ -228,6 +255,7 @@ class SimConfig(BaseSimConfig):
         #                 "color"     : "#3399FF",
         #                 "smooth_sigma": 0,
         #                 "exclude_body": False,
+        #                 "reflective": True,
         #             },
         #             # {
         #             #     "field"     : "omega_mag",

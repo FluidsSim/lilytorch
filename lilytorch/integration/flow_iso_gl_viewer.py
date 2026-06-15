@@ -119,7 +119,7 @@ _GL_HOOK_C_SOURCE = r"""
 
 typedef void (*mjr_render_fn)(mjrRect viewport, mjvScene* scn, const mjrContext* con);
 
-#define ISO_FLOATS_PER_VERTEX 10
+#define ISO_FLOATS_PER_VERTEX 11   /* pos3, normal3, rgb3, alpha, reflective */
 #define ISO_MIN_CAPACITY 4096
 #define ISO_MAX_CTX 4
 
@@ -197,6 +197,7 @@ static const char* k_vertex_shader =
     "layout (location = 1) in vec3 aNormal;\n"
     "layout (location = 2) in vec3 aColor;\n"
     "layout (location = 3) in float aAlpha;\n"
+    "layout (location = 4) in float aReflective;\n"
     "uniform vec3  uCamPos;\n"
     "uniform vec3  uCamRight;\n"
     "uniform vec3  uCamUp;\n"
@@ -208,8 +209,10 @@ static const char* k_vertex_shader =
     "uniform int   uClipZeroToOne;  /* 1: GL_ZERO_TO_ONE, 0: GL_NEGATIVE_ONE_TO_ONE */\n"
     "uniform int   uReverseZ;       /* 1: reversed depth (near maps to max) */\n"
     "out vec3 vNormalWorld;\n"
+    "out vec3 vWorldPos;\n"
     "out vec3 vColor;\n"
     "out float vAlpha;\n"
+    "out float vReflective;\n"
     "void main() {\n"
     "  vec3 rel = aPos - uCamPos;\n"
     "  float depth = dot(rel, uCamFwd);\n"
@@ -233,24 +236,54 @@ static const char* k_vertex_shader =
     "  }\n"
     "  gl_Position = vec4(xeye / uHalfW, yeye / uHalfH, zc, depth);\n"
     "  vNormalWorld = aNormal;\n"
+    "  vWorldPos = aPos;\n"
     "  vColor = aColor;\n"
     "  vAlpha = aAlpha;\n"
+    "  vReflective = aReflective;\n"
     "}\n";
 
 static const char* k_fragment_shader =
     "#version 330 core\n"
     "in vec3 vNormalWorld;\n"
+    "in vec3 vWorldPos;\n"
     "in vec3 vColor;\n"
     "in float vAlpha;\n"
+    "in float vReflective;\n"
     "out vec4 FragColor;\n"
     "uniform vec3  uLightDir;\n"
+    "uniform vec3  uCamPos;\n"   /* program-wide uniform, already set for the vertex stage */
     "uniform float uAlpha;\n"
     "void main() {\n"
     "  vec3 N = normalize(vNormalWorld);\n"
     "  vec3 L = normalize(-uLightDir);\n"
-    "  float diff = max(abs(dot(N, L)), 0.0);\n"
-    "  float shade = 0.25 + 0.75 * diff;\n"
-    "  FragColor = vec4(vColor * shade, uAlpha * vAlpha);\n"
+    "  if (vReflective < 0.5) {\n"
+    "    /* Flat Lambertian (default look for vorticity/pressure/etc.). */\n"
+    "    float diff = max(abs(dot(N, L)), 0.0);\n"
+    "    float shade = 0.25 + 0.75 * diff;\n"
+    "    FragColor = vec4(vColor * shade, uAlpha * vAlpha);\n"
+    "    return;\n"
+    "  }\n"
+    "  /* Reflective water shading. */\n"
+    "  vec3 V = normalize(uCamPos - vWorldPos);\n"
+    "  /* Two-sided: the iso is unsorted/translucent, flip N to face the camera. */\n"
+    "  if (dot(N, V) < 0.0) N = -N;\n"
+    "  vec3 H = normalize(L + V);\n"
+    "  float diff = 0.25 + 0.75 * max(dot(N, L), 0.0);\n"
+    "  /* Sun glint (Blinn-Phong specular). */\n"
+    "  float spec = pow(max(dot(N, H), 0.0), 80.0);\n"
+    "  /* Fresnel: water turns mirror-like at grazing view angles. */\n"
+    "  float fres = pow(1.0 - max(dot(N, V), 0.0), 5.0);\n"
+    "  fres = 0.04 + 0.96 * fres;\n"
+    "  /* Cheap procedural sky tint in the reflected direction (no cubemap). */\n"
+    "  vec3 R = reflect(-V, N);\n"
+    "  vec3 sky = mix(vec3(0.55, 0.65, 0.80), vec3(0.85, 0.92, 1.0),\n"
+    "                 clamp(R.z * 0.5 + 0.5, 0.0, 1.0));\n"
+    "  vec3 col = vColor * diff;\n"
+    "  col = mix(col, sky, fres * 0.6);\n"          /* reflectivity grows at grazing angle */
+    "  col += spec * vec3(1.0);\n"                  /* white sun highlight */
+    "  /* Grazing angles read more opaque, like real water. */\n"
+    "  float a = uAlpha * vAlpha * (0.6 + 0.4 * fres);\n"
+    "  FragColor = vec4(col, a);\n"
     "}\n";
 
 static void ensure_real_mjr_render(void) {
@@ -376,6 +409,8 @@ static int ensure_ctx_resources(CtxResources* c) {
   glEnableVertexAttribArray(2);
   glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, stride, (const void*)(9 * sizeof(float)));
   glEnableVertexAttribArray(3);
+  glVertexAttribPointer(4, 1, GL_FLOAT, GL_FALSE, stride, (const void*)(10 * sizeof(float)));
+  glEnableVertexAttribArray(4);
   glBindBuffer(GL_ARRAY_BUFFER, 0);
   glBindVertexArray(0);
 
@@ -793,7 +828,7 @@ class FlowIsoGLHook:
         )
 
     def update(self, interleaved_xyz_nrm_rgb_a: torch.Tensor, synchronize: bool = True):
-        """Submit a new mesh; (V, 10) float32 tensor (pos3, normal3, rgb3, alpha).
+        """Submit a new mesh; (V, 11) float32 tensor (pos3, normal3, rgb3, alpha, reflective).
 
         The trailing per-vertex alpha lets several isosurface layers (e.g. a
         translucent free-surface interface plus a more opaque vorticity shell)
@@ -805,9 +840,9 @@ class FlowIsoGLHook:
         VBO uploads work in both the live viewer and the offscreen renderer.
         """
         t = interleaved_xyz_nrm_rgb_a
-        if t.dtype != torch.float32 or t.ndim != 2 or t.shape[1] != 10:
+        if t.dtype != torch.float32 or t.ndim != 2 or t.shape[1] != 11:
             raise ValueError(
-                f"Expected (V, 10) float32 tensor, got shape {tuple(t.shape)} "
+                f"Expected (V, 11) float32 tensor, got shape {tuple(t.shape)} "
                 f"dtype {t.dtype}."
             )
         if t.is_cuda:
@@ -930,14 +965,15 @@ class _IsoLayer:
     The viewer can render several of these at once (e.g. a translucent
     two-phase interface together with a more opaque ``omega_mag`` vorticity
     shell). Each layer becomes its own marching-cubes mesh; all layers are
-    concatenated into the single interleaved (V, 10) buffer the GL hook draws,
-    the trailing per-vertex ``alpha`` column carrying the layer opacity.
+    concatenated into the single interleaved (V, 11) buffer the GL hook draws,
+    the per-vertex ``alpha`` column carrying the layer opacity and the trailing
+    ``reflective`` flag selecting water-style shading.
     """
 
     __slots__ = (
         "field_name", "field_fn", "iso_fraction", "iso_value",
         "smooth_sigma", "alpha", "exclude_body", "phase_mask",
-        "color_pos", "color_neg", "color_uni",
+        "color_pos", "color_neg", "color_uni", "reflective",
     )
 
     def __init__(
@@ -952,6 +988,7 @@ class _IsoLayer:
         color_pos: tuple[float, float, float],
         color_neg: tuple[float, float, float],
         color_uni: tuple[float, float, float],
+        reflective: bool = False,
     ):
         self.field_name = field_name
         self.field_fn = FIELD_MAP.get(field_name)
@@ -964,6 +1001,9 @@ class _IsoLayer:
         self.color_pos = color_pos
         self.color_neg = color_neg
         self.color_uni = color_uni
+        # Water-style reflective shading (Fresnel + sun glint + sky reflection).
+        # Off by default so vorticity/pressure keep the flat Lambertian look.
+        self.reflective = bool(reflective)
 
 
 # ── GPU helpers ──────────────────────────────────────────────────────────────
@@ -1070,6 +1110,7 @@ class FlowIsoGLViewer(_BaseExtension):
         mc_backend: str = "auto",     # "auto" | "torchmcubes" | "skimage"
         exclude_body: bool = True,
         phase_mask: str | None = None,  # None | "water" | "air" — restrict to one phase (two-phase only)
+        reflective: bool = False,       # water-style Fresnel/sky/glint shading (per-field override via "reflective")
         light_dir: tuple[float, float, float] = (0.3, 0.4, -1.0),
         diag_every: int = 200,
         debug_force_visible: bool = False,
@@ -1098,6 +1139,7 @@ class FlowIsoGLViewer(_BaseExtension):
         self.mc_backend = str(mc_backend)
         self.exclude_body = bool(exclude_body)
         self.phase_mask = phase_mask
+        self.reflective = bool(reflective)
         self.light_dir = tuple(float(c) for c in light_dir)
         self.diag_every = max(1, int(diag_every))
         self.debug_force_visible = bool(debug_force_visible)
@@ -1174,6 +1216,7 @@ class FlowIsoGLViewer(_BaseExtension):
                 color_uni=self._parse_iso_color(
                     spec.get("color_uni", col if col is not None else self.color_uni)
                 ),
+                reflective=spec.get("reflective", self.reflective),
             )
 
         if fields:
@@ -1197,6 +1240,7 @@ class FlowIsoGLViewer(_BaseExtension):
             mc_backend=config.get("mc_backend", "auto"),
             exclude_body=config.get("exclude_body", True),
             phase_mask=config.get("phase_mask", None),
+            reflective=config.get("reflective", False),
             light_dir=tuple(config.get("light_dir", (0.3, 0.4, -1.0))),
             diag_every=config.get("diag_every", 200),
             debug_force_visible=config.get("debug_force_visible", False),
@@ -1486,7 +1530,7 @@ class FlowIsoGLViewer(_BaseExtension):
     # ── mesh extraction ──────────────────────────────────────────────────
     def _build_mesh(self, fs, u, v, p, w):
         """Run MC + per-vertex normals for every layer; return one combined
-        (V, 10) float32 CUDA tensor (pos3, normal3, rgb3, alpha).
+        (V, 11) float32 CUDA tensor (pos3, normal3, rgb3, alpha, reflective).
 
         Each configured layer contributes its own isosurface(s) with its own
         colour and per-vertex alpha; they are concatenated into a single buffer
@@ -1544,7 +1588,7 @@ class FlowIsoGLViewer(_BaseExtension):
 
     def _build_layer_chunks(self, fs, u, v, p, w, layer, spacing, origin,
                             body_sdf, budget):
-        """Build the (V, 10) mesh for one layer, or None if it is empty."""
+        """Build the (V, 11) mesh for one layer, or None if it is empty."""
         field = layer.field_fn(fs, u, v, p, w)  # torch.Tensor on GPU
         if not isinstance(field, torch.Tensor):
             field = torch.as_tensor(field, device=u.device)
@@ -1608,7 +1652,11 @@ class FlowIsoGLViewer(_BaseExtension):
                 (tri_pos.shape[0], 1), layer.alpha,
                 device=field.device, dtype=torch.float32,
             )
-            layer_chunks.append(torch.cat([tri_pos, n, color, a], dim=1))
+            refl = torch.full(
+                (tri_pos.shape[0], 1), 1.0 if layer.reflective else 0.0,
+                device=field.device, dtype=torch.float32,
+            )
+            layer_chunks.append(torch.cat([tri_pos, n, color, a, refl], dim=1))
 
         if bipolar:
             _run(threshold,  layer.color_pos, sign=+1.0)

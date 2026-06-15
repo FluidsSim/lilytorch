@@ -1,0 +1,150 @@
+farms_muscle not installed
+PositionController: joints_names=['joint_body_00', 'joint_body_01', 'joint_body_02', 'joint_body_03', 'joint_body_04', 'joint_body_05', 'joint_body_06', 'joint_body_07']
+  0%|          | 0/400 [00:00<?, ?it/s]  0%|          | 1/400 [00:03<22:07,  3.33s/it][BodyColorOverride] Painted 18 geoms with [0.8156863  0.62352943 0.13725491 1.        ].
+[FluidExtension] overriding bdim_yaml.solver.nt (401) with runtime.n_iterations (400).
+Using GPU: NVIDIA GeForce RTX 4080 SUPER is available.
+Using dtype: torch.float32
+Using the quick method for the adv-diff equation (3D)
+  [solver_method='kernel'] native streamed path (update-only geometry + post-fluid-step force kernel)
+Poisson solver: multigrid
+Computing 3-D SDF for /data/andreaferrario/lilytorch/lilytorch/farms_examples/sdfs/1guilla/meshes_800/link0_collision.stl (129×64×64) ...
+  skfmm distance with spacing (0.001670,0.001250,0.001570)
+  Saving 3-D interpolation data for /data/andreaferrario/lilytorch/lilytorch/farms_examples/sdfs/1guilla/meshes_800/link0_collision.stl
+Computing 3-D SDF for /data/andreaferrario/lilytorch/lilytorch/farms_examples/sdfs/1guilla/meshes_800/link1_collision.stl (65×64×64) ...
+  skfmm distance with spacing (0.001690,0.000982,0.001144)
+  Saving 3-D interpolation data for /data/andreaferrario/lilytorch/lilytorch/farms_examples/sdfs/1guilla/meshes_800/link1_collision.stl
+Computing 3-D SDF for /data/andreaferrario/lilytorch/lilytorch/farms_examples/sdfs/1guilla/meshes_800/link2_collision.stl (65×64×64) ...
+  skfmm distance with spacing (0.001685,0.000980,0.001146)
+  Saving 3-D interpolation data for /data/andreaferrario/lilytorch/lilytorch/farms_examples/sdfs/1guilla/meshes_800/link2_collision.stl
+Computing 3-D SDF for /data/andreaferrario/lilytorch/lilytorch/farms_examples/sdfs/1guilla/meshes_800/link3_collision.stl (65×64×64) ...
+  skfmm distance with spacing (0.001685,0.000980,0.001146)
+  Saving 3-D interpolation data for /data/andreaferrario/lilytorch/lilytorch/farms_examples/sdfs/1guilla/meshes_800/link3_collision.stl
+Computing 3-D SDF for /data/andreaferrario/lilytorch/lilytorch/farms_examples/sdfs/1guilla/meshes_800/link4_collision.stl (65×64×64) ...
+  skfmm distance with spacing (0.001686,0.000982,0.001146)
+  Saving 3-D interpolation data for /data/andreaferrario/lilytorch/lilytorch/farms_examples/sdfs/1guilla/meshes_800/link4_collision.stl
+Computing 3-D SDF for /data/andreaferrario/lilytorch/lilytorch/farms_examples/sdfs/1guilla/meshes_800/link5_collision.stl (65×64×64) ...
+  skfmm distance with spacing (0.001685,0.000981,0.001146)
+  Saving 3-D interpolation data for /data/andreaferrario/lilytorch/lilytorch/farms_examples/sdfs/1guilla/meshes_800/link5_collision.stl
+Computing 3-D SDF for /data/andreaferrario/lilytorch/lilytorch/farms_examples/sdfs/1guilla/meshes_800/link6_collision.stl (65×64×64) ...
+  skfmm distance with spacing (0.001685,0.000979,0.001146)
+  Saving 3-D interpolation data for /data/andreaferrario/lilytorch/lilytorch/farms_examples/sdfs/1guilla/meshes_800/link6_collision.stl
+Computing 3-D SDF for /data/andreaferrario/lilytorch/lilytorch/farms_examples/sdfs/1guilla/meshes_800/link7_collision.stl (65×64×64) ...
+  skfmm distance with spacing (0.001686,0.000982,0.001146)
+  Saving 3-D interpolation data for /data/andreaferrario/lilytorch/lilytorch/farms_examples/sdfs/1guilla/meshes_800/link7_collision.stl
+Computing 3-D SDF for /data/andreaferrario/lilytorch/lilytorch/farms_examples/sdfs/1guilla/meshes_800/link8_collision.stl (153×64×64) ...
+  skfmm distance with spacing (0.001677,0.001095,0.001233)
+  Saving 3-D interpolation data for /data/andreaferrario/lilytorch/lilytorch/farms_examples/sdfs/1guilla/meshes_800/link8_collision.stl
+Frames will be saved in folder: /data/andreaferrario/ns_data/2026-06-15T11:36:04.534133/
+Gravity body force enabled: g = (0.0, 0.0, -9.81)
+Two-phase enabled: rho 1000.0/1.2 (ratio 833:1), harmonic face density, three-phase rho_solid=800.0, air-transparent-body, body-aware alpha init (carve+volume-compensate).
+  [stream-meta-3D] built 9/9 per-body 3-D streaming-SDF metadata records (9 tabulated, 0 sampled from analytical SDF)
+[OrientationLogger] logging body id=17 name='a0_link0' -> /data/andreaferrario/lilytorch/_flip_diag/orient_fine.csv
+[OrientationLogger]   body[0] 'world' mass=0
+[OrientationLogger]   body[1] 'gridv_2' mass=1e-15
+[OrientationLogger]   body[2] 'gridh_1' mass=1e-15
+[OrientationLogger]   body[3] 'wall_xmin' mass=1e-15
+[OrientationLogger]   body[4] 'wall_xmax' mass=1e-15
+[OrientationLogger]   body[5] 'wall_ymax' mass=1e-15
+[OrientationLogger]   body[6] 'gridh_2' mass=1e-15
+[OrientationLogger]   body[7] 'gridv_1' mass=1e-15
+[OrientationLogger]   body[8] 'ground_bg' mass=1e-15
+[OrientationLogger]   body[9] 'gridv_0' mass=1e-15
+[OrientationLogger]   body[10] 'floor' mass=1e-15
+[OrientationLogger]   body[11] 'gridv_3' mass=1e-15
+[OrientationLogger]   body[12] 'gridh_0' mass=1e-15
+[OrientationLogger]   body[13] 'wall_ymin' mass=1e-15
+[OrientationLogger]   body[14] 'arena_water' mass=1e-15
+[OrientationLogger]   body[15] 'water' mass=1e-15
+[OrientationLogger]   body[16] 'a0_1guilla_watertight' mass=1e-15
+[OrientationLogger]   body[17] 'a0_link0' mass=0.266808
+[OrientationLogger]   body[18] 'a0_link1' mass=0.0476495
+[OrientationLogger]   body[19] 'a0_link2' mass=0.0475807
+[OrientationLogger]   body[20] 'a0_link3' mass=0.0474665
+[OrientationLogger]   body[21] 'a0_link4' mass=0.0475372
+[OrientationLogger]   body[22] 'a0_link5' mass=0.047596
+[OrientationLogger]   body[23] 'a0_link6' mass=0.0476426
+[OrientationLogger]   body[24] 'a0_link7' mass=0.0475256
+[OrientationLogger]   body[25] 'a0_link8' mass=0.101946
+[OrientationLogger] gravity=[ 0.    0.   -9.81]  sum(link masses)=0.701752  weight_z(MuJoCo units)=-6.88419
+body_aware_alpha_init: carved 22479.0 cells of body interior out of the water; surface raised by ~0.001668 to compensate (volume 3110400.0 / target 3110400.0 cells).
+body_aware_alpha_init: deferred carve applied (body interior cells: 14841, sdf min -0.026); wet cells left inside the body: 0
+WARNING:lilytorch.src.plotting:Termination condition met: body exited domain
+  0%|          | 2/400 [00:06<21:32,  3.25s/it] 74%|███████▍  | 295/400 [00:06<00:01, 74.15it/s]100%|██████████| 400/400 [00:06<00:00, 59.13it/s]
+         42880867 function calls (42346358 primitive calls) in 19.629 seconds
+
+   Ordered by: internal time
+   List reduced from 21824 to 30 due to restriction <30>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+        2    2.250    1.125    2.250    1.125 /data/andreaferrario/lilytorch/lilytorch/src/body.py:999(bounding_box)
+  6199605    1.400    0.000    2.293    0.000 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/pywavefront/obj.py:284(consume_faces)
+        1    1.320    1.320    1.320    1.320 /data/andreaferrario/lilytorch/lilytorch/src/body.py:968(__call__)
+        1    1.269    1.269    1.270    1.270 {built-in method mujoco._structs.from_xml_string}
+        1    0.847    0.847    0.847    0.847 /data/andreaferrario/lilytorch/lilytorch/src/body.py:954(update_mesh)
+        9    0.827    0.092    0.827    0.092 {built-in method skfmm.cfmm.cFastMarcher}
+  5001287    0.576    0.000    0.576    0.000 {method 'split' of 'str' objects}
+       40    0.463    0.012    0.463    0.012 {built-in method torch._C._cuda_synchronize}
+  7215420    0.368    0.000    0.368    0.000 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/pywavefront/obj.py:312(emit_vertex)
+  1788227    0.347    0.000    0.872    0.000 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/pywavefront/parser.py:97(next_line)
+   702986    0.340    0.000    0.698    0.000 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/pywavefront/obj.py:114(consume_vertices)
+        9    0.307    0.034    2.600    0.289 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/pywavefront/obj.py:254(parse_f)
+4037/1769    0.304    0.000    0.252    0.000 {method 'read' of '_io.BufferedReader' objects}
+      128    0.280    0.002    0.281    0.002 {built-in method _imp.create_dynamic}
+   702986    0.276    0.000    0.614    0.000 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/pywavefront/obj.py:160(consume_normals)
+       30    0.247    0.008    0.247    0.008 {built-in method numpy.fromstring}
+        9    0.206    0.023    0.206    0.023 {built-in method open3d.cuda.pybind.io.read_triangle_mesh}
+      582    0.203    0.000    0.203    0.000 {method 'split' of 're.Pattern' objects}
+       73    0.200    0.003    0.200    0.003 {method 'argsort' of 'numpy.ndarray' objects}
+1842948/1832901    0.186    0.000    0.488    0.000 {built-in method builtins.next}
+        6    0.172    0.029    0.387    0.065 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/torch/_inductor/compile_worker/subproc_pool.py:52(_recv_msg)
+     3497    0.171    0.000    0.339    0.000 <frozen importlib._bootstrap_external>:755(_compile_bytecode)
+     3497    0.166    0.000    0.166    0.000 {built-in method marshal.loads}
+2057547/2049203    0.143    0.000    0.167    0.000 {built-in method builtins.isinstance}
+2764271/2747489    0.135    0.000    0.138    0.000 {built-in method builtins.len}
+  1788227    0.129    0.000    0.134    0.000 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/pywavefront/parser.py:74(create_line_generator)
+   6347/7    0.125    0.000    0.001    0.000 {built-in method builtins.exec}
+     5215    0.118    0.000    0.143    0.000 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/torch/utils/hipify/hipify_python.py:686(add)
+     2271    0.112    0.000    0.112    0.000 {built-in method torch._C._cuda_getDeviceCount}
+       72    0.110    0.002    0.110    0.002 {built-in method _hashlib.openssl_sha1}
+
+
+         42880867 function calls (42346358 primitive calls) in 19.629 seconds
+
+   Ordered by: cumulative time
+   List reduced from 21824 to 30 due to restriction <30>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+        1    0.000    0.000    5.745    5.745 <string>:3(_patched_smx)
+        1    0.000    0.000    5.745    5.745 /data/andreaferrario/lilytorch/lilytorch/FARMS_V2/farms_mujoco/farms_mujoco/simulation/mjcf.py:1355(setup_mjcf_xml)
+        3    0.000    0.000    5.694    1.898 /data/andreaferrario/lilytorch/lilytorch/FARMS_V2/farms_mujoco/farms_mujoco/simulation/mjcf.py:770(sdf2mjcf)
+       26    0.001    0.000    5.687    0.219 /data/andreaferrario/lilytorch/lilytorch/FARMS_V2/farms_mujoco/farms_mujoco/simulation/mjcf.py:140(mjc_add_link)
+    23/15    0.000    0.000    5.687    0.379 /data/andreaferrario/lilytorch/lilytorch/FARMS_V2/farms_mujoco/farms_mujoco/simulation/mjcf.py:720(add_link_recursive)
+       20    0.000    0.000    5.021    0.251 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/torch/_jit_internal.py:1025(_overload)
+        9    0.000    0.000    4.022    0.447 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/pywavefront/wavefront.py:47(__init__)
+        9    0.000    0.000    4.022    0.447 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/pywavefront/obj.py:53(__init__)
+        9    0.000    0.000    4.021    0.447 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/pywavefront/obj.py:82(parse)
+     18/9    0.000    0.000    4.021    0.447 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/pywavefront/parser.py:110(parse)
+        9    0.307    0.034    2.600    0.289 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/pywavefront/obj.py:254(parse_f)
+  6199605    1.400    0.000    2.293    0.000 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/pywavefront/obj.py:284(consume_faces)
+        2    2.250    1.125    2.250    1.125 /data/andreaferrario/lilytorch/lilytorch/src/body.py:999(bounding_box)
+       18    0.001    0.000    1.633    0.091 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/trimesh/exchange/load.py:258(load_mesh)
+       18    0.009    0.000    1.616    0.090 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/trimesh/exchange/load.py:157(load_scene)
+        9    0.000    0.000    1.489    0.165 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/torch/_inductor/runtime/triton_heuristics.py:1018(run)
+        1    0.000    0.000    1.341    1.341 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/dm_control/mjcf/physics.py:437(from_mjcf_model)
+        1    1.320    1.320    1.320    1.320 /data/andreaferrario/lilytorch/lilytorch/src/body.py:968(__call__)
+        1    0.000    0.000    1.273    1.273 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/dm_control/mujoco/engine.py:429(from_xml_string)
+        1    0.000    0.000    1.270    1.270 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/dm_control/mujoco/wrapper/core.py:280(from_xml_string)
+        1    0.000    0.000    1.270    1.270 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/dm_control/mujoco/wrapper/core.py:150(_get_model_ptr_from_xml)
+        1    1.269    1.269    1.270    1.270 {built-in method mujoco._structs.from_xml_string}
+        9    0.063    0.007    1.269    0.141 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/trimesh/exchange/obj.py:27(load_obj)
+        1    0.010    0.010    1.124    1.124 /data/andreaferrario/lilytorch/lilytorch/src/body.py:948(__init__)
+        6    0.000    0.000    0.950    0.158 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/torch/_inductor/scheduler.py:870(has_side_effects)
+  1788227    0.347    0.000    0.872    0.000 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/pywavefront/parser.py:97(next_line)
+        1    0.847    0.847    0.847    0.847 /data/andreaferrario/lilytorch/lilytorch/src/body.py:954(update_mesh)
+        9    0.000    0.000    0.830    0.092 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/skfmm/pfmm.py:61(distance)
+        9    0.827    0.092    0.827    0.092 {built-in method skfmm.cfmm.cFastMarcher}
+       18    0.000    0.000    0.820    0.046 /data/andreaferrario/lilytorch/lilytorch/src/body.py:23(_import_open3d)
+
+
+Saving configs to folder: /data/andreaferrario/ns_data/2026-06-15T11:36:04.534133
+farms_muscle not installed
