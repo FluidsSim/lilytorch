@@ -682,6 +682,8 @@ class PoissonSolver:
         smoother="jacobi",
         use_kernels=False,
         recycle_k=0,
+        cuda_graph=False,
+        cuda_graph_max_cells=64 ** 3,
     ):
         self.dtype       = dtype
         self.h2          = h * h
@@ -710,6 +712,17 @@ class PoissonSolver:
         # coefficient layout.
         self.dirichlet_mask = None
         self.use_kernels = use_kernels
+        # ---- CUDA-graph capture of the native solve (GU6) --------------
+        # Small-grid-only win: the native V-cycle issues ~1300 tiny kernels
+        # whose host-launch latency dominates on launch-bound grids.  Capturing
+        # the (sync-free, tol<0) solve into a CUDA graph replays them with one
+        # host launch.  Net-NEGATIVE on large/compute-bound 3-D grids and on the
+        # static-buffer copy_ overhead, so it is GATED on interior cell count.
+        # Only mgcg / multigrid are intercepted (rmgcg's deflation basis and
+        # the FFT solver are out of scope).
+        self.cuda_graph           = cuda_graph
+        self.cuda_graph_max_cells = cuda_graph_max_cells
+        self._graph_cache         = {}   # {key: entry-dict | None (capture failed)}
         # ---- Recycled-Krylov (deflation) state -------------------------
         # When recycle_k > 0, solve_rmgcg keeps a small subspace of search
         # directions from previous solves and deflates them out of the next
@@ -1121,51 +1134,126 @@ class PoissonSolver:
     # ------------------------------------------------------------------
     # Top-level solve
     # ------------------------------------------------------------------
-    def _solve_multigrid_native(self, f, p0, face_arrs, ndim):
-        """Dispatch solve_multigrid to native CUDA driver."""
-        p = p0 if p0.is_contiguous() else p0.contiguous()
+    def _native_call(self, method, f, p0, face_arrs, ndim, tol=None):
+        """Single dispatch to the native CUDA Poisson driver.
+
+        ``method`` is ``"mgcg"`` or ``"multigrid"``.  ``p0`` is mutated in place
+        (the driver writes the solution into it); returns ``(p, residual)``.
+        ``tol`` defaults to the solver tolerance; pass ``tol < 0`` to request the
+        sync-free fixed-cycle mode (host-sync-free, CUDA-graph-capturable).
+        """
+        if tol is None:
+            tol = self._tol_float
+        p   = p0 if p0.is_contiguous() else p0.contiguous()
         f_c = f.contiguous()
-        if ndim == 2:
-            ch, cv = face_arrs
-            r = self._K.poisson_solve_multigrid_2d(
-                p, f_c, ch.contiguous(), cv.contiguous(),
+        faces_c = tuple(c.contiguous() for c in face_arrs)
+        if method == "mgcg":
+            fn = (self._K.poisson_solve_mgcg_2d if ndim == 2
+                  else self._K.poisson_solve_mgcg_3d)
+            r = fn(
+                p, f_c, *faces_c,
                 h2=self.h2, jcap_tol=self.jcap_tol, w=self.w,
-                nsmoothing=self.nsmoothing, max_vcycles=self.max_vcycles,
-                tol=self._tol_float, smoother=self.smoother,
+                nsmoothing=self.nsmoothing, max_cycles=self.max_cycles,
+                precond_vcycles=self.precond_vcycles,
+                tol=tol, smoother=self.smoother,
             )
-        else:
-            ch, cv, cw = face_arrs
-            r = self._K.poisson_solve_multigrid_3d(
-                p, f_c, ch.contiguous(), cv.contiguous(), cw.contiguous(),
+        else:  # multigrid
+            fn = (self._K.poisson_solve_multigrid_2d if ndim == 2
+                  else self._K.poisson_solve_multigrid_3d)
+            r = fn(
+                p, f_c, *faces_c,
                 h2=self.h2, jcap_tol=self.jcap_tol, w=self.w,
                 nsmoothing=self.nsmoothing, max_vcycles=self.max_vcycles,
-                tol=self._tol_float, smoother=self.smoother,
+                tol=tol, smoother=self.smoother,
             )
         return p, r
 
+    # ------------------------------------------------------------------
+    # CUDA-graph capture of the native solve  (GU6, small-grid-only win)
+    # ------------------------------------------------------------------
+    def _cuda_graph_enabled(self, f):
+        """Gate: opt-in flag, native kernels, CUDA tensor, below the cell
+        threshold (graphs are net-negative on large/compute-bound grids)."""
+        return (self.cuda_graph and self.use_kernels
+                and f.is_cuda and f.numel() <= self.cuda_graph_max_cells)
+
+    def _graphed_native_solve(self, method, f, p0, face_arrs, ndim):
+        """Replay a captured CUDA graph of the sync-free native solve.
+
+        Lazily captures one graph per (method, ndim, input shapes) into static
+        p/f/face buffers; thereafter each call copies the live RHS + face
+        coefficients + warm-start guess into those buffers and replays.  Falls
+        back permanently to the eager native call if capture ever fails.
+        """
+        key = (method, ndim, tuple(f.shape), tuple(p0.shape),
+               tuple(tuple(c.shape) for c in face_arrs))
+        if key not in self._graph_cache:
+            self._graph_cache[key] = self._capture_poisson_graph(
+                method, f, p0, face_arrs, ndim)
+        entry = self._graph_cache[key]
+        if entry is None:                       # capture failed → eager
+            return self._native_call(method, f, p0, face_arrs, ndim)
+
+        entry["f"].copy_(f)
+        for cs, c in zip(entry["faces"], face_arrs):
+            cs.copy_(c)
+        entry["p"].copy_(p0)                    # warm-start (or zeros) guess
+        entry["graph"].replay()
+        # ``p0`` is a fresh tensor each step (or the persistent warm-start
+        # field); write the static solution back so in-place semantics and
+        # warm-starting are preserved.  Clone the residual — the static buffer
+        # is overwritten on the next replay.
+        p0.copy_(entry["p"])
+        return p0, entry["r"].clone()
+
+    def _capture_poisson_graph(self, method, f, p0, face_arrs, ndim):
+        """Capture the sync-free (tol<0) native solve into a CUDA graph.
+
+        Returns the capture entry dict, or ``None`` if capture failed (the
+        caller then falls back to the eager native path for this shape).
+        """
+        # Static buffers: contiguous copies whose pointers the graph binds to.
+        p_s     = p0.contiguous().clone()
+        f_s     = f.contiguous().clone()
+        faces_s = tuple(c.contiguous().clone() for c in face_arrs)
+        try:
+            # Warm up on a side stream so the driver's lazy allocations and any
+            # library init happen OUTSIDE the captured region.
+            s = torch.cuda.Stream()
+            s.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(s):
+                for _ in range(3):
+                    p_s.copy_(p0)
+                    self._native_call(method, f_s, p_s, faces_s, ndim, tol=-1.0)
+            torch.cuda.current_stream().wait_stream(s)
+
+            graph = torch.cuda.CUDAGraph()
+            p_s.copy_(p0)
+            with torch.cuda.graph(graph):
+                _, r_s = self._native_call(
+                    method, f_s, p_s, faces_s, ndim, tol=-1.0)
+        except Exception as e:                  # noqa: BLE001 — capture is best-effort
+            if self.verbose:
+                print(f"[poisson_cuda_graph] capture failed ({e}); "
+                      f"falling back to eager native solve")
+            return None
+        if self.verbose:
+            n_cycles = self.max_cycles if method == "mgcg" else self.max_vcycles
+            print(f"[poisson_cuda_graph] captured {method} {ndim}D "
+                  f"shape={tuple(f.shape)} ({n_cycles} fixed cycles, sync-free)")
+        return {"graph": graph, "p": p_s, "f": f_s, "faces": faces_s, "r": r_s}
+
+    def _solve_multigrid_native(self, f, p0, face_arrs, ndim):
+        """Dispatch solve_multigrid to the native CUDA driver."""
+        if self._cuda_graph_enabled(f):
+            return self._graphed_native_solve("multigrid", f, p0, face_arrs, ndim)
+        return self._native_call("multigrid", f, p0, face_arrs, ndim)
+
     def _solve_mgcg_native(self, f, p0, face_arrs, ndim):
-        """Dispatch solve_mgcg to native CUDA driver."""
-        p = p0 if p0.is_contiguous() else p0.contiguous()
-        f_c = f.contiguous()
-        if ndim == 2:
-            ch, cv = face_arrs
-            r = self._K.poisson_solve_mgcg_2d(
-                p, f_c, ch.contiguous(), cv.contiguous(),
-                h2=self.h2, jcap_tol=self.jcap_tol, w=self.w,
-                nsmoothing=self.nsmoothing, max_cycles=self.max_cycles,
-                precond_vcycles=self.precond_vcycles,
-                tol=self._tol_float, smoother=self.smoother,
-            )
-        else:
-            ch, cv, cw = face_arrs
-            r = self._K.poisson_solve_mgcg_3d(
-                p, f_c, ch.contiguous(), cv.contiguous(), cw.contiguous(),
-                h2=self.h2, jcap_tol=self.jcap_tol, w=self.w,
-                nsmoothing=self.nsmoothing, max_cycles=self.max_cycles,
-                precond_vcycles=self.precond_vcycles,
-                tol=self._tol_float, smoother=self.smoother,
-            )
-        return p, r
+        """Dispatch solve_mgcg to the native CUDA driver."""
+        if self._cuda_graph_enabled(f):
+            return self._graphed_native_solve("mgcg", f, p0, face_arrs, ndim)
+        return self._native_call("mgcg", f, p0, face_arrs, ndim)
 
     def solve_multigrid(self, f, p0, **kwargs):
         """Solve with multigrid V-cycles.

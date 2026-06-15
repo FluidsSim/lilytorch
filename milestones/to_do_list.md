@@ -50,9 +50,6 @@ MP8. **T2b** Dirty-AABB-sized Kernel-A temps (`sdf_*_tmp`, `b*_tmp`: full-grid �
   Needs `streaming_sdf.cu` changes; no peak movement until T2a.
 MP9. **T2c** Two-pass Kernel B for `primes` elimination (write to AABB scratch, copy back).
   ~1.5 GiB; no peak movement until T2a.
-MP10. **T4** (architectural, 1+ wk each, measure first): fp16 SDF+body-vel temps;
-  mixed-precision velocity fields (fp16 storage, fp32 compute); `--poisson_compile`
-  CUDA-graph capture.
 
 ---
 
@@ -107,23 +104,32 @@ alpha/beta syncs). The residual low GPU-util (22% @ 2D-N64 → 50% @ 3D-N96) is
 **CUDA kernel-launch latency**: the C++ V-cycle issues ~2100 *tiny* kernels per solve and
 the GPU idles between launches. Confirmed: idle ≈ (#launches) × ~1.5 µs.
 
-GU6. **CUDA-graph capture of the native solve — PROVEN (POC), not yet wired in (2026-06-14).**
-  The real ceiling-lift for launch-bound small grids: replay the ~1300 kernels with ~1 host
-  launch. **Enabler DONE:** the native drivers now take `tol < 0` = sync-free fixed-cycle mode
-  (skips the residual-norm `.item()` via short-circuit), so the solve is host-sync-free and
-  CUDA-graph-capturable; `tol >= 0` unchanged (self-tests pass bit-for-bit). **POC measured**
-  (`/tmp/graph_poc.py`, fp32, mc=3 = production cycle count, graph vs eager+sync, |dp|=0):
-  2D-N64 **2.05×**, 2D-N128 **1.53×**, 3D-N48 **1.49×**, 3D-N96 **0.91×**, 3D-N128 **0.84×**.
-  ⇒ **Graphs are a SMALL-GRID-ONLY win** (launch-bound); they are net-NEGATIVE on large 3D
-  (compute-bound + the static-buffer `copy_` + cannot early-exit). A full megakernel rewrite
-  would share this large-grid limitation AND hit a cooperative-launch occupancy ceiling
-  (~64³ max) — so graphs, size-gated, are the right tool; the rewrite is not worth it.
-  **Remaining work to productionise (regime-gated, hot-path):** capture per grid-shape into
-  static p/f/face buffers, copy live RHS+BDIM faces in & warm-start p before each replay,
-  **gate ON only below a cell threshold** (≈ ≤64³ / 2D), opt-in config flag, fixed cycle
-  budget (= `poisson_max_mgcg_cycles`). Start with mgcg+multigrid (rmgcg deflation has
-  changing U/W; fft N/A). RBGS red/black can't be fused (Gauss-Seidel dep) — the win has to
-  come from graphs, not more fusion. This is also the T4 `--poisson_compile` prerequisite.
+GU6. ~~**CUDA-graph capture of the native solve**~~ ✅ SHIPPED (2026-06-15). Replays the
+  ~1300-kernel native V-cycle with ~1 host launch on launch-bound small grids. **Enabler**
+  (already done 2026-06-14): the native drivers take `tol < 0` = sync-free fixed-cycle mode
+  (skips the residual-norm `.item()` short-circuit) → host-sync-free → graph-capturable;
+  `tol >= 0` unchanged. **Wired into `PoissonSolver`** (`poisson_mult.py`): `_solve_mgcg_native`
+  / `_solve_multigrid_native` now route through `_graphed_native_solve` when enabled — lazily
+  captures one graph per (method, ndim, input-shape) into static p/f/face buffers, then each
+  step `copy_`s the live RHS + BDIM face coeffs + warm-start guess in, replays, copies p back
+  out (residual cloned). Capture failure → permanent eager fallback. Config:
+  `poisson_cuda_graph` (default False) + `poisson_cuda_graph_max_cells` (interior-cell gate,
+  default 64³) wired through `base_sim_config.py`. **mgcg + multigrid only** (rmgcg's
+  deflation basis changes / fft uses a different solver — both untouched, automatically
+  out of scope). **Verified:** graph vs eager bit-exact (`|dp|=0`, 2D/3D, both methods);
+  gating correct (N=96 skips, N=48 captures); speedup 9.8×/8.1× (2D-N64/128), 4.0× (3D-N48)
+  → 1.04× (3D-N128) — regime-dependent as the POC predicted, hence the size gate;
+  mgcg/rmgcg native self-tests still PASS. Harness `/tmp/verify_gu6.py` + `/tmp/verify_gu6_perf.py`.
+  ⇒ **SMALL-GRID-ONLY win** (launch-bound); net-NEGATIVE on large compute-bound 3D, so the
+  size gate is load-bearing. A full megakernel rewrite would share the large-grid limitation
+  AND hit a cooperative-launch occupancy ceiling (~64³) — graphs, size-gated, are the right
+  tool. RBGS red/black can't be fused (Gauss-Seidel dep).
+  **NOTE on T4 (`--poisson_compile`):** SUBSUMED — no distinct work remains. The literal T4
+  (`torch.compile` the *Python* multigrid path) was built (`14bbbfa`) then deliberately
+  removed (`4de22b2`, "unnecessary via kernel mode"); its surviving reframe ("CUDA-graph
+  capture of the whole native solve") IS this GU6 item, now shipped. The only forward-looking
+  follow-on is an optional device-side convergence flag so the captured graph can early-exit
+  when converged instead of running the fixed cycle budget (GU6 uses `tol<0` fixed cycles).
 
 ---
 
@@ -416,10 +422,11 @@ MP11. ~~**T5 Pipelined / communication-avoiding CG (native Poisson driver)**~~ �
   rounding floor* into the chaotic loss-of-orthogonality regime (which the Python path
   exhibits too); production runs 3 MGCG cycles, far below it. The f32 N=16 parity case in
   `test_poisson_solve_mgcg_self.py` was retuned to compare in the converged regime
-  (`max_cycles=6`). Still-open follow-on: this is the prerequisite for CUDA-graph capture
-  of the whole solve (T4 `--poisson_compile`) — would also need a device-side convergence
-  flag to drop the residual-norm sync. The plain `multigrid` driver already syncs only
-  once/cycle (residual norm), so it was left unchanged.
+  (`max_cycles=6`). Follow-on: this was the prerequisite for CUDA-graph capture of the whole
+  solve — now SHIPPED as GU6 (which uses the `tol<0` fixed-cycle mode to be sync-free rather
+  than needing a device-side convergence flag; an early-exit device flag remains an optional
+  enhancement). The plain `multigrid` driver already syncs only once/cycle (residual norm),
+  so it was left unchanged.
 
 ## 2D/3D solver unification — kernel parity
 

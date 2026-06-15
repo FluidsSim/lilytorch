@@ -508,6 +508,8 @@ class FluidSolver(PlottingMixin):
             smoother        = solver.get("poisson_smoother", "rbgs"),
             use_kernels     = self._use_kernels,
             recycle_k       = solver.get("poisson_recycle_k", 0),
+            cuda_graph      = solver.get("poisson_cuda_graph", False),
+            cuda_graph_max_cells = solver.get("poisson_cuda_graph_max_cells", 64 ** 3),
         )
         # Degenerate-cell freeze threshold. Cells with |diagonal| < jcap_tol are
         # frozen (iD=0, residual zeroed) — WaterLily's iszero(D) guard. The
