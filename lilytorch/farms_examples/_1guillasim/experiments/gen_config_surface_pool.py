@@ -27,7 +27,7 @@ class SimConfig(BaseSimConfig):
         self.force_method                  = "lagrangian"
         self.zero_pressure_inside          = True
         self.body_velocity_blend_eps_cells = None
-        self.bdim_mu0_projection           = False
+        self.bdim_mu0_projection           = True
         self.bdim_body_div_correction      = True
         self.poisson_method                = "multigrid"
 
@@ -46,11 +46,11 @@ class SimConfig(BaseSimConfig):
         self.animats_pars = [
             {
                 "model_name"     : "1guilla",
-                "sdf_name"       : "1guilla.sdf",
+                "sdf_name"       : "1guilla_800.sdf",
                 "control_type"   : "position",
                 "gains"          : [100.0, 1., 0],
-                "spawn_mode"     : SpawnMode.TRANSVERSE,
-                "pose"           : [4.75, 0.1, 0.0, 0, 0, 0.05],
+                "spawn_mode"     : SpawnMode.FREE,
+                "pose"           : [4.75, 0.1, -0., 0, 0, 0.05],
                 "controller_path": "lilytorch.farms_examples._1guillasim.experiments.controller.PositionController",
                 "control_pars"   : {
                     "file_path": os.path.join(
@@ -98,6 +98,11 @@ class SimConfig(BaseSimConfig):
         self.poisson_smoother        = "jacobi"
         self.poisson_nsmoothing      = 5
         self.poisson_bc_type         = "free"
+        # Effectively disable the per-step CUDA allocator flush: empty_cache()
+        # is cosmetic (lowers nvidia-smi reserved memory) and pure overhead in a
+        # fixed-shape loop. TODO (see milestones/to_do_list.md): drop the
+        # empty_cache() call from TwoPhaseSolver.finalize_step entirely.
+        self.empty_cache_every       = 10**9
 
         # ── Boundary conditions (3-D, all Dirichlet / no-slip) ───────
         self.bc_type_u   = ["D", "D", "D", "D", "D", "D"]
@@ -199,63 +204,63 @@ class SimConfig(BaseSimConfig):
     def extra_simulation_extensions(self, output_folder):
         extensions = []
 
-        extensions.append({
-            "loader": "lilytorch.integration.light_modifier.LightModifier",
-            "config": {
-                "diffuse": [1, 1, 1],
-                "ambient": [0.3, 0.3, 0.3],
-            },
-        })
+        # extensions.append({
+        #     "loader": "lilytorch.integration.light_modifier.LightModifier",
+        #     "config": {
+        #         "diffuse": [1, 1, 1],
+        #         "ambient": [0.3, 0.3, 0.3],
+        #     },
+        # })
 
-        # Air/water interface + vorticity wake visualisation
-        extensions.append({
-            "loader": "lilytorch.integration.flow_iso_gl_viewer.FlowIsoGLViewer",
-            "config": {
-                "update_every"      : 1,
-                "max_vertices"      : 20 * self.Nx * self.Ny,
-                "crop_boundary"     : 0,
-                "debug_force_visible": False,
-                "fields": [
-                    {
-                        "field"     : "interface",
-                        "iso_value" : 0.5,
-                        "alpha"     : 0.45,
-                        "color"     : "#3399FF",
-                        "smooth_sigma": 0,
-                        "exclude_body": False,
-                    },
-                    {
-                        "field"     : "omega_mag",
-                        "iso_value" : 10.0,
-                        "alpha"     : 0.3,
-                        "color"     : "#FF8C1A",
-                        "smooth_sigma": 0,
-                        "exclude_body": True,
-                        "phase_mask": "water",
-                    },
-                ],
-            },
-        })
+        # # Air/water interface + vorticity wake visualisation
+        # extensions.append({
+        #     "loader": "lilytorch.integration.flow_iso_gl_viewer.FlowIsoGLViewer",
+        #     "config": {
+        #         "update_every"      : 1,
+        #         "max_vertices"      : 20 * self.Nx * self.Ny,
+        #         "crop_boundary"     : 0,
+        #         "debug_force_visible": False,
+        #         "fields": [
+        #             {
+        #                 "field"     : "interface",
+        #                 "iso_value" : 0.5,
+        #                 "alpha"     : 0.45,
+        #                 "color"     : "#3399FF",
+        #                 "smooth_sigma": 0,
+        #                 "exclude_body": False,
+        #             },
+        #             # {
+        #             #     "field"     : "omega_mag",
+        #             #     "iso_value" : 10.0,
+        #             #     "alpha"     : 0.3,
+        #             #     "color"     : "#FF8C1A",
+        #             #     "smooth_sigma": 0,
+        #             #     "exclude_body": True,
+        #             #     "phase_mask": "water",
+        #             # },
+        #         ],
+        #     },
+        # })
 
-        # Top-down camera auto-fitted to the pool
-        cam = top_down_camera_config(
-            self.xmin, self.xmax,
-            self.ymin, self.ymax,
-            self.zmin, self.zmax,
-            overshoot=1,
-            max_width=3840, max_height=2160,
-        )
-        extensions.append({
-            "loader": "lilytorch.integration.streaming_camera.StreamingCameraRecording",
-            "config": {
-                "path"            : os.path.join(output_folder, "output", "video.mp4"),
-                "animat_id"       : None,
-                "fps"             : 30,
-                "speed"           : 1.0,
-                "angular_velocity": 0,
-                **cam,
-            },
-        })
+        # # Top-down camera auto-fitted to the pool
+        # cam = top_down_camera_config(
+        #     self.xmin, self.xmax,
+        #     self.ymin, self.ymax,
+        #     self.zmin, self.zmax,
+        #     overshoot=1,
+        #     max_width=3840, max_height=2160,
+        # )
+        # extensions.append({
+        #     "loader": "lilytorch.integration.streaming_camera.StreamingCameraRecording",
+        #     "config": {
+        #         "path"            : os.path.join(output_folder, "output", "video.mp4"),
+        #         "animat_id"       : None,
+        #         "fps"             : 30,
+        #         "speed"           : 1.0,
+        #         "angular_velocity": 0,
+        #         **cam,
+        #     },
+        # })
 
         return extensions
 

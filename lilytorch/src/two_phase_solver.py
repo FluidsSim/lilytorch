@@ -936,7 +936,12 @@ class TwoPhaseSolver(FluidSolver):
         import os
         if os.environ.get("LILYTORCH_UMAX_PROBE", "0") == "1":
             self._umax_probe(u, v, w_vel, iteration)
-        self.check_explosion(iteration)
+        # Throttle the blow-up check to check_explosion_every (default 50), like
+        # the base solver: check_explosion reads GPU reductions to the host
+        # (.cpu()) to branch in Python, which forces a GPU->CPU sync that stalls
+        # the async CUDA pipeline. Per-step it was a needless sync every step.
+        if iteration % self.check_explosion_every == 0:
+            self.check_explosion(iteration)
         # Deferred body-aware carve: on the kernel/streaming path the composite
         # sdf_val is first materialised by the post-step force kernel, so the
         # carve can only fire here (before this step's VOF transport).
@@ -949,7 +954,16 @@ class TwoPhaseSolver(FluidSolver):
             else:
                 self.two_phase.advect(u, v, w_vel, dt=self.dt)
         self._release_bdim_fields()
-        if self.device.type == "cuda":
+        # Flush the CUDA allocator cache only at the base solver's throttled
+        # cadence (empty_cache_every, default 200), NOT every step: the grids
+        # are fixed-size and the only variable-shape churn (the moving AABB
+        # force crops) is bounded, so the caching allocator reuses blocks
+        # across steps. A per-step empty_cache() returned all cached blocks to
+        # the driver and forced a sync every step -- pure overhead here, the
+        # dominant cost vs the one-way path (which runs this same lagrangian/
+        # AABB machinery at the 200-step cadence). Only nvidia-smi's reserved
+        # number rises; true peak working set is unchanged.
+        if self.device.type == "cuda" and iteration % self.empty_cache_every == 0:
             torch.cuda.empty_cache()
         return self.plotting_and_saving(u, v, p, iteration, w_vel=w_vel)
 

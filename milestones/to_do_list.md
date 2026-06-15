@@ -5,51 +5,17 @@ Memory vars: `sdf_val_{u,v,w}`, `{u,v,w,p}0`, `n{x,y,z}_{u,v,w}`, `body_{u,v,w}`
 
 ---
 
+# ═══════════════════════════════════════════════════════════
+# NEEDS WORK
+# ═══════════════════════════════════════════════════════════
+
 # HIGH PRIORITY
 
 HP3. **Polish repo & docs** — review/correct outdated documentation, including `docs/`.
 
-HP4. ~~**Wire in `FlowDiagnostics`.**~~ ✅ `FlowDiagnostics` moved to its own module
-  `lilytorch/src/diagnostics.py` (out of solver.py), instantiated in `FluidSolver.__init__`
-  when `diagnostics_every > 0`, called from `finalize_step` on the post-projection field,
-  and saved to `diagnostics.h5` at the end of `run_sim`/`run_from_initial`. Default
-  `diagnostics_every = 100` in `base_sim_config.py` (0 disables). Subsumes the old F4 item.
-
 ---
 
 # BUGS
-
-BG1. ✅ **`_forces_lagrangian_2d_python_ref` undefined variables (2026-06-11)** —
-  `eps_ij`, `nu_rho`, and `nu_rho_const` were used inside the per-body loop but never
-  computed in this function.  The production `forces_lagrangian_2d` computes them before
-  the loop via `_viscous_stress_tensor` + `_compute_nu_rho_for_forces`; the reference was
-  missing the same preamble → silently crashes at runtime when called for tests/debugging.
-  **Fix:** added the preamble (mirror of `forces_lagrangian_2d` lines 1094-1122) before
-  the body loop in `_forces_lagrangian_2d_python_ref`.
-
-BG2. ✅ **ABDQUICKEST hardcoded `C=0.1` (2026-06-11)** — `abdquickest(u, c, d, C=0.1)` used
-  a fixed Courant number regardless of the actual flow CFL.  For CFL > 0.1 the TVD limiter
-  is overly optimistic (less diffusive than it should be), and for CFL→0.5 the scheme is
-  no longer TVD-guaranteed.  `C` should be `|u|·dt/h` (the actual advective Courant).
-  **Fix:** in `AdvDiffSolver._solve_convective`, compute the step's max CFL before the
-  flux loop and pass it as `C` to `abdquickest`.  Stored on `self._scheme_name` to avoid
-  checking at every (i,d) iteration.
-
-BG3. ✅ **Semi-Lagrangian back-tracing upgraded to RK2 (2026-06-11)** — `_solve_semi_lagrangian`
-  used 1st-order Euler back-tracing `x_dep = x − u(x)·dt`.  Replaced with the 2-stage
-  midpoint method: `x_mid = x − 0.5·dt·u(x)`, then `x_dep = x − dt·u(x_mid)`.  This is
-  2nd-order accurate in the Lagrangian path at the cost of one extra interpolation per
-  component per step.  Also removed the spurious `.clone().detach()` calls (unnecessary
-  under `torch.no_grad()`) — now plain `.clone()`.
-
-BG4. ✅ **Dead `_use_legacy_sparse_forces_2d` code removed (2026-06-11)** — the flag was
-  hardcoded `False` since the sparse-AABB force path was unified; the dead AABB-union
-  block (lines 455-476) and the `if/else` cache branch (lines 502-511) were removed from
-  `forces_method2`.
-
-BG5. ✅ **`_vcycle_rbgs_2d/3d`: red/black masks reused between pre-smooth and post-smooth
-  (2026-06-11)** — masks are shape-dependent only so the post-smooth can reuse the ones
-  built for the pre-smooth at the same level; removed the duplicate `_rb_masks_*` call.
 
 BG6. **Multigrid residual restriction over-scaled (LOW priority, DEFER — regression risk)**
   — `_restrict_residual_2d/3d` in `poisson_mult.py` sums over fine cells without
@@ -60,14 +26,6 @@ BG6. **Multigrid residual restriction over-scaled (LOW priority, DEFER — regre
   post-smooth.  The potential fix is `* 0.5` on `_restrict_residual_*` (not `* 0.25`).
   Deferred: changing normalization on a working solver needs full regression coverage
   before merging.
-
-BG7. ✅ **`strain_rate_magnitude` cross-derivative stagger fix (2026-06-11)** — `dudy` (at
-  x-faces) and `dvdx` (at y-faces) were at different stagger positions before being summed
-  into S12 = 0.5·(∂u/∂y + ∂v/∂x); this made the Smagorinsky eddy viscosity physically
-  inconsistent in the cross terms.  **Fix:** added `_stag_to_cc` helper in `operations.py`
-  that averages each cross-derivative to cell centres before combining.  Verified: pure
-  shear gives `|S|=1.0`, solid rotation gives `|S|≈0` (machine precision) — previous code
-  gave spurious non-zero for solid rotation.
 
 ---
 
@@ -85,41 +43,9 @@ Target: ~8 GiB peak alloc on 3D runs. Do in sequence; remeasure after each stage
 > before T3a/T3b/T2a can be prioritised by measurement. The python-path standalone bench
 > proved the wrong path for these items. See `lilytorch/validation/cost_analysis/MEMORY_BASELINE.md`.
 
-MP1. ~~**H1 per-step `torch.cuda.empty_cache()`**~~ ✅ (2026-06-11). Gated to every
-  `empty_cache_every` steps (default 200, config key `empty_cache_every` in
-  `base_sim_config.py`).
-MP2. ~~**H2 per-step host sync in `check_explosion`**~~ ✅ (2026-06-11). Throttled to every
-  `check_explosion_every` steps (default 50, config key `check_explosion_every` in
-  `base_sim_config.py`).
-MP3. ~~**T1a**~~ ✅ Inlined `_tvd_face` into `van_leer`/`abdquickest`/`cubista` in
-  `advection.py`, chaining in-place on the owned `psi` and reusing the live `denom`;
-  `_tvd_face` helper removed. Verified bit-exact (fp32+fp64, incl. denom≈0 branch).
-MP4. ~~**T1b**~~ ✅ `div` is now a local in `solver.py:project()` (was a persistent
-  `self.div`) and is `del`-ed right after each `_poisson_solve` returns, before the
-  gradient/correction allocations. ~0.5 GiB transient + removes a persistent field.
-MP5. ~~**T3a**~~ ✅ (2026-06-11) Eliminated the `div` field on the multigrid/MGCG path:
-  `ops.divergence_interior()` computes the interior-only RHS (no ghost cells) directly
-  in `project()`; for the Python path it is scaled in-place by `h²` before the solve
-  (`pre_scaled=True` kwarg skips the redundant `f_scaled = h²·f` copy inside
-  `solve_multigrid`/`solve_mgcg`).  Kernel path (`use_kernels=True`) is unaffected
-  (native CUDA kernel applies h² internally).  FFT path unchanged (still uses full-grid
-  `div`).  Dead `'div'` entry removed from `_BDIM_FIELD_NAMES`.
 MP6. **T3b** Preallocate the V-cycle coarse-level pyramid at `__init__` instead of
   `torch.zeros` inside the recursion. ~0.5-1 GiB transient. (Python-path multigrid solve
   stayed ≤3.58 GiB; re-baseline on kernel path before judging peak benefit.)
-MP7. ~~**T2a**~~ ✅ (2026-06-12) Fused CUDA `advect_flux_add` kernel written in
-  `lilytorch/src/kernels/csrc/cuda/advection_flux.cu` and registered as
-  `torch.ops.lilytorch_kernels.advect_flux_add`. Replaces the Python
-  `_flux → F[:-1]-F[1:] → rhs.add_()` chain (which allocated ~4 full-grid tensors per
-  (i,d) pair) with a single kernel launch that accumulates the flux divergence in
-  registers and writes directly into rhs.  Handles all 5 schemes (QUICK, ABDQUICKEST,
-  vanLeer, CDS, CUBISTA) via compile-time template specialisation.  Handles
-  non-contiguous fv/p views via explicit stride parameters; rhs strides are also passed
-  so face_dim-dependent layout is handled correctly.  Activated automatically in
-  `AdvDiffSolver._solve_convective` on CUDA (skips `_get_step_scheme` sync for
-  ABDQUICKEST).  Measured **3.5–3.9× speedup** on 128³; 260/260 flux parity checks +
-  10/10 full `_solve_convective` parity checks passed at machine precision (fp64 rel_err
-  ≤ 1e-16).
 MP8. **T2b** Dirty-AABB-sized Kernel-A temps (`sdf_*_tmp`, `b*_tmp`: full-grid → AABB+halo).
   Needs `streaming_sdf.cu` changes; no peak movement until T2a.
 MP9. **T2c** Two-pass Kernel B for `primes` elimination (write to AABB scratch, copy back).
@@ -127,27 +53,6 @@ MP9. **T2c** Two-pass Kernel B for `primes` elimination (write to AABB scratch, 
 MP10. **T4** (architectural, 1+ wk each, measure first): fp16 SDF+body-vel temps;
   mixed-precision velocity fields (fp16 storage, fp32 compute); `--poisson_compile`
   CUDA-graph capture.
-MP11. ~~**T5 Pipelined / communication-avoiding CG (native Poisson driver)**~~ ✅
-  (2026-06-14) The native `mgcg`/`rmgcg` CG loop did ~4 host `.item()` syncs per iteration
-  (alpha ×2, beta, residual-norm), each a CPU↔GPU pipeline stall (native 2D solves at only
-  ~23% GPU-util). **Fix:** keep `alpha`/`beta` as 0-dim *device* scalars (drop the
-  `.item()` calls) and fuse the axpy updates with `addcmul_`/`mul_` (a 0-dim tensor
-  broadcasts — identical kernel count, no extra temps): `x += α·d` → `x_in.addcmul_(d_in,
-  alpha)`, `r -= α·q` → `r.addcmul_(q, alpha, -1.0)`, `d = β·d + z` → `d_in.mul_(beta)
-  .add_(z_in)`. This removes the alpha/beta D→H syncs, leaving the residual-norm check as
-  the only per-iter host sync (~1/iter, as targeted). Applied to all 4 drivers
-  (mgcg/rmgcg × 2D/3D) in `poisson_solve.cu`. **Measured ~1.13–1.18× wall-clock** on
-  sync-bound small-2D solves (N=32/64/128). Parity: rmgcg(kdef=0) still bit-identical to
-  mgcg (0.00e+00); all 3 Poisson self-tests PASS. NOTE: `addcmul_` is non-FMA (matches the
-  Python `_cg_core` reference formula exactly, vs the old scalar `add_` which used FMA) —
-  this only perturbs the LAST ULPs, visible solely when over-iterating f32 *past its
-  rounding floor* into the chaotic loss-of-orthogonality regime (which the Python path
-  exhibits too); production runs 3 MGCG cycles, far below it. The f32 N=16 parity case in
-  `test_poisson_solve_mgcg_self.py` was retuned to compare in the converged regime
-  (`max_cycles=6`). Still-open follow-on: this is the prerequisite for CUDA-graph capture
-  of the whole solve (T4 `--poisson_compile`) — would also need a device-side convergence
-  flag to drop the residual-norm sync. The plain `multigrid` driver already syncs only
-  once/cycle (residual norm), so it was left unchanged.
 
 ---
 
@@ -165,12 +70,6 @@ SU2. **Step 6 remainder — merge BDIMhandler `_update_2d/_3d` +
 Per-step rules: branch from `optimize_speed_memory`, one PR per step, validate 2D
 (`_1guillasim` pinned) + 3D (jellyfish) + cost_analysis (<5% wall-clock regression),
 rel-err <1e-6 on integrated quantities. No semantics changes.
-
-### Kernel parity (remaining minor)
-SU3. ~~**K9**~~ ✅ Added `is_cuda` TORCH_CHECK to `apply_bcs_2d_cuda` (mirrors 3D).
-SU4. ~~**K10**~~ ✅ `apply_bcs_2d/3d_kernel` now compute `src_lin` unconditionally
-  (Dirichlet's value is harmlessly discarded), dropping the dead `src_lin = 0` init and
-  the `if (kind != 1)` branch. Rebuilt `_C.so`; CPU↔CUDA parity exact (fp32+fp64).
 
 ---
 
@@ -195,12 +94,7 @@ GU3. **`adv_diff_streams`** never helps — dispatch overhead is in the Poisson 
   advection; streams add overhead. Not worth enabling alone.
 GU4. Combined `compile_project + adv_diff_streams` gives marginal extra gain over compile alone.
 
-✅ **All three config options implemented (2026-06-12):** `solver.compile_project`,
-`solver.use_cuda_graphs`, `solver.adv_diff_streams` wired into `FluidSolver.__init__`
-and exposed in `BaseSimConfig` (all default `False`). `compile_project=True` is the
-recommended opt-in for GPU production runs; `torch.compile` has a 30–100 s first-compile
-overhead (amortised over long sims). Benchmark script:
-`lilytorch/validation/cost_analysis/bench_gpu_util.py`.
+(All three config options have been implemented — see DONE section.)
 
 ### Native-path GPU-util — RE-PROFILED 2026-06-14 (after the native CUDA Poisson port)
 
@@ -213,15 +107,6 @@ alpha/beta syncs). The residual low GPU-util (22% @ 2D-N64 → 50% @ 3D-N96) is
 **CUDA kernel-launch latency**: the C++ V-cycle issues ~2100 *tiny* kernels per solve and
 the GPU idles between launches. Confirmed: idle ≈ (#launches) × ~1.5 µs.
 
-GU5. ~~**Fuse the per-axis Neumann BC into one launch**~~ ✅ (2026-06-14) The BC mirror
-  (`apply_neumann_bc_2d/3d` in `multigrid_smoothers.cu`) was the single largest launch-count
-  contributor — one kernel **per axis pair** (3 in 3D), called by every smoother half-sweep
-  and residual eval (~1170 launches/solve @ 3D-N96). Fused into ONE launch using
-  `blockIdx.{y,z}` as the axis-pair selector. Safe because the 5-/7-point stencils only read
-  **face** ghosts (each axis pair writes a disjoint interior-face slab → race-free; the
-  never-read edge/corner ghosts are left stale). **Measured:** launches/solve 2101→1321
-  (−37%), wall-clock **−10% (2D-N64) to −25% (3D-N48)**, −17% (3D-N96). multigrid/mgcg/rmgcg
-  self-tests still PASS (BC exercised through the full solve vs Python ref).
 GU6. **CUDA-graph capture of the native solve — PROVEN (POC), not yet wired in (2026-06-14).**
   The real ceiling-lift for launch-bound small grids: replay the ~1300 kernels with ~1 host
   launch. **Enabler DONE:** the native drivers now take `tol < 0` = sync-free fixed-cycle mode
@@ -247,14 +132,9 @@ GU6. **CUDA-graph capture of the native solve — PROVEN (POC), not yet wired in
 These run on EVERY step; none is measured for wall-clock cost yet. Time them
 (e.g. with the cost_analysis harness) before/after gating.
 
-PH1. ~~**H1 per-step `torch.cuda.empty_cache()`**~~ ✅ (2026-06-11) — see BUGS section above.
-PH2. ~~**H2 per-step host sync in `check_explosion`**~~ ✅ (2026-06-11) — see BUGS section above.
 PH3. **H3 `diagnostics_every=100` is now default-ON** in `base_sim_config.py` (2026-06-11).
   Adds a small recurring vorticity/divergence + host-sync cost. Defensible given the
   blow-up-debugging history, but RATIFY: keep at 100, or set 0 (opt-in)?
-PH4. ~~Delete legacy `adv_diff.py`~~ ✅ (2026-06-11) — repointed the lone importer
-  (`run_compile_advdiff_bench.py`) to `lilytorch.src.advection` (drop-in: identical
-  `AdvDiffSolver` API), removed the file, fixed the "kept on disk as legacy" docstrings.
 
 ---
 
@@ -264,23 +144,9 @@ LP2. Crank-Nicolson diffusion — current explicit limit `dt < h²/(2ν·ndim)` 
   bottleneck now, relevant only if dt is pushed aggressively.
 LP3. **eps configurable** — BDIM transition thickness is hardcoded `2h`; add `eps_cells`
   config key (3h-4h smoother on coarse grids).
-LP4. ~~**Cache `_compute_union_aabb` across BDIM + coefficient passes**~~ ✅ (2026-06-11).
-  The AABB was computed twice per step on the kernel path: once in `_apply_bdim_all_axes`
-  and once inside `_compute_bdim_coefficients`.  Now computed once in
-  `_fluid_step_kernel_{2,3}d` and reused by both; `_bdim_union_aabb` is reset to `None`
-  only after `_compute_bdim_coefficients` returns.
-LP5. ~~**Harmonic mean for variable viscosity**~~ ✅ (2026-06-11). `diffusion.py:
-  variable_laplacian` now uses the harmonic mean `2·νᵢ·νⱼ/(νᵢ+νⱼ)` for face viscosity
-  instead of the arithmetic mean.  More accurate for strongly varying viscosity
-  (Carreau/Herschel-Bulkley); backward-compatible (identical for constant ν).
 LP6. **F1 AABB cull force integration** — δ(sdf−ε) is evaluated over the whole domain per
   body but is nonzero only within ε. Slice to each body's AABB+ε. 10-100× for small
   swimmers in big pools.
-LP7. ~~**F3 cache CC normals**~~ ✅ (2026-06-11). `forces_method1/2/2_3d` now store
-  `self.normal_{x,y,z}` on the first call in a step; `_release_bdim_fields` clears them
-  after the step.  On the python path `_recompute_mu_normals` already sets them, so no
-  change.  On the kernel path and for implicit coupling sub-iterations this avoids a
-  redundant `torch.gradient` call per iteration.
 LP8. **F2** drag records: CPU pinned memory + async copy instead of GPU `nt` pre-alloc.
 
 ---
@@ -316,6 +182,38 @@ AP5. [ ] **Isaac Lab backend** — exposes body state as **torch GPU tensors**, 
       Strong fit; the adapter is the enabler. (MuJoCo-Warp/MJX is a GPU alternative.)
 Feasibility: MODERATE — numerics are already FARMS-free; the work is outer-loop
 (driver/config/controllers/viewers), not the solver.
+
+### Caveat A — model/file-description format (investigated 2026-06-15)
+FARMS owns TWO things behind the `.sdf` (SDFormat XML) authoring format, and they
+are SEPARABLE:
+  1. **SDF parser** (`farms_core.io.sdf.ModelSDF.read`) — used by BOTH the FARMS
+     converter AND lilytorch's own `BodyMesh`/`CompositeBody` (body.py), but the
+     latter only pulls *mesh files + link poses* to build its OWN signed-distance
+     tables. Shedding it is EASY (mostly pure-Python; vendor it, or author in
+     URDF/MJCF instead).
+  2. **SDF→MJCF converter** (`farms_mujoco/.../mjcf.py`, ~1725 lines) — the heavy,
+     MuJoCo-specific part (units, spawn modes, joint-axis rotation, inertial frames,
+     mesh composites, hfields, materials). Faithfully reproducing it is MODERATE–HARD,
+     but **largely AVOIDABLE**: MuJoCo loads MJCF/URDF natively → author there and
+     delete the conversion step.
+  Note BDIMhandler needs NEITHER (geometry from lilytorch `body.sdf`, poses from
+  MuJoCo `data.xpos/xquat`).
+AP5b. [ ] **Pick a portable model format.** SDFormat is the LEAST supported outside
+      Gazebo. Engine-native: MuJoCo=MJCF, Isaac Sim/Lab=USD (via URDF/USD importers),
+      Newton=USD/MJCF/URDF importers. Realistic common interchange = **URDF or MJCF**.
+      Recommendation: separate "geometry/inertia spec" (what BDIM needs: meshes +
+      link tree + poses + masses, format-agnostic) from "engine model" (native
+      MJCF/USD/URDF), and standardise authoring on URDF/MJCF rather than SDF→X.
+
+### Caveat B — logging (investigated 2026-06-15)
+FARMS provides efficient preallocated Cython typed arrays (`LinkSensorArray`,
+`JointSensorArray`, `ContactsArray`, `XfrcArray`, shape `[n_iter,n_links,size]`) →
+HDF5 via `dict_to_hdf5` (extensions.py `DataLogger`/`end_episode`).
+AP5c. [ ] **Backend-neutral `SensorLogger`** to replace FARMS `AnimatData` logging.
+      Feasibility EASY–MODERATE: lilytorch already has HDF5 logging patterns
+      (`diagnostics.py`, `save_drags_h5`). Only loss is the Cython buffer
+      micro-efficiency — negligible vs. the fluid solve. Pull per-step link/joint
+      state straight from the engine via the `RigidBodyBackend` adapter.
 
 ## Part 2 — Single-source CPU+GPU kernels (kill the .cpp/.cu double-write)
 Pain: kernels are hand-written TWICE (CPU `.cpp` + CUDA `.cu`) → more code, more bugs.
@@ -378,8 +276,211 @@ LT7. **Granular flow (sand) via μ(I)-rheology** — new physics: dense dry/imme
   `ops.strain_rate_magnitude`, VOF free surface for the pile surface). Pitched as the
   cheapest genuinely-new physics LilyTorch can add. Full design + milestone plan:
   `milestones/granular_design.md`.
-LT8. SPH simulation support (?).
-LT9. Monolithic strongly-coupled fluid + multi-rigid-body solver (?) — hard, would require dropping MuJoCo.
-LT10. Refactor: extract `FluidSolver.__init__` (~500 lines) into `_setup_grid/_models/
+LT8. **Elastic-body FSI via Cosserat rods (PyElastica coupling)** — simulate flexible
+  slender bodies (flapping fins, flagella, soft swimmers, plant stalks) in the BDIM solver.
+  **Key insight: the SDF is the easy part — no raycasting, no Bezier.** A Cosserat rod is a
+  chain of tapered capsules, and the analytical capsule-chain SDF already exists in the
+  codebase (`body.py: segment()` 2D round-cone, `capsule_3d`/`sdUnevenCapsule` 3D); the
+  deforming centerline+radius SDF machinery is exactly what `BodyFish*` already does each
+  step: `sdf(x) = smin_i segment(x, p_i, p_{i+1}, r_i, r_{i+1})`, AABB-cropped. Bezier is
+  strictly worse (no closed-form distance, sub-grid fidelity wasted below ~2h).
+  **Architecture:** PyElastica is the structural solver (like MuJoCo for rigid bodies) —
+  slots under the planned `RigidBodyBackend`/`StructuralBackend` adapter (AP1) returning
+  per-node positions/velocities/radii. Loop: query rod state → rebuild capsule-chain SDF →
+  body velocity = nearest-node velocity → BDIM+projection → bin hydro forces to centerline
+  nodes as distributed loads+moments → feed back to PyElastica. PyElastica is CPU/Numba but
+  a rod is ~100 nodes (negligible vs. fluid). New `BodyCosseratRod` + `PyElasticaBackend`.
+  **Real difficulties (NOT the SDF):** (1) **added-mass instability** — light flexible bodies
+  are the worst case; MUST use the already-shipped implicit Aitken/IQN-ILS coupling
+  (`BDIMhandler._step_implicit`), prefer Aitken to start (IQN reuse-poisoning trap); (2)
+  **force→moment attribution** — Cosserat elements carry bending/twist, so accumulate r×f
+  torque per node, not just force (extend the Lagrangian-marker force path); (3) **grid
+  resolution floor** — BDIM is volume-penalization, needs rod radius ≳ 2-3h (sub-grid fibers
+  need a different IB+drag-law model, out of scope); (4) **joint seam smoothness** — per-
+  segment min creates concave creases → noisy normals; use polynomial smooth-min for the
+  union (+ existing `body_velocity_blend_eps_cells` for the velocity side). Reuses ~3 existing
+  pieces: deforming-fish SDF builder, Lagrangian force attribution, implicit coupling.
+  NOTE: elastic *sheets / 3D soft solids* are the genuinely-hard SDF case (deforming FEM mesh
+  → per-step distance-to-deforming-triangles + robust winding-number sign); start with rods.
+
+LT9. SPH simulation support (?).
+LT10. Monolithic strongly-coupled fluid + multi-rigid-body solver (?) — hard, would require dropping MuJoCo.
+LT11. Refactor: extract `FluidSolver.__init__` (~500 lines) into `_setup_grid/_models/
   _poisson/_output`; add `BaseSimConfig.generate_config()` (dry-run YAML without launch);
   add type hints.
+
+---
+
+# ═══════════════════════════════════════════════════════════
+# ✅ DONE
+# ═══════════════════════════════════════════════════════════
+
+## High priority
+
+HP4. ~~**Wire in `FlowDiagnostics`.**~~ ✅ `FlowDiagnostics` moved to its own module
+  `lilytorch/src/diagnostics.py` (out of solver.py), instantiated in `FluidSolver.__init__`
+  when `diagnostics_every > 0`, called from `finalize_step` on the post-projection field,
+  and saved to `diagnostics.h5` at the end of `run_sim`/`run_from_initial`. Default
+  `diagnostics_every = 100` in `base_sim_config.py` (0 disables). Subsumes the old F4 item.
+
+## Bugs
+
+BG1. ✅ **`_forces_lagrangian_2d_python_ref` undefined variables (2026-06-11)** —
+  `eps_ij`, `nu_rho`, and `nu_rho_const` were used inside the per-body loop but never
+  computed in this function.  The production `forces_lagrangian_2d` computes them before
+  the loop via `_viscous_stress_tensor` + `_compute_nu_rho_for_forces`; the reference was
+  missing the same preamble → silently crashes at runtime when called for tests/debugging.
+  **Fix:** added the preamble (mirror of `forces_lagrangian_2d` lines 1094-1122) before
+  the body loop in `_forces_lagrangian_2d_python_ref`.
+
+BG2. ✅ **ABDQUICKEST hardcoded `C=0.1` (2026-06-11)** — `abdquickest(u, c, d, C=0.1)` used
+  a fixed Courant number regardless of the actual flow CFL.  For CFL > 0.1 the TVD limiter
+  is overly optimistic (less diffusive than it should be), and for CFL→0.5 the scheme is
+  no longer TVD-guaranteed.  `C` should be `|u|·dt/h` (the actual advective Courant).
+  **Fix:** in `AdvDiffSolver._solve_convective`, compute the step's max CFL before the
+  flux loop and pass it as `C` to `abdquickest`.  Stored on `self._scheme_name` to avoid
+  checking at every (i,d) iteration.
+
+BG3. ✅ **Semi-Lagrangian back-tracing upgraded to RK2 (2026-06-11)** — `_solve_semi_lagrangian`
+  used 1st-order Euler back-tracing `x_dep = x − u(x)·dt`.  Replaced with the 2-stage
+  midpoint method: `x_mid = x − 0.5·dt·u(x)`, then `x_dep = x − dt·u(x_mid)`.  This is
+  2nd-order accurate in the Lagrangian path at the cost of one extra interpolation per
+  component per step.  Also removed the spurious `.clone().detach()` calls (unnecessary
+  under `torch.no_grad()`) — now plain `.clone()`.
+
+BG4. ✅ **Dead `_use_legacy_sparse_forces_2d` code removed (2026-06-11)** — the flag was
+  hardcoded `False` since the sparse-AABB force path was unified; the dead AABB-union
+  block (lines 455-476) and the `if/else` cache branch (lines 502-511) were removed from
+  `forces_method2`.
+
+BG5. ✅ **`_vcycle_rbgs_2d/3d`: red/black masks reused between pre-smooth and post-smooth
+  (2026-06-11)** — masks are shape-dependent only so the post-smooth can reuse the ones
+  built for the pre-smooth at the same level; removed the duplicate `_rb_masks_*` call.
+
+BG7. ✅ **`strain_rate_magnitude` cross-derivative stagger fix (2026-06-11)** — `dudy` (at
+  x-faces) and `dvdx` (at y-faces) were at different stagger positions before being summed
+  into S12 = 0.5·(∂u/∂y + ∂v/∂x); this made the Smagorinsky eddy viscosity physically
+  inconsistent in the cross terms.  **Fix:** added `_stag_to_cc` helper in `operations.py`
+  that averages each cross-derivative to cell centres before combining.  Verified: pure
+  shear gives `|S|=1.0`, solid rotation gives `|S|≈0` (machine precision) — previous code
+  gave spurious non-zero for solid rotation.
+
+## Memory / perf
+
+MP1. ~~**H1 per-step `torch.cuda.empty_cache()`**~~ ✅ (2026-06-11). Gated to every
+  `empty_cache_every` steps (default 200, config key `empty_cache_every` in
+  `base_sim_config.py`).
+MP2. ~~**H2 per-step host sync in `check_explosion`**~~ ✅ (2026-06-11). Throttled to every
+  `check_explosion_every` steps (default 50, config key `check_explosion_every` in
+  `base_sim_config.py`).
+MP3. ~~**T1a**~~ ✅ Inlined `_tvd_face` into `van_leer`/`abdquickest`/`cubista` in
+  `advection.py`, chaining in-place on the owned `psi` and reusing the live `denom`;
+  `_tvd_face` helper removed. Verified bit-exact (fp32+fp64, incl. denom≈0 branch).
+MP4. ~~**T1b**~~ ✅ `div` is now a local in `solver.py:project()` (was a persistent
+  `self.div`) and is `del`-ed right after each `_poisson_solve` returns, before the
+  gradient/correction allocations. ~0.5 GiB transient + removes a persistent field.
+MP5. ~~**T3a**~~ ✅ (2026-06-11) Eliminated the `div` field on the multigrid/MGCG path:
+  `ops.divergence_interior()` computes the interior-only RHS (no ghost cells) directly
+  in `project()`; for the Python path it is scaled in-place by `h²` before the solve
+  (`pre_scaled=True` kwarg skips the redundant `f_scaled = h²·f` copy inside
+  `solve_multigrid`/`solve_mgcg`).  Kernel path (`use_kernels=True`) is unaffected
+  (native CUDA kernel applies h² internally).  FFT path unchanged (still uses full-grid
+  `div`).  Dead `'div'` entry removed from `_BDIM_FIELD_NAMES`.
+MP7. ~~**T2a**~~ ✅ (2026-06-12) Fused CUDA `advect_flux_add` kernel written in
+  `lilytorch/src/kernels/csrc/cuda/advection_flux.cu` and registered as
+  `torch.ops.lilytorch_kernels.advect_flux_add`. Replaces the Python
+  `_flux → F[:-1]-F[1:] → rhs.add_()` chain (which allocated ~4 full-grid tensors per
+  (i,d) pair) with a single kernel launch that accumulates the flux divergence in
+  registers and writes directly into rhs.  Handles all 5 schemes (QUICK, ABDQUICKEST,
+  vanLeer, CDS, CUBISTA) via compile-time template specialisation.  Handles
+  non-contiguous fv/p views via explicit stride parameters; rhs strides are also passed
+  so face_dim-dependent layout is handled correctly.  Activated automatically in
+  `AdvDiffSolver._solve_convective` on CUDA (skips `_get_step_scheme` sync for
+  ABDQUICKEST).  Measured **3.5–3.9× speedup** on 128³; 260/260 flux parity checks +
+  10/10 full `_solve_convective` parity checks passed at machine precision (fp64 rel_err
+  ≤ 1e-16).
+MP11. ~~**T5 Pipelined / communication-avoiding CG (native Poisson driver)**~~ ✅
+  (2026-06-14) The native `mgcg`/`rmgcg` CG loop did ~4 host `.item()` syncs per iteration
+  (alpha ×2, beta, residual-norm), each a CPU↔GPU pipeline stall (native 2D solves at only
+  ~23% GPU-util). **Fix:** keep `alpha`/`beta` as 0-dim *device* scalars (drop the
+  `.item()` calls) and fuse the axpy updates with `addcmul_`/`mul_` (a 0-dim tensor
+  broadcasts — identical kernel count, no extra temps): `x += α·d` → `x_in.addcmul_(d_in,
+  alpha)`, `r -= α·q` → `r.addcmul_(q, alpha, -1.0)`, `d = β·d + z` → `d_in.mul_(beta)
+  .add_(z_in)`. This removes the alpha/beta D→H syncs, leaving the residual-norm check as
+  the only per-iter host sync (~1/iter, as targeted). Applied to all 4 drivers
+  (mgcg/rmgcg × 2D/3D) in `poisson_solve.cu`. **Measured ~1.13–1.18× wall-clock** on
+  sync-bound small-2D solves (N=32/64/128). Parity: rmgcg(kdef=0) still bit-identical to
+  mgcg (0.00e+00); all 3 Poisson self-tests PASS. NOTE: `addcmul_` is non-FMA (matches the
+  Python `_cg_core` reference formula exactly, vs the old scalar `add_` which used FMA) —
+  this only perturbs the LAST ULPs, visible solely when over-iterating f32 *past its
+  rounding floor* into the chaotic loss-of-orthogonality regime (which the Python path
+  exhibits too); production runs 3 MGCG cycles, far below it. The f32 N=16 parity case in
+  `test_poisson_solve_mgcg_self.py` was retuned to compare in the converged regime
+  (`max_cycles=6`). Still-open follow-on: this is the prerequisite for CUDA-graph capture
+  of the whole solve (T4 `--poisson_compile`) — would also need a device-side convergence
+  flag to drop the residual-norm sync. The plain `multigrid` driver already syncs only
+  once/cycle (residual norm), so it was left unchanged.
+
+## 2D/3D solver unification — kernel parity
+
+SU3. ~~**K9**~~ ✅ Added `is_cuda` TORCH_CHECK to `apply_bcs_2d_cuda` (mirrors 3D).
+SU4. ~~**K10**~~ ✅ `apply_bcs_2d/3d_kernel` now compute `src_lin` unconditionally
+  (Dirichlet's value is harmlessly discarded), dropping the dead `src_lin = 0` init and
+  the `if (kind != 1)` branch. Rebuilt `_C.so`; CPU↔CUDA parity exact (fp32+fp64).
+
+## GPU utilisation
+
+✅ **All three config options implemented (2026-06-12):** `solver.compile_project`,
+`solver.use_cuda_graphs`, `solver.adv_diff_streams` wired into `FluidSolver.__init__`
+and exposed in `BaseSimConfig` (all default `False`). `compile_project=True` is the
+recommended opt-in for GPU production runs; `torch.compile` has a 30–100 s first-compile
+overhead (amortised over long sims). Benchmark script:
+`lilytorch/validation/cost_analysis/bench_gpu_util.py`.
+
+GU5. ~~**Fuse the per-axis Neumann BC into one launch**~~ ✅ (2026-06-14) The BC mirror
+  (`apply_neumann_bc_2d/3d` in `multigrid_smoothers.cu`) was the single largest launch-count
+  contributor — one kernel **per axis pair** (3 in 3D), called by every smoother half-sweep
+  and residual eval (~1170 launches/solve @ 3D-N96). Fused into ONE launch using
+  `blockIdx.{y,z}` as the axis-pair selector. Safe because the 5-/7-point stencils only read
+  **face** ghosts (each axis pair writes a disjoint interior-face slab → race-free; the
+  never-read edge/corner ghosts are left stale). **Measured:** launches/solve 2101→1321
+  (−37%), wall-clock **−10% (2D-N64) to −25% (3D-N48)**, −17% (3D-N96). multigrid/mgcg/rmgcg
+  self-tests still PASS (BC exercised through the full solve vs Python ref).
+
+## Per-step hot-path overhead
+
+PH1. ~~**H1 per-step `torch.cuda.empty_cache()`**~~ ✅ (2026-06-11) — see MP1.
+PH2. ~~**H2 per-step host sync in `check_explosion`**~~ ✅ (2026-06-11) — see MP2.
+PH5. **TwoPhaseSolver re-introduced the per-step `empty_cache()` (regresses PH1).**
+  `TwoPhaseSolver.finalize_step` (`lilytorch/src/two_phase_solver.py`) overrides the base
+  and calls `torch.cuda.empty_cache()` **unconditionally every step**, bypassing the
+  `empty_cache_every` throttle that fixed PH1 for the base solver — the dominant overhead
+  making the two-phase path (e.g. `gen_config_surface_pool.py`) much slower than the one-way
+  path (`gen_config_full_pool.py`) at identical grid/physics. The override also ran
+  `check_explosion` every step (regressed PH2). **check_explosion FIXED (2026-06-15):** the
+  override now gates it on `check_explosion_every` (default 50) like the base. **empty_cache
+  stopgap (2026-06-15):** gated the flush on `empty_cache_every` in the override + set
+  `empty_cache_every = 10**9` in `gen_config_surface_pool.py` so it never fires. **Remaining
+  proper fix:** delete the `empty_cache()` call from the override entirely (it is cosmetic —
+  only lowers nvidia-smi reserved memory — and unnecessary in a fixed-shape loop; the moving
+  AABB force crops are bounded). Confine to `two_phase_solver.py` (no core-source edits).
+PH4. ~~Delete legacy `adv_diff.py`~~ ✅ (2026-06-11) — repointed the lone importer
+  (`run_compile_advdiff_bench.py`) to `lilytorch.src.advection` (drop-in: identical
+  `AdvDiffSolver` API), removed the file, fixed the "kept on disk as legacy" docstrings.
+
+## Low priority
+
+LP4. ~~**Cache `_compute_union_aabb` across BDIM + coefficient passes**~~ ✅ (2026-06-11).
+  The AABB was computed twice per step on the kernel path: once in `_apply_bdim_all_axes`
+  and once inside `_compute_bdim_coefficients`.  Now computed once in
+  `_fluid_step_kernel_{2,3}d` and reused by both; `_bdim_union_aabb` is reset to `None`
+  only after `_compute_bdim_coefficients` returns.
+LP5. ~~**Harmonic mean for variable viscosity**~~ ✅ (2026-06-11). `diffusion.py:
+  variable_laplacian` now uses the harmonic mean `2·νᵢ·νⱼ/(νᵢ+νⱼ)` for face viscosity
+  instead of the arithmetic mean.  More accurate for strongly varying viscosity
+  (Carreau/Herschel-Bulkley); backward-compatible (identical for constant ν).
+LP7. ~~**F3 cache CC normals**~~ ✅ (2026-06-11). `forces_method1/2/2_3d` now store
+  `self.normal_{x,y,z}` on the first call in a step; `_release_bdim_fields` clears them
+  after the step.  On the python path `_recompute_mu_normals` already sets them, so no
+  change.  On the kernel path and for implicit coupling sub-iterations this avoids a
+  redundant `torch.gradient` call per iteration.
