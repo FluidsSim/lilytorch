@@ -151,6 +151,9 @@ class BDIMhandler:
             )
 
         # ---- axes (derived from ndim and 2d_plane) ----
+        # Simulated velocity components (u,v[,w]) — indexes the unified
+        # _update_python per-axis field lists (Step 6 unification).
+        self._sim_axes = list(range(self.ndim))
         if self.ndim == 3:
             self.lin_axes = [0, 1, 2]
             self.ang_axes = [0, 1, 2]
@@ -336,16 +339,16 @@ class BDIMhandler:
 
     def _init_update(self):
         kernel_mode = self.fluid_solver._solver_method == "kernel"
-        if self.ndim == 3:
-            if kernel_mode:
-                self.update = self._update_3d_streaming_multi
-            else:
-                self.update = self._update_3d
+        if kernel_mode:
+            # Unified streaming path (Step 6 unification): the former
+            # _update_2d/3d_streaming_multi are retained as the parity oracle
+            # (test_update_streaming_parity.py) but no longer dispatched.
+            self.update = self._update_streaming_multi
         else:
-            if kernel_mode:
-                self.update = self._update_2d_streaming_multi
-            else:
-                self.update = self._update_2d
+            # Unified Python path (Step 6 unification): the former
+            # _update_2d / _update_3d are retained as the parity oracle
+            # (see test_update_python_parity.py) but no longer dispatched.
+            self.update = self._update_python
 
     def _init_apply_forces(self):
         """Bind ``self.apply_forces`` and precompute per-D force-axis maps.
@@ -979,6 +982,279 @@ class BDIMhandler:
         """Write body velocity = num/den (guarded where den≈0, i.e. fluid)."""
         target_vel.copy_(num / den.clamp_min(1e-12))
 
+    # ==================================================================
+    #  Unified Python-path SDF/velocity update (2-D + 3-D)
+    # ==================================================================
+    def _update_python(self, t, iteration, dt=1):
+        """Dimension-agnostic FARMS-driven SDF + body-velocity update.
+
+        Merges the former ``_update_2d`` / ``_update_3d`` Python paths
+        (Step 6 of the 2D/3D unification).  ``self.ndim`` (2 or 3)
+        selects the per-axis field lists, the body-frame composition,
+        the rotation helper, the rigid-body velocity formula, and the
+        AABB descriptor; the per-body running-min union loop, the
+        smooth velocity blend, and the sparse-SDF bookkeeping are shared.
+
+        Behaviour is identical to the two former per-dim methods (no
+        semantics change).  ``self._sim_axes = range(ndim)`` indexes the
+        simulated velocity components (u,v[,w]).
+        """
+        D    = self.ndim
+        fs   = self.fluid_solver
+        comp = fs.composite_body
+        gs   = fs.grid_shape
+        B    = len(comp.bodies)
+
+        # Far-field SDF value (>> eps) so mu0 = 1 (pure fluid) and the
+        # union-min always prefers the closest real body value.
+        _FAR = 1e4
+
+        com_poses, urdf_poses, Rs, lin_vels, ang_vels = self.gather_data(iteration)
+
+        # Convert per-animat kinematics to device tensors for torch ops.
+        com_poses_t  = [torch.from_numpy(a).to(self.device) for a in com_poses]
+        urdf_poses_t = [torch.from_numpy(a).to(self.device) for a in urdf_poses]
+        Rs_t         = [torch.from_numpy(a).to(self.device) for a in Rs]
+        lin_vels_t   = [torch.from_numpy(a).to(self.device) for a in lin_vels]
+        ang_vels_t   = [torch.from_numpy(a).to(self.device) for a in ang_vels]
+
+        h_grid = comp.h          # uniform grid spacing
+
+        # Per-body sparse SDF storage for forces (reset each step).
+        comp._sdf_sparse = [None] * B
+
+        # Initialise union fields to _FAR / zero in-place (once per step).
+        comp.sdf_val.fill_(_FAR)
+        sdf_stag_fields = [comp.sdf_val_u, comp.sdf_val_v]
+        body_vel_fields = [comp.body_u, comp.body_v]
+        if D == 3:
+            sdf_stag_fields.append(comp.sdf_val_w)
+            body_vel_fields.append(comp.body_w)
+        for f in sdf_stag_fields:
+            f.fill_(_FAR)
+        for f in body_vel_fields:
+            f.zero_()
+
+        # CC grid coords (3-D uses Z_grid for the cell-centred z axis).
+        cc_coords = (comp.X, comp.Y) if D == 2 else (comp.X, comp.Y, comp.Z_grid)
+        # Per-axis staggered face coords (u,v[,w]).
+        if D == 2:
+            stag = [(comp.Xu_stag, comp.Yu_stag),
+                    (comp.Xv_stag, comp.Yv_stag)]
+        else:
+            stag = [(comp.Xu_stag, comp.Yu_stag, comp.Zu_stag),
+                    (comp.Xv_stag, comp.Yv_stag, comp.Zv_stag),
+                    (comp.Xw_stag, comp.Yw_stag, comp.Zw_stag)]
+
+        # Smooth velocity-blend bookkeeping: body_* hold the Σ w_i v_i
+        # numerator (zeroed above), den_* the Σ w_i denominator.
+        blend = self._blend_eps_cells is not None
+        if blend:
+            self._blend_eps = h_grid * self._blend_eps_cells
+            if (self._blend_den is None
+                    or self._blend_den[0].shape != comp.body_u.shape):
+                self._blend_den = [torch.zeros_like(comp.body_u)
+                                   for _ in range(D)]
+            den = self._blend_den
+            for d in den:
+                d.zero_()
+
+        # Cache per-body AABBs for downstream use (e.g. narrow-band forces).
+        for body_i, body in enumerate(comp.bodies):
+            (animat_id, link_id) = comp.body_ids[body_i]
+
+            com_pos  = com_poses_t[animat_id][link_id]
+            urdf_pos = urdf_poses_t[animat_id][link_id]
+            R        = Rs_t[animat_id][link_id]
+            lin_vel  = lin_vels_t[animat_id][link_id]
+            ang_vel  = ang_vels_t[animat_id][link_id]
+
+            # ── Body frame + AABB descriptor ────────────────────────
+            # 2-D rigid-body links collapse to identity local frames, so
+            # body_pos = urdf_pos, body_rot = R.  3-D composes the MuJoCo
+            # link pose with the body's local collision pose.
+            if D == 2:
+                body_pos, body_rot = urdf_pos, R
+                aabb = self._body_aabb_local_2d(
+                    body, body_rot, body_pos,
+                    comp.x, comp.y, h_grid, gs, pad=3,
+                )
+            else:
+                body_pos, body_rot = self._compose_body_frame_3d(
+                    body, urdf_pos, R)
+                aabb = self._body_aabb_indices(
+                    body, body_rot, body_pos,
+                    comp.x, comp.y, comp.z, h_grid, gs, pad=3,
+                )
+            comp._body_aabbs[body_i] = aabb
+            sl, full_region = self._slice_from_aabb(aabb, D)
+
+            R_T = body_rot.T
+            sdf_eval = body.sdf
+
+            def _rotate(coords):
+                if D == 2:
+                    return rotate_grid_2d(coords[0], coords[1], R_T, body_pos)
+                return _rotate_grid_3d_compiled(
+                    coords[0], coords[1], coords[2], R_T, body_pos)
+
+            # Cell-centred SDF (running-min geometry union).
+            p_cc = _rotate(tuple(c[sl] for c in cc_coords))
+            sdf_cc = sdf_eval(*p_cc)
+            self._store_sparse_sdf(comp, body_i, aabb, sdf_cc)
+            self._merge_region_sdf(comp.sdf_val, sdf_cc, sl, full_region)
+
+            # Staggered-face SDF + rigid-body velocity per simulated axis.
+            # v = lin + ω × (r − com); 2-D ω is the single out-of-plane
+            # component (the z-component of that cross product), 3-D is the
+            # full cross product evaluated at each face's stagger location.
+            if D == 2:
+                vels = [
+                    lin_vel[0] - ang_vel * (stag[0][1][sl] - com_pos[1]),
+                    lin_vel[1] + ang_vel * (stag[1][0][sl] - com_pos[0]),
+                ]
+            else:
+                vels = [
+                    (lin_vel[0]
+                     + ang_vel[1] * (stag[0][2][sl] - com_pos[2])
+                     - ang_vel[2] * (stag[0][1][sl] - com_pos[1])),
+                    (lin_vel[1]
+                     + ang_vel[2] * (stag[1][0][sl] - com_pos[0])
+                     - ang_vel[0] * (stag[1][2][sl] - com_pos[2])),
+                    (lin_vel[2]
+                     + ang_vel[0] * (stag[2][1][sl] - com_pos[1])
+                     - ang_vel[1] * (stag[2][0][sl] - com_pos[0])),
+                ]
+
+            for a in self._sim_axes:
+                p_a = _rotate(tuple(c[sl] for c in stag[a]))
+                sdf_a = sdf_eval(*p_a)
+                if blend:
+                    # Geometry stays running-min; velocity is the smooth
+                    # SDF-weighted blend (continuous across link seams).
+                    self._merge_region_sdf(
+                        sdf_stag_fields[a], sdf_a, sl, full_region)
+                    self._accum_region_velocity_blend(
+                        body_vel_fields[a], den[a], sdf_a, vels[a],
+                        sl, full_region)
+                else:
+                    self._merge_region_sdf_and_velocity(
+                        sdf_stag_fields[a], body_vel_fields[a],
+                        sdf_a, vels[a], sl, full_region)
+
+            comp.com_pos[body_i] = com_pos
+            body.com_pos = com_pos
+
+            # ── Lagrangian world-frame surface-marker refresh ───────
+            if self.force_method == "lagrangian":
+                if D == 2:
+                    self._refresh_lagrangian_contour_2d(
+                        body, R, urdf_pos)
+                else:
+                    self._refresh_lagrangian_tris_3d(
+                        comp, body_i, body, body_rot, body_pos)
+
+            # ── 2-D contour mask + per-link r_com (2-D only) ────────
+            if D == 2:
+                if self.contour_mask:
+                    self._apply_contour_mask_2d(
+                        comp, body_i, body, R, urdf_pos,
+                        Rs_t, urdf_poses_t, animat_id)
+                body.r_com = body.cnt_update - com_pos[:, None]
+
+        if blend:
+            for a in self._sim_axes:
+                self._finalize_velocity_blend(
+                    body_vel_fields[a], body_vel_fields[a], den[a])
+
+    def _refresh_lagrangian_contour_2d(self, body, R, urdf_pos):
+        """World-frame refresh of a 2-D body contour (``body.cnt_update``).
+
+        Lagrangian forces sample at ``body.cnt_update`` — must be in world
+        coords.  The body contour is oriented CCW once (kernel/force
+        convention: outward normal via ``nx = ty, ny = -tx``).
+        """
+        if body.cnt is None or body.cnt.numel() == 0:
+            return
+        if not hasattr(body, '_cnt_ccw_oriented'):
+            cl = body.cnt
+            dx = torch.roll(cl[0], -1) - cl[0]
+            dy = torch.roll(cl[1], -1) - cl[1]
+            cx_mid = 0.5 * (cl[0] + torch.roll(cl[0], -1))
+            cy_mid = 0.5 * (cl[1] + torch.roll(cl[1], -1))
+            signed_area = (0.5 * (cx_mid * dy - cy_mid * dx).sum()).item()
+            if signed_area < 0:
+                body.cnt = body.cnt.flip(dims=[1]).contiguous()
+            body._cnt_ccw_oriented = True
+        body.cnt_update = R @ body.cnt.to(self.dtype) + urdf_pos[:, None]
+
+    def _refresh_lagrangian_tris_3d(self, comp, body_i, body, body_rot, body_pos):
+        """World-frame refresh of a 3-D body's surface triangulation.
+
+        Mirrors the 2-D ``cnt_update`` refresh: rotate+translate the
+        body-local triangle centroids/normals into world coords so the
+        3-D Lagrangian force samples the right fluid locations.  The
+        bbox-centred mesh markers are shifted into the SDF-local frame
+        via :meth:`_lagr_marker_offset`.
+        """
+        tcl = getattr(body, 'tri_centroid_local', None)
+        tnl = getattr(body, 'tri_normal_local', None)
+        if tcl is None or tnl is None:
+            return
+        # NOTE: capture the marker offset BEFORE overwriting
+        # tri_centroid_world (it is read from the body's init value).
+        off = self._lagr_marker_offset(comp, body_i, body)
+        tcl_d = tcl.to(dtype=self.dtype, device=self.device)
+        tnl_d = tnl.to(dtype=self.dtype, device=self.device)
+        body.tri_centroid_world = body_rot @ (tcl_d + off) + body_pos[:, None]
+        body.tri_normal_world   = body_rot @ tnl_d
+
+    def _apply_contour_mask_2d(self, comp, body_i, body, R, urdf_pos,
+                               Rs_t, urdf_poses_t, animat_id):
+        """Optional contour mask for overlapping 2-D links (verbatim from
+        the former ``_update_2d``)."""
+        body.cnt_update = R @ body.cnt + urdf_pos[:, None]
+        x_cnt = body.cnt_update[0]
+        y_cnt = body.cnt_update[1]
+        prev_body_i = self._prev_body_index[body_i]
+        next_body_i = self._next_body_index[body_i]
+
+        if prev_body_i is None and next_body_i is None:
+            mask = torch.ones_like(x_cnt, dtype=torch.bool)
+        elif prev_body_i is None:
+            (_, next_link_id) = comp.body_ids[next_body_i]
+            body_p = comp.bodies[next_body_i]
+            pt = Rs_t[animat_id][next_link_id].T @ (
+                torch.stack((x_cnt, y_cnt))
+                - urdf_poses_t[animat_id][next_link_id][:, None]
+            )
+            mask = (body_p.sdf(pt[0], pt[1]) - body.h) >= 0
+        elif next_body_i is None:
+            (_, prev_link_id) = comp.body_ids[prev_body_i]
+            body_m = comp.bodies[prev_body_i]
+            pt = Rs_t[animat_id][prev_link_id].T @ (
+                torch.stack((x_cnt, y_cnt))
+                - urdf_poses_t[animat_id][prev_link_id][:, None]
+            )
+            mask = (body_m.sdf(pt[0], pt[1]) - body.h) >= 0
+        else:
+            (_, prev_link_id) = comp.body_ids[prev_body_i]
+            body_m = comp.bodies[prev_body_i]
+            pt_m = Rs_t[animat_id][prev_link_id].T @ (
+                torch.stack((x_cnt, y_cnt))
+                - urdf_poses_t[animat_id][prev_link_id][:, None]
+            )
+            (_, next_link_id) = comp.body_ids[next_body_i]
+            body_p = comp.bodies[next_body_i]
+            pt_p = Rs_t[animat_id][next_link_id].T @ (
+                torch.stack((x_cnt, y_cnt))
+                - urdf_poses_t[animat_id][next_link_id][:, None]
+            )
+            sdf_m = body_m.sdf(pt_m[0], pt_m[1]) - body.h
+            sdf_p = body_p.sdf(pt_p[0], pt_p[1]) - body.h
+            mask = (sdf_m >= 0) & (sdf_p >= 0)
+        body.mask = mask
+
     # ---- 2-D update --------------------------------------------------
     def _update_2d(self, t, iteration, dt=1):
 
@@ -1357,6 +1633,422 @@ class BDIMhandler:
                 off = torch.zeros(3, 1, dtype=self.dtype, device=self.device)
             cache[b] = off
         return off
+
+    # ==================================================================
+    #  Unified streaming (kernel-path) SDF/velocity update (2-D + 3-D)
+    # ==================================================================
+    def _stream_kin_static(self, comp, B, gs, D):
+        """Build (once) + return the cached static per-body kinematics
+        descriptor for the streaming kernel path.
+
+        Stored on ``comp._stream_kin_static`` (3-D) / ``_stream_kin_static_2d``
+        (2-D).  Holds the per-body local pose (``local_lt``/``local_lr``), the
+        local-frame SDF-box centre/half extent, the grid origin/spacing, and
+        numpy mirrors used by the per-step host assembly.  Merges the former
+        per-dim builders; the only dim-specific bit is the local-pose source
+        (3-D reads ``body.local_pose``; 2-D links collapse to identity) and
+        the SDF-box extent source (2-D prefers a tight ``local_aabb``).
+        """
+        attr = '_stream_kin_static' if D == 3 else '_stream_kin_static_2d'
+        kin_static = getattr(comp, attr, None)
+        if kin_static is not None:
+            return kin_static
+
+        anames = ('x', 'y', 'z')[:D]
+        body_ids = torch.tensor(
+            [(int(a), int(l)) for (a, l) in comp.body_ids], dtype=torch.int64,
+        )
+        local_lt = torch.zeros((B, D), dtype=self.dtype, device=self.device)
+        local_lr = torch.eye(
+            D, dtype=self.dtype, device=self.device,
+        ).unsqueeze(0).repeat(B, 1, 1)
+        sdf_lo = torch.empty((B, D), dtype=self.dtype, device=self.device)
+        sdf_hi = torch.empty((B, D), dtype=self.dtype, device=self.device)
+
+        for b, body in enumerate(comp.bodies):
+            m = body._stream_meta
+            if D == 3:
+                # Compose with the body's local collision pose (mesh links).
+                lp = getattr(body, 'local_pose', None)
+                if lp is not None:
+                    lp_t = torch.as_tensor(
+                        lp, dtype=self.dtype, device=self.device)
+                    local_lt[b] = lp_t[:3]
+                    local_lr[b] = torch.as_tensor(
+                        Rotation.from_euler(
+                            'xyz', lp_t[3:].detach().cpu().numpy(),
+                        ).as_matrix(),
+                        dtype=self.dtype, device=self.device,
+                    )
+                sx, sy, sz = m['bx'], m['by'], m['bz']
+                sdf_lo[b] = torch.stack((sx[0], sy[0], sz[0]))
+                sdf_hi[b] = torch.stack((sx[-1], sy[-1], sz[-1]))
+            else:
+                # 2-D rigid-body links have identity local frames (lt=0, lr=I,
+                # set above).  Prefer the tight contour-based AABB for mesh
+                # bodies whose SDF table is padded far beyond the BDIM band.
+                if 'local_aabb_lo' in m:
+                    sdf_lo[b] = m['local_aabb_lo'].to(
+                        dtype=self.dtype, device=self.device)
+                    sdf_hi[b] = m['local_aabb_hi'].to(
+                        dtype=self.dtype, device=self.device)
+                else:
+                    sdf_lo[b] = torch.stack((
+                        torch.as_tensor(m['bx0'], dtype=self.dtype, device=self.device),
+                        torch.as_tensor(m['by0'], dtype=self.dtype, device=self.device),
+                    ))
+                    sdf_hi[b] = torch.stack((
+                        torch.as_tensor(m['bx_last'], dtype=self.dtype, device=self.device),
+                        torch.as_tensor(m['by_last'], dtype=self.dtype, device=self.device),
+                    ))
+
+        grid_origin = [float(getattr(comp, a)[0].item()) for a in anames]
+        kin_static = {
+            'body_ids':     body_ids,
+            'local_lt':     local_lt,
+            'local_lr':     local_lr,
+            'local_center': 0.5 * (sdf_lo + sdf_hi),
+            'local_half':   0.5 * (sdf_hi - sdf_lo),
+            'grid_origin':  torch.tensor(
+                grid_origin, dtype=self.dtype, device=self.device),
+            'inv_h':        1.0 / float(comp.h),
+            'gs':           torch.tensor(gs, dtype=torch.int64, device=self.device),
+            'pad':          3,
+            # numpy mirrors used by the host-side per-step assembly.  2-D
+            # stores zeros/identity for local_lt/lr so the unified compose
+            # einsum is a bit-exact no-op there (R@I = R, urdf + R@0 = urdf).
+            'body_ids_np':     body_ids.numpy(),
+            'local_lt_np':     local_lt.detach().cpu().numpy().copy(),
+            'local_lr_np':     local_lr.detach().cpu().numpy().copy(),
+            'local_center_np': (0.5 * (sdf_lo + sdf_hi)).detach().cpu().numpy().copy(),
+            'local_half_np':   (0.5 * (sdf_hi - sdf_lo)).detach().cpu().numpy().copy(),
+            'grid_origin_np':  np.array(grid_origin, dtype=self.dtype_np),
+            'gs_np':           np.array(gs, dtype=np.int64),
+        }
+        setattr(comp, attr, kin_static)
+        return kin_static
+
+    def _stream_static_pack(self, comp, D):
+        """Build (once) the packed static per-body device tensors consumed by
+        the streaming kernels.  Stored under the exact names ``_kernel_static_2d``
+        / ``_kernel_static_3d`` (read by ``forces.py`` and ``solver.fluid_step``).
+
+        ``body_meta`` row layout (generic over the D simulated axes):
+        ``[b{a}0 …] + [b{a}_last …] + [inv_d{a} …] + [inv_vol]`` — exactly the
+        former per-dim layouts (10 entries in 3-D, 7 in 2-D).
+        """
+        attr = '_kernel_static_3d' if D == 3 else '_kernel_static_2d'
+        if getattr(comp, attr, None) is not None:
+            return
+        anames = ('x', 'y', 'z')[:D]
+        _use_combined_cache = self.fluid_solver._use_kernels
+
+        F_chunks = []
+        F_off    = [0]
+        shapes   = []
+        meta     = []
+        if not _use_combined_cache:
+            b_chunks = {a: [] for a in anames}
+            b_off    = {a: [0] for a in anames}
+        for body in comp.bodies:
+            m = body._stream_meta
+            F_chunks.append(m['F'].flatten())
+            F_off.append(F_off[-1] + m['F'].numel())
+            shapes.append([int(s) for s in m['F'].shape])
+            meta.append(
+                [m[f'b{a}0'] for a in anames]
+                + [m[f'b{a}_last'] for a in anames]
+                + [m[f'inv_d{a}'] for a in anames]
+                + [m['inv_vol']]
+            )
+            if not _use_combined_cache:
+                for a in anames:
+                    b_chunks[a].append(m[f'b{a}'])
+                    b_off[a].append(b_off[a][-1] + m[f'b{a}'].numel())
+        F_flat = torch.cat(F_chunks).contiguous()
+        sm = {
+            'F_flat':      F_flat,
+            'F_offsets':   torch.tensor(F_off,  dtype=torch.int64, device=self.device),
+            'body_shapes': torch.tensor(shapes, dtype=torch.int64, device=self.device),
+            'body_meta':   torch.tensor(meta,   dtype=self.dtype,  device=self.device),
+        }
+        if not _use_combined_cache:
+            for a in anames:
+                sm[f'b{a}_flat']    = torch.cat(b_chunks[a]).contiguous()
+                sm[f'b{a}_offsets'] = torch.tensor(
+                    b_off[a], dtype=torch.int64, device=self.device)
+        # De-duplicate per-body body-template SDFs into the packed F_flat buffer.
+        for b, body in enumerate(comp.bodies):
+            m = body._stream_meta
+            m['F'] = F_flat[F_off[b]:F_off[b + 1]].view(*shapes[b])
+        del F_chunks
+        if not _use_combined_cache:
+            del b_chunks
+        setattr(comp, attr, sm)
+
+    def _stream_lagrangian_refresh(self, comp, D, body_R_np, body_pos_np):
+        """World-frame refresh of the Lagrangian surface markers (kernel path).
+
+        Batched ``bmm`` over a cached flat pack: 3-D rotates the triangle
+        centroids/normals (``tri_centroid/normal_world``), 2-D rotates the
+        contour (``cnt_update``).  Skipped entirely for the Eulerian path.
+        """
+        if D == 3:
+            R_b_t   = torch.from_numpy(np.ascontiguousarray(body_R_np)).to(self.device)
+            pos_b_t = torch.from_numpy(np.ascontiguousarray(body_pos_np)).to(self.device)
+            pack = getattr(comp, '_lagr_tri_pack', None)
+            if pack is None:
+                cs, ns, idxs, offs, valid = [], [], [], [0], []
+                for b, body in enumerate(comp.bodies):
+                    tcl = getattr(body, 'tri_centroid_local', None)
+                    tnl = getattr(body, 'tri_normal_local', None)
+                    if tcl is None or tnl is None:
+                        offs.append(offs[-1]); valid.append(False); continue
+                    tcl_d = tcl.to(dtype=self.dtype, device=self.device)
+                    tnl_d = tnl.to(dtype=self.dtype, device=self.device)
+                    cs.append(tcl_d + self._lagr_marker_offset(comp, b, body))
+                    ns.append(tnl_d)
+                    idxs.append(torch.full((tcl_d.shape[1],), b, dtype=torch.long, device=self.device))
+                    offs.append(offs[-1] + tcl_d.shape[1]); valid.append(True)
+                pack = {
+                    'cen':      torch.cat(cs, dim=1) if cs
+                                else torch.empty(3, 0, dtype=self.dtype, device=self.device),
+                    'nrm':      torch.cat(ns, dim=1) if ns
+                                else torch.empty(3, 0, dtype=self.dtype, device=self.device),
+                    'body_idx': torch.cat(idxs) if idxs
+                                else torch.empty(0, dtype=torch.long, device=self.device),
+                    'offs': offs, 'valid': valid,
+                }
+                comp._lagr_tri_pack = pack
+            cen = pack['cen']
+            if cen.shape[1] > 0:
+                nrm = pack['nrm']; body_idx = pack['body_idx']
+                offs = pack['offs']; valid = pack['valid']
+                Rm     = R_b_t.index_select(0, body_idx)
+                cw     = torch.bmm(Rm, cen.transpose(0, 1).unsqueeze(-1)).squeeze(-1) \
+                         + pos_b_t.index_select(0, body_idx)
+                nw     = torch.bmm(Rm, nrm.transpose(0, 1).unsqueeze(-1)).squeeze(-1)
+                cw_flat = cw.transpose(0, 1).contiguous()
+                nw_flat = nw.transpose(0, 1).contiguous()
+                for b, body in enumerate(comp.bodies):
+                    if valid[b]:
+                        body.tri_centroid_world = cw_flat[:, offs[b]:offs[b + 1]]
+                        body.tri_normal_world   = nw_flat[:, offs[b]:offs[b + 1]]
+        else:
+            # 2-D: body_R_np == R_link_np and body_pos_np == urdf_pos_np
+            # (identity local frame), so these are the same world transforms.
+            R_t    = torch.from_numpy(np.ascontiguousarray(body_R_np)).to(self.device)
+            urdf_t = torch.from_numpy(np.ascontiguousarray(body_pos_np)).to(self.device)
+            pack = getattr(comp, '_lagr_cnt_pack', None)
+            if pack is None:
+                locals_, idxs, offs, valid = [], [], [0], []
+                for b, body in enumerate(comp.bodies):
+                    if body.cnt is None or body.cnt.numel() == 0:
+                        offs.append(offs[-1]); valid.append(False); continue
+                    cl = body.cnt
+                    dx = torch.roll(cl[0], -1) - cl[0]
+                    dy = torch.roll(cl[1], -1) - cl[1]
+                    cx_mid = 0.5 * (cl[0] + torch.roll(cl[0], -1))
+                    cy_mid = 0.5 * (cl[1] + torch.roll(cl[1], -1))
+                    signed_area = (0.5 * (cx_mid * dy - cy_mid * dx).sum()).item()
+                    if signed_area < 0:
+                        body.cnt = body.cnt.flip(dims=[1]).contiguous()
+                    body._cnt_ccw_oriented = True
+                    cl = body.cnt.to(dtype=self.dtype, device=self.device)
+                    locals_.append(cl)
+                    idxs.append(torch.full((cl.shape[1],), b, dtype=torch.long, device=self.device))
+                    offs.append(offs[-1] + cl.shape[1]); valid.append(True)
+                pack = {
+                    'local_flat': torch.cat(locals_, dim=1) if locals_
+                                  else torch.empty(2, 0, dtype=self.dtype, device=self.device),
+                    'body_idx':   torch.cat(idxs) if idxs
+                                  else torch.empty(0, dtype=torch.long, device=self.device),
+                    'offs': offs, 'valid': valid,
+                }
+                comp._lagr_cnt_pack = pack
+            local_flat = pack['local_flat']
+            if local_flat.shape[1] > 0:
+                body_idx = pack['body_idx']; offs = pack['offs']; valid = pack['valid']
+                Rm    = R_t.index_select(0, body_idx)
+                clq   = local_flat.transpose(0, 1).unsqueeze(-1)
+                world = torch.bmm(Rm, clq).squeeze(-1) + urdf_t.index_select(0, body_idx)
+                world_flat = world.transpose(0, 1).contiguous()
+                for b, body in enumerate(comp.bodies):
+                    if valid[b]:
+                        body.cnt_update = world_flat[:, offs[b]:offs[b + 1]]
+
+    def _update_streaming_multi(self, t, iteration, dt=1):
+        """Unified batched multi-body streaming SDF update (2-D + 3-D).
+
+        Merges the former ``_update_2d_streaming_multi`` /
+        ``_update_3d_streaming_multi`` (Step 6 unification).  Assembles the
+        per-step packed kinematics + AABB tensors and stashes them on
+        ``comp._kernel_step`` / ``_kernel_static_{2,3}d`` for the fused CUDA
+        SDF/coefficient kernels launched in ``FluidSolver.fluid_step``.  The
+        per-dim packed layouts (kin row, body_meta, dirty-AABB keys) are
+        reproduced exactly via ``self._sim_axes``; behaviour is unchanged.
+        """
+        D    = self.ndim
+        fs   = self.fluid_solver
+        comp = fs.composite_body
+        gs   = fs.grid_shape
+        _FAR = 1e4
+        B    = len(comp.bodies)
+        anames = ('x', 'y', 'z')[:D]
+
+        com_poses, urdf_poses, Rs, lin_vels, ang_vels = self.gather_data(iteration)
+
+        g_1d = tuple(getattr(comp, f'g{a}_1d') for a in anames)
+
+        if not fs._use_kernels:
+            raise RuntimeError(
+                f"The legacy sparse {D}-D kernel path has been removed; "
+                f"use solver_method='kernel' or 'python'.")
+
+        # ---- static per-body descriptors (cached) ----
+        kin_static = self._stream_kin_static(comp, B, gs, D)
+        self._stream_static_pack(comp, D)
+        body_ids_np = kin_static['body_ids_np']
+
+        # ---- gather per-body kinematics on the host (numpy) ----
+        urdf_pos_np = np.empty((B, D), dtype=self.dtype_np)
+        com_pos_np  = np.empty((B, D), dtype=self.dtype_np)
+        R_link_np   = np.empty((B, D, D), dtype=self.dtype_np)
+        lin_vel_np  = np.empty((B, D), dtype=self.dtype_np)
+        ang_vel_np  = np.empty((B, 3) if D == 3 else (B,), dtype=self.dtype_np)
+        for b in range(B):
+            a_id = int(body_ids_np[b, 0]); l_id = int(body_ids_np[b, 1])
+            urdf_pos_np[b] = urdf_poses[a_id][l_id]
+            com_pos_np[b]  = com_poses[a_id][l_id]
+            R_link_np[b]   = Rs[a_id][l_id]
+            lin_vel_np[b]  = lin_vels[a_id][l_id]
+            ang_vel_np[b]  = ang_vels[a_id][l_id]
+
+        # ---- compose body frame: body_pos = urdf + R@lt; body_R = R@lr ----
+        local_lt_np = kin_static['local_lt_np']
+        local_lr_np = kin_static['local_lr_np']
+        body_pos_np = urdf_pos_np + np.einsum('bij,bj->bi', R_link_np, local_lt_np)
+        body_R_np   = np.einsum('bij,bjk->bik', R_link_np, local_lr_np)
+
+        # ---- Lagrangian world-frame marker refresh (per-dim) ----
+        if self.force_method == "lagrangian":
+            self._stream_lagrangian_refresh(comp, D, body_R_np, body_pos_np)
+
+        # ---- vectorised world-space AABB of the oriented body-SDF box ----
+        local_center_np = kin_static['local_center_np']
+        local_half_np   = kin_static['local_half_np']
+        g0_np  = kin_static['grid_origin_np']
+        inv_h  = kin_static['inv_h']
+        gs_np  = kin_static['gs_np']
+        pad    = kin_static['pad']
+
+        abs_R_np     = np.abs(body_R_np)
+        world_half   = np.einsum('bij,bj->bi', abs_R_np, local_half_np)
+        world_center = np.einsum('bij,bj->bi', body_R_np, local_center_np) + body_pos_np
+        w_min = world_center - world_half
+        w_max = world_center + world_half
+
+        i_lo = np.floor((w_min - g0_np) * inv_h).astype(np.int64) - pad
+        i_hi = np.floor((w_max - g0_np) * inv_h).astype(np.int64) + 1 + pad
+        np.clip(i_lo, 0, None, out=i_lo)
+        np.minimum(i_hi, gs_np[None, :], out=i_hi)
+        if D == 2:
+            # Clamp partially/entirely out-of-bounds bodies to a zero-size AABB.
+            np.maximum(i_hi, i_lo, out=i_hi)
+
+        dims     = i_hi - i_lo
+        sub_vol  = dims.prod(axis=1)
+        full_vol = int(np.prod(gs_np))
+        fallback = sub_vol > int(0.9 * full_vol)   # >90 % grid -> full grid
+        if fallback.any():
+            i_lo[fallback, :] = 0
+            i_hi[fallback, :] = gs_np
+            dims = i_hi - i_lo
+
+        max_vol = int(dims.prod(axis=1).max()) if B > 0 else 0
+
+        # ---- per-body AABB metadata + current/dirty union AABB ----
+        for b in range(B):
+            lo = [int(i_lo[b, ax]) for ax in range(D)]
+            dm = [int(dims[b, ax]) for ax in range(D)]
+            comp._body_aabbs[b] = tuple(
+                v for ax in range(D) for v in (lo[ax], lo[ax] + dm[ax]))
+
+        if B > 0:
+            curr_lo = [int(i_lo[:, ax].min()) for ax in range(D)]
+            curr_hi = [int(i_hi[:, ax].max()) for ax in range(D)]
+        else:
+            curr_lo = [0] * D
+            curr_hi = [int(gs[ax]) for ax in range(D)]
+
+        prev = getattr(comp, '_combined_union_aabb', None)
+        if prev is not None:
+            d_lo = [min(prev[2 * ax],     curr_lo[ax]) for ax in range(D)]
+            d_hi = [max(prev[2 * ax + 1], curr_hi[ax]) for ax in range(D)]
+        else:
+            # First step: comp.sdf_val starts at _FAR everywhere, so the
+            # current union AABB alone is a safe dirty region.
+            d_lo = list(curr_lo)
+            d_hi = list(curr_hi)
+
+        # Reset running-min CC SDF in the dirty sub-block (O(dirty_vol)).
+        comp._sdf_sparse = [None] * B
+        comp.sdf_val[tuple(slice(d_lo[ax], d_hi[ax]) for ax in range(D))].fill_(_FAR)
+
+        # ---- assemble per-step kin on the host ----
+        # Layout: [R^T (D*D) | body_pos (D) | com_pos (D) | lin_vel (D) | ang (3|1)].
+        wRT   = D * D
+        ang_w = 3 if D == 3 else 1
+        kin_np = np.empty((B, wRT + 3 * D + ang_w), dtype=self.dtype_np)
+        kin_np[:, 0:wRT] = body_R_np.transpose(0, 2, 1).reshape(B, wRT)
+        o = wRT
+        kin_np[:, o:o + D] = body_pos_np; o += D
+        kin_np[:, o:o + D] = com_pos_np;  o += D
+        kin_np[:, o:o + D] = lin_vel_np;  o += D
+        if D == 3:
+            kin_np[:, o:o + 3] = ang_vel_np
+        else:
+            kin_np[:, o] = ang_vel_np
+
+        # ---- single H2D transfer for the packed per-step tensors ----
+        kin       = torch.from_numpy(np.ascontiguousarray(kin_np)).to(self.device)
+        aabb_lo   = torch.from_numpy(np.ascontiguousarray(i_lo)).to(self.device)
+        aabb_dim  = torch.from_numpy(np.ascontiguousarray(dims)).to(self.device)
+        com_pos_t = torch.from_numpy(np.ascontiguousarray(com_pos_np)).to(self.device)
+
+        # ---- maintain comp.com_pos / body.com_pos views for downstream code ----
+        for b, body in enumerate(comp.bodies):
+            comp.com_pos[b] = com_pos_t[b]
+            body.com_pos = comp.com_pos[b]
+
+        # Kernel path does not populate per-body CC-SDF slabs.
+        for b in range(B):
+            comp._sdf_sparse[b] = None
+        # Cache the union AABB so _compute_union_aabb can use the cheap
+        # sub-block mu/normals path without reading _sdf_sparse.
+        comp._combined_union_aabb = tuple(
+            v for ax in range(D) for v in (curr_lo[ax], curr_hi[ax]))
+        # Kernel forces are evaluated later from post-fluid-step fields.
+        comp._combined_forces_out = None
+
+        # Stash per-step metadata for FluidSolver.fluid_step (Kernel A streaming
+        # SDF + Kernel B fused BDIM2/Poisson coefficients over the dirty block).
+        kstep = {
+            'kin':      kin,
+            'aabb_lo':  aabb_lo,
+            'aabb_dim': aabb_dim,
+            'max_vol':  max_vol,
+        }
+        for ax, a in enumerate(anames):
+            kstep[f'g{a}'] = g_1d[ax]
+        kstep['dirty_i0'] = int(d_lo[0])
+        kstep['dirty_j0'] = int(d_lo[1])
+        kstep['dirty_Ai'] = int(d_hi[0] - d_lo[0])
+        kstep['dirty_Aj'] = int(d_hi[1] - d_lo[1])
+        if D == 3:
+            kstep['dirty_k0'] = int(d_lo[2])
+            kstep['dirty_Ak'] = int(d_hi[2] - d_lo[2])
+        comp._kernel_step = kstep
 
     # ------------------------------------------------------------------
     #  Streaming combined-CUDA 3-D SDF update (Phase B)

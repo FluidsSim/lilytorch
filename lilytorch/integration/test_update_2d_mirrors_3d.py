@@ -6,7 +6,7 @@ Validates the Stage-1 rewrite that replaced the batched
 
 The test does NOT depend on FARMS / MuJoCo / open3d.  It exercises:
 
-  * ``BDIMhandler._body_aabb_indices_2d`` — both mesh-style (with
+  * ``BDIMhandler._body_aabb_local_2d`` — both mesh-style (with
     ``body.sdf.x/y``) and analytical-style (contour-bbox + 4 h margin)
     paths.
   * ``rotate_grid_2d`` — the per-body local-frame rotation used inside
@@ -138,7 +138,7 @@ def _torch_where_aabb_union(bodies, poses, X, Y, h, gs):
         if (hasattr(body, 'sdf')
                 and hasattr(body.sdf, 'x')
                 and hasattr(body.sdf, 'y')):
-            aabb = BDIMhandler._body_aabb_indices_2d(
+            aabb = BDIMhandler._body_aabb_local_2d(
                 body, R, urdf_pos, x_axis, y_axis, h, gs, pad=3,
             )
         if aabb is None:
@@ -204,14 +204,14 @@ def main():
     if (hasattr(bodies[0], 'sdf')
             and hasattr(bodies[0].sdf, 'x')
             and hasattr(bodies[0].sdf, 'y')):
-        aabb_circle = BDIMhandler._body_aabb_indices_2d(
+        aabb_circle = BDIMhandler._body_aabb_local_2d(
             bodies[0], R0, urdf0, X[:, 0], Y[0], h, gs, pad=3,
         )
     aabb_square = None
     if (hasattr(bodies[1], 'sdf')
             and hasattr(bodies[1].sdf, 'x')
             and hasattr(bodies[1].sdf, 'y')):
-        aabb_square = BDIMhandler._body_aabb_indices_2d(
+        aabb_square = BDIMhandler._body_aabb_local_2d(
             bodies[1], R1, urdf1, X[:, 0], Y[0], h, gs, pad=3,
         )
 
@@ -263,7 +263,7 @@ def main():
     print(f"  mesh-square AABB covers all interior cells  "
           f"(count={int(inside_square.sum().item())})")
 
-    # Edge case: very large analytical body — _body_aabb_indices_2d is
+    # Edge case: very large analytical body — _body_aabb_local_2d is
     # not called for analytical bodies (no body.sdf.x/y).  We still
     # exercise the helper directly with a fake interpolator-like object
     # to confirm the >90 % full-grid heuristic still kicks in for
@@ -280,7 +280,7 @@ def main():
             )
             self.h = h
     big_body = _BigGridSDF()
-    aabb_big = BDIMhandler._body_aabb_indices_2d(
+    aabb_big = BDIMhandler._body_aabb_local_2d(
         big_body, torch.eye(2), torch.zeros(2),
         X[:, 0], Y[0], h, gs, pad=3,
     )
@@ -296,7 +296,7 @@ def main():
     # outside the AABB have body SDF ≥ band_margin, so omitting them
     # from the running-min cannot pollute the union.
     body_circ_aabb = _AnalyticalCircle(radius=0.07, with_local_aabb=True)
-    aabb_circ = BDIMhandler._body_aabb_indices_2d(
+    aabb_circ = BDIMhandler._body_aabb_local_2d(
         body_circ_aabb, R0, urdf0, X[:, 0], Y[0], h, gs, pad=3,
     )
     assert aabb_circ is not None, (

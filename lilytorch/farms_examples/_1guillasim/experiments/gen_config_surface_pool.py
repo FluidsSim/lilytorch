@@ -41,7 +41,7 @@ class SimConfig(BaseSimConfig):
         # V-cycles on this 17:1-anisotropic grid, where standalone multigrid
         # stalls. (Poisson warm-start was tested and is a net loss here -- 2.6-4x
         # SLOWER + less stable -- so it stays disabled on the two-phase path.)
-        self.poisson_method                = "mgcg"
+        self.poisson_method                = "multigrid"
 
         self.headless             = False
         self.smagorinsky_cs       = 0.
@@ -81,15 +81,27 @@ class SimConfig(BaseSimConfig):
         ]
 
         # ── 3-D grid ─────────────────────────────────────────────────
-        self.Nx   = 900
-        self.Ny   = 300
-        self.Nz   = 52
-        self.xmin = 0
+        self.Nx   = 600*2
+        self.Ny   = 300*2
+        self.Nz   = 52*2
+        self.xmin = 2
         self.xmax = 6
         self.ymin = -1
         self.ymax = 1
         self.zmin = -(2/300*52/2)
         self.zmax = (2/300*52/2)
+
+
+        # # ── 3-D grid ─────────────────────────────────────────────────
+        # self.Nx   = 900
+        # self.Ny   = 300
+        # self.Nz   = 52
+        # self.xmin = 0
+        # self.xmax = 6
+        # self.ymin = -1
+        # self.ymax = 1
+        # self.zmin = -(2/300*52/2)
+        # self.zmax = (2/300*52/2)
 
         # ── Physics ───────────────────────────────────────────────────
         self.rho_body          = 1000.0
@@ -154,7 +166,16 @@ class SimConfig(BaseSimConfig):
         solver["two_phase"] = {
             "alpha_init"            : f"lambda X, Y, Z: (Z < {WATERLINE}).double()",
             "rho_water"             : 1000.0,
-            "rho_air"               : 1.2,
+            # Density-ratio CAP for stability (not physical air density). The
+            # non-conservative two-phase momentum transport is only stable to
+            # ~100:1; the true 1000:1.2 = 833:1 ratio blows up at the waterline
+            # once the grid is refined (sharper interface -> steeper density
+            # gradient). rho_air=12.5 -> 80:1, within the stable regime, and
+            # dynamically negligible for the swimmer (air loads are still ~80x
+            # smaller than water; draft/buoyancy are set by rho_water/rho_solid,
+            # untouched). Verified: 833:1 NaNs by it~130, 80:1 stays bounded.
+            # Tune toward 100:1 if you need lighter air and the grid allows.
+            "rho_air"               : 12.5,
             "nu_water"              : self.nu,
             "nu_air"                : 1.5e-5,
             "rho_solid"             : 800.0,
@@ -231,64 +252,67 @@ class SimConfig(BaseSimConfig):
     def extra_simulation_extensions(self, output_folder):
         extensions = []
 
-        # extensions.append({
-        #     "loader": "lilytorch.integration.light_modifier.LightModifier",
-        #     "config": {
-        #         "diffuse": [1, 1, 1],
-        #         "ambient": [0.3, 0.3, 0.3],
-        #     },
-        # })
+        # reduce overall scene light: lower diffuse and ambient
+        extensions.append({
+            "loader": "lilytorch.integration.light_modifier.LightModifier",
+            "config": {
+                # dim the main light
+                "diffuse": [0.6, 0.6, 0.6],
+                # reduce ambient/global illumination
+                "ambient": [0.1, 0.1, 0.1],
+            },
+        })
 
-        # # Air/water interface + vorticity wake visualisation
-        # extensions.append({
-        #     "loader": "lilytorch.integration.flow_iso_gl_viewer.FlowIsoGLViewer",
-        #     "config": {
-        #         "update_every"      : 1,
-        #         "max_vertices"      : 20 * self.Nx * self.Ny,
-        #         "crop_boundary"     : 0,
-        #         "debug_force_visible": False,
-        #         "fields": [
-        #             {
-        #                 "field"     : "interface",
-        #                 "iso_value" : 0.5,
-        #                 "alpha"     : 0.45,
-        #                 "color"     : "#3399FF",
-        #                 "smooth_sigma": 0,
-        #                 "exclude_body": False,
-        #                 "reflective": True,
-        #             },
-        #             # {
-        #             #     "field"     : "omega_mag",
-        #             #     "iso_value" : 10.0,
-        #             #     "alpha"     : 0.3,
-        #             #     "color"     : "#FF8C1A",
-        #             #     "smooth_sigma": 0,
-        #             #     "exclude_body": True,
-        #             #     "phase_mask": "water",
-        #             # },
-        #         ],
-        #     },
-        # })
+        # Air/water interface + vorticity wake visualisation
+        extensions.append({
+            "loader": "lilytorch.integration.flow_iso_gl_viewer.FlowIsoGLViewer",
+            "config": {
+                "update_every"      : 1,
+                "max_vertices"      : 20 * self.Nx * self.Ny,
+                "crop_boundary"     : 0,
+                "debug_force_visible": False,
+                "fields": [
+                    {
+                        "field"     : "interface",
+                        "iso_value" : 0.5,
+                        "alpha"     : 0.45,
+                        "color"     : "#3399FF",
+                        "smooth_sigma": 0,
+                        "exclude_body": False,
+                        "reflective": True,
+                    },
+                    # {
+                    #     "field"     : "omega_mag",
+                    #     "iso_value" : 10.0,
+                    #     "alpha"     : 0.3,
+                    #     "color"     : "#FF8C1A",
+                    #     "smooth_sigma": 0,
+                    #     "exclude_body": True,
+                    #     "phase_mask": "water",
+                    # },
+                ],
+            },
+        })
 
-        # # Top-down camera auto-fitted to the pool
-        # cam = top_down_camera_config(
-        #     self.xmin, self.xmax,
-        #     self.ymin, self.ymax,
-        #     self.zmin, self.zmax,
-        #     overshoot=1,
-        #     max_width=3840, max_height=2160,
-        # )
-        # extensions.append({
-        #     "loader": "lilytorch.integration.streaming_camera.StreamingCameraRecording",
-        #     "config": {
-        #         "path"            : os.path.join(output_folder, "output", "video.mp4"),
-        #         "animat_id"       : None,
-        #         "fps"             : 30,
-        #         "speed"           : 1.0,
-        #         "angular_velocity": 0,
-        #         **cam,
-        #     },
-        # })
+        # Top-down camera auto-fitted to the pool
+        cam = top_down_camera_config(
+            self.xmin, self.xmax,
+            self.ymin, self.ymax,
+            self.zmin, self.zmax,
+            overshoot=1,
+            max_width=3840, max_height=2160,
+        )
+        extensions.append({
+            "loader": "lilytorch.integration.streaming_camera.StreamingCameraRecording",
+            "config": {
+                "path"            : os.path.join(output_folder, "output", "video.mp4"),
+                "animat_id"       : None,
+                "fps"             : 30,
+                "speed"           : 1.0,
+                "angular_velocity": 0,
+                **cam,
+            },
+        })
 
         return extensions
 

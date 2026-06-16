@@ -60,9 +60,8 @@ Steps 1-4 + apply_forces merge ✅. Remaining:
 SU1. **Step 5 — stacked-tensor storage.** Replace `(u0,v0,w0)`, `(nx,ny,nz)`,
   `(mu0_{u,v,w})` etc. with `(D, *grid)` tensors. Deepest refactor (every callsite,
   FARMS bridge, kernels, plotting, HDF5). Needs explicit user sign-off.
-SU2. **Step 6 remainder — merge BDIMhandler `_update_2d/_3d` +
-  `_update_*_streaming_multi`** (~1000 lines). Replace per-plane branches with a
-  `self._sim_axes` index array; needs full FSI regression coverage.
+
+(SU2 — Step 6 BDIMhandler update merge — ✅ DONE; see the DONE section below.)
 
 Per-step rules: branch from `optimize_speed_memory`, one PR per step, validate 2D
 (`_1guillasim` pinned) + 3D (jellyfish) + cost_analysis (<5% wall-clock regression),
@@ -429,6 +428,35 @@ MP11. ~~**T5 Pipelined / communication-avoiding CG (native Poisson driver)**~~ �
   so it was left unchanged.
 
 ## 2D/3D solver unification — kernel parity
+
+SU2. ~~**Step 6 — merge BDIMhandler `_update_2d/_3d` + `_update_*_streaming_multi`**~~
+  ✅ (2026-06-15, branch `optimize_speed_memory`). Both per-dim pairs collapsed
+  into dimension-generic methods driven by `self._sim_axes = range(ndim)`:
+  - **Python path:** `_update_2d`+`_update_3d` → `_update_python` (per-axis field
+    lists for the staggered SDF/velocity union loop; dim-specific only in
+    body-frame compose, rotation helper, rigid-body velocity formula, AABB
+    descriptor, and the Lagrangian/contour tail — factored into
+    `_refresh_lagrangian_contour_2d`, `_refresh_lagrangian_tris_3d`,
+    `_apply_contour_mask_2d`).
+  - **Kernel path (production):** `_update_2d_streaming_multi`+
+    `_update_3d_streaming_multi` → `_update_streaming_multi` + helpers
+    `_stream_kin_static`, `_stream_static_pack` (writes the exact
+    `_kernel_static_{2,3}d` names `forces.py`/`solver.fluid_step` read),
+    `_stream_lagrangian_refresh`. Per-dim packed layouts (kin row D*D+3D+(3|1),
+    body_meta 3D+1, dirty-AABB keys) reproduced exactly; 2-D identity local frame
+    makes the unified compose einsum (`R@I`, `urdf+R@0`) a bit-exact no-op.
+  `_init_update` dispatches the unified methods. The 4 legacy methods are RETAINED
+  as the parity oracles for `test_update_python_parity.py` +
+  `test_update_streaming_parity.py` (both bit-identical, max|Δ|=0, across
+  Eulerian/blend/Lagrangian/contour × 2D/3D, streaming incl. the prev-union dirty
+  branch). Also fixed a pre-existing stale name in `test_update_2d_mirrors_3d.py`
+  (`_body_aabb_indices_2d`→`_body_aabb_local_2d`). **FSI regression:** GPU
+  kernel-mode + CPU python-mode end-to-end A/B on the real 3D multi-link 1guilla
+  (225×75×13, 8 steps, Lagrangian) — per-link drags+torques bit-identical
+  unified-vs-legacy on BOTH paths. (2-D kernel covered by unit parity only — no
+  non-stale 2-D coupled example exists on HEAD.) **Follow-up (low-risk cleanup):**
+  delete the 4 legacy oracle methods (~700 lines, the net line-count win) once a
+  full-length run confirms the unified path in situ.
 
 SU3. ~~**K9**~~ ✅ Added `is_cuda` TORCH_CHECK to `apply_bcs_2d_cuda` (mirrors 3D).
 SU4. ~~**K10**~~ ✅ `apply_bcs_2d/3d_kernel` now compute `src_lin` unconditionally
