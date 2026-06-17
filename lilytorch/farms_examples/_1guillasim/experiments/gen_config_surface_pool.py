@@ -3,7 +3,7 @@ import os
 from farms_core.model.options import SpawnMode
 from lilytorch.util.paths import lilytorch_repo_root
 from lilytorch.farms_examples.base_sim_config import BaseSimConfig
-from lilytorch.integration.camera import top_down_camera_config
+from lilytorch.integration.camera import top_down_camera_config, side_camera_config
 
 # z = 0 is the centre of the z domain; water fills z < 0, air above.
 # The fish spawns at z=0.0 and straddles the air-water interface.
@@ -23,13 +23,13 @@ class SimConfig(BaseSimConfig):
         self.use_gpu                       = True
         self.use_bdim                      = True
         self.compute_sdf                   = True
-        self.convexify                     = True
+        self.convexify                     = False
         # Eulerian (band integral on real pressure) is much more robust than the
         # Lagrangian surface-marker integral for this thin body at the free
         # surface on the coarse grid: uniform-800 then floats with the head out
         # instead of sinking to the floor. (Lagrangian wins only when the body
         # is well resolved.)
-        self.force_method                  = "lagrangian"
+        self.force_method                  = "eulerian"
         self.zero_pressure_inside          = True
         self.body_velocity_blend_eps_cells = None
         self.bdim_mu0_projection           = True
@@ -64,7 +64,7 @@ class SimConfig(BaseSimConfig):
                 # righting moment that keeps the planar gait from rolling the
                 # body over (gait roll 24.5deg -> ~5deg). Regenerate/tune with
                 # sdfs/1guilla/make_ballast_sdf.py.
-                "sdf_name"       : "1guilla_ballast.sdf",
+                "sdf_name"       : "1guilla_600.sdf",
                 "control_type"   : "position",
                 "gains"          : [100.0, 1., 0],
                 "spawn_mode"     : SpawnMode.FREE,
@@ -81,27 +81,27 @@ class SimConfig(BaseSimConfig):
         ]
 
         # ── 3-D grid ─────────────────────────────────────────────────
-        self.Nx   = 600*2
-        self.Ny   = 300*2
-        self.Nz   = 52*2
-        self.xmin = 2
-        self.xmax = 6
-        self.ymin = -1
-        self.ymax = 1
-        self.zmin = -(2/300*52/2)
-        self.zmax = (2/300*52/2)
-
-
-        # # ── 3-D grid ─────────────────────────────────────────────────
-        # self.Nx   = 900
-        # self.Ny   = 300
-        # self.Nz   = 52
-        # self.xmin = 0
+        # self.Nx   = 600*2
+        # self.Ny   = 300*2
+        # self.Nz   = 52*2
+        # self.xmin = 2
         # self.xmax = 6
         # self.ymin = -1
         # self.ymax = 1
         # self.zmin = -(2/300*52/2)
         # self.zmax = (2/300*52/2)
+
+
+        # ── 3-D grid ─────────────────────────────────────────────────
+        self.Nx   = 900
+        self.Ny   = 300
+        self.Nz   = 52
+        self.xmin = 0
+        self.xmax = 6
+        self.ymin = -1
+        self.ymax = 1
+        self.zmin = -(2/300*52/2)
+        self.zmax = (2/300*52/2)
 
         # ── Physics ───────────────────────────────────────────────────
         self.rho_body          = 1000.0
@@ -313,6 +313,27 @@ class SimConfig(BaseSimConfig):
                 **cam,
             },
         })
+
+        # Side camera auto-fitted to the pool
+        cam_side = side_camera_config(
+            self.xmin, self.xmax,
+            self.ymin, self.ymax,
+            self.zmin, self.zmax,
+            overshoot=1,
+            max_width=3840, max_height=2160,
+        )
+        extensions.append({
+            "loader": "lilytorch.integration.streaming_camera.StreamingCameraRecording",
+            "config": {
+                "path"            : os.path.join(output_folder, "output", "video.mp4"),
+                "animat_id"       : None,
+                "fps"             : 30,
+                "speed"           : 1.0,
+                "angular_velocity": 0,
+                **cam_side,
+            },
+        })
+
 
         return extensions
 

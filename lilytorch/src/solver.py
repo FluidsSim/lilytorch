@@ -590,6 +590,14 @@ class FluidSolver(PlottingMixin):
         # are created on-the-fly in forces_method* and project() respectively
         # (no pre-allocation needed — they are rebound, not written in-place).
 
+          # ===== stacked velocity storage (Step 5 unification) =====
+        # u0/v0[/w0] are compat @property views into this single
+        # (D, *grid) buffer; see the property block below.  Allocated
+        # before set_initial_conditions so the property setters have a
+        # backing store to write into.
+        self._vel = torch.zeros(
+            (self.ndim, *self.grid_shape), device=self.device, dtype=self.dtype)
+
           # ===== set initial conditions =====
         self.set_initial_conditions()
 
@@ -868,6 +876,40 @@ class FluidSolver(PlottingMixin):
                 mu0_w, _ = cb.mu_funcs(cb.sdf_val_w)
                 self.w0 = self.w0 * mu0_w
 
+
+    # --- stacked velocity compat accessors (Step 5 unification) --------
+    # u0/v0[/w0] are views into the single ``self._vel`` (D, *grid) buffer.
+    # Reads return a (contiguous) row view; assignments copy into the row in
+    # place (so external aliases of the buffer stay valid).  The 3-D ``w0``
+    # raises AttributeError in 2-D so ``hasattr/getattr(fs, 'w0')`` keeps the
+    # legacy "absent in 2-D" semantics that the viewers rely on.
+    @property
+    def u0(self):
+        return self._vel[0]
+
+    @u0.setter
+    def u0(self, value):
+        self._vel[0] = value
+
+    @property
+    def v0(self):
+        return self._vel[1]
+
+    @v0.setter
+    def v0(self, value):
+        self._vel[1] = value
+
+    @property
+    def w0(self):
+        if self.ndim < 3:
+            raise AttributeError("w0 is undefined for a 2-D solver")
+        return self._vel[2]
+
+    @w0.setter
+    def w0(self, value):
+        if self.ndim < 3:
+            raise AttributeError("w0 is undefined for a 2-D solver")
+        self._vel[2] = value
 
     # --- moved to lilytorch/src/forces.py (item #8) ---
     forces_method1 = forces.forces_method1

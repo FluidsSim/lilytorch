@@ -4,7 +4,7 @@
     <model name="pool">
       <pose>0 0 0 0 0 0</pose>
       <link name="wall_xmin">
-        <pose>1.98615 0.0 0.01385 0 0 0</pose>
+        <pose>-0.01385 0.0 0.01385 0 0 0</pose>
         <collision name="wall_xmin_collision">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
@@ -54,12 +54,12 @@
         </visual>
       </link>
       <link name="wall_ymin">
-        <pose>4.0 -1.01385 0.01385 0 0 0</pose>
+        <pose>3.0 -1.01385 0.01385 0 0 0</pose>
         <collision name="wall_ymin_collision">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>4.0554 0.0277 0.3743666666666667</size>
+              <size>6.0554 0.0277 0.3743666666666667</size>
             </box>
           </geometry>
         </collision>
@@ -67,7 +67,7 @@
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>4.0554 0.0277 0.3743666666666667</size>
+              <size>6.0554 0.0277 0.3743666666666667</size>
             </box>
           </geometry>
           <material>
@@ -79,12 +79,12 @@
         </visual>
       </link>
       <link name="wall_ymax">
-        <pose>4.0 1.01385 0.01385 0 0 0</pose>
+        <pose>3.0 1.01385 0.01385 0 0 0</pose>
         <collision name="wall_ymax_collision">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>4.0554 0.0277 0.3743666666666667</size>
+              <size>6.0554 0.0277 0.3743666666666667</size>
             </box>
           </geometry>
         </collision>
@@ -92,7 +92,7 @@
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>4.0554 0.0277 0.3743666666666667</size>
+              <size>6.0554 0.0277 0.3743666666666667</size>
             </box>
           </geometry>
           <material>
@@ -104,12 +104,12 @@
         </visual>
       </link>
       <link name="floor">
-        <pose>4.0 0.0 -0.18718333333333334 0 0 0</pose>
+        <pose>3.0 0.0 -0.18718333333333334 0 0 0</pose>
         <collision name="floor_collision">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>4.0554 2.0554 0.0277</size>
+              <size>6.0554 2.0554 0.0277</size>
             </box>
           </geometry>
         </collision>
@@ -117,7 +117,7 @@
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>4.0554 2.0554 0.0277</size>
+              <size>6.0554 2.0554 0.0277</size>
             </box>
           </geometry>
           <material>
@@ -129,7 +129,7 @@
         </visual>
       </link>
       <link name="ground_bg">
-        <pose>4.0 0.0 -0.22488333333333335 0 0 0</pose>
+        <pose>3.0 0.0 -0.22488333333333335 0 0 0</pose>
         <visual name="ground_bg_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
@@ -146,12 +146,12 @@
         </visual>
       </link>
       <link name="gridh_0">
-        <pose>4.0 -1 -0.17313333333333336 0 0 0</pose>
+        <pose>3.0 -1 -0.17313333333333336 0 0 0</pose>
         <visual name="gridh_0_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>4 0.003 0.0002</size>
+              <size>6 0.003 0.0002</size>
             </box>
           </geometry>
           <material>
@@ -163,12 +163,12 @@
         </visual>
       </link>
       <link name="gridh_1">
-        <pose>4.0 0.0 -0.17313333333333336 0 0 0</pose>
+        <pose>3.0 0.0 -0.17313333333333336 0 0 0</pose>
         <visual name="gridh_1_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>4 0.003 0.0002</size>
+              <size>6 0.003 0.0002</size>
             </box>
           </geometry>
           <material>
@@ -180,12 +180,12 @@
         </visual>
       </link>
       <link name="gridh_2">
-        <pose>4.0 1.0 -0.17313333333333336 0 0 0</pose>
+        <pose>3.0 1.0 -0.17313333333333336 0 0 0</pose>
         <visual name="gridh_2_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>4 0.003 0.0002</size>
+              <size>6 0.003 0.0002</size>
             </box>
           </geometry>
           <material>
@@ -197,7 +197,7 @@
         </visual>
       </link>
       <link name="gridv_0">
-        <pose>2 0.0 -0.17313333333333336 0 0 0</pose>
+        <pose>0 0.0 -0.17313333333333336 0 0 0</pose>
         <visual name="gridv_0_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
@@ -214,7 +214,7 @@
         </visual>
       </link>
       <link name="gridv_1">
-        <pose>3.0 0.0 -0.17313333333333336 0 0 0</pose>
+        <pose>1.0 0.0 -0.17313333333333336 0 0 0</pose>
         <visual name="gridv_1_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
@@ -231,7 +231,7 @@
         </visual>
       </link>
       <link name="gridv_2">
-        <pose>4.0 0.0 -0.17313333333333336 0 0 0</pose>
+        <pose>2.0 0.0 -0.17313333333333336 0 0 0</pose>
         <visual name="gridv_2_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
@@ -248,7 +248,7 @@
         </visual>
       </link>
       <link name="gridv_3">
-        <pose>5.0 0.0 -0.17313333333333336 0 0 0</pose>
+        <pose>3.0 0.0 -0.17313333333333336 0 0 0</pose>
         <visual name="gridv_3_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
@@ -265,8 +265,42 @@
         </visual>
       </link>
       <link name="gridv_4">
-        <pose>6.0 0.0 -0.17313333333333336 0 0 0</pose>
+        <pose>4.0 0.0 -0.17313333333333336 0 0 0</pose>
         <visual name="gridv_4_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.003 2 0.0002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.55 0.55 0.55 1.0</ambient>
+            <diffuse>0.55 0.55 0.55 1.0</diffuse>
+            <specular>0.0 0.0 0.0 1.0</specular>
+            <emissive>0.0 0.0 0.0 1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="gridv_5">
+        <pose>5.0 0.0 -0.17313333333333336 0 0 0</pose>
+        <visual name="gridv_5_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.003 2 0.0002</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.55 0.55 0.55 1.0</ambient>
+            <diffuse>0.55 0.55 0.55 1.0</diffuse>
+            <specular>0.0 0.0 0.0 1.0</specular>
+            <emissive>0.0 0.0 0.0 1.0</emissive>
+          </material>
+        </visual>
+      </link>
+      <link name="gridv_6">
+        <pose>6.0 0.0 -0.17313333333333336 0 0 0</pose>
+        <visual name="gridv_6_visual">
           <pose>0 0 0 0 0 0</pose>
           <geometry>
             <box>

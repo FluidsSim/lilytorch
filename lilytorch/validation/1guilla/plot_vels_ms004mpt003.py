@@ -15,6 +15,7 @@ from lilytorch.util.paths import save_path
 import matplotlib.pyplot as plt
 plt.rcParams['font.size'] = '20'
 
+# RUN_DIR = os.path.join(save_path, "1guilla_surface/2026-06-16T21:23:45.335219")
 
 RUN_DIR = os.path.join(save_path, "1guilla_self_propelled/2026-06-02T16:48:32.413301")
 SIMULATION_PATH = os.path.join(RUN_DIR, "output", "simulation.hdf5")

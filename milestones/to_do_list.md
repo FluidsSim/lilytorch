@@ -13,6 +13,42 @@ Memory vars: `sdf_val_{u,v,w}`, `{u,v,w,p}0`, `n{x,y,z}_{u,v,w}`, `body_{u,v,w}`
 
 HP3. **Polish repo & docs** — review/correct outdated documentation, including `docs/`.
 
+HP4. **Stabilise the one-fluid GFM free surface** (handoff 2026-06-17). GOAL: a
+  free-surface solver that captures surface WAVES so the surface-swimming eel's
+  wave-making drag is resolved — the two-phase VOF over-predicts swim speed ~2×
+  because that drag is under-resolved/smeared (robot 0.128 m/s vs sim ~0.20–0.26;
+  ruled out viewer, force-readout, air-density; see memory
+  `project_surface_eel_overspeed` + `project_free_surface_gfm_solver`). One-fluid
+  (air = constant-p void) ALSO removes the air-force noise structurally.
+  WHAT EXISTS (keep, two-phase solver untouched):
+    - `lilytorch/src/free_surface_solver.py` `FreeSurfaceSolver(TwoPhaseSolver)`:
+      uniform water density, `p=0` in air (via the dormant `dirichlet_mask` hook
+      in `poisson_mult.py`), velocity-extend into air, gauge-anchor+air-transparent off.
+    - `lilytorch/src/poisson_gfm.py`: sub-cell ghost-fluid Poisson (2-D) — height
+      level set `phi=y-h(x)`, θ-scaled ghost gradient placing `p=0` on the exact
+      interface, Jacobi-CG, operator `A=div(gfm_grad)`.
+    - `lilytorch/validation/free_surface/run_hydrostatic_fs.py` (PASSES: water
+      hydrostatic 0.00%, |u|~1e-7, air p=0) and `gfm_wave_standalone.py` (the
+      standing-wave probe that exposes the failure).
+  STATUS: STATICS WORK. WAVES DON'T — the explicit free-surface mode is UNSTABLE:
+  in `gfm_wave_standalone.py`, freezing the surface face → stable but amplitude=0;
+  letting it move → |u| grows 0.007→3 m/s, surface collapses. Smaller dt only
+  delays it. This is the classic explicit free-surface instability (why the old
+  GFM was retired).
+  NEXT STEPS to make it usable:
+    (1) IMPLICIT free-surface coupling — treat the surface pressure/gravity
+        implicitly so the fast gravity-wave mode can't blow up (the load-bearing fix);
+    (2) NON-DIFFUSIVE interface advection / clean reinitialised level set — the
+        standalone reuses 1st-order upwind α → φ noisy → noisy θ → noise feeds the
+        growth; reuse the Weymouth-Yue VOF (`two_phase.py`) or a proper level set;
+    (3) then extend `poisson_gfm.py` to 3-D and wire the GFM grad/solve into
+        `FreeSurfaceSolver.project` (currently it uses the staircase `p=0` mask),
+        re-validate hydrostatic → standing-wave period (ω²=gk·tanh kH) → eel.
+  VALIDATION ORDER: standalone standing wave (period + amplitude retention) BEFORE
+  any MAC/BDIM integration. Target: stable oscillation at the analytic period with
+  ~100% amplitude over several periods. Then a surface-pool eel config using
+  `FreeSurfaceSolver` vs two-phase vs robot 0.128 m/s.
+
 ---
 
 # BUGS
@@ -57,9 +93,24 @@ MP9. **T2c** Two-pass Kernel B for `primes` elimination (write to AABB scratch, 
 
 Steps 1-4 + apply_forces merge ✅. Remaining:
 
-SU1. **Step 5 — stacked-tensor storage.** Replace `(u0,v0,w0)`, `(nx,ny,nz)`,
-  `(mu0_{u,v,w})` etc. with `(D, *grid)` tensors. Deepest refactor (every callsite,
-  FARMS bridge, kernels, plotting, HDF5). Needs explicit user sign-off.
+SU1. **Step 5 — stacked-tensor storage — SCOPE NOW BOUNDED BY MEMORY.**
+  - **Velocity DONE (2026-06-16):** `u0/v0/w0` → one contiguous `FluidSolver._vel`
+    (D,*grid), exposed via compat `@property` views (reads = zero-copy row view;
+    sets copy into the row; `w0` raises AttributeError in 2-D so `getattr(fs,'w0')`
+    keeps "absent-in-2D" semantics for the viewers). **Memory-neutral** (same
+    3·grid floats, no duplicate tensors, kernels get contiguous views) +
+    **bit-identical** drags on the kernel(GPU) + python(CPU) 1guilla A/B vs the
+    pre-refactor baseline. Solver owns no other per-component trio (all
+    `sdf_val/body/mu/normal` live on `composite_body`).
+  - **Field trios B–E (`sdf_val_{u,v,w}`, `body_{u,v,w}`, `mu0/mu1`, normals)
+    DELIBERATELY NOT STACKED — memory.** In kernel mode these are **per-step
+    temporaries** (`fluid_step` allocs `sdf_u_tmp/bU_tmp/…`, Kernel A fills, Kernel
+    B consumes for fused BDIM+adv-diff, then freed — the Phase-I optimization).
+    Stacking them into persistent `comp` buffers would PIN that memory → regression
+    of exactly what this branch optimizes. They are also spread across 6+ body
+    classes (analytical/fish/mesh/multi-animat) with aliasing + `torch.where`
+    unions. ⇒ SU1's correct scope is the persistent velocity only; the rest stay
+    freed temporaries. See `feedback-no-stacking-perstep-temporaries` memory.
 
 (SU2 — Step 6 BDIMhandler update merge — ✅ DONE; see the DONE section below.)
 
