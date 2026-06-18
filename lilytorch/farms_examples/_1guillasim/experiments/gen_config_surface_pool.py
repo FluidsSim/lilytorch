@@ -9,6 +9,11 @@ from lilytorch.integration.camera import top_down_camera_config, side_camera_con
 # The fish spawns at z=0.0 and straddles the air-water interface.
 WATERLINE = 0.0
 
+# Set True to use the one-fluid FreeSurfaceSolver (air = constant-p void,
+# no density jump, no air momentum, buoyancy from p=0 free-surface BC).
+# Set False for the original two-phase VOF solver (real light air).
+USE_FREE_SURFACE = False
+
 
 class SimConfig(BaseSimConfig):
 
@@ -64,7 +69,7 @@ class SimConfig(BaseSimConfig):
                 # righting moment that keeps the planar gait from rolling the
                 # body over (gait roll 24.5deg -> ~5deg). Regenerate/tune with
                 # sdfs/1guilla/make_ballast_sdf.py.
-                "sdf_name"       : "1guilla_600.sdf",
+                "sdf_name"       : "1guilla_900.sdf",
                 "control_type"   : "position",
                 "gains"          : [100.0, 1., 0],
                 "spawn_mode"     : SpawnMode.FREE,
@@ -92,16 +97,28 @@ class SimConfig(BaseSimConfig):
         # self.zmax = (2/300*52/2)
 
 
+        # # ── 3-D grid ─────────────────────────────────────────────────
+        # self.Nx   = 900
+        # self.Ny   = 300
+        # self.Nz   = 52
+        # self.xmin = 0
+        # self.xmax = 6
+        # self.ymin = -1
+        # self.ymax = 1
+        # self.zmin = -(2/300*52/2)
+        # self.zmax = (2/300*52/2)
+
         # ── 3-D grid ─────────────────────────────────────────────────
-        self.Nx   = 900
-        self.Ny   = 300
+        self.Nx   = 450
+        self.Ny   = 150
         self.Nz   = 52
-        self.xmin = 0
+        self.xmin = 3
         self.xmax = 6
-        self.ymin = -1
-        self.ymax = 1
+        self.ymin = -0.5
+        self.ymax = 0.5
         self.zmin = -(2/300*52/2)
         self.zmax = (2/300*52/2)
+
 
         # ── Physics ───────────────────────────────────────────────────
         self.rho_body          = 1000.0
@@ -152,9 +169,12 @@ class SimConfig(BaseSimConfig):
         self.sky_color         = [0.02, 0.05, 0.15]
         self.floor_color       = "#E0D4D4"
         self.viewer_body_color = "#D09F23"
-        self.wall_alpha        = 1.
-        self.water_alpha       = 0.05
-        self.grid_spacing      = 0.5*(self.ymax - self.ymin)
+        self.wall_alpha        = 0.
+        self.floor_color       = None
+        self.water_alpha       = 0.2
+        self.grid_spacing      = None                #0.5*(self.ymax - self.ymin)
+
+        # self.solver_method = "python"  # DIAGNOSTIC: for consistent_momentum
 
     # ── Two-phase BDIM extension ──────────────────────────────────────
 
@@ -164,31 +184,35 @@ class SimConfig(BaseSimConfig):
 
         solver["gravity"] = [0, 0, -9.81]
         solver["two_phase"] = {
-            "alpha_init"            : f"lambda X, Y, Z: (Z < {WATERLINE}).double()",
-            "rho_water"             : 1000.0,
-            # Density-ratio CAP for stability (not physical air density). The
-            # non-conservative two-phase momentum transport is only stable to
-            # ~100:1; the true 1000:1.2 = 833:1 ratio blows up at the waterline
-            # once the grid is refined (sharper interface -> steeper density
-            # gradient). rho_air=12.5 -> 80:1, within the stable regime, and
-            # dynamically negligible for the swimmer (air loads are still ~80x
-            # smaller than water; draft/buoyancy are set by rho_water/rho_solid,
-            # untouched). Verified: 833:1 NaNs by it~130, 80:1 stays bounded.
-            # Tune toward 100:1 if you need lighter air and the grid allows.
-            "rho_air"               : 12.5,
-            "nu_water"              : self.nu,
-            "nu_air"                : 1.5e-5,
-            "rho_solid"             : 800.0,
-            "alpha_exclude_body"    : True,
+            "alpha_init"             : f"lambda X, Y, Z: (Z < {WATERLINE}).double()",
+            "rho_water"              : 1000.0,
+            "rho_air"                : 1.2,                                             # 80:1 stability cap
+            "nu_water"               : self.nu,
+            "nu_air"                 : 1.5e-5,
+            "alpha_exclude_body"     : True,
             "alpha_volume_compensate": True,
-            # Subtract the body-band-mean pressure before the force integral.
-            # The eulerian band integral leaks the body's DC pressure level, which
-            # in two-phase is the large hydrostatic/gauge baseline -> spurious
-            # thrust (the eel swam unrealistically fast). Anchoring removes it
-            # while preserving buoyancy + true thrust. Verified: static surface
-            # body spurious Fx -19.2 N -> -0.006 N.
-            "gauge_anchor_forces"   : True,
+            "gauge_anchor_forces"    : True,
+            "air_transparent_body"   : False,
+            "consistent_momentum"    : False,  # requires solver_method='python' (not kernel)
         }
+
+
+        # if USE_FREE_SURFACE:
+        #     # One-fluid free surface: uniform density (air = void), no gauge
+        #     # anchor needed (p=0 BC at surface already pins the datum).
+        #     # FreeSurfaceSolver overrides rho_air=rho_water and disables
+        #     # gauge_anchor_forces automatically, but we set clean defaults here
+        #     # so the YAML is self-documenting.
+        #     solver["free_surface"] = {
+        #         "extend_iters": 10,
+        #         "use_gfm_gradient": True,
+        #     }
+        #     solver["two_phase"]["rho_air"] = 1000.0       # = rho_water (uniform)
+        #     solver["two_phase"]["nu_air"] = self.nu       # = nu_water (uniform)
+        #     solver["two_phase"]["gauge_anchor_forces"] = False
+
+        #     # The BDIMhandler auto-detects solver.free_surface and selects
+        #     # FreeSurfaceSolver instead of TwoPhaseSolver.
 
         return bdim_ext
 
@@ -325,7 +349,7 @@ class SimConfig(BaseSimConfig):
         extensions.append({
             "loader": "lilytorch.integration.streaming_camera.StreamingCameraRecording",
             "config": {
-                "path"            : os.path.join(output_folder, "output", "video.mp4"),
+                "path"            : os.path.join(output_folder, "output", "video_side.mp4"),
                 "animat_id"       : None,
                 "fps"             : 30,
                 "speed"           : 1.0,

@@ -690,6 +690,16 @@ class TwoPhaseSolver(FluidSolver):
             cb.sdf_vals = torch.stack([b.sdf_val for b in cb.bodies])
         if self._gauge_anchor_forces:
             p = self._anchor_pressure_for_forces(p)    # kill the gauge/hydrostatic leak
+        # Prevent the gauge-anchored air pressure (which becomes negative after
+        # the uniform band-mean shift) from creating spurious suction on the
+        # dorsal (air-exposed) body surface.  Air pressure forces are physically
+        # negligible (~1000× smaller than water); any non-zero air pressure in
+        # the simulation is a numerical artifact (gauge ambiguity, density cap).
+        # Weighting by the water volume fraction α ∈ [0,1] smoothly zeroes the
+        # air contribution while preserving the full water pressure forces
+        # (buoyancy + dynamic load).  The original p is never modified — only
+        # the copy passed to the force integral is masked.
+        # p = p * self.two_phase.alpha.clamp(0, 1)
         base = _forces.forces_method2_3d if fn3d else _forces.forces_method2
         base(self, *vels, p, iteration)                # REAL pressure → emergent
 
@@ -733,9 +743,58 @@ class TwoPhaseSolver(FluidSolver):
     def forces_method2_3d(self, u, v, w, p, iteration):
         self._two_phase_forces(True, (u, v, w), p, iteration)
 
-    # ------------------------------------------------------------------
-    #  Override: consistent conservative mass/momentum transport
-    # ------------------------------------------------------------------
+    def forces_lagrangian_2d(self, u, v, p, iteration):
+        if self._gauge_anchor_forces:
+            p = self._anchor_pressure_for_forces(p)
+        super().forces_lagrangian_2d(u, v, p, iteration)
+
+    def forces_lagrangian_3d(self, u, v, w, p, iteration):
+        if self._gauge_anchor_forces:
+            p = self._anchor_pressure_for_forces(p)
+        super().forces_lagrangian_3d(u, v, w, p, iteration)
+
+    def advance_and_compute_loads(self, u, v, p, iteration, t, w_vel=None):
+        """Override: when zero_pressure_inside is enabled, zero pressure only
+        DEEP inside the body (sdf < -2h), leaving the BDIM band (|sdf| < 2h)
+        intact.  The base solver zeros at sdf < 0, which for thin bodies
+        (thickness ~ band width) removes the interior half of the band and
+        destroys emergent buoyancy."""
+        self.composite_body.update(t, iteration, dt=self.dt)
+        if not self._use_kernels:
+            self._recompute_mu_normals()
+
+        if self.use_gravity:
+            if self.ndim == 2:
+                u, v = self._apply_gravity_body_force(u, v)
+            else:
+                u, v, w_vel = self._apply_gravity_body_force(u, v, w_vel)
+
+        if self.ndim == 2:
+            (u, v, p) = self.fluid_step(u, v, p, self.dt)
+            # ---- corrected zero_pressure_inside (only deep interior) ----
+            if self.zero_pressure_inside:
+                deep = self.composite_body.sdf_val < -2.0 * self.h
+                p = torch.where(deep, 0.0, p)
+            self.u0, self.v0, self.p0 = u, v, p
+            if self.compute_forces:
+                if self.force_method == "lagrangian":
+                    self.forces_lagrangian_2d(u, v, p, iteration)
+                else:
+                    self.forces_method2(u, v, p, iteration)
+        else:
+            (u, v, w_vel, p) = self.fluid_step(u, v, w_vel, p, self.dt)
+            # ---- corrected zero_pressure_inside (only deep interior) ----
+            if self.zero_pressure_inside:
+                deep = self.composite_body.sdf_val < -2.0 * self.h
+                p = torch.where(deep, 0.0, p)
+            self.u0, self.v0, self.w0, self.p0 = u, v, w_vel, p
+            if self.compute_forces:
+                if self.force_method == "lagrangian":
+                    self.forces_lagrangian_3d(u, v, w_vel, p, iteration)
+                else:
+                    self.forces_method2_3d(u, v, w_vel, p, iteration)
+
+        return u, v, p, w_vel
     def _apply_gravity_body_force(self, *vels):
         """In consistent mode gravity is applied as a rho*g body force INSIDE the
         conservative momentum advection (see :meth:`_consistent_advect_2d`), so

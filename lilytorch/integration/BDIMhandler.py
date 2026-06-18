@@ -25,6 +25,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 from lilytorch.src.solver import FluidSolver
 from lilytorch.src.two_phase_solver import TwoPhaseSolver
+from lilytorch.src.free_surface_solver import FreeSurfaceSolver
 from lilytorch.src.body import (rotate_grid_2d, rotate_grid_3d,
                                 _rotate_grid_3d_compiled)
 
@@ -95,14 +96,17 @@ class BDIMhandler:
 
         # ---- create fluid solver ----
         # Auto-select the two-phase (water + real air) solver when the config
-        # carries a ``solver.two_phase`` block (mirrors the ``Nz`` -> 3-D
-        # detection above). ``TwoPhaseSolver`` is a thin subclass that reuses
-        # all of FluidSolver's state and step machinery, so the coupling loop,
-        # pose read and force application below are unchanged; only the
-        # projection coefficients, the once-per-step VOF advect (inside
-        # ``finalize_step``) and the now-emergent buoyancy differ.
+        # carries a ``solver.two_phase`` block, or the one-fluid free-surface
+        # solver when ``solver.free_surface`` is present (which also requires
+        # ``solver.two_phase`` for the VOF interface tracking).
         self._two_phase = self.pars["solver"].get("two_phase") is not None
-        _SolverCls = TwoPhaseSolver if self._two_phase else FluidSolver
+        self._free_surface = self.pars["solver"].get("free_surface") is not None
+        if self._free_surface:
+            _SolverCls = FreeSurfaceSolver
+        elif self._two_phase:
+            _SolverCls = TwoPhaseSolver
+        else:
+            _SolverCls = FluidSolver
         self.fluid_solver = _SolverCls(
             self.pars,
             dtype=dtype,

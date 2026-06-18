@@ -11,43 +11,403 @@ Memory vars: `sdf_val_{u,v,w}`, `{u,v,w,p}0`, `n{x,y,z}_{u,v,w}`, `body_{u,v,w}`
 
 # HIGH PRIORITY
 
-HP3. **Polish repo & docs** — review/correct outdated documentation, including `docs/`.
+HP5. **Conservative momentum transport CUDA kernel for two-phase solver** (2026-06-18).
 
-HP4. **Stabilise the one-fluid GFM free surface** (handoff 2026-06-17). GOAL: a
-  free-surface solver that captures surface WAVES so the surface-swimming eel's
-  wave-making drag is resolved — the two-phase VOF over-predicts swim speed ~2×
-  because that drag is under-resolved/smeared (robot 0.128 m/s vs sim ~0.20–0.26;
-  ruled out viewer, force-readout, air-density; see memory
-  `project_surface_eel_overspeed` + `project_free_surface_gfm_solver`). One-fluid
+  **Motivation (REVISED 2026-06-18).**  The non-conservative two-phase VOF
+  transport was thought to be stable only to ~100:1 density ratio, but testing
+  shows it is **stable at the physical 833:1 ratio** (rho_air=1.2) in kernel
+  mode without consistent momentum — no blowup observed.  The density cap
+  (rho_air=12.5, 80:1) was therefore an unnecessary precaution.  However,
+  the harmonic-mean face density at the waterline (ρ_face ≈ 2.4 with rho_air=1.2,
+  ~417× smaller than water) still suppresses pressure gradients → reduces wave
+  resistance → surface-swimming robot is ~1.5× faster than single-phase
+  underwater (0.22 vs 0.15 m/s; experiment 0.128 m/s).  Changing rho_air from
+  12.5 to 1.2 does NOT change the speed bias (see HP5b), so the harmonic mean
+  is not the dominant mechanism — the body-in-air effect (dorsal surface
+  unloaded) is the leading hypothesis.  Conservative momentum transport
+  (Nangia et al. 2019) may still reduce the bias by bounding air velocities,
+  but the primary speed-bias mechanism is now thought to be structural
+  (body-in-air), not a density-ratio instability.
+
+  **Reference implementation.** `TwoPhaseSolver._consistent_advect()` in
+  `lilytorch/src/two_phase_solver.py` — pure Python, already correct but
+  requires `solver_method='python'` (~10× slower than kernel mode).
+
+  **What to build.**
+  * CUDA kernel for conservative mass-momentum advection (replaces Kernel A
+    for two-phase): compute upwind mass flux F = u_adv * rho_upwind at faces,
+    evolve density and momentum with the SAME flux, recover u = (ρu)/ρ.
+  * Integrate into kernel pipeline: `solver.py` → `_fluid_step_kernel_3d`
+    dispatch, `two_phase_solver.py` → `project()` coefficient rescale
+    (unchanged), `finalize_step` — skip standalone VOF advection when alpha
+    is synced from evolved density.
+  * BDIM (Kernel B) and projection stay identical.
+  * Validation: (a) rho_air=rho_water → match single-phase speed; (b) rho_air=1.2
+    → verify still stable, compare speed to current non-conservative at rho_air=1.2
+    (baseline: ~0.22 m/s).  **Note:** the speed bias (0.22 vs 0.15 single-phase)
+    is now known to be robust to rho_air, so do NOT expect conservative transport
+    alone to close the gap — see HP5b for the body-in-air diagnosis.
+
+HP5b. **Diagnose two-phase surface speed bias** (2026-06-18 — investigation in progress).
+
+  **Observation.** Two-phase surface swimming reaches ~0.22 m/s at steady state
+  vs ~0.15 m/s for single-phase underwater (same grid, same gait, same robot).
+  Experiment: 0.128 m/s.  The speed bias is **robust** — does NOT depend on:
+  * `rho_air` (12.5 → 1.2): no change — rules out harmonic-mean density cap
+    as the dominant mechanism.
+  * `consistent_momentum` on/off: no change — rules out non-conservative
+    advection instability as the cause.  (NB: config key typo
+    `"converved_momentum"` in `gen_config_surface_pool.py` line 195;
+    solver reads `"consistent_momentum"` — the feature was never active in
+    these tests.  Fix the typo before re-testing.)
+  * `air_transparent_body` on/off: no change — rules out BDIM velocity
+    masking in air as the cause.
+  * Alpha-weighting in forces (`p = p * alpha` in `_two_phase_forces`):
+    breaks buoyancy (body sinks), cannot be used.
+
+  **Leading hypothesis — body-in-air effect (structural, not a bug).**
+  At steady state the robot floats at the waterline; dorsal body surface is
+  in air (drag ≈ 0), ventral surface + tail are in water (full thrust).
+  Same thrust, ~30% less drag → faster.  This is **physically correct**
+  for a surface swimmer — the question is whether +47% (0.15→0.22) is the
+  right magnitude, or whether additional mechanisms (free-surface pressure
+  release reducing confinement) are also contributing.
+
+  **Agent TODO — isolate the mechanism:**
+  1. ~~Fix config typo~~ ✅ DONE (2026-06-18): `"converved_momentum"` →
+     `"consistent_momentum"` in `gen_config_surface_pool.py` line 195
+     (set to `False` — requires `solver_method='python'` when enabled).
+  2. Run two-phase surface sim (current config, kernel mode, rho_air=1.2)
+     and single-phase underwater sim.  At steady state, compare:
+     * Per-link drag force (Fx) — is drag_two_phase ≈ 0.7 × drag_single?
+       (expect ~30% reduction from dorsal surface unloading).
+     * Per-link thrust force — should be similar (tail submerged in both).
+     * If drag reduction >30%, additional confinement-release effect exists.
+  3. Run the two-phase sim with WATERLINE raised high enough that the robot
+     is fully submerged at steady state (e.g. WATERLINE = 0.10).  If speed
+     drops to ~0.15 → body-in-air effect confirmed as the sole mechanism.
+     (Note: buoyancy will push the robot up; the WATERLINE must be high
+     enough that equilibrium depth is still fully submerged.)
+  4. If none of the above resolves the bias, instrument `_two_phase_forces`
+     to print per-step pressure-force components on water-only vs air-only
+     band cells, looking for spurious air suction from gauge anchoring.
+
+HP3. **Polish repo & docs** — review/correct outdated documentation, including `docs/`.
+  * (2026-06-18) Added status note to `docs/solver_bdim_merge_proposal.md`
+    (SU2 done, proposal remains valid long-term direction).
+  * (2026-06-18) `docs/memory_analysis.md` reviewed — still current.
+  * (2026-06-18) `docs/two_phase.rst` reviewed — consistent with implementation.
+  * Remaining: add one-fluid free-surface section to docs, review
+    `docs/getting_started.rst` and `README.md` for stale references.
+
+HP4. **Stabilise the one-fluid GFM free surface** (handoff 2026-06-17).
+
+  **One-line status.** The two-phase surface model is sound for *qualitative*
+  free-surface work but over-predicts swim speed ~2× from under-resolved wave
+  drag; **single-phase underwater already matches the robot (0.128 m/s)** and is
+  the tool for quantitative speed. The one-fluid free surface is the right
+  structural fix (removes air noise, statics validated exactly) — it just needs
+  the explicit surface mode stabilized, which is this HP4 task.
+
+  **Progress (2026-06-17).** Steps (1)–(3) DONE at proof-of-concept level:
+  * (1) **Implicit free-surface coupling** — hydrostatic-pressure correction
+    (η''(x) term in Poisson RHS) stabilises the standing wave at RES=75:
+    wave oscillates with amplitude ~0.02 m, no blowup (|u|max ~0.67 m/s).
+    Gaussian smoothing of η(x) added to suppress stair-step noise.
+  * (2) **Non-diffusive advection** — self-contained Weymouth–Yue VOF
+    implemented for true staggered MAC grid (interior-only arrays). Works
+    correctly; column-height transport limited by directional-splitting
+    cancellation in divergence-free regions (known WY property).
+  * (3) **3‑D extension** — `poisson_gfm.py` extended to 3‑D
+    (`gfm_solve_cg_3d`, `gfm_grad_3d`, `level_set_height_3d`,
+    `_div_of_faces_3d`).  3‑D hydrostatic validation PASSES (p error ~3.5%
+    from half-cell GFM discretization, |u|~1e-17, air p=0).  **NOT yet
+    wired into `FreeSurfaceSolver.project`** (still uses staircase mask).
+  * Remaining for step (4): period tuning (+22% → goal <5% — root cause is
+    GFM discretization of free-surface BC, not source-term calibration),
+    wire GFM into solver, 3‑D standing wave, surface-pool eel.
+
+  **Progress (2026-06-17, session 2 — period root cause FOUND + halved).**
+  Root cause of the +24% period was located: it is NOT the GFM BC and NOT the
+  η'' source-term scaling. The `ETAXX_SCALE` knob does NOT move the period
+  (1.0→+22%, 1.45→+24%, *worse*), proving the hydrostatic source is not the
+  restoring mechanism. The real cause is the **Weymouth–Yue VOF under-
+  transporting the surface**: with the narrow-band velocity zeroing,
+  `explicit_wy` now goes fully STABLE but the surface FREEZES (h flat,
+  amplitude=0, dα=0) — the WY directional-split flux cancellation in
+  divergence-free columns means the surface barely advances → wave appears
+  slow → long period.
+  * **New `height_function` method** (in `gfm_wave_standalone.py`, selectable
+    via `FS_METHOD=height_function`): single-valued surface advanced by the
+    exact kinematic eq `Dh/Dt = v_surf − u_surf·∂h/∂x` (v_surf interpolated at
+    y=h(x) from the y-faces); alpha/phi rebuilt from h each step. Removes the
+    VOF freeze. Plus: (a) exact volume conservation (uniform shift, closed
+    box) kills the spurious downward drift; (b) biharmonic (∝k⁴)
+    hyperviscosity `h −= (1/16)·∂⁴h/∂x⁴` suppresses the height-function
+    odd-even (2-cell) sawtooth — annihilates the sawtooth in one step yet
+    damps the 75-cell wave only ~0.3% over the run (a per-step Gaussian
+    compounds and kills the wave — rejected).
+  * **RESULT (RES=75):** `height_function` → **T_sim=0.646 vs 0.574, +12.5%**
+    (was +24%), **amplitude retained 73%** (was 65%), stable. Period error
+    HALVED. NOTE: |u|max still slowly creeps 0.26→0.71 over 3 periods — the
+    biharmonic only *contains* a residual instability, doesn't cure it.
+  * **OPEN (user flagged: filters are non-physical).** The 2-cell sawtooth is
+    a genuine odd-even instability of the EXPLICIT height-function coupling
+    (surface advanced by pointwise v_surf then fed back through GFM θ). The
+    physically-clean cure that removes the NEED for any filter is implicit/
+    semi-implicit surface coupling (couple the kinematic + pressure solve so
+    the fast mode can't go odd-even) — proper next step, more work. The
+    biharmonic is the least-intrusive stopgap (k⁴-targeted, ~0.3% on the
+    physical wave). Remaining +12.5% period is then likely the half-cell GFM
+    BC discretization (cf. the 3.5% hydrostatic p error) + the residual
+    surface dissipation.
+  * Diagnostic: period detection now linearly detrends `hs` before zero-
+    crossings (a residual drift otherwise reports nan).
+
+  **Progress (2026-06-17, session 3 — IMPLICIT coupling: FILTER REMOVED).**
+  User flagged the biharmonic as non-physical and chose to build the implicit
+  coupling. DONE: new default method `implicit_robin` in
+  `gfm_wave_standalone.py` (`FS_METHOD=implicit_robin`). The dynamic+kinematic
+  free-surface conditions are coupled INTO the pressure solve, turning the GFM
+  Dirichlet p=0 into a **Robin BC** at each column's surface y-face:
+  `p + g·dt²·∂p/∂z = ρ·g·η_pred`, η_pred = (h−H_ref) + dt·w* (DISPLACEMENT,
+  not absolute height — the first cut blew up because I used absolute h → ~1900
+  Pa source). Implemented as a delta on top of the existing Dirichlet GFM
+  operator (`_apply_A_2d`): extra +diagonal at (i,jt) keeps it SPD, plus a
+  known source moved to the RHS; surface y-face gradient overridden in the
+  velocity correction. Self-contained CG. **No CUDA/solver changes.**
+  * **RESULT (RES=75): STABLE WITH NO FILTER, amp 81% retained** (best of all
+    methods), mean level correct, |u| saturates ~1.75 (bounded, not growing).
+    Period **+62%** (pure form) — restoring under-resolved by the half-cell
+    GFM surface BC (the dynamic-pressure BC carries weaker restoring than a
+    body force; cf. explicit body-force height_function was +12.5%).
+  * **θ-split period tuning** (`FS_GBODY`, default 0): split gravity into an
+    implicit-BC part and an explicit body-force fraction. `FS_GBODY=0.07` →
+    **T+15%, amp 84%, still filter-free**; but the knob is STIFF/nonlinear
+    (0.12 → −55% overshoot, amp 40%), so it is a tuning parameter, not a clean
+    cure. Robust tuning-free default is FS_GBODY=0 (+62%).
+  * **NET:** the artificial filter is GONE — implicit coupling gives filter-
+    free stability with the best amplitude retention (81–84%). Remaining
+    period error (+15% tuned / +62% pure) is now squarely the **half-cell GFM
+    free-surface-BC discretization** (consistent with the 3.5% hydrostatic p
+    error). That — a higher-order/consistent GFM surface gradient — is the
+    real next lever for <5% period, NOT more source/knob calibration.
+  * Comparison table of all methods is in the file's METHOD-selector header.
+
+  **Progress (2026-06-18, session 4 — CONVERGENCE TEST: implicit_robin is
+  resolution-fragile, NOT yet convergent).** Added `FS_RES` env knob and swept
+  the pure `implicit_robin` period vs grid:
+    RES=75  → T+62%, amp 81%   (the earlier "good" point)
+    RES=110 → collapses (amp 7%, period nan)
+    RES=150 → T−69%, amp 23%
+  The period does NOT converge and amplitude DECAYS under refinement → the
+  +62% at RES=75 is **not** a half-cell discretization floor; it sat in a lucky
+  stability window. **Root cause (analysed):** the implicit coupling strength
+  `β = g·dt²/(θh) ∝ h` (because dt ∝ h here) → the implicit ∂p/∂z term
+  VANISHES as the grid refines, so the single-face Robin stops suppressing the
+  column odd-even mode and the restoring reverts to effectively explicit-in-η
+  → decay/instability. The fully-implicit derivation itself is correct
+  (`p + g·dt²·∂p/∂z = ρg·η_pred`, η_pred = η^n + dt·w*, verified by
+  back-substituting w^{n+1}=w*−c∂p/∂z); the FLAW is imposing it at only ONE
+  y-face per column — on a sloped surface the interface-cut **x-faces** still
+  get the Dirichlet p=0 (not p=ρgη), so the implicit BC is incomplete and the
+  scheme is inconsistent at finite slope.
+  **→ CONCRETE NEXT STEP (convergent fix):** generalise the GFM ghost to impose
+  a NONZERO interface pressure p_I = ρg·η_disp(x_interface) on **all**
+  interface-cut faces (both x and y), treated implicitly (each cut face carries
+  its own β and source). For the single-valued height surface η is known per
+  column, so p_I at a y-face = ρg·η_i and at an x-face = ρg·(η_i+η_{i+1})/2.
+  This is the proper 2-D implicit GFM free surface; expect it to converge.
+  Re-run the FS_RES sweep as the acceptance test BEFORE wiring into the solver.
+
+  **Progress (2026-06-18, session 5 — all-cut-faces RULED OUT; true root cause
+  is the coupling ORDER).** Implemented `implicit_robin_full` (method in
+  `gfm_wave_standalone.py`): the implicit Robin p=ρgη is imposed on EVERY
+  interface-cut face (x and y), each with its own θ/β/source (diagonal per cut
+  face → still SPD). FS_RES sweep: RES75 T+82%/amp43%, RES110 −46%/amp5%,
+  RES150 −16%/amp78% — STILL non-convergent. So the slope/x-face Dirichlet
+  leak was NOT the cause.
+  **TRUE ROOT CAUSE (conclusive):** the GFM-Robin couples the surface
+  implicitly only through the FIRST normal derivative `∂p/∂z`, so the
+  stabilising coefficient `β = g·dt²/(θh) ∝ h` (because dt ∝ h here) and the
+  implicit term VANISHES as h→0. A refinement-robust implicit free surface
+  (Casulli-style semi-implicit) instead couples the surface elevation through
+  a HELMHOLTZ / second-derivative term `g·dt²·∇²η`, coefficient `g·dt²/h² ∝
+  const` when dt ∝ h — one order of h STRONGER. No GFM-Robin patch (single-
+  face OR all-faces) can be refinement-robust; the coupling is structurally
+  one order too weak. **Both `implicit_robin` and `implicit_robin_full` are
+  therefore dead-ends for production** (they only "work" in a luck-of-dt window
+  at one resolution).
+  **→ CORRECTED NEXT STEP:** build a Casulli-type semi-implicit free surface —
+  treat the surface-elevation gradient implicitly in momentum AND the velocity
+  divergence implicitly in the kinematic equation, yielding a Helmholtz solve
+  for η^{n+1} (coefficient g·dt², does NOT vanish). For THIS depth (kH≈2.14,
+  not shallow) the depth-AVERAGED Casulli would give the wrong dispersion
+  (ω²=gHk² vs gk·tanh kH), so it must be the FULL 2-D (x–z) version: couple
+  η^{n+1} into the full pressure Poisson via the Helmholtz surface term while
+  keeping the vertical structure (this is how 3-D ocean codes do it). Acceptance
+  test = the FS_RES sweep must show a CONVERGING period. This is real work, not
+  a patch — best started with fresh budget.
+
+  **Progress (2026-06-18, session 6 — CONVERGENT implicit free surface PASSES
+  (linear).** Before reaching for Casulli I did the von-Neumann analysis of the
+  Robin BC on a clean FIXED linear domain: η^{n+1}=η_pred/(1+μ),
+  μ=g·dt²·k·tanh(kH); discrete map |λ|²=1/(1+μ)<1 (stable, decays
+  ~1/√(1+μ)/step), phase→√μ ⇒ ω_num→√(gk·tanh kH) EXACT as μ→0. At RES=75
+  μ≈3e-4 ⇒ near-perfect. **CONCLUSION: the Robin concept was never the problem
+  — the non-convergence was entirely the moving-interface GFM machinery
+  (θ-clamp, narrow-band zeroing, VOF-free kinematic, volume shifts).**
+  * **NEW: `lilytorch/validation/free_surface/linear_wave_robin.py`** — clean
+    LINEARIZED standing wave, fixed domain (water 0..H, surface linearised at
+    z=H), MAC grid, implicit Robin top BC, NO GFM / NO VOF / NO narrow-band /
+    NO filter / NO body-force fudge.
+  * **One real bug found:** the surface cell's continuity RHS must include the
+    PREDICTOR surface-face flux vtop* (`rhs[:,Nz-1] -= vtop*/(c·h)`); it is
+    omitted by the interior-only `_div_of_faces` and is zero only while
+    vtop≈0, so leaving it out blows up *after* the surface starts moving
+    (clean start → accelerating blow-up). With it added: perfect.
+  * **RESULT — FS_RES convergence sweep (acceptance test):**
+      RES=50  T err +0.2%, amp 86%
+      RES=75  T err −0.0%, amp 90%
+      RES=110 T err +0.0%, amp 94%
+      RES=150 T err +0.1%, amp 95%
+    Period EXACT at all resolutions; amplitude retention IMPROVES with
+    refinement (→100% as μ→0) — i.e. it CONVERGES. This is the property both
+    `implicit_robin` and `implicit_robin_full` failed. **The project's
+    load-bearing standalone standing-wave acceptance test now PASSES (linear,
+    filter-free).** No Casulli reformulation needed — the implicit Robin is the
+    correct, convergent scheme; it just has to be applied on a clean MAC grid.
+  ── REMAINING (the implicit core is now proven): port this clean implicit-Robin
+     surface BC onto the MOVING interface — rebuild the moving-interface step
+     using the lesson above (include the predictor surface-flux term; avoid the
+     θ-clamp/narrow-band artifacts that broke the GFM probes), re-pass the
+     FS_RES sweep with a moving interface + finite amplitude; THEN wire into
+     `FreeSurfaceSolver.project` (replace staircase mask), 3-D standing wave,
+     surface-pool eel.
+
+  **Progress (2026-06-18, session 7 — moving-interface port ATTEMPTED,
+  BLOCKED by GFM).**  Two attempts to port the clean Robin BC to the moving
+  interface by weakening/removing the GFM artifacts:
+  * `implicit_robin_clean` (θ floor 0.005, NO narrow-band) → **catastrophic
+    blowup** (|u|→2700 m/s).  The narrow-band zeroing IS load-bearing for
+    the moving-interface case — without it, air cells accumulate unbounded
+    GFM velocities.  Unlike `linear_wave_robin.py` (which has NO air cells),
+    the moving-interface domain has air above the surface that must be
+    controlled.
+  * `implicit_robin_clean` v2 (θ floor 0.005, narrow-band KEPT) → **still
+    blows up** (|u|→4400 m/s).  The milder θ floor increases the Robin
+    diagonal by 63× (β/(1+β))/(θ·h²) ∝ 1/θ², making the operator stiff
+    enough to destabilise the CG + time integration.  The GFM θ-clamp at
+    _TH_MIN=0.05 is load-bearing for the operator conditioning.
+  * **CONCLUSION:** both GFM artifacts (θ-clamp, narrow-band zeroing) are
+    NECESSARY for the moving-interface case.  They cannot be simply
+    "removed" or "weakened."  The convergent Robin BC can only be applied on
+    a clean MAC grid without air cells (as in `linear_wave_robin.py`).
+  * **→ PATH FORWARD:** the moving-interface port needs a FUNDAMENTALLY
+    DIFFERENT air treatment — not GFM ghost cells + narrow-band zeroing, but
+    a one-fluid approach where the air is NOT a computational domain (e.g.
+    cut-cell, embedded boundary, or a level-set method that only solves in
+    Ω_water).  This is more work than a patch; best scoped as a separate
+    milestone with fresh budget.  The LINEAR implicit-Robin acceptance test
+    IS the validated core — it just needs the right moving-interface
+    machinery wrapped around it.
+  * **FS_RES verification re-run (2026-06-18):** linear_wave_robin.py PASSES
+    at all resolutions (RES=50/75/110/150, T err ≤0.2%).
+
+  **Progress (2026-06-18, session 8 — GFM gradient wired into solver).**
+  * `FreeSurfaceSolver.gradient()` overridden to return GFM sub-cell gradient
+    (padded to full-grid shape) when `free_surface.use_gfm_gradient=True`.
+    The level set φ is built from alpha each `project()`.  This gives a more
+    accurate velocity correction at the interface while the pressure solve
+    still uses the staircase `dirichlet_mask` (multigrid/MGCG unchanged).
+    Config key: `free_surface.use_gfm_gradient` (default False).
+  * **GFM pressure solve NOT wired** — the standalone GFM CG solver cannot
+    replace multigrid/MGCG without significant refactoring, and the GFM-based
+    implicit-Robin approaches (`implicit_robin`, `implicit_robin_full`,
+    `implicit_robin_clean`) are all resolution-fragile or unstable on the
+    moving interface.  The GFM machinery (θ-clamp, narrow-band zeroing) is
+    load-bearing for stability but breaks convergence under refinement.
+  * **→ REALISTIC PATH FORWARD:** the convergent implicit-Robin BC is proven
+    on a clean MAC grid (`linear_wave_robin.py`).  Porting it to the moving
+    interface requires a non-GFM air treatment (cut-cell, embedded boundary,
+    or one-fluid solve-in-Ω_water-only).  This is scoped as future work.
+    The GFM gradient override is a pragmatic partial improvement available now.
+
+  **Progress (2026-06-18, session 10 — exhaustive moving-interface attempts
+  CONCLUDE: GFM-based approaches cannot converge).**
+  * `robin_gfm_free` + staircase x-faces: |u|→10^135 (blows up).
+  * `implicit_robin` + physical-distance narrow band: RES=75 T+62%, RES=110
+    collapses, RES=150 T−69% — still non-convergent.
+  * **FINAL ASSESSMENT:** the implicit Robin BC is proven correct and
+    convergent on a clean MAC grid (`linear_wave_robin.py`, T err ≤0.2% at
+    all RES).  ALL GFM-based moving-interface implementations
+    (`implicit_robin`, `implicit_robin_full`, `implicit_robin_clean`,
+    `robin_gfm_free`) fail to converge under refinement.  The GFM machinery
+    (θ-clamp, narrow-band zeroing, GFM gradient at water-air faces) is
+    simultaneously load-bearing for stability AND convergence-breaking.
+  * **→ ONLY VIABLE PATH:** a one-fluid solve-in-Ω_water-only approach
+    (cut-cell, embedded boundary, or σ-coordinate transform) that avoids
+    air cells entirely — analogous to `linear_wave_robin.py` but with a
+    moving top boundary.  This requires a new solver architecture, not a
+    patch on the existing GFM.  Best scoped as a separate milestone with
+    fresh budget.
+  * The GFM gradient override in `FreeSurfaceSolver` (session 8) remains a
+    pragmatic partial improvement for production (better velocity correction
+    at the interface with the existing staircase pressure solve).
+
+  ── GOAL ──
+  A free-surface solver that captures surface WAVES so the surface-swimming
+  eel's wave-making drag is resolved. The two-phase VOF over-predicts swim
+  speed ~2× because that drag is under-resolved/smeared (robot 0.128 m/s vs
+  sim ~0.20–0.26; ruled out viewer, force-readout, air-density). One-fluid
   (air = constant-p void) ALSO removes the air-force noise structurally.
-  WHAT EXISTS (keep, two-phase solver untouched):
-    - `lilytorch/src/free_surface_solver.py` `FreeSurfaceSolver(TwoPhaseSolver)`:
-      uniform water density, `p=0` in air (via the dormant `dirichlet_mask` hook
-      in `poisson_mult.py`), velocity-extend into air, gauge-anchor+air-transparent off.
-    - `lilytorch/src/poisson_gfm.py`: sub-cell ghost-fluid Poisson (2-D) — height
-      level set `phi=y-h(x)`, θ-scaled ghost gradient placing `p=0` on the exact
-      interface, Jacobi-CG, operator `A=div(gfm_grad)`.
-    - `lilytorch/validation/free_surface/run_hydrostatic_fs.py` (PASSES: water
-      hydrostatic 0.00%, |u|~1e-7, air p=0) and `gfm_wave_standalone.py` (the
-      standing-wave probe that exposes the failure).
-  STATUS: STATICS WORK. WAVES DON'T — the explicit free-surface mode is UNSTABLE:
-  in `gfm_wave_standalone.py`, freezing the surface face → stable but amplitude=0;
-  letting it move → |u| grows 0.007→3 m/s, surface collapses. Smaller dt only
-  delays it. This is the classic explicit free-surface instability (why the old
-  GFM was retired).
-  NEXT STEPS to make it usable:
-    (1) IMPLICIT free-surface coupling — treat the surface pressure/gravity
-        implicitly so the fast gravity-wave mode can't blow up (the load-bearing fix);
-    (2) NON-DIFFUSIVE interface advection / clean reinitialised level set — the
-        standalone reuses 1st-order upwind α → φ noisy → noisy θ → noise feeds the
-        growth; reuse the Weymouth-Yue VOF (`two_phase.py`) or a proper level set;
-    (3) then extend `poisson_gfm.py` to 3-D and wire the GFM grad/solve into
-        `FreeSurfaceSolver.project` (currently it uses the staircase `p=0` mask),
-        re-validate hydrostatic → standing-wave period (ω²=gk·tanh kH) → eel.
-  VALIDATION ORDER: standalone standing wave (period + amplitude retention) BEFORE
-  any MAC/BDIM integration. Target: stable oscillation at the analytic period with
-  ~100% amplitude over several periods. Then a surface-pool eel config using
-  `FreeSurfaceSolver` vs two-phase vs robot 0.128 m/s.
+
+  ── WHAT EXISTS (the two-phase solver is untouched) ──
+  * `lilytorch/src/free_surface_solver.py` — `FreeSurfaceSolver(TwoPhaseSolver)`:
+    uniform water density, `p=0` in air (staircase mask via the `dirichlet_mask`
+    hook in `poisson_mult.py`), velocity-extend into air, gauge-anchor +
+    air-transparent-body OFF.
+  * `lilytorch/src/poisson_gfm.py` — self-contained ghost-fluid Poisson (2‑D):
+    height level-set `φ = y − h(x)`, θ-scaled ghost gradient placing `p=0` on
+    the *exact* interface, Jacobi-CG, operator `A = div(gfm_grad)`.  NOT yet
+    wired into `FreeSurfaceSolver.project` (that still uses the staircase mask).
+  * `lilytorch/validation/free_surface/run_hydrostatic_fs.py` — **PASSES:**
+    water hydrostatic 0.00%, |u| ~ 1e−7, air p = 0.
+  * `lilytorch/validation/free_surface/gfm_wave_standalone.py` — self-contained
+    2‑D MAC standing-wave probe that **exposes the failure**.
+
+  ── PRECISE FAILURE MODE ──
+  **Statics work. Waves don't.** The explicit free-surface mode is UNSTABLE:
+  * freeze the surface face → stable but amplitude = 0 (no wave);
+  * let the surface move → |u| grows **0.007 → 3 m/s** (three orders of
+    magnitude), surface collapses, smaller dt only delays it.
+  This is the **classic explicit free-surface instability** — the fast
+  gravity-wave mode (ω² = gk tanh kH) is treated explicitly and its CFL
+  constraint is not the advective one but a much tighter surface-gravity one.
+  This is exactly why the old GFM was retired.
+
+  ── ORDERED NEXT STEPS ──
+  **(1) Implicit free-surface coupling** — treat the surface pressure/gravity
+      implicitly so the fast gravity-wave mode can't blow up (the load-bearing
+      fix).  This means the Poisson RHS must include the gravity contribution
+      at the *future* surface position, or equivalently the surface kinematic
+      BC (Dh/Dt = v_surface) must be coupled to the pressure solve.
+  **(2) Non-diffusive interface advection + clean reinitialised level set** —
+      the standalone reuses 1st-order upwind α → φ noisy → noisy θ → noise
+      feeds the instability growth.  Reuse the Weymouth-Yue VOF
+      (`two_phase.py`) or implement a proper level-set method with HJ-WENO
+      advection and Sussman reinitialisation.
+  **(3) 3‑D + BDIM integration** — extend `poisson_gfm.py` to 3‑D, wire the
+      GFM grad/solve into `FreeSurfaceSolver.project` (replacing the current
+      staircase `p=0` mask).  Re-validate hydrostatic first.
+  **(4) Validate standing-wave period then eel** — standalone standing wave
+      (period + amplitude retention) BEFORE any MAC/BDIM integration.  Target:
+      stable oscillation at the analytic period ω² = gk tanh kH with ~100%
+      amplitude over several periods.  Then a surface-pool eel config using
+      `FreeSurfaceSolver` vs two-phase vs robot 0.128 m/s.
+
+  **Validation order is load-bearing:** standalone standing wave MUST pass
+  before any 3‑D or BDIM integration.
 
 ---
 

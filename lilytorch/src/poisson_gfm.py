@@ -1,4 +1,4 @@
-"""Ghost-Fluid-Method (GFM) free-surface pressure solve (2-D), self-contained.
+"""Ghost-Fluid-Method (GFM) free-surface pressure solve (2-D and 3-D).
 
 Imposes the free-surface Dirichlet BC ``p = 0`` at the *exact* (sub-cell)
 interface location, so surface gravity waves are captured (unlike a staircase
@@ -7,7 +7,7 @@ interface location, so surface gravity waves are captured (unlike a staircase
 Method (Fedkiw/Gibou ghost-fluid):
   * a level-set ``phi`` (``phi<0`` water, ``phi>0`` air, ``phi=0`` at the
     surface) locates the interface; for a single-valued free surface we build it
-    as a height function ``phi = y - h(x)``;
+    as a height function ``phi = z - h(x,y)`` (3-D) or ``phi = y - h(x)`` (2-D);
   * the face pressure gradient used by BOTH the Poisson operator and the
     velocity correction replaces an air cell's pressure by the GHOST value
     ``p_ghost = p_water * (1 - 1/theta)``, where ``theta = phi_water /
@@ -24,6 +24,10 @@ import torch
 
 _TH_MIN = 0.05   # clamp theta away from 0 (cell adjacent to interface)
 
+
+# ═══════════════════════════════════════════════════════════════════════
+#  2-D
+# ═══════════════════════════════════════════════════════════════════════
 
 def level_set_height_2d(alpha, dy, y0):
     """Height-function level set for a single-valued free surface.
@@ -102,6 +106,91 @@ def gfm_solve_cg_2d(rhs, phi, h, n_iter=400, tol=1e-7):
     b2 = (b * b).sum().clamp(min=1e-30)
     for _ in range(n_iter):
         Ap = _apply_A_2d(pdir, phi, h, water)
+        denom = (pdir * Ap).sum()
+        if denom.abs() < 1e-30:
+            break
+        a = rz / denom
+        p = p + a * pdir
+        r = r - a * Ap
+        r = torch.where(water, r, torch.zeros_like(r))
+        if (r * r).sum() / b2 < tol * tol:
+            break
+        rz_new = (r * r).sum()
+        pdir = r + (rz_new / rz) * pdir
+        rz = rz_new
+    return torch.where(water, p, torch.zeros_like(p))
+
+
+# ═══════════════════════════════════════════════════════════════════════
+#  3-D
+# ═══════════════════════════════════════════════════════════════════════
+
+def level_set_height_3d(alpha, dz, z0):
+    """Height-function level set for a 3-D single-valued free surface.
+
+    ``alpha`` (1 water, 0 air), cell-centred, shape (Nx, Ny, Nz).
+    Water column height per (x,y) column
+    ``h(x,y) = z0 + dz * sum_z alpha``;
+    ``phi[i,j,k] = z_k - h(x_i, y_j)`` (<0 water).
+    """
+    Nx, Ny, Nz = alpha.shape
+    h_col = z0 + dz * alpha.sum(dim=2)                       # (Nx, Ny)
+    zk = z0 + (torch.arange(Nz, device=alpha.device, dtype=alpha.dtype) + 0.5) * dz
+    return zk[None, None, :] - h_col[:, :, None]             # (Nx, Ny, Nz)
+
+
+def gfm_grad_3d(p, phi, h):
+    """GFM pressure gradient on MAC interior faces. Returns (gx, gy, gz).
+
+    gx: (Nx-1, Ny, Nz)   x-faces
+    gy: (Nx, Ny-1, Nz)   y-faces
+    gz: (Nx, Ny, Nz-1)   z-faces
+    """
+    return (
+        _ghost_faces_1d(p, phi, 0, h),
+        _ghost_faces_1d(p, phi, 1, h),
+        _ghost_faces_1d(p, phi, 2, h),
+    )
+
+
+def _div_of_faces_3d(gx, gy, gz, h):
+    """Cell-centred divergence of interior face fluxes; 0 normal flux at walls."""
+    Nx = gx.shape[0] + 1
+    Ny = gy.shape[1] + 1
+    Nz = gz.shape[2] + 1
+    div = torch.zeros((Nx, Ny, Nz), device=gx.device, dtype=gx.dtype)
+    div[1:, :, :]  += gx / h
+    div[:-1, :, :] -= gx / h
+    div[:, 1:, :]  += gy / h
+    div[:, :-1, :] -= gy / h
+    div[:, :, 1:]  += gz / h
+    div[:, :, :-1] -= gz / h
+    return div
+
+
+def _apply_A_3d(p, phi, h, water):
+    gx, gy, gz = gfm_grad_3d(p, phi, h)
+    Ap = _div_of_faces_3d(gx, gy, gz, h)
+    return torch.where(water, Ap, torch.zeros_like(Ap))
+
+
+def gfm_solve_cg_3d(rhs, phi, h, n_iter=400, tol=1e-7):
+    """Solve ``div(gfm_grad(p)) = rhs`` in water (p=0 in air) by CG, 3-D.
+
+    ``rhs`` is the projection RHS ``div(u*)/c`` (cell-centred, defined in
+    water). Returns p with p=0 in the air.
+    """
+    water = phi < 0
+    b = torch.where(water, rhs, torch.zeros_like(rhs))
+    p = torch.zeros_like(rhs)
+    r = b - _apply_A_3d(p, phi, h, water)
+    r = torch.where(water, r, torch.zeros_like(r))
+    z = r.clone()
+    pdir = z.clone()
+    rz = (r * z).sum()
+    b2 = (b * b).sum().clamp(min=1e-30)
+    for _ in range(n_iter):
+        Ap = _apply_A_3d(pdir, phi, h, water)
         denom = (pdir * Ap).sum()
         if denom.abs() < 1e-30:
             break

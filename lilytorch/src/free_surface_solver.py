@@ -42,6 +42,11 @@ first). Not a drop-in for the production eel until validated there.
 import torch
 
 from lilytorch.src.two_phase_solver import TwoPhaseSolver
+from lilytorch.src.poisson_gfm import (
+    level_set_height_2d, level_set_height_3d,
+    gfm_grad_2d, gfm_grad_3d,
+    gfm_solve_cg_2d, gfm_solve_cg_3d,
+)
 
 
 class FreeSurfaceSolver(TwoPhaseSolver):
@@ -51,8 +56,6 @@ class FreeSurfaceSolver(TwoPhaseSolver):
                          compute_forces=compute_forces)
 
         # ---- one-fluid: collapse the phase contrast to a single (water) fluid.
-        # recip_density_cc/face then return 1/rho_water uniformly => the
-        # variable-density projection degenerates to a constant-coefficient one.
         self.two_phase.rho_air = self.two_phase.rho_water
         self.two_phase.nu_air  = self.two_phase.nu_water
 
@@ -62,14 +65,76 @@ class FreeSurfaceSolver(TwoPhaseSolver):
         self._air_transparent_body = False
 
         fs = pars["solver"].get("free_surface", {})
-        # number of harmonic sweeps used to extend the water velocity into the
-        # air void each step (covers the near-surface band; ~5-15 is plenty).
         self._fs_extend_iters = int(fs.get("extend_iters", 10))
         self._fs_air_mask_cache = None
+        self._fs_phi = None                     # GFM level set, built each project
+        self._fs_use_gfm_gradient = bool(fs.get("use_gfm_gradient", False))
         self._wrap_poisson_air_dirichlet()
+        gfm_status = "GFM gradient ON" if self._fs_use_gfm_gradient else "staircase mask only"
         print(f"[FreeSurfaceSolver] one-fluid free surface: p=0 in air "
               f"(dirichlet mask), uniform rho={self.two_phase.rho_water}, "
-              f"velocity-extend iters={self._fs_extend_iters}")
+              f"velocity-extend iters={self._fs_extend_iters}, {gfm_status}")
+
+    # ------------------------------------------------------------------
+    #  GFM level set + gradient override
+    # ------------------------------------------------------------------
+    def _build_level_set(self):
+        """Build the GFM level set φ from the VOF alpha field.
+        φ < 0 in water, φ > 0 in air, φ = 0 at the interface.
+        Stored in ``self._fs_phi`` (interior-only, no ghost cells)."""
+        alpha = self.two_phase.alpha
+        inner = tuple(slice(1, -1) for _ in range(self.ndim))
+        a = alpha[inner]
+        h = float(self.h)
+        if self.ndim == 2:
+            self._fs_phi = level_set_height_2d(a, h, float(self.ymin))
+        else:
+            self._fs_phi = level_set_height_3d(a, h, float(self.zmin))
+
+    def gradient(self, var):
+        """Override: use GFM sub-cell gradient when enabled, else standard."""
+        if not self._fs_use_gfm_gradient or self._fs_phi is None:
+            return super().gradient(var)
+        p = var
+        inner = tuple(slice(1, -1) for _ in range(self.ndim))
+        p_int = p[inner]
+        h = float(self.h)
+        if self.ndim == 2:
+            gx_int, gy_int = gfm_grad_2d(p_int, self._fs_phi, h)
+            # gx_int: (Nx-1, Ny) interior x-faces, interior y-cells
+            # gy_int: (Nx, Ny-1) interior x-cells, interior y-faces
+            # Full-grid shapes: p_x (Nx+2, Ny+2), p_y (Nx+2, Ny+2)
+            Nx = gx_int.shape[0] + 1  # = number of interior x-cells
+            Ny = gx_int.shape[1]      # = number of interior y-cells
+            p_x = torch.zeros_like(p)
+            p_y = torch.zeros_like(p)
+            # Interior x-faces: GFM face k → full-grid face k+2
+            p_x[2:Nx+1, 1:-1] = gx_int
+            # Left/right boundary faces stay 0 (Neumann wall, no-flux)
+            # Interior y-faces: GFM face k → full-grid face k+2
+            p_y[1:-1, 2:Ny+1] = gy_int
+            # Bottom/top boundary faces stay 0 (Neumann wall)
+            # Ghost-cell padding (Neumann replication) for non-sweep dimension
+            p_x[:, 0] = p_x[:, 1]; p_x[:, -1] = p_x[:, -2]
+            p_y[0, :] = p_y[1, :]; p_y[-1, :] = p_y[-2, :]
+            return (p_x, p_y)
+        else:
+            gx_int, gy_int, gz_int = gfm_grad_3d(p_int, self._fs_phi, h)
+            Nx, Ny, Nz = gx_int.shape[0] + 1, gy_int.shape[1] + 1, gz_int.shape[2] + 1
+            p_x = torch.zeros_like(p)
+            p_y = torch.zeros_like(p)
+            p_z = torch.zeros_like(p)
+            p_x[2:Nx+1, 1:-1, 1:-1] = gx_int
+            p_y[1:-1, 2:Ny+1, 1:-1] = gy_int
+            p_z[1:-1, 1:-1, 2:Nz+1] = gz_int
+            # Ghost-cell padding
+            p_x[:, 0, :] = p_x[:, 1, :]; p_x[:, -1, :] = p_x[:, -2, :]
+            p_x[:, :, 0] = p_x[:, :, 1]; p_x[:, :, -1] = p_x[:, :, -2]
+            p_y[0, :, :] = p_y[1, :, :]; p_y[-1, :, :] = p_y[-2, :, :]
+            p_y[:, :, 0] = p_y[:, :, 1]; p_y[:, :, -1] = p_y[:, :, -2]
+            p_z[0, :, :] = p_z[1, :, :]; p_z[-1, :, :] = p_z[-2, :, :]
+            p_z[:, 0, :] = p_z[:, 1, :]; p_z[:, -1, :] = p_z[:, -2, :]
+            return (p_x, p_y, p_z)
 
     # ------------------------------------------------------------------
     #  p = 0 in the air via the Poisson dirichlet_mask
@@ -98,13 +163,14 @@ class FreeSurfaceSolver(TwoPhaseSolver):
             setattr(ps, name, wrapped)
 
     def project(self, *args, **kwargs):
+        # Build the GFM level set for the gradient override.
+        if self._fs_use_gfm_gradient:
+            self._build_level_set()
         # Cache the air mask for the wrapped Poisson solve, then run the
         # (now constant-coefficient, since rho_air==rho_water) projection.
         self._fs_air_mask_cache = self._air_mask_interior()
         out = super().project(*args, **kwargs)
-        # Hard-pin the air void to p=0: the V-cycle preconditioner pins it, but
-        # CG (mgcg) iterates can re-pollute it; the air is dynamically a void, so
-        # zeroing its pressure post-solve keeps the body-force band clean.
+        # Hard-pin the air void to p=0.
         p = out[-1]
         p[self.two_phase.alpha < 0.5] = 0.0
         return out

@@ -1,6 +1,14 @@
 # Proposal: Merging `solver.py` and `BDIMhandler.py`
 
-**TODO reference (HIGH PRIORITY #3):**
+**Status (2026-06-18):** The 2-D/3-D unification of `BDIMhandler` (SU2 in
+`milestones/to_do_list.md`) is ✅ DONE.  The four per-dim methods
+(`_update_2d`, `_update_3d`, `_update_2d_streaming_multi`,
+`_update_3d_streaming_multi`) have been collapsed into dimension-generic
+methods.  The full merge proposed below has NOT been executed — the files
+remain separate but share unified internals.  The proposal remains a valid
+long-term cleanup direction but is lower priority than the current HP items.
+
+**TODO reference (original HIGH PRIORITY #3):**
 > Combine `solver.py` and `BDIMhandler` in a single simulation file (just
 > `solver.py`). `BDIMhandler` should only keep whatever is necessary for
 > handling the coupling with FARMS, if possible. **Review options and

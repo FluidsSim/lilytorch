@@ -187,8 +187,15 @@ class FluidSolver(PlottingMixin):
         self.rho  = torch.tensor(solver["rho"], device=self.device, dtype=self.dtype)  # density
         self.visc = self.nu*self.rho                                                   # dynamic viscosity
 
-        self.eps  = solver.get("eps_multiplier",
-                                torch.tensor(2.0, device=self.device, dtype=self.dtype)) * self.h
+        # BDIM transition thickness ε.  Default 2 cells; 3–4 gives a smoother
+        # interface on coarse grids.  ``eps_cells`` (integer) is preferred;
+        # ``eps_multiplier`` (float) is the legacy key.
+        _eps_cells = solver.get("eps_cells", None)
+        if _eps_cells is not None:
+            self.eps = float(_eps_cells) * self.h
+        else:
+            self.eps = solver.get("eps_multiplier",
+                                  torch.tensor(2.0, device=self.device, dtype=self.dtype)) * self.h
 
         # BDIM-σ (Lauber et al. 2022): per-body Poisson-coefficient shift
         # to enforce mu0_poisson → 0 inside thin bodies (r < eps).  When
