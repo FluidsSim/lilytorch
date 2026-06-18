@@ -92,6 +92,73 @@ HP5b. **Diagnose two-phase surface speed bias** (2026-06-18 — investigation in
      to print per-step pressure-force components on water-only vs air-only
      band cells, looking for spurious air suction from gauge anchoring.
 
+  **RESULT (2026-06-18 — body-in-air hypothesis REFUTED; gap is free-DOF
+  dynamics).**  Ran the decisive submerged-vs-surface A/B (new harness
+  `gen_config_submerged_diag.py` + `speed_logger.py`, output `_submerged_diag/`).
+  Because the eel is lighter than water (floats), it was held under with
+  `SpawnMode.TRANSVERSE0` (slide-x, slide-y -> surge/sway free, heave/roll/
+  pitch/yaw LOCKED); the free-yaw `TRANSVERSE` variant + explicit coupling
+  diverged when fully submerged (added-mass blow-up, `mjWARN_BADQACC`), cured
+  with `force_relaxation=0.5` (cycle-mean force preserved -> speed unbiased).
+  Three matched runs (frelax=0.5, spawn x=4.75, swim speed = net head
+  translation / T):
+      two-phase SURFACE   (z=-0.0115, dorsal in air)  : 0.184 m/s
+      two-phase SUBMERGED (z=-0.07, all in water)     : 0.174 m/s
+      single-phase SUBMERGED (z=-0.07, infinite water): 0.164 m/s
+  All within ~6-12%.  Conclusions:
+  * **Body-in-air unloading is only ~6%** (surface 0.184 vs submerged 0.174) —
+    NOT the ~45% HP5b assumed.  **Leading hypothesis refuted.**
+  * **two-phase submerged ~= single-phase submerged** (0.174 vs 0.164) — the
+    two-phase momentum transport does NOT over-thrust vs single-phase for a
+    submerged body (single-phase steady-window is even marginally higher).
+    **=> HP5's conservative-momentum kernel will NOT close the speed bias**
+    (its value is stability/perf only).
+  * The big original 47% gap (free two-phase 0.22 vs free single 0.15) is NOT
+    reproduced once DOFs are locked (~12% left) => it lives in the **free
+    vertical/rotational surface dynamics** (heave/roll/pitch/yaw — body riding
+    the interface), the same DOFs the lock suppresses.
+  **=> NEXT (to confirm):** rerun the SAME A/B with `SpawnMode.FREE` (or
+  TRANSVERSE, yaw free) under implicit Aitken coupling (cures the added-mass
+  blow-up the explicit path hits when submerged), reproduce the 0.22 vs 0.15
+  gap, then lock DOFs one at a time (heave only, then +roll/pitch, then +yaw)
+  to find which freedom carries the speed-up.  Caveat: locking heave removes
+  the body's surface-riding, so the ~6% body-in-air number is for a FIXED-draft
+  body, not a freely-bobbing one.
+
+  **RESULT-2 (2026-06-18 — WHY single-fluid-underwater != two-fluid-underwater:
+  the gauge_anchor_forces fix OVER-corrects, leaving a residual hydrostatic
+  force-readout artifact that biases the self-propelled swim speed).** A
+  fully-controlled isolating ladder (ALL `SpawnMode.TRANSVERSE`, frelax=0.5,
+  z=-0.07, same gait/BDIM; only one knob changed per run; new diag knobs
+  DIAG_SINGLEPHASE/GRAVITY/RHO_AIR/TP_NOGRAVITY/GAUGE/FREESLIP_TOP), forward =
+  -dx/dt slope:
+      single-phase  (no gravity)                 +0.075   <- clean reference
+      single-phase + gravity (no gauge)          -0.042   REVERSED
+      two-phase uniform-rho + gravity, gauge OFF  -0.092   REVERSED
+      two-phase uniform-rho + gravity, gauge ON   +0.152
+      two-phase uniform-rho, NO gravity (gauge)   +0.103
+      two-phase REAL air(1.2) + gravity, gauge ON +0.115
+  Decisive: toggling ONLY the gauge on the SAME flow swings -0.092 -> +0.152
+  (sign-flip).  Decomposition of the single(0.075)->two-phase-real(0.115) gap:
+  +0.05 gravity/hydrostatic force-integral leak (the coarse-body `Sum p n delta`
+  doesn't cancel the large hydrostatic baseline; gauge mitigates but OVER-
+  corrects -> residual), +0.028 two-phase code path (within TRANSVERSE noise),
+  -0.037 the ONLY physical effect = wave-making drag from the interface ~7 cells
+  above (correctly a slowdown).  Confinement/rigid-lid REFUTED (free-slip top:
+  0.075->0.075).  PHYSICS: gravity/hydrostatic must give ZERO horizontal force on
+  a heave-locked body, so the +0.05/+0.028 are NUMERICAL force-readout artifacts;
+  the gauge fix is out-of-place (flow is fine, only the force readout is approx-
+  corrected).  => For a SUBMERGED body single-phase is the trustworthy estimate;
+  two-phase submerged is biased HIGH.  Two-phase is needed only NEAR the surface
+  (real wave drag) and there carries the residual artifact.  See
+  [[project_two_phase_force_gauge_leak]], [[project_surface_eel_overspeed]].
+  **=> ACTIONABLE:** improve the eulerian band force to be discretely gauge-
+  invariant (per-body / depth-varying anchor, or a control-volume momentum-flux
+  integral) to kill the residual hydrostatic leak -> would make two-phase
+  submerged forces match single-phase.  **HANDOFF BRIEF for a fresh-session
+  agent: `milestones/gauge_invariant_force_handoff.md`** (problem, evidence,
+  approaches, validation gates, constraints, harness pointers).
+
 HP3. **Polish repo & docs** — review/correct outdated documentation, including `docs/`.
   * (2026-06-18) Added status note to `docs/solver_bdim_merge_proposal.md`
     (SU2 done, proposal remains valid long-term direction).
