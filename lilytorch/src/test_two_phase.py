@@ -199,6 +199,335 @@ def test_body_aware_3d_with_twophase():
     assert abs(tp.initial_water_volume - target * h ** 3) < 1e-6 * h ** 3
 
 
+# ---------------------------------------------------------------------------
+# Solver-level reduction parity: uniform-density two-phase == single-phase
+# ---------------------------------------------------------------------------
+# Rationale: with rho_air == rho_water and nu_air == nu_water the variable-
+# density VOF projection coefficient ``dt*mu0_eff*(1/rho)`` collapses to the
+# single-phase ``dt*mu0/rho`` (recip_density is constant regardless of alpha),
+# the air-transparent velocity identity ``a*S+(1-a)*u'`` becomes ``S`` where
+# alpha==1, and BDIM/advection/Poisson are inherited unchanged.  So the
+# TwoPhaseSolver MUST reproduce the FluidSolver field-by-field.
+#
+# This is a *fluid* reduction.  It is decoupled from the body-support physics
+# (analytical Archimedes in single-phase vs emergent buoyancy in two-phase),
+# which legitimately differ and only matter for a FREE body under gravity --
+# hence gravity is OFF and the FSI body below is STATIC (pinned), so weight /
+# buoyancy never enter and only the fluid+BDIM coupling is compared.
+
+import math as _math
+
+
+def _parity_pars(ndim, N, dt, nu, rho, body_sdf, two_phase=None):
+    """Minimal CPU/float64 ``pars`` dict for a closed no-slip box; identical
+    for both solvers except the optional ``solver.two_phase`` block."""
+    L = 1.0
+    solver = {
+        "use_gpu"                : False,
+        "nthreads"               : 1,
+        "Nx"                     : N,
+        "Ny"                     : N,
+        "xmin"                   : 0.0, "xmax": L,
+        "ymin"                   : 0.0, "ymax": L,
+        "nt"                     : 10_000,
+        "nu"                     : nu,
+        "rho"                    : rho,
+        "dt"                     : dt,
+        "convection_method"      : "abdquickest",
+        "poisson_method"         : "multigrid",
+        "poisson_tol"            : 1.0e-12,
+        "jacobi_weight"          : 0.8,
+        "poisson_max_cycles"     : 40,
+        "poisson_max_mgcg_cycles": 40,
+        "poisson_nsmoothing"     : 6,
+        "poisson_verbose"        : False,
+        "bdim_mu0_projection"    : True,   # aligns the coeff with the two-phase form
+        "solver_method"          : "python",
+        "force_method"           : "eulerian",
+    }
+    n_faces = 2 * ndim
+    bcs = {
+        "BC_type_u"  : ["D"] * n_faces, "BC_values_u": [0.0] * n_faces,
+        "BC_type_v"  : ["D"] * n_faces, "BC_values_v": [0.0] * n_faces,
+    }
+    if ndim == 3:
+        solver["Nz"] = N
+        solver["zmin"] = 0.0
+        solver["zmax"] = L
+        bcs["BC_type_w"]   = ["D"] * n_faces
+        bcs["BC_values_w"] = [0.0] * n_faces
+    if two_phase is not None:
+        solver["two_phase"] = two_phase
+    body = {
+        "type"       : "composite_analytical",
+        "plotting"   : False,
+        "sdf"        : body_sdf,
+        "update_maps": [
+            {"rotation": "lambda t: 0.0*t",
+             "translation": ["lambda t: 0.0*t"] * ndim}
+            for _ in body_sdf
+        ],
+    }
+    output = {"save_frames": False, "save_every": 10**9, "vmin": -1.0, "vmax": 1.0}
+    return {"solver": solver, "boundary_conditions": bcs,
+            "body": body, "output": output}
+
+
+def _taylor_green_ic(solver):
+    """Divergence-free Taylor-Green velocity on the solver's own grid (zero
+    normal velocity on the [0,1] walls).  Returns (u, v[, w]) all matching
+    ``solver.grid_shape``."""
+    two_pi = 2.0 * _math.pi
+    if solver.ndim == 2:
+        X, Y = torch.meshgrid(solver.x, solver.y, indexing="ij")
+        u =  torch.sin(two_pi * X) * torch.cos(two_pi * Y)
+        v = -torch.cos(two_pi * X) * torch.sin(two_pi * Y)
+        return u, v
+    X, Y, Z = torch.meshgrid(solver.x, solver.y, solver.z, indexing="ij")
+    u =  torch.sin(two_pi * X) * torch.cos(two_pi * Y)
+    v = -torch.cos(two_pi * X) * torch.sin(two_pi * Y)
+    w =  torch.zeros_like(u)
+    return u, v, w
+
+
+def _set_ic(solver, fields):
+    solver.set_initial_conditions()
+    solver.u0 = fields[0].clone()
+    solver.v0 = fields[1].clone()
+    if solver.ndim == 3:
+        solver.w0 = fields[2].clone()
+    solver.p0 = torch.zeros_like(solver.u0)
+
+
+def _step_n(solver, nsteps):
+    """Drive the explicit fluid core for ``nsteps`` and return the final
+    (u, v, p[, w]) — uses the same per-step methods as the production loop."""
+    u, v, p = solver.u0, solver.v0, solver.p0
+    w = solver.w0 if solver.ndim == 3 else None
+    for it in range(nsteps):
+        t = it * float(solver.dt)
+        out = solver.advance_and_compute_loads(u, v, p, it, t, w_vel=w)
+        u, v, p, w = out
+        solver.finalize_step(u, v, p, it, w_vel=w)
+    return u, v, p, w
+
+
+def _uniform_two_phase_block(rho, nu, alpha_init):
+    return {
+        "alpha_init"          : alpha_init,
+        "rho_water"           : rho,
+        "rho_air"             : rho,       # uniform: must reduce to single-phase
+        "nu_water"            : nu,
+        "nu_air"              : nu,
+        "alpha_exclude_body"  : False,
+        "air_transparent_body": False,
+    }
+
+
+def _assert_parity(sp, tp, label, atol=1e-7, rtol=1e-6):
+    for name in (("u0", "v0", "w0", "p0") if sp.ndim == 3 else ("u0", "v0", "p0")):
+        a = getattr(sp, name)
+        b = getattr(tp, name)
+        diff = (a - b).abs().max().item()
+        scale = a.abs().max().item() + 1e-30
+        assert torch.allclose(a, b, atol=atol, rtol=rtol), (
+            f"[{label}] field {name} diverged: max|Δ|={diff:.3e} "
+            f"(rel {diff/scale:.3e})")
+
+
+# ---- interface present + advecting: alpha transport must not leak into the
+#      momentum update.  Probe body sits deep in the water half (alpha==1
+#      around it -> mu0_eff==mu0), the free water/air interface lives near the
+#      top and is transported every step. ----------------------------------
+def test_uniform_two_phase_reduces_to_single_phase_2d():
+    N, dt, nu, rho, nsteps = 32, 2.0e-3, 1.0e-2, 1000.0, 12
+    body = ["lambda x, y: circle(x,y,xt=0.5,yt=0.25,r=0.08)"]
+    tp_block = _uniform_two_phase_block(
+        rho, nu, "lambda X, Y: (Y < 0.7).double()")   # interface above the body
+
+    # field-only comparison -> skip the body-load readout
+    sp = __import__("lilytorch.src.solver", fromlist=["FluidSolver"]).FluidSolver(
+        _parity_pars(2, N, dt, nu, rho, body), dtype=torch.float64,
+        compute_forces=False)
+    tpd = __import__("lilytorch.src.two_phase_solver",
+                     fromlist=["TwoPhaseSolver"]).TwoPhaseSolver(
+        _parity_pars(2, N, dt, nu, rho, body, two_phase=tp_block),
+        dtype=torch.float64, compute_forces=False)
+
+    ic = _taylor_green_ic(sp)
+    _set_ic(sp, ic); _set_ic(tpd, ic)
+    _step_n(sp, nsteps); _step_n(tpd, nsteps)
+    _assert_parity(sp, tpd, "interface-2d")
+
+
+def test_uniform_two_phase_reduces_to_single_phase_3d():
+    N, dt, nu, rho, nsteps = 20, 2.0e-3, 1.0e-2, 1000.0, 8
+    body = ["lambda x, y, z: sphere(x,y,z,xt=0.5,yt=0.5,zt=0.25,r=0.1)"]
+    tp_block = _uniform_two_phase_block(
+        rho, nu, "lambda X, Y, Z: (Z < 0.7).double()")
+
+    # field-only comparison -> skip the body-load readout (the 3-D analytical
+    # method2 force path is exercised separately; here we test the fluid fields)
+    sp = __import__("lilytorch.src.solver", fromlist=["FluidSolver"]).FluidSolver(
+        _parity_pars(3, N, dt, nu, rho, body), dtype=torch.float64,
+        compute_forces=False)
+    tpd = __import__("lilytorch.src.two_phase_solver",
+                     fromlist=["TwoPhaseSolver"]).TwoPhaseSolver(
+        _parity_pars(3, N, dt, nu, rho, body, two_phase=tp_block),
+        dtype=torch.float64, compute_forces=False)
+
+    ic = _taylor_green_ic(sp)
+    _set_ic(sp, ic); _set_ic(tpd, ic)
+    _step_n(sp, nsteps); _step_n(tpd, nsteps)
+    _assert_parity(sp, tpd, "interface-3d")
+
+
+# ---- FSI (static body, fully submerged in all-water alpha): the BDIM-coupled
+#      fields AND the integrated body loads must match single-phase ----------
+def test_uniform_two_phase_fsi_matches_single_phase_2d():
+    N, dt, nu, rho, nsteps = 32, 2.0e-3, 1.0e-2, 1000.0, 12
+    body = ["lambda x, y: circle(x,y,xt=0.5,yt=0.5,r=0.15)"]
+    # all-water alpha (no air anywhere) so the body sits fully in water:
+    # mu0_eff = alpha*mu0 + (1-alpha) = mu0, S identity = full BDIM.
+    tp_block = _uniform_two_phase_block(rho, nu, "lambda X, Y: torch.ones_like(X)")
+
+    sp = __import__("lilytorch.src.solver", fromlist=["FluidSolver"]).FluidSolver(
+        _parity_pars(2, N, dt, nu, rho, body), dtype=torch.float64)
+    tpd = __import__("lilytorch.src.two_phase_solver",
+                     fromlist=["TwoPhaseSolver"]).TwoPhaseSolver(
+        _parity_pars(2, N, dt, nu, rho, body, two_phase=tp_block),
+        dtype=torch.float64)
+
+    ic = _taylor_green_ic(sp)
+    _set_ic(sp, ic); _set_ic(tpd, ic)
+    _step_n(sp, nsteps); _step_n(tpd, nsteps)
+
+    _assert_parity(sp, tpd, "fsi-2d-fields")
+    # integrated body loads must agree too (the readout path is shared, but the
+    # coefficients/velocity feeding it come through the two-phase override)
+    for rec in ("pressure_drag_record", "viscous_drag_record"):
+        a = getattr(sp, rec)[:, :, :nsteps]
+        b = getattr(tpd, rec)[:, :, :nsteps]
+        diff = (a - b).abs().max().item()
+        assert torch.allclose(a, b, atol=1e-6, rtol=1e-5), (
+            f"[fsi-2d-loads] {rec} diverged: max|Δ|={diff:.3e}")
+
+
+# ---------------------------------------------------------------------------
+# CUDA W&Y sweep kernel (MP10 / T2d) — parity vs the pure-PyTorch oracle
+# ---------------------------------------------------------------------------
+def _cvof_kernel_vs_python(ndim, dtype, noncontig):
+    """Compare the fused ``cvof_sweep`` CUDA kernel against
+    ``_cvof_sweep_python`` on identical CUDA inputs (isolates the kernel's
+    arithmetic from any CPU/GPU or single/double differences)."""
+    from lilytorch.src.two_phase import _cvof_kernel_available
+    if not _cvof_kernel_available():
+        return None  # extension not built for cvof_sweep
+
+    dev = torch.device("cuda")
+    N = 24 if ndim == 3 else 40
+    L = 1.0
+    h = L / N
+    coords = [torch.linspace(0.0, L, N, dtype=dtype, device=dev) for _ in range(ndim)]
+    cx = 0.5
+    if ndim == 2:
+        X, Y = torch.meshgrid(*coords, indexing="ij")
+        alpha = ((X - cx) ** 2 + (Y - cx) ** 2 < 0.2 ** 2).to(dtype)
+        # divergence-bearing velocity with BOTH signs (exercises C>=0 and C<0)
+        u = math.pi * torch.sin(math.pi * X) * torch.cos(math.pi * Y)
+        v = -math.pi * torch.cos(math.pi * X) * torch.sin(math.pi * Y)
+        vels = [u, v]
+    else:
+        X, Y, Z = torch.meshgrid(*coords, indexing="ij")
+        alpha = ((X - cx) ** 2 + (Y - cx) ** 2 + (Z - cx) ** 2 < 0.2 ** 2).to(dtype)
+        u = math.pi * torch.sin(math.pi * X) * torch.cos(math.pi * Y)
+        v = -math.pi * torch.cos(math.pi * X) * torch.sin(math.pi * Y)
+        w = 0.5 * torch.cos(math.pi * Z)
+        vels = [u, v, w]
+
+    tp = TwoPhase(coords[0], coords[1], h, lambda *a: alpha,
+                  z=(coords[2] if ndim == 3 else None), device=dev, dtype=dtype)
+    dt = 0.2 * h / max(float(t.abs().max()) for t in vels)
+
+    if noncontig:
+        # mimic the stacked-_vel row views: build a genuinely strided view by
+        # interleaving into a trailing axis (stride-2 on the last real dim).
+        strided = []
+        for t in vels:
+            buf = torch.empty(t.shape + (2,), dtype=dtype, device=dev)
+            buf[..., 0] = t
+            view = buf[..., 0]
+            assert not view.is_contiguous()
+            strided.append(view)
+        vels = strided
+
+    a = tp.alpha
+    rels = []
+    for d in range(ndim):
+        from lilytorch.src.two_phase import _neumann_pad
+        ad = a.clone(); _neumann_pad(ad)
+        out_k = tp._cvof_sweep(ad, vels[d], d, dt)          # kernel (CUDA)
+        out_p = tp._cvof_sweep_python(ad, vels[d], d, dt)   # oracle
+        diff = (out_k - out_p).abs().max().item()
+        scale = max(out_p.abs().max().item(), 1.0)
+        rels.append(diff / scale)
+    return max(rels)
+
+
+def test_cvof_sweep_kernel_parity_2d_f64():
+    r = _cvof_kernel_vs_python(2, torch.float64, noncontig=False)
+    if r is None:
+        return
+    assert r < 1e-12, f"2D f64 cvof_sweep kernel parity: rel={r:.3e}"
+
+
+def test_cvof_sweep_kernel_parity_3d_f64():
+    r = _cvof_kernel_vs_python(3, torch.float64, noncontig=False)
+    if r is None:
+        return
+    assert r < 1e-12, f"3D f64 cvof_sweep kernel parity: rel={r:.3e}"
+
+
+def test_cvof_sweep_kernel_parity_2d_f32():
+    r = _cvof_kernel_vs_python(2, torch.float32, noncontig=False)
+    if r is None:
+        return
+    assert r < 1e-5, f"2D f32 cvof_sweep kernel parity: rel={r:.3e}"
+
+
+def test_cvof_sweep_kernel_parity_noncontig_f64():
+    """Strided velocity views (as produced by the stacked-_vel row views)."""
+    r = _cvof_kernel_vs_python(2, torch.float64, noncontig=True)
+    if r is None:
+        return
+    assert r < 1e-12, f"2D f64 non-contig cvof_sweep parity: rel={r:.3e}"
+
+
+def test_cvof_kernel_advect_bounded_and_conservative_2d():
+    """End-to-end: the kernel-backed advect stays bounded + conserves mass to
+    the same tolerance as the Python oracle (mirrors the CPU test on CUDA)."""
+    from lilytorch.src.two_phase import _cvof_kernel_available
+    if not (torch.cuda.is_available() and _cvof_kernel_available()):
+        return
+    dev = torch.device("cuda")
+    N = 48; L = 1.0; h = L / N
+    x = y = torch.linspace(0.0, L, N, dtype=torch.float64, device=dev)
+    cx = cy = 0.5; r = 0.2
+    tp = TwoPhase(x, y, h,
+                  lambda X, Y: ((X - cx) ** 2 + (Y - cy) ** 2 < r ** 2).double(),
+                  device=dev, dtype=torch.float64)
+    X, Y = torch.meshgrid(x, y, indexing="ij")
+    u = math.pi * torch.sin(math.pi * X) * torch.cos(math.pi * Y)
+    v = -math.pi * torch.cos(math.pi * X) * torch.sin(math.pi * Y)
+    dt = 0.2 * h / max(u.abs().max().item(), v.abs().max().item())
+    V0 = tp.water_volume()
+    for _ in range(100):
+        tp.advect(u, v, dt=dt)
+        assert tp.alpha.min() >= -1e-12 and tp.alpha.max() <= 1.0 + 1e-12
+    drift = abs(tp.water_volume() - V0) / V0
+    assert drift < 5e-3, f"kernel-path water-volume drift: {drift:.2e}"
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

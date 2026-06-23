@@ -286,6 +286,24 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " int scheme_id, int face_dim"
         ") -> ()");
 
+    // ---- Weymouth & Yue conservative-VOF sweep (MP10 / T2d) -----------
+    // cvof_sweep: one bounded conservative-VOF directional sweep, replacing
+    // the Python ``_cvof_sweep`` shift/limit/flux/divergence-correction
+    // chain in TwoPhase._cvof_sweep with a single launch.  Mirrors
+    //   out[i] = a[i] + cfl*(F(i) - F(i+1) + a[i]*(u[i+1]-u[i]))
+    // with the W&Y van-Leer-limited, Courant-corrected donor face value.
+    //
+    // a   : volume fraction (full grid, ghost-padded, Neumann)
+    // u_d : MAC velocity component along face_dim (full grid, strided OK)
+    // cfl : dt / h (scalar)
+    // face_dim : sweep direction (0, 1, or 2)
+    // out : preallocated = a.clone(); kernel overwrites interior-along-d
+    m.def(
+        "cvof_sweep("
+        "Tensor a, Tensor u_d, float cfl, int face_dim,"
+        " Tensor(a!) out"
+        ") -> ()");
+
     // ---- Multigrid RBGS sweeper kernels --------------------------------
     // rbgs_sweep_2d: tiled 2-D RBGS smoother (all nsmoothing sweeps fused).
     //   p is updated in-place (includes Neumann BC application).

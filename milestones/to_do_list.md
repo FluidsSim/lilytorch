@@ -581,16 +581,41 @@ MP8. **T2b** Dirty-AABB-sized Kernel-A temps (`sdf_*_tmp`, `b*_tmp`: full-grid �
   Needs `streaming_sdf.cu` changes; no peak movement until T2a.
 MP9. **T2c** Two-pass Kernel B for `primes` elimination (write to AABB scratch, copy back).
   ~1.5 GiB; no peak movement until T2a.
-MP10. **T2d — fused CUDA kernel for SCALAR advection** (found 2026-06-23). T2a/MP7
-  fused only the MOMENTUM flux chain (`advect_flux_add`); `advection.advect_scalar`
-  (the cell-centred VOF α-transport AND the free-surface level-set transport) still
-  runs the Python `_flux → F_diff → rhs.add_` chain even in kernel mode — the exact
-  chain T2a replaced for momentum. So in two-phase/free-surface kernel runs the α
-  advection is a Python-path contributor (part of the ~6% two-phase Python cost; the
-  variable-coeff Poisson still dominates at ~75%, see
-  `project_two_phase_poisson_bottleneck`). Reuse the `advect_flux_add` op for the
-  single scalar (1 component, same scheme IDs). Pairs naturally with HP5's
-  conservative-momentum kernel (same evolved-density flux machinery).
+MP10. ~~**T2d — fused CUDA kernel for SCALAR advection**~~ ✅ DONE (2026-06-23,
+  as the W&Y `cvof_sweep` kernel — see below). **The original framing was stale:**
+  it assumed `advection.advect_scalar` carried the two-phase α-transport, but
+  (a) `advect_scalar` has **zero live callers** — its only consumer was the
+  free-surface level-set transport, deleted with HP4; and (b) the actual VOF
+  α-transport is `TwoPhase._cvof_sweep` (`two_phase.py`), the **Weymouth & Yue**
+  conservative scheme, which `advect_flux_add` **cannot** express (W&Y is a
+  sequential operator-split sweep with a divergence-correction term
+  `a_i·(u_R−u_L)` and a bounded donor face value, not a sum-over-d accumulation of
+  QUICK/vanLeer fluxes). So reusing `advect_flux_add` was a dead end; instead a
+  **dedicated W&Y CUDA kernel** was written.
+  * **NEW op `lilytorch_kernels::cvof_sweep`** in
+    `lilytorch/src/kernels/csrc/cuda/cvof_sweep.cu` (schema in `ops.cpp`): one
+    launch per (sweep, direction) replacing the ~8 full-grid temporaries (3
+    edge-clamped shifts, 2 limited slopes, 2 donor faces, the flux tensor) of the
+    Python sweep; computes `out[i] = a[i] + cfl·(F(i)−F(i+1)+a[i]·(u[i+1]−u[i]))`
+    with the W&Y van-Leer-limited Courant-corrected donor face, all in registers.
+    Edge-clamp (Neumann) neighbour reads + explicit strides (velocity components
+    are strided `_vel` row views). 2-D + 3-D.
+  * **Wired** into `TwoPhase._cvof_sweep` (`two_phase.py`): dispatches to the
+    kernel on CUDA when the extension exports the op (cached
+    `_cvof_kernel_available()` probe), else falls back to the renamed
+    `_cvof_sweep_python` oracle (CPU path / un-built extension). **No core-source
+    edits** (confined to `two_phase.py` per `feedback-no-core-source-for-two-phase`).
+  * **Parity** (`test_two_phase.py`, new `test_cvof_sweep_kernel_parity_*`):
+    kernel vs `_cvof_sweep_python` on identical CUDA tensors — **rel 0.0 (2-D
+    f32+f64, contiguous AND strided-velocity)**, 1.1e-16 (3-D f64), 6e-8 (3-D f32,
+    FMA). End-to-end `tp.advect` 100-step boundedness + mass-conservation test on
+    CUDA also passes. **Speedup 4.5–5.6×** at typical sizes (2D-256, 3D-64/128;
+    1.3× at 2D-512), measured incl. the shared clone+pad overhead.
+  * NOTE: `advect_scalar` left in place (harmless dead code; a future passive-
+    scalar/dye/level-set consumer could be CUDA-accelerated via `advect_flux_add`
+    cheaply, but there is none today). The variable-coeff Poisson still dominates
+    the two-phase step at ~75% (see `project_two_phase_poisson_bottleneck`); this
+    removes the α-transport slice of the ~6% Python cost.
 
 ---
 
