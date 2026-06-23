@@ -25,9 +25,10 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 from lilytorch.src.solver import FluidSolver
 from lilytorch.src.two_phase_solver import TwoPhaseSolver
-from lilytorch.src.free_surface_solver import FreeSurfaceSolver
 from lilytorch.src.body import (rotate_grid_2d, rotate_grid_3d,
                                 _rotate_grid_3d_compiled)
+from lilytorch.integration.rigid_body_backend import (
+    FarmsMujocoBackend, MujocoCheckpoint)
 
 import torch
 
@@ -38,40 +39,10 @@ _FS_FREE_AFTER_FORCES_3D = {
 }
 
 
-class _MujocoCheckpoint:
-    """Save/restore the full MuJoCo integration state for sub-iteration.
-
-    ``mjSTATE_INTEGRATION`` bundles qpos, qvel, act, time, qacc_warmstart,
-    ctrl, qfrc_applied, xfrc_applied, mocap and eq_active — everything
-    needed to reproduce an integration step deterministically across a
-    checkpoint/restore.  Used by the implicit (strongly-coupled) step to
-    run throwaway prediction integrations that are each undone before the
-    next coupling sweep.  See STRONG_COUPLING_FARMS_DESIGN.md §5.
-    """
-
-    def __init__(self, physics):
-        import mujoco
-        self._mj = mujoco
-        self.spec = mujoco.mjtState.mjSTATE_INTEGRATION
-        self.m = physics.model.ptr
-        self.d = physics.data.ptr
-        self.n = mujoco.mj_stateSize(self.m, self.spec)
-        self._buf = np.zeros(self.n, dtype=np.float64)
-
-    def save(self):
-        self._mj.mj_getState(self.m, self.d, self._buf, self.spec)
-        return self._buf.copy()
-
-    def restore(self, state):
-        self._mj.mj_setState(self.m, self.d, state, self.spec)
-        self._mj.mj_forward(self.m, self.d)
-
-    def integrate(self, nstep=1):
-        """Advance ``nstep`` MuJoCo steps in place, then refresh derived
-        quantities (xpos/xipos/xquat/sensordata) for the new state so the
-        fluid's ``physics`` pose source reads the predicted pose."""
-        self._mj.mj_step(self.m, self.d, nstep)
-        self._mj.mj_forward(self.m, self.d)
+# Backwards-compatible alias: the MuJoCo checkpoint moved to
+# ``rigid_body_backend`` (the AP1 adapter seam) but is still imported under the
+# old name by test_mujoco_checkpoint.py.
+_MujocoCheckpoint = MujocoCheckpoint
 
 
 class BDIMhandler:
@@ -96,14 +67,10 @@ class BDIMhandler:
 
         # ---- create fluid solver ----
         # Auto-select the two-phase (water + real air) solver when the config
-        # carries a ``solver.two_phase`` block, or the one-fluid free-surface
-        # solver when ``solver.free_surface`` is present (which also requires
-        # ``solver.two_phase`` for the VOF interface tracking).
+        # carries a ``solver.two_phase`` block, otherwise the single-phase
+        # solver.
         self._two_phase = self.pars["solver"].get("two_phase") is not None
-        self._free_surface = self.pars["solver"].get("free_surface") is not None
-        if self._free_surface:
-            _SolverCls = FreeSurfaceSolver
-        elif self._two_phase:
+        if self._two_phase:
             _SolverCls = TwoPhaseSolver
         else:
             _SolverCls = FluidSolver
@@ -292,8 +259,17 @@ class BDIMhandler:
             )
             self.force_method = _fm_aliases[self.force_method]
 
+        # ---- rigid-body engine adapter (AP1 seam) ----
+        # All MuJoCo / FARMS access from here on goes through this backend so
+        # the handler's numerics stay engine-agnostic.  ``physics`` is the
+        # reused instance; the live ``task`` is bound per step in ``step``.
+        self._backend = FarmsMujocoBackend(
+            physics, self.data, self.ndim,
+            self.lin_axes, self._2d_ang_ax, self.dtype_np,
+        )
+
         # ---- buoyancy parameters ----
-        self.gravity_z = float(physics.model.opt.gravity[2])  # e.g. -9.81
+        self.gravity_z = self._backend.gravity_z  # e.g. -9.81
         # water_surface: height at which buoyancy becomes full.
         # 3-D:        MuJoCo z ↔ fluid z  → use solver.zmax
         # 2-D xz:     MuJoCo z ↔ fluid y  → use solver.ymax
@@ -307,17 +283,10 @@ class BDIMhandler:
         self._buoyancy_initialized = False
 
         # ---- optional physics contact tweaks ----
-        solref = self.pars.get("physics", {}).get("solref", None)
-        if solref is not None:
-            physics.model.geom_solref[:, 0] = solref[0]
-            physics.model.geom_solref[:, 1] = solref[1]
-        solimp = self.pars.get("physics", {}).get("solimp", None)
-        if solimp is not None:
-            physics.model.geom_solimp[:, 0] = solimp[0]
-            physics.model.geom_solimp[:, 1] = solimp[1]
-            physics.model.geom_solimp[:, 2] = solimp[2]
-            physics.model.geom_solimp[:, 3] = solimp[3]
-            physics.model.geom_solimp[:, 4] = solimp[4]
+        self._backend.set_contact_params(
+            self.pars.get("physics", {}).get("solref", None),
+            self.pars.get("physics", {}).get("solimp", None),
+        )
 
 
 
@@ -453,101 +422,20 @@ class BDIMhandler:
         return meta
 
     def gather_data(self, iteration):
-        """Gather FARMS link poses/velocities once per update path.
+        """Gather link poses/velocities once per update path.
 
-        Reads from the ``AnimatData`` sensor buffers at ``iteration`` when
+        Delegates to the rigid-body backend, which reads from the FARMS
+        ``AnimatData`` sensor buffers at ``iteration`` when
         ``self._pose_source == "sensors"`` (default), or live from
-        ``physics.data`` when ``"physics"`` (strong coupling).  Both
-        sources return the same SI-scaled quantities — the physics path
-        mirrors ``physics2data`` field-for-field — so they agree at the
-        start-of-step pose (see :meth:`_gather_data_physics` and the
-        equivalence test).
+        ``physics.data`` when ``"physics"`` (strong coupling).  Both sources
+        return the same SI-scaled quantities so they agree at the start-of-step
+        pose (see the equivalence test).
+
+        NOTE: kept as a thin handler method (rather than calling the backend
+        directly at every consumer) because several tests monkeypatch
+        ``handler.gather_data`` with a fixed-kinematics stub.
         """
-        if self._pose_source == "physics":
-            return self._gather_data_physics()
-
-        com_poses = []
-        urdf_poses = []
-        Rs = []
-        lin_vels = []
-        ang_vels = []
-        for exp_data in self.data:
-            sen = exp_data.sensors.links
-
-            com = np.asarray(sen.com_positions()[iteration, :], dtype=self.dtype_np)
-            urdf = np.asarray(sen.urdf_positions()[iteration, :], dtype=self.dtype_np)
-            R = Rotation.from_quat(sen.urdf_orientations()[iteration, :]).as_matrix().astype(self.dtype_np)
-            lin = np.asarray(sen.com_lin_velocities()[iteration, :], dtype=self.dtype_np)
-            nlinks = len(sen.names)
-            if self.ndim == 2:
-                com = com[:, self.lin_axes]
-                urdf = urdf[:, self.lin_axes]
-                R = R[:, self.lin_axes, :][:, :, self.lin_axes]
-                lin = lin[:, self.lin_axes]
-                ang = np.asarray(
-                    [sen.com_ang_velocity(iteration, lk)[self._2d_ang_ax]
-                        for lk in range(nlinks)],
-                    dtype=self.dtype_np,
-                )
-            else:
-                ang = np.stack([
-                    np.asarray(sen.com_ang_velocity(iteration, lk), dtype=self.dtype_np)
-                    for lk in range(nlinks)
-                ])
-            com_poses.append(com)
-            urdf_poses.append(urdf)
-            Rs.append(R)
-            lin_vels.append(lin)
-            ang_vels.append(ang)
-        return com_poses, urdf_poses, Rs, lin_vels, ang_vels
-
-    def _gather_data_physics(self):
-        """``gather_data`` variant reading live ``physics.data`` (strong coupling).
-
-        Mirrors ``farms_mujoco.simulation.physics.physics2data`` exactly so
-        the returned SI quantities match the ``"sensors"`` path at the same
-        physics state:
-
-        * ``urdf_pos`` ← ``data.xpos[xpos2data]   / units.meters``
-        * ``com_pos``  ← ``data.xipos[xipos2data] / units.meters``
-        * ``R``        ← ``Rotation.from_quat(data.xquat[xquat2data][:, [1,2,3,0]])``
-        * ``lin_vel``  ← ``data.sensordata[framelinvel2data] / units.velocity``
-        * ``ang_vel``  ← ``data.sensordata[frameangvel2data] / units.angular_velocity``
-
-        Because it reads ``physics.data`` directly, an internal
-        ``physics.step`` prediction in the implicit loop is seen here without
-        a ``task.update_sensors`` round-trip.  Requires ``self._task`` and
-        ``self._physics`` to be set (the implicit step / the test set them).
-        """
-        physics = self._physics
-        task    = self._task
-        units   = task.units
-        d       = physics.data
-
-        com_poses, urdf_poses, Rs, lin_vels, ang_vels = [], [], [], [], []
-        for animat_i, _exp in enumerate(self.data):
-            sm = task.maps[animat_i]["sensors"]
-
-            urdf  = np.asarray(d.xpos[sm["xpos2data"]],  dtype=self.dtype_np) / units.meters
-            com   = np.asarray(d.xipos[sm["xipos2data"]], dtype=self.dtype_np) / units.meters
-            quat  = np.asarray(d.xquat[sm["xquat2data"]], dtype=self.dtype_np)[:, [1, 2, 3, 0]]
-            R     = Rotation.from_quat(quat).as_matrix().astype(self.dtype_np)
-            lin   = np.asarray(d.sensordata[sm["framelinvel2data"]], dtype=self.dtype_np) / units.velocity
-            ang   = np.asarray(d.sensordata[sm["frameangvel2data"]], dtype=self.dtype_np) / units.angular_velocity
-
-            if self.ndim == 2:
-                com  = com[:, self.lin_axes]
-                urdf = urdf[:, self.lin_axes]
-                R    = R[:, self.lin_axes, :][:, :, self.lin_axes]
-                lin  = lin[:, self.lin_axes]
-                ang  = ang[:, self._2d_ang_ax]
-
-            com_poses.append(com)
-            urdf_poses.append(urdf)
-            Rs.append(R)
-            lin_vels.append(lin)
-            ang_vels.append(ang)
-        return com_poses, urdf_poses, Rs, lin_vels, ang_vels
+        return self._backend.get_body_poses_velocities(self._pose_source, iteration)
 
     def _init_interp(self):
         """Build per-body regular-grid streaming metadata for the kernel path.
@@ -677,9 +565,11 @@ class BDIMhandler:
 
         for body_i in range(n):
             (animat_id, link_id) = comp.body_ids[body_i]
-            ind = task.maps[animat_id]["sensors"]["data2xfrc"][link_id]
 
-            self._buoy_mass[body_i] = float(physics.model.body_mass[ind])
+            # Engine-side mass + max bounding-sphere radius (FARMS
+            # SwimmingHandler logic lives inside the backend now).
+            mass, max_rbound = self._backend.get_body_mass_radius(animat_id, link_id)
+            self._buoy_mass[body_i] = mass
             if experiment_options is not None:
                 try:
                     density = float(
@@ -691,14 +581,6 @@ class BDIMhandler:
                 if density > 0.0:
                     self._buoy_density[body_i] = density
 
-            # Find the maximum bounding-sphere radius among geoms attached
-            # to this MuJoCo body (same logic as FARMS SwimmingHandler).
-            max_rbound = 0.0
-            for gi in range(physics.model.ngeom):
-                if int(physics.model.geom_bodyid[gi]) == ind:
-                    rb = float(physics.model.geom_rbound[gi])
-                    if rb > max_rbound:
-                        max_rbound = rb
             self._buoy_height[body_i] = 0.5 * max_rbound
 
         self._buoyancy_initialized = True
@@ -2913,39 +2795,38 @@ class BDIMhandler:
         comp    = fs.composite_body
         surface = self.water_surface
         g_z     = self.gravity_z
-        units_N = task.units.newtons
         buoy_xidx = self._buoyancy_xfrc_idx
         buoy_pidx = self._buoyancy_pos_idx
         has_buoy  = self._has_buoyancy
 
-        for body_i in range(len(comp.bodies)):
-            (animat_id, link_id) = comp.body_ids[body_i]
-            ind = task.maps[animat_id]["sensors"]["data2xfrc"][link_id]
-
-            buoyancy = 0.0
-            if has_buoy:
+        # FARMS-identical per-body buoyancy (drag.pyx ``compute_buoyancy``).
+        # Computed handler-side; the engine write (unit scaling + index map)
+        # lives in the backend.
+        nbodies  = len(comp.bodies)
+        buoyancy = np.zeros(nbodies)
+        if has_buoy:
+            for body_i in range(nbodies):
                 mass    = self._buoy_mass[body_i]
                 density = self._buoy_density[body_i]
                 height  = self._buoy_height[body_i]
                 pos_z   = float(comp.com_pos[body_i][buoy_pidx])
                 if mass > 0 and height > 0 and pos_z - height < surface:
                     frac = min((surface + height - pos_z) / (2.0 * height), 1.0)
-                    buoyancy = -self.rho_fluid * mass * g_z / density * frac
+                    buoyancy[body_i] = -self.rho_fluid * mass * g_z / density * frac
 
-            for d, xidx in enumerate(self._lin_xfrc_idx):
-                val = lin_total[d][body_i] * units_N
-                if xidx == buoy_xidx:
-                    val += buoyancy * units_N
-                physics.data.xfrc_applied[ind, xidx] = val
-
-            for d, xidx in enumerate(self._ang_xfrc_idx):
-                physics.data.xfrc_applied[ind, xidx] = ang_total[d][body_i] * units_N
+        self._backend.apply_xfrc(
+            comp.body_ids, self._lin_xfrc_idx, self._ang_xfrc_idx,
+            lin_total, ang_total, buoyancy, buoy_xidx,
+        )
 
     # ==================================================================
     #  step: one full coupled step (called by FluidExtension.before_step)
     # ==================================================================
     def step(self, task, physics):
         """Dispatch to the explicit or implicit (strong) coupling step."""
+        # Bind the live engine handles for this step (the backend reads the
+        # FARMS index maps / unit scales off ``task``).
+        self._backend.bind_step(task, physics)
         if self._coupling_scheme == "implicit":
             self._step_implicit(task, physics)
         else:
@@ -3042,7 +2923,7 @@ class BDIMhandler:
             self._init_buoyancy_params(task, physics)
 
         if self._mj_ckpt is None:
-            self._mj_ckpt = _MujocoCheckpoint(physics)
+            self._mj_ckpt = self._backend.checkpoint()
         ckpt = self._mj_ckpt
         acc  = self.accelerator
         nsub = self._predict_nstep

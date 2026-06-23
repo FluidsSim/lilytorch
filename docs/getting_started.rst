@@ -252,9 +252,12 @@ Project layout
    lilytorch/
    ├── src/                 Core solver modules
    │   ├── solver.py        Main FluidSolver class
-   │   ├── adv_diff.py      Advection–diffusion solver
+   │   ├── advection.py     Convective schemes + AdvDiffSolver
+   │   ├── diffusion.py     Diffusion Laplacians (composed by AdvDiffSolver)
    │   ├── poisson_fft.py   FFT / DCT Poisson solver
    │   ├── poisson_mult.py  Multigrid / MGCG Poisson solver
+   │   ├── two_phase.py     Two-phase VOF interface + material fields
+   │   ├── two_phase_solver.py   Variable-density free-surface solver
    │   ├── body.py          Body geometry, SDF, kinematics
    │   ├── forces.py        Hydrodynamic force / torque integration
    │   ├── extras.py        Sponge layer, Carreau / yield damping, Smagorinsky
@@ -272,7 +275,7 @@ Project layout
    │   ├── flow_viewer_2d_gpu.py    CUDA→GL fast path for 2-D overlay
    │   ├── flow_viewer_gl_hook.py   LD_PRELOAD GL shim for passive viewer
    │   ├── particle_viewer.py       Lagrangian dye particle overlay
-   │   ├── native_body_colors.py    Per-body colouring extension
+   │   ├── body_color_override.py   Per-body colouring extension
    │   ├── camera.py        Camera presets / controllers
    │   ├── gamepad.py       Optional gamepad input (incl. paddling mode)
    │   └── gen_pool_sdf.py  Generate pool / arena SDF XML for MuJoCo

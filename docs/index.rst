@@ -67,7 +67,6 @@ Key features
    api/solver
    api/advection
    api/diffusion
-   api/adv_diff
    api/poisson
    api/two_phase
    api/body

@@ -489,6 +489,7 @@ __global__ void streaming_sdf_forces_post_3d_kernel(
     const scalar_t eps_solver,
     const scalar_t h3,
     const int delta_order,
+    const int with_pressure,
     double* __restrict__ out)
 {
     const int b     = blockIdx.y;
@@ -693,6 +694,9 @@ __global__ void streaming_sdf_forces_post_3d_kernel(
                 delta_visc = ((scalar_t)1 + cos(pi_ov_eb * d_visc)) * inv_2eps;
             if (s_cc_body > -eps_body && s_cc_body < eps_body)
                 delta_pres = ((scalar_t)1 + cos(pi_ov_eb * s_cc_body)) * inv_2eps;
+            // deltaH readout supplies the pressure force/torque from a separate
+            // union-∂H pass; here we emit only the viscous channels.
+            if (!with_pressure) delta_pres = 0;
             if (delta_order == 2 && (delta_visc > 0 || delta_pres > 0)) {
                 const scalar_t h_grid = (scalar_t)1.0 / inv_h;
                 const scalar_t s_xp = sdf_sample_dispatch(interp_method,F,Mx,My,Mz,bx0,by0,bz0,idx_,idy_,idz_,bxq+r00*h_grid,byq+r10*h_grid,bzq+r20*h_grid);
@@ -736,6 +740,148 @@ __global__ void streaming_sdf_forces_post_3d_kernel(
         // CUB requires a sync between successive uses of the same
         // TempStorage in the same kernel invocation.
         __syncthreads();
+    }
+}
+
+// ----------------------------------------------------------------------
+//  Partial-Heaviside (∂H) pressure-force readout  --  deltaH submethod
+//
+//  Pressure force density is taken from the UNION SDF (one closed surface,
+//  no internal inter-link seams) as  f_i = -p ∂_iH_ε(φ_union), where H is the
+//  smooth Heaviside (exact antiderivative of the cosine δ the n·δ path uses)
+//  and ∂_iH is its edge_order=2 discrete gradient -- matching
+//  TwoPhaseSolver._heaviside_smooth + torch.gradient exactly.  The union force
+//  density is split back to the individual bodies by a softmin partition of
+//  unity  w_b = softmax_b(-φ_b/τ)  (Σ_b w_b ≡ 1 over the bodies covering the
+//  cell), so Σ_b F_b == union force while each body keeps its own force/torque.
+//
+//  Cell-major launch over the union AABB; each thread loops over all B bodies
+//  twice (Z normaliser, then distribute).  B is small (link counts), so the
+//  re-sampling is cheap and avoids a separate grid-sized partition buffer.
+// ----------------------------------------------------------------------
+template <typename scalar_t>
+__device__ __forceinline__ scalar_t heaviside_smooth_dev(scalar_t phi, scalar_t inv_eps) {
+    const scalar_t pi = (scalar_t)3.141592653589793;
+    scalar_t x = phi * inv_eps;
+    x = x < (scalar_t)-1 ? (scalar_t)-1 : (x > (scalar_t)1 ? (scalar_t)1 : x);
+    return (scalar_t)0.5 * ((scalar_t)1 + x + sin(pi * x) / pi);
+}
+
+template <typename scalar_t>
+__global__ void forces_post_deltaH_pressure_3d_kernel(
+    const scalar_t* __restrict__ F_flat,
+    const int64_t*  __restrict__ F_offsets,
+    const int64_t*  __restrict__ body_shapes,
+    const scalar_t* __restrict__ body_meta,
+    const scalar_t* __restrict__ kin,
+    const int64_t*  __restrict__ aabb_lo,
+    const int64_t*  __restrict__ aabb_dim,
+    const scalar_t* __restrict__ gx,
+    const scalar_t* __restrict__ gy,
+    const scalar_t* __restrict__ gz,
+    const int Ngx, const int Ngy, const int Ngz,
+    const scalar_t* __restrict__ sdf_cc,
+    const int interp_method,
+    const scalar_t* __restrict__ p_prev,
+    const scalar_t inv_h,
+    const scalar_t inv_eps,
+    const scalar_t inv_tau,
+    const scalar_t h3,
+    const int B,
+    const int uli0, const int ulj0, const int ulk0,
+    const int ULi, const int ULj, const int ULk,
+    double* __restrict__ out)
+{
+    const int local = blockIdx.x * blockDim.x + threadIdx.x;
+    const int uvol = ULi * ULj * ULk;
+    if (local >= uvol) return;
+
+    const int di  = local / (ULj * ULk);
+    const int rem = local - di * (ULj * ULk);
+    const int dj  = rem / ULk;
+    const int dk  = rem - dj * ULk;
+    const int i = uli0 + di;
+    const int j = ulj0 + dj;
+    const int k = ulk0 + dk;
+    if (i < 0 || i >= Ngx || j < 0 || j >= Ngy || k < 0 || k >= Ngz) return;
+
+#define SDF_AT(ii, jj, kk) (sdf_cc[(((int64_t)(ii)) * Ngy + (jj)) * Ngz + (kk)])
+#define HV_AT(ii, jj, kk) heaviside_smooth_dev<scalar_t>(SDF_AT(ii, jj, kk), inv_eps)
+    // edge_order=2 discrete gradient of the union smooth Heaviside
+    scalar_t gHx = 0, gHy = 0, gHz = 0;
+    if (Ngx >= 3) {
+        if (i == 0) gHx = ((scalar_t)(-3)*HV_AT(0,j,k) + (scalar_t)4*HV_AT(1,j,k) - HV_AT(2,j,k)) * (scalar_t)0.5 * inv_h;
+        else if (i == Ngx-1) gHx = ((scalar_t)3*HV_AT(Ngx-1,j,k) - (scalar_t)4*HV_AT(Ngx-2,j,k) + HV_AT(Ngx-3,j,k)) * (scalar_t)0.5 * inv_h;
+        else gHx = (HV_AT(i+1,j,k) - HV_AT(i-1,j,k)) * (scalar_t)0.5 * inv_h;
+    } else if (Ngx == 2) gHx = (HV_AT(1,j,k) - HV_AT(0,j,k)) * inv_h;
+    if (Ngy >= 3) {
+        if (j == 0) gHy = ((scalar_t)(-3)*HV_AT(i,0,k) + (scalar_t)4*HV_AT(i,1,k) - HV_AT(i,2,k)) * (scalar_t)0.5 * inv_h;
+        else if (j == Ngy-1) gHy = ((scalar_t)3*HV_AT(i,Ngy-1,k) - (scalar_t)4*HV_AT(i,Ngy-2,k) + HV_AT(i,Ngy-3,k)) * (scalar_t)0.5 * inv_h;
+        else gHy = (HV_AT(i,j+1,k) - HV_AT(i,j-1,k)) * (scalar_t)0.5 * inv_h;
+    } else if (Ngy == 2) gHy = (HV_AT(i,1,k) - HV_AT(i,0,k)) * inv_h;
+    if (Ngz >= 3) {
+        if (k == 0) gHz = ((scalar_t)(-3)*HV_AT(i,j,0) + (scalar_t)4*HV_AT(i,j,1) - HV_AT(i,j,2)) * (scalar_t)0.5 * inv_h;
+        else if (k == Ngz-1) gHz = ((scalar_t)3*HV_AT(i,j,Ngz-1) - (scalar_t)4*HV_AT(i,j,Ngz-2) + HV_AT(i,j,Ngz-3)) * (scalar_t)0.5 * inv_h;
+        else gHz = (HV_AT(i,j,k+1) - HV_AT(i,j,k-1)) * (scalar_t)0.5 * inv_h;
+    } else if (Ngz == 2) gHz = (HV_AT(i,j,1) - HV_AT(i,j,0)) * inv_h;
+#undef HV_AT
+#undef SDF_AT
+
+    if (gHx == (scalar_t)0 && gHy == (scalar_t)0 && gHz == (scalar_t)0) return;
+
+    const int64_t g = ((int64_t)i * Ngy + j) * Ngz + k;
+    const scalar_t p_c = p_prev[g];
+    const scalar_t fdx = -p_c * gHx;
+    const scalar_t fdy = -p_c * gHy;
+    const scalar_t fdz = -p_c * gHz;
+    const scalar_t xc = gx[i], yc = gy[j], zc = gz[k];
+    const scalar_t sdfu = sdf_cc[g];   // = min_b φ_b (numerically-stable shift)
+
+    // ---- per-body softmin weight  w_b = exp(-(φ_b-φ_union)/τ) / Z ----
+    scalar_t Z = 0;
+    for (int b = 0; b < B; ++b) {
+        const int i0 = (int)aabb_lo[b*3+0], j0 = (int)aabb_lo[b*3+1], k0 = (int)aabb_lo[b*3+2];
+        const int Ai = (int)aabb_dim[b*3+0], Aj = (int)aabb_dim[b*3+1], Ak = (int)aabb_dim[b*3+2];
+        if (i < i0 || i >= i0+Ai || j < j0 || j >= j0+Aj || k < k0 || k >= k0+Ak) continue;
+        const scalar_t* F = F_flat + F_offsets[b];
+        const int Mx = (int)body_shapes[b*3+0], My = (int)body_shapes[b*3+1], Mz = (int)body_shapes[b*3+2];
+        const scalar_t* M = body_meta + b*10;
+        const scalar_t* K = kin + b*21;
+        const scalar_t dx_w = xc - K[9], dy_w = yc - K[10], dz_w = zc - K[11];
+        const scalar_t bxq = K[0]*dx_w + K[1]*dy_w + K[2]*dz_w;
+        const scalar_t byq = K[3]*dx_w + K[4]*dy_w + K[5]*dz_w;
+        const scalar_t bzq = K[6]*dx_w + K[7]*dy_w + K[8]*dz_w;
+        const scalar_t s_b = sdf_sample_dispatch(interp_method, F, Mx, My, Mz,
+            M[0], M[1], M[2], M[6], M[7], M[8], bxq, byq, bzq);
+        Z += exp(-(s_b - sdfu) * inv_tau);
+    }
+    if (Z <= (scalar_t)0) return;
+    const scalar_t inv_Z = (scalar_t)1 / Z;
+    const double h3_d = (double)h3;
+
+    for (int b = 0; b < B; ++b) {
+        const int i0 = (int)aabb_lo[b*3+0], j0 = (int)aabb_lo[b*3+1], k0 = (int)aabb_lo[b*3+2];
+        const int Ai = (int)aabb_dim[b*3+0], Aj = (int)aabb_dim[b*3+1], Ak = (int)aabb_dim[b*3+2];
+        if (i < i0 || i >= i0+Ai || j < j0 || j >= j0+Aj || k < k0 || k >= k0+Ak) continue;
+        const scalar_t* F = F_flat + F_offsets[b];
+        const int Mx = (int)body_shapes[b*3+0], My = (int)body_shapes[b*3+1], Mz = (int)body_shapes[b*3+2];
+        const scalar_t* M = body_meta + b*10;
+        const scalar_t* K = kin + b*21;
+        const scalar_t dx_w = xc - K[9], dy_w = yc - K[10], dz_w = zc - K[11];
+        const scalar_t bxq = K[0]*dx_w + K[1]*dy_w + K[2]*dz_w;
+        const scalar_t byq = K[3]*dx_w + K[4]*dy_w + K[5]*dz_w;
+        const scalar_t bzq = K[6]*dx_w + K[7]*dy_w + K[8]*dz_w;
+        const scalar_t s_b = sdf_sample_dispatch(interp_method, F, Mx, My, Mz,
+            M[0], M[1], M[2], M[6], M[7], M[8], bxq, byq, bzq);
+        const scalar_t wb = exp(-(s_b - sdfu) * inv_tau) * inv_Z;
+        const scalar_t fbx = wb * fdx, fby = wb * fdy, fbz = wb * fdz;
+        const scalar_t ax = xc - K[12], ay = yc - K[13], az = zc - K[14];
+        atomicAdd(&out[b*12 + 6], (double)fbx * h3_d);
+        atomicAdd(&out[b*12 + 7], (double)fby * h3_d);
+        atomicAdd(&out[b*12 + 8], (double)fbz * h3_d);
+        atomicAdd(&out[b*12 + 9],  ((double)ay*(double)fbz - (double)az*(double)fby) * h3_d);
+        atomicAdd(&out[b*12 + 10], ((double)az*(double)fbx - (double)ax*(double)fbz) * h3_d);
+        atomicAdd(&out[b*12 + 11], ((double)ax*(double)fby - (double)ay*(double)fbx) * h3_d);
     }
 }
 
@@ -1487,6 +1633,8 @@ void streaming_sdf_forces_post_3d_cuda(
     const double eps_solver,
     const double h3,
     const int64_t delta_order,
+    const int64_t force_submethod,
+    const double ph_tau,
     at::Tensor out)
 {
     const int B = (int)aabb_dim.size(0);
@@ -1496,6 +1644,7 @@ void streaming_sdf_forces_post_3d_cuda(
     const int Ngx = (int)gx.numel();
     const int Ngy = (int)gy.numel();
     const int Ngz = (int)gz.numel();
+    const int with_pressure = (force_submethod == 0) ? 1 : 0;
 
     // Adaptive blockSize matching the streaming_sdf_min_rho launcher: small
     // bodies launch with smaller blocks so the masked-off threads at the
@@ -1523,6 +1672,7 @@ void streaming_sdf_forces_post_3d_cuda(
                     nu_rho_field.data_ptr<scalar_t>(), (int64_t)nu_rho_field.numel(),
                     (scalar_t)(1.0 / h_grid), (scalar_t)eps_body,
                     (scalar_t)eps_solver, (scalar_t)h3, (int)delta_order,
+                    with_pressure,
                     out.data_ptr<double>());
         };
         switch (blockSize) {
@@ -1531,6 +1681,57 @@ void streaming_sdf_forces_post_3d_cuda(
             default:  launch(std::integral_constant<int, 256>{}); break;
         }
     });
+
+    if (force_submethod != 0) {
+        // deltaH: second pass fills the pressure force/torque from the
+        // union-∂H density distributed by the softmin partition of unity.
+        // Launch over the union AABB (union of all per-body AABBs + halo),
+        // computed on host from the tiny aabb_lo/aabb_dim tensors.
+        auto lo_c  = aabb_lo.to(at::kCPU);
+        auto dim_c = aabb_dim.to(at::kCPU);
+        const int64_t* loh  = lo_c.data_ptr<int64_t>();
+        const int64_t* dimh = dim_c.data_ptr<int64_t>();
+        int ulo[3] = {Ngx, Ngy, Ngz};
+        int uhi[3] = {0, 0, 0};
+        for (int b = 0; b < B; ++b) {
+            for (int d = 0; d < 3; ++d) {
+                const int a0 = (int)loh[b*3+d];
+                const int a1 = a0 + (int)dimh[b*3+d];
+                if (a0 < ulo[d]) ulo[d] = a0;
+                if (a1 > uhi[d]) uhi[d] = a1;
+            }
+        }
+        const int Ng[3] = {Ngx, Ngy, Ngz};
+        const int halo = 2;
+        for (int d = 0; d < 3; ++d) {
+            ulo[d] = ulo[d] - halo; if (ulo[d] < 0) ulo[d] = 0;
+            uhi[d] = uhi[d] + halo; if (uhi[d] > Ng[d]) uhi[d] = Ng[d];
+        }
+        const int ULi = uhi[0] - ulo[0];
+        const int ULj = uhi[1] - ulo[1];
+        const int ULk = uhi[2] - ulo[2];
+        const int64_t uvol = (int64_t)ULi * ULj * ULk;
+        if (ULi > 0 && ULj > 0 && ULk > 0) {
+            const double tau = (ph_tau > 0.0) ? ph_tau : 1e-9;
+            const int bs = 256;
+            const int nb = (int)((uvol + bs - 1) / bs);
+            AT_DISPATCH_FLOATING_TYPES(F_flat.scalar_type(), "forces_post_deltaH_pressure_3d_cuda", [&] {
+                forces_post_deltaH_pressure_3d_kernel<scalar_t>
+                    <<<dim3(nb, 1, 1), dim3(bs, 1, 1), 0, stream>>>(
+                        F_flat.data_ptr<scalar_t>(), F_offsets.data_ptr<int64_t>(),
+                        body_shapes.data_ptr<int64_t>(), body_meta.data_ptr<scalar_t>(),
+                        kin.data_ptr<scalar_t>(), aabb_lo.data_ptr<int64_t>(),
+                        aabb_dim.data_ptr<int64_t>(), gx.data_ptr<scalar_t>(),
+                        gy.data_ptr<scalar_t>(), gz.data_ptr<scalar_t>(), Ngx, Ngy, Ngz,
+                        sdf_cc.data_ptr<scalar_t>(), (int)interp_method,
+                        p.data_ptr<scalar_t>(),
+                        (scalar_t)(1.0 / h_grid), (scalar_t)(1.0 / eps_body),
+                        (scalar_t)(1.0 / tau), (scalar_t)h3, B,
+                        ulo[0], ulo[1], ulo[2], ULi, ULj, ULk,
+                        out.data_ptr<double>());
+            });
+        }
+    }
 }
 
 // =====================================================================

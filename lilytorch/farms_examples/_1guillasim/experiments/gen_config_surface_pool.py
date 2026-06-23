@@ -9,11 +9,6 @@ from lilytorch.integration.camera import top_down_camera_config, side_camera_con
 # The fish spawns at z=0.0 and straddles the air-water interface.
 WATERLINE = 0.0
 
-# Set True to use the one-fluid FreeSurfaceSolver (air = constant-p void,
-# no density jump, no air momentum, buoyancy from p=0 free-surface BC).
-# Set False for the original two-phase VOF solver (real light air).
-USE_FREE_SURFACE = False
-
 
 class SimConfig(BaseSimConfig):
 
@@ -35,6 +30,10 @@ class SimConfig(BaseSimConfig):
         # instead of sinking to the floor. (Lagrangian wins only when the body
         # is well resolved.)
         self.force_method                  = "eulerian"
+        # Partial-Heaviside (∂H) pressure-force readout: union-∂H density split
+        # to links by a softmin partition of unity — seam-free, no hydrostatic
+        # baseline leak (vs the default per-body n·δ band integral).
+        self.force_submethod               = "deltaH"
         self.zero_pressure_inside          = True
         self.body_velocity_blend_eps_cells = None
         self.bdim_mu0_projection           = True
@@ -69,16 +68,17 @@ class SimConfig(BaseSimConfig):
                 # righting moment that keeps the planar gait from rolling the
                 # body over (gait roll 24.5deg -> ~5deg). Regenerate/tune with
                 # sdfs/1guilla/make_ballast_sdf.py.
-                "sdf_name"       : "1guilla_900.sdf",
+                "sdf_name"       : "1guilla_600.sdf",
                 "control_type"   : "position",
                 "gains"          : [100.0, 1., 0],
                 "spawn_mode"     : SpawnMode.FREE,
                 # spawn at the true floating equilibrium (centreline ~1.1 cm
                 # below the waterline) to avoid the initial heave-overshoot.
-                "pose"           : [4.75, 0.1, -0.0115, 0, 0, 0.05],
+                "pose"           : [4.75, 0.1, -0.0, 0, 0, 0.05],
                 "controller_path": "lilytorch.farms_examples._1guillasim.experiments.controller.PositionController",
                 "control_pars"   : {
                     "file_path": os.path.join(
+                        # self.data_folder, "/data/andreaferrario/1guilla_experiments/swim/log/ms004mpt003log.csv"
                         self.data_folder, "/data/andreaferrario/1guilla_experiments/swim/log/ms004mpt003log.csv"
                     ),
                 },
@@ -139,19 +139,26 @@ class SimConfig(BaseSimConfig):
         # ── BDIM solver ──────────────────────────────────────────────
         self.bdim_dt                 = self.timestep
         self.bdim_nt                 = self.n_iterations + 1
-        self.poisson_tol             = 1.0e-4
+        self.poisson_tol             = 1.0e-8
         self.poisson_max_cycles      = 30
         self.poisson_max_mgcg_cycles = 10
         self.poisson_precond_vcycles = 1
         self.poisson_warm_start      = True
         self.poisson_smoother        = "jacobi"
         self.poisson_nsmoothing      = 5
-        self.poisson_bc_type         = "free"
+        self.poisson_bc_type         = "neumann"
         # Effectively disable the per-step CUDA allocator flush: empty_cache()
         # is cosmetic (lowers nvidia-smi reserved memory) and pure overhead in a
         # fixed-shape loop. TODO (see milestones/to_do_list.md): drop the
         # empty_cache() call from TwoPhaseSolver.finalize_step entirely.
         self.empty_cache_every       = 10**9
+        # self.coupling = {
+        #     "scheme"     : "implicit",
+        #     "accelerator": "iqn-ils",    # or "aitken" / "constant"
+        #     "reuse"      : 2,
+        #     "tol"        : 1e-4,
+        #     "max_iter"   : 30,
+        # }
 
         # ── Boundary conditions (3-D, all Dirichlet / no-slip) ───────
         self.bc_type_u   = ["D", "D", "D", "D", "D", "D"]
@@ -182,6 +189,19 @@ class SimConfig(BaseSimConfig):
         bdim_ext = super()._bdim_extension(output_folder)
         solver = bdim_ext["config"]["bdim_yaml"]["solver"]
 
+        # solver["gravity"] = [0, 0, -9.81]
+        # solver["two_phase"] = {
+        #     "alpha_init"             : f"lambda X, Y, Z: (Z < {WATERLINE}).double()",
+        #     "rho_water"              : 1000.0,
+        #     "rho_air"                : 1.2,                                             # 80:1 stability cap
+        #     "nu_water"               : self.nu,
+        #     "nu_air"                 : 1.5e-5,
+        #     "alpha_exclude_body"     : True,
+        #     "alpha_volume_compensate": True,
+        #     "air_transparent_body"   : False,
+        #     # "consistent_momentum"    : True,
+        # }
+
         solver["gravity"] = [0, 0, -9.81]
         solver["two_phase"] = {
             "alpha_init"             : f"lambda X, Y, Z: (Z < {WATERLINE}).double()",
@@ -189,27 +209,24 @@ class SimConfig(BaseSimConfig):
             "rho_air"                : 1.2,                                             # 80:1 stability cap
             "nu_water"               : self.nu,
             "nu_air"                 : 1.5e-5,
-            "alpha_exclude_body"     : True,
-            "alpha_volume_compensate": True,
-            "gauge_anchor_forces"    : True,
+            # "alpha_exclude_body"     : True,
+            # "alpha_volume_compensate": True,
             "air_transparent_body"   : False,
             "consistent_momentum"    : False,  # requires solver_method='python' (not kernel)
         }
+        # Pressure force readout = SBP-clean union-∂H partition via
+        # solver.force_submethod = "deltaH" (set in __init__).
 
 
         # if USE_FREE_SURFACE:
-        #     # One-fluid free surface: uniform density (air = void), no gauge
-        #     # anchor needed (p=0 BC at surface already pins the datum).
-        #     # FreeSurfaceSolver overrides rho_air=rho_water and disables
-        #     # gauge_anchor_forces automatically, but we set clean defaults here
-        #     # so the YAML is self-documenting.
+        #     # One-fluid free surface: uniform density (air = void); the p=0 BC
+        #     # at the surface already pins the pressure datum.
         #     solver["free_surface"] = {
         #         "extend_iters": 10,
         #         "use_gfm_gradient": True,
         #     }
         #     solver["two_phase"]["rho_air"] = 1000.0       # = rho_water (uniform)
         #     solver["two_phase"]["nu_air"] = self.nu       # = nu_water (uniform)
-        #     solver["two_phase"]["gauge_anchor_forces"] = False
 
         #     # The BDIMhandler auto-detects solver.free_surface and selects
         #     # FreeSurfaceSolver instead of TwoPhaseSolver.

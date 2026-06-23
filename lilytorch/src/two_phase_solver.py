@@ -364,19 +364,28 @@ class TwoPhaseSolver(FluidSolver):
         # approximation.  Default ON; set to False to restore legacy behaviour.
         self._air_transparent_body = bool(
             cfg.get("air_transparent_body", True))
-        # Gauge-anchor the force pressure (see _anchor_pressure_for_forces): the
-        # eulerian band integral -Sum p n delta is gauge-invariant only if the
-        # discrete Sum n delta = 0, which fails for a coarsely-resolved body, so
-        # the DC pressure level at the body leaks into a spurious force. In two-
-        # phase that level is the LARGE hydrostatic head + the unpinned all-
-        # Neumann gauge (~hundreds-to-thousands of Pa), so it swamps the real
-        # hydrodynamic load -> a static body gets a fake force, an undulating one
-        # a fake thrust (single-phase is immune: its dynamic pressure is ~10 Pa).
-        # Subtracting the BDIM-band-mean pressure removes the leak while
-        # preserving buoyancy (pressure VARIATION across the body) and thrust.
-        # Default OFF: every existing two-phase case byte-for-byte unchanged;
-        # enable for free-surface swimmers (e.g. the surface-pool eel).
-        self._gauge_anchor_forces = bool(cfg.get("gauge_anchor_forces", False))
+        # Partial-Heaviside pressure force (the ``n·δ -> ∂_iH`` weight change).
+        # The eulerian band integral ``F_i = -Σ p n_i δ_ε`` forms the analytic
+        # normal n and the delta kernel separately, so the discrete sum does NOT
+        # satisfy summation-by-parts and a hydrostatic baseline leaks in (∝depth,
+        # see gauge_anchor notes).  Replacing the weight by the DISCRETE gradient
+        # of the smooth body Heaviside makes it satisfy discrete SBP
+        # ``Σ p ∂_iH = -Σ (∂_i p) H``, so a hydrostatic field (∂_x p = 0) gives
+        # Fx -> 0 exactly while buoyancy (∂_z p = ρg) survives.
+        #
+        # The force density ``f_i = -p ∂_iH_ε(φ_union)`` is taken over the UNION
+        # SDF (one closed surface, no interior inter-link seams that would break
+        # the SBP cancellation) and split to links by a softmin partition of
+        # unity over the per-link SDFs (Σ_b w_b ≡ 1, so Σ_b F[b] == union force,
+        # and each link still gets its own force+torque for MuJoCo).
+        # ``partial_heaviside_blend_cells`` sets the softmin scale tau =
+        # blend_cells * h (default 1.5 cells).  Viscous channels untouched.
+        # Needs solver_method='python' (per-body SDFs); the native-kernel
+        # equivalent is ``solver.force_submethod = "deltaH"``.  Opt-in;
+        # supersedes the gauge anchors when set.
+        self._partial_heaviside_forces = bool(
+            cfg.get("partial_heaviside_forces", False))
+        self._ph_blend_cells = float(cfg.get("partial_heaviside_blend_cells", 1.5))
         flags = []
         if self._consistent_momentum:
             flags.append("CONSISTENT momentum")
@@ -386,8 +395,9 @@ class TwoPhaseSolver(FluidSolver):
             flags.append(f"three-phase rho_solid={self._rho_solid}")
         if self._air_transparent_body:
             flags.append("air-transparent-body")
-        if self._gauge_anchor_forces:
-            flags.append("gauge-anchored forces")
+        if self._partial_heaviside_forces:
+            flags.append(
+                "partial-Heaviside (∂H) pressure forces [union+partition]")
         if self._alpha_exclude_body:
             flags.append("body-aware alpha init (carve"
                          + ("+volume-compensate)" if cfg.get(
@@ -688,54 +698,111 @@ class TwoPhaseSolver(FluidSolver):
                   and cb._sdf_sparse[0] is not None)
         if not sparse and all(hasattr(b, 'sdf_val') for b in cb.bodies):
             cb.sdf_vals = torch.stack([b.sdf_val for b in cb.bodies])
-        if self._gauge_anchor_forces:
-            p = self._anchor_pressure_for_forces(p)    # kill the gauge/hydrostatic leak
-        # Prevent the gauge-anchored air pressure (which becomes negative after
-        # the uniform band-mean shift) from creating spurious suction on the
-        # dorsal (air-exposed) body surface.  Air pressure forces are physically
-        # negligible (~1000× smaller than water); any non-zero air pressure in
-        # the simulation is a numerical artifact (gauge ambiguity, density cap).
-        # Weighting by the water volume fraction α ∈ [0,1] smoothly zeroes the
-        # air contribution while preserving the full water pressure forces
-        # (buoyancy + dynamic load).  The original p is never modified — only
-        # the copy passed to the force integral is masked.
-        # p = p * self.two_phase.alpha.clamp(0, 1)
         base = _forces.forces_method2_3d if fn3d else _forces.forces_method2
         base(self, *vels, p, iteration)                # REAL pressure → emergent
+        if self._partial_heaviside_forces:
+            # The base routine already computed the (p-independent) viscous loads;
+            # REPLACE its pressure force/torque with the union-∂H partition integral.
+            self._apply_partition_heaviside(fn3d, p)
 
-    def _anchor_pressure_for_forces(self, p):
-        """Gauge-anchor the pressure at the body before the band force integral.
+    @staticmethod
+    def _heaviside_smooth(phi, eps):
+        """Smooth Heaviside = exact antiderivative of the cosine delta the base
+        force uses (``δ = (1+cos(πφ/ε))/(2ε)``): 0 for φ≤-ε, 1 for φ≥ε, else
+        ``½(1 + φ/ε + sin(πφ/ε)/π)``.  H(φ>0)=1 (fluid side), so ∂H points
+        outward -> matches the n·δ sign convention (pforce = -p n)."""
+        x = (phi / eps).clamp(-1.0, 1.0)
+        return 0.5 * (1.0 + x + torch.sin(torch.pi * x) / torch.pi)
 
-        The eulerian band integral ``F = -Sum p n delta_eps`` is gauge-invariant
-        only if the discrete ``Sum n delta_eps = 0``; for a coarsely-resolved
-        body it is not, so the DC pressure level sitting at the body leaks into a
-        spurious force ``~ -p_baseline * Sum n delta_eps``. In two-phase that
-        baseline is the hydrostatic head plus the unpinned all-Neumann gauge
-        (~hundreds-to-thousands of Pa), which swamps the real load.
+    def _apply_partition_heaviside(self, fn3d, p):
+        """THE FIX: union-∂H force density distributed to links by a softmin
+        partition of unity on the per-link SDFs.
 
-        Subtracting a single CONSTANT -- the mean pressure in the BDIM band
-        around the body -- removes the baseline while leaving the physical force
-        intact: buoyancy is the pressure VARIATION across the body and thrust the
-        dynamic part, both invariant under a uniform shift (continuously
-        ``integral C n dS = 0``). Verified on a static sphere: surface-straddling
-        spurious Fx -19.2 N -> -0.006 N; deep-submerged 4.3 N -> 0.6 N.
+        Force density ``f_i = -p ∂_iH_ε(φ_union)`` is computed from the UNION SDF
+        (one closed surface, NO interior inter-link seams -> SBP cancels the
+        hydrostatic baseline, as the union diagnostic proved).  It is split to
+        links by weights ``w_b = softmax(-φ_b / τ)`` (τ = blend_cells·h): at a
+        union-surface cell the nearest link (smallest φ_b) owns the patch; at a
+        seam two abutting links share it smoothly.  Σ_b w_b ≡ 1, so
+        ``Σ_b F[b] == union force`` exactly (validated in tests/harness).  Each
+        link's torque is about its OWN com.  Cropped to the union AABB for speed;
+        per-link SDFs from _sdf_sparse / sdf_vals (python path only)."""
+        cb = self.composite_body
+        if getattr(self, "_use_kernels", False) and getattr(
+                cb, "_kernel_step", None) is not None:
+            raise RuntimeError(
+                "partial_heaviside_forces requires solver_method='python' "
+                "(the kernel-streaming force path keeps only the union SDF); "
+                "use solver.force_submethod='deltaH' on the native path.")
+        B = len(cb.bodies)
+        h = self.h
+        hD = self.h3 if fn3d else self.h2
+        eps0 = cb.bodies[0].eps
+        tau = max(self._ph_blend_cells * h, 1e-9)
+        _d = torch.float64
+        _FAR = 1e6
+        ndim = 3 if fn3d else 2
 
-        Out-of-place (never touches ``self.p0`` / the field evolution) and works
-        on both the python and kernel force paths (``comp.sdf_val`` is current at
-        force time; the _FAR=1e4 sentinel outside the body is excluded by the
-        band). No-op when the band is empty (e.g. a placeholder SDF). A single
-        global constant assumes the bodies sit at a similar pressure level (true
-        for a near-surface swimmer); per-body anchoring would generalise to
-        bodies at very different depths.
-        """
-        sdf = getattr(self.composite_body, "sdf_val", None)
-        if sdf is None or sdf.shape != p.shape:
-            return p
-        band = sdf.abs() < 2.0 * self.h
-        if not bool(band.any()):
-            return p
-        pref = p[band].to(torch.float64).mean().to(p.dtype)
-        return p - pref
+        # union force density f_i = -p ∂_iH(φ_union) on the full grid
+        sdf_u = cb.sdf_val
+        H = self._heaviside_smooth(sdf_u, eps0)
+        gH = [torch.gradient(H, spacing=h, dim=d, edge_order=2)[0]
+              for d in range(ndim)]
+        fdens = [-p * g for g in gH]
+
+        # union AABB over all per-link sub-blocks (+halo); crop everything to it
+        use_sparse = (hasattr(cb, "_sdf_sparse") and cb._sdf_sparse
+                      and cb._sdf_sparse[0] is not None)
+        lo = [0] * ndim
+        hi = list(sdf_u.shape)
+        aabbs = None
+        if use_sparse and all(a is not None for a, _ in cb._sdf_sparse):
+            aabbs = [a for a, _ in cb._sdf_sparse]
+            lo = [min(a[2 * d] for a in aabbs) for d in range(ndim)]
+            hi = [max(a[2 * d + 1] for a in aabbs) for d in range(ndim)]
+            halo = 2
+            lo = [max(0, lo[d] - halo) for d in range(ndim)]
+            hi = [min(sdf_u.shape[d], hi[d] + halo) for d in range(ndim)]
+        sl = tuple(slice(lo[d], hi[d]) for d in range(ndim))
+        cshape = tuple(hi[d] - lo[d] for d in range(ndim))
+
+        # per-link SDF stack on the crop (_FAR outside each link's AABB)
+        sdf_stack = torch.full((B, *cshape), _FAR, device=p.device, dtype=p.dtype)
+        for b in range(B):
+            if aabbs is not None:
+                a = aabbs[b]
+                sub = cb._sdf_sparse[b][1]
+                lsl = tuple(slice(a[2 * d] - lo[d], a[2 * d + 1] - lo[d])
+                            for d in range(ndim))
+                sdf_stack[b][lsl] = sub
+            else:
+                sdf_b = (cb.sdf_vals[b] if getattr(cb, "sdf_vals", None) is not None
+                         else cb.bodies[b].sdf_val)
+                sdf_stack[b] = sdf_b[sl]
+        # softmin partition of unity over links (sums to 1 over b)
+        w = torch.softmax(-sdf_stack / tau, dim=0)
+
+        fdc = [f[sl] for f in fdens]
+        coords = [cb.X[sl], cb.Y[sl]] + ([cb.Z_grid[sl]] if fn3d else [])
+        zero = p.new_zeros(())
+
+        def load(t):                       # density field -> reduced scalar load
+            return t.to(_d).sum().to(p.dtype) * hD
+
+        for b in range(B):
+            wb = w[b]
+            com = cb.bodies[b].com_pos
+            # weighted force density / lever arm per axis; pad z with 0 in 2-D so
+            # the cross product is dimension-agnostic (Tx, Ty then vanish exactly)
+            f = [wb * fdc[d] for d in range(ndim)] + [zero] * (3 - ndim)
+            r = [coords[d] - com[d] for d in range(ndim)] + [zero] * (3 - ndim)
+            self.pressure_force_x[b] = load(f[0])
+            self.pressure_force_y[b] = load(f[1])
+            self.pressure_force_z[b] = load(f[2])
+            # torque density r x f about the link's own com
+            self.pressure_force_ang_x[b] = load(r[1] * f[2] - r[2] * f[1])
+            self.pressure_force_ang_y[b] = load(r[2] * f[0] - r[0] * f[2])
+            self.pressure_force_ang_z[b] = load(r[0] * f[1] - r[1] * f[0])
 
     def forces_method2(self, u, v, p, iteration):
         self._two_phase_forces(False, (u, v), p, iteration)
@@ -743,22 +810,12 @@ class TwoPhaseSolver(FluidSolver):
     def forces_method2_3d(self, u, v, w, p, iteration):
         self._two_phase_forces(True, (u, v, w), p, iteration)
 
-    def forces_lagrangian_2d(self, u, v, p, iteration):
-        if self._gauge_anchor_forces:
-            p = self._anchor_pressure_for_forces(p)
-        super().forces_lagrangian_2d(u, v, p, iteration)
-
-    def forces_lagrangian_3d(self, u, v, w, p, iteration):
-        if self._gauge_anchor_forces:
-            p = self._anchor_pressure_for_forces(p)
-        super().forces_lagrangian_3d(u, v, w, p, iteration)
-
     def advance_and_compute_loads(self, u, v, p, iteration, t, w_vel=None):
         """Override: when zero_pressure_inside is enabled, zero pressure only
-        DEEP inside the body (sdf < -2h), leaving the BDIM band (|sdf| < 2h)
-        intact.  The base solver zeros at sdf < 0, which for thin bodies
-        (thickness ~ band width) removes the interior half of the band and
-        destroys emergent buoyancy."""
+        DEEP inside the body (``sdf < -2h``), leaving the BDIM band
+        (``|sdf| < 2h``) intact.  The base solver zeros at ``sdf < 0``, which
+        for thin bodies (thickness ~ band width) removes the interior half of
+        the band and destroys emergent buoyancy."""
         self.composite_body.update(t, iteration, dt=self.dt)
         if not self._use_kernels:
             self._recompute_mu_normals()
@@ -771,30 +828,38 @@ class TwoPhaseSolver(FluidSolver):
 
         if self.ndim == 2:
             (u, v, p) = self.fluid_step(u, v, p, self.dt)
-            # ---- corrected zero_pressure_inside (only deep interior) ----
-            if self.zero_pressure_inside:
-                deep = self.composite_body.sdf_val < -2.0 * self.h
-                p = torch.where(deep, 0.0, p)
-            self.u0, self.v0, self.p0 = u, v, p
-            if self.compute_forces:
-                if self.force_method == "lagrangian":
-                    self.forces_lagrangian_2d(u, v, p, iteration)
-                else:
-                    self.forces_method2(u, v, p, iteration)
         else:
             (u, v, w_vel, p) = self.fluid_step(u, v, w_vel, p, self.dt)
-            # ---- corrected zero_pressure_inside (only deep interior) ----
-            if self.zero_pressure_inside:
-                deep = self.composite_body.sdf_val < -2.0 * self.h
-                p = torch.where(deep, 0.0, p)
+
+        # corrected zero_pressure_inside: zero only the DEEP interior (sdf<-2h),
+        # leaving the BDIM band intact (see the method docstring).
+        if self.zero_pressure_inside:
+            deep = self.composite_body.sdf_val < -2.0 * self.h
+            p = torch.where(deep, 0.0, p)
+
+        lagrangian = self.force_method == "lagrangian"
+        if self.ndim == 2:
+            self.u0, self.v0, self.p0 = u, v, p
+            if self.compute_forces:
+                (self.forces_lagrangian_2d if lagrangian
+                 else self.forces_method2)(u, v, p, iteration)
+        else:
             self.u0, self.v0, self.w0, self.p0 = u, v, w_vel, p
             if self.compute_forces:
-                if self.force_method == "lagrangian":
-                    self.forces_lagrangian_3d(u, v, w_vel, p, iteration)
-                else:
-                    self.forces_method2_3d(u, v, w_vel, p, iteration)
+                (self.forces_lagrangian_3d if lagrangian
+                 else self.forces_method2_3d)(u, v, w_vel, p, iteration)
 
         return u, v, p, w_vel
+
+    def _build_hydrostatic_reference(self):
+        """Two-phase density is variable (water/air VOF blend), so the
+        single-phase analytic ``p_h = rho*(g.x)`` does NOT satisfy
+        ``∇p_h = rho_face*g`` across the interface.  Returning ``None``
+        keeps the base ``_wb_gravity`` flag OFF -> the legacy uniform
+        ``dt*g`` body force is used, byte-identical to before.  The
+        variable-density hydrostatic split is Stage 2."""
+        return None
+
     def _apply_gravity_body_force(self, *vels):
         """In consistent mode gravity is applied as a rho*g body force INSIDE the
         conservative momentum advection (see :meth:`_consistent_advect_2d`), so

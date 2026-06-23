@@ -401,6 +401,8 @@ void streaming_sdf_forces_post_2d_cpu(
     const at::Tensor& nu_rho_field,
     const double eps_body, const double eps_solver, const double h2,
     const int64_t delta_order,
+    const int64_t force_submethod,
+    const double ph_tau,
     at::Tensor out)
 {
     const int B = (int)aabb_dim.size(0);
@@ -520,6 +522,8 @@ void streaming_sdf_forces_post_2d_cpu(
                 scalar_t delta_pres = 0;
                 if (sdf > -eps_b && sdf < eps_b)
                     delta_pres = ((scalar_t)1 + std::cos(pi_over_eb * sdf)) * inv_2eps;
+                // deltaH: pressure force/torque come from the union-∂H pass below.
+                if (force_submethod != 0) delta_pres = 0;
                 if (delta_visc == (scalar_t)0 && delta_pres == (scalar_t)0) continue;
 
                 if (delta_order == 2 && (delta_visc > 0 || delta_pres > 0)) {
@@ -694,6 +698,68 @@ void streaming_sdf_forces_post_2d_cpu(
             });
             for (int t = 0; t < nT; ++t)
                 for (int c = 0; c < 6; ++c) lb[c] += tls[(size_t)t*6 + c];
+        }
+
+        // ---- deltaH: union-∂H pressure force density, softmin partition ----
+        if (force_submethod != 0) {
+            const scalar_t inv_eps = (scalar_t)(1.0 / eps_body);
+            const double tau = (ph_tau > 0.0) ? ph_tau : 1e-9;
+            const scalar_t inv_tau = (scalar_t)(1.0 / tau);
+            auto sample_b = [&](const scalar_t* Fb, int Mx, int My, scalar_t bx0,
+                                scalar_t by0, scalar_t idx_, scalar_t idy_,
+                                scalar_t xq, scalar_t yq) -> scalar_t {
+                return (interp_method == 1)
+                    ? biquadratic_sample_uniform_2d<scalar_t>(Fb, Mx, My, bx0, by0, idx_, idy_, xq, yq)
+                    : bilinear_sample_uniform_2d<scalar_t>(Fb, Mx, My, bx0, by0, idx_, idy_, xq, yq);
+            };
+            int ulo[2] = {Ngx, Ngy}, uhi[2] = {0, 0};
+            for (int b = 0; b < B; ++b)
+                for (int d = 0; d < 2; ++d) { int a0=(int)lo[b*2+d]; int a1=a0+(int)dim_[b*2+d]; if(a0<ulo[d])ulo[d]=a0; if(a1>uhi[d])uhi[d]=a1; }
+            const int Ng[2] = {Ngx, Ngy}; const int halo = 2;
+            for (int d = 0; d < 2; ++d) { ulo[d]-=halo; if(ulo[d]<0)ulo[d]=0; uhi[d]+=halo; if(uhi[d]>Ng[d])uhi[d]=Ng[d]; }
+            auto Hs = [&](int i, int j) -> scalar_t {
+                scalar_t x = sdf_cc_p[(std::int64_t)i*Ngy+j] * inv_eps;
+                x = x < (scalar_t)-1 ? (scalar_t)-1 : (x > (scalar_t)1 ? (scalar_t)1 : x);
+                return (scalar_t)0.5 * ((scalar_t)1 + x + std::sin(pi_v * x) / pi_v);
+            };
+            for (int i = ulo[0]; i < uhi[0]; ++i)
+            for (int j = ulo[1]; j < uhi[1]; ++j) {
+                scalar_t gHx = 0, gHy = 0;
+                if (Ngx >= 3) { if(i==0) gHx=((-3)*Hs(0,j)+4*Hs(1,j)-Hs(2,j))*(scalar_t)0.5*inv_h_s; else if(i==Ngx-1) gHx=(3*Hs(Ngx-1,j)-4*Hs(Ngx-2,j)+Hs(Ngx-3,j))*(scalar_t)0.5*inv_h_s; else gHx=(Hs(i+1,j)-Hs(i-1,j))*(scalar_t)0.5*inv_h_s; } else if(Ngx==2) gHx=(Hs(1,j)-Hs(0,j))*inv_h_s;
+                if (Ngy >= 3) { if(j==0) gHy=((-3)*Hs(i,0)+4*Hs(i,1)-Hs(i,2))*(scalar_t)0.5*inv_h_s; else if(j==Ngy-1) gHy=(3*Hs(i,Ngy-1)-4*Hs(i,Ngy-2)+Hs(i,Ngy-3))*(scalar_t)0.5*inv_h_s; else gHy=(Hs(i,j+1)-Hs(i,j-1))*(scalar_t)0.5*inv_h_s; } else if(Ngy==2) gHy=(Hs(i,1)-Hs(i,0))*inv_h_s;
+                if (gHx == (scalar_t)0 && gHy == (scalar_t)0) continue;
+                const std::int64_t g = (std::int64_t)i*Ngy+j;
+                const scalar_t p_c = p_p[g];
+                const scalar_t fdx = -p_c*gHx, fdy = -p_c*gHy;
+                const scalar_t xc = gx_ptr[i], yc = gy_ptr[j];
+                const scalar_t sdfu = sdf_cc_p[g];
+                scalar_t Z = 0;
+                for (int b = 0; b < B; ++b) {
+                    const int i0=(int)lo[b*2],j0=(int)lo[b*2+1],Ai=(int)dim_[b*2],Aj=(int)dim_[b*2+1];
+                    if (i<i0||i>=i0+Ai||j<j0||j>=j0+Aj) continue;
+                    const scalar_t* Fb=F_ptr+F_off[b]; const int Mx=(int)shapes[b*2],My=(int)shapes[b*2+1];
+                    const scalar_t* M=meta+b*7; const scalar_t* K=kin_ptr+b*11;
+                    const scalar_t dxw=xc-K[4],dyw=yc-K[5];
+                    const scalar_t bxq=K[0]*dxw+K[1]*dyw, byq=K[2]*dxw+K[3]*dyw;
+                    Z += std::exp(-(sample_b(Fb,Mx,My,M[0],M[1],M[4],M[5],bxq,byq)-sdfu)*inv_tau);
+                }
+                if (Z <= (scalar_t)0) continue;
+                const scalar_t invZ = (scalar_t)1/Z;
+                for (int b = 0; b < B; ++b) {
+                    const int i0=(int)lo[b*2],j0=(int)lo[b*2+1],Ai=(int)dim_[b*2],Aj=(int)dim_[b*2+1];
+                    if (i<i0||i>=i0+Ai||j<j0||j>=j0+Aj) continue;
+                    const scalar_t* Fb=F_ptr+F_off[b]; const int Mx=(int)shapes[b*2],My=(int)shapes[b*2+1];
+                    const scalar_t* M=meta+b*7; const scalar_t* K=kin_ptr+b*11;
+                    const scalar_t dxw=xc-K[4],dyw=yc-K[5];
+                    const scalar_t bxq=K[0]*dxw+K[1]*dyw, byq=K[2]*dxw+K[3]*dyw;
+                    const scalar_t s_b=sample_b(Fb,Mx,My,M[0],M[1],M[4],M[5],bxq,byq);
+                    const scalar_t wb=std::exp(-(s_b-sdfu)*inv_tau)*invZ;
+                    const scalar_t fbx=wb*fdx,fby=wb*fdy;
+                    const scalar_t ax=xc-K[6],ay=yc-K[7];
+                    double* lb=accs.data()+(size_t)b*6;
+                    lb[3]+=(double)fbx; lb[4]+=(double)fby; lb[5]+=(double)ax*fby-(double)ay*fbx;
+                }
+            }
         }
 
         double* out_ptr = out.data_ptr<double>();

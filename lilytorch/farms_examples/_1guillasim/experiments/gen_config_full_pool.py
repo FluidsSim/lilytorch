@@ -21,7 +21,7 @@ class SimConfig(BaseSimConfig):
         self.use_bdim                      = True
         self.compute_sdf                   = True
         self.convexify                     = True
-        self.force_method                  = "lagrangian"
+        self.force_method                  = "eulerian"
         self.zero_pressure_inside          = True
         # self.force_relaxation              = 0.3
         self.body_velocity_blend_eps_cells = None

@@ -407,6 +407,8 @@ def forces_method2(self, u, v, p, iteration):
 
         eps_body = comp.bodies[0].eps
         interp_method = int(getattr(self, '_sdf_interp_method', 0))
+        _fsm = 1 if getattr(self, 'force_submethod', 'ndelta') == 'deltaH' else 0
+        _ph_tau = float(getattr(self, 'force_ph_blend_cells', 1.5)) * self.h
 
         streaming_sdf_forces_post_2d(
             sm['F_flat'], sm['F_offsets'],
@@ -421,6 +423,7 @@ def forces_method2(self, u, v, p, iteration):
             eps_body, self.eps, self.h2,
             self.force_delta_order,
             out2d,
+            _fsm, _ph_tau,
         )
 
         out_s = out2d if out2d.dtype == u.dtype else out2d.to(u.dtype)
@@ -626,6 +629,8 @@ def forces_method2_3d(self, u, v, w, p, iteration):
             nu_rho_field = nu_rho_scalar
 
         eps_body = comp.bodies[0].eps
+        _fsm = 1 if getattr(self, 'force_submethod', 'ndelta') == 'deltaH' else 0
+        _ph_tau = float(getattr(self, 'force_ph_blend_cells', 1.5)) * self.h
         streaming_sdf_forces_post_3d(
             _stream_static['F_flat'], _stream_static['F_offsets'],
             _stream_static['body_shapes'], _stream_static['body_meta'],
@@ -637,6 +642,7 @@ def forces_method2_3d(self, u, v, w, p, iteration):
             u.contiguous(), v.contiguous(), w.contiguous(), p.contiguous(),
             nu_rho_field,
             eps_body, self.eps, self.h3, self.force_delta_order, out,
+            _fsm, _ph_tau,
         )
         out_s = out if out.dtype == u.dtype else out.to(u.dtype)
         self.viscous_drag_record[:B, :, iteration]    = out_s[:, 0:3]

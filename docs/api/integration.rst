@@ -85,10 +85,10 @@ advected with RK2.
    :show-inheritance:
    :member-order: bysource
 
-Native body colours
--------------------
+Per-body colours
+----------------
 
-.. automodule:: lilytorch.integration.native_body_colors
+.. automodule:: lilytorch.integration.body_color_override
    :members:
    :undoc-members:
    :show-inheritance:

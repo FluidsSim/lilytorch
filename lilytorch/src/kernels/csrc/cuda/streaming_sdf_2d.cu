@@ -296,6 +296,7 @@ __global__ void streaming_sdf_forces_post_2d_kernel(
     const scalar_t eps_solver,
     const scalar_t h2,
     const int delta_order,
+    const int with_pressure,
     double* __restrict__ out)
 {
     const int b     = blockIdx.y;
@@ -491,6 +492,9 @@ __global__ void streaming_sdf_forces_post_2d_kernel(
                 delta_visc = ((scalar_t)1 + cos(pi_ov_eb * d_visc)) * inv_2eps;
             if (s_cc_body > -eps_body && s_cc_body < eps_body)
                 delta_pres = ((scalar_t)1 + cos(pi_ov_eb * s_cc_body)) * inv_2eps;
+            // deltaH readout supplies the pressure force/torque from a separate
+            // union-∂H pass; here we emit only the viscous channels.
+            if (!with_pressure) delta_pres = 0;
 
             if (delta_order == 2 && (delta_visc > 0 || delta_pres > 0)) {
                 const scalar_t h_grid = (scalar_t)1.0 / inv_h;
@@ -549,6 +553,116 @@ __global__ void streaming_sdf_forces_post_2d_kernel(
     }
 }
 
+// ----------------------------------------------------------------------
+//  2-D partial-Heaviside (∂H) pressure-force readout  --  deltaH submethod.
+//  See the 3-D analogue in streaming_sdf.cu for the full rationale.
+// ----------------------------------------------------------------------
+template <typename scalar_t>
+__device__ __forceinline__ scalar_t heaviside_smooth_dev_2d(scalar_t phi, scalar_t inv_eps) {
+    const scalar_t pi = (scalar_t)3.141592653589793;
+    scalar_t x = phi * inv_eps;
+    x = x < (scalar_t)-1 ? (scalar_t)-1 : (x > (scalar_t)1 ? (scalar_t)1 : x);
+    return (scalar_t)0.5 * ((scalar_t)1 + x + sin(pi * x) / pi);
+}
+
+template <typename scalar_t>
+__global__ void forces_post_deltaH_pressure_2d_kernel(
+    const scalar_t* __restrict__ F_flat,
+    const int64_t*  __restrict__ F_offsets,
+    const int64_t*  __restrict__ body_shapes,
+    const scalar_t* __restrict__ body_meta,
+    const scalar_t* __restrict__ kin,
+    const int64_t*  __restrict__ aabb_lo,
+    const int64_t*  __restrict__ aabb_dim,
+    const scalar_t* __restrict__ gx,
+    const scalar_t* __restrict__ gy,
+    const int Ngx, const int Ngy,
+    const scalar_t* __restrict__ sdf_cc,
+    const int interp_method,
+    const scalar_t* __restrict__ p_prev,
+    const scalar_t inv_h,
+    const scalar_t inv_eps,
+    const scalar_t inv_tau,
+    const scalar_t h2,
+    const int B,
+    const int uli0, const int ulj0,
+    const int ULi, const int ULj,
+    double* __restrict__ out)
+{
+    const int local = blockIdx.x * blockDim.x + threadIdx.x;
+    const int uvol = ULi * ULj;
+    if (local >= uvol) return;
+    const int di = local / ULj;
+    const int dj = local - di * ULj;
+    const int i = uli0 + di;
+    const int j = ulj0 + dj;
+    if (i < 0 || i >= Ngx || j < 0 || j >= Ngy) return;
+
+#define SDF_AT(ii, jj) (sdf_cc[(int64_t)(ii) * Ngy + (jj)])
+#define HV_AT(ii, jj) heaviside_smooth_dev_2d<scalar_t>(SDF_AT(ii, jj), inv_eps)
+    scalar_t gHx = 0, gHy = 0;
+    if (Ngx >= 3) {
+        if (i == 0) gHx = ((scalar_t)(-3)*HV_AT(0,j) + (scalar_t)4*HV_AT(1,j) - HV_AT(2,j)) * (scalar_t)0.5 * inv_h;
+        else if (i == Ngx-1) gHx = ((scalar_t)3*HV_AT(Ngx-1,j) - (scalar_t)4*HV_AT(Ngx-2,j) + HV_AT(Ngx-3,j)) * (scalar_t)0.5 * inv_h;
+        else gHx = (HV_AT(i+1,j) - HV_AT(i-1,j)) * (scalar_t)0.5 * inv_h;
+    } else if (Ngx == 2) gHx = (HV_AT(1,j) - HV_AT(0,j)) * inv_h;
+    if (Ngy >= 3) {
+        if (j == 0) gHy = ((scalar_t)(-3)*HV_AT(i,0) + (scalar_t)4*HV_AT(i,1) - HV_AT(i,2)) * (scalar_t)0.5 * inv_h;
+        else if (j == Ngy-1) gHy = ((scalar_t)3*HV_AT(i,Ngy-1) - (scalar_t)4*HV_AT(i,Ngy-2) + HV_AT(i,Ngy-3)) * (scalar_t)0.5 * inv_h;
+        else gHy = (HV_AT(i,j+1) - HV_AT(i,j-1)) * (scalar_t)0.5 * inv_h;
+    } else if (Ngy == 2) gHy = (HV_AT(i,1) - HV_AT(i,0)) * inv_h;
+#undef HV_AT
+#undef SDF_AT
+    if (gHx == (scalar_t)0 && gHy == (scalar_t)0) return;
+
+    const int64_t g = (int64_t)i * Ngy + j;
+    const scalar_t p_c = p_prev[g];
+    const scalar_t fdx = -p_c * gHx, fdy = -p_c * gHy;
+    const scalar_t xc = gx[i], yc = gy[j];
+    const scalar_t sdfu = sdf_cc[g];
+
+    scalar_t Z = 0;
+    for (int b = 0; b < B; ++b) {
+        const int i0 = (int)aabb_lo[b*2+0], j0 = (int)aabb_lo[b*2+1];
+        const int Ai = (int)aabb_dim[b*2+0], Aj = (int)aabb_dim[b*2+1];
+        if (i < i0 || i >= i0+Ai || j < j0 || j >= j0+Aj) continue;
+        const scalar_t* F = F_flat + F_offsets[b];
+        const int Mx = (int)body_shapes[b*2+0], My = (int)body_shapes[b*2+1];
+        const scalar_t* M = body_meta + b*7;
+        const scalar_t* K = kin + b*11;
+        const scalar_t dx_w = xc - K[4], dy_w = yc - K[5];
+        const scalar_t bxq = K[0]*dx_w + K[1]*dy_w;
+        const scalar_t byq = K[2]*dx_w + K[3]*dy_w;
+        const scalar_t s_b = sdf_sample_dispatch_2d(interp_method, F, Mx, My,
+            M[0], M[1], M[4], M[5], bxq, byq);
+        Z += exp(-(s_b - sdfu) * inv_tau);
+    }
+    if (Z <= (scalar_t)0) return;
+    const scalar_t inv_Z = (scalar_t)1 / Z;
+    const double h2_d = (double)h2;
+
+    for (int b = 0; b < B; ++b) {
+        const int i0 = (int)aabb_lo[b*2+0], j0 = (int)aabb_lo[b*2+1];
+        const int Ai = (int)aabb_dim[b*2+0], Aj = (int)aabb_dim[b*2+1];
+        if (i < i0 || i >= i0+Ai || j < j0 || j >= j0+Aj) continue;
+        const scalar_t* F = F_flat + F_offsets[b];
+        const int Mx = (int)body_shapes[b*2+0], My = (int)body_shapes[b*2+1];
+        const scalar_t* M = body_meta + b*7;
+        const scalar_t* K = kin + b*11;
+        const scalar_t dx_w = xc - K[4], dy_w = yc - K[5];
+        const scalar_t bxq = K[0]*dx_w + K[1]*dy_w;
+        const scalar_t byq = K[2]*dx_w + K[3]*dy_w;
+        const scalar_t s_b = sdf_sample_dispatch_2d(interp_method, F, Mx, My,
+            M[0], M[1], M[4], M[5], bxq, byq);
+        const scalar_t wb = exp(-(s_b - sdfu) * inv_tau) * inv_Z;
+        const scalar_t fbx = wb * fdx, fby = wb * fdy;
+        const scalar_t ax = xc - K[6], ay = yc - K[7];
+        atomicAdd(&out[b*6 + 3], (double)fbx * h2_d);
+        atomicAdd(&out[b*6 + 4], (double)fby * h2_d);
+        atomicAdd(&out[b*6 + 5], ((double)ax*(double)fby - (double)ay*(double)fbx) * h2_d);
+    }
+}
+
 void streaming_sdf_forces_post_2d_cuda(
     const at::Tensor& F_flat, const at::Tensor& F_offsets,
     const at::Tensor& body_shapes, const at::Tensor& body_meta,
@@ -562,6 +676,8 @@ void streaming_sdf_forces_post_2d_cuda(
     const at::Tensor& nu_rho_field,
     const double eps_body, const double eps_solver, const double h2,
     const int64_t delta_order,
+    const int64_t force_submethod,
+    const double ph_tau,
     at::Tensor out)
 {
     const int B = (int)aabb_dim.size(0);
@@ -570,6 +686,7 @@ void streaming_sdf_forces_post_2d_cuda(
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
     const int Ngx = (int)gx.numel();
     const int Ngy = (int)gy.numel();
+    const int with_pressure = (force_submethod == 0) ? 1 : 0;
 
     // Adaptive blockSize matching the streaming_sdf_stag launcher; CUB's
     // BlockReduce takes block size as a compile-time template parameter,
@@ -606,6 +723,7 @@ void streaming_sdf_forces_post_2d_cuda(
                     (scalar_t)eps_solver,
                     (scalar_t)h2,
                     (int)delta_order,
+                    with_pressure,
                     out.data_ptr<double>());
         };
         switch (blockSize) {
@@ -614,6 +732,52 @@ void streaming_sdf_forces_post_2d_cuda(
             default:  launch(std::integral_constant<int, 256>{}); break;
         }
     });
+
+    if (force_submethod != 0) {
+        // deltaH: second pass fills the pressure force/torque from union-∂H.
+        auto lo_c  = aabb_lo.to(at::kCPU);
+        auto dim_c = aabb_dim.to(at::kCPU);
+        const int64_t* loh  = lo_c.data_ptr<int64_t>();
+        const int64_t* dimh = dim_c.data_ptr<int64_t>();
+        int ulo[2] = {Ngx, Ngy};
+        int uhi[2] = {0, 0};
+        for (int b = 0; b < B; ++b)
+            for (int d = 0; d < 2; ++d) {
+                const int a0 = (int)loh[b*2+d];
+                const int a1 = a0 + (int)dimh[b*2+d];
+                if (a0 < ulo[d]) ulo[d] = a0;
+                if (a1 > uhi[d]) uhi[d] = a1;
+            }
+        const int Ng[2] = {Ngx, Ngy};
+        const int halo = 2;
+        for (int d = 0; d < 2; ++d) {
+            ulo[d] -= halo; if (ulo[d] < 0) ulo[d] = 0;
+            uhi[d] += halo; if (uhi[d] > Ng[d]) uhi[d] = Ng[d];
+        }
+        const int ULi = uhi[0] - ulo[0];
+        const int ULj = uhi[1] - ulo[1];
+        const int64_t uvol = (int64_t)ULi * ULj;
+        if (ULi > 0 && ULj > 0) {
+            const double tau = (ph_tau > 0.0) ? ph_tau : 1e-9;
+            const int bs = 256;
+            const int nb = (int)((uvol + bs - 1) / bs);
+            AT_DISPATCH_FLOATING_TYPES(F_flat.scalar_type(), "forces_post_deltaH_pressure_2d_cuda", [&] {
+                forces_post_deltaH_pressure_2d_kernel<scalar_t>
+                    <<<dim3(nb, 1, 1), dim3(bs, 1, 1), 0, stream>>>(
+                        F_flat.data_ptr<scalar_t>(), F_offsets.data_ptr<int64_t>(),
+                        body_shapes.data_ptr<int64_t>(), body_meta.data_ptr<scalar_t>(),
+                        kin.data_ptr<scalar_t>(), aabb_lo.data_ptr<int64_t>(),
+                        aabb_dim.data_ptr<int64_t>(), gx.data_ptr<scalar_t>(),
+                        gy.data_ptr<scalar_t>(), Ngx, Ngy,
+                        sdf_cc.data_ptr<scalar_t>(), (int)interp_method,
+                        p_prev.data_ptr<scalar_t>(),
+                        (scalar_t)(1.0 / h_grid), (scalar_t)(1.0 / eps_body),
+                        (scalar_t)(1.0 / tau), (scalar_t)h2, B,
+                        ulo[0], ulo[1], ULi, ULj,
+                        out.data_ptr<double>());
+            });
+        }
+    }
 }
 
 // =====================================================================

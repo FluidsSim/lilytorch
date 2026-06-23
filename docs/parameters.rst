@@ -321,8 +321,40 @@ Miscellaneous
      - Explicitly set :math:`p = 0` inside bodies.
    * - ``force_method``
      - str
-     - *null*
-     - ``"method1"`` or ``"method2"`` — force integration variant.
+     - ``"eulerian"``
+     - Force-integration method. ``"eulerian"`` — volumetric smoothed-delta band
+       integral (:math:`\int \sigma\cdot\delta_\varepsilon\,dV` and
+       :math:`-\int p\,\mathbf{n}\,\delta_\varepsilon\,dV`); works on both the
+       python and kernel paths. ``"lagrangian"`` — surface integral
+       :math:`\oint \sigma\cdot\mathbf{n}\,dS` on per-body Lagrangian markers
+       (2-D arc-length contour / 3-D triangulation), most accurate for
+       fully-resolved bodies. The legacy aliases ``"method2"`` → ``"eulerian"``
+       and ``"method1"`` → ``"lagrangian"`` are still accepted (with a
+       ``DeprecationWarning``).
+   * - ``force_submethod``
+     - str
+     - ``"ndelta"``
+     - Pressure-force readout for ``force_method="eulerian"``. ``"ndelta"`` —
+       per-body smoothed-delta band integral :math:`-\sum p\,\mathbf{n}\,
+       \delta_\varepsilon(\phi_b)` (historical default). ``"deltaH"`` —
+       *partial-Heaviside* readout :math:`-\sum p\,\partial_i H_\varepsilon`,
+       where the pressure force density is taken from the **union** SDF (one
+       closed surface, no internal inter-link seams) so it obeys
+       summation-by-parts and does not leak the hydrostatic baseline; the union
+       force is split back to the individual bodies by a softmin partition of
+       unity :math:`w_b = \mathrm{softmax}(-\phi_b/\tau)` so
+       :math:`\sum_b \mathbf{F}_b` equals the union force exactly. Viscous
+       force/torque are unchanged. Implemented in the native CUDA/CPU force
+       kernels (2-D and 3-D), bit-matched to the python reference
+       (:py:meth:`~lilytorch.src.two_phase_solver.TwoPhaseSolver._apply_partition_heaviside`).
+       Useful for surface-straddling / multi-link swimmers where the per-body
+       ``ndelta`` quadrature admits a depth-linear spurious force.
+   * - ``force_ph_blend_cells``
+     - float
+     - ``1.5``
+     - Softmin partition temperature for ``force_submethod="deltaH"``, in grid
+       cells (:math:`\tau = \texttt{force\_ph\_blend\_cells}\cdot h`). Sets how
+       sharply the union force is handed between abutting links at a seam.
    * - ``body_velocity_blend_eps_cells``
      - float
      - *null*

@@ -61,6 +61,11 @@ figures/
 output/
 Output/
 .pytest_cache/
+# Scratch diagnostic / study OUTPUT dirs (sim-generated, e.g. _submerged_diag/,
+# _flip_diag/, _overlap_study/). Trailing slash => directories only, so the
+# *.py harness scripts (_overlap_diag.py, _region_diag.py, ...) stay tracked.
+_*_diag/
+_*_study/
 
 # Generated Sphinx documentation output (rebuild with `make html`)
 docs/_build/

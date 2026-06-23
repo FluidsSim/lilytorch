@@ -591,6 +591,8 @@ void streaming_sdf_forces_post_3d_cpu(
     const double eps_solver,
     const double h3,
     const int64_t delta_order,
+    const int64_t force_submethod,
+    const double ph_tau,
     at::Tensor out)
 {
     const int B = (int)aabb_dim.size(0);
@@ -667,6 +669,8 @@ void streaming_sdf_forces_post_3d_cpu(
                 const scalar_t nrv=nr_size==1?nr[0]:nr[g];
                 const scalar_t xs=nrv*(2*dudx*nx+(dudy+dvdx)*ny+(dudz+dwdx)*nz), ys=nrv*((dvdx+dudy)*nx+2*dvdy*ny+(dvdz+dwdy)*nz), zs=nrv*((dwdx+dudz)*nx+(dwdy+dvdz)*ny+2*dwdz*nz);
                 scalar_t dv=0,dp=0; const scalar_t sd=sbody-eps_s; if(sd>-eps_b&&sd<eps_b) dv=(1+std::cos(pi_eb*sd))*inv_2eps; if(sbody>-eps_b&&sbody<eps_b) dp=(1+std::cos(pi_eb*sbody))*inv_2eps;
+                // deltaH: pressure force/torque come from the union-∂H pass below.
+                if(force_submethod!=0) dp=0;
                 // delta_order==2: divide both deltas by |grad(sdf_body)| evaluated by
                 // re-sampling at world-aligned ±h offsets.  Matches the CUDA-3D path
                 // at streaming_sdf.cu:644-657; without this the CPU path silently
@@ -699,6 +703,60 @@ void streaming_sdf_forces_post_3d_cpu(
             for(int t=0;t<nT;++t)
                 for(int c=0;c<12;++c) acc[c]+=tls[(size_t)t*12+c];
             for(int c=0;c<12;++c) outp[b*12+c]+=acc[c]*h3d;
+        }
+        // ---- deltaH: union-∂H pressure force density, softmin partition ----
+        if(force_submethod!=0){
+            const scalar_t inv_eps=(scalar_t)(1.0/eps_body);
+            const double tau=(ph_tau>0.0)?ph_tau:1e-9;
+            const scalar_t inv_tau=(scalar_t)(1.0/tau);
+            int ulo[3]={Ngx,Ngy,Ngz}, uhi[3]={0,0,0};
+            for(int b=0;b<B;++b) for(int d=0;d<3;++d){int a0=(int)lo[b*3+d];int a1=a0+(int)dim[b*3+d];if(a0<ulo[d])ulo[d]=a0;if(a1>uhi[d])uhi[d]=a1;}
+            const int Ng[3]={Ngx,Ngy,Ngz}; const int halo=2;
+            for(int d=0;d<3;++d){ulo[d]-=halo;if(ulo[d]<0)ulo[d]=0;uhi[d]+=halo;if(uhi[d]>Ng[d])uhi[d]=Ng[d];}
+            auto Hs=[&](int i,int j,int k)->scalar_t{ scalar_t x=S(i,j,k)*inv_eps; x=x<(scalar_t)-1?(scalar_t)-1:(x>(scalar_t)1?(scalar_t)1:x); return (scalar_t)0.5*((scalar_t)1+x+std::sin(pi*x)/pi); };
+            for(int i=ulo[0];i<uhi[0];++i)for(int j=ulo[1];j<uhi[1];++j)for(int k=ulo[2];k<uhi[2];++k){
+                scalar_t gHx=0,gHy=0,gHz=0;
+                if(Ngx>=3){ if(i==0) gHx=((-3)*Hs(0,j,k)+4*Hs(1,j,k)-Hs(2,j,k))*(scalar_t)0.5*inv_h; else if(i==Ngx-1) gHx=(3*Hs(Ngx-1,j,k)-4*Hs(Ngx-2,j,k)+Hs(Ngx-3,j,k))*(scalar_t)0.5*inv_h; else gHx=(Hs(i+1,j,k)-Hs(i-1,j,k))*(scalar_t)0.5*inv_h; } else if(Ngx==2) gHx=(Hs(1,j,k)-Hs(0,j,k))*inv_h;
+                if(Ngy>=3){ if(j==0) gHy=((-3)*Hs(i,0,k)+4*Hs(i,1,k)-Hs(i,2,k))*(scalar_t)0.5*inv_h; else if(j==Ngy-1) gHy=(3*Hs(i,Ngy-1,k)-4*Hs(i,Ngy-2,k)+Hs(i,Ngy-3,k))*(scalar_t)0.5*inv_h; else gHy=(Hs(i,j+1,k)-Hs(i,j-1,k))*(scalar_t)0.5*inv_h; } else if(Ngy==2) gHy=(Hs(i,1,k)-Hs(i,0,k))*inv_h;
+                if(Ngz>=3){ if(k==0) gHz=((-3)*Hs(i,j,0)+4*Hs(i,j,1)-Hs(i,j,2))*(scalar_t)0.5*inv_h; else if(k==Ngz-1) gHz=(3*Hs(i,j,Ngz-1)-4*Hs(i,j,Ngz-2)+Hs(i,j,Ngz-3))*(scalar_t)0.5*inv_h; else gHz=(Hs(i,j,k+1)-Hs(i,j,k-1))*(scalar_t)0.5*inv_h; } else if(Ngz==2) gHz=(Hs(i,j,1)-Hs(i,j,0))*inv_h;
+                if(gHx==(scalar_t)0&&gHy==(scalar_t)0&&gHz==(scalar_t)0) continue;
+                const int64_t g=((int64_t)i*Ngy+j)*Ngz+k;
+                const scalar_t p_c=pp[g];
+                const scalar_t fdx=-p_c*gHx, fdy=-p_c*gHy, fdz=-p_c*gHz;
+                const scalar_t xc=gx_ptr[i],yc=gy_ptr[j],zc=gz_ptr[k];
+                const scalar_t sdfu=sdf[g];
+                scalar_t Z=0;
+                for(int b=0;b<B;++b){
+                    const int i0=(int)lo[b*3],j0=(int)lo[b*3+1],k0=(int)lo[b*3+2];
+                    const int Ai=(int)dim[b*3],Aj=(int)dim[b*3+1],Ak=(int)dim[b*3+2];
+                    if(i<i0||i>=i0+Ai||j<j0||j>=j0+Aj||k<k0||k>=k0+Ak) continue;
+                    const scalar_t* Fb=F_ptr+F_off[b]; const int Mx=(int)shapes[b*3],My=(int)shapes[b*3+1],Mz=(int)shapes[b*3+2];
+                    const scalar_t* M=meta+b*10; const scalar_t* K=kin_ptr+b*21;
+                    const scalar_t dxw=xc-K[9],dyw=yc-K[10],dzw=zc-K[11];
+                    const scalar_t bxq=K[0]*dxw+K[1]*dyw+K[2]*dzw, byq=K[3]*dxw+K[4]*dyw+K[5]*dzw, bzq=K[6]*dxw+K[7]*dyw+K[8]*dzw;
+                    const scalar_t s_b=sample_dispatch_cpu<scalar_t>((int)interp_method,Fb,Mx,My,Mz,M[0],M[1],M[2],M[6],M[7],M[8],bxq,byq,bzq);
+                    Z+=std::exp(-(s_b-sdfu)*inv_tau);
+                }
+                if(Z<=(scalar_t)0) continue;
+                const scalar_t invZ=(scalar_t)1/Z;
+                for(int b=0;b<B;++b){
+                    const int i0=(int)lo[b*3],j0=(int)lo[b*3+1],k0=(int)lo[b*3+2];
+                    const int Ai=(int)dim[b*3],Aj=(int)dim[b*3+1],Ak=(int)dim[b*3+2];
+                    if(i<i0||i>=i0+Ai||j<j0||j>=j0+Aj||k<k0||k>=k0+Ak) continue;
+                    const scalar_t* Fb=F_ptr+F_off[b]; const int Mx=(int)shapes[b*3],My=(int)shapes[b*3+1],Mz=(int)shapes[b*3+2];
+                    const scalar_t* M=meta+b*10; const scalar_t* K=kin_ptr+b*21;
+                    const scalar_t dxw=xc-K[9],dyw=yc-K[10],dzw=zc-K[11];
+                    const scalar_t bxq=K[0]*dxw+K[1]*dyw+K[2]*dzw, byq=K[3]*dxw+K[4]*dyw+K[5]*dzw, bzq=K[6]*dxw+K[7]*dyw+K[8]*dzw;
+                    const scalar_t s_b=sample_dispatch_cpu<scalar_t>((int)interp_method,Fb,Mx,My,Mz,M[0],M[1],M[2],M[6],M[7],M[8],bxq,byq,bzq);
+                    const scalar_t wb=std::exp(-(s_b-sdfu)*inv_tau)*invZ;
+                    const scalar_t fbx=wb*fdx,fby=wb*fdy,fbz=wb*fdz;
+                    const scalar_t ax=xc-K[12],ay=yc-K[13],az=zc-K[14];
+                    outp[b*12+6]+=(double)fbx*h3d; outp[b*12+7]+=(double)fby*h3d; outp[b*12+8]+=(double)fbz*h3d;
+                    outp[b*12+9]+=((double)ay*fbz-(double)az*fby)*h3d;
+                    outp[b*12+10]+=((double)az*fbx-(double)ax*fbz)*h3d;
+                    outp[b*12+11]+=((double)ax*fby-(double)ay*fbx)*h3d;
+                }
+            }
         }
     });
 }

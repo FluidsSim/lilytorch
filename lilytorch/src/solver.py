@@ -187,15 +187,8 @@ class FluidSolver(PlottingMixin):
         self.rho  = torch.tensor(solver["rho"], device=self.device, dtype=self.dtype)  # density
         self.visc = self.nu*self.rho                                                   # dynamic viscosity
 
-        # BDIM transition thickness ε.  Default 2 cells; 3–4 gives a smoother
-        # interface on coarse grids.  ``eps_cells`` (integer) is preferred;
-        # ``eps_multiplier`` (float) is the legacy key.
-        _eps_cells = solver.get("eps_cells", None)
-        if _eps_cells is not None:
-            self.eps = float(_eps_cells) * self.h
-        else:
-            self.eps = solver.get("eps_multiplier",
-                                  torch.tensor(2.0, device=self.device, dtype=self.dtype)) * self.h
+        self.eps  = solver.get("eps_multiplier",
+                                torch.tensor(2.0, device=self.device, dtype=self.dtype)) * self.h
 
         # BDIM-σ (Lauber et al. 2022): per-body Poisson-coefficient shift
         # to enforce mu0_poisson → 0 inside thin bodies (r < eps).  When
@@ -424,6 +417,32 @@ class FluidSolver(PlottingMixin):
                 f"('eulerian', 'lagrangian'), got {_fm_raw!r}."
             )
         self.force_method = _fm_raw
+        # Eulerian pressure-force readout sub-method (only meaningful when
+        # ``force_method == "eulerian"``):
+        #
+        #   "ndelta" — F = -Σ p·n·δ_ε(φ_body)  (per-body smoothed-delta band
+        #              integral; the historical default).
+        #   "deltaH" — F = -Σ p·∂_iH_ε(φ_union)  partial-Heaviside readout: the
+        #              pressure force density is taken from the UNION SDF (one
+        #              closed surface, no internal inter-link seams) so it obeys
+        #              summation-by-parts and does not leak the hydrostatic
+        #              baseline; it is split back to the individual bodies by a
+        #              softmin partition of unity (w_b = softmax(-φ_b/τ),
+        #              τ = ``force_ph_blend_cells``·h).  Viscous force/torque are
+        #              unchanged (still the per-body δ_ε integral).
+        #
+        # Mirrors ``TwoPhaseSolver._apply_partition_heaviside`` (python path) in
+        # the native CUDA/CPU force kernels.
+        _fsm_raw = solver.get("force_submethod", "ndelta")
+        if _fsm_raw not in ("ndelta", "deltaH"):
+            raise ValueError(
+                f"solver.force_submethod must be one of "
+                f"('ndelta', 'deltaH'), got {_fsm_raw!r}."
+            )
+        self.force_submethod = _fsm_raw
+        # Softmin partition temperature for the deltaH readout, in grid cells.
+        self.force_ph_blend_cells = float(
+            solver.get("force_ph_blend_cells", 1.5))
         # Distance to offset the Lagrangian-force sample point along the
         # outward surface normal (see lagrangian_forces.cu).  0 (default)
         # = sample exactly at the centroid/contour marker (legacy
@@ -747,6 +766,12 @@ class FluidSolver(PlottingMixin):
         """
         self.use_gravity = False
         self._gravity = None
+        # Well-balanced-gravity attributes default OFF so no-gravity runs
+        # (the vast majority) skip the hydrostatic split entirely and stay
+        # byte-identical.
+        self._wb_gravity = False
+        self.p_h         = None
+        self._ph_grad    = None
         if gravity_cfg is None:
             return
         g = list(gravity_cfg)
@@ -760,25 +785,87 @@ class FluidSolver(PlottingMixin):
         if self.use_gravity:
             print(f"Gravity body force enabled: g = {self._gravity}")
 
+        # ---- well-balanced (hydrostatic-split) gravity ------------------
+        # Stage 1 (single-phase / uniform density): pre-subtract the analytic
+        # hydrostatic gradient from the predictor body force so the Poisson
+        # never sees the stiff hydrostatic and produces no spurious flow.
+        # ``_build_hydrostatic_reference`` returns None for variable-density
+        # solvers (two-phase), which then keep the legacy uniform ``dt*g``
+        # body force untouched (Stage 2).  No-gravity runs are unaffected.
+        if self.use_gravity:
+            p_h = self._build_hydrostatic_reference()
+            if p_h is not None:
+                self.p_h      = p_h
+                self._ph_grad = self.gradient(p_h)   # ∇p_h on the face grids
+                self._wb_gravity = True
+                print("Well-balanced gravity: hydrostatic split active "
+                      "(single-phase, uniform density).")
+
+    def _build_hydrostatic_reference(self):
+        """Cell-centred analytic hydrostatic pressure ``p_h`` with
+        ``∇p_h = rho*g`` for UNIFORM single-phase density.
+
+        Returns ``rho * (g . x)`` on the cell-centred grid.  The predictor
+        subtracts ``(dt/rho)*∇p_h`` (cancelling ``dt*g`` in the interior to
+        machine precision -- uniform-density incompressible flow is
+        gravity-invariant).  The body-force readout uses the DYNAMIC pressure
+        ``p_d`` alone (NOT ``p_d + p_h``): single-phase buoyancy is handled by
+        the rigid-body integrator (external Archimedes / MuJoCo), and feeding
+        ``p_h`` through the non-gauge-invariant band quadrature leaks a spurious
+        horizontal force.  ``self.p_h`` is kept only for optional physical-
+        pressure reconstruction (``p_d + p_h``) in plotting.  Variable-density
+        solvers (two-phase) override this to return ``None`` -> the legacy
+        uniform ``dt*g`` body force is used (Stage 2, see
+        milestones/hydrostatic_gravity_stage2_handoff.md).
+        """
+        g   = self._gravity
+        rho = float(self.rho)
+        if self.ndim == 2:
+            X = self.x.view(-1, 1)
+            Y = self.y.view(1, -1)
+            p_h = rho * (g[0] * X + g[1] * Y)
+        else:
+            X = self.x.view(-1, 1, 1)
+            Y = self.y.view(1, -1, 1)
+            Z = self.z.view(1, 1, -1)
+            p_h = rho * (g[0] * X + g[1] * Y + g[2] * Z)
+        return p_h.expand(self.grid_shape).contiguous()
 
     @torch.no_grad()
     def _apply_gravity_body_force(self, *vels):
-        """Add ``dt * g`` to each velocity component (predictor-side
-        forward-Euler body force).  Called inside ``step_`` right before
-        ``fluid_step`` so the projection can balance it through the
-        Poisson solve.
+        """Predictor-side gravity body force, applied inside ``step_`` right
+        before ``fluid_step`` so the projection can balance it.
 
-        MAC-staggered: ``u`` is on x-faces, ``v`` on y-faces, etc.  A
-        uniform gravity vector adds the same constant to every face on the
-        corresponding component grid; this is consistent with the
-        cell-centred pressure projection that follows.
+        Legacy path (default; variable-density / two-phase): add the uniform
+        ``dt*g`` to every face (``u`` on x-faces, ``v`` on y-faces, ...),
+        consistent with the cell-centred projection that follows.
+
+        Well-balanced path (``self._wb_gravity``, single-phase uniform
+        density): add ``dt*g - (dt/rho)*∇p_h`` instead.  The analytic
+        ``∇p_h = rho*g`` cancels the body force in the INTERIOR to machine
+        precision, so the Poisson never sees the stiff hydrostatic gradient
+        and produces no spurious flow.  Boundary faces (where the
+        backward-difference ``∇p_h`` is zeroed, exactly as in the
+        projection's correction) keep the legacy ``dt*g`` and are governed
+        by the BCs -- i.e. boundary behaviour is unchanged.
         """
         if not self.use_gravity:
             return vels
+        dt = float(self.dt)
+        if not self._wb_gravity:
+            out = []
+            for vel, g_comp in zip(vels, self._gravity):
+                if g_comp != 0.0:
+                    vel.add_(dt * g_comp)           # in-place
+                out.append(vel)
+            return tuple(out)
+        # ---- well-balanced (hydrostatic-split) gravity ----
+        c = dt / float(self.rho)
         out = []
-        for vel, g_comp in zip(vels, self._gravity):
+        for vel, g_comp, ph_g in zip(vels, self._gravity, self._ph_grad):
             if g_comp != 0.0:
-                vel.add_(float(self.dt) * g_comp)   # in-place
+                vel.add_(dt * g_comp)               # body force
+                vel.sub_(c * ph_g)                  # subtract hydrostatic ∇p_h
             out.append(vel)
         return tuple(out)
 
@@ -2399,6 +2486,18 @@ class FluidSolver(PlottingMixin):
             else:
                 u, v, w_vel = self._apply_gravity_body_force(u, v, w_vel)
 
+        # NOTE (well-balanced gravity): the Poisson now solves only the DYNAMIC
+        # pressure ``p_d`` (the analytic hydrostatic ``p_h`` is pre-balanced out
+        # of the predictor).  The body-force readout deliberately uses ``p_d``
+        # alone -- exactly as the no-gravity reference does -- so it carries the
+        # dynamic load (thrust / form drag / added mass) WITHOUT the hydrostatic
+        # baseline.  Adding ``p_h`` back here would feed the large hydrostatic
+        # head through the discretely non-gauge-invariant band quadrature
+        # ``Σ -p n δ_ε`` and leak a spurious horizontal force (verified: it
+        # reverses the single-phase swim).  Buoyancy is the rigid-body
+        # integrator's concern (external Archimedes / MuJoCo), unchanged from
+        # the no-gravity case.  Physical pressure, if ever needed for plotting,
+        # is ``p_d + self.p_h``.
         if self.ndim == 2:
             (u, v, p) = self.fluid_step(u, v, p, self.dt)
             if self.zero_pressure_inside:

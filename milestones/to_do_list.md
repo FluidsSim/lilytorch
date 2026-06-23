@@ -11,7 +11,7 @@ Memory vars: `sdf_val_{u,v,w}`, `{u,v,w,p}0`, `n{x,y,z}_{u,v,w}`, `body_{u,v,w}`
 
 # HIGH PRIORITY
 
-HP5. **Conservative momentum transport CUDA kernel for two-phase solver** (2026-06-18).
+<!-- HP5. **Conservative momentum transport CUDA kernel for two-phase solver** (2026-06-18).
 
   **Motivation (REVISED 2026-06-18).**  The non-conservative two-phase VOF
   transport was thought to be stable only to ~100:1 density ratio, but testing
@@ -71,7 +71,7 @@ HP5b. **Diagnose two-phase surface speed bias** (2026-06-18 — investigation in
   Same thrust, ~30% less drag → faster.  This is **physically correct**
   for a surface swimmer — the question is whether +47% (0.15→0.22) is the
   right magnitude, or whether additional mechanisms (free-surface pressure
-  release reducing confinement) are also contributing.
+  release reducing confinement) are also contributing. -->
 
   **Agent TODO — isolate the mechanism:**
   1. ~~Fix config typo~~ ✅ DONE (2026-06-18): `"converved_momentum"` →
@@ -186,45 +186,6 @@ HP6. **Discretely gauge-invariant two-phase band force** (the live force-readout
   was DELETED/superseded by this brief.
   Constraint: confine to `two_phase*.py` / validation (no `forces.py`/`solver.py`/
   `body.py` edits — see `feedback-no-core-source-for-two-phase`).
-
-HP3. **Polish repo & docs** — review/correct outdated documentation, including `docs/`.
-  * (2026-06-18) Added status note to `docs/solver_bdim_merge_proposal.md`
-    (SU2 done, proposal remains valid long-term direction).
-  * (2026-06-18) `docs/memory_analysis.md` reviewed — still current.
-  * (2026-06-18) `docs/two_phase.rst` reviewed — consistent with implementation.
-  * (2026-06-23) **Stale `adv_diff.py` references purged** (the module was
-    deleted 2026-06-05 → `advection.py` + `diffusion.py`): removed `api/adv_diff`
-    from the `index.rst` toctree, deleted `docs/api/adv_diff.rst`, fixed the
-    `README.md` module table (added `advection.py`/`diffusion.py`/`two_phase*`/
-    `free_surface_solver` rows) and the `getting_started.rst` project-layout tree.
-    NOTE: `compile_adv_diff` in `parameters.rst`/`numerical_schemes.rst` is the
-    live config-key name (NOT stale). `docs/_build/html/` regenerated via
-    `make html`.
-  * (2026-06-23) **One-fluid free-surface section added** — new
-    "One-fluid free surface (experimental)" section in `docs/two_phase.rst`
-    (`_one_fluid_free_surface` label) documenting `FreeSurfaceSolver` +
-    `poisson_gfm` with an honest status warning (statics validated, explicit
-    wave mode not production-stable, use `TwoPhaseSolver` for quantitative work);
-    added autodoc stubs for `free_surface_solver` (api/two_phase.rst) and
-    `poisson_gfm` (api/poisson.rst) so the cross-refs resolve.
-  * (2026-06-23) **README/getting_started stale-ref sweep** — added the missing
-    `farms_amphibious` row to the README FARMS-submodule table (prose already
-    said "Four"); `xfrc_applied` claim verified correct for the FARMS path
-    (the `qfrc_applied`/`mj_applyFT` pitfall is viewer-specific). `extras.py`
-    references confirmed valid (file exists).
-  * (2026-06-23) **`native_body_colors` → `body_color_override` rename fixed**
-    (caught by the Sphinx build — file renamed, nothing imports the old name):
-    updated `api/integration.rst` automodule, `getting_started.rst` layout, and
-    the README integration table.
-  * (2026-06-23) **Two docstring rendering bugs fixed** (surfaced by the build):
-    `two_phase_solver.advance_and_compute_loads` had a bare `|sdf|` parsed as an
-    RST substitution (wrapped sdf expressions in double backticks); the
-    `TwoPhase` class docstring had prose trailing the numpydoc Parameters block
-    (moved under a `Notes` section).
-  * (2026-06-23) **`make html` now builds with ZERO warnings** (was 4) — all new
-    cross-refs (`_one_fluid_free_surface`, `FreeSurfaceSolver`, `poisson_gfm`)
-    resolve; autodoc imports `free_surface_solver` + `poisson_gfm` cleanly.
-  * **HP3 COMPLETE** for all known items.
 
 HP4. ~~**Stabilise the one-fluid GFM free surface** (handoff 2026-06-17).~~
   **CANCELLED / REMOVED 2026-06-23.** The one-fluid free-surface method
@@ -767,13 +728,13 @@ TI1. **No CI, no test aggregation.** There is no `.github/`, no `conftest.py`,
   workflow running the CPU-path parity oracles on push. Enabler for trusting the
   refactor-heavy `optimize_speed_memory` branch. NOTE: kernel parity tests need a
   built `_C.so` matching the runtime torch — gate or build-in-CI accordingly.
-TI2. **Repo-root clutter / un-ignored diag output.** Working tree carries untracked
-  scratch: `_submerged_diag/` (dozens of `force_*.csv`), `_flip_diag/`,
-  `_overlap_study/`, plus `_overlap_diag.py`/`_region_diag.py` and several root
-  `run_*.py`. Per `feedback-plots-in-ns-data`, sim outputs belong in
-  `/data/andreaferrario/ns_data/`, not the repo. Add `.gitignore` rules for the
-  `_*_diag/` output dirs (keep the harness scripts) and relocate or git-ignore the
-  CSV dumps so `git status` stays readable.
+TI2. ~~**Repo-root clutter / un-ignored diag output.**~~ ✅ DONE (2026-06-23).
+  The scratch dirs/CSV dumps (`_submerged_diag/`, `_flip_diag/`, `_overlap_study/`,
+  root `run_*.py`) were already relocated/dropped in commit `bbdaa4d` ("Repo tidy").
+  Remaining preventative half done: added directory-only `.gitignore` rules
+  `_*_diag/` and `_*_study/` (trailing slash => the `_overlap_diag.py`/`_region_diag.py`
+  harness scripts stay tracked; the in-dir `force_*.csv` dumps are covered without
+  touching the deliberately-commented `# *.csv` rule). Verified with `git check-ignore`.
 
 ---
 
@@ -792,11 +753,27 @@ speaks MuJoCo directly (`data.xpos/xquat/xipos`, `model.body_mass`, `geom_*`,
   - swimmer controllers (CPG networks, PD controllers).
   - the viewers (all `import farms` for the MuJoCo viewer).
 
-AP1. [ ] **Define a `RigidBodyBackend` adapter** = the only surface BDIMhandler needs:
-      `get_body_poses() -> pos,quat,com`, `get_body_velocities()`,
-      `get_body_mass_inertia()`, `apply_force_torque(body,F,T)`, `step(dt)`, `gravity`.
-      Refactor BDIMhandler's ~10 MuJoCo-specific access sites behind it.
-      **This single refactor both decouples FARMS and enables Isaac.** Do it FIRST.
+AP1. [x] ✅ **`RigidBodyBackend` adapter — DONE (2026-06-23).** New module
+      `lilytorch/integration/rigid_body_backend.py`: `RigidBodyBackend` ABC +
+      `FarmsMujocoBackend` impl + relocated `MujocoCheckpoint` (re-exported from
+      BDIMhandler as `_MujocoCheckpoint` for the existing checkpoint test). The
+      adapter surface: `get_body_poses_velocities(source,iteration)`,
+      `get_body_mass_radius`, `apply_xfrc`, `gravity_z`, `set_contact_params`,
+      `checkpoint()`, `bind_step(task,physics)`. ALL MuJoCo/FARMS access (the
+      ~16 `physics.*` + `task.maps`/`task.units` sites: pose/velocity reads both
+      sensors+physics paths, mass/rbound, gravity, contact tuning, xfrc force
+      write, implicit-coupling checkpoint) moved behind it; BDIMhandler keeps the
+      coupling logic (2-D slicing consumers, buoyancy formula, force scaling/
+      relaxation, IQN-ILS loop). Behavior-preserving: net −116 lines in
+      BDIMhandler; `git grep physics.model|physics.data|task.units|task.maps`
+      in BDIMhandler now empty. **Verified:** 21/21 integration regression tests
+      identical to baseline (pose-source, checkpoint, strong/fsi coupling, all
+      update parities); focused bit-identical unit check of apply_xfrc/
+      get_body_mass_radius/gravity/contact vs the original inline formulas;
+      both gather paths confirmed logic-identical to git HEAD by normalized diff.
+      Core source (solver/forces/body) untouched. (Full live `_1guillasim`
+      coupled smoke not run — heavyweight/needs display; recommended as manual
+      belt-and-suspenders before merge.) ⇒ unblocks AP2/AP3/AP5.
 AP2. [ ] **MuJoCo backend** implementing the adapter from raw `mujoco.MjModel/MjData`
       (or dm_control `Physics`) — no FARMS dependency.
 AP3. [ ] **Standalone driver loop** (~100 lines): load model, step physics, call

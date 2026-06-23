@@ -113,7 +113,7 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " Tensor u, Tensor v, Tensor w, Tensor p,"
         " Tensor nu_rho_field,"
         " float eps_body, float eps_solver, float h3,"
-        " int delta_order,"
+        " int delta_order, int force_submethod, float ph_tau,"
         " Tensor(a!) out"
         ") -> ()");
 
@@ -255,7 +255,7 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " Tensor u_prev, Tensor v_prev, Tensor p_prev,"
         " Tensor nu_rho_field,"
         " float eps_body, float eps_solver, float h2,"
-        " int delta_order,"
+        " int delta_order, int force_submethod, float ph_tau,"
         " Tensor(a!) out"
         ") -> ()");
 

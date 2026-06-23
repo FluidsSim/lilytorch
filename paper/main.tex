@@ -64,12 +64,17 @@ fast-marching), handles per-link articulated kinematics, and offers a
 choice of spectral (DCT / free-space Green's function) or
 variable-coefficient multigrid pressure-projection solvers.  Optional
 Smagorinsky large-eddy closure, Carreau / Herschel--Bulkley
-non-Newtonian rheology, and a sponge damping layer extend the solver to
-a range of bio- and soft-robotic scenarios.  Because the complete
-pipeline (advection--diffusion, projection, BDIM, force integration) is
-expressed in \pytorch tensors, every hot kernel is JIT-compiled via
-\texttt{torch.compile} and runs on a single GPU without domain
-decomposition.  We describe the continuous and discrete formulations,
+non-Newtonian rheology, a two-phase volume-of-fluid free-surface model
+for floating and surface-piercing robots, and a sponge damping layer
+extend the solver to a range of bio- and soft-robotic scenarios.
+Because the complete pipeline (advection--diffusion, projection, BDIM,
+force integration) is expressed in \pytorch tensors, every hot kernel
+is JIT-compiled via \texttt{torch.compile} or executed by hand-written
+fused CUDA kernels, and runs on a single GPU without domain
+decomposition.  A union bounding-box optimisation for articulated
+bodies and a gauge-consistent force readout for high-density-ratio
+free-surface flows are introduced to keep the coupled simulation both
+fast and physically faithful.  We describe the continuous and discrete formulations,
 detail how rigid, articulated, and mesh bodies are integrated with
 \mujoco, and discuss the implications of the proposed coupling for
 embodied studies of aquatic locomotion.
@@ -379,7 +384,8 @@ $\rho(\mathbf x)=\rho_b+(\rho_f-\rho_b)\mu_0(\mathbf x)$ and face
 coefficients $c=\Delta t/\rho$ directly on the MAC faces.  This
 coupled variable-density operator departs from the single-density
 BDIM form of \waterlily and is therefore solved exclusively by the
-multigrid path.
+multigrid path; the same machinery drives the two-phase free-surface
+model of §\ref{sec:two-phase}.
 
 
 \subsection{Body representation: analytical vs mesh}\label{sec:bodies}
@@ -493,6 +499,92 @@ emulates an infinite far-field at a fraction of the cost of
 perfectly-matched layers.
 
 
+\subsection{Two-phase free-surface flows}\label{sec:two-phase}
+
+Surface-piercing and floating robots require resolving the air--water
+interface.  \lilytorch implements a one-fluid, variable-density model
+in which a volume-of-fluid (VOF) colour field
+$\alpha(\mathbf x,t)\!\in\![0,1]$ tracks the water fraction of each
+cell~\cite{hirt1981volume,harlow1965numerical}.  The interface is
+transported by the same high-resolution advection scheme used for the
+momentum equations,
+\begin{equation}
+  \partial_t\alpha+\nabla\!\cdot(\alpha\,\mathbf u)=0,
+  \label{eq:vof}
+\end{equation}
+and the cell density and viscosity follow the linear blend
+$\rho(\alpha)=\alpha\rho_w+(1-\alpha)\rho_a$ and
+$\nu(\alpha)=\alpha\nu_w+(1-\alpha)\nu_a$, supporting water-to-air
+ratios up to $\rho_w/\rho_a\!\approx\!10^3$.
+
+\paragraph{Variable-density projection}
+With a spatially varying density the projection~\eqref{eq:poisson}
+becomes genuinely variable-coefficient: the face coefficient
+$c=\Delta t/\rho_\mathrm{face}$ takes the \emph{harmonic} mean of the
+two cell densities straddling each MAC face, which keeps the discrete
+Laplacian symmetric positive-definite and well-balanced across the
+$10^3{:}1$ density jump.  Because the spectral back-ends assume a
+constant coefficient, two-phase flows are solved exclusively by the
+multigrid / MGCG path (§\ref{sec:poisson}).  This stiff,
+high-contrast operator is the single most expensive component of a
+two-phase step, motivating the solver accelerations of
+§\ref{sec:native}.
+
+\paragraph{Emergent buoyancy}
+Rather than adding an analytic Archimedes term, the body load is read
+directly from the variable-density pressure integrated over the BDIM
+band: the hydrostatic gradient across the immersed body yields the
+buoyant force, so a body whose mean density is below $\rho_w$ rises and
+one above it sinks with no explicit buoyancy model.  Floating
+equilibria and draft therefore become an \emph{emergent} property of
+the coupled simulation, which is essential for free-floating surface
+robots whose waterline is not known a priori.
+
+\paragraph{Air-transparent immersion}
+At the air--water--body triple line the BDIM mask is gated by the local
+water fraction so that the body is immersed only on the water side of
+the interface.  This avoids a ``half-present'' body zone at the
+waterline --- a known source of spurious pressure noise and instability
+at high density ratios --- and reflects the physical fact that air
+loads on the body are $\sim\!10^3\times$ smaller than water loads.
+
+\paragraph{Gauge-consistent force readout}
+The mollified surface integral
+$\mathbf F_\mathrm{pres}=-\!\int p\,\hat{\mathbf n}\,
+\delta_\varepsilon\,\mathrm dV$ of §\ref{sec:bdim} is only
+\emph{discretely} gauge-invariant when
+$\sum\hat{\mathbf n}\,\delta_\varepsilon=0$.  On a coarsely-resolved or
+articulated body this discrete surface defect is non-zero, so the
+\emph{large} hydrostatic baseline $\rho_w g H$ leaks into a spurious
+horizontal force that grows linearly with submergence depth ---
+negligible in single-phase flow (dynamic pressure $\sim\!10$\,Pa) but
+dominant once gravity and a free surface are present.  We remove the
+leak by replacing the separately-formed normal/Dirac weight
+$\hat n_i\delta_\varepsilon$ with the discrete gradient of the smooth
+Heaviside~\eqref{eq:mu0}, $\partial_i H_\varepsilon$, where
+$H_\varepsilon$ is the exact antiderivative of $\delta_\varepsilon$:
+\begin{equation}
+  F_{\mathrm{pres},i}=-\!\sum p\,\partial_i H_\varepsilon(d)\,h^{D},
+  \label{eq:dH}
+\end{equation}
+with $D$ the spatial dimension.  This obeys a discrete
+summation-by-parts identity
+$\sum p\,\partial_i H_\varepsilon=-\sum(\partial_i p)\,H_\varepsilon$,
+so a purely hydrostatic field ($\partial_x p=0$) gives $F_x\!\to\!0$
+exactly while the vertical buoyancy ($\partial_z p=\rho g$) is
+retained.  For an articulated body the weight is evaluated on the
+\emph{union} SDF --- one closed surface, free of the spurious internal
+seams between abutting links --- and the resulting force density is
+distributed back to the individual links by a softmin partition of
+unity $w_b=\mathrm{softmax}(-d_b/\tau)$, $\tau{=}1.5h$, so that
+$\sum_b\mathbf F_b$ equals the union force exactly while each link
+still receives a force and torque for \mujoco.  On a static submerged
+sphere the readout recovers $F_z/F_\mathrm{Archimedes}\!\approx\!1$
+with a horizontal force at machine zero, and on the 9-link swimmer it
+removes the depth-dependent hydrostatic bias of the baseline
+$\hat{\mathbf n}\delta_\varepsilon$ quadrature.
+
+
 \subsection{Implementation and GPU kernel fusion}\label{sec:impl}
 
 The solver is written in approximately 10\,k lines of Python on top
@@ -565,6 +657,51 @@ $256{\times}64{\times}64$ ($2.8\times$) and from 8.4 to
 3.4\,ms at $512{\times}128{\times}128$ ($2.5\times$); hydrodynamic
 forces speed up by $\sim\!2.3\times$ and the BDIM meta-equation by
 $6$--$11\times$ across the swept grid sizes.
+
+
+\subsection{Native kernels and memory footprint}\label{sec:native}
+
+While \texttt{torch.compile} fuses the static-shape kernels, the most
+launch- and bandwidth-sensitive operators are additionally provided as
+hand-written CUDA/C++ extensions that interoperate zero-copy with the
+\pytorch tensors and are selected by a configuration flag.
+
+\paragraph{Fused streaming and advection}
+For rigid articulated bodies the entire per-step body update --- grid
+rotation, SDF staggering, the $\mu_0/\mu_1$ and normal fields, and the
+BDIM2 meta-equation~\eqref{eq:bdim} --- is executed by a single
+streaming kernel over the union AABB of
+§\ref{sec:union-narrow-band}.  Likewise, the advection--diffusion flux
+is fused into one kernel that accumulates the right-hand side in place;
+this eliminates roughly four full-grid temporaries per directional flux
+evaluation and runs $3.5$--$3.9\times$ faster than the equivalent
+\pytorch expression graph at $128^3$.
+
+\paragraph{Register-resident kernels reduce peak memory}
+On the \pytorch path the transient $\mu_0/\mu_1$ and normal fields
+dominate the peak memory --- about $5.7$\,GiB at our largest 3-D
+configuration, residing in the $\mu$/normals recomputation rather than
+in the velocity or pressure state.  The native streaming kernel
+evaluates these quantities in registers and never materialises them as
+full-grid tensors, removing that peak entirely; combined with the
+union-AABB cropping, which bounds the working set to the occupied
+sub-block $N_\cup\!\ll\!N$, this keeps the largest articulated 3-D runs
+within a single 16\,GiB device.
+
+\paragraph{Accelerating the stiff projection}
+Because the variable-density two-phase operator
+(§\ref{sec:two-phase}) can account for $\sim\!75\%$ of a step, the
+projection carries several optional accelerations.  Wrapping the
+multigrid V-cycle in a conjugate-gradient iteration (MGCG) roughly
+halves the solve on the anisotropic production grid (e.g.\
+$505\!\to\!234$\,ms per solve at $900{\times}300{\times}52$,
+$2.2\times$), as the outer CG compensates for the weak V-cycles when
+the cells are far from isotropic.  A recycled-Krylov (deflated MGCG)
+variant reuses approximate near-null-space vectors across steps and
+helps further where the smoother stalls, and for small grids dominated
+by launch overhead the entire native solve is captured as a single
+CUDA graph.  All variants are bit-compatible with the plain multigrid
+path.
 
 
 % =====================================================================
@@ -671,10 +808,14 @@ sedimentation benchmarks.
 
 \subsection{Limitations and outlook}
 
-At present \lilytorch is limited to uniform Cartesian grids and
-single-phase flow; free-surface extensions through a volume-of-fluid
-or level-set approach, and local grid refinement through an AMReX
-back-end, are natural next steps.  Adaptive time stepping is
+At present \lilytorch is limited to uniform Cartesian grids; local
+grid refinement through an AMReX back-end is a natural next step.  The
+two-phase volume-of-fluid model (§\ref{sec:two-phase}) resolves
+floating and surface-piercing bodies, but the $10^3{:}1$ density ratio
+still constrains the interface sharpness and the wave-drag resolution
+attainable at a given grid spacing; a sharper geometric-VOF or coupled
+level-set interface would improve quantitative surface-swimming
+predictions.  Adaptive time stepping is
 currently manual and could be automated from the flow diagnostics
 already tracked by the solver (kinetic energy, enstrophy, max-CFL,
 max-divergence).  On the robotics side, a tighter integration of the

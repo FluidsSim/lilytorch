@@ -192,6 +192,12 @@ class BaseSimConfig:
         self.dtype                   = None
         self.zero_pressure_inside    = None
         self.force_method            = None
+        # Eulerian pressure-force readout sub-method: None → solver default
+        # ("ndelta", F=-Σ p·n·δ_ε).  "deltaH" = partial-Heaviside readout
+        # (union-∂H force density split to bodies by a softmin partition of
+        # unity, τ = force_ph_blend_cells·h); seam-free / hydrostatic-leak-free.
+        self.force_submethod         = None
+        self.force_ph_blend_cells    = None   # None → solver default (1.5)
         # Distance (units of length) to offset the sample point from the
         # body surface along the outward normal when integrating
         # Lagrangian surface forces.  0 (default) samples exactly at the
@@ -857,6 +863,8 @@ class BaseSimConfig:
             ("dtype",                   self.dtype),
             ("zero_pressure_inside",    self.zero_pressure_inside),
             ("force_method",            self.force_method),
+            ("force_submethod",         self.force_submethod),
+            ("force_ph_blend_cells",    self.force_ph_blend_cells),
             ("lagrangian_sample_offset", self.lagrangian_sample_offset),
             ("body_velocity_blend_eps_cells", self.body_velocity_blend_eps_cells),
             ("time_integration",        self.time_integration),

@@ -165,18 +165,24 @@ def streaming_sdf_forces_post_3d(
         nu_rho_field: Tensor,
         eps_body: float, eps_solver: float, h3: float,
         delta_order: int,
-        out: Tensor) -> None:
+        out: Tensor,
+        force_submethod: int = 0, ph_tau: float = 0.0) -> None:
     """3-D Phase D only: current-union-normal force integration.
 
     Reuses the streamed body metadata and current union SDF produced by the
     update stage, but consumes the current post-fluid-step fields.
+
+    ``force_submethod``: 0 = n·δ (default), 1 = partial-Heaviside ∂H readout
+    (union-∂H pressure force density split to bodies by a softmin partition of
+    unity with temperature ``ph_tau``).
     """
     return torch.ops.lilytorch_kernels.streaming_sdf_forces_post_3d.default(
         F_flat, F_offsets, body_shapes, body_meta, kin, aabb_lo, aabb_dim,
         gx, gy, gz, float(h_grid), int(max_vol_per_body),
         sdf_cc, int(interp_method),
         u, v, w, p, nu_rho_field,
-        float(eps_body), float(eps_solver), float(h3), int(delta_order), out,
+        float(eps_body), float(eps_solver), float(h3), int(delta_order),
+        int(force_submethod), float(ph_tau), out,
     )
 
 
@@ -320,11 +326,16 @@ def streaming_sdf_forces_post_2d(
         nu_rho_field: Tensor,
         eps_body: float, eps_solver: float, h2: float,
         delta_order: int,
-        out: Tensor) -> None:
+        out: Tensor,
+        force_submethod: int = 0, ph_tau: float = 0.0) -> None:
     """2-D Phase D only: current-union-normal force integration.
 
     Reuses the streamed body metadata and current union SDF produced by
     the update stage, but consumes the current post-fluid-step fields.
+
+    ``force_submethod``: 0 = n·δ (default), 1 = partial-Heaviside ∂H readout
+    (union-∂H pressure force density split to bodies by a softmin partition of
+    unity with temperature ``ph_tau``).
     """
     return torch.ops.lilytorch_kernels.streaming_sdf_forces_post_2d.default(
         F_flat, F_offsets,
@@ -336,6 +347,7 @@ def streaming_sdf_forces_post_2d(
         u_prev, v_prev, p_prev,
         nu_rho_field,
         float(eps_body), float(eps_solver), float(h2), int(delta_order),
+        int(force_submethod), float(ph_tau),
         out,
     )
 

@@ -105,6 +105,9 @@ def assert_gather_data_sources_agree(handler, task, physics, atol=1e-6):
     """
     handler._task = task
     handler._physics = physics
+    # The MuJoCo/FARMS access now lives behind the rigid-body backend (AP1);
+    # bind the live task/physics there so the "physics" pose source reads them.
+    handler._backend.bind_step(task, physics)
 
     handler._pose_source = "sensors"
     s_com, s_urdf, s_R, s_lin, s_ang = handler.gather_data(handler.iteration)

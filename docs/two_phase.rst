@@ -102,18 +102,43 @@ legacy and **unused** by this conservative scheme.)
 Buoyancy & body loads
 ----------------------
 
-The naive surface-pressure integral :math:`\oint -p\,\mathbf n\,dS` cannot
-extract the small buoyancy from the *large* hydrostatic pressure
-(:math:`\rho_w g H`): the smoothed-delta discretisation suffers catastrophic
-cancellation. Instead the buoyancy is taken **analytically from the displaced
-fluid** (gauge-robust),
+Buoyancy is **emergent**: rather than adding an analytic displaced-volume term,
+:meth:`~lilytorch.src.two_phase_solver.TwoPhaseSolver._two_phase_forces`
+integrates the *real* variable-density pressure over the BDIM band, so the
+hydrostatic gradient across the body yields the buoyant load (and the dynamic
+load) directly, alongside the viscous stress from the inherited routine. The
+challenge is that this band integral must stay gauge-robust — the small buoyancy
+sits on a *large* hydrostatic baseline (:math:`\rho_w g H`) — which is exactly
+what the partial-Heaviside readout below addresses.
 
-.. math::
+Partial-Heaviside (:math:`\partial H`) pressure readout
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-   \mathbf F_{\text{buoy}} = -\,\mathbf g \int \rho_{\text{fluid}}\,(1-\mu_0)\,dV ,
+When the body loads *are* read from the pressure field (the eulerian path,
+``force_method = "eulerian"``), the per-body smoothed-delta quadrature
+:math:`-\sum p\,\mathbf n\,\delta_\varepsilon(\phi_b)` is only gauge-invariant
+if the discrete :math:`\sum \mathbf n\,\delta_\varepsilon = 0`; on a coarsely
+resolved or articulated body it is not, so the large hydrostatic baseline leaks
+into a spurious force that is **linear in depth** (and, on a multi-link body,
+also surfaces at the internal inter-link seams).
 
-and the viscous stress from the inherited routine. See
-:meth:`~lilytorch.src.two_phase_solver.TwoPhaseSolver._displaced_buoyancy`.
+Setting ``force_submethod = "deltaH"`` switches the pressure readout to the
+**partial-Heaviside** form :math:`-\sum p\,\partial_i H_\varepsilon`, where the
+force density is the discrete gradient of the smooth Heaviside of the
+**union** SDF — one closed surface with *no* internal seams. This obeys
+summation-by-parts (:math:`\sum \partial_i H_\varepsilon = 0` discretely), so
+the hydrostatic baseline cancels exactly and a static submerged body recovers
+:math:`F_z/F_{\text{Arch}} \approx 1` with a seam-free, depth-independent
+horizontal force. The union force is redistributed to the individual links by a
+softmin partition of unity :math:`w_b = \mathrm{softmax}(-\phi_b/\tau)`
+(:math:`\tau = \texttt{force\_ph\_blend\_cells}\cdot h`), so
+:math:`\sum_b \mathbf F_b` equals the union force exactly while each link still
+receives its own force and torque. Viscous loads are unchanged. The readout is
+implemented directly in the native CUDA/CPU force kernels (2-D and 3-D) and is
+bit-matched to the python reference
+:meth:`~lilytorch.src.two_phase_solver.TwoPhaseSolver._apply_partition_heaviside`;
+see ``lilytorch/validation/two_phase_3d/band_treatment_check.py``. It is the
+recommended readout for surface-straddling and multi-link swimmers.
 
 .. note::
 

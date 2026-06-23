@@ -63,6 +63,8 @@ class TwoPhase:
     rho_water, rho_air : float -- phase densities (default 1000 / 1).
     nu_water, nu_air : float -- phase kinematic viscosities.
 
+    Notes
+    -----
     The face material coefficient is the **harmonic** density mean (Weymouth &
     Yue 2011, Eq. 33) — the standard, well-conditioned choice for the
     variable-density pressure Poisson. It is carried as the reciprocal density
@@ -70,7 +72,7 @@ class TwoPhase:
     the harmonic density mean is the *arithmetic* mean of ``1/rho`` and the
     projection coefficient ``dt*mu0/rho`` only ever needs the reciprocal.
 
-    Note: the interface scheme is the hardwired Weymouth & Yue conservative
+    The interface scheme is the hardwired Weymouth & Yue conservative
     VOF (:meth:`advect`); there is no scheme/compression choice to make.
     """
 

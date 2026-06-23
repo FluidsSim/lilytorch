@@ -147,7 +147,9 @@ self.sponge = {
 |---|---|
 | `solver.py` | Main `FluidSolver` class implementing the BDIM2 Navier–Stokes solver: grid setup, Heun / Euler time stepping, pressure projection, IBM forcing, force computation on immersed bodies, sponge / Carreau / Smagorinsky / yield-damping dispatchers. |
 | `body.py` | Immersed body representation via SDFs. Only composite bodies are user-facing: `body_from_yaml()` accepts the `composite_analytical` and `composite_mesh` body types, which wrap the internal `BodyAnalytical`, `BodyMesh`, `BodyFishAnalytical`, and `BodyFishExperimental` building blocks into multi-link articulated models. |
-| `adv_diff.py` | Advection–diffusion solver for velocity transport. Supports implicit / explicit / QUICK / ABDQUICKEST / Adams–Bashforth schemes with Dirichlet / Neumann BCs. Optional Smagorinsky LES and Carreau non-Newtonian eddy-viscosity fields. |
+| `advection.py` | Dimension-agnostic advection on the MAC grid: pluggable convective schemes (QUICK, ABDQUICKEST, CUBISTA, van Leer, CDS, semi-Lagrangian), the flux assembler, and the `AdvDiffSolver` orchestrator (composes `diffusion.py`). `advect_scalar` is reused by the two-phase VOF transport. |
+| `diffusion.py` | Pure constant- and variable-coefficient (harmonic-mean) diffusion Laplacians + the forward-Euler `diffuse` increment, composed by `AdvDiffSolver`. |
+| `two_phase.py` / `two_phase_solver.py` | Two-phase water–air free surface: `TwoPhase` (VOF interface + blended density/viscosity fields) and `TwoPhaseSolver` (variable-density projection subclass of `FluidSolver`). See `docs/two_phase.rst`. |
 | `forces.py` | Hydrodynamic force / torque integrators (`forces_method1`, `forces_method2`, `forces_method2_3d`, plus the compiled / batched variants `_forces_shared_*`, `_forces_body_batch_*`). |
 | `extras.py` | Optional add-on physics: sponge layer, Smagorinsky LES, Carreau / Herschel-Bulkley, yield-stress damping, and the unified `_compute_nu_t` / `_compute_nu_rho_for_forces` dispatchers. |
 | `operations.py` | Stencil-level operators — gradients, divergence, vorticity, normal derivative, strain-rate magnitude, etc. |
@@ -168,7 +170,7 @@ self.sponge = {
 | `flow_viewer.py`, `flow_viewer_2d.py` | `FlowViewer` — FARMS `TaskExtension` that renders fluid fields (vorticity, pressure, velocity) as coloured spheres (3-D) or 2-D tiles directly inside the MuJoCo viewer. See [FlowViewer](#flowviewer--in-viewer-flow-visualisation). |
 | `flow_viewer_2d_gpu.py` | GPU-accelerated 2-D flow overlay that uploads the field directly from CUDA tensors to an OpenGL texture, avoiding the CPU round-trip used by `flow_viewer_2d.py`. |
 | `flow_viewer_gl_hook.py` | `LD_PRELOAD` OpenGL interception shim (Python wrapper around an embedded C source) that injects flow textures into MuJoCo's passive viewer when the standard `user_scn` path is not available. |
-| `particle_viewer.py`, `native_body_colors.py`, `camera.py` | Viewer extras — Lagrangian particle-tracer overlay, per-body colouring, camera controllers. |
+| `particle_viewer.py`, `body_color_override.py`, `camera.py` | Viewer extras — Lagrangian particle-tracer overlay, per-body colouring, camera controllers. |
 | `gamepad.py` | Optional interactive gamepad controller (incl. paddling mode) for steering coupled simulations live. |
 | `gen_pool_sdf.py` | Generates SDF XML files defining rectangular pool arenas with collision walls for MuJoCo. |
 | `fsi_coupling.py` | preCICE-style interface accelerators for strong (implicit) FSI coupling: `ConstantUnderRelaxation`, `AitkenRelaxation`, `IQNILS` (quasi-Newton). |
@@ -257,6 +259,7 @@ Four git submodules from [farmsim](https://github.com/farmsim), pinned to the `a
 | `farms_core` | Core framework: simulation options, sensor conventions, data structures, extensions API. |
 | `farms_mujoco` | MuJoCo backend: physics simulation, task management, swimming/drag handlers. |
 | `farms_sim` | Simulation launcher: `setup_from_clargs()`, `run_simulation()`. |
+| `farms_amphibious` | Amphibious animat models, CPG controllers, and amphibious task options. |
 
 ## Installation
 
