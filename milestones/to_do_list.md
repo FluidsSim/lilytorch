@@ -771,9 +771,11 @@ AP1. [x] ✅ **`RigidBodyBackend` adapter — DONE (2026-06-23).** New module
       update parities); focused bit-identical unit check of apply_xfrc/
       get_body_mass_radius/gravity/contact vs the original inline formulas;
       both gather paths confirmed logic-identical to git HEAD by normalized diff.
-      Core source (solver/forces/body) untouched. (Full live `_1guillasim`
-      coupled smoke not run — heavyweight/needs display; recommended as manual
-      belt-and-suspenders before merge.) ⇒ unblocks AP2/AP3/AP5.
+      Core source (solver/forces/body) untouched. **Live 3-D coupled smoke RUN
+      (2026-06-23):** 1guilla 3-D pinned, 128×32×16 isotropic, 5 steps, headless
+      via the real FARMS→FluidExtension→BDIMhandler→backend pipeline — exit 0,
+      `FarmsMujocoBackend.apply_xfrc` confirmed invoked per step on the 9-link
+      eel (env-gated probe), no errors. ⇒ unblocks AP2/AP3/AP5.
 AP2. [ ] **MuJoCo backend** implementing the adapter from raw `mujoco.MjModel/MjData`
       (or dm_control `Physics`) — no FARMS dependency.
 AP3. [ ] **Standalone driver loop** (~100 lines): load model, step physics, call
