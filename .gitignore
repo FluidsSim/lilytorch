@@ -62,6 +62,9 @@ output/
 Output/
 .pytest_cache/
 
+# Generated Sphinx documentation output (rebuild with `make html`)
+docs/_build/
+
 precice_coupling/
 
 # OpenFOAM generated files (do NOT commit)

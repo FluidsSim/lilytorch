@@ -1,152 +1,0 @@
-farms_muscle not installed
-PositionController: joints_names=['joint_body_00', 'joint_body_01', 'joint_body_02', 'joint_body_03', 'joint_body_04', 'joint_body_05', 'joint_body_06', 'joint_body_07']
-  0%|          | 0/300 [00:00<?, ?it/s]  0%|          | 1/300 [00:02<14:45,  2.96s/it][BodyColorOverride] Painted 18 geoms with [0.8156863  0.62352943 0.13725491 1.        ].
-[FluidExtension] overriding bdim_yaml.solver.nt (301) with runtime.n_iterations (300).
-Using GPU: NVIDIA GeForce RTX 4080 SUPER is available.
-Using dtype: torch.float32
-Using the quick method for the adv-diff equation (3D)
-  [solver_method='kernel'] native streamed path (update-only geometry + post-fluid-step force kernel)
-Poisson solver: multigrid
-Computing 3-D SDF for /data/andreaferrario/lilytorch/lilytorch/farms_examples/sdfs/1guilla/meshes_800/link0_collision.stl (73×64×64) ...
-  skfmm distance with spacing (0.003340,0.001673,0.001993)
-  Saving 3-D interpolation data for /data/andreaferrario/lilytorch/lilytorch/farms_examples/sdfs/1guilla/meshes_800/link0_collision.stl
-Computing 3-D SDF for /data/andreaferrario/lilytorch/lilytorch/farms_examples/sdfs/1guilla/meshes_800/link1_collision.stl (64×64×64) ...
-  skfmm distance with spacing (0.002140,0.001405,0.001567)
-  Saving 3-D interpolation data for /data/andreaferrario/lilytorch/lilytorch/farms_examples/sdfs/1guilla/meshes_800/link1_collision.stl
-Computing 3-D SDF for /data/andreaferrario/lilytorch/lilytorch/farms_examples/sdfs/1guilla/meshes_800/link2_collision.stl (64×64×64) ...
-  skfmm distance with spacing (0.002135,0.001403,0.001569)
-  Saving 3-D interpolation data for /data/andreaferrario/lilytorch/lilytorch/farms_examples/sdfs/1guilla/meshes_800/link2_collision.stl
-Computing 3-D SDF for /data/andreaferrario/lilytorch/lilytorch/farms_examples/sdfs/1guilla/meshes_800/link3_collision.stl (64×64×64) ...
-  skfmm distance with spacing (0.002135,0.001403,0.001569)
-  Saving 3-D interpolation data for /data/andreaferrario/lilytorch/lilytorch/farms_examples/sdfs/1guilla/meshes_800/link3_collision.stl
-Computing 3-D SDF for /data/andreaferrario/lilytorch/lilytorch/farms_examples/sdfs/1guilla/meshes_800/link4_collision.stl (64×64×64) ...
-  skfmm distance with spacing (0.002136,0.001406,0.001569)
-  Saving 3-D interpolation data for /data/andreaferrario/lilytorch/lilytorch/farms_examples/sdfs/1guilla/meshes_800/link4_collision.stl
-Computing 3-D SDF for /data/andreaferrario/lilytorch/lilytorch/farms_examples/sdfs/1guilla/meshes_800/link5_collision.stl (64×64×64) ...
-  skfmm distance with spacing (0.002135,0.001404,0.001569)
-  Saving 3-D interpolation data for /data/andreaferrario/lilytorch/lilytorch/farms_examples/sdfs/1guilla/meshes_800/link5_collision.stl
-Computing 3-D SDF for /data/andreaferrario/lilytorch/lilytorch/farms_examples/sdfs/1guilla/meshes_800/link6_collision.stl (64×64×64) ...
-  skfmm distance with spacing (0.002135,0.001403,0.001569)
-  Saving 3-D interpolation data for /data/andreaferrario/lilytorch/lilytorch/farms_examples/sdfs/1guilla/meshes_800/link6_collision.stl
-Computing 3-D SDF for /data/andreaferrario/lilytorch/lilytorch/farms_examples/sdfs/1guilla/meshes_800/link7_collision.stl (64×64×64) ...
-  skfmm distance with spacing (0.002136,0.001405,0.001569)
-  Saving 3-D interpolation data for /data/andreaferrario/lilytorch/lilytorch/farms_examples/sdfs/1guilla/meshes_800/link7_collision.stl
-Computing 3-D SDF for /data/andreaferrario/lilytorch/lilytorch/farms_examples/sdfs/1guilla/meshes_800/link8_collision.stl (85×64×64) ...
-  skfmm distance with spacing (0.003352,0.001518,0.001656)
-  Saving 3-D interpolation data for /data/andreaferrario/lilytorch/lilytorch/farms_examples/sdfs/1guilla/meshes_800/link8_collision.stl
-Frames will be saved in folder: /data/andreaferrario/ns_data/2026-06-15T11:00:36.004290/
-Gravity body force enabled: g = (0.0, 0.0, -9.81)
-Two-phase enabled: rho 1000.0/1.2 (ratio 833:1), harmonic face density, three-phase rho_solid=800.0, air-transparent-body, body-aware alpha init (carve+volume-compensate).
-  [stream-meta-3D] built 9/9 per-body 3-D streaming-SDF metadata records (9 tabulated, 0 sampled from analytical SDF)
-[OrientationLogger] logging body id=20 name='a0_link0' -> /data/andreaferrario/lilytorch/_flip_diag/orient_force.csv
-[OrientationLogger]   body[0] 'world' mass=0
-[OrientationLogger]   body[1] 'ground_bg' mass=1e-15
-[OrientationLogger]   body[2] 'gridh_2' mass=1e-15
-[OrientationLogger]   body[3] 'gridv_6' mass=1e-15
-[OrientationLogger]   body[4] 'gridv_0' mass=1e-15
-[OrientationLogger]   body[5] 'gridv_2' mass=1e-15
-[OrientationLogger]   body[6] 'wall_xmin' mass=1e-15
-[OrientationLogger]   body[7] 'floor' mass=1e-15
-[OrientationLogger]   body[8] 'wall_ymin' mass=1e-15
-[OrientationLogger]   body[9] 'wall_xmax' mass=1e-15
-[OrientationLogger]   body[10] 'gridv_3' mass=1e-15
-[OrientationLogger]   body[11] 'gridv_4' mass=1e-15
-[OrientationLogger]   body[12] 'wall_ymax' mass=1e-15
-[OrientationLogger]   body[13] 'gridv_5' mass=1e-15
-[OrientationLogger]   body[14] 'gridv_1' mass=1e-15
-[OrientationLogger]   body[15] 'gridh_1' mass=1e-15
-[OrientationLogger]   body[16] 'gridh_0' mass=1e-15
-[OrientationLogger]   body[17] 'arena_water' mass=1e-15
-[OrientationLogger]   body[18] 'water' mass=1e-15
-[OrientationLogger]   body[19] 'a0_1guilla_watertight' mass=1e-15
-[OrientationLogger]   body[20] 'a0_link0' mass=0.266808
-[OrientationLogger]   body[21] 'a0_link1' mass=0.0476495
-[OrientationLogger]   body[22] 'a0_link2' mass=0.0475807
-[OrientationLogger]   body[23] 'a0_link3' mass=0.0474665
-[OrientationLogger]   body[24] 'a0_link4' mass=0.0475372
-[OrientationLogger]   body[25] 'a0_link5' mass=0.047596
-[OrientationLogger]   body[26] 'a0_link6' mass=0.0476426
-[OrientationLogger]   body[27] 'a0_link7' mass=0.0475256
-[OrientationLogger]   body[28] 'a0_link8' mass=0.101946
-[OrientationLogger] gravity=[ 0.    0.   -9.81]  sum(link masses)=0.701752  weight_z(MuJoCo units)=-6.88419
-body_aware_alpha_init: carved 2215.8 cells of body interior out of the water; surface raised by ~0.003337 to compensate (volume 7020000.0 / target 7020000.0 cells).
-body_aware_alpha_init: deferred carve applied (body interior cells: 576, sdf min -0.026); wet cells left inside the body: 0
-  1%|          | 2/300 [00:05<14:47,  2.98s/it]  1%|          | 3/300 [00:06<08:21,  1.69s/it]  1%|▏         | 4/300 [00:06<05:20,  1.08s/it]  2%|▏         | 5/300 [00:06<03:42,  1.32it/s]  2%|▏         | 6/300 [00:06<02:52,  1.70it/s]  2%|▏         | 7/300 [00:06<02:10,  2.24it/s]  3%|▎         | 8/300 [00:07<01:42,  2.84it/s]  3%|▎         | 9/300 [00:07<01:32,  3.13it/s]  3%|▎         | 10/300 [00:07<01:24,  3.43it/s]  4%|▎         | 11/300 [00:07<01:25,  3.39it/s]  4%|▍         | 12/300 [00:07<01:13,  3.91it/s]  4%|▍         | 13/300 [00:08<01:05,  4.40it/s]  5%|▍         | 14/300 [00:08<01:38,  2.90it/s]  5%|▌         | 15/300 [00:08<01:22,  3.47it/s]  5%|▌         | 16/300 [00:09<01:23,  3.40it/s]  6%|▌         | 17/300 [00:09<01:10,  3.99it/s]  6%|▌         | 18/300 [00:09<01:02,  4.55it/s]  6%|▋         | 19/300 [00:09<00:55,  5.04it/s]  7%|▋         | 20/300 [00:09<00:51,  5.40it/s]  7%|▋         | 21/300 [00:10<00:57,  4.84it/s]  7%|▋         | 22/300 [00:10<00:57,  4.86it/s]  8%|▊         | 23/300 [00:10<00:53,  5.20it/s]  8%|▊         | 24/300 [00:10<01:02,  4.40it/s]  8%|▊         | 25/300 [00:10<00:55,  4.92it/s]  9%|▊         | 26/300 [00:11<00:51,  5.36it/s]  9%|▉         | 27/300 [00:11<00:49,  5.50it/s]  9%|▉         | 28/300 [00:11<00:46,  5.80it/s] 10%|▉         | 29/300 [00:11<00:44,  6.03it/s] 10%|█         | 30/300 [00:11<00:43,  6.22it/s] 10%|█         | 31/300 [00:11<00:42,  6.37it/s] 11%|█         | 32/300 [00:11<00:41,  6.48it/s] 11%|█         | 33/300 [00:12<00:41,  6.49it/s] 11%|█▏        | 34/300 [00:12<00:40,  6.57it/s] 12%|█▏        | 35/300 [00:12<00:40,  6.55it/s] 12%|█▏        | 36/300 [00:12<00:39,  6.61it/s] 12%|█▏        | 37/300 [00:12<00:39,  6.67it/s] 13%|█▎        | 38/300 [00:12<00:39,  6.71it/s] 13%|█▎        | 39/300 [00:12<00:38,  6.74it/s] 13%|█▎        | 40/300 [00:13<00:38,  6.72it/s] 14%|█▎        | 41/300 [00:13<00:38,  6.70it/s] 14%|█▍        | 42/300 [00:13<00:38,  6.73it/s] 14%|█▍        | 43/300 [00:13<00:38,  6.74it/s] 15%|█▍        | 44/300 [00:13<00:37,  6.74it/s] 15%|█▌        | 45/300 [00:13<00:37,  6.76it/s] 15%|█▌        | 46/300 [00:14<00:37,  6.78it/s] 16%|█▌        | 47/300 [00:14<00:37,  6.78it/s] 16%|█▌        | 48/300 [00:14<00:37,  6.77it/s] 16%|█▋        | 49/300 [00:14<00:37,  6.78it/s] 17%|█▋        | 50/300 [00:14<00:36,  6.77it/s] 17%|█▋        | 51/300 [00:14<00:36,  6.77it/s] 17%|█▋        | 52/300 [00:14<00:37,  6.60it/s] 18%|█▊        | 53/300 [00:15<00:37,  6.60it/s] 18%|█▊        | 54/300 [00:15<00:36,  6.66it/s] 18%|█▊        | 55/300 [00:15<00:37,  6.61it/s] 19%|█▊        | 56/300 [00:15<00:37,  6.53it/s] 19%|█▉        | 57/300 [00:15<00:36,  6.58it/s] 19%|█▉        | 58/300 [00:15<00:36,  6.62it/s] 20%|█▉        | 59/300 [00:15<00:36,  6.57it/s] 20%|██        | 60/300 [00:16<00:36,  6.62it/s] 20%|██        | 61/300 [00:16<00:35,  6.66it/s] 21%|██        | 62/300 [00:16<00:35,  6.70it/s] 21%|██        | 63/300 [00:16<00:35,  6.74it/s] 21%|██▏       | 64/300 [00:16<00:35,  6.74it/s] 22%|██▏       | 65/300 [00:16<00:34,  6.76it/s] 22%|██▏       | 66/300 [00:17<00:34,  6.76it/s] 22%|██▏       | 67/300 [00:17<00:34,  6.77it/s] 23%|██▎       | 68/300 [00:17<00:34,  6.76it/s] 23%|██▎       | 69/300 [00:17<00:34,  6.76it/s] 23%|██▎       | 70/300 [00:17<00:33,  6.78it/s] 24%|██▎       | 71/300 [00:17<00:33,  6.77it/s] 24%|██▍       | 72/300 [00:17<00:33,  6.76it/s] 24%|██▍       | 73/300 [00:18<00:33,  6.76it/s] 25%|██▍       | 74/300 [00:18<00:33,  6.75it/s] 25%|██▌       | 75/300 [00:18<00:33,  6.77it/s] 25%|██▌       | 76/300 [00:18<00:33,  6.76it/s] 26%|██▌       | 77/300 [00:18<00:33,  6.71it/s] 26%|██▌       | 78/300 [00:18<00:33,  6.64it/s] 26%|██▋       | 79/300 [00:18<00:33,  6.69it/s] 27%|██▋       | 80/300 [00:19<00:32,  6.69it/s] 27%|██▋       | 81/300 [00:19<00:32,  6.69it/s] 27%|██▋       | 82/300 [00:19<00:32,  6.71it/s] 28%|██▊       | 83/300 [00:19<00:32,  6.73it/s] 28%|██▊       | 84/300 [00:19<00:32,  6.74it/s] 28%|██▊       | 85/300 [00:19<00:32,  6.68it/s] 29%|██▊       | 86/300 [00:19<00:32,  6.61it/s] 29%|██▉       | 87/300 [00:20<00:31,  6.66it/s] 29%|██▉       | 88/300 [00:20<00:31,  6.67it/s] 30%|██▉       | 89/300 [00:20<00:31,  6.71it/s] 30%|███       | 90/300 [00:20<00:31,  6.71it/s] 30%|███       | 91/300 [00:20<00:31,  6.72it/s] 31%|███       | 92/300 [00:20<00:30,  6.72it/s] 31%|███       | 93/300 [00:21<00:30,  6.74it/s] 31%|███▏      | 94/300 [00:21<00:30,  6.76it/s] 32%|███▏      | 95/300 [00:21<00:30,  6.77it/s] 32%|███▏      | 96/300 [00:21<00:30,  6.75it/s] 32%|███▏      | 97/300 [00:21<00:30,  6.76it/s] 33%|███▎      | 98/300 [00:21<00:29,  6.76it/s] 33%|███▎      | 99/300 [00:21<00:29,  6.77it/s] 33%|███▎      | 100/300 [00:22<00:29,  6.77it/s] 34%|███▎      | 101/300 [00:22<00:29,  6.66it/s] 34%|███▍      | 102/300 [00:22<00:30,  6.48it/s] 34%|███▍      | 103/300 [00:22<00:30,  6.45it/s] 35%|███▍      | 104/300 [00:22<00:30,  6.50it/s] 35%|███▌      | 105/300 [00:22<00:29,  6.58it/s] 35%|███▌      | 106/300 [00:22<00:29,  6.61it/s] 36%|███▌      | 107/300 [00:23<00:28,  6.67it/s] 36%|███▌      | 108/300 [00:23<00:28,  6.69it/s] 36%|███▋      | 109/300 [00:23<00:28,  6.72it/s] 37%|███▋      | 110/300 [00:23<00:28,  6.71it/s] 37%|███▋      | 111/300 [00:23<00:28,  6.70it/s] 37%|███▋      | 112/300 [00:23<00:28,  6.68it/s] 38%|███▊      | 113/300 [00:24<00:28,  6.67it/s] 38%|███▊      | 114/300 [00:24<00:27,  6.67it/s] 38%|███▊      | 115/300 [00:24<00:27,  6.66it/s] 39%|███▊      | 116/300 [00:24<00:27,  6.64it/s] 39%|███▉      | 117/300 [00:24<00:27,  6.68it/s] 39%|███▉      | 118/300 [00:24<00:27,  6.72it/s] 40%|███▉      | 119/300 [00:24<00:26,  6.74it/s] 40%|████      | 120/300 [00:25<00:26,  6.74it/s] 40%|████      | 121/300 [00:25<00:26,  6.73it/s] 41%|████      | 122/300 [00:25<00:26,  6.71it/s] 41%|████      | 123/300 [00:25<00:26,  6.74it/s] 41%|████▏     | 124/300 [00:25<00:26,  6.73it/s] 42%|████▏     | 125/300 [00:25<00:25,  6.75it/s] 42%|████▏     | 126/300 [00:25<00:25,  6.76it/s] 42%|████▏     | 127/300 [00:26<00:25,  6.77it/s] 43%|████▎     | 128/300 [00:26<00:25,  6.77it/s] 43%|████▎     | 129/300 [00:26<00:25,  6.76it/s] 43%|████▎     | 130/300 [00:26<00:25,  6.77it/s] 44%|████▎     | 131/300 [00:26<00:24,  6.78it/s] 44%|████▍     | 132/300 [00:26<00:24,  6.78it/s] 44%|████▍     | 133/300 [00:26<00:24,  6.79it/s] 45%|████▍     | 134/300 [00:27<00:24,  6.79it/s] 45%|████▌     | 135/300 [00:27<00:24,  6.79it/s] 45%|████▌     | 136/300 [00:27<00:24,  6.79it/s] 46%|████▌     | 137/300 [00:27<00:24,  6.78it/s] 46%|████▌     | 138/300 [00:27<00:23,  6.79it/s] 46%|████▋     | 139/300 [00:27<00:23,  6.79it/s] 47%|████▋     | 140/300 [00:28<00:23,  6.78it/s] 47%|████▋     | 141/300 [00:28<00:23,  6.79it/s] 47%|████▋     | 142/300 [00:28<00:23,  6.75it/s] 48%|████▊     | 143/300 [00:28<00:23,  6.76it/s] 48%|████▊     | 144/300 [00:28<00:23,  6.76it/s] 48%|████▊     | 145/300 [00:28<00:22,  6.76it/s] 49%|████▊     | 146/300 [00:28<00:22,  6.78it/s] 49%|████▉     | 147/300 [00:29<00:22,  6.78it/s] 49%|████▉     | 148/300 [00:29<00:22,  6.78it/s] 50%|████▉     | 149/300 [00:29<00:22,  6.79it/s] 50%|█████     | 150/300 [00:29<00:22,  6.79it/s] 50%|█████     | 151/300 [00:29<00:21,  6.79it/s] 51%|█████     | 152/300 [00:29<00:21,  6.76it/s] 51%|█████     | 153/300 [00:29<00:21,  6.75it/s] 51%|█████▏    | 154/300 [00:30<00:21,  6.77it/s] 52%|█████▏    | 155/300 [00:30<00:22,  6.56it/s] 52%|█████▏    | 156/300 [00:30<00:22,  6.42it/s] 52%|█████▏    | 157/300 [00:30<00:22,  6.33it/s] 53%|█████▎    | 158/300 [00:30<00:22,  6.27it/s] 53%|█████▎    | 159/300 [00:30<00:22,  6.22it/s] 53%|█████▎    | 160/300 [00:31<00:22,  6.16it/s] 54%|█████▎    | 161/300 [00:31<00:22,  6.13it/s] 54%|█████▍    | 162/300 [00:31<00:22,  6.10it/s] 54%|█████▍    | 163/300 [00:31<00:22,  6.10it/s] 55%|█████▍    | 164/300 [00:31<00:22,  6.10it/s] 55%|█████▌    | 165/300 [00:31<00:22,  6.11it/s] 55%|█████▌    | 166/300 [00:32<00:21,  6.12it/s] 56%|█████▌    | 167/300 [00:32<00:21,  6.09it/s] 56%|█████▌    | 168/300 [00:32<00:21,  6.10it/s] 56%|█████▋    | 169/300 [00:32<00:21,  6.11it/s] 57%|█████▋    | 170/300 [00:32<00:21,  6.12it/s] 57%|█████▋    | 171/300 [00:32<00:21,  6.11it/s] 57%|█████▋    | 172/300 [00:33<00:20,  6.12it/s] 58%|█████▊    | 173/300 [00:33<00:20,  6.12it/s] 58%|█████▊    | 174/300 [00:33<00:20,  6.12it/s] 58%|█████▊    | 175/300 [00:33<00:19,  6.29it/s] 59%|█████▊    | 176/300 [00:33<00:19,  6.43it/s] 59%|█████▉    | 177/300 [00:33<00:18,  6.54it/s] 59%|█████▉    | 178/300 [00:33<00:18,  6.62it/s] 60%|█████▉    | 179/300 [00:34<00:18,  6.45it/s] 60%|██████    | 180/300 [00:34<00:19,  6.30it/s] 60%|██████    | 181/300 [00:34<00:19,  6.22it/s] 61%|██████    | 182/300 [00:34<00:19,  6.17it/s] 61%|██████    | 183/300 [00:34<00:19,  6.14it/s] 61%|██████▏   | 184/300 [00:34<00:18,  6.14it/s] 62%|██████▏   | 185/300 [00:35<00:18,  6.13it/s] 62%|██████▏   | 186/300 [00:35<00:18,  6.11it/s] 62%|██████▏   | 187/300 [00:35<00:18,  6.10it/s] 63%|██████▎   | 188/300 [00:35<00:18,  6.11it/s] 63%|██████▎   | 189/300 [00:35<00:18,  6.10it/s] 63%|██████▎   | 190/300 [00:35<00:17,  6.28it/s] 64%|██████▎   | 191/300 [00:36<00:16,  6.43it/s] 64%|██████▍   | 192/300 [00:36<00:16,  6.54it/s] 64%|██████▍   | 193/300 [00:36<00:16,  6.60it/s] 65%|██████▍   | 194/300 [00:36<00:16,  6.62it/s] 65%|██████▌   | 195/300 [00:36<00:15,  6.66it/s] 65%|██████▌   | 196/300 [00:36<00:15,  6.68it/s] 66%|██████▌   | 197/300 [00:36<00:15,  6.67it/s] 66%|██████▌   | 198/300 [00:37<00:15,  6.65it/s] 66%|██████▋   | 199/300 [00:37<00:15,  6.64it/s] 67%|██████▋   | 200/300 [00:37<00:15,  6.54it/s] 67%|██████▋   | 201/300 [00:37<00:15,  6.46it/s] 67%|██████▋   | 202/300 [00:38<00:25,  3.82it/s] 68%|██████▊   | 203/300 [00:38<00:22,  4.28it/s] 68%|██████▊   | 204/300 [00:38<00:19,  4.80it/s] 68%|██████▊   | 205/300 [00:38<00:20,  4.72it/s] 69%|██████▊   | 206/300 [00:38<00:20,  4.58it/s] 69%|██████▉   | 207/300 [00:39<00:18,  4.91it/s] 69%|██████▉   | 208/300 [00:39<00:18,  4.96it/s] 70%|██████▉   | 209/300 [00:39<00:19,  4.69it/s] 70%|███████   | 210/300 [00:39<00:18,  4.78it/s] 70%|███████   | 211/300 [00:40<00:24,  3.68it/s] 71%|███████   | 212/300 [00:40<00:22,  3.97it/s] 71%|███████   | 213/300 [00:40<00:19,  4.48it/s] 71%|███████▏  | 214/300 [00:40<00:17,  4.87it/s] 72%|███████▏  | 215/300 [00:40<00:20,  4.17it/s] 72%|███████▏  | 216/300 [00:41<00:18,  4.60it/s] 72%|███████▏  | 217/300 [00:41<00:16,  5.08it/s] 73%|███████▎  | 218/300 [00:41<00:16,  4.91it/s] 73%|███████▎  | 219/300 [00:41<00:15,  5.19it/s] 73%|███████▎  | 220/300 [00:41<00:14,  5.37it/s] 74%|███████▎  | 221/300 [00:42<00:15,  5.18it/s] 74%|███████▍  | 222/300 [00:42<00:14,  5.43it/s] 74%|███████▍  | 223/300 [00:42<00:16,  4.58it/s] 75%|███████▍  | 224/300 [00:42<00:14,  5.08it/s] 75%|███████▌  | 225/300 [00:42<00:13,  5.48it/s] 75%|███████▌  | 226/300 [00:42<00:12,  5.80it/s] 76%|███████▌  | 227/300 [00:43<00:12,  6.03it/s] 76%|███████▌  | 228/300 [00:43<00:11,  6.21it/s] 76%|███████▋  | 229/300 [00:43<00:11,  6.33it/s] 77%|███████▋  | 230/300 [00:43<00:10,  6.44it/s] 77%|███████▋  | 231/300 [00:43<00:10,  6.51it/s] 77%|███████▋  | 232/300 [00:43<00:10,  6.56it/s] 78%|███████▊  | 233/300 [00:43<00:10,  6.60it/s] 78%|███████▊  | 234/300 [00:44<00:09,  6.62it/s] 78%|███████▊  | 235/300 [00:44<00:09,  6.64it/s] 79%|███████▊  | 236/300 [00:44<00:09,  6.68it/s] 79%|███████▉  | 237/300 [00:44<00:09,  6.70it/s] 79%|███████▉  | 238/300 [00:44<00:09,  6.72it/s] 80%|███████▉  | 239/300 [00:44<00:09,  6.64it/s] 80%|████████  | 240/300 [00:45<00:09,  6.63it/s] 80%|████████  | 241/300 [00:45<00:08,  6.62it/s] 81%|████████  | 242/300 [00:45<00:08,  6.65it/s] 81%|████████  | 243/300 [00:45<00:08,  6.68it/s] 81%|████████▏ | 244/300 [00:45<00:08,  6.71it/s] 82%|████████▏ | 245/300 [00:45<00:08,  6.71it/s] 82%|████████▏ | 246/300 [00:45<00:08,  6.73it/s] 82%|████████▏ | 247/300 [00:46<00:07,  6.95it/s] 83%|████████▎ | 248/300 [00:46<00:07,  7.11it/s] 83%|████████▎ | 249/300 [00:46<00:07,  7.16it/s] 83%|████████▎ | 250/300 [00:46<00:06,  7.26it/s] 84%|████████▎ | 251/300 [00:46<00:06,  7.33it/s] 84%|████████▍ | 252/300 [00:46<00:06,  7.35it/s] 84%|████████▍ | 253/300 [00:46<00:06,  7.41it/s] 85%|████████▍ | 254/300 [00:46<00:06,  7.40it/s] 85%|████████▌ | 255/300 [00:47<00:06,  7.42it/s] 85%|████████▌ | 256/300 [00:47<00:05,  7.42it/s] 86%|████████▌ | 257/300 [00:47<00:05,  7.41it/s] 86%|████████▌ | 258/300 [00:47<00:05,  7.42it/s] 86%|████████▋ | 259/300 [00:47<00:05,  7.48it/s] 87%|████████▋ | 260/300 [00:47<00:05,  7.50it/s] 87%|████████▋ | 261/300 [00:47<00:05,  7.51it/s] 87%|████████▋ | 262/300 [00:48<00:05,  7.45it/s] 88%|████████▊ | 263/300 [00:48<00:05,  7.38it/s] 88%|████████▊ | 264/300 [00:48<00:04,  7.43it/s] 88%|████████▊ | 265/300 [00:48<00:04,  7.45it/s] 89%|████████▊ | 266/300 [00:48<00:04,  7.43it/s] 89%|████████▉ | 267/300 [00:48<00:04,  7.36it/s] 89%|████████▉ | 268/300 [00:48<00:04,  7.28it/s] 90%|████████▉ | 269/300 [00:49<00:04,  7.28it/s] 90%|█████████ | 270/300 [00:49<00:04,  7.32it/s] 90%|█████████ | 271/300 [00:49<00:03,  7.34it/s] 91%|█████████ | 272/300 [00:49<00:03,  7.37it/s] 91%|█████████ | 273/300 [00:49<00:03,  7.40it/s] 91%|█████████▏| 274/300 [00:49<00:03,  7.42it/s] 92%|█████████▏| 275/300 [00:49<00:03,  7.41it/s] 92%|█████████▏| 276/300 [00:49<00:03,  7.43it/s] 92%|█████████▏| 277/300 [00:50<00:03,  7.45it/s] 93%|█████████▎| 278/300 [00:50<00:02,  7.49it/s] 93%|█████████▎| 279/300 [00:50<00:02,  7.51it/s] 93%|█████████▎| 280/300 [00:50<00:02,  7.52it/s] 94%|█████████▎| 281/300 [00:50<00:02,  7.52it/s] 94%|█████████▍| 282/300 [00:50<00:02,  7.53it/s] 94%|█████████▍| 283/300 [00:50<00:02,  7.26it/s] 95%|█████████▍| 284/300 [00:51<00:02,  7.35it/s] 95%|█████████▌| 285/300 [00:51<00:02,  7.42it/s] 95%|█████████▌| 286/300 [00:51<00:01,  7.46it/s] 96%|█████████▌| 287/300 [00:51<00:01,  7.50it/s] 96%|█████████▌| 288/300 [00:51<00:01,  7.48it/s] 96%|█████████▋| 289/300 [00:51<00:01,  7.51it/s] 97%|█████████▋| 290/300 [00:51<00:01,  7.52it/s] 97%|█████████▋| 291/300 [00:51<00:01,  7.52it/s] 97%|█████████▋| 292/300 [00:52<00:01,  7.48it/s] 98%|█████████▊| 293/300 [00:52<00:00,  7.49it/s] 98%|█████████▊| 294/300 [00:52<00:00,  7.43it/s] 98%|█████████▊| 295/300 [00:52<00:00,  7.16it/s] 99%|█████████▊| 296/300 [00:52<00:00,  7.23it/s] 99%|█████████▉| 297/300 [00:52<00:00,  7.05it/s] 99%|█████████▉| 298/300 [00:52<00:00,  6.92it/s]100%|█████████▉| 299/300 [00:53<00:00,  7.08it/s]100%|██████████| 300/300 [00:53<00:00,  7.24it/s]100%|██████████| 300/300 [00:53<00:00,  5.64it/s]
-         46813016 function calls (46072220 primitive calls) in 49.407 seconds
-
-   Ordered by: internal time
-   List reduced from 23460 to 30 due to restriction <30>
-
-   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
-  298/207    8.962    0.030    6.189    0.030 /data/andreaferrario/lilytorch/lilytorch/src/plotting.py:1383(check_termination)
-      300    4.818    0.016    5.108    0.017 /data/andreaferrario/lilytorch/lilytorch/src/solver.py:1676(_init_bdim_coeff_persist_3d)
-  298/208    3.554    0.012   15.713    0.076 /data/andreaferrario/lilytorch/lilytorch/src/kernels/ops.py:841(poisson_solve_multigrid_3d)
-    297/7    2.802    0.009    0.050    0.007 /data/andreaferrario/lilytorch/lilytorch/src/two_phase_solver.py:597(_rescale_kernel_coeffs_two_phase)
-        2    2.107    1.054    2.107    1.054 /data/andreaferrario/lilytorch/lilytorch/src/body.py:999(bounding_box)
-  6199605    1.381    0.000    2.256    0.000 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/pywavefront/obj.py:284(consume_faces)
-        1    1.255    1.255    1.255    1.255 {built-in method mujoco._structs.from_xml_string}
-        1    1.172    1.172    1.172    1.172 /data/andreaferrario/lilytorch/lilytorch/src/body.py:968(__call__)
-       73    0.909    0.012    0.928    0.013 {method 'encode' of 'ImagingEncoder' objects}
-        1    0.861    0.861    0.861    0.861 /data/andreaferrario/lilytorch/lilytorch/src/body.py:954(update_mesh)
-       36    0.794    0.022    0.794    0.022 {method 'Update' of 'vtkmodules.vtkCommonExecutionModel.vtkStreamingDemandDrivenPipeline' objects}
-        9    0.681    0.076    0.681    0.076 {built-in method skfmm.cfmm.cFastMarcher}
-      469    0.657    0.001    0.657    0.001 {method 'tobytes' of 'numpy.ndarray' objects}
-2607/2320    0.609    0.000    0.312    0.000 {method 'astype' of 'numpy.ndarray' objects}
-  5004477    0.570    0.000    0.570    0.000 {method 'split' of 'str' objects}
-      186    0.560    0.003    0.562    0.003 {built-in method _imp.create_dynamic}
-  298/207    0.531    0.002    0.424    0.002 /data/andreaferrario/lilytorch/lilytorch/src/solver.py:882(_mw_body_div_correction)
-      897    0.519    0.001    0.519    0.001 {method 'addcmul_' of 'torch._C.TensorBase' objects}
-    235/7    0.441    0.002    1.521    0.217 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/matplotlib/backends/backend_agg.py:206(get_text_width_height_descent)
-  7215420    0.359    0.000    0.359    0.000 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/pywavefront/obj.py:312(emit_vertex)
-  1788227    0.341    0.000    0.857    0.000 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/pywavefront/parser.py:97(next_line)
-   702986    0.336    0.000    0.687    0.000 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/pywavefront/obj.py:114(consume_vertices)
-     21/5    0.327    0.016    0.143    0.029 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/matplotlib/image.py:585(draw)
-   365/61    0.319    0.001    0.080    0.001 {built-in method torch.tensor}
-        9    0.299    0.033    2.555    0.284 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/pywavefront/obj.py:254(parse_f)
-   702986    0.274    0.000    0.606    0.000 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/pywavefront/obj.py:160(consume_normals)
-       48    0.260    0.005    0.276    0.006 {built-in method matplotlib._image.resample}
-       30    0.245    0.008    0.245    0.008 {built-in method numpy.fromstring}
-        4    0.234    0.058    0.247    0.062 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/pyvista/plotting/plotter.py:6971(__init__)
-      455    0.229    0.001    0.297    0.001 {method 'cpu' of 'torch._C.TensorBase' objects}
-
-
-         46813016 function calls (46072220 primitive calls) in 49.407 seconds
-
-   Ordered by: cumulative time
-   List reduced from 23460 to 30 due to restriction <30>
-
-   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
-  297/207    0.058    0.000   16.417    0.079 /data/andreaferrario/lilytorch/lilytorch/src/solver.py:903(project)
-  298/208    0.027    0.000   15.925    0.077 /data/andreaferrario/lilytorch/lilytorch/src/poisson_mult.py:1124(_solve_multigrid_native)
-  298/208    3.554    0.012   15.713    0.076 /data/andreaferrario/lilytorch/lilytorch/src/kernels/ops.py:841(poisson_solve_multigrid_3d)
-  297/204    0.025    0.000    6.921    0.034 /data/andreaferrario/lilytorch/lilytorch/src/two_phase_solver.py:933(finalize_step)
-  298/204    0.023    0.000    6.525    0.032 /data/andreaferrario/lilytorch/lilytorch/src/plotting.py:1162(plotting_and_saving)
-  298/207    8.962    0.030    6.189    0.030 /data/andreaferrario/lilytorch/lilytorch/src/plotting.py:1383(check_termination)
-        1    0.000    0.000    5.668    5.668 <string>:3(_patched_smx)
-        1    0.000    0.000    5.668    5.668 /data/andreaferrario/lilytorch/lilytorch/FARMS_V2/farms_mujoco/farms_mujoco/simulation/mjcf.py:1355(setup_mjcf_xml)
-        3    0.000    0.000    5.616    1.872 /data/andreaferrario/lilytorch/lilytorch/FARMS_V2/farms_mujoco/farms_mujoco/simulation/mjcf.py:770(sdf2mjcf)
-       29    0.001    0.000    5.610    0.193 /data/andreaferrario/lilytorch/lilytorch/FARMS_V2/farms_mujoco/farms_mujoco/simulation/mjcf.py:140(mjc_add_link)
-    26/18    0.000    0.000    5.609    0.312 /data/andreaferrario/lilytorch/lilytorch/FARMS_V2/farms_mujoco/farms_mujoco/simulation/mjcf.py:720(add_link_recursive)
-      300    4.818    0.016    5.108    0.017 /data/andreaferrario/lilytorch/lilytorch/src/solver.py:1676(_init_bdim_coeff_persist_3d)
-       20    0.000    0.000    4.816    0.241 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/torch/_jit_internal.py:1025(_overload)
-        9    0.000    0.000    3.956    0.440 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/pywavefront/wavefront.py:47(__init__)
-        9    0.000    0.000    3.956    0.440 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/pywavefront/obj.py:53(__init__)
-        9    0.000    0.000    3.955    0.439 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/pywavefront/obj.py:82(parse)
-     18/9    0.000    0.000    3.955    0.439 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/pywavefront/parser.py:110(parse)
-        9    0.299    0.033    2.555    0.284 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/pywavefront/obj.py:254(parse_f)
-  6199605    1.381    0.000    2.256    0.000 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/pywavefront/obj.py:284(consume_faces)
-        2    2.107    1.054    2.107    1.054 /data/andreaferrario/lilytorch/lilytorch/src/body.py:999(bounding_box)
-  4335/13    0.006    0.000    1.899    0.146 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/matplotlib/text.py:65(_get_text_metrics_with_cache)
-    182/7    0.002    0.000    1.763    0.252 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/matplotlib/text.py:73(_get_text_metrics_with_cache_impl)
- 1722/170    0.005    0.000    1.742    0.010 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/pyvista/_deprecate_positional_args.py:191(inner_f)
-       18    0.001    0.000    1.619    0.090 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/trimesh/exchange/load.py:258(load_mesh)
-       18    0.009    0.000    1.602    0.089 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/trimesh/exchange/load.py:157(load_scene)
-    235/7    0.441    0.002    1.521    0.217 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/matplotlib/backends/backend_agg.py:206(get_text_width_height_descent)
-   1967/5    0.032    0.000    1.340    0.268 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/matplotlib/text.py:358(_get_layout)
-        1    0.000    0.000    1.326    1.326 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/dm_control/mjcf/physics.py:437(from_mjcf_model)
-   1680/5    0.012    0.000    1.308    0.262 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/matplotlib/text.py:926(get_window_extent)
-        9    0.063    0.007    1.261    0.140 /data/andreaferrario/venv_ns_312/lib/python3.12/site-packages/trimesh/exchange/obj.py:27(load_obj)
-
-
-Saving configs to folder: /data/andreaferrario/ns_data/2026-06-15T11:00:36.004290
-farms_muscle not installed

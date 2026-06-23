@@ -80,14 +80,14 @@ cost of the Poisson solve, advection–diffusion, and BDIM stages:
 Memory / runtime benchmarks
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-A few top-level scripts profile the solver in isolation:
+A few scripts in ``benchmarks/`` profile the solver in isolation:
 
 .. code-block:: bash
 
-   python run_compile_advdiff_bench.py     # advection–diffusion micro-bench
-   python run_compile_smoother_bench.py    # Poisson smoother micro-bench
-   python run_memory_profile_free_3d.py    # peak GPU memory vs. grid size
-   python run_poisson_comparison_3d.py     # FFT vs. multigrid vs. MGCG
+   python benchmarks/run_compile_advdiff_bench.py     # advection–diffusion micro-bench
+   python benchmarks/run_compile_smoother_bench.py    # Poisson smoother micro-bench
+   python benchmarks/run_memory_profile_free_3d.py    # peak GPU memory vs. grid size
+   python benchmarks/run_poisson_comparison_3d.py     # FFT vs. multigrid vs. MGCG
 
    # End-to-end per-stage cost sweep (3-D free-swimming)
    python lilytorch/validation/cost_analysis_free_swimming_3d/run_cost_analysis.py

@@ -155,19 +155,87 @@ HP5b. **Diagnose two-phase surface speed bias** (2026-06-18 — investigation in
   **=> ACTIONABLE:** improve the eulerian band force to be discretely gauge-
   invariant (per-body / depth-varying anchor, or a control-volume momentum-flux
   integral) to kill the residual hydrostatic leak -> would make two-phase
-  submerged forces match single-phase.  **HANDOFF BRIEF for a fresh-session
-  agent: `milestones/gauge_invariant_force_handoff.md`** (problem, evidence,
-  approaches, validation gates, constraints, harness pointers).
+  submerged forces match single-phase.  **Promoted to its own item HP6.**
+
+HP6. **Discretely gauge-invariant two-phase band force** (the live force-readout
+  fix; was buried in HP5b RESULT-2).  **ACTIVE WORK** — latest commit `8196127`
+  ("gauge-invariant force handoff + submerged diag harness") + the fresh
+  `_submerged_diag/force_dec_*.csv` come from this line.
+
+  **Problem.** The Eulerian band force `ρg·Σ z nₓ δ` over-reads a horizontal
+  force that is LINEAR in depth on a body whose true horizontal force is 0
+  (a submerged body sees only the *vertical* hydrostatic gradient).  The shipped
+  `gauge_anchor_forces` band-mean subtraction OVER-corrects to a depth-linear
+  residual of opposite sign; the opt-in `gauge_anchor_per_body` was implemented
+  and tested and ALSO does not remove the depth-linearity.
+
+  **Decisive new result (2026-06-20).** The leak is **STATIC, not unsteady** —
+  fully present on a zero-gait non-moving body; undulation adds ~−0.02 to the
+  mean Fx.  Therefore the control-volume *momentum* readout (§2 of the old brief)
+  is the WRONG build (it targets the added-mass/unsteady path the data exonerates,
+  and is the SBP-dual of the already-rejected ∂H).  Open tension to reconcile:
+  this seemingly contradicts `project_two_phase_force_gauge_leak` (∂H zeroed the
+  static Fx yet barely moved the self-propelled swim) — either ∂H didn't truly
+  zero the force on the running multi-link union SDF (per-link seams), or the
+  swim-speed bias is a different quantity than the static leak.  **A direction
+  decision is required before any further build.**
+
+  **HANDOFF BRIEF (current):** `milestones/two_phase_force_readout_next_agent.md`
+  (problem, evidence, the 2026-06-20 static verdict, dead-ends, harness pointers).
+  NOTE: the old `milestones/gauge_invariant_force_handoff.md` referenced by HP5b
+  was DELETED/superseded by this brief.
+  Constraint: confine to `two_phase*.py` / validation (no `forces.py`/`solver.py`/
+  `body.py` edits — see `feedback-no-core-source-for-two-phase`).
 
 HP3. **Polish repo & docs** — review/correct outdated documentation, including `docs/`.
   * (2026-06-18) Added status note to `docs/solver_bdim_merge_proposal.md`
     (SU2 done, proposal remains valid long-term direction).
   * (2026-06-18) `docs/memory_analysis.md` reviewed — still current.
   * (2026-06-18) `docs/two_phase.rst` reviewed — consistent with implementation.
-  * Remaining: add one-fluid free-surface section to docs, review
-    `docs/getting_started.rst` and `README.md` for stale references.
+  * (2026-06-23) **Stale `adv_diff.py` references purged** (the module was
+    deleted 2026-06-05 → `advection.py` + `diffusion.py`): removed `api/adv_diff`
+    from the `index.rst` toctree, deleted `docs/api/adv_diff.rst`, fixed the
+    `README.md` module table (added `advection.py`/`diffusion.py`/`two_phase*`/
+    `free_surface_solver` rows) and the `getting_started.rst` project-layout tree.
+    NOTE: `compile_adv_diff` in `parameters.rst`/`numerical_schemes.rst` is the
+    live config-key name (NOT stale). `docs/_build/html/` regenerated via
+    `make html`.
+  * (2026-06-23) **One-fluid free-surface section added** — new
+    "One-fluid free surface (experimental)" section in `docs/two_phase.rst`
+    (`_one_fluid_free_surface` label) documenting `FreeSurfaceSolver` +
+    `poisson_gfm` with an honest status warning (statics validated, explicit
+    wave mode not production-stable, use `TwoPhaseSolver` for quantitative work);
+    added autodoc stubs for `free_surface_solver` (api/two_phase.rst) and
+    `poisson_gfm` (api/poisson.rst) so the cross-refs resolve.
+  * (2026-06-23) **README/getting_started stale-ref sweep** — added the missing
+    `farms_amphibious` row to the README FARMS-submodule table (prose already
+    said "Four"); `xfrc_applied` claim verified correct for the FARMS path
+    (the `qfrc_applied`/`mj_applyFT` pitfall is viewer-specific). `extras.py`
+    references confirmed valid (file exists).
+  * (2026-06-23) **`native_body_colors` → `body_color_override` rename fixed**
+    (caught by the Sphinx build — file renamed, nothing imports the old name):
+    updated `api/integration.rst` automodule, `getting_started.rst` layout, and
+    the README integration table.
+  * (2026-06-23) **Two docstring rendering bugs fixed** (surfaced by the build):
+    `two_phase_solver.advance_and_compute_loads` had a bare `|sdf|` parsed as an
+    RST substitution (wrapped sdf expressions in double backticks); the
+    `TwoPhase` class docstring had prose trailing the numpydoc Parameters block
+    (moved under a `Notes` section).
+  * (2026-06-23) **`make html` now builds with ZERO warnings** (was 4) — all new
+    cross-refs (`_one_fluid_free_surface`, `FreeSurfaceSolver`, `poisson_gfm`)
+    resolve; autodoc imports `free_surface_solver` + `poisson_gfm` cleanly.
+  * **HP3 COMPLETE** for all known items.
 
-HP4. **Stabilise the one-fluid GFM free surface** (handoff 2026-06-17).
+HP4. ~~**Stabilise the one-fluid GFM free surface** (handoff 2026-06-17).~~
+  **CANCELLED / REMOVED 2026-06-23.** The one-fluid free-surface method
+  (`free_surface_solver.py`, `poisson_gfm.py`, `validation/free_surface/`,
+  `run_1guilla_fs.py`, the BDIMhandler `solver.free_surface` branch, and the
+  associated docs sections) has been deleted from the codebase as outdated. The
+  GFM moving-interface approach never converged under refinement (see the
+  session log below for the conclusive analysis); quantitative free-surface
+  work uses single-phase underwater, and `TwoPhaseSolver` remains for
+  qualitative free-surface cases. The notes below are retained as a historical
+  record of why the GFM route was abandoned.
 
   **One-line status.** The two-phase surface model is sound for *qualitative*
   free-surface work but over-predicts swim speed ~2× from under-resolved wave
@@ -513,6 +581,16 @@ MP8. **T2b** Dirty-AABB-sized Kernel-A temps (`sdf_*_tmp`, `b*_tmp`: full-grid �
   Needs `streaming_sdf.cu` changes; no peak movement until T2a.
 MP9. **T2c** Two-pass Kernel B for `primes` elimination (write to AABB scratch, copy back).
   ~1.5 GiB; no peak movement until T2a.
+MP10. **T2d — fused CUDA kernel for SCALAR advection** (found 2026-06-23). T2a/MP7
+  fused only the MOMENTUM flux chain (`advect_flux_add`); `advection.advect_scalar`
+  (the cell-centred VOF α-transport AND the free-surface level-set transport) still
+  runs the Python `_flux → F_diff → rhs.add_` chain even in kernel mode — the exact
+  chain T2a replaced for momentum. So in two-phase/free-surface kernel runs the α
+  advection is a Python-path contributor (part of the ~6% two-phase Python cost; the
+  variable-coeff Poisson still dominates at ~75%, see
+  `project_two_phase_poisson_bottleneck`). Reuse the `advect_flux_add` op for the
+  single scalar (1 component, same scheme IDs). Pairs naturally with HP5's
+  conservative-momentum kernel (same evolved-density flux machinery).
 
 ---
 
@@ -631,6 +709,46 @@ LP6. **F1 AABB cull force integration** — δ(sdf−ε) is evaluated over the w
   body but is nonzero only within ε. Slice to each body's AABB+ε. 10-100× for small
   swimmers in big pools.
 LP8. **F2** drag records: CPU pinned memory + async copy instead of GPU `nt` pre-alloc.
+LP9. **Adaptive / CFL-limited timestep** (found 2026-06-23) — `dt` is FIXED for the
+  whole run (no `self.dt =` reassignment anywhere in `solver.py`); `diagnostics.py`
+  only *warns* on CFL>0.5, it never adapts. The blow-up-prone cases (toy boat,
+  surface eel, sphere-near-wall) would benefit from a CFL-limited dt as a safety
+  lever — recompute `dt = cfl_target·h/|u|max` each step (or every N steps) with a
+  config cap. Caveat: checkpoint/restart (LT6) and the Adams-Bashforth flux history
+  assume constant dt, so a variable dt touches both. Keep opt-in (default fixed).
+LP10. **`COMPOSITEmesh2sdf.transform_3d` is a `NotImplementedError`** (found 2026-06-23,
+  `body.py:1052`) — blocked on a missing `mesh2sdf.transform_3d`. Latent: any code
+  path that rotates/translates a COMPOSITEmesh2sdf body crashes at runtime. Either
+  implement the underlying mesh transform or assert-guard the call site so the
+  failure is explicit at construction.
+LP11. **Pleurodeles full-3D example is a stub** (found 2026-06-23) —
+  `farms_examples/pleurodeles/gen_configs_swim_full3d.py:25` has a placeholder SDF
+  filename TODO ("replace once the full-3D SDF is ready"); the example cannot run
+  as-is. Either finish the full-3D SDF + wire it, or mark the file experimental.
+LP12. ~~**Empty orphan dir `validation/free_surface_2d/`** (found 2026-06-23) — contains
+  only `__pycache__`.~~ ✅ Deleted 2026-06-23 with the rest of the free-surface method.
+
+---
+
+# TEST INFRA / REPO HYGIENE (found 2026-06-23)
+
+TI1. **No CI, no test aggregation.** There is no `.github/`, no `conftest.py`,
+  `pytest.ini`, or `tox.ini`; the ~26 `test_*.py` files are scattered across
+  `src/`, `src/kernels/`, and `integration/` and are run by hand. Meanwhile the
+  SU1 per-step rule MANDATES "validate 2D (`_1guillasim`) + 3D (jellyfish) +
+  cost_analysis (<5% regression), rel-err <1e-6" with nothing automating it.
+  Add at minimum a `pytest` config that collects the self-tests (the CUDA ones
+  skip cleanly without a GPU via `pytest.importorskip`), and ideally a CI
+  workflow running the CPU-path parity oracles on push. Enabler for trusting the
+  refactor-heavy `optimize_speed_memory` branch. NOTE: kernel parity tests need a
+  built `_C.so` matching the runtime torch — gate or build-in-CI accordingly.
+TI2. **Repo-root clutter / un-ignored diag output.** Working tree carries untracked
+  scratch: `_submerged_diag/` (dozens of `force_*.csv`), `_flip_diag/`,
+  `_overlap_study/`, plus `_overlap_diag.py`/`_region_diag.py` and several root
+  `run_*.py`. Per `feedback-plots-in-ns-data`, sim outputs belong in
+  `/data/andreaferrario/ns_data/`, not the repo. Add `.gitignore` rules for the
+  `_*_diag/` output dirs (keep the harness scripts) and relocate or git-ignore the
+  CSV dumps so `git status` stays readable.
 
 ---
 
@@ -978,7 +1096,7 @@ PH5. **TwoPhaseSolver re-introduced the per-step `empty_cache()` (regresses PH1)
   only lowers nvidia-smi reserved memory — and unnecessary in a fixed-shape loop; the moving
   AABB force crops are bounded). Confine to `two_phase_solver.py` (no core-source edits).
 PH4. ~~Delete legacy `adv_diff.py`~~ ✅ (2026-06-11) — repointed the lone importer
-  (`run_compile_advdiff_bench.py`) to `lilytorch.src.advection` (drop-in: identical
+  (`benchmarks/run_compile_advdiff_bench.py`) to `lilytorch.src.advection` (drop-in: identical
   `AdvDiffSolver` API), removed the file, fixed the "kept on disk as legacy" docstrings.
 
 ## Low priority

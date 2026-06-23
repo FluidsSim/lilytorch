@@ -1,7 +1,0 @@
-
-[memory_comparison worker]  dim=3  mode=kernel  n_bodies=1  grid=1024x256x128  n_steps=80  warmup=15
-terminate called after throwing an instance of 'std::runtime_error'
-  what():  expected ident but found ')' here:
-streaming_sdf_stag_3d_multi(Tensor F_flat, Tensor F_offsets, Tensor body_shapes, Tensor body_meta, Tensor kin, Tensor aabb_lo, Tensor aabb_dim, Tensor gx, Tensor gy, Tensor gz, float h_grid, int max_vol_per_body, Tensor(a!) sdf_cc, Tensor(b!) sdf_u, Tensor(c!) sdf_v, Tensor(d!) sdf_w, Tensor(e!) body_u, Tensor(f!) body_v, Tensor(g!) body_w,) -> ()
-                                                                                                                                                                                                                                                                                                                                                      ~ <--- HERE
-
