@@ -500,7 +500,7 @@ def forces_method2(self, u, v, p, iteration):
 
     # Towers (2008) 2nd-order: compute per-body |∇SDF| on CC grid  (B,Ni,Nj)
     # ``comp.sdf_vals`` was the legacy dense per-body SDF stack.  The new
-    # 2-D Python update (``_update_2d``) populates ``comp._sdf_sparse``
+    # 2-D Python update (``_update_python``) populates ``comp._sdf_sparse``
     # (per-body AABB-cropped slabs) instead — mirroring 3-D.  Reconstruct
     # a dense (B, Ni, Nj) tensor here when the sparse storage is present.
     _have_sparse_2d = (

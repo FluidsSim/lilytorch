@@ -2701,7 +2701,7 @@ class CompositeBodyMesh(Body):
         # 3-D paths always use comp._sdf_sparse (per-body sparse sub-blocks),
         # so skip the dense (B, Nx, Ny, Nz) allocations entirely for 3-D.
         # For streaming 2-D, BDIMhandler.__init__ deletes sdf_vals after init
-        # since _update_2d_streaming_multi / streaming_sdf_forces_post_2d never read it.
+        # since _update_streaming_multi / streaming_sdf_forces_post_2d never read it.
         # if not is_3d:
         #     self.sdf_vals   = torch.zeros((self.nbodies, *gs), device=device)
         #     self.sdf_vals_u = torch.zeros((self.nbodies, *gs), device=device)
