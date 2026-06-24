@@ -18,7 +18,7 @@ for Nx in [256, 512, 1024, 2048]:
     print(f"\n{'='*60}\n  Nx={Nx}  dx={dx:.6f}  D/dx={D/dx:.1f}\n{'='*60}", flush=True)
     pars = yaml2pyobject("lilytorch/src/configs/flow_past_cylinder.yaml")
     pars["solver"].update(xmin=xmin, xmax=xmax, ymin=ymin, ymax=ymax, Nx=Nx, Ny=Ny,
-                          nu=nu, rho=rho, rho_body=rho, solver_method="python",
+                          nu=nu, rho=rho, solver_method="python",
                           poisson_method="multigrid", poisson_max_cycles=30,
                           poisson_nsmoothing=10, poisson_tol=1e-8)
     pars["body"]["sdf"] = [f"lambda x, y: circle(x,y,xt={cx},yt={cy},r={R})"]
@@ -31,8 +31,6 @@ for Nx in [256, 512, 1024, 2048]:
     pars["output"]["save_frames"] = False
     save_path = f"{output_base}/Nx{Nx}/"
     solver = FluidSolver(pars, dtype=torch.float32, compute_forces=False)
-    # NOTE: rho_body no longer affects the solver (BDIM uses dt*mu0/rho_fluid);
-    # this study script is retained for grid-convergence only.
     print(f"  rho_fluid={solver.rho}  nt={solver.nt}", flush=True)
     solver.save_path = save_path
     os.makedirs(solver.save_path, exist_ok=True)

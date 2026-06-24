@@ -69,7 +69,6 @@ extensions:
         nt: 26001
         nu: 0.01
         rho: 1
-        rho_body: 1.5
         eps_multiplier: 2
 
         poisson_tol: 1.0e-7

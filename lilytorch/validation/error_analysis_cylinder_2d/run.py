@@ -73,7 +73,6 @@ for Nx in nxs:
     # --- Physics ---
     pars["solver"]["nu"]                  = nu
     pars["solver"]["rho"]                 = rho
-    pars["solver"]["rho_body"]            = rho
     pars["solver"]["bdim_mu0_projection"] = True
 
     # --- Solver method: CompositeBodyAnalytical does not use BDIMhandler,

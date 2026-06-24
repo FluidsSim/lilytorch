@@ -666,8 +666,15 @@ void jacobi_sweep_3d_cuda(
     AT_DISPATCH_FLOATING_TYPES(p.scalar_type(), "jacobi_sweep_3d", [&] {
         scalar_t* pp = p.data_ptr<scalar_t>();
 
-        // Allocate ping-pong buffer (same shape and device as p)
-        at::Tensor tmp = at::empty_like(p);
+        // Allocate ping-pong buffer (same shape and device as p).
+        // zeros (not empty): the jacobi kernel + apply_neumann_bc_3d write the
+        // interior and the 6 face-ghost layers, but NOT the edge/corner ghost
+        // cells.  When nsmoothing is odd this buffer is copied back into p in
+        // full, so any uninitialised cells would leak into p.  Normally that
+        // memory is benignly finite, but another GPU consumer (e.g. the iso
+        // flow viewer) perturbing the caching allocator can leave NaN/Inf
+        // there, which then propagates and blows up the coupled solve.
+        at::Tensor tmp = at::zeros_like(p);
         scalar_t* pt = tmp.data_ptr<scalar_t>();
 
         apply_neumann_bc_3d<scalar_t>(pp, Nx, Ny, Nz, stream);

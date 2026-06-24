@@ -92,9 +92,6 @@ extensions:
         nt: 4000
         nu: 2.0e-4               # EFFECTIVE viscosity (m^2/s) -> Re ~ 500 (see header)
         rho: 1000                # water (kg/m^3)
-        rho_body: 1000           # FLUID band density inside the body (projection
-                                 # conditioning only) -- keep ~rho_water. NOT the body
-                                 # weight: sink/float = body MASS (gen_sphere.py DENSITY).
         eps_multiplier: 2
 
         gravity: [0, 0, -9.81]   # fluid body force -> hydrostatic pressure -> emergent buoyancy

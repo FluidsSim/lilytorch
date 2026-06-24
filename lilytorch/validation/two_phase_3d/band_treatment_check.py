@@ -42,7 +42,7 @@ def build_pars(D=0.10, pts_per_D=16):
             "poisson_nsmoothing": 6, "poisson_verbose": False,
             "poisson_folder": "lilytorch/data/",
             "poisson_method": "mgcg", "poisson_smoother": "rbgs",
-            "dtype": "float64", "solver_method": "python", "rho_body": rho,
+            "dtype": "float64", "solver_method": "python",
             "force_method": "eulerian",
             "gravity": [0.0, 0.0, -g],
             "two_phase": {                       # uniform density -> pure water
@@ -208,7 +208,7 @@ def asym_lagrangian_test(pts_per_D=16, n_settle=250):
                 "poisson_max_mgcg_cycles": 50, "poisson_nsmoothing": 6,
                 "poisson_verbose": False, "poisson_folder": "lilytorch/data/",
                 "poisson_method": "mgcg", "poisson_smoother": "rbgs",
-                "dtype": "float64", "solver_method": "python", "rho_body": rho,
+                "dtype": "float64", "solver_method": "python",
                 "force_method": force_method, "gravity": [0.0, 0.0, -g],
                 "two_phase": {
                     "alpha_init": "lambda X, Y, Z: torch.ones_like(X).double()",

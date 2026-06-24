@@ -76,7 +76,7 @@ def build_pars(R=0.12, Hint=0.6, y0=1.0, U=2.0):
             "poisson_nsmoothing": 6, "poisson_verbose": False,
             "poisson_folder": "lilytorch/data/",
             "poisson_method": "mgcg", "poisson_smoother": "rbgs",
-            "dtype": "float32", "solver_method": "python", "rho_body": 2000.0,
+            "dtype": "float32", "solver_method": "python",
             "gravity": [0.0, -g],
             "two_phase": {
                 "alpha_init": f"lambda X, Y: (Y < {Hint}).double()",

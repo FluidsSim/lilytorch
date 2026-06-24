@@ -53,7 +53,7 @@ def build_pars(a=0.25):
             "poisson_nsmoothing": 6, "poisson_verbose": False,
             "poisson_folder": "lilytorch/data/",
             "poisson_method": "mgcg", "poisson_smoother": "rbgs",
-            "dtype": "float64", "solver_method": "python", "rho_body": rho_w,
+            "dtype": "float64", "solver_method": "python",
             "gravity": [0.0, -g],
             "two_phase": {
                 # water column: x < a AND y < 2a

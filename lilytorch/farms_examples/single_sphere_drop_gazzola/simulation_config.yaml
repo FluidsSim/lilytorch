@@ -67,7 +67,6 @@ extensions:
         nt                : 27001
         nu                : 8.0e-7
         rho               : 996.0
-        rho_body          : 1005.96
         eps_multiplier    : 2.0
 
         poisson_tol            : 1.0e-9

@@ -18,7 +18,6 @@ The simulation is now driven entirely through ``simulation_config.yaml``:
 
 Key config flags that replicate the original custom behaviour:
   - ``solver.heun: true``              — Heun (RK2) outer time integration
-  - ``solver.rho_body: 1.5``          — sphere density (CGS: g/cm³)
   - ``solver.dtype: "float64"``        — double precision (original default)
   - ``body.2d_plane: "xz"``           — sphere falls in MuJoCo z-direction
   - ``body.force_scaling: 1.0``       — no z-extent scaling for 2-D body

@@ -335,20 +335,28 @@ class FluidSolver(PlottingMixin):
         _u_inlet = float(self.adv_diff_solver.BC_values_u[1])
         self._vmax_abort = float(solver.get("vmax_abort", max(100.0 * abs(_u_inlet), 100.0)))
 
-        # ---- optional torch.compile for adv-diff -----
-        self._compile_adv_diff = solver.get("compile_adv_diff", False)
-        if self._compile_adv_diff and self.device.type == "cuda":
-            self.adv_diff_solver.solve = torch.compile(
-                self.adv_diff_solver.solve, mode="default",
-            )
-
         # ---- multi-stream advection (CUDA only) -----
         # Each velocity component is dispatched on a separate CUDA stream so
         # u/v/w adv-diff can overlap.  Peak intermediate memory is ~ndim× the
         # sequential path (all rhs tensors are live simultaneously); disable
         # on memory-constrained runs.  No-op on CPU.
+        # NOTE: set before the torch.compile decision below — it changes
+        # which path solve() takes (and thus whether compile is worthwhile).
         if solver.get("adv_diff_streams", False) and self.device.type == "cuda":
             self.adv_diff_solver._use_streams = True
+
+        # ---- optional torch.compile for adv-diff -----
+        # Skip when solve() will take the fused CUDA ``advect_flux_add`` kernel
+        # path: that path is a custom op + host syncs, so compiling it gives no
+        # speedup and trips dynamo's speculation log ("SpeculationLog diverged"
+        # AssertionError on graph-break restart).  Compile only helps the
+        # pure-PyTorch fallback (e.g. semi-Lagrangian, multi-stream ND>1).
+        self._compile_adv_diff = solver.get("compile_adv_diff", False)
+        if (self._compile_adv_diff and self.device.type == "cuda"
+                and not self.adv_diff_solver.uses_cuda_flux_kernel):
+            self.adv_diff_solver.solve = torch.compile(
+                self.adv_diff_solver.solve, mode="default",
+            )
 
         # ---- optional torch.compile for project() -----
         # Fuses divergence + Poisson + velocity-correction ops into fewer

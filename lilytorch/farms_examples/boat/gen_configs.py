@@ -159,7 +159,7 @@ class SimConfig(BaseSimConfig):
         # self.body_velocity_blend_eps_cells = 3
 
         # ── Physics (real ~6 m scale) ─────────────────────────────────
-        self.rho_body      = 1000.0   # Poisson conditioning (not boat density)
+        self.rho_body      = 1000.0
         self.rho           = 1000.0   # water density
         self.nu            = 1.0e-6   # real water kinematic viscosity [m²/s]
         self.timestep      = 0.001

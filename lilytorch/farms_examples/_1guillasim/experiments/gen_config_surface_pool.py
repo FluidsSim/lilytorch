@@ -79,7 +79,7 @@ class SimConfig(BaseSimConfig):
                 "control_pars"   : {
                     "file_path": os.path.join(
                         # self.data_folder, "/data/andreaferrario/1guilla_experiments/swim/log/ms004mpt003log.csv"
-                        self.data_folder, "/data/andreaferrario/1guilla_experiments/swim/log/ms004mpt003log.csv"
+                        self.data_folder, "/data/andreaferrario/1guilla_experiments/swim/log/ms001mpt001log.csv"
                     ),
                 },
             },
@@ -217,19 +217,6 @@ class SimConfig(BaseSimConfig):
         # Pressure force readout = SBP-clean union-∂H partition via
         # solver.force_submethod = "deltaH" (set in __init__).
 
-
-        # if USE_FREE_SURFACE:
-        #     # One-fluid free surface: uniform density (air = void); the p=0 BC
-        #     # at the surface already pins the pressure datum.
-        #     solver["free_surface"] = {
-        #         "extend_iters": 10,
-        #         "use_gfm_gradient": True,
-        #     }
-        #     solver["two_phase"]["rho_air"] = 1000.0       # = rho_water (uniform)
-        #     solver["two_phase"]["nu_air"] = self.nu       # = nu_water (uniform)
-
-        #     # The BDIMhandler auto-detects solver.free_surface and selects
-        #     # FreeSurfaceSolver instead of TwoPhaseSolver.
 
         return bdim_ext
 

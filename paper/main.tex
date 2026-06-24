@@ -56,8 +56,9 @@ closed-loop neuromechanical experiments yet accurate enough to capture
 viscous boundary layers and unsteady wakes.  We present \lilytorch, an
 open-source, GPU-accelerated incompressible Navier--Stokes solver that
 implements a second-order Boundary Data Immersion Method (BDIM2) on a
-staggered Cartesian grid and couples two-way with the \mujoco physics
-engine through the \farms framework.  The solver supports both
+staggered Cartesian grid and couples two-way with an external
+rigid-body dynamics engine through a thin, engine-agnostic adapter;
+the present reference implementation drives \mujoco.  The solver supports both
 analytical signed-distance functions (spheres, capsules, boxes, fish
 spines) and mesh-based bodies (STL/OBJ through \textsc{Open3D} and
 fast-marching), handles per-link articulated kinematics, and offers a
@@ -75,9 +76,9 @@ decomposition.  A union bounding-box optimisation for articulated
 bodies and a gauge-consistent force readout for high-density-ratio
 free-surface flows are introduced to keep the coupled simulation both
 fast and physically faithful.  We describe the continuous and discrete formulations,
-detail how rigid, articulated, and mesh bodies are integrated with
-\mujoco, and discuss the implications of the proposed coupling for
-embodied studies of aquatic locomotion.
+detail how rigid, articulated, and mesh bodies are integrated with an
+external multibody engine, and discuss the implications of the proposed
+coupling for embodied studies of aquatic locomotion.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -131,21 +132,19 @@ can be implemented concisely on top of modern array frameworks; our
 work adopts the same philosophy in \pytorch and extends it to two-way
 coupling with a general-purpose multibody engine.
 
-On the robotics side, \mujoco~\cite{todorov2012mujoco} has become the
-reference engine for articulated rigid-body dynamics and is widely used
-for legged and swimming locomotion.  The
-\farms framework~\cite{arreguit2023farms} provides a high-level
-neuromechanical abstraction on top of \mujoco, with central-pattern
-generators~\cite{ijspeert2008central}, sensor buses, and extension
-hooks.  However, neither \mujoco nor \farms natively models a viscous
-fluid: aquatic experiments have historically relied on drag
-coefficients or added-mass approximations, which cannot reproduce wake
-reattachment, vortex shedding, or inter-body interference.  Plugging a
-fully-resolved CFD solver into this stack requires:
+On the robotics side, general-purpose rigid-body dynamics engines such
+as \mujoco~\cite{todorov2012mujoco}, Isaac~Sim, and Bullet have become
+the standard tools for simulating articulated legged and swimming
+locomotion.  None of them, however, natively models a viscous fluid:
+aquatic experiments have historically relied on drag coefficients or
+added-mass approximations, which cannot reproduce wake reattachment,
+vortex shedding, or inter-body interference.  Coupling a
+fully-resolved CFD solver to such an engine requires:
 (i) a fluid formulation that accepts arbitrarily-moving, articulated
 geometry at every time step;
 (ii) a body representation that covers analytical primitives as well
-as arbitrary triangular meshes (for which \mujoco uses STL/OBJ); and
+as the arbitrary triangular meshes (STL/OBJ) these engines already use
+for collision geometry; and
 (iii) a pressure-projection path that tolerates per-step changes in
 body mask, density, and viscosity.
 
@@ -154,12 +153,14 @@ This paper describes \lilytorch, an open-source
 solver that we designed to fill this gap.  Its contributions are:
 
 \begin{itemize}
-\item \textbf{A single-GPU, two-way coupled CFD+\mujoco pipeline.}
-  Every time step the fluid solver reads link poses from \mujoco,
-  recomputes per-link signed-distance functions (SDFs), performs a
-  BDIM2 Heun predictor--corrector step, integrates hydrodynamic
-  forces, and writes them back as external wrenches.  The entire
-  pipeline runs on one GPU without inter-process communication.
+\item \textbf{A single-GPU, two-way coupled CFD + multibody pipeline.}
+  Every time step the fluid solver reads link poses from an external
+  rigid-body engine, recomputes per-link signed-distance functions
+  (SDFs), performs a BDIM2 Heun predictor--corrector step, integrates
+  hydrodynamic forces, and writes them back as external wrenches
+  through a thin engine-agnostic adapter.  The reference implementation
+  couples to \mujoco and runs the entire pipeline on one GPU without
+  inter-process communication.
 \item \textbf{Unified analytical / mesh body handling.}  A common
   \texttt{Body} abstraction exposes spheres, capsules, boxes, NACA
   fish-spine profiles, and STL/OBJ meshes (loaded via
@@ -192,8 +193,8 @@ solver that we designed to fill this gap.  Its contributions are:
 The remainder of this paper is organised as follows.
 Section~\ref{sec:methods} presents the continuous equations, the
 discrete numerical schemes, the BDIM2 immersed-boundary formulation,
-the analytical and mesh body classes, and the coupling with \mujoco
-through \farms.  Section~\ref{sec:discussion} discusses design
+the analytical and mesh body classes, and the coupling with an external
+multibody engine.  Section~\ref{sec:discussion} discusses design
 trade-offs, comparisons with existing tools, limitations, and
 planned extensions.  Experimental validation and quantitative results
 are deferred to a companion section.
@@ -377,7 +378,7 @@ restriction and bilinear (2-D) or trilinear (3-D) prolongation are
 used.  The coarsest level is a trivial $2\times 2\,(\times 2)$ direct
 solve.
 
-\paragraph{Variable-density extension for \mujoco coupling}  When the
+\paragraph{Variable-density extension for multibody coupling}  When the
 body density $\rho_b$ differs from the fluid $\rho_f$ we assemble an
 effective density
 $\rho(\mathbf x)=\rho_b+(\rho_f-\rho_b)\mu_0(\mathbf x)$ and face
@@ -403,7 +404,7 @@ capsules (useful for articulated fish tails), and NACA-foil fish
 spines parameterised by a cubic spline of centre-line
 positions~\cite{kern2006simulations}.  Because $d$ is evaluated
 analytically at every time step, arbitrary kinematics (prescribed or
-driven by \mujoco) cost only a small number of elementwise GPU
+driven by the multibody engine) cost only a small number of elementwise GPU
 kernels.
 
 \subsubsection{Mesh bodies}  For arbitrary
@@ -414,8 +415,8 @@ pipeline is: closest-point queries through
 via winding numbers; narrow-band fast
 marching~\cite{sethian1996fastmarch} (scikit-fmm) to extend the
 distance field beyond the mesh; and projection onto the three MAC
-face grids.  At simulation time the body pose (from \mujoco or from
-a prescribed trajectory) rigidly transforms the cached SDF via a
+face grids.  At simulation time the body pose (from the multibody
+engine or from a prescribed trajectory) rigidly transforms the cached SDF via a
 \texttt{pytorch-interpolation} regular-grid trilinear interpolator,
 so that mesh updates are a single GPU interpolation rather than a
 re-triangulation.
@@ -431,16 +432,17 @@ full grid whenever it occupies less than $\approx 90\%$ of the
 domain, which is the common case for small animats in large pools.
 
 
-\subsection{Coupling with \mujoco through \farms}\label{sec:coupling}
+\subsection{Coupling with an external rigid-body engine}\label{sec:coupling}
 
 In standalone mode the \texttt{FluidSolver} simply advances
 Eqs.~\eqref{eq:momentum}--\eqref{eq:continuity} together with
-prescribed body kinematics.  In coupled mode, the solver is invoked
-as a \farms \texttt{TaskExtension} (\texttt{FluidExtension}), which
-participates in \mujoco's \texttt{before\_step} callback.  One
-coupled time step proceeds as follows:
+prescribed body kinematics.  In coupled mode it exchanges data with an
+external multibody dynamics engine through a thin adapter that exposes
+only two operations --- read the per-link poses and twists, and write
+back per-link wrenches --- so the same solver can in principle drive
+any rigid-body engine.  One coupled time step proceeds as follows:
 \begin{enumerate}
-\item \emph{Pose read-out.}  \farms sensors expose link positions,
+\item \emph{Pose read-out.}  The engine exposes link positions,
       orientations, and linear/angular velocities; these are copied
       into \pytorch tensors.
 \item \emph{SDF assembly.}  Each link updates its cached SDF
@@ -457,21 +459,29 @@ coupled time step proceeds as follows:
       that smoothly switches on as a link crosses a prescribed free
       surface.
 \item \emph{Wrench write-back.}  The six-vector per-link wrench is
-      written to \mujoco's \texttt{xfrc\_applied} buffer and
-      integrated by the rigid-body engine during its next step.
+      written back to the engine as an external force/torque and
+      integrated by the rigid-body solver during its next step.
 \end{enumerate}
-Because \lilytorch and \mujoco share a single Python process, no
+When the solver and the engine share a single process, no
 inter-process communication is required; the GPU and CPU execute in
-alternation once per simulation step.  A complementary
-\texttt{WaterDynamicsCallback} feeds the CFD velocity field back to
-\mujoco's native drag solver for cheaper, lower-fidelity scenarios
-(e.g.\ shallow-water robots), and a \texttt{FlowViewer} extension
-renders vorticity isosurfaces directly inside the \mujoco GUI and
-recorded video, aiding debugging.
+alternation once per simulation step.  An optional lower-fidelity path
+instead feeds the CFD velocity field to the engine's native analytic
+drag solver (e.g.\ for shallow-water robots), and a flow-visualisation
+hook renders vorticity isosurfaces directly inside the engine's viewer
+and recorded video, aiding debugging.
+
+\paragraph{Reference implementation}  The coupling is currently
+realised for \mujoco~\cite{todorov2012mujoco} via the \farms
+neuromechanical framework~\cite{arreguit2023farms}: the fluid solver
+runs as a task extension inside \mujoco's per-step callback, reads link
+states from the \farms sensor bus, and writes the per-link wrenches into
+\mujoco's applied-force buffer, all within one Python process.  Porting
+to a different engine (e.g.\ Isaac~Sim or Bullet) only requires
+reimplementing the two-operation pose/wrench adapter.
 
 \paragraph{Body density and buoyancy}  Hydrodynamic and inertial
-properties of the multibody model are inherited from the \mujoco XML
-(masses, inertias, collision meshes).  The fluid solver additionally
+properties of the multibody model are inherited from the engine's model
+description (masses, inertias, collision meshes).  The fluid solver additionally
 queries a \emph{body density} $\rho_b$: when it equals the fluid
 density the projection reduces to the standard BDIM form; otherwise
 the variable-density multigrid path is taken and buoyancy is computed
@@ -578,7 +588,7 @@ seams between abutting links --- and the resulting force density is
 distributed back to the individual links by a softmin partition of
 unity $w_b=\mathrm{softmax}(-d_b/\tau)$, $\tau{=}1.5h$, so that
 $\sum_b\mathbf F_b$ equals the union force exactly while each link
-still receives a force and torque for \mujoco.  On a static submerged
+still receives a force and torque for the multibody engine.  On a static submerged
 sphere the readout recovers $F_z/F_\mathrm{Archimedes}\!\approx\!1$
 with a horizontal force at machine zero, and on the 9-link swimmer it
 removes the depth-dependent hydrostatic bias of the baseline
@@ -602,8 +612,8 @@ spatial dimension and per smoother choice.
 YAML configuration files drive every simulation: the
 \texttt{solver}, \texttt{boundary\_conditions}, \texttt{body}, and
 \texttt{output} blocks select grid, BCs, bodies, and logging; an
-additional \texttt{physics} block is used only when coupling with
-\farms.  State checkpoints are written to HDF5 and can be resumed.
+additional \texttt{physics} block is used only when coupling with an
+external engine.  State checkpoints are written to HDF5 and can be resumed.
 
 
 \subsection{Union narrow-band optimisation for articulated bodies}\label{sec:union-narrow-band}
@@ -724,8 +734,8 @@ advantages.  First, \pytorch's autograd and \texttt{torch.compile}
 infrastructure are readily available for \emph{adjoint}-based shape
 and control optimisation~\cite{kochkov2021machinelearned}, without
 any additional code.  Second, the Python ecosystem makes it trivial
-to embed the solver inside \mujoco, \farms, or reinforcement-learning
-training loops, which is our primary use case.  Third, every
+to embed the solver inside a rigid-body engine or a
+reinforcement-learning training loop, which is our primary use case.  Third, every
 research group already familiar with \pytorch can modify the solver
 --- for instance by swapping the advection scheme or plugging in a
 learned closure~\cite{brunton2020machine} --- without cross-language
@@ -784,7 +794,7 @@ milliseconds per step, independent of the number of triangles.
 
 \subsection{Coupling stability and time-step considerations}
 
-Two-way coupling with \mujoco exposes two numerical pitfalls.
+Two-way coupling with an external rigid-body engine exposes two numerical pitfalls.
 \emph{Added-mass instability} can arise when $\rho_b\!\approx\!\rho_f$
 and the fluid forces dominate the body inertia~\cite{causin2005added};
 for the neutrally-buoyant animats studied here we mitigate it with
@@ -793,7 +803,7 @@ $\rho=\rho_b+(\rho_f-\rho_b)\mu_0$, which absorbs the fluid's
 virtual mass into the Poisson operator rather than treating it as an
 explicit body force.  \emph{Temporal resolution mismatch}
 between the fluid (CFL-limited at $\Delta t\!\sim\!10^{-4}$~s on a
-$1$~cm grid) and \mujoco (typically $10^{-3}$~s for contact
+$1$~cm grid) and the rigid-body engine (typically $10^{-3}$~s for contact
 stability) is handled by running both engines at the fluid time
 step; the overhead on the rigid-body side is negligible compared to
 the fluid cost.
@@ -819,7 +829,7 @@ predictions.  Adaptive time stepping is
 currently manual and could be automated from the flow diagnostics
 already tracked by the solver (kinetic energy, enstrophy, max-CFL,
 max-divergence).  On the robotics side, a tighter integration of the
-fluid forces into \mujoco's semi-implicit integrator would address
+fluid forces into the host engine's semi-implicit integrator would address
 the residual added-mass instability for fully hollow bodies.  Finally,
 because all kernels are \pytorch-native and differentiable, end-to-end
 adjoint optimisation of gait parameters or morphology appears

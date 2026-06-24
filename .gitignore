@@ -32,6 +32,14 @@ paper/main.fls
 paper/main.log
 paper/main.out
 paper/main.synctex.gz
+paper/supplementary.aux
+paper/supplementary.bbl
+paper/supplementary.blg
+paper/supplementary.fdb_latexmk
+paper/supplementary.fls
+paper/supplementary.log
+paper/supplementary.out
+paper/supplementary.synctex.gz
 
 # VS Code
 .vscode/

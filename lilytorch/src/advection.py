@@ -571,6 +571,21 @@ class AdvDiffSolver:
             return lambda u, c, d, _C=C_step: self._scheme(u, c, d, C=_C)
         return self._scheme
 
+    @property
+    def uses_cuda_flux_kernel(self):
+        """Whether ``solve`` will take the fused CUDA ``advect_flux_add`` path.
+
+        That path calls a hand-written custom op plus host-side ``.item()``
+        syncs, so wrapping it in ``torch.compile`` yields negligible benefit
+        and trips dynamo's speculation log (graph-break on restart).  Mirrors
+        the ``use_cuda_kernel`` guard inside :meth:`_solve_convective`.
+        """
+        return (
+            self._is_cuda
+            and self._scheme_name in _CUDA_SCHEME_IDS
+            and not (self._use_streams and self.ndim > 1)
+        )
+
     def _solve_convective(self, *vel, nu_t=None, iteration=0):
         """Forward-Euler advection-diffusion step.
 

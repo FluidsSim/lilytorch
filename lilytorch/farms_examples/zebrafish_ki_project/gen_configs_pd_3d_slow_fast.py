@@ -52,7 +52,7 @@ class SimConfig(BaseSimConfig):
 
         self.bdim_physics = {
             "solref": [-2e4, -30e1],
-            "solimp": [0., 0.95, 0.001, 0.5, 2],
+            "solimp": [0., 0.1, 0.001, 0.5, 2],
         }
 
 
@@ -79,11 +79,12 @@ class SimConfig(BaseSimConfig):
 
 
         self.coupling = {
-            "scheme": "implicit",
-            "accelerator": "iqn-ils",   # or "aitken" / "constant"
-            "reuse": 2,
-            "tol": 1e-4,
-            "max_iter": 30,
+            "scheme": "explicit",
+            # "scheme": "implicit",
+            # "accelerator": "aitken",   # iqn-ils reuse poisoning → use aitken / reuse=0
+            # "reuse": 0,
+            # "tol": 1e-4,
+            # "max_iter": 30,
         }
 
         # ── 3-D grid ─────────────────────────────────────────────────
@@ -97,7 +98,7 @@ class SimConfig(BaseSimConfig):
         self.zmin         = -0.00625
         self.zmax         = 0.00625
         self.timestep     = 0.0005
-        self.n_iterations = 401
+        self.n_iterations = 2001
 
         # self.Nx           = 1024
         # self.Ny           = 256
@@ -185,17 +186,17 @@ class SimConfig(BaseSimConfig):
             },
         })
 
-        # Interactive viewer: keep the camera locked on the fish CoM
-        extensions.append({
-            "loader": "farms_mujoco.simulation.extensions.CameraFollower",
-            "config": {
-                "animat_id"       : 0,
-                "azimuth"         : 90,
-                "elevation"       : -30,
-                "distance"        : 0.04,
-                "angular_velocity": 0,
-            },
-        })
+        # # Interactive viewer: keep the camera locked on the fish CoM
+        # extensions.append({
+        #     "loader": "farms_mujoco.simulation.extensions.CameraFollower",
+        #     "config": {
+        #         "animat_id"       : 0,
+        #         "azimuth"         : 90,
+        #         "elevation"       : -30,
+        #         "distance"        : 0.04,
+        #         "angular_velocity": 0,
+        #     },
+        # })
 
         extensions.append({
             "loader": "lilytorch.integration.flow_iso_gl_viewer.FlowIsoGLViewer",
@@ -275,25 +276,25 @@ class SimConfig(BaseSimConfig):
         })
 
         # Back camera: looking along +X from behind the fish.
-        back_cam = back_camera_config(
-            self.xmin, self.xmax,
-            self.ymin, self.ymax,
-            self.zmin, self.zmax,
-            overshoot=1.0,
-            max_width=3840, max_height=2160,
-        )
-        back_cam["elevation"] = -30   # match the top-down / follow camera tilt
-        extensions.append({
-            "loader": "lilytorch.integration.streaming_camera.StreamingCameraRecording",
-            "config": {
-                "path"            : os.path.join(output_folder, "output", "video_back.mp4"),
-                "animat_id"       : None,
-                "fps"             : 30,
-                "speed"           : 0.1,
-                "angular_velocity": 0,
-                **back_cam,
-            },
-        })
+        # back_cam = back_camera_config(
+        #     self.xmin, self.xmax,
+        #     self.ymin, self.ymax,
+        #     self.zmin, self.zmax,
+        #     overshoot=1.0,
+        #     max_width=3840, max_height=2160,
+        # )
+        # back_cam["elevation"] = -30   # match the top-down / follow camera tilt
+        # extensions.append({
+        #     "loader": "lilytorch.integration.streaming_camera.StreamingCameraRecording",
+        #     "config": {
+        #         "path"            : os.path.join(output_folder, "output", "video_back.mp4"),
+        #         "animat_id"       : None,
+        #         "fps"             : 30,
+        #         "speed"           : 0.1,
+        #         "angular_velocity": 0,
+        #         **back_cam,
+        #     },
+        # })
 
         # SkyModifier must be LAST so all CameraRecording renderers already
         # exist when initialize_episode runs the GPU texture upload.

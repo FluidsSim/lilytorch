@@ -1,0 +1,539 @@
+% =====================================================================
+% LilyTorch — Supplementary Information
+%
+% Detailed numerical formulations that are summarised only briefly in
+% the main manuscript (main.tex):
+%   S1  Spatial discretisation and ghost cells
+%   S2  Advection schemes (the six convective limiters)
+%   S3  Boundary conditions (velocity ghost layer + Poisson)
+%   S4  Pressure-projection / Poisson back-ends
+%   S5  Strong (implicit) fluid--structure coupling
+%
+% Standalone document: compiles on its own and shares references.bib
+% with the main manuscript.
+%
+%   pdflatex supplementary
+%   bibtex   supplementary
+%   pdflatex supplementary
+%   pdflatex supplementary
+% =====================================================================
+
+\documentclass[10pt,onecolumn]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{cite}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{url}
+\usepackage[hidelinks]{hyperref}
+\usepackage{bm}
+\usepackage{xspace}
+
+% ---- Convenience macros (mirror main.tex) ---------------------------
+\newcommand{\lilytorch}{\textsc{LilyTorch}\xspace}
+\newcommand{\farms}{\textsc{FARMS}\xspace}
+\newcommand{\mujoco}{\textsc{MuJoCo}\xspace}
+\newcommand{\pytorch}{\textsc{PyTorch}\xspace}
+\newcommand{\waterlily}{\textsc{WaterLily.jl}\xspace}
+\newcommand{\bdim}{BDIM\xspace}
+
+% Supplementary numbering: S1, S2, ... and equations (S1), (S2), ...
+\renewcommand{\thesection}{S\arabic{section}}
+\renewcommand{\theequation}{S\arabic{equation}}
+\renewcommand{\thetable}{S\arabic{table}}
+\renewcommand{\thefigure}{S\arabic{figure}}
+
+\title{\lilytorch: Supplementary Information\\[2pt]
+\large Detailed Numerical Formulations for the Advection Schemes,
+Boundary Conditions, Pressure Solvers, and Implicit Coupling}
+\author{Andrea Ferrario}
+\date{}
+
+\begin{document}
+\maketitle
+
+\noindent
+This supplement expands the numerical methods that are stated only
+briefly in the main manuscript.  Section and equation numbers carry an
+``S'' prefix; cross-references of the form ``\S2.x'' or ``Eq.~(x)''
+without the prefix point to the main text.  Symbols follow the main
+text: $h$ is the (uniform) cell size, $\Delta t$ the time step,
+$\mathbf u$ the velocity, $p$ the pressure, $\rho$ the density, $\nu$
+the kinematic viscosity, and $d(\mathbf x)$ the signed-distance
+function (SDF) of an immersed body (positive in the fluid).  All fields
+live on a Marker-and-Cell (MAC) staggered grid with one ghost cell per
+side.
+
+
+% =====================================================================
+\section{Spatial discretisation and ghost cells}\label{sec:s-grid}
+% =====================================================================
+
+The domain $\Omega\subset\mathbb R^{d}$ ($d\in\{2,3\}$) is stored as
+arrays of shape $(N_x{+}2)\times(N_y{+}2)\,[\times(N_z{+}2)]$, where the
+single extra layer on each side is the \emph{ghost} (halo) layer used to
+impose boundary conditions.  Pressure $p$ lives at cell centres; the
+velocity components live on their own staggered face grids ($u$ on
+$x$-faces, $v$ on $y$-faces, $w$ on $z$-faces).  Throughout this
+supplement we use the index convention that, along a given dimension,
+slice \texttt{[0]} is the low ghost layer, \texttt{[-1]} the high ghost
+layer, and \texttt{[1:-1]} the interior.
+
+The convective operator acts on a one-dimensional family of stencils:
+for a transported quantity $\phi$ and a face velocity
+$f$, the flux through an interior face uses the three aligned values
+$(\phi_{\text{upstream}},\phi_{\text{centre}},\phi_{\text{downstream}})$,
+selected by the sign of $f$.  The transverse face velocity needed to
+advect a staggered momentum component is obtained by averaging the
+appropriate neighbouring velocities to the flux face; for a
+cell-centred scalar transported along direction $d$ the $d$-face already
+coincides with the MAC location of $u_d$, so no transverse averaging is
+needed.  These details are what make the scheme functions below pure,
+dimension-agnostic kernels $\lambda(u,c,d)$ of the three upstream/
+centre/downstream samples.
+
+
+% =====================================================================
+\section{Advection schemes}\label{sec:s-advection}
+% =====================================================================
+
+The convective term is written in flux form,
+$\nabla\!\cdot(\mathbf u\otimes\phi)$, and discretised by reconstructing
+a face value $\phi_f$ from the three aligned cell values
+$u=\phi_{\text{upstream}}$, $c=\phi_{\text{centre}}$,
+$d=\phi_{\text{downstream}}$ (relative to the local flow direction).
+Five of the six schemes return a single face value $\phi_f=\lambda(u,c,d)$
+and differ only in the limiter $\lambda$; the sixth (semi-Lagrangian)
+replaces the flux form entirely.  The advection--diffusion sub-step is
+advanced with forward Euler and embedded in the outer Heun (RK2)
+predictor--corrector of the main text (\S2.2).
+
+Several limiters are conveniently expressed through the upwind ratio of
+consecutive gradients
+\begin{equation}
+  r = \frac{c-u}{d-c},
+  \label{eq:s-rf}
+\end{equation}
+evaluated with a small floor on the denominator; where $|d-c|$
+underflows, the scheme falls back to the first-order upwind value $c$.
+The TVD limiters then take the form
+\begin{equation}
+  \phi_f = c + \tfrac12\,(d-c)\,\psi(r),
+  \label{eq:s-tvd}
+\end{equation}
+so the limiter function $\psi(r)$ fully characterises the scheme.
+
+\paragraph{QUICK (third-order upwind).}
+The Quadratic Upstream Interpolation for Convective Kinematics
+scheme~\cite{leonard1979quick} fits a parabola through the three points
+and is stabilised with a double-median (ULTIMATE-style) limiter:
+\begin{align}
+  \phi_f^{\text{QUICK}} &= \tfrac{1}{6}\,(5c + 2d - u),
+  \label{eq:s-quick-raw}\\
+  m_{\text{in}} &= \operatorname{median}(10c-9u,\; c,\; d),
+  \nonumber\\
+  \phi_f &= \operatorname{median}\!\bigl(\phi_f^{\text{QUICK}},\; c,\;
+            m_{\text{in}}\bigr).
+  \label{eq:s-quick}
+\end{align}
+The inner median bounds the curvature correction, and the outer median
+clips the result into the monotone interval, which suppresses the
+dispersive overshoots of the unlimited parabola while retaining
+third-order accuracy in smooth regions.  This is the default scheme.
+
+\paragraph{ADBQUICKEST (Courant-dependent TVD QUICKEST).}
+A TVD form of Leonard's QUICKEST in which the limiter depends explicitly
+on the local Courant number $C=|f|\,\Delta t/h$.  With $r$ from
+\eqref{eq:s-rf} the limiter is
+\begin{equation}
+  \psi(r) = \max\!\Bigl[\,0,\;
+    \min\!\bigl(\,2(1-C)\,r,\;
+      \tfrac{(2+C^2-3C)+(1-C^2)\,r}{3(1-C)},\;
+      2(1-C)\bigr)\Bigr],
+  \label{eq:s-abdq}
+\end{equation}
+inserted into \eqref{eq:s-tvd}.  The explicit $C$-dependence tightens
+the stability bound at large Courant numbers, so this scheme is the
+preferred high-order option when $\Delta t$ approaches the advective CFL
+limit.  The implementation requires the actual per-face Courant number
+to be consistent with the $C$ used in the limiter (a global
+$\max|f|\,\Delta t/h$ is used).
+
+\paragraph{CUBISTA (Convergent and Universally Bounded Interpolation
+Scheme).}
+A second-order, universally bounded high-resolution scheme of Alves,
+Oliveira \& Pinho~\cite{alves2003convergent}, designed for smooth
+convergence of iterative solvers.  Its limiter is the piecewise-linear
+envelope
+\begin{equation}
+  \psi(r) = \max\!\Bigl[\,0,\;
+    \min\!\bigl(\,\tfrac{3}{2}\,r,\;
+      \tfrac{3}{4}\,r + \tfrac14,\;
+      \tfrac{3}{2}\bigr)\Bigr].
+  \label{eq:s-cubista}
+\end{equation}
+
+\paragraph{van Leer.}
+The classical smooth (differentiable) symmetric limiter~\cite{vanleer1979towards}
+\begin{equation}
+  \psi(r) = \frac{r + |r|}{1 + |r|},
+  \label{eq:s-vanleer}
+\end{equation}
+again used in \eqref{eq:s-tvd}.  It is second-order and TVD, with a
+gentler shape than the QUICK family.
+
+\paragraph{Central differences (CDS).}
+The plain non-upwind, non-TVD second-order reconstruction
+\begin{equation}
+  \phi_f = \tfrac12\,(c + d).
+  \label{eq:s-cds}
+\end{equation}
+It is the most accurate in smooth, well-resolved flow but admits
+dispersive wiggles when the cell Reynolds/P\'eclet number is large; it
+is mainly used for verification and for the boundary-face fallback of
+the limited schemes (the lowest/highest interior faces, where the full
+three-point stencil is unavailable, default to CDS).
+
+\paragraph{Semi-Lagrangian back-tracing.}
+For very large time steps the unconditionally stable semi-Lagrangian
+advection of Stam~\cite{stam1999stable} is available.  Instead of a flux
+balance, the departure point $\mathbf x_d = \mathbf x - \Delta t\,
+\mathbf u(\mathbf x)$ of each grid node is traced backwards and the field
+is interpolated there,
+\begin{equation}
+  \phi^{*}(\mathbf x) = \phi^{n}\!\bigl(\mathbf x - \Delta t\,
+  \mathbf u^{n}(\mathbf x)\bigr),
+  \label{eq:s-semilag}
+\end{equation}
+by trilinear (3-D) / bilinear (2-D) interpolation.  This removes the
+advective CFL restriction entirely at the cost of substantial numerical
+diffusion, and is intended for fast, low-fidelity previews rather than
+quantitative runs.
+
+\medskip
+Table~\ref{tab:s-advection} summarises the schemes.  All five flux-form
+limiters share the registry used both by the momentum advection and by
+the volume-of-fluid colour transport of the two-phase model
+(main text \S2.7); they are additionally available as a single fused
+CUDA flux kernel that accumulates the right-hand side in place
+(main text \S2.10).
+
+\begin{table}[t]
+\centering
+\caption{Convective schemes exposed through the
+\texttt{convection\_method} configuration key.}
+\label{tab:s-advection}
+\begin{tabular}{@{}l l c l@{}}
+\toprule
+Key & Scheme & Order & Notes\\
+\midrule
+\texttt{quick}        & QUICK + double median   & 3 & default; ULTIMATE-limited \\
+\texttt{abdquickest}  & ADBQUICKEST             & 3 & TVD, Courant-dependent \\
+\texttt{cubista}      & CUBISTA                 & 2 & TVD, universally bounded \\
+\texttt{van\_leer}    & van Leer                & 2 & TVD, smooth limiter \\
+\texttt{cds}          & central differences     & 2 & not TVD; verification / fallback \\
+\texttt{semi-lagrangian} & Stam back-tracing    & 1--2 & unconditionally stable, diffusive \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+% =====================================================================
+\section{Boundary conditions}\label{sec:s-bc}
+% =====================================================================
+
+\lilytorch distinguishes the \emph{velocity} boundary conditions, which
+act on the ghost layer of each MAC component, from the \emph{Poisson}
+boundary condition, which is a property of the chosen pressure back-end.
+
+\subsection{Velocity ghost-cell conditions}
+
+Each velocity component carries an independent list of per-face
+condition types and values.  The faces are ordered
+\begin{equation*}
+  (\text{dim0\_lo},\ \text{dim0\_hi},\ \text{dim1\_lo},\ \text{dim1\_hi},
+   \ [\text{dim2\_lo},\ \text{dim2\_hi}]),
+\end{equation*}
+i.e.\ $(\text{west, east, south, north}[, \text{bottom, top}])$, giving
+a list of $4$ entries in 2-D and $6$ in 3-D per component
+(\texttt{bc\_type\_u/v/w} and \texttt{bc\_values\_u/v/w} in the
+configuration; an unspecified tail defaults to Neumann).  Three
+elementary ghost operations cover all supported cases.  Writing $g$ for
+the ghost slice and $i$ for the adjacent interior slice:
+
+\begin{itemize}
+\item \textbf{Neumann (zero-gradient)} — copy the interior value into
+  the ghost,
+  \begin{equation}
+    \phi_g = \phi_i,
+    \label{eq:s-neumann}
+  \end{equation}
+  giving $\partial\phi/\partial n = 0$ at the face.  This is the default
+  open/outflow-like condition.
+\item \textbf{Dirichlet (direct)} — for a velocity component
+  \emph{normal} to its own boundary face the wall value coincides with a
+  grid location, so it is written directly,
+  \begin{equation}
+    \phi_g = \phi_{\text{wall}}.
+    \label{eq:s-dirichlet}
+  \end{equation}
+  This sets, e.g., a prescribed inflow normal velocity or a zero
+  through-wall velocity.
+\item \textbf{Dirichlet (reflective / mirror)} — for a component
+  \emph{tangential} to the face the wall value sits half a cell outside
+  the last interior node, so the prescribed value $\phi_{\text{wall}}$ is
+  imposed by linear reflection,
+  \begin{equation}
+    \phi_g = 2\,\phi_{\text{wall}} - \phi_i,
+    \label{eq:s-reflect}
+  \end{equation}
+  which makes the face-interpolated value equal $\phi_{\text{wall}}$
+  exactly.  With $\phi_{\text{wall}}=0$ this is the standard no-slip
+  mirror.
+\end{itemize}
+
+The three operations are applied in a fixed, stable order
+(Neumann, then direct Dirichlet, then reflective Dirichlet) so that a
+wall-face direct write is already committed before the reflective form
+reads the up-to-date interior value.  On the GPU, when all components
+are contiguous CUDA tensors of the same floating dtype, the entire set
+of per-face slice copies is dispatched as a single fused
+\texttt{apply\_bcs\_2d}/\texttt{apply\_bcs\_3d} CUDA kernel (one launch
+instead of many small slice assignments); an eager \pytorch loop is the
+fallback otherwise.  A typical channel uses a direct Dirichlet inflow on
+the west face, Neumann outflow on the east face, and reflective no-slip
+on the lateral walls; a free-stream / open box uses Neumann on all
+faces.
+
+\subsection{Pressure (Poisson) boundary conditions}
+
+The pressure-projection back-end carries its own boundary treatment,
+selected by \texttt{poisson\_bc\_type}:
+
+\begin{itemize}
+\item \textbf{Neumann} ($\partial p/\partial n = 0$ on every face) — the
+  homogeneous-Neumann Laplacian is exactly diagonalised by the type-II
+  DCT (Section~\ref{sec:s-poisson}), giving the fastest solve.  Because
+  the all-Neumann problem fixes $p$ only up to an additive constant, the
+  pressure datum (null space) must be pinned; this is the natural choice
+  for closed/walled domains.
+\item \textbf{Free} (free-space / unbounded) — the right-hand side is
+  zero-padded and convolved with a regularised free-space Green's
+  function, emulating an infinite domain with no reflected pressure
+  waves at the box edges.  This is the appropriate choice for an
+  isolated body in open water, often combined with the sponge layer
+  (main text \S2.6) on the velocity field.
+\end{itemize}
+
+The variable-coefficient multigrid/MGCG back-end (used for the BDIM
+mask, variable density, and two-phase flows) inherits the homogeneous
+Neumann condition at domain faces while embedding the immersed-body
+condition through the face coefficients $c_{d\pm}$ rather than through
+the ghost layer; see Section~\ref{sec:s-poisson}.  Note that the
+velocity and pressure conditions are chosen consistently: a Dirichlet
+(prescribed-velocity) inflow corresponds to a homogeneous-Neumann
+pressure face, while a Neumann (zero-gradient) velocity outflow pairs
+with a pressure datum constraint to keep the discrete projection
+well-posed.
+
+
+% =====================================================================
+\section{Pressure-projection / Poisson solvers}\label{sec:s-poisson}
+% =====================================================================
+
+After the provisional velocity $\tilde{\mathbf u}$ is formed, the
+incompressibility constraint is enforced by solving a Poisson problem
+for $p$ and correcting
+$\mathbf u^{n+1}=\tilde{\mathbf u}-(\,w\Delta t/\rho)\,\nabla p$.
+\lilytorch ships three back-ends; the appropriate one depends on the
+boundary condition and on whether the operator is constant- or
+variable-coefficient.
+
+\subsection{Spectral DCT solver (constant-coefficient Neumann)}
+
+For homogeneous Neumann boundaries with a constant coefficient the
+discrete Laplacian is diagonal in the type-II Discrete Cosine
+Transform~\cite{makhoul1980dct}.  Each 1-D second difference has
+eigenvalues
+\begin{equation}
+  \lambda_k = \frac{2}{h^2}\Bigl[\cos\!\Bigl(\tfrac{\pi k}{N}\Bigr)-1\Bigr],
+  \qquad k=0,\dots,N-1,
+  \label{eq:s-dct}
+\end{equation}
+and the $d$-dimensional eigenvalue is the sum over axes.  The solve is
+therefore \emph{forward DCT $\rightarrow$ divide by
+$\sum_{\text{axes}}\lambda$ $\rightarrow$ inverse DCT}, with the
+zero-frequency (null-space) mode set to zero to fix the pressure datum.
+This $\mathcal O(N\log N)$ path is the fastest and is used for the
+majority of single-phase validation benchmarks.
+
+\subsection{Free-space Green's function (unbounded)}
+
+For an unbounded domain the right-hand side is zero-padded to $2N$ per
+axis and convolved (via FFT) with a regularised free-space Green's
+function, so the periodic wrap-around of the padded FFT does not
+contaminate the interior.  In 2-D the eighth-order algebraic smoothing
+of Hejlesen et al.~\cite{hejlesen2013high} is used; in 3-D the
+Gaussian/erf regularisation
+\begin{equation}
+  G(r) = -\frac{1}{4\pi r}\,\operatorname{erf}\!\Bigl(\frac{r}{\sqrt 2\,
+  \sigma}\Bigr),\qquad \sigma = h,
+  \label{eq:s-green}
+\end{equation}
+removes the $1/r$ singularity at the origin.  The discrete Green's
+kernel is precomputed once and cached on disk, so the per-step cost is
+two padded FFTs plus a pointwise multiply.
+
+\subsection{Geometric multigrid and MGCG (variable-coefficient)}
+
+When the BDIM mask $\mu_0$ or a variable fluid/body density makes the
+projection genuinely variable-coefficient, the discrete operator along
+dimension $d$ is
+\begin{equation}
+  \frac{c_{d+}\,p_{i+1}-(c_{d+}+c_{d-})\,p_i+c_{d-}\,p_{i-1}}{h^2},
+  \label{eq:s-mg-stencil}
+\end{equation}
+where the face coefficients $c_{d\pm}$ are the \emph{harmonic} average of
+the cell values straddling each MAC face (of $\mu_0$ in the BDIM case,
+or of $\Delta t/\rho$ in the variable-density / two-phase case).  The
+harmonic average keeps the discrete Laplacian symmetric
+positive-definite and well-balanced across the $10^3{:}1$ density jump
+at an air--water interface.
+
+The system is solved by a geometric V-cycle~\cite{trottenberg2001multigrid}:
+
+\begin{itemize}
+\item \textbf{Smoothers}: weighted Jacobi (default relaxation
+  $\omega=0.7$) or red/black Gauss--Seidel.
+\item \textbf{Restriction}: full-weighting of the residual to the
+  coarse grid.
+\item \textbf{Prolongation}: bilinear (2-D) / trilinear (3-D)
+  interpolation of the coarse correction.
+\item \textbf{Coarsest level}: a trivial $2\times2\,(\times2)$ direct
+  solve.
+\end{itemize}
+
+For anisotropic production grids the V-cycle alone smooths weakly, so it
+is optionally wrapped in a conjugate-gradient outer iteration (MGCG),
+with the V-cycle acting as the preconditioner.  This roughly halves the
+solve time on the strongly anisotropic two-phase grids (main text
+\S2.10).  Two further accelerations are available and are bit-compatible
+with the plain multigrid result: a \emph{recycled-Krylov} (deflated
+MGCG) variant that reuses approximate near-null-space vectors across
+time steps to help where the smoother stalls, and, for small grids
+dominated by kernel-launch overhead, capture of the entire native solve
+as a single CUDA graph.
+
+\subsection{Variable-density and two-phase coupling}
+
+When the body density $\rho_b$ differs from the fluid density $\rho_f$
+(MuJoCo coupling) an effective density
+\begin{equation}
+  \rho(\mathbf x) = \rho_b + (\rho_f-\rho_b)\,\mu_0(\mathbf x)
+  \label{eq:s-rho-eff}
+\end{equation}
+is assembled and the face coefficients $c=\Delta t/\rho_{\text{face}}$
+are formed directly on the MAC faces.  The same machinery, with
+$\rho(\alpha)=\alpha\rho_w+(1-\alpha)\rho_a$ from the volume-of-fluid
+colour field $\alpha$, drives the two-phase free-surface model.  Because
+the spectral back-ends assume a constant coefficient, all
+variable-density and two-phase flows are solved exclusively by the
+multigrid/MGCG path.
+
+
+% =====================================================================
+\section{Strong (implicit) fluid--structure coupling}\label{sec:s-implicit}
+% =====================================================================
+
+\emph{This section documents capability that is present in the solver
+but only alluded to as future work in the main manuscript (limitations,
+\S3.5).}  By default the fluid and \mujoco are advanced in a single
+\emph{explicit}, loosely-coupled (staggered) pass per time step: the
+fluid reads the body pose, integrates the hydrodynamic wrench, and
+writes it back once.  For light or force-driven bodies whose
+mean density approaches that of the fluid, this staggered scheme suffers
+the well-known \emph{added-mass instability}~\cite{causin2005added}: the
+explicit wrench lags the body acceleration it induces, and the coupling
+diverges regardless of how small $\Delta t$ is.
+
+\lilytorch optionally closes the coupling implicitly within each time
+step, in the spirit of partitioned solvers such as
+preCICE~\cite{bungartz2016precice}.  Let $x$ collect the interface
+unknowns (the per-link wrench / interface state) passed from the body
+solver to the fluid, and let $\mathcal F(x)$ be the value returned after
+one fluid$\rightarrow$body sweep.  A converged time step is a fixed point
+$x^{*}=\mathcal F(x^{*})$, found by sub-iterating
+\begin{equation}
+  \tilde x_k = \mathcal F(x_k),\qquad
+  r_k = \tilde x_k - x_k,
+  \label{eq:s-fixedpoint}
+\end{equation}
+until $\lVert r_k\rVert$ falls below a tolerance (or a maximum sweep
+count is reached).  Three accelerators control how $x_{k+1}$ is built
+from the residual history.
+
+\paragraph{Constant under-relaxation.}
+The classical staggered relaxation
+\begin{equation}
+  x_{k+1} = x_k + \omega\,r_k,
+  \label{eq:s-constant}
+\end{equation}
+with a fixed factor $\omega\in(0,1]$.  $\omega=1$ reproduces the plain
+explicit step; a small $\omega$ buys stability but smears the true
+force and converges slowly.  This is the baseline.
+
+\paragraph{Aitken (Irons--Tuck) adaptive relaxation.}
+The scalar relaxation factor is recomputed every sub-iteration from the
+last two residuals~\cite{irons1969version},
+\begin{equation}
+  \omega_k = -\,\omega_{k-1}\,
+  \frac{\langle r_{k-1},\,r_k-r_{k-1}\rangle}
+       {\lVert r_k-r_{k-1}\rVert^{2}},
+  \label{eq:s-aitken}
+\end{equation}
+clamped in magnitude to $\omega_{\max}$ and applied as in
+\eqref{eq:s-constant}.  This typically converges several times faster
+than a hand-tuned constant $\omega$ while remaining a scalar one-liner;
+the converged factor is carried into the next time step as the initial
+guess.
+
+\paragraph{Interface Quasi-Newton (IQN-ILS).}
+The most robust option is the Interface Quasi-Newton with Inverse
+Jacobian from a Least-Squares model of
+Degroote et al.~\cite{degroote2009performance}.  Differences of
+successive residuals and interface states are stacked into matrices
+\begin{equation}
+  V_k = [\,\Delta r_{k},\,\Delta r_{k-1},\,\dots\,],\qquad
+  W_k = [\,\Delta \tilde x_{k},\,\Delta \tilde x_{k-1},\,\dots\,],
+  \label{eq:s-iqn-cols}
+\end{equation}
+and the Newton update $\Delta x = -J^{-1}r_k$ is approximated by solving
+the small least-squares problem $V_k\,\alpha \approx -r_k$ (via a QR
+factorisation) and forming $\Delta x = W_k\,\alpha + (-r_k - V_k\alpha)$.
+Columns may be \emph{reused} from a configurable number of previous time
+steps (the \texttt{reuse} window) to enrich the Jacobian model and cut
+the number of sweeps.
+
+\medskip
+The scheme and accelerator are selected through a \texttt{body.coupling}
+configuration block (\texttt{scheme: explicit\,|\,implicit};
+\texttt{accelerator: iqn-ils\,|\,aitken\,|\,constant}; \texttt{reuse},
+\texttt{tol}, \texttt{max\_iter}).  In implicit mode the constant
+force-relaxation low-pass used by the explicit path is bypassed.  A
+practical caveat applies to column reuse: a single diverged
+quasi-Newton sweep can poison the reuse window and silently degrade the
+method back to an explicit step, so for delicate free-swimmer cases the
+Aitken accelerator (or \texttt{reuse: 0}) is the safer default.  Implicit
+coupling is intended for light or force-driven bodies where added mass
+dominates; position-controlled swimmers, whose kinematics are
+prescribed, are advanced with the cheaper explicit path.
+
+
+% =====================================================================
+\bibliographystyle{IEEEtran}
+\bibliography{references}
+% =====================================================================
+
+\end{document}

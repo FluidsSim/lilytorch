@@ -825,7 +825,6 @@ class BaseSimConfig:
             "poisson_nsmoothing"     : self.poisson_nsmoothing,
             "poisson_verbose"        : self.poisson_verbose,
             "poisson_folder"         : os.path.join(self.data_folder, "data"),
-            "rho_body"               : self.rho_body,
             "smagorinsky_cs"         : self.smagorinsky_cs,
             "diagnostics_every"      : self.diagnostics_every,
             "check_explosion_every"  : self.check_explosion_every,

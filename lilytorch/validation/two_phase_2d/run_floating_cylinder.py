@@ -54,7 +54,6 @@ def build_pars(R=0.15, Hint=0.5):
             "poisson_folder": "lilytorch/data/",
             "poisson_method": "mgcg", "poisson_smoother": "rbgs",
             "dtype": "float64", "solver_method": "python",
-            "rho_body": 500.0,           # floats (rho_b < rho_water)
             "gravity": [0.0, -g],
             "two_phase": {
                 "alpha_init": f"lambda X, Y: (Y < {Hint}).double()",

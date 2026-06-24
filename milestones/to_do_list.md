@@ -157,37 +157,407 @@ HP5b. **Diagnose two-phase surface speed bias** (2026-06-18 — investigation in
   integral) to kill the residual hydrostatic leak -> would make two-phase
   submerged forces match single-phase.  **Promoted to its own item HP6.**
 
-HP6. **Discretely gauge-invariant two-phase band force** (the live force-readout
-  fix; was buried in HP5b RESULT-2).  **ACTIVE WORK** — latest commit `8196127`
-  ("gauge-invariant force handoff + submerged diag harness") + the fresh
-  `_submerged_diag/force_dec_*.csv` come from this line.
+(HP6 — discretely gauge-invariant two-phase band force — ✅ DONE; shipped as
+ `force_submethod="deltaH"`. See the DONE section below.)
 
-  **Problem.** The Eulerian band force `ρg·Σ z nₓ δ` over-reads a horizontal
-  force that is LINEAR in depth on a body whose true horizontal force is 0
-  (a submerged body sees only the *vertical* hydrostatic gradient).  The shipped
-  `gauge_anchor_forces` band-mean subtraction OVER-corrects to a depth-linear
-  residual of opposite sign; the opt-in `gauge_anchor_per_body` was implemented
-  and tested and ALSO does not remove the depth-linearity.
+---
 
-  **Decisive new result (2026-06-20).** The leak is **STATIC, not unsteady** —
-  fully present on a zero-gait non-moving body; undulation adds ~−0.02 to the
-  mean Fx.  Therefore the control-volume *momentum* readout (§2 of the old brief)
-  is the WRONG build (it targets the added-mass/unsteady path the data exonerates,
-  and is the SBP-dual of the already-rejected ∂H).  Open tension to reconcile:
-  this seemingly contradicts `project_two_phase_force_gauge_leak` (∂H zeroed the
-  static Fx yet barely moved the self-propelled swim) — either ∂H didn't truly
-  zero the force on the running multi-link union SDF (per-link seams), or the
-  swim-speed bias is a different quantity than the static leak.  **A direction
-  decision is required before any further build.**
+# BUGS
 
-  **HANDOFF BRIEF (current):** `milestones/two_phase_force_readout_next_agent.md`
-  (problem, evidence, the 2026-06-20 static verdict, dead-ends, harness pointers).
-  NOTE: the old `milestones/gauge_invariant_force_handoff.md` referenced by HP5b
-  was DELETED/superseded by this brief.
-  Constraint: confine to `two_phase*.py` / validation (no `forces.py`/`solver.py`/
-  `body.py` edits — see `feedback-no-core-source-for-two-phase`).
+BG6. **Multigrid residual restriction over-scaled (LOW priority, DEFER — regression risk)**
+  — `_restrict_residual_2d/3d` in `poisson_mult.py` sums over fine cells without
+  normalization (×4 in 2D, ×8 in 3D).  WaterLily uses `0.5 × sum` (×2/×4); the face-
+  coefficient restriction uses `0.5 × sum` (×1/×2).  Lilytorch residual:face ratio = 4,
+  WaterLily ratio = 2.  **Investigated 2026-06-11:** analysis confirms 2× discrepancy vs
+  WaterLily; solver converges in all tests anyway — the over-scaling is absorbed by the
+  post-smooth.  The potential fix is `* 0.5` on `_restrict_residual_*` (not `* 0.25`).
+  Deferred: changing normalization on a working solver needs full regression coverage
+  before merging.
 
-HP4. ~~**Stabilise the one-fluid GFM free surface** (handoff 2026-06-17).~~
+---
+
+# MEMORY / PERF (optimize_speed_memory branch)
+
+Target: ~8 GiB peak alloc on 3D runs. Do in sequence; remeasure after each stage.
+
+> **MEASURED (2026-06-05, `bench_memory.py`, 448×224×224):** baseline peak **5.749 GiB**
+> on the standalone **PYTHON path**, located in **`_recompute_mu_normals`** (mu0/mu1 +
+> normals build) — NOT advection (~3.36) and NOT the multigrid solve (~3.58). BUT the
+> python path's mu/normals build does **not exist in kernel mode** (Kernel B computes
+> them in registers, no buffers), so this peak is python-path-only and is **not
+> representative of kernel-mode production**, which is what the T2/T3 items target.
+> ⇒ The memory work must be re-baselined on the **kernel path** (needs BDIMhandler/FARMS)
+> before T3a/T3b/T2a can be prioritised by measurement. The python-path standalone bench
+> proved the wrong path for these items. See `lilytorch/validation/cost_analysis/MEMORY_BASELINE.md`.
+
+MP6. **T3b** Preallocate the V-cycle coarse-level pyramid at `__init__` instead of
+  `torch.zeros` inside the recursion. ~0.5-1 GiB transient. (Python-path multigrid solve
+  stayed ≤3.58 GiB; re-baseline on kernel path before judging peak benefit.)
+MP8. **T2b** Dirty-AABB-sized Kernel-A temps (`sdf_*_tmp`, `b*_tmp`: full-grid → AABB+halo).
+  Needs `streaming_sdf.cu` changes; no peak movement until T2a.
+MP9. **T2c** Two-pass Kernel B for `primes` elimination (write to AABB scratch, copy back).
+  ~1.5 GiB; no peak movement until T2a.
+
+---
+
+# 2D/3D SOLVER UNIFICATION ✅ COMPLETE (2026-06-24)
+
+Steps 1-6 + apply_forces merge ✅. SU1 is bounded-and-done (velocity stacked;
+the rest deliberately not stacked — memory). SU2 + its legacy-oracle cleanup ✅
+done (see below). **Nothing remaining in this section.**
+
+SU1. **Step 5 — stacked-tensor storage — SCOPE NOW BOUNDED BY MEMORY.**
+  - **Velocity DONE (2026-06-16):** `u0/v0/w0` → one contiguous `FluidSolver._vel`
+    (D,*grid), exposed via compat `@property` views (reads = zero-copy row view;
+    sets copy into the row; `w0` raises AttributeError in 2-D so `getattr(fs,'w0')`
+    keeps "absent-in-2D" semantics for the viewers). **Memory-neutral** (same
+    3·grid floats, no duplicate tensors, kernels get contiguous views) +
+    **bit-identical** drags on the kernel(GPU) + python(CPU) 1guilla A/B vs the
+    pre-refactor baseline. Solver owns no other per-component trio (all
+    `sdf_val/body/mu/normal` live on `composite_body`).
+  - **Field trios B–E (`sdf_val_{u,v,w}`, `body_{u,v,w}`, `mu0/mu1`, normals)
+    DELIBERATELY NOT STACKED — memory.** In kernel mode these are **per-step
+    temporaries** (`fluid_step` allocs `sdf_u_tmp/bU_tmp/…`, Kernel A fills, Kernel
+    B consumes for fused BDIM+adv-diff, then freed — the Phase-I optimization).
+    Stacking them into persistent `comp` buffers would PIN that memory → regression
+    of exactly what this branch optimizes. They are also spread across 6+ body
+    classes (analytical/fish/mesh/multi-animat) with aliasing + `torch.where`
+    unions. ⇒ SU1's correct scope is the persistent velocity only; the rest stay
+    freed temporaries. See `feedback-no-stacking-perstep-temporaries` memory.
+
+(SU2 — Step 6 BDIMhandler update merge — ✅ DONE; see the DONE section below.
+ Legacy-oracle CLEANUP also ✅ DONE 2026-06-24 — see SU2 follow-up note below.)
+
+Per-step rules: branch from `optimize_speed_memory`, one PR per step, validate 2D
+(`_1guillasim` pinned) + 3D (jellyfish) + cost_analysis (<5% wall-clock regression),
+rel-err <1e-6 on integrated quantities. No semantics changes.
+
+---
+
+# GPU UTILISATION (small-tank / small-grid regime) — benchmark 2026-06-11
+
+At small grid sizes the GPU is underutilised because **Python kernel-dispatch overhead
+dominates compute** (each multigrid V-cycle dispatches 50-100+ small kernels, each ~10-50 µs
+Python cost). Three strategies benchmarked on an RTX 4080 SUPER:
+
+| Strategy | 2D 128×64 | 3D 64×32×32 | 3D 128×64×64 | Δmem |
+|----------|-----------|-------------|--------------|------|
+| `adv_diff_streams` | 0.98× | 0.99× | 1.01× | 0 |
+| **`compile_project`** | **2.74×** | **2.32×** | **2.62×** | **≈0** |
+| `use_cuda_graphs` | 1.11× | 1.17× | 1.03× | +14 MiB |
+| `compile_project` + streams | 2.78× | 2.27× | 2.70× | 0 |
+
+GU1. **`compile_project=True`** is the clear winner: 2.3–2.8× speedup, zero memory overhead,
+  works with all schemes including abdquickest. Enable in `solver.solver.compile_project`.
+GU2. **`use_cuda_graphs`** gives modest 1.03–1.17×; benefit shrinks with grid size; +14 MiB
+  at 128³. Incompatible with abdquickest (gracefully skips with a log message).
+GU3. **`adv_diff_streams`** never helps — dispatch overhead is in the Poisson V-cycle, not
+  advection; streams add overhead. Not worth enabling alone.
+GU4. Combined `compile_project + adv_diff_streams` gives marginal extra gain over compile alone.
+
+(All three config options have been implemented — see DONE section.)
+
+### Native-path GPU-util — RE-PROFILED 2026-06-14 (after the native CUDA Poisson port)
+
+The 2026-06-11 analysis above is for the **Python** projection path (the
+`compile_project` knob compiles that path). Production now runs the **native CUDA
+Poisson** path (mgcg/rmgcg), which is already 10–17× faster than Python. Re-profiling
+*that* path (`bench_python_overhead.py`) shows it is **NOT Python-dispatch bound** (the
+whole solve is a single Python op call) and **NOT sync bound** (MP11 removed the
+alpha/beta syncs). The residual low GPU-util (22% @ 2D-N64 → 50% @ 3D-N96) is
+**CUDA kernel-launch latency**: the C++ V-cycle issues ~2100 *tiny* kernels per solve and
+the GPU idles between launches. Confirmed: idle ≈ (#launches) × ~1.5 µs.
+
+---
+
+# PER-STEP HOT-PATH OVERHEAD (measure first — found 2026-06-05 while doing T1/diagnostics)
+
+These run on EVERY step; none is measured for wall-clock cost yet. Time them
+(e.g. with the cost_analysis harness) before/after gating.
+
+PH3. **H3 `diagnostics_every=100` is now default-ON** in `base_sim_config.py` (2026-06-11).
+  Adds a small recurring vorticity/divergence + host-sync cost. Defensible given the
+  blow-up-debugging history, but RATIFY: keep at 100, or set 0 (opt-in)?
+
+---
+
+# LOW PRIORITY
+
+LP2. Crank-Nicolson diffusion — current explicit limit `dt < h²/(2ν·ndim)` is not a
+  bottleneck now, relevant only if dt is pushed aggressively.
+LP3. **eps configurable** — BDIM transition thickness is hardcoded `2h`; add `eps_cells`
+  config key (3h-4h smoother on coarse grids).
+LP6. **F1 AABB cull force integration** — δ(sdf−ε) is evaluated over the whole domain per
+  body but is nonzero only within ε. Slice to each body's AABB+ε. 10-100× for small
+  swimmers in big pools.
+  **PARTIALLY ADDRESSED (status 2026-06-24).** The per-body SDF is now stored
+  AABB-sparse (`comp._sdf_sparse[bi] = (aabb, sdf_sub)`, populated by the 2-D/3-D
+  Python update), so the per-body distance table is no longer dense. BUT the
+  bandwidth-heavy *shared* stress/pressure-force density (`_forces_shared_compiled`)
+  is NOT cropped: the crop scaffolding exists in `forces.py` but `u_aabb` is
+  hardcoded `None` (~line 466), so it always takes the full-domain branch, and the
+  δ-force `sdf_vals` is then reconstructed back to a dense `(B,Ni,Nj)` tensor with
+  `_FAR` fill before the δ(sdf−ε) integration → the integration still runs over the
+  whole grid. **Remaining work:** drive `u_aabb` from the union of `_sdf_sparse`
+  AABBs (+halo), keep `sdf_vals` sparse through the Towers δ-force loop, and index
+  the force kernel relative to the cropped slab.
+LP8. **F2** drag records: CPU pinned memory + async copy instead of GPU `nt` pre-alloc.
+LP9. **Adaptive / CFL-limited timestep** (found 2026-06-23) — `dt` is FIXED for the
+  whole run (no `self.dt =` reassignment anywhere in `solver.py`); `diagnostics.py`
+  only *warns* on CFL>0.5, it never adapts. The blow-up-prone cases (toy boat,
+  surface eel, sphere-near-wall) would benefit from a CFL-limited dt as a safety
+  lever — recompute `dt = cfl_target·h/|u|max` each step (or every N steps) with a
+  config cap. Caveat: checkpoint/restart (LT6) and the Adams-Bashforth flux history
+  assume constant dt, so a variable dt touches both. Keep opt-in (default fixed).
+LP10. **`COMPOSITEmesh2sdf.transform_3d` is a `NotImplementedError`** (found 2026-06-23,
+  `body.py:1052`) — blocked on a missing `mesh2sdf.transform_3d`. Latent: any code
+  path that rotates/translates a COMPOSITEmesh2sdf body crashes at runtime. Either
+  implement the underlying mesh transform or assert-guard the call site so the
+  failure is explicit at construction.
+LP11. **Pleurodeles full-3D example is a stub** (found 2026-06-23) —
+  `farms_examples/pleurodeles/gen_configs_swim_full3d.py:25` has a placeholder SDF
+  filename TODO ("replace once the full-3D SDF is ready"); the example cannot run
+  as-is. Either finish the full-3D SDF + wire it, or mark the file experimental.
+
+---
+
+# TEST INFRA / REPO HYGIENE (found 2026-06-23)
+
+TI1. **No CI, no test aggregation.** There is no `.github/`, no `conftest.py`,
+  `pytest.ini`, or `tox.ini`; the ~26 `test_*.py` files are scattered across
+  `src/`, `src/kernels/`, and `integration/` and are run by hand. Meanwhile the
+  SU1 per-step rule MANDATES "validate 2D (`_1guillasim`) + 3D (jellyfish) +
+  cost_analysis (<5% regression), rel-err <1e-6" with nothing automating it.
+  Add at minimum a `pytest` config that collects the self-tests (the CUDA ones
+  skip cleanly without a GPU via `pytest.importorskip`), and ideally a CI
+  workflow running the CPU-path parity oracles on push. Enabler for trusting the
+  refactor-heavy `optimize_speed_memory` branch. NOTE: kernel parity tests need a
+  built `_C.so` matching the runtime torch — gate or build-in-CI accordingly.
+
+---
+
+# ARCHITECTURE / PORTABILITY (strategy 2026-06-14)
+
+## Part 1 — Drop FARMS; support pluggable rigid-body engines (Isaac Sim, MuJoCo)
+Goal: get rid of FARMS entirely and make the rigid-body engine swappable
+(MuJoCo today, Isaac Sim / Isaac Lab next).
+
+Coupling map (investigated): **`BDIMhandler` already does NOT import FARMS** — it
+speaks MuJoCo directly (`data.xpos/xquat/xipos`, `model.body_mass`, `geom_*`,
+`xfrc_applied`/`mj_applyFT`). FARMS only owns the *outer* layer:
+  - `integration/extensions.py` — `FluidExtension(TaskExtension)` hooks
+    (`initialize_episode`, `before_step`), experiment options, HDF5 IO.
+  - `farms_examples/base_sim_config.py` + `gen_configs_*` — animat model + scene gen.
+  - swimmer controllers (CPG networks, PD controllers).
+  - the viewers (all `import farms` for the MuJoCo viewer).
+
+AP2. [ ] **MuJoCo backend** implementing the adapter from raw `mujoco.MjModel/MjData`
+      (or dm_control `Physics`) — no FARMS dependency.
+AP3. [ ] **Standalone driver loop** (~100 lines): load model, step physics, call
+      `BDIMhandler.step()` each tick (replaces the `before_step` hook).
+AP4. [ ] Replace controllers/viewers (FARMS-based) with engine-native equivalents
+      (`mujoco.viewer`; note `xfrc_applied` viewer pitfall — use `qfrc_applied`).
+AP5. [ ] **Isaac Lab backend** — exposes body state as **torch GPU tensors**, so the
+      coupling becomes GPU-resident (no numpy/CPU round-trip the MuJoCo path pays).
+      Strong fit; the adapter is the enabler. (MuJoCo-Warp/MJX is a GPU alternative.)
+Feasibility: MODERATE — numerics are already FARMS-free; the work is outer-loop
+(driver/config/controllers/viewers), not the solver.
+
+### Caveat A — model/file-description format (investigated 2026-06-15)
+FARMS owns TWO things behind the `.sdf` (SDFormat XML) authoring format, and they
+are SEPARABLE:
+  1. **SDF parser** (`farms_core.io.sdf.ModelSDF.read`) — used by BOTH the FARMS
+     converter AND lilytorch's own `BodyMesh`/`CompositeBody` (body.py), but the
+     latter only pulls *mesh files + link poses* to build its OWN signed-distance
+     tables. Shedding it is EASY (mostly pure-Python; vendor it, or author in
+     URDF/MJCF instead).
+  2. **SDF→MJCF converter** (`farms_mujoco/.../mjcf.py`, ~1725 lines) — the heavy,
+     MuJoCo-specific part (units, spawn modes, joint-axis rotation, inertial frames,
+     mesh composites, hfields, materials). Faithfully reproducing it is MODERATE–HARD,
+     but **largely AVOIDABLE**: MuJoCo loads MJCF/URDF natively → author there and
+     delete the conversion step.
+  Note BDIMhandler needs NEITHER (geometry from lilytorch `body.sdf`, poses from
+  MuJoCo `data.xpos/xquat`).
+AP5b. [ ] **Pick a portable model format.** SDFormat is the LEAST supported outside
+      Gazebo. Engine-native: MuJoCo=MJCF, Isaac Sim/Lab=USD (via URDF/USD importers),
+      Newton=USD/MJCF/URDF importers. Realistic common interchange = **URDF or MJCF**.
+      Recommendation: separate "geometry/inertia spec" (what BDIM needs: meshes +
+      link tree + poses + masses, format-agnostic) from "engine model" (native
+      MJCF/USD/URDF), and standardise authoring on URDF/MJCF rather than SDF→X.
+
+### Caveat B — logging (investigated 2026-06-15)
+FARMS provides efficient preallocated Cython typed arrays (`LinkSensorArray`,
+`JointSensorArray`, `ContactsArray`, `XfrcArray`, shape `[n_iter,n_links,size]`) →
+HDF5 via `dict_to_hdf5` (extensions.py `DataLogger`/`end_episode`).
+AP5c. [ ] **Backend-neutral `SensorLogger`** to replace FARMS `AnimatData` logging.
+      Feasibility EASY–MODERATE: lilytorch already has HDF5 logging patterns
+      (`diagnostics.py`, `save_drags_h5`). Only loss is the Cython buffer
+      micro-efficiency — negligible vs. the fluid solve. Pull per-step link/joint
+      state straight from the engine via the `RigidBodyBackend` adapter.
+
+## Part 2 — Single-source CPU+GPU kernels (kill the .cpp/.cu double-write)
+Pain: kernels are hand-written TWICE (CPU `.cpp` + CUDA `.cu`) → more code, more bugs.
+Double-written today: **streaming_sdf (2d/3d), lagrangian_forces (2d/3d), rbgs**.
+(Poisson driver/transfer/advection are CUDA-only + pure-PyTorch CPU fallback.)
+
+Strategy (two kernel classes):
+AP6. [ ] **Fusible stencil/pointwise** (rbgs sweep, residual, restriction, advection
+      flux) → push through **`torch.compile`/Inductor**: write once in PyTorch,
+      auto-generates C++ (CPU) + Triton (GPU, incl. ROCm). No hand kernel.
+AP7. [x] **Irregular scatter/gather** (streaming_sdf, lagrangian_forces) → **Warp**
+      (chosen): single Python `@wp.kernel` → CPU + CUDA, zero-copy torch interop.
+      Driver-style kernels (poisson_solve mgcg/multigrid loops) stay `.cu` — Warp is
+      kernel-level, no C++ driver-with-control-flow equivalent (use CUDA-graph capture
+      if unified). AMD: Warp's HIP backend is weak — if AMD becomes hard-required,
+      Taichi (Vulkan) or SYCL/Kokkos (HIP) for those kernels instead.
+
+**Warp RBGS POC done 2026-06-14** (`/tmp/poc_warp_rbgs.py`, pure test):
+  - Interop: zero-copy `wp.from_torch` (warp wrote the torch tensor, same ptr); a
+    native `torch.ops` CUDA kernel consumed warp output on one stream; same
+    `@wp.kernel` ran on CPU and CUDA. Correctness within 0.9% of native.
+  - Perf (ms/2-sweep): 256² native 0.010 / warp 0.094 / warp+graph 0.019;
+    2048² native 0.179 / warp 0.664 / warp+graph 0.650; pytorch 5–35× slower than warp.
+  - Findings: eager Warp is launch-bound (6 launches vs native's 1 fused) → **CUDA
+    graph capture** removes most of it (~2× native at typical sizes). Residual gap
+    (2–3.6×) at large grids = native is hand-TILED (shared mem, all sweeps fused, 1
+    global pass) vs naive warp's 6 global passes. **To match native, write a tiled
+    warp kernel (`wp.tile`).** Net: Warp gives single-source + crushes the PyTorch
+    path; matching a hand-tuned kernel needs tiling work.
+
+**Warp streaming_sdf POC done 2026-06-24** (`lilytorch/warp_poc/`, isolated from main codebase):
+  - **Design:** sequential-per-body — B kernel launches (one per body), CUDA-graph captures
+    all B into a single replay.  Avoids the native uint64 packed-key atomicMin (`wp.bit_cast`
+    not available in Warp 1.14) by using float conditional compare-swap within each body's
+    kernel (race-free: each thread owns a unique AABB cell).
+  - **Parity** (parity test, B=1/3/9 eager + graph, 64×32×32 + 128×64×64):
+    SDF rel err < 5e-4 (abs < 2 ULP at overlap cells — tie-breaking noise only);
+    body-vel rel err < 1e-4.  Eager vs graph: **bit-identical**.
+  - **Perf** (RTX 4080 Super, warmup=3, reps=20):
+
+    | Grid       | B | Mode            | Native  | Warp     | Ratio  |
+    |------------|---|-----------------|---------|----------|--------|
+    | 64×32×32   | 3 | kernel-only     | 0.013ms | 0.010ms  | **0.83×** (Warp faster) |
+    | 64×32×32   | 3 | +reset          | 0.026ms | 0.021ms  | 0.82×  |
+    | 64×32×32   | 9 | kernel-only     | 0.013ms | 0.029ms  | 2.25×  |
+    | 64×32×32   | 9 | +reset          | 0.027ms | 0.041ms  | 1.53×  |
+    | 128×64×64  | 3 | kernel-only     | 0.019ms | 0.017ms  | 0.89×  |
+    | 128×64×64  | 3 | +reset          | 0.035ms | 0.035ms  | 1.02×  |
+    | 128×64×64  | 9 | kernel-only     | 0.019ms | 0.031ms  | 1.60×  |
+    | 128×64×64  | 9 | +reset          | 0.034ms | 0.049ms  | 1.45×  |
+
+  - **Conclusions:**
+    * **CUDA graph capture is essential** — eager mode is 3–14× slower (B Python submissions).
+    * **B=3 (fish with 3 links): Warp+graph matches or BEATS native** (0.82–1.02×).
+    * **B=9 (9-link anguilliform): Warp+graph 1.45–2.25× slower** because sequential B
+      launches > native's 3 fanned launches; the ratio scales with B.
+    * **Warp 1.14 constraint:** `wp.bit_cast` missing → can't replicate the native 64-bit
+      packed-key atomicMin.  `wp.atomic_min(float32)` works and is used for `sdf_cc`.
+      Sequential per-body design is the workaround; a single-fanned Warp kernel matching
+      native's architecture would need `wp.bit_cast` (or Warp 1.15+).
+    * **Next lever for B=9:** `wp.tile`-based all-bodies-in-one-launch kernel (AP8), or
+      wait for `wp.bit_cast` in a future Warp version.
+
+AP8. [ ] Port streaming_sdf + lagrangian_forces to Warp (tiled where bandwidth-bound);
+      keep self-tests as oracles; retire the `.cpp` twins.
+      **Decision point from AP7 POC:** for B≤3 the sequential-per-body design already
+      matches native performance with CUDA-graph capture — viable for fish (3-link +
+      9-link cases). For B=9 with production reset overhead: 1.45× slower.  To match
+      native at all B, either (a) wait for `wp.bit_cast` in Warp (matches 3-pass fanned),
+      or (b) implement a tiled all-bodies kernel that does atomicMin via
+      integer-compare-swap on a scratch `int32` body-ID array with a separate float SDF.
+
+---
+
+# LONG TERM
+
+LT1. **LES for high-Reynolds** — extend the existing Smagorinsky SGS model into a full LES
+  workflow (WALE/dynamic-Smagorinsky options, wall treatment) for turbulent high-Re
+  regimes where DNS is intractable.
+LT2. **AMR (Adaptive Mesh Refinement)** — refine the grid only near bodies and in the wake;
+  the enabler for high-Re cases at tractable cost (pairs with LES).
+LT3. **Near-boundary stress stencils** — velocity gradients use central differences,
+  degrading to 1st-order near immersed bodies. One-sided / ghost-cell stencils would
+  improve force accuracy and reduce oscillations.
+LT4. **5th-order Hermite smoothstep** for the BDIM delta — `0.5*(1+d/ε+sin(πd/ε)/π)` has
+  cancellation at `d≈±ε`; Hermite is more robust and drops sin/cos.
+LT5. **2nd-order body coupling** — body SDF/velocity are updated once per step, so Heun's
+  corrector uses body state at *t* not *t+dt/2* → coupling is effectively 1st-order.
+  Update body to *t+dt* after the predictor and feed the corrector.
+LT6. **Checkpoint/restart** — periodic full-state save (iteration, drag records,
+  Adams-Bashforth flux, body poses) so a crash at iter 999k of a 1M run isn't fatal.
+  Current `_load_initial_conditions` restores only `u,v,[w],p` → warm restart diverges
+  from a continuous run.
+LT7. **Granular flow (sand) via μ(I)-rheology** — new physics: dense dry/immersed granular
+  media as an incompressible fluid with a pressure-dependent, shear-rate-dependent
+  effective viscosity. Implemented as `GranularSolver(TwoPhaseSolver)` reusing projection,
+  BDIM, advection–diffusion, forces, and FARMS/MuJoCo coupling **unchanged**; adds only
+  (a) a pressure-dependent μ(I) viscosity closure and (b) granular stabilisation. ~80% of
+  the machinery already exists (`_compute_nu_t`, `ops.carreau_viscosity`,
+  `ops.strain_rate_magnitude`, VOF free surface for the pile surface). Pitched as the
+  cheapest genuinely-new physics LilyTorch can add. Full design + milestone plan:
+  `milestones/granular_design.md`.
+LT8. **Elastic-body FSI via Cosserat rods (PyElastica coupling)** — simulate flexible
+  slender bodies (flapping fins, flagella, soft swimmers, plant stalks) in the BDIM solver.
+  **Key insight: the SDF is the easy part — no raycasting, no Bezier.** A Cosserat rod is a
+  chain of tapered capsules, and the analytical capsule-chain SDF already exists in the
+  codebase (`body.py: segment()` 2D round-cone, `capsule_3d`/`sdUnevenCapsule` 3D); the
+  deforming centerline+radius SDF machinery is exactly what `BodyFish*` already does each
+  step: `sdf(x) = smin_i segment(x, p_i, p_{i+1}, r_i, r_{i+1})`, AABB-cropped. Bezier is
+  strictly worse (no closed-form distance, sub-grid fidelity wasted below ~2h).
+  **Architecture:** PyElastica is the structural solver (like MuJoCo for rigid bodies) —
+  slots under the planned `RigidBodyBackend`/`StructuralBackend` adapter (AP1) returning
+  per-node positions/velocities/radii. Loop: query rod state → rebuild capsule-chain SDF →
+  body velocity = nearest-node velocity → BDIM+projection → bin hydro forces to centerline
+  nodes as distributed loads+moments → feed back to PyElastica. PyElastica is CPU/Numba but
+  a rod is ~100 nodes (negligible vs. fluid). New `BodyCosseratRod` + `PyElasticaBackend`.
+  **Real difficulties (NOT the SDF):** (1) **added-mass instability** — light flexible bodies
+  are the worst case; MUST use the already-shipped implicit Aitken/IQN-ILS coupling
+  (`BDIMhandler._step_implicit`), prefer Aitken to start (IQN reuse-poisoning trap); (2)
+  **force→moment attribution** — Cosserat elements carry bending/twist, so accumulate r×f
+  torque per node, not just force (extend the Lagrangian-marker force path); (3) **grid
+  resolution floor** — BDIM is volume-penalization, needs rod radius ≳ 2-3h (sub-grid fibers
+  need a different IB+drag-law model, out of scope); (4) **joint seam smoothness** — per-
+  segment min creates concave creases → noisy normals; use polynomial smooth-min for the
+  union (+ existing `body_velocity_blend_eps_cells` for the velocity side). Reuses ~3 existing
+  pieces: deforming-fish SDF builder, Lagrangian force attribution, implicit coupling.
+  NOTE: elastic *sheets / 3D soft solids* are the genuinely-hard SDF case (deforming FEM mesh
+  → per-step distance-to-deforming-triangles + robust winding-number sign); start with rods.
+
+LT9. SPH simulation support (?).
+LT10. Monolithic strongly-coupled fluid + multi-rigid-body solver (?) — hard, would require dropping MuJoCo.
+LT11. Refactor: extract `FluidSolver.__init__` (~500 lines) into `_setup_grid/_models/
+  _poisson/_output`; add `BaseSimConfig.generate_config()` (dry-run YAML without launch);
+  add type hints.
+
+---
+
+# ═══════════════════════════════════════════════════════════
+# ✅ DONE
+# ═══════════════════════════════════════════════════════════
+
+## High priority
+
+HP6. ~~**Discretely gauge-invariant two-phase band force** (the live force-readout
+  fix).~~ **DONE — VERIFIED SHIPPED 2026-06-24.** The handoff brief
+  (`milestones/two_phase_force_readout_next_agent.md`, commit `8196127`) was the
+  ACTIVE-WORK seed; the fix landed 3 commits later in `e28f231` ("Two-phase
+  force-readout cleanup, GFM removal, native kernels") — confirmed a descendant of
+  the handoff commit. Shipped as the **`force_submethod="deltaH"`** union-∂H
+  partition readout (`solver.force_submethod`, default `"ndelta"`):
+  * Core native path — `lilytorch/src/solver.py` (`force_submethod` parse + softmin
+    partition temperature) and `lilytorch/src/forces.py:410,632` (`_fsm` deltaH
+    branch), CUDA + CPU, 2-D + 3-D. (Core edit was the authorised native port; the
+    python oracle stays in `two_phase_solver.py`.)
+  * Python oracle — `TwoPhaseSolver._apply_partition_heaviside`
+    (`two_phase_solver.py:717`), parity to the native path at machine precision.
+  * Mechanism: union-∂H force density `f_i=-p·∂_iH_ε(φ_union)` split to links by a
+    softmin partition of unity (seam-free, `Σ_k F_k == union`); removes ~59% of the
+    n·δ overspeed, buoyancy preserved/emergent. See memories
+    `project_deltaH_force_submethod`, `project_two_phase_force_gauge_leak`.
+  * The old to-do entry sat in NEEDS-WORK because the list was never updated after
+    `e28f231` shipped; the handoff brief itself documents the SHIPPED partition-∂H.
+
+HP7. ~~**Stabilise the one-fluid GFM free surface** (handoff 2026-06-17).~~
   **CANCELLED / REMOVED 2026-06-23.** The one-fluid free-surface method
   (`free_surface_solver.py`, `poisson_gfm.py`, `validation/free_surface/`,
   `run_1guilla_fs.py`, the BDIMhandler `solver.free_surface` branch, and the
@@ -203,7 +573,7 @@ HP4. ~~**Stabilise the one-fluid GFM free surface** (handoff 2026-06-17).~~
   drag; **single-phase underwater already matches the robot (0.128 m/s)** and is
   the tool for quantitative speed. The one-fluid free surface is the right
   structural fix (removes air noise, statics validated exactly) — it just needs
-  the explicit surface mode stabilized, which is this HP4 task.
+  the explicit surface mode stabilized, which is this HP7 task.
 
   **Progress (2026-06-17).** Steps (1)–(3) DONE at proof-of-concept level:
   * (1) **Implicit free-surface coupling** — hydrostatic-pressure correction
@@ -505,423 +875,6 @@ HP4. ~~**Stabilise the one-fluid GFM free surface** (handoff 2026-06-17).~~
   **Validation order is load-bearing:** standalone standing wave MUST pass
   before any 3‑D or BDIM integration.
 
----
-
-# BUGS
-
-BG6. **Multigrid residual restriction over-scaled (LOW priority, DEFER — regression risk)**
-  — `_restrict_residual_2d/3d` in `poisson_mult.py` sums over fine cells without
-  normalization (×4 in 2D, ×8 in 3D).  WaterLily uses `0.5 × sum` (×2/×4); the face-
-  coefficient restriction uses `0.5 × sum` (×1/×2).  Lilytorch residual:face ratio = 4,
-  WaterLily ratio = 2.  **Investigated 2026-06-11:** analysis confirms 2× discrepancy vs
-  WaterLily; solver converges in all tests anyway — the over-scaling is absorbed by the
-  post-smooth.  The potential fix is `* 0.5` on `_restrict_residual_*` (not `* 0.25`).
-  Deferred: changing normalization on a working solver needs full regression coverage
-  before merging.
-
----
-
-# MEMORY / PERF (optimize_speed_memory branch)
-
-Target: ~8 GiB peak alloc on 3D runs. Do in sequence; remeasure after each stage.
-
-> **MEASURED (2026-06-05, `bench_memory.py`, 448×224×224):** baseline peak **5.749 GiB**
-> on the standalone **PYTHON path**, located in **`_recompute_mu_normals`** (mu0/mu1 +
-> normals build) — NOT advection (~3.36) and NOT the multigrid solve (~3.58). BUT the
-> python path's mu/normals build does **not exist in kernel mode** (Kernel B computes
-> them in registers, no buffers), so this peak is python-path-only and is **not
-> representative of kernel-mode production**, which is what the T2/T3 items target.
-> ⇒ The memory work must be re-baselined on the **kernel path** (needs BDIMhandler/FARMS)
-> before T3a/T3b/T2a can be prioritised by measurement. The python-path standalone bench
-> proved the wrong path for these items. See `lilytorch/validation/cost_analysis/MEMORY_BASELINE.md`.
-
-MP6. **T3b** Preallocate the V-cycle coarse-level pyramid at `__init__` instead of
-  `torch.zeros` inside the recursion. ~0.5-1 GiB transient. (Python-path multigrid solve
-  stayed ≤3.58 GiB; re-baseline on kernel path before judging peak benefit.)
-MP8. **T2b** Dirty-AABB-sized Kernel-A temps (`sdf_*_tmp`, `b*_tmp`: full-grid → AABB+halo).
-  Needs `streaming_sdf.cu` changes; no peak movement until T2a.
-MP9. **T2c** Two-pass Kernel B for `primes` elimination (write to AABB scratch, copy back).
-  ~1.5 GiB; no peak movement until T2a.
-MP10. ~~**T2d — fused CUDA kernel for SCALAR advection**~~ ✅ DONE (2026-06-23,
-  as the W&Y `cvof_sweep` kernel — see below). **The original framing was stale:**
-  it assumed `advection.advect_scalar` carried the two-phase α-transport, but
-  (a) `advect_scalar` has **zero live callers** — its only consumer was the
-  free-surface level-set transport, deleted with HP4; and (b) the actual VOF
-  α-transport is `TwoPhase._cvof_sweep` (`two_phase.py`), the **Weymouth & Yue**
-  conservative scheme, which `advect_flux_add` **cannot** express (W&Y is a
-  sequential operator-split sweep with a divergence-correction term
-  `a_i·(u_R−u_L)` and a bounded donor face value, not a sum-over-d accumulation of
-  QUICK/vanLeer fluxes). So reusing `advect_flux_add` was a dead end; instead a
-  **dedicated W&Y CUDA kernel** was written.
-  * **NEW op `lilytorch_kernels::cvof_sweep`** in
-    `lilytorch/src/kernels/csrc/cuda/cvof_sweep.cu` (schema in `ops.cpp`): one
-    launch per (sweep, direction) replacing the ~8 full-grid temporaries (3
-    edge-clamped shifts, 2 limited slopes, 2 donor faces, the flux tensor) of the
-    Python sweep; computes `out[i] = a[i] + cfl·(F(i)−F(i+1)+a[i]·(u[i+1]−u[i]))`
-    with the W&Y van-Leer-limited Courant-corrected donor face, all in registers.
-    Edge-clamp (Neumann) neighbour reads + explicit strides (velocity components
-    are strided `_vel` row views). 2-D + 3-D.
-  * **Wired** into `TwoPhase._cvof_sweep` (`two_phase.py`): dispatches to the
-    kernel on CUDA when the extension exports the op (cached
-    `_cvof_kernel_available()` probe), else falls back to the renamed
-    `_cvof_sweep_python` oracle (CPU path / un-built extension). **No core-source
-    edits** (confined to `two_phase.py` per `feedback-no-core-source-for-two-phase`).
-  * **Parity** (`test_two_phase.py`, new `test_cvof_sweep_kernel_parity_*`):
-    kernel vs `_cvof_sweep_python` on identical CUDA tensors — **rel 0.0 (2-D
-    f32+f64, contiguous AND strided-velocity)**, 1.1e-16 (3-D f64), 6e-8 (3-D f32,
-    FMA). End-to-end `tp.advect` 100-step boundedness + mass-conservation test on
-    CUDA also passes. **Speedup 4.5–5.6×** at typical sizes (2D-256, 3D-64/128;
-    1.3× at 2D-512), measured incl. the shared clone+pad overhead.
-  * NOTE: `advect_scalar` left in place (harmless dead code; a future passive-
-    scalar/dye/level-set consumer could be CUDA-accelerated via `advect_flux_add`
-    cheaply, but there is none today). The variable-coeff Poisson still dominates
-    the two-phase step at ~75% (see `project_two_phase_poisson_bottleneck`); this
-    removes the α-transport slice of the ~6% Python cost.
-
----
-
-# 2D/3D SOLVER UNIFICATION (remaining)
-
-Steps 1-4 + apply_forces merge ✅. Remaining:
-
-SU1. **Step 5 — stacked-tensor storage — SCOPE NOW BOUNDED BY MEMORY.**
-  - **Velocity DONE (2026-06-16):** `u0/v0/w0` → one contiguous `FluidSolver._vel`
-    (D,*grid), exposed via compat `@property` views (reads = zero-copy row view;
-    sets copy into the row; `w0` raises AttributeError in 2-D so `getattr(fs,'w0')`
-    keeps "absent-in-2D" semantics for the viewers). **Memory-neutral** (same
-    3·grid floats, no duplicate tensors, kernels get contiguous views) +
-    **bit-identical** drags on the kernel(GPU) + python(CPU) 1guilla A/B vs the
-    pre-refactor baseline. Solver owns no other per-component trio (all
-    `sdf_val/body/mu/normal` live on `composite_body`).
-  - **Field trios B–E (`sdf_val_{u,v,w}`, `body_{u,v,w}`, `mu0/mu1`, normals)
-    DELIBERATELY NOT STACKED — memory.** In kernel mode these are **per-step
-    temporaries** (`fluid_step` allocs `sdf_u_tmp/bU_tmp/…`, Kernel A fills, Kernel
-    B consumes for fused BDIM+adv-diff, then freed — the Phase-I optimization).
-    Stacking them into persistent `comp` buffers would PIN that memory → regression
-    of exactly what this branch optimizes. They are also spread across 6+ body
-    classes (analytical/fish/mesh/multi-animat) with aliasing + `torch.where`
-    unions. ⇒ SU1's correct scope is the persistent velocity only; the rest stay
-    freed temporaries. See `feedback-no-stacking-perstep-temporaries` memory.
-
-(SU2 — Step 6 BDIMhandler update merge — ✅ DONE; see the DONE section below.)
-
-Per-step rules: branch from `optimize_speed_memory`, one PR per step, validate 2D
-(`_1guillasim` pinned) + 3D (jellyfish) + cost_analysis (<5% wall-clock regression),
-rel-err <1e-6 on integrated quantities. No semantics changes.
-
----
-
-# GPU UTILISATION (small-tank / small-grid regime) — benchmark 2026-06-11
-
-At small grid sizes the GPU is underutilised because **Python kernel-dispatch overhead
-dominates compute** (each multigrid V-cycle dispatches 50-100+ small kernels, each ~10-50 µs
-Python cost). Three strategies benchmarked on an RTX 4080 SUPER:
-
-| Strategy | 2D 128×64 | 3D 64×32×32 | 3D 128×64×64 | Δmem |
-|----------|-----------|-------------|--------------|------|
-| `adv_diff_streams` | 0.98× | 0.99× | 1.01× | 0 |
-| **`compile_project`** | **2.74×** | **2.32×** | **2.62×** | **≈0** |
-| `use_cuda_graphs` | 1.11× | 1.17× | 1.03× | +14 MiB |
-| `compile_project` + streams | 2.78× | 2.27× | 2.70× | 0 |
-
-GU1. **`compile_project=True`** is the clear winner: 2.3–2.8× speedup, zero memory overhead,
-  works with all schemes including abdquickest. Enable in `solver.solver.compile_project`.
-GU2. **`use_cuda_graphs`** gives modest 1.03–1.17×; benefit shrinks with grid size; +14 MiB
-  at 128³. Incompatible with abdquickest (gracefully skips with a log message).
-GU3. **`adv_diff_streams`** never helps — dispatch overhead is in the Poisson V-cycle, not
-  advection; streams add overhead. Not worth enabling alone.
-GU4. Combined `compile_project + adv_diff_streams` gives marginal extra gain over compile alone.
-
-(All three config options have been implemented — see DONE section.)
-
-### Native-path GPU-util — RE-PROFILED 2026-06-14 (after the native CUDA Poisson port)
-
-The 2026-06-11 analysis above is for the **Python** projection path (the
-`compile_project` knob compiles that path). Production now runs the **native CUDA
-Poisson** path (mgcg/rmgcg), which is already 10–17× faster than Python. Re-profiling
-*that* path (`bench_python_overhead.py`) shows it is **NOT Python-dispatch bound** (the
-whole solve is a single Python op call) and **NOT sync bound** (MP11 removed the
-alpha/beta syncs). The residual low GPU-util (22% @ 2D-N64 → 50% @ 3D-N96) is
-**CUDA kernel-launch latency**: the C++ V-cycle issues ~2100 *tiny* kernels per solve and
-the GPU idles between launches. Confirmed: idle ≈ (#launches) × ~1.5 µs.
-
-GU6. ~~**CUDA-graph capture of the native solve**~~ ✅ SHIPPED (2026-06-15). Replays the
-  ~1300-kernel native V-cycle with ~1 host launch on launch-bound small grids. **Enabler**
-  (already done 2026-06-14): the native drivers take `tol < 0` = sync-free fixed-cycle mode
-  (skips the residual-norm `.item()` short-circuit) → host-sync-free → graph-capturable;
-  `tol >= 0` unchanged. **Wired into `PoissonSolver`** (`poisson_mult.py`): `_solve_mgcg_native`
-  / `_solve_multigrid_native` now route through `_graphed_native_solve` when enabled — lazily
-  captures one graph per (method, ndim, input-shape) into static p/f/face buffers, then each
-  step `copy_`s the live RHS + BDIM face coeffs + warm-start guess in, replays, copies p back
-  out (residual cloned). Capture failure → permanent eager fallback. Config:
-  `poisson_cuda_graph` (default False) + `poisson_cuda_graph_max_cells` (interior-cell gate,
-  default 64³) wired through `base_sim_config.py`. **mgcg + multigrid only** (rmgcg's
-  deflation basis changes / fft uses a different solver — both untouched, automatically
-  out of scope). **Verified:** graph vs eager bit-exact (`|dp|=0`, 2D/3D, both methods);
-  gating correct (N=96 skips, N=48 captures); speedup 9.8×/8.1× (2D-N64/128), 4.0× (3D-N48)
-  → 1.04× (3D-N128) — regime-dependent as the POC predicted, hence the size gate;
-  mgcg/rmgcg native self-tests still PASS. Harness `/tmp/verify_gu6.py` + `/tmp/verify_gu6_perf.py`.
-  ⇒ **SMALL-GRID-ONLY win** (launch-bound); net-NEGATIVE on large compute-bound 3D, so the
-  size gate is load-bearing. A full megakernel rewrite would share the large-grid limitation
-  AND hit a cooperative-launch occupancy ceiling (~64³) — graphs, size-gated, are the right
-  tool. RBGS red/black can't be fused (Gauss-Seidel dep).
-  **NOTE on T4 (`--poisson_compile`):** SUBSUMED — no distinct work remains. The literal T4
-  (`torch.compile` the *Python* multigrid path) was built (`14bbbfa`) then deliberately
-  removed (`4de22b2`, "unnecessary via kernel mode"); its surviving reframe ("CUDA-graph
-  capture of the whole native solve") IS this GU6 item, now shipped. The only forward-looking
-  follow-on is an optional device-side convergence flag so the captured graph can early-exit
-  when converged instead of running the fixed cycle budget (GU6 uses `tol<0` fixed cycles).
-
----
-
-# PER-STEP HOT-PATH OVERHEAD (measure first — found 2026-06-05 while doing T1/diagnostics)
-
-These run on EVERY step; none is measured for wall-clock cost yet. Time them
-(e.g. with the cost_analysis harness) before/after gating.
-
-PH3. **H3 `diagnostics_every=100` is now default-ON** in `base_sim_config.py` (2026-06-11).
-  Adds a small recurring vorticity/divergence + host-sync cost. Defensible given the
-  blow-up-debugging history, but RATIFY: keep at 100, or set 0 (opt-in)?
-
----
-
-# LOW PRIORITY
-
-LP2. Crank-Nicolson diffusion — current explicit limit `dt < h²/(2ν·ndim)` is not a
-  bottleneck now, relevant only if dt is pushed aggressively.
-LP3. **eps configurable** — BDIM transition thickness is hardcoded `2h`; add `eps_cells`
-  config key (3h-4h smoother on coarse grids).
-LP6. **F1 AABB cull force integration** — δ(sdf−ε) is evaluated over the whole domain per
-  body but is nonzero only within ε. Slice to each body's AABB+ε. 10-100× for small
-  swimmers in big pools.
-LP8. **F2** drag records: CPU pinned memory + async copy instead of GPU `nt` pre-alloc.
-LP9. **Adaptive / CFL-limited timestep** (found 2026-06-23) — `dt` is FIXED for the
-  whole run (no `self.dt =` reassignment anywhere in `solver.py`); `diagnostics.py`
-  only *warns* on CFL>0.5, it never adapts. The blow-up-prone cases (toy boat,
-  surface eel, sphere-near-wall) would benefit from a CFL-limited dt as a safety
-  lever — recompute `dt = cfl_target·h/|u|max` each step (or every N steps) with a
-  config cap. Caveat: checkpoint/restart (LT6) and the Adams-Bashforth flux history
-  assume constant dt, so a variable dt touches both. Keep opt-in (default fixed).
-LP10. **`COMPOSITEmesh2sdf.transform_3d` is a `NotImplementedError`** (found 2026-06-23,
-  `body.py:1052`) — blocked on a missing `mesh2sdf.transform_3d`. Latent: any code
-  path that rotates/translates a COMPOSITEmesh2sdf body crashes at runtime. Either
-  implement the underlying mesh transform or assert-guard the call site so the
-  failure is explicit at construction.
-LP11. **Pleurodeles full-3D example is a stub** (found 2026-06-23) —
-  `farms_examples/pleurodeles/gen_configs_swim_full3d.py:25` has a placeholder SDF
-  filename TODO ("replace once the full-3D SDF is ready"); the example cannot run
-  as-is. Either finish the full-3D SDF + wire it, or mark the file experimental.
-LP12. ~~**Empty orphan dir `validation/free_surface_2d/`** (found 2026-06-23) — contains
-  only `__pycache__`.~~ ✅ Deleted 2026-06-23 with the rest of the free-surface method.
-
----
-
-# TEST INFRA / REPO HYGIENE (found 2026-06-23)
-
-TI1. **No CI, no test aggregation.** There is no `.github/`, no `conftest.py`,
-  `pytest.ini`, or `tox.ini`; the ~26 `test_*.py` files are scattered across
-  `src/`, `src/kernels/`, and `integration/` and are run by hand. Meanwhile the
-  SU1 per-step rule MANDATES "validate 2D (`_1guillasim`) + 3D (jellyfish) +
-  cost_analysis (<5% regression), rel-err <1e-6" with nothing automating it.
-  Add at minimum a `pytest` config that collects the self-tests (the CUDA ones
-  skip cleanly without a GPU via `pytest.importorskip`), and ideally a CI
-  workflow running the CPU-path parity oracles on push. Enabler for trusting the
-  refactor-heavy `optimize_speed_memory` branch. NOTE: kernel parity tests need a
-  built `_C.so` matching the runtime torch — gate or build-in-CI accordingly.
-TI2. ~~**Repo-root clutter / un-ignored diag output.**~~ ✅ DONE (2026-06-23).
-  The scratch dirs/CSV dumps (`_submerged_diag/`, `_flip_diag/`, `_overlap_study/`,
-  root `run_*.py`) were already relocated/dropped in commit `bbdaa4d` ("Repo tidy").
-  Remaining preventative half done: added directory-only `.gitignore` rules
-  `_*_diag/` and `_*_study/` (trailing slash => the `_overlap_diag.py`/`_region_diag.py`
-  harness scripts stay tracked; the in-dir `force_*.csv` dumps are covered without
-  touching the deliberately-commented `# *.csv` rule). Verified with `git check-ignore`.
-
----
-
-# ARCHITECTURE / PORTABILITY (strategy 2026-06-14)
-
-## Part 1 — Drop FARMS; support pluggable rigid-body engines (Isaac Sim, MuJoCo)
-Goal: get rid of FARMS entirely and make the rigid-body engine swappable
-(MuJoCo today, Isaac Sim / Isaac Lab next).
-
-Coupling map (investigated): **`BDIMhandler` already does NOT import FARMS** — it
-speaks MuJoCo directly (`data.xpos/xquat/xipos`, `model.body_mass`, `geom_*`,
-`xfrc_applied`/`mj_applyFT`). FARMS only owns the *outer* layer:
-  - `integration/extensions.py` — `FluidExtension(TaskExtension)` hooks
-    (`initialize_episode`, `before_step`), experiment options, HDF5 IO.
-  - `farms_examples/base_sim_config.py` + `gen_configs_*` — animat model + scene gen.
-  - swimmer controllers (CPG networks, PD controllers).
-  - the viewers (all `import farms` for the MuJoCo viewer).
-
-AP1. [x] ✅ **`RigidBodyBackend` adapter — DONE (2026-06-23).** New module
-      `lilytorch/integration/rigid_body_backend.py`: `RigidBodyBackend` ABC +
-      `FarmsMujocoBackend` impl + relocated `MujocoCheckpoint` (re-exported from
-      BDIMhandler as `_MujocoCheckpoint` for the existing checkpoint test). The
-      adapter surface: `get_body_poses_velocities(source,iteration)`,
-      `get_body_mass_radius`, `apply_xfrc`, `gravity_z`, `set_contact_params`,
-      `checkpoint()`, `bind_step(task,physics)`. ALL MuJoCo/FARMS access (the
-      ~16 `physics.*` + `task.maps`/`task.units` sites: pose/velocity reads both
-      sensors+physics paths, mass/rbound, gravity, contact tuning, xfrc force
-      write, implicit-coupling checkpoint) moved behind it; BDIMhandler keeps the
-      coupling logic (2-D slicing consumers, buoyancy formula, force scaling/
-      relaxation, IQN-ILS loop). Behavior-preserving: net −116 lines in
-      BDIMhandler; `git grep physics.model|physics.data|task.units|task.maps`
-      in BDIMhandler now empty. **Verified:** 21/21 integration regression tests
-      identical to baseline (pose-source, checkpoint, strong/fsi coupling, all
-      update parities); focused bit-identical unit check of apply_xfrc/
-      get_body_mass_radius/gravity/contact vs the original inline formulas;
-      both gather paths confirmed logic-identical to git HEAD by normalized diff.
-      Core source (solver/forces/body) untouched. **Live 3-D coupled smoke RUN
-      (2026-06-23):** 1guilla 3-D pinned, 128×32×16 isotropic, 5 steps, headless
-      via the real FARMS→FluidExtension→BDIMhandler→backend pipeline — exit 0,
-      `FarmsMujocoBackend.apply_xfrc` confirmed invoked per step on the 9-link
-      eel (env-gated probe), no errors. ⇒ unblocks AP2/AP3/AP5.
-AP2. [ ] **MuJoCo backend** implementing the adapter from raw `mujoco.MjModel/MjData`
-      (or dm_control `Physics`) — no FARMS dependency.
-AP3. [ ] **Standalone driver loop** (~100 lines): load model, step physics, call
-      `BDIMhandler.step()` each tick (replaces the `before_step` hook).
-AP4. [ ] Replace controllers/viewers (FARMS-based) with engine-native equivalents
-      (`mujoco.viewer`; note `xfrc_applied` viewer pitfall — use `qfrc_applied`).
-AP5. [ ] **Isaac Lab backend** — exposes body state as **torch GPU tensors**, so the
-      coupling becomes GPU-resident (no numpy/CPU round-trip the MuJoCo path pays).
-      Strong fit; the adapter is the enabler. (MuJoCo-Warp/MJX is a GPU alternative.)
-Feasibility: MODERATE — numerics are already FARMS-free; the work is outer-loop
-(driver/config/controllers/viewers), not the solver.
-
-### Caveat A — model/file-description format (investigated 2026-06-15)
-FARMS owns TWO things behind the `.sdf` (SDFormat XML) authoring format, and they
-are SEPARABLE:
-  1. **SDF parser** (`farms_core.io.sdf.ModelSDF.read`) — used by BOTH the FARMS
-     converter AND lilytorch's own `BodyMesh`/`CompositeBody` (body.py), but the
-     latter only pulls *mesh files + link poses* to build its OWN signed-distance
-     tables. Shedding it is EASY (mostly pure-Python; vendor it, or author in
-     URDF/MJCF instead).
-  2. **SDF→MJCF converter** (`farms_mujoco/.../mjcf.py`, ~1725 lines) — the heavy,
-     MuJoCo-specific part (units, spawn modes, joint-axis rotation, inertial frames,
-     mesh composites, hfields, materials). Faithfully reproducing it is MODERATE–HARD,
-     but **largely AVOIDABLE**: MuJoCo loads MJCF/URDF natively → author there and
-     delete the conversion step.
-  Note BDIMhandler needs NEITHER (geometry from lilytorch `body.sdf`, poses from
-  MuJoCo `data.xpos/xquat`).
-AP5b. [ ] **Pick a portable model format.** SDFormat is the LEAST supported outside
-      Gazebo. Engine-native: MuJoCo=MJCF, Isaac Sim/Lab=USD (via URDF/USD importers),
-      Newton=USD/MJCF/URDF importers. Realistic common interchange = **URDF or MJCF**.
-      Recommendation: separate "geometry/inertia spec" (what BDIM needs: meshes +
-      link tree + poses + masses, format-agnostic) from "engine model" (native
-      MJCF/USD/URDF), and standardise authoring on URDF/MJCF rather than SDF→X.
-
-### Caveat B — logging (investigated 2026-06-15)
-FARMS provides efficient preallocated Cython typed arrays (`LinkSensorArray`,
-`JointSensorArray`, `ContactsArray`, `XfrcArray`, shape `[n_iter,n_links,size]`) →
-HDF5 via `dict_to_hdf5` (extensions.py `DataLogger`/`end_episode`).
-AP5c. [ ] **Backend-neutral `SensorLogger`** to replace FARMS `AnimatData` logging.
-      Feasibility EASY–MODERATE: lilytorch already has HDF5 logging patterns
-      (`diagnostics.py`, `save_drags_h5`). Only loss is the Cython buffer
-      micro-efficiency — negligible vs. the fluid solve. Pull per-step link/joint
-      state straight from the engine via the `RigidBodyBackend` adapter.
-
-## Part 2 — Single-source CPU+GPU kernels (kill the .cpp/.cu double-write)
-Pain: kernels are hand-written TWICE (CPU `.cpp` + CUDA `.cu`) → more code, more bugs.
-Double-written today: **streaming_sdf (2d/3d), lagrangian_forces (2d/3d), rbgs**.
-(Poisson driver/transfer/advection are CUDA-only + pure-PyTorch CPU fallback.)
-
-Strategy (two kernel classes):
-AP6. [ ] **Fusible stencil/pointwise** (rbgs sweep, residual, restriction, advection
-      flux) → push through **`torch.compile`/Inductor**: write once in PyTorch,
-      auto-generates C++ (CPU) + Triton (GPU, incl. ROCm). No hand kernel.
-AP7. [ ] **Irregular scatter/gather** (streaming_sdf, lagrangian_forces) → **Warp**
-      (chosen): single Python `@wp.kernel` → CPU + CUDA, zero-copy torch interop.
-      Driver-style kernels (poisson_solve mgcg/multigrid loops) stay `.cu` — Warp is
-      kernel-level, no C++ driver-with-control-flow equivalent (use CUDA-graph capture
-      if unified). AMD: Warp's HIP backend is weak — if AMD becomes hard-required,
-      Taichi (Vulkan) or SYCL/Kokkos (HIP) for those kernels instead.
-
-**Warp RBGS POC done 2026-06-14** (`/tmp/poc_warp_rbgs.py`, pure test):
-  - Interop: zero-copy `wp.from_torch` (warp wrote the torch tensor, same ptr); a
-    native `torch.ops` CUDA kernel consumed warp output on one stream; same
-    `@wp.kernel` ran on CPU and CUDA. Correctness within 0.9% of native.
-  - Perf (ms/2-sweep): 256² native 0.010 / warp 0.094 / warp+graph 0.019;
-    2048² native 0.179 / warp 0.664 / warp+graph 0.650; pytorch 5–35× slower than warp.
-  - Findings: eager Warp is launch-bound (6 launches vs native's 1 fused) → **CUDA
-    graph capture** removes most of it (~2× native at typical sizes). Residual gap
-    (2–3.6×) at large grids = native is hand-TILED (shared mem, all sweeps fused, 1
-    global pass) vs naive warp's 6 global passes. **To match native, write a tiled
-    warp kernel (`wp.tile`).** Net: Warp gives single-source + crushes the PyTorch
-    path; matching a hand-tuned kernel needs tiling work.
-AP8. [ ] Port streaming_sdf + lagrangian_forces to Warp (tiled where bandwidth-bound);
-      keep self-tests as oracles; retire the `.cpp` twins.
-
----
-
-# LONG TERM
-
-LT1. **LES for high-Reynolds** — extend the existing Smagorinsky SGS model into a full LES
-  workflow (WALE/dynamic-Smagorinsky options, wall treatment) for turbulent high-Re
-  regimes where DNS is intractable.
-LT2. **AMR (Adaptive Mesh Refinement)** — refine the grid only near bodies and in the wake;
-  the enabler for high-Re cases at tractable cost (pairs with LES).
-LT3. **Near-boundary stress stencils** — velocity gradients use central differences,
-  degrading to 1st-order near immersed bodies. One-sided / ghost-cell stencils would
-  improve force accuracy and reduce oscillations.
-LT4. **5th-order Hermite smoothstep** for the BDIM delta — `0.5*(1+d/ε+sin(πd/ε)/π)` has
-  cancellation at `d≈±ε`; Hermite is more robust and drops sin/cos.
-LT5. **2nd-order body coupling** — body SDF/velocity are updated once per step, so Heun's
-  corrector uses body state at *t* not *t+dt/2* → coupling is effectively 1st-order.
-  Update body to *t+dt* after the predictor and feed the corrector.
-LT6. **Checkpoint/restart** — periodic full-state save (iteration, drag records,
-  Adams-Bashforth flux, body poses) so a crash at iter 999k of a 1M run isn't fatal.
-  Current `_load_initial_conditions` restores only `u,v,[w],p` → warm restart diverges
-  from a continuous run.
-LT7. **Granular flow (sand) via μ(I)-rheology** — new physics: dense dry/immersed granular
-  media as an incompressible fluid with a pressure-dependent, shear-rate-dependent
-  effective viscosity. Implemented as `GranularSolver(TwoPhaseSolver)` reusing projection,
-  BDIM, advection–diffusion, forces, and FARMS/MuJoCo coupling **unchanged**; adds only
-  (a) a pressure-dependent μ(I) viscosity closure and (b) granular stabilisation. ~80% of
-  the machinery already exists (`_compute_nu_t`, `ops.carreau_viscosity`,
-  `ops.strain_rate_magnitude`, VOF free surface for the pile surface). Pitched as the
-  cheapest genuinely-new physics LilyTorch can add. Full design + milestone plan:
-  `milestones/granular_design.md`.
-LT8. **Elastic-body FSI via Cosserat rods (PyElastica coupling)** — simulate flexible
-  slender bodies (flapping fins, flagella, soft swimmers, plant stalks) in the BDIM solver.
-  **Key insight: the SDF is the easy part — no raycasting, no Bezier.** A Cosserat rod is a
-  chain of tapered capsules, and the analytical capsule-chain SDF already exists in the
-  codebase (`body.py: segment()` 2D round-cone, `capsule_3d`/`sdUnevenCapsule` 3D); the
-  deforming centerline+radius SDF machinery is exactly what `BodyFish*` already does each
-  step: `sdf(x) = smin_i segment(x, p_i, p_{i+1}, r_i, r_{i+1})`, AABB-cropped. Bezier is
-  strictly worse (no closed-form distance, sub-grid fidelity wasted below ~2h).
-  **Architecture:** PyElastica is the structural solver (like MuJoCo for rigid bodies) —
-  slots under the planned `RigidBodyBackend`/`StructuralBackend` adapter (AP1) returning
-  per-node positions/velocities/radii. Loop: query rod state → rebuild capsule-chain SDF →
-  body velocity = nearest-node velocity → BDIM+projection → bin hydro forces to centerline
-  nodes as distributed loads+moments → feed back to PyElastica. PyElastica is CPU/Numba but
-  a rod is ~100 nodes (negligible vs. fluid). New `BodyCosseratRod` + `PyElasticaBackend`.
-  **Real difficulties (NOT the SDF):** (1) **added-mass instability** — light flexible bodies
-  are the worst case; MUST use the already-shipped implicit Aitken/IQN-ILS coupling
-  (`BDIMhandler._step_implicit`), prefer Aitken to start (IQN reuse-poisoning trap); (2)
-  **force→moment attribution** — Cosserat elements carry bending/twist, so accumulate r×f
-  torque per node, not just force (extend the Lagrangian-marker force path); (3) **grid
-  resolution floor** — BDIM is volume-penalization, needs rod radius ≳ 2-3h (sub-grid fibers
-  need a different IB+drag-law model, out of scope); (4) **joint seam smoothness** — per-
-  segment min creates concave creases → noisy normals; use polynomial smooth-min for the
-  union (+ existing `body_velocity_blend_eps_cells` for the velocity side). Reuses ~3 existing
-  pieces: deforming-fish SDF builder, Lagrangian force attribution, implicit coupling.
-  NOTE: elastic *sheets / 3D soft solids* are the genuinely-hard SDF case (deforming FEM mesh
-  → per-step distance-to-deforming-triangles + robust winding-number sign); start with rods.
-
-LT9. SPH simulation support (?).
-LT10. Monolithic strongly-coupled fluid + multi-rigid-body solver (?) — hard, would require dropping MuJoCo.
-LT11. Refactor: extract `FluidSolver.__init__` (~500 lines) into `_setup_grid/_models/
-  _poisson/_output`; add `BaseSimConfig.generate_config()` (dry-run YAML without launch);
-  add type hints.
-
----
-
-# ═══════════════════════════════════════════════════════════
-# ✅ DONE
-# ═══════════════════════════════════════════════════════════
-
-## High priority
-
 HP4. ~~**Wire in `FlowDiagnostics`.**~~ ✅ `FlowDiagnostics` moved to its own module
   `lilytorch/src/diagnostics.py` (out of solver.py), instantiated in `FluidSolver.__init__`
   when `diagnostics_every > 0`, called from `finalize_step` on the post-projection field,
@@ -971,6 +924,42 @@ BG7. ✅ **`strain_rate_magnitude` cross-derivative stagger fix (2026-06-11)** �
   gave spurious non-zero for solid rotation.
 
 ## Memory / perf
+
+MP10. ~~**T2d — fused CUDA kernel for SCALAR advection**~~ ✅ DONE (2026-06-23,
+  as the W&Y `cvof_sweep` kernel — see below). **The original framing was stale:**
+  it assumed `advection.advect_scalar` carried the two-phase α-transport, but
+  (a) `advect_scalar` has **zero live callers** — its only consumer was the
+  free-surface level-set transport, deleted with HP7; and (b) the actual VOF
+  α-transport is `TwoPhase._cvof_sweep` (`two_phase.py`), the **Weymouth & Yue**
+  conservative scheme, which `advect_flux_add` **cannot** express (W&Y is a
+  sequential operator-split sweep with a divergence-correction term
+  `a_i·(u_R−u_L)` and a bounded donor face value, not a sum-over-d accumulation of
+  QUICK/vanLeer fluxes). So reusing `advect_flux_add` was a dead end; instead a
+  **dedicated W&Y CUDA kernel** was written.
+  * **NEW op `lilytorch_kernels::cvof_sweep`** in
+    `lilytorch/src/kernels/csrc/cuda/cvof_sweep.cu` (schema in `ops.cpp`): one
+    launch per (sweep, direction) replacing the ~8 full-grid temporaries (3
+    edge-clamped shifts, 2 limited slopes, 2 donor faces, the flux tensor) of the
+    Python sweep; computes `out[i] = a[i] + cfl·(F(i)−F(i+1)+a[i]·(u[i+1]−u[i]))`
+    with the W&Y van-Leer-limited Courant-corrected donor face, all in registers.
+    Edge-clamp (Neumann) neighbour reads + explicit strides (velocity components
+    are strided `_vel` row views). 2-D + 3-D.
+  * **Wired** into `TwoPhase._cvof_sweep` (`two_phase.py`): dispatches to the
+    kernel on CUDA when the extension exports the op (cached
+    `_cvof_kernel_available()` probe), else falls back to the renamed
+    `_cvof_sweep_python` oracle (CPU path / un-built extension). **No core-source
+    edits** (confined to `two_phase.py` per `feedback-no-core-source-for-two-phase`).
+  * **Parity** (`test_two_phase.py`, new `test_cvof_sweep_kernel_parity_*`):
+    kernel vs `_cvof_sweep_python` on identical CUDA tensors — **rel 0.0 (2-D
+    f32+f64, contiguous AND strided-velocity)**, 1.1e-16 (3-D f64), 6e-8 (3-D f32,
+    FMA). End-to-end `tp.advect` 100-step boundedness + mass-conservation test on
+    CUDA also passes. **Speedup 4.5–5.6×** at typical sizes (2D-256, 3D-64/128;
+    1.3× at 2D-512), measured incl. the shared clone+pad overhead.
+  * NOTE: `advect_scalar` left in place (harmless dead code; a future passive-
+    scalar/dye/level-set consumer could be CUDA-accelerated via `advect_flux_add`
+    cheaply, but there is none today). The variable-coeff Poisson still dominates
+    the two-phase step at ~75% (see `project_two_phase_poisson_bottleneck`); this
+    removes the α-transport slice of the ~6% Python cost.
 
 MP1. ~~**H1 per-step `torch.cuda.empty_cache()`**~~ ✅ (2026-06-11). Gated to every
   `empty_cache_every` steps (default 200, config key `empty_cache_every` in
@@ -1054,9 +1043,27 @@ SU2. ~~**Step 6 — merge BDIMhandler `_update_2d/_3d` + `_update_*_streaming_mu
   kernel-mode + CPU python-mode end-to-end A/B on the real 3D multi-link 1guilla
   (225×75×13, 8 steps, Lagrangian) — per-link drags+torques bit-identical
   unified-vs-legacy on BOTH paths. (2-D kernel covered by unit parity only — no
-  non-stale 2-D coupled example exists on HEAD.) **Follow-up (low-risk cleanup):**
-  delete the 4 legacy oracle methods (~700 lines, the net line-count win) once a
-  full-length run confirms the unified path in situ.
+  non-stale 2-D coupled example exists on HEAD.)
+  **Follow-up cleanup ✅ DONE (2026-06-24).** After the gated full-length in-situ
+  validation passed — unit parity re-run bit-identical (max|Δ|=0, both paths);
+  2-D `_1guillasim` pinned kernel-streaming coupled run 1000 steps clean (body
+  undulating, all sensors finite, no explosion); 3-D `_1guillasim` pinned
+  kernel-streaming + Lagrangian coupled run 300 steps clean (isotropic
+  192×48×24, `convexify=False` per `project_convexify_overlap_instability`) —
+  the 4 legacy oracle methods (`_update_2d`, `_update_3d`,
+  `_update_2d_streaming_multi`, `_update_3d_streaming_multi`) were DELETED from
+  `BDIMhandler.py` (**1124 lines removed**) along with the two now-moot parity
+  tests (`test_update_python_parity.py`, `test_update_streaming_parity.py`).
+  `test_update_2d_mirrors_3d.py` KEPT (it pins `_body_aabb_local_2d`, not the
+  deleted methods; docstrings refreshed). Stale comments in `forces.py` /
+  `body.py` repointed to the unified method names. Post-deletion: mirrors test +
+  2-D & 3-D coupled smokes all exit-0. NOTE: the production full-res 3-D config
+  (1024×256×128 + Euler) explodes at iter ~25, but that is a pre-existing fluid
+  instability orthogonal to the update path (unit parity guarantees legacy would
+  explode identically) — not a unification regression. NOTE: the jellyfish 3-D
+  example is STANDALONE (replaces `composite_body`, calls `jelly.update()`
+  directly) and does NOT exercise the BDIMhandler unified path, so 3-D coupled
+  validation uses `_1guillasim` pinned, not jellyfish.
 
 SU3. ~~**K9**~~ ✅ Added `is_cuda` TORCH_CHECK to `apply_bcs_2d_cuda` (mirrors 3D).
 SU4. ~~**K10**~~ ✅ `apply_bcs_2d/3d_kernel` now compute `src_lin` unconditionally
@@ -1064,6 +1071,33 @@ SU4. ~~**K10**~~ ✅ `apply_bcs_2d/3d_kernel` now compute `src_lin` unconditiona
   the `if (kind != 1)` branch. Rebuilt `_C.so`; CPU↔CUDA parity exact (fp32+fp64).
 
 ## GPU utilisation
+
+GU6. ~~**CUDA-graph capture of the native solve**~~ ✅ SHIPPED (2026-06-15). Replays the
+  ~1300-kernel native V-cycle with ~1 host launch on launch-bound small grids. **Enabler**
+  (already done 2026-06-14): the native drivers take `tol < 0` = sync-free fixed-cycle mode
+  (skips the residual-norm `.item()` short-circuit) → host-sync-free → graph-capturable;
+  `tol >= 0` unchanged. **Wired into `PoissonSolver`** (`poisson_mult.py`): `_solve_mgcg_native`
+  / `_solve_multigrid_native` now route through `_graphed_native_solve` when enabled — lazily
+  captures one graph per (method, ndim, input-shape) into static p/f/face buffers, then each
+  step `copy_`s the live RHS + BDIM face coeffs + warm-start guess in, replays, copies p back
+  out (residual cloned). Capture failure → permanent eager fallback. Config:
+  `poisson_cuda_graph` (default False) + `poisson_cuda_graph_max_cells` (interior-cell gate,
+  default 64³) wired through `base_sim_config.py`. **mgcg + multigrid only** (rmgcg's
+  deflation basis changes / fft uses a different solver — both untouched, automatically
+  out of scope). **Verified:** graph vs eager bit-exact (`|dp|=0`, 2D/3D, both methods);
+  gating correct (N=96 skips, N=48 captures); speedup 9.8×/8.1× (2D-N64/128), 4.0× (3D-N48)
+  → 1.04× (3D-N128) — regime-dependent as the POC predicted, hence the size gate;
+  mgcg/rmgcg native self-tests still PASS. Harness `/tmp/verify_gu6.py` + `/tmp/verify_gu6_perf.py`.
+  ⇒ **SMALL-GRID-ONLY win** (launch-bound); net-NEGATIVE on large compute-bound 3D, so the
+  size gate is load-bearing. A full megakernel rewrite would share the large-grid limitation
+  AND hit a cooperative-launch occupancy ceiling (~64³) — graphs, size-gated, are the right
+  tool. RBGS red/black can't be fused (Gauss-Seidel dep).
+  **NOTE on T4 (`--poisson_compile`):** SUBSUMED — no distinct work remains. The literal T4
+  (`torch.compile` the *Python* multigrid path) was built (`14bbbfa`) then deliberately
+  removed (`4de22b2`, "unnecessary via kernel mode"); its surviving reframe ("CUDA-graph
+  capture of the whole native solve") IS this GU6 item, now shipped. The only forward-looking
+  follow-on is an optional device-side convergence flag so the captured graph can early-exit
+  when converged instead of running the fixed cycle budget (GU6 uses `tol<0` fixed cycles).
 
 ✅ **All three config options implemented (2026-06-12):** `solver.compile_project`,
 `solver.use_cuda_graphs`, `solver.adv_diff_streams` wired into `FluidSolver.__init__`
@@ -1105,6 +1139,9 @@ PH4. ~~Delete legacy `adv_diff.py`~~ ✅ (2026-06-11) — repointed the lone imp
 
 ## Low priority
 
+LP12. ~~**Empty orphan dir `validation/free_surface_2d/`** (found 2026-06-23) — contains
+  only `__pycache__`.~~ ✅ Deleted 2026-06-23 with the rest of the free-surface method.
+
 LP4. ~~**Cache `_compute_union_aabb` across BDIM + coefficient passes**~~ ✅ (2026-06-11).
   The AABB was computed twice per step on the kernel path: once in `_apply_bdim_all_axes`
   and once inside `_compute_bdim_coefficients`.  Now computed once in
@@ -1119,3 +1156,48 @@ LP7. ~~**F3 cache CC normals**~~ ✅ (2026-06-11). `forces_method1/2/2_3d` now s
   after the step.  On the python path `_recompute_mu_normals` already sets them, so no
   change.  On the kernel path and for implicit coupling sub-iterations this avoids a
   redundant `torch.gradient` call per iteration.
+
+## Test infra / repo hygiene
+
+TI3. ~~**`rho_body` dead solver config key — purged from codebase.**~~ ✅ DONE (2026-06-24).
+  Removed `"rho_body"` from the solver config dict (`base_sim_config.py` builder),
+  from all YAML solver configs (coquerelle/gazzola/two-phase sphere), from all
+  validation scripts that passed it as a FluidSolver kwarg, and from `run_jellyfish_fluid.py`.
+  Also updated README.md and controller.py docs that referenced it as a solver parameter.
+  Note: `self.rho_body` is intentionally retained in `base_sim_config.py` (line 106/470)
+  and all child `gen_configs_*.py` files — it still feeds the FARMS/MuJoCo link
+  `density` field and determines body mass in the rigid-body physics engine.
+
+TI2. ~~**Repo-root clutter / un-ignored diag output.**~~ ✅ DONE (2026-06-23).
+  The scratch dirs/CSV dumps (`_submerged_diag/`, `_flip_diag/`, `_overlap_study/`,
+  root `run_*.py`) were already relocated/dropped in commit `bbdaa4d` ("Repo tidy").
+  Remaining preventative half done: added directory-only `.gitignore` rules
+  `_*_diag/` and `_*_study/` (trailing slash => the `_overlap_diag.py`/`_region_diag.py`
+  harness scripts stay tracked; the in-dir `force_*.csv` dumps are covered without
+  touching the deliberately-commented `# *.csv` rule). Verified with `git check-ignore`.
+
+## Architecture / portability
+
+AP1. [x] ✅ **`RigidBodyBackend` adapter — DONE (2026-06-23).** New module
+      `lilytorch/integration/rigid_body_backend.py`: `RigidBodyBackend` ABC +
+      `FarmsMujocoBackend` impl + relocated `MujocoCheckpoint` (re-exported from
+      BDIMhandler as `_MujocoCheckpoint` for the existing checkpoint test). The
+      adapter surface: `get_body_poses_velocities(source,iteration)`,
+      `get_body_mass_radius`, `apply_xfrc`, `gravity_z`, `set_contact_params`,
+      `checkpoint()`, `bind_step(task,physics)`. ALL MuJoCo/FARMS access (the
+      ~16 `physics.*` + `task.maps`/`task.units` sites: pose/velocity reads both
+      sensors+physics paths, mass/rbound, gravity, contact tuning, xfrc force
+      write, implicit-coupling checkpoint) moved behind it; BDIMhandler keeps the
+      coupling logic (2-D slicing consumers, buoyancy formula, force scaling/
+      relaxation, IQN-ILS loop). Behavior-preserving: net −116 lines in
+      BDIMhandler; `git grep physics.model|physics.data|task.units|task.maps`
+      in BDIMhandler now empty. **Verified:** 21/21 integration regression tests
+      identical to baseline (pose-source, checkpoint, strong/fsi coupling, all
+      update parities); focused bit-identical unit check of apply_xfrc/
+      get_body_mass_radius/gravity/contact vs the original inline formulas;
+      both gather paths confirmed logic-identical to git HEAD by normalized diff.
+      Core source (solver/forces/body) untouched. **Live 3-D coupled smoke RUN
+      (2026-06-23):** 1guilla 3-D pinned, 128×32×16 isotropic, 5 steps, headless
+      via the real FARMS→FluidExtension→BDIMhandler→backend pipeline — exit 0,
+      `FarmsMujocoBackend.apply_xfrc` confirmed invoked per step on the 9-link
+      eel (env-gated probe), no errors. ⇒ unblocks AP2/AP3/AP5.

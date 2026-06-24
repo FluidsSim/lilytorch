@@ -4,8 +4,7 @@
 # FARMS reads the body mass from the SDF ``<inertial>`` block and ignores
 # ``morphology.links.density`` below, so editing it does nothing. gen_sphere.py
 # (run by run.sh before launch) writes sphere.sdf's <mass>/<inertia> from its
-# DENSITY constant: >1 sinks, <1 floats, ~1 hovers. (rho_body in
-# simulation_config.yaml is a FLUID setting, not the body weight.)
+# DENSITY constant: >1 sinks, <1 floats, ~1 hovers.
 sdf: sphere.sdf
 spawn:
   loader: 0

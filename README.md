@@ -217,7 +217,7 @@ Notes:
 - Requires `cb_sub_steps = 1`. Works with `poisson_method: fft` or
   `multigrid`.
 - The body's morphology `density` (in its `.yaml`) must exceed the fluid
-  `rho` for it to sink; it should match the solver `rho_body`.
+  `rho` for it to sink.
 
 See the [Strong (implicit) FSI coupling](docs/strong_coupling.rst)
 documentation for the theory and equations, and

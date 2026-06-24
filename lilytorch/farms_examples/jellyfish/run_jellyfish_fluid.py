@@ -102,7 +102,6 @@ def build_solver(config_path: str, dtype=torch.float32) -> FluidSolver:
         s.setdefault("poisson_max_mgcg_cycles", 30)
         s.setdefault("poisson_max_cycles", 30)
         s["gravity"]  = GRAVITY
-        s["rho_body"] = RHO_BODY
         s["two_phase"] = {
             "alpha_init": f"lambda X, Y, Z: (Z < {SURFACE_Z}).double()",
             "rho_water": RHO_WATER, "rho_air": RHO_AIR,

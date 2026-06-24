@@ -124,7 +124,7 @@ def build_pars(D=0.10, pts_per_D=16, Fr=3.0, Re=500.0):
             "poisson_nsmoothing": 6, "poisson_verbose": False,
             "poisson_folder": "lilytorch/data/",
             "poisson_method": "multigrid", "poisson_smoother": "rbgs",
-            "dtype": "float32", "solver_method": "python", "rho_body": 500.0,
+            "dtype": "float32", "solver_method": "python",
             # Lagrangian surface-integral forces on the REAL pressure: the
             # watertight sphere triangulation gives Σ(A·n)=0, so the integral is
             # gauge-invariant and recovers buoyancy + the dynamic impact load

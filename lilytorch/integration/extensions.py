@@ -147,6 +147,17 @@ class FluidExtension(TaskExtension):
             except Exception as exc:
                 print(f"[FluidExtension] save_drags_h5 failed: {exc}")
 
+        # FARMS-coupled runs also never call FluidSolver.run_sim, so the
+        # FlowDiagnostics time-series (kinetic energy, enstrophy, divergence,
+        # CFL) would otherwise never be written. Persist it here when the
+        # monitor is enabled (diagnostics_every>0) and a save_path exists.
+        if getattr(fs, "diagnostics", None) is not None:
+            try:
+                fs._save_diagnostics_h5()
+                fs.flush_io()
+            except Exception as exc:
+                print(f"[FluidExtension] save_diagnostics_h5 failed: {exc}")
+
 
 class _RTColumnModel(_dm_views.ColumnTextModel):
     """Dynamic two-column text model for dm_control viewer RT overlay."""
@@ -278,15 +289,105 @@ class PhysicsOptionsExtension(TaskExtension):
 
     def initialize_episode(self, task: ExperimentTask, physics: Physics):
         del task
+        model = physics.model
 
         solref = self.physics_options.get("solref", None)
         if solref is not None:
-            physics.model.geom_solref[:, 0] = solref[0]
-            physics.model.geom_solref[:, 1] = solref[1]
+            model.geom_solref[:, 0] = solref[0]
+            model.geom_solref[:, 1] = solref[1]
 
         solimp = self.physics_options.get("solimp", None)
         if solimp is not None:
-            physics.model.geom_solimp[:, :] = solimp
+            model.geom_solimp[:, :] = solimp
+
+        # Contact engages this far *before* geometric penetration. With the
+        # default margin=0, a light drag-driven body that only grazes a wall
+        # never forms a sustained contact (ncon stays 0) and solref/solimp have
+        # nothing to act on. Applied to collision geoms only (contype!=0).
+        margin = self.physics_options.get("margin", None)
+        if margin is not None:
+            collidable = (model.geom_contype != 0) | (model.geom_conaffinity != 0)
+            model.geom_margin[collidable] = margin
+            # gap < margin keeps the extra band frictionless-but-detected; set
+            # gap=margin to make the whole band inactive except for detection.
+            gap = self.physics_options.get("gap", None)
+            if gap is not None:
+                model.geom_gap[collidable] = gap
+
+        # Force ALL contacts to use these params, bypassing MuJoCo's per-geom
+        # mixing/priority (which can silently ignore per-geom edits).
+        self._override = bool(self.physics_options.get("override", False))
+        if self._override:
+            if solref is not None:
+                model.opt.o_solref[:] = solref
+            if solimp is not None:
+                model.opt.o_solimp[:] = solimp
+            model.opt.enableflags |= int(mujoco.mjtEnableBit.mjENBL_OVERRIDE)
+
+        # One-time confirmation that the override actually reached the model.
+        print(
+            f"[PhysicsOptions] geom_solref[0]={model.geom_solref[0]} "
+            f"geom_solimp[0]={model.geom_solimp[0]} "
+            f"override={self._override} margin={margin} "
+            f"o_solref={model.opt.o_solref} o_solimp={model.opt.o_solimp}"
+        )
+        self._diag_every = int(self.physics_options.get("contact_debug_every", 0))
+
+        # Precompute geom-id groups for the proximity diagnostic.
+        names = [model.geom(i).name for i in range(model.ngeom)]
+        self._fish_gids = np.array(
+            [i for i, n in enumerate(names)
+             if n.startswith("a0") and n.endswith("collision")], dtype=int)
+        self._wall_gids = np.array(
+            [i for i, n in enumerate(names)
+             if n.endswith("collision") and ("wall" in n or "floor" in n)], dtype=int)
+
+    def after_step(self, task: ExperimentTask, physics: Physics):
+        del task
+        # Per-step contact diagnostic: prints whether real MuJoCo contacts are
+        # forming and how hard. ncon==0 means solref/solimp have nothing to act
+        # on (the body is being stopped by something other than contact).
+        if getattr(self, "_diag_every", 0) <= 0:
+            return
+        data = physics.data
+        model = physics.model
+        step = int(getattr(self, "_diag_step", 0))
+        self._diag_step = step + 1
+        if step % self._diag_every:
+            return
+        ncon = int(data.ncon)
+        fmax = float(np.abs(data.qfrc_constraint).max()) if data.qfrc_constraint.size else 0.0
+
+        # Closest approach between any fish collision geom and any wall/floor
+        # collision geom (bounding-sphere surfaces). Shows whether the fish ever
+        # gets within `margin` of a wall — i.e. whether a contact *can* form.
+        gap = float("nan")
+        if self._fish_gids.size and self._wall_gids.size:
+            gx = np.asarray(data.geom_xpos)
+            rb = np.asarray(model.geom_rbound)
+            fc, wc = gx[self._fish_gids], gx[self._wall_gids]
+            d = np.linalg.norm(fc[:, None, :] - wc[None, :, :], axis=-1)
+            surf = d - rb[self._fish_gids][:, None] - rb[self._wall_gids][None, :]
+            gap = float(surf.min())
+        # Read the LIVE margin off the stepped model (proves the override took).
+        coll = (model.geom_contype != 0) | (model.geom_conaffinity != 0)
+        live_margin = float(np.asarray(model.geom_margin)[coll].max()) if coll.any() else 0.0
+
+        # If contacts exist, name the geom pairs + their actual separation dist.
+        pairs = ""
+        if ncon:
+            items = []
+            for c in range(ncon):
+                con = data.contact[c]
+                g1, g2 = int(con.geom1), int(con.geom2)
+                items.append(f"{model.geom(g1).name}|{model.geom(g2).name}@dist={con.dist:.4g}")
+            pairs = " ; ".join(items)
+        qvel = np.asarray(data.qvel)
+        vmax = float(np.abs(qvel).max()) if qvel.size else 0.0
+        nan = bool(np.isnan(qvel).any() or np.isnan(np.asarray(data.qacc)).any())
+        print(f"[ContactDiag] step={step} ncon={ncon} "
+              f"|qfrc_constraint|max={fmax:.4g} |qvel|max={vmax:.4g} nan={nan} "
+              f"min_wall_gap={gap:.4g} live_margin={live_margin:.4g} {pairs}")
 
 
 class DataLogger(TaskExtension):

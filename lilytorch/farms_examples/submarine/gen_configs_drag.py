@@ -120,7 +120,7 @@ class SimConfig(BaseSimConfig):
         # Submarine is approximately neutrally buoyant overall. The outer
         # hull carries the ballast in the buoyancy model while the fixed keel
         # link only changes inertia and centre of mass.
-        self.rho_body          = 1000.0  # matches the SDF inertia mass
+        self.rho_body          = 1000.0
         self.rho               = 1000.0  # water density
         self.timestep          = 0.001
         self.n_iterations      = 10001

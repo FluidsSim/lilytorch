@@ -13,7 +13,8 @@ The paper is written in the **IEEE Robotics and Automation Letters
 | File | Description |
 | --- | --- |
 | `main.tex` | Main manuscript (abstract, introduction, methods, discussion). |
-| `references.bib` | BibTeX database (BDIM, immersed boundary methods, projection methods, advection schemes, LES, MuJoCo/FARMS, biological swimming, validation benchmarks, ML-for-CFD, software). |
+| `supplementary.tex` | Supplementary Information: detailed formulations of the advection schemes, boundary conditions, pressure/Poisson solvers, and the strong (implicit) FSI coupling. Standalone document; shares `references.bib`. |
+| `references.bib` | BibTeX database (BDIM, immersed boundary methods, projection methods, advection schemes, LES, MuJoCo/FARMS, biological swimming, validation benchmarks, ML-for-CFD, partitioned/implicit coupling, software). |
 | `figures/` | Figures directory (empty placeholder — figures are added in a separate pass). |
 
 The sections currently drafted are **Introduction**, **Methods**, and
