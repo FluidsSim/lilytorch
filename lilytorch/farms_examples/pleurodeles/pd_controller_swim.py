@@ -6,6 +6,7 @@ from farms_core.model.options import AnimatOptions
 from farms_core.sensors.sensor_convention import sc
 from farms_core.model.control import ControlType
 import numpy as np
+from lilytorch.FARMS_V2.farms_core.farms_core.experiment import data
 from lilytorch.util.rw import Dict2Class
 from lilytorch.integration.kinematics import KinematicsController
 import os
@@ -120,36 +121,33 @@ class PositionController(KinematicsController):
 
 
         base_dir = os.path.dirname(__file__)
-        data_file = os.path.join(base_dir, 'salamander_kinematics_2D_x15.csv')
-        data = np.loadtxt(data_file, delimiter=',', skiprows=1)
+        # Allow selecting the kinematics CSV per run without editing this file.
+        # 3D
+        csv_name = os.environ.get('LILYTORCH_SWIM_CSV', 'nominal_swim_4.5.csv')
+        csv_name = os.environ.get('LILYTORCH_SWIM_CSV', 'general_swim_extended_3D.csv')
 
-        amp_deg=40
-        TWL=39
-        freq=3.0
+        data_file = os.path.join(base_dir, 'kinematics', csv_name)
+        if not os.path.isfile(data_file):
+            raise FileNotFoundError(
+                f"Kinematics file not found: {data_file}. "
+                "Set LILYTORCH_SWIM_CSV to a file present in the kinematics folder."
+            )
+        # data_file = os.path.join(base_dir, 'general_swim_extended_sine_fit.csv')
+        # data_file = os.path.join(base_dir, 'general_swim_extended_3D.csv')
+        data_animal = np.loadtxt(data_file, delimiter=',')
+        times = data_animal[:, 0]
+
         nmotors = 39
-        tstop=30
-        amp = amp_deg * (np.pi / 180.0)
-        times = np.expand_dims(np.arange(0, tstop, 0.01), axis=1)
-        times_expanded = np.repeat(times, nmotors, axis=1)
-
-        idxs   = np.arange(nmotors)
-        x      = (idxs + 1) / nmotors
-        c1     = +0.05,
-        c2     = -0.13,
-        c3     = +0.28
-        factor = c1+c2*x+c3*x**2
-
-        # factor[:-1] *= 0
-        # factor[-1] = 4
 
         data=np.zeros((times.shape[0], nmotors+13))
-        data[:,0]=times[:,0]
+        data[:,:40]=data_animal[:,:40]
+        data[:,1:40] *= (np.pi / 180.0)
 
-        data[:,1:40] = amp * factor * np.sin(
-            2 * np.pi * (
-                idxs / TWL - freq * times_expanded
-            )
-        )
+        # 3D
+        data=np.zeros((times.shape[0], nmotors*2+24+1))
+        data[:,:1+nmotors*2]=data_animal[:,:1+nmotors*2]
+        data[:,1:1+nmotors*2] *= (np.pi / 180.0)
+
 
 
         # ======================= TEMPORARY FIX =======================

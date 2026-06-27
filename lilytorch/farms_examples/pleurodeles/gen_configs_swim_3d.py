@@ -23,7 +23,7 @@ class SimConfig(BaseSimConfig):
 
           # Reuse the existing pleurodeles mesh SDF and generate a separate
           # 3-D interpolation cache so it does not clash with the 2-D data.
-        self.compute_sdf = False
+        self.compute_sdf = True
 
         self.data_folder = os.path.join(
             lilytorch_repo_root, 'farms_examples', 'pleurodeles',
@@ -35,7 +35,7 @@ class SimConfig(BaseSimConfig):
         self.headless          = False
         self.poisson_method    = "multigrid"
 
-        self.force_method         = "lagrangian"
+        self.force_method         = "eulerian"
         self.sdf_interp_method    = "triquadratic"
         # self.force_delta_order = 2
         self.convexify                     = False
@@ -85,9 +85,10 @@ class SimConfig(BaseSimConfig):
           # Physics
         self.timestep          = 0.0005
         self.convection_method = "abdquickest"
-        self.n_iterations      = 8001
+        self.n_iterations      = 3501
         self.save_every        = 50
         self.save              = False
+        self.save_drags        = True
 
           # MuJoCo
         self.visual_scale = 10.0
@@ -131,7 +132,7 @@ class SimConfig(BaseSimConfig):
 
         self.wall_alpha   = 0.
         self.water_alpha  = 0.05
-        self.grid_spacing = 0.5*(self.ymax - self.ymin)  # lines on background floor
+        self.grid_spacing = None #0.5*(self.ymax - self.ymin)  # lines on background floor
 
     def _load_drag_map(self):
         """Return a dict {link_name: drag_coefficients} parsed from the
@@ -203,15 +204,15 @@ class SimConfig(BaseSimConfig):
         extensions.append({
             "loader": "lilytorch.integration.flow_iso_gl_viewer.FlowIsoGLViewer",
             "config": {
-                # "field"              : "omega_z",
-                "field"              : "pressure",
+                "field"              : "omega_z",
+                # "field"              : "pressure",
                 "alpha"              : 0.2,
                 "update_every"       : 1,
-                "max_vertices"       : 20 * self.Nx * self.Ny,
+                "max_vertices"       : 30 * self.Nx * self.Ny, #20 * self.Nx * self.Ny,
                 "smooth_sigma"       : 0,
                 "crop_boundary"      : 0,
                 "exclude_body"       : True,
-                "iso_value"          : 5.0,
+                "iso_value"          : 10.0, #5.0,
                 "debug_force_visible": False,
                 # "color_uni"          : "#FF4500",
                 "color_pos"          : "#FF4500",
@@ -287,7 +288,7 @@ class SimConfig(BaseSimConfig):
             "config": {
                 "vel_scale": 0.2,         # metres of arrow per (m/s)
                 "vel_width": 0.001,       # shaft (circular) radius in metres
-                "color"    : "#00FF66",
+                "color"    : "#D717BD",
                                    # "max_length"  : 0.3,      # clamp arrow length (m); null = off
                                    # "min_vel"     : 0.0,      # hide arrows below this speed (m/s)
                                    # "show_angular": True,     # also draw an ω arrow per body
@@ -304,22 +305,22 @@ class SimConfig(BaseSimConfig):
         # acceleration of each body as an arrow. Anchored at the body CoM,
         # world-frame axes. Reads MuJoCo's qacc-derived spatial acceleration
         # via mj_objectAcceleration (reflects the previous step's qacc).
-        extensions.append({
-            "loader": "lilytorch.integration.acceleration_viewer.AccelerationViewer",
-            "config": {
-                "acc_scale": 0.05,        # metres of arrow per (m/s²)
-                "acc_width": 0.001,     # shaft (circular) radius in metres
-                "color"    : "#FF00AA",
-                                   # "max_length"  : 0.3,      # clamp arrow length (m); null = off
-                                   # "min_acc"     : 0.0,      # hide arrows below this |a| (m/s²)
-                                   # "show_angular": True,     # also draw an α arrow per body
-                                   # "ang_scale"   : 0.005,    # m per (rad/s²) (default: acc_scale)
-                                   # "ang_width"   : 0.001,    # shaft radius (default: acc_width)
-                                   # "ang_color"   : "#AA00FF",
-                                   # "min_ang"     : 0.0,      # hide α arrows below this (rad/s²)
-                "update_every": 1  # null -> solver.save_every cadence
-            },
-        })
+        # extensions.append({
+        #     "loader": "lilytorch.integration.acceleration_viewer.AccelerationViewer",
+        #     "config": {
+        #         "acc_scale": 0.05,        # metres of arrow per (m/s²)
+        #         "acc_width": 0.001,     # shaft (circular) radius in metres
+        #         "color"    : "#FF00AA",
+        #                            # "max_length"  : 0.3,      # clamp arrow length (m); null = off
+        #                            # "min_acc"     : 0.0,      # hide arrows below this |a| (m/s²)
+        #                            # "show_angular": True,     # also draw an α arrow per body
+        #                            # "ang_scale"   : 0.005,    # m per (rad/s²) (default: acc_scale)
+        #                            # "ang_width"   : 0.001,    # shaft radius (default: acc_width)
+        #                            # "ang_color"   : "#AA00FF",
+        #                            # "min_ang"     : 0.0,      # hide α arrows below this (rad/s²)
+        #         "update_every": 1  # null -> solver.save_every cadence
+        #     },
+        # })
 
 
           # SkyModifier must be LAST so all CameraRecording renderers already

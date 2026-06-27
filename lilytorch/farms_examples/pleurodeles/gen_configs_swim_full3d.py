@@ -24,7 +24,7 @@ from lilytorch.integration.camera import top_down_camera_config
 # ── New full-3D mesh SDF (not available yet) ──────────────────────────────
 # TODO: replace with the actual filename once the full-3D SDF is ready.
 # It must live under ``farms_examples/sdfs/pleurodeles/``.
-FULL3D_SDF_NAME = "salamander_animal_fmsv0.21_2D.sdf"
+FULL3D_SDF_NAME = "pleurosim_v0.3.sdf"
 
 
 class SimConfig(BaseSimConfig):
@@ -71,7 +71,7 @@ class SimConfig(BaseSimConfig):
         # 3-D grid
         self.Nx = 1024
         self.Ny = 192
-        self.Nz = 96
+        self.Nz = 192
         self.xmin = -0.2
         self.xmax = 0.5
 
@@ -88,9 +88,10 @@ class SimConfig(BaseSimConfig):
         # Physics
         self.timestep          = 0.0005
         self.convection_method = "abdquickest"
-        self.n_iterations      = 8001
+        self.n_iterations      = 4001
         self.save_every        = 50
         self.save              = False
+        self.save_drags        = True
 
         # MuJoCo
         self.visual_scale = 10.0
@@ -140,13 +141,23 @@ class SimConfig(BaseSimConfig):
 
     def customize_joint_initials(self, joints_list):
         for joint in joints_list:
-            if joint["name"] in ("joint_leg_0_L_0", "joint_leg_0_R_0"):
+            if joint["name"] in ("joint_leg_0_L_0_z", "joint_leg_0_R_0_z"):
                 joint["initial"] = [-0.3 * np.pi, -0.0]
-            if joint["name"] in ("joint_leg_0_L_1", "joint_leg_0_R_1"):
-                joint["initial"] = [-0.2 * np.pi, -0.0]
-            if joint["name"] in ("joint_leg_1_L_0", "joint_leg_1_R_0"):
+            if joint["name"] in ("joint_leg_1_L_0_z", "joint_leg_1_R_0_z"):
                 joint["initial"] = [-0.35 * np.pi, -0.0]
-            if joint["name"] in ("joint_leg_1_L_1", "joint_leg_1_R_1"):
+
+            if joint["name"] in ("joint_leg_1_L_0_y", "joint_leg_1_R_0_y",):
+                joint["initial"] = [0.5*np.pi, -0.0]
+            if joint["name"] in ("joint_leg_1_L_1_y", "joint_leg_1_R_1_y"):
+                joint["initial"] = [0.5 * np.pi, -0.0]
+            if joint["name"] in ("joint_leg_0_L_0_y", "joint_leg_0_R_0_y",):
+                joint["initial"] = [0.5*np.pi, -0.0]
+            if joint["name"] in ("joint_leg_0_L_1_y", "joint_leg_0_R_1_y"):
+                joint["initial"] = [0.5 * np.pi, -0.0]
+
+            if joint["name"] in ("joint_leg_0_L_1_x", "joint_leg_0_R_1_x"):
+                joint["initial"] = [-0.2 * np.pi, -0.0]
+            if joint["name"] in ("joint_leg_1_L_1_x", "joint_leg_1_R_1_x"):
                 joint["initial"] = [-0.2 * np.pi, -0.0]
 
     def extra_simulation_extensions(self, output_folder):

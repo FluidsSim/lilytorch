@@ -36,7 +36,7 @@ class SimConfig(BaseSimConfig):
         # ── Hardware ──────────────────────────────────────────────────
         self.compute_sdf                   = True
         self.use_gpu                       = True
-        self.use_bdim                      = True
+        self.use_bdim                      = False
         self.headless                      = False
         self.water_buoyancy                = True
         self.sdf_interp_method             = "triquadratic"
