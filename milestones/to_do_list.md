@@ -423,48 +423,84 @@ AP7. [x] **Irregular scatter/gather** (streaming_sdf, lagrangian_forces) → **W
     global pass) vs naive warp's 6 global passes. **To match native, write a tiled
     warp kernel (`wp.tile`).** Net: Warp gives single-source + crushes the PyTorch
     path; matching a hand-tuned kernel needs tiling work.
+  - **UPDATE 2026-06-24** (`warp_poc/warp_poisson.py`): for the variable-coeff **3-D RBGS**
+    the ~1.5× gap was closed AND reversed WITHOUT `wp.tile` — Warp+graph now **0.5–1.0× of
+    native (faster) at 32³–128³**, bit-parity 1.3e-7, CPU==GPU. Two opts: (1) flat 1-D
+    array addressing (precomputed base + ±stride) instead of 3-D `wp.array` stride-recompute;
+    (2) fold homogeneous Neumann into the half-sweep via index clamp (ghost=self at bdry) →
+    ZERO BC launches (native pays 2/sweep). NB the 2026-06-14 RBGS gap was vs the hand-TILED
+    *2-D* native; the *3-D* native rbgs is flat (untiled), which is why flat Warp matches it.
+    `wp.tile` remains the lever only where native itself is shared-mem tiled (2-D rbgs).
 
-**Warp streaming_sdf POC done 2026-06-24** (`lilytorch/warp_poc/`, isolated from main codebase):
-  - **Design:** sequential-per-body — B kernel launches (one per body), CUDA-graph captures
-    all B into a single replay.  Avoids the native uint64 packed-key atomicMin (`wp.bit_cast`
-    not available in Warp 1.14) by using float conditional compare-swap within each body's
-    kernel (race-free: each thread owns a unique AABB cell).
-  - **Parity** (parity test, B=1/3/9 eager + graph, 64×32×32 + 128×64×64):
-    SDF rel err < 5e-4 (abs < 2 ULP at overlap cells — tie-breaking noise only);
-    body-vel rel err < 1e-4.  Eager vs graph: **bit-identical**.
-  - **Perf** (RTX 4080 Super, warmup=3, reps=20):
+**Warp streaming_sdf POC done 2026-06-24** (`lilytorch/warp_poc/`, isolated from main codebase).
+  **PARTIAL VERDICT (Kernel A only): for the streaming-SDF kernel Warp is viable — the
+  FANNED design matches/beats native at all B, is single-source CPU+GPU, and CUDA-graph
+  captured.** This validates ONE of the per-step kernels; the full kernel-mode replacement
+  is NOT yet earned — advection, Kernel B (BDIM coeff + normals), Poisson stencils,
+  lagrangian_forces, and (critically) PEAK MEMORY are untested. Full testing checklist:
+  `lilytorch/warp_poc/VALIDATION_STATUS.md`. Two streaming-SDF designs benchmarked:
+  - **(a) Sequential-per-body** (`run_eager`/`run_graph`): B kernel launches (one per body),
+    CUDA-graph captures all B into one replay.  Race-free (each thread owns a unique AABB
+    cell → conditional compare-swap, no atomics).  Cost scales with B.
+  - **(b) Fanned all-body** (`run_fanned_eager`/`run_graph_fanned`): **2 launches, CONSTANT
+    in B** (dim = B·max_vol).  Pass B = `wp.atomic_min` on cc/u/v/w across all bodies fanned;
+    Pass C = recompute per-body face SDF, write that body's velocity where SDF == stored min
+    (bit-identical recompute ⇒ exact winner select).  This is the structural analogue of the
+    native 3-pass fanned kernel, but using **float `atomic_min` instead of the uint64
+    packed-key atomicMin** (`wp.bit_cast` is absent in Warp 1.14, so the packed key can't be
+    built — the equality-decode replaces it).
+  - **Parity** (B=1/3/9, eager + graph, 64×32×32 + 128×64×64; pytest 8/8 PASS): both designs
+    SDF rel err < 5e-4 (abs < 2 ULP at overlap cells — tie noise only), body-vel rel < 1e-4.
+    Eager vs graph: **bit-identical**.
+  - **Perf** (RTX 4080 Super, warmup=10, reps=100; ratio vs native, <1.0 = Warp faster):
 
-    | Grid       | B | Mode            | Native  | Warp     | Ratio  |
-    |------------|---|-----------------|---------|----------|--------|
-    | 64×32×32   | 3 | kernel-only     | 0.013ms | 0.010ms  | **0.83×** (Warp faster) |
-    | 64×32×32   | 3 | +reset          | 0.026ms | 0.021ms  | 0.82×  |
-    | 64×32×32   | 9 | kernel-only     | 0.013ms | 0.029ms  | 2.25×  |
-    | 64×32×32   | 9 | +reset          | 0.027ms | 0.041ms  | 1.53×  |
-    | 128×64×64  | 3 | kernel-only     | 0.019ms | 0.017ms  | 0.89×  |
-    | 128×64×64  | 3 | +reset          | 0.035ms | 0.035ms  | 1.02×  |
-    | 128×64×64  | 9 | kernel-only     | 0.019ms | 0.031ms  | 1.60×  |
-    | 128×64×64  | 9 | +reset          | 0.034ms | 0.049ms  | 1.45×  |
+    | Grid      | B | mode        | native  | seq-graph     | **fan-graph**     |
+    |-----------|---|-------------|---------|---------------|-------------------|
+    | 64×32×32  | 3 | kernel-only | 0.012ms | 0.010 (0.85×) | **0.007 (0.61×)** |
+    | 64×32×32  | 3 | +reset      | 0.026ms | 0.021 (0.80×) | **0.018 (0.69×)** |
+    | 64×32×32  | 9 | kernel-only | 0.013ms | 0.029 (2.28×) | **0.008 (0.64×)** |
+    | 64×32×32  | 9 | +reset      | 0.025ms | 0.043 (1.72×) | **0.018 (0.74×)** |
+    | 128×64×64 | 3 | kernel-only | 0.019ms | 0.017 (0.90×) | **0.022 (1.16×)** |
+    | 128×64×64 | 3 | +reset      | 0.037ms | 0.035 (0.94×) | **0.039 (1.05×)** |
+    | 128×64×64 | 9 | kernel-only | 0.020ms | 0.031 (1.50×) | **0.019 (0.96×)** |
+    | 128×64×64 | 9 | +reset      | 0.035ms | 0.055 (1.56×) | **0.037 (1.05×)** |
+
+  - **Larger grids** (warmup=10, reps=50; with-reset = production-relevant, both pay reset):
+
+    | Grid        | B | mode        | native  | seq-graph     | **fan-graph**     |
+    |-------------|---|-------------|---------|---------------|-------------------|
+    | 192×96×96   | 9 | +reset      | 0.112ms | 0.089 (0.79×) | **0.088 (0.79×)** |
+    | 256×128×128 | 9 | +reset      | 0.426ms | 0.320 (0.75×) | **0.332 (0.78×)** |
+    | 384×192×192 | 9 | +reset      | 1.886ms | 1.049 (0.56×) | **1.116 (0.59×)** |
+
+    **Warp's advantage GROWS with grid size** — 0.79× @192³ → 0.59× @384³.  (The
+    native *kernel-only* time scales super-linearly at large grids — 0.044→0.241→1.280ms
+    for 192/256/384 @B=9, far worse than the ~3× cell-count growth — so the kernel-only
+    gap looks even larger, ~0.2–0.5×; not over-claimed since the reset-inclusive row is
+    the apples-to-apples production number.  Worth a look why native streaming_sdf scales
+    poorly there, but not load-bearing for the Warp verdict.)
 
   - **Conclusions:**
     * **CUDA graph capture is essential** — eager mode is 3–14× slower (B Python submissions).
-    * **B=3 (fish with 3 links): Warp+graph matches or BEATS native** (0.82–1.02×).
-    * **B=9 (9-link anguilliform): Warp+graph 1.45–2.25× slower** because sequential B
-      launches > native's 3 fanned launches; the ratio scales with B.
-    * **Warp 1.14 constraint:** `wp.bit_cast` missing → can't replicate the native 64-bit
-      packed-key atomicMin.  `wp.atomic_min(float32)` works and is used for `sdf_cc`.
-      Sequential per-body design is the workaround; a single-fanned Warp kernel matching
-      native's architecture would need `wp.bit_cast` (or Warp 1.15+).
-    * **Next lever for B=9:** `wp.tile`-based all-bodies-in-one-launch kernel (AP8), or
-      wait for `wp.bit_cast` in a future Warp version.
+    * **Fanned mode (b) is the winner: 0.59–1.16× of native at ALL B and ALL grids, const in B.**
+      It resolves the sequential design's small-grid B=9 slowdown (1.4–2.3×) by collapsing
+      to 2 launches; at ≥192³ both Warp designs beat native and the lead widens with grid.
+    * Sequential mode (a) is fine for B≤3 (fish) but degrades ~linearly with B.
+    * The float-`atomic_min` + equality-decode **fully sidesteps** the `wp.bit_cast` gap — no
+      need to wait for Warp 1.15.  Cost vs native: Pass C recomputes the trilinear SDF (native
+      reads it back from the packed key), but the 2-launch GPU saving dominates.
+    * **Single-source achieved:** the same `@wp.kernel` runs on CPU and CUDA (Warp codegen).
 
-AP8. [ ] Port streaming_sdf + lagrangian_forces to Warp (tiled where bandwidth-bound);
-      keep self-tests as oracles; retire the `.cpp` twins.
-      **Decision point from AP7 POC:** for B≤3 the sequential-per-body design already
-      matches native performance with CUDA-graph capture — viable for fish (3-link +
-      9-link cases). For B=9 with production reset overhead: 1.45× slower.  To match
-      native at all B, either (a) wait for `wp.bit_cast` in Warp (matches 3-pass fanned),
-      or (b) implement a tiled all-bodies kernel that does atomicMin via
-      integer-compare-swap on a scratch `int32` body-ID array with a separate float SDF.
+AP8. [ ] Port streaming_sdf + lagrangian_forces to Warp and retire the `.cpp`/`.cu` twins.
+      **streaming_sdf design is DECIDED (AP7 POC):** use the FANNED float-atomicMin +
+      equality-decode kernel (`warp_poc/warp_kernels.py: streaming_sdf_fanned_{min,decode}_3d`),
+      2 launches constant in B, CUDA-graph captured — matches/beats native at all body counts.
+      Remaining for production: (1) wire `WarpStreamingSDF` into the kernel dispatch in
+      `solver.py`/`BDIMhandler` behind a `use_warp_kernels` toggle; (2) port the 2-D variant
+      + the blend-eps path (`num_*`/`den_*` softmin) currently stubbed in the POC; (3) port
+      `lagrangian_forces` (simpler — atomicAdd scatter, no argmin); (4) keep the `.cpp`/`.cu`
+      self-tests as parity oracles before deleting them. AABB-sized output buffers (MP8/T2b)
+      compose cleanly since the fanned kernel already indexes by global g.
 
 ---
 

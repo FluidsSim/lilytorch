@@ -89,12 +89,12 @@ class SimConfig(BaseSimConfig):
 
         # ── 3-D grid ─────────────────────────────────────────────────
         self.Nx           = 512
-        self.Ny           = 128
+        self.Ny           = 256          # doubled (with the y extent) to keep h isotropic
         self.Nz           = 64
         self.xmin         = -0.02
         self.xmax         = 0.08
-        self.ymin         = -0.0125
-        self.ymax         = 0.0125
+        self.ymin         = -0.025        # doubled lateral tank: fish stays off the walls
+        self.ymax         = 0.025
         self.zmin         = -0.00625
         self.zmax         = 0.00625
         self.timestep     = 0.0005

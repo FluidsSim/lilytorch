@@ -153,6 +153,10 @@ def main():
                     help="Use a log y-axis on the COT panel.")
     ap.add_argument("--min-dist", type=float, default=1e-4,
                     help="Minimum swim distance [m] before COT is computed (avoids t=0 zero).")
+    ap.add_argument("--tmax", type=float, default=None,
+                    help="Truncate ALL data (speed, KE, COT, distance) to t <= tmax [s] "
+                         "before computing metrics. Use to exclude the wall-contact window "
+                         "(e.g. --tmax 0.3).")
     args = ap.parse_args()
 
     out_prefix = args.out or os.path.join(args.stack, "freq_cross")
@@ -181,6 +185,12 @@ def main():
         times, v_fwd, v_lat, com_xy, m_fish = _speed_and_com(run_dir)
         dt = float(times[1] - times[0]) if len(times) > 1 else 5e-4
 
+        # Truncate to the wall-free window (t <= tmax) before any metric.
+        if args.tmax is not None:
+            keep = times <= args.tmax
+            times, v_fwd, v_lat = times[keep], v_fwd[keep], v_lat[keep]
+            com_xy = com_xy[keep]
+
         half = len(v_fwd) // 2
         v_mean    = float(np.mean(v_fwd))
         v_mean_ss = float(np.mean(v_fwd[half:]))
@@ -189,6 +199,9 @@ def main():
         ke_idx, ke = _fluid_ke(run_dir, rho)
         if ke is not None:
             ke_t = ke_idx * dt
+            if args.tmax is not None:
+                keep = ke_t <= args.tmax
+                ke_t, ke = ke_t[keep], ke[keep]
             ke_mean  = float(np.mean(ke))
             ke_peak  = float(np.max(ke))
             ke_final = float(ke[-1])
@@ -255,9 +268,11 @@ def main():
         ax_c.set_yscale("log")
     ax_c.legend(); ax_c.grid(alpha=0.3)
 
-    if args.xlim is not None:
+    xlim = args.xlim if args.xlim is not None else (
+        (0.0, args.tmax) if args.tmax is not None else None)
+    if xlim is not None:
         for ax in (ax_v, ax_e, ax_c):
-            ax.set_xlim(args.xlim)
+            ax.set_xlim(xlim)
     if args.ylim_speed is not None:
         ax_v.set_ylim(args.ylim_speed)
     if args.ylim_ke is not None:

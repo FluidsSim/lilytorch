@@ -13,6 +13,8 @@ import warnings
 import h5py
 import torch
 
+from lilytorch.src import operations as ops
+
 logger = logging.getLogger(__name__)
 
 
@@ -56,13 +58,18 @@ class FlowDiagnostics:
         self.enstrophy      = torch.full((nt,), float('nan'), device=device, dtype=dtype)
         self.max_divergence  = torch.full((nt,), float('nan'), device=device, dtype=dtype)
         self.cfl_number      = torch.full((nt,), float('nan'), device=device, dtype=dtype)
+        # Viscous dissipation *rate* (per unit density): nu * h^d * Σ(mu0·|S|²),
+        # |S| = sqrt(2 S_ij S_ij).  Multiply by rho for watts, integrate over
+        # time for the energy irreversibly lost to the fluid.  mu0 masks the
+        # solid interior so the BDIM band does not contaminate the integral.
+        self.dissipation_rate = torch.full((nt,), float('nan'), device=device, dtype=dtype)
 
         self._ek0 = None   # E_k at the first computed step (baseline)
 
     # ------------------------------------------------------------------
     @torch.no_grad()
     def update(self, iteration, u, v, p, dt, nu, divergence_fn, vorticity_fn,
-               w=None):
+               w=None, sdf_cc=None, mu_fn=None):
         """Compute and record diagnostics for the current step.
 
         Parameters
@@ -84,6 +91,15 @@ class FlowDiagnostics:
             magnitude in 3-D).
         w : Tensor or None
             z-velocity component (3-D only).
+        sdf_cc : Tensor or None
+            Cell-centred union signed-distance field (>0 in fluid).  When given
+            together with *mu_fn*, the viscous-dissipation integral is masked to
+            the fluid region so the BDIM transition band inside the body does
+            not contaminate it.  ``None`` ⇒ dissipation integrated over the
+            whole grid (body interior included).
+        mu_fn : callable(d) -> (mu0, mu1) or None
+            Smooth-Heaviside builder (the body's ``mu_funcs``); ``mu0`` is the
+            fluid fraction (≈1 in fluid, ≈0 inside the body).
         """
         if iteration % self.check_every != 0:
             return
@@ -104,6 +120,23 @@ class FlowDiagnostics:
         omega = vorticity_fn(u, v, w)
         enst = 0.5 * hd * omega.square().sum()
         self.enstrophy[iteration] = enst
+
+        # ---- viscous dissipation rate  ε = ν * h^d * Σ(mu0·|S|²) ----
+        # |S| = sqrt(2 S_ij S_ij), so |S|² = 2 S_ij S_ij and the dissipation
+        # density is Φ = 2μ S:S = μ|S|² = ρν|S|².  We store the per-density rate
+        # ν·h^d·Σ(mu0·|S|²) (parallel to the rho-free kinetic_energy); multiply
+        # by rho downstream for watts.
+        vel = (u, v) if w is None else (u, v, w)
+        smag = ops.strain_rate_magnitude(vel, h, self.ndim)   # |S| on CC grid
+        phi = smag.square()                                   # |S|² = 2 S:S
+        if sdf_cc is not None and mu_fn is not None:
+            try:
+                mu0_cc, _ = mu_fn(sdf_cc)
+                if mu0_cc.shape == phi.shape:
+                    phi = phi * mu0_cc
+            except Exception:
+                pass
+        self.dissipation_rate[iteration] = nu_val * hd * phi.sum()
 
         # ---- max |div(u)| ----
         div = divergence_fn(u, v, w=w)
@@ -145,6 +178,7 @@ class FlowDiagnostics:
             "enstrophy":      self.enstrophy.cpu().numpy().copy(),
             "max_divergence":  self.max_divergence.cpu().numpy().copy(),
             "cfl_number":      self.cfl_number.cpu().numpy().copy(),
+            "dissipation_rate": self.dissipation_rate.cpu().numpy().copy(),
         }
         with lock:
             with h5py.File(h5_path, "w") as f:

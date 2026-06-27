@@ -2547,9 +2547,12 @@ class FluidSolver(PlottingMixin):
         # Runs before the BDIM-field release so it sees the converged u,v,[w],p
         # and warns on energy blow-up / CFL>0.5 before they cascade to NaN.
         if self.diagnostics is not None:
+            cb = self.composite_body
             self.diagnostics.update(
                 iteration, u, v, p, self.dt, self.nu,
                 self.divergence, self.vorticity, w=w_vel,
+                sdf_cc=getattr(cb, "sdf_val", None),
+                mu_fn=getattr(cb, "mu_funcs", None),
             )
 
         # ---- free BDIM fields to reclaim GPU memory between steps ----
