@@ -15,7 +15,7 @@ Tank:  27 × 6.4 × 6.4 m  (18 m ahead of the bow for forward navigation).
 
 Run with::
 
-    cd lilytorch/farms_examples/toy_boat_two_phase_3d
+    cd lilytorch/farms_examples/boat
     bash run.sh
 """
 
@@ -56,7 +56,7 @@ class SimConfig(BaseSimConfig):
         super().__init__()
 
         self.data_folder = os.path.join(
-            lilytorch_repo_root, 'farms_examples', 'toy_boat_two_phase_3d',
+            lilytorch_repo_root, 'farms_examples', 'boat',
         )
 
         # ── Hardware ──────────────────────────────────────────────────

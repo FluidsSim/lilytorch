@@ -9,7 +9,7 @@ Question: the full 6 m boat explodes at its waterline; the well-resolved sphere
 demo does not.  If this small, better-resolved boat is STABLE -> the cause is
 size/resolution; if it still explodes -> it is the multi-body mesh, not size.
 
-Run::  cd lilytorch/farms_examples/toy_boat_two_phase_3d
+Run::  cd lilytorch/farms_examples/boat
        PYTHONPATH=$PWD python3 _verify_run_small.py     # headless z/pitch/Fz
 """
 import os

@@ -5,7 +5,7 @@
 # buoyancy and dynamic pressure forces emerge from the variable-density fluid.
 #
 # Run with::
-#     cd lilytorch/farms_examples/toy_boat_two_phase_3d
+#     cd lilytorch/farms_examples/boat
 #     bash run.sh
 #
 # For a quick test, reduce Nx/Ny/Nz and n_iterations in gen_configs.py first.

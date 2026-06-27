@@ -32,11 +32,11 @@ port (left turn), instead of accelerating straight forward.
 4. The effect appears within the first few hundred iterations
 
 ## Key files
-- `toy_boat_two_phase_3d/gen_configs.py` — simulation config
-- `toy_boat_two_phase_3d/toy_boat.sdf` — MuJoCo/SDF model
+- `boat/gen_configs.py` — simulation config
+- `boat/toy_boat.sdf` — MuJoCo/SDF model
 - `lilytorch/src/two_phase_solver.py` — two-phase solver overrides
 - `lilytorch/src/forces.py` — `forces_lagrangian_3d`
-- `toy_boat_two_phase_3d/MASS_INERTIA_NOTES.md` — prior analysis
+- `boat/MASS_INERTIA_NOTES.md` — prior analysis
 
 ## Fluid properties
 - ρ_water=1000, ρ_air=1.2 (ratio 833:1)

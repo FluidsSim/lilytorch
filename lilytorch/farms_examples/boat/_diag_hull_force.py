@@ -16,7 +16,7 @@ from skimage import measure
 from lilytorch.src.kernels import RegularGridInterpolator
 
 DT = torch.float64
-D = "lilytorch/farms_examples/toy_boat_two_phase_3d/interp_data"
+D = "lilytorch/farms_examples/boat/interp_data"
 RHO_W, G = 1000.0, 9.81
 
 xnp = np.load(f"{D}/xnp_hull.npy"); ynp = np.load(f"{D}/ynp_hull.npy")

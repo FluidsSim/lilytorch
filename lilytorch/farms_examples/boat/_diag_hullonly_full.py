@@ -15,7 +15,7 @@ Watch the FlowDiagnostics output (energy / max-divergence / CFL) and the
 viewer.  The full sim blows up around iter ~90, so a few hundred iters suffice.
 
 Run::
-    cd lilytorch/farms_examples/toy_boat_two_phase_3d
+    cd lilytorch/farms_examples/boat
     python3 _diag_hullonly_full.py
 """
 import os

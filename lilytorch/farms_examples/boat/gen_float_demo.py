@@ -10,7 +10,7 @@ spheroid (a long waterline strip) explodes.
 Both bodies have IDENTICAL mass (0.26 kg), density (~496 kg/m^3 -> floats half
 submerged), volume, and spawn (centre AT the waterline). Run::
 
-    cd lilytorch/farms_examples/toy_boat_two_phase_3d
+    cd lilytorch/farms_examples/boat
     FLOAT_BODY=sphere   python3 gen_float_demo.py     # stable, floats
     FLOAT_BODY=spheroid python3 gen_float_demo.py     # explodes (long waterline)
 
