@@ -75,24 +75,31 @@ def _run_and_collect_native(sc: dict) -> dict:
 
 
 def _run_and_collect_warp(sc: dict, mode: str = "eager") -> dict:
-    """Run Warp kernel (eager or graph) and return output tensors."""
+    """Run Warp kernel and return output tensors.
+
+    mode ∈ {"eager", "graph"}            → sequential per-body design
+    mode ∈ {"fan-eager", "fan-graph"}    → fanned all-body design (const in B)
+    """
     wsdf, wp_out = setup_warp_runner(sc, DEVICE)
+    out_args = (
+        wp_out["sdf_cc"], wp_out["sdf_u"], wp_out["sdf_v"], wp_out["sdf_w"],
+        wp_out["body_u"], wp_out["body_v"], wp_out["body_w"],
+    )
     _reset_warp_outputs(wp_out)
 
     if mode == "graph":
-        wsdf.capture_graph(
-            wp_out["sdf_cc"], wp_out["sdf_u"],
-            wp_out["sdf_v"],  wp_out["sdf_w"],
-            wp_out["body_u"], wp_out["body_v"], wp_out["body_w"],
-        )
+        wsdf.capture_graph(*out_args)
         _reset_warp_outputs(wp_out)
         wsdf.run_graph()
+    elif mode == "fan-eager":
+        wsdf.run_fanned_eager(*out_args)
+    elif mode == "fan-graph":
+        wsdf.run_fanned_eager(*out_args)        # warmup/JIT
+        wsdf.capture_graph_fanned(*out_args)
+        _reset_warp_outputs(wp_out)
+        wsdf.run_graph_fanned()
     else:
-        wsdf.run_eager(
-            wp_out["sdf_cc"], wp_out["sdf_u"],
-            wp_out["sdf_v"],  wp_out["sdf_w"],
-            wp_out["body_u"], wp_out["body_v"], wp_out["body_w"],
-        )
+        wsdf.run_eager(*out_args)
 
     wp.synchronize()
     return {k: wp.to_torch(wp_out[k]).clone() for k in wp_out}
@@ -165,12 +172,36 @@ def test_warp_graph_matches_native(B):
 
 @SKIP_NO_NATIVE
 @SKIP_NO_CUDA
+@pytest.mark.parametrize("B", [1, 3, 9])
+def test_warp_fanned_eager_matches_native(B):
+    """Fanned all-body Warp (eager) matches native within tolerance."""
+    sc = make_synthetic_scene(64, 32, 32, B, device=DEVICE)
+    native_out = _run_and_collect_native(sc)
+    warp_out   = _run_and_collect_warp(sc, mode="fan-eager")
+    _compare(native_out, warp_out, label=f"fan-eager B={B}")
+
+
+@SKIP_NO_NATIVE
+@SKIP_NO_CUDA
+@pytest.mark.parametrize("B", [1, 3, 9])
+def test_warp_fanned_graph_matches_native(B):
+    """Fanned all-body Warp (CUDA-graph) matches native within tolerance."""
+    sc = make_synthetic_scene(64, 32, 32, B, device=DEVICE)
+    native_out = _run_and_collect_native(sc)
+    warp_out   = _run_and_collect_warp(sc, mode="fan-graph")
+    _compare(native_out, warp_out, label=f"fan-graph B={B}")
+
+
+@SKIP_NO_NATIVE
+@SKIP_NO_CUDA
 def test_warp_larger_grid():
-    """Warp eager on a 128×64×32 grid, 9 bodies."""
+    """Warp eager + fanned on a 128×64×32 grid, 9 bodies."""
     sc = make_synthetic_scene(128, 64, 32, 9, device=DEVICE)
     native_out = _run_and_collect_native(sc)
-    warp_out   = _run_and_collect_warp(sc, mode="eager")
-    _compare(native_out, warp_out, label="128×64×32 B=9")
+    _compare(native_out, _run_and_collect_warp(sc, mode="eager"),
+             label="128×64×32 B=9 seq")
+    _compare(native_out, _run_and_collect_warp(sc, mode="fan-graph"),
+             label="128×64×32 B=9 fan")
 
 
 @SKIP_NO_NATIVE

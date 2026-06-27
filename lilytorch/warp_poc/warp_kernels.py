@@ -372,31 +372,35 @@ def streaming_sdf_fanned_decode_3d(
 # ─────────────────────────────────────────────────────────────────────────────
 
 class WarpStreamingSDF:
-    """Sequential per-body Warp streaming SDF with CUDA-graph support.
+    """Warp streaming SDF with CUDA-graph support — two interchangeable designs.
 
-    Sequential-body design rationale
-    ─────────────────────────────────
-    The native kernel uses a 3-pass fanned approach to handle all bodies in
-    3 CUDA launches.  Here we use B sequential launches (one per body), which:
-    * Avoids the uint64 packed-key trick (requires bit_cast, not in Warp 1.14).
-    * Keeps the kernel simple: within each launch g is unique per thread →
-      conditional compare-swap is race-free without atomics.
-    * Still benefits from CUDA-graph capture: B launches → 1 graph replay
-      → Python overhead identical to the 3-launch native approach.
+    (a) SEQUENTIAL per-body  (`run_eager` / `capture_graph` / `run_graph`)
+        B kernel launches (one per body).  Within each launch g is unique per
+        thread → conditional compare-swap is race-free without atomics.  Cost
+        scales ~linearly with B.  Good for small B (fish, 3 links).
 
-    Typical production B = 9 links; 9 launches vs 3 = 6 extra CUDA kernel
-    submissions ≈ 6 × ~2 µs = ~12 µs GPU overhead (< 1% of a 1 ms step).
+    (b) FANNED all-body  (`run_fanned_eager` / `capture_graph_fanned` /
+        `run_graph_fanned`)  ← RECOMMENDED.
+        2 kernel launches, CONSTANT in B (each dim = B·max_vol):
+          Pass B = wp.atomic_min on cc/u/v/w across all bodies fanned;
+          Pass C = recompute per-body face SDF, write that body's velocity where
+                   SDF == the stored min (bit-identical recompute → exact winner).
+        Structural analogue of the native 3-pass fanned kernel, using float
+        atomic_min instead of the uint64 packed-key atomicMin (wp.bit_cast is
+        absent in Warp 1.14, so the packed key can't be built — equality-decode
+        replaces it).  Benchmarks at 0.6–1.2× of native at all B (see AP7).
 
-    Usage
-    ─────
+    Both designs benefit from CUDA-graph capture (essential: eager is 3–14×
+    slower from per-launch Python overhead).  Both pass parity vs the native
+    kernel (SDF rel < 5e-4, body-vel rel < 1e-4).
+
+    Usage (fanned, recommended)
+    ───────────────────────────
         wsdf = WarpStreamingSDF(Ngx, Ngy, Ngz, device="cuda:0")
         wsdf.setup(F_flat, F_offsets, body_shapes, body_meta, gx, gy, gz, h, max_vol)
-        # per step:
-        wsdf.update_kinematics(kin, aabb_lo, aabb_dim)
-        wsdf.run_eager(sdf_cc_wp, sdf_u_wp, sdf_v_wp, sdf_w_wp, bU_wp, bV_wp, bW_wp)
-        # after one capture:
-        wsdf.capture_graph(sdf_cc_wp, sdf_u_wp, sdf_v_wp, sdf_w_wp, bU_wp, bV_wp, bW_wp)
-        wsdf.run_graph()   # 1 host call regardless of B
+        wsdf.update_kinematics(kin, aabb_lo, aabb_dim)            # per step
+        wsdf.capture_graph_fanned(sdf_cc, sdf_u, sdf_v, sdf_w, bU, bV, bW)  # once
+        wsdf.run_graph_fanned()                                   # 1 host call, any B
     """
 
     def __init__(self, Ngx: int, Ngy: int, Ngz: int, device: str = "cuda:0"):
