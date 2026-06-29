@@ -127,6 +127,69 @@ def _joint_power(run_dir: str):
     return times, power
 
 
+def _dissipation_energy(run_dir: str, rho: float, dt: float):
+    """Return (t_diag, E_diss[J]) — cumulative dissipated energy from diagnostics.h5.
+
+    Reads the per-unit-density dissipation rate ν·hᵈ·Σ(μ₀|S̄|²) [m⁵/s³],
+    multiplies by *rho* for Watts, then cumulatively integrates for Joules.
+    The time axis is *idx* · *dt* where *idx* is the solver iteration index
+    (written every ``diagnostics_every`` steps).
+    """
+    path = os.path.join(run_dir, "diagnostics.h5")
+    if not os.path.exists(path):
+        return None, None
+    with h5py.File(path, "r") as f:
+        diss_rate = np.array(f["dissipation_rate"])
+    valid = np.isfinite(diss_rate)
+    if not valid.any():
+        return None, None
+    idx = np.where(valid)[0]
+    power_w = rho * diss_rate[valid]                      # (N,) Watts
+    t_diag = idx * dt                                      # (N,) seconds
+    e_diss = _cumtrapz0(power_w, t_diag)                   # (N,) Joules
+    return t_diag, e_diss
+
+
+def _bdim_power(run_dir: str):
+    """Return (times, P_bdim[W]) — hydrodynamic power the body delivers to the fluid.
+
+    Reads the per-link hydrodynamic forces/torques from ``drags.h5`` (force and
+    torque *on the body* from the fluid, pressure + viscous, torque about each
+    link COM) and the link COM linear/angular velocities from the FARMS link
+    sensors.  The power injected into the fluid is the *reaction* of the work the
+    fluid does on the body,
+
+        P_bdim(t) = − Σ_links [ F_i·v_i + τ_i·ω_i ]                         [W]
+
+    where the sum runs over translational (F·v) and rotational (τ·ω) channels.
+    This is an independent estimate of the fluid power that, in the wall-free
+    window, closes the energy balance with dissipation + dE_k/dt (verified on
+    slow_slow to ~2 %).  Returns ``(None, None)`` if ``drags.h5`` is absent.
+    """
+    path = os.path.join(run_dir, "drags.h5")
+    if not os.path.exists(path):
+        return None, None
+    with h5py.File(path, "r") as f:
+        # (n_links, 3, nt) — force/torque ON the body from the fluid.
+        F = np.array(f["pressure_drags"]) + np.array(f["viscous_drags"])
+        T = np.array(f["pressure_torques"]) + np.array(f["viscous_torques"])
+    F = np.transpose(F, (2, 0, 1))           # (nt, n_links, 3)
+    T = np.transpose(T, (2, 0, 1))
+    with h5py.File(os.path.join(run_dir, "output", "simulation.hdf5"), "r") as f:
+        link = np.array(f["FARMSLISTanimats"]["0"]["sensors"]["links"]["array"])
+        if "times" in f:
+            times = np.array(f["times"])[: link.shape[0]]
+        else:
+            dt = float(np.array(f["timestep"]))
+            times = dt * np.arange(link.shape[0])
+    v = link[:, :, sc.link_com_velocity_lin_x : sc.link_com_velocity_lin_z + 1]
+    w = link[:, :, sc.link_com_velocity_ang_x : sc.link_com_velocity_ang_z + 1]
+    n = min(F.shape[0], v.shape[0])
+    F, T, v, w, times = F[:n], T[:n], v[:n], w[:n], times[:n]
+    p_bdim = -((F * v).sum(axis=(1, 2)) + (T * w).sum(axis=(1, 2)))   # (n,) [W]
+    return times, p_bdim
+
+
 def _cumtrapz0(y, x):
     """Cumulative trapezoidal integral of y over x, prepended with 0 (len == len(y))."""
     if len(y) < 2:
@@ -234,6 +297,53 @@ def main():
         cot_ss = float(np.nanmean(cot[half_far])) if half_far.any() else float("nan")
         cot_final = float(cot[-1]) if far[-1] else float("nan")
 
+        # ── Dissipation CoT  COT_diss(t) = E_diss(t) / (m·g·d(t)) ──────
+        #    E_diss  : cumulative dissipated energy  ρ·∫ν·hᵈ·Σ(μ₀|S̄|²) dt [J]
+        #    At steady state, COT_diss ≈ COT_mech by the energy balance
+        #    dE_k/dt = P_act − dissipation_rate; with 0 cycle-averaged dE_k/dt.
+        diss_t, e_diss = _dissipation_energy(run_dir, rho, dt)
+        if diss_t is not None and e_diss is not None:
+            # Truncate to tmax (same window as all other data).
+            if args.tmax is not None:
+                keep_d = diss_t <= args.tmax
+                diss_t, e_diss = diss_t[keep_d], e_diss[keep_d]
+            # Interpolate E_diss onto the simulation time grid for CoT.
+            e_diss_sim = np.interp(tj, diss_t, e_diss, left=0.0, right=e_diss[-1])
+            cot_diss = np.full(n, np.nan)
+            cot_diss[far] = e_diss_sim[far] / (m_fish * G * d_xy[far])
+            # Dashed line for dissipation CoT on the same panel.
+            ax_c.plot(tj, cot_diss, color=color, linestyle="--", alpha=0.7)
+            cot_diss_ss = float(np.nanmean(cot_diss[half_far])) if half_far.any() else float("nan")
+            cot_diss_final = float(cot_diss[-1]) if far[-1] else float("nan")
+            e_diss_final = float(e_diss[-1]) if len(e_diss) > 0 else float("nan")
+        else:
+            cot_diss_ss = cot_diss_final = e_diss_final = float("nan")
+
+        # ── BDIM CoT  COT_bdim(t) = E_bdim(t) / (m·g·d(t)) ─────────────
+        #    P_bdim  : hydrodynamic power into the fluid  −Σ(F·v + τ·ω) [W]
+        #    E_bdim  : cumulative ∫ P_bdim dt                            [J]
+        #    Independent of the CFD dissipation integral; in steady state
+        #    COT_bdim ≈ COT_diss (both measure fluid power), so the dotted
+        #    line cross-checks the dashed one.
+        tb, p_bdim = _bdim_power(run_dir)
+        if tb is not None and p_bdim is not None:
+            if args.tmax is not None:
+                keep_b = tb <= args.tmax
+                tb, p_bdim = tb[keep_b], p_bdim[keep_b]
+            e_bdim = _cumtrapz0(p_bdim, tb)                  # (.,) [J]
+            e_bdim_sim = np.interp(tj, tb, e_bdim, left=0.0, right=e_bdim[-1])
+            cot_bdim = np.full(n, np.nan)
+            cot_bdim[far] = e_bdim_sim[far] / (m_fish * G * d_xy[far])
+            # Dotted line for BDIM CoT on the same panel.
+            ax_c.plot(tj, cot_bdim, color=color, linestyle=":", alpha=0.9)
+            cot_bdim_ss = float(np.nanmean(cot_bdim[half_far])) if half_far.any() else float("nan")
+            cot_bdim_final = float(cot_bdim[-1]) if far[-1] else float("nan")
+            e_bdim_final = float(e_bdim[-1]) if len(e_bdim) > 0 else float("nan")
+            p_bdim_mean = float(np.mean(p_bdim))
+        else:
+            cot_bdim_ss = cot_bdim_final = e_bdim_final = p_bdim_mean = float("nan")
+            print(f"[warn] no drags.h5 for {case} (BDIM CoT unavailable)")
+
         ax_v.plot(times, v_fwd / args.bl, color=color, label=case)
 
         rows.append({
@@ -251,6 +361,13 @@ def main():
             "dist_final_m": d_final,
             "COT_ss": cot_ss,
             "COT_final": cot_final,
+            "E_diss_final_J": e_diss_final,
+            "COT_diss_ss": cot_diss_ss,
+            "COT_diss_final": cot_diss_final,
+            "P_bdim_mean_W": p_bdim_mean,
+            "E_bdim_final_J": e_bdim_final,
+            "COT_bdim_ss": cot_bdim_ss,
+            "COT_bdim_final": cot_bdim_final,
         })
 
     ax_v.set_ylabel(r"$V_{\mathrm{fwd}}$ [BL/s]")
@@ -261,9 +378,9 @@ def main():
     ax_e.set_title("Total fluid kinetic energy")
     ax_e.legend(); ax_e.grid(alpha=0.3)
 
-    ax_c.set_ylabel(r"COT $= E_{\mathrm{mech}}/(m\,g\,d)$  [–]")
+    ax_c.set_ylabel(r"COT $= E/(m\,g\,d)$  [–]")
     ax_c.set_xlabel("Time [s]")
-    ax_c.set_title("Cost of transport  (cumulative actuator work / weight·distance)")
+    ax_c.set_title("Cost of transport  (solid: mech  |  dashed: dissipation  |  dotted: BDIM)")
     if args.cot_logy:
         ax_c.set_yscale("log")
     ax_c.legend(); ax_c.grid(alpha=0.3)
@@ -296,7 +413,8 @@ def main():
 
         # Pretty stdout table
         hdr = ["case", "v_fwd_ss[BL/s]", "v_fwd_ss[m/s]",
-               "E_mech_f[J]", "dist_f[m]", "COT_ss[-]", "COT_final[-]"]
+               "E_mech_f[J]", "E_diss_f[J]", "dist_f[m]",
+               "COT_ss[-]", "COT_diss_ss[-]", "COT_bdim_ss[-]"]
         print("  ".join(f"{h:>14}" for h in hdr))
         for r in rows:
             print("  ".join(f"{v:>14}" for v in [
@@ -304,9 +422,11 @@ def main():
                 f"{r['v_fwd_mean_ss_BLps']:.4f}",
                 f"{r['v_fwd_mean_ss_mps']:.5f}",
                 f"{r['E_mech_final_J']:.4e}",
+                f"{r['E_diss_final_J']:.4e}",
                 f"{r['dist_final_m']:.4e}",
                 f"{r['COT_ss']:.4e}",
-                f"{r['COT_final']:.4e}",
+                f"{r['COT_diss_ss']:.4e}",
+                f"{r['COT_bdim_ss']:.4e}",
             ]))
     else:
         print("No runs found — launch run_freq_cross.py first.")

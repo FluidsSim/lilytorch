@@ -32,6 +32,7 @@ Usage
 """
 
 import sys
+import traceback
 
 from controller_parameters import (
     SLOW_SWIMMING_CONTROLLER_PARAMETERS as _SLOW,
@@ -80,6 +81,7 @@ class FreqCrossConfig(ZFConfig):
         self.save_frames = False
         self.save_every = 10_000_000
         self.diagnostics_every = 2
+        self.save_drags = True   # save hydrodynamic forces for energy balance
 
         # ── Each case to its own stack folder so metrics can find the output.
         self.stack_folder = f"{STACK_ROOT}/{case}"
@@ -106,8 +108,23 @@ def main():
     for case in cases:
         if case not in CASES:
             raise SystemExit(f"Unknown case {case!r}. Choose from: {', '.join(CASES)}")
+    # Run every case to completion even if some explode. A crashing case still
+    # leaves its (partial) video / simulation.hdf5 / diagnostics on disk thanks
+    # to the run()-level crash-save patch; here we just make sure one failure
+    # does not abort the remaining cases. ``single_run`` shells out with
+    # ``check=True``, so a crash surfaces as a CalledProcessError.
+    failures = []
     for case in cases:
-        _run_case(case)
+        try:
+            _run_case(case)
+        except Exception as exc:  # CalledProcessError (subprocess) or setup error
+            traceback.print_exc()
+            print(f"[run_freq_cross] case {case!r} failed ({exc}); "
+                  "continuing with the next case.")
+            failures.append(case)
+    if failures:
+        print(f"\n[run_freq_cross] completed with {len(failures)} failed "
+              f"case(s): {', '.join(failures)}")
 
 
 if __name__ == "__main__":

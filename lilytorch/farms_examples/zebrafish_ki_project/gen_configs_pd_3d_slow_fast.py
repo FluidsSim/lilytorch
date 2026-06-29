@@ -36,7 +36,7 @@ class SimConfig(BaseSimConfig):
         # ── Hardware ──────────────────────────────────────────────────
         self.compute_sdf                   = True
         self.use_gpu                       = True
-        self.use_bdim                      = False
+        self.use_bdim                      = True
         self.headless                      = False
         self.water_buoyancy                = True
         self.sdf_interp_method             = "triquadratic"
@@ -50,9 +50,23 @@ class SimConfig(BaseSimConfig):
         # self.force_delta_order   = 2
         # self.solver_method       = "python"
 
+        # Wall contact for a milligram-scale larva. The previous direct
+        # (-stiffness, -damping) = (-2e4, -3e2) form put 20000 N/m against a
+        # ~mg mass: k*dt^2/m >> 1 with dt=5e-4, so the contact was numerically
+        # unstable and detonated the instant the fish grazed a wall (in BOTH
+        # drag and BDIM runs). Switch to the mass-independent (timeconst,
+        # dampratio) form, which is stable for any timeconst >= 2*dt regardless
+        # of mass. timeconst sets the penetration depth: smaller = stiffer =
+        # less tunneling. 0.002 s is 4*dt on the slow case / 8*dt on the fast
+        # case (dt halved there) — firm enough to curb wall penetration while
+        # staying clear of the 2*dt floor (0.001 slow / 0.0005 fast). dampratio
+        # = 1 is critically damped, so the body is absorbed without bounce or
+        # energy injection. solimp [0.9, 0.95, ...] keeps the constraint firm.
+        # If the fish still tunnels through the 3 mm wall, drop timeconst toward
+        # the floor and/or add "margin": <~1 cell so contact engages earlier.
         self.bdim_physics = {
-            "solref": [-2e4, -30e1],
-            "solimp": [0., 0.1, 0.001, 0.5, 2],
+            "solref": [0.002, 1.0],
+            "solimp": [0.9, 0.95, 0.001, 0.5, 2],
         }
 
 
@@ -67,7 +81,7 @@ class SimConfig(BaseSimConfig):
                 "controller_path": "lilytorch.farms_examples.zebrafish_ki_project.pd_controller.PositionController",
                 "control_pars"   : {
                     "data_folder"        : self.data_folder,
-                    "mode"               : "slow",
+                    "mode"               : "fast",
                     "kinematics_sampling": 0.00025,
                 },
                 "gains"     : [0.2, 0.001, 0],
