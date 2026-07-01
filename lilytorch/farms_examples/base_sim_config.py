@@ -228,6 +228,10 @@ class BaseSimConfig:
         # See :class:`FluidSolver` for what each method does. ``None``
         # → solver default (``"kernel"``).
         self.solver_method           = None
+        # Compute backend: ``None``/``"native"`` (native CUDA) or ``"warp"``
+        # (single-source Warp backend, lilytorch.src_warp).  Orthogonal to
+        # ``solver_method`` (which selects the kernel vs python STEP path).
+        self.backend                 = None
         # DEPRECATED.  Kept for backward compatibility — superseded by
         # ``solver_method``.  When set, they are mapped onto
         # ``solver_method`` inside :class:`FluidSolver`.
@@ -757,6 +761,36 @@ class BaseSimConfig:
                 "_m.setup_mjcf_xml = _patched_smx\n"
             )
 
+        # Write the crash-save fix to a helper file (same shell-quoting reason
+        # as above). It wraps Simulation.run so that ANY crash mid-run (a MuJoCo
+        # PhysicsError from deep wall penetration, or a fluid RuntimeError from
+        # check_explosion) still runs every extension's end_episode. Without
+        # this the MuJoCo-driven loop only finalises extensions on a clean
+        # finish, so an explosion loses simulation.hdf5, the stitched video,
+        # diagnostics.h5 and drags.h5. Each extension is finalised in its own
+        # try/except so one failure can't block the others, then the original
+        # exception is re-raised so the crash still surfaces (non-zero exit).
+        with open(os.path.join(output_folder, '_crash_save_patch.py'), 'w') as f:
+            f.write(
+                "import traceback as _cstb\n"
+                "import farms_mujoco.simulation.simulation as _csm\n"
+                "_orig_run = _csm.Simulation.run\n"
+                "def _run_with_crash_save(self, *a, **k):\n"
+                "    try:\n"
+                "        return _orig_run(self, *a, **k)\n"
+                "    except BaseException:\n"
+                "        _cstb.print_exc()\n"
+                "        print('[crash-save] run crashed; finalising extensions "
+                "so video / simulation.hdf5 / diagnostics / drags are written.')\n"
+                "        for _ext in getattr(self.task, 'extensions', []):\n"
+                "            try:\n"
+                "                _ext.end_episode(self.task, self.physics)\n"
+                "            except Exception:\n"
+                "                _cstb.print_exc()\n"
+                "        raise\n"
+                "_csm.Simulation.run = _run_with_crash_save\n"
+            )
+
         # Build a one-liner that optionally monkey-patches add_cameras before
         # starting farms_sim, so that ] in the viewer uses the right distance.
         patch = (
@@ -764,6 +798,7 @@ class BaseSimConfig:
             f"_o=_m.add_cameras;"
             f"_m.add_cameras=lambda link,dist={camera_dist!r},rot=None,simulation_options=None:_o(link,dist=dist,rot=rot,simulation_options=simulation_options);"
             f"exec(open('_offscreen_patch.py').read());"
+            f"exec(open('_crash_save_patch.py').read());"
         )
         patch += self._extra_run_patch()
         sh_str = (
@@ -859,6 +894,7 @@ class BaseSimConfig:
             ("poisson_cuda_graph",      self.poisson_cuda_graph),
             ("poisson_cuda_graph_max_cells", self.poisson_cuda_graph_max_cells),
             ("solver_method",           self.solver_method),
+            ("backend",                 self.backend),
             ("dtype",                   self.dtype),
             ("zero_pressure_inside",    self.zero_pressure_inside),
             ("force_method",            self.force_method),
