@@ -1,0 +1,46 @@
+sdf: sphere_D0p2.sdf
+spawn:
+  loader: 0
+  mode: !!python/object/apply:farms_core.model.options.SpawnMode
+  - free
+  pose:
+  - 0.5
+  - 0.5
+  - 2.0
+  - 0
+  - 0
+  - 0
+  velocity:
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+  - 0
+  extras: {}
+morphology:
+  links:
+  - name: base_link
+    collisions: true
+    friction:
+    - 0.5
+    - 0.5
+    - 0
+    density: 1.02
+  self_collisions: []
+  joints: []
+control:
+  controller_loader: []
+  sensors:
+    links:
+    - base_link
+    joints: []
+    contacts: []
+    xfrc:
+    - base_link
+    muscles: []
+    adhesions: []
+    visuals: []
+  motors: []
+  hill_muscles: []
+extensions: []

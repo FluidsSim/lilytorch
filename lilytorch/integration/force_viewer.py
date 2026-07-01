@@ -1,0 +1,496 @@
+"""
+ForceViewer – draw the hydrodynamic force (and, optionally, torque) acting on
+each immersed body as an arrow inside the MuJoCo viewer **and** in the
+recorded video.
+
+One arrow is drawn per FARMS link/body, anchored at the body centre of mass
+and pointing along the total fluid force (viscous + pressure).  When
+``show_torque`` is enabled, a second arrow per body is drawn along the net
+hydrodynamic torque axis (right-hand rule), length proportional to |torque|.
+
+Appearance knobs:
+
+- ``force_scale``  – force-arrow **length** per unit force (metres per Newton).
+- ``force_width``  – the **circular (shaft) radius** of the force arrow (m).
+- ``show_torque``  – also draw a torque arrow per body (default ``False``).
+- ``torque_scale`` – torque-arrow length per unit torque (m per N·m); defaults
+                     to ``force_scale``.
+- ``torque_width`` – shaft radius of the torque arrow (m); defaults to
+                     ``force_width``.
+
+Arrows are injected into both:
+- the interactive viewer's ``user_scn`` (visible in the MuJoCo GUI), and
+- the ``CameraRecording`` extension's offscreen renderer (visible in the
+  saved MP4 video).
+
+Usage
+-----
+Add to the simulation extensions list in your gen_configs file, **after**
+the FluidExtension entry (so ``xfrc_applied`` / the cached force tensors are
+already fresh when this extension reads them)::
+
+    extensions.append({
+        "loader": "lilytorch.integration.force_viewer.ForceViewer",
+        "config": {
+            "force_scale" : 0.05,    # metres of arrow per Newton
+            "force_width" : 0.003,   # shaft (circular) radius in metres
+            "color"       : "#FF4500",
+            "force_source": "hydro", # "hydro" (viscous+pressure, no buoyancy)
+                                     # or "applied" (raw xfrc, incl. buoyancy)
+            "max_length"  : 0.3,     # clamp arrow length (m); null = no clamp
+            "min_force"   : 0.0,     # hide arrows below this magnitude (N)
+            "show_torque" : True,    # also draw torque arrows
+            "torque_scale": 0.5,     # m per N·m (default: force_scale)
+            "torque_width": 0.002,   # shaft radius (default: force_width)
+            "torque_color": "#00B0FF",
+            "min_torque"  : 0.0,     # hide torque arrows below this (N·m)
+            "update_every": null,    # null -> same cadence as solver.save_every
+        },
+    })
+
+Works with ``headless: false`` (viewer + video) and ``headless: true``
+(video only via CameraRecording — no interactive viewer needed).
+"""
+
+import numpy as np
+import mujoco
+import torch
+
+from farms_core.simulation.extensions import TaskExtension
+from farms_core.experiment.options import ExperimentOptions
+from farms_mujoco.simulation.task import ExperimentTask
+from dm_control.mjcf.physics import Physics
+
+
+_ARROW = int(mujoco.mjtGeom.mjGEOM_ARROW)
+
+
+def _parse_color(color, default=(0.95, 0.45, 0.1, 0.9)):
+    """Return an RGBA float32 array from a hex string or a 3/4-length list."""
+    if color is None:
+        return np.array(default, dtype=np.float32)
+    if isinstance(color, str):
+        h = color.lstrip("#")
+        rgb = [int(h[i:i + 2], 16) / 255.0 for i in (0, 2, 4)]
+        a = int(h[6:8], 16) / 255.0 if len(h) >= 8 else default[3]
+        return np.array([*rgb, a], dtype=np.float32)
+    arr = np.asarray(color, dtype=np.float32)
+    if arr.size == 3:
+        arr = np.array([*arr, default[3]], dtype=np.float32)
+    return arr
+
+
+class ForceViewer(TaskExtension):
+    """Render the fluid force (and optionally torque) on each body as arrows."""
+
+    def __init__(
+        self,
+        experiment_options: ExperimentOptions,
+        force_scale: float = 0.05,
+        force_width: float = 0.003,
+        color="#FF4500",
+        force_source: str = "hydro",
+        max_length: float | None = None,
+        min_force: float = 0.0,
+        show_torque: bool = False,
+        torque_scale: float | None = None,
+        torque_width: float | None = None,
+        torque_color="#00B0FF",
+        min_torque: float = 0.0,
+        update_every: int | None = None,
+    ):
+        super().__init__()
+        self.experiment_options = experiment_options
+        self.force_scale = float(force_scale)
+        self.force_width = float(force_width)
+        self.color = _parse_color(color)
+        self.force_source = str(force_source).lower()
+        self.max_length = None if max_length is None else float(max_length)
+        self.min_force = float(min_force)
+
+        self.show_torque = bool(show_torque)
+        self.torque_scale = (self.force_scale if torque_scale is None
+                             else float(torque_scale))
+        self.torque_width = (self.force_width if torque_width is None
+                             else float(torque_width))
+        self.torque_color = _parse_color(torque_color,
+                                         default=(0.0, 0.69, 1.0, 0.9))
+        self.min_torque = float(min_torque)
+
+        self.update_every = update_every
+
+        self._viewer = None
+        self._fluid_ext = None          # reference to FluidExtension (optional)
+        self._geom_start = None         # first slot we own in user_scn
+        self._n_bodies = 0              # number of bodies
+        self._max_arrows = 0            # geom budget (bodies × arrows_per_body)
+        self._arrows_per_body = 2 if self.show_torque else 1
+        self._n_active = 0              # arrows currently visible
+        self._iteration = 0
+        self._slots_reserved = False
+        self._patched_renderers = set()   # id() of already-wrapped renderers
+        self._warned_hydro = False
+        self._body_mj_ids = None        # list of (animat_id, link_id, xfrc_row)
+        self._warned_no_bdim = False
+
+        # Shared arrow data (interactive viewer + offscreen renderer).
+        self._from = None               # (max_arrows, 3) float64 — arrow base
+        self._to = None                 # (max_arrows, 3) float64 — arrow tip
+        self._rgba = None               # (max_arrows, 4) float32 — per arrow
+        self._width = None              # (max_arrows,)  float64 — shaft radius
+
+    @classmethod
+    def from_options(cls, config: dict, experiment_options: ExperimentOptions):
+        return cls(
+            experiment_options=experiment_options,
+            force_scale=config.get("force_scale", 0.05),
+            force_width=config.get("force_width", 0.003),
+            color=config.get("color", "#FF4500"),
+            force_source=config.get("force_source", "hydro"),
+            max_length=config.get("max_length", None),
+            min_force=config.get("min_force", 0.0),
+            show_torque=config.get("show_torque", False),
+            torque_scale=config.get("torque_scale", None),
+            torque_width=config.get("torque_width", None),
+            torque_color=config.get("torque_color", "#00B0FF"),
+            min_torque=config.get("min_torque", 0.0),
+            update_every=config.get("update_every", None),
+        )
+
+    # ── lifecycle hooks ──────────────────────────────────────────────
+
+    def initialize_episode(self, task: ExperimentTask, physics: Physics):
+        self._viewer = task.viewer
+
+        # FluidExtension is optional. When present, ``force_source="hydro"``
+        # reconstructs viscous + pressure from the BDIM solver. When absent
+        # (e.g. ``use_bdim=False`` with FARMS' ``water_drag=True``), we read
+        # the drag forces that ``SwimmingExtension`` writes into
+        # ``physics.data.xfrc_applied`` and silently switch to "applied".
+        try:
+            from lilytorch.integration.extensions import FluidExtension
+            for ext in task.extensions:
+                if isinstance(ext, FluidExtension):
+                    self._fluid_ext = ext
+                    break
+        except Exception:  # noqa: BLE001
+            self._fluid_ext = None
+
+    def _handler(self):
+        if self._fluid_ext is None:
+            return None
+        return getattr(self._fluid_ext, "BDIMhandler", None)
+
+    def _resolve_body_ids(self, task: ExperimentTask, physics: Physics):
+        """Build the list of bodies to visualise.
+
+        Returns a list of ``(animat_id, link_id, xfrc_row)`` tuples.
+
+        Prefers the FluidExtension/CompositeBody body list (so we render
+        exactly the immersed links the solver knows about). Falls back to
+        every body declared by every animat's ``data2xfrc`` map — the FARMS
+        ``SwimmingExtension`` writes drag forces to exactly those rows.
+        """
+        handler = self._handler()
+        fs = getattr(handler, "fluid_solver", None) if handler is not None else None
+        comp = getattr(fs, "composite_body", None) if fs is not None else None
+
+        ids: list[tuple[int, int, int]] = []
+        if comp is not None:
+            for body_i in range(len(comp.bodies)):
+                animat_id, link_id = comp.body_ids[body_i]
+                row = int(task.maps[animat_id]["sensors"]["data2xfrc"][link_id])
+                ids.append((int(animat_id), int(link_id), row))
+            return ids
+
+        # Drag-only fallback: every link of every animat.
+        for animat_id, m in enumerate(task.maps):
+            try:
+                rows = m["sensors"]["data2xfrc"]
+            except Exception:  # noqa: BLE001
+                continue
+            for link_id, row in enumerate(rows):
+                ids.append((int(animat_id), int(link_id), int(row)))
+        return ids
+
+    def _reserve_slots(self, n_bodies: int):
+        """Allocate arrow storage and pre-create user_scn slots.
+
+        Up to ``arrows_per_body`` arrows are reserved per body (1 for force,
+        +1 for torque when ``show_torque``).
+        """
+        self._n_bodies = n_bodies
+        self._max_arrows = n_bodies * self._arrows_per_body
+        self._from = np.zeros((self._max_arrows, 3), dtype=np.float64)
+        self._to = np.zeros((self._max_arrows, 3), dtype=np.float64)
+        self._rgba = np.zeros((self._max_arrows, 4), dtype=np.float32)
+        self._width = np.full(self._max_arrows, self.force_width, dtype=np.float64)
+
+        if self._viewer is not None:
+            scn = self._viewer.user_scn
+            self._geom_start = scn.ngeom
+            _transparent = np.zeros(4, dtype=np.float32)
+            _zero = np.zeros(3, dtype=np.float64)
+            _eye3 = np.eye(3, dtype=np.float64).ravel()
+            reserved = 0
+            for _ in range(self._max_arrows):
+                if scn.ngeom >= scn.maxgeom:
+                    break
+                mujoco.mjv_initGeom(
+                    scn.geoms[scn.ngeom],
+                    _ARROW, _zero, _zero, _eye3, _transparent,
+                )
+                scn.ngeom += 1
+                reserved += 1
+            if reserved < self._max_arrows:
+                print(f"[ForceViewer] WARNING: user_scn.maxgeom={scn.maxgeom} "
+                      f"reached – only {reserved}/{self._max_arrows} arrow "
+                      f"slots reserved.")
+                self._max_arrows = reserved
+            print(f"[ForceViewer] Reserved {self._max_arrows} arrow slots "
+                  f"(geom {self._geom_start}..{scn.ngeom - 1}); "
+                  f"{self._arrows_per_body} per body.")
+        else:
+            print("[ForceViewer] No viewer (headless) – "
+                  "arrows will only appear in recorded video.")
+
+        self._slots_reserved = True
+
+    def _patch_camera_renderers(self, task: ExperimentTask):
+        """Inject arrows into every CameraRecording offscreen renderer so they
+        appear in the saved videos / PNG frames (same trick as FlowViewer).
+
+        Matches by ``isinstance`` so subclasses such as ``CameraRecordingFrames``
+        (used for the follow-camera video) are patched too, and patches *all*
+        recorders, not just the first one.
+        """
+        try:
+            from farms_mujoco.sensors.camera import CameraRecording
+        except Exception:  # noqa: BLE001
+            return
+
+        for ext in task.extensions:
+            if not isinstance(ext, CameraRecording):
+                continue
+            renderer = getattr(ext, "renderer", None)
+            if renderer is None or id(renderer) in self._patched_renderers:
+                continue
+            self._patch_one_renderer(renderer)
+            self._patched_renderers.add(id(renderer))
+            print(f"[ForceViewer] Patched {type(ext).__name__} renderer "
+                  f"({getattr(getattr(ext, 'video', None), 'path', '?')}) "
+                  f"for video output.")
+
+    def _patch_one_renderer(self, renderer):
+        """Wrap a single ``mujoco.Renderer.render`` to append our arrow geoms."""
+        viewer_self = self
+        original_render = renderer.render
+        _eye3 = np.eye(3, dtype=np.float64).ravel()
+        _zero = np.zeros(3, dtype=np.float64)
+
+        def _render_with_arrows(out=None):
+            n = viewer_self._n_active
+            if n > 0:
+                scn = renderer.scene
+                for i in range(n):
+                    if scn.ngeom >= scn.maxgeom:
+                        break
+                    g = scn.geoms[scn.ngeom]
+                    mujoco.mjv_initGeom(
+                        g, _ARROW, _zero, viewer_self._from[i], _eye3,
+                        viewer_self._rgba[i],
+                    )
+                    mujoco.mjv_connector(
+                        g, _ARROW, float(viewer_self._width[i]),
+                        viewer_self._from[i], viewer_self._to[i],
+                    )
+                    g.category = mujoco.mjtCatBit.mjCAT_DECOR
+                    scn.ngeom += 1
+            return original_render(out=out)
+
+        renderer.render = _render_with_arrows
+
+    # ── per-step update ──────────────────────────────────────────────
+
+    def before_step(self, task: ExperimentTask, action, physics: Physics):
+        # Deferred CameraRecording patch (renderers are created in each
+        # recorder's initialize_episode, so they exist by the first step).
+        # Cheap idempotent re-scan: skips renderers already wrapped.
+        self._patch_camera_renderers(task)
+
+        handler = self._handler()
+        fs = getattr(handler, "fluid_solver", None) if handler is not None else None
+
+        # When the BDIM solver is absent we can only show ``xfrc_applied``
+        # (drag forces written by FARMS' SwimmingExtension). Force the
+        # source once and continue.
+        if handler is None and self.force_source != "applied":
+            if not self._warned_no_bdim:
+                print("[ForceViewer] No FluidExtension/BDIM solver – falling "
+                      "back to force_source='applied' (reads xfrc_applied, "
+                      "which includes FARMS' water_drag forces).")
+                self._warned_no_bdim = True
+            self.force_source = "applied"
+
+        if self._body_mj_ids is None:
+            self._body_mj_ids = self._resolve_body_ids(task, physics)
+            if not self._body_mj_ids:
+                return
+
+        if not self._slots_reserved:
+            self._reserve_slots(len(self._body_mj_ids))
+
+        # Cadence:
+        #   - explicit ``update_every`` always wins;
+        #   - else inherit the solver's ``save_every`` when BDIM is on;
+        #   - else fall back to every step.
+        if self.update_every is not None:
+            every = self.update_every
+        elif fs is not None:
+            every = getattr(fs, "save_every", 200)
+        else:
+            every = 1
+
+        if handler is not None:
+            iteration = getattr(handler, "iteration", self._iteration)
+            self._iteration = iteration
+        else:
+            self._iteration += 1
+            iteration = self._iteration
+        if every > 1 and iteration % every != 0:
+            return
+
+        # World-frame linear force (and angular torque) per body.
+        lin, ang = self._gather_wrenches(
+            task, physics, handler, fs, self.show_torque,
+        )
+        if lin is None:
+            return
+
+        n_active = 0
+        for body_i in range(min(self._n_bodies, len(self._body_mj_ids))):
+            (_animat_id, _link_id, ind) = self._body_mj_ids[body_i]
+            base = np.asarray(physics.data.xipos[ind], dtype=np.float64).copy()
+
+            # Force arrow.
+            n_active = self._push_arrow(
+                n_active, base, lin[body_i],
+                self.force_scale, self.min_force, self.color, self.force_width,
+            )
+            # Torque arrow (optional).
+            if self.show_torque and ang is not None:
+                n_active = self._push_arrow(
+                    n_active, base, ang[body_i],
+                    self.torque_scale, self.min_torque,
+                    self.torque_color, self.torque_width,
+                )
+
+        self._update_viewer_arrows(n_active)
+        self._n_active = n_active
+
+    def _push_arrow(self, n_active, base, vec, scale, min_mag, rgba, width):
+        """Append one arrow (base → base + scaled vec) to the buffers.
+
+        Returns the updated active-arrow count. Arrows below ``min_mag`` (or
+        exceeding the reserved geom budget) are skipped.
+        """
+        if n_active >= self._max_arrows:
+            return n_active
+        mag = float(np.linalg.norm(vec))
+        if mag <= min_mag or mag < 1e-12:
+            return n_active
+        length = scale * mag
+        if self.max_length is not None:
+            length = min(length, self.max_length)
+        self._from[n_active] = base
+        self._to[n_active] = base + (np.asarray(vec, dtype=np.float64) / mag) * length
+        self._rgba[n_active] = rgba
+        self._width[n_active] = width
+        return n_active + 1
+
+    def _gather_wrenches(self, task, physics, handler, fs, want_torque):
+        """Return ``(lin, ang)`` world-frame arrays, each ``(n_bodies, 3)``.
+
+        ``ang`` is ``None`` when ``want_torque`` is False. Returns
+        ``(None, None)`` on failure.
+        """
+        n = len(self._body_mj_ids)
+
+        if self.force_source == "applied":
+            lin = np.zeros((n, 3), dtype=np.float64)
+            ang = np.zeros((n, 3), dtype=np.float64) if want_torque else None
+            xfrc = physics.data.xfrc_applied
+            for body_i in range(n):
+                ind = self._body_mj_ids[body_i][2]
+                lin[body_i] = xfrc[ind, 0:3]
+                if want_torque:
+                    ang[body_i] = xfrc[ind, 3:6]
+            return lin, ang
+
+        # "hydro": reconstruct viscous + pressure in world frame, exactly as
+        # BDIMhandler._apply_forces does (minus buoyancy), so the arrows show
+        # the pure hydrodynamic load. Requires the BDIM handler.
+        if handler is None or fs is None:
+            return None, None
+        try:
+            D = handler.ndim
+            Nt = len(handler._ang_xfrc_idx)
+            attrs = (handler._lin_visc_attrs + handler._ang_visc_attrs
+                     + handler._lin_pres_attrs + handler._ang_pres_attrs)
+            forces_gpu = torch.stack([getattr(fs, a) for a in attrs])
+            fc = (handler.force_scaling * forces_gpu).detach().cpu().numpy()
+            units_N = float(task.units.newtons)
+
+            lin_total = fc[:D] + fc[D + Nt:2 * D + Nt]      # (D, B) fluid frame
+            B = lin_total.shape[1]
+            lin = np.zeros((B, 3), dtype=np.float64)
+            for d, axis in enumerate(handler._lin_xfrc_idx):
+                lin[:, axis] = lin_total[d] * units_N
+
+            ang = None
+            if want_torque:
+                ang_total = fc[D:D + Nt] + fc[2 * D + Nt:]  # (Nt, B)
+                ang = np.zeros((B, 3), dtype=np.float64)
+                for d, axis in enumerate(handler._ang_xfrc_idx):
+                    ang[:, axis] = ang_total[d] * units_N
+            return lin, ang
+        except Exception as exc:  # noqa: BLE001
+            if not self._warned_hydro:
+                print(f"[ForceViewer] 'hydro' wrench read failed ({exc}); "
+                      f"falling back to applied xfrc.")
+                self._warned_hydro = True
+            self.force_source = "applied"
+            return self._gather_wrenches(
+                task, physics, handler, fs, want_torque,
+            )
+
+    def _update_viewer_arrows(self, n_active: int):
+        if self._viewer is None or self._geom_start is None:
+            return
+        scn = self._viewer.user_scn
+
+        # Re-anchor if user_scn was reset by outside code.
+        if scn.ngeom < self._geom_start:
+            self._geom_start = scn.ngeom
+
+        _eye3 = np.eye(3, dtype=np.float64).ravel()
+        for i in range(n_active):
+            target = self._geom_start + i
+            if target >= scn.maxgeom:
+                break
+            if target >= scn.ngeom:
+                scn.ngeom = target + 1
+            g = scn.geoms[target]
+            mujoco.mjv_initGeom(g, _ARROW, np.zeros(3), self._from[i],
+                                _eye3, self._rgba[i])
+            mujoco.mjv_connector(g, _ARROW, float(self._width[i]),
+                                 self._from[i], self._to[i])
+            g.category = mujoco.mjtCatBit.mjCAT_ALL
+            g.objtype = mujoco.mjtObj.mjOBJ_UNKNOWN
+            g.objid = -1
+
+        # Hide previously-used slots that are now idle.
+        for i in range(n_active, self._n_active):
+            target = self._geom_start + i
+            if target < scn.ngeom:
+                scn.geoms[target].rgba[3] = 0

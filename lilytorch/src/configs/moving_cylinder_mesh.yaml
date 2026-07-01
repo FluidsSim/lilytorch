@@ -1,0 +1,79 @@
+
+solver :
+  use_gpu: False
+  nthreads: 16
+  Nx     : 512
+  Ny     : 512
+  xmin   : -1
+  xmax   : 1
+  ymin   : -1
+  ymax   : 1
+
+  nt     : 20000
+  nu     : 1.0e-6
+  rho    : 1.0e+3
+
+
+  # convection_method : "implicit"
+  # dt     : 1
+
+  convection_method : "abdquickest"
+  dt                : 0.1
+
+  poisson_tol       : 1.0e-5
+  jacobi_weight     : 0.8
+  poisson_max_mgcg_cycles: 10
+  poisson_max_cycles: 10
+  poisson_nsmoothing: 50
+  poisson_verbose   : True
+  poisson_folder : "lilytorch/data/"
+
+
+
+
+boundary_conditions:
+  BC_type_u:
+  - "N"
+  - "N"
+  - "N"
+  - "N"
+  BC_values_u:
+  - 0
+  - 0
+  - 0
+  - 0
+  BC_type_v:
+  - "N"
+  - "N"
+  - "N"
+  - "N"
+  BC_values_v:
+  - 0
+  - 0
+  - 0
+  - 0
+
+body:
+  type: composite_mesh
+
+  mesh_file: "cylinder.obj"
+  n_samples: (1000, 1000)
+  compute_interp: True
+  plotting_meshes: False
+  update_maps:
+    rotation: "None"
+    translation:
+      - None
+      - None
+  suit: 0.0
+  convexify: False
+  scale: 1
+
+
+output:
+  save_path: "/data/andreaferrario/ns_data/"
+  save_frames: True
+  save_every : 50
+  vmin: -0.05
+  vmax: 0.05
+  save_uv: False

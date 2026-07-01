@@ -1,0 +1,161 @@
+units:
+  meters: 1
+  seconds: 1
+  kilograms: 1
+runtime:
+  n_iterations: 30001
+  buffer_size: 30001
+  play: true
+  rtl: 1.0
+  fast: false
+  headless: true
+  show_progress: true
+physics:
+  timestep: 0.0001
+  gravity:
+  - 0
+  - 0
+  - -980
+  num_sub_steps: 1
+  cb_sub_steps: 1
+  n_solver_iters: 5000
+mujoco:
+  cone: elliptic
+  solver: CG
+  integrator: implicit
+  impratio: 10
+  ccd_iterations: 1000
+  ccd_tolerance: 1e-6
+  noslip_iterations: 10000
+  noslip_tolerance: 1e-6
+  viewer: MuJoCo
+  texture_repeat: 10
+  shadow_size: 1024
+  visual_scale: 1.0
+  extent: 10.0
+pybullet:
+  opengl2: false
+  lcp: dantzig
+  cfm: 1.0e-10
+  erp: 0
+  contact_erp: 0
+  friction_erp: 0
+  residual_threshold: 1.0e-06
+  max_num_cmd_per_1ms: 100000000
+  report_solver_analytics: 0
+extensions:
+- loader: lilytorch.integration.extensions.FluidExtension
+  config:
+    handler_path: lilytorch.integration.BDIMhandler.BDIMhandler
+    bdim_yaml:
+      solver:
+        use_gpu: true
+        nthreads: 16
+        dtype: float64
+        Nx: 60
+        Ny: 60
+        Nz: 150
+        xmin: 0
+        ymin: 0
+        zmin: 0
+        xmax: 1
+        ymax: 1
+        zmax: 2.5
+        convection_method: quick
+        dt: 0.0001
+        nt: 30001
+        nu: 0.05
+        rho: 1
+        eps_multiplier: 2
+        poisson_tol: 1.0e-06
+        poisson_max_cycles: 20
+        poisson_max_mgcg_cycles: 5
+        jacobi_weight: 0.7
+        poisson_nsmoothing: 5
+        poisson_verbose: false
+        poisson_folder: data/
+        poisson_smoother: jacobi
+        poisson_method: fft
+        poisson_bc_type: neumann
+        time_integration: euler
+        heun: false
+        force_method: method2
+        force_delta_order: 1
+      boundary_conditions:
+        BC_type_u:
+        - D
+        - D
+        - D
+        - D
+        - D
+        - D
+        BC_values_u:
+        - 0
+        - 0
+        - 0
+        - 0
+        - 0
+        - 0
+        BC_type_v:
+        - D
+        - D
+        - D
+        - D
+        - D
+        - D
+        BC_values_v:
+        - 0
+        - 0
+        - 0
+        - 0
+        - 0
+        - 0
+        BC_type_w:
+        - D
+        - D
+        - D
+        - D
+        - D
+        - D
+        BC_values_w:
+        - 0
+        - 0
+        - 0
+        - 0
+        - 0
+        - 0
+      physics:
+        solref:
+        - 1.0e-05
+        - 10
+      body:
+        force_scaling: 1.0
+        type: multi_animat
+        plotting: false
+        compute_interp: false
+        plotting_meshes: false
+        save_folder: None
+        n_samples:
+        - 2000
+        - 2000
+        update_maps:
+          rotation: None
+          translation:
+          - None
+          - None
+          - None
+        suit: 0.0
+        convexify: true
+        scale: 1
+      output:
+        save_path: ''
+        existing_folder: /data/andreaferrario/ns_data/coquerelle_cottet_3d_drop/d0p2_nu0p05
+        save_frames: false
+        save_every: 500
+        vmin: -10
+        vmax: 10
+        save_uv: false
+- loader: farms_core.simulation.extensions.ExperimentLogger
+  config:
+    log_path: /data/andreaferrario/ns_data/coquerelle_cottet_3d_drop/d0p2_nu0p05/output
+    skip: 0

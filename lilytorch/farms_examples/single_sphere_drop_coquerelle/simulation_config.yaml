@@ -3,15 +3,15 @@ units:
   seconds: 1
   kilograms: 1
 runtime:
-  n_iterations: 55001
-  buffer_size: 55001
+  n_iterations: 7001
+  buffer_size: 7001
   play: true
   rtl: 1.0
   fast: false
   headless: true
   show_progress: true
 physics:
-  timestep: 0.00001
+  timestep: 0.0001
   gravity:
   - 0
   - 0
@@ -22,7 +22,7 @@ physics:
 mujoco:
   cone: elliptic
   solver: CG
-  integrator: implicitfast
+  integrator: implicit
   impratio: 10
   ccd_iterations: 1000
   ccd_tolerance: 1e-6
@@ -46,12 +46,15 @@ pybullet:
 extensions:
 - loader: lilytorch.integration.extensions.FluidExtension
   config:
-    handler_path: lilytorch.farms_examples.single_sphere_drop_coquerelle.controller.BDIMhandler
+    handler_path: lilytorch.integration.BDIMhandler.BDIMhandler
     bdim_yaml:
-      solver :
-        use_gpu : True
-        nthreads : 16
+      solver:
+        use_gpu: True
+        nthreads: 16
+        dtype: "float64"
 
+        # Nx: 256
+        # Ny: 768
         Nx: 512
         Ny: 1536
         # Nx: 1024
@@ -61,49 +64,64 @@ extensions:
         xmax: 2
         ymax: 6
 
-        convection_method : "adam-bashforth"
-        dt                : 0.00001
-        nt                : 150000
-        nu                : 0.01
-        rho               : 1
+        convection_method: "quick"
+        dt: 0.000025
+        nt: 26001
+        nu: 0.01
+        rho: 1
+        eps_multiplier: 2
 
-        poisson_tol       : 1.0e-7
-        poisson_max_cycles: 5
-        poisson_max_mgcg_cycles: 3
-        jacobi_weight     : 0.7
+        poisson_tol: 1.0e-7
+        poisson_max_cycles: 10
+        poisson_max_mgcg_cycles: 5
+        jacobi_weight: 0.7
         poisson_nsmoothing: 5
-        poisson_verbose   : True
-        poisson_folder : "data/"
+        poisson_verbose: True
+        poisson_folder: "data/"
+        poisson_smoother: "jacobi"
+        poisson_method: "fft"
+        poisson_bc_type: "neumann"
 
+        heun: false
+        force_method: "method2"
+        force_delta_order: 1
 
       boundary_conditions:
         BC_type_u:
-        - "N"
-        - "N"
-        - "N"
-        - "N"
+        - "D"
+        - "D"
+        - "D"
+        - "D"
         BC_values_u:
         - 0
         - 0
         - 0
         - 0
         BC_type_v:
-        - "N"
-        - "N"
-        - "N"
-        - "N"
+        - "D"
+        - "D"
+        - "D"
+        - "D"
         BC_values_v:
         - 0
         - 0
         - 0
         - 0
 
+      physics:
+        solref: [0.00001, 10]
+
       body:
+        2d_plane: "xz"       # MuJoCo (x,z) → fluid (x,y); sphere falls in MuJoCo z
+        force_scaling: 1.0   # no z-extent scaling for 2-D analytical body
         type: multi_animat
-        plotting: True
+        plotting: False
         compute_interp: False
-        plotting_meshes: True
-        n_samples: (2000, 2000)
+        plotting_meshes: False
+        save_folder: None
+        n_samples:
+        - 2000
+        - 2000
         update_maps:
           rotation: "None"
           translation:
@@ -114,45 +132,15 @@ extensions:
         scale: 1
 
       output:
-        save_path: "/data/andreaferrario/ns_data/"
+        save_path: ""
+        existing_folder: /data/andreaferrario/ns_data/coquerelle_sphere_drop
         save_frames: True
-        save_every : 1000
+        save_every: 1000
         vmin: -50
         vmax: 50
         save_uv: True
 
-# - loader: farms_mujoco.simulation.extensions.MjcfSaver
-#   config:
-#     path: output/simulation_mjcf.xml
-
-# extensions: []
-
 - loader: farms_core.simulation.extensions.ExperimentLogger
   config:
-    log_path: output
+    log_path: /data/andreaferrario/ns_data/coquerelle_sphere_drop/output
     skip: 0
-
-# - loader: farms_mujoco.simulation.extensions.CameraFollower
-#   config:
-#     animat_id: 0
-#     distance: 3
-#     azimuth: -30
-#     elevation: -20
-#     angular_velocity: 0
-# - loader: farms_mujoco.sensors.camera.CameraRecording
-#   config:
-#     path: 'output/video.mp4'
-#     animat_id: 0
-#     fps: 30
-#     speed: 1.0
-#     azimuth: -30
-#     elevation: -15
-#     distance: 2
-#     angular_velocity: 0
-#     offset:
-#     - 0
-#     - 0
-#     - 0.0
-#     resolution:
-#     - 1280
-#     - 720

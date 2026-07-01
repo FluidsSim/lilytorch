@@ -1,0 +1,40 @@
+<?xml version="1.0" ?>
+<sdf version="1.6">
+  <world name="world">
+    <model name="sphere_D0p2">
+      <pose>0 0 0 0 0 0</pose>
+      <link name="base_link">
+        <pose>0 0 0 0 0 0</pose>
+        <inertial>
+          <pose>0 0 0 0 0 0</pose>
+          <!-- 3-D solid sphere: rho=900.0, r=0.0335 (tennis ball) -->
+          <mass>0.141731224691</mass>
+          <inertia>
+            <ixx>6.36231467637e-05</ixx>
+            <ixy>0</ixy>
+            <ixz>0</ixz>
+            <iyy>6.36231467637e-05</iyy>
+            <iyz>0</iyz>
+            <izz>6.36231467637e-05</izz>
+          </inertia>
+        </inertial>
+        <collision name="base_link_collision">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <sphere>
+              <radius>0.0335</radius>
+            </sphere>
+          </geometry>
+        </collision>
+        <visual name="base_link_visual">
+          <pose>0 0 0 0 0 0</pose>
+          <geometry>
+            <mesh>
+              <uri>_striped_sphere.obj</uri>
+            </mesh>
+          </geometry>
+        </visual>
+      </link>
+    </model>
+  </world>
+</sdf>

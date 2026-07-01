@@ -2,5 +2,59 @@
 requires = [
     "setuptools",
     "torch",
+    "numpy",
 ]
 build-backend = "setuptools.build_meta"
+
+[project]
+name = "lilytorch"
+version = "0.1.0"
+description = "GPU-accelerated CFD with immersed-boundary methods, built on PyTorch"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+authors = [
+    { name = "Andrea Ferrario", email = "ferrarioa5@gmail.com" },
+]
+keywords = ["cfd", "fluid-structure-interaction", "pytorch", "immersed-boundary", "navier-stokes"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Physics",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = [
+    "numpy",
+    "scipy",
+    "matplotlib",
+    "h5py",
+    "scikit-image",
+    "tqdm",
+    "imageio",
+    "opencv-python",
+    "trimesh",
+    "open3d",
+    "scikit-fmm",
+    "seaborn",
+    "plotly",
+    "scikit-learn",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-cov",
+    "ruff",
+]
+petsc = ["petsc4py", "mpi4py"]
+
+[project.urls]
+Repository = "https://github.com/ferrarioa5/lilytorch"
+
+[tool.setuptools.packages.find]
+include = ["lilytorch*"]

@@ -1,0 +1,398 @@
+<?xml version="1.0" ?>
+<sdf version="1.6">
+  <world name="world">
+    <model name="submarine">
+      <pose>0 0 0 0 0 0</pose>
+
+      <link name="base_link">
+        <pose>0 0 0 0 0 0</pose>
+        <inertial>
+          <pose>0 0 0 0 0 0</pose>
+          <mass>3.141592653589793</mass>
+          <inertia>
+            <ixx>0.003926990816987241</ixx>
+            <ixy>0</ixy>
+            <ixz>0</ixz>
+            <iyy>0.04385139745635753</iyy>
+            <iyz>0</iyz>
+            <izz>0.04385139745635753</izz>
+          </inertia>
+        </inertial>
+        <collision name="base_link_collision">
+          <pose>0 0 0 0 1.5707963267948966 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.05</radius>
+              <length>0.4</length>
+            </cylinder>
+          </geometry>
+        </collision>
+        <collision name="conning_tower_collision">
+          <pose>0 0 0.05 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.08 0.04 0.04</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="base_link_visual">
+          <pose>0 0 0 0 1.5707963267948966 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.05</radius>
+              <length>0.4</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <ambient>0.1 0.3 0.5 1</ambient>
+            <diffuse>0.1 0.3 0.5 1</diffuse>
+            <specular>0.4 0.4 0.4 1</specular>
+            <emissive>0 0 0 1</emissive>
+          </material>
+        </visual>
+        <visual name="conning_tower_visual">
+          <pose>0 0 0.05 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.08 0.04 0.04</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.1 0.3 0.5 1</ambient>
+            <diffuse>0.1 0.3 0.5 1</diffuse>
+            <specular>0.4 0.4 0.4 1</specular>
+            <emissive>0 0 0 1</emissive>
+          </material>
+        </visual>
+        <visual name="nose_visual">
+          <pose>0.2 0 0 0 0 0</pose>
+          <geometry>
+            <sphere>
+              <radius>0.05</radius>
+            </sphere>
+          </geometry>
+          <material>
+            <ambient>0.1 0.3 0.5 1</ambient>
+            <diffuse>0.1 0.3 0.5 1</diffuse>
+            <specular>0.4 0.4 0.4 1</specular>
+            <emissive>0 0 0 1</emissive>
+          </material>
+        </visual>
+        <visual name="tail_visual">
+          <pose>-0.2 0 0 0 0 0</pose>
+          <geometry>
+            <sphere>
+              <radius>0.05</radius>
+            </sphere>
+          </geometry>
+          <material>
+            <ambient>0.1 0.3 0.5 1</ambient>
+            <diffuse>0.1 0.3 0.5 1</diffuse>
+            <specular>0.4 0.4 0.4 1</specular>
+            <emissive>0 0 0 1</emissive>
+          </material>
+        </visual>
+      </link>
+
+      <link name="fin_top">
+        <pose>-0.16 0 0.075 0 0 0</pose>
+        <inertial>
+          <pose>0 0 0 0 0 0</pose>
+          <mass>0.024</mass>
+          <inertia>
+            <ixx>5.032e-06</ixx>
+            <ixy>0</ixy>
+            <ixz>0</ixz>
+            <iyy>3.38e-05</iyy>
+            <iyz>0</iyz>
+            <izz>2.8832e-05</izz>
+          </inertia>
+        </inertial>
+        <collision name="fin_top_collision">
+          <geometry>
+            <box>
+              <size>0.12 0.004 0.05</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="fin_top_visual">
+          <geometry>
+            <box>
+              <size>0.12 0.004 0.05</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.1 0.3 0.5 1</ambient>
+            <diffuse>0.1 0.3 0.5 1</diffuse>
+            <specular>0.4 0.4 0.4 1</specular>
+            <emissive>0 0 0 1</emissive>
+          </material>
+        </visual>
+      </link>
+
+      <link name="fin_bottom">
+        <pose>-0.16 0 -0.075 0 0 0</pose>
+        <inertial>
+          <pose>0 0 0 0 0 0</pose>
+          <mass>0.024</mass>
+          <inertia>
+            <ixx>5.032e-06</ixx>
+            <ixy>0</ixy>
+            <ixz>0</ixz>
+            <iyy>3.38e-05</iyy>
+            <iyz>0</iyz>
+            <izz>2.8832e-05</izz>
+          </inertia>
+        </inertial>
+        <collision name="fin_bottom_collision">
+          <geometry>
+            <box>
+              <size>0.12 0.004 0.05</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="fin_bottom_visual">
+          <geometry>
+            <box>
+              <size>0.12 0.004 0.05</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.1 0.3 0.5 1</ambient>
+            <diffuse>0.1 0.3 0.5 1</diffuse>
+            <specular>0.4 0.4 0.4 1</specular>
+            <emissive>0 0 0 1</emissive>
+          </material>
+        </visual>
+      </link>
+
+      <link name="fin_port">
+        <pose>-0.16 0.075 0 0 0 0</pose>
+        <inertial>
+          <pose>0 0 0 0 0 0</pose>
+          <mass>0.024</mass>
+          <inertia>
+            <ixx>5.032e-06</ixx>
+            <ixy>0</ixy>
+            <ixz>0</ixz>
+            <iyy>2.8832e-05</iyy>
+            <iyz>0</iyz>
+            <izz>3.38e-05</izz>
+          </inertia>
+        </inertial>
+        <collision name="fin_port_collision">
+          <geometry>
+            <box>
+              <size>0.12 0.05 0.004</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="fin_port_visual">
+          <geometry>
+            <box>
+              <size>0.12 0.05 0.004</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.1 0.3 0.5 1</ambient>
+            <diffuse>0.1 0.3 0.5 1</diffuse>
+            <specular>0.4 0.4 0.4 1</specular>
+            <emissive>0 0 0 1</emissive>
+          </material>
+        </visual>
+      </link>
+
+      <link name="fin_starboard">
+        <pose>-0.16 -0.075 0 0 0 0</pose>
+        <inertial>
+          <pose>0 0 0 0 0 0</pose>
+          <mass>0.024</mass>
+          <inertia>
+            <ixx>5.032e-06</ixx>
+            <ixy>0</ixy>
+            <ixz>0</ixz>
+            <iyy>2.8832e-05</iyy>
+            <iyz>0</iyz>
+            <izz>3.38e-05</izz>
+          </inertia>
+        </inertial>
+        <collision name="fin_starboard_collision">
+          <geometry>
+            <box>
+              <size>0.12 0.05 0.004</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="fin_starboard_visual">
+          <geometry>
+            <box>
+              <size>0.12 0.05 0.004</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.1 0.3 0.5 1</ambient>
+            <diffuse>0.1 0.3 0.5 1</diffuse>
+            <specular>0.4 0.4 0.4 1</specular>
+            <emissive>0 0 0 1</emissive>
+          </material>
+        </visual>
+      </link>
+
+      <link name="propeller_hub">
+        <pose>-0.27 0 0 0 0 0</pose>
+        <inertial>
+          <pose>0 0 0 0 0 0</pose>
+          <mass>0.021205750411731104</mass>
+          <inertia>
+            <ixx>2.385646921319749e-06</ixx>
+            <ixy>0</ixy>
+            <ixz>0</ixz>
+            <iyy>2.784321474773041e-06</iyy>
+            <iyz>0</iyz>
+            <izz>2.784321474773041e-06</izz>
+          </inertia>
+        </inertial>
+        <collision name="propeller_hub_collision">
+          <pose>0 0 0 0 1.5707963267948966 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.015</radius>
+              <length>0.03</length>
+            </cylinder>
+          </geometry>
+        </collision>
+        <visual name="propeller_hub_visual">
+          <pose>0 0 0 0 1.5707963267948966 0</pose>
+          <geometry>
+            <cylinder>
+              <radius>0.015</radius>
+              <length>0.03</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <ambient>0.8 0.6 0.1 1</ambient>
+            <diffuse>0.8 0.6 0.1 1</diffuse>
+            <specular>0.4 0.4 0.4 1</specular>
+            <emissive>0 0 0 1</emissive>
+          </material>
+        </visual>
+      </link>
+
+      <link name="blade_0">
+        <pose>-0.27 0.04 0 0 0.3 0</pose>
+        <inertial>
+          <pose>0 0 0 0 0 0</pose>
+          <mass>0.0064</mass>
+          <inertia>
+            <ixx>3.626666666666667e-06</ixx>
+            <ixy>0</ixy>
+            <ixz>0</ixz>
+            <iyy>2.218666666666667e-07</iyy>
+            <iyz>0</iyz>
+            <izz>3.421333333333333e-06</izz>
+          </inertia>
+        </inertial>
+        <collision name="blade_0_collision">
+          <geometry>
+            <box>
+              <size>0.004 0.08 0.02</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="blade_0_visual">
+          <geometry>
+            <box>
+              <size>0.004 0.08 0.02</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.9 0.7 0.1 1</ambient>
+            <diffuse>0.9 0.7 0.1 1</diffuse>
+            <specular>0.4 0.4 0.4 1</specular>
+            <emissive>0 0 0 1</emissive>
+          </material>
+        </visual>
+      </link>
+
+      <link name="blade_1">
+        <pose>-0.27 -0.04 0 0 -0.3 0</pose>
+        <inertial>
+          <pose>0 0 0 0 0 0</pose>
+          <mass>0.0064</mass>
+          <inertia>
+            <ixx>3.626666666666667e-06</ixx>
+            <ixy>0</ixy>
+            <ixz>0</ixz>
+            <iyy>2.218666666666667e-07</iyy>
+            <iyz>0</iyz>
+            <izz>3.421333333333333e-06</izz>
+          </inertia>
+        </inertial>
+        <collision name="blade_1_collision">
+          <geometry>
+            <box>
+              <size>0.004 0.08 0.02</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="blade_1_visual">
+          <geometry>
+            <box>
+              <size>0.004 0.08 0.02</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.9 0.7 0.1 1</ambient>
+            <diffuse>0.9 0.7 0.1 1</diffuse>
+            <specular>0.4 0.4 0.4 1</specular>
+            <emissive>0 0 0 1</emissive>
+          </material>
+        </visual>
+      </link>
+
+      <joint name="joint_fin_top" type="fixed">
+        <parent>base_link</parent>
+        <child>fin_top</child>
+        <pose>0 0 0 0 0 0</pose>
+      </joint>
+      <joint name="joint_fin_bottom" type="fixed">
+        <parent>base_link</parent>
+        <child>fin_bottom</child>
+        <pose>0 0 0 0 0 0</pose>
+      </joint>
+      <joint name="joint_fin_port" type="fixed">
+        <parent>base_link</parent>
+        <child>fin_port</child>
+        <pose>0 0 0 0 0 0</pose>
+      </joint>
+      <joint name="joint_fin_starboard" type="fixed">
+        <parent>base_link</parent>
+        <child>fin_starboard</child>
+        <pose>0 0 0 0 0 0</pose>
+      </joint>
+
+      <joint name="joint_propeller" type="revolute">
+        <parent>base_link</parent>
+        <child>propeller_hub</child>
+        <pose>0 0 0 0 0 0</pose>
+        <axis>
+          <xyz>1 0 0</xyz>
+          <limit>
+            <lower>-1e16</lower>
+            <upper>1e16</upper>
+          </limit>
+        </axis>
+      </joint>
+      <joint name="joint_blade_0" type="fixed">
+        <parent>propeller_hub</parent>
+        <child>blade_0</child>
+        <pose>0 0 0 0 0 0</pose>
+      </joint>
+      <joint name="joint_blade_1" type="fixed">
+        <parent>propeller_hub</parent>
+        <child>blade_1</child>
+        <pose>0 0 0 0 0 0</pose>
+      </joint>
+    </model>
+  </world>
+</sdf>

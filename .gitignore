@@ -2,44 +2,93 @@
 
 #: Python
 *.orig
+!**/0.orig/
 *.npy
 *.pyc
 *.*~
 *_flymake.py
-*.ipynb
+# *.ipynb
 *.pt
 
 #: File types
 *.mp4
+*.MP4
 *.html
 *.h5
 *.pickle
-*.csv
+# *.csv
 *.so
 *.egg-info
 
-#: Do not ignore figures folder
-
 make.bat
-*.txt
+# *.txt — do NOT blanket-ignore .txt (requirements.txt is tracked)
+
+# LaTeX build artefacts (keep .tex / .bib / .pdf / README.md)
+paper/main.aux
+paper/main.bbl
+paper/main.blg
+paper/main.fdb_latexmk
+paper/main.fls
+paper/main.log
+paper/main.out
+paper/main.synctex.gz
+paper/supplementary.aux
+paper/supplementary.bbl
+paper/supplementary.blg
+paper/supplementary.fdb_latexmk
+paper/supplementary.fls
+paper/supplementary.log
+paper/supplementary.out
+paper/supplementary.synctex.gz
 
 # VS Code
-*.vscode
+.vscode/
+
+# RAG vector store and papers (large binary files)
+rag/vectorstore/
+rag/papers/*.pdf
+rag/papers/**/*.pdf
+
+# Editor / IDE temp files
+*.swp
+*.swo
+*~
+.idea/
+*.sublime-workspace
 
 # folders
-FARMS_V2/
 data/
 build/
 logs/
 interp_data/
+interp_data_2d/
+interp_data_3d/
 results/
 __pycache__
 figures/
 output/
-
-farms_amphibious/
-farms_core/
-farms_sim/
-farms_mujoco/
-
 Output/
+.pytest_cache/
+# Scratch diagnostic / study OUTPUT dirs (sim-generated, e.g. _submerged_diag/,
+# _flip_diag/, _overlap_study/). Trailing slash => directories only, so the
+# *.py harness scripts (_overlap_diag.py, _region_diag.py, ...) stay tracked.
+_*_diag/
+_*_study/
+
+# Generated Sphinx documentation output (rebuild with `make html`)
+docs/_build/
+
+precice_coupling/
+
+# OpenFOAM generated files (do NOT commit)
+**/constant/polyMesh/
+**/constant/triSurface/
+**/openfoam_case/0/
+processor*/
+postProcessing/
+VTK/
+log.*
+
+# Cython generated C files (but keep source files)
+*.c
+!lilytorch/farms_examples/amphibot/experimental_data/modes.c
