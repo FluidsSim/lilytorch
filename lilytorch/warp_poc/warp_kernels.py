@@ -1,4 +1,4 @@
-"""Warp single-source CPU+GPU kernels for BDIM streaming SDF (AP7).
+"""Warp single-source CPU+GPU kernels for BDIM streaming SDF (AP7) — 3-D.
 
 Sequential per-body design
 ──────────────────────────
@@ -11,20 +11,28 @@ This sidesteps the need for the 64-bit packed-key atomicMin trick used by the
 native kernel (which required the non-portable `__float_as_uint`/`atomicCAS`
 not available in Warp's built-in set).
 
-Architecture comparison vs native kernel
-─────────────────────────────────────────
-  Native : 3 launches  (init_keys + fanned-all-bodies + decode) — fused, 1 global pass
-  Warp   : B launches  (one per body) — sequential, simple compare-swap
-  Both   : CUDA-graph capture → 1 graph replay, near-zero Python overhead
+The fanned all-body path additionally honours the smooth velocity-blend
+(`blend_eps > 0`): accumulate Σ w_i v_i and Σ w_i with
+w_i = sigmoid(-s_i/blend_eps) via `wp.atomic_add`, then the decode divides by
+Σ w_i — bit-mirroring the native num_*/den_* fields (matches the 2-D file).
+
+**Precision (single source, both dtypes).**  Every value-carrying array and
+float scalar is a Warp *generic* (``Any``): float literals are materialised in
+the bound element type via ``type(x)(literal)``.  ``wp.overload`` registers the
+``float32`` *and* ``float64`` specialisations up front (Warp 1.14 does not
+reliably re-specialise a generic kernel implicitly across dtypes in one
+process).  ``float32`` codegen is unchanged from the original concrete kernels,
+so the existing parity tests stay bit-identical; ``float64`` is what an f64
+solver uses.
 
 All @wp.func / @wp.kernel are at module level (Warp codegen requirement).
 """
 from __future__ import annotations
 
+from typing import Any, Optional
+
 import warp as wp
 import torch
-import numpy as np
-from typing import Optional, Tuple
 
 wp.init()
 
@@ -34,28 +42,30 @@ wp.init()
 
 @wp.func
 def trilinear_sample_off(
-    F:      wp.array(dtype=wp.float32),
+    F:      wp.array(dtype=Any),
     F_off:  int,
     Mx: int, My: int, Mz: int,
-    bx0: wp.float32, by0: wp.float32, bz0: wp.float32,
-    inv_dx: wp.float32, inv_dy: wp.float32, inv_dz: wp.float32,
-    xq: wp.float32, yq: wp.float32, zq: wp.float32,
-) -> wp.float32:
+    bx0: Any, by0: Any, bz0: Any,
+    inv_dx: Any, inv_dy: Any, inv_dz: Any,
+    xq: Any, yq: Any, zq: Any,
+):
     """Trilinear interp into F_flat at offset F_off with border clamp."""
-    tx = wp.clamp((xq - bx0) * inv_dx, wp.float32(0.0), wp.float32(Mx - 1))
-    ty = wp.clamp((yq - by0) * inv_dy, wp.float32(0.0), wp.float32(My - 1))
-    tz = wp.clamp((zq - bz0) * inv_dz, wp.float32(0.0), wp.float32(Mz - 1))
+    zero = type(bx0)(0.0)
+    one = type(bx0)(1.0)
+    tx = wp.clamp((xq - bx0) * inv_dx, zero, type(bx0)(Mx - 1))
+    ty = wp.clamp((yq - by0) * inv_dy, zero, type(bx0)(My - 1))
+    tz = wp.clamp((zq - bz0) * inv_dz, zero, type(bx0)(Mz - 1))
 
     ix = wp.min(int(tx), Mx - 2)
     iy = wp.min(int(ty), My - 2)
     iz = wp.min(int(tz), Mz - 2)
 
-    fx = tx - wp.float32(ix)
-    fy = ty - wp.float32(iy)
-    fz = tz - wp.float32(iz)
-    wx0 = wp.float32(1.0) - fx
-    wy0 = wp.float32(1.0) - fy
-    wz0 = wp.float32(1.0) - fz
+    fx = tx - type(bx0)(ix)
+    fy = ty - type(bx0)(iy)
+    fz = tz - type(bx0)(iz)
+    wx0 = one - fx
+    wy0 = one - fy
+    wz0 = one - fz
 
     s2   = Mz
     s1   = My * Mz
@@ -70,37 +80,37 @@ def trilinear_sample_off(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Per-body streaming SDF kernel
+#  Per-body streaming SDF kernel (sequential design — no blend, matches 2-D)
 # ─────────────────────────────────────────────────────────────────────────────
 
 @wp.kernel
 def streaming_sdf_one_body_3d(
     # All-body packed arrays (static, loaded once)
-    F_flat:      wp.array(dtype=wp.float32),
+    F_flat:      wp.array(dtype=Any),
     F_offsets:   wp.array(dtype=wp.int64),    # [B]
     body_shapes: wp.array(dtype=wp.int64),    # [B*3] flat
-    body_meta:   wp.array(dtype=wp.float32),  # [B*10] flat
+    body_meta:   wp.array(dtype=Any),         # [B*10] flat
     # Per-step packed arrays (updated before each step / graph replay)
-    kin:         wp.array(dtype=wp.float32),  # [B*21] flat
+    kin:         wp.array(dtype=Any),         # [B*21] flat
     aabb_lo:     wp.array(dtype=wp.int64),    # [B*3] flat
     aabb_dim:    wp.array(dtype=wp.int64),    # [B*3] flat
     # This body's index (compile-time constant per launch in graph)
     b:  int,
     # Fluid grid
-    gx: wp.array(dtype=wp.float32),
-    gy: wp.array(dtype=wp.float32),
-    gz: wp.array(dtype=wp.float32),
-    half_h:  wp.float32,
+    gx: wp.array(dtype=Any),
+    gy: wp.array(dtype=Any),
+    gz: wp.array(dtype=Any),
+    half_h:  Any,
     max_vol: int,
     Ngy: int, Ngz: int,
     # Outputs (full-grid flat)
-    sdf_cc: wp.array(dtype=wp.float32),
-    sdf_u:  wp.array(dtype=wp.float32),
-    sdf_v:  wp.array(dtype=wp.float32),
-    sdf_w:  wp.array(dtype=wp.float32),
-    body_u: wp.array(dtype=wp.float32),
-    body_v: wp.array(dtype=wp.float32),
-    body_w: wp.array(dtype=wp.float32),
+    sdf_cc: wp.array(dtype=Any),
+    sdf_u:  wp.array(dtype=Any),
+    sdf_v:  wp.array(dtype=Any),
+    sdf_w:  wp.array(dtype=Any),
+    body_u: wp.array(dtype=Any),
+    body_v: wp.array(dtype=Any),
+    body_w: wp.array(dtype=Any),
 ):
     """Process one body's AABB: sample SDF at cc+3 face positions; compare-swap.
 
@@ -155,7 +165,6 @@ def streaming_sdf_one_body_3d(
     bzq = r20*dx + r21*dy + r22*dz
 
     # Pre-rotate face offsets into body frame
-    # u-face: world -h/2 along x → R_T @ [-h/2, 0, 0]
     neg_hh = -half_h
     du_x = neg_hh*r00; du_y = neg_hh*r10; du_z = neg_hh*r20
     dv_x = neg_hh*r01; dv_y = neg_hh*r11; dv_z = neg_hh*r21
@@ -195,15 +204,6 @@ def streaming_sdf_one_body_3d(
 # ─────────────────────────────────────────────────────────────────────────────
 #  Fanned all-bodies kernels (constant in B — 1 launch each, matches native)
 # ─────────────────────────────────────────────────────────────────────────────
-#
-#  Pass B (min)   : dim = B*max_vol; every (body, cell) thread does
-#                   wp.atomic_min on sdf_cc/u/v/w → resolves all-body argmin
-#                   without the uint64 packed key (wp.bit_cast not in Warp 1.14).
-#  Pass C (decode): dim = B*max_vol; recompute the face SDF; where it equals the
-#                   stored winning value, write that body's face velocity.  The
-#                   trilinear recompute is bit-identical to Pass B (same inputs),
-#                   so the winner's equality test is exact.  Ties (overlap cells)
-#                   resolve last-writer-wins — same tie behaviour as native.
 
 @wp.func
 def _fan_decode_tid(
@@ -235,15 +235,15 @@ def _fan_decode_tid(
 @wp.func
 def _fan_faces(
     b: int, i: int, j: int, k: int,
-    F_flat:      wp.array(dtype=wp.float32),
+    F_flat:      wp.array(dtype=Any),
     F_offsets:   wp.array(dtype=wp.int64),
     body_shapes: wp.array(dtype=wp.int64),
-    body_meta:   wp.array(dtype=wp.float32),
-    kin:         wp.array(dtype=wp.float32),
-    gx: wp.array(dtype=wp.float32),
-    gy: wp.array(dtype=wp.float32),
-    gz: wp.array(dtype=wp.float32),
-    half_h: wp.float32,
+    body_meta:   wp.array(dtype=Any),
+    kin:         wp.array(dtype=Any),
+    gx: wp.array(dtype=Any),
+    gy: wp.array(dtype=Any),
+    gz: wp.array(dtype=Any),
+    half_h: Any,
 ):
     """Return (s_cc, s_u, s_v, s_w) sampled SDFs for body b at cell (i,j,k)."""
     F_off  = int(F_offsets[b])
@@ -290,25 +290,33 @@ def _fan_faces(
 
 @wp.kernel
 def streaming_sdf_fanned_min_3d(
-    F_flat:      wp.array(dtype=wp.float32),
+    F_flat:      wp.array(dtype=Any),
     F_offsets:   wp.array(dtype=wp.int64),
     body_shapes: wp.array(dtype=wp.int64),
-    body_meta:   wp.array(dtype=wp.float32),
-    kin:         wp.array(dtype=wp.float32),
+    body_meta:   wp.array(dtype=Any),
+    kin:         wp.array(dtype=Any),
     aabb_lo:     wp.array(dtype=wp.int64),
     aabb_dim:    wp.array(dtype=wp.int64),
-    gx: wp.array(dtype=wp.float32),
-    gy: wp.array(dtype=wp.float32),
-    gz: wp.array(dtype=wp.float32),
-    half_h:  wp.float32,
+    gx: wp.array(dtype=Any),
+    gy: wp.array(dtype=Any),
+    gz: wp.array(dtype=Any),
+    half_h:  Any,
     max_vol: int,
     Ngy: int, Ngz: int,
-    sdf_cc: wp.array(dtype=wp.float32),
-    sdf_u:  wp.array(dtype=wp.float32),
-    sdf_v:  wp.array(dtype=wp.float32),
-    sdf_w:  wp.array(dtype=wp.float32),
+    blend_eps: Any,
+    sdf_cc: wp.array(dtype=Any),
+    sdf_u:  wp.array(dtype=Any),
+    sdf_v:  wp.array(dtype=Any),
+    sdf_w:  wp.array(dtype=Any),
+    num_u:  wp.array(dtype=Any),
+    num_v:  wp.array(dtype=Any),
+    num_w:  wp.array(dtype=Any),
+    den_u:  wp.array(dtype=Any),
+    den_v:  wp.array(dtype=Any),
+    den_w:  wp.array(dtype=Any),
 ):
-    """Pass B: fanned all-body atomic-min of cc/u/v/w SDFs (1 launch)."""
+    """Pass B: fanned all-body atomic-min of cc/u/v/w SDFs (1 launch).
+    Also accumulates Σ w_i v_i / Σ w_i into num/den when blend_eps>0."""
     tid = wp.tid()
     b, i, j, k, g = _fan_decode_tid(tid, max_vol, aabb_lo, aabb_dim, Ngy, Ngz)
     if g < 0:
@@ -321,30 +329,67 @@ def streaming_sdf_fanned_min_3d(
     wp.atomic_min(sdf_v,  g, s_v)
     wp.atomic_min(sdf_w,  g, s_w)
 
+    if blend_eps > type(blend_eps)(0.0):
+        K0   = b * 21
+        cm_x = kin[K0 + 12]; cm_y = kin[K0 + 13]; cm_z = kin[K0 + 14]
+        lv_x = kin[K0 + 15]; lv_y = kin[K0 + 16]; lv_z = kin[K0 + 17]
+        av_x = kin[K0 + 18]; av_y = kin[K0 + 19]; av_z = kin[K0 + 20]
+        xc = gx[i]; yc = gy[j]; zc = gz[k]
+        vU = lv_x + av_y * (zc - cm_z) - av_z * (yc - cm_y)
+        vV = lv_y + av_z * (xc - cm_x) - av_x * (zc - cm_z)
+        vW = lv_z + av_x * (yc - cm_y) - av_y * (xc - cm_x)
+        one = type(blend_eps)(1.0)
+        wU = one / (one + wp.exp(s_u / blend_eps))
+        wV = one / (one + wp.exp(s_v / blend_eps))
+        wW = one / (one + wp.exp(s_w / blend_eps))
+        wp.atomic_add(num_u, g, wU * vU); wp.atomic_add(den_u, g, wU)
+        wp.atomic_add(num_v, g, wV * vV); wp.atomic_add(den_v, g, wV)
+        wp.atomic_add(num_w, g, wW * vW); wp.atomic_add(den_w, g, wW)
+
 
 @wp.kernel
 def streaming_sdf_fanned_decode_3d(
-    F_flat:      wp.array(dtype=wp.float32),
+    F_flat:      wp.array(dtype=Any),
     F_offsets:   wp.array(dtype=wp.int64),
     body_shapes: wp.array(dtype=wp.int64),
-    body_meta:   wp.array(dtype=wp.float32),
-    kin:         wp.array(dtype=wp.float32),
+    body_meta:   wp.array(dtype=Any),
+    kin:         wp.array(dtype=Any),
     aabb_lo:     wp.array(dtype=wp.int64),
     aabb_dim:    wp.array(dtype=wp.int64),
-    gx: wp.array(dtype=wp.float32),
-    gy: wp.array(dtype=wp.float32),
-    gz: wp.array(dtype=wp.float32),
-    half_h:  wp.float32,
+    gx: wp.array(dtype=Any),
+    gy: wp.array(dtype=Any),
+    gz: wp.array(dtype=Any),
+    half_h:  Any,
     max_vol: int,
     Ngy: int, Ngz: int,
-    sdf_u:  wp.array(dtype=wp.float32),
-    sdf_v:  wp.array(dtype=wp.float32),
-    sdf_w:  wp.array(dtype=wp.float32),
-    body_u: wp.array(dtype=wp.float32),
-    body_v: wp.array(dtype=wp.float32),
-    body_w: wp.array(dtype=wp.float32),
+    blend_eps: Any,
+    sdf_u:  wp.array(dtype=Any),
+    sdf_v:  wp.array(dtype=Any),
+    sdf_w:  wp.array(dtype=Any),
+    body_u: wp.array(dtype=Any),
+    body_v: wp.array(dtype=Any),
+    body_w: wp.array(dtype=Any),
+    num_u:  wp.array(dtype=Any),
+    num_v:  wp.array(dtype=Any),
+    num_w:  wp.array(dtype=Any),
+    den_u:  wp.array(dtype=Any),
+    den_v:  wp.array(dtype=Any),
+    den_w:  wp.array(dtype=Any),
+    # BDIM-σ key emission (emit_keys == 0 → key_* are dummies, untouched).
+    # See the 2-D decode kernel: write the winning body-id (lowest-id-wins via
+    # int64 ``atomic_min``) into key_u/key_v/key_w; the σ Kernel B masks
+    # ``key & 0xffffffff``.  Unlike 2-D (full-grid keys indexed by g), the
+    # native 3-D keys are dirty_vol-sized and indexed by the AABB-local
+    # ``g_local`` (matching ``bdim_coeff_sigma_3d``'s read) — so the dirty
+    # origin / strides are passed in to recompute it.
+    emit_keys: int,
+    key_u: wp.array(dtype=wp.int64),
+    key_v: wp.array(dtype=wp.int64),
+    key_w: wp.array(dtype=wp.int64),
+    di0: int, dj0: int, dk0: int, dAj: int, dAk: int,
 ):
-    """Pass C: write the winning body's face velocity where SDF == stored min."""
+    """Pass C: write the winning body's face velocity where SDF == stored min.
+    With blend_eps>0, instead writes Σ w_i v_i / Σ w_i (the softmin blend)."""
     tid = wp.tid()
     b, i, j, k, g = _fan_decode_tid(tid, max_vol, aabb_lo, aabb_dim, Ngy, Ngz)
     if g < 0:
@@ -359,12 +404,58 @@ def streaming_sdf_fanned_decode_3d(
     av_x = kin[K0 + 18]; av_y = kin[K0 + 19]; av_z = kin[K0 + 20]
     xc = gx[i]; yc = gy[j]; zc = gz[k]
 
-    if s_u == sdf_u[g]:
+    blend = blend_eps > type(blend_eps)(0.0)
+    den_tol = type(blend_eps)(1e-6)
+
+    if blend and den_u[g] > den_tol:
+        body_u[g] = num_u[g] / den_u[g]
+    elif s_u == sdf_u[g]:
         body_u[g] = lv_x + av_y * (zc - cm_z) - av_z * (yc - cm_y)
-    if s_v == sdf_v[g]:
+
+    if blend and den_v[g] > den_tol:
+        body_v[g] = num_v[g] / den_v[g]
+    elif s_v == sdf_v[g]:
         body_v[g] = lv_y + av_z * (xc - cm_x) - av_x * (zc - cm_z)
-    if s_w == sdf_w[g]:
+
+    if blend and den_w[g] > den_tol:
+        body_w[g] = num_w[g] / den_w[g]
+    elif s_w == sdf_w[g]:
         body_w[g] = lv_z + av_x * (yc - cm_y) - av_y * (xc - cm_x)
+
+    if emit_keys != 0:
+        g_local = (i - di0) * (dAj * dAk) + (j - dj0) * dAk + (k - dk0)
+        if s_u == sdf_u[g]:
+            wp.atomic_min(key_u, g_local, wp.int64(b))
+        if s_v == sdf_v[g]:
+            wp.atomic_min(key_v, g_local, wp.int64(b))
+        if s_w == sdf_w[g]:
+            wp.atomic_min(key_w, g_local, wp.int64(b))
+
+
+# ── Register float32 + float64 specialisations up front ─────────────────────
+for _dt in (wp.float32, wp.float64):
+    _A = wp.array(dtype=_dt)
+    wp.overload(streaming_sdf_one_body_3d, {
+        "F_flat": _A, "body_meta": _A, "kin": _A,
+        "gx": _A, "gy": _A, "gz": _A, "half_h": _dt,
+        "sdf_cc": _A, "sdf_u": _A, "sdf_v": _A, "sdf_w": _A,
+        "body_u": _A, "body_v": _A, "body_w": _A,
+    })
+    wp.overload(streaming_sdf_fanned_min_3d, {
+        "F_flat": _A, "body_meta": _A, "kin": _A,
+        "gx": _A, "gy": _A, "gz": _A, "half_h": _dt, "blend_eps": _dt,
+        "sdf_cc": _A, "sdf_u": _A, "sdf_v": _A, "sdf_w": _A,
+        "num_u": _A, "num_v": _A, "num_w": _A,
+        "den_u": _A, "den_v": _A, "den_w": _A,
+    })
+    wp.overload(streaming_sdf_fanned_decode_3d, {
+        "F_flat": _A, "body_meta": _A, "kin": _A,
+        "gx": _A, "gy": _A, "gz": _A, "half_h": _dt, "blend_eps": _dt,
+        "sdf_u": _A, "sdf_v": _A, "sdf_w": _A,
+        "body_u": _A, "body_v": _A, "body_w": _A,
+        "num_u": _A, "num_v": _A, "num_w": _A,
+        "den_u": _A, "den_v": _A, "den_w": _A,
+    })
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -375,78 +466,78 @@ class WarpStreamingSDF:
     """Warp streaming SDF with CUDA-graph support — two interchangeable designs.
 
     (a) SEQUENTIAL per-body  (`run_eager` / `capture_graph` / `run_graph`)
-        B kernel launches (one per body).  Within each launch g is unique per
-        thread → conditional compare-swap is race-free without atomics.  Cost
-        scales ~linearly with B.  Good for small B (fish, 3 links).
+        B kernel launches (one per body).  No velocity blend (matches 2-D).
 
     (b) FANNED all-body  (`run_fanned_eager` / `capture_graph_fanned` /
         `run_graph_fanned`)  ← RECOMMENDED.
-        2 kernel launches, CONSTANT in B (each dim = B·max_vol):
-          Pass B = wp.atomic_min on cc/u/v/w across all bodies fanned;
-          Pass C = recompute per-body face SDF, write that body's velocity where
-                   SDF == the stored min (bit-identical recompute → exact winner).
-        Structural analogue of the native 3-pass fanned kernel, using float
-        atomic_min instead of the uint64 packed-key atomicMin (wp.bit_cast is
-        absent in Warp 1.14, so the packed key can't be built — equality-decode
-        replaces it).  Benchmarks at 0.6–1.2× of native at all B (see AP7).
+        2 kernel launches, CONSTANT in B (each dim = B·max_vol).  Honours the
+        smooth velocity-blend path when ``blend_eps > 0`` (num/den softmin),
+        mirroring the native ``streaming_sdf_stag_3d_multi``.
 
-    Both designs benefit from CUDA-graph capture (essential: eager is 3–14×
-    slower from per-launch Python overhead).  Both pass parity vs the native
-    kernel (SDF rel < 5e-4, body-vel rel < 1e-4).
-
-    Usage (fanned, recommended)
-    ───────────────────────────
-        wsdf = WarpStreamingSDF(Ngx, Ngy, Ngz, device="cuda:0")
-        wsdf.setup(F_flat, F_offsets, body_shapes, body_meta, gx, gy, gz, h, max_vol)
-        wsdf.update_kinematics(kin, aabb_lo, aabb_dim)            # per step
-        wsdf.capture_graph_fanned(sdf_cc, sdf_u, sdf_v, sdf_w, bU, bV, bW)  # once
-        wsdf.run_graph_fanned()                                   # 1 host call, any B
+    ``dtype`` selects the float precision of every value-carrying array/scalar
+    (``wp.float32`` default — bit-identical to the original; ``wp.float64`` for
+    an f64 solver).  Static input tensors are cast to the matching torch dtype
+    in :meth:`setup`; the caller's output arrays must already be that dtype.
     """
 
-    def __init__(self, Ngx: int, Ngy: int, Ngz: int, device: str = "cuda:0"):
+    def __init__(self, Ngx: int, Ngy: int, Ngz: int, device: str = "cuda:0",
+                 dtype=wp.float32):
         self.Ngx = Ngx; self.Ngy = Ngy; self.Ngz = Ngz
         self.device = device
+        self._wpf = dtype
+        self._tdtype = torch.float64 if dtype == wp.float64 else torch.float32
         self._graph: Optional[wp.Graph] = None
         self._B   = 0
         self._max_vol = 0
         self._half_h  = 0.5
-
-        # Persistent output arrays (filled in setup)
-        self._out: dict = {}
+        self._blend_eps = 0.0
 
     def setup(
         self,
         F_flat_t:      torch.Tensor,
         F_offsets_t:   torch.Tensor,   # [B] int64
         body_shapes_t: torch.Tensor,   # [B, 3] int64
-        body_meta_t:   torch.Tensor,   # [B, 10] float32
+        body_meta_t:   torch.Tensor,   # [B, 10] float
         gx_t: torch.Tensor, gy_t: torch.Tensor, gz_t: torch.Tensor,
         h: float,
         max_vol: int,
+        blend_eps: float = 0.0,
     ):
         """Convert static per-body tensors to persistent Warp arrays."""
         B = int(F_offsets_t.shape[0])
         self._B = B
-        self._max_vol = max_vol
+        self._max_vol = int(max_vol)
         self._half_h  = float(h) * 0.5
+        self._blend_eps = float(blend_eps)
 
+        td = self._tdtype
         # Static (never change)
-        self._F_flat      = wp.from_torch(F_flat_t.contiguous())
+        self._F_flat      = wp.from_torch(F_flat_t.to(td).contiguous())
         self._F_offsets   = wp.from_torch(F_offsets_t.contiguous())
         self._body_shapes = wp.from_torch(body_shapes_t.reshape(-1).contiguous())
-        self._body_meta   = wp.from_torch(body_meta_t.reshape(-1).contiguous())
-        self._gx = wp.from_torch(gx_t.contiguous())
-        self._gy = wp.from_torch(gy_t.contiguous())
-        self._gz = wp.from_torch(gz_t.contiguous())
+        self._body_meta   = wp.from_torch(body_meta_t.to(td).reshape(-1).contiguous())
+        self._gx = wp.from_torch(gx_t.to(td).contiguous())
+        self._gy = wp.from_torch(gy_t.to(td).contiguous())
+        self._gz = wp.from_torch(gz_t.to(td).contiguous())
 
         # Dynamic (updated per step)
-        self._kin      = wp.zeros(B * 21, dtype=wp.float32, device=self.device)
+        self._kin      = wp.zeros(B * 21, dtype=self._wpf, device=self.device)
         self._aabb_lo  = wp.zeros(B * 3,  dtype=wp.int64,   device=self.device)
         self._aabb_dim = wp.zeros(B * 3,  dtype=wp.int64,   device=self.device)
 
+        # Blend accumulators (full-grid), only used when blend_eps>0.
+        N = self.Ngx * self.Ngy * self.Ngz
+        nb = N if self._blend_eps > 0.0 else 1
+        self._num_u = wp.zeros(nb, dtype=self._wpf, device=self.device)
+        self._num_v = wp.zeros(nb, dtype=self._wpf, device=self.device)
+        self._num_w = wp.zeros(nb, dtype=self._wpf, device=self.device)
+        self._den_u = wp.zeros(nb, dtype=self._wpf, device=self.device)
+        self._den_v = wp.zeros(nb, dtype=self._wpf, device=self.device)
+        self._den_w = wp.zeros(nb, dtype=self._wpf, device=self.device)
+
     def update_kinematics(
         self,
-        kin_t:      torch.Tensor,   # [B, 21] float32
+        kin_t:      torch.Tensor,   # [B, 21] float
         aabb_lo_t:  torch.Tensor,   # [B, 3]  int64
         aabb_dim_t: torch.Tensor,   # [B, 3]  int64
     ):
@@ -454,17 +545,19 @@ class WarpStreamingSDF:
 
         Must be called before run_eager() / run_graph() each step.
         """
-        wp.copy(self._kin,      wp.from_torch(kin_t.reshape(-1).contiguous()))
+        wp.copy(self._kin,
+                wp.from_torch(kin_t.to(self._tdtype).reshape(-1).contiguous()))
         wp.copy(self._aabb_lo,  wp.from_torch(aabb_lo_t.reshape(-1).contiguous()))
         wp.copy(self._aabb_dim, wp.from_torch(aabb_dim_t.reshape(-1).contiguous()))
 
-    def _launch_all_bodies(
-        self,
-        sdf_cc: wp.array, sdf_u: wp.array,
-        sdf_v:  wp.array, sdf_w: wp.array,
-        bU: wp.array,     bV: wp.array, bW: wp.array,
-    ):
+    def _zero_blend(self):
+        if self._blend_eps > 0.0:
+            self._num_u.zero_(); self._num_v.zero_(); self._num_w.zero_()
+            self._den_u.zero_(); self._den_v.zero_(); self._den_w.zero_()
+
+    def _launch_all_bodies(self, sdf_cc, sdf_u, sdf_v, sdf_w, bU, bV, bW):
         """Launch one kernel per body sequentially (B kernel launches)."""
+        hh = self._wpf(self._half_h)
         for b in range(self._B):
             wp.launch(
                 streaming_sdf_one_body_3d,
@@ -475,7 +568,7 @@ class WarpStreamingSDF:
                     self._kin, self._aabb_lo, self._aabb_dim,
                     b,
                     self._gx, self._gy, self._gz,
-                    wp.float32(self._half_h), self._max_vol,
+                    hh, self._max_vol,
                     self.Ngy, self.Ngz,
                     sdf_cc, sdf_u, sdf_v, sdf_w,
                     bU, bV, bW,
@@ -483,26 +576,12 @@ class WarpStreamingSDF:
                 device=self.device,
             )
 
-    def run_eager(
-        self,
-        sdf_cc: wp.array, sdf_u: wp.array,
-        sdf_v:  wp.array, sdf_w: wp.array,
-        bU: wp.array,     bV: wp.array, bW: wp.array,
-    ):
+    def run_eager(self, sdf_cc, sdf_u, sdf_v, sdf_w, bU, bV, bW):
         """Run all B body kernels eagerly (B Python kernel submissions)."""
         self._launch_all_bodies(sdf_cc, sdf_u, sdf_v, sdf_w, bU, bV, bW)
 
-    def capture_graph(
-        self,
-        sdf_cc: wp.array, sdf_u: wp.array,
-        sdf_v:  wp.array, sdf_w: wp.array,
-        bU: wp.array,     bV: wp.array, bW: wp.array,
-    ):
-        """Capture the B per-body launches as one CUDA graph.
-
-        The graph references the persistent kin/aabb/output arrays; calling
-        update_kinematics() before run_graph() ensures new poses are used.
-        """
+    def capture_graph(self, sdf_cc, sdf_u, sdf_v, sdf_w, bU, bV, bW):
+        """Capture the B per-body launches as one CUDA graph."""
         with wp.ScopedCapture(device=self.device) as capture:
             self._launch_all_bodies(sdf_cc, sdf_u, sdf_v, sdf_w, bU, bV, bW)
         self._graph = capture.graph
@@ -515,14 +594,23 @@ class WarpStreamingSDF:
 
     # ── Fanned mode (constant in B: 2 launches regardless of body count) ──────
 
-    def _launch_fanned(
-        self,
-        sdf_cc: wp.array, sdf_u: wp.array,
-        sdf_v:  wp.array, sdf_w: wp.array,
-        bU: wp.array,     bV: wp.array, bW: wp.array,
-    ):
+    def _key_dummy(self):
+        if getattr(self, "_kdummy", None) is None:
+            self._kdummy = wp.zeros(1, dtype=wp.int64, device=self.device)
+        return self._kdummy
+
+    def _launch_fanned(self, sdf_cc, sdf_u, sdf_v, sdf_w, bU, bV, bW,
+                       key_u=None, key_v=None, key_w=None, emit_keys=0,
+                       dirty=(0, 0, 0, 0, 0)):
         """Launch the 2 fanned kernels (min + decode), each dim = B*max_vol."""
+        self._zero_blend()
         dim = self._B * self._max_vol
+        hh = self._wpf(self._half_h)
+        be = self._wpf(self._blend_eps)
+        ku = key_u if emit_keys else self._key_dummy()
+        kv = key_v if emit_keys else self._key_dummy()
+        kw = key_w if emit_keys else self._key_dummy()
+        di0, dj0, dk0, dAj, dAk = (int(x) for x in dirty)
         wp.launch(
             streaming_sdf_fanned_min_3d, dim=dim,
             inputs=[
@@ -530,9 +618,11 @@ class WarpStreamingSDF:
                 self._body_shapes, self._body_meta,
                 self._kin, self._aabb_lo, self._aabb_dim,
                 self._gx, self._gy, self._gz,
-                wp.float32(self._half_h), self._max_vol,
-                self.Ngy, self.Ngz,
+                hh, self._max_vol,
+                self.Ngy, self.Ngz, be,
                 sdf_cc, sdf_u, sdf_v, sdf_w,
+                self._num_u, self._num_v, self._num_w,
+                self._den_u, self._den_v, self._den_w,
             ],
             device=self.device,
         )
@@ -543,29 +633,27 @@ class WarpStreamingSDF:
                 self._body_shapes, self._body_meta,
                 self._kin, self._aabb_lo, self._aabb_dim,
                 self._gx, self._gy, self._gz,
-                wp.float32(self._half_h), self._max_vol,
-                self.Ngy, self.Ngz,
+                hh, self._max_vol,
+                self.Ngy, self.Ngz, be,
                 sdf_u, sdf_v, sdf_w,
                 bU, bV, bW,
+                self._num_u, self._num_v, self._num_w,
+                self._den_u, self._den_v, self._den_w,
+                int(emit_keys), ku, kv, kw,
+                di0, dj0, dk0, dAj, dAk,
             ],
             device=self.device,
         )
 
-    def run_fanned_eager(
-        self,
-        sdf_cc: wp.array, sdf_u: wp.array,
-        sdf_v:  wp.array, sdf_w: wp.array,
-        bU: wp.array,     bV: wp.array, bW: wp.array,
-    ):
+    def run_fanned_eager(self, sdf_cc, sdf_u, sdf_v, sdf_w, bU, bV, bW,
+                         key_u=None, key_v=None, key_w=None, emit_keys=0,
+                         dirty=(0, 0, 0, 0, 0)):
         """Run the 2 fanned kernels eagerly (2 Python submissions, any B)."""
-        self._launch_fanned(sdf_cc, sdf_u, sdf_v, sdf_w, bU, bV, bW)
+        self._launch_fanned(sdf_cc, sdf_u, sdf_v, sdf_w, bU, bV, bW,
+                            key_u=key_u, key_v=key_v, key_w=key_w,
+                            emit_keys=emit_keys, dirty=dirty)
 
-    def capture_graph_fanned(
-        self,
-        sdf_cc: wp.array, sdf_u: wp.array,
-        sdf_v:  wp.array, sdf_w: wp.array,
-        bU: wp.array,     bV: wp.array, bW: wp.array,
-    ):
+    def capture_graph_fanned(self, sdf_cc, sdf_u, sdf_v, sdf_w, bU, bV, bW):
         """Capture the 2 fanned launches as one CUDA graph."""
         with wp.ScopedCapture(device=self.device) as capture:
             self._launch_fanned(sdf_cc, sdf_u, sdf_v, sdf_w, bU, bV, bW)

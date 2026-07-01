@@ -223,6 +223,53 @@ def test_warp_graph_eager_identical():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  float64 parity (dtype-generic 3-D Kernel A) — used by the f64 src_warp solver
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _run_warp_f64(sc: dict) -> dict:
+    """Run the dtype-generic WarpStreamingSDF at float64 on the f64 scene `sc`,
+    wrapping the scene's torch output buffers zero-copy.  Returns torch tensors."""
+    from lilytorch.warp_poc.warp_kernels import WarpStreamingSDF
+    Ngx, Ngy, Ngz = sc["Ngx"], sc["Ngy"], sc["Ngz"]
+    sc["sdf_cc"].fill_(1e4); sc["sdf_u"].fill_(1e4)
+    sc["sdf_v"].fill_(1e4);  sc["sdf_w"].fill_(1e4)
+    sc["body_u"].zero_();    sc["body_v"].zero_();  sc["body_w"].zero_()
+
+    wsdf = WarpStreamingSDF(Ngx, Ngy, Ngz, device=DEVICE, dtype=wp.float64)
+    wsdf.setup(sc["F_flat"], sc["F_offsets"], sc["body_shapes"], sc["body_meta"],
+               sc["gx"], sc["gy"], sc["gz"], float(sc["h"]), int(sc["max_vol"]))
+    wsdf.update_kinematics(sc["kin"], sc["aabb_lo"], sc["aabb_dim"])
+
+    def f(t):
+        return wp.from_torch(t.reshape(-1))
+
+    wsdf.run_fanned_eager(f(sc["sdf_cc"]), f(sc["sdf_u"]), f(sc["sdf_v"]),
+                          f(sc["sdf_w"]), f(sc["body_u"]), f(sc["body_v"]),
+                          f(sc["body_w"]))
+    wp.synchronize()
+    return {k: sc[k].clone() for k in
+            ("sdf_cc", "sdf_u", "sdf_v", "sdf_w", "body_u", "body_v", "body_w")}
+
+
+@SKIP_NO_NATIVE
+@SKIP_NO_CUDA
+@pytest.mark.parametrize("B", [1, 3])
+def test_warp_fanned_f64_matches_native(B):
+    """Dtype-generic Kernel A at float64 matches native f64 within tolerance."""
+    sc = make_synthetic_scene(64, 32, 32, B, device=DEVICE, dtype=torch.float64)
+    # Force the static body table + grid + kin to f64 so the native op runs the
+    # consistent-dtype f64 path (the live bridge normalises the same way inside
+    # WarpStreamingSDF.setup).
+    for k in ("F_flat", "body_meta", "kin", "gx", "gy", "gz"):
+        sc[k] = sc[k].double()
+    native_out = _run_and_collect_native(sc)
+    warp_out = _run_warp_f64(sc)
+    # Native interpolates the body SDF table in float32 internally even for f64
+    # output; this Warp kernel is true-f64 → agree to ~float32-epsilon.
+    _compare(native_out, warp_out, label=f"f64 fan-eager B={B}", sdf_rtol=1e-6)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  Quick smoke (no pytest) — run with:  python -m lilytorch.warp_poc.test_parity
 # ─────────────────────────────────────────────────────────────────────────────
 

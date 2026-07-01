@@ -65,17 +65,17 @@ def _fields(dev):
     return [t.to(dev) for t in flds]
 
 
-def _cbuf(dev):
+def _cbuf(dev, dtype=torch.float64):
     base = DT / RHO
-    return (torch.full((NGX - 1, NGY - 2, NGZ - 2), base, dtype=torch.float64, device=dev),
-            torch.full((NGX - 2, NGY - 1, NGZ - 2), base, dtype=torch.float64, device=dev),
-            torch.full((NGX - 2, NGY - 2, NGZ - 1), base, dtype=torch.float64, device=dev))
+    return (torch.full((NGX - 1, NGY - 2, NGZ - 2), base, dtype=dtype, device=dev),
+            torch.full((NGX - 2, NGY - 1, NGZ - 2), base, dtype=dtype, device=dev),
+            torch.full((NGX - 2, NGY - 2, NGZ - 1), base, dtype=dtype, device=dev))
 
 
 def _run_warp(F, dirty, mu0_proj, sigma=None):
     su, sv, sw, bu, bv, bw, up, vp, wp_ = F
     u0, v0, w0 = up.clone(), vp.clone(), wp_.clone()
-    ch, cv, cw = _cbuf(su.device)
+    ch, cv, cw = _cbuf(su.device, su.dtype)
     kw = {}
     if sigma is not None:
         ku, kv, kwk, ss = sigma
@@ -89,7 +89,7 @@ def _run_warp(F, dirty, mu0_proj, sigma=None):
 def _run_native(F, dirty, mu0_proj, sigma=None):
     su, sv, sw, bu, bv, bw, up, vp, wp_ = F
     u0, v0, w0 = up.clone(), vp.clone(), wp_.clone()
-    ch, cv, cw = _cbuf(su.device)
+    ch, cv, cw = _cbuf(su.device, su.dtype)
     if sigma is None:
         native_3d(up, vp, wp_, su, sv, sw, bu, bv, bw,
                   u0, v0, w0, ch, cv, cw, EPS, RHO, DT, H, *dirty, mu0_proj)
@@ -99,6 +99,10 @@ def _run_native(F, dirty, mu0_proj, sigma=None):
                         u0, v0, w0, ch, cv, cw, ku, kv, kwk, ss,
                         EPS, RHO, DT, H, *dirty, mu0_proj)
     return u0, v0, w0, ch, cv, cw
+
+
+def _fields_f32(dev):
+    return [t.float() for t in _fields(dev)]
 
 
 def _maxerr(a, b):
@@ -125,6 +129,28 @@ def test_gpu_parity_subblock(mu0_proj):
     dirty = (5, 4, 3, 20, 18, 16)   # interior AABB sub-block
     err = _maxerr(_run_native(F, dirty, mu0_proj), _run_warp(F, dirty, mu0_proj))
     assert max(err) == 0.0, f"subblock mu0_proj={mu0_proj}: {err}"
+
+
+@SKIP_NO_NATIVE
+@SKIP_NO_CUDA
+@pytest.mark.parametrize("mu0_proj", [1, 0])
+def test_gpu_parity_full_f32(mu0_proj):
+    """float32: Warp dtype-generic port vs native f32 (single-precision tol)."""
+    F = _fields_f32("cuda:0")
+    dirty = (0, 0, 0, NGX, NGY, NGZ)
+    err = _maxerr(_run_native(F, dirty, mu0_proj), _run_warp(F, dirty, mu0_proj))
+    # f32 FMA/ULP drift between the native CUDA codegen and Warp's.
+    assert max(err) < 1e-5, f"full f32 mu0_proj={mu0_proj}: {err}"
+
+
+@SKIP_NO_NATIVE
+@SKIP_NO_CUDA
+@pytest.mark.parametrize("mu0_proj", [1, 0])
+def test_gpu_parity_subblock_f32(mu0_proj):
+    F = _fields_f32("cuda:0")
+    dirty = (5, 4, 3, 20, 18, 16)
+    err = _maxerr(_run_native(F, dirty, mu0_proj), _run_warp(F, dirty, mu0_proj))
+    assert max(err) < 1e-5, f"subblock f32 mu0_proj={mu0_proj}: {err}"
 
 
 @SKIP_NO_NATIVE

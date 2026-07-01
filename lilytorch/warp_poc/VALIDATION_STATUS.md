@@ -39,14 +39,14 @@ Strategy split (AP6/AP7):
 Every native `lilytorch_kernels` op now has a Warp equivalent **except the Eulerian force
 readout**:
 - **Ported:** streaming_sdf_stag (A) 2D+3D · bdim_coeff(+σ) (B) 2D+3D · lagrangian_forces 2D+3D ·
-  rbgs_sweep & jacobi_sweep 2D+3D (thread-per-cell **and** fused-tiled) · mg_residual /
-  restrict_residual / restrict_face / prolongate_add 2D+3D · advect_flux_add · cvof_sweep ·
-  interp 2D+3D · apply_bcs 2D+3D.  Poisson DRIVERS (multigrid/mgcg/rmgcg) = composition shown via
-  WarpVCycle 2D+3D (kernel-level Warp + Python control flow).
-- **NOT ported (1 kernel family):** `streaming_sdf_forces_post_2d/3d` — the Eulerian n·δ viscous+
-  pressure force integration (+ deltaH ∂H second pass).  The *lagrangian* force readout IS ported;
-  this Eulerian one (block-reduction + atomicAdd scatter + the force discretization) is the sole
-  remaining op.  Tractable (same Warp-class scatter pattern as lagrangian_forces) — open.
+  **streaming_sdf_forces_post (Eulerian n·δ + deltaH) 2D+3D** · rbgs_sweep & jacobi_sweep 2D+3D
+  (thread-per-cell **and** fused-tiled) · mg_residual / restrict_residual / restrict_face /
+  prolongate_add 2D+3D · advect_flux_add · cvof_sweep · interp 2D+3D · apply_bcs 2D+3D.  Poisson
+  DRIVERS (multigrid/mgcg/rmgcg) = composition shown via WarpVCycle 2D+3D (kernel-level Warp +
+  Python control flow).
+- **NOT ported:** none.  `streaming_sdf_forces_post_{2,3}d` (the last Eulerian force op) is now
+  ported in `warp_forces.py` (block-reduction → per-cell `wp.atomic_add`; ndelta + deltaH; f32+f64;
+  parity in `test_forces.py`) — **every custom kernel family the step touches has a Warp port.**
 
 ### Fused TILED smoother — 2D **and 3D** (Jacobi + RBGS)
 `warp_poisson_tiled_2d.py` / `warp_poisson_tiled_3d.py` (+ `test_poisson_tiled_{2,3}d.py`):
@@ -402,19 +402,206 @@ has a `kernel/` package exposing one unified op API.  See `src_warp/README.md`.
       3-D follow-up).  Parity: f32 Kernel A bit-exact, f64 chain vs native to the
       documented Kernel-A SDF gate (~1e-7; native interpolates the SDF in f32).
       `WARP_BACKED` += `streaming_sdf_stag_2d_multi`, `bdim_coeff_2d`.
-- [ ] **Kernel A/B (3-D) in-solver wiring** — needs the 3-D marshalling bridge +
-      an **f32 Kernel B Warp variant** (3-D solvers run f32; mirror the 2-D
-      dtype-generic treatment) + override `_fluid_step_kernel_3d`.
-- [ ] **Poisson driver assembly** — smoother + transfer ops + `WarpVCycle`
-      composition all DONE (6, 7); remaining: wrap the mgcg/multigrid **outer
-      driver** as a `poisson_solve_*`-compatible `PoissonSolver` backend (the
-      native op is a monolithic C++ driver with no injectable smoother seam).
-- [ ] **Full coupled trajectory match** (2-D `_1guillasim` pinned + 3-D
-      jellyfish, <5% wall-clock) — needs Kernel A/B (+Poisson) wired.  Forces
-      routed via `force_method=lagrangian` (native; Eulerian readout unported).
-- [ ] **CPU end-to-end run** — per-op CPU single-source proven
-      (`test_cvof_warp_cpu_matches_python_reference`); the full-step CPU run
-      follows once the step path is fully Warp.
+- [x] **Kernel A/B (3-D) in-solver wiring — DONE** (Item 1, 3-D).  `warp_kernels.py`
+      (Kernel A 3-D) and `warp_bdim.py` (Kernel B 3-D) are both **dtype-generic**
+      (`wp.overload` f32+f64); Kernel A also gains the velocity-blend (num/den
+      softmin) path to match the native op.  Wired via
+      `src_warp/kernel._KernelA3DBridge` (z axis: `body_shapes`/`aabb_*`=`B*3`,
+      `kin`=`B*21`, adds `gz`/`sdf_w`/`bW`) + an overridden
+      `_fluid_step_kernel_3d` in `src_warp/solver.py` (σ path → native, gated).
+      Parity: f32 Kernel B (`test_bdim.py`), f64 Kernel A (`test_parity.py`), and
+      the f32+f64 A→B chain vs native (`test_src_trees.py::
+      test_kernelAB_3d_bridge_matches_native`).
+      `WARP_BACKED` += `streaming_sdf_stag_3d_multi`, `bdim_coeff_3d`.
+- [x] **Poisson driver assembly — DONE** (Item 2).  Rather than wrap the
+      monolithic C++ `poisson_solve_*`, the `src_warp.poisson_mult.PoissonSolver`
+      subclass forces the three `solve_*` entry points onto the native **Python
+      outer driver** (`use_kernels=False`) and overrides `_dispatch_vcycle` to run
+      the fine-level smoother + residual on the single-source Warp kernels
+      (`warp_poisson{,_2d}`, made dtype-generic f32+f64, CPU+GPU; Neumann folded
+      into the stencil; the native `mg_residual` sign convention is `+f+A·p`, the
+      negative of the POC `residual` kernel — handled in the wrapper).
+      Restriction / prolongation / coarse recursion + the CG/Aitken loops are
+      reused pure-torch (no `lilytorch_kernels` op).  Residual-level parity vs
+      native (multigrid + MGCG, rbgs + jacobi, 2-D+3-D, f32+f64), a
+      monkeypatch-to-raise independence test, and a CPU solve — all in
+      `test_poisson_driver.py`.  `WARP_BACKED` += `rbgs_sweep_{2,3}d`,
+      `jacobi_sweep_{2,3}d`, `mg_residual_{2,3}d`.
+      **Perf (vs the native CUDA *kernel* path `use_kernels=False`, NOT the
+      monolithic C++ `poisson_solve_*`):** Item-2 Python-loop Warp ≈ native CUDA
+      kernel path (1.0–1.1×; both Python-driver-bound, ~57–62 ms / 6 V-cycles at
+      96–128³).  The all-Warp CUDA-graph multigrid `warp_mg_var.WarpMG3D`
+      (`cuda_graph=True`, 3-D) is **3–9× faster than the native CUDA kernel path**
+      (96³ f32 7.1 ms vs 57 ms) with **0 MiB per-step alloc** — Warp-only cycle ⇒
+      graph-capturable end-to-end (the native per-kernel path's torch coarse
+      recursion is not).  `WarpMG2D` + **sync-free graphed MGCG — DONE** (C1):
+      `_dispatch_vcycle` replays a CUDA-graphed `WarpMG{2,3}D` preconditioner in
+      one host launch → **4.3–14× over the Item-2 Python-driver MGCG** (3-D f32
+      64³ 24.4→1.7 ms / 96³ 27.1→2.8 ms / 128³ 27.7→6.4 ms, same residual);
+      opt-in periodic residual check `poisson_cg_check_every`.
+- [x] **Lagrangian forces in-solver wiring — DONE** (Item 3a).
+      `warp_lagrangian.py` made **dtype-generic** (`wp.overload` f32+f64): every
+      per-element quantity is computed in the field dtype (matching the native
+      `AT_DISPATCH` `scalar_t`), only the final products cast to `double` for the
+      `wp.atomic_add` into the always-float64 `out` accumulator (native
+      `double* out`).  The Python wrappers gained an `out=` arg and now mirror the
+      native `ops.lagrangian_forces_{2,3}d` signature exactly, so the
+      `src_warp.kernel` shims are drop-ins.  Routing:
+      `src_warp.solver.FluidSolver` overrides `forces_lagrangian_{2,3}d` to swap
+      the `lilytorch.src.forces` module-global kernel for the Warp shim for the
+      duration of the inherited readout, then restore it (localized injection, no
+      `lilytorch.src` edits — same pattern as the `__init__` sub-solver swap).
+      Parity in `test_lagrangian.py` (f64 bit-exact + f32 single-precision, CPU+GPU,
+      linear/quadratic, scalar/field nu_rho); routing + restore in
+      `test_src_trees.py::test_lagrangian_force_override_routes_to_warp`.
+      `WARP_BACKED` += `lagrangian_forces_2d`, `lagrangian_forces_3d`.
+- [x] **Eulerian forces in-solver wiring — DONE** (Item 3b).  `warp_forces.py`
+      newly written: ports `streaming_sdf_forces_post_{2,3}d` — the n·δ
+      viscous+pressure band integral (reusing the Kernel-A `sdf_sample_off_*`
+      samplers; triquadratic-with-offset added for 3-D) plus the deltaH ∂H
+      pressure second pass (softmin partition of unity).  The native CUB
+      `BlockReduce` is replaced by one `wp.atomic_add` per cell into the float64
+      accumulator — *identical sum*, only the reduction order (hence ~1e-9 noise)
+      differs.  Dtype-generic (per-element math in the field dtype, float64
+      atomic; native `double* out`).  Wired behind the inherited `forces_method2`
+      / `forces_method2_3d` by the same module-global swap as the Lagrangian path
+      (no `lilytorch.src` edits).  Parity vs native in `test_forces.py` (2-D+3-D ×
+      ndelta+deltaH × delta_order 1/2 × f32+f64 × scalar/field nu_rho, union
+      `sdf_cc` populated by the native streaming kernel); routing in
+      `test_src_trees.py::test_eulerian_force_override_routes_to_warp`.
+      `WARP_BACKED` += `streaming_sdf_forces_post_2d`, `streaming_sdf_forces_post_3d`.
+- [x] **BCs + interp in-solver wiring — DONE** (Item 4).  `warp_misc_{2,3}d`
+      `apply_bcs_{2,3}d` / `interp_{2,3}d` made **dtype-generic** (f32+f64); the
+      3-D `apply_bcs` wrapper now takes both face dims `(max_dim0, max_dim1)` so
+      non-cubic grids launch correctly (verified by
+      `test_misc_3d::test_apply_bcs_3d_noncubic_dual_facedims`).  Wired by a real
+      `set_BCs` override in `src_warp.advection.AdvDiffSolver` (the native
+      `set_BCs` calls `torch.ops…` directly, so the module-global swap does not
+      apply) reproducing the native CUDA-fused gate and dispatching the cached
+      descriptors through `kernel.apply_bcs_*`; the CPU / non-contiguous / mixed
+      paths fall through to the inherited pure-torch eager loop.  `interp_*`
+      routed through the facade.  Routing in
+      `test_src_trees::test_set_bcs_override_routes_to_warp` (2-D+3-D × f32+f64);
+      per-op parity (incl. f32) in `test_misc_{2,3}d`.  `WARP_BACKED` +=
+      `apply_bcs_2d/3d`, `interp_2d/3d`.
+- [x] **σ path in-solver wiring — DONE** (Item 5).  The Warp streaming Kernel A
+      now emits the winning body-id into `key_{u,v[,w]}` on an `emit_keys` path
+      (Pass-C `atomic_min` into int64 → lowest-id-wins, mirroring the native
+      packed `atomicMin`; sentinel = B on untouched cells; 2-D keys are
+      full-grid / 3-D keys dirty-local, matching `bdim_coeff_sigma_*`'s read).
+      The σ Kernel B (already dtype-generic, parity-tested) reads `key & 0xffffffff`.
+      Both `_fluid_step_kernel_{2,3}d` overrides drop the native σ gate and route
+      the σ branch through the Warp Kernel B with the keys + `sigma_shifts`.
+      Parity vs native (body-ids + fields) in
+      `test_src_trees::test_kernelAB_{2,3}d_sigma_chain_matches_native` (f32).
+      `WARP_BACKED` += `bdim_coeff_sigma_2d/3d`.
+- [x] **Step-level independence — DONE** (Item 6 #1/#2).  Static:
+      `test_warp_backed_covers_step_custom_ops` asserts `WARP_BACKED` ⊇ every
+      custom op the kernel step dispatches.  Dynamic:
+      `test_no_native_kernel_calls_{2,3}d` (f32+f64) build the scenes/solvers,
+      monkeypatch `torch.ops.lilytorch_kernels` to raise, then run the step's
+      custom ops (Kernel A/B, σ chain, `advect_flux_add`, fused `set_BCs`,
+      `cvof_sweep`) — all complete on Warp only.
+- [x] **CPU end-to-end run — DONE** (Item 6 #5).  `test_kernelAB_2d_chain_cpu_eq_gpu`
+      (plain + σ) runs the full Kernel A → Kernel B (+σ key emission) chain on the
+      CPU Warp single-source kernels and matches the GPU Warp result to 1e-12 —
+      the one kernel source serves CPU and GPU.
+- [x] **Full coupled trajectory match — DONE for scene (a)** (C2, 2026-06-30).
+      Real headless FARMS/MuJoCo coupled run, native (`src/`) vs Warp (`src_warp/`)
+      backend, 2-D `_1guillasim` pinned (f64), n=400.  Runner +
+      backend-swap/save/compare harness in `lilytorch/validation/warp_e2e/`
+      (`run_c2.py` + `c2_hook.py`; the backend is swapped by monkeypatching
+      `BDIMhandler.FluidSolver` through the sanctioned `_extra_run_patch` seam —
+      no `src/`/`BDIMhandler` edits; swap asserted on the first step).
+      **Result:** Warp ≡ native to **residual level** (field rel-L2 p ~1e-8,
+      |u| ~1e-9; qpos ~1e-11, xpos ~1e-12) for the first **~325 steps**, then a
+      **deterministic, Warp-specific discrete divergence onsets at step ≈330–335**
+      (rel-L2 p → 0.11), body/near-wake-localized (71 % of diff-energy at x<0);
+      both runs stay stable, final qpos max|Δ| = **3.4e-5** (within the f64
+      trajectory band 1e-6..1e-4).  A perturbation sweep (`--perturb[/-recurring]`,
+      1e-9…1e-3 one-shot AND per-step) proves the coupled system is **linearly
+      stable** over this horizon → the onset is **not** chaos but the documented
+      **Kernel-A f32-SDF interp difference** (native truncates the SDF to f32 even
+      in an f64 solver; the only non-bit-exact Warp op in f64) crossing a
+      discretization threshold at a specific body pose — a legitimate backend
+      *difference* (Warp is the more accurate), not a bug.  **Perf:** end-to-end
+      Warp **1.45× (eager) / 1.68× (Kernel-A graph)** faster than native
+      (3.73 / 3.22 vs 5.42 ms/step), past the "~5 %, ideally faster" target.
+      See `src_warp/HANDOFF_perf_remaining.md` §C2 for the full note.
+      **Scene (b) 3-D jellyfish (f32, two-phase, python path) — DONE** (C2(b),
+      `validation/warp_e2e/run_c2_jelly.py`).  Standalone driver; the Warp backend
+      is injected by rebinding the `AdvDiffSolver`/`PoissonSolver`/`TwoPhase`
+      module globals (+ `src.forces` kernels) before the native `TwoPhaseSolver`
+      is built (no Warp two-phase subclass needed; no `src/` edits).  Exercises
+      Warp advection / variable-density Poisson / `cvof_sweep` / `apply_bcs` /
+      forces (NOT Kernel A/B — deforming SDF → python path).  **Eager
+      Python-driver MGCG: clean f32 parity over 120 steps** — com 2.5e-9,
+      linvel 3.4e-6, alpha_sum 1.7e-7, fields at f32 round-off (|u| rel-L2 ~1e-3),
+      bounded; trends match.  Perf (128³): warp-eager 0.94× native; the C1
+      **graphed** MGCG is 1.18× but **under-converges the stiff 1000:1 two-phase
+      Poisson** at default cycles (~14 % field error) → eager is the parity path,
+      graphed needs more precond cycles for this stiffness.
+- [x] **Perf — CUDA-graph capture of the in-step ops — DONE for apply_bcs +
+      Kernel A.**  The eager Warp host floor (per-call ``wp.from_torch`` wrapping +
+      ~36 µs/launch ``wp.launch`` submission) is removed by capturing the launch
+      sequence into a CUDA graph and replaying it (~3 µs), keyed on the
+      input/output pointer signature with a **churn guard** (capture only on the
+      2nd sighting of a stable signature → transient buffers stay eager).
+      - **`apply_bcs` (default ON, memory-free):** ghost writes are in-place into
+        the persistent velocity fields, so no extra buffers.
+        ``ApplyBcs{2,3}DGraphRunner`` wired behind the ``set_BCs`` override.
+        **128³ f32 `set_BCs`: 131 µs eager → 11.3 µs graph = native parity (1.00×).**
+      - **Kernel A (opt-in `solver.kernel_cuda_graph`, default OFF):** the bridge
+        captures the fanned streaming; ``update_kinematics`` stays outside the
+        graph (body pose refreshes the persistent ``w._kin`` the replay reads), so
+        moving bodies are correct (parity test ``test_kernelA_{2,3}d_graph_replay_
+        matches_native`` perturbs kin between capture and replay).  Needs
+        persistent streaming buffers (``_kernel_bufs_{2,3}d``) → a few-% peak-memory
+        cost (they are not freed before the projection), hence opt-in.
+        The SDF→FAR / body→0 resets are **folded into the captured graph** (Warp
+        memsets), so the override pays no per-step torch fills.
+        **Kernel A 3-D f32 (graph): 48³ 27 µs (native 20), 64³ 29 µs (native 25,
+        1.15×), 128³ 116 µs which BEATS native CUDA (137 µs, 0.85×).**  Parity:
+        ``test_kernelA_{2,3}d_graph_replay_matches_native`` poisons the buffers
+        before the replay to prove the in-graph reset.
+      - **Forces — `wp.synchronize()` dropped + Lagrangian `elem_body` cached.**
+        The per-call full-device sync (a pure latency floor) is removed from all
+        four force wrappers (null-stream ordering covers the caller's torch read);
+        the Lagrangian `elem_body` map is cached (it was rebuilt via a
+        D2H-syncing `repeat_interleave` each call).  **Eulerian
+        `streaming_sdf_forces_post_3d` now beats native** (96³ 0.96×, 128³ 0.85×);
+        Lagrangian floor 231 → 160 µs (competitive at real triangle counts).
+      - Memory: at parity for ``apply_bcs`` and forces; Kernel-A graph trades the
+        streaming buffers' residency for the speed (opt-in).
+      - **Lagrangian view-wrap floor cut** (``_fast_flat``: direct ``wp.array(ptr=)``
+        on the contiguous/right-dtype path, ~2× cheaper than ``wp.from_torch``).
+        The Lagrangian buffers are freshly allocated with body-following shapes
+        each step, so graph capture is structurally blocked — but native scales
+        with triangle count, so Warp **matches at realistic meshes** (10560 tri
+        1.11×); small meshes stay floor-bound by the eager Python launch.
+      - **Poisson ``WarpMG2D`` — DONE** (mirrors ``WarpMG3D``): an all-Warp,
+        variable-coefficient, anisotropic, CUDA-graph-captured 2-D multigrid (f64
+        + rbgs, the 2-D eel target), wired into ``solve_multigrid`` behind
+        ``cuda_graph=True``.  Needed a ghost-clamping 2-D residual
+        (``mg_residual_2d_clamped``) — the graphed V-cycle never updates the ghost
+        layer, so the existing unclamped ``mg_residual_2d`` gave an operator/
+        residual mismatch at the boundary → divergence.  **At nvc=6 it matches the
+        hand-fused native C++ driver (0.97×) with deeper convergence, and is 11×
+        faster than the src_warp Python multigrid driver** (its independent-tree
+        alternative).  Tests: ``test_warp_poisson_graphed_multigrid_2d`` +
+        ``test_warp_poisson_graphed_2d_independent``.
+      **Graphed MGCG — DONE** (C1).  ``_dispatch_vcycle`` routes the CG
+      preconditioner through a CUDA-graphed ``WarpMG{2,3}D`` (one captured V-cycle
+      per ``precond_vcycles`` step) when ``cuda_graph`` is on → **4.3–14× over the
+      Item-2 Python-driver MGCG** (3-D f32 64³ 24.4→1.7 ms / 96³ 27.1→2.8 ms /
+      128³ 27.7→6.4 ms, same residual).  The ``-r`` RHS is passed **un-rescaled**
+      (already h²-scaled in the SPD units — the smoother's units; an extra h²
+      multiply would mis-scale the preconditioner).  Periodic (not per-iter)
+      convergence check is the opt-in ``cg_check_every`` / config
+      ``poisson_cg_check_every`` (default 1 = native; only pays off at high CG
+      iteration counts — once the V-cycle is graphed the residual ``.item()``
+      sync is no longer the bottleneck).  Tests:
+      ``test_warp_poisson_graphed_mgcg[*]`` / ``…_periodic`` / ``…_independent``.
 
 ---
 

@@ -111,3 +111,33 @@ def test_apply_bcs_2d_cpu():
     wp.synchronize()
     du = (un - uw).abs().max().item(); dv = (vn - vw).abs().max().item()
     assert du == 0.0 and dv == 0.0, f"bcs cpu maxdiff u={du:.3e} v={dv:.3e}"
+
+
+@SKIP_NO_NATIVE
+@SKIP_NO_CUDA
+def test_apply_bcs_2d_gpu_f32():
+    """f32 dtype-generic parity (bit-exact: BC writes are copies / value sets)."""
+    p = _bcs_problem("cuda:0")
+    u, v, shapes, neu, dird, dirv, refd, refv, ml = p
+    u = u.float(); v = v.float(); dirv = dirv.float(); refv = refv.float()
+    un, vn = u.clone().contiguous(), v.clone().contiguous()
+    uw, vw = u.clone().contiguous(), v.clone().contiguous()
+    native_apply_bcs_2d(un, vn, shapes, neu, dird, dirv, refd, refv, ml)
+    apply_bcs_2d_warp(uw, vw, shapes, neu, dird, dirv, refd, refv, ml)
+    wp.synchronize()
+    du = (un - uw).abs().max().item(); dv = (vn - vw).abs().max().item()
+    assert du == 0.0 and dv == 0.0, f"bcs f32 maxdiff u={du:.3e} v={dv:.3e}"
+
+
+@SKIP_NO_NATIVE
+@pytest.mark.parametrize("method", ["linear", "quadratic"])
+def test_interp_2d_cpu_f64(method):
+    """f64 dtype-generic interp parity (CPU bit-exact: no FMA contraction)."""
+    F, xq, yq, bx0, by0, idx, idy, Mx, My = _interp_problem("cpu")
+    F = F.double(); xq = xq.double(); yq = yq.double()
+    gn = native_interp_2d(F, xq, yq, bx0, by0, idx, idy, Mx, My, method)
+    gw = interp_2d_warp(F, xq, yq, bx0, by0, idx, idy, Mx, My, method)
+    wp.synchronize()
+    assert gw.dtype == torch.float64
+    d = (gn - gw).abs().max().item()
+    assert d == 0.0, f"interp f64 cpu {method} maxdiff {d:.3e}"

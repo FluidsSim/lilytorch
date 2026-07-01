@@ -1,31 +1,33 @@
-"""Warp single-source Poisson smoother + residual (AP6 counter-demo).
-
-Point of this file
-──────────────────
-Refutes the assumption that the fusible *stencil* kernels (RBGS/Jacobi smoother,
-residual) must go through torch.compile rather than Warp.  They are perfectly
-expressible as `@wp.kernel` — the only open question was performance vs the
-hand-tiled native CUDA, which we measure in `bench_poisson.py`.
+"""Warp single-source 3-D Poisson smoother (RBGS + weighted Jacobi) + residual.
 
 Faithful port of the native variable-coefficient 7-point red-black Gauss-Seidel
-(`multigrid_smoothers.cu: rbgs_3d_halfsweep_kernel`):
+(`multigrid_smoothers.cu: rbgs_3d_halfsweep_kernel`) and the weighted Jacobi
+sweep + multigrid residual:
 
     J        = cp0+cm0 + cp1+cm1 + cp2+cm2                 (diagonal)
     sum      = cp0·p[i+1] + cm0·p[i-1] + cp1·p[j+1] + cm1·p[j-1]
                                        + cp2·p[k+1] + cm2·p[k-1]
-    p[i,j,k] = (-f + sum) / J            (only cells with (i+j+k)&1 == color)
+    p[i,j,k] = (-f + sum) / J            (RBGS: only cells with (i+j+k)&1==color)
 
 `p` is ghost-padded (Nx+2, Ny+2, Nz+2); `f` and the six face coefficients are
-interior (Nx, Ny, Nz).  Same memory layout as the native op, so the same torch
-tensors feed both via zero-copy `wp.from_torch`.
+interior (Nx, Ny, Nz).  Homogeneous Neumann is folded into the half-sweep /
+residual by index clamping (ghost = nearest interior = self at the boundary), so
+NO separate BC kernel launch is needed — identical math to native's explicit
+ghost refresh.  The SAME kernels run on Warp `device="cpu"` (→ C++/OpenMP) and
+`"cuda:0"`.
 
-The SAME kernels run on Warp device "cpu" (→ C++/OpenMP) and "cuda:0".
+**Precision (single source, both dtypes).**  Value arrays / float scalars are
+Warp generics (`Any`); float literals are materialised in the bound element type
+via `type(x)(literal)` and `wp.overload` pre-registers float32 *and* float64.
+float32 codegen is unchanged from the original concrete kernels; float64 is what
+an f64 solver uses.
 """
 from __future__ import annotations
 
+from typing import Any, Optional
+
 import warp as wp
 import torch
-from typing import Optional
 
 wp.init()
 
@@ -34,22 +36,36 @@ wp.init()
 #  Kernels (3-D arrays; launched over interior (Nx, Ny, Nz))
 # ─────────────────────────────────────────────────────────────────────────────
 
-#  FLAT 1-D arrays with a precomputed base index + ±stride offsets — mirrors the
-#  native CUDA addressing (`p_base ± si/sj/1`).  3-D wp.array indexing recomputes
-#  strides on every access and benchmarked ~1.5× slower; this closes that gap.
+@wp.func
+def _stencil_sum_3d(
+    p: wp.array(dtype=Any), b: int, si: int, sj: int,
+    i: int, j: int, k: int, Nx: int, Ny: int, Nz: int,
+    cp0: Any, cm0: Any, cp1: Any, cm1: Any, cp2: Any, cm2: Any,
+):
+    pc = p[b]
+    pip = pc; pim = pc; pjp = pc; pjm = pc; pkp = pc; pkm = pc
+    if i < Nx - 1: pip = p[b + si]
+    if i > 0:      pim = p[b - si]
+    if j < Ny - 1: pjp = p[b + sj]
+    if j > 0:      pjm = p[b - sj]
+    if k < Nz - 1: pkp = p[b + 1]
+    if k > 0:      pkm = p[b - 1]
+    return (cp0 * pip + cm0 * pim + cp1 * pjp + cm1 * pjm
+            + cp2 * pkp + cm2 * pkm)
+
 
 @wp.kernel
 def rbgs_halfsweep_3d(
-    p:   wp.array(dtype=wp.float32),   # flat padded (Nx+2)(Ny+2)(Nz+2)
-    f:   wp.array(dtype=wp.float32),   # flat interior Nx·Ny·Nz
-    cp0: wp.array(dtype=wp.float32),
-    cm0: wp.array(dtype=wp.float32),
-    cp1: wp.array(dtype=wp.float32),
-    cm1: wp.array(dtype=wp.float32),
-    cp2: wp.array(dtype=wp.float32),
-    cm2: wp.array(dtype=wp.float32),
+    p:   wp.array(dtype=Any),   # flat padded (Nx+2)(Ny+2)(Nz+2)
+    f:   wp.array(dtype=Any),   # flat interior Nx·Ny·Nz
+    cp0: wp.array(dtype=Any),
+    cm0: wp.array(dtype=Any),
+    cp1: wp.array(dtype=Any),
+    cm1: wp.array(dtype=Any),
+    cp2: wp.array(dtype=Any),
+    cm2: wp.array(dtype=Any),
     Nx: int, Ny: int, Nz: int,
-    jcap_tol: wp.float32,
+    jcap_tol: Any,
     color:    int,
 ):
     i, j, k = wp.tid()
@@ -62,27 +78,44 @@ def rbgs_halfsweep_3d(
     si = (Ny + 2) * (Nz + 2)
     sj = Nz + 2
     b = (i + 1) * si + (j + 1) * sj + (k + 1)
-    # Homogeneous Neumann folded in by index clamping (ghost = nearest interior
-    # = self at the boundary).  Identical to native's explicit ghost refresh,
-    # but needs NO separate BC kernel launch.
-    pc = p[b]
-    pip = pc; pim = pc; pjp = pc; pjm = pc; pkp = pc; pkm = pc
-    if i < Nx - 1: pip = p[b + si]
-    if i > 0:      pim = p[b - si]
-    if j < Ny - 1: pjp = p[b + sj]
-    if j > 0:      pjm = p[b - sj]
-    if k < Nz - 1: pkp = p[b + 1]
-    if k > 0:      pkm = p[b - 1]
-    s = (cp0[c] * pip + cm0[c] * pim
-         + cp1[c] * pjp + cm1[c] * pjm
-         + cp2[c] * pkp + cm2[c] * pkm)
+    s = _stencil_sum_3d(p, b, si, sj, i, j, k, Nx, Ny, Nz,
+                        cp0[c], cm0[c], cp1[c], cm1[c], cp2[c], cm2[c])
     p[b] = (-f[c] + s) / J
 
 
 @wp.kernel
-def neumann_fused_3d(p: wp.array(dtype=wp.float32), Nx: int, Ny: int, Nz: int):
-    """All six ghost faces in one launch (dim = (max(Ny,Nz), max(Nx,Ny,Nz), 3)),
-    mirroring the native `neumann_bc_3d_fused`."""
+def jacobi_sweep_3d(
+    p:   wp.array(dtype=Any),   # flat padded (read)
+    p2:  wp.array(dtype=Any),   # flat padded (write)
+    f:   wp.array(dtype=Any),
+    cp0: wp.array(dtype=Any),
+    cm0: wp.array(dtype=Any),
+    cp1: wp.array(dtype=Any),
+    cm1: wp.array(dtype=Any),
+    cp2: wp.array(dtype=Any),
+    cm2: wp.array(dtype=Any),
+    Nx: int, Ny: int, Nz: int,
+    jcap_tol: Any,
+    w: Any,
+):
+    i, j, k = wp.tid()
+    c = i * (Ny * Nz) + j * Nz + k
+    J = cp0[c] + cm0[c] + cp1[c] + cm1[c] + cp2[c] + cm2[c]
+    Jinv = type(jcap_tol)(0.0)
+    if J >= jcap_tol or J <= -jcap_tol:
+        Jinv = type(jcap_tol)(1.0) / J
+    si = (Ny + 2) * (Nz + 2)
+    sj = Nz + 2
+    b = (i + 1) * si + (j + 1) * sj + (k + 1)
+    s = _stencil_sum_3d(p, b, si, sj, i, j, k, Nx, Ny, Nz,
+                        cp0[c], cm0[c], cp1[c], cm1[c], cp2[c], cm2[c])
+    p_new = (-f[c] + s) * Jinv
+    p2[b] = w * p_new + (type(w)(1.0) - w) * p[b]
+
+
+@wp.kernel
+def neumann_fused_3d(p: wp.array(dtype=Any), Nx: int, Ny: int, Nz: int):
+    """All six ghost faces in one launch, mirroring `neumann_bc_3d_fused`."""
     a, bb, face = wp.tid()
     si = (Ny + 2) * (Nz + 2)
     sj = Nz + 2
@@ -108,16 +141,16 @@ def neumann_fused_3d(p: wp.array(dtype=wp.float32), Nx: int, Ny: int, Nz: int):
 
 @wp.kernel
 def residual_3d(
-    p:   wp.array(dtype=wp.float32),
-    f:   wp.array(dtype=wp.float32),
-    cp0: wp.array(dtype=wp.float32),
-    cm0: wp.array(dtype=wp.float32),
-    cp1: wp.array(dtype=wp.float32),
-    cm1: wp.array(dtype=wp.float32),
-    cp2: wp.array(dtype=wp.float32),
-    cm2: wp.array(dtype=wp.float32),
+    p:   wp.array(dtype=Any),
+    f:   wp.array(dtype=Any),
+    cp0: wp.array(dtype=Any),
+    cm0: wp.array(dtype=Any),
+    cp1: wp.array(dtype=Any),
+    cm1: wp.array(dtype=Any),
+    cp2: wp.array(dtype=Any),
+    cm2: wp.array(dtype=Any),
     Nx: int, Ny: int, Nz: int,
-    r:   wp.array(dtype=wp.float32),   # flat interior
+    r:   wp.array(dtype=Any),   # flat interior
 ):
     """r = -f - A·p,  with  A·p = J·p_c - sum  (so r→0 at convergence)."""
     i, j, k = wp.tid()
@@ -126,59 +159,124 @@ def residual_3d(
     si = (Ny + 2) * (Nz + 2)
     sj = Nz + 2
     b = (i + 1) * si + (j + 1) * sj + (k + 1)
-    pc = p[b]
-    pip = pc; pim = pc; pjp = pc; pjm = pc; pkp = pc; pkm = pc
-    if i < Nx - 1: pip = p[b + si]
-    if i > 0:      pim = p[b - si]
-    if j < Ny - 1: pjp = p[b + sj]
-    if j > 0:      pjm = p[b - sj]
-    if k < Nz - 1: pkp = p[b + 1]
-    if k > 0:      pkm = p[b - 1]
-    s = (cp0[c] * pip + cm0[c] * pim
-         + cp1[c] * pjp + cm1[c] * pjm
-         + cp2[c] * pkp + cm2[c] * pkm)
-    r[c] = -f[c] - (J * pc - s)
+    s = _stencil_sum_3d(p, b, si, sj, i, j, k, Nx, Ny, Nz,
+                        cp0[c], cm0[c], cp1[c], cm1[c], cp2[c], cm2[c])
+    r[c] = -f[c] - (J * p[b] - s)
+
+
+# ── Register float32 + float64 specialisations up front ─────────────────────
+for _dt in (wp.float32, wp.float64):
+    _A = wp.array(dtype=_dt)
+    _C6 = {"p": _A, "f": _A, "cp0": _A, "cm0": _A, "cp1": _A, "cm1": _A,
+           "cp2": _A, "cm2": _A}
+    wp.overload(rbgs_halfsweep_3d, {**_C6, "jcap_tol": _dt})
+    wp.overload(jacobi_sweep_3d, {**_C6, "p2": _A, "jcap_tol": _dt, "w": _dt})
+    wp.overload(residual_3d, {**_C6, "r": _A})
+    wp.overload(neumann_fused_3d, {"p": _A})
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Python driver (control-flow stays in Python; kernels do the work)
+#  Native-signature host wrappers (drop-in for the in-solver V-cycle)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _wdev(t):
+    return "cuda:0" if t.device.type == "cuda" else "cpu"
+
+
+def _wpf(t):
+    return wp.float64 if t.dtype == torch.float64 else wp.float32
+
+
+def rbgs_sweep_3d_warp(p, f, cp0, cm0, cp1, cm1, cp2, cm2, jcap_tol, nsmoothing):
+    """Warp port of native ``rbgs_sweep_3d``: ``nsmoothing`` red-black sweeps,
+    Neumann folded into the stencil.  ``p`` (padded, contiguous) mutated in place.
+    Generic in dtype (f32/f64)."""
+    Nx, Ny, Nz = f.shape
+    wdev, wpf = _wdev(p), _wpf(p)
+    fp = wp.from_torch(p.reshape(-1))
+    ff = wp.from_torch(f.contiguous().reshape(-1))
+    c = [wp.from_torch(x.contiguous().reshape(-1))
+         for x in (cp0, cm0, cp1, cm1, cp2, cm2)]
+    jt = wpf(jcap_tol)
+    for _ in range(int(nsmoothing)):
+        for color in (0, 1):
+            wp.launch(rbgs_halfsweep_3d, dim=(int(Nx), int(Ny), int(Nz)),
+                      inputs=[fp, ff, *c, int(Nx), int(Ny), int(Nz), jt, int(color)],
+                      device=wdev)
+
+
+def jacobi_sweep_3d_warp(p, f, cp0, cm0, cp1, cm1, cp2, cm2, jcap_tol, w,
+                         nsmoothing):
+    """Warp port of native ``jacobi_sweep_3d``: ``nsmoothing`` weighted-Jacobi
+    sweeps (ping-pong).  ``p`` (padded, contiguous) mutated in place."""
+    Nx, Ny, Nz = f.shape
+    wdev, wpf = _wdev(p), _wpf(p)
+    a, b = p, torch.empty_like(p)
+    ff = wp.from_torch(f.contiguous().reshape(-1))
+    c = [wp.from_torch(x.contiguous().reshape(-1))
+         for x in (cp0, cm0, cp1, cm1, cp2, cm2)]
+    jt, ww = wpf(jcap_tol), wpf(w)
+    for _ in range(int(nsmoothing)):
+        wp.launch(jacobi_sweep_3d, dim=(int(Nx), int(Ny), int(Nz)),
+                  inputs=[wp.from_torch(a.reshape(-1)), wp.from_torch(b.reshape(-1)),
+                          ff, *c, int(Nx), int(Ny), int(Nz), jt, ww], device=wdev)
+        a, b = b, a
+    if a.data_ptr() != p.data_ptr():
+        p.copy_(a)
+    return p
+
+
+def mg_residual_3d_warp(p, f, cp0, cm0, cp1, cm1, cp2, cm2, jcap_tol):
+    """Warp port of native ``mg_residual_3d``: returns the interior residual in
+    the **native sign convention** ``r = f + A·p`` (= −1 × the ``residual_3d``
+    kernel) as a fresh (Nx, Ny, Nz) torch tensor — the sign the multigrid coarse
+    V-cycle expects for the defect correction."""
+    Nx, Ny, Nz = f.shape
+    wdev, wpf = _wdev(p), _wpf(p)
+    r = torch.empty((Nx, Ny, Nz), dtype=p.dtype, device=p.device)
+    fp = wp.from_torch(p.reshape(-1))
+    ff = wp.from_torch(f.contiguous().reshape(-1))
+    c = [wp.from_torch(x.contiguous().reshape(-1))
+         for x in (cp0, cm0, cp1, cm1, cp2, cm2)]
+    wp.launch(residual_3d, dim=(int(Nx), int(Ny), int(Nz)),
+              inputs=[fp, ff, *c, int(Nx), int(Ny), int(Nz),
+                      wp.from_torch(r.reshape(-1))],
+              device=wdev)
+    return r.neg_()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Persistent-array class (kept for the POC benches/tests; f32 default)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class WarpRBGS:
-    """RBGS smoother + residual on persistent Warp arrays, graph-capturable.
-
-    Coefficients/ f are static for a given problem; p is updated in place.
-    """
+    """RBGS smoother + residual on persistent Warp arrays, graph-capturable."""
 
     def __init__(self, Nx: int, Ny: int, Nz: int, device: str = "cuda:0",
-                 jcap_tol: float = 1e-30):
+                 jcap_tol: float = 1e-30, dtype=wp.float32):
         self.Nx, self.Ny, self.Nz = Nx, Ny, Nz
         self.device = device
         self.jcap_tol = jcap_tol
+        self._wpf = dtype
         self._graph: Optional[wp.Graph] = None
 
     def setup(self, p_t, f_t, coeffs_t):
-        """p_t: padded (Nx+2,Ny+2,Nz+2); f_t,coeffs interior (Nx,Ny,Nz) torch.
-        Flattened to 1-D Warp arrays (zero-copy views) for native-style addressing."""
+        """p_t: padded (Nx+2,Ny+2,Nz+2); f_t,coeffs interior (Nx,Ny,Nz) torch."""
+        self._wpf = wp.float64 if p_t.dtype == torch.float64 else wp.float32
         self.p = wp.from_torch(p_t.contiguous().reshape(-1))
         self.f = wp.from_torch(f_t.contiguous().reshape(-1))
         cp0, cm0, cp1, cm1, cp2, cm2 = coeffs_t
         self.cp0 = wp.from_torch(cp0.contiguous().reshape(-1)); self.cm0 = wp.from_torch(cm0.contiguous().reshape(-1))
         self.cp1 = wp.from_torch(cp1.contiguous().reshape(-1)); self.cm1 = wp.from_torch(cm1.contiguous().reshape(-1))
         self.cp2 = wp.from_torch(cp2.contiguous().reshape(-1)); self.cm2 = wp.from_torch(cm2.contiguous().reshape(-1))
-        self.r = wp.zeros(self.Nx * self.Ny * self.Nz, dtype=wp.float32, device=self.device)
-        # fused-Neumann launch span (matches native: span_a=max(Ny,Nz), span_b=max(Nx,Ny,Nz))
+        self.r = wp.zeros(self.Nx * self.Ny * self.Nz, dtype=self._wpf, device=self.device)
         self._bc_dim = (max(self.Ny, self.Nz), max(self.Nx, self.Ny, self.Nz), 3)
 
     def _coef_args(self):
         return [self.cp0, self.cm0, self.cp1, self.cm1, self.cp2, self.cm2]
 
     def apply_neumann(self):
-        """Explicit homogeneous-Neumann ghost refresh (one fused launch).
-
-        No longer used by `sweep()` — Neumann is now folded into the half-sweep
-        by index clamping (faster, no BC launch).  Retained because non-Neumann
-        BCs (e.g. Dirichlet) DO need an explicit ghost kernel like this."""
+        """Explicit homogeneous-Neumann ghost refresh (one fused launch)."""
         wp.launch(neumann_fused_3d, dim=self._bc_dim,
                   inputs=[self.p, self.Nx, self.Ny, self.Nz], device=self.device)
 
@@ -186,14 +284,10 @@ class WarpRBGS:
         wp.launch(rbgs_halfsweep_3d, dim=(self.Nx, self.Ny, self.Nz),
                   inputs=[self.p, self.f, *self._coef_args(),
                           self.Nx, self.Ny, self.Nz,
-                          wp.float32(self.jcap_tol), color],
+                          self._wpf(self.jcap_tol), color],
                   device=self.device)
 
     def sweep(self, n: int = 1):
-        """n full red-black sweeps.  Homogeneous Neumann is folded into the
-        half-sweep (index clamp), so NO separate BC kernel is launched — this
-        is what closes the last gap to native (which pays 2 BC launches/sweep).
-        Bit-identical to native's explicit ghost refresh (ghost = self at bdry)."""
         for _ in range(n):
             self._half(0)
             self._half(1)
@@ -206,7 +300,6 @@ class WarpRBGS:
         rt = wp.to_torch(self.r)
         return float(rt.norm().item())
 
-    # ── CUDA-graph capture of K sweeps (constant host cost) ──────────────────
     def capture_sweeps(self, n: int):
         with wp.ScopedCapture(device=self.device) as cap:
             self.sweep(n)

@@ -9,6 +9,8 @@ signature-identical drop-in and bit-exact vs native (all 5 schemes, 2-D+3-D),
 so the only change is the dispatch target; all other code paths (multi-stream,
 python fallback) delegate to the base class unchanged.
 """
+import torch
+
 from lilytorch.src.advection import (  # noqa: F401
     AdvDiffSolver as _BaseAdvDiffSolver,
     SCHEMES,
@@ -63,3 +65,72 @@ class AdvDiffSolver(_BaseAdvDiffSolver):
             vel_new[i][inner] += rhs
             del rhs
         return tuple(vel_new)
+
+    def set_BCs(self, *vel):
+        """Apply ghost-layer BCs through the Warp ``apply_bcs_{2,3}d`` kernel.
+
+        The native :meth:`AdvDiffSolver.set_BCs` calls
+        ``torch.ops.lilytorch_kernels.apply_bcs_*`` *directly* (not a module
+        global), so the localized-global-swap trick used for forces does not
+        apply — this override reproduces the native CUDA-fused fast-path gate
+        and rebuilds the same cached descriptors via the inherited
+        ``_build_fused_bc_cache*`` helpers, dispatching to
+        :func:`kernel.apply_bcs_*` (Warp, dtype-generic).  Every other case
+        (non-contiguous, CPU, mixed dtype, missing descriptor pack) falls
+        through to the base eager Python loop, which is pure-torch and already
+        native-independent.
+        """
+        if (self.ndim == 3
+                and self._bc_fused_3d_packed is not None
+                and len(vel) == 3
+                and all(t.is_cuda for t in vel)
+                and vel[0].dtype == vel[1].dtype == vel[2].dtype
+                and vel[0].dtype in (torch.float32, torch.float64)
+                and vel[0].is_contiguous()
+                and vel[1].is_contiguous()
+                and vel[2].is_contiguous()):
+            cache = self._build_fused_bc_cache(vel)
+            self._bcs_runner_3d(
+                vel[0], vel[1], vel[2],
+                cache["shapes"],
+                cache["neu_desc"], cache["dir_desc"], cache["dir_val"],
+                cache["ref_desc"], cache["ref_val"],
+                cache["max_dim0"], cache["max_dim1"],
+            )
+            return
+
+        if (self.ndim == 2
+                and self._bc_fused_2d_packed is not None
+                and len(vel) == 2
+                and all(t.is_cuda for t in vel)
+                and vel[0].dtype == vel[1].dtype
+                and vel[0].dtype in (torch.float32, torch.float64)
+                and vel[0].is_contiguous()
+                and vel[1].is_contiguous()):
+            cache = self._build_fused_bc_cache_2d(vel)
+            self._bcs_runner_2d(
+                vel[0], vel[1],
+                cache["shapes"],
+                cache["neu_desc"], cache["dir_desc"], cache["dir_val"],
+                cache["ref_desc"], cache["ref_val"],
+                cache["max_line_dim"],
+            )
+            return
+
+        return super().set_BCs(*vel)
+
+    @property
+    def _bcs_runner_2d(self):
+        r = getattr(self, "_bcs_graph_2d", None)
+        if r is None:
+            r = kernel.ApplyBcs2DGraphRunner()
+            self._bcs_graph_2d = r
+        return r
+
+    @property
+    def _bcs_runner_3d(self):
+        r = getattr(self, "_bcs_graph_3d", None)
+        if r is None:
+            r = kernel.ApplyBcs3DGraphRunner()
+            self._bcs_graph_3d = r
+        return r

@@ -37,6 +37,21 @@ SKIP_NO_CUDA = pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA
 # float64 reduction noise; same tolerance the native self-test uses (1e-12),
 # relaxed slightly for the GPU's much wider concurrent atomic fan-in.
 ATOL = 1e-9
+# float32: per-element products are computed in f32 (matching native's
+# scalar_t=float dispatch) before the double atomicAdd, so the only drift is
+# single-precision rounding / FMA contraction differences between the Warp
+# codegen and the native nvcc codegen — ~1e-5 relative on these scenes.
+RTOL_F32 = 2e-4
+ATOL_F32 = 1e-4
+
+
+def _err(w, n, dtype):
+    """Max abs error, plus a relative scale for the f32 tolerance check."""
+    a = (w - n).abs().max().item()
+    if dtype == torch.float32:
+        scale = n.abs().max().item()
+        return a, a <= ATOL_F32 + RTOL_F32 * scale
+    return a, a < ATOL
 
 
 # ─── scene builders (mirror src/kernels/test_lagrangian_forces_self.py) ──────
@@ -115,12 +130,16 @@ def _scene_3d(dev):
 
 # ─── runners ──────────────────────────────────────────────────────────────
 
-def _run_2d(dev, method, scalar_nrho, offset):
+def _run_2d(dev, method, scalar_nrho, offset, dtype=torch.float64):
     Mx, My, h, F, cnt, offs, com = _scene_2d(dev)
     if scalar_nrho:
         nrho = torch.tensor([0.7], dtype=torch.float64, device=dev)
     else:
         nrho = torch.randn(Mx, My, dtype=torch.float64, device=dev).abs() + 0.1
+    # Cast the field/geometry inputs to the working dtype (native dispatches on
+    # ``p.scalar_type()``, so f32 inputs exercise the f32 kernel both sides).
+    F = {k: v.to(dtype) for k, v in F.items()}
+    nrho = nrho.to(dtype); cnt = cnt.to(dtype); com = com.to(dtype)
     args = (F["exx"], F["exy"], F["eyy"], F["p"], nrho,
             cnt, offs, com, 0.0, 0.0, 1.0 / h, 1.0 / h, Mx, My)
     w = lagrangian_forces_2d_warp(*args, method=method, sample_offset=offset)
@@ -128,12 +147,15 @@ def _run_2d(dev, method, scalar_nrho, offset):
     return w.cpu(), n.cpu()
 
 
-def _run_3d(dev, method, scalar_nrho, offset):
+def _run_3d(dev, method, scalar_nrho, offset, dtype=torch.float64):
     Mx, My, Mz, h, F, c, n_, a, offs, com = _scene_3d(dev)
     if scalar_nrho:
         nrho = torch.tensor([0.4], dtype=torch.float64, device=dev)
     else:
         nrho = torch.randn(Mx, My, Mz, dtype=torch.float64, device=dev).abs() + 0.1
+    F = {k: v.to(dtype) for k, v in F.items()}
+    nrho = nrho.to(dtype); c = c.to(dtype); n_ = n_.to(dtype)
+    a = a.to(dtype); com = com.to(dtype)
     args = (F["exx"], F["eyy"], F["ezz"], F["exy"], F["exz"], F["eyz"],
             F["p"], nrho, c, n_, a, offs, com,
             0.0, 0.0, 0.0, 1.0 / h, 1.0 / h, 1.0 / h, Mx, My, Mz)
@@ -180,6 +202,44 @@ def test_3d_gpu_parity(method):
     w, n = _run_3d("cuda:0", method, False, 0.2)
     err = (w - n).abs().max().item()
     assert err < ATOL, f"3D gpu {method}: {err:.3e}"
+
+
+# ─── float32 parity (dtype-generic kernel; native dispatches f32) ────────────
+
+@SKIP_NO_NATIVE
+@pytest.mark.parametrize("method", ["linear", "quadratic"])
+@pytest.mark.parametrize("scalar_nrho", [True, False])
+def test_2d_cpu_parity_f32(method, scalar_nrho):
+    w, n = _run_2d("cpu", method, scalar_nrho, 0.08, dtype=torch.float32)
+    err, ok = _err(w, n, torch.float32)
+    assert ok, f"2D cpu f32 {method} scalar={scalar_nrho}: {err:.3e}"
+
+
+@SKIP_NO_NATIVE
+@pytest.mark.parametrize("method", ["linear", "quadratic"])
+@pytest.mark.parametrize("scalar_nrho", [True, False])
+def test_3d_cpu_parity_f32(method, scalar_nrho):
+    w, n = _run_3d("cpu", method, scalar_nrho, 0.2, dtype=torch.float32)
+    err, ok = _err(w, n, torch.float32)
+    assert ok, f"3D cpu f32 {method} scalar={scalar_nrho}: {err:.3e}"
+
+
+@SKIP_NO_NATIVE
+@SKIP_NO_CUDA
+@pytest.mark.parametrize("method", ["linear", "quadratic"])
+def test_2d_gpu_parity_f32(method):
+    w, n = _run_2d("cuda:0", method, False, 0.08, dtype=torch.float32)
+    err, ok = _err(w, n, torch.float32)
+    assert ok, f"2D gpu f32 {method}: {err:.3e}"
+
+
+@SKIP_NO_NATIVE
+@SKIP_NO_CUDA
+@pytest.mark.parametrize("method", ["linear", "quadratic"])
+def test_3d_gpu_parity_f32(method):
+    w, n = _run_3d("cuda:0", method, False, 0.2, dtype=torch.float32)
+    err, ok = _err(w, n, torch.float32)
+    assert ok, f"3D gpu f32 {method}: {err:.3e}"
 
 
 @SKIP_NO_CUDA
