@@ -34,7 +34,8 @@ class SimConfig(BaseSimConfig):
         # to links by a softmin partition of unity — seam-free, no hydrostatic
         # baseline leak (vs the default per-body n·δ band integral).
         self.force_submethod               = "deltaH"
-        self.zero_pressure_inside          = True
+        self.backend                       = "warp"
+        self.zero_pressure_inside          = False
         self.body_velocity_blend_eps_cells = None
         self.bdim_mu0_projection           = True
         self.bdim_body_div_correction      = True
@@ -97,27 +98,27 @@ class SimConfig(BaseSimConfig):
         # self.zmax = (2/300*52/2)
 
 
-        # # ── 3-D grid ─────────────────────────────────────────────────
-        # self.Nx   = 900
-        # self.Ny   = 300
-        # self.Nz   = 52
-        # self.xmin = 0
-        # self.xmax = 6
-        # self.ymin = -1
-        # self.ymax = 1
-        # self.zmin = -(2/300*52/2)
-        # self.zmax = (2/300*52/2)
-
         # ── 3-D grid ─────────────────────────────────────────────────
-        self.Nx   = 450
-        self.Ny   = 150
+        self.Nx   = 900
+        self.Ny   = 300
         self.Nz   = 52
-        self.xmin = 3
+        self.xmin = 0
         self.xmax = 6
-        self.ymin = -0.5
-        self.ymax = 0.5
+        self.ymin = -1
+        self.ymax = 1
         self.zmin = -(2/300*52/2)
         self.zmax = (2/300*52/2)
+
+        # # ── 3-D grid ─────────────────────────────────────────────────
+        # self.Nx   = 450
+        # self.Ny   = 150
+        # self.Nz   = 52
+        # self.xmin = 3
+        # self.xmax = 6
+        # self.ymin = -0.5
+        # self.ymax = 0.5
+        # self.zmin = -(2/300*52/2)
+        # self.zmax = (2/300*52/2)
 
 
         # ── Physics ───────────────────────────────────────────────────
@@ -147,10 +148,6 @@ class SimConfig(BaseSimConfig):
         self.poisson_smoother        = "jacobi"
         self.poisson_nsmoothing      = 5
         self.poisson_bc_type         = "neumann"
-        # Effectively disable the per-step CUDA allocator flush: empty_cache()
-        # is cosmetic (lowers nvidia-smi reserved memory) and pure overhead in a
-        # fixed-shape loop. TODO (see milestones/to_do_list.md): drop the
-        # empty_cache() call from TwoPhaseSolver.finalize_step entirely.
         self.empty_cache_every       = 10**9
         # self.coupling = {
         #     "scheme"     : "implicit",
@@ -181,10 +178,8 @@ class SimConfig(BaseSimConfig):
         self.water_alpha       = 0.2
         self.grid_spacing      = None                #0.5*(self.ymax - self.ymin)
 
-        # self.solver_method = "python"  # DIAGNOSTIC: for consistent_momentum
 
     # ── Two-phase BDIM extension ──────────────────────────────────────
-
     def _bdim_extension(self, output_folder):
         bdim_ext = super()._bdim_extension(output_folder)
         solver = bdim_ext["config"]["bdim_yaml"]["solver"]
@@ -209,14 +204,11 @@ class SimConfig(BaseSimConfig):
             "rho_air"                : 1.2,                                             # 80:1 stability cap
             "nu_water"               : self.nu,
             "nu_air"                 : 1.5e-5,
-            # "alpha_exclude_body"     : True,
-            # "alpha_volume_compensate": True,
+            "alpha_exclude_body"     : True,
+            "alpha_volume_compensate": True,
             "air_transparent_body"   : False,
             "consistent_momentum"    : False,  # requires solver_method='python' (not kernel)
         }
-        # Pressure force readout = SBP-clean union-∂H partition via
-        # solver.force_submethod = "deltaH" (set in __init__).
-
 
         return bdim_ext
 

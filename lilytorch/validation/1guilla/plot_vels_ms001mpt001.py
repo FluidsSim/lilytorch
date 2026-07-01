@@ -16,8 +16,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 plt.rcParams['font.size'] = '20'
 
+RUN_DIR = os.path.join(save_path, "2026-06-30T00:03:11.915483")
 
-RUN_DIR = os.path.join(save_path, "1guilla_self_propelled/2026-06-02T15:46:57.285611")
+# RUN_DIR = os.path.join(save_path, "1guilla_self_propelled/2026-06-02T15:46:57.285611")
 SIMULATION_PATH = os.path.join(RUN_DIR, "output", "simulation.hdf5")
 TRACK_CSV_PATH = "/data/andreaferrario/1guilla_experiments/swim/videos/ms001mpt001_track.csv"
 HEAD_LINK_NAME = "link0"
