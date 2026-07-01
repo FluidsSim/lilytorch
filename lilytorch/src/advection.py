@@ -26,7 +26,9 @@ WaterLily.jl.
 
 import torch
 from lilytorch.src.kernels import RegularGridInterpolatorAutomatic
-from lilytorch.src.kernels import _C as _lilytorch_kernels_C  # noqa: F401  -- registers torch.ops.lilytorch_kernels.*
+from lilytorch.src.kernels import advect_flux_add
+from lilytorch.src.kernels.facade import (
+    ApplyBcs2DGraphRunner, ApplyBcs3DGraphRunner)
 
 from lilytorch.src import diffusion
 
@@ -645,7 +647,7 @@ class AdvDiffSolver:
                 for d in range(ndim):
                     fv = _face_vel(vel, i, d, ndim)
                     p  = _field_for_flux(vel[i], d, ndim)
-                    torch.ops.lilytorch_kernels.advect_flux_add(
+                    advect_flux_add(
                         fv, p, rhs,
                         float(self._dt_dh[d]), C_courant,
                         scheme_id, d,
@@ -1074,6 +1076,24 @@ class AdvDiffSolver:
         self._bc_fused_2d_cache = cache
         return cache
 
+    @property
+    def _bcs_runner_2d(self):
+        """Lazy Warp ``apply_bcs_2d`` graph runner (fused ghost-line BC writes)."""
+        r = getattr(self, "_bcs_graph_2d", None)
+        if r is None:
+            r = ApplyBcs2DGraphRunner()
+            self._bcs_graph_2d = r
+        return r
+
+    @property
+    def _bcs_runner_3d(self):
+        """Lazy Warp ``apply_bcs_3d`` graph runner (fused ghost-line BC writes)."""
+        r = getattr(self, "_bcs_graph_3d", None)
+        if r is None:
+            r = ApplyBcs3DGraphRunner()
+            self._bcs_graph_3d = r
+        return r
+
     def set_BCs(self, *vel):
         """Apply Dirichlet / Neumann BCs on the ghost layer.
 
@@ -1099,7 +1119,7 @@ class AdvDiffSolver:
                 and vel[1].is_contiguous()
                 and vel[2].is_contiguous()):
             cache = self._build_fused_bc_cache(vel)
-            torch.ops.lilytorch_kernels.apply_bcs_3d(
+            self._bcs_runner_3d(
                 vel[0], vel[1], vel[2],
                 cache["shapes"],
                 cache["neu_desc"],
@@ -1121,7 +1141,7 @@ class AdvDiffSolver:
                 and vel[0].is_contiguous()
                 and vel[1].is_contiguous()):
             cache = self._build_fused_bc_cache_2d(vel)
-            torch.ops.lilytorch_kernels.apply_bcs_2d(
+            self._bcs_runner_2d(
                 vel[0], vel[1],
                 cache["shapes"],
                 cache["neu_desc"],

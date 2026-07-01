@@ -114,15 +114,8 @@ def build_solver(config_path: str, dtype=torch.float32) -> FluidSolver:
         pars.setdefault("jellyfish", {})["gravity"] = GRAVITY
 
     output_dir = _resolve_output_folder(pars)
-    # ``solver.backend`` (opt-in; default "native") selects the native CUDA
-    # backend or the single-source Warp backend (lilytorch.src_warp).  Set
-    # ``solver.backend: warp`` in the YAML to run this example on Warp.
-    _backend = pars["solver"].get("backend", "native")
-    if _backend in (None, "native"):
-        SolverCls = TwoPhaseSolver if TWO_PHASE else FluidSolver
-    else:
-        from lilytorch.src_warp.backend import resolve_solver_class
-        SolverCls = resolve_solver_class(_backend, TWO_PHASE)
+    # Single-source Warp kernels (lilytorch.src.kernels) back both solvers.
+    SolverCls = TwoPhaseSolver if TWO_PHASE else FluidSolver
     solver = SolverCls(pars, dtype=dtype, compute_forces=True)
     solver.jellyfish_output_dir = output_dir
 

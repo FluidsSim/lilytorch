@@ -417,13 +417,9 @@ def test_uniform_two_phase_fsi_matches_single_phase_2d():
 # CUDA W&Y sweep kernel (MP10 / T2d) — parity vs the pure-PyTorch oracle
 # ---------------------------------------------------------------------------
 def _cvof_kernel_vs_python(ndim, dtype, noncontig):
-    """Compare the fused ``cvof_sweep`` CUDA kernel against
+    """Compare the single-source Warp ``cvof_sweep`` kernel against
     ``_cvof_sweep_python`` on identical CUDA inputs (isolates the kernel's
     arithmetic from any CPU/GPU or single/double differences)."""
-    from lilytorch.src.two_phase import _cvof_kernel_available
-    if not _cvof_kernel_available():
-        return None  # extension not built for cvof_sweep
-
     dev = torch.device("cuda")
     N = 24 if ndim == 3 else 40
     L = 1.0
@@ -506,8 +502,7 @@ def test_cvof_sweep_kernel_parity_noncontig_f64():
 def test_cvof_kernel_advect_bounded_and_conservative_2d():
     """End-to-end: the kernel-backed advect stays bounded + conserves mass to
     the same tolerance as the Python oracle (mirrors the CPU test on CUDA)."""
-    from lilytorch.src.two_phase import _cvof_kernel_available
-    if not (torch.cuda.is_available() and _cvof_kernel_available()):
+    if not torch.cuda.is_available():
         return
     dev = torch.device("cuda")
     N = 48; L = 1.0; h = L / N

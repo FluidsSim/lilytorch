@@ -24,21 +24,7 @@ Sign / value convention::
 import torch
 
 from lilytorch.src.advection import _sl
-
-
-_CVOF_KERNEL_OK = None
-
-
-def _cvof_kernel_available():
-    """True if the native ``cvof_sweep`` op is registered (extension built
-    against this runtime).  Cached after the first probe."""
-    global _CVOF_KERNEL_OK
-    if _CVOF_KERNEL_OK is None:
-        try:
-            _CVOF_KERNEL_OK = torch.ops.lilytorch_kernels.cvof_sweep is not None
-        except (AttributeError, RuntimeError):
-            _CVOF_KERNEL_OK = False
-    return _CVOF_KERNEL_OK
+from lilytorch.src.kernels import cvof_sweep
 
 
 def _neumann_pad(q):
@@ -229,21 +215,15 @@ class TwoPhase:
     def _cvof_sweep(self, a, u_d, d, dt):
         """One Weymouth-Yue conservative directional sweep along dim ``d``.
 
-        Dispatches to the fused CUDA kernel (:func:`torch.ops.lilytorch_kernels.cvof_sweep`,
-        MP10 / T2d) when ``a`` is on CUDA and the native extension is built —
-        a single launch replacing the ~8 full-grid temporaries (the three
-        edge-clamped shifts, two limited slopes, two donor faces, the flux
-        tensor) of the pure-PyTorch path below.  Falls back to
-        :meth:`_cvof_sweep_python` (the bit-for-bit reference / CPU path)
-        otherwise.
+        Dispatches to the single-source Warp ``cvof_sweep`` kernel (CPU and GPU
+        from one ``@wp.kernel``), a single launch replacing the ~8 full-grid
+        temporaries (the three edge-clamped shifts, two limited slopes, two donor
+        faces, the flux tensor) of the pure-PyTorch reference
+        (:meth:`_cvof_sweep_python`, kept as the parity oracle).
         """
-        if a.is_cuda and _cvof_kernel_available():
-            out = a.clone()
-            torch.ops.lilytorch_kernels.cvof_sweep(
-                a, u_d, float(dt) / self.h, d, out,
-            )
-            return out
-        return self._cvof_sweep_python(a, u_d, d, dt)
+        out = a.clone()
+        cvof_sweep(a, u_d, float(dt) / self.h, d, out)
+        return out
 
     def _cvof_sweep_python(self, a, u_d, d, dt):
         """Pure-PyTorch reference for one W&Y conservative sweep along ``d``.

@@ -67,18 +67,10 @@ class BDIMhandler:
 
         # ---- create fluid solver ----
         # Auto-select the two-phase (water + real air) solver when the config
-        # carries a ``solver.two_phase`` block, otherwise the single-phase
-        # solver.  ``solver.backend`` (opt-in; default "native") additionally
-        # chooses the native CUDA backend or the single-source Warp backend
-        # (:mod:`lilytorch.src_warp`) — existing configs (no ``backend`` key)
-        # are unaffected.
+        # carries a ``solver.two_phase`` block, otherwise the single-phase solver.
+        # Both run on the single-source Warp kernels (:mod:`lilytorch.src.kernels`).
         self._two_phase = self.pars["solver"].get("two_phase") is not None
-        _backend = self.pars["solver"].get("backend", "native")
-        if _backend in (None, "native"):
-            _SolverCls = TwoPhaseSolver if self._two_phase else FluidSolver
-        else:
-            from lilytorch.src_warp.backend import resolve_solver_class
-            _SolverCls = resolve_solver_class(_backend, self._two_phase)
+        _SolverCls = TwoPhaseSolver if self._two_phase else FluidSolver
         self.fluid_solver = _SolverCls(
             self.pars,
             dtype=dtype,

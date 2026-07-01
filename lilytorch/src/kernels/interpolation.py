@@ -21,7 +21,7 @@ from typing import Sequence
 import torch
 from torch import Tensor
 
-from .ops import interp_2d, interp_3d
+from .facade import interp_2d, interp_3d
 
 __all__ = [
     "RegularGridInterpolator",

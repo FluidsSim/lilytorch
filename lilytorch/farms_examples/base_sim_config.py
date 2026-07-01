@@ -228,10 +228,6 @@ class BaseSimConfig:
         # See :class:`FluidSolver` for what each method does. ``None``
         # → solver default (``"kernel"``).
         self.solver_method           = None
-        # Compute backend: ``None``/``"native"`` (native CUDA) or ``"warp"``
-        # (single-source Warp backend, lilytorch.src_warp).  Orthogonal to
-        # ``solver_method`` (which selects the kernel vs python STEP path).
-        self.backend                 = None
         # DEPRECATED.  Kept for backward compatibility — superseded by
         # ``solver_method``.  When set, they are mapped onto
         # ``solver_method`` inside :class:`FluidSolver`.
@@ -894,7 +890,6 @@ class BaseSimConfig:
             ("poisson_cuda_graph",      self.poisson_cuda_graph),
             ("poisson_cuda_graph_max_cells", self.poisson_cuda_graph_max_cells),
             ("solver_method",           self.solver_method),
-            ("backend",                 self.backend),
             ("dtype",                   self.dtype),
             ("zero_pressure_inside",    self.zero_pressure_inside),
             ("force_method",            self.force_method),
