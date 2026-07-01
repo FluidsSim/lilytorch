@@ -63,6 +63,11 @@ class FlowDiagnostics:
         # time for the energy irreversibly lost to the fluid.  mu0 masks the
         # solid interior so the BDIM band does not contaminate the integral.
         self.dissipation_rate = torch.full((nt,), float('nan'), device=device, dtype=dtype)
+        # Unmasked counterpart: ν·h^d·Σ|S|² integrated over the *whole* grid
+        # (body interior + transition band included).  Captures any boundary-layer
+        # dissipation that the mu0 mask clips; equals dissipation_rate when no
+        # mask is applied.  Useful as an upper bound for the energy-balance check.
+        self.dissipation_rate_unmasked = torch.full((nt,), float('nan'), device=device, dtype=dtype)
 
         self._ek0 = None   # E_k at the first computed step (baseline)
 
@@ -129,14 +134,17 @@ class FlowDiagnostics:
         vel = (u, v) if w is None else (u, v, w)
         smag = ops.strain_rate_magnitude(vel, h, self.ndim)   # |S| on CC grid
         phi = smag.square()                                   # |S|² = 2 S:S
+        # Unmasked dissipation over the whole grid (always recorded).
+        self.dissipation_rate_unmasked[iteration] = nu_val * hd * phi.sum()
+        phi_masked = phi
         if sdf_cc is not None and mu_fn is not None:
             try:
                 mu0_cc, _ = mu_fn(sdf_cc)
                 if mu0_cc.shape == phi.shape:
-                    phi = phi * mu0_cc
+                    phi_masked = phi * mu0_cc
             except Exception:
                 pass
-        self.dissipation_rate[iteration] = nu_val * hd * phi.sum()
+        self.dissipation_rate[iteration] = nu_val * hd * phi_masked.sum()
 
         # ---- max |div(u)| ----
         div = divergence_fn(u, v, w=w)
@@ -179,6 +187,7 @@ class FlowDiagnostics:
             "max_divergence":  self.max_divergence.cpu().numpy().copy(),
             "cfl_number":      self.cfl_number.cpu().numpy().copy(),
             "dissipation_rate": self.dissipation_rate.cpu().numpy().copy(),
+            "dissipation_rate_unmasked": self.dissipation_rate_unmasked.cpu().numpy().copy(),
         }
         with lock:
             with h5py.File(h5_path, "w") as f:
