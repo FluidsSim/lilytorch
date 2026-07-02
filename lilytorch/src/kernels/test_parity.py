@@ -1,15 +1,13 @@
-"""Correctness parity tests: Warp streaming SDF vs native CUDA kernel.
+"""Self-consistency tests: the 3-D Warp streaming SDF across execution designs.
 
-Checks that the Warp 3-pass implementation produces outputs that match the
-native body_update_3d within tight tolerances:
-  - sdf_cc / sdf_u / sdf_v / sdf_w : f32 parity; SDF is fp32-encoded in the
-    packed key → round-trip precision loss ≤ 1 ULP (rel < 1e-6)
-  - body_u / body_v / body_w        : recomputed from kin → bit-identical
-    given the same winning body_id.
+Checks that every execution design of the Warp 3-pass implementation
+(sequential eager, CUDA graph, fanned eager, fanned graph) produces the same
+outputs, that the single Warp source matches between CPU and GPU, and that the
+dtype-generic float64 specialisation is device-independent.
 
 Run with:
     python -m lilytorch.src.kernels.test_parity
-    pytest lilytorch/warp_poc/test_parity.py -v
+    pytest lilytorch/src/kernels/test_parity.py -v
 """
 from __future__ import annotations
 
@@ -17,70 +15,25 @@ import pytest
 import torch
 import warp as wp
 
-# Native kernel (requires _C.so)
-try:
-    import lilytorch.src.kernels  # noqa: F401
-    from lilytorch.src.kernels.ops import body_update_3d
-    _NATIVE_AVAILABLE = True
-except Exception:
-    _NATIVE_AVAILABLE = False
-
 from lilytorch.src.kernels.bench_viability import (
     make_synthetic_scene,
-    run_native,
     setup_warp_runner,
     _reset_warp_outputs,
 )
 
 DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
-SKIP_NO_NATIVE = pytest.mark.skipif(
-    not _NATIVE_AVAILABLE, reason="native kernel (_C.so) not available"
-)
 SKIP_NO_CUDA = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="CUDA not available"
 )
 
 
-def _run_and_collect_native(sc: dict) -> dict:
-    """Run native kernel and return output tensors as {name: tensor}."""
-    Ngx, Ngy, Ngz = sc["Ngx"], sc["Ngy"], sc["Ngz"]
-    sc["sdf_cc"].fill_(1e4); sc["sdf_u"].fill_(1e4)
-    sc["sdf_v"].fill_(1e4);  sc["sdf_w"].fill_(1e4)
-    sc["body_u"].zero_();    sc["body_v"].zero_();  sc["body_w"].zero_()
-
-    di0, dj0, dk0, dAi, dAj, dAk = sc["dirty_bounds"]
-    body_update_3d(
-        sc["F_flat"], sc["F_offsets"],
-        sc["body_shapes"], sc["body_meta"], sc["kin"],
-        sc["aabb_lo"], sc["aabb_dim"],
-        sc["gx"], sc["gy"], sc["gz"],
-        float(sc["h"]), int(sc["max_vol"]),
-        sc["sdf_cc"].view(Ngx, Ngy, Ngz),
-        sc["sdf_u"].view(Ngx, Ngy, Ngz),
-        sc["sdf_v"].view(Ngx, Ngy, Ngz),
-        sc["sdf_w"].view(Ngx, Ngy, Ngz),
-        sc["body_u"].view(Ngx, Ngy, Ngz),
-        sc["body_v"].view(Ngx, Ngy, Ngz),
-        sc["body_w"].view(Ngx, Ngy, Ngz),
-        sc["key_cc"], sc["key_u"], sc["key_v"], sc["key_w"],
-        0,
-        di0, dj0, dk0, dAi, dAj, dAk,
-        sc["num_u"], sc["num_v"], sc["num_w"],
-        sc["den_u"], sc["den_v"], sc["den_w"],
-        0.0,
-    )
-    torch.cuda.synchronize()
-    return {k: sc[k].clone() for k in
-            ("sdf_cc", "sdf_u", "sdf_v", "sdf_w", "body_u", "body_v", "body_w")}
-
-
-def _run_and_collect_warp(sc: dict, mode: str = "eager") -> dict:
+def _run_and_collect_warp(sc: dict, mode: str = "eager", device: str = DEVICE) -> dict:
     """Run Warp kernel and return output tensors.
 
     mode ∈ {"eager", "graph"}            → sequential per-body design
     mode ∈ {"fan-eager", "fan-graph"}    → fanned all-body design (const in B)
     """
-    wsdf, wp_out = setup_warp_runner(sc, DEVICE)
+    wsdf, wp_out = setup_warp_runner(sc, device)
     out_args = (
         wp_out["sdf_cc"], wp_out["sdf_u"], wp_out["sdf_v"], wp_out["sdf_w"],
         wp_out["body_u"], wp_out["body_v"], wp_out["body_w"],
@@ -105,18 +58,18 @@ def _run_and_collect_warp(sc: dict, mode: str = "eager") -> dict:
     return {k: wp.to_torch(wp_out[k]).clone() for k in wp_out}
 
 
-def _compare(native: dict, warp: dict, label: str, sdf_rtol: float = 5e-4):
+def _compare(ref: dict, got: dict, label: str, sdf_rtol: float = 5e-4):
     """Assert SDF and body velocity match within tolerance.
 
     Tie-breaking note: when two bodies have overlapping AABBs and nearly-equal
-    SDF at a cell the winner differs between sequential (Warp) and fanned-atomic
-    (native) approaches.  The absolute error is always < 2 ULP (~1e-8) but the
-    relative error can reach ~2e-4 near the zero-crossing band.  We use 5e-4
-    relative tolerance, which is physically tight (< 1/2000 of a grid cell).
+    SDF at a cell the winner differs between the sequential and fanned-atomic
+    designs.  The absolute error is always < 2 ULP (~1e-8) but the relative
+    error can reach ~2e-4 near the zero-crossing band.  We use 5e-4 relative
+    tolerance, which is physically tight (< 1/2000 of a grid cell).
     """
     for key in ("sdf_cc", "sdf_u", "sdf_v", "sdf_w"):
-        n = native[key]
-        w = warp[key]
+        n = ref[key].cpu()
+        w = got[key].cpu()
         # Only compare cells that were touched (< FAR)
         mask = n < 1e3
         if not mask.any():
@@ -131,8 +84,8 @@ def _compare(native: dict, warp: dict, label: str, sdf_rtol: float = 5e-4):
         )
 
     for key in ("body_u", "body_v", "body_w"):
-        n = native[key]
-        w = warp[key]
+        n = ref[key].cpu()
+        w = got[key].cpu()
         mask = n.abs() > 1e-10  # non-zero body velocity
         if not mask.any():
             continue
@@ -148,63 +101,26 @@ def _compare(native: dict, warp: dict, label: str, sdf_rtol: float = 5e-4):
 #  Tests
 # ─────────────────────────────────────────────────────────────────────────────
 
-@SKIP_NO_NATIVE
 @SKIP_NO_CUDA
 @pytest.mark.parametrize("B", [1, 3, 9])
-def test_warp_eager_matches_native(B):
-    """Warp eager 3-pass output matches native kernel within 1e-5 rel."""
+@pytest.mark.parametrize("mode", ["graph", "fan-eager", "fan-graph"])
+def test_warp_modes_agree(B, mode):
+    """Every execution design matches the sequential-eager reference."""
     sc = make_synthetic_scene(64, 32, 32, B, device=DEVICE)
-    native_out = _run_and_collect_native(sc)
-    warp_out   = _run_and_collect_warp(sc, mode="eager")
-    _compare(native_out, warp_out, label=f"eager B={B}")
+    ref = _run_and_collect_warp(sc, mode="eager")
+    got = _run_and_collect_warp(sc, mode=mode)
+    _compare(ref, got, label=f"{mode} B={B}")
 
 
-@SKIP_NO_NATIVE
-@SKIP_NO_CUDA
-@pytest.mark.parametrize("B", [1, 3, 9])
-def test_warp_graph_matches_native(B):
-    """Warp CUDA-graph output matches native kernel within 1e-5 rel."""
-    sc = make_synthetic_scene(64, 32, 32, B, device=DEVICE)
-    native_out = _run_and_collect_native(sc)
-    warp_out   = _run_and_collect_warp(sc, mode="graph")
-    _compare(native_out, warp_out, label=f"graph B={B}")
-
-
-@SKIP_NO_NATIVE
-@SKIP_NO_CUDA
-@pytest.mark.parametrize("B", [1, 3, 9])
-def test_warp_fanned_eager_matches_native(B):
-    """Fanned all-body Warp (eager) matches native within tolerance."""
-    sc = make_synthetic_scene(64, 32, 32, B, device=DEVICE)
-    native_out = _run_and_collect_native(sc)
-    warp_out   = _run_and_collect_warp(sc, mode="fan-eager")
-    _compare(native_out, warp_out, label=f"fan-eager B={B}")
-
-
-@SKIP_NO_NATIVE
-@SKIP_NO_CUDA
-@pytest.mark.parametrize("B", [1, 3, 9])
-def test_warp_fanned_graph_matches_native(B):
-    """Fanned all-body Warp (CUDA-graph) matches native within tolerance."""
-    sc = make_synthetic_scene(64, 32, 32, B, device=DEVICE)
-    native_out = _run_and_collect_native(sc)
-    warp_out   = _run_and_collect_warp(sc, mode="fan-graph")
-    _compare(native_out, warp_out, label=f"fan-graph B={B}")
-
-
-@SKIP_NO_NATIVE
 @SKIP_NO_CUDA
 def test_warp_larger_grid():
-    """Warp eager + fanned on a 128×64×32 grid, 9 bodies."""
+    """Sequential vs fanned-graph on a 128×64×32 grid, 9 bodies."""
     sc = make_synthetic_scene(128, 64, 32, 9, device=DEVICE)
-    native_out = _run_and_collect_native(sc)
-    _compare(native_out, _run_and_collect_warp(sc, mode="eager"),
-             label="128×64×32 B=9 seq")
-    _compare(native_out, _run_and_collect_warp(sc, mode="fan-graph"),
+    ref = _run_and_collect_warp(sc, mode="eager")
+    _compare(ref, _run_and_collect_warp(sc, mode="fan-graph"),
              label="128×64×32 B=9 fan")
 
 
-@SKIP_NO_NATIVE
 @SKIP_NO_CUDA
 def test_warp_graph_eager_identical():
     """Warp eager and Warp graph produce identical results (same computation)."""
@@ -222,11 +138,26 @@ def test_warp_graph_eager_identical():
         )
 
 
+@SKIP_NO_CUDA
+@pytest.mark.parametrize("B", [1, 3, 9])
+def test_warp_cpu_matches_gpu(B):
+    """Single Warp source: CPU == GPU (fanned eager)."""
+    sc_g = make_synthetic_scene(64, 32, 32, B, device="cuda:0")
+    sc_c = make_synthetic_scene(64, 32, 32, B, device="cpu")
+    g = _run_and_collect_warp(sc_g, mode="fan-eager", device="cuda:0")
+    c = _run_and_collect_warp(sc_c, mode="fan-eager", device="cpu")
+    for key in g:
+        gg = g[key].cpu(); cc = c[key]
+        mask = gg.abs() < 1e3
+        d = (gg[mask] - cc[mask]).abs().max().item()
+        assert d < 1e-5, f"B={B} CPU vs GPU {key}: {d:.2e}"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-#  float64 parity (dtype-generic 3-D body_update) — used by the f64 src_warp solver
+#  float64 (dtype-generic 3-D body_update) — used by the f64 solver bridge
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _run_warp_f64(sc: dict) -> dict:
+def _run_warp_f64(sc: dict, device: str) -> dict:
     """Run the dtype-generic WarpStreamingSDF at float64 on the f64 scene `sc`,
     wrapping the scene's torch output buffers zero-copy.  Returns torch tensors."""
     from lilytorch.src.kernels.streaming_sdf import WarpStreamingSDF
@@ -235,7 +166,7 @@ def _run_warp_f64(sc: dict) -> dict:
     sc["sdf_v"].fill_(1e4);  sc["sdf_w"].fill_(1e4)
     sc["body_u"].zero_();    sc["body_v"].zero_();  sc["body_w"].zero_()
 
-    wsdf = WarpStreamingSDF(Ngx, Ngy, Ngz, device=DEVICE, dtype=wp.float64)
+    wsdf = WarpStreamingSDF(Ngx, Ngy, Ngz, device=device, dtype=wp.float64)
     wsdf.setup(sc["F_flat"], sc["F_offsets"], sc["body_shapes"], sc["body_meta"],
                sc["gx"], sc["gy"], sc["gz"], float(sc["h"]), int(sc["max_vol"]))
     wsdf.update_kinematics(sc["kin"], sc["aabb_lo"], sc["aabb_dim"])
@@ -251,22 +182,22 @@ def _run_warp_f64(sc: dict) -> dict:
             ("sdf_cc", "sdf_u", "sdf_v", "sdf_w", "body_u", "body_v", "body_w")}
 
 
-@SKIP_NO_NATIVE
 @SKIP_NO_CUDA
 @pytest.mark.parametrize("B", [1, 3])
-def test_warp_fanned_f64_matches_native(B):
-    """Dtype-generic body_update at float64 matches native f64 within tolerance."""
-    sc = make_synthetic_scene(64, 32, 32, B, device=DEVICE, dtype=torch.float64)
-    # Force the static body table + grid + kin to f64 so the native op runs the
-    # consistent-dtype f64 path (the live bridge normalises the same way inside
-    # WarpStreamingSDF.setup).
-    for k in ("F_flat", "body_meta", "kin", "gx", "gy", "gz"):
-        sc[k] = sc[k].double()
-    native_out = _run_and_collect_native(sc)
-    warp_out = _run_warp_f64(sc)
-    # Native interpolates the body SDF table in float32 internally even for f64
-    # output; this Warp kernel is true-f64 → agree to ~float32-epsilon.
-    _compare(native_out, warp_out, label=f"f64 fan-eager B={B}", sdf_rtol=1e-6)
+def test_warp_fanned_f64_cpu_matches_gpu(B):
+    """Dtype-generic body_update at float64: CPU == GPU."""
+    def run(device):
+        sc = make_synthetic_scene(64, 32, 32, B, device=device, dtype=torch.float64)
+        for k in ("F_flat", "body_meta", "kin", "gx", "gy", "gz"):
+            sc[k] = sc[k].double()
+        return _run_warp_f64(sc, device)
+
+    g, c = run("cuda:0"), run("cpu")
+    for key in g:
+        gg = g[key].cpu(); cc = c[key]
+        mask = gg.abs() < 1e3
+        d = (gg[mask] - cc[mask]).abs().max().item()
+        assert d < 1e-10, f"f64 B={B} CPU vs GPU {key}: {d:.2e}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -275,32 +206,8 @@ def test_warp_fanned_f64_matches_native(B):
 
 def _smoke(B: int, label: str):
     sc = make_synthetic_scene(64, 32, 32, B, device=DEVICE)
-
-    if _NATIVE_AVAILABLE:
-        native_out = _run_and_collect_native(sc)
-    else:
-        native_out = None
-        print(f"  [{label}] native kernel unavailable — skipping parity check")
-
     warp_out = _run_and_collect_warp(sc, mode="eager")
-
-    if native_out is not None:
-        try:
-            _compare(native_out, warp_out, label=f"{label} eager")
-            print(f"  [{label}] eager:  PASS")
-        except AssertionError as e:
-            print(f"  [{label}] eager:  FAIL — {e}")
-
-    # Graph mode
     warp_graph_out = _run_and_collect_warp(sc, mode="graph")
-    if native_out is not None:
-        try:
-            _compare(native_out, warp_graph_out, label=f"{label} graph")
-            print(f"  [{label}] graph:  PASS")
-        except AssertionError as e:
-            print(f"  [{label}] graph:  FAIL — {e}")
-
-    # Eager vs graph must be identical
     for key in warp_out:
         diff = (warp_out[key] - warp_graph_out[key]).abs().max().item()
         if diff > 0:
@@ -310,7 +217,7 @@ def _smoke(B: int, label: str):
 
 
 if __name__ == "__main__":
-    print("\nWarp streaming-SDF parity smoke test")
+    print("\nWarp streaming-SDF self-consistency smoke test")
     print("=" * 50)
     for B in [1, 3, 9]:
         _smoke(B, f"B={B}")

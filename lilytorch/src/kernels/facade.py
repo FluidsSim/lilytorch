@@ -1,41 +1,31 @@
 """Unified kernel-backend API — **Warp** implementation.
 
-Exposes the same names as :mod:`lilytorch.src_cuda.kernel` (the contract is
-documented there).  Ops whose Warp wrapper has an identical call convention to
-the native op are wired to the single-source ``@wp.kernel`` ports in
-:mod:`lilytorch.src.kernels`; everything else falls back to the native op so this
-tree is always runnable end-to-end.
+Every op below keeps the positional call convention of the retired hand-written
+CUDA/C++ ``_C.so`` extension (so the solver call sites never changed) and
+dispatches to a single-source ``@wp.kernel`` port in this package — the same
+kernel source runs on CPU and CUDA.  There is no native fallback: Warp is a
+hard dependency (the ``except`` blocks below re-raise).
 
-Wired to Warp (``WARP_BACKED``):
+Ops (all in ``WARP_BACKED``):
 
-* ``advect_flux_add`` — :func:`warp_poc.warp_advection.advect_flux_add_warp`
-  (identical signature ``(fv, p, rhs, dt_dh, C, scheme_id, face_dim)``;
-  in-place ``rhs += dt_dh·(F_L−F_R)``).  Bit-exact vs native (all 5 schemes,
-  2-D+3-D), single-source CPU==GPU.
-* ``cvof_sweep`` — :func:`warp_poc.warp_cvof.cvof_sweep_warp`
-  (identical signature ``(a, u_d, cfl, face_dim, out)``; writes ``out``
-  interior in place).  Bit-exact vs native, 2-D+3-D.
-
-Native fallback (Warp ports exist + are parity-clean in ``warp_poc`` but need a
-marshalling / driver-assembly bridge to drop into the live solver — see §F):
-
-* ``body_update_*`` / ``bdim_forcing_*`` (formerly Kernel A/B) — the Warp wrappers
-  take the POC per-body scene layout, not the native ``F_flat``/``F_offsets``/
-  ``body_meta``/``kin`` flat-table marshalling. (Marshalling bridge = remaining.)
-* Poisson ``K`` — the native ``poisson_solve_*`` is a monolithic C++ driver;
-  Warp routing means assembling the mgcg/multigrid outer loop from the Warp
-  smoother + transfer ops (``WarpVCycle`` shows it converges). (Driver assembly.)
-* ``apply_bcs_*`` — Warp wrapper uses a single ``max_face_dim`` vs the native
-  ``(max_dim0, max_dim1)``; safe only on cubic faces. (Kept native.)
-* forces — both readouts run on Warp: Lagrangian ``lagrangian_forces_*`` and
-  Eulerian ``streaming_sdf_forces_post_*`` (dtype-generic shims here, routed by
-  the ``src_warp.solver`` ``forces_lagrangian_*`` / ``forces_method2*``
-  overrides).  No native custom force kernel remains. (See ``forces.py``.)
+* ``body_update_{2,3}d`` — streaming SDF + body velocities (formerly Kernel A),
+  via the marshalling bridges below (flat-table layout → ``WarpStreamingSDF``);
+  dtype-generic (f32+f64), optional CUDA-graph fast path, σ body-id key emit.
+* ``bdim_forcing_{2,3}d`` (+ ``_sigma_`` variants) — fused BDIM2 forcing +
+  Poisson coefficients (formerly Kernel B); dtype-generic.
+* ``advect_flux_add`` — high-order limiter flux, in-place
+  ``rhs += dt_dh·(F_L−F_R)``; all 5 schemes, 2-D+3-D.
+* ``cvof_sweep`` — Weymouth-Yue VOF sweep (two-phase α transport).
+* ``apply_bcs_{2,3}d`` / ``interp_{2,3}d`` — fused BC ghost writes and
+  scattered bilinear/trilinear/quadratic gathers.
+* ``lagrangian_forces_{2,3}d`` and ``streaming_sdf_forces_post_{2,3}d`` — the
+  Lagrangian and Eulerian (n·δ / deltaH) force readouts.
+* Poisson smoother/residual ops (``rbgs_sweep_*``, ``jacobi_sweep_*``,
+  ``mg_residual_*``) — consumed by the Python multigrid/MGCG driver in
+  ``poisson_mult.py`` (with CUDA-graphed variants in ``multigrid_graph.py``).
 """
 
 import torch
-
-# Native ops are the fallback for everything not yet wired to Warp.
 
 BACKEND = "warp"
 
@@ -53,8 +43,7 @@ _warp_backed = set()
 
 # ── body_update / bdim_forcing (2-D) → WARP (marshalling bridge) ───────────────────
 # body_update + bdim_forcing both run on Warp at f32 AND f64 (dtype-generic ports).
-# The native handles below are used ONLY if Warp is unavailable (import except).
-# The σ bdim_forcing also runs on Warp now (Item 5): the streaming bridge emits the
+# The σ bdim_forcing also runs on Warp (Item 5): the streaming bridge emits the
 # body-id key_* arrays the σ pass reads (see the bridges' emit_keys path).
 
 try:
@@ -270,12 +259,11 @@ try:
     bdim_forcing_3d = _bdim3d_warp
     _warp_backed.add("bdim_forcing_3d")
 
-    # σ bdim_forcing (thin bodies): the Warp body_update now emits the body-id keys the
-    # σ pass reads (Item 5), so the σ variants run on Warp too — native-positional
-    # shims around the same dtype-generic ``bdim_coeff_{2,3}d_warp`` (keys +
-    # sigma_shifts as keywords).  The solver step calls ``bdim_coeff_{2,3}d``
-    # directly with the σ keywords; these named shims keep the facade contract
-    # (parity with ``src_cuda.kernel``) Warp-backed instead of native.
+    # σ bdim_forcing (thin bodies): the Warp body_update emits the body-id keys the
+    # σ pass reads (Item 5) — positional shims around the same dtype-generic
+    # ``bdim_forcing_{2,3}d_warp`` (keys + sigma_shifts as keywords).  The solver
+    # step calls ``bdim_forcing_{2,3}d`` directly with the σ keywords; these named
+    # shims keep the historical facade contract available.
     def bdim_forcing_sigma_2d(
             u_prime, v_prime, sdf_u, sdf_v, body_u, body_v, u0, v0, ch, cv,
             key_u, key_v, sigma_shifts, eps, rho_f, dt, h_grid,
@@ -301,8 +289,8 @@ try:
 
     _warp_backed.add("bdim_forcing_sigma_2d")
     _warp_backed.add("bdim_forcing_sigma_3d")
-except Exception:  # pragma: no cover - degrade to native if Warp unavailable
-    # Warp backend is required (native CUDA/C++ kernels removed).
+except Exception:  # pragma: no cover
+    # Warp backend is required (the native CUDA/C++ kernels were removed).
     raise
 
 # ── advection flux → WARP ──────────────────────────────────────────────────
@@ -312,13 +300,13 @@ try:
     def advect_flux_add(fv, p, rhs, dt_dh, C_courant, scheme_id, face_dim):
         """Warp ``advect_flux_add`` (in-place ``rhs += dt_dh·(F_L−F_R)``).
 
-        Signature-identical drop-in for ``torch.ops.lilytorch_kernels.advect_flux_add``.
+        Same positional signature as the retired native op.
         """
         _advect_warp(fv, p, rhs, dt_dh, C_courant, scheme_id, face_dim)
 
     _warp_backed.add("advect_flux_add")
-except Exception:  # pragma: no cover - degrade to native if Warp unavailable
-    # Warp backend is required (native CUDA/C++ kernels removed).
+except Exception:  # pragma: no cover
+    # Warp backend is required (the native CUDA/C++ kernels were removed).
     raise
 
 # ── two-phase VOF → WARP ───────────────────────────────────────────────────
@@ -328,22 +316,21 @@ try:
     def cvof_sweep(a, u_d, cfl, face_dim, out):
         """Warp ``cvof_sweep`` (writes ``out`` interior in place).
 
-        Signature-identical drop-in for ``torch.ops.lilytorch_kernels.cvof_sweep``.
+        Same positional signature as the retired native op.
         """
         _cvof_warp(a, u_d, cfl, face_dim, out)
 
     _warp_backed.add("cvof_sweep")
 except Exception:  # pragma: no cover
-    # Warp backend is required (native CUDA/C++ kernels removed).
+    # Warp backend is required (the native CUDA/C++ kernels were removed).
     raise
 
 # ── BC / interp → WARP ─────────────────────────────────────────────────────
 # ``apply_bcs_{2,3}d`` (fused Neumann/Dirichlet/reflective ghost-line writes,
-# dtype-generic f32+f64) is routed by the ``src_warp.advection.AdvDiffSolver``
-# ``set_BCs`` override (the native ``set_BCs`` calls ``torch.ops…`` directly, so
-# the module-global swap does not apply — see TASK §Item 4).  The 3-D wrapper now
-# takes both face dims ``(max_dim0, max_dim1)``.  ``interp_{2,3}d`` (scattered
-# bilinear/trilinear gather, marker / semi-Lagrangian path) is also dtype-generic.
+# dtype-generic f32+f64) is consumed by ``AdvDiffSolver.set_BCs``.  The 3-D
+# wrapper takes both face dims ``(max_dim0, max_dim1)``.  ``interp_{2,3}d``
+# (scattered bilinear/trilinear gather, marker / semi-Lagrangian path) is also
+# dtype-generic.
 try:
     from lilytorch.src.kernels.misc_2d import (
         apply_bcs_2d_warp as apply_bcs_2d,
@@ -356,21 +343,18 @@ try:
         ApplyBcs3DGraphRunner,
     )
     _warp_backed |= {"apply_bcs_2d", "apply_bcs_3d", "interp_2d", "interp_3d"}
-except Exception:  # pragma: no cover - degrade to native if Warp unavailable
-    # Warp backend is required (native CUDA/C++ kernels removed).
+except Exception:  # pragma: no cover
+    # Warp backend is required (the native CUDA/C++ kernels were removed).
     raise
 
-# ── forces — Lagrangian → WARP; Eulerian still native ──────────────────────
-# The Warp Lagrangian wrappers take the SAME positional arg list as the native
-# ``ops.lagrangian_forces_{2,3}d`` (decomposed eps_xx…/tri_*…) plus the
-# ``method``/``sample_offset``/``out=`` keywords, so they are drop-in shims for
-# ``_lagrangian_forces_{2,3}d_kernel`` at the ``forces_lagrangian_*`` call site
-# (routed there by the ``src_warp.solver`` method override).  Dtype-generic:
-# per-element math runs in the field dtype, ``out`` is the float64 accumulator.
-# The Eulerian readout (n·δ band integral + deltaH ∂H pass) is also on Warp:
-# ``warp_forces.py`` ports ``streaming_sdf_forces_post_{2,3}d`` with the identical
-# native positional signature (incl. ``force_submethod``/``ph_tau``), routed by
-# the ``src_warp.solver`` ``forces_method2{,_3d}`` override.
+# ── forces → WARP (both readouts) ──────────────────────────────────────────
+# The Lagrangian wrappers keep the historical positional arg list (decomposed
+# eps_xx…/tri_*…) plus the ``method``/``sample_offset``/``out=`` keywords, so
+# they drop straight into the ``forces_lagrangian_*`` call sites in solver.py.
+# Dtype-generic: per-element math runs in the field dtype, ``out`` is the
+# float64 accumulator.  The Eulerian readout (n·δ band integral + deltaH ∂H
+# pass) is ``streaming_sdf_forces_post_{2,3}d`` in ``forces.py`` (incl.
+# ``force_submethod``/``ph_tau``), used by ``forces_method2{,_3d}``.
 try:
     from lilytorch.src.kernels.forces import (
         streaming_sdf_forces_post_2d_warp as streaming_sdf_forces_post_2d,
@@ -378,8 +362,8 @@ try:
     )
     _warp_backed.add("streaming_sdf_forces_post_2d")
     _warp_backed.add("streaming_sdf_forces_post_3d")
-except Exception:  # pragma: no cover - degrade to native if Warp unavailable
-    # Warp backend is required (native CUDA/C++ kernels removed).
+except Exception:  # pragma: no cover
+    # Warp backend is required (the native CUDA/C++ kernels were removed).
     raise
 try:
     from lilytorch.src.kernels.lagrangian import (
@@ -392,7 +376,7 @@ try:
             cnt_flat, cnt_offsets, com_pos,
             bx0, by0, inv_dx, inv_dy, Mx, My,
             method="linear", sample_offset=0.0, out=None):
-        """Warp ``lagrangian_forces_2d`` — drop-in for the native ops wrapper."""
+        """Warp ``lagrangian_forces_2d`` (historical positional signature)."""
         return _lagr2d_warp(
             eps_xx, eps_xy, eps_yy, p, nu_rho_field,
             cnt_flat, cnt_offsets, com_pos,
@@ -405,7 +389,7 @@ try:
             tri_offsets, com_pos,
             bx0, by0, bz0, inv_dx, inv_dy, inv_dz, Mx, My, Mz,
             method="linear", sample_offset=0.0, out=None):
-        """Warp ``lagrangian_forces_3d`` — drop-in for the native ops wrapper."""
+        """Warp ``lagrangian_forces_3d`` (historical positional signature)."""
         return _lagr3d_warp(
             eps_xx, eps_yy, eps_zz, eps_xy, eps_xz, eps_yz,
             p, nu_rho_field, tri_centroid, tri_normal, tri_area,
@@ -415,16 +399,15 @@ try:
 
     _warp_backed.add("lagrangian_forces_2d")
     _warp_backed.add("lagrangian_forces_3d")
-except Exception:  # pragma: no cover - degrade to native if Warp unavailable
-    # Warp backend is required (native CUDA/C++ kernels removed).
+except Exception:  # pragma: no cover
+    # Warp backend is required (the native CUDA/C++ kernels were removed).
     raise
 
 # ── Poisson driver — WARP (Python outer driver + Warp fine-level smoother) ──
-# The native ``poisson_solve_*`` C++ driver is NOT used by this backend: the
-# ``src_warp.poisson_mult.PoissonSolver`` subclass forces the Python outer driver
-# and runs the fine-level smoother + residual on the single-source Warp kernels
-# (``warp_poisson{,_2d}``).  ``K`` stays the native ops handle for symmetry, but
-# the Warp Poisson path never dispatches through it.
+# ``poisson_mult.PoissonSolver`` runs the multigrid / MGCG outer driver in
+# Python with the smoother + residual on the single-source Warp kernels
+# (``poisson{,_2d}.py``); the CUDA-graphed all-Warp variants live in
+# ``multigrid_graph.py``.
 try:
     from lilytorch.src.kernels import poisson_2d as _wp2d  # noqa: F401
     from lilytorch.src.kernels import poisson as _wp3d  # noqa: F401
@@ -432,8 +415,8 @@ try:
         "rbgs_sweep_2d", "rbgs_sweep_3d", "jacobi_sweep_2d", "jacobi_sweep_3d",
         "mg_residual_2d", "mg_residual_3d",
     }
-except Exception:  # pragma: no cover - degrade to native if Warp unavailable
-    # Warp backend is required (native CUDA/C++ kernels removed).
+except Exception:  # pragma: no cover
+    # Warp backend is required (the native CUDA/C++ kernels were removed).
     raise
 
 #: Ops actually executing on Warp single-source kernels in this backend.

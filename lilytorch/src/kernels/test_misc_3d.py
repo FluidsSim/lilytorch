@@ -1,56 +1,43 @@
-"""Parity: Warp interp_3d / apply_bcs_3d vs native (3-D coverage fill)."""
+"""Warp interp_3d / apply_bcs_3d single-source checks: Warp CPU == Warp GPU."""
 from __future__ import annotations
 
 import pytest
 import torch
 import warp as wp
 
-try:
-    import lilytorch.src.kernels  # noqa: F401
-    from lilytorch.src.kernels.ops import interp_3d as nat_interp_3d
-    from lilytorch.src.kernels.ops import apply_bcs_3d as nat_apply_bcs_3d
-    _NATIVE = True
-except Exception:
-    _NATIVE = False
-
 from lilytorch.src.kernels.misc_3d import interp_3d_warp, apply_bcs_3d_warp
 
-SKIP_NO_NATIVE = pytest.mark.skipif(not _NATIVE, reason="native _C.so unavailable")
 SKIP_NO_CUDA = pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA")
 
 
-def _interp_problem(dev, Mx=20, My=18, Mz=16, N=3000, seed=5):
+def _interp_problem(dev, Mx=20, My=18, Mz=16, N=3000, seed=5, dtype=torch.float32):
     torch.manual_seed(seed)
     xs = torch.linspace(-0.5, 0.5, Mx); ys = torch.linspace(-0.4, 0.4, My); zs = torch.linspace(-0.3, 0.3, Mz)
     X, Y, Z = torch.meshgrid(xs, ys, zs, indexing="ij")
-    F = (torch.sin(3*X)*torch.cos(2*Y)*torch.sin(Z)).float()
+    F = (torch.sin(3*X)*torch.cos(2*Y)*torch.sin(Z)).to(dtype)
     b = (float(xs[0]), float(ys[0]), float(zs[0]))
     inv = (1.0/float(xs[1]-xs[0]), 1.0/float(ys[1]-ys[0]), 1.0/float(zs[1]-zs[0]))
-    xq = torch.rand(N)*1.2-0.6; yq = torch.rand(N)*1.0-0.5; zq = torch.rand(N)*0.8-0.4
+    xq = (torch.rand(N)*1.2-0.6).to(dtype)
+    yq = (torch.rand(N)*1.0-0.5).to(dtype)
+    zq = (torch.rand(N)*0.8-0.4).to(dtype)
     return F.to(dev), xq.to(dev), yq.to(dev), zq.to(dev), b, inv, (Mx, My, Mz)
 
 
-@SKIP_NO_NATIVE
 @SKIP_NO_CUDA
 @pytest.mark.parametrize("method", ["linear", "quadratic"])
-def test_interp_3d_gpu(method):
-    F, xq, yq, zq, b, inv, M = _interp_problem("cuda:0")
-    gn = nat_interp_3d(F, xq, yq, zq, *b, *inv, *M, method)
-    gw = interp_3d_warp(F, xq, yq, zq, *b, *inv, *M, method)
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_interp_3d_cpu_eq_gpu(method, dtype):
+    # CPU vs GPU to ~1 ULP of the working dtype: the CUDA codegen may contract
+    # the trilinear blend FMAs while the CPU path does not.
+    Fc, xc, yc, zc, b, inv, M = _interp_problem("cpu", dtype=dtype)
+    Fg, xg, yg, zg, _, _, _ = _interp_problem("cuda:0", dtype=dtype)
+    gc = interp_3d_warp(Fc, xc, yc, zc, *b, *inv, *M, method)
+    gg = interp_3d_warp(Fg, xg, yg, zg, *b, *inv, *M, method)
     wp.synchronize()
-    d = (gn.float() - gw).abs().max().item()
-    assert d < 1e-6, f"interp3d {method} maxdiff {d:.3e}"
-
-
-@SKIP_NO_NATIVE
-@pytest.mark.parametrize("method", ["linear", "quadratic"])
-def test_interp_3d_cpu(method):
-    F, xq, yq, zq, b, inv, M = _interp_problem("cpu")
-    gn = nat_interp_3d(F, xq, yq, zq, *b, *inv, *M, method)
-    gw = interp_3d_warp(F, xq, yq, zq, *b, *inv, *M, method)
-    wp.synchronize()
-    d = (gn.float() - gw).abs().max().item()
-    assert d == 0.0, f"interp3d cpu {method} maxdiff {d:.3e}"
+    assert gc.dtype == dtype
+    d = (gc - gg.cpu()).abs().max().item()
+    tol = 1e-6 if dtype == torch.float32 else 1e-14
+    assert d < tol, f"interp3d {method} {dtype} cpu vs gpu maxdiff {d:.3e}"
 
 
 def _bcs_problem(dev, Nx=20, Ny=16, Nz=14, seed=9):
@@ -70,50 +57,31 @@ def _bcs_problem(dev, Nx=20, Ny=16, Nz=14, seed=9):
     return (to(u), to(v), to(w), to(shapes), to(neu), to(dird), to(dirv), to(refd), to(refv), M)
 
 
-@SKIP_NO_NATIVE
-@SKIP_NO_CUDA
-def test_apply_bcs_3d_gpu():
-    u, v, w, shapes, neu, dird, dirv, refd, refv, M = _bcs_problem("cuda:0")
-    un, vn, wn = u.clone().contiguous(), v.clone().contiguous(), w.clone().contiguous()
+def _run_bcs(dev, f32=False):
+    u, v, w, shapes, neu, dird, dirv, refd, refv, M = _bcs_problem(dev)
+    if f32:
+        u = u.float(); v = v.float(); w = w.float()
+        dirv = dirv.float(); refv = refv.float()
     uw, vw, ww = u.clone().contiguous(), v.clone().contiguous(), w.clone().contiguous()
-    nat_apply_bcs_3d(un, vn, wn, shapes, neu, dird, dirv, refd, refv, M, M)
-    apply_bcs_3d_warp(uw, vw, ww, shapes, neu, dird, dirv, refd, refv, M)
-    wp.synchronize()
-    for a, b, nm in ((un, uw, "u"), (vn, vw, "v"), (wn, ww, "w")):
-        assert (a - b).abs().max().item() == 0.0, f"bcs3d {nm} mismatch"
-
-
-@SKIP_NO_NATIVE
-def test_apply_bcs_3d_cpu():
-    u, v, w, shapes, neu, dird, dirv, refd, refv, M = _bcs_problem("cpu")
-    un, vn, wn = u.clone().contiguous(), v.clone().contiguous(), w.clone().contiguous()
-    uw, vw, ww = u.clone().contiguous(), v.clone().contiguous(), w.clone().contiguous()
-    nat_apply_bcs_3d(un, vn, wn, shapes, neu, dird, dirv, refd, refv, M, M)
-    apply_bcs_3d_warp(uw, vw, ww, shapes, neu, dird, dirv, refd, refv, M)
-    wp.synchronize()
-    for a, b, nm in ((un, uw, "u"), (vn, vw, "v"), (wn, ww, "w")):
-        assert (a - b).abs().max().item() == 0.0, f"bcs3d cpu {nm} mismatch"
-
-
-@SKIP_NO_NATIVE
-@SKIP_NO_CUDA
-def test_apply_bcs_3d_gpu_f32():
-    """f32 dtype-generic parity (bit-exact: BC writes are copies / value sets)."""
-    u, v, w, shapes, neu, dird, dirv, refd, refv, M = _bcs_problem("cuda:0")
-    u = u.float(); v = v.float(); w = w.float(); dirv = dirv.float(); refv = refv.float()
-    un, vn, wn = u.clone().contiguous(), v.clone().contiguous(), w.clone().contiguous()
-    uw, vw, ww = u.clone().contiguous(), v.clone().contiguous(), w.clone().contiguous()
-    nat_apply_bcs_3d(un, vn, wn, shapes, neu, dird, dirv, refd, refv, M, M)
     apply_bcs_3d_warp(uw, vw, ww, shapes, neu, dird, dirv, refd, refv, M, M)
     wp.synchronize()
-    for a, b, nm in ((un, uw, "u"), (vn, vw, "v"), (wn, ww, "w")):
-        assert (a - b).abs().max().item() == 0.0, f"bcs3d f32 {nm} mismatch"
+    return uw, vw, ww
 
 
-@SKIP_NO_NATIVE
+@SKIP_NO_CUDA
+@pytest.mark.parametrize("f32", [False, True], ids=["f64", "f32"])
+def test_apply_bcs_3d_cpu_eq_gpu(f32):
+    """BC writes are copies / value sets → CPU == GPU bit-exact."""
+    rc = _run_bcs("cpu", f32)
+    rg = _run_bcs("cuda:0", f32)
+    for a, b, nm in zip(rc, rg, ("u", "v", "w")):
+        d = (a - b.cpu()).abs().max().item()
+        assert d == 0.0, f"bcs3d cpu vs gpu {nm} mismatch {d:.3e}"
+
+
 @SKIP_NO_CUDA
 def test_apply_bcs_3d_noncubic_dual_facedims():
-    """Non-cubic grid with separate (max_dim0, max_dim1) matches native exactly."""
+    """Non-cubic grid with separate (max_dim0, max_dim1): CPU == GPU exactly."""
     Nx, Ny, Nz = 24, 14, 10
     torch.manual_seed(3)
     u = torch.randn(Nx, Ny, Nz, dtype=torch.float64)
@@ -133,28 +101,17 @@ def test_apply_bcs_3d_noncubic_dual_facedims():
     refv = torch.zeros((0,), dtype=torch.float64)
     max_dim0 = int(max(Ny, Nx))
     max_dim1 = int(max(Nz, Ny))
-    to = lambda t: t.to("cuda:0")
-    args = [to(x) for x in (u, v, w, shapes, neu, dird, dirv, refd, refv)]
-    un, vn, wn = (args[0].clone().contiguous(), args[1].clone().contiguous(),
-                  args[2].clone().contiguous())
-    uw, vw, ww = (args[0].clone().contiguous(), args[1].clone().contiguous(),
-                  args[2].clone().contiguous())
-    nat_apply_bcs_3d(un, vn, wn, *args[3:9], max_dim0, max_dim1)
-    apply_bcs_3d_warp(uw, vw, ww, *args[3:9], max_dim0, max_dim1)
-    wp.synchronize()
-    for a, b, nm in ((un, uw, "u"), (vn, vw, "v"), (wn, ww, "w")):
-        assert (a - b).abs().max().item() == 0.0, f"noncubic {nm} mismatch"
 
+    def run(dev):
+        to = lambda t: t.to(dev)
+        args = [to(x) for x in (u, v, w, shapes, neu, dird, dirv, refd, refv)]
+        uw, vw, ww = (args[0].clone().contiguous(), args[1].clone().contiguous(),
+                      args[2].clone().contiguous())
+        apply_bcs_3d_warp(uw, vw, ww, *args[3:9], max_dim0, max_dim1)
+        wp.synchronize()
+        return uw, vw, ww
 
-@SKIP_NO_NATIVE
-@pytest.mark.parametrize("method", ["linear", "quadratic"])
-def test_interp_3d_cpu_f64(method):
-    """f64 dtype-generic interp parity (CPU bit-exact: no FMA contraction)."""
-    F, xq, yq, zq, b, inv, M = _interp_problem("cpu")
-    F = F.double(); xq = xq.double(); yq = yq.double(); zq = zq.double()
-    gn = nat_interp_3d(F, xq, yq, zq, *b, *inv, *M, method)
-    gw = interp_3d_warp(F, xq, yq, zq, *b, *inv, *M, method)
-    wp.synchronize()
-    assert gw.dtype == torch.float64
-    d = (gn - gw).abs().max().item()
-    assert d == 0.0, f"interp3d f64 cpu {method} maxdiff {d:.3e}"
+    rc, rg = run("cpu"), run("cuda:0")
+    for a, b, nm in zip(rc, rg, ("u", "v", "w")):
+        d = (a - b.cpu()).abs().max().item()
+        assert d == 0.0, f"noncubic cpu vs gpu {nm} mismatch {d:.3e}"

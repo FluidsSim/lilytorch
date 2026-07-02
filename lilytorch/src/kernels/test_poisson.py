@@ -1,11 +1,10 @@
 """Validate the Warp RBGS Poisson smoother.
 
-  (1) Parity vs native `rbgs_sweep_3d` — 1 sweep, interior cells.
-  (2) Manufactured-solution convergence — residual drops monotonically.
-  (3) Single-source: CPU Warp vs GPU Warp agree.
+  (1) Manufactured-solution convergence — residual drops monotonically.
+  (2) Single-source: CPU Warp vs GPU Warp agree.
 
 Run:  python -m lilytorch.src.kernels.test_poisson
-      pytest lilytorch/warp_poc/test_poisson.py -v
+      pytest lilytorch/src/kernels/test_poisson.py -v
 """
 from __future__ import annotations
 
@@ -13,18 +12,10 @@ import pytest
 import torch
 import warp as wp
 
-try:
-    import lilytorch.src.kernels  # noqa: F401
-    from lilytorch.src.kernels.ops import rbgs_sweep_3d
-    _NATIVE = True
-except Exception:
-    _NATIVE = False
-
 from lilytorch.src.kernels.poisson import WarpRBGS
 
 DEV = "cuda:0" if torch.cuda.is_available() else "cpu"
 SKIP_CUDA = pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA")
-SKIP_NATIVE = pytest.mark.skipif(not _NATIVE, reason="native _C.so unavailable")
 
 
 def _make_problem(Nx, Ny, Nz, device, seed=0):
@@ -37,33 +28,6 @@ def _make_problem(Nx, Ny, Nz, device, seed=0):
     coeffs = [0.5 + torch.rand((Nx, Ny, Nz), generator=g, device=device)
               for _ in range(6)]
     return p, f, coeffs
-
-
-@SKIP_CUDA
-@SKIP_NATIVE
-@pytest.mark.parametrize("N", [16, 32])
-def test_warp_matches_native_one_sweep(N):
-    """After 1 RBGS sweep, Warp interior == native interior (BC refresh only
-    touches ghosts, which the current sweep does not consume)."""
-    p0, f, coeffs = _make_problem(N, N, N, DEV, seed=1)
-
-    # Native
-    pn = p0.clone()
-    rbgs_sweep_3d(pn, f, *coeffs, 1e-30, 1)
-    torch.cuda.synchronize()
-
-    # Warp
-    pw = p0.clone()
-    sol = WarpRBGS(N, N, N, device=DEV)
-    sol.setup(pw, f, coeffs)
-    sol.sweep(1)
-    wp.synchronize()
-
-    int_n = pn[1:-1, 1:-1, 1:-1]
-    int_w = pw[1:-1, 1:-1, 1:-1]
-    max_abs = (int_n - int_w).abs().max().item()
-    rel = max_abs / int_n.abs().max().clamp_min(1e-8).item()
-    assert rel < 1e-5, f"N={N}: Warp vs native rel {rel:.3e} (abs {max_abs:.3e})"
 
 
 @SKIP_CUDA
@@ -108,14 +72,6 @@ def _smoke():
     print("\nWarp Poisson smoother validation")
     print("=" * 50)
     N = 24
-    if _NATIVE and torch.cuda.is_available():
-        p0, f, coeffs = _make_problem(N, N, N, DEV, seed=1)
-        pn = p0.clone(); rbgs_sweep_3d(pn, f, *coeffs, 1e-30, 1); torch.cuda.synchronize()
-        pw = p0.clone(); s = WarpRBGS(N, N, N, DEV); s.setup(pw, f, coeffs); s.sweep(1); wp.synchronize()
-        rel = ((pn - pw)[1:-1, 1:-1, 1:-1]).abs().max().item() / pn[1:-1,1:-1,1:-1].abs().max().item()
-        print(f"  native parity (1 sweep, interior): rel err {rel:.2e}  "
-              f"{'PASS' if rel < 1e-5 else 'FAIL'}")
-
     p, f, coeffs = _make_problem(N, N, N, DEV, seed=2)
     s = WarpRBGS(N, N, N, DEV); s.setup(p, f, coeffs)
     r0 = s.residual_norm()

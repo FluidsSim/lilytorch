@@ -1,4 +1,4 @@
-"""Scattered-point interpolators backed by native CUDA/CPU kernels.
+"""Scattered-point interpolators backed by the Warp ``interp_{2,3}d`` kernels.
 
 Drop-in replacement for pytorch_interpolation's RegularGridInterpolator,
 RegularGridInterpolatorAutomatic, and RegularGridInterpolator3D.

@@ -1,19 +1,16 @@
-"""Advection parity tests.
+"""Advection Warp-kernel tests.
 
 Two layers:
   (1) First-order upwind Warp kernel vs a PyTorch reference (CPU+GPU) — the
       original viability demo.
-  (2) HIGH-ORDER LIMITER port (`advect_flux_add_warp`) vs the **native** fused
-      CUDA op ``torch.ops.lilytorch_kernels.advect_flux_add`` — the real oracle.
+  (2) HIGH-ORDER LIMITER port (`advect_flux_add_warp`) single-source check:
+      the SAME @wp.kernel on CPU == GPU, plus in-place accumulate semantics.
       Covers all five schemes (QUICK / ABDQUICKEST / vanLeer / CDS / CUBISTA),
       2-D and 3-D, every (velocity component i, direction d) pair (so the
       rhs-stride caveat — face_dim ≠ outermost in rhs — is exercised for d>0),
       built from the genuine strided slice views of advection.py.
 
-      Native op is CUDA-only → GPU takes bit-parity vs native; CPU is validated
-      by Warp-CPU == Warp-GPU (HANDOFF lesson 10).
-
-Run:  pytest lilytorch/warp_poc/test_advection.py -v
+Run:  pytest lilytorch/src/kernels/test_advection.py -v
       python -m lilytorch.src.kernels.test_advection
 """
 from __future__ import annotations
@@ -35,16 +32,9 @@ from lilytorch.src.advection import (
     _inner,
 )
 
-try:
-    import lilytorch.src.kernels  # noqa: F401  (registers the native ops)
-    _NATIVE = hasattr(torch.ops.lilytorch_kernels, "advect_flux_add")
-except Exception:  # pragma: no cover
-    _NATIVE = False
-
-SKIP_NO_NATIVE = pytest.mark.skipif(not _NATIVE, reason="native _C.so unavailable")
 SKIP_NO_CUDA = pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA")
 
-# scheme_id → name (matches _CUDA_SCHEME_IDS / advection_flux.cu enum)
+# scheme_id → name (matches _CUDA_SCHEME_IDS in advection.py)
 _SCHEMES = {0: "quick", 1: "abdquickest", 2: "vanLeer", 3: "cds", 4: "cubista"}
 
 
@@ -91,7 +81,7 @@ def test_upwind_matches_reference_cpu():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  (2) high-order limiter parity vs the native advect_flux_add op
+#  (2) high-order limiter single-source + accumulate semantics
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _make_vel(ndim, N, dev, seed=11):
@@ -109,16 +99,6 @@ def _courant(scheme_id):
     return 0.37 if scheme_id == 1 else 0.0
 
 
-def _native(vel, i, d, scheme_id, dt_dh, ndim):
-    inner = _inner(ndim)
-    fv = _face_vel(vel, i, d, ndim)
-    p = _field_for_flux(vel[i], d, ndim)
-    rhs = torch.zeros_like(vel[i][inner])  # contiguous, ORIGINAL dim order
-    torch.ops.lilytorch_kernels.advect_flux_add(
-        fv, p, rhs, float(dt_dh), _courant(scheme_id), scheme_id, d)
-    return rhs
-
-
 def _warp(vel, i, d, scheme_id, dt_dh, ndim):
     inner = _inner(ndim)
     fv = _face_vel(vel, i, d, ndim)
@@ -129,27 +109,6 @@ def _warp(vel, i, d, scheme_id, dt_dh, ndim):
     return rhs
 
 
-@SKIP_NO_NATIVE
-@SKIP_NO_CUDA
-@pytest.mark.parametrize("ndim", [2, 3])
-@pytest.mark.parametrize("scheme_id", sorted(_SCHEMES))
-def test_flux_add_parity_vs_native_gpu(ndim, scheme_id):
-    """Warp vs native CUDA over every (i, d) pair — bit-exact float64."""
-    N = 24 if ndim == 3 else 48
-    dev = "cuda:0"
-    vel = _make_vel(ndim, N, dev)
-    dt_dh = 0.123
-    worst = 0.0
-    for i, d in itertools.product(range(ndim), range(ndim)):
-        ref = _native(vel, i, d, scheme_id, dt_dh, ndim)
-        got = _warp(vel, i, d, scheme_id, dt_dh, ndim)
-        err = (got - ref).abs().max().item()
-        worst = max(worst, err)
-    assert worst == 0.0, (
-        f"{_SCHEMES[scheme_id]} {ndim}-D: warp vs native max abs {worst:.3e} (want bit-exact)")
-
-
-@SKIP_NO_NATIVE
 @SKIP_NO_CUDA
 def test_flux_add_accumulates_in_place():
     """The op must ADD into a pre-seeded rhs (not overwrite), like production."""
@@ -162,19 +121,19 @@ def test_flux_add_accumulates_in_place():
     fv = _face_vel(vel, i, d, ndim)
     p = _field_for_flux(vel[i], d, ndim)
 
-    ref = seed_rhs.clone()
-    torch.ops.lilytorch_kernels.advect_flux_add(fv, p, ref, float(dt_dh), 0.0, sid, d)
+    delta = _warp(vel, i, d, sid, dt_dh, ndim)  # zero-seeded → pure flux term
     got = seed_rhs.clone()
     advect_flux_add_warp(fv, p, got, dt_dh, 0.0, sid, d)
     wp.synchronize()
-    assert (got - ref).abs().max().item() == 0.0
+    # 1-ULP f64 slack: the kernel fuses seed + dt_dh·flux in one expression,
+    # while the reference adds them in two rounding steps.
+    assert (got - (seed_rhs + delta)).abs().max().item() < 1e-15
 
 
 @pytest.mark.parametrize("ndim", [2, 3])
 @pytest.mark.parametrize("scheme_id", sorted(_SCHEMES))
 def test_flux_add_warp_cpu_equals_gpu(ndim, scheme_id):
-    """Single-source check: the SAME @wp.kernel on CPU == GPU (native is
-    CUDA-only, so this is how CPU is validated — HANDOFF lesson 10)."""
+    """Single-source check: the SAME @wp.kernel on CPU == GPU."""
     if not torch.cuda.is_available():
         pytest.skip("no CUDA")
     N = 20 if ndim == 3 else 40
@@ -194,17 +153,3 @@ if __name__ == "__main__":
         out, ref = _run_upwind(dev)
         rel = (out - ref).abs().max().item() / ref.abs().max().item()
         print(f"  upwind {dev:7s}: rel {rel:.2e}  {'PASS' if rel < 1e-5 else 'FAIL'}")
-
-    if _NATIVE and torch.cuda.is_available():
-        print("\n  high-order limiter parity vs native (GPU, float64):")
-        for ndim in (2, 3):
-            N = 24 if ndim == 3 else 48
-            vel = _make_vel(ndim, N, "cuda:0")
-            for sid, name in _SCHEMES.items():
-                worst = 0.0
-                for i, d in itertools.product(range(ndim), range(ndim)):
-                    ref = _native(vel, i, d, sid, 0.123, ndim)
-                    got = _warp(vel, i, d, sid, 0.123, ndim)
-                    worst = max(worst, (got - ref).abs().max().item())
-                print(f"    {ndim}-D {name:12s}: max abs {worst:.2e}  "
-                      f"{'BIT-EXACT' if worst == 0.0 else 'DIFF'}")

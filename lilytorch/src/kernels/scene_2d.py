@@ -1,10 +1,10 @@
-"""Synthetic 2-D scene builder shared by the 2-D Warp parity tests/benches.
+"""Synthetic 2-D scene builder shared by the 2-D Warp tests/benches.
 
-Builds all tensors needed by the native `body_update_2d` /
-`bdim_forcing_2d` ops AND by `warp_kernels_2d.WarpStreamingSDF2D`, using disc
-(circle) SDF tables on a uniform body grid — no FARMS/MuJoCo dependency.
+Builds all tensors needed by the `body_update_2d` / `bdim_forcing_2d` ops AND
+by `streaming_sdf_2d.WarpStreamingSDF2D`, using disc (circle) SDF tables on a
+uniform body grid — no FARMS/MuJoCo dependency.
 
-2-D packed layouts (match `streaming_sdf_2d.cu`):
+2-D packed layouts (match `streaming_sdf_2d.py`):
   body_shapes : [B,2]  = (Mx, My)
   body_meta   : [B,7]  = (bx0, by0, bx_last, by_last, inv_dx, inv_dy, inv_vol)
   kin         : [B,11] = R_T(2x2 row-major,4) + bp(2) + cm(2) + lv(2) + om(1)
@@ -101,7 +101,7 @@ def make_synthetic_scene_2d(
         F_flat=t(F_flat_np), F_offsets=t(F_offsets_np[:B]),
         body_shapes=t(body_shapes_np), body_meta=t(body_meta_np),
         kin=t(kin_np), aabb_lo=t(aabb_lo_np), aabb_dim=t(aabb_dim_np),
-        # native output buffers (flat, viewed as (Ngx,Ngy) at call site)
+        # output buffers (flat, viewed as (Ngx,Ngy) at call site)
         sdf_cc=torch.full((N,), FAR, dtype=dtype, device=device),
         sdf_u=torch.full((N,), FAR, dtype=dtype, device=device),
         sdf_v=torch.full((N,), FAR, dtype=dtype, device=device),

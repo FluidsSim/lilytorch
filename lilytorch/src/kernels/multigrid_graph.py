@@ -1,15 +1,15 @@
 """Variable-coefficient, CUDA-graph-captured Warp multigrid (3-D + 2-D).
 
-Closes the Item-2 Poisson perf gap.  The Item-2 driver (`src_warp.poisson_mult`)
+Closes the Item-2 Poisson perf gap.  The ``poisson_mult.PoissonSolver`` driver
 runs the multigrid OUTER loop in Python with a per-cycle ``.item()`` residual
-sync — correct + native-independent but 5–20× slower than the native C++
-``poisson_solve_*`` which fuses the whole solve into one sync-free host launch.
+sync — correct but launch-bound, where the retired native C++ ``poisson_solve_*``
+fused the whole solve into one sync-free host launch.
 
 This module rebuilds the V-cycle as an **all-Warp** geometric multigrid (smoother
 + residual + restriction + prolongation all on ``@wp.kernel``s, no torch in the
 cycle) so the entire fixed-cycle solve can be captured into ONE Warp CUDA graph
 and replayed per step with a single host launch — the Warp analogue of the
-native GU6 ``tol<0`` sync-free path.
+retired native GU6 ``tol<0`` sync-free path.
 
 Differences vs the demo ``warp_multigrid.WarpVCycle`` (square / f64 / constant
 coefficient):
@@ -20,9 +20,9 @@ coefficient):
   * **dtype-generic** — f32 + f64 (``wp.overload``).
   * **fixed cycle count** — no early-exit, no host sync → graph-capturable.
 
-Parity vs native is residual-level (same converged residual), matching the
-Item-2 contract.  Sign convention: ``mg_residual`` returns ``f + A·p`` (native
-``mg_residual`` sign), self-consistent through the restriction → coarse-RHS path.
+Parity vs the ungraphed driver is residual-level (same converged residual),
+matching the Item-2 contract.  Sign convention: ``mg_residual`` returns
+``f + A·p``, self-consistent through the restriction → coarse-RHS path.
 """
 from __future__ import annotations
 

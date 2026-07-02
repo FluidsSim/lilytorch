@@ -1,15 +1,17 @@
-"""Warp vs native kernel viability benchmark.
+"""Warp streaming-SDF benchmark + synthetic 3-D scene builder.
 
-Measures the streaming-SDF hot path (body_update) across three modes:
-  1. Native CUDA  — torch.ops.lilytorch_kernels.body_update_3d
-  2. Warp eager   — 3 separate wp.launch calls (init_keys, fanned, decode)
-  3. Warp + graph — single graph replay (captures the 3 launches)
+Measures the streaming-SDF hot path (body_update) across the Warp execution
+designs:
+  1. Warp eager      — per-body wp.launch calls
+  2. Warp + graph    — sequential design, single CUDA-graph replay
+  3. Warp fan-graph  — fanned all-body design (const in B), graph replay
+
+``make_synthetic_scene`` / ``setup_warp_runner`` are also imported by the
+kernel test files (test_parity.py, test_forces.py).
 
 Metrics reported
 ────────────────
   * Wall-clock ms/step (GPU-synchronised)
-  * Speedup relative to native
-  * Launch count (proxy for Python host overhead)
 
 Usage
 ─────
@@ -22,22 +24,12 @@ match the production format, so no FARMS/MuJoCo dependency.
 from __future__ import annotations
 
 import argparse
-import math
 import time
 from typing import Dict, List, Tuple
 
 import numpy as np
 import torch
 import warp as wp
-
-# Import native kernel (requires _C.so to be built)
-try:
-    import lilytorch.src.kernels  # noqa: F401 — registers ops
-    from lilytorch.src.kernels.ops import body_update_3d
-    _NATIVE_AVAILABLE = True
-except Exception as e:
-    print(f"[warn] native kernel unavailable: {e}")
-    _NATIVE_AVAILABLE = False
 
 from lilytorch.src.kernels.streaming_sdf import WarpStreamingSDF
 
@@ -179,7 +171,7 @@ def make_synthetic_scene(
     body_v = torch.zeros(Ngx * Ngy * Ngz, dtype=dtype, device=device)
     body_w = torch.zeros(Ngx * Ngy * Ngz, dtype=dtype, device=device)
 
-    # Key scratch (for native kernel)
+    # Key scratch (for the facade body_update op)
     key_cc_t = torch.empty(dirty_vol, dtype=torch.int64, device=device)
     key_u_t  = torch.empty(dirty_vol, dtype=torch.int64, device=device)
     key_v_t  = torch.empty(dirty_vol, dtype=torch.int64, device=device)
@@ -205,46 +197,6 @@ def make_synthetic_scene(
         key_cc=key_cc_t, key_u=key_u_t, key_v=key_v_t, key_w=key_w_t,
         num_u=num_u_t, num_v=num_v_t, num_w=num_w_t,
         den_u=den_u_t, den_v=den_v_t, den_w=den_w_t,
-    )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  Native kernel runner
-# ─────────────────────────────────────────────────────────────────────────────
-
-def run_native(sc: Dict, *, reset_outputs: bool = True):
-    """Run the native body_update_3d for one step."""
-    if not _NATIVE_AVAILABLE:
-        return
-    if reset_outputs:
-        sc["sdf_cc"].fill_(1e4);  sc["sdf_u"].fill_(1e4)
-        sc["sdf_v"].fill_(1e4);  sc["sdf_w"].fill_(1e4)
-        sc["body_u"].zero_();    sc["body_v"].zero_();   sc["body_w"].zero_()
-
-    di0, dj0, dk0, dAi, dAj, dAk = sc["dirty_bounds"]
-
-    # Native expects 3D tensors; reshape flat outputs
-    Ngx, Ngy, Ngz = sc["Ngx"], sc["Ngy"], sc["Ngz"]
-
-    body_update_3d(
-        sc["F_flat"], sc["F_offsets"],
-        sc["body_shapes"], sc["body_meta"], sc["kin"],
-        sc["aabb_lo"], sc["aabb_dim"],
-        sc["gx"], sc["gy"], sc["gz"],
-        float(sc["h"]), int(sc["max_vol"]),
-        sc["sdf_cc"].view(Ngx, Ngy, Ngz),
-        sc["sdf_u"].view(Ngx, Ngy, Ngz),
-        sc["sdf_v"].view(Ngx, Ngy, Ngz),
-        sc["sdf_w"].view(Ngx, Ngy, Ngz),
-        sc["body_u"].view(Ngx, Ngy, Ngz),
-        sc["body_v"].view(Ngx, Ngy, Ngz),
-        sc["body_w"].view(Ngx, Ngy, Ngz),
-        sc["key_cc"], sc["key_u"], sc["key_v"], sc["key_w"],
-        0,   # interp_method: trilinear
-        di0, dj0, dk0, dAi, dAj, dAk,
-        sc["num_u"], sc["num_v"], sc["num_w"],
-        sc["den_u"], sc["den_v"], sc["den_w"],
-        0.0,  # blend_eps=0
     )
 
 
@@ -305,8 +257,8 @@ def time_ms(fn, warmup: int = 3, reps: int = 20) -> float:
 
 def run_benchmark(grids: List[int], bodies: List[int], device: str = "cuda:0"):
     print(f"\n{'─'*80}")
-    print(f"  Warp streaming-SDF viability benchmark  (device={device})")
-    print(f"  Sequential per-body Warp kernel (B launches) vs native fanned 3-pass")
+    print(f"  Warp streaming-SDF benchmark  (device={device})")
+    print(f"  Sequential per-body Warp kernel (B launches) vs fanned all-body design")
     print(f"{'─'*80}")
 
     for N in grids:
@@ -314,16 +266,6 @@ def run_benchmark(grids: List[int], bodies: List[int], device: str = "cuda:0"):
         for B in bodies:
             sc = make_synthetic_scene(Ngx, Ngy, Ngz, B, device=device)
             grid_str = f"{Ngx}×{Ngy}×{Ngz}"
-
-            # ── Native kernel ──────────────────────────────────────────────
-            # Timing: pure kernel cost, no pre-reset (native does its own init
-            # in Pass 1 of the 3-pass pipeline; Warp equivalent needs external
-            # reset).  We measure both variants below.
-            if _NATIVE_AVAILABLE:
-                t_native = time_ms(lambda: run_native(sc, reset_outputs=False))
-                t_native_reset = time_ms(lambda: run_native(sc, reset_outputs=True))
-            else:
-                t_native = t_native_reset = float("nan")
 
             # ── Warp eager ─────────────────────────────────────────────────
             wsdf, wp_out = setup_warp_runner(sc, device)
@@ -386,30 +328,26 @@ def run_benchmark(grids: List[int], bodies: List[int], device: str = "cuda:0"):
             t_fan_reset = time_ms(_warp_fan_with_reset)
 
             # ── Print rows ─────────────────────────────────────────────────
-            def ms(v): return f"{v:.3f} ms" if not math.isnan(v) else "  n/a    "
-            def sp(t): return f"{t / t_native:.2f}×" if not math.isnan(t_native) else "  n/a"
-            def sp2(t): return f"{t / t_native_reset:.2f}×" if not math.isnan(t_native_reset) else "  n/a"
+            def ms(v): return f"{v:.3f} ms"
 
-            print(f"  {grid_str:>16}  {B:>6}  kernel-only: native={ms(t_native)}  "
-                  f"seq-graph={ms(t_graph)} ({sp(t_graph)})  "
-                  f"fan-graph={ms(t_fan)} ({sp(t_fan)})  "
-                  f"[seq-eager={ms(t_eager)} ({sp(t_eager)})]")
-            print(f"  {grid_str:>16}  {B:>6}  with-reset:  native={ms(t_native_reset)}  "
-                  f"seq-graph={ms(t_graph_reset)} ({sp2(t_graph_reset)})  "
-                  f"fan-graph={ms(t_fan_reset)} ({sp2(t_fan_reset)})")
+            print(f"  {grid_str:>16}  {B:>6}  kernel-only: "
+                  f"seq-graph={ms(t_graph)}  fan-graph={ms(t_fan)}  "
+                  f"[seq-eager={ms(t_eager)}]")
+            print(f"  {grid_str:>16}  {B:>6}  with-reset:  "
+                  f"seq-graph={ms(t_graph_reset)}  fan-graph={ms(t_fan_reset)}  "
+                  f"[seq-eager={ms(t_eager_reset)}]")
             print()
 
     print(f"{'─'*80}\n")
     print("Notes:")
-    print("  kernel-only : pure kernel time; native does an internal Pass-1 reset")
+    print("  kernel-only : pure kernel time (outputs pre-reset outside the timer)")
     print("  with-reset  : includes the required pre-step output reset (7 fill/zero ops)")
     print("  seq-graph   : sequential per-body Warp (B launches), CUDA-graph replay")
-    print("  fan-graph   : fanned all-body Warp (2 launches, const in B), CUDA-graph replay")
-    print("  x.xx× means Warp is x.xx times slower than native (<1.00× = Warp faster)\n")
+    print("  fan-graph   : fanned all-body Warp (2 launches, const in B), CUDA-graph replay\n")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Warp vs native streaming-SDF benchmark")
+    parser = argparse.ArgumentParser(description="Warp streaming-SDF benchmark")
     parser.add_argument("--grids",  type=int, nargs="+", default=[64, 128])
     parser.add_argument("--bodies", type=int, nargs="+", default=[3, 9])
     parser.add_argument("--device", default="cuda:0")

@@ -1,7 +1,9 @@
 """Single-source Warp kernels for BDIM-IB CFD.
 
-Every op below is backed by an ``@wp.kernel`` port in ``src/kernels/warp_*.py``
-(one source runs on CPU and CUDA), exposed through the :mod:`~.facade` module.
+Every op below is backed by an ``@wp.kernel`` port in this package
+(``streaming_sdf{,_2d}.py``, ``bdim{,_2d}.py``, ``forces.py``, ``misc_{2,3}d.py``,
+``advection.py``, ``cvof.py``, ``poisson*.py``, ``multigrid*.py``) — one kernel
+source runs on CPU and CUDA — and is exposed through the :mod:`~.facade` module.
 The hand-written CUDA/C++ ``_C.so`` extension has been retired.
 
 3-D ops:
@@ -14,8 +16,6 @@ The hand-written CUDA/C++ ``_C.so`` extension has been retired.
 """
 import torch  # noqa: F401
 
-# Warp single-source kernels (facade) — these op names dispatch to the
-# ``@wp.kernel`` ports in ``src/kernels/warp_*.py``.
 from .facade import (
     body_update_3d,
     bdim_forcing_3d,

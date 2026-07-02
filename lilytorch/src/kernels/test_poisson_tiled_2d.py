@@ -1,8 +1,8 @@
-"""Tiled fused Jacobi (shared-mem multi-sweep) — parity vs native + convergence.
+"""Tiled fused Jacobi (shared-mem multi-sweep) — reference parity + convergence.
 
 Confirms the smoother gap CLOSES with the Warp 1.14 tile API:
-  - nsmoothing=1: bit-close to native jacobi_sweep_2d (both = global Jacobi, no
-    stale halos used in the first sweep → tiling-independent), float32 ULP.
+  - nsmoothing=1: bit-close to a torch global-Jacobi reference (no stale halos
+    used in the first sweep → tiling-independent), float32 ULP.
   - multi-sweep: residual converges geometrically (valid MG smoother).
 GPU-only (the tile/shared-mem path is CUDA).
 """
@@ -12,17 +12,9 @@ import pytest
 import torch
 import warp as wp
 
-try:
-    import lilytorch.src.kernels  # noqa: F401
-    from lilytorch.src.kernels.ops import jacobi_sweep_2d as nat_jac
-    _NATIVE = True
-except Exception:
-    _NATIVE = False
-
 from lilytorch.src.kernels.poisson_tiled_2d import (
     WarpTiledJacobi2D, WarpTiledRBGS2D, TILE)
 
-SKIP_NO_NATIVE = pytest.mark.skipif(not _NATIVE, reason="native _C.so unavailable")
 SKIP_NO_CUDA = pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA")
 
 
@@ -35,25 +27,26 @@ def _problem(N, seed=11):
     return p, f, c
 
 
-@SKIP_NO_NATIVE
 @SKIP_NO_CUDA
 @pytest.mark.parametrize("N", [64, 256])
 @pytest.mark.parametrize("w", [1.0, 0.8])
-def test_tiled_jacobi_ns1_matches_native(N, w):
-    """1 sweep = global Jacobi (no stale halos) → matches native to float32 ULP,
-    independent of the tile decomposition."""
+def test_tiled_jacobi_ns1_matches_reference(N, w):
+    """1 sweep = global Jacobi (no stale halos) → matches a torch global-Jacobi
+    reference to float32 ULP, independent of the tile decomposition."""
     p, f, c = _problem(N)
-    # Apply Neumann ghosts so both paths see the same domain boundary (native
-    # applies it internally; the tiled load reads p's ghosts as-is).  Inter-tile
-    # halos are already the true global values for a single sweep.
+    # Apply Neumann ghosts so both paths see the same domain boundary (the
+    # tiled load reads p's ghosts as-is).  Inter-tile halos are already the
+    # true global values for a single sweep.
     p[0, :] = p[1, :]; p[-1, :] = p[-2, :]; p[:, 0] = p[:, 1]; p[:, -1] = p[:, -2]
-    pn = p.clone()
-    nat_jac(pn, f, *c, 1e-30, w, 1)
-    torch.cuda.synchronize()
+    cp0, cm0, cp1, cm1 = c
+    J = cp0 + cm0 + cp1 + cm1
+    U = (-f + cp0 * p[2:, 1:-1] + cm0 * p[:-2, 1:-1]
+         + cp1 * p[1:-1, 2:] + cm1 * p[1:-1, :-2]) / J
+    ref = (1.0 - w) * p[1:-1, 1:-1] + w * U
     pw = WarpTiledJacobi2D(N).smooth(p, f, c, 1, w)
     wp.synchronize()
-    d = (pn[1:-1, 1:-1] - pw[1:-1, 1:-1]).abs().max().item()
-    assert d < 1e-5, f"N={N} w={w} tiled-jacobi ns=1 vs native maxdiff {d:.2e}"
+    d = (ref - pw[1:-1, 1:-1]).abs().max().item()
+    assert d < 1e-5, f"N={N} w={w} tiled-jacobi ns=1 vs ref maxdiff {d:.2e}"
 
 
 def _torch_rbgs_singletile(p, f, c, nsweep):

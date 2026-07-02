@@ -320,10 +320,10 @@ def _flat(t: torch.Tensor):
 
 
 def advect_flux_add_warp(fv_t, p_t, rhs_t, dt_dh, C_courant, scheme_id, face_dim):
-    """Warp replica of ``torch.ops.lilytorch_kernels.advect_flux_add``.
+    """Warp port of the retired native ``advect_flux_add`` op.
 
     Accumulates ``rhs_t[i_fd] += dt_dh * (F_left - F_right)`` in place for one
-    (velocity component, spatial direction) pair.  Faithful to the native C++
+    (velocity component, spatial direction) pair.  Faithful to the original C++
     wrapper's stride extraction (transverse dims gathered in order, skipping
     face_dim; rhs strides taken in ORIGINAL grid-dim order).
     """

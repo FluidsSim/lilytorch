@@ -1,12 +1,11 @@
-"""Parity tests: Warp multigrid transfer ops vs native, + a Warp V-cycle.
+"""Warp multigrid ops: CPU == GPU single-source checks + a Warp V-cycle.
 
-Validates the four ported building blocks against the native CUDA ops (the
-parity oracle) on manufactured fields, on CPU and GPU, plus Warp CPU == Warp GPU
-(single source).  Finally drives the assembled ``WarpVCycle`` on a manufactured
+Exercises the ported building blocks (smoother, residual, transfers) on
+manufactured fields, then drives the assembled ``WarpVCycle`` on a
 constant-coefficient Neumann-Laplacian Poisson and asserts the residual
-contracts geometrically (the integration check the HANDOFF asks for).
+contracts geometrically.
 
-Run:  pytest lilytorch/warp_poc/test_multigrid.py -v
+Run:  pytest lilytorch/src/kernels/test_multigrid.py -v
       python -m lilytorch.src.kernels.test_multigrid
 """
 from __future__ import annotations
@@ -14,26 +13,12 @@ from __future__ import annotations
 import pytest
 import torch
 
-try:
-    import lilytorch.src.kernels  # noqa: F401
-    from lilytorch.src.kernels.ops import (
-        jacobi_sweep_3d as nat_jacobi,
-        mg_residual_3d as nat_residual,
-        restrict_residual_3d as nat_rr,
-        restrict_face_3d as nat_rf,
-        prolongate_add_3d as nat_pa,
-    )
-    _NATIVE = True
-except Exception:
-    _NATIVE = False
-
 from lilytorch.src.kernels.multigrid import (
     jacobi_sweep_3d_warp, mg_residual_3d_warp,
     restrict_residual_3d_warp, restrict_face_3d_warp, prolongate_add_3d_warp,
     WarpVCycle,
 )
 
-SKIP_NO_NATIVE = pytest.mark.skipif(not _NATIVE, reason="native _C.so unavailable")
 SKIP_NO_CUDA = pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA")
 
 JCAP = 1e-30
@@ -49,82 +34,7 @@ def _prob(N, dev):
 
 
 def _maxerr(a, b):
-    return (a - b).abs().max().item()
-
-
-# ─── residual parity ─────────────────────────────────────────────────────────
-
-@SKIP_NO_NATIVE
-@SKIP_NO_CUDA
-def test_residual_gpu():
-    p, f, *c = _prob(32, "cuda:0")
-    rn = nat_residual(p, f, *c, JCAP)
-    rw = mg_residual_3d_warp(p, f, *c, JCAP)
-    assert _maxerr(rn, rw) == 0.0, _maxerr(rn, rw)
-
-
-# (native mg_residual_3d / transfer ops are CUDA-only — CPU is validated by the
-#  Warp CPU==GPU single-source check below, not against a native CPU oracle.)
-
-
-# ─── jacobi parity (interior only — ghosts are BC bookkeeping) ───────────────
-
-@SKIP_NO_NATIVE
-@SKIP_NO_CUDA
-@pytest.mark.parametrize("nsmooth", [1, 2, 3])
-def test_jacobi_gpu(nsmooth):
-    p, f, *c = _prob(32, "cuda:0")
-    pn = p.clone(); pw = p.clone()
-    nat_jacobi(pn, f, *c, JCAP, 0.8, nsmooth)
-    jacobi_sweep_3d_warp(pw, f, *c, JCAP, 0.8, nsmooth)
-    err = _maxerr(pn[1:-1, 1:-1, 1:-1], pw[1:-1, 1:-1, 1:-1])
-    assert err < 1e-13, f"nsmooth={nsmooth}: {err:.2e}"
-
-
-# ─── restriction parity ──────────────────────────────────────────────────────
-
-@SKIP_NO_NATIVE
-@SKIP_NO_CUDA
-def test_restrict_residual_gpu():
-    N = 32; Nc = N // 2
-    r = torch.randn(N, N, N, dtype=torch.float64, device="cuda:0")
-    rcn = torch.empty(Nc, Nc, Nc, dtype=torch.float64, device="cuda:0")
-    rcw = torch.empty_like(rcn)
-    nat_rr(r, rcn)
-    restrict_residual_3d_warp(r, rcw)
-    assert _maxerr(rcn, rcw) == 0.0, _maxerr(rcn, rcw)
-
-
-@SKIP_NO_NATIVE
-@SKIP_NO_CUDA
-@pytest.mark.parametrize("face_dim", [0, 1, 2])
-def test_restrict_face_gpu(face_dim):
-    # fine face shape: +1 in face_dim
-    Nc = 16
-    shp = [2 * Nc, 2 * Nc, 2 * Nc]
-    shp[face_dim] = 2 * Nc + 1
-    src = torch.randn(*shp, dtype=torch.float64, device="cuda:0")
-    cshp = [Nc, Nc, Nc]
-    cshp[face_dim] = Nc + 1
-    dstn = torch.empty(*cshp, dtype=torch.float64, device="cuda:0")
-    dstw = torch.empty_like(dstn)
-    nat_rf(src, dstn, face_dim)
-    restrict_face_3d_warp(src, dstw, face_dim)
-    assert _maxerr(dstn, dstw) == 0.0, _maxerr(dstn, dstw)
-
-
-# ─── prolongation parity ─────────────────────────────────────────────────────
-
-@SKIP_NO_NATIVE
-@SKIP_NO_CUDA
-def test_prolongate_gpu():
-    Nc = 16; Nf = 32
-    ec = torch.randn(Nc + 2, Nc + 2, Nc + 2, dtype=torch.float64, device="cuda:0")
-    p0 = torch.randn(Nf + 2, Nf + 2, Nf + 2, dtype=torch.float64, device="cuda:0")
-    pn = p0.clone(); pw = p0.clone()
-    nat_pa(ec, pn)
-    prolongate_add_3d_warp(ec, pw)
-    assert _maxerr(pn, pw) == 0.0, _maxerr(pn, pw)
+    return (a.cpu() - b.cpu()).abs().max().item()
 
 
 # ─── CPU == GPU (single source) ──────────────────────────────────────────────
@@ -135,7 +45,65 @@ def test_cpu_eq_gpu_residual():
     rc = mg_residual_3d_warp(p, f, *c, JCAP)
     pg = [t.cuda() for t in [p, f, *c]]
     rg = mg_residual_3d_warp(pg[0], pg[1], *pg[2:], JCAP)
-    assert _maxerr(rc, rg.cpu()) < 1e-12
+    assert _maxerr(rc, rg) < 1e-12
+
+
+@SKIP_NO_CUDA
+@pytest.mark.parametrize("nsmooth", [1, 2, 3])
+def test_cpu_eq_gpu_jacobi(nsmooth):
+    p, f, *c = _prob(24, "cpu")
+    pc = p.clone()
+    jacobi_sweep_3d_warp(pc, f, *c, JCAP, 0.8, nsmooth)
+    pg = [t.cuda() for t in [p, f, *c]]
+    pgc = pg[0].clone()
+    jacobi_sweep_3d_warp(pgc, pg[1], *pg[2:], JCAP, 0.8, nsmooth)
+    err = _maxerr(pc[1:-1, 1:-1, 1:-1], pgc[1:-1, 1:-1, 1:-1])
+    assert err < 1e-12, f"nsmooth={nsmooth}: {err:.2e}"
+
+
+@SKIP_NO_CUDA
+def test_cpu_eq_gpu_restrict_residual():
+    N = 32; Nc = N // 2
+    torch.manual_seed(3)
+    r = torch.randn(N, N, N, dtype=torch.float64)
+    rc = torch.empty(Nc, Nc, Nc, dtype=torch.float64)
+    restrict_residual_3d_warp(r, rc)
+    rg = torch.empty(Nc, Nc, Nc, dtype=torch.float64, device="cuda:0")
+    restrict_residual_3d_warp(r.cuda(), rg)
+    assert _maxerr(rc, rg) == 0.0
+
+
+@SKIP_NO_CUDA
+@pytest.mark.parametrize("face_dim", [0, 1, 2])
+def test_cpu_eq_gpu_restrict_face(face_dim):
+    # fine face shape: +1 in face_dim
+    Nc = 16
+    shp = [2 * Nc, 2 * Nc, 2 * Nc]
+    shp[face_dim] = 2 * Nc + 1
+    torch.manual_seed(4)
+    src = torch.randn(*shp, dtype=torch.float64)
+    cshp = [Nc, Nc, Nc]
+    cshp[face_dim] = Nc + 1
+    dc = torch.empty(*cshp, dtype=torch.float64)
+    restrict_face_3d_warp(src, dc, face_dim)
+    dg = torch.empty(*cshp, dtype=torch.float64, device="cuda:0")
+    restrict_face_3d_warp(src.cuda(), dg, face_dim)
+    assert _maxerr(dc, dg) == 0.0
+
+
+@SKIP_NO_CUDA
+def test_cpu_eq_gpu_prolongate():
+    Nc = 16; Nf = 32
+    torch.manual_seed(6)
+    ec = torch.randn(Nc + 2, Nc + 2, Nc + 2, dtype=torch.float64)
+    p0 = torch.randn(Nf + 2, Nf + 2, Nf + 2, dtype=torch.float64)
+    pc = p0.clone()
+    prolongate_add_3d_warp(ec, pc)
+    pg = p0.clone().cuda()
+    prolongate_add_3d_warp(ec.cuda(), pg)
+    # 1-ULP f64 FMA-contraction difference between the CPU and CUDA codegen
+    # on the trilinear weighted sum.
+    assert _maxerr(pc, pg) < 1e-14
 
 
 # ─── V-cycle convergence (integration of the ported ops) ─────────────────────
