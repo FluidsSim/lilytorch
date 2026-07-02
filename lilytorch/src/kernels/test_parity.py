@@ -1,7 +1,7 @@
 """Correctness parity tests: Warp streaming SDF vs native CUDA kernel.
 
 Checks that the Warp 3-pass implementation produces outputs that match the
-native streaming_sdf_stag_3d_multi within tight tolerances:
+native body_update_3d within tight tolerances:
   - sdf_cc / sdf_u / sdf_v / sdf_w : f32 parity; SDF is fp32-encoded in the
     packed key → round-trip precision loss ≤ 1 ULP (rel < 1e-6)
   - body_u / body_v / body_w        : recomputed from kin → bit-identical
@@ -20,7 +20,7 @@ import warp as wp
 # Native kernel (requires _C.so)
 try:
     import lilytorch.src.kernels  # noqa: F401
-    from lilytorch.src.kernels.ops import streaming_sdf_stag_3d_multi
+    from lilytorch.src.kernels.ops import body_update_3d
     _NATIVE_AVAILABLE = True
 except Exception:
     _NATIVE_AVAILABLE = False
@@ -49,7 +49,7 @@ def _run_and_collect_native(sc: dict) -> dict:
     sc["body_u"].zero_();    sc["body_v"].zero_();  sc["body_w"].zero_()
 
     di0, dj0, dk0, dAi, dAj, dAk = sc["dirty_bounds"]
-    streaming_sdf_stag_3d_multi(
+    body_update_3d(
         sc["F_flat"], sc["F_offsets"],
         sc["body_shapes"], sc["body_meta"], sc["kin"],
         sc["aabb_lo"], sc["aabb_dim"],
@@ -223,7 +223,7 @@ def test_warp_graph_eager_identical():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  float64 parity (dtype-generic 3-D Kernel A) — used by the f64 src_warp solver
+#  float64 parity (dtype-generic 3-D body_update) — used by the f64 src_warp solver
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _run_warp_f64(sc: dict) -> dict:
@@ -255,7 +255,7 @@ def _run_warp_f64(sc: dict) -> dict:
 @SKIP_NO_CUDA
 @pytest.mark.parametrize("B", [1, 3])
 def test_warp_fanned_f64_matches_native(B):
-    """Dtype-generic Kernel A at float64 matches native f64 within tolerance."""
+    """Dtype-generic body_update at float64 matches native f64 within tolerance."""
     sc = make_synthetic_scene(64, 32, 32, B, device=DEVICE, dtype=torch.float64)
     # Force the static body table + grid + kin to f64 so the native op runs the
     # consistent-dtype f64 path (the live bridge normalises the same way inside

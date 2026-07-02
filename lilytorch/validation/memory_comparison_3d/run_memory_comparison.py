@@ -2,6 +2,12 @@
 """
 GPU memory comparison across solver modes — 2-D and 3-D pinned 1guilla.
 
+.. note:: PARKED — the python/kernel ``solver_method`` modes were collapsed
+   into the single fused path (``solver_method`` is deprecated and ignored),
+   so the two "modes" below now run the identical solver and the comparison
+   is moot.  The script is kept for its per-phase / per-tensor memory
+   instrumentation, which still works on the fused path.
+
 This is the *measurement* counterpart to ``docs/memory_analysis.md``.  It
 runs the same FARMS-coupled pinned 1guilla scenario used in the cost
 analysis (``lilytorch/validation/cost_analysis/``) under the reference
@@ -714,11 +720,10 @@ def _run_worker(args: argparse.Namespace) -> None:
         _record(f"step {idx:03d} [{mode}]: after update (union SDF+body_vel)")
 
         # 2. mu / normals
-        # In kernel 3-D mode, mu0/mu1 and normals are computed inside
-        # the CUDA kernel during fluid_step (Phase I). sdf_val_u/v/w
-        # are not allocated on MultiAnimatBodies in that mode, so
-        # _recompute_mu_normals must not be called (mirrors step_() guard).
-        if not (fs._use_kernels and fs.ndim == 3):
+        # The fused step computes mu0/mu1 and normals in registers inside
+        # bdim_forcing; the python full-grid pack is only built when the
+        # python force readout needs it (mirrors advance_and_compute_loads).
+        if fs._needs_python_mu_normals():
             fs._recompute_mu_normals()
             _record(f"step {idx:03d} [{mode}]: after mu/normals")
         else:

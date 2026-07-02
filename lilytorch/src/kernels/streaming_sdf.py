@@ -377,10 +377,10 @@ def streaming_sdf_fanned_decode_3d(
     den_w:  wp.array(dtype=Any),
     # BDIM-σ key emission (emit_keys == 0 → key_* are dummies, untouched).
     # See the 2-D decode kernel: write the winning body-id (lowest-id-wins via
-    # int64 ``atomic_min``) into key_u/key_v/key_w; the σ Kernel B masks
+    # int64 ``atomic_min``) into key_u/key_v/key_w; the σ bdim_forcing masks
     # ``key & 0xffffffff``.  Unlike 2-D (full-grid keys indexed by g), the
     # native 3-D keys are dirty_vol-sized and indexed by the AABB-local
-    # ``g_local`` (matching ``bdim_coeff_sigma_3d``'s read) — so the dirty
+    # ``g_local`` (matching ``bdim_forcing_sigma_3d``'s read) — so the dirty
     # origin / strides are passed in to recompute it.
     emit_keys: int,
     key_u: wp.array(dtype=wp.int64),
@@ -472,7 +472,7 @@ class WarpStreamingSDF:
         `run_graph_fanned`)  ← RECOMMENDED.
         2 kernel launches, CONSTANT in B (each dim = B·max_vol).  Honours the
         smooth velocity-blend path when ``blend_eps > 0`` (num/den softmin),
-        mirroring the native ``streaming_sdf_stag_3d_multi``.
+        mirroring the native ``body_update_3d``.
 
     ``dtype`` selects the float precision of every value-carrying array/scalar
     (``wp.float32`` default — bit-identical to the original; ``wp.float64`` for

@@ -1,6 +1,6 @@
 """Warp single-source CPU+GPU kernels for BDIM streaming SDF — 2-D variant (AP7).
 
-2-D analogue of `warp_kernels.py` (`streaming_sdf_stag_3d_multi`) with the
+2-D analogue of `warp_kernels.py` (`body_update_3d`) with the
 z-axis stripped, mirroring the native `streaming_sdf_2d.cu` line-for-line.
 
 Per-body packed-array layouts (2-D, matching the native `.cu`):
@@ -296,7 +296,7 @@ def streaming_sdf_fanned_decode_2d(
     # When on, write the winning body-id (the body whose face SDF equals the
     # stored running-min) into the low 32 bits of key_u/key_v via int64
     # ``atomic_min`` → lowest-id-wins tie-break, mirroring the native packed
-    # ``atomicMin`` (SDF high bits, body-id low bits).  The σ Kernel B only
+    # ``atomicMin`` (SDF high bits, body-id low bits).  The σ bdim_forcing only
     # reads ``key & 0xffffffff`` (body-id), so the high SDF bits are not needed.
     emit_keys: int,
     key_u: wp.array(dtype=wp.int64),

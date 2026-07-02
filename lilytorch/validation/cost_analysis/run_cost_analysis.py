@@ -112,6 +112,9 @@ try:
 except ValueError as exc:
     print(f"ERROR: {exc}")
     sys.exit(1)
+if SOLVER_MODE is not None:
+    print(f"NOTE: --mode {SOLVER_MODE} is deprecated and ignored — the solver "
+          "always runs the single fused path.")
 
 USE_CUDA = args.device == "cuda" and torch.cuda.is_available()
 if args.out_dir is None:
@@ -247,14 +250,11 @@ def instrument_handler(handler):
             with T("1  SDF update (body kinematics + SDF eval)"):
                 self_h.update(t, iteration, dt=timestep)
 
-            with T("2  mu+normals (recompute)"):
-                # Kernel mode fuses mu+normals into Kernel B during
-                # fluid_step, so the python recompute is intentionally
-                # unreachable in step_().  Skip it here too — calling it
-                # would try to read ``comp.sdf_val_u``, which is not
-                # allocated on MultiAnimatBodies when use_kernels=True.
-                if not ffs._use_kernels:
-                    _orig_recompute(ffs)
+            # NOTE: no "mu+normals (recompute)" phase — the fused step
+            # computes mu/normals in registers inside bdim_forcing, and
+            # streaming FARMS runs never build the python full-grid pack
+            # (reading ``comp.sdf_val_u`` would fail: MultiAnimatBodies
+            # does not allocate the persistent staggered fields).
 
             with T("3  fluid_step (total PDE)"):
                 state = _orig_fluid_step(ffs, *_get_state(), timestep)
@@ -378,37 +378,36 @@ def instrument_handler(handler):
 
             poisson_mg._vcycle = types.MethodType(timed_vcycle, poisson_mg)
 
-        # Kernel-mode patches: intercept Kernel A (streaming SDF) and Kernel B
-        # (fused BDIM+vardens) at the solver module level so they are attributed
-        # to the "Body update (SDF eval)" and "BDIM meta-equation" categories
-        # respectively (prefixes "1b" and "3b").
-        kern_patched = False
-        if getattr(fs, '_use_kernels', False):
-            import lilytorch.src.solver as _solver_mod
-            if spec.dim == 3:
-                _orig_kern_a = _solver_mod.streaming_sdf_stag_3d_multi
-                _orig_kern_b = _solver_mod.bdim_coeff_3d
-            else:
-                _orig_kern_a = _solver_mod.streaming_sdf_stag_2d_multi
-                _orig_kern_b = _solver_mod.bdim_coeff_2d
+        # Fused-path patches: intercept body_update (streaming SDF, launched
+        # from BDIMhandler) and bdim_forcing (fused BDIM+vardens, launched from
+        # the solver's fused step) at their respective module levels so they
+        # are attributed to the "Body update (SDF eval)" and "BDIM
+        # meta-equation" categories (prefixes "1b" and "3b").
+        import lilytorch.src.solver as _solver_mod
+        import lilytorch.integration.BDIMhandler as _handler_mod
+        if spec.dim == 3:
+            _orig_kern_a = _handler_mod.body_update_3d
+            _orig_kern_b = _solver_mod.bdim_forcing_3d
+        else:
+            _orig_kern_a = _handler_mod.body_update_2d
+            _orig_kern_b = _solver_mod.bdim_forcing_2d
 
-            def _timed_kern_a(*ca, **ckw):
-                with T("1b.ka   Kernel A (streaming SDF)"):
-                    return _orig_kern_a(*ca, **ckw)
+        def _timed_kern_a(*ca, **ckw):
+            with T("1b.ka   body_update (streaming SDF)"):
+                return _orig_kern_a(*ca, **ckw)
 
-            def _timed_kern_b(*ca, **ckw):
-                with T("3b.kb   Kernel B (fused BDIM+vardens)"):
-                    return _orig_kern_b(*ca, **ckw)
+        def _timed_kern_b(*ca, **ckw):
+            with T("3b.kb   bdim_forcing (fused BDIM+vardens)"):
+                return _orig_kern_b(*ca, **ckw)
 
-            if spec.dim == 3:
-                _solver_mod.streaming_sdf_stag_3d_multi = _timed_kern_a
-                _solver_mod.bdim_coeff_3d = _timed_kern_b
-            else:
-                _solver_mod.streaming_sdf_stag_2d_multi = _timed_kern_a
-                _solver_mod.bdim_coeff_2d = _timed_kern_b
-            kern_patched = True
+        if spec.dim == 3:
+            _handler_mod.body_update_3d = _timed_kern_a
+            _solver_mod.bdim_forcing_3d = _timed_kern_b
+        else:
+            _handler_mod.body_update_2d = _timed_kern_a
+            _solver_mod.bdim_forcing_2d = _timed_kern_b
 
-        kern_info = ", Kernel A+B" if kern_patched else ""
+        kern_info = ", body_update+bdim_forcing"
         extra = ", Poisson internals" if instrument_poisson_internals and poisson_mg else ""
         print(f"  [profiler] Deep patches installed (SDF, advection, BDIM, project{kern_info}{extra})", flush=True)
 
@@ -560,8 +559,8 @@ def _apply_cfg_overrides(cfg):
                 solver_cfg["compile_forces"] = True
                 solver_cfg["dtype"] = args.dtype
                 solver_cfg["poisson_method"] = args.poisson_method
-                if SOLVER_MODE is not None:
-                    solver_cfg["solver_method"] = SOLVER_MODE
+                # solver_method is deprecated (single fused path); never set it.
+                solver_cfg.pop("solver_method", None)
 
         with open(yaml_path, "w") as handle:
             yaml.dump(sim_dict, handle, default_flow_style=False, sort_keys=False)
@@ -587,7 +586,7 @@ print(f"  Grid:   {grid_label(args.grid)}  ({grid_n:,} cells)")
 print(
     f"  Steps:  {args.n_steps} measured  (+ {args.precompile} pre-compile, + {args.settle_steps} settle)"
 )
-print(f"  Solver: {args.poisson_method}, dtype={args.dtype}, mode={SOLVER_MODE or 'default'}")
+print(f"  Solver: {args.poisson_method}, dtype={args.dtype}, mode=fused")
 print(f"  Device: {'CUDA' if USE_CUDA else 'CPU'}")
 print("=" * 72)
 

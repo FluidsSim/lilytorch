@@ -96,7 +96,8 @@ def build_solver(config_path: str, dtype=torch.float32) -> FluidSolver:
     # ------------------------------------------------------------------
     s = pars["solver"]
     if TWO_PHASE:
-        s["solver_method"]  = "python"     # deforming SDF -> no streaming kernel
+        # Deforming SDF: JellyfishBody.update() publishes the solver's
+        # body-field contract itself (no rigid streaming kernel involved).
         s["poisson_method"] = "mgcg"       # FFT cannot do a variable-density Poisson
         s["poisson_smoother"] = "rbgs"
         s.setdefault("poisson_max_mgcg_cycles", 30)

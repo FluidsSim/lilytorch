@@ -224,13 +224,11 @@ class BaseSimConfig:
         # single (non-overlapping) body.  None/0 → legacy winner-take-all.
         self.body_velocity_blend_eps_cells = None
         self.time_integration        = None
-        # Solver method: ``"python"`` | ``"kernel"``.
-        # See :class:`FluidSolver` for what each method does. ``None``
-        # → solver default (``"kernel"``).
+        # DEPRECATED and IGNORED: the python/kernel solver modes were
+        # collapsed into the single fused path.  Kept only so existing
+        # gen_configs that set them keep loading (FluidSolver warns on
+        # ``solver_method``; ``use_kernels`` is silently ignored).
         self.solver_method           = None
-        # DEPRECATED.  Kept for backward compatibility — superseded by
-        # ``solver_method``.  When set, they are mapped onto
-        # ``solver_method`` inside :class:`FluidSolver`.
         self.use_kernels             = None
         # Body-SDF sampling method for the streaming kernels:
         #   "trilinear" (default) | "triquadratic"

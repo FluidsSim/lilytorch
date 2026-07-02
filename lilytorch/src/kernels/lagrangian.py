@@ -7,8 +7,8 @@ traction ``t = nu*rho*(eps . n) - p n`` over a precomputed surface
 (triangulation in 3-D, closed contour in 2-D), scattered into a per-body
 12-channel (3-D) / 6-channel (2-D) force+torque row via ``atomicAdd``.
 
-This is the *other* irregular-scatter (Warp-class) kernel besides Kernel A.
-Unlike Kernel A it has no argmin — just a gather (trilinear/triquadratic field
+This is the *other* irregular-scatter (Warp-class) kernel besides body_update.
+Unlike body_update it has no argmin — just a gather (trilinear/triquadratic field
 sample a fixed offset along the outward normal) followed by an ``atomic_add``
 accumulation, so it is the simplest scatter demonstrator.
 

@@ -3,8 +3,8 @@
 Ports of native `interp_2d` (scattered-point bilinear/biquadratic gather) and
 `apply_bcs_2d` (fused Neumann / Dirichlet / reflective ghost-line writes), the
 last two stencil/pointwise stages of the per-step pipeline (VALIDATION_STATUS
-§D).  interp reuses the same `sdf_sample_off_2d` device func as Kernel A, so the
-gather is bit-identical to `streaming_sdf_stag_2d_multi`'s SDF sampling.
+§D).  interp reuses the same `sdf_sample_off_2d` device func as body_update, so the
+gather is bit-identical to `body_update_2d`'s SDF sampling.
 """
 from __future__ import annotations
 

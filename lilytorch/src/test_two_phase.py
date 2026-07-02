@@ -242,7 +242,6 @@ def _parity_pars(ndim, N, dt, nu, rho, body_sdf, two_phase=None):
         "poisson_nsmoothing"     : 6,
         "poisson_verbose"        : False,
         "bdim_mu0_projection"    : True,   # aligns the coeff with the two-phase form
-        "solver_method"          : "python",
         "force_method"           : "eulerian",
     }
     n_faces = 2 * ndim

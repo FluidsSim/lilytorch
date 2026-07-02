@@ -3,17 +3,18 @@
 Validates the Stage-1 rewrite that replaced the batched
 ``grid_sample`` + ``min(dim=0)`` union with a per-body AABB +
 ``torch.where`` running-min loop (matching the 3-D Python path).  The
-per-dim ``_update_2d`` / ``_update_3d`` were later unified into
-``_update_python``; this test still pins ``_body_aabb_local_2d`` + the
-running-min union it relies on.
+per-dim ``_update_2d`` / ``_update_3d`` were later unified into a single
+python update (since removed with the solver_method modes); this test
+still pins ``_body_aabb_local_2d`` + the running-min union used by the
+streaming path's AABB machinery.
 
 The test does NOT depend on FARMS / MuJoCo / open3d.  It exercises:
 
   * ``BDIMhandler._body_aabb_local_2d`` — both mesh-style (with
     ``body.sdf.x/y``) and analytical-style (contour-bbox + 4 h margin)
     paths.
-  * ``rotate_grid_2d`` — the per-body local-frame rotation used inside
-    ``_update_python`` (2-D branch).
+  * ``rotate_grid_2d`` — the per-body local-frame rotation the legacy
+    python update used (2-D branch).
   * The ``torch.where`` running-min union on a 2-body, mixed
     analytical + (synthetic) mesh composite — verifies the algorithm
     matches a reference computed from each body's SDF taken minimum
@@ -127,7 +128,8 @@ def _ref_running_min_union(bodies, poses, X, Y):
 def _torch_where_aabb_union(bodies, poses, X, Y, h, gs):
     """Reference union: per-body AABB + torch.where running-min.
 
-    Mirrors the loop body of ``_update_python`` (2-D branch) exactly: only
+    Mirrors the loop body of the removed legacy python update (2-D
+    branch) exactly: only
     mesh-style bodies (with ``body.sdf.x``/``body.sdf.y``) are AABB-
     clipped; analytical bodies use the full-grid path.
     """

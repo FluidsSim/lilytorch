@@ -30,11 +30,15 @@ N_SWEEPS = 4
 output_base = "/data/andreaferrario/ns_data/flow_past_cylinder_error_tests_MW/bdimconsistent_abdquickest"
 
 def fluid_step_consistent(self, u, v, p, timestep):
+    # 0. mu0/mu1/normals — step_() no longer recomputes them for
+    # compute_forces=False runs (the fused step does it in-kernel), so this
+    # python-style override must build the pack itself.
+    self._recompute_mu_normals()
     # 1. advection-diffusion
     nu_t   = self._compute_nu_t(u, v)
     us, vs = self.adv_diff_solver.solve(u, v, nu_t=nu_t)
     us, vs = us.clone(), vs.clone()
-    # 2. BDIM meta-equation (mu0/mu1/normals already recomputed in step_)
+    # 2. BDIM meta-equation
     u_b, v_b = self._apply_bdim_all_axes((us, vs))
     self.adv_diff_solver.set_BCs(u_b, v_b)
 

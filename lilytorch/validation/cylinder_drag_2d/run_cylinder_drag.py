@@ -25,7 +25,6 @@ from tqdm import tqdm
 FORCE_METHOD          = "eulerian"   # "lagrangian" or "eulerian"
 BDIM_MU0_PROJECTION   = True           # True = paper-correct decoupled body cells; False = uniform dt/rho
 ZERO_PRESSURE_INSIDE  = True          # True = wipe p where union sdf<0 before forces (workaround for garbage inside p)
-SOLVER_METHOD         = "python"       # "python" (works standalone) or "kernel" (needs BDIMhandler)
 
 # ================================================================
 # Physical / geometric parameters
@@ -74,7 +73,7 @@ print(f"  dt = {dt:.6e},  nt = {nt}")
 print(f"  t_stop = {t_stop:.4f}  ({final_conv_time} convective times)")
 print(f"  Convection method: {convection_method}")
 print(f"  Toggles: force_method={FORCE_METHOD}  bdim_mu0_projection={BDIM_MU0_PROJECTION}  "
-      f"zero_pressure_inside={ZERO_PRESSURE_INSIDE}  solver_method={SOLVER_METHOD}")
+      f"zero_pressure_inside={ZERO_PRESSURE_INSIDE}")
 print(f"  Output: {output_base}")
 print()
 
@@ -104,7 +103,6 @@ pars["solver"]["nt"]                = nt
 pars["solver"]["force_method"]         = FORCE_METHOD
 pars["solver"]["bdim_mu0_projection"]  = BDIM_MU0_PROJECTION
 pars["solver"]["zero_pressure_inside"] = ZERO_PRESSURE_INSIDE
-pars["solver"]["solver_method"]        = SOLVER_METHOD
 
 # --- Poisson solver ---
 pars["solver"]["poisson_verbose"] = True

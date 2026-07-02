@@ -376,8 +376,7 @@ def forces_method2(self, u, v, p, iteration):
         and comp._sdf_sparse[0] is not None
     )
     _use_kernel_post_forces_2d = (
-        self._use_kernels
-        and not _have_sparse_2d
+        not _have_sparse_2d
         and _stream_step is not None
         and getattr(comp, '_kernel_static_2d', None) is not None
     )
@@ -500,7 +499,7 @@ def forces_method2(self, u, v, p, iteration):
 
     # Towers (2008) 2nd-order: compute per-body |∇SDF| on CC grid  (B,Ni,Nj)
     # ``comp.sdf_vals`` was the legacy dense per-body SDF stack.  The new
-    # 2-D Python update (``_update_python``) populates ``comp._sdf_sparse``
+    # Python-style 2-D body updates populate ``comp._sdf_sparse``
     # (per-body AABB-cropped slabs) instead — mirroring 3-D.  Reconstruct
     # a dense (B, Ni, Nj) tensor here when the sparse storage is present.
     _have_sparse_2d = (
@@ -605,8 +604,7 @@ def forces_method2_3d(self, u, v, w, p, iteration):
     _stream_step = getattr(comp, '_kernel_step', None)
     _stream_static = getattr(comp, '_kernel_static_3d', None)
     _use_kernel_post = (
-        self._use_kernels
-        and _stream_step is not None
+        _stream_step is not None
         and _stream_static is not None
     )
     if _use_kernel_post:
@@ -693,8 +691,7 @@ def forces_method2_3d(self, u, v, w, p, iteration):
     # the bandwidth-bound _forces_shared only on that sub-block.
     # Per-body integration then uses indices RELATIVE to the union.
     _have_sparse_for_union = (
-        self._use_kernels
-        and hasattr(comp, '_sdf_sparse')
+        hasattr(comp, '_sdf_sparse')
         and len(comp._sdf_sparse) > 0
         and comp._sdf_sparse[0] is not None
     )

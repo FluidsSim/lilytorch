@@ -1,11 +1,11 @@
-"""Parity tests: Warp **Kernel B** (`bdim_coeff_3d` + FD normals) vs native.
+"""Parity tests: Warp **bdim_forcing** (`bdim_forcing_3d` + FD normals) vs native.
 
-Validates ``bdim_coeff_3d_warp`` (and its BDIM-σ keyword path) against the native
+Validates ``bdim_forcing_3d_warp`` (and its BDIM-σ keyword path) against the native
 CUDA op — the parity oracle — on manufactured sphere-SDF + random-field scenes:
 full-grid and interior dirty-AABB sub-blocks, ``mu0_projection`` 0/1, and the
 σ-shifted-coefficient variant.  Also checks Warp CPU == Warp GPU (single source).
 
-Note on the native CPU op: ``bdim_coeff_3d_cpu`` writes the Poisson coefficient
+Note on the native CPU op: ``bdim_forcing_3d_cpu`` writes the Poisson coefficient
 at the *padded-grid* flat index (``c_out[g]``), whereas the CUDA op writes the
 *compact face grid* (``c_out[(i-1)·…]``) — the two native impls use different
 ``ch/cv/cw`` layouts.  The production path (``solver.py``) is CUDA + the compact
@@ -24,14 +24,14 @@ import torch
 try:
     import lilytorch.src.kernels  # noqa: F401
     from lilytorch.src.kernels.ops import (
-        bdim_coeff_3d as native_3d,
-        bdim_coeff_sigma_3d as native_sigma_3d,
+        bdim_forcing_3d as native_3d,
+        bdim_forcing_sigma_3d as native_sigma_3d,
     )
     _NATIVE = True
 except Exception:
     _NATIVE = False
 
-from lilytorch.src.kernels.bdim import bdim_coeff_3d_warp
+from lilytorch.src.kernels.bdim import bdim_forcing_3d_warp
 
 SKIP_NO_NATIVE = pytest.mark.skipif(not _NATIVE, reason="native _C.so unavailable")
 SKIP_NO_CUDA = pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA")
@@ -80,7 +80,7 @@ def _run_warp(F, dirty, mu0_proj, sigma=None):
     if sigma is not None:
         ku, kv, kwk, ss = sigma
         kw = dict(key_u=ku, key_v=kv, key_w=kwk, sigma_shifts=ss)
-    bdim_coeff_3d_warp(up, vp, wp_, su, sv, sw, bu, bv, bw,
+    bdim_forcing_3d_warp(up, vp, wp_, su, sv, sw, bu, bv, bw,
                        u0, v0, w0, ch, cv, cw, EPS, RHO, DT, H, *dirty,
                        mu0_proj, **kw)
     return u0, v0, w0, ch, cv, cw

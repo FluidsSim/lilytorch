@@ -1,7 +1,7 @@
 """Warp 3-D pointwise/gather kernels: interp_3d + apply_bcs_3d (coverage fill).
 
 3-D analogues of `warp_misc_2d.py`.  interp_3d reuses the trilinear sampler from
-`warp_kernels.py` (Kernel A) and adds the triquadratic branch (faithful port of
+`warp_kernels.py` (body_update) and adds the triquadratic branch (faithful port of
 `triquadratic_sample_uniform` in streaming_sdf.cu).  apply_bcs_3d mirrors
 `apply_bcs_3d_kernel`: per BC op, write a ghost FACE (2-D launch over the face),
 Neumann/Dirichlet in stage 1, reflective in stage 2.

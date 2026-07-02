@@ -10,12 +10,8 @@ from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor
 
 from lilytorch.src.kernels import (
-    streaming_sdf_stag_3d_multi,
-    bdim_coeff_3d,
-    bdim_coeff_sigma_3d,
-    streaming_sdf_stag_2d_multi,
-    bdim_coeff_2d,
-    bdim_coeff_sigma_2d,
+    bdim_forcing_3d,
+    bdim_forcing_2d,
 )
 from lilytorch.src.advection import AdvDiffSolver, SCHEMES as _ADV_SCHEMES
 from lilytorch.src.diagnostics import FlowDiagnostics
@@ -465,28 +461,20 @@ class FluidSolver(PlottingMixin):
         _bvb = solver.get("body_velocity_blend_eps_cells", None)
         self._body_vel_blend_cells = float(_bvb) if _bvb else 0.0
 
-        self._solver_method = solver.get("solver_method", "kernel")
-        method = solver.get("solver_method", "kernel")
-        if method not in ("python", "kernel"):
-            raise ValueError(
-                f"solver.solver_method must be one of "
-                f"('python', 'kernel'), got {method!r}."
+        # ``solver_method`` is DEPRECATED and IGNORED: the former "python" /
+        # "kernel" modes were collapsed into the single fused (body-agnostic)
+        # path.  The key is still parsed so the many existing configs that set
+        # it keep loading; it only triggers a warning.
+        if solver.get("solver_method") is not None:
+            warnings.warn(
+                "solver.solver_method is deprecated and ignored: the python "
+                "and kernel modes were collapsed into the single fused "
+                "(body-agnostic) fluid path.",
+                DeprecationWarning, stacklevel=2,
             )
-
-        _method = self._solver_method
-        _kernel = (_method == "kernel")
-
-        self._use_kernels    = _kernel
         self._mu_union_ready = False
-
-        _METHOD_DESCR = {
-            "python": "Python reference path",
-            "kernel": ("native streamed path (update-only geometry + "
-                       "post-fluid-step force kernel)"),
-        }
-        print(f"  [solver_method={_method!r}] {_METHOD_DESCR[_method]}")
         # Body-SDF sampling method used inside the streaming C++/CUDA
-        # kernels (``streaming_sdf_stag_{2d,3d}_multi``):
+        # kernels (``body_update_{2d,3d}``):
         #   * ``"trilinear"`` (default) -- 2x2x2 stencil, matches the
         #     historical behaviour;
         #   * ``"triquadratic"`` -- 3x3x3 Lagrange stencil for higher-order
@@ -540,7 +528,7 @@ class FluidSolver(PlottingMixin):
             verbose         = solver["poisson_verbose"],
             precond_vcycles = solver.get("poisson_precond_vcycles", 1),
             smoother        = solver.get("poisson_smoother", "rbgs"),
-            use_kernels     = self._use_kernels,
+            use_kernels     = True,
             recycle_k       = solver.get("poisson_recycle_k", 0),
             cuda_graph      = solver.get("poisson_cuda_graph", False),
             cuda_graph_max_cells = solver.get("poisson_cuda_graph_max_cells", 64 ** 3),
@@ -588,7 +576,6 @@ class FluidSolver(PlottingMixin):
             eps           = self.eps,
             custom_update = custom_update,
             starting_time = self.starting_time,
-            use_kernels   = self._use_kernels,
         )
 
         self.n_bodies = len(self.composite_body.bodies)
@@ -748,9 +735,9 @@ class FluidSolver(PlottingMixin):
         # mid-step on the first fluid_step.  If the runtime timestep differs
         # from self.dt these buffers will be reallocated on the first call,
         # at no worse cost than the previous lazy-init path.
-        if self._use_kernels and self.ndim == 3:
+        if self.ndim == 3:
             self._init_bdim_coeff_persist_3d(self.dt)
-        elif self._use_kernels and self.ndim == 2:
+        else:
             self._init_bdim_coeff_persist_2d(self.dt)
 
         # =====================================================================
@@ -762,11 +749,10 @@ class FluidSolver(PlottingMixin):
         # =====================================================================
         self._init_gravity(solver.get("gravity", None))
 
-        # Warp Kernel-A CUDA-graph fast path (opt-in) + persistent kernel-step
-        # buffer caches (allocated lazily by _kernel_bufs_{2,3}d in graph mode).
+        # CUDA-graph fast path for the streaming body_update (opt-in).  Parsed
+        # here because it is a solver-config key; consumed by the body-update
+        # provider (BDIMhandler), which owns the launch and its buffers.
         self._kernel_cuda_graph = bool(solver.get("kernel_cuda_graph", False))
-        self._kbuf2d = None
-        self._kbuf3d = None
         # Periodic MGCG convergence check (1 = check every iter); threaded onto
         # the Poisson sub-solver (its constructor takes no such kwarg).
         if getattr(self, "poisson_solver", None) is not None:
@@ -1481,23 +1467,37 @@ class FluidSolver(PlottingMixin):
         Phase I: the kernel-mode paths (2-D and 3-D) no longer
         materialise any of the staggered or CC mu / normal tensors as
         full-grid buffers — they live only in CUDA thread registers
-        inside Kernel B — so the keep-set is empty in both modes.
+        inside the fused ``bdim_forcing`` kernel — so the keep-set is
+        empty in both modes.
         """
         for attr in self._BDIM_FIELD_NAMES:
             if hasattr(self, attr):
                 setattr(self, attr, None)
 
     # ------------------------------------------------------------------
-    #   mu / normal recomputation  (shared by step_() and BDIMhandler)
+    #   mu / normal recomputation  (python-style force readout only)
     # ------------------------------------------------------------------
+    def _needs_python_mu_normals(self):
+        """True when the per-step ``_recompute_mu_normals`` pack must be
+        built: standalone (non-streaming) bodies whose forces are read by
+        the python force integration, which consumes ``mu0_all``/normals.
+        Streaming bodies (``_kernel_static_{2,3}d`` present) use the
+        post-step force kernels and never need the full-grid pack.
+        ``TwoPhaseSolver`` extends this with the consistent-momentum path
+        (which needs the staggered mu/normals for the velocity BDIM)."""
+        comp = self.composite_body
+        streaming = (getattr(comp, '_kernel_static_3d', None) is not None
+                     or getattr(comp, '_kernel_static_2d', None) is not None)
+        return (not streaming) and bool(self.compute_forces)
+
     def _recompute_mu_normals(self):
         """Recompute mu0/mu1 and CC/staggered unit normals — dim-agnostic.
 
         Processes all ``ndim + 1`` SDF grids ([u, v, [w,] cc]) in a single
         batched pass via the dim-agnostic ``_mu_normals_batched`` helper.
 
-        When the kernel mode is on AND the union-AABB sub-block covers
-        less than 50 % of the grid (see :meth:`_compute_union_aabb`),
+        When the union-AABB sub-block covers less than 50 % of the grid
+        (see :meth:`_compute_union_aabb`),
         the compiled kernel runs only on the union sub-block and results
         are slice-written into a single persistent packed buffer
         ``self._mu_pack`` pre-filled with outside-body defaults
@@ -1514,8 +1514,8 @@ class FluidSolver(PlottingMixin):
             ``[3*n_grids .. 4*n_grids)``        : normal_y for the same
             ``[4*n_grids .. 5*n_grids)``        : normal_z (3-D only)
 
-        When kernel mode is off or the union covers >50 % of the grid,
-        falls back to the full-grid compiled kernel (no pack buffer).
+        When no sparse AABB is available or the union covers >50 % of the
+        grid, falls back to the full-grid compiled kernel (no pack buffer).
         """
         comp   = self.composite_body
         D      = self.ndim
@@ -1531,61 +1531,63 @@ class FluidSolver(PlottingMixin):
         # Union-AABB crop path — outside the union SDF is _FAR so mu0=1,
         # mu1=0, normals=0 (these defaults never change between steps).
         # Slice each SDF to the sub-block BEFORE stacking so the torch.stack
-        # allocation is O(sub-block) rather than O(full grid).
+        # allocation is O(sub-block) rather than O(full grid).  Activates
+        # whenever a sparse AABB is available (``_sdf_sparse`` or
+        # ``_combined_union_aabb``); bodies without one fall through to the
+        # full-grid path below.
         # ------------------------------------------------------------------
-        if self._use_kernels:
-            u_aabb = self._compute_union_aabb(halo=2, bucket=16)
-            if u_aabb is not None:
-                n_pack = (2 + D) * ngrids   # 12 for 2-D, 20 for 3-D
+        u_aabb = self._compute_union_aabb(halo=2, bucket=16)
+        if u_aabb is not None:
+            n_pack = (2 + D) * ngrids   # 12 for 2-D, 20 for 3-D
 
-                if (getattr(self, '_mu_pack', None) is None
-                    or self._mu_pack.shape[1:] != comp.sdf_val.shape
-                    or self._mu_pack.shape[0] != n_pack
-                    or self._mu_pack.dtype  != comp.sdf_val.dtype
-                    or self._mu_pack.device != comp.sdf_val.device):
-                    pack = torch.zeros(
-                        (n_pack, *comp.sdf_val.shape),
-                        device=comp.sdf_val.device, dtype=comp.sdf_val.dtype,
-                    )
-                    pack[0:ngrids].fill_(1.0)   # mu0 defaults to 1 outside body
-                    self._mu_pack = pack
-                    self._mu_union_ready = True
-                pack = self._mu_pack
+            if (getattr(self, '_mu_pack', None) is None
+                or self._mu_pack.shape[1:] != comp.sdf_val.shape
+                or self._mu_pack.shape[0] != n_pack
+                or self._mu_pack.dtype  != comp.sdf_val.dtype
+                or self._mu_pack.device != comp.sdf_val.device):
+                pack = torch.zeros(
+                    (n_pack, *comp.sdf_val.shape),
+                    device=comp.sdf_val.device, dtype=comp.sdf_val.dtype,
+                )
+                pack[0:ngrids].fill_(1.0)   # mu0 defaults to 1 outside body
+                self._mu_pack = pack
+                self._mu_union_ready = True
+            pack = self._mu_pack
 
-                # (Re-)alias every step — cheap Python, robust to any
-                # non-union path overwriting these attributes.
-                for i, ax in enumerate(axes):
-                    setattr(self, f'mu0_all_{ax}', pack[i])
-                    setattr(self, f'mu1_all_{ax}', pack[ngrids + i])
-                    for d, n in enumerate(norms):
-                        setattr(self, f'normal_{n}_{ax}',
-                                pack[(2 + d) * ngrids + i])
-                self.mu0_all = pack[cc]
-                self.mu1_all = pack[ngrids + cc]
+            # (Re-)alias every step — cheap Python, robust to any
+            # non-union path overwriting these attributes.
+            for i, ax in enumerate(axes):
+                setattr(self, f'mu0_all_{ax}', pack[i])
+                setattr(self, f'mu1_all_{ax}', pack[ngrids + i])
                 for d, n in enumerate(norms):
-                    setattr(self, f'normal_{n}', pack[(2 + d) * ngrids + cc])
+                    setattr(self, f'normal_{n}_{ax}',
+                            pack[(2 + d) * ngrids + i])
+            self.mu0_all = pack[cc]
+            self.mu1_all = pack[ngrids + cc]
+            for d, n in enumerate(norms):
+                setattr(self, f'normal_{n}', pack[(2 + d) * ngrids + cc])
 
-                slices = tuple(
-                    slice(u_aabb[2 * d], u_aabb[2 * d + 1]) for d in range(D)
-                )
-                # Stack only the sub-block — O(sub-block * ngrids) copy,
-                # not O(full-grid * ngrids).
-                sdf_sub = torch.stack(
-                    [getattr(comp, n)[slices] for n in sdf_attrs]
-                )
+            slices = tuple(
+                slice(u_aabb[2 * d], u_aabb[2 * d + 1]) for d in range(D)
+            )
+            # Stack only the sub-block — O(sub-block * ngrids) copy,
+            # not O(full-grid * ngrids).
+            sdf_sub = torch.stack(
+                [getattr(comp, n)[slices] for n in sdf_attrs]
+            )
 
-                out = self._mu_normals_dyn_compiled(sdf_sub, comp.h, comp.eps)
-                mu0_s, mu1_s = out[0], out[1]
-                normals_s = out[2:]   # length-D tuple of (ngrids, *sub_spatial)
+            out = self._mu_normals_dyn_compiled(sdf_sub, comp.h, comp.eps)
+            mu0_s, mu1_s = out[0], out[1]
+            normals_s = out[2:]   # length-D tuple of (ngrids, *sub_spatial)
 
-                # Fused slice-write: stack mu0, mu1, normals along dim-0 and
-                # scatter into the packed buffer with ONE assign.
-                stacked = torch.cat(
-                    (mu0_s, mu1_s) + tuple(normals_s),
-                    dim=0,
-                )
-                self._mu_pack[(slice(None),) + slices] = stacked
-                return
+            # Fused slice-write: stack mu0, mu1, normals along dim-0 and
+            # scatter into the packed buffer with ONE assign.
+            stacked = torch.cat(
+                (mu0_s, mu1_s) + tuple(normals_s),
+                dim=0,
+            )
+            self._mu_pack[(slice(None),) + slices] = stacked
+            return
 
         # ── Full-grid path: batched + compiled, all grids in one pass ──
         sdf_stack = torch.stack([getattr(comp, n) for n in sdf_attrs])
@@ -1774,8 +1776,8 @@ class FluidSolver(PlottingMixin):
             mu_grids = self._compute_sigma_mu_grids(mu_grids)
 
         # ---- narrow-band fast path -------------------------------------
-        if self._use_kernels and all(m is not None for m in mu_grids):
-            # Reuse the AABB cached in _fluid_step_kernel_{2,3}d when available
+        if all(m is not None for m in mu_grids):
+            # Reuse the AABB cached earlier in the step when available
             # (it was computed at step 3 and kept alive through step 6).
             u_aabb = (self._bdim_union_aabb
                       if self._bdim_union_aabb is not None
@@ -1834,7 +1836,7 @@ class FluidSolver(PlottingMixin):
         return tuple(out)
 
     # ------------------------------------------------------------------
-    #   Phase-I kernel-mode 3-D fluid step  (Kernel A + Kernel B)
+    #   Fused (kernel-mode) fluid step — bdim_forcing on Warp
     # ------------------------------------------------------------------
     def _init_bdim_coeff_persist_3d(self, timestep):
         """Lazy-allocate the persistent ``ch/cv/cw`` Poisson-coefficient
@@ -1842,8 +1844,9 @@ class FluidSolver(PlottingMixin):
 
         Outside any immersed body ``mu0 = 1`` everywhere, so the
         coefficients reduce to the constant ``dt / rho_fluid``.  The
-        buffers are pre-filled once with that default; Kernel B
-        overwrites only the dirty AABB sub-block each step.
+        buffers are pre-filled once with that default; the fused
+        ``bdim_forcing`` kernel overwrites only the dirty AABB sub-block
+        each step.
         """
         Ngx, Ngy, Ngz = self.grid_shape
         device = self.device
@@ -1886,77 +1889,49 @@ class FluidSolver(PlottingMixin):
             self._cv_persist = torch.full(gs, _dt_over_rhofluid, device=device, dtype=dtype)
             self._ch_outside_val = _dt_over_rhofluid
 
-    def _kernel_bufs_2d(self, gs, Ngrid, blend_on):
-        """Lazily-allocated persistent streaming temporaries for the 2-D graph
-        path (sdf_u/v, body_u/v, key_*, num/den), reused every step."""
-        c = self._kbuf2d
-        if c is None or c["gs"] != gs or c["dtype"] != self.dtype \
-                or c["blend"] != blend_on:
-            o = dict(device=self.device, dtype=self.dtype)
-            ki = dict(dtype=torch.int64, device=self.device)
-            nb = Ngrid if blend_on else 1
-            c = dict(gs=gs, dtype=self.dtype, blend=blend_on,
-                     sdf_u=torch.empty(gs, **o), sdf_v=torch.empty(gs, **o),
-                     bU=torch.empty(gs, **o), bV=torch.empty(gs, **o),
-                     key_cc=torch.empty(Ngrid, **ki), key_u=torch.empty(Ngrid, **ki),
-                     key_v=torch.empty(Ngrid, **ki),
-                     num_u=torch.empty(nb, **o), num_v=torch.empty(nb, **o),
-                     den_u=torch.empty(nb, **o), den_v=torch.empty(nb, **o))
-            self._kbuf2d = c
-        return c
+    # ── Fused BDIM step (2-D): bdim_forcing on Warp ─────────────────────────
+    def _fluid_step_fused_2d(self, u, v, p, timestep):
+        """2-D fused fluid step: a single Warp kernel (``bdim_forcing_2d``)
+        applies the BDIM2 meta-equation and assembles the variable-density
+        Poisson coefficients, followed by the pressure projection.
 
-    def _kernel_bufs_3d(self, gs, blend_on):
-        """3-D analogue of :meth:`_kernel_bufs_2d` (adds w-axis buffers).  The
-        graph path is non-σ, so the key buffers are unused — they are size-1
-        dummies, keeping the cache independent of the per-step dirty_vol (which
-        changes as the body moves, and would otherwise thrash the graph)."""
-        c = self._kbuf3d
-        if c is None or c["gs"] != gs or c["dtype"] != self.dtype \
-                or c["blend"] != blend_on:
-            o = dict(device=self.device, dtype=self.dtype)
-            ki = dict(dtype=torch.int64, device=self.device)
-            nb = 1  # blend stays on the eager path → no full-grid num/den here
-            c = dict(gs=gs, dtype=self.dtype, blend=blend_on,
-                     sdf_u=torch.empty(gs, **o), sdf_v=torch.empty(gs, **o),
-                     sdf_w=torch.empty(gs, **o),
-                     bU=torch.empty(gs, **o), bV=torch.empty(gs, **o),
-                     bW=torch.empty(gs, **o),
-                     key_cc=torch.empty(1, **ki), key_u=torch.empty(1, **ki),
-                     key_v=torch.empty(1, **ki), key_w=torch.empty(1, **ki),
-                     num_u=torch.empty(nb, **o), num_v=torch.empty(nb, **o),
-                     num_w=torch.empty(nb, **o), den_u=torch.empty(nb, **o),
-                     den_v=torch.empty(nb, **o), den_w=torch.empty(nb, **o))
-            self._kbuf3d = c
-        return c
+        Body-agnostic: the step computes no body geometry itself.  It consumes
+        the contract fields the preceding ``composite_body.update()`` published
+        on the composite body — whether that update is the body's own (python
+        field evaluation, e.g. deforming bodies) or the rigid streaming
+        ``body_update`` launched by ``BDIMhandler``:
 
-    # ── Kernel A/B (2-D) on Warp ─────────────────────────────────────────────
-    def _fluid_step_kernel_2d(self, u, v, p, timestep):
-        """2-D kernel fluid step with Kernel A (streaming SDF) and Kernel B
-        (fused BDIM2 + variable-density Poisson coefficients) routed to the Warp
-        single-source ports via :mod:`lilytorch.src.kernels`.
-
-        Body copied verbatim from ``lilytorch.src.solver.FluidSolver``; the only
-        changes are: (1) the two ``streaming_sdf_stag_2d_multi`` /
-        ``bdim_coeff_2d`` calls dispatch to the Warp ports; (2) the σ path
-        runs on Warp too — the streaming bridge emits the winning body-id into
-        ``key_u/key_v`` (``emit_keys``) and the Warp σ Kernel B reads it (Item
-        5); (3) ``comp.sdf_val`` is pre-filled to ``+FAR`` (the Warp
-        ``atomic_min`` needs it; the native op initialised it internally)."""
-        comp = self.composite_body
-        ks = getattr(comp, '_kernel_step', None)
-        if ks is None or 'dirty_i0' not in ks:
+          * ``sdf_val_u`` / ``sdf_val_v`` — staggered union SDFs;
+          * ``body_u`` / ``body_v``       — staggered body velocities;
+          * ``bdim_dirty``  (optional)    — narrow-band dirty rect
+            ``{'i0','j0','Ai','Aj'}``; ``None``/absent → full grid;
+          * ``bdim_keys``   (optional)    — per-face winning body-id keys
+            for the BDIM-σ thin-body path (streaming update only);
+          * ``bdim_fields_scratch`` (optional) — ``True`` when the fields
+            are per-step scratch buffers this step must release before the
+            pressure projection (streaming eager path).
+        """
+        comp  = self.composite_body
+        sdf_u = getattr(comp, 'sdf_val_u', None)
+        sdf_v = getattr(comp, 'sdf_val_v', None)
+        bU    = getattr(comp, 'body_u', None)
+        bV    = getattr(comp, 'body_v', None)
+        if sdf_u is None or sdf_v is None or bU is None or bV is None:
             raise RuntimeError(
-                "_fluid_step_kernel_2d called but composite_body has no "
-                "Phase-I _kernel_step bookkeeping; was BDIMhandler.update() "
-                "invoked first?"
+                "fluid_step: composite_body.update() must publish the "
+                "staggered BDIM fields (sdf_val_u/v, body_u/v) before the "
+                "fluid step."
             )
-        sm = comp._kernel_static_2d
 
-        # BDIM-σ: lazily compute the per-body thin-body shifts on first use,
-        # then decide whether the σ Kernel B path is active this step.
-        if self.apply_bdim_sigma and self._sigma_shifts is None:
-            self._compute_sigma_shifts()
-        sigma_active = (self.apply_bdim_sigma
+        # BDIM-σ (thin bodies): active only when the body update emitted the
+        # per-face body-id keys (rigid streaming path).
+        keys = getattr(comp, 'bdim_keys', None)
+        if self.apply_bdim_sigma and keys is None:
+            raise RuntimeError(
+                "apply_bdim_sigma requires a body update that emits per-face "
+                "body-id keys (the rigid streaming body_update path)."
+            )
+        sigma_active = (keys is not None
                         and self._sigma_shifts is not None
                         and bool(self._sigma_shifts.any()))
 
@@ -1969,108 +1944,48 @@ class FluidSolver(PlottingMixin):
         # 3. Init persistent var-dens coefficients (once / on resize).
         self._init_bdim_coeff_persist_2d(timestep)
 
-        # 4. Per-step temporaries for Kernel A -> Kernel B.
-        _opts = dict(device=self.device, dtype=self.dtype)
-        _FAR  = 1e4
-        gs    = self.grid_shape
-        Ngrid = int(gs[0]) * int(gs[1])
-        blend_eps = self._body_vel_blend_cells * float(comp.h)
-        blend_on = blend_eps > 0.0
-        # Opt-in CUDA-graph fast path needs PERSISTENT buffers (stable pointers).
-        # σ / blend stay on the eager path (graph capture is non-σ, non-blend).
-        graph_mode = (getattr(self, "_kernel_cuda_graph", False)
-                      and not sigma_active and not blend_on)
-        if graph_mode:
-            # Persistent buffers; the SDF→FAR / body→0 resets are folded into the
-            # bridge's captured graph (no per-step torch fills here).
-            c = self._kernel_bufs_2d(gs, Ngrid, blend_on)
-            sdf_u_tmp, sdf_v_tmp = c["sdf_u"], c["sdf_v"]
-            bU_tmp, bV_tmp = c["bU"], c["bV"]
-            key_cc_t, key_u_t, key_v_t = c["key_cc"], c["key_u"], c["key_v"]
-            num_u_t, num_v_t = c["num_u"], c["num_v"]
-            den_u_t, den_v_t = c["den_u"], c["den_v"]
-        else:
-            sdf_u_tmp = torch.full(gs, _FAR, **_opts)
-            sdf_v_tmp = torch.full(gs, _FAR, **_opts)
-            bU_tmp    = torch.zeros(gs, **_opts)
-            bV_tmp    = torch.zeros(gs, **_opts)
-            _key_opts = dict(dtype=torch.int64, device=self.device)
-            key_cc_t  = torch.empty(Ngrid, **_key_opts)
-            key_u_t   = torch.empty(Ngrid, **_key_opts)
-            key_v_t   = torch.empty(Ngrid, **_key_opts)
-            if blend_on:
-                num_u_t = torch.zeros(Ngrid, **_opts); num_v_t = torch.zeros(Ngrid, **_opts)
-                den_u_t = torch.zeros(Ngrid, **_opts); den_v_t = torch.zeros(Ngrid, **_opts)
-            else:
-                num_u_t = torch.empty(1, **_opts); num_v_t = torch.empty(1, **_opts)
-                den_u_t = torch.empty(1, **_opts); den_v_t = torch.empty(1, **_opts)
+        # 4. Dirty rect: provider-supplied narrow band, else the full grid.
+        gs = self.grid_shape
+        d  = getattr(comp, 'bdim_dirty', None)
+        if d is None:
+            d = {'i0': 0, 'j0': 0, 'Ai': int(gs[0]), 'Aj': int(gs[1])}
 
-        # Warp Kernel A's atomic-min needs the CC SDF pre-filled to +FAR.  In
-        # graph mode the bridge folds this reset into the captured graph.
-        if not graph_mode:
-            comp.sdf_val.fill_(_FAR)
-
-        # 5. Kernel A (Warp).
-        streaming_sdf_stag_2d_multi(
-            sm['F_flat'], sm['F_offsets'],
-            sm['body_shapes'], sm['body_meta'], ks['kin'],
-            ks['aabb_lo'], ks['aabb_dim'],
-            ks['gx'], ks['gy'],
-            float(comp.h), int(ks['max_vol']),
-            comp.sdf_val, sdf_u_tmp, sdf_v_tmp,
-            bU_tmp, bV_tmp,
-            key_cc_t, key_u_t, key_v_t,
-            int(getattr(self, '_sdf_interp_method', 0)),
-            int(ks['dirty_i0']), int(ks['dirty_j0']),
-            int(ks['dirty_Ai']), int(ks['dirty_Aj']),
-            num_u_t, num_v_t, den_u_t, den_v_t, float(blend_eps),
-            emit_keys=sigma_active, use_graph=graph_mode,
+        # 5. bdim_forcing (Warp): fused BDIM2 + variable-density coefficients.
+        #    σ variant (thin bodies) reads the body-id keys from body_update.
+        _sigma_kwargs = (
+            dict(key_u=keys[0], key_v=keys[1], sigma_shifts=self._sigma_shifts)
+            if sigma_active else {})
+        bdim_forcing_2d(
+            primes[0], primes[1],
+            sdf_u, sdf_v,
+            bU, bV,
+            self.u0, self.v0,
+            self._ch_persist, self._cv_persist,
+            float(comp.eps), float(self.rho),
+            float(timestep), float(comp.h),
+            int(d['i0']), int(d['j0']),
+            int(d['Ai']), int(d['Aj']),
+            int(self.bdim_mu0_projection),
+            **_sigma_kwargs,
         )
 
-        # 6. Kernel B (Warp): fused BDIM2 + variable-density coefficients.
-        #    σ variant (thin bodies) reads the body-id keys emitted by Kernel A.
-        if sigma_active:
-            bdim_coeff_2d(
-                primes[0], primes[1],
-                sdf_u_tmp, sdf_v_tmp,
-                bU_tmp, bV_tmp,
-                self.u0, self.v0,
-                self._ch_persist, self._cv_persist,
-                float(comp.eps), float(self.rho),
-                float(timestep), float(comp.h),
-                int(ks['dirty_i0']), int(ks['dirty_j0']),
-                int(ks['dirty_Ai']), int(ks['dirty_Aj']),
-                int(self.bdim_mu0_projection),
-                key_u=key_u_t, key_v=key_v_t,
-                sigma_shifts=self._sigma_shifts,
-            )
-        else:
-            bdim_coeff_2d(
-                primes[0], primes[1],
-                sdf_u_tmp, sdf_v_tmp,
-                bU_tmp, bV_tmp,
-                self.u0, self.v0,
-                self._ch_persist, self._cv_persist,
-                float(comp.eps), float(self.rho),
-                float(timestep), float(comp.h),
-                int(ks['dirty_i0']), int(ks['dirty_j0']),
-                int(ks['dirty_Ai']), int(ks['dirty_Aj']),
-                int(self.bdim_mu0_projection),
-            )
-
-        # 6b. Maertens–Weymouth body-divergence RHS correction (before free).
+        # 5b. Maertens–Weymouth body-divergence RHS correction (before free).
         _body_div_corr = (
-            self._mw_body_div_correction(bU_tmp, bV_tmp)
+            self._mw_body_div_correction(bU, bV)
             if self._bdim_body_div_correction else None)
 
-        # 7. Free per-step temporaries before the pressure projection.
-        del sdf_u_tmp, sdf_v_tmp, bU_tmp, bV_tmp, primes
-        del key_cc_t, key_u_t, key_v_t
+        # 6. Release per-step scratch fields before the pressure projection
+        #    (streaming eager path — mirrors the former temporary free).
+        del sdf_u, sdf_v, bU, bV, primes, keys
+        if getattr(comp, 'bdim_fields_scratch', False):
+            comp.sdf_val_u = comp.sdf_val_v = None
+            comp.body_u = comp.body_v = None
+            comp.bdim_keys = None
 
-        # 8. Boundary conditions on the BDIM-corrected velocity.
+        # 7. Boundary conditions on the BDIM-corrected velocity.
         self.adv_diff_solver.set_BCs(self.u0, self.v0)
 
-        # 9. Pressure projection.
+        # 8. Pressure projection.
         out = self.project(
             self.u0, self.v0, p,
             ch=self._ch_persist, cv=self._cv_persist,
@@ -2080,7 +1995,7 @@ class FluidSolver(PlottingMixin):
         vels_out = out[:-1]
         p_out    = out[-1]
 
-        # 10. Optional sponge / yield damping + final BC pass.
+        # 9. Optional sponge / yield damping + final BC pass.
         if self.use_sponge:
             vels_out = self.apply_sponge_damping(*vels_out)
         if self.use_yield_damping:
@@ -2089,36 +2004,36 @@ class FluidSolver(PlottingMixin):
 
         return (*vels_out, p_out)
 
-    # ── Kernel A/B (3-D) on Warp ─────────────────────────────────────────────
-    def _fluid_step_kernel_3d(self, u, v, w_vel, p, timestep):
-        """3-D kernel fluid step with Kernel A (streaming SDF) and Kernel B
-        (fused BDIM2 + variable-density Poisson coefficients) routed to the Warp
-        single-source ports via :mod:`lilytorch.src.kernels`.
-
-        Body copied from ``lilytorch.src.solver.FluidSolver._fluid_step_kernel_3d``;
-        the only changes are: (1) the two ``streaming_sdf_stag_3d_multi`` /
-        ``bdim_coeff_3d`` calls dispatch to the Warp ports; (2) the σ path
-        runs on Warp too — the streaming bridge emits the winning body-id into
-        the dirty-local ``key_{u,v,w}`` (``emit_keys``) and the Warp σ Kernel B
-        reads it (Item 5); (3) ``comp.sdf_val`` is pre-filled to ``+FAR`` (the
-        Warp ``atomic_min`` needs it; the native op initialised it internally);
-        (4) the verbose ``_chk`` memory-debug instrumentation is dropped (it is
-        not part of the kernel contract)."""
-        comp = self.composite_body
-        ks = getattr(comp, '_kernel_step', None)
-        if ks is None or 'dirty_i0' not in ks:
+    # ── Fused BDIM step (3-D): bdim_forcing on Warp ─────────────────────────
+    def _fluid_step_fused_3d(self, u, v, w_vel, p, timestep):
+        """3-D analogue of :meth:`_fluid_step_fused_2d` (adds the w axis and
+        the ``k0``/``Ak`` dirty extents).  Same body-agnostic contract: the
+        step consumes the staggered fields published by the preceding
+        ``composite_body.update()`` and never computes body geometry itself."""
+        comp  = self.composite_body
+        sdf_u = getattr(comp, 'sdf_val_u', None)
+        sdf_v = getattr(comp, 'sdf_val_v', None)
+        sdf_w = getattr(comp, 'sdf_val_w', None)
+        bU    = getattr(comp, 'body_u', None)
+        bV    = getattr(comp, 'body_v', None)
+        bW    = getattr(comp, 'body_w', None)
+        if (sdf_u is None or sdf_v is None or sdf_w is None
+                or bU is None or bV is None or bW is None):
             raise RuntimeError(
-                "_fluid_step_kernel_3d called but composite_body has no "
-                "Phase-I _kernel_step bookkeeping; was BDIMhandler.update() "
-                "invoked first?"
+                "fluid_step: composite_body.update() must publish the "
+                "staggered BDIM fields (sdf_val_u/v/w, body_u/v/w) before "
+                "the fluid step."
             )
-        sm = comp._kernel_static_3d
 
-        # BDIM-σ: lazily compute per-body thin-body shifts, then decide whether
-        # the σ Kernel B path is active this step.
-        if self.apply_bdim_sigma and self._sigma_shifts is None:
-            self._compute_sigma_shifts()
-        sigma_active = (self.apply_bdim_sigma
+        # BDIM-σ (thin bodies): active only when the body update emitted the
+        # per-face body-id keys (rigid streaming path).
+        keys = getattr(comp, 'bdim_keys', None)
+        if self.apply_bdim_sigma and keys is None:
+            raise RuntimeError(
+                "apply_bdim_sigma requires a body update that emits per-face "
+                "body-id keys (the rigid streaming body_update path)."
+            )
+        sigma_active = (keys is not None
                         and self._sigma_shifts is not None
                         and bool(self._sigma_shifts.any()))
 
@@ -2133,115 +2048,50 @@ class FluidSolver(PlottingMixin):
         # 3. Init persistent var-dens coefficients (once / on resize).
         self._init_bdim_coeff_persist_3d(timestep)
 
-        # 4. Per-step temporaries for Kernel A -> Kernel B.
-        _opts = dict(device=self.device, dtype=self.dtype)
-        _FAR  = 1e4
-        gs    = self.grid_shape
-        dirty_vol = int(ks['dirty_Ai']) * int(ks['dirty_Aj']) * int(ks['dirty_Ak'])
-        blend_eps = self._body_vel_blend_cells * float(comp.h)
-        blend_on = blend_eps > 0.0
-        graph_mode = (getattr(self, "_kernel_cuda_graph", False)
-                      and not sigma_active and not blend_on)
-        if graph_mode:
-            c = self._kernel_bufs_3d(gs, blend_on)
-            sdf_u_tmp, sdf_v_tmp, sdf_w_tmp = c["sdf_u"], c["sdf_v"], c["sdf_w"]
-            bU_tmp, bV_tmp, bW_tmp = c["bU"], c["bV"], c["bW"]
-            key_cc_t, key_u_t = c["key_cc"], c["key_u"]
-            key_v_t, key_w_t = c["key_v"], c["key_w"]
-            num_u_t, num_v_t, num_w_t = c["num_u"], c["num_v"], c["num_w"]
-            den_u_t, den_v_t, den_w_t = c["den_u"], c["den_v"], c["den_w"]
-            # SDF→FAR / body→0 resets are folded into the bridge's captured graph.
-        else:
-            sdf_u_tmp = torch.full(gs, _FAR, **_opts)
-            sdf_v_tmp = torch.full(gs, _FAR, **_opts)
-            sdf_w_tmp = torch.full(gs, _FAR, **_opts)
-            bU_tmp    = torch.zeros(gs, **_opts)
-            bV_tmp    = torch.zeros(gs, **_opts)
-            bW_tmp    = torch.zeros(gs, **_opts)
-            _key_opts = dict(dtype=torch.int64, device=self.device)
-            key_cc_t = torch.empty(dirty_vol, **_key_opts)
-            key_u_t  = torch.empty(dirty_vol, **_key_opts)
-            key_v_t  = torch.empty(dirty_vol, **_key_opts)
-            key_w_t  = torch.empty(dirty_vol, **_key_opts)
-            if blend_on:
-                num_u_t = torch.zeros(dirty_vol, **_opts)
-                num_v_t = torch.zeros(dirty_vol, **_opts)
-                num_w_t = torch.zeros(dirty_vol, **_opts)
-                den_u_t = torch.zeros(dirty_vol, **_opts)
-                den_v_t = torch.zeros(dirty_vol, **_opts)
-                den_w_t = torch.zeros(dirty_vol, **_opts)
-            else:
-                num_u_t = torch.empty(1, **_opts); num_v_t = torch.empty(1, **_opts)
-                num_w_t = torch.empty(1, **_opts); den_u_t = torch.empty(1, **_opts)
-                den_v_t = torch.empty(1, **_opts); den_w_t = torch.empty(1, **_opts)
+        # 4. Dirty rect: provider-supplied narrow band, else the full grid.
+        gs = self.grid_shape
+        d  = getattr(comp, 'bdim_dirty', None)
+        if d is None:
+            d = {'i0': 0, 'j0': 0, 'k0': 0,
+                 'Ai': int(gs[0]), 'Aj': int(gs[1]), 'Ak': int(gs[2])}
 
-        # Warp Kernel A's atomic-min needs the CC SDF pre-filled to +FAR.  In
-        # graph mode the bridge folds this reset into the captured graph.
-        if not graph_mode:
-            comp.sdf_val.fill_(_FAR)
-
-        # 5. Kernel A (Warp).
-        streaming_sdf_stag_3d_multi(
-            sm['F_flat'], sm['F_offsets'],
-            sm['body_shapes'], sm['body_meta'], ks['kin'],
-            ks['aabb_lo'], ks['aabb_dim'],
-            ks['gx'], ks['gy'], ks['gz'],
-            float(comp.h), int(ks['max_vol']),
-            comp.sdf_val, sdf_u_tmp, sdf_v_tmp, sdf_w_tmp,
-            bU_tmp, bV_tmp, bW_tmp,
-            key_cc_t, key_u_t, key_v_t, key_w_t,
-            int(getattr(self, '_sdf_interp_method', 0)),
-            int(ks['dirty_i0']), int(ks['dirty_j0']), int(ks['dirty_k0']),
-            int(ks['dirty_Ai']), int(ks['dirty_Aj']), int(ks['dirty_Ak']),
-            num_u_t, num_v_t, num_w_t, den_u_t, den_v_t, den_w_t,
-            float(blend_eps),
-            emit_keys=sigma_active, use_graph=graph_mode,
+        # 5. bdim_forcing (Warp): fused BDIM2 + variable-density coefficients.
+        #    σ variant (thin bodies) reads the body-id keys from body_update.
+        _sigma_kwargs = (
+            dict(key_u=keys[0], key_v=keys[1], key_w=keys[2],
+                 sigma_shifts=self._sigma_shifts)
+            if sigma_active else {})
+        bdim_forcing_3d(
+            primes[0], primes[1], primes[2],
+            sdf_u, sdf_v, sdf_w,
+            bU, bV, bW,
+            self.u0, self.v0, self.w0,
+            self._ch_persist, self._cv_persist, self._cw_persist,
+            float(comp.eps), float(self.rho),
+            float(timestep), float(comp.h),
+            int(d['i0']), int(d['j0']), int(d['k0']),
+            int(d['Ai']), int(d['Aj']), int(d['Ak']),
+            int(self.bdim_mu0_projection),
+            **_sigma_kwargs,
         )
 
-        # 6. Kernel B (Warp): fused BDIM2 + variable-density coefficients.
-        #    σ variant (thin bodies) reads the body-id keys emitted by Kernel A.
-        if sigma_active:
-            bdim_coeff_3d(
-                primes[0], primes[1], primes[2],
-                sdf_u_tmp, sdf_v_tmp, sdf_w_tmp,
-                bU_tmp, bV_tmp, bW_tmp,
-                self.u0, self.v0, self.w0,
-                self._ch_persist, self._cv_persist, self._cw_persist,
-                float(comp.eps), float(self.rho),
-                float(timestep), float(comp.h),
-                int(ks['dirty_i0']), int(ks['dirty_j0']), int(ks['dirty_k0']),
-                int(ks['dirty_Ai']), int(ks['dirty_Aj']), int(ks['dirty_Ak']),
-                int(self.bdim_mu0_projection),
-                key_u=key_u_t, key_v=key_v_t, key_w=key_w_t,
-                sigma_shifts=self._sigma_shifts,
-            )
-        else:
-            bdim_coeff_3d(
-                primes[0], primes[1], primes[2],
-                sdf_u_tmp, sdf_v_tmp, sdf_w_tmp,
-                bU_tmp, bV_tmp, bW_tmp,
-                self.u0, self.v0, self.w0,
-                self._ch_persist, self._cv_persist, self._cw_persist,
-                float(comp.eps), float(self.rho),
-                float(timestep), float(comp.h),
-                int(ks['dirty_i0']), int(ks['dirty_j0']), int(ks['dirty_k0']),
-                int(ks['dirty_Ai']), int(ks['dirty_Aj']), int(ks['dirty_Ak']),
-                int(self.bdim_mu0_projection),
-            )
-
-        # 6b. Maertens–Weymouth body-divergence RHS correction (before free).
+        # 5b. Maertens–Weymouth body-divergence RHS correction (before free).
         _body_div_corr = (
-            self._mw_body_div_correction(bU_tmp, bV_tmp, bW_tmp)
+            self._mw_body_div_correction(bU, bV, bW)
             if self._bdim_body_div_correction else None)
 
-        # 7. Free per-step temporaries before the pressure projection.
-        del sdf_u_tmp, sdf_v_tmp, sdf_w_tmp, bU_tmp, bV_tmp, bW_tmp, primes
-        del key_cc_t, key_u_t, key_v_t, key_w_t
+        # 6. Release per-step scratch fields before the pressure projection
+        #    (streaming eager path — mirrors the former temporary free).
+        del sdf_u, sdf_v, sdf_w, bU, bV, bW, primes, keys
+        if getattr(comp, 'bdim_fields_scratch', False):
+            comp.sdf_val_u = comp.sdf_val_v = comp.sdf_val_w = None
+            comp.body_u = comp.body_v = comp.body_w = None
+            comp.bdim_keys = None
 
-        # 8. Boundary conditions on the BDIM-corrected velocity.
+        # 7. Boundary conditions on the BDIM-corrected velocity.
         self.adv_diff_solver.set_BCs(self.u0, self.v0, self.w0)
 
-        # 9. Pressure projection.
+        # 8. Pressure projection.
         out = self.project(
             self.u0, self.v0, p,
             ch=self._ch_persist, cv=self._cv_persist, cw=self._cw_persist,
@@ -2252,7 +2102,7 @@ class FluidSolver(PlottingMixin):
         vels_out = out[:-1]
         p_out    = out[-1]
 
-        # 10. Optional sponge / yield damping + final BC pass.
+        # 9. Optional sponge / yield damping + final BC pass.
         if self.use_sponge:
             vels_out = self.apply_sponge_damping(*vels_out)
         if self.use_yield_damping:
@@ -2265,99 +2115,23 @@ class FluidSolver(PlottingMixin):
         """One FSI fluid step (advect-BDIM-project).  Called by BDIMhandler.
 
         Dim-agnostic.  Signature: ``(u, v, p, timestep)`` in 2-D,
-        ``(u, v, w, p, timestep)`` in 3-D.  Pipeline (same for both D):
-
-        1. eddy viscosity (Smagorinsky / Carreau) on the cell-centred field
-        2. advection-diffusion → clone outputs
-        3. BDIM2 forcing on staggered grids, with union-AABB narrow band
-           when ``_use_kernels`` is on and bodies are sparse
-        4. ``set_BCs`` after BDIM so ghost cells are consistent for project
-        5. free BDIM intermediates (mu1, normals) before var-density solve
-        6. variable-density Poisson coefficients on staggered + CC grids
-        7. free mu0 fields before project (no longer needed)
-        8. pressure projection
-        9. optional sponge / yield damping
-        10. final ``set_BCs`` on the projected velocity
+        ``(u, v, w, p, timestep)`` in 3-D.  Dispatches to the single fused
+        (body-agnostic) step ``_fluid_step_fused_{2,3}d``, which consumes
+        the contract fields published by the preceding
+        ``composite_body.update()`` — whether that update is a python-style
+        field evaluation (standalone / deforming bodies) or the rigid
+        streaming ``body_update`` launched by ``BDIMhandler``.
         """
-        D = self.ndim
-        vels     = args[:D]
-        p        = args[D]
-        timestep = args[D + 1]
-
-        # Phase-I fused-kernel fast path (2-D and 3-D).  The python
-        # reference path stays on the legacy implementation below.
-        if self._use_kernels:
-            if D == 3:
-                return self._fluid_step_kernel_3d(vels[0], vels[1], vels[2],
-                                                  p, timestep)
-            if D == 2:
-                return self._fluid_step_kernel_2d(vels[0], vels[1],
-                                                  p, timestep)
-
-        # Lazy CUDA graph capture: first call after construction, once the
-        # body SDFs are valid (so warmup runs inside the capture are physical).
+        # Lazy CUDA graph capture of the adv-diff solve: first call after
+        # construction, once the body SDFs are valid (so warmup runs inside
+        # the capture are physical).
         if self._use_cuda_graphs and not self._adv_graph_captured:
             self._capture_adv_cuda_graph()
             self._adv_graph_captured = True
 
-        # 1-2. eddy viscosity + advection-diffusion
-        nu_t   = self._compute_nu_t(*vels)
-        primes = self.adv_diff_solver.solve(*vels, nu_t=nu_t)
-        primes = tuple(pp.clone() for pp in primes)
-
-        # 3. BDIM with optional union-AABB narrow band (2-D harmlessly
-        #    falls back to full-grid when no sparse SDFs are available).
-        # Compute the AABB once and keep it alive through step 6 so that
-        # _compute_bdim_coefficients can reuse it without a second call.
-        self._bdim_union_aabb = (
-            self._compute_union_aabb(halo=2) if self._use_kernels else None
-        )
-        primes = self._apply_bdim_all_axes(primes)
-        # Do NOT reset _bdim_union_aabb here — _compute_bdim_coefficients reuses it.
-
-        # 4. enforce BCs on the post-BDIM field (BDIM may touch ghosts
-        #    when bodies straddle the domain boundary).
-        self.adv_diff_solver.set_BCs(*primes)
-
-        # 5. drop mu1 / normals — projected coefficients only need mu0.
-        self.__dict__.update(self._FS_FREE_AFTER_BDIM)
-
-        # 6. variable-density Poisson coefficients.
-        #    2-D returns (ch, cv, ch_cc); 3-D returns (ch, cv, cw, ch_cc).
-        coeffs       = self._compute_bdim_coefficients(timestep)
-        self._bdim_union_aabb = None   # release after both step-3 and step-6 are done
-        ch_cc        = coeffs[-1]
-        face_coeffs  = coeffs[:-1]
-
-        # 7. drop mu0 fields — projection consumes ch/cv/cw/ch_cc only.
-        self.__dict__.update(self._FS_FREE_AFTER_BDIM_COEFF)
-
-        # 8. pressure projection.  ``ch_cc`` is consumed by the FFT path
-        #    only; the multigrid/MGCG path ignores it, so passing it
-        #    unconditionally is harmless and removes a branch.
-        proj_kwargs = {'ch': face_coeffs[0], 'cv': face_coeffs[1], 'ch_cc': ch_cc}
-        if D == 3:
-            proj_kwargs['cw']    = face_coeffs[2]
-            proj_kwargs['w_vel'] = primes[2]
-        if self._bdim_body_div_correction:
-            _cb = self.composite_body
-            proj_kwargs['body_div_corr'] = self._mw_body_div_correction(
-                _cb.body_u, _cb.body_v,
-                getattr(_cb, 'body_w', None) if D == 3 else None)
-        out      = self.project(primes[0], primes[1], p, **proj_kwargs)
-        vels_out = out[:-1]
-        p_out    = out[-1]
-
-        # 9. boundary / yield damping.
-        if self.use_sponge:
-            vels_out = self.apply_sponge_damping(*vels_out)
-        if self.use_yield_damping:
-            vels_out = self.apply_yield_damping(*vels_out)
-
-        # 10. final BC pass on the projected velocity.
-        self.adv_diff_solver.set_BCs(*vels_out)
-
-        return (*vels_out, p_out)
+        if self.ndim == 3:
+            return self._fluid_step_fused_3d(*args)
+        return self._fluid_step_fused_2d(*args)
 
     def _capture_adv_cuda_graph(self):
         """Capture a CUDA graph for the adv-diff solve (constant-viscosity path).
@@ -2523,14 +2297,14 @@ class FluidSolver(PlottingMixin):
         Returns ``(u, v, p, w_vel)`` (``w_vel`` is ``None`` in 2-D).
         """
         self.composite_body.update(t, iteration, dt=self.dt)
-        # Phase I: in kernel mode (2-D and 3-D), mu0/mu1 and normals are
-        # computed in CUDA thread registers inside Kernel B during
-        # fluid_step.  No persistent mu/normal buffers are allocated, so
-        # the python ``_recompute_mu_normals`` is unused (and would
-        # allocate the per-axis mu/normal pack it depends on).
-        if not self._use_kernels:
+        # The fused step computes mu0/mu1 and normals in CUDA thread
+        # registers inside bdim_forcing, so the full-grid mu/normal pack is
+        # only materialised when a downstream consumer actually reads it:
+        # the python force readout of standalone (non-streaming) bodies.
+        # Streaming (FARMS) runs read their forces from the post-step force
+        # kernels and must NOT start paying the mu/normals memory peak.
+        if self._needs_python_mu_normals():
             self._recompute_mu_normals()
-        # self.sdf_properties = [[self.composite_body.sdf_val_u]]
 
         # Gravity body force (predictor-side forward-Euler).  Applied
         # BEFORE fluid_step so the adv-diff + projection see the new

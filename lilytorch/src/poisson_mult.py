@@ -1283,6 +1283,11 @@ class _MultigridPoissonSolver:
             if r_err < self.tol:
                 cycles_run = i + 1
                 break
+        # Refresh the ghost ring before the gauge fix: the Warp smoothers fold
+        # the Neumann BC by index-clamping and never write the ghost cells, so
+        # the ring holds stale/allocator values that would otherwise poison the
+        # full-array mean below (and any downstream reader of the padded p).
+        self.BC(p)
         # float64 mean subtraction: GPU parallel-reduction of float32 gives
         # a different value than CPU sequential sum.
         # Skip when a Dirichlet mask pins p in (a subset of) cells — the
@@ -1882,6 +1887,9 @@ class PoissonSolver(_MultigridPoissonSolver):
                     ch, cv, cw = face_arrs
                     p = mg.solve(f_scaled, ch.contiguous(), cv.contiguous(),
                                  cw.contiguous(), p0=p0)
+                    # Ghost ring is never written by the graphed Warp V-cycle
+                    # (index-clamped Neumann); refresh it before the gauge mean.
+                    self.BC(p)
                     if self.dirichlet_mask is None:
                         p -= p.to(torch.float64).mean().to(p.dtype)
                     from lilytorch.src.kernels.poisson import mg_residual_3d_warp
@@ -1893,6 +1901,9 @@ class PoissonSolver(_MultigridPoissonSolver):
                     return p, r
                 ch, cv = face_arrs
                 p = mg.solve(f_scaled, ch.contiguous(), cv.contiguous(), p0=p0)
+                # Ghost ring is never written by the graphed Warp V-cycle
+                # (index-clamped Neumann); refresh it before the gauge mean.
+                self.BC(p)
                 if self.dirichlet_mask is None:
                     p -= p.to(torch.float64).mean().to(p.dtype)
                 from lilytorch.src.kernels.multigrid_graph import mg_residual_2d_clamped_warp

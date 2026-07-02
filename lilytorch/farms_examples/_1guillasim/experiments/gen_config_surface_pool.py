@@ -34,7 +34,6 @@ class SimConfig(BaseSimConfig):
         # to links by a softmin partition of unity — seam-free, no hydrostatic
         # baseline leak (vs the default per-body n·δ band integral).
         self.force_submethod               = "deltaH"
-        self.backend                       = "warp"
         self.zero_pressure_inside          = False
         self.body_velocity_blend_eps_cells = None
         self.bdim_mu0_projection           = True

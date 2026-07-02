@@ -13,14 +13,14 @@ FARMS coupling) runs through the untouched base solver byte-for-byte. The
 overrides are:
 
 * ``__init__`` — build the :class:`~lilytorch.src.two_phase.TwoPhase` field.
-* ``_compute_bdim_coefficients`` / ``_apply_bdim_all_axes`` — **Python path**:
-  projection coefficients ``c = dt·μ0_eff·(1/ρ)_fluid`` from the VOF water/air
-  density (Weymouth & Yue 2011, ``(1−δ^B)/ρ``; the body enters via ``μ0`` only,
-  never its density) and the air-transparent mu0/mu1 masking of the velocity
-  BDIM.
-* ``project`` — **kernel path**: between the fused single-phase Kernel B and
-  the Poisson solve, repair the velocity with the exact air-transparent
-  identity ``a·S + (1−a)·u′`` (u′ captured by wrapping
+* ``_compute_bdim_coefficients`` / ``_apply_bdim_all_axes`` — **consistent-
+  momentum (python-style) path**: projection coefficients
+  ``c = dt·μ0_eff·(1/ρ)_fluid`` from the VOF water/air density (Weymouth &
+  Yue 2011, ``(1−δ^B)/ρ``; the body enters via ``μ0`` only, never its
+  density) and the air-transparent mu0/mu1 masking of the velocity BDIM.
+* ``project`` — **fused path** (the default): between the fused single-phase
+  bdim_forcing and the Poisson solve, repair the velocity with the exact
+  air-transparent identity ``a·S + (1−a)·u′`` (u′ captured by wrapping
   ``adv_diff_solver.solve``) and rescale the kernel's water-normalised
   coefficients to the two-phase formulas. No CUDA or solver.py changes;
   both paths solve the identical Poisson.
@@ -35,7 +35,7 @@ Everything else is inherited and reused unchanged:
 * **projection core** — the base ``project`` runs the variable-coefficient MGCG
   path ``∇·(c∇p)=div`` → ``u -= c∇p`` (closed-box all-Neumann, ``dirichlet_mask
   = None``); we just feed it the density-based ``c`` (built by the python
-  coefficient override or written by the two-phase Kernel B);
+  coefficient override or written by the two-phase bdim_forcing);
 * advection–diffusion, BDIM, the Poisson solver, force integration.
 
 The hydrostatic interface jump and the buoyancy on the body therefore emerge
@@ -176,41 +176,43 @@ class TwoPhaseSolver(FluidSolver):
                 "two_phase requires poisson_method 'multigrid' or 'mgcg' "
                 "(the FFT solver cannot do a variable-density Poisson)."
             )
-        # KERNEL MODE: supported, with the single-phase fused kernels left
-        # untouched.  The two-phase repairs run in ``project`` (see the
-        # kernel-mode override section below): the BDIM velocity is fixed by
-        # the exact identity ``a*S + (1-a)*u'`` (the historical blocker — the
-        # kernel imposing the body velocity into the air — needed only u',
-        # captured by wrapping ``adv_diff_solver.solve``), and the Poisson
-        # coefficient by the out-of-place rescale of the kernel's
-        # water-normalised ``dt*mu0/rho_water``.
-        if self._use_kernels and self.apply_bdim_sigma:
+        # FUSED PATH: the default (non-consistent) two-phase step reuses the
+        # single-phase fused kernels untouched.  The two-phase repairs run in
+        # ``project`` (see the fused-path override section below): the BDIM
+        # velocity is fixed by the exact identity ``a*S + (1-a)*u'`` (the
+        # historical blocker — the kernel imposing the body velocity into the
+        # air — needed only u', captured by wrapping ``adv_diff_solver.solve``),
+        # and the Poisson coefficient by the out-of-place rescale of the
+        # kernel's water-normalised ``dt*mu0/rho_water``.  The consistent-
+        # momentum step (python-style conservative transport) bypasses the
+        # fused kernels entirely, so the guards below do not apply to it.
+        _consistent = bool(tp_cfg.get("consistent_momentum", False))
+        if not _consistent and self.apply_bdim_sigma:
             raise ValueError(
-                "TwoPhaseSolver kernel mode does not support apply_bdim_sigma "
+                "TwoPhaseSolver's fused path does not support apply_bdim_sigma "
                 "(the σ-shifted coefficient breaks the mu0 reconstruction in "
                 "the two-phase rescale); disable one of them."
             )
-        if self._use_kernels and not self.bdim_mu0_projection:
+        if not _consistent and not self.bdim_mu0_projection:
             raise ValueError(
-                "TwoPhaseSolver kernel mode requires bdim_mu0_projection=True "
+                "TwoPhaseSolver's fused path requires bdim_mu0_projection=True "
                 "(the two-phase coefficient rescale reconstructs mu0 from the "
                 "kernel's dt*mu0/rho_water coefficient)."
             )
         self._init_two_phase(tp_cfg)
-        # Kernel path: capture the advection output u' each step — the only
+        # Fused path: capture the advection output u' each step — the only
         # input the air-transparent velocity identity needs.  The reference is
         # dropped at the start of ``project``, before the Poisson solve, so
-        # peak memory matches the base kernel step.
+        # peak memory matches the base fused step.
         self._kernel_primes = None
-        if self._use_kernels:
-            _orig_solve = self.adv_diff_solver.solve
+        _orig_solve = self.adv_diff_solver.solve
 
-            def _solve_and_stash(*a, **k):
-                out = _orig_solve(*a, **k)
-                self._kernel_primes = out
-                return out
+        def _solve_and_stash(*a, **k):
+            out = _orig_solve(*a, **k)
+            self._kernel_primes = out
+            return out
 
-            self.adv_diff_solver.solve = _solve_and_stash
+        self.adv_diff_solver.solve = _solve_and_stash
         # Saved 3-D PyVista frames (plotting_and_saving -> plot_field_3d) render
         # the air/water INTERFACE: the VOF field alpha at iso-level 0.5, plus the
         # body SDF. This overrides the default vorticity iso-specs (the interface
@@ -315,14 +317,9 @@ class TwoPhaseSolver(FluidSolver):
         # flux that evolves the density, recovers u = rho*u / rho consistently
         # (no 833x blow-up at the interface), and the interface is advected by
         # that same flux (the Weymouth-Yue VOF in finalize_step is skipped).
-        # PYTHON path only (the fused kernel is untouched); default OFF so every
-        # existing two-phase case is byte-for-byte unchanged.
+        # Runs a python-style step (the fused kernel is bypassed); default OFF
+        # so every existing two-phase case is byte-for-byte unchanged.
         self._consistent_momentum = bool(cfg.get("consistent_momentum", False))
-        if self._consistent_momentum and self._use_kernels:
-            raise ValueError(
-                "two_phase.consistent_momentum requires the python solver path "
-                "(solver_method != 'kernel'); the fused kernel is not yet ported."
-            )
         # Three-phase density (Nangia 2019 WSI, Eq. 23): treat the body as a
         # smoothed THIRD density phase rho_solid, blended by mu0 (the BDIM fluid
         # fraction IS the body Heaviside), INSIDE the variable-density projection
@@ -380,7 +377,7 @@ class TwoPhaseSolver(FluidSolver):
         # and each link still gets its own force+torque for MuJoCo).
         # ``partial_heaviside_blend_cells`` sets the softmin scale tau =
         # blend_cells * h (default 1.5 cells).  Viscous channels untouched.
-        # Needs solver_method='python' (per-body SDFs); the native-kernel
+        # Needs per-body SDFs (standalone python-style bodies); the streaming
         # equivalent is ``solver.force_submethod = "deltaH"``.  Opt-in;
         # supersedes the gauge anchors when set.
         self._partial_heaviside_forces = bool(
@@ -545,7 +542,7 @@ class TwoPhaseSolver(FluidSolver):
     # ------------------------------------------------------------------
     #  Override: KERNEL-mode two-phase (velocity blend + coefficient rescale)
     # ------------------------------------------------------------------
-    # The fused single-phase Kernel B writes ``S = mu0*(u'-b) + b + mu1*nd``
+    # The fused single-phase bdim_forcing writes ``S = mu0*(u'-b) + b + mu1*nd``
     # and ``c_kernel = dt*mu0/rho_water`` — wrong for two-phase on BOTH
     # counts.  Both are repaired here in a handful of python tensor ops, with
     # NO custom kernels and NO solver.py changes, thanks to two identities:
@@ -652,11 +649,13 @@ class TwoPhaseSolver(FluidSolver):
         return tuple(out)
 
     def project(self, *args, ch=None, cv=None, cw=None, ch_cc=None, **kwargs):
-        """Kernel path only: blend the BDIM velocity with u' (air-transparent
+        """Fused path only: blend the BDIM velocity with u' (air-transparent
         identity) and rescale the coefficients to the two-phase formulas, then
-        run the base variable-coefficient projection.  The python path arrives
-        here with velocity and coefficients already two-phase-correct."""
-        if self._use_kernels and isinstance(ch, torch.Tensor):
+        run the base variable-coefficient projection.  The consistent-momentum
+        path arrives here with freshly-built two-phase coefficients (not the
+        solver's persistent water-normalised buffers), so the identity check
+        on ``_ch_persist`` keeps it untouched."""
+        if isinstance(ch, torch.Tensor) and ch is getattr(self, '_ch_persist', None):
             vels = list(args[:2])
             if self.ndim == 3:
                 vels.append(kwargs["w_vel"])
@@ -728,12 +727,12 @@ class TwoPhaseSolver(FluidSolver):
         link's torque is about its OWN com.  Cropped to the union AABB for speed;
         per-link SDFs from _sdf_sparse / sdf_vals (python path only)."""
         cb = self.composite_body
-        if getattr(self, "_use_kernels", False) and getattr(
-                cb, "_kernel_step", None) is not None:
+        if getattr(cb, "_kernel_step", None) is not None:
             raise RuntimeError(
-                "partial_heaviside_forces requires solver_method='python' "
-                "(the kernel-streaming force path keeps only the union SDF); "
-                "use solver.force_submethod='deltaH' on the native path.")
+                "partial_heaviside_forces requires per-body SDFs (standalone "
+                "python-style bodies; the rigid streaming update keeps only "
+                "the union SDF); use solver.force_submethod='deltaH' on the "
+                "streaming path.")
         B = len(cb.bodies)
         h = self.h
         hD = self.h3 if fn3d else self.h2
@@ -810,6 +809,13 @@ class TwoPhaseSolver(FluidSolver):
     def forces_method2_3d(self, u, v, w, p, iteration):
         self._two_phase_forces(True, (u, v, w), p, iteration)
 
+    def _needs_python_mu_normals(self):
+        """The consistent-momentum step applies the velocity BDIM and builds
+        the two-phase coefficients in python, both of which read the
+        staggered mu/normal pack — so it always needs the recompute (the
+        streaming update publishes the staggered SDFs it consumes)."""
+        return self._consistent_momentum or super()._needs_python_mu_normals()
+
     def advance_and_compute_loads(self, u, v, p, iteration, t, w_vel=None):
         """Override: when zero_pressure_inside is enabled, zero pressure only
         DEEP inside the body (``sdf < -2h``), leaving the BDIM band
@@ -817,7 +823,7 @@ class TwoPhaseSolver(FluidSolver):
         for thin bodies (thickness ~ band width) removes the interior half of
         the band and destroys emergent buoyancy."""
         self.composite_body.update(t, iteration, dt=self.dt)
-        if not self._use_kernels:
+        if self._needs_python_mu_normals():
             self._recompute_mu_normals()
 
         if self.use_gravity:
@@ -865,7 +871,7 @@ class TwoPhaseSolver(FluidSolver):
         conservative momentum advection (see :meth:`_consistent_advect_2d`), so
         the base velocity pre-kick must be suppressed to avoid double-counting
         (and to keep the density-transport flux on the un-kicked velocity)."""
-        if self._consistent_momentum and not self._use_kernels:
+        if self._consistent_momentum:
             return vels
         return super()._apply_gravity_body_force(*vels)
 
@@ -873,9 +879,9 @@ class TwoPhaseSolver(FluidSolver):
         """As the base (advect-BDIM-project), but in consistent mode the velocity
         advection is replaced by consistent conservative momentum transport.
         BDIM, the variable-density coefficients, and the projection are reused
-        unchanged. Dimension-agnostic; python path only."""
+        unchanged. Dimension-agnostic."""
         self._try_deferred_alpha_carve()
-        if not self._consistent_momentum or self._use_kernels:
+        if not self._consistent_momentum:
             return super().fluid_step(*args)
         D = self.ndim
         u_n = [a.clone() for a in args[:D]]                  # n-level velocity (start)

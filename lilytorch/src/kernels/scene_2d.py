@@ -1,7 +1,7 @@
 """Synthetic 2-D scene builder shared by the 2-D Warp parity tests/benches.
 
-Builds all tensors needed by the native `streaming_sdf_stag_2d_multi` /
-`bdim_coeff_2d` ops AND by `warp_kernels_2d.WarpStreamingSDF2D`, using disc
+Builds all tensors needed by the native `body_update_2d` /
+`bdim_forcing_2d` ops AND by `warp_kernels_2d.WarpStreamingSDF2D`, using disc
 (circle) SDF tables on a uniform body grid — no FARMS/MuJoCo dependency.
 
 2-D packed layouts (match `streaming_sdf_2d.cu`):

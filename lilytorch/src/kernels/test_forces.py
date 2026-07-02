@@ -19,9 +19,9 @@ import torch
 try:
     import lilytorch.src.kernels  # noqa: F401
     from lilytorch.src.kernels.ops import (
-        streaming_sdf_stag_2d_multi as native_stream_2d,
+        body_update_2d as native_stream_2d,
         streaming_sdf_forces_post_2d as native_forces_2d,
-        streaming_sdf_stag_3d_multi as native_stream_3d,
+        body_update_3d as native_stream_3d,
         streaming_sdf_forces_post_3d as native_forces_3d,
     )
     _NATIVE = True

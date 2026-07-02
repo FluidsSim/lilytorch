@@ -1,7 +1,7 @@
 """Warp vs native kernel viability benchmark.
 
-Measures the streaming-SDF hot path (Kernel A) across three modes:
-  1. Native CUDA  — torch.ops.lilytorch_kernels.streaming_sdf_stag_3d_multi
+Measures the streaming-SDF hot path (body_update) across three modes:
+  1. Native CUDA  — torch.ops.lilytorch_kernels.body_update_3d
   2. Warp eager   — 3 separate wp.launch calls (init_keys, fanned, decode)
   3. Warp + graph — single graph replay (captures the 3 launches)
 
@@ -33,7 +33,7 @@ import warp as wp
 # Import native kernel (requires _C.so to be built)
 try:
     import lilytorch.src.kernels  # noqa: F401 — registers ops
-    from lilytorch.src.kernels.ops import streaming_sdf_stag_3d_multi
+    from lilytorch.src.kernels.ops import body_update_3d
     _NATIVE_AVAILABLE = True
 except Exception as e:
     print(f"[warn] native kernel unavailable: {e}")
@@ -64,7 +64,7 @@ def make_synthetic_scene(
     device: str = "cuda:0",
     seed: int = 42,
 ) -> Dict:
-    """Build all tensors needed by streaming_sdf_stag_3d_multi and WarpStreamingSDF.
+    """Build all tensors needed by body_update_3d and WarpStreamingSDF.
 
     Returns a dict with keys:
       F_flat, F_offsets, body_shapes, body_meta,
@@ -213,7 +213,7 @@ def make_synthetic_scene(
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_native(sc: Dict, *, reset_outputs: bool = True):
-    """Run the native streaming_sdf_stag_3d_multi for one step."""
+    """Run the native body_update_3d for one step."""
     if not _NATIVE_AVAILABLE:
         return
     if reset_outputs:
@@ -226,7 +226,7 @@ def run_native(sc: Dict, *, reset_outputs: bool = True):
     # Native expects 3D tensors; reshape flat outputs
     Ngx, Ngy, Ngz = sc["Ngx"], sc["Ngy"], sc["Ngz"]
 
-    streaming_sdf_stag_3d_multi(
+    body_update_3d(
         sc["F_flat"], sc["F_offsets"],
         sc["body_shapes"], sc["body_meta"], sc["kin"],
         sc["aabb_lo"], sc["aabb_dim"],

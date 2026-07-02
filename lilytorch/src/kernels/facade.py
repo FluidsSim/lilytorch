@@ -19,7 +19,7 @@ Wired to Warp (``WARP_BACKED``):
 Native fallback (Warp ports exist + are parity-clean in ``warp_poc`` but need a
 marshalling / driver-assembly bridge to drop into the live solver — see §F):
 
-* Kernel A/B ``streaming_sdf_stag_*`` / ``bdim_coeff_*`` — the Warp wrappers
+* ``body_update_*`` / ``bdim_forcing_*`` (formerly Kernel A/B) — the Warp wrappers
   take the POC per-body scene layout, not the native ``F_flat``/``F_offsets``/
   ``body_meta``/``kin`` flat-table marshalling. (Marshalling bridge = remaining.)
 * Poisson ``K`` — the native ``poisson_solve_*`` is a monolithic C++ driver;
@@ -39,34 +39,34 @@ import torch
 
 BACKEND = "warp"
 
-# Streaming SDF "far" sentinel — Warp Kernel A's atomic-min needs untouched cells
+# Streaming SDF "far" sentinel — Warp body_update's atomic-min needs untouched cells
 # pre-filled to +FAR.  Used by the CUDA-graph fast path, which folds the reset
 # into the captured graph (Warp memset) instead of a per-step torch fill.
 _FAR = 1e4
 
 _warp_backed = set()
 
-# ── Kernel A / Kernel B (3-D) → WARP (marshalling bridge) ───────────────────
-# Mirrors the 2-D bridge: Kernel A streams via WarpStreamingSDF, Kernel B is a
-# signature-identical drop-in.  Both dtype-generic (f32+f64).  The σ Kernel B
-# also runs on Warp (Item 5): Kernel A's bridge emits the winning body-id keys.
+# ── body_update / bdim_forcing (3-D) → WARP (marshalling bridge) ───────────────────
+# Mirrors the 2-D bridge: body_update streams via WarpStreamingSDF, bdim_forcing is a
+# signature-identical drop-in.  Both dtype-generic (f32+f64).  The σ bdim_forcing
+# also runs on Warp (Item 5): body_update's bridge emits the winning body-id keys.
 
-# ── Kernel A / Kernel B (2-D) → WARP (marshalling bridge) ───────────────────
-# Kernel A + Kernel B both run on Warp at f32 AND f64 (dtype-generic ports).
+# ── body_update / bdim_forcing (2-D) → WARP (marshalling bridge) ───────────────────
+# body_update + bdim_forcing both run on Warp at f32 AND f64 (dtype-generic ports).
 # The native handles below are used ONLY if Warp is unavailable (import except).
-# The σ Kernel B also runs on Warp now (Item 5): the streaming bridge emits the
+# The σ bdim_forcing also runs on Warp now (Item 5): the streaming bridge emits the
 # body-id key_* arrays the σ pass reads (see the bridges' emit_keys path).
 
 try:
     from lilytorch.src.kernels.streaming_sdf_2d import WarpStreamingSDF2D as _WarpSDF2D
-    from lilytorch.src.kernels.bdim_2d import bdim_coeff_2d_warp as _bdim2d_warp
+    from lilytorch.src.kernels.bdim_2d import bdim_forcing_2d_warp as _bdim2d_warp
     import warp as _wp
 
     def _wdev(t):
         return "cuda:0" if t.device.type == "cuda" else "cpu"
 
-    class _KernelA2DBridge:
-        """Adapt the native ``streaming_sdf_stag_2d_multi`` positional call into
+    class _BodyUpdate2DBridge:
+        """Adapt the native ``body_update_2d`` positional call into
         :class:`WarpStreamingSDF2D` (flat-table layout → setup/update/run).
 
         The static body table (``F_flat``/``body_meta``/``gx``/``gy``…) is cached
@@ -115,7 +115,7 @@ try:
                 return _wp.from_torch(t.reshape(-1))
 
             # BDIM-σ path: emit the winning body-id into key_u/key_v (low 32
-            # bits) so the Warp σ Kernel B can read it (it masks key & 0xffffffff).
+            # bits) so the Warp σ bdim_forcing can read it (it masks key & 0xffffffff).
             # Sentinel = B (= n_sigma) on untouched cells → no σ shift, mirroring
             # the native ``B_sentinel``.
             if emit_keys:
@@ -134,7 +134,7 @@ try:
             # buffers stay eager.  The SDF→FAR / body→0 resets are folded INTO the
             # graph (Warp memsets) so the solver override does not pay the
             # ~35 µs/step of size-independent torch fill launches — this is what
-            # makes Kernel A beat native at small grids too.
+            # makes body_update beat native at small grids too.
             if use_graph and sdf_cc.is_cuda and not blend_on:
                 gkey = (sdf_cc.data_ptr(), sdf_u.data_ptr(), sdf_v.data_ptr(),
                         body_u.data_ptr(), body_v.data_ptr())
@@ -162,21 +162,21 @@ try:
             w.run_fanned_eager(f(sdf_cc), f(sdf_u), f(sdf_v),
                                f(body_u), f(body_v))
 
-    streaming_sdf_stag_2d_multi = _KernelA2DBridge()
-    _warp_backed.add("streaming_sdf_stag_2d_multi")
+    body_update_2d = _BodyUpdate2DBridge()
+    _warp_backed.add("body_update_2d")
 
     # Signature-identical drop-in; the Warp port is now dtype-generic (f32+f64),
     # so this runs on Warp at either precision (no native fallback).
-    bdim_coeff_2d = _bdim2d_warp
-    _warp_backed.add("bdim_coeff_2d")
+    bdim_forcing_2d = _bdim2d_warp
+    _warp_backed.add("bdim_forcing_2d")
 
-    # ── Kernel A (3-D) bridge ────────────────────────────────────────────────
+    # ── body_update (3-D) bridge ────────────────────────────────────────────────
     from lilytorch.src.kernels.streaming_sdf import WarpStreamingSDF as _WarpSDF3D
-    from lilytorch.src.kernels.bdim import bdim_coeff_3d_warp as _bdim3d_warp
+    from lilytorch.src.kernels.bdim import bdim_forcing_3d_warp as _bdim3d_warp
 
-    class _KernelA3DBridge:
-        """3-D analogue of :class:`_KernelA2DBridge`.  Adapts the native
-        ``streaming_sdf_stag_3d_multi`` positional call into
+    class _BodyUpdate3DBridge:
+        """3-D analogue of :class:`_BodyUpdate2DBridge`.  Adapts the native
+        ``body_update_3d`` positional call into
         :class:`WarpStreamingSDF` (z axis: ``aabb_*``/``body_shapes`` are ``B*3``,
         ``kin`` is ``B*21``; adds ``gz``/``sdf_w``/``bW``).  The σ ``key_*``
         arrays (winning body-id, dirty-local) are emitted on the ``emit_keys``
@@ -263,20 +263,20 @@ try:
             w.run_fanned_eager(f(sdf_cc), f(sdf_u), f(sdf_v), f(sdf_w),
                                f(body_u), f(body_v), f(body_w))
 
-    streaming_sdf_stag_3d_multi = _KernelA3DBridge()
-    _warp_backed.add("streaming_sdf_stag_3d_multi")
+    body_update_3d = _BodyUpdate3DBridge()
+    _warp_backed.add("body_update_3d")
 
     # Signature-identical drop-in (dtype-generic f32+f64).
-    bdim_coeff_3d = _bdim3d_warp
-    _warp_backed.add("bdim_coeff_3d")
+    bdim_forcing_3d = _bdim3d_warp
+    _warp_backed.add("bdim_forcing_3d")
 
-    # σ Kernel B (thin bodies): the Warp Kernel A now emits the body-id keys the
+    # σ bdim_forcing (thin bodies): the Warp body_update now emits the body-id keys the
     # σ pass reads (Item 5), so the σ variants run on Warp too — native-positional
     # shims around the same dtype-generic ``bdim_coeff_{2,3}d_warp`` (keys +
     # sigma_shifts as keywords).  The solver step calls ``bdim_coeff_{2,3}d``
     # directly with the σ keywords; these named shims keep the facade contract
     # (parity with ``src_cuda.kernel``) Warp-backed instead of native.
-    def bdim_coeff_sigma_2d(
+    def bdim_forcing_sigma_2d(
             u_prime, v_prime, sdf_u, sdf_v, body_u, body_v, u0, v0, ch, cv,
             key_u, key_v, sigma_shifts, eps, rho_f, dt, h_grid,
             dirty_i0, dirty_j0, dirty_Ai, dirty_Aj, mu0_projection=1):
@@ -285,7 +285,7 @@ try:
             eps, rho_f, dt, h_grid, dirty_i0, dirty_j0, dirty_Ai, dirty_Aj,
             mu0_projection, key_u=key_u, key_v=key_v, sigma_shifts=sigma_shifts)
 
-    def bdim_coeff_sigma_3d(
+    def bdim_forcing_sigma_3d(
             u_prime, v_prime, w_prime, sdf_u, sdf_v, sdf_w,
             body_u, body_v, body_w, u0, v0, w0, ch, cv, cw,
             key_u, key_v, key_w, sigma_shifts, eps, rho_f, dt, h_grid,
@@ -299,8 +299,8 @@ try:
             mu0_projection, key_u=key_u, key_v=key_v, key_w=key_w,
             sigma_shifts=sigma_shifts)
 
-    _warp_backed.add("bdim_coeff_sigma_2d")
-    _warp_backed.add("bdim_coeff_sigma_3d")
+    _warp_backed.add("bdim_forcing_sigma_2d")
+    _warp_backed.add("bdim_forcing_sigma_3d")
 except Exception:  # pragma: no cover - degrade to native if Warp unavailable
     # Warp backend is required (native CUDA/C++ kernels removed).
     raise

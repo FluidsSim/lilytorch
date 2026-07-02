@@ -1,4 +1,4 @@
-"""Parity: Warp **Kernel B (2-D)** (`bdim_coeff_2d` + FD normals) vs native.
+"""Parity: Warp **bdim_forcing (2-D)** (`bdim_forcing_2d` + FD normals) vs native.
 
 2-D analogue of `test_bdim.py`.  In 2-D the native writes the Poisson coeff at
 the full-grid index ``c_out[g]`` in BOTH the CUDA and CPU ops, so coeff parity
@@ -12,14 +12,14 @@ import torch
 try:
     import lilytorch.src.kernels  # noqa: F401
     from lilytorch.src.kernels.ops import (
-        bdim_coeff_2d as native_2d,
-        bdim_coeff_sigma_2d as native_sigma_2d,
+        bdim_forcing_2d as native_2d,
+        bdim_forcing_sigma_2d as native_sigma_2d,
     )
     _NATIVE = True
 except Exception:
     _NATIVE = False
 
-from lilytorch.src.kernels.bdim_2d import bdim_coeff_2d_warp
+from lilytorch.src.kernels.bdim_2d import bdim_forcing_2d_warp
 
 SKIP_NO_NATIVE = pytest.mark.skipif(not _NATIVE, reason="native _C.so unavailable")
 SKIP_NO_CUDA = pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA")
@@ -62,7 +62,7 @@ def _run_warp(F, dirty, mu0_proj, sigma=None):
     if sigma is not None:
         ku, kv, ss = sigma
         kw = dict(key_u=ku, key_v=kv, sigma_shifts=ss)
-    bdim_coeff_2d_warp(up, vp, su, sv, bu, bv, u0, v0, ch, cv,
+    bdim_forcing_2d_warp(up, vp, su, sv, bu, bv, u0, v0, ch, cv,
                        EPS, RHO, DT, H, *dirty, mu0_proj, **kw)
     return u0, v0, ch, cv
 
@@ -109,7 +109,7 @@ def test_gpu_parity_subblock(mu0_proj):
 @SKIP_NO_CUDA
 @pytest.mark.parametrize("mu0_proj", [1, 0])
 def test_gpu_parity_full_f32(mu0_proj):
-    """float32: the dtype-generic Kernel B runs on Warp (no native fallback) and
+    """float32: the dtype-generic bdim_forcing runs on Warp (no native fallback) and
     matches the native f32 op to single precision (not bit-exact: f32 FMA/order)."""
     dev = "cuda:0"
     su, sv, bu, bv, up, vp = [t.float() for t in _fields(dev)]
@@ -124,7 +124,7 @@ def test_gpu_parity_full_f32(mu0_proj):
     native_2d(up, vp, su, sv, bu, bv, u0n, v0n, chn, cvn,
               EPS, RHO, DT, H, *dirty, mu0_proj)
     u0w, v0w = up.clone(), vp.clone(); chw, cvw = cb()
-    bdim_coeff_2d_warp(up, vp, su, sv, bu, bv, u0w, v0w, chw, cvw,
+    bdim_forcing_2d_warp(up, vp, su, sv, bu, bv, u0w, v0w, chw, cvw,
                        EPS, RHO, DT, H, *dirty, mu0_proj)
     for nm, a, b in (("u0", u0n, u0w), ("v0", v0n, v0w),
                      ("ch", chn, chw), ("cv", cvn, cvw)):

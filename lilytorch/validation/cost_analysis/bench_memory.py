@@ -76,7 +76,6 @@ def main() -> None:
     if args.dtype is not None: s["dtype"] = args.dtype
     s["poisson_method"] = args.poisson
     s["compile_adv_diff"] = bool(args.compile_adv_diff)
-    s["solver_method"] = "python"            # standalone (no FARMS bridge)
     s["nt"] = args.warmup + args.nt
     # no I/O during the benchmark
     pars["output"]["save_frames"] = False

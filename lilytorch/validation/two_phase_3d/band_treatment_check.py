@@ -346,7 +346,7 @@ def kernel_deltaH_parity(grid_n=56, extent=0.4):
         hd.ndim = 3; hd.device = DEV; hd.dtype = DT; hd.dtype_np = np.float64
         hd._sim_axes = [0, 1, 2]
         hd.fluid_solver = types.SimpleNamespace(
-            composite_body=comp, grid_shape=gs, _use_kernels=True)
+            composite_body=comp, grid_shape=gs)
         hd.force_method = "eulerian"
         hd.gather_data = types.MethodType(lambda self, it, k=kin_id(bodies): k, hd)
         hd._update_streaming_multi(0.0, 0)

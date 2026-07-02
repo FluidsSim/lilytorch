@@ -80,7 +80,6 @@ def _make_config(dim, ncells, scheme, poisson):
 
     s["convection_method"] = scheme
     s["poisson_method"]    = poisson
-    s["solver_method"]     = "python"
     s["save_frames"]       = False
     s["save"]              = False
     s["nt"]                = 1          # overridden in run_config

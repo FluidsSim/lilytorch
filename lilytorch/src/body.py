@@ -893,7 +893,6 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, custom_update=None, starti
             convexify          = body_pars["convexify"],
             scale              = body_pars["scale"],
             save_folder        = body_pars["save_folder"],
-            use_kernels        = kwargs.pop("use_kernels", False),
             **kwargs
         )
 
@@ -1122,12 +1121,10 @@ class Body:
 
         Called eagerly by composite / standalone body classes (e.g.
         ``CompositeBodyAnalytical``, ``BodyFishAnalytical``,
-        ``CompositeBodyMesh``) after ``super().__init__()``, and by
-        ``MultiAnimatBodies`` when ``use_kernels=False`` (python mode).
-        In kernel mode ``MultiAnimatBodies`` skips this call entirely so
-        no staggered-grid tensors are allocated.  Child ``BodyAnalytical``
-        instances inside a
-        composite do *not* call this.
+        ``CompositeBodyMesh``) after ``super().__init__()``.
+        ``MultiAnimatBodies`` (the FARMS streaming provider) skips this
+        call entirely so no staggered-grid tensors are allocated.  Child
+        ``BodyAnalytical`` instances inside a composite do *not* call this.
         """
         g = _get_staggered_grids(self.x, self.y, self.z)
         self._grids  = g
@@ -2789,17 +2786,19 @@ class MultiAnimatBodies(Body):
 
     def __init__(self, device, x, y, experiment_options, z=None, eps=0.05, compute_interp=True,
                  nsamples=None, msamples=None, ksamples=None, plotting=False, plotting_meshes=False,
-                 suit=0.0, use_kernels=False, **kwargs):
+                 suit=0.0, **kwargs):
         """Union of bodies from one or more MuJoCo/SDF model files.
 
         Mesh-based bodies that share the same mesh file (and scale) are
         automatically deduplicated: the expensive open3d → skfmm → interpolation
         pipeline runs only once per unique mesh, and the resulting BodyMesh
         is reused (with its own pose) for every duplicate.
+
+        BDIMhandler streams the per-step geometry (the rigid ``body_update``
+        kernel), so neither the staggered meshgrids nor the persistent
+        staggered SDF / body-velocity fields are allocated here.
         """
         super().__init__(device, x, y, z=z, eps=eps)
-        if not use_kernels:
-            self._setup_grids()
 
         self.suit = suit
         self.plotting        = plotting
@@ -3158,26 +3157,18 @@ class MultiAnimatBodies(Body):
         # Initialised to the SDF sentinel _FAR=1e4 (i.e. "outside body
         # everywhere") rather than zeros.  This lets BDIMhandler restrict
         # the first-step "dirty AABB" (the region reset to _FAR + recomputed
-        # by Kernel A) to only the bodies' current footprint instead of the
+        # by the streaming body_update) to only the bodies' footprint, not the
         # whole grid — which on a 512³ run shrinks the int64 key buffers
         # from 4×1 GiB = 4 GiB to a few MB.  Cells the bodies never visit
         # keep their _FAR value, which is the correct "outside body" answer
         # for the BDIM stencil.
         self.sdf_val   = torch.full(gs, 1e4, device=device, dtype=self.dtype)
-        # In kernel mode the staggered face-SDF and rigid-body face-velocity
-        # tensors are per-step temporaries owned by FluidSolver.fluid_step —
-        # they live only between Kernel A (streaming SDF) and Kernel B
-        # (fused BDIM2 + var-dens) of the same step.  Skip the persistent
-        # full-grid allocations here to save 6 * Ngrid * sizeof(float)
-        # of permanent GPU storage per composite body.
-        if not use_kernels:
-            self.sdf_val_u = torch.zeros(gs, device=device, dtype=self.dtype)
-            self.sdf_val_v = torch.zeros(gs, device=device, dtype=self.dtype)
-            self.body_u    = torch.zeros(gs, device=device, dtype=self.dtype)
-            self.body_v    = torch.zeros(gs, device=device, dtype=self.dtype)
-            if self.ndim == 3:
-                self.sdf_val_w = torch.zeros(gs, device=device, dtype=self.dtype)
-                self.body_w    = torch.zeros(gs, device=device, dtype=self.dtype)
+        # The staggered face-SDF and rigid-body face-velocity tensors are
+        # per-step scratch fields published by the rigid streaming
+        # ``body_update`` (BDIMhandler._launch_body_update) and released by
+        # the solver's fused step before the pressure projection.  No
+        # persistent full-grid allocations here — saves 6 * Ngrid *
+        # sizeof(float) of permanent GPU storage per composite body.
         self.com_pos   = torch.zeros((self.nbodies, self.ndim), device=device)
 
         # Null out any SDF tensor that was stored directly on a child body

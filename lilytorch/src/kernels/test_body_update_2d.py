@@ -1,4 +1,4 @@
-"""Parity: 2-D Warp streaming SDF vs native streaming_sdf_stag_2d_multi.
+"""Parity: 2-D Warp streaming SDF vs native body_update_2d.
 
 Covers fanned + sequential designs, blend-eps off/on, interp_method 0/1, on
 CPU and GPU.  Mirrors `test_parity.py` (3-D) with the z axis stripped.
@@ -11,7 +11,7 @@ import warp as wp
 
 try:
     import lilytorch.src.kernels  # noqa: F401
-    from lilytorch.src.kernels.ops import streaming_sdf_stag_2d_multi
+    from lilytorch.src.kernels.ops import body_update_2d
     _NATIVE = True
 except Exception:
     _NATIVE = False
@@ -30,7 +30,7 @@ def _run_native(sc, interp):
     sc["body_u"].zero_(); sc["body_v"].zero_()
     sc["num_u"].zero_(); sc["num_v"].zero_(); sc["den_u"].zero_(); sc["den_v"].zero_()
     di0, dj0, dAi, dAj = sc["dirty_bounds"]
-    streaming_sdf_stag_2d_multi(
+    body_update_2d(
         sc["F_flat"], sc["F_offsets"], sc["body_shapes"], sc["body_meta"], sc["kin"],
         sc["aabb_lo"], sc["aabb_dim"], sc["gx"], sc["gy"],
         float(sc["h"]), int(sc["max_vol"]),

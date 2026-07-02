@@ -1,6 +1,6 @@
-"""Warp single-source **Kernel B (3-D)** — fused BDIM2 coefficient + FD normals.
+"""Warp single-source **bdim_forcing (3-D)** — fused BDIM2 coefficient + FD normals.
 
-Port of the native ``bdim_coeff_3d`` / ``bdim_coeff_sigma_3d`` CUDA kernels
+Port of the native ``bdim_forcing_3d`` / ``bdim_forcing_sigma_3d`` CUDA kernels
 (``src/kernels/csrc/cuda/streaming_sdf.cu``, ``bdim_one_axis_3d`` /
 ``bdim_one_axis_sigma_3d`` device helpers).  For every cell in the dirty AABB,
 and for each of the three staggered face grids, the kernel:
@@ -121,7 +121,7 @@ def bdim_one_axis_3d(
     c_stride_i: wp.int32, c_stride_j: wp.int32,
     c_hi_i: wp.int32, c_hi_j: wp.int32, c_hi_k: wp.int32,
     mu0_proj: wp.int32,
-    # BDIM-σ extras (sigma_on == 0 → ignored, plain bdim_coeff_3d):
+    # BDIM-σ extras (sigma_on == 0 → ignored, plain bdim_forcing_3d):
     sigma_on: wp.int32,
     key: wp.array(dtype=wp.int64),
     sigma_shifts: wp.array(dtype=wp.float32),
@@ -213,7 +213,7 @@ def bdim_one_axis_3d(
 
 
 @wp.kernel
-def bdim_coeff_3d_kernel(
+def bdim_forcing_3d_kernel(
     u_prime: wp.array(dtype=Any),
     v_prime: wp.array(dtype=Any),
     w_prime: wp.array(dtype=Any),
@@ -277,7 +277,7 @@ def bdim_coeff_3d_kernel(
 # Register float32 + float64 specialisations (generic args only).
 for _dt in (wp.float32, wp.float64):
     _A = wp.array(dtype=_dt)
-    wp.overload(bdim_coeff_3d_kernel, {
+    wp.overload(bdim_forcing_3d_kernel, {
         "u_prime": _A, "v_prime": _A, "w_prime": _A,
         "sdf_u": _A, "sdf_v": _A, "sdf_w": _A,
         "body_u": _A, "body_v": _A, "body_w": _A,
@@ -304,7 +304,7 @@ def _empty_key(wdev):
             wp.zeros(1, dtype=wp.float32, device=wdev))
 
 
-def bdim_coeff_3d_warp(
+def bdim_forcing_3d_warp(
         u_prime, v_prime, w_prime,
         sdf_u, sdf_v, sdf_w,
         body_u, body_v, body_w,
@@ -315,8 +315,8 @@ def bdim_coeff_3d_warp(
         mu0_projection=1,
         *, key_u=None, key_v=None, key_w=None, sigma_shifts=None,
         graph=None):
-    """Warp port of ``bdim_coeff_3d`` (and, with the keyword args, the σ
-    variant ``bdim_coeff_sigma_3d``).  Writes ``u0/v0/w0`` and ``ch/cv/cw``
+    """Warp port of ``bdim_forcing_3d`` (and, with the keyword args, the σ
+    variant ``bdim_forcing_sigma_3d``).  Writes ``u0/v0/w0`` and ``ch/cv/cw``
     in place inside the dirty AABB; returns nothing (mirrors the native op).
     Generic in dtype (f32/f64), selected from ``u0``.
 
@@ -345,7 +345,7 @@ def bdim_coeff_3d_warp(
         n_sigma = 0
 
     wp.launch(
-        bdim_coeff_3d_kernel,
+        bdim_forcing_3d_kernel,
         dim=int(dirty_Ai) * int(dirty_Aj) * int(dirty_Ak),
         inputs=[
             f(u_prime), f(v_prime), f(w_prime),

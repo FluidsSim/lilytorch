@@ -1,6 +1,6 @@
-"""Warp single-source **Kernel B (2-D)** — fused BDIM2 coefficient + FD normals.
+"""Warp single-source **bdim_forcing (2-D)** — fused BDIM2 coefficient + FD normals.
 
-Port of native ``bdim_coeff_2d`` / ``bdim_coeff_sigma_2d``
+Port of native ``bdim_forcing_2d`` / ``bdim_forcing_sigma_2d``
 (``streaming_sdf_2d.cu``: ``bdim_one_axis_2d`` / ``bdim_one_axis_sigma_2d``).
 
 Unlike the 3-D kernel, the 2-D native writes the Poisson coefficient at the
@@ -160,7 +160,7 @@ def bdim_one_axis_2d(
 
 
 @wp.kernel
-def bdim_coeff_2d_kernel(
+def bdim_forcing_2d_kernel(
     u_prime: wp.array(dtype=Any),
     v_prime: wp.array(dtype=Any),
     sdf_u: wp.array(dtype=Any),
@@ -202,7 +202,7 @@ def bdim_coeff_2d_kernel(
 # Register float32 + float64 specialisations (generic args only).
 for _dt in (wp.float32, wp.float64):
     _A = wp.array(dtype=_dt)
-    wp.overload(bdim_coeff_2d_kernel, {
+    wp.overload(bdim_forcing_2d_kernel, {
         "u_prime": _A, "v_prime": _A, "sdf_u": _A, "sdf_v": _A,
         "body_u": _A, "body_v": _A, "u0": _A, "v0": _A, "ch": _A, "cv": _A,
         "eps": _dt, "rho_f": _dt, "dt": _dt, "inv_2h": _dt,
@@ -222,14 +222,14 @@ def _empty_key(wdev):
             wp.zeros(1, dtype=wp.float32, device=wdev))
 
 
-def bdim_coeff_2d_warp(
+def bdim_forcing_2d_warp(
         u_prime, v_prime, sdf_u, sdf_v, body_u, body_v,
         u0, v0, ch, cv,
         eps, rho_f, dt, h_grid,
         dirty_i0, dirty_j0, dirty_Ai, dirty_Aj,
         mu0_projection=1,
         *, key_u=None, key_v=None, sigma_shifts=None):
-    """Warp port of ``bdim_coeff_2d`` (and σ variant with the keyword args).
+    """Warp port of ``bdim_forcing_2d`` (and σ variant with the keyword args).
     Writes u0/v0 and ch/cv (full-grid) in place inside the dirty AABB.
     Generic in dtype (f32/f64), selected from ``u0``."""
     if int(dirty_Ai) * int(dirty_Aj) <= 0:
@@ -253,7 +253,7 @@ def bdim_coeff_2d_warp(
         n_sigma = 0
 
     wp.launch(
-        bdim_coeff_2d_kernel,
+        bdim_forcing_2d_kernel,
         dim=int(dirty_Ai) * int(dirty_Aj),
         inputs=[
             f(u_prime), f(v_prime), f(sdf_u), f(sdf_v),

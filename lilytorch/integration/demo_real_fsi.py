@@ -23,7 +23,6 @@ def make_pars():
                                       "flow_past_circle_2d.yaml"))
     pars["solver"].update(
         nt=12, save=False, save_frames=False, use_gpu=True,
-        solver_method="python",
     )
     # quiescent fluid: zero the inflow so the only flow is body-induced
     for key in ("bc_values_u", "bc_values_v"):
