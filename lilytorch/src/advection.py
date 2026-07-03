@@ -3,21 +3,19 @@
 Split out of the former monolithic ``adv_diff.py`` (since removed).  This
 module owns:
 
-* the pluggable convective **scheme functions** (QUICK, ADBQUICKEST, CUBISTA,
-  van Leer, CDS) — pure ``f(upstream, center, downstream)`` kernels;
-* the location-agnostic **flux assembler** :func:`_flux`;
-* **momentum** advection (:func:`advect_momentum`, the MAC self/cross-advection
-  used by the Navier–Stokes predictor);
-* **scalar** advection (:func:`advect_scalar`) for a cell-centred passive
-  scalar (e.g. the free-surface level set) — reuses the same schemes/flux;
+* the fused single-source Warp flux kernel :func:`advect_flux_add_warp` — all
+  five high-order convective schemes (QUICK, ADBQUICKEST, CUBISTA, van Leer,
+  CDS), 2-D and 3-D, f32+f64 — the single production convective path on CPU
+  (C++/OpenMP) and CUDA;
 * the :class:`AdvDiffSolver` orchestrator (BCs + scheme dispatch +
   semi-Lagrangian), which composes :mod:`lilytorch.src.diffusion` for the
   diffusion term so advection and diffusion stay independently testable and
   ``torch.compile``-able.
 
-Dependency rule: this module imports :mod:`diffusion` (a leaf) but **never**
-imports ``solver`` or ``two_phase``.  The two-phase model depends on this
-module (it reuses ``advect_scalar`` for VOF transport), not the other way round.
+Dependency rule: this module imports the leaf kernel modules (``diffusion``,
+``misc_{2,3}d``, ``interpolation``) but **never** imports ``solver``,
+``two_phase`` or ``facade``.  ``facade`` re-exports ``advect_flux_add_warp``
+from here; ``two_phase`` reuses the ``_sl`` slicing helper.
 
 Works identically in 2-D ``(x, y)`` and 3-D ``(x, y, z)`` by looping over
 spatial dimensions rather than duplicating code per axis -- inspired by
@@ -37,142 +35,6 @@ from lilytorch.src.misc_3d import ApplyBcs3DGraphRunner
 from lilytorch.src import diffusion
 
 
-
-# =====================================================================
-# Convective scheme functions:  f(upstream, center, downstream)
-# =====================================================================
-#
-# Convention -- face between cell L (left) and cell R (right):
-#   positive flow (L->R):
-#       upstream   = f[L-1]   (far upstream)
-#       center     = f[L]     (upwind cell)
-#       downstream = f[R]     (downwind cell)
-#   negative flow (R->L):
-#       upstream   = f[R+1]
-#       center     = f[R]
-#       downstream = f[L]
-
-def median(a, b, c):
-    """Element-wise median of three tensors."""
-    return torch.maximum(
-        torch.minimum(a, b),
-        torch.minimum(torch.maximum(a, b), c),
-    )
-
-
-def quick(u, c, d):
-    """QUICK scheme -- 3rd-order.
-
-    Uses in-place operations to keep simultaneous intermediate tensors at 3
-    (vs. the 5-6 created by the original nested ``median`` calls), cutting
-    the peak transient allocation roughly in half at large grid sizes.
-    """
-    # inner_median = median(10*c - 9*u, c, d)
-    t  = 10.0 * c - 9.0 * u       # owned temp #1
-    lo = torch.minimum(t, c)       # owned temp #2  (= min(t, c))
-    torch.maximum(t, c, out=t)     # t = max(t, c), in-place
-    torch.minimum(t, d, out=t)     # t = min(max(t, c), d), in-place
-    torch.maximum(lo, t, out=lo)   # lo = median(10c-9u, c, d)
-    del t                          # free; lo holds inner_median
-
-    # outer = (5*c + 2*d - u) / 6
-    outer = 5.0 * c
-    outer.add_(d, alpha=2.0)       # in-place: 5c + 2d
-    outer.add_(u, alpha=-1.0)      # in-place: 5c + 2d - u
-    outer.div_(6.0)                # in-place: / 6
-
-    # result = median(outer, c, lo)  -- lo is inner_median
-    # Peak: lo + outer + lo2 = 3 tensors
-    lo2 = torch.minimum(outer, c)
-    torch.maximum(outer, c, out=outer)
-    torch.minimum(outer, lo, out=outer)
-    torch.maximum(lo2, outer, out=lo2)
-    del outer, lo
-    return lo2
-
-
-def van_leer(u, c, d):
-    """Van Leer flux limiter -- 2nd-order TVD."""
-    denom = d - c
-    rf = (c - u) / (denom + 1e-30)
-    psi = (rf + rf.abs()) / (1.0 + rf.abs())
-    # T1a: inline the TVD face value ``c + 0.5*(d-c)*psi`` in-place on the
-    # owned ``psi``, reusing the already-live ``denom == d-c`` instead of
-    # re-materialising it.  Ordering (×0.5 first) is bit-exact: ×0.5 is an
-    # exact power-of-two scale, so this is a single rounding of the same real
-    # product, and the final add is commutative in IEEE-754.
-    psi.mul_(0.5).mul_(denom).add_(c)
-    return torch.where(denom.abs() < 1e-30, c, psi)
-
-
-def cds(u, c, d):
-    """Central difference scheme -- 2nd-order, not TVD."""
-    return 0.5 * (c + d)
-
-
-def abdquickest(u, c, d, C=0.1):
-    """ADBQUICKEST scheme -- 3rd-order TVD, Courant-number dependent.
-
-    Refactored to keep peak simultaneous tensor count at 4 (was 5) by
-    replacing ``torch.full_like(rf, C_upper)`` with a scalar clamp and
-    sequencing A / B so only one extra tensor beyond {denom, rf, psi} is
-    live at the peak moment.  Saves ~1 full-grid tensor (~0.5 GiB at 512³).
-    """
-    C2      = C * C
-    C_upper = 2.0 * (1.0 - C)                             # scalar
-
-    denom = d - c                                          # owned temp #1
-    rf    = (c - u) / (denom + 1e-30)                     # owned temp #2
-
-    # Compute psi = clamp(min(A, B, C_upper), 0)
-    #   A = C_upper * rf
-    #   B = [(2+C2-3C) + (1-C2)*rf] / (3-3C)
-    # Order: B → scalar-clamp at C_upper → min with A → scalar-clamp at 0
-    # Peak: denom + rf + psi + A_temp = 4 tensors (vs 5 in the original).
-    _scale  = (1.0 - C2) / (3.0 - 3.0 * C)
-    _offset = (2.0 + C2 - 3.0 * C) / (3.0 - 3.0 * C)
-    psi  = rf * _scale                                     # owned temp #3
-    psi += _offset                                         # in-place: psi = B
-    psi.clamp_(max=C_upper)                                # in-place: min(B, C_upper)
-    torch.minimum(psi, rf * C_upper, out=psi)              # rf*C_upper = temp #4 (brief)
-    del rf
-    psi.clamp_(min=0.0)
-
-    # T1a: inline ``c + 0.5*(d-c)*psi`` in-place on the owned ``psi``,
-    # reusing the live ``denom`` (bit-exact — see van_leer).
-    psi.mul_(0.5).mul_(denom).add_(c)
-    return torch.where(denom.abs() < 1e-30, c, psi)
-
-
-def cubista(u, c, d):
-    """CUBISTA scheme -- 2nd-order TVD (Alves, Oliveira & Pinho, 2003).
-
-    Same tensor-sequencing improvement as ``abdquickest``: scalar clamp
-    replaces ``torch.full_like(rf, 1.5)`` to avoid a 5th simultaneous
-    tensor at the peak moment.
-    """
-    denom = d - c
-    rf    = (c - u) / (denom + 1e-30)
-
-    psi  = 0.75 * rf                                       # owned temp
-    psi += 0.25                                            # in-place: 0.75*rf + 0.25
-    psi.clamp_(max=1.5)                                    # in-place: min(0.75*rf+0.25, 1.5)
-    torch.minimum(psi, rf * 1.5, out=psi)                  # min with 1.5*rf (brief temp)
-    del rf
-    psi.clamp_(min=0.0)
-
-    # T1a: inline ``c + 0.5*(d-c)*psi`` in-place on the owned ``psi``,
-    # reusing the live ``denom`` (bit-exact — see van_leer).
-    psi.mul_(0.5).mul_(denom).add_(c)
-    return torch.where(denom.abs() < 1e-30, c, psi)
-
-
-# Scheme registry — shared by AdvDiffSolver and the free-surface level set.
-SCHEMES = {
-    "quick": quick, "abdquickest": abdquickest,
-    "vanLeer": van_leer, "van_leer": van_leer,
-    "cds": cds, "cubista": cubista,
-}
 
 # Scheme IDs for the fused CUDA ``advect_flux_add`` kernel (T2a).
 # Must match the compile-time enum in advection_flux.cu.
@@ -200,58 +62,6 @@ def _sl(ndim, dim, s):
 def _inner(ndim):
     """Index tuple selecting interior cells: [1:-1] on every dimension."""
     return tuple(slice(1, -1) for _ in range(ndim))
-
-
-# =====================================================================
-# Flux computation  (dimension-agnostic, scheme-parameterised)
-# =====================================================================
-
-def _flux(scheme, fv, p, dim):
-    """Scheme-weighted flux along dimension *dim*.
-
-    Location-agnostic: works for staggered momentum components and for
-    cell-centred scalars alike — it only needs a face-velocity array and a
-    field array of compatible shapes.
-
-    Parameters
-    ----------
-    scheme : callable ``f(upstream, center, downstream)`` — one of the
-             scheme functions above.
-    fv     : face velocities  (``n[dim]-1`` on *dim*, interior on others).
-    p      : field values      (``n[dim]``   on *dim*, interior on others).
-    """
-    lam = scheme
-    D   = dim
-    S   = lambda s: _sl(p.ndim, D, s)
-
-    # interior faces (full 3-point stencil available)
-    # Compute B1 and B2 as separate named tensors so cond, B1, B2 can
-    # be freed immediately after torch.where, reducing the live-tensor
-    # count at the torch.cat step.
-    fv_in = fv[S(slice(1, -1))]
-    cond  = fv_in > 0
-    B1    = fv_in * lam(p[S(slice(None, -3))], p[S(slice(1, -2))], p[S(slice(2, -1))])
-    B2    = fv_in * lam(p[S(slice(3, None))],  p[S(slice(2, -1))], p[S(slice(1, -2))])
-    flux_in = torch.where(cond, B1, B2)
-    del cond, B1, B2
-
-    # lo boundary face — CDS fallback for positive flow
-    fv_lo = fv[S(slice(0, 1))]
-    flux_lo = torch.where(
-        fv_lo > 0,
-        fv_lo * 0.5 * (p[S(slice(0, 1))] + p[S(slice(1, 2))]),
-        fv_lo * lam(p[S(slice(2, 3))], p[S(slice(1, 2))], p[S(slice(0, 1))]),
-    )
-
-    # hi boundary face — CDS fallback for negative flow
-    fv_hi = fv[S(slice(-1, None))]
-    flux_hi = torch.where(
-        fv_hi > 0,
-        fv_hi * lam(p[S(slice(-3, -2))], p[S(slice(-2, -1))], p[S(slice(-1, None))]),
-        fv_hi * 0.5 * (p[S(slice(-2, -1))] + p[S(slice(-1, None))]),
-    )
-
-    return torch.cat([flux_lo, flux_in, flux_hi], dim=D)
 
 
 # =====================================================================
@@ -311,72 +121,6 @@ def _scalar_face_vel(vd, d, ndim):
 
 
 # =====================================================================
-# Advection update kernels  (forward-Euler, conservative flux form)
-# =====================================================================
-
-def advect_momentum(scheme, vel, dt_dh, ndim, accum=None):
-    """Convective increment for each MAC momentum component (no diffusion).
-
-    Returns a tuple of per-component interior increments ``rhs_i`` such that
-    ``vel_new[i][inner] = vel[i][inner] + rhs_i``.  If *accum* is provided it
-    must be a list of per-component starting tensors (e.g. the diffusion
-    increment) that the convective fluxes are added into **in place**; this
-    preserves the original fused advection+diffusion memory behaviour.
-    """
-    inner = _inner(ndim)
-    out = []
-    for i in range(ndim):
-        rhs = accum[i] if accum is not None else torch.zeros_like(vel[i][inner])
-        for d in range(ndim):
-            fv = _face_vel(vel, i, d, ndim)
-            p  = _field_for_flux(vel[i], d, ndim)
-            F  = _flux(scheme, fv, p, d)
-            # In-place accumulation: rhs += dt_dh * (F[:-1] - F[1:]).
-            F_diff = (F[_sl(ndim, d, slice(None, -1))]
-                      - F[_sl(ndim, d, slice(1, None))])
-            rhs.add_(F_diff, alpha=float(dt_dh[d]))
-            del fv, F, F_diff  # free before next d-iteration to avoid stacking
-        out.append(rhs)
-    return tuple(out)
-
-
-def advect_scalar(phi, *vel, scheme, dt, dh):
-    """Forward-Euler advection of a cell-centred scalar by a MAC velocity.
-
-        phi^{n+1} = phi^n - dt * div(vel ⊗ phi)
-
-    Conservative flux form; for a divergence-free ``vel`` this equals the
-    advective form ``vel·∇phi``.  Reuses the same scheme/flux machinery as
-    the momentum path via :func:`_flux` and :func:`_scalar_face_vel`.
-
-    Parameters
-    ----------
-    phi    : cell-centred scalar (interior + ghost cells).
-    *vel   : MAC velocity components ``(u, v[, w])``, same shape as ``phi``.
-    scheme : callable convective scheme (e.g. :func:`quick`).
-    dt     : float time step.
-    dh     : list of floats — grid spacing per dimension.
-
-    Returns a new tensor (ghost cells copied from ``phi``; the caller is
-    expected to re-apply its scalar BC / ghost padding afterwards).
-    """
-    ndim  = phi.ndim
-    inner = _inner(ndim)
-    rhs   = torch.zeros_like(phi[inner])
-    for d in range(ndim):
-        fv = _scalar_face_vel(vel[d], d, ndim)
-        p  = _field_for_flux(phi, d, ndim)
-        F  = _flux(scheme, fv, p, d)
-        F_diff = (F[_sl(ndim, d, slice(None, -1))]
-                  - F[_sl(ndim, d, slice(1, None))])
-        rhs.add_(F_diff, alpha=float(dt) / float(dh[d]))
-        del fv, F, F_diff
-    out = phi.clone()
-    out[inner] += rhs
-    return out
-
-
-# =====================================================================
 # Advection-diffusion solver
 # =====================================================================
 class AdvDiffSolver:
@@ -399,8 +143,9 @@ class AdvDiffSolver:
 
         u^{n+1} = u^n + dt * [-div(vel (x) u) + nu * laplacian(u)]
 
-    The convective fluxes come from :func:`advect_momentum` and the
-    diffusion term from :mod:`lilytorch.src.diffusion`, composed here.
+    The convective fluxes come from the fused :func:`advect_flux_add_warp`
+    kernel and the diffusion term from :mod:`lilytorch.src.diffusion`,
+    composed here.
     """
 
     # -- construction ---------------------------------------------------
@@ -507,9 +252,11 @@ class AdvDiffSolver:
             self._bc_fused_2d_packed = self._pack_bc_descriptors_3d()
 
         # ---- method dispatch -----------------------------------------
-        if method in SCHEMES:
-            self._scheme      = SCHEMES[method]
-            self._scheme_name = method        # used by _get_step_scheme
+        # Flux schemes all run through the single fused Warp ``advect_flux_add``
+        # kernel (CPU + CUDA); the semi-Lagrangian / implicit solves are a
+        # separate ``solve`` method.
+        if method in _CUDA_SCHEME_IDS:
+            self._scheme_name = method
             self.solve        = self._solve_convective
         elif method in ("semi-lagrangian", "implicit"):
             self._scheme_name = method
@@ -518,16 +265,8 @@ class AdvDiffSolver:
         else:
             raise ValueError(
                 f"Unknown convection method '{method}'. Choose from: "
-                f"{sorted(set(list(SCHEMES.keys()) + ['semi-lagrangian', 'implicit']))}"
+                f"{sorted(list(_CUDA_SCHEME_IDS.keys()) + ['semi-lagrangian', 'implicit'])}"
             )
-
-        # Multi-stream dispatch: set True externally (e.g. from FluidSolver)
-        # when device is CUDA.  Lazy-initialised per-component streams stored
-        # in _adv_streams; None until first use.
-        _dev = device if isinstance(device, torch.device) else torch.device(device)
-        self._is_cuda     = _dev.type == "cuda"
-        self._use_streams = False
-        self._adv_streams = None
 
         print(f"Using the {method} method for the adv-diff equation ({self.ndim}D)")
 
@@ -561,39 +300,20 @@ class AdvDiffSolver:
     # Convective-scheme solve  (advection + diffusion, dimension-agnostic)
     # =================================================================
 
-    def _get_step_scheme(self, vel):
-        """Return the advection scheme callable for this step.
-
-        For ABDQUICKEST the TVD limiter parameter C must equal the actual
-        advective Courant number |u|·dt/h.  Computing max-|u| requires one
-        GPU→CPU sync (.amax().item()), so it is done HERE — once per step,
-        outside any CUDA stream — and captured in a closure passed to _flux.
-        All other schemes return self._scheme unchanged (no sync).
-        """
-        if self._scheme_name == 'abdquickest':
-            h_min  = min(self.dh)
-            umax   = float(max(v.abs().amax() for v in vel))
-            C_step = min(max(umax * self.dt / h_min, 0.1), 0.99)
-            return lambda u, c, d, _C=C_step: self._scheme(u, c, d, C=_C)
-        return self._scheme
-
     @property
     def uses_cuda_flux_kernel(self):
-        """Whether ``solve`` will take the fused CUDA ``advect_flux_add`` path.
+        """Whether ``solve`` takes the fused Warp ``advect_flux_add`` path.
 
-        That path calls a hand-written custom op plus host-side ``.item()``
-        syncs, so wrapping it in ``torch.compile`` yields negligible benefit
-        and trips dynamo's speculation log (graph-break on restart).  Mirrors
-        the ``use_cuda_kernel`` guard inside :meth:`_solve_convective`.
+        True for every flux scheme (the single production convective path, on
+        CPU and CUDA alike); False only for the semi-Lagrangian solve, which is
+        a distinct ``solve`` method.  The flux path is a custom op plus
+        host-side syncs, so ``torch.compile`` gives no benefit and trips
+        dynamo's speculation log — callers use this to skip compiling ``solve``.
         """
-        return (
-            self._is_cuda
-            and self._scheme_name in _CUDA_SCHEME_IDS
-            and not (self._use_streams and self.ndim > 1)
-        )
+        return self._scheme_name in _CUDA_SCHEME_IDS
 
     def _solve_convective(self, *vel, nu_t=None, iteration=0):
-        """Forward-Euler advection-diffusion step.
+        """Forward-Euler advection-diffusion step via the fused Warp flux kernel.
 
             phi^{n+1} = phi^n + dt * [-div(vel (x) phi) + diff(phi)]
 
@@ -604,119 +324,47 @@ class AdvDiffSolver:
 
         Accepts (u, v) in 2-D or (u, v, w) in 3-D.
 
-        Lazy clone: start with aliases of the input velocity components.
-        We replace ``vel_new[i]`` with a real clone only at the END of
-        iteration ``i`` (just before mutating it via ``+= rhs``).  During
-        iteration i's _flux peak, only the i already-cloned earlier
-        components are alive; the not-yet-mutated components are still
-        aliases of ``vel`` (the persistent u0/v0/w0) and cost zero extra
-        memory.
+        One ``advect_flux_add`` launch per (velocity component i, spatial
+        direction d) accumulates ``dt_dh*(F_left - F_right)`` into ``rhs`` in
+        place without materialising the intermediate flux tensor.  The same
+        single-source Warp kernel runs on CPU (C++/OpenMP) and CUDA.
 
-        Multi-stream: when ``self._use_streams`` is True and device is CUDA,
-        each velocity component is processed on a separate CUDA stream.
-        The components are mutually independent (all read from the original
-        ``vel`` tuple), so concurrent execution is safe.  Trade-off: all
-        ``ndim`` rhs tensors are live simultaneously (vs one at a time in the
-        sequential path), so peak intermediate memory is ~ndim× higher for
-        the adv-diff phase.
+        Lazy clone: ``vel_new[i]`` becomes a real clone only at the END of
+        iteration ``i`` (just before the ``+= rhs`` mutation); the
+        not-yet-mutated components stay aliases of the persistent ``vel``
+        (u0/v0/w0) and cost zero extra memory.
         """
         ndim    = self.ndim
         vel_new = list(vel)
         inner   = _inner(ndim)
 
-        # ---- CUDA fused-flux path (T2a) ----
-        # One kernel call per (velocity component i, spatial direction d)
-        # directly accumulates dt_dh*(F_left - F_right) into rhs without
-        # materialising the intermediate F tensor.  Not combined with the
-        # multi-stream path: both are forms of CUDA parallelism that are
-        # alternatives at this level.
-        use_cuda_kernel = (
-            self._is_cuda
-            and self._scheme_name in _CUDA_SCHEME_IDS
-            and not (self._use_streams and ndim > 1)
-        )
-        if use_cuda_kernel:
-            scheme_id = _CUDA_SCHEME_IDS[self._scheme_name]
-            if self._scheme_name == 'abdquickest':
-                h_min     = min(self.dh)
-                umax      = float(max(v.abs().amax() for v in vel))
-                C_courant = float(min(max(umax * self.dt / h_min, 0.1), 0.99))
-            else:
-                C_courant = 0.0
-            for i in range(ndim):
-                rhs = diffusion.diffuse(
-                    vel[i], self.dt, nu=self.nu, nu_t=nu_t,
-                    inv_dh2=self._inv_dh2, dh=self.dh,
-                )
-                for d in range(ndim):
-                    fv = _face_vel(vel, i, d, ndim)
-                    p  = _field_for_flux(vel[i], d, ndim)
-                    advect_flux_add(
-                        fv, p, rhs,
-                        float(self._dt_dh[d]), C_courant,
-                        scheme_id, d,
-                    )
-                    del fv, p
-                vel_new[i] = vel[i].clone()
-                vel_new[i][inner] += rhs
-                del rhs
-            return tuple(vel_new)
+        scheme_id = _CUDA_SCHEME_IDS[self._scheme_name]
+        if self._scheme_name == 'abdquickest':
+            # ABDQUICKEST's TVD limiter C must equal the advective Courant
+            # number |u|·dt/h — one host sync (.amax()), once per step.
+            h_min     = min(self.dh)
+            umax      = float(max(v.abs().amax() for v in vel))
+            C_courant = float(min(max(umax * self.dt / h_min, 0.1), 0.99))
+        else:
+            C_courant = 0.0
 
-        # ABDQUICKEST has a .amax().item() sync — must happen BEFORE any
-        # stream dispatch so all streams see the same C value.
-        scheme = self._get_step_scheme(vel)
-
-        # ---- multi-stream path (CUDA only, ndim > 1) ----
-        if self._use_streams and self._is_cuda and ndim > 1:
-            if self._adv_streams is None:
-                self._adv_streams = [
-                    torch.cuda.Stream(device=self.device) for _ in range(ndim)
-                ]
-            cur = torch.cuda.current_stream()
-            for i, s in enumerate(self._adv_streams):
-                s.wait_stream(cur)          # inherit prior work from main stream
-                with torch.cuda.stream(s):
-                    rhs = diffusion.diffuse(
-                        vel[i], self.dt, nu=self.nu, nu_t=nu_t,
-                        inv_dh2=self._inv_dh2, dh=self.dh,
-                    )
-                    for d in range(ndim):
-                        fv = _face_vel(vel, i, d, ndim)
-                        p  = _field_for_flux(vel[i], d, ndim)
-                        F  = _flux(scheme, fv, p, d)
-                        F_diff = (F[_sl(ndim, d, slice(None, -1))]
-                                  - F[_sl(ndim, d, slice(1, None))])
-                        rhs.add_(F_diff, alpha=float(self._dt_dh[d]))
-                        del fv, F, F_diff
-                    vel_new[i] = vel[i].clone()
-                    vel_new[i][inner] += rhs
-            for s in self._adv_streams:
-                cur.wait_stream(s)          # main stream waits for all components
-            return tuple(vel_new)
-
-        # ---- sequential path (CPU, single-stream, or 1-D) ----
         for i in range(ndim):
-            # diffusion increment (fresh, writable tensor)
             rhs = diffusion.diffuse(
                 vel[i], self.dt, nu=self.nu, nu_t=nu_t,
                 inv_dh2=self._inv_dh2, dh=self.dh,
             )
-            # convective fluxes in each direction, accumulated into rhs.
-            # (inlined single-component form of advect_momentum so the
-            #  clone happens AFTER the d-loop peak — see lazy-clone note.)
             for d in range(ndim):
                 fv = _face_vel(vel, i, d, ndim)
                 p  = _field_for_flux(vel[i], d, ndim)
-                F  = _flux(scheme, fv, p, d)
-                F_diff = (F[_sl(ndim, d, slice(None, -1))]
-                          - F[_sl(ndim, d, slice(1, None))])
-                rhs.add_(F_diff, alpha=float(self._dt_dh[d]))
-                del fv, F, F_diff
-            # NOW materialise the clone of vel[i] — we mutate it immediately.
+                advect_flux_add(
+                    fv, p, rhs,
+                    float(self._dt_dh[d]), C_courant,
+                    scheme_id, d,
+                )
+                del fv, p
             vel_new[i] = vel[i].clone()
             vel_new[i][inner] += rhs
-            del rhs  # free this component's rhs before the next i-iteration
-
+            del rhs
         return tuple(vel_new)
 
     # =================================================================
@@ -1175,7 +823,7 @@ class AdvDiffSolver:
 # Warp advection kernels  (merged from the former src/kernels/advection.py)
 # ---------------------------------------------------------------------
 # The fused high-order flux-add kernel (all 5 schemes, 2-D+3-D, f32+f64),
-# plus the first-order-upwind counter-demo used by the parity test.  This
+# The single production advection path (GPU *and* CPU).  facade.py
 # is the single production advection path (GPU *and* CPU).  facade.py
 # re-exports advect_flux_add_warp from here.
 # =====================================================================
@@ -1186,75 +834,6 @@ import warp as wp
 
 wp.init()
 
-
-@wp.func
-def _flux_upwind(uf: wp.float32, q_lo: wp.float32, q_hi: wp.float32) -> wp.float32:
-    """Face flux uf*q with first-order upwind scalar."""
-    if uf > 0.0:
-        return uf * q_lo
-    return uf * q_hi
-
-
-@wp.kernel
-def advect_upwind_3d(
-    q:  wp.array(dtype=wp.float32, ndim=3),    # padded (N+2)³
-    u:  wp.array(dtype=wp.float32, ndim=3),    # padded (N+2)³
-    v:  wp.array(dtype=wp.float32, ndim=3),
-    w:  wp.array(dtype=wp.float32, ndim=3),
-    dt: wp.float32, inv_h: wp.float32,
-    out: wp.array(dtype=wp.float32, ndim=3),   # interior N³
-):
-    i, j, k = wp.tid()
-    ci = i + 1; cj = j + 1; ck = k + 1
-    qc = q[ci, cj, ck]
-
-    # x faces
-    uW = 0.5 * (u[ci - 1, cj, ck] + u[ci, cj, ck])
-    uE = 0.5 * (u[ci, cj, ck] + u[ci + 1, cj, ck])
-    fW = _flux_upwind(uW, q[ci - 1, cj, ck], qc)
-    fE = _flux_upwind(uE, qc, q[ci + 1, cj, ck])
-
-    # y faces
-    vS = 0.5 * (v[ci, cj - 1, ck] + v[ci, cj, ck])
-    vN = 0.5 * (v[ci, cj, ck] + v[ci, cj + 1, ck])
-    fS = _flux_upwind(vS, q[ci, cj - 1, ck], qc)
-    fN = _flux_upwind(vN, qc, q[ci, cj + 1, ck])
-
-    # z faces
-    wB = 0.5 * (w[ci, cj, ck - 1] + w[ci, cj, ck])
-    wT = 0.5 * (w[ci, cj, ck] + w[ci, cj, ck + 1])
-    fB = _flux_upwind(wB, q[ci, cj, ck - 1], qc)
-    fT = _flux_upwind(wT, qc, q[ci, cj, ck + 1])
-
-    div = (fE - fW + fN - fS + fT - fB) * inv_h
-    out[i, j, k] = qc - dt * div
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  PyTorch reference of the identical scheme (validation oracle)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def advect_upwind_torch(q_pad, u_pad, v_pad, w_pad, dt, inv_h):
-    """Vectorised reference; q_pad/... padded (N+2)³. Returns interior N³."""
-    c  = (slice(1, -1),) * 3
-    qc = q_pad[c]
-
-    def faces(a_pad, ax):
-        # adjacent cell-centred values along axis ax (lo neighbour, hi neighbour)
-        sl_lo = [slice(1, -1)] * 3; sl_lo[ax] = slice(0, -2)
-        sl_hi = [slice(1, -1)] * 3; sl_hi[ax] = slice(2, None)
-        return a_pad[tuple(sl_lo)], a_pad[tuple(sl_hi)]
-
-    out = qc.clone()
-    for ax, vel in enumerate((u_pad, v_pad, w_pad)):
-        q_lo, q_hi = faces(q_pad, ax)
-        u_lo, u_hi = faces(vel, ax)
-        uc = vel[c]
-        uW = 0.5 * (u_lo + uc); uE = 0.5 * (uc + u_hi)
-        fW = torch.where(uW > 0, uW * q_lo, uW * qc)
-        fE = torch.where(uE > 0, uE * qc,  uE * q_hi)
-        out = out - dt * (fE - fW) * inv_h
-    return out
 
 
 # ═════════════════════════════════════════════════════════════════════════════

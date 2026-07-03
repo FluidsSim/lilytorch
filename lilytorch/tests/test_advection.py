@@ -1,17 +1,21 @@
-"""Advection Warp-kernel tests.
+"""Advection Warp-kernel tests (single production path).
 
-Two layers:
-  (1) First-order upwind Warp kernel vs a PyTorch reference (CPU+GPU) — the
-      original viability demo.
-  (2) HIGH-ORDER LIMITER port (`advect_flux_add_warp`) single-source check:
-      the SAME @wp.kernel on CPU == GPU, plus in-place accumulate semantics.
-      Covers all five schemes (QUICK / ABDQUICKEST / vanLeer / CDS / CUBISTA),
-      2-D and 3-D, every (velocity component i, direction d) pair (so the
-      rhs-stride caveat — face_dim ≠ outermost in rhs — is exercised for d>0),
-      built from the genuine strided slice views of advection.py.
+The fused high-order limiter kernel ``advect_flux_add_warp`` is the *only*
+convective path (CPU C++/OpenMP and CUDA).  Three layers:
 
-Run:  pytest lilytorch/src/kernels/test_advection.py -v
-      python -m lilytorch.src.test_advection
+  (1) CPU regression anchor — a frozen (sum, |max|) snapshot of the rhs the
+      kernel produces for a fixed seed, for all five schemes (QUICK /
+      ABDQUICKEST / vanLeer / CDS / CUBISTA), 2-D and 3-D.  The snapshot was
+      captured when the kernel was still validated bit-for-bit against the
+      (now-removed) PyTorch reference, so it pins correctness without CUDA.
+  (2) Single-source integrity — the SAME @wp.kernel on CPU == GPU (needs CUDA).
+  (3) In-place accumulate semantics (rhs += flux, not overwrite).
+
+Every (velocity component i, direction d) pair is exercised so the rhs-stride
+caveat (face_dim ≠ outermost in rhs) is covered for d>0, using the genuine
+strided slice views from advection.py.
+
+Run:  pytest lilytorch/tests/test_advection.py -v
 """
 from __future__ import annotations
 
@@ -22,11 +26,7 @@ import torch
 import warp as wp
 
 from lilytorch.src.advection import (
-    advect_upwind_3d,
-    advect_upwind_torch,
     advect_flux_add_warp,
-)
-from lilytorch.src.advection import (
     _face_vel,
     _field_for_flux,
     _inner,
@@ -38,55 +38,9 @@ SKIP_NO_CUDA = pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA
 _SCHEMES = {0: "quick", 1: "abdquickest", 2: "vanLeer", 3: "cds", 4: "cubista"}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  (1) first-order upwind viability demo (unchanged)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _pad(x):
-    return torch.nn.functional.pad(
-        x.unsqueeze(0).unsqueeze(0), (1, 1, 1, 1, 1, 1), mode="replicate")[0, 0]
-
-
-def _run_upwind(dev, N=32, seed=7):
-    g = torch.Generator(device=dev).manual_seed(seed)
-    q = torch.rand((N, N, N), generator=g, device=dev)
-    u = torch.rand((N, N, N), generator=g, device=dev) - 0.5
-    v = torch.rand((N, N, N), generator=g, device=dev) - 0.5
-    w = torch.rand((N, N, N), generator=g, device=dev) - 0.5
-    qp, up, vp, wp_ = (_pad(x) for x in (q, u, v, w))
-    dt, inv_h = 0.1, float(N)
-
-    ref = advect_upwind_torch(qp, up, vp, wp_, dt, inv_h)
-
-    out = wp.zeros((N, N, N), dtype=wp.float32, device=dev)
-    wp.launch(advect_upwind_3d, dim=(N, N, N),
-              inputs=[wp.from_torch(qp.contiguous()), wp.from_torch(up.contiguous()),
-                      wp.from_torch(vp.contiguous()), wp.from_torch(wp_.contiguous()),
-                      dt, inv_h, out], device=dev)
-    wp.synchronize()
-    return wp.to_torch(out), ref
-
-
-@SKIP_NO_CUDA
-def test_upwind_matches_reference_gpu():
-    out, ref = _run_upwind("cuda:0")
-    rel = (out - ref).abs().max().item() / ref.abs().max().item()
-    assert rel < 1e-5, f"GPU warp vs torch-ref rel {rel:.3e}"
-
-
-def test_upwind_matches_reference_cpu():
-    out, ref = _run_upwind("cpu")
-    rel = (out - ref).abs().max().item() / ref.abs().max().item()
-    assert rel < 1e-5, f"CPU warp vs torch-ref rel {rel:.3e}"
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  (2) high-order limiter single-source + accumulate semantics
-# ─────────────────────────────────────────────────────────────────────────────
-
 def _make_vel(ndim, N, dev, seed=11):
-    """Padded MAC velocity field built ONCE on CPU then moved (lesson 5: a
-    device-seeded generator yields different sequences per device)."""
+    """Padded MAC velocity field built ONCE on CPU then moved (a device-seeded
+    generator yields different sequences per device)."""
     g = torch.Generator(device="cpu").manual_seed(seed)
     shape = (N + 2,) * ndim
     vel = [torch.rand(shape, generator=g, dtype=torch.float64) - 0.5
@@ -108,6 +62,48 @@ def _warp(vel, i, d, scheme_id, dt_dh, ndim):
     wp.synchronize()
     return rhs
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  (1) CPU regression anchor  (no CUDA required)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# (ndim, scheme_id) → (sum(rhs), max|rhs|), summed over all (i, d) pairs at
+# seed 11, dt_dh 0.15, N=40 (2-D) / N=20 (3-D).  Captured against the kernel
+# while it was bit-parity with the removed PyTorch scheme reference.
+_REGRESSION = {
+    (2, 0): (0.05990405142928154, 0.049610416505477574),
+    (2, 1): (0.07741790648773922, 0.049610416505477574),
+    (2, 2): (0.07369885379628983, 0.049610416505477574),
+    (2, 3): (0.047893404100937315, 0.04886254959572121),
+    (2, 4): (0.0762824918396289, 0.049610416505477574),
+    (3, 0): (1.1405044788006227, 0.060893124887524866),
+    (3, 1): (1.0385373002973184, 0.060893124887524866),
+    (3, 2): (1.064901094990712, 0.060893124887524866),
+    (3, 3): (1.022053726682977, 0.052619659932840825),
+    (3, 4): (1.078541541139582, 0.060893124887524866),
+}
+
+
+@pytest.mark.parametrize("ndim", [2, 3])
+@pytest.mark.parametrize("scheme_id", sorted(_SCHEMES))
+def test_flux_add_warp_cpu_regression(ndim, scheme_id):
+    """Kernel output on CPU matches the frozen validated snapshot."""
+    N = 20 if ndim == 3 else 40
+    vel = _make_vel(ndim, N, "cpu")
+    dt_dh = 0.15
+    s, a = 0.0, 0.0
+    for i, d in itertools.product(range(ndim), range(ndim)):
+        rhs = _warp(vel, i, d, scheme_id, dt_dh, ndim)
+        s += float(rhs.sum())
+        a = max(a, float(rhs.abs().max()))
+    exp_s, exp_a = _REGRESSION[(ndim, scheme_id)]
+    assert abs(s - exp_s) < 1e-12, f"{_SCHEMES[scheme_id]} {ndim}-D sum {s!r}"
+    assert abs(a - exp_a) < 1e-12, f"{_SCHEMES[scheme_id]} {ndim}-D max {a!r}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  (2) single-source integrity  +  (3) accumulate semantics
+# ─────────────────────────────────────────────────────────────────────────────
 
 @SKIP_NO_CUDA
 def test_flux_add_accumulates_in_place():
@@ -146,10 +142,3 @@ def test_flux_add_warp_cpu_equals_gpu(ndim, scheme_id):
         rg = _warp(vel_gpu, i, d, scheme_id, dt_dh, ndim).cpu()
         worst = max(worst, (rc - rg).abs().max().item())
     assert worst < 1e-12, f"{_SCHEMES[scheme_id]} {ndim}-D CPU vs GPU {worst:.3e}"
-
-
-if __name__ == "__main__":
-    for dev in (["cuda:0"] if torch.cuda.is_available() else []) + ["cpu"]:
-        out, ref = _run_upwind(dev)
-        rel = (out - ref).abs().max().item() / ref.abs().max().item()
-        print(f"  upwind {dev:7s}: rel {rel:.2e}  {'PASS' if rel < 1e-5 else 'FAIL'}")
