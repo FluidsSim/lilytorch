@@ -63,13 +63,13 @@ def make_problem(ndim, N, dtype, device, contrast=1000.0):
     return h, faces, f, p0
 
 
-def profile_backend(label, ndim, N, use_kernels, poisson, warmup, steps):
+def profile_backend(label, ndim, N, poisson, warmup, steps):
     dtype = torch.float32
     dev = "cuda"
     h, faces, f, p0 = make_problem(ndim, N, dtype, dev)
     ps = PoissonSolver(dtype, dev, h, tol=1e-5, max_cycles=50, max_vcycles=1,
                        nsmoothing=2, w=1.0, verbose=False, precond_vcycles=1,
-                       smoother="rbgs", use_kernels=use_kernels)
+                       smoother="rbgs")
     solve = ps.solve_mgcg if poisson == "mgcg" else ps.solve_multigrid
 
     for _ in range(warmup):
@@ -120,9 +120,7 @@ def main():
     print(f"Warmup  : {args.warmup}   Measured: {args.steps}\n")
 
     rows = [
-        profile_backend("native (kernel)", args.dim, args.ncells, True,
-                        args.poisson, args.warmup, args.steps),
-        profile_backend("python (ref)", args.dim, args.ncells, False,
+        profile_backend("warp", args.dim, args.ncells,
                         args.poisson, args.warmup, args.steps),
     ]
     print("="*64)

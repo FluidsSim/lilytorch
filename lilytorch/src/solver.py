@@ -518,10 +518,8 @@ class FluidSolver(PlottingMixin):
             verbose         = solver["poisson_verbose"],
             precond_vcycles = solver.get("poisson_precond_vcycles", 1),
             smoother        = solver.get("poisson_smoother", "rbgs"),
-            use_kernels     = True,
             recycle_k       = solver.get("poisson_recycle_k", 0),
             cuda_graph      = solver.get("poisson_cuda_graph", False),
-            cuda_graph_max_cells = solver.get("poisson_cuda_graph_max_cells", 64 ** 3),
         )
         # Degenerate-cell freeze threshold. Cells with |diagonal| < jcap_tol are
         # frozen (iD=0, residual zeroed) — WaterLily's iszero(D) guard. The
@@ -1124,10 +1122,10 @@ class FluidSolver(PlottingMixin):
                 _sl = (slice(1, -1),) * self.ndim
                 div.sub_(body_div_corr[_sl])
 
-            # Pre-scale only on the Python path; the native CUDA solver
-            # applies h² internally (h2=self.h2 kernel parameter) so
-            # passing a pre-scaled RHS would double-scale.
-            _pre_scaled = not self.poisson_solver.use_kernels
+            # The Warp multigrid driver applies h² internally (f_scaled = h²·f
+            # inside solve_*), so pass the raw divergence RHS (pre_scaled=False)
+            # to avoid double-scaling.
+            _pre_scaled = False
             if _pre_scaled:
                 div.mul_(self.poisson_solver.h2)
 

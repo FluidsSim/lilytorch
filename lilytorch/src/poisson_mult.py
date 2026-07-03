@@ -358,206 +358,6 @@ def _rb_masks_2d(nx, ny, device):
     return (parity == 0), (parity == 1)
 
 
-# ── Full 2-D V-cycle with native RBGS kernel (hybrid) ──────────────────
-# Uses the tiled CUDA kernel ONLY at the finest level for pre- and
-# post-smoothing.  All coarse-level corrections fall back to the standard
-# PyTorch _vcycle_rbgs_2d path.
-#
-# Why:  The tiled kernel loads a global-memory snapshot at the start of
-# each kernel call and propagates red→black updates only within a tile
-# (block-boundary approximation).  This is negligible on large grids but
-# degrades the smoothing factor on coarse grids where adjacent blocks cover
-# a large fraction of the total cells.  Using PyTorch RBGS for all coarse
-# levels preserves the full V-cycle convergence rate while the native kernel
-# provides the memory-bandwidth speedup at the dominant fine level.
-def _vcycle_rbgs_2d_native(f, p, ch, cv, jcap_tol, nsmoothing):
-    """Hybrid 2-D V-cycle: tiled native RBGS at fine level, PyTorch at coarse.
-
-    Both the smoother and the residual computation run as native CUDA ops:
-    ``J`` and the active mask are recomputed in CUDA registers inside
-    ``mg_residual_2d`` instead of being materialised as ``(Nx, Ny)`` tensors.
-    Only ``r`` (the residual itself) is allocated on the fine grid.
-
-    The caller's ``p`` is mutated in place; the returned tensor aliases it.
-    """
-    # The CUDA kernel indexes coefficients as cp0[gi*Ny + gj], assuming a
-    # C-contiguous (Nx, Ny) layout.  ch/cv arrive as non-contiguous slices
-    # of the ghost-padded pressure grid (row stride Ny+2, not Ny), so we
-    # must materialise them before extracting cp/cm pairs.
-    ch = ch.contiguous()
-    cv = cv.contiguous()
-    cp0, cm0 = ch[1:, :], ch[:-1, :]
-    cp1, cm1 = cv[:, 1:], cv[:, :-1]
-
-    # Pre-smooth (fine level): native tiled kernel
-    _native_rbgs_2d(p, f, cp0, cm0, cp1, cm1, jcap_tol, nsmoothing)
-    # Fused residual — J and active live in CUDA registers only.
-    r = _native_mg_residual_2d(p, f, cp0, cm0, cp1, cm1, jcap_tol)
-
-    nx, ny = f.shape
-    if nx > 2 and ny > 2:
-        ch_c, cv_c = _restrict_face_2d(ch, cv)
-        r_c = _restrict_residual_2d(r)
-        # r is no longer needed after restriction; free it to reduce peak footprint
-        # during the coarse correction + prolongation phase.
-        del r
-        coarse_shape = (r_c.shape[0] + 2, r_c.shape[1] + 2)
-        p_c = torch.zeros(coarse_shape, device=p.device, dtype=p.dtype)
-        # Coarse correction: PyTorch V-cycle (reliable convergence at all sizes)
-        err_c, _ = _vcycle_rbgs_2d(r_c, p_c, ch_c, cv_c, jcap_tol, nsmoothing)
-        # Use f.shape (same as the former r.shape) since r was freed above.
-        err = _prolongate_2d(err_c, f.shape)
-        p[1:-1, 1:-1] = p[1:-1, 1:-1] + err
-
-        # Post-smooth (fine level): native tiled kernel
-        cp0, cm0 = ch[1:, :], ch[:-1, :]
-        cp1, cm1 = cv[:, 1:], cv[:, :-1]
-        _native_rbgs_2d(p, f, cp0, cm0, cp1, cm1, jcap_tol, nsmoothing)
-        r = _native_mg_residual_2d(p, f, cp0, cm0, cp1, cm1, jcap_tol)
-
-    return p, r
-
-
-# ── Full 3-D V-cycle with native RBGS kernel (hybrid) ──────────────────
-# Same hybrid strategy as the 2-D version: native kernel at the finest level
-# only; PyTorch _vcycle_rbgs_3d for the coarse correction.
-def _vcycle_rbgs_3d_native(f, p, ch, cv, cw, jcap_tol, nsmoothing):
-    """Hybrid 3-D V-cycle: thread-per-cell native RBGS at fine level, PyTorch at coarse.
-
-    Both the smoother and the residual run as native CUDA ops.  ``J`` and the
-    active mask are computed in CUDA registers by ``mg_residual_3d`` — the
-    two 64 MB tensors (``J`` float + ``active`` bool) that previously lived
-    for the entire fine-level V-cycle no longer exist.
-
-    The caller's ``p`` is mutated in place; the returned tensor aliases it.
-    """
-    # ch/cv/cw must be C-contiguous for the native RBGS kernel.
-    # .contiguous() is a zero-cost pass-through when the tensor is already
-    # C-contiguous (the Phase-I kernel path stores them at face-grid shape),
-    # and makes a copy only on the legacy Python-BDIM path (non-contiguous
-    # ghost-padded slices).
-    ch = ch.contiguous()
-    cv = cv.contiguous()
-    cw = cw.contiguous()
-    cp0, cm0 = ch[1:, :, :], ch[:-1, :, :]
-    cp1, cm1 = cv[:, 1:, :], cv[:, :-1, :]
-    cp2, cm2 = cw[:, :, 1:], cw[:, :, :-1]
-
-    # Pre-smooth (fine level): native kernel
-    _native_rbgs_3d(p, f, cp0, cm0, cp1, cm1, cp2, cm2, jcap_tol, nsmoothing)
-    # Fused residual — J and active live in CUDA registers only.
-    r = _native_mg_residual_3d(p, f, cp0, cm0, cp1, cm1, cp2, cm2, jcap_tol)
-
-    nx, ny, nz = f.shape
-    if nx > 2 and ny > 2 and nz > 2:
-        ch_c, cv_c, cw_c = _restrict_face_3d(ch, cv, cw)
-        r_c = _restrict_residual_3d(r)
-        # r is no longer needed after restriction; free it to reduce peak footprint
-        # during the coarse correction + prolongation phase.
-        del r
-        coarse_shape = (r_c.shape[0] + 2, r_c.shape[1] + 2, r_c.shape[2] + 2)
-        p_c = torch.zeros(coarse_shape, device=p.device, dtype=p.dtype)
-        # Coarse correction: PyTorch V-cycle (reliable convergence at all sizes)
-        err_c, _ = _vcycle_rbgs_3d(r_c, p_c, ch_c, cv_c, cw_c, jcap_tol, nsmoothing)
-        # Use f.shape (same as the former r.shape) since r was freed above.
-        err = _prolongate_3d(err_c, f.shape)
-        p[1:-1, 1:-1, 1:-1] = p[1:-1, 1:-1, 1:-1] + err
-
-        # Post-smooth (fine level): native kernel
-        cp0, cm0 = ch[1:, :, :], ch[:-1, :, :]
-        cp1, cm1 = cv[:, 1:, :], cv[:, :-1, :]
-        cp2, cm2 = cw[:, :, 1:], cw[:, :, :-1]
-        _native_rbgs_3d(p, f, cp0, cm0, cp1, cm1, cp2, cm2, jcap_tol, nsmoothing)
-        r = _native_mg_residual_3d(p, f, cp0, cm0, cp1, cm1, cp2, cm2, jcap_tol)
-
-    return p, r
-
-
-# ── Full 2-D V-cycle with native Jacobi kernel (hybrid) ────────────────
-def _vcycle_jac_2d_native(f, p, ch, cv, w, jcap_tol, nsmoothing):
-    """Hybrid 2-D V-cycle: tiled native Jacobi at fine level, PyTorch at coarse.
-
-    Residual computed via ``mg_residual_2d``; ``J``/``active`` live only in
-    CUDA registers.  The caller's ``p`` is mutated in place; the returned
-    tensor aliases it.
-    """
-    ch = ch.contiguous()
-    cv = cv.contiguous()
-    cp0, cm0 = ch[1:, :], ch[:-1, :]
-    cp1, cm1 = cv[:, 1:], cv[:, :-1]
-
-    # Pre-smooth (fine level): native tiled kernel
-    _native_jac_2d(p, f, cp0, cm0, cp1, cm1, jcap_tol, w, nsmoothing)
-    r = _native_mg_residual_2d(p, f, cp0, cm0, cp1, cm1, jcap_tol)
-
-    nx, ny = f.shape
-    if nx > 2 and ny > 2:
-        ch_c, cv_c = _restrict_face_2d(ch, cv)
-        r_c = _restrict_residual_2d(r)
-        # r is no longer needed after restriction; free it to reduce peak footprint
-        # during the coarse correction + prolongation phase.
-        del r
-        coarse_shape = (r_c.shape[0] + 2, r_c.shape[1] + 2)
-        p_c = torch.zeros(coarse_shape, device=p.device, dtype=p.dtype)
-        # Coarse correction: PyTorch V-cycle
-        err_c, _ = _vcycle_jac_2d(r_c, p_c, ch_c, cv_c, w, jcap_tol, nsmoothing)
-        # Use f.shape (same as the former r.shape) since r was freed above.
-        err = _prolongate_2d(err_c, f.shape)
-        p[1:-1, 1:-1] = p[1:-1, 1:-1] + err
-
-        # Post-smooth (fine level): native tiled kernel
-        cp0, cm0 = ch[1:, :], ch[:-1, :]
-        cp1, cm1 = cv[:, 1:], cv[:, :-1]
-        _native_jac_2d(p, f, cp0, cm0, cp1, cm1, jcap_tol, w, nsmoothing)
-        r = _native_mg_residual_2d(p, f, cp0, cm0, cp1, cm1, jcap_tol)
-
-    return p, r
-
-
-# ── Full 3-D V-cycle with native Jacobi kernel (hybrid) ────────────────
-def _vcycle_jac_3d_native(f, p, ch, cv, cw, w, jcap_tol, nsmoothing):
-    """Hybrid 3-D V-cycle: native Jacobi at fine level, PyTorch at coarse.
-
-    Residual computed via ``mg_residual_3d``; ``J``/``active`` live only in
-    CUDA registers.  The caller's ``p`` is mutated in place; the returned
-    tensor aliases it.
-    """
-    ch = ch.contiguous()
-    cv = cv.contiguous()
-    cw = cw.contiguous()
-    cp0, cm0 = ch[1:, :, :], ch[:-1, :, :]
-    cp1, cm1 = cv[:, 1:, :], cv[:, :-1, :]
-    cp2, cm2 = cw[:, :, 1:], cw[:, :, :-1]
-
-    # Pre-smooth (fine level): native double-buffer kernel
-    _native_jac_3d(p, f, cp0, cm0, cp1, cm1, cp2, cm2, jcap_tol, w, nsmoothing)
-    r = _native_mg_residual_3d(p, f, cp0, cm0, cp1, cm1, cp2, cm2, jcap_tol)
-
-    nx, ny, nz = f.shape
-    if nx > 2 and ny > 2 and nz > 2:
-        ch_c, cv_c, cw_c = _restrict_face_3d(ch, cv, cw)
-        r_c = _restrict_residual_3d(r)
-        # r is no longer needed after restriction; free it to reduce peak footprint
-        # during the coarse correction + prolongation phase.
-        del r
-        coarse_shape = (r_c.shape[0] + 2, r_c.shape[1] + 2, r_c.shape[2] + 2)
-        p_c = torch.zeros(coarse_shape, device=p.device, dtype=p.dtype)
-        # Coarse correction: PyTorch V-cycle
-        err_c, _ = _vcycle_jac_3d(r_c, p_c, ch_c, cv_c, cw_c, w, jcap_tol, nsmoothing)
-        # Use f.shape (same as the former r.shape) since r was freed above.
-        err = _prolongate_3d(err_c, f.shape)
-        p[1:-1, 1:-1, 1:-1] = p[1:-1, 1:-1, 1:-1] + err
-
-        # Post-smooth (fine level): native double-buffer kernel
-        cp0, cm0 = ch[1:, :, :], ch[:-1, :, :]
-        cp1, cm1 = cv[:, 1:, :], cv[:, :-1, :]
-        cp2, cm2 = cw[:, :, 1:], cw[:, :, :-1]
-        _native_jac_3d(p, f, cp0, cm0, cp1, cm1, cp2, cm2, jcap_tol, w, nsmoothing)
-        r = _native_mg_residual_3d(p, f, cp0, cm0, cp1, cm1, cp2, cm2, jcap_tol)
-
-    return p, r
-
-
 # ── Full 2-D V-cycle with Jacobi (coarse-level recursive) ──────────────────
 def _vcycle_jac_2d(f, p, ch, cv, w, jcap_tol, nsmoothing):
     """Complete 2-D V-cycle with Jacobi smoother (used at coarse levels)."""
@@ -669,10 +469,8 @@ class _MultigridPoissonSolver:
         verbose=True,
         precond_vcycles=1,
         smoother="jacobi",
-        use_kernels=False,
         recycle_k=0,
         cuda_graph=False,
-        cuda_graph_max_cells=64 ** 3,
     ):
         self.dtype       = dtype
         self.h2          = h * h
@@ -700,18 +498,11 @@ class _MultigridPoissonSolver:
         # subset of interior cells without touching the per-face
         # coefficient layout.
         self.dirichlet_mask = None
-        self.use_kernels = use_kernels
-        # ---- CUDA-graph capture of the native solve (GU6) --------------
-        # Small-grid-only win: the native V-cycle issues ~1300 tiny kernels
-        # whose host-launch latency dominates on launch-bound grids.  Capturing
-        # the (sync-free, tol<0) solve into a CUDA graph replays them with one
-        # host launch.  Net-NEGATIVE on large/compute-bound 3-D grids and on the
-        # static-buffer copy_ overhead, so it is GATED on interior cell count.
-        # Only mgcg / multigrid are intercepted (rmgcg's deflation basis and
-        # the FFT solver are out of scope).
-        self.cuda_graph           = cuda_graph
-        self.cuda_graph_max_cells = cuda_graph_max_cells
-        self._graph_cache         = {}   # {key: entry-dict | None (capture failed)}
+        # ---- CUDA-graph replay of the all-Warp multigrid V-cycle -------
+        # When set, :class:`PoissonSolver` replays a captured, sync-free,
+        # fixed-cycle Warp V-cycle in one host launch (small-grid win on
+        # launch-bound grids).  See ``PoissonSolver._graphed_mg``.
+        self.cuda_graph = cuda_graph
         # ---- Recycled-Krylov (deflation) state -------------------------
         # When recycle_k > 0, solve_rmgcg keeps a small subspace of search
         # directions from previous solves and deflates them out of the next
@@ -730,11 +521,6 @@ class _MultigridPoissonSolver:
         # non-deflated V-cycle preconditioner (observed to stall in 3-D), so it
         # is OFF by default; flip for experimentation only.
         self._deflate_in_loop = True
-        # The public :class:`PoissonSolver` (Warp subclass) drives the outer
-        # multigrid/MGCG loop in Python with the fine-level smoother + residual on
-        # Warp kernels; the retired native C++ ``poisson_solve_*`` driver (which
-        # ``self._K`` dispatched to) is never used.
-        self._K = None
 
     # ------------------------------------------------------------------
     # Helpers
@@ -970,32 +756,14 @@ class _MultigridPoissonSolver:
     # V-cycle dispatch
     # ------------------------------------------------------------------
     def _dispatch_vcycle(self, f, p, face_arrs):
-        """Run one V-cycle through the native hybrid path.
+        """Run one V-cycle.
 
-        The caller (project) is OK with in-place mutation of its p input:
-        the returned tensor is assigned back to fs.p0 immediately, so the
-        fine-level p.clone() is skipped to save ~512 MB at 512³ float32.
+        Base class: the pure-PyTorch recursive V-cycle (dimension-agnostic,
+        Dirichlet-mask aware).  :class:`PoissonSolver` overrides this to run the
+        fine level on Warp kernels (CPU + GPU).  The caller is OK with in-place
+        mutation of ``p`` (the result is assigned straight back to ``fs.p0``).
         """
-        # The native hybrid V-cycle uses CUDA-only smoother kernels.  Off CUDA
-        # (CPU path), fall back to the pure-PyTorch recursive V-cycle so the
-        # CG solvers (solve_mgcg / solve_rmgcg) run on CPU tensors too.
-        if not p.is_cuda:
-            return self._vcycle(f, p, face_arrs)
-
-        ndim = f.ndim
-        if ndim == 3:
-            ch, cv, cw = face_arrs
-            if self.smoother == "rbgs":
-                return _vcycle_rbgs_3d_native(
-                    f, p, ch, cv, cw, self.jcap_tol, self.nsmoothing)
-            return _vcycle_jac_3d_native(
-                f, p, ch, cv, cw, self.w, self.jcap_tol, self.nsmoothing)
-        ch, cv = face_arrs
-        if self.smoother == "rbgs":
-            return _vcycle_rbgs_2d_native(
-                f, p, ch, cv, self.jcap_tol, self.nsmoothing)
-        return _vcycle_jac_2d_native(
-            f, p, ch, cv, self.w, self.jcap_tol, self.nsmoothing)
+        return self._vcycle(f, p, face_arrs)
 
     # ------------------------------------------------------------------
     # V-cycle  (dimension-agnostic, recursive)
@@ -1124,127 +892,6 @@ class _MultigridPoissonSolver:
     # ------------------------------------------------------------------
     # Top-level solve
     # ------------------------------------------------------------------
-    def _native_call(self, method, f, p0, face_arrs, ndim, tol=None):
-        """Single dispatch to the native CUDA Poisson driver.
-
-        ``method`` is ``"mgcg"`` or ``"multigrid"``.  ``p0`` is mutated in place
-        (the driver writes the solution into it); returns ``(p, residual)``.
-        ``tol`` defaults to the solver tolerance; pass ``tol < 0`` to request the
-        sync-free fixed-cycle mode (host-sync-free, CUDA-graph-capturable).
-        """
-        if tol is None:
-            tol = self._tol_float
-        p   = p0 if p0.is_contiguous() else p0.contiguous()
-        f_c = f.contiguous()
-        faces_c = tuple(c.contiguous() for c in face_arrs)
-        if method == "mgcg":
-            fn = (self._K.poisson_solve_mgcg_2d if ndim == 2
-                  else self._K.poisson_solve_mgcg_3d)
-            r = fn(
-                p, f_c, *faces_c,
-                h2=self.h2, jcap_tol=self.jcap_tol, w=self.w,
-                nsmoothing=self.nsmoothing, max_cycles=self.max_cycles,
-                precond_vcycles=self.precond_vcycles,
-                tol=tol, smoother=self.smoother,
-            )
-        else:  # multigrid
-            fn = (self._K.poisson_solve_multigrid_2d if ndim == 2
-                  else self._K.poisson_solve_multigrid_3d)
-            r = fn(
-                p, f_c, *faces_c,
-                h2=self.h2, jcap_tol=self.jcap_tol, w=self.w,
-                nsmoothing=self.nsmoothing, max_vcycles=self.max_vcycles,
-                tol=tol, smoother=self.smoother,
-            )
-        return p, r
-
-    # ------------------------------------------------------------------
-    # CUDA-graph capture of the native solve  (GU6, small-grid-only win)
-    # ------------------------------------------------------------------
-    def _cuda_graph_enabled(self, f):
-        """Gate: opt-in flag, native kernels, CUDA tensor, below the cell
-        threshold (graphs are net-negative on large/compute-bound grids)."""
-        return (self.cuda_graph and self.use_kernels
-                and f.is_cuda and f.numel() <= self.cuda_graph_max_cells)
-
-    def _graphed_native_solve(self, method, f, p0, face_arrs, ndim):
-        """Replay a captured CUDA graph of the sync-free native solve.
-
-        Lazily captures one graph per (method, ndim, input shapes) into static
-        p/f/face buffers; thereafter each call copies the live RHS + face
-        coefficients + warm-start guess into those buffers and replays.  Falls
-        back permanently to the eager native call if capture ever fails.
-        """
-        key = (method, ndim, tuple(f.shape), tuple(p0.shape),
-               tuple(tuple(c.shape) for c in face_arrs))
-        if key not in self._graph_cache:
-            self._graph_cache[key] = self._capture_poisson_graph(
-                method, f, p0, face_arrs, ndim)
-        entry = self._graph_cache[key]
-        if entry is None:                       # capture failed → eager
-            return self._native_call(method, f, p0, face_arrs, ndim)
-
-        entry["f"].copy_(f)
-        for cs, c in zip(entry["faces"], face_arrs):
-            cs.copy_(c)
-        entry["p"].copy_(p0)                    # warm-start (or zeros) guess
-        entry["graph"].replay()
-        # ``p0`` is a fresh tensor each step (or the persistent warm-start
-        # field); write the static solution back so in-place semantics and
-        # warm-starting are preserved.  Clone the residual — the static buffer
-        # is overwritten on the next replay.
-        p0.copy_(entry["p"])
-        return p0, entry["r"].clone()
-
-    def _capture_poisson_graph(self, method, f, p0, face_arrs, ndim):
-        """Capture the sync-free (tol<0) native solve into a CUDA graph.
-
-        Returns the capture entry dict, or ``None`` if capture failed (the
-        caller then falls back to the eager native path for this shape).
-        """
-        # Static buffers: contiguous copies whose pointers the graph binds to.
-        p_s     = p0.contiguous().clone()
-        f_s     = f.contiguous().clone()
-        faces_s = tuple(c.contiguous().clone() for c in face_arrs)
-        try:
-            # Warm up on a side stream so the driver's lazy allocations and any
-            # library init happen OUTSIDE the captured region.
-            s = torch.cuda.Stream()
-            s.wait_stream(torch.cuda.current_stream())
-            with torch.cuda.stream(s):
-                for _ in range(3):
-                    p_s.copy_(p0)
-                    self._native_call(method, f_s, p_s, faces_s, ndim, tol=-1.0)
-            torch.cuda.current_stream().wait_stream(s)
-
-            graph = torch.cuda.CUDAGraph()
-            p_s.copy_(p0)
-            with torch.cuda.graph(graph):
-                _, r_s = self._native_call(
-                    method, f_s, p_s, faces_s, ndim, tol=-1.0)
-        except Exception as e:                  # noqa: BLE001 — capture is best-effort
-            if self.verbose:
-                print(f"[poisson_cuda_graph] capture failed ({e}); "
-                      f"falling back to eager native solve")
-            return None
-        if self.verbose:
-            n_cycles = self.max_cycles if method == "mgcg" else self.max_vcycles
-            print(f"[poisson_cuda_graph] captured {method} {ndim}D "
-                  f"shape={tuple(f.shape)} ({n_cycles} fixed cycles, sync-free)")
-        return {"graph": graph, "p": p_s, "f": f_s, "faces": faces_s, "r": r_s}
-
-    def _solve_multigrid_native(self, f, p0, face_arrs, ndim):
-        """Dispatch solve_multigrid to the native CUDA driver."""
-        if self._cuda_graph_enabled(f):
-            return self._graphed_native_solve("multigrid", f, p0, face_arrs, ndim)
-        return self._native_call("multigrid", f, p0, face_arrs, ndim)
-
-    def _solve_mgcg_native(self, f, p0, face_arrs, ndim):
-        """Dispatch solve_mgcg to the native CUDA driver."""
-        if self._cuda_graph_enabled(f):
-            return self._graphed_native_solve("mgcg", f, p0, face_arrs, ndim)
-        return self._native_call("mgcg", f, p0, face_arrs, ndim)
-
     def solve_multigrid(self, f, p0, **kwargs):
         """Solve with multigrid V-cycles.
 
@@ -1256,8 +903,7 @@ class _MultigridPoissonSolver:
         pre_scaled : bool, optional
             When True, *f* is already scaled by ``h²``, so the internal
             ``f_scaled = h² * f`` multiplication is skipped (T3a: saves one
-            interior-sized allocation on the Python path).  Ignored when
-            ``use_kernels=True`` — the native solver applies h² internally.
+            interior-sized allocation).
         """
         pre_scaled = kwargs.pop('pre_scaled', False)
         ndim = f.ndim
@@ -1267,9 +913,6 @@ class _MultigridPoissonSolver:
                 "solve_multigrid: ch/cv (2-D) or ch/cv/cw (3-D) keyword "
                 "arguments are required."
             )
-
-        if self.use_kernels:
-            return self._solve_multigrid_native(f, p0, face_arrs, ndim)
 
         # p0 is passed directly; the vcycle clones its input internally,
         # so the redundant clone here is unnecessary and wastes 128-131 MB.
@@ -1360,8 +1003,6 @@ class _MultigridPoissonSolver:
                 "arguments are required."
             )
 
-        if self.use_kernels:
-            return self._solve_mgcg_native(f, p0, face_arrs, ndim)
         cfaces = self._extract_cfaces(face_arrs, ndim)
 
         # ------ SPD system:  B(x) = b  where B = Jp - S,  b = -(h²·f) ------
@@ -1599,63 +1240,6 @@ class _MultigridPoissonSolver:
         else:
             self._recycle = None
 
-    def _solve_rmgcg_native(self, f, p0, face_arrs, cfaces, ndim, inner):
-        """Dispatch recycled MGCG to the native CUDA driver.
-
-        The persistent recycle bookkeeping (``_prepare_recycle`` B-ortho­
-        normalisation, ``_finalize_recycle`` guards) stays in Python; only the
-        deflated CG loop runs natively.  The driver harvests the last
-        ``recycle_k`` search directions into ``D`` for the next refresh.
-        """
-        p = p0.clone().detach()
-        if not p.is_contiguous():
-            p = p.contiguous()
-        self.BC(p)
-        f_c = f.contiguous()
-
-        recycle = self._prepare_recycle(cfaces, p.shape, inner)
-        if recycle is not None and recycle["U"]:
-            U = torch.stack(recycle["U"]).contiguous()
-            W = torch.stack(recycle["W"]).contiguous()
-        else:
-            U = p.new_empty((0, *p.shape))
-            W = f_c.new_empty((0, *f_c.shape))
-        hk = self.recycle_k
-
-        if ndim == 2:
-            ch, cv = face_arrs
-            r, D, niter = self._K.poisson_solve_rmgcg_2d(
-                p, f_c, ch.contiguous(), cv.contiguous(), U, W, hk,
-                h2=self.h2, jcap_tol=self.jcap_tol, w=self.w,
-                nsmoothing=self.nsmoothing, max_cycles=self.max_cycles,
-                precond_vcycles=self.precond_vcycles,
-                tol=self._tol_float, smoother=self.smoother,
-            )
-        else:
-            ch, cv, cw = face_arrs
-            r, D, niter = self._K.poisson_solve_rmgcg_3d(
-                p, f_c, ch.contiguous(), cv.contiguous(), cw.contiguous(),
-                U, W, hk,
-                h2=self.h2, jcap_tol=self.jcap_tol, w=self.w,
-                nsmoothing=self.nsmoothing, max_cycles=self.max_cycles,
-                precond_vcycles=self.precond_vcycles,
-                tol=self._tol_float, smoother=self.smoother,
-            )
-
-        deflated = U.shape[0] > 0
-        harvest_list = list(D.unbind(0)) if hk > 0 else None
-        self._last_niter = niter
-        self._finalize_recycle(niter, deflated, harvest_list, inner)
-
-        if self.verbose:
-            n_rec = 0 if self._recycle is None else len(self._recycle["U"])
-            print(
-                f"RMGCG[native] residual = {r.abs().max().item():.2e}"
-                f"/{self._tol_float:.2e} with {niter}/{self.max_cycles} CG "
-                f"iterations (deflated {U.shape[0]} → recycle dim {n_rec})"
-            )
-        return p, r
-
     def solve_rmgcg(self, f, p0, **kwargs):
         """Recycled MGCG: ``solve_mgcg`` plus cross-timestep Krylov recycling.
 
@@ -1663,9 +1247,7 @@ class _MultigridPoissonSolver:
         to ``solve_mgcg``.  With ``recycle_k > 0`` it deflates the subspace of
         slow-converging modes carried over from previous solves, cutting CG
         iterations for time-stepping problems whose operator changes little
-        per step (e.g. slow swimmers).  Runs the native CUDA driver when
-        ``use_kernels`` is set, else the PyTorch CG core; both share the recycle
-        bookkeeping and guards below.
+        per step (e.g. slow swimmers).
         """
         pre_scaled = kwargs.pop('pre_scaled', False)
         ndim = f.ndim
@@ -1678,9 +1260,6 @@ class _MultigridPoissonSolver:
 
         cfaces = self._extract_cfaces(face_arrs, ndim)
         inner  = _inner(ndim)
-
-        if self.use_kernels:
-            return self._solve_rmgcg_native(f, p0, face_arrs, cfaces, ndim, inner)
 
         b = -f if pre_scaled else -(self.h2 * f)
         x = p0.clone().detach()
@@ -1726,9 +1305,8 @@ from lilytorch.src.poisson import (
 
 
 # ── Hybrid V-cycles: Warp fine-level smoother+residual, pure-torch coarse ────
-# Structure copied from src.poisson_mult._vcycle_{rbgs,jac}_{2,3}d_native; the
-# only change is the two native ops → Warp wrappers (and the contiguous-coeff
-# extraction stays identical).
+# The finest level's pre/post smooth + residual run on Warp kernels (CPU + GPU);
+# the coarse correction recurses into the pure-torch _vcycle_{rbgs,jac} path.
 
 def _vcycle_rbgs_2d_warp(f, p, ch, cv, jcap_tol, nsmoothing):
     ch = ch.contiguous(); cv = cv.contiguous()
@@ -1826,9 +1404,10 @@ class PoissonSolver(_MultigridPoissonSolver):
     """Variable-coefficient multigrid Poisson with the fine-level smoother +
     residual on Warp kernels (CPU + GPU, f32 + f64).
 
-    The three top-level solvers are forced onto the Python outer driver (so the
-    native C++ ``poisson_solve_*`` is bypassed) and :meth:`_dispatch_vcycle` runs
-    the Warp hybrid V-cycle."""
+    The top-level multigrid / MGCG / RMGCG solvers run their outer driver in
+    Python; :meth:`_dispatch_vcycle` runs the Warp hybrid V-cycle (Warp fine
+    level + pure-torch coarse recursion), optionally replayed from a captured
+    CUDA graph when ``cuda_graph`` is set."""
 
     #: op names this backend now serves on Warp (for the WARP_BACKED accounting).
     WARP_POISSON_OPS = frozenset({
@@ -1876,7 +1455,7 @@ class PoissonSolver(_MultigridPoissonSolver):
         """CUDA-graphed all-Warp multigrid when ``cuda_graph`` is on (3-D),
         else the Item-2 Python-driver path.  The graphed path replays a captured,
         sync-free, fixed-(``max_vcycles``)-cycle V-cycle in one host launch —
-        ~4× over the Python loop and competitive with the native C++ driver."""
+        ~4× over the Python loop."""
         if getattr(self, "cuda_graph", False) and f.ndim in (2, 3):
             face_arrs, _ = self._face_arrs_from_kwargs(kwargs, f.ndim)
             mg = self._graphed_mg(f.ndim, tuple(f.shape))
@@ -1912,13 +1491,8 @@ class PoissonSolver(_MultigridPoissonSolver):
                 r = mg_residual_2d_clamped_warp(p, f_scaled, cp0, cm0, cp1, cm1,
                                                 self.jcap_tol)
                 return p, r
-        # Fallback: Item-2 Python outer driver (bypass the native C++ poisson_solve_*).
-        saved = self.use_kernels
-        self.use_kernels = False
-        try:
-            return super().solve_multigrid(f, p0, **kwargs)
-        finally:
-            self.use_kernels = saved
+        # Fallback: Python outer driver with the fine-level V-cycle on Warp.
+        return super().solve_multigrid(f, p0, **kwargs)
 
     def _dispatch_vcycle(self, f, p, face_arrs):
         """One V-cycle with the fine-level smoother + residual on Warp.
@@ -1926,14 +1500,14 @@ class PoissonSolver(_MultigridPoissonSolver):
         When ``cuda_graph`` is on (and a graphed ``WarpMG`` is available for this
         shape/dtype/smoother), the whole V-cycle is replayed from ONE captured
         CUDA graph in a single host launch — the sync-free MGCG preconditioner
-        (C1).  Otherwise it mirrors the native ``_dispatch_vcycle`` hybrid (Warp
-        fine level + pure-torch coarse recursion), which also runs on CPU.
+        (C1).  Otherwise it runs the hybrid V-cycle (Warp fine level +
+        pure-torch coarse recursion), which also runs on CPU.
 
         SCALING (the C1 gotcha): the CG core calls this as
         ``z, _ = self._dispatch_vcycle(-r, z, face_arrs)``.  ``-r`` is the
         residual of the *h²-scaled* SPD system (``b = -(h²·f)``, ``B`` uses the
         h²-scaled face coefficients), so it is ALREADY in the smoother's units —
-        exactly what the native ``_vcycle_*_warp`` smoothers consume as ``f``
+        exactly what the ``_vcycle_*_warp`` smoothers consume as ``f``
         (no internal h² rescale).  ``WarpMG.solve`` likewise treats its ``f``
         argument as the raw smoother RHS, so we pass ``f`` straight through with
         **no h² multiplication** (the ``h²`` rescale belongs only in
@@ -1964,23 +1538,6 @@ class PoissonSolver(_MultigridPoissonSolver):
         return _vcycle_jac_2d_warp(
             f, p, ch, cv, self.w, self.jcap_tol, self.nsmoothing)
 
-    # ── Force the Python outer driver (bypass the native C++ poisson_solve_*) ──
-    def solve_mgcg(self, f, p0, **kwargs):
-        saved = self.use_kernels
-        self.use_kernels = False
-        try:
-            return super().solve_mgcg(f, p0, **kwargs)
-        finally:
-            self.use_kernels = saved
-
-    def solve_rmgcg(self, f, p0, **kwargs):
-        saved = self.use_kernels
-        self.use_kernels = False
-        try:
-            return super().solve_rmgcg(f, p0, **kwargs)
-        finally:
-            self.use_kernels = saved
-
     # ── Sync-free MGCG: periodic convergence check (C1, point 4) ──────────────
     def _cg_core(self, b, x, cfaces, face_arrs, recycle=None, harvest=None):
         """Plain-MGCG CG loop with a PERIODIC convergence check, to cut the
@@ -1994,9 +1551,9 @@ class PoissonSolver(_MultigridPoissonSolver):
         iterations past convergence.
 
         Gated to plain MGCG (``recycle is None and harvest is None``) — the
-        deflated / recycle-harvesting RMGCG path keeps the native source-of-truth
-        loop.  ``cg_check_every <= 1`` (the default) also defers to the native
-        ``_cg_core`` so the out-of-the-box behaviour is bit-identical."""
+        deflated / recycle-harvesting RMGCG path keeps the base-class
+        source-of-truth loop.  ``cg_check_every <= 1`` (the default) also defers
+        to the base ``_cg_core`` so the out-of-the-box behaviour is bit-identical."""
         K = int(getattr(self, "cg_check_every", 1))
         if K <= 1 or recycle is not None or harvest is not None:
             return super()._cg_core(b, x, cfaces, face_arrs,

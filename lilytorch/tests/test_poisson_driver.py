@@ -43,8 +43,7 @@ def _problem(ndim, dtype, N=48, device=DEV):
 def _solve(SolverCls, method, ndim, dtype, smoother):
     h, f, p, faces = _problem(ndim, dtype)
     s = SolverCls(dtype=dtype, device=DEV, h=h, tol=1e-6, max_vcycles=40,
-                  max_cycles=50, nsmoothing=2, smoother=smoother, verbose=False,
-                  use_kernels=False)
+                  max_cycles=50, nsmoothing=2, smoother=smoother, verbose=False)
     _, r = getattr(s, method)(f.clone(), p, **{k: v.clone() for k, v in faces.items()})
     return r.abs().max().item()
 
@@ -82,7 +81,7 @@ def test_warp_poisson_graphed_multigrid(dtype, smoother):
     rn = _solve(PoissonSolver, "solve_multigrid", 3, dtype, smoother)
     s = PoissonSolver(dtype=dtype, device=DEV, h=h, tol=1e-6, max_vcycles=15,
                     nsmoothing=2, smoother=smoother, verbose=False,
-                    use_kernels=True, cuda_graph=True)
+                    cuda_graph=True)
     _, r = s.solve_multigrid(f.clone(), p, **{k: v.clone() for k, v in faces.items()})
     rw = r.abs().max().item()
     assert rw < 1e-3, f"graphed {dtype} {smoother}: residual {rw:.2e}"
@@ -100,7 +99,7 @@ def test_warp_poisson_graphed_multigrid_2d(dtype, smoother):
     rn = _solve(PoissonSolver, "solve_multigrid", 2, dtype, smoother)
     s = PoissonSolver(dtype=dtype, device=DEV, h=h, tol=1e-6, max_vcycles=15,
                     nsmoothing=2, smoother=smoother, verbose=False,
-                    use_kernels=True, cuda_graph=True)
+                    cuda_graph=True)
     _, r = s.solve_multigrid(f.clone(), p, **{k: v.clone() for k, v in faces.items()})
     rw = r.abs().max().item()
     assert rw < 1e-3, f"graphed 2-D {dtype} {smoother}: residual {rw:.2e}"
@@ -114,7 +113,7 @@ def test_warp_poisson_graphed_2d_independent(monkeypatch):
     h, f, p, faces = _problem(2, torch.float64, N=64)
     s = PoissonSolver(dtype=torch.float64, device=DEV, h=h, tol=1e-6, max_vcycles=15,
                     nsmoothing=2, smoother="rbgs", verbose=False,
-                    use_kernels=True, cuda_graph=True)
+                    cuda_graph=True)
     # warm-up + capture before patching (capture itself is pure-Warp).
     s.solve_multigrid(f.clone(), p, **{k: v.clone() for k, v in faces.items()})
 
@@ -132,7 +131,7 @@ def test_warp_poisson_graphed_independent(monkeypatch):
     h, f, p, faces = _problem(3, torch.float32, N=32)
     s = PoissonSolver(dtype=torch.float32, device=DEV, h=h, tol=1e-6, max_vcycles=10,
                     nsmoothing=2, smoother="rbgs", verbose=False,
-                    use_kernels=True, cuda_graph=True)
+                    cuda_graph=True)
     # warm-up / capture before monkeypatch (capture itself is pure-Warp).
     s.solve_multigrid(f.clone(), p.clone(), **{k: v.clone() for k, v in faces.items()})
 
@@ -159,7 +158,7 @@ def test_warp_poisson_graphed_mgcg(ndim, dtype, smoother):
     rn = _solve(PoissonSolver, "solve_mgcg", ndim, dtype, smoother)
     s = PoissonSolver(dtype=dtype, device=DEV, h=h, tol=1e-6, max_vcycles=2,
                     max_cycles=50, nsmoothing=2, smoother=smoother, verbose=False,
-                    use_kernels=True, cuda_graph=True)
+                    cuda_graph=True)
     _, r = s.solve_mgcg(f.clone(), p, **{k: v.clone() for k, v in faces.items()})
     rw = r.abs().max().item()
     assert rw < 1e-3, f"graphed MGCG {ndim}D {dtype} {smoother}: residual {rw:.2e}"
@@ -175,7 +174,7 @@ def test_warp_poisson_graphed_mgcg_periodic(check_every):
     h, f, p, faces = _problem(3, torch.float32, N=48)
     s = PoissonSolver(dtype=torch.float32, device=DEV, h=h, tol=1e-6, max_vcycles=2,
                     max_cycles=80, nsmoothing=2, smoother="rbgs", verbose=False,
-                    use_kernels=True, cuda_graph=True)
+                    cuda_graph=True)
     s.cg_check_every = check_every
     _, r = s.solve_mgcg(f.clone(), p, **{k: v.clone() for k, v in faces.items()})
     assert r.abs().max().item() < 1e-3, f"periodic K={check_every}: {r.abs().max().item():.2e}"
@@ -187,7 +186,7 @@ def test_warp_poisson_graphed_mgcg_independent(monkeypatch):
     h, f, p, faces = _problem(3, torch.float32, N=32)
     s = PoissonSolver(dtype=torch.float32, device=DEV, h=h, tol=1e-6, max_vcycles=2,
                     max_cycles=50, nsmoothing=2, smoother="rbgs", verbose=False,
-                    use_kernels=True, cuda_graph=True)
+                    cuda_graph=True)
     # warm-up / capture before monkeypatch (capture itself is pure-Warp).
     s.solve_mgcg(f.clone(), p.clone(), **{k: v.clone() for k, v in faces.items()})
 
@@ -204,7 +203,54 @@ def test_warp_poisson_cpu():
     """CPU end-to-end: the Warp smoother/residual run on CPU from one source."""
     h, f, p, faces = _problem(2, torch.float64, N=24, device="cpu")
     s = PoissonSolver(dtype=torch.float64, device="cpu", h=h, tol=1e-6,
-                    max_vcycles=60, nsmoothing=2, smoother="rbgs", verbose=False,
-                    use_kernels=False)
+                    max_vcycles=60, nsmoothing=2, smoother="rbgs", verbose=False)
     _, r = s.solve_multigrid(f.clone(), p, **{k: v.clone() for k, v in faces.items()})
     assert r.abs().max().item() < 1e-3
+
+
+# ── Manufactured-solution (analytic) Poisson ──────────────────────────────
+# Solve ∇²p = f with unit face coefficients for the closed-form Neumann
+# eigenfunction p*(x) = Π_d cos(2π x_d) on the unit cube (cell-centred), whose
+# exact Laplacian is f = -ndim·(2π)²·p*.  The recovered field must match p* to
+# the O(h²) discretisation error — a true accuracy check (not just a residual
+# or python-vs-warp parity assertion), anchoring the Warp-only solver.
+def _mms_problem(ndim, dtype, N, device):
+    import math
+    h = 1.0 / N
+    k = 2.0 * math.pi
+    xc = (torch.arange(N, dtype=dtype, device=device) + 0.5) * h
+    grids = torch.meshgrid(*([xc] * ndim), indexing="ij")
+    p_true = torch.ones_like(grids[0])
+    for g in grids:
+        p_true = p_true * torch.cos(k * g)
+    p_true = p_true - p_true.mean()
+    f = (-ndim * k * k) * p_true
+    f = f - f.mean()                                  # compatible (Neumann) RHS
+    o = dict(dtype=dtype, device=device)
+    if ndim == 2:
+        faces = dict(ch=torch.ones(N + 1, N, **o), cv=torch.ones(N, N + 1, **o))
+    else:
+        faces = dict(ch=torch.ones(N + 1, N, N, **o),
+                     cv=torch.ones(N, N + 1, N, **o),
+                     cw=torch.ones(N, N, N + 1, **o))
+    return h, f, p_true, faces
+
+
+@pytest.mark.parametrize("method", ["solve_multigrid", "solve_mgcg"])
+@pytest.mark.parametrize("smoother", ["rbgs", "jacobi"])
+@pytest.mark.parametrize("ndim,N,tol_err", [(2, 64, 3e-3), (3, 32, 1.5e-2)])
+def test_warp_poisson_manufactured_solution(method, smoother, ndim, N, tol_err):
+    """The Warp driver recovers the analytic p* to the O(h²) truncation error,
+    on the active device (CPU always; CUDA when present)."""
+    h, f, p_true, faces = _mms_problem(ndim, torch.float64, N, DEV)
+    s = PoissonSolver(dtype=torch.float64, device=DEV, h=h, tol=1e-10,
+                      max_vcycles=300, max_cycles=300, nsmoothing=2,
+                      smoother=smoother, verbose=False)
+    p0 = torch.zeros(*([N + 2] * ndim), dtype=torch.float64, device=DEV)
+    p, _ = getattr(s, method)(f.clone(), p0,
+                              **{k: v.clone() for k, v in faces.items()})
+    inner = tuple(slice(1, -1) for _ in range(ndim))
+    p_rec = p[inner].clone()
+    p_rec = p_rec - p_rec.mean()                      # fix the Neumann null space
+    err = (p_rec - p_true).abs().max().item()
+    assert err < tol_err, f"MMS {method} {ndim}D {smoother}: max |p-p*| = {err:.2e}"

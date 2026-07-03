@@ -81,14 +81,12 @@ def run(ndim=2, N=128, steps=30, recycle_k=10, contrast=100.0, seed=0,
         f -= f.mean()
         return faces, f
 
-    use_kernels = os.environ.get("USE_KERNELS", "0") == "1"
-
     def make_solver(k):
         return PoissonSolver(
             dt_t, dev, h,
             tol=tol, max_cycles=200, max_vcycles=1, nsmoothing=nsmoothing,
             w=1.0, verbose=False, precond_vcycles=precond_vcycles,
-            smoother=smoother, use_kernels=use_kernels, recycle_k=k,
+            smoother=smoother, recycle_k=k,
         )
 
     warm = os.environ.get("WARM", "1") == "1"
@@ -101,8 +99,7 @@ def run(ndim=2, N=128, steps=30, recycle_k=10, contrast=100.0, seed=0,
     print(f"\n=== {ndim}-D  N={N}  steps={steps}  recycle_k={recycle_k}  "
           f"device={dev} ===")
     print(f"    precond: {smoother} x{nsmoothing}, {precond_vcycles} vcycle/iter, "
-          f"tol={tol:g}, contrast={contrast:g}, "
-          f"backend={'native' if use_kernels else 'pytorch'}")
+          f"tol={tol:g}, contrast={contrast:g}, backend=warp")
     print(f"{'step':>4} | {'mgcg it':>7} | {'rmgcg it':>8} | {'saved':>6}")
     print("-" * 36)
     for step in range(steps):
