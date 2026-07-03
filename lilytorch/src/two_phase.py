@@ -197,75 +197,16 @@ class TwoPhase:
         _neumann_pad(a)
         self.alpha = a
 
-    def _shift(self, a, s, d):
-        """Shift ``a`` by ``s`` cells along dim ``d`` with **edge replication**
-        (Neumann-consistent), unlike ``torch.roll`` which wraps the boundary.
-        Supports ``s in (1, 2, -1)`` (the cVOF stencil offsets)."""
-        nd = self.ndim
-        S  = lambda sl: _sl(nd, d, sl)
-        if s == 1:                       # a[k-1], boundary -> a[0]
-            return torch.cat([a[S(slice(0, 1))], a[S(slice(0, -1))]], dim=d)
-        if s == 2:                       # a[k-2], boundary -> a[0]
-            return torch.cat([a[S(slice(0, 1))], a[S(slice(0, 1))],
-                              a[S(slice(0, -2))]], dim=d)
-        if s == -1:                      # a[k+1], boundary -> a[-1]
-            return torch.cat([a[S(slice(1, None))], a[S(slice(-1, None))]], dim=d)
-        raise ValueError(f"_shift: unsupported offset {s}")
-
     def _cvof_sweep(self, a, u_d, d, dt):
         """One Weymouth-Yue conservative directional sweep along dim ``d``.
 
         Dispatches to the single-source Warp ``cvof_sweep`` kernel (CPU and GPU
         from one ``@wp.kernel``), a single launch replacing the ~8 full-grid
-        temporaries (the three edge-clamped shifts, two limited slopes, two donor
-        faces, the flux tensor) of the pure-PyTorch reference
-        (:meth:`_cvof_sweep_python`, kept as the parity oracle).
+        temporaries (three edge-clamped shifts, two limited slopes, two donor
+        faces, the flux tensor) of the pure-PyTorch reference.  That reference is
+        kept as the independent parity oracle in ``tests/test_two_phase.py``.
         """
         out = a.clone()
         cvof_sweep(a, u_d, float(dt) / self.h, d, out)
         return out
 
-    def _cvof_sweep_python(self, a, u_d, d, dt):
-        """Pure-PyTorch reference for one W&Y conservative sweep along ``d``.
-
-        MAC convention: ``u_d[k]`` is the face *left* of cell ``k`` (between
-        cells ``k-1`` and ``k``).  The face value is the W&Y 2nd-order
-        Courant-corrected, van-Leer-limited extrapolation of the **donor**
-        cell to the face (first-order upwind when the slope limiter kills the
-        gradient), plus the divergence correction.  Returns a new tensor with
-        the interior updated.  Kept as the parity oracle for the CUDA kernel.
-        """
-        nd  = self.ndim
-        S   = lambda s: _sl(nd, d, s)
-        cfl = dt / self.h
-        C   = u_d * cfl                                   # face Courant number
-        # neighbour shifts along d with EDGE-CLAMP (Neumann-consistent), NOT
-        # torch.roll: roll wraps top<->bottom / left<->right, which corrupts the
-        # face values at the domain corners in an order-dependent way and shows
-        # up as a one-corner asymmetry in an otherwise symmetric problem.
-        a_m1 = self._shift(a,  1, d)                      # a[k-1]
-        a_m2 = self._shift(a,  2, d)                      # a[k-2]
-        a_p1 = self._shift(a, -1, d)                      # a[k+1]
-
-        def _vleer(db, df):
-            # van Leer (harmonic) limited slope; 0 at extrema / sign changes.
-            denom = torch.where(db + df == 0.0,
-                                torch.ones_like(db), db + df)
-            s = 2.0 * db * df / denom
-            return torch.where(db * df > 0.0, s, torch.zeros_like(s))
-
-        # C >= 0: donor = cell k-1, extrapolate forward to the face
-        s_pos    = _vleer(a_m1 - a_m2, a - a_m1)
-        face_pos = a_m1 + 0.5 * (1.0 - C) * s_pos
-        # C < 0: donor = cell k, extrapolate backward to the face
-        s_neg    = _vleer(a - a_m1, a_p1 - a)
-        face_neg = a - 0.5 * (1.0 + C) * s_neg
-        F = u_d * torch.where(C >= 0.0, face_pos, face_neg)   # flux at face k
-        out = a.clone()
-        FL = F[S(slice(1, -1))]        # left face of interior cell i  (index i)
-        FR = F[S(slice(2, None))]      # right face of interior cell i (index i+1)
-        uL = u_d[S(slice(1, -1))]
-        uR = u_d[S(slice(2, None))]
-        ai = a[S(slice(1, -1))]
-        out[S(slice(1, -1))] = ai + cfl * (FL - FR + ai * (uR - uL))
-        return out

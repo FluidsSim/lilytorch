@@ -415,9 +415,63 @@ def test_uniform_two_phase_fsi_matches_single_phase_2d():
 # ---------------------------------------------------------------------------
 # CUDA W&Y sweep kernel (MP10 / T2d) — parity vs the pure-PyTorch oracle
 # ---------------------------------------------------------------------------
+# Pure-PyTorch Weymouth-Yue reference, kept HERE (test-only) as the independent
+# oracle for the single-source Warp ``cvof_sweep`` kernel.  It used to live on
+# ``TwoPhase`` as ``_cvof_sweep_python`` / ``_shift``; moved into the test suite
+# when the production sweep became Warp-only (no source-side duplicate).
+from lilytorch.src.advection import _sl as _oracle_sl
+
+
+def _oracle_shift(a, s, d, nd):
+    """Shift ``a`` by ``s`` cells along dim ``d`` with edge replication."""
+    S = lambda sl: _oracle_sl(nd, d, sl)
+    if s == 1:
+        return torch.cat([a[S(slice(0, 1))], a[S(slice(0, -1))]], dim=d)
+    if s == 2:
+        return torch.cat([a[S(slice(0, 1))], a[S(slice(0, 1))],
+                          a[S(slice(0, -2))]], dim=d)
+    if s == -1:
+        return torch.cat([a[S(slice(1, None))], a[S(slice(-1, None))]], dim=d)
+    raise ValueError(f"_oracle_shift: unsupported offset {s}")
+
+
+def _oracle_cvof_sweep_python(a, u_d, d, dt, nd, h):
+    """Pure-PyTorch reference for one W&Y conservative sweep along ``d``.
+
+    MAC convention: ``u_d[k]`` is the face left of cell ``k``.  Face value is
+    the W&Y 2nd-order Courant-corrected, van-Leer-limited donor extrapolation
+    plus the divergence correction.  Returns a new tensor with the interior
+    updated.  Independent oracle for the Warp kernel."""
+    S   = lambda s: _oracle_sl(nd, d, s)
+    cfl = dt / h
+    C   = u_d * cfl
+    a_m1 = _oracle_shift(a,  1, d, nd)
+    a_m2 = _oracle_shift(a,  2, d, nd)
+    a_p1 = _oracle_shift(a, -1, d, nd)
+
+    def _vleer(db, df):
+        denom = torch.where(db + df == 0.0, torch.ones_like(db), db + df)
+        s = 2.0 * db * df / denom
+        return torch.where(db * df > 0.0, s, torch.zeros_like(s))
+
+    s_pos    = _vleer(a_m1 - a_m2, a - a_m1)
+    face_pos = a_m1 + 0.5 * (1.0 - C) * s_pos
+    s_neg    = _vleer(a - a_m1, a_p1 - a)
+    face_neg = a - 0.5 * (1.0 + C) * s_neg
+    F = u_d * torch.where(C >= 0.0, face_pos, face_neg)
+    out = a.clone()
+    FL = F[S(slice(1, -1))]
+    FR = F[S(slice(2, None))]
+    uL = u_d[S(slice(1, -1))]
+    uR = u_d[S(slice(2, None))]
+    ai = a[S(slice(1, -1))]
+    out[S(slice(1, -1))] = ai + cfl * (FL - FR + ai * (uR - uL))
+    return out
+
+
 def _cvof_kernel_vs_python(ndim, dtype, noncontig):
-    """Compare the single-source Warp ``cvof_sweep`` kernel against
-    ``_cvof_sweep_python`` on identical CUDA inputs (isolates the kernel's
+    """Compare the single-source Warp ``cvof_sweep`` kernel against the
+    pure-PyTorch oracle on identical CUDA inputs (isolates the kernel's
     arithmetic from any CPU/GPU or single/double differences)."""
     dev = torch.device("cuda")
     N = 24 if ndim == 3 else 40
@@ -462,7 +516,7 @@ def _cvof_kernel_vs_python(ndim, dtype, noncontig):
         from lilytorch.src.two_phase import _neumann_pad
         ad = a.clone(); _neumann_pad(ad)
         out_k = tp._cvof_sweep(ad, vels[d], d, dt)          # kernel (CUDA)
-        out_p = tp._cvof_sweep_python(ad, vels[d], d, dt)   # oracle
+        out_p = _oracle_cvof_sweep_python(ad, vels[d], d, dt, ndim, tp.h)  # oracle
         diff = (out_k - out_p).abs().max().item()
         scale = max(out_p.abs().max().item(), 1.0)
         rels.append(diff / scale)
