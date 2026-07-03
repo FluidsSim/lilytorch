@@ -19,7 +19,7 @@ from typing import Optional
 
 wp.init()
 
-from lilytorch.src.kernels.multigrid import linear_weights, _wd, _f
+from lilytorch.src.multigrid import linear_weights, _wd, _f
 
 
 @wp.kernel

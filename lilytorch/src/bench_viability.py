@@ -15,8 +15,8 @@ Metrics reported
 
 Usage
 ─────
-    python -m lilytorch.src.kernels.bench_viability               # default sizes
-    python -m lilytorch.src.kernels.bench_viability --grids 64 128 256 --bodies 3 9
+    python -m lilytorch.src.bench_viability               # default sizes
+    python -m lilytorch.src.bench_viability --grids 64 128 256 --bodies 3 9
 
 The script is self-contained: it generates synthetic sphere-SDF scenes that
 match the production format, so no FARMS/MuJoCo dependency.
@@ -31,7 +31,7 @@ import numpy as np
 import torch
 import warp as wp
 
-from lilytorch.src.kernels.streaming_sdf import WarpStreamingSDF
+from lilytorch.src.streaming_sdf import WarpStreamingSDF
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Synthetic scene builder

@@ -6,14 +6,14 @@ constant-coefficient Neumann-Laplacian Poisson and asserts the residual
 contracts geometrically.
 
 Run:  pytest lilytorch/src/kernels/test_multigrid.py -v
-      python -m lilytorch.src.kernels.test_multigrid
+      python -m lilytorch.src.test_multigrid
 """
 from __future__ import annotations
 
 import pytest
 import torch
 
-from lilytorch.src.kernels.multigrid import (
+from lilytorch.src.multigrid import (
     jacobi_sweep_3d_warp, mg_residual_3d_warp,
     restrict_residual_3d_warp, restrict_face_3d_warp, prolongate_add_3d_warp,
     WarpVCycle,

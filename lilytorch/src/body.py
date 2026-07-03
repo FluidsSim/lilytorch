@@ -5,7 +5,7 @@ import os
 
 import numpy as np
 import torch
-from lilytorch.src.kernels import RegularGridInterpolator, RegularGridInterpolatorAutomatic
+from lilytorch.src.facade import RegularGridInterpolator, RegularGridInterpolatorAutomatic
 
 logger = logging.getLogger(__name__)
 

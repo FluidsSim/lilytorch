@@ -9,7 +9,7 @@ import torch
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor
 
-from lilytorch.src.kernels import (
+from lilytorch.src.facade import (
     bdim_forcing_3d,
     bdim_forcing_2d,
 )

@@ -299,7 +299,7 @@ def kernel_deltaH_parity(grid_n=56, extent=0.4):
     import types
     import numpy as np
     from lilytorch.integration.BDIMhandler import BDIMhandler
-    from lilytorch.src.kernels import streaming_sdf_forces_post_3d, interp_3d
+    from lilytorch.src.facade import streaming_sdf_forces_post_3d, interp_3d
 
     DT = torch.float64
     DEV = "cuda" if torch.cuda.is_available() else "cpu"

@@ -9,7 +9,7 @@ generators yield different sequences for the same seed (HANDOFF lesson 5), so
 building twice would compare two different problems.
 
 Run:  pytest lilytorch/src/kernels/test_lagrangian.py -v
-      python -m lilytorch.src.kernels.test_lagrangian
+      python -m lilytorch.src.test_lagrangian
 """
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ import math
 import pytest
 import torch
 
-from lilytorch.src.kernels.lagrangian import (
+from lilytorch.src.lagrangian import (
     lagrangian_forces_2d_warp,
     lagrangian_forces_3d_warp,
 )

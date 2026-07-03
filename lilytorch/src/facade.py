@@ -47,8 +47,8 @@ _warp_backed = set()
 # body-id key_* arrays the σ pass reads (see the bridges' emit_keys path).
 
 try:
-    from lilytorch.src.kernels.streaming_sdf_2d import WarpStreamingSDF2D as _WarpSDF2D
-    from lilytorch.src.kernels.bdim_2d import bdim_forcing_2d_warp as _bdim2d_warp
+    from lilytorch.src.streaming_sdf_2d import WarpStreamingSDF2D as _WarpSDF2D
+    from lilytorch.src.bdim_2d import bdim_forcing_2d_warp as _bdim2d_warp
     import warp as _wp
 
     def _wdev(t):
@@ -162,8 +162,8 @@ try:
     _warp_backed.add("bdim_forcing_2d")
 
     # ── body_update (3-D) bridge ────────────────────────────────────────────────
-    from lilytorch.src.kernels.streaming_sdf import WarpStreamingSDF as _WarpSDF3D
-    from lilytorch.src.kernels.bdim import bdim_forcing_3d_warp as _bdim3d_warp
+    from lilytorch.src.streaming_sdf import WarpStreamingSDF as _WarpSDF3D
+    from lilytorch.src.bdim import bdim_forcing_3d_warp as _bdim3d_warp
 
     class _BodyUpdate3DBridge:
         """3-D analogue of :class:`_BodyUpdate2DBridge`.  Adapts the native
@@ -301,7 +301,7 @@ except Exception:  # pragma: no cover
 
 # ── advection flux → WARP ──────────────────────────────────────────────────
 try:
-    from lilytorch.src.kernels.advection import advect_flux_add_warp as _advect_warp
+    from lilytorch.src.advection import advect_flux_add_warp as _advect_warp
 
     def advect_flux_add(fv, p, rhs, dt_dh, C_courant, scheme_id, face_dim):
         """Warp ``advect_flux_add`` (in-place ``rhs += dt_dh·(F_L−F_R)``).
@@ -317,7 +317,7 @@ except Exception:  # pragma: no cover
 
 # ── two-phase VOF → WARP ───────────────────────────────────────────────────
 try:
-    from lilytorch.src.kernels.cvof import cvof_sweep_warp as _cvof_warp
+    from lilytorch.src.cvof import cvof_sweep_warp as _cvof_warp
 
     def cvof_sweep(a, u_d, cfl, face_dim, out):
         """Warp ``cvof_sweep`` (writes ``out`` interior in place).
@@ -338,12 +338,12 @@ except Exception:  # pragma: no cover
 # (scattered bilinear/trilinear gather, marker / semi-Lagrangian path) is also
 # dtype-generic.
 try:
-    from lilytorch.src.kernels.misc_2d import (
+    from lilytorch.src.misc_2d import (
         apply_bcs_2d_warp as apply_bcs_2d,
         interp_2d_warp as interp_2d,
         ApplyBcs2DGraphRunner,
     )
-    from lilytorch.src.kernels.misc_3d import (
+    from lilytorch.src.misc_3d import (
         apply_bcs_3d_warp as apply_bcs_3d,
         interp_3d_warp as interp_3d,
         ApplyBcs3DGraphRunner,
@@ -362,7 +362,7 @@ except Exception:  # pragma: no cover
 # pass) is ``streaming_sdf_forces_post_{2,3}d`` in ``forces.py`` (incl.
 # ``force_submethod``/``ph_tau``), used by ``forces_method2{,_3d}``.
 try:
-    from lilytorch.src.kernels.forces import (
+    from lilytorch.src.forces import (
         streaming_sdf_forces_post_2d_warp as streaming_sdf_forces_post_2d,
         streaming_sdf_forces_post_3d_warp as streaming_sdf_forces_post_3d,
     )
@@ -372,7 +372,7 @@ except Exception:  # pragma: no cover
     # Warp backend is required (the native CUDA/C++ kernels were removed).
     raise
 try:
-    from lilytorch.src.kernels.lagrangian import (
+    from lilytorch.src.lagrangian import (
         lagrangian_forces_2d_warp as _lagr2d_warp,
         lagrangian_forces_3d_warp as _lagr3d_warp,
     )
@@ -415,8 +415,8 @@ except Exception:  # pragma: no cover
 # (``poisson{,_2d}.py``); the CUDA-graphed all-Warp variants live in
 # ``multigrid_graph.py``.
 try:
-    from lilytorch.src.kernels import poisson_2d as _wp2d  # noqa: F401
-    from lilytorch.src.kernels import poisson as _wp3d  # noqa: F401
+    from lilytorch.src import poisson_2d as _wp2d  # noqa: F401
+    from lilytorch.src import poisson as _wp3d  # noqa: F401
     _warp_backed |= {
         "rbgs_sweep_2d", "rbgs_sweep_3d", "jacobi_sweep_2d", "jacobi_sweep_3d",
         "mg_residual_2d", "mg_residual_3d",
@@ -427,3 +427,14 @@ except Exception:  # pragma: no cover
 
 #: Ops actually executing on Warp single-source kernels in this backend.
 WARP_BACKED = frozenset(_warp_backed)
+
+
+# ── aggregator re-exports ───────────────────────────────────────────────────
+# facade.py is the single public kernel-API surface (formerly src/kernels/__init__).
+# The scattered-gather interpolators live in ``interpolation.py``; re-export them
+# here so call sites can ``from lilytorch.src.facade import RegularGridInterpolator``.
+from lilytorch.src.interpolation import (  # noqa: E402
+    RegularGridInterpolator,
+    RegularGridInterpolator3D,
+    RegularGridInterpolatorAutomatic,
+)

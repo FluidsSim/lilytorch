@@ -15,7 +15,7 @@ import torch
 
 wp.init()
 
-from lilytorch.src.kernels.streaming_sdf_2d import sdf_sample_off_2d
+from lilytorch.src.streaming_sdf_2d import sdf_sample_off_2d
 
 
 # ─────────────────────────────────────────────────────────────────────────────

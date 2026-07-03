@@ -15,7 +15,7 @@ import torch
 
 wp.init()
 
-from lilytorch.src.kernels.streaming_sdf import trilinear_sample_off
+from lilytorch.src.streaming_sdf import trilinear_sample_off
 
 
 @wp.func
@@ -256,7 +256,7 @@ def apply_bcs_3d_warp(u, v, w, shapes, neu_desc, dir_desc, dir_val,
 
 class ApplyBcs3DGraphRunner:
     """CUDA-graph-cached ``apply_bcs_3d`` — 3-D analogue of
-    :class:`lilytorch.src.kernels.misc_2d.ApplyBcs2DGraphRunner`.  In-place ghost
+    :class:`lilytorch.src.misc_2d.ApplyBcs2DGraphRunner`.  In-place ghost
     writes into the persistent u/v/w fields (no extra memory); captured on the
     second sighting of a stable (u, v, w, descriptor, face-dims) signature, eager
     otherwise.  CPU delegates to :func:`apply_bcs_3d_warp`."""

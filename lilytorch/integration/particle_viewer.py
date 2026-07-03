@@ -1022,7 +1022,7 @@ class ParticleViewer(TaskExtension):
         self._dtype = fs.dtype
         self._ndim = 3 if fs.z is not None else 2
 
-        from lilytorch.src.kernels import (
+        from lilytorch.src.facade import (
             RegularGridInterpolator,
             RegularGridInterpolator3D,
         )

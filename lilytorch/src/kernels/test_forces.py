@@ -17,13 +17,13 @@ from __future__ import annotations
 import pytest
 import torch
 
-from lilytorch.src.kernels import body_update_2d, body_update_3d
-from lilytorch.src.kernels.forces import (
+from lilytorch.src.facade import body_update_2d, body_update_3d
+from lilytorch.src.forces import (
     streaming_sdf_forces_post_2d_warp,
     streaming_sdf_forces_post_3d_warp,
 )
-from lilytorch.src.kernels.scene_2d import make_synthetic_scene_2d
-from lilytorch.src.kernels.bench_viability import make_synthetic_scene
+from lilytorch.src.scene_2d import make_synthetic_scene_2d
+from lilytorch.src.bench_viability import make_synthetic_scene
 
 SKIP_NO_CUDA = pytest.mark.skipif(not torch.cuda.is_available(),
                                   reason="needs CUDA for the GPU half")

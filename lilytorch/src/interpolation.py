@@ -21,7 +21,11 @@ from typing import Sequence
 import torch
 from torch import Tensor
 
-from .facade import interp_2d, interp_3d
+# Import the scattered-gather warp ops directly from the leaf misc modules
+# (not via facade) so this module stays a leaf and cannot form an import cycle
+# with facade (facade -> advection/forces -> interpolation).
+from lilytorch.src.misc_2d import interp_2d_warp as interp_2d
+from lilytorch.src.misc_3d import interp_3d_warp as interp_3d
 
 __all__ = [
     "RegularGridInterpolator",

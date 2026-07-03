@@ -5,7 +5,7 @@ import pytest
 import torch
 import warp as wp
 
-from lilytorch.src.kernels.misc_2d import interp_2d_warp, apply_bcs_2d_warp
+from lilytorch.src.misc_2d import interp_2d_warp, apply_bcs_2d_warp
 
 SKIP_NO_CUDA = pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA")
 

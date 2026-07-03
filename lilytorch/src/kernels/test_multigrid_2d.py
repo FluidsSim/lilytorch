@@ -9,7 +9,7 @@ import pytest
 import torch
 import warp as wp
 
-from lilytorch.src.kernels.multigrid_2d import (
+from lilytorch.src.multigrid_2d import (
     mg_residual_2d_warp, restrict_residual_2d_warp, restrict_face_2d_warp,
     prolongate_add_2d_warp, WarpVCycle2D,
 )

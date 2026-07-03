@@ -6,7 +6,7 @@ outputs, that the single Warp source matches between CPU and GPU, and that the
 dtype-generic float64 specialisation is device-independent.
 
 Run with:
-    python -m lilytorch.src.kernels.test_parity
+    python -m lilytorch.src.test_parity
     pytest lilytorch/src/kernels/test_parity.py -v
 """
 from __future__ import annotations
@@ -15,7 +15,7 @@ import pytest
 import torch
 import warp as wp
 
-from lilytorch.src.kernels.bench_viability import (
+from lilytorch.src.bench_viability import (
     make_synthetic_scene,
     setup_warp_runner,
     _reset_warp_outputs,
@@ -160,7 +160,7 @@ def test_warp_cpu_matches_gpu(B):
 def _run_warp_f64(sc: dict, device: str) -> dict:
     """Run the dtype-generic WarpStreamingSDF at float64 on the f64 scene `sc`,
     wrapping the scene's torch output buffers zero-copy.  Returns torch tensors."""
-    from lilytorch.src.kernels.streaming_sdf import WarpStreamingSDF
+    from lilytorch.src.streaming_sdf import WarpStreamingSDF
     Ngx, Ngy, Ngz = sc["Ngx"], sc["Ngy"], sc["Ngz"]
     sc["sdf_cc"].fill_(1e4); sc["sdf_u"].fill_(1e4)
     sc["sdf_v"].fill_(1e4);  sc["sdf_w"].fill_(1e4)
@@ -201,7 +201,7 @@ def test_warp_fanned_f64_cpu_matches_gpu(B):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  Quick smoke (no pytest) — run with:  python -m lilytorch.src.kernels.test_parity
+#  Quick smoke (no pytest) — run with:  python -m lilytorch.src.test_parity
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _smoke(B: int, label: str):

@@ -10,7 +10,7 @@ import pytest
 import torch
 import warp as wp
 
-from lilytorch.src.kernels.cvof import cvof_sweep_warp
+from lilytorch.src.cvof import cvof_sweep_warp
 
 SKIP_NO_CUDA = pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA")
 CFL = 0.3

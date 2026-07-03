@@ -3,7 +3,7 @@
   (1) Manufactured-solution convergence — residual drops monotonically.
   (2) Single-source: CPU Warp vs GPU Warp agree.
 
-Run:  python -m lilytorch.src.kernels.test_poisson
+Run:  python -m lilytorch.src.test_poisson
       pytest lilytorch/src/kernels/test_poisson.py -v
 """
 from __future__ import annotations
@@ -12,7 +12,7 @@ import pytest
 import torch
 import warp as wp
 
-from lilytorch.src.kernels.poisson import WarpRBGS
+from lilytorch.src.poisson import WarpRBGS
 
 DEV = "cuda:0" if torch.cuda.is_available() else "cpu"
 SKIP_CUDA = pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA")

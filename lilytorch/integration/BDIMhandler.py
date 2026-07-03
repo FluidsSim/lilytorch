@@ -25,7 +25,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 from lilytorch.src.solver import FluidSolver
 from lilytorch.src.two_phase_solver import TwoPhaseSolver
-from lilytorch.src.kernels import body_update_2d, body_update_3d
+from lilytorch.src.facade import body_update_2d, body_update_3d
 from lilytorch.integration.rigid_body_backend import (
     FarmsMujocoBackend, MujocoCheckpoint)
 
@@ -67,7 +67,7 @@ class BDIMhandler:
         # ---- create fluid solver ----
         # Auto-select the two-phase (water + real air) solver when the config
         # carries a ``solver.two_phase`` block, otherwise the single-phase solver.
-        # Both run on the single-source Warp kernels (:mod:`lilytorch.src.kernels`).
+        # Both run on the single-source Warp kernels (:mod:`lilytorch.src`).
         self._two_phase = self.pars["solver"].get("two_phase") is not None
         _SolverCls = TwoPhaseSolver if self._two_phase else FluidSolver
         self.fluid_solver = _SolverCls(

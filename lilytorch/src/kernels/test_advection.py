@@ -11,7 +11,7 @@ Two layers:
       built from the genuine strided slice views of advection.py.
 
 Run:  pytest lilytorch/src/kernels/test_advection.py -v
-      python -m lilytorch.src.kernels.test_advection
+      python -m lilytorch.src.test_advection
 """
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ import pytest
 import torch
 import warp as wp
 
-from lilytorch.src.kernels.advection import (
+from lilytorch.src.advection import (
     advect_upwind_3d,
     advect_upwind_torch,
     advect_flux_add_warp,

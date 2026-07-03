@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from lilytorch.src.kernels.bdim import bdim_forcing_3d_warp
+from lilytorch.src.bdim import bdim_forcing_3d_warp
 
 SKIP_NO_CUDA = pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA")
 

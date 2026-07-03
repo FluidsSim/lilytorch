@@ -1717,10 +1717,10 @@ class _MultigridPoissonSolver:
 # ─────────────────────────────────────────────────────────────────────────────
 #  Warp fine-level smoother + graphed multigrid (folded from the Warp backend)
 # ─────────────────────────────────────────────────────────────────────────────
-from lilytorch.src.kernels.poisson_2d import (
+from lilytorch.src.poisson_2d import (
     rbgs_sweep_2d_warp, jacobi_sweep_2d_warp, mg_residual_2d_warp,
 )
-from lilytorch.src.kernels.poisson import (
+from lilytorch.src.poisson import (
     rbgs_sweep_3d_warp, jacobi_sweep_3d_warp, mg_residual_3d_warp,
 )
 
@@ -1845,7 +1845,7 @@ class PoissonSolver(_MultigridPoissonSolver):
         preconditioner passes ``nvc=1`` (one captured V-cycle per
         :meth:`_dispatch_vcycle`, repeated by the CG core's ``precond_vcycles``
         loop)."""
-        from lilytorch.src.kernels.multigrid_graph import WarpMG3D, WarpMG2D
+        from lilytorch.src.multigrid_graph import WarpMG3D, WarpMG2D
         cache = getattr(self, "_warp_mg_cache", None)
         if cache is None:
             cache = self._warp_mg_cache = {}
@@ -1892,7 +1892,7 @@ class PoissonSolver(_MultigridPoissonSolver):
                     self.BC(p)
                     if self.dirichlet_mask is None:
                         p -= p.to(torch.float64).mean().to(p.dtype)
-                    from lilytorch.src.kernels.poisson import mg_residual_3d_warp
+                    from lilytorch.src.poisson import mg_residual_3d_warp
                     cp0, cm0 = ch[1:].contiguous(), ch[:-1].contiguous()
                     cp1, cm1 = cv[:, 1:].contiguous(), cv[:, :-1].contiguous()
                     cp2, cm2 = cw[:, :, 1:].contiguous(), cw[:, :, :-1].contiguous()
@@ -1906,7 +1906,7 @@ class PoissonSolver(_MultigridPoissonSolver):
                 self.BC(p)
                 if self.dirichlet_mask is None:
                     p -= p.to(torch.float64).mean().to(p.dtype)
-                from lilytorch.src.kernels.multigrid_graph import mg_residual_2d_clamped_warp
+                from lilytorch.src.multigrid_graph import mg_residual_2d_clamped_warp
                 cp0, cm0 = ch[1:].contiguous(), ch[:-1].contiguous()
                 cp1, cm1 = cv[:, 1:].contiguous(), cv[:, :-1].contiguous()
                 r = mg_residual_2d_clamped_warp(p, f_scaled, cp0, cm0, cp1, cm1,
