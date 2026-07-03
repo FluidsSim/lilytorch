@@ -202,3 +202,54 @@ def test_forces_3d_deltaH_cpu_eq_gpu(dtype, delta_order):
     g = _run_3d("cuda", dtype, 1, delta_order, False)
     c = _run_3d("cpu", dtype, 1, delta_order, False)
     _check(g, c, dtype)
+
+
+# ── Live NON-streaming python force path (forces_method2 python branch) ───────
+# The torch-tensor force path (``_forces_shared`` / ``_forces_body_batch`` in
+# forces.py) is NOT dead: it is the general fallback taken whenever the Warp
+# streaming buffers (``comp._kernel_step`` / ``_kernel_static_2d``) are absent —
+# i.e. any direct ``FluidSolver`` (no BDIMhandler), analytical composite bodies,
+# and the drag/lift validation benchmarks.  The 3c dedup only removed the dead
+# ``_forces_lagrangian_*_python_ref`` oracles; this locks the surviving path
+# end-to-end (finite, deterministic on CPU, and Warp-CPU == Warp-GPU parity).
+
+def _run_python_eulerian(device):
+    from lilytorch.tests.test_two_phase import (
+        _parity_pars, _taylor_green_ic, _set_ic, _step_n)
+    from lilytorch.src.solver import FluidSolver
+    body = ["lambda x, y: circle(x,y,xt=0.5,yt=0.5,r=0.12)"]
+    pars = _parity_pars(2, 48, 2.0e-3, 1.0e-2, 1000.0, body)
+    pars["solver"]["use_gpu"] = (device == "cuda")
+    pars["solver"]["force_method"] = "eulerian"
+    sp = FluidSolver(pars, dtype=torch.float64, compute_forces=True)
+    _set_ic(sp, _taylor_green_ic(sp))
+    _step_n(sp, 5)
+    # confirms we exercised the python branch, not the Warp streaming readout
+    assert getattr(sp.composite_body, "_kernel_step", None) is None
+    return torch.tensor([
+        float(sp.friction_force_lin_x.reshape(-1)[0]),
+        float(sp.friction_force_lin_y.reshape(-1)[0]),
+        float(sp.pressure_force_x.reshape(-1)[0]),
+        float(sp.pressure_force_y.reshape(-1)[0]),
+    ], dtype=torch.float64)
+
+
+def test_python_eulerian_force_path_cpu_regression():
+    """Frozen CPU snapshot of the non-streaming python eulerian force readout
+    (float64 is deterministic).  Guards the load-bearing torch-tensor path that
+    has no other unit coverage."""
+    got = _run_python_eulerian("cpu")
+    expected = torch.tensor(
+        [0.4901618824486351, -0.5369408655053685,
+         28.151615191669535, -11.75747291847982], dtype=torch.float64)
+    assert torch.allclose(got, expected, rtol=1e-9, atol=1e-11), \
+        f"python eulerian force drift: {got.tolist()} vs {expected.tolist()}"
+
+
+@SKIP_NO_CUDA
+def test_python_eulerian_force_path_cpu_eq_gpu():
+    """The non-streaming python force path is single-source across devices."""
+    c = _run_python_eulerian("cpu")
+    g = _run_python_eulerian("cuda")
+    assert torch.allclose(c, g, rtol=1e-8, atol=1e-8), \
+        f"CPU vs GPU python eulerian force: {c.tolist()} vs {g.tolist()}"
