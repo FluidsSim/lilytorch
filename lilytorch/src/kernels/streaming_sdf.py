@@ -540,11 +540,22 @@ class WarpStreamingSDF:
         kin_t:      torch.Tensor,   # [B, 21] float
         aabb_lo_t:  torch.Tensor,   # [B, 3]  int64
         aabb_dim_t: torch.Tensor,   # [B, 3]  int64
+        max_vol:    int = None,
     ):
         """Copy per-step body poses into persistent Warp arrays.
 
         Must be called before run_eager() / run_graph() each step.
+
+        ``max_vol`` is the CURRENT step's max per-body AABB volume.  The
+        launch dimension must cover it: a deforming body's AABB can grow
+        past the setup-time value, and a stale ``_max_vol`` silently
+        truncates the highest-index cells of the AABB (they keep FAR sdf /
+        zero body velocity).  Grow-only watermark; growth invalidates any
+        captured graph (its launch dims are frozen).
         """
+        if max_vol is not None and int(max_vol) > self._max_vol:
+            self._max_vol = int(max_vol)
+            self._graph = None
         wp.copy(self._kin,
                 wp.from_torch(kin_t.to(self._tdtype).reshape(-1).contiguous()))
         wp.copy(self._aabb_lo,  wp.from_torch(aabb_lo_t.reshape(-1).contiguous()))

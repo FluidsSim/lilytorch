@@ -98,7 +98,9 @@ try:
             w = self._w
             # Kinematics update stays OUTSIDE any captured graph — it copies the
             # new body pose into the persistent w._kin/_aabb the graph reads.
-            w.update_kinematics(kin, aabb_lo, aabb_dim)
+            if int(max_vol) > w._max_vol:
+                self._graph = None
+            w.update_kinematics(kin, aabb_lo, aabb_dim, max_vol=int(max_vol))
 
             def f(t):
                 return _wp.from_torch(t.reshape(-1))
@@ -201,7 +203,11 @@ try:
                 self._w, self._key = w, key
                 self._graph = None
             w = self._w
-            w.update_kinematics(kin, aabb_lo, aabb_dim)  # outside the graph
+            # Growth of the per-body AABB volume must invalidate the fanned
+            # graph too (its launch dims are frozen at capture).
+            if int(max_vol) > w._max_vol:
+                self._graph = None
+            w.update_kinematics(kin, aabb_lo, aabb_dim, max_vol=int(max_vol))
 
             def f(t):
                 return _wp.from_torch(t.reshape(-1))

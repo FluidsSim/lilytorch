@@ -477,7 +477,14 @@ class WarpStreamingSDF2D:
         self._den_u = wp.zeros(nb, dtype=self._wpf, device=self.device)
         self._den_v = wp.zeros(nb, dtype=self._wpf, device=self.device)
 
-    def update_kinematics(self, kin_t, aabb_lo_t, aabb_dim_t):
+    def update_kinematics(self, kin_t, aabb_lo_t, aabb_dim_t, max_vol=None):
+        # Grow-only launch-dim watermark: a deforming body's AABB can exceed
+        # the setup-time max_vol; a stale value truncates the highest-index
+        # AABB cells (FAR sdf / zero body velocity).  Growth invalidates any
+        # captured graph (frozen launch dims).
+        if max_vol is not None and int(max_vol) > self._max_vol:
+            self._max_vol = int(max_vol)
+            self._graph = None
         wp.copy(self._kin,
                 wp.from_torch(kin_t.to(self._tdtype).reshape(-1).contiguous()))
         wp.copy(self._aabb_lo,  wp.from_torch(aabb_lo_t.reshape(-1).contiguous()))
