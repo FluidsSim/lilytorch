@@ -14,7 +14,7 @@ ROOT = os.path.dirname(os.path.dirname(HERE))          # repo root
 sys.path.insert(0, HERE)
 
 from lilytorch.util.yaml_operations import yaml2pyobject
-from fsi_coupling import IQNILS, ConstantUnderRelaxation
+from lilytorch.integration.fsi_coupling import IQNILS, ConstantUnderRelaxation
 from fsi_rigid_body import build_rigid_circle_fsi
 
 

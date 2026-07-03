@@ -15,7 +15,7 @@ import pytest
 import torch
 import warp as wp
 
-from lilytorch.src.bench_viability import (
+from lilytorch.benchmarks.bench_viability import (
     make_synthetic_scene,
     setup_warp_runner,
     _reset_warp_outputs,

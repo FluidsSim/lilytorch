@@ -40,7 +40,7 @@ from typing import Protocol, runtime_checkable
 
 import numpy as np
 
-from fsi_coupling import CouplingAccelerator, IQNILS
+from lilytorch.integration.fsi_coupling import CouplingAccelerator, IQNILS
 
 
 # ======================================================================

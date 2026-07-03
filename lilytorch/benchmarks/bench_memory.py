@@ -8,7 +8,7 @@ this is the right baseline for the T1/T3 memory-reduction items).
 
 Usage
 -----
-    python lilytorch/validation/cost_analysis/bench_memory.py
+    python lilytorch/benchmarks/bench_memory.py
     python .../bench_memory.py --nx 192 --ny 96 --nz 96 --nt 20 --warmup 5
     python .../bench_memory.py --config path/to/other_3d.yaml --convection abdquickest
 

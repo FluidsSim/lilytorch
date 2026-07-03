@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from fsi_coupling import (
+from lilytorch.integration.fsi_coupling import (
     AitkenRelaxation,
     ConstantUnderRelaxation,
     IQNILS,

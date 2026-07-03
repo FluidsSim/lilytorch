@@ -58,3 +58,6 @@ Repository = "https://github.com/ferrarioa5/lilytorch"
 
 [tool.setuptools.packages.find]
 include = ["lilytorch*"]
+
+[tool.pytest.ini_options]
+testpaths = ["lilytorch/tests"]

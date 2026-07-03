@@ -12,8 +12,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from fsi_coupling import ConstantUnderRelaxation, IQNILS
-from strong_coupling import StrongCoupledFSI
+from lilytorch.integration.fsi_coupling import ConstantUnderRelaxation, IQNILS
+from lilytorch.integration.strong_coupling import StrongCoupledFSI
 
 
 class MockFluid:
@@ -101,7 +101,7 @@ def _run(accelerator, n_steps=50, **fluid_kw):
 def test_driver_protocol_conformance():
     fluid = MockFluid()
     body = MockBody(fluid)
-    from strong_coupling import FluidStepper, RigidBodyCoupling
+    from lilytorch.integration.strong_coupling import FluidStepper, RigidBodyCoupling
     assert isinstance(fluid, FluidStepper)
     assert isinstance(body, RigidBodyCoupling)
 
