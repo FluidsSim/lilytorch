@@ -11,8 +11,7 @@ cycle) so the entire fixed-cycle solve can be captured into ONE Warp CUDA graph
 and replayed per step with a single host launch — the Warp analogue of the
 retired native GU6 ``tol<0`` sync-free path.
 
-Differences vs the demo ``warp_multigrid.WarpVCycle`` (square / f64 / constant
-coefficient):
+Unlike a textbook constant-coefficient square-grid f64 V-cycle, this driver is:
   * **variable coefficients** — the live BDIM ``ch/cv/cw`` are copied into the
     level-0 face buffers each step; coarse-level coefficients are recomputed
     in-graph by ``restrict_face`` (the body moves every step).
