@@ -17,6 +17,7 @@ seaborn
 plotly
 scikit-learn
 pyvista
+warp-lang
 
 # for the gamepad control
 pynput

@@ -62,6 +62,8 @@ class SimConfig(BaseSimConfig):
         self.n_iterations      = 80001
         self.save_frames       = False
         self.num_sub_steps     = 1
+        self.poisson_cuda_graph = True
+
 
 
         self.force_method         = "eulerian"
