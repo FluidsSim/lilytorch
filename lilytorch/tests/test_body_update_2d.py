@@ -11,7 +11,7 @@ import torch
 import warp as wp
 
 from lilytorch.src.scene_2d import make_synthetic_scene_2d
-from lilytorch.src.streaming_sdf_2d import WarpStreamingSDF2D
+from lilytorch.src.streaming_sdf import WarpStreamingSDF2D
 
 DEV = "cuda:0" if torch.cuda.is_available() else "cpu"
 SKIP_NO_CUDA = pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA")

@@ -1277,7 +1277,7 @@ import torch
 
 wp.init()
 
-from lilytorch.src.streaming_sdf_2d import sdf_sample_off_2d
+from lilytorch.src.streaming_sdf import sdf_sample_off_2d
 from lilytorch.src.streaming_sdf import trilinear_sample_off
 
 

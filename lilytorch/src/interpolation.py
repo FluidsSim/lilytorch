@@ -21,11 +21,11 @@ from typing import Sequence
 import torch
 from torch import Tensor
 
-# Import the scattered-gather warp ops directly from the leaf misc modules
-# (not via facade) so this module stays a leaf and cannot form an import cycle
-# with facade (facade -> advection/forces -> interpolation).
-from lilytorch.src.misc_2d import interp_2d_warp as interp_2d
-from lilytorch.src.misc_3d import interp_3d_warp as interp_3d
+# The scattered-gather Warp kernels these interpolators call (interp_2d /
+# interp_3d) are defined at the bottom of this module — merged from the former
+# misc_2d.py / misc_3d.py.  They pull the shared sampler @wp.func's from
+# streaming_sdf (a leaf), so this module stays upstream of facade in the import
+# graph (facade -> advection/forces -> interpolation -> streaming_sdf).
 
 __all__ = [
     "RegularGridInterpolator",
@@ -168,3 +168,168 @@ class RegularGridInterpolator:
 
 RegularGridInterpolatorAutomatic = RegularGridInterpolator
 RegularGridInterpolator3D        = RegularGridInterpolator
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  Scattered-gather Warp kernels — interp_2d / interp_3d
+#  Merged from the former misc_2d.py / misc_3d.py.  These back the
+#  RegularGridInterpolator classes above (bilinear/biquadratic in 2-D,
+#  trilinear/triquadratic in 3-D); dtype-generic f32+f64 via wp.overload.
+# ═════════════════════════════════════════════════════════════════════════════
+from typing import Any  # noqa: E402
+import warp as wp  # noqa: E402
+
+from lilytorch.src.streaming_sdf import sdf_sample_off_2d, trilinear_sample_off  # noqa: E402
+
+wp.init()
+
+
+@wp.kernel
+def interp_2d_kernel(
+    F:  wp.array(dtype=Any),
+    xq: wp.array(dtype=Any),
+    yq: wp.array(dtype=Any),
+    N: int, Mx: int, My: int,
+    bx0: Any, by0: Any,
+    inv_dx: Any, inv_dy: Any,
+    interp_method: int,
+    G: wp.array(dtype=Any),
+):
+    tid = wp.tid()
+    if tid >= N:
+        return
+    G[tid] = sdf_sample_off_2d(interp_method, F, 0, Mx, My,
+                               bx0, by0, inv_dx, inv_dy, xq[tid], yq[tid])
+
+
+for _dt in (wp.float32, wp.float64):
+    _A = wp.array(dtype=_dt)
+    wp.overload(interp_2d_kernel,
+                {"F": _A, "xq": _A, "yq": _A, "G": _A,
+                 "bx0": _dt, "by0": _dt, "inv_dx": _dt, "inv_dy": _dt})
+
+
+def interp_2d_warp(F_t, xq_t, yq_t, bx0, by0, inv_dx, inv_dy, Mx, My,
+                   method="linear"):
+    """Warp port of native ``interp_2d``.  Returns G shape (N,) in F's dtype."""
+    wdev = "cuda:0" if F_t.device.type == "cuda" else "cpu"
+    N = int(xq_t.numel())
+    G = torch.empty(N, dtype=F_t.dtype, device=F_t.device)
+    if N == 0:
+        return G
+    im = 1 if method == "quadratic" else 0
+    wpf = wp.float64 if F_t.dtype == torch.float64 else wp.float32
+    tdt = F_t.dtype
+    wp.launch(interp_2d_kernel, dim=N,
+              inputs=[wp.from_torch(F_t.reshape(-1).contiguous()),
+                      wp.from_torch(xq_t.reshape(-1).contiguous().to(tdt)),
+                      wp.from_torch(yq_t.reshape(-1).contiguous().to(tdt)),
+                      N, int(Mx), int(My),
+                      wpf(bx0), wpf(by0),
+                      wpf(inv_dx), wpf(inv_dy), im,
+                      wp.from_torch(G)],
+              device=wdev)
+    return G
+
+
+@wp.func
+def triquadratic_sample_off(
+    F: wp.array(dtype=Any), F_off: int,
+    Mx: int, My: int, Mz: int,
+    bx0: Any, by0: Any, bz0: Any,
+    inv_dx: Any, inv_dy: Any, inv_dz: Any,
+    xq: Any, yq: Any, zq: Any,
+):
+    zero = type(xq)(0.0)
+    one = type(xq)(1.0)
+    half = type(xq)(0.5)
+    tx = wp.clamp((xq - bx0) * inv_dx, zero, type(xq)(Mx - 1))
+    ty = wp.clamp((yq - by0) * inv_dy, zero, type(xq)(My - 1))
+    tz = wp.clamp((zq - bz0) * inv_dz, zero, type(xq)(Mz - 1))
+    ix = wp.min(int(tx), Mx - 2)
+    iy = wp.min(int(ty), My - 2)
+    iz = wp.min(int(tz), Mz - 2)
+    if ix < 1 or iy < 1 or iz < 1 or Mx < 3 or My < 3 or Mz < 3:
+        return trilinear_sample_off(F, F_off, Mx, My, Mz, bx0, by0, bz0,
+                                    inv_dx, inv_dy, inv_dz, xq, yq, zq)
+    fx = tx - type(xq)(ix); fy = ty - type(xq)(iy); fz = tz - type(xq)(iz)
+    wxm = half*fx*(fx-one); wx0 = one-fx*fx; wxp = half*fx*(fx+one)
+    wym = half*fy*(fy-one); wy0 = one-fy*fy; wyp = half*fy*(fy+one)
+    wzm = half*fz*(fz-one); wz0 = one-fz*fz; wzp = half*fz*(fz+one)
+    s2 = Mz
+    s1 = My * Mz
+    base = F_off + (ix-1)*s1 + (iy-1)*s2 + (iz-1)
+    out = zero
+    for dx in range(3):
+        wx = wxm
+        if dx == 1: wx = wx0
+        if dx == 2: wx = wxp
+        b0 = base + dx*s1
+        plane = zero
+        for dy in range(3):
+            wy = wym
+            if dy == 1: wy = wy0
+            if dy == 2: wy = wyp
+            b1 = b0 + dy*s2
+            row = wzm*F[b1] + wz0*F[b1+1] + wzp*F[b1+2]
+            plane = plane + wy*row
+        out = out + wx*plane
+    return out
+
+
+@wp.kernel
+def interp_3d_kernel(
+    F: wp.array(dtype=Any),
+    xq: wp.array(dtype=Any), yq: wp.array(dtype=Any),
+    zq: wp.array(dtype=Any),
+    N: int, Mx: int, My: int, Mz: int,
+    bx0: Any, by0: Any, bz0: Any,
+    idx: Any, idy: Any, idz: Any,
+    interp_method: int,
+    G: wp.array(dtype=Any),
+):
+    tid = wp.tid()
+    if tid >= N:
+        return
+    if interp_method == 1:
+        G[tid] = triquadratic_sample_off(F, 0, Mx, My, Mz, bx0, by0, bz0,
+                                         idx, idy, idz, xq[tid], yq[tid], zq[tid])
+    else:
+        G[tid] = trilinear_sample_off(F, 0, Mx, My, Mz, bx0, by0, bz0,
+                                      idx, idy, idz, xq[tid], yq[tid], zq[tid])
+
+
+for _dt in (wp.float32, wp.float64):
+    _A = wp.array(dtype=_dt)
+    wp.overload(interp_3d_kernel,
+                {"F": _A, "xq": _A, "yq": _A, "zq": _A, "G": _A,
+                 "bx0": _dt, "by0": _dt, "bz0": _dt,
+                 "idx": _dt, "idy": _dt, "idz": _dt})
+
+
+def interp_3d_warp(F_t, xq_t, yq_t, zq_t, bx0, by0, bz0, idx, idy, idz,
+                   Mx, My, Mz, method="linear"):
+    """Warp port of native ``interp_3d``.  Returns G shape (N,) in F's dtype."""
+    wdev = "cuda:0" if F_t.device.type == "cuda" else "cpu"
+    N = int(xq_t.numel())
+    G = torch.empty(N, dtype=F_t.dtype, device=F_t.device)
+    if N == 0:
+        return G
+    im = 1 if method == "quadratic" else 0
+    tdt = F_t.dtype
+    wpf = wp.float64 if tdt == torch.float64 else wp.float32
+    cast = lambda t: wp.from_torch(t.reshape(-1).contiguous().to(tdt))
+    wp.launch(interp_3d_kernel, dim=N,
+              inputs=[wp.from_torch(F_t.reshape(-1).contiguous()),
+                      cast(xq_t), cast(yq_t), cast(zq_t),
+                      N, int(Mx), int(My), int(Mz),
+                      wpf(bx0), wpf(by0), wpf(bz0),
+                      wpf(idx), wpf(idy), wpf(idz),
+                      im, wp.from_torch(G)],
+              device=wdev)
+    return G
+
+
+# Names used by the RegularGridInterpolator classes above (resolved at call time).
+interp_2d = interp_2d_warp
+interp_3d = interp_3d_warp

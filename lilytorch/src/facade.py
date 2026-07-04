@@ -47,8 +47,8 @@ _warp_backed = set()
 # body-id key_* arrays the σ pass reads (see the bridges' emit_keys path).
 
 try:
-    from lilytorch.src.streaming_sdf_2d import WarpStreamingSDF2D as _WarpSDF2D
-    from lilytorch.src.bdim_2d import bdim_forcing_2d_warp as _bdim2d_warp
+    from lilytorch.src.streaming_sdf import WarpStreamingSDF2D as _WarpSDF2D
+    from lilytorch.src.bdim import bdim_forcing_2d_warp as _bdim2d_warp
     import warp as _wp
 
     def _wdev(t):
@@ -338,15 +338,17 @@ except Exception:  # pragma: no cover
 # (scattered bilinear/trilinear gather, marker / semi-Lagrangian path) is also
 # dtype-generic.
 try:
-    from lilytorch.src.misc_2d import (
+    # apply_bcs + the graph runners now live with the AdvDiffSolver in advection;
+    # the scattered-gather interp kernels live with the interpolators.
+    from lilytorch.src.advection import (
         apply_bcs_2d_warp as apply_bcs_2d,
-        interp_2d_warp as interp_2d,
-        ApplyBcs2DGraphRunner,
-    )
-    from lilytorch.src.misc_3d import (
         apply_bcs_3d_warp as apply_bcs_3d,
-        interp_3d_warp as interp_3d,
+        ApplyBcs2DGraphRunner,
         ApplyBcs3DGraphRunner,
+    )
+    from lilytorch.src.interpolation import (
+        interp_2d_warp as interp_2d,
+        interp_3d_warp as interp_3d,
     )
     _warp_backed |= {"apply_bcs_2d", "apply_bcs_3d", "interp_2d", "interp_3d"}
 except Exception:  # pragma: no cover
@@ -412,11 +414,10 @@ except Exception:  # pragma: no cover
 # ── Poisson driver — WARP (Python outer driver + Warp fine-level smoother) ──
 # ``poisson_mult.PoissonSolver`` runs the multigrid / MGCG outer driver in
 # Python with the smoother + residual on the single-source Warp kernels
-# (``poisson{,_2d}.py``); the CUDA-graphed all-Warp variants live in
-# ``multigrid_graph.py``.
+# (``poisson.py`` holds both the 2-D and 3-D variants); the CUDA-graphed
+# all-Warp variants live in ``multigrid_graph.py``.
 try:
-    from lilytorch.src import poisson_2d as _wp2d  # noqa: F401
-    from lilytorch.src import poisson as _wp3d  # noqa: F401
+    from lilytorch.src import poisson as _poisson  # noqa: F401
     _warp_backed |= {
         "rbgs_sweep_2d", "rbgs_sweep_3d", "jacobi_sweep_2d", "jacobi_sweep_3d",
         "mg_residual_2d", "mg_residual_3d",

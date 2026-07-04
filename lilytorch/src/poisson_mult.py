@@ -1296,10 +1296,8 @@ class _MultigridPoissonSolver:
 # ─────────────────────────────────────────────────────────────────────────────
 #  Warp fine-level smoother + graphed multigrid (folded from the Warp backend)
 # ─────────────────────────────────────────────────────────────────────────────
-from lilytorch.src.poisson_2d import (
-    rbgs_sweep_2d_warp, jacobi_sweep_2d_warp, mg_residual_2d_warp,
-)
 from lilytorch.src.poisson import (
+    rbgs_sweep_2d_warp, jacobi_sweep_2d_warp, mg_residual_2d_warp,
     rbgs_sweep_3d_warp, jacobi_sweep_3d_warp, mg_residual_3d_warp,
 )
 
