@@ -9,9 +9,9 @@ import torch
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor
 
-from lilytorch.src.facade import (
-    bdim_forcing_3d,
-    bdim_forcing_2d,
+from lilytorch.src.bdim import (
+    bdim_forcing_3d_warp as bdim_forcing_3d,
+    bdim_forcing_2d_warp as bdim_forcing_2d,
 )
 from lilytorch.src.advection import AdvDiffSolver
 from lilytorch.src.diagnostics import FlowDiagnostics

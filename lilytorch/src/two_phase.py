@@ -24,7 +24,7 @@ Sign / value convention::
 import torch
 
 from lilytorch.src.advection import _sl
-from lilytorch.src.facade import cvof_sweep
+from lilytorch.src.cvof import cvof_sweep_warp as cvof_sweep
 
 
 def _neumann_pad(q):

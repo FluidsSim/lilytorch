@@ -1407,7 +1407,7 @@ class PoissonSolver(_MultigridPoissonSolver):
     level + pure-torch coarse recursion), optionally replayed from a captured
     CUDA graph when ``cuda_graph`` is set."""
 
-    #: op names this backend now serves on Warp (for the WARP_BACKED accounting).
+    #: op names this backend now serves on Warp (bookkeeping / documentation).
     WARP_POISSON_OPS = frozenset({
         "rbgs_sweep_2d", "rbgs_sweep_3d", "jacobi_sweep_2d", "jacobi_sweep_3d",
         "mg_residual_2d", "mg_residual_3d",

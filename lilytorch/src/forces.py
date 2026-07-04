@@ -20,9 +20,9 @@ import torch
 
 from lilytorch.src import operations as ops
 # Warp force ops are imported from the leaf kernel modules (not from facade) so
-# this module stays upstream of facade — facade re-exports the Eulerian readout
-# (``streaming_sdf_forces_post_*_warp``, defined in the merged Warp section at
-# the end of this file) from *here*.
+# this module stays upstream of facade in the import graph.  The Eulerian readout
+# (``streaming_sdf_forces_post_*_warp``) is defined in the merged Warp section at
+# the end of this file and consumed directly by force_method2 below.
 from lilytorch.src.lagrangian import (
     lagrangian_forces_2d_warp as _lagrangian_forces_2d_kernel,
     lagrangian_forces_3d_warp as _lagrangian_forces_3d_kernel,
@@ -1267,8 +1267,7 @@ def forces_lagrangian_3d(self, u, v, w, p, iteration):
 # Warp Eulerian surface-force readout  (merged from former src/kernels/forces.py)
 # ---------------------------------------------------------------------
 # n.delta viscous+pressure band integral (+ deltaH second pass); the single
-# production Eulerian force path (GPU and CPU).  facade.py re-exports
-# streaming_sdf_forces_post_{2,3}d_warp from here.
+# production Eulerian force path (GPU and CPU).
 # =====================================================================
 from typing import Any
 
@@ -2581,7 +2580,7 @@ def streaming_sdf_forces_post_3d_warp(
     # full-device sync was a per-call latency floor, not a correctness need.
 
 
-# In-module aliases matching the historical facade names used by the
-# force_method2 call sites above.
+# In-module aliases (historical short names) used by the force_method2 call
+# sites above.
 streaming_sdf_forces_post_2d = streaming_sdf_forces_post_2d_warp
 streaming_sdf_forces_post_3d = streaming_sdf_forces_post_3d_warp

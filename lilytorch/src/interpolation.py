@@ -24,8 +24,8 @@ from torch import Tensor
 # The scattered-gather Warp kernels these interpolators call (interp_2d /
 # interp_3d) are defined at the bottom of this module — merged from the former
 # misc_2d.py / misc_3d.py.  They pull the shared sampler @wp.func's from
-# streaming_sdf (a leaf), so this module stays upstream of facade in the import
-# graph (facade -> advection/forces -> interpolation -> streaming_sdf).
+# streaming_sdf (a leaf); this module is a leaf itself and must never import
+# ``solver``, ``two_phase`` or ``facade``.
 
 __all__ = [
     "RegularGridInterpolator",

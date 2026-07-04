@@ -13,9 +13,8 @@ module owns:
   ``torch.compile``-able.
 
 Dependency rule: this module imports the leaf kernel modules (``diffusion``,
-``misc_{2,3}d``, ``interpolation``) but **never** imports ``solver``,
-``two_phase`` or ``facade``.  ``facade`` re-exports ``advect_flux_add_warp``
-from here; ``two_phase`` reuses the ``_sl`` slicing helper.
+``interpolation``) but **never** imports ``solver``, ``two_phase`` or
+``facade``.  ``two_phase`` reuses the ``_sl`` slicing helper.
 
 Works identically in 2-D ``(x, y)`` and 3-D ``(x, y, z)`` by looping over
 spatial dimensions rather than duplicating code per axis -- inspired by
@@ -24,10 +23,9 @@ WaterLily.jl.
 from __future__ import annotations
 
 import torch
-# Warp primitives are imported from the leaf kernel modules (not from facade)
-# so this module stays upstream of facade in the import graph — facade imports
-# ``advect_flux_add_warp`` from *here* (see the merged Warp section at the end of
-# this file), so importing facade back would create a cycle.
+# Warp primitives are imported from the leaf kernel modules (``interpolation``,
+# ``diffusion``); this module must never import ``solver``, ``two_phase`` or
+# ``facade`` (it sits upstream of them in the import graph).
 from lilytorch.src.interpolation import RegularGridInterpolatorAutomatic
 
 from lilytorch.src import diffusion
@@ -824,10 +822,8 @@ class AdvDiffSolver:
 # =====================================================================
 # Warp advection kernels  (merged from the former src/kernels/advection.py)
 # ---------------------------------------------------------------------
-# The fused high-order flux-add kernel (all 5 schemes, 2-D+3-D, f32+f64),
-# The single production advection path (GPU *and* CPU).  facade.py
-# is the single production advection path (GPU *and* CPU).  facade.py
-# re-exports advect_flux_add_warp from here.
+# The fused high-order flux-add kernel (all 5 schemes, 2-D+3-D, f32+f64) is the
+# single production advection path (GPU *and* CPU).
 # =====================================================================
 
 from typing import Any
@@ -1114,16 +1110,15 @@ def advect_flux_add_warp(fv_t, p_t, rhs_t, dt_dh, C_courant, scheme_id, face_dim
     )
 
 
-# Backwards-compatible in-module alias: the AdvDiffSolver call site and
-# facade's public advect_flux_add both dispatch to the Warp kernel.
+# In-module alias used by the AdvDiffSolver call site above.
 advect_flux_add = advect_flux_add_warp
 
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  Fused boundary-condition ghost writes — apply_bcs_2d / apply_bcs_3d
 #  Merged from the former misc_2d.py / misc_3d.py.  Consumed by
-#  AdvDiffSolver.set_BCs above (the ApplyBcs{2,3}DGraphRunner lazies), and
-#  re-exported through facade.  Dtype-generic f32+f64 via wp.overload.
+#  AdvDiffSolver.set_BCs above (the ApplyBcs{2,3}DGraphRunner lazies).
+#  Dtype-generic f32+f64 via wp.overload.
 # ═════════════════════════════════════════════════════════════════════════════
 
 @wp.kernel

@@ -13,7 +13,7 @@ import math
 import numpy as np
 import torch
 from skimage import measure
-from lilytorch.src.facade import RegularGridInterpolator
+from lilytorch.src.interpolation import RegularGridInterpolator
 
 DT = torch.float64
 D = "lilytorch/farms_examples/boat/interp_data"
