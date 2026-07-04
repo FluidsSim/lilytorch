@@ -22,7 +22,7 @@ from lilytorch.src.forces import (
     streaming_sdf_forces_post_2d_warp,
     streaming_sdf_forces_post_3d_warp,
 )
-from lilytorch.src.scene_2d import make_synthetic_scene_2d
+from lilytorch.tests.scene_2d import make_synthetic_scene_2d
 from lilytorch.benchmarks.bench_viability import make_synthetic_scene
 
 SKIP_NO_CUDA = pytest.mark.skipif(not torch.cuda.is_available(),

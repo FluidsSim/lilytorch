@@ -10,7 +10,7 @@ import pytest
 import torch
 import warp as wp
 
-from lilytorch.src.scene_2d import make_synthetic_scene_2d
+from lilytorch.tests.scene_2d import make_synthetic_scene_2d
 from lilytorch.src.streaming_sdf import WarpStreamingSDF2D
 
 DEV = "cuda:0" if torch.cuda.is_available() else "cpu"
