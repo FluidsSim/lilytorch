@@ -150,8 +150,6 @@ def _profiled_step(self, task, physics):
     # 4. forces
     if self.ndim == 3:
         fs.forces_method2_3d(fs.u0, fs.v0, fs.w0, fs.p0, iteration)
-    elif self.force_method == "method1":
-        fs.forces_method1(fs.u0, fs.v0, fs.p0, iteration)
     else:
         fs.forces_method2(fs.u0, fs.v0, fs.p0, iteration)
     if do_trace:

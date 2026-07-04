@@ -999,7 +999,6 @@ class FluidSolver(PlottingMixin):
         self._vel[2] = value
 
     # --- moved to lilytorch/src/forces.py (item #8) ---
-    forces_method1 = forces.forces_method1
     forces_method2 = forces.forces_method2
     forces_method2_3d = forces.forces_method2_3d
     # Lagrangian (surface-integral) force methods — phase 2 of force_method
