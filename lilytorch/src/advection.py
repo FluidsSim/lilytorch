@@ -26,7 +26,7 @@ import torch
 # Warp primitives are imported from the leaf kernel modules (``interpolation``,
 # ``diffusion``); this module must never import ``solver``, ``two_phase`` or
 # ``facade`` (it sits upstream of them in the import graph).
-from lilytorch.src.interpolation import RegularGridInterpolatorAutomatic
+from lilytorch.src.interpolation import RegularGridInterpolator
 
 from lilytorch.src import diffusion
 
@@ -284,7 +284,7 @@ class AdvDiffSolver:
             # component-i lives on a grid staggered in dim i only
             grid = tuple(stag[d] if d == i else self.coords[d]
                          for d in range(ndim))
-            interp = RegularGridInterpolatorAutomatic(
+            interp = RegularGridInterpolator(
                 grid,
                 torch.zeros(tuple(self.n), device=self.device, dtype=self.dtype),
                 fill_value=None, method="quadratic",

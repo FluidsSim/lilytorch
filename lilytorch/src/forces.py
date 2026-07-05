@@ -1181,8 +1181,8 @@ import torch
 
 wp.init()
 
-from lilytorch.src.streaming_sdf import sdf_sample_off_2d
-from lilytorch.src.streaming_sdf import trilinear_sample_off
+from lilytorch.src.interpolation import sdf_sample_off_2d
+from lilytorch.src.interpolation import trilinear_sample_off
 
 
 _PI = 3.141592653589793

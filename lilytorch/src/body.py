@@ -5,7 +5,7 @@ import os
 
 import numpy as np
 import torch
-from lilytorch.src.interpolation import RegularGridInterpolator, RegularGridInterpolatorAutomatic
+from lilytorch.src.interpolation import RegularGridInterpolator
 
 logger = logging.getLogger(__name__)
 
@@ -2564,7 +2564,7 @@ class BodyMesh(Body):
         curv_coord = np.load(os.path.join(self.save_folder, f"curv_coord_{mesh_tag}.npy"))
         sign_vec = np.load(os.path.join(self.save_folder, f"sign_vec_{mesh_tag}.npy"))
 
-        self.sdf = RegularGridInterpolatorAutomatic(
+        self.sdf = RegularGridInterpolator(
             (
                 torch.from_numpy(xnp).type(self.dtype).to(self.device),
                 torch.from_numpy(ynp).type(self.dtype).to(self.device)
@@ -2591,7 +2591,7 @@ class BodyMesh(Body):
     def _initialize_3d_mesh(self, xnp, ynp, sdf_val, mesh_tag):
         znp = np.load(os.path.join(self.save_folder, f"znp_{mesh_tag}.npy"))
 
-        self.sdf = RegularGridInterpolatorAutomatic(
+        self.sdf = RegularGridInterpolator(
             (
                 torch.from_numpy(xnp).type(self.dtype).to(self.device),
                 torch.from_numpy(ynp).type(self.dtype).to(self.device),

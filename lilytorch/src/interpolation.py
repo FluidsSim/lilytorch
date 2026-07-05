@@ -1,11 +1,12 @@
 """Scattered-point interpolators backed by the Warp ``interp_{2,3}d`` kernels.
 
-Drop-in replacement for pytorch_interpolation's RegularGridInterpolator,
-RegularGridInterpolatorAutomatic, and RegularGridInterpolator3D.
+Drop-in replacement for pytorch_interpolation's RegularGridInterpolator.
 
-Uses the same bilinear/biquadratic (2-D) and trilinear/triquadratic (3-D)
-device functions as the streaming-SDF kernels — no grid_sample overhead,
-no coordinate normalisation, and the same border-clamp semantics.
+Also the home of the shared uniform-grid sampler ``@wp.func``s
+(``bilinear``/``biquadratic``/``sdf_sample`` in 2-D, ``trilinear``/
+``triquadratic`` in 3-D) — no grid_sample overhead, no coordinate
+normalisation, and the same border-clamp semantics.  The streaming-SDF and
+forces kernels import these from here.
 
 method="linear"    → bilinear (2-D) / trilinear (3-D)  [default]
 method="quadratic" → biquadratic (2-D) / triquadratic (3-D), falls back
@@ -29,8 +30,6 @@ from torch import Tensor
 
 __all__ = [
     "RegularGridInterpolator",
-    "RegularGridInterpolator3D",
-    "RegularGridInterpolatorAutomatic",
 ]
 
 _VALID_METHODS = ("linear", "quadratic")
@@ -160,28 +159,160 @@ class RegularGridInterpolator:
         return result.reshape(orig_shape)
 
 
-# ---------------------------------------------------------------------------
-# Aliases — same class handles 2-D and 3-D; "Automatic" / "3D" suffixes are
-# kept for backward-compatible imports from sites that used to import them
-# from pytorch_interpolation.
-# ---------------------------------------------------------------------------
-
-RegularGridInterpolatorAutomatic = RegularGridInterpolator
-RegularGridInterpolator3D        = RegularGridInterpolator
-
-
 # ═════════════════════════════════════════════════════════════════════════════
-#  Scattered-gather Warp kernels — interp_2d / interp_3d
-#  Merged from the former misc_2d.py / misc_3d.py.  These back the
-#  RegularGridInterpolator classes above (bilinear/biquadratic in 2-D,
-#  trilinear/triquadratic in 3-D); dtype-generic f32+f64 via wp.overload.
+#  Shared uniform-grid sampler @wp.func's + scattered-gather Warp kernels.
+#  The samplers (bilinear/biquadratic/sdf_sample in 2-D, trilinear/triquadratic
+#  in 3-D) live here as the single source; streaming_sdf.py and forces.py import
+#  them.  interp_2d / interp_3d back the RegularGridInterpolator class above.
+#  All dtype-generic f32+f64 via wp.overload.
 # ═════════════════════════════════════════════════════════════════════════════
 from typing import Any  # noqa: E402
 import warp as wp  # noqa: E402
 
-from lilytorch.src.streaming_sdf import sdf_sample_off_2d, trilinear_sample_off  # noqa: E402
-
 wp.init()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Trilinear interpolation on a uniform grid (with flat-array offset)
+# ─────────────────────────────────────────────────────────────────────────────
+@wp.func
+def trilinear_sample_off(
+    F:      wp.array(dtype=Any),
+    F_off:  int,
+    Mx: int, My: int, Mz: int,
+    bx0: Any, by0: Any, bz0: Any,
+    inv_dx: Any, inv_dy: Any, inv_dz: Any,
+    xq: Any, yq: Any, zq: Any,
+):
+    """Trilinear interp into F_flat at offset F_off with border clamp."""
+    zero = type(bx0)(0.0)
+    one = type(bx0)(1.0)
+    tx = wp.clamp((xq - bx0) * inv_dx, zero, type(bx0)(Mx - 1))
+    ty = wp.clamp((yq - by0) * inv_dy, zero, type(bx0)(My - 1))
+    tz = wp.clamp((zq - bz0) * inv_dz, zero, type(bx0)(Mz - 1))
+
+    ix = wp.min(int(tx), Mx - 2)
+    iy = wp.min(int(ty), My - 2)
+    iz = wp.min(int(tz), Mz - 2)
+
+    fx = tx - type(bx0)(ix)
+    fy = ty - type(bx0)(iy)
+    fz = tz - type(bx0)(iz)
+    wx0 = one - fx
+    wy0 = one - fy
+    wz0 = one - fz
+
+    s2   = Mz
+    s1   = My * Mz
+    base = F_off + ix * s1 + iy * s2 + iz
+
+    return (
+        wx0 * (wy0 * (wz0 * F[base]              + fz * F[base + 1]) +
+               fy  * (wz0 * F[base + s2]          + fz * F[base + s2 + 1])) +
+        fx  * (wy0 * (wz0 * F[base + s1]          + fz * F[base + s1 + 1]) +
+               fy  * (wz0 * F[base + s1 + s2]     + fz * F[base + s1 + s2 + 1]))
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Bilinear / biquadratic interpolation on a uniform grid (flat offset)
+# ─────────────────────────────────────────────────────────────────────────────
+@wp.func
+def bilinear_sample_off_2d(
+    F:      wp.array(dtype=Any),
+    F_off:  int,
+    Mx: int, My: int,
+    bx0: Any, by0: Any,
+    inv_dx: Any, inv_dy: Any,
+    xq: Any, yq: Any,
+):
+    """Bilinear interp into F_flat at offset F_off with border clamp."""
+    tx = wp.clamp((xq - bx0) * inv_dx, type(bx0)(0.0), type(bx0)(Mx - 1))
+    ty = wp.clamp((yq - by0) * inv_dy, type(bx0)(0.0), type(bx0)(My - 1))
+
+    ix = wp.min(int(tx), Mx - 2)
+    iy = wp.min(int(ty), My - 2)
+
+    fx = tx - type(bx0)(ix)
+    fy = ty - type(bx0)(iy)
+    wx0 = type(bx0)(1.0) - fx
+    wy0 = type(bx0)(1.0) - fy
+
+    s1   = My
+    base = F_off + ix * s1 + iy
+
+    return (
+        wx0 * (wy0 * F[base]      + fy * F[base + 1]) +
+        fx  * (wy0 * F[base + s1] + fy * F[base + s1 + 1])
+    )
+
+
+@wp.func
+def biquadratic_sample_off_2d(
+    F:      wp.array(dtype=Any),
+    F_off:  int,
+    Mx: int, My: int,
+    bx0: Any, by0: Any,
+    inv_dx: Any, inv_dy: Any,
+    xq: Any, yq: Any,
+):
+    """Biquadratic interp; falls back to bilinear at the table border (Mx/My<3
+    or ix/iy<1), exactly matching ``biquadratic_sample_uniform_2d``."""
+    tx = wp.clamp((xq - bx0) * inv_dx, type(bx0)(0.0), type(bx0)(Mx - 1))
+    ty = wp.clamp((yq - by0) * inv_dy, type(bx0)(0.0), type(bx0)(My - 1))
+
+    ix = wp.min(int(tx), Mx - 2)
+    iy = wp.min(int(ty), My - 2)
+
+    if ix < 1 or iy < 1 or Mx < 3 or My < 3:
+        return bilinear_sample_off_2d(F, F_off, Mx, My, bx0, by0,
+                                      inv_dx, inv_dy, xq, yq)
+
+    fx = tx - type(bx0)(ix)
+    fy = ty - type(bx0)(iy)
+
+    half = type(bx0)(0.5)
+    one = type(bx0)(1.0)
+    wxm = half * fx * (fx - one)
+    wx0 = one - fx * fx
+    wxp = half * fx * (fx + one)
+    wym = half * fy * (fy - one)
+    wy0 = one - fy * fy
+    wyp = half * fy * (fy + one)
+
+    s1   = My
+    base = F_off + (ix - 1) * s1 + (iy - 1)
+
+    out = type(bx0)(0.0)
+    # dx = 0
+    col0 = wym * F[base]      + wy0 * F[base + 1]      + wyp * F[base + 2]
+    out += wxm * col0
+    # dx = 1
+    b1 = base + s1
+    col1 = wym * F[b1] + wy0 * F[b1 + 1] + wyp * F[b1 + 2]
+    out += wx0 * col1
+    # dx = 2
+    b2 = base + 2 * s1
+    col2 = wym * F[b2] + wy0 * F[b2 + 1] + wyp * F[b2 + 2]
+    out += wxp * col2
+    return out
+
+
+@wp.func
+def sdf_sample_off_2d(
+    interp_method: int,
+    F:      wp.array(dtype=Any),
+    F_off:  int,
+    Mx: int, My: int,
+    bx0: Any, by0: Any,
+    inv_dx: Any, inv_dy: Any,
+    xq: Any, yq: Any,
+):
+    if interp_method == 1:
+        return biquadratic_sample_off_2d(F, F_off, Mx, My, bx0, by0,
+                                         inv_dx, inv_dy, xq, yq)
+    return bilinear_sample_off_2d(F, F_off, Mx, My, bx0, by0,
+                                  inv_dx, inv_dy, xq, yq)
 
 
 @wp.kernel
