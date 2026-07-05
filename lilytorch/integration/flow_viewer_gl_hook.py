@@ -51,11 +51,17 @@ _GL_HOOK_C_SOURCE = r"""
 
 #define CUDA_GRAPHICS_REGISTER_FLAGS_WRITE_DISCARD 2U
 #define CUDA_MEMCPY_DEVICE_TO_DEVICE 3
+#define CUDA_STREAM_NON_BLOCKING 0x01U
 
 typedef int cudaError_t;
 typedef void* cudaGraphicsResource_t;
+typedef void* cudaStream_t;
 
 extern cudaError_t cudaSetDevice(int device);
+extern cudaError_t cudaStreamCreateWithFlags(cudaStream_t* pStream, unsigned int flags);
+extern cudaError_t cudaStreamSynchronize(cudaStream_t stream);
+extern cudaError_t cudaMemcpyAsync(
+    void* dst, const void* src, size_t count, int kind, cudaStream_t stream);
 extern cudaError_t cudaGraphicsGLRegisterBuffer(
   cudaGraphicsResource_t* resource,
   unsigned int buffer,
@@ -101,6 +107,7 @@ typedef struct {
   GLint alpha_location;
   GLint texture_location;
   cudaGraphicsResource_t resource;
+  cudaStream_t stream;
   int gl_ready;
 } FlowViewerHookState;
 
@@ -127,6 +134,7 @@ static FlowViewerHookState g_state = {
     .alpha_location = -1,
     .texture_location = -1,
     .resource = NULL,
+    .stream = NULL,
     .gl_ready = 0,
 };
 
@@ -371,28 +379,46 @@ static int upload_texture_locked(void) {
   if (!cuda_ok(cudaSetDevice(g_state.device), "cudaSetDevice")) {
     return 0;
   }
-  if (!cuda_ok(cudaGraphicsMapResources(1, &g_state.resource, NULL), "cudaGraphicsMapResources")) {
+  // Use a dedicated non-blocking stream rather than the legacy default (NULL)
+  // stream: the default stream is process-global and any op on it fails with
+  // cudaErrorStreamCaptureImplicit (906) while another thread runs a CUDA graph
+  // capture (Warp BC-runner / poisson_cuda_graph), poisoning that capture. A
+  // non-blocking stream never creates that implicit dependency.
+  if (!g_state.stream) {
+    if (!cuda_ok(cudaStreamCreateWithFlags(&g_state.stream, CUDA_STREAM_NON_BLOCKING),
+                 "cudaStreamCreateWithFlags")) {
+      return 0;
+    }
+  }
+  if (!cuda_ok(cudaGraphicsMapResources(1, &g_state.resource, g_state.stream),
+               "cudaGraphicsMapResources")) {
     return 0;
   }
   if (!cuda_ok(cudaGraphicsResourceGetMappedPointer(&mapped_ptr, &mapped_size, g_state.resource),
                "cudaGraphicsResourceGetMappedPointer")) {
-    cudaGraphicsUnmapResources(1, &g_state.resource, NULL);
+    cudaGraphicsUnmapResources(1, &g_state.resource, g_state.stream);
     return 0;
   }
   if (mapped_size < num_bytes) {
-    cudaGraphicsUnmapResources(1, &g_state.resource, NULL);
+    cudaGraphicsUnmapResources(1, &g_state.resource, g_state.stream);
     return 0;
   }
-  if (!cuda_ok(cudaMemcpy(
+  if (!cuda_ok(cudaMemcpyAsync(
                mapped_ptr,
                (const void*)g_state.cuda_ptr,
                num_bytes,
-               CUDA_MEMCPY_DEVICE_TO_DEVICE),
-               "cudaMemcpy")) {
-    cudaGraphicsUnmapResources(1, &g_state.resource, NULL);
+               CUDA_MEMCPY_DEVICE_TO_DEVICE,
+               g_state.stream),
+               "cudaMemcpyAsync")) {
+    cudaGraphicsUnmapResources(1, &g_state.resource, g_state.stream);
     return 0;
   }
-  if (!cuda_ok(cudaGraphicsUnmapResources(1, &g_state.resource, NULL), "cudaGraphicsUnmapResources")) {
+  if (!cuda_ok(cudaGraphicsUnmapResources(1, &g_state.resource, g_state.stream),
+               "cudaGraphicsUnmapResources")) {
+    return 0;
+  }
+  // Ensure the copy has completed on our stream before GL reads the PBO below.
+  if (!cuda_ok(cudaStreamSynchronize(g_state.stream), "cudaStreamSynchronize")) {
     return 0;
   }
 
