@@ -254,3 +254,39 @@ def test_warp_poisson_manufactured_solution(method, smoother, ndim, N, tol_err):
     p_rec = p_rec - p_rec.mean()                      # fix the Neumann null space
     err = (p_rec - p_true).abs().max().item()
     assert err < tol_err, f"MMS {method} {ndim}D {smoother}: max |p-p*| = {err:.2e}"
+
+
+@pytest.mark.parametrize("ndim,N", [(2, 64), (3, 32)])
+@pytest.mark.parametrize("smoother", ["rbgs", "jacobi"])
+def test_warp_poisson_dirichlet_mask(ndim, N, smoother):
+    """Free-surface GFM: with ``dirichlet_mask`` set, the WarpMG driver pins p=0
+    in the flagged (air) cells at every level/sweep and still converges to a
+    small residual in the fluid cells — the mask-aware V-cycle that replaced the
+    torch _vcycle Dirichlet path."""
+    dtype = torch.float64
+    h = 1.0 / N
+    o = dict(dtype=dtype, device=DEV)
+    # variable-coefficient faces so the mask sees a non-trivial operator
+    if ndim == 2:
+        faces = dict(ch=torch.full((N + 1, N), 0.5, **o),
+                     cv=torch.full((N, N + 1), 0.5, **o))
+    else:
+        faces = dict(ch=torch.full((N + 1, N, N), 0.5, **o),
+                     cv=torch.full((N, N + 1, N), 0.5, **o),
+                     cw=torch.full((N, N, N + 1), 0.5, **o))
+    mask = torch.zeros(*([N] * ndim), dtype=torch.bool, device=DEV)
+    mask[tuple([slice(N // 2, None)] * ndim)] = True          # an "air" block
+    torch.manual_seed(0)
+    f = torch.randn(*([N] * ndim), dtype=dtype, device=DEV).masked_fill(mask, 0.0)
+    p0 = torch.zeros(*([N + 2] * ndim), dtype=dtype, device=DEV)
+
+    s = PoissonSolver(dtype=dtype, device=DEV, h=h, tol=1e-10, max_vcycles=60,
+                      max_cycles=80, nsmoothing=2, smoother=smoother, verbose=False)
+    s.dirichlet_mask = mask
+    p, r = s.solve_multigrid(f.clone(), p0, **{k: v.clone() for k, v in faces.items()})
+    inner = tuple(slice(1, -1) for _ in range(ndim))
+    # (1) Dirichlet cells are pinned exactly to zero
+    assert p[inner][mask].abs().max().item() == 0.0
+    # (2) the solve converged in the fluid region
+    rf = r[~mask].abs().max().item()
+    assert rf < 1e-6, f"dirichlet {ndim}D {smoother}: fluid residual {rf:.2e}"

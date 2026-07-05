@@ -21,411 +21,6 @@ Usage (backward-compatible with old 2-D interface)::
 import torch
 
 # =====================================================================
-# Smoother kernels (module-level)
-# =====================================================================
-
-def _bc_2d(q):
-    """Neumann BCs for a 2-D tensor (in-place)."""
-    q[0, :]  = q[1, :]
-    q[-1, :] = q[-2, :]
-    q[:, 0]  = q[:, 1]
-    q[:, -1] = q[:, -2]
-
-
-def _bc_3d(q):
-    """Neumann BCs for a 3-D tensor (in-place)."""
-    q[0, :, :]  = q[1, :, :]
-    q[-1, :, :] = q[-2, :, :]
-    q[:, 0, :]  = q[:, 1, :]
-    q[:, -1, :] = q[:, -2, :]
-    q[:, :, 0]  = q[:, :, 1]
-    q[:, :, -1] = q[:, :, -2]
-
-
-# ── 3-D helper: stencil sum (inlined for compile) ───────────────────
-def _sum3d(cp0, cm0, cp1, cm1, cp2, cm2, p):
-    return (cp0 * p[2:, 1:-1, 1:-1] + cm0 * p[:-2, 1:-1, 1:-1]
-          + cp1 * p[1:-1, 2:, 1:-1] + cm1 * p[1:-1, :-2, 1:-1]
-          + cp2 * p[1:-1, 1:-1, 2:] + cm2 * p[1:-1, 1:-1, :-2])
-
-
-def _J3d(cp0, cm0, cp1, cm1, cp2, cm2):
-    return cp0 + cm0 + cp1 + cm1 + cp2 + cm2
-
-
-# ── 2-D helper: stencil sum (inlined for compile) ───────────────────
-def _sum2d(cp0, cm0, cp1, cm1, p):
-    return (cp0 * p[2:, 1:-1] + cm0 * p[:-2, 1:-1]
-          + cp1 * p[1:-1, 2:] + cm1 * p[1:-1, :-2])
-
-
-def _J2d(cp0, cm0, cp1, cm1):
-    return cp0 + cm0 + cp1 + cm1
-
-
-# ── Jacobi 3-D (compilable) ─────────────────────────────────────────
-def _jacobi_3d(f, p, cp0, cm0, cp1, cm1, cp2, cm2, w, jcap_tol,
-               nsmoothing):
-    _bc_3d(p)
-    J = _J3d(cp0, cm0, cp1, cm1, cp2, cm2)
-    active = torch.abs(J) >= jcap_tol
-    Jinv = torch.where(active, J.reciprocal(), torch.zeros_like(J))
-    for _ in range(nsmoothing):
-        s = _sum3d(cp0, cm0, cp1, cm1, cp2, cm2, p)
-        p[1:-1, 1:-1, 1:-1] = (
-            w * (-f + s) * Jinv + (1 - w) * p[1:-1, 1:-1, 1:-1]
-        )
-        _bc_3d(p)
-    del Jinv
-    s = _sum3d(cp0, cm0, cp1, cm1, cp2, cm2, p)
-    s.addcmul_(J, p[1:-1, 1:-1, 1:-1], value=-1.0)
-    del J
-    s.neg_().add_(f).mul_(active)
-    r = s
-    del active
-    return p, r
-
-
-# ── Jacobi 2-D (compilable) ─────────────────────────────────────────
-def _jacobi_2d(f, p, cp0, cm0, cp1, cm1, w, jcap_tol, nsmoothing):
-    _bc_2d(p)
-    J = _J2d(cp0, cm0, cp1, cm1)
-    active = torch.abs(J) >= jcap_tol
-    Jinv = torch.where(active, J.reciprocal(), torch.zeros_like(J))
-    for _ in range(nsmoothing):
-        s = _sum2d(cp0, cm0, cp1, cm1, p)
-        p[1:-1, 1:-1] = (
-            w * (-f + s) * Jinv + (1 - w) * p[1:-1, 1:-1]
-        )
-        _bc_2d(p)
-    del Jinv
-    s = _sum2d(cp0, cm0, cp1, cm1, p)
-    s.addcmul_(J, p[1:-1, 1:-1], value=-1.0)
-    del J
-    s.neg_().add_(f).mul_(active)
-    r = s
-    del active
-    return p, r
-
-
-# ── RBGS 3-D (compilable) ───────────────────────────────────────────
-def _rbgs_3d(f, p, cp0, cm0, cp1, cm1, cp2, cm2, jcap_tol,
-             nsmoothing, red, black):
-    _bc_3d(p)
-    J = _J3d(cp0, cm0, cp1, cm1, cp2, cm2)
-    active = torch.abs(J) >= jcap_tol
-    Jinv = torch.where(active, J.reciprocal(), torch.zeros_like(J))
-    for _ in range(nsmoothing):
-        s = _sum3d(cp0, cm0, cp1, cm1, cp2, cm2, p)
-        p_new = (-f + s) * Jinv
-        p[1:-1, 1:-1, 1:-1] = torch.where(red, p_new, p[1:-1, 1:-1, 1:-1])
-        _bc_3d(p)
-        s = _sum3d(cp0, cm0, cp1, cm1, cp2, cm2, p)
-        p_new = (-f + s) * Jinv
-        p[1:-1, 1:-1, 1:-1] = torch.where(black, p_new, p[1:-1, 1:-1, 1:-1])
-        _bc_3d(p)
-    del Jinv
-    s = _sum3d(cp0, cm0, cp1, cm1, cp2, cm2, p)
-    s.addcmul_(J, p[1:-1, 1:-1, 1:-1], value=-1.0)
-    del J
-    s.neg_().add_(f).mul_(active)
-    r = s
-    del active
-    return p, r
-
-
-# ── RBGS 2-D (compilable) ───────────────────────────────────────────
-def _rbgs_2d(f, p, cp0, cm0, cp1, cm1, jcap_tol, nsmoothing,
-             red, black):
-    _bc_2d(p)
-    J = _J2d(cp0, cm0, cp1, cm1)
-    active = torch.abs(J) >= jcap_tol
-    Jinv = torch.where(active, J.reciprocal(), torch.zeros_like(J))
-    for _ in range(nsmoothing):
-        s = _sum2d(cp0, cm0, cp1, cm1, p)
-        p_new = (-f + s) * Jinv
-        p[1:-1, 1:-1] = torch.where(red, p_new, p[1:-1, 1:-1])
-        _bc_2d(p)
-        s = _sum2d(cp0, cm0, cp1, cm1, p)
-        p_new = (-f + s) * Jinv
-        p[1:-1, 1:-1] = torch.where(black, p_new, p[1:-1, 1:-1])
-        _bc_2d(p)
-    del Jinv
-    s = _sum2d(cp0, cm0, cp1, cm1, p)
-    s.addcmul_(J, p[1:-1, 1:-1], value=-1.0)
-    del J
-    s.neg_().add_(f).mul_(active)
-    r = s
-    del active
-    return p, r
-
-
-# =====================================================================
-# V-cycle helpers (3-D)
-# =====================================================================
-
-def _restrict_face_3d(ch, cv, cw):
-    """Restrict face arrays from fine to coarse (3-D, WaterLily convention)."""
-    # ch: face along dim 0 — stride-2 in dim 0 first, then SUM in dims 1,2
-    ch_c = ch[::2, :, :]
-    e1, o1 = ch_c[:, :-1:2, :], ch_c[:, 1::2, :]
-    m1 = min(e1.shape[1], o1.shape[1])
-    ch_c = e1[:, :m1] + o1[:, :m1]
-    e2, o2 = ch_c[:, :, :-1:2], ch_c[:, :, 1::2]
-    m2 = min(e2.shape[2], o2.shape[2])
-    ch_c = (e2[:, :, :m2] + o2[:, :, :m2]) * 0.5
-    # cv: face along dim 1 — stride-2 in dim 1 first, then SUM in dims 0,2
-    cv_c = cv[:, ::2, :]
-    e0, o0 = cv_c[:-1:2, :, :], cv_c[1::2, :, :]
-    m0 = min(e0.shape[0], o0.shape[0])
-    cv_c = e0[:m0] + o0[:m0]
-    e2, o2 = cv_c[:, :, :-1:2], cv_c[:, :, 1::2]
-    m2 = min(e2.shape[2], o2.shape[2])
-    cv_c = (e2[:, :, :m2] + o2[:, :, :m2]) * 0.5
-    # cw: face along dim 2 — stride-2 in dim 2 first, then SUM in dims 0,1
-    cw_c = cw[:, :, ::2]
-    e0, o0 = cw_c[:-1:2, :, :], cw_c[1::2, :, :]
-    m0 = min(e0.shape[0], o0.shape[0])
-    cw_c = e0[:m0] + o0[:m0]
-    e1, o1 = cw_c[:, :-1:2, :], cw_c[:, 1::2, :]
-    m1 = min(e1.shape[1], o1.shape[1])
-    cw_c = (e1[:, :m1] + o1[:, :m1]) * 0.5
-    return ch_c, cv_c, cw_c
-
-
-def _restrict_residual_3d(r):
-    """Full-weighting restriction of residual (3-D)."""
-    e0, o0 = r[::2, :, :], r[1::2, :, :]
-    m0 = min(e0.shape[0], o0.shape[0])
-    rc = e0[:m0] + o0[:m0]
-    e1, o1 = rc[:, ::2, :], rc[:, 1::2, :]
-    m1 = min(e1.shape[1], o1.shape[1])
-    rc = e1[:, :m1, :] + o1[:, :m1, :]
-    e2, o2 = rc[:, :, ::2], rc[:, :, 1::2]
-    m2 = min(e2.shape[2], o2.shape[2])
-    rc = e2[:, :, :m2] + o2[:, :, :m2]
-    return rc
-
-
-def _prolongate_3d(err_coarse, target_shape):
-    """Trilinear prolongation (3-D) for cell-centred multigrid.
-
-    Uses F.interpolate with align_corners=False, which places cell centres
-    at (i+0.5)/N — the correct mapping for cell-centred data.  This gives
-    the standard prolongation weights: 3/4 on the parent coarse cell and
-    1/4 on the nearest coarse neighbour.
-    """
-    ec = err_coarse[1:-1, 1:-1, 1:-1]
-    out = torch.nn.functional.interpolate(
-        ec.unsqueeze(0).unsqueeze(0),
-        size=(target_shape[0], target_shape[1], target_shape[2]),
-        mode='trilinear',
-        align_corners=False,
-    )
-    return out[0, 0]
-
-
-def _rb_masks_3d(nx, ny, nz, device):
-    """Build red/black masks for interior of shape (nx, ny, nz)."""
-    gi = torch.arange(nx, device=device)
-    gj = torch.arange(ny, device=device)
-    gk = torch.arange(nz, device=device)
-    I, J, K = torch.meshgrid(gi, gj, gk, indexing="ij")
-    parity = (I + J + K) % 2
-    return (parity == 0), (parity == 1)
-
-
-# ── Full 3-D V-cycle with Jacobi (coarse-level recursive) ──────────────────
-def _vcycle_jac_3d(f, p, ch, cv, cw, w, jcap_tol, nsmoothing):
-    """Complete 3-D V-cycle with Jacobi smoother (used at coarse levels)."""
-    p = p.clone()
-    cp0, cm0 = ch[1:, :, :], ch[:-1, :, :]
-    cp1, cm1 = cv[:, 1:, :], cv[:, :-1, :]
-    cp2, cm2 = cw[:, :, 1:], cw[:, :, :-1]
-
-    # pre-smooth
-    p, r = _jacobi_3d(f, p, cp0, cm0, cp1, cm1, cp2, cm2,
-                       w, jcap_tol, nsmoothing)
-
-    nx, ny, nz = f.shape
-    if nx > 2 and ny > 2 and nz > 2:
-        ch_c, cv_c, cw_c = _restrict_face_3d(ch, cv, cw)
-        r_c = _restrict_residual_3d(r)
-
-        coarse_shape = (r_c.shape[0] + 2, r_c.shape[1] + 2, r_c.shape[2] + 2)
-        p_c = torch.zeros(coarse_shape, device=p.device, dtype=p.dtype)
-
-        err_c, _ = _vcycle_jac_3d(r_c, p_c, ch_c, cv_c, cw_c,
-                                   w, jcap_tol, nsmoothing)
-
-        err = _prolongate_3d(err_c, r.shape)
-        p[1:-1, 1:-1, 1:-1] = p[1:-1, 1:-1, 1:-1] + err
-
-        # post-smooth (recompute cfaces from same face arrays)
-        cp0, cm0 = ch[1:, :, :], ch[:-1, :, :]
-        cp1, cm1 = cv[:, 1:, :], cv[:, :-1, :]
-        cp2, cm2 = cw[:, :, 1:], cw[:, :, :-1]
-        p, r = _jacobi_3d(f, p, cp0, cm0, cp1, cm1, cp2, cm2,
-                           w, jcap_tol, nsmoothing)
-
-    return p, r
-
-
-# ── Full 3-D V-cycle with RBGS (coarse-level recursive) ────────────────────
-def _vcycle_rbgs_3d(f, p, ch, cv, cw, jcap_tol, nsmoothing):
-    """Complete 3-D V-cycle with RBGS smoother (used at coarse levels)."""
-    p = p.clone()
-    cp0, cm0 = ch[1:, :, :], ch[:-1, :, :]
-    cp1, cm1 = cv[:, 1:, :], cv[:, :-1, :]
-    cp2, cm2 = cw[:, :, 1:], cw[:, :, :-1]
-
-    red, black = _rb_masks_3d(f.shape[0], f.shape[1], f.shape[2], p.device)
-    p, r = _rbgs_3d(f, p, cp0, cm0, cp1, cm1, cp2, cm2,
-                     jcap_tol, nsmoothing, red, black)
-
-    nx, ny, nz = f.shape
-    if nx > 2 and ny > 2 and nz > 2:
-        ch_c, cv_c, cw_c = _restrict_face_3d(ch, cv, cw)
-        r_c = _restrict_residual_3d(r)
-
-        coarse_shape = (r_c.shape[0] + 2, r_c.shape[1] + 2, r_c.shape[2] + 2)
-        p_c = torch.zeros(coarse_shape, device=p.device, dtype=p.dtype)
-
-        err_c, _ = _vcycle_rbgs_3d(r_c, p_c, ch_c, cv_c, cw_c,
-                                    jcap_tol, nsmoothing)
-
-        err = _prolongate_3d(err_c, r.shape)
-        p[1:-1, 1:-1, 1:-1] = p[1:-1, 1:-1, 1:-1] + err
-
-        cp0, cm0 = ch[1:, :, :], ch[:-1, :, :]
-        cp1, cm1 = cv[:, 1:, :], cv[:, :-1, :]
-        cp2, cm2 = cw[:, :, 1:], cw[:, :, :-1]
-        # red/black masks are shape-dependent only; reuse from pre-smooth.
-        p, r = _rbgs_3d(f, p, cp0, cm0, cp1, cm1, cp2, cm2,
-                         jcap_tol, nsmoothing, red, black)
-
-    return p, r
-
-
-# =====================================================================
-
-def _restrict_face_2d(ch, cv):
-    """Restrict face arrays from fine to coarse (2-D, WaterLily convention)."""
-    # ch: face along dim 0 — stride-2 in dim 0 first, then SUM in dim 1
-    ch_c = ch[::2, :]
-    e = ch_c[:, :-1:2]
-    o = ch_c[:, 1::2]
-    m = min(e.shape[1], o.shape[1])
-    ch_c = (e[:, :m] + o[:, :m]) * 0.5
-    # cv: face along dim 1 — stride-2 in dim 1 first, then SUM in dim 0
-    cv_c = cv[:, ::2]
-    e = cv_c[:-1:2, :]
-    o = cv_c[1::2, :]
-    m = min(e.shape[0], o.shape[0])
-    cv_c = (e[:m] + o[:m]) * 0.5
-    return ch_c, cv_c
-
-
-def _restrict_residual_2d(r):
-    """Full-weighting restriction of residual (2-D)."""
-    e0, o0 = r[::2, :], r[1::2, :]
-    m0 = min(e0.shape[0], o0.shape[0])
-    rc = e0[:m0] + o0[:m0]
-    e1, o1 = rc[:, ::2], rc[:, 1::2]
-    m1 = min(e1.shape[1], o1.shape[1])
-    rc = e1[:, :m1] + o1[:, :m1]
-    return rc
-
-
-def _prolongate_2d(err_coarse, target_shape):
-    """Bilinear prolongation (2-D) for cell-centred multigrid."""
-    ec = err_coarse[1:-1, 1:-1]
-    out = torch.nn.functional.interpolate(
-        ec.unsqueeze(0).unsqueeze(0),
-        size=(target_shape[0], target_shape[1]),
-        mode='bilinear',
-        align_corners=False,
-    )
-    return out[0, 0]
-
-
-def _rb_masks_2d(nx, ny, device):
-    """Build red/black masks for interior of shape (nx, ny)."""
-    gi = torch.arange(nx, device=device)
-    gj = torch.arange(ny, device=device)
-    I, J = torch.meshgrid(gi, gj, indexing="ij")
-    parity = (I + J) % 2
-    return (parity == 0), (parity == 1)
-
-
-# ── Full 2-D V-cycle with Jacobi (coarse-level recursive) ──────────────────
-def _vcycle_jac_2d(f, p, ch, cv, w, jcap_tol, nsmoothing):
-    """Complete 2-D V-cycle with Jacobi smoother (used at coarse levels)."""
-    p = p.clone()
-    cp0, cm0 = ch[1:, :], ch[:-1, :]
-    cp1, cm1 = cv[:, 1:], cv[:, :-1]
-
-    # pre-smooth
-    p, r = _jacobi_2d(f, p, cp0, cm0, cp1, cm1,
-                       w, jcap_tol, nsmoothing)
-
-    nx, ny = f.shape
-    if nx > 2 and ny > 2:
-        ch_c, cv_c = _restrict_face_2d(ch, cv)
-        r_c = _restrict_residual_2d(r)
-
-        coarse_shape = (r_c.shape[0] + 2, r_c.shape[1] + 2)
-        p_c = torch.zeros(coarse_shape, device=p.device, dtype=p.dtype)
-
-        err_c, _ = _vcycle_jac_2d(r_c, p_c, ch_c, cv_c,
-                                   w, jcap_tol, nsmoothing)
-
-        err = _prolongate_2d(err_c, r.shape)
-        p[1:-1, 1:-1] = p[1:-1, 1:-1] + err
-
-        cp0, cm0 = ch[1:, :], ch[:-1, :]
-        cp1, cm1 = cv[:, 1:], cv[:, :-1]
-        p, r = _jacobi_2d(f, p, cp0, cm0, cp1, cm1,
-                           w, jcap_tol, nsmoothing)
-
-    return p, r
-
-
-# ── Full 2-D V-cycle with RBGS (coarse-level recursive) ────────────────────
-def _vcycle_rbgs_2d(f, p, ch, cv, jcap_tol, nsmoothing):
-    """Complete 2-D V-cycle with RBGS smoother (used at coarse levels)."""
-    p = p.clone()
-    cp0, cm0 = ch[1:, :], ch[:-1, :]
-    cp1, cm1 = cv[:, 1:], cv[:, :-1]
-
-    red, black = _rb_masks_2d(f.shape[0], f.shape[1], p.device)
-    p, r = _rbgs_2d(f, p, cp0, cm0, cp1, cm1,
-                     jcap_tol, nsmoothing, red, black)
-
-    nx, ny = f.shape
-    if nx > 2 and ny > 2:
-        ch_c, cv_c = _restrict_face_2d(ch, cv)
-        r_c = _restrict_residual_2d(r)
-
-        coarse_shape = (r_c.shape[0] + 2, r_c.shape[1] + 2)
-        p_c = torch.zeros(coarse_shape, device=p.device, dtype=p.dtype)
-
-        err_c, _ = _vcycle_rbgs_2d(r_c, p_c, ch_c, cv_c,
-                                    jcap_tol, nsmoothing)
-
-        err = _prolongate_2d(err_c, r.shape)
-        p[1:-1, 1:-1] = p[1:-1, 1:-1] + err
-
-        cp0, cm0 = ch[1:, :], ch[:-1, :]
-        cp1, cm1 = cv[:, 1:], cv[:, :-1]
-        # red/black masks are shape-dependent only; reuse from pre-smooth.
-        p, r = _rbgs_2d(f, p, cp0, cm0, cp1, cm1,
-                         jcap_tol, nsmoothing, red, black)
-
-    return p, r
-
-
-# =====================================================================
 # Slicing helpers
 # =====================================================================
 
@@ -498,11 +93,13 @@ class _MultigridPoissonSolver:
         # subset of interior cells without touching the per-face
         # coefficient layout.
         self.dirichlet_mask = None
-        # ---- CUDA-graph replay of the all-Warp multigrid V-cycle -------
-        # When set, :class:`PoissonSolver` replays a captured, sync-free,
-        # fixed-cycle Warp V-cycle in one host launch (small-grid win on
-        # launch-bound grids).  See ``PoissonSolver._graphed_mg``.
-        self.cuda_graph = cuda_graph
+        # ---- WarpMG is the single V-cycle path (always on) -------------
+        # :class:`PoissonSolver` always drives the all-Warp multigrid
+        # V-cycle; on CUDA it is captured into a graph and replayed sync-free
+        # in one host launch, on CPU the same kernels launch eagerly.  The
+        # ``cuda_graph`` parameter is retained for call-site compatibility but
+        # ignored — there is no unoptimized fallback path any more.
+        self.cuda_graph = True
         # ---- Recycled-Krylov (deflation) state -------------------------
         # When recycle_k > 0, solve_rmgcg keeps a small subspace of search
         # directions from previous solves and deflates them out of the next
@@ -577,133 +174,6 @@ class _MultigridPoissonSolver:
         return J
 
     # ------------------------------------------------------------------
-    # Jacobi smoother
-    # ------------------------------------------------------------------
-    def Jacobi(self, f, p, cfaces):
-        self.BC(p)
-        J    = self.compute_J(cfaces)
-        active = torch.abs(J) >= self.jcap_tol          # fluid mask
-        Jinv = torch.where(active, J.reciprocal(), torch.zeros_like(J))
-        inner = _inner(p.ndim)
-        dmask = getattr(self, "_active_dirichlet_mask", None)
-
-        for _ in range(self.nsmoothing):
-            s = self.compute_sum(cfaces, p)
-            p[inner] = self.w * (-f + s) * Jinv + (1 - self.w) * p[inner]
-            if dmask is not None:
-                p[inner].masked_fill_(dmask, 0.0)
-            self.BC(p)
-
-        # residual — zero at degenerate cells (cf. WaterLily residual!)
-        s  = self.compute_sum(cfaces, p)
-        Au = (s - J * p[inner])
-        r  = torch.where(active, f - Au, torch.zeros_like(f))
-        return p, r
-
-    # ------------------------------------------------------------------
-    # Red-Black Gauss-Seidel smoother
-    # ------------------------------------------------------------------
-    def _build_rb_masks(self, shape):
-        """Build red/black masks for interior cells (cached per shape).
-
-        Red cells: sum of (0-based interior) indices is even.
-        Black cells: sum is odd.
-        Both masks have the shape of the *interior* grid (no ghost cells).
-        """
-        key = (shape, self.device)
-        if key in self._rb_mask_cache:
-            return self._rb_mask_cache[key]
-        ndim = len(shape)
-        # Build coordinate grids for the interior (each starting at 0)
-        ranges = [torch.arange(s, device=self.device) for s in shape]
-        grids  = torch.meshgrid(*ranges, indexing="ij")
-        parity = sum(grids) % 2            # 0 = red, 1 = black
-        red   = (parity == 0)
-        black = (parity == 1)
-        self._rb_mask_cache[key] = (red, black)
-        return red, black
-
-    def RBGS(self, f, p, cfaces):
-        """Red-Black Gauss-Seidel smoother.
-
-        Sweeps red cells (sum of interior indices even), then black cells,
-        updating p in-place.  Each colour update reads only neighbours of
-        the opposite colour, so the ordering is consistent.
-        """
-        self.BC(p)
-        ndim  = p.ndim
-        inner = _inner(ndim)
-        J     = self.compute_J(cfaces)
-        active = torch.abs(J) >= self.jcap_tol
-        Jinv  = torch.where(active, 1 / J, torch.zeros_like(J))
-
-        interior_shape = p[inner].shape
-        red, black = self._build_rb_masks(interior_shape)
-        dmask = getattr(self, "_active_dirichlet_mask", None)
-
-        for _ in range(self.nsmoothing):
-            # --- red sweep ---
-            s = self.compute_sum(cfaces, p)
-            p_new = (-f + s) * Jinv
-            p[inner] = torch.where(red, p_new, p[inner])
-            if dmask is not None:
-                p[inner].masked_fill_(dmask, 0.0)
-            self.BC(p)
-
-            # --- black sweep ---
-            s = self.compute_sum(cfaces, p)
-            p_new = (-f + s) * Jinv
-            p[inner] = torch.where(black, p_new, p[inner])
-            if dmask is not None:
-                p[inner].masked_fill_(dmask, 0.0)
-            self.BC(p)
-
-        # residual
-        s  = self.compute_sum(cfaces, p)
-        Au = (s - J * p[inner])
-        r  = torch.where(active, f - Au, torch.zeros_like(f))
-        return p, r
-
-    # ------------------------------------------------------------------
-    # Smoother dispatch
-    # ------------------------------------------------------------------
-    def smooth(self, f, p, cfaces):
-        """Dispatch to the configured smoother (used by the Python-recursive _vcycle)."""
-        if self.smoother == "rbgs":
-            p, r = self.RBGS(f, p, cfaces)
-        else:
-            p, r = self.Jacobi(f, p, cfaces)
-        m = getattr(self, "_active_dirichlet_mask", None)
-        if m is not None:
-            # Force p = 0 in masked (air) cells AND zero the residual
-            # there so it does not pollute the coarse-grid restriction.
-            inner = _inner(p.ndim)
-            p[inner].masked_fill_(m, 0.0)
-            r.masked_fill_(m, 0.0)
-        return p, r
-
-    @staticmethod
-    def _coarsen_mask(mask):
-        """Coarsen a bool Dirichlet mask by stride-2 OR-downsampling.
-
-        Any fine cell flagged as Dirichlet causes the enclosing coarse
-        cell to also be flagged (conservative: more cells get pinned).
-        Returns ``None`` if the result would be smaller than 1 along
-        any axis (caller should skip recursion in that case).
-        """
-        if mask is None:
-            return None
-        m = mask
-        ndim = m.ndim
-        for d in range(ndim):
-            even = m[_sl(ndim, d, slice(0, None, 2))]
-            odd  = m[_sl(ndim, d, slice(1, None, 2))]
-            n = min(even.shape[d], odd.shape[d])
-            m = (even[_sl(ndim, d, slice(n))] |
-                 odd[_sl(ndim, d, slice(n))])
-        return m
-
-    # ------------------------------------------------------------------
     # Face array helpers
     # ------------------------------------------------------------------
     @staticmethod
@@ -751,199 +221,6 @@ class _MultigridPoissonSolver:
         remaining = dict(kwargs)
         face_arrs = [remaining.pop(lab) for lab in labels]
         return face_arrs, remaining
-
-    # ------------------------------------------------------------------
-    # V-cycle dispatch
-    # ------------------------------------------------------------------
-    def _dispatch_vcycle(self, f, p, face_arrs):
-        """Run one V-cycle.
-
-        Base class: the pure-PyTorch recursive V-cycle (dimension-agnostic,
-        Dirichlet-mask aware).  :class:`PoissonSolver` overrides this to run the
-        fine level on Warp kernels (CPU + GPU).  The caller is OK with in-place
-        mutation of ``p`` (the result is assigned straight back to ``fs.p0``).
-        """
-        return self._vcycle(f, p, face_arrs)
-
-    # ------------------------------------------------------------------
-    # V-cycle  (dimension-agnostic, recursive)
-    # ------------------------------------------------------------------
-    def _vcycle(self, f, p, face_arrs):
-        """Internal V-cycle operating on full face arrays."""
-        ndim  = f.ndim
-        shape = f.shape
-
-        # ---- Dirichlet mask (free-surface): pick / save / restore ----
-        # The top-level caller stores the fine mask on self.dirichlet_mask;
-        # within a recursion we read the current-level mask off
-        # self._active_dirichlet_mask, restrict it for the coarse call,
-        # and restore on the way back up.
-        outer_mask = getattr(self, "_active_dirichlet_mask", None)
-        if outer_mask is None:
-            outer_mask = self.dirichlet_mask
-        self._active_dirichlet_mask = (
-            outer_mask if (outer_mask is None or outer_mask.shape == shape)
-            else None
-        )
-
-        # extract (cp, cm) for the smoother
-        cfaces = self._extract_cfaces(face_arrs, ndim)
-
-        # pre-smooth
-        p, r = self.smooth(f, p, cfaces)
-
-        # coarsen if grid is large enough
-        if all(n > 8 for n in shape):
-
-            # CPU offload for very large grids
-            on_gpu = (self.device == "cuda"
-                      and max(shape) >= self.n_switch)
-            if on_gpu:
-                f         = f.cpu()
-                p         = p.cpu()
-                r         = r.cpu()
-                face_arrs = [cf.cpu() for cf in face_arrs]
-
-            # ---- restriction of face arrays --------------------------
-            # Matches WaterLily.jl's restrictL:
-            #   L_coarse[I,i] = 0.5 * sum_{J in up(I,i)} L[J,i]
-            # i.e. stride-2 in face direction, SUM in transverse
-            # directions, then a single 0.5 factor.
-            # In 2D this equals the old  0.5*(even+odd) per transverse dim.
-            # In 3D the old code applied 0.5 per transverse dim, giving
-            # (0.5)^(ndim-1)*sum instead of the correct 0.5*sum, which
-            # made the coarse diagonal too small and caused divergence.
-            face_arrs_coarse = []
-            for d, cf in enumerate(face_arrs):
-                cf_c = cf
-                for d2 in range(ndim):
-                    if d2 == d:
-                        cf_c = cf_c[_sl(ndim, d2, slice(None, None, 2))]
-                    else:
-                        even = cf_c[_sl(ndim, d2, slice(None, -1, 2))]
-                        odd  = cf_c[_sl(ndim, d2, slice(1, None, 2))]
-                        cf_c = even + odd          # SUM (not average)
-                cf_c = cf_c.mul_(0.5)              # single 0.5 factor (in-place)
-                face_arrs_coarse.append(cf_c)
-
-            # ---- restriction of residual (full-weighting) ------------
-            # No .clone() needed: each slicing step creates a new tensor
-            r_coarse = r
-            for d in range(ndim):
-                even = r_coarse[_sl(ndim, d, slice(0, None, 2))]
-                odd  = r_coarse[_sl(ndim, d, slice(1, None, 2))]
-                m = min(even.shape[d], odd.shape[d])
-                r_coarse = (even[_sl(ndim, d, slice(m))] +
-                            odd[_sl(ndim, d, slice(m))])
-
-            # coarse-grid error
-            coarse_shape = tuple(s + 2 for s in r_coarse.shape)
-            saved_mask = self._active_dirichlet_mask
-            coarse_mask = self._coarsen_mask(saved_mask)
-            self._active_dirichlet_mask = coarse_mask
-            err_coarse, _ = self._vcycle(
-                r_coarse,
-                torch.zeros(coarse_shape, device=p.device, dtype=p.dtype),
-                face_arrs_coarse,
-            )
-            self._active_dirichlet_mask = saved_mask
-
-            # ---- prolongation (trilinear / bilinear) -----------------
-            inner_c = _inner(ndim)
-            ec = err_coarse[inner_c]
-            mode = 'trilinear' if ndim == 3 else 'bilinear'
-            ec_nd = ec.unsqueeze(0).unsqueeze(0)
-            err = torch.nn.functional.interpolate(
-                ec_nd, size=r.shape, mode=mode, align_corners=False,
-            )[0, 0]
-
-            # correction
-            p[_inner(ndim)] += err
-            m = self._active_dirichlet_mask
-            if m is not None:
-                p[_inner(ndim)].masked_fill_(m, 0.0)
-
-            if on_gpu:
-                f         = f.cuda()
-                p         = p.cuda()
-                face_arrs = [cf.cuda() for cf in face_arrs]
-                # re-extract after device transfer
-                cfaces = self._extract_cfaces(face_arrs, ndim)
-
-            # post-smooth
-            p, r = self.smooth(f, p, cfaces)
-
-        return p, r
-
-    # ------------------------------------------------------------------
-    # Public V-cycle  (wrapper that builds face_arrs from kwargs)
-    # ------------------------------------------------------------------
-    def vcycle(self, f, p, **kwargs):
-        """V-cycle with face-coefficient arrays ch/cv(/cw)."""
-        ndim = f.ndim
-        face_arrs, kwargs = self._face_arrs_from_kwargs(kwargs, ndim)
-        if face_arrs is None:
-            raise ValueError(
-                "vcycle: ch/cv (2-D) or ch/cv/cw (3-D) keyword "
-                "arguments are required."
-            )
-        return self._vcycle(f, p, face_arrs)
-
-    # ------------------------------------------------------------------
-    # Top-level solve
-    # ------------------------------------------------------------------
-    def solve_multigrid(self, f, p0, **kwargs):
-        """Solve with multigrid V-cycles.
-
-        Parameters
-        ----------
-        f  : RHS on the interior grid  (no ghost cells)
-        p0 : initial guess (with ghost cells)
-        ch, cv[, cw] : pre-computed face-averaged coefficients
-        pre_scaled : bool, optional
-            When True, *f* is already scaled by ``h²``, so the internal
-            ``f_scaled = h² * f`` multiplication is skipped (T3a: saves one
-            interior-sized allocation).
-        """
-        pre_scaled = kwargs.pop('pre_scaled', False)
-        ndim = f.ndim
-        face_arrs, _ = self._face_arrs_from_kwargs(kwargs, ndim)
-        if face_arrs is None:
-            raise ValueError(
-                "solve_multigrid: ch/cv (2-D) or ch/cv/cw (3-D) keyword "
-                "arguments are required."
-            )
-
-        # p0 is passed directly; the vcycle clones its input internally,
-        # so the redundant clone here is unnecessary and wastes 128-131 MB.
-        p = p0
-        # T3a: skip h² multiplication when caller has pre-scaled f.
-        f_scaled = f if pre_scaled else self.h2 * f
-        cycles_run = self.max_vcycles
-        for i in range(self.max_vcycles):
-            p, r = self._dispatch_vcycle(f_scaled, p, face_arrs)
-            r_err = self._convergence_norm(r)
-            if r_err < self.tol:
-                cycles_run = i + 1
-                break
-        # Refresh the ghost ring before the gauge fix: the Warp smoothers fold
-        # the Neumann BC by index-clamping and never write the ghost cells, so
-        # the ring holds stale/allocator values that would otherwise poison the
-        # full-array mean below (and any downstream reader of the padded p).
-        self.BC(p)
-        # float64 mean subtraction: GPU parallel-reduction of float32 gives
-        # a different value than CPU sequential sum.
-        # Skip when a Dirichlet mask pins p in (a subset of) cells — the
-        # null space is removed by the Dirichlet condition, so the
-        # absolute level of p is meaningful and must NOT be shifted.
-        if self.dirichlet_mask is None:
-            p -= p.to(torch.float64).mean().to(p.dtype)
-        if self.verbose:
-            print(
-                f"Multigrid residual = {self.l2_norm(r):.2e}/{self._tol_float:.2e} "
-                f"with {cycles_run}/{self.max_vcycles} cycles"
-            )
-        return p, r
 
     # ------------------------------------------------------------------
     # SPD operator for CG
@@ -1293,110 +570,6 @@ class _MultigridPoissonSolver:
 # Stand-alone test
 # ======================================================================
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  Warp fine-level smoother + graphed multigrid (folded from the Warp backend)
-# ─────────────────────────────────────────────────────────────────────────────
-from lilytorch.src.poisson import (
-    rbgs_sweep_2d_warp, jacobi_sweep_2d_warp, mg_residual_2d_warp,
-    rbgs_sweep_3d_warp, jacobi_sweep_3d_warp, mg_residual_3d_warp,
-)
-
-
-# ── Hybrid V-cycles: Warp fine-level smoother+residual, pure-torch coarse ────
-# The finest level's pre/post smooth + residual run on Warp kernels (CPU + GPU);
-# the coarse correction recurses into the pure-torch _vcycle_{rbgs,jac} path.
-
-def _vcycle_rbgs_2d_warp(f, p, ch, cv, jcap_tol, nsmoothing):
-    ch = ch.contiguous(); cv = cv.contiguous()
-    cp0, cm0 = ch[1:, :], ch[:-1, :]
-    cp1, cm1 = cv[:, 1:], cv[:, :-1]
-    rbgs_sweep_2d_warp(p, f, cp0, cm0, cp1, cm1, jcap_tol, nsmoothing)
-    r = mg_residual_2d_warp(p, f, cp0, cm0, cp1, cm1, jcap_tol)
-    nx, ny = f.shape
-    if nx > 2 and ny > 2:
-        ch_c, cv_c = _restrict_face_2d(ch, cv)
-        r_c = _restrict_residual_2d(r); del r
-        coarse_shape = (r_c.shape[0] + 2, r_c.shape[1] + 2)
-        p_c = torch.zeros(coarse_shape, device=p.device, dtype=p.dtype)
-        err_c, _ = _vcycle_rbgs_2d(r_c, p_c, ch_c, cv_c, jcap_tol, nsmoothing)
-        err = _prolongate_2d(err_c, f.shape)
-        p[1:-1, 1:-1] = p[1:-1, 1:-1] + err
-        cp0, cm0 = ch[1:, :], ch[:-1, :]
-        cp1, cm1 = cv[:, 1:], cv[:, :-1]
-        rbgs_sweep_2d_warp(p, f, cp0, cm0, cp1, cm1, jcap_tol, nsmoothing)
-        r = mg_residual_2d_warp(p, f, cp0, cm0, cp1, cm1, jcap_tol)
-    return p, r
-
-
-def _vcycle_jac_2d_warp(f, p, ch, cv, w, jcap_tol, nsmoothing):
-    ch = ch.contiguous(); cv = cv.contiguous()
-    cp0, cm0 = ch[1:, :], ch[:-1, :]
-    cp1, cm1 = cv[:, 1:], cv[:, :-1]
-    jacobi_sweep_2d_warp(p, f, cp0, cm0, cp1, cm1, jcap_tol, w, nsmoothing)
-    r = mg_residual_2d_warp(p, f, cp0, cm0, cp1, cm1, jcap_tol)
-    nx, ny = f.shape
-    if nx > 2 and ny > 2:
-        ch_c, cv_c = _restrict_face_2d(ch, cv)
-        r_c = _restrict_residual_2d(r); del r
-        coarse_shape = (r_c.shape[0] + 2, r_c.shape[1] + 2)
-        p_c = torch.zeros(coarse_shape, device=p.device, dtype=p.dtype)
-        err_c, _ = _vcycle_jac_2d(r_c, p_c, ch_c, cv_c, w, jcap_tol, nsmoothing)
-        err = _prolongate_2d(err_c, f.shape)
-        p[1:-1, 1:-1] = p[1:-1, 1:-1] + err
-        cp0, cm0 = ch[1:, :], ch[:-1, :]
-        cp1, cm1 = cv[:, 1:], cv[:, :-1]
-        jacobi_sweep_2d_warp(p, f, cp0, cm0, cp1, cm1, jcap_tol, w, nsmoothing)
-        r = mg_residual_2d_warp(p, f, cp0, cm0, cp1, cm1, jcap_tol)
-    return p, r
-
-
-def _vcycle_rbgs_3d_warp(f, p, ch, cv, cw, jcap_tol, nsmoothing):
-    ch = ch.contiguous(); cv = cv.contiguous(); cw = cw.contiguous()
-    cp0, cm0 = ch[1:, :, :], ch[:-1, :, :]
-    cp1, cm1 = cv[:, 1:, :], cv[:, :-1, :]
-    cp2, cm2 = cw[:, :, 1:], cw[:, :, :-1]
-    rbgs_sweep_3d_warp(p, f, cp0, cm0, cp1, cm1, cp2, cm2, jcap_tol, nsmoothing)
-    r = mg_residual_3d_warp(p, f, cp0, cm0, cp1, cm1, cp2, cm2, jcap_tol)
-    nx, ny, nz = f.shape
-    if nx > 2 and ny > 2 and nz > 2:
-        ch_c, cv_c, cw_c = _restrict_face_3d(ch, cv, cw)
-        r_c = _restrict_residual_3d(r); del r
-        coarse_shape = (r_c.shape[0] + 2, r_c.shape[1] + 2, r_c.shape[2] + 2)
-        p_c = torch.zeros(coarse_shape, device=p.device, dtype=p.dtype)
-        err_c, _ = _vcycle_rbgs_3d(r_c, p_c, ch_c, cv_c, cw_c, jcap_tol, nsmoothing)
-        err = _prolongate_3d(err_c, f.shape)
-        p[1:-1, 1:-1, 1:-1] = p[1:-1, 1:-1, 1:-1] + err
-        cp0, cm0 = ch[1:, :, :], ch[:-1, :, :]
-        cp1, cm1 = cv[:, 1:, :], cv[:, :-1, :]
-        cp2, cm2 = cw[:, :, 1:], cw[:, :, :-1]
-        rbgs_sweep_3d_warp(p, f, cp0, cm0, cp1, cm1, cp2, cm2, jcap_tol, nsmoothing)
-        r = mg_residual_3d_warp(p, f, cp0, cm0, cp1, cm1, cp2, cm2, jcap_tol)
-    return p, r
-
-
-def _vcycle_jac_3d_warp(f, p, ch, cv, cw, w, jcap_tol, nsmoothing):
-    ch = ch.contiguous(); cv = cv.contiguous(); cw = cw.contiguous()
-    cp0, cm0 = ch[1:, :, :], ch[:-1, :, :]
-    cp1, cm1 = cv[:, 1:, :], cv[:, :-1, :]
-    cp2, cm2 = cw[:, :, 1:], cw[:, :, :-1]
-    jacobi_sweep_3d_warp(p, f, cp0, cm0, cp1, cm1, cp2, cm2, jcap_tol, w, nsmoothing)
-    r = mg_residual_3d_warp(p, f, cp0, cm0, cp1, cm1, cp2, cm2, jcap_tol)
-    nx, ny, nz = f.shape
-    if nx > 2 and ny > 2 and nz > 2:
-        ch_c, cv_c, cw_c = _restrict_face_3d(ch, cv, cw)
-        r_c = _restrict_residual_3d(r); del r
-        coarse_shape = (r_c.shape[0] + 2, r_c.shape[1] + 2, r_c.shape[2] + 2)
-        p_c = torch.zeros(coarse_shape, device=p.device, dtype=p.dtype)
-        err_c, _ = _vcycle_jac_3d(r_c, p_c, ch_c, cv_c, cw_c, w, jcap_tol, nsmoothing)
-        err = _prolongate_3d(err_c, f.shape)
-        p[1:-1, 1:-1, 1:-1] = p[1:-1, 1:-1, 1:-1] + err
-        cp0, cm0 = ch[1:, :, :], ch[:-1, :, :]
-        cp1, cm1 = cv[:, 1:, :], cv[:, :-1, :]
-        cp2, cm2 = cw[:, :, 1:], cw[:, :, :-1]
-        jacobi_sweep_3d_warp(p, f, cp0, cm0, cp1, cm1, cp2, cm2, jcap_tol, w, nsmoothing)
-        r = mg_residual_3d_warp(p, f, cp0, cm0, cp1, cm1, cp2, cm2, jcap_tol)
-    return p, r
-
 
 class PoissonSolver(_MultigridPoissonSolver):
     """Variable-coefficient multigrid Poisson with the fine-level smoother +
@@ -1405,7 +578,39 @@ class PoissonSolver(_MultigridPoissonSolver):
     The top-level multigrid / MGCG / RMGCG solvers run their outer driver in
     Python; :meth:`_dispatch_vcycle` runs the Warp hybrid V-cycle (Warp fine
     level + pure-torch coarse recursion), optionally replayed from a captured
-    CUDA graph when ``cuda_graph`` is set."""
+    CUDA graph when ``cuda_graph`` is set.
+
+    Two V-cycle implementations coexist ON PURPOSE — they are NOT dead
+    duplication:
+
+    * the DEFAULT (``cuda_graph=False``) hybrid path — Warp fine level +
+      pure-torch coarse recursion, driven from a Python loop. It runs on CPU
+      and GPU, in f32/f64, and is the single source of truth for correctness
+      (it also serves RMGCG, which the graphed path does not).
+    * the OPT-IN graphed path (``cuda_graph=True``) — the all-Warp
+      ``WarpMG2D``/``WarpMG3D`` V-cycle in :mod:`lilytorch.src.multigrid_graph`,
+      whose fixed-cycle-count V-cycle is captured once into a CUDA graph and
+      thereafter replayed in a single sync-free host launch.
+
+    WHY BOTH: the pressure Poisson solve is launch-bound, not compute-bound, on
+    the grids this solver targets. Each Python-driven V-cycle dispatches dozens
+    of tiny kernels (smoother sweeps + residual/restrict/prolong per level),
+    each a few µs of GPU work behind µs of host launch + sync overhead. The
+    captured graph collapses that whole tree into one replay. Measured on an
+    RTX 4080 SUPER (fp32, rbgs, variable-coeff): the graphed path is ~15–35×
+    faster on the isolated solve — ~16× at the salamander 1024×512 config that
+    enables it, ~17–25× at 64³, ~30× at 64²–128² — while agreeing with the
+    Python path to fp32 reduction roundoff (mgcg converges in identical
+    iteration counts). The win GROWS as the grid shrinks (more launch overhead
+    relative to compute), so the graphed path is worth it precisely on the
+    small / launch-bound grids where the Python path spends most of its wall
+    clock in host overhead.
+
+    It is opt-in (default off) only because CUDA-graph capture requires static
+    shapes/streams and does not cover RMGCG or CPU — not because the speedup is
+    marginal. If you are tempted to delete ``multigrid_graph.py`` as a
+    "duplicate", re-run ``benchmarks/bench_python_overhead.py``-style
+    cuda_graph=True/False comparison first."""
 
     #: op names this backend now serves on Warp (bookkeeping / documentation).
     WARP_POISSON_OPS = frozenset({
@@ -1429,68 +634,75 @@ class PoissonSolver(_MultigridPoissonSolver):
         if nvc is None:
             nvc = self.max_vcycles
         nvc = max(int(nvc), 1)
-        key = (ndim, tuple(shape), self.dtype, self.smoother, self.nsmoothing, nvc)
+        # Free-surface GFM: a Dirichlet mask needs a mask-aware WarpMG (extra
+        # per-sweep pinning kernels); keyed separately so the common Neumann
+        # solver stays mask-kernel-free.
+        dirichlet = self.dirichlet_mask is not None
+        key = (ndim, tuple(shape), self.dtype, self.smoother, self.nsmoothing,
+               nvc, dirichlet)
         mg = cache.get(key)
         if mg is None:
             if ndim == 3:
                 mg = WarpMG3D(shape[0], shape[1], shape[2], device=self.device,
                               dtype=self.dtype, smoother=self.smoother,
                               nu1=self.nsmoothing, nu2=self.nsmoothing,
-                              n_vcycles=nvc, jcap_tol=self.jcap_tol)
+                              n_vcycles=nvc, jcap_tol=self.jcap_tol,
+                              dirichlet=dirichlet)
             elif ndim == 2:
                 # 2-D graphed MG is now dtype-generic (f32+f64) + rbgs/jacobi,
                 # matching the 3-D driver — no config falls back to the Python loop.
                 mg = WarpMG2D(shape[0], shape[1], device=self.device,
                               dtype=self.dtype, smoother=self.smoother,
                               nu1=self.nsmoothing, nu2=self.nsmoothing,
-                              n_vcycles=nvc, jcap_tol=self.jcap_tol)
+                              n_vcycles=nvc, jcap_tol=self.jcap_tol,
+                              dirichlet=dirichlet)
             else:
                 return None
             cache[key] = mg
         return mg
 
     def solve_multigrid(self, f, p0, **kwargs):
-        """CUDA-graphed all-Warp multigrid when ``cuda_graph`` is on (3-D),
-        else the Item-2 Python-driver path.  The graphed path replays a captured,
-        sync-free, fixed-(``max_vcycles``)-cycle V-cycle in one host launch —
-        ~4× over the Python loop."""
-        if getattr(self, "cuda_graph", False) and f.ndim in (2, 3):
-            face_arrs, _ = self._face_arrs_from_kwargs(kwargs, f.ndim)
-            mg = self._graphed_mg(f.ndim, tuple(f.shape))
-            if mg is not None and face_arrs is not None:
-                pre_scaled = kwargs.get("pre_scaled", False)
-                f_scaled = f if pre_scaled else self.h2 * f
-                if f.ndim == 3:
-                    ch, cv, cw = face_arrs
-                    p = mg.solve(f_scaled, ch.contiguous(), cv.contiguous(),
-                                 cw.contiguous(), p0=p0)
-                    # Ghost ring is never written by the graphed Warp V-cycle
-                    # (index-clamped Neumann); refresh it before the gauge mean.
-                    self.BC(p)
-                    if self.dirichlet_mask is None:
-                        p -= p.to(torch.float64).mean().to(p.dtype)
-                    from lilytorch.src.poisson import mg_residual_3d_warp
-                    cp0, cm0 = ch[1:].contiguous(), ch[:-1].contiguous()
-                    cp1, cm1 = cv[:, 1:].contiguous(), cv[:, :-1].contiguous()
-                    cp2, cm2 = cw[:, :, 1:].contiguous(), cw[:, :, :-1].contiguous()
-                    r = mg_residual_3d_warp(p, f_scaled, cp0, cm0, cp1, cm1,
-                                            cp2, cm2, self.jcap_tol)
-                    return p, r
-                ch, cv = face_arrs
-                p = mg.solve(f_scaled, ch.contiguous(), cv.contiguous(), p0=p0)
-                # Ghost ring is never written by the graphed Warp V-cycle
-                # (index-clamped Neumann); refresh it before the gauge mean.
-                self.BC(p)
-                if self.dirichlet_mask is None:
-                    p -= p.to(torch.float64).mean().to(p.dtype)
-                from lilytorch.src.multigrid_graph import mg_residual_2d_clamped_warp
-                cp0, cm0 = ch[1:].contiguous(), ch[:-1].contiguous()
-                cp1, cm1 = cv[:, 1:].contiguous(), cv[:, :-1].contiguous()
-                r = mg_residual_2d_clamped_warp(p, f_scaled, cp0, cm0, cp1, cm1,
-                                                self.jcap_tol)
-                return p, r
-        # Fallback: Python outer driver with the fine-level V-cycle on Warp.
-        return super().solve_multigrid(f, p0, **kwargs)
+        """Standalone multigrid via the graph-captured WarpMG V-cycle (a fixed
+        ``max_vcycles`` cycles per call).  On CUDA it replays one captured graph
+        in a single host launch; on CPU it launches the same kernels eagerly.  A
+        Dirichlet ``dirichlet_mask`` (free-surface GFM) selects the mask-aware
+        WarpMG, which pins p=0 in the flagged cells at every level/sweep."""
+        face_arrs, _ = self._face_arrs_from_kwargs(kwargs, f.ndim)
+        if face_arrs is None:
+            raise ValueError(
+                "solve_multigrid: ch/cv (2-D) or ch/cv/cw (3-D) keyword "
+                "arguments are required.")
+        mg = self._graphed_mg(f.ndim, tuple(f.shape))
+        pre_scaled = kwargs.get("pre_scaled", False)
+        f_scaled = f if pre_scaled else self.h2 * f
+        if f.ndim == 3:
+            ch, cv, cw = face_arrs
+            p = mg.solve(f_scaled, ch.contiguous(), cv.contiguous(),
+                         cw.contiguous(), p0=p0, mask=self.dirichlet_mask)
+            # Ghost ring is never written by the graphed Warp V-cycle
+            # (index-clamped Neumann); refresh it before the gauge mean.
+            self.BC(p)
+            if self.dirichlet_mask is None:
+                p -= p.to(torch.float64).mean().to(p.dtype)
+            from lilytorch.src.multigrid_graph import mg_residual_3d_warp
+            cp0, cm0 = ch[1:].contiguous(), ch[:-1].contiguous()
+            cp1, cm1 = cv[:, 1:].contiguous(), cv[:, :-1].contiguous()
+            cp2, cm2 = cw[:, :, 1:].contiguous(), cw[:, :, :-1].contiguous()
+            r = mg_residual_3d_warp(p, f_scaled, cp0, cm0, cp1, cm1,
+                                    cp2, cm2, self.jcap_tol)
+            return p, r
+        ch, cv = face_arrs
+        p = mg.solve(f_scaled, ch.contiguous(), cv.contiguous(), p0=p0,
+                     mask=self.dirichlet_mask)
+        self.BC(p)
+        if self.dirichlet_mask is None:
+            p -= p.to(torch.float64).mean().to(p.dtype)
+        from lilytorch.src.multigrid_graph import mg_residual_2d_clamped_warp
+        cp0, cm0 = ch[1:].contiguous(), ch[:-1].contiguous()
+        cp1, cm1 = cv[:, 1:].contiguous(), cv[:, :-1].contiguous()
+        r = mg_residual_2d_clamped_warp(p, f_scaled, cp0, cm0, cp1, cm1,
+                                        self.jcap_tol)
+        return p, r
 
     def _dispatch_vcycle(self, f, p, face_arrs):
         """One V-cycle with the fine-level smoother + residual on Warp.
@@ -1510,31 +722,16 @@ class PoissonSolver(_MultigridPoissonSolver):
         argument as the raw smoother RHS, so we pass ``f`` straight through with
         **no h² multiplication** (the ``h²`` rescale belongs only in
         ``solve_multigrid``, where the input is the raw divergence)."""
-        if getattr(self, "cuda_graph", False) and p.is_cuda and f.ndim in (2, 3):
-            mg = self._graphed_mg(f.ndim, tuple(f.shape), nvc=1)
-            if mg is not None:
-                if f.ndim == 3:
-                    ch, cv, cw = face_arrs
-                    z = mg.solve(f, ch.contiguous(), cv.contiguous(),
-                                 cw.contiguous(), p0=p)
-                else:
-                    ch, cv = face_arrs
-                    z = mg.solve(f, ch.contiguous(), cv.contiguous(), p0=p)
-                return z, None
-        ndim = f.ndim
-        if ndim == 3:
+        mg = self._graphed_mg(f.ndim, tuple(f.shape), nvc=1)
+        if f.ndim == 3:
             ch, cv, cw = face_arrs
-            if self.smoother == "rbgs":
-                return _vcycle_rbgs_3d_warp(
-                    f, p, ch, cv, cw, self.jcap_tol, self.nsmoothing)
-            return _vcycle_jac_3d_warp(
-                f, p, ch, cv, cw, self.w, self.jcap_tol, self.nsmoothing)
-        ch, cv = face_arrs
-        if self.smoother == "rbgs":
-            return _vcycle_rbgs_2d_warp(
-                f, p, ch, cv, self.jcap_tol, self.nsmoothing)
-        return _vcycle_jac_2d_warp(
-            f, p, ch, cv, self.w, self.jcap_tol, self.nsmoothing)
+            z = mg.solve(f, ch.contiguous(), cv.contiguous(),
+                         cw.contiguous(), p0=p, mask=self.dirichlet_mask)
+        else:
+            ch, cv = face_arrs
+            z = mg.solve(f, ch.contiguous(), cv.contiguous(), p0=p,
+                         mask=self.dirichlet_mask)
+        return z, None
 
     # ── Sync-free MGCG: periodic convergence check (C1, point 4) ──────────────
     def _cg_core(self, b, x, cfaces, face_arrs, recycle=None, harvest=None):

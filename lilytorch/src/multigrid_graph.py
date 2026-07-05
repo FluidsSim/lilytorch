@@ -267,6 +267,46 @@ def jacobi_3d(
     p_out[b] = w * p_new + (type(w)(1.0) - w) * pc
 
 
+# ── Dirichlet-mask kernels (3-D analogues of the 2-D block) ──────────────────
+
+@wp.kernel
+def apply_mask_padded_3d(p: wp.array(dtype=Any), mask: wp.array(dtype=Any),
+                         Nx: int, Ny: int, Nz: int):
+    i, j, k = wp.tid()
+    c = i * (Ny * Nz) + j * Nz + k
+    if mask[c] > type(mask[0])(0.5):
+        b = (i + 1) * ((Ny + 2) * (Nz + 2)) + (j + 1) * (Nz + 2) + (k + 1)
+        p[b] = type(p[0])(0.0)
+
+
+@wp.kernel
+def apply_mask_interior_3d(r: wp.array(dtype=Any), mask: wp.array(dtype=Any),
+                           Nx: int, Ny: int, Nz: int):
+    i, j, k = wp.tid()
+    c = i * (Ny * Nz) + j * Nz + k
+    if mask[c] > type(mask[0])(0.5):
+        r[c] = type(r[0])(0.0)
+
+
+@wp.kernel
+def restrict_mask_max_3d(mf: wp.array(dtype=Any), mc: wp.array(dtype=Any),
+                         Nxf: int, Nyf: int, Nzf: int,
+                         Nxc: int, Nyc: int, Nzc: int):
+    I, J, K = wp.tid()
+    m = type(mf[0])(0.0)
+    for di in range(2):
+        ii = 2 * I + di
+        if ii < Nxf:
+            for dj in range(2):
+                jj = 2 * J + dj
+                if jj < Nyf:
+                    for dk in range(2):
+                        kk = 2 * K + dk
+                        if kk < Nzf:
+                            m = wp.max(m, mf[ii * (Nyf * Nzf) + jj * Nzf + kk])
+    mc[I * (Nyc * Nzc) + J * Nzc + K] = m
+
+
 for _dt in (wp.float32, wp.float64):
     _A = wp.array(dtype=_dt)
     _C6 = {"cp0": _A, "cm0": _A, "cp1": _A, "cm1": _A, "cp2": _A, "cm2": _A}
@@ -280,6 +320,9 @@ for _dt in (wp.float32, wp.float64):
     wp.overload(extract_pairs_3d, {
         "ch": _A, "cv": _A, "cw": _A, "cp0": _A, "cm0": _A, "cp1": _A,
         "cm1": _A, "cp2": _A, "cm2": _A})
+    wp.overload(apply_mask_padded_3d, {"p": _A, "mask": _A})
+    wp.overload(apply_mask_interior_3d, {"r": _A, "mask": _A})
+    wp.overload(restrict_mask_max_3d, {"mf": _A, "mc": _A})
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -301,7 +344,7 @@ class WarpMG3D:
 
     def __init__(self, Nx, Ny, Nz, device="cuda:0", dtype=torch.float64,
                  smoother="rbgs", nu1=2, nu2=2, n_vcycles=4, coarse_extra=8,
-                 jcap_tol=1e-30, min_dim=4):
+                 jcap_tol=1e-30, min_dim=4, dirichlet=False):
         self.device = device
         self.tdt = dtype
         self.wpf = wp.float64 if dtype == torch.float64 else wp.float32
@@ -310,6 +353,8 @@ class WarpMG3D:
         self.coarse_extra = coarse_extra
         self.jcap = jcap_tol
         self.min_dim = min_dim
+        # Free-surface GFM: pin p=0 in flagged cells at every level/sweep.
+        self.dirichlet = dirichlet
         self._wdev = "cuda:0" if (isinstance(device, str) and "cuda" in device) \
             or getattr(device, "type", "") == "cuda" else "cpu"
         self._tdev = device
@@ -346,6 +391,10 @@ class WarpMG3D:
             )
             if self.smoother == "jacobi":
                 lv["ptmp"] = wp.zeros_like(lv["pw"])
+            if self.dirichlet:
+                mask = torch.zeros(nx * ny * nz, **o)
+                lv["mask_t"] = mask
+                lv["maskw"] = wp.from_torch(mask)
             self.levels.append(lv)
             if (nx % 2 == 0 and ny % 2 == 0 and nz % 2 == 0
                     and min(nx, ny, nz) // 2 >= self.min_dim):
@@ -359,12 +408,15 @@ class WarpMG3D:
     def _smooth(self, lv, n):
         nx, ny, nz = lv["n"]
         jt = self.wpf(self.jcap)
+        dir = self.dirichlet
         if self.smoother == "jacobi":
             src, dst = lv["pw"], lv["ptmp"]
             for _ in range(n):
                 wp.launch(jacobi_3d, dim=(nx, ny, nz),
                           inputs=[dst, src, lv["fw"], *self._coef(lv),
                                   nx, ny, nz, jt, self.wpf(0.7)], device=self._wdev)
+                if dir:
+                    self._mask_p(lv, dst)
                 src, dst = dst, src
             if n % 2 == 1:
                 wp.copy(lv["pw"], src)
@@ -374,6 +426,19 @@ class WarpMG3D:
                     wp.launch(rbgs_halfsweep_3d, dim=(nx, ny, nz),
                               inputs=[lv["pw"], lv["fw"], *self._coef(lv),
                                       nx, ny, nz, jt, color], device=self._wdev)
+                    if dir:
+                        self._mask_p(lv)
+
+    def _mask_p(self, lv, arr=None):
+        nx, ny, nz = lv["n"]
+        p = arr if arr is not None else lv["pw"]
+        wp.launch(apply_mask_padded_3d, dim=(nx, ny, nz),
+                  inputs=[p, lv["maskw"], nx, ny, nz], device=self._wdev)
+
+    def _mask_r(self, lv):
+        nx, ny, nz = lv["n"]
+        wp.launch(apply_mask_interior_3d, dim=(nx, ny, nz),
+                  inputs=[lv["rw"], lv["maskw"], nx, ny, nz], device=self._wdev)
 
     def _extract(self, lv):
         nx, ny, nz = lv["n"]
@@ -396,6 +461,14 @@ class WarpMG3D:
                       inputs=[f["cww"], c["cww"], nf[0], nf[1], nf[2] + 1,
                               nc[0], nc[1], nc[2] + 1, 2], device=self._wdev)
 
+    def _restrict_masks(self):
+        for l in range(len(self.levels) - 1):
+            f, c = self.levels[l], self.levels[l + 1]
+            nf = f["n"]; nc = c["n"]
+            wp.launch(restrict_mask_max_3d, dim=(nc[0], nc[1], nc[2]),
+                      inputs=[f["maskw"], c["maskw"], nf[0], nf[1], nf[2],
+                              nc[0], nc[1], nc[2]], device=self._wdev)
+
     def _vcycle(self, lvl):
         lv = self.levels[lvl]
         nx, ny, nz = lv["n"]
@@ -407,6 +480,8 @@ class WarpMG3D:
         wp.launch(mg_residual_3d, dim=(nx, ny, nz),
                   inputs=[lv["pw"], lv["fw"], *self._coef(lv), lv["rw"],
                           nx, ny, nz, jt], device=self._wdev)
+        if self.dirichlet:
+            self._mask_r(lv)
         c = self.levels[lvl + 1]
         ncx, ncy, ncz = c["n"]
         wp.launch(restrict_residual_3d, dim=(ncx, ncy, ncz),
@@ -417,6 +492,8 @@ class WarpMG3D:
         wp.launch(prolongate_add_3d, dim=(nx, ny, nz),
                   inputs=[c["pw"], lv["pw"], ncx, ncy, ncz, nx, ny, nz],
                   device=self._wdev)
+        if self.dirichlet:
+            self._mask_p(lv)
         self._smooth(lv, self.nu2)
 
     def _cycle(self):
@@ -425,6 +502,8 @@ class WarpMG3D:
         self._restrict_faces()
         for lv in self.levels:
             self._extract(lv)
+        if self.dirichlet:
+            self._restrict_masks()
         for _ in range(self.n_vcycles):
             self._vcycle(0)
 
@@ -435,17 +514,22 @@ class WarpMG3D:
             self._cycle()
         self._graph = cap.graph
 
-    def solve(self, f, ch, cv, cw, p0=None):
+    def solve(self, f, ch, cv, cw, p0=None, mask=None):
         """f: (Nx,Ny,Nz) interior RHS; ch/cv/cw: live face coeffs; p0: optional
-        padded warm-start.  Returns padded p (the solution)."""
+        padded warm-start; mask: optional (Nx,Ny,Nz) Dirichlet mask.
+        Returns padded p (the solution)."""
         l0 = self.levels[0]
         l0["f"].copy_(f.reshape(-1))
         l0["ch"].copy_(ch); l0["cv"].copy_(cv); l0["cw"].copy_(cw)
+        if self.dirichlet and mask is not None:
+            l0["mask_t"].copy_(mask.reshape(-1))
         if p0 is not None:
             l0["p"].copy_(p0.reshape(-1))
         else:
             l0["p"].zero_()
-        if self._graph is None:
+        if self._wdev == "cpu":
+            self._cycle()               # CUDA graphs don't exist on CPU
+        elif self._graph is None:
             self.capture()
         else:
             wp.capture_launch(self._graph)
@@ -628,6 +712,45 @@ def extract_pairs_2d(
     cm1[c] = cv[i * svi + j]
 
 
+# ── Dirichlet-mask kernels (free-surface GFM: pin p=0 in flagged cells) ──────
+# mask is a float 0/1 interior array (1 = Dirichlet/air).  OR-downsampling is a
+# max() over the 2×2 fine block (0/1 → OR).  These run in-graph so a moving
+# interface (fresh l0 mask copied in each solve) re-propagates on every replay.
+
+@wp.kernel
+def apply_mask_padded_2d(p: wp.array(dtype=Any), mask: wp.array(dtype=Any),
+                         Nx: int, Ny: int):
+    i, j = wp.tid()
+    c = i * Ny + j
+    if mask[c] > type(mask[0])(0.5):
+        p[(i + 1) * (Ny + 2) + (j + 1)] = type(p[0])(0.0)
+
+
+@wp.kernel
+def apply_mask_interior_2d(r: wp.array(dtype=Any), mask: wp.array(dtype=Any),
+                           Nx: int, Ny: int):
+    i, j = wp.tid()
+    c = i * Ny + j
+    if mask[c] > type(mask[0])(0.5):
+        r[c] = type(r[0])(0.0)
+
+
+@wp.kernel
+def restrict_mask_max_2d(mf: wp.array(dtype=Any), mc: wp.array(dtype=Any),
+                         Nxf: int, Nyf: int, Nxc: int, Nyc: int):
+    I, J = wp.tid()
+    i0 = 2 * I; i1 = i0 + 1
+    j0 = 2 * J; j1 = j0 + 1
+    m = mf[i0 * Nyf + j0]
+    if i1 < Nxf:
+        m = wp.max(m, mf[i1 * Nyf + j0])
+    if j1 < Nyf:
+        m = wp.max(m, mf[i0 * Nyf + j1])
+    if i1 < Nxf and j1 < Nyf:
+        m = wp.max(m, mf[i1 * Nyf + j1])
+    mc[I * Nyc + J] = m
+
+
 for _dt in (wp.float32, wp.float64):
     _A2 = wp.array(dtype=_dt)
     _C4 = {"cp0": _A2, "cm0": _A2, "cp1": _A2, "cm1": _A2}
@@ -640,6 +763,9 @@ for _dt in (wp.float32, wp.float64):
     wp.overload(restrict_face_2d, {"src": _A2, "dst": _A2})
     wp.overload(prolongate_add_2d, {"ec": _A2, "p": _A2})
     wp.overload(extract_pairs_2d, {"ch": _A2, "cv": _A2, **_C4})
+    wp.overload(apply_mask_padded_2d, {"p": _A2, "mask": _A2})
+    wp.overload(apply_mask_interior_2d, {"r": _A2, "mask": _A2})
+    wp.overload(restrict_mask_max_2d, {"mf": _A2, "mc": _A2})
 
 
 def mg_residual_2d_clamped_warp(p, f, cp0, cm0, cp1, cm1, jcap_tol):
@@ -658,6 +784,26 @@ def mg_residual_2d_clamped_warp(p, f, cp0, cm0, cp1, cm1, jcap_tol):
     return r
 
 
+def mg_residual_3d_warp(p, f, cp0, cm0, cp1, cm1, cp2, cm2, jcap_tol):
+    """Host wrapper for :func:`mg_residual_3d` (f32+f64), the 3-D analogue of
+    :func:`mg_residual_2d_clamped_warp`.  ``p`` padded (Nx+2,Ny+2,Nz+2);
+    ``f``/coeffs interior (Nx,Ny,Nz).  Returns r (Nx,Ny,Nz) in the native
+    sign convention ``r = f + A·p`` that the coarse V-cycle defect correction
+    expects (J-capped cells zeroed, consistent with the smoother)."""
+    Nx, Ny, Nz = f.shape
+    wdev = "cuda:0" if f.is_cuda else "cpu"
+    wpf = wp.float64 if f.dtype == torch.float64 else wp.float32
+    r = torch.empty((Nx, Ny, Nz), dtype=p.dtype, device=p.device)
+    c = [wp.from_torch(x.contiguous().reshape(-1))
+         for x in (cp0, cm0, cp1, cm1, cp2, cm2)]
+    wp.launch(mg_residual_3d, dim=(int(Nx), int(Ny), int(Nz)),
+              inputs=[wp.from_torch(p.reshape(-1)),
+                      wp.from_torch(f.contiguous().reshape(-1)), *c,
+                      wp.from_torch(r.reshape(-1)), int(Nx), int(Ny), int(Nz),
+                      wpf(jcap_tol)], device=wdev)
+    return r
+
+
 class WarpMG2D:
     """2-D analogue of :class:`WarpMG3D` — an all-Warp, variable-coefficient,
     anisotropic, CUDA-graph-captured geometric multigrid (Neumann), dtype-generic
@@ -668,7 +814,7 @@ class WarpMG2D:
 
     def __init__(self, Nx, Ny, device="cuda:0", dtype=torch.float64,
                  smoother="rbgs", nu1=2, nu2=2, n_vcycles=4, coarse_extra=8,
-                 jcap_tol=1e-30, min_dim=4):
+                 jcap_tol=1e-30, min_dim=4, dirichlet=False):
         self.device = device
         self.tdt = dtype
         self.wpf = wp.float64 if dtype == torch.float64 else wp.float32
@@ -677,6 +823,10 @@ class WarpMG2D:
         self.coarse_extra = coarse_extra
         self.jcap = jcap_tol
         self.min_dim = min_dim
+        # Free-surface GFM: when set, pin p=0 in flagged (air) cells at every
+        # level/sweep, matching the torch _vcycle Dirichlet path.  Off by
+        # default so the common Neumann hot path launches no mask kernels.
+        self.dirichlet = dirichlet
         self._wdev = "cuda:0" if (isinstance(device, str) and "cuda" in device) \
             or getattr(device, "type", "") == "cuda" else "cpu"
         self._tdev = device
@@ -706,6 +856,10 @@ class WarpMG2D:
             )
             if self.smoother == "jacobi":
                 lv["ptmp"] = wp.zeros_like(lv["pw"])
+            if self.dirichlet:
+                mask = torch.zeros(nx * ny, **o)
+                lv["mask_t"] = mask
+                lv["maskw"] = wp.from_torch(mask)
             self.levels.append(lv)
             if (nx % 2 == 0 and ny % 2 == 0
                     and min(nx, ny) // 2 >= self.min_dim):
@@ -719,12 +873,15 @@ class WarpMG2D:
     def _smooth(self, lv, n):
         nx, ny = lv["n"]
         jt = self.wpf(self.jcap)
+        dir = self.dirichlet
         if self.smoother == "jacobi":
             src, dst = lv["pw"], lv["ptmp"]
             for _ in range(n):
                 wp.launch(jacobi_2d, dim=(nx, ny),
                           inputs=[dst, src, lv["fw"], *self._coef(lv),
                                   nx, ny, jt, self.wpf(0.7)], device=self._wdev)
+                if dir:
+                    self._mask_p(lv, dst)   # pin masked cells 0 every sweep
                 src, dst = dst, src
             if n % 2 == 1:
                 wp.copy(lv["pw"], src)
@@ -734,6 +891,19 @@ class WarpMG2D:
                     wp.launch(rbgs_halfsweep_2d, dim=(nx, ny),
                               inputs=[lv["pw"], lv["fw"], *self._coef(lv),
                                       nx, ny, jt, color], device=self._wdev)
+                    if dir:
+                        self._mask_p(lv)    # pin masked cells 0 after each colour
+
+    def _mask_p(self, lv, arr=None):
+        nx, ny = lv["n"]
+        p = arr if arr is not None else lv["pw"]
+        wp.launch(apply_mask_padded_2d, dim=(nx, ny),
+                  inputs=[p, lv["maskw"], nx, ny], device=self._wdev)
+
+    def _mask_r(self, lv):
+        nx, ny = lv["n"]
+        wp.launch(apply_mask_interior_2d, dim=(nx, ny),
+                  inputs=[lv["rw"], lv["maskw"], nx, ny], device=self._wdev)
 
     def _extract(self, lv):
         nx, ny = lv["n"]
@@ -752,17 +922,33 @@ class WarpMG2D:
                       inputs=[f["cvw"], c["cvw"], nf[0], nf[1] + 1,
                               nc[0], nc[1] + 1, 1], device=self._wdev)
 
+    def _restrict_masks(self):
+        # OR-downsample the fine (level-0) mask down every coarse level, in-graph.
+        for l in range(len(self.levels) - 1):
+            f, c = self.levels[l], self.levels[l + 1]
+            nf = f["n"]; nc = c["n"]
+            wp.launch(restrict_mask_max_2d, dim=(nc[0], nc[1]),
+                      inputs=[f["maskw"], c["maskw"], nf[0], nf[1],
+                              nc[0], nc[1]], device=self._wdev)
+
     def _vcycle(self, lvl):
         lv = self.levels[lvl]
         nx, ny = lv["n"]
         jt = self.wpf(self.jcap)
         if lvl == len(self.levels) - 1:
             self._smooth(lv, self.nu1 + self.nu2 + self.coarse_extra)
+            if self.dirichlet:
+                self._mask_p(lv)
             return
+        # pre-smooth, then residual from the smoothed (still-unmasked) p — the
+        # torch _vcycle order — then pin p and r in the Dirichlet cells.
         self._smooth(lv, self.nu1)
         wp.launch(mg_residual_2d_clamped, dim=(nx, ny),
                   inputs=[lv["pw"], lv["fw"], *self._coef(lv), lv["rw"],
                           nx, ny, jt], device=self._wdev)
+        if self.dirichlet:
+            self._mask_r(lv)
+            self._mask_p(lv)
         c = self.levels[lvl + 1]
         ncx, ncy = c["n"]
         wp.launch(restrict_residual_2d, dim=(ncx, ncy),
@@ -773,12 +959,18 @@ class WarpMG2D:
         wp.launch(prolongate_add_2d, dim=(nx, ny),
                   inputs=[c["pw"], lv["pw"], ncx, ncy, nx, ny],
                   device=self._wdev)
+        if self.dirichlet:
+            self._mask_p(lv)
         self._smooth(lv, self.nu2)
+        if self.dirichlet:
+            self._mask_p(lv)
 
     def _cycle(self):
         self._restrict_faces()
         for lv in self.levels:
             self._extract(lv)
+        if self.dirichlet:
+            self._restrict_masks()
         for _ in range(self.n_vcycles):
             self._vcycle(0)
 
@@ -788,17 +980,22 @@ class WarpMG2D:
             self._cycle()
         self._graph = cap.graph
 
-    def solve(self, f, ch, cv, p0=None):
+    def solve(self, f, ch, cv, p0=None, mask=None):
         """f: (Nx,Ny) interior RHS; ch/cv: live face coeffs; p0: optional padded
-        warm-start.  Returns padded p (Nx+2, Ny+2)."""
+        warm-start; mask: optional (Nx,Ny) Dirichlet mask (float/bool 0/1).
+        Returns padded p (Nx+2, Ny+2)."""
         l0 = self.levels[0]
         l0["f"].copy_(f.reshape(-1))
         l0["ch"].copy_(ch); l0["cv"].copy_(cv)
+        if self.dirichlet and mask is not None:
+            l0["mask_t"].copy_(mask.reshape(-1))
         if p0 is not None:
             l0["p"].copy_(p0.reshape(-1))
         else:
             l0["p"].zero_()
-        if self._graph is None:
+        if self._wdev == "cpu":
+            self._cycle()               # CUDA graphs don't exist on CPU
+        elif self._graph is None:
             self.capture()
         else:
             wp.capture_launch(self._graph)

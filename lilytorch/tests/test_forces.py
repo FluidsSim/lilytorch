@@ -237,11 +237,16 @@ def _run_python_eulerian(device):
 def test_python_eulerian_force_path_cpu_regression():
     """Frozen CPU snapshot of the non-streaming python eulerian force readout
     (float64 is deterministic).  Guards the load-bearing torch-tensor path that
-    has no other unit coverage."""
+    has no other unit coverage.
+
+    Re-frozen when the Poisson driver unified onto the single WarpMG V-cycle:
+    the force *readout* path is unchanged, but the pressure it reads now comes
+    from WarpMG on CPU instead of the retired hybrid torch V-cycle, shifting the
+    values by ~3e-9 relative (arithmetic-order roundoff, not convergence)."""
     got = _run_python_eulerian("cpu")
     expected = torch.tensor(
-        [0.4901618824486351, -0.5369408655053685,
-         28.151615191669535, -11.75747291847982], dtype=torch.float64)
+        [0.49016188278759837, -0.5369408657638242,
+         28.151615096217956, -11.75747282288945], dtype=torch.float64)
     assert torch.allclose(got, expected, rtol=1e-9, atol=1e-11), \
         f"python eulerian force drift: {got.tolist()} vs {expected.tolist()}"
 
