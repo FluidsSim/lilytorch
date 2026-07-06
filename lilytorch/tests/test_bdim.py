@@ -76,6 +76,158 @@ def test_cpu_eq_gpu(dirty, mu0_proj):
     assert max(err) < 1e-12, f"warp cpu vs gpu: {err}"
 
 
+# ─── 3-D full-grid rewrite semantics: pass-through outside the dirty AABB ────
+
+@pytest.mark.parametrize("dev", ["cpu"] + (["cuda:0"] if torch.cuda.is_available() else []))
+def test_outside_rect_passthrough_3d(dev):
+    """Outside the dirty AABB the kernel must write u0/v0/w0 = the advected
+    primes (the upfront full-grid copies it replaces) and leave the face-grid
+    ch/cv/cw untouched."""
+    su, sv, sw, bu, bv, bw, up, vp, wp_ = _fields(dev)
+    u0 = torch.full_like(up, 777.0)     # garbage: NOT clones of the primes
+    v0 = torch.full_like(vp, 777.0)
+    w0 = torch.full_like(wp_, 777.0)
+    ch, cv, cw = _cbuf(dev)
+    refs = tuple(c.clone() for c in (ch, cv, cw))
+    rect = (5, 4, 3, 20, 18, 16)
+    bdim_forcing_3d_warp(up, vp, wp_, su, sv, sw, bu, bv, bw,
+                         u0, v0, w0, ch, cv, cw,
+                         EPS, RHO, DT, H, *rect, 1)
+    i0, j0, k0, Ai, Aj, Ak = rect
+    out = torch.ones_like(up, dtype=torch.bool)
+    out[i0:i0 + Ai, j0:j0 + Aj, k0:k0 + Ak] = False
+    for got, prime, name in ((u0, up, "u0"), (v0, vp, "v0"), (w0, wp_, "w0")):
+        assert torch.equal(got[out], prime[out]), f"{name} != prime outside AABB"
+        assert not torch.equal(got[~out], prime[~out]), f"no BDIM write in {name}"
+    # face-grid coeffs outside the AABB stay at the dt/rho prefill: compare
+    # against a full-AABB reference restricted to the outside complement.
+    for c, ref, gs in zip((ch, cv, cw), refs, (c.shape for c in refs)):
+        outside = torch.ones(gs, dtype=torch.bool)
+        outside[max(i0 - 1, 0):i0 + Ai, max(j0 - 1, 0):j0 + Aj,
+                max(k0 - 1, 0):k0 + Ak] = False
+        assert torch.equal(c[outside], ref[outside]), "coeff touched outside AABB"
+
+
+# ─── 3-D Maertens–Weymouth fold: in-kernel div_corr == torch oracle ──────────
+
+def _mw_oracle_3d(bU, bV, bW, sdf_cc, eps, h):
+    div = torch.zeros_like(bU)
+    div[1:-1, 1:-1, 1:-1] = (
+        (bU[2:, 1:-1, 1:-1] - bU[1:-1, 1:-1, 1:-1]) * (1.0 / h)
+        + (bV[1:-1, 2:, 1:-1] - bV[1:-1, 1:-1, 1:-1]) * (1.0 / h)
+        + (bW[1:-1, 1:-1, 2:] - bW[1:-1, 1:-1, 1:-1]) * (1.0 / h))
+    deps = (sdf_cc / eps).clamp(-1.0, 1.0)
+    mu0 = 0.5 * (1.0 + deps + torch.sin(torch.pi * deps) / torch.pi)
+    return (1.0 - mu0) * div
+
+
+@pytest.mark.parametrize("dev", ["cpu"] + (["cuda:0"] if torch.cuda.is_available() else []))
+@pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
+def test_mw_div_corr_fold_3d(dev, dtype):
+    su, sv, sw, bu, bv, bw, up, vp, wp_ = [t.to(dtype) for t in _fields(dev)]
+    sdf_cc = ((su + sv + sw) / 3.0).contiguous()
+    u0, v0, w0 = up.clone(), vp.clone(), wp_.clone()
+    ch, cv, cw = _cbuf(dev, dtype)
+    div_corr = torch.full_like(sdf_cc, -333.0)
+    eps_mw = 1.7 * EPS
+    bdim_forcing_3d_warp(up, vp, wp_, su, sv, sw, bu, bv, bw,
+                         u0, v0, w0, ch, cv, cw,
+                         EPS, RHO, DT, H, 5, 4, 3, 20, 18, 16, 1,
+                         sdf_cc=sdf_cc, div_corr=div_corr, eps_mw=eps_mw,
+                         inv_dx=1.0 / H, inv_dy=1.0 / H, inv_dz=1.0 / H)
+    ref = _mw_oracle_3d(bu, bv, bw, sdf_cc, eps_mw, H)
+    # ulp-level torch-vs-Warp sin/FMA differences, relative to the field scale
+    rtol = 1e-13 if dtype == torch.float64 else 1e-6
+    err = (div_corr - ref).abs().max().item() / ref.abs().max().item()
+    assert err < rtol, f"MW fold vs torch oracle (rel): {err:.3e}"
+    assert (div_corr == -333.0).sum().item() == 0     # full-grid write
+
+
+# ─── 3-D CUDA-graph runner: replay == eager over a moving-AABB run ───────────
+
+def _graph_steps_bdim_3d(dtype, mw_on):
+    from lilytorch.src.bdim import BdimForcing3DGraph
+    dev = "cuda:0"
+    su, sv, sw, bu, bv, bw, up, vp, wp_ = [t.to(dtype) for t in _fields(dev)]
+    sdf_cc = ((su + sv + sw) / 3.0).contiguous()
+    u0g, v0g, w0g = (torch.empty_like(t) for t in (up, vp, wp_))
+    chg, cvg, cwg = _cbuf(dev, dtype)
+    dcg = torch.zeros_like(sdf_cc) if mw_on else None
+    kw = dict(eps_mw=1.7 * EPS, inv_dx=1.0 / H, inv_dy=1.0 / H,
+              inv_dz=1.0 / H) if mw_on else {}
+
+    fg = BdimForcing3DGraph()
+    for step in range(8):
+        rect = (4 + step, 3 + step, 2 + step, 18, 16, 14)   # moving AABB
+        up.add_(0.01); bu.mul_(1.001)                       # live-data check
+        bdim_forcing_3d_warp(up, vp, wp_, su, sv, sw, bu, bv, bw,
+                             u0g, v0g, w0g, chg, cvg, cwg,
+                             EPS, RHO, DT, H, *rect, 1,
+                             sdf_cc=(sdf_cc if mw_on else None),
+                             div_corr=dcg, runner=fg, **kw)
+        u0e, v0e, w0e = (torch.empty_like(t) for t in (up, vp, wp_))
+        che, cve, cwe = chg.clone(), cvg.clone(), cwg.clone()
+        dce = torch.zeros_like(sdf_cc) if mw_on else None
+        bdim_forcing_3d_warp(up, vp, wp_, su, sv, sw, bu, bv, bw,
+                             u0e, v0e, w0e, che, cve, cwe,
+                             EPS, RHO, DT, H, *rect, 1,
+                             sdf_cc=(sdf_cc if mw_on else None),
+                             div_corr=dce, **kw)
+        outs = [(u0g, u0e), (v0g, v0e), (w0g, w0e),
+                (chg, che), (cvg, cve), (cwg, cwe)]
+        if mw_on:
+            outs.append((dcg, dce))
+        for a, b in outs:
+            err = (a - b).abs().max().item()
+            assert err == 0.0, f"step {step}: graph vs eager err {err:.3e}"
+    return fg
+
+
+@SKIP_NO_CUDA
+@pytest.mark.parametrize("mw_on", [False, True], ids=["plain", "mw"])
+@pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
+def test_bdim_3d_graph_replay_eq_eager(dtype, mw_on):
+    fg = _graph_steps_bdim_3d(dtype, mw_on)
+    # step 0 eager (1st sighting), step 1 capture, steps 2-7 replay
+    assert fg.captures == 1, f"captures={fg.captures}"
+    assert fg.replays == 6, f"replays={fg.replays}"
+    assert fg.eager_calls == 1, f"eager_calls={fg.eager_calls}"
+
+
+# ─── solver-level MW wiring: fused step's div_corr == the method oracle ──────
+
+@pytest.mark.parametrize("ndim", [2, 3])
+def test_solver_mw_fold_wiring(ndim):
+    """Run the fused single-phase step with ``bdim_body_div_correction`` on
+    and check the kernel-written ``_mw_div_corr_persist`` matches the retained
+    torch oracle ``_mw_body_div_correction`` on the live solver state (i.e.
+    the solver passes the right sdf_cc/eps/inv_d{x,y,z} into the kernel)."""
+    from lilytorch.tests.test_two_phase import (
+        _parity_pars, _taylor_green_ic, _set_ic, _step_n)
+    from lilytorch.src.solver import FluidSolver
+
+    N, dt, nu, rho = (20 if ndim == 3 else 32), 2.0e-3, 1.0e-2, 1000.0
+    body = (["lambda x, y, z: sphere(x,y,z,xt=0.5,yt=0.5,zt=0.5,r=0.15)"]
+            if ndim == 3 else
+            ["lambda x, y: circle(x,y,xt=0.5,yt=0.5,r=0.15)"])
+    pars = _parity_pars(ndim, N, dt, nu, rho, body)
+    pars["solver"]["bdim_body_div_correction"] = True
+
+    s = FluidSolver(pars, dtype=torch.float64, compute_forces=False)
+    _set_ic(s, _taylor_green_ic(s))
+    _step_n(s, 4)
+
+    comp = s.composite_body
+    if ndim == 3:
+        ref = s._mw_body_div_correction(comp.body_u, comp.body_v, comp.body_w)
+    else:
+        ref = s._mw_body_div_correction(comp.body_u, comp.body_v)
+    err = (s._mw_div_corr_persist - ref).abs().max().item()
+    assert err < 1e-13, f"solver MW wiring vs oracle: {err:.3e}"
+    for f in (s.u0, s.v0, s.p0) + ((s.w0,) if ndim == 3 else ()):
+        assert torch.isfinite(f).all()
+
+
 if __name__ == "__main__":
     if torch.cuda.is_available():
         wc = _run_warp(_fields("cpu"), (0, 0, 0, NGX, NGY, NGZ), 1)
