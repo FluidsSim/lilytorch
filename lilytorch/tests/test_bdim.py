@@ -137,3 +137,118 @@ def test_cpu_eq_gpu_2d(dirty, mu0_proj):
     wg = _run_warp_2d(_fields_2d("cuda:0"), dirty, mu0_proj)
     err = [(a.cpu() - b.cpu()).abs().max().item() for a, b in zip(wc, wg)]
     assert max(err) < 1e-12, f"warp cpu vs gpu: {err}"
+
+
+# ─── full-grid rewrite semantics: pass-through outside the dirty rect ────────
+
+@pytest.mark.parametrize("dev", ["cpu"] + (["cuda:0"] if torch.cuda.is_available() else []))
+def test_outside_rect_passthrough_2d(dev):
+    """Outside the dirty AABB the kernel must write u0 = u_prime / v0 = v_prime
+    (the upfront full-grid copy it replaces) and leave ch/cv untouched."""
+    su, sv, bu, bv, up, vp = _fields_2d(dev)
+    u0 = torch.full_like(up, 777.0)     # garbage: NOT a clone of up
+    v0 = torch.full_like(vp, 777.0)
+    ch, cv = _cbuf_2d(dev)
+    ch_ref, cv_ref = ch.clone(), cv.clone()
+    rect = (5, 4, 24, 20)
+    bdim_forcing_2d_warp(up, vp, su, sv, bu, bv, u0, v0, ch, cv,
+                         EPS_2D, RHO_2D, DT_2D, H_2D, *rect, 1)
+    i0, j0, Ai, Aj = rect
+    out = torch.ones_like(up, dtype=torch.bool)
+    out[i0:i0 + Ai, j0:j0 + Aj] = False
+    assert torch.equal(u0[out], up[out]), "u0 != u_prime outside rect"
+    assert torch.equal(v0[out], vp[out]), "v0 != v_prime outside rect"
+    assert torch.equal(ch[out], ch_ref[out]), "ch touched outside rect"
+    assert torch.equal(cv[out], cv_ref[out]), "cv touched outside rect"
+    inside = ~out
+    assert not torch.equal(u0[inside], up[inside]), "no BDIM write inside rect"
+
+
+# ─── Maertens–Weymouth fold: in-kernel div_corr == torch oracle ──────────────
+
+def _mw_oracle(bU, bV, sdf_cc, eps, dx, dy):
+    """Verbatim FluidSolver._mw_body_div_correction + ops.divergence."""
+    div = torch.zeros_like(bU)
+    div[1:-1, 1:-1] = ((bU[2:, 1:-1] - bU[1:-1, 1:-1]) * (1.0 / dx)
+                       + (bV[1:-1, 2:] - bV[1:-1, 1:-1]) * (1.0 / dy))
+    deps = (sdf_cc / eps).clamp(-1.0, 1.0)
+    mu0 = 0.5 * (1.0 + deps + torch.sin(torch.pi * deps) / torch.pi)
+    return (1.0 - mu0) * div
+
+
+@pytest.mark.parametrize("dev", ["cpu"] + (["cuda:0"] if torch.cuda.is_available() else []))
+@pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
+def test_mw_div_corr_fold_2d(dev, dtype):
+    su, sv, bu, bv, up, vp = [t.to(dtype) for t in _fields_2d(dev)]
+    sdf_cc = 0.5 * (su + sv)            # any smooth CC SDF-like field
+    u0, v0 = up.clone(), vp.clone()
+    ch, cv = (c.to(dtype) for c in _cbuf_2d(dev))
+    div_corr = torch.full_like(sdf_cc, -333.0)
+    eps_mw = 1.7 * EPS_2D
+    bdim_forcing_2d_warp(up, vp, su, sv, bu, bv, u0, v0, ch, cv,
+                         EPS_2D, RHO_2D, DT_2D, H_2D,
+                         5, 4, 24, 20, 1,
+                         sdf_cc=sdf_cc, div_corr=div_corr,
+                         eps_mw=eps_mw, inv_dx=1.0 / H_2D, inv_dy=1.0 / H_2D)
+    ref = _mw_oracle(bu, bv, sdf_cc, eps_mw, H_2D, H_2D)
+    # ulp-level torch-vs-Warp sin/FMA differences, relative to the field scale
+    rtol = 1e-13 if dtype == torch.float64 else 1e-6
+    err = (div_corr - ref).abs().max().item() / ref.abs().max().item()
+    assert err < rtol, f"MW fold vs torch oracle (rel): {err:.3e}"
+    # full-grid write: no stale sentinel survives anywhere
+    assert (div_corr == -333.0).sum().item() == 0
+
+
+# ─── CUDA-graph runner: replay == eager over a moving-pose multi-step run ────
+
+def _graph_steps_bdim_2d(dtype, mw_on):
+    """8 steps with drifting fields and a MOVING dirty rect through one
+    BdimForcing2DGraph (stable pointers → capture at step 1, replay after),
+    checked per-step against a fresh eager launch on cloned outputs."""
+    from lilytorch.src.bdim import BdimForcing2DGraph
+    dev = "cuda:0"
+    su, sv, bu, bv, up, vp = [t.to(dtype) for t in _fields_2d(dev)]
+    sdf_cc = (0.5 * (su + sv)).contiguous()
+    ch_base = DT_2D / RHO_2D
+    # persistent runner-path buffers (pointer-stable, as in the solver)
+    u0g = torch.empty_like(up); v0g = torch.empty_like(vp)
+    chg = torch.full_like(up, ch_base); cvg = torch.full_like(vp, ch_base)
+    dcg = torch.zeros_like(sdf_cc) if mw_on else None
+    kw = dict(eps_mw=1.7 * EPS_2D, inv_dx=1.0 / H_2D, inv_dy=1.0 / H_2D) \
+        if mw_on else {}
+
+    fg = BdimForcing2DGraph()
+    for step in range(8):
+        rect = (4 + step, 3 + step, 22, 18)      # moving dirty rect
+        up.add_(0.01); bu.mul_(1.001)            # live-data check
+        bdim_forcing_2d_warp(up, vp, su, sv, bu, bv, u0g, v0g, chg, cvg,
+                             EPS_2D, RHO_2D, DT_2D, H_2D, *rect, 1,
+                             sdf_cc=(sdf_cc if mw_on else None),
+                             div_corr=dcg, runner=fg, **kw)
+        # eager reference on fresh clones (chg/cvg state must match: clone)
+        u0e = torch.empty_like(up); v0e = torch.empty_like(vp)
+        che, cve = chg.clone(), cvg.clone()
+        # ch outside-rect state is identical by construction (untouched)
+        dce = torch.zeros_like(sdf_cc) if mw_on else None
+        bdim_forcing_2d_warp(up, vp, su, sv, bu, bv, u0e, v0e, che, cve,
+                             EPS_2D, RHO_2D, DT_2D, H_2D, *rect, 1,
+                             sdf_cc=(sdf_cc if mw_on else None),
+                             div_corr=dce, **kw)
+        outs = [(u0g, u0e), (v0g, v0e), (chg, che), (cvg, cve)]
+        if mw_on:
+            outs.append((dcg, dce))
+        for a, b in outs:
+            err = (a - b).abs().max().item()
+            assert err == 0.0, f"step {step}: graph vs eager err {err:.3e}"
+    return fg
+
+
+@SKIP_NO_CUDA
+@pytest.mark.parametrize("mw_on", [False, True], ids=["plain", "mw"])
+@pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
+def test_bdim_2d_graph_replay_eq_eager(dtype, mw_on):
+    fg = _graph_steps_bdim_2d(dtype, mw_on)
+    # step 0 eager (1st sighting), step 1 capture, steps 2-7 replay
+    assert fg.captures == 1, f"captures={fg.captures}"
+    assert fg.replays == 6, f"replays={fg.replays}"
+    assert fg.eager_calls == 1, f"eager_calls={fg.eager_calls}"

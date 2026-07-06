@@ -77,10 +77,15 @@ Spec:
   staggered components): RK2 back-trace entirely in registers —
   sample (u,v) at the grid point, form midpoint `x − 0.5·dt·u(x)`, sample at
   midpoint, form departure `x − dt·u_mid`, sample the advected component at
-  departure. Bilinear sampling helpers already exist
-  (`interpolation.py:bilinear_sample_off_2d`); follow the T2a fused-flux
-  kernel pattern (`advect_flux_add_warp`, same file conventions, dtype-generic
-  via `wp.overload` f32/f64).
+  departure. **The interpolation is QUADRATIC, not bilinear** — the SL
+  interpolators are built with `method="quadratic"`
+  (`advection.py:_init_semi_lagrangian`); the in-kernel sampler must be
+  `biquadratic_sample_off_2d` (`interpolation.py:251`), which already exists.
+  Follow the T2a fused-flux kernel pattern (`advect_flux_add_warp`, same file
+  conventions, dtype-generic via `wp.overload` f32/f64). Free micro-win while
+  here: the stage-1 `d == i` sample is the component at its own nodes — an
+  identity read, no interpolation needed (only 8 of the current 10 samples do
+  real work).
 * Inputs: the component fields + grid descriptors, all persistent buffers.
   Output into a persistent `vel_new` buffer (no per-step allocation) — this
   makes the launch pointer-stable and graph-capturable; add a graph runner
@@ -105,6 +110,22 @@ Pitfall: the python path must stay selectable for CPU and as test oracle —
 do NOT delete it; gate on `is_cuda` like the other runners.
 
 ## Task B — graphable bdim_forcing + MW-div fold + copy audit (expected −0.5…−0.8 ms/step)
+
+**DONE 2026-07-06** (measured on the tree carrying Task A's in-flight SL work,
+same-tree before/after): throughput 3.626 → 3.117 ms/step (−0.51);
+`bdim_forcing` 0.316 → 0.047; `mw_body_div_corr` 0.129 → 0 (row gone — folded
+into the kernel, ~11 µs GPU inline); −2 `aten::copy_` and −2 DtoD per step
+(the upfront u0/v0 full-grid copies).  Implementation: full-grid static
+`bdim_forcing_2d_kernel` (BDIM inside the device-resident rect descriptor,
+pass-through `u0 = u'` outside, flag-gated full-grid MW term) +
+`BdimForcing2DGraph` runner (pinned-host → device async rect staging,
+2nd-sighting capture, pointer+scalar keyed).  Note on sub-item 1's
+BDIMhandler `.item()` claim: the streaming path computes the dirty AABB in
+host numpy from MuJoCo poses — there were no GPU `.item()` syncs to remove
+(counter: 0/step before and after); lines 640-643 are the non-streaming
+python body path, off the critical path.  Parity tests in `test_bdim.py`
+(pass-through exactness, MW fold vs torch oracle, graph-vs-eager over a
+moving rect, capture/replay counts).  3-D twin not done (same recipe applies).
 
 Three sub-items, one agent:
 

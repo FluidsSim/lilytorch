@@ -413,25 +413,55 @@ def bdim_forcing_2d_kernel(
     v0: wp.array(dtype=Any),
     ch: wp.array(dtype=Any),
     cv: wp.array(dtype=Any),
+    sdf_cc: wp.array(dtype=Any),
+    div_corr: wp.array(dtype=Any),
+    rect: wp.array(dtype=wp.int32),
     eps: Any, rho_f: Any, dt: Any, inv_2h: Any,
+    eps_mw: Any, inv_dx: Any, inv_dy: Any,
     Ngx: wp.int32, Ngy: wp.int32,
-    di0: wp.int32, dj0: wp.int32,
     mu0_proj: wp.int32,
-    dAj: wp.int32,
+    mw_on: wp.int32,
 ):
-    # Flat 1-D launch, native's exact decode (j fastest → coalesced).
-    local = wp.tid()
-    dj = local % dAj
-    di = local / dAj
-    i = di0 + di
-    j = dj0 + dj
+    # Static FULL-GRID 1-D launch (j fastest → coalesced): the launch dim is
+    # pose-independent, so the whole thing is CUDA-graph-capturable.  The
+    # per-step dirty AABB lives in the device-resident ``rect`` descriptor
+    # [i0, j0, Ai, Aj] (staged with an async copy_ by the caller); threads
+    # inside the rect do the BDIM2 math, threads outside pass the advected
+    # velocity straight through (u0 = u', exactly what mu0 = 1 gives far from
+    # the body) and leave ch/cv at their persistent dt/rho prefill.
+    g = wp.tid()
+    j = g % Ngy
+    i = g / Ngy
 
-    bdim_one_axis_2d(
-        u_prime, sdf_u, body_u, u0, ch,
-        eps, rho_f, dt, inv_2h, Ngx, Ngy, i, j, mu0_proj)
-    bdim_one_axis_2d(
-        v_prime, sdf_v, body_v, v0, cv,
-        eps, rho_f, dt, inv_2h, Ngx, Ngy, i, j, mu0_proj)
+    di = i - rect[0]
+    dj = j - rect[1]
+    if di >= 0 and di < rect[2] and dj >= 0 and dj < rect[3]:
+        bdim_one_axis_2d(
+            u_prime, sdf_u, body_u, u0, ch,
+            eps, rho_f, dt, inv_2h, Ngx, Ngy, i, j, mu0_proj)
+        bdim_one_axis_2d(
+            v_prime, sdf_v, body_v, v0, cv,
+            eps, rho_f, dt, inv_2h, Ngx, Ngy, i, j, mu0_proj)
+    else:
+        u0[g] = u_prime[g]
+        v0[g] = v_prime[g]
+
+    # Maertens–Weymouth body-divergence source (1 - mu0_cc) * div(u_b), full
+    # grid (matches the torch oracle in FluidSolver._mw_body_div_correction
+    # term for term: interior staggered divergence, ghost ring = 0, clamped
+    # smoothed-Heaviside mu0 from the CELL-CENTRED union SDF / solver eps).
+    if mw_on != 0:
+        zero = type(eps)(0.0)
+        one = type(eps)(1.0)
+        half = type(eps)(0.5)
+        pi = type(eps)(_PI_F64)
+        db = zero
+        if i > 0 and i < Ngx - 1 and j > 0 and j < Ngy - 1:
+            db = ((body_u[g + Ngy] - body_u[g]) * inv_dx
+                  + (body_v[g + 1] - body_v[g]) * inv_dy)
+        deps = wp.clamp(sdf_cc[g] / eps_mw, -one, one)
+        mu0c = half * (one + deps + wp.sin(pi * deps) / pi)
+        div_corr[g] = (one - mu0c) * db
 
 
 # Register float32 + float64 specialisations (generic args only).
@@ -440,22 +470,20 @@ for _dt in (wp.float32, wp.float64):
     wp.overload(bdim_forcing_2d_kernel, {
         "u_prime": _A, "v_prime": _A, "sdf_u": _A, "sdf_v": _A,
         "body_u": _A, "body_v": _A, "u0": _A, "v0": _A, "ch": _A, "cv": _A,
+        "sdf_cc": _A, "div_corr": _A,
         "eps": _dt, "rho_f": _dt, "dt": _dt, "inv_2h": _dt,
+        "eps_mw": _dt, "inv_dx": _dt, "inv_dy": _dt,
     })
 
 
-
-def bdim_forcing_2d_warp(
+def _bdim_forcing_2d_launch(
         u_prime, v_prime, sdf_u, sdf_v, body_u, body_v,
-        u0, v0, ch, cv,
-        eps, rho_f, dt, h_grid,
-        dirty_i0, dirty_j0, dirty_Ai, dirty_Aj,
-        mu0_projection=1):
-    """Warp port of ``bdim_forcing_2d``.
-    Writes u0/v0 and ch/cv (full-grid) in place inside the dirty AABB.
-    Generic in dtype (f32/f64), selected from ``u0``."""
-    if int(dirty_Ai) * int(dirty_Aj) <= 0:
-        return
+        u0, v0, ch, cv, sdf_cc, div_corr, rect_dev,
+        eps, rho_f, dt, h_grid, eps_mw, inv_dx, inv_dy,
+        mu0_projection, mw_on):
+    """Raw full-grid launch given a device-resident ``rect_dev`` int32[4]
+    descriptor.  Every argument tensor must outlive the launch (the graph
+    runner captures exactly this call with persistent buffers)."""
     wdev = _wdev(u0)
     wpf = _wp_dtype(u0)
     Ngx, Ngy = u0.shape
@@ -465,15 +493,169 @@ def bdim_forcing_2d_warp(
 
     wp.launch(
         bdim_forcing_2d_kernel,
-        dim=int(dirty_Ai) * int(dirty_Aj),
+        dim=int(Ngx) * int(Ngy),
         inputs=[
             f(u_prime), f(v_prime), f(sdf_u), f(sdf_v),
             f(body_u), f(body_v), f(u0), f(v0), f(ch), f(cv),
+            f(sdf_cc), f(div_corr),
+            wp.from_torch(rect_dev),
             wpf(eps), wpf(rho_f), wpf(dt),
             wpf(0.5 / h_grid),
+            wpf(eps_mw), wpf(inv_dx), wpf(inv_dy),
             int(Ngx), int(Ngy),
-            int(dirty_i0), int(dirty_j0),
             int(mu0_projection),
-            int(dirty_Aj),
+            int(mw_on),
         ],
         device=wdev)
+
+
+def bdim_forcing_2d_warp(
+        u_prime, v_prime, sdf_u, sdf_v, body_u, body_v,
+        u0, v0, ch, cv,
+        eps, rho_f, dt, h_grid,
+        dirty_i0, dirty_j0, dirty_Ai, dirty_Aj,
+        mu0_projection=1,
+        sdf_cc=None, div_corr=None,
+        eps_mw=1.0, inv_dx=0.0, inv_dy=0.0,
+        runner=None):
+    """Warp port of ``bdim_forcing_2d`` — static full-grid launch.
+
+    Inside the dirty AABB: writes the BDIM2 velocity into ``u0/v0`` and the
+    variable-density Poisson coefficients into ``ch/cv`` in place.  OUTSIDE
+    the AABB: writes ``u0 = u_prime`` / ``v0 = v_prime`` (pass-through copy —
+    exactly the value BDIM produces far from the body, so callers no longer
+    need an upfront full-grid ``u0.copy_(u_prime)``) and leaves ``ch/cv``
+    untouched.  Generic in dtype (f32/f64), selected from ``u0``.
+
+    When ``sdf_cc``/``div_corr`` are given (with ``eps_mw``/``inv_dx``/
+    ``inv_dy``), the kernel also writes the full-grid Maertens–Weymouth
+    body-divergence correction ``(1 - mu0_cc) * div(u_body)`` into
+    ``div_corr`` — the fused replacement for
+    ``FluidSolver._mw_body_div_correction``.
+
+    ``runner`` (a :class:`BdimForcing2DGraph`) routes the launch through
+    CUDA-graph replay with device-side dirty-rect staging; ``None`` launches
+    eagerly with a per-call rect tensor.
+    """
+    if runner is not None:
+        return runner.run(
+            u_prime, v_prime, sdf_u, sdf_v, body_u, body_v,
+            u0, v0, ch, cv,
+            eps, rho_f, dt, h_grid,
+            dirty_i0, dirty_j0, dirty_Ai, dirty_Aj,
+            mu0_projection, sdf_cc, div_corr, eps_mw, inv_dx, inv_dy)
+
+    mw_on = 1 if div_corr is not None else 0
+    if div_corr is None:
+        sdf_cc = div_corr = u0.new_zeros(1)
+    rect_dev = torch.tensor(
+        [int(dirty_i0), int(dirty_j0), int(dirty_Ai), int(dirty_Aj)],
+        dtype=torch.int32, device=u0.device)
+    _bdim_forcing_2d_launch(
+        u_prime, v_prime, sdf_u, sdf_v, body_u, body_v,
+        u0, v0, ch, cv, sdf_cc, div_corr, rect_dev,
+        eps, rho_f, dt, h_grid, eps_mw, inv_dx, inv_dy,
+        mu0_projection, mw_on)
+
+
+class BdimForcing2DGraph:
+    """CUDA-graph replay around the full-grid ``bdim_forcing_2d`` launch.
+
+    The launch dim is the (static) full grid; the only per-step non-tensor
+    input is the dirty AABB, which is staged into a persistent device int32[4]
+    descriptor with an async pinned-host ``copy_`` — no host sync, and the
+    captured graph reads the fresh rect on every replay (same staging pattern
+    as ``forces.ForcesPostGraph._stage``).
+
+    Graphs are keyed on the live-tensor pointer signature plus the frozen
+    scalars (eps/rho/dt/h/mw parameters, mu0_proj, grid shape, dtype) and
+    captured on a signature's 2nd sighting, up to ``_MAX_GRAPHS`` distinct
+    signatures; a churning signature stays on the eager launch (correct, just
+    not accelerated).  ``replays``/``captures``/``eager_calls`` count what
+    actually happened.
+    """
+
+    _MAX_GRAPHS = 8
+
+    def __init__(self):
+        self._rect_host = None     # pinned int32[4] staging
+        self._rect_np = None       # numpy view of the pinned buffer
+        self._rect_dev = None      # device int32[4] descriptor
+        self._dummy = None         # persistent 1-elem stand-in when MW is off
+        self._graphs = {}          # signature -> wp.Graph
+        self._seen = {}            # signature -> sighting count
+        self.replays = 0
+        self.captures = 0
+        self.eager_calls = 0
+
+    def _stage_rect(self, i0, j0, Ai, Aj, device):
+        if self._rect_dev is None or self._rect_dev.device != device:
+            self._rect_host = torch.empty(4, dtype=torch.int32,
+                                          pin_memory=True)
+            self._rect_np = self._rect_host.numpy()
+            self._rect_dev = torch.empty(4, dtype=torch.int32, device=device)
+            self._graphs.clear()
+            self._seen.clear()
+        self._rect_np[0] = int(i0)
+        self._rect_np[1] = int(j0)
+        self._rect_np[2] = int(Ai)
+        self._rect_np[3] = int(Aj)
+        self._rect_dev.copy_(self._rect_host, non_blocking=True)
+
+    def run(self, u_prime, v_prime, sdf_u, sdf_v, body_u, body_v,
+            u0, v0, ch, cv,
+            eps, rho_f, dt, h_grid,
+            dirty_i0, dirty_j0, dirty_Ai, dirty_Aj,
+            mu0_projection, sdf_cc, div_corr, eps_mw, inv_dx, inv_dy):
+        mw_on = 1 if div_corr is not None else 0
+        if div_corr is None:
+            if (self._dummy is None or self._dummy.device != u0.device
+                    or self._dummy.dtype != u0.dtype):
+                self._dummy = torch.zeros(1, dtype=u0.dtype, device=u0.device)
+            sdf_cc = div_corr = self._dummy
+
+        live = (u_prime, v_prime, sdf_u, sdf_v, body_u, body_v,
+                u0, v0, ch, cv, sdf_cc, div_corr)
+        if not all(t.is_cuda and t.is_contiguous() for t in live):
+            # CPU / non-contiguous: eager launch with a per-call rect.
+            rect_dev = torch.tensor(
+                [int(dirty_i0), int(dirty_j0), int(dirty_Ai), int(dirty_Aj)],
+                dtype=torch.int32, device=u0.device)
+            _bdim_forcing_2d_launch(
+                u_prime, v_prime, sdf_u, sdf_v, body_u, body_v,
+                u0, v0, ch, cv, sdf_cc, div_corr, rect_dev,
+                eps, rho_f, dt, h_grid, eps_mw, inv_dx, inv_dy,
+                mu0_projection, mw_on)
+            self.eager_calls += 1
+            return
+
+        self._stage_rect(dirty_i0, dirty_j0, dirty_Ai, dirty_Aj, u0.device)
+
+        def _work():
+            _bdim_forcing_2d_launch(
+                u_prime, v_prime, sdf_u, sdf_v, body_u, body_v,
+                u0, v0, ch, cv, sdf_cc, div_corr, self._rect_dev,
+                eps, rho_f, dt, h_grid, eps_mw, inv_dx, inv_dy,
+                mu0_projection, mw_on)
+
+        sig = (tuple(t.data_ptr() for t in live),
+               float(eps), float(rho_f), float(dt), float(h_grid),
+               float(eps_mw), float(inv_dx), float(inv_dy),
+               int(mu0_projection), mw_on, tuple(u0.shape), u0.dtype)
+        g = self._graphs.get(sig)
+        if g is not None:
+            wp.capture_launch(g)
+            self.replays += 1
+            return
+
+        n = self._seen.get(sig, 0) + 1
+        self._seen[sig] = n
+        if n >= 2 and len(self._graphs) < self._MAX_GRAPHS:
+            _work()  # this step's real work (also JIT/module warm-up)
+            with wp.ScopedCapture(device=str(u0.device)) as cap:
+                _work()
+            self._graphs[sig] = cap.graph
+            self.captures += 1
+        else:
+            _work()
+            self.eager_calls += 1

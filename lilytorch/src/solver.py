@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from lilytorch.src.bdim import (
     bdim_forcing_3d_warp as bdim_forcing_3d,
     bdim_forcing_2d_warp as bdim_forcing_2d,
+    BdimForcing2DGraph,
 )
 from lilytorch.src.advection import AdvDiffSolver
 from lilytorch.src.diagnostics import FlowDiagnostics
@@ -984,6 +985,12 @@ class FluidSolver(PlottingMixin):
         links, where it is exactly the term that keeps the mu0-weighted
         (degenerate-inside) Poisson operator consistent and prevents the
         seam blow-up.  See ``docs/immersed_boundary.rst``.
+
+        Used by the 3-D fused step and the two-phase solver.  The 2-D fused
+        step computes this term INSIDE the ``bdim_forcing_2d`` kernel
+        (``mw_on`` inputs, written to ``_mw_div_corr_persist``) — this
+        method is its torch oracle (parity-tested in
+        ``tests/test_bdim.py::test_mw_div_corr_fold_2d``).
         """
         div_b = self.divergence(bU, bV, w=bW)        # ∇·u_b at cell centres
         phi   = self.composite_body.sdf_val          # CC union SDF
@@ -1749,6 +1756,14 @@ class FluidSolver(PlottingMixin):
             self._ch_persist = torch.full(gs, _dt_over_rhofluid, device=device, dtype=dtype)
             self._cv_persist = torch.full(gs, _dt_over_rhofluid, device=device, dtype=dtype)
             self._ch_outside_val = _dt_over_rhofluid
+        if self._bdim_body_div_correction and (
+                getattr(self, '_mw_div_corr_persist', None) is None
+                or self._mw_div_corr_persist.shape != gs
+                or self._mw_div_corr_persist.dtype != dtype
+                or self._mw_div_corr_persist.device != device):
+            # Full-grid MW body-divergence output, written by the fused
+            # bdim_forcing kernel every step (so no stale-cell hazard).
+            self._mw_div_corr_persist = torch.zeros(gs, device=device, dtype=dtype)
 
     # ── Fused BDIM step (2-D): bdim_forcing on Warp ─────────────────────────
     def _fluid_step_fused_2d(self, u, v, p, timestep):
@@ -1783,10 +1798,12 @@ class FluidSolver(PlottingMixin):
             )
 
         # 1-2. eddy viscosity + advection-diffusion.
+        # No upfront u0.copy_(primes): the full-grid bdim_forcing kernel
+        # writes EVERY cell of u0/v0 itself (BDIM inside the dirty rect,
+        # pass-through u0 = u' outside) — primes is never aliased to u0/v0
+        # (both adv-diff paths write clones / persistent _sl_out buffers).
         nu_t   = self._compute_nu_t(u, v)
         primes = self.adv_diff_solver.solve(u, v, nu_t=nu_t)
-        self.u0.copy_(primes[0])
-        self.v0.copy_(primes[1])
 
         # 3. Init persistent var-dens coefficients (once / on resize).
         self._init_bdim_coeff_persist_2d(timestep)
@@ -1797,7 +1814,12 @@ class FluidSolver(PlottingMixin):
         if d is None:
             d = {'i0': 0, 'j0': 0, 'Ai': int(gs[0]), 'Aj': int(gs[1])}
 
-        # 5. bdim_forcing (Warp): fused BDIM2 + variable-density coefficients.
+        # 5. bdim_forcing (Warp): fused BDIM2 + variable-density coefficients
+        #    + (flag-gated) Maertens–Weymouth body-div correction, one static
+        #    full-grid launch via CUDA-graph replay (BdimForcing2DGraph).
+        mw_on = self._bdim_body_div_correction
+        if getattr(self, '_bdim_fgraph_2d', None) is None:
+            self._bdim_fgraph_2d = BdimForcing2DGraph()
         bdim_forcing_2d(
             primes[0], primes[1],
             sdf_u, sdf_v,
@@ -1811,12 +1833,16 @@ class FluidSolver(PlottingMixin):
             int(d['i0']), int(d['j0']),
             int(d['Ai']), int(d['Aj']),
             int(self.bdim_mu0_projection),
+            sdf_cc=(comp.sdf_val if mw_on else None),
+            div_corr=(self._mw_div_corr_persist if mw_on else None),
+            eps_mw=(self._cached_float('eps', self.eps) if mw_on else 1.0),
+            inv_dx=1.0 / self._cached_float('dx', self.dx),
+            inv_dy=1.0 / self._cached_float('dy', self.dy),
+            runner=self._bdim_fgraph_2d,
         )
 
-        # 5b. Maertens–Weymouth body-divergence RHS correction (before free).
-        _body_div_corr = (
-            self._mw_body_div_correction(bU, bV)
-            if self._bdim_body_div_correction else None)
+        # 5b. MW body-divergence RHS correction — now written in-kernel above.
+        _body_div_corr = self._mw_div_corr_persist if mw_on else None
 
         # 6. Release per-step scratch fields before the pressure projection
         #    (streaming eager path — mirrors the former temporary free).
