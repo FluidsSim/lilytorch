@@ -16,7 +16,7 @@ long-term cleanup direction but is lower priority than the current HP items.
 
 This document is the requested *review and proposal*, not a code change:
 the merge itself is a multi-day refactor that touches every example in
-`farms_examples/` and every script in `validation/`, and it should be
+`examples/` and every script in `validation/`, and it should be
 landed on its own branch with full integration testing rather than
 piggy-backed onto the present session.
 
@@ -190,7 +190,7 @@ Migration steps (each step is a self-contained PR):
   FARMS coupling); separates concerns; preserves the standalone /
   coupled split in the README; each step is independently testable.
 * **Cons:** still a non-trivial refactor; touches every example in
-  `farms_examples/` (mostly `from lilytorch.integration.BDIMhandler
+  `examples/` (mostly `from lilytorch.integration.BDIMhandler
   import BDIMhandler` import paths, which can stay stable).
 * **Test impact:** existing kernel tests still cover step 1 verbatim;
   steps 2–4 need a new analytical-kinematics integration test
@@ -241,7 +241,7 @@ opened as `copilot/solver-bdim-merge` against the same
 
 ---
 
-## 5. What changes for users in `farms_examples/`
+## 5. What changes for users in `examples/`
 
 In Option B, **the public API surface does not change**:
 
@@ -252,7 +252,7 @@ In Option B, **the public API surface does not change**:
 * `handler.step(task, physics)` keeps the same semantics.
 * The yaml schema is unchanged.
 
-So *no* example in `farms_examples/` needs editing.  The validation
+So *no* example in `examples/` needs editing.  The validation
 scripts and the analytical `BodyFish` driver only benefit (step 2 means
 they share the same composite-update code path as the FARMS coupling,
 making bugs in either show up in both test suites).

@@ -331,38 +331,13 @@ class FluidSolver(PlottingMixin):
         _u_inlet = float(self.adv_diff_solver.BC_values_u[1])
         self._vmax_abort = float(solver.get("vmax_abort", max(100.0 * abs(_u_inlet), 100.0)))
 
-        # ---- optional torch.compile for adv-diff -----
-        # Skip when solve() will take the fused CUDA ``advect_flux_add`` kernel
-        # path: that path is a custom op + host syncs, so compiling it gives no
-        # speedup and trips dynamo's speculation log ("SpeculationLog diverged"
-        # AssertionError on graph-break restart).  Compile only helps the
-        # pure-PyTorch fallback (e.g. the semi-Lagrangian solve).
-        self._compile_adv_diff = solver.get("compile_adv_diff", False)
-        if (self._compile_adv_diff and self.device.type == "cuda"
-                and not self.adv_diff_solver.uses_cuda_flux_kernel):
-            self.adv_diff_solver.solve = torch.compile(
-                self.adv_diff_solver.solve, mode="default",
-            )
-
-        # ---- optional torch.compile for project() -----
-        # Fuses divergence + Poisson + velocity-correction ops into fewer
-        # kernels.  Graph-breaks at Python branches (poisson_method check,
-        # body_div_corr guard), so benefit is partial but non-zero.
-        if solver.get("compile_project", False) and self.device.type == "cuda":
-            self.project = torch.compile(self.project, mode="default")
-
-        # ---- CUDA graph capture of adv-diff solve -----
-        # Eliminates Python dispatch overhead on every adv-diff call.
-        # Only supported for constant-viscosity runs (nu_t=None) and schemes
-        # without host syncs (not abdquickest).  Lazily captured on the first
-        # fluid_step call via _adv_graph_pending flag.
-        self._use_cuda_graphs = (
-            solver.get("use_cuda_graphs", False)
-            and self.device.type == "cuda"
-            and not self._compile_adv_diff          # graphs + compile = redundant
-            and not solver.get("adv_diff_streams", False)  # graphs + streams = conflict
-        )
-        self._adv_graph_captured = False
+        # NOTE: the fast path is Warp.  Every numerical kernel (advection,
+        # diffusion, Poisson, body-update) is an always-on, already-compiled
+        # Warp kernel — there is no torch.compile / adv-diff CUDA-graph toggle
+        # any more.  ``torch.cuda.make_graphed_callables`` cannot capture the
+        # Warp launches (they run on Warp's own stream and get dropped from the
+        # replay → wrong physics), so that path was removed; Warp is the single
+        # compiled fast path on both CUDA and CPU.
 
         # Dynamic BDIM META compilation for the union-AABB crop path
         # (sub-block shape varies with body kinematics).
@@ -519,7 +494,6 @@ class FluidSolver(PlottingMixin):
             precond_vcycles = solver.get("poisson_precond_vcycles", 1),
             smoother        = solver.get("poisson_smoother", "rbgs"),
             recycle_k       = solver.get("poisson_recycle_k", 0),
-            cuda_graph      = solver.get("poisson_cuda_graph", False),
         )
         # Degenerate-cell freeze threshold. Cells with |diagonal| < jcap_tol are
         # frozen (iD=0, residual zeroed) — WaterLily's iszero(D) guard. The
@@ -2136,77 +2110,9 @@ class FluidSolver(PlottingMixin):
         field evaluation (standalone / deforming bodies) or the rigid
         streaming ``body_update`` launched by ``BDIMhandler``.
         """
-        # Lazy CUDA graph capture of the adv-diff solve: first call after
-        # construction, once the body SDFs are valid (so warmup runs inside
-        # the capture are physical).
-        if self._use_cuda_graphs and not self._adv_graph_captured:
-            self._capture_adv_cuda_graph()
-            self._adv_graph_captured = True
-
         if self.ndim == 3:
             return self._fluid_step_fused_3d(*args)
         return self._fluid_step_fused_2d(*args)
-
-    def _capture_adv_cuda_graph(self):
-        """Capture a CUDA graph for the adv-diff solve (constant-viscosity path).
-
-        Uses ``torch.cuda.make_graphed_callables``, which internally runs
-        ``num_warmup_iters`` un-captured passes then records one replay graph.
-        Input tensors are copied in each call; outputs are freshly allocated.
-
-        Constraints (checked here, silently skip if violated):
-        - Scheme must not have host syncs (abdquickest uses .item()).
-        - nu_t must be None (Smagorinsky not supported in graph path).
-        - Not compatible with multi-stream (separate streams inside a graph
-          are not captured by make_graphed_callables).
-        """
-        adv = self.adv_diff_solver
-        # HARD GUARD (warp_port): every adv-diff scheme now runs its fluxes /
-        # semi-Lagrangian interpolation / BCs as Warp kernels on Warp's OWN
-        # CUDA stream.  torch.cuda.make_graphed_callables records only the
-        # torch capture stream, so the Warp launches execute once at capture
-        # time and are SILENTLY ABSENT from every replay — the graphed solve
-        # returns frozen/partial physics (verified: salamander 2-D coupled run
-        # blows up at ~700 steps with this flag on).  Refuse until the capture
-        # is rebuilt to route Warp launches onto the captured torch stream
-        # (e.g. wp.ScopedStream(wp.stream_from_torch()) around the solve).
-        if self.device.type == "cuda":
-            print("[cuda_graph] skip — adv-diff runs Warp kernels on Warp's "
-                  "stream; make_graphed_callables would drop them from the "
-                  "replay (wrong physics). use_cuda_graphs is disabled on "
-                  "the Warp path.")
-            return
-        if adv._scheme_name == 'abdquickest':
-            print("[cuda_graph] skip — abdquickest requires host sync for CFL")
-            return
-        if getattr(self, '_smagorinsky_cs', 0.0) > 0:
-            print("[cuda_graph] skip — Smagorinsky requires nu_t tensor input")
-            return
-
-        D = self.ndim
-        samples = (self.u0.clone(), self.v0.clone())
-        if D == 3:
-            samples = (*samples, self.w0.clone())
-
-        _base = adv.solve  # bind current solve (possibly already compiled)
-
-        # make_graphed_callables needs a module or plain function with only
-        # Tensor positional args.  Wrap with a class to avoid closure issues.
-        class _Wrapper(torch.nn.Module):
-            def forward(self_, *v):  # noqa: N805
-                return _base(*v)
-
-        wrapper = _Wrapper().to(self.device)
-        try:
-            graphed = torch.cuda.make_graphed_callables(
-                wrapper, samples, num_warmup_iters=3,
-            )
-        except Exception as e:
-            print(f"[cuda_graph] capture failed ({e}); falling back to eager")
-            return
-
-        adv.solve = lambda *v, nu_t=None, iteration=0: graphed(*v)
-        print(f"[cuda_graph] adv-diff graph captured ({D}D, scheme={adv._scheme_name})")
 
     def check_explosion(self, iteration):
         """Abort if fluid fields are non-finite or velocities exceed _vmax_abort."""

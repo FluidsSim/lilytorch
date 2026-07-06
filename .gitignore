@@ -91,4 +91,4 @@ log.*
 
 # Cython generated C files (but keep source files)
 *.c
-!lilytorch/farms_examples/amphibot/experimental_data/modes.c
+!lilytorch/examples/amphibot/experimental_data/modes.c

@@ -94,7 +94,7 @@ def run_one_method(method_name, nx, ny, nz, n_steps, warmup,
     # IMPORTANT: We need to reimport the config module to get fresh state.
     # Since gen_configs writes to disk, we can modify the YAML after.
     import importlib
-    import lilytorch.farms_examples._1guillasim.gen_configs_one_pinned_3d as cfg
+    import lilytorch.examples._1guillasim.gen_configs_one_pinned_3d as cfg
     importlib.reload(cfg)
 
     cfg.Nx           = nx

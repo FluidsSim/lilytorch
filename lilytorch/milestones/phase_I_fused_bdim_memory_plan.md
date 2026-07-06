@@ -502,7 +502,7 @@ blocker for the memory savings from Kernels A and B.
 
 ### Test harness
 
-Use `lilytorch/farms_examples/jellyfish/run_jellyfish_fluid.py`.
+Use `lilytorch/examples/jellyfish/run_jellyfish_fluid.py`.
 The jellyfish is a pure analytical body — no FARMS, no MuJoCo, no mesh files.
 It exercises the full 3-D kernel path including SDF streaming, forces, and
 the variable-density projection.
@@ -520,8 +520,8 @@ PYTHON=/data/andreaferrario/venv_ns_312/bin/python
 # Save reference outputs from old code (before any changes — run on optimize_speed_memory)
 $PYTHON - << 'EOF'
 import torch
-from lilytorch.farms_examples.jellyfish.run_jellyfish_fluid import build_solver
-solver = build_solver("lilytorch/farms_examples/jellyfish/config_fluid.yaml")
+from lilytorch.examples.jellyfish.run_jellyfish_fluid import build_solver
+solver = build_solver("lilytorch/examples/jellyfish/config_fluid.yaml")
 solver.composite_body.update(0.0, 0, dt=float(solver.dt))
 refs = []
 for i in range(10):
@@ -535,8 +535,8 @@ EOF
 $PYTHON - << 'EOF'
 import torch
 refs = torch.load("/tmp/jellyfish_ref.pt")
-from lilytorch.farms_examples.jellyfish.run_jellyfish_fluid import build_solver
-solver = build_solver("lilytorch/farms_examples/jellyfish/config_fluid.yaml")
+from lilytorch.examples.jellyfish.run_jellyfish_fluid import build_solver
+solver = build_solver("lilytorch/examples/jellyfish/config_fluid.yaml")
 solver.composite_body.update(0.0, 0, dt=float(solver.dt))
 for i, (ru, rv, rw, rp) in enumerate(refs):
     solver.step_(solver.u0, solver.v0, solver.w0, solver.p0, i)
@@ -552,9 +552,9 @@ EOF
 ```bash
 $PYTHON - << 'EOF'
 import torch
-from lilytorch.farms_examples.jellyfish.run_jellyfish_fluid import build_solver
+from lilytorch.examples.jellyfish.run_jellyfish_fluid import build_solver
 torch.cuda.reset_peak_memory_stats()
-solver = build_solver("lilytorch/farms_examples/jellyfish/config_fluid.yaml")
+solver = build_solver("lilytorch/examples/jellyfish/config_fluid.yaml")
 solver.composite_body.update(0.0, 0, dt=float(solver.dt))
 for i in range(5):
     solver.step_(solver.u0, solver.v0, solver.w0, solver.p0, i)
@@ -571,8 +571,8 @@ EOF
 ```bash
 $PYTHON - << 'EOF'
 import torch, time
-from lilytorch.farms_examples.jellyfish.run_jellyfish_fluid import build_solver
-solver = build_solver("lilytorch/farms_examples/jellyfish/config_fluid.yaml")
+from lilytorch.examples.jellyfish.run_jellyfish_fluid import build_solver
+solver = build_solver("lilytorch/examples/jellyfish/config_fluid.yaml")
 solver.composite_body.update(0.0, 0, dt=float(solver.dt))
 # warmup
 for i in range(5):

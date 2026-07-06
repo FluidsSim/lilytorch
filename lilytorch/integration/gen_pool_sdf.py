@@ -134,7 +134,7 @@ def _write_sdf(sdf_elem, rel_path):
     """Pretty-print an SDF ElementTree and write it under the sdfs folder."""
     xml_str = minidom.parseString(ET.tostring(sdf_elem)).toprettyxml(indent="  ")
     output_path = os.path.join(
-        lilytorch_repo_root, 'farms_examples', 'sdfs', *rel_path.split('/'))
+        lilytorch_repo_root, 'examples', 'sdfs', *rel_path.split('/'))
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, 'w') as f:
         f.write(xml_str)

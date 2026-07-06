@@ -79,12 +79,12 @@ deleted.
   `validation/memory_comparison_3d` (compares the two modes — becomes moot),
   `validation/error_analysis_cylinder_2d/run.py`,
   gazzola/coquerelle single_sphere_drop controllers,
-  several `farms_examples/**/gen_config*` set `solver_method` (submerged_diag,
+  several `examples/**/gen_config*` set `solver_method` (submerged_diag,
   _run_keflow, study_overlap python variants, _test_spheroid_consistent).
 
 Capability edges found:
 1. **two-phase `consistent_momentum`** — ACTIVE users:
-   `farms_examples/boat/_verify_run_full.py`, `_verify_run_small.py`,
+   `examples/boat/_verify_run_full.py`, `_verify_run_small.py`,
    `_diag_hullonly_full.py`, `_test_spheroid_consistent.py`. Its
    `TwoPhaseSolver.fluid_step` override reuses the python BDIM helpers
    (`_apply_bdim_all_axes`, `_bdim_apply`, `_bdim_meta`,
@@ -170,7 +170,7 @@ Capability edges found:
      test_strong_coupling.py test_mujoco_checkpoint.py -q`
    - test_two_phase.py constructs solvers with `solver_method` — they will go
      through the deprecation path; fix fixtures if they assert on mode.
-   - A boat consistent-momentum smoke: `farms_examples/boat/_verify_run_small.py`
+   - A boat consistent-momentum smoke: `examples/boat/_verify_run_small.py`
      (needs FARMS; if too heavy, at least import-check + a few steps).
    - grep clean: `grep -rn "_use_kernels\|_update_python" lilytorch --include=*.py`
      (excluding `/old/`) should return nothing (except the deprecation shim).

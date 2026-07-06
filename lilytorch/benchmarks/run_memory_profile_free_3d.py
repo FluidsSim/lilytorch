@@ -42,7 +42,7 @@ def record(label):
 # ═══════════════════════════════════════════════════════════════════════
 # 1. Generate the config files (quick, no GPU)
 # ═══════════════════════════════════════════════════════════════════════
-import lilytorch.farms_examples._1guillasim.gen_configs_one_free_3d as cfg
+import lilytorch.examples._1guillasim.gen_configs_one_free_3d as cfg
 
 cfg.n_iterations = 201
 cfg.save_every   = 200

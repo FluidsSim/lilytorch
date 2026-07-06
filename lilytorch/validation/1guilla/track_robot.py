@@ -29,7 +29,7 @@ Workflow
     python track_robot.py --tune --video <path>
 
 Data files are expected at:
-    <script_dir>/../../farms_examples/../  (adjust --summary_csv / --video_dir)
+    <script_dir>/../../examples/../  (adjust --summary_csv / --video_dir)
 
 Defaults assume the script lives next to a `videos/` folder and
 `swim_experiment_summary.csv` (see --summary_csv / --video_dir).

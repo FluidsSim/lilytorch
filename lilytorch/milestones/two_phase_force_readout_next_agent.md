@@ -242,7 +242,7 @@ purpose of two-phase. Buoyancy must stay emergent from the real fluid pressure.
 
 ## 4. Harness (all throwaway, already on disk)
 
-In `lilytorch/farms_examples/_1guillasim/experiments/`:
+In `lilytorch/examples/_1guillasim/experiments/`:
 - **`_run_keflow.py`** — prescribed-motion (force_scaling=0, `SpawnMode.TRANSVERSE`)
   KE + force probe. Knobs: `KEFLOW_N`, `KEFLOW_Z` (depth), `KEFLOW_REALAIR`
   (0=uniform 1000, 1=real air), `KEFLOW_RHOAIR` (override air density, e.g. 12.5),

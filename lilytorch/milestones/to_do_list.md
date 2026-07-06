@@ -315,7 +315,7 @@ LP10. **`COMPOSITEmesh2sdf.transform_3d` is a `NotImplementedError`** (found 202
   implement the underlying mesh transform or assert-guard the call site so the
   failure is explicit at construction.
 LP11. **Pleurodeles full-3D example is a stub** (found 2026-06-23) —
-  `farms_examples/pleurodeles/gen_configs_swim_full3d.py:25` has a placeholder SDF
+  `examples/pleurodeles/gen_configs_swim_full3d.py:25` has a placeholder SDF
   filename TODO ("replace once the full-3D SDF is ready"); the example cannot run
   as-is. Either finish the full-3D SDF + wire it, or mark the file experimental.
 
@@ -347,7 +347,7 @@ speaks MuJoCo directly (`data.xpos/xquat/xipos`, `model.body_mass`, `geom_*`,
 `xfrc_applied`/`mj_applyFT`). FARMS only owns the *outer* layer:
   - `integration/extensions.py` — `FluidExtension(TaskExtension)` hooks
     (`initialize_episode`, `before_step`), experiment options, HDF5 IO.
-  - `farms_examples/base_sim_config.py` + `gen_configs_*` — animat model + scene gen.
+  - `examples/base_sim_config.py` + `gen_configs_*` — animat model + scene gen.
   - swimmer controllers (CPG networks, PD controllers).
   - the viewers (all `import farms` for the MuJoCo viewer).
 

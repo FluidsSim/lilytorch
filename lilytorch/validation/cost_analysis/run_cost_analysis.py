@@ -555,8 +555,6 @@ def _apply_cfg_overrides(cfg):
             bdim_yaml = ext.get("config", {}).get("bdim_yaml", {})
             solver_cfg = bdim_yaml.get("solver", {})
             if solver_cfg:
-                solver_cfg["compile_adv_diff"] = True
-                solver_cfg["compile_forces"] = True
                 solver_cfg["dtype"] = args.dtype
                 solver_cfg["poisson_method"] = args.poisson_method
                 # solver_method is deprecated (single fused path); never set it.

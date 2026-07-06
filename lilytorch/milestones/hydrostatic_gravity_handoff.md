@@ -138,14 +138,14 @@ readout. This is the opposite of the failed `gauge_anchor` band-aid.
 
 ### Recommended staging
 - **Stage 1** — single-phase/uniform `p_h` + predictor balance. Small, safe,
-  proves the mechanism end-to-end via the KE gate. 
+  proves the mechanism end-to-end via the KE gate.
 - **Stage 2** — two-phase variable-density `p_h` + buoyancy reconciliation (the
   valuable but risky part), gated by the buoyancy tests. Only after Stage 1.
 
 ## 4. The harness that already exists (don't rebuild it)
 
 All throwaway, on disk:
-- `lilytorch/farms_examples/_1guillasim/experiments/_run_keflow.py` — FARMS runner.
+- `lilytorch/examples/_1guillasim/experiments/_run_keflow.py` — FARMS runner.
   Subclasses the surface-pool config; `force_scaling=0` (fluid exerts no force on
   the body → identical body motion across runs), TRANSVERSE, z=−0.07,
   `diagnostics_every=1`. Env knobs:
@@ -153,7 +153,7 @@ All throwaway, on disk:
   `KEFLOW_SINGLEPHASE` (1=plain FluidSolver, no two_phase block),
   `KEFLOW_REALAIR` (1=keep rho_air=1.2 / 833:1; default overrides to 1000=uniform),
   `KEFLOW_PTOL` / `KEFLOW_PMETHOD` (mgcg|multigrid) / `KEFLOW_PCYC`.
-- `lilytorch/farms_examples/_1guillasim/experiments/_ke_ext.py` — a `FluidExtension`
+- `lilytorch/examples/_1guillasim/experiments/_ke_ext.py` — a `FluidExtension`
   subclass that records FLUID kinetic energy each step (total + fluid-only, the
   latter masks out the body interior `sdf>eps`). Writes
   `_submerged_diag/keflow_<TAG>.csv` (cols `it,ke_tot,ke_fluid`). NOTE:
@@ -166,7 +166,7 @@ All throwaway, on disk:
 
 Run from the experiments dir, e.g.:
 ```
-cd lilytorch/farms_examples/_1guillasim/experiments
+cd lilytorch/examples/_1guillasim/experiments
 KEFLOW_N=400 KEFLOW_REALAIR=1 KEFLOW_NOGRAV=1 KEFLOW_TAG=tpreal_nograv python _run_keflow.py
 KEFLOW_N=400 KEFLOW_REALAIR=1 KEFLOW_NOGRAV=0 KEFLOW_TAG=tpreal_grav   python _run_keflow.py
 ```

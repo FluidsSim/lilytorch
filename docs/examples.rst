@@ -58,10 +58,10 @@ from the hydrodynamic loads. **No MuJoCo involvement.**
 .. code-block:: bash
 
    # Uses config_fluid.yaml next to the script
-   python -m lilytorch.farms_examples.jellyfish.run_jellyfish_fluid
+   python -m lilytorch.examples.jellyfish.run_jellyfish_fluid
 
    # Or point to a custom YAML
-   python -m lilytorch.farms_examples.jellyfish.run_jellyfish_fluid /path/to/my_config.yaml
+   python -m lilytorch.examples.jellyfish.run_jellyfish_fluid /path/to/my_config.yaml
 
 Key settings in ``config_fluid.yaml``: 256³ cube, FFT Neumann Poisson,
 ``eps_multiplier: 2.0`` for a slightly wider BDIM interface to stabilise
@@ -112,7 +112,7 @@ zero-gradient outlet.
 
 .. code-block:: bash
 
-   python -m lilytorch.farms_examples._1guillasim.gen_configs_one_pinned_2d
+   python -m lilytorch.examples._1guillasim.gen_configs_one_pinned_2d
 
 Variants in the same folder:
 
@@ -128,7 +128,7 @@ A simplified zebrafish swimmer with analytical muscle actuation:
 
 .. code-block:: bash
 
-   python -m lilytorch.farms_examples.zebrafishsim.gen_configs
+   python -m lilytorch.examples.zebrafishsim.gen_configs
 
 Salamander
 ^^^^^^^^^^
@@ -138,10 +138,10 @@ multibody). Both 2-D and 3-D variants are shipped:
 
 .. code-block:: bash
 
-   python -m lilytorch.farms_examples.salamander.gen_configs_swim_2d
-   python -m lilytorch.farms_examples.salamander.gen_configs_paddle_2d
-   python -m lilytorch.farms_examples.salamander.gen_configs_swim_3d
-   python -m lilytorch.farms_examples.salamander.gen_configs_underwater_walking_3d
+   python -m lilytorch.examples.salamander.gen_configs_swim_2d
+   python -m lilytorch.examples.salamander.gen_configs_paddle_2d
+   python -m lilytorch.examples.salamander.gen_configs_swim_3d
+   python -m lilytorch.examples.salamander.gen_configs_underwater_walking_3d
 
 Pleurodeles
 ^^^^^^^^^^^
@@ -151,7 +151,7 @@ kinematics replay from recorded animal data:
 
 .. code-block:: bash
 
-   python -m lilytorch.farms_examples.pleurodeles.gen_configs_swim
+   python -m lilytorch.examples.pleurodeles.gen_configs_swim
 
 Submarine
 ^^^^^^^^^
@@ -161,7 +161,7 @@ ballast-stabilised roll — two-way coupled to BDIM:
 
 .. code-block:: bash
 
-   python -m lilytorch.farms_examples.submarine.gen_configs_drag
+   python -m lilytorch.examples.submarine.gen_configs_drag
 
 Single-sphere drop (FARMS experiment bundle)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -173,11 +173,11 @@ launched with ``farmsim``:
 .. code-block:: bash
 
    # Gazzola low-Re sphere drop
-   cd lilytorch/farms_examples/single_sphere_drop_gazzola
+   cd lilytorch/examples/single_sphere_drop_gazzola
    ./run.sh
 
    # 3-D Coquerelle study across densities and viscosities
-   cd lilytorch/farms_examples/single_sphere_drop_coquerelle_3d
+   cd lilytorch/examples/single_sphere_drop_coquerelle_3d
    ./run_all_cases.sh
 
 Each folder contains ``experiment_config.yaml`` (FARMS), an
@@ -189,13 +189,13 @@ Writing your own example
 ------------------------
 
 The cleanest template for a *standalone* case is the jellyfish driver
-(:mod:`lilytorch.farms_examples.jellyfish.run_jellyfish_fluid`): it
+(:mod:`lilytorch.examples.jellyfish.run_jellyfish_fluid`): it
 loads a YAML, builds the solver, optionally replaces
 ``solver.composite_body`` with a custom :class:`~lilytorch.src.body.Body`
 subclass, and runs the loop.
 
 The cleanest template for a *coupled* case is any
-``gen_configs_*.py`` in :mod:`lilytorch.farms_examples._1guillasim`:
+``gen_configs_*.py`` in :mod:`lilytorch.examples._1guillasim`:
 a :class:`BaseSimConfig` subclass defines the grid, physics, animat(s),
 and extensions list; the
 :class:`~lilytorch.integration.extensions.FluidExtension` entry turns
