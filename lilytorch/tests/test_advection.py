@@ -147,6 +147,56 @@ def test_flux_add_warp_cpu_equals_gpu(ndim, scheme_id):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+#  FluxAddGraphRunner — CUDA-graph-cached flux launches must equal eager
+# ═════════════════════════════════════════════════════════════════════════════
+
+@SKIP_NO_CUDA
+@pytest.mark.parametrize("scheme", ["quick", "abdquickest"])
+def test_flux_graph_runner_matches_eager(scheme):
+    """A multi-step 3-D advection run with the CUDA-graph flux runner must
+    reproduce the eager run bit-for-bit (the graph bakes f32 scalars, so replay
+    is exact).  This is the guard against the ``b423298`` failure mode where a
+    graph "runs but the Warp launches are dropped": such a graph would leave rhs
+    unchanged, so the fields would NOT match eager — and the ``evolved`` check
+    below asserts the fields actually moved, so a no-op graph fails loudly.
+    ``abdquickest`` is forced onto the eager path (live Courant number); it is
+    included to confirm that exclusion still evolves correctly."""
+    import os
+    from lilytorch.src.advection import AdvDiffSolver, FluxAddGraphRunner
+
+    N, dev = 34, torch.device("cuda:0")
+    x = torch.linspace(0.0, 1.0, N, device=dev, dtype=torch.float32)
+    torch.manual_seed(0)
+    seed = [torch.randn(N, N, N, device=dev, dtype=torch.float32) * 0.1
+            for _ in range(3)]
+
+    def run(graph_on):
+        s = AdvDiffSolver(dev, dt=1e-3, x=x, y=x.clone(), nu=1e-3,
+                          z=x.clone(), method=scheme)
+        # Force the desired dispatch regardless of the LILY_FLUX_GRAPH env var.
+        from lilytorch.src import advection as _adv
+        s._flux_graph_runner = (FluxAddGraphRunner() if graph_on
+                                else _adv.advect_flux_add_warp)
+        u, v, w = (f.clone() for f in seed)
+        for _ in range(25):        # ≥20 steps; runner captures on 2nd sighting
+            out = s.solve(u, v, w)
+            u.copy_(out[0]); v.copy_(out[1]); w.copy_(out[2])
+        torch.cuda.synchronize()
+        return u, v, w
+
+    ue, ve, we = run(False)
+    ug, vg, wg = run(True)
+
+    # Fields must have actually evolved (a no-op graph would leave seed intact).
+    evolved = (ue - seed[0]).abs().max().item()
+    assert evolved > 1e-3, f"fields did not evolve ({evolved:.3e}) — bad harness"
+
+    for a, b, name in ((ue, ug, "u"), (ve, vg, "v"), (we, wg, "w")):
+        d = (a - b).abs().max().item()
+        assert d == 0.0, f"graph vs eager {name} mismatch: {d:.3e} (dropped launches?)"
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 #  apply_bcs_2d / apply_bcs_3d — fused BC ghost writes (Warp CPU == GPU)
 #  Merged from the former test_misc_2d.py / test_misc_3d.py.
 # ═════════════════════════════════════════════════════════════════════════════

@@ -1,10 +1,10 @@
 """Warp **bdim_forcing (3-D)** single-source checks: Warp CPU == Warp GPU.
 
-Exercises ``bdim_forcing_3d_warp`` (and its BDIM-σ keyword path) on manufactured
+Exercises ``bdim_forcing_3d_warp`` on manufactured
 sphere-SDF + random-field scenes: full-grid and interior dirty-AABB sub-blocks,
-``mu0_projection`` 0/1, and the σ-shifted-coefficient variant.
+``mu0_projection`` 0/1.
 
-Run:  pytest lilytorch/src/kernels/test_bdim.py -v
+Run:  pytest lilytorch/tests/test_bdim.py -v
 """
 from __future__ import annotations
 
@@ -51,28 +51,14 @@ def _cbuf(dev, dtype=torch.float64):
             torch.full((NGX - 2, NGY - 2, NGZ - 1), base, dtype=dtype, device=dev))
 
 
-def _run_warp(F, dirty, mu0_proj, sigma=None):
+def _run_warp(F, dirty, mu0_proj):
     su, sv, sw, bu, bv, bw, up, vp, wp_ = F
     u0, v0, w0 = up.clone(), vp.clone(), wp_.clone()
     ch, cv, cw = _cbuf(su.device, su.dtype)
-    kw = {}
-    if sigma is not None:
-        ku, kv, kwk, ss = sigma
-        kw = dict(key_u=ku, key_v=kv, key_w=kwk, sigma_shifts=ss)
     bdim_forcing_3d_warp(up, vp, wp_, su, sv, sw, bu, bv, bw,
                        u0, v0, w0, ch, cv, cw, EPS, RHO, DT, H, *dirty,
-                       mu0_proj, **kw)
+                       mu0_proj)
     return u0, v0, w0, ch, cv, cw
-
-
-def _sigma(dev):
-    dvol = NGX * NGY * NGZ
-    g = torch.Generator(device="cpu").manual_seed(3)
-    ku = torch.randint(0, 2, (dvol,), dtype=torch.int64, generator=g)
-    kv = torch.randint(0, 2, (dvol,), dtype=torch.int64, generator=g)
-    kw = torch.randint(0, 2, (dvol,), dtype=torch.int64, generator=g)
-    ss = torch.tensor([0.05, 0.12], dtype=torch.float32)
-    return ku.to(dev), kv.to(dev), kw.to(dev), ss.to(dev)
 
 
 # ─── single source: Warp CPU == Warp GPU ──────────────────────────────────────
@@ -88,16 +74,6 @@ def test_cpu_eq_gpu(dirty, mu0_proj):
     err = [(a.cpu() - b.cpu()).abs().max().item() for a, b in zip(wc, wg)]
     # float64 reduction noise on the normalised normal / mu1 polynomial.
     assert max(err) < 1e-12, f"warp cpu vs gpu: {err}"
-
-
-@SKIP_NO_CUDA
-@pytest.mark.parametrize("mu0_proj", [1, 0])
-def test_cpu_eq_gpu_sigma(mu0_proj):
-    dirty = (0, 0, 0, NGX, NGY, NGZ)
-    wc = _run_warp(_fields("cpu"), dirty, mu0_proj, _sigma("cpu"))
-    wg = _run_warp(_fields("cuda:0"), dirty, mu0_proj, _sigma("cuda:0"))
-    err = [(a.cpu() - b.cpu()).abs().max().item() for a, b in zip(wc, wg)]
-    assert max(err) < 1e-12, f"warp cpu vs gpu (sigma): {err}"
 
 
 if __name__ == "__main__":
@@ -143,26 +119,13 @@ def _cbuf_2d(dev):
             torch.full((NGX_2D, NGY_2D), base, dtype=torch.float64, device=dev))
 
 
-def _run_warp_2d(F, dirty, mu0_proj, sigma=None):
+def _run_warp_2d(F, dirty, mu0_proj):
     su, sv, bu, bv, up, vp = F
     u0, v0 = up.clone(), vp.clone()
     ch, cv = _cbuf_2d(su.device)
-    kw = {}
-    if sigma is not None:
-        ku, kv, ss = sigma
-        kw = dict(key_u=ku, key_v=kv, sigma_shifts=ss)
     bdim_forcing_2d_warp(up, vp, su, sv, bu, bv, u0, v0, ch, cv,
-                       EPS_2D, RHO_2D, DT_2D, H_2D, *dirty, mu0_proj, **kw)
+                       EPS_2D, RHO_2D, DT_2D, H_2D, *dirty, mu0_proj)
     return u0, v0, ch, cv
-
-
-def _sigma_2d(dev):
-    dvol = NGX_2D * NGY_2D
-    g = torch.Generator(device="cpu").manual_seed(3)
-    ku = torch.randint(0, 2, (dvol,), dtype=torch.int64, generator=g)
-    kv = torch.randint(0, 2, (dvol,), dtype=torch.int64, generator=g)
-    ss = torch.tensor([0.05, 0.12], dtype=torch.float32)
-    return ku.to(dev), kv.to(dev), ss.to(dev)
 
 
 @SKIP_NO_CUDA
@@ -174,13 +137,3 @@ def test_cpu_eq_gpu_2d(dirty, mu0_proj):
     wg = _run_warp_2d(_fields_2d("cuda:0"), dirty, mu0_proj)
     err = [(a.cpu() - b.cpu()).abs().max().item() for a, b in zip(wc, wg)]
     assert max(err) < 1e-12, f"warp cpu vs gpu: {err}"
-
-
-@SKIP_NO_CUDA
-@pytest.mark.parametrize("mu0_proj", [1, 0])
-def test_cpu_eq_gpu_sigma_2d(mu0_proj):
-    dirty = (0, 0, NGX_2D, NGY_2D)
-    wc = _run_warp_2d(_fields_2d("cpu"), dirty, mu0_proj, _sigma_2d("cpu"))
-    wg = _run_warp_2d(_fields_2d("cuda:0"), dirty, mu0_proj, _sigma_2d("cuda:0"))
-    err = [(a.cpu() - b.cpu()).abs().max().item() for a, b in zip(wc, wg)]
-    assert max(err) < 1e-12, f"warp cpu vs gpu (sigma): {err}"

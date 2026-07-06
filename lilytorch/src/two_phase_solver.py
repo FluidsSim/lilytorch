@@ -187,12 +187,6 @@ class TwoPhaseSolver(FluidSolver):
         # momentum step (python-style conservative transport) bypasses the
         # fused kernels entirely, so the guards below do not apply to it.
         _consistent = bool(tp_cfg.get("consistent_momentum", False))
-        if not _consistent and self.apply_bdim_sigma:
-            raise ValueError(
-                "TwoPhaseSolver's fused path does not support apply_bdim_sigma "
-                "(the σ-shifted coefficient breaks the mu0 reconstruction in "
-                "the two-phase rescale); disable one of them."
-            )
         if not _consistent and not self.bdim_mu0_projection:
             raise ValueError(
                 "TwoPhaseSolver's fused path requires bdim_mu0_projection=True "

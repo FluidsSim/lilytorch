@@ -49,8 +49,6 @@ class SimConfig(BaseSimConfig):
         self.sdf_interp_method = "triquadratic"
         self.force_delta_order = 2
 
-        # self.apply_bdim_sigma = True
-
         # Animat — FREE spawn: full 6-DOF base, free to dive/roll/pitch.
         self.animats_pars = [
             {

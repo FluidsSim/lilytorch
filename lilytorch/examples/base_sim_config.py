@@ -171,7 +171,6 @@ class BaseSimConfig:
         self.poisson_nsmoothing      = 10
         self.poisson_verbose         = False
         self.poisson_bc_type         = "neumann"
-        self.kernel_cuda_graph       = None    # CUDA graph for the streaming body_update (Warp path)
         self.smagorinsky_cs          = 0.0
         self.carreau                 = None   # dict with keys: nu_0, nu_inf, lam, n
         self.sponge                  = None   # dict with keys: width, strength
@@ -234,10 +233,6 @@ class BaseSimConfig:
         # Default 2.0 in the solver.  For mesh bodies set to 1.5 or lower
         # (min ~1.0) to reduce the effective body size and drag inflation.
         self.eps_multiplier          = None   # None → solver default (2.0)
-        # BDIM-σ (Lauber et al. 2022): per-body Poisson-coefficient shift
-        # so thin bodies (r < eps) reach mu0_poisson = 0 inside and the
-        # pressure BC is correctly enforced.  None → solver default (False).
-        self.apply_bdim_sigma        = None   # None → solver default (False)
         # BDIM2 mu0-weighted Poisson coefficient (dt*mu0/rho_eff).  None →
         # solver default (True).  Set False to use the plain dt/rho_eff
         # coefficient, which keeps the projection non-degenerate — needed for
@@ -876,7 +871,6 @@ class BaseSimConfig:
             ("poisson_warm_start",      self.poisson_warm_start),
             ("poisson_smoother",        self.poisson_smoother),
             ("poisson_bc_type",         self.poisson_bc_type),
-            ("kernel_cuda_graph",       self.kernel_cuda_graph),
             ("solver_method",           self.solver_method),
             ("dtype",                   self.dtype),
             ("zero_pressure_inside",    self.zero_pressure_inside),
@@ -890,7 +884,6 @@ class BaseSimConfig:
             ("sdf_interp_method",       self.sdf_interp_method),
             ("vmax_abort",              self.vmax_abort),
             ("eps_multiplier",          self.eps_multiplier),
-            ("apply_bdim_sigma",        self.apply_bdim_sigma),
             ("bdim_mu0_projection",     self.bdim_mu0_projection),
             ("bdim_body_div_correction", self.bdim_body_div_correction),
             ("poisson_jcap_tol",         self.poisson_jcap_tol),

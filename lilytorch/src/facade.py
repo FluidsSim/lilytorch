@@ -18,7 +18,7 @@ Bridges:
 
 * ``body_update_{2,3}d`` — streaming SDF + staggered body velocities (formerly
   "Kernel A"), flat-table layout → ``WarpStreamingSDF``; dtype-generic (f32+f64),
-  optional CUDA-graph fast path, σ body-id key emit.
+  optional CUDA-graph fast path.
 """
 
 import torch
@@ -29,8 +29,7 @@ import torch
 _FAR = 1e4
 
 # ── body_update (2-D) → WARP (marshalling bridge) ──────────────────────────────────
-# body_update runs on Warp at f32 AND f64 (dtype-generic port).  The σ path emits
-# the body-id key_* arrays the σ bdim_forcing pass reads (see the emit_keys path).
+# body_update runs on Warp at f32 AND f64 (dtype-generic port).
 
 from lilytorch.src.streaming_sdf import WarpStreamingSDF2D as _WarpSDF2D
 import warp as _wp
@@ -49,8 +48,7 @@ class _BodyUpdate2DBridge:
     toggles; per-step ``kin``/``aabb`` go through ``update_kinematics``.
     Outputs are wrapped zero-copy from the caller's torch tensors (which the
     solver step pre-fills to ``+FAR``/0, exactly as ``wp.atomic_min`` needs).
-    Generic in dtype: f32 and f64 both run on Warp.  The σ ``key_*`` arrays
-    (winning body-id) are emitted on the ``emit_keys`` path (Item 5)."""
+    Generic in dtype: f32 and f64 both run on Warp."""
 
     def __init__(self):
         self._w = None
@@ -61,10 +59,10 @@ class _BodyUpdate2DBridge:
     def __call__(self, F_flat, F_offsets, body_shapes, body_meta, kin,
                  aabb_lo, aabb_dim, gx, gy, h, max_vol,
                  sdf_cc, sdf_u, sdf_v, body_u, body_v,
-                 key_cc, key_u, key_v, interp_method,
+                 interp_method,
                  dirty_i0, dirty_j0, dirty_Ai, dirty_Aj,
                  num_u, num_v, den_u, den_v, blend_eps,
-                 emit_keys=False, use_graph=False):
+                 use_graph=False):
         if int(dirty_Ai) * int(dirty_Aj) <= 0:
             return
         wpf = _wp.float64 if sdf_cc.dtype == torch.float64 else _wp.float32
@@ -91,19 +89,7 @@ class _BodyUpdate2DBridge:
         def f(t):
             return _wp.from_torch(t.reshape(-1))
 
-        # BDIM-σ path: emit the winning body-id into key_u/key_v (low 32
-        # bits) so the Warp σ bdim_forcing can read it (it masks key & 0xffffffff).
-        # Sentinel = B (= n_sigma) on untouched cells → no σ shift, mirroring
-        # the native ``B_sentinel``.
-        if emit_keys:
-            key_u.fill_(B)
-            key_v.fill_(B)
-            w.run_fanned_eager(f(sdf_cc), f(sdf_u), f(sdf_v),
-                               f(body_u), f(body_v),
-                               key_u=f(key_u), key_v=f(key_v), emit_keys=1)
-            return
-
-        # CUDA-graph fast path (opt-in, non-σ): replaces the ~2× eager
+        # CUDA-graph fast path (default on CUDA): replaces the ~2× eager
         # ``wp.launch`` host floor (~70–170 µs) with one graph replay (~3 µs).
         # Requires stable output buffers (the solver override reuses persistent
         # temporaries under the same flag); a churn guard captures only on the
@@ -150,9 +136,8 @@ class _BodyUpdate3DBridge:
     """3-D analogue of :class:`_BodyUpdate2DBridge`.  Adapts the native
     ``body_update_3d`` positional call into
     :class:`WarpStreamingSDF` (z axis: ``aabb_*``/``body_shapes`` are ``B*3``,
-    ``kin`` is ``B*21``; adds ``gz``/``sdf_w``/``bW``).  The σ ``key_*``
-    arrays (winning body-id, dirty-local) are emitted on the ``emit_keys``
-    path (Item 5).  Generic in dtype: f32 and f64 both run on Warp."""
+    ``kin`` is ``B*21``; adds ``gz``/``sdf_w``/``bW``).  Generic in dtype:
+    f32 and f64 both run on Warp."""
 
     def __init__(self):
         self._w = None
@@ -163,11 +148,11 @@ class _BodyUpdate3DBridge:
     def __call__(self, F_flat, F_offsets, body_shapes, body_meta, kin,
                  aabb_lo, aabb_dim, gx, gy, gz, h, max_vol,
                  sdf_cc, sdf_u, sdf_v, sdf_w, body_u, body_v, body_w,
-                 key_cc, key_u, key_v, key_w, interp_method,
+                 interp_method,
                  dirty_i0, dirty_j0, dirty_k0,
                  dirty_Ai, dirty_Aj, dirty_Ak,
                  num_u, num_v, num_w, den_u, den_v, den_w, blend_eps,
-                 emit_keys=False, use_graph=False):
+                 use_graph=False):
         if int(dirty_Ai) * int(dirty_Aj) * int(dirty_Ak) <= 0:
             return
         wpf = _wp.float64 if sdf_cc.dtype == torch.float64 else _wp.float32
@@ -193,20 +178,7 @@ class _BodyUpdate3DBridge:
         def f(t):
             return _wp.from_torch(t.reshape(-1))
 
-        # BDIM-σ: emit the winning body-id into key_{u,v,w} (low 32 bits).
-        # Sentinel = B (= n_sigma) on untouched cells → no σ shift.
-        if emit_keys:
-            key_u.fill_(B); key_v.fill_(B); key_w.fill_(B)
-            w.run_fanned_eager(f(sdf_cc), f(sdf_u), f(sdf_v), f(sdf_w),
-                               f(body_u), f(body_v), f(body_w),
-                               key_u=f(key_u), key_v=f(key_v),
-                               key_w=f(key_w), emit_keys=1,
-                               dirty=(int(dirty_i0), int(dirty_j0),
-                                      int(dirty_k0), int(dirty_Aj),
-                                      int(dirty_Ak)))
-            return
-
-        # CUDA-graph fast path (opt-in, non-σ) — see the 2-D bridge.  The
+        # CUDA-graph fast path (default on CUDA) — see the 2-D bridge.  The
         # SDF→FAR / body→0 resets are folded into the captured graph (Warp
         # memsets), so the override pays no per-step torch fills.
         if use_graph and sdf_cc.is_cuda and not blend_on:

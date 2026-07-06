@@ -1191,18 +1191,15 @@ class BDIMhandler:
     def _body_update_bufs(self, gs):
         """Persistent streaming output buffers for the CUDA-graph fast path
         (stable pointers; the SDF→FAR / body→0 resets are folded into the
-        captured graph inside the Warp bridge).  Graph mode is non-σ and
-        non-blend, so the key buffers are size-1 dummies."""
+        captured graph inside the Warp bridge)."""
         fs = self.fluid_solver
         c = self._bu_bufs
         if c is None or c['gs'] != gs or c['dtype'] != fs.dtype:
             D = self.ndim
             o = dict(device=fs.device, dtype=fs.dtype)
-            ki = dict(dtype=torch.int64, device=fs.device)
             c = dict(gs=gs, dtype=fs.dtype,
                      sdf=[torch.empty(gs, **o) for _ in range(D)],
-                     bvel=[torch.empty(gs, **o) for _ in range(D)],
-                     keys=[torch.empty(1, **ki) for _ in range(D + 1)])
+                     bvel=[torch.empty(gs, **o) for _ in range(D)])
             self._bu_bufs = c
         return c
 
@@ -1220,7 +1217,6 @@ class BDIMhandler:
           * ``comp.sdf_val_u/v[/w]``     — staggered union SDFs;
           * ``comp.body_u/v[/w]``        — staggered body velocities;
           * ``comp.bdim_dirty``          — dirty-rect dict for the fused step;
-          * ``comp.bdim_keys``           — per-face body-id keys (BDIM-σ only);
           * ``comp.bdim_fields_scratch`` — True on the eager path (the solver
             releases the fields before the pressure projection); False in
             graph mode, where the buffers must persist (stable pointers).
@@ -1233,37 +1229,19 @@ class BDIMhandler:
         sm = getattr(comp,
                      '_kernel_static_3d' if D == 3 else '_kernel_static_2d')
 
-        # BDIM-σ (thin bodies): lazily compute the per-body shifts on first
-        # use, then decide whether to emit the per-face body-id keys.
-        if fs.apply_bdim_sigma and fs._sigma_shifts is None:
-            fs._compute_sigma_shifts()
-        sigma_active = (fs.apply_bdim_sigma
-                        and fs._sigma_shifts is not None
-                        and bool(fs._sigma_shifts.any()))
-
         blend_eps = fs._body_vel_blend_cells * float(comp.h)
         blend_on  = blend_eps > 0.0
-        # Opt-in CUDA-graph fast path needs PERSISTENT buffers (stable
-        # pointers).  σ / blend stay on the eager path.
-        graph_mode = (getattr(fs, '_kernel_cuda_graph', False)
-                      and not sigma_active and not blend_on)
+        # CUDA-graph fast path — the DEFAULT on CUDA; it needs PERSISTENT
+        # buffers (stable pointers).  Blend / CPU stay on the eager path
+        # (the bridge's eager launch is the same kernel, just host-submitted).
+        graph_mode = (comp.sdf_val.is_cuda and not blend_on)
 
         if graph_mode:
             c = self._body_update_bufs(gs)
-            sdf_stag, bvel, keys = c['sdf'], c['bvel'], c['keys']
+            sdf_stag, bvel = c['sdf'], c['bvel']
         else:
             sdf_stag = [torch.full(gs, _FAR, **_opts) for _ in range(D)]
             bvel     = [torch.zeros(gs, **_opts) for _ in range(D)]
-            # Key buffers are read only on the σ path (emit_keys): 2-D keys
-            # are full-grid, 3-D keys dirty-local.  Size-1 dummies otherwise.
-            if sigma_active:
-                klen = (int(gs[0]) * int(gs[1]) if D == 2 else
-                        int(kstep['dirty_Ai']) * int(kstep['dirty_Aj'])
-                        * int(kstep['dirty_Ak']))
-            else:
-                klen = 1
-            _ki  = dict(dtype=torch.int64, device=fs.device)
-            keys = [torch.empty(klen, **_ki) for _ in range(D + 1)]
             # The Warp atomic-min needs the CC SDF pre-filled to +FAR.  In
             # graph mode the bridge folds this reset into the captured graph.
             comp.sdf_val.fill_(_FAR)
@@ -1281,12 +1259,11 @@ class BDIMhandler:
                 float(comp.h), int(kstep['max_vol']),
                 comp.sdf_val, sdf_stag[0], sdf_stag[1],
                 bvel[0], bvel[1],
-                keys[0], keys[1], keys[2],
                 int(getattr(fs, '_sdf_interp_method', 0)),
                 int(kstep['dirty_i0']), int(kstep['dirty_j0']),
                 int(kstep['dirty_Ai']), int(kstep['dirty_Aj']),
                 dummy, dummy, dummy, dummy, float(blend_eps),
-                emit_keys=sigma_active, use_graph=graph_mode,
+                use_graph=graph_mode,
             )
         else:
             body_update_3d(
@@ -1297,14 +1274,13 @@ class BDIMhandler:
                 float(comp.h), int(kstep['max_vol']),
                 comp.sdf_val, sdf_stag[0], sdf_stag[1], sdf_stag[2],
                 bvel[0], bvel[1], bvel[2],
-                keys[0], keys[1], keys[2], keys[3],
                 int(getattr(fs, '_sdf_interp_method', 0)),
                 int(kstep['dirty_i0']), int(kstep['dirty_j0']),
                 int(kstep['dirty_k0']),
                 int(kstep['dirty_Ai']), int(kstep['dirty_Aj']),
                 int(kstep['dirty_Ak']),
                 dummy, dummy, dummy, dummy, dummy, dummy, float(blend_eps),
-                emit_keys=sigma_active, use_graph=graph_mode,
+                use_graph=graph_mode,
             )
 
         # ---- publish the solver contract fields ----
@@ -1313,7 +1289,6 @@ class BDIMhandler:
         if D == 3:
             comp.sdf_val_w = sdf_stag[2]
             comp.body_w = bvel[2]
-        comp.bdim_keys = tuple(keys[1:]) if sigma_active else None
         dirty = {'i0': int(kstep['dirty_i0']), 'j0': int(kstep['dirty_j0']),
                  'Ai': int(kstep['dirty_Ai']), 'Aj': int(kstep['dirty_Aj'])}
         if D == 3:

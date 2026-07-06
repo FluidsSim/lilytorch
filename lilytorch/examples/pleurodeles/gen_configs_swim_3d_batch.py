@@ -47,9 +47,6 @@ class SimConfig(BaseSimConfig):
         # self.force_relaxation              = 0.3
         # self.body_velocity_blend_eps_cells = 2
 
-
-        # self.apply_bdim_sigma = True
-
         # Animat
         self.animats_pars = [
             {

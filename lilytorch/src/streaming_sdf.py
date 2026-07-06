@@ -339,18 +339,6 @@ def streaming_sdf_fanned_decode_3d(
     den_u:  wp.array(dtype=Any),
     den_v:  wp.array(dtype=Any),
     den_w:  wp.array(dtype=Any),
-    # BDIM-σ key emission (emit_keys == 0 → key_* are dummies, untouched).
-    # See the 2-D decode kernel: write the winning body-id (lowest-id-wins via
-    # int64 ``atomic_min``) into key_u/key_v/key_w; the σ bdim_forcing masks
-    # ``key & 0xffffffff``.  Unlike 2-D (full-grid keys indexed by g), the
-    # native 3-D keys are dirty_vol-sized and indexed by the AABB-local
-    # ``g_local`` (matching ``bdim_forcing_sigma_3d``'s read) — so the dirty
-    # origin / strides are passed in to recompute it.
-    emit_keys: int,
-    key_u: wp.array(dtype=wp.int64),
-    key_v: wp.array(dtype=wp.int64),
-    key_w: wp.array(dtype=wp.int64),
-    di0: int, dj0: int, dk0: int, dAj: int, dAk: int,
 ):
     """Pass C: write the winning body's face velocity where SDF == stored min.
     With blend_eps>0, instead writes Σ w_i v_i / Σ w_i (the softmin blend)."""
@@ -385,15 +373,6 @@ def streaming_sdf_fanned_decode_3d(
         body_w[g] = num_w[g] / den_w[g]
     elif s_w == sdf_w[g]:
         body_w[g] = lv_z + av_x * (yc - cm_y) - av_y * (xc - cm_x)
-
-    if emit_keys != 0:
-        g_local = (i - di0) * (dAj * dAk) + (j - dj0) * dAk + (k - dk0)
-        if s_u == sdf_u[g]:
-            wp.atomic_min(key_u, g_local, wp.int64(b))
-        if s_v == sdf_v[g]:
-            wp.atomic_min(key_v, g_local, wp.int64(b))
-        if s_w == sdf_w[g]:
-            wp.atomic_min(key_w, g_local, wp.int64(b))
 
 
 # ── Register float32 + float64 specialisations up front ─────────────────────
@@ -569,23 +548,12 @@ class WarpStreamingSDF:
 
     # ── Fanned mode (constant in B: 2 launches regardless of body count) ──────
 
-    def _key_dummy(self):
-        if getattr(self, "_kdummy", None) is None:
-            self._kdummy = wp.zeros(1, dtype=wp.int64, device=self.device)
-        return self._kdummy
-
-    def _launch_fanned(self, sdf_cc, sdf_u, sdf_v, sdf_w, bU, bV, bW,
-                       key_u=None, key_v=None, key_w=None, emit_keys=0,
-                       dirty=(0, 0, 0, 0, 0)):
+    def _launch_fanned(self, sdf_cc, sdf_u, sdf_v, sdf_w, bU, bV, bW):
         """Launch the 2 fanned kernels (min + decode), each dim = B*max_vol."""
         self._zero_blend()
         dim = self._B * self._max_vol
         hh = self._wpf(self._half_h)
         be = self._wpf(self._blend_eps)
-        ku = key_u if emit_keys else self._key_dummy()
-        kv = key_v if emit_keys else self._key_dummy()
-        kw = key_w if emit_keys else self._key_dummy()
-        di0, dj0, dk0, dAj, dAk = (int(x) for x in dirty)
         wp.launch(
             streaming_sdf_fanned_min_3d, dim=dim,
             inputs=[
@@ -614,19 +582,13 @@ class WarpStreamingSDF:
                 bU, bV, bW,
                 self._num_u, self._num_v, self._num_w,
                 self._den_u, self._den_v, self._den_w,
-                int(emit_keys), ku, kv, kw,
-                di0, dj0, dk0, dAj, dAk,
             ],
             device=self.device,
         )
 
-    def run_fanned_eager(self, sdf_cc, sdf_u, sdf_v, sdf_w, bU, bV, bW,
-                         key_u=None, key_v=None, key_w=None, emit_keys=0,
-                         dirty=(0, 0, 0, 0, 0)):
+    def run_fanned_eager(self, sdf_cc, sdf_u, sdf_v, sdf_w, bU, bV, bW):
         """Run the 2 fanned kernels eagerly (2 Python submissions, any B)."""
-        self._launch_fanned(sdf_cc, sdf_u, sdf_v, sdf_w, bU, bV, bW,
-                            key_u=key_u, key_v=key_v, key_w=key_w,
-                            emit_keys=emit_keys, dirty=dirty)
+        self._launch_fanned(sdf_cc, sdf_u, sdf_v, sdf_w, bU, bV, bW)
 
     def capture_graph_fanned(self, sdf_cc, sdf_u, sdf_v, sdf_w, bU, bV, bW):
         """Capture the 2 fanned launches as one CUDA graph."""
@@ -799,15 +761,7 @@ def streaming_sdf_fanned_decode_2d(
     num_v:  wp.array(dtype=Any),
     den_u:  wp.array(dtype=Any),
     den_v:  wp.array(dtype=Any),
-    # BDIM-σ key emission (emit_keys == 0 → key_u/key_v are dummies, untouched).
-    # When on, write the winning body-id (the body whose face SDF equals the
-    # stored running-min) into the low 32 bits of key_u/key_v via int64
-    # ``atomic_min`` → lowest-id-wins tie-break, mirroring the native packed
-    # ``atomicMin`` (SDF high bits, body-id low bits).  The σ bdim_forcing only
-    # reads ``key & 0xffffffff`` (body-id), so the high SDF bits are not needed.
-    emit_keys: int,
-    key_u: wp.array(dtype=wp.int64),
-    key_v: wp.array(dtype=wp.int64),
+    # BDIM-σ key emission removed — no longer needed.
 ):
     """Pass C: write the winning body's face velocity where SDF == stored min.
     With blend_eps>0, instead writes Σ w_i v_i / Σ w_i (the softmin blend)."""
@@ -837,12 +791,6 @@ def streaming_sdf_fanned_decode_2d(
         body_v[g] = num_v[g] / den_v[g]
     elif s_v == sdf_v[g]:
         body_v[g] = lv_y + om * (xc - cm_x)
-
-    if emit_keys != 0:
-        if s_u == sdf_u[g]:
-            wp.atomic_min(key_u, g, wp.int64(b))
-        if s_v == sdf_v[g]:
-            wp.atomic_min(key_v, g, wp.int64(b))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1002,20 +950,12 @@ class WarpStreamingSDF2D:
             self._num_u.zero_(); self._num_v.zero_()
             self._den_u.zero_(); self._den_v.zero_()
 
-    def _key_dummy(self):
-        if getattr(self, "_kdummy", None) is None:
-            self._kdummy = wp.zeros(1, dtype=wp.int64, device=self.device)
-        return self._kdummy
-
     # ── fanned mode ──────────────────────────────────────────────────────────
-    def _launch_fanned(self, sdf_cc, sdf_u, sdf_v, bU, bV,
-                       key_u=None, key_v=None, emit_keys=0):
+    def _launch_fanned(self, sdf_cc, sdf_u, sdf_v, bU, bV):
         self._zero_blend()
         dim = self._B * self._max_vol
         be = self._wpf(self._blend_eps)
         hh = self._wpf(self._half_h)
-        ku = key_u if emit_keys else self._key_dummy()
-        kv = key_v if emit_keys else self._key_dummy()
         wp.launch(streaming_sdf_fanned_min_2d, dim=dim,
                   inputs=[self._F_flat, self._F_offsets, self._body_shapes,
                           self._body_meta, self._kin, self._aabb_lo, self._aabb_dim,
@@ -1030,14 +970,11 @@ class WarpStreamingSDF2D:
                           self._gx, self._gy, hh,
                           self._max_vol, self.Ngy, self._interp, be,
                           sdf_u, sdf_v, bU, bV,
-                          self._num_u, self._num_v, self._den_u, self._den_v,
-                          int(emit_keys), ku, kv],
+                          self._num_u, self._num_v, self._den_u, self._den_v],
                   device=self.device)
 
-    def run_fanned_eager(self, sdf_cc, sdf_u, sdf_v, bU, bV,
-                         key_u=None, key_v=None, emit_keys=0):
-        self._launch_fanned(sdf_cc, sdf_u, sdf_v, bU, bV,
-                            key_u=key_u, key_v=key_v, emit_keys=emit_keys)
+    def run_fanned_eager(self, sdf_cc, sdf_u, sdf_v, bU, bV):
+        self._launch_fanned(sdf_cc, sdf_u, sdf_v, bU, bV)
 
     def capture_graph_fanned(self, sdf_cc, sdf_u, sdf_v, bU, bV):
         with wp.ScopedCapture(device=self.device) as cap:

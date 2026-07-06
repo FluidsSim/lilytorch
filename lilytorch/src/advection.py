@@ -22,6 +22,7 @@ WaterLily.jl.
 """
 from __future__ import annotations
 
+import os
 import torch
 # Warp primitives are imported from the leaf kernel modules (``interpolation``,
 # ``diffusion``); this module must never import ``solver``, ``two_phase`` or
@@ -339,6 +340,7 @@ class AdvDiffSolver:
         inner   = _inner(ndim)
 
         scheme_id = _CUDA_SCHEME_IDS[self._scheme_name]
+        flux_add  = self._flux_runner   # [SPIKE] eager fn or CUDA-graph runner
         if self._scheme_name == 'abdquickest':
             # ABDQUICKEST's TVD limiter C must equal the advective Courant
             # number |u|·dt/h — one host sync (.amax()), once per step.
@@ -356,7 +358,7 @@ class AdvDiffSolver:
             for d in range(ndim):
                 fv = _face_vel(vel, i, d, ndim)
                 p  = _field_for_flux(vel[i], d, ndim)
-                advect_flux_add(
+                flux_add(
                     fv, p, rhs,
                     float(self._dt_dh[d]), C_courant,
                     scheme_id, d,
@@ -746,6 +748,23 @@ class AdvDiffSolver:
             self._bcs_graph_3d = r
         return r
 
+    @property
+    def _flux_runner(self):
+        """[SPIKE] Lazy flux-launch dispatcher.
+
+        Returns the CUDA-graph :class:`FluxAddGraphRunner` unless disabled via
+        ``LILY_FLUX_GRAPH=0`` (benchmark/eager escape hatch), in which case it
+        returns the plain eager :func:`advect_flux_add_warp`.  Cached per-solver.
+        """
+        r = getattr(self, "_flux_graph_runner", None)
+        if r is None:
+            if os.environ.get("LILY_FLUX_GRAPH", "1") == "0":
+                r = advect_flux_add_warp
+            else:
+                r = FluxAddGraphRunner()
+            self._flux_graph_runner = r
+        return r
+
     def set_BCs(self, *vel):
         """Apply Dirichlet / Neumann BCs on the ghost layer.
 
@@ -1062,6 +1081,28 @@ def _flat(t: torch.Tensor):
                     shape=(int(remaining),), device=_wp_device(t))
 
 
+# Persistent solver buffers keep a stable (pointer, length, dtype, device) across
+# steps, so the zero-copy Warp view built by ``_flat`` can be created once and
+# reused instead of rebuilt every iteration.  Keyed on full storage identity: a
+# cache hit is only returned when the layout matches exactly, so a pool-reused
+# pointer either describes the caller's tensor precisely (the view is correct by
+# construction) or misses and rebuilds.  Entries are host-only wrappers over
+# externally-owned memory — they never keep a torch block alive.
+_FLAT_VIEW_CACHE: dict = {}
+
+
+def _flat_cached(t: torch.Tensor):
+    """Cached :func:`_flat` — reuse the Warp view for a given buffer/layout."""
+    elem = t.element_size()
+    remaining = (t.untyped_storage().nbytes() - t.storage_offset() * elem) // elem
+    key = (t.data_ptr(), int(remaining), t.dtype, _wp_device(t))
+    view = _FLAT_VIEW_CACHE.get(key)
+    if view is None:
+        view = _flat(t)
+        _FLAT_VIEW_CACHE[key] = view
+    return view
+
+
 def advect_flux_add_warp(fv_t, p_t, rhs_t, dt_dh, C_courant, scheme_id, face_dim):
     """Warp port of the retired native ``advect_flux_add`` op.
 
@@ -1099,7 +1140,7 @@ def advect_flux_add_warp(fv_t, p_t, rhs_t, dt_dh, C_courant, scheme_id, face_dim
         kernel,
         dim=n_threads,
         inputs=[
-            _flat(p_t), _flat(fv_t), _flat(rhs_t),
+            _flat_cached(p_t), _flat_cached(fv_t), _flat_cached(rhs_t),
             int(Nfd), int(Nt1), int(Nt2),
             int(p_s_fd), int(p_s_t1), int(p_s_t2),
             int(fv_s_fd), int(fv_s_t1), int(fv_s_t2),
@@ -1112,6 +1153,65 @@ def advect_flux_add_warp(fv_t, p_t, rhs_t, dt_dh, C_courant, scheme_id, face_dim
 
 # In-module alias used by the AdvDiffSolver call site above.
 advect_flux_add = advect_flux_add_warp
+
+
+class FluxAddGraphRunner:
+    """[SPIKE] CUDA-graph-cached ``advect_flux_add`` — per-launch analogue of
+    :class:`ApplyBcs3DGraphRunner`.
+
+    The eager wrapper's per-call host floor (Warp-array wrapping + a
+    ~30-37 µs ``wp.launch`` submission) is replaced by a single
+    ``wp.capture_launch`` once a stable
+    ``(fv, p, rhs, dt_dh, C_courant, scheme_id, face_dim, dtype)`` signature is
+    seen twice.  ``rhs += flux`` is **not idempotent**, so — unlike the BC
+    runner — there is NO executing warm-up before capture; the kernel is already
+    JIT-compiled by the first-sighting eager launch, and Warp graph capture only
+    *records* (does not execute) the launch, so no double-accumulation occurs.
+
+    Landmines respected:
+      * ``abdquickest`` (scheme_id 1) recomputes ``C_courant`` every step via a
+        device sync, so a baked graph would replay a stale Courant number → it is
+        forced onto the eager path.
+      * ``dt_dh`` and dtype are part of the key, so an adaptive-dt / dtype change
+        re-captures instead of replaying stale scalars.
+      * ``fv`` is a fresh allocation each step (ping-pongs across ~2 allocator
+        blocks); each block yields its own stable key, so both get captured and
+        replay correctly (the key match guarantees the baked pointer == the
+        current fv's address).
+    CPU delegates to :func:`advect_flux_add_warp` (bit-identical)."""
+
+    def __init__(self):
+        self._graphs = {}   # key -> graph
+        self._seen = {}     # key -> sighting count
+
+    def __call__(self, fv, p, rhs, dt_dh, C_courant, scheme_id, face_dim):
+        # CPU or the live-Courant scheme → eager (never graph-capture).
+        if p.device.type != "cuda" or int(scheme_id) == 1:
+            return advect_flux_add_warp(fv, p, rhs, dt_dh, C_courant,
+                                        scheme_id, face_dim)
+        Ni_fd = p.size(face_dim) - 2
+        if Ni_fd <= 0:
+            return
+        key = (fv.data_ptr(), p.data_ptr(), rhs.data_ptr(),
+               float(dt_dh), float(C_courant), int(scheme_id), int(face_dim),
+               str(p.dtype))
+        graph = self._graphs.get(key)
+        if graph is None:
+            n = self._seen.get(key, 0) + 1
+            self._seen[key] = n
+            if n < 2:        # first sighting → eager (might be a one-shot ptr)
+                return advect_flux_add_warp(fv, p, rhs, dt_dh, C_courant,
+                                            scheme_id, face_dim)
+            # 2nd sighting: kernel is already compiled (1st-sighting launch) and
+            # _flat_cached views are warm, so capture allocates nothing.  No
+            # executing warm-up — that would add flux to rhs twice.
+            wdev = _wp_device(p)
+            with wp.ScopedCapture(device=wdev) as cap:
+                advect_flux_add_warp(fv, p, rhs, dt_dh, C_courant,
+                                     scheme_id, face_dim)
+            graph = cap.graph
+            self._graphs[key] = graph
+        wp.capture_launch(graph)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1253,8 +1353,7 @@ def apply_bcs_2d_warp(u, v, shapes, neu_desc, dir_desc, dir_val,
     N_ref = int(ref_desc.size(0)) if ref_desc is not None and ref_desc.numel() else 0
     if N_neu + N_dir + N_ref == 0 or max_line_dim <= 0:
         return
-    uw = wp.from_torch(u.reshape(-1))
-    vw = wp.from_torch(v.reshape(-1))
+    uw = _flat_cached(u); vw = _flat_cached(v)
     shw = wp.from_torch(shapes.reshape(-1).contiguous().to(torch.int64))
     neu = _i32(neu_desc, wdev); dirw = _i32(dir_desc, wdev); refw = _i32(ref_desc, wdev)
     dvw = _valf(dir_val, wdev, u.dtype); rvw = _valf(ref_val, wdev, u.dtype)
@@ -1443,7 +1542,7 @@ def apply_bcs_3d_warp(u, v, w, shapes, neu_desc, dir_desc, dir_val,
     M1 = int(max_dim1) if max_dim1 is not None else M0
     if N_neu + N_dir + N_ref == 0 or M0 <= 0 or M1 <= 0:
         return
-    uw = wp.from_torch(u.reshape(-1)); vw = wp.from_torch(v.reshape(-1)); ww = wp.from_torch(w.reshape(-1))
+    uw = _flat_cached(u); vw = _flat_cached(v); ww = _flat_cached(w)
     shw = wp.from_torch(shapes.reshape(-1).contiguous().to(torch.int64))
     neu = _i32(neu_desc, wdev); dirw = _i32(dir_desc, wdev); refw = _i32(ref_desc, wdev)
     dvw = _valf(dir_val, wdev, u.dtype); rvw = _valf(ref_val, wdev, u.dtype)

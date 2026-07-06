@@ -81,7 +81,7 @@ class SimConfig(BaseSimConfig):
                 "controller_path": "lilytorch.examples.zebrafish_ki_project.pd_controller.PositionController",
                 "control_pars"   : {
                     "data_folder"        : self.data_folder,
-                    "mode"               : "fast",
+                    "mode"               : "slow",
                     "kinematics_sampling": 0.00025,
                 },
                 "gains"     : [0.2, 0.001, 0],
@@ -136,8 +136,6 @@ class SimConfig(BaseSimConfig):
         self.save_frames       = False
 
         self.eps_multiplier = 1.0
-        # BDIM-σ correction for thin zebrafish body links (r < eps).
-        # self.apply_bdim_sigma = True
 
         # ── Arena ────────────────────────────────────────────────────
         self.wall_thickness = 0.003

@@ -1,8 +1,8 @@
 """Warp single-source **bdim_forcing (3-D)** — fused BDIM2 coefficient + FD normals.
 
-Port of the native ``bdim_forcing_3d`` / ``bdim_forcing_sigma_3d`` CUDA kernels
-(``src/kernels/csrc/cuda/streaming_sdf.cu``, ``bdim_one_axis_3d`` /
-``bdim_one_axis_sigma_3d`` device helpers).  For every cell in the dirty AABB,
+Port of the native ``bdim_forcing_3d`` CUDA kernel
+(``src/kernels/csrc/cuda/streaming_sdf.cu``, ``bdim_one_axis_3d`` device helper).
+For every cell in the dirty AABB,
 and for each of the three staggered face grids, the kernel:
 
   1. reads the face SDF ``phi = sdf[g]`` and forms the smoothed Heaviside /
@@ -27,9 +27,7 @@ tensors are written.
 specialisations (Warp 1.14 needs the dtypes pre-registered).  float64 lands on
 bit-parity with the native op (``scalar_t = double``) — the codegen is
 unchanged from the original concrete kernel, so existing f64 parity stays
-bit-identical; float32 matches native f32 to single precision.  ``key_*`` stays
-int64 and ``sigma_shifts`` stays float32 (cast to the working type inside the
-kernel), independent of the solver dtype.
+bit-identical; float32 matches native f32 to single precision.
 
 **Coefficient layout (HANDOFF lesson 9, 3-D-specific).**  Unlike 2-D, the 3-D
 native writes the Poisson coefficient at the *face-grid* flat offset
@@ -49,7 +47,6 @@ import torch
 
 wp.init()
 
-_MASK32 = wp.constant(wp.int64(0xFFFFFFFF))
 # native uses scalar_t(M_PI) with scalar_t = double → the IEEE-754 double M_PI.
 _PI_F64 = 3.141592653589793
 
@@ -92,23 +89,6 @@ def _mu0_mu1(phi: Any, eps: Any):
 
 
 @wp.func
-def _mu0_only(phi: Any, eps: Any):
-    """Smoothed Heaviside mu0 alone (used for the BDIM-σ shifted coefficient)."""
-    res = type(phi)(0.0)
-    if phi <= -eps:
-        res = type(phi)(0.0)
-    elif phi >= eps:
-        res = type(phi)(1.0)
-    else:
-        half = type(phi)(0.5)
-        one = type(phi)(1.0)
-        pi = type(phi)(_PI_F64)
-        deps = phi / eps
-        res = half * (one + deps + wp.sin(pi * deps) / pi)
-    return res
-
-
-@wp.func
 def bdim_one_axis_3d(
     phi_prime: wp.array(dtype=Any),
     sdf: wp.array(dtype=Any),
@@ -121,13 +101,6 @@ def bdim_one_axis_3d(
     c_stride_i: wp.int32, c_stride_j: wp.int32,
     c_hi_i: wp.int32, c_hi_j: wp.int32, c_hi_k: wp.int32,
     mu0_proj: wp.int32,
-    # BDIM-σ extras (sigma_on == 0 → ignored, plain bdim_forcing_3d):
-    sigma_on: wp.int32,
-    key: wp.array(dtype=wp.int64),
-    sigma_shifts: wp.array(dtype=wp.float32),
-    n_sigma: wp.int32,
-    di0: wp.int32, dj0: wp.int32, dk0: wp.int32,
-    dAj: wp.int32, dAk: wp.int32,
 ):
     zero = type(eps)(0.0)
     one = type(eps)(1.0)
@@ -197,15 +170,8 @@ def bdim_one_axis_3d(
     phi_out[g] = mu0 * diff_c + b_c + mu1 * nd
 
     if i >= 1 and j >= 1 and k >= 1 and i <= c_hi_i and j <= c_hi_j and k <= c_hi_k:
-        # Poisson coefficient.  BDIM-σ shifts the SDF for the mu0 used here only.
+        # Poisson coefficient.
         mu0_c = mu0
-        if sigma_on != 0:
-            local = (i - di0) * (dAj * dAk) + (j - dj0) * dAk + (k - dk0)
-            body_idx = wp.int32(key[local] & _MASK32)
-            sigma_shift = zero
-            if body_idx < n_sigma:
-                sigma_shift = type(eps)(sigma_shifts[body_idx])
-            mu0_c = _mu0_only(phi - sigma_shift, eps)
         cval = dt / rho_f
         if mu0_proj != 0:
             cval = dt * mu0_c / rho_f
@@ -233,12 +199,6 @@ def bdim_forcing_3d_kernel(
     Ngx: wp.int32, Ngy: wp.int32, Ngz: wp.int32,
     di0: wp.int32, dj0: wp.int32, dk0: wp.int32,
     mu0_proj: wp.int32,
-    sigma_on: wp.int32,
-    key_u: wp.array(dtype=wp.int64),
-    key_v: wp.array(dtype=wp.int64),
-    key_w: wp.array(dtype=wp.int64),
-    sigma_shifts: wp.array(dtype=wp.float32),
-    n_sigma: wp.int32,
     dAj: wp.int32, dAk: wp.int32,
 ):
     # FLAT 1-D launch + native's exact decode (k fastest → coalesced global
@@ -258,20 +218,17 @@ def bdim_forcing_3d_kernel(
     bdim_one_axis_3d(
         u_prime, sdf_u, body_u, u0, ch,
         eps, rho_f, dt, inv_2h, Ngx, Ngy, Ngz, i, j, k,
-        (Ngy - 2) * (Ngz - 2), (Ngz - 2), Ngx - 1, Ngy - 2, Ngz - 2, mu0_proj,
-        sigma_on, key_u, sigma_shifts, n_sigma, di0, dj0, dk0, dAj, dAk)
+        (Ngy - 2) * (Ngz - 2), (Ngz - 2), Ngx - 1, Ngy - 2, Ngz - 2, mu0_proj)
     # cv: y-face grid (Ngx-2, Ngy-1, Ngz-2)
     bdim_one_axis_3d(
         v_prime, sdf_v, body_v, v0, cv,
         eps, rho_f, dt, inv_2h, Ngx, Ngy, Ngz, i, j, k,
-        (Ngy - 1) * (Ngz - 2), (Ngz - 2), Ngx - 2, Ngy - 1, Ngz - 2, mu0_proj,
-        sigma_on, key_v, sigma_shifts, n_sigma, di0, dj0, dk0, dAj, dAk)
+        (Ngy - 1) * (Ngz - 2), (Ngz - 2), Ngx - 2, Ngy - 1, Ngz - 2, mu0_proj)
     # cw: z-face grid (Ngx-2, Ngy-2, Ngz-1)
     bdim_one_axis_3d(
         w_prime, sdf_w, body_w, w0, cw,
         eps, rho_f, dt, inv_2h, Ngx, Ngy, Ngz, i, j, k,
-        (Ngy - 2) * (Ngz - 1), (Ngz - 1), Ngx - 2, Ngy - 2, Ngz - 1, mu0_proj,
-        sigma_on, key_w, sigma_shifts, n_sigma, di0, dj0, dk0, dAj, dAk)
+        (Ngy - 2) * (Ngz - 1), (Ngz - 1), Ngx - 2, Ngy - 2, Ngz - 1, mu0_proj)
 
 
 # Register float32 + float64 specialisations (generic args only).
@@ -298,12 +255,6 @@ def _wp_dtype(t: torch.Tensor):
     return wp.float64 if t.dtype == torch.float64 else wp.float32
 
 
-def _empty_key(wdev):
-    """1-element placeholder int64/float32 arrays for the non-sigma path."""
-    return (wp.zeros(1, dtype=wp.int64, device=wdev),
-            wp.zeros(1, dtype=wp.float32, device=wdev))
-
-
 def bdim_forcing_3d_warp(
         u_prime, v_prime, w_prime,
         sdf_u, sdf_v, sdf_w,
@@ -312,11 +263,8 @@ def bdim_forcing_3d_warp(
         eps, rho_f, dt, h_grid,
         dirty_i0, dirty_j0, dirty_k0,
         dirty_Ai, dirty_Aj, dirty_Ak,
-        mu0_projection=1,
-        *, key_u=None, key_v=None, key_w=None, sigma_shifts=None,
-        graph=None):
-    """Warp port of ``bdim_forcing_3d`` (and, with the keyword args, the σ
-    variant ``bdim_forcing_sigma_3d``).  Writes ``u0/v0/w0`` and ``ch/cv/cw``
+        mu0_projection=1):
+    """Warp port of ``bdim_forcing_3d``.  Writes ``u0/v0/w0`` and ``ch/cv/cw``
     in place inside the dirty AABB; returns nothing (mirrors the native op).
     Generic in dtype (f32/f64), selected from ``u0``.
 
@@ -332,18 +280,6 @@ def bdim_forcing_3d_warp(
     def f(x):
         return wp.from_torch(x.reshape(-1))  # zero-copy view
 
-    sigma_on = 1 if sigma_shifts is not None else 0
-    if sigma_on:
-        ku = wp.from_torch(key_u.reshape(-1))
-        kv = wp.from_torch(key_v.reshape(-1))
-        kw = wp.from_torch(key_w.reshape(-1))
-        ss = wp.from_torch(sigma_shifts.reshape(-1).to(torch.float32))
-        n_sigma = int(sigma_shifts.numel())
-    else:
-        ku, ss = _empty_key(wdev)
-        kv = kw = ku
-        n_sigma = 0
-
     wp.launch(
         bdim_forcing_3d_kernel,
         dim=int(dirty_Ai) * int(dirty_Aj) * int(dirty_Ak),
@@ -357,7 +293,6 @@ def bdim_forcing_3d_warp(
             int(Ngx), int(Ngy), int(Ngz),
             int(dirty_i0), int(dirty_j0), int(dirty_k0),
             int(mu0_projection),
-            int(sigma_on), ku, kv, kw, ss, int(n_sigma),
             int(dirty_Aj), int(dirty_Ak),
         ],
         device=wdev)
@@ -366,7 +301,7 @@ def bdim_forcing_3d_warp(
 # ═════════════════════════════════════════════════════════════════════════════
 #  2-D VARIANT — BDIM2 forcing + Poisson coefficients (bdim_forcing_2d)
 #  Merged from the former bdim_2d.py.  z-axis-stripped analogue of the 3-D
-#  kernel above; shares _MASK32/_PI_F64/_wdev/_wp_dtype/_empty_key (above).
+#  kernel above; shares _PI_F64/_wdev/_wp_dtype (above).
 # ═════════════════════════════════════════════════════════════════════════════
 @wp.func
 def _mu0_mu1_2d(phi: Any, eps: Any):
@@ -398,22 +333,6 @@ def _mu0_mu1_2d(phi: Any, eps: Any):
 
 
 @wp.func
-def _mu0_only_2d(phi: Any, eps: Any):
-    res = type(phi)(0.0)
-    if phi <= -eps:
-        res = type(phi)(0.0)
-    elif phi >= eps:
-        res = type(phi)(1.0)
-    else:
-        half = type(phi)(0.5)
-        one = type(phi)(1.0)
-        pi = type(phi)(_PI_F64)
-        deps = phi / eps
-        res = half * (one + deps + wp.sin(pi * deps) / pi)
-    return res
-
-
-@wp.func
 def bdim_one_axis_2d(
     phi_prime: wp.array(dtype=Any),
     sdf: wp.array(dtype=Any),
@@ -424,11 +343,6 @@ def bdim_one_axis_2d(
     Ngx: wp.int32, Ngy: wp.int32,
     i: wp.int32, j: wp.int32,
     mu0_proj: wp.int32,
-    # BDIM-σ extras (sigma_on == 0 → ignored):
-    sigma_on: wp.int32,
-    key: wp.array(dtype=wp.int64),
-    sigma_shifts: wp.array(dtype=wp.float32),
-    n_sigma: wp.int32,
 ):
     zero = type(eps)(0.0)
     one = type(eps)(1.0)
@@ -481,12 +395,6 @@ def bdim_one_axis_2d(
 
     # Poisson coefficient at the SAME full-grid index g (2-D: no face-grid offset).
     mu0_c = mu0
-    if sigma_on != 0:
-        body_idx = wp.int32(key[g] & _MASK32)
-        sigma_shift = zero
-        if body_idx < n_sigma:
-            sigma_shift = type(eps)(sigma_shifts[body_idx])
-        mu0_c = _mu0_only_2d(phi - sigma_shift, eps)
     cval = dt / rho_f
     if mu0_proj != 0:
         cval = dt * mu0_c / rho_f
@@ -509,11 +417,6 @@ def bdim_forcing_2d_kernel(
     Ngx: wp.int32, Ngy: wp.int32,
     di0: wp.int32, dj0: wp.int32,
     mu0_proj: wp.int32,
-    sigma_on: wp.int32,
-    key_u: wp.array(dtype=wp.int64),
-    key_v: wp.array(dtype=wp.int64),
-    sigma_shifts: wp.array(dtype=wp.float32),
-    n_sigma: wp.int32,
     dAj: wp.int32,
 ):
     # Flat 1-D launch, native's exact decode (j fastest → coalesced).
@@ -525,12 +428,10 @@ def bdim_forcing_2d_kernel(
 
     bdim_one_axis_2d(
         u_prime, sdf_u, body_u, u0, ch,
-        eps, rho_f, dt, inv_2h, Ngx, Ngy, i, j, mu0_proj,
-        sigma_on, key_u, sigma_shifts, n_sigma)
+        eps, rho_f, dt, inv_2h, Ngx, Ngy, i, j, mu0_proj)
     bdim_one_axis_2d(
         v_prime, sdf_v, body_v, v0, cv,
-        eps, rho_f, dt, inv_2h, Ngx, Ngy, i, j, mu0_proj,
-        sigma_on, key_v, sigma_shifts, n_sigma)
+        eps, rho_f, dt, inv_2h, Ngx, Ngy, i, j, mu0_proj)
 
 
 # Register float32 + float64 specialisations (generic args only).
@@ -549,9 +450,8 @@ def bdim_forcing_2d_warp(
         u0, v0, ch, cv,
         eps, rho_f, dt, h_grid,
         dirty_i0, dirty_j0, dirty_Ai, dirty_Aj,
-        mu0_projection=1,
-        *, key_u=None, key_v=None, sigma_shifts=None):
-    """Warp port of ``bdim_forcing_2d`` (and σ variant with the keyword args).
+        mu0_projection=1):
+    """Warp port of ``bdim_forcing_2d``.
     Writes u0/v0 and ch/cv (full-grid) in place inside the dirty AABB.
     Generic in dtype (f32/f64), selected from ``u0``."""
     if int(dirty_Ai) * int(dirty_Aj) <= 0:
@@ -562,17 +462,6 @@ def bdim_forcing_2d_warp(
 
     def f(x):
         return wp.from_torch(x.reshape(-1))
-
-    sigma_on = 1 if sigma_shifts is not None else 0
-    if sigma_on:
-        ku = wp.from_torch(key_u.reshape(-1))
-        kv = wp.from_torch(key_v.reshape(-1))
-        ss = wp.from_torch(sigma_shifts.reshape(-1).to(torch.float32))
-        n_sigma = int(sigma_shifts.numel())
-    else:
-        ku, ss = _empty_key(wdev)
-        kv = ku
-        n_sigma = 0
 
     wp.launch(
         bdim_forcing_2d_kernel,
@@ -585,7 +474,6 @@ def bdim_forcing_2d_warp(
             int(Ngx), int(Ngy),
             int(dirty_i0), int(dirty_j0),
             int(mu0_projection),
-            int(sigma_on), ku, kv, ss, int(n_sigma),
             int(dirty_Aj),
         ],
         device=wdev)

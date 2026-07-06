@@ -186,13 +186,6 @@ class FluidSolver(PlottingMixin):
         self.eps  = solver.get("eps_multiplier",
                                 torch.tensor(2.0, device=self.device, dtype=self.dtype)) * self.h
 
-        # BDIM-σ (Lauber et al. 2022): per-body Poisson-coefficient shift
-        # to enforce mu0_poisson → 0 inside thin bodies (r < eps).  When
-        # enabled, ``_sigma_shifts`` is lazily computed at the first
-        # fluid step (once body SDFs are populated) and static thereafter.
-        self.apply_bdim_sigma = bool(solver.get("apply_bdim_sigma", False))
-        self._sigma_shifts    = None   # lazily computed at first fluid step
-
         # BDIM2 mu0-weighted Poisson coefficient.  When True (default) the
         # variable-density coefficient is ``dt*mu0/rho_eff`` (Maertens &
         # Weymouth 2015), which sharpens the body interface but makes the
@@ -711,10 +704,6 @@ class FluidSolver(PlottingMixin):
         # =====================================================================
         self._init_gravity(solver.get("gravity", None))
 
-        # CUDA-graph fast path for the streaming body_update (opt-in).  Parsed
-        # here because it is a solver-config key; consumed by the body-update
-        # provider (BDIMhandler), which owns the launch and its buffers.
-        self._kernel_cuda_graph = bool(solver.get("kernel_cuda_graph", False))
         # Periodic MGCG convergence check (1 = check every iter); threaded onto
         # the Poisson sub-solver (its constructor takes no such kwarg).
         if getattr(self, "poisson_solver", None) is not None:
@@ -1566,110 +1555,6 @@ class FluidSolver(PlottingMixin):
         for d, n in enumerate(norms):
             setattr(self, f'normal_{n}', normals[d][cc])
 
-    def _compute_sigma_shifts(self):
-        """Compute per-body BDIM-σ shifts (Lauber et al. 2022).
-
-        For each body ``b``, ``shift_b = max(0, eps + phi_min_b)`` where
-        ``phi_min_b`` is the minimum body SDF.  Thick bodies (r ≥ eps)
-        get ``shift = 0`` and behave unchanged; thin bodies (r < eps)
-        get a positive shift so the Poisson coefficient
-        ``mu0(phi - shift_b)`` reaches 0 inside the body.
-
-        Stored as a float32 device tensor for direct ``data_ptr<float>()``
-        consumption by the CUDA/CPU σ kernels.
-        """
-        shifts = []
-        eps_val = float(self.eps)
-        comp    = self.composite_body
-
-        # In kernel mode body.sdf_val is never populated.  The per-body SDF
-        # table lives in _kernel_static_{3,2}d['F_flat'] (mesh bodies: h/2
-        # resolution, accurate; analytical bodies: h resolution).  In Python
-        # mode fall back to the full-domain body.sdf_val.
-        sm = getattr(comp, '_kernel_static_3d', None) \
-            or getattr(comp, '_kernel_static_2d', None)
-
-        ndim_b           = self.ndim
-        F_flat           = sm['F_flat']           if sm is not None else None
-        F_offsets        = sm['F_offsets']        if sm is not None else None
-        body_shapes_flat = sm['body_shapes'].reshape(-1) if sm is not None else None
-
-        for b, body in enumerate(comp.bodies):
-            if F_flat is not None:
-                i0   = int(F_offsets[b])
-                size = int(body_shapes_flat[b * ndim_b:(b + 1) * ndim_b].prod().item())
-                smin = float(F_flat[i0:i0 + size].min().item())
-                shifts.append(max(0.0, smin + eps_val))
-            else:
-                sdf_val = getattr(body, 'sdf_val', None)
-                if sdf_val is not None:
-                    shifts.append(max(0.0, float(sdf_val.min().item()) + eps_val))
-                else:
-                    shifts.append(0.0)
-
-        self._sigma_shifts = torch.tensor(
-            shifts, dtype=torch.float32, device=self.device)
-        nonzero = [(i, s) for i, s in enumerate(shifts) if s > 0]
-        print(f"[BDIM-σ] sigma_shifts computed: {len(nonzero)} thin "
-              f"body/bodies need correction")
-        for i, s in nonzero:
-            print(f"  body {i}: shift = {s*1e3:.4f} mm")
-
-    def _compute_sigma_mu_grids(self, mu_grids):
-        """Recompute ``mu0`` from σ-shifted union SDFs for each stagger axis.
-
-        Used by ``_compute_bdim_coefficients`` (Python-mode
-        path) to substitute ``mu0_poisson`` for ``mu0_all_*`` when
-        BDIM-σ is enabled.  The velocity BDIM mu0 is unchanged.
-
-        Returns a tuple of the same length / shape as ``mu_grids``
-        (``(mu0_u, mu0_v, [mu0_w,] mu0_cc)``).  Falls back to the
-        original ``mu_grids`` when the per-body SDF attributes
-        (``sdf_val_u/v/w``, ``sdf_val``) required to rebuild the
-        union SDF are not populated (kernel mode does not store them).
-        """
-        comp  = self.composite_body
-        axes  = self._bdim_axis_names
-        sdf_attrs = tuple(f'sdf_val_{a}' for a in axes) + ('sdf_val',)
-        eps_val   = float(self.eps)
-
-        # Without per-body SDFs (kernel mode skips populating them)
-        # there is no Python-side σ correction to apply.
-        if not all(getattr(b, sdf_attrs[-1], None) is not None
-                   for b in comp.bodies):
-            return mu_grids
-
-        # Re-build a σ-shifted union SDF per stagger axis by min-reducing
-        # over per-body ``sdf_val_<attr> - shift_b``.  Start from a copy
-        # of the unshifted union and tighten with each thin body.
-        unions = []
-        for attr in sdf_attrs:
-            base = getattr(comp, attr, None)
-            if base is None:
-                return mu_grids
-            unions.append(base.clone())
-
-        for b, body in enumerate(comp.bodies):
-            shift = float(self._sigma_shifts[b])
-            if shift <= 0.0:
-                continue
-            for u_idx, attr in enumerate(sdf_attrs):
-                sdf_b = getattr(body, attr, None)
-                if sdf_b is None:
-                    continue
-                torch.minimum(unions[u_idx], sdf_b - shift, out=unions[u_idx])
-
-        # Smooth Heaviside mu0(d/eps) — same formula as Body.mu_funcs.
-        new_mu = []
-        for u in unions:
-            d    = u
-            mu0  = (d >= 0).to(d.dtype)
-            band = (d > -eps_val) & (d < eps_val)
-            deps = d[band] / eps_val
-            mu0[band] = 0.5 * (1.0 + deps + torch.sin(torch.pi * deps) / torch.pi)
-            new_mu.append(mu0)
-        return tuple(new_mu)
-
     # ==================================================================
     #  Variable-density FSI fluid step  (called by BDIMhandler.step)
     # ==================================================================
@@ -1727,14 +1612,6 @@ class FluidSolver(PlottingMixin):
         # codebase (staggering is a coord offset, not a shape change),
         # so a single slice tuple indexes every grid identically.
         mu_grids = tuple(getattr(self, f'mu0_all_{a}') for a in axes) + (self.mu0_all,)
-
-        # ---- BDIM-σ: substitute σ-shifted mu0 for the Poisson coefficient.
-        # The velocity BDIM (mu0_all_* used in _bdim_apply) is *not* changed
-        # — only the Poisson coefficient line uses these shifted grids.
-        if (self.apply_bdim_sigma
-                and self._sigma_shifts is not None
-                and bool(self._sigma_shifts.any())):
-            mu_grids = self._compute_sigma_mu_grids(mu_grids)
 
         # ---- narrow-band fast path -------------------------------------
         if all(m is not None for m in mu_grids):
@@ -1889,8 +1766,6 @@ class FluidSolver(PlottingMixin):
           * ``body_u`` / ``body_v``       — staggered body velocities;
           * ``bdim_dirty``  (optional)    — narrow-band dirty rect
             ``{'i0','j0','Ai','Aj'}``; ``None``/absent → full grid;
-          * ``bdim_keys``   (optional)    — per-face winning body-id keys
-            for the BDIM-σ thin-body path (streaming update only);
           * ``bdim_fields_scratch`` (optional) — ``True`` when the fields
             are per-step scratch buffers this step must release before the
             pressure projection (streaming eager path).
@@ -1906,18 +1781,6 @@ class FluidSolver(PlottingMixin):
                 "staggered BDIM fields (sdf_val_u/v, body_u/v) before the "
                 "fluid step."
             )
-
-        # BDIM-σ (thin bodies): active only when the body update emitted the
-        # per-face body-id keys (rigid streaming path).
-        keys = getattr(comp, 'bdim_keys', None)
-        if self.apply_bdim_sigma and keys is None:
-            raise RuntimeError(
-                "apply_bdim_sigma requires a body update that emits per-face "
-                "body-id keys (the rigid streaming body_update path)."
-            )
-        sigma_active = (keys is not None
-                        and self._sigma_shifts is not None
-                        and bool(self._sigma_shifts.any()))
 
         # 1-2. eddy viscosity + advection-diffusion.
         nu_t   = self._compute_nu_t(u, v)
@@ -1935,10 +1798,6 @@ class FluidSolver(PlottingMixin):
             d = {'i0': 0, 'j0': 0, 'Ai': int(gs[0]), 'Aj': int(gs[1])}
 
         # 5. bdim_forcing (Warp): fused BDIM2 + variable-density coefficients.
-        #    σ variant (thin bodies) reads the body-id keys from body_update.
-        _sigma_kwargs = (
-            dict(key_u=keys[0], key_v=keys[1], sigma_shifts=self._sigma_shifts)
-            if sigma_active else {})
         bdim_forcing_2d(
             primes[0], primes[1],
             sdf_u, sdf_v,
@@ -1952,7 +1811,6 @@ class FluidSolver(PlottingMixin):
             int(d['i0']), int(d['j0']),
             int(d['Ai']), int(d['Aj']),
             int(self.bdim_mu0_projection),
-            **_sigma_kwargs,
         )
 
         # 5b. Maertens–Weymouth body-divergence RHS correction (before free).
@@ -1962,11 +1820,10 @@ class FluidSolver(PlottingMixin):
 
         # 6. Release per-step scratch fields before the pressure projection
         #    (streaming eager path — mirrors the former temporary free).
-        del sdf_u, sdf_v, bU, bV, primes, keys
+        del sdf_u, sdf_v, bU, bV, primes
         if getattr(comp, 'bdim_fields_scratch', False):
             comp.sdf_val_u = comp.sdf_val_v = None
             comp.body_u = comp.body_v = None
-            comp.bdim_keys = None
 
         # 7. Boundary conditions on the BDIM-corrected velocity.
         self.adv_diff_solver.set_BCs(self.u0, self.v0)
@@ -2011,18 +1868,6 @@ class FluidSolver(PlottingMixin):
                 "the fluid step."
             )
 
-        # BDIM-σ (thin bodies): active only when the body update emitted the
-        # per-face body-id keys (rigid streaming path).
-        keys = getattr(comp, 'bdim_keys', None)
-        if self.apply_bdim_sigma and keys is None:
-            raise RuntimeError(
-                "apply_bdim_sigma requires a body update that emits per-face "
-                "body-id keys (the rigid streaming body_update path)."
-            )
-        sigma_active = (keys is not None
-                        and self._sigma_shifts is not None
-                        and bool(self._sigma_shifts.any()))
-
         # 1-2. eddy viscosity + advection-diffusion.
         nu_t   = self._compute_nu_t(u, v, w_vel)
         primes = self.adv_diff_solver.solve(u, v, w_vel, nu_t=nu_t)
@@ -2042,11 +1887,6 @@ class FluidSolver(PlottingMixin):
                  'Ai': int(gs[0]), 'Aj': int(gs[1]), 'Ak': int(gs[2])}
 
         # 5. bdim_forcing (Warp): fused BDIM2 + variable-density coefficients.
-        #    σ variant (thin bodies) reads the body-id keys from body_update.
-        _sigma_kwargs = (
-            dict(key_u=keys[0], key_v=keys[1], key_w=keys[2],
-                 sigma_shifts=self._sigma_shifts)
-            if sigma_active else {})
         bdim_forcing_3d(
             primes[0], primes[1], primes[2],
             sdf_u, sdf_v, sdf_w,
@@ -2060,7 +1900,6 @@ class FluidSolver(PlottingMixin):
             int(d['i0']), int(d['j0']), int(d['k0']),
             int(d['Ai']), int(d['Aj']), int(d['Ak']),
             int(self.bdim_mu0_projection),
-            **_sigma_kwargs,
         )
 
         # 5b. Maertens–Weymouth body-divergence RHS correction (before free).
@@ -2070,11 +1909,10 @@ class FluidSolver(PlottingMixin):
 
         # 6. Release per-step scratch fields before the pressure projection
         #    (streaming eager path — mirrors the former temporary free).
-        del sdf_u, sdf_v, sdf_w, bU, bV, bW, primes, keys
+        del sdf_u, sdf_v, sdf_w, bU, bV, bW, primes
         if getattr(comp, 'bdim_fields_scratch', False):
             comp.sdf_val_u = comp.sdf_val_v = comp.sdf_val_w = None
             comp.body_u = comp.body_v = comp.body_w = None
-            comp.bdim_keys = None
 
         # 7. Boundary conditions on the BDIM-corrected velocity.
         self.adv_diff_solver.set_BCs(self.u0, self.v0, self.w0)

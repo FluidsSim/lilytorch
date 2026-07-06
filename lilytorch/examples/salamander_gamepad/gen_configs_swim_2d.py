@@ -25,9 +25,6 @@ class SimConfig(BaseSimConfig):
         self.stack_folder   = "salamander"
 
         self.solver_method    = "kernel"
-        # CUDA-graph the streaming body_update: each eager wp.launch has a
-        # ~120 us python marshalling floor; graph replay collapses it to ~3 us.
-        self.kernel_cuda_graph = True   # streaming body_update
 
         self.bdim_physics = {"solref": [-50000.0, -500.0]}
 
