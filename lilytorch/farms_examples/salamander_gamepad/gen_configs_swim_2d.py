@@ -25,10 +25,12 @@ class SimConfig(BaseSimConfig):
         self.stack_folder   = "salamander"
 
         self.solver_method    = "kernel"
-        # CUDA-graph the eager Warp segments: each eager wp.launch has a
-        # ~120 us python marshalling floor (~35 launches/step = ~4.4 ms/step
-        # at 1024x512); graph replay collapses that to ~3 us per replay.
-        self.use_cuda_graphs   = True   # adv-diff solve
+        # CUDA-graph the streaming body_update: each eager wp.launch has a
+        # ~120 us python marshalling floor; graph replay collapses it to ~3 us.
+        # NOTE: use_cuda_graphs (adv-diff graph) must stay OFF on warp_port —
+        # torch.cuda.make_graphed_callables records the torch stream only, so
+        # the Warp flux/interpolation/BC kernels inside the adv-diff solve are
+        # silently dropped from the replay (wrong physics, verified blow-up).
         self.kernel_cuda_graph = True   # streaming body_update
         # self.compile_adv_diff = True
 

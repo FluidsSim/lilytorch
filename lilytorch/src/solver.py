@@ -2161,6 +2161,21 @@ class FluidSolver(PlottingMixin):
           are not captured by make_graphed_callables).
         """
         adv = self.adv_diff_solver
+        # HARD GUARD (warp_port): every adv-diff scheme now runs its fluxes /
+        # semi-Lagrangian interpolation / BCs as Warp kernels on Warp's OWN
+        # CUDA stream.  torch.cuda.make_graphed_callables records only the
+        # torch capture stream, so the Warp launches execute once at capture
+        # time and are SILENTLY ABSENT from every replay — the graphed solve
+        # returns frozen/partial physics (verified: salamander 2-D coupled run
+        # blows up at ~700 steps with this flag on).  Refuse until the capture
+        # is rebuilt to route Warp launches onto the captured torch stream
+        # (e.g. wp.ScopedStream(wp.stream_from_torch()) around the solve).
+        if self.device.type == "cuda":
+            print("[cuda_graph] skip — adv-diff runs Warp kernels on Warp's "
+                  "stream; make_graphed_callables would drop them from the "
+                  "replay (wrong physics). use_cuda_graphs is disabled on "
+                  "the Warp path.")
+            return
         if adv._scheme_name == 'abdquickest':
             print("[cuda_graph] skip — abdquickest requires host sync for CFL")
             return
