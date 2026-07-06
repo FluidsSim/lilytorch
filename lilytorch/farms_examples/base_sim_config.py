@@ -175,6 +175,7 @@ class BaseSimConfig:
         self.adv_diff_streams        = False   # parallel u/v/w on separate CUDA streams
         self.compile_project         = False   # torch.compile the pressure projection
         self.use_cuda_graphs         = False   # CUDA graph for adv-diff (no abdquickest/LES)
+        self.kernel_cuda_graph       = None    # CUDA graph for the streaming body_update (Warp path)
         self.poisson_cuda_graph      = False   # CUDA graph for native mgcg/multigrid Poisson (small grids)
         self.poisson_cuda_graph_max_cells = None  # interior-cell gate (None → solver default 64**3)
         self.smagorinsky_cs          = 0.0
@@ -885,6 +886,7 @@ class BaseSimConfig:
             ("adv_diff_streams",        self.adv_diff_streams),
             ("compile_project",         self.compile_project),
             ("use_cuda_graphs",         self.use_cuda_graphs),
+            ("kernel_cuda_graph",       self.kernel_cuda_graph),
             ("poisson_cuda_graph",      self.poisson_cuda_graph),
             ("poisson_cuda_graph_max_cells", self.poisson_cuda_graph_max_cells),
             ("solver_method",           self.solver_method),
