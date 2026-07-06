@@ -242,11 +242,16 @@ def test_python_eulerian_force_path_cpu_regression():
     Re-frozen when the Poisson driver unified onto the single WarpMG V-cycle:
     the force *readout* path is unchanged, but the pressure it reads now comes
     from WarpMG on CPU instead of the retired hybrid torch V-cycle, shifting the
-    values by ~3e-9 relative (arithmetic-order roundoff, not convergence)."""
+    values by ~3e-9 relative (arithmetic-order roundoff, not convergence).
+
+    Re-frozen again when ``solve_multigrid`` became adaptive (early-exit at
+    ``tol`` between one-v-cycle graph replays, restoring the retired native
+    driver's convergence semantics): the solve stops after fewer V-cycles once
+    converged, shifting the pressure — and these readouts — by ~7e-9 relative."""
     got = _run_python_eulerian("cpu")
     expected = torch.tensor(
-        [0.49016188278759837, -0.5369408657638242,
-         28.151615096217956, -11.75747282288945], dtype=torch.float64)
+        [0.4901618791749159, -0.5369408627991937,
+         28.151615663974535, -11.757473401771366], dtype=torch.float64)
     assert torch.allclose(got, expected, rtol=1e-9, atol=1e-11), \
         f"python eulerian force drift: {got.tolist()} vs {expected.tolist()}"
 

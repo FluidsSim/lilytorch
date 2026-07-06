@@ -1838,7 +1838,8 @@ class FluidSolver(PlottingMixin):
         Ngx, Ngy, Ngz = self.grid_shape
         device = self.device
         dtype  = self.dtype
-        _dt_over_rhofluid = float(timestep) / float(self.rho)
+        _dt_over_rhofluid = (self._cached_float('dt', timestep)
+                             / self._cached_float('rho', self.rho))
         # Face-grid shapes: each buffer covers only the staggered faces of
         # the interior region, excluding ghost-cell rows.  The kernel writes
         # directly into these shapes (no padded ghost-cell rows needed).
@@ -1858,12 +1859,34 @@ class FluidSolver(PlottingMixin):
             self._cw_persist = torch.full(cw_gs, _dt_over_rhofluid, device=device, dtype=dtype)
             self._ch_outside_val = _dt_over_rhofluid
 
+    def _cached_float(self, key, value):
+        """Python-float mirror of a per-run scalar that may live as a 0-d GPU
+        tensor (``self.rho``/``self.nu``/``self.eps``/``comp.h``/``self.dt``…).
+
+        ``float(gpu_tensor)`` is a host↔device sync; doing it every step at
+        kernel-marshalling sites (bdim_forcing, the fused force readout) stalls
+        the CUDA pipeline mid-step — profiling the salamander 2-D run showed
+        ~16 such hidden syncs/step.  These scalars are constant for the life of
+        the run, so convert once and reuse the cached float.
+
+        Non-tensor scalars pass straight through (no cache), so callers that
+        supply plain python floats keep exact per-call semantics."""
+        if not torch.is_tensor(value):
+            return float(value)
+        cache = self.__dict__.setdefault('_float_scalar_cache', {})
+        v = cache.get(key)
+        if v is None:
+            v = float(value)
+            cache[key] = v
+        return v
+
     def _init_bdim_coeff_persist_2d(self, timestep):
         """2-D analogue of :meth:`_init_bdim_coeff_persist_3d`."""
         gs = self.grid_shape
         device = self.device
         dtype  = self.dtype
-        _dt_over_rhofluid = float(timestep) / float(self.rho)
+        _dt_over_rhofluid = (self._cached_float('dt', timestep)
+                             / self._cached_float('rho', self.rho))
         needs_realloc = (
             getattr(self, '_ch_persist', None) is None
             or self._ch_persist.shape  != gs
@@ -1948,8 +1971,10 @@ class FluidSolver(PlottingMixin):
             bU, bV,
             self.u0, self.v0,
             self._ch_persist, self._cv_persist,
-            float(comp.eps), float(self.rho),
-            float(timestep), float(comp.h),
+            self._cached_float('comp_eps', comp.eps),
+            self._cached_float('rho', self.rho),
+            self._cached_float('dt', timestep),
+            self._cached_float('comp_h', comp.h),
             int(d['i0']), int(d['j0']),
             int(d['Ai']), int(d['Aj']),
             int(self.bdim_mu0_projection),
@@ -2054,8 +2079,10 @@ class FluidSolver(PlottingMixin):
             bU, bV, bW,
             self.u0, self.v0, self.w0,
             self._ch_persist, self._cv_persist, self._cw_persist,
-            float(comp.eps), float(self.rho),
-            float(timestep), float(comp.h),
+            self._cached_float('comp_eps', comp.eps),
+            self._cached_float('rho', self.rho),
+            self._cached_float('dt', timestep),
+            self._cached_float('comp_h', comp.h),
             int(d['i0']), int(d['j0']), int(d['k0']),
             int(d['Ai']), int(d['Aj']), int(d['Ak']),
             int(self.bdim_mu0_projection),

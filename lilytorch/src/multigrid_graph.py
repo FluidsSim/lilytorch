@@ -514,6 +514,18 @@ class WarpMG3D:
             self._cycle()
         self._graph = cap.graph
 
+    def replay(self):
+        """Run ``n_vcycles`` more captured V-cycle(s) on the CURRENT level-buffer
+        state (f/ch/cv[/cw]/p already loaded by a preceding :meth:`solve`).
+        Used by the adaptive ``solve_multigrid`` loop to add cycles one at a
+        time between residual checks without re-copying the inputs."""
+        if self._wdev == "cpu":
+            self._cycle()
+        elif self._graph is None:
+            self.capture()
+        else:
+            wp.capture_launch(self._graph)
+
     def solve(self, f, ch, cv, cw, p0=None, mask=None):
         """f: (Nx,Ny,Nz) interior RHS; ch/cv/cw: live face coeffs; p0: optional
         padded warm-start; mask: optional (Nx,Ny,Nz) Dirichlet mask.
@@ -979,6 +991,18 @@ class WarpMG2D:
         with wp.ScopedCapture(device=self._wdev) as cap:
             self._cycle()
         self._graph = cap.graph
+
+    def replay(self):
+        """Run ``n_vcycles`` more captured V-cycle(s) on the CURRENT level-buffer
+        state (f/ch/cv/p already loaded by a preceding :meth:`solve`).  Used by
+        the adaptive ``solve_multigrid`` loop to add cycles one at a time
+        between residual checks without re-copying the inputs."""
+        if self._wdev == "cpu":
+            self._cycle()
+        elif self._graph is None:
+            self.capture()
+        else:
+            wp.capture_launch(self._graph)
 
     def solve(self, f, ch, cv, p0=None, mask=None):
         """f: (Nx,Ny) interior RHS; ch/cv: live face coeffs; p0: optional padded

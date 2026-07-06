@@ -662,46 +662,70 @@ class PoissonSolver(_MultigridPoissonSolver):
         return mg
 
     def solve_multigrid(self, f, p0, **kwargs):
-        """Standalone multigrid via the graph-captured WarpMG V-cycle (a fixed
-        ``max_vcycles`` cycles per call).  On CUDA it replays one captured graph
-        in a single host launch; on CPU it launches the same kernels eagerly.  A
-        Dirichlet ``dirichlet_mask`` (free-surface GFM) selects the mask-aware
-        WarpMG, which pins p=0 in the flagged cells at every level/sweep."""
+        """Adaptive standalone multigrid on the graph-captured WarpMG V-cycle.
+
+        Replays a captured ONE-v-cycle graph up to ``max_vcycles`` times,
+        checking the fine-level residual between replays and early-exiting at
+        ``tol`` — the same convergence semantics as the retired native/torch
+        driver.  The previous fixed-count graph (``n_vcycles = max_vcycles``
+        captured in one replay) burned the full smoothing budget every call:
+        in quasi-steady coupled runs the solve converges in 1-2 cycles, so a
+        5-cycle budget wasted ~3.5 ms/step of rbgs sweeps at 1024x512
+        (salamander 2-D, ~73% of all GPU time).  The check costs one residual
+        kernel + one device sync per cycle.  The nvc=1 graph is shared with
+        the MGCG preconditioner cache key.
+
+        A Dirichlet ``dirichlet_mask`` (free-surface GFM) selects the
+        mask-aware WarpMG, which pins p=0 in the flagged cells at every
+        level/sweep."""
         face_arrs, _ = self._face_arrs_from_kwargs(kwargs, f.ndim)
         if face_arrs is None:
             raise ValueError(
                 "solve_multigrid: ch/cv (2-D) or ch/cv/cw (3-D) keyword "
                 "arguments are required.")
-        mg = self._graphed_mg(f.ndim, tuple(f.shape))
+        mg = self._graphed_mg(f.ndim, tuple(f.shape), nvc=1)
         pre_scaled = kwargs.get("pre_scaled", False)
         f_scaled = f if pre_scaled else self.h2 * f
         if f.ndim == 3:
-            ch, cv, cw = face_arrs
-            p = mg.solve(f_scaled, ch.contiguous(), cv.contiguous(),
-                         cw.contiguous(), p0=p0, mask=self.dirichlet_mask)
-            # Ghost ring is never written by the graphed Warp V-cycle
-            # (index-clamped Neumann); refresh it before the gauge mean.
-            self.BC(p)
-            if self.dirichlet_mask is None:
-                p -= p.to(torch.float64).mean().to(p.dtype)
             from lilytorch.src.multigrid_graph import mg_residual_3d_warp
+            ch, cv, cw = (a.contiguous() for a in face_arrs)
             cp0, cm0 = ch[1:].contiguous(), ch[:-1].contiguous()
             cp1, cm1 = cv[:, 1:].contiguous(), cv[:, :-1].contiguous()
             cp2, cm2 = cw[:, :, 1:].contiguous(), cw[:, :, :-1].contiguous()
-            r = mg_residual_3d_warp(p, f_scaled, cp0, cm0, cp1, cm1,
-                                    cp2, cm2, self.jcap_tol)
-            return p, r
-        ch, cv = face_arrs
-        p = mg.solve(f_scaled, ch.contiguous(), cv.contiguous(), p0=p0,
-                     mask=self.dirichlet_mask)
+            p = mg.solve(f_scaled, ch, cv, cw, p0=p0,
+                         mask=self.dirichlet_mask)
+
+            def _residual():
+                # Index-clamped residual: reads no ghost ring, gauge-invariant,
+                # so it is valid on the raw post-cycle p (BC/gauge applied once
+                # at the end).
+                return mg_residual_3d_warp(p, f_scaled, cp0, cm0, cp1, cm1,
+                                           cp2, cm2, self.jcap_tol)
+        else:
+            from lilytorch.src.multigrid_graph import mg_residual_2d_clamped_warp
+            ch, cv = (a.contiguous() for a in face_arrs)
+            cp0, cm0 = ch[1:].contiguous(), ch[:-1].contiguous()
+            cp1, cm1 = cv[:, 1:].contiguous(), cv[:, :-1].contiguous()
+            p = mg.solve(f_scaled, ch, cv, p0=p0, mask=self.dirichlet_mask)
+
+            def _residual():
+                return mg_residual_2d_clamped_warp(p, f_scaled, cp0, cm0,
+                                                   cp1, cm1, self.jcap_tol)
+
+        # ``p`` is a live view of the WarpMG fine-level buffer; extra cycles
+        # replay the captured graph on that in-place state (no input re-copy).
+        r = _residual()
+        for _ in range(max(int(self.max_vcycles), 1) - 1):
+            if self._convergence_norm(r) < self.tol:
+                break
+            mg.replay()
+            r = _residual()
+
+        # Ghost ring is never written by the graphed Warp V-cycle
+        # (index-clamped Neumann); refresh it before the gauge mean.
         self.BC(p)
         if self.dirichlet_mask is None:
             p -= p.to(torch.float64).mean().to(p.dtype)
-        from lilytorch.src.multigrid_graph import mg_residual_2d_clamped_warp
-        cp0, cm0 = ch[1:].contiguous(), ch[:-1].contiguous()
-        cp1, cm1 = cv[:, 1:].contiguous(), cv[:, :-1].contiguous()
-        r = mg_residual_2d_clamped_warp(p, f_scaled, cp0, cm0, cp1, cm1,
-                                        self.jcap_tol)
         return p, r
 
     def _dispatch_vcycle(self, f, p, face_arrs):

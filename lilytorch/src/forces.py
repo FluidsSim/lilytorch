@@ -308,26 +308,35 @@ def forces_method2(self, u, v, p, iteration):
                 nu_rho_scalar = torch.empty(
                     (1,), device=self.device, dtype=self.dtype,
                 )
+                # nu/rho are constant for the run (variable viscosity takes the
+                # branch above): fill ONCE — float(gpu_tensor) is a device sync.
+                nu_rho_scalar.fill_(self._cached_float('nu', self.nu)
+                                    * self._cached_float('rho', self.rho))
                 self._kernel_post_nu_rho_scalar_2d = nu_rho_scalar
-            nu_rho_scalar.fill_(float(self.nu) * float(self.rho))
             nu_rho_field = nu_rho_scalar
 
-        eps_body = comp.bodies[0].eps
+        # Scalar kernel params must be python floats: a 0-d GPU tensor passed
+        # to wp.launch is converted host-side per launch (= a hidden device
+        # sync inside Warp's argument packing; 4/step profiled here).
+        eps_body = self._cached_float('body0_eps', comp.bodies[0].eps)
         interp_method = int(getattr(self, '_sdf_interp_method', 0))
         _fsm = 1 if getattr(self, 'force_submethod', 'ndelta') == 'deltaH' else 0
-        _ph_tau = float(getattr(self, 'force_ph_blend_cells', 1.5)) * self.h
+        _ph_tau = (float(getattr(self, 'force_ph_blend_cells', 1.5))
+                   * self._cached_float('h', self.h))
 
         streaming_sdf_forces_post_2d(
             sm['F_flat'], sm['F_offsets'],
             sm['body_shapes'], sm['body_meta'], _stream_step['kin'],
             _stream_step['aabb_lo'], _stream_step['aabb_dim'],
             _stream_step['gx'], _stream_step['gy'],
-            self.h, _stream_step['max_vol'],
+            self._cached_float('h', self.h), _stream_step['max_vol'],
             comp.sdf_val,
             interp_method,
             u.contiguous(), v.contiguous(), p.contiguous(),
             nu_rho_field,
-            eps_body, self.eps, self.h2,
+            eps_body,
+            self._cached_float('eps', self.eps),
+            self._cached_float('h2', self.h2),
             self.force_delta_order,
             out2d,
             _fsm, _ph_tau,
@@ -529,24 +538,32 @@ def forces_method2_3d(self, u, v, w, p, iteration):
             nu_rho_scalar = getattr(self, '_kernel_post_nu_rho_scalar_3d', None)
             if nu_rho_scalar is None:
                 nu_rho_scalar = torch.empty((1,), device=self.device, dtype=self.dtype)
+                # nu/rho are constant for the run (variable viscosity takes the
+                # branch above): fill ONCE — float(gpu_tensor) is a device sync.
+                nu_rho_scalar.fill_(self._cached_float('nu', self.nu)
+                                    * self._cached_float('rho', self.rho))
                 self._kernel_post_nu_rho_scalar_3d = nu_rho_scalar
-            nu_rho_scalar.fill_(float(self.nu) * float(self.rho))
             nu_rho_field = nu_rho_scalar
 
-        eps_body = comp.bodies[0].eps
+        # Scalar kernel params must be python floats — see the 2-D twin.
+        eps_body = self._cached_float('body0_eps', comp.bodies[0].eps)
         _fsm = 1 if getattr(self, 'force_submethod', 'ndelta') == 'deltaH' else 0
-        _ph_tau = float(getattr(self, 'force_ph_blend_cells', 1.5)) * self.h
+        _ph_tau = (float(getattr(self, 'force_ph_blend_cells', 1.5))
+                   * self._cached_float('h', self.h))
         streaming_sdf_forces_post_3d(
             _stream_static['F_flat'], _stream_static['F_offsets'],
             _stream_static['body_shapes'], _stream_static['body_meta'],
             _stream_step['kin'], _stream_step['aabb_lo'], _stream_step['aabb_dim'],
             _stream_step['gx'], _stream_step['gy'], _stream_step['gz'],
-            self.h, _stream_step['max_vol'],
+            self._cached_float('h', self.h), _stream_step['max_vol'],
             comp.sdf_val,
             getattr(self, '_sdf_interp_method', 0),
             u.contiguous(), v.contiguous(), w.contiguous(), p.contiguous(),
             nu_rho_field,
-            eps_body, self.eps, self.h3, self.force_delta_order, out,
+            eps_body,
+            self._cached_float('eps', self.eps),
+            self._cached_float('h3', self.h3),
+            self.force_delta_order, out,
             _fsm, _ph_tau,
         )
         out_s = out if out.dtype == u.dtype else out.to(u.dtype)
