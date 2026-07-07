@@ -1,120 +1,116 @@
 {
- "throughput_ms_per_step_untouched": 5.419662869826425,
+ "throughput_ms_per_step_untouched": 3.1168834198615514,
  "sync_attributed_ms": {
-  "stream_sdf": 0.14952755118429195,
-  "compute_nu_t": 0.011269251626799814,
-  "sl_interp_call": 0.17775365464331117,
-  "sl_diffuse": 0.08564465406379895,
-  "advdiff_solve_sl": 2.3679628226091154,
-  "bdim_forcing": 0.2963162518426543,
-  "mw_body_div_corr": 0.12613658836926334,
-  "advdiff_set_bcs": 0.24734102389629697,
-  "project(poisson+correct)": 1.272465150032076,
-  "forces_readout": 0.12512276298366487,
-  "advance_and_loads_total": 5.52888533748046,
-  "fluid_step_total": 5.734150638090796,
-  "apply_forces(readback+push)": 0.17701124961604364
+  "stream_sdf": 0.15206010029942263,
+  "compute_nu_t": 0.011759364133467898,
+  "sl_diffuse": 0.04971919879608322,
+  "advdiff_solve_sl": 0.21174717585381586,
+  "bdim_forcing": 0.04652786192309577,
+  "advdiff_set_bcs": 0.27366223075659946,
+  "project(poisson+correct)": 1.2182586247945437,
+  "forces_readout": 0.12725632586807478,
+  "advance_and_loads_total": 2.9784933238261146,
+  "fluid_step_total": 3.177246111590648,
+  "apply_forces(readback+push)": 0.17268609881284647
  },
  "submit_only_ms": {
-  "stream_sdf": 0.12822302305721678,
-  "compute_nu_t": 0.0011431504390202463,
-  "sl_interp_call": 0.15823532819922548,
-  "sl_diffuse": 0.07034379959804937,
-  "advdiff_solve_sl": 2.0930621511070058,
-  "bdim_forcing": 0.2838755026459694,
-  "mw_body_div_corr": 0.11925260041607544,
-  "advdiff_set_bcs": 0.2356568362301914,
-  "project(poisson+correct)": 1.2428510490281042,
-  "forces_readout": 0.10467252213857137,
-  "advance_and_loads_total": 5.009754475031514,
-  "fluid_step_total": 5.176396049500909,
-  "apply_forces(readback+push)": 0.15684297468396835
+  "stream_sdf": 0.12631492500077002,
+  "compute_nu_t": 0.0011424992408137769,
+  "sl_diffuse": 0.04987347419955768,
+  "advdiff_solve_sl": 0.1426070783054456,
+  "bdim_forcing": 0.02727710161707364,
+  "advdiff_set_bcs": 0.24883567384677008,
+  "project(poisson+correct)": 1.172957502421923,
+  "forces_readout": 0.10575469859759323,
+  "advance_and_loads_total": 2.5975824006309267,
+  "fluid_step_total": 2.7723391227482352,
+  "apply_forces(readback+push)": 0.13979829891468398
  },
- "total_step_ms_wall_window": 5.418562600098085,
- "handler_step_ms_sync_window": 5.978341838999768,
+ "total_step_ms_wall_window": 3.116420469887089,
+ "handler_step_ms_sync_window": 3.4171160506957676,
  "eager_wp_launches_per_step": [
-  14,
-  16,
-  14,
-  16,
-  14,
-  14,
-  14,
-  16,
-  14,
-  14,
-  16,
-  14,
-  16,
-  14,
-  16,
-  14,
-  14,
-  14,
-  16,
-  14,
-  14,
-  14,
-  16,
-  14,
-  14,
-  14,
-  16,
-  14,
-  16,
-  14,
-  16,
-  14,
-  14,
-  14,
-  16,
-  14,
-  14,
-  16,
-  14,
-  16
+  5,
+  3,
+  5,
+  3,
+  5,
+  3,
+  5,
+  3,
+  5,
+  3,
+  5,
+  3,
+  5,
+  3,
+  5,
+  3,
+  5,
+  3,
+  5,
+  3,
+  5,
+  3,
+  5,
+  3,
+  5,
+  3,
+  5,
+  3,
+  5,
+  3,
+  5,
+  3,
+  5,
+  3,
+  5,
+  3,
+  5,
+  3,
+  5,
+  3
  ],
  "graph_replays_per_step": [
-  4,
-  5,
-  4,
-  5,
-  4,
-  4,
-  4,
-  5,
-  4,
-  4,
-  5,
-  4,
-  5,
-  4,
-  5,
-  4,
-  4,
-  4,
-  5,
-  4,
-  4,
-  4,
-  5,
-  4,
-  4,
-  4,
-  5,
-  4,
-  5,
-  4,
-  5,
-  4,
-  4,
-  4,
-  5,
-  4,
-  4,
-  5,
-  4,
-  5
+  9,
+  8,
+  9,
+  8,
+  9,
+  8,
+  9,
+  8,
+  9,
+  8,
+  9,
+  8,
+  9,
+  8,
+  9,
+  8,
+  9,
+  8,
+  9,
+  8,
+  9,
+  8,
+  9,
+  8,
+  9,
+  8,
+  9,
+  8,
+  9,
+  8,
+  9,
+  8,
+  9,
+  8,
+  9,
+  8,
+  9,
+  8,
+  9,
+  8
  ],
  "cuda_item_syncs_per_step": [
   0,
@@ -161,153 +157,153 @@
  "profiler_top_cuda": [
   {
    "name": "rbgs_halfsweep_2d_b6ff8889_cuda_kernel_forward",
-   "cuda_us_total": 5532.8,
+   "cuda_us_total": 5061.6,
    "calls": 2352
   },
   {
-   "name": "aten::copy_",
-   "cuda_us_total": 1063.5,
-   "calls": 553
-  },
-  {
    "name": "prolongate_add_2d_a0e26c26_cuda_kernel_forward",
-   "cuda_us_total": 882.2,
+   "cuda_us_total": 810.9,
    "calls": 49
   },
   {
+   "name": "aten::copy_",
+   "cuda_us_total": 658.4,
+   "calls": 469
+  },
+  {
    "name": "Memcpy DtoD (Device -> Device)",
-   "cuda_us_total": 780.8,
-   "calls": 399
+   "cuda_us_total": 425.3,
+   "calls": 315
   },
   {
-   "name": "interp_2d_kernel_2c41c805_cuda_kernel_forward",
-   "cuda_us_total": 584.3,
-   "calls": 70
-  },
-  {
-   "name": "aten::mul",
-   "cuda_us_total": 553.6,
-   "calls": 238
-  },
-  {
-   "name": "aten::sub",
-   "cuda_us_total": 448.6,
-   "calls": 147
+   "name": "sl_advect_2d_kernel_6dae2ef3_cuda_kernel_forward",
+   "cuda_us_total": 314.9,
+   "calls": 7
   },
   {
    "name": "void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<a",
-   "cuda_us_total": 421.2,
-   "calls": 126
-  },
-  {
-   "name": "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<fl",
-   "cuda_us_total": 324.8,
-   "calls": 119
-  },
-  {
-   "name": "void at::native::vectorized_elementwise_kernel<4, at::native::AUnaryFunctor<floa",
-   "cuda_us_total": 298.7,
-   "calls": 147
+   "cuda_us_total": 186.7,
+   "calls": 98
   },
   {
    "name": "void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<a",
-   "cuda_us_total": 228.4,
-   "calls": 105
+   "cuda_us_total": 164.8,
+   "calls": 56
   },
   {
    "name": "mg_residual_2d_clamped_1128f299_cuda_kernel_forward",
-   "cuda_us_total": 177.2,
+   "cuda_us_total": 161.4,
    "calls": 56
   },
   {
-   "name": "aten::add",
-   "cuda_us_total": 160.4,
-   "calls": 56
+   "name": "aten::mul",
+   "cuda_us_total": 140.4,
+   "calls": 63
   },
   {
    "name": "restrict_face_2d_498a6c07_cuda_kernel_forward",
-   "cuda_us_total": 146.9,
+   "cuda_us_total": 133.0,
    "calls": 98
   },
   {
    "name": "extract_pairs_2d_c30f03a4_cuda_kernel_forward",
-   "cuda_us_total": 128.7,
+   "cuda_us_total": 120.3,
    "calls": 56
   },
   {
-   "name": "aten::add_",
-   "cuda_us_total": 125.7,
+   "name": "aten::sub",
+   "cuda_us_total": 116.8,
    "calls": 42
-  },
-  {
-   "name": "void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<a",
-   "cuda_us_total": 112.6,
-   "calls": 42
-  },
-  {
-   "name": "aten::fill_",
-   "cuda_us_total": 109.9,
-   "calls": 63
-  },
-  {
-   "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>",
-   "cuda_us_total": 101.1,
-   "calls": 56
-  },
-  {
-   "name": "aten::any",
-   "cuda_us_total": 98.2,
-   "calls": 21
   },
   {
    "name": "forces_post_2d_kernel_495d00a4_cuda_kernel_forward",
-   "cuda_us_total": 92.1,
+   "cuda_us_total": 87.0,
    "calls": 7
   },
   {
-   "name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<bool, at::native::fu",
-   "cuda_us_total": 84.1,
+   "name": "laplacian_warp_kernel_5f08a58a_cuda_kernel_forward",
+   "cuda_us_total": 83.9,
+   "calls": 14
+  },
+  {
+   "name": "aten::any",
+   "cuda_us_total": 83.7,
    "calls": 21
   },
   {
-   "name": "void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<a",
-   "cuda_us_total": 83.3,
-   "calls": 28
-  },
-  {
-   "name": "apply_bcs_2d_kernel_0f10c9d9_cuda_kernel_forward",
-   "cuda_us_total": 75.4,
-   "calls": 32
-  },
-  {
-   "name": "restrict_residual_2d_12f0206e_cuda_kernel_forward",
-   "cuda_us_total": 60.4,
+   "name": "aten::fill_",
+   "cuda_us_total": 78.4,
    "calls": 49
   },
   {
-   "name": "void at::native::vectorized_elementwise_kernel<4, at::native::BinaryFunctor<floa",
-   "cuda_us_total": 59.0,
+   "name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<bool, at::native::fu",
+   "cuda_us_total": 77.6,
+   "calls": 21
+  },
+  {
+   "name": "bdim_forcing_2d_kernel_c936c2b0_cuda_kernel_forward",
+   "cuda_us_total": 77.0,
+   "calls": 7
+  },
+  {
+   "name": "apply_bcs_2d_kernel_0f10c9d9_cuda_kernel_forward",
+   "cuda_us_total": 73.8,
+   "calls": 36
+  },
+  {
+   "name": "void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>",
+   "cuda_us_total": 70.3,
+   "calls": 42
+  },
+  {
+   "name": "void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<a",
+   "cuda_us_total": 67.1,
+   "calls": 28
+  },
+  {
+   "name": "void at::native::vectorized_elementwise_kernel<4, at::native::AUnaryFunctor<floa",
+   "cuda_us_total": 64.1,
+   "calls": 35
+  },
+  {
+   "name": "restrict_residual_2d_12f0206e_cuda_kernel_forward",
+   "cuda_us_total": 55.6,
+   "calls": 49
+  },
+  {
+   "name": "void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<fl",
+   "cuda_us_total": 55.1,
    "calls": 21
   },
   {
    "name": "aten::mean",
-   "cuda_us_total": 58.5,
+   "cuda_us_total": 52.9,
    "calls": 7
   },
   {
    "name": "void at::native::reduce_kernel<512, 1, at::native::ReduceOp<double, at::native::",
-   "cuda_us_total": 53.8,
+   "cuda_us_total": 50.8,
    "calls": 7
   },
   {
    "name": "streaming_sdf_fanned_min_2d_214e25c4_cuda_kernel_forward",
-   "cuda_us_total": 53.6,
+   "cuda_us_total": 49.9,
    "calls": 7
   },
   {
    "name": "memset32",
-   "cuda_us_total": 52.0,
+   "cuda_us_total": 49.3,
    "calls": 42
+  },
+  {
+   "name": "aten::add_",
+   "cuda_us_total": 46.5,
+   "calls": 14
+  },
+  {
+   "name": "void memtile_value_kernel<int>(int*, int, unsigned long)",
+   "cuda_us_total": 41.9,
+   "calls": 21
   }
  ]
 }

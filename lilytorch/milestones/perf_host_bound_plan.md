@@ -163,14 +163,37 @@ structure); suite green; profile rows `bdim_forcing` ≤0.05, `mw_body_div_corr`
 
 ## Task C — finish + commit the BC/flux graph runners (expected −0.2 ms/step)
 
-`ApplyBcs2DGraphRunner` / `FluxAddGraphRunner` (advection.py) are marked
-[SPIKE] and `set_BCs` still costs 0.25 ms/step. Finish: verify the runners
-actually replay in the coupled run (add replay counters, assert >0 after
-warm-up in a test), harden the signature keys (dtype/dt changes must
-recapture — the landmines are documented in the FluxAddGraphRunner docstring),
-and cover with tests in `tests/test_advection.py`. If Task A lands first, the
-flux runner matters only for the explicit-convection examples — still finish
-it; other examples use those schemes.
+**DONE 2026-07-06.** The runners already existed — `ApplyBcs{2,3}DGraphRunner`
+(advection.py:1751,:1935) and `FluxAddGraphRunner` (a `_WarpGraphRunner` factory,
+advection.py:1286) — but were `[SPIKE]`-marked with nothing proving they replay
+under a real run. Finished/hardened them (no new kernels):
+
+1. **Replay counters** — each runner now exposes `replays`/`captures`/`eager`
+   counts (`_WarpGraphRunner` added them to `__slots__`). Empirically confirmed
+   the flux runner is *not* silently eager in a steady solve: 6 steps → 27
+   replays / 18 captures (the caching allocator double-buffers `rhs`, so each of
+   the 9 (component,direction) signatures captures twice, then replays). The
+   profiler already tallies aggregate replays by patching `wp.capture_launch`,
+   so the per-runner counters are for tests/inspection only.
+2. **Recapture keys** — audited: dtype (`str(u.dtype)`) and the flux path's
+   `dt_dh`/`C_courant`/`scheme_id`/`face_dim` were already keyed. **Hardened**
+   the ApplyBcs keys with the op counts `N_neu/N_dir/N_ref` — they are baked into
+   the captured graph's launch dims + kernel scalars, so a pool-reused descriptor
+   pointer with a changed op count would otherwise replay a stale graph.
+3. **Tests** in `tests/test_advection.py`:
+   `test_apply_bcs_{2,3}d_graph_replay_eq_eager` (f32/f64, stable-buffer
+   multi-step graph-vs-eager, bit-exact, asserts captures==1/eager==1/replays==K-1),
+   `test_apply_bcs_2d_graph_recaptures_on_new_dtype`, and
+   `test_flux_graph_runner_replays_after_warmup` (asserts captures>0 and
+   replays≥captures in a real `AdvDiffSolver.solve` loop).
+4. Dropped the `[SPIKE]` markers (advection.py:345 + the two runner docstrings).
+
+Suite green: 275 passed / 1 skipped (full `tests/`). The BC `set_BCs` row was
+not re-profiled in isolation — the runners were already wired into `set_BCs`;
+this task made them provably-replaying and safe, not faster in a new way.
+
+If Task A lands first, the flux runner matters only for the explicit-convection
+examples — still finished; other examples use those schemes.
 
 ## Task D — Poisson host share + initial guess (expected −0.3…−0.5 ms/step)
 

@@ -312,7 +312,7 @@ class PositionController(AnimatController):
 
 
         self.base_amp = np.deg2rad(float(getattr(self.config, "amp",     300)))
-        self.swim_freq = float(getattr(self.config, "freq", 2))
+        self.swim_freq = float(getattr(self.config, "freq", 1.5))
         self.turn_strength = float(getattr(self.config, "turn_strength", 0.8))
         self.turn_strength_step = float(
             getattr(self.config, "turn_strength_step", 0.)

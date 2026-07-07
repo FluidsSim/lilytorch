@@ -196,6 +196,31 @@ def test_flux_graph_runner_matches_eager(scheme):
         assert d == 0.0, f"graph vs eager {name} mismatch: {d:.3e} (dropped launches?)"
 
 
+@SKIP_NO_CUDA
+def test_flux_graph_runner_replays_after_warmup():
+    """The flux runner must actually take the graph fast path in a steady solve
+    loop — not silently stay eager because the rhs pointer churns.  After warm-up
+    ``replays`` must be positive and at least the number of captured graphs (each
+    stable (component, direction) signature is captured once then replayed)."""
+    from lilytorch.src.advection import AdvDiffSolver, FluxAddGraphRunner
+    N, dev = 24, torch.device("cuda:0")
+    x = torch.linspace(0.0, 1.0, N, device=dev, dtype=torch.float32)
+    torch.manual_seed(0)
+    s = AdvDiffSolver(dev, dt=1e-3, x=x, y=x.clone(), nu=1e-3,
+                      z=x.clone(), method="quick")
+    runner = FluxAddGraphRunner()
+    s._flux_graph_runner = runner
+    u, v, w = (torch.randn(N, N, N, device=dev, dtype=torch.float32) * 0.1
+               for _ in range(3))
+    for _ in range(6):
+        out = s.solve(u, v, w)
+        u.copy_(out[0]); v.copy_(out[1]); w.copy_(out[2])
+    torch.cuda.synchronize()
+    assert runner.captures > 0, "flux runner never captured a graph (pointer churn?)"
+    assert runner.replays >= runner.captures, (
+        f"replays={runner.replays} < captures={runner.captures} — graphs not reused")
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 #  apply_bcs_2d / apply_bcs_3d — fused BC ghost writes (Warp CPU == GPU)
 #  Merged from the former test_misc_2d.py / test_misc_3d.py.
@@ -323,3 +348,371 @@ def test_apply_bcs_3d_noncubic_dual_facedims():
     rc, rg = run("cpu"), run("cuda:0")
     for a, b, nm in zip(rc, rg, ("u", "v", "w")):
         d = (a - b.cpu()).abs().max().item()
+        assert d == 0.0, f"bcs3d noncubic cpu vs gpu {nm} mismatch {d:.3e}"
+
+
+# ─── ApplyBcs{2,3}DGraphRunner — CUDA-graph replay must equal eager ───────────
+#  Guards two things at once: (1) the captured graph replays bit-for-bit vs the
+#  eager apply_bcs_*_warp path over a multi-step run with a *stable* buffer
+#  (a dropped-launch graph would leave the ghost cells stale → mismatch), and
+#  (2) the replay/capture counters behave — after the 2nd-sighting capture,
+#  every later call replays (the plan's "prove the runners actually replay").
+
+@SKIP_NO_CUDA
+@pytest.mark.parametrize("f32", [False, True], ids=["f64", "f32"])
+def test_apply_bcs_2d_graph_replay_eq_eager(f32):
+    from lilytorch.src.advection import ApplyBcs2DGraphRunner
+    u0, v0, shapes, neu, dird, dirv, refd, refv, ml = _bcs_problem_2d("cuda:0")
+    if f32:
+        u0 = u0.float(); v0 = v0.float(); dirv = dirv.float(); refv = refv.float()
+
+    K = 8
+    torch.manual_seed(1)
+    # Deterministic in-place interior perturbations so the Neumann/reflective
+    # ghost writes (which read the interior) actually change step to step —
+    # identically for both runs — while the buffer pointer stays fixed.
+    noise = [torch.randn_like(u0) for _ in range(K)]
+
+    def run(use_graph):
+        u = u0.clone().contiguous(); v = v0.clone().contiguous()
+        runner = ApplyBcs2DGraphRunner() if use_graph else None
+        for k in range(K):
+            u.add_(noise[k]); v.add_(noise[k])
+            if use_graph:
+                runner(u, v, shapes, neu, dird, dirv, refd, refv, ml)
+            else:
+                apply_bcs_2d_warp(u, v, shapes, neu, dird, dirv, refd, refv, ml)
+        wp.synchronize()
+        return u, v, runner
+
+    ue, ve, _ = run(False)
+    ug, vg, runner = run(True)
+    du = (ue - ug).abs().max().item(); dv = (ve - vg).abs().max().item()
+    assert du == 0.0 and dv == 0.0, f"graph vs eager maxdiff u={du:.3e} v={dv:.3e}"
+    # Stable signature: call 1 eager (first sighting), calls 2..K replay.
+    assert runner.captures == 1, f"captures={runner.captures} (expected 1)"
+    assert runner.eager == 1, f"eager={runner.eager} (expected 1)"
+    assert runner.replays == K - 1, f"replays={runner.replays} (expected {K-1})"
+
+
+@SKIP_NO_CUDA
+@pytest.mark.parametrize("f32", [False, True], ids=["f64", "f32"])
+def test_apply_bcs_3d_graph_replay_eq_eager(f32):
+    from lilytorch.src.advection import ApplyBcs3DGraphRunner
+    u0, v0, w0, shapes, neu, dird, dirv, refd, refv, M = _bcs_problem_3d("cuda:0")
+    if f32:
+        u0 = u0.float(); v0 = v0.float(); w0 = w0.float()
+        dirv = dirv.float(); refv = refv.float()
+
+    K = 8
+    torch.manual_seed(2)
+    noise = [torch.randn_like(u0) for _ in range(K)]
+
+    def run(use_graph):
+        u = u0.clone().contiguous(); v = v0.clone().contiguous()
+        w = w0.clone().contiguous()
+        runner = ApplyBcs3DGraphRunner() if use_graph else None
+        for k in range(K):
+            u.add_(noise[k]); v.add_(noise[k]); w.add_(noise[k])
+            if use_graph:
+                runner(u, v, w, shapes, neu, dird, dirv, refd, refv, M, M)
+            else:
+                apply_bcs_3d_warp(u, v, w, shapes, neu, dird, dirv, refd, refv, M, M)
+        wp.synchronize()
+        return u, v, w, runner
+
+    ue, ve, we, _ = run(False)
+    ug, vg, wg, runner = run(True)
+    for a, b, nm in ((ue, ug, "u"), (ve, vg, "v"), (we, wg, "w")):
+        d = (a - b).abs().max().item()
+        assert d == 0.0, f"graph vs eager {nm} mismatch: {d:.3e} (dropped launches?)"
+    assert runner.captures == 1, f"captures={runner.captures} (expected 1)"
+    assert runner.eager == 1, f"eager={runner.eager} (expected 1)"
+    assert runner.replays == K - 1, f"replays={runner.replays} (expected {K-1})"
+
+
+@SKIP_NO_CUDA
+def test_apply_bcs_2d_graph_recaptures_on_new_dtype():
+    """A single runner instance handles both dtypes: ``str(u.dtype)`` is in the
+    signature key, so an f64 signature never replays an f32 graph.  Both dtypes
+    stay correct and each captures its own graph."""
+    from lilytorch.src.advection import ApplyBcs2DGraphRunner
+    runner = ApplyBcs2DGraphRunner()
+    for dt in (torch.float64, torch.float32):
+        u0, v0, shapes, neu, dird, dirv, refd, refv, ml = _bcs_problem_2d("cuda:0")
+        if dt == torch.float32:
+            u0 = u0.float(); v0 = v0.float(); dirv = dirv.float(); refv = refv.float()
+        u = u0.clone().contiguous(); v = v0.clone().contiguous()
+        ue = u.clone(); ve = v.clone()
+        for _ in range(4):
+            runner(u, v, shapes, neu, dird, dirv, refd, refv, ml)
+            apply_bcs_2d_warp(ue, ve, shapes, neu, dird, dirv, refd, refv, ml)
+        wp.synchronize()
+        assert (u - ue).abs().max().item() == 0.0
+        assert (v - ve).abs().max().item() == 0.0
+    assert runner.captures == 2, f"captures={runner.captures} (expected one per dtype)"
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  Fused semi-Lagrangian advection (2-D) — sl_advect_2d_kernel
+#  One Warp launch replaces the 10 python RegularGridInterpolator calls of the
+#  RK2 back-trace.  The pure-Python reference lives here as a standalone oracle
+#  (moved from AdvDiffSolver._solve_semi_lagrangian_python).
+# ═════════════════════════════════════════════════════════════════════════════
+
+from lilytorch.src.advection import (
+    AdvDiffSolver,
+    _inner,
+    SLAdvect2DGraphRunner,
+    SLAdvect3DGraphRunner,
+)
+from lilytorch.src import diffusion
+
+
+def _sl_python_oracle(solver, *vel, nu_t=None):
+    """Pure-Python semi-Lagrangian RK2 back-trace — independent reference
+    oracle for the Warp fused kernels.  Moved here from the now-removed
+    ``AdvDiffSolver._solve_semi_lagrangian_python``."""
+    ndim = solver.ndim
+    shape = tuple(solver.n)
+    for i in range(ndim):
+        solver._interps[i].F = vel[i]
+    vel_new = list(vel)
+    half_dt = 0.5 * solver.dt
+    for i in range(ndim):
+        vel_at_i = [
+            solver._interps[d](*solver._flat_coords[i]).clone()
+            for d in range(ndim)
+        ]
+        midpoint = [
+            solver._flat_coords[i][d] - half_dt * vel_at_i[d]
+            for d in range(ndim)
+        ]
+        vel_at_mid = [
+            solver._interps[d](*midpoint).clone()
+            for d in range(ndim)
+        ]
+        departure = [
+            solver._flat_coords[i][d] - solver.dt * vel_at_mid[d]
+            for d in range(ndim)
+        ]
+        vel_new[i] = solver._interps[i](*departure).reshape(shape).clone()
+    inner = _inner(ndim)
+    for i in range(ndim):
+        vel_new[i][inner] += diffusion.diffuse(
+            vel_new[i], solver.dt, nu=solver.nu, nu_t=nu_t,
+            inv_dh2=solver._inv_dh2, dh=solver.dh,
+        )
+    return tuple(vel_new)
+
+
+def _sl_solver_2d(dev, dtype, N=48, M=40, dt=0.03, nu=1e-3, seed=7):
+    """2-D SL solver on a non-square grid + random MAC fields.
+
+    dt is large enough that departure points cross cell boundaries and leave
+    the domain near the border, exercising the clamp + bilinear-fallback
+    paths of the biquadratic sampler."""
+    x = torch.linspace(0.0, 1.0, N, device=dev, dtype=dtype)
+    y = torch.linspace(0.0, 0.8, M, device=dev, dtype=dtype)
+    s = AdvDiffSolver(torch.device(dev), dt=dt, x=x, y=y, nu=nu,
+                      method="implicit")
+    g = torch.Generator(device="cpu").manual_seed(seed)
+    u = (torch.rand((N, M), generator=g, dtype=torch.float64) - 0.5).to(
+        device=dev, dtype=dtype)
+    v = (torch.rand((N, M), generator=g, dtype=torch.float64) - 0.5).to(
+        device=dev, dtype=dtype)
+    return s, u, v
+
+
+@pytest.mark.parametrize("dev", ["cpu",
+                                 pytest.param("cuda:0", marks=SKIP_NO_CUDA)])
+@pytest.mark.parametrize("dtype", [torch.float64, torch.float32],
+                         ids=["f64", "f32"])
+def test_sl_fused_matches_python_2d(dev, dtype):
+    """Fused RK2 kernel == python interpolator path (same math, same
+    biquadratic sampler @wp.func).  CPU is bit-exact; on CUDA the only
+    drift source is FMA contraction in the midpoint/departure arithmetic
+    (observed 3.5e-15 f64 / 2.8e-6 f32 → tolerances give ~3x headroom)."""
+    s, u, v = _sl_solver_2d(dev, dtype)
+    ref = _sl_python_oracle(s, u.clone(), v.clone())
+    got = s._solve_semi_lagrangian_warp(u.clone(), v.clone())
+    wp.synchronize()
+    tol = 1e-14 if dtype is torch.float64 else 1e-5
+    for a, b, nm in zip(ref, got, ("u", "v")):
+        d = (a - b).abs().max().item()
+        assert d < tol, f"sl fused vs python {nm} ({dev}, {dtype}): {d:.3e}"
+
+
+@SKIP_NO_CUDA
+@pytest.mark.parametrize("dtype", [torch.float64, torch.float32],
+                         ids=["f64", "f32"])
+def test_sl_fused_cpu_equals_gpu(dtype):
+    """Single-source check: the SAME sl_advect_2d_kernel on CPU == GPU."""
+    sc, uc, vc = _sl_solver_2d("cpu", dtype)
+    sg, ug, vg = _sl_solver_2d("cuda:0", dtype)
+    rc = sc._solve_semi_lagrangian_warp(uc, vc)
+    rg = sg._solve_semi_lagrangian_warp(ug, vg)
+    wp.synchronize()
+    tol = 1e-14 if dtype is torch.float64 else 1e-5
+    for a, b, nm in zip(rc, rg, ("u", "v")):
+        d = (a - b.cpu()).abs().max().item()
+        assert d < tol, f"sl kernel cpu vs gpu {nm} ({dtype}): {d:.3e}"
+
+
+@pytest.mark.parametrize("dev", ["cpu",
+                                 pytest.param("cuda:0", marks=SKIP_NO_CUDA)])
+def test_sl_dispatch_takes_warp_path_2d(dev):
+    """The production entry point (`solve`) must actually take the fused
+    Warp path on contiguous 2-D fields (CPU + CUDA) — guards against a
+    silent fall-back to the python interpolator path."""
+    s, u, v = _sl_solver_2d(dev, torch.float32)
+    assert s._sl_out is None
+    out = s.solve(u, v)
+    assert s._sl_out is not None, f"solve() on {dev} did not take the fused Warp path"
+    assert out[0].data_ptr() == s._sl_out[0].data_ptr()
+
+
+@SKIP_NO_CUDA
+def test_sl_graph_runner_matches_eager():
+    """Multi-step SL run with the CUDA-graph runner must reproduce the eager
+    kernel run bit-for-bit (same kernel, baked pointers).  Mirrors
+    test_flux_graph_runner_matches_eager, including the guard against the
+    ``b423298`` dropped-launch failure mode: a no-op graph would leave the
+    persistent out-buffers stale, caught by both the eager comparison and
+    the ``evolved`` check."""
+    from lilytorch.src import advection as _adv
+
+    def run(graph_on):
+        s, u, v = _sl_solver_2d("cuda:0", torch.float32)
+        s._sl_graph_runner = (SLAdvect2DGraphRunner() if graph_on
+                              else _adv.sl_advect_2d_warp)
+        u0, v0 = u.clone(), v.clone()
+        for _ in range(25):        # runner captures on 2nd sighting
+            out = s.solve(u, v)
+            u.copy_(out[0]); v.copy_(out[1])
+        torch.cuda.synchronize()
+        return u0, u.clone(), v.clone()
+
+    seed_u, ue, ve = run(False)
+    _, ug, vg = run(True)
+
+    evolved = (ue - seed_u).abs().max().item()
+    assert evolved > 1e-3, f"fields did not evolve ({evolved:.3e}) — bad harness"
+
+    for a, b, name in ((ue, ug, "u"), (ve, vg, "v")):
+        d = (a - b).abs().max().item()
+        assert d == 0.0, f"graph vs eager {name} mismatch: {d:.3e} (dropped launches?)"
+
+
+def test_sl_warp_path_always_taken(monkeypatch):
+    """The Warp path is now the ONLY production path — even with
+    LILY_SL_KERNEL=0 the dispatch goes through the fused kernel."""
+    monkeypatch.setenv("LILY_SL_KERNEL", "0")
+    dev = "cuda:0" if torch.cuda.is_available() else "cpu"
+    s, u, v = _sl_solver_2d(dev, torch.float32)
+    out = s.solve(u, v)
+    assert s._sl_out is not None, "Warp path must always be taken"
+    assert out[0].data_ptr() == s._sl_out[0].data_ptr()
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  Fused semi-Lagrangian advection (3-D) — sl_advect_3d_kernel
+#  One Warp launch replaces the 21 python RegularGridInterpolator calls.
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+def _sl_solver_3d(dev, dtype, Nx=24, Ny=20, Nz=16, dt=0.02, nu=1e-3, seed=3):
+    """3-D SL solver on a non-cubic grid + random MAC fields.
+
+    dt is large enough that departure points cross cell boundaries and leave
+    the domain near the border, exercising the clamp + trilinear-fallback
+    paths of the triquadratic sampler."""
+    x = torch.linspace(0.0, 1.0, Nx, device=dev, dtype=dtype)
+    y = torch.linspace(0.0, 0.8, Ny, device=dev, dtype=dtype)
+    z = torch.linspace(0.0, 0.6, Nz, device=dev, dtype=dtype)
+    s = AdvDiffSolver(torch.device(dev), dt=dt, x=x, y=y, nu=nu, z=z,
+                      method="implicit")
+    g = torch.Generator(device="cpu").manual_seed(seed)
+    shape = (Nx, Ny, Nz)
+    u = (torch.rand(shape, generator=g, dtype=torch.float64) - 0.5).to(
+        device=dev, dtype=dtype)
+    v = (torch.rand(shape, generator=g, dtype=torch.float64) - 0.5).to(
+        device=dev, dtype=dtype)
+    w = (torch.rand(shape, generator=g, dtype=torch.float64) - 0.5).to(
+        device=dev, dtype=dtype)
+    return s, u, v, w
+
+
+@pytest.mark.parametrize("dev", ["cpu",
+                                 pytest.param("cuda:0", marks=SKIP_NO_CUDA)])
+@pytest.mark.parametrize("dtype", [torch.float64, torch.float32],
+                         ids=["f64", "f32"])
+def test_sl_fused_matches_python_3d(dev, dtype):
+    """Fused 3-D RK2 kernel == python interpolator path (same math, same
+    triquadratic sampler @wp.func).  CPU is bit-exact; CUDA tolerance
+    accounts for FMA contraction drift."""
+    s, u, v, w = _sl_solver_3d(dev, dtype)
+    ref = _sl_python_oracle(s, u.clone(), v.clone(), w.clone())
+    got = s._solve_semi_lagrangian_warp(u.clone(), v.clone(), w.clone())
+    wp.synchronize()
+    tol = 1e-14 if dtype is torch.float64 else 1e-5
+    for a, b, nm in zip(ref, got, ("u", "v", "w")):
+        d = (a - b).abs().max().item()
+        assert d < tol, f"sl3d fused vs python {nm} ({dev}, {dtype}): {d:.3e}"
+
+
+@SKIP_NO_CUDA
+@pytest.mark.parametrize("dtype", [torch.float64, torch.float32],
+                         ids=["f64", "f32"])
+def test_sl_fused_cpu_equals_gpu_3d(dtype):
+    """Single-source check: the SAME sl_advect_3d_kernel on CPU == GPU."""
+    sc, uc, vc, wc = _sl_solver_3d("cpu", dtype)
+    sg, ug, vg, wg = _sl_solver_3d("cuda:0", dtype)
+    rc = sc._solve_semi_lagrangian_warp(uc, vc, wc)
+    rg = sg._solve_semi_lagrangian_warp(ug, vg, wg)
+    wp.synchronize()
+    tol = 1e-14 if dtype is torch.float64 else 1e-5
+    for a, b, nm in zip(rc, rg, ("u", "v", "w")):
+        d = (a - b.cpu()).abs().max().item()
+        assert d < tol, f"sl3d kernel cpu vs gpu {nm} ({dtype}): {d:.3e}"
+
+
+@pytest.mark.parametrize("dev", ["cpu",
+                                 pytest.param("cuda:0", marks=SKIP_NO_CUDA)])
+def test_sl_dispatch_takes_warp_path_3d(dev):
+    """The production entry point (`solve`) must take the fused Warp
+    path on contiguous 3-D fields (CPU + CUDA)."""
+    s, u, v, w = _sl_solver_3d(dev, torch.float32)
+    assert s._sl_out is None
+    out = s.solve(u, v, w)
+    assert s._sl_out is not None, f"solve() 3-D on {dev} did not take the fused Warp path"
+    assert len(s._sl_out) == 3
+    assert out[0].data_ptr() == s._sl_out[0].data_ptr()
+
+
+@SKIP_NO_CUDA
+def test_sl_graph_runner_matches_eager_3d():
+    """Multi-step 3-D SL run with the CUDA-graph runner must reproduce the
+    eager kernel run bit-for-bit."""
+    from lilytorch.src import advection as _adv
+
+    def run(graph_on):
+        s, u, v, w = _sl_solver_3d("cuda:0", torch.float32)
+        s._sl_graph_runner_3d = (SLAdvect3DGraphRunner() if graph_on
+                                 else _adv.sl_advect_3d_warp)
+        u0, v0, w0 = u.clone(), v.clone(), w.clone()
+        for _ in range(25):        # runner captures on 2nd sighting
+            out = s.solve(u, v, w)
+            u.copy_(out[0]); v.copy_(out[1]); w.copy_(out[2])
+        torch.cuda.synchronize()
+        return u0, u.clone(), v.clone(), w.clone()
+
+    seed_u, ue, ve, we = run(False)
+    _, ug, vg, wg = run(True)
+
+    evolved = (ue - seed_u).abs().max().item()
+    assert evolved > 1e-3, f"3-D fields did not evolve ({evolved:.3e}) — bad harness"
+
+    for a, b, name in ((ue, ug, "u"), (ve, vg, "v"), (we, wg, "w")):
+        d = (a - b).abs().max().item()
+        assert d == 0.0, f"graph vs eager {name} mismatch: {d:.3e} (dropped launches?)"

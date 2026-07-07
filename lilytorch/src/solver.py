@@ -1066,15 +1066,19 @@ class FluidSolver(PlottingMixin):
             _rhs = div / c_scalar
             del div
             p = self.poisson_solverFFT.solve(_rhs)
+            # In-place corrections keep u/v/w_vel (== self.u0/v0/w0)
+            # pointer-stable across steps -> the data_ptr-keyed CUDA-graph
+            # caches replay instead of leaking a fresh graph per allocator
+            # reshuffle.  See the multigrid branch note below.
             if self.ndim == 2:
                 (p_x, p_y) = self.gradient(p)
-                u = u - c_scalar * p_x
-                v = v - c_scalar * p_y
+                u.add_(p_x, alpha=-float(c_scalar))
+                v.add_(p_y, alpha=-float(c_scalar))
             else:
                 (p_x, p_y, p_z) = self.gradient(p)
-                u     = u - c_scalar * p_x
-                v     = v - c_scalar * p_y
-                w_vel = w_vel - c_scalar * p_z
+                u.add_(p_x, alpha=-float(c_scalar))
+                v.add_(p_y, alpha=-float(c_scalar))
+                w_vel.add_(p_z, alpha=-float(c_scalar))
         else:
             # ---- Multigrid / MGCG solver (variable-coefficient Poisson) ----
             # T3a: compute interior-only divergence directly — no full-grid
@@ -1135,9 +1139,16 @@ class FluidSolver(PlottingMixin):
                 )
                 del div                   # T3a: free interior RHS before correction
                 # ====== projection step ======
+                # In-place correction (u/v are self.u0/self.v0): keeps the
+                # velocity buffers pointer-stable across steps so the
+                # data_ptr-keyed CUDA-graph caches (fused SL advect, apply_bcs)
+                # replay one graph instead of capturing+pinning a fresh graph
+                # every allocator reshuffle (empty_cache_every) -> steady GPU
+                # growth -> wp_cuda_graph_create_exec OOM.  Mirrors the 3-D
+                # face-grid path's addcmul_ correction below.
                 (p_x, p_y) = self.gradient(p)
-                u          = u - ch * p_x
-                v          = v - cv * p_y
+                u.addcmul_(ch, p_x, value=-1.0)
+                v.addcmul_(cv, p_y, value=-1.0)
             else:
                 if cw is None:
                     cw = coeff * self.mu0_all_w
@@ -1189,9 +1200,9 @@ class FluidSolver(PlottingMixin):
                     # gradient() call. The padded coefficients are full-grid
                     # so the savings vs the inline path are marginal.
                     (p_x, p_y, p_z) = self.gradient(p)
-                    u     = u - ch * p_x
-                    v     = v - cv * p_y
-                    w_vel = w_vel - cw * p_z
+                    u.addcmul_(ch, p_x, value=-1.0)
+                    v.addcmul_(cv, p_y, value=-1.0)
+                    w_vel.addcmul_(cw, p_z, value=-1.0)
                     del p_x, p_y, p_z
                 if bool(int(os.environ.get('LILYTORCH_MEM_DBG', '0'))):
                     torch.cuda.synchronize()

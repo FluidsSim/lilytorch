@@ -22,7 +22,6 @@ WaterLily.jl.
 """
 from __future__ import annotations
 
-import os
 import torch
 # Warp primitives are imported from the leaf kernel modules (``interpolation``,
 # ``diffusion``); this module must never import ``solver``, ``two_phase`` or
@@ -280,6 +279,8 @@ class AdvDiffSolver:
 
         self._interps     = []
         self._flat_coords = []
+        self._sl_axes_1d  = []   # per-comp tuple of 1-D axis tensors
+        self._sl_out      = None # persistent fused-kernel output buffers
 
         for i in range(ndim):
             # component-i lives on a grid staggered in dim i only
@@ -291,6 +292,7 @@ class AdvDiffSolver:
                 fill_value=None, method="quadratic",
             )
             self._interps.append(interp)
+            self._sl_axes_1d.append(tuple(g.contiguous() for g in grid))
 
             grids = torch.meshgrid(*grid, indexing="ij")
             self._flat_coords.append(
@@ -340,7 +342,7 @@ class AdvDiffSolver:
         inner   = _inner(ndim)
 
         scheme_id = _CUDA_SCHEME_IDS[self._scheme_name]
-        flux_add  = self._flux_runner   # [SPIKE] eager fn or CUDA-graph runner
+        flux_add  = self._flux_runner   # CUDA-graph-cached runner (eager on CPU)
         if self._scheme_name == 'abdquickest':
             # ABDQUICKEST's TVD limiter C must equal the advective Courant
             # number |u|·dt/h — one host sync (.amax()), once per step.
@@ -381,36 +383,71 @@ class AdvDiffSolver:
         (vs. 1st-order for the original Euler back-trace) with the same number
         of field evaluations per component as one full Euler step needs
         (ndim interpolations at current position + ndim at midpoint).
+
+        The fused :func:`sl_advect_2d_kernel` / :func:`sl_advect_3d_kernel`
+        Warp kernels are the sole production path (CPU + CUDA), one launch
+        per solve.  The retired pure-Python interpolator reference is kept
+        as a standalone oracle in ``tests/test_advection.py``.
         """
-        ndim  = self.ndim
-        shape = tuple(self.n)
+        ndim = self.ndim
+        if ndim not in (2, 3):
+            raise ValueError(f"SL solve supports 2-D or 3-D, got {ndim}-D")
+        if len(vel) != ndim:
+            raise ValueError(
+                f"SL solve expects {ndim} velocity components, got {len(vel)}")
+        return self._solve_semi_lagrangian_warp(*vel, nu_t=nu_t)
 
-        # update interpolator data
-        for i in range(ndim):
-            self._interps[i].F = vel[i]
+    def _solve_semi_lagrangian_warp(self, *vel, nu_t=None):
+        """Fused semi-Lagrangian solve (2-D or 3-D) — one Warp launch
+        (or CUDA-graph replay) does the full RK2 back-trace for all
+        staggered components, writing into persistent output buffers
+        (pointer-stable ⇒ graph-capturable).  The explicit-diffusion
+        pass stays separate (cheap)."""
+        ndim = self.ndim
+        out = self._sl_out
+        dev = vel[0].device
+        dtype = vel[0].dtype
 
-        vel_new = list(vel)
-        half_dt = 0.5 * self.dt
-        for i in range(ndim):
-            # Stage 1: velocity at current grid position → midpoint departure
-            vel_at_i = [
-                self._interps[d](*self._flat_coords[i]).clone()
-                for d in range(ndim)
-            ]
-            midpoint = [
-                self._flat_coords[i][d] - half_dt * vel_at_i[d]
-                for d in range(ndim)
-            ]
-            # Stage 2: velocity at midpoint → full-step departure
-            vel_at_mid = [
-                self._interps[d](*midpoint).clone()
-                for d in range(ndim)
-            ]
-            departure = [
-                self._flat_coords[i][d] - self.dt * vel_at_mid[d]
-                for d in range(ndim)
-            ]
-            vel_new[i] = self._interps[i](*departure).reshape(shape).clone()
+        # Build / rebuild output buffers if the signature changed.
+        if (out is None
+                or len(out) != ndim
+                or out[0].shape != vel[0].shape
+                or out[0].dtype != dtype
+                or out[0].device != dev):
+            self._sl_out = out = tuple(torch.empty_like(v) for v in vel)
+            # Move grid axes to the right device/dtype once.
+            flat_axes = []
+            for comp_axes in self._sl_axes_1d:
+                for g in comp_axes:
+                    flat_axes.append(g.to(device=dev, dtype=dtype).contiguous())
+            self._sl_axes_dev = tuple(flat_axes)
+
+        if ndim == 2:
+            u, v = vel
+            out_u, out_v = out
+            gxu, gyu, gxv, gyv = self._sl_axes_dev
+            iu, iv = self._interps
+            self._sl_runner(
+                u, v, out_u, out_v, gxu, gyu, gxv, gyv,
+                iu._bx0, iu._by0, iu._inv_dx, iu._inv_dy,
+                iv._bx0, iv._by0, iv._inv_dx, iv._inv_dy,
+                self.dt,
+            )
+            vel_new = [out_u, out_v]
+        else:  # ndim == 3
+            u, v, w = vel
+            out_u, out_v, out_w = out
+            (gxu, gyu, gzu, gxv, gyv, gzv, gxw, gyw, gzw) = self._sl_axes_dev
+            iu, iv, iw = self._interps
+            self._sl_runner_3d(
+                u, v, w, out_u, out_v, out_w,
+                gxu, gyu, gzu, gxv, gyv, gzv, gxw, gyw, gzw,
+                iu._bx0, iu._by0, iu._bz0, iu._inv_dx, iu._inv_dy, iu._inv_dz,
+                iv._bx0, iv._by0, iv._bz0, iv._inv_dx, iv._inv_dy, iv._inv_dz,
+                iw._bx0, iw._by0, iw._bz0, iw._inv_dx, iw._inv_dy, iw._inv_dz,
+                self.dt,
+            )
+            vel_new = [out_u, out_v, out_w]
 
         # explicit diffusion
         inner = _inner(ndim)
@@ -419,8 +456,27 @@ class AdvDiffSolver:
                 vel_new[i], self.dt, nu=self.nu, nu_t=nu_t,
                 inv_dh2=self._inv_dh2, dh=self.dh,
             )
-
         return tuple(vel_new)
+
+    @property
+    def _sl_runner(self):
+        """Lazy fused-SL launch dispatcher (2-D): CUDA-graph
+        :class:`SLAdvect2DGraphRunner`.  Cached per-solver."""
+        r = getattr(self, "_sl_graph_runner", None)
+        if r is None:
+            r = SLAdvect2DGraphRunner()
+            self._sl_graph_runner = r
+        return r
+
+    @property
+    def _sl_runner_3d(self):
+        """Lazy fused-SL launch dispatcher (3-D): CUDA-graph
+        :class:`SLAdvect3DGraphRunner`.  Cached per-solver."""
+        r = getattr(self, "_sl_graph_runner_3d", None)
+        if r is None:
+            r = SLAdvect3DGraphRunner()
+            self._sl_graph_runner_3d = r
+        return r
 
     # =================================================================
     # Boundary conditions  (dimension-agnostic)
@@ -750,18 +806,11 @@ class AdvDiffSolver:
 
     @property
     def _flux_runner(self):
-        """[SPIKE] Lazy flux-launch dispatcher.
-
-        Returns the CUDA-graph :class:`FluxAddGraphRunner` unless disabled via
-        ``LILY_FLUX_GRAPH=0`` (benchmark/eager escape hatch), in which case it
-        returns the plain eager :func:`advect_flux_add_warp`.  Cached per-solver.
-        """
+        """Lazy flux-launch dispatcher: CUDA-graph
+        :class:`FluxAddGraphRunner`.  Cached per-solver."""
         r = getattr(self, "_flux_graph_runner", None)
         if r is None:
-            if os.environ.get("LILY_FLUX_GRAPH", "1") == "0":
-                r = advect_flux_add_warp
-            else:
-                r = FluxAddGraphRunner()
+            r = FluxAddGraphRunner()
             self._flux_graph_runner = r
         return r
 
@@ -1155,63 +1204,402 @@ def advect_flux_add_warp(fv_t, p_t, rhs_t, dt_dh, C_courant, scheme_id, face_dim
 advect_flux_add = advect_flux_add_warp
 
 
-class FluxAddGraphRunner:
-    """[SPIKE] CUDA-graph-cached ``advect_flux_add`` — per-launch analogue of
-    :class:`ApplyBcs3DGraphRunner`.
+# ═════════════════════════════════════════════════════════════════════════════
+#  Generic CUDA-graph-cached Warp launch runner
+#
+#  Replaces the former per-kernel graph-runner classes (FluxAddGraphRunner,
+#  SLAdvect2DGraphRunner, SLAdvect3DGraphRunner) which duplicated the same
+#  ~25-line pattern.  The concrete runners are now thin factory functions
+#  that bind their eager_fn, key-builder, and optional skip/pre-check
+#  callbacks.
+# ═════════════════════════════════════════════════════════════════════════════
 
-    The eager wrapper's per-call host floor (Warp-array wrapping + a
-    ~30-37 µs ``wp.launch`` submission) is replaced by a single
-    ``wp.capture_launch`` once a stable
-    ``(fv, p, rhs, dt_dh, C_courant, scheme_id, face_dim, dtype)`` signature is
-    seen twice.  ``rhs += flux`` is **not idempotent**, so — unlike the BC
-    runner — there is NO executing warm-up before capture; the kernel is already
-    JIT-compiled by the first-sighting eager launch, and Warp graph capture only
-    *records* (does not execute) the launch, so no double-accumulation occurs.
+class _WarpGraphRunner:
+    """Generic CUDA-graph-cached Warp launch — captures on the second
+    sighting of a stable pointer+scalar signature, replays thereafter.
 
-    Landmines respected:
-      * ``abdquickest`` (scheme_id 1) recomputes ``C_courant`` every step via a
-        device sync, so a baked graph would replay a stale Courant number → it is
-        forced onto the eager path.
-      * ``dt_dh`` and dtype are part of the key, so an adaptive-dt / dtype change
-        re-captures instead of replaying stale scalars.
-      * ``fv`` is a fresh allocation each step (ping-pongs across ~2 allocator
-        blocks); each block yields its own stable key, so both get captured and
-        replay correctly (the key match guarantees the baked pointer == the
-        current fv's address).
-    CPU delegates to :func:`advect_flux_add_warp` (bit-identical)."""
+    Parameters
+    ----------
+    eager_fn : callable
+        The eager launch function (called as ``eager_fn(*args)``).
+    build_key : callable
+        ``(*args) -> hashable key``.  Typically data pointers + float
+        scalars + dtype string.
+    skip_graph : callable, optional
+        ``(*args) -> bool`` — if True, always use the eager path
+        (e.g. ABDQUICKEST's live Courant number).
+    pre_check : callable, optional
+        ``(*args) -> bool`` — if True, return early without launching
+        (e.g. zero-sized grid guard).
 
-    def __init__(self):
-        self._graphs = {}   # key -> graph
-        self._seen = {}     # key -> sighting count
+    Counters ``replays``/``captures``/``eager`` mirror the ApplyBcs runners: a
+    steady coupled run must show ``replays`` growing ~1/call once a stable
+    signature is captured (used by the profiler and the graph-replay tests).
+    """
 
-    def __call__(self, fv, p, rhs, dt_dh, C_courant, scheme_id, face_dim):
-        # CPU or the live-Courant scheme → eager (never graph-capture).
-        if p.device.type != "cuda" or int(scheme_id) == 1:
-            return advect_flux_add_warp(fv, p, rhs, dt_dh, C_courant,
-                                        scheme_id, face_dim)
-        Ni_fd = p.size(face_dim) - 2
-        if Ni_fd <= 0:
+    __slots__ = ("_eager_fn", "_build_key", "_skip_graph", "_pre_check",
+                 "_graphs", "_seen", "replays", "captures", "eager")
+
+    def __init__(self, eager_fn, build_key, skip_graph=None, pre_check=None):
+        self._eager_fn = eager_fn
+        self._build_key = build_key
+        self._skip_graph = skip_graph
+        self._pre_check = pre_check
+        self._graphs: dict = {}
+        self._seen: dict = {}
+        self.replays = 0
+        self.captures = 0
+        self.eager = 0
+
+    def __call__(self, *args):
+        if self._pre_check is not None and self._pre_check(*args):
             return
-        key = (fv.data_ptr(), p.data_ptr(), rhs.data_ptr(),
-               float(dt_dh), float(C_courant), int(scheme_id), int(face_dim),
-               str(p.dtype))
+        first = args[0]
+        if first.device.type != "cuda":
+            self.eager += 1
+            return self._eager_fn(*args)
+        if self._skip_graph is not None and self._skip_graph(*args):
+            self.eager += 1
+            return self._eager_fn(*args)
+        key = self._build_key(*args)
         graph = self._graphs.get(key)
         if graph is None:
             n = self._seen.get(key, 0) + 1
             self._seen[key] = n
             if n < 2:        # first sighting → eager (might be a one-shot ptr)
-                return advect_flux_add_warp(fv, p, rhs, dt_dh, C_courant,
-                                            scheme_id, face_dim)
-            # 2nd sighting: kernel is already compiled (1st-sighting launch) and
-            # _flat_cached views are warm, so capture allocates nothing.  No
-            # executing warm-up — that would add flux to rhs twice.
-            wdev = _wp_device(p)
-            with wp.ScopedCapture(device=wdev) as cap:
-                advect_flux_add_warp(fv, p, rhs, dt_dh, C_courant,
-                                     scheme_id, face_dim)
+                self.eager += 1
+                return self._eager_fn(*args)
+            with wp.ScopedCapture(device=_wp_device(first)) as cap:
+                self._eager_fn(*args)
             graph = cap.graph
             self._graphs[key] = graph
+            self.captures += 1
+        self.replays += 1
         wp.capture_launch(graph)
+
+
+# ── FluxAddGraphRunner factory ──────────────────────────────────────────────
+
+def _flux_skip_graph(fv, p, rhs, dt_dh, C_courant, scheme_id, face_dim):
+    # ABDQUICKEST recomputes C_courant every step → graph would replay stale.
+    return int(scheme_id) == 1
+
+
+def _flux_pre_check(fv, p, rhs, dt_dh, C_courant, scheme_id, face_dim):
+    return p.size(face_dim) - 2 <= 0
+
+
+def _flux_key(fv, p, rhs, dt_dh, C_courant, scheme_id, face_dim):
+    return (fv.data_ptr(), p.data_ptr(), rhs.data_ptr(),
+            float(dt_dh), float(C_courant), int(scheme_id), int(face_dim),
+            str(p.dtype))
+
+
+def FluxAddGraphRunner():
+    """Factory for a CUDA-graph-cached ``advect_flux_add`` runner.
+
+    Kept as a callable (was a class) for backward compatibility — callers
+    do ``FluxAddGraphRunner()`` to get a :class:`_WarpGraphRunner` instance.
+    """
+    return _WarpGraphRunner(
+        advect_flux_add_warp, _flux_key,
+        skip_graph=_flux_skip_graph, pre_check=_flux_pre_check,
+    )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  Fused semi-Lagrangian advection (2-D) — RK2 back-trace in registers
+#
+#  Replaces the 10 eager RegularGridInterpolator calls of the python SL path
+#  (5 biquadratic samples per velocity component: u,v at the node, u,v at the
+#  midpoint, the advected component at the departure point) with ONE Warp
+#  launch over both staggered components.  Per-sample math is the shared
+#  ``biquadratic_sample_off_2d`` @wp.func — the exact routine the python
+#  interpolator kernel calls — so clamping/border-fallback semantics are
+#  identical by construction; only the midpoint/departure arithmetic moves
+#  from eager torch into registers.
+#
+#  Node positions are READ from the component's 1-D axis tensors (not
+#  recomputed as bx0 + i*dx) so the query points match the python path's
+#  ``_flat_coords`` meshgrid bit-for-bit.  Grid scalars (origin, 1/dh) are
+#  passed per component because the staggered axes yield subtly different
+#  float values for the same nominal spacing.
+# ═════════════════════════════════════════════════════════════════════════════
+
+from lilytorch.src.interpolation import (
+    biquadratic_sample_off_2d,
+    triquadratic_sample_off,
+)
+
+
+@wp.kernel
+def sl_advect_2d_kernel(
+    u: wp.array(dtype=Any),      # flat (Mx*My) staggered u field, C-contiguous
+    v: wp.array(dtype=Any),      # flat (Mx*My) staggered v field
+    gxu: wp.array(dtype=Any), gyu: wp.array(dtype=Any),   # u-grid axes
+    gxv: wp.array(dtype=Any), gyv: wp.array(dtype=Any),   # v-grid axes
+    Mx: int, My: int,
+    u_bx0: Any, u_by0: Any, u_idx: Any, u_idy: Any,       # u-grid origin, 1/dh
+    v_bx0: Any, v_by0: Any, v_idx: Any, v_idy: Any,       # v-grid origin, 1/dh
+    dt: Any,
+    out_u: wp.array(dtype=Any),
+    out_v: wp.array(dtype=Any),
+):
+    tid = wp.tid()
+    total = Mx * My
+    if tid >= 2 * total:
+        return
+    comp = tid / total           # 0 → u node, 1 → v node
+    lin = tid - comp * total
+    ixq = lin / My
+    iyq = lin - ixq * My
+
+    X = gxu[ixq]
+    Y = gyu[iyq]
+    if comp == 1:
+        X = gxv[ixq]
+        Y = gyv[iyq]
+
+    half = type(dt)(0.5)
+
+    # Stage 1: velocity at the node → midpoint x - 0.5*dt*u(x).
+    u1 = biquadratic_sample_off_2d(u, 0, Mx, My, u_bx0, u_by0,
+                                   u_idx, u_idy, X, Y)
+    v1 = biquadratic_sample_off_2d(v, 0, Mx, My, v_bx0, v_by0,
+                                   v_idx, v_idy, X, Y)
+    xm = X - half * dt * u1
+    ym = Y - half * dt * v1
+
+    # Stage 2: velocity at the midpoint → departure x - dt*u(x_mid).
+    u2 = biquadratic_sample_off_2d(u, 0, Mx, My, u_bx0, u_by0,
+                                   u_idx, u_idy, xm, ym)
+    v2 = biquadratic_sample_off_2d(v, 0, Mx, My, v_bx0, v_by0,
+                                   v_idx, v_idy, xm, ym)
+    xd = X - dt * u2
+    yd = Y - dt * v2
+
+    # Sample the advected component at the departure point.
+    if comp == 0:
+        out_u[lin] = biquadratic_sample_off_2d(u, 0, Mx, My, u_bx0, u_by0,
+                                               u_idx, u_idy, xd, yd)
+    else:
+        out_v[lin] = biquadratic_sample_off_2d(v, 0, Mx, My, v_bx0, v_by0,
+                                               v_idx, v_idy, xd, yd)
+
+
+for _dt in (wp.float32, wp.float64):
+    _A = wp.array(dtype=_dt)
+    wp.overload(sl_advect_2d_kernel, {
+        "u": _A, "v": _A,
+        "gxu": _A, "gyu": _A, "gxv": _A, "gyv": _A,
+        "u_bx0": _dt, "u_by0": _dt, "u_idx": _dt, "u_idy": _dt,
+        "v_bx0": _dt, "v_by0": _dt, "v_idx": _dt, "v_idy": _dt,
+        "dt": _dt,
+        "out_u": _A, "out_v": _A,
+    })
+
+
+def sl_advect_2d_warp(u_t, v_t, out_u_t, out_v_t, gxu, gyu, gxv, gyv,
+                      u_bx0, u_by0, u_idx, u_idy,
+                      v_bx0, v_by0, v_idx, v_idy, dt):
+    """Eager launch of :func:`sl_advect_2d_kernel` (CPU + CUDA).
+
+    Writes the advected u into ``out_u_t`` and v into ``out_v_t`` (pure
+    gather — inputs are never mutated, so the launch is idempotent)."""
+    Mx, My = u_t.shape
+    wpf = _wp_dtype(u_t)
+    wp.launch(
+        sl_advect_2d_kernel,
+        dim=2 * int(Mx) * int(My),
+        inputs=[
+            _flat_cached(u_t), _flat_cached(v_t),
+            _flat_cached(gxu), _flat_cached(gyu),
+            _flat_cached(gxv), _flat_cached(gyv),
+            int(Mx), int(My),
+            wpf(u_bx0), wpf(u_by0), wpf(u_idx), wpf(u_idy),
+            wpf(v_bx0), wpf(v_by0), wpf(v_idx), wpf(v_idy),
+            wpf(float(dt)),
+            _flat_cached(out_u_t), _flat_cached(out_v_t),
+        ],
+        device=_wp_device(u_t),
+    )
+
+
+def _sl2d_key(u, v, out_u, out_v, gxu, gyu, gxv, gyv,
+              u_bx0, u_by0, u_idx, u_idy,
+              v_bx0, v_by0, v_idx, v_idy, dt):
+    return (u.data_ptr(), v.data_ptr(), out_u.data_ptr(), out_v.data_ptr(),
+            gxu.data_ptr(), gyu.data_ptr(), gxv.data_ptr(), gyv.data_ptr(),
+            float(u_bx0), float(u_by0), float(u_idx), float(u_idy),
+            float(v_bx0), float(v_by0), float(v_idx), float(v_idy),
+            float(dt), tuple(u.shape), str(u.dtype))
+
+
+def SLAdvect2DGraphRunner():
+    """Factory for a CUDA-graph-cached ``sl_advect_2d`` runner.
+
+    Kept as a callable (was a class) for backward compatibility.
+    """
+    return _WarpGraphRunner(sl_advect_2d_warp, _sl2d_key)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  Fused semi-Lagrangian advection (3-D) — RK2 back-trace in registers
+#
+#  Same fused RK2 pattern as the 2-D kernel, but over three staggered
+#  components (u,v,w) using ``triquadratic_sample_off`` — the exact
+#  @wp.func the python interpolator kernel calls — so clamping and
+#  border-fallback semantics are identical by construction.
+#
+#  One Warp launch replaces the 21 eager RegularGridInterpolator calls
+#  of the python SL path (7 triquadratic samples per component).
+# ═════════════════════════════════════════════════════════════════════════════
+
+@wp.kernel
+def sl_advect_3d_kernel(
+    u: wp.array(dtype=Any), v: wp.array(dtype=Any), w: wp.array(dtype=Any),
+    gxu: wp.array(dtype=Any), gyu: wp.array(dtype=Any), gzu: wp.array(dtype=Any),
+    gxv: wp.array(dtype=Any), gyv: wp.array(dtype=Any), gzv: wp.array(dtype=Any),
+    gxw: wp.array(dtype=Any), gyw: wp.array(dtype=Any), gzw: wp.array(dtype=Any),
+    Mx: int, My: int, Mz: int,
+    u_bx0: Any, u_by0: Any, u_bz0: Any, u_idx: Any, u_idy: Any, u_idz: Any,
+    v_bx0: Any, v_by0: Any, v_bz0: Any, v_idx: Any, v_idy: Any, v_idz: Any,
+    w_bx0: Any, w_by0: Any, w_bz0: Any, w_idx: Any, w_idy: Any, w_idz: Any,
+    dt: Any,
+    out_u: wp.array(dtype=Any), out_v: wp.array(dtype=Any), out_w: wp.array(dtype=Any),
+):
+    tid = wp.tid()
+    total = Mx * My * Mz
+    if tid >= 3 * total:
+        return
+    comp = tid / total           # 0 → u node, 1 → v node, 2 → w node
+    lin = tid - comp * total
+    ixy = lin / Mz
+    izq = lin - ixy * Mz
+    ixq = ixy / My
+    iyq = ixy - ixq * My
+
+    X = gxu[ixq]
+    Y = gyu[iyq]
+    Z = gzu[izq]
+    if comp == 1:
+        X = gxv[ixq]
+        Y = gyv[iyq]
+        Z = gzv[izq]
+    elif comp == 2:
+        X = gxw[ixq]
+        Y = gyw[iyq]
+        Z = gzw[izq]
+
+    half = type(dt)(0.5)
+
+    # Stage 1: velocity at the node → midpoint x - 0.5*dt*u(x).
+    u1 = triquadratic_sample_off(u, 0, Mx, My, Mz, u_bx0, u_by0, u_bz0,
+                                 u_idx, u_idy, u_idz, X, Y, Z)
+    v1 = triquadratic_sample_off(v, 0, Mx, My, Mz, v_bx0, v_by0, v_bz0,
+                                 v_idx, v_idy, v_idz, X, Y, Z)
+    w1 = triquadratic_sample_off(w, 0, Mx, My, Mz, w_bx0, w_by0, w_bz0,
+                                 w_idx, w_idy, w_idz, X, Y, Z)
+    xm = X - half * dt * u1
+    ym = Y - half * dt * v1
+    zm = Z - half * dt * w1
+
+    # Stage 2: velocity at the midpoint → departure x - dt*u(x_mid).
+    u2 = triquadratic_sample_off(u, 0, Mx, My, Mz, u_bx0, u_by0, u_bz0,
+                                 u_idx, u_idy, u_idz, xm, ym, zm)
+    v2 = triquadratic_sample_off(v, 0, Mx, My, Mz, v_bx0, v_by0, v_bz0,
+                                 v_idx, v_idy, v_idz, xm, ym, zm)
+    w2 = triquadratic_sample_off(w, 0, Mx, My, Mz, w_bx0, w_by0, w_bz0,
+                                 w_idx, w_idy, w_idz, xm, ym, zm)
+    xd = X - dt * u2
+    yd = Y - dt * v2
+    zd = Z - dt * w2
+
+    # Sample the advected component at the departure point.
+    if comp == 0:
+        out_u[lin] = triquadratic_sample_off(u, 0, Mx, My, Mz, u_bx0, u_by0, u_bz0,
+                                             u_idx, u_idy, u_idz, xd, yd, zd)
+    elif comp == 1:
+        out_v[lin] = triquadratic_sample_off(v, 0, Mx, My, Mz, v_bx0, v_by0, v_bz0,
+                                             v_idx, v_idy, v_idz, xd, yd, zd)
+    else:
+        out_w[lin] = triquadratic_sample_off(w, 0, Mx, My, Mz, w_bx0, w_by0, w_bz0,
+                                             w_idx, w_idy, w_idz, xd, yd, zd)
+
+
+for _dt in (wp.float32, wp.float64):
+    _A = wp.array(dtype=_dt)
+    wp.overload(sl_advect_3d_kernel, {
+        "u": _A, "v": _A, "w": _A,
+        "gxu": _A, "gyu": _A, "gzu": _A,
+        "gxv": _A, "gyv": _A, "gzv": _A,
+        "gxw": _A, "gyw": _A, "gzw": _A,
+        "u_bx0": _dt, "u_by0": _dt, "u_bz0": _dt,
+        "u_idx": _dt, "u_idy": _dt, "u_idz": _dt,
+        "v_bx0": _dt, "v_by0": _dt, "v_bz0": _dt,
+        "v_idx": _dt, "v_idy": _dt, "v_idz": _dt,
+        "w_bx0": _dt, "w_by0": _dt, "w_bz0": _dt,
+        "w_idx": _dt, "w_idy": _dt, "w_idz": _dt,
+        "dt": _dt,
+        "out_u": _A, "out_v": _A, "out_w": _A,
+    })
+
+
+def sl_advect_3d_warp(u_t, v_t, w_t, out_u_t, out_v_t, out_w_t,
+                      gxu, gyu, gzu, gxv, gyv, gzv, gxw, gyw, gzw,
+                      u_bx0, u_by0, u_bz0, u_idx, u_idy, u_idz,
+                      v_bx0, v_by0, v_bz0, v_idx, v_idy, v_idz,
+                      w_bx0, w_by0, w_bz0, w_idx, w_idy, w_idz, dt):
+    """Eager launch of :func:`sl_advect_3d_kernel` (CPU + CUDA).
+
+    Writes the advected u,v,w into ``out_u_t``, ``out_v_t``, ``out_w_t``
+    (pure gather — inputs are never mutated, so the launch is idempotent)."""
+    Mx, My, Mz = u_t.shape
+    wpf = _wp_dtype(u_t)
+    wp.launch(
+        sl_advect_3d_kernel,
+        dim=3 * int(Mx) * int(My) * int(Mz),
+        inputs=[
+            _flat_cached(u_t), _flat_cached(v_t), _flat_cached(w_t),
+            _flat_cached(gxu), _flat_cached(gyu), _flat_cached(gzu),
+            _flat_cached(gxv), _flat_cached(gyv), _flat_cached(gzv),
+            _flat_cached(gxw), _flat_cached(gyw), _flat_cached(gzw),
+            int(Mx), int(My), int(Mz),
+            wpf(u_bx0), wpf(u_by0), wpf(u_bz0), wpf(u_idx), wpf(u_idy), wpf(u_idz),
+            wpf(v_bx0), wpf(v_by0), wpf(v_bz0), wpf(v_idx), wpf(v_idy), wpf(v_idz),
+            wpf(w_bx0), wpf(w_by0), wpf(w_bz0), wpf(w_idx), wpf(w_idy), wpf(w_idz),
+            wpf(float(dt)),
+            _flat_cached(out_u_t), _flat_cached(out_v_t), _flat_cached(out_w_t),
+        ],
+        device=_wp_device(u_t),
+    )
+
+
+def _sl3d_key(u, v, w, out_u, out_v, out_w,
+              gxu, gyu, gzu, gxv, gyv, gzv, gxw, gyw, gzw,
+              u_bx0, u_by0, u_bz0, u_idx, u_idy, u_idz,
+              v_bx0, v_by0, v_bz0, v_idx, v_idy, v_idz,
+              w_bx0, w_by0, w_bz0, w_idx, w_idy, w_idz, dt):
+    return (u.data_ptr(), v.data_ptr(), w.data_ptr(),
+            out_u.data_ptr(), out_v.data_ptr(), out_w.data_ptr(),
+            gxu.data_ptr(), gyu.data_ptr(), gzu.data_ptr(),
+            gxv.data_ptr(), gyv.data_ptr(), gzv.data_ptr(),
+            gxw.data_ptr(), gyw.data_ptr(), gzw.data_ptr(),
+            float(u_bx0), float(u_by0), float(u_bz0),
+            float(u_idx), float(u_idy), float(u_idz),
+            float(v_bx0), float(v_by0), float(v_bz0),
+            float(v_idx), float(v_idy), float(v_idz),
+            float(w_bx0), float(w_by0), float(w_bz0),
+            float(w_idx), float(w_idy), float(w_idz),
+            float(dt), tuple(u.shape), str(u.dtype))
+
+
+def SLAdvect3DGraphRunner():
+    """Factory for a CUDA-graph-cached ``sl_advect_3d`` runner.
+
+    Kept as a callable (was a class) for backward compatibility.
+    """
+    return _WarpGraphRunner(sl_advect_3d_warp, _sl3d_key)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1382,11 +1770,18 @@ class ApplyBcs2DGraphRunner:
     Churn guard: a pointer signature is only captured on its **second** sighting,
     so one-shot tensors (e.g. fresh projection outputs) stay eager and never pay
     the (expensive) capture cost.  CPU and the unstable first-sighting path
-    delegate to :func:`apply_bcs_2d_warp` (bit-identical)."""
+    delegate to :func:`apply_bcs_2d_warp` (bit-identical).
+
+    Counters (``replays``/``captures``/``eager``) are exposed for the profiler
+    and tests: after warm-up a steady coupled run must show ``replays`` growing
+    ~1/call and ``captures`` frozen at the number of stable signatures seen."""
 
     def __init__(self):
         self._graphs = {}   # key -> (graph, cached wp arrays)
         self._seen = {}     # key -> sighting count
+        self.replays = 0    # wp.capture_launch replays (graph fast path)
+        self.captures = 0   # graphs captured (one per stable signature)
+        self.eager = 0      # eager fallbacks (CPU / first sighting / churn)
 
     def __call__(self, u, v, shapes, neu_desc, dir_desc, dir_val,
                  ref_desc, ref_val, max_line_dim):
@@ -1396,16 +1791,22 @@ class ApplyBcs2DGraphRunner:
         if N_neu + N_dir + N_ref == 0 or max_line_dim <= 0:
             return
         if u.device.type != "cuda":     # CPU: eager (no graph capture)
+            self.eager += 1
             return apply_bcs_2d_warp(u, v, shapes, neu_desc, dir_desc, dir_val,
                                      ref_desc, ref_val, max_line_dim)
+        # The op counts (N_neu/N_dir/N_ref) are baked into the captured graph's
+        # launch dims + kernel scalars, so they MUST be in the key: a pool-reused
+        # descriptor pointer with a different op count would otherwise replay a
+        # stale graph.
         key = (u.data_ptr(), v.data_ptr(), shapes.data_ptr(),
                neu_desc.data_ptr(), dir_desc.data_ptr(), ref_desc.data_ptr(),
-               int(max_line_dim), str(u.dtype))
+               N_neu, N_dir, N_ref, int(max_line_dim), str(u.dtype))
         ent = self._graphs.get(key)
         if ent is None:
             n = self._seen.get(key, 0) + 1
             self._seen[key] = n
             if n < 2:        # first sighting → eager (might be a one-shot ptr)
+                self.eager += 1
                 return apply_bcs_2d_warp(u, v, shapes, neu_desc, dir_desc,
                                          dir_val, ref_desc, ref_val, max_line_dim)
             wdev = "cuda:0"
@@ -1431,6 +1832,8 @@ class ApplyBcs2DGraphRunner:
                 _launch()
             ent = (cap.graph, (uw, vw, shw, neu, dirw, refw, dvw, rvw))
             self._graphs[key] = ent
+            self.captures += 1
+        self.replays += 1
         wp.capture_launch(ent[0])
 
 
@@ -1561,11 +1964,17 @@ class ApplyBcs3DGraphRunner:
     :class:`ApplyBcs2DGraphRunner`.  In-place ghost
     writes into the persistent u/v/w fields (no extra memory); captured on the
     second sighting of a stable (u, v, w, descriptor, face-dims) signature, eager
-    otherwise.  CPU delegates to :func:`apply_bcs_3d_warp`."""
+    otherwise.  CPU delegates to :func:`apply_bcs_3d_warp`.
+
+    Exposes the same ``replays``/``captures``/``eager`` counters as
+    :class:`ApplyBcs2DGraphRunner`."""
 
     def __init__(self):
         self._graphs = {}
         self._seen = {}
+        self.replays = 0
+        self.captures = 0
+        self.eager = 0
 
     def __call__(self, u, v, w, shapes, neu_desc, dir_desc, dir_val,
                  ref_desc, ref_val, max_dim0, max_dim1=None):
@@ -1577,16 +1986,20 @@ class ApplyBcs3DGraphRunner:
         if N_neu + N_dir + N_ref == 0 or M0 <= 0 or M1 <= 0:
             return
         if u.device.type != "cuda":
+            self.eager += 1
             return apply_bcs_3d_warp(u, v, w, shapes, neu_desc, dir_desc, dir_val,
                                      ref_desc, ref_val, M0, M1)
+        # Op counts are baked into the captured graph → part of the key (see the
+        # 2-D runner's note on stale-graph replay for a reused descriptor ptr).
         key = (u.data_ptr(), v.data_ptr(), w.data_ptr(), shapes.data_ptr(),
                neu_desc.data_ptr(), dir_desc.data_ptr(), ref_desc.data_ptr(),
-               M0, M1, str(u.dtype))
+               N_neu, N_dir, N_ref, M0, M1, str(u.dtype))
         ent = self._graphs.get(key)
         if ent is None:
             n = self._seen.get(key, 0) + 1
             self._seen[key] = n
             if n < 2:
+                self.eager += 1
                 return apply_bcs_3d_warp(u, v, w, shapes, neu_desc, dir_desc,
                                          dir_val, ref_desc, ref_val, M0, M1)
             wdev = "cuda:0"
@@ -1612,4 +2025,6 @@ class ApplyBcs3DGraphRunner:
                 _launch()
             ent = (cap.graph, (uw, vw, ww, shw, neu, dirw, refw, dvw, rvw))
             self._graphs[key] = ent
+            self.captures += 1
+        self.replays += 1
         wp.capture_launch(ent[0])

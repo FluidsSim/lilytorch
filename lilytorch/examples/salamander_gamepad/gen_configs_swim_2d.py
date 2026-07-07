@@ -3,7 +3,7 @@ import os
 import numpy as np
 from farms_core.model.options import SpawnMode
 from lilytorch.integration.camera import top_down_camera_config
-from lilytorch.util.paths import lilytorch_repo_root, sdfs_path
+from lilytorch.util.paths import lilytorch_repo_root
 from lilytorch.examples.base_sim_config import BaseSimConfig
 
 
