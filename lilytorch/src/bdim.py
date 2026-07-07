@@ -45,6 +45,8 @@ from typing import Any
 import warp as wp
 import torch
 
+from lilytorch.src import graph_capture as _gc
+
 wp.init()
 
 # native uses scalar_t(M_PI) with scalar_t = double → the IEEE-754 double M_PI.
@@ -698,6 +700,15 @@ class _BdimForcingGraphBase:
             # CPU / non-contiguous: eager launch with a per-call rect.
             launch(torch.tensor(list(rect_vals), dtype=torch.int32,
                                 device=ref.device))
+            self.eager_calls += 1
+            return
+
+        if _gc.in_capture():
+            # Whole-step ScopedCapture: the outer runner has ALREADY staged the
+            # current dirty rect into ``self._rect_dev`` (the numpy host write
+            # must stay OUTSIDE the graph, else replays copy a frozen rect).
+            # Raw launch, recorded into the outer graph.
+            launch(self._rect_dev)
             self.eager_calls += 1
             return
 

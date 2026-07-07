@@ -9,6 +9,26 @@ Memory vars: `sdf_val_{u,v,w}`, `{u,v,w,p}0`, `n{x,y,z}_{u,v,w}`, `body_{u,v,w}`
 # NEEDS WORK
 # ═══════════════════════════════════════════════════════════
 
+# questions
+- I wonder if there is a better way to capture the whole fluid step graph,
+that is, instead of capturing each individual function in the different src/
+files, there could be a high level check of all cuda kernels and compile
+them directly. Is this a possibility? This could also reduce the complexity of the
+codebase.
+
+- I wonder if with the newly implemented whole fluid step graph
+I still need to capture each individual function in the different src/
+files
+
+- can you update the
+
+- The codebase is very complex, multiple lines of code. I suggest to go step by step to
+reduce the complexity.
+
+-
+
+- Is there a
+
 # HIGH PRIORITY
 
 <!-- HP5. **Conservative momentum transport CUDA kernel for two-phase solver** (2026-06-18).

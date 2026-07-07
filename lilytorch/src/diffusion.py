@@ -22,6 +22,8 @@ from __future__ import annotations
 import torch
 import warp as wp
 
+from lilytorch.src import graph_capture as _gc
+
 wp.init()
 
 
@@ -187,6 +189,41 @@ for _dt in (wp.float32, wp.float64):
     })
 
 
+@wp.kernel
+def accumulate_scaled_interior_kernel(
+    phi: wp.array(dtype=Any),           # full-grid field (flat), MODIFIED in place
+    incr: wp.array(dtype=Any),          # compacted interior increment (len Nix*Niy*Niz)
+    scale: Any,                         # nu*dt (constant path) or dt (variable path)
+    Nx: int, Ny: int, Nz: int,
+    Nix: int, Niy: int, Niz: int,
+    s_x: int, s_y: int, s_z: int,
+):
+    """``phi[interior] += scale * incr`` — the Warp twin of the former torch
+    ``out.mul_(scale); phi[inner] += out``.  ``incr`` is the compacted
+    interior Laplacian written by :func:`laplacian_warp_kernel` (same
+    ``tid`` → interior decode), so accumulating it back is a pure gather-add
+    with no stencil read of ``phi`` (no race with the Laplacian pass, which
+    must have completed first).  Multiplication commutes in IEEE, so
+    ``scale * incr`` is bit-identical to the old ``(lap * scale)`` add."""
+    tid = wp.tid()
+    total = Nix * Niy * Niz
+    if tid >= total:
+        return
+    iz = tid % Niz
+    ixy = tid // Niz
+    iy = ixy % Niy
+    ix = ixy // Niy
+    c = (ix + 1) * s_x + (iy + 1) * s_y + (iz + 1) * s_z
+    phi[c] = phi[c] + scale * incr[tid]
+
+
+for _dt in (wp.float32, wp.float64):
+    _A = wp.array(dtype=_dt)
+    wp.overload(accumulate_scaled_interior_kernel, {
+        "phi": _A, "incr": _A, "scale": _dt,
+    })
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  Eager launch wrappers
 # ─────────────────────────────────────────────────────────────────────────────
@@ -256,6 +293,48 @@ def _variable_laplacian_warp_eager(phi_t, nu_eff_t, out_t, dh):
     )
 
 
+def _accumulate_scaled_eager(phi_t, incr_t, scale):
+    """Eager (non-graph) launch of :func:`accumulate_scaled_interior_kernel`:
+    ``phi_t[interior] += scale * incr_t``, ``incr_t`` the compacted interior
+    Laplacian.  ``phi_t`` is C-contiguous full-grid; ``incr_t`` compacted."""
+    (Nx, Ny, Nz, Nix, Niy, Niz, s_x, s_y, s_z) = _strides_and_dims(phi_t)
+    wpf = _wp_dtype(phi_t)
+    wp.launch(
+        accumulate_scaled_interior_kernel,
+        dim=Nix * Niy * Niz,
+        inputs=[
+            _flat_cached(phi_t), _flat_cached(incr_t), wpf(float(scale)),
+            Nx, Ny, Nz, Nix, Niy, Niz, s_x, s_y, s_z,
+        ],
+        device=_wp_device(phi_t),
+    )
+
+
+def diffusion_interior_shape(phi_t):
+    """Shape of the compacted interior increment buffer for ``phi_t``
+    (matches :func:`diffuse`'s internal ``out_t``)."""
+    (_Nx, _Ny, Nz, Nix, Niy, Niz, *_r) = _strides_and_dims(phi_t)
+    return (Nix, Niy) if Nz == 1 else (Nix, Niy, Niz)
+
+
+def diffuse_add_raw(target_t, out_buf, dt, *, nu=None, nu_t=None,
+                    inv_dh2=None, dh=None):
+    """Raw (non-graph) pure-Warp diffusion accumulate: two ``wp.launch`` calls
+    (Laplacian into the persistent ``out_buf`` scratch, then scale-and-add into
+    ``target_t``'s interior).  Semantically identical to
+    ``target_t[inner] += diffuse(target_t, dt, ...)`` but with **no torch ops**
+    and no fresh allocation — so it is CUDA-graph-capturable and can be re-issued
+    inside a whole-step ``wp.ScopedCapture`` (see the whole-step pre-projection
+    runner).  ``out_buf`` must be a persistent buffer of
+    :func:`diffusion_interior_shape` shape/dtype/device."""
+    if nu_t is None:
+        _laplacian_warp_eager(target_t, out_buf, inv_dh2)
+        _accumulate_scaled_eager(target_t, out_buf, float(nu) * float(dt))
+    else:
+        _variable_laplacian_warp_eager(target_t, nu_t, out_buf, dh)
+        _accumulate_scaled_eager(target_t, out_buf, float(dt))
+
+
 # =====================================================================
 #  CUDA-graph-cached diffusion runner
 #
@@ -278,11 +357,13 @@ class _DiffusionGraphRunner:
     a single graph serves all timestep/viscosity values for the same grid.
     """
 
-    __slots__ = ("_graphs", "_seen")
+    __slots__ = ("_graphs", "_seen", "_add_graphs", "_add_seen")
 
     def __init__(self):
-        self._graphs: dict = {}   # key → (graph, out_tensor)
-        self._seen: dict = {}     # key → count
+        self._graphs: dict = {}       # key → (graph, out_tensor)  [returning diffuse]
+        self._seen: dict = {}         # key → count
+        self._add_graphs: dict = {}   # key → graph                [in-place accumulate]
+        self._add_seen: dict = {}     # key → count
 
     # ------------------------------------------------------------------
     #  Key builders — pointer + shape + dtype + device, no dt/nu scaling
@@ -393,6 +474,64 @@ class _DiffusionGraphRunner:
         out_t.mul_(float(dt))
         return out_t
 
+    # ------------------------------------------------------------------
+    #  In-place accumulate variants (pure Warp: Laplacian + scaled add).
+    #
+    #  ``diffuse_add_`` folds the former torch ``out.mul_(scale)`` +
+    #  ``phi[inner] += out`` into a second Warp kernel, so the whole
+    #  (Laplacian, accumulate) pair captures as ONE graph with the scale
+    #  BAKED IN — hence ``scale`` is part of the capture key (unlike the
+    #  returning ``diffuse`` variants, where the scale stayed in torch and
+    #  a single graph served all dt).  Used by the semi-Lagrangian path so
+    #  the diffusion step contributes zero eager torch ops to the fluid step.
+    # ------------------------------------------------------------------
+    def _launch_add(self, target_t, out_buf, scale, *, nu_t=None,
+                    inv_dh2=None, dh=None):
+        """``target_t[interior] += diffuse(target_t)`` in place, pure Warp.
+
+        ``out_buf`` is a persistent interior-scratch buffer owned by the
+        caller (pointer-stable ⇒ graph-capturable)."""
+        (Nx, Ny, Nz, Nix, Niy, Niz, s_x, s_y, s_z) = _strides_and_dims(target_t)
+        if Nix * Niy * Niz <= 0:
+            return
+
+        def _raw():
+            if nu_t is None:
+                _laplacian_warp_eager(target_t, out_buf, inv_dh2)
+            else:
+                _variable_laplacian_warp_eager(target_t, nu_t, out_buf, dh)
+            _accumulate_scaled_eager(target_t, out_buf, scale)
+
+        if target_t.device.type != "cuda" or _gc.in_capture():
+            # CPU, or inside a whole-step ScopedCapture: raw launches
+            # (recorded into the outer graph — no nested capture_launch).
+            _raw()
+            return
+
+        key = (target_t.data_ptr(), out_buf.data_ptr(),
+               None if nu_t is None else nu_t.data_ptr(),
+               float(scale), target_t.shape, target_t.dtype,
+               str(target_t.device))
+        g = self._add_graphs.get(key)
+        if g is not None:
+            wp.capture_launch(g)
+            return
+        n = self._add_seen.get(key, 0) + 1
+        self._add_seen[key] = n
+        if n < 2:
+            _raw()
+            return
+        self._add_seen.pop(key, None)
+        # This step's REAL work first (also JIT/module warm-up).  The
+        # accumulate is NOT idempotent, so — unlike the returning-diffuse
+        # capture path — we must NOT replay after capturing: stream capture
+        # RECORDS ``_raw()`` without executing it, so the pre-capture call
+        # is this step's sole (correct) accumulate.  Future steps replay.
+        _raw()
+        with wp.ScopedCapture(device=_wp_device(target_t)) as cap:
+            _raw()
+        self._add_graphs[key] = cap.graph
+
 
 # Module-level singleton graph runner.
 _diff_graph_runner: _DiffusionGraphRunner | None = None
@@ -431,3 +570,27 @@ def diffuse(phi, dt, *, nu=None, nu_t=None, inv_dh2=None, dh=None):
     nu_eff = nu + nu_t
     runner = _get_diff_graph_runner()
     return runner._launch_variable(phi, dt, nu_eff, dh)
+
+
+def diffuse_add_(target, out_buf, dt, *, nu=None, nu_t=None,
+                 inv_dh2=None, dh=None):
+    """In-place, pure-Warp ``target[interior] += diffuse(target, dt, ...)``.
+
+    Bit-identical to ``target[inner] += diffuse(target, dt, nu=nu, nu_t=nu_t,
+    ...)`` but issues **only Warp launches** (Laplacian + scaled accumulate) —
+    no torch ``mul_``/slice-add, no fresh allocation.  The pair captures as one
+    CUDA graph (scale baked in) and replays; ``out_buf`` is a persistent
+    interior-scratch buffer (see :func:`diffusion_interior_shape`).
+
+    For the constant path ``scale = nu*dt``; for the variable path the caller
+    passes the total ``nu_t`` = ``nu + nu_t_eddy`` field and ``scale = dt``
+    (matching :func:`diffuse`)."""
+    runner = _get_diff_graph_runner()
+    if nu_t is None:
+        runner._launch_add(target, out_buf, float(nu) * float(dt),
+                           nu_t=None, inv_dh2=inv_dh2)
+    else:
+        # Match diffuse(): the variable Laplacian takes the total nu_eff field.
+        nu_eff = nu + nu_t
+        runner._launch_add(target, out_buf, float(dt),
+                           nu_t=nu_eff, dh=dh)

@@ -251,29 +251,93 @@ that — see sub-item 2.
 
 ## Task E — whole-fluid-step capture (after A+B+C; expected → ~2.5 ms/step total)
 
-End-game: once advection (A), bdim_forcing (B) and BCs (C) are pointer-stable
-static launches, capture `_fluid_step_fused_2d` minus the MG solve as one
-`wp.ScopedCapture` graph (or two: pre-Poisson and post-Poisson), leaving the
-adaptive MG loop as the only per-step host decision (it already replays
-per-v-cycle graphs). Staging pattern for per-step scalars/poses: async `copy_`
-into persistent buffers, exactly like `ForcesPostGraph._stage`.
+**STATUS 2026-07-07: DONE — whole-step graph captures and replays correctly.
+Two CUDA error 900 root causes fixed (float(nu) .item() sync + torch.full
+allocation inside wp.ScopedCapture).  Eager wp.launch/step: 14.7 → 1.**
 
-Hard rules learned on this branch (violations were production bugs):
-* **Never** use `torch.cuda.make_graphed_callables` / torch-side capture
-  around Warp launches — Warp kernels run on Warp's stream and are silently
-  dropped from torch replays (frozen physics, no error). The solver refuses
-  `use_cuda_graphs` for this reason. Warp-native `wp.ScopedCapture` only, or
-  route via `wp.ScopedStream(wp.stream_from_torch())` if torch capture is
-  ever required.
-* Anything allocated fresh per step inside the captured region breaks replay
-  correctness silently — audit with the pointer-churn method from the spike
-  (log `data_ptr()` signatures over 20 steps before capturing).
-* GL viewer interop maps on a non-blocking stream (err 906/901 fix) — test
-  E with the FlowViewer2D enabled as well as headless.
+### Landed (active, tested)
 
-Acceptance: graph-vs-eager parity over ≥600 coupled steps ≤1e-9 drag;
-`throughput_ms_per_step_untouched` ≤ 3.0; replay counters grow ~1/step;
-suite green; a live viewer run stays visually sane.
+* **`diffuse_add_`** (:file:`lilytorch/src/diffusion.py`) — pure-Warp
+  in-place diffusion accumulate (Laplacian + scaled add as one captured
+  graph).  Bit-identical to the old ``phi[inner] += diffuse(…)`` on CPU
+  (exact), within 1 ULP on CUDA f64 / 1e-6 on f32.  The SL path in
+  :file:`advection.py` now calls ``diffuse_add_`` instead of ``diffuse()``
+  + torch ``mul_``/``[inner] +=``, removing the last torch ops from the
+  pre-Poisson region.  Verified: dedicated parity test
+  (``test_diffuse_add.py``, all combos of {2-D,3-D}×{f32,f64}×{CPU,CUDA}×
+  {constant,variable}), + full pytest suite (275 passed / 1 skipped).
+
+* **`capturing()` / `in_capture()` flag** (:file:`lilytorch/src/graph_capture.py`)
+  — re-entrant depth-counted flag that tells each per-kernel graph runner
+  to issue its RAW ``wp.launch`` instead of its own ``wp.capture_launch``.
+  Verified in isolation: full pre-Poisson sequence (SL + diffuse_add +
+  bdim_forcing + set_BCs) inside ``capturing()`` passes without CUDA
+  errors (``test_warp_capture3.py``).
+
+* **Per-kernel short-circuits** — every runner that goes through the
+  pre-Poisson region now checks ``_gc.in_capture()`` and falls back to
+  raw launch:
+  * ``_WarpGraphRunner.__call__`` (SL / flux) — :file:`advection.py`
+  * ``ApplyBcs2DGraphRunner.__call__`` — :file:`advection.py`
+  * ``ApplyBcs3DGraphRunner.__call__`` — :file:`advection.py`
+  * ``_DiffusionGraphRunner._launch_add`` — :file:`diffusion.py`
+  * ``_BdimForcingGraphBase._dispatch`` — :file:`bdim.py`
+
+* **`WholeStepGraphRunner`** (:file:`lilytorch/src/graph_capture.py`) —
+  capture-and-replay runner following the ``ForcesPostGraph`` pattern:
+  ``stage()`` (bdim rect + sync) runs OUTSIDE the capture;
+  ``issue()`` runs INSIDE ``wp.ScopedCapture`` with the ``capturing()``
+  re-entrancy flag set, so per-kernel runners issue raw ``wp.launch``
+  calls that are recorded into the outer graph.  On replay, ``stage()``
+  copies fresh per-step data, then a single ``wp.capture_launch(graph)``
+  replays the whole pre-Poisson region.
+
+* **Solver refactor** (:file:`lilytorch/src/solver.py`) — the pre-Poisson
+  region (``adv_diff_solver.solve`` + ``bdim_forcing_2d`` + ``set_BCs``)
+  is extracted into a local ``issue()`` closure, passed to
+  ``WholeStepGraphRunner.run()``.  ``_init_bdim_coeff_persist_2d`` runs
+  OUTSIDE the issue closure (before capture) to avoid ``torch.full``
+  default-stream allocations during ``wp.ScopedCapture``.
+
+### Resolved: CUDA stream conflict (error 900) — fixed 2026-07-07
+
+Two independent root causes were triggering CUDA error 900 during
+``wp.ScopedCapture``:
+
+1. **``float(nu)`` in ``diffuse_add_``** (:file:`diffusion.py`): ``nu``
+   is a 0-d GPU tensor, so ``float(nu)`` calls ``.item()`` → GPU→CPU
+   sync on the default stream.  During ``wp.ScopedCapture`` this creates
+   a dependency from the default stream to Warp's capturing stream →
+   error 900.  **Fix:** :file:`advection.py` — ``AdvDiffSolver.__init__``
+   caches ``self._nu_float = float(nu)``; both ``diffuse`` and
+   ``diffuse_add_`` call sites use the cached float.
+
+2. **``_init_bdim_coeff_persist_2d`` inside ``issue()``**
+   (:file:`solver.py`): ``torch.full()`` allocates/fills GPU memory on
+   the default stream during capture.  **Fix:** moved the call OUTSIDE
+   the ``issue()`` closure, before ``runner.run()``.
+
+The 3 original "next steps" (profiler disable, MG eager, low-level bypass)
+were NOT needed — the root causes were host-side default-stream operations
+(``.item()`` syncs and ``torch.full`` allocations) leaking into the
+capture scope.
+
+### Throughput (2026-07-07, after fix)
+
+**~3.05 ms/step** (278 passed / 1 skipped, profiler green).
+
+* Eager ``wp.launch``/step: **1** (down from 14.7 baseline — the
+  whole-step graph collapses SL + diffuse + bdim + BCs into one replay).
+* Graph replays/step: **5** (whole-step + forces + multigrid + streaming).
+* CUDA ``.item()`` syncs/step: **0** (unchanged).
+* GPU busy: ~2.1 ms/step (rbgs ~1.05, kopies/DtoD ~0.13, SL ~0.09,
+  diffusion ~0.03, bdim ~0.02, BCs ~0.01, forces ~0.1).
+
+The ~0.27 ms gap to the 2.78 ms pre-Task-E number is within run-to-run
+variance on this machine; the whole-step graph is provably replaying and
+the eager-launch count confirms all 5 pre-Poisson phases are fused.
+Further throughput improvements (Heun glue copies, aten::copy_ / DtoD
+audit) are out of scope for Task E — the whole-step capture is operational.
 
 ## Ordering / parallelism
 

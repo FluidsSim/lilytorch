@@ -29,6 +29,7 @@ import torch
 from lilytorch.src.interpolation import RegularGridInterpolator
 
 from lilytorch.src import diffusion
+from lilytorch.src import graph_capture as _gc
 
 # apply_bcs_{2,3}d + the ApplyBcs{2,3}DGraphRunner CUDA-graph caches (used by
 # AdvDiffSolver.set_BCs) are defined in the Warp section at the bottom of this
@@ -180,6 +181,10 @@ class AdvDiffSolver:
         self.dtype  = x.dtype
         self.dt     = float(dt)   # ensure Python float so _dt_dh never holds tensors
         self.nu     = nu
+        # Pre-convert nu to Python float (avoids GPU→CPU .item() sync in
+        # diffuse_add_ / diffuse hot paths, which would trigger CUDA error
+        # 900 during whole-step wp.ScopedCapture).
+        self._nu_float = float(nu)
 
         # ---- dimension-agnostic grid setup ----------------------------
         self.coords = [x, y] if z is None else [x, y, z]
@@ -281,6 +286,7 @@ class AdvDiffSolver:
         self._flat_coords = []
         self._sl_axes_1d  = []   # per-comp tuple of 1-D axis tensors
         self._sl_out      = None # persistent fused-kernel output buffers
+        self._diff_out    = None # persistent diffusion interior scratch
 
         for i in range(ndim):
             # component-i lives on a grid staggered in dim i only
@@ -354,7 +360,7 @@ class AdvDiffSolver:
 
         for i in range(ndim):
             rhs = diffusion.diffuse(
-                vel[i], self.dt, nu=self.nu, nu_t=nu_t,
+                vel[i], self.dt, nu=self._nu_float, nu_t=nu_t,
                 inv_dh2=self._inv_dh2, dh=self.dh,
             )
             for d in range(ndim):
@@ -415,6 +421,12 @@ class AdvDiffSolver:
                 or out[0].dtype != dtype
                 or out[0].device != dev):
             self._sl_out = out = tuple(torch.empty_like(v) for v in vel)
+            # Persistent interior scratch for the pure-Warp diffusion accumulate
+            # (diffusion.diffuse_add_): pointer-stable ⇒ graph-capturable.
+            self._diff_out = tuple(
+                torch.empty(diffusion.diffusion_interior_shape(v),
+                            dtype=dtype, device=dev)
+                for v in vel)
             # Move grid axes to the right device/dtype once.
             flat_axes = []
             for comp_axes in self._sl_axes_1d:
@@ -449,11 +461,13 @@ class AdvDiffSolver:
             )
             vel_new = [out_u, out_v, out_w]
 
-        # explicit diffusion
-        inner = _inner(ndim)
+        # Explicit diffusion — pure-Warp in-place accumulate (no torch ops,
+        # graph-capturable).  Bit-identical to the former
+        # ``vel_new[i][inner] += diffusion.diffuse(...)``.
         for i in range(ndim):
-            vel_new[i][inner] += diffusion.diffuse(
-                vel_new[i], self.dt, nu=self.nu, nu_t=nu_t,
+            diffusion.diffuse_add_(
+                vel_new[i], self._diff_out[i], self.dt,
+                nu=self._nu_float, nu_t=nu_t,
                 inv_dh2=self._inv_dh2, dh=self.dh,
             )
         return tuple(vel_new)
@@ -1258,6 +1272,11 @@ class _WarpGraphRunner:
         if first.device.type != "cuda":
             self.eager += 1
             return self._eager_fn(*args)
+        if _gc.in_capture():
+            # Inside a whole-step ScopedCapture: raw launch, recorded into the
+            # outer graph (a nested capture_launch would raise CUDA err 900).
+            self.eager += 1
+            return self._eager_fn(*args)
         if self._skip_graph is not None and self._skip_graph(*args):
             self.eager += 1
             return self._eager_fn(*args)
@@ -1794,6 +1813,11 @@ class ApplyBcs2DGraphRunner:
             self.eager += 1
             return apply_bcs_2d_warp(u, v, shapes, neu_desc, dir_desc, dir_val,
                                      ref_desc, ref_val, max_line_dim)
+        if _gc.in_capture():
+            # Whole-step capture: raw launch recorded into the outer graph.
+            self.eager += 1
+            return apply_bcs_2d_warp(u, v, shapes, neu_desc, dir_desc, dir_val,
+                                     ref_desc, ref_val, max_line_dim)
         # The op counts (N_neu/N_dir/N_ref) are baked into the captured graph's
         # launch dims + kernel scalars, so they MUST be in the key: a pool-reused
         # descriptor pointer with a different op count would otherwise replay a
@@ -1986,6 +2010,10 @@ class ApplyBcs3DGraphRunner:
         if N_neu + N_dir + N_ref == 0 or M0 <= 0 or M1 <= 0:
             return
         if u.device.type != "cuda":
+            self.eager += 1
+            return apply_bcs_3d_warp(u, v, w, shapes, neu_desc, dir_desc, dir_val,
+                                     ref_desc, ref_val, M0, M1)
+        if _gc.in_capture():
             self.eager += 1
             return apply_bcs_3d_warp(u, v, w, shapes, neu_desc, dir_desc, dir_val,
                                      ref_desc, ref_val, M0, M1)
