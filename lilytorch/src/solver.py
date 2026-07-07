@@ -1126,6 +1126,13 @@ class FluidSolver(PlottingMixin):
             # of early-exiting. Kept disabled for the custom-coeff path.)
             if self.poisson_warm_start and not has_custom_coeffs:
                 p0 = p
+            elif self.poisson_method == "multigrid":
+                # WarpMG.solve zeros its level-0 buffer in place when p0 is
+                # None -- skip the per-step full-grid ``zeros_like`` alloc +
+                # copy-into-graph (host-wrapper trim; the MGCG/RMGCG cores need
+                # a real tensor for ``x = p0.clone()``, so only multigrid opts
+                # out here).
+                p0 = None
             else:
                 p0 = torch.zeros_like(p)
 

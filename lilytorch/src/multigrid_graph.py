@@ -548,6 +548,24 @@ class WarpMG3D:
         nx, ny, nz = l0["n"]
         return l0["p"].view(nx + 2, ny + 2, nz + 2)
 
+    def residual_inf(self):
+        """L∞ norm of the fine-level residual, computed on the PERSISTENT
+        level-0 buffers (pw / fw / the in-graph-extracted face pairs cp0..cm2 /
+        rw) — zero per-step torch allocation and no ``wp.from_torch`` wraps.
+
+        Must be called after a :meth:`solve` / :meth:`replay` has loaded pw/fw
+        and materialised the face pairs.  Overwrites ``lv["rw"]`` eagerly, which
+        is safe: it runs on the Warp stream after the just-finished cycle and
+        before the next replay, so the stale in-cycle residual it clobbers is
+        never read.  Bit-identical to :func:`mg_residual_3d_warp` on the same
+        state (same kernel, same clamped-Neumann fold, same ``jcap`` cap)."""
+        lv = self.levels[0]
+        nx, ny, nz = lv["n"]
+        wp.launch(mg_residual_3d, dim=(nx, ny, nz),
+                  inputs=[lv["pw"], lv["fw"], *self._coef(lv), lv["rw"],
+                          nx, ny, nz, self.wpf(self.jcap)], device=self._wdev)
+        return torch.max(torch.abs(lv["r"]))
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Variable-coefficient, graph-captured multigrid driver (2-D)
@@ -1025,3 +1043,21 @@ class WarpMG2D:
             wp.capture_launch(self._graph)
         nx, ny = l0["n"]
         return l0["p"].view(nx + 2, ny + 2)
+
+    def residual_inf(self):
+        """L∞ norm of the fine-level residual, computed on the PERSISTENT
+        level-0 buffers (pw / fw / the in-graph-extracted face pairs cp0..cm1 /
+        rw) — zero per-step torch allocation and no ``wp.from_torch`` wraps.
+
+        Must be called after a :meth:`solve` / :meth:`replay` has loaded pw/fw
+        and materialised the face pairs.  Overwrites ``lv["rw"]`` eagerly, which
+        is safe: it runs on the Warp stream after the just-finished cycle and
+        before the next replay, so the stale in-cycle residual it clobbers is
+        never read.  Bit-identical to :func:`mg_residual_2d_clamped_warp` on the
+        same state (same clamped kernel, same ``jcap`` cap)."""
+        lv = self.levels[0]
+        nx, ny = lv["n"]
+        wp.launch(mg_residual_2d_clamped, dim=(nx, ny),
+                  inputs=[lv["pw"], lv["fw"], *self._coef(lv), lv["rw"],
+                          nx, ny, self.wpf(self.jcap)], device=self._wdev)
+        return torch.max(torch.abs(lv["r"]))

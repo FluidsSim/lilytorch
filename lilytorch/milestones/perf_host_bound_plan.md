@@ -197,24 +197,57 @@ examples — still finished; other examples use those schemes.
 
 ## Task D — Poisson host share + initial guess (expected −0.3…−0.5 ms/step)
 
-`project` = 1.28 ms/step: ~0.9 GPU (already inside the captured v-cycle
-graphs, `multigrid_graph.py` WarpMG2D), ~0.4 host around it.
+**DONE 2026-07-07** (sub-item 1 landed; sub-item 2 investigated + CLOSED as
+inapplicable to the reference case). Same-tree before/after over the phase
+window (steps 250–329, the stable signal — the throughput window is too noisy
+for a 0.05 ms change): `project(poisson+correct)` 1.2165 → 1.1652 ms sync,
+1.1628 → 1.1449 ms submit; −3 `aten::copy_` and −1 DtoD per step. Suite green
+(275 passed / 1 skipped). Changes are provably bit-identical (no drag-trace
+validation needed — see below), so no physics gate was run.
 
-1. Profile-guided trim of the host wrapper: RHS assembly (divergence),
-   `p -= p.mean()`, BCs on p, and the per-cycle residual-check bool sync
-   (2–3/step, unavoidable for adaptive exit but the surrounding ops can move
-   onto the graph or into a fused Warp RHS kernel).
-   **Landmine:** `self.BC(p)` must run BEFORE `p -= p.mean()` (ghost-ring
-   gauge bug, fixed once already — don't reintroduce).
-2. Experiment (cheap, high leverage): linear pressure extrapolation initial
-   guess `p_guess = 2·p_n − p_{n−1}` (persistent history buffer). If it drops
-   the typical v-cycle count 2–3 → 1–2, that's ~0.3 ms GPU saved per step.
-   Must be validated on physics: 3000-step quiet-water control + drag trace
-   vs baseline; make it opt-in config (`poisson_warm_start: extrapolate`)
-   if results shift beyond 1e-9. Note: plain warm-start reuse was REJECTED
-   for the two-phase variable-coeff case previously — this is the
-   *extrapolated* variant on the single-phase path; if it also fails, record
-   why and close the item.
+`project` ≈ 1.17 ms/step: ~0.9 GPU (one heavy v-cycle inside the captured
+WarpMG2D graph) + ~0.25 host around it. The −0.3…−0.5 target assumed the solve
+burned multiple v-cycles with host churn around each; the profiling refutes
+that — see sub-item 2.
+
+1. **Host-wrapper trim (DONE).** Two allocation/dispatch cuts, both in the
+   multigrid path (`poisson_mult.solve_multigrid` + `solver.project`):
+   * `WarpMG{2,3}D.residual_inf()` — the adaptive early-exit residual now runs
+     on the multigrid's OWN persistent level-0 buffers (pw / fw / the
+     in-graph-extracted face pairs cp0..cm2 / rw), replacing the old per-check
+     closure that re-sliced the y/z-face coefficients (real non-contiguous
+     copies) and allocated a fresh residual field + 6 `wp.from_torch` wraps
+     every convergence check. Bit-identical to the old `mg_residual_*_warp`
+     wrapper (verified: f64 field diff 1.7e-17, f32 2.3e-8 — pure gauge-shift
+     roundoff, the residual is computed pre-BC/pre-mean exactly as before).
+     `solve_multigrid` returns the persistent residual FIELD (callers do
+     `r.abs().max().item()` or GFM `r[~mask]`, so the field shape is kept).
+   * `project` passes `p0=None` to `solve_multigrid` when not warm-starting;
+     `WarpMG.solve` zeros its level-0 buffer in place, skipping the per-step
+     full-grid `torch.zeros_like` alloc + copy-into-graph. MGCG/RMGCG still get
+     a real tensor (`x = p0.clone()`), so only the multigrid method opts out.
+     Bit-identical (zeros in, zeros in).
+   * NOT done, by design: `p -= p.mean()` and `self.BC(p)` were left alone.
+     The gauge subtraction is gradient-invariant (cancels in the velocity
+     correction) and only matters for warm-start/plotting; removing it changes
+     the returned p by a constant (plot/warm-start regression) for ~50 µs GPU.
+     BC(p) fusion (4 slice-copies → 1 Warp kernel) saves ~15 µs host but risks
+     the ghost-ring gauge landmine (`self.BC(p)` must run BEFORE `p -= p.mean()`
+     — fixed once already); not worth it outside a Task-E whole-step capture.
+2. **Extrapolated initial guess — CLOSED, inapplicable.** The premise (cut the
+   typical v-cycle count 2–3 → 1–2) does not hold for the reference salamander:
+   with adaptive early-exit + heavy smoothing (nu1=nu2=nsmoothing=10) the solve
+   **already converges in ONE v-cycle/step** and early-exits at tol. Measured
+   directly: enabling plain `poisson_warm_start` changed nothing —
+   `rbgs_halfsweep` 2352 → 2352 launches, `mg_residual_2d` 56 → 56, project
+   1.1656 → 1.1695 ms sync (noise). The ~336 rbgs halfsweeps/step is a single
+   heavy multi-level v-cycle, not several cheap ones. So `p_guess = 2·p_n −
+   p_{n−1}` would add a persistent history buffer + torch ops for ZERO cycle
+   saving on this case, and plain reuse was already REJECTED for the two-phase
+   variable-coeff path. Recording and closing per the plan's own escape hatch.
+   (If a future case is genuinely budget-limited — many cycles/step, not
+   early-exiting — revisit: the WarpMG buffers are already pointer-stable, so
+   an opt-in `poisson_warm_start: extrapolate` is a small add there.)
 
 ## Task E — whole-fluid-step capture (after A+B+C; expected → ~2.5 ms/step total)
 

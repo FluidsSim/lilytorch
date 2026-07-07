@@ -687,46 +687,40 @@ class PoissonSolver(_MultigridPoissonSolver):
         pre_scaled = kwargs.get("pre_scaled", False)
         f_scaled = f if pre_scaled else self.h2 * f
         if f.ndim == 3:
-            from lilytorch.src.multigrid_graph import mg_residual_3d_warp
             ch, cv, cw = (a.contiguous() for a in face_arrs)
-            cp0, cm0 = ch[1:].contiguous(), ch[:-1].contiguous()
-            cp1, cm1 = cv[:, 1:].contiguous(), cv[:, :-1].contiguous()
-            cp2, cm2 = cw[:, :, 1:].contiguous(), cw[:, :, :-1].contiguous()
             p = mg.solve(f_scaled, ch, cv, cw, p0=p0,
                          mask=self.dirichlet_mask)
-
-            def _residual():
-                # Index-clamped residual: reads no ghost ring, gauge-invariant,
-                # so it is valid on the raw post-cycle p (BC/gauge applied once
-                # at the end).
-                return mg_residual_3d_warp(p, f_scaled, cp0, cm0, cp1, cm1,
-                                           cp2, cm2, self.jcap_tol)
         else:
-            from lilytorch.src.multigrid_graph import mg_residual_2d_clamped_warp
             ch, cv = (a.contiguous() for a in face_arrs)
-            cp0, cm0 = ch[1:].contiguous(), ch[:-1].contiguous()
-            cp1, cm1 = cv[:, 1:].contiguous(), cv[:, :-1].contiguous()
             p = mg.solve(f_scaled, ch, cv, p0=p0, mask=self.dirichlet_mask)
-
-            def _residual():
-                return mg_residual_2d_clamped_warp(p, f_scaled, cp0, cm0,
-                                                   cp1, cm1, self.jcap_tol)
 
         # ``p`` is a live view of the WarpMG fine-level buffer; extra cycles
         # replay the captured graph on that in-place state (no input re-copy).
-        r = _residual()
+        # ``mg.residual_inf`` recomputes the clamped-Neumann residual (index-
+        # clamped, reads no ghost ring → gauge-invariant, valid on the raw
+        # post-cycle p) on the multigrid's own persistent level-0 buffers,
+        # reusing the face pairs it already extracted in-graph, and returns the
+        # L∞ norm.  This drops the per-step host cost of the old closure: the
+        # y/z-face coefficient slices (real copies, non-contiguous) and a fresh
+        # residual field + six ``wp.from_torch`` wraps per convergence check —
+        # the wrapper is host-bound, so every eliminated allocation/wrap is
+        # submit time saved.  ``lv["r"]`` now holds the matching residual field.
+        r_inf = mg.residual_inf()
         for _ in range(max(int(self.max_vcycles), 1) - 1):
-            if self._convergence_norm(r) < self.tol:
+            if r_inf < self.tol:
                 break
             mg.replay()
-            r = _residual()
+            r_inf = mg.residual_inf()
 
         # Ghost ring is never written by the graphed Warp V-cycle
         # (index-clamped Neumann); refresh it before the gauge mean.
         self.BC(p)
         if self.dirichlet_mask is None:
             p -= p.to(torch.float64).mean().to(p.dtype)
-        return p, r
+        # Return the persistent residual field (matches the just-returned p);
+        # callers reduce it with ``r.abs().max().item()`` or index it (GFM
+        # ``r[~mask]``), so the field shape is preserved.
+        return p, mg.levels[0]["r"].view(f.shape)
 
     def _dispatch_vcycle(self, f, p, face_arrs):
         """One V-cycle with the fine-level smoother + residual on Warp.
