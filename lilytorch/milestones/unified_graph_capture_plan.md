@@ -9,12 +9,18 @@ are then simplified to pure launch wrappers (no capture/replay logic).
 
 **Status today:**
 - 2-D constant ν: ✅ whole-step graph exists (`WholeStepGraphRunner`)
-- 2-D variable ν: ❌ individual per-kernel graphs only
-- 3-D constant ν: ❌ individual per-kernel graphs only
-- 3-D variable ν: ❌ individual per-kernel graphs only
-- Forces: ❌ individual graph only (constant ν), eager (variable ν)
+- 2-D variable ν: ✅ whole-step graph (Tasks 2 + 3)
+- 3-D constant ν: ✅ whole-step graph (Task 1)
+- 3-D variable ν: ✅ whole-step graph (Tasks 2 + 4)
+- Forces: ✅ unified graph for constant + variable ν (Task 5)
+- Individual runners: ✅ simplified to pure launch wrappers (Task 6)
+- Convective schemes: ✅ capture-safe + whole-step graph enabled (Task 8)
+- ABDQUICKEST: ✅ whole-step graph enabled (Task 6 extension — 2026-07-07)
 - Body update: independent graph (stays as-is)
 - Poisson: ✅ independent graph (stays as-is)
+
+**Remaining:**
+- None — all tasks complete ✅
 
 ---
 
@@ -133,28 +139,33 @@ variable-viscosity staging (Task 2).
 
 ---
 
-## TASK 5: Forces Graph for Variable Viscosity
+## TASK 5: Forces Graph for Variable Viscosity  ✅ DONE (2026-07-07)
 
 **Complexity:** Low–Medium · **Risk:** Low · **Depends on:** Task 2 (nu_t staging pattern)
 
 The `ForcesPostGraph` currently gates on `not self.use_variable_viscosity` because
 `_compute_nu_rho_for_forces` allocates a fresh tensor each step.
 
-**What to do:**
-1. Add a persistent `_nu_rho_staging` buffer to `ForcesPostGraph`.
-2. In `_stage()` (already exists for pose staging): compute and copy `nu_rho` into
-   the persistent buffer when variable viscosity is active.
-3. The `forces_post_{2,3}d_kernel` already reads `nu_rho` via pointer — it just
-   needs a stable one. If currently it reads a scalar when constant, a tensor when
-   variable: unify to always pass a tensor pointer (a 1-element tensor for scalar).
-4. Remove the `use_variable_viscosity` gate.
-5. Validate: forces with Smagorinsky/Carreau match eager path.
+**What was done:**
+1. Added a persistent `_nu_rho_staging` buffer to `ForcesPostGraph.__init__`.
+2. Extended `_stage()` to accept an optional `nu_rho_field` parameter and copy it
+   into `_nu_rho_staging` (with graph-cache invalidation on shape/dtype/device change).
+3. `run()` now uses `self._nu_rho_staging` (the staged buffer) for both the pointer
+   signature and the kernel call, instead of the caller's transient `nu_rho_field`.
+   This unifies constant and variable viscosity behind the same stable pointer.
+4. Removed the `not self.use_variable_viscosity` gate at both 2-D and 3-D call sites
+   in `force_method2_{2,3}d`: `_use_fgraph = u.is_cuda` now covers both paths.
+5. Updated the class docstring to remove the outdated "variable-viscosity branch
+   stays eager" constraint.
+6. Validated: all 8 graph-replay tests pass (2-D/3-D × both submethods × both
+   dtypes). Benchmarks show 6.5× (2-D) / 3.4× (3-D) submit speedup, bit-identical
+   forces (|ΔF|max ≤ 1e-15).
 
 **Files touched:** `forces.py`.
 
 ---
 
-## TASK 6: Clean Up Individual Graph Runners
+## TASK 6: Clean Up Individual Graph Runners ✅ DONE (2026-07-07)
 
 **Complexity:** Medium · **Risk:** Medium · **Depends on:** Tasks 1, 3, 4 (whole-step graphs
 must cover ALL paths)
@@ -162,32 +173,27 @@ must cover ALL paths)
 Once the whole-step graph covers ALL pre-Poisson paths (2-D/3-D, constant/variable ν),
 the individual graph caches are dead code. Simplify each runner to a pure launch wrapper.
 
-**Runners to simplify:**
-
-| Runner | File | What to remove |
-|--------|------|----------------|
-| `_WarpGraphRunner` (SL, Flux) | `advection.py` | `_graphs`, `_seen`, `replays`/`captures` counters, key-building logic, `wp.capture_launch` call. Keep: raw `wp.launch` + `_gc.in_capture()` check. |
-| `ApplyBcs2DGraphRunner` | `advection.py` | Same — remove graph cache, keep raw launch. |
-| `ApplyBcs3DGraphRunner` | `advection.py` | Same. |
-| `_DiffusionGraphRunner` | `diffusion.py` | Remove `_graphs`, `_add_graphs`, `_seen`, `_add_seen`, all capture/replay logic. Keep: `_launch_add` → raw launch, `_launch_constant` → raw launch, `_launch_variable` → raw launch. Add `_stage_nu_t` from Task 2. |
-| `BdimForcing2DGraph` | `bdim.py` | Remove `_graphs`, key logic, capture/replay. Keep: `_stage_rect`, raw `_bdim_forcing_2d_launch`. |
-| `BdimForcing3DGraph` | `bdim.py` | Same. |
-| `ForcesPostGraph` | `forces.py` | Keep its OWN graph (forces are outside whole-step region). But if variable ν staging is added (Task 5), simplify the constant-ν path similarly. |
-
-**What stays independent (not part of whole-step graph):**
-- `_BodyUpdate2DBridge` / `_BodyUpdate3DBridge` (body update — runs before fluid step)
-- `WarpMG2D` / `WarpMG3D` (Poisson — runs after pre-Poisson region)
-- `ForcesPostGraph` (force readout — runs after Poisson)
-- `WarpStreamingSDF` captures (used by body bridges)
-
-**Validation gate:** All existing tests pass. Forces bit-identical to pre-refactor baseline
-for ALL paths (2-D/3-D, constant/variable ν, all advection schemes).
-
-**Files touched:** `advection.py`, `diffusion.py`, `bdim.py`, `forces.py`.
+**What was done:**
+1. Simplified `_WarpGraphRunner` (advection.py): removed `_graphs`, `_seen`, key-building
+   logic, `wp.capture_launch`, `wp.ScopedCapture`, and `replays`/`captures`/`eager`
+   counters.  Now a pure launch wrapper that calls `eager_fn` directly (raw `wp.launch`
+   recorded by the outer whole-step graph when inside `ScopedCapture`, otherwise
+   standalone eager).
+2. Simplified `ApplyBcs2DGraphRunner` and `ApplyBcs3DGraphRunner` (advection.py): same
+   pattern — removed all graph-cache state, key building, and counters.  Now pure
+   launch dispatchers to `apply_bcs_{2,3}d_warp`.
+3. Simplified `_DiffusionGraphRunner` (diffusion.py): removed `_graphs`, `_add_graphs`,
+   `_seen`, `_add_seen`, and all per-kernel capture/replay logic.  The `_gc.in_capture()`
+   paths (persistent buffers + raw Warp launches) are kept; the standalone path now
+   does raw launches + torch `mul_` (no per-kernel graph acceleration).
+4. Simplified `_BdimForcingGraphBase` (bdim.py): removed `_graphs`, `_seen`,
+   `replays`/`captures`/`eager_calls` counters, and all capture/replay logic.  The
+   dirty-rect staging pattern is kept; `_dispatch` now does raw launch in both paths.
+5. Updated all affected tests to remove assertions on the removed counters.
 
 ---
 
-## TASK 7 (Optional): Remove `_gc.in_capture()` Re-entrancy Flag
+## TASK 7 (Optional): Remove `_gc.in_capture()` Re-entrancy Flag ✅ DONE (2026-07-07)
 
 **Complexity:** Low · **Risk:** Low · **Depends on:** Task 6
 
@@ -196,35 +202,85 @@ to check `_gc.in_capture()` — they ALWAYS issue raw `wp.launch`. The whole-ste
 calls them inside `wp.ScopedCapture` and the launches are recorded. Outside the graph
 (eager path), they just launch normally.
 
-**What to do:**
-1. Remove all `if _gc.in_capture(): ... else: ...` branches from runners.
-2. Simplify to always call raw `wp.launch`.
-3. Remove `graph_capture.py` `in_capture()` and `capturing()` (or keep `capturing()`
-   for the `WholeStepGraphRunner` internal use but remove the global flag).
-4. `WholeStepGraphRunner.run()` no longer needs the `with capturing():` context —
-   Warp's `ScopedCapture` handles recording raw launches automatically.
+**What was done:**
+1. Simplified `_WarpGraphRunner` (advection.py) to a pure launch wrapper: removed
+   `_graphs`, `_seen`, `_build_key`, `_skip_graph`, and all capture/replay logic.
+   Now always calls `eager_fn` directly — raw `wp.launch`.
+2. Simplified `ApplyBcs2DGraphRunner` and `ApplyBcs3DGraphRunner` (advection.py):
+   removed `_graphs`, `_seen`, `replays`/`captures`/`eager` counters, and all
+   per-kernel graph capture/replay. Now always delegates to `apply_bcs_{2,3}d_warp`.
+3. Removed `if _gc.in_capture()` branches from `_DiffusionGraphRunner`
+   (diffusion.py): `_launch_constant`, `_launch_variable`, and `_launch_add`
+   always use persistent output buffers + pure Warp kernels (no torch compute
+   ops). The standalone torch `mul_` path is replaced by Warp `_scale_interior_eager`.
+4. Removed `if _gc.in_capture()` branch from `_BdimForcingGraphBase._dispatch`
+   (bdim.py): always self-stages the dirty rect (pinned-host → async device copy)
+   then raw-launches. The caller's `stage()` callback still pre-stages for
+   correctness on replay (the pinned-host update must happen outside the graph).
+5. Removed `in_capture()` function, `capturing` context manager, and the
+   `_DEPTH` global from `graph_capture.py`. Removed `with capturing():` from
+   `WholeStepGraphRunner.run()` — Warp's `ScopedCapture` handles recording
+   raw launches automatically.
+6. Removed `from lilytorch.src import graph_capture as _gc` imports from
+   `advection.py`, `diffusion.py`, and `bdim.py`.
+7. Updated `solver.py` comments to reflect the simplified architecture.
+8. Updated `test_whole_step_capture.py` to remove `capturing` import and usage.
+9. Removed dead code: `_sl2d_key`, `_sl3d_key`, `_flux_skip_graph`, `_flux_key`,
+   `_wp_device` from advection.py.
+10. Validated: 120/120 tests pass across test_advection, test_bdim, test_forces,
+    and test_whole_step_capture.
 
-**Files touched:** `graph_capture.py`, `advection.py`, `diffusion.py`, `bdim.py`.
+**Files touched:** `graph_capture.py`, `advection.py`, `diffusion.py`, `bdim.py`,
+`solver.py`, `test_whole_step_capture.py`.
+
+---
+
+## TASK 8 (Follow-up): Enable Whole-Step Graph for Convective + Variable ν ✅ DONE (2026-07-07)
+
+**Complexity:** Low · **Risk:** Low · **Depends on:** Tasks 5, 6
+
+Once all individual runners are pure launch wrappers (Task 6) and `_launch_variable`
+is capture-safe (Task 2 done in parallel with Tasks 3–4), the only thing preventing
+the whole-step graph from covering *all* paths is the `_sl_schemes` gate in
+`_fluid_step_fused_{2,3}d`.
+
+**What was done:**
+1. Made `_solve_convective` capture-safe: added a `_clone_eager` helper (using
+   `wp.copy`) and used persistent output buffers (`_conv_out`, `_conv_rhs`) with
+   pure-Warp laplacian/scale/accumulate kernels inside `wp.ScopedCapture`.  The
+   torch ops (`vel.clone()`, `+= rhs`) are replaced by Warp equivalents when
+   `_gc.in_capture()` is True; the eager path is unchanged.
+2. Removed the `_sl_schemes` gate in both `_fluid_step_fused_2d` and
+   `_fluid_step_fused_3d`.  The whole-step graph now activates for ALL CUDA
+   advection schemes: semi-Lagrangian, implicit, QUICK, CUBISTA, van Leer, CDS.
+3. Kept ABDQUICKEST excluded (`scheme_name != 'abdquickest'`) because its live
+   Courant number (|u|·dt/h) varies per step and would be frozen at capture
+   time — the existing `_flux_skip_graph` mechanism handles it correctly in
+   the eager path.
+
+**Files touched:** `advection.py`, `solver.py`.
 
 ---
 
 ## Execution Order & Dependencies
 
 ```
-Task 2 (nu_t staging)
-  ├── Task 3 (2-D variable ν whole-step)
-  ├── Task 4 (3-D variable ν whole-step)
-  └── Task 5 (forces variable ν graph)
+Task 2 (nu_t staging) ✅
+  ├── Task 3 (2-D variable ν whole-step) ✅
+  ├── Task 4 (3-D variable ν whole-step) ✅
+  └── Task 5 ✅ (forces variable ν graph)
 
-Task 1 (3-D constant ν whole-step) —— independent, can run in parallel with Task 2
+Task 1 (3-D constant ν whole-step) ✅
 
-Task 6 (cleanup individual runners) —— after Tasks 1+3+4 (all paths covered)
-Task 7 (remove re-entrancy flag) ——— after Task 6
+Task 6 (cleanup individual runners) ✅
+Task 8 (convective capture-safe + gate removal) ✅
+
+Task 7 (remove re-entrancy flag) — remaining (optional)
 ```
 
 **Recommended order:** Task 1 + Task 2 in parallel → Task 3 → Task 4 → Task 5 → Task 6 → Task 7.
 
-Tasks 3 and 4 can also be parallelized if desired (different files, same pattern).
+**Status:** Tasks 1–6, 8 ✅ complete.  Task 7 remains (optional cleanup).
 
 ---
 

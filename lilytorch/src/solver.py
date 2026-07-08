@@ -12,8 +12,6 @@ from concurrent.futures import ThreadPoolExecutor
 from lilytorch.src.bdim import (
     bdim_forcing_3d_warp as bdim_forcing_3d,
     bdim_forcing_2d_warp as bdim_forcing_2d,
-    BdimForcing2DGraph,
-    BdimForcing3DGraph,
 )
 from lilytorch.src.advection import AdvDiffSolver
 from lilytorch.src.diagnostics import FlowDiagnostics
@@ -305,6 +303,11 @@ class FluidSolver(PlottingMixin):
         # silently ignored.
 
         self.terminate = False   # flag for early termination (e.g. from NaN detection)
+
+        # Debug flag — force the eager (non-graph) path even on CUDA.
+        self._graph_capture_debug = bool(solver.get("graph_capture_debug", False))
+        if self._graph_capture_debug:
+            print("Whole-step graph capture DISABLED (graph_capture_debug=True).")
 
         # ============= convection solver =============
         self.convection_method = solver["convection_method"]
@@ -686,17 +689,10 @@ class FluidSolver(PlottingMixin):
         # read + getattr loop, with no per-step Python branching on ndim.
         self._bdim_axis_names   = ('u', 'v', 'w')[:self.ndim]
         self._bdim_normal_names = ('x', 'y', 'z')[:self.ndim]
-
-        # Eagerly allocate the kernel-mode persistent face-coefficient
-        # buffers (_ch/_cv/_cw_persist) so the ~1.5 GiB cost at 512³ fp32
-        # is paid HERE (and counted in the persistent baseline) instead of
-        # mid-step on the first fluid_step.  If the runtime timestep differs
-        # from self.dt these buffers will be reallocated on the first call,
-        # at no worse cost than the previous lazy-init path.
-        if self.ndim == 3:
-            self._init_bdim_coeff_persist_3d(self.dt)
-        else:
-            self._init_bdim_coeff_persist_2d(self.dt)
+        # Persistent device buffer for the per-step dirty rect (int32[4/6]).
+        # Allocated once; ``stage()`` copies fresh values in before each step.
+        self._bdim_rect_dev = torch.empty(2 * self.ndim, dtype=torch.int32,
+                                          device=self.device)
 
         # =====================================================================
         # Gravity body force (opt-in via the ``solver.gravity`` block).
@@ -1834,110 +1830,47 @@ class FluidSolver(PlottingMixin):
 
         mw_on = self._bdim_body_div_correction
 
-        # Lazy init persistent runners.
-        if getattr(self, '_bdim_fgraph_2d', None) is None:
-            self._bdim_fgraph_2d = BdimForcing2DGraph()
+        use_graph = u.is_cuda and not self._graph_capture_debug
 
-        # ═════════════════════════════════════════════════════════════════
-        #  Whole-step pre-Poisson graph (CUDA, constant viscosity only)
-        #
-        #  Captures SL advection + diffusion + bdim_forcing + set_BCs as
-        #  ONE wp.capture_launch, collapsing ~5 host-side capture_launch
-        #  dispatches into a single replay (~3 µs).  Gated off when the
-        #  region is not pure-Warp (variable-viscosity path uses torch
-        #  ops — torch.gradient, torch.sqrt — that can't live inside a
-        #  Warp ScopedCapture).
-        # ═════════════════════════════════════════════════════════════════
-        use_graph = (
-            u.is_cuda
-            and not self.use_variable_viscosity
-        )
-
-        if use_graph:
-            if getattr(self, '_preproj_graph_2d', None) is None:
-                self._preproj_graph_2d = WholeStepGraphRunner()
-            runner = self._preproj_graph_2d
-            bdim_runner = self._bdim_fgraph_2d
-            rect_vals = (int(d['i0']), int(d['j0']),
-                         int(d['Ai']), int(d['Aj']))
-
-            # ── Per-step init OUTSIDE the graph ──────────────────────
-            # _init_bdim_coeff_persist_2d must run BEFORE capture:
-            # it may allocate torch tensors (torch.full) which issue
-            # default-stream operations — illegal inside a
-            # wp.ScopedCapture (CUDA error 900).
-            self._init_bdim_coeff_persist_2d(timestep)
-
-            def stage():
-                # Per-step staging OUTSIDE the graph: async-copy the
-                # current dirty rect into the bdim runner's device
-                # descriptor so replays read fresh extents.
-                # Must synchronise here: the copy runs on the default
-                # stream; Warp launches later in issue() run on Warp's
-                # internal stream.  An in-flight default-stream copy
-                # would create a cross-stream dependency that is illegal
-                # when Warp internally captures a CUDA graph.
-                bdim_runner._stage_rect(rect_vals, u.device)
-                torch.cuda.synchronize(u.device)
-
-            def issue():
-                # Steps 1-2: SL advection + constant-viscosity diffusion
-                # (all pure Warp — SL runner + diffuse_add_ issue raw
-                #  launches when _gc.in_capture() is True).
-                # No upfront u0.copy_(primes): the full-grid bdim_forcing
-                # kernel writes EVERY cell of u0/v0 itself.
-                primes_loc = self.adv_diff_solver.solve(u, v, nu_t=None)
-
-                # Step 5: bdim_forcing (Warp) — fused BDIM2 + variable-
-                # density coefficients + (flag-gated) MW body-div
-                # correction.  The bdim runner issues its raw launch
-                # (self._rect_dev already staged by `stage()`).
-                bdim_forcing_2d(
-                    primes_loc[0], primes_loc[1],
-                    sdf_u, sdf_v,
-                    bU, bV,
-                    self.u0, self.v0,
-                    self._ch_persist, self._cv_persist,
-                    self._cached_float('comp_eps', comp.eps),
-                    self._cached_float('rho', self.rho),
-                    self._cached_float('dt', timestep),
-                    self._cached_float('comp_h', comp.h),
-                    int(d['i0']), int(d['j0']),
-                    int(d['Ai']), int(d['Aj']),
-                    int(self.bdim_mu0_projection),
-                    sdf_cc=(comp.sdf_val if mw_on else None),
-                    div_corr=(self._mw_div_corr_persist if mw_on else None),
-                    eps_mw=(self._cached_float('eps', self.eps) if mw_on else 1.0),
-                    inv_dx=1.0 / self._cached_float('dx', self.dx),
-                    inv_dy=1.0 / self._cached_float('dy', self.dy),
-                    runner=bdim_runner,
-                )
-
-                # Step 7: boundary conditions on the BDIM-corrected
-                # velocity (ApplyBcs2DGraphRunner raw path).
-                self.adv_diff_solver.set_BCs(self.u0, self.v0)
-
-            key = (
-                u.data_ptr(), v.data_ptr(),
-                self.u0.data_ptr(), self.v0.data_ptr(),
-                sdf_u.data_ptr(), sdf_v.data_ptr(),
-                bU.data_ptr(), bV.data_ptr(),
-                self._ch_persist.data_ptr(),
-                self._cv_persist.data_ptr(),
-                (self._mw_div_corr_persist.data_ptr() if mw_on else 0),
-                (comp.sdf_val.data_ptr()
-                 if mw_on and comp.sdf_val is not None else 0),
-                self._cached_float('dt', timestep), str(u.dtype),
-            )
-            runner.run(key, f"cuda:{u.device.index}", issue, stage)
+        # ── Lazy-init whole-step runner with correct mode ──────────
+        # The runner itself decides whether to capture a CUDA graph or
+        # run eagerly — solver.py has no branching on use_graph.
+        if getattr(self, '_preproj_graph_2d', None) is None:
+            self._preproj_graph_2d = WholeStepGraphRunner(
+                use_cuda_graph=use_graph)
         else:
-            # Eager path: CPU, or variable viscosity (Smagorinsky/Carreau
-            # uses torch.gradient etc. — not capturable by Warp).
-            nu_t   = self._compute_nu_t(u, v)
-            primes = self.adv_diff_solver.solve(u, v, nu_t=nu_t)
+            self._preproj_graph_2d._use_cuda_graph = use_graph
+        runner = self._preproj_graph_2d
+
+        # ── Shared pre-computation (CPU + CUDA) ─────────────────────
+        # Compute nu_t (Smagorinsky / Carreau) via Warp, then form the
+        # total effective viscosity nu_eff = nu + nu_t in a persistent
+        # buffer.  The torch.add is cheap on CPU; on CUDA it runs before
+        # graph capture and synchronises implicitly.
+        _nu_t_field = self._compute_nu_t(u, v)
+        if _nu_t_field is not None:
+            if (getattr(self, '_nu_eff_graph', None) is None
+                    or self._nu_eff_graph.shape != u.shape
+                    or self._nu_eff_graph.dtype != u.dtype
+                    or self._nu_eff_graph.device != u.device):
+                self._nu_eff_graph = torch.empty_like(u)
+            torch.add(float(self.nu), _nu_t_field, out=self._nu_eff_graph)
+            _nu_eff = self._nu_eff_graph
+        else:
+            _nu_eff = None
+
+        # Init persistent BDIM coefficient buffers (fallback for standalone
+        # runs; BDIMhandler normally allocates these before the fluid step).
+        if getattr(self, '_ch_persist', None) is None:
             self._init_bdim_coeff_persist_2d(timestep)
+
+        # ── Core pre-projection operations (always the same) ─────
+        # advection + diffusion + BDIM forcing + set_BCs — all pure Warp.
+        # The runner dispatches to either graph replay or eager launch.
+        def _run_preproj():
+            primes_loc = self.adv_diff_solver.solve(u, v, nu_eff=_nu_eff)
             bdim_forcing_2d(
-                primes[0], primes[1],
+                primes_loc[0], primes_loc[1],
                 sdf_u, sdf_v,
                 bU, bV,
                 self.u0, self.v0,
@@ -1954,10 +1887,38 @@ class FluidSolver(PlottingMixin):
                 eps_mw=(self._cached_float('eps', self.eps) if mw_on else 1.0),
                 inv_dx=1.0 / self._cached_float('dx', self.dx),
                 inv_dy=1.0 / self._cached_float('dy', self.dy),
-                runner=self._bdim_fgraph_2d,
+                rect_dev=self._bdim_rect_dev,
             )
-            # Step 7: boundary conditions (eager or per-runner graph).
             self.adv_diff_solver.set_BCs(self.u0, self.v0)
+
+        # ── Staging: copy the per-step dirty rect into the persistent
+        # device buffer OUTSIDE the graph capture (stable pointer, no
+        # torch ops on the default stream → no CUDA error 900).
+        # stage() is defined unconditionally; the runner only calls it
+        # when _use_cuda_graph is True, so torch.cuda.synchronize is
+        # never reached on CPU.
+        def stage():
+            self._bdim_rect_dev.copy_(torch.tensor(
+                [int(d['i0']), int(d['j0']),
+                 int(d['Ai']), int(d['Aj'])],
+                dtype=torch.int32, device=u.device))
+            torch.cuda.synchronize(u.device)
+
+        key = (
+            u.data_ptr(), v.data_ptr(),
+            self.u0.data_ptr(), self.v0.data_ptr(),
+            sdf_u.data_ptr(), sdf_v.data_ptr(),
+            bU.data_ptr(), bV.data_ptr(),
+            self._ch_persist.data_ptr(),
+            self._cv_persist.data_ptr(),
+            self._bdim_rect_dev.data_ptr(),
+            (self._mw_div_corr_persist.data_ptr() if mw_on else 0),
+            (comp.sdf_val.data_ptr()
+             if mw_on and comp.sdf_val is not None else 0),
+            self._cached_float('dt', timestep), str(u.dtype),
+        )
+        device_str = f"cuda:{u.device.index}" if u.is_cuda else "cpu"
+        runner.run(key, device_str, _run_preproj, stage)
 
         # 5b. MW body-divergence RHS correction — now written in-kernel.
         _body_div_corr = self._mw_div_corr_persist if mw_on else None
@@ -1993,7 +1954,11 @@ class FluidSolver(PlottingMixin):
         """3-D analogue of :meth:`_fluid_step_fused_2d` (adds the w axis and
         the ``k0``/``Ak`` dirty extents).  Same body-agnostic contract: the
         step consumes the staggered fields published by the preceding
-        ``composite_body.update()`` and never computes body geometry itself."""
+        ``composite_body.update()`` and never computes body geometry itself.
+
+        Whole-step pre-Poisson graph (CUDA) captures SL/convective advection
+        + diffusion + bdim_forcing + set_BCs as ONE ``wp.capture_launch``,
+        collapsing ~5 host-side captures into a single replay (~3 µs)."""
         comp  = self.composite_body
         sdf_u = getattr(comp, 'sdf_val_u', None)
         sdf_v = getattr(comp, 'sdf_val_v', None)
@@ -2009,68 +1974,117 @@ class FluidSolver(PlottingMixin):
                 "the fluid step."
             )
 
-        # 1-2. eddy viscosity + advection-diffusion.
-        # No upfront u0.copy_(primes): the full-grid bdim_forcing kernel
-        # writes EVERY cell of u0/v0/w0 itself (BDIM inside the dirty AABB,
-        # pass-through u0 = u' outside) — primes is never aliased to
-        # u0/v0/w0 (both adv-diff paths write clones / persistent _sl_out
-        # buffers).
-        nu_t   = self._compute_nu_t(u, v, w_vel)
-        primes = self.adv_diff_solver.solve(u, v, w_vel, nu_t=nu_t)
-        del nu_t
-
-        # 3. Init persistent var-dens coefficients (once / on resize).
-        self._init_bdim_coeff_persist_3d(timestep)
-
-        # 4. Dirty rect: provider-supplied narrow band, else the full grid.
+        # Dirty rect: provider-supplied narrow band, else the full grid.
         gs = self.grid_shape
         d  = getattr(comp, 'bdim_dirty', None)
         if d is None:
             d = {'i0': 0, 'j0': 0, 'k0': 0,
                  'Ai': int(gs[0]), 'Aj': int(gs[1]), 'Ak': int(gs[2])}
 
-        # 5. bdim_forcing (Warp): fused BDIM2 + variable-density coefficients
-        #    + (flag-gated) Maertens–Weymouth body-div correction, one static
-        #    full-grid launch via CUDA-graph replay (BdimForcing3DGraph).
         mw_on = self._bdim_body_div_correction
-        if getattr(self, '_bdim_fgraph_3d', None) is None:
-            self._bdim_fgraph_3d = BdimForcing3DGraph()
-        bdim_forcing_3d(
-            primes[0], primes[1], primes[2],
-            sdf_u, sdf_v, sdf_w,
-            bU, bV, bW,
-            self.u0, self.v0, self.w0,
-            self._ch_persist, self._cv_persist, self._cw_persist,
-            self._cached_float('comp_eps', comp.eps),
-            self._cached_float('rho', self.rho),
-            self._cached_float('dt', timestep),
-            self._cached_float('comp_h', comp.h),
-            int(d['i0']), int(d['j0']), int(d['k0']),
-            int(d['Ai']), int(d['Aj']), int(d['Ak']),
-            int(self.bdim_mu0_projection),
-            sdf_cc=(comp.sdf_val if mw_on else None),
-            div_corr=(self._mw_div_corr_persist if mw_on else None),
-            eps_mw=(self._cached_float('eps', self.eps) if mw_on else 1.0),
-            inv_dx=1.0 / self._cached_float('dx', self.dx),
-            inv_dy=1.0 / self._cached_float('dy', self.dy),
-            inv_dz=1.0 / self._cached_float('dz', self.dz),
-            runner=self._bdim_fgraph_3d,
-        )
 
-        # 5b. MW body-divergence RHS correction — now written in-kernel above.
+        use_graph = u.is_cuda and not self._graph_capture_debug
+
+        # ── Lazy-init whole-step runner with correct mode ──────────
+        # The runner itself decides whether to capture a CUDA graph or
+        # run eagerly — solver.py has no branching on use_graph.
+        if getattr(self, '_preproj_graph_3d', None) is None:
+            self._preproj_graph_3d = WholeStepGraphRunner(
+                use_cuda_graph=use_graph)
+        else:
+            self._preproj_graph_3d._use_cuda_graph = use_graph
+        runner = self._preproj_graph_3d
+
+        # ── Shared pre-computation (CPU + CUDA) ─────────────────────
+        # Compute nu_t (Smagorinsky / Carreau) via Warp, then form the
+        # total effective viscosity nu_eff = nu + nu_t in a persistent
+        # buffer.  The torch.add is cheap on CPU; on CUDA it runs before
+        # graph capture and synchronises implicitly.
+        _nu_t_field = self._compute_nu_t(u, v, w_vel)
+        if _nu_t_field is not None:
+            if (getattr(self, '_nu_eff_graph', None) is None
+                    or self._nu_eff_graph.shape != u.shape
+                    or self._nu_eff_graph.dtype != u.dtype
+                    or self._nu_eff_graph.device != u.device):
+                self._nu_eff_graph = torch.empty_like(u)
+            torch.add(float(self.nu), _nu_t_field, out=self._nu_eff_graph)
+            _nu_eff = self._nu_eff_graph
+        else:
+            _nu_eff = None
+
+        # Init persistent BDIM coefficient buffers (fallback for standalone
+        # runs; BDIMhandler normally allocates these before the fluid step).
+        if getattr(self, '_ch_persist', None) is None:
+            self._init_bdim_coeff_persist_3d(timestep)
+
+        # ── Core pre-projection operations (always the same) ─────
+        # advection + diffusion + BDIM forcing + set_BCs — all pure Warp.
+        # The runner dispatches to either graph replay or eager launch.
+        def _run_preproj():
+            primes_loc = self.adv_diff_solver.solve(
+                u, v, w_vel, nu_eff=_nu_eff)
+            bdim_forcing_3d(
+                primes_loc[0], primes_loc[1], primes_loc[2],
+                sdf_u, sdf_v, sdf_w,
+                bU, bV, bW,
+                self.u0, self.v0, self.w0,
+                self._ch_persist, self._cv_persist, self._cw_persist,
+                self._cached_float('comp_eps', comp.eps),
+                self._cached_float('rho', self.rho),
+                self._cached_float('dt', timestep),
+                self._cached_float('comp_h', comp.h),
+                int(d['i0']), int(d['j0']), int(d['k0']),
+                int(d['Ai']), int(d['Aj']), int(d['Ak']),
+                int(self.bdim_mu0_projection),
+                sdf_cc=(comp.sdf_val if mw_on else None),
+                div_corr=(self._mw_div_corr_persist if mw_on else None),
+                eps_mw=(self._cached_float('eps', self.eps) if mw_on else 1.0),
+                inv_dx=1.0 / self._cached_float('dx', self.dx),
+                inv_dy=1.0 / self._cached_float('dy', self.dy),
+                inv_dz=1.0 / self._cached_float('dz', self.dz),
+                rect_dev=self._bdim_rect_dev,
+            )
+            self.adv_diff_solver.set_BCs(self.u0, self.v0, self.w0)
+
+        # ── Staging: copy the per-step dirty rect into the persistent
+        # device buffer OUTSIDE the graph capture (stable pointer, no
+        # torch ops on the default stream → no CUDA error 900).
+        def stage():
+            self._bdim_rect_dev.copy_(torch.tensor(
+                [int(d['i0']), int(d['j0']), int(d['k0']),
+                 int(d['Ai']), int(d['Aj']), int(d['Ak'])],
+                dtype=torch.int32, device=u.device))
+            torch.cuda.synchronize(u.device)
+
+        key = (
+            u.data_ptr(), v.data_ptr(), w_vel.data_ptr(),
+            self.u0.data_ptr(), self.v0.data_ptr(), self.w0.data_ptr(),
+            sdf_u.data_ptr(), sdf_v.data_ptr(), sdf_w.data_ptr(),
+            bU.data_ptr(), bV.data_ptr(), bW.data_ptr(),
+            self._ch_persist.data_ptr(),
+            self._cv_persist.data_ptr(),
+            self._cw_persist.data_ptr(),
+            self._bdim_rect_dev.data_ptr(),
+            (self._mw_div_corr_persist.data_ptr() if mw_on else 0),
+            (comp.sdf_val.data_ptr()
+             if mw_on and comp.sdf_val is not None else 0),
+            self._cached_float('dt', timestep), str(u.dtype),
+        )
+        device_str = f"cuda:{u.device.index}" if u.is_cuda else "cpu"
+        runner.run(key, device_str, _run_preproj, stage)
+
+        # 5b. MW body-divergence RHS correction — now written in-kernel.
         _body_div_corr = self._mw_div_corr_persist if mw_on else None
 
         # 6. Release per-step scratch fields before the pressure projection
         #    (streaming eager path — mirrors the former temporary free).
-        del sdf_u, sdf_v, sdf_w, bU, bV, bW, primes
+        del sdf_u, sdf_v, sdf_w, bU, bV, bW
         if getattr(comp, 'bdim_fields_scratch', False):
             comp.sdf_val_u = comp.sdf_val_v = comp.sdf_val_w = None
             comp.body_u = comp.body_v = comp.body_w = None
 
-        # 7. Boundary conditions on the BDIM-corrected velocity.
-        self.adv_diff_solver.set_BCs(self.u0, self.v0, self.w0)
-
-        # 8. Pressure projection.
+        # 8. Pressure projection (set_BCs already done inside the graph/eager
+        #    branch above; no separate step 7 needed).
         out = self.project(
             self.u0, self.v0, p,
             ch=self._ch_persist, cv=self._cv_persist, cw=self._cw_persist,

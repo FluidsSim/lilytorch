@@ -325,11 +325,12 @@ def forces_method2(self, u, v, p, iteration):
 
         # CUDA-graph replay — the default readout path on CUDA.  Both
         # submethods are static-dim (deltaH's ∂H pass is a full-grid launch).
-        # Sole structural exclusion: variable viscosity builds a fresh nu_rho
-        # field per step (its pointer would dangle inside a captured graph).
+        # Variable viscosity is now graph-safe: nu_rho_field is staged into a
+        # persistent buffer inside ForcesPostGraph._stage() so its pointer
+        # is stable across steps.
         # The wrapper owns the out-zeroing and degrades to the eager launch
         # (never to wrong results) if live pointers churn.
-        _use_fgraph = u.is_cuda and not self.use_variable_viscosity
+        _use_fgraph = u.is_cuda
         if _use_fgraph:
             fg = getattr(self, '_forces_post_graph_2d', None)
             if fg is None:
@@ -585,9 +586,9 @@ def forces_method2_3d(self, u, v, w, p, iteration):
         _fsm = 1 if getattr(self, 'force_submethod', 'ndelta') == 'deltaH' else 0
         _ph_tau = (float(getattr(self, 'force_ph_blend_cells', 1.5))
                    * self._cached_float('h', self.h))
-        # CUDA-graph replay — the default readout path on CUDA; see the 2-D
-        # twin for the (sole) variable-viscosity exclusion.
-        _use_fgraph = u.is_cuda and not self.use_variable_viscosity
+        # CUDA-graph replay — the default readout path on CUDA.  Variable
+        # viscosity is now graph-safe (nu_rho staged inside ForcesPostGraph).
+        _use_fgraph = u.is_cuda
         if _use_fgraph:
             fg = getattr(self, '_forces_post_graph_3d', None)
             if fg is None:
@@ -2572,9 +2573,10 @@ class ForcesPostGraph:
     ``eager_calls`` count what actually happened so callers/benchmarks can
     verify the fast path engaged.
 
-    Caller-enforced constraint: a run-constant ``nu_rho`` buffer (constant-
-    viscosity scalar or a persistent field — a per-step temporary would
-    dangle inside the graph); the variable-viscosity branch stays eager.
+    ``nu_rho_field`` (constant or variable viscosity) is staged into a
+    persistent buffer in ``_stage()`` so the graph always sees a stable
+    pointer — this enables graph capture for Smagorinsky / Carreau runs
+    where a fresh field would otherwise be allocated each step.
     """
 
     _MAX_GRAPHS = 8
@@ -2586,15 +2588,22 @@ class ForcesPostGraph:
         self._kin_st = None        # persistent per-step staging buffers
         self._lo_st = None
         self._dim_st = None
+        self._nu_rho_staging = None  # persistent nu_rho staging (var. viscosity)
         self._graphs = {}          # pointer signature -> wp.Graph
         self._seen = {}            # pointer signature -> sighting count
         self.replays = 0
         self.captures = 0
         self.eager_calls = 0
 
-    def _stage(self, kin, aabb_lo, aabb_dim, max_vol):
+    def _stage(self, kin, aabb_lo, aabb_dim, max_vol, nu_rho_field=None):
         """Copy the per-step pose tensors into persistent staging buffers
-        (async device copies) and maintain the grow-only watermark."""
+        (async device copies) and maintain the grow-only watermark.
+
+        When ``nu_rho_field`` is provided (variable viscosity), it is staged
+        into a persistent buffer so the pointer seen by the graph is stable
+        across steps — avoiding the signature churn that would otherwise
+        prevent graph replay.
+        """
         B = int(aabb_dim.shape[0])
         if (self._kin_st is None or B != self._B
                 or self._kin_st.shape != kin.shape
@@ -2614,6 +2623,20 @@ class ForcesPostGraph:
         self._lo_st.copy_(aabb_lo)
         self._dim_st.copy_(aabb_dim)
 
+        # Stage nu_rho into a persistent buffer so its pointer is stable
+        # across steps (critical for graph capture when variable viscosity
+        # allocates a fresh nu_rho field each step).
+        if nu_rho_field is not None:
+            if (self._nu_rho_staging is None
+                    or self._nu_rho_staging.shape != nu_rho_field.shape
+                    or self._nu_rho_staging.dtype != nu_rho_field.dtype
+                    or self._nu_rho_staging.device != nu_rho_field.device):
+                self._nu_rho_staging = torch.empty_like(
+                    nu_rho_field.contiguous())
+                self._graphs.clear()
+                self._seen.clear()
+            self._nu_rho_staging.copy_(nu_rho_field)
+
     @staticmethod
     def _graph_safe(tensors):
         """All live tensors must be CUDA, contiguous and dtype-stable so the
@@ -2631,23 +2654,35 @@ class ForcesPostGraph:
         captured graph matches the live pointer signature, eagerly otherwise.
         ``grids`` is (gx, gy[, gz]); ``fields`` is (u, v[, w]).  Covers both
         submethods: n·δ is one fanned launch; deltaH adds the static
-        full-grid ∂H pressure pass (both dims are pose-independent)."""
-        self._stage(kin, aabb_lo, aabb_dim, max_vol)
+        full-grid ∂H pressure pass (both dims are pose-independent).
+
+        ``nu_rho_field`` is staged into a persistent buffer so the graph
+        always sees a stable pointer — this enables graph capture for
+        variable-viscosity (Smagorinsky / Carreau) runs where a fresh
+        field is allocated each step.
+        """
+        self._stage(kin, aabb_lo, aabb_dim, max_vol, nu_rho_field)
 
         post = (streaming_sdf_forces_post_2d_warp if self.D == 2
                 else streaming_sdf_forces_post_3d_warp)
         out_flat = out.reshape(-1)
+
+        # Use the staged nu_rho buffer (stable pointer) for graph capture
+        # and replay.  For constant viscosity this is a 1-element copy of
+        # the already-persistent scalar tensor; for variable viscosity it
+        # is a full-grid copy staged above.
+        _nu_rho_use = self._nu_rho_staging
 
         def _work():
             wp.from_torch(out_flat).zero_()
             post(F_flat, F_offsets, body_shapes, body_meta,
                  self._kin_st, self._lo_st, self._dim_st, *grids,
                  h_grid, self._max_vol, sdf_cc, interp_method,
-                 *fields, p, nu_rho_field,
+                 *fields, p, _nu_rho_use,
                  eps_body, eps_solver, cell_vol, delta_order, out,
                  int(force_submethod), float(ph_tau))
 
-        live = (*fields, p, sdf_cc, nu_rho_field, out)
+        live = (*fields, p, sdf_cc, _nu_rho_use, out)
         if not self._graph_safe(live):
             _work()
             self.eager_calls += 1

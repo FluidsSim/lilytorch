@@ -143,10 +143,9 @@ def test_mw_div_corr_fold_3d(dev, dtype):
     assert (div_corr == -333.0).sum().item() == 0     # full-grid write
 
 
-# ─── 3-D CUDA-graph runner: replay == eager over a moving-AABB run ───────────
+# ─── 3-D rect_dev: pre-allocated == per-call eager over a moving-AABB run ────
 
-def _graph_steps_bdim_3d(dtype, mw_on):
-    from lilytorch.src.bdim import BdimForcing3DGraph
+def _rectdev_steps_bdim_3d(dtype, mw_on):
     dev = "cuda:0"
     su, sv, sw, bu, bv, bw, up, vp, wp_ = [t.to(dtype) for t in _fields(dev)]
     sdf_cc = ((su + sv + sw) / 3.0).contiguous()
@@ -155,16 +154,17 @@ def _graph_steps_bdim_3d(dtype, mw_on):
     dcg = torch.zeros_like(sdf_cc) if mw_on else None
     kw = dict(eps_mw=1.7 * EPS, inv_dx=1.0 / H, inv_dy=1.0 / H,
               inv_dz=1.0 / H) if mw_on else {}
+    rect_dev = torch.empty(6, dtype=torch.int32, device=dev)
 
-    fg = BdimForcing3DGraph()
     for step in range(8):
         rect = (4 + step, 3 + step, 2 + step, 18, 16, 14)   # moving AABB
         up.add_(0.01); bu.mul_(1.001)                       # live-data check
+        rect_dev.copy_(torch.tensor(rect, dtype=torch.int32, device=dev))
         bdim_forcing_3d_warp(up, vp, wp_, su, sv, sw, bu, bv, bw,
                              u0g, v0g, w0g, chg, cvg, cwg,
                              EPS, RHO, DT, H, *rect, 1,
                              sdf_cc=(sdf_cc if mw_on else None),
-                             div_corr=dcg, runner=fg, **kw)
+                             div_corr=dcg, rect_dev=rect_dev, **kw)
         u0e, v0e, w0e = (torch.empty_like(t) for t in (up, vp, wp_))
         che, cve, cwe = chg.clone(), cvg.clone(), cwg.clone()
         dce = torch.zeros_like(sdf_cc) if mw_on else None
@@ -179,19 +179,16 @@ def _graph_steps_bdim_3d(dtype, mw_on):
             outs.append((dcg, dce))
         for a, b in outs:
             err = (a - b).abs().max().item()
-            assert err == 0.0, f"step {step}: graph vs eager err {err:.3e}"
-    return fg
+            assert err == 0.0, f"step {step}: rect_dev vs eager err {err:.3e}"
+    return rect_dev
 
 
 @SKIP_NO_CUDA
 @pytest.mark.parametrize("mw_on", [False, True], ids=["plain", "mw"])
 @pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
-def test_bdim_3d_graph_replay_eq_eager(dtype, mw_on):
-    fg = _graph_steps_bdim_3d(dtype, mw_on)
-    # step 0 eager (1st sighting), step 1 capture, steps 2-7 replay
-    assert fg.captures == 1, f"captures={fg.captures}"
-    assert fg.replays == 6, f"replays={fg.replays}"
-    assert fg.eager_calls == 1, f"eager_calls={fg.eager_calls}"
+def test_bdim_3d_rectdev_eq_eager(dtype, mw_on):
+    """Pre-allocated rect_dev produces bit-identical results to eager path."""
+    _rectdev_steps_bdim_3d(dtype, mw_on)
 
 
 # ─── solver-level MW wiring: fused step's div_corr == the method oracle ──────
@@ -351,36 +348,35 @@ def test_mw_div_corr_fold_2d(dev, dtype):
     assert (div_corr == -333.0).sum().item() == 0
 
 
-# ─── CUDA-graph runner: replay == eager over a moving-pose multi-step run ────
+# ─── rect_dev: pre-allocated == per-call eager over a moving-AABB run ────────
 
-def _graph_steps_bdim_2d(dtype, mw_on):
+def _rectdev_steps_bdim_2d(dtype, mw_on):
     """8 steps with drifting fields and a MOVING dirty rect through one
-    BdimForcing2DGraph (stable pointers → capture at step 1, replay after),
-    checked per-step against a fresh eager launch on cloned outputs."""
-    from lilytorch.src.bdim import BdimForcing2DGraph
+    pre-allocated rect_dev, checked per-step against a fresh eager launch
+    on cloned outputs."""
     dev = "cuda:0"
     su, sv, bu, bv, up, vp = [t.to(dtype) for t in _fields_2d(dev)]
     sdf_cc = (0.5 * (su + sv)).contiguous()
     ch_base = DT_2D / RHO_2D
-    # persistent runner-path buffers (pointer-stable, as in the solver)
+    # persistent buffers (pointer-stable, as in the solver)
     u0g = torch.empty_like(up); v0g = torch.empty_like(vp)
     chg = torch.full_like(up, ch_base); cvg = torch.full_like(vp, ch_base)
     dcg = torch.zeros_like(sdf_cc) if mw_on else None
     kw = dict(eps_mw=1.7 * EPS_2D, inv_dx=1.0 / H_2D, inv_dy=1.0 / H_2D) \
         if mw_on else {}
+    rect_dev = torch.empty(4, dtype=torch.int32, device=dev)
 
-    fg = BdimForcing2DGraph()
     for step in range(8):
         rect = (4 + step, 3 + step, 22, 18)      # moving dirty rect
         up.add_(0.01); bu.mul_(1.001)            # live-data check
+        rect_dev.copy_(torch.tensor(rect, dtype=torch.int32, device=dev))
         bdim_forcing_2d_warp(up, vp, su, sv, bu, bv, u0g, v0g, chg, cvg,
                              EPS_2D, RHO_2D, DT_2D, H_2D, *rect, 1,
                              sdf_cc=(sdf_cc if mw_on else None),
-                             div_corr=dcg, runner=fg, **kw)
+                             div_corr=dcg, rect_dev=rect_dev, **kw)
         # eager reference on fresh clones (chg/cvg state must match: clone)
         u0e = torch.empty_like(up); v0e = torch.empty_like(vp)
         che, cve = chg.clone(), cvg.clone()
-        # ch outside-rect state is identical by construction (untouched)
         dce = torch.zeros_like(sdf_cc) if mw_on else None
         bdim_forcing_2d_warp(up, vp, su, sv, bu, bv, u0e, v0e, che, cve,
                              EPS_2D, RHO_2D, DT_2D, H_2D, *rect, 1,
@@ -391,16 +387,13 @@ def _graph_steps_bdim_2d(dtype, mw_on):
             outs.append((dcg, dce))
         for a, b in outs:
             err = (a - b).abs().max().item()
-            assert err == 0.0, f"step {step}: graph vs eager err {err:.3e}"
-    return fg
+            assert err == 0.0, f"step {step}: rect_dev vs eager err {err:.3e}"
+    return rect_dev
 
 
 @SKIP_NO_CUDA
 @pytest.mark.parametrize("mw_on", [False, True], ids=["plain", "mw"])
 @pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
-def test_bdim_2d_graph_replay_eq_eager(dtype, mw_on):
-    fg = _graph_steps_bdim_2d(dtype, mw_on)
-    # step 0 eager (1st sighting), step 1 capture, steps 2-7 replay
-    assert fg.captures == 1, f"captures={fg.captures}"
-    assert fg.replays == 6, f"replays={fg.replays}"
-    assert fg.eager_calls == 1, f"eager_calls={fg.eager_calls}"
+def test_bdim_2d_rectdev_eq_eager(dtype, mw_on):
+    """Pre-allocated rect_dev produces bit-identical results to eager path."""
+    _rectdev_steps_bdim_2d(dtype, mw_on)

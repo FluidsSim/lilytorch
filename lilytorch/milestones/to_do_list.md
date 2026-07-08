@@ -10,24 +10,18 @@ Memory vars: `sdf_val_{u,v,w}`, `{u,v,w,p}0`, `n{x,y,z}_{u,v,w}`, `body_{u,v,w}`
 # ═══════════════════════════════════════════════════════════
 
 # questions
-- I wonder if there is a better way to capture the whole fluid step graph,
-that is, instead of capturing each individual function in the different src/
-files, there could be a high level check of all cuda kernels and compile
-them directly. Is this a possibility? This could also reduce the complexity of the
-codebase.
 
-- I wonder if with the newly implemented whole fluid step graph
-I still need to capture each individual function in the different src/
-files
 
-- can you update the
+- Simplify code, too many lines
+- I wonder if there is a more efficient strategy for lower grid sizes (GPU is not fully used).
+  For example, stacking velocities,
+- I wonder if the streaming sdf can be optimized, instead of stacking bodies sdfs based on
+the max aabb indices length. An alternative: stack bodies aabb indices and interpolation functions?
+- Is it possible to include poisson solve and force computation to the a single step cuda graph capture?
 
-- The codebase is very complex, multiple lines of code. I suggest to go step by step to
-reduce the complexity.
+- The register float32 + float64 specialisations happen sevearl times across the codebase. are these needed?
+- Unify 2d and 3d kernels into unique kernels.
 
--
-
-- Is there a
 
 # HIGH PRIORITY
 

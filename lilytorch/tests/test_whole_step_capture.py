@@ -11,7 +11,7 @@ import pytest
 import torch
 import warp as wp
 
-from lilytorch.src.graph_capture import WholeStepGraphRunner, capturing
+from lilytorch.src.graph_capture import WholeStepGraphRunner
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -77,10 +77,9 @@ def test_whole_step_capture_basic():
 
     def issue():
         issue_count[0] += 1
-        with capturing():
-            pass  # not nested — we're calling raw launches here
-        # Simulate per-kernel runners seeing in_capture() == True:
-        # they issue raw wp.launch.
+        # Per-kernel runners are pure launch wrappers — they always
+        # issue raw wp.launch (no per-kernel graph capture).  The outer
+        # wp.ScopedCapture records these launches into one graph.
         wp.launch(_add_kernel, dim=N, inputs=[wa, wb, wtmp])
         wp.launch(_scale_kernel, dim=N, inputs=[wtmp, 3.0, wout])
 

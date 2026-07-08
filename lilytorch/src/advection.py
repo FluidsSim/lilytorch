@@ -29,7 +29,6 @@ import torch
 from lilytorch.src.interpolation import RegularGridInterpolator
 
 from lilytorch.src import diffusion
-from lilytorch.src import graph_capture as _gc
 
 # apply_bcs_{2,3}d + the ApplyBcs{2,3}DGraphRunner CUDA-graph caches (used by
 # AdvDiffSolver.set_BCs) are defined in the Warp section at the bottom of this
@@ -182,7 +181,7 @@ class AdvDiffSolver:
         self.dt     = float(dt)   # ensure Python float so _dt_dh never holds tensors
         self.nu     = nu
         # Pre-convert nu to Python float (avoids GPU→CPU .item() sync in
-        # diffuse_add_ / diffuse hot paths, which would trigger CUDA error
+        # diffuse_add_ hot path, which would trigger CUDA error
         # 900 during whole-step wp.ScopedCapture).
         self._nu_float = float(nu)
 
@@ -273,6 +272,16 @@ class AdvDiffSolver:
                 f"{sorted(list(_CUDA_SCHEME_IDS.keys()) + ['semi-lagrangian', 'implicit'])}"
             )
 
+        # ---- persistent buffers for convective solve (Phase 2) --------
+        # _conv_copy[i]: full-grid copy buffer for vel[i] (flux stencil source)
+        # _conv_out[i]:  full-grid output buffer (dst = vel[i] + diff + flux)
+        # _diff_copy[i]: full-grid double-buffer for diffuse_add_
+        # _rhs_flux[i]:  interior buffer for flux-only accumulation
+        self._conv_copy = None
+        self._conv_out = None
+        self._diff_copy = None
+        self._rhs_flux = None
+
         print(f"Using the {method} method for the adv-diff equation ({self.ndim}D)")
 
     # -----------------------------------------------------------------
@@ -286,7 +295,7 @@ class AdvDiffSolver:
         self._flat_coords = []
         self._sl_axes_1d  = []   # per-comp tuple of 1-D axis tensors
         self._sl_out      = None # persistent fused-kernel output buffers
-        self._diff_out    = None # persistent diffusion interior scratch
+        self._diff_out    = None # persistent full-grid copy buffers (double-buffer diffusion)
 
         for i in range(ndim):
             # component-i lives on a grid staggered in dim i only
@@ -305,6 +314,39 @@ class AdvDiffSolver:
                 [g.flatten().clone().detach() for g in grids]
             )
 
+    # -----------------------------------------------------------------
+    # Convective-scheme persistent buffers  (Phase 2 double-buffer pattern)
+    # -----------------------------------------------------------------
+    def _init_convective_buffers(self, *vel):
+        """Ensure persistent buffers exist for each velocity component
+        (full-grid, same shape/dtype/device as *vel*).
+
+        Called once on first solve; reallocated transparently if the
+        signature changes (grid growth / dtype / device switch).
+        """
+        ndim = len(vel)
+        dev = vel[0].device
+        dtype = vel[0].dtype
+
+        def _bufs_ok(bufs):
+            return (bufs is not None
+                    and len(bufs) == ndim
+                    and all(b.shape == v.shape and b.dtype == dtype and b.device == dev
+                           for b, v in zip(bufs, vel)))
+
+        if not _bufs_ok(self._conv_copy):
+            self._conv_copy = tuple(torch.empty_like(v) for v in vel)
+        if not _bufs_ok(self._conv_out):
+            self._conv_out = tuple(torch.empty_like(v) for v in vel)
+        if not _bufs_ok(self._diff_copy):
+            self._diff_copy = tuple(torch.empty_like(v) for v in vel)
+        # _rhs_flux is interior-only (Nix x Niy [x Niz]).
+        if self._rhs_flux is None or len(self._rhs_flux) != ndim:
+            self._rhs_flux = tuple(
+                torch.empty([n - 2 for n in v.shape], dtype=dtype, device=dev)
+                for v in vel
+            )
+
     # =================================================================
     # Convective-scheme solve  (advection + diffusion, dimension-agnostic)
     # =================================================================
@@ -321,8 +363,8 @@ class AdvDiffSolver:
         """
         return self._scheme_name in _CUDA_SCHEME_IDS
 
-    def _solve_convective(self, *vel, nu_t=None, iteration=0):
-        """Forward-Euler advection-diffusion step via the fused Warp flux kernel.
+    def _solve_convective(self, *vel, nu_t=None, nu_eff=None, iteration=0):
+        """Forward-Euler advection-diffusion step — pure Warp, zero torch ops.
 
             phi^{n+1} = phi^n + dt * [-div(vel (x) phi) + diff(phi)]
 
@@ -333,54 +375,67 @@ class AdvDiffSolver:
 
         Accepts (u, v) in 2-D or (u, v, w) in 3-D.
 
-        One ``advect_flux_add`` launch per (velocity component i, spatial
-        direction d) accumulates ``dt_dh*(F_left - F_right)`` into ``rhs`` in
-        place without materialising the intermediate flux tensor.  The same
-        single-source Warp kernel runs on CPU (C++/OpenMP) and CUDA.
-
-        Lazy clone: ``vel_new[i]`` becomes a real clone only at the END of
-        iteration ``i`` (just before the ``+= rhs`` mutation); the
-        not-yet-mutated components stay aliases of the persistent ``vel``
-        (u0/v0/w0) and cost zero extra memory.
+        Uses ``diffuse_add_`` for diffusion (in-place on output) and a
+        separate flux-only accumulation, all pure-Warp graph-capturable:
+          1. ``conv_out[i] = copy(vel[i])``
+          2. ``diffuse_add_(conv_out[i], diff_copy[i], ...)``  (in-place)
+          3. ``conv_copy[i] = copy(vel[i])``  (stencil for flux)
+          4. ``zero(rhs_flux[i])``
+          5. ``advect_flux_accumulate(conv_copy[i], rhs_flux[i], vel, ...)``
+          6. ``conv_out[i][inner] += rhs_flux[i]``
         """
         ndim    = self.ndim
         vel_new = list(vel)
         inner   = _inner(ndim)
 
         scheme_id = _CUDA_SCHEME_IDS[self._scheme_name]
-        flux_add  = self._flux_runner   # CUDA-graph-cached runner (eager on CPU)
-        if self._scheme_name == 'abdquickest':
-            # ABDQUICKEST's TVD limiter C must equal the advective Courant
-            # number |u|·dt/h — one host sync (.amax()), once per step.
-            h_min     = min(self.dh)
-            umax      = float(max(v.abs().amax() for v in vel))
-            C_courant = float(min(max(umax * self.dt / h_min, 0.1), 0.99))
-        else:
-            C_courant = 0.0
+        # ABDQUICKEST uses a fixed Courant number C=0.1 — safe default that
+        # avoids the GPU→CPU sync of a live |u|·dt/h, making the flux kernel
+        # graph-capturable (no per-step varying scalar parameter).
+        C_courant = 0.1 if self._scheme_name == 'abdquickest' else 0.0
+
+        # Normalise effective viscosity: if the caller already passed a
+        # pre-computed nu_eff (graph-safe path), use it as-is; otherwise
+        # build it from nu + nu_t (eager path) or leave it None (constant).
+        if nu_eff is None and nu_t is not None:
+            nu_eff = self._nu_float + nu_t
+
+        # Ensure persistent buffers exist (lazy init, realloc on shape change).
+        self._init_convective_buffers(*vel)
 
         for i in range(ndim):
-            rhs = diffusion.diffuse(
-                vel[i], self.dt, nu=self._nu_float, nu_t=nu_t,
-                inv_dh2=self._inv_dh2, dh=self.dh,
+            # Step 1: copy vel[i] → conv_out[i] (final output buffer).
+            diffusion._copy_full_grid_eager(vel[i], self._conv_out[i])
+
+            # Step 2: in-place diffusion on output (double-buffer: copy + fused accumulate).
+            diffusion.diffuse_add_(
+                self._conv_out[i], self._diff_copy[i], self.dt,
+                dh=self.dh, nu_eff=nu_eff, nu=self._nu_float,
             )
-            for d in range(ndim):
-                fv = _face_vel(vel, i, d, ndim)
-                p  = _field_for_flux(vel[i], d, ndim)
-                flux_add(
-                    fv, p, rhs,
-                    float(self._dt_dh[d]), C_courant,
-                    scheme_id, d,
-                )
-                del fv, p
-            vel_new[i] = vel[i].clone()
-            vel_new[i][inner] += rhs
-            del rhs
+
+            # Step 3: copy vel[i] → conv_copy[i] (stencil source for flux).
+            diffusion._copy_full_grid_eager(vel[i], self._conv_copy[i])
+
+            # Step 4: zero the flux-only interior buffer.
+            diffusion._zero_interior_eager(self._rhs_flux[i])
+
+            # Step 5: advection flux into rhs_flux (interior buffer).
+            advect_flux_accumulate_warp(
+                self._conv_copy[i], self._rhs_flux[i], vel, i,
+                self._dt_dh, C_courant, scheme_id, ndim,
+            )
+
+            # Step 6: accumulate flux into output.
+            _accumulate_interior_warp(self._conv_out[i], self._rhs_flux[i], ndim)
+
+            vel_new[i] = self._conv_out[i]
+
         return tuple(vel_new)
 
     # =================================================================
     # Semi-Lagrangian solve  (Stam 1999, dimension-agnostic)
     # =================================================================
-    def _solve_semi_lagrangian(self, *vel, nu_t=None, iteration=0):
+    def _solve_semi_lagrangian(self, *vel, nu_t=None, nu_eff=None, iteration=0):
         """Unconditionally-stable advection via RK2 back-tracing (midpoint method).
 
         Uses a two-stage departure: first trace to x - 0.5*dt*u(x) (midpoint),
@@ -394,6 +449,10 @@ class AdvDiffSolver:
         Warp kernels are the sole production path (CPU + CUDA), one launch
         per solve.  The retired pure-Python interpolator reference is kept
         as a standalone oracle in ``tests/test_advection.py``.
+
+        When *nu_eff* is given (pre-computed ``nu + nu_t``), it is
+        forwarded — no torch add inside the call, safe for
+        ``wp.ScopedCapture``.
         """
         ndim = self.ndim
         if ndim not in (2, 3):
@@ -401,14 +460,18 @@ class AdvDiffSolver:
         if len(vel) != ndim:
             raise ValueError(
                 f"SL solve expects {ndim} velocity components, got {len(vel)}")
-        return self._solve_semi_lagrangian_warp(*vel, nu_t=nu_t)
+        return self._solve_semi_lagrangian_warp(*vel, nu_t=nu_t, nu_eff=nu_eff)
 
-    def _solve_semi_lagrangian_warp(self, *vel, nu_t=None):
+    def _solve_semi_lagrangian_warp(self, *vel, nu_t=None, nu_eff=None):
         """Fused semi-Lagrangian solve (2-D or 3-D) — one Warp launch
         (or CUDA-graph replay) does the full RK2 back-trace for all
         staggered components, writing into persistent output buffers
         (pointer-stable ⇒ graph-capturable).  The explicit-diffusion
-        pass stays separate (cheap)."""
+        pass stays separate (cheap).
+
+        When *nu_eff* is given (pre-computed ``nu + nu_t``), it is
+        forwarded directly to :func:`diffuse_add_` — no torch add
+        inside the call, safe for ``wp.ScopedCapture``."""
         ndim = self.ndim
         out = self._sl_out
         dev = vel[0].device
@@ -421,12 +484,11 @@ class AdvDiffSolver:
                 or out[0].dtype != dtype
                 or out[0].device != dev):
             self._sl_out = out = tuple(torch.empty_like(v) for v in vel)
-            # Persistent interior scratch for the pure-Warp diffusion accumulate
-            # (diffusion.diffuse_add_): pointer-stable ⇒ graph-capturable.
+            # Persistent full-grid copy buffers for the double-buffer
+            # diffusion accumulate (diffusion.diffuse_add_): each buffer
+            # is the same shape as the velocity field.
             self._diff_out = tuple(
-                torch.empty(diffusion.diffusion_interior_shape(v),
-                            dtype=dtype, device=dev)
-                for v in vel)
+                torch.empty_like(v) for v in vel)
             # Move grid axes to the right device/dtype once.
             flat_axes = []
             for comp_axes in self._sl_axes_1d:
@@ -439,7 +501,7 @@ class AdvDiffSolver:
             out_u, out_v = out
             gxu, gyu, gxv, gyv = self._sl_axes_dev
             iu, iv = self._interps
-            self._sl_runner(
+            sl_advect_2d_warp(
                 u, v, out_u, out_v, gxu, gyu, gxv, gyv,
                 iu._bx0, iu._by0, iu._inv_dx, iu._inv_dy,
                 iv._bx0, iv._by0, iv._inv_dx, iv._inv_dy,
@@ -451,7 +513,7 @@ class AdvDiffSolver:
             out_u, out_v, out_w = out
             (gxu, gyu, gzu, gxv, gyv, gzv, gxw, gyw, gzw) = self._sl_axes_dev
             iu, iv, iw = self._interps
-            self._sl_runner_3d(
+            sl_advect_3d_warp(
                 u, v, w, out_u, out_v, out_w,
                 gxu, gyu, gzu, gxv, gyv, gzv, gxw, gyw, gzw,
                 iu._bx0, iu._by0, iu._bz0, iu._inv_dx, iu._inv_dy, iu._inv_dz,
@@ -461,36 +523,18 @@ class AdvDiffSolver:
             )
             vel_new = [out_u, out_v, out_w]
 
+        # Normalise effective viscosity (same pattern as _solve_convective).
+        if nu_eff is None and nu_t is not None:
+            nu_eff = self._nu_float + nu_t
+
         # Explicit diffusion — pure-Warp in-place accumulate (no torch ops,
-        # graph-capturable).  Bit-identical to the former
-        # ``vel_new[i][inner] += diffusion.diffuse(...)``.
+        # graph-capturable).
         for i in range(ndim):
             diffusion.diffuse_add_(
                 vel_new[i], self._diff_out[i], self.dt,
-                nu=self._nu_float, nu_t=nu_t,
-                inv_dh2=self._inv_dh2, dh=self.dh,
+                dh=self.dh, nu_eff=nu_eff, nu=self._nu_float,
             )
         return tuple(vel_new)
-
-    @property
-    def _sl_runner(self):
-        """Lazy fused-SL launch dispatcher (2-D): CUDA-graph
-        :class:`SLAdvect2DGraphRunner`.  Cached per-solver."""
-        r = getattr(self, "_sl_graph_runner", None)
-        if r is None:
-            r = SLAdvect2DGraphRunner()
-            self._sl_graph_runner = r
-        return r
-
-    @property
-    def _sl_runner_3d(self):
-        """Lazy fused-SL launch dispatcher (3-D): CUDA-graph
-        :class:`SLAdvect3DGraphRunner`.  Cached per-solver."""
-        r = getattr(self, "_sl_graph_runner_3d", None)
-        if r is None:
-            r = SLAdvect3DGraphRunner()
-            self._sl_graph_runner_3d = r
-        return r
 
     # =================================================================
     # Boundary conditions  (dimension-agnostic)
@@ -800,34 +844,6 @@ class AdvDiffSolver:
         self._bc_fused_2d_cache = cache
         return cache
 
-    @property
-    def _bcs_runner_2d(self):
-        """Lazy Warp ``apply_bcs_2d`` graph runner (fused ghost-line BC writes)."""
-        r = getattr(self, "_bcs_graph_2d", None)
-        if r is None:
-            r = ApplyBcs2DGraphRunner()
-            self._bcs_graph_2d = r
-        return r
-
-    @property
-    def _bcs_runner_3d(self):
-        """Lazy Warp ``apply_bcs_3d`` graph runner (fused ghost-line BC writes)."""
-        r = getattr(self, "_bcs_graph_3d", None)
-        if r is None:
-            r = ApplyBcs3DGraphRunner()
-            self._bcs_graph_3d = r
-        return r
-
-    @property
-    def _flux_runner(self):
-        """Lazy flux-launch dispatcher: CUDA-graph
-        :class:`FluxAddGraphRunner`.  Cached per-solver."""
-        r = getattr(self, "_flux_graph_runner", None)
-        if r is None:
-            r = FluxAddGraphRunner()
-            self._flux_graph_runner = r
-        return r
-
     def set_BCs(self, *vel):
         """Apply Dirichlet / Neumann BCs on the ghost layer.
 
@@ -853,7 +869,7 @@ class AdvDiffSolver:
                 and vel[1].is_contiguous()
                 and vel[2].is_contiguous()):
             cache = self._build_fused_bc_cache(vel)
-            self._bcs_runner_3d(
+            apply_bcs_3d_warp(
                 vel[0], vel[1], vel[2],
                 cache["shapes"],
                 cache["neu_desc"],
@@ -875,7 +891,7 @@ class AdvDiffSolver:
                 and vel[0].is_contiguous()
                 and vel[1].is_contiguous()):
             cache = self._build_fused_bc_cache_2d(vel)
-            self._bcs_runner_2d(
+            apply_bcs_2d_warp(
                 vel[0], vel[1],
                 cache["shapes"],
                 cache["neu_desc"],
@@ -1214,115 +1230,362 @@ def advect_flux_add_warp(fv_t, p_t, rhs_t, dt_dh, C_courant, scheme_id, face_dim
     )
 
 
-# In-module alias used by the AdvDiffSolver call site above.
-advect_flux_add = advect_flux_add_warp
-
-
 # ═════════════════════════════════════════════════════════════════════════════
-#  Generic CUDA-graph-cached Warp launch runner
+#  Fused per-cell flux-accumulate kernel — one launch per velocity component.
 #
-#  Replaces the former per-kernel graph-runner classes (FluxAddGraphRunner,
-#  SLAdvect2DGraphRunner, SLAdvect3DGraphRunner) which duplicated the same
-#  ~25-line pattern.  The concrete runners are now thin factory functions
-#  that bind their eager_fn, key-builder, and optional skip/pre-check
-#  callbacks.
+#  Replaces the ``_face_vel`` + ``_field_for_flux`` + per-direction
+#  ``advect_flux_add_warp`` triple with a SINGLE kernel that reads the
+#  stencil directly from a read-only copy buffer (double-buffer pattern,
+#  same as ``diffuse_add_``), computes face velocities from the original
+#  velocity fields on the fly, and accumulates Σ_d dt_dh_d * (F_L - F_R)
+#  directly into the interior output buffer.
+#
+#  Per-cell (one thread per interior cell), loops over spatial directions
+#  internally.  2-D + 3-D unified (Nz=1 for 2-D, z-terms vanish).
+#  Scheme-specialized via ``_make_flux_accumulate_kernel`` (compile-time
+#  inlining, zero branch overhead) — one compiled kernel per scheme_id.
 # ═════════════════════════════════════════════════════════════════════════════
 
-class _WarpGraphRunner:
-    """Generic CUDA-graph-cached Warp launch — captures on the second
-    sighting of a stable pointer+scalar signature, replays thereafter.
+def _make_flux_accumulate_kernel(scheme):
+    """Build a scheme-SPECIALIZED per-cell flux-accumulate kernel.
 
-    Parameters
-    ----------
-    eager_fn : callable
-        The eager launch function (called as ``eager_fn(*args)``).
-    build_key : callable
-        ``(*args) -> hashable key``.  Typically data pointers + float
-        scalars + dtype string.
-    skip_graph : callable, optional
-        ``(*args) -> bool`` — if True, always use the eager path
-        (e.g. ABDQUICKEST's live Courant number).
-    pre_check : callable, optional
-        ``(*args) -> bool`` — if True, return early without launching
-        (e.g. zero-sized grid guard).
+    Each thread handles one interior cell.  It reads the stencil from
+    *phi_src* (full-grid copy of ``vel[comp_i]``), computes face velocities
+    from the original staggered velocity fields, evaluates the left- and
+    right-face fluxes using the inlined *scheme* ``@wp.func``, and
+    accumulates ``Σ_d dt_dh_d * (F_L - F_R)`` into ``phi_dst[tid]``.
 
-    Counters ``replays``/``captures``/``eager`` mirror the ApplyBcs runners: a
-    steady coupled run must show ``replays`` growing ~1/call once a stable
-    signature is captured (used by the profiler and the graph-replay tests).
+    Boundary handling mirrors the native ``advect_flux_add`` kernel:
+      - Leftmost interior face → CDS fallback for positive flow.
+      - Rightmost interior face → CDS fallback for negative flow.
     """
-
-    __slots__ = ("_eager_fn", "_build_key", "_skip_graph", "_pre_check",
-                 "_graphs", "_seen", "replays", "captures", "eager")
-
-    def __init__(self, eager_fn, build_key, skip_graph=None, pre_check=None):
-        self._eager_fn = eager_fn
-        self._build_key = build_key
-        self._skip_graph = skip_graph
-        self._pre_check = pre_check
-        self._graphs: dict = {}
-        self._seen: dict = {}
-        self.replays = 0
-        self.captures = 0
-        self.eager = 0
-
-    def __call__(self, *args):
-        if self._pre_check is not None and self._pre_check(*args):
+    @wp.kernel
+    def kernel(
+        phi_src: wp.array(dtype=Any),   # flat full-grid copy of vel[comp_i]
+        phi_dst: wp.array(dtype=Any),   # flat interior rhs buffer (accum. in place)
+        u_flat: wp.array(dtype=Any),    # vel[0] full grid, flat (for face velocities)
+        v_flat: wp.array(dtype=Any),    # vel[1] full grid, flat
+        w_flat: wp.array(dtype=Any),    # vel[2] full grid, flat (dummy in 2-D)
+        comp_i: int,                    # which component we are solving for
+        Nx: int, Ny: int, Nz: int,     # full grid dims (Nz=1 for 2-D)
+        Nix: int, Niy: int, Niz: int,  # interior dims
+        s_x: int, s_y: int, s_z: int,  # full-grid strides (same for all components)
+        dt_dh_0: Any, dt_dh_1: Any, dt_dh_2: Any,
+        C: Any,                        # Courant number (ABDQUICKEST only)
+    ):
+        tid = wp.tid()
+        total = Nix * Niy * Niz
+        if tid >= total:
             return
-        first = args[0]
-        if first.device.type != "cuda":
-            self.eager += 1
-            return self._eager_fn(*args)
-        if _gc.in_capture():
-            # Inside a whole-step ScopedCapture: raw launch, recorded into the
-            # outer graph (a nested capture_launch would raise CUDA err 900).
-            self.eager += 1
-            return self._eager_fn(*args)
-        if self._skip_graph is not None and self._skip_graph(*args):
-            self.eager += 1
-            return self._eager_fn(*args)
-        key = self._build_key(*args)
-        graph = self._graphs.get(key)
-        if graph is None:
-            n = self._seen.get(key, 0) + 1
-            self._seen[key] = n
-            if n < 2:        # first sighting → eager (might be a one-shot ptr)
-                self.eager += 1
-                return self._eager_fn(*args)
-            with wp.ScopedCapture(device=_wp_device(first)) as cap:
-                self._eager_fn(*args)
-            graph = cap.graph
-            self._graphs[key] = graph
-            self.captures += 1
-        self.replays += 1
-        wp.capture_launch(graph)
+
+        # Decode flat tid → interior (ix, iy, iz); z is fastest-varying.
+        iz = tid % Niz
+        ixy = tid // Niz
+        iy = ixy % Niy
+        ix = ixy // Niy
+
+        # Full-grid indices (add 1 for ghost offset).
+        gx = ix + 1
+        gy = iy + 1
+        gz = iz + 1
+
+        # Linear index into full-grid flat arrays at (gx, gy, gz).
+        c = gx * s_x + gy * s_y + gz * s_z
+
+        zero = type(phi_src[0])(0.0)
+        half = type(phi_src[0])(0.5)
+        acc = zero
+
+        # ---- direction 0 (x) ----
+        # Stencil for LEFT face (face gx-1, between cells gx-1 and gx).
+        #   pu = phi_src[gx-2, gy, gz], pc = phi_src[gx-1, gy, gz], pd = phi_src[gx, gy, gz]
+        # Stencil for RIGHT face (face gx, between cells gx and gx+1).
+        #   pu2= phi_src[gx-1, gy, gz], pc2= phi_src[gx, gy, gz], pd2= phi_src[gx+1, gy, gz]
+
+        # Face velocities at direction-0 faces.
+        #   fv from u_flat.  For self-advection: average u along x (lo=0:-1, hi=1:).
+        #   For cross-advection: average u along comp_i at x-face positions
+        #   (lo[d]=1:, hi[d]=1: → offset of +1 between fv and p face indices).
+        if comp_i == 0:
+            # self-advection: fv at midpoint between consecutive x-faces
+            fv_L = half * (u_flat[c - s_x] + u_flat[c])
+            fv_R = half * (u_flat[c] + u_flat[c + s_x])
+        elif comp_i == 1:
+            # cross (v advected by u): fv at x-face, averaged along y
+            #   fv face index = p face index + 1  (the +1 offset)
+            #   left face at x=gx-1 → fv at x=gx
+            fv_L = half * (u_flat[c - s_y] + u_flat[c])
+            fv_R = half * (u_flat[c + s_x - s_y] + u_flat[c + s_x])
+        else:  # comp_i == 2
+            # cross (w advected by u): fv at x-face, averaged along z
+            fv_L = half * (u_flat[c - s_z] + u_flat[c])
+            fv_R = half * (u_flat[c + s_x - s_z] + u_flat[c + s_x])
+
+        # ---- left face (face gx-1) ----
+        pc  = phi_src[c - s_x]      # face value at gx-1
+        pd  = phi_src[c]            # face value at gx
+        F_L = zero
+        if fv_L > zero:
+            if gx == 1:
+                # lo boundary: no upstream → CDS fallback
+                F_L = fv_L * half * (pc + pd)
+            else:
+                pu = phi_src[c - 2 * s_x]
+                F_L = fv_L * scheme(pu, pc, pd, C)
+        else:
+            # negative flow; gx is never the hi boundary for left face
+            pdd = phi_src[c + s_x]
+            F_L = fv_L * scheme(pdd, pd, pc, C)
+
+        # ---- right face (face gx) ----
+        pc2 = phi_src[c]            # face value at gx
+        pd2 = phi_src[c + s_x]      # face value at gx+1
+        F_R = zero
+        if fv_R > zero:
+            # positive flow; gx is never the lo boundary for right face
+            pu2 = phi_src[c - s_x]
+            F_R = fv_R * scheme(pu2, pc2, pd2, C)
+        else:
+            if gx == Nx - 2:
+                # hi boundary: no downstream → CDS fallback
+                F_R = fv_R * half * (pc2 + pd2)
+            else:
+                pdd2 = phi_src[c + 2 * s_x]
+                F_R = fv_R * scheme(pdd2, pd2, pc2, C)
+
+        acc = acc + dt_dh_0 * (F_L - F_R)
+
+        # ---- direction 1 (y) ----
+        if comp_i == 1:
+            # self-advection: fv at midpoint between consecutive y-faces
+            fv_L = half * (v_flat[c - s_y] + v_flat[c])
+            fv_R = half * (v_flat[c] + v_flat[c + s_y])
+        elif comp_i == 0:
+            # cross (u advected by v): fv at y-face, averaged along x
+            #   fv face index = p face index + 1
+            fv_L = half * (v_flat[c - s_x] + v_flat[c])
+            fv_R = half * (v_flat[c + s_y - s_x] + v_flat[c + s_y])
+        else:  # comp_i == 2
+            # cross (w advected by v): fv at y-face, averaged along z
+            fv_L = half * (v_flat[c - s_z] + v_flat[c])
+            fv_R = half * (v_flat[c + s_y - s_z] + v_flat[c + s_y])
+
+        # ---- left face (face gy-1) ----
+        pc  = phi_src[c - s_y]
+        pd  = phi_src[c]
+        F_L = zero
+        if fv_L > zero:
+            if gy == 1:
+                F_L = fv_L * half * (pc + pd)
+            else:
+                pu = phi_src[c - 2 * s_y]
+                F_L = fv_L * scheme(pu, pc, pd, C)
+        else:
+            pdd = phi_src[c + s_y]
+            F_L = fv_L * scheme(pdd, pd, pc, C)
+
+        # ---- right face (face gy) ----
+        pc2 = phi_src[c]
+        pd2 = phi_src[c + s_y]
+        F_R = zero
+        if fv_R > zero:
+            pu2 = phi_src[c - s_y]
+            F_R = fv_R * scheme(pu2, pc2, pd2, C)
+        else:
+            if gy == Ny - 2:
+                F_R = fv_R * half * (pc2 + pd2)
+            else:
+                pdd2 = phi_src[c + 2 * s_y]
+                F_R = fv_R * scheme(pdd2, pd2, pc2, C)
+
+        acc = acc + dt_dh_1 * (F_L - F_R)
+
+        # ---- direction 2 (z) — only if 3-D ----
+        if Nz > 1:
+            if comp_i == 2:
+                # self-advection: fv at midpoint between consecutive z-faces
+                fv_L = half * (w_flat[c - s_z] + w_flat[c])
+                fv_R = half * (w_flat[c] + w_flat[c + s_z])
+            elif comp_i == 0:
+                # cross (u advected by w): fv at z-face, averaged along x
+                #   fv face index = p face index + 1
+                fv_L = half * (w_flat[c - s_x] + w_flat[c])
+                fv_R = half * (w_flat[c + s_z - s_x] + w_flat[c + s_z])
+            else:  # comp_i == 1
+                # cross (v advected by w): fv at z-face, averaged along y
+                fv_L = half * (w_flat[c - s_y] + w_flat[c])
+                fv_R = half * (w_flat[c + s_z - s_y] + w_flat[c + s_z])
+
+            # ---- left face (face gz-1) ----
+            pc  = phi_src[c - s_z]
+            pd  = phi_src[c]
+            F_L = zero
+            if fv_L > zero:
+                if gz == 1:
+                    F_L = fv_L * half * (pc + pd)
+                else:
+                    pu = phi_src[c - 2 * s_z]
+                    F_L = fv_L * scheme(pu, pc, pd, C)
+            else:
+                pdd = phi_src[c + s_z]
+                F_L = fv_L * scheme(pdd, pd, pc, C)
+
+            # ---- right face (face gz) ----
+            pc2 = phi_src[c]
+            pd2 = phi_src[c + s_z]
+            F_R = zero
+            if fv_R > zero:
+                pu2 = phi_src[c - s_z]
+                F_R = fv_R * scheme(pu2, pc2, pd2, C)
+            else:
+                if gz == Nz - 2:
+                    F_R = fv_R * half * (pc2 + pd2)
+                else:
+                    pdd2 = phi_src[c + 2 * s_z]
+                    F_R = fv_R * scheme(pdd2, pd2, pc2, C)
+
+            acc = acc + dt_dh_2 * (F_L - F_R)
+
+        # Accumulate total flux contribution into output.
+        phi_dst[tid] = phi_dst[tid] + acc
+
+    return kernel
 
 
-# ── FluxAddGraphRunner factory ──────────────────────────────────────────────
+# One compiled kernel per scheme_id.
+_FLUX_ACCUMULATE_KERNELS = {
+    0: _make_flux_accumulate_kernel(_scheme_quick),        # QUICK
+    1: _make_flux_accumulate_kernel(_scheme_abdquickest),  # ABDQUICKEST
+    2: _make_flux_accumulate_kernel(_scheme_van_leer),     # vanLeer
+    3: _make_flux_accumulate_kernel(_scheme_cds),          # CDS
+    4: _make_flux_accumulate_kernel(_scheme_cubista),      # CUBISTA
+}
 
-def _flux_skip_graph(fv, p, rhs, dt_dh, C_courant, scheme_id, face_dim):
-    # ABDQUICKEST recomputes C_courant every step → graph would replay stale.
-    return int(scheme_id) == 1
+# Register float32 + float64 specialisations for every scheme kernel.
+for _k in _FLUX_ACCUMULATE_KERNELS.values():
+    for _dt in (wp.float32, wp.float64):
+        _A = wp.array(dtype=_dt)
+        wp.overload(_k, {
+            "phi_src": _A, "phi_dst": _A,
+            "u_flat": _A, "v_flat": _A, "w_flat": _A,
+            "dt_dh_0": _dt, "dt_dh_1": _dt, "dt_dh_2": _dt,
+            "C": _dt,
+        })
 
 
-def _flux_pre_check(fv, p, rhs, dt_dh, C_courant, scheme_id, face_dim):
-    return p.size(face_dim) - 2 <= 0
+def advect_flux_accumulate_warp(phi_src_t, phi_dst_t, vel, comp_i,
+                                 dt_dh, C_courant, scheme_id, ndim):
+    """Eager launch of the fused per-cell flux-accumulate kernel.
 
+    Reads stencil from *phi_src_t* (full-grid copy of ``vel[comp_i]``),
+    computes face velocities from *vel* (all components, original time
+    step), and accumulates ``Σ_d dt_dh[d] * (F_L - F_R)`` into
+    *phi_dst_t* (interior buffer, already holding the diffusion increment).
 
-def _flux_key(fv, p, rhs, dt_dh, C_courant, scheme_id, face_dim):
-    return (fv.data_ptr(), p.data_ptr(), rhs.data_ptr(),
-            float(dt_dh), float(C_courant), int(scheme_id), int(face_dim),
-            str(p.dtype))
-
-
-def FluxAddGraphRunner():
-    """Factory for a CUDA-graph-cached ``advect_flux_add`` runner.
-
-    Kept as a callable (was a class) for backward compatibility — callers
-    do ``FluxAddGraphRunner()`` to get a :class:`_WarpGraphRunner` instance.
+    One launch replaces the old ``_face_vel`` + ``_field_for_flux`` +
+    ``advect_flux_add_warp`` triple.
     """
-    return _WarpGraphRunner(
-        advect_flux_add_warp, _flux_key,
-        skip_graph=_flux_skip_graph, pre_check=_flux_pre_check,
+    Nx, Ny = phi_src_t.shape[0], phi_src_t.shape[1]
+    Nz = phi_src_t.shape[2] if ndim == 3 else 1
+    Nix, Niy = Nx - 2, Ny - 2
+    Niz = Nz - 2 if ndim == 3 else 1
+    n_interior = Nix * Niy * Niz
+    if n_interior <= 0:
+        return
+
+    s_x = int(phi_src_t.stride(0))
+    s_y = int(phi_src_t.stride(1))
+    s_z = int(phi_src_t.stride(2)) if ndim == 3 else 0
+
+    wpf = _wp_dtype(phi_src_t)
+    dev = _wp_device(phi_src_t)
+
+    kernel = _FLUX_ACCUMULATE_KERNELS[int(scheme_id)]
+
+    # Build flat views.  w_flat is a dummy in 2-D.
+    u_flat = _flat_cached(vel[0])
+    v_flat = _flat_cached(vel[1])
+    if ndim == 3:
+        w_flat = _flat_cached(vel[2])
+    else:
+        w_flat = u_flat  # dummy, never read
+
+    wp.launch(
+        kernel,
+        dim=n_interior,
+        inputs=[
+            _flat_cached(phi_src_t),
+            _flat_cached(phi_dst_t),
+            u_flat, v_flat, w_flat,
+            int(comp_i),
+            Nx, Ny, Nz, Nix, Niy, Niz,
+            s_x, s_y, s_z,
+            wpf(float(dt_dh[0])), wpf(float(dt_dh[1])),
+            wpf(float(dt_dh[2])) if ndim == 3 else wpf(0.0),
+            wpf(float(C_courant)),
+        ],
+        device=dev,
+    )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  Interior accumulate kernel — pure-Warp ``dst[interior] += src``.
+#
+#  Replaces ``vel_new[i][inner] += rhs`` (torch slice assignment, illegal
+#  inside ``wp.ScopedCapture``).  One launch per component, reads from the
+#  compacted interior buffer and accumulates into the full-grid output.
+# ═════════════════════════════════════════════════════════════════════════════
+
+@wp.kernel
+def accumulate_interior_kernel(
+    dst: wp.array(dtype=Any),          # flat full-grid output buffer
+    src: wp.array(dtype=Any),          # flat compacted interior buffer
+    Nx: int, Ny: int, Nz: int,
+    Nix: int, Niy: int, Niz: int,
+    s_x: int, s_y: int, s_z: int,
+):
+    """``dst[interior_cell] += src[tid]`` for each interior cell."""
+    tid = wp.tid()
+    total = Nix * Niy * Niz
+    if tid >= total:
+        return
+    iz = tid % Niz
+    ixy = tid // Niz
+    iy = ixy % Niy
+    ix = ixy // Niy
+    gx = ix + 1
+    gy = iy + 1
+    gz = iz + 1
+    c = gx * s_x + gy * s_y + gz * s_z
+    dst[c] = dst[c] + src[tid]
+
+
+for _dt in (wp.float32, wp.float64):
+    _A = wp.array(dtype=_dt)
+    wp.overload(accumulate_interior_kernel, {"dst": _A, "src": _A})
+
+
+def _accumulate_interior_warp(dst_t, src_t, ndim):
+    """Eager launch: ``dst_t[interior] += src_t`` (pure Warp, no torch ops)."""
+    Nx, Ny = dst_t.shape[0], dst_t.shape[1]
+    Nz = dst_t.shape[2] if ndim == 3 else 1
+    Nix, Niy = Nx - 2, Ny - 2
+    Niz = Nz - 2 if ndim == 3 else 1
+    n_interior = Nix * Niy * Niz
+    if n_interior <= 0:
+        return
+    s_x = int(dst_t.stride(0))
+    s_y = int(dst_t.stride(1))
+    s_z = int(dst_t.stride(2)) if ndim == 3 else 0
+    wp.launch(
+        accumulate_interior_kernel,
+        dim=n_interior,
+        inputs=[
+            _flat_cached(dst_t), _flat_cached(src_t),
+            Nx, Ny, Nz, Nix, Niy, Niz,
+            s_x, s_y, s_z,
+        ],
+        device=_wp_device(dst_t),
     )
 
 
@@ -1443,23 +1706,6 @@ def sl_advect_2d_warp(u_t, v_t, out_u_t, out_v_t, gxu, gyu, gxv, gyv,
         device=_wp_device(u_t),
     )
 
-
-def _sl2d_key(u, v, out_u, out_v, gxu, gyu, gxv, gyv,
-              u_bx0, u_by0, u_idx, u_idy,
-              v_bx0, v_by0, v_idx, v_idy, dt):
-    return (u.data_ptr(), v.data_ptr(), out_u.data_ptr(), out_v.data_ptr(),
-            gxu.data_ptr(), gyu.data_ptr(), gxv.data_ptr(), gyv.data_ptr(),
-            float(u_bx0), float(u_by0), float(u_idx), float(u_idy),
-            float(v_bx0), float(v_by0), float(v_idx), float(v_idy),
-            float(dt), tuple(u.shape), str(u.dtype))
-
-
-def SLAdvect2DGraphRunner():
-    """Factory for a CUDA-graph-cached ``sl_advect_2d`` runner.
-
-    Kept as a callable (was a class) for backward compatibility.
-    """
-    return _WarpGraphRunner(sl_advect_2d_warp, _sl2d_key)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1592,33 +1838,6 @@ def sl_advect_3d_warp(u_t, v_t, w_t, out_u_t, out_v_t, out_w_t,
         ],
         device=_wp_device(u_t),
     )
-
-
-def _sl3d_key(u, v, w, out_u, out_v, out_w,
-              gxu, gyu, gzu, gxv, gyv, gzv, gxw, gyw, gzw,
-              u_bx0, u_by0, u_bz0, u_idx, u_idy, u_idz,
-              v_bx0, v_by0, v_bz0, v_idx, v_idy, v_idz,
-              w_bx0, w_by0, w_bz0, w_idx, w_idy, w_idz, dt):
-    return (u.data_ptr(), v.data_ptr(), w.data_ptr(),
-            out_u.data_ptr(), out_v.data_ptr(), out_w.data_ptr(),
-            gxu.data_ptr(), gyu.data_ptr(), gzu.data_ptr(),
-            gxv.data_ptr(), gyv.data_ptr(), gzv.data_ptr(),
-            gxw.data_ptr(), gyw.data_ptr(), gzw.data_ptr(),
-            float(u_bx0), float(u_by0), float(u_bz0),
-            float(u_idx), float(u_idy), float(u_idz),
-            float(v_bx0), float(v_by0), float(v_bz0),
-            float(v_idx), float(v_idy), float(v_idz),
-            float(w_bx0), float(w_by0), float(w_bz0),
-            float(w_idx), float(w_idy), float(w_idz),
-            float(dt), tuple(u.shape), str(u.dtype))
-
-
-def SLAdvect3DGraphRunner():
-    """Factory for a CUDA-graph-cached ``sl_advect_3d`` runner.
-
-    Kept as a callable (was a class) for backward compatibility.
-    """
-    return _WarpGraphRunner(sl_advect_3d_warp, _sl3d_key)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1779,88 +1998,6 @@ def apply_bcs_2d_warp(u, v, shapes, neu_desc, dir_desc, dir_val,
                   device=wdev)
 
 
-class ApplyBcs2DGraphRunner:
-    """CUDA-graph-cached ``apply_bcs_2d``: the eager wrapper's per-call host floor
-    (~90 µs: ~17 µs Warp-array wrapping + 2× ~36 µs ``wp.launch`` submission) is
-    replaced by a single ``wp.capture_launch`` (~3 µs) once the (u, v, descriptor,
-    max_line) pointer signature is stable.  Ghost writes are in-place into the
-    persistent velocity fields, so there is **no extra memory** vs native.
-
-    Churn guard: a pointer signature is only captured on its **second** sighting,
-    so one-shot tensors (e.g. fresh projection outputs) stay eager and never pay
-    the (expensive) capture cost.  CPU and the unstable first-sighting path
-    delegate to :func:`apply_bcs_2d_warp` (bit-identical).
-
-    Counters (``replays``/``captures``/``eager``) are exposed for the profiler
-    and tests: after warm-up a steady coupled run must show ``replays`` growing
-    ~1/call and ``captures`` frozen at the number of stable signatures seen."""
-
-    def __init__(self):
-        self._graphs = {}   # key -> (graph, cached wp arrays)
-        self._seen = {}     # key -> sighting count
-        self.replays = 0    # wp.capture_launch replays (graph fast path)
-        self.captures = 0   # graphs captured (one per stable signature)
-        self.eager = 0      # eager fallbacks (CPU / first sighting / churn)
-
-    def __call__(self, u, v, shapes, neu_desc, dir_desc, dir_val,
-                 ref_desc, ref_val, max_line_dim):
-        N_neu = int(neu_desc.size(0)) if neu_desc is not None and neu_desc.numel() else 0
-        N_dir = int(dir_desc.size(0)) if dir_desc is not None and dir_desc.numel() else 0
-        N_ref = int(ref_desc.size(0)) if ref_desc is not None and ref_desc.numel() else 0
-        if N_neu + N_dir + N_ref == 0 or max_line_dim <= 0:
-            return
-        if u.device.type != "cuda":     # CPU: eager (no graph capture)
-            self.eager += 1
-            return apply_bcs_2d_warp(u, v, shapes, neu_desc, dir_desc, dir_val,
-                                     ref_desc, ref_val, max_line_dim)
-        if _gc.in_capture():
-            # Whole-step capture: raw launch recorded into the outer graph.
-            self.eager += 1
-            return apply_bcs_2d_warp(u, v, shapes, neu_desc, dir_desc, dir_val,
-                                     ref_desc, ref_val, max_line_dim)
-        # The op counts (N_neu/N_dir/N_ref) are baked into the captured graph's
-        # launch dims + kernel scalars, so they MUST be in the key: a pool-reused
-        # descriptor pointer with a different op count would otherwise replay a
-        # stale graph.
-        key = (u.data_ptr(), v.data_ptr(), shapes.data_ptr(),
-               neu_desc.data_ptr(), dir_desc.data_ptr(), ref_desc.data_ptr(),
-               N_neu, N_dir, N_ref, int(max_line_dim), str(u.dtype))
-        ent = self._graphs.get(key)
-        if ent is None:
-            n = self._seen.get(key, 0) + 1
-            self._seen[key] = n
-            if n < 2:        # first sighting → eager (might be a one-shot ptr)
-                self.eager += 1
-                return apply_bcs_2d_warp(u, v, shapes, neu_desc, dir_desc,
-                                         dir_val, ref_desc, ref_val, max_line_dim)
-            wdev = "cuda:0"
-            uw = wp.from_torch(u.reshape(-1)); vw = wp.from_torch(v.reshape(-1))
-            shw = wp.from_torch(shapes.reshape(-1).contiguous().to(torch.int64))
-            neu = _i32(neu_desc, wdev); dirw = _i32(dir_desc, wdev)
-            refw = _i32(ref_desc, wdev)
-            dvw = _valf(dir_val, wdev, u.dtype); rvw = _valf(ref_val, wdev, u.dtype)
-            ml = int(max_line_dim)
-
-            def _launch():
-                if N_neu + N_dir > 0:
-                    wp.launch(apply_bcs_2d_kernel, dim=(N_neu + N_dir, ml),
-                              inputs=[uw, vw, shw, neu, N_neu, dirw, dvw, N_dir,
-                                      refw, rvw, 0], device=wdev)
-                if N_ref > 0:
-                    wp.launch(apply_bcs_2d_kernel, dim=(N_ref, ml),
-                              inputs=[uw, vw, shw, neu, 0, dirw, dvw, 0,
-                                      refw, rvw, N_ref], device=wdev)
-
-            _launch()  # warm-up / JIT (idempotent ghost writes)
-            with wp.ScopedCapture(device=wdev) as cap:
-                _launch()
-            ent = (cap.graph, (uw, vw, shw, neu, dirw, refw, dvw, rvw))
-            self._graphs[key] = ent
-            self.captures += 1
-        self.replays += 1
-        wp.capture_launch(ent[0])
-
-
 @wp.kernel
 def apply_bcs_3d_kernel(
     u: wp.array(dtype=Any), v: wp.array(dtype=Any),
@@ -1983,76 +2120,4 @@ def apply_bcs_3d_warp(u, v, w, shapes, neu_desc, dir_desc, dir_val,
                   device=wdev)
 
 
-class ApplyBcs3DGraphRunner:
-    """CUDA-graph-cached ``apply_bcs_3d`` — 3-D analogue of
-    :class:`ApplyBcs2DGraphRunner`.  In-place ghost
-    writes into the persistent u/v/w fields (no extra memory); captured on the
-    second sighting of a stable (u, v, w, descriptor, face-dims) signature, eager
-    otherwise.  CPU delegates to :func:`apply_bcs_3d_warp`.
 
-    Exposes the same ``replays``/``captures``/``eager`` counters as
-    :class:`ApplyBcs2DGraphRunner`."""
-
-    def __init__(self):
-        self._graphs = {}
-        self._seen = {}
-        self.replays = 0
-        self.captures = 0
-        self.eager = 0
-
-    def __call__(self, u, v, w, shapes, neu_desc, dir_desc, dir_val,
-                 ref_desc, ref_val, max_dim0, max_dim1=None):
-        N_neu = int(neu_desc.size(0)) if neu_desc is not None and neu_desc.numel() else 0
-        N_dir = int(dir_desc.size(0)) if dir_desc is not None and dir_desc.numel() else 0
-        N_ref = int(ref_desc.size(0)) if ref_desc is not None and ref_desc.numel() else 0
-        M0 = int(max_dim0)
-        M1 = int(max_dim1) if max_dim1 is not None else M0
-        if N_neu + N_dir + N_ref == 0 or M0 <= 0 or M1 <= 0:
-            return
-        if u.device.type != "cuda":
-            self.eager += 1
-            return apply_bcs_3d_warp(u, v, w, shapes, neu_desc, dir_desc, dir_val,
-                                     ref_desc, ref_val, M0, M1)
-        if _gc.in_capture():
-            self.eager += 1
-            return apply_bcs_3d_warp(u, v, w, shapes, neu_desc, dir_desc, dir_val,
-                                     ref_desc, ref_val, M0, M1)
-        # Op counts are baked into the captured graph → part of the key (see the
-        # 2-D runner's note on stale-graph replay for a reused descriptor ptr).
-        key = (u.data_ptr(), v.data_ptr(), w.data_ptr(), shapes.data_ptr(),
-               neu_desc.data_ptr(), dir_desc.data_ptr(), ref_desc.data_ptr(),
-               N_neu, N_dir, N_ref, M0, M1, str(u.dtype))
-        ent = self._graphs.get(key)
-        if ent is None:
-            n = self._seen.get(key, 0) + 1
-            self._seen[key] = n
-            if n < 2:
-                self.eager += 1
-                return apply_bcs_3d_warp(u, v, w, shapes, neu_desc, dir_desc,
-                                         dir_val, ref_desc, ref_val, M0, M1)
-            wdev = "cuda:0"
-            uw = wp.from_torch(u.reshape(-1)); vw = wp.from_torch(v.reshape(-1))
-            ww = wp.from_torch(w.reshape(-1))
-            shw = wp.from_torch(shapes.reshape(-1).contiguous().to(torch.int64))
-            neu = _i32(neu_desc, wdev); dirw = _i32(dir_desc, wdev)
-            refw = _i32(ref_desc, wdev)
-            dvw = _valf(dir_val, wdev, u.dtype); rvw = _valf(ref_val, wdev, u.dtype)
-
-            def _launch():
-                if N_neu + N_dir > 0:
-                    wp.launch(apply_bcs_3d_kernel, dim=(N_neu + N_dir, M0, M1),
-                              inputs=[uw, vw, ww, shw, neu, N_neu, dirw, dvw,
-                                      N_dir, refw, rvw, 0], device=wdev)
-                if N_ref > 0:
-                    wp.launch(apply_bcs_3d_kernel, dim=(N_ref, M0, M1),
-                              inputs=[uw, vw, ww, shw, neu, 0, dirw, dvw, 0,
-                                      refw, rvw, N_ref], device=wdev)
-
-            _launch()
-            with wp.ScopedCapture(device=wdev) as cap:
-                _launch()
-            ent = (cap.graph, (uw, vw, ww, shw, neu, dirw, refw, dvw, rvw))
-            self._graphs[key] = ent
-            self.captures += 1
-        self.replays += 1
-        wp.capture_launch(ent[0])

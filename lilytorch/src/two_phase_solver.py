@@ -1008,8 +1008,15 @@ class TwoPhaseSolver(FluidSolver):
             vi = u_start[i].clone()
             vi[I] = mu[I] / rfi2[I]
             ads = self.adv_diff_solver
-            vi[I] = vi[I] + _diffusion.diffuse(u_start[i], dt, nu=self.nu, nu_t=nu_t,
-                                               inv_dh2=ads._inv_dh2, dh=ads.dh)
+            _nu_eff = (self.nu + nu_t) if nu_t is not None else None
+            inv_dh2 = [1.0 / (h * h) for h in ads.dh]
+            scale = float(dt) if _nu_eff is not None else float(self.nu) * float(dt)
+            # diffuse_add_ pattern with separate src (u_start[i]) / dst (vi):
+            # copy src → temp, then fused Laplacian from temp into dst.
+            _tmp = torch.empty_like(u_start[i])
+            _diffusion._copy_full_grid_eager(u_start[i], _tmp)
+            _diffusion._fused_diffuse_add_eager(_tmp, vi, scale, inv_dh2,
+                                                nu_eff_t=_nu_eff)
             out[i] = vi
 
         tp.alpha = ((r_new - ra) / (rw - ra)).clamp(0.0, 1.0)

@@ -80,6 +80,10 @@ class BDIMhandler:
         self.dtype = self.fluid_solver.dtype
         self.dtype_np = np.float64 if self.dtype == torch.float64 else np.float32
 
+        # Eagerly allocate BDIM coefficient buffers on the fluid solver so
+        # the memory cost is paid at construction time, not mid-step.
+        self._ensure_bdim_coeff_persist(self.fluid_solver.dt)
+
         # ---- bookkeeping ----
         self.data = data          # list[AnimatData] from FARMS
         self.iteration = 0
@@ -1297,6 +1301,102 @@ class BDIMhandler:
         comp.bdim_dirty = dirty
         comp.bdim_fields_scratch = not graph_mode
 
+    # ------------------------------------------------------------------
+    #  Persistent BDIM coefficient buffers  (moved from solver.py)
+    # ------------------------------------------------------------------
+    def _init_bdim_coeff_persist_2d(self, timestep):
+        """Lazy-allocate the persistent ``ch/cv`` Poisson-coefficient
+        buffers for the kernel-mode 2-D path on ``self.fluid_solver``.
+
+        Outside any immersed body ``mu0 = 1`` everywhere, so the
+        coefficients reduce to the constant ``dt / rho_fluid``.  The
+        buffers are pre-filled once with that default; the fused
+        ``bdim_forcing`` kernel overwrites only the dirty AABB sub-block
+        each step.
+        """
+        fs = self.fluid_solver
+        gs = fs.grid_shape
+        device = fs.device
+        dtype = fs.dtype
+        _dt_over_rhofluid = (fs._cached_float('dt', timestep)
+                             / fs._cached_float('rho', fs.rho))
+        needs_realloc = (
+            getattr(fs, '_ch_persist', None) is None
+            or fs._ch_persist.shape != gs
+            or fs._ch_persist.dtype != dtype
+            or fs._ch_persist.device != device
+            or getattr(fs, '_ch_outside_val', None) != _dt_over_rhofluid
+        )
+        if needs_realloc:
+            fs._ch_persist = torch.full(
+                gs, _dt_over_rhofluid, device=device, dtype=dtype)
+            fs._cv_persist = torch.full(
+                gs, _dt_over_rhofluid, device=device, dtype=dtype)
+            fs._ch_outside_val = _dt_over_rhofluid
+        if fs._bdim_body_div_correction and (
+                getattr(fs, '_mw_div_corr_persist', None) is None
+                or fs._mw_div_corr_persist.shape != gs
+                or fs._mw_div_corr_persist.dtype != dtype
+                or fs._mw_div_corr_persist.device != device):
+            fs._mw_div_corr_persist = torch.zeros(
+                gs, device=device, dtype=dtype)
+
+    def _init_bdim_coeff_persist_3d(self, timestep):
+        """Lazy-allocate the persistent ``ch/cv/cw`` Poisson-coefficient
+        buffers for the kernel-mode 3-D path on ``self.fluid_solver``.
+
+        Outside any immersed body ``mu0 = 1`` everywhere, so the
+        coefficients reduce to the constant ``dt / rho_fluid``.  The
+        buffers are pre-filled once with that default; the fused
+        ``bdim_forcing`` kernel overwrites only the dirty AABB sub-block
+        each step.
+        """
+        fs = self.fluid_solver
+        Ngx, Ngy, Ngz = fs.grid_shape
+        device = fs.device
+        dtype = fs.dtype
+        _dt_over_rhofluid = (fs._cached_float('dt', timestep)
+                             / fs._cached_float('rho', fs.rho))
+        # Face-grid shapes: each buffer covers only the staggered faces of
+        # the interior region, excluding ghost-cell rows.  The kernel writes
+        # directly into these shapes (no padded ghost-cell rows needed).
+        ch_gs = (Ngx - 1, Ngy - 2, Ngz - 2)   # x-faces: (Nx+1, Ny, Nz)
+        cv_gs = (Ngx - 2, Ngy - 1, Ngz - 2)   # y-faces: (Nx, Ny+1, Nz)
+        cw_gs = (Ngx - 2, Ngy - 2, Ngz - 1)   # z-faces: (Nx, Ny, Nz+1)
+        needs_realloc = (
+            getattr(fs, '_ch_persist', None) is None
+            or fs._ch_persist.shape != ch_gs
+            or fs._ch_persist.dtype != dtype
+            or fs._ch_persist.device != device
+            or getattr(fs, '_ch_outside_val', None) != _dt_over_rhofluid
+        )
+        if needs_realloc:
+            fs._ch_persist = torch.full(
+                ch_gs, _dt_over_rhofluid, device=device, dtype=dtype)
+            fs._cv_persist = torch.full(
+                cv_gs, _dt_over_rhofluid, device=device, dtype=dtype)
+            fs._cw_persist = torch.full(
+                cw_gs, _dt_over_rhofluid, device=device, dtype=dtype)
+            fs._ch_outside_val = _dt_over_rhofluid
+        gs = fs.grid_shape
+        if fs._bdim_body_div_correction and (
+                getattr(fs, '_mw_div_corr_persist', None) is None
+                or fs._mw_div_corr_persist.shape != gs
+                or fs._mw_div_corr_persist.dtype != dtype
+                or fs._mw_div_corr_persist.device != device):
+            fs._mw_div_corr_persist = torch.zeros(
+                gs, device=device, dtype=dtype)
+
+    def _ensure_bdim_coeff_persist(self, timestep):
+        """Dim-agnostic dispatcher: ensure BDIM coefficient buffers are
+        allocated on the fluid solver.  Called before every fluid step by
+        the BDIM handler (primary owner); the solver keeps a fallback for
+        standalone runs."""
+        if self.ndim == 3:
+            self._init_bdim_coeff_persist_3d(timestep)
+        else:
+            self._init_bdim_coeff_persist_2d(timestep)
+
     # ==================================================================
     #  apply_forces: fluid -> body forces via MuJoCo xfrc_applied
     # ==================================================================
@@ -1420,6 +1520,7 @@ class BDIMhandler:
         fs = self.fluid_solver
 
         if not fs.terminate:
+            self._ensure_bdim_coeff_persist(timestep)
             if self.ndim == 3:
                 (fs.u0, fs.v0, fs.p0, fs.w0, fs.terminate) = fs.step_(
                     fs.u0, fs.v0, fs.p0, iteration, t, w_vel=fs.w0
@@ -1470,6 +1571,7 @@ class BDIMhandler:
         """One fluid solve at the body pose currently in ``physics.data``
         (read via the ``physics`` pose source).  Sets the solver loads."""
         fs = self.fluid_solver
+        self._ensure_bdim_coeff_persist(self.pars["solver"]["dt"])
         if self.ndim == 3:
             fs.advance_and_compute_loads(fs.u0, fs.v0, fs.p0, iteration, t, w_vel=fs.w0)
         else:

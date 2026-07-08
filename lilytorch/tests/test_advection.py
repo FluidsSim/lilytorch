@@ -147,22 +147,16 @@ def test_flux_add_warp_cpu_equals_gpu(ndim, scheme_id):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-#  FluxAddGraphRunner — CUDA-graph-cached flux launches must equal eager
+#  Flux-add multi-step correctness  (formerly graph-runner tests)
 # ═════════════════════════════════════════════════════════════════════════════
 
 @SKIP_NO_CUDA
 @pytest.mark.parametrize("scheme", ["quick", "abdquickest"])
-def test_flux_graph_runner_matches_eager(scheme):
-    """A multi-step 3-D advection run with the CUDA-graph flux runner must
-    reproduce the eager run bit-for-bit (the graph bakes f32 scalars, so replay
-    is exact).  This is the guard against the ``b423298`` failure mode where a
-    graph "runs but the Warp launches are dropped": such a graph would leave rhs
-    unchanged, so the fields would NOT match eager — and the ``evolved`` check
-    below asserts the fields actually moved, so a no-op graph fails loudly.
-    ``abdquickest`` is forced onto the eager path (live Courant number); it is
-    included to confirm that exclusion still evolves correctly."""
-    import os
-    from lilytorch.src.advection import AdvDiffSolver, FluxAddGraphRunner
+def test_flux_multi_step_correctness(scheme):
+    """Multi-step 3-D advection: the solve loop must be deterministic (two
+    identical runs with the same seed must produce bit-identical results)
+    and the fields must actually evolve."""
+    from lilytorch.src.advection import AdvDiffSolver
 
     N, dev = 34, torch.device("cuda:0")
     x = torch.linspace(0.0, 1.0, N, device=dev, dtype=torch.float32)
@@ -170,55 +164,47 @@ def test_flux_graph_runner_matches_eager(scheme):
     seed = [torch.randn(N, N, N, device=dev, dtype=torch.float32) * 0.1
             for _ in range(3)]
 
-    def run(graph_on):
+    def run():
         s = AdvDiffSolver(dev, dt=1e-3, x=x, y=x.clone(), nu=1e-3,
                           z=x.clone(), method=scheme)
-        # Force the desired dispatch regardless of the LILY_FLUX_GRAPH env var.
-        from lilytorch.src import advection as _adv
-        s._flux_graph_runner = (FluxAddGraphRunner() if graph_on
-                                else _adv.advect_flux_add_warp)
         u, v, w = (f.clone() for f in seed)
-        for _ in range(25):        # ≥20 steps; runner captures on 2nd sighting
+        for _ in range(25):
             out = s.solve(u, v, w)
             u.copy_(out[0]); v.copy_(out[1]); w.copy_(out[2])
         torch.cuda.synchronize()
         return u, v, w
 
-    ue, ve, we = run(False)
-    ug, vg, wg = run(True)
+    u1, v1, w1 = run()
+    u2, v2, w2 = run()
 
-    # Fields must have actually evolved (a no-op graph would leave seed intact).
-    evolved = (ue - seed[0]).abs().max().item()
+    # Fields must have actually evolved.
+    evolved = (u1 - seed[0]).abs().max().item()
     assert evolved > 1e-3, f"fields did not evolve ({evolved:.3e}) — bad harness"
 
-    for a, b, name in ((ue, ug, "u"), (ve, vg, "v"), (we, wg, "w")):
+    # Two identical runs must be bit-identical (deterministic solver).
+    for a, b, name in ((u1, u2, "u"), (v1, v2, "v"), (w1, w2, "w")):
         d = (a - b).abs().max().item()
-        assert d == 0.0, f"graph vs eager {name} mismatch: {d:.3e} (dropped launches?)"
+        assert d == 0.0, f"run1 vs run2 {name} mismatch: {d:.3e}"
 
 
 @SKIP_NO_CUDA
-def test_flux_graph_runner_replays_after_warmup():
-    """The flux runner must actually take the graph fast path in a steady solve
-    loop — not silently stay eager because the rhs pointer churns.  After warm-up
-    ``replays`` must be positive and at least the number of captured graphs (each
-    stable (component, direction) signature is captured once then replayed)."""
-    from lilytorch.src.advection import AdvDiffSolver, FluxAddGraphRunner
+def test_flux_solve_loop_stability():
+    """Steady solve loop runs without errors through the raw-launch path."""
+    from lilytorch.src.advection import AdvDiffSolver
     N, dev = 24, torch.device("cuda:0")
     x = torch.linspace(0.0, 1.0, N, device=dev, dtype=torch.float32)
     torch.manual_seed(0)
     s = AdvDiffSolver(dev, dt=1e-3, x=x, y=x.clone(), nu=1e-3,
                       z=x.clone(), method="quick")
-    runner = FluxAddGraphRunner()
-    s._flux_graph_runner = runner
     u, v, w = (torch.randn(N, N, N, device=dev, dtype=torch.float32) * 0.1
                for _ in range(3))
     for _ in range(6):
         out = s.solve(u, v, w)
         u.copy_(out[0]); v.copy_(out[1]); w.copy_(out[2])
     torch.cuda.synchronize()
-    assert runner.captures > 0, "flux runner never captured a graph (pointer churn?)"
-    assert runner.replays >= runner.captures, (
-        f"replays={runner.replays} < captures={runner.captures} — graphs not reused")
+    # Verify the final velocities are finite and non-zero (solve worked).
+    assert u.isfinite().all(), "velocity diverged"
+    assert (u.abs().max() > 0).item(), "velocity is all zero"
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -360,45 +346,32 @@ def test_apply_bcs_3d_noncubic_dual_facedims():
 
 @SKIP_NO_CUDA
 @pytest.mark.parametrize("f32", [False, True], ids=["f64", "f32"])
-def test_apply_bcs_2d_graph_replay_eq_eager(f32):
-    from lilytorch.src.advection import ApplyBcs2DGraphRunner
+def test_apply_bcs_2d_deterministic(f32):
     u0, v0, shapes, neu, dird, dirv, refd, refv, ml = _bcs_problem_2d("cuda:0")
     if f32:
         u0 = u0.float(); v0 = v0.float(); dirv = dirv.float(); refv = refv.float()
 
     K = 8
     torch.manual_seed(1)
-    # Deterministic in-place interior perturbations so the Neumann/reflective
-    # ghost writes (which read the interior) actually change step to step —
-    # identically for both runs — while the buffer pointer stays fixed.
     noise = [torch.randn_like(u0) for _ in range(K)]
 
-    def run(use_graph):
+    def run():
         u = u0.clone().contiguous(); v = v0.clone().contiguous()
-        runner = ApplyBcs2DGraphRunner() if use_graph else None
         for k in range(K):
             u.add_(noise[k]); v.add_(noise[k])
-            if use_graph:
-                runner(u, v, shapes, neu, dird, dirv, refd, refv, ml)
-            else:
-                apply_bcs_2d_warp(u, v, shapes, neu, dird, dirv, refd, refv, ml)
+            apply_bcs_2d_warp(u, v, shapes, neu, dird, dirv, refd, refv, ml)
         wp.synchronize()
-        return u, v, runner
+        return u, v
 
-    ue, ve, _ = run(False)
-    ug, vg, runner = run(True)
-    du = (ue - ug).abs().max().item(); dv = (ve - vg).abs().max().item()
-    assert du == 0.0 and dv == 0.0, f"graph vs eager maxdiff u={du:.3e} v={dv:.3e}"
-    # Stable signature: call 1 eager (first sighting), calls 2..K replay.
-    assert runner.captures == 1, f"captures={runner.captures} (expected 1)"
-    assert runner.eager == 1, f"eager={runner.eager} (expected 1)"
-    assert runner.replays == K - 1, f"replays={runner.replays} (expected {K-1})"
+    u1, v1 = run()
+    u2, v2 = run()
+    du = (u1 - u2).abs().max().item(); dv = (v1 - v2).abs().max().item()
+    assert du == 0.0 and dv == 0.0, f"non-deterministic u={du:.3e} v={dv:.3e}"
 
 
 @SKIP_NO_CUDA
 @pytest.mark.parametrize("f32", [False, True], ids=["f64", "f32"])
-def test_apply_bcs_3d_graph_replay_eq_eager(f32):
-    from lilytorch.src.advection import ApplyBcs3DGraphRunner
+def test_apply_bcs_3d_deterministic(f32):
     u0, v0, w0, shapes, neu, dird, dirv, refd, refv, M = _bcs_problem_3d("cuda:0")
     if f32:
         u0 = u0.float(); v0 = v0.float(); w0 = w0.float()
@@ -408,36 +381,26 @@ def test_apply_bcs_3d_graph_replay_eq_eager(f32):
     torch.manual_seed(2)
     noise = [torch.randn_like(u0) for _ in range(K)]
 
-    def run(use_graph):
+    def run():
         u = u0.clone().contiguous(); v = v0.clone().contiguous()
         w = w0.clone().contiguous()
-        runner = ApplyBcs3DGraphRunner() if use_graph else None
         for k in range(K):
             u.add_(noise[k]); v.add_(noise[k]); w.add_(noise[k])
-            if use_graph:
-                runner(u, v, w, shapes, neu, dird, dirv, refd, refv, M, M)
-            else:
-                apply_bcs_3d_warp(u, v, w, shapes, neu, dird, dirv, refd, refv, M, M)
+            apply_bcs_3d_warp(u, v, w, shapes, neu, dird, dirv, refd, refv, M, M)
         wp.synchronize()
-        return u, v, w, runner
+        return u, v, w
 
-    ue, ve, we, _ = run(False)
-    ug, vg, wg, runner = run(True)
-    for a, b, nm in ((ue, ug, "u"), (ve, vg, "v"), (we, wg, "w")):
+    u1, v1, w1 = run()
+    u2, v2, w2 = run()
+    for a, b, nm in ((u1, u2, "u"), (v1, v2, "v"), (w1, w2, "w")):
         d = (a - b).abs().max().item()
-        assert d == 0.0, f"graph vs eager {nm} mismatch: {d:.3e} (dropped launches?)"
-    assert runner.captures == 1, f"captures={runner.captures} (expected 1)"
-    assert runner.eager == 1, f"eager={runner.eager} (expected 1)"
-    assert runner.replays == K - 1, f"replays={runner.replays} (expected {K-1})"
+        assert d == 0.0, f"non-deterministic {nm}: {d:.3e}"
 
 
 @SKIP_NO_CUDA
-def test_apply_bcs_2d_graph_recaptures_on_new_dtype():
-    """A single runner instance handles both dtypes: ``str(u.dtype)`` is in the
-    signature key, so an f64 signature never replays an f32 graph.  Both dtypes
-    stay correct and each captures its own graph."""
-    from lilytorch.src.advection import ApplyBcs2DGraphRunner
-    runner = ApplyBcs2DGraphRunner()
+def test_apply_bcs_2d_multi_dtype():
+    """apply_bcs_2d_warp handles both f32 and f64 correctly, and repeated
+    calls are idempotent (same inputs → same outputs)."""
     for dt in (torch.float64, torch.float32):
         u0, v0, shapes, neu, dird, dirv, refd, refv, ml = _bcs_problem_2d("cuda:0")
         if dt == torch.float32:
@@ -445,12 +408,11 @@ def test_apply_bcs_2d_graph_recaptures_on_new_dtype():
         u = u0.clone().contiguous(); v = v0.clone().contiguous()
         ue = u.clone(); ve = v.clone()
         for _ in range(4):
-            runner(u, v, shapes, neu, dird, dirv, refd, refv, ml)
+            apply_bcs_2d_warp(u, v, shapes, neu, dird, dirv, refd, refv, ml)
             apply_bcs_2d_warp(ue, ve, shapes, neu, dird, dirv, refd, refv, ml)
         wp.synchronize()
         assert (u - ue).abs().max().item() == 0.0
         assert (v - ve).abs().max().item() == 0.0
-    assert runner.captures == 2, f"captures={runner.captures} (expected one per dtype)"
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -463,8 +425,6 @@ def test_apply_bcs_2d_graph_recaptures_on_new_dtype():
 from lilytorch.src.advection import (
     AdvDiffSolver,
     _inner,
-    SLAdvect2DGraphRunner,
-    SLAdvect3DGraphRunner,
 )
 from lilytorch.src import diffusion
 
@@ -498,10 +458,12 @@ def _sl_python_oracle(solver, *vel, nu_t=None):
         ]
         vel_new[i] = solver._interps[i](*departure).reshape(shape).clone()
     inner = _inner(ndim)
+    _nu_eff = (solver.nu + nu_t) if nu_t is not None else None
     for i in range(ndim):
-        vel_new[i][inner] += diffusion.diffuse(
-            vel_new[i], solver.dt, nu=solver.nu, nu_t=nu_t,
-            inv_dh2=solver._inv_dh2, dh=solver.dh,
+        _copy_buf = torch.empty_like(vel_new[i])
+        diffusion.diffuse_add_(
+            vel_new[i], _copy_buf, solver.dt,
+            dh=solver.dh, nu_eff=_nu_eff, nu=solver.nu,
         )
     return tuple(vel_new)
 
@@ -573,35 +535,29 @@ def test_sl_dispatch_takes_warp_path_2d(dev):
 
 
 @SKIP_NO_CUDA
-def test_sl_graph_runner_matches_eager():
-    """Multi-step SL run with the CUDA-graph runner must reproduce the eager
-    kernel run bit-for-bit (same kernel, baked pointers).  Mirrors
-    test_flux_graph_runner_matches_eager, including the guard against the
-    ``b423298`` dropped-launch failure mode: a no-op graph would leave the
-    persistent out-buffers stale, caught by both the eager comparison and
-    the ``evolved`` check."""
+def test_sl_multi_step_deterministic_2d():
+    """Multi-step 2-D SL solve: two identical runs must be bit-identical
+    and the fields must actually evolve."""
     from lilytorch.src import advection as _adv
 
-    def run(graph_on):
+    def run():
         s, u, v = _sl_solver_2d("cuda:0", torch.float32)
-        s._sl_graph_runner = (SLAdvect2DGraphRunner() if graph_on
-                              else _adv.sl_advect_2d_warp)
         u0, v0 = u.clone(), v.clone()
-        for _ in range(25):        # runner captures on 2nd sighting
+        for _ in range(25):
             out = s.solve(u, v)
             u.copy_(out[0]); v.copy_(out[1])
         torch.cuda.synchronize()
         return u0, u.clone(), v.clone()
 
-    seed_u, ue, ve = run(False)
-    _, ug, vg = run(True)
+    seed_u, u1, v1 = run()
+    _, u2, v2 = run()
 
-    evolved = (ue - seed_u).abs().max().item()
+    evolved = (u1 - seed_u).abs().max().item()
     assert evolved > 1e-3, f"fields did not evolve ({evolved:.3e}) — bad harness"
 
-    for a, b, name in ((ue, ug, "u"), (ve, vg, "v")):
+    for a, b, name in ((u1, u2, "u"), (v1, v2, "v")):
         d = (a - b).abs().max().item()
-        assert d == 0.0, f"graph vs eager {name} mismatch: {d:.3e} (dropped launches?)"
+        assert d == 0.0, f"run1 vs run2 {name} mismatch: {d:.3e}"
 
 
 def test_sl_warp_path_always_taken(monkeypatch):
@@ -691,28 +647,26 @@ def test_sl_dispatch_takes_warp_path_3d(dev):
 
 
 @SKIP_NO_CUDA
-def test_sl_graph_runner_matches_eager_3d():
-    """Multi-step 3-D SL run with the CUDA-graph runner must reproduce the
-    eager kernel run bit-for-bit."""
+def test_sl_multi_step_deterministic_3d():
+    """Multi-step 3-D SL solve: two identical runs must be bit-identical
+    and the fields must actually evolve."""
     from lilytorch.src import advection as _adv
 
-    def run(graph_on):
+    def run():
         s, u, v, w = _sl_solver_3d("cuda:0", torch.float32)
-        s._sl_graph_runner_3d = (SLAdvect3DGraphRunner() if graph_on
-                                 else _adv.sl_advect_3d_warp)
         u0, v0, w0 = u.clone(), v.clone(), w.clone()
-        for _ in range(25):        # runner captures on 2nd sighting
+        for _ in range(25):
             out = s.solve(u, v, w)
             u.copy_(out[0]); v.copy_(out[1]); w.copy_(out[2])
         torch.cuda.synchronize()
         return u0, u.clone(), v.clone(), w.clone()
 
-    seed_u, ue, ve, we = run(False)
-    _, ug, vg, wg = run(True)
+    seed_u, u1, v1, w1 = run()
+    _, u2, v2, w2 = run()
 
-    evolved = (ue - seed_u).abs().max().item()
+    evolved = (u1 - seed_u).abs().max().item()
     assert evolved > 1e-3, f"3-D fields did not evolve ({evolved:.3e}) — bad harness"
 
-    for a, b, name in ((ue, ug, "u"), (ve, vg, "v"), (we, wg, "w")):
+    for a, b, name in ((u1, u2, "u"), (v1, v2, "v"), (w1, w2, "w")):
         d = (a - b).abs().max().item()
-        assert d == 0.0, f"graph vs eager {name} mismatch: {d:.3e} (dropped launches?)"
+        assert d == 0.0, f"run1 vs run2 {name} mismatch: {d:.3e}"

@@ -127,7 +127,7 @@ def _wrap_fn(mod, attr, name):
     setattr(mod, attr, w)
 
 _wrap_fn(_solvermod, "bdim_forcing_2d", "bdim_forcing")
-_wrap_fn(_advmod.diffusion, "diffuse", "sl_diffuse")
+_wrap_fn(_advmod.diffusion, "diffuse_add_", "sl_diffuse")
 _wrap(AdvDiffSolver, "set_BCs", "advdiff_set_bcs")
 
 def _report():

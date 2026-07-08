@@ -45,7 +45,6 @@ from typing import Any
 import warp as wp
 import torch
 
-from lilytorch.src import graph_capture as _gc
 
 wp.init()
 
@@ -338,7 +337,7 @@ def bdim_forcing_3d_warp(
         mu0_projection=1,
         sdf_cc=None, div_corr=None,
         eps_mw=1.0, inv_dx=0.0, inv_dy=0.0, inv_dz=0.0,
-        runner=None):
+        rect_dev=None):
     """Warp port of ``bdim_forcing_3d`` — static full-grid launch.
 
     Inside the dirty AABB: writes the BDIM2 velocity into ``u0/v0/w0`` and
@@ -353,26 +352,19 @@ def bdim_forcing_3d_warp(
     correction ``(1 - mu0_cc) * div(u_body)`` into ``div_corr`` — the fused
     replacement for ``FluidSolver._mw_body_div_correction``.
 
-    ``runner`` (a :class:`BdimForcing3DGraph`) routes the launch through
-    CUDA-graph replay with device-side dirty-rect staging; ``None`` launches
-    eagerly with a per-call rect tensor.  The kernel allocates **no** global
-    scratch — mu/normals stay in registers.
+    ``rect_dev`` is an optional pre-allocated ``int32`` device tensor of
+    length 6 ``[i0, j0, k0, Ai, Aj, Ak]`` (pointer-stable for CUDA-graph
+    capture).  When *None*, a new tensor is allocated per call (eager path).
+    The kernel allocates **no** global scratch — mu/normals stay in registers.
     """
-    if runner is not None:
-        return runner.run(
-            u_prime, v_prime, w_prime, sdf_u, sdf_v, sdf_w,
-            body_u, body_v, body_w, u0, v0, w0, ch, cv, cw,
-            eps, rho_f, dt, h_grid,
-            dirty_i0, dirty_j0, dirty_k0, dirty_Ai, dirty_Aj, dirty_Ak,
-            mu0_projection, sdf_cc, div_corr, eps_mw, inv_dx, inv_dy, inv_dz)
-
     mw_on = 1 if div_corr is not None else 0
     if div_corr is None:
         sdf_cc = div_corr = u0.new_zeros(1)
-    rect_dev = torch.tensor(
-        [int(dirty_i0), int(dirty_j0), int(dirty_k0),
-         int(dirty_Ai), int(dirty_Aj), int(dirty_Ak)],
-        dtype=torch.int32, device=u0.device)
+    if rect_dev is None:
+        rect_dev = torch.tensor(
+            [int(dirty_i0), int(dirty_j0), int(dirty_k0),
+             int(dirty_Ai), int(dirty_Aj), int(dirty_Ak)],
+            dtype=torch.int32, device=u0.device)
     _bdim_forcing_3d_launch(
         u_prime, v_prime, w_prime, sdf_u, sdf_v, sdf_w,
         body_u, body_v, body_w, u0, v0, w0, ch, cv, cw,
@@ -600,7 +592,7 @@ def bdim_forcing_2d_warp(
         mu0_projection=1,
         sdf_cc=None, div_corr=None,
         eps_mw=1.0, inv_dx=0.0, inv_dy=0.0,
-        runner=None):
+        rect_dev=None):
     """Warp port of ``bdim_forcing_2d`` — static full-grid launch.
 
     Inside the dirty AABB: writes the BDIM2 velocity into ``u0/v0`` and the
@@ -616,24 +608,17 @@ def bdim_forcing_2d_warp(
     ``div_corr`` — the fused replacement for
     ``FluidSolver._mw_body_div_correction``.
 
-    ``runner`` (a :class:`BdimForcing2DGraph`) routes the launch through
-    CUDA-graph replay with device-side dirty-rect staging; ``None`` launches
-    eagerly with a per-call rect tensor.
+    ``rect_dev`` is an optional pre-allocated ``int32`` device tensor of
+    length 4 ``[i0, j0, Ai, Aj]`` (pointer-stable for CUDA-graph capture).
+    When *None*, a new tensor is allocated per call (eager path).
     """
-    if runner is not None:
-        return runner.run(
-            u_prime, v_prime, sdf_u, sdf_v, body_u, body_v,
-            u0, v0, ch, cv,
-            eps, rho_f, dt, h_grid,
-            dirty_i0, dirty_j0, dirty_Ai, dirty_Aj,
-            mu0_projection, sdf_cc, div_corr, eps_mw, inv_dx, inv_dy)
-
     mw_on = 1 if div_corr is not None else 0
     if div_corr is None:
         sdf_cc = div_corr = u0.new_zeros(1)
-    rect_dev = torch.tensor(
-        [int(dirty_i0), int(dirty_j0), int(dirty_Ai), int(dirty_Aj)],
-        dtype=torch.int32, device=u0.device)
+    if rect_dev is None:
+        rect_dev = torch.tensor(
+            [int(dirty_i0), int(dirty_j0), int(dirty_Ai), int(dirty_Aj)],
+            dtype=torch.int32, device=u0.device)
     _bdim_forcing_2d_launch(
         u_prime, v_prime, sdf_u, sdf_v, body_u, body_v,
         u0, v0, ch, cv, sdf_cc, div_corr, rect_dev,
@@ -641,163 +626,4 @@ def bdim_forcing_2d_warp(
         mu0_projection, mw_on)
 
 
-class _BdimForcingGraphBase:
-    """CUDA-graph replay around the full-grid ``bdim_forcing_{2,3}d`` launch.
 
-    The launch dim is the (static) full grid; the only per-step non-tensor
-    input is the dirty AABB, which is staged into a persistent device int32
-    descriptor ([i0,j0,Ai,Aj] 2-D / [i0,j0,k0,Ai,Aj,Ak] 3-D) with an async
-    pinned-host ``copy_`` — no host sync, and the captured graph reads the
-    fresh rect on every replay (same staging pattern as
-    ``forces.ForcesPostGraph._stage``).
-
-    Graphs are keyed on the live-tensor pointer signature plus the frozen
-    scalars (eps/rho/dt/h/mw parameters, mu0_proj, grid shape, dtype) and
-    captured on a signature's 2nd sighting, up to ``_MAX_GRAPHS`` distinct
-    signatures; a churning signature stays on the eager launch (correct, just
-    not accelerated).  ``replays``/``captures``/``eager_calls`` count what
-    actually happened.
-    """
-
-    _MAX_GRAPHS = 8
-    _RECT_LEN = 4                  # 6 in 3-D
-
-    def __init__(self):
-        self._rect_host = None     # pinned int32 staging
-        self._rect_np = None       # numpy view of the pinned buffer
-        self._rect_dev = None      # device int32 descriptor
-        self._dummy = None         # persistent 1-elem stand-in when MW is off
-        self._graphs = {}          # signature -> wp.Graph
-        self._seen = {}            # signature -> sighting count
-        self.replays = 0
-        self.captures = 0
-        self.eager_calls = 0
-
-    def _stage_rect(self, rect_vals, device):
-        n = self._RECT_LEN
-        if self._rect_dev is None or self._rect_dev.device != device:
-            self._rect_host = torch.empty(n, dtype=torch.int32,
-                                          pin_memory=True)
-            self._rect_np = self._rect_host.numpy()
-            self._rect_dev = torch.empty(n, dtype=torch.int32, device=device)
-            self._graphs.clear()
-            self._seen.clear()
-        self._rect_np[:] = rect_vals
-        self._rect_dev.copy_(self._rect_host, non_blocking=True)
-
-    def _mw_dummy(self, ref):
-        if (self._dummy is None or self._dummy.device != ref.device
-                or self._dummy.dtype != ref.dtype):
-            self._dummy = torch.zeros(1, dtype=ref.dtype, device=ref.device)
-        return self._dummy
-
-    def _dispatch(self, live, rect_vals, scalar_sig, launch):
-        """Shared eager/capture/replay logic.  ``launch(rect_dev)`` performs
-        the raw full-grid launch; ``live`` is the tuple of tensors whose
-        pointers key the graph; ``scalar_sig`` the frozen non-tensor args."""
-        ref = live[0]
-        if not all(t.is_cuda and t.is_contiguous() for t in live):
-            # CPU / non-contiguous: eager launch with a per-call rect.
-            launch(torch.tensor(list(rect_vals), dtype=torch.int32,
-                                device=ref.device))
-            self.eager_calls += 1
-            return
-
-        if _gc.in_capture():
-            # Whole-step ScopedCapture: the outer runner has ALREADY staged the
-            # current dirty rect into ``self._rect_dev`` (the numpy host write
-            # must stay OUTSIDE the graph, else replays copy a frozen rect).
-            # Raw launch, recorded into the outer graph.
-            launch(self._rect_dev)
-            self.eager_calls += 1
-            return
-
-        self._stage_rect(rect_vals, ref.device)
-
-        sig = (tuple(t.data_ptr() for t in live), scalar_sig)
-        g = self._graphs.get(sig)
-        if g is not None:
-            wp.capture_launch(g)
-            self.replays += 1
-            return
-
-        n = self._seen.get(sig, 0) + 1
-        self._seen[sig] = n
-        if n >= 2 and len(self._graphs) < self._MAX_GRAPHS:
-            # This step's real work first (also JIT/module warm-up): stream
-            # capture RECORDS without executing, so capturing alone would
-            # leave this step's outputs stale.
-            launch(self._rect_dev)
-            with wp.ScopedCapture(device=str(ref.device)) as cap:
-                launch(self._rect_dev)
-            self._graphs[sig] = cap.graph
-            self.captures += 1
-        else:
-            launch(self._rect_dev)
-            self.eager_calls += 1
-
-
-class BdimForcing2DGraph(_BdimForcingGraphBase):
-    _RECT_LEN = 4
-
-    def run(self, u_prime, v_prime, sdf_u, sdf_v, body_u, body_v,
-            u0, v0, ch, cv,
-            eps, rho_f, dt, h_grid,
-            dirty_i0, dirty_j0, dirty_Ai, dirty_Aj,
-            mu0_projection, sdf_cc, div_corr, eps_mw, inv_dx, inv_dy):
-        mw_on = 1 if div_corr is not None else 0
-        if div_corr is None:
-            sdf_cc = div_corr = self._mw_dummy(u0)
-
-        live = (u_prime, v_prime, sdf_u, sdf_v, body_u, body_v,
-                u0, v0, ch, cv, sdf_cc, div_corr)
-
-        def launch(rect_dev):
-            _bdim_forcing_2d_launch(
-                u_prime, v_prime, sdf_u, sdf_v, body_u, body_v,
-                u0, v0, ch, cv, sdf_cc, div_corr, rect_dev,
-                eps, rho_f, dt, h_grid, eps_mw, inv_dx, inv_dy,
-                mu0_projection, mw_on)
-
-        scalar_sig = (float(eps), float(rho_f), float(dt), float(h_grid),
-                      float(eps_mw), float(inv_dx), float(inv_dy),
-                      int(mu0_projection), mw_on, tuple(u0.shape), u0.dtype)
-        self._dispatch(
-            live, (int(dirty_i0), int(dirty_j0),
-                   int(dirty_Ai), int(dirty_Aj)),
-            scalar_sig, launch)
-
-
-class BdimForcing3DGraph(_BdimForcingGraphBase):
-    _RECT_LEN = 6
-
-    def run(self, u_prime, v_prime, w_prime, sdf_u, sdf_v, sdf_w,
-            body_u, body_v, body_w, u0, v0, w0, ch, cv, cw,
-            eps, rho_f, dt, h_grid,
-            dirty_i0, dirty_j0, dirty_k0, dirty_Ai, dirty_Aj, dirty_Ak,
-            mu0_projection, sdf_cc, div_corr,
-            eps_mw, inv_dx, inv_dy, inv_dz):
-        mw_on = 1 if div_corr is not None else 0
-        if div_corr is None:
-            sdf_cc = div_corr = self._mw_dummy(u0)
-
-        live = (u_prime, v_prime, w_prime, sdf_u, sdf_v, sdf_w,
-                body_u, body_v, body_w, u0, v0, w0, ch, cv, cw,
-                sdf_cc, div_corr)
-
-        def launch(rect_dev):
-            _bdim_forcing_3d_launch(
-                u_prime, v_prime, w_prime, sdf_u, sdf_v, sdf_w,
-                body_u, body_v, body_w, u0, v0, w0, ch, cv, cw,
-                sdf_cc, div_corr, rect_dev,
-                eps, rho_f, dt, h_grid, eps_mw, inv_dx, inv_dy, inv_dz,
-                mu0_projection, mw_on)
-
-        scalar_sig = (float(eps), float(rho_f), float(dt), float(h_grid),
-                      float(eps_mw), float(inv_dx), float(inv_dy),
-                      float(inv_dz),
-                      int(mu0_projection), mw_on, tuple(u0.shape), u0.dtype)
-        self._dispatch(
-            live, (int(dirty_i0), int(dirty_j0), int(dirty_k0),
-                   int(dirty_Ai), int(dirty_Aj), int(dirty_Ak)),
-            scalar_sig, launch)
