@@ -29,6 +29,7 @@ import torch
 from lilytorch.src.interpolation import RegularGridInterpolator
 
 from lilytorch.src import diffusion
+from lilytorch.src import native
 
 # apply_bcs_{2,3}d + the ApplyBcs{2,3}DGraphRunner CUDA-graph caches (used by
 # AdvDiffSolver.set_BCs) are defined in the Warp section at the bottom of this
@@ -501,7 +502,7 @@ class AdvDiffSolver:
             out_u, out_v = out
             gxu, gyu, gxv, gyv = self._sl_axes_dev
             iu, iv = self._interps
-            sl_advect_2d_warp(
+            native.sl_advect_2d(
                 u, v, out_u, out_v, gxu, gyu, gxv, gyv,
                 iu._bx0, iu._by0, iu._inv_dx, iu._inv_dy,
                 iv._bx0, iv._by0, iv._inv_dx, iv._inv_dy,
@@ -513,7 +514,7 @@ class AdvDiffSolver:
             out_u, out_v, out_w = out
             (gxu, gyu, gzu, gxv, gyv, gzv, gxw, gyw, gzw) = self._sl_axes_dev
             iu, iv, iw = self._interps
-            sl_advect_3d_warp(
+            native.sl_advect_3d(
                 u, v, w, out_u, out_v, out_w,
                 gxu, gyu, gzu, gxv, gyv, gzv, gxw, gyw, gzw,
                 iu._bx0, iu._by0, iu._bz0, iu._inv_dx, iu._inv_dy, iu._inv_dz,
@@ -527,10 +528,10 @@ class AdvDiffSolver:
         if nu_eff is None and nu_t is not None:
             nu_eff = self._nu_float + nu_t
 
-        # Explicit diffusion — pure-Warp in-place accumulate (no torch ops,
+        # Explicit diffusion — native in-place accumulate (no torch ops,
         # graph-capturable).
         for i in range(ndim):
-            diffusion.diffuse_add_(
+            native.diffuse_add(
                 vel_new[i], self._diff_out[i], self.dt,
                 dh=self.dh, nu_eff=nu_eff, nu=self._nu_float,
             )
@@ -869,7 +870,7 @@ class AdvDiffSolver:
                 and vel[1].is_contiguous()
                 and vel[2].is_contiguous()):
             cache = self._build_fused_bc_cache(vel)
-            apply_bcs_3d_warp(
+            native.apply_bcs_3d(
                 vel[0], vel[1], vel[2],
                 cache["shapes"],
                 cache["neu_desc"],
@@ -891,7 +892,7 @@ class AdvDiffSolver:
                 and vel[0].is_contiguous()
                 and vel[1].is_contiguous()):
             cache = self._build_fused_bc_cache_2d(vel)
-            apply_bcs_2d_warp(
+            native.apply_bcs_2d(
                 vel[0], vel[1],
                 cache["shapes"],
                 cache["neu_desc"],

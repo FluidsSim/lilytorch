@@ -15,6 +15,11 @@ __all__ = [
     "streaming_sdf_stag_2d_multi",
     "bdim_coeff_2d",
     "bdim_coeff_sigma_2d",
+    "bdim_forcing_2d",
+    "bdim_forcing_3d",
+    "sl_advect_2d",
+    "sl_advect_3d",
+    "diffuse_add",
     "streaming_sdf_forces_post_2d",
     "apply_bcs_2d",
     "interp_2d",
@@ -45,6 +50,20 @@ __all__ = [
 ]
 _METHOD_MAP = {"linear": 0, "quadratic": 1}
 
+# Persistent dummy for mw-off sdf_cc/div_corr (mirrors bdim._mw_dummy).
+_MW_DUMMY_NATIVE: dict = {}
+
+
+def _mw_dummy_native(u0: torch.Tensor) -> torch.Tensor:
+    """Persistent 1-element zero placeholder for ``sdf_cc``/``div_corr`` when
+    the Maertens–Weymouth correction is off."""
+    key = (u0.device, u0.dtype)
+    d = _MW_DUMMY_NATIVE.get(key)
+    if d is None:
+        d = torch.zeros(1, dtype=u0.dtype, device=u0.device)
+        _MW_DUMMY_NATIVE[key] = d
+    return d
+
 
 def streaming_sdf_stag_3d_multi(
         F_flat: Tensor, F_offsets: Tensor,
@@ -74,6 +93,15 @@ def streaming_sdf_stag_3d_multi(
     persistent buffers (allocated once at solver init) to avoid the 4×
     empty-tensor allocation that the kernel used to do internally.
     """
+    # Tolerate 1-element dummy num/den tensors (callers pass torch.empty(1)
+    # when blend_eps==0); replace with zero-filled full-grid buffers.
+    if num_u.numel() == 1:
+        num_u = torch.zeros_like(sdf_u)
+        num_v = torch.zeros_like(sdf_v)
+        num_w = torch.zeros_like(sdf_w)
+        den_u = torch.zeros_like(sdf_u)
+        den_v = torch.zeros_like(sdf_v)
+        den_w = torch.zeros_like(sdf_w)
     return torch.ops.lilytorch_kernels.streaming_sdf_stag_3d_multi.default(
         F_flat, F_offsets, body_shapes, body_meta, kin, aabb_lo, aabb_dim,
         gx, gy, gz, float(h_grid), int(max_vol_per_body),
@@ -254,6 +282,13 @@ def streaming_sdf_stag_2d_multi(
     uses to pack/unpack per-cell winning-body keys; required by the
     BDIM-σ path so Kernel B can decode body_id per cell.
     """
+    # Tolerate 1-element dummy num/den tensors (callers pass torch.empty(1)
+    # when blend_eps==0); replace with zero-filled full-grid buffers.
+    if num_u.numel() == 1:
+        num_u = torch.zeros_like(sdf_u)
+        num_v = torch.zeros_like(sdf_v)
+        den_u = torch.zeros_like(sdf_u)
+        den_v = torch.zeros_like(sdf_v)
     return torch.ops.lilytorch_kernels.streaming_sdf_stag_2d_multi.default(
         F_flat, F_offsets, body_shapes, body_meta, kin,
         aabb_lo, aabb_dim,
@@ -320,6 +355,161 @@ def bdim_coeff_sigma_2d(
         int(dirty_i0), int(dirty_j0),
         int(dirty_Ai), int(dirty_Aj),
         int(mu0_projection),
+    )
+
+
+# =====================================================================
+#  bdim_forcing — static full-grid BDIM2 + Poisson coeff + MW correction
+#  Mirrors bdim.bdim_forcing_{2,3}d_warp signatures exactly.
+# =====================================================================
+
+def bdim_forcing_3d(
+        u_prime, v_prime, w_prime,
+        sdf_u, sdf_v, sdf_w,
+        body_u, body_v, body_w,
+        u0, v0, w0, ch, cv, cw,
+        eps, rho_f, dt, h_grid,
+        dirty_i0, dirty_j0, dirty_k0,
+        dirty_Ai, dirty_Aj, dirty_Ak,
+        mu0_projection=1,
+        sdf_cc=None, div_corr=None,
+        eps_mw=1.0, inv_dx=0.0, inv_dy=0.0, inv_dz=0.0,
+        rect_dev=None):
+    """Native static full-grid BDIM2 forcing (3-D).
+
+    Mirrors :func:`bdim.bdim_forcing_3d_warp` exactly — same signature,
+    same semantics.  ``rect_dev`` is an optional pre-allocated int32
+    device tensor [i0,j0,k0,Ai,Aj,Ak]; when None, a new tensor is
+    allocated per call (eager path).
+    """
+    mw_on = 1 if div_corr is not None else 0
+    if div_corr is None:
+        sdf_cc = div_corr = _mw_dummy_native(u0)
+    if rect_dev is None:
+        rect_dev = torch.tensor(
+            [int(dirty_i0), int(dirty_j0), int(dirty_k0),
+             int(dirty_Ai), int(dirty_Aj), int(dirty_Ak)],
+            dtype=torch.int32, device=u0.device)
+    return torch.ops.lilytorch_kernels.bdim_forcing_3d.default(
+        u_prime, v_prime, w_prime,
+        sdf_u, sdf_v, sdf_w,
+        body_u, body_v, body_w,
+        u0, v0, w0, ch, cv, cw,
+        sdf_cc, div_corr, rect_dev,
+        float(eps), float(rho_f), float(dt), float(h_grid),
+        float(eps_mw), float(inv_dx), float(inv_dy), float(inv_dz),
+        int(mu0_projection), int(mw_on),
+    )
+
+
+def bdim_forcing_2d(
+        u_prime, v_prime,
+        sdf_u, sdf_v,
+        body_u, body_v,
+        u0, v0, ch, cv,
+        eps, rho_f, dt, h_grid,
+        dirty_i0, dirty_j0,
+        dirty_Ai, dirty_Aj,
+        mu0_projection=1,
+        sdf_cc=None, div_corr=None,
+        eps_mw=1.0, inv_dx=0.0, inv_dy=0.0,
+        rect_dev=None):
+    """Native static full-grid BDIM2 forcing (2-D).
+
+    Mirrors :func:`bdim.bdim_forcing_2d_warp` exactly.
+    """
+    mw_on = 1 if div_corr is not None else 0
+    if div_corr is None:
+        sdf_cc = div_corr = _mw_dummy_native(u0)
+    if rect_dev is None:
+        rect_dev = torch.tensor(
+            [int(dirty_i0), int(dirty_j0), int(dirty_Ai), int(dirty_Aj)],
+            dtype=torch.int32, device=u0.device)
+    return torch.ops.lilytorch_kernels.bdim_forcing_2d.default(
+        u_prime, v_prime,
+        sdf_u, sdf_v,
+        body_u, body_v,
+        u0, v0, ch, cv,
+        sdf_cc, div_corr, rect_dev,
+        float(eps), float(rho_f), float(dt), float(h_grid),
+        float(eps_mw), float(inv_dx), float(inv_dy),
+        int(mu0_projection), int(mw_on),
+    )
+
+
+# =====================================================================
+#  sl_advect + diffuse_add — item 8.D
+#  Mirrors advection.sl_advect_{2,3}d_warp and diffusion.diffuse_add_.
+# =====================================================================
+
+def sl_advect_2d(u, v, out_u, out_v,
+                 gxu, gyu, gxv, gyv,
+                 u_bx0, u_by0, u_idx, u_idy,
+                 v_bx0, v_by0, v_idx, v_idy, dt):
+    """Native fused RK2 semi-Lagrangian advection (2-D).
+
+    Mirrors :func:`advection.sl_advect_2d_warp` exactly.
+    """
+    return torch.ops.lilytorch_kernels.sl_advect_2d.default(
+        u, v, gxu, gyu, gxv, gyv,
+        out_u, out_v,
+        float(u_bx0), float(u_by0), float(u_idx), float(u_idy),
+        float(v_bx0), float(v_by0), float(v_idx), float(v_idy),
+        float(dt),
+    )
+
+
+def sl_advect_3d(u, v, w, out_u, out_v, out_w,
+                 gxu, gyu, gzu, gxv, gyv, gzv,
+                 gxw, gyw, gzw,
+                 u_bx0, u_by0, u_bz0, u_idx, u_idy, u_idz,
+                 v_bx0, v_by0, v_bz0, v_idx, v_idy, v_idz,
+                 w_bx0, w_by0, w_bz0, w_idx, w_idy, w_idz, dt):
+    """Native fused RK2 semi-Lagrangian advection (3-D).
+
+    Mirrors :func:`advection.sl_advect_3d_warp` exactly.
+    """
+    return torch.ops.lilytorch_kernels.sl_advect_3d.default(
+        u, v, w,
+        gxu, gyu, gzu, gxv, gyv, gzv,
+        gxw, gyw, gzw,
+        out_u, out_v, out_w,
+        float(u_bx0), float(u_by0), float(u_bz0),
+        float(u_idx), float(u_idy), float(u_idz),
+        float(v_bx0), float(v_by0), float(v_bz0),
+        float(v_idx), float(v_idy), float(v_idz),
+        float(w_bx0), float(w_by0), float(w_bz0),
+        float(w_idx), float(w_idy), float(w_idz),
+        float(dt),
+    )
+
+
+def diffuse_add(target, copy_buf, dt, *, dh, nu_eff=None, nu=None):
+    """Native in-place explicit-diffusion Laplacian accumulate.
+
+    Mirrors :func:`diffusion.diffuse_add_` exactly.
+    Snapshot target → copy_buf (implicit barrier), then fused stencil
+    read from copy_buf with accumulate into target.
+    """
+    ndim = target.ndim
+    is_variable = nu_eff is not None
+    scale = float(dt) if is_variable else float(nu) * float(dt)
+
+    # Step 1: snapshot target → copy_buf.
+    copy_buf.copy_(target)
+
+    # Step 2: fused laplacian-accumulate.
+    if is_variable:
+        nu_eff_t = nu_eff
+    else:
+        # Pass a 1-element dummy for the unified kernel signature.
+        nu_eff_t = torch.tensor(float(nu) * float(dt), dtype=target.dtype,
+                                device=target.device)
+    return torch.ops.lilytorch_kernels.diffuse_add.default(
+        target, copy_buf, nu_eff_t,
+        float(dt), int(ndim),
+        float(dh[0]), float(dh[1]),
+        float(dh[2]) if ndim == 3 else 0.0,
     )
 
 

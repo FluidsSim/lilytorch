@@ -163,22 +163,80 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " int mu0_projection"
         ") -> ()");
 
-    // BDIM-σ variant of bdim_coeff_2d (Lauber et al. 2022).  See the
-    // 3-D variant above for documentation.
+    // bdim_forcing_3d: static full-grid BDIM2 velocity + Poisson coefficients
+    // + Maertens–Weymouth body-divergence correction.  Launches over the FULL
+    // grid (pose-independent → CUDA-graph-capturable); the per-step dirty
+    // AABB lives in the device-resident int32 rect tensor [i0,j0,k0,Ai,Aj,Ak].
+    // Threads inside the AABB compute BDIM2 (u0 = mu0*(u'-body)+body+mu1*nd)
+    // and write the face-grid Poisson coefficient; outside, u0 = u_prime
+    // (pass-through) and ch/cv/cw stay at their persistent dt/rho prefill.
+    // mw_on != 0 additionally computes (1-mu0_cc)*div(u_body) into div_corr.
     m.def(
-        "bdim_coeff_sigma_2d("
+        "bdim_forcing_3d("
+        "Tensor u_prime, Tensor v_prime, Tensor w_prime,"
+        " Tensor sdf_u, Tensor sdf_v, Tensor sdf_w,"
+        " Tensor body_u, Tensor body_v, Tensor body_w,"
+        " Tensor(a!) u0, Tensor(b!) v0, Tensor(c!) w0,"
+        " Tensor(d!) ch, Tensor(e!) cv, Tensor(f!) cw,"
+        " Tensor sdf_cc, Tensor(g!) div_corr,"
+        " Tensor rect,"
+        " float eps, float rho_f, float dt, float h_grid,"
+        " float eps_mw, float inv_dx, float inv_dy, float inv_dz,"
+        " int mu0_projection, int mw_on"
+        ") -> ()");
+
+    // bdim_forcing_2d: 2-D analogue of bdim_forcing_3d.
+    m.def(
+        "bdim_forcing_2d("
         "Tensor u_prime, Tensor v_prime,"
         " Tensor sdf_u, Tensor sdf_v,"
         " Tensor body_u, Tensor body_v,"
         " Tensor(a!) u0, Tensor(b!) v0,"
         " Tensor(c!) ch, Tensor(d!) cv,"
-        " Tensor key_u, Tensor key_v,"
-        " Tensor sigma_shifts,"
-        " float eps, float rho_f, float dt,"
-        " float h_grid,"
-        " int dirty_i0, int dirty_j0,"
-        " int dirty_Ai, int dirty_Aj,"
-        " int mu0_projection"
+        " Tensor sdf_cc, Tensor(e!) div_corr,"
+        " Tensor rect,"
+        " float eps, float rho_f, float dt, float h_grid,"
+        " float eps_mw, float inv_dx, float inv_dy,"
+        " int mu0_projection, int mw_on"
+        ") -> ()");
+
+    // ---- Fused semi-Lagrangian advection kernels (item 8.D) ------------
+    // sl_advect_2d: fused RK2 midpoint semi-Lagrangian back-trace,
+    // one launch for both staggered components, writing persistent out_*.
+    // Mirrors advection.sl_advect_2d_warp exactly.
+    m.def(
+        "sl_advect_2d("
+        "Tensor u, Tensor v,"
+        " Tensor gxu, Tensor gyu, Tensor gxv, Tensor gyv,"
+        " Tensor(a!) out_u, Tensor(b!) out_v,"
+        " float u_bx0, float u_by0, float u_idx, float u_idy,"
+        " float v_bx0, float v_by0, float v_idx, float v_idy,"
+        " float dt"
+        ") -> ()");
+
+    // sl_advect_3d: 3-D analogue of sl_advect_2d.
+    m.def(
+        "sl_advect_3d("
+        "Tensor u, Tensor v, Tensor w,"
+        " Tensor gxu, Tensor gyu, Tensor gzu,"
+        " Tensor gxv, Tensor gyv, Tensor gzv,"
+        " Tensor gxw, Tensor gyw, Tensor gzw,"
+        " Tensor(a!) out_u, Tensor(b!) out_v, Tensor(c!) out_w,"
+        " float u_bx0, float u_by0, float u_bz0, float u_idx, float u_idy, float u_idz,"
+        " float v_bx0, float v_by0, float v_bz0, float v_idx, float v_idy, float v_idz,"
+        " float w_bx0, float w_by0, float w_bz0, float w_idx, float w_idy, float w_idz,"
+        " float dt"
+        ") -> ()");
+
+    // diffuse_add: in-place explicit-diffusion Laplacian accumulate.
+    // The caller snapshots target → copy_buf before calling; this kernel
+    // reads the stencil from copy_buf and accumulates into target.
+    // nu_eff can be a 1-element tensor (constant ν·dt) or a full field.
+    m.def(
+        "diffuse_add("
+        "Tensor(a!) target, Tensor copy_buf, Tensor nu_eff,"
+        " float dt, int ndim,"
+        " float dh0, float dh1, float dh2"
         ") -> ()");
 
     // ---- Lagrangian (surface-integral) force kernels ------------------

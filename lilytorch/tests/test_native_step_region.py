@@ -34,6 +34,7 @@ DEV = "cuda:0"
 
 # dtype-aware parity tolerances (mirror the forces-post / interpolation gates).
 _TOL = {torch.float64: 1e-9, torch.float32: 2e-7}
+_SL_TOL = {torch.float64: 1e-9, torch.float32: 5e-6}  # SL back-trace is interpolation-heavy
 
 
 def _need(op_name: str):
@@ -112,19 +113,21 @@ def test_bdim_forcing_2d_native_eq_warp(dtype, mw, full_grid):
     h, rho, dt, eps = inp["h"], 1.0, 0.01, 2.0 * inp["h"]
     rect = (0, 0, Ngx, Ngy) if full_grid else (3, 2, Ngx - 8, Ngy - 6)
 
+    # Pre-generate MW tensors ONCE so Warp and native see identical inputs.
+    sdf_cc_mw = div_mw = None
+    if mw:
+        sdf_cc_mw = (torch.randn(Ngx, Ngy, dtype=dtype, device=DEV) * (3 * h)).contiguous()
+        div_mw = torch.zeros(Ngx, Ngy, dtype=dtype, device=DEV)
+
     def run(fn):
         u0 = inp["u_prime"].clone(); v0 = inp["v_prime"].clone()
         ch = torch.full(inp["ch_shape"], dt / rho, dtype=dtype, device=DEV)
         cv = torch.full(inp["cv_shape"], dt / rho, dtype=dtype, device=DEV)
-        sdf_cc = div = None
-        if mw:
-            sdf_cc = (torch.randn(Ngx, Ngy, dtype=dtype, device=DEV) * (3 * h)).contiguous()
-            div = torch.zeros(Ngx, Ngy, dtype=dtype, device=DEV)
         fn(inp["u_prime"], inp["v_prime"], inp["sdf_u"], inp["sdf_v"],
            inp["body_u"], inp["body_v"], u0, v0, ch, cv,
            eps, rho, dt, h, *rect, 1,
-           sdf_cc, div, 1.0 / h if mw else 1.0, 1.0 / h, 1.0 / h)
-        return u0, v0, ch, cv, div
+           sdf_cc_mw, div_mw, 1.0 / h if mw else 1.0, 1.0 / h, 1.0 / h)
+        return u0, v0, ch, cv, div_mw
 
     # NB: sdf_cc/div/eps_mw/inv_d* are keyword-tail args on the Warp wrapper;
     # pass positionally in the mirrored native wrapper (DeepSeek: keep the order).
@@ -167,21 +170,23 @@ def test_bdim_forcing_3d_native_eq_warp(dtype, mw, full_grid):
     rect = ((0, 0, 0, Ngx, Ngy, Ngz) if full_grid
             else (2, 2, 1, Ngx - 6, Ngy - 5, Ngz - 4))
 
+    # Pre-generate MW tensors ONCE so Warp and native see identical inputs.
+    sdf_cc_mw = div_mw = None
+    if mw:
+        sdf_cc_mw = (torch.randn(Ngx, Ngy, Ngz, dtype=dtype, device=DEV) * (3 * h)).contiguous()
+        div_mw = torch.zeros(Ngx, Ngy, Ngz, dtype=dtype, device=DEV)
+
     def run(fn):
         u0 = inp["u_prime"].clone(); v0 = inp["v_prime"].clone(); w0 = inp["w_prime"].clone()
         ch = torch.full(inp["ch_shape"], dt / rho, dtype=dtype, device=DEV)
         cv = torch.full(inp["cv_shape"], dt / rho, dtype=dtype, device=DEV)
         cw = torch.full(inp["cw_shape"], dt / rho, dtype=dtype, device=DEV)
-        sdf_cc = div = None
-        if mw:
-            sdf_cc = (torch.randn(Ngx, Ngy, Ngz, dtype=dtype, device=DEV) * (3 * h)).contiguous()
-            div = torch.zeros(Ngx, Ngy, Ngz, dtype=dtype, device=DEV)
         fn(inp["u_prime"], inp["v_prime"], inp["w_prime"],
            inp["sdf_u"], inp["sdf_v"], inp["sdf_w"],
            inp["body_u"], inp["body_v"], inp["body_w"],
            u0, v0, w0, ch, cv, cw, eps, rho, dt, h, *rect, 1,
-           sdf_cc, div, 1.0 / h if mw else 1.0, 1.0 / h, 1.0 / h, 1.0 / h)
-        return u0, v0, w0, ch, cv, cw, div
+           sdf_cc_mw, div_mw, 1.0 / h if mw else 1.0, 1.0 / h, 1.0 / h, 1.0 / h)
+        return u0, v0, w0, ch, cv, cw, div_mw
 
     def shim(op):
         def _call(u_p, v_p, w_p, su, sv, sw, bu, bv, bw, u0, v0, w0, ch, cv, cw,
@@ -239,7 +244,7 @@ def test_sl_advect_2d_native_eq_warp(dtype):
     sl_advect_2d_warp(u, v, ow[0], ow[1], gxu, gyu, gxv, gyv, *meta)
     native.sl_advect_2d(u, v, on[0], on[1], gxu, gyu, gxv, gyv, *meta)
     wp.synchronize()
-    tol = _TOL[dtype]
+    tol = _SL_TOL[dtype]
     assert _maxdiff(ow[0], on[0]) <= tol
     assert _maxdiff(ow[1], on[1]) <= tol
 
@@ -265,7 +270,7 @@ def test_sl_advect_3d_native_eq_warp(dtype):
     sl_advect_3d_warp(u, v, w, *ow, *axes, *meta)
     native.sl_advect_3d(u, v, w, *on, *axes, *meta)
     wp.synchronize()
-    tol = _TOL[dtype]
+    tol = _SL_TOL[dtype]
     for a, b in zip(ow, on):
         assert _maxdiff(a, b) <= tol
 

@@ -13,22 +13,25 @@
 //  recomputes the linked velocity / density from the winning body
 //  index alone — no need to touch ``bU/bV/bW`` during phase 1.
 //
-//  Encoding (IEEE-754 fp32 → sortable uint32, then pack with body id):
-//      f2u_sortable(+f) flips the sign bit       → high half of u32 range
-//      f2u_sortable(-f) flips all bits           → low  half of u32 range
+//  Encoding (IEEE-754 fp64 → sortable uint64, then pack with body id):
+//      f2u_sortable(+f) flips the sign bit       → high half of u64 range
+//      f2u_sortable(-f) flips all bits           → low  half of u64 range
 //  giving a strict monotone ordering: f1 < f2  ⇔  f2u(f1) < f2u(f2).
 //
-//  ``key = (f2u(s) << 32) | (uint32_t)body_id``.  The SDF lives in the
-//  high half so it dominates ordering; the body id breaks ties
-//  deterministically (lower id wins).  The sentinel ``body_id = B``
-//  marks "no body has touched this cell" and lets the decode pass
-//  preserve any pre-existing value of ``sdf_*[g]``.
+//  ``key = (f2u64(s) & ~0xFFFF) | (uint16_t)body_id``.  The SDF occupies
+//  the top 48 bits so it dominates ordering; the low 16 bits carry the
+//  body id, which breaks ties deterministically (lower id wins).  The
+//  sentinel ``body_id = B`` marks "no body has touched this cell" and
+//  lets the decode pass preserve any pre-existing value of ``sdf_*[g]``
+//  (requires ``B <= 0xFFFF`` — far beyond any realistic link count).
 //
-//  All scalar dtypes (fp16/fp32/fp64) are quantised to fp32 for the
-//  key.  Final values written back to ``sdf_*[g]`` are recovered from
-//  the key (cast back to scalar_t); the precision loss for fp64 union
-//  SDFs is bounded by ~1 ulp in fp32 — well below the geometric error
-//  of the upstream SDF sampler at typical body resolutions.
+//  The SDF is carried in the fp64 sortable domain and only the low 16
+//  mantissa bits are dropped to make room for the body id.  For an
+//  fp32-origin value those 16 bits are exactly zero, so fp32 union SDFs
+//  round-trip **bit-exactly**; for fp64 the relative loss is ~2^-36
+//  (~1.5e-11) across the geometrically meaningful SDF band (|s| ≲ O(1)),
+//  well under the 1e-9 native-vs-Warp parity gate.  (The former key
+//  quantised everything to fp32, flooring fp64 parity at ~4e-9.)
 // =====================================================================
 
 #pragma once
@@ -38,32 +41,39 @@
 
 namespace lilytorch_kernels {
 
-__device__ __forceinline__ uint32_t f2u_sortable(float f)
+// fp64 → order-preserving uint64 (and back).
+__device__ __forceinline__ uint64_t f2u_sortable(double f)
 {
-    uint32_t u = __float_as_uint(f);
-    return (u & 0x80000000u) ? ~u : (u ^ 0x80000000u);
+    uint64_t u = __double_as_longlong(f);
+    return (u & 0x8000000000000000ull) ? ~u : (u ^ 0x8000000000000000ull);
 }
 
-__device__ __forceinline__ float u2f_sortable(uint32_t u)
+__device__ __forceinline__ double u2f_sortable(uint64_t u)
 {
-    return __uint_as_float((u & 0x80000000u) ? (u ^ 0x80000000u) : ~u);
+    return __longlong_as_double(
+        (u & 0x8000000000000000ull) ? (u ^ 0x8000000000000000ull) : ~u);
 }
+
+// Low 16 bits reserved for the body id; top 48 bits hold the sortable SDF.
+static constexpr uint64_t KEY_SDF_MASK  = 0xFFFFFFFFFFFF0000ull;
+static constexpr uint64_t KEY_BODY_MASK = 0x000000000000FFFFull;
 
 template <typename scalar_t>
 __device__ __forceinline__ uint64_t pack_sdf_body_key(scalar_t s, int b)
 {
-    return ((uint64_t)f2u_sortable((float)s) << 32) | (uint32_t)b;
+    return (f2u_sortable((double)s) & KEY_SDF_MASK)
+           | ((uint64_t)b & KEY_BODY_MASK);
 }
 
 __device__ __forceinline__ uint32_t unpack_body_id(uint64_t key)
 {
-    return (uint32_t)(key & 0xFFFFFFFFull);
+    return (uint32_t)(key & KEY_BODY_MASK);
 }
 
 template <typename scalar_t>
 __device__ __forceinline__ scalar_t unpack_sdf(uint64_t key)
 {
-    return (scalar_t)u2f_sortable((uint32_t)(key >> 32));
+    return (scalar_t)u2f_sortable(key & KEY_SDF_MASK);
 }
 
 }  // namespace lilytorch_kernels

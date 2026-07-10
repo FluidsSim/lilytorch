@@ -9,9 +9,9 @@ import torch
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor
 
-from lilytorch.src.bdim import (
-    bdim_forcing_3d_warp as bdim_forcing_3d,
-    bdim_forcing_2d_warp as bdim_forcing_2d,
+from lilytorch.src.native import (
+    bdim_forcing_3d,
+    bdim_forcing_2d,
 )
 from lilytorch.src.advection import AdvDiffSolver
 from lilytorch.src.diagnostics import FlowDiagnostics
@@ -27,7 +27,7 @@ from lilytorch.src.forces import (
     _forces_body_integrate_3d,
 )
 from lilytorch.src import forces, extras
-from lilytorch.src.graph_capture import WholeStepGraphRunner
+from lilytorch.src.graph_capture import WholeStepGraphRunner, NativeWholeStepGraphRunner
 
 logger = logging.getLogger(__name__)
 
@@ -1836,7 +1836,7 @@ class FluidSolver(PlottingMixin):
         # The runner itself decides whether to capture a CUDA graph or
         # run eagerly — solver.py has no branching on use_graph.
         if getattr(self, '_preproj_graph_2d', None) is None:
-            self._preproj_graph_2d = WholeStepGraphRunner(
+            self._preproj_graph_2d = NativeWholeStepGraphRunner(
                 use_cuda_graph=use_graph)
         else:
             self._preproj_graph_2d._use_cuda_graph = use_graph
@@ -1902,7 +1902,6 @@ class FluidSolver(PlottingMixin):
                 [int(d['i0']), int(d['j0']),
                  int(d['Ai']), int(d['Aj'])],
                 dtype=torch.int32, device=u.device))
-            torch.cuda.synchronize(u.device)
 
         key = (
             u.data_ptr(), v.data_ptr(),
@@ -1989,7 +1988,7 @@ class FluidSolver(PlottingMixin):
         # The runner itself decides whether to capture a CUDA graph or
         # run eagerly — solver.py has no branching on use_graph.
         if getattr(self, '_preproj_graph_3d', None) is None:
-            self._preproj_graph_3d = WholeStepGraphRunner(
+            self._preproj_graph_3d = NativeWholeStepGraphRunner(
                 use_cuda_graph=use_graph)
         else:
             self._preproj_graph_3d._use_cuda_graph = use_graph
@@ -2054,7 +2053,6 @@ class FluidSolver(PlottingMixin):
                 [int(d['i0']), int(d['j0']), int(d['k0']),
                  int(d['Ai']), int(d['Aj']), int(d['Ak'])],
                 dtype=torch.int32, device=u.device))
-            torch.cuda.synchronize(u.device)
 
         key = (
             u.data_ptr(), v.data_ptr(), w_vel.data_ptr(),
