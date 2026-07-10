@@ -9,9 +9,14 @@ import pytest
 import torch
 import warp as wp
 
-from lilytorch.src.interpolation import interp_2d_warp, interp_3d_warp
+from lilytorch.src.interpolation import (
+    interp_2d_warp, interp_3d_warp, RegularGridInterpolator,
+)
+from lilytorch.src.native import interp_2d as interp_2d_native
+from lilytorch.src.native import interp_3d as interp_3d_native
 
 SKIP_NO_CUDA = pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA")
+_DEVS = ["cpu"] + (["cuda:0"] if torch.cuda.is_available() else [])
 
 
 # ─── interp_2d ───────────────────────────────────────────────────────────────
@@ -77,3 +82,50 @@ def test_interp_3d_cpu_eq_gpu(method, dtype):
     assert gc.dtype == dtype
     d = (gc - gg.cpu()).abs().max().item()
     tol = 1e-6 if dtype == torch.float32 else 1e-14
+    assert d < tol, f"interp3d {method} {dtype} cpu vs gpu maxdiff {d:.3e}"
+
+
+# ─── cuda_native_port Track A parity gate: native interp == Warp oracle ──────
+# Scattered gathers (no atomics) → tight parity; only FMA-contraction drift.
+
+@pytest.mark.parametrize("dev", _DEVS)
+@pytest.mark.parametrize("method", ["linear", "quadratic"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_interp_2d_native_eq_warp(dev, method, dtype):
+    p = _interp_problem_2d(dev, dtype=dtype)
+    w = interp_2d_warp(*p, method)
+    n = interp_2d_native(*p, method)
+    wp.synchronize()
+    d = (w - n).abs().max().item()
+    tol = 1e-6 if dtype == torch.float32 else 1e-13
+    assert d < tol, f"interp2d native vs warp {dev} {method} {dtype} maxdiff {d:.3e}"
+
+
+@pytest.mark.parametrize("dev", _DEVS)
+@pytest.mark.parametrize("method", ["linear", "quadratic"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_interp_3d_native_eq_warp(dev, method, dtype):
+    F, xq, yq, zq, b, inv, M = _interp_problem_3d(dev, dtype=dtype)
+    w = interp_3d_warp(F, xq, yq, zq, *b, *inv, *M, method)
+    n = interp_3d_native(F, xq, yq, zq, *b, *inv, *M, method)
+    wp.synchronize()
+    d = (w - n).abs().max().item()
+    tol = 1e-6 if dtype == torch.float32 else 1e-13
+    assert d < tol, f"interp3d native vs warp {dev} {method} {dtype} maxdiff {d:.3e}"
+
+
+@pytest.mark.parametrize("dev", _DEVS)
+@pytest.mark.parametrize("method", ["linear", "quadratic"])
+def test_rgi_class_matches_warp_kernel(dev, method):
+    """The re-exported native RegularGridInterpolator == the Warp scattered
+    gather it replaces, end-to-end (constructor metadata + __call__)."""
+    F, xq, yq, bx0, by0, inv_dx, inv_dy, Mx, My = _interp_problem_2d(
+        dev, dtype=torch.float64)
+    ax = (torch.linspace(bx0, bx0 + (Mx - 1) / inv_dx, Mx, dtype=torch.float64).to(dev),
+          torch.linspace(by0, by0 + (My - 1) / inv_dy, My, dtype=torch.float64).to(dev))
+    rgi = RegularGridInterpolator(ax, F, method=method)
+    got = rgi(xq, yq)
+    ref = interp_2d_warp(F, xq, yq, bx0, by0, inv_dx, inv_dy, Mx, My, method)
+    wp.synchronize()
+    d = (got - ref).abs().max().item()
+    assert d < 1e-12, f"RGI vs warp {dev} {method} maxdiff {d:.3e}"

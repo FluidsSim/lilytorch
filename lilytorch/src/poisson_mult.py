@@ -618,6 +618,191 @@ class PoissonSolver(_MultigridPoissonSolver):
         "mg_residual_2d", "mg_residual_3d",
     })
 
+    # ------------------------------------------------------------------
+    # Native dispatch helpers (Track D: swap WarpMG → native poisson_solve_*)
+    # ------------------------------------------------------------------
+
+    def _use_native_poisson(self):
+        """True when the native poisson_solve_* drivers can be used.
+
+        Native drivers are CUDA-only (no CPU twin yet — Track C) and do not
+        support the Dirichlet mask (free-surface GFM)."""
+        dev = torch.device(self.device) if isinstance(self.device, str) else self.device
+        return (dev.type == "cuda"
+                and self.dirichlet_mask is None)
+
+    def _native_multigrid(self, f, p0, face_arrs, pre_scaled=False):
+        """Run the native multigrid Poisson driver (2-D / 3-D).
+
+        Mutates ``p0`` in place; returns ``(p, r)`` matching the Python
+        ``solve_multigrid`` contract.  The native driver scales ``f`` by
+        ``self.h2`` internally, so ``pre_scaled`` is not supported here
+        (the WarpMG path handles it).
+        """
+        from lilytorch.src import native as _nat
+        ndim = f.ndim
+        if pre_scaled:
+            raise NotImplementedError(
+                "Native multigrid does not support pre_scaled=True. "
+                "Use the WarpMG path.")
+        if p0 is None:
+            # p0=None is the solver's multigrid cold-start fast path
+            # (WarpMG.solve zeros its level-0 buffer in place).  Mirror it
+            # with a persistent zeroed padded buffer — no per-step alloc,
+            # pointer-stable for graph keying.
+            pshp = tuple(n + 2 for n in f.shape)
+            buf = getattr(self, "_native_p0", None)
+            if (buf is None or buf.shape != pshp
+                    or buf.dtype != f.dtype or buf.device != f.device):
+                buf = torch.zeros(pshp, dtype=f.dtype, device=f.device)
+                self._native_p0 = buf
+            else:
+                buf.zero_()
+            p0 = buf
+        if ndim == 2:
+            ch, cv = (a.contiguous() for a in face_arrs)
+            r = _nat.poisson_solve_multigrid_2d(
+                p0, f, ch, cv,
+                float(self.h2), float(self.jcap_tol), float(self.w),
+                int(self.nsmoothing), int(self.max_vcycles),
+                float(self._tol_float), self.smoother,
+            )
+        else:
+            ch, cv, cw = (a.contiguous() for a in face_arrs)
+            r = _nat.poisson_solve_multigrid_3d(
+                p0, f, ch, cv, cw,
+                float(self.h2), float(self.jcap_tol), float(self.w),
+                int(self.nsmoothing), int(self.max_vcycles),
+                float(self._tol_float), self.smoother,
+            )
+        return p0, r
+
+    def _native_mgcg(self, f, p0, face_arrs, pre_scaled=False):
+        """Run the native MGCG Poisson driver (2-D / 3-D).
+
+        Mutates ``p0`` in place; returns ``(p, r)``.  The native driver handles
+        the entire CG loop with V-cycle preconditioner internally — no Python
+        per-iteration dispatch."""
+        from lilytorch.src import native as _nat
+        ndim = f.ndim
+        if pre_scaled:
+            raise NotImplementedError(
+                "Native MGCG does not support pre_scaled=True. "
+                "Use the WarpMG path.")
+        if ndim == 2:
+            ch, cv = (a.contiguous() for a in face_arrs)
+            r = _nat.poisson_solve_mgcg_2d(
+                p0, f, ch, cv,
+                float(self.h2), float(self.jcap_tol), float(self.w),
+                int(self.nsmoothing), int(self.max_cycles),
+                int(self.precond_vcycles),
+                float(self._tol_float), self.smoother,
+            )
+        else:
+            ch, cv, cw = (a.contiguous() for a in face_arrs)
+            r = _nat.poisson_solve_mgcg_3d(
+                p0, f, ch, cv, cw,
+                float(self.h2), float(self.jcap_tol), float(self.w),
+                int(self.nsmoothing), int(self.max_cycles),
+                int(self.precond_vcycles),
+                float(self._tol_float), self.smoother,
+            )
+        return p0, r
+
+    def _native_rmgcg(self, f, p0, face_arrs, cfaces, inner, pre_scaled=False):
+        """Run the native RMGCG driver, managing the recycle space on the
+        Python side.
+
+        The native driver handles the deflated CG loop internally and returns
+        harvested search directions ``D`` for refreshing the recycle space.
+        The Python side is responsible for:
+        1. Preparing the B-orthonormal recycle basis (``_prepare_recycle``).
+        2. Harvesting directions from the returned ``D`` (``_update_recycle``).
+        3. Stall-safety guards (``_finalize_recycle``).
+
+        Returns ``(p, r)`` where ``p`` is the solution and ``r`` the residual."""
+        from lilytorch.src import native as _nat
+        ndim = f.ndim
+        if pre_scaled:
+            raise NotImplementedError(
+                "Native RMGCG does not support pre_scaled=True. "
+                "Use the WarpMG path.")
+
+        # --- Prepare recycle space (B-orthonormalise under current operator) ---
+        recycle = self._prepare_recycle(cfaces, p0.shape, inner)
+        kdef = 0
+        if recycle is not None:
+            U_recycle = recycle["U"]   # list of (Nx+2, Ny+2[, Nz+2])
+            W_recycle = recycle["W"]   # list of (Nx, Ny[, Nz])
+            kdef = len(U_recycle)
+            if kdef > 0:
+                U = torch.stack(U_recycle, dim=0)   # (kdef, Nx+2, Ny+2[, Nz+2])
+                W = torch.stack(W_recycle, dim=0)   # (kdef, Nx, Ny[, Nz])
+            else:
+                recycle = None
+
+        if recycle is None:
+            shape_2d = (0, p0.shape[0], p0.shape[1])
+            if ndim == 2:
+                U = torch.empty(shape_2d, dtype=p0.dtype, device=p0.device)
+                W = torch.empty((0, f.shape[0], f.shape[1]),
+                                dtype=f.dtype, device=f.device)
+            else:
+                U = torch.empty((0, p0.shape[0], p0.shape[1], p0.shape[2]),
+                                dtype=p0.dtype, device=p0.device)
+                W = torch.empty((0, f.shape[0], f.shape[1], f.shape[2]),
+                                dtype=f.dtype, device=f.device)
+
+        harvest_k = int(self.recycle_k)
+
+        if ndim == 2:
+            ch, cv = (a.contiguous() for a in face_arrs)
+            r, D, niter = _nat.poisson_solve_rmgcg_2d(
+                p0, f, ch, cv, U, W, harvest_k,
+                float(self.h2), float(self.jcap_tol), float(self.w),
+                int(self.nsmoothing), int(self.max_cycles),
+                int(self.precond_vcycles),
+                float(self._tol_float), self.smoother,
+            )
+        else:
+            ch, cv, cw = (a.contiguous() for a in face_arrs)
+            r, D, niter = _nat.poisson_solve_rmgcg_3d(
+                p0, f, ch, cv, cw, U, W, harvest_k,
+                float(self.h2), float(self.jcap_tol), float(self.w),
+                int(self.nsmoothing), int(self.max_cycles),
+                int(self.precond_vcycles),
+                float(self._tol_float), self.smoother,
+            )
+
+        # --- Harvest directions from D and update recycle space ---
+        harvest = []
+        if harvest_k > 0:
+            for k in range(min(harvest_k, niter)):
+                harvest.append(D[k].clone())
+
+        self._finalize_recycle(niter, recycle is not None, harvest, inner)
+
+        if self.verbose:
+            n_def = 0 if recycle is None else kdef
+            n_rec = 0 if self._recycle is None else len(self._recycle["U"])
+            if niter == 0:
+                print(f"RMGCG converged at initial guess: "
+                      f"residual = {r.abs().max().item():.2e} (deflated {n_def})")
+            else:
+                print(
+                    f"RMGCG residual = {r.abs().max().item():.2e}/"
+                    f"{self._tol_float:.2e} "
+                    f"with {niter}/{self.max_cycles} CG iterations "
+                    f"(deflated {n_def} → recycle dim {n_rec})"
+                )
+
+        return p0, r
+
+    # ------------------------------------------------------------------
+    # Overridden solve entry points: dispatch to native on CUDA,
+    # fall back to WarpMG on CPU (until Track C lands CPU twins).
+    # ------------------------------------------------------------------
+
     def _graphed_mg(self, ndim, shape, nvc=None):
         """Lazily build / fetch a CUDA-graph-captured all-Warp multigrid keyed by
         (ndim, shape, dtype, smoother, nsmoothing, n_vcycles).
@@ -634,9 +819,6 @@ class PoissonSolver(_MultigridPoissonSolver):
         if nvc is None:
             nvc = self.max_vcycles
         nvc = max(int(nvc), 1)
-        # Free-surface GFM: a Dirichlet mask needs a mask-aware WarpMG (extra
-        # per-sweep pinning kernels); keyed separately so the common Neumann
-        # solver stays mask-kernel-free.
         dirichlet = self.dirichlet_mask is not None
         key = (ndim, tuple(shape), self.dtype, self.smoother, self.nsmoothing,
                nvc, dirichlet)
@@ -649,8 +831,6 @@ class PoissonSolver(_MultigridPoissonSolver):
                               n_vcycles=nvc, jcap_tol=self.jcap_tol,
                               dirichlet=dirichlet)
             elif ndim == 2:
-                # 2-D graphed MG is now dtype-generic (f32+f64) + rbgs/jacobi,
-                # matching the 3-D driver — no config falls back to the Python loop.
                 mg = WarpMG2D(shape[0], shape[1], device=self.device,
                               dtype=self.dtype, smoother=self.smoother,
                               nu1=self.nsmoothing, nu2=self.nsmoothing,
@@ -662,29 +842,24 @@ class PoissonSolver(_MultigridPoissonSolver):
         return mg
 
     def solve_multigrid(self, f, p0, **kwargs):
-        """Adaptive standalone multigrid on the graph-captured WarpMG V-cycle.
+        """Standalone multigrid solve.
 
-        Replays a captured ONE-v-cycle graph up to ``max_vcycles`` times,
-        checking the fine-level residual between replays and early-exiting at
-        ``tol`` — the same convergence semantics as the retired native/torch
-        driver.  The previous fixed-count graph (``n_vcycles = max_vcycles``
-        captured in one replay) burned the full smoothing budget every call:
-        in quasi-steady coupled runs the solve converges in 1-2 cycles, so a
-        5-cycle budget wasted ~3.5 ms/step of rbgs sweeps at 1024x512
-        (salamander 2-D, ~73% of all GPU time).  The check costs one residual
-        kernel + one device sync per cycle.  The nvc=1 graph is shared with
-        the MGCG preconditioner cache key.
-
-        A Dirichlet ``dirichlet_mask`` (free-surface GFM) selects the
-        mask-aware WarpMG, which pins p=0 in the flagged cells at every
-        level/sweep."""
+        On CUDA (no Dirichlet mask): delegates to the native
+        ``poisson_solve_multigrid_*`` driver (whole solve in one C++ launch).
+        On CPU / with mask: delegates to the WarpMG graph-captured V-cycle."""
         face_arrs, _ = self._face_arrs_from_kwargs(kwargs, f.ndim)
         if face_arrs is None:
             raise ValueError(
                 "solve_multigrid: ch/cv (2-D) or ch/cv/cw (3-D) keyword "
                 "arguments are required.")
-        mg = self._graphed_mg(f.ndim, tuple(f.shape), nvc=1)
         pre_scaled = kwargs.get("pre_scaled", False)
+
+        # Native path (CUDA, no Dirichlet mask, not pre-scaled).
+        if self._use_native_poisson() and not pre_scaled:
+            return self._native_multigrid(f, p0, face_arrs, pre_scaled=False)
+
+        # ---- WarpMG fallback (CPU / mask / pre_scaled) ----
+        mg = self._graphed_mg(f.ndim, tuple(f.shape), nvc=1)
         f_scaled = f if pre_scaled else self.h2 * f
         if f.ndim == 3:
             ch, cv, cw = (a.contiguous() for a in face_arrs)
@@ -694,17 +869,6 @@ class PoissonSolver(_MultigridPoissonSolver):
             ch, cv = (a.contiguous() for a in face_arrs)
             p = mg.solve(f_scaled, ch, cv, p0=p0, mask=self.dirichlet_mask)
 
-        # ``p`` is a live view of the WarpMG fine-level buffer; extra cycles
-        # replay the captured graph on that in-place state (no input re-copy).
-        # ``mg.residual_inf`` recomputes the clamped-Neumann residual (index-
-        # clamped, reads no ghost ring → gauge-invariant, valid on the raw
-        # post-cycle p) on the multigrid's own persistent level-0 buffers,
-        # reusing the face pairs it already extracted in-graph, and returns the
-        # L∞ norm.  This drops the per-step host cost of the old closure: the
-        # y/z-face coefficient slices (real copies, non-contiguous) and a fresh
-        # residual field + six ``wp.from_torch`` wraps per convergence check —
-        # the wrapper is host-bound, so every eliminated allocation/wrap is
-        # submit time saved.  ``lv["r"]`` now holds the matching residual field.
         r_inf = mg.residual_inf()
         for _ in range(max(int(self.max_vcycles), 1) - 1):
             if r_inf < self.tol:
@@ -712,15 +876,107 @@ class PoissonSolver(_MultigridPoissonSolver):
             mg.replay()
             r_inf = mg.residual_inf()
 
-        # Ghost ring is never written by the graphed Warp V-cycle
-        # (index-clamped Neumann); refresh it before the gauge mean.
         self.BC(p)
         if self.dirichlet_mask is None:
             p -= p.to(torch.float64).mean().to(p.dtype)
-        # Return the persistent residual field (matches the just-returned p);
-        # callers reduce it with ``r.abs().max().item()`` or index it (GFM
-        # ``r[~mask]``), so the field shape is preserved.
         return p, mg.levels[0]["r"].view(f.shape)
+
+    def solve_mgcg(self, f, p0, **kwargs):
+        """MGCG solve.
+
+        On CUDA (no Dirichlet mask): delegates to the native
+        ``poisson_solve_mgcg_*`` driver (CG + V-cycle preconditioner in one
+        C++ launch).
+        On CPU / with mask: delegates to the Python CG loop with WarpMG
+        preconditioner."""
+        ndim = f.ndim
+        face_arrs, _ = self._face_arrs_from_kwargs(kwargs, ndim)
+        if face_arrs is None:
+            raise ValueError(
+                "solve_mgcg: ch/cv (2-D) or ch/cv/cw (3-D) keyword "
+                "arguments are required.")
+        pre_scaled = kwargs.pop("pre_scaled", False)
+
+        # Native path.
+        if self._use_native_poisson() and not pre_scaled:
+            return self._native_mgcg(f, p0, face_arrs, pre_scaled=False)
+
+        # ---- WarpMG fallback ----
+        cfaces = self._extract_cfaces(face_arrs, ndim)
+        b = -f if pre_scaled else -(self.h2 * f)
+        x = p0.clone().detach()
+        self.BC(x)
+
+        x, r, niter, r_norm_final = self._cg_core(
+            b, x, cfaces, face_arrs, recycle=None, harvest=None,
+        )
+
+        if self.verbose:
+            if niter == 0:
+                print(f"MGCG converged at initial guess: "
+                      f"residual = {r_norm_final:.2e}")
+            else:
+                print(
+                    f"MGCG residual = {r_norm_final:.2e}/{self._tol_float:.2e} "
+                    f"with {niter}/{self.max_cycles} CG iterations "
+                    f"({self.precond_vcycles} V-cycle"
+                    f"{'s' if self.precond_vcycles > 1 else ''}/iter)"
+                )
+        return x, r
+
+    def solve_rmgcg(self, f, p0, **kwargs):
+        """Recycled MGCG solve.
+
+        On CUDA (no Dirichlet mask): delegates to the native
+        ``poisson_solve_rmgcg_*`` driver.  The Python side manages the
+        recycle space (prepare → harvest → finalize); the native driver
+        handles the deflated CG loop.
+        On CPU / with mask: delegates to the Python CG loop with WarpMG
+        preconditioner."""
+        ndim = f.ndim
+        face_arrs, _ = self._face_arrs_from_kwargs(kwargs, ndim)
+        if face_arrs is None:
+            raise ValueError(
+                "solve_rmgcg: ch/cv (2-D) or ch/cv/cw (3-D) keyword "
+                "arguments are required.")
+        pre_scaled = kwargs.pop("pre_scaled", False)
+
+        # Native path.
+        if self._use_native_poisson() and not pre_scaled:
+            cfaces = self._extract_cfaces(face_arrs, ndim)
+            inner = _inner(ndim)
+            return self._native_rmgcg(f, p0, face_arrs, cfaces, inner,
+                                      pre_scaled=False)
+
+        # ---- WarpMG fallback ----
+        cfaces = self._extract_cfaces(face_arrs, ndim)
+        inner = _inner(ndim)
+        b = -f if pre_scaled else -(self.h2 * f)
+        x = p0.clone().detach()
+        self.BC(x)
+
+        recycle = self._prepare_recycle(cfaces, x.shape, inner)
+        harvest = [] if self.recycle_k > 0 else None
+
+        x, r, niter, r_norm_final = self._cg_core(
+            b, x, cfaces, face_arrs, recycle=recycle, harvest=harvest,
+        )
+
+        self._finalize_recycle(niter, recycle is not None, harvest, inner)
+
+        if self.verbose:
+            n_def = 0 if recycle is None else len(recycle["U"])
+            n_rec = 0 if self._recycle is None else len(self._recycle["U"])
+            if niter == 0:
+                print(f"RMGCG converged at initial guess: "
+                      f"residual = {r_norm_final:.2e} (deflated {n_def})")
+            else:
+                print(
+                    f"RMGCG residual = {r_norm_final:.2e}/{self._tol_float:.2e} "
+                    f"with {niter}/{self.max_cycles} CG iterations "
+                    f"(deflated {n_def} → recycle dim {n_rec})"
+                )
+        return x, r
 
     def _dispatch_vcycle(self, f, p, face_arrs):
         """One V-cycle with the fine-level smoother + residual on Warp.

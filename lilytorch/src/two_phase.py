@@ -24,6 +24,11 @@ Sign / value convention::
 import torch
 
 from lilytorch.src.advection import _sl
+# cuda_native_port Phase 0.2: the native ``cvof_sweep`` op is CUDA-only (no
+# ``at::parallel_for`` CPU twin yet — see ops.cpp), and two-phase runs on CPU
+# in the test suite, so re-pointing here would violate ground rule 4.  Stay on
+# the Warp cvof (CPU + CUDA) until the native CPU twin lands; the native op is
+# verified against this Warp oracle on CUDA in tests/test_cvof.py.
 from lilytorch.src.cvof import cvof_sweep_warp as cvof_sweep
 
 

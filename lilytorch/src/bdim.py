@@ -290,6 +290,23 @@ def _wp_dtype(t: torch.Tensor):
     return wp.float64 if t.dtype == torch.float64 else wp.float32
 
 
+_MW_DUMMY: dict = {}
+
+
+def _mw_dummy(u0: torch.Tensor) -> torch.Tensor:
+    """Persistent 1-element zero placeholder for ``sdf_cc``/``div_corr`` when
+    the Maertens–Weymouth correction is off (``mw_on = 0`` — the kernel never
+    reads or writes it).  Cached per (device, dtype): a per-call allocation
+    breaks CUDA-graph capture (alloc on the legacy stream inside the capture)
+    and would bake a freed pointer into the captured graph."""
+    key = (u0.device, u0.dtype)
+    d = _MW_DUMMY.get(key)
+    if d is None:
+        d = torch.zeros(1, dtype=u0.dtype, device=u0.device)
+        _MW_DUMMY[key] = d
+    return d
+
+
 def _bdim_forcing_3d_launch(
         u_prime, v_prime, w_prime, sdf_u, sdf_v, sdf_w,
         body_u, body_v, body_w, u0, v0, w0, ch, cv, cw,
@@ -359,7 +376,7 @@ def bdim_forcing_3d_warp(
     """
     mw_on = 1 if div_corr is not None else 0
     if div_corr is None:
-        sdf_cc = div_corr = u0.new_zeros(1)
+        sdf_cc = div_corr = _mw_dummy(u0)
     if rect_dev is None:
         rect_dev = torch.tensor(
             [int(dirty_i0), int(dirty_j0), int(dirty_k0),
@@ -614,7 +631,7 @@ def bdim_forcing_2d_warp(
     """
     mw_on = 1 if div_corr is not None else 0
     if div_corr is None:
-        sdf_cc = div_corr = u0.new_zeros(1)
+        sdf_cc = div_corr = _mw_dummy(u0)
     if rect_dev is None:
         rect_dev = torch.tensor(
             [int(dirty_i0), int(dirty_j0), int(dirty_Ai), int(dirty_Aj)],

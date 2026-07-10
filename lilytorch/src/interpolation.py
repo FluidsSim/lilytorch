@@ -1,6 +1,9 @@
-"""Scattered-point interpolators backed by the Warp ``interp_{2,3}d`` kernels.
+"""Scattered-point interpolation + shared uniform-grid samplers.
 
-Drop-in replacement for pytorch_interpolation's RegularGridInterpolator.
+``RegularGridInterpolator`` (a drop-in for pytorch_interpolation's) is
+re-exported from :mod:`lilytorch.src.native` — the native CUDA/C++
+``interp_{2,3}d`` ops (cuda_native_port Track A).  The Warp ``interp_{2,3}d_warp``
+scattered-gather kernels below are retained as the parity oracle.
 
 Also the home of the shared uniform-grid sampler ``@wp.func``s
 (``bilinear``/``biquadratic``/``sdf_sample`` in 2-D, ``trilinear``/
@@ -17,153 +20,33 @@ constructor (must be 2 or 3; 1 raises ValueError).
 """
 from __future__ import annotations
 
-from typing import Sequence
+import torch  # noqa: F401  (kept for the Warp scattered-gather kernels below)
+from torch import Tensor  # noqa: F401
 
-import torch
-from torch import Tensor
-
-# The scattered-gather Warp kernels these interpolators call (interp_2d /
-# interp_3d) are defined at the bottom of this module — merged from the former
-# misc_2d.py / misc_3d.py.  They pull the shared sampler @wp.func's from
-# streaming_sdf (a leaf); this module is a leaf itself and must never import
-# ``solver``, ``two_phase`` or ``facade``.
+# cuda_native_port Phase 0.2 (Track A): the scattered-point interpolator IS the
+# native CUDA/C++ ``RegularGridInterpolator`` (backed by the ``interp_{2,3}d``
+# ops — both a CUDA kernel and an ``at::parallel_for`` CPU twin).  It is a
+# verbatim drop-in for the former Warp-backed class defined here (same
+# constructor, ``.F`` setter, ``.x/.y/.z`` metadata, ``__call__``).  The Warp
+# scattered-gather kernels ``interp_{2,3}d_warp`` remain at the bottom of this
+# module as the parity oracle (tests/test_interpolation.py), and the shared
+# uniform-grid ``@wp.func`` samplers stay for the streaming-SDF / forces kernels.
+#
+# ``native`` is a true leaf (imports only the ``_C`` extension + torch), so this
+# does not break the "interpolation must not import solver/two_phase/facade" rule.
+from lilytorch.src.native import RegularGridInterpolator
 
 __all__ = [
     "RegularGridInterpolator",
 ]
-
-_VALID_METHODS = ("linear", "quadratic")
-
-
-class RegularGridInterpolator:
-    """Scattered-point interpolator on a uniform regular grid.
-
-    Automatically selects the 2-D or 3-D kernel from the number of axes.
-
-    Parameters
-    ----------
-    points : tuple of 1-D Tensors
-        Axis coordinate arrays — exactly 2 (2-D) or 3 (3-D).
-    F : Tensor
-        Grid values, shape ``(Nx, Ny)`` or ``(Nx, Ny, Nz)``.
-    method : "linear" | "quadratic"
-        Interpolation order.  Default "linear" (bilinear / trilinear).
-    fill_value : any
-        Kept for API compatibility; ignored.  Out-of-bounds queries are
-        always clamped to the nearest border value by the kernel.
-    """
-
-    def __init__(
-        self,
-        points: Sequence[Tensor],
-        F: Tensor,
-        method: str = "linear",
-        fill_value=None,          # kept for drop-in compatibility; ignored
-    ) -> None:
-        ndim = len(points)
-        if ndim < 2:
-            raise ValueError(
-                f"At least 2 grid axes (x, y) are required; got {ndim}. "
-                "Pass (x, y) for 2-D or (x, y, z) for 3-D."
-            )
-        if ndim > 3:
-            raise ValueError(
-                f"At most 3 grid axes are supported; got {ndim}."
-            )
-        if method not in _VALID_METHODS:
-            raise ValueError(
-                f"method must be 'linear' or 'quadratic', got {method!r}."
-            )
-
-        self._ndim   = ndim
-        self._method = method
-
-        # Store axis tensors for attribute access compatibility
-        axes = [ax.detach() for ax in points]
-        self.x  = axes[0]
-        self.y  = axes[1]
-        self.z  = axes[2] if ndim == 3 else None
-
-        # Pre-compute grid metadata (uniform spacing assumed)
-        self.dx = float((axes[0][-1] - axes[0][0]) / max(axes[0].numel() - 1, 1))
-        self.dy = float((axes[1][-1] - axes[1][0]) / max(axes[1].numel() - 1, 1))
-        self.dz = (
-            float((axes[2][-1] - axes[2][0]) / max(axes[2].numel() - 1, 1))
-            if ndim == 3 else None
-        )
-
-        self._bx0    = float(axes[0][0])
-        self._by0    = float(axes[1][0])
-        self._bz0    = float(axes[2][0]) if ndim == 3 else 0.0
-        self._inv_dx = 1.0 / self.dx if self.dx != 0.0 else 0.0
-        self._inv_dy = 1.0 / self.dy if self.dy != 0.0 else 0.0
-        self._inv_dz = (1.0 / self.dz if (self.dz is not None and self.dz != 0.0) else 0.0)
-        self._Mx     = int(axes[0].numel())
-        self._My     = int(axes[1].numel())
-        self._Mz     = int(axes[2].numel()) if ndim == 3 else 1
-
-        self._F = F.contiguous()
-
-    # ------------------------------------------------------------------
-    # .F property — reassigned every step in the CFD loop
-    # ------------------------------------------------------------------
-    @property
-    def F(self) -> Tensor:
-        return self._F
-
-    @F.setter
-    def F(self, val: Tensor) -> None:
-        self._F = val.contiguous() if not val.is_contiguous() else val
-
-    # ------------------------------------------------------------------
-    # Interpolation
-    # ------------------------------------------------------------------
-    def __call__(self, *coords: Tensor) -> Tensor:
-        """Interpolate at scattered query points.
-
-        Parameters
-        ----------
-        *coords : Tensor
-            One 1-D tensor per dimension — ``(xq, yq)`` for 2-D or
-            ``(xq, yq, zq)`` for 3-D.  All must have the same numel.
-
-        Returns
-        -------
-        Tensor
-            Interpolated values, same shape as each coordinate tensor.
-        """
-        if len(coords) != self._ndim:
-            raise ValueError(
-                f"Expected {self._ndim} coordinate tensors, got {len(coords)}."
-            )
-        orig_shape = coords[0].shape
-        flat = [c.reshape(-1) for c in coords]
-
-        if self._ndim == 2:
-            result = interp_2d(
-                self._F, flat[0], flat[1],
-                self._bx0, self._by0,
-                self._inv_dx, self._inv_dy,
-                self._Mx, self._My,
-                self._method,
-            )
-        else:
-            result = interp_3d(
-                self._F, flat[0], flat[1], flat[2],
-                self._bx0, self._by0, self._bz0,
-                self._inv_dx, self._inv_dy, self._inv_dz,
-                self._Mx, self._My, self._Mz,
-                self._method,
-            )
-
-        return result.reshape(orig_shape)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  Shared uniform-grid sampler @wp.func's + scattered-gather Warp kernels.
 #  The samplers (bilinear/biquadratic/sdf_sample in 2-D, trilinear/triquadratic
 #  in 3-D) live here as the single source; streaming_sdf.py and forces.py import
-#  them.  interp_2d / interp_3d back the RegularGridInterpolator class above.
+#  them.  ``interp_{2,3}d_warp`` are the parity oracle for the native
+#  ``RegularGridInterpolator`` (re-exported at the top of this module).
 #  All dtype-generic f32+f64 via wp.overload.
 # ═════════════════════════════════════════════════════════════════════════════
 from typing import Any  # noqa: E402
@@ -459,8 +342,3 @@ def interp_3d_warp(F_t, xq_t, yq_t, zq_t, bx0, by0, bz0, idx, idy, idz,
                       im, wp.from_torch(G)],
               device=wdev)
     return G
-
-
-# Names used by the RegularGridInterpolator classes above (resolved at call time).
-interp_2d = interp_2d_warp
-interp_3d = interp_3d_warp

@@ -11,6 +11,7 @@ import torch
 import warp as wp
 
 from lilytorch.src.cvof import cvof_sweep_warp
+from lilytorch.src.native import cvof_sweep as cvof_sweep_native
 
 SKIP_NO_CUDA = pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA")
 CFL = 0.3
@@ -42,3 +43,21 @@ def test_cvof_cpu_eq_gpu(shape, strided):
         wp.synchronize()
         d = (oc - og.cpu()).abs().max().item()
         assert d < 1e-12, f"shape={shape} strided={strided} fd={fd} cpu vs gpu {d:.3e}"
+
+
+# cuda_native_port Phase 0.2 parity gate: native cvof_sweep == Warp oracle.
+# CUDA-only — the native ``cvof_sweep`` op has no CPU twin yet (ground rule 4),
+# so two_phase.py keeps the Warp cvof on CPU.  This gate documents that the
+# native CUDA kernel is bit-parity with the oracle, ready for the swap once the
+# ``at::parallel_for`` CPU twin lands.
+@SKIP_NO_CUDA
+@pytest.mark.parametrize("shape", [(40, 32), (24, 20, 18)])
+@pytest.mark.parametrize("strided", [False, True])
+def test_cvof_native_eq_warp(shape, strided):
+    for fd in range(len(shape)):
+        a, u = _alpha_vel(shape, "cuda:0", 4, strided)
+        o_warp = a.clone(); cvof_sweep_warp(a, u, CFL, fd, o_warp)
+        o_nat = a.clone(); cvof_sweep_native(a, u, CFL, fd, o_nat)
+        wp.synchronize()
+        d = (o_warp - o_nat).abs().max().item()
+        assert d < 1e-12, f"shape={shape} strided={strided} fd={fd} native vs warp {d:.3e}"

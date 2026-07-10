@@ -19,13 +19,14 @@ import math
 import torch
 
 from lilytorch.src import operations as ops
-# Warp force ops are imported from the leaf kernel modules (not from facade) so
-# this module stays upstream of facade in the import graph.  The Eulerian readout
-# (``streaming_sdf_forces_post_*_warp``) is defined in the merged Warp section at
-# the end of this file and consumed directly by force_method2 below.
-from lilytorch.src.lagrangian import (
-    lagrangian_forces_2d_warp as _lagrangian_forces_2d_kernel,
-    lagrangian_forces_3d_warp as _lagrangian_forces_3d_kernel,
+# cuda_native_port Phase 0.2: the Lagrangian surface-integral force readout now
+# dispatches to the native CUDA/C++ op (``native.lagrangian_forces_{2,3}d``),
+# which is a positional drop-in for the former Warp wrappers.  The Warp
+# wrappers stay importable from ``lilytorch.src.lagrangian`` as the parity
+# oracle (see tests/test_lagrangian.py) until Phase 1.
+from lilytorch.src.native import (
+    lagrangian_forces_2d as _lagrangian_forces_2d_kernel,
+    lagrangian_forces_3d as _lagrangian_forces_3d_kernel,
 )
 
 
@@ -2540,8 +2541,16 @@ def streaming_sdf_forces_post_3d_warp(
 
 # In-module aliases (historical short names) used by the force_method2 call
 # sites above.
-streaming_sdf_forces_post_2d = streaming_sdf_forces_post_2d_warp
-streaming_sdf_forces_post_3d = streaming_sdf_forces_post_3d_warp
+#
+# cuda_native_port Phase 0.2: the Eulerian streaming force readout dispatches
+# to the native CUDA/C++ op (which has both a CUDA kernel and an
+# ``at::parallel_for`` CPU twin — see ops.cpp), a positional drop-in for the
+# former Warp wrappers.  The Warp wrappers above stay importable as the parity
+# oracle (tests/test_forces.py) until Phase 1.
+from lilytorch.src.native import (
+    streaming_sdf_forces_post_2d as streaming_sdf_forces_post_2d,
+    streaming_sdf_forces_post_3d as streaming_sdf_forces_post_3d,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2650,66 +2659,31 @@ class ForcesPostGraph:
             fields, p, nu_rho_field,
             eps_body, eps_solver, cell_vol, delta_order, out,
             force_submethod=0, ph_tau=0.0):
-        """Zero ``out`` and run the force readout — via graph replay when a
-        captured graph matches the live pointer signature, eagerly otherwise.
+        """Zero ``out`` and run the native streaming force readout eagerly.
         ``grids`` is (gx, gy[, gz]); ``fields`` is (u, v[, w]).  Covers both
         submethods: n·δ is one fanned launch; deltaH adds the static
-        full-grid ∂H pressure pass (both dims are pose-independent).
+        full-grid ∂H pressure pass.
 
-        ``nu_rho_field`` is staged into a persistent buffer so the graph
-        always sees a stable pointer — this enables graph capture for
-        variable-viscosity (Smagorinsky / Carreau) runs where a fresh
-        field is allocated each step.
+        cuda_native_port Phase 0: the readout dispatches to the native
+        CUDA/C++ op and runs EAGERLY.  The former Warp ``ScopedCapture``
+        graph replay is retired here — native launches cannot be recorded by
+        a Warp capture — and the whole-step native CUDA-graph runner is
+        re-added in Phase 1.  Per-step pose data is still staged into
+        persistent buffers (grow-only ``max_vol`` watermark, pointer-stable
+        ``nu_rho``) so the Phase-1 graph runner drops in without call-site
+        changes.
         """
         self._stage(kin, aabb_lo, aabb_dim, max_vol, nu_rho_field)
 
-        post = (streaming_sdf_forces_post_2d_warp if self.D == 2
-                else streaming_sdf_forces_post_3d_warp)
-        out_flat = out.reshape(-1)
-
-        # Use the staged nu_rho buffer (stable pointer) for graph capture
-        # and replay.  For constant viscosity this is a 1-element copy of
-        # the already-persistent scalar tensor; for variable viscosity it
-        # is a full-grid copy staged above.
+        post = (streaming_sdf_forces_post_2d if self.D == 2
+                else streaming_sdf_forces_post_3d)
         _nu_rho_use = self._nu_rho_staging
 
-        def _work():
-            wp.from_torch(out_flat).zero_()
-            post(F_flat, F_offsets, body_shapes, body_meta,
-                 self._kin_st, self._lo_st, self._dim_st, *grids,
-                 h_grid, self._max_vol, sdf_cc, interp_method,
-                 *fields, p, _nu_rho_use,
-                 eps_body, eps_solver, cell_vol, delta_order, out,
-                 int(force_submethod), float(ph_tau))
-
-        live = (*fields, p, sdf_cc, _nu_rho_use, out)
-        if not self._graph_safe(live):
-            _work()
-            self.eager_calls += 1
-            return
-
-        sig = tuple(t.data_ptr() for t in live)
-        g = self._graphs.get(sig)
-        if g is not None:
-            wp.capture_launch(g)
-            self.replays += 1
-            return
-
-        n = self._seen.get(sig, 0) + 1
-        self._seen[sig] = n
-        if n >= 2 and len(self._graphs) < self._MAX_GRAPHS:
-            _work()  # this step's real work (also JIT/module warm-up)
-            with wp.ScopedCapture(device=str(out.device)) as cap:
-                _work()
-            self._graphs[sig] = cap.graph
-            self.captures += 1
-            return
-        _work()
+        out.zero_()
+        post(F_flat, F_offsets, body_shapes, body_meta,
+             self._kin_st, self._lo_st, self._dim_st, *grids,
+             h_grid, self._max_vol, sdf_cc, interp_method,
+             *fields, p, _nu_rho_use,
+             eps_body, eps_solver, cell_vol, delta_order, out,
+             int(force_submethod), float(ph_tau))
         self.eager_calls += 1
-        if self.eager_calls == 200 and self.replays == 0:
-            import warnings
-            warnings.warn(
-                "ForcesPostGraph: 200 eager fallbacks and no graph replay — "
-                "live fluid-field pointers are churning past the signature "
-                "cache; the readout is correct but not graph-accelerated.",
-                RuntimeWarning)

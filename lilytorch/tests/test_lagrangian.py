@@ -22,6 +22,10 @@ from lilytorch.src.lagrangian import (
     lagrangian_forces_2d_warp,
     lagrangian_forces_3d_warp,
 )
+from lilytorch.src.native import (
+    lagrangian_forces_2d as lagrangian_forces_2d_native,
+    lagrangian_forces_3d as lagrangian_forces_3d_native,
+)
 
 SKIP_NO_CUDA = pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA")
 # atomicAdd accumulation order differs between devices → float64 reduction
@@ -195,6 +199,37 @@ def test_3d_cpu_eq_gpu_f32(method, scalar_nrho):
     wc, wg = _cpu_vs_gpu(lagrangian_forces_3d_warp, tensors, geom, method, 0.2)
     err, ok = _err(wc, wg, torch.float32)
     assert ok, f"3D f32 {method} scalar={scalar_nrho}: {err:.3e}"
+
+
+# ─── cuda_native_port Phase 0.2 parity gate: native == Warp oracle ───────────
+
+_DEVS = ["cpu"] + (["cuda:0"] if torch.cuda.is_available() else [])
+
+
+@pytest.mark.parametrize("dev", _DEVS)
+@pytest.mark.parametrize("method", ["linear", "quadratic"])
+@pytest.mark.parametrize("scalar_nrho", [True, False])
+@pytest.mark.parametrize("offset", [0.0, 0.08])
+def test_2d_native_eq_warp(dev, method, scalar_nrho, offset):
+    tensors, geom = _args_2d(scalar_nrho, torch.float64)
+    tensors = tuple(t.to(dev) for t in tensors)
+    w = lagrangian_forces_2d_warp(*tensors, *geom, method=method, sample_offset=offset)
+    n = lagrangian_forces_2d_native(*tensors, *geom, method=method, sample_offset=offset)
+    err, ok = _err(w.cpu(), n.cpu(), torch.float64)
+    assert ok, f"2D native vs warp {dev} {method} scalar={scalar_nrho} off={offset}: {err:.3e}"
+
+
+@pytest.mark.parametrize("dev", _DEVS)
+@pytest.mark.parametrize("method", ["linear", "quadratic"])
+@pytest.mark.parametrize("scalar_nrho", [True, False])
+@pytest.mark.parametrize("offset", [0.0, 0.2])
+def test_3d_native_eq_warp(dev, method, scalar_nrho, offset):
+    tensors, geom = _args_3d(scalar_nrho, torch.float64)
+    tensors = tuple(t.to(dev) for t in tensors)
+    w = lagrangian_forces_3d_warp(*tensors, *geom, method=method, sample_offset=offset)
+    n = lagrangian_forces_3d_native(*tensors, *geom, method=method, sample_offset=offset)
+    err, ok = _err(w.cpu(), n.cpu(), torch.float64)
+    assert ok, f"3D native vs warp {dev} {method} scalar={scalar_nrho} off={offset}: {err:.3e}"
 
 
 if __name__ == "__main__":

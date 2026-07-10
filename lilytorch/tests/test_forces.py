@@ -272,16 +272,20 @@ def test_python_eulerian_force_path_cpu_eq_gpu():
         f"CPU vs GPU python eulerian force: {c.tolist()} vs {g.tolist()}"
 
 
-# ── CUDA-graph replay wrapper (ForcesPostGraph) == eager ─────────────────────
-# Drives the default-on CUDA-graph force readout (ForcesPostGraph) over a multi-step
+# ── Native streaming force readout (ForcesPostGraph) == Warp oracle ──────────
+# cuda_native_port Phase 0.2 parity gate.  Drives the ForcesPostGraph readout —
+# now the NATIVE CUDA op, run eagerly (the Warp CUDA-graph capture is retired
+# here; the native whole-step graph runner is Phase 1) — over a multi-step
 # "simulation": per-step FRESH kin/aabb tensors (as BDIMhandler produces),
-# moving poses, in-place fluid-field updates (the graph must read live data,
-# not capture-time values), and a mid-run max_vol growth that forces the
-# grow-only watermark to invalidate + recapture.  The eager reference runs the
-# plain function on identical data; agreement is fp sum-order roundoff only
-# (same per-cell math, different atomic accumulation order).
+# moving poses, in-place fluid-field updates, and a mid-run max_vol growth that
+# exercises the grow-only watermark.  The reference runs the Warp oracle on
+# identical data; agreement is atomic-accumulation-order roundoff only (native
+# CUDA vs Warp CUDA), so the tolerance is fp-width-aware rather than bit-exact.
 
-GRAPH_ATOL = 1e-9
+# native-vs-warp atomic-order divergence: f64 ~3e-9, f32 ~2e-7 (measured);
+# leave headroom for other scenes / larger force magnitudes.
+def _forces_parity_atol(dtype):
+    return 1e-6 if dtype == torch.float64 else 1e-3
 
 
 def _graph_steps_2d(dtype, submethod=0):
@@ -338,7 +342,8 @@ def _graph_steps_2d(dtype, submethod=0):
             force_submethod=submethod, ph_tau=ph_tau)
 
         err = (out_g - out_e).abs().max().item()
-        assert err < GRAPH_ATOL, f"step {step}: graph vs eager err {err:.3e}"
+        atol = _forces_parity_atol(dtype)
+        assert err < atol, f"step {step}: native vs warp err {err:.3e} >= {atol:.1e}"
         assert out_e.abs().max().item() > 0, f"step {step}: no in-band force"
     return fg
 
@@ -348,9 +353,11 @@ def _graph_steps_2d(dtype, submethod=0):
 @pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
 def test_forces_2d_graph_replay_eq_eager(dtype, submethod):
     fg = _graph_steps_2d(dtype, submethod)
-    # steps 0 eager, 1 capture, 2-4 replay, 5 growth→recapture, 6-7 replay
-    assert fg.captures == 2, f"captures={fg.captures}"
-    assert fg.replays == 5, f"replays={fg.replays}"
+    # Phase 0: the readout is native and runs eagerly every step (no Warp
+    # capture/replay).  All 8 steps count as eager; the per-step native-vs-warp
+    # parity is checked inside _graph_steps_2d.
+    assert fg.eager_calls == 8, f"eager_calls={fg.eager_calls}"
+    assert fg.captures == 0 and fg.replays == 0
 
 
 def _graph_steps_3d(dtype, submethod=0):
@@ -402,7 +409,8 @@ def _graph_steps_3d(dtype, submethod=0):
             force_submethod=submethod, ph_tau=ph_tau)
 
         err = (out_g - out_e).abs().max().item()
-        assert err < GRAPH_ATOL, f"step {step}: graph vs eager err {err:.3e}"
+        atol = _forces_parity_atol(dtype)
+        assert err < atol, f"step {step}: native vs warp err {err:.3e} >= {atol:.1e}"
         assert out_e.abs().max().item() > 0, f"step {step}: no in-band force"
     return fg
 
@@ -412,5 +420,6 @@ def _graph_steps_3d(dtype, submethod=0):
 @pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
 def test_forces_3d_graph_replay_eq_eager(dtype, submethod):
     fg = _graph_steps_3d(dtype, submethod)
-    assert fg.captures == 2, f"captures={fg.captures}"
-    assert fg.replays == 5, f"replays={fg.replays}"
+    # Phase 0: native readout runs eagerly every step (see the 2-D twin).
+    assert fg.eager_calls == 8, f"eager_calls={fg.eager_calls}"
+    assert fg.captures == 0 and fg.replays == 0
