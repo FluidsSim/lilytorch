@@ -173,18 +173,14 @@ static inline scalar_t triquadratic_sample_uniform(
     const scalar_t Mx_lim = (scalar_t)(Mx - 1);
     const scalar_t My_lim = (scalar_t)(My - 1);
     const scalar_t Mz_lim = (scalar_t)(Mz - 1);
-    if (tx < (scalar_t)0) tx = (scalar_t)0; else if (tx > Mx_lim) tx = Mx_lim;
-    if (ty < (scalar_t)0) ty = (scalar_t)0; else if (ty > My_lim) ty = My_lim;
-    if (tz < (scalar_t)0) tz = (scalar_t)0; else if (tz > Mz_lim) tz = Mz_lim;
+    tx = std::max((scalar_t)0, std::min(tx, Mx_lim));
+    ty = std::max((scalar_t)0, std::min(ty, My_lim));
+    tz = std::max((scalar_t)0, std::min(tz, Mz_lim));
 
     int ix = (int)tx; if (ix > Mx - 2) ix = Mx - 2;
     int iy = (int)ty; if (iy > My - 2) iy = My - 2;
     int iz = (int)tz; if (iz > Mz - 2) iz = Mz - 2;
 
-    // Boundary fallback to trilinear on any axis whose lower stencil
-    // neighbour (ix-1) is out of range.  The body grid is at least 2 wide
-    // on each axis (otherwise the trilinear sampler would be invalid as
-    // well), but ix-1 < 0 for queries in the first cell.
     if (ix < 1 || iy < 1 || iz < 1 ||
         Mx < 3 || My < 3 || Mz < 3) {
         return trilinear_sample_uniform<scalar_t>(
@@ -210,22 +206,24 @@ static inline scalar_t triquadratic_sample_uniform(
     const int s2 = Mz;
     const int s1 = My * Mz;
     const int base = (ix - 1) * s1 + (iy - 1) * s2 + (iz - 1);
-    // Each F lookup = base + dx*s1 + dy*s2 + dz with dx,dy,dz in {0,1,2}.
-    // Factor by x: 3 inner-y reductions; then sum.
-    auto plane = [&](int dx_off) -> scalar_t {
-        const int b0 = base + dx_off * s1;
-        // y = -1
-        const scalar_t r_m =
-            wzm * F[b0 + 0]      + wz0 * F[b0 + 1]      + wzp * F[b0 + 2];
-        // y =  0
-        const scalar_t r_0 =
-            wzm * F[b0 + s2]     + wz0 * F[b0 + s2 + 1] + wzp * F[b0 + s2 + 2];
-        // y = +1
-        const scalar_t r_p =
-            wzm * F[b0 + 2*s2]   + wz0 * F[b0 + 2*s2 + 1] + wzp * F[b0 + 2*s2 + 2];
-        return wym * r_m + wy0 * r_0 + wyp * r_p;
-    };
-    return wxm * plane(0) + wx0 * plane(1) + wxp * plane(2);
+
+    // Identical accumulation order as the CUDA kernel — running +=
+    // accumulators so FMA contraction produces the same rounding.
+    scalar_t out = (scalar_t)0;
+    for (int dx = 0; dx < 3; ++dx) {
+        const scalar_t wx = (dx == 0) ? wxm : (dx == 1 ? wx0 : wxp);
+        const int b0 = base + dx * s1;
+        scalar_t plane = (scalar_t)0;
+        for (int dy = 0; dy < 3; ++dy) {
+            const scalar_t wy = (dy == 0) ? wym : (dy == 1 ? wy0 : wyp);
+            const int b1 = b0 + dy * s2;
+            const scalar_t row =
+                wzm * F[b1]     + wz0 * F[b1 + 1] + wzp * F[b1 + 2];
+            plane += wy * row;
+        }
+        out += wx * plane;
+    }
+    return out;
 }
 
 // =====================================================================

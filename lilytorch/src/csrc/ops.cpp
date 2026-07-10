@@ -148,6 +148,34 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " float blend_eps"
         ") -> ()");
 
+    // ---- B=1 direct-write kernels (no keys, no atomics, no decode) ----------
+    m.def(
+        "streaming_sdf_stag_2d_direct("
+        "Tensor F_flat, Tensor F_offsets,"
+        " Tensor body_shapes, Tensor body_meta, Tensor kin,"
+        " Tensor aabb_lo, Tensor aabb_dim,"
+        " Tensor gx, Tensor gy, float h_grid,"
+        " int max_vol_per_body,"
+        " Tensor(a!) sdf_cc, Tensor(b!) sdf_u, Tensor(c!) sdf_v,"
+        " Tensor(d!) body_u, Tensor(e!) body_v,"
+        " int interp_method,"
+        " int dirty_i0, int dirty_j0, int dirty_Ai, int dirty_Aj"
+        ") -> ()");
+
+    m.def(
+        "streaming_sdf_stag_3d_direct("
+        "Tensor F_flat, Tensor F_offsets,"
+        " Tensor body_shapes, Tensor body_meta, Tensor kin,"
+        " Tensor aabb_lo, Tensor aabb_dim,"
+        " Tensor gx, Tensor gy, Tensor gz, float h_grid,"
+        " int max_vol_per_body,"
+        " Tensor(a!) sdf_cc, Tensor(b!) sdf_u, Tensor(c!) sdf_v, Tensor(d!) sdf_w,"
+        " Tensor(e!) body_u, Tensor(f!) body_v, Tensor(g!) body_w,"
+        " int interp_method,"
+        " int dirty_i0, int dirty_j0, int dirty_k0,"
+        " int dirty_Ai, int dirty_Aj, int dirty_Ak"
+        ") -> ()");
+
     // Phase-I fused BDIM2 + variable-density Poisson coefficient kernel (2-D).
     m.def(
         "bdim_coeff_2d("

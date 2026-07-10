@@ -90,8 +90,8 @@ static inline scalar_t biquadratic_sample_uniform_2d(
     scalar_t ty = (yq - by0) * inv_dy;
     const scalar_t Mx_lim = (scalar_t)(Mx - 1);
     const scalar_t My_lim = (scalar_t)(My - 1);
-    if (tx < (scalar_t)0) tx = (scalar_t)0; else if (tx > Mx_lim) tx = Mx_lim;
-    if (ty < (scalar_t)0) ty = (scalar_t)0; else if (ty > My_lim) ty = My_lim;
+    tx = std::max((scalar_t)0, std::min(tx, Mx_lim));
+    ty = std::max((scalar_t)0, std::min(ty, My_lim));
 
     int ix = (int)tx; if (ix > Mx - 2) ix = Mx - 2;
     int iy = (int)ty; if (iy > My - 2) iy = My - 2;
@@ -115,11 +115,17 @@ static inline scalar_t biquadratic_sample_uniform_2d(
     const int s1   = My;
     const int base = (ix - 1) * s1 + (iy - 1);
 
-    auto col = [&](int dx_off) -> scalar_t {
-        const int b0 = base + dx_off * s1;
-        return wym * F[b0] + wy0 * F[b0 + 1] + wyp * F[b0 + 2];
-    };
-    return wxm * col(0) + wx0 * col(1) + wxp * col(2);
+    // Identical accumulation order as the CUDA kernel — running +=
+    // accumulator so FMA contraction produces the same rounding.
+    scalar_t out = (scalar_t)0;
+    for (int dx = 0; dx < 3; ++dx) {
+        const scalar_t wx = (dx == 0) ? wxm : (dx == 1 ? wx0 : wxp);
+        const int b0 = base + dx * s1;
+        const scalar_t col =
+            wym * F[b0] + wy0 * F[b0 + 1] + wyp * F[b0 + 2];
+        out += wx * col;
+    }
+    return out;
 }
 
 // =====================================================================

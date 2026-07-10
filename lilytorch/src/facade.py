@@ -33,20 +33,27 @@ def _native_body_update_2d(
     key_cc, key_u, key_v,
     use_graph=False,  # ignored — native eager only for now
 ):
-    """Native 2-D streaming SDF body update (eager path).
-
-    ``key_cc/key_u/key_v`` are persistent int64 scratch buffers
-    (size >= Ngx*Ngy), allocated once by the bridge.
-    ``num_u/num_v/den_u/den_v`` are 1-element dummies when blend_eps==0
-    (the native wrapper expands them to full-grid zeros)."""
+    """Native 2-D streaming SDF body update (eager path)."""
     if int(dirty_Ai) * int(dirty_Aj) <= 0:
         return
-    B = int(body_shapes.reshape(-1).numel() // 2)
+
+    # B=1 fast path: direct-write kernel (no key packing, no atomics, no decode)
+    if body_shapes.size(0) == 1 and sdf_cc.device.type == 'cuda':
+        native.streaming_sdf_stag_2d_direct(
+            F_flat, F_offsets,
+            body_shapes, body_meta, kin,
+            aabb_lo, aabb_dim,
+            gx, gy, float(h), int(max_vol),
+            sdf_cc, sdf_u, sdf_v, body_u, body_v,
+            int(interp_method),
+            int(dirty_i0), int(dirty_j0), int(dirty_Ai), int(dirty_Aj),
+        )
+        return
 
     native.streaming_sdf_stag_2d_multi(
         F_flat, F_offsets,
-        body_shapes.reshape(-1), body_meta.reshape(-1), kin.reshape(-1),
-        aabb_lo.reshape(-1), aabb_dim.reshape(-1),
+        body_shapes, body_meta, kin,
+        aabb_lo, aabb_dim,
         gx, gy, float(h), int(max_vol),
         sdf_cc, sdf_u, sdf_v, body_u, body_v,
         key_cc, key_u, key_v,
@@ -71,10 +78,24 @@ def _native_body_update_3d(
     if int(dirty_Ai) * int(dirty_Aj) * int(dirty_Ak) <= 0:
         return
 
+    # B=1 fast path: direct-write kernel (no key packing, no atomics, no decode)
+    if body_shapes.size(0) == 1 and sdf_cc.device.type == 'cuda':
+        native.streaming_sdf_stag_3d_direct(
+            F_flat, F_offsets,
+            body_shapes, body_meta, kin,
+            aabb_lo, aabb_dim,
+            gx, gy, gz, float(h), int(max_vol),
+            sdf_cc, sdf_u, sdf_v, sdf_w, body_u, body_v, body_w,
+            int(interp_method),
+            int(dirty_i0), int(dirty_j0), int(dirty_k0),
+            int(dirty_Ai), int(dirty_Aj), int(dirty_Ak),
+        )
+        return
+
     native.streaming_sdf_stag_3d_multi(
         F_flat, F_offsets,
-        body_shapes.reshape(-1), body_meta.reshape(-1), kin.reshape(-1),
-        aabb_lo.reshape(-1), aabb_dim.reshape(-1),
+        body_shapes, body_meta, kin,
+        aabb_lo, aabb_dim,
         gx, gy, gz, float(h), int(max_vol),
         sdf_cc, sdf_u, sdf_v, sdf_w, body_u, body_v, body_w,
         key_cc, key_u, key_v, key_w,

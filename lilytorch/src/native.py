@@ -302,6 +302,58 @@ def streaming_sdf_stag_2d_multi(
     )
 
 
+def streaming_sdf_stag_2d_direct(
+        F_flat: Tensor, F_offsets: Tensor,
+        body_shapes: Tensor, body_meta: Tensor, kin: Tensor,
+        aabb_lo: Tensor, aabb_dim: Tensor,
+        gx: Tensor, gy: Tensor,
+        h_grid: float, max_vol_per_body: int,
+        sdf_cc: Tensor, sdf_u: Tensor, sdf_v: Tensor,
+        body_u: Tensor, body_v: Tensor,
+        interp_method: int,
+        dirty_i0: int, dirty_j0: int,
+        dirty_Ai: int, dirty_Aj: int) -> None:
+    """2-D single-body direct-write SDF kernel (B=1 fast path).
+
+    No key packing, no atomics, no decode pass — produces bit-identical
+    results with the CPU twin."""
+    return torch.ops.lilytorch_kernels.streaming_sdf_stag_2d_direct.default(
+        F_flat, F_offsets, body_shapes, body_meta, kin,
+        aabb_lo, aabb_dim,
+        gx, gy, float(h_grid), int(max_vol_per_body),
+        sdf_cc, sdf_u, sdf_v, body_u, body_v,
+        int(interp_method),
+        int(dirty_i0), int(dirty_j0),
+        int(dirty_Ai), int(dirty_Aj),
+    )
+
+
+def streaming_sdf_stag_3d_direct(
+        F_flat: Tensor, F_offsets: Tensor,
+        body_shapes: Tensor, body_meta: Tensor, kin: Tensor,
+        aabb_lo: Tensor, aabb_dim: Tensor,
+        gx: Tensor, gy: Tensor, gz: Tensor,
+        h_grid: float, max_vol_per_body: int,
+        sdf_cc: Tensor, sdf_u: Tensor, sdf_v: Tensor, sdf_w: Tensor,
+        body_u: Tensor, body_v: Tensor, body_w: Tensor,
+        interp_method: int,
+        dirty_i0: int, dirty_j0: int, dirty_k0: int,
+        dirty_Ai: int, dirty_Aj: int, dirty_Ak: int) -> None:
+    """3-D single-body direct-write SDF kernel (B=1 fast path).
+
+    No key packing, no atomics, no decode pass — produces bit-identical
+    results with the CPU twin."""
+    return torch.ops.lilytorch_kernels.streaming_sdf_stag_3d_direct.default(
+        F_flat, F_offsets, body_shapes, body_meta, kin,
+        aabb_lo, aabb_dim,
+        gx, gy, gz, float(h_grid), int(max_vol_per_body),
+        sdf_cc, sdf_u, sdf_v, sdf_w, body_u, body_v, body_w,
+        int(interp_method),
+        int(dirty_i0), int(dirty_j0), int(dirty_k0),
+        int(dirty_Ai), int(dirty_Aj), int(dirty_Ak),
+    )
+
+
 def bdim_coeff_2d(
         u_prime: Tensor, v_prime: Tensor,
         sdf_u: Tensor, sdf_v: Tensor,
