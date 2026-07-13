@@ -236,11 +236,13 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
     // The caller snapshots target → copy_buf before calling; this kernel
     // reads the stencil from copy_buf and accumulates into target.
     // nu_eff can be a 1-element tensor (constant ν·dt) or a full field.
+    // scale_constant: pre-computed ν·dt (used only when nu_eff.numel()≤1).
     m.def(
         "diffuse_add("
         "Tensor(a!) target, Tensor copy_buf, Tensor nu_eff,"
         " float dt, int ndim,"
-        " float dh0, float dh1, float dh2"
+        " float dh0, float dh1, float dh2,"
+        " float scale_constant"
         ") -> ()");
 
     // ---- Lagrangian (surface-integral) force kernels ------------------

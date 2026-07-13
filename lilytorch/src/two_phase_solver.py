@@ -171,10 +171,17 @@ class TwoPhaseSolver(FluidSolver):
             raise ValueError(
                 "TwoPhaseSolver requires a 'solver.two_phase' config block."
             )
-        if self.poisson_method not in ("multigrid", "mgcg"):
+        if self.poisson_method not in ("multigrid", "mgcg", "rmgcg"):
             raise ValueError(
-                "two_phase requires poisson_method 'multigrid' or 'mgcg' "
+                "two_phase requires poisson_method 'multigrid', 'mgcg', or 'rmgcg' "
                 "(the FFT solver cannot do a variable-density Poisson)."
+            )
+        if self.poisson_method == "multigrid":
+            print(
+                "TwoPhaseSolver: poisson_method='multigrid' is functional but "
+                "'mgcg' (multigrid-preconditioned CG) is ~2.2× faster for "
+                "variable-density (833:1) two-phase Poisson. "
+                "Consider setting poisson_method='mgcg'."
             )
         # FUSED PATH: the default (non-consistent) two-phase step reuses the
         # single-phase fused kernels untouched.  The two-phase repairs run in
@@ -1131,10 +1138,7 @@ class TwoPhaseSolver(FluidSolver):
         # In consistent (evolve) mode the interface already rode the shared mass
         # flux inside fluid_step (alpha synced there); skip the standalone VOF.
         if not self._consistent_momentum:
-            if self.ndim == 2:
-                self.two_phase.advect(u, v, dt=self.dt)
-            else:
-                self.two_phase.advect(u, v, w_vel, dt=self.dt)
+            self._advect_vof(u, v, p, iteration, w_vel=w_vel)
         self._release_bdim_fields()
         # Flush the CUDA allocator cache only at the base solver's throttled
         # cadence (empty_cache_every, default 200), NOT every step: the grids
@@ -1148,6 +1152,59 @@ class TwoPhaseSolver(FluidSolver):
         if self.device.type == "cuda" and iteration % self.empty_cache_every == 0:
             torch.cuda.empty_cache()
         return self.plotting_and_saving(u, v, p, iteration, w_vel=w_vel)
+
+    # ------------------------------------------------------------------
+    #  cvof graph capture (Phase 4.3): fold VOF transport into a CUDA graph
+    # ------------------------------------------------------------------
+    def _advect_vof(self, u, v, p, iteration, w_vel=None):
+        """VOF transport (cvof sweeps), graph-captured on CUDA.
+
+        Uses :class:`NativeWholeStepGraphRunner` to capture the per-direction
+        W&Y conservative sweeps into a single graph replay.  Each sweep-parity
+        variant gets its own graph; the parity is toggled OUTSIDE the graph
+        (before key computation) because Python attribute writes do not execute
+        during graph replay.
+        On CPU, falls back to eager execution.
+        """
+        tp = self.two_phase
+        ndim = self.ndim
+        dt = float(self.dt)
+
+        if not u.is_cuda:
+            # CPU: eager path (parity toggled inside advect())
+            if ndim == 2:
+                tp.advect(u, v, dt=dt)
+            else:
+                tp.advect(u, v, w_vel, dt=dt)
+            return
+
+        # Toggle parity OUTSIDE the graph so each parity variant gets its
+        # own captured graph.  advect_graph_aware reads _sweep_parity but
+        # does NOT toggle it (toggle-on-replay would be silently dropped).
+        tp._sweep_parity = not getattr(tp, '_sweep_parity', False)
+        parity = int(tp._sweep_parity)
+
+        # Lazy-init cvof graph runner
+        if getattr(self, '_cvof_graph', None) is None:
+            from lilytorch.src.graph_capture import NativeWholeStepGraphRunner
+            self._cvof_graph = NativeWholeStepGraphRunner(
+                use_cuda_graph=not self._graph_capture_debug)
+        else:
+            self._cvof_graph._use_cuda_graph = not self._graph_capture_debug
+        runner = self._cvof_graph
+
+        if ndim == 2:
+            def _run_cvof():
+                tp.advect_graph_aware(u, v, dt=dt)
+            key = (tp.alpha.data_ptr(), u.data_ptr(), v.data_ptr(),
+                   parity, dt)
+        else:
+            def _run_cvof():
+                tp.advect_graph_aware(u, v, w_vel, dt=dt)
+            key = (tp.alpha.data_ptr(), u.data_ptr(), v.data_ptr(),
+                   w_vel.data_ptr(), parity, dt)
+        device_str = f"cuda:{u.device.index}"
+        runner.run(key, device_str, _run_cvof, stage=None)
 
 
 def build_two_phase_solver(config_path, dtype=torch.float32):

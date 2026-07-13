@@ -396,7 +396,8 @@ static void diffuse_add_cuda(
     const at::Tensor& nu_eff,
     double dt,
     int64_t ndim,
-    double dh0, double dh1, double dh2)
+    double dh0, double dh1, double dh2,
+    double scale_constant)
 {
     // Note: copy_buf is target's data snapshot (caller does copy first).
     // This kernel is the accumulate pass only.
@@ -418,9 +419,9 @@ static void diffuse_add_cuda(
     int blocks = (total + threads - 1) / threads;
 
     bool is_variable = nu_eff.numel() > 1;
-    // nu_eff is nu*dt for constant case (1-element), full nu field for variable.
-    // Kernel scale = dt for variable, nu_eff value for constant.
-    double scale = is_variable ? dt : (nu_eff.numel() >= 1 ? nu_eff.item<double>() : 0.0);
+    // Use pre-computed scale_constant for constant case (avoids .item()
+    // GPU→CPU sync which would be illegal during CUDA graph capture).
+    double scale = is_variable ? dt : scale_constant;
 
     AT_DISPATCH_FLOATING_TYPES(target.scalar_type(), "diffuse_add_cuda", [&] {
         diffuse_add_kernel<scalar_t><<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(

@@ -352,7 +352,8 @@ static void diffuse_add_cpu(
     const at::Tensor& nu_eff,
     double dt,
     int64_t ndim,
-    double dh0, double dh1, double dh2)
+    double dh0, double dh1, double dh2,
+    double scale_constant)
 {
     int Nx, Ny, Nz, Nix, Niy, Niz, s_x, s_y, s_z;
     if (ndim == 2) {
@@ -366,9 +367,9 @@ static void diffuse_add_cpu(
     }
     int total = Nix * Niy * Niz;
     bool is_variable = nu_eff.numel() > 1;
-    // Python wrapper pre-computes nu_eff_t = nu*dt for constant case,
-    // so we use nu_eff.item() directly as the scale (no extra *dt).
-    double scale = is_variable ? dt : (nu_eff.numel() == 1 ? nu_eff.item<double>() : 0.0);
+    // Use pre-computed scale_constant for constant case (avoids .item()
+    // GPU→CPU sync which would be illegal during CUDA graph capture).
+    double scale = is_variable ? dt : scale_constant;
 
     AT_DISPATCH_FLOATING_TYPES(target.scalar_type(), "diffuse_add_cpu", [&] {
         const scalar_t* ps = copy_buf.data_ptr<scalar_t>();

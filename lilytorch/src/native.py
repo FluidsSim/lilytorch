@@ -458,6 +458,10 @@ def diffuse_add(target, copy_buf, dt, *, dh, nu_eff=None, nu=None):
     Mirrors :func:`diffusion.diffuse_add_` exactly.
     Snapshot target → copy_buf (implicit barrier), then fused stencil
     read from copy_buf with accumulate into target.
+
+    Graph-capture-safe: the constant-viscosity path passes a pre-computed
+    ``scale_constant`` float instead of creating a GPU tensor or calling
+    ``.item()``, both of which are illegal during CUDA graph capture.
     """
     ndim = target.ndim
     is_variable = nu_eff is not None
@@ -469,15 +473,21 @@ def diffuse_add(target, copy_buf, dt, *, dh, nu_eff=None, nu=None):
     # Step 2: fused laplacian-accumulate.
     if is_variable:
         nu_eff_t = nu_eff
+        scale_constant = 0.0  # ignored by kernel (is_variable=1 → scale=dt)
     else:
-        # Pass a 1-element dummy for the unified kernel signature.
-        nu_eff_t = torch.tensor(float(nu) * float(dt), dtype=target.dtype,
-                                device=target.device)
+        # Pass a 1-element dummy tensor so nu_eff.numel()==1 in C++.
+        # The kernel does NOT read nu_eff when is_variable=0, so any
+        # pre-existing tensor view is safe.  The actual scale is passed
+        # via scale_constant, avoiding both torch.tensor() (Python) and
+        # .item() (C++) during CUDA graph capture.
+        nu_eff_t = copy_buf[0:1, 0:1] if ndim == 2 else copy_buf[0:1, 0:1, 0:1]
+        scale_constant = scale
     return torch.ops.lilytorch_kernels.diffuse_add.default(
         target, copy_buf, nu_eff_t,
         float(dt), int(ndim),
         float(dh[0]), float(dh[1]),
         float(dh[2]) if ndim == 3 else 0.0,
+        float(scale_constant),
     )
 
 

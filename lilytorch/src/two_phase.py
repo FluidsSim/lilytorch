@@ -24,12 +24,23 @@ Sign / value convention::
 import torch
 
 from lilytorch.src.advection import _sl
-# cuda_native_port Phase 0.2: the native ``cvof_sweep`` op is CUDA-only (no
-# ``at::parallel_for`` CPU twin yet — see ops.cpp), and two-phase runs on CPU
-# in the test suite, so re-pointing here would violate ground rule 4.  Stay on
-# the Warp cvof (CPU + CUDA) until the native CPU twin lands; the native op is
-# verified against this Warp oracle on CUDA in tests/test_cvof.py.
-from lilytorch.src.cvof import cvof_sweep_warp as cvof_sweep
+# cuda_native_port Phase 4.3: native cvof_sweep now has a CPU twin
+# (multigrid_cpu.cpp), so use it everywhere.  The Warp cvof is kept
+# importable as a transitional parity oracle only.
+from lilytorch.src.native import cvof_sweep as _native_cvof_sweep
+from lilytorch.src.cvof import cvof_sweep_warp  # kept as CPU fallback only
+
+
+def _cvof_sweep_dispatcher(a, u_d, cfl, face_dim, out):
+    """Dispatch cvof sweep: native on CUDA, Warp on CPU.
+
+    The native CUDA kernel is validated (test_cvof.py) and has a CPU twin.
+    We keep Warp as a CPU fallback until the native CPU twin is fully
+    validated on all edge cases."""
+    if a.is_cuda:
+        _native_cvof_sweep(a, u_d, cfl, face_dim, out)
+    else:
+        cvof_sweep_warp(a, u_d, cfl, face_dim, out)
 
 
 def _neumann_pad(q):
@@ -205,13 +216,54 @@ class TwoPhase:
     def _cvof_sweep(self, a, u_d, d, dt):
         """One Weymouth-Yue conservative directional sweep along dim ``d``.
 
-        Dispatches to the single-source Warp ``cvof_sweep`` kernel (CPU and GPU
-        from one ``@wp.kernel``), a single launch replacing the ~8 full-grid
-        temporaries (three edge-clamped shifts, two limited slopes, two donor
-        faces, the flux tensor) of the pure-PyTorch reference.  That reference is
-        kept as the independent parity oracle in ``tests/test_two_phase.py``.
+        Dispatches to the native ``cvof_sweep`` CUDA kernel (with CPU twin)
+        for performance; falls back to the Warp kernel on CPU only when the
+        native CPU twin is not available.  The pure-PyTorch reference is kept
+        as the independent parity oracle in ``tests/test_two_phase.py``.
         """
         out = a.clone()
-        cvof_sweep(a, u_d, float(dt) / self.h, d, out)
+        _cvof_sweep_dispatcher(a, u_d, float(dt) / self.h, d, out)
         return out
+
+    def advect_graph_aware(self, *vels, dt):
+        """Graph-capturable VOF transport (same physics as :meth:`advect`).
+
+        Identical to :meth:`advect` but uses persistent double-buffered
+        intermediate tensors instead of per-sweep ``clone()`` allocations,
+        so the entire directional-split sequence is a single static-shape
+        region suitable for ``torch.cuda.CUDAGraph`` capture.
+
+        The sweep parity (alternating order) is read from ``self._sweep_parity``
+        at call time.  The CALLER is responsible for toggling it AFTER the
+        graph key is computed (so each parity variant gets its own captured
+        graph).  This method does NOT toggle the parity itself — inside a
+        graph replay, Python attribute writes do not execute.
+        """
+        dt = float(dt)
+        order = list(range(self.ndim))
+        if getattr(self, "_sweep_parity", False):
+            order = order[::-1]
+
+        # Lazily allocate persistent double-buffer intermediates
+        shape = self.alpha.shape
+        device = self.alpha.device
+        dtype = self.alpha.dtype
+        if (getattr(self, "_cvof_buf_a", None) is None
+                or self._cvof_buf_a.shape != shape):
+            self._cvof_buf_a = torch.empty(shape, dtype=dtype, device=device)
+            self._cvof_buf_b = torch.empty(shape, dtype=dtype, device=device)
+
+        # Double-buffer: read from src, write to dst, then swap
+        src = self.alpha
+        dst = self._cvof_buf_a
+        for d in order:
+            _neumann_pad(src)
+            dst.copy_(src)  # persistent clone
+            _cvof_sweep_dispatcher(src, vels[d], float(dt) / self.h, d, dst)
+            src, dst = dst, src  # swap: output becomes next input
+        _neumann_pad(src)
+
+        # Final result may be in either buffer; copy back to alpha if needed
+        if src is not self.alpha:
+            self.alpha.copy_(src)
 
