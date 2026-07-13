@@ -59,7 +59,7 @@ def _kernel_extensions():
             "-O0" if debug_mode else "-O3",
             "-fdiagnostics-color=always",
         ],
-        "nvcc": ["-O0" if debug_mode else "-O3"],
+        "nvcc": [("-O0" if debug_mode else "-O3"), "--use_fast_math"],
     }
     extra_link_args = []
     if use_openmp:

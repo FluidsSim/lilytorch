@@ -693,6 +693,11 @@ class FluidSolver(PlottingMixin):
         # Allocated once; ``stage()`` copies fresh values in before each step.
         self._bdim_rect_dev = torch.empty(2 * self.ndim, dtype=torch.int32,
                                           device=self.device)
+        # CPU-side staging buffer — avoids a per-step GPU tensor allocation
+        # inside stage() (the old path did ``torch.tensor([...], device=...)``
+        # for every step, which is ~80k cudaMalloc/cudaFree calls over a run).
+        self._stage_rect_cpu = torch.empty(2 * self.ndim, dtype=torch.int32,
+                                           device='cpu', pin_memory=True)
 
         # =====================================================================
         # Gravity body force (opt-in via the ``solver.gravity`` block).
@@ -1894,14 +1899,15 @@ class FluidSolver(PlottingMixin):
         # ── Staging: copy the per-step dirty rect into the persistent
         # device buffer OUTSIDE the graph capture (stable pointer, no
         # torch ops on the default stream → no CUDA error 900).
-        # stage() is defined unconditionally; the runner only calls it
-        # when _use_cuda_graph is True, so torch.cuda.synchronize is
-        # never reached on CPU.
+        # Uses a pre-allocated CPU-pinned buffer to avoid a per-step
+        # GPU tensor allocation (cudaMalloc + cudaFree per step).
         def stage():
-            self._bdim_rect_dev.copy_(torch.tensor(
-                [int(d['i0']), int(d['j0']),
-                 int(d['Ai']), int(d['Aj'])],
-                dtype=torch.int32, device=u.device))
+            cpu = self._stage_rect_cpu
+            cpu[0] = int(d['i0'])
+            cpu[1] = int(d['j0'])
+            cpu[2] = int(d['Ai'])
+            cpu[3] = int(d['Aj'])
+            self._bdim_rect_dev.copy_(cpu)
 
         key = (
             u.data_ptr(), v.data_ptr(),
@@ -2048,11 +2054,17 @@ class FluidSolver(PlottingMixin):
         # ── Staging: copy the per-step dirty rect into the persistent
         # device buffer OUTSIDE the graph capture (stable pointer, no
         # torch ops on the default stream → no CUDA error 900).
+        # Uses a pre-allocated CPU-pinned buffer to avoid a per-step
+        # GPU tensor allocation (cudaMalloc + cudaFree per step).
         def stage():
-            self._bdim_rect_dev.copy_(torch.tensor(
-                [int(d['i0']), int(d['j0']), int(d['k0']),
-                 int(d['Ai']), int(d['Aj']), int(d['Ak'])],
-                dtype=torch.int32, device=u.device))
+            cpu = self._stage_rect_cpu
+            cpu[0] = int(d['i0'])
+            cpu[1] = int(d['j0'])
+            cpu[2] = int(d['k0'])
+            cpu[3] = int(d['Ai'])
+            cpu[4] = int(d['Aj'])
+            cpu[5] = int(d['Ak'])
+            self._bdim_rect_dev.copy_(cpu)
 
         key = (
             u.data_ptr(), v.data_ptr(), w_vel.data_ptr(),
