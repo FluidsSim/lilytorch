@@ -208,6 +208,120 @@ def test_flux_solve_loop_stability():
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+#  advect_flux_accumulate — native fused flux kernel (13c)
+#
+#  The production flux path (`_solve_convective`) is native end-to-end:
+#  torch ``copy_`` + ``native.diffuse_add`` + ``native.advect_flux_accumulate``.
+#  The Warp pair ``advect_flux_accumulate_warp`` + ``_accumulate_interior_warp``
+#  is kept as the parity ORACLE here (it was itself validated against the
+#  scheme references).  Expected agreement: bit-exact (same operation order).
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _flux_accumulate_pair(vel, dst0, sid, ndim, dev):
+    """Return (warp_dst, native_dst) after accumulating all components."""
+    from lilytorch.src.advection import (
+        advect_flux_accumulate_warp, _accumulate_interior_warp)
+    from lilytorch.src import native
+    dt_dh = [0.15, 0.12, 0.1][:ndim]
+    C = 0.1 if sid == 1 else 0.0
+    shape = vel[0].shape
+    dst_ref = dst0.clone()
+    dst_nat = dst0.clone()
+    rhs = torch.zeros([n - 2 for n in shape], dtype=vel[0].dtype, device=dev)
+    for i in range(ndim):
+        phi = vel[i].clone()
+        rhs.zero_()
+        advect_flux_accumulate_warp(phi, rhs, vel, i, dt_dh, C, sid, ndim)
+        _accumulate_interior_warp(dst_ref, rhs, ndim)
+        wp.synchronize()
+        native.advect_flux_accumulate(phi, dst_nat, vel, i, dt_dh, C, sid)
+    if dev != "cpu":
+        torch.cuda.synchronize()
+    return dst_ref, dst_nat
+
+
+@pytest.mark.parametrize("ndim", [2, 3])
+@pytest.mark.parametrize("scheme_id", sorted(_SCHEMES))
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_flux_accumulate_native_equals_warp_cpu(ndim, scheme_id, dtype):
+    """Native fused kernel == Warp oracle, CPU, all schemes/dtypes."""
+    N = 20 if ndim == 3 else 40
+    g = torch.Generator(device="cpu").manual_seed(7)
+    shape = (N + 2,) * ndim
+    vel = [torch.rand(shape, generator=g, dtype=dtype) - 0.5
+           for _ in range(ndim)]
+    dst0 = torch.rand(shape, generator=g, dtype=dtype)
+    ref, nat = _flux_accumulate_pair(vel, dst0, scheme_id, ndim, "cpu")
+    assert torch.equal(ref, nat), (
+        f"{_SCHEMES[scheme_id]} {ndim}-D {dtype}: "
+        f"max|d|={(ref - nat).abs().max().item():.3e}")
+
+
+@SKIP_NO_CUDA
+@pytest.mark.parametrize("ndim", [2, 3])
+@pytest.mark.parametrize("scheme_id", sorted(_SCHEMES))
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_flux_accumulate_native_equals_warp_gpu(ndim, scheme_id, dtype):
+    """Native fused kernel == Warp oracle, CUDA, all schemes/dtypes."""
+    N = 20 if ndim == 3 else 40
+    g = torch.Generator(device="cpu").manual_seed(7)
+    shape = (N + 2,) * ndim
+    vel = [(torch.rand(shape, generator=g, dtype=dtype) - 0.5).to("cuda:0")
+           for _ in range(ndim)]
+    dst0 = torch.rand(shape, generator=g, dtype=dtype).to("cuda:0")
+    ref, nat = _flux_accumulate_pair(vel, dst0, scheme_id, ndim, "cuda:0")
+    assert torch.equal(ref, nat), (
+        f"{_SCHEMES[scheme_id]} {ndim}-D {dtype}: "
+        f"max|d|={(ref - nat).abs().max().item():.3e}")
+
+
+@SKIP_NO_CUDA
+@pytest.mark.parametrize("ndim", [2, 3])
+def test_flux_solve_graph_replay_equals_eager(ndim):
+    """The flux `_solve_convective` recorded into a torch.cuda.CUDAGraph must
+    produce the SAME result on replay as the eager solve — this is the 13c
+    regression gate for the "Warp launches dropped from graph replay" bug
+    (the graph used to silently lose the whole advection term)."""
+    from lilytorch.src.advection import AdvDiffSolver
+    N, dev = (20 if ndim == 3 else 40), torch.device("cuda:0")
+    dtype = torch.float64
+    x = torch.linspace(0.0, 1.0, N, device=dev, dtype=dtype)
+    kw = dict(dt=1e-3, x=x, y=x.clone(), nu=1e-3, method="quick")
+    if ndim == 3:
+        kw["z"] = x.clone()
+    torch.manual_seed(3)
+    vel = [torch.randn((N,) * ndim, device=dev, dtype=dtype) * 0.1
+           for _ in range(ndim)]
+
+    # Eager reference.
+    s_e = AdvDiffSolver(dev, **kw)
+    ref = tuple(t.clone() for t in s_e.solve(*[v.clone() for v in vel]))
+
+    # Graphed run: static input buffers, capture, overwrite inputs, replay.
+    s_g = AdvDiffSolver(dev, **kw)
+    assert s_g.graph_capturable, "flux path must be graph-capturable after 13c"
+    static_in = [torch.zeros_like(v) for v in vel]
+    # warm-up on a side stream (cuDNN-style), then capture
+    side = torch.cuda.Stream()
+    side.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(side):
+        s_g.solve(*static_in)
+    torch.cuda.current_stream().wait_stream(side)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        out_g = s_g.solve(*static_in)
+    # Fill the real inputs AFTER capture — only a correct replay sees them.
+    for buf, v in zip(static_in, vel):
+        buf.copy_(v)
+    graph.replay()
+    torch.cuda.synchronize()
+    for r, o in zip(ref, out_g):
+        assert torch.equal(r, o), (
+            f"{ndim}-D graph replay != eager: "
+            f"max|d|={(r - o).abs().max().item():.3e}")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 #  apply_bcs_2d / apply_bcs_3d — fused BC ghost writes (Warp CPU == GPU)
 #  Merged from the former test_misc_2d.py / test_misc_3d.py.
 # ═════════════════════════════════════════════════════════════════════════════

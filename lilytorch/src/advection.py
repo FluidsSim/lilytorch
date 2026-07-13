@@ -257,23 +257,22 @@ class AdvDiffSolver:
             self._bc_fused_2d_packed = self._pack_bc_descriptors_3d()
 
         # ---- method dispatch -----------------------------------------
-        # Flux schemes all run through the single fused Warp ``advect_flux_add``
-        # kernel (CPU + CUDA); the semi-Lagrangian / implicit solves are a
-        # separate ``solve`` method.
+        # Flux schemes all run through the single fused native
+        # ``advect_flux_accumulate`` kernel (CPU + CUDA); the
+        # semi-Lagrangian / implicit solves are a separate ``solve`` method.
         # ``graph_capturable``: may the caller record ``solve`` into a
         # ``torch.cuda.CUDAGraph``?  ONLY if every kernel it launches goes to
-        # torch's current CUDA stream, i.e. the native extension ops.  The flux
-        # schemes still run on Warp (``advect_flux_accumulate_warp``,
-        # ``_accumulate_interior_warp`` and the ``diffusion`` Warp helpers),
-        # and raw ``wp.launch`` goes to Warp's OWN stream: torch stream capture
-        # does not record it, so those kernels EXECUTE during the capture pass
-        # and are silently DROPPED from every replay — wrong physics, no error.
-        # The semi-Lagrangian path is native end-to-end (``native.sl_advect_*``
-        # + ``native.diffuse_add``) and is safe to capture.
+        # torch's current CUDA stream, i.e. the native extension ops.  Both
+        # paths are native end-to-end since 13c (flux: torch ``copy_`` +
+        # ``native.diffuse_add`` + ``native.advect_flux_accumulate``;
+        # semi-Lagrangian: ``native.sl_advect_*`` + ``native.diffuse_add``),
+        # so both are safe to capture.  (History: the flux path used to
+        # launch Warp kernels — raw ``wp.launch`` goes to Warp's OWN stream,
+        # so torch stream capture silently DROPPED them from every replay.)
         if method in _CUDA_SCHEME_IDS:
             self._scheme_name = method
             self.solve        = self._solve_convective
-            self.graph_capturable = False
+            self.graph_capturable = True
         elif method in ("semi-lagrangian", "implicit"):
             self._scheme_name = method
             self._init_semi_lagrangian()
@@ -288,12 +287,10 @@ class AdvDiffSolver:
         # ---- persistent buffers for convective solve (Phase 2) --------
         # _conv_copy[i]: full-grid copy buffer for vel[i] (flux stencil source)
         # _conv_out[i]:  full-grid output buffer (dst = vel[i] + diff + flux)
-        # _diff_copy[i]: full-grid double-buffer for diffuse_add_
-        # _rhs_flux[i]:  interior buffer for flux-only accumulation
+        # _diff_copy[i]: full-grid double-buffer for native.diffuse_add
         self._conv_copy = None
         self._conv_out = None
         self._diff_copy = None
-        self._rhs_flux = None
 
         print(f"Using the {method} method for the adv-diff equation ({self.ndim}D)")
 
@@ -353,31 +350,13 @@ class AdvDiffSolver:
             self._conv_out = tuple(torch.empty_like(v) for v in vel)
         if not _bufs_ok(self._diff_copy):
             self._diff_copy = tuple(torch.empty_like(v) for v in vel)
-        # _rhs_flux is interior-only (Nix x Niy [x Niz]).
-        if self._rhs_flux is None or len(self._rhs_flux) != ndim:
-            self._rhs_flux = tuple(
-                torch.empty([n - 2 for n in v.shape], dtype=dtype, device=dev)
-                for v in vel
-            )
 
     # =================================================================
     # Convective-scheme solve  (advection + diffusion, dimension-agnostic)
     # =================================================================
 
-    @property
-    def uses_cuda_flux_kernel(self):
-        """Whether ``solve`` takes the fused Warp ``advect_flux_add`` path.
-
-        True for every flux scheme (the single production convective path, on
-        CPU and CUDA alike); False only for the semi-Lagrangian solve, which is
-        a distinct ``solve`` method.  The flux path is a custom op plus
-        host-side syncs, so ``torch.compile`` gives no benefit and trips
-        dynamo's speculation log — callers use this to skip compiling ``solve``.
-        """
-        return self._scheme_name in _CUDA_SCHEME_IDS
-
     def _solve_convective(self, *vel, nu_t=None, nu_eff=None, iteration=0):
-        """Forward-Euler advection-diffusion step — pure Warp, zero torch ops.
+        """Forward-Euler advection-diffusion step — native end-to-end.
 
             phi^{n+1} = phi^n + dt * [-div(vel (x) phi) + diff(phi)]
 
@@ -388,14 +367,13 @@ class AdvDiffSolver:
 
         Accepts (u, v) in 2-D or (u, v, w) in 3-D.
 
-        Uses ``diffuse_add_`` for diffusion (in-place on output) and a
-        separate flux-only accumulation, all pure-Warp graph-capturable:
-          1. ``conv_out[i] = copy(vel[i])``
-          2. ``diffuse_add_(conv_out[i], diff_copy[i], ...)``  (in-place)
-          3. ``conv_copy[i] = copy(vel[i])``  (stencil for flux)
-          4. ``zero(rhs_flux[i])``
-          5. ``advect_flux_accumulate(conv_copy[i], rhs_flux[i], vel, ...)``
-          6. ``conv_out[i][inner] += rhs_flux[i]``
+        Every launch goes to torch's current CUDA stream, so the whole
+        solve is CUDA-graph-capturable (13c):
+          1. ``conv_out[i].copy_(vel[i])``
+          2. ``native.diffuse_add(conv_out[i], diff_copy[i], ...)`` (in-place)
+          3. ``conv_copy[i].copy_(vel[i])``  (stencil for flux)
+          4. ``native.advect_flux_accumulate(conv_copy[i], conv_out[i],
+             vel, ...)`` — fused flux + interior accumulate
         """
         ndim    = self.ndim
         vel_new = list(vel)
@@ -418,28 +396,23 @@ class AdvDiffSolver:
 
         for i in range(ndim):
             # Step 1: copy vel[i] → conv_out[i] (final output buffer).
-            diffusion._copy_full_grid_eager(vel[i], self._conv_out[i])
+            self._conv_out[i].copy_(vel[i])
 
             # Step 2: in-place diffusion on output (double-buffer: copy + fused accumulate).
-            diffusion.diffuse_add_(
+            native.diffuse_add(
                 self._conv_out[i], self._diff_copy[i], self.dt,
                 dh=self.dh, nu_eff=nu_eff, nu=self._nu_float,
             )
 
             # Step 3: copy vel[i] → conv_copy[i] (stencil source for flux).
-            diffusion._copy_full_grid_eager(vel[i], self._conv_copy[i])
+            self._conv_copy[i].copy_(vel[i])
 
-            # Step 4: zero the flux-only interior buffer.
-            diffusion._zero_interior_eager(self._rhs_flux[i])
-
-            # Step 5: advection flux into rhs_flux (interior buffer).
-            advect_flux_accumulate_warp(
-                self._conv_copy[i], self._rhs_flux[i], vel, i,
-                self._dt_dh, C_courant, scheme_id, ndim,
+            # Step 4: fused advection flux, accumulated straight into the
+            # interior of conv_out (no separate rhs buffer / zero pass).
+            native.advect_flux_accumulate(
+                self._conv_copy[i], self._conv_out[i], vel, i,
+                self._dt_dh, C_courant, scheme_id,
             )
-
-            # Step 6: accumulate flux into output.
-            _accumulate_interior_warp(self._conv_out[i], self._rhs_flux[i], ndim)
 
             vel_new[i] = self._conv_out[i]
 

@@ -1441,13 +1441,13 @@ class FluidSolver(PlottingMixin):
         """May the pre-projection region be recorded into a CUDA graph?
 
         Only if every kernel it launches goes to torch's CURRENT CUDA stream.
-        The flux convection schemes (``quick`` and friends) still run on Warp,
-        and a raw ``wp.launch`` goes to Warp's own stream: torch stream capture
-        never records it, so those kernels execute during the capture pass and
-        are silently DROPPED from every replay — the advection just vanishes,
-        with no error and no NaN (measured: ~47% velocity error).  Refuse to
-        capture there and run the region eagerly instead; the semi-Lagrangian
-        path is native end-to-end and captures correctly.
+        A raw ``wp.launch`` goes to Warp's own stream: torch stream capture
+        never records it, so such kernels execute during the capture pass and
+        are silently DROPPED from every replay — the physics just vanishes,
+        with no error and no NaN (measured: ~47% velocity error when the flux
+        advection still ran on Warp).  Since 13c both advection paths (flux
+        and semi-Lagrangian) are native end-to-end and capture correctly;
+        the guard stays as the gate for any future non-capturable solve.
 
         This is the same rule that made warp_port refuse ``use_cuda_graphs``.
         """
@@ -1456,11 +1456,10 @@ class FluidSolver(PlottingMixin):
             self._preproj_graph_warned = True
             warnings.warn(
                 "Pre-projection CUDA graph DISABLED: convection_method "
-                f"'{getattr(self.adv_diff_solver, '_scheme_name', '?')}' runs on "
-                "Warp kernels, which torch's stream capture cannot record "
-                "(they would be dropped from every graph replay). Running the "
-                "region eagerly. Use convection_method 'semi-lagrangian' for "
-                "the graphed fast path.",
+                f"'{getattr(self.adv_diff_solver, '_scheme_name', '?')}' "
+                "launches kernels that torch's stream capture cannot record "
+                "(they would be dropped from every graph replay). Running "
+                "the region eagerly.",
                 RuntimeWarning, stacklevel=2,
             )
         return safe

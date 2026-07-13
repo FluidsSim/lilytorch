@@ -43,6 +43,7 @@ __all__ = [
     "poisson_solve_rmgcg_2d",
     "poisson_solve_rmgcg_3d",
     "advect_flux_add",
+    "advect_flux_accumulate",
     "cvof_sweep",
     "RegularGridInterpolator",
     "RegularGridInterpolator3D",
@@ -1180,6 +1181,37 @@ def advect_flux_add(
 @torch.library.register_fake("lilytorch_kernels::advect_flux_add")
 def _advect_flux_add_abstract(fv, p, rhs, dt_dh, C, scheme_id, face_dim):
     pass   # rhs is accumulated in place; no new tensors created
+
+
+def advect_flux_accumulate(
+        phi_src: Tensor, dst: Tensor, vel, comp_i: int,
+        dt_dh, C_courant: float, scheme_id: int) -> None:
+    """Fused per-cell convective flux accumulate for one velocity component.
+
+    Native twin of the Warp ``advect_flux_accumulate_warp`` +
+    ``_accumulate_interior_warp`` pair.  Reads the flux stencil from
+    ``phi_src`` (full-grid copy of ``vel[comp_i]``), computes face
+    velocities from ``vel`` on the fly, and accumulates
+    ``dst[cell] += Σ_d dt_dh[d] * (F_L - F_R)`` over the interior of the
+    full-grid output ``dst``.  Graph-capture-safe (single kernel on the
+    current stream, scalar params passed by value).
+    """
+    ndim = phi_src.ndim
+    w = vel[2] if ndim == 3 else vel[0]   # dummy in 2-D, never read
+    return torch.ops.lilytorch_kernels.advect_flux_accumulate.default(
+        phi_src, dst, vel[0], vel[1], w,
+        int(comp_i),
+        float(dt_dh[0]), float(dt_dh[1]),
+        float(dt_dh[2]) if ndim == 3 else 0.0,
+        float(C_courant), int(scheme_id),
+    )
+
+
+@torch.library.register_fake("lilytorch_kernels::advect_flux_accumulate")
+def _advect_flux_accumulate_abstract(
+        phi_src, dst, u, v, w, comp_i,
+        dt_dh0, dt_dh1, dt_dh2, C, scheme_id):
+    pass   # dst is accumulated in place; no new tensors created
 
 
 def cvof_sweep(

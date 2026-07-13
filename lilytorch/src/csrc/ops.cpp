@@ -350,6 +350,30 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " int scheme_id, int face_dim"
         ") -> ()");
 
+    // ---- Fused per-cell flux accumulate (13c) --------------------------
+    // advect_flux_accumulate: native port of the Warp
+    // ``advect_flux_accumulate_warp`` + ``_accumulate_interior_warp``
+    // pair.  One launch per velocity component: computes face velocities
+    // from the original staggered fields on the fly and accumulates
+    // dst[cell] += Σ_d dt_dh_d*(F_L - F_R) over the interior of the
+    // FULL-GRID output (which already holds vel + diffusion increment).
+    //
+    // phi_src : full-grid copy of vel[comp_i] (flux stencil source)
+    // dst     : full-grid output buffer, mutated in the interior
+    // u, v, w : original velocity fields (w ignored in 2-D — pass u)
+    // comp_i  : which velocity component is being solved for
+    // dt_dh*  : dt / h_d per direction (dt_dh2 ignored in 2-D)
+    // C       : max Courant number for ABDQUICKEST; ignored otherwise
+    // scheme_id : 0=QUICK 1=ABDQUICKEST 2=vanLeer 3=CDS 4=CUBISTA
+    m.def(
+        "advect_flux_accumulate("
+        "Tensor phi_src, Tensor(a!) dst,"
+        " Tensor u, Tensor v, Tensor w,"
+        " int comp_i,"
+        " float dt_dh0, float dt_dh1, float dt_dh2,"
+        " float C, int scheme_id"
+        ") -> ()");
+
     // ---- Weymouth & Yue conservative-VOF sweep (MP10 / T2d) -----------
     // cvof_sweep: one bounded conservative-VOF directional sweep, replacing
     // the Python ``_cvof_sweep`` shift/limit/flux/divergence-correction

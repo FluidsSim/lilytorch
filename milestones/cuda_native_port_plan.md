@@ -1718,13 +1718,13 @@ projection 1.41 ms (54%), cvof 0.06 ms (2%), rest of fluid_step 0.50 ms.
   never wrote. `torch.empty`/`empty_like` poisoning at the *Python* level found
   nothing, so look for an `at::empty` temporary inside a **native C++ op** whose
   ghost ring is never written.
-- **(b) Make the flux path capturable** — port `advect_flux_accumulate` +
+- **(b) Make the flux path capturable** — ✅ DONE (see row-13c log below) — port `advect_flux_accumulate` +
   `_accumulate_interior` + the three `diffusion` Warp helpers to native ops.
   That is the real prize: it would put the *default* config on the graphed path
   (2.6 → ~1.6 ms) and finally remove Warp from the hot loop, which is the whole
   point of `cuda_native_port`. Bounded, mechanical, spec-able for DeepSeek — the
   CPU twins and the native `diffuse_add` already exist.
-- **(c) Audit the coupled FARMS/streaming path.** It has pointer-stable buffers,
+- **(c) Audit the coupled FARMS/streaming path.** ✅ DONE (see row-13d log below). It has pointer-stable buffers,
   so it *does* replay — meaning if it runs a flux `convection_method` it has been
   silently dropping advection on every replay. The row-9 0.4 gate (2-D 103.3
   ms/step, 3-D 122.0) and the 3.098 ms/step single-phase number must be
@@ -1745,6 +1745,113 @@ projection 1.41 ms (54%), cvof 0.06 ms (2%), rest of fluid_step 0.50 ms.
 it was benchmarking a fluid at rest; it now drives `solver.step_` and prints
 graph capture/replay/eviction counters), `tests/test_two_phase.py` (+4 cvof-graph
 tests), and this plan.
+
+*(Update: the above landed as commit `fa41cd0`.)*
+
+### Row 13d DONE — coupled/streaming re-validation under the flux guard (2026-07-13, Claude)
+
+**Config audit.** Essentially the whole fleet runs flux schemes:
+salamander / zebrafish / pleurodeles `quick`; eel (`_1guillasim`) +
+`validation/` + `bench_04_gate` `abdquickest`; a couple of standalone
+configs `cds`. Only `salamander_gamepad` (+ 3 standalone yamls) use
+`implicit`, which routes to the *semi-Lagrangian* solve
+(`advection.py:277`) — native end-to-end, graph-capturable. So under the
+fix-#4 guard everything except salamander_gamepad now runs the
+pre-Poisson region **eagerly (correct)**; salamander_gamepad keeps the
+graphed fast path.
+
+**Row-9 0.4 gate: the old physics were CORRECT, the old perf numbers were
+garbage.** Attribution, measured on HEAD (RTX 4080 SUPER, fp32):
+
+| run | 3-D final state vs Jul-10 recorded state | verdict |
+|---|---|---|
+| HEAD, guard on (eager) | max rel Δ ≈ 0.11–0.18 | numerics drift only (MG transfer precision now follows dtype, 7f0fdf9, chaotic amplification over 600 steps) |
+| HEAD, guard bypassed → graph replays, flux kernels dropped | max rel Δ ≈ 0.8–2.2, p blown to 1.2e4 (vs sane ~4.6e2) | what dropped advection actually looks like — **nothing like the recorded state** |
+
+I.e. the Jul-10 gate never replayed: pre-13b the analytical `Body.update`
+rebound fresh tensors every step *even for a static body* (old
+`body.py:1656,1938`), so the key churned and every step re-captured —
+eager execution, correct physics, ~11× slowdown from per-step capture.
+
+**Re-validated gate numbers (HEAD fa41cd0, 600 steps, fp32, `abdquickest`
+eager under the guard):**
+
+| Config | Grid | ms/step (was) | ms/step (now) |
+|---|---|---|---|
+| 2-D | 128² | 103.3 ± 13.3 | **9.42 ± 0.47** |
+| 3-D | 48³ | 122.0 ± 19.9 | **25.36 ± 0.68** |
+
+New final states saved to `bench_04_gate_final_{2,3}d.pt` (the Jul-10 3-D
+state is preserved in the session scratchpad only; the 2-D one was
+overwritten before comparison — no numeric checksums of it were ever
+recorded).
+
+**The 3.098 ms/step single-phase number is VALID** — that bench
+(`salamander_gamepad/gen_configs_bench_2d.py`) uses `implicit` →
+semi-Lagrangian → graph-safe path; no re-measurement needed.
+
+**Residual caveat.** FARMS *streaming-SDF* coupled runs with a flux
+`convection_method` executed between row-8 landing (~2026-07-10) and
+`fa41cd0` (2026-07-13) remain suspect *if* the streaming path's
+scratch-buffer key was pointer-stable enough to replay (the caching
+allocator can hand back the same block every step). Any production
+outputs from that 3-day window should be regenerated on HEAD; going
+forward the guard makes the question moot.
+
+### Row 13c DONE — flux adv-diff ported to native; DEFAULT config now graphed (2026-07-13, Claude)
+
+**Warp is out of the hot loop.** One new native op did the whole job:
+`lilytorch_kernels::advect_flux_accumulate` — the fused Warp
+`advect_flux_accumulate_warp` + `_accumulate_interior_warp` pair as a
+single kernel that computes face velocities on the fly and accumulates
+`dst[cell] += Σ_d dt_dh_d(F_L−F_R)` straight into the full-grid output
+(no interior rhs buffer, no zero pass, `_rhs_flux` deleted). The three
+"diffusion Warp helpers" needed **no porting**: the two full-grid copies
+are torch `copy_` (graph-safe), and diffusion was already
+`native.diffuse_add`. The five scheme functions now live in a shared
+header `csrc/advection_schemes.h` (CUDA + CPU twin compile the same
+code — the *old* `advect_flux_add` CPU twin in `multigrid_cpu.cpp` had
+silently diverged from the CUDA schemes; the new op cannot).
+
+- Files: `csrc/advection_schemes.h` (new), `csrc/cuda/advection_flux.cu`
+  (schemes → header + new kernel), `csrc/advection_flux_cpu.cpp` (new,
+  `at::parallel_for` twin), `ops.cpp`, `native.py`, `advection.py`
+  (`_solve_convective` native, `graph_capturable = True` for flux
+  schemes; dead `uses_cuda_flux_kernel` property deleted), `solver.py`
+  (guard docstring), `build.sh` (REPO_ROOT was broken since the
+  kernels-flatten move — `../../..` → `../..`).
+- **Parity: bit-exact** vs the Warp oracle — all 5 schemes × 2-D/3-D ×
+  fp32/fp64 × CPU/CUDA (40 combos, `torch.equal`). Permanent tests in
+  `test_advection.py`, plus the 13c regression gate:
+  `test_flux_solve_graph_replay_equals_eager` records `solve` into a
+  real `torch.cuda.CUDAGraph`, overwrites the inputs *after* capture,
+  replays, and demands bit-equality with eager (2-D + 3-D).
+- **Solver-level**: 2-D/3-D coupled abdquickest, graph vs
+  `graph_capture_debug` eager: step 1 **bit-exact** in a fresh process;
+  multi-step drift starts at fp32-ULP level (1.8e-7 @ 5 steps) and grows
+  chaotically — same magnitude and allocator-history dependence as the
+  pre-existing open item (a), which is measurable with both runs eager,
+  i.e. NOT graph-related.
+- **Perf** (two-phase 128² surface pool, `quick`, fp32, mgcg):
+  `preproj captures=1 replays=107 evictions=0` — the DEFAULT config now
+  replays. Per-step 2.6 → **2.04 ms** (pre-Poisson region 0.50 →
+  0.09 ms). Remaining cost is projection 1.30 ms (64%) + body_update
+  0.58 ms — Poisson is now unambiguously the next target. 0.4 gate
+  (MG tol 1e-12 → 40 cycles, Poisson-bound): 2-D 9.19, 3-D 25.07
+  ms/step.
+- Suite: **479 pass / 1 fail (pre-existing
+  `test_python_eulerian_force_path_cpu_eq_gpu`) / 1 skip**.
+- Warp flux kernels stay in `advection.py` solely as the parity oracle
+  for the tests; nothing in the hot loop launches Warp any more on the
+  default config. (Eager two-phase paths in `two_phase_solver.py` still
+  call `diffusion` Warp helpers — they are never captured, so harmless;
+  candidates for row 14 cleanup.)
+
+**Quick side-finding:** `convection_method: quick` on the 0.4-gate
+Taylor-Green config blows up at iteration 50 **on both the old Warp path
+and the native path** (bit-identical explosion) — a pre-existing QUICK
+stability limit of that config, not a port regression; use `abdquickest`
+there.
 
 ## Suggested execution order & session budget
 
@@ -1769,8 +1876,8 @@ the table below reflects that. Track B *is* Phase 1.
 | 12 | 3 unification memo | Phase 3 | **Claude** | 1 | ☐ |
 | 13 | 4.1–4.3 two-phase perf | Phase 4 | DeepSeek (Claude spec/review) | 2 | ⚠ **REOPENED** — 4.3 correct + now tested; **4.1 never ran** (harness was broken) and **4.2 not done** (default still `multigrid`). See the review log above. |
 | 13b | **pre-Poisson graph key pointer-stability** (Phase-1 defect found by 4.1) | Phase 1 fix | **Claude** | 1 | ✅ DONE (uncommitted) — + it exposed 2 **silent-wrong-physics** bugs the churn was masking (skipped `stage()`; blend dropped on replay) and a 3rd (Warp flux kernels dropped from graph replay → graph now refused there). Default path 80.9 → **2.6 ms/step and correct**. See log above. |
-| 13c | **port the flux adv-diff (`quick`) Warp kernels → native** so the DEFAULT config can be graphed | Phase 1 | DeepSeek (Claude spec) | 1–2 | ☐ **HIGH** — unblocks 2.6 → ~1.6 ms/step and removes Warp from the hot loop |
-| 13d | **re-validate the coupled FARMS/streaming path** — it *does* replay, so a flux `convection_method` there has been silently dropping advection | Phase 1 | **Claude** | 1 | ☐ **CRITICAL** — row-9 0.4 gate numbers suspect |
+| 13c | **port the flux adv-diff (`quick`) Warp kernels → native** so the DEFAULT config can be graphed | Phase 1 | **Claude** | 1–2 | ✅ DONE — one fused native op (`advect_flux_accumulate`, CUDA+CPU, shared schemes header), bit-exact vs Warp (40/40 combos); default config replays (captures=1 evictions=0); 2.6 → **2.04 ms/step**; Warp out of the hot loop. See row-13c log above. |
+| 13d | **re-validate the coupled FARMS/streaming path** — it *does* replay, so a flux `convection_method` there has been silently dropping advection | Phase 1 | **Claude** | 1 | ✅ DONE — old gate physics were CORRECT (churn → never replayed; proven by forced-replay repro); perf re-validated 2-D 103.3→**9.42**, 3-D 122.0→**25.36** ms/step; 3.098 single-phase number valid (`implicit`). See row-13d log above. |
 | 14 | 4.4–4.5 two-phase simplification | Phase 4 | **Claude** | 1–2 | ☐ |
 
 **Dependencies:** Track C unblocks the CPU side of D (Poisson) and B
