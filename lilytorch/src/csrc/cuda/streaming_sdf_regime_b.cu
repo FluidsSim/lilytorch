@@ -1,0 +1,508 @@
+// =====================================================================
+//  streaming_sdf_regime_b.cu — Regime-B per-body private buffers + resolve
+//
+//  Replaces the union-AABB packed-key ``atomicMin`` pipeline for
+//  overlapping-body regimes.  Two kernels:
+//
+//  1. **Min-kernel** (fanned per-body, gridDim.y = B): each block-row
+//     processes one body's AABB cells.  Computes raw SDF + staggered
+//     body velocity and writes them into per-body linear private buffers.
+//     Single writer per (body, cell) — no atomics, no packed key.
+//
+//  2. **Resolve kernel** (over the full union dirty AABB): one thread per
+//     cell; loops over all B bodies, checks AABB coverage, reads the raw
+//     SDF from each covering body's private buffer, picks the minimum
+//     (no atomics — single thread per global cell), and writes the winner
+//     to the global output tensors.  Full fp64 precision.
+//
+//  Private buffers are flat tensors with per-body cumulative offsets:
+//    priv_offsets[b] = sum_{i < b} body_vol[i]
+//    priv_sdf_cc[priv_offsets[b] + local]  ←  body b, local idx
+// =====================================================================
+
+#include <ATen/Operators.h>
+#include <torch/all.h>
+#include <torch/library.h>
+#include <torch/extension.h>
+#include <c10/util/ArrayRef.h>
+#include <cuda.h>
+#include <cuda_runtime.h>
+#include <ATen/cuda/CUDAContext.h>
+
+namespace lilytorch_kernels {
+
+// ---- 2-D samplers (duplicated from streaming_sdf_direct.cu) ---------------
+template <typename scalar_t>
+__device__ __forceinline__ scalar_t bilinear_sample_uniform_2d(
+    const scalar_t* __restrict__ F, int Mx, int My,
+    scalar_t bx0, scalar_t by0, scalar_t inv_dx, scalar_t inv_dy,
+    scalar_t xq, scalar_t yq)
+{
+    scalar_t tx=(xq-bx0)*inv_dx, ty=(yq-by0)*inv_dy;
+    scalar_t Mx_lim=(scalar_t)(Mx-1), My_lim=(scalar_t)(My-1);
+    tx=max((scalar_t)0,min(tx,Mx_lim)); ty=max((scalar_t)0,min(ty,My_lim));
+    int ix=(int)tx; if(ix>Mx-2)ix=Mx-2;
+    int iy=(int)ty; if(iy>My-2)iy=My-2;
+    scalar_t fx=tx-(scalar_t)ix, fy=ty-(scalar_t)iy;
+    scalar_t wx0=(scalar_t)1-fx, wx1=fx, wy0=(scalar_t)1-fy, wy1=fy;
+    int s1=My, base=ix*s1+iy;
+    return wx0*(wy0*F[base]+wy1*F[base+1])+wx1*(wy0*F[base+s1]+wy1*F[base+s1+1]);
+}
+
+template <typename scalar_t>
+__device__ __forceinline__ scalar_t biquadratic_sample_uniform_2d(
+    const scalar_t* __restrict__ F, int Mx, int My,
+    scalar_t bx0, scalar_t by0, scalar_t inv_dx, scalar_t inv_dy,
+    scalar_t xq, scalar_t yq)
+{
+    scalar_t tx=(xq-bx0)*inv_dx, ty=(yq-by0)*inv_dy;
+    scalar_t Mx_lim=(scalar_t)(Mx-1), My_lim=(scalar_t)(My-1);
+    tx=max((scalar_t)0,min(tx,Mx_lim)); ty=max((scalar_t)0,min(ty,My_lim));
+    int ix=(int)tx; if(ix>Mx-2)ix=Mx-2;
+    int iy=(int)ty; if(iy>My-2)iy=My-2;
+    if(ix<1||iy<1||Mx<3||My<3) return bilinear_sample_uniform_2d<scalar_t>(F,Mx,My,bx0,by0,inv_dx,inv_dy,xq,yq);
+    scalar_t fx=tx-(scalar_t)ix, fy=ty-(scalar_t)iy, half=(scalar_t)0.5;
+    scalar_t wxm=half*fx*(fx-(scalar_t)1), wx0=(scalar_t)1-fx*fx, wxp=half*fx*(fx+(scalar_t)1);
+    scalar_t wym=half*fy*(fy-(scalar_t)1), wy0=(scalar_t)1-fy*fy, wyp=half*fy*(fy+(scalar_t)1);
+    int s1=My, base=(ix-1)*s1+(iy-1);
+    scalar_t out=(scalar_t)0;
+    for(int dx=0;dx<3;++dx){
+        scalar_t wx=(dx==0)?wxm:(dx==1?wx0:wxp);
+        int b0=base+dx*s1;
+        out+=wx*(wym*F[b0]+wy0*F[b0+1]+wyp*F[b0+2]);
+    }
+    return out;
+}
+
+// ---- 3-D samplers ----------------------------------------------------------
+template <typename scalar_t>
+__device__ __forceinline__ scalar_t trilinear_sample_uniform(
+    const scalar_t* __restrict__ F, int Mx, int My, int Mz,
+    scalar_t bx0, scalar_t by0, scalar_t bz0,
+    scalar_t inv_dx, scalar_t inv_dy, scalar_t inv_dz,
+    scalar_t xq, scalar_t yq, scalar_t zq)
+{
+    scalar_t tx=(xq-bx0)*inv_dx, ty=(yq-by0)*inv_dy, tz=(zq-bz0)*inv_dz;
+    scalar_t Mx_lim=(scalar_t)(Mx-1), My_lim=(scalar_t)(My-1), Mz_lim=(scalar_t)(Mz-1);
+    tx=max((scalar_t)0,min(tx,Mx_lim)); ty=max((scalar_t)0,min(ty,My_lim)); tz=max((scalar_t)0,min(tz,Mz_lim));
+    int ix=(int)tx; if(ix>Mx-2)ix=Mx-2;
+    int iy=(int)ty; if(iy>My-2)iy=My-2;
+    int iz=(int)tz; if(iz>Mz-2)iz=Mz-2;
+    scalar_t fx=tx-(scalar_t)ix, fy=ty-(scalar_t)iy, fz=tz-(scalar_t)iz;
+    scalar_t wx0=(scalar_t)1-fx, wx1=fx, wy0=(scalar_t)1-fy, wy1=fy, wz0=(scalar_t)1-fz, wz1=fz;
+    int s2=Mz, s1=My*Mz, base=ix*s1+iy*s2+iz;
+    return wx0*(wy0*(wz0*F[base]+wz1*F[base+1])+wy1*(wz0*F[base+s2]+wz1*F[base+s2+1]))
+         + wx1*(wy0*(wz0*F[base+s1]+wz1*F[base+s1+1])+wy1*(wz0*F[base+s1+s2]+wz1*F[base+s1+s2+1]));
+}
+
+template <typename scalar_t>
+__device__ __forceinline__ scalar_t triquadratic_sample_uniform(
+    const scalar_t* __restrict__ F, int Mx, int My, int Mz,
+    scalar_t bx0, scalar_t by0, scalar_t bz0,
+    scalar_t inv_dx, scalar_t inv_dy, scalar_t inv_dz,
+    scalar_t xq, scalar_t yq, scalar_t zq)
+{
+    scalar_t tx=(xq-bx0)*inv_dx, ty=(yq-by0)*inv_dy, tz=(zq-bz0)*inv_dz;
+    scalar_t Mx_lim=(scalar_t)(Mx-1), My_lim=(scalar_t)(My-1), Mz_lim=(scalar_t)(Mz-1);
+    tx=max((scalar_t)0,min(tx,Mx_lim)); ty=max((scalar_t)0,min(ty,My_lim)); tz=max((scalar_t)0,min(tz,Mz_lim));
+    int ix=(int)tx; if(ix>Mx-2)ix=Mx-2;
+    int iy=(int)ty; if(iy>My-2)iy=My-2;
+    int iz=(int)tz; if(iz>Mz-2)iz=Mz-2;
+    if(ix<1||iy<1||iz<1||Mx<3||My<3||Mz<3)
+        return trilinear_sample_uniform<scalar_t>(F,Mx,My,Mz,bx0,by0,bz0,inv_dx,inv_dy,inv_dz,xq,yq,zq);
+    scalar_t fx=tx-(scalar_t)ix, fy=ty-(scalar_t)iy, fz=tz-(scalar_t)iz, half=(scalar_t)0.5;
+    scalar_t wxm=half*fx*(fx-(scalar_t)1), wx0=(scalar_t)1-fx*fx, wxp=half*fx*(fx+(scalar_t)1);
+    scalar_t wym=half*fy*(fy-(scalar_t)1), wy0=(scalar_t)1-fy*fy, wyp=half*fy*(fy+(scalar_t)1);
+    scalar_t wzm=half*fz*(fz-(scalar_t)1), wz0=(scalar_t)1-fz*fz, wzp=half*fz*(fz+(scalar_t)1);
+    int s2=Mz, s1=My*Mz, base=(ix-1)*s1+(iy-1)*s2+(iz-1);
+    scalar_t out=(scalar_t)0;
+    for(int dx=0;dx<3;++dx){
+        scalar_t wx=(dx==0)?wxm:(dx==1?wx0:wxp); int b0=base+dx*s1; scalar_t plane=(scalar_t)0;
+        for(int dy=0;dy<3;++dy){
+            scalar_t wy=(dy==0)?wym:(dy==1?wy0:wyp); int b1=b0+dy*s2;
+            plane+=wy*(wzm*F[b1]+wz0*F[b1+1]+wzp*F[b1+2]);
+        }
+        out+=wx*plane;
+    }
+    return out;
+}
+
+template <typename scalar_t>
+__device__ __forceinline__ scalar_t sdf_sample_2d(int interp, const scalar_t* F, int Mx, int My,
+    scalar_t bx0, scalar_t by0, scalar_t idx_, scalar_t idy_, scalar_t xq, scalar_t yq) {
+    return interp==1 ? biquadratic_sample_uniform_2d<scalar_t>(F,Mx,My,bx0,by0,idx_,idy_,xq,yq)
+                     : bilinear_sample_uniform_2d<scalar_t>(F,Mx,My,bx0,by0,idx_,idy_,xq,yq);
+}
+template <typename scalar_t>
+__device__ __forceinline__ scalar_t sdf_sample_3d(int interp, const scalar_t* F, int Mx, int My, int Mz,
+    scalar_t bx0, scalar_t by0, scalar_t bz0, scalar_t idx_, scalar_t idy_, scalar_t idz_,
+    scalar_t xq, scalar_t yq, scalar_t zq) {
+    return interp==1 ? triquadratic_sample_uniform<scalar_t>(F,Mx,My,Mz,bx0,by0,bz0,idx_,idy_,idz_,xq,yq,zq)
+                     : trilinear_sample_uniform<scalar_t>(F,Mx,My,Mz,bx0,by0,bz0,idx_,idy_,idz_,xq,yq,zq);
+}
+
+
+// =====================================================================
+//  2-D min kernel — fanned per-body, writes raw SDF + vel to private bufs
+// =====================================================================
+template <typename scalar_t>
+__global__ void regime_b_min_kernel_2d(
+    const scalar_t* __restrict__ F_flat, const int64_t* __restrict__ F_offsets,
+    const int64_t* __restrict__ body_shapes, const scalar_t* __restrict__ body_meta,
+    const scalar_t* __restrict__ kin,
+    const int64_t* __restrict__ aabb_lo, const int64_t* __restrict__ aabb_dim,
+    const scalar_t* __restrict__ gx, const scalar_t* __restrict__ gy,
+    int Ngy, scalar_t half_h, int B, int interp,
+    const int64_t* __restrict__ priv_offsets,
+    scalar_t* __restrict__ priv_sdf_cc, scalar_t* __restrict__ priv_sdf_u, scalar_t* __restrict__ priv_sdf_v,
+    scalar_t* __restrict__ priv_body_u, scalar_t* __restrict__ priv_body_v)
+{
+    int b = blockIdx.y;  // body index
+    if (b >= B) return;
+
+    int Ai = (int)aabb_dim[b*2+0], Aj = (int)aabb_dim[b*2+1];
+    int body_vol = Ai * Aj;
+    int i0 = (int)aabb_lo[b*2+0], j0 = (int)aabb_lo[b*2+1];
+    int64_t off = priv_offsets[b];
+
+    const scalar_t* F = F_flat + F_offsets[b];
+    int Mx = (int)body_shapes[b*2+0], My = (int)body_shapes[b*2+1];
+    const scalar_t* M = body_meta + b*7;
+    scalar_t bx0 = M[0], by0 = M[1], idx_ = M[4], idy_ = M[5];
+    const scalar_t* K = kin + b*11;
+    scalar_t r00 = K[0], r01 = K[1], r10 = K[2], r11 = K[3];
+    scalar_t bp_x = K[4], bp_y = K[5], cm_x = K[6], cm_y = K[7], lv_x = K[8], lv_y = K[9], om = K[10];
+
+    scalar_t neg_hh = -half_h;
+    scalar_t du_x = neg_hh * r00, du_y = neg_hh * r10;
+    scalar_t dv_x = neg_hh * r01, dv_y = neg_hh * r11;
+
+    for (int local = blockIdx.x * blockDim.x + threadIdx.x; local < body_vol; local += gridDim.x * blockDim.x) {
+        int di = local / Aj;
+        int dj = local - di * Aj;
+        int i = i0 + di;
+        int j = j0 + dj;
+
+        scalar_t xc = gx[i], yc = gy[j];
+        scalar_t dxw = xc - bp_x, dyw = yc - bp_y;
+        scalar_t bxq = r00 * dxw + r01 * dyw;
+        scalar_t byq = r10 * dxw + r11 * dyw;
+
+        int64_t idx = off + local;
+        priv_sdf_cc[idx] = sdf_sample_2d<scalar_t>(interp, F, Mx, My, bx0, by0, idx_, idy_, bxq, byq);
+        priv_sdf_u[idx]  = sdf_sample_2d<scalar_t>(interp, F, Mx, My, bx0, by0, idx_, idy_, bxq + du_x, byq + du_y);
+        priv_body_u[idx] = lv_x - om * (yc - cm_y);
+        priv_sdf_v[idx]  = sdf_sample_2d<scalar_t>(interp, F, Mx, My, bx0, by0, idx_, idy_, bxq + dv_x, byq + dv_y);
+        priv_body_v[idx] = lv_y + om * (xc - cm_x);
+    }
+}
+
+
+// =====================================================================
+//  2-D resolve kernel — one thread per cell in union dirty AABB
+// =====================================================================
+template <typename scalar_t>
+__global__ void regime_b_resolve_kernel_2d(
+    const int64_t* __restrict__ aabb_lo, const int64_t* __restrict__ aabb_dim,
+    int Ngy, int B,
+    int dirty_i0, int dirty_j0, int dirty_Ai, int dirty_Aj,
+    const int64_t* __restrict__ priv_offsets,
+    const scalar_t* __restrict__ priv_sdf_cc, const scalar_t* __restrict__ priv_sdf_u, const scalar_t* __restrict__ priv_sdf_v,
+    const scalar_t* __restrict__ priv_body_u, const scalar_t* __restrict__ priv_body_v,
+    scalar_t* __restrict__ sdf_cc, scalar_t* __restrict__ sdf_u, scalar_t* __restrict__ sdf_v,
+    scalar_t* __restrict__ body_u, scalar_t* __restrict__ body_v)
+{
+    int local = blockIdx.x * blockDim.x + threadIdx.x;
+    int di = local / dirty_Aj;
+    int dj = local - di * dirty_Aj;
+    if (di >= dirty_Ai) return;
+    int i = dirty_i0 + di;
+    int j = dirty_j0 + dj;
+    int64_t g_idx = (int64_t)i * Ngy + j;
+
+    scalar_t best_cc = (scalar_t)1e4;
+    int best_b = -1;
+    int best_local = -1;
+
+    for (int b = 0; b < B; ++b) {
+        int Ai = (int)aabb_dim[b*2+0], Aj = (int)aabb_dim[b*2+1];
+        int i0 = (int)aabb_lo[b*2+0], j0 = (int)aabb_lo[b*2+1];
+        if (i < i0 || i >= i0 + Ai || j < j0 || j >= j0 + Aj) continue;
+        int di_b = i - i0, dj_b = j - j0;
+        int loc = di_b * Aj + dj_b;
+        int64_t idx = priv_offsets[b] + loc;
+        scalar_t s = priv_sdf_cc[idx];
+        if (s < best_cc) { best_cc = s; best_b = b; best_local = loc; }
+    }
+
+    if (best_b >= 0) {
+        int64_t win_off = priv_offsets[best_b] + best_local;
+        sdf_cc[g_idx]  = best_cc;
+        sdf_u[g_idx]   = priv_sdf_u[win_off];
+        sdf_v[g_idx]   = priv_sdf_v[win_off];
+        body_u[g_idx]  = priv_body_u[win_off];
+        body_v[g_idx]  = priv_body_v[win_off];
+    }
+    // else: cell not covered by any body → keep pre-existing values (FAR/0)
+}
+
+
+// =====================================================================
+//  3-D min kernel — fanned per-body
+// =====================================================================
+template <typename scalar_t>
+__global__ void regime_b_min_kernel_3d(
+    const scalar_t* __restrict__ F_flat, const int64_t* __restrict__ F_offsets,
+    const int64_t* __restrict__ body_shapes, const scalar_t* __restrict__ body_meta,
+    const scalar_t* __restrict__ kin,
+    const int64_t* __restrict__ aabb_lo, const int64_t* __restrict__ aabb_dim,
+    const scalar_t* __restrict__ gx, const scalar_t* __restrict__ gy, const scalar_t* __restrict__ gz,
+    int Ngy, int Ngz, scalar_t half_h, int B, int interp,
+    const int64_t* __restrict__ priv_offsets,
+    scalar_t* __restrict__ priv_sdf_cc, scalar_t* __restrict__ priv_sdf_u,
+    scalar_t* __restrict__ priv_sdf_v, scalar_t* __restrict__ priv_sdf_w,
+    scalar_t* __restrict__ priv_body_u, scalar_t* __restrict__ priv_body_v, scalar_t* __restrict__ priv_body_w)
+{
+    int b = blockIdx.y;
+    if (b >= B) return;
+
+    int Ai = (int)aabb_dim[b*3+0], Aj = (int)aabb_dim[b*3+1], Ak = (int)aabb_dim[b*3+2];
+    int body_vol = Ai * Aj * Ak;
+    int i0 = (int)aabb_lo[b*3+0], j0 = (int)aabb_lo[b*3+1], k0 = (int)aabb_lo[b*3+2];
+    int64_t off = priv_offsets[b];
+
+    const scalar_t* F = F_flat + F_offsets[b];
+    int Mx = (int)body_shapes[b*3+0], My = (int)body_shapes[b*3+1], Mz = (int)body_shapes[b*3+2];
+    const scalar_t* M = body_meta + b*10;
+    scalar_t bx0 = M[0], by0 = M[1], bz0 = M[2], idx_ = M[6], idy_ = M[7], idz_ = M[8];
+    const scalar_t* K = kin + b*21;
+    scalar_t r00=K[0], r01=K[1], r02=K[2], r10=K[3], r11=K[4], r12=K[5], r20=K[6], r21=K[7], r22=K[8];
+    scalar_t bp_x=K[9], bp_y=K[10], bp_z=K[11], cm_x=K[12], cm_y=K[13], cm_z=K[14];
+    scalar_t lv_x=K[15], lv_y=K[16], lv_z=K[17], av_x=K[18], av_y=K[19], av_z=K[20];
+
+    scalar_t neg_hh = -half_h;
+    scalar_t du_x = neg_hh*r00, du_y = neg_hh*r10, du_z = neg_hh*r20;
+    scalar_t dv_x = neg_hh*r01, dv_y = neg_hh*r11, dv_z = neg_hh*r21;
+    scalar_t dw_x = neg_hh*r02, dw_y = neg_hh*r12, dw_z = neg_hh*r22;
+
+    int stride_y = Ak;
+    int stride_x = Aj * Ak;
+
+    for (int local = blockIdx.x * blockDim.x + threadIdx.x; local < body_vol; local += gridDim.x * blockDim.x) {
+        int di = local / stride_x;
+        int rem = local - di * stride_x;
+        int dj = rem / stride_y;
+        int dk = rem - dj * stride_y;
+        int i = i0 + di, j = j0 + dj, k = k0 + dk;
+
+        scalar_t xc = gx[i], yc = gy[j], zc = gz[k];
+        scalar_t dxw = xc - bp_x, dyw = yc - bp_y, bzw = zc - bp_z;
+        scalar_t bxq = r00*dxw + r01*dyw + r02*bzw;
+        scalar_t byq = r10*dxw + r11*dyw + r12*bzw;
+        scalar_t bzq = r20*dxw + r21*dyw + r22*bzw;
+
+        int64_t idx = off + local;
+        priv_sdf_cc[idx] = sdf_sample_3d<scalar_t>(interp,F,Mx,My,Mz,bx0,by0,bz0,idx_,idy_,idz_,bxq,byq,bzq);
+        priv_sdf_u[idx]  = sdf_sample_3d<scalar_t>(interp,F,Mx,My,Mz,bx0,by0,bz0,idx_,idy_,idz_,bxq+du_x,byq+du_y,bzq+du_z);
+        priv_body_u[idx] = lv_x + av_y*(zc - cm_z) - av_z*(yc - cm_y);
+        priv_sdf_v[idx]  = sdf_sample_3d<scalar_t>(interp,F,Mx,My,Mz,bx0,by0,bz0,idx_,idy_,idz_,bxq+dv_x,byq+dv_y,bzq+dv_z);
+        priv_body_v[idx] = lv_y + av_z*(xc - cm_x) - av_x*(zc - cm_z);
+        priv_sdf_w[idx]  = sdf_sample_3d<scalar_t>(interp,F,Mx,My,Mz,bx0,by0,bz0,idx_,idy_,idz_,bxq+dw_x,byq+dw_y,bzq+dw_z);
+        priv_body_w[idx] = lv_z + av_x*(yc - cm_y) - av_y*(xc - cm_x);
+    }
+}
+
+
+// =====================================================================
+//  3-D resolve kernel — one thread per cell in union dirty AABB
+// =====================================================================
+template <typename scalar_t>
+__global__ void regime_b_resolve_kernel_3d(
+    const int64_t* __restrict__ aabb_lo, const int64_t* __restrict__ aabb_dim,
+    int Ngy, int Ngz, int B,
+    int dirty_i0, int dirty_j0, int dirty_k0, int dirty_Ai, int dirty_Aj, int dirty_Ak,
+    const int64_t* __restrict__ priv_offsets,
+    const scalar_t* __restrict__ priv_sdf_cc, const scalar_t* __restrict__ priv_sdf_u,
+    const scalar_t* __restrict__ priv_sdf_v, const scalar_t* __restrict__ priv_sdf_w,
+    const scalar_t* __restrict__ priv_body_u, const scalar_t* __restrict__ priv_body_v, const scalar_t* __restrict__ priv_body_w,
+    scalar_t* __restrict__ sdf_cc, scalar_t* __restrict__ sdf_u, scalar_t* __restrict__ sdf_v, scalar_t* __restrict__ sdf_w,
+    scalar_t* __restrict__ body_u, scalar_t* __restrict__ body_v, scalar_t* __restrict__ body_w)
+{
+    int local = blockIdx.x * blockDim.x + threadIdx.x;
+    int rem = local / dirty_Ak;
+    int dk = local - rem * dirty_Ak;
+    int di = rem / dirty_Aj;
+    int dj = rem - di * dirty_Aj;
+    if (di >= dirty_Ai) return;
+    int i = dirty_i0 + di, j = dirty_j0 + dj, k = dirty_k0 + dk;
+    int64_t g_idx = ((int64_t)i * Ngy + j) * Ngz + k;
+
+    scalar_t best_cc = (scalar_t)1e4;
+    int best_b = -1;
+    int best_local = -1;
+
+    for (int b = 0; b < B; ++b) {
+        int Ai = (int)aabb_dim[b*3+0], Aj = (int)aabb_dim[b*3+1], Ak = (int)aabb_dim[b*3+2];
+        int i0 = (int)aabb_lo[b*3+0], j0 = (int)aabb_lo[b*3+1], k0 = (int)aabb_lo[b*3+2];
+        if (i < i0 || i >= i0 + Ai || j < j0 || j >= j0 + Aj || k < k0 || k >= k0 + Ak) continue;
+        int di_b = i - i0, dj_b = j - j0, dk_b = k - k0;
+        int loc = (di_b * Aj + dj_b) * Ak + dk_b;
+        int64_t idx = priv_offsets[b] + loc;
+        scalar_t s = priv_sdf_cc[idx];
+        if (s < best_cc) { best_cc = s; best_b = b; best_local = loc; }
+    }
+
+    if (best_b >= 0) {
+        int64_t win_off = priv_offsets[best_b] + best_local;
+        sdf_cc[g_idx]  = best_cc;
+        sdf_u[g_idx]   = priv_sdf_u[win_off];
+        sdf_v[g_idx]   = priv_sdf_v[win_off];
+        sdf_w[g_idx]   = priv_sdf_w[win_off];
+        body_u[g_idx]  = priv_body_u[win_off];
+        body_v[g_idx]  = priv_body_v[win_off];
+        body_w[g_idx]  = priv_body_w[win_off];
+    }
+}
+
+
+// =====================================================================
+//  Launcher functions
+// =====================================================================
+
+void streaming_sdf_stag_2d_resolve_cuda(
+    const at::Tensor& F_flat, const at::Tensor& F_offsets,
+    const at::Tensor& body_shapes, const at::Tensor& body_meta, const at::Tensor& kin,
+    const at::Tensor& aabb_lo, const at::Tensor& aabb_dim,
+    const at::Tensor& gx, const at::Tensor& gy,
+    double h_grid, int64_t max_vol_per_body,
+    at::Tensor sdf_cc, at::Tensor sdf_u, at::Tensor sdf_v,
+    at::Tensor body_u, at::Tensor body_v, int64_t interp,
+    int64_t dirty_i0, int64_t dirty_j0, int64_t dirty_Ai, int64_t dirty_Aj,
+    const at::Tensor& priv_offsets,
+    at::Tensor priv_sdf_cc, at::Tensor priv_sdf_u, at::Tensor priv_sdf_v,
+    at::Tensor priv_body_u, at::Tensor priv_body_v)
+{
+    int B = (int)aabb_dim.size(0);
+    if (B <= 0 || dirty_Ai <= 0 || dirty_Aj <= 0) return;
+    cudaStream_t s = at::cuda::getCurrentCUDAStream();
+    int Ngy = (int)gy.numel();
+    int64_t dirty_vol = dirty_Ai * dirty_Aj;
+
+    AT_DISPATCH_FLOATING_TYPES(F_flat.scalar_type(), "sdf_stag_2d_resolve", [&] {
+        // ----- min-kernel: fanned per-body -----
+        {
+            int bs = 256;
+            // Grid sizing from the caller-supplied max body volume.  (Do NOT
+            // host-deref aabb_dim here: it is a CUDA tensor, so reading its
+            // data_ptr on the host is an illegal device-memory access — the
+            // former crash.  max_vol_per_body already = max_b prod(aabb_dim[b]).)
+            int64_t max_vol = max_vol_per_body;
+            int blocks_per_body = (int)((max_vol + bs - 1) / bs);
+            if (blocks_per_body < 1) blocks_per_body = 1;
+            regime_b_min_kernel_2d<scalar_t>
+                <<<dim3(blocks_per_body, B, 1), dim3(bs, 1, 1), 0, s>>>(
+                    F_flat.data_ptr<scalar_t>(), F_offsets.data_ptr<int64_t>(),
+                    body_shapes.data_ptr<int64_t>(), body_meta.data_ptr<scalar_t>(),
+                    kin.data_ptr<scalar_t>(),
+                    aabb_lo.data_ptr<int64_t>(), aabb_dim.data_ptr<int64_t>(),
+                    gx.data_ptr<scalar_t>(), gy.data_ptr<scalar_t>(),
+                    Ngy, (scalar_t)(0.5 * h_grid), B, (int)interp,
+                    priv_offsets.data_ptr<int64_t>(),
+                    priv_sdf_cc.data_ptr<scalar_t>(), priv_sdf_u.data_ptr<scalar_t>(), priv_sdf_v.data_ptr<scalar_t>(),
+                    priv_body_u.data_ptr<scalar_t>(), priv_body_v.data_ptr<scalar_t>());
+            cudaError_t err = cudaGetLastError();
+            if (err != cudaSuccess) {
+                AT_ERROR("regime_b_min_kernel_2d launch failed: ", cudaGetErrorString(err));
+            }
+        }
+
+        // ----- resolve kernel: over union dirty AABB -----
+        {
+            int bs = (dirty_vol <= 256) ? 32 : (dirty_vol <= 65536) ? 128 : 256;
+            regime_b_resolve_kernel_2d<scalar_t>
+                <<<dim3((dirty_vol + bs - 1) / bs, 1, 1), dim3(bs, 1, 1), 0, s>>>(
+                    aabb_lo.data_ptr<int64_t>(), aabb_dim.data_ptr<int64_t>(),
+                    Ngy, B,
+                    (int)dirty_i0, (int)dirty_j0, (int)dirty_Ai, (int)dirty_Aj,
+                    priv_offsets.data_ptr<int64_t>(),
+                    priv_sdf_cc.data_ptr<scalar_t>(), priv_sdf_u.data_ptr<scalar_t>(), priv_sdf_v.data_ptr<scalar_t>(),
+                    priv_body_u.data_ptr<scalar_t>(), priv_body_v.data_ptr<scalar_t>(),
+                    sdf_cc.data_ptr<scalar_t>(), sdf_u.data_ptr<scalar_t>(), sdf_v.data_ptr<scalar_t>(),
+                    body_u.data_ptr<scalar_t>(), body_v.data_ptr<scalar_t>());
+            cudaError_t err = cudaGetLastError();
+            if (err != cudaSuccess) {
+                AT_ERROR("regime_b_resolve_kernel_2d launch failed: ", cudaGetErrorString(err));
+            }
+        }
+    });
+}
+
+void streaming_sdf_stag_3d_resolve_cuda(
+    const at::Tensor& F_flat, const at::Tensor& F_offsets,
+    const at::Tensor& body_shapes, const at::Tensor& body_meta, const at::Tensor& kin,
+    const at::Tensor& aabb_lo, const at::Tensor& aabb_dim,
+    const at::Tensor& gx, const at::Tensor& gy, const at::Tensor& gz,
+    double h_grid, int64_t max_vol_per_body,
+    at::Tensor sdf_cc, at::Tensor sdf_u, at::Tensor sdf_v, at::Tensor sdf_w,
+    at::Tensor body_u, at::Tensor body_v, at::Tensor body_w, int64_t interp,
+    int64_t dirty_i0, int64_t dirty_j0, int64_t dirty_k0,
+    int64_t dirty_Ai, int64_t dirty_Aj, int64_t dirty_Ak,
+    const at::Tensor& priv_offsets,
+    at::Tensor priv_sdf_cc, at::Tensor priv_sdf_u, at::Tensor priv_sdf_v, at::Tensor priv_sdf_w,
+    at::Tensor priv_body_u, at::Tensor priv_body_v, at::Tensor priv_body_w)
+{
+    int B = (int)aabb_dim.size(0);
+    if (B <= 0 || dirty_Ai <= 0 || dirty_Aj <= 0 || dirty_Ak <= 0) return;
+    cudaStream_t s = at::cuda::getCurrentCUDAStream();
+    int Ngy = (int)gy.numel(), Ngz = (int)gz.numel();
+    int64_t dirty_vol = dirty_Ai * dirty_Aj * dirty_Ak;
+
+    AT_DISPATCH_FLOATING_TYPES(F_flat.scalar_type(), "sdf_stag_3d_resolve", [&] {
+        // ----- min-kernel: fanned per-body -----
+        {
+            int bs = 256;
+            // Grid sizing from the caller-supplied max body volume (see the
+            // 2-D launcher note — host-deref of the CUDA aabb_dim was the crash).
+            int64_t max_vol = max_vol_per_body;
+            int blocks_per_body = (int)((max_vol + bs - 1) / bs);
+            if (blocks_per_body < 1) blocks_per_body = 1;
+            regime_b_min_kernel_3d<scalar_t>
+                <<<dim3(blocks_per_body, B, 1), dim3(bs, 1, 1), 0, s>>>(
+                    F_flat.data_ptr<scalar_t>(), F_offsets.data_ptr<int64_t>(),
+                    body_shapes.data_ptr<int64_t>(), body_meta.data_ptr<scalar_t>(),
+                    kin.data_ptr<scalar_t>(),
+                    aabb_lo.data_ptr<int64_t>(), aabb_dim.data_ptr<int64_t>(),
+                    gx.data_ptr<scalar_t>(), gy.data_ptr<scalar_t>(), gz.data_ptr<scalar_t>(),
+                    Ngy, Ngz, (scalar_t)(0.5 * h_grid), B, (int)interp,
+                    priv_offsets.data_ptr<int64_t>(),
+                    priv_sdf_cc.data_ptr<scalar_t>(), priv_sdf_u.data_ptr<scalar_t>(),
+                    priv_sdf_v.data_ptr<scalar_t>(), priv_sdf_w.data_ptr<scalar_t>(),
+                    priv_body_u.data_ptr<scalar_t>(), priv_body_v.data_ptr<scalar_t>(), priv_body_w.data_ptr<scalar_t>());
+        }
+        AT_CUDA_CHECK(cudaGetLastError());
+
+        // ----- resolve kernel: over union dirty AABB -----
+        {
+            int bs = (dirty_vol <= 256) ? 32 : (dirty_vol <= 65536) ? 128 : 256;
+            regime_b_resolve_kernel_3d<scalar_t>
+                <<<dim3((dirty_vol + bs - 1) / bs, 1, 1), dim3(bs, 1, 1), 0, s>>>(
+                    aabb_lo.data_ptr<int64_t>(), aabb_dim.data_ptr<int64_t>(),
+                    Ngy, Ngz, B,
+                    (int)dirty_i0, (int)dirty_j0, (int)dirty_k0,
+                    (int)dirty_Ai, (int)dirty_Aj, (int)dirty_Ak,
+                    priv_offsets.data_ptr<int64_t>(),
+                    priv_sdf_cc.data_ptr<scalar_t>(), priv_sdf_u.data_ptr<scalar_t>(),
+                    priv_sdf_v.data_ptr<scalar_t>(), priv_sdf_w.data_ptr<scalar_t>(),
+                    priv_body_u.data_ptr<scalar_t>(), priv_body_v.data_ptr<scalar_t>(), priv_body_w.data_ptr<scalar_t>(),
+                    sdf_cc.data_ptr<scalar_t>(), sdf_u.data_ptr<scalar_t>(), sdf_v.data_ptr<scalar_t>(), sdf_w.data_ptr<scalar_t>(),
+                    body_u.data_ptr<scalar_t>(), body_v.data_ptr<scalar_t>(), body_w.data_ptr<scalar_t>());
+        }
+        AT_CUDA_CHECK(cudaGetLastError());
+    });
+}
+
+TORCH_LIBRARY_IMPL(lilytorch_kernels, CUDA, m) {
+    m.impl("streaming_sdf_stag_2d_resolve", &streaming_sdf_stag_2d_resolve_cuda);
+    m.impl("streaming_sdf_stag_3d_resolve", &streaming_sdf_stag_3d_resolve_cuda);
+}
+}  // namespace lilytorch_kernels

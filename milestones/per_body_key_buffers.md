@@ -229,3 +229,126 @@ For multi-link robots: the overlap region is `O(B × seam_cells)`, typically
    SDF portion.
 8. Remove `streaming_sdf_init_keys_3d_kernel` and the full-grid decode pass
    (or keep as fallback for Regime B if the overlap-resolve is buggy).
+
+---
+
+## 2.1 reconciliation — post-Phase-0 layout + parity contract (2026-07-10, Claude)
+
+This doc was written against the old `cuda_kernels` tree.  Phase 0 flattened the
+extension, so the file/symbol names above are stale.  This section reconciles
+them and pins the **parity contract** the item-2.2/2.3 kernels must satisfy.
+The tests are already written (`lilytorch/tests/test_per_body_buffers.py`) — a
+sub-item is DONE when its gate flips SKIP→PASS with no other regression.
+
+### Name / location map (old → current)
+
+| Doc says (old `cuda_kernels`) | Current (`cuda_native_port`) |
+|---|---|
+| `streaming_sdf.cu` (3-D only) | `src/csrc/cuda/streaming_sdf.cu` (3-D) **and** `streaming_sdf_2d.cu` (2-D twin) — do BOTH per ground rule 1 |
+| CPU twin (implicit) | `src/csrc/streaming_sdf_cpu.cpp` (3-D) + `streaming_sdf_cpu_2d.cpp` (2-D) — required (ground rule 4) |
+| `TORCH_LIBRARY(lilytorch_kernels)` in kernels pkg | `src/csrc/ops.cpp` |
+| python wrapper in `kernels/ops.py` | `src/native.py` (`streaming_sdf_stag_{2,3}d_multi`, …) |
+| dispatch in `_fluid_step_kernel_3d` | `facade._native_body_update_{2,3}d` (the production entry point) |
+| overlap detection in `BDIMhandler.update()` → `_kernel_step` | compute per-body AABB overlap where the union dirty rect is already built and stash a `regime` flag; the facade bridge dispatches on it. There is **no** `_kernel_step` dict on this branch. |
+| `streaming_sdf_min_rho_3d_multi_kernel` | the `streaming_sdf_stag_{2,3}d_multi` min pass (already fanned `gridDim.y=B`) |
+| `streaming_sdf_init_keys_*` / `decode_keys_*` | same names inside the current `.cu`; still the waste to remove (doc step 8) |
+
+The packed-key helpers now live in `src/csrc/cuda/packed_key.cuh`
+(`pack_sdf_body_key` / `unpack_sdf`).
+
+### DECISION (2026-07-11): new method is the SOLE path — full fp64, no atomics
+
+The per-body method **replaces** the union-`atomicMin` path; there is no opt-in
+coexistence and **no memory-bound fallback**. Concretely this fixes the design as:
+
+- **Regime A (disjoint / B=1)** — one owner per cell → **direct write, no
+  atomic**, raw fp64 SDF straight to the global arrays.
+- **Regime B (overlap)** — **per-body PRIVATE buffers** hold raw fp64 SDF (the
+  winning body-id is implicit in *which* buffer, so there is **no packed key**
+  and **no quantization**). The fanned min-kernel is the only writer of each
+  `(body, cell)` slot. A **separate resolve kernel — one thread per overlap
+  cell** — reads the covering bodies' buffers, compares raw doubles in
+  registers, and writes the winner **once**. Single writer per output cell, so
+  it is thread-safe *without* an atomic. ⚠️ Do NOT implement Regime B by
+  dropping the atomic from the min-kernel and letting overlapping bodies write
+  the global array directly — that is the racy version; the per-body-buffer +
+  separate-resolve split is what makes it safe.
+- **Removed**: `streaming_sdf_init_keys_*`, the full-grid `decode_keys_*` pass,
+  `packed_key.cuh`, and `streaming_sdf_stag_*_multi` (op + wrapper + schema).
+- **Memory tradeoff (accepted)**: overlap clusters cost `Σ body_vol[b]` private
+  buffer (~2–3× the union buffer, MB-scale for realistic link counts; separated
+  bodies cost *less* than the union). No fallback for pathological huge-overlap
+  systems — out of scope.
+- **Safe to remove (verified)**: `_multi` has one production call site
+  (`facade._native_body_update_{2,3}d`); the per-cell body-id the key carried is
+  consumed only by `bdim_coeff_sigma_{2,3}d`, which is not in any production
+  path. If BDIM-σ is revived, have the Regime-B resolve emit a body-id field —
+  do not resurrect the packed key.
+- **Oracle**: durable gate = new-GPU vs new-CPU-twin. `_multi` is kept
+  importable as a *transitional* test oracle only, deleted at item 2.4 (which
+  migrates `test_per_body_buffers.py`'s oracle to the new CPU twin).
+
+### Prior art: a B=1 direct-write kernel already existed and was reverted
+
+Commit `6c72e6b` added `streaming_sdf_stag_{2,3}d_direct` (CUDA + CPU twin, op
+reg, `native.py` wrapper, facade B==1 fast-path).  The **working tree reverts
+it** (deletes `streaming_sdf_direct.cu`, its ops/wrappers/dispatch) so that 2.1
+lands the gate first.  Item 2.2 should **restore that kernel from `6c72e6b` and
+generalise** its facade dispatch from `B==1` to *any disjoint set* (Regime A —
+the op itself is already `gridDim.y=B` direct-write and handles B>1 disjoint
+bodies correctly).  `benchmarks/bench_direct_vs_multi.py` (untracked) is its
+companion bench and references the reverted op.
+
+### Parity contract (THE thing 2.1 pins down)
+
+Reference oracle = the union-AABB `streaming_sdf_stag_{2,3}d_multi`.  The multi
+path routes every winning SDF through the 64-bit packed key, which keeps the top
+48 sortable bits and **drops the low 16 mantissa bits** (see `packed_key.cuh`).
+So "byte-identical vs the union-AABB path" means, precisely:
+
+- **SDF, fp32** — an fp32-origin value's low 16 bits are zero, so the key
+  round-trips it bit-exactly.  A direct-write / resolve path that computes the
+  SDF with the **same `sdf_sample_dispatch_*` sampler** is therefore
+  **byte-identical** to multi (`torch.equal`).  This is the load-bearing gate:
+  it forces 2.2/2.3 to *reuse* the sampler, not re-derive it.  If a direct
+  kernel diverges by even 1 ULP in fp32, the gate fails — that is correct.
+- **SDF, fp64** — the key loses ~2^-36 (~1.5e-11).  Direct-written cells keep
+  the raw (more accurate) fp64 value → they differ from multi's quantised value
+  at that floor.  **Not** byte-identical in fp64; gated at `1e-9`.  (Per the
+  2026-07-11 decision Regime B also stores raw fp64 in per-body buffers — no key
+  — so *every* cell is full-precision and the whole scene sits at the ~1.5e-11
+  floor vs the quantised `_multi` oracle; same `1e-9` tolerance, and the oracle
+  is the less-accurate side, deleted at 2.4.)
+- **Body velocity** — recomputed from the winning body id, never quantised, so
+  it does not carry the key floor: gated at `2e-7` (fp32) / `1e-9` (fp64).
+
+Do **not** try to make the fp64 direct path bit-match multi — it is *more*
+accurate, and matching would mean re-introducing the quantisation.
+
+### The tests (already in place)
+
+`lilytorch/tests/test_per_body_buffers.py`, three layers, 2-D **and** 3-D,
+fp32 **and** fp64, over three controlled scenes — `single` (B=1), `separated`
+(disjoint B=2 → Regime A), `multilink` (overlapping B=3 → Regime B):
+
+1. `test_scene_*` — guards the scenes (liveness; separated is disjoint;
+   multilink has real overlap cells).  Passes now.
+2. `test_facade_matches_multi` — production invariant: `facade._native_body_
+   update_{2,3}d` vs the pinned multi reference.  Passes now (facade→multi) and
+   **remains the gate** as 2.2/2.3 teach the facade to dispatch regimes.
+3. `test_direct_write_matches_multi` — op-level Regime-A gate for `single` +
+   `separated`.  **SKIPs** until `native.streaming_sdf_stag_{2,3}d_direct`
+   exists; must flip SKIP→PASS when 2.2 restores the direct op.
+
+Current status: **24 passed / 8 skipped** (the 8 = the direct-write op gate).
+
+### Graph-capture interaction (Phase 1 composition)
+
+Regime A vs B selection is a **host** decision → it must be part of the
+`NativeWholeStepGraphRunner` *key*, never a branch inside the captured graph
+(host branches freeze at capture — see the 1.2 log).  Two grid-shaped regimes ⇒
+at most two captured graphs for the streaming bridge, LRU-evicted like any other
+key.  Direct-write and multi launch over different grids (`gridDim.y=B` vs the
+per-body fan), so their pointer/shape signatures already differ — keep the
+regime flag in the key explicitly so a scene that flips regime mid-run recaptures
+rather than replaying the wrong path.

@@ -8,11 +8,15 @@ from lilytorch.src import _C  # noqa: F401
 
 __all__ = [
     "streaming_sdf_stag_3d_multi",
+    "streaming_sdf_stag_3d_direct",
+    "streaming_sdf_stag_2d_resolve",
+    "streaming_sdf_stag_3d_resolve",
     "bdim_coeff_3d",
     "bdim_coeff_sigma_3d",
     "streaming_sdf_forces_post_3d",
     "apply_bcs_3d",
     "streaming_sdf_stag_2d_multi",
+    "streaming_sdf_stag_2d_direct",
     "bdim_coeff_2d",
     "bdim_coeff_sigma_2d",
     "bdim_forcing_2d",
@@ -313,10 +317,11 @@ def streaming_sdf_stag_2d_direct(
         interp_method: int,
         dirty_i0: int, dirty_j0: int,
         dirty_Ai: int, dirty_Aj: int) -> None:
-    """2-D single-body direct-write SDF kernel (B=1 fast path).
+    """2-D direct-write SDF kernel (Regime A: pairwise-disjoint bodies).
 
-    No key packing, no atomics, no decode pass — produces bit-identical
-    results with the CPU twin."""
+    No key packing, no atomics, no decode pass — safe when every pair of body
+    AABBs is disjoint.  Produces bit-identical results with the CPU twin for
+    fp32 (the multi-path packed-key quantisation is not applied)."""
     return torch.ops.lilytorch_kernels.streaming_sdf_stag_2d_direct.default(
         F_flat, F_offsets, body_shapes, body_meta, kin,
         aabb_lo, aabb_dim,
@@ -339,10 +344,11 @@ def streaming_sdf_stag_3d_direct(
         interp_method: int,
         dirty_i0: int, dirty_j0: int, dirty_k0: int,
         dirty_Ai: int, dirty_Aj: int, dirty_Ak: int) -> None:
-    """3-D single-body direct-write SDF kernel (B=1 fast path).
+    """3-D direct-write SDF kernel (Regime A: pairwise-disjoint bodies).
 
-    No key packing, no atomics, no decode pass — produces bit-identical
-    results with the CPU twin."""
+    No key packing, no atomics, no decode pass — safe when every pair of body
+    AABBs is disjoint.  Produces bit-identical results with the CPU twin for
+    fp32 (the multi-path packed-key quantisation is not applied)."""
     return torch.ops.lilytorch_kernels.streaming_sdf_stag_3d_direct.default(
         F_flat, F_offsets, body_shapes, body_meta, kin,
         aabb_lo, aabb_dim,
@@ -351,6 +357,80 @@ def streaming_sdf_stag_3d_direct(
         int(interp_method),
         int(dirty_i0), int(dirty_j0), int(dirty_k0),
         int(dirty_Ai), int(dirty_Aj), int(dirty_Ak),
+    )
+
+
+# =====================================================================
+#  Regime-B streaming SDF: per-body private buffers + resolve
+# =====================================================================
+
+def streaming_sdf_stag_2d_resolve(
+        F_flat: Tensor, F_offsets: Tensor,
+        body_shapes: Tensor, body_meta: Tensor, kin: Tensor,
+        aabb_lo: Tensor, aabb_dim: Tensor,
+        gx: Tensor, gy: Tensor,
+        h_grid: float, max_vol_per_body: int,
+        sdf_cc: Tensor, sdf_u: Tensor, sdf_v: Tensor,
+        body_u: Tensor, body_v: Tensor,
+        interp_method: int,
+        dirty_i0: int, dirty_j0: int,
+        dirty_Ai: int, dirty_Aj: int,
+        priv_offsets: Tensor,
+        priv_sdf_cc: Tensor, priv_sdf_u: Tensor, priv_sdf_v: Tensor,
+        priv_body_u: Tensor, priv_body_v: Tensor) -> None:
+    """2-D Regime-B streaming SDF: per-body private buffers + resolve.
+
+    Two-stage pipeline for overlapping-body regimes:
+    1. Min-stage: per-body parallel writes raw SDF + staggered velocity to
+       per-body private flat buffers (no packed key, no atomics).
+    2. Resolve-stage: iterates the union dirty AABB, reads each covering
+       body's private buffer, picks min, writes winner to global tensors.
+
+    ``priv_offsets``: int64 [B+1] cumulative body_vol offsets.
+    ``priv_sdf_cc``, etc.: flat tensors of size ``priv_offsets[-1]``.
+    """
+    return torch.ops.lilytorch_kernels.streaming_sdf_stag_2d_resolve.default(
+        F_flat, F_offsets, body_shapes, body_meta, kin,
+        aabb_lo, aabb_dim,
+        gx, gy, float(h_grid), int(max_vol_per_body),
+        sdf_cc, sdf_u, sdf_v, body_u, body_v,
+        int(interp_method),
+        int(dirty_i0), int(dirty_j0), int(dirty_Ai), int(dirty_Aj),
+        priv_offsets,
+        priv_sdf_cc, priv_sdf_u, priv_sdf_v,
+        priv_body_u, priv_body_v,
+    )
+
+
+def streaming_sdf_stag_3d_resolve(
+        F_flat: Tensor, F_offsets: Tensor,
+        body_shapes: Tensor, body_meta: Tensor, kin: Tensor,
+        aabb_lo: Tensor, aabb_dim: Tensor,
+        gx: Tensor, gy: Tensor, gz: Tensor,
+        h_grid: float, max_vol_per_body: int,
+        sdf_cc: Tensor, sdf_u: Tensor, sdf_v: Tensor, sdf_w: Tensor,
+        body_u: Tensor, body_v: Tensor, body_w: Tensor,
+        interp_method: int,
+        dirty_i0: int, dirty_j0: int, dirty_k0: int,
+        dirty_Ai: int, dirty_Aj: int, dirty_Ak: int,
+        priv_offsets: Tensor,
+        priv_sdf_cc: Tensor, priv_sdf_u: Tensor, priv_sdf_v: Tensor, priv_sdf_w: Tensor,
+        priv_body_u: Tensor, priv_body_v: Tensor, priv_body_w: Tensor) -> None:
+    """3-D Regime-B streaming SDF: per-body private buffers + resolve.
+
+    See :func:`streaming_sdf_stag_2d_resolve` for the pipeline description.
+    """
+    return torch.ops.lilytorch_kernels.streaming_sdf_stag_3d_resolve.default(
+        F_flat, F_offsets, body_shapes, body_meta, kin,
+        aabb_lo, aabb_dim,
+        gx, gy, gz, float(h_grid), int(max_vol_per_body),
+        sdf_cc, sdf_u, sdf_v, sdf_w, body_u, body_v, body_w,
+        int(interp_method),
+        int(dirty_i0), int(dirty_j0), int(dirty_k0),
+        int(dirty_Ai), int(dirty_Aj), int(dirty_Ak),
+        priv_offsets,
+        priv_sdf_cc, priv_sdf_u, priv_sdf_v, priv_sdf_w,
+        priv_body_u, priv_body_v, priv_body_w,
     )
 
 

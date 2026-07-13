@@ -176,6 +176,47 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " int dirty_Ai, int dirty_Aj, int dirty_Ak"
         ") -> ()");
 
+    // ---- Regime-B per-body private buffers + resolve kernels -------------
+    // streaming_sdf_stag_2d_resolve: two-stage streaming SDF for overlapping
+    // bodies.  Min-stage writes raw SDF + staggered body velocity to
+    // per-body private flat buffers (priv_*); resolve-stage iterates the
+    // union dirty AABB, reads each covering body's private buffer, picks
+    // the minimum SDF (no atomics, single thread per global cell), and
+    // writes the winner to the global output tensors.  Full fp64 precision
+    // (no packed key).  priv_offsets is int64 [B+1] cumulative body_vol.
+    m.def(
+        "streaming_sdf_stag_2d_resolve("
+        "Tensor F_flat, Tensor F_offsets,"
+        " Tensor body_shapes, Tensor body_meta, Tensor kin,"
+        " Tensor aabb_lo, Tensor aabb_dim,"
+        " Tensor gx, Tensor gy, float h_grid,"
+        " int max_vol_per_body,"
+        " Tensor(a!) sdf_cc, Tensor(b!) sdf_u, Tensor(c!) sdf_v,"
+        " Tensor(d!) body_u, Tensor(e!) body_v,"
+        " int interp_method,"
+        " int dirty_i0, int dirty_j0, int dirty_Ai, int dirty_Aj,"
+        " Tensor priv_offsets,"
+        " Tensor(f!) priv_sdf_cc, Tensor(g!) priv_sdf_u, Tensor(h!) priv_sdf_v,"
+        " Tensor(i!) priv_body_u, Tensor(j!) priv_body_v"
+        ") -> ()");
+
+    m.def(
+        "streaming_sdf_stag_3d_resolve("
+        "Tensor F_flat, Tensor F_offsets,"
+        " Tensor body_shapes, Tensor body_meta, Tensor kin,"
+        " Tensor aabb_lo, Tensor aabb_dim,"
+        " Tensor gx, Tensor gy, Tensor gz, float h_grid,"
+        " int max_vol_per_body,"
+        " Tensor(a!) sdf_cc, Tensor(b!) sdf_u, Tensor(c!) sdf_v, Tensor(d!) sdf_w,"
+        " Tensor(e!) body_u, Tensor(f!) body_v, Tensor(g!) body_w,"
+        " int interp_method,"
+        " int dirty_i0, int dirty_j0, int dirty_k0,"
+        " int dirty_Ai, int dirty_Aj, int dirty_Ak,"
+        " Tensor priv_offsets,"
+        " Tensor(h!) priv_sdf_cc, Tensor(i!) priv_sdf_u, Tensor(j!) priv_sdf_v, Tensor(k!) priv_sdf_w,"
+        " Tensor(l!) priv_body_u, Tensor(m!) priv_body_v, Tensor(n!) priv_body_w"
+        ") -> ()");
+
     // Phase-I fused BDIM2 + variable-density Poisson coefficient kernel (2-D).
     m.def(
         "bdim_coeff_2d("

@@ -765,6 +765,94 @@ void streaming_sdf_forces_post_3d_cpu(
 //  with the variable-density Poisson coefficient computation.
 // =====================================================================
 
+// ---- direct-write (Regime A: disjoint bodies, no keys, no atomics) --------
+void streaming_sdf_stag_3d_direct_cpu(
+    const at::Tensor& F_flat, const at::Tensor& F_offsets,
+    const at::Tensor& body_shapes,
+    const at::Tensor& body_meta,
+    const at::Tensor& kin,
+    const at::Tensor& aabb_lo,
+    const at::Tensor& aabb_dim,
+    const at::Tensor& gx, const at::Tensor& gy, const at::Tensor& gz,
+    const double h_grid,
+    const int64_t /*max_vol_per_body*/,
+    at::Tensor sdf_cc, at::Tensor sdf_u, at::Tensor sdf_v, at::Tensor sdf_w,
+    at::Tensor body_u, at::Tensor body_v, at::Tensor body_w,
+    const int64_t interp_method,
+    const int64_t, const int64_t, const int64_t,
+    const int64_t, const int64_t, const int64_t)
+{
+    const int B = (int)aabb_dim.size(0);
+    if (B <= 0) return;
+    const int Ngy = (int)gy.numel();
+    const int Ngz = (int)gz.numel();
+
+    AT_DISPATCH_FLOATING_TYPES(F_flat.scalar_type(), "streaming_sdf_stag_3d_direct_cpu", [&] {
+        const scalar_t* F_ptr = F_flat.data_ptr<scalar_t>();
+        const int64_t* F_off = F_offsets.data_ptr<int64_t>();
+        const int64_t* shapes = body_shapes.data_ptr<int64_t>();
+        const scalar_t* meta = body_meta.data_ptr<scalar_t>();
+        const scalar_t* kin_ptr = kin.data_ptr<scalar_t>();
+        const int64_t* lo = aabb_lo.data_ptr<int64_t>();
+        const int64_t* dim = aabb_dim.data_ptr<int64_t>();
+        const scalar_t* gx_ptr = gx.data_ptr<scalar_t>();
+        const scalar_t* gy_ptr = gy.data_ptr<scalar_t>();
+        const scalar_t* gz_ptr = gz.data_ptr<scalar_t>();
+        scalar_t* sdf_cc_p = sdf_cc.data_ptr<scalar_t>();
+        scalar_t* sdf_u_p  = sdf_u.data_ptr<scalar_t>();
+        scalar_t* sdf_v_p  = sdf_v.data_ptr<scalar_t>();
+        scalar_t* sdf_w_p  = sdf_w.data_ptr<scalar_t>();
+        scalar_t* bU_p     = body_u.data_ptr<scalar_t>();
+        scalar_t* bV_p     = body_v.data_ptr<scalar_t>();
+        scalar_t* bW_p     = body_w.data_ptr<scalar_t>();
+        const scalar_t half_h = (scalar_t)(0.5 * h_grid);
+        const int interp = (int)interp_method;
+
+        for (int b = 0; b < B; ++b) {
+            const int Ai = (int)dim[b*3+0], Aj = (int)dim[b*3+1], Ak = (int)dim[b*3+2];
+            const int vol = Ai * Aj * Ak;
+            if (vol <= 0) continue;
+            const int i0 = (int)lo[b*3+0], j0 = (int)lo[b*3+1], k0 = (int)lo[b*3+2];
+            const scalar_t* F_b = F_ptr + F_off[b];
+            const int Mx = (int)shapes[b*3+0], My = (int)shapes[b*3+1], Mz = (int)shapes[b*3+2];
+            const scalar_t* M = meta + b*10;
+            const scalar_t bx0=M[0], by0=M[1], bz0=M[2], idx=M[6], idy=M[7], idz=M[8];
+            const scalar_t* K = kin_ptr + b*21;
+            const scalar_t r00=K[0], r01=K[1], r02=K[2], r10=K[3], r11=K[4], r12=K[5], r20=K[6], r21=K[7], r22=K[8];
+            const scalar_t bp_x=K[9], bp_y=K[10], bp_z=K[11], cm_x=K[12], cm_y=K[13], cm_z=K[14];
+            const scalar_t lv_x=K[15], lv_y=K[16], lv_z=K[17], av_x=K[18], av_y=K[19], av_z=K[20];
+            const scalar_t neg_hh = -half_h;
+            const scalar_t du_x=neg_hh*r00, du_y=neg_hh*r10, du_z=neg_hh*r20;
+            const scalar_t dv_x=neg_hh*r01, dv_y=neg_hh*r11, dv_z=neg_hh*r21;
+            const scalar_t dw_x=neg_hh*r02, dw_y=neg_hh*r12, dw_z=neg_hh*r22;
+
+            at::parallel_for(0, vol, 1024, [&](int64_t _begin, int64_t _end) {
+            for (int local = (int)_begin; local < (int)_end; ++local) {
+                const int di = local / (Aj*Ak);
+                const int rem = local - di*(Aj*Ak);
+                const int dj = rem / Ak;
+                const int dk = rem - dj*Ak;
+                const int i = i0+di, j = j0+dj, k = k0+dk;
+                const int64_t g = ((int64_t)i * Ngy + j) * Ngz + k;
+                const scalar_t xc=gx_ptr[i], yc=gy_ptr[j], zc=gz_ptr[k];
+                const scalar_t dxw=xc-bp_x, dyw=yc-bp_y, bzw=zc-bp_z;
+                const scalar_t bxq=r00*dxw+r01*dyw+r02*bzw;
+                const scalar_t byq=r10*dxw+r11*dyw+r12*bzw;
+                const scalar_t bzq=r20*dxw+r21*dyw+r22*bzw;
+
+                const scalar_t scc = sample_dispatch_cpu<scalar_t>(interp,F_b,Mx,My,Mz,bx0,by0,bz0,idx,idy,idz,bxq,byq,bzq);
+                if (scc < sdf_cc_p[g]) { sdf_cc_p[g]=scc; }
+                const scalar_t su = sample_dispatch_cpu<scalar_t>(interp,F_b,Mx,My,Mz,bx0,by0,bz0,idx,idy,idz,bxq+du_x,byq+du_y,bzq+du_z);
+                if (su < sdf_u_p[g]) { sdf_u_p[g]=su; bU_p[g]=lv_x + av_y*(zc-cm_z) - av_z*(yc-cm_y); }
+                const scalar_t sv = sample_dispatch_cpu<scalar_t>(interp,F_b,Mx,My,Mz,bx0,by0,bz0,idx,idy,idz,bxq+dv_x,byq+dv_y,bzq+dv_z);
+                if (sv < sdf_v_p[g]) { sdf_v_p[g]=sv; bV_p[g]=lv_y + av_z*(xc-cm_x) - av_x*(zc-cm_z); }
+                const scalar_t sw = sample_dispatch_cpu<scalar_t>(interp,F_b,Mx,My,Mz,bx0,by0,bz0,idx,idy,idz,bxq+dw_x,byq+dw_y,bzq+dw_z);
+                if (sw < sdf_w_p[g]) { sdf_w_p[g]=sw; bW_p[g]=lv_z + av_x*(yc-cm_y) - av_y*(xc-cm_x); }
+            }});
+        }
+    });
+}
+
 void streaming_sdf_stag_3d_multi_cpu(
     const at::Tensor& F_flat, const at::Tensor& F_offsets,
     const at::Tensor& body_shapes,
@@ -1261,6 +1349,7 @@ void bdim_coeff_sigma_3d_cpu(
 }
 
 TORCH_LIBRARY_IMPL(lilytorch_kernels, CPU, m) {
+    m.impl("streaming_sdf_stag_3d_direct",    &streaming_sdf_stag_3d_direct_cpu);
     m.impl("streaming_sdf_stag_3d_multi",    &streaming_sdf_stag_3d_multi_cpu);
     m.impl("bdim_coeff_3d",                &bdim_coeff_3d_cpu);
     m.impl("bdim_coeff_sigma_3d",          &bdim_coeff_sigma_3d_cpu);

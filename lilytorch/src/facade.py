@@ -23,6 +23,60 @@ from lilytorch.src import native
 _FAR = 1e4
 
 
+def _aabbs_are_disjoint(aabb_lo, aabb_dim):
+    """Return True if every pair of body AABBs is disjoint (no overlap on any axis).
+
+    AABBs are half-open ``[lo, lo+dim)``.  Two AABBs are disjoint when at least
+    one axis has no overlap; they intersect only when ALL axes overlap.
+    Regime A (direct-write) is safe exactly when bodies are pairwise disjoint.
+    """
+    if aabb_lo is None or aabb_dim is None:
+        return False
+    B = aabb_lo.shape[0]
+    if B <= 1:
+        return True
+    # Vectorised pairwise overlap: boxes a,b intersect iff on EVERY axis
+    # lo_a < hi_b and lo_b < hi_a.  Done on-device in one shot with a SINGLE
+    # host sync at the end (the old per-element `.item()` triple loop cost
+    # ~B^2*ndim device syncs per call — catastrophic in a pipelined sim).
+    lo = aabb_lo.to(torch.int64)
+    hi = lo + aabb_dim.to(torch.int64)
+    ov = (lo[:, None, :] < hi[None, :, :]) & (lo[None, :, :] < hi[:, None, :])
+    ov = ov.all(dim=2)               # [B,B] pairwise overlap
+    ov.fill_diagonal_(False)
+    return not bool(ov.any().item())  # one sync
+
+
+# Grow-only persistent per-body private-buffer cache for the Regime-B resolve.
+# Keyed on (device, dtype, ndim); reused across steps so the streaming path does
+# NO per-call allocation and NO host sync (the killer was `total_vol.item()`).
+_priv_cache: dict = {}
+
+
+def _regime_b_priv(B, max_vol, dtype, device, ndim):
+    """Sync-free private buffers + offsets for the Regime-B resolve.
+
+    Uses a UNIFORM per-body stride of ``max_vol`` (host-known: `B` from
+    `aabb_dim.shape[0]`, `max_vol` a python int), so:
+      * offsets = arange(B+1)*max_vol — no cumsum, no `.item()`, no D→H sync;
+      * buffers sized to `B*max_vol` (≥ Σ body_vol), grow-only + reused.
+    Body `b` owns the disjoint slice `[b*max_vol, b*max_vol+body_vol[b])`, which
+    is what the min/resolve kernels index via `priv_offsets[b]+local`.
+    """
+    need = int(B) * int(max_vol)
+    n_bufs = 5 if ndim == 2 else 7
+    key = (device, dtype, ndim)
+    ent = _priv_cache.get(key)
+    if ent is None or ent["cap"] < need:
+        cap = max(need, (ent["cap"] if ent else 0))
+        ent = {"cap": cap,
+               "bufs": [torch.empty(cap, dtype=dtype, device=device)
+                        for _ in range(n_bufs)]}
+        _priv_cache[key] = ent
+    offsets = torch.arange(B + 1, dtype=torch.int64, device=device) * int(max_vol)
+    return offsets, ent["bufs"]
+
+
 def _native_body_update_2d(
     F_flat, F_offsets, body_shapes, body_meta, kin,
     aabb_lo, aabb_dim, gx, gy, h, max_vol,
@@ -37,8 +91,8 @@ def _native_body_update_2d(
     if int(dirty_Ai) * int(dirty_Aj) <= 0:
         return
 
-    # B=1 fast path: direct-write kernel (no key packing, no atomics, no decode)
-    if body_shapes.size(0) == 1 and sdf_cc.device.type == 'cuda':
+    # Regime A: direct-write kernel when all bodies have disjoint AABBs
+    if _aabbs_are_disjoint(aabb_lo, aabb_dim):
         native.streaming_sdf_stag_2d_direct(
             F_flat, F_offsets,
             body_shapes, body_meta, kin,
@@ -50,16 +104,31 @@ def _native_body_update_2d(
         )
         return
 
-    native.streaming_sdf_stag_2d_multi(
-        F_flat, F_offsets,
-        body_shapes, body_meta, kin,
-        aabb_lo, aabb_dim,
-        gx, gy, float(h), int(max_vol),
-        sdf_cc, sdf_u, sdf_v, body_u, body_v,
-        key_cc, key_u, key_v,
-        int(interp_method),
+    # Regime B (overlapping bodies): per-body private buffers + one-thread-per-
+    # cell resolve = deterministic true min, full fp64, no atomics/race.
+    # Validated byte-identical vs `_multi` (fp32) / ≤1e-9 (fp64) + GPU==CPU twin.
+    # (The direct kernel must NOT run here — its non-atomic gridDim.y=B write
+    # races overlapping bodies.)  Per-call priv-buffer alloc: eager path only,
+    # not yet graph-captured (see the 2.x graph-key note).
+    # The resolve kernel does not carry the softmin velocity blend (num/den);
+    # fall back to `_multi` (which does) when blending is on, so overlap+blend
+    # configs don't silently lose it. TODO(2.4): add blend to the resolve.
+    if float(blend_eps) > 0.0:
+        native.streaming_sdf_stag_2d_multi(
+            F_flat, F_offsets, body_shapes, body_meta, kin, aabb_lo, aabb_dim,
+            gx, gy, float(h), int(max_vol), sdf_cc, sdf_u, sdf_v, body_u, body_v,
+            key_cc, key_u, key_v, int(interp_method),
+            int(dirty_i0), int(dirty_j0), int(dirty_Ai), int(dirty_Aj),
+            num_u, num_v, den_u, den_v, float(blend_eps))
+        return
+    priv_offsets, pb = _regime_b_priv(
+        body_shapes.size(0), max_vol, sdf_cc.dtype, sdf_cc.device, 2)
+    native.streaming_sdf_stag_2d_resolve(
+        F_flat, F_offsets, body_shapes, body_meta, kin,
+        aabb_lo, aabb_dim, gx, gy, float(h), int(max_vol),
+        sdf_cc, sdf_u, sdf_v, body_u, body_v, int(interp_method),
         int(dirty_i0), int(dirty_j0), int(dirty_Ai), int(dirty_Aj),
-        num_u, num_v, den_u, den_v, float(blend_eps),
+        priv_offsets, pb[0], pb[1], pb[2], pb[3], pb[4],
     )
 
 
@@ -78,8 +147,8 @@ def _native_body_update_3d(
     if int(dirty_Ai) * int(dirty_Aj) * int(dirty_Ak) <= 0:
         return
 
-    # B=1 fast path: direct-write kernel (no key packing, no atomics, no decode)
-    if body_shapes.size(0) == 1 and sdf_cc.device.type == 'cuda':
+    # Regime A: direct-write kernel when all bodies have disjoint AABBs
+    if _aabbs_are_disjoint(aabb_lo, aabb_dim):
         native.streaming_sdf_stag_3d_direct(
             F_flat, F_offsets,
             body_shapes, body_meta, kin,
@@ -92,17 +161,30 @@ def _native_body_update_3d(
         )
         return
 
-    native.streaming_sdf_stag_3d_multi(
-        F_flat, F_offsets,
-        body_shapes, body_meta, kin,
-        aabb_lo, aabb_dim,
-        gx, gy, gz, float(h), int(max_vol),
-        sdf_cc, sdf_u, sdf_v, sdf_w, body_u, body_v, body_w,
-        key_cc, key_u, key_v, key_w,
-        int(interp_method),
+    # Regime B (overlapping bodies): per-body private buffers + one-thread-per-
+    # cell resolve = deterministic true min, full fp64, no atomics/race.
+    # Validated byte-identical vs `_multi` (fp32) / ≤1e-9 (fp64) + GPU==CPU twin.
+    # Per-call priv-buffer alloc: eager path only, not yet graph-captured.
+    # Blend not carried by the resolve kernel — fall back to `_multi` (see 2-D).
+    if float(blend_eps) > 0.0:
+        native.streaming_sdf_stag_3d_multi(
+            F_flat, F_offsets, body_shapes, body_meta, kin, aabb_lo, aabb_dim,
+            gx, gy, gz, float(h), int(max_vol),
+            sdf_cc, sdf_u, sdf_v, sdf_w, body_u, body_v, body_w,
+            key_cc, key_u, key_v, key_w, int(interp_method),
+            int(dirty_i0), int(dirty_j0), int(dirty_k0),
+            int(dirty_Ai), int(dirty_Aj), int(dirty_Ak),
+            num_u, num_v, num_w, den_u, den_v, den_w, float(blend_eps))
+        return
+    priv_offsets, pb = _regime_b_priv(
+        body_shapes.size(0), max_vol, sdf_cc.dtype, sdf_cc.device, 3)
+    native.streaming_sdf_stag_3d_resolve(
+        F_flat, F_offsets, body_shapes, body_meta, kin,
+        aabb_lo, aabb_dim, gx, gy, gz, float(h), int(max_vol),
+        sdf_cc, sdf_u, sdf_v, sdf_w, body_u, body_v, body_w, int(interp_method),
         int(dirty_i0), int(dirty_j0), int(dirty_k0),
         int(dirty_Ai), int(dirty_Aj), int(dirty_Ak),
-        num_u, num_v, num_w, den_u, den_v, den_w, float(blend_eps),
+        priv_offsets, pb[0], pb[1], pb[2], pb[3], pb[4], pb[5], pb[6],
     )
 
 # ── body_update (2-D) → NATIVE (marshalling bridge) ─────────────────────────
