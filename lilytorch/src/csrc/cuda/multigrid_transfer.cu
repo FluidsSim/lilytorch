@@ -318,30 +318,36 @@ void restrict_face_3d_cuda(at::Tensor src, at::Tensor dst, int64_t face_dim) {
 // at [1 + src_l/r, ...]).
 // =====================================================================
 
-// Helper computed in double precision to match torch's internal accumulator
-// for align_corners=False linear interpolation (PyTorch uses opmath_t = double
-// for float32 src). Using double for the source-coord arithmetic plus
-// scalar_t for the final weighted sum is bit-exact up to last ULP on the
-// fixtures we care about.
+// Computed in scalar_t -- the tensor dtype the user selected -- like every other
+// kernel here.  This used to be hardcoded to double to bit-match torch's
+// align_corners=False interpolation (which uses opmath_t = double for f32 src).
+// That made a 4-tap bilinear interp cost more than an rbgs sweep on consumer
+// GPUs, where FP64 runs at 1/64 of FP32 (measured: 200 us vs 11 us at 1024^2).
+// It is also safe to drop: for multigrid coarsening Nc/Nf == 1/2 exactly, so
+// `src` and the weights are exact binary fractions (0.25 / 0.75) in fp32 too --
+// only the 4-tap accumulation rounds differently, at ~1 ulp on a V-cycle
+// *correction*.
+template <typename scalar_t>
 __device__ __forceinline__ void linear_weights(
         int dst, int Nc, int Nf,
-        int& il, int& ir, double& wl, double& wr)
+        int& il, int& ir, scalar_t& wl, scalar_t& wr)
 {
-    const double src = ((double)dst + 0.5) * ((double)Nc / (double)Nf) - 0.5;
-    double sf = floor(src);
+    const scalar_t src = ((scalar_t)dst + (scalar_t)0.5)
+                       * ((scalar_t)Nc / (scalar_t)Nf) - (scalar_t)0.5;
+    scalar_t sf = ::floor(src);
     il = (int)sf;
     ir = il + 1;
     if (il < 0) { il = 0; }
     if (ir < 0) { ir = 0; }
     if (il > Nc - 1) { il = Nc - 1; }
     if (ir > Nc - 1) { ir = Nc - 1; }
-    double w = src - sf;     // fractional part in [0,1)
-    if (w < 0.0) w = 0.0;
-    if (w > 1.0) w = 1.0;
+    scalar_t w = src - sf;     // fractional part in [0,1)
+    if (w < (scalar_t)0) w = (scalar_t)0;
+    if (w > (scalar_t)1) w = (scalar_t)1;
     // If src is below domain or above, weights collapse to corner cell.
-    if (src <= 0.0) { wl = 1.0; wr = 0.0; }
-    else if (src >= (double)Nc - 1.0) { wl = 0.0; wr = 1.0; }
-    else { wl = 1.0 - w; wr = w; }
+    if (src <= (scalar_t)0) { wl = (scalar_t)1; wr = (scalar_t)0; }
+    else if (src >= (scalar_t)Nc - (scalar_t)1) { wl = (scalar_t)0; wr = (scalar_t)1; }
+    else { wl = (scalar_t)1 - w; wr = w; }
 }
 
 template <typename scalar_t>
@@ -356,9 +362,9 @@ __global__ void prolongate_add_2d_kernel(
     if (i >= Nx_f || j >= Ny_f) return;
 
     int il, ir, jl, jr;
-    double wil, wir, wjl, wjr;
-    linear_weights(i, Nx_c, Nx_f, il, ir, wil, wir);
-    linear_weights(j, Ny_c, Ny_f, jl, jr, wjl, wjr);
+    scalar_t wil, wir, wjl, wjr;
+    linear_weights<scalar_t>(i, Nx_c, Nx_f, il, ir, wil, wir);
+    linear_weights<scalar_t>(j, Ny_c, Ny_f, jl, jr, wjl, wjr);
 
     // Read ec at [1+il, 1+jl], [1+il, 1+jr], [1+ir, 1+jl], [1+ir, 1+jr]
     const int se = Ny_c + 2;   // ghost-padded coarse row stride
@@ -367,13 +373,13 @@ __global__ void prolongate_add_2d_kernel(
     const scalar_t v_rl = ec[(ir + 1) * se + (jl + 1)];
     const scalar_t v_rr = ec[(ir + 1) * se + (jr + 1)];
 
-    const double interp = wil * wjl * (double)v_ll
-                        + wil * wjr * (double)v_lr
-                        + wir * wjl * (double)v_rl
-                        + wir * wjr * (double)v_rr;
+    const scalar_t interp = wil * wjl * v_ll
+                          + wil * wjr * v_lr
+                          + wir * wjl * v_rl
+                          + wir * wjr * v_rr;
 
     const int sp = Ny_f + 2;   // fine padded row stride
-    p[(i + 1) * sp + (j + 1)] += (scalar_t)interp;
+    p[(i + 1) * sp + (j + 1)] += interp;
 }
 
 template <typename scalar_t>
@@ -389,36 +395,36 @@ __global__ void prolongate_add_3d_kernel(
     if (i >= Nx_f || j >= Ny_f || k >= Nz_f) return;
 
     int il, ir, jl, jr, kl, kr;
-    double wil, wir, wjl, wjr, wkl, wkr;
-    linear_weights(i, Nx_c, Nx_f, il, ir, wil, wir);
-    linear_weights(j, Ny_c, Ny_f, jl, jr, wjl, wjr);
-    linear_weights(k, Nz_c, Nz_f, kl, kr, wkl, wkr);
+    scalar_t wil, wir, wjl, wjr, wkl, wkr;
+    linear_weights<scalar_t>(i, Nx_c, Nx_f, il, ir, wil, wir);
+    linear_weights<scalar_t>(j, Ny_c, Ny_f, jl, jr, wjl, wjr);
+    linear_weights<scalar_t>(k, Nz_c, Nz_f, kl, kr, wkl, wkr);
 
     const int sje = Nz_c + 2;
     const int sie = (Ny_c + 2) * (Nz_c + 2);
 
-    double interp = 0.0;
+    scalar_t interp = (scalar_t)0;
     #pragma unroll
     for (int di = 0; di < 2; ++di) {
         const int ii = (di == 0) ? il : ir;
-        const double wi = (di == 0) ? wil : wir;
+        const scalar_t wi = (di == 0) ? wil : wir;
         #pragma unroll
         for (int dj = 0; dj < 2; ++dj) {
             const int jj = (dj == 0) ? jl : jr;
-            const double wj = (dj == 0) ? wjl : wjr;
+            const scalar_t wj = (dj == 0) ? wjl : wjr;
             #pragma unroll
             for (int dk = 0; dk < 2; ++dk) {
                 const int kk = (dk == 0) ? kl : kr;
-                const double wk = (dk == 0) ? wkl : wkr;
+                const scalar_t wk = (dk == 0) ? wkl : wkr;
                 interp += wi * wj * wk
-                        * (double)ec[(ii + 1) * sie + (jj + 1) * sje + (kk + 1)];
+                        * ec[(ii + 1) * sie + (jj + 1) * sje + (kk + 1)];
             }
         }
     }
 
     const int sjp = Nz_f + 2;
     const int sip = (Ny_f + 2) * (Nz_f + 2);
-    p[(i + 1) * sip + (j + 1) * sjp + (k + 1)] += (scalar_t)interp;
+    p[(i + 1) * sip + (j + 1) * sjp + (k + 1)] += interp;
 }
 
 // ---- C++ wrappers ---------------------------------------------------

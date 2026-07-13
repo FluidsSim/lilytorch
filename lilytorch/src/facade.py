@@ -6,14 +6,13 @@ hand-written CUDA/C++ ``_C.so`` extension) onto the per-body streaming-SDF
 kernels.  They stream the immersed-body SDF + staggered body velocities using
 the native CUDA/C++ kernels (with CPU twins for CPU runs).
 
-Regime dispatch (per_body_key_buffers, item 2.4 — the union-AABB packed-key
-``_multi`` path is DELETED):
-
-* pairwise-disjoint body AABBs → ``streaming_sdf_stag_{2,3}d_direct``
-  (single writer per cell, no keys, no atomics);
-* overlapping AABBs → ``streaming_sdf_stag_{2,3}d_resolve`` (per-body private
-  buffers + one-thread-per-cell per-stagger min resolve; full fp64, no
-  atomics; softmin velocity blend in-kernel when ``blend_eps > 0``).
+There is ONE streaming path: ``streaming_sdf_stag_{2,3}d_resolve`` (per-body
+private buffers + one-thread-per-cell per-stagger min resolve; no atomics, no
+race; softmin velocity blend in-kernel when ``blend_eps > 0``).  It is correct
+whether or not the body AABBs overlap.  The ``_direct`` kernels — valid only for
+pairwise-disjoint AABBs — are retired from this path; see
+:data:`USE_REGIME_B_ONLY`.  (The union-AABB packed-key ``_multi`` path was
+deleted earlier, in per_body_key_buffers item 2.4.)
 
 Per-bridge CUDA-graph capture is deferred (native eager is fast enough); the
 per-step region is graph-captured at the whole-step level by
@@ -25,28 +24,22 @@ import torch
 from lilytorch.src import native
 
 
-def _aabbs_are_disjoint(aabb_lo, aabb_dim):
-    """Return True if every pair of body AABBs is disjoint (no overlap on any axis).
-
-    AABBs are half-open ``[lo, lo+dim)``.  Two AABBs are disjoint when at least
-    one axis has no overlap; they intersect only when ALL axes overlap.
-    Regime A (direct-write) is safe exactly when bodies are pairwise disjoint.
-    """
-    if aabb_lo is None or aabb_dim is None:
-        return False
-    B = aabb_lo.shape[0]
-    if B <= 1:
-        return True
-    # Vectorised pairwise overlap: boxes a,b intersect iff on EVERY axis
-    # lo_a < hi_b and lo_b < hi_a.  Done on-device in one shot with a SINGLE
-    # host sync at the end (the old per-element `.item()` triple loop cost
-    # ~B^2*ndim device syncs per call — catastrophic in a pipelined sim).
-    lo = aabb_lo.to(torch.int64)
-    hi = lo + aabb_dim.to(torch.int64)
-    ov = (lo[:, None, :] < hi[None, :, :]) & (lo[None, :, :] < hi[:, None, :])
-    ov = ov.all(dim=2)               # [B,B] pairwise overlap
-    ov.fill_diagonal_(False)
-    return not bool(ov.any().item())  # one sync
+#: Regime A (``streaming_sdf_stag_{2,3}d_direct``) is RETIRED from the live path.
+#:
+#: It is only correct when every pair of body AABBs is disjoint — its
+#: non-atomic ``gridDim.y = B`` write races overlapping bodies — so selecting it
+#: required a pairwise-overlap test on the AABBs. That test ended in an
+#: ``.item()``, i.e. a device→host sync on EVERY body update, which cost ~75 µs
+#: per step of pipeline drain (measured) — more than 4x the resolve kernel it was
+#: guarding. And for any articulated body (a salamander, an eel) adjacent links
+#: always overlap, so the answer was "not disjoint" on every step anyway.
+#:
+#: Regime B (``streaming_sdf_stag_{2,3}d_resolve``) is correct in BOTH cases —
+#: per-body private buffers + a per-stagger min resolve — so it is now the sole
+#: path. The direct kernels are still built and still reachable through
+#: :mod:`lilytorch.src.native` (and their self-tests); they are kept for
+#: reference and for the disjoint-body benchmark, just no longer auto-selected.
+USE_REGIME_B_ONLY = True
 
 
 # Grow-only persistent per-body private-buffer cache for the Regime-B resolve.
@@ -90,31 +83,19 @@ def body_update_2d(
 ):
     """Native 2-D streaming SDF body update (eager path).
 
+    Always takes the Regime-B resolve — see :data:`USE_REGIME_B_ONLY`.
+
     The caller (BDIMhandler) pre-fills ``sdf_*`` to +FAR and ``body_*`` to 0
     before every call — the kernels only write body-covered cells."""
     if int(dirty_Ai) * int(dirty_Aj) <= 0:
         return
 
-    # Regime A: direct-write kernel when all bodies have disjoint AABBs
-    if _aabbs_are_disjoint(aabb_lo, aabb_dim):
-        native.streaming_sdf_stag_2d_direct(
-            F_flat, F_offsets,
-            body_shapes, body_meta, kin,
-            aabb_lo, aabb_dim,
-            gx, gy, float(h), int(max_vol),
-            sdf_cc, sdf_u, sdf_v, body_u, body_v,
-            int(interp_method),
-            int(dirty_i0), int(dirty_j0), int(dirty_Ai), int(dirty_Aj),
-        )
-        return
-
-    # Regime B (overlapping bodies): per-body private buffers + one-thread-per-
-    # cell PER-STAGGER min resolve = deterministic true min, full fp64, no
-    # atomics/race.  (The direct kernel must NOT run here — its non-atomic
-    # gridDim.y=B write races overlapping bodies.)  blend_eps > 0: softmin
-    # velocity blend accumulated in registers inside the resolve kernel
-    # (deterministic ordered sum).  Per-call priv-buffer offsets: eager path
-    # only, not yet graph-captured (see the 2.x graph-key note).
+    # Regime B: per-body private buffers + one-thread-per-cell PER-STAGGER min
+    # resolve = deterministic true min, no atomics/race, correct whether or not
+    # the body AABBs overlap.  blend_eps > 0: softmin velocity blend accumulated
+    # in registers inside the resolve kernel (deterministic ordered sum).
+    # Per-call priv-buffer offsets: eager path only, not yet graph-captured
+    # (see the 2.x graph-key note).
     priv_offsets, pb = _regime_b_priv(
         body_shapes.size(0), max_vol, sdf_cc.dtype, sdf_cc.device, 2)
     native.streaming_sdf_stag_2d_resolve(
@@ -141,21 +122,7 @@ def body_update_3d(
     if int(dirty_Ai) * int(dirty_Aj) * int(dirty_Ak) <= 0:
         return
 
-    # Regime A: direct-write kernel when all bodies have disjoint AABBs
-    if _aabbs_are_disjoint(aabb_lo, aabb_dim):
-        native.streaming_sdf_stag_3d_direct(
-            F_flat, F_offsets,
-            body_shapes, body_meta, kin,
-            aabb_lo, aabb_dim,
-            gx, gy, gz, float(h), int(max_vol),
-            sdf_cc, sdf_u, sdf_v, sdf_w, body_u, body_v, body_w,
-            int(interp_method),
-            int(dirty_i0), int(dirty_j0), int(dirty_k0),
-            int(dirty_Ai), int(dirty_Aj), int(dirty_Ak),
-        )
-        return
-
-    # Regime B (overlapping bodies) — see the 2-D note.
+    # Regime B — see the 2-D note and :data:`USE_REGIME_B_ONLY`.
     priv_offsets, pb = _regime_b_priv(
         body_shapes.size(0), max_vol, sdf_cc.dtype, sdf_cc.device, 3)
     native.streaming_sdf_stag_3d_resolve(

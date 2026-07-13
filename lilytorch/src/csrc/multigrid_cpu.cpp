@@ -635,22 +635,26 @@ static void restrict_face_3d_cpu_impl(
 //  prolongate_add (2-D / 3-D) — bilinear/trilinear, align_corners=False
 // =====================================================================
 
-// Helper: compute linear-interpolation weights (identical to CUDA _lw).
+// Helper: compute linear-interpolation weights (identical to CUDA linear_weights).
+// Computed in scalar_t -- the user's dtype -- not double; see the note on the
+// CUDA twin in cuda/multigrid_transfer.cu.
+template <typename scalar_t>
 static inline void linear_weights(
     int dst, int Nc, int Nf,
-    int& il, int& ir, double& wl, double& wr)
+    int& il, int& ir, scalar_t& wl, scalar_t& wr)
 {
-    double src = (double(dst) + 0.5) * (double(Nc) / double(Nf)) - 0.5;
+    scalar_t src = ((scalar_t)dst + (scalar_t)0.5)
+                 * ((scalar_t)Nc / (scalar_t)Nf) - (scalar_t)0.5;
     int sf = (int)std::floor(src);
     il = sf; ir = il + 1;
     if (il < 0) il = 0;
     if (ir < 0) ir = 0;
     if (il > Nc - 1) il = Nc - 1;
     if (ir > Nc - 1) ir = Nc - 1;
-    double w = src - double(sf);
-    if (src <= 0.0)       { wl = 1.0; wr = 0.0; }
-    else if (src >= double(Nc) - 1.0) { wl = 0.0; wr = 1.0; }
-    else                  { wl = 1.0 - w; wr = w; }
+    scalar_t w = src - (scalar_t)sf;
+    if (src <= (scalar_t)0)       { wl = (scalar_t)1; wr = (scalar_t)0; }
+    else if (src >= (scalar_t)Nc - (scalar_t)1) { wl = (scalar_t)0; wr = (scalar_t)1; }
+    else                  { wl = (scalar_t)1 - w; wr = w; }
 }
 
 template <typename scalar_t>
@@ -663,23 +667,23 @@ static void prolongate_add_2d_cpu_impl(
 
     at::parallel_for(0, Nx_f, 1, [&](int64_t istart, int64_t iend) {
         for (int64_t i = istart; i < iend; ++i) {
-            int il, ir; double wil, wir;
-            linear_weights((int)i, Nx_c, Nx_f, il, ir, wil, wir);
+            int il, ir; scalar_t wil, wir;
+            linear_weights<scalar_t>((int)i, Nx_c, Nx_f, il, ir, wil, wir);
             const int i_p = (int)i + 1;
             for (int j = 0; j < Ny_f; ++j) {
-                int jl, jr; double wjl, wjr;
-                linear_weights(j, Ny_c, Ny_f, jl, jr, wjl, wjr);
+                int jl, jr; scalar_t wjl, wjr;
+                linear_weights<scalar_t>(j, Ny_c, Ny_f, jl, jr, wjl, wjr);
                 const int j_p = j + 1;
                 // ec indices in ghost-padded array: +1 for ghost offset
                 const int e_ll = (il + 1) * sec + (jl + 1);
                 const int e_lr = (il + 1) * sec + (jr + 1);
                 const int e_rl = (ir + 1) * sec + (jl + 1);
                 const int e_rr = (ir + 1) * sec + (jr + 1);
-                double interp = wil * wjl * double(ec[e_ll])
-                              + wil * wjr * double(ec[e_lr])
-                              + wir * wjl * double(ec[e_rl])
-                              + wir * wjr * double(ec[e_rr]);
-                p[i_p * sp + j_p] += (scalar_t)interp;
+                scalar_t interp = wil * wjl * ec[e_ll]
+                                + wil * wjr * ec[e_lr]
+                                + wir * wjl * ec[e_rl]
+                                + wir * wjr * ec[e_rr];
+                p[i_p * sp + j_p] += interp;
             }
         }
     });
@@ -698,16 +702,16 @@ static void prolongate_add_3d_cpu_impl(
 
     at::parallel_for(0, Nx_f, 1, [&](int64_t istart, int64_t iend) {
         for (int64_t i = istart; i < iend; ++i) {
-            int il, ir; double wil, wir;
-            linear_weights((int)i, Nx_c, Nx_f, il, ir, wil, wir);
+            int il, ir; scalar_t wil, wir;
+            linear_weights<scalar_t>((int)i, Nx_c, Nx_f, il, ir, wil, wir);
             const int i_p = (int)i + 1;
             for (int j = 0; j < Ny_f; ++j) {
-                int jl, jr; double wjl, wjr;
-                linear_weights(j, Ny_c, Ny_f, jl, jr, wjl, wjr);
+                int jl, jr; scalar_t wjl, wjr;
+                linear_weights<scalar_t>(j, Ny_c, Ny_f, jl, jr, wjl, wjr);
                 const int j_p = j + 1;
                 for (int k = 0; k < Nz_f; ++k) {
-                    int kl, kr; double wkl, wkr;
-                    linear_weights(k, Nz_c, Nz_f, kl, kr, wkl, wkr);
+                    int kl, kr; scalar_t wkl, wkr;
+                    linear_weights<scalar_t>(k, Nz_c, Nz_f, kl, kr, wkl, wkr);
                     const int k_p = k + 1;
                     const int e_lll = (il+1)*sec + (jl+1)*sjc + (kl+1);
                     const int e_llr = (il+1)*sec + (jl+1)*sjc + (kr+1);
@@ -717,15 +721,15 @@ static void prolongate_add_3d_cpu_impl(
                     const int e_rlr = (ir+1)*sec + (jl+1)*sjc + (kr+1);
                     const int e_rrl = (ir+1)*sec + (jr+1)*sjc + (kl+1);
                     const int e_rrr = (ir+1)*sec + (jr+1)*sjc + (kr+1);
-                    double interp = wil * wjl * wkl * double(ec[e_lll])
-                                  + wil * wjl * wkr * double(ec[e_llr])
-                                  + wil * wjr * wkl * double(ec[e_lrl])
-                                  + wil * wjr * wkr * double(ec[e_lrr])
-                                  + wir * wjl * wkl * double(ec[e_rll])
-                                  + wir * wjl * wkr * double(ec[e_rlr])
-                                  + wir * wjr * wkl * double(ec[e_rrl])
-                                  + wir * wjr * wkr * double(ec[e_rrr]);
-                    p[i_p*sp + j_p*sjp + k_p] += (scalar_t)interp;
+                    scalar_t interp = wil * wjl * wkl * ec[e_lll]
+                                    + wil * wjl * wkr * ec[e_llr]
+                                    + wil * wjr * wkl * ec[e_lrl]
+                                    + wil * wjr * wkr * ec[e_lrr]
+                                    + wir * wjl * wkl * ec[e_rll]
+                                    + wir * wjl * wkr * ec[e_rlr]
+                                    + wir * wjr * wkl * ec[e_rrl]
+                                    + wir * wjr * wkr * ec[e_rrr];
+                    p[i_p*sp + j_p*sjp + k_p] += interp;
                 }
             }
         }
