@@ -1437,6 +1437,34 @@ class FluidSolver(PlottingMixin):
         'pforce_x', 'pforce_y', 'pforce_z',
     )
 
+    def _preproj_graph_safe(self):
+        """May the pre-projection region be recorded into a CUDA graph?
+
+        Only if every kernel it launches goes to torch's CURRENT CUDA stream.
+        The flux convection schemes (``quick`` and friends) still run on Warp,
+        and a raw ``wp.launch`` goes to Warp's own stream: torch stream capture
+        never records it, so those kernels execute during the capture pass and
+        are silently DROPPED from every replay — the advection just vanishes,
+        with no error and no NaN (measured: ~47% velocity error).  Refuse to
+        capture there and run the region eagerly instead; the semi-Lagrangian
+        path is native end-to-end and captures correctly.
+
+        This is the same rule that made warp_port refuse ``use_cuda_graphs``.
+        """
+        safe = getattr(self.adv_diff_solver, 'graph_capturable', False)
+        if not safe and not getattr(self, '_preproj_graph_warned', False):
+            self._preproj_graph_warned = True
+            warnings.warn(
+                "Pre-projection CUDA graph DISABLED: convection_method "
+                f"'{getattr(self.adv_diff_solver, '_scheme_name', '?')}' runs on "
+                "Warp kernels, which torch's stream capture cannot record "
+                "(they would be dropped from every graph replay). Running the "
+                "region eagerly. Use convection_method 'semi-lagrangian' for "
+                "the graphed fast path.",
+                RuntimeWarning, stacklevel=2,
+            )
+        return safe
+
     def _release_bdim_fields(self):
         """Set BDIM intermediate fields to *None* so their GPU memory
         can be reclaimed between time-steps (they are recomputed at the
@@ -1835,7 +1863,8 @@ class FluidSolver(PlottingMixin):
 
         mw_on = self._bdim_body_div_correction
 
-        use_graph = u.is_cuda and not self._graph_capture_debug
+        use_graph = (u.is_cuda and not self._graph_capture_debug
+                     and self._preproj_graph_safe())
 
         # ── Lazy-init whole-step runner with correct mode ──────────
         # The runner itself decides whether to capture a CUDA graph or
@@ -1988,7 +2017,8 @@ class FluidSolver(PlottingMixin):
 
         mw_on = self._bdim_body_div_correction
 
-        use_graph = u.is_cuda and not self._graph_capture_debug
+        use_graph = (u.is_cuda and not self._graph_capture_debug
+                     and self._preproj_graph_safe())
 
         # ── Lazy-init whole-step runner with correct mode ──────────
         # The runner itself decides whether to capture a CUDA graph or

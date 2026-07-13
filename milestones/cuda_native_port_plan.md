@@ -1510,6 +1510,242 @@ CUDA ops replay.  This would cause the same parity to be used every step
 graph key, so each parity variant gets its own captured graph and the toggle
 is guaranteed to execute every step.
 
+### 4.1–4.3 REVIEW (session 2026-07-13, Claude) — row 13 reopened ⚠
+
+Verdict: **4.3's code is correct; 4.1 was never actually delivered, and running
+it uncovers a Phase-1 defect that dwarfs everything Phase 4 was chasing.**
+
+**What is correct (verified, not just read).**
+- *4.3 cvof graph capture* — `advect_graph_aware` is **bit-exact** vs eager
+  `advect` over 12 steps (2-D/3-D × f32/f64, max|Δ| = 0.0), the graph engages
+  (captures=2 — one per sweep parity — replays clean, evictions=0), and
+  `alpha` stays pointer-stable.  The parity-toggle-outside-the-graph reasoning
+  in DeepSeek's log is right and is the subtle thing that would otherwise have
+  been silently wrong physics.  The double-buffer swap lands the result in
+  `alpha` for even *and* odd `ndim`.  **This had ZERO test coverage** — now
+  pinned by `test_cvof_graph_vs_eager_{2d,3d}_{f32,f64}` in `test_two_phase.py`.
+- *4.3 native cvof swap* — dispatches native on CUDA (critically **not** Warp,
+  which would be silently dropped from the capture — the `use_cuda_graphs`
+  lesson).
+- *4.2 coefficient-unification check* — the claim holds: single- and two-phase
+  share the same variable-coefficient kernels, differing only in coefficient
+  VALUES.  No fork to unify.
+- *`diffuse_add` `scale_constant`* — a legitimate `.item()` sync removal.
+
+**What is wrong.**
+1. **4.1 was never run, and the harness does not work.**  `bench_two_phase_profile.py`
+   as shipped **crashes on construction** (`KeyError: 'vmin'` — the config's
+   `output` block is missing `vmin`/`vmax`).  The log blames a missing
+   environment; in fact torch 2.6+cu124 and the built extension are present and
+   the script is simply broken.  Once fixed it still measured the wrong thing:
+   it timed the **eager** `tp.advect()` instead of the graph path 4.3 added, had
+   a dead no-op `pre_poisson` timer (`pass`), and **never isolated the Poisson**
+   — the one number 4.1 exists to produce.  Row 13's ✅ was awarded to an
+   unrun benchmark.  Harness now fixed: it drives the real production step
+   (`finalize_step` → `_advect_vof`), times projection/VOF/body separately,
+   derives pre-Poisson, and prints graph capture/replay/eviction counters.
+2. **4.2 was not implemented as specced.**  The spec says *make `mgcg` the
+   two-phase default*; the default is still `multigrid` (`solver.py:478`).
+   DeepSeek added a `print()` recommending mgcg, which is not the same thing
+   (and a bare `print` in a library constructor).
+3. **THE BIG ONE — the Phase-1 pre-Poisson graph NEVER REPLAYS for any
+   analytical-body sim.**  It re-captures every step.  This is a **Phase-1
+   defect**, not a Phase-4 one; 4.1 existed to surface exactly this and didn't,
+   because it never ran.
+
+**Root cause (measured, not inferred).**  The pre-Poisson graph key contains
+`comp.sdf_val_u/v`, `comp.body_u/v` and `comp.sdf_val` `data_ptr()`s.
+`BodyAnalytical.update()` (`body.py:1656-1675`) **reallocates all of them every
+step** (`self.sdf(px,py)`, `lin_vel_x - ang_vel*ry_u`, … each return fresh
+tensors), so the key never repeats → capture → evict → capture, forever.
+Instrumented: of the 15 key components, `sdf_u, sdf_v, bU, bV, sdf_val` show a
+distinct pointer on every step; `u0/v0/ch/cv/rect/dt/dtype` are stable.
+(`bdim_fields_scratch`, the flag guarding the solver's own nulling at
+`solver.py:1934`, is never set by anything — it is not the culprit.)
+
+The coupled FARMS/streaming-SDF path publishes *persistent* per-body buffers, so
+it replays fine — which is why the 0.4 gate (row 9) and the single-phase
+3.098 ms/step number never showed this.  **Anything on the analytical-body path
+— every two-phase validation case, and single-phase analytical sims too — has
+been paying a full graph capture per step.**
+
+**Numbers (RTX 4080 SUPER, fp32, mgcg, 2-D surface pool 128², 100 steps).**
+
+| config | preproj graph | ms/step |
+|---|---|---|
+| graphs ON (**current HEAD default**) | captures=94 replays=**0** evictions=90 | **80.9** |
+| graphs OFF (`graph_capture_debug: True`) | eager | 1.62 |
+| graphs ON + persistent staggered buffers (**proposed fix**) | captures=**1** replays=67 evictions=0 | **1.14** |
+
+The graph machinery is currently a **50× pessimization**; the fix makes it a
+1.4× win over eager and **71× faster than HEAD**.  3-D (48³ sphere water-entry)
+has the same disease in milder form: `captures=9 replays=0 eager=101`, mean
+fluid_step 10.5 ms with std 24.6 (bimodal: ~1.2 ms eager steps + ~90 ms capture
+spikes).  Single-phase + analytical body reproduces it exactly
+(`captures=6 replays=0 evictions=2`, 36.8 ms/step) — **confirming it is not a
+two-phase bug**.
+
+**Corrected 4.1 profile** (2-D 128², mgcg, *with* the pointer fix — i.e. what the
+step actually costs once the graph works):
+
+| region | ms | share |
+|---|---|---|
+| body_update (analytical SDF rebuild) | 0.567 | **50%** |
+| projection (variable-coeff Poisson) | 0.426 | 37% |
+| cvof VOF transport (graphed) | 0.057 | 5% |
+| pre-Poisson (graph replay) | 0.090 | 8% |
+
+**Poisson is 37% of the two-phase step, not the ~75% Phase 4 assumed** — and
+`body_update` is now the single largest region.  This reframes Phase 4: 4.2+4.3
+together address ~42% of the step, and the analytical-SDF body rebuild is the
+next real target.  4.3's cvof graph saves ~0.06 ms/step — real, but three orders
+of magnitude below the bug sitting next to it.
+
+**Minor.**  `_cvof_buf_b` is allocated but never used (the swap uses `alpha`
+itself as the second buffer) — a dead full-grid buffer, delete it.  The CPU
+branch still routes to **Warp** although the native CPU twin exists
+(`multigrid_cpu.cpp:994`), contradicting the log's own "so use it everywhere"
+and retaining a Warp dep the branch is trying to shed.  An unrelated
+`gen_configs_swim_2d.py` edit (enable GPU + FlowViewer2D) rode along in the perf
+commit.
+
+### Row 13b spec — make the pre-Poisson graph key pointer-stable (Claude → DeepSeek)
+
+**Goal:** analytical-body sims replay the pre-Poisson graph instead of
+re-capturing it.  Target: 2-D 128² two-phase 80.9 → ~1.1 ms/step.
+
+1. Give `BodyAnalytical` / `CompositeBodyAnalytical` **persistent output buffers**
+   for `sdf_val`, `sdf_u`/`sdf_v`(/`sdf_w`), `body_u`/`body_v`(/`body_w`):
+   allocate once (on first `update()`, or on shape change) and have `update()`
+   write into them in place (`torch.*(..., out=buf)` / `buf.copy_(...)`) instead
+   of rebinding fresh tensors.  Keep the `sdf_val_u`/`sdf_val_v` aliases.
+2. Do **not** null them per step (`bdim_fields_scratch` is already never set —
+   leave it, or delete the dead branch at `solver.py:1934`/`2092`).
+3. **Gates:**
+   - `preproj` runner must report `captures == 1` and `replays == nsteps-2`,
+     `evictions == 0` on the 2-D and 3-D bench (the harness now prints these).
+   - Bit-exact parity vs `graph_capture_debug: True` (eager) over 200 steps —
+     the fix must be pure re-plumbing, no numerical change.
+   - **3-D peak memory** must be re-measured: keeping the staggered pack alive
+     across the step is exactly the memory the `_release_bdim_fields` design was
+     avoiding (the 5.749 GiB `_recompute_mu_normals` peak).  Price it before
+     landing; if 3-D peak regresses, make persistence opt-in per body.
+   - Full suite (baseline: 436 pass / 2 pre-existing `test_forces` fails / 1 skip).
+
+### Row 13b IMPLEMENTED + two CRITICAL latent bugs it exposed (2026-07-13, Claude)
+
+Doing 13b turned up something much bigger than a perf bug: **the Phase-1
+pre-Poisson graph produces WRONG PHYSICS whenever it actually replays.** The
+key churn (13b) had been masking it — the graph re-captured every step, and a
+capture step runs the region eagerly, so the corruption never showed. Fixing the
+churn without the two fixes below would have converted a 50× slowdown into
+silent physics corruption in every analytical-body sim.
+
+**Landed (all four, working tree — NOT yet committed):**
+
+1. **13b — pointer-stable BDIM fields** (`body.py`). New `Body._publish(name,
+   value)` writes every published field (`sdf_val`, `sdf_u/v/w`,
+   `body_u/v/w`) into a persistent buffer instead of rebinding a fresh tensor.
+   `CompositeBodyAnalytical.update` aliases the child's buffers when
+   `nbodies == 1` (zero extra memory) and folds the union into its own
+   persistent buffers otherwise. Result: `preproj captures=1, replays=N,
+   evictions=0` in 2-D **and** 3-D (was `captures=94, replays=0, evictions=90`).
+   Bonus: `body_update` got *faster* (0.84 → 0.55 ms) — fewer allocations.
+
+2. **`stage()` was never called on the eager/CPU path** (`graph_capture.py`).
+   The eager branch `return`ed before `stage()`. `stage()` copies the BDIM dirty
+   rect into `_bdim_rect_dev`, which is `torch.empty` — **uninitialised**. So
+   CPU runs and `graph_capture_debug: True` ran `bdim_forcing` over a garbage
+   rect. Fixed by staging on all paths. **This flipped a pre-existing red test
+   green** (`test_forces.py::test_python_eulerian_force_path_cpu_regression`) —
+   suite is now 437 pass / 1 fail (was 436/2). It also means the eager path was
+   never a valid parity reference before this fix.
+
+3. **The air-transparent velocity blend was silently skipped on every graph
+   replay** (`two_phase_solver.py`). `_solve_and_stash` stashes u′ into
+   `self._kernel_primes` — a *Python attribute write* executed inside the
+   captured region — and `_kernel_blend_velocities` **cleared it to `None` each
+   step**. Python does not run on replay, so on every replay `primes is None`
+   → the blend returned early → the kernel kept imposing the body velocity into
+   the air. That is precisely the failure the code's own comment calls "the
+   historical kernel-mode blow-up". Fixed by not clearing the stash: `solve`
+   returns adv_diff's *persistent* `_sl_out`/`_conv_out` buffers, which the
+   graph rewrites in place on every replay, so the reference stays valid and
+   costs no extra memory.
+
+4. **The pre-Poisson graph now REFUSES to capture the Warp flux path**
+   (`solver._preproj_graph_safe()` + `AdvDiffSolver.graph_capturable`).
+   `_solve_convective` — i.e. `convection_method: quick` and every other flux
+   scheme, **the default and what all two-phase configs use** — launches five
+   Warp kernels (`advect_flux_accumulate_warp`, `_accumulate_interior_warp`,
+   `diffusion._copy_full_grid_eager`, `diffuse_add_`, `_zero_interior_eager`).
+   Raw `wp.launch` goes to *Warp's own stream*: torch stream capture never
+   records it, so those kernels **execute during the capture pass and are
+   dropped from every replay** — the advection just vanishes, no error, no NaN.
+   Measured on a single-phase non-trivial flow: **max|Δu| = 5.6e-2 against
+   |u|max = 0.12 — a ~47% velocity error.** Only the semi-Lagrangian path is
+   native end-to-end (`native.sl_advect_*` + `native.diffuse_add`; the `_warp`
+   suffix and "pure Warp" docstring are stale) and is safe to capture. Same rule
+   that made warp_port refuse `use_cuda_graphs`.
+
+**Perf, 2-D two-phase surface pool 128², fp32, mgcg (RTX 4080 SUPER):**
+
+| config | preproj graph | ms/step |
+|---|---|---|
+| HEAD, `quick` (default) | captures=94 replays=0 evictions=90 | **80.9** (and physics wrong at every capture step) |
+| now, `quick` (graph refused → eager) | eager | **2.6** — correct |
+| now, `semi-lagrangian` (graph replays) | captures=1 replays=197 evictions=0 | **1.6** |
+
+So the default path is **~31× faster and now correct**, and semi-Lagrangian gets
+the full graphed fast path.
+
+**Corrected 4.1 profile** (2-D 128², `quick`, eager): body_update 0.63 ms (24%),
+projection 1.41 ms (54%), cvof 0.06 ms (2%), rest of fluid_step 0.50 ms.
+**Poisson is ~54% of the step — not the ~75% Phase 4 assumed** — and
+`body_update` is the #2 region.
+
+**OPEN — next agent starts here:**
+
+- **(a) Residual graph-vs-eager drift, ~1e-4.** With `quick` the pre-Poisson
+  graph is now refused, so both runs are eager — yet they still differ by
+  `max|Δu| = 1.8e-4` (rel 1e-2) over 200 steps. The only thing
+  `graph_capture_debug` still toggles is the **cvof graph** (4.3), so that is
+  the suspect. Standalone, `advect_graph_aware` is bit-exact vs `advect`
+  (`test_cvof_graph_vs_eager_*` pass), so reproduce it *in the solver*:
+  `TwoPhaseSolver._advect_vof` replay vs eager, step by step, and find the first
+  diverging step. Note the divergence onset **moves when you add `.clone()`
+  probes**, i.e. it is allocator-history dependent → something reads memory it
+  never wrote. `torch.empty`/`empty_like` poisoning at the *Python* level found
+  nothing, so look for an `at::empty` temporary inside a **native C++ op** whose
+  ghost ring is never written.
+- **(b) Make the flux path capturable** — port `advect_flux_accumulate` +
+  `_accumulate_interior` + the three `diffusion` Warp helpers to native ops.
+  That is the real prize: it would put the *default* config on the graphed path
+  (2.6 → ~1.6 ms) and finally remove Warp from the hot loop, which is the whole
+  point of `cuda_native_port`. Bounded, mechanical, spec-able for DeepSeek — the
+  CPU twins and the native `diffuse_add` already exist.
+- **(c) Audit the coupled FARMS/streaming path.** It has pointer-stable buffers,
+  so it *does* replay — meaning if it runs a flux `convection_method` it has been
+  silently dropping advection on every replay. The row-9 0.4 gate (2-D 103.3
+  ms/step, 3-D 122.0) and the 3.098 ms/step single-phase number must be
+  **re-validated** under the guard. Check what `convection_method` the salamander
+  / eel / zebrafish configs use. This is the highest-priority correctness item.
+- **(d) Still not done from row 13:** 4.2's actual ask — make `mgcg` the
+  two-phase *default* (`solver.py:478` still defaults to `multigrid`; DeepSeek
+  only added a `print`). And delete the dead `_cvof_buf_b` (allocated, never
+  used); route the CPU cvof to the native twin (it exists) instead of Warp.
+- **(e) 3-D peak memory** for the `_publish` buffers has NOT been measured (the
+  13b spec asked for it). `nbodies == 1` aliases the child's buffers so it should
+  be a wash, but confirm on a 3-D case before committing.
+
+**Nothing is committed.** Working tree: `body.py`, `graph_capture.py`,
+`solver.py`, `advection.py`, `two_phase_solver.py`,
+`benchmarks/bench_two_phase_profile.py` (harness was broken — it crashed on
+`KeyError: 'vmin'` and drove `fluid_step` directly, skipping the gravity kick, so
+it was benchmarking a fluid at rest; it now drives `solver.step_` and prints
+graph capture/replay/eviction counters), `tests/test_two_phase.py` (+4 cvof-graph
+tests), and this plan.
+
 ## Suggested execution order & session budget
 
 The 0.2 core-path work is reorganized into Tracks A–D (see the 0.2 re-scope);
@@ -1531,7 +1767,10 @@ the table below reflects that. Track B *is* Phase 1.
 | 11b | 2.3 Regime B (per-body private buffers + resolve, full fp64) | Phase 2 | DeepSeek + Claude fix | 1–2 | ✅ resolve crash fixed + wired; 52/0/0; strict parity + GPU==CPU twin (see 2026-07-13 correction log) |
 | 11c | 2.4 delete old union path + migrate test oracle + bench | Phase 2 | DeepSeek (Claude review) | 1 | ✅ union path deleted; oracle migrated to GPU==CPU twin; 2-D+3-D coupled gates PASS; bench done (Regime-A retirement priced) — **Phase 2 CLOSED** |
 | 12 | 3 unification memo | Phase 3 | **Claude** | 1 | ☐ |
-| 13 | 4.1–4.3 two-phase perf | Phase 4 | DeepSeek (Claude spec/review) | 2 | ✅ (see 4.1–4.3 log below) |
+| 13 | 4.1–4.3 two-phase perf | Phase 4 | DeepSeek (Claude spec/review) | 2 | ⚠ **REOPENED** — 4.3 correct + now tested; **4.1 never ran** (harness was broken) and **4.2 not done** (default still `multigrid`). See the review log above. |
+| 13b | **pre-Poisson graph key pointer-stability** (Phase-1 defect found by 4.1) | Phase 1 fix | **Claude** | 1 | ✅ DONE (uncommitted) — + it exposed 2 **silent-wrong-physics** bugs the churn was masking (skipped `stage()`; blend dropped on replay) and a 3rd (Warp flux kernels dropped from graph replay → graph now refused there). Default path 80.9 → **2.6 ms/step and correct**. See log above. |
+| 13c | **port the flux adv-diff (`quick`) Warp kernels → native** so the DEFAULT config can be graphed | Phase 1 | DeepSeek (Claude spec) | 1–2 | ☐ **HIGH** — unblocks 2.6 → ~1.6 ms/step and removes Warp from the hot loop |
+| 13d | **re-validate the coupled FARMS/streaming path** — it *does* replay, so a flux `convection_method` there has been silently dropping advection | Phase 1 | **Claude** | 1 | ☐ **CRITICAL** — row-9 0.4 gate numbers suspect |
 | 14 | 4.4–4.5 two-phase simplification | Phase 4 | **Claude** | 1–2 | ☐ |
 
 **Dependencies:** Track C unblocks the CPU side of D (Poisson) and B

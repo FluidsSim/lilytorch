@@ -581,3 +581,92 @@ if __name__ == "__main__":
         if name.startswith("test_") and callable(fn):
             fn(); print(f"PASS  {name}")
     print("All two-phase unit tests passed.")
+
+
+# ---------------------------------------------------------------------------
+#  cuda_native_port Phase 4.3: graph-captured VOF transport
+# ---------------------------------------------------------------------------
+#  ``TwoPhase.advect_graph_aware`` replaces ``advect``'s per-sweep clone() with
+#  persistent double-buffered intermediates so the directional-split sequence is
+#  a static-shape region that ``torch.cuda.CUDAGraph`` can capture.  Two things
+#  can silently break and produce WRONG PHYSICS rather than an error:
+#
+#    * the sweep-parity alternation: parity is a *Python attribute write*, and
+#      Python does not execute on graph replay — so it must be toggled OUTSIDE
+#      the capture and folded into the graph key (one graph per parity);
+#    * ``self.alpha`` must stay pointer-stable, or the key churns and the graph
+#      re-captures every step.
+#
+#  This gate pins both: N steps of the graph path must be BIT-EXACT against the
+#  eager ``advect`` reference, and the graph must actually replay.
+def _cvof_graph_vs_eager(ndim, dtype):
+    if not torch.cuda.is_available():
+        return
+    from lilytorch.src.graph_capture import NativeWholeStepGraphRunner
+
+    dev = torch.device("cuda")
+    N = 32 if ndim == 3 else 64
+    L = 1.0
+    coords = [torch.linspace(0.0, L, N, dtype=dtype, device=dev)
+              for _ in range(ndim)]
+    h = float(coords[0][1] - coords[0][0])
+
+    def alpha_init(*G):
+        return (G[1] < 0.5).to(dtype)            # water below the waterline
+
+    def build():
+        return TwoPhase(coords[0], coords[1], h, alpha_init,
+                        z=(coords[2] if ndim == 3 else None),
+                        device=dev, dtype=dtype)
+
+    tp_eager, tp_graph = build(), build()
+
+    g = torch.Generator(device=dev).manual_seed(1234)
+    vels = [0.3 * torch.rand((N,) * ndim, generator=g, dtype=dtype, device=dev) - 0.15
+            for _ in range(ndim)]
+    dt = 0.2 * h / 0.15                          # CFL ~ 0.2
+
+    runner = NativeWholeStepGraphRunner()
+    alpha_ptrs = set()
+
+    for _ in range(12):
+        tp_eager.advect(*vels, dt=dt)            # reference (toggles parity itself)
+
+        # exactly what TwoPhaseSolver._advect_vof does: toggle OUTSIDE the graph,
+        # then key on (field pointers, parity, dt).
+        tp_graph._sweep_parity = not getattr(tp_graph, "_sweep_parity", False)
+        key = tuple(t.data_ptr() for t in (tp_graph.alpha, *vels)) \
+            + (int(tp_graph._sweep_parity), dt)
+        runner.run(key, "cuda:0",
+                   lambda: tp_graph.advect_graph_aware(*vels, dt=dt), stage=None)
+        alpha_ptrs.add(tp_graph.alpha.data_ptr())
+
+    # bit-exact: the graph path is a pure re-plumbing of advect(), not an approximation
+    assert torch.equal(tp_eager.alpha, tp_graph.alpha), (
+        f"{ndim}-D {dtype}: graph VOF diverged from eager, "
+        f"max|d|={(tp_eager.alpha - tp_graph.alpha).abs().max().item():.3e}")
+    # the graph must actually engage: one capture per parity, then pure replay
+    assert runner.captures == 2 and runner.replays > 0 and runner.evictions == 0, (
+        f"{ndim}-D {dtype}: VOF graph did not engage "
+        f"(captures={runner.captures} replays={runner.replays} "
+        f"eager={runner.eager} evictions={runner.evictions})")
+    # alpha must be pointer-stable, else the key churns and we re-capture forever
+    assert len(alpha_ptrs) == 1, (
+        f"{ndim}-D {dtype}: alpha data_ptr churned ({len(alpha_ptrs)} distinct) "
+        "-- advect_graph_aware must write alpha in place, never rebind it")
+
+
+def test_cvof_graph_vs_eager_2d_f32():
+    _cvof_graph_vs_eager(2, torch.float32)
+
+
+def test_cvof_graph_vs_eager_2d_f64():
+    _cvof_graph_vs_eager(2, torch.float64)
+
+
+def test_cvof_graph_vs_eager_3d_f32():
+    _cvof_graph_vs_eager(3, torch.float32)
+
+
+def test_cvof_graph_vs_eager_3d_f64():
+    _cvof_graph_vs_eager(3, torch.float64)

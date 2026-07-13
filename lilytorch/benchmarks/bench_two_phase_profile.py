@@ -89,7 +89,8 @@ def _pars_2d_surface_pool(N=128, dtype=torch.float32, use_gpu=True):
                 "translation": ["lambda t: 0.0*t", "lambda t: 0.0*t"],
             }],
         },
-        "output": {"save_frames": False, "save_every": 10**9},
+        "output": {"save_frames": False, "save_every": 10**9,
+                   "vmin": "auto", "vmax": "auto"},
     }
 
 
@@ -154,7 +155,8 @@ def _pars_3d_sphere_water_entry(N=48, dtype=torch.float32, use_gpu=True):
                 ],
             }],
         },
-        "output": {"save_frames": False, "save_every": 10**9},
+        "output": {"save_frames": False, "save_every": 10**9,
+                   "vmin": "auto", "vmax": "auto"},
     }
 
 
@@ -195,68 +197,80 @@ def run_profiled_benchmark(pars, dtype, use_gpu, n_warmup=10, n_profile=100):
         u = torch.zeros_like(solver.u0)
         v = torch.zeros_like(solver.v0)
         p = torch.zeros_like(solver.p0)
+        w = None
     else:
         u = torch.zeros_like(solver.u0)
         v = torch.zeros_like(solver.v0)
         w = torch.zeros_like(solver.w0)
         p = torch.zeros_like(solver.p0)
 
-    # --- Warm-up ---
-    for it in range(n_warmup):
-        t_step = it * float(solver.dt)
-        if ndim == 2:
-            solver.composite_body.update(t_step, it, dt=solver.dt)
-            out = solver.fluid_step(u, v, p, solver.dt)
-            u, v, p = out
-            solver.finalize_step(u, v, p, it)
-        else:
-            solver.composite_body.update(t_step, it, dt=solver.dt)
-            out = solver.fluid_step(u, v, w, p, solver.dt)
-            u, v, w, p = out
-            solver.finalize_step(u, v, p, it, w_vel=w)
-    if use_gpu and torch.cuda.is_available():
-        torch.cuda.synchronize()
-
-    # --- Profiled run: instrumented step ---
     times = {}
-    for it in range(n_warmup, n_warmup + n_profile):
+
+    # Time the regions by wrapping the solver's OWN methods, so the profiled
+    # loop runs the real production step (finalize_step -> _advect_vof, the
+    # graph-captured VOF) rather than a hand-rolled imitation of it.  Regions:
+    #   projection  -- variable-coefficient Poisson solve + velocity correction
+    #   cvof_advect -- VOF transport (graph replay on CUDA)
+    #   fluid_step  -- advect + diffuse + BDIM + BCs + projection (total)
+    # pre_poisson is derived as fluid_step - projection.
+    enabled = {"on": False}          # only record inside the profiled window
+
+    def _timed(obj, name, region):
+        inner = getattr(obj, name)
+
+        def wrapper(*a, **kw):
+            if not enabled["on"]:
+                return inner(*a, **kw)
+            with cuda_timer(region, times):
+                return inner(*a, **kw)
+        setattr(obj, name, wrapper)
+
+    _timed(solver, "project", "projection")
+    _timed(solver, "_advect_vof", "cvof_advect")
+    _timed(solver, "fluid_step", "fluid_step")
+    _timed(solver.composite_body, "update", "body_update")
+
+    def _step(it):
+        # solver.step_ is the PRODUCTION entry point: it runs
+        # advance_and_compute_loads (body update -> gravity body force ->
+        # fluid_step) and then finalize_step.  Driving fluid_step directly
+        # skips the gravity kick, which leaves the two-phase pool at rest and
+        # makes the whole benchmark measure a trivial zero-RHS Poisson.
+        nonlocal u, v, w, p
         t_step = it * float(solver.dt)
-
-        # ── Body update ──
-        with cuda_timer("body_update", times):
-            solver.composite_body.update(t_step, it, dt=solver.dt)
-
-        # ── Fluid step (pre-Poisson region is graphed, so we time the graph
-        #    replay + projection + post-projection separately) ──
         if ndim == 2:
-            # Pre-Poisson (graph replay or eager)
-            with cuda_timer("pre_poisson", times):
-                # The graph captures advection+diffusion+bdim_forcing+set_BCs
-                # We can't easily split inside the graph, so time the whole
-                # fluid_step minus projection
-                pass
-
-            # Full fluid_step (includes everything: pre-Poisson + projection)
-            with cuda_timer("fluid_step", times):
-                out = solver.fluid_step(u, v, p, solver.dt)
-            u, v, p = out
-
-            # cvof advection (VOF transport)
-            with cuda_timer("cvof_advect", times):
-                tp = solver.two_phase
-                tp.advect(u, v, solver.dt)
-
+            u, v, p, _ = solver.step_(u, v, p, it, t_step)
         else:
-            with cuda_timer("fluid_step", times):
-                out = solver.fluid_step(u, v, w, p, solver.dt)
-            u, v, w, p = out
+            u, v, p, w, _ = solver.step_(u, v, p, it, t_step, w_vel=w)
 
-            with cuda_timer("cvof_advect", times):
-                tp = solver.two_phase
-                tp.advect(u, v, w, solver.dt)
+    # --- Warm-up (untimed: includes the CUDA-graph capture steps) ---
+    for it in range(n_warmup):
+        _step(it)
+    if use_gpu and torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+    # --- Profiled run: the real step, instrumented ---
+    enabled["on"] = True
+    for it in range(n_warmup, n_warmup + n_profile):
+        _step(it)
+    enabled["on"] = False
 
     if use_gpu and torch.cuda.is_available():
         torch.cuda.synchronize()
+
+    # Derived: everything in fluid_step that is not the projection.
+    if "fluid_step" in times and "projection" in times:
+        times["pre_poisson (derived)"] = [
+            f - pr for f, pr in zip(times["fluid_step"], times["projection"])]
+
+    # Report whether the graphs actually engaged (replay vs capture-thrash).
+    for label, attr in (("cvof   ", "_cvof_graph"),
+                        ("preproj", "_preproj_graph_2d"),
+                        ("preproj", "_preproj_graph_3d")):
+        g = getattr(solver, attr, None)
+        if g is not None:
+            print(f"  {label} graph: captures={g.captures} replays={g.replays} "
+                  f"eager={g.eager} evictions={g.evictions}")
 
     return times
 

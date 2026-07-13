@@ -1116,6 +1116,32 @@ class Body:
 
         self.rad_conv   = (torch.pi / 180)
 
+    def _publish(self, name, value):
+        """Write ``value`` into a persistent buffer and return that buffer.
+
+        The BDIM fields a body publishes each step (``sdf_val``, the staggered
+        ``sdf_u/v/w`` and ``body_u/v/w``) are hashed BY POINTER into the
+        pre-Poisson CUDA-graph key.  Rebinding them to freshly-allocated
+        tensors every ``update()`` — which is what the plain
+        ``self.sdf_val = self.sdf(px, py)`` form does — churns the key, so the
+        graph can never replay: it re-captures every single step (~80 ms at
+        128^2, a ~50x pessimisation vs the eager path).  Routing every published
+        field through a persistent buffer keeps the pointers stable, so the key
+        repeats and the graph replays.
+
+        The buffer is reallocated only on a shape/dtype/device change.
+        """
+        bufs = getattr(self, "_persist_bufs", None)
+        if bufs is None:
+            bufs = self._persist_bufs = {}
+        buf = bufs.get(name)
+        if (buf is None or buf.shape != value.shape
+                or buf.dtype != value.dtype or buf.device != value.device):
+            buf = torch.empty_like(value)
+            bufs[name] = buf
+        buf.copy_(value)
+        return buf
+
     def _setup_grids(self):
         """Bind full staggered meshgrids to this body instance.
 
@@ -1652,23 +1678,25 @@ class BodyAnalytical(Body):
             ang_vel = _safe_grad(w, t_var)
 
             # SDF at cell-centres (meshgrid broadcasting)
+            # Every published field goes through _publish: the pre-Poisson CUDA
+            # graph keys on these pointers, so they must not be rebound.
             px, py = rotate_grid_2d(grids.X, grids.Y, R_T, transl)
-            self.sdf_val = self.sdf(px, py)
+            self.sdf_val = self._publish('sdf_val', self.sdf(px, py))
 
             # SDF at u-faces
             px, py = rotate_grid_2d(grids.Xu_stag, grids.Yu_stag, R_T, transl)
-            self.sdf_u = self.sdf(px, py)
+            self.sdf_u = self._publish('sdf_u', self.sdf(px, py))
 
             # SDF at v-faces
             px, py = rotate_grid_2d(grids.Xv_stag, grids.Yv_stag, R_T, transl)
-            self.sdf_v = self.sdf(px, py)
+            self.sdf_v = self._publish('sdf_v', self.sdf(px, py))
 
             # body velocities (staggered)
             # v = v_lin + ω × r  (2-D:  ω×r = (-ω*ry, ω*rx))
             ry_u = grids.Yu_stag - transl[1]
-            self.body_u = lin_vel_x - ang_vel * ry_u
+            self.body_u = self._publish('body_u', lin_vel_x - ang_vel * ry_u)
             rx_v = grids.Xv_stag - transl[0]
-            self.body_v = lin_vel_y + ang_vel * rx_v
+            self.body_v = self._publish('body_v', lin_vel_y + ang_vel * rx_v)
 
             # Aliases so standalone BodyAnalytical works directly with solver
             self.sdf_val_u = self.sdf_u
@@ -1709,10 +1737,16 @@ class BodyAnalytical(Body):
                 px, py, pz = rotate_grid_3d(X, Y, Z, R_T, transl)
                 return self.sdf(px, py, pz)
 
-            self.sdf_val = _eval_sdf(grids.X, grids.Y, grids.Z_grid)
-            self.sdf_u = _eval_sdf(grids.Xu_stag, grids.Yu_stag, grids.Zu_stag)
-            self.sdf_v = _eval_sdf(grids.Xv_stag, grids.Yv_stag, grids.Zv_stag)
-            self.sdf_w = _eval_sdf(grids.Xw_stag, grids.Yw_stag, grids.Zw_stag)
+            # _publish: keep the published pointers stable so the pre-Poisson
+            # CUDA graph (which keys on them) can replay instead of re-capturing.
+            self.sdf_val = self._publish(
+                'sdf_val', _eval_sdf(grids.X, grids.Y, grids.Z_grid))
+            self.sdf_u = self._publish(
+                'sdf_u', _eval_sdf(grids.Xu_stag, grids.Yu_stag, grids.Zu_stag))
+            self.sdf_v = self._publish(
+                'sdf_v', _eval_sdf(grids.Xv_stag, grids.Yv_stag, grids.Zv_stag))
+            self.sdf_w = self._publish(
+                'sdf_w', _eval_sdf(grids.Xw_stag, grids.Yw_stag, grids.Zw_stag))
 
             # body velocities: v = v_lin + ω × r
             # ω × r = (ωy*rz - ωz*ry, ωz*rx - ωx*rz, ωx*ry - ωy*rx)
@@ -1725,12 +1759,15 @@ class BodyAnalytical(Body):
                 bw = lin_vel_z + ang_vel_x * ry - ang_vel_y * rx
                 return bu, bv, bw
 
-            self.body_u, _, _ = _body_vel_component(
+            bu, _, _ = _body_vel_component(
                 grids.Xu_stag, grids.Yu_stag, grids.Zu_stag)
-            _, self.body_v, _ = _body_vel_component(
+            _, bv, _ = _body_vel_component(
                 grids.Xv_stag, grids.Yv_stag, grids.Zv_stag)
-            _, _, self.body_w = _body_vel_component(
+            _, _, bw = _body_vel_component(
                 grids.Xw_stag, grids.Yw_stag, grids.Zw_stag)
+            self.body_u = self._publish('body_u', bu)
+            self.body_v = self._publish('body_v', bv)
+            self.body_w = self._publish('body_w', bw)
 
             # Aliases so standalone BodyAnalytical works directly with solver
             self.sdf_val_u = self.sdf_u
@@ -1784,33 +1821,54 @@ class CompositeBodyAnalytical(Body):
     def update(self, t, iteration, dt=1):
         # Streaming union: process bodies one at a time to avoid
         # allocating (nbodies, *grid_shape) stacks.
-        for i, body in enumerate(self.bodies):
+        #
+        # The fields published here are hashed by pointer into the pre-Poisson
+        # CUDA-graph key (see Body._publish), so they must be pointer-stable.
+        # Single body: alias the child's persistent buffers directly (stable,
+        # and costs no extra memory).  True union: fold into the composite's own
+        # persistent buffers, since body 0's buffers must not be clobbered.
+        for body in self.bodies:
             body.update(t, iteration, dt=dt, grids=self._grids)
-            if i == 0:
-                self.sdf_val   = body.sdf_val
-                self.sdf_val_u = body.sdf_u
-                self.body_u    = body.body_u
-                self.sdf_val_v = body.sdf_v
-                self.body_v    = body.body_v
-                if self.ndim == 3:
-                    self.sdf_val_w = body.sdf_w
-                    self.body_w    = body.body_w
-            else:
-                mask = body.sdf_val < self.sdf_val
-                self.sdf_val = torch.where(mask, body.sdf_val, self.sdf_val)
 
-                mask_u = body.sdf_u < self.sdf_val_u
-                self.sdf_val_u = torch.where(mask_u, body.sdf_u, self.sdf_val_u)
-                self.body_u    = torch.where(mask_u, body.body_u, self.body_u)
+        b0 = self.bodies[0]
+        if self.nbodies == 1:
+            self.sdf_val   = b0.sdf_val
+            self.sdf_val_u = b0.sdf_u
+            self.body_u    = b0.body_u
+            self.sdf_val_v = b0.sdf_v
+            self.body_v    = b0.body_v
+            if self.ndim == 3:
+                self.sdf_val_w = b0.sdf_w
+                self.body_w    = b0.body_w
+            return
 
-                mask_v = body.sdf_v < self.sdf_val_v
-                self.sdf_val_v = torch.where(mask_v, body.sdf_v, self.sdf_val_v)
-                self.body_v    = torch.where(mask_v, body.body_v, self.body_v)
+        self.sdf_val   = self._publish('sdf_val',   b0.sdf_val)
+        self.sdf_val_u = self._publish('sdf_val_u', b0.sdf_u)
+        self.body_u    = self._publish('body_u',    b0.body_u)
+        self.sdf_val_v = self._publish('sdf_val_v', b0.sdf_v)
+        self.body_v    = self._publish('body_v',    b0.body_v)
+        if self.ndim == 3:
+            self.sdf_val_w = self._publish('sdf_val_w', b0.sdf_w)
+            self.body_w    = self._publish('body_w',    b0.body_w)
 
-                if self.ndim == 3:
-                    mask_w = body.sdf_w < self.sdf_val_w
-                    self.sdf_val_w = torch.where(mask_w, body.sdf_w, self.sdf_val_w)
-                    self.body_w    = torch.where(mask_w, body.body_w, self.body_w)
+        for body in self.bodies[1:]:
+            # min-union on the SDF; the winning body also supplies the velocity.
+            # copy_ into the persistent buffers (never rebind them).
+            mask = body.sdf_val < self.sdf_val
+            self.sdf_val.copy_(torch.where(mask, body.sdf_val, self.sdf_val))
+
+            mask_u = body.sdf_u < self.sdf_val_u
+            self.body_u.copy_(torch.where(mask_u, body.body_u, self.body_u))
+            self.sdf_val_u.copy_(torch.where(mask_u, body.sdf_u, self.sdf_val_u))
+
+            mask_v = body.sdf_v < self.sdf_val_v
+            self.body_v.copy_(torch.where(mask_v, body.body_v, self.body_v))
+            self.sdf_val_v.copy_(torch.where(mask_v, body.sdf_v, self.sdf_val_v))
+
+            if self.ndim == 3:
+                mask_w = body.sdf_w < self.sdf_val_w
+                self.body_w.copy_(torch.where(mask_w, body.body_w, self.body_w))
+                self.sdf_val_w.copy_(torch.where(mask_w, body.sdf_w, self.sdf_val_w))
 
 
 class BodyFishAnalytical(Body):

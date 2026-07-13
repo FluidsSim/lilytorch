@@ -198,19 +198,23 @@ class NativeWholeStepGraphRunner:
             current stream (native extension ops + torch ops; no raw
             ``wp.launch``).
         stage : callable or None
-            Zero-argument closure that stages per-step data into persistent
-            device buffers — called OUTSIDE the capture (both during capture
-            and on every replay).  Ignored when ``_use_cuda_graph`` is False.
+            Zero-argument closure that stages per-step data into the
+            persistent buffers ``issue()`` reads — called OUTSIDE the capture,
+            on EVERY path: eager, capture and replay.  ``issue()`` consumes
+            those buffers regardless of graph mode (e.g. ``bdim_forcing`` reads
+            the staged dirty rect), so skipping the staging on the eager path
+            leaves it reading an uninitialised ``torch.empty`` buffer — silently
+            wrong physics on CPU and under ``graph_capture_debug``.
         """
+        # ---- stage per-step data OUTSIDE the graph (all paths) ----
+        if stage is not None:
+            stage()
+
         # ---- eager path (CPU, or CUDA graphs disabled) ----
         if not self._use_cuda_graph:
             self.eager += 1
             issue()
             return
-
-        # ---- stage per-step data OUTSIDE the graph ----
-        if stage is not None:
-            stage()
 
         # ---- replay ----
         graph = self._graphs.get(key)

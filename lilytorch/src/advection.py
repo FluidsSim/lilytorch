@@ -260,13 +260,25 @@ class AdvDiffSolver:
         # Flux schemes all run through the single fused Warp ``advect_flux_add``
         # kernel (CPU + CUDA); the semi-Lagrangian / implicit solves are a
         # separate ``solve`` method.
+        # ``graph_capturable``: may the caller record ``solve`` into a
+        # ``torch.cuda.CUDAGraph``?  ONLY if every kernel it launches goes to
+        # torch's current CUDA stream, i.e. the native extension ops.  The flux
+        # schemes still run on Warp (``advect_flux_accumulate_warp``,
+        # ``_accumulate_interior_warp`` and the ``diffusion`` Warp helpers),
+        # and raw ``wp.launch`` goes to Warp's OWN stream: torch stream capture
+        # does not record it, so those kernels EXECUTE during the capture pass
+        # and are silently DROPPED from every replay — wrong physics, no error.
+        # The semi-Lagrangian path is native end-to-end (``native.sl_advect_*``
+        # + ``native.diffuse_add``) and is safe to capture.
         if method in _CUDA_SCHEME_IDS:
             self._scheme_name = method
             self.solve        = self._solve_convective
+            self.graph_capturable = False
         elif method in ("semi-lagrangian", "implicit"):
             self._scheme_name = method
             self._init_semi_lagrangian()
             self.solve = self._solve_semi_lagrangian
+            self.graph_capturable = True
         else:
             raise ValueError(
                 f"Unknown convection method '{method}'. Choose from: "

@@ -201,10 +201,13 @@ class TwoPhaseSolver(FluidSolver):
                 "kernel's dt*mu0/rho_water coefficient)."
             )
         self._init_two_phase(tp_cfg)
-        # Fused path: capture the advection output u' each step — the only
-        # input the air-transparent velocity identity needs.  The reference is
-        # dropped at the start of ``project``, before the Poisson solve, so
-        # peak memory matches the base fused step.
+        # Fused path: capture the advection output u' — the only input the
+        # air-transparent velocity identity needs.  ``solve`` returns
+        # adv_diff_solver's PERSISTENT output buffers (``_sl_out`` /
+        # ``_conv_out``), so this stash aliases buffers that already live for
+        # the whole run: it holds no extra memory, and it stays valid across a
+        # pre-Poisson graph REPLAY (where this python wrapper does not run but
+        # the captured kernels still rewrite those same buffers in place).
         self._kernel_primes = None
         _orig_solve = self.adv_diff_solver.solve
 
@@ -606,7 +609,17 @@ class TwoPhaseSolver(FluidSolver):
         averaged to faces — kernel mode keeps no staggered SDFs), keeping the
         carved dry interior rigidly attached.  Re-applies the BCs afterwards
         so ghost cells match the python path."""
-        primes, self._kernel_primes = getattr(self, "_kernel_primes", None), None
+        # NOTE: do NOT clear ``_kernel_primes`` here.  ``solve`` runs INSIDE the
+        # pre-Poisson CUDA graph, so on a graph REPLAY the ``_solve_and_stash``
+        # python assignment never executes.  Clearing the stash each step would
+        # therefore leave ``primes is None`` on every replay and silently skip
+        # this blend — the kernel would keep imposing the body velocity into the
+        # air (exactly the historical kernel-mode blow-up).  The stashed tensors
+        # are ``adv_diff_solver``'s PERSISTENT output buffers (``_sl_out`` /
+        # ``_conv_out``), which the graph rewrites in place on every replay, so
+        # holding the reference costs no extra memory and always reads this
+        # step's u'.
+        primes = getattr(self, "_kernel_primes", None)
         if primes is None or not self._air_transparent_body:
             return
         comp = self.composite_body
