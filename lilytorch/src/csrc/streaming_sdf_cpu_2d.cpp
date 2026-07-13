@@ -1,7 +1,7 @@
 // =====================================================================
 //  streaming_sdf_cpu_2d.cpp
 //
-//  CPU implementations of the 2-D ``streaming_sdf_stag_2d_multi`` and
+//  CPU implementations of the 2-D ``streaming_sdf_stag_2d_*`` and
 //  ``bdim_coeff_2d`` ops.  Mirrors
 //  ``streaming_sdf_cpu.cpp`` line-for-line with the z-axis stripped:
 //    * 3 face samples per cell (cc, u-stagger -h/2 in x, v-stagger -h/2 in y);

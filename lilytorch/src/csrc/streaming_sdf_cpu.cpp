@@ -76,7 +76,7 @@ static inline scalar_t trilinear_sample_border(
 // =====================================================================
 //  Trilinear sample on a UNIFORM body grid.
 //
-//  The streaming_sdf_stag_3d_multi* kernels are exclusively used with body SDF
+//  The streaming_sdf_stag_3d_* kernels are exclusively used with body SDF
 //  tables built on uniform Cartesian grids (the kernel already takes
 //  ``inv_dx``, ``inv_dy``, ``inv_dz``).  In that case the corner
 //  weights reduce to ``(1 - frac, frac)`` per axis -- no axis-table
@@ -319,15 +319,6 @@ static inline void update_cell(
         }
     }
 }
-
-
-// =====================================================================
-//  streaming_sdf_stag_3d_multi
-//
-//  Bodies are processed serially (matches CUDA -- no atomics required
-//  because each cell is touched once per body, and bodies progress in
-//  order); cells within a body are parallelised.
-// =====================================================================
 
 
 // =====================================================================

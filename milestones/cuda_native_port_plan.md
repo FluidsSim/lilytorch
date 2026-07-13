@@ -1247,6 +1247,56 @@ host-bound by the `_aabbs_are_disjoint` single sync (irrelevant in-sim);
 gate scripts live in the session scratchpad only (`gate_{2,3}d.py`) — recreate
 from this log if needed.
 
+## Phase 2 CLOSED — 2.4 bench + the last two loose ends (2026-07-13 late, Claude)
+
+Row 11c is now ✅. The deletion and oracle migration landed in `beb3c51` (log
+above); this session finished the **bench** leg and cleared the two things that
+were still blocking an honest "Phase 2 done, suite green" claim.
+
+**1. Regime A is RETIRED — resolve is the sole streaming path (was uncommitted;
+now priced).** `_aabbs_are_disjoint` picked Regime A (direct-write) only for
+pairwise-disjoint AABBs, and that test ended in an `.item()` — a D→H sync on
+*every* body update (~75 µs/step of pipeline drain, measured). For any
+articulated body (salamander, eel) adjacent links always overlap, so the answer
+was "not disjoint" on every step anyway: we paid the sync to *never* take the
+fast path. The bench (fp32+fp64, 2-D+3-D, kernel-level, `bench_regime.py`):
+
+| scene | direct | resolve | ratio |
+|---|---|---|---|
+| 2-D single / separated | ~40 µs | ~52 µs | 0.77–0.82× |
+| 3-D single / separated | ~48 µs | ~59 µs | 0.81–0.83× |
+| 2-D / 3-D multilink | n/a (would race) | ~49–62 µs | — |
+
+So direct *is* ~12 µs/call cheaper where it is legal — but selecting it costs a
+~75 µs sync, i.e. **the guard is 6× more expensive than the thing it guards**.
+Retiring A is net-positive and the numbers say so. The direct kernels stay built
++ reachable via `native.*` (and are still a gate: `direct == resolve`,
+byte-identical fp32, is the cross-kernel sampler-drift detector), just no longer
+auto-selected. `facade.USE_REGIME_B_ONLY` documents this.
+
+**2. `--use_fast_math` REVERTED (it had silently broken 9 parity gates).**
+`b3657de` added it to the nvcc flags. It fails 9 fp32 tests in
+`test_native_step_region.py` (`bdim_forcing_2d/3d`, `diffuse_add`) at exactly
+2.38e-7 = 2 ULP against a 2e-7 tolerance — the flag implies `-ftz` +
+approximate div/sqrt/transcendentals, and the solver's **default production
+dtype is fp32**, so this is a real numerics change, not a test artifact.
+Priced before reverting: **it buys nothing.** The stencil kernels are
+bandwidth-bound and the body-update path is host-marshalling-bound, so the A/B
+came back **0.93×–1.13× — noise in both directions** on every kernel benched
+(diffuse_add const/var, rbgs_sweep, prolongate_add, and the whole 2-D/3-D
+streaming path × blend on/off). Trading the native port's correctness contract
+for an unmeasurable win is exactly the ground-rule-2 mistake, so the flag is
+gone and `setup.py` now carries a comment saying why. **Suite back to the
+documented baseline: 432 passed / 1 skipped** (+ the 2 known pre-existing
+`test_python_eulerian_force_path_cpu*` failures). The `stage()` per-step-alloc
+half of `b3657de` is good and stays.
+
+Also swept the stale comments the deletion left behind: an orphaned
+`streaming_sdf_stag_3d_multi` header block in `streaming_sdf_cpu.cpp` (the
+function it described was gone), the `_multi` references in both CPU twins'
+headers, and the 8.B note in `test_native_step_region.py` that still asked for
+a standalone unit oracle — `test_per_body_buffers.py` *is* that oracle now.
+
 ## HANDOFF — superseded (kept for history; TODOs resolved above) — (Phase 2 wrap-up, 2026-07-13)
 
 **Current state (all UNCOMMITTED in the working tree):**
@@ -1479,7 +1529,7 @@ the table below reflects that. Track B *is* Phase 1.
 | 10 | 2.1 per-body-buffer tests | Phase 2 | **Claude** | 1 | ✅ tests+doc reconcile; 24 pass / 8 skip (direct-write gate) |
 | 11 | 2.2 Regime A (direct-write, disjoint) + overlap detect | Phase 2 | DeepSeek + Claude fix | 1 | ✅ direct is disjoint-ONLY (Claude fixed the dispatch — DeepSeek had it racing on overlap) |
 | 11b | 2.3 Regime B (per-body private buffers + resolve, full fp64) | Phase 2 | DeepSeek + Claude fix | 1–2 | ✅ resolve crash fixed + wired; 52/0/0; strict parity + GPU==CPU twin (see 2026-07-13 correction log) |
-| 11c | 2.4 delete old union path + migrate test oracle + bench | Phase 2 | DeepSeek (Claude review) | 1 | ☐ (needs real multi-link sim gate first) |
+| 11c | 2.4 delete old union path + migrate test oracle + bench | Phase 2 | DeepSeek (Claude review) | 1 | ✅ union path deleted; oracle migrated to GPU==CPU twin; 2-D+3-D coupled gates PASS; bench done (Regime-A retirement priced) — **Phase 2 CLOSED** |
 | 12 | 3 unification memo | Phase 3 | **Claude** | 1 | ☐ |
 | 13 | 4.1–4.3 two-phase perf | Phase 4 | DeepSeek (Claude spec/review) | 2 | ✅ (see 4.1–4.3 log below) |
 | 14 | 4.4–4.5 two-phase simplification | Phase 4 | **Claude** | 1–2 | ☐ |

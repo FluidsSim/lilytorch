@@ -365,13 +365,11 @@ def test_apply_bcs_3d_native_eq_warp(dtype):
 
 # =====================================================================
 # 8.B — streaming-SDF native path.
-# Unit parity for streaming_sdf_stag_{2,3}d_multi requires a full body-table
-# oracle (body_shapes/body_meta/kin/aabb marshalling).  Rather than duplicate
-# that marshalling here, 8.B's gate is (a) the existing coupled/streaming
-# suite (which exercises facade.body_update end-to-end and will break if the
-# native swap diverges), plus (b) the solver-driven bit-exact step gate added
-# to tests/test_whole_step_capture_native.py in 8.E.  DeepSeek: if a standalone
-# unit oracle is wanted, build it from a single BodyAnalytical via BDIMhandler's
-# body-table packing and compare native.streaming_sdf_stag_2d_multi against the
-# facade.body_update_2d Warp bridge (single body, two separated bodies, salamander
-# multi-link; ≤1e-9 f64 / 1e-6 f32).
+# The streaming-SDF kernels are NOT gated here: they need a full body-table
+# oracle (body_shapes/body_meta/kin/aabb marshalling), so they get a dedicated
+# suite.  Their gates live in tests/test_per_body_buffers.py (GPU==CPU twin as
+# the race detector, direct==resolve byte-identical on disjoint scenes as the
+# sampler-drift detector, plus the blend invariants), backed by the
+# solver-driven bit-exact step gate in tests/test_whole_step_capture_native.py.
+# (The union-AABB `_multi` path those gates were originally written against was
+# deleted in per_body_key_buffers item 2.4.)
