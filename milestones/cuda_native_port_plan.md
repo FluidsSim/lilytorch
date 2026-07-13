@@ -1174,7 +1174,80 @@ fallback). The 3-D resolve itself is validated correct + race-free.
 
 ---
 
-## HANDOFF — new agent start here (Phase 2 wrap-up, 2026-07-13)
+## Phase-2 COMPLETE — 2.4 done (session 2026-07-13 pm, Claude)
+
+This session executed and CLOSED the previous handoff (section below kept for
+history; its TODOs are resolved). Two commits: `2dc5922` (Regime-B fix + 2-D
+gate) and the 2.4 commit that follows this log.
+
+**TODO 1 (3-D `FluidSolver.__init__` 54 GB OOM) — NOT REPRODUCIBLE, closed.**
+Ran `gen_configs_swim_3d` headless (extensions=[]) at 128×24×12, 512×96×48 AND
+the full 1024×192×96 with `lilytorch/integration/_setup_rss.py` injected via
+`_extra_run_patch`: every run completes (exit 0), peak RSS ≤ 3.5 GB, init in
+seconds. The prescribed RLIMIT_AS trick **does not work in a CUDA process** —
+the driver's VA reservations (VIRT ≫ RSS) trip any cap low enough to catch a
+host runaway (observed: Warp "Failed to allocate 4 bytes" mid-step at a 48 GB
+cap with RSS 3.5 GB); `_setup_rss.install()` therefore now uses an RSS
+watchdog (stack-dump + abort thresholds) instead, kept in-tree for reuse.
+Conclusion: the earlier OOM was environmental or an artifact of that session's
+instrumentation; the 3-D gate was unblocked.
+
+**Three REAL bugs found & fixed on the way to the gates:**
+1. **Resolve winner selection was per-CELL, not per-STAGGER.** `_multi` takes
+   independent atomicMin winners for sdf_u/v/w; the resolve reused the sdf_cc
+   winner for all staggers → staggered union SDF biased up to ~h/2 at link
+   seams (3-D gate showed parity_sdf 1.35e-3 ≈ h/2 with triquadratic). Fixed
+   in all 4 implementations (CUDA+CPU × 2-D/3-D): per-stagger best/winner.
+   The earlier 2-D gate's "benign tiebreak" vel 0.066 was THIS bug — that
+   attribution is retracted. The synthetic scenes hid it (bodies centred at
+   integer cells + identical velocities); scenes now carry sub-cell jitter +
+   per-body velocities and catch it.
+2. **Softmin blend added to the resolve** (TODO 2 first half): accumulated in
+   registers over covering bodies in ascending-b order inside the resolve
+   kernel — deterministic, no atomics, no num/den scratch buffers (unlike
+   `_multi`'s atomicAdd+decode). Same semantics (w=sigmoid(-s_stag/eps),
+   den_tol 1e-6, else per-stagger winner velocity). The blend→`_multi`
+   facade fallback is REMOVED.
+3. **Graph-mode streaming buffers were never prefilled (pre-existing, since
+   the 8.B bridge swap).** `BDIMhandler._launch_body_update` skipped the
+   SDF→FAR / vel→0 resets on the CUDA no-blend path ("folded into the Warp
+   captured graph" — but the Warp bridge is gone and the native bridge never
+   filled). Stale previous-step values → ghost body imprints (wrong physics)
+   on every CUDA no-blend streaming run since 8.B. Fixed: the handler now
+   prefills on every path.
+
+**Coupled-sim gates (59 streaming calls each, parity vs `_multi` every 5th
+call, RSS watchdog on): ALL PASS.**
+| gate | B | overlap | parity_sdf_max | parity_vel_max | NaN |
+|---|---|---|---|---|---|
+| 2-D salamander no-blend | 17 | 2.47× | **0.0 (byte-id)** | 0.0 | 0 |
+| 2-D salamander blend=2 | 17 | 2.46× | **0.0** | 5.6e-9 | 0 |
+| 3-D swim salamander no-blend (512×96×48) | 52 | 4.30× | **0.0** | 0.0 | 0 |
+| 3-D swim salamander blend=2 (production cfg, triquadratic) | 52 | 4.31× | **0.0** | 8.9e-8 (sum-order) | 0 |
+
+**2.4 deletion — DONE.** Removed: `packed_key.cuh`; init_keys/min_rho_multi/
+decode_keys kernels + `streaming_sdf_stag_{2,3}d_multi` launchers/impls from
+`streaming_sdf.cu`/`streaming_sdf_2d.cu`/both CPU twins; both multi schemas +
+wrappers; **and `bdim_coeff_sigma_{2,3}d`** (its only body-id input was the
+packed key; zero consumers — the ops.cpp note documents how to revive BDIM-σ
+from a resolve-emitted winner field). `facade.py` simplified: bridge classes +
+key-buffer caches + num/den plumbing deleted (bridges are plain functions;
+`_native_body_update_*` kept as aliases); BDIMhandler call sites updated.
+Test oracle migrated (`test_per_body_buffers.py`): durable gates are now
+GPU==CPU twins (race detector, all layouts+blend) + **direct==resolve on
+disjoint scenes, fp32 byte-identical** (cross-kernel sampler-drift detector) +
+blend invariants (SDF untouched, single-cover no-op, actually-blends).
+Deleted `bench_direct_vs_multi.py` (numbers recorded; in-sim A/B 0.98× is the
+authoritative speed result). Full suite: **432 passed / 1 skipped** (+ the 2
+documented pre-existing `test_python_eulerian_force_path_cpu*` failures).
+
+**Left open (minor):** fold the resolve's per-call `arange` offsets into the
+future graph-captured body-update (2.x note); tiny-scene facade wall time is
+host-bound by the `_aabbs_are_disjoint` single sync (irrelevant in-sim);
+gate scripts live in the session scratchpad only (`gate_{2,3}d.py`) — recreate
+from this log if needed.
+
+## HANDOFF — superseded (kept for history; TODOs resolved above) — (Phase 2 wrap-up, 2026-07-13)
 
 **Current state (all UNCOMMITTED in the working tree):**
 - Regime B (per-body private buffers + one-thread-per-overlap-cell resolve) is

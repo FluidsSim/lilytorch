@@ -1243,16 +1243,20 @@ class BDIMhandler:
         if graph_mode:
             c = self._body_update_bufs(gs)
             sdf_stag, bvel = c['sdf'], c['bvel']
+            # The retired Warp bridge folded the SDF→FAR / vel→0 resets into
+            # its captured graph; the native bridge does NOT — the caller owns
+            # the prefill on EVERY path.  Skipping it here left stale
+            # previous-step values in the persistent buffers (ghost body
+            # imprints on the CUDA no-blend path — wrong physics).
+            for t in sdf_stag:
+                t.fill_(_FAR)
+            for t in bvel:
+                t.zero_()
         else:
             sdf_stag = [torch.full(gs, _FAR, **_opts) for _ in range(D)]
             bvel     = [torch.zeros(gs, **_opts) for _ in range(D)]
-            # The Warp atomic-min needs the CC SDF pre-filled to +FAR.  In
-            # graph mode the bridge folds this reset into the captured graph.
-            comp.sdf_val.fill_(_FAR)
-
-        # Blend num/den accumulators live inside the Warp streaming class
-        # (``setup(blend_eps=...)``); the positional slots are legacy dummies.
-        dummy = torch.empty(1, **_opts)
+        # The streaming min needs the CC SDF pre-filled to +FAR.
+        comp.sdf_val.fill_(_FAR)
 
         if D == 2:
             body_update_2d(
@@ -1266,7 +1270,7 @@ class BDIMhandler:
                 int(getattr(fs, '_sdf_interp_method', 0)),
                 int(kstep['dirty_i0']), int(kstep['dirty_j0']),
                 int(kstep['dirty_Ai']), int(kstep['dirty_Aj']),
-                dummy, dummy, dummy, dummy, float(blend_eps),
+                blend_eps=float(blend_eps),
                 use_graph=graph_mode,
             )
         else:
@@ -1283,7 +1287,7 @@ class BDIMhandler:
                 int(kstep['dirty_k0']),
                 int(kstep['dirty_Ai']), int(kstep['dirty_Aj']),
                 int(kstep['dirty_Ak']),
-                dummy, dummy, dummy, dummy, dummy, dummy, float(blend_eps),
+                blend_eps=float(blend_eps),
                 use_graph=graph_mode,
             )
 

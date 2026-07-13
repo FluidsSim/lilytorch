@@ -68,13 +68,11 @@ def _fill_union_sdf_2d(sc, dtype, dev, kin=None, aabb_lo=None, aabb_dim=None,
     sdf_v = torch.full((Ngx, Ngy), 1e4, **opt)
     bu = torch.zeros((Ngx, Ngy), **opt)
     bv = torch.zeros((Ngx, Ngy), **opt)
-    nu_ = torch.empty(1, **opt); nv_ = torch.empty(1, **opt)
-    du_ = torch.empty(1, **opt); dv_ = torch.empty(1, **opt)
     body_update_2d(sc["F_flat"], sc["F_offsets"], sc["body_shapes"],
                    sc["body_meta"], kin, aabb_lo, aabb_dim,
                    sc["gx"], sc["gy"], float(sc["h"]), max_vol,
                    sdf_cc, sdf_u, sdf_v, bu, bv,
-                   0, 0, 0, Ngx, Ngy, nu_, nv_, du_, dv_, 0.0)
+                   0, 0, 0, Ngx, Ngy)
     return sdf_cc
 
 
@@ -156,14 +154,11 @@ def _fill_union_sdf_3d(sc, dtype, dev, kin=None, aabb_lo=None, aabb_dim=None,
     bu = torch.zeros((Ngx, Ngy, Ngz), **opt)
     bv = torch.zeros((Ngx, Ngy, Ngz), **opt)
     bw = torch.zeros((Ngx, Ngy, Ngz), **opt)
-    nu_ = torch.empty(1, **opt); nv_ = torch.empty(1, **opt); nw_ = torch.empty(1, **opt)
-    du_ = torch.empty(1, **opt); dv_ = torch.empty(1, **opt); dw_ = torch.empty(1, **opt)
     body_update_3d(sc["F_flat"], sc["F_offsets"], sc["body_shapes"],
                    sc["body_meta"], kin, aabb_lo, aabb_dim,
                    sc["gx"], sc["gy"], sc["gz"], float(sc["h"]), max_vol,
                    sdf_cc, sdf_u, sdf_v, sdf_w, bu, bv, bw,
-                   0, 0, 0, 0, Ngx, Ngy, Ngz,
-                   nu_, nv_, nw_, du_, dv_, dw_, 0.0)
+                   0, 0, 0, 0, Ngx, Ngy, Ngz)
     return sdf_cc
 
 

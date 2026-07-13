@@ -7,18 +7,14 @@ from torch import Tensor
 from lilytorch.src import _C  # noqa: F401
 
 __all__ = [
-    "streaming_sdf_stag_3d_multi",
     "streaming_sdf_stag_3d_direct",
     "streaming_sdf_stag_2d_resolve",
     "streaming_sdf_stag_3d_resolve",
     "bdim_coeff_3d",
-    "bdim_coeff_sigma_3d",
     "streaming_sdf_forces_post_3d",
     "apply_bcs_3d",
-    "streaming_sdf_stag_2d_multi",
     "streaming_sdf_stag_2d_direct",
     "bdim_coeff_2d",
-    "bdim_coeff_sigma_2d",
     "bdim_forcing_2d",
     "bdim_forcing_3d",
     "sl_advect_2d",
@@ -68,56 +64,6 @@ def _mw_dummy_native(u0: torch.Tensor) -> torch.Tensor:
         _MW_DUMMY_NATIVE[key] = d
     return d
 
-
-def streaming_sdf_stag_3d_multi(
-        F_flat: Tensor, F_offsets: Tensor,
-        body_shapes: Tensor, body_meta: Tensor, kin: Tensor,
-        aabb_lo: Tensor, aabb_dim: Tensor,
-        gx: Tensor, gy: Tensor, gz: Tensor,
-        h_grid: float, max_vol_per_body: int,
-        sdf_cc: Tensor, sdf_u: Tensor, sdf_v: Tensor, sdf_w: Tensor,
-        body_u: Tensor, body_v: Tensor, body_w: Tensor,
-        key_cc_t: Tensor, key_u_t: Tensor, key_v_t: Tensor, key_w_t: Tensor,
-        interp_method: int,
-        dirty_i0: int, dirty_j0: int, dirty_k0: int,
-        dirty_Ai: int, dirty_Aj: int, dirty_Ak: int,
-        num_u: Tensor, num_v: Tensor, num_w: Tensor,
-        den_u: Tensor, den_v: Tensor, den_w: Tensor,
-        blend_eps: float) -> None:
-    """Phase-I 3-D streaming SDF + face velocity update (no rho).
-
-    Companion to ``bdim_coeff_3d``: fills ``sdf_cc`` (persistent),
-    ``sdf_u/v/w`` and ``body_u/v/w`` (per-step temporaries) inside the
-    dirty AABB.  Does NOT touch ``winning_rho_cc`` because Kernel B
-    computes rho_eff from mu0 in registers.
-
-    ``key_cc_t``, ``key_u_t``, ``key_v_t``, ``key_w_t`` are caller-allocated
-    int64 scratch buffers of size ``>= Ngx*Ngy*Ngz`` (one per stagger)
-    that the kernel uses to pack/unpack per-cell winning-body keys.  Pass
-    persistent buffers (allocated once at solver init) to avoid the 4×
-    empty-tensor allocation that the kernel used to do internally.
-    """
-    # Tolerate 1-element dummy num/den tensors (callers pass torch.empty(1)
-    # when blend_eps==0); replace with zero-filled full-grid buffers.
-    if num_u.numel() == 1:
-        num_u = torch.zeros_like(sdf_u)
-        num_v = torch.zeros_like(sdf_v)
-        num_w = torch.zeros_like(sdf_w)
-        den_u = torch.zeros_like(sdf_u)
-        den_v = torch.zeros_like(sdf_v)
-        den_w = torch.zeros_like(sdf_w)
-    return torch.ops.lilytorch_kernels.streaming_sdf_stag_3d_multi.default(
-        F_flat, F_offsets, body_shapes, body_meta, kin, aabb_lo, aabb_dim,
-        gx, gy, gz, float(h_grid), int(max_vol_per_body),
-        sdf_cc, sdf_u, sdf_v, sdf_w, body_u, body_v, body_w,
-        key_cc_t, key_u_t, key_v_t, key_w_t,
-        int(interp_method),
-        int(dirty_i0), int(dirty_j0), int(dirty_k0),
-        int(dirty_Ai), int(dirty_Aj), int(dirty_Ak),
-        num_u, num_v, num_w, den_u, den_v, den_w, float(blend_eps),
-    )
-
-
 def bdim_coeff_3d(
         u_prime: Tensor, v_prime: Tensor, w_prime: Tensor,
         sdf_u: Tensor, sdf_v: Tensor, sdf_w: Tensor,
@@ -158,41 +104,6 @@ def bdim_coeff_3d(
         int(dirty_Ai), int(dirty_Aj), int(dirty_Ak),
         int(mu0_projection),
     )
-
-
-def bdim_coeff_sigma_3d(
-        u_prime: Tensor, v_prime: Tensor, w_prime: Tensor,
-        sdf_u: Tensor, sdf_v: Tensor, sdf_w: Tensor,
-        body_u: Tensor, body_v: Tensor, body_w: Tensor,
-        u0: Tensor, v0: Tensor, w0: Tensor,
-        ch: Tensor, cv: Tensor, cw: Tensor,
-        key_u: Tensor, key_v: Tensor, key_w: Tensor,
-        sigma_shifts: Tensor,
-        eps: float, rho_f: float, dt: float,
-        h_grid: float,
-        dirty_i0: int, dirty_j0: int, dirty_k0: int,
-        dirty_Ai: int, dirty_Aj: int, dirty_Ak: int,
-        mu0_projection: int = 1) -> None:
-    """BDIM-σ variant of :func:`bdim_coeff_3d` (Lauber et al. 2022).
-
-    For each cell the Poisson coefficient is evaluated with ``mu0`` of a
-    shifted SDF ``phi - sigma_shifts[body_id]`` where ``body_id`` is
-    decoded from the Kernel-A AABB-local key buffer.  The velocity BDIM
-    field (``u0/v0/w0``) uses the unmodified ``mu0`` — only the
-    ``ch/cv/cw`` Poisson coefficient line uses the shifted ``mu0``.
-    """
-    return torch.ops.lilytorch_kernels.bdim_coeff_sigma_3d.default(
-        u_prime, v_prime, w_prime,
-        sdf_u, sdf_v, sdf_w,
-        body_u, body_v, body_w,
-        u0, v0, w0, ch, cv, cw,
-        key_u, key_v, key_w, sigma_shifts,
-        float(eps), float(rho_f), float(dt), float(h_grid),
-        int(dirty_i0), int(dirty_j0), int(dirty_k0),
-        int(dirty_Ai), int(dirty_Aj), int(dirty_Ak),
-        int(mu0_projection),
-    )
-
 
 def streaming_sdf_forces_post_3d(
         F_flat: Tensor, F_offsets: Tensor,
@@ -255,56 +166,6 @@ def apply_bcs_3d(
         shapes, neu_desc, dir_desc, dir_val, ref_desc, ref_val,
         int(max_dim0), int(max_dim1),
     )
-
-
-# =====================================================================
-
-def streaming_sdf_stag_2d_multi(
-        F_flat: Tensor, F_offsets: Tensor,
-        body_shapes: Tensor, body_meta: Tensor, kin: Tensor,
-        aabb_lo: Tensor, aabb_dim: Tensor,
-        gx: Tensor, gy: Tensor,
-        h_grid: float, max_vol_per_body: int,
-        sdf_cc: Tensor, sdf_u: Tensor, sdf_v: Tensor,
-        body_u: Tensor, body_v: Tensor,
-        key_cc_t: Tensor, key_u_t: Tensor, key_v_t: Tensor,
-        interp_method: int,
-        dirty_i0: int, dirty_j0: int,
-        dirty_Ai: int, dirty_Aj: int,
-        num_u: Tensor, num_v: Tensor,
-        den_u: Tensor, den_v: Tensor,
-        blend_eps: float) -> None:
-    """Phase-I 2-D streaming SDF + face velocity update (no rho).
-
-    Companion to ``bdim_coeff_2d``: fills ``sdf_cc`` (persistent),
-    ``sdf_u/v`` and ``body_u/v`` (per-step temporaries) inside the
-    dirty AABB.  Does NOT touch ``winning_rho_cc`` -- Kernel B computes
-    rho_eff from mu0 in registers.
-
-    ``key_cc_t/key_u_t/key_v_t`` are caller-allocated int64 scratch
-    buffers of size ``>= Ngx*Ngy`` (one per stagger) that the kernel
-    uses to pack/unpack per-cell winning-body keys; required by the
-    BDIM-σ path so Kernel B can decode body_id per cell.
-    """
-    # Tolerate 1-element dummy num/den tensors (callers pass torch.empty(1)
-    # when blend_eps==0); replace with zero-filled full-grid buffers.
-    if num_u.numel() == 1:
-        num_u = torch.zeros_like(sdf_u)
-        num_v = torch.zeros_like(sdf_v)
-        den_u = torch.zeros_like(sdf_u)
-        den_v = torch.zeros_like(sdf_v)
-    return torch.ops.lilytorch_kernels.streaming_sdf_stag_2d_multi.default(
-        F_flat, F_offsets, body_shapes, body_meta, kin,
-        aabb_lo, aabb_dim,
-        gx, gy, float(h_grid), int(max_vol_per_body),
-        sdf_cc, sdf_u, sdf_v, body_u, body_v,
-        key_cc_t, key_u_t, key_v_t,
-        int(interp_method),
-        int(dirty_i0), int(dirty_j0),
-        int(dirty_Ai), int(dirty_Aj),
-        num_u, num_v, den_u, den_v, float(blend_eps),
-    )
-
 
 def streaming_sdf_stag_2d_direct(
         F_flat: Tensor, F_offsets: Tensor,
@@ -377,7 +238,8 @@ def streaming_sdf_stag_2d_resolve(
         dirty_Ai: int, dirty_Aj: int,
         priv_offsets: Tensor,
         priv_sdf_cc: Tensor, priv_sdf_u: Tensor, priv_sdf_v: Tensor,
-        priv_body_u: Tensor, priv_body_v: Tensor) -> None:
+        priv_body_u: Tensor, priv_body_v: Tensor,
+        blend_eps: float = 0.0) -> None:
     """2-D Regime-B streaming SDF: per-body private buffers + resolve.
 
     Two-stage pipeline for overlapping-body regimes:
@@ -385,6 +247,9 @@ def streaming_sdf_stag_2d_resolve(
        per-body private flat buffers (no packed key, no atomics).
     2. Resolve-stage: iterates the union dirty AABB, reads each covering
        body's private buffer, picks min, writes winner to global tensors.
+       When ``blend_eps > 0`` the body velocities are the softmin blend
+       Σwᵢvᵢ/Σwᵢ, wᵢ = sigmoid(-sᵢ/blend_eps), accumulated in registers
+       over the covering bodies (deterministic — no atomics).
 
     ``priv_offsets``: int64 [B+1] cumulative body_vol offsets.
     ``priv_sdf_cc``, etc.: flat tensors of size ``priv_offsets[-1]``.
@@ -399,6 +264,7 @@ def streaming_sdf_stag_2d_resolve(
         priv_offsets,
         priv_sdf_cc, priv_sdf_u, priv_sdf_v,
         priv_body_u, priv_body_v,
+        float(blend_eps),
     )
 
 
@@ -415,10 +281,12 @@ def streaming_sdf_stag_3d_resolve(
         dirty_Ai: int, dirty_Aj: int, dirty_Ak: int,
         priv_offsets: Tensor,
         priv_sdf_cc: Tensor, priv_sdf_u: Tensor, priv_sdf_v: Tensor, priv_sdf_w: Tensor,
-        priv_body_u: Tensor, priv_body_v: Tensor, priv_body_w: Tensor) -> None:
+        priv_body_u: Tensor, priv_body_v: Tensor, priv_body_w: Tensor,
+        blend_eps: float = 0.0) -> None:
     """3-D Regime-B streaming SDF: per-body private buffers + resolve.
 
-    See :func:`streaming_sdf_stag_2d_resolve` for the pipeline description.
+    See :func:`streaming_sdf_stag_2d_resolve` for the pipeline description
+    (including the ``blend_eps > 0`` softmin velocity blend).
     """
     return torch.ops.lilytorch_kernels.streaming_sdf_stag_3d_resolve.default(
         F_flat, F_offsets, body_shapes, body_meta, kin,
@@ -431,6 +299,7 @@ def streaming_sdf_stag_3d_resolve(
         priv_offsets,
         priv_sdf_cc, priv_sdf_u, priv_sdf_v, priv_sdf_w,
         priv_body_u, priv_body_v, priv_body_w,
+        float(blend_eps),
     )
 
 
@@ -461,39 +330,6 @@ def bdim_coeff_2d(
         int(dirty_Ai), int(dirty_Aj),
         int(mu0_projection),
     )
-
-
-def bdim_coeff_sigma_2d(
-        u_prime: Tensor, v_prime: Tensor,
-        sdf_u: Tensor, sdf_v: Tensor,
-        body_u: Tensor, body_v: Tensor,
-        u0: Tensor, v0: Tensor,
-        ch: Tensor, cv: Tensor,
-        key_u: Tensor, key_v: Tensor,
-        sigma_shifts: Tensor,
-        eps: float, rho_f: float, dt: float,
-        h_grid: float,
-        dirty_i0: int, dirty_j0: int,
-        dirty_Ai: int, dirty_Aj: int,
-        mu0_projection: int = 1) -> None:
-    """2-D analogue of :func:`bdim_coeff_sigma_3d`."""
-    return torch.ops.lilytorch_kernels.bdim_coeff_sigma_2d.default(
-        u_prime, v_prime,
-        sdf_u, sdf_v,
-        body_u, body_v,
-        u0, v0, ch, cv,
-        key_u, key_v, sigma_shifts,
-        float(eps), float(rho_f), float(dt), float(h_grid),
-        int(dirty_i0), int(dirty_j0),
-        int(dirty_Ai), int(dirty_Aj),
-        int(mu0_projection),
-    )
-
-
-# =====================================================================
-#  bdim_forcing — static full-grid BDIM2 + Poisson coeff + MW correction
-#  Mirrors bdim.bdim_forcing_{2,3}d_warp signatures exactly.
-# =====================================================================
 
 def bdim_forcing_3d(
         u_prime, v_prime, w_prime,

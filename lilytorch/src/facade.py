@@ -2,25 +2,27 @@
 
 The two bridges below adapt the historical positional ``body_update_{2,3}d``
 call convention (a flat body-table layout, inherited from the retired
-hand-written CUDA/C++ ``_C.so`` extension) into ``native.streaming_sdf_stag_*_multi``
-calls.  They stream the immersed-body SDF + staggered body velocities using the
-native CUDA/C++ kernels (with CPU twins for CPU runs).
+hand-written CUDA/C++ ``_C.so`` extension) onto the per-body streaming-SDF
+kernels.  They stream the immersed-body SDF + staggered body velocities using
+the native CUDA/C++ kernels (with CPU twins for CPU runs).
 
-Bridges:
+Regime dispatch (per_body_key_buffers, item 2.4 — the union-AABB packed-key
+``_multi`` path is DELETED):
 
-* ``body_update_{2,3}d`` — streaming SDF + staggered body velocities (formerly
-  "Kernel A"), flat-table layout → native streaming_sdf_stag_{2,3}d_multi;
-  dtype-generic (f32+f64).  Per-bridge CUDA-graph capture is deferred (native
-  eager is fast enough); the per-step region is graph-captured at the whole-step
-  level by ``graph_capture.NativeWholeStepGraphRunner``.
+* pairwise-disjoint body AABBs → ``streaming_sdf_stag_{2,3}d_direct``
+  (single writer per cell, no keys, no atomics);
+* overlapping AABBs → ``streaming_sdf_stag_{2,3}d_resolve`` (per-body private
+  buffers + one-thread-per-cell per-stagger min resolve; full fp64, no
+  atomics; softmin velocity blend in-kernel when ``blend_eps > 0``).
+
+Per-bridge CUDA-graph capture is deferred (native eager is fast enough); the
+per-step region is graph-captured at the whole-step level by
+``graph_capture.NativeWholeStepGraphRunner``.
 """
 
 import torch
 
 from lilytorch.src import native
-
-# Streaming SDF "far" sentinel — atomsic-min needs untouched cells pre-filled to +FAR.
-_FAR = 1e4
 
 
 def _aabbs_are_disjoint(aabb_lo, aabb_dim):
@@ -77,17 +79,19 @@ def _regime_b_priv(B, max_vol, dtype, device, ndim):
     return offsets, ent["bufs"]
 
 
-def _native_body_update_2d(
+def body_update_2d(
     F_flat, F_offsets, body_shapes, body_meta, kin,
     aabb_lo, aabb_dim, gx, gy, h, max_vol,
     sdf_cc, sdf_u, sdf_v, body_u, body_v,
     interp_method,
     dirty_i0, dirty_j0, dirty_Ai, dirty_Aj,
-    num_u, num_v, den_u, den_v, blend_eps,
-    key_cc, key_u, key_v,
+    blend_eps=0.0,
     use_graph=False,  # ignored — native eager only for now
 ):
-    """Native 2-D streaming SDF body update (eager path)."""
+    """Native 2-D streaming SDF body update (eager path).
+
+    The caller (BDIMhandler) pre-fills ``sdf_*`` to +FAR and ``body_*`` to 0
+    before every call — the kernels only write body-covered cells."""
     if int(dirty_Ai) * int(dirty_Aj) <= 0:
         return
 
@@ -105,22 +109,12 @@ def _native_body_update_2d(
         return
 
     # Regime B (overlapping bodies): per-body private buffers + one-thread-per-
-    # cell resolve = deterministic true min, full fp64, no atomics/race.
-    # Validated byte-identical vs `_multi` (fp32) / ≤1e-9 (fp64) + GPU==CPU twin.
-    # (The direct kernel must NOT run here — its non-atomic gridDim.y=B write
-    # races overlapping bodies.)  Per-call priv-buffer alloc: eager path only,
-    # not yet graph-captured (see the 2.x graph-key note).
-    # The resolve kernel does not carry the softmin velocity blend (num/den);
-    # fall back to `_multi` (which does) when blending is on, so overlap+blend
-    # configs don't silently lose it. TODO(2.4): add blend to the resolve.
-    if float(blend_eps) > 0.0:
-        native.streaming_sdf_stag_2d_multi(
-            F_flat, F_offsets, body_shapes, body_meta, kin, aabb_lo, aabb_dim,
-            gx, gy, float(h), int(max_vol), sdf_cc, sdf_u, sdf_v, body_u, body_v,
-            key_cc, key_u, key_v, int(interp_method),
-            int(dirty_i0), int(dirty_j0), int(dirty_Ai), int(dirty_Aj),
-            num_u, num_v, den_u, den_v, float(blend_eps))
-        return
+    # cell PER-STAGGER min resolve = deterministic true min, full fp64, no
+    # atomics/race.  (The direct kernel must NOT run here — its non-atomic
+    # gridDim.y=B write races overlapping bodies.)  blend_eps > 0: softmin
+    # velocity blend accumulated in registers inside the resolve kernel
+    # (deterministic ordered sum).  Per-call priv-buffer offsets: eager path
+    # only, not yet graph-captured (see the 2.x graph-key note).
     priv_offsets, pb = _regime_b_priv(
         body_shapes.size(0), max_vol, sdf_cc.dtype, sdf_cc.device, 2)
     native.streaming_sdf_stag_2d_resolve(
@@ -129,21 +123,21 @@ def _native_body_update_2d(
         sdf_cc, sdf_u, sdf_v, body_u, body_v, int(interp_method),
         int(dirty_i0), int(dirty_j0), int(dirty_Ai), int(dirty_Aj),
         priv_offsets, pb[0], pb[1], pb[2], pb[3], pb[4],
+        blend_eps=float(blend_eps),
     )
 
 
-def _native_body_update_3d(
+def body_update_3d(
     F_flat, F_offsets, body_shapes, body_meta, kin,
     aabb_lo, aabb_dim, gx, gy, gz, h, max_vol,
     sdf_cc, sdf_u, sdf_v, sdf_w, body_u, body_v, body_w,
     interp_method,
     dirty_i0, dirty_j0, dirty_k0,
     dirty_Ai, dirty_Aj, dirty_Ak,
-    num_u, num_v, num_w, den_u, den_v, den_w, blend_eps,
-    key_cc, key_u, key_v, key_w,
+    blend_eps=0.0,
     use_graph=False,  # ignored — native eager only for now
 ):
-    """Native 3-D streaming SDF body update (eager path)."""
+    """Native 3-D streaming SDF body update (eager path).  See 2-D."""
     if int(dirty_Ai) * int(dirty_Aj) * int(dirty_Ak) <= 0:
         return
 
@@ -161,21 +155,7 @@ def _native_body_update_3d(
         )
         return
 
-    # Regime B (overlapping bodies): per-body private buffers + one-thread-per-
-    # cell resolve = deterministic true min, full fp64, no atomics/race.
-    # Validated byte-identical vs `_multi` (fp32) / ≤1e-9 (fp64) + GPU==CPU twin.
-    # Per-call priv-buffer alloc: eager path only, not yet graph-captured.
-    # Blend not carried by the resolve kernel — fall back to `_multi` (see 2-D).
-    if float(blend_eps) > 0.0:
-        native.streaming_sdf_stag_3d_multi(
-            F_flat, F_offsets, body_shapes, body_meta, kin, aabb_lo, aabb_dim,
-            gx, gy, gz, float(h), int(max_vol),
-            sdf_cc, sdf_u, sdf_v, sdf_w, body_u, body_v, body_w,
-            key_cc, key_u, key_v, key_w, int(interp_method),
-            int(dirty_i0), int(dirty_j0), int(dirty_k0),
-            int(dirty_Ai), int(dirty_Aj), int(dirty_Ak),
-            num_u, num_v, num_w, den_u, den_v, den_w, float(blend_eps))
-        return
+    # Regime B (overlapping bodies) — see the 2-D note.
     priv_offsets, pb = _regime_b_priv(
         body_shapes.size(0), max_vol, sdf_cc.dtype, sdf_cc.device, 3)
     native.streaming_sdf_stag_3d_resolve(
@@ -185,108 +165,11 @@ def _native_body_update_3d(
         int(dirty_i0), int(dirty_j0), int(dirty_k0),
         int(dirty_Ai), int(dirty_Aj), int(dirty_Ak),
         priv_offsets, pb[0], pb[1], pb[2], pb[3], pb[4], pb[5], pb[6],
+        blend_eps=float(blend_eps),
     )
 
-# ── body_update (2-D) → NATIVE (marshalling bridge) ─────────────────────────
-# body_update runs on native CUDA kernels + CPU twins at f32 AND f64.
 
-class _BodyUpdate2DBridge:
-    """Native 2-D streaming SDF body update bridge.
-
-    Allocates persistent per-grid int64 key scratch buffers on first call
-    (keyed on grid dimensions).  The SDF→FAR / body→0 resets are performed
-    by the caller (BDIMhandler) before this bridge is invoked; this matches
-    the contract the Warp bridge had (the fills were folded into the Warp
-    captured graph but the caller still pre-filled for the CPU path)."""
-
-    def __init__(self):
-        self._key_cache = {}  # (Ngx, Ngy, device_id, dtype_str) → (key_cc, key_u, key_v)
-
-    def _get_keys(self, Ngx, Ngy, device, dtype):
-        cache_key = (Ngx, Ngy, device.index if device.type == 'cuda' else -1,
-                     str(dtype))
-        if cache_key not in self._key_cache:
-            N = Ngx * Ngy
-            self._key_cache[cache_key] = (
-                torch.empty(N, dtype=torch.int64, device=device),
-                torch.empty(N, dtype=torch.int64, device=device),
-                torch.empty(N, dtype=torch.int64, device=device),
-            )
-        return self._key_cache[cache_key]
-
-    def __call__(self, F_flat, F_offsets, body_shapes, body_meta, kin,
-                 aabb_lo, aabb_dim, gx, gy, h, max_vol,
-                 sdf_cc, sdf_u, sdf_v, body_u, body_v,
-                 interp_method,
-                 dirty_i0, dirty_j0, dirty_Ai, dirty_Aj,
-                 num_u, num_v, den_u, den_v, blend_eps,
-                 use_graph=False):
-        Ngx, Ngy = int(sdf_cc.shape[0]), int(sdf_cc.shape[1])
-        key_cc, key_u, key_v = self._get_keys(Ngx, Ngy, sdf_cc.device,
-                                               sdf_cc.dtype)
-        _native_body_update_2d(
-            F_flat, F_offsets, body_shapes, body_meta, kin,
-            aabb_lo, aabb_dim, gx, gy, h, max_vol,
-            sdf_cc, sdf_u, sdf_v, body_u, body_v,
-            interp_method,
-            dirty_i0, dirty_j0, dirty_Ai, dirty_Aj,
-            num_u, num_v, den_u, den_v, blend_eps,
-            key_cc, key_u, key_v,
-            use_graph=use_graph,
-        )
-
-
-body_update_2d = _BodyUpdate2DBridge()
-
-
-# ── body_update (3-D) → NATIVE (marshalling bridge) ─────────────────────────
-
-class _BodyUpdate3DBridge:
-    """Native 3-D streaming SDF body update bridge.
-
-    3-D analogue of :class:`_BodyUpdate2DBridge`."""
-
-    def __init__(self):
-        self._key_cache = {}  # (Ngx, Ngy, Ngz, device_id, dtype_str) → keys
-
-    def _get_keys(self, Ngx, Ngy, Ngz, device, dtype):
-        cache_key = (Ngx, Ngy, Ngz,
-                     device.index if device.type == 'cuda' else -1,
-                     str(dtype))
-        if cache_key not in self._key_cache:
-            N = Ngx * Ngy * Ngz
-            self._key_cache[cache_key] = (
-                torch.empty(N, dtype=torch.int64, device=device),
-                torch.empty(N, dtype=torch.int64, device=device),
-                torch.empty(N, dtype=torch.int64, device=device),
-                torch.empty(N, dtype=torch.int64, device=device),
-            )
-        return self._key_cache[cache_key]
-
-    def __call__(self, F_flat, F_offsets, body_shapes, body_meta, kin,
-                 aabb_lo, aabb_dim, gx, gy, gz, h, max_vol,
-                 sdf_cc, sdf_u, sdf_v, sdf_w, body_u, body_v, body_w,
-                 interp_method,
-                 dirty_i0, dirty_j0, dirty_k0,
-                 dirty_Ai, dirty_Aj, dirty_Ak,
-                 num_u, num_v, num_w, den_u, den_v, den_w, blend_eps,
-                 use_graph=False):
-        Ngx, Ngy, Ngz = (int(sdf_cc.shape[0]), int(sdf_cc.shape[1]),
-                         int(sdf_cc.shape[2]))
-        key_cc, key_u, key_v, key_w = self._get_keys(Ngx, Ngy, Ngz,
-                                                      sdf_cc.device,
-                                                      sdf_cc.dtype)
-        _native_body_update_3d(
-            F_flat, F_offsets, body_shapes, body_meta, kin,
-            aabb_lo, aabb_dim, gx, gy, gz, h, max_vol,
-            sdf_cc, sdf_u, sdf_v, sdf_w, body_u, body_v, body_w,
-            interp_method,
-            dirty_i0, dirty_j0, dirty_k0,
-            dirty_Ai, dirty_Aj, dirty_Ak,
-            num_u, num_v, num_w, den_u, den_v, den_w, blend_eps,
-            key_cc, key_u, key_v, key_w,
-            use_graph=use_graph,
-        )
-
-
-body_update_3d = _BodyUpdate3DBridge()
+# Back-compat aliases (the bridge classes collapsed into plain functions when
+# the _multi key-scratch buffers were deleted in item 2.4).
+_native_body_update_2d = body_update_2d
+_native_body_update_3d = body_update_3d

@@ -210,7 +210,8 @@ __global__ void regime_b_resolve_kernel_2d(
     const scalar_t* __restrict__ priv_sdf_cc, const scalar_t* __restrict__ priv_sdf_u, const scalar_t* __restrict__ priv_sdf_v,
     const scalar_t* __restrict__ priv_body_u, const scalar_t* __restrict__ priv_body_v,
     scalar_t* __restrict__ sdf_cc, scalar_t* __restrict__ sdf_u, scalar_t* __restrict__ sdf_v,
-    scalar_t* __restrict__ body_u, scalar_t* __restrict__ body_v)
+    scalar_t* __restrict__ body_u, scalar_t* __restrict__ body_v,
+    const scalar_t blend_eps)
 {
     int local = blockIdx.x * blockDim.x + threadIdx.x;
     int di = local / dirty_Aj;
@@ -220,9 +221,20 @@ __global__ void regime_b_resolve_kernel_2d(
     int j = dirty_j0 + dj;
     int64_t g_idx = (int64_t)i * Ngy + j;
 
-    scalar_t best_cc = (scalar_t)1e4;
-    int best_b = -1;
-    int best_local = -1;
+    // Winner selection is PER STAGGER, mirroring _multi's independent
+    // atomicMin on key_cc/key_u/key_v: the union SDF at the u-face is
+    // min_b s_u(b), whose winner can differ from the cell-centre winner
+    // near inter-body seams (up to ~h/2 bias if the cc winner were reused).
+    // Velocity follows each stagger's own winner (or the softmin blend).
+    scalar_t best_cc = (scalar_t)1e4, best_u = (scalar_t)1e4, best_v = (scalar_t)1e4;
+    int64_t win_cc = -1, win_u = -1, win_v = -1;
+
+    // Softmin velocity blend (mirrors the _multi min-kernel/decode pair):
+    // w_i = sigmoid(-s_i/blend_eps) per stagger; accumulated in registers
+    // over the covering bodies in ascending-b order — deterministic, no
+    // atomics, no num/den scratch buffers.
+    const bool blend = blend_eps > scalar_t(0);
+    scalar_t num_u = 0, den_u = 0, num_v = 0, den_v = 0;
 
     for (int b = 0; b < B; ++b) {
         int Ai = (int)aabb_dim[b*2+0], Aj = (int)aabb_dim[b*2+1];
@@ -231,17 +243,29 @@ __global__ void regime_b_resolve_kernel_2d(
         int di_b = i - i0, dj_b = j - j0;
         int loc = di_b * Aj + dj_b;
         int64_t idx = priv_offsets[b] + loc;
-        scalar_t s = priv_sdf_cc[idx];
-        if (s < best_cc) { best_cc = s; best_b = b; best_local = loc; }
+        const scalar_t s_cc = priv_sdf_cc[idx];
+        const scalar_t s_u  = priv_sdf_u[idx];
+        const scalar_t s_v  = priv_sdf_v[idx];
+        if (s_cc < best_cc) { best_cc = s_cc; win_cc = idx; }
+        if (s_u  < best_u)  { best_u  = s_u;  win_u  = idx; }
+        if (s_v  < best_v)  { best_v  = s_v;  win_v  = idx; }
+        if (blend) {
+            const scalar_t wU = scalar_t(1) / (scalar_t(1) + exp(s_u / blend_eps));
+            const scalar_t wV = scalar_t(1) / (scalar_t(1) + exp(s_v / blend_eps));
+            num_u += wU * priv_body_u[idx]; den_u += wU;
+            num_v += wV * priv_body_v[idx]; den_v += wV;
+        }
     }
 
-    if (best_b >= 0) {
-        int64_t win_off = priv_offsets[best_b] + best_local;
-        sdf_cc[g_idx]  = best_cc;
-        sdf_u[g_idx]   = priv_sdf_u[win_off];
-        sdf_v[g_idx]   = priv_sdf_v[win_off];
-        body_u[g_idx]  = priv_body_u[win_off];
-        body_v[g_idx]  = priv_body_v[win_off];
+    if (win_cc >= 0) {
+        sdf_cc[g_idx] = best_cc;
+        sdf_u[g_idx]  = best_u;
+        sdf_v[g_idx]  = best_v;
+        const scalar_t den_tol = scalar_t(1e-6);
+        body_u[g_idx] = (blend && den_u > den_tol) ? num_u / den_u
+                                                   : priv_body_u[win_u];
+        body_v[g_idx] = (blend && den_v > den_tol) ? num_v / den_v
+                                                   : priv_body_v[win_v];
     }
     // else: cell not covered by any body → keep pre-existing values (FAR/0)
 }
@@ -326,7 +350,8 @@ __global__ void regime_b_resolve_kernel_3d(
     const scalar_t* __restrict__ priv_sdf_v, const scalar_t* __restrict__ priv_sdf_w,
     const scalar_t* __restrict__ priv_body_u, const scalar_t* __restrict__ priv_body_v, const scalar_t* __restrict__ priv_body_w,
     scalar_t* __restrict__ sdf_cc, scalar_t* __restrict__ sdf_u, scalar_t* __restrict__ sdf_v, scalar_t* __restrict__ sdf_w,
-    scalar_t* __restrict__ body_u, scalar_t* __restrict__ body_v, scalar_t* __restrict__ body_w)
+    scalar_t* __restrict__ body_u, scalar_t* __restrict__ body_v, scalar_t* __restrict__ body_w,
+    const scalar_t blend_eps)
 {
     int local = blockIdx.x * blockDim.x + threadIdx.x;
     int rem = local / dirty_Ak;
@@ -337,9 +362,14 @@ __global__ void regime_b_resolve_kernel_3d(
     int i = dirty_i0 + di, j = dirty_j0 + dj, k = dirty_k0 + dk;
     int64_t g_idx = ((int64_t)i * Ngy + j) * Ngz + k;
 
-    scalar_t best_cc = (scalar_t)1e4;
-    int best_b = -1;
-    int best_local = -1;
+    // Per-stagger winner selection — see the 2-D resolve kernel note.
+    scalar_t best_cc = (scalar_t)1e4, best_u = (scalar_t)1e4,
+             best_v = (scalar_t)1e4,  best_w = (scalar_t)1e4;
+    int64_t win_cc = -1, win_u = -1, win_v = -1, win_w = -1;
+
+    // Softmin velocity blend — see the 2-D resolve kernel note.
+    const bool blend = blend_eps > scalar_t(0);
+    scalar_t num_u = 0, den_u = 0, num_v = 0, den_v = 0, num_w = 0, den_w = 0;
 
     for (int b = 0; b < B; ++b) {
         int Ai = (int)aabb_dim[b*3+0], Aj = (int)aabb_dim[b*3+1], Ak = (int)aabb_dim[b*3+2];
@@ -348,19 +378,36 @@ __global__ void regime_b_resolve_kernel_3d(
         int di_b = i - i0, dj_b = j - j0, dk_b = k - k0;
         int loc = (di_b * Aj + dj_b) * Ak + dk_b;
         int64_t idx = priv_offsets[b] + loc;
-        scalar_t s = priv_sdf_cc[idx];
-        if (s < best_cc) { best_cc = s; best_b = b; best_local = loc; }
+        const scalar_t s_cc = priv_sdf_cc[idx];
+        const scalar_t s_u  = priv_sdf_u[idx];
+        const scalar_t s_v  = priv_sdf_v[idx];
+        const scalar_t s_w  = priv_sdf_w[idx];
+        if (s_cc < best_cc) { best_cc = s_cc; win_cc = idx; }
+        if (s_u  < best_u)  { best_u  = s_u;  win_u  = idx; }
+        if (s_v  < best_v)  { best_v  = s_v;  win_v  = idx; }
+        if (s_w  < best_w)  { best_w  = s_w;  win_w  = idx; }
+        if (blend) {
+            const scalar_t wU = scalar_t(1) / (scalar_t(1) + exp(s_u / blend_eps));
+            const scalar_t wV = scalar_t(1) / (scalar_t(1) + exp(s_v / blend_eps));
+            const scalar_t wW = scalar_t(1) / (scalar_t(1) + exp(s_w / blend_eps));
+            num_u += wU * priv_body_u[idx]; den_u += wU;
+            num_v += wV * priv_body_v[idx]; den_v += wV;
+            num_w += wW * priv_body_w[idx]; den_w += wW;
+        }
     }
 
-    if (best_b >= 0) {
-        int64_t win_off = priv_offsets[best_b] + best_local;
-        sdf_cc[g_idx]  = best_cc;
-        sdf_u[g_idx]   = priv_sdf_u[win_off];
-        sdf_v[g_idx]   = priv_sdf_v[win_off];
-        sdf_w[g_idx]   = priv_sdf_w[win_off];
-        body_u[g_idx]  = priv_body_u[win_off];
-        body_v[g_idx]  = priv_body_v[win_off];
-        body_w[g_idx]  = priv_body_w[win_off];
+    if (win_cc >= 0) {
+        sdf_cc[g_idx] = best_cc;
+        sdf_u[g_idx]  = best_u;
+        sdf_v[g_idx]  = best_v;
+        sdf_w[g_idx]  = best_w;
+        const scalar_t den_tol = scalar_t(1e-6);
+        body_u[g_idx] = (blend && den_u > den_tol) ? num_u / den_u
+                                                   : priv_body_u[win_u];
+        body_v[g_idx] = (blend && den_v > den_tol) ? num_v / den_v
+                                                   : priv_body_v[win_v];
+        body_w[g_idx] = (blend && den_w > den_tol) ? num_w / den_w
+                                                   : priv_body_w[win_w];
     }
 }
 
@@ -380,7 +427,8 @@ void streaming_sdf_stag_2d_resolve_cuda(
     int64_t dirty_i0, int64_t dirty_j0, int64_t dirty_Ai, int64_t dirty_Aj,
     const at::Tensor& priv_offsets,
     at::Tensor priv_sdf_cc, at::Tensor priv_sdf_u, at::Tensor priv_sdf_v,
-    at::Tensor priv_body_u, at::Tensor priv_body_v)
+    at::Tensor priv_body_u, at::Tensor priv_body_v,
+    double blend_eps)
 {
     int B = (int)aabb_dim.size(0);
     if (B <= 0 || dirty_Ai <= 0 || dirty_Aj <= 0) return;
@@ -428,7 +476,8 @@ void streaming_sdf_stag_2d_resolve_cuda(
                     priv_sdf_cc.data_ptr<scalar_t>(), priv_sdf_u.data_ptr<scalar_t>(), priv_sdf_v.data_ptr<scalar_t>(),
                     priv_body_u.data_ptr<scalar_t>(), priv_body_v.data_ptr<scalar_t>(),
                     sdf_cc.data_ptr<scalar_t>(), sdf_u.data_ptr<scalar_t>(), sdf_v.data_ptr<scalar_t>(),
-                    body_u.data_ptr<scalar_t>(), body_v.data_ptr<scalar_t>());
+                    body_u.data_ptr<scalar_t>(), body_v.data_ptr<scalar_t>(),
+                    (scalar_t)blend_eps);
             cudaError_t err = cudaGetLastError();
             if (err != cudaSuccess) {
                 AT_ERROR("regime_b_resolve_kernel_2d launch failed: ", cudaGetErrorString(err));
@@ -449,7 +498,8 @@ void streaming_sdf_stag_3d_resolve_cuda(
     int64_t dirty_Ai, int64_t dirty_Aj, int64_t dirty_Ak,
     const at::Tensor& priv_offsets,
     at::Tensor priv_sdf_cc, at::Tensor priv_sdf_u, at::Tensor priv_sdf_v, at::Tensor priv_sdf_w,
-    at::Tensor priv_body_u, at::Tensor priv_body_v, at::Tensor priv_body_w)
+    at::Tensor priv_body_u, at::Tensor priv_body_v, at::Tensor priv_body_w,
+    double blend_eps)
 {
     int B = (int)aabb_dim.size(0);
     if (B <= 0 || dirty_Ai <= 0 || dirty_Aj <= 0 || dirty_Ak <= 0) return;
@@ -495,7 +545,8 @@ void streaming_sdf_stag_3d_resolve_cuda(
                     priv_sdf_v.data_ptr<scalar_t>(), priv_sdf_w.data_ptr<scalar_t>(),
                     priv_body_u.data_ptr<scalar_t>(), priv_body_v.data_ptr<scalar_t>(), priv_body_w.data_ptr<scalar_t>(),
                     sdf_cc.data_ptr<scalar_t>(), sdf_u.data_ptr<scalar_t>(), sdf_v.data_ptr<scalar_t>(), sdf_w.data_ptr<scalar_t>(),
-                    body_u.data_ptr<scalar_t>(), body_v.data_ptr<scalar_t>(), body_w.data_ptr<scalar_t>());
+                    body_u.data_ptr<scalar_t>(), body_v.data_ptr<scalar_t>(), body_w.data_ptr<scalar_t>(),
+                    (scalar_t)blend_eps);
         }
         AT_CUDA_CHECK(cudaGetLastError());
     });

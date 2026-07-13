@@ -33,32 +33,6 @@ namespace lilytorch_kernels {
 
 // ----------------------- schemas -----------------------
 TORCH_LIBRARY(lilytorch_kernels, m) {
-    // Phase-I 3-D streaming SDF / face velocity update.  Kernel B
-    // computes rho_eff from mu0 in registers, so no per-cell
-    // winning-density tensor or rho_bodies input is needed.
-    //
-    // key_cc_t / key_u_t / key_v_t / key_w_t are caller-allocated int64
-    // scratch buffers of size >= Ngx*Ngy*Ngz (one per stagger) used to
-    // pack/unpack per-cell winning-body keys.  Moving them out of the
-    // kernel avoids a 4× empty allocation per call.
-    m.def(
-        "streaming_sdf_stag_3d_multi("
-        "Tensor F_flat, Tensor F_offsets,"
-        " Tensor body_shapes, Tensor body_meta, Tensor kin,"
-        " Tensor aabb_lo, Tensor aabb_dim,"
-        " Tensor gx, Tensor gy, Tensor gz, float h_grid,"
-        " int max_vol_per_body,"
-        " Tensor(a!) sdf_cc, Tensor(b!) sdf_u, Tensor(c!) sdf_v, Tensor(d!) sdf_w,"
-        " Tensor(e!) body_u, Tensor(f!) body_v, Tensor(g!) body_w,"
-        " Tensor(h!) key_cc_t, Tensor(i!) key_u_t, Tensor(j!) key_v_t, Tensor(k!) key_w_t,"
-        " int interp_method,"
-        " int dirty_i0, int dirty_j0, int dirty_k0,"
-        " int dirty_Ai, int dirty_Aj, int dirty_Ak,"
-        " Tensor(l!) num_u, Tensor(m!) num_v, Tensor(n!) num_w,"
-        " Tensor(o!) den_u, Tensor(p!) den_v, Tensor(q!) den_w,"
-        " float blend_eps"
-        ") -> ()");
-
     // Phase-I fused BDIM2 + variable-density Poisson coefficient kernel.
     // Reads advdiff outputs + Kernel-A face SDFs / body velocities, writes
     // the persistent velocity fields u0/v0/w0 and Poisson coefficients
@@ -78,28 +52,10 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " int mu0_projection"
         ") -> ()");
 
-    // BDIM-σ variant of bdim_coeff_3d (Lauber et al. 2022).
-    // For each cell the Poisson coefficient is evaluated with mu0 of a
-    // shifted SDF phi - sigma_shifts[body_id] (lookup via key_u/v/w), so
-    // thin bodies (r < eps) reach mu0_poisson = 0 inside the body and the
-    // pressure BC is correctly enforced.  The velocity BDIM fields
-    // (phi_out) are unchanged — only the Poisson coefficient line uses
-    // the shifted mu0.
-    m.def(
-        "bdim_coeff_sigma_3d("
-        "Tensor u_prime, Tensor v_prime, Tensor w_prime,"
-        " Tensor sdf_u, Tensor sdf_v, Tensor sdf_w,"
-        " Tensor body_u, Tensor body_v, Tensor body_w,"
-        " Tensor(a!) u0, Tensor(b!) v0, Tensor(c!) w0,"
-        " Tensor(d!) ch, Tensor(e!) cv, Tensor(f!) cw,"
-        " Tensor key_u, Tensor key_v, Tensor key_w,"
-        " Tensor sigma_shifts,"
-        " float eps, float rho_f, float dt,"
-        " float h_grid,"
-        " int dirty_i0, int dirty_j0, int dirty_k0,"
-        " int dirty_Ai, int dirty_Aj, int dirty_Ak,"
-        " int mu0_projection"
-        ") -> ()");
+    // NOTE (2.4): the BDIM-σ ops (bdim_coeff_sigma_{2,3}d) were removed with
+    // the packed-key union path — their body-id input existed only as the
+    // packed-key winner.  If BDIM-σ (Lauber et al. 2022) is revived, have the
+    // Regime-B resolve kernel emit a per-cell winner body-id field instead.
 
     m.def(
         "streaming_sdf_forces_post_3d("
@@ -125,30 +81,7 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " int max_dim0, int max_dim1"
         ") -> ()");
 
-    // Phase-I 2-D streaming SDF / face velocity update.
-    //
-    // key_cc_t / key_u_t / key_v_t are caller-allocated int64 scratch buffers
-    // of size >= Ngx*Ngy used to pack/unpack per-cell winning-body keys.
-    // Mirrors the 3-D version; required by BDIM-σ so the keys can be read
-    // by Kernel B (bdim_coeff_sigma_2d) after Kernel A populates them.
-    m.def(
-        "streaming_sdf_stag_2d_multi("
-        "Tensor F_flat, Tensor F_offsets,"
-        " Tensor body_shapes, Tensor body_meta, Tensor kin,"
-        " Tensor aabb_lo, Tensor aabb_dim,"
-        " Tensor gx, Tensor gy, float h_grid,"
-        " int max_vol_per_body,"
-        " Tensor(a!) sdf_cc, Tensor(b!) sdf_u, Tensor(c!) sdf_v,"
-        " Tensor(d!) body_u, Tensor(e!) body_v,"
-        " Tensor(f!) key_cc_t, Tensor(g!) key_u_t, Tensor(h!) key_v_t,"
-        " int interp_method,"
-        " int dirty_i0, int dirty_j0, int dirty_Ai, int dirty_Aj,"
-        " Tensor(l!) num_u, Tensor(m!) num_v,"
-        " Tensor(o!) den_u, Tensor(p!) den_v,"
-        " float blend_eps"
-        ") -> ()");
-
-    // ---- B=1 direct-write kernels (no keys, no atomics, no decode) ----------
+    // ---- direct-write kernels (disjoint bodies; no keys, no atomics) --------
     m.def(
         "streaming_sdf_stag_2d_direct("
         "Tensor F_flat, Tensor F_offsets,"
@@ -197,7 +130,8 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " int dirty_i0, int dirty_j0, int dirty_Ai, int dirty_Aj,"
         " Tensor priv_offsets,"
         " Tensor(f!) priv_sdf_cc, Tensor(g!) priv_sdf_u, Tensor(h!) priv_sdf_v,"
-        " Tensor(i!) priv_body_u, Tensor(j!) priv_body_v"
+        " Tensor(i!) priv_body_u, Tensor(j!) priv_body_v,"
+        " float blend_eps"
         ") -> ()");
 
     m.def(
@@ -214,7 +148,8 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " int dirty_Ai, int dirty_Aj, int dirty_Ak,"
         " Tensor priv_offsets,"
         " Tensor(h!) priv_sdf_cc, Tensor(i!) priv_sdf_u, Tensor(j!) priv_sdf_v, Tensor(k!) priv_sdf_w,"
-        " Tensor(l!) priv_body_u, Tensor(m!) priv_body_v, Tensor(n!) priv_body_w"
+        " Tensor(l!) priv_body_u, Tensor(m!) priv_body_v, Tensor(n!) priv_body_w,"
+        " float blend_eps"
         ") -> ()");
 
     // Phase-I fused BDIM2 + variable-density Poisson coefficient kernel (2-D).

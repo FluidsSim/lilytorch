@@ -1,56 +1,39 @@
-"""Phase-2 per-body-buffer parity gates (cuda_native_port plan item 10 / 2.1).
+"""Phase-2 per-body-buffer parity gates (cuda_native_port plan items 2.1–2.4).
 
-These are the *tests-first* gate for `milestones/per_body_key_buffers.md`.  The
-per-body-buffer work (items 2.2 / 2.3) replaces the union-AABB streaming-SDF
-pipeline with two regimes and must reproduce the union-AABB output:
+The streaming SDF runs on TWO regimes (the union-AABB packed-key ``_multi``
+path was DELETED in item 2.4):
 
-  * **Regime A** — disjoint bodies (incl. B=1): a direct-write kernel that
-    writes the winning SDF/velocity straight into the global tensors, no key
-    buffers, no init/decode pass.
-  * **Regime B** — overlapping links (multi-link robots): per-body PRIVATE
-    buffers (raw fp64, no packed key; single writer per slot) + a one-thread-
-    per-cell resolve that reads the covering bodies' buffers and picks the
-    deterministic true min.  No atomics, no race — see the resolve kernel.
+  * **Regime A** — pairwise-disjoint bodies (incl. B=1):
+    ``streaming_sdf_stag_{2,3}d_direct`` writes the winning SDF/velocity
+    straight into the global tensors (single writer per cell, no keys).
+  * **Regime B** — overlapping bodies (multi-link robots):
+    ``streaming_sdf_stag_{2,3}d_resolve`` — per-body PRIVATE buffers (raw
+    fp64, no packed key; single writer per slot) + a one-thread-per-cell
+    resolve that picks the PER-STAGGER minimum over the covering bodies
+    (mirrors the retired ``_multi``'s independent atomicMin per stagger).
+    ``blend_eps > 0`` adds the softmin velocity blend Σwᵢvᵢ/Σwᵢ,
+    wᵢ = sigmoid(-sᵢ/eps), accumulated in registers (deterministic).
 
-Reference oracle = the current union-AABB path `streaming_sdf_stag_{2,3}d_multi`.
-NOTE (2026-07-11 decision): the new per-body method is the SOLE path and `_multi`
-is being removed. `_multi` here is a *transitional* oracle; item 2.4 migrates
-these gates to the new CPU twin (new-GPU vs new-CPU) once the old path is deleted.
+Durable gate structure (post-2.4 oracle strategy — the ``_multi`` oracle is
+gone; correctness rests on):
 
-Parity contract (derived from ``csrc/cuda/packed_key.cuh``)
-----------------------------------------------------------
-The multi path routes each winning SDF through a 64-bit packed key that keeps
-the top 48 sortable bits and **drops the low 16 mantissa bits** to carry the
-body id.  Consequences for "byte-identical vs the union-AABB path":
+  1. **GPU == CPU twin** on the production facade dispatch, ALL layouts —
+     the race detector: a racing GPU path produces nondeterministic output
+     that cannot match the serial CPU twin.
+  2. **direct == resolve on disjoint scenes** (both GPU) — the cross-kernel
+     sampler-drift detector: the two kernels implement the same math with
+     separate device code; fp32 must be byte-identical.
+  3. Blend invariants: blend must not touch the SDF; on single-cover cells
+     the blend is a velocity no-op (Σwv/Σw = v); on overlap scenes it must
+     actually blend; blended GPU == blended CPU.
+  4. The coupled-sim gates (2-D + 3-D salamander, see the plan 2.4 log)
+     validated resolve == _multi BYTE-IDENTICAL (fp32 SDF) on real
+     multi-link geometry before the deletion.
 
-  * **SDF, fp32:** an fp32-origin value has those low 16 bits exactly zero, so
-    the key round-trips it bit-exactly.  A direct-write path that computes the
-    SDF with the *same sampler* therefore matches multi **byte-identically**
-    (`torch.equal`).  This is the strong, load-bearing gate: it forces 2.2/2.3
-    to reuse the identical `sdf_sample_dispatch_*` math rather than re-derive it.
-  * **SDF, fp64:** the key loses ~2^-36 (~1.5e-11) relative.  A direct-written
-    cell keeps the raw (more accurate) fp64 value, so it differs from multi's
-    quantised value at that floor — **not** byte-identical; gated at ``ATOL_F64``.
-    (Regime B stores raw fp64 in per-body buffers — no key — so it too is more
-    accurate than multi and differs from it at the ~1.5e-11 quantisation floor;
-    same ATOL_F64 tolerance as Regime A.  A >~1e-8 divergence means a lost
-    winner, i.e. a race — NOT a reason to relax this gate.)
-  * **Body velocity:** recomputed from the winning body id (never quantised),
-    so it does not carry the key floor; gated tightly (fp32 ``ATOL_F32``, fp64
-    ``ATOL_F64``).
-
-Test layers
------------
-  1. ``test_scene_*`` — guard the synthetic scenes: liveness, and that
-     "separated" is genuinely disjoint (Regime A) while "multilink" has real
-     overlap cells (Regime B).  Runs today.
-  2. ``test_facade_matches_multi_*`` — the production invariant.  Compares the
-     facade entry point ``_native_body_update_{2,3}d`` (which 2.2/2.3 will teach
-     to dispatch regimes) against the pinned multi reference.  Passes today
-     (facade → multi) and REMAINS the gate as the internals change.
-  3. ``test_direct_write_matches_multi_*`` — the op-level Regime-A gate.
-     **SKIPs** until ``native.streaming_sdf_stag_{2,3}d_direct`` exists (item
-     2.2 restores + generalises the reverted B=1 kernel); flips SKIP→PASS then.
+Scene note: body centres carry a sub-cell jitter and per-body velocities.
+Without the jitter the inter-body seams land exactly between cell centres
+and the per-stagger winner never differs from the cell-centre winner — the
+degenerate geometry that hid the resolve cc-winner-for-all-staggers bug.
 """
 from __future__ import annotations
 
@@ -65,22 +48,19 @@ DEV = "cuda:0"
 SKIP_NO_CUDA = pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA")
 FAR = 1e4
 
-# fp32 SDF is byte-identical; fp64 sits at the packed-key quantisation floor
-# (~1.5e-11, see packed_key.cuh).  ATOL_F64 is the house native-parity gate,
-# comfortably above the floor; ATOL_F32 bounds the (un-quantised) velocity.
+# fp64: house native-parity gate.  fp32 velocity bound; SDF cross-kernel
+# checks are byte-identity (same-device) or FMA-noise bounded (GPU vs CPU).
 ATOL_F64 = 1e-9
 ATOL_F32 = 2e-7
+_CPU_ATOL_F32 = 5e-6  # GPU-vs-CPU fp32 SDF FMA-ordering noise (3-D triquadratic)
 
-
-def _need(op_name: str):
-    if not hasattr(torch.ops.lilytorch_kernels, op_name):
-        pytest.skip(f"item 2.2: native op {op_name} not implemented yet")
+_BLEND_EPS_CELLS = 2.0  # matches gen_configs_swim_3d's body_velocity_blend_eps_cells
 
 
 # ── controlled synthetic scenes ─────────────────────────────────────────────
 # Each body is a disc/sphere SDF table, placed with R = identity and its centre
-# at the world-centre of its AABB (so every body writes live cells inside its
-# own AABB).  Layout controls the AABB arrangement, hence the regime.
+# near the world-centre of its AABB (sub-cell jitter, see module docstring).
+# Layout controls the AABB arrangement, hence the regime.
 
 def _disc_table_2d(M: int, r0: float):
     ax = np.linspace(-(M - 1) * 0.005, (M - 1) * 0.005, M).astype(np.float64)
@@ -116,9 +96,12 @@ def make_scene_2d(layout, dtype, Ngx=96, Ngy=72, M=32, r0=0.10, h=0.02):
     aabbs = _AABBS_2D[layout]
     B = len(aabbs)
     kin, alo, adim = [], [], []
-    for (i0, j0, Ai, Aj) in aabbs:
-        cx, cy = (i0 + Ai / 2) * h, (j0 + Aj / 2) * h
-        kin.append([1, 0, 0, 1, cx, cy, cx, cy, 0.1, -0.05, 0.3])  # R,bp,cm,lv,om
+    for b, (i0, j0, Ai, Aj) in enumerate(aabbs):
+        # Sub-cell jitter + per-body velocities — see the module docstring.
+        cx = (i0 + Ai / 2 + 0.23 * ((b % 3) - 1)) * h
+        cy = (j0 + Aj / 2 + 0.31 * ((b % 2) - 0.5)) * h
+        kin.append([1, 0, 0, 1, cx, cy, cx, cy,
+                    0.1 * (1 + b), -0.05 * (1 + 0.5 * b), 0.3 * (1 - 0.3 * b)])
         alo.append([i0, j0]); adim.append([Ai, Aj])
 
     def T(a, dt):
@@ -143,11 +126,15 @@ def make_scene_3d(layout, dtype, Ngx=40, Ngy=32, Ngz=32, M=16, r0=0.06, h=0.02):
     aabbs = _AABBS_3D[layout]
     B = len(aabbs)
     kin, alo, adim = [], [], []
-    for (i0, j0, k0, Ai, Aj, Ak) in aabbs:
-        cx, cy, cz = (i0 + Ai / 2) * h, (j0 + Aj / 2) * h, (k0 + Ak / 2) * h
+    for b, (i0, j0, k0, Ai, Aj, Ak) in enumerate(aabbs):
+        # Sub-cell jitter + per-body velocities — see the module docstring.
+        cx = (i0 + Ai / 2 + 0.23 * ((b % 3) - 1)) * h
+        cy = (j0 + Aj / 2 + 0.31 * ((b % 2) - 0.5)) * h
+        cz = (k0 + Ak / 2 + 0.17 * ((b % 3) - 1)) * h
         kin.append([1, 0, 0, 0, 1, 0, 0, 0, 1,          # R
                     cx, cy, cz, cx, cy, cz,             # bp, cm
-                    0.1, -0.05, 0.02, 0.3, -0.1, 0.05])  # lv, av
+                    0.1 * (1 + b), -0.05 * (1 + 0.5 * b), 0.02 * (1 + b),
+                    0.3 * (1 - 0.3 * b), -0.1 * (1 + 0.4 * b), 0.05 * (1 + b)])
         alo.append([i0, j0, k0]); adim.append([Ai, Aj, Ak])
 
     def T(a, dt):
@@ -171,7 +158,7 @@ def make_scene(dim, layout, dtype):
 
 
 def _dirty(sc):
-    """Union AABB = the dirty rect passed to the multi kernel."""
+    """Union AABB = the dirty rect passed to the streaming kernels."""
     alo = sc["aabb_lo"].cpu().numpy(); adim = sc["aabb_dim"].cpu().numpy()
     lo = alo.min(0); hi = (alo + adim).max(0)
     return lo.tolist(), (hi - lo).tolist()
@@ -190,79 +177,43 @@ def _coverage(sc):
     return cov
 
 
-# ── runners: reference (multi), production (facade), op-level (direct) ───────
+# ── runners ──────────────────────────────────────────────────────────────────
 
-def _out_buffers(sc, dtype):
+def _out_buffers(sc, dtype, dev=DEV):
     shp = (sc["Ngx"], sc["Ngy"]) if sc["dim"] == 2 else (sc["Ngx"], sc["Ngy"], sc["Ngz"])
     comps = ("cc", "u", "v") if sc["dim"] == 2 else ("cc", "u", "v", "w")
     vels = ("u", "v") if sc["dim"] == 2 else ("u", "v", "w")
-    out = {f"sdf_{c}": torch.full(shp, FAR, dtype=dtype, device=DEV) for c in comps}
-    out.update({f"body_{c}": torch.zeros(shp, dtype=dtype, device=DEV) for c in vels})
+    out = {f"sdf_{c}": torch.full(shp, FAR, dtype=dtype, device=dev) for c in comps}
+    out.update({f"body_{c}": torch.zeros(shp, dtype=dtype, device=dev) for c in vels})
     return out
 
 
-def _out_buffers_cpu(sc, dtype):
-    shp = (sc["Ngx"], sc["Ngy"]) if sc["dim"] == 2 else (sc["Ngx"], sc["Ngy"], sc["Ngz"])
-    comps = ("cc", "u", "v") if sc["dim"] == 2 else ("cc", "u", "v", "w")
-    vels = ("u", "v") if sc["dim"] == 2 else ("u", "v", "w")
-    out = {f"sdf_{c}": torch.full(shp, FAR, dtype=dtype, device="cpu") for c in comps}
-    out.update({f"body_{c}": torch.zeros(shp, dtype=dtype, device="cpu") for c in vels})
-    return out
-
-
-def run_multi(sc, dtype):
-    out = _out_buffers(sc, dtype)
-    N = int(np.prod([sc["Ngx"], sc["Ngy"]] + ([sc["Ngz"]] if sc["dim"] == 3 else [])))
-    lo, dim = _dirty(sc)
-    keys = [torch.empty(N, dtype=torch.int64, device=DEV) for _ in out if _.startswith("sdf")]
-    z = lambda: torch.zeros(1, dtype=dtype, device=DEV)
-    if sc["dim"] == 2:
-        native.streaming_sdf_stag_2d_multi(
-            sc["F_flat"], sc["F_offsets"], sc["body_shapes"], sc["body_meta"], sc["kin"],
-            sc["aabb_lo"], sc["aabb_dim"], sc["gx"], sc["gy"], sc["h"], sc["max_vol"],
-            out["sdf_cc"], out["sdf_u"], out["sdf_v"], out["body_u"], out["body_v"],
-            keys[0], keys[1], keys[2], 0, lo[0], lo[1], dim[0], dim[1],
-            z(), z(), z(), z(), 0.0)
-    else:
-        native.streaming_sdf_stag_3d_multi(
-            sc["F_flat"], sc["F_offsets"], sc["body_shapes"], sc["body_meta"], sc["kin"],
-            sc["aabb_lo"], sc["aabb_dim"], sc["gx"], sc["gy"], sc["gz"], sc["h"], sc["max_vol"],
-            out["sdf_cc"], out["sdf_u"], out["sdf_v"], out["sdf_w"],
-            out["body_u"], out["body_v"], out["body_w"],
-            keys[0], keys[1], keys[2], keys[3], 0, lo[0], lo[1], lo[2], dim[0], dim[1], dim[2],
-            z(), z(), z(), z(), z(), z(), 0.0)
-    return out
-
-
-def run_facade(sc, dtype, dev=DEV):
+def run_facade(sc, dtype, dev=DEV, blend_eps=0.0):
     """Production dispatch: Regime A (direct) for disjoint, Regime B (resolve)
     for overlap.  `dev` lets the GPU-vs-CPU twin gate drive the same path on CPU."""
-    out = _out_buffers(sc, dtype) if dev != "cpu" else _out_buffers_cpu(sc, dtype)
-    N = int(np.prod([sc["Ngx"], sc["Ngy"]] + ([sc["Ngz"]] if sc["dim"] == 3 else [])))
+    out = _out_buffers(sc, dtype, dev=dev)
     lo, dim = _dirty(sc)
-    keys = [torch.empty(N, dtype=torch.int64, device=dev) for _ in out if _.startswith("sdf")]
-    z = lambda: torch.zeros(1, dtype=dtype, device=dev)
     if sc["dim"] == 2:
-        facade._native_body_update_2d(
+        facade.body_update_2d(
             sc["F_flat"], sc["F_offsets"], sc["body_shapes"], sc["body_meta"], sc["kin"],
             sc["aabb_lo"], sc["aabb_dim"], sc["gx"], sc["gy"], sc["h"], sc["max_vol"],
             out["sdf_cc"], out["sdf_u"], out["sdf_v"], out["body_u"], out["body_v"],
             0, lo[0], lo[1], dim[0], dim[1],
-            z(), z(), z(), z(), 0.0, keys[0], keys[1], keys[2])
+            blend_eps=float(blend_eps))
     else:
-        facade._native_body_update_3d(
+        facade.body_update_3d(
             sc["F_flat"], sc["F_offsets"], sc["body_shapes"], sc["body_meta"], sc["kin"],
             sc["aabb_lo"], sc["aabb_dim"], sc["gx"], sc["gy"], sc["gz"], sc["h"], sc["max_vol"],
             out["sdf_cc"], out["sdf_u"], out["sdf_v"], out["sdf_w"],
             out["body_u"], out["body_v"], out["body_w"],
             0, lo[0], lo[1], lo[2], dim[0], dim[1], dim[2],
-            z(), z(), z(), z(), z(), z(), 0.0, keys[0], keys[1], keys[2], keys[3])
+            blend_eps=float(blend_eps))
     return out
 
 
-def run_direct(sc, dtype):
-    """Op-level Regime-A direct-write path (item 2.2).  Requires the native op."""
-    out = _out_buffers(sc, dtype)
+def run_direct(sc, dtype, dev=DEV):
+    """Op-level Regime-A direct-write path (disjoint layouts only)."""
+    out = _out_buffers(sc, dtype, dev=dev)
     lo, dim = _dirty(sc)
     if sc["dim"] == 2:
         native.streaming_sdf_stag_2d_direct(
@@ -280,31 +231,37 @@ def run_direct(sc, dtype):
     return out
 
 
-# ── the parity contract ─────────────────────────────────────────────────────
+def run_resolve(sc, dtype, dev=DEV, blend_eps=0.0):
+    """Op-level Regime-B resolve path, forced on ANY layout (incl. disjoint —
+    the resolve is regime-agnostic; only its performance motivates the direct
+    kernel for disjoint sets)."""
+    out = _out_buffers(sc, dtype, dev=dev)
+    lo, dim = _dirty(sc)
+    device = out["sdf_cc"].device
+    priv_offsets, pb = facade._regime_b_priv(
+        sc["body_shapes"].size(0), sc["max_vol"], dtype, device, sc["dim"])
+    if sc["dim"] == 2:
+        native.streaming_sdf_stag_2d_resolve(
+            sc["F_flat"], sc["F_offsets"], sc["body_shapes"], sc["body_meta"], sc["kin"],
+            sc["aabb_lo"], sc["aabb_dim"], sc["gx"], sc["gy"], sc["h"], sc["max_vol"],
+            out["sdf_cc"], out["sdf_u"], out["sdf_v"], out["body_u"], out["body_v"],
+            0, lo[0], lo[1], dim[0], dim[1],
+            priv_offsets, pb[0], pb[1], pb[2], pb[3], pb[4],
+            blend_eps=float(blend_eps))
+    else:
+        native.streaming_sdf_stag_3d_resolve(
+            sc["F_flat"], sc["F_offsets"], sc["body_shapes"], sc["body_meta"], sc["kin"],
+            sc["aabb_lo"], sc["aabb_dim"], sc["gx"], sc["gy"], sc["gz"], sc["h"], sc["max_vol"],
+            out["sdf_cc"], out["sdf_u"], out["sdf_v"], out["sdf_w"],
+            out["body_u"], out["body_v"], out["body_w"],
+            0, lo[0], lo[1], lo[2], dim[0], dim[1], dim[2],
+            priv_offsets, pb[0], pb[1], pb[2], pb[3], pb[4], pb[5], pb[6],
+            blend_eps=float(blend_eps))
+    return out
 
-def assert_matches_multi(ref, got, dtype, label):
-    """Unified contract vs the union-AABB reference (the deterministic true min).
 
-    SDF fields:  fp32 → byte-identical (torch.equal); fp64 → ≤ ATOL_F64.
-    Velocity:    ≤ ATOL_F32 (fp32) / ATOL_F64 (fp64).
-
-    This holds for BOTH regimes: `_multi` (atomicMin), the disjoint direct-write
-    kernel, and — once correct — the Regime-B resolve all compute the same true
-    minimum.  A path that diverges here at the ~0.1 level is losing the winner
-    (e.g. the direct kernel *raced* on overlapping bodies — that is a bug in the
-    path, NOT a reason to relax this gate; the atomic/serial min is the truth).
-    """
-    for k, v in ref.items():
-        g = got[k]
-        if k.startswith("sdf") and dtype == torch.float32:
-            assert torch.equal(v, g), (
-                f"[{label}] {k} not byte-identical in fp32 "
-                f"(maxdiff={(v - g).abs().max().item():.3e}); the direct/resolve "
-                f"path must reuse the multi sampler bit-for-bit")
-        else:
-            atol = ATOL_F32 if (dtype == torch.float32 and k.startswith("body")) else ATOL_F64
-            md = (v - g).abs().max().item()
-            assert md <= atol, f"[{label}] {k} maxdiff {md:.3e} > {atol:.1e}"
+def _to_cpu_scene(sc):
+    return {k: (v.cpu() if isinstance(v, torch.Tensor) else v) for k, v in sc.items()}
 
 
 # ── layer 1: scene guards ────────────────────────────────────────────────────
@@ -314,7 +271,7 @@ def assert_matches_multi(ref, got, dtype, label):
 @pytest.mark.parametrize("layout", ALL_LAYOUTS)
 def test_scene_liveness(dim, layout):
     sc = make_scene(dim, layout, torch.float32)
-    out = run_multi(sc, torch.float32)
+    out = run_facade(sc, torch.float32)
     live = (out["sdf_cc"] < 1e3).sum().item()
     assert live > 0, f"{dim}D {layout}: no live cells (vacuous scene)"
 
@@ -332,120 +289,58 @@ def test_scene_regime(dim, layout):
         assert n_overlap > 0, f"{dim}D {layout}: multilink must have overlap cells"
 
 
-# ── layer 2: production invariant (runs now, gate through 2.2/2.3) ───────────
-
-@SKIP_NO_CUDA
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
-@pytest.mark.parametrize("dim", [2, 3])
-@pytest.mark.parametrize("layout", ALL_LAYOUTS)
-def test_facade_matches_multi(dim, layout, dtype):
-    sc = make_scene(dim, layout, dtype)
-    ref = run_multi(sc, dtype)
-    got = run_facade(sc, dtype)
-    assert_matches_multi(ref, got, dtype, f"facade/{dim}D/{layout}/{dtype}")
-
-
-# ── layer 3: op-level Regime-A gate (SKIP until item 2.2 lands) ──────────────
+# ── layer 2: cross-kernel gate — direct == resolve on disjoint scenes ────────
 
 @SKIP_NO_CUDA
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 @pytest.mark.parametrize("dim", [2, 3])
 @pytest.mark.parametrize("layout", DISJOINT)
-def test_direct_write_matches_multi(dim, layout, dtype):
-    _need(f"streaming_sdf_stag_{dim}d_direct")
+def test_direct_eq_resolve_disjoint(dim, layout, dtype):
+    """The two kernels implement the same sampler math in separate device
+    code; on disjoint scenes their output must agree — fp32 byte-identical
+    (sampler-drift detector), fp64 ≤ ATOL_F64."""
     sc = make_scene(dim, layout, dtype)
-    ref = run_multi(sc, dtype)
-    got = run_direct(sc, dtype)
-    assert_matches_multi(ref, got, dtype, f"direct/{dim}D/{layout}/{dtype}")
+    a = run_direct(sc, dtype)
+    b = run_resolve(sc, dtype)
+    for k, v in a.items():
+        if dtype == torch.float32:
+            assert torch.equal(v, b[k]), (
+                f"[direct_eq_resolve/{dim}D/{layout}] {k} not byte-identical "
+                f"(maxdiff={(v - b[k]).abs().max().item():.3e}); the two "
+                f"kernels' samplers have drifted apart")
+        else:
+            md = (v - b[k]).abs().max().item()
+            assert md <= ATOL_F64, f"[direct_eq_resolve/{dim}D/{layout}] {k} maxdiff {md:.3e}"
 
 
-# ── layer 4: durable GPU-vs-CPU twin gate (item 2.2) ─────────────────────────
+# ── layer 3: durable GPU-vs-CPU twin gates (race detectors) ──────────────────
+
+def _assert_gpu_eq_cpu(out_gpu, out_cpu, dtype, label):
+    for k in out_gpu:
+        md = (out_gpu[k].cpu() - out_cpu[k]).abs().max().item()
+        if dtype == torch.float32:
+            atol = _CPU_ATOL_F32 if k.startswith("sdf") else ATOL_F32
+        else:
+            atol = ATOL_F64
+        assert md <= atol, f"[{label}] {k} maxdiff {md:.3e} > {atol:.1e}"
+
 
 @SKIP_NO_CUDA
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 @pytest.mark.parametrize("dim", [2, 3])
 @pytest.mark.parametrize("layout", DISJOINT)
 def test_direct_gpu_eq_cpu(dim, layout, dtype):
-    """Regime-A direct kernel: GPU output must match CPU twin."""
-    _need(f"streaming_sdf_stag_{dim}d_direct")
-    sc_gpu = make_scene(dim, layout, dtype)
-    # Run on GPU
-    out_gpu = _out_buffers(sc_gpu, dtype)
-    lo, dirty_dim = _dirty(sc_gpu)
-    if dim == 2:
-        native.streaming_sdf_stag_2d_direct(
-            sc_gpu["F_flat"], sc_gpu["F_offsets"], sc_gpu["body_shapes"],
-            sc_gpu["body_meta"], sc_gpu["kin"],
-            sc_gpu["aabb_lo"], sc_gpu["aabb_dim"],
-            sc_gpu["gx"], sc_gpu["gy"], sc_gpu["h"], sc_gpu["max_vol"],
-            out_gpu["sdf_cc"], out_gpu["sdf_u"], out_gpu["sdf_v"],
-            out_gpu["body_u"], out_gpu["body_v"],
-            0, lo[0], lo[1], dirty_dim[0], dirty_dim[1])
-    else:
-        native.streaming_sdf_stag_3d_direct(
-            sc_gpu["F_flat"], sc_gpu["F_offsets"], sc_gpu["body_shapes"],
-            sc_gpu["body_meta"], sc_gpu["kin"],
-            sc_gpu["aabb_lo"], sc_gpu["aabb_dim"],
-            sc_gpu["gx"], sc_gpu["gy"], sc_gpu["gz"], sc_gpu["h"], sc_gpu["max_vol"],
-            out_gpu["sdf_cc"], out_gpu["sdf_u"], out_gpu["sdf_v"], out_gpu["sdf_w"],
-            out_gpu["body_u"], out_gpu["body_v"], out_gpu["body_w"],
-            0, lo[0], lo[1], lo[2], dirty_dim[0], dirty_dim[1], dirty_dim[2])
+    """Regime-A direct kernel: GPU output must match the CPU twin."""
+    sc = make_scene(dim, layout, dtype)
+    out_gpu = run_direct(sc, dtype)
+    out_cpu = run_direct(_to_cpu_scene(sc), dtype, dev="cpu")
+    _assert_gpu_eq_cpu(out_gpu, out_cpu, dtype, f"direct_gpu_eq_cpu/{dim}D/{layout}/{dtype}")
 
-    # Run same scene on CPU
-    sc_cpu = {}
-    for k, v in sc_gpu.items():
-        if isinstance(v, torch.Tensor):
-            sc_cpu[k] = v.cpu()
-        else:
-            sc_cpu[k] = v
-    out_cpu = _out_buffers_cpu(sc_cpu, dtype)
-    if dim == 2:
-        native.streaming_sdf_stag_2d_direct(
-            sc_cpu["F_flat"], sc_cpu["F_offsets"], sc_cpu["body_shapes"],
-            sc_cpu["body_meta"], sc_cpu["kin"],
-            sc_cpu["aabb_lo"], sc_cpu["aabb_dim"],
-            sc_cpu["gx"], sc_cpu["gy"], sc_cpu["h"], sc_cpu["max_vol"],
-            out_cpu["sdf_cc"], out_cpu["sdf_u"], out_cpu["sdf_v"],
-            out_cpu["body_u"], out_cpu["body_v"],
-            0, lo[0], lo[1], dirty_dim[0], dirty_dim[1])
-    else:
-        native.streaming_sdf_stag_3d_direct(
-            sc_cpu["F_flat"], sc_cpu["F_offsets"], sc_cpu["body_shapes"],
-            sc_cpu["body_meta"], sc_cpu["kin"],
-            sc_cpu["aabb_lo"], sc_cpu["aabb_dim"],
-            sc_cpu["gx"], sc_cpu["gy"], sc_cpu["gz"], sc_cpu["h"], sc_cpu["max_vol"],
-            out_cpu["sdf_cc"], out_cpu["sdf_u"], out_cpu["sdf_v"], out_cpu["sdf_w"],
-            out_cpu["body_u"], out_cpu["body_v"], out_cpu["body_w"],
-            0, lo[0], lo[1], lo[2], dirty_dim[0], dirty_dim[1], dirty_dim[2])
-
-    # Compare GPU vs CPU (both direct).
-    # fp32 SDF: GPU vs CPU may differ by ~1e-6 due to different FMA ordering
-    # in the sampler accumulators (CUDA vs at::parallel_for).
-    _DIRECT_CPU_ATOL_F32 = 1e-6
-    for k in out_gpu:
-        g = out_gpu[k].cpu()
-        c = out_cpu[k]
-        if dtype == torch.float32 and k.startswith("sdf"):
-            md = (g - c).abs().max().item()
-            assert md <= _DIRECT_CPU_ATOL_F32, (
-                f"[gpu_eq_cpu/{dim}D/{layout}/{dtype}] {k} maxdiff {md:.3e} > {_DIRECT_CPU_ATOL_F32:.1e}")
-        elif dtype == torch.float32 and k.startswith("body"):
-            md = (g - c).abs().max().item()
-            assert md <= ATOL_F32, (
-                f"[gpu_eq_cpu/{dim}D/{layout}/{dtype}] {k} maxdiff {md:.3e} > {ATOL_F32:.1e}")
-        else:
-            # fp64: expect tight match
-            md = (g - c).abs().max().item()
-            assert md <= ATOL_F64, (
-                f"[gpu_eq_cpu/{dim}D/{layout}/{dtype}] {k} maxdiff {md:.3e} > {ATOL_F64:.1e}")
-
-
-# ── layer 5: Regime-B durable parity gate (GPU vs CPU twin, item 2.3) ────────
 
 @SKIP_NO_CUDA
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 @pytest.mark.parametrize("dim", [2, 3])
-@pytest.mark.parametrize("layout", ALL_LAYOUTS)  # includes multilink (Regime B)
+@pytest.mark.parametrize("layout", ALL_LAYOUTS)
 def test_regimeB_gpu_eq_cpu(dim, layout, dtype):
     """Race detector: the production facade dispatch (Regime A direct for
     disjoint, Regime B resolve for overlap) must give GPU == CPU.
@@ -456,23 +351,64 @@ def test_regimeB_gpu_eq_cpu(dim, layout, dtype):
     layouts, including `multilink` (overlap → Regime-B resolve).  Do NOT special-
     case multilink to the direct kernel — that is the race that this gate exists
     to catch."""
-    sc_gpu = make_scene(dim, layout, dtype)
-    out_gpu = run_facade(sc_gpu, dtype, dev=DEV)
-    sc_cpu = {k: (v.cpu() if isinstance(v, torch.Tensor) else v)
-              for k, v in sc_gpu.items()}
-    out_cpu = run_facade(sc_cpu, dtype, dev="cpu")
+    sc = make_scene(dim, layout, dtype)
+    out_gpu = run_facade(sc, dtype, dev=DEV)
+    out_cpu = run_facade(_to_cpu_scene(sc), dtype, dev="cpu")
+    _assert_gpu_eq_cpu(out_gpu, out_cpu, dtype, f"regimeB_gpu_eq_cpu/{dim}D/{layout}/{dtype}")
 
-    # fp32 SDF: GPU vs CPU differ ~1e-6 (2-D bilinear) up to ~5e-6 (3-D
-    # triquadratic) from FMA ordering; velocity/fp64 are tight.
-    _CPU_ATOL_F32 = 5e-6
-    for k in out_gpu:
-        md = (out_gpu[k].cpu() - out_cpu[k]).abs().max().item()
-        if dtype == torch.float32 and k.startswith("sdf"):
-            atol = _CPU_ATOL_F32
-        elif dtype == torch.float32 and k.startswith("body"):
-            atol = ATOL_F32
+
+# ── layer 4: softmin velocity-blend gates ────────────────────────────────────
+# blend_eps > 0 replaces the winner-take-all body velocity with the softmin
+# blend Σwᵢvᵢ/Σwᵢ, wᵢ = sigmoid(-sᵢ/eps) per stagger, accumulated in registers
+# over the covering bodies (ascending b — deterministic, no atomics).
+
+@SKIP_NO_CUDA
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("dim", [2, 3])
+@pytest.mark.parametrize("layout", ["multilink"])
+def test_blend_gpu_eq_cpu(dim, layout, dtype):
+    """Race/parity detector for the blended resolve: GPU == CPU twin."""
+    sc = make_scene(dim, layout, dtype)
+    blend_eps = _BLEND_EPS_CELLS * sc["h"]
+    out_gpu = run_facade(sc, dtype, dev=DEV, blend_eps=blend_eps)
+    out_cpu = run_facade(_to_cpu_scene(sc), dtype, dev="cpu", blend_eps=blend_eps)
+    _assert_gpu_eq_cpu(out_gpu, out_cpu, dtype, f"blend_gpu_eq_cpu/{dim}D/{layout}/{dtype}")
+
+
+@SKIP_NO_CUDA
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("dim", [2, 3])
+@pytest.mark.parametrize("layout", DISJOINT)
+def test_blend_single_cover_noop(dim, layout, dtype):
+    """On disjoint scenes every covered cell has exactly one covering body, so
+    the blend must be a velocity no-op (Σwv/Σw = v up to one rounding) and the
+    SDF must be untouched.  This is also why the facade may keep routing
+    disjoint scenes to the (blend-less) direct kernel with blend_eps > 0."""
+    sc = make_scene(dim, layout, dtype)
+    hard = run_resolve(sc, dtype)
+    soft = run_resolve(sc, dtype, blend_eps=_BLEND_EPS_CELLS * sc["h"])
+    for k in hard:
+        md = (hard[k] - soft[k]).abs().max().item()
+        if k.startswith("sdf"):
+            assert md == 0.0, f"[blend_noop/{dim}D/{layout}] {k} SDF changed by blend"
         else:
-            atol = ATOL_F64
-        assert md <= atol, (
-            f"[regimeB_gpu_eq_cpu/{dim}D/{layout}/{dtype}] {k} maxdiff {md:.3e}"
-            f" > {atol:.1e}")
+            atol = ATOL_F32 if dtype == torch.float32 else ATOL_F64
+            assert md <= atol, f"[blend_noop/{dim}D/{layout}] {k} maxdiff {md:.3e}"
+
+
+@SKIP_NO_CUDA
+@pytest.mark.parametrize("dim", [2, 3])
+def test_blend_actually_blends(dim):
+    """Guard against a silently-ignored blend_eps: on an overlap scene the
+    blended velocity field must differ from the winner-take-all one in the
+    seam band (bodies have distinct velocities there)."""
+    dtype = torch.float64
+    sc = make_scene(dim, "multilink", dtype)
+    hard = run_facade(sc, dtype)
+    soft = run_facade(sc, dtype, blend_eps=_BLEND_EPS_CELLS * sc["h"])
+    diff = max((hard[k] - soft[k]).abs().max().item()
+               for k in hard if k.startswith("body"))
+    assert diff > 1e-6, "blend_eps>0 produced the identical velocity field"
+    sdf_diff = max((hard[k] - soft[k]).abs().max().item()
+                   for k in hard if k.startswith("sdf"))
+    assert sdf_diff == 0.0, "blend must not change the SDF"
