@@ -24,23 +24,10 @@ Sign / value convention::
 import torch
 
 from lilytorch.src.advection import _sl
-# cuda_native_port Phase 4.3: native cvof_sweep now has a CPU twin
-# (multigrid_cpu.cpp), so use it everywhere.  The Warp cvof is kept
-# importable as a transitional parity oracle only.
+# Native cvof_sweep: CUDA kernel + CPU twin (multigrid_cpu.cpp), bit-exact vs
+# the Warp oracle on both devices (test_cvof.py) — the sole production path.
+# The Warp cvof lives on in lilytorch.src.cvof as the tests' parity oracle.
 from lilytorch.src.native import cvof_sweep as _native_cvof_sweep
-from lilytorch.src.cvof import cvof_sweep_warp  # kept as CPU fallback only
-
-
-def _cvof_sweep_dispatcher(a, u_d, cfl, face_dim, out):
-    """Dispatch cvof sweep: native on CUDA, Warp on CPU.
-
-    The native CUDA kernel is validated (test_cvof.py) and has a CPU twin.
-    We keep Warp as a CPU fallback until the native CPU twin is fully
-    validated on all edge cases."""
-    if a.is_cuda:
-        _native_cvof_sweep(a, u_d, cfl, face_dim, out)
-    else:
-        cvof_sweep_warp(a, u_d, cfl, face_dim, out)
 
 
 def _neumann_pad(q):
@@ -216,13 +203,12 @@ class TwoPhase:
     def _cvof_sweep(self, a, u_d, d, dt):
         """One Weymouth-Yue conservative directional sweep along dim ``d``.
 
-        Dispatches to the native ``cvof_sweep`` CUDA kernel (with CPU twin)
-        for performance; falls back to the Warp kernel on CPU only when the
-        native CPU twin is not available.  The pure-PyTorch reference is kept
-        as the independent parity oracle in ``tests/test_two_phase.py``.
+        Runs the native ``cvof_sweep`` op (CUDA kernel / CPU twin).  The
+        pure-PyTorch reference is kept as the independent parity oracle in
+        ``tests/test_two_phase.py``.
         """
         out = a.clone()
-        _cvof_sweep_dispatcher(a, u_d, float(dt) / self.h, d, out)
+        _native_cvof_sweep(a, u_d, float(dt) / self.h, d, out)
         return out
 
     def advect_graph_aware(self, *vels, dt):
@@ -244,14 +230,13 @@ class TwoPhase:
         if getattr(self, "_sweep_parity", False):
             order = order[::-1]
 
-        # Lazily allocate persistent double-buffer intermediates
+        # Lazily allocate the persistent intermediate: the sweeps ping-pong
+        # between ``alpha`` and this one scratch buffer.
         shape = self.alpha.shape
-        device = self.alpha.device
-        dtype = self.alpha.dtype
         if (getattr(self, "_cvof_buf_a", None) is None
                 or self._cvof_buf_a.shape != shape):
-            self._cvof_buf_a = torch.empty(shape, dtype=dtype, device=device)
-            self._cvof_buf_b = torch.empty(shape, dtype=dtype, device=device)
+            self._cvof_buf_a = torch.empty(
+                shape, dtype=self.alpha.dtype, device=self.alpha.device)
 
         # Double-buffer: read from src, write to dst, then swap
         src = self.alpha
@@ -259,7 +244,7 @@ class TwoPhase:
         for d in order:
             _neumann_pad(src)
             dst.copy_(src)  # persistent clone
-            _cvof_sweep_dispatcher(src, vels[d], float(dt) / self.h, d, dst)
+            _native_cvof_sweep(src, vels[d], float(dt) / self.h, d, dst)
             src, dst = dst, src  # swap: output becomes next input
         _neumann_pad(src)
 

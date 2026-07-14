@@ -13,8 +13,8 @@ FARMS coupling) runs through the untouched base solver byte-for-byte. The
 overrides are:
 
 * ``__init__`` — build the :class:`~lilytorch.src.two_phase.TwoPhase` field.
-* ``_compute_bdim_coefficients`` / ``_apply_bdim_all_axes`` — **consistent-
-  momentum (python-style) path**: projection coefficients
+* ``_compute_bdim_coefficients`` / ``_apply_bdim_all_axes`` — **python
+  path**: projection coefficients
   ``c = dt·μ0_eff·(1/ρ)_fluid`` from the VOF water/air density (Weymouth &
   Yue 2011, ``(1−δ^B)/ρ``; the body enters via ``μ0`` only, never its
   density) and the air-transparent mu0/mu1 masking of the velocity BDIM.
@@ -46,7 +46,6 @@ import torch
 
 from lilytorch.src.solver import FluidSolver
 from lilytorch.src import forces as _forces
-from lilytorch.src import diffusion as _diffusion
 from lilytorch.src.advection import _sl
 from lilytorch.src.two_phase import TwoPhase
 
@@ -163,6 +162,11 @@ class TwoPhaseSolver(FluidSolver):
     """Variable-density two-phase solver (water + real air) via VOF."""
 
     def __init__(self, pars, dtype=None, custom_update=None, compute_forces=True):
+        # Two-phase default Poisson: mgcg (multigrid-preconditioned CG) is
+        # ~2.2x faster than plain multigrid for the variable-density (833:1)
+        # two-phase Poisson.  Injected before the base __init__ reads the key,
+        # so an explicit poisson_method in the config still wins.
+        pars["solver"].setdefault("poisson_method", "mgcg")
         super().__init__(pars, dtype=dtype, custom_update=custom_update,
                          compute_forces=compute_forces)
         solver = pars["solver"]
@@ -176,27 +180,17 @@ class TwoPhaseSolver(FluidSolver):
                 "two_phase requires poisson_method 'multigrid', 'mgcg', or 'rmgcg' "
                 "(the FFT solver cannot do a variable-density Poisson)."
             )
-        if self.poisson_method == "multigrid":
-            print(
-                "TwoPhaseSolver: poisson_method='multigrid' is functional but "
-                "'mgcg' (multigrid-preconditioned CG) is ~2.2× faster for "
-                "variable-density (833:1) two-phase Poisson. "
-                "Consider setting poisson_method='mgcg'."
-            )
-        # FUSED PATH: the default (non-consistent) two-phase step reuses the
-        # single-phase fused kernels untouched.  The two-phase repairs run in
-        # ``project`` (see the fused-path override section below): the BDIM
-        # velocity is fixed by the exact identity ``a*S + (1-a)*u'`` (the
-        # historical blocker — the kernel imposing the body velocity into the
-        # air — needed only u', captured by wrapping ``adv_diff_solver.solve``),
-        # and the Poisson coefficient by the out-of-place rescale of the
-        # kernel's water-normalised ``dt*mu0/rho_water``.  The consistent-
-        # momentum step (python-style conservative transport) bypasses the
-        # fused kernels entirely, so the guards below do not apply to it.
-        _consistent = bool(tp_cfg.get("consistent_momentum", False))
-        if not _consistent and not self.bdim_mu0_projection:
+        # The two-phase step reuses the single-phase fused kernels untouched.
+        # The two-phase repairs run in ``project`` (see the fused-path override
+        # section below): the BDIM velocity is fixed by the exact identity
+        # ``a*S + (1-a)*u'`` (the historical blocker — the kernel imposing the
+        # body velocity into the air — needed only u', captured by wrapping
+        # ``adv_diff_solver.solve``), and the Poisson coefficient by the
+        # out-of-place rescale of the kernel's water-normalised
+        # ``dt*mu0/rho_water``.
+        if not self.bdim_mu0_projection:
             raise ValueError(
-                "TwoPhaseSolver's fused path requires bdim_mu0_projection=True "
+                "TwoPhaseSolver requires bdim_mu0_projection=True "
                 "(the two-phase coefficient rescale reconstructs mu0 from the "
                 "kernel's dt*mu0/rho_water coefficient)."
             )
@@ -314,45 +308,29 @@ class TwoPhaseSolver(FluidSolver):
         else:
             self.two_phase = TwoPhase(self.x, self.y, self.h, alpha_init,
                                       z=self.z, **kwargs)
-        # Consistent conservative mass/momentum transport (Nangia et al. 2019,
-        # Desjardins-Moureau): the cure for the high-density-ratio instability
-        # (non-conservative is stable only to ~100:1; water/air is 833:1). When
-        # on, ``fluid_step`` transports rho*u conservatively with the SAME mass
-        # flux that evolves the density, recovers u = rho*u / rho consistently
-        # (no 833x blow-up at the interface), and the interface is advected by
-        # that same flux (the Weymouth-Yue VOF in finalize_step is skipped).
-        # Runs a python-style step (the fused kernel is bypassed); default OFF
-        # so every existing two-phase case is byte-for-byte unchanged.
-        self._consistent_momentum = bool(cfg.get("consistent_momentum", False))
+        # REMOVED experimental toggles (cuda_native_port Phase 4.4).  Reject
+        # loudly when a config still enables them rather than silently running
+        # a different scheme.  ``consistent_momentum`` (Nangia 2019 conservative
+        # rho*u transport) and ``mu0_free_coeff`` were toy-boat waterline
+        # experiments; the adopted stabilisers are ``rho_solid``,
+        # ``air_transparent_body`` and ``alpha_exclude_body``.
+        for _removed in ("consistent_momentum", "consistent_n_cycles",
+                         "mu0_free_coeff"):
+            if cfg.get(_removed):
+                raise ValueError(
+                    f"solver.two_phase.{_removed} was removed (Phase 4.4 "
+                    "cleanup); use rho_solid / air_transparent_body / "
+                    "alpha_exclude_body to stabilise the waterline band."
+                )
         # Three-phase density (Nangia 2019 WSI, Eq. 23): treat the body as a
         # smoothed THIRD density phase rho_solid, blended by mu0 (the BDIM fluid
         # fraction IS the body Heaviside), INSIDE the variable-density projection
-        # coefficient and the gravity body force -- instead of mu0-EXCLUDING the
-        # body. Targets the body-interface band spurious current (the killer).
+        # coefficient -- instead of mu0-EXCLUDING the body. Targets the
+        # body-interface band spurious current (the killer).
         # None = off (current mu0-exclusion behaviour). Python path only for now.
         self._rho_solid = cfg.get("rho_solid", None)
         if self._rho_solid is not None:
             self._rho_solid = float(self._rho_solid)
-        # mu0-free coefficient: the cleanest statement of "no hole in the Poisson"
-        # -- the projection coefficient is simply c = dt/rho_fluid (the VOF
-        # water/air mobility) EVERYWHERE, with mu0 dropped, so the body is purely
-        # a velocity constraint and never zeros the coefficient. This is the
-        # rho_solid limit rho_solid -> rho_flow (the mu0 blend cancels), but uses
-        # the LOCAL VOF density inside the body instead of a pinned constant.
-        # Works on BOTH paths: the python coefficient builder skips mu0; the
-        # kernel-mode projection rescale returns dt/rho_face directly (discarding
-        # the kernel's mu0-laden coeff). Mutually exclusive with rho_solid.
-        self._mu0_free_coeff = bool(cfg.get("mu0_free_coeff", False))
-        if self._mu0_free_coeff and self._rho_solid is not None:
-            raise ValueError(
-                "two_phase.mu0_free_coeff and rho_solid both set the projection "
-                "coefficient; enable only one (mu0_free_coeff is the rho_solid="
-                "rho_flow limit)."
-            )
-        # Fixed-point iteration cycles per step (Nangia Sec 4.2; n_cycles=2 gives
-        # 2nd order + reconciles the body-inclusive projection with the rigid
-        # constraint and the density). 1 = single forward-Euler pass (default).
-        self._n_cycles = max(1, int(cfg.get("consistent_n_cycles", 1)))
         # Air-transparent body: mask the BDIM fluid fraction mu0 by the water
         # fraction alpha so the body effectively does NOT exist in the air phase.
         # Uses a SHARP threshold at alpha=0.5 (the VOF interface): the body is
@@ -388,10 +366,6 @@ class TwoPhaseSolver(FluidSolver):
             cfg.get("partial_heaviside_forces", False))
         self._ph_blend_cells = float(cfg.get("partial_heaviside_blend_cells", 1.5))
         flags = []
-        if self._consistent_momentum:
-            flags.append("CONSISTENT momentum")
-        if self._mu0_free_coeff:
-            flags.append("mu0-free coeff (c=dt/rho_fluid everywhere)")
         if self._rho_solid is not None:
             flags.append(f"three-phase rho_solid={self._rho_solid}")
         if self._air_transparent_body:
@@ -453,13 +427,6 @@ class TwoPhaseSolver(FluidSolver):
         out = []
         for d, ax in enumerate(self._bdim_axis_names):       # 'u','v'[,'w']
             recip_face = tp.recip_density_face(d)            # (1/ρ) water/air blend
-            if self._mu0_free_coeff:
-                # mu0-FREE: c = dt/rho_fluid everywhere (no body hole); the body
-                # is purely a velocity constraint. Uses the LOCAL VOF density,
-                # so the body interior carries whatever fluid (water/air) the VOF
-                # places there. (rho_solid -> rho_flow limit; mu0 cancels.)
-                out.append(dt * recip_face)
-                continue
             mu0 = getattr(self, f'mu0_all_{ax}')             # (1−δ^B), fluid fraction
             if atb:
                 # Air-transparent body: mu0_eff = 1 - alpha_face*(1 - mu0)
@@ -488,11 +455,6 @@ class TwoPhaseSolver(FluidSolver):
                 out.append(dt * mu0 * recip_face)
         out.append(None)                                     # ch_cc: unused (no FFT)
         return tuple(out)
-
-    def _mu0_cc(self):
-        """Cell-centred BDIM fluid fraction mu0 (1 in fluid, 0 in body, smoothed
-        over the band) from the union body SDF -- the body Heaviside (= H_body)."""
-        return self.composite_body.mu_funcs(self.composite_body.sdf_val)[0]
 
     def _alpha_face(self, d):
         """Water fraction ``alpha`` on the staggered *d*-face grid (full grid;
@@ -569,8 +531,8 @@ class TwoPhaseSolver(FluidSolver):
     # 2. COEFFICIENT.  ``mu0 = c_kernel * rho_water/dt`` recovers the fluid
     #    fraction from the kernel coefficient (requires bdim_mu0_projection,
     #    enforced at init), after which the python-path formulas of
-    #    ``_compute_bdim_coefficients`` (standard / rho_solid three-phase /
-    #    mu0-free, with the air-transparent masking and the carved-init gate)
+    #    ``_compute_bdim_coefficients`` (standard / rho_solid three-phase,
+    #    with the air-transparent masking and the carved-init gate)
     #    are evaluated directly on the face grids.  Out-of-place: the
     #    persistent ``_ch_persist`` buffers must stay water-normalised for
     #    the next step's Kernel-B overwrite.
@@ -645,9 +607,6 @@ class TwoPhaseSolver(FluidSolver):
                 out.append(None)
                 continue
             inv_rho = self._kernel_face_mean(q, d)
-            if self._mu0_free_coeff:
-                out.append(dt * inv_rho)
-                continue
             mu0 = c_kernel * (tp.rho_water / dt)
             if self._air_transparent_body:
                 a = self._kernel_face_mean(tp.alpha, d)
@@ -665,10 +624,10 @@ class TwoPhaseSolver(FluidSolver):
     def project(self, *args, ch=None, cv=None, cw=None, ch_cc=None, **kwargs):
         """Fused path only: blend the BDIM velocity with u' (air-transparent
         identity) and rescale the coefficients to the two-phase formulas, then
-        run the base variable-coefficient projection.  The consistent-momentum
-        path arrives here with freshly-built two-phase coefficients (not the
-        solver's persistent water-normalised buffers), so the identity check
-        on ``_ch_persist`` keeps it untouched."""
+        run the base variable-coefficient projection.  The python path arrives
+        here with freshly-built two-phase coefficients (not the solver's
+        persistent water-normalised buffers), so the identity check on
+        ``_ch_persist`` keeps it untouched."""
         if isinstance(ch, torch.Tensor) and ch is getattr(self, '_ch_persist', None):
             vels = list(args[:2])
             if self.ndim == 3:
@@ -823,13 +782,6 @@ class TwoPhaseSolver(FluidSolver):
     def forces_method2_3d(self, u, v, w, p, iteration):
         self._two_phase_forces(True, (u, v, w), p, iteration)
 
-    def _needs_python_mu_normals(self):
-        """The consistent-momentum step applies the velocity BDIM and builds
-        the two-phase coefficients in python, both of which read the
-        staggered mu/normal pack — so it always needs the recompute (the
-        streaming update publishes the staggered SDFs it consumes)."""
-        return self._consistent_momentum or super()._needs_python_mu_normals()
-
     def advance_and_compute_loads(self, u, v, p, iteration, t, w_vel=None):
         """Override: when zero_pressure_inside is enabled, zero pressure only
         DEEP inside the body (``sdf < -2h``), leaving the BDIM band
@@ -880,167 +832,12 @@ class TwoPhaseSolver(FluidSolver):
         variable-density hydrostatic split is Stage 2."""
         return None
 
-    def _apply_gravity_body_force(self, *vels):
-        """In consistent mode gravity is applied as a rho*g body force INSIDE the
-        conservative momentum advection (see :meth:`_consistent_advect_2d`), so
-        the base velocity pre-kick must be suppressed to avoid double-counting
-        (and to keep the density-transport flux on the un-kicked velocity)."""
-        if self._consistent_momentum:
-            return vels
-        return super()._apply_gravity_body_force(*vels)
-
     def fluid_step(self, *args):
-        """As the base (advect-BDIM-project), but in consistent mode the velocity
-        advection is replaced by consistent conservative momentum transport.
-        BDIM, the variable-density coefficients, and the projection are reused
-        unchanged. Dimension-agnostic."""
+        """As the base (advect-BDIM-project); the only two-phase addition is
+        the deferred body-aware alpha carve, which must run after the coupled
+        body poses arrive but before this step's transport."""
         self._try_deferred_alpha_carve()
-        if not self._consistent_momentum:
-            return super().fluid_step(*args)
-        D = self.ndim
-        u_n = [a.clone() for a in args[:D]]                  # n-level velocity (start)
-        p = args[D]; timestep = args[D + 1]
-        nu_t = self._compute_nu_t(*u_n)
-        alpha_n = self.two_phase.alpha.clone()               # n-level interface
-        iterate = [a.clone() for a in u_n]                   # u^{n+1,k}, k=0 -> u^n
-        p_cur = p
-        # Fixed-point iteration (Nangia Sec 4.2): each cycle RESTARTS from the
-        # n-level state; the advecting velocity is the midpoint of the iterate and
-        # u^n, the advected/limited velocity is the iterate. n_cycles=1 reduces to
-        # a single forward-Euler pass (all three velocities = u^n).
-        for k in range(self._n_cycles):
-            if k == 0:
-                u_adv = u_n; u_lim = u_n
-            else:
-                u_adv = [0.5 * (it + un) for it, un in zip(iterate, u_n)]
-                u_lim = iterate
-            self.two_phase.alpha = alpha_n.clone()           # restore start density
-            primes = [pp.clone() for pp in
-                      self._consistent_advect(u_n, u_adv, u_lim, nu_t, timestep)]
-            self._bdim_union_aabb = None
-            primes = list(self._apply_bdim_all_axes(primes))
-            self.adv_diff_solver.set_BCs(*primes)
-            coeffs = self._compute_bdim_coefficients(timestep)
-            ch_cc = coeffs[-1]; face_coeffs = coeffs[:-1]
-            proj_kwargs = {'ch': face_coeffs[0], 'cv': face_coeffs[1], 'ch_cc': ch_cc}
-            if D == 3:
-                proj_kwargs['cw'] = face_coeffs[2]
-                proj_kwargs['w_vel'] = primes[2]
-            if self._bdim_body_div_correction:
-                _cb = self.composite_body
-                proj_kwargs['body_div_corr'] = self._mw_body_div_correction(
-                    _cb.body_u, _cb.body_v,
-                    getattr(_cb, 'body_w', None) if D == 3 else None)
-            out = self.project(primes[0], primes[1], p_cur, **proj_kwargs)
-            iterate = list(out[:-1]); p_cur = out[-1]
-        # free BDIM intermediates once, after the iteration (they are recomputed
-        # once per step in advance_and_compute_loads, reused across cycles).
-        self.__dict__.update(self._FS_FREE_AFTER_BDIM)
-        self.__dict__.update(self._FS_FREE_AFTER_BDIM_COEFF)
-        vels_out = iterate; p_out = p_cur
-        if self.use_sponge:
-            vels_out = list(self.apply_sponge_damping(*vels_out))
-        if self.use_yield_damping:
-            vels_out = list(self.apply_yield_damping(*vels_out))
-        self.adv_diff_solver.set_BCs(*vels_out)
-        return (*vels_out, p_out)
-
-    def _consistent_advect(self, u_start, u_adv, u_lim, nu_t, dt):
-        """Consistent conservative momentum transport (Nangia 2019,
-        Desjardins-Moureau), dimension-agnostic. The mass flux ``F = u_adv *
-        rho_upwind`` (advecting velocity) drives BOTH the cell-density update AND
-        the momentum convection of ``u_lim`` (the advected/limited velocity); the
-        momentum starts from ``u_start`` (the n-level ``rho^n u^n``) and is
-        recovered as ``rho*u / rho`` with the SAME flux-evolved density (so the
-        833:1 jump cannot blow up the velocity). For a single pass (n_cycles=1)
-        all three are ``u^n``; the fixed-point iteration feeds the midpoint
-        ``u_adv`` and the iterate ``u_lim``. Gravity is a ``rho*g`` BODY FORCE
-        (NOT a pre-kick) -> the density flux is on the ~div-free velocity (mass
-        conserving). ``two_phase.alpha`` is synced from the evolved density.
-        MAC convention: ``q[k]`` is the face LEFT of cell ``k`` on its axis."""
-        tp = self.two_phase
-        rw, ra = tp.rho_water, tp.rho_air
-        # Momentum/transport/recovery use the AIR/WATER density (NOT three-phase):
-        # advecting the solid density with the flow corrupts both the body density
-        # (it is rigid, not flow-advected) and the interface. rho_solid enters
-        # only the projection coefficient + the gravity (empirically it 61 vs 47).
-        r = tp.alpha * rw + (1.0 - tp.alpha) * ra
-        nd = self.ndim
-        dtdh = float(dt) / self.h
-        I = tuple(slice(1, -1) for _ in range(nd))
-        def A(d, s):  return _sl(nd, d, s)                               # slice s on axis d, full else
-        def J(spec):  return tuple(spec.get(a, slice(1, -1)) for a in range(nd))  # interior else
-
-        # upwind cell-face mass fluxes (advecting velocity): F[d][k] thru face left of cell k
-        F = []
-        for d in range(nd):
-            Fd = torch.zeros_like(u_adv[d])
-            vf = u_adv[d][A(d, slice(1, None))]
-            Fd[A(d, slice(1, None))] = vf * torch.where(
-                vf >= 0, r[A(d, slice(0, -1))], r[A(d, slice(1, None))])
-            F.append(Fd)
-
-        # evolve cell density by the cell fluxes (conservative -> mass preserving)
-        r_new = r.clone()
-        dvr = torch.zeros_like(r[I])
-        for d in range(nd):
-            dvr = dvr + (F[d][J({d: slice(2, None)})] - F[d][J({})])
-        r_new[I] = (r[I] - dtdh * dvr).clamp_min(ra)
-
-        # three-phase body Heaviside for the rho_solid gravity blend (band only)
-        mu0cc = self._mu0_cc() if self._rho_solid is not None else None
-
-        out = list(u_start)
-        for i in range(nd):
-            rfi = r.clone()
-            rfi[A(i, slice(1, None))] = 0.5 * (r[A(i, slice(0, -1))] + r[A(i, slice(1, None))])
-            mu = rfi * u_start[i]                              # n-level momentum rho^n u^n
-            dmu = torch.zeros_like(mu[I])
-            for d in range(nd):
-                if d == i:                                   # self-advection (cell centres)
-                    Mc = 0.5 * (F[i][A(i, slice(0, -1))] + F[i][A(i, slice(1, None))])
-                    ui = torch.where(Mc >= 0, u_lim[i][A(i, slice(0, -1))],
-                                     u_lim[i][A(i, slice(1, None))])
-                    phi = Mc * ui
-                    dmu = dmu + (phi[J({i: slice(1, None)})] - phi[J({i: slice(0, -1)})])
-                else:                                        # cross-advection (i-edge / d-face)
-                    Me = torch.zeros_like(F[d])
-                    Me[A(i, slice(1, None))] = 0.5 * (F[d][A(i, slice(0, -1))]
-                                                      + F[d][A(i, slice(1, None))])
-                    Med = Me[A(d, slice(1, None))]
-                    vid = torch.where(Med >= 0, u_lim[i][A(d, slice(0, -1))],
-                                      u_lim[i][A(d, slice(1, None))])
-                    psi = Med * vid
-                    dmu = dmu + (psi[J({d: slice(1, None)})] - psi[J({d: slice(0, -1)})])
-            mu[I] = mu[I] - dtdh * dmu
-            if self.use_gravity and float(self._gravity[i]) != 0.0:
-                rfg = rfi
-                if mu0cc is not None:                          # three-phase rho*g at the band
-                    m0 = rfi.clone()
-                    m0[A(i, slice(1, None))] = 0.5 * (mu0cc[A(i, slice(0, -1))]
-                                                      + mu0cc[A(i, slice(1, None))])
-                    rfg = m0 * rfi + (1.0 - m0) * self._rho_solid
-                mu[I] = mu[I] + float(dt) * float(self._gravity[i]) * rfg[I]
-            # recover velocity with the evolved face density (consistent -> bounded)
-            rfi2 = r_new.clone()
-            rfi2[A(i, slice(1, None))] = 0.5 * (r_new[A(i, slice(0, -1))]
-                                                + r_new[A(i, slice(1, None))])
-            vi = u_start[i].clone()
-            vi[I] = mu[I] / rfi2[I]
-            ads = self.adv_diff_solver
-            _nu_eff = (self.nu + nu_t) if nu_t is not None else None
-            inv_dh2 = [1.0 / (h * h) for h in ads.dh]
-            scale = float(dt) if _nu_eff is not None else float(self.nu) * float(dt)
-            # diffuse_add_ pattern with separate src (u_start[i]) / dst (vi):
-            # copy src → temp, then fused Laplacian from temp into dst.
-            _tmp = torch.empty_like(u_start[i])
-            _diffusion._copy_full_grid_eager(u_start[i], _tmp)
-            _diffusion._fused_diffuse_add_eager(_tmp, vi, scale, inv_dh2,
-                                                nu_eff_t=_nu_eff)
-            out[i] = vi
-
-        tp.alpha = ((r_new - ra) / (rw - ra)).clamp(0.0, 1.0)
-        return tuple(out)
+        return super().fluid_step(*args)
 
     # ------------------------------------------------------------------
     #  Override: VOF transport in the once-per-step tail
@@ -1148,10 +945,7 @@ class TwoPhaseSolver(FluidSolver):
         # sdf_val is first materialised by the post-step force kernel, so the
         # carve can only fire here (before this step's VOF transport).
         self._try_deferred_alpha_carve(iteration)
-        # In consistent (evolve) mode the interface already rode the shared mass
-        # flux inside fluid_step (alpha synced there); skip the standalone VOF.
-        if not self._consistent_momentum:
-            self._advect_vof(u, v, p, iteration, w_vel=w_vel)
+        self._advect_vof(u, v, p, iteration, w_vel=w_vel)
         self._release_bdim_fields()
         # Flush the CUDA allocator cache only at the base solver's throttled
         # cadence (empty_cache_every, default 200), NOT every step: the grids
