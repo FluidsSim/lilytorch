@@ -33,13 +33,20 @@ class PositionController(KinematicsController):
         config_obj = Dict2Class(config)
 
         data_folder = config["data_folder"]
-        mode = config["mode"]
-        if mode == "slow":
-            file_path = os.path.join(data_folder, "joints_positions_slow_sigmoid.xlsx")
-        elif mode == "fast":
-            file_path = os.path.join(data_folder, "joints_positions_fast.xlsx")
+
+        # Accept a direct file_path override (e.g. ep223 / ep248 model angles).
+        if "file_path" in config:
+            file_path = config["file_path"]
+            if not os.path.isabs(file_path):
+                file_path = os.path.join(data_folder, file_path)
         else:
-            raise ValueError(f"Unknown mode {mode!r}. Expected 'slow' or 'fast'.")
+            mode = config["mode"]
+            if mode == "slow":
+                file_path = os.path.join(data_folder, "joints_positions_slow_sigmoid.xlsx")
+            elif mode == "fast":
+                file_path = os.path.join(data_folder, "joints_positions_fast.xlsx")
+            else:
+                raise ValueError(f"Unknown mode {mode!r}. Expected 'slow' or 'fast'.")
 
         joints_names = animat_options.control.joints_names()
 

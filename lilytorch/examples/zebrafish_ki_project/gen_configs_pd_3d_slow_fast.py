@@ -34,6 +34,7 @@ class SimConfig(BaseSimConfig):
         )
 
         # ── Hardware ──────────────────────────────────────────────────
+        self.save_drags                    = True
         self.compute_sdf                   = True
         self.use_gpu                       = True
         self.use_bdim                      = True
