@@ -160,9 +160,20 @@ static void apply_neumann_bc_3d(scalar_t* p,
 #define RBGS_2D_I  8
 #define RBGS_2D_J  32
 
+// ``p_in`` is a read-only snapshot of ``p`` taken before the launch (or ``p``
+// itself for single-block grids).  Loading the tile+halo from the snapshot
+// instead of ``p`` removes an inter-block race: a block that finished its
+// (shared-memory) sweeps writes its interior back to ``p`` while a slower
+// neighbouring block may still be loading its halo — whether the neighbour
+// sees pre- or post-sweep values then depends on block *timing*, which is
+// reproducible for a fixed memory layout but shifts with allocator history
+// (measured: 3 distinct solver outputs / 300 runs on bit-identical inputs
+// under concurrent memory traffic).  The snapshot pins the documented
+// semantics — inter-tile halos always use the pre-sweep values.
 template <typename scalar_t>
 __global__ void rbgs_2d_tiled_kernel(
         scalar_t* __restrict__ p,
+        const scalar_t* __restrict__ p_in,
         const scalar_t* __restrict__ f,
         const scalar_t* __restrict__ cp0,
         const scalar_t* __restrict__ cm0,
@@ -216,7 +227,7 @@ __global__ void rbgs_2d_tiled_kernel(
             const int sj = k % stride_s;
             const int pi = max(0, min(gi_base + si, Nx + 1));
             const int pj = max(0, min(gj_base + sj, Ny + 1));
-            p_s[si][sj] = p[pi * stride_p + pj];
+            p_s[si][sj] = p_in[pi * stride_p + pj];
         }
     }
 
@@ -295,8 +306,25 @@ void rbgs_sweep_2d_cuda(
         // Tiled RBGS sweep (all nsmoothing iterations fused)
         const dim3 blk(RBGS_2D_J, RBGS_2D_I);
         const dim3 grd(cdiv(Ny, RBGS_2D_J), cdiv(Nx, RBGS_2D_I));
+
+        // Snapshot p for the tile+halo loads on multi-block grids: without it
+        // the halo values a block reads depend on whether neighbouring blocks
+        // already wrote back their sweeps (inter-block race, see the kernel
+        // comment).  A single block cannot race with itself — its own
+        // __syncthreads() orders load before write-back — so tiny coarse MG
+        // levels skip the copy.
+        const scalar_t* src = pp;
+        at::Tensor p_snap;
+        if (grd.x * grd.y > 1) {
+            p_snap = at::empty_like(p);
+            scalar_t* ps = p_snap.data_ptr<scalar_t>();
+            cudaMemcpyAsync(ps, pp, (size_t)p.numel() * sizeof(scalar_t),
+                            cudaMemcpyDeviceToDevice, stream);
+            src = ps;
+        }
         rbgs_2d_tiled_kernel<scalar_t><<<grd, blk, 0, stream>>>(
             pp,
+            src,
             f.data_ptr<scalar_t>(),
             cp0.data_ptr<scalar_t>(),
             cm0.data_ptr<scalar_t>(),
@@ -446,9 +474,12 @@ void rbgs_sweep_3d_cuda(
 //   communication still uses the block-boundary approximation.
 // =====================================================================
 
+// ``p_in``: read-only pre-sweep snapshot for the tile+halo loads — same
+// inter-block-race fix as rbgs_2d_tiled_kernel (see the comment there).
 template <typename scalar_t>
 __global__ void jacobi_2d_tiled_kernel(
         scalar_t* __restrict__ p,
+        const scalar_t* __restrict__ p_in,
         const scalar_t* __restrict__ f,
         const scalar_t* __restrict__ cp0,
         const scalar_t* __restrict__ cm0,
@@ -495,7 +526,7 @@ __global__ void jacobi_2d_tiled_kernel(
             const int sj = k % stride_s;
             const int pi = max(0, min(gi_base + si, Nx + 1));
             const int pj = max(0, min(gj_base + sj, Ny + 1));
-            p_s[si][sj] = p[pi * stride_p + pj];
+            p_s[si][sj] = p_in[pi * stride_p + pj];
         }
     }
 
@@ -557,8 +588,21 @@ void jacobi_sweep_2d_cuda(
 
         const dim3 blk(RBGS_2D_J, RBGS_2D_I);
         const dim3 grd(cdiv(Ny, RBGS_2D_J), cdiv(Nx, RBGS_2D_I));
+
+        // Pre-sweep snapshot on multi-block grids (inter-block-race fix, see
+        // rbgs_sweep_2d_cuda).
+        const scalar_t* src = pp;
+        at::Tensor p_snap;
+        if (grd.x * grd.y > 1) {
+            p_snap = at::empty_like(p);
+            scalar_t* ps = p_snap.data_ptr<scalar_t>();
+            cudaMemcpyAsync(ps, pp, (size_t)p.numel() * sizeof(scalar_t),
+                            cudaMemcpyDeviceToDevice, stream);
+            src = ps;
+        }
         jacobi_2d_tiled_kernel<scalar_t><<<grd, blk, 0, stream>>>(
             pp,
+            src,
             f.data_ptr<scalar_t>(),
             cp0.data_ptr<scalar_t>(),
             cm0.data_ptr<scalar_t>(),

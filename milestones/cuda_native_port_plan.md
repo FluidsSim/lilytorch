@@ -1706,18 +1706,13 @@ projection 1.41 ms (54%), cvof 0.06 ms (2%), rest of fluid_step 0.50 ms.
 
 **OPEN — next agent starts here:**
 
-- **(a) Residual graph-vs-eager drift, ~1e-4.** With `quick` the pre-Poisson
-  graph is now refused, so both runs are eager — yet they still differ by
-  `max|Δu| = 1.8e-4` (rel 1e-2) over 200 steps. The only thing
-  `graph_capture_debug` still toggles is the **cvof graph** (4.3), so that is
-  the suspect. Standalone, `advect_graph_aware` is bit-exact vs `advect`
-  (`test_cvof_graph_vs_eager_*` pass), so reproduce it *in the solver*:
-  `TwoPhaseSolver._advect_vof` replay vs eager, step by step, and find the first
-  diverging step. Note the divergence onset **moves when you add `.clone()`
-  probes**, i.e. it is allocator-history dependent → something reads memory it
-  never wrote. `torch.empty`/`empty_like` poisoning at the *Python* level found
-  nothing, so look for an `at::empty` temporary inside a **native C++ op** whose
-  ghost ring is never written.
+- **(a) Residual graph-vs-eager drift, ~1e-4.** ✅ DONE (see the row-13
+  close-out log below). Root cause was NEITHER graph: an **inter-block race in
+  the 2-D tiled RBGS/Jacobi smoother kernels** made the native Poisson solve
+  non-deterministic; `graph_capture_debug` (like every allocator perturbation)
+  merely shifted memory layout → block timing → race outcome. Fixed by loading
+  the tile+halo from a pre-sweep snapshot. Graphs-on vs eager is now
+  **bit-exact over 200 production steps**.
 - **(b) Make the flux path capturable** — ✅ DONE (see row-13c log below) — port `advect_flux_accumulate` +
   `_accumulate_interior` + the three `diffusion` Warp helpers to native ops.
   That is the real prize: it would put the *default* config on the graphed path
@@ -1734,9 +1729,11 @@ projection 1.41 ms (54%), cvof 0.06 ms (2%), rest of fluid_step 0.50 ms.
   two-phase *default* (`solver.py:478` still defaults to `multigrid`; DeepSeek
   only added a `print`). And delete the dead `_cvof_buf_b` (allocated, never
   used); route the CPU cvof to the native twin (it exists) instead of Warp.
-- **(e) 3-D peak memory** for the `_publish` buffers has NOT been measured (the
-  13b spec asked for it). `nbodies == 1` aliases the child's buffers so it should
-  be a wash, but confirm on a 3-D case before committing.
+- **(e) 3-D peak memory** for the `_publish` buffers — ✅ DONE (row-13
+  close-out log below): 48³ two-phase water-entry, 60 steps — HEAD
+  **32.0 MiB** peak allocated vs pre-13b (`7f0fdf9`) **33.3 MiB**. The
+  persistent buffers *reduce* peak (fewer transient reallocations;
+  `nbodies == 1` aliases the child's buffers). No regression.
 
 **Nothing is committed.** Working tree: `body.py`, `graph_capture.py`,
 `solver.py`, `advection.py`, `two_phase_solver.py`,
@@ -1853,6 +1850,150 @@ and the native path** (bit-identical explosion) — a pre-existing QUICK
 stability limit of that config, not a port regression; use `abdquickest`
 there.
 
+### Row 14 DONE — 4.4 complexity pass + 4.5 gate (2026-07-13, Claude)
+
+**4.4 — what was deleted (reachability traced first, per the standing lesson).**
+
+- **Consistent-momentum machinery** (`consistent_momentum`,
+  `consistent_n_cycles`): the entire Nangia-2019 conservative ρu-transport
+  branch — the `fluid_step` fixed-point loop, `_consistent_advect` (~150 L),
+  the `_apply_gravity_body_force` / `_needs_python_mu_normals` overrides and
+  `_mu0_cc`. No production config enables it (only the retired toy-boat
+  debug harnesses `boat/_verify_run_*`, `_test_spheroid_consistent`,
+  `_diag_hullonly_full` set it True; `gen_config_surface_pool` sets it
+  **False**, which stays accepted). The adopted waterline stabilisers are
+  `rho_solid` + `air_transparent_body` + `alpha_exclude_body`. Deleting it
+  also removed the LAST `diffusion` Warp-helper calls from
+  `two_phase_solver.py` (the 13c leftover).
+- **`mu0_free_coeff`**: only `boat/_verify_run_small.py` (PATH C experiment).
+- Removed keys are **rejected loudly** when truthy (`ValueError`, pointing at
+  the surviving stabilisers) — never silently ignored — following the
+  `face_density="arithmetic"` precedent. Falsy values are tolerated so
+  existing configs that spell out the default keep working.
+- **KEPT (config-reachable, verified by grep):** `rho_solid` (ACTIVE=1000.0
+  in `boat/gen_configs*.py` — the hull-band stabiliser), `alpha_exclude_body`
+  (+ deferred carve), `air_transparent_body`, `partial_heaviside_forces`
+  (python-path twin of the streaming `force_submethod="deltaH"`; used by
+  `gen_config_submerged_diag`), `_umax_probe` (env-gated blow-up diagnostic).
+
+**Row-13 leftovers folded in:**
+
+- **4.2 done for real**: `TwoPhaseSolver.__init__` injects
+  `poisson_method="mgcg"` via `pars["solver"].setdefault(...)` *before* the
+  base `__init__` reads the key — two-phase default is now mgcg, an explicit
+  config choice still wins, and the change stays in `two_phase_solver.py`
+  (core `solver.py` untouched, per the two-phase decoupling rule). The bare
+  `print()` recommendation is gone.
+- **cvof native everywhere**: `_cvof_sweep_dispatcher` + the Warp import
+  deleted from `two_phase.py` — the native op dispatches CPU/CUDA itself and
+  the CPU twin is bit-exact vs the Warp oracle (verified 2-D/3-D f64 before
+  the swap; `test_cvof.py` pins it). `two_phase.py` is now **Warp-free**.
+- Dead `_cvof_buf_b` deleted (the ping-pong uses `alpha` as second buffer).
+
+**Sizes:** `two_phase_solver.py` 1229 → 1023 L, `two_phase.py` 269 → 254 L.
+
+**4.5 gate (RTX 4080 SUPER, fp32):**
+
+- **Bit-exactness**: 100 production steps (`step_`) of the 2-D 128² surface
+  pool, poisson_method pinned to `mgcg` in a HEAD worktree vs the working
+  tree — `u/v/p/alpha` all `torch.equal` → the 4.4 pass is pure re-plumbing.
+- **Suite**: 479 pass / 1 fail (pre-existing
+  `test_python_eulerian_force_path_cpu_eq_gpu`) / 1 skip — identical to the
+  13c baseline; includes the uniform-density parity + cvof-graph tests.
+- **ms/step** (bench_two_phase_profile, mgcg, body+fluid+cvof): 2-D 128²
+  2.20 → **2.01**, 3-D 48³ 4.90 → **4.75** — unchanged-to-slightly-better
+  (the deletions are off the hot path; graph counters still
+  `captures=1 replays=107 evictions=0`).
+- **3-D sphere water-entry** (`run_drop_sphere_3d.py`, W&Y §4.2, pinned
+  `multigrid`): **PASSED** (stability + mass + force checks).
+
+### Row 13 CLOSED — open items (a) + (e) resolved; the "graph drift" was a CUDA kernel race (2026-07-14, Claude)
+
+**(a) The ~1e-4 "graph-vs-eager drift" was never about graphs — the native 2-D
+Poisson solve was NON-DETERMINISTIC.**
+
+*Diagnosis chain (2-D 128² surface pool, `quick`, mgcg, fp32, all eager):*
+1. Two fresh-process runs with identical config: **bit-exact** — deterministic.
+2. Same, but one run alloc+frees a single junk tensor before solver
+   construction: **max|Δu| = 2.9e-4** after 100 steps. So `graph_capture_debug`
+   was only ever an allocator-layout perturbation; the cvof graph is innocent.
+3. Per-step snapshots: steps 0–18 bit-exact, then a step diverges *abruptly*
+   (5e-4) — a discrete event, not a growing ULP seed. Onset step moves whenever
+   probes perturb allocations (19 → 25 → 35 → …).
+4. Region probes at the diverging step: body fields, pre-projection u/v/p, and
+   every input to `poisson_solve_mgcg_2d` (f, warm-start p0, ch/cv, scalars)
+   **bit-equal** between the runs — but the op's output p differs by 1e-2.
+5. `compute-sanitizer` initcheck + memcheck (with
+   `PYTORCH_NO_CUDA_MEMORY_CACHING=1`): **clean** — not an uninitialised or OOB
+   read. NaN/finite poisoning of the entire free allocator pool: output
+   unchanged — not a content-dependent read at all.
+6. Smoking gun: `poisson_solve_mgcg_2d` on bit-identical inputs, with heavy
+   memory traffic on a second stream: **3 distinct outputs in 300 trials**
+   (298× the dominant one). The op is racy; its outcome depends on block
+   *timing*, which is reproducible for a fixed memory layout (hence 1) but
+   shifts when allocator history changes physical addresses (hence 2).
+
+*Root cause:* `rbgs_2d_tiled_kernel` and `jacobi_2d_tiled_kernel`
+(`multigrid_smoothers.cu`) load a p tile+halo from global memory, run all
+`nsmoothing` sweeps in shared memory, and write the interior back — **all in
+one launch**. A block that finishes its (fast, smem-only) sweeps writes back
+while a slower neighbouring block is still loading its halo, so the halo values
+depend on the inter-block schedule. The 3-D smoothers (separate red/black
+half-sweep launches; double-buffered Jacobi) and the residual/transfer kernels
+are race-free — this was a 2-D-only disease, which is why 3-D drop-sphere
+validations never wobbled.
+
+*Fix:* the wrappers snapshot p (`cudaMemcpyAsync` D2D) after the pre-BC and the
+kernels take a read-only `p_in` for the tile+halo load, writing to `p` — the
+launch now implements the documented "inter-tile halos use pre-sweep values"
+semantics deterministically. Single-block grids (coarse MG levels ≤ 8×32) skip
+the copy — a block cannot race with itself.
+
+*Verification (RTX 4080 SUPER, fp32):*
+- Contended stress: **300/300 identical**, hash == the pre-fix dominant
+  outcome → the fix pins the schedule the solver was almost always getting.
+- 100-step production run: **bit-identical** to the pre-fix build → pure
+  determinism-pinning, no physics change.
+- 200-step surface pool: eager vs eager+perturbed-prehistory vs graphs-on vs
+  graphs-on+perturbed — **all four bit-exact** (u, v, p, alpha). The 13c
+  "multi-step ULP drift, allocator-history dependent" note is retroactively
+  explained and gone.
+- Suite: **479 pass / 1 fail (pre-existing
+  `test_python_eulerian_force_path_cpu_eq_gpu`) / 1 skip** — identical to the
+  row-14 baseline.
+- Perf cost of the snapshot copies: two-phase 2-D 2.01 → **2.09 ms/step**
+  (~4%, mgcg does ~80 67-KB copies/solve); 3-D **4.58 ms/step** (untouched —
+  race-free kernels unchanged); 0.4-gate 2-D **9.414 ± 0.288 ms/step** vs 9.42
+  recorded — no measurable regression where it matters. Accepted as the price
+  of a deterministic solver. (`bench_04_gate_final_2d.pt` regenerated post-fix;
+  the Jul-13 2-D state had no recorded checksums. The 3-D file is untouched.)
+
+**(e) 3-D peak memory of the 13b `_publish` buffers:** 48³ two-phase
+water-entry, 60 steps: HEAD **32.0 MiB** peak allocated / 46.0 reserved vs
+pre-13b (`7f0fdf9`, same built extension) **33.3 MiB** / 48.0. The persistent
+buffers *reduce* peak — `nbodies == 1` aliases the child's buffers and the
+in-place `_publish` writes kill the per-step reallocation churn the old code
+paid. No regression; persistence stays unconditional.
+
+**Definitive 4.1 profile** (bench_two_phase_profile, mgcg, fp32, HEAD+fix;
+graphs engage: cvof captures=2 replays=106, preproj captures=1 replays=107,
+evictions=0):
+
+| region | 2-D 128² (ms) | 3-D 48³ (ms) |
+|---|---|---|
+| body_update | 0.56 | 1.22 |
+| fluid_step (incl. projection) | 1.47 | 3.29 |
+| — of which projection | 1.37 | 3.17 |
+| cvof VOF transport (graphed) | 0.06 | 0.07 |
+| **per-step total** | **2.09** | **4.58** |
+
+Poisson remains ~65% of the two-phase step → it stays the next perf target;
+`body_update` is #2.
+
+**Row-13 scorecard:** 4.1 harness fixed + profile recorded (above); 4.2 mgcg
+default landed in row 14; 4.3 cvof graph correct + tested; leftovers (a)/(e)
+closed here. **Row 13 is CLOSED.**
+
 ## Suggested execution order & session budget
 
 The 0.2 core-path work is reorganized into Tracks A–D (see the 0.2 re-scope);
@@ -1874,11 +2015,11 @@ the table below reflects that. Track B *is* Phase 1.
 | 11b | 2.3 Regime B (per-body private buffers + resolve, full fp64) | Phase 2 | DeepSeek + Claude fix | 1–2 | ✅ resolve crash fixed + wired; 52/0/0; strict parity + GPU==CPU twin (see 2026-07-13 correction log) |
 | 11c | 2.4 delete old union path + migrate test oracle + bench | Phase 2 | DeepSeek (Claude review) | 1 | ✅ union path deleted; oracle migrated to GPU==CPU twin; 2-D+3-D coupled gates PASS; bench done (Regime-A retirement priced) — **Phase 2 CLOSED** |
 | 12 | 3 unification memo | Phase 3 | **Claude** | 1 | ☐ |
-| 13 | 4.1–4.3 two-phase perf | Phase 4 | DeepSeek (Claude spec/review) | 2 | ⚠ **REOPENED** — 4.3 correct + now tested; **4.1 never ran** (harness was broken) and **4.2 not done** (default still `multigrid`). See the review log above. |
+| 13 | 4.1–4.3 two-phase perf | Phase 4 | DeepSeek (Claude spec/review) | 2 | ✅ **CLOSED** (2026-07-14) — 4.1 harness fixed + definitive profile (2-D 2.09 / 3-D 4.58 ms/step, graphs replay); 4.2 mgcg default landed in row 14; 4.3 correct + tested. Leftover (a) = **inter-block race in the 2-D tiled RBGS/Jacobi kernels** (non-deterministic Poisson!) → fixed via pre-sweep snapshot, graphs-vs-eager now bit-exact over 200 steps; leftover (e) 3-D peak memory measured (32.0 vs 33.3 MiB — improved). See the row-13 close-out log. |
 | 13b | **pre-Poisson graph key pointer-stability** (Phase-1 defect found by 4.1) | Phase 1 fix | **Claude** | 1 | ✅ DONE (uncommitted) — + it exposed 2 **silent-wrong-physics** bugs the churn was masking (skipped `stage()`; blend dropped on replay) and a 3rd (Warp flux kernels dropped from graph replay → graph now refused there). Default path 80.9 → **2.6 ms/step and correct**. See log above. |
 | 13c | **port the flux adv-diff (`quick`) Warp kernels → native** so the DEFAULT config can be graphed | Phase 1 | **Claude** | 1–2 | ✅ DONE — one fused native op (`advect_flux_accumulate`, CUDA+CPU, shared schemes header), bit-exact vs Warp (40/40 combos); default config replays (captures=1 evictions=0); 2.6 → **2.04 ms/step**; Warp out of the hot loop. See row-13c log above. |
 | 13d | **re-validate the coupled FARMS/streaming path** — it *does* replay, so a flux `convection_method` there has been silently dropping advection | Phase 1 | **Claude** | 1 | ✅ DONE — old gate physics were CORRECT (churn → never replayed; proven by forced-replay repro); perf re-validated 2-D 103.3→**9.42**, 3-D 122.0→**25.36** ms/step; 3.098 single-phase number valid (`implicit`). See row-13d log above. |
-| 14 | 4.4–4.5 two-phase simplification | Phase 4 | **Claude** | 1–2 | ☐ |
+| 14 | 4.4–4.5 two-phase simplification | Phase 4 | **Claude** | 1–2 | ✅ DONE — consistent-momentum + mu0_free_coeff deleted (−206 L, loud key rejection); `mgcg` now the two-phase default (4.2 leftover); cvof native-everywhere, `two_phase.py` Warp-free, dead `_cvof_buf_b` gone. Gate: 100-step production path **bit-exact vs HEAD**; 479/1(pre-existing)/1; drop-sphere PASSES. See row-14 log above. |
 
 **Dependencies:** Track C unblocks the CPU side of D (Poisson) and B
 (advection). Track D is otherwise independent (its own graph). Track B / Phase 1
