@@ -388,7 +388,7 @@ static int upload_texture_locked(void) {
   // Use a dedicated non-blocking stream rather than the legacy default (NULL)
   // stream: the default stream is process-global and any op on it fails with
   // cudaErrorStreamCaptureImplicit (906) while another thread runs a CUDA graph
-  // capture (Warp BC-runner / poisson_cuda_graph), poisoning that capture. A
+  // capture (the whole-step graph runner), poisoning that capture. A
   // non-blocking stream never creates that implicit dependency.
   if (!g_state.stream) {
     if (!cuda_ok(cudaStreamCreateWithFlags(&g_state.stream, CUDA_STREAM_NON_BLOCKING),
@@ -609,7 +609,7 @@ void lily_flow_viewer_hook_record_ready(void* producer_stream) {
   // writes the overlay texture, with that thread's current torch stream.
   // Recording here (under the mutex) serialises against the render thread's
   // cudaStreamWaitEvent, so record/wait never race on the event handle.
-  // NOTE: this runs on the sim thread sequentially with any Warp graph
+  // NOTE: this runs on the sim thread sequentially with any CUDA graph
   // capture (captures begin and end inside solver calls), so recording on
   // the legacy default stream is safe — unlike the render thread, it can
   // never be concurrent with a capture.

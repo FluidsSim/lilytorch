@@ -14,7 +14,7 @@ SIGKILLs the process with no diagnostics.
 NOTE: an RLIMIT_AS cap does NOT work for this in a CUDA process — the CUDA
 driver reserves address space far beyond RSS (VIRT >> RSS), so any cap low
 enough to catch a host-RAM runaway also breaks legitimate device
-allocations (observed: Warp "Failed to allocate 4 bytes on device 'cuda:0'"
+allocations (observed: "Failed to allocate 4 bytes on device 'cuda:0'"
 mid-step with a 48 GB cap while RSS was only ~3.5 GB).
 """
 

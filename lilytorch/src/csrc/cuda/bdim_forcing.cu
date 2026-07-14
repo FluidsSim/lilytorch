@@ -2,7 +2,7 @@
 //  bdim_forcing_{2d,3d} — static full-grid BDIM2 + Poisson coefficient
 //  + Maertens–Weymouth body-divergence correction.
 //
-//  Faithful line-for-line port of the Warp kernel in bdim.py
+//  Static full-grid BDIM forcing kernel
 //  (bdim_forcing_2d_kernel / bdim_forcing_3d_kernel), which is itself a
 //  faithful port of the original native bdim_one_axis in streaming_sdf.cu.
 //

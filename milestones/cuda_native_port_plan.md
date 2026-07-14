@@ -2014,7 +2014,7 @@ the table below reflects that. Track B *is* Phase 1.
 | 11 | 2.2 Regime A (direct-write, disjoint) + overlap detect | Phase 2 | DeepSeek + Claude fix | 1 | ✅ direct is disjoint-ONLY (Claude fixed the dispatch — DeepSeek had it racing on overlap) |
 | 11b | 2.3 Regime B (per-body private buffers + resolve, full fp64) | Phase 2 | DeepSeek + Claude fix | 1–2 | ✅ resolve crash fixed + wired; 52/0/0; strict parity + GPU==CPU twin (see 2026-07-13 correction log) |
 | 11c | 2.4 delete old union path + migrate test oracle + bench | Phase 2 | DeepSeek (Claude review) | 1 | ✅ union path deleted; oracle migrated to GPU==CPU twin; 2-D+3-D coupled gates PASS; bench done (Regime-A retirement priced) — **Phase 2 CLOSED** |
-| 12 | 3 unification memo | Phase 3 | **Claude** | 1 | ☐ |
+| 12 | 3 unification memo | Phase 3 | **Claude** | 1 | ☐ **still open** — the only unclosed row. Pure evaluation (see Phase 3): decide whether to fuse fluid_step ⊕ Poisson into one graph. Explicitly deferrable; blocks nothing. |
 | 13 | 4.1–4.3 two-phase perf | Phase 4 | DeepSeek (Claude spec/review) | 2 | ✅ **CLOSED** (2026-07-14) — 4.1 harness fixed + definitive profile (2-D 2.09 / 3-D 4.58 ms/step, graphs replay); 4.2 mgcg default landed in row 14; 4.3 correct + tested. Leftover (a) = **inter-block race in the 2-D tiled RBGS/Jacobi kernels** (non-deterministic Poisson!) → fixed via pre-sweep snapshot, graphs-vs-eager now bit-exact over 200 steps; leftover (e) 3-D peak memory measured (32.0 vs 33.3 MiB — improved). See the row-13 close-out log. |
 | 13b | **pre-Poisson graph key pointer-stability** (Phase-1 defect found by 4.1) | Phase 1 fix | **Claude** | 1 | ✅ DONE (uncommitted) — + it exposed 2 **silent-wrong-physics** bugs the churn was masking (skipped `stage()`; blend dropped on replay) and a 3rd (Warp flux kernels dropped from graph replay → graph now refused there). Default path 80.9 → **2.6 ms/step and correct**. See log above. |
 | 13c | **port the flux adv-diff (`quick`) Warp kernels → native** so the DEFAULT config can be graphed | Phase 1 | **Claude** | 1–2 | ✅ DONE — one fused native op (`advect_flux_accumulate`, CUDA+CPU, shared schemes header), bit-exact vs Warp (40/40 combos); default config replays (captures=1 evictions=0); 2.6 → **2.04 ms/step**; Warp out of the hot loop. See row-13c log above. |
@@ -2031,3 +2031,82 @@ correctness or the main perf win.
 Claude-critical sessions: the graph-runner build (row 7) and the
 bdim/BCs/advection conversion specs (row 8); everything mechanical is
 spec-driven DeepSeek work bounded by pre-written parity tests.
+
+---
+
+## Phase 5 — Warp REMOVED (2026-07-14, Claude)
+
+**Warp is gone from the branch.** `import warp` now fails nowhere because nothing
+imports it: no `src/` module, no test, no benchmark, and `warp-lang` is out of
+`requirements.txt`. Gate: the solver drives 2-D/3-D, CPU+CUDA, 10 steps with
+`import warp` monkeypatched to raise.
+
+### What had to be ported first (Warp was still load-bearing in two places)
+
+| Piece | Why it was still live | Resolution |
+|---|---|---|
+| `operations.strain_rate_magnitude` | the ONLY Warp kernel on a live path — Smagorinsky LES, Carreau/yield viscosity, FlowDiagnostics | **NEW native op** `strain_rate_magnitude` (`csrc/strain_rate.h` single-source + `cuda/strain_rate.cu` + `strain_rate_cpu.cpp`). CPU twin is **bit-exact** vs the Warp kernel; CUDA agrees to 1.4e-16 (f64) / ~1 ULP (f32) — FMA contraction only. |
+| `multigrid_graph.WarpMG{2,3}D` | the CPU Poisson fallback (`_use_native_poisson()` was CUDA-only) | **NEW native op** `mg_vcycle_{2,3}d` — N raw V-cycles, no gauge fix: exactly the PCG preconditioner primitive the native CUDA MGCG driver already applies to `z` internally. `PoissonSolver._dispatch_vcycle` now calls it, so the Python CG driver runs on **any** device. `multigrid_graph.py` DELETED. |
+
+Also deleted as dead-on-arrival (native twins already shipped, only tests still
+referenced them): `src/bdim.py`, `src/cvof.py`, `src/streaming_sdf.py`,
+`src/lagrangian.py`, `src/diffusion.py`, the Warp blocks inside `advection.py`
+(−1206 L) / `forces.py` (−1285 L) / `interpolation.py` (−317 L), and
+`graph_capture.WholeStepGraphRunner` (imported by `solver.py`, never instantiated).
+
+`dirichlet_mask` and `pre_scaled` went with them: both were **always** `None` /
+`False` (the free-surface GFM solver they served is no longer in the repo), and
+the mask was only ever implemented in the Warp V-cycle. Ditto the `cuda_graph`
+ctor arg, which no caller passed.
+
+### The interesting part: Warp was MASKING three broken CPU twins
+
+Every `*_cpu_eq_gpu` test ran **Warp-on-CPU vs Warp-on-GPU** — so it never once
+exercised the native CPU twins. Repointing those tests at the native ops (which
+is what actually ships) turned three of them red immediately:
+
+1. **`rbgs_sweep_3d` (CPU)** — a bogus row-level `(i+j) & 1` guard sat on TOP of
+   the correct per-cell `(i+j+k) & 1` colour test, so it skipped **half the red
+   cells and half the black cells outright**; and it never refreshed the Neumann
+   ghost ring between the red and black half-sweeps (the CUDA twin does). CPU 3-D
+   RBGS Poisson was silently wrong (O(1) error). Now bit-exact vs CUDA.
+2. **`streaming_sdf_forces_post_3d` (CPU)** — the velocity-gradient stencils used
+   *clamped-index* differences instead of the CUDA kernel's O(h²) one-sided
+   formulas on the CC-interpolated components, and `dudx` collapsed to **zero** on
+   the last plane. Viscous force/torque was ~1–3% off for any body whose AABB
+   touched a boundary. Rewritten to mirror CUDA cell-for-cell.
+3. **`advect_flux_add` (CPU)** — the twin was a hand-rolled *second copy* of the
+   five schemes living in `multigrid_cpu.cpp` (not the single-source
+   `advection_schemes.h`), and it disagreed with CUDA by ~10×. Reimplemented in
+   `advection_flux_cpu.cpp` on the shared `face_flux_diff_cpu` helper; the
+   duplicated scheme block is deleted. (This op is superseded in production by
+   `advect_flux_accumulate`, so the bug was latent — but it is the op the CPU
+   scheme-regression anchor pins.)
+
+Unifying the CPU Poisson onto the native driver also **fixed the one test that
+was failing at HEAD** (`test_python_eulerian_force_path_cpu_eq_gpu`): CPU and CUDA
+had been running *different V-cycles*, so the pressure they read differed.
+
+### Known, benign, PRE-EXISTING (found while gating; not introduced here)
+
+* **Dead ghost cells differ between backends.** The 5/7-point stencil never reads
+  edge/corner ghosts, and the two backends leave different garbage there (the CUDA
+  Jacobi's odd-`nsmoothing` ping-pong memcpys a zeroed scratch buffer back over
+  `p`). Each Poisson driver's gauge is a `mean` over the FULL padded tensor, dead
+  corners included, so that garbage shifts the whole field by a **constant** —
+  immaterial, since the solver only ever consumes ∇p. Tests therefore compare
+  interiors modulo a constant, and smoothers on live cells only.
+* **3-D `v` is non-deterministic in 2 edge-ghost cells** — reproduced on unmodified
+  HEAD (run-to-run rel 2.4e-3 in those cells; interior bit-exact). Same class as
+  the row-13 2-D smoother race, apparently not fully closed in 3-D. Worth a look;
+  no physics impact.
+
+### Gate
+
+| check | result |
+|---|---|
+| suite | **360 pass / 0 fail / 1 skip** (was 479/1/1 — the drop is the deleted Warp-oracle tests, and the 1 failure is now FIXED) |
+| `import warp` blocked → solver runs | 2-D CUDA + 2-D CPU + 3-D CUDA, 10 steps, finite |
+| 50-step physics vs HEAD b055aab (CUDA, default cfg) | **interior BIT-IDENTICAL** in 2-D (u,v,p) and 3-D (u,v,w,p) |
+| CPU vs CUDA agreement | 2-D 10-step Σu² agrees to 9 s.f. (they now share the Poisson driver) |
+| ms/step (2-D 48² / 3-D 24³) | 4.29 → 4.25 / 5.67 → 5.61 — a wash, as expected (no hot-path kernel changed) |

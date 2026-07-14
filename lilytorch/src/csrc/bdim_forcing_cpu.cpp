@@ -2,7 +2,7 @@
 //  bdim_forcing_{2d,3d} — CPU twins (at::parallel_for).
 //
 //  Faithful line-for-line port of the CUDA kernel in bdim_forcing.cu,
-//  which is a faithful port of the Warp kernel in bdim.py.
+//  cell-for-cell.
 // =====================================================================
 
 #include <ATen/ATen.h>

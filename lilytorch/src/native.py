@@ -346,7 +346,7 @@ def bdim_forcing_3d(
         rect_dev=None):
     """Native static full-grid BDIM2 forcing (3-D).
 
-    Mirrors :func:`bdim.bdim_forcing_3d_warp` exactly — same signature,
+    Same signature,
     same semantics.  ``rect_dev`` is an optional pre-allocated int32
     device tensor [i0,j0,k0,Ai,Aj,Ak]; when None, a new tensor is
     allocated per call (eager path).
@@ -385,7 +385,6 @@ def bdim_forcing_2d(
         rect_dev=None):
     """Native static full-grid BDIM2 forcing (2-D).
 
-    Mirrors :func:`bdim.bdim_forcing_2d_warp` exactly.
     """
     mw_on = 1 if div_corr is not None else 0
     if div_corr is None:
@@ -408,7 +407,6 @@ def bdim_forcing_2d(
 
 # =====================================================================
 #  sl_advect + diffuse_add — item 8.D
-#  Mirrors advection.sl_advect_{2,3}d_warp and diffusion.diffuse_add_.
 # =====================================================================
 
 def sl_advect_2d(u, v, out_u, out_v,
@@ -417,7 +415,6 @@ def sl_advect_2d(u, v, out_u, out_v,
                  v_bx0, v_by0, v_idx, v_idy, dt):
     """Native fused RK2 semi-Lagrangian advection (2-D).
 
-    Mirrors :func:`advection.sl_advect_2d_warp` exactly.
     """
     return torch.ops.lilytorch_kernels.sl_advect_2d.default(
         u, v, gxu, gyu, gxv, gyv,
@@ -436,7 +433,6 @@ def sl_advect_3d(u, v, w, out_u, out_v, out_w,
                  w_bx0, w_by0, w_bz0, w_idx, w_idy, w_idz, dt):
     """Native fused RK2 semi-Lagrangian advection (3-D).
 
-    Mirrors :func:`advection.sl_advect_3d_warp` exactly.
     """
     return torch.ops.lilytorch_kernels.sl_advect_3d.default(
         u, v, w,
@@ -1007,6 +1003,48 @@ def _prolongate_add_3d_abstract(ec, p): pass
 _SMOOTHER_MAP = {"rbgs": 0, "jacobi": 1}
 
 
+def mg_vcycle_2d(
+        p: Tensor, f: Tensor, ch: Tensor, cv: Tensor,
+        jcap_tol: float, w: float,
+        nsmoothing: int, n_vcycles: int, smoother: str = "rbgs") -> Tensor:
+    """``n_vcycles`` raw V-cycles (2-D) — the MGCG preconditioner primitive.
+
+    No gauge fix: unlike :func:`poisson_solve_multigrid_2d` this applies no
+    ghost-ring Neumann pass and no mean subtraction, and does NOT rescale
+    ``f`` (pass the h²-scaled smoother RHS).  ``p`` (ghost-padded) is mutated
+    in place; the interior residual is returned.
+    """
+    sid = _SMOOTHER_MAP[smoother]
+    return torch.ops.lilytorch_kernels.mg_vcycle_2d.default(
+        p, f, ch, cv, float(jcap_tol), float(w),
+        int(nsmoothing), int(n_vcycles), int(sid),
+    )
+
+
+def mg_vcycle_3d(
+        p: Tensor, f: Tensor, ch: Tensor, cv: Tensor, cw: Tensor,
+        jcap_tol: float, w: float,
+        nsmoothing: int, n_vcycles: int, smoother: str = "rbgs") -> Tensor:
+    """``n_vcycles`` raw V-cycles (3-D).  See :func:`mg_vcycle_2d`."""
+    sid = _SMOOTHER_MAP[smoother]
+    return torch.ops.lilytorch_kernels.mg_vcycle_3d.default(
+        p, f, ch, cv, cw, float(jcap_tol), float(w),
+        int(nsmoothing), int(n_vcycles), int(sid),
+    )
+
+
+@torch.library.register_fake("lilytorch_kernels::mg_vcycle_2d")
+def _mg_vcycle_2d_abstract(p, f, ch, cv, jcap_tol, w,
+                           nsmoothing, n_vcycles, smoother_id):
+    return torch.empty_like(f)
+
+
+@torch.library.register_fake("lilytorch_kernels::mg_vcycle_3d")
+def _mg_vcycle_3d_abstract(p, f, ch, cv, cw, jcap_tol, w,
+                           nsmoothing, n_vcycles, smoother_id):
+    return torch.empty_like(f)
+
+
 def poisson_solve_multigrid_2d(
         p: Tensor, f: Tensor, ch: Tensor, cv: Tensor,
         h2: float, jcap_tol: float, w: float,
@@ -1166,7 +1204,7 @@ def advect_flux_add(
     """Accumulate ``rhs[i_fd] += dt_dh * (F_left - F_right)`` in place for one
     (velocity component, spatial direction) pair.
 
-    Native twin of ``advection.advect_flux_add_warp`` (same positional
+    Fused high-order flux add (same positional
     convention).  ``fv`` is the face velocity, ``p`` the transported field,
     ``rhs`` the in-place accumulator; ``scheme_id`` selects the limiter and
     ``face_dim`` the flux direction.
@@ -1188,8 +1226,7 @@ def advect_flux_accumulate(
         dt_dh, C_courant: float, scheme_id: int) -> None:
     """Fused per-cell convective flux accumulate for one velocity component.
 
-    Native twin of the Warp ``advect_flux_accumulate_warp`` +
-    ``_accumulate_interior_warp`` pair.  Reads the flux stencil from
+    Fused flux accumulate: reads the flux stencil from
     ``phi_src`` (full-grid copy of ``vel[comp_i]``), computes face
     velocities from ``vel`` on the fly, and accumulates
     ``dst[cell] += Σ_d dt_dh[d] * (F_L - F_R)`` over the interior of the
@@ -1219,7 +1256,6 @@ def cvof_sweep(
         face_dim: int, out: Tensor) -> None:
     """Weymouth & Yue conservative-VOF donor-acceptor sweep along ``face_dim``.
 
-    Native twin of ``cvof.cvof_sweep_warp`` (same positional convention).
     Writes the interior of ``out`` in place from the alpha field ``a`` and
     face velocity ``u_d`` at Courant ``cfl``.
     """
@@ -1233,9 +1269,27 @@ def _cvof_sweep_abstract(a, u_d, cfl, face_dim, out):
     pass   # out interior is written in place; no new tensors created
 
 
+def strain_rate_magnitude(
+        u: Tensor, v: Tensor, w, h: float, out: Tensor) -> None:
+    """Strain-rate magnitude ``|S̄| = sqrt(2·S_ij·S_ij)`` on the full grid.
+
+    Writes ``out`` (shaped like ``u``) in place.  ``w`` is required in 3-D and
+    ignored in 2-D.  Reproduces the reference ``torch.gradient(edge_order=2)
+    + _stag_to_cc`` path exactly, with every gradient kept in registers.
+    """
+    return torch.ops.lilytorch_kernels.strain_rate_magnitude.default(
+        u, v, w, float(h), out,
+    )
+
+
+@torch.library.register_fake("lilytorch_kernels::strain_rate_magnitude")
+def _strain_rate_magnitude_abstract(u, v, w, h, out):
+    pass   # out is written in place; no new tensors created
+
+
 # =====================================================================
 # RegularGridInterpolator — native CUDA/CPU-backed scattered-point
-# interpolation (replaces pytorch_interpolation + Warp interp kernels).
+# interpolation (replaces pytorch_interpolation).
 # =====================================================================
 
 from typing import Sequence  # noqa: E402

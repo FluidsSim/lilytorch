@@ -115,7 +115,7 @@ def build_solver(config_path: str, dtype=torch.float32) -> FluidSolver:
         pars.setdefault("jellyfish", {})["gravity"] = GRAVITY
 
     output_dir = _resolve_output_folder(pars)
-    # Single-source Warp kernels (lilytorch.src) back both solvers.
+    # Single-source native kernels (lilytorch.src) back both solvers.
     SolverCls = TwoPhaseSolver if TWO_PHASE else FluidSolver
     solver = SolverCls(pars, dtype=dtype, compute_forces=True)
     solver.jellyfish_output_dir = output_dir

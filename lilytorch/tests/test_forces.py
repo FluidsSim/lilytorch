@@ -1,9 +1,9 @@
-"""Warp Eulerian force readout single-source checks: Warp CPU == Warp GPU.
+"""Native Eulerian force readout single-source checks: CPU twin == CUDA kernel.
 
-Exercises ``streaming_sdf_forces_post_{2,3}d_warp`` (``forces.py``) on the
+Exercises ``streaming_sdf_forces_post_{2,3}d`` (``forces.py``) on the
 synthetic flat-table scenes (``scene_2d.make_synthetic_scene_2d`` /
-``bench_viability.make_synthetic_scene``).  The union ``sdf_cc`` is populated
-by the Warp streaming bridge first (so the band / union-normal paths are
+``scene_3d.make_synthetic_scene``).  The union ``sdf_cc`` is populated
+by the native streaming bridge first (so the band / union-normal paths are
 exercised on a real union SDF), then the force readout consumes the same
 fields on both devices.
 
@@ -19,20 +19,19 @@ import torch
 
 from lilytorch.src.facade import body_update_2d, body_update_3d
 from lilytorch.src.forces import (
-    streaming_sdf_forces_post_2d_warp,
-    streaming_sdf_forces_post_3d_warp,
+    streaming_sdf_forces_post_2d,
+    streaming_sdf_forces_post_3d,
 )
 from lilytorch.tests.scene_2d import make_synthetic_scene_2d
-from lilytorch.benchmarks.bench_viability import make_synthetic_scene
+from lilytorch.tests.scene_3d import make_synthetic_scene
 
 SKIP_NO_CUDA = pytest.mark.skipif(not torch.cuda.is_available(),
                                   reason="needs CUDA for the GPU half")
 
-# Native CPU/CUDA streaming SDF now agrees to ~1e-12 (f64) after the
-# sampler accumulation-order fix.  delta_order=1 force tests pass at
-# ATOL=1e-12; delta_order=2 amplifies residual ~1e-12 SDF differences
-# through the delta-function gradient, producing ~1e-8 force errors on
-# the 3-D path (a Warp force-kernel runtime artifact, not a native bug).
+# The CPU/CUDA streaming SDF agrees to ~1e-12 (f64).  delta_order=1 force
+# tests pass at ATOL=1e-12; delta_order=2 amplifies residual ~1e-12 SDF
+# differences through the delta-function gradient, producing ~1e-8 force
+# errors on the 3-D path.
 ATOL_F64 = 1e-12
 RTOL_F64 = 1e-8
 RTOL_F32 = 3e-4
@@ -49,7 +48,7 @@ def _rand_fields(shape, dtype, dev, seed):
 
 def _fill_union_sdf_2d(sc, dtype, dev, kin=None, aabb_lo=None, aabb_dim=None,
                        max_vol=None, out=None):
-    """Run the Warp streaming bridge to populate a real union ``sdf_cc``.
+    """Run the native streaming bridge to populate a real union ``sdf_cc``.
 
     ``kin``/``aabb_*``/``max_vol`` default to the scene's; pass the current
     step's values (and a persistent ``out``) to refresh the union in place,
@@ -96,7 +95,7 @@ def _run_2d(dev, dtype, submethod, delta_order, scalar_nrho):
     ph_tau = 0.5 * h if submethod else 0.0
 
     out_w = torch.zeros(B, 6, dtype=torch.float64, device=dev)
-    streaming_sdf_forces_post_2d_warp(
+    streaming_sdf_forces_post_2d(
         sc["F_flat"], sc["F_offsets"], sc["body_shapes"], sc["body_meta"],
         sc["kin"], sc["aabb_lo"], sc["aabb_dim"], sc["gx"], sc["gy"],
         h, int(sc["max_vol"]), sdf_cc, 0, u, v, p, nrho,
@@ -182,7 +181,7 @@ def _run_3d(dev, dtype, submethod, delta_order, scalar_nrho):
     ph_tau = 0.5 * h if submethod else 0.0
 
     out_w = torch.zeros(B, 12, dtype=torch.float64, device=dev)
-    streaming_sdf_forces_post_3d_warp(
+    streaming_sdf_forces_post_3d(
         sc["F_flat"], sc["F_offsets"], sc["body_shapes"], sc["body_meta"],
         sc["kin"], sc["aabb_lo"], sc["aabb_dim"], sc["gx"], sc["gy"], sc["gz"],
         h, int(sc["max_vol"]), sdf_cc, 0, u, v, w, p, nrho,
@@ -212,12 +211,12 @@ def test_forces_3d_deltaH_cpu_eq_gpu(dtype, delta_order):
 
 # ── Live NON-streaming python force path (forces_method2 python branch) ───────
 # The torch-tensor force path (``_forces_shared`` / ``_forces_body_batch`` in
-# forces.py) is NOT dead: it is the general fallback taken whenever the Warp
+# forces.py) is NOT dead: it is the general fallback taken whenever the native
 # streaming buffers (``comp._kernel_step`` / ``_kernel_static_2d``) are absent —
 # i.e. any direct ``FluidSolver`` (no BDIMhandler), analytical composite bodies,
 # and the drag/lift validation benchmarks.  The 3c dedup only removed the dead
 # ``_forces_lagrangian_*_python_ref`` oracles; this locks the surviving path
-# end-to-end (finite, deterministic on CPU, and Warp-CPU == Warp-GPU parity).
+# end-to-end (finite, deterministic on CPU, and CPU == GPU parity).
 
 def _run_python_eulerian(device):
     from lilytorch.tests.test_two_phase import (
@@ -230,7 +229,7 @@ def _run_python_eulerian(device):
     sp = FluidSolver(pars, dtype=torch.float64, compute_forces=True)
     _set_ic(sp, _taylor_green_ic(sp))
     _step_n(sp, 5)
-    # confirms we exercised the python branch, not the Warp streaming readout
+    # confirms we exercised the python branch, not the native streaming readout
     assert getattr(sp.composite_body, "_kernel_step", None) is None
     return torch.tensor([
         float(sp.friction_force_lin_x.reshape(-1)[0]),
@@ -245,19 +244,20 @@ def test_python_eulerian_force_path_cpu_regression():
     (float64 is deterministic).  Guards the load-bearing torch-tensor path that
     has no other unit coverage.
 
-    Re-frozen when the Poisson driver unified onto the single WarpMG V-cycle:
-    the force *readout* path is unchanged, but the pressure it reads now comes
-    from WarpMG on CPU instead of the retired hybrid torch V-cycle, shifting the
-    values by ~3e-9 relative (arithmetic-order roundoff, not convergence).
+    The force *readout* path is stable; the frozen values track the pressure it
+    reads, so they have been re-frozen whenever the Poisson driver changed
+    (arithmetic-order roundoff, not convergence — each shift was ~1e-9
+    relative).
 
-    Re-frozen again when ``solve_multigrid`` became adaptive (early-exit at
-    ``tol`` between one-v-cycle graph replays, restoring the retired native
-    driver's convergence semantics): the solve stops after fewer V-cycles once
-    converged, shifting the pressure — and these readouts — by ~7e-9 relative."""
+    Re-frozen when the CPU Poisson moved off WarpMG onto the native
+    ``poisson_solve_multigrid_*`` C++ driver (the same one CUDA already used):
+    the pressure it reads shifts by ~2e-8 relative.  That unification also made
+    ``test_python_eulerian_force_path_cpu_eq_gpu`` pass, which had been failing
+    for as long as CPU and CUDA ran different V-cycles."""
     got = _run_python_eulerian("cpu")
     expected = torch.tensor(
-        [0.4901618791749159, -0.5369408627991937,
-         28.151615663974535, -11.757473401771366], dtype=torch.float64)
+        [0.4901618826264682, -0.5369408657033692,
+         28.151615122937677, -11.757472849432448], dtype=torch.float64)
     assert torch.allclose(got, expected, rtol=1e-9, atol=1e-11), \
         f"python eulerian force drift: {got.tolist()} vs {expected.tolist()}"
 
@@ -271,17 +271,16 @@ def test_python_eulerian_force_path_cpu_eq_gpu():
         f"CPU vs GPU python eulerian force: {c.tolist()} vs {g.tolist()}"
 
 
-# ── Native streaming force readout (ForcesPostGraph) == Warp oracle ──────────
-# cuda_native_port Phase 0.2 parity gate.  Drives the ForcesPostGraph readout —
-# now the NATIVE CUDA op, run eagerly (the Warp CUDA-graph capture is retired
-# here; the native whole-step graph runner is Phase 1) — over a multi-step
-# "simulation": per-step FRESH kin/aabb tensors (as BDIMhandler produces),
-# moving poses, in-place fluid-field updates, and a mid-run max_vol growth that
-# exercises the grow-only watermark.  The reference runs the Warp oracle on
-# identical data; agreement is atomic-accumulation-order roundoff only (native
-# CUDA vs Warp CUDA), so the tolerance is fp-width-aware rather than bit-exact.
+# ── Streaming force readout: the ForcesPostGraph wrapper == the raw op ───────
+# Drives the ForcesPostGraph readout over a multi-step "simulation": per-step
+# FRESH kin/aabb tensors (as BDIMhandler produces), moving poses, in-place
+# fluid-field updates, and a mid-run max_vol growth that exercises the grow-only
+# watermark.  The reference calls the raw native op on identical data, so this
+# gates the staging / watermark bookkeeping around the kernel, not the kernel.
+# Agreement is atomic-accumulation-order roundoff only, so the tolerance is
+# fp-width-aware rather than bit-exact.
 
-# native-vs-warp atomic-order divergence: f64 ~3e-9, f32 ~2e-7 (measured);
+# atomic-order divergence: f64 ~3e-9, f32 ~2e-7 (measured);
 # leave headroom for other scenes / larger force magnitudes.
 def _forces_parity_atol(dtype):
     return 1e-6 if dtype == torch.float64 else 1e-3
@@ -333,7 +332,7 @@ def _graph_steps_2d(dtype, submethod=0):
                force_submethod=submethod, ph_tau=ph_tau)
 
         out_e.zero_()
-        streaming_sdf_forces_post_2d_warp(
+        streaming_sdf_forces_post_2d(
             sc["F_flat"], sc["F_offsets"], sc["body_shapes"], sc["body_meta"],
             kin, aabb_lo, aabb_dim, sc["gx"], sc["gy"],
             h, max_vol, sdf_cc, 0, u, v, p, nrho,
@@ -342,7 +341,7 @@ def _graph_steps_2d(dtype, submethod=0):
 
         err = (out_g - out_e).abs().max().item()
         atol = _forces_parity_atol(dtype)
-        assert err < atol, f"step {step}: native vs warp err {err:.3e} >= {atol:.1e}"
+        assert err < atol, f"step {step}: graph wrapper vs raw op err {err:.3e} >= {atol:.1e}"
         assert out_e.abs().max().item() > 0, f"step {step}: no in-band force"
     return fg
 
@@ -352,9 +351,8 @@ def _graph_steps_2d(dtype, submethod=0):
 @pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
 def test_forces_2d_graph_replay_eq_eager(dtype, submethod):
     fg = _graph_steps_2d(dtype, submethod)
-    # Phase 0: the readout is native and runs eagerly every step (no Warp
-    # capture/replay).  All 8 steps count as eager; the per-step native-vs-warp
-    # parity is checked inside _graph_steps_2d.
+    # The readout runs eagerly every step; all 8 steps count as eager, and the
+    # per-step parity against the raw op is checked inside _graph_steps_2d.
     assert fg.eager_calls == 8, f"eager_calls={fg.eager_calls}"
     assert fg.captures == 0 and fg.replays == 0
 
@@ -400,7 +398,7 @@ def _graph_steps_3d(dtype, submethod=0):
                force_submethod=submethod, ph_tau=ph_tau)
 
         out_e.zero_()
-        streaming_sdf_forces_post_3d_warp(
+        streaming_sdf_forces_post_3d(
             sc["F_flat"], sc["F_offsets"], sc["body_shapes"], sc["body_meta"],
             kin, aabb_lo, aabb_dim, sc["gx"], sc["gy"], sc["gz"],
             h, max_vol, sdf_cc, 0, u, v, w, p, nrho,
@@ -409,7 +407,7 @@ def _graph_steps_3d(dtype, submethod=0):
 
         err = (out_g - out_e).abs().max().item()
         atol = _forces_parity_atol(dtype)
-        assert err < atol, f"step {step}: native vs warp err {err:.3e} >= {atol:.1e}"
+        assert err < atol, f"step {step}: graph wrapper vs raw op err {err:.3e} >= {atol:.1e}"
         assert out_e.abs().max().item() > 0, f"step {step}: no in-band force"
     return fg
 

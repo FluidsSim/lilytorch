@@ -120,7 +120,7 @@ def main():
     print(f"Warmup  : {args.warmup}   Measured: {args.steps}\n")
 
     rows = [
-        profile_backend("warp", args.dim, args.ncells,
+        profile_backend("native", args.dim, args.ncells,
                         args.poisson, args.warmup, args.steps),
     ]
     print("="*64)

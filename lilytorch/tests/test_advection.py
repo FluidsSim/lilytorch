@@ -1,6 +1,6 @@
-"""Advection Warp-kernel tests (single production path).
+"""Advection native-kernel tests (single production path).
 
-The fused high-order limiter kernel ``advect_flux_add_warp`` is the *only*
+The fused high-order limiter kernel ``native.advect_flux_add`` is the *only*
 convective path (CPU C++/OpenMP and CUDA).  Three layers:
 
   (1) CPU regression anchor — a frozen (sum, |max|) snapshot of the rhs the
@@ -8,7 +8,7 @@ convective path (CPU C++/OpenMP and CUDA).  Three layers:
       ABDQUICKEST / vanLeer / CDS / CUBISTA), 2-D and 3-D.  The snapshot was
       captured when the kernel was still validated bit-for-bit against the
       (now-removed) PyTorch reference, so it pins correctness without CUDA.
-  (2) Single-source integrity — the SAME @wp.kernel on CPU == GPU (needs CUDA).
+  (2) Single-source integrity — the SAME kernel source on CPU == GPU (needs CUDA).
   (3) In-place accumulate semantics (rhs += flux, not overwrite).
 
 Every (velocity component i, direction d) pair is exercised so the rhs-stride
@@ -23,16 +23,14 @@ import itertools
 
 import pytest
 import torch
-import warp as wp
 
+from lilytorch.src import native
 from lilytorch.src.advection import (
-    advect_flux_add_warp,
     _face_vel,
     _field_for_flux,
     _inner,
-    apply_bcs_2d_warp,
-    apply_bcs_3d_warp,
 )
+from lilytorch.src.native import advect_flux_add, apply_bcs_2d, apply_bcs_3d
 
 SKIP_NO_CUDA = pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA")
 
@@ -55,13 +53,12 @@ def _courant(scheme_id):
     return 0.37 if scheme_id == 1 else 0.0
 
 
-def _warp(vel, i, d, scheme_id, dt_dh, ndim):
+def _flux(vel, i, d, scheme_id, dt_dh, ndim):
     inner = _inner(ndim)
     fv = _face_vel(vel, i, d, ndim)
     p = _field_for_flux(vel[i], d, ndim)
     rhs = torch.zeros_like(vel[i][inner])
-    advect_flux_add_warp(fv, p, rhs, dt_dh, _courant(scheme_id), scheme_id, d)
-    wp.synchronize()
+    advect_flux_add(fv, p, rhs, dt_dh, _courant(scheme_id), scheme_id, d)
     return rhs
 
 
@@ -88,14 +85,14 @@ _REGRESSION = {
 
 @pytest.mark.parametrize("ndim", [2, 3])
 @pytest.mark.parametrize("scheme_id", sorted(_SCHEMES))
-def test_flux_add_warp_cpu_regression(ndim, scheme_id):
+def test_flux_add_cpu_regression(ndim, scheme_id):
     """Kernel output on CPU matches the frozen validated snapshot."""
     N = 20 if ndim == 3 else 40
     vel = _make_vel(ndim, N, "cpu")
     dt_dh = 0.15
     s, a = 0.0, 0.0
     for i, d in itertools.product(range(ndim), range(ndim)):
-        rhs = _warp(vel, i, d, scheme_id, dt_dh, ndim)
+        rhs = _flux(vel, i, d, scheme_id, dt_dh, ndim)
         s += float(rhs.sum())
         a = max(a, float(rhs.abs().max()))
     exp_s, exp_a = _REGRESSION[(ndim, scheme_id)]
@@ -119,10 +116,9 @@ def test_flux_add_accumulates_in_place():
     fv = _face_vel(vel, i, d, ndim)
     p = _field_for_flux(vel[i], d, ndim)
 
-    delta = _warp(vel, i, d, sid, dt_dh, ndim)  # zero-seeded → pure flux term
+    delta = _flux(vel, i, d, sid, dt_dh, ndim)  # zero-seeded → pure flux term
     got = seed_rhs.clone()
-    advect_flux_add_warp(fv, p, got, dt_dh, 0.0, sid, d)
-    wp.synchronize()
+    advect_flux_add(fv, p, got, dt_dh, 0.0, sid, d)
     # 1-ULP f64 slack: the kernel fuses seed + dt_dh·flux in one expression,
     # while the reference adds them in two rounding steps.
     assert (got - (seed_rhs + delta)).abs().max().item() < 1e-15
@@ -130,8 +126,8 @@ def test_flux_add_accumulates_in_place():
 
 @pytest.mark.parametrize("ndim", [2, 3])
 @pytest.mark.parametrize("scheme_id", sorted(_SCHEMES))
-def test_flux_add_warp_cpu_equals_gpu(ndim, scheme_id):
-    """Single-source check: the SAME @wp.kernel on CPU == GPU."""
+def test_flux_add_cpu_equals_gpu(ndim, scheme_id):
+    """Single-source check: the SAME kernel source on CPU == GPU."""
     if not torch.cuda.is_available():
         pytest.skip("no CUDA")
     N = 20 if ndim == 3 else 40
@@ -140,8 +136,8 @@ def test_flux_add_warp_cpu_equals_gpu(ndim, scheme_id):
     vel_gpu = [v.to("cuda:0") for v in vel_cpu]
     worst = 0.0
     for i, d in itertools.product(range(ndim), range(ndim)):
-        rc = _warp(vel_cpu, i, d, scheme_id, dt_dh, ndim)
-        rg = _warp(vel_gpu, i, d, scheme_id, dt_dh, ndim).cpu()
+        rc = _flux(vel_cpu, i, d, scheme_id, dt_dh, ndim)
+        rg = _flux(vel_gpu, i, d, scheme_id, dt_dh, ndim).cpu()
         worst = max(worst, (rc - rg).abs().max().item())
     assert worst < 1e-12, f"{_SCHEMES[scheme_id]} {ndim}-D CPU vs GPU {worst:.3e}"
 
@@ -212,67 +208,79 @@ def test_flux_solve_loop_stability():
 #
 #  The production flux path (`_solve_convective`) is native end-to-end:
 #  torch ``copy_`` + ``native.diffuse_add`` + ``native.advect_flux_accumulate``.
-#  The Warp pair ``advect_flux_accumulate_warp`` + ``_accumulate_interior_warp``
-#  is kept as the parity ORACLE here (it was itself validated against the
-#  scheme references).  Expected agreement: bit-exact (same operation order).
+#  This op fuses the per-(component, direction) flux add AND the interior
+#  accumulate into one launch, so it is gated as CPU twin == CUDA kernel.
 # ═════════════════════════════════════════════════════════════════════════════
 
-def _flux_accumulate_pair(vel, dst0, sid, ndim, dev):
-    """Return (warp_dst, native_dst) after accumulating all components."""
-    from lilytorch.src.advection import (
-        advect_flux_accumulate_warp, _accumulate_interior_warp)
-    from lilytorch.src import native
+def _flux_accumulate(vel, dst0, sid, ndim):
+    """Accumulate every velocity component's flux into a copy of ``dst0``."""
     dt_dh = [0.15, 0.12, 0.1][:ndim]
     C = 0.1 if sid == 1 else 0.0
-    shape = vel[0].shape
-    dst_ref = dst0.clone()
-    dst_nat = dst0.clone()
-    rhs = torch.zeros([n - 2 for n in shape], dtype=vel[0].dtype, device=dev)
+    dst = dst0.clone()
     for i in range(ndim):
-        phi = vel[i].clone()
-        rhs.zero_()
-        advect_flux_accumulate_warp(phi, rhs, vel, i, dt_dh, C, sid, ndim)
-        _accumulate_interior_warp(dst_ref, rhs, ndim)
-        wp.synchronize()
-        native.advect_flux_accumulate(phi, dst_nat, vel, i, dt_dh, C, sid)
-    if dev != "cpu":
-        torch.cuda.synchronize()
-    return dst_ref, dst_nat
-
-
-@pytest.mark.parametrize("ndim", [2, 3])
-@pytest.mark.parametrize("scheme_id", sorted(_SCHEMES))
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
-def test_flux_accumulate_native_equals_warp_cpu(ndim, scheme_id, dtype):
-    """Native fused kernel == Warp oracle, CPU, all schemes/dtypes."""
-    N = 20 if ndim == 3 else 40
-    g = torch.Generator(device="cpu").manual_seed(7)
-    shape = (N + 2,) * ndim
-    vel = [torch.rand(shape, generator=g, dtype=dtype) - 0.5
-           for _ in range(ndim)]
-    dst0 = torch.rand(shape, generator=g, dtype=dtype)
-    ref, nat = _flux_accumulate_pair(vel, dst0, scheme_id, ndim, "cpu")
-    assert torch.equal(ref, nat), (
-        f"{_SCHEMES[scheme_id]} {ndim}-D {dtype}: "
-        f"max|d|={(ref - nat).abs().max().item():.3e}")
+        native.advect_flux_accumulate(vel[i].clone(), dst, vel, i, dt_dh, C, sid)
+    return dst
 
 
 @SKIP_NO_CUDA
 @pytest.mark.parametrize("ndim", [2, 3])
 @pytest.mark.parametrize("scheme_id", sorted(_SCHEMES))
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
-def test_flux_accumulate_native_equals_warp_gpu(ndim, scheme_id, dtype):
-    """Native fused kernel == Warp oracle, CUDA, all schemes/dtypes."""
+def test_flux_accumulate_cpu_eq_gpu(ndim, scheme_id, dtype):
+    """The fused accumulate kernel: CPU twin == CUDA kernel, all schemes/dtypes.
+
+    Same stencil and operation order on both backends, so the only difference is
+    the CUDA codegen contracting the flux FMAs — ~1 ULP of the working dtype.
+    """
     N = 20 if ndim == 3 else 40
     g = torch.Generator(device="cpu").manual_seed(7)
     shape = (N + 2,) * ndim
-    vel = [(torch.rand(shape, generator=g, dtype=dtype) - 0.5).to("cuda:0")
-           for _ in range(ndim)]
-    dst0 = torch.rand(shape, generator=g, dtype=dtype).to("cuda:0")
-    ref, nat = _flux_accumulate_pair(vel, dst0, scheme_id, ndim, "cuda:0")
-    assert torch.equal(ref, nat), (
-        f"{_SCHEMES[scheme_id]} {ndim}-D {dtype}: "
-        f"max|d|={(ref - nat).abs().max().item():.3e}")
+    vel_c = [torch.rand(shape, generator=g, dtype=dtype) - 0.5 for _ in range(ndim)]
+    dst_c = torch.rand(shape, generator=g, dtype=dtype)
+    vel_g = [v.to("cuda:0") for v in vel_c]
+    dst_g = dst_c.to("cuda:0")
+
+    rc = _flux_accumulate(vel_c, dst_c, scheme_id, ndim)
+    rg = _flux_accumulate(vel_g, dst_g, scheme_id, ndim).cpu()
+
+    d = (rc - rg).abs().max().item()
+    tol = 1e-14 if dtype == torch.float64 else 1e-6
+    assert d <= tol, (f"{_SCHEMES[scheme_id]} {ndim}-D {dtype}: "
+                      f"cpu vs gpu max|d|={d:.3e}")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  diffuse_add — native in-place explicit-diffusion accumulate
+# ═════════════════════════════════════════════════════════════════════════════
+
+@SKIP_NO_CUDA
+@pytest.mark.parametrize("ndim", [2, 3])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("variable", [False, True])
+def test_diffuse_add_cpu_eq_gpu(ndim, dtype, variable):
+    """The explicit-diffusion accumulate: CPU twin == CUDA kernel.
+
+    Covers the constant-``nu`` form and the variable-viscosity ``nu_eff`` field
+    (the Smagorinsky / Carreau path).
+    """
+    N = 16 if ndim == 3 else 32
+    g = torch.Generator(device="cpu").manual_seed(5)
+    shape = (N + 2,) * ndim
+    tgt_c = torch.rand(shape, generator=g, dtype=dtype) - 0.5
+    nu_eff_c = (torch.rand(shape, generator=g, dtype=dtype) + 0.5) if variable else None
+    dt, dh, nu = 1e-3, (0.05,) * ndim, 1e-2
+
+    def run(dev):
+        tgt = tgt_c.clone().to(dev).contiguous()
+        buf = torch.empty_like(tgt)
+        ne = nu_eff_c.clone().to(dev).contiguous() if variable else None
+        native.diffuse_add(tgt, buf, dt, dh=dh,
+                           nu_eff=ne, nu=(None if variable else nu))
+        return tgt
+
+    d = (run("cpu") - run("cuda:0").cpu()).abs().max().item()
+    tol = 1e-12 if dtype == torch.float64 else 1e-6
+    assert d < tol, f"diffuse_add {ndim}-D {dtype} variable={variable}: cpu vs gpu {d:.3e}"
 
 
 @SKIP_NO_CUDA
@@ -280,7 +288,7 @@ def test_flux_accumulate_native_equals_warp_gpu(ndim, scheme_id, dtype):
 def test_flux_solve_graph_replay_equals_eager(ndim):
     """The flux `_solve_convective` recorded into a torch.cuda.CUDAGraph must
     produce the SAME result on replay as the eager solve — this is the 13c
-    regression gate for the "Warp launches dropped from graph replay" bug
+    regression gate for the "kernel launches dropped from graph replay" bug
     (the graph used to silently lose the whole advection term)."""
     from lilytorch.src.advection import AdvDiffSolver
     N, dev = (20 if ndim == 3 else 40), torch.device("cuda:0")
@@ -322,7 +330,7 @@ def test_flux_solve_graph_replay_equals_eager(ndim):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-#  apply_bcs_2d / apply_bcs_3d — fused BC ghost writes (Warp CPU == GPU)
+#  apply_bcs_2d / apply_bcs_3d — fused BC ghost writes (CPU twin == CUDA)
 #  Merged from the former test_misc_2d.py / test_misc_3d.py.
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -355,8 +363,7 @@ def _run_bcs_2d(dev, f32=False):
     if f32:
         u = u.float(); v = v.float(); dirv = dirv.float(); refv = refv.float()
     uw, vw = u.clone().contiguous(), v.clone().contiguous()
-    apply_bcs_2d_warp(uw, vw, shapes, neu, dird, dirv, refd, refv, ml)
-    wp.synchronize()
+    apply_bcs_2d(uw, vw, shapes, neu, dird, dirv, refd, refv, ml)
     return uw, vw
 
 
@@ -397,8 +404,7 @@ def _run_bcs_3d(dev, f32=False):
         u = u.float(); v = v.float(); w = w.float()
         dirv = dirv.float(); refv = refv.float()
     uw, vw, ww = u.clone().contiguous(), v.clone().contiguous(), w.clone().contiguous()
-    apply_bcs_3d_warp(uw, vw, ww, shapes, neu, dird, dirv, refd, refv, M, M)
-    wp.synchronize()
+    apply_bcs_3d(uw, vw, ww, shapes, neu, dird, dirv, refd, refv, M, M)
     return uw, vw, ww
 
 
@@ -441,8 +447,7 @@ def test_apply_bcs_3d_noncubic_dual_facedims():
         args = [to(x) for x in (u, v, w, shapes, neu, dird, dirv, refd, refv)]
         uw, vw, ww = (args[0].clone().contiguous(), args[1].clone().contiguous(),
                       args[2].clone().contiguous())
-        apply_bcs_3d_warp(uw, vw, ww, *args[3:9], max_dim0, max_dim1)
-        wp.synchronize()
+        apply_bcs_3d(uw, vw, ww, *args[3:9], max_dim0, max_dim1)
         return uw, vw, ww
 
     rc, rg = run("cpu"), run("cuda:0")
@@ -453,7 +458,7 @@ def test_apply_bcs_3d_noncubic_dual_facedims():
 
 # ─── ApplyBcs{2,3}DGraphRunner — CUDA-graph replay must equal eager ───────────
 #  Guards two things at once: (1) the captured graph replays bit-for-bit vs the
-#  eager apply_bcs_*_warp path over a multi-step run with a *stable* buffer
+#  eager apply_bcs_* path over a multi-step run with a *stable* buffer
 #  (a dropped-launch graph would leave the ghost cells stale → mismatch), and
 #  (2) the replay/capture counters behave — after the 2nd-sighting capture,
 #  every later call replays (the plan's "prove the runners actually replay").
@@ -473,8 +478,7 @@ def test_apply_bcs_2d_deterministic(f32):
         u = u0.clone().contiguous(); v = v0.clone().contiguous()
         for k in range(K):
             u.add_(noise[k]); v.add_(noise[k])
-            apply_bcs_2d_warp(u, v, shapes, neu, dird, dirv, refd, refv, ml)
-        wp.synchronize()
+            apply_bcs_2d(u, v, shapes, neu, dird, dirv, refd, refv, ml)
         return u, v
 
     u1, v1 = run()
@@ -500,8 +504,7 @@ def test_apply_bcs_3d_deterministic(f32):
         w = w0.clone().contiguous()
         for k in range(K):
             u.add_(noise[k]); v.add_(noise[k]); w.add_(noise[k])
-            apply_bcs_3d_warp(u, v, w, shapes, neu, dird, dirv, refd, refv, M, M)
-        wp.synchronize()
+            apply_bcs_3d(u, v, w, shapes, neu, dird, dirv, refd, refv, M, M)
         return u, v, w
 
     u1, v1, w1 = run()
@@ -513,7 +516,7 @@ def test_apply_bcs_3d_deterministic(f32):
 
 @SKIP_NO_CUDA
 def test_apply_bcs_2d_multi_dtype():
-    """apply_bcs_2d_warp handles both f32 and f64 correctly, and repeated
+    """apply_bcs_2d handles both f32 and f64 correctly, and repeated
     calls are idempotent (same inputs → same outputs)."""
     for dt in (torch.float64, torch.float32):
         u0, v0, shapes, neu, dird, dirv, refd, refv, ml = _bcs_problem_2d("cuda:0")
@@ -522,16 +525,15 @@ def test_apply_bcs_2d_multi_dtype():
         u = u0.clone().contiguous(); v = v0.clone().contiguous()
         ue = u.clone(); ve = v.clone()
         for _ in range(4):
-            apply_bcs_2d_warp(u, v, shapes, neu, dird, dirv, refd, refv, ml)
-            apply_bcs_2d_warp(ue, ve, shapes, neu, dird, dirv, refd, refv, ml)
-        wp.synchronize()
+            apply_bcs_2d(u, v, shapes, neu, dird, dirv, refd, refv, ml)
+            apply_bcs_2d(ue, ve, shapes, neu, dird, dirv, refd, refv, ml)
         assert (u - ue).abs().max().item() == 0.0
         assert (v - ve).abs().max().item() == 0.0
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-#  Fused semi-Lagrangian advection (2-D) — sl_advect_2d_kernel
-#  One Warp launch replaces the 10 python RegularGridInterpolator calls of the
+#  Fused semi-Lagrangian advection (2-D) — native sl_advect_2d
+#  One native launch replaces the 10 python RegularGridInterpolator calls of the
 #  RK2 back-trace.  The pure-Python reference lives here as a standalone oracle
 #  (moved from AdvDiffSolver._solve_semi_lagrangian_python).
 # ═════════════════════════════════════════════════════════════════════════════
@@ -540,12 +542,11 @@ from lilytorch.src.advection import (
     AdvDiffSolver,
     _inner,
 )
-from lilytorch.src import diffusion
 
 
 def _sl_python_oracle(solver, *vel, nu_t=None):
     """Pure-Python semi-Lagrangian RK2 back-trace — independent reference
-    oracle for the Warp fused kernels.  Moved here from the now-removed
+    oracle for the fused native kernels.  Moved here from the now-removed
     ``AdvDiffSolver._solve_semi_lagrangian_python``."""
     ndim = solver.ndim
     shape = tuple(solver.n)
@@ -575,7 +576,7 @@ def _sl_python_oracle(solver, *vel, nu_t=None):
     _nu_eff = (solver.nu + nu_t) if nu_t is not None else None
     for i in range(ndim):
         _copy_buf = torch.empty_like(vel_new[i])
-        diffusion.diffuse_add_(
+        native.diffuse_add(
             vel_new[i], _copy_buf, solver.dt,
             dh=solver.dh, nu_eff=_nu_eff, nu=solver.nu,
         )
@@ -606,13 +607,12 @@ def _sl_solver_2d(dev, dtype, N=48, M=40, dt=0.03, nu=1e-3, seed=7):
                          ids=["f64", "f32"])
 def test_sl_fused_matches_python_2d(dev, dtype):
     """Fused RK2 kernel == python interpolator path (same math, same
-    biquadratic sampler @wp.func).  CPU is bit-exact; on CUDA the only
+    biquadratic sampler).  CPU is bit-exact; on CUDA the only
     drift source is FMA contraction in the midpoint/departure arithmetic
     (observed 3.5e-15 f64 / 2.8e-6 f32 → tolerances give ~3x headroom)."""
     s, u, v = _sl_solver_2d(dev, dtype)
     ref = _sl_python_oracle(s, u.clone(), v.clone())
-    got = s._solve_semi_lagrangian_warp(u.clone(), v.clone())
-    wp.synchronize()
+    got = s._solve_semi_lagrangian(u.clone(), v.clone())
     tol = 1e-14 if dtype is torch.float64 else 1e-5
     for a, b, nm in zip(ref, got, ("u", "v")):
         d = (a - b).abs().max().item()
@@ -626,9 +626,8 @@ def test_sl_fused_cpu_equals_gpu(dtype):
     """Single-source check: the SAME sl_advect_2d_kernel on CPU == GPU."""
     sc, uc, vc = _sl_solver_2d("cpu", dtype)
     sg, ug, vg = _sl_solver_2d("cuda:0", dtype)
-    rc = sc._solve_semi_lagrangian_warp(uc, vc)
-    rg = sg._solve_semi_lagrangian_warp(ug, vg)
-    wp.synchronize()
+    rc = sc._solve_semi_lagrangian(uc, vc)
+    rg = sg._solve_semi_lagrangian(ug, vg)
     tol = 1e-14 if dtype is torch.float64 else 1e-5
     for a, b, nm in zip(rc, rg, ("u", "v")):
         d = (a - b.cpu()).abs().max().item()
@@ -637,14 +636,14 @@ def test_sl_fused_cpu_equals_gpu(dtype):
 
 @pytest.mark.parametrize("dev", ["cpu",
                                  pytest.param("cuda:0", marks=SKIP_NO_CUDA)])
-def test_sl_dispatch_takes_warp_path_2d(dev):
+def test_sl_dispatch_takes_fused_path_2d(dev):
     """The production entry point (`solve`) must actually take the fused
-    Warp path on contiguous 2-D fields (CPU + CUDA) — guards against a
+    native path on contiguous 2-D fields (CPU + CUDA) — guards against a
     silent fall-back to the python interpolator path."""
     s, u, v = _sl_solver_2d(dev, torch.float32)
     assert s._sl_out is None
     out = s.solve(u, v)
-    assert s._sl_out is not None, f"solve() on {dev} did not take the fused Warp path"
+    assert s._sl_out is not None, f"solve() on {dev} did not take the fused native path"
     assert out[0].data_ptr() == s._sl_out[0].data_ptr()
 
 
@@ -674,20 +673,20 @@ def test_sl_multi_step_deterministic_2d():
         assert d == 0.0, f"run1 vs run2 {name} mismatch: {d:.3e}"
 
 
-def test_sl_warp_path_always_taken(monkeypatch):
-    """The Warp path is now the ONLY production path — even with
+def test_sl_fused_path_always_taken(monkeypatch):
+    """The fused native path is the ONLY production path — even with
     LILY_SL_KERNEL=0 the dispatch goes through the fused kernel."""
     monkeypatch.setenv("LILY_SL_KERNEL", "0")
     dev = "cuda:0" if torch.cuda.is_available() else "cpu"
     s, u, v = _sl_solver_2d(dev, torch.float32)
     out = s.solve(u, v)
-    assert s._sl_out is not None, "Warp path must always be taken"
+    assert s._sl_out is not None, "fused native path must always be taken"
     assert out[0].data_ptr() == s._sl_out[0].data_ptr()
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-#  Fused semi-Lagrangian advection (3-D) — sl_advect_3d_kernel
-#  One Warp launch replaces the 21 python RegularGridInterpolator calls.
+#  Fused semi-Lagrangian advection (3-D) — native sl_advect_3d
+#  One native launch replaces the 21 python RegularGridInterpolator calls.
 # ═════════════════════════════════════════════════════════════════════════════
 
 
@@ -719,12 +718,11 @@ def _sl_solver_3d(dev, dtype, Nx=24, Ny=20, Nz=16, dt=0.02, nu=1e-3, seed=3):
                          ids=["f64", "f32"])
 def test_sl_fused_matches_python_3d(dev, dtype):
     """Fused 3-D RK2 kernel == python interpolator path (same math, same
-    triquadratic sampler @wp.func).  CPU is bit-exact; CUDA tolerance
+    triquadratic sampler).  CPU is bit-exact; CUDA tolerance
     accounts for FMA contraction drift."""
     s, u, v, w = _sl_solver_3d(dev, dtype)
     ref = _sl_python_oracle(s, u.clone(), v.clone(), w.clone())
-    got = s._solve_semi_lagrangian_warp(u.clone(), v.clone(), w.clone())
-    wp.synchronize()
+    got = s._solve_semi_lagrangian(u.clone(), v.clone(), w.clone())
     tol = 1e-14 if dtype is torch.float64 else 1e-5
     for a, b, nm in zip(ref, got, ("u", "v", "w")):
         d = (a - b).abs().max().item()
@@ -738,9 +736,8 @@ def test_sl_fused_cpu_equals_gpu_3d(dtype):
     """Single-source check: the SAME sl_advect_3d_kernel on CPU == GPU."""
     sc, uc, vc, wc = _sl_solver_3d("cpu", dtype)
     sg, ug, vg, wg = _sl_solver_3d("cuda:0", dtype)
-    rc = sc._solve_semi_lagrangian_warp(uc, vc, wc)
-    rg = sg._solve_semi_lagrangian_warp(ug, vg, wg)
-    wp.synchronize()
+    rc = sc._solve_semi_lagrangian(uc, vc, wc)
+    rg = sg._solve_semi_lagrangian(ug, vg, wg)
     tol = 1e-14 if dtype is torch.float64 else 1e-5
     for a, b, nm in zip(rc, rg, ("u", "v", "w")):
         d = (a - b.cpu()).abs().max().item()
@@ -749,13 +746,13 @@ def test_sl_fused_cpu_equals_gpu_3d(dtype):
 
 @pytest.mark.parametrize("dev", ["cpu",
                                  pytest.param("cuda:0", marks=SKIP_NO_CUDA)])
-def test_sl_dispatch_takes_warp_path_3d(dev):
-    """The production entry point (`solve`) must take the fused Warp
+def test_sl_dispatch_takes_fused_path_3d(dev):
+    """The production entry point (`solve`) must take the fused native
     path on contiguous 3-D fields (CPU + CUDA)."""
     s, u, v, w = _sl_solver_3d(dev, torch.float32)
     assert s._sl_out is None
     out = s.solve(u, v, w)
-    assert s._sl_out is not None, f"solve() 3-D on {dev} did not take the fused Warp path"
+    assert s._sl_out is not None, f"solve() 3-D on {dev} did not take the fused native path"
     assert len(s._sl_out) == 3
     assert out[0].data_ptr() == s._sl_out[0].data_ptr()
 

@@ -65,7 +65,6 @@ class _MultigridPoissonSolver:
         precond_vcycles=1,
         smoother="jacobi",
         recycle_k=0,
-        cuda_graph=False,
     ):
         self.dtype       = dtype
         self.h2          = h * h
@@ -84,22 +83,6 @@ class _MultigridPoissonSolver:
             f"smoother must be 'jacobi' or 'rbgs', got '{smoother}'"
         self.smoother = smoother
         self._rb_mask_cache = {}  # {(shape, device): (red, black)}
-        # Optional cell-centred Dirichlet mask (inner shape, bool).
-        # When set (e.g. by the free-surface ghost-fluid layer), the
-        # smoother forces ``p == 0`` in masked cells after every sweep
-        # and at every multigrid level (coarse masks are built by OR
-        # downsampling: any-air → coarse-air).  This is the cheap way to
-        # enforce a homogeneous Dirichlet boundary on an arbitrary
-        # subset of interior cells without touching the per-face
-        # coefficient layout.
-        self.dirichlet_mask = None
-        # ---- WarpMG is the single V-cycle path (always on) -------------
-        # :class:`PoissonSolver` always drives the all-Warp multigrid
-        # V-cycle; on CUDA it is captured into a graph and replayed sync-free
-        # in one host launch, on CPU the same kernels launch eagerly.  The
-        # ``cuda_graph`` parameter is retained for call-site compatibility but
-        # ignored — there is no unoptimized fallback path any more.
-        self.cuda_graph = True
         # ---- Recycled-Krylov (deflation) state -------------------------
         # When recycle_k > 0, solve_rmgcg keeps a small subspace of search
         # directions from previous solves and deflates them out of the next
@@ -572,84 +555,59 @@ class _MultigridPoissonSolver:
 
 
 class PoissonSolver(_MultigridPoissonSolver):
-    """Variable-coefficient multigrid Poisson with the fine-level smoother +
-    residual on Warp kernels (CPU + GPU, f32 + f64).
+    """Variable-coefficient multigrid Poisson on the native CUDA / C++ kernels
+    (CPU + GPU, f32 + f64).
 
-    The top-level multigrid / MGCG / RMGCG solvers run their outer driver in
-    Python; :meth:`_dispatch_vcycle` runs the Warp hybrid V-cycle (Warp fine
-    level + pure-torch coarse recursion), optionally replayed from a captured
-    CUDA graph when ``cuda_graph`` is set.
+    Two levels of native driver, picked by :meth:`_native_whole_solve`:
 
-    Two V-cycle implementations coexist ON PURPOSE — they are NOT dead
-    duplication:
+    * **Whole-solve drivers** — ``poisson_solve_{multigrid,mgcg,rmgcg}_{2,3}d``
+      run the entire solve (V-cycle tree, CG loop, deflation, gauge fix) inside
+      one C++ call, so the launch-bound Python loop disappears entirely.  All
+      six exist on CUDA; on the CPU only ``multigrid`` has a twin.
+    * **Raw V-cycle** — ``mg_vcycle_{2,3}d`` runs N V-cycles with no gauge fix.
+      This is the PCG preconditioner primitive (what the native MGCG driver
+      applies to ``z`` internally), and it is what keeps MGCG / RMGCG alive on
+      the CPU: there :meth:`_cg_core` drives the CG loop in Python and calls
+      :meth:`_dispatch_vcycle` → ``mg_vcycle_*`` for the preconditioner.
 
-    * the DEFAULT (``cuda_graph=False``) hybrid path — Warp fine level +
-      pure-torch coarse recursion, driven from a Python loop. It runs on CPU
-      and GPU, in f32/f64, and is the single source of truth for correctness
-      (it also serves RMGCG, which the graphed path does not).
-    * the OPT-IN graphed path (``cuda_graph=True``) — the all-Warp
-      ``WarpMG2D``/``WarpMG3D`` V-cycle in :mod:`lilytorch.src.multigrid_graph`,
-      whose fixed-cycle-count V-cycle is captured once into a CUDA graph and
-      thereafter replayed in a single sync-free host launch.
-
-    WHY BOTH: the pressure Poisson solve is launch-bound, not compute-bound, on
-    the grids this solver targets. Each Python-driven V-cycle dispatches dozens
-    of tiny kernels (smoother sweeps + residual/restrict/prolong per level),
-    each a few µs of GPU work behind µs of host launch + sync overhead. The
-    captured graph collapses that whole tree into one replay. Measured on an
-    RTX 4080 SUPER (fp32, rbgs, variable-coeff): the graphed path is ~15–35×
-    faster on the isolated solve — ~16× at the salamander 1024×512 config that
-    enables it, ~17–25× at 64³, ~30× at 64²–128² — while agreeing with the
-    Python path to fp32 reduction roundoff (mgcg converges in identical
-    iteration counts). The win GROWS as the grid shrinks (more launch overhead
-    relative to compute), so the graphed path is worth it precisely on the
-    small / launch-bound grids where the Python path spends most of its wall
-    clock in host overhead.
-
-    It is opt-in (default off) only because CUDA-graph capture requires static
-    shapes/streams and does not cover RMGCG or CPU — not because the speedup is
-    marginal. If you are tempted to delete ``multigrid_graph.py`` as a
-    "duplicate", re-run ``benchmarks/bench_python_overhead.py``-style
-    cuda_graph=True/False comparison first."""
-
-    #: op names this backend now serves on Warp (bookkeeping / documentation).
-    WARP_POISSON_OPS = frozenset({
-        "rbgs_sweep_2d", "rbgs_sweep_3d", "jacobi_sweep_2d", "jacobi_sweep_3d",
-        "mg_residual_2d", "mg_residual_3d",
-    })
+    WHY the whole-solve drivers matter: the pressure Poisson solve is
+    launch-bound, not compute-bound, on the grids this solver targets.  A
+    Python-driven V-cycle dispatches dozens of tiny kernels (smoother sweeps +
+    residual/restrict/prolong per level), each a few µs of GPU work behind µs
+    of host launch and sync overhead.  Collapsing the tree into one C++ call
+    removes that overhead — and, unlike a CUDA-graph replay, it also removes
+    the per-V-cycle residual ``.item()`` host sync.
+    """
 
     # ------------------------------------------------------------------
-    # Native dispatch helpers (Track D: swap WarpMG → native poisson_solve_*)
+    # Native dispatch helpers
     # ------------------------------------------------------------------
 
-    def _use_native_poisson(self):
-        """True when the native poisson_solve_* drivers can be used.
+    def _native_whole_solve(self, method):
+        """True when the whole-solve C++ driver for ``method`` exists here.
 
-        Native drivers are CUDA-only (no CPU twin yet — Track C) and do not
-        support the Dirichlet mask (free-surface GFM)."""
+        All six drivers exist on CUDA.  On the CPU only ``multigrid`` has a
+        twin, so ``mgcg`` / ``rmgcg`` fall back to the Python CG loop driving
+        the native ``mg_vcycle_*`` preconditioner (see :meth:`_dispatch_vcycle`).
+        """
         dev = torch.device(self.device) if isinstance(self.device, str) else self.device
-        return (dev.type == "cuda"
-                and self.dirichlet_mask is None)
+        return dev.type == "cuda" or method == "multigrid"
 
-    def _native_multigrid(self, f, p0, face_arrs, pre_scaled=False):
-        """Run the native multigrid Poisson driver (2-D / 3-D).
+    def _native_multigrid(self, f, p0, face_arrs):
+        """Run the native multigrid Poisson driver (2-D / 3-D, CUDA + CPU).
 
-        Mutates ``p0`` in place; returns ``(p, r)`` matching the Python
-        ``solve_multigrid`` contract.  The native driver scales ``f`` by
-        ``self.h2`` internally, so ``pre_scaled`` is not supported here
-        (the WarpMG path handles it).
+        Mutates ``p0`` in place; returns ``(p, r)`` matching the
+        ``solve_multigrid`` contract.  The driver scales ``f`` by ``self.h2``
+        internally, runs up to ``max_vcycles`` V-cycles with an L∞ early exit
+        at ``tol``, then applies the ghost-ring Neumann BC and the float64
+        gauge (mean) subtraction.
         """
         from lilytorch.src import native as _nat
         ndim = f.ndim
-        if pre_scaled:
-            raise NotImplementedError(
-                "Native multigrid does not support pre_scaled=True. "
-                "Use the WarpMG path.")
         if p0 is None:
-            # p0=None is the solver's multigrid cold-start fast path
-            # (WarpMG.solve zeros its level-0 buffer in place).  Mirror it
-            # with a persistent zeroed padded buffer — no per-step alloc,
-            # pointer-stable for graph keying.
+            # p0=None is the multigrid cold-start fast path.  Serve it from a
+            # persistent zeroed padded buffer — no per-step alloc, and
+            # pointer-stable so it does not churn the graph cache key.
             pshp = tuple(n + 2 for n in f.shape)
             buf = getattr(self, "_native_p0", None)
             if (buf is None or buf.shape != pshp
@@ -677,18 +635,14 @@ class PoissonSolver(_MultigridPoissonSolver):
             )
         return p0, r
 
-    def _native_mgcg(self, f, p0, face_arrs, pre_scaled=False):
+    def _native_mgcg(self, f, p0, face_arrs):
         """Run the native MGCG Poisson driver (2-D / 3-D).
 
-        Mutates ``p0`` in place; returns ``(p, r)``.  The native driver handles
-        the entire CG loop with V-cycle preconditioner internally — no Python
-        per-iteration dispatch."""
+        Mutates ``p0`` in place; returns ``(p, r)``.  The driver runs the whole
+        CG loop with its V-cycle preconditioner in C++ — no Python
+        per-iteration dispatch and no per-iteration residual sync."""
         from lilytorch.src import native as _nat
         ndim = f.ndim
-        if pre_scaled:
-            raise NotImplementedError(
-                "Native MGCG does not support pre_scaled=True. "
-                "Use the WarpMG path.")
         if ndim == 2:
             ch, cv = (a.contiguous() for a in face_arrs)
             r = _nat.poisson_solve_mgcg_2d(
@@ -709,7 +663,7 @@ class PoissonSolver(_MultigridPoissonSolver):
             )
         return p0, r
 
-    def _native_rmgcg(self, f, p0, face_arrs, cfaces, inner, pre_scaled=False):
+    def _native_rmgcg(self, f, p0, face_arrs, cfaces, inner):
         """Run the native RMGCG driver, managing the recycle space on the
         Python side.
 
@@ -723,10 +677,6 @@ class PoissonSolver(_MultigridPoissonSolver):
         Returns ``(p, r)`` where ``p`` is the solution and ``r`` the residual."""
         from lilytorch.src import native as _nat
         ndim = f.ndim
-        if pre_scaled:
-            raise NotImplementedError(
-                "Native RMGCG does not support pre_scaled=True. "
-                "Use the WarpMG path.")
 
         # --- Prepare recycle space (B-orthonormalise under current operator) ---
         recycle = self._prepare_recycle(cfaces, p0.shape, inner)
@@ -799,111 +749,37 @@ class PoissonSolver(_MultigridPoissonSolver):
         return p0, r
 
     # ------------------------------------------------------------------
-    # Overridden solve entry points: dispatch to native on CUDA,
-    # fall back to WarpMG on CPU (until Track C lands CPU twins).
+    # Solve entry points — native whole-solve driver where one exists,
+    # otherwise the Python CG loop over the native V-cycle (CPU mgcg/rmgcg).
     # ------------------------------------------------------------------
 
-    def _graphed_mg(self, ndim, shape, nvc=None):
-        """Lazily build / fetch a CUDA-graph-captured all-Warp multigrid keyed by
-        (ndim, shape, dtype, smoother, nsmoothing, n_vcycles).
-
-        ``nvc`` overrides the captured fixed V-cycle count; defaults to
-        ``max_vcycles`` (the standalone-multigrid budget).  The MGCG
-        preconditioner passes ``nvc=1`` (one captured V-cycle per
-        :meth:`_dispatch_vcycle`, repeated by the CG core's ``precond_vcycles``
-        loop)."""
-        from lilytorch.src.multigrid_graph import WarpMG3D, WarpMG2D
-        cache = getattr(self, "_warp_mg_cache", None)
-        if cache is None:
-            cache = self._warp_mg_cache = {}
-        if nvc is None:
-            nvc = self.max_vcycles
-        nvc = max(int(nvc), 1)
-        dirichlet = self.dirichlet_mask is not None
-        key = (ndim, tuple(shape), self.dtype, self.smoother, self.nsmoothing,
-               nvc, dirichlet)
-        mg = cache.get(key)
-        if mg is None:
-            if ndim == 3:
-                mg = WarpMG3D(shape[0], shape[1], shape[2], device=self.device,
-                              dtype=self.dtype, smoother=self.smoother,
-                              nu1=self.nsmoothing, nu2=self.nsmoothing,
-                              n_vcycles=nvc, jcap_tol=self.jcap_tol,
-                              dirichlet=dirichlet)
-            elif ndim == 2:
-                mg = WarpMG2D(shape[0], shape[1], device=self.device,
-                              dtype=self.dtype, smoother=self.smoother,
-                              nu1=self.nsmoothing, nu2=self.nsmoothing,
-                              n_vcycles=nvc, jcap_tol=self.jcap_tol,
-                              dirichlet=dirichlet)
-            else:
-                return None
-            cache[key] = mg
-        return mg
-
     def solve_multigrid(self, f, p0, **kwargs):
-        """Standalone multigrid solve.
-
-        On CUDA (no Dirichlet mask): delegates to the native
-        ``poisson_solve_multigrid_*`` driver (whole solve in one C++ launch).
-        On CPU / with mask: delegates to the WarpMG graph-captured V-cycle."""
+        """Standalone multigrid solve — native whole-solve driver (CUDA + CPU)."""
         face_arrs, _ = self._face_arrs_from_kwargs(kwargs, f.ndim)
         if face_arrs is None:
             raise ValueError(
                 "solve_multigrid: ch/cv (2-D) or ch/cv/cw (3-D) keyword "
                 "arguments are required.")
-        pre_scaled = kwargs.get("pre_scaled", False)
-
-        # Native path (CUDA, no Dirichlet mask, not pre-scaled).
-        if self._use_native_poisson() and not pre_scaled:
-            return self._native_multigrid(f, p0, face_arrs, pre_scaled=False)
-
-        # ---- WarpMG fallback (CPU / mask / pre_scaled) ----
-        mg = self._graphed_mg(f.ndim, tuple(f.shape), nvc=1)
-        f_scaled = f if pre_scaled else self.h2 * f
-        if f.ndim == 3:
-            ch, cv, cw = (a.contiguous() for a in face_arrs)
-            p = mg.solve(f_scaled, ch, cv, cw, p0=p0,
-                         mask=self.dirichlet_mask)
-        else:
-            ch, cv = (a.contiguous() for a in face_arrs)
-            p = mg.solve(f_scaled, ch, cv, p0=p0, mask=self.dirichlet_mask)
-
-        r_inf = mg.residual_inf()
-        for _ in range(max(int(self.max_vcycles), 1) - 1):
-            if r_inf < self.tol:
-                break
-            mg.replay()
-            r_inf = mg.residual_inf()
-
-        self.BC(p)
-        if self.dirichlet_mask is None:
-            p -= p.to(torch.float64).mean().to(p.dtype)
-        return p, mg.levels[0]["r"].view(f.shape)
+        return self._native_multigrid(f, p0, face_arrs)
 
     def solve_mgcg(self, f, p0, **kwargs):
         """MGCG solve.
 
-        On CUDA (no Dirichlet mask): delegates to the native
-        ``poisson_solve_mgcg_*`` driver (CG + V-cycle preconditioner in one
-        C++ launch).
-        On CPU / with mask: delegates to the Python CG loop with WarpMG
-        preconditioner."""
+        CUDA: the native ``poisson_solve_mgcg_*`` whole-solve driver.
+        CPU: the Python CG loop with the native V-cycle as preconditioner."""
         ndim = f.ndim
         face_arrs, _ = self._face_arrs_from_kwargs(kwargs, ndim)
         if face_arrs is None:
             raise ValueError(
                 "solve_mgcg: ch/cv (2-D) or ch/cv/cw (3-D) keyword "
                 "arguments are required.")
-        pre_scaled = kwargs.pop("pre_scaled", False)
 
-        # Native path.
-        if self._use_native_poisson() and not pre_scaled:
-            return self._native_mgcg(f, p0, face_arrs, pre_scaled=False)
+        if self._native_whole_solve("mgcg"):
+            return self._native_mgcg(f, p0, face_arrs)
 
-        # ---- WarpMG fallback ----
+        # ---- CPU: Python CG driver over the native V-cycle ----
         cfaces = self._extract_cfaces(face_arrs, ndim)
-        b = -f if pre_scaled else -(self.h2 * f)
+        b = -(self.h2 * f)
         x = p0.clone().detach()
         self.BC(x)
 
@@ -927,31 +803,25 @@ class PoissonSolver(_MultigridPoissonSolver):
     def solve_rmgcg(self, f, p0, **kwargs):
         """Recycled MGCG solve.
 
-        On CUDA (no Dirichlet mask): delegates to the native
-        ``poisson_solve_rmgcg_*`` driver.  The Python side manages the
-        recycle space (prepare → harvest → finalize); the native driver
-        handles the deflated CG loop.
-        On CPU / with mask: delegates to the Python CG loop with WarpMG
-        preconditioner."""
+        CUDA: the native ``poisson_solve_rmgcg_*`` driver runs the deflated CG
+        loop; the Python side manages the recycle space (prepare → harvest →
+        finalize).
+        CPU: the Python CG loop with the native V-cycle as preconditioner."""
         ndim = f.ndim
         face_arrs, _ = self._face_arrs_from_kwargs(kwargs, ndim)
         if face_arrs is None:
             raise ValueError(
                 "solve_rmgcg: ch/cv (2-D) or ch/cv/cw (3-D) keyword "
                 "arguments are required.")
-        pre_scaled = kwargs.pop("pre_scaled", False)
 
-        # Native path.
-        if self._use_native_poisson() and not pre_scaled:
-            cfaces = self._extract_cfaces(face_arrs, ndim)
-            inner = _inner(ndim)
-            return self._native_rmgcg(f, p0, face_arrs, cfaces, inner,
-                                      pre_scaled=False)
-
-        # ---- WarpMG fallback ----
         cfaces = self._extract_cfaces(face_arrs, ndim)
         inner = _inner(ndim)
-        b = -f if pre_scaled else -(self.h2 * f)
+
+        if self._native_whole_solve("rmgcg"):
+            return self._native_rmgcg(f, p0, face_arrs, cfaces, inner)
+
+        # ---- CPU: Python CG driver over the native V-cycle ----
+        b = -(self.h2 * f)
         x = p0.clone().detach()
         self.BC(x)
 
@@ -979,41 +849,44 @@ class PoissonSolver(_MultigridPoissonSolver):
         return x, r
 
     def _dispatch_vcycle(self, f, p, face_arrs):
-        """One V-cycle with the fine-level smoother + residual on Warp.
+        """One native V-cycle — the CG preconditioner.
 
-        When ``cuda_graph`` is on (and a graphed ``WarpMG`` is available for this
-        shape/dtype/smoother), the whole V-cycle is replayed from ONE captured
-        CUDA graph in a single host launch — the sync-free MGCG preconditioner
-        (C1).  Otherwise it runs the hybrid V-cycle (Warp fine level +
-        pure-torch coarse recursion), which also runs on CPU.
-
-        SCALING (the C1 gotcha): the CG core calls this as
+        SCALING (the gotcha): the CG core calls this as
         ``z, _ = self._dispatch_vcycle(-r, z, face_arrs)``.  ``-r`` is the
-        residual of the *h²-scaled* SPD system (``b = -(h²·f)``, ``B`` uses the
-        h²-scaled face coefficients), so it is ALREADY in the smoother's units —
-        exactly what the ``_vcycle_*_warp`` smoothers consume as ``f``
-        (no internal h² rescale).  ``WarpMG.solve`` likewise treats its ``f``
-        argument as the raw smoother RHS, so we pass ``f`` straight through with
-        **no h² multiplication** (the ``h²`` rescale belongs only in
-        ``solve_multigrid``, where the input is the raw divergence)."""
-        mg = self._graphed_mg(f.ndim, tuple(f.shape), nvc=1)
-        if f.ndim == 3:
-            ch, cv, cw = face_arrs
-            z = mg.solve(f, ch.contiguous(), cv.contiguous(),
-                         cw.contiguous(), p0=p, mask=self.dirichlet_mask)
-        else:
-            ch, cv = face_arrs
-            z = mg.solve(f, ch.contiguous(), cv.contiguous(), p0=p,
-                         mask=self.dirichlet_mask)
-        return z, None
+        residual of the *h²-scaled* SPD system (``b = -(h²·f)``, and ``B`` uses
+        the h²-scaled face coefficients), so it is ALREADY in the smoother's
+        units — exactly what ``mg_vcycle_*`` consumes as ``f``.  Pass it
+        straight through with NO h² multiplication (that rescale belongs only
+        in ``solve_multigrid``, whose input is the raw divergence).
 
-    # ── Sync-free MGCG: periodic convergence check (C1, point 4) ──────────────
+        NO gauge fix here: ``mg_vcycle_*`` applies neither the ghost-ring
+        Neumann pass nor the mean subtraction that the whole-solve drivers end
+        with — which is what a PCG preconditioner needs, and matches the
+        V-cycle the native MGCG driver applies to ``z`` internally.
+
+        ``p`` is mutated in place and returned.
+        """
+        from lilytorch.src import native as _nat
+        p = p.contiguous()
+        f = f.contiguous()
+        if f.ndim == 3:
+            ch, cv, cw = (a.contiguous() for a in face_arrs)
+            _nat.mg_vcycle_3d(p, f, ch, cv, cw,
+                              float(self.jcap_tol), float(self.w),
+                              int(self.nsmoothing), 1, self.smoother)
+        else:
+            ch, cv = (a.contiguous() for a in face_arrs)
+            _nat.mg_vcycle_2d(p, f, ch, cv,
+                              float(self.jcap_tol), float(self.w),
+                              int(self.nsmoothing), 1, self.smoother)
+        return p, None
+
     def _cg_core(self, b, x, cfaces, face_arrs, recycle=None, harvest=None):
         """Plain-MGCG CG loop with a PERIODIC convergence check, to cut the
         per-iter ``.item()`` sync that ``_convergence_norm(r) < self.tol`` forces
         on the host every CG iteration.
 
-        With the graphed WarpMG preconditioner (above) the CG arithmetic and the
+        With the native V-cycle preconditioner (above) the CG arithmetic and the
         V-cycle are both sync-free; the only remaining per-iter host sync is this
         residual test.  Checking it every ``cg_check_every`` iters (K) instead of
         every iter cuts that to ~1/K syncs at the cost of at most K-1 extra CG

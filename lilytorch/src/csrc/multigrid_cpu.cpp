@@ -188,12 +188,11 @@ static void rbgs_sweep_3d_cpu_impl(
             for (int64_t i = istart; i < iend; ++i) {
                 const int pi = (int)i + 1;
                 for (int j = 0; j < Ny; ++j) {
-                    if ((((int)i + j) & 1) != 0) continue;  // skip black for now
                     const int pj = j + 1;
                     const int cbase = (int)i * (Ny * Nz) + j * Nz;
                     const int pbase = pi * si + pj * sj + 1;
                     for (int k = 0; k < Nz; ++k) {
-                        if ((((int)i + j + k) & 1) != 0) continue;
+                        if ((((int)i + j + k) & 1) != 0) continue;   // red = (i+j+k) even
                         const scalar_t J = cp0[cbase+k] + cm0[cbase+k]
                                          + cp1[cbase+k] + cm1[cbase+k]
                                          + cp2[cbase+k] + cm2[cbase+k];
@@ -210,17 +209,21 @@ static void rbgs_sweep_3d_cpu_impl(
                 }
             }
         });
+        // Refresh the ghost ring so the black cells read up-to-date Neumann
+        // mirrors of the red cells just written (the CUDA twin does the same
+        // between half-sweeps; skipping it desynchronises the two backends).
+        apply_neumann_bc_3d_cpu(p, Nx, Ny, Nz);
+
         // Black half-sweep
         at::parallel_for(0, Nx, 1, [&](int64_t istart, int64_t iend) {
             for (int64_t i = istart; i < iend; ++i) {
                 const int pi = (int)i + 1;
                 for (int j = 0; j < Ny; ++j) {
-                    if ((((int)i + j) & 1) != 1) continue;
                     const int pj = j + 1;
                     const int cbase = (int)i * (Ny * Nz) + j * Nz;
                     const int pbase = pi * si + pj * sj + 1;
                     for (int k = 0; k < Nz; ++k) {
-                        if ((((int)i + j + k) & 1) != 1) continue;
+                        if ((((int)i + j + k) & 1) != 1) continue;   // black = (i+j+k) odd
                         const scalar_t J = cp0[cbase+k] + cm0[cbase+k]
                                          + cp1[cbase+k] + cm1[cbase+k]
                                          + cp2[cbase+k] + cm2[cbase+k];
@@ -237,9 +240,8 @@ static void rbgs_sweep_3d_cpu_impl(
                 }
             }
         });
+        apply_neumann_bc_3d_cpu(p, Nx, Ny, Nz);
     }
-
-    apply_neumann_bc_3d_cpu(p, Nx, Ny, Nz);
 }
 
 // =====================================================================
@@ -736,222 +738,6 @@ static void prolongate_add_3d_cpu_impl(
     });
 }
 
-// =====================================================================
-//  advect_flux_add — CPU twin
-// =====================================================================
-
-// Device functions for the 5 advection schemes (mirror CUDA .cu).
-template <typename scalar_t>
-static inline scalar_t quick_flux(scalar_t up, scalar_t ce, scalar_t dn) {
-    scalar_t g = (ce - up);
-    scalar_t h = (dn - ce);
-    scalar_t curv = dn - (scalar_t)2 * ce + up;
-    if (curv * curv < (scalar_t)1e-12) return ce;
-    scalar_t num = g * g + h * h;
-    if (num < (scalar_t)1e-12) return ce;
-    scalar_t face = (scalar_t)0.5 * (ce + dn) - (scalar_t)0.125 * curv;
-    if ((face - ce) * (face - up) > (scalar_t)0) face = ce;
-    if ((dn - face) * (face - ce) < (scalar_t)0) face = ce;
-    return face;
-}
-
-template <typename scalar_t>
-static inline scalar_t abdquickest_flux(
-    scalar_t up, scalar_t ce, scalar_t dn,
-    scalar_t up2, scalar_t C)
-{
-    scalar_t curv = dn - (scalar_t)2 * ce + up;
-    scalar_t curv2 = ce - (scalar_t)2 * up + up2;
-    scalar_t phi_f = (scalar_t)0.5 * (ce + dn) - (scalar_t)0.125 * curv
-                     + C * ((scalar_t)0.25 * curv - (scalar_t)0.125 * curv2 * C);
-    scalar_t maxv = std::max(ce, std::max(dn, up));
-    scalar_t minv = std::min(ce, std::min(dn, up));
-    return std::max(minv, std::min(maxv, phi_f));
-}
-
-template <typename scalar_t>
-static inline scalar_t vanleer_flux(scalar_t up, scalar_t ce, scalar_t dn) {
-    scalar_t db = ce - up;
-    scalar_t df = dn - ce;
-    if (db * df <= (scalar_t)0) return ce;
-    scalar_t rf = db / (df + (scalar_t)1e-20);
-    scalar_t phi = (rf + std::abs(rf)) / ((scalar_t)1 + std::abs(rf));
-    return ce + (scalar_t)0.5 * phi * df;
-}
-
-template <typename scalar_t>
-static inline scalar_t cds_flux(scalar_t ce, scalar_t dn) {
-    return (scalar_t)0.5 * (ce + dn);
-}
-
-template <typename scalar_t>
-static inline scalar_t cubista_flux(scalar_t up, scalar_t ce, scalar_t dn) {
-    scalar_t g = ce - up;
-    scalar_t h = dn - ce;
-    if (g * h <= (scalar_t)0) return ce;
-    scalar_t C_cub = std::abs(g) / (std::abs(h) + (scalar_t)1e-20);
-    scalar_t phi = (scalar_t)0;
-    if (C_cub <= (scalar_t)0.125)
-        phi = (scalar_t)3 * C_cub;
-    else
-        phi = (scalar_t)0.75 + (scalar_t)0.25 * C_cub;
-    return ce + (scalar_t)0.5 * phi * h;
-}
-
-template <typename scalar_t>
-static inline scalar_t compute_face_flux(
-    scalar_t fv_face, scalar_t up, scalar_t ce, scalar_t dn, scalar_t up2,
-    scalar_t dt_dh, scalar_t C_courant,
-    int scheme_id, bool lo_boundary, bool hi_boundary)
-{
-    // lo_boundary: face is at the domain lo end → fall back to CDS
-    // hi_boundary: face is at the domain hi end → fall back to CDS
-    if (fv_face > (scalar_t)0) {
-        // Positive flow: up=cell[left], ce=cell[face_left], dn=cell[face_right]
-        if (lo_boundary) return cds_flux(up, ce);
-        switch (scheme_id) {
-            case 0: return quick_flux(up, ce, dn);
-            case 1: return abdquickest_flux(up, ce, dn, up2, C_courant);
-            case 2: return vanleer_flux(up, ce, dn);
-            case 3: return cds_flux(ce, dn);
-            case 4: return cubista_flux(up, ce, dn);
-            default: return cds_flux(ce, dn);
-        }
-    } else {
-        // Negative flow: up=cell[right], ce=cell[face_right], dn=cell[face_left]
-        if (hi_boundary) return cds_flux(ce, up);
-        switch (scheme_id) {
-            case 0: return quick_flux(up, ce, dn);
-            case 1: return abdquickest_flux(up, ce, dn, up2, C_courant);
-            case 2: return vanleer_flux(up, ce, dn);
-            case 3: return cds_flux(ce, dn);
-            case 4: return cubista_flux(up, ce, dn);
-            default: return cds_flux(ce, dn);
-        }
-    }
-}
-
-template <typename scalar_t>
-static void advect_flux_add_cpu_impl(
-        const scalar_t* p, const scalar_t* fv,
-        int Nfd, int Nt1, int Nt2,
-        int64_t p_s_fd, int64_t p_s_t1, int64_t p_s_t2,
-        int64_t fv_s_fd, int64_t fv_s_t1, int64_t fv_s_t2,
-        int64_t rhs_s_fd, int64_t rhs_s_t1, int64_t rhs_s_t2,
-        scalar_t dt_dh, scalar_t C_courant, int scheme_id,
-        scalar_t* rhs)
-{
-    // Nfd = full p size along face_dim, interior rhs has Nfd-2 entries
-    // face velocity fv has Nfd-1 entries along face_dim
-    const int Ni_fd = Nfd - 2;  // interior rhs cells along face_dim
-    const int N_tot = Ni_fd * Nt1 * ((Nt2 > 0) ? Nt2 : 1);
-    const bool is3d = (Nt2 > 0);
-
-    at::parallel_for(0, N_tot, 1, [&](int64_t start, int64_t end) {
-        for (int64_t idx = start; idx < end; ++idx) {
-            int i_fd, i_t1, i_t2;
-            if (is3d) {
-                i_fd = (int)(idx / (Nt1 * Nt2));
-                int rem = (int)(idx % (Nt1 * Nt2));
-                i_t1 = rem / Nt2;
-                i_t2 = rem % Nt2;
-            } else {
-                i_fd = (int)(idx / Nt1);
-                i_t1 = (int)(idx % Nt1);
-                i_t2 = 0;
-            }
-
-            // p reads: indices [i_fd, i_fd+1, i_fd+2] along face_dim
-            //   (rhs index i_fd maps to p index i_fd; face at i_fd=0 is p[0]->p[1])
-            const int pi_fd = i_fd;      // p index for this rhs cell
-
-            // -- Left face flux (face at i_fd) --
-            scalar_t F_L = (scalar_t)0;
-            {
-                const int fv_idx = i_fd * fv_s_fd + i_t1 * fv_s_t1 + i_t2 * fv_s_t2;
-                scalar_t fv_L = fv[fv_idx];
-                const int p_ce = pi_fd * p_s_fd + i_t1 * p_s_t1 + i_t2 * p_s_t2;
-                scalar_t pc = p[p_ce];
-                if (fv_L > (scalar_t)0) {
-                    // positive: upstream = left of face = p[i_fd-1]
-                    if (i_fd == 0) {
-                        F_L = fv_L * cds_flux(p[p_ce], p[p_ce + p_s_fd]);
-                    } else {
-                        const int p_up_idx = (pi_fd - 1) * p_s_fd + i_t1 * p_s_t1 + i_t2 * p_s_t2;
-                        const int p_dn_idx = (pi_fd + 1) * p_s_fd + i_t1 * p_s_t1 + i_t2 * p_s_t2;
-                        const int p_up2_idx = (pi_fd - 2) * p_s_fd + i_t1 * p_s_t1 + i_t2 * p_s_t2;
-                        scalar_t up_val = p[p_up_idx];
-                        scalar_t ce_val = pc;
-                        scalar_t dn_val = p[p_dn_idx];
-                        scalar_t up2_val = (i_fd >= 2) ? p[p_up2_idx] : up_val;
-                        scalar_t f = compute_face_flux(fv_L, up_val, ce_val, dn_val, up2_val,
-                            dt_dh, C_courant, scheme_id, false, false);
-                        F_L = fv_L * f;
-                    }
-                } else {
-                    // negative: upstream = right of face = p[i_fd+1]
-                    if (i_fd == Ni_fd - 1) {
-                        F_L = fv_L * cds_flux(p[p_ce + p_s_fd], p[p_ce]);
-                    } else {
-                        const int p_up_idx = (pi_fd + 1) * p_s_fd + i_t1 * p_s_t1 + i_t2 * p_s_t2;
-                        const int p_dn_idx = pi_fd * p_s_fd + i_t1 * p_s_t1 + i_t2 * p_s_t2;
-                        const int p_up2_idx = (pi_fd + 2) * p_s_fd + i_t1 * p_s_t1 + i_t2 * p_s_t2;
-                        scalar_t up_val = p[p_up_idx];
-                        scalar_t ce_val = pc;
-                        scalar_t dn_val = p[p_dn_idx];
-                        scalar_t up2_val = (i_fd + 2 < Nfd) ? p[p_up2_idx] : up_val;
-                        scalar_t f = compute_face_flux(fv_L, up_val, ce_val, dn_val, up2_val,
-                            dt_dh, C_courant, scheme_id, false, false);
-                        F_L = fv_L * f;
-                    }
-                }
-            }
-
-            // -- Right face flux (face at i_fd+1) --
-            scalar_t F_R = (scalar_t)0;
-            {
-                const int fvR_idx = (i_fd + 1) * fv_s_fd + i_t1 * fv_s_t1 + i_t2 * fv_s_t2;
-                scalar_t fv_R = fv[fvR_idx];
-                const int pR_ce = (pi_fd + 1) * p_s_fd + i_t1 * p_s_t1 + i_t2 * p_s_t2;
-                scalar_t pRc = p[pR_ce];
-                if (fv_R > (scalar_t)0) {
-                    // positive: upstream = left of face = p[i_fd]
-                    const int pR_up_idx = pi_fd * p_s_fd + i_t1 * p_s_t1 + i_t2 * p_s_t2;
-                    const int pR_dn_idx = (pi_fd + 2) * p_s_fd + i_t1 * p_s_t1 + i_t2 * p_s_t2;
-                    const int pR_up2_idx = (pi_fd - 1) * p_s_fd + i_t1 * p_s_t1 + i_t2 * p_s_t2;
-                    scalar_t up_val = p[pR_up_idx];
-                    scalar_t ce_val = pRc;
-                    scalar_t dn_val = (pi_fd + 2 < Nfd) ? p[pR_dn_idx] : pRc;
-                    scalar_t up2_val = (pi_fd >= 1) ? p[pR_up2_idx] : up_val;
-                    scalar_t f = compute_face_flux(fv_R, up_val, ce_val, dn_val, up2_val,
-                        dt_dh, C_courant, scheme_id, false,
-                        (pi_fd + 2 >= Nfd));
-                    F_R = fv_R * f;
-                } else {
-                    // negative: upstream = right = p[i_fd+2]
-                    const int pR_up_idx = (pi_fd + 2) * p_s_fd + i_t1 * p_s_t1 + i_t2 * p_s_t2;
-                    const int pR_dn_idx = pi_fd * p_s_fd + i_t1 * p_s_t1 + i_t2 * p_s_t2;
-                    const int pR_up2_idx = (pi_fd + 3) * p_s_fd + i_t1 * p_s_t1 + i_t2 * p_s_t2;
-                    scalar_t up_val = (pi_fd + 2 < Nfd) ? p[pR_up_idx] : pRc;
-                    scalar_t ce_val = pRc;
-                    scalar_t dn_val = p[pR_dn_idx];
-                    scalar_t up2_val = (pi_fd + 3 < Nfd) ? p[pR_up2_idx] : up_val;
-                    scalar_t f = compute_face_flux(fv_R, up_val, ce_val, dn_val, up2_val,
-                        dt_dh, C_courant, scheme_id,
-                        (pi_fd + 2 >= Nfd), false);
-                    F_R = fv_R * f;
-                }
-            }
-
-            const int rhs_idx = i_fd * rhs_s_fd + i_t1 * rhs_s_t1 + i_t2 * rhs_s_t2;
-            rhs[rhs_idx] += dt_dh * (F_L - F_R);
-        }
-    });
-}
-
-// =====================================================================
-//  cvof_sweep — CPU twin
-// =====================================================================
 
 template <typename scalar_t>
 static inline scalar_t cv_vleer(scalar_t db, scalar_t df) {
@@ -1502,61 +1288,6 @@ static void prolongate_add_3d_cpu_dispatch(at::Tensor ec, at::Tensor p) {
     });
 }
 
-static void advect_flux_add_cpu_dispatch(
-        const at::Tensor& fv, const at::Tensor& p, at::Tensor& rhs,
-        double dt_dh, double C, int64_t scheme_id, int64_t face_dim)
-{
-    TORCH_CHECK(!fv.device().is_cuda(), "advect_flux_add CPU: expected CPU tensors");
-    const int Nfd = (int)p.size(face_dim);
-    const int ndim = (int)p.dim();
-
-    int Nt1 = 1, Nt2 = 1;
-    int64_t p_s_fd, p_s_t1, p_s_t2;
-    int64_t fv_s_fd, fv_s_t1, fv_s_t2;
-    int64_t rhs_s_fd, rhs_s_t1, rhs_s_t2;
-
-    if (ndim == 2) {
-        Nt1 = (face_dim == 0) ? (int)p.size(1) : (int)p.size(0);
-        p_s_fd = (face_dim == 0) ? p.stride(0) : p.stride(1);
-        p_s_t1 = (face_dim == 0) ? p.stride(1) : p.stride(0);
-        p_s_t2 = 1;
-        fv_s_fd = (face_dim == 0) ? fv.stride(0) : fv.stride(1);
-        fv_s_t1 = (face_dim == 0) ? fv.stride(1) : fv.stride(0);
-        fv_s_t2 = 1;
-        rhs_s_fd = rhs.stride(face_dim);
-        rhs_s_t1 = (face_dim == 0) ? rhs.stride(1) : rhs.stride(0);
-        rhs_s_t2 = 1;
-    } else {
-        if (face_dim == 0) {
-            Nt1 = (int)p.size(1); Nt2 = (int)p.size(2);
-            p_s_fd = p.stride(0); p_s_t1 = p.stride(1); p_s_t2 = p.stride(2);
-            fv_s_fd = fv.stride(0); fv_s_t1 = fv.stride(1); fv_s_t2 = fv.stride(2);
-            rhs_s_fd = rhs.stride(0); rhs_s_t1 = rhs.stride(1); rhs_s_t2 = rhs.stride(2);
-        } else if (face_dim == 1) {
-            Nt1 = (int)p.size(0); Nt2 = (int)p.size(2);
-            p_s_fd = p.stride(1); p_s_t1 = p.stride(0); p_s_t2 = p.stride(2);
-            fv_s_fd = fv.stride(1); fv_s_t1 = fv.stride(0); fv_s_t2 = fv.stride(2);
-            rhs_s_fd = rhs.stride(1); rhs_s_t1 = rhs.stride(0); rhs_s_t2 = rhs.stride(2);
-        } else {
-            Nt1 = (int)p.size(0); Nt2 = (int)p.size(1);
-            p_s_fd = p.stride(2); p_s_t1 = p.stride(0); p_s_t2 = p.stride(1);
-            fv_s_fd = fv.stride(2); fv_s_t1 = fv.stride(0); fv_s_t2 = fv.stride(1);
-            rhs_s_fd = rhs.stride(2); rhs_s_t1 = rhs.stride(0); rhs_s_t2 = rhs.stride(1);
-        }
-    }
-
-    AT_DISPATCH_FLOATING_TYPES(p.scalar_type(), "advect_flux_add_cpu", [&] {
-        advect_flux_add_cpu_impl<scalar_t>(
-            p.data_ptr<scalar_t>(), fv.data_ptr<scalar_t>(),
-            Nfd, Nt1, Nt2,
-            p_s_fd, p_s_t1, p_s_t2,
-            fv_s_fd, fv_s_t1, fv_s_t2,
-            rhs_s_fd, rhs_s_t1, rhs_s_t2,
-            static_cast<scalar_t>(dt_dh), static_cast<scalar_t>(C),
-            (int)scheme_id, rhs.data_ptr<scalar_t>());
-    });
-}
-
 static void cvof_sweep_cpu_dispatch(
         const at::Tensor& a, const at::Tensor& u_d, double cfl,
         int64_t face_dim, at::Tensor& out)
@@ -1637,9 +1368,105 @@ static at::Tensor poisson_solve_multigrid_3d_cpu(
     });
 }
 
-// MGCG and RMGCG CPU stubs — these are complex whole-solve drivers that
-// depend on the V-cycle sub-kernels above.  For now they raise a clear
-// error; full MGCG/RMGCG CPU twins are deferred.
+// =====================================================================
+//  Raw V-cycle op — the MGCG preconditioner primitive (CPU twin).
+//
+//  ``n_vcycles`` V-cycles with NO gauge fix (no ghost-ring Neumann pass, no
+//  mean subtraction), unlike the whole-solve driver above.  ``f`` is the raw
+//  smoother RHS (already h²-scaled by the caller); ``p`` (ghost-padded) is
+//  mutated in place and the interior residual is returned.
+//
+//  This is what keeps MGCG / RMGCG alive on the CPU: the whole-solve twins
+//  below are stubs, so ``PoissonSolver._cg_core`` runs the CG driver in Python
+//  and calls THIS for the preconditioner — the same V-cycle the native CUDA
+//  MGCG driver applies to ``z`` internally.
+// =====================================================================
+
+template <typename scalar_t>
+static at::Tensor mg_vcycle_2d_cpu_impl(
+        at::Tensor p, at::Tensor f, at::Tensor ch, at::Tensor cv,
+        double jcap_tol, double w,
+        int64_t nsmoothing, int64_t n_vcycles, int64_t smoother_id)
+{
+    const int Nx = (int)f.size(0);
+    const int Ny = (int)f.size(1);
+    auto r = at::empty_like(f);
+
+    scalar_t* pp = p.data_ptr<scalar_t>();
+    const scalar_t* ff = f.data_ptr<scalar_t>();
+    const scalar_t* cch = ch.data_ptr<scalar_t>();
+    const scalar_t* ccv = cv.data_ptr<scalar_t>();
+    scalar_t* rr = r.data_ptr<scalar_t>();
+
+    for (int64_t i = 0; i < n_vcycles; ++i) {
+        vcycle_2d_cpu<scalar_t>(pp, ff, cch, ccv, Nx, Ny,
+                                static_cast<scalar_t>(jcap_tol),
+                                static_cast<scalar_t>(w),
+                                (int)nsmoothing, (int)smoother_id, rr);
+    }
+    return r;
+}
+
+static at::Tensor mg_vcycle_2d_cpu(
+        at::Tensor p, at::Tensor f, at::Tensor ch, at::Tensor cv,
+        double jcap_tol, double w,
+        int64_t nsmoothing, int64_t n_vcycles, int64_t smoother_id)
+{
+    TORCH_CHECK(p.is_contiguous() && f.is_contiguous()
+                && ch.is_contiguous() && cv.is_contiguous(),
+                "mg_vcycle_2d: tensors must be contiguous");
+    return AT_DISPATCH_FLOATING_TYPES(p.scalar_type(), "mg_vcycle_2d_cpu", [&] {
+        return mg_vcycle_2d_cpu_impl<scalar_t>(
+            p, f, ch, cv, jcap_tol, w, nsmoothing, n_vcycles, smoother_id);
+    });
+}
+
+template <typename scalar_t>
+static at::Tensor mg_vcycle_3d_cpu_impl(
+        at::Tensor p, at::Tensor f,
+        at::Tensor ch, at::Tensor cv, at::Tensor cw,
+        double jcap_tol, double w,
+        int64_t nsmoothing, int64_t n_vcycles, int64_t smoother_id)
+{
+    const int Nx = (int)f.size(0);
+    const int Ny = (int)f.size(1);
+    const int Nz = (int)f.size(2);
+    auto r = at::empty_like(f);
+
+    scalar_t* pp = p.data_ptr<scalar_t>();
+    const scalar_t* ff = f.data_ptr<scalar_t>();
+    const scalar_t* cch = ch.data_ptr<scalar_t>();
+    const scalar_t* ccv = cv.data_ptr<scalar_t>();
+    const scalar_t* ccw = cw.data_ptr<scalar_t>();
+    scalar_t* rr = r.data_ptr<scalar_t>();
+
+    for (int64_t i = 0; i < n_vcycles; ++i) {
+        vcycle_3d_cpu<scalar_t>(pp, ff, cch, ccv, ccw, Nx, Ny, Nz,
+                                static_cast<scalar_t>(jcap_tol),
+                                static_cast<scalar_t>(w),
+                                (int)nsmoothing, (int)smoother_id, rr);
+    }
+    return r;
+}
+
+static at::Tensor mg_vcycle_3d_cpu(
+        at::Tensor p, at::Tensor f,
+        at::Tensor ch, at::Tensor cv, at::Tensor cw,
+        double jcap_tol, double w,
+        int64_t nsmoothing, int64_t n_vcycles, int64_t smoother_id)
+{
+    TORCH_CHECK(p.is_contiguous() && f.is_contiguous() && ch.is_contiguous()
+                && cv.is_contiguous() && cw.is_contiguous(),
+                "mg_vcycle_3d: tensors must be contiguous");
+    return AT_DISPATCH_FLOATING_TYPES(p.scalar_type(), "mg_vcycle_3d_cpu", [&] {
+        return mg_vcycle_3d_cpu_impl<scalar_t>(
+            p, f, ch, cv, cw, jcap_tol, w, nsmoothing, n_vcycles, smoother_id);
+    });
+}
+
+// MGCG and RMGCG CPU stubs — the whole-solve drivers.  On the CPU the CG loop
+// runs in Python (``PoissonSolver._cg_core``) against ``mg_vcycle_{2,3}d``
+// above, so these raise rather than duplicating that driver in C++.
 static at::Tensor poisson_solve_mgcg_2d_cpu(
         at::Tensor /*p*/, at::Tensor /*f*/,
         at::Tensor /*ch*/, at::Tensor /*cv*/,
@@ -1714,8 +1541,10 @@ TORCH_LIBRARY_IMPL(lilytorch_kernels, CPU, m) {
     m.impl("prolongate_add_2d", &prolongate_add_2d_cpu_dispatch);
     m.impl("prolongate_add_3d", &prolongate_add_3d_cpu_dispatch);
     // Advection / cvof
-    m.impl("advect_flux_add", &advect_flux_add_cpu_dispatch);
     m.impl("cvof_sweep", &cvof_sweep_cpu_dispatch);
+    // Raw V-cycle (MGCG preconditioner primitive)
+    m.impl("mg_vcycle_2d", &mg_vcycle_2d_cpu);
+    m.impl("mg_vcycle_3d", &mg_vcycle_3d_cpu);
     // Poisson whole-solve drivers
     m.impl("poisson_solve_multigrid_2d", &poisson_solve_multigrid_2d_cpu);
     m.impl("poisson_solve_multigrid_3d", &poisson_solve_multigrid_3d_cpu);

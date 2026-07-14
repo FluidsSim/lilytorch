@@ -67,7 +67,7 @@ class BDIMhandler:
         # ---- create fluid solver ----
         # Auto-select the two-phase (water + real air) solver when the config
         # carries a ``solver.two_phase`` block, otherwise the single-phase solver.
-        # Both run on the single-source Warp kernels (:mod:`lilytorch.src`).
+        # Both run on the single-source native kernels (:mod:`lilytorch.src`).
         self._two_phase = self.pars["solver"].get("two_phase") is not None
         _SolverCls = TwoPhaseSolver if self._two_phase else FluidSolver
         self.fluid_solver = _SolverCls(
@@ -1016,7 +1016,7 @@ class BDIMhandler:
         ``_update_3d_streaming_multi`` (Step 6 unification).  Assembles the
         per-step packed kinematics + AABB tensors on ``comp._kernel_step`` /
         ``_kernel_static_{2,3}d`` and then launches the rigid streaming
-        ``body_update`` Warp kernel (:meth:`_launch_body_update`), which
+        ``body_update`` native kernel (:meth:`_launch_body_update`), which
         publishes the staggered SDF / body-velocity contract fields the
         body-agnostic ``FluidSolver.fluid_step`` consumes.  The per-dim
         packed layouts (kin row, body_meta, dirty-AABB keys) are reproduced
@@ -1195,7 +1195,7 @@ class BDIMhandler:
     def _body_update_bufs(self, gs):
         """Persistent streaming output buffers for the CUDA-graph fast path
         (stable pointers; the SDF→FAR / body→0 resets are folded into the
-        captured graph inside the Warp bridge)."""
+        captured graph inside the streaming bridge)."""
         fs = self.fluid_solver
         c = self._bu_bufs
         if c is None or c['gs'] != gs or c['dtype'] != fs.dtype:
@@ -1208,7 +1208,7 @@ class BDIMhandler:
         return c
 
     def _launch_body_update(self, comp, kstep):
-        """Launch the rigid streaming ``body_update`` Warp kernel and publish
+        """Launch the rigid streaming ``body_update`` native kernel and publish
         its outputs as the solver's body-field contract.
 
         Streams every body's local SDF table onto the fluid grid (cell-centred
@@ -1243,7 +1243,7 @@ class BDIMhandler:
         if graph_mode:
             c = self._body_update_bufs(gs)
             sdf_stag, bvel = c['sdf'], c['bvel']
-            # The retired Warp bridge folded the SDF→FAR / vel→0 resets into
+            # The retired bridge folded the SDF→FAR / vel→0 resets into
             # its captured graph; the native bridge does NOT — the caller owns
             # the prefill on EVERY path.  Skipping it here left stale
             # previous-step values in the persistent buffers (ghost body

@@ -2,7 +2,7 @@
 //  sl_advect_{2d,3d} + diffuse_add — native CUDA kernels for the
 //  pre-Poisson step region (item 8.D).
 //
-//  Faithful line-for-line port of the Warp kernels in advection.py
+//  Fused semi-Lagrangian back-trace kernels
 //  (sl_advect_{2,3}d_kernel) and diffusion.py (fused_laplacian_accumulate).
 // =====================================================================
 
@@ -16,7 +16,7 @@
 namespace lilytorch_kernels {
 
 // =====================================================================
-//  Biquadratic sample — 2-D, off-grid indexing (EXACT Warp port).
+//  Biquadratic sample — 2-D, off-grid indexing.
 // =====================================================================
 template <typename scalar_t>
 __device__ __forceinline__ scalar_t biquadratic_sample_off_2d(
@@ -75,7 +75,7 @@ __device__ __forceinline__ scalar_t biquadratic_sample_off_2d(
 }
 
 // =====================================================================
-//  Triquadratic sample — 3-D, off-grid indexing (EXACT Warp port).
+//  Triquadratic sample — 3-D, off-grid indexing.
 // =====================================================================
 template <typename scalar_t>
 __device__ __forceinline__ scalar_t triquadratic_sample_off(

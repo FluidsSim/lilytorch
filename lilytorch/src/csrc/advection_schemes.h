@@ -5,7 +5,8 @@
 //  Convention: u = upstream (far), c = center (upwind), d = downstream.
 //  The caller handles the positive/negative flow direction swap.
 //
-//  These mirror the Warp @wp.func implementations in advection.py
+//  Single source for the five limiters, shared by the CUDA kernels and
+//  their CPU twins.
 //  (_scheme_quick .. _scheme_cubista) exactly — same tiny-denominator
 //  guard (1e-30), same operation order.
 //

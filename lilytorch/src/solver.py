@@ -27,7 +27,7 @@ from lilytorch.src.forces import (
     _forces_body_integrate_3d,
 )
 from lilytorch.src import forces, extras
-from lilytorch.src.graph_capture import WholeStepGraphRunner, NativeWholeStepGraphRunner
+from lilytorch.src.graph_capture import NativeWholeStepGraphRunner
 
 logger = logging.getLogger(__name__)
 
@@ -330,13 +330,12 @@ class FluidSolver(PlottingMixin):
         _u_inlet = float(self.adv_diff_solver.BC_values_u[1])
         self._vmax_abort = float(solver.get("vmax_abort", max(100.0 * abs(_u_inlet), 100.0)))
 
-        # NOTE: the fast path is Warp.  Every numerical kernel (advection,
-        # diffusion, Poisson, body-update) is an always-on, already-compiled
-        # Warp kernel — there is no torch.compile / adv-diff CUDA-graph toggle
-        # any more.  ``torch.cuda.make_graphed_callables`` cannot capture the
-        # Warp launches (they run on Warp's own stream and get dropped from the
-        # replay → wrong physics), so that path was removed; Warp is the single
-        # compiled fast path on both CUDA and CPU.
+        # NOTE: every numerical kernel (advection, diffusion, Poisson,
+        # body-update) is an always-on native CUDA / C++ op with a CPU twin —
+        # there is no torch.compile / adv-diff CUDA-graph toggle any more.  The
+        # native ops launch on torch's current stream, so the whole pre-Poisson
+        # region is captured as one CUDA graph instead (see
+        # ``NativeWholeStepGraphRunner``).
 
         # Dynamic BDIM META compilation for the union-AABB crop path
         # (sub-block shape varies with body kinematics).
@@ -1034,8 +1033,6 @@ class FluidSolver(PlottingMixin):
 
         coeff = w * self.dt / self.rho
 
-        self.poisson_solver.dirichlet_mask = None
-
         if self.poisson_method == "fft":
             # ---- FFT solver: CONSTANT-coefficient projection ----
             # Full-grid div is computed here (FFT solver needs the ghost-cell
@@ -1098,7 +1095,7 @@ class FluidSolver(PlottingMixin):
                 _sl = (slice(1, -1),) * self.ndim
                 div.sub_(body_div_corr[_sl])
 
-            # The Warp multigrid driver applies h² internally (f_scaled = h²·f
+            # The multigrid driver applies h² internally (f_scaled = h²·f
             # inside solve_*), so pass the raw divergence RHS (pre_scaled=False)
             # to avoid double-scaling.
             _pre_scaled = False
@@ -1129,8 +1126,8 @@ class FluidSolver(PlottingMixin):
             if self.poisson_warm_start and not has_custom_coeffs:
                 p0 = p
             elif self.poisson_method == "multigrid":
-                # WarpMG.solve zeros its level-0 buffer in place when p0 is
-                # None -- skip the per-step full-grid ``zeros_like`` alloc +
+                # The native multigrid driver serves p0=None from a persistent
+                # zeroed buffer -- skip the per-step ``zeros_like`` alloc +
                 # copy-into-graph (host-wrapper trim; the MGCG/RMGCG cores need
                 # a real tensor for ``x = p0.clone()``, so only multigrid opts
                 # out here).
@@ -1441,15 +1438,12 @@ class FluidSolver(PlottingMixin):
         """May the pre-projection region be recorded into a CUDA graph?
 
         Only if every kernel it launches goes to torch's CURRENT CUDA stream.
-        A raw ``wp.launch`` goes to Warp's own stream: torch stream capture
-        never records it, so such kernels execute during the capture pass and
-        are silently DROPPED from every replay — the physics just vanishes,
-        with no error and no NaN (measured: ~47% velocity error when the flux
-        advection still ran on Warp).  Since 13c both advection paths (flux
-        and semi-Lagrangian) are native end-to-end and capture correctly;
+        A kernel launched on any OTHER stream is never recorded by torch stream
+        capture: it executes during the capture pass and is then silently
+        DROPPED from every replay — the physics just vanishes, with no error and
+        no NaN (measured once at ~47% velocity error).  Both advection paths
+        (flux and semi-Lagrangian) are native end-to-end and capture correctly;
         the guard stays as the gate for any future non-capturable solve.
-
-        This is the same rule that made warp_port refuse ``use_cuda_graphs``.
         """
         safe = getattr(self.adv_diff_solver, 'graph_capturable', False)
         if not safe and not getattr(self, '_preproj_graph_warned', False):
@@ -1729,7 +1723,7 @@ class FluidSolver(PlottingMixin):
         return tuple(out)
 
     # ------------------------------------------------------------------
-    #   Fused (kernel-mode) fluid step — bdim_forcing on Warp
+    #   Fused fluid step — native bdim_forcing
     # ------------------------------------------------------------------
     def _init_bdim_coeff_persist_3d(self, timestep):
         """Lazy-allocate the persistent ``ch/cv/cw`` Poisson-coefficient
@@ -1822,9 +1816,9 @@ class FluidSolver(PlottingMixin):
             # bdim_forcing kernel every step (so no stale-cell hazard).
             self._mw_div_corr_persist = torch.zeros(gs, device=device, dtype=dtype)
 
-    # ── Fused BDIM step (2-D): bdim_forcing on Warp ─────────────────────────
+    # ── Fused BDIM step (2-D): native bdim_forcing ──────────────────────────
     def _fluid_step_fused_2d(self, u, v, p, timestep):
-        """2-D fused fluid step: a single Warp kernel (``bdim_forcing_2d``)
+        """2-D fused fluid step: a single native kernel (``bdim_forcing_2d``)
         applies the BDIM2 meta-equation and assembles the variable-density
         Poisson coefficients, followed by the pressure projection.
 
@@ -1876,7 +1870,7 @@ class FluidSolver(PlottingMixin):
         runner = self._preproj_graph_2d
 
         # ── Shared pre-computation (CPU + CUDA) ─────────────────────
-        # Compute nu_t (Smagorinsky / Carreau) via Warp, then form the
+        # Compute nu_t (Smagorinsky / Carreau) natively, then form the
         # total effective viscosity nu_eff = nu + nu_t in a persistent
         # buffer.  The torch.add is cheap on CPU; on CUDA it runs before
         # graph capture and synchronises implicitly.
@@ -1898,7 +1892,7 @@ class FluidSolver(PlottingMixin):
             self._init_bdim_coeff_persist_2d(timestep)
 
         # ── Core pre-projection operations (always the same) ─────
-        # advection + diffusion + BDIM forcing + set_BCs — all pure Warp.
+        # advection + diffusion + BDIM forcing + set_BCs — all native.
         # The runner dispatches to either graph replay or eager launch.
         def _run_preproj():
             primes_loc = self.adv_diff_solver.solve(u, v, nu_eff=_nu_eff)
@@ -1982,7 +1976,7 @@ class FluidSolver(PlottingMixin):
 
         return (*vels_out, p_out)
 
-    # ── Fused BDIM step (3-D): bdim_forcing on Warp ─────────────────────────
+    # ── Fused BDIM step (3-D): native bdim_forcing ──────────────────────────
     def _fluid_step_fused_3d(self, u, v, w_vel, p, timestep):
         """3-D analogue of :meth:`_fluid_step_fused_2d` (adds the w axis and
         the ``k0``/``Ak`` dirty extents).  Same body-agnostic contract: the
@@ -1990,7 +1984,7 @@ class FluidSolver(PlottingMixin):
         ``composite_body.update()`` and never computes body geometry itself.
 
         Whole-step pre-Poisson graph (CUDA) captures SL/convective advection
-        + diffusion + bdim_forcing + set_BCs as ONE ``wp.capture_launch``,
+        + diffusion + bdim_forcing + set_BCs as ONE CUDA-graph replay,
         collapsing ~5 host-side captures into a single replay (~3 µs)."""
         comp  = self.composite_body
         sdf_u = getattr(comp, 'sdf_val_u', None)
@@ -2030,7 +2024,7 @@ class FluidSolver(PlottingMixin):
         runner = self._preproj_graph_3d
 
         # ── Shared pre-computation (CPU + CUDA) ─────────────────────
-        # Compute nu_t (Smagorinsky / Carreau) via Warp, then form the
+        # Compute nu_t (Smagorinsky / Carreau) natively, then form the
         # total effective viscosity nu_eff = nu + nu_t in a persistent
         # buffer.  The torch.add is cheap on CPU; on CUDA it runs before
         # graph capture and synchronises implicitly.
@@ -2052,7 +2046,7 @@ class FluidSolver(PlottingMixin):
             self._init_bdim_coeff_persist_3d(timestep)
 
         # ── Core pre-projection operations (always the same) ─────
-        # advection + diffusion + BDIM forcing + set_BCs — all pure Warp.
+        # advection + diffusion + BDIM forcing + set_BCs — all native.
         # The runner dispatches to either graph replay or eager launch.
         def _run_preproj():
             primes_loc = self.adv_diff_solver.solve(

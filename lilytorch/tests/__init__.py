@@ -1,1 +1,1 @@
-"""Centralized test suite for lilytorch (solver + Warp kernels + integration)."""
+"""Centralized test suite for lilytorch (solver + native kernels + integration)."""

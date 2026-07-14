@@ -1,6 +1,6 @@
-"""Warp **bdim_forcing (3-D)** single-source checks: Warp CPU == Warp GPU.
+"""Native **bdim_forcing (3-D)** single-source checks: CPU twin == CUDA kernel.
 
-Exercises ``bdim_forcing_3d_warp`` on manufactured
+Exercises ``bdim_forcing_3d`` on manufactured
 sphere-SDF + random-field scenes: full-grid and interior dirty-AABB sub-blocks,
 ``mu0_projection`` 0/1.
 
@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from lilytorch.src.bdim import bdim_forcing_3d_warp, bdim_forcing_2d_warp
+from lilytorch.src.native import bdim_forcing_3d, bdim_forcing_2d
 
 SKIP_NO_CUDA = pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA")
 
@@ -51,17 +51,17 @@ def _cbuf(dev, dtype=torch.float64):
             torch.full((NGX - 2, NGY - 2, NGZ - 1), base, dtype=dtype, device=dev))
 
 
-def _run_warp(F, dirty, mu0_proj):
+def _run_native(F, dirty, mu0_proj):
     su, sv, sw, bu, bv, bw, up, vp, wp_ = F
     u0, v0, w0 = up.clone(), vp.clone(), wp_.clone()
     ch, cv, cw = _cbuf(su.device, su.dtype)
-    bdim_forcing_3d_warp(up, vp, wp_, su, sv, sw, bu, bv, bw,
+    bdim_forcing_3d(up, vp, wp_, su, sv, sw, bu, bv, bw,
                        u0, v0, w0, ch, cv, cw, EPS, RHO, DT, H, *dirty,
                        mu0_proj)
     return u0, v0, w0, ch, cv, cw
 
 
-# ─── single source: Warp CPU == Warp GPU ──────────────────────────────────────
+# ─── single source: native CPU twin == CUDA kernel ────────────────────────────
 
 @SKIP_NO_CUDA
 @pytest.mark.parametrize("dirty", [(0, 0, 0, NGX, NGY, NGZ),
@@ -69,11 +69,11 @@ def _run_warp(F, dirty, mu0_proj):
                          ids=["full", "subblock"])
 @pytest.mark.parametrize("mu0_proj", [1, 0])
 def test_cpu_eq_gpu(dirty, mu0_proj):
-    wc = _run_warp(_fields("cpu"), dirty, mu0_proj)
-    wg = _run_warp(_fields("cuda:0"), dirty, mu0_proj)
+    wc = _run_native(_fields("cpu"), dirty, mu0_proj)
+    wg = _run_native(_fields("cuda:0"), dirty, mu0_proj)
     err = [(a.cpu() - b.cpu()).abs().max().item() for a, b in zip(wc, wg)]
     # float64 reduction noise on the normalised normal / mu1 polynomial.
-    assert max(err) < 1e-12, f"warp cpu vs gpu: {err}"
+    assert max(err) < 1e-12, f"cpu vs gpu: {err}"
 
 
 # ─── 3-D full-grid rewrite semantics: pass-through outside the dirty AABB ────
@@ -90,7 +90,7 @@ def test_outside_rect_passthrough_3d(dev):
     ch, cv, cw = _cbuf(dev)
     refs = tuple(c.clone() for c in (ch, cv, cw))
     rect = (5, 4, 3, 20, 18, 16)
-    bdim_forcing_3d_warp(up, vp, wp_, su, sv, sw, bu, bv, bw,
+    bdim_forcing_3d(up, vp, wp_, su, sv, sw, bu, bv, bw,
                          u0, v0, w0, ch, cv, cw,
                          EPS, RHO, DT, H, *rect, 1)
     i0, j0, k0, Ai, Aj, Ak = rect
@@ -130,13 +130,13 @@ def test_mw_div_corr_fold_3d(dev, dtype):
     ch, cv, cw = _cbuf(dev, dtype)
     div_corr = torch.full_like(sdf_cc, -333.0)
     eps_mw = 1.7 * EPS
-    bdim_forcing_3d_warp(up, vp, wp_, su, sv, sw, bu, bv, bw,
+    bdim_forcing_3d(up, vp, wp_, su, sv, sw, bu, bv, bw,
                          u0, v0, w0, ch, cv, cw,
                          EPS, RHO, DT, H, 5, 4, 3, 20, 18, 16, 1,
                          sdf_cc=sdf_cc, div_corr=div_corr, eps_mw=eps_mw,
                          inv_dx=1.0 / H, inv_dy=1.0 / H, inv_dz=1.0 / H)
     ref = _mw_oracle_3d(bu, bv, bw, sdf_cc, eps_mw, H)
-    # ulp-level torch-vs-Warp sin/FMA differences, relative to the field scale
+    # ulp-level torch-vs-kernel sin/FMA differences, relative to the field scale
     rtol = 1e-13 if dtype == torch.float64 else 1e-6
     err = (div_corr - ref).abs().max().item() / ref.abs().max().item()
     assert err < rtol, f"MW fold vs torch oracle (rel): {err:.3e}"
@@ -160,7 +160,7 @@ def _rectdev_steps_bdim_3d(dtype, mw_on):
         rect = (4 + step, 3 + step, 2 + step, 18, 16, 14)   # moving AABB
         up.add_(0.01); bu.mul_(1.001)                       # live-data check
         rect_dev.copy_(torch.tensor(rect, dtype=torch.int32, device=dev))
-        bdim_forcing_3d_warp(up, vp, wp_, su, sv, sw, bu, bv, bw,
+        bdim_forcing_3d(up, vp, wp_, su, sv, sw, bu, bv, bw,
                              u0g, v0g, w0g, chg, cvg, cwg,
                              EPS, RHO, DT, H, *rect, 1,
                              sdf_cc=(sdf_cc if mw_on else None),
@@ -168,7 +168,7 @@ def _rectdev_steps_bdim_3d(dtype, mw_on):
         u0e, v0e, w0e = (torch.empty_like(t) for t in (up, vp, wp_))
         che, cve, cwe = chg.clone(), cvg.clone(), cwg.clone()
         dce = torch.zeros_like(sdf_cc) if mw_on else None
-        bdim_forcing_3d_warp(up, vp, wp_, su, sv, sw, bu, bv, bw,
+        bdim_forcing_3d(up, vp, wp_, su, sv, sw, bu, bv, bw,
                              u0e, v0e, w0e, che, cve, cwe,
                              EPS, RHO, DT, H, *rect, 1,
                              sdf_cc=(sdf_cc if mw_on else None),
@@ -227,15 +227,15 @@ def test_solver_mw_fold_wiring(ndim):
 
 if __name__ == "__main__":
     if torch.cuda.is_available():
-        wc = _run_warp(_fields("cpu"), (0, 0, 0, NGX, NGY, NGZ), 1)
-        wg = _run_warp(_fields("cuda:0"), (0, 0, 0, NGX, NGY, NGZ), 1)
+        wc = _run_native(_fields("cpu"), (0, 0, 0, NGX, NGY, NGZ), 1)
+        wg = _run_native(_fields("cuda:0"), (0, 0, 0, NGX, NGY, NGZ), 1)
         e = [(a.cpu() - b.cpu()).abs().max().item() for a, b in zip(wc, wg)]
         print(f"  CPU vs GPU full  maxerr={max(e):.2e}")
     print("  (run via pytest for the full matrix)")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-#  2-D bdim_forcing (bdim_forcing_2d_warp) — merged from the former
+#  2-D bdim_forcing (bdim_forcing_2d) — merged from the former
 #  test_bdim_2d.py.  Symbols carry a `_2d` suffix so both dims coexist.
 # ═════════════════════════════════════════════════════════════════════════════
 NGX_2D, NGY_2D, H_2D = 48, 40, 0.05
@@ -268,11 +268,11 @@ def _cbuf_2d(dev):
             torch.full((NGX_2D, NGY_2D), base, dtype=torch.float64, device=dev))
 
 
-def _run_warp_2d(F, dirty, mu0_proj):
+def _run_native_2d(F, dirty, mu0_proj):
     su, sv, bu, bv, up, vp = F
     u0, v0 = up.clone(), vp.clone()
     ch, cv = _cbuf_2d(su.device)
-    bdim_forcing_2d_warp(up, vp, su, sv, bu, bv, u0, v0, ch, cv,
+    bdim_forcing_2d(up, vp, su, sv, bu, bv, u0, v0, ch, cv,
                        EPS_2D, RHO_2D, DT_2D, H_2D, *dirty, mu0_proj)
     return u0, v0, ch, cv
 
@@ -282,10 +282,10 @@ def _run_warp_2d(F, dirty, mu0_proj):
                          ids=["full", "subblock"])
 @pytest.mark.parametrize("mu0_proj", [1, 0])
 def test_cpu_eq_gpu_2d(dirty, mu0_proj):
-    wc = _run_warp_2d(_fields_2d("cpu"), dirty, mu0_proj)
-    wg = _run_warp_2d(_fields_2d("cuda:0"), dirty, mu0_proj)
+    wc = _run_native_2d(_fields_2d("cpu"), dirty, mu0_proj)
+    wg = _run_native_2d(_fields_2d("cuda:0"), dirty, mu0_proj)
     err = [(a.cpu() - b.cpu()).abs().max().item() for a, b in zip(wc, wg)]
-    assert max(err) < 1e-12, f"warp cpu vs gpu: {err}"
+    assert max(err) < 1e-12, f"cpu vs gpu: {err}"
 
 
 # ─── full-grid rewrite semantics: pass-through outside the dirty rect ────────
@@ -300,7 +300,7 @@ def test_outside_rect_passthrough_2d(dev):
     ch, cv = _cbuf_2d(dev)
     ch_ref, cv_ref = ch.clone(), cv.clone()
     rect = (5, 4, 24, 20)
-    bdim_forcing_2d_warp(up, vp, su, sv, bu, bv, u0, v0, ch, cv,
+    bdim_forcing_2d(up, vp, su, sv, bu, bv, u0, v0, ch, cv,
                          EPS_2D, RHO_2D, DT_2D, H_2D, *rect, 1)
     i0, j0, Ai, Aj = rect
     out = torch.ones_like(up, dtype=torch.bool)
@@ -334,13 +334,13 @@ def test_mw_div_corr_fold_2d(dev, dtype):
     ch, cv = (c.to(dtype) for c in _cbuf_2d(dev))
     div_corr = torch.full_like(sdf_cc, -333.0)
     eps_mw = 1.7 * EPS_2D
-    bdim_forcing_2d_warp(up, vp, su, sv, bu, bv, u0, v0, ch, cv,
+    bdim_forcing_2d(up, vp, su, sv, bu, bv, u0, v0, ch, cv,
                          EPS_2D, RHO_2D, DT_2D, H_2D,
                          5, 4, 24, 20, 1,
                          sdf_cc=sdf_cc, div_corr=div_corr,
                          eps_mw=eps_mw, inv_dx=1.0 / H_2D, inv_dy=1.0 / H_2D)
     ref = _mw_oracle(bu, bv, sdf_cc, eps_mw, H_2D, H_2D)
-    # ulp-level torch-vs-Warp sin/FMA differences, relative to the field scale
+    # ulp-level torch-vs-kernel sin/FMA differences, relative to the field scale
     rtol = 1e-13 if dtype == torch.float64 else 1e-6
     err = (div_corr - ref).abs().max().item() / ref.abs().max().item()
     assert err < rtol, f"MW fold vs torch oracle (rel): {err:.3e}"
@@ -370,7 +370,7 @@ def _rectdev_steps_bdim_2d(dtype, mw_on):
         rect = (4 + step, 3 + step, 22, 18)      # moving dirty rect
         up.add_(0.01); bu.mul_(1.001)            # live-data check
         rect_dev.copy_(torch.tensor(rect, dtype=torch.int32, device=dev))
-        bdim_forcing_2d_warp(up, vp, su, sv, bu, bv, u0g, v0g, chg, cvg,
+        bdim_forcing_2d(up, vp, su, sv, bu, bv, u0g, v0g, chg, cvg,
                              EPS_2D, RHO_2D, DT_2D, H_2D, *rect, 1,
                              sdf_cc=(sdf_cc if mw_on else None),
                              div_corr=dcg, rect_dev=rect_dev, **kw)
@@ -378,7 +378,7 @@ def _rectdev_steps_bdim_2d(dtype, mw_on):
         u0e = torch.empty_like(up); v0e = torch.empty_like(vp)
         che, cve = chg.clone(), cvg.clone()
         dce = torch.zeros_like(sdf_cc) if mw_on else None
-        bdim_forcing_2d_warp(up, vp, su, sv, bu, bv, u0e, v0e, che, cve,
+        bdim_forcing_2d(up, vp, su, sv, bu, bv, u0e, v0e, che, cve,
                              EPS_2D, RHO_2D, DT_2D, H_2D, *rect, 1,
                              sdf_cc=(sdf_cc if mw_on else None),
                              div_corr=dce, **kw)

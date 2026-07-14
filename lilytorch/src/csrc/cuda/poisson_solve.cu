@@ -793,8 +793,47 @@ static std::tuple<at::Tensor, at::Tensor, int64_t> poisson_solve_rmgcg_3d_cuda(
     return std::make_tuple(r, D, niter);
 }
 
+// =====================================================================
+// Raw V-cycle op — the MGCG preconditioner primitive.
+//
+// ``n_vcycles`` V-cycles on (p, f, faces) with NO gauge fix: no ghost-ring
+// Neumann pass and no mean subtraction, unlike the whole-solve drivers above.
+// That is exactly what a PCG preconditioner needs — the internal
+// ``vcycle_{2,3}d`` the native MGCG driver already applies to ``z`` — and it
+// is what the Python CG driver (``PoissonSolver._cg_core``) calls on the CPU,
+// where the MGCG/RMGCG whole-solve C++ twins do not exist.
+//
+// ``f`` is consumed as the raw smoother RHS (already h²-scaled by the caller).
+// ``p`` (ghost-padded) is mutated in place; the interior residual is returned.
+// =====================================================================
+
+static at::Tensor mg_vcycle_2d_cuda(
+        at::Tensor p, at::Tensor f, at::Tensor ch, at::Tensor cv,
+        double jcap_tol, double w,
+        int64_t nsmoothing, int64_t n_vcycles, int64_t smoother_id)
+{
+    auto r = at::empty_like(f);
+    for (int64_t i = 0; i < n_vcycles; ++i)
+        vcycle_2d(p, f, ch, cv, r, jcap_tol, w, nsmoothing, smoother_id);
+    return r;
+}
+
+static at::Tensor mg_vcycle_3d_cuda(
+        at::Tensor p, at::Tensor f,
+        at::Tensor ch, at::Tensor cv, at::Tensor cw,
+        double jcap_tol, double w,
+        int64_t nsmoothing, int64_t n_vcycles, int64_t smoother_id)
+{
+    auto r = at::empty_like(f);
+    for (int64_t i = 0; i < n_vcycles; ++i)
+        vcycle_3d(p, f, ch, cv, cw, r, jcap_tol, w, nsmoothing, smoother_id);
+    return r;
+}
+
 // ---- CUDA dispatch registration -------------------------------------
 TORCH_LIBRARY_IMPL(lilytorch_kernels, CUDA, m) {
+    m.impl("mg_vcycle_2d", &mg_vcycle_2d_cuda);
+    m.impl("mg_vcycle_3d", &mg_vcycle_3d_cuda);
     m.impl("poisson_solve_multigrid_2d", &poisson_solve_multigrid_2d_cuda);
     m.impl("poisson_solve_multigrid_3d", &poisson_solve_multigrid_3d_cuda);
     m.impl("poisson_solve_mgcg_2d", &poisson_solve_mgcg_2d_cuda);

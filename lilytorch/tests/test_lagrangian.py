@@ -1,6 +1,6 @@
-"""Warp Lagrangian surface-force single-source checks: Warp CPU == Warp GPU.
+"""Native Lagrangian surface-force single-source checks: CPU twin == CUDA kernel.
 
-Exercises ``lagrangian_forces_{2d,3d}_warp`` on synthetic scenes (circles in
+Exercises ``native.lagrangian_forces_{2d,3d}`` on synthetic scenes (circles in
 2-D, uv-sphere triangulations in 3-D): scalar + full-field nu_rho, linear +
 quadratic sampling, a nonzero ``sample_offset``, and f32 + f64.
 
@@ -18,13 +18,9 @@ import math
 import pytest
 import torch
 
-from lilytorch.src.lagrangian import (
-    lagrangian_forces_2d_warp,
-    lagrangian_forces_3d_warp,
-)
 from lilytorch.src.native import (
-    lagrangian_forces_2d as lagrangian_forces_2d_native,
-    lagrangian_forces_3d as lagrangian_forces_3d_native,
+    lagrangian_forces_2d,
+    lagrangian_forces_3d,
 )
 
 SKIP_NO_CUDA = pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA")
@@ -165,7 +161,7 @@ def _cpu_vs_gpu(fn, tensors, geom, method, offset):
 @pytest.mark.parametrize("offset", [0.0, 0.08])
 def test_2d_cpu_eq_gpu(method, scalar_nrho, offset):
     tensors, geom = _args_2d(scalar_nrho, torch.float64)
-    wc, wg = _cpu_vs_gpu(lagrangian_forces_2d_warp, tensors, geom, method, offset)
+    wc, wg = _cpu_vs_gpu(lagrangian_forces_2d, tensors, geom, method, offset)
     err, ok = _err(wc, wg, torch.float64)
     assert ok, f"2D {method} scalar={scalar_nrho} off={offset}: {err:.3e}"
 
@@ -176,7 +172,7 @@ def test_2d_cpu_eq_gpu(method, scalar_nrho, offset):
 @pytest.mark.parametrize("offset", [0.0, 0.2])
 def test_3d_cpu_eq_gpu(method, scalar_nrho, offset):
     tensors, geom = _args_3d(scalar_nrho, torch.float64)
-    wc, wg = _cpu_vs_gpu(lagrangian_forces_3d_warp, tensors, geom, method, offset)
+    wc, wg = _cpu_vs_gpu(lagrangian_forces_3d, tensors, geom, method, offset)
     err, ok = _err(wc, wg, torch.float64)
     assert ok, f"3D {method} scalar={scalar_nrho} off={offset}: {err:.3e}"
 
@@ -186,7 +182,7 @@ def test_3d_cpu_eq_gpu(method, scalar_nrho, offset):
 @pytest.mark.parametrize("scalar_nrho", [True, False])
 def test_2d_cpu_eq_gpu_f32(method, scalar_nrho):
     tensors, geom = _args_2d(scalar_nrho, torch.float32)
-    wc, wg = _cpu_vs_gpu(lagrangian_forces_2d_warp, tensors, geom, method, 0.08)
+    wc, wg = _cpu_vs_gpu(lagrangian_forces_2d, tensors, geom, method, 0.08)
     err, ok = _err(wc, wg, torch.float32)
     assert ok, f"2D f32 {method} scalar={scalar_nrho}: {err:.3e}"
 
@@ -196,40 +192,9 @@ def test_2d_cpu_eq_gpu_f32(method, scalar_nrho):
 @pytest.mark.parametrize("scalar_nrho", [True, False])
 def test_3d_cpu_eq_gpu_f32(method, scalar_nrho):
     tensors, geom = _args_3d(scalar_nrho, torch.float32)
-    wc, wg = _cpu_vs_gpu(lagrangian_forces_3d_warp, tensors, geom, method, 0.2)
+    wc, wg = _cpu_vs_gpu(lagrangian_forces_3d, tensors, geom, method, 0.2)
     err, ok = _err(wc, wg, torch.float32)
     assert ok, f"3D f32 {method} scalar={scalar_nrho}: {err:.3e}"
-
-
-# ─── cuda_native_port Phase 0.2 parity gate: native == Warp oracle ───────────
-
-_DEVS = ["cpu"] + (["cuda:0"] if torch.cuda.is_available() else [])
-
-
-@pytest.mark.parametrize("dev", _DEVS)
-@pytest.mark.parametrize("method", ["linear", "quadratic"])
-@pytest.mark.parametrize("scalar_nrho", [True, False])
-@pytest.mark.parametrize("offset", [0.0, 0.08])
-def test_2d_native_eq_warp(dev, method, scalar_nrho, offset):
-    tensors, geom = _args_2d(scalar_nrho, torch.float64)
-    tensors = tuple(t.to(dev) for t in tensors)
-    w = lagrangian_forces_2d_warp(*tensors, *geom, method=method, sample_offset=offset)
-    n = lagrangian_forces_2d_native(*tensors, *geom, method=method, sample_offset=offset)
-    err, ok = _err(w.cpu(), n.cpu(), torch.float64)
-    assert ok, f"2D native vs warp {dev} {method} scalar={scalar_nrho} off={offset}: {err:.3e}"
-
-
-@pytest.mark.parametrize("dev", _DEVS)
-@pytest.mark.parametrize("method", ["linear", "quadratic"])
-@pytest.mark.parametrize("scalar_nrho", [True, False])
-@pytest.mark.parametrize("offset", [0.0, 0.2])
-def test_3d_native_eq_warp(dev, method, scalar_nrho, offset):
-    tensors, geom = _args_3d(scalar_nrho, torch.float64)
-    tensors = tuple(t.to(dev) for t in tensors)
-    w = lagrangian_forces_3d_warp(*tensors, *geom, method=method, sample_offset=offset)
-    n = lagrangian_forces_3d_native(*tensors, *geom, method=method, sample_offset=offset)
-    err, ok = _err(w.cpu(), n.cpu(), torch.float64)
-    assert ok, f"3D native vs warp {dev} {method} scalar={scalar_nrho} off={offset}: {err:.3e}"
 
 
 if __name__ == "__main__":
@@ -239,10 +204,10 @@ if __name__ == "__main__":
         for method in ("linear", "quadratic"):
             for sc in (True, False):
                 t2, g2 = _args_2d(sc, torch.float64)
-                wc, wg = _cpu_vs_gpu(lagrangian_forces_2d_warp, t2, g2, method, 0.08)
+                wc, wg = _cpu_vs_gpu(lagrangian_forces_2d, t2, g2, method, 0.08)
                 e2 = (wc - wg).abs().max().item()
                 t3, g3 = _args_3d(sc, torch.float64)
-                wc, wg = _cpu_vs_gpu(lagrangian_forces_3d_warp, t3, g3, method, 0.2)
+                wc, wg = _cpu_vs_gpu(lagrangian_forces_3d, t3, g3, method, 0.2)
                 e3 = (wc - wg).abs().max().item()
                 tag = f"{method:9s} scalar={sc!s:5s}"
                 print(f"  {tag}  2D {e2:.2e}  3D {e3:.2e}  "

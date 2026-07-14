@@ -1,6 +1,6 @@
 // =====================================================================
 //  sl_advect_{2d,3d} + diffuse_add — CPU twins (at::parallel_for).
-//  Interpolation functions mirror Warp's bilinear/biquadratic/trilinear/
+//  Interpolation functions mirror the CUDA bilinear/biquadratic/trilinear/
 //  triquadratic exactly — same clamping, same boundary-fallback, same
 //  quadratic-B-spline weights.
 // =====================================================================
@@ -60,7 +60,7 @@ static inline scalar_t biquadratic_sample_off_2d_cpu(
     int ix = (int)tx; if (ix > Mx - 2) ix = Mx - 2;
     int iy = (int)ty; if (iy > My - 2) iy = My - 2;
 
-    // Warp falls back to bilinear when the stencil would cross the border.
+    // Fall back to bilinear when the stencil would cross the border.
     if (ix < 1 || iy < 1 || Mx < 3 || My < 3) {
         return bilinear_sample_off_2d_cpu(F, offset, Mx, My,
             bx0, by0, inv_dx, inv_dy, xq, yq);
@@ -150,7 +150,7 @@ static inline scalar_t triquadratic_sample_off_3d_cpu(
     int iy = (int)ty; if (iy > My - 2) iy = My - 2;
     int iz = (int)tz; if (iz > Mz - 2) iz = Mz - 2;
 
-    // Warp falls back to trilinear when the stencil would cross the border.
+    // Fall back to trilinear when the stencil would cross the border.
     if (ix < 1 || iy < 1 || iz < 1 || Mx < 3 || My < 3 || Mz < 3) {
         return trilinear_sample_off_3d_cpu(F, offset, Mx, My, Mz,
             bx0, by0, bz0, inv_dx, inv_dy, inv_dz, xq, yq, zq);

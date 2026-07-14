@@ -3,7 +3,7 @@
 
 Runs a 2-D and 3-D coupled fluid simulation with an analytical body
 for exactly 600 steps, records wall-clock ms/step (GPU-synchronised),
-and saves the final state for parity comparison vs ``warp_port``.
+and saves the final state for parity comparison across revisions.
 
 Usage::
 
@@ -214,7 +214,7 @@ def main():
 
     # Print checksums for parity comparison
     print()
-    print("  --- Parity checksums (for warp_port comparison) ---")
+    print("  --- Parity checksums (for cross-revision comparison) ---")
     for key in result["final_state"]:
         t = result["final_state"][key]
         print(f"  {key}: sum={t.sum().item():.15e}  mean={t.mean().item():.15e}  "

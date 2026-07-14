@@ -25,8 +25,7 @@ import torch
 
 from lilytorch.src.advection import _sl
 # Native cvof_sweep: CUDA kernel + CPU twin (multigrid_cpu.cpp), bit-exact vs
-# the Warp oracle on both devices (test_cvof.py) — the sole production path.
-# The Warp cvof lives on in lilytorch.src.cvof as the tests' parity oracle.
+# the sole production path (CUDA kernel + at::parallel_for CPU twin).
 from lilytorch.src.native import cvof_sweep as _native_cvof_sweep
 
 

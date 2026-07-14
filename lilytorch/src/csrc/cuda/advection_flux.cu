@@ -258,8 +258,7 @@ static void advect_flux_add_cuda(
 // =====================================================================
 //  advect_flux_accumulate — fused per-cell flux kernel (13c)
 //
-//  Native port of the Warp ``advect_flux_accumulate_warp`` +
-//  ``_accumulate_interior_warp`` pair: one launch per velocity
+//  Fused flux accumulate: one launch per velocity
 //  component.  Each thread owns one interior cell, computes face
 //  velocities from the original staggered fields on the fly, evaluates
 //  both face fluxes per spatial direction, and accumulates
@@ -273,7 +272,7 @@ static void advect_flux_add_cuda(
 // =====================================================================
 
 // Both face fluxes along one direction: stride s_d, boundary index g in
-// [1, N-2].  Mirrors the Warp kernel's per-direction block exactly.
+// [1, N-2].
 template <typename scalar_t, int scheme_id>
 __device__ __forceinline__ scalar_t face_flux_diff(
     const scalar_t* __restrict__ phi, int64_t c, int64_t s_d,

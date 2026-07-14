@@ -33,11 +33,11 @@ if REPO_ROOT not in sys.path:
 
 from lilytorch.src.forces import (                       # noqa: E402
     ForcesPostGraph,
-    streaming_sdf_forces_post_2d_warp,
-    streaming_sdf_forces_post_3d_warp,
+    streaming_sdf_forces_post_2d,
+    streaming_sdf_forces_post_3d,
 )
 from lilytorch.tests.scene_2d import make_synthetic_scene_2d      # noqa: E402
-from lilytorch.benchmarks.bench_viability import make_synthetic_scene  # noqa: E402
+from lilytorch.tests.scene_3d import make_synthetic_scene  # noqa: E402
 
 
 def build(dim, B, dtype, dev):
@@ -68,14 +68,14 @@ def one_eager(dim, sc, fields, nrho, out, kin):
     h = float(sc["h"])
     out.zero_()
     if dim == 2:
-        streaming_sdf_forces_post_2d_warp(
+        streaming_sdf_forces_post_2d(
             sc["F_flat"], sc["F_offsets"], sc["body_shapes"], sc["body_meta"],
             kin, sc["aabb_lo"], sc["aabb_dim"], sc["gx"], sc["gy"],
             h, int(sc["max_vol"]), sc["sdf_cc_g"], 0,
             fields[0], fields[1], fields[2], nrho,
             2.0 * h, 0.0, h * h, 1, out, 0, 0.0)
     else:
-        streaming_sdf_forces_post_3d_warp(
+        streaming_sdf_forces_post_3d(
             sc["F_flat"], sc["F_offsets"], sc["body_shapes"], sc["body_meta"],
             kin, sc["aabb_lo"], sc["aabb_dim"], sc["gx"], sc["gy"], sc["gz"],
             h, int(sc["max_vol"]), sc["sdf_cc_g"], 0,

@@ -207,7 +207,6 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
     // ---- Fused semi-Lagrangian advection kernels (item 8.D) ------------
     // sl_advect_2d: fused RK2 midpoint semi-Lagrangian back-trace,
     // one launch for both staggered components, writing persistent out_*.
-    // Mirrors advection.sl_advect_2d_warp exactly.
     m.def(
         "sl_advect_2d("
         "Tensor u, Tensor v,"
@@ -351,8 +350,7 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         ") -> ()");
 
     // ---- Fused per-cell flux accumulate (13c) --------------------------
-    // advect_flux_accumulate: native port of the Warp
-    // ``advect_flux_accumulate_warp`` + ``_accumulate_interior_warp``
+    // advect_flux_accumulate: the fused flux-add + interior-accumulate
     // pair.  One launch per velocity component: computes face velocities
     // from the original staggered fields on the fly and accumulates
     // dst[cell] += Σ_d dt_dh_d*(F_L - F_R) over the interior of the
@@ -389,6 +387,23 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
     m.def(
         "cvof_sweep("
         "Tensor a, Tensor u_d, float cfl, int face_dim,"
+        " Tensor(a!) out"
+        ") -> ()");
+
+    // ---- Strain-rate magnitude ----------------------------------------
+    // strain_rate_magnitude: |S̄| = sqrt(2·S_ij·S_ij) at every grid point,
+    // for the Smagorinsky eddy viscosity, the Carreau / yield-damping
+    // viscosity field and the flow diagnostics.  Reproduces the reference
+    // ``torch.gradient(edge_order=2) + _stag_to_cc`` path (4 full-grid
+    // temporaries in 2-D, 9 in 3-D) in a single launch, registers only.
+    //
+    // u, v, w  : MAC velocity components (full grid, same shape, strided OK).
+    //            w is required in 3-D and ignored in 2-D.
+    // h        : uniform grid spacing.
+    // out      : preallocated, shaped like u; fully overwritten.
+    m.def(
+        "strain_rate_magnitude("
+        "Tensor u, Tensor v, Tensor? w, float h,"
         " Tensor(a!) out"
         ") -> ()");
 
@@ -495,6 +510,30 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
     // interpolation of ec[interior] added into p[interior] (both ghost-padded).
     m.def("prolongate_add_2d(Tensor ec, Tensor(a!) p) -> ()");
     m.def("prolongate_add_3d(Tensor ec, Tensor(a!) p) -> ()");
+
+    // ---- Raw V-cycle (MGCG preconditioner primitive) --------------------
+    // ``n_vcycles`` V-cycles with NO gauge fix — no ghost-ring Neumann pass
+    // and no mean subtraction, unlike the whole-solve drivers below.  This is
+    // the V-cycle a PCG preconditioner needs (the one the native MGCG driver
+    // applies to ``z`` internally), and it is what keeps MGCG / RMGCG alive on
+    // the CPU, where the whole-solve twins are stubs and the CG loop runs in
+    // Python (``PoissonSolver._cg_core``).
+    //
+    // ``f`` is the raw smoother RHS — ALREADY h²-scaled by the caller (no
+    // internal rescale, unlike the drivers below).  ``p`` is ghost-padded and
+    // mutated in place; the interior residual is returned.
+    m.def(
+        "mg_vcycle_2d("
+        "Tensor(a!) p, Tensor f, Tensor ch, Tensor cv,"
+        " float jcap_tol, float w, int nsmoothing, int n_vcycles,"
+        " int smoother_id"
+        ") -> Tensor");
+    m.def(
+        "mg_vcycle_3d("
+        "Tensor(a!) p, Tensor f, Tensor ch, Tensor cv, Tensor cw,"
+        " float jcap_tol, float w, int nsmoothing, int n_vcycles,"
+        " int smoother_id"
+        ") -> Tensor");
 
     // ---- Monolithic multigrid Poisson drivers --------------------------
     // Run the full multi-V-cycle solve in C++: scale f by h², N V-cycles

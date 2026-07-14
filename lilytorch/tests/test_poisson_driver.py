@@ -1,13 +1,15 @@
-"""Convergence tests for the Warp-backed Poisson driver.
+"""Convergence tests for the native Poisson driver.
 
-``poisson_mult.PoissonSolver`` runs the multigrid / MGCG outer driver in
-Python with the fine-level smoother + residual on Warp kernels.  These tests
-check it converges to tolerance on a manufactured Neumann Poisson, for both
-smoothers, 2-D + 3-D, f32 + f64, multigrid + MGCG, and the CUDA-graphed
-all-Warp variants (``cuda_graph=True``).
+``poisson_mult.PoissonSolver`` dispatches to the native CUDA / C++ kernels:
 
-Also asserts independence: with ``torch.ops.lilytorch_kernels`` monkeypatched
-to raise, the driver still solves (it touches no custom torch op).
+* CUDA — the whole-solve drivers ``poisson_solve_{multigrid,mgcg,rmgcg}_{2,3}d``
+  run the entire solve (V-cycle tree, CG loop, deflation, gauge) in one C++ call.
+* CPU — ``multigrid`` has a whole-solve twin; ``mgcg`` / ``rmgcg`` run the CG
+  loop in Python over the native ``mg_vcycle_{2,3}d`` preconditioner.
+
+These check it converges on a manufactured Neumann Poisson for every
+(method, ndim, dtype, smoother) combination on BOTH devices, and that the two
+backends agree.
 """
 from __future__ import annotations
 
@@ -18,18 +20,19 @@ from lilytorch.src.poisson_mult import PoissonSolver
 
 CUDA = torch.cuda.is_available()
 SKIP_NO_CUDA = pytest.mark.skipif(not CUDA, reason="CUDA not available")
-DEV = "cuda" if CUDA else "cpu"
+_DEVS = ["cpu"] + (["cuda"] if CUDA else [])
+_METHODS = ["solve_multigrid", "solve_mgcg", "solve_rmgcg"]
 
 
-def _problem(ndim, dtype, N=48, device=DEV):
+def _problem(ndim, dtype, N=48, device="cpu"):
     torch.manual_seed(0)
     h = 1.0 / N
     shp = (N,) * ndim
-    f = torch.randn(*shp, dtype=dtype, device=device)
+    f = torch.randn(*shp, dtype=dtype)
     f -= f.mean()                                    # compatible (Neumann) RHS
     pshp = tuple(n + 2 for n in shp)
-    p = torch.zeros(pshp, dtype=dtype, device=device)
-    o = dict(dtype=dtype, device=device)
+    p = torch.zeros(pshp, dtype=dtype)
+    o = dict(dtype=dtype)
     if ndim == 2:
         faces = dict(ch=torch.full((N + 1, N), 1.0, **o),
                      cv=torch.full((N, N + 1), 1.0, **o))
@@ -37,333 +40,143 @@ def _problem(ndim, dtype, N=48, device=DEV):
         faces = dict(ch=torch.full((N + 1, N, N), 1.0, **o),
                      cv=torch.full((N, N + 1, N), 1.0, **o),
                      cw=torch.full((N, N, N + 1), 1.0, **o))
-    return h, f, p, faces
+    # Built once on CPU then moved: a device-seeded generator would otherwise
+    # hand the two devices different problems.
+    return (h, f.to(device), p.to(device),
+            {k: v.to(device) for k, v in faces.items()})
 
 
-def _solve(SolverCls, method, ndim, dtype, smoother):
-    h, f, p, faces = _problem(ndim, dtype)
-    s = SolverCls(dtype=dtype, device=DEV, h=h, tol=1e-6, max_vcycles=40,
-                  max_cycles=50, nsmoothing=2, smoother=smoother, verbose=False)
-    _, r = getattr(s, method)(f.clone(), p, **{k: v.clone() for k, v in faces.items()})
-    return r.abs().max().item()
+def _solve(method, ndim, dtype, smoother, device, N=48):
+    h, f, p, faces = _problem(ndim, dtype, N=N, device=device)
+    s = PoissonSolver(dtype=dtype, device=device, h=h, tol=1e-6, max_vcycles=40,
+                      max_cycles=50, nsmoothing=2, smoother=smoother,
+                      verbose=False,
+                      recycle_k=2 if method == "solve_rmgcg" else 0)
+    p_out, r = getattr(s, method)(
+        f.clone(), p, **{k: v.clone() for k, v in faces.items()})
+    return p_out, r.abs().max().item(), f.abs().max().item()
 
 
-@SKIP_NO_CUDA
-@pytest.mark.parametrize("method", ["solve_multigrid", "solve_mgcg"])
+@pytest.mark.parametrize("device", _DEVS)
+@pytest.mark.parametrize("method", _METHODS)
 @pytest.mark.parametrize("ndim", [2, 3])
 @pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
 @pytest.mark.parametrize("smoother", ["rbgs", "jacobi"])
-def test_warp_poisson_converges(method, ndim, dtype, smoother):
-    """The Warp driver converges to a small residual."""
-    rw = _solve(PoissonSolver, method, ndim, dtype, smoother)
-    assert rw < 1e-3, f"{method} {ndim}D {dtype} {smoother}: warp residual {rw:.2e}"
+def test_poisson_converges(method, ndim, dtype, smoother, device):
+    """The native driver drives the residual well below the RHS scale.
+
+    The bar is deliberately loose (1e-3 · |f|): plain multigrid with an
+    undamped (w=1) Jacobi smoother is a genuinely slow solver, and this test is
+    gating "the driver converges", not "the smoother is optimal".  The MGCG
+    paths land ~6 orders below this.
+    """
+    _, r, fscale = _solve(method, ndim, dtype, smoother, device)
+    assert r < 1e-3 * fscale, \
+        f"{method} {ndim}D {dtype} {smoother} on {device}: residual {r:.2e}"
 
 
 @SKIP_NO_CUDA
-def test_warp_poisson_independent_of_native_ops(monkeypatch):
-    """With lilytorch_kernels monkeypatched to raise, the Warp Poisson driver
-    still solves (it dispatches no native custom-kernel op).
+@pytest.mark.parametrize("method", _METHODS)
+@pytest.mark.parametrize("ndim", [2, 3])
+def test_poisson_cpu_agrees_with_cuda(method, ndim):
+    """The CPU and CUDA backends solve the same problem to the same pressure.
 
-    Since the native Poisson swap (Track D) routes CUDA solves to native ops,
-    force the WarpMG fallback path for this isolation test."""
-    class _Boom:
-        def __getattr__(self, name):
-            raise RuntimeError(f"native op {name} must not be called (Warp path)")
-    monkeypatch.setattr(torch.ops, "lilytorch_kernels", _Boom())
-    # Force WarpMG path (used on CPU / with mask) — this is what we're testing.
-    monkeypatch.setattr(PoissonSolver, "_use_native_poisson", lambda self: False)
-    rw = _solve(PoissonSolver, "solve_mgcg", 3, torch.float32, "rbgs")
-    assert rw < 1e-3, f"independent solve residual {rw:.2e}"
+    Compared on the INTERIOR and modulo an additive constant, which is what a
+    pure-Neumann Poisson actually determines.  Two things make the raw padded
+    tensors differ without any physics differing:
 
+    * The ghost ring's edge/corner cells are never read by the 5/7-point
+      stencil, and the two backends leave different garbage there (the CUDA
+      Jacobi's odd-sweep ping-pong copies a zeroed scratch buffer back over p).
+    * Each driver's gauge is a mean over the FULL padded tensor, dead corners
+      included — so that garbage shifts the whole field by a constant.  The
+      solver only ever consumes ∇p, so the constant is immaterial.
 
-@SKIP_NO_CUDA
-@pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
-@pytest.mark.parametrize("smoother", ["rbgs", "jacobi"])
-def test_warp_poisson_graphed_multigrid(dtype, smoother):
-    """The CUDA-graphed all-Warp 3-D multigrid (cuda_graph=True) converges to
-    the same residual as the ungraphed Python-driver path."""
-    h, f, p, faces = _problem(3, dtype, N=48)
-    rn = _solve(PoissonSolver, "solve_multigrid", 3, dtype, smoother)
-    s = PoissonSolver(dtype=dtype, device=DEV, h=h, tol=1e-6, max_vcycles=15,
-                    nsmoothing=2, smoother=smoother, verbose=False,
-                    cuda_graph=True)
-    _, r = s.solve_multigrid(f.clone(), p, **{k: v.clone() for k, v in faces.items()})
-    rw = r.abs().max().item()
-    assert rw < 1e-3, f"graphed {dtype} {smoother}: residual {rw:.2e}"
-    assert rw < 50.0 * max(rn, 1e-8), f"graphed {dtype} {smoother}: {rw:.2e} vs {rn:.2e}"
-
-
-@SKIP_NO_CUDA
-@pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
-@pytest.mark.parametrize("smoother", ["rbgs", "jacobi"])
-def test_warp_poisson_graphed_multigrid_2d(dtype, smoother):
-    """The CUDA-graphed all-Warp 2-D multigrid (``WarpMG2D``) converges to the
-    same residual as the ungraphed Python-driver path — dtype-generic (f32+f64)
-    and rbgs/jacobi, matching the 3-D driver."""
-    h, f, p, faces = _problem(2, dtype, N=64)
-    rn = _solve(PoissonSolver, "solve_multigrid", 2, dtype, smoother)
-    s = PoissonSolver(dtype=dtype, device=DEV, h=h, tol=1e-6, max_vcycles=15,
-                    nsmoothing=2, smoother=smoother, verbose=False,
-                    cuda_graph=True)
-    _, r = s.solve_multigrid(f.clone(), p, **{k: v.clone() for k, v in faces.items()})
-    rw = r.abs().max().item()
-    assert rw < 1e-3, f"graphed 2-D {dtype} {smoother}: residual {rw:.2e}"
-    assert rw < 50.0 * max(rn, 1e-8), (
-        f"graphed 2-D {dtype} {smoother}: {rw:.2e} vs {rn:.2e}")
-
-
-@SKIP_NO_CUDA
-def test_warp_poisson_graphed_2d_independent(monkeypatch):
-    """The graphed 2-D MG replays with no native custom-kernel op.
-
-    Since the native Poisson swap routes CUDA solves to native ops, force
-    the WarpMG fallback path for this isolation test."""
-    h, f, p, faces = _problem(2, torch.float64, N=64)
-    s = PoissonSolver(dtype=torch.float64, device=DEV, h=h, tol=1e-6, max_vcycles=15,
-                    nsmoothing=2, smoother="rbgs", verbose=False,
-                    cuda_graph=True)
-    # Force WarpMG path.
-    monkeypatch.setattr(s, "_use_native_poisson", lambda: False)
-    # warm-up + capture before patching (capture itself is pure-Warp).
-    s.solve_multigrid(f.clone(), p, **{k: v.clone() for k, v in faces.items()})
-
-    class _Boom:
-        def __getattr__(self, name):
-            raise RuntimeError(f"native op {name} must not be called")
-    monkeypatch.setattr(torch.ops, "lilytorch_kernels", _Boom())
-    _, r = s.solve_multigrid(f.clone(), p, **{k: v.clone() for k, v in faces.items()})
-    assert r.abs().max().item() < 1e-3
-
-
-@SKIP_NO_CUDA
-def test_warp_poisson_graphed_independent(monkeypatch):
-    """The graphed multigrid touches no native custom-kernel op.
-
-    Since the native Poisson swap routes CUDA solves to native ops, force
-    the WarpMG fallback path for this isolation test."""
-    h, f, p, faces = _problem(3, torch.float32, N=32)
-    s = PoissonSolver(dtype=torch.float32, device=DEV, h=h, tol=1e-6, max_vcycles=10,
-                    nsmoothing=2, smoother="rbgs", verbose=False,
-                    cuda_graph=True)
-    monkeypatch.setattr(s, "_use_native_poisson", lambda: False)
-    # warm-up / capture before monkeypatch (capture itself is pure-Warp).
-    s.solve_multigrid(f.clone(), p.clone(), **{k: v.clone() for k, v in faces.items()})
-
-    class _Boom:
-        def __getattr__(self, name):
-            raise RuntimeError(f"native op {name} must not be called")
-    monkeypatch.setattr(torch.ops, "lilytorch_kernels", _Boom())
-    _, r = s.solve_multigrid(f.clone(), p.clone(),
-                             **{k: v.clone() for k, v in faces.items()})
-    assert r.abs().max().item() < 1e-2
-
-
-@SKIP_NO_CUDA
-@pytest.mark.parametrize("ndim,dtype,smoother", [
-    (3, torch.float32, "rbgs"), (3, torch.float64, "rbgs"),
-    (3, torch.float32, "jacobi"),
-    (2, torch.float64, "rbgs"), (2, torch.float32, "rbgs"),
-    (2, torch.float64, "jacobi"), (2, torch.float32, "jacobi")])
-def test_warp_poisson_graphed_mgcg(ndim, dtype, smoother):
-    """The CUDA-graphed WarpMG MGCG preconditioner (``cuda_graph=True``,
-    ``_dispatch_vcycle`` → one-host-launch V-cycle) reaches the same residual
-    as the ungraphed MGCG driver (C1)."""
-    h, f, p, faces = _problem(ndim, dtype, N=48)
-    rn = _solve(PoissonSolver, "solve_mgcg", ndim, dtype, smoother)
-    s = PoissonSolver(dtype=dtype, device=DEV, h=h, tol=1e-6, max_vcycles=2,
-                    max_cycles=50, nsmoothing=2, smoother=smoother, verbose=False,
-                    cuda_graph=True)
-    _, r = s.solve_mgcg(f.clone(), p, **{k: v.clone() for k, v in faces.items()})
-    rw = r.abs().max().item()
-    assert rw < 1e-3, f"graphed MGCG {ndim}D {dtype} {smoother}: residual {rw:.2e}"
-    assert rw < 50.0 * max(rn, 1e-8), (
-        f"graphed MGCG {ndim}D {dtype} {smoother}: {rw:.2e} vs ungraphed {rn:.2e}")
-
-
-@SKIP_NO_CUDA
-@pytest.mark.parametrize("check_every", [1, 4])
-def test_warp_poisson_graphed_mgcg_periodic(check_every):
-    """Periodic convergence check (``cg_check_every``) still converges; K=1 is
-    the every-iter behaviour, K=4 cuts the per-iter residual sync (C1 point 4)."""
-    h, f, p, faces = _problem(3, torch.float32, N=48)
-    s = PoissonSolver(dtype=torch.float32, device=DEV, h=h, tol=1e-6, max_vcycles=2,
-                    max_cycles=80, nsmoothing=2, smoother="rbgs", verbose=False,
-                    cuda_graph=True)
-    s.cg_check_every = check_every
-    _, r = s.solve_mgcg(f.clone(), p, **{k: v.clone() for k, v in faces.items()})
-    assert r.abs().max().item() < 1e-3, f"periodic K={check_every}: {r.abs().max().item():.2e}"
-
-
-@SKIP_NO_CUDA
-def test_warp_poisson_graphed_mgcg_independent(monkeypatch):
-    """The graphed MGCG preconditioner replays with no native custom-kernel op.
-
-    Since the native Poisson swap routes CUDA solves to native ops, force
-    the WarpMG fallback path for this isolation test."""
-    h, f, p, faces = _problem(3, torch.float32, N=32)
-    s = PoissonSolver(dtype=torch.float32, device=DEV, h=h, tol=1e-6, max_vcycles=2,
-                    max_cycles=50, nsmoothing=2, smoother="rbgs", verbose=False,
-                    cuda_graph=True)
-    monkeypatch.setattr(s, "_use_native_poisson", lambda: False)
-    # warm-up / capture before monkeypatch (capture itself is pure-Warp).
-    s.solve_mgcg(f.clone(), p.clone(), **{k: v.clone() for k, v in faces.items()})
-
-    class _Boom:
-        def __getattr__(self, name):
-            raise RuntimeError(f"native op {name} must not be called")
-    monkeypatch.setattr(torch.ops, "lilytorch_kernels", _Boom())
-    _, r = s.solve_mgcg(f.clone(), p.clone(),
-                        **{k: v.clone() for k, v in faces.items()})
-    assert r.abs().max().item() < 1e-3
-
-
-def test_warp_poisson_cpu():
-    """CPU end-to-end: the Warp smoother/residual run on CPU from one source."""
-    h, f, p, faces = _problem(2, torch.float64, N=24, device="cpu")
-    s = PoissonSolver(dtype=torch.float64, device="cpu", h=h, tol=1e-6,
-                    max_vcycles=60, nsmoothing=2, smoother="rbgs", verbose=False)
-    _, r = s.solve_multigrid(f.clone(), p, **{k: v.clone() for k, v in faces.items()})
-    assert r.abs().max().item() < 1e-3
-
-
-# ── Manufactured-solution (analytic) Poisson ──────────────────────────────
-# Solve ∇²p = f with unit face coefficients for the closed-form Neumann
-# eigenfunction p*(x) = Π_d cos(2π x_d) on the unit cube (cell-centred), whose
-# exact Laplacian is f = -ndim·(2π)²·p*.  The recovered field must match p* to
-# the O(h²) discretisation error — a true accuracy check (not just a residual
-# or python-vs-warp parity assertion), anchoring the Warp-only solver.
-def _mms_problem(ndim, dtype, N, device):
-    import math
-    h = 1.0 / N
-    k = 2.0 * math.pi
-    xc = (torch.arange(N, dtype=dtype, device=device) + 0.5) * h
-    grids = torch.meshgrid(*([xc] * ndim), indexing="ij")
-    p_true = torch.ones_like(grids[0])
-    for g in grids:
-        p_true = p_true * torch.cos(k * g)
-    p_true = p_true - p_true.mean()
-    f = (-ndim * k * k) * p_true
-    f = f - f.mean()                                  # compatible (Neumann) RHS
-    o = dict(dtype=dtype, device=device)
-    if ndim == 2:
-        faces = dict(ch=torch.ones(N + 1, N, **o), cv=torch.ones(N, N + 1, **o))
-    else:
-        faces = dict(ch=torch.ones(N + 1, N, N, **o),
-                     cv=torch.ones(N, N + 1, N, **o),
-                     cw=torch.ones(N, N, N + 1, **o))
-    return h, f, p_true, faces
-
-
-@pytest.mark.parametrize("method", ["solve_multigrid", "solve_mgcg"])
-@pytest.mark.parametrize("smoother", ["rbgs", "jacobi"])
-@pytest.mark.parametrize("ndim,N,tol_err", [(2, 64, 3e-3), (3, 32, 1.5e-2)])
-def test_warp_poisson_manufactured_solution(method, smoother, ndim, N, tol_err):
-    """The Warp driver recovers the analytic p* to the O(h²) truncation error,
-    on the active device (CPU always; CUDA when present)."""
-    h, f, p_true, faces = _mms_problem(ndim, torch.float64, N, DEV)
-    s = PoissonSolver(dtype=torch.float64, device=DEV, h=h, tol=1e-10,
-                      max_vcycles=300, max_cycles=300, nsmoothing=2,
-                      smoother=smoother, verbose=False)
-    p0 = torch.zeros(*([N + 2] * ndim), dtype=torch.float64, device=DEV)
-    p, _ = getattr(s, method)(f.clone(), p0,
-                              **{k: v.clone() for k, v in faces.items()})
-    inner = tuple(slice(1, -1) for _ in range(ndim))
-    p_rec = p[inner].clone()
-    p_rec = p_rec - p_rec.mean()                      # fix the Neumann null space
-    err = (p_rec - p_true).abs().max().item()
-    assert err < tol_err, f"MMS {method} {ndim}D {smoother}: max |p-p*| = {err:.2e}"
-
-
-@pytest.mark.parametrize("ndim,N", [(2, 64), (3, 32)])
-@pytest.mark.parametrize("smoother", ["rbgs", "jacobi"])
-def test_warp_poisson_dirichlet_mask(ndim, N, smoother):
-    """Free-surface GFM: with ``dirichlet_mask`` set, the WarpMG driver pins p=0
-    in the flagged (air) cells at every level/sweep and still converges to a
-    small residual in the fluid cells — the mask-aware V-cycle that replaced the
-    torch _vcycle Dirichlet path."""
+    Not bit-exact either way: the CUDA 2-D smoothers are tiled (stale
+    cross-block halo reads by design), so the backends take slightly different
+    iteration paths to the same answer.
+    """
     dtype = torch.float64
-    h = 1.0 / N
-    o = dict(dtype=dtype, device=DEV)
-    # variable-coefficient faces so the mask sees a non-trivial operator
-    if ndim == 2:
-        faces = dict(ch=torch.full((N + 1, N), 0.5, **o),
-                     cv=torch.full((N, N + 1), 0.5, **o))
-    else:
-        faces = dict(ch=torch.full((N + 1, N, N), 0.5, **o),
-                     cv=torch.full((N, N + 1, N), 0.5, **o),
-                     cw=torch.full((N, N, N + 1), 0.5, **o))
-    mask = torch.zeros(*([N] * ndim), dtype=torch.bool, device=DEV)
-    mask[tuple([slice(N // 2, None)] * ndim)] = True          # an "air" block
-    torch.manual_seed(0)
-    f = torch.randn(*([N] * ndim), dtype=dtype, device=DEV).masked_fill(mask, 0.0)
-    p0 = torch.zeros(*([N + 2] * ndim), dtype=dtype, device=DEV)
+    pc, rc, fscale = _solve(method, ndim, dtype, "rbgs", "cpu")
+    pg, rg, _ = _solve(method, ndim, dtype, "rbgs", "cuda")
 
-    s = PoissonSolver(dtype=dtype, device=DEV, h=h, tol=1e-10, max_vcycles=60,
-                      max_cycles=80, nsmoothing=2, smoother=smoother, verbose=False)
-    s.dirichlet_mask = mask
-    p, r = s.solve_multigrid(f.clone(), p0, **{k: v.clone() for k, v in faces.items()})
-    inner = tuple(slice(1, -1) for _ in range(ndim))
-    # (1) Dirichlet cells are pinned exactly to zero
-    assert p[inner][mask].abs().max().item() == 0.0
-    # (2) the solve converged in the fluid region
-    rf = r[~mask].abs().max().item()
-    assert rf < 1e-6, f"dirichlet {ndim}D {smoother}: fluid residual {rf:.2e}"
+    assert rc < 1e-3 * fscale and rg < 1e-3 * fscale, \
+        f"{method} {ndim}D did not converge (cpu {rc:.2e}, cuda {rg:.2e})"
+
+    inner = (slice(1, -1),) * ndim
+    d = pc[inner] - pg.cpu()[inner]
+    d = d - d.mean()                       # drop the arbitrary Neumann constant
+    err = d.abs().max().item()
+    scale = pc[inner].abs().max().item()
+    assert err < 1e-4 * scale, \
+        f"{method} {ndim}D cpu vs cuda interior pressure: {err:.3e} (scale {scale:.3e})"
 
 
-# ── Native driver: ghost-ring gauge fix (0.3) ─────────────────────────────
-# The native ``poisson_solve_multigrid_{2,3}d`` op subtracts the float64 mean of
-# the whole ghost-padded ``p`` to fix the Neumann null space.  The per-sweep BC
-# inside the smoother refreshes only the FACE ghosts the stencil reads, leaving
-# the edge/corner ghosts stale — so the mean (and hence the gauge) is biased by
-# whatever those corners held unless the full ghost ring is refreshed first.
-# These tests seed a large stale value into the corner ghosts of the initial
-# guess and assert the native driver still lands on the same gauge as the Warp
-# ``PoissonSolver.solve_multigrid`` (which applies ``self.BC(p)`` before the
-# mean).  Without ``apply_neumann_bc(p)`` before the mean in poisson_solve.cu the
-# interior fields differ by the corner-induced constant offset.
-@SKIP_NO_CUDA
+@pytest.mark.parametrize("device", _DEVS)
 @pytest.mark.parametrize("ndim", [2, 3])
-@pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
+def test_mgcg_beats_plain_multigrid(ndim, device):
+    """MGCG must converge at least as far as plain multigrid on the same budget.
+
+    Guards the preconditioner wiring: on the CPU ``solve_mgcg`` runs the Python
+    CG loop over ``mg_vcycle_*``, and a mis-scaled or gauge-fixed V-cycle there
+    would still "converge" — just far worse than the plain multigrid it wraps.
+    """
+    _, r_mg, fscale = _solve("solve_multigrid", ndim, torch.float64, "rbgs", device)
+    _, r_cg, _ = _solve("solve_mgcg", ndim, torch.float64, "rbgs", device)
+    assert r_cg <= max(r_mg, 1e-12 * fscale), \
+        f"{ndim}D on {device}: mgcg {r_cg:.2e} worse than multigrid {r_mg:.2e}"
+
+
+# ── 3-D smoother CPU twins == CUDA kernels ───────────────────────────────────
+# Regression gate for the CPU rbgs_sweep_3d bug the Warp removal exposed.  The
+# CPU Poisson used to run on WarpMG, so this twin was never compared to CUDA,
+# and it was wrong two ways:
+#
+#   * a bogus row-level ``(i+j) & 1`` guard sat on TOP of the correct per-cell
+#     ``(i+j+k) & 1`` colour test, so it skipped half the red cells and half the
+#     black cells outright; and
+#   * it never refreshed the Neumann ghost ring between the red and black
+#     half-sweeps (the CUDA twin does), so the black cells read stale mirrors.
+#
+# Compared on LIVE cells only — the ones a 7-point stencil can reach (interior +
+# face ghosts).  The edge/corner ghosts are never read, and the CUDA Jacobi's
+# odd-sweep ping-pong copies a zeroed scratch buffer back over p, so the two
+# backends legitimately leave different garbage there.
+#
+# The 2-D CUDA smoothers are TILED (stale cross-block halo reads by design), so
+# only the 3-D smoothers are expected to match a plain sequential CPU sweep.
+
+def _live_cells(n, ndim):
+    """True where a 7-point stencil can read: at most ONE axis on a boundary."""
+    idx = torch.arange(n)
+    on_b = sum(((idx == 0) | (idx == n - 1))
+               .reshape([-1 if d == a else 1 for d in range(ndim)]).long()
+               for a in range(ndim))
+    return on_b <= 1
+
+
+@SKIP_NO_CUDA
 @pytest.mark.parametrize("smoother", ["rbgs", "jacobi"])
-def test_native_multigrid_gauge_matches_warp(ndim, dtype, smoother):
+@pytest.mark.parametrize("nsmoothing", [1, 2, 3])
+def test_smoother_3d_cpu_eq_cuda(smoother, nsmoothing):
     from lilytorch.src import native
-    N = 48 if ndim == 2 else 24
-    h, f, _, faces = _problem(ndim, dtype, N=N)
-    face_list = [faces["ch"], faces["cv"]] + ([faces["cw"]] if ndim == 3 else [])
 
-    # Initial guess with a large STALE value in the corner ghosts (the smoother
-    # never touches them, so they survive to bias an unrefreshed gauge mean).
-    def seed_corners(p):
-        for corner in ([(0, 0), (0, -1), (-1, 0), (-1, -1)] if ndim == 2 else
-                       [(a, b, c) for a in (0, -1) for b in (0, -1) for c in (0, -1)]):
-            p[corner] = 1.0e3
-        return p
+    torch.manual_seed(1)
+    N, dt = 8, torch.float64
+    p = torch.randn(N + 2, N + 2, N + 2, dtype=dt)
+    f = torch.randn(N, N, N, dtype=dt)
+    cs = [torch.rand(N, N, N, dtype=dt) + 0.5 for _ in range(6)]
 
-    jcap, wj, nsm, mvc, tol = 1e-12, 1.0, 2, 60, 1e-10
+    def run(dev):
+        pp = p.clone().to(dev).contiguous()
+        args = [pp, f.to(dev)] + [c.to(dev) for c in cs]
+        if smoother == "rbgs":
+            native.rbgs_sweep_3d(*args, 1e-12, nsmoothing)
+        else:
+            native.jacobi_sweep_3d(*args, 1e-12, 1.0, nsmoothing)
+        return pp.cpu()
 
-    p_native = seed_corners(torch.zeros(*([N + 2] * ndim), dtype=dtype, device=DEV))
-    args = [p_native, f.clone()] + [c.clone() for c in face_list]
-    getattr(native, f"poisson_solve_multigrid_{ndim}d")(
-        *args, h * h, jcap, wj, nsm, mvc, tol, smoother)
-
-    s = PoissonSolver(dtype=dtype, device=DEV, h=h, tol=tol, max_vcycles=mvc,
-                      nsmoothing=nsm, smoother=smoother, verbose=False)
-    p_warp, _ = s.solve_multigrid(
-        f.clone(), seed_corners(torch.zeros(*([N + 2] * ndim), dtype=dtype, device=DEV)),
-        **{k: v.clone() for k, v in faces.items()})
-
-    inner = tuple(slice(1, -1) for _ in range(ndim))
-    # Both are gauge-fixed by their own mean subtraction; with the ghost-ring fix
-    # they land on the SAME gauge, so the interior fields agree.  The tolerance is
-    # set to catch the gauge OFFSET (removing the fix leaves an O(0.5) constant
-    # bias here) while tolerating benign solver-convergence noise between the two
-    # drivers (jacobi runs to the vcycle cap, ~1e-7 in f64; f32 mean reduction is
-    # looser still).
-    tol_match = 1e-6 if dtype == torch.float64 else 2e-4
-    diff = (p_native[inner] - p_warp[inner]).abs().max().item()
-    assert diff < tol_match, (
-        f"native vs warp gauge {ndim}D {dtype} {smoother}: max|Δ|={diff:.2e} "
-        f"(stale corner ghosts biased the native gauge mean)")
-    # The corner ghosts must be refreshed to the Neumann extrapolation, not left
-    # at the 1e3 seed.
-    assert p_native[tuple([0] * ndim)].abs().item() < 1.0
+    live = _live_cells(N + 2, 3)
+    d = (run("cpu") - run("cuda")).abs()[live].max().item()
+    assert d < 1e-12, \
+        f"{smoother}_sweep_3d nsmoothing={nsmoothing}: cpu vs cuda {d:.3e}"

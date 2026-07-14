@@ -645,16 +645,58 @@ void streaming_sdf_forces_post_3d_cpu(
                 if(Ngy>=3){ if(j==0) dy=((-3)*S(i,0,k)+4*S(i,1,k)-S(i,2,k))*0.5*inv_h; else if(j==Ngy-1) dy=(3*S(i,Ngy-1,k)-4*S(i,Ngy-2,k)+S(i,Ngy-3,k))*0.5*inv_h; else dy=(S(i,j+1,k)-S(i,j-1,k))*0.5*inv_h; } else if(Ngy==2) dy=(S(i,1,k)-S(i,0,k))*inv_h;
                 if(Ngz>=3){ if(k==0) dz=((-3)*S(i,j,0)+4*S(i,j,1)-S(i,j,2))*0.5*inv_h; else if(k==Ngz-1) dz=(3*S(i,j,Ngz-1)-4*S(i,j,Ngz-2)+S(i,j,Ngz-3))*0.5*inv_h; else dz=(S(i,j,k+1)-S(i,j,k-1))*0.5*inv_h; } else if(Ngz==2) dz=(S(i,j,1)-S(i,j,0))*inv_h;
                 scalar_t norm=std::sqrt(dx*dx+dy*dy+dz*dz); scalar_t invn=norm>0?(scalar_t)1/norm:(scalar_t)0; const scalar_t nx=dx*invn,ny=dy*invn,nz=dz*invn;
-                const int im1=i>0?i-1:0, ip1=i+1<Ngx?i+1:i, jm1=j>0?j-1:0, jp1=j+1<Ngy?j+1:j, km1=k>0?k-1:0, kp1=k+1<Ngz?k+1:k;
-                const scalar_t dudx=(up[(ip1*Ngy+j)*Ngz+k]-up[(i*Ngy+j)*Ngz+k])*inv_h;
-                const scalar_t dvdy=(vp[(i*Ngy+jp1)*Ngz+k]-vp[(i*Ngy+j)*Ngz+k])*inv_h;
-                const scalar_t dwdz=(wp[(i*Ngy+j)*Ngz+kp1]-wp[(i*Ngy+j)*Ngz+k])*inv_h;
-                const scalar_t dudy=((up[(i*Ngy+jp1)*Ngz+k]+up[(ip1*Ngy+jp1)*Ngz+k])-(up[(i*Ngy+jm1)*Ngz+k]+up[(ip1*Ngy+jm1)*Ngz+k]))*(scalar_t)0.25*inv_h;
-                const scalar_t dudz=((up[(i*Ngy+j)*Ngz+kp1]+up[(ip1*Ngy+j)*Ngz+kp1])-(up[(i*Ngy+j)*Ngz+km1]+up[(ip1*Ngy+j)*Ngz+km1]))*(scalar_t)0.25*inv_h;
-                const scalar_t dvdx=((vp[(ip1*Ngy+j)*Ngz+k]+vp[(ip1*Ngy+jp1)*Ngz+k])-(vp[(im1*Ngy+j)*Ngz+k]+vp[(im1*Ngy+jp1)*Ngz+k]))*(scalar_t)0.25*inv_h;
-                const scalar_t dvdz=((vp[(i*Ngy+j)*Ngz+kp1]+vp[(i*Ngy+jp1)*Ngz+kp1])-(vp[(i*Ngy+j)*Ngz+km1]+vp[(i*Ngy+jp1)*Ngz+km1]))*(scalar_t)0.25*inv_h;
-                const scalar_t dwdx=((wp[(ip1*Ngy+j)*Ngz+k]+wp[(ip1*Ngy+j)*Ngz+kp1])-(wp[(im1*Ngy+j)*Ngz+k]+wp[(im1*Ngy+j)*Ngz+kp1]))*(scalar_t)0.25*inv_h;
-                const scalar_t dwdy=((wp[(i*Ngy+jp1)*Ngz+k]+wp[(i*Ngy+jp1)*Ngz+kp1])-(wp[(i*Ngy+jm1)*Ngz+k]+wp[(i*Ngy+jm1)*Ngz+kp1]))*(scalar_t)0.25*inv_h;
+                // Velocity-gradient stencils — must mirror the CUDA kernel
+                // (cuda/streaming_sdf.cu) EXACTLY.  Normal derivatives are
+                // forward differences (backward on the upper boundary); the
+                // cross derivatives are O(h²) central on the CC-interpolated
+                // component, with 3-point one-sided formulas on the boundary
+                // planes.  (A clamped-index central difference is NOT the same
+                // thing: it silently degrades to first order at the boundary,
+                // and a clamped forward difference for dudx collapses to zero
+                // on the last plane.)
+                const int im1=i>0?i-1:0,        ip1=i+1<Ngx?i+1:i;
+                const int im2=i>1?i-2:0,        ip2=i+2<Ngx?i+2:(Ngx-1);
+                const int jm1=j>0?j-1:0,        jp1=j+1<Ngy?j+1:j;
+                const int jm2=j>1?j-2:0,        jp2=j+2<Ngy?j+2:(Ngy-1);
+                const int km1=k>0?k-1:0,        kp1=k+1<Ngz?k+1:k;
+                const int km2=k>1?k-2:0,        kp2=k+2<Ngz?k+2:(Ngz-1);
+
+                const scalar_t dudx = (i+1<Ngx)
+                    ? (up[(ip1*Ngy+j)*Ngz+k] - up[(i*Ngy+j)*Ngz+k]) * inv_h
+                    : (up[(i*Ngy+j)*Ngz+k]   - up[(im1*Ngy+j)*Ngz+k]) * inv_h;
+                const scalar_t dvdy = (j+1<Ngy)
+                    ? (vp[(i*Ngy+jp1)*Ngz+k] - vp[(i*Ngy+j)*Ngz+k]) * inv_h
+                    : (vp[(i*Ngy+j)*Ngz+k]   - vp[(i*Ngy+jm1)*Ngz+k]) * inv_h;
+                const scalar_t dwdz = (k+1<Ngz)
+                    ? (wp[(i*Ngy+j)*Ngz+kp1] - wp[(i*Ngy+j)*Ngz+k]) * inv_h
+                    : (wp[(i*Ngy+j)*Ngz+k]   - wp[(i*Ngy+j)*Ngz+km1]) * inv_h;
+
+                // 3-point O(h²) derivative of a CC-interpolated component along
+                // one axis: central in the interior, one-sided on the boundary.
+                auto d_cc=[&](scalar_t am2,scalar_t am1,scalar_t a0,
+                              scalar_t ap1,scalar_t ap2,int idxa,int Na)->scalar_t{
+                    if(Na>=3){
+                        if(idxa==0)      return ((scalar_t)(-3)*a0 + (scalar_t)4*ap1 - ap2)*(scalar_t)0.5*inv_h;
+                        if(idxa==Na-1)   return ((scalar_t)3*a0 - (scalar_t)4*am1 + am2)*(scalar_t)0.5*inv_h;
+                    }
+                    return (ap1 - am1)*(scalar_t)0.5*inv_h;
+                };
+                // u staggered in x → CC: 0.5*(u[i,..]+u[i+1,..])
+                auto u_cc=[&](int jj,int kk)->scalar_t{
+                    return (scalar_t)0.5*(up[(i*Ngy+jj)*Ngz+kk] + up[(ip1*Ngy+jj)*Ngz+kk]); };
+                // v staggered in y → CC: 0.5*(v[..,j,..]+v[..,j+1,..])
+                auto v_cc=[&](int ii,int kk)->scalar_t{
+                    return (scalar_t)0.5*(vp[(ii*Ngy+j)*Ngz+kk] + vp[(ii*Ngy+jp1)*Ngz+kk]); };
+                // w staggered in z → CC: 0.5*(w[..,k]+w[..,k+1])
+                auto w_cc=[&](int ii,int jj)->scalar_t{
+                    return (scalar_t)0.5*(wp[(ii*Ngy+jj)*Ngz+k] + wp[(ii*Ngy+jj)*Ngz+kp1]); };
+
+                const scalar_t dudy=d_cc(u_cc(jm2,k),u_cc(jm1,k),u_cc(j,k),u_cc(jp1,k),u_cc(jp2,k), j,Ngy);
+                const scalar_t dudz=d_cc(u_cc(j,km2),u_cc(j,km1),u_cc(j,k),u_cc(j,kp1),u_cc(j,kp2), k,Ngz);
+                const scalar_t dvdx=d_cc(v_cc(im2,k),v_cc(im1,k),v_cc(i,k),v_cc(ip1,k),v_cc(ip2,k), i,Ngx);
+                const scalar_t dvdz=d_cc(v_cc(i,km2),v_cc(i,km1),v_cc(i,k),v_cc(i,kp1),v_cc(i,kp2), k,Ngz);
+                const scalar_t dwdx=d_cc(w_cc(im2,j),w_cc(im1,j),w_cc(i,j),w_cc(ip1,j),w_cc(ip2,j), i,Ngx);
+                const scalar_t dwdy=d_cc(w_cc(i,jm2),w_cc(i,jm1),w_cc(i,j),w_cc(i,jp1),w_cc(i,jp2), j,Ngy);
                 const scalar_t nrv=nr_size==1?nr[0]:nr[g];
                 const scalar_t xs=nrv*(2*dudx*nx+(dudy+dvdx)*ny+(dudz+dwdx)*nz), ys=nrv*((dvdx+dudy)*nx+2*dvdy*ny+(dvdz+dwdy)*nz), zs=nrv*((dwdx+dudz)*nx+(dwdy+dvdz)*ny+2*dwdz*nz);
                 scalar_t dv=0,dp=0; const scalar_t sd=sbody-eps_s; if(sd>-eps_b&&sd<eps_b) dv=(1+std::cos(pi_eb*sd))*inv_2eps; if(sbody>-eps_b&&sbody<eps_b) dp=(1+std::cos(pi_eb*sbody))*inv_2eps;
