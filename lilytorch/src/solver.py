@@ -1102,7 +1102,6 @@ class FluidSolver(PlottingMixin):
             if _pre_scaled:
                 div.mul_(self.poisson_solver.h2)
 
-            has_custom_coeffs = any(arr is not None for arr in (ch, cv, cw))
             if ch is None:
                 ch = coeff * self.mu0_all_u
             if cv is None:
@@ -1114,16 +1113,28 @@ class FluidSolver(PlottingMixin):
                 "mgcg":  self.poisson_solver.solve_mgcg,
             }.get(self.poisson_method, self.poisson_solver.solve_multigrid)
 
-            # Variable-density custom coefficients are coupled to a moving
-            # immersed geometry; reusing the previous pressure field can carry
-            # stale body-interior/interface values and destabilize the solve.
-            # (Confirmed by A/B on the two-phase surface-pool case: warm-start
-            # made the solve 2.6-4x SLOWER and less stable -- with
-            # zero_pressure_inside zeroing the body interior, the previous p is
-            # a poor guess whose sharp body-boundary mismatch the smoother must
-            # undo, so multigrid runs its full cycle budget every step instead
-            # of early-exiting. Kept disabled for the custom-coeff path.)
-            if self.poisson_warm_start and not has_custom_coeffs:
+            # Warm start: reuse the previous pressure as the initial guess.
+            #
+            # This used to be gated on ``not has_custom_coeffs``, from a time
+            # when custom ch/cv/cw meant "two-phase".  The streaming BDIM path
+            # now ALWAYS passes persistent coefficient buffers, so that guard
+            # silently disabled the flag for every config on that path,
+            # single-phase included.
+            #
+            # The guess is not a mere speed knob here: ``poisson_tol`` is an
+            # ABSOLUTE residual, and a solve that runs out its cycle cap stops
+            # wherever it happens to be.  A two-phase pressure carries
+            # hydrostatics (O(1e3) Pa), so cold-starting from zero rebuilds
+            # that whole field every step and never converges.  Measured,
+            # surface-pool 900x300x52 over 60 steps: cold, tol 1e-8 leaves
+            # max|div u| = 6.17 at 182 ms/step; warm leaves 0.24 at the same
+            # 182 ms (tol 1e-6), or 0.93 at 25 ms (tol 1e-4).
+            #
+            # ``zero_pressure_inside`` is the one combination to watch: it
+            # zeroes the body interior of the stored p, so the warm guess
+            # carries a sharp mismatch at the body boundary that the smoother
+            # must undo -- there, cold-starting can genuinely be faster.
+            if self.poisson_warm_start:
                 p0 = p
             elif self.poisson_method == "multigrid":
                 # The native multigrid driver serves p0=None from a persistent

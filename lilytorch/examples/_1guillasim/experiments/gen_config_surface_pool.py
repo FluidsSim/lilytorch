@@ -23,7 +23,7 @@ class SimConfig(BaseSimConfig):
         self.use_gpu                       = True
         self.use_bdim                      = True
         self.compute_sdf                   = True
-        self.convexify                     = False
+        self.convexify                     = True
         # Eulerian (band integral on real pressure) is much more robust than the
         # Lagrangian surface-marker integral for this thin body at the free
         # surface on the coarse grid: uniform-800 then floats with the head out
@@ -45,7 +45,7 @@ class SimConfig(BaseSimConfig):
         # V-cycles on this 17:1-anisotropic grid, where standalone multigrid
         # stalls. (Poisson warm-start was tested and is a net loss here -- 2.6-4x
         # SLOWER + less stable -- so it stays disabled on the two-phase path.)
-        self.poisson_method                = "multigrid"
+        # self.poisson_method                = "multigrid"
 
         self.headless             = False
         self.smagorinsky_cs       = 0.
@@ -138,10 +138,22 @@ class SimConfig(BaseSimConfig):
         # ── BDIM solver ──────────────────────────────────────────────
         self.bdim_dt                 = self.timestep
         self.bdim_nt                 = self.n_iterations + 1
-        self.poisson_tol             = 1.0e-8
+        # poisson_tol is an ABSOLUTE L-inf residual, and the two-phase pressure
+        # carries hydrostatics (~1.3e3 Pa here).  At 1e-8 the solve can never
+        # reach it, so mgcg simply burned all 10 CG iterations every step and
+        # stopped wherever it happened to be: the projection left max|div u|~5
+        # and pumped ~60x too much kinetic energy into the fluid.  1e-5 is
+        # reachable from the warm start below.  Measured, 160-step coupled run:
+        # 4.2 -> 8.9 it/s, median max|div u| 4.9 -> 0.43, E_k 1.8e-3 -> 3.0e-5.
+        self.poisson_tol             = 1.0e-5
         self.poisson_max_cycles      = 30
         self.poisson_max_mgcg_cycles = 10
         self.poisson_precond_vcycles = 1
+        # Reuse the previous pressure as the Poisson guess.  This flag was a
+        # silent no-op until the stale `not has_custom_coeffs` guard was removed
+        # from solver.project (the streaming path always passes coefficients),
+        # so the solve was cold-starting and rebuilding the whole hydrostatic
+        # field from zero every step.
         self.poisson_warm_start      = True
         self.poisson_smoother        = "jacobi"
         self.poisson_nsmoothing      = 5

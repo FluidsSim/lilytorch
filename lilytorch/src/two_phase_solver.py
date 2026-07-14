@@ -188,12 +188,12 @@ class TwoPhaseSolver(FluidSolver):
         # ``adv_diff_solver.solve``), and the Poisson coefficient by the
         # out-of-place rescale of the kernel's water-normalised
         # ``dt*mu0/rho_water``.
-        if not self.bdim_mu0_projection:
-            raise ValueError(
-                "TwoPhaseSolver requires bdim_mu0_projection=True "
-                "(the two-phase coefficient rescale reconstructs mu0 from the "
-                "kernel's dt*mu0/rho_water coefficient)."
-            )
+        # bdim_mu0_projection=True (default): μ₀ recovered from the kernel
+        # coefficient (fast, one mul per cell).  False: μ₀ computed from the
+        # persistent cell-centred union SDF, matching the old cuda_kernels
+        # path — needed when the staggered-face μ₀ in the kernel does not
+        # agree with the face-averaged cell-centred μ₀ (e.g. large bodies at
+        # an angle like the amphibious ramp).
         self._init_two_phase(tp_cfg)
         # Fused path: capture the advection output u' — the only input the
         # air-transparent velocity identity needs.  ``solve`` returns
@@ -563,6 +563,18 @@ class TwoPhaseSolver(FluidSolver):
         hi[d] = slice(1, None)
         return 0.5 * (q[tuple(lo)] + q[tuple(hi)])
 
+    def _mu0_cc(self):
+        """Cell-centred BDIM fluid fraction μ₀ from the union body SDF.
+
+        When ``bdim_mu0_projection=False`` the kernel writes a constant
+        ``dt/ρ`` coefficient and the Poisson rescale computes μ₀ from the
+        persistent cell-centred union SDF instead of recovering it from the
+        kernel's staggered-face value.  This matches the old cuda_kernels
+        path and is more robust for large bodies at an angle (the
+        staggered-face SDF can differ from the face-averaged cell-centred
+        SDF near sharp edges)."""
+        return self.composite_body.mu_funcs(self.composite_body.sdf_val)[0]
+
     def _kernel_blend_velocities(self, vels):
         """Apply the air-transparent identity ``u0 := a*u0 + (1-a)*u'`` to the
         kernel-path BDIM output (in place), using the u' stashed by the
@@ -595,7 +607,14 @@ class TwoPhaseSolver(FluidSolver):
     def _rescale_kernel_coeffs_two_phase(self, coeffs):
         """Return fresh two-phase Poisson coefficients from the kernel's
         water-normalised ``c_kernel = dt*mu0/rho_water`` ones, evaluating the
-        same per-mode formulas as ``_compute_bdim_coefficients``."""
+        same per-mode formulas as ``_compute_bdim_coefficients``.
+
+        When ``bdim_mu0_projection`` is True the fluid fraction μ₀ is recovered
+        directly from the kernel coefficient (zero extra cost).  When False the
+        kernel wrote a constant ``dt/ρ`` coefficient (no μ₀ baked in) and μ₀
+        is computed from the persistent cell-centred union SDF instead, making
+        the rescale independent of how the kernel wrote the coefficient.
+        """
         tp = self.two_phase
         dt = float(self.dt)
         rs = self._rho_solid
@@ -607,7 +626,14 @@ class TwoPhaseSolver(FluidSolver):
                 out.append(None)
                 continue
             inv_rho = self._kernel_face_mean(q, d)
-            mu0 = c_kernel * (tp.rho_water / dt)
+            # Recover fluid fraction μ₀: prefer the kernel coefficient
+            # (fast, exact match to what the BDIM kernel used) when
+            # available; otherwise compute from the persistent cell-centred
+            # union SDF (robust for large angled bodies like the ramp).
+            if self.bdim_mu0_projection:
+                mu0 = c_kernel * (tp.rho_water / dt)
+            else:
+                mu0 = self._kernel_face_mean(self._mu0_cc(), d)
             if self._air_transparent_body:
                 a = self._kernel_face_mean(tp.alpha, d)
                 mu0_t = a * mu0 + (1.0 - a)
@@ -946,6 +972,17 @@ class TwoPhaseSolver(FluidSolver):
         # carve can only fire here (before this step's VOF transport).
         self._try_deferred_alpha_carve(iteration)
         self._advect_vof(u, v, p, iteration, w_vel=w_vel)
+        # Flow diagnostics on the post-projection field, as in the base tail.
+        # This override re-implements the base finalize_step and used to drop
+        # the block, so diagnostics.h5 came out all-NaN on every two-phase run.
+        if self.diagnostics is not None:
+            cb = self.composite_body
+            self.diagnostics.update(
+                iteration, u, v, p, self.dt, self.nu,
+                self.divergence, self.vorticity, w=w_vel,
+                sdf_cc=getattr(cb, "sdf_val", None),
+                mu_fn=getattr(cb, "mu_funcs", None),
+            )
         self._release_bdim_fields()
         # Flush the CUDA allocator cache only at the base solver's throttled
         # cadence (empty_cache_every, default 200), NOT every step: the grids
