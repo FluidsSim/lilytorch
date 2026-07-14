@@ -2087,19 +2087,36 @@ Unifying the CPU Poisson onto the native driver also **fixed the one test that
 was failing at HEAD** (`test_python_eulerian_force_path_cpu_eq_gpu`): CPU and CUDA
 had been running *different V-cycles*, so the pressure they read differed.
 
-### Known, benign, PRE-EXISTING (found while gating; not introduced here)
+### ~~Known, benign, PRE-EXISTING~~ — BOTH FIXED, and one was NOT benign (2026-07-14, commit `c919d6c`)
 
-* **Dead ghost cells differ between backends.** The 5/7-point stencil never reads
-  edge/corner ghosts, and the two backends leave different garbage there (the CUDA
-  Jacobi's odd-`nsmoothing` ping-pong memcpys a zeroed scratch buffer back over
-  `p`). Each Poisson driver's gauge is a `mean` over the FULL padded tensor, dead
-  corners included, so that garbage shifts the whole field by a **constant** —
-  immaterial, since the solver only ever consumes ∇p. Tests therefore compare
-  interiors modulo a constant, and smoothers on live cells only.
-* **3-D `v` is non-deterministic in 2 edge-ghost cells** — reproduced on unmodified
-  HEAD (run-to-run rel 2.4e-3 in those cells; interior bit-exact). Same class as
-  the row-13 2-D smoother race, apparently not fully closed in 3-D. Worth a look;
-  no physics impact.
+> ⚠ **The "benign" verdict below was wrong.** Both items were written on the
+> premise that no stencil reads edge/corner ghosts. That premise is **false** for
+> the *velocity* ghosts: the wide / cross-term advection stencil does read them
+> (perturb only those cells and one step moves the **interior** velocity by
+> ~8e-3). The second bullet was therefore a real interior-physics bug on CUDA —
+> the 3-D all-Neumann interior disagreed with the deterministic CPU twin by
+> **2.2e-3** over 50 steps. It now agrees to **3e-15**.
+>
+> Both are fixed; see `ghost_cell_issues_handoff.md` for the diagnosis, the fix
+> (`csrc/bc_ops.h`, `csrc/poisson_gauge.h`) and the gates. Follow-up:
+> `corner_ghost_bc_rule.md`.
+
+* ~~**Dead ghost cells differ between backends.**~~ FIXED. The 5/7-point stencil
+  never reads edge/corner ghosts *of `p`* (true), and the two backends left
+  different garbage there (the CUDA Jacobi's odd-`nsmoothing` ping-pong memcpys a
+  zeroed scratch buffer back over `p`). Each Poisson driver's gauge was a `mean`
+  over the FULL padded tensor, dead corners included, so that garbage shifted the
+  whole field by a **constant**. The gauge is now an **interior-only** mean and
+  the drivers refresh the full ghost ring first (`csrc/poisson_gauge.h`), so
+  CPU/CUDA now agree on the raw padded tensor and no test compares modulo a
+  constant. Only odd-sweep Jacobi still needs the live-cell mask, and that is now
+  asserted rather than assumed.
+* ~~**3-D `v` is non-deterministic in 2 edge-ghost cells**~~ FIXED, and **not**
+  "no physics impact". It was a write-write race in `apply_bcs_{2,3}d` (one BC op
+  per `blockIdx.z` ⇒ all ops concurrent ⇒ a cell on two boundary planes took two
+  concurrent writes). Not the row-13 smoother race. Fixed by ordered stages +
+  a write-ownership rule + a composed source (`csrc/bc_ops.h`), single-sourced
+  across CUDA and CPU.
 
 ### Gate
 
