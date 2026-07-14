@@ -253,7 +253,13 @@ def test_python_eulerian_force_path_cpu_regression():
     ``poisson_solve_multigrid_*`` C++ driver (the same one CUDA already used):
     the pressure it reads shifts by ~2e-8 relative.  That unification also made
     ``test_python_eulerian_force_path_cpu_eq_gpu`` pass, which had been failing
-    for as long as CPU and CUDA ran different V-cycles."""
+    for as long as CPU and CUDA ran different V-cycles.
+
+    NOT re-frozen when the Poisson gauge moved to an interior-only mean (which
+    shifts this config's p by ~13): a closed-surface ∮p·n integral is
+    gauge-invariant, and these values did not move at rtol 1e-9.  That is the
+    intended check — if they HAD moved, something would be reading p absolutely.
+    """
     got = _run_python_eulerian("cpu")
     expected = torch.tensor(
         [0.4901618826264682, -0.5369408657033692,

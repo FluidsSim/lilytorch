@@ -79,22 +79,23 @@ def test_poisson_converges(method, ndim, dtype, smoother, device):
 @pytest.mark.parametrize("method", _METHODS)
 @pytest.mark.parametrize("ndim", [2, 3])
 def test_poisson_cpu_agrees_with_cuda(method, ndim):
-    """The CPU and CUDA backends solve the same problem to the same pressure.
+    """The CPU and CUDA backends return the same pressure — no constant allowed.
 
-    Compared on the INTERIOR and modulo an additive constant, which is what a
-    pure-Neumann Poisson actually determines.  Two things make the raw padded
-    tensors differ without any physics differing:
+    Compared on the raw values, with NO ``d - d.mean()`` step: both drivers end
+    with the same full ghost-ring Neumann pass and the same INTERIOR-only gauge
+    (csrc/poisson_gauge.h), so the arbitrary Neumann constant is pinned to the
+    same value on both backends.  It used to be a mean over the FULL padded
+    tensor, dead corners included — and those corners hold backend-dependent
+    garbage (the CUDA Jacobi's odd-sweep ping-pong copies a zeroed scratch
+    buffer back over p), so the gauge constant itself was backend-dependent and
+    the two backends returned pressures differing by a constant.
 
-    * The ghost ring's edge/corner cells are never read by the 5/7-point
-      stencil, and the two backends leave different garbage there (the CUDA
-      Jacobi's odd-sweep ping-pong copies a zeroed scratch buffer back over p).
-    * Each driver's gauge is a mean over the FULL padded tensor, dead corners
-      included — so that garbage shifts the whole field by a constant.  The
-      solver only ever consumes ∇p, so the constant is immaterial.
+    The whole padded tensor is compared, ghost ring included: the ring is now
+    re-derived from the interior on both sides.
 
-    Not bit-exact either way: the CUDA 2-D smoothers are tiled (stale
-    cross-block halo reads by design), so the backends take slightly different
-    iteration paths to the same answer.
+    Not bit-exact: the CUDA 2-D smoothers are tiled (stale cross-block halo
+    reads by design), so the backends take slightly different iteration paths to
+    the same answer.
     """
     dtype = torch.float64
     pc, rc, fscale = _solve(method, ndim, dtype, "rbgs", "cpu")
@@ -104,12 +105,26 @@ def test_poisson_cpu_agrees_with_cuda(method, ndim):
         f"{method} {ndim}D did not converge (cpu {rc:.2e}, cuda {rg:.2e})"
 
     inner = (slice(1, -1),) * ndim
-    d = pc[inner] - pg.cpu()[inner]
-    d = d - d.mean()                       # drop the arbitrary Neumann constant
-    err = d.abs().max().item()
     scale = pc[inner].abs().max().item()
+
+    # Raw interior difference — a constant offset would show up here.
+    d = pc[inner] - pg.cpu()[inner]
+    err = d.abs().max().item()
     assert err < 1e-4 * scale, \
         f"{method} {ndim}D cpu vs cuda interior pressure: {err:.3e} (scale {scale:.3e})"
+
+    # The gauge constant must be pinned: removing the mean may not improve the
+    # agreement, or the two backends are still differing by a constant.
+    demeaned = (d - d.mean()).abs().max().item()
+    assert err <= demeaned * 1.5 + 1e-12 * scale, \
+        (f"{method} {ndim}D cpu vs cuda pressure still differs by a CONSTANT "
+         f"(raw {err:.3e} vs de-meaned {demeaned:.3e}) — the gauge is not "
+         f"interior-only on one of the backends")
+
+    # Full padded tensor, ghost ring included.
+    errf = (pc - pg.cpu()).abs().max().item()
+    assert errf < 1e-4 * scale, \
+        f"{method} {ndim}D cpu vs cuda padded pressure (ghosts): {errf:.3e}"
 
 
 @pytest.mark.parametrize("device", _DEVS)
@@ -138,10 +153,18 @@ def test_mgcg_beats_plain_multigrid(ndim, device):
 #   * it never refreshed the Neumann ghost ring between the red and black
 #     half-sweeps (the CUDA twin does), so the black cells read stale mirrors.
 #
-# Compared on LIVE cells only — the ones a 7-point stencil can reach (interior +
-# face ghosts).  The edge/corner ghosts are never read, and the CUDA Jacobi's
-# odd-sweep ping-pong copies a zeroed scratch buffer back over p, so the two
-# backends legitimately leave different garbage there.
+# RBGS is compared on EVERY cell, edge/corner ghosts included.
+#
+# JACOBI is compared on LIVE cells only (interior + face ghosts — the ones a
+# 7-point stencil can reach).  That mask is NOT a stand-in for the apply_bcs
+# race (fixed) nor for the Poisson gauge (fixed): the CUDA Jacobi's ping-pong
+# copies a *zeroed* scratch buffer back over p when nsmoothing is ODD, so it
+# zeroes the edge/corner ghosts while the CPU twin leaves them at their prior
+# value.  The zeroing is deliberate — uninitialised memory once leaked NaN into
+# p and blew up the coupled solve (see the comment in jacobi_sweep_3d_cuda) —
+# and it is harmless because every whole-solve driver ends by re-deriving the
+# full ghost ring from the interior (csrc/poisson_gauge.h).  So the mask stays,
+# and it is asserted below that it is only ever needed for odd-sweep Jacobi.
 #
 # The 2-D CUDA smoothers are TILED (stale cross-block halo reads by design), so
 # only the 3-D smoothers are expected to match a plain sequential CPU sweep.
@@ -176,7 +199,21 @@ def test_smoother_3d_cpu_eq_cuda(smoother, nsmoothing):
             native.jacobi_sweep_3d(*args, 1e-12, 1.0, nsmoothing)
         return pp.cpu()
 
+    diff = (run("cpu") - run("cuda")).abs()
     live = _live_cells(N + 2, 3)
-    d = (run("cpu") - run("cuda")).abs()[live].max().item()
+
+    d = diff[live].max().item()
     assert d < 1e-12, \
         f"{smoother}_sweep_3d nsmoothing={nsmoothing}: cpu vs cuda {d:.3e}"
+
+    # The dead ghosts must agree too, EXCEPT for odd-nsmoothing Jacobi, whose
+    # CUDA ping-pong deliberately zeroes them (see the header comment).  Pinning
+    # that here keeps the mask honest: if any other case starts needing it, this
+    # fails instead of hiding behind the mask.
+    dead = diff[~live].max().item()
+    if smoother == "jacobi" and nsmoothing % 2 == 1:
+        return
+    assert dead < 1e-12, \
+        (f"{smoother}_sweep_3d nsmoothing={nsmoothing}: cpu vs cuda disagree on "
+         f"the edge/corner ghosts by {dead:.3e} — only odd-sweep Jacobi is "
+         f"allowed to (its ping-pong zeroes them)")

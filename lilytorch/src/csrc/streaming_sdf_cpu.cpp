@@ -29,6 +29,8 @@
 #include <mutex>
 #include <vector>
 
+#include "bc_ops.h"
+
 namespace lilytorch_kernels {
 
 template <typename scalar_t>
@@ -324,21 +326,27 @@ static inline void update_cell(
 // =====================================================================
 //  apply_bcs_3d
 //
-//  Each op writes a single 2D plane of u / v / w. Ops are independent
-//  (caller arranges them so the addressed planes don't overlap), so we
-//  loop ops serially and parallelise the plane fill.
+//  Each op writes a single 2-D plane of u / v / w.  Ops run in three
+//  ordered stages (Neumann → Dirichlet → reflective); within a stage the
+//  write-ownership rule in bc_ops.h gives every cell — edge/corner ghosts
+//  included — exactly one writer and a source that no same-stage op is
+//  writing, so the result is identical to the CUDA twin cell for cell.
+//  See bc_ops.h for the full argument.
 // =====================================================================
 
 template <typename scalar_t>
 static void apply_bcs_3d_one_plane(
     scalar_t* base,
-    const int Ny, const int Nz,
-    const int axis,
+    const std::int64_t* shapes_p,
+    const int kind, const int* desc, const int nops, const int op,
+    const scalar_t* vals,
+    const int comp, const int axis,
     const int dst_along, const int src_along,
-    const int kind, const scalar_t value,
+    const int Ny, const int Nz,
     const int dim0_max, const int dim1_max)
 {
-    // kind: 0 = Neumann copy, 1 = Dirichlet direct write, 2 = reflective.
+    using namespace lilytorch_kernels::bcs;
+
     const std::int64_t s1 = (std::int64_t)Ny * Nz;
     const std::int64_t s2 = (std::int64_t)Nz;
 
@@ -347,20 +355,23 @@ static void apply_bcs_3d_one_plane(
     for (int64_t t = _begin; t < _end; ++t) {
         const int i = (int)(t / dim1_max);
         const int j = (int)(t % dim1_max);
-        std::int64_t dst_lin, src_lin = 0;
-        if (axis == 0) {
-            dst_lin = (std::int64_t)dst_along * s1 + (std::int64_t)i * s2 + j;
-            if (kind != 1) src_lin = (std::int64_t)src_along * s1 + (std::int64_t)i * s2 + j;
-        } else if (axis == 1) {
-            dst_lin = (std::int64_t)i * s1 + (std::int64_t)dst_along * s2 + j;
-            if (kind != 1) src_lin = (std::int64_t)i * s1 + (std::int64_t)src_along * s2 + j;
-        } else {
-            dst_lin = (std::int64_t)i * s1 + (std::int64_t)j * s2 + dst_along;
-            if (kind != 1) src_lin = (std::int64_t)i * s1 + (std::int64_t)j * s2 + src_along;
-        }
-        if      (kind == 0) base[dst_lin] = base[src_lin];
-        else if (kind == 1) base[dst_lin] = value;
-        else                base[dst_lin] = scalar_t(2) * value - base[src_lin];
+
+        int c[3];
+        if      (axis == 0) { c[0] = dst_along; c[1] = i;         c[2] = j;         }
+        else if (axis == 1) { c[0] = i;         c[1] = dst_along; c[2] = j;         }
+        else                { c[0] = i;         c[1] = j;         c[2] = dst_along; }
+
+        int s[3];
+        if (!bc_own_and_source(kind, desc, nops, op, shapes_p, /*ndim=*/3,
+                               comp, axis, src_along, c, s))
+            continue;                              // a lower-indexed op owns it
+
+        const std::int64_t dst_lin = (std::int64_t)c[0] * s1 + (std::int64_t)c[1] * s2 + c[2];
+        const std::int64_t src_lin = (std::int64_t)s[0] * s1 + (std::int64_t)s[1] * s2 + s[2];
+
+        if      (kind == BC_KIND_NEUMANN)   base[dst_lin] = base[src_lin];
+        else if (kind == BC_KIND_DIRICHLET) base[dst_lin] = vals[op];
+        else base[dst_lin] = scalar_t(2) * vals[op] - base[src_lin];
     }
     });
 }
@@ -400,6 +411,8 @@ void apply_bcs_3d_cpu(
     if (N_neu + N_dir + N_ref == 0) return;
 
     AT_DISPATCH_FLOATING_TYPES(u.scalar_type(), "apply_bcs_3d_cpu", [&] {
+        using namespace lilytorch_kernels::bcs;
+
         const int64_t*  shapes_p  = shapes.data_ptr<int64_t>();
         const int*      neu_p     = (N_neu > 0) ? neu_desc.data_ptr<int>() : nullptr;
         const int*      dir_p     = (N_dir > 0) ? dir_desc.data_ptr<int>() : nullptr;
@@ -411,56 +424,38 @@ void apply_bcs_3d_cpu(
         scalar_t* v_p = v.data_ptr<scalar_t>();
         scalar_t* w_p = w.data_ptr<scalar_t>();
 
-        const int total = N_neu + N_dir + N_ref;
-        for (int op = 0; op < total; ++op) {
-            int kind, comp, axis, dst_along, src_along = 0;
-            scalar_t value = scalar_t(0);
+        // One stage per op kind, in the same order as the CUDA launches.
+        const int   kinds[3] = {BC_KIND_NEUMANN, BC_KIND_DIRICHLET, BC_KIND_REFLECTIVE};
+        const int*  descs[3] = {neu_p, dir_p, ref_p};
+        const scalar_t* valss[3] = {nullptr, dir_val_p, ref_val_p};
+        const int   counts[3] = {N_neu, N_dir, N_ref};
 
-            if (op < N_neu) {
-                kind = 0;
-                comp = neu_p[op*3 + 0];
-                axis = neu_p[op*3 + 1];
-                const int side = neu_p[op*3 + 2];
-                const int sz = (int)shapes_p[comp*3 + axis];
-                if (side == 0) { dst_along = 0;      src_along = 1; }
-                else           { dst_along = sz - 1; src_along = sz - 2; }
-            } else if (op < N_neu + N_dir) {
-                const int d = op - N_neu;
-                kind = 1;
-                comp = dir_p[d*3 + 0];
-                axis = dir_p[d*3 + 1];
-                const int offset = dir_p[d*3 + 2];
-                const int sz = (int)shapes_p[comp*3 + axis];
-                dst_along = (offset >= 0) ? offset : (sz + offset);
-                value = dir_val_p[d];
-            } else {
-                const int r = op - N_neu - N_dir;
-                kind = 2;
-                comp = ref_p[r*4 + 0];
-                axis = ref_p[r*4 + 1];
-                const int dst_off = ref_p[r*4 + 2];
-                const int src_off = ref_p[r*4 + 3];
-                const int sz = (int)shapes_p[comp*3 + axis];
-                dst_along = (dst_off >= 0) ? dst_off : (sz + dst_off);
-                src_along = (src_off >= 0) ? src_off : (sz + src_off);
-                value = ref_val_p[r];
+        for (int st = 0; st < 3; ++st) {
+            const int kind = kinds[st];
+            const int* desc = descs[st];
+            const int nops = counts[st];
+
+            for (int op = 0; op < nops; ++op) {
+                int comp, axis, dst_along, src_along;
+                bc_decode(kind, desc, op, shapes_p, /*ndim=*/3,
+                          comp, axis, dst_along, src_along);
+
+                const int Nx = (int)shapes_p[comp*3 + 0];
+                const int Ny = (int)shapes_p[comp*3 + 1];
+                const int Nz = (int)shapes_p[comp*3 + 2];
+
+                int dim0_max, dim1_max;
+                if      (axis == 0) { dim0_max = Ny; dim1_max = Nz; }
+                else if (axis == 1) { dim0_max = Nx; dim1_max = Nz; }
+                else                { dim0_max = Nx; dim1_max = Ny; }
+
+                scalar_t* base = (comp == 0) ? u_p : (comp == 1 ? v_p : w_p);
+
+                apply_bcs_3d_one_plane<scalar_t>(
+                    base, shapes_p, kind, desc, nops, op, valss[st],
+                    comp, axis, dst_along, src_along,
+                    Ny, Nz, dim0_max, dim1_max);
             }
-
-            const int Nx = (int)shapes_p[comp*3 + 0];
-            const int Ny = (int)shapes_p[comp*3 + 1];
-            const int Nz = (int)shapes_p[comp*3 + 2];
-
-            int dim0_max, dim1_max;
-            if      (axis == 0) { dim0_max = Ny; dim1_max = Nz; }
-            else if (axis == 1) { dim0_max = Nx; dim1_max = Nz; }
-            else                { dim0_max = Nx; dim1_max = Ny; }
-
-            scalar_t* base = (comp == 0) ? u_p : (comp == 1 ? v_p : w_p);
-
-            apply_bcs_3d_one_plane<scalar_t>(
-                base, Ny, Nz, axis,
-                dst_along, src_along, kind, value,
-                dim0_max, dim1_max);
         }
     });
 }

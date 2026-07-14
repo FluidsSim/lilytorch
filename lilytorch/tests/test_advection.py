@@ -341,15 +341,18 @@ def _bcs_problem_2d(dev, Nx=40, Ny=32, seed=9):
     u = torch.randn(Nx, Ny, dtype=torch.float64)
     v = torch.randn(Nx, Ny, dtype=torch.float64)
     shapes = torch.tensor([[Nx, Ny], [Nx, Ny]], dtype=torch.int64)
-    # Descriptors chosen so no two STAGE-1 (Neumann+Dirichlet) ops share a
-    # cell — overlapping stage-1 writes are order-undefined on GPU, so a
-    # deterministic bit-exact comparison needs disjoint ops.
+    # Descriptors here are DISJOINT (no two ops share a cell).  They were
+    # chosen that way back when overlapping writes were order-undefined on GPU;
+    # they are no longer required to be (see bc_ops.h), and precisely because
+    # they are disjoint they cannot catch the overlap bug — that is what
+    # test_apply_bcs_solver_config_* below is for.  Kept as the simple
+    # per-op-kind smoke test.
     # Neumann: u rows 0 and Nx-1 (axis0, both sides).
     neu = torch.tensor([[0, 0, 0], [0, 0, 1]], dtype=torch.int32)
     # Dirichlet: v cols 0 and Ny-1 (axis1).  Different field from Neumann.
     dird = torch.tensor([[1, 1, 0], [1, 1, -1]], dtype=torch.int32)
     dirv = torch.tensor([2.5, -1.3], dtype=torch.float64)
-    # Reflective (stage 2 → runs last, deterministic even at corners): u col Ny-1.
+    # Reflective (runs in the last stage): u col Ny-1.
     refd = torch.tensor([[0, 1, -1, -2]], dtype=torch.int32)
     refv = torch.tensor([0.4], dtype=torch.float64)
     max_line = max(Nx, Ny)
@@ -428,9 +431,9 @@ def test_apply_bcs_3d_noncubic_dual_facedims():
     v = torch.randn(Nx, Ny, Nz, dtype=torch.float64)
     w = torch.randn(Nx, Ny, Nz, dtype=torch.float64)
     shapes = torch.tensor([[Nx, Ny, Nz]] * 3, dtype=torch.int64)
-    # Disjoint per-component ops (no shared stage-1 cell — overlaps are
-    # order-undefined on GPU) that still exercise all three face axes so
-    # dim0/dim1 differ per face:
+    # Disjoint per-component ops that exercise all three face axes so
+    # dim0/dim1 differ per face (this test is about the rectangular launch
+    # grid, not about overlap resolution):
     #   u z-face (axis2): d0=Nx=24, d1=Ny=14  → drives max_dim0, max_dim1
     #   w x-face (axis0): d0=Ny=14, d1=Nz=10
     #   v y-face (axis1): d0=Nx=24, d1=Nz=10
@@ -781,3 +784,106 @@ def test_sl_multi_step_deterministic_3d():
     for a, b, name in ((u1, u2, "u"), (v1, v2, "v"), (w1, w2, "w")):
         d = (a - b).abs().max().item()
         assert d == 0.0, f"run1 vs run2 {name} mismatch: {d:.3e}"
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  apply_bcs_{2,3}d on REAL solver BC configs — write-ownership / determinism
+#
+#  The synthetic ``_bcs_problem_{2,3}d`` descriptors above are hand-picked so no
+#  two ops ever share a cell, so they pass whatever the kernel does at the
+#  edge/corner ghosts.  A real AdvDiffSolver BC config is NOT disjoint: under
+#  all-Neumann, cell v[0,j,0] is on both the x-face and the z-face plane and so
+#  is written by two ops.  The CUDA kernel used to run every op concurrently,
+#  which made those writes race — non-deterministic run to run, and disagreeing
+#  with the (sequential) CPU twin.
+#
+#  That is NOT confined to unread cells: the wide/cross-term advection stencil
+#  DOES read edge/corner ghosts (perturbing only those cells moves the interior
+#  velocity by ~8e-3 in one step), so the race was corrupting interior physics
+#  on CUDA — the 3-D all-Neumann interior disagreed with the CPU twin by 2.2e-3
+#  after 50 steps.  See csrc/bc_ops.h for the ownership rule that fixes it.
+# ═════════════════════════════════════════════════════════════════════════════
+
+# (BC_type per component) for 2-D and 3-D.  "N" = all-Neumann (the config that
+# exposed the race), "mixed" = Dirichlet inflow + Neumann, "D" = closed box.
+_SOLVER_BCS = {
+    (2, "neumann"): [(("N",) * 4, (0.0,) * 4)] * 2,
+    (2, "mixed"): [(("D", "N", "N", "N"), (1.0, 0, 0, 0)),
+                   (("D", "D", "D", "N"), (0.2, 0.3, 0.4, 0))],
+    (2, "dirichlet"): [(("D",) * 4, (0.5, -0.5, 0.25, 0.75))] * 2,
+    (3, "neumann"): [(("N",) * 6, (0.0,) * 6)] * 3,
+    (3, "mixed"): [(("D", "N", "N", "N", "N", "N"), (1.0, 0, 0, 0, 0, 0)),
+                   (("D", "N", "D", "N", "N", "N"), (0.2, 0, 0.3, 0, 0, 0)),
+                   (("N", "N", "N", "N", "D", "D"), (0, 0, 0, 0, 0.1, -0.1))],
+    (3, "dirichlet"): [(("D",) * 6, (0.5, -0.5, 0.25, 0.75, 1.5, -1.5))] * 3,
+}
+
+
+def _apply_bcs_solver_config(ndim, kind, dev, N=12, seed=5):
+    """Run apply_bcs_{2,3}d with descriptors built by a real AdvDiffSolver.
+
+    Fields are drawn on CPU then moved: torch.randn(device="cuda") draws from a
+    different RNG stream, which would hand the two backends different inputs.
+    """
+    from lilytorch.src.advection import AdvDiffSolver
+
+    torch.manual_seed(seed)
+    fields = [torch.randn(*(N,) * ndim, dtype=torch.float64).to(dev).contiguous()
+              for _ in range(ndim)]
+
+    bcs = _SOLVER_BCS[(ndim, kind)]
+    ax = torch.linspace(0, 1, N)
+    sol = AdvDiffSolver(
+        device=torch.device(dev), dt=0.01, x=ax, y=ax, nu=1e-3,
+        BC_type_u=bcs[0][0], BC_values_u=bcs[0][1],
+        BC_type_v=bcs[1][0], BC_values_v=bcs[1][1],
+        z=(ax if ndim == 3 else None),
+        BC_type_w=(bcs[2][0] if ndim == 3 else None),
+        BC_values_w=(bcs[2][1] if ndim == 3 else None),
+        method="abdquickest",
+    )
+    if ndim == 3:
+        c = sol._build_fused_bc_cache(fields)
+        apply_bcs_3d(*fields, c["shapes"], c["neu_desc"], c["dir_desc"],
+                     c["dir_val"], c["ref_desc"], c["ref_val"],
+                     c["max_dim0"], c["max_dim1"])
+    else:
+        c = sol._build_fused_bc_cache_2d(fields)
+        apply_bcs_2d(*fields, c["shapes"], c["neu_desc"], c["dir_desc"],
+                     c["dir_val"], c["ref_desc"], c["ref_val"],
+                     c["max_line_dim"])
+    return fields
+
+
+@SKIP_NO_CUDA
+@pytest.mark.parametrize("ndim", [2, 3])
+@pytest.mark.parametrize("kind", ["neumann", "mixed", "dirichlet"])
+def test_apply_bcs_solver_config_cpu_eq_cuda(ndim, kind):
+    """CPU twin == CUDA over ALL cells, edge/corner ghosts included.
+
+    This is the comparison that could not be written before the ownership rule:
+    the two backends resolved the overlapping ghost writes differently (CPU:
+    last op wins, sequentially; CUDA: whichever block landed last).
+    """
+    cpu = _apply_bcs_solver_config(ndim, kind, "cpu")
+    gpu = _apply_bcs_solver_config(ndim, kind, "cuda:0")
+    for a, b, nm in zip(cpu, gpu, "uvw"):
+        d = (a - b.cpu()).abs().max().item()
+        assert d == 0.0, f"{ndim}D {kind}: {nm} cpu vs cuda maxdiff {d:.3e}"
+
+
+@SKIP_NO_CUDA
+@pytest.mark.parametrize("ndim", [2, 3])
+@pytest.mark.parametrize("kind", ["neumann", "mixed", "dirichlet"])
+def test_apply_bcs_solver_config_deterministic(ndim, kind):
+    """12 identical CUDA calls on identical input are bit-identical.
+
+    Fails on the pre-ownership kernel for 5 of these 6 configs.
+    """
+    ref = _apply_bcs_solver_config(ndim, kind, "cuda:0")
+    for it in range(11):
+        again = _apply_bcs_solver_config(ndim, kind, "cuda:0")
+        for a, b, nm in zip(ref, again, "uvw"):
+            assert torch.equal(a, b), (
+                f"{ndim}D {kind}: {nm} not bit-reproducible on rerun {it + 1} "
+                f"(maxdiff {(a - b).abs().max().item():.3e})")

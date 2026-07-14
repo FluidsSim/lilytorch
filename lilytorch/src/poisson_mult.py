@@ -36,6 +36,24 @@ def _inner(ndim):
     return tuple(slice(1, -1) for _ in range(ndim))
 
 
+def _gauge_fix(x):
+    """Neumann gauge fix, in place: subtract the INTERIOR mean.
+
+    The mean must NOT include the ghost ring: its edge/corner cells are dead
+    (no 5/7-point stencil reads them) and hold backend-dependent garbage, so a
+    mean over the padded tensor makes the gauge constant itself
+    backend-dependent — CPU and CUDA then return pressures differing by a
+    constant.  Mirrors ``gauge_fix()`` in csrc/poisson_gauge.h, which the
+    native whole-solve drivers use.
+
+    Subtracting from the whole tensor leaves the Neumann ring consistent (a
+    ghost and its interior neighbour shift by the same constant), so the
+    caller's last ``BC(x)`` still holds.
+    """
+    inner = _inner(x.ndim)
+    x -= x[inner].to(torch.float64).mean().to(x.dtype)
+
+
 # =====================================================================
 # Poisson solver
 # =====================================================================
@@ -322,7 +340,7 @@ class _MultigridPoissonSolver:
 
         r_norm = self._convergence_norm(r)
         if r_norm < self.tol:
-            x -= x.to(torch.float64).mean().to(x.dtype)
+            _gauge_fix(x)
             self._last_niter = 0
             return x, r, 0, r_norm
 
@@ -370,7 +388,7 @@ class _MultigridPoissonSolver:
             self.BC(d)
             rz = rz_new
 
-        x -= x.to(torch.float64).mean().to(x.dtype)
+        _gauge_fix(x)
         niter = min(k + 1, self.max_cycles)
         self._last_niter = niter          # exposed for benchmarking/diagnostics
         return x, r, niter, r_norm_final
@@ -905,7 +923,7 @@ class PoissonSolver(_MultigridPoissonSolver):
         r = b - self._apply_op_spd(x, cfaces)
         r_norm = self._convergence_norm(r)
         if r_norm < self.tol:
-            x -= x.to(torch.float64).mean().to(x.dtype)
+            _gauge_fix(x)
             self._last_niter = 0
             return x, r, 0, r_norm
 
@@ -941,7 +959,7 @@ class PoissonSolver(_MultigridPoissonSolver):
             self.BC(d)
             rz = rz_new
 
-        x -= x.to(torch.float64).mean().to(x.dtype)
+        _gauge_fix(x)
         niter = min(k + 1, self.max_cycles)
         self._last_niter = niter
         return x, r, niter, r_norm_final

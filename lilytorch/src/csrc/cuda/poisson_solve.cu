@@ -23,6 +23,8 @@
 
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
+
+#include "../poisson_gauge.h"
 #include <torch/all.h>
 #include <torch/library.h>
 #include <torch/extension.h>
@@ -236,15 +238,10 @@ static void vcycle_3d(
 // (the fused per-sweep BC in the smoother only refreshes the face ghosts
 // the stencil reads, leaving corners stale).
 // =====================================================================
-static inline void apply_neumann_bc(at::Tensor p)
-{
-    const int64_t nd = p.dim();
-    for (int64_t d = 0; d < nd; ++d) {
-        const int64_t L = p.size(d);
-        p.select(d, 0).copy_(p.select(d, 1));
-        p.select(d, L - 1).copy_(p.select(d, L - 2));
-    }
-}
+using lilytorch_kernels::poisson::apply_neumann_bc_full;
+using lilytorch_kernels::poisson::gauge_fix;
+
+static inline void apply_neumann_bc(at::Tensor p) { apply_neumann_bc_full(p); }
 
 // =====================================================================
 // Top-level entry points
@@ -288,8 +285,7 @@ static at::Tensor poisson_solve_multigrid_2d_cuda(
     // biased by leftover corner values.  Matches poisson_mult.PoissonSolver.
     apply_neumann_bc(p);
     // float64 mean subtraction (matches Python: p -= p.to(f64).mean().to(p.dtype)).
-    auto pmean = p.to(at::kDouble).mean();
-    p.sub_(pmean.to(p.scalar_type()));
+    gauge_fix(p);
     return r;
 }
 
@@ -328,8 +324,7 @@ static at::Tensor poisson_solve_multigrid_3d_cuda(
     // Ghost-ring gauge fix (see 2-D driver): refresh the full ghost ring incl.
     // corners before the gauge mean, which the per-sweep face-only BC leaves stale.
     apply_neumann_bc(p);
-    auto pmean = p.to(at::kDouble).mean();
-    p.sub_(pmean.to(p.scalar_type()));
+    gauge_fix(p);
     return r;
 }
 
@@ -383,8 +378,7 @@ static at::Tensor poisson_solve_mgcg_2d_cuda(
 
     double r_norm = (tol >= 0.0) ? r.abs().max().item<double>() : 1.0;
     if (r_norm < tol) {
-        auto pmean = p.to(at::kDouble).mean();
-        p.sub_(pmean.to(p.scalar_type()));
+        gauge_fix(p);
         return r;
     }
 
@@ -445,8 +439,7 @@ static at::Tensor poisson_solve_mgcg_2d_cuda(
         rz = rz_new;
     }
 
-    auto pmean = p.to(at::kDouble).mean();
-    p.sub_(pmean.to(p.scalar_type()));
+    gauge_fix(p);
     return r;
 }
 
@@ -486,8 +479,7 @@ static at::Tensor poisson_solve_mgcg_3d_cuda(
 
     double r_norm = (tol >= 0.0) ? r.abs().max().item<double>() : 1.0;
     if (r_norm < tol) {
-        auto pmean = p.to(at::kDouble).mean();
-        p.sub_(pmean.to(p.scalar_type()));
+        gauge_fix(p);
         return r;
     }
 
@@ -538,8 +530,7 @@ static at::Tensor poisson_solve_mgcg_3d_cuda(
         rz = rz_new;
     }
 
-    auto pmean = p.to(at::kDouble).mean();
-    p.sub_(pmean.to(p.scalar_type()));
+    gauge_fix(p);
     return r;
 }
 
@@ -607,8 +598,7 @@ static std::tuple<at::Tensor, at::Tensor, int64_t> poisson_solve_rmgcg_2d_cuda(
 
     double r_norm = (tol >= 0.0) ? r.abs().max().item<double>() : 1.0;
     if (r_norm < tol) {
-        auto pmean = p.to(at::kDouble).mean();
-        p.sub_(pmean.to(p.scalar_type()));
+        gauge_fix(p);
         return std::make_tuple(r, D, niter);
     }
 
@@ -669,8 +659,7 @@ static std::tuple<at::Tensor, at::Tensor, int64_t> poisson_solve_rmgcg_2d_cuda(
         rz = rz_new;
     }
 
-    auto pmean = p.to(at::kDouble).mean();
-    p.sub_(pmean.to(p.scalar_type()));
+    gauge_fix(p);
     return std::make_tuple(r, D, niter);
 }
 
@@ -727,8 +716,7 @@ static std::tuple<at::Tensor, at::Tensor, int64_t> poisson_solve_rmgcg_3d_cuda(
 
     double r_norm = (tol >= 0.0) ? r.abs().max().item<double>() : 1.0;
     if (r_norm < tol) {
-        auto pmean = p.to(at::kDouble).mean();
-        p.sub_(pmean.to(p.scalar_type()));
+        gauge_fix(p);
         return std::make_tuple(r, D, niter);
     }
 
@@ -788,8 +776,7 @@ static std::tuple<at::Tensor, at::Tensor, int64_t> poisson_solve_rmgcg_3d_cuda(
         rz = rz_new;
     }
 
-    auto pmean = p.to(at::kDouble).mean();
-    p.sub_(pmean.to(p.scalar_type()));
+    gauge_fix(p);
     return std::make_tuple(r, D, niter);
 }
 

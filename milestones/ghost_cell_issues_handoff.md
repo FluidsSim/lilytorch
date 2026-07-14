@@ -1,177 +1,156 @@
-# Handoff — two pre-existing ghost-cell defects
+# Handoff — two pre-existing ghost-cell defects  ✅ BOTH CLOSED
 
 Both were found while gating the Warp removal (commit `bf7e3a7`). **Neither was
-introduced by it**, both reproduce on unmodified `b055aab`, and neither changes
-interior physics today. Fix them anyway: issue A makes the solver
-bit-irreproducible, which quietly destroys our ability to write bit-exact
-regression gates, and issue B makes CPU and CUDA disagree on the pressure by a
-constant, which forces every cross-backend comparison to special-case it.
+introduced by it**, both reproduced on unmodified `b055aab`.
 
-Ground rules from `cuda_native_port_plan.md` still apply — in particular #4
-(every CUDA kernel keeps a CPU twin) and #3 (no task is done without a parity
-test and a before/after ms/step).
+**Status: fixed.** Issue A turned out to be worse than diagnosed below — see
+"Correction" — and was a real interior-physics bug on CUDA, not just a
+reproducibility annoyance.
 
 Vocabulary used below:
 
 * **live cell** — interior, or a *face* ghost (exactly ONE index on a boundary
-  plane). These are the only cells a 5/7-point stencil can read.
+  plane).
 * **dead cell** — an *edge* or *corner* ghost (TWO or THREE indices on a
-  boundary plane). Never read by any stencil in the solver.
+  boundary plane).
+
+> ## ⚠ Correction to the original diagnosis
+>
+> The original write-up asserted that dead cells are "never read by any stencil
+> in the solver", so the race was "numerically harmless" and only cost us
+> bit-reproducibility. **That is false.** The wide / cross-term advection
+> stencil *does* read edge and corner ghosts: perturbing **only** the dead
+> ghosts of `u0/v0/w0` and taking a single step moves the **interior** velocity
+> by ~8e-3 (3-D) / ~3e-3 (2-D).
+>
+> So the race was feeding schedule-dependent garbage into the interior. Measured
+> on the 3-D all-Neumann config, 50 steps: CUDA's **interior** velocity
+> disagreed with the (deterministic) CPU twin by **2.2e-3**. After the fix they
+> agree to **3e-15**.
+>
+> (The claim was easy to believe and hard to check: a first attempt to test it
+> came back "advection does not read dead cells" — but `AdvDiffSolver.solve()`
+> returns *persistent buffers*, so that probe was comparing a tensor with
+> itself. Clone before you compare.)
 
 ---
 
-## Issue A — `apply_bcs_{2,3}d` CUDA races on edge/corner cells (NON-DETERMINISM)
+## Issue A — `apply_bcs_{2,3}d` CUDA raced on edge/corner cells ✅ FIXED
 
-### Diagnosis (confirmed, not a guess)
+### What was wrong
 
-`cuda/streaming_sdf.cu :: apply_bcs_3d_kernel` (and its 2-D twin in
-`streaming_sdf_2d.cu`) dispatches **one BC op per `blockIdx.z`**:
+`apply_bcs_{3,2}d_kernel` dispatched **one BC op per `blockIdx.z`**, so all ops
+ran concurrently. A cell on two boundary planes got two concurrent writes from
+two different source cells (all-Neumann: `v[0,j,0]` written both as `v[1,j,0]`
+by the x-face op and as `v[0,j,1]` by the z-face op). Winner = whichever block
+landed last ⇒ non-deterministic from step 1, and disagreeing with the
+(sequential) CPU twin.
 
-```cpp
-const int op = blockIdx.z;      // ALL BC ops run CONCURRENTLY
-```
+Worse, Neumann and Dirichlet ops shared one launch ("stage 1"), and a Dirichlet
+wall-slot write (index 1 along the component's own axis) overlaps a Neumann /
+reflective ghost plane of another axis at a **live** cell — so Dirichlet configs
+had a live-cell write-write race too, and a read-write race on the Neumann
+source.
 
-Every op writes one boundary plane of one component. A cell lying on **two**
-boundary planes therefore receives **two concurrent writes from two different
-source cells** — e.g. for all-Neumann, cell `v[0, j, 0]` is written by both
+### The fix — `csrc/bc_ops.h` (single-sourced, both backends)
 
-* the x-face op: `v[0,j,0] = v[1,j,0]`, and
-* the z-face op: `v[0,j,0] = v[0,j,1]`.
+Ops now run in three **ordered stages** — Neumann → Dirichlet → reflective —
+one kernel launch each on CUDA, one loop each on CPU. That is the order the
+eager Python reference applies them in, so every cross-kind overlap keeps the
+value it had. Within a stage:
 
-The winner is whichever block lands last. That is a write-write race, and it is
-non-deterministic run to run.
+* **Ownership.** A cell claimed by several ops of the stage is written only by
+  the lowest-indexed of them (= lowest axis, with the current packing). One
+  writer per cell ⇒ no write-write race.
+* **Composed source.** The owner reads its source stepped inward along its own
+  axis *and* along every other axis whose same-stage op also claims the cell.
+  That lands on a cell no op of the stage writes (destinations are ghost planes
+  0 / n−1, sources are 1 / n−2) ⇒ no read-write race either. For all-Neumann
+  this reproduces exactly what the old sequential CPU loop produced, so those
+  cells do not move.
 
-The CPU twin (`streaming_sdf_cpu.cpp :: apply_bcs_3d_cpu`) loops
-`for (int op = 0; op < total; ++op)` **sequentially**, so it is deterministic
-(last op wins) — which is also why CPU and CUDA disagree on these cells.
+Only cells contested *within* a stage are dead cells, so live-cell values are
+unchanged on CPU by construction.
 
-### Reproduction
+### Gates (all green)
 
-```
-3-D solver, N=24, default config (abdquickest + multigrid), CUDA, f64.
-Run the identical sim twice, compare v0.
-```
-
-Non-deterministic **from step 1**. At 50 steps the interior is bit-exact and
-`u0`/`w0`/`p0` are bit-exact; only `v0` differs, in a handful of cells, ALL of
-which have exactly two indices on a boundary plane (e.g. `[0,2,0]`, `[0,5,0]`,
-`[0,15,0]` — i.e. i=0 AND k=0). Magnitude in those cells: O(1e-1) at step 1,
-O(1e-3) by step 50.
-
-(Only `v` shows it for this config because of which BC ops happen to collide;
-`u`/`w` are not immune in general.)
-
-### The fix
-
-Give the edge/corner writes a **deterministic tie-break**. Two acceptable
-designs — pick whichever benches better, they are both cheap:
-
-1. **Serialise by axis.** Launch one kernel per `axis` (so 2 launches in 2-D, 3
-   in 3-D), each handling all ops for that axis. Cells are then written by at
-   most one op per launch, and the inter-launch ordering fixes the winner. This
-   matches the CPU twin's "last op wins" *only if* the CPU loop is also reordered
-   to axis-major — do that, and make it explicit in a comment.
-2. **Ownership rule inside the single launch.** Have each thread write a cell
-   only if its `axis` is the *lowest* boundary axis of that cell; the op whose
-   axis does not own the cell early-returns. One launch, no race, and the winner
-   is defined by the rule rather than by the schedule. This is the cheaper
-   option and I'd start here.
-
-Whichever you pick, **the CPU twin must use the same rule** so the two backends
-agree cell-for-cell, dead cells included.
-
-### Gate
-
-* New test in `tests/test_advection.py` (next to the existing `apply_bcs_*`
-  tests): call `apply_bcs_{2,3}d` on CUDA **12 times on identical input** and
-  assert the result is bit-identical every time. Today's kernel passes this on
-  the synthetic `_bcs_problem_3d` descriptors but fails in the solver's
-  all-Neumann config — so build the descriptors from a real `AdvDiffSolver`
-  BC config (all-Neumann), not the synthetic set, or the test will pass
-  vacuously.
-* CPU twin == CUDA kernel over **all** cells (not just live cells). This is the
-  test that currently cannot be written; when it passes, the issue is closed.
-* Re-run the 50-step 3-D determinism check: two identical runs must now be
-  bit-identical in *every* field including ghosts.
-* The existing `tests/test_poisson_driver.py::test_smoother_3d_cpu_eq_cuda`
-  masks dead cells via `_live_cells()`. Leave that alone — it is masking issue B,
-  not this one.
+* `test_apply_bcs_solver_config_deterministic` — 12 identical CUDA calls,
+  bit-identical, on descriptors built from a **real `AdvDiffSolver`** BC config
+  (all-Neumann / mixed / all-Dirichlet, 2-D and 3-D). The old kernel fails 5 of
+  those 6. It passes on the synthetic `_bcs_problem_*` descriptors, which are
+  hand-picked disjoint — the trap the original handoff flagged.
+* `test_apply_bcs_solver_config_cpu_eq_cuda` — CPU twin == CUDA over **all**
+  cells, dead ghosts included. The comparison that could not be written before.
+* 50-step 3-D all-Neumann solver run, CUDA f64: two identical runs are now
+  bit-identical in **every** field including ghosts.
+* CPU physics unchanged: 3-D velocity bit-identical before/after; 2-D moves only
+  at 1e-16 (the issue-B gauge shift changes the rounding of ∇p).
 
 ---
 
-## Issue B — the Poisson gauge is a mean over dead ghost cells
+## Issue B — the Poisson gauge averaged over dead ghost corners ✅ FIXED
 
-### Diagnosis
+### What was wrong
 
-Every whole-solve Poisson driver ends with a gauge fix computed over the **full
-ghost-padded tensor**:
+All six whole-solve drivers ended with `p -= p.mean()` over the **full padded
+tensor**. The dead corners hold backend-dependent garbage (the CUDA Jacobi's
+ping-pong `cudaMemcpyAsync`s a *zeroed* scratch buffer over `p` when
+`nsmoothing` is odd; the CPU twin leaves them alone), so the gauge constant
+itself was backend-dependent and CPU and CUDA returned pressures differing by a
+constant.
 
-```cpp
-auto pmean = p.to(at::kDouble).mean();   // includes edge/corner ghosts
-p.sub_(pmean.to(p.scalar_type()));
-```
+### The fix — `csrc/poisson_gauge.h` (single-sourced, both backends)
 
-(`cuda/poisson_solve.cu` ~lines 291, 331, 448, 541; `multigrid_cpu.cpp`
-`poisson_solve_multigrid_{2,3}d_cpu_impl`.)
+* `gauge_fix(p)` — mean over the **interior** only, subtracted from the whole
+  tensor (which leaves the Neumann ring consistent: ghost and interior neighbour
+  shift by the same constant, so no re-BC is needed).
+* `apply_neumann_bc_full(p)` — full ghost-ring refresh, corners included, in dim
+  order. The CPU drivers used to call the smoothers' *face-only* pass here and
+  left the corners stale.
 
-Those dead corner cells hold different garbage on the two backends:
+Applied at all 10 gauge sites in `cuda/poisson_solve.cu`, both CPU drivers in
+`multigrid_cpu.cpp`, and the 4 Python CG sites in `poisson_mult.py`
+(`_gauge_fix`). The smoothers' per-sweep BC stays face-only — it is the hot path
+and the drivers re-derive the ring at the end anyway.
 
-* `apply_neumann_bc_*` fills face ghosts; the CPU version leaves corners
-  untouched, and the two backends do not agree on them.
-* The CUDA Jacobi's ping-pong (`cuda/multigrid_smoothers.cu :: jacobi_sweep_3d_cuda`)
-  `cudaMemcpyAsync`s the whole `tmp` buffer back over `p` when `nsmoothing` is
-  **odd**. `tmp` is `at::zeros_like(p)` and its corners are never written, so
-  p's corners get **zeroed** on odd sweeps and keep their prior value on even
-  ones.
+### Gates (all green)
 
-Net effect: the gauge constant differs between CPU and CUDA, so the two backends
-return pressures that differ by a **constant offset**. Measured: interior
-`p` agrees to ~3.5e-6 absolute with the residual difference being a pure
-constant (3-D: std of the interior difference = 2e-18, i.e. exactly a constant).
-
-Harmless *today* — the solver only ever consumes ∇p — but it is why
-`tests/test_poisson_driver.py::test_poisson_cpu_agrees_with_cuda` has to compare
-interiors *modulo a constant*, and it is a landmine for anyone who later reads
-`p` absolutely (e.g. a pressure probe, a Bernoulli check, a reported Cp).
-
-### The fix
-
-Make the gauge depend only on cells that are actually part of the solution:
-
-* Compute `pmean` over the **interior** only (`p[1:-1, 1:-1(, 1:-1)]`), in both
-  the CUDA and CPU drivers, in all six `poisson_solve_*` entry points.
-* Then re-apply the ghost BC so the ring stays consistent with the shifted
-  interior.
-
-This changes the returned `p` by a constant — which is exactly the point — so
-expect frozen-value tests to move:
-
-* `tests/test_forces.py::test_python_eulerian_force_path_cpu_regression` reads
-  pressure forces; it will need re-freezing (it already documents that it tracks
-  the Poisson driver). Re-freeze it and say why in the docstring.
-* Nothing else should move. If a *velocity* field changes, stop — that means
-  something is reading `p` absolutely and you have found a real bug.
-
-While you are in there, consider making `apply_neumann_bc_*` fill the full ghost
-ring (corners included) identically on both backends. That is a strictly good
-change and it removes the last reason for the two backends' dead cells to differ.
-Do NOT "fix" the Jacobi ping-pong by making `tmp` non-zeroed — the zeroing is
-deliberate (see the comment there: uninitialised memory once leaked NaN into `p`
-and blew up the coupled solve).
-
-### Gate
-
-* `tests/test_poisson_driver.py::test_poisson_cpu_agrees_with_cuda` should be
-  tightened to compare the interior **without** the `d - d.mean()` step, and
-  ideally the full padded tensor once the ghost ring is consistent.
-* `test_smoother_3d_cpu_eq_cuda`'s `_live_cells()` mask should be removable.
-* 50-step physics parity vs `bf7e3a7`: **velocity must be bit-identical**;
-  pressure may shift by a constant.
-* Suite green (`360 pass / 0 fail / 1 skip` today, minus whatever you re-freeze).
+* `test_poisson_cpu_agrees_with_cuda` now compares the **raw** values with no
+  `d - d.mean()` step, asserts the constant is actually pinned (removing the
+  mean may not improve the agreement), and compares the **full padded tensor**,
+  ghost ring included. All six method×ndim combos pass.
+* **The frozen force snapshot did NOT move** and was not re-frozen. `p` shifts by
+  ~13 in that config, and the pressure force is unchanged at rtol 1e-9 — a
+  closed-surface ∮p·n integral is gauge-invariant. This is exactly the check the
+  original handoff proposed ("if a velocity moves, something is reading p
+  absolutely"): nothing does.
+* `test_smoother_3d_cpu_eq_cuda`'s `_live_cells()` mask is **not** removable, and
+  the test now says why: RBGS is compared on every cell (mask dropped), while
+  odd-`nsmoothing` Jacobi legitimately zeroes the dead ghosts on CUDA (the
+  zeroing is deliberate — uninitialised memory once leaked NaN into `p`). The
+  test now asserts the mask is needed *only* there, so it can't quietly start
+  hiding something else.
 
 ---
 
-## Suggested order
+## Cost
 
-Do **A first**. It is self-contained, and once the solver is bit-reproducible you
-can gate B with an exact 50-step velocity comparison instead of a tolerance.
+600-step 0.4-gate benchmark, RTX 4080 SUPER, f32, same session:
+
+| | before | after |
+|---|---|---|
+| 2-D | 9.68 / 9.74 ms/step | 9.86 / 9.98 ms/step |
+| 3-D | 25.99 / 26.80 ms/step | 25.02 / 25.10 ms/step |
+
+A wash — the extra launch (3 stages vs 2) and the per-thread ownership loop
+(≤ 18 int compares) cost nothing measurable; the interior-mean gauge runs once
+per solve. Suite: 372 pass / 1 skip (was 360 + 12 new).
+
+## Follow-up worth considering
+
+The advection stencil reading edge/corner ghosts is now *correct and
+deterministic*, but it means those cells are load-bearing — they are not the
+"don't care" region the codebase's comments still describe them as. Worth a
+pass over the remaining "corners aren't read" comments, and worth deciding
+whether the composed-inward-step value is the BC the scheme actually wants
+there (it is what the CPU has always used, so this change did not alter it).

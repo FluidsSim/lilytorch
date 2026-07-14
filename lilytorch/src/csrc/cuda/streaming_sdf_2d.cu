@@ -18,6 +18,8 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <cub/block/block_reduce.cuh>
 
+#include "../bc_ops.h"
+
 namespace lilytorch_kernels {
 
 template <typename scalar_t>
@@ -634,8 +636,9 @@ void streaming_sdf_forces_post_2d_cuda(
 //  apply_bcs_2d (CUDA)
 //
 //  2-D analogue of ``apply_bcs_3d``: writes one ghost line per op
-//  (Neumann copy or Dirichlet constant).  See CPU impl for the
-//  argument layout.
+//  (Neumann copy, Dirichlet constant, or reflective).  One launch per op
+//  kind; the write-ownership rule in bc_ops.h keeps the corner ghosts
+//  race-free and deterministic.  See CPU impl for the argument layout.
 // =====================================================================
 
 template <typename scalar_t>
@@ -643,52 +646,18 @@ __global__ void apply_bcs_2d_kernel(
     scalar_t* __restrict__ u,
     scalar_t* __restrict__ v,
     const int64_t* __restrict__ shapes,
-    const int* __restrict__ neu_desc,
-    const int N_neu,
-    const int* __restrict__ dir_desc,
-    const scalar_t* __restrict__ dir_val,
-    const int N_dir,
-    const int* __restrict__ ref_desc,
-    const scalar_t* __restrict__ ref_val,
-    const int N_ref)
+    const int kind,
+    const int* __restrict__ desc,
+    const scalar_t* __restrict__ vals,   // null for Neumann
+    const int nops)
 {
+    using namespace lilytorch_kernels::bcs;
+
     const int op = blockIdx.y;
-    const int total = N_neu + N_dir + N_ref;
-    if (op >= total) return;
+    if (op >= nops) return;
 
-    // 0 = Neumann copy, 1 = Dirichlet direct write, 2 = reflective.
-    int kind, comp, axis, dst_along, src_along = 0;
-    scalar_t value = scalar_t(0);
-
-    if (op < N_neu) {
-        kind = 0;
-        comp = neu_desc[op * 3 + 0];
-        axis = neu_desc[op * 3 + 1];
-        const int side = neu_desc[op * 3 + 2];
-        const int sz = (int)shapes[comp * 2 + axis];
-        if (side == 0) { dst_along = 0;      src_along = 1; }
-        else           { dst_along = sz - 1; src_along = sz - 2; }
-    } else if (op < N_neu + N_dir) {
-        const int d = op - N_neu;
-        kind = 1;
-        comp = dir_desc[d * 3 + 0];
-        axis = dir_desc[d * 3 + 1];
-        const int offset = dir_desc[d * 3 + 2];
-        const int sz = (int)shapes[comp * 2 + axis];
-        dst_along = (offset >= 0) ? offset : (sz + offset);
-        value = dir_val[d];
-    } else {
-        const int r = op - N_neu - N_dir;
-        kind = 2;
-        comp = ref_desc[r * 4 + 0];
-        axis = ref_desc[r * 4 + 1];
-        const int dst_off = ref_desc[r * 4 + 2];
-        const int src_off = ref_desc[r * 4 + 3];
-        const int sz = (int)shapes[comp * 2 + axis];
-        dst_along = (dst_off >= 0) ? dst_off : (sz + dst_off);
-        src_along = (src_off >= 0) ? src_off : (sz + src_off);
-        value = ref_val[r];
-    }
+    int comp, axis, dst_along, src_along;
+    bc_decode(kind, desc, op, shapes, /*ndim=*/2, comp, axis, dst_along, src_along);
 
     const int Nx = (int)shapes[comp * 2 + 0];
     const int Ny = (int)shapes[comp * 2 + 1];
@@ -697,24 +666,22 @@ __global__ void apply_bcs_2d_kernel(
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= dim0_max) return;
 
+    int c[2];
+    if (axis == 0) { c[0] = dst_along; c[1] = i;         }
+    else           { c[0] = i;         c[1] = dst_along; }
+
+    int s[2];
+    if (!bc_own_and_source(kind, desc, nops, op, shapes, /*ndim=*/2,
+                           comp, axis, src_along, c, s))
+        return;                                   // a lower-indexed op owns it
+
     scalar_t* base = (comp == 0) ? u : v;
+    const int64_t dst_lin = (int64_t)c[0] * Ny + c[1];
+    const int64_t src_lin = (int64_t)s[0] * Ny + s[1];
 
-    // src_lin is read only by the Neumann (kind==0) and reflective (kind==2)
-    // branches; for Dirichlet (kind==1) src_along defaults to 0, so the value
-    // computed here is harmlessly discarded.  Computing it unconditionally
-    // drops the old dead ``src_lin = 0`` init and the per-axis branch.
-    int64_t dst_lin, src_lin;
-    if (axis == 0) {
-        dst_lin = (int64_t)dst_along * Ny + i;
-        src_lin = (int64_t)src_along * Ny + i;
-    } else {
-        dst_lin = (int64_t)i * Ny + dst_along;
-        src_lin = (int64_t)i * Ny + src_along;
-    }
-
-    if      (kind == 0) base[dst_lin] = base[src_lin];
-    else if (kind == 1) base[dst_lin] = value;
-    else                base[dst_lin] = scalar_t(2) * value - base[src_lin];
+    if      (kind == BC_KIND_NEUMANN)   base[dst_lin] = base[src_lin];
+    else if (kind == BC_KIND_DIRICHLET) base[dst_lin] = vals[op];
+    else base[dst_lin] = scalar_t(2) * vals[op] - base[src_lin];
 }
 
 void apply_bcs_2d_cuda(
@@ -749,38 +716,28 @@ void apply_bcs_2d_cuda(
     const int blockX = 256;
     const int gridX  = (int)((max_line_dim + blockX - 1) / blockX);
 
-    // Two-stage launch on the same stream:
-    //   Stage 1: Neumann + Direct ops (independent of each other and of
-    //            reflective; corner overlaps among them are intentionally
-    //            order-undefined but harmless — corners aren't read by
-    //            interior stencils).
-    //   Stage 2: Reflective ops (read-modify-write against the adjacent
-    //            interior cell).  Must run AFTER stage 1 so that any
-    //            direct write to that adjacent cell is already visible.
-    // Same kernel function, just called with the other op-kind counts
-    // zeroed so the kernel only dispatches the remaining op category.
+    // One launch per op kind, in the order the eager reference applies them:
+    //   Neumann → Dirichlet → reflective.
+    // The stage boundaries define the cross-kind overlaps (a reflective op
+    // reads the adjacent cell AFTER any Dirichlet wall write to it, a Neumann
+    // op BEFORE — as on CPU); within a stage, bc_own_and_source() picks a
+    // single writer per cell.
     AT_DISPATCH_FLOATING_TYPES(u.scalar_type(), "apply_bcs_2d_cuda", [&] {
-        const int stage1 = N_neu + N_dir;
-        if (stage1 > 0) {
+        using namespace lilytorch_kernels::bcs;
+        auto launch = [&](int kind, const at::Tensor& desc,
+                          const scalar_t* vals, int nops) {
+            if (nops == 0) return;
             apply_bcs_2d_kernel<scalar_t>
-                <<<dim3(gridX, stage1, 1), dim3(blockX, 1, 1), 0, stream>>>(
+                <<<dim3(gridX, nops, 1), dim3(blockX, 1, 1), 0, stream>>>(
                     u.data_ptr<scalar_t>(), v.data_ptr<scalar_t>(),
                     shapes.data_ptr<int64_t>(),
-                    (N_neu > 0) ? neu_desc.data_ptr<int>() : nullptr, N_neu,
-                    (N_dir > 0) ? dir_desc.data_ptr<int>() : nullptr,
-                    (N_dir > 0) ? dir_val.data_ptr<scalar_t>() : nullptr, N_dir,
-                    /*ref_desc=*/nullptr, /*ref_val=*/nullptr, /*N_ref=*/0);
-        }
-        if (N_ref > 0) {
-            apply_bcs_2d_kernel<scalar_t>
-                <<<dim3(gridX, N_ref, 1), dim3(blockX, 1, 1), 0, stream>>>(
-                    u.data_ptr<scalar_t>(), v.data_ptr<scalar_t>(),
-                    shapes.data_ptr<int64_t>(),
-                    /*neu_desc=*/nullptr, /*N_neu=*/0,
-                    /*dir_desc=*/nullptr, /*dir_val=*/nullptr, /*N_dir=*/0,
-                    ref_desc.data_ptr<int>(),
-                    ref_val.data_ptr<scalar_t>(), N_ref);
-        }
+                    kind, desc.data_ptr<int>(), vals, nops);
+        };
+        launch(BC_KIND_NEUMANN, neu_desc, nullptr, N_neu);
+        launch(BC_KIND_DIRICHLET, dir_desc,
+               (N_dir > 0) ? dir_val.data_ptr<scalar_t>() : nullptr, N_dir);
+        launch(BC_KIND_REFLECTIVE, ref_desc,
+               (N_ref > 0) ? ref_val.data_ptr<scalar_t>() : nullptr, N_ref);
     });
 }
 

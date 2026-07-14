@@ -24,6 +24,8 @@
 #include <cstdint>
 #include <vector>
 
+#include "poisson_gauge.h"
+
 namespace lilytorch_kernels {
 
 // =====================================================================
@@ -942,11 +944,12 @@ static at::Tensor poisson_solve_multigrid_2d_cpu_impl(
         }
     }
 
-    // Full ghost-ring Neumann BC + float64 mean subtraction
-    apply_neumann_bc_2d_cpu(pp, Nx, Ny);
-
-    auto pmean = p.to(at::kDouble).mean();
-    p.sub_(pmean.to(p.scalar_type()));
+    // Full ghost-ring Neumann BC (corners included — apply_neumann_bc_2d_cpu is
+    // the smoothers' face-only pass and leaves them stale) + interior gauge fix.
+    // Same two helpers the CUDA driver calls, so the returned p — dead ghosts
+    // included — is bit-comparable across backends.
+    lilytorch_kernels::poisson::apply_neumann_bc_full(p);
+    lilytorch_kernels::poisson::gauge_fix(p);
     return r;
 }
 
@@ -1080,10 +1083,9 @@ static at::Tensor poisson_solve_multigrid_3d_cpu_impl(
         }
     }
 
-    apply_neumann_bc_3d_cpu(pp, Nx, Ny, Nz);
-
-    auto pmean = p.to(at::kDouble).mean();
-    p.sub_(pmean.to(p.scalar_type()));
+    // Full ghost-ring Neumann BC + interior gauge fix — see the 2-D driver.
+    lilytorch_kernels::poisson::apply_neumann_bc_full(p);
+    lilytorch_kernels::poisson::gauge_fix(p);
     return r;
 }
 
