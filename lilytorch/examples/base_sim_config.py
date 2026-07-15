@@ -788,6 +788,14 @@ class BaseSimConfig:
         sh_str = (
             "#!/bin/bash\n"
             "set -e\n"
+            "# CUDA-graph-safe allocation.  The mgcg/rmgcg Poisson solve allocates\n"
+            "# transient GPU buffers every step; without expandable segments the\n"
+            "# caching allocator can call cudaMalloc DURING the pre-projection graph\n"
+            "# capture (illegal -> intermittent 'operation failed due to a previous\n"
+            "# error during capture', crashing after a variable number of steps).\n"
+            "# Must be set before the CUDA context initialises -- i.e. here in the\n"
+            "# shell, not from Python.  Any user-set value is preserved.\n"
+            'export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"\n'
             f'"{sys.executable}" -c "{patch}from farms_sim._bootstrap import main; main()" '
             '--experiment_config experiment_config.yaml "$@"\n'
         )

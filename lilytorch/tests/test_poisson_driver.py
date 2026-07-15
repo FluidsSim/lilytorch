@@ -142,6 +142,97 @@ def test_mgcg_beats_plain_multigrid(ndim, device):
         f"{ndim}D on {device}: mgcg {r_cg:.2e} worse than multigrid {r_mg:.2e}"
 
 
+# ── MGCG on a STIFF variable-coefficient operator ────────────────────────────
+# The uniform-coefficient problem above is too easy to expose a broken CG
+# preconditioner: the multigrid V-cycle is only *mildly* non-symmetric there.
+# The real regime (two-phase 80:1–833:1 density jumps) is where a non-symmetric
+# preconditioner made mgcg/rmgcg converge WORSE than plain multigrid.  These
+# gates build that stiff operator (coeff jump across a z-plane) and check the
+# two properties the 2026-07-15 fix restored:
+#   1. the CG-preconditioner V-cycle (full-weighting restriction = P^T) is
+#      SYMMETRIC to ~machine precision, and
+#   2. mgcg converges at least as far as multigrid at EQUAL V-cycle budget.
+# Before the fix (sum-of-children restriction != trilinear^T) both fail: the
+# one-cycle operator was ~4–55% asymmetric and mgcg-30 was ~8x worse than
+# multigrid-30 at 833:1.
+
+def _stiff_faces(ndim, dtype, N, ratio, device):
+    """Face coefficients with a `ratio`:1 jump across the mid-plane of the last
+    axis (mimics the projection coeff c=dt/rho across an air/water interface)."""
+    o = dict(dtype=dtype, device=device)
+    lo, hi = 1.0, ratio                       # c is `ratio`x larger in the "air"
+    shp = (N,) * ndim
+    c = torch.full(shp, lo, **o)
+    half = N // 2
+    c[(...,)] = torch.where(
+        torch.arange(N, device=device).expand(shp) < half,
+        torch.tensor(lo, **o), torch.tensor(hi, **o))
+    cpad = torch.nn.functional.pad(
+        c[(None, None)], (1, 1) * ndim, mode="replicate")[0, 0]
+    faces = {}
+    for d, lab in enumerate(["ch", "cv", "cw"][:ndim]):
+        fwd = [slice(1, -1)] * ndim; fwd[d] = slice(1, None)
+        bwd = [slice(1, -1)] * ndim; bwd[d] = slice(None, -1)
+        faces[lab] = (0.5 * (cpad[tuple(fwd)] + cpad[tuple(bwd)])).contiguous()
+    return faces
+
+
+@SKIP_NO_CUDA
+@pytest.mark.parametrize("ndim", [2, 3])
+@pytest.mark.parametrize("ratio", [80.0, 833.0])
+def test_mgcg_preconditioner_is_symmetric(ndim, ratio):
+    """One CG-preconditioner V-cycle must be a SYMMETRIC operator: <Mu,v>=<u,Mv>."""
+    dtype, device, N = torch.float64, "cuda", 32
+    h = 1.0 / N
+    faces = _stiff_faces(ndim, dtype, N, ratio, device)
+    s = PoissonSolver(dtype=dtype, device=device, h=h, tol=-1.0, max_vcycles=1,
+                      max_cycles=1, nsmoothing=5, w=1, smoother="jacobi",
+                      verbose=False)
+    face_arrs = [faces[k] for k in ["ch", "cv", "cw"][:ndim]]
+    inner = (slice(1, -1),) * ndim
+    pshp = (N + 2,) * ndim
+
+    def M(vec):
+        z = torch.zeros(pshp, dtype=dtype, device=device)
+        z, _ = s._dispatch_vcycle(vec, z, face_arrs)
+        return z[inner].clone()
+
+    torch.manual_seed(0)
+    u = torch.randn((N,) * ndim, dtype=dtype, device=device); u -= u.mean()
+    v = torch.randn((N,) * ndim, dtype=dtype, device=device); v -= v.mean()
+    a = (M(u) * v).sum().item()
+    b = (u * M(v)).sum().item()
+    rel = abs(a - b) / max(abs(a), abs(b), 1e-30)
+    assert rel < 1e-9, \
+        f"{ndim}D {ratio}:1 preconditioner not symmetric: <Mu,v>={a:.4e} <u,Mv>={b:.4e} rel={rel:.2e}"
+
+
+@SKIP_NO_CUDA
+@pytest.mark.parametrize("ndim", [2, 3])
+@pytest.mark.parametrize("ratio", [80.0, 833.0])
+def test_mgcg_beats_multigrid_stiff(ndim, ratio):
+    """At EQUAL V-cycle budget, mgcg must not converge worse than multigrid on a
+    stiff jump operator (the property a non-symmetric preconditioner destroyed)."""
+    dtype, device, N, K = torch.float64, "cuda", 48, 20
+    h = 1.0 / N
+    faces = _stiff_faces(ndim, dtype, N, ratio, device)
+    f = torch.randn((N,) * ndim, dtype=dtype, device=device); f -= f.mean()
+    p0 = torch.zeros((N + 2,) * ndim, dtype=dtype, device=device)
+
+    def run(method, max_vc, max_cg):
+        s = PoissonSolver(dtype=dtype, device=device, h=h, tol=-1.0,
+                          max_vcycles=max_vc, max_cycles=max_cg, nsmoothing=5,
+                          w=1, smoother="jacobi", verbose=False)
+        _, r = getattr(s, method)(f.clone(), p0.clone(),
+                                  **{k: v.clone() for k, v in faces.items()})
+        return r.abs().max().item()
+
+    r_mg = run("solve_multigrid", K, 0)     # K V-cycles
+    r_cg = run("solve_mgcg", 1, K)          # K CG iters = K V-cycles of work
+    assert r_cg <= r_mg * 1.05, \
+        f"{ndim}D {ratio}:1: mgcg {r_cg:.2e} worse than multigrid {r_mg:.2e} at equal budget"
+
+
 # ── 3-D smoother CPU twins == CUDA kernels ───────────────────────────────────
 # Regression gate for the CPU rbgs_sweep_3d bug the Warp removal exposed.  The
 # CPU Poisson used to run on WarpMG, so this twin was never compared to CUDA,

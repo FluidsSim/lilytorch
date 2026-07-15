@@ -73,6 +73,12 @@ void mg_residual_3d_cuda(
 
 void restrict_residual_2d_cuda(at::Tensor r, at::Tensor rc);
 void restrict_residual_3d_cuda(at::Tensor r, at::Tensor rc);
+// Full-weighting restriction = transpose of prolongate_add (see
+// multigrid_transfer.cu).  The V-cycle uses THIS, not the sum-of-children
+// restrict_residual above, so that R = P^T and the cycle is a SYMMETRIC
+// operator — required for the mgcg/rmgcg CG preconditioner to be valid.
+void restrict_fw_2d_cuda(at::Tensor r, at::Tensor rc);
+void restrict_fw_3d_cuda(at::Tensor r, at::Tensor rc);
 void restrict_face_2d_cuda(at::Tensor src, at::Tensor dst, int64_t face_dim);
 void restrict_face_3d_cuda(at::Tensor src, at::Tensor dst, int64_t face_dim);
 void prolongate_add_2d_cuda(at::Tensor ec, at::Tensor p);
@@ -123,12 +129,20 @@ static inline void smooth_3d(
 //   Output (in p) : smoothed pressure;  r filled in caller-provided buffer
 // =====================================================================
 
+// ``variational`` selects the residual restriction:
+//   false  -> sum-of-children (restrict_residual): robust for the STATIONARY
+//             multigrid iteration, which is sensitive to coarse-correction
+//             scaling and DIVERGES with full-weighting on stiff (833:1) operators.
+//   true   -> full-weighting = P^T (restrict_fw): makes the V-cycle a SYMMETRIC
+//             operator, required for the mgcg/rmgcg CG preconditioner.  CG is
+//             immune to the scaling issue (it computes the optimal step length),
+//             so this is both valid AND far more effective there.
 static void vcycle_2d(
         at::Tensor p, at::Tensor f,
         at::Tensor ch, at::Tensor cv,
         at::Tensor r_out,                 // pre-allocated (Nx, Ny)
         double jcap_tol, double w, int64_t nsmoothing,
-        int64_t smoother_id)
+        int64_t smoother_id, bool variational = false)
 {
     auto opts = p.options();
     const int Nx = (int)f.size(0);
@@ -155,14 +169,15 @@ static void vcycle_2d(
 
         // Restricted residual → coarse RHS
         auto r_c = at::empty({Nx_c, Ny_c}, opts);
-        restrict_residual_2d_cuda(r_out, r_c);
+        if (variational) restrict_fw_2d_cuda(r_out, r_c);       // P^T (symmetric)
+        else             restrict_residual_2d_cuda(r_out, r_c); // sum-of-children
 
         // Coarse correction starts from zero, ghost-padded.
         auto p_c = at::zeros({Nx_c + 2, Ny_c + 2}, opts);
         auto r_c2 = at::empty({Nx_c, Ny_c}, opts);  // coarse-level residual buffer
 
         vcycle_2d(p_c, r_c, ch_c, cv_c, r_c2,
-                  jcap_tol, w, nsmoothing, smoother_id);
+                  jcap_tol, w, nsmoothing, smoother_id, variational);
 
         // Prolongate + add into fine p (in place).
         prolongate_add_2d_cuda(p_c, p);
@@ -177,12 +192,13 @@ static void vcycle_2d(
 // 3-D recursive V-cycle
 // =====================================================================
 
+// See the note on ``variational`` above vcycle_2d.
 static void vcycle_3d(
         at::Tensor p, at::Tensor f,
         at::Tensor ch, at::Tensor cv, at::Tensor cw,
         at::Tensor r_out,
         double jcap_tol, double w, int64_t nsmoothing,
-        int64_t smoother_id)
+        int64_t smoother_id, bool variational = false)
 {
     auto opts = p.options();
     const int Nx = (int)f.size(0);
@@ -214,13 +230,14 @@ static void vcycle_3d(
         restrict_face_3d_cuda(cw, cw_c, 2);
 
         auto r_c  = at::empty({Nx_c, Ny_c, Nz_c}, opts);
-        restrict_residual_3d_cuda(r_out, r_c);
+        if (variational) restrict_fw_3d_cuda(r_out, r_c);       // P^T (symmetric)
+        else             restrict_residual_3d_cuda(r_out, r_c); // sum-of-children
 
         auto p_c  = at::zeros({Nx_c + 2, Ny_c + 2, Nz_c + 2}, opts);
         auto r_c2 = at::empty({Nx_c, Ny_c, Nz_c}, opts);
 
         vcycle_3d(p_c, r_c, ch_c, cv_c, cw_c, r_c2,
-                  jcap_tol, w, nsmoothing, smoother_id);
+                  jcap_tol, w, nsmoothing, smoother_id, variational);
 
         prolongate_add_3d_cuda(p_c, p);
 
@@ -390,7 +407,7 @@ static at::Tensor poisson_solve_mgcg_2d_cuda(
     // to get B(z) ≈ r.
     auto neg_r = r.neg();
     for (int64_t i = 0; i < precond_vcycles; ++i)
-        vcycle_2d(z, neg_r, ch, cv, r_buf, jcap_tol, w, nsmoothing, smoother_id);
+        vcycle_2d(z, neg_r, ch, cv, r_buf, jcap_tol, w, nsmoothing, smoother_id, /*variational=*/true);
 
     auto d = z.clone();
     apply_neumann_bc(d);
@@ -428,7 +445,7 @@ static at::Tensor poisson_solve_mgcg_2d_cuda(
         z.zero_();
         r.neg_(); // reuse buffer: r → −r
         for (int64_t i = 0; i < precond_vcycles; ++i)
-            vcycle_2d(z, r, ch, cv, r_buf, jcap_tol, w, nsmoothing, smoother_id);
+            vcycle_2d(z, r, ch, cv, r_buf, jcap_tol, w, nsmoothing, smoother_id, /*variational=*/true);
         r.neg_(); // restore
 
         auto rz_new = (r * z_in).to(at::kDouble).sum();
@@ -488,7 +505,7 @@ static at::Tensor poisson_solve_mgcg_3d_cuda(
 
     auto neg_r = r.neg();
     for (int64_t i = 0; i < precond_vcycles; ++i)
-        vcycle_3d(z, neg_r, ch, cv, cw, r_buf, jcap_tol, w, nsmoothing, smoother_id);
+        vcycle_3d(z, neg_r, ch, cv, cw, r_buf, jcap_tol, w, nsmoothing, smoother_id, /*variational=*/true);
 
     auto d = z.clone();
     apply_neumann_bc(d);
@@ -520,7 +537,7 @@ static at::Tensor poisson_solve_mgcg_3d_cuda(
         z.zero_();
         r.neg_();
         for (int64_t i = 0; i < precond_vcycles; ++i)
-            vcycle_3d(z, r, ch, cv, cw, r_buf, jcap_tol, w, nsmoothing, smoother_id);
+            vcycle_3d(z, r, ch, cv, cw, r_buf, jcap_tol, w, nsmoothing, smoother_id, /*variational=*/true);
         r.neg_();
 
         auto rz_new = (r * z_in).to(at::kDouble).sum();
@@ -606,7 +623,7 @@ static std::tuple<at::Tensor, at::Tensor, int64_t> poisson_solve_rmgcg_2d_cuda(
     auto r_buf = at::empty({Nx, Ny}, opts);
     auto neg_r = r.neg();
     for (int64_t i = 0; i < precond_vcycles; ++i)
-        vcycle_2d(z, neg_r, ch, cv, r_buf, jcap_tol, w, nsmoothing, smoother_id);
+        vcycle_2d(z, neg_r, ch, cv, r_buf, jcap_tol, w, nsmoothing, smoother_id, /*variational=*/true);
 
     auto d    = z.clone();
     auto d_in = d.index({Slice(1, -1), Slice(1, -1)});
@@ -644,7 +661,7 @@ static std::tuple<at::Tensor, at::Tensor, int64_t> poisson_solve_rmgcg_2d_cuda(
         z.zero_();
         r.neg_();
         for (int64_t i = 0; i < precond_vcycles; ++i)
-            vcycle_2d(z, r, ch, cv, r_buf, jcap_tol, w, nsmoothing, smoother_id);
+            vcycle_2d(z, r, ch, cv, r_buf, jcap_tol, w, nsmoothing, smoother_id, /*variational=*/true);
         r.neg_();
 
         auto rz_new = (r * z_in).to(at::kDouble).sum();
@@ -724,7 +741,7 @@ static std::tuple<at::Tensor, at::Tensor, int64_t> poisson_solve_rmgcg_3d_cuda(
     auto r_buf = at::empty({Nx, Ny, Nz}, opts);
     auto neg_r = r.neg();
     for (int64_t i = 0; i < precond_vcycles; ++i)
-        vcycle_3d(z, neg_r, ch, cv, cw, r_buf, jcap_tol, w, nsmoothing, smoother_id);
+        vcycle_3d(z, neg_r, ch, cv, cw, r_buf, jcap_tol, w, nsmoothing, smoother_id, /*variational=*/true);
 
     auto d    = z.clone();
     auto d_in = d.index({Slice(1, -1), Slice(1, -1), Slice(1, -1)});
@@ -761,7 +778,7 @@ static std::tuple<at::Tensor, at::Tensor, int64_t> poisson_solve_rmgcg_3d_cuda(
         z.zero_();
         r.neg_();
         for (int64_t i = 0; i < precond_vcycles; ++i)
-            vcycle_3d(z, r, ch, cv, cw, r_buf, jcap_tol, w, nsmoothing, smoother_id);
+            vcycle_3d(z, r, ch, cv, cw, r_buf, jcap_tol, w, nsmoothing, smoother_id, /*variational=*/true);
         r.neg_();
 
         auto rz_new = (r * z_in).to(at::kDouble).sum();
@@ -801,7 +818,7 @@ static at::Tensor mg_vcycle_2d_cuda(
 {
     auto r = at::empty_like(f);
     for (int64_t i = 0; i < n_vcycles; ++i)
-        vcycle_2d(p, f, ch, cv, r, jcap_tol, w, nsmoothing, smoother_id);
+        vcycle_2d(p, f, ch, cv, r, jcap_tol, w, nsmoothing, smoother_id, /*variational=*/true);
     return r;
 }
 
@@ -813,7 +830,7 @@ static at::Tensor mg_vcycle_3d_cuda(
 {
     auto r = at::empty_like(f);
     for (int64_t i = 0; i < n_vcycles; ++i)
-        vcycle_3d(p, f, ch, cv, cw, r, jcap_tol, w, nsmoothing, smoother_id);
+        vcycle_3d(p, f, ch, cv, cw, r, jcap_tol, w, nsmoothing, smoother_id, /*variational=*/true);
     return r;
 }
 

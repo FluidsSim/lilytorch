@@ -470,6 +470,118 @@ void prolongate_add_3d_cuda(at::Tensor ec, at::Tensor p) {
     });
 }
 
+// =====================================================================
+// Full-weighting residual restriction  =  transpose of prolongate_add
+//
+// The plain sum-of-children restriction above is NOT the transpose of the
+// (bi/tri)linear prolongation, so the multigrid V-cycle built from that pair
+// is a NON-SYMMETRIC operator — fine for a stationary V-cycle, but INVALID as
+// a preconditioner for CG (mgcg/rmgcg), which needs an SPD M.  This kernel is
+// the EXACT adjoint P^T: every fine cell scatters its residual to the same 8
+// (4 in 2-D) coarse corners with the SAME linear_weights() the prolongation
+// gathers with, so R = P^T holds to rounding, INCLUDING the align_corners=False
+// edge clamping (il==ir collapse contributes wl+wr=1, matching P reading the
+// same coarse cell twice).  ``rc`` (coarse interior) is zeroed by the wrapper;
+// the scatter accumulates with atomicAdd.
+// =====================================================================
+
+template <typename scalar_t>
+__global__ void restrict_fw_2d_kernel(
+        const scalar_t* __restrict__ r,     // fine interior (Nx_f, Ny_f)
+        scalar_t* __restrict__ rc,           // coarse interior (Nx_c, Ny_c), pre-zeroed
+        int Nx_c, int Ny_c,
+        int Nx_f, int Ny_f)
+{
+    const int j = blockIdx.x * blockDim.x + threadIdx.x;
+    const int i = blockIdx.y * blockDim.y + threadIdx.y;
+    if (i >= Nx_f || j >= Ny_f) return;
+
+    int il, ir, jl, jr;
+    scalar_t wil, wir, wjl, wjr;
+    linear_weights<scalar_t>(i, Nx_c, Nx_f, il, ir, wil, wir);
+    linear_weights<scalar_t>(j, Ny_c, Ny_f, jl, jr, wjl, wjr);
+
+    const scalar_t val = r[i * Ny_f + j];
+    const int ii[2] = {il, ir};  const scalar_t wi[2] = {wil, wir};
+    const int jj[2] = {jl, jr};  const scalar_t wj[2] = {wjl, wjr};
+    #pragma unroll
+    for (int a = 0; a < 2; ++a)
+        #pragma unroll
+        for (int b = 0; b < 2; ++b)
+            atomicAdd(&rc[ii[a] * Ny_c + jj[b]], wi[a] * wj[b] * val);
+}
+
+template <typename scalar_t>
+__global__ void restrict_fw_3d_kernel(
+        const scalar_t* __restrict__ r,
+        scalar_t* __restrict__ rc,
+        int Nx_c, int Ny_c, int Nz_c,
+        int Nx_f, int Ny_f, int Nz_f)
+{
+    const int k = blockIdx.x * blockDim.x + threadIdx.x;
+    const int j = blockIdx.y * blockDim.y + threadIdx.y;
+    const int i = blockIdx.z * blockDim.z + threadIdx.z;
+    if (i >= Nx_f || j >= Ny_f || k >= Nz_f) return;
+
+    int il, ir, jl, jr, kl, kr;
+    scalar_t wil, wir, wjl, wjr, wkl, wkr;
+    linear_weights<scalar_t>(i, Nx_c, Nx_f, il, ir, wil, wir);
+    linear_weights<scalar_t>(j, Ny_c, Ny_f, jl, jr, wjl, wjr);
+    linear_weights<scalar_t>(k, Nz_c, Nz_f, kl, kr, wkl, wkr);
+
+    const int sj_c = Nz_c;
+    const int si_c = Ny_c * Nz_c;
+    const scalar_t val = r[(i * Ny_f + j) * Nz_f + k];
+
+    const int ii[2] = {il, ir};  const scalar_t wi[2] = {wil, wir};
+    const int jj[2] = {jl, jr};  const scalar_t wj[2] = {wjl, wjr};
+    const int kk[2] = {kl, kr};  const scalar_t wk[2] = {wkl, wkr};
+    #pragma unroll
+    for (int a = 0; a < 2; ++a)
+        #pragma unroll
+        for (int b = 0; b < 2; ++b)
+            #pragma unroll
+            for (int c = 0; c < 2; ++c)
+                atomicAdd(&rc[ii[a] * si_c + jj[b] * sj_c + kk[c]],
+                          wi[a] * wj[b] * wk[c] * val);
+}
+
+void restrict_fw_2d_cuda(at::Tensor r, at::Tensor rc) {
+    TORCH_CHECK(r.is_contiguous() && rc.is_contiguous(),
+                "restrict_fw_2d: tensors must be contiguous");
+    TORCH_CHECK(r.device().is_cuda(), "restrict_fw_2d: tensors must be on CUDA");
+    TORCH_CHECK(r.dim() == 2 && rc.dim() == 2, "restrict_fw_2d: tensors must be 2-D");
+    const int Nx_f = (int)r.size(0),  Ny_f = (int)r.size(1);
+    const int Nx_c = (int)rc.size(0), Ny_c = (int)rc.size(1);
+    rc.zero_();
+    auto stream = at::cuda::getCurrentCUDAStream();
+    const dim3 blk(32, 8);
+    const dim3 grd(cdiv_t(Ny_f, 32), cdiv_t(Nx_f, 8));
+    AT_DISPATCH_FLOATING_TYPES(r.scalar_type(), "restrict_fw_2d", [&] {
+        restrict_fw_2d_kernel<scalar_t><<<grd, blk, 0, stream>>>(
+            r.data_ptr<scalar_t>(), rc.data_ptr<scalar_t>(),
+            Nx_c, Ny_c, Nx_f, Ny_f);
+    });
+}
+
+void restrict_fw_3d_cuda(at::Tensor r, at::Tensor rc) {
+    TORCH_CHECK(r.is_contiguous() && rc.is_contiguous(),
+                "restrict_fw_3d: tensors must be contiguous");
+    TORCH_CHECK(r.device().is_cuda(), "restrict_fw_3d: tensors must be on CUDA");
+    TORCH_CHECK(r.dim() == 3 && rc.dim() == 3, "restrict_fw_3d: tensors must be 3-D");
+    const int Nx_f = (int)r.size(0),  Ny_f = (int)r.size(1),  Nz_f = (int)r.size(2);
+    const int Nx_c = (int)rc.size(0), Ny_c = (int)rc.size(1), Nz_c = (int)rc.size(2);
+    rc.zero_();
+    auto stream = at::cuda::getCurrentCUDAStream();
+    const dim3 blk(16, 8, 4);
+    const dim3 grd(cdiv_t(Nz_f, 16), cdiv_t(Ny_f, 8), cdiv_t(Nx_f, 4));
+    AT_DISPATCH_FLOATING_TYPES(r.scalar_type(), "restrict_fw_3d", [&] {
+        restrict_fw_3d_kernel<scalar_t><<<grd, blk, 0, stream>>>(
+            r.data_ptr<scalar_t>(), rc.data_ptr<scalar_t>(),
+            Nx_c, Ny_c, Nz_c, Nx_f, Ny_f, Nz_f);
+    });
+}
+
 // ---- CUDA dispatch registration -------------------------------------
 TORCH_LIBRARY_IMPL(lilytorch_kernels, CUDA, m) {
     m.impl("restrict_residual_2d", &restrict_residual_2d_cuda);

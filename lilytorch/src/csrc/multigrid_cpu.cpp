@@ -740,6 +740,70 @@ static void prolongate_add_3d_cpu_impl(
     });
 }
 
+// =====================================================================
+//  restrict_fw (2-D / 3-D) — full-weighting = transpose of prolongate_add.
+//  Serial scatter with the IDENTICAL linear_weights() the prolongation gathers
+//  with, so R = P^T exactly (matching the CUDA restrict_fw_* kernels).  This is
+//  what the V-cycle uses so that the cycle is a SYMMETRIC operator, required for
+//  the mgcg/rmgcg CG preconditioner to be valid.  ``rc`` (coarse interior) is
+//  zeroed first, then accumulated; serial so no scatter race (the CPU MGCG path
+//  is a fallback, and these grids are small).
+// =====================================================================
+
+template <typename scalar_t>
+static void restrict_fw_2d_cpu_impl(
+        const scalar_t* r, scalar_t* rc,
+        int Nx_f, int Ny_f, int Nx_c, int Ny_c)
+{
+    std::fill(rc, rc + (size_t)Nx_c * Ny_c, (scalar_t)0);
+    for (int i = 0; i < Nx_f; ++i) {
+        int il, ir; scalar_t wil, wir;
+        linear_weights<scalar_t>(i, Nx_c, Nx_f, il, ir, wil, wir);
+        const int ii[2] = {il, ir}; const scalar_t wi[2] = {wil, wir};
+        for (int j = 0; j < Ny_f; ++j) {
+            int jl, jr; scalar_t wjl, wjr;
+            linear_weights<scalar_t>(j, Ny_c, Ny_f, jl, jr, wjl, wjr);
+            const int jj[2] = {jl, jr}; const scalar_t wj[2] = {wjl, wjr};
+            const scalar_t val = r[i * Ny_f + j];
+            for (int a = 0; a < 2; ++a)
+                for (int b = 0; b < 2; ++b)
+                    rc[ii[a] * Ny_c + jj[b]] += wi[a] * wj[b] * val;
+        }
+    }
+}
+
+template <typename scalar_t>
+static void restrict_fw_3d_cpu_impl(
+        const scalar_t* r, scalar_t* rc,
+        int Nx_f, int Ny_f, int Nz_f,
+        int Nx_c, int Ny_c, int Nz_c)
+{
+    const int sif = Ny_f * Nz_f, sjf = Nz_f;
+    const int sic = Ny_c * Nz_c, sjc = Nz_c;
+    std::fill(rc, rc + (size_t)Nx_c * sic, (scalar_t)0);
+    for (int i = 0; i < Nx_f; ++i) {
+        int il, ir; scalar_t wil, wir;
+        linear_weights<scalar_t>(i, Nx_c, Nx_f, il, ir, wil, wir);
+        const int ii[2] = {il, ir}; const scalar_t wi[2] = {wil, wir};
+        for (int j = 0; j < Ny_f; ++j) {
+            int jl, jr; scalar_t wjl, wjr;
+            linear_weights<scalar_t>(j, Ny_c, Ny_f, jl, jr, wjl, wjr);
+            const int jj[2] = {jl, jr}; const scalar_t wj[2] = {wjl, wjr};
+            for (int k = 0; k < Nz_f; ++k) {
+                int kl, kr; scalar_t wkl, wkr;
+                linear_weights<scalar_t>(k, Nz_c, Nz_f, kl, kr, wkl, wkr);
+                const int kk[2] = {kl, kr}; const scalar_t wk[2] = {wkl, wkr};
+                const scalar_t val = r[i * sif + j * sjf + k];
+                for (int a = 0; a < 2; ++a)
+                    for (int b = 0; b < 2; ++b)
+                        for (int c = 0; c < 2; ++c)
+                            rc[ii[a] * sic + jj[b] * sjc + kk[c]]
+                                += wi[a] * wj[b] * wk[c] * val;
+            }
+        }
+    }
+}
+
 
 template <typename scalar_t>
 static inline scalar_t cv_vleer(scalar_t db, scalar_t df) {
@@ -826,12 +890,17 @@ static void cvof_sweep_cpu_impl(
 //  Poisson whole-solve driver (2-D multigrid)
 // =====================================================================
 
+// ``variational`` selects the residual restriction (see the CUDA note in
+// cuda/poisson_solve.cu): false = sum-of-children (robust for the stationary
+// multigrid iteration); true = full-weighting = P^T (symmetric V-cycle for the
+// mgcg/rmgcg CG preconditioner).
 template <typename scalar_t>
 static void vcycle_2d_cpu(
         scalar_t* p, const scalar_t* f,
         const scalar_t* ch, const scalar_t* cv,
         int Nx, int Ny, scalar_t jcap_tol, scalar_t w,
-        int nsmoothing, int smoother_id, scalar_t* r_out)
+        int nsmoothing, int smoother_id, scalar_t* r_out,
+        bool variational = false)
 {
     // Extract face coefficient slices
     std::vector<scalar_t> cp0_buf(Nx * Ny), cm0_buf(Nx * Ny);
@@ -876,14 +945,17 @@ static void vcycle_2d_cpu(
 
         // Restrict residual
         std::vector<scalar_t> r_c(Nx_c * Ny_c);
-        restrict_residual_2d_cpu_impl(r_out, r_c.data(), Nx, Ny, Nx_c, Ny_c);
+        if (variational)
+            restrict_fw_2d_cpu_impl(r_out, r_c.data(), Nx, Ny, Nx_c, Ny_c);       // P^T (symmetric)
+        else
+            restrict_residual_2d_cpu_impl(r_out, r_c.data(), Nx, Ny, Nx_c, Ny_c); // sum-of-children
 
         // Coarse solve
         std::vector<scalar_t> p_c((Nx_c + 2) * (Ny_c + 2), (scalar_t)0);
         std::vector<scalar_t> r_c2(Nx_c * Ny_c);
         vcycle_2d_cpu<scalar_t>(p_c.data(), r_c.data(), ch_c.data(), cv_c.data(),
                                  Nx_c, Ny_c, jcap_tol, w, nsmoothing, smoother_id,
-                                 r_c2.data());
+                                 r_c2.data(), variational);
 
         // Prolongate + add
         prolongate_add_2d_cpu_impl(p_c.data(), p, Nx_c, Ny_c, Nx, Ny);
@@ -962,7 +1034,8 @@ static void vcycle_3d_cpu(
         scalar_t* p, const scalar_t* f,
         const scalar_t* ch, const scalar_t* cv, const scalar_t* cw,
         int Nx, int Ny, int Nz, scalar_t jcap_tol, scalar_t w,
-        int nsmoothing, int smoother_id, scalar_t* r_out)
+        int nsmoothing, int smoother_id, scalar_t* r_out,
+        bool variational = false)
 {
     // Extract face coefficient slices
     const size_t ncell = (size_t)Nx * Ny * Nz;
@@ -1015,13 +1088,16 @@ static void vcycle_3d_cpu(
         restrict_face_3d_cpu_impl<scalar_t, 2>(cw, cw_c.data(), Nx, Ny, Nz, Nx_c, Ny_c, Nz_c);
 
         std::vector<scalar_t> r_c(Nx_c * Ny_c * Nz_c);
-        restrict_residual_3d_cpu_impl(r_out, r_c.data(), Nx, Ny, Nz, Nx_c, Ny_c, Nz_c);
+        if (variational)
+            restrict_fw_3d_cpu_impl(r_out, r_c.data(), Nx, Ny, Nz, Nx_c, Ny_c, Nz_c);       // P^T (symmetric)
+        else
+            restrict_residual_3d_cpu_impl(r_out, r_c.data(), Nx, Ny, Nz, Nx_c, Ny_c, Nz_c); // sum-of-children
 
         std::vector<scalar_t> p_c((Nx_c + 2) * (Ny_c + 2) * (Nz_c + 2), (scalar_t)0);
         std::vector<scalar_t> r_c2(Nx_c * Ny_c * Nz_c);
         vcycle_3d_cpu<scalar_t>(p_c.data(), r_c.data(), ch_c.data(), cv_c.data(), cw_c.data(),
                                  Nx_c, Ny_c, Nz_c, jcap_tol, w, nsmoothing, smoother_id,
-                                 r_c2.data());
+                                 r_c2.data(), variational);
 
         prolongate_add_3d_cpu_impl(p_c.data(), p, Nx_c, Ny_c, Nz_c, Nx, Ny, Nz);
 
@@ -1404,7 +1480,8 @@ static at::Tensor mg_vcycle_2d_cpu_impl(
         vcycle_2d_cpu<scalar_t>(pp, ff, cch, ccv, Nx, Ny,
                                 static_cast<scalar_t>(jcap_tol),
                                 static_cast<scalar_t>(w),
-                                (int)nsmoothing, (int)smoother_id, rr);
+                                (int)nsmoothing, (int)smoother_id, rr,
+                                /*variational=*/true);  // CG preconditioner: symmetric V-cycle
     }
     return r;
 }
@@ -1446,7 +1523,8 @@ static at::Tensor mg_vcycle_3d_cpu_impl(
         vcycle_3d_cpu<scalar_t>(pp, ff, cch, ccv, ccw, Nx, Ny, Nz,
                                 static_cast<scalar_t>(jcap_tol),
                                 static_cast<scalar_t>(w),
-                                (int)nsmoothing, (int)smoother_id, rr);
+                                (int)nsmoothing, (int)smoother_id, rr,
+                                /*variational=*/true);  // CG preconditioner: symmetric V-cycle
     }
     return r;
 }

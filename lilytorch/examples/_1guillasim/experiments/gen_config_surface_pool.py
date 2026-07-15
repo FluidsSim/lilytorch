@@ -36,16 +36,30 @@ class SimConfig(BaseSimConfig):
         self.force_submethod               = "deltaH"
         self.zero_pressure_inside          = False
         self.body_velocity_blend_eps_cells = None
-        self.bdim_mu0_projection           = True
+        self.bdim_mu0_projection           = False
         self.bdim_body_div_correction      = True
-        # mgcg (CG-accelerated multigrid) is ~2.2x faster than standalone
-        # `multigrid` V-cycles at the same accuracy for this variable-density
-        # (833:1) two-phase Poisson on the production grid (measured native:
-        # 505ms -> 234ms/solve at 900x300x52). CG compensates for the weak
-        # V-cycles on this 17:1-anisotropic grid, where standalone multigrid
-        # stalls. (Poisson warm-start was tested and is a net loss here -- 2.6-4x
-        # SLOWER + less stable -- so it stays disabled on the two-phase path.)
-        # self.poisson_method                = "multigrid"
+        # rmgcg (recycled multigrid-preconditioned CG).  Previously this BLEW UP
+        # ~iter 1200 while multigrid survived, because the MG V-cycle used as the
+        # CG preconditioner was NON-SYMMETRIC (restriction was sum-of-8-children,
+        # prolongation is trilinear, and sum-of-8 != trilinear^T), which is
+        # invalid for CG -- mgcg/rmgcg then converged WORSE than plain multigrid.
+        # FIXED (2026-07-15): the CG-preconditioner V-cycle now uses full-
+        # weighting restriction = P^T (csrc .../multigrid_transfer.cu
+        # restrict_fw_*, gated by the `variational` flag in vcycle_{2,3}d), so it
+        # is symmetric to machine precision.  mgcg/rmgcg now beat multigrid at
+        # equal V-cycle work (bench 80:1: mgcg-30 resid 1.4e-6 vs multigrid-30
+        # 9.8e-6) and match it at ~1/3 the cost.  Standalone `multigrid` is
+        # unchanged (still sum-of-8, robust) and remains the conservative
+        # fallback if anything regresses.  Raise poisson_max_mgcg_cycles below for
+        # an even lower per-step residual.
+        #
+        # NOTE: mgcg/rmgcg allocate transient GPU buffers every step, so they need
+        # expandable_segments (else the caching allocator can cudaMalloc DURING the
+        # pre-projection CUDA-graph capture -> intermittent 'operation failed due
+        # to a previous error during capture', crashing after a few steps).  This
+        # is auto-applied in the generated run.sh (base_sim_config.gen_sh_config).
+        # self.poisson_method                = "rmgcg"
+        self.poisson_method                = "multigrid"   # conservative fallback
 
         self.headless             = False
         self.smagorinsky_cs       = 0.
@@ -71,8 +85,6 @@ class SimConfig(BaseSimConfig):
                 "control_type"   : "position",
                 "gains"          : [100.0, 1., 0],
                 "spawn_mode"     : SpawnMode.FREE,
-                # spawn at the true floating equilibrium (centreline ~1.1 cm
-                # below the waterline) to avoid the initial heave-overshoot.
                 "pose"           : [4.75, 0.1, -0.0, 0, 0, 0.05],
                 "controller_path": "lilytorch.examples._1guillasim.experiments.controller.PositionController",
                 "control_pars"   : {
@@ -207,18 +219,26 @@ class SimConfig(BaseSimConfig):
         #     # "consistent_momentum"    : True,
         # }
 
-        solver["gravity"] = [0, 0, -9.81]
-        solver["two_phase"] = {
-            "alpha_init"             : f"lambda X, Y, Z: (Z < {WATERLINE}).double()",
-            "rho_water"              : 1000.0,
-            "rho_air"                : 1.2,                                             # 80:1 stability cap
-            "nu_water"               : self.nu,
-            "nu_air"                 : 1.5e-5,
-            "alpha_exclude_body"     : True,
-            "alpha_volume_compensate": True,
-            "air_transparent_body"   : False,
-            "consistent_momentum"    : False,  # requires solver_method='python' (not kernel)
-        }
+        # solver["gravity"] = [0, 0, -9.81]
+        # solver["two_phase"] = {
+        #     "alpha_init"             : f"lambda X, Y, Z: (Z < {WATERLINE}).double()",
+        #     "rho_water"              : 1000.0,
+        #     # 80:1 stability cap.  This MUST NOT be the physical 1.2 (=833:1):
+        #     # the projection coeff is dt*mu0/rho, so in air the solver converts
+        #     # any residual pressure error into velocity with a gain of
+        #     # rho_water/rho_air.  The variable-density V-cycle contracts only
+        #     # ~0.99/cycle on this operator, so the Poisson never fully converges
+        #     # and a sub-1% residual at 833:1 blows the air velocity up (NaN ->
+        #     # MuJoCo BADQACC) around iter 1200-1400.  12.5 (80:1) amplifies the
+        #     # same residual 66x less and the air velocity saturates instead.
+        #     "rho_air"                : 12.5,
+        #     "nu_water"               : self.nu,
+        #     "nu_air"                 : 1.5e-5,
+        #     "alpha_exclude_body"     : True,
+        #     "alpha_volume_compensate": True,
+        #     "air_transparent_body"   : False,
+        #     "consistent_momentum"    : False,  # requires solver_method='python' (not kernel)
+        # }
 
         return bdim_ext
 
@@ -293,76 +313,76 @@ class SimConfig(BaseSimConfig):
             },
         })
 
-        # Air/water interface + vorticity wake visualisation
-        extensions.append({
-            "loader": "lilytorch.integration.flow_iso_gl_viewer.FlowIsoGLViewer",
-            "config": {
-                "update_every"      : 1,
-                "max_vertices"      : 20 * self.Nx * self.Ny,
-                "crop_boundary"     : 0,
-                "debug_force_visible": False,
-                "fields": [
-                    {
-                        "field"     : "interface",
-                        "iso_value" : 0.5,
-                        "alpha"     : 0.45,
-                        "color"     : "#3399FF",
-                        "smooth_sigma": 0,
-                        "exclude_body": False,
-                        "reflective": True,
-                    },
-                    # {
-                    #     "field"     : "omega_mag",
-                    #     "iso_value" : 10.0,
-                    #     "alpha"     : 0.3,
-                    #     "color"     : "#FF8C1A",
-                    #     "smooth_sigma": 0,
-                    #     "exclude_body": True,
-                    #     "phase_mask": "water",
-                    # },
-                ],
-            },
-        })
+        # # Air/water interface + vorticity wake visualisation
+        # extensions.append({
+        #     "loader": "lilytorch.integration.flow_iso_gl_viewer.FlowIsoGLViewer",
+        #     "config": {
+        #         "update_every"      : 1,
+        #         "max_vertices"      : 20 * self.Nx * self.Ny,
+        #         "crop_boundary"     : 0,
+        #         "debug_force_visible": False,
+        #         "fields": [
+        #             # {
+        #             #     "field"     : "interface",
+        #             #     "iso_value" : 0.5,
+        #             #     "alpha"     : 0.45,
+        #             #     "color"     : "#3399FF",
+        #             #     "smooth_sigma": 0,
+        #             #     "exclude_body": False,
+        #             #     "reflective": True,
+        #             # },
+        #             # {
+        #             #     "field"     : "omega_mag",
+        #             #     "iso_value" : 10.0,
+        #             #     "alpha"     : 0.3,
+        #             #     "color"     : "#FF8C1A",
+        #             #     "smooth_sigma": 0,
+        #             #     "exclude_body": True,
+        #             #     "phase_mask": "water",
+        #             # },
+        #         ],
+        #     },
+        # })
 
-        # Top-down camera auto-fitted to the pool
-        cam = top_down_camera_config(
-            self.xmin, self.xmax,
-            self.ymin, self.ymax,
-            self.zmin, self.zmax,
-            overshoot=1,
-            max_width=3840, max_height=2160,
-        )
-        extensions.append({
-            "loader": "lilytorch.integration.streaming_camera.StreamingCameraRecording",
-            "config": {
-                "path"            : os.path.join(output_folder, "output", "video.mp4"),
-                "animat_id"       : None,
-                "fps"             : 30,
-                "speed"           : 1.0,
-                "angular_velocity": 0,
-                **cam,
-            },
-        })
+        # # Top-down camera auto-fitted to the pool
+        # cam = top_down_camera_config(
+        #     self.xmin, self.xmax,
+        #     self.ymin, self.ymax,
+        #     self.zmin, self.zmax,
+        #     overshoot=1,
+        #     max_width=3840, max_height=2160,
+        # )
+        # extensions.append({
+        #     "loader": "lilytorch.integration.streaming_camera.StreamingCameraRecording",
+        #     "config": {
+        #         "path"            : os.path.join(output_folder, "output", "video.mp4"),
+        #         "animat_id"       : None,
+        #         "fps"             : 30,
+        #         "speed"           : 1.0,
+        #         "angular_velocity": 0,
+        #         **cam,
+        #     },
+        # })
 
-        # Side camera auto-fitted to the pool
-        cam_side = side_camera_config(
-            self.xmin, self.xmax,
-            self.ymin, self.ymax,
-            self.zmin, self.zmax,
-            overshoot=1,
-            max_width=3840, max_height=2160,
-        )
-        extensions.append({
-            "loader": "lilytorch.integration.streaming_camera.StreamingCameraRecording",
-            "config": {
-                "path"            : os.path.join(output_folder, "output", "video_side.mp4"),
-                "animat_id"       : None,
-                "fps"             : 30,
-                "speed"           : 1.0,
-                "angular_velocity": 0,
-                **cam_side,
-            },
-        })
+        # # Side camera auto-fitted to the pool
+        # cam_side = side_camera_config(
+        #     self.xmin, self.xmax,
+        #     self.ymin, self.ymax,
+        #     self.zmin, self.zmax,
+        #     overshoot=1,
+        #     max_width=3840, max_height=2160,
+        # )
+        # extensions.append({
+        #     "loader": "lilytorch.integration.streaming_camera.StreamingCameraRecording",
+        #     "config": {
+        #         "path"            : os.path.join(output_folder, "output", "video_side.mp4"),
+        #         "animat_id"       : None,
+        #         "fps"             : 30,
+        #         "speed"           : 1.0,
+        #         "angular_velocity": 0,
+        #         **cam_side,
+        #     },
+        # })
 
 
         return extensions
