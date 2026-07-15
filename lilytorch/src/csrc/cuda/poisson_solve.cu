@@ -25,6 +25,7 @@
 #include <ATen/cuda/CUDAContext.h>
 
 #include "../poisson_gauge.h"
+#include "../poisson_scratch.h"
 #include <torch/all.h>
 #include <torch/library.h>
 #include <torch/extension.h>
@@ -161,20 +162,24 @@ static void vcycle_2d(
     if (Nx > 2 && Ny > 2) {
         const int Nx_c = Nx / 2;
         const int Ny_c = Ny / 2;
-        // Restricted face arrays
-        auto ch_c = at::empty({Nx_c + 1, Ny_c}, opts);
-        auto cv_c = at::empty({Nx_c, Ny_c + 1}, opts);
+
+        using namespace poisson_scratch;
+
+        // Restricted face arrays (persistent, reused across solves)
+        auto& ch_c = scratch("vcycle_ch_c", {Nx_c + 1, Ny_c}, opts);
+        auto& cv_c = scratch("vcycle_cv_c", {Nx_c, Ny_c + 1}, opts);
         restrict_face_2d_cuda(ch, ch_c, /*face_dim=*/0);
         restrict_face_2d_cuda(cv, cv_c, /*face_dim=*/1);
 
         // Restricted residual → coarse RHS
-        auto r_c = at::empty({Nx_c, Ny_c}, opts);
+        auto& r_c  = scratch("vcycle_r_c", {Nx_c, Ny_c}, opts);
         if (variational) restrict_fw_2d_cuda(r_out, r_c);       // P^T (symmetric)
         else             restrict_residual_2d_cuda(r_out, r_c); // sum-of-children
 
         // Coarse correction starts from zero, ghost-padded.
-        auto p_c = at::zeros({Nx_c + 2, Ny_c + 2}, opts);
-        auto r_c2 = at::empty({Nx_c, Ny_c}, opts);  // coarse-level residual buffer
+        auto& p_c  = scratch("vcycle_p_c", {Nx_c + 2, Ny_c + 2}, opts);
+        p_c.zero_();
+        auto& r_c2 = scratch("vcycle_r_c2", {Nx_c, Ny_c}, opts);  // coarse-level residual buffer
 
         vcycle_2d(p_c, r_c, ch_c, cv_c, r_c2,
                   jcap_tol, w, nsmoothing, smoother_id, variational);
@@ -222,19 +227,22 @@ static void vcycle_3d(
         const int Ny_c = Ny / 2;
         const int Nz_c = Nz / 2;
 
-        auto ch_c = at::empty({Nx_c + 1, Ny_c, Nz_c}, opts);
-        auto cv_c = at::empty({Nx_c, Ny_c + 1, Nz_c}, opts);
-        auto cw_c = at::empty({Nx_c, Ny_c, Nz_c + 1}, opts);
+        using namespace poisson_scratch;
+
+        auto& ch_c = scratch("vcycle_ch_c", {Nx_c + 1, Ny_c, Nz_c}, opts);
+        auto& cv_c = scratch("vcycle_cv_c", {Nx_c, Ny_c + 1, Nz_c}, opts);
+        auto& cw_c = scratch("vcycle_cw_c", {Nx_c, Ny_c, Nz_c + 1}, opts);
         restrict_face_3d_cuda(ch, ch_c, 0);
         restrict_face_3d_cuda(cv, cv_c, 1);
         restrict_face_3d_cuda(cw, cw_c, 2);
 
-        auto r_c  = at::empty({Nx_c, Ny_c, Nz_c}, opts);
+        auto& r_c  = scratch("vcycle_r_c", {Nx_c, Ny_c, Nz_c}, opts);
         if (variational) restrict_fw_3d_cuda(r_out, r_c);       // P^T (symmetric)
         else             restrict_residual_3d_cuda(r_out, r_c); // sum-of-children
 
-        auto p_c  = at::zeros({Nx_c + 2, Ny_c + 2, Nz_c + 2}, opts);
-        auto r_c2 = at::empty({Nx_c, Ny_c, Nz_c}, opts);
+        auto& p_c  = scratch("vcycle_p_c", {Nx_c + 2, Ny_c + 2, Nz_c + 2}, opts);
+        p_c.zero_();
+        auto& r_c2 = scratch("vcycle_r_c2", {Nx_c, Ny_c, Nz_c}, opts);
 
         vcycle_3d(p_c, r_c, ch_c, cv_c, cw_c, r_c2,
                   jcap_tol, w, nsmoothing, smoother_id, variational);
@@ -285,8 +293,12 @@ static at::Tensor poisson_solve_multigrid_2d_cuda(
     TORCH_CHECK(p.size(0) == Nx + 2 && p.size(1) == Ny + 2,
                 "poisson_solve_multigrid_2d: p must be (Nx+2, Ny+2)");
 
-    auto f_scaled = f.mul(h2);                   // single allocation, one launch
-    auto r = at::empty_like(f_scaled);
+    using namespace poisson_scratch;
+    auto opts = p.options();
+
+    auto& f_scaled = scratch("mg2d_f_scaled", f.sizes(), opts);
+    f_scaled.copy_(f).mul_(h2);
+    auto& r = scratch("mg2d_r", f.sizes(), opts);
 
     for (int64_t i = 0; i < max_vcycles; ++i) {
         vcycle_2d(p, f_scaled, ch, cv, r,
@@ -296,12 +308,8 @@ static at::Tensor poisson_solve_multigrid_2d_cuda(
         if (tol >= 0.0 && rnorm < tol) break;
     }
 
-    // Ghost-ring gauge fix: the per-sweep BC in the smoother only refreshes the
-    // face ghosts the stencil reads, so the edge/corner ghosts are stale; refresh
-    // the full ghost ring (incl. corners) before the gauge mean so it is not
-    // biased by leftover corner values.  Matches poisson_mult.PoissonSolver.
+    // Ghost-ring gauge fix
     apply_neumann_bc(p);
-    // float64 mean subtraction (matches Python: p -= p.to(f64).mean().to(p.dtype)).
     gauge_fix(p);
     return r;
 }
@@ -328,8 +336,12 @@ static at::Tensor poisson_solve_multigrid_3d_cuda(
     TORCH_CHECK(p.size(0) == Nx + 2 && p.size(1) == Ny + 2 && p.size(2) == Nz + 2,
                 "poisson_solve_multigrid_3d: p must be (Nx+2, Ny+2, Nz+2)");
 
-    auto f_scaled = f.mul(h2);
-    auto r = at::empty_like(f_scaled);
+    using namespace poisson_scratch;
+    auto opts = p.options();
+
+    auto& f_scaled = scratch("mg3d_f_scaled", f.sizes(), opts);
+    f_scaled.copy_(f).mul_(h2);
+    auto& r = scratch("mg3d_r", f.sizes(), opts);
 
     for (int64_t i = 0; i < max_vcycles; ++i) {
         vcycle_3d(p, f_scaled, ch, cv, cw, r,
@@ -379,19 +391,23 @@ static at::Tensor poisson_solve_mgcg_2d_cuda(
     auto cp1 = cv.slice(1, 1, Ny + 1).contiguous();
     auto cm1 = cv.slice(1, 0, Ny    ).contiguous();
 
-    // b = −h²·f  (interior)
-    auto b = f.mul(-h2);
+    using namespace poisson_scratch;
+
+    // b = −h²·f  (interior) — persistent scratch, filled every solve
+    auto& b = scratch("mgcg2d_b", {Nx, Ny}, opts);
+    b.copy_(f).mul_(-h2);
 
     // x = p (already passed in), apply BC
     apply_neumann_bc(p);
 
-    // Zero-f buffer used to evaluate B(·) via mg_residual.
-    auto f_zero = at::zeros({Nx, Ny}, opts);
+    // Persistent zero-f buffer — allocated once, never written (read-only).
+    auto& f_zero = zero_buffer({Nx, Ny}, opts);
 
     // r = b − B(x).  mg_residual with f_zero gives B(x) directly.
-    auto Bx = at::empty({Nx, Ny}, opts);
+    auto& Bx = scratch("mgcg2d_Bx", {Nx, Ny}, opts);
     mg_residual_2d_cuda(p, f_zero, cp0, cm0, cp1, cm1, jcap_tol, Bx);
-    auto r = b.sub(Bx);
+    auto& r = scratch("mgcg2d_r", {Nx, Ny}, opts);
+    r.copy_(b).sub_(Bx);
 
     double r_norm = (tol >= 0.0) ? r.abs().max().item<double>() : 1.0;
     if (r_norm < tol) {
@@ -399,17 +415,20 @@ static at::Tensor poisson_solve_mgcg_2d_cuda(
         return r;
     }
 
-    // Preconditioner buffers.
-    auto z      = at::zeros({Nx + 2, Ny + 2}, opts);
-    auto r_buf  = at::empty({Nx, Ny}, opts);   // V-cycle residual scratch
+    // Preconditioner buffers (persistent).
+    auto& z     = scratch("mgcg2d_z", {Nx + 2, Ny + 2}, opts);
+    z.zero_();
+    auto& r_buf = scratch("mgcg2d_r_buf", {Nx, Ny}, opts);   // V-cycle residual scratch
 
     // V-cycle solves (S − Jp) p = f_arg, i.e. −B(p) = f_arg, so pass −r
-    // to get B(z) ≈ r.
-    auto neg_r = r.neg();
+    // to get B(z) ≈ r.  Use in-place neg to avoid a temporary allocation.
+    r.neg_();
     for (int64_t i = 0; i < precond_vcycles; ++i)
-        vcycle_2d(z, neg_r, ch, cv, r_buf, jcap_tol, w, nsmoothing, smoother_id, /*variational=*/true);
+        vcycle_2d(z, r, ch, cv, r_buf, jcap_tol, w, nsmoothing, smoother_id, /*variational=*/true);
+    r.neg_();  // restore
 
-    auto d = z.clone();
+    auto& d = scratch("mgcg2d_d", {Nx + 2, Ny + 2}, opts);
+    d.copy_(z);
     apply_neumann_bc(d);
 
     using namespace torch::indexing;
@@ -418,7 +437,7 @@ static at::Tensor poisson_solve_mgcg_2d_cuda(
     auto z_in = z.index({Slice(1, -1), Slice(1, -1)});
 
     auto rz = (r * z_in).to(at::kDouble).sum();   // scalar tensor (f64)
-    auto q  = at::empty({Nx, Ny}, opts);
+    auto& q  = scratch("mgcg2d_q", {Nx, Ny}, opts);
 
     for (int64_t k = 0; k < max_cycles; ++k) {
         // q = B(d).  mg_residual applies its own BC to d (read-only inside).
@@ -486,13 +505,20 @@ static at::Tensor poisson_solve_mgcg_3d_cuda(
     auto cp2 = cw.slice(2, 1, Nz + 1).contiguous();
     auto cm2 = cw.slice(2, 0, Nz    ).contiguous();
 
-    auto b = f.mul(-h2);
+    using namespace poisson_scratch;
+
+    // b = −h²·f  (interior) — persistent scratch, filled every solve
+    auto& b = scratch("mgcg3d_b", {Nx, Ny, Nz}, opts);
+    b.copy_(f).mul_(-h2);
+
     apply_neumann_bc(p);
 
-    auto f_zero = at::zeros({Nx, Ny, Nz}, opts);
-    auto Bx = at::empty({Nx, Ny, Nz}, opts);
+    // Persistent zero-f buffer — allocated once, never written (read-only).
+    auto& f_zero = zero_buffer({Nx, Ny, Nz}, opts);
+    auto& Bx = scratch("mgcg3d_Bx", {Nx, Ny, Nz}, opts);
     mg_residual_3d_cuda(p, f_zero, cp0, cm0, cp1, cm1, cp2, cm2, jcap_tol, Bx);
-    auto r = b.sub(Bx);
+    auto& r = scratch("mgcg3d_r", {Nx, Ny, Nz}, opts);
+    r.copy_(b).sub_(Bx);
 
     double r_norm = (tol >= 0.0) ? r.abs().max().item<double>() : 1.0;
     if (r_norm < tol) {
@@ -500,14 +526,18 @@ static at::Tensor poisson_solve_mgcg_3d_cuda(
         return r;
     }
 
-    auto z     = at::zeros({Nx + 2, Ny + 2, Nz + 2}, opts);
-    auto r_buf = at::empty({Nx, Ny, Nz}, opts);
+    auto& z     = scratch("mgcg3d_z", {Nx + 2, Ny + 2, Nz + 2}, opts);
+    z.zero_();
+    auto& r_buf = scratch("mgcg3d_r_buf", {Nx, Ny, Nz}, opts);
 
-    auto neg_r = r.neg();
+    // In-place neg to avoid temporary allocation (same pattern as inner loop).
+    r.neg_();
     for (int64_t i = 0; i < precond_vcycles; ++i)
-        vcycle_3d(z, neg_r, ch, cv, cw, r_buf, jcap_tol, w, nsmoothing, smoother_id, /*variational=*/true);
+        vcycle_3d(z, r, ch, cv, cw, r_buf, jcap_tol, w, nsmoothing, smoother_id, /*variational=*/true);
+    r.neg_();  // restore
 
-    auto d = z.clone();
+    auto& d = scratch("mgcg3d_d", {Nx + 2, Ny + 2, Nz + 2}, opts);
+    d.copy_(z);
     apply_neumann_bc(d);
 
     using namespace torch::indexing;
@@ -516,7 +546,7 @@ static at::Tensor poisson_solve_mgcg_3d_cuda(
     auto z_in = z.index({Slice(1, -1), Slice(1, -1), Slice(1, -1)});
 
     auto rz = (r * z_in).to(at::kDouble).sum();
-    auto q  = at::empty({Nx, Ny, Nz}, opts);
+    auto& q  = scratch("mgcg3d_q", {Nx, Ny, Nz}, opts);
 
     for (int64_t k = 0; k < max_cycles; ++k) {
         mg_residual_3d_cuda(d, f_zero, cp0, cm0, cp1, cm1, cp2, cm2, jcap_tol, q);
@@ -590,13 +620,20 @@ static std::tuple<at::Tensor, at::Tensor, int64_t> poisson_solve_rmgcg_2d_cuda(
     auto cp1 = cv.slice(1, 1, Ny + 1).contiguous();
     auto cm1 = cv.slice(1, 0, Ny    ).contiguous();
 
-    auto b = f.mul(-h2);
+    using namespace poisson_scratch;
+
+    // b = −h²·f  (interior) — persistent scratch, filled every solve
+    auto& b = scratch("rmgcg2d_b", {Nx, Ny}, opts);
+    b.copy_(f).mul_(-h2);
+
     apply_neumann_bc(p);
 
-    auto f_zero = at::zeros({Nx, Ny}, opts);
-    auto Bx = at::empty({Nx, Ny}, opts);
+    // Persistent zero-f buffer — allocated once, never written (read-only).
+    auto& f_zero = zero_buffer({Nx, Ny}, opts);
+    auto& Bx = scratch("rmgcg2d_Bx", {Nx, Ny}, opts);
     mg_residual_2d_cuda(p, f_zero, cp0, cm0, cp1, cm1, jcap_tol, Bx);
-    auto r = b.sub(Bx);
+    auto& r = scratch("rmgcg2d_r", {Nx, Ny}, opts);
+    r.copy_(b).sub_(Bx);
 
     auto x_in = p.index({Slice(1, -1), Slice(1, -1)});
     auto U_in = (kdef > 0) ? U.index({Slice(), Slice(1, -1), Slice(1, -1)}) : U;
@@ -610,7 +647,11 @@ static std::tuple<at::Tensor, at::Tensor, int64_t> poisson_solve_rmgcg_2d_cuda(
         r.sub_((c.view({kdef, 1, 1}) * W).sum(0));
     }
 
-    auto D = at::zeros({std::max<int64_t>(harvest_k, 1), Nx + 2, Ny + 2}, opts);
+    // Harvest buffer — key includes harvest_k to distinguish configs
+    int64_t dk = std::max<int64_t>(harvest_k, 1);
+    auto& D = scratch("rmgcg2d_D_hk" + std::to_string(dk),
+                      {dk, Nx + 2, Ny + 2}, opts);
+    D.zero_();
     int64_t niter = 0;
 
     double r_norm = (tol >= 0.0) ? r.abs().max().item<double>() : 1.0;
@@ -619,13 +660,18 @@ static std::tuple<at::Tensor, at::Tensor, int64_t> poisson_solve_rmgcg_2d_cuda(
         return std::make_tuple(r, D, niter);
     }
 
-    auto z     = at::zeros({Nx + 2, Ny + 2}, opts);
-    auto r_buf = at::empty({Nx, Ny}, opts);
-    auto neg_r = r.neg();
-    for (int64_t i = 0; i < precond_vcycles; ++i)
-        vcycle_2d(z, neg_r, ch, cv, r_buf, jcap_tol, w, nsmoothing, smoother_id, /*variational=*/true);
+    auto& z     = scratch("rmgcg2d_z", {Nx + 2, Ny + 2}, opts);
+    z.zero_();
+    auto& r_buf = scratch("rmgcg2d_r_buf", {Nx, Ny}, opts);
 
-    auto d    = z.clone();
+    // In-place neg to avoid temporary allocation.
+    r.neg_();
+    for (int64_t i = 0; i < precond_vcycles; ++i)
+        vcycle_2d(z, r, ch, cv, r_buf, jcap_tol, w, nsmoothing, smoother_id, /*variational=*/true);
+    r.neg_();  // restore
+
+    auto& d    = scratch("rmgcg2d_d", {Nx + 2, Ny + 2}, opts);
+    d.copy_(z);
     auto d_in = d.index({Slice(1, -1), Slice(1, -1)});
     auto z_in = z.index({Slice(1, -1), Slice(1, -1)});
 
@@ -638,7 +684,7 @@ static std::tuple<at::Tensor, at::Tensor, int64_t> poisson_solve_rmgcg_2d_cuda(
     apply_neumann_bc(d);
 
     auto rz = (r * z_in).to(at::kDouble).sum();
-    auto q  = at::empty({Nx, Ny}, opts);
+    auto& q  = scratch("rmgcg2d_q", {Nx, Ny}, opts);
 
     for (int64_t k = 0; k < max_cycles; ++k) {
         mg_residual_2d_cuda(d, f_zero, cp0, cm0, cp1, cm1, jcap_tol, q);
@@ -708,13 +754,20 @@ static std::tuple<at::Tensor, at::Tensor, int64_t> poisson_solve_rmgcg_3d_cuda(
     auto cp2 = cw.slice(2, 1, Nz + 1).contiguous();
     auto cm2 = cw.slice(2, 0, Nz    ).contiguous();
 
-    auto b = f.mul(-h2);
+    using namespace poisson_scratch;
+
+    // b = −h²·f  (interior) — persistent scratch, filled every solve
+    auto& b = scratch("rmgcg3d_b", {Nx, Ny, Nz}, opts);
+    b.copy_(f).mul_(-h2);
+
     apply_neumann_bc(p);
 
-    auto f_zero = at::zeros({Nx, Ny, Nz}, opts);
-    auto Bx = at::empty({Nx, Ny, Nz}, opts);
+    // Persistent zero-f buffer — allocated once, never written (read-only).
+    auto& f_zero = zero_buffer({Nx, Ny, Nz}, opts);
+    auto& Bx = scratch("rmgcg3d_Bx", {Nx, Ny, Nz}, opts);
     mg_residual_3d_cuda(p, f_zero, cp0, cm0, cp1, cm1, cp2, cm2, jcap_tol, Bx);
-    auto r = b.sub(Bx);
+    auto& r = scratch("rmgcg3d_r", {Nx, Ny, Nz}, opts);
+    r.copy_(b).sub_(Bx);
 
     auto x_in = p.index({Slice(1, -1), Slice(1, -1), Slice(1, -1)});
     auto U_in = (kdef > 0)
@@ -728,7 +781,11 @@ static std::tuple<at::Tensor, at::Tensor, int64_t> poisson_solve_rmgcg_3d_cuda(
         r.sub_((c.view({kdef, 1, 1, 1}) * W).sum(0));
     }
 
-    auto D = at::zeros({std::max<int64_t>(harvest_k, 1), Nx + 2, Ny + 2, Nz + 2}, opts);
+    // Harvest buffer — key includes harvest_k to distinguish configs
+    int64_t dk = std::max<int64_t>(harvest_k, 1);
+    auto& D = scratch("rmgcg3d_D_hk" + std::to_string(dk),
+                      {dk, Nx + 2, Ny + 2, Nz + 2}, opts);
+    D.zero_();
     int64_t niter = 0;
 
     double r_norm = (tol >= 0.0) ? r.abs().max().item<double>() : 1.0;
@@ -737,13 +794,18 @@ static std::tuple<at::Tensor, at::Tensor, int64_t> poisson_solve_rmgcg_3d_cuda(
         return std::make_tuple(r, D, niter);
     }
 
-    auto z     = at::zeros({Nx + 2, Ny + 2, Nz + 2}, opts);
-    auto r_buf = at::empty({Nx, Ny, Nz}, opts);
-    auto neg_r = r.neg();
-    for (int64_t i = 0; i < precond_vcycles; ++i)
-        vcycle_3d(z, neg_r, ch, cv, cw, r_buf, jcap_tol, w, nsmoothing, smoother_id, /*variational=*/true);
+    auto& z     = scratch("rmgcg3d_z", {Nx + 2, Ny + 2, Nz + 2}, opts);
+    z.zero_();
+    auto& r_buf = scratch("rmgcg3d_r_buf", {Nx, Ny, Nz}, opts);
 
-    auto d    = z.clone();
+    // In-place neg to avoid temporary allocation.
+    r.neg_();
+    for (int64_t i = 0; i < precond_vcycles; ++i)
+        vcycle_3d(z, r, ch, cv, cw, r_buf, jcap_tol, w, nsmoothing, smoother_id, /*variational=*/true);
+    r.neg_();  // restore
+
+    auto& d    = scratch("rmgcg3d_d", {Nx + 2, Ny + 2, Nz + 2}, opts);
+    d.copy_(z);
     auto d_in = d.index({Slice(1, -1), Slice(1, -1), Slice(1, -1)});
     auto z_in = z.index({Slice(1, -1), Slice(1, -1), Slice(1, -1)});
 
@@ -755,7 +817,7 @@ static std::tuple<at::Tensor, at::Tensor, int64_t> poisson_solve_rmgcg_3d_cuda(
     apply_neumann_bc(d);
 
     auto rz = (r * z_in).to(at::kDouble).sum();
-    auto q  = at::empty({Nx, Ny, Nz}, opts);
+    auto& q  = scratch("rmgcg3d_q", {Nx, Ny, Nz}, opts);
 
     for (int64_t k = 0; k < max_cycles; ++k) {
         mg_residual_3d_cuda(d, f_zero, cp0, cm0, cp1, cm1, cp2, cm2, jcap_tol, q);
@@ -816,7 +878,9 @@ static at::Tensor mg_vcycle_2d_cuda(
         double jcap_tol, double w,
         int64_t nsmoothing, int64_t n_vcycles, int64_t smoother_id)
 {
-    auto r = at::empty_like(f);
+    using namespace poisson_scratch;
+    auto opts = f.options();
+    auto& r = scratch("mg_vcycle2d_r", f.sizes(), opts);
     for (int64_t i = 0; i < n_vcycles; ++i)
         vcycle_2d(p, f, ch, cv, r, jcap_tol, w, nsmoothing, smoother_id, /*variational=*/true);
     return r;
@@ -828,7 +892,9 @@ static at::Tensor mg_vcycle_3d_cuda(
         double jcap_tol, double w,
         int64_t nsmoothing, int64_t n_vcycles, int64_t smoother_id)
 {
-    auto r = at::empty_like(f);
+    using namespace poisson_scratch;
+    auto opts = f.options();
+    auto& r = scratch("mg_vcycle3d_r", f.sizes(), opts);
     for (int64_t i = 0; i < n_vcycles; ++i)
         vcycle_3d(p, f, ch, cv, cw, r, jcap_tol, w, nsmoothing, smoother_id, /*variational=*/true);
     return r;

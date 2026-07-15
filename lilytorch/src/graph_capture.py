@@ -12,6 +12,7 @@ launched on any OTHER stream is silently dropped from every replay, which is
 why the whole pre-Poisson region has to stay native end-to-end.
 """
 
+import gc
 from collections import OrderedDict
 
 import torch
@@ -105,30 +106,35 @@ class NativeWholeStepGraphRunner:
             graph.replay()
             return
 
-        # ---- eager (first sighting = warm-up) ----
+        # ---- eager (first sightings = extended warm-up) ----
         n = self._seen.get(key, 0) + 1
         self._seen[key] = n
-        if n < 2:
+        if n < 4:                          # 3 warm-up steps before capture
             self.eager += 1
             issue()
             return
 
-        # ---- capture (second sighting) ----
+        # ---- capture (fourth sighting) ----
         dev = torch.device(device)
         with torch.cuda.device(dev):
-            # This step's REAL work first — torch requires pre-capture
-            # warm-up on a side stream, and stream capture RECORDS without
-            # executing, so this eager issue() is this step's sole correct
-            # output.  Future steps replay the captured graph.
-            side = torch.cuda.Stream(dev)
-            side.wait_stream(torch.cuda.current_stream(dev))
-            with torch.cuda.stream(side):
-                issue()
-            torch.cuda.current_stream(dev).wait_stream(side)
+            # Final warm-up on default stream for this step's correct output.
+            issue()
+            torch.cuda.synchronize(dev)
+            gc.collect()
 
             graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph):
-                issue()
+            gc.disable()
+            try:
+                with torch.cuda.graph(graph):
+                    issue()
+            except RuntimeError:
+                graph.reset()
+                del graph
+                self._seen[key] = 0   # restart warm-up cycle
+                gc.enable()
+                return
+            finally:
+                gc.enable()
 
         # ---- LRU eviction: never pin (salamander OOM lesson) ----
         while len(self._graphs) >= self._max_graphs:
@@ -137,6 +143,9 @@ class NativeWholeStepGraphRunner:
             self.evictions += 1
         self._graphs[key] = graph
         self.captures += 1
+        if self.captures == 1:
+            print(f"[graph_capture] First graph captured successfully "
+                  f"(key hash={hash(key) & 0xFFFF:04x}).", flush=True)
         # Bound the sighting book-keeping under pointer churn; a cleared
         # entry only costs one extra eager warm-up sighting.
         if len(self._seen) > 64 * max(self._max_graphs, 1):

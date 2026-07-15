@@ -203,8 +203,9 @@ class SimConfig(BaseSimConfig):
 
     # ── Two-phase BDIM extension ──────────────────────────────────────
     def _bdim_extension(self, output_folder):
-        bdim_ext = super()._bdim_extension(output_folder)
-        solver = bdim_ext["config"]["bdim_yaml"]["solver"]
+        bdim_ext                      = super()._bdim_extension(output_folder)
+        solver                        = bdim_ext["config"]["bdim_yaml"]["solver"]
+        # solver["graph_capture_debug"] = True
 
         # solver["gravity"] = [0, 0, -9.81]
         # solver["two_phase"] = {
@@ -219,26 +220,26 @@ class SimConfig(BaseSimConfig):
         #     # "consistent_momentum"    : True,
         # }
 
-        # solver["gravity"] = [0, 0, -9.81]
-        # solver["two_phase"] = {
-        #     "alpha_init"             : f"lambda X, Y, Z: (Z < {WATERLINE}).double()",
-        #     "rho_water"              : 1000.0,
-        #     # 80:1 stability cap.  This MUST NOT be the physical 1.2 (=833:1):
-        #     # the projection coeff is dt*mu0/rho, so in air the solver converts
-        #     # any residual pressure error into velocity with a gain of
-        #     # rho_water/rho_air.  The variable-density V-cycle contracts only
-        #     # ~0.99/cycle on this operator, so the Poisson never fully converges
-        #     # and a sub-1% residual at 833:1 blows the air velocity up (NaN ->
-        #     # MuJoCo BADQACC) around iter 1200-1400.  12.5 (80:1) amplifies the
-        #     # same residual 66x less and the air velocity saturates instead.
-        #     "rho_air"                : 12.5,
-        #     "nu_water"               : self.nu,
-        #     "nu_air"                 : 1.5e-5,
-        #     "alpha_exclude_body"     : True,
-        #     "alpha_volume_compensate": True,
-        #     "air_transparent_body"   : False,
-        #     "consistent_momentum"    : False,  # requires solver_method='python' (not kernel)
-        # }
+        solver["gravity"] = [0, 0, -9.81]
+        solver["two_phase"] = {
+            "alpha_init"             : f"lambda X, Y, Z: (Z < {WATERLINE}).double()",
+            "rho_water"              : 1000.0,
+            # 80:1 stability cap.  This MUST NOT be the physical 1.2 (=833:1):
+            # the projection coeff is dt*mu0/rho, so in air the solver converts
+            # any residual pressure error into velocity with a gain of
+            # rho_water/rho_air.  The variable-density V-cycle contracts only
+            # ~0.99/cycle on this operator, so the Poisson never fully converges
+            # and a sub-1% residual at 833:1 blows the air velocity up (NaN ->
+            # MuJoCo BADQACC) around iter 1200-1400.  12.5 (80:1) amplifies the
+            # same residual 66x less and the air velocity saturates instead.
+            "rho_air"                : 1.5,
+            "nu_water"               : self.nu,
+            "nu_air"                 : 1.5e-5,
+            "alpha_exclude_body"     : True,
+            "alpha_volume_compensate": True,
+            "air_transparent_body"   : False,
+            "consistent_momentum"    : False,  # requires solver_method='python' (not kernel)
+        }
 
         return bdim_ext
 

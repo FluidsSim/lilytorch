@@ -1120,7 +1120,7 @@ class FluidSolver(PlottingMixin):
             # now ALWAYS passes persistent coefficient buffers, so that guard
             # silently disabled the flag for every config on that path,
             # single-phase included.
-            #
+            #``
             # The guess is not a mere speed knob here: ``poisson_tol`` is an
             # ABSOLUTE residual, and a solve that runs out its cycle cap stops
             # wherever it happens to be.  A two-phase pressure carries
@@ -1761,7 +1761,7 @@ class FluidSolver(PlottingMixin):
             getattr(self, '_ch_persist', None) is None
             or self._ch_persist.shape  != ch_gs
             or self._ch_persist.dtype  != dtype
-            or self._ch_persist.device != device
+            or self._ch_persist.device.type != device.type
             or getattr(self, '_ch_outside_val', None) != _dt_over_rhofluid
         )
         if needs_realloc:
@@ -1774,7 +1774,7 @@ class FluidSolver(PlottingMixin):
                 getattr(self, '_mw_div_corr_persist', None) is None
                 or self._mw_div_corr_persist.shape != gs
                 or self._mw_div_corr_persist.dtype != dtype
-                or self._mw_div_corr_persist.device != device):
+                or self._mw_div_corr_persist.device.type != device.type):
             # Full-grid MW body-divergence output, written by the fused
             # bdim_forcing kernel every step (so no stale-cell hazard).
             self._mw_div_corr_persist = torch.zeros(gs, device=device, dtype=dtype)
@@ -1789,10 +1789,9 @@ class FluidSolver(PlottingMixin):
         ~16 such hidden syncs/step.  These scalars are constant for the life of
         the run, so convert once and reuse the cached float.
 
-        Non-tensor scalars pass straight through (no cache), so callers that
-        supply plain python floats keep exact per-call semantics."""
-        if not torch.is_tensor(value):
-            return float(value)
+        Always checks the cache first — even for non-tensor scalars — to
+        return the SAME float every call (critical for persistent-buffer
+        realloc guards and CUDA-graph key stability)."""
         cache = self.__dict__.setdefault('_float_scalar_cache', {})
         v = cache.get(key)
         if v is None:
@@ -1811,7 +1810,7 @@ class FluidSolver(PlottingMixin):
             getattr(self, '_ch_persist', None) is None
             or self._ch_persist.shape  != gs
             or self._ch_persist.dtype  != dtype
-            or self._ch_persist.device != device
+            or self._ch_persist.device.type != device.type
             or getattr(self, '_ch_outside_val', None) != _dt_over_rhofluid
         )
         if needs_realloc:
@@ -1822,7 +1821,7 @@ class FluidSolver(PlottingMixin):
                 getattr(self, '_mw_div_corr_persist', None) is None
                 or self._mw_div_corr_persist.shape != gs
                 or self._mw_div_corr_persist.dtype != dtype
-                or self._mw_div_corr_persist.device != device):
+                or self._mw_div_corr_persist.device.type != device.type):
             # Full-grid MW body-divergence output, written by the fused
             # bdim_forcing kernel every step (so no stale-cell hazard).
             self._mw_div_corr_persist = torch.zeros(gs, device=device, dtype=dtype)

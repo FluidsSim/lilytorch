@@ -1784,7 +1784,7 @@ class BDIMhandler:
             getattr(fs, '_ch_persist', None) is None
             or fs._ch_persist.shape != gs
             or fs._ch_persist.dtype != dtype
-            or fs._ch_persist.device != device
+            or fs._ch_persist.device.type != device.type
             or getattr(fs, '_ch_outside_val', None) != _dt_over_rhofluid
         )
         if needs_realloc:
@@ -1797,7 +1797,7 @@ class BDIMhandler:
                 getattr(fs, '_mw_div_corr_persist', None) is None
                 or fs._mw_div_corr_persist.shape != gs
                 or fs._mw_div_corr_persist.dtype != dtype
-                or fs._mw_div_corr_persist.device != device):
+                or fs._mw_div_corr_persist.device.type != device.type):
             fs._mw_div_corr_persist = torch.zeros(
                 gs, device=device, dtype=dtype)
 
@@ -1827,7 +1827,7 @@ class BDIMhandler:
             getattr(fs, '_ch_persist', None) is None
             or fs._ch_persist.shape != ch_gs
             or fs._ch_persist.dtype != dtype
-            or fs._ch_persist.device != device
+            or fs._ch_persist.device.type != device.type
             or getattr(fs, '_ch_outside_val', None) != _dt_over_rhofluid
         )
         if needs_realloc:
@@ -1843,7 +1843,7 @@ class BDIMhandler:
                 getattr(fs, '_mw_div_corr_persist', None) is None
                 or fs._mw_div_corr_persist.shape != gs
                 or fs._mw_div_corr_persist.dtype != dtype
-                or fs._mw_div_corr_persist.device != device):
+                or fs._mw_div_corr_persist.device.type != device.type):
             fs._mw_div_corr_persist = torch.zeros(
                 gs, device=device, dtype=dtype)
 
