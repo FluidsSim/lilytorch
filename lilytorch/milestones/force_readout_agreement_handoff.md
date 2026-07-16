@@ -1,7 +1,9 @@
 # Handoff: make the eulerian and lagrangian force readouts agree — and match published references
 
-**Branch:** `cuda_native_port`  ·  **Written:** 2026-07-16  ·  **Status:** SUPERSEDED by §9 (session 2, same day):
-Phases 0-2 done. The §1 "cubic over-read law" is FALSIFIED in real flows — read §9 before acting on §§1-6.
+**Branch:** `cuda_native_port`  ·  **Written:** 2026-07-16  ·  **Status:** SUPERSEDED by §9 (session 2)
+and §10 (session 3, same day). **§10 explains the zebrafish and reconciles §1 with §9 — read it first.**
+Phases 0-2 done; the §1 "cubic over-read law" is not a universal law (§9.1) but IS the dominant term
+when `eps/R ~ 1`, which is exactly the zebrafish (§10).
 
 ## The goal
 
@@ -342,3 +344,154 @@ if combined with eulerian forces): `salamander/gen_configs_underwater_walking_3d
 
 Open questions #2 (lagrangian noise in coupled runs) and the §8 side findings
 (`force_delta_order=2` inversion, `sdf_vals` crash) are untouched.
+
+---
+
+# §10 — SESSION 3 RESULTS (2026-07-16). The zebrafish is EXPLAINED.
+
+§9.5 item 1 is closed, item 3 is done, item 4 is done. The cheap variant worked: no
+zebrafish A/B swim race was needed.
+
+## 10.1 The measurement
+
+`gen_zfish_snapshot.py` runs the **production** `gen_configs_pd_3d_slow_fast` config headless
+(same grid/gait/physics; viewers stripped) and dumps every argument the live solver hands the force
+op at step 300. `shift_sweep_3d.py` then re-drives `streaming_sdf_forces_post_3d` on that frozen
+field at any band shift, and — when the snapshot comes from a lagrangian run, the only path that
+refreshes the world-frame triangulation (§7 trap) — the lagrangian readout too. **Both readouts, one
+field, no trajectory divergence.** The whole loop is ~15 s.
+
+Totals over all 16 links, x = swimming axis, frozen at step 300 (`snap_lagr.pt`):
+
+| | `Fv_x` | `Fp_x` | **net `Fx`** |
+|---|---|---|---|
+| eulerian @ live `s = 2h` | −2.02e-05 | +2.62e-05 | **+6.00e-06** |
+| lagrangian @ live `off = 0` | −5.11e-06 | +1.98e-05 | **+1.47e-05** |
+| ratio | **3.96×** | 1.33× | **0.41×** |
+
+**The eulerian readout reports 4× the viscous drag the lagrangian does, leaving 2.4× less net
+forward force. That is the "swims markedly slower under eulerian" complaint, quantitatively.**
+Pressure (`Fp_x`) is constant across the whole shift sweep, as it must be — only the viscous band is
+shifted — which is a clean internal check that the sweep moves what it claims to.
+
+## 10.2 Root cause: the band is WIDER THAN THE FISH
+
+Measured from the snapshot SDF:
+
+- max inscribed radius of the whole animal = **2.86 h** (`min(sdf_cc)`)
+- `eps_body` (delta half-width) = **2.0 h**, `eps_solver` (band shift) = **2.0 h**
+- **95.1%** of interior cells lie within `eps_body` of a surface
+
+So for this body the smoothed delta is not a surface-localised measure at all: the band launched
+from one side reaches through the centreline and out the other. There is no `eps/R << 1` regime to
+be asymptotic in — here `eps/R ≈ 0.7`.
+
+The §1 mechanism then dominates. By the divergence theorem the shifted band integrates `∇·σ` over
+the volume enclosed by `{φ = eps_solver}`, and that inflation is measurable directly on the real
+geometry:
+
+| s/h | `V(φ<s)/V(φ<0)` |
+|---|---|
+| 1.0 | 1.587 |
+| 2.0 | **2.257** |
+| 4.0 | 4.031 |
+
+Measured eulerian over-read from `s=0` to `s=2h`: **2.554×** (2.640× on the eulerian-trajectory
+snapshot). Predicted by pure volume inflation: **2.257×**. Within ~13% — **the geometric inflation
+is the leading term for the zebrafish**, the residual being the flow-dependent `∂σ/∂n` variation of §9.1.
+
+**This reconciles §1 and §9.1.** Both are the same object — the readout is a volume integral over an
+inflated region, so its error ≈ (volume inflation) × (how `∇·σ` varies across the shell):
+- cylinder, `R/h=25.6`, `eps/R≈0.08`: inflation only 1.25×, and boundary-layer decay of `∂σ/∂n`
+  overwhelms it → net **0.89×** (reads LOW). §9.1 stands.
+- zebrafish, `R/h≈2.9`, `eps/R≈0.7`: inflation 2.26× dwarfs the decay term → net **~2.5×** (reads
+  HIGH). §3's predicted 2.4-3.4× for the zebrafish thin dimension was right, for the right reason —
+  it just is not a law that survives to fat bodies.
+
+## 10.3 Neither live setting is the truth — and they may bracket it
+
+Both readouts are "sample σ at distance ~s off the wall" devices (§9.1), and on this field:
+
+| off/h | lagrangian `Fv_x` |  | s/h | eulerian `Fv_x` |
+|---|---|---|---|---|
+| 0.0 | −5.11e-06 |  | 0.0 | −7.92e-06 |
+| 1.0 | −8.56e-06 |  | 2.0 | −2.02e-05 |
+| **1.5** | **−8.76e-06** |  | 3.0 | −2.25e-05 |
+| 2.0 | −8.04e-06 |  | 4.0 | −3.22e-05 |
+
+The lagrangian has a genuine smooth **maximum at off ≈ 1.5h** — the classic "escape the BDIM band,
+before interpolation/decay eats it" trade-off — and its live `off = 0` sits on the contaminated side
+of that peak, under-reading by ~40%. The eulerian has **no plateau at all**: it varies ~4× over the
+plausible range of s with nothing to extrapolate from. (Linear Richardson from s=2h,4h returns
+−8.2e-06, close to lagrangian's peak — suggestive that truth ≈ −8.5e-06, i.e. eulerian@2h over-reads
+~2.4× and lagrangian@0 under-reads ~0.6× — but the eulerian curve's shape does not justify trusting
+that construction here.)
+
+## 10.4 Recommendation (revises §6 / §9.5 item 2)
+
+1. **The zebrafish should use `lagrangian` with `lagrangian_sample_offset ≈ 1.5h` (≈ 3.0e-4 m).**
+   This is what `solver.py:418`'s own comment already advises (~eps) and it is unset (→ 0.0) today.
+   Worth ~+70% on the viscous readout vs the current default, off the contaminated side of the peak.
+2. **Do not try to rescue the eulerian viscous readout on bodies this thin.** Option C (extrapolate
+   σ back to φ=0) is still the principled fix for *resolved* bodies, but at `eps/R ≈ 0.7` there is no
+   asymptotic regime to extrapolate from — the band is wider than the body. The honest fix for thin
+   swimmers is the lagrangian readout, or a finer grid (the 1024×256×128 block already commented out
+   in the config would put `R/h ≈ 5.7`, `eps/R ≈ 0.35`).
+3. Any eulerian fix must still be gated on the §9.5 campaign (cylinder 512²/1024² vs K&L, gazzola
+   `U_t`, coquerelle 3D) — but note it can now ALSO be gated on this snapshot in ~15 s.
+
+## 10.5 Done this session
+
+- `tests/test_forces.py`: **the suite's first physics force tests** (§9.5 item 3) — 6 tests, ~1 s,
+  promoting `oracle_native_three_way.py`. Assert lagrangian ≈ exact (both channels) and eulerian
+  pressure ≈ exact (both submethods); **pin** the eulerian viscous offset over-read against the
+  `((R+eps)/R)³` model with a docstring saying a fix should flip the assertion; and pin
+  deltaH-viscous == ndelta-viscous (so deltaH is never mistaken for a candidate fix). Every other
+  force test in the repo is parity-or-snapshot only.
+- `validation/force_readout_oracle/`: `zfish_snapshot_hook.py`, `gen_zfish_snapshot.py`,
+  `shift_sweep_3d.py` (+ `shift_sweep_2d.py` from session 2).
+
+## 10.6 Two PRE-EXISTING failures found, NOT caused by this work or the refactor
+
+`test_python_eulerian_force_path_cpu_regression` and `..._cpu_eq_gpu` fail. Confirmed **pre-existing
+at 39fb3b4** (session-2 HEAD) by building that commit in a separate worktree: the numbers are
+**bit-identical** there, so the `e5ad1f0..ec64de6` refactor chain (`bdim_forcing→bdim_apply`, file
+splits, dead-`bdim_coeff` deletion) is **physics-neutral** — a clean refactor.
+
+- CPU is `[0.48735056267128085, -0.5337453893897146, 28.237438779046265, -11.85863205998823]` vs a
+  frozen expectation of `[0.4901618826264682, ...]` — a **~6e-3 relative** drift, where every past
+  re-freeze in that docstring was ~1e-9/2e-8 ("arithmetic-order roundoff").
+- CPU vs GPU now differ by ~4e-3 relative, though the docstring records that unifying the Poisson
+  driver had *made that test pass*.
+
+The test drives the **python** force branch (it asserts `_kernel_step is None`), so the divergence is
+upstream in the fields — projection / `bdim_apply` / Poisson — not in the readout. Someone should
+bisect it; it is a different bug from this handoff and is deliberately left untouched here.
+**Note it means a CPU/CUDA physics divergence is live on this branch right now.**
+
+## 10.7 Reproduce
+
+```bash
+python -m pytest lilytorch/tests/test_forces.py -k oracle -q        # ~1 s
+python -m lilytorch.validation.force_readout_oracle.oracle_native_three_way
+ZFISH_SNAP_FORCE_METHOD=lagrangian \
+  ZFISH_SNAP_OUT=/data/andreaferrario/ns_data/zfish_force_snapshot/snap_lagr.pt \
+  python -m lilytorch.validation.force_readout_oracle.gen_zfish_snapshot   # ~15 s
+python -m lilytorch.validation.force_readout_oracle.shift_sweep_3d \
+  /data/andreaferrario/ns_data/zfish_force_snapshot/snap_lagr.pt
+```
+
+`gen_zfish_snapshot.py` needs a rebuilt native extension (`python setup.py build_ext --inplace`) —
+the op set moved with the refactor chain.
+
+## 10.8 What is still open
+
+1. **Verify the §10.4 recommendation in a live run**: zebrafish with
+   `lagrangian_sample_offset = 3.0e-4`, arbiter `verify_energy_balance.py --tmax 0.3`. §10 is one
+   frozen field at one step of one gait phase — strong on mechanism, but it is not a swim race.
+2. The §10.6 CPU/GPU divergence (independent bug).
+3. Open question #2: *why* lagrangian is noisier in coupled runs — still unmeasured. §10.3 suggests
+   an angle: `off=0` sits on a steep part of the offset curve, so pose jitter maps straight into
+   force jitter; the `off≈1.5h` peak is stationary and should be quieter. Cheap to test on snapshots
+   from consecutive steps.
+4. §8 side findings (`force_delta_order=2` inversion, `sdf_vals` crash) — untouched.

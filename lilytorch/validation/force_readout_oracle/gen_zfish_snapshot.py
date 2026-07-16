@@ -22,6 +22,9 @@ from lilytorch.examples.zebrafish_ki_project.gen_configs_pd_3d_slow_fast import 
 SNAP_STEP = int(os.environ.get("ZFISH_SNAP_STEP", 300))
 SNAP_OUT = os.environ.get("ZFISH_SNAP_OUT", "/data/andreaferrario/ns_data/"
                                             "zfish_force_snapshot/snap.pt")
+# "lagrangian" additionally captures the world-frame triangulation, which lets
+# shift_sweep_3d evaluate BOTH readouts on the one frozen field.
+SNAP_FORCE_METHOD = os.environ.get("ZFISH_SNAP_FORCE_METHOD", "eulerian")
 
 
 class SimConfig(_ProdConfig):
@@ -31,9 +34,7 @@ class SimConfig(_ProdConfig):
         self.headless = True
         self.save = False
         self.save_frames = False
-        # The hook wraps forces_method2_3d, so the run must take the eulerian
-        # branch; the sweep re-derives the lagrangian side offline anyway.
-        self.force_method = "eulerian"
+        self.force_method = SNAP_FORCE_METHOD
         # Enough steps to reach SNAP_STEP; the hook aborts the run there.
         self.n_iterations = SNAP_STEP + 10
         self.bdim_nt = self.n_iterations + 1

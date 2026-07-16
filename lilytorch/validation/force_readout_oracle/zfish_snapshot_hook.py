@@ -72,19 +72,34 @@ def _capture(self, u, v, w, p, iteration):
         "ph_blend_cells": float(getattr(self, "force_ph_blend_cells", 1.5)),
         "n_bodies": len(comp.bodies),
         "iteration": int(iteration),
-        "grid": (int(self.Nx), int(self.Ny), int(self.Nz)),
+        # padded grid dims (nx = Nx + 2 ghosts), which is what the flat fields
+        # above are actually shaped as
+        "grid": (int(self.nx), int(self.ny), int(self.nz)),
     }
 
-    # Lagrangian triangulation, if the run carries one — lets the sweep compare
-    # both readouts on the SAME frozen field (the live run only calls one).
-    for key in ("tri_centroid_world", "tri_normal_world", "tri_area_world",
-                "tri_offsets"):
-        t = getattr(comp, key, None)
-        if t is not None:
-            snap[key] = _cpu(t)
-    coms = [getattr(b, "com", None) for b in comp.bodies]
-    if all(c is not None for c in coms):
-        snap["com"] = _cpu(torch.stack([torch.as_tensor(c) for c in coms]))
+    # Lagrangian triangulation, if the run carries one.  It lives per-body and
+    # is only refreshed into WORLD frame by BDIMhandler._refresh_lagrangian_tris_3d
+    # on lagrangian runs — capturing it here, at the force call site, is the only
+    # place it is guaranteed world-frame (see handoff §7: the local-frame trap).
+    tri_c = [getattr(b, "tri_centroid_world", None) for b in comp.bodies]
+    tri_n = [getattr(b, "tri_normal_world", None) for b in comp.bodies]
+    tri_a = [getattr(b, "tri_area", None) for b in comp.bodies]
+    if all(t is not None for t in tri_c + tri_n + tri_a):
+        offs = [0]
+        for t in tri_c:
+            offs.append(offs[-1] + t.shape[1])
+        snap["tri_centroid"] = _cpu(torch.cat(tri_c, dim=1))
+        snap["tri_normal"] = _cpu(torch.cat(tri_n, dim=1))
+        snap["tri_area"] = _cpu(torch.cat(tri_a, dim=0))
+        snap["tri_offsets"] = torch.tensor(offs, dtype=torch.int64)
+        snap["com_pos"] = _cpu(torch.stack([b.com_pos for b in comp.bodies]))
+        # grid origin: the lagrangian op maps world -> index off these
+        snap["x0"] = float(comp.x[0])
+        snap["y0"] = float(comp.y[0])
+        snap["z0"] = float(comp.z[0])
+    else:
+        print("[zfish-snap] no world-frame triangulation on the bodies "
+              "(eulerian run?) — snapshot is eulerian-only", flush=True)
 
     torch.save(snap, _STATE["out"])
     print(f"[zfish-snap] wrote {_STATE['out']} at iteration {iteration} "
@@ -102,18 +117,22 @@ def install(step=None, out=None, stop=None):
     if "ZFISH_SNAP_STOP" in os.environ:
         _STATE["stop"] = os.environ["ZFISH_SNAP_STOP"] not in ("0", "", "false")
 
-    original = FluidSolver.forces_method2_3d
+    # Wrap BOTH readouts: whichever the run uses, the snapshot carries the full
+    # native streaming scene (the body-update stage builds it either way), and a
+    # lagrangian run additionally carries the world-frame triangulation.
+    for name in ("forces_method2_3d", "forces_lagrangian_3d"):
+        original = getattr(FluidSolver, name)
 
-    def wrapped(self, u, v, w, p, iteration):
-        result = original(self, u, v, w, p, iteration)
-        if not _STATE["done"] and iteration >= _STATE["step"]:
-            _STATE["done"] = True
-            _capture(self, u, v, w, p, iteration)
-            if _STATE["stop"]:
-                raise SnapshotTaken(
-                    f"snapshot written at iteration {iteration}; stopping")
-        return result
+        def wrapped(self, u, v, w, p, iteration, _orig=original):
+            result = _orig(self, u, v, w, p, iteration)
+            if not _STATE["done"] and iteration >= _STATE["step"]:
+                _STATE["done"] = True
+                _capture(self, u, v, w, p, iteration)
+                if _STATE["stop"]:
+                    raise SnapshotTaken(
+                        f"snapshot written at iteration {iteration}; stopping")
+            return result
 
-    FluidSolver.forces_method2_3d = wrapped
+        setattr(FluidSolver, name, wrapped)
     print(f"[zfish-snap] armed: step={_STATE['step']} out={_STATE['out']} "
           f"stop={_STATE['stop']}", flush=True)
