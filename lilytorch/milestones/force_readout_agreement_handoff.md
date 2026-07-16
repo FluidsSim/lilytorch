@@ -526,15 +526,15 @@ that construction here.)
 
 ## 10.4 Recommendation (revises §6 / §9.5 item 2)
 
-1. **The zebrafish should use `lagrangian`, probably with `lagrangian_sample_offset ≈ 1.5h`
-   (≈ 3.0e-4 m)** — but this is a *compromise, not a clean fix*, and §10.3's oracle tempers it.
-   `solver.py:418`'s own comment advises ~eps and it is unset (→ 0.0) today; the fish's offset curve
-   has a real maximum at 1.5h, worth ~+70% on the viscous readout. **But on the sphere oracle — which
-   has NO BDIM band, since it imposes analytic fields — the lagrangian is exact at off=0 and
-   degrades monotonically with offset (+8% at off=h, +16% at 2h).** So offsetting buys band-escape
-   at the price of an error the oracle can measure and the live run cannot separate. The fish's peak
-   at 1.5h is the balance of those two, and its height is not a guarantee of accuracy. **This one
-   deserves the live `verify_energy_balance.py` arbiter before being adopted** (§10.8 item 1).
+1. **The zebrafish should use `lagrangian` with `lagrangian_sample_offset ≈ h` (≈ 2.0e-4 m).**
+   **Now settled live — see §10.10**, which supersedes the tentative "1.5h" reasoning this item
+   originally carried. Any offset in [0.5h, 3h] gives the same swim speed to within 2% (a genuine
+   plateau, not a tuned optimum) and closure in 93-109%; `h` sits mid-plateau. The live default of
+   **0.0 is the worst setting tested** (closure 74.4%, speed 20% below the plateau) because it is the
+   one point still inside the BDIM band. `solver.py:418`'s own comment already advises ~eps.
+   (The sphere oracle shows the lagrangian is *exact* at off=0 and degrades ~8%/h with offset when
+   there is NO BDIM band — §10.3. That cost is real but is plainly the lesser one in a live run: the
+   band contamination it escapes is worth 26 points of closure.)
 2. **Do not try to rescue the eulerian viscous readout on bodies this thin.** Option C (extrapolate
    σ back to φ=0) is still the principled fix for *resolved* bodies, but at `eps/R ≈ 0.7` there is no
    asymptotic regime to extrapolate from — the band is wider than the body. The honest fix for thin
@@ -619,11 +619,68 @@ Full suite: **362 passed, 10 failed** — and the same **10 failures reproduce e
 commit 2246f45** (verified in a separate worktree), i.e. all pre-existing: 2 are §10.6, 3 are
 `test_two_phase` uniform-parity, 5 are `test_whole_step_capture_native`. None are caused by this fix.
 
+## 10.10 LIVE ARBITRATION (§10.8 item 1 CLOSED) — off=0 is the worst setting in the repo
+
+Eight headless production-config runs (0.6 s each, ~40 s wall), `{stack}/{case}` layout, via
+`gen_zfish_readout_arbitration.py`. Arbiter = hydrodynamic-power closure
+(`zfish_pbdim_closure.py`), the check the freq-cross study used (90-102% per case):
+
+    P_BDIM = -Σ_links [F_i·v_i + τ_i·ω_i]   from drags.h5 (the READOUT forces)
+    closure = ∫P_BDIM dt / (ΔE_k + E_diss)  denominator from the FLUID fields alone
+
+The denominator knows nothing about the readout, so a readout that over-reports drag claims more
+work than the water received → closure > 100%.
+
+| case | closure | speed [mm/s] | speed [BL/s] |
+|---|---|---|---|
+| `eul_order1` | **128.3%** | 44.8 | 2.49 |
+| `eul_order2` (the §10.9 fix) | **115.8%** | 42.1 | 2.34 |
+| `lagr_off0` **(today's default)** | **74.4%** | 65.4 | 3.64 |
+| `lagr_off0p5h` | **97.8%** | 77.7 | 4.32 |
+| `lagr_off1h` | 107.8% | 79.5 | 4.41 |
+| `lagr_off1p5h` | 109.1% | 78.7 | 4.37 |
+| `lagr_off2h` | 104.9% | 78.4 | 4.36 |
+| `lagr_off3h` | 93.3% | 78.7 | 4.37 |
+
+**Three results, in order of confidence:**
+
+1. **`lagrangian_sample_offset = 0` — the current default — is the single worst setting tested.**
+   Closure **74.4%**: it under-reports the power delivered to the fluid by a quarter, worse than
+   either eulerian. And its speed (65.4) is an outlier below a **flat plateau at ~78 mm/s that every
+   offset from 0.5h to 3h agrees on within 2%**. Once the sample escapes the BDIM band, the answer
+   stops depending on where you put it — off=0 is the one point still inside the band. That flatness
+   is the strongest signal in the table: it is a real plateau, not a tuned optimum.
+2. **The eulerian genuinely over-reports** (closure 116-128%) and swims ~45% slower than the
+   lagrangian plateau. Consistent with §10.2. **Not usable on a body this thin.**
+3. **The §10.9 `delta_order=2` fix is worth more live than the frozen field predicted**: eulerian
+   closure **128.3% → 115.8%** (12.5 points) — vs the 2.9% the frozen snapshot suggested (§10.3c).
+   The frozen estimate held the fields fixed; in a coupled run the correction compounds. It improves
+   the eulerian but does not save it.
+
+**Nuance — closure is a weaker discriminator than speed here, and that is physical.** The eulerian is
+only 16% off in closure yet 45% off in speed. No contradiction: closure measures *total* power
+exchange, which pressure dominates; speed is set by *net* streamwise force, a difference of two
+larger numbers, where a 4× viscous over-read bites hard. Do not read "116%" as "the eulerian is
+roughly fine".
+
+**Caveats.** One run per setting; 0.6 s (0.3 s analysis window); the eight runs follow different
+trajectories, so this compares each readout's self-consistency, not readouts on identical fluid
+states (that is what §10.1's frozen snapshot is for). The 97.8-109.1% spread across offsets ≥0.5h is
+plausibly run-to-run noise; the 74.4% is not.
+
+**`verify_energy_balance.py` is NOT the arbiter for this question** — it returns *identical* numbers
+to 5 significant figures for every readout (`<P_act>` 3.5183e-02 W, residual 102.7%). Expected, and
+already recorded in `project_zebrafish_energy_balance`: actuator power is ~5000-12000× the power
+reaching the fluid (only ~0.02% of muscle work enters the water), and a position-controlled fish
+tracks the same gait regardless of readout, so P_act cannot see the difference. Use
+`zfish_pbdim_closure.py`.
+
 ## 10.8 What is still open
 
-1. **Verify the §10.4 recommendation in a live run**: zebrafish with
-   `lagrangian_sample_offset = 3.0e-4`, arbiter `verify_energy_balance.py --tmax 0.3`. §10 is one
-   frozen field at one step of one gait phase — strong on mechanism, but it is not a swim race.
+1. ~~Verify the §10.4 recommendation in a live run.~~ **DONE — §10.10.** What remains: apply
+   `lagrangian_sample_offset ≈ 2.0e-4` to the production configs (left to the user; the zebrafish
+   config was being actively edited), and re-run the longer 2001-step case to confirm the plateau
+   holds beyond 0.6 s.
 2. The §10.6 CPU/GPU divergence (independent bug).
 3. Open question #2: *why* lagrangian is noisier in coupled runs — still unmeasured, and §10.3c
    **eliminated** the most attractive hypothesis (buried joint caps sampling unconstrained interior
