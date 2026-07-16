@@ -7,7 +7,7 @@
 //      below);
 //    - the operator schemas under the `lilytorch_kernels` namespace.
 //
-//  CPU implementations live in `streaming_sdf_cpu.cpp` (OpenMP),
+//  CPU implementations live in `ops_3d.cpp` / `ops_2d.cpp` (at::parallel_for),
 //  CUDA implementations in `cuda/streaming_sdf.cu`. Each backend
 //  registers its own dispatch table via TORCH_LIBRARY_IMPL.
 // =====================================================================
@@ -44,8 +44,8 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
     // packed-key winner.  If BDIM-σ (Lauber et al. 2022) is revived, have the
     // Regime-B resolve kernel emit a per-cell winner body-id field instead.
     // NOTE (CL2/CLx): the bdim_coeff_{2,3}d ops were removed — superseded by
-    // bdim_forcing_{2,3}d which adds the Maertens-Weymouth body-divergence
-    // correction.  The live BDIM ops live in bdim_forcing.cu / bdim_forcing_cpu.cpp.
+    // bdim_apply_{2,3}d which adds the Maertens-Weymouth body-divergence
+    // correction.  The live BDIM ops live in bdim_apply.cu / bdim_apply.cpp.
 
     m.def(
         "streaming_sdf_forces_post_3d("
@@ -113,7 +113,7 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " float blend_eps"
         ") -> ()");
 
-    // bdim_forcing_3d: static full-grid BDIM2 velocity + Poisson coefficients
+    // bdim_apply_3d: static full-grid BDIM2 velocity + Poisson coefficients
     // + Maertens–Weymouth body-divergence correction.  Launches over the FULL
     // grid (pose-independent → CUDA-graph-capturable); the per-step dirty
     // AABB lives in the device-resident int32 rect tensor [i0,j0,k0,Ai,Aj,Ak].
@@ -122,7 +122,7 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
     // (pass-through) and ch/cv/cw stay at their persistent dt/rho prefill.
     // mw_on != 0 additionally computes (1-mu0_cc)*div(u_body) into div_corr.
     m.def(
-        "bdim_forcing_3d("
+        "bdim_apply_3d("
         "Tensor u_prime, Tensor v_prime, Tensor w_prime,"
         " Tensor sdf_u, Tensor sdf_v, Tensor sdf_w,"
         " Tensor body_u, Tensor body_v, Tensor body_w,"
@@ -135,9 +135,9 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " int mu0_projection, int mw_on"
         ") -> ()");
 
-    // bdim_forcing_2d: 2-D analogue of bdim_forcing_3d.
+    // bdim_apply_2d: 2-D analogue of bdim_apply_3d.
     m.def(
-        "bdim_forcing_2d("
+        "bdim_apply_2d("
         "Tensor u_prime, Tensor v_prime,"
         " Tensor sdf_u, Tensor sdf_v,"
         " Tensor body_u, Tensor body_v,"

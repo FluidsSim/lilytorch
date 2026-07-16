@@ -1,9 +1,9 @@
 // =====================================================================
-//  bdim_forcing_{2d,3d} — static full-grid BDIM2 + Poisson coefficient
+//  bdim_apply_{2d,3d} — static full-grid BDIM2 + Poisson coefficient
 //  + Maertens–Weymouth body-divergence correction.
 //
 //  Static full-grid BDIM forcing kernel
-//  (bdim_forcing_2d_kernel / bdim_forcing_3d_kernel), which is itself a
+//  (bdim_apply_2d_kernel / bdim_apply_3d_kernel), which is itself a
 //  faithful port of the original native bdim_one_axis in streaming_sdf.cu.
 //
 //  Key difference from bdim_coeff_{2,3}d: the launch dim is the FULL grid
@@ -196,10 +196,10 @@ __device__ void bdim_one_axis_2d(
 }
 
 // =====================================================================
-//  3-D bdim_forcing CUDA kernel (static full-grid launch)
+//  3-D bdim_apply CUDA kernel (static full-grid launch)
 // =====================================================================
 template <typename scalar_t>
-__global__ void bdim_forcing_3d_kernel(
+__global__ void bdim_apply_3d_kernel(
     const scalar_t* __restrict__ u_prime,
     const scalar_t* __restrict__ v_prime,
     const scalar_t* __restrict__ w_prime,
@@ -289,10 +289,10 @@ __global__ void bdim_forcing_3d_kernel(
 }
 
 // =====================================================================
-//  2-D bdim_forcing CUDA kernel (static full-grid launch)
+//  2-D bdim_apply CUDA kernel (static full-grid launch)
 // =====================================================================
 template <typename scalar_t>
-__global__ void bdim_forcing_2d_kernel(
+__global__ void bdim_apply_2d_kernel(
     const scalar_t* __restrict__ u_prime,
     const scalar_t* __restrict__ v_prime,
     const scalar_t* __restrict__ sdf_u,
@@ -360,7 +360,7 @@ __global__ void bdim_forcing_2d_kernel(
 //  C++ launcher wrappers (called by TORCH_LIBRARY_IMPL)
 // =====================================================================
 
-static void bdim_forcing_3d_cuda(
+static void bdim_apply_3d_cuda(
     const at::Tensor& u_prime,
     const at::Tensor& v_prime,
     const at::Tensor& w_prime,
@@ -387,8 +387,8 @@ static void bdim_forcing_3d_cuda(
     const int threads = 256;
     const int blocks = (total + threads - 1) / threads;
 
-    AT_DISPATCH_FLOATING_TYPES(u0.scalar_type(), "bdim_forcing_3d_cuda", [&] {
-        bdim_forcing_3d_kernel<scalar_t>
+    AT_DISPATCH_FLOATING_TYPES(u0.scalar_type(), "bdim_apply_3d_cuda", [&] {
+        bdim_apply_3d_kernel<scalar_t>
             <<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
                 u_prime.data_ptr<scalar_t>(),
                 v_prime.data_ptr<scalar_t>(),
@@ -416,7 +416,7 @@ static void bdim_forcing_3d_cuda(
     });
 }
 
-static void bdim_forcing_2d_cuda(
+static void bdim_apply_2d_cuda(
     const at::Tensor& u_prime,
     const at::Tensor& v_prime,
     const at::Tensor& sdf_u,
@@ -439,8 +439,8 @@ static void bdim_forcing_2d_cuda(
     const int threads = 256;
     const int blocks = (total + threads - 1) / threads;
 
-    AT_DISPATCH_FLOATING_TYPES(u0.scalar_type(), "bdim_forcing_2d_cuda", [&] {
-        bdim_forcing_2d_kernel<scalar_t>
+    AT_DISPATCH_FLOATING_TYPES(u0.scalar_type(), "bdim_apply_2d_cuda", [&] {
+        bdim_apply_2d_kernel<scalar_t>
             <<<blocks, threads, 0, at::cuda::getCurrentCUDAStream()>>>(
                 u_prime.data_ptr<scalar_t>(),
                 v_prime.data_ptr<scalar_t>(),
@@ -467,8 +467,8 @@ static void bdim_forcing_2d_cuda(
 //  Register with the CUDA backend
 // =====================================================================
 TORCH_LIBRARY_IMPL(lilytorch_kernels, CUDA, m) {
-    m.impl("bdim_forcing_3d", &bdim_forcing_3d_cuda);
-    m.impl("bdim_forcing_2d", &bdim_forcing_2d_cuda);
+    m.impl("bdim_apply_3d", &bdim_apply_3d_cuda);
+    m.impl("bdim_apply_2d", &bdim_apply_2d_cuda);
 }
 
 }  // namespace lilytorch_kernels

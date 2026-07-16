@@ -1,13 +1,9 @@
 // =====================================================================
-//  3-D interpolation support kernels (post-2.4: union path removed;
-//  post-CL2: _direct path removed)
+//  interp.cu — Scattered-point interpolation kernels (2-D and 3-D).
 //
-//  The union-AABB packed-key pipeline (init_keys / min_rho_3d_multi /
-//  decode_keys, packed_key.cuh) was deleted in cuda_native_port item 2.4;
-//  the Regime-A _direct path was deleted in CL2.  The sole production
-//  streaming path is streaming_sdf_regime_b.cu (per-body private buffers
-//  + resolve).  This file keeps the shared samplers plus: forces-post
-//  readout, bdim_coeff, the fused BC kernel, and scattered-point interp.
+//  Contains interp_{2,3}d: bilinear/trilinear (method=0) and
+//  biquadratic/triquadratic (method=1) interpolation at arbitrary
+//  query points on a uniform grid.
 // =====================================================================
 
 #include <ATen/Operators.h>

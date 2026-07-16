@@ -11,8 +11,8 @@ __all__ = [
     "streaming_sdf_stag_3d_resolve",
     "streaming_sdf_forces_post_3d",
     "apply_bcs_3d",
-    "bdim_forcing_2d",
-    "bdim_forcing_3d",
+    "bdim_apply_2d",
+    "bdim_apply_3d",
     "sl_advect_2d",
     "sl_advect_3d",
     "diffuse_add",
@@ -204,7 +204,7 @@ def streaming_sdf_stag_3d_resolve(
     )
 
 
-def bdim_forcing_3d(
+def bdim_apply_3d(
         u_prime, v_prime, w_prime,
         sdf_u, sdf_v, sdf_w,
         body_u, body_v, body_w,
@@ -231,7 +231,7 @@ def bdim_forcing_3d(
             [int(dirty_i0), int(dirty_j0), int(dirty_k0),
              int(dirty_Ai), int(dirty_Aj), int(dirty_Ak)],
             dtype=torch.int32, device=u0.device)
-    return torch.ops.lilytorch_kernels.bdim_forcing_3d.default(
+    return torch.ops.lilytorch_kernels.bdim_apply_3d.default(
         u_prime, v_prime, w_prime,
         sdf_u, sdf_v, sdf_w,
         body_u, body_v, body_w,
@@ -243,7 +243,7 @@ def bdim_forcing_3d(
     )
 
 
-def bdim_forcing_2d(
+def bdim_apply_2d(
         u_prime, v_prime,
         sdf_u, sdf_v,
         body_u, body_v,
@@ -265,7 +265,7 @@ def bdim_forcing_2d(
         rect_dev = torch.tensor(
             [int(dirty_i0), int(dirty_j0), int(dirty_Ai), int(dirty_Aj)],
             dtype=torch.int32, device=u0.device)
-    return torch.ops.lilytorch_kernels.bdim_forcing_2d.default(
+    return torch.ops.lilytorch_kernels.bdim_apply_2d.default(
         u_prime, v_prime,
         sdf_u, sdf_v,
         body_u, body_v,

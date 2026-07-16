@@ -1,18 +1,9 @@
 // =====================================================================
-//  streaming_sdf_cpu_2d.cpp
+//  ops_2d.cpp — 2-D CPU implementations (at::parallel_for).
 //
-//  CPU implementations of the 2-D ``streaming_sdf_stag_2d_*`` and
-//  ``bdim_coeff_2d`` ops.  Mirrors
-//  ``streaming_sdf_cpu.cpp`` line-for-line with the z-axis stripped:
-//    * 3 face samples per cell (cc, u-stagger -h/2 in x, v-stagger -h/2 in y);
-//    * rotation R_T is a 2x2 column-major matrix (4 floats);
-//    * angular velocity is a scalar omega (out-of-plane);
-//    * world->body transform: [bxq;byq] = R_T * [xc-bp_x; yc-bp_y].
-//
-//  Body SDF tables are uniform Cartesian grids by construction in BDIM,
-//  so corner weights reduce to (1-frac, frac) per axis.  Bilinear and
-//  biquadratic Lagrange samplers operate directly on (bx0, inv_dx) /
-//  (by0, inv_dy) without axis-table lookups.
+//  Contains forces_post_2d, apply_bcs_2d, interp_2d CPU twins.
+//  See ops_3d.cpp for the 3-D counterparts.
+// =====================================================================
 //
 //  Hot loops are parallelised with ``at::parallel_for`` (PyTorch's
 //  intra-op thread pool); see the rationale comment at the top of

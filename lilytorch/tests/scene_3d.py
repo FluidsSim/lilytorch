@@ -1,6 +1,6 @@
 """Synthetic 3-D scene builder shared by the 3-D kernel tests/benches.
 
-Builds all tensors needed by the ``streaming_sdf_stag_3d_*`` / ``bdim_forcing_3d``
+Builds all tensors needed by the ``streaming_sdf_stag_3d_*`` / ``bdim_apply_3d``
 / ``streaming_sdf_forces_post_3d`` ops, using sphere SDF tables on a uniform body
 grid — no FARMS/MuJoCo dependency.  The 2-D twin is :mod:`scene_2d`.
 

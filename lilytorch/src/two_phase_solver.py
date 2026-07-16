@@ -19,7 +19,7 @@ overrides are:
   Yue 2011, ``(1−δ^B)/ρ``; the body enters via ``μ0`` only, never its
   density) and the air-transparent mu0/mu1 masking of the velocity BDIM.
 * ``project`` — **fused path** (the default): between the fused single-phase
-  bdim_forcing and the Poisson solve, repair the velocity with the exact
+  bdim_apply and the Poisson solve, repair the velocity with the exact
   air-transparent identity ``a·S + (1−a)·u′`` (u′ captured by wrapping
   ``adv_diff_solver.solve``) and rescale the kernel's water-normalised
   coefficients to the two-phase formulas. No CUDA or solver.py changes;
@@ -35,7 +35,7 @@ Everything else is inherited and reused unchanged:
 * **projection core** — the base ``project`` runs the variable-coefficient MGCG
   path ``∇·(c∇p)=div`` → ``u -= c∇p`` (closed-box all-Neumann, ``dirichlet_mask
   = None``); we just feed it the density-based ``c`` (built by the python
-  coefficient override or written by the two-phase bdim_forcing);
+  coefficient override or written by the two-phase bdim_apply);
 * advection–diffusion, BDIM, the Poisson solver, force integration.
 
 The hydrostatic interface jump and the buoyancy on the body therefore emerge
@@ -208,6 +208,15 @@ class TwoPhaseSolver(FluidSolver):
         # agree with the face-averaged cell-centred μ₀ (e.g. large bodies at
         # an angle like the amphibious ramp).
         self._init_two_phase(tp_cfg)
+
+        # ── Align body eps with the solver's Maertens-Weymouth eps ──────
+        # The BDIM kernel reads comp.eps for its mu0 computation; comp.mu_funcs
+        # and the two-phase coefficient rescale (via _mu0_cc) also use it.  The
+        # alpha carve uses self.eps.  Overwriting comp.eps with self.eps makes
+        # EVERY component (kernel velocity enforcement, Poisson coefficients,
+        # and the initial alpha carve) use the SAME eps_multiplier * h value.
+        self.composite_body.eps = float(self.eps)
+
         # Fused path: capture the advection output u' — the only input the
         # air-transparent velocity identity needs.  ``solve`` returns
         # adv_diff_solver's PERSISTENT output buffers (``_sl_out`` /
@@ -556,7 +565,7 @@ class TwoPhaseSolver(FluidSolver):
     # ------------------------------------------------------------------
     #  Override: KERNEL-mode two-phase (velocity blend + coefficient rescale)
     # ------------------------------------------------------------------
-    # The fused single-phase bdim_forcing writes ``S = mu0*(u'-b) + b + mu1*nd``
+    # The fused single-phase bdim_apply writes ``S = mu0*(u'-b) + b + mu1*nd``
     # and ``c_kernel = dt*mu0/rho_water`` — wrong for two-phase on BOTH
     # counts.  Both are repaired here in a handful of python tensor ops, with
     # NO custom kernels and NO solver.py changes, thanks to two identities:

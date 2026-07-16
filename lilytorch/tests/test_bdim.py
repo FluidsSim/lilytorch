@@ -1,6 +1,6 @@
-"""Native **bdim_forcing (3-D)** single-source checks: CPU twin == CUDA kernel.
+"""Native **bdim_apply (3-D)** single-source checks: CPU twin == CUDA kernel.
 
-Exercises ``bdim_forcing_3d`` on manufactured
+Exercises ``bdim_apply_3d`` on manufactured
 sphere-SDF + random-field scenes: full-grid and interior dirty-AABB sub-blocks,
 ``mu0_projection`` 0/1.
 
@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from lilytorch.src.native import bdim_forcing_3d, bdim_forcing_2d
+from lilytorch.src.native import bdim_apply_3d, bdim_apply_2d
 
 SKIP_NO_CUDA = pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA")
 
@@ -55,7 +55,7 @@ def _run_native(F, dirty, mu0_proj):
     su, sv, sw, bu, bv, bw, up, vp, wp_ = F
     u0, v0, w0 = up.clone(), vp.clone(), wp_.clone()
     ch, cv, cw = _cbuf(su.device, su.dtype)
-    bdim_forcing_3d(up, vp, wp_, su, sv, sw, bu, bv, bw,
+    bdim_apply_3d(up, vp, wp_, su, sv, sw, bu, bv, bw,
                        u0, v0, w0, ch, cv, cw, EPS, RHO, DT, H, *dirty,
                        mu0_proj)
     return u0, v0, w0, ch, cv, cw
@@ -90,7 +90,7 @@ def test_outside_rect_passthrough_3d(dev):
     ch, cv, cw = _cbuf(dev)
     refs = tuple(c.clone() for c in (ch, cv, cw))
     rect = (5, 4, 3, 20, 18, 16)
-    bdim_forcing_3d(up, vp, wp_, su, sv, sw, bu, bv, bw,
+    bdim_apply_3d(up, vp, wp_, su, sv, sw, bu, bv, bw,
                          u0, v0, w0, ch, cv, cw,
                          EPS, RHO, DT, H, *rect, 1)
     i0, j0, k0, Ai, Aj, Ak = rect
@@ -130,7 +130,7 @@ def test_mw_div_corr_fold_3d(dev, dtype):
     ch, cv, cw = _cbuf(dev, dtype)
     div_corr = torch.full_like(sdf_cc, -333.0)
     eps_mw = 1.7 * EPS
-    bdim_forcing_3d(up, vp, wp_, su, sv, sw, bu, bv, bw,
+    bdim_apply_3d(up, vp, wp_, su, sv, sw, bu, bv, bw,
                          u0, v0, w0, ch, cv, cw,
                          EPS, RHO, DT, H, 5, 4, 3, 20, 18, 16, 1,
                          sdf_cc=sdf_cc, div_corr=div_corr, eps_mw=eps_mw,
@@ -160,7 +160,7 @@ def _rectdev_steps_bdim_3d(dtype, mw_on):
         rect = (4 + step, 3 + step, 2 + step, 18, 16, 14)   # moving AABB
         up.add_(0.01); bu.mul_(1.001)                       # live-data check
         rect_dev.copy_(torch.tensor(rect, dtype=torch.int32, device=dev))
-        bdim_forcing_3d(up, vp, wp_, su, sv, sw, bu, bv, bw,
+        bdim_apply_3d(up, vp, wp_, su, sv, sw, bu, bv, bw,
                              u0g, v0g, w0g, chg, cvg, cwg,
                              EPS, RHO, DT, H, *rect, 1,
                              sdf_cc=(sdf_cc if mw_on else None),
@@ -168,7 +168,7 @@ def _rectdev_steps_bdim_3d(dtype, mw_on):
         u0e, v0e, w0e = (torch.empty_like(t) for t in (up, vp, wp_))
         che, cve, cwe = chg.clone(), cvg.clone(), cwg.clone()
         dce = torch.zeros_like(sdf_cc) if mw_on else None
-        bdim_forcing_3d(up, vp, wp_, su, sv, sw, bu, bv, bw,
+        bdim_apply_3d(up, vp, wp_, su, sv, sw, bu, bv, bw,
                              u0e, v0e, w0e, che, cve, cwe,
                              EPS, RHO, DT, H, *rect, 1,
                              sdf_cc=(sdf_cc if mw_on else None),
@@ -235,7 +235,7 @@ if __name__ == "__main__":
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-#  2-D bdim_forcing (bdim_forcing_2d) — merged from the former
+#  2-D bdim_apply (bdim_apply_2d) — merged from the former
 #  test_bdim_2d.py.  Symbols carry a `_2d` suffix so both dims coexist.
 # ═════════════════════════════════════════════════════════════════════════════
 NGX_2D, NGY_2D, H_2D = 48, 40, 0.05
@@ -272,7 +272,7 @@ def _run_native_2d(F, dirty, mu0_proj):
     su, sv, bu, bv, up, vp = F
     u0, v0 = up.clone(), vp.clone()
     ch, cv = _cbuf_2d(su.device)
-    bdim_forcing_2d(up, vp, su, sv, bu, bv, u0, v0, ch, cv,
+    bdim_apply_2d(up, vp, su, sv, bu, bv, u0, v0, ch, cv,
                        EPS_2D, RHO_2D, DT_2D, H_2D, *dirty, mu0_proj)
     return u0, v0, ch, cv
 
@@ -300,7 +300,7 @@ def test_outside_rect_passthrough_2d(dev):
     ch, cv = _cbuf_2d(dev)
     ch_ref, cv_ref = ch.clone(), cv.clone()
     rect = (5, 4, 24, 20)
-    bdim_forcing_2d(up, vp, su, sv, bu, bv, u0, v0, ch, cv,
+    bdim_apply_2d(up, vp, su, sv, bu, bv, u0, v0, ch, cv,
                          EPS_2D, RHO_2D, DT_2D, H_2D, *rect, 1)
     i0, j0, Ai, Aj = rect
     out = torch.ones_like(up, dtype=torch.bool)
@@ -334,7 +334,7 @@ def test_mw_div_corr_fold_2d(dev, dtype):
     ch, cv = (c.to(dtype) for c in _cbuf_2d(dev))
     div_corr = torch.full_like(sdf_cc, -333.0)
     eps_mw = 1.7 * EPS_2D
-    bdim_forcing_2d(up, vp, su, sv, bu, bv, u0, v0, ch, cv,
+    bdim_apply_2d(up, vp, su, sv, bu, bv, u0, v0, ch, cv,
                          EPS_2D, RHO_2D, DT_2D, H_2D,
                          5, 4, 24, 20, 1,
                          sdf_cc=sdf_cc, div_corr=div_corr,
@@ -370,7 +370,7 @@ def _rectdev_steps_bdim_2d(dtype, mw_on):
         rect = (4 + step, 3 + step, 22, 18)      # moving dirty rect
         up.add_(0.01); bu.mul_(1.001)            # live-data check
         rect_dev.copy_(torch.tensor(rect, dtype=torch.int32, device=dev))
-        bdim_forcing_2d(up, vp, su, sv, bu, bv, u0g, v0g, chg, cvg,
+        bdim_apply_2d(up, vp, su, sv, bu, bv, u0g, v0g, chg, cvg,
                              EPS_2D, RHO_2D, DT_2D, H_2D, *rect, 1,
                              sdf_cc=(sdf_cc if mw_on else None),
                              div_corr=dcg, rect_dev=rect_dev, **kw)
@@ -378,7 +378,7 @@ def _rectdev_steps_bdim_2d(dtype, mw_on):
         u0e = torch.empty_like(up); v0e = torch.empty_like(vp)
         che, cve = chg.clone(), cvg.clone()
         dce = torch.zeros_like(sdf_cc) if mw_on else None
-        bdim_forcing_2d(up, vp, su, sv, bu, bv, u0e, v0e, che, cve,
+        bdim_apply_2d(up, vp, su, sv, bu, bv, u0e, v0e, che, cve,
                              EPS_2D, RHO_2D, DT_2D, H_2D, *rect, 1,
                              sdf_cc=(sdf_cc if mw_on else None),
                              div_corr=dce, **kw)

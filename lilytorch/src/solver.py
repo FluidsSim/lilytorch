@@ -10,8 +10,8 @@ from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor
 
 from lilytorch.src.native import (
-    bdim_forcing_3d,
-    bdim_forcing_2d,
+    bdim_apply_3d,
+    bdim_apply_2d,
 )
 from lilytorch.src.advection import AdvDiffSolver
 from lilytorch.src.diagnostics import FlowDiagnostics
@@ -537,6 +537,10 @@ class FluidSolver(PlottingMixin):
             custom_update = custom_update,
             starting_time = self.starting_time,
         )
+        # Belt-and-suspenders: ensure the body's eps exactly matches the
+        # solver's Maertens-Weymouth eps_multiplier * h, even if a subclass
+        # or downstream handler replaces the body after construction.
+        self.composite_body.eps = float(self.eps)
 
         self.n_bodies = len(self.composite_body.bodies)
 
@@ -989,7 +993,7 @@ class FluidSolver(PlottingMixin):
         seam blow-up.  See ``docs/immersed_boundary.rst``.
 
         Used by the two-phase solver.  BOTH fused single-phase steps compute
-        this term INSIDE the ``bdim_forcing_{2,3}d`` kernel (``mw_on``
+        this term INSIDE the ``bdim_apply_{2,3}d`` kernel (``mw_on``
         inputs, written to ``_mw_div_corr_persist``) — this method is their
         torch oracle (parity-tested in
         ``tests/test_bdim.py::test_mw_div_corr_fold_{2d,3d}``).
@@ -1477,7 +1481,7 @@ class FluidSolver(PlottingMixin):
         Phase I: the kernel-mode paths (2-D and 3-D) no longer
         materialise any of the staggered or CC mu / normal tensors as
         full-grid buffers — they live only in CUDA thread registers
-        inside the fused ``bdim_forcing`` kernel — so the keep-set is
+        inside the fused ``bdim_apply`` kernel — so the keep-set is
         empty in both modes.
         """
         for attr in self._BDIM_FIELD_NAMES:
@@ -1734,7 +1738,7 @@ class FluidSolver(PlottingMixin):
         return tuple(out)
 
     # ------------------------------------------------------------------
-    #   Fused fluid step — native bdim_forcing
+    #   Fused fluid step — native bdim_apply
     # ------------------------------------------------------------------
     def _init_bdim_coeff_persist_3d(self, timestep):
         """Lazy-allocate the persistent ``ch/cv/cw`` Poisson-coefficient
@@ -1743,7 +1747,7 @@ class FluidSolver(PlottingMixin):
         Outside any immersed body ``mu0 = 1`` everywhere, so the
         coefficients reduce to the constant ``dt / rho_fluid``.  The
         buffers are pre-filled once with that default; the fused
-        ``bdim_forcing`` kernel overwrites only the dirty AABB sub-block
+        ``bdim_apply`` kernel overwrites only the dirty AABB sub-block
         each step.
         """
         Ngx, Ngy, Ngz = self.grid_shape
@@ -1776,7 +1780,7 @@ class FluidSolver(PlottingMixin):
                 or self._mw_div_corr_persist.dtype != dtype
                 or self._mw_div_corr_persist.device.type != device.type):
             # Full-grid MW body-divergence output, written by the fused
-            # bdim_forcing kernel every step (so no stale-cell hazard).
+            # bdim_apply kernel every step (so no stale-cell hazard).
             self._mw_div_corr_persist = torch.zeros(gs, device=device, dtype=dtype)
 
     def _cached_float(self, key, value):
@@ -1784,7 +1788,7 @@ class FluidSolver(PlottingMixin):
         tensor (``self.rho``/``self.nu``/``self.eps``/``comp.h``/``self.dt``…).
 
         ``float(gpu_tensor)`` is a host↔device sync; doing it every step at
-        kernel-marshalling sites (bdim_forcing, the fused force readout) stalls
+        kernel-marshalling sites (bdim_apply, the fused force readout) stalls
         the CUDA pipeline mid-step — profiling the salamander 2-D run showed
         ~16 such hidden syncs/step.  These scalars are constant for the life of
         the run, so convert once and reuse the cached float.
@@ -1823,12 +1827,12 @@ class FluidSolver(PlottingMixin):
                 or self._mw_div_corr_persist.dtype != dtype
                 or self._mw_div_corr_persist.device.type != device.type):
             # Full-grid MW body-divergence output, written by the fused
-            # bdim_forcing kernel every step (so no stale-cell hazard).
+            # bdim_apply kernel every step (so no stale-cell hazard).
             self._mw_div_corr_persist = torch.zeros(gs, device=device, dtype=dtype)
 
-    # ── Fused BDIM step (2-D): native bdim_forcing ──────────────────────────
+    # ── Fused BDIM step (2-D): native bdim_apply ──────────────────────────
     def _fluid_step_fused_2d(self, u, v, p, timestep):
-        """2-D fused fluid step: a single native kernel (``bdim_forcing_2d``)
+        """2-D fused fluid step: a single native kernel (``bdim_apply_2d``)
         applies the BDIM2 meta-equation and assembles the variable-density
         Poisson coefficients, followed by the pressure projection.
 
@@ -1906,7 +1910,7 @@ class FluidSolver(PlottingMixin):
         # The runner dispatches to either graph replay or eager launch.
         def _run_preproj():
             primes_loc = self.adv_diff_solver.solve(u, v, nu_eff=_nu_eff)
-            bdim_forcing_2d(
+            bdim_apply_2d(
                 primes_loc[0], primes_loc[1],
                 sdf_u, sdf_v,
                 bU, bV,
@@ -1986,7 +1990,7 @@ class FluidSolver(PlottingMixin):
 
         return (*vels_out, p_out)
 
-    # ── Fused BDIM step (3-D): native bdim_forcing ──────────────────────────
+    # ── Fused BDIM step (3-D): native bdim_apply ──────────────────────────
     def _fluid_step_fused_3d(self, u, v, w_vel, p, timestep):
         """3-D analogue of :meth:`_fluid_step_fused_2d` (adds the w axis and
         the ``k0``/``Ak`` dirty extents).  Same body-agnostic contract: the
@@ -1994,7 +1998,7 @@ class FluidSolver(PlottingMixin):
         ``composite_body.update()`` and never computes body geometry itself.
 
         Whole-step pre-Poisson graph (CUDA) captures SL/convective advection
-        + diffusion + bdim_forcing + set_BCs as ONE CUDA-graph replay,
+        + diffusion + bdim_apply + set_BCs as ONE CUDA-graph replay,
         collapsing ~5 host-side captures into a single replay (~3 µs)."""
         comp  = self.composite_body
         sdf_u = getattr(comp, 'sdf_val_u', None)
@@ -2061,7 +2065,7 @@ class FluidSolver(PlottingMixin):
         def _run_preproj():
             primes_loc = self.adv_diff_solver.solve(
                 u, v, w_vel, nu_eff=_nu_eff)
-            bdim_forcing_3d(
+            bdim_apply_3d(
                 primes_loc[0], primes_loc[1], primes_loc[2],
                 sdf_u, sdf_v, sdf_w,
                 bU, bV, bW,
@@ -2281,7 +2285,7 @@ class FluidSolver(PlottingMixin):
         """
         self.composite_body.update(t, iteration, dt=self.dt)
         # The fused step computes mu0/mu1 and normals in CUDA thread
-        # registers inside bdim_forcing, so the full-grid mu/normal pack is
+        # registers inside bdim_apply, so the full-grid mu/normal pack is
         # only materialised when a downstream consumer actually reads it:
         # the python force readout of standalone (non-streaming) bodies.
         # Streaming (FARMS) runs read their forces from the post-step force

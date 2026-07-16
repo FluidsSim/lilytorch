@@ -952,7 +952,7 @@ class BDIMhandler:
                 grid_origin, dtype=self.dtype, device=self.device),
             'inv_h':        1.0 / float(comp.h),
             'gs':           torch.tensor(gs, dtype=torch.int64, device=self.device),
-            'pad':          3,
+            'pad':          8,
             # numpy mirrors used by the host-side per-step assembly.  2-D
             # stores zeros/identity for local_lt/lr so the unified compose
             # einsum is a bit-exact no-op there (R@I = R, urdf + R@0 = urdf).
@@ -1778,7 +1778,7 @@ class BDIMhandler:
         Outside any immersed body ``mu0 = 1`` everywhere, so the
         coefficients reduce to the constant ``dt / rho_fluid``.  The
         buffers are pre-filled once with that default; the fused
-        ``bdim_forcing`` kernel overwrites only the dirty AABB sub-block
+        ``bdim_apply`` kernel overwrites only the dirty AABB sub-block
         each step.
         """
         fs = self.fluid_solver
@@ -1815,7 +1815,7 @@ class BDIMhandler:
         Outside any immersed body ``mu0 = 1`` everywhere, so the
         coefficients reduce to the constant ``dt / rho_fluid``.  The
         buffers are pre-filled once with that default; the fused
-        ``bdim_forcing`` kernel overwrites only the dirty AABB sub-block
+        ``bdim_apply`` kernel overwrites only the dirty AABB sub-block
         each step.
         """
         fs = self.fluid_solver

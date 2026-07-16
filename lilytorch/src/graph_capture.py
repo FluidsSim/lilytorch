@@ -1,7 +1,7 @@
 """Whole-step CUDA-graph capture for the pre-Poisson fluid region.
 
 :class:`NativeWholeStepGraphRunner` captures the entire pre-Poisson region
-(semi-Lagrangian advection, diffusion accumulate, ``bdim_forcing``,
+(semi-Lagrangian advection, diffusion accumulate, ``bdim_apply``,
 ``apply_bcs``) as ONE ``torch.cuda.CUDAGraph`` and replays it with a single
 host launch.
 
@@ -83,7 +83,7 @@ class NativeWholeStepGraphRunner:
             Zero-argument closure that stages per-step data into the
             persistent buffers ``issue()`` reads — called OUTSIDE the capture,
             on EVERY path: eager, capture and replay.  ``issue()`` consumes
-            those buffers regardless of graph mode (e.g. ``bdim_forcing`` reads
+            those buffers regardless of graph mode (e.g. ``bdim_apply`` reads
             the staged dirty rect), so skipping the staging on the eager path
             leaves it reading an uninitialised ``torch.empty`` buffer — silently
             wrong physics on CPU and under ``graph_capture_debug``.

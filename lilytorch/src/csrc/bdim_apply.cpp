@@ -1,7 +1,7 @@
 // =====================================================================
-//  bdim_forcing_{2d,3d} — CPU twins (at::parallel_for).
+//  bdim_apply_{2d,3d} — CPU twins (at::parallel_for).
 //
-//  Faithful line-for-line port of the CUDA kernel in bdim_forcing.cu,
+//  Faithful line-for-line port of the CUDA kernel in bdim_apply.cu,
 //  cell-for-cell.
 // =====================================================================
 
@@ -160,9 +160,9 @@ static inline void bdim_one_axis_3d_cpu(
 }
 
 // =====================================================================
-//  CPU launcher: bdim_forcing_3d
+//  CPU launcher: bdim_apply_3d
 // =====================================================================
-static void bdim_forcing_3d_cpu(
+static void bdim_apply_3d_cpu(
     const at::Tensor& u_prime,
     const at::Tensor& v_prime,
     const at::Tensor& w_prime,
@@ -187,7 +187,7 @@ static void bdim_forcing_3d_cpu(
     const int Ngz = (int)u0.size(2);
     const int total = Ngx * Ngy * Ngz;
 
-    AT_DISPATCH_FLOATING_TYPES(u0.scalar_type(), "bdim_forcing_3d_cpu", [&] {
+    AT_DISPATCH_FLOATING_TYPES(u0.scalar_type(), "bdim_apply_3d_cpu", [&] {
         const scalar_t eps_s   = (scalar_t)eps;
         const scalar_t rho_s   = (scalar_t)rho_f;
         const scalar_t dt_s    = (scalar_t)dt;
@@ -272,9 +272,9 @@ static void bdim_forcing_3d_cpu(
 }
 
 // =====================================================================
-//  CPU launcher: bdim_forcing_2d
+//  CPU launcher: bdim_apply_2d
 // =====================================================================
-static void bdim_forcing_2d_cpu(
+static void bdim_apply_2d_cpu(
     const at::Tensor& u_prime,
     const at::Tensor& v_prime,
     const at::Tensor& sdf_u,
@@ -295,7 +295,7 @@ static void bdim_forcing_2d_cpu(
     const int Ngy = (int)u0.size(1);
     const int total = Ngx * Ngy;
 
-    AT_DISPATCH_FLOATING_TYPES(u0.scalar_type(), "bdim_forcing_2d_cpu", [&] {
+    AT_DISPATCH_FLOATING_TYPES(u0.scalar_type(), "bdim_apply_2d_cpu", [&] {
         const scalar_t eps_s   = (scalar_t)eps;
         const scalar_t rho_s   = (scalar_t)rho_f;
         const scalar_t dt_s    = (scalar_t)dt;
@@ -362,8 +362,8 @@ static void bdim_forcing_2d_cpu(
 //  Register with the CPU backend
 // =====================================================================
 TORCH_LIBRARY_IMPL(lilytorch_kernels, CPU, m) {
-    m.impl("bdim_forcing_3d", &bdim_forcing_3d_cpu);
-    m.impl("bdim_forcing_2d", &bdim_forcing_2d_cpu);
+    m.impl("bdim_apply_3d", &bdim_apply_3d_cpu);
+    m.impl("bdim_apply_2d", &bdim_apply_2d_cpu);
 }
 
 }  // namespace lilytorch_kernels

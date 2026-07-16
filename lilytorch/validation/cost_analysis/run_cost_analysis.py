@@ -251,7 +251,7 @@ def instrument_handler(handler):
                 self_h.update(t, iteration, dt=timestep)
 
             # NOTE: no "mu+normals (recompute)" phase — the fused step
-            # computes mu/normals in registers inside bdim_forcing, and
+            # computes mu/normals in registers inside bdim_apply, and
             # streaming FARMS runs never build the python full-grid pack
             # (reading ``comp.sdf_val_u`` would fail: MultiAnimatBodies
             # does not allocate the persistent staggered fields).
@@ -379,7 +379,7 @@ def instrument_handler(handler):
             poisson_mg._vcycle = types.MethodType(timed_vcycle, poisson_mg)
 
         # Fused-path patches: intercept body_update (streaming SDF, launched
-        # from BDIMhandler) and bdim_forcing (fused BDIM+vardens, launched from
+        # from BDIMhandler) and bdim_apply (fused BDIM+vardens, launched from
         # the solver's fused step) at their respective module levels so they
         # are attributed to the "Body update (SDF eval)" and "BDIM
         # meta-equation" categories (prefixes "1b" and "3b").
@@ -387,27 +387,27 @@ def instrument_handler(handler):
         import lilytorch.integration.BDIMhandler as _handler_mod
         if spec.dim == 3:
             _orig_kern_a = _handler_mod.body_update_3d
-            _orig_kern_b = _solver_mod.bdim_forcing_3d
+            _orig_kern_b = _solver_mod.bdim_apply_3d
         else:
             _orig_kern_a = _handler_mod.body_update_2d
-            _orig_kern_b = _solver_mod.bdim_forcing_2d
+            _orig_kern_b = _solver_mod.bdim_apply_2d
 
         def _timed_kern_a(*ca, **ckw):
             with T("1b.ka   body_update (streaming SDF)"):
                 return _orig_kern_a(*ca, **ckw)
 
         def _timed_kern_b(*ca, **ckw):
-            with T("3b.kb   bdim_forcing (fused BDIM+vardens)"):
+            with T("3b.kb   bdim_apply (fused BDIM+vardens)"):
                 return _orig_kern_b(*ca, **ckw)
 
         if spec.dim == 3:
             _handler_mod.body_update_3d = _timed_kern_a
-            _solver_mod.bdim_forcing_3d = _timed_kern_b
+            _solver_mod.bdim_apply_3d = _timed_kern_b
         else:
             _handler_mod.body_update_2d = _timed_kern_a
-            _solver_mod.bdim_forcing_2d = _timed_kern_b
+            _solver_mod.bdim_apply_2d = _timed_kern_b
 
-        kern_info = ", body_update+bdim_forcing"
+        kern_info = ", body_update+bdim_apply"
         extra = ", Poisson internals" if instrument_poisson_internals and poisson_mg else ""
         print(f"  [profiler] Deep patches installed (SDF, advection, BDIM, project{kern_info}{extra})", flush=True)
 

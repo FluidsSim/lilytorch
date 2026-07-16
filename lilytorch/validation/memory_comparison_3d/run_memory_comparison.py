@@ -717,7 +717,7 @@ def _run_worker(args: argparse.Namespace) -> None:
 
         # 2. mu / normals
         # The fused step computes mu0/mu1 and normals in registers inside
-        # bdim_forcing; the python full-grid pack is only built when the
+        # bdim_apply; the python full-grid pack is only built when the
         # python force readout needs it (mirrors advance_and_compute_loads).
         if fs._needs_python_mu_normals():
             fs._recompute_mu_normals()

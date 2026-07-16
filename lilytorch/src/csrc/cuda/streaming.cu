@@ -1,5 +1,5 @@
 // =====================================================================
-//  streaming_sdf_regime_b.cu — Regime-B per-body private buffers + resolve
+//  streaming.cu — Per-body private buffers + resolve kernels (2-D and 3-D).
 //
 //  Replaces the union-AABB packed-key ``atomicMin`` pipeline for
 //  overlapping-body regimes.  Two kernels:
