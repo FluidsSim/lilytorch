@@ -153,11 +153,11 @@ def _forces_body_integrate_3d(
         0.0,
     )
 
-    # Towers (2008) 2nd-order correction: δ_S = δ_ε(φ) / |∇φ|
+    # Towers (2008) 2nd-order correction: δ_S = δ_ε(φ)·|∇φ|.  Coarea:
+    # ∮_{φ=0} g dS = ∫ g δ(φ)|∇φ| dV, so the surface delta MULTIPLIES by |∇φ|.
     if sdf_grad_mag is not None:
-        inv_grad = 1.0 / sdf_grad_mag.clamp(min=1e-3)
-        delta_visc = delta_visc * inv_grad
-        delta_pres = delta_pres * inv_grad
+        delta_visc = delta_visc * sdf_grad_mag
+        delta_pres = delta_pres * sdf_grad_mag
 
     # viscous forces — cast to float64 before .sum() for deterministic
     # accumulation order (GPU tree-reduction vs CPU sequential).
@@ -227,11 +227,11 @@ def _forces_body_batch(
         (1.0 + torch.cos(torch.pi * sdf_all / eps_body)) / (2.0 * eps_body),
         torch.zeros_like(sdf_all),
     )
-    # Towers (2008) 2nd-order correction: δ_S = δ_ε(φ) / |∇φ|
+    # Towers (2008) 2nd-order correction: δ_S = δ_ε(φ)·|∇φ|.  Coarea:
+    # ∮_{φ=0} g dS = ∫ g δ(φ)|∇φ| dV, so the surface delta MULTIPLIES by |∇φ|.
     if sdf_grad_mag is not None:
-        inv_grad = 1.0 / sdf_grad_mag.clamp(min=1e-3)
-        delta_visc = delta_visc * inv_grad
-        delta_pres = delta_pres * inv_grad
+        delta_visc = delta_visc * sdf_grad_mag
+        delta_pres = delta_pres * sdf_grad_mag
 
     fvisc = [stresses[i].unsqueeze(0) * delta_visc for i in range(D)]
     fpres = [pforces[i].unsqueeze(0) * delta_pres for i in range(D)]

@@ -676,48 +676,47 @@ def test_oracle_eulerian_thinness_error_at_zero_shift():
     assert ratios["thin"] > ratios["fat"]
 
 
-def test_delta_order2_is_inverted_vs_coarea():
-    """PINS A KNOWN BUG (handoff §8, promoted to §10.3c) — flip this on fix.
+@pytest.mark.parametrize("g", [0.5, 1.0, 2.0])
+def test_delta_order2_applies_the_coarea_factor(g):
+    """delta_order=2 must MULTIPLY the delta by |∇φ| (coarea), not divide.
 
-    The coarea identity ∮_{φ=0} g dS = ∫ δ(φ) g |∇φ| dV needs a MULTIPLY by
-    |∇φ|; ``solver.py`` says delta_order=2 "divides by |∇SDF| so that the volume
-    integral gives the correct surface measure", and the code does divide.  So
-    order 2 doubles the |∇φ| error instead of removing it.
+    ∮_{φ=0} f dS = ∫ f δ(φ) |∇φ| dV, so a δ_ε(φ) volume integral without the
+    |∇φ| factor returns (true surface integral)/|∇φ|.  Order 2 supplies that
+    factor and must therefore recover the exact force for ANY |∇φ|.
 
-    Inert at |∇φ| = 1 (which is why analytical-body tests never caught it), so
-    this drives a DELIBERATELY SCALED SDF, φ = g·(r−R), where the true force is
-    unchanged but |∇φ| = g.  Correct behaviour would be order2 ≈ exact for any
-    g; as coded it lands at exact/g² instead.  On the zebrafish's real mesh SDF
-    (|∇φ| ≈ 0.82) this is worth ~1.22x of live over-read.
+    The correction is inert at |∇φ| = 1 — which is why every analytical-body
+    test missed that it was inverted until 2026-07-16 (handoff §8 / §10.3c) —
+    so this drives a DELIBERATELY SCALED SDF φ = g·(r−R): the same sphere and
+    the same exact force, but |∇φ| = g.  Order 1 lands at exact/g; order 2 must
+    land on exact.  Before the fix, order 2 gave exact/g² instead.
     """
     exact = 2 * _ORC_NU * _ORC_RHO * _ORC_CSH * _ORC_V
-    for g in (0.5, 2.0):
-        sc = _oracle_scene(64, 1.0)
-        # rescale BOTH the union SDF and the body table -> |∇φ| = g, same body
-        sc["sdf_cc"] = sc["sdf_cc"] * g
-        sc["F_flat"] = sc["F_flat"] * g
-        sc["eps"] = sc["eps"] * g          # band must scale with the SDF units
-        z = torch.zeros_like(sc["X"])
-        args = (_ORC_CSH * sc["Y"] ** 2, z.clone(), z.clone(), z.clone())
-        f1 = _oracle_eulerian_shift(sc, *args, 0.0)
-        out = torch.zeros((1, 12), dtype=torch.float64)
-        streaming_sdf_forces_post_3d(
-            sc["F_flat"], sc["F_offsets"], sc["body_shapes"], sc["body_meta"],
-            sc["kin"], sc["aabb_lo"], sc["aabb_dim"],
-            sc["g"], sc["g"], sc["g"], sc["h"], sc["N"] ** 3,
-            sc["sdf_cc"], 0,
-            args[0].ravel().contiguous(), args[1].ravel().contiguous(),
-            args[2].ravel().contiguous(), args[3].ravel().contiguous(),
-            torch.tensor([_ORC_NU * _ORC_RHO], dtype=torch.float64),
-            sc["eps"], 0.0, sc["h"] ** 3, 2, out, 0, 1.5 * sc["h"],
-        )
-        f2 = float(out[0, 0])
-        # order 2 as coded = order 1 / |∇φ|; the coarea fix would MULTIPLY.
-        assert f2 == pytest.approx(f1 / g, rel=0.05), \
-            f"|∇φ|={g}: order2 {f2:.5e} is not order1/|∇φ| ({f1/g:.5e})"
-        # ...so it moves AWAY from the exact answer that order1*|∇φ| recovers.
-        assert f1 * g == pytest.approx(exact, rel=0.06), \
-            f"|∇φ|={g}: order1*|∇φ| should recover exact, got {f1*g:.5e}"
+    sc = _oracle_scene(64, 1.0)
+    # rescale BOTH the union SDF and the body table -> |∇φ| = g, same geometry
+    sc["sdf_cc"] = sc["sdf_cc"] * g
+    sc["F_flat"] = sc["F_flat"] * g
+    sc["eps"] = sc["eps"] * g              # band must scale with the SDF units
+    z = torch.zeros_like(sc["X"])
+    args = (_ORC_CSH * sc["Y"] ** 2, z.clone(), z.clone(), z.clone())
+
+    f1 = _oracle_eulerian_shift(sc, *args, 0.0)          # order 1: exact/g
+    out = torch.zeros((1, 12), dtype=torch.float64)
+    streaming_sdf_forces_post_3d(
+        sc["F_flat"], sc["F_offsets"], sc["body_shapes"], sc["body_meta"],
+        sc["kin"], sc["aabb_lo"], sc["aabb_dim"],
+        sc["g"], sc["g"], sc["g"], sc["h"], sc["N"] ** 3,
+        sc["sdf_cc"], 0,
+        args[0].ravel().contiguous(), args[1].ravel().contiguous(),
+        args[2].ravel().contiguous(), args[3].ravel().contiguous(),
+        torch.tensor([_ORC_NU * _ORC_RHO], dtype=torch.float64),
+        sc["eps"], 0.0, sc["h"] ** 3, 2, out, 0, 1.5 * sc["h"],
+    )
+    f2 = float(out[0, 0])
+
+    assert f1 == pytest.approx(exact / g, rel=0.06), \
+        f"|∇φ|={g}: order1 should read exact/|∇φ|, got {f1:.5e}"
+    assert f2 == pytest.approx(exact, rel=0.06), \
+        f"|∇φ|={g}: order2 must recover exact via the coarea factor, got {f2:.5e}"
 
 
 def test_oracle_deltaH_viscous_is_ndelta_viscous():

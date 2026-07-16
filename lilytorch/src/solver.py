@@ -345,11 +345,15 @@ class FluidSolver(PlottingMixin):
         self._bdim_union_aabb = None
 
         # ---- optional Towers (2008) 2nd-order delta correction -----------
-        # When force_delta_order=2, the smoothed delta is divided by |∇SDF|
+        # When force_delta_order=2, the smoothed delta is MULTIPLIED by |∇SDF|
         # so that the volume integral gives the correct surface measure even
-        # when the numerical SDF deviates from unit gradient.
+        # when the numerical SDF deviates from unit gradient.  This is the
+        # coarea identity ∮_{φ=0} g dS = ∫ g δ(φ)|∇φ| dV.
         # For analytical bodies |∇SDF|=1 exactly, so order 2 is a no-op;
         # it matters for mesh bodies or near geometric corners.
+        # (Until 2026-07-16 this DIVIDED by |∇SDF|, doubling the error it was
+        # meant to remove — invisible to every analytical-body test.  See
+        # milestones/force_readout_agreement_handoff.md §8 / §10.3c.)
         self.force_delta_order = int(solver.get("force_delta_order", 1))
         if self.force_delta_order not in (1, 2):
             raise ValueError(f"force_delta_order must be 1 or 2, got {self.force_delta_order}")

@@ -533,11 +533,11 @@ void streaming_sdf_forces_post_2d_cpu(
                     const scalar_t s_ym = smp(bxq - r01*hg, byq - r11*hg);
                     const scalar_t dsdx = (s_xp - s_xm) * (scalar_t)0.5 * inv_h_s;
                     const scalar_t dsdy = (s_yp - s_ym) * (scalar_t)0.5 * inv_h_s;
-                    scalar_t grad_mag = std::sqrt(dsdx*dsdx + dsdy*dsdy);
-                    if (grad_mag < (scalar_t)1e-3) grad_mag = (scalar_t)1e-3;
-                    const scalar_t inv_grad = (scalar_t)1.0 / grad_mag;
-                    delta_visc *= inv_grad;
-                    delta_pres *= inv_grad;
+                    const scalar_t grad_mag = std::sqrt(dsdx*dsdx + dsdy*dsdy);
+                    // Coarea: oint_{phi=0} g dS = int g delta(phi) |grad phi| dV,
+                    // so the surface delta is delta_eps(phi) * |grad phi|.
+                    delta_visc *= grad_mag;
+                    delta_pres *= grad_mag;
                 }
 
                 const scalar_t nu_rho_val = (nr_size == 1) ? nr_p[0] : nr_p[g_idx];

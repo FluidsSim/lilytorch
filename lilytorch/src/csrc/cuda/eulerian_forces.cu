@@ -516,12 +516,11 @@ __global__ void streaming_sdf_forces_post_2d_kernel(
                     bxq - r01*h_grid, byq - r11*h_grid);
                 const scalar_t dsdx = (s_xp - s_xm) * (scalar_t)0.5 * inv_h;
                 const scalar_t dsdy = (s_yp - s_ym) * (scalar_t)0.5 * inv_h;
-                scalar_t grad_mag = sqrt(dsdx*dsdx + dsdy*dsdy);
-                const scalar_t min_grad = (scalar_t)1e-3;
-                if (grad_mag < min_grad) grad_mag = min_grad;
-                const scalar_t inv_grad = (scalar_t)1.0 / grad_mag;
-                delta_visc *= inv_grad;
-                delta_pres *= inv_grad;
+                const scalar_t grad_mag = sqrt(dsdx*dsdx + dsdy*dsdy);
+                // Coarea: oint_{phi=0} g dS = int g delta(phi) |grad phi| dV,
+                // so the surface delta is delta_eps(phi) * |grad phi|.
+                delta_visc *= grad_mag;
+                delta_pres *= grad_mag;
             }
 
             const scalar_t arm_x = xc - cm_x;
@@ -1032,11 +1031,11 @@ __global__ void streaming_sdf_forces_post_3d_kernel(
                 const scalar_t s_ym = sdf_sample_dispatch(interp_method,F,Mx,My,Mz,bx0,by0,bz0,idx_,idy_,idz_,bxq-r01*h_grid,byq-r11*h_grid,bzq-r21*h_grid);
                 const scalar_t s_zp = sdf_sample_dispatch(interp_method,F,Mx,My,Mz,bx0,by0,bz0,idx_,idy_,idz_,bxq+r02*h_grid,byq+r12*h_grid,bzq+r22*h_grid);
                 const scalar_t s_zm = sdf_sample_dispatch(interp_method,F,Mx,My,Mz,bx0,by0,bz0,idx_,idy_,idz_,bxq-r02*h_grid,byq-r12*h_grid,bzq-r22*h_grid);
-                scalar_t grad_mag = sqrt(((s_xp-s_xm)*(s_xp-s_xm) + (s_yp-s_ym)*(s_yp-s_ym) + (s_zp-s_zm)*(s_zp-s_zm)) * (scalar_t)0.25 * inv_h * inv_h);
-                if (grad_mag < (scalar_t)1e-3) grad_mag = (scalar_t)1e-3;
-                const scalar_t inv_grad = (scalar_t)1.0 / grad_mag;
-                delta_visc *= inv_grad;
-                delta_pres *= inv_grad;
+                const scalar_t grad_mag = sqrt(((s_xp-s_xm)*(s_xp-s_xm) + (s_yp-s_ym)*(s_yp-s_ym) + (s_zp-s_zm)*(s_zp-s_zm)) * (scalar_t)0.25 * inv_h * inv_h);
+                // Coarea: oint_{phi=0} g dS = int g delta(phi) |grad phi| dV,
+                // so the surface delta is delta_eps(phi) * |grad phi|.
+                delta_visc *= grad_mag;
+                delta_pres *= grad_mag;
             }
             const scalar_t arm_x = xc - cm_x, arm_y = yc - cm_y, arm_z = zc - cm_z;
             const double fv_x = (double)(xs * delta_visc), fv_y = (double)(ys * delta_visc), fv_z = (double)(zs * delta_visc);

@@ -696,10 +696,11 @@ void streaming_sdf_forces_post_3d_cpu(
                 scalar_t dv=0,dp=0; const scalar_t sd=sbody-eps_s; if(sd>-eps_b&&sd<eps_b) dv=(1+std::cos(pi_eb*sd))*inv_2eps; if(sbody>-eps_b&&sbody<eps_b) dp=(1+std::cos(pi_eb*sbody))*inv_2eps;
                 // deltaH: pressure force/torque come from the union-∂H pass below.
                 if(force_submethod!=0) dp=0;
-                // delta_order==2: divide both deltas by |grad(sdf_body)| evaluated by
-                // re-sampling at world-aligned ±h offsets.  Matches the CUDA-3D path
-                // at streaming_sdf.cu:644-657; without this the CPU path silently
-                // skipped the gradient correction and disagreed with CUDA forces.
+                // delta_order==2: MULTIPLY both deltas by |grad(sdf_body)| evaluated
+                // by re-sampling at world-aligned ±h offsets.  Coarea:
+                // oint_{phi=0} g dS = int g delta(phi) |grad phi| dV.  Matches the
+                // CUDA-3D twin in cuda/eulerian_forces.cu; without this the CPU path
+                // silently skipped the gradient correction and disagreed with CUDA.
                 if(delta_order==2 && (dv>0 || dp>0)){
                     const scalar_t hg=(scalar_t)1.0/inv_h;
                     const scalar_t s_xp=sample_dispatch_cpu<scalar_t>((int)interp_method,Fb,Mx,My,Mz,bx0,by0,bz0,idx,idy,idz,bxq+r00*hg,byq+r10*hg,bzq+r20*hg);
@@ -708,10 +709,8 @@ void streaming_sdf_forces_post_3d_cpu(
                     const scalar_t s_ym=sample_dispatch_cpu<scalar_t>((int)interp_method,Fb,Mx,My,Mz,bx0,by0,bz0,idx,idy,idz,bxq-r01*hg,byq-r11*hg,bzq-r21*hg);
                     const scalar_t s_zp=sample_dispatch_cpu<scalar_t>((int)interp_method,Fb,Mx,My,Mz,bx0,by0,bz0,idx,idy,idz,bxq+r02*hg,byq+r12*hg,bzq+r22*hg);
                     const scalar_t s_zm=sample_dispatch_cpu<scalar_t>((int)interp_method,Fb,Mx,My,Mz,bx0,by0,bz0,idx,idy,idz,bxq-r02*hg,byq-r12*hg,bzq-r22*hg);
-                    scalar_t gm=std::sqrt(((s_xp-s_xm)*(s_xp-s_xm)+(s_yp-s_ym)*(s_yp-s_ym)+(s_zp-s_zm)*(s_zp-s_zm))*(scalar_t)0.25*inv_h*inv_h);
-                    if(gm<(scalar_t)1e-3) gm=(scalar_t)1e-3;
-                    const scalar_t ig=(scalar_t)1.0/gm;
-                    dv*=ig; dp*=ig;
+                    const scalar_t gm=std::sqrt(((s_xp-s_xm)*(s_xp-s_xm)+(s_yp-s_ym)*(s_yp-s_ym)+(s_zp-s_zm)*(s_zp-s_zm))*(scalar_t)0.25*inv_h*inv_h);
+                    dv*=gm; dp*=gm;
                 }
                 const scalar_t px=-pp[g]*nx, py=-pp[g]*ny, pz=-pp[g]*nz, ax=xc-cm_x, ay=yc-cm_y, az=zc-cm_z;
                 const double fvx=xs*dv, fvy=ys*dv, fvz=zs*dv, fpx=px*dp, fpy=py*dp, fpz=pz*dp;

@@ -458,11 +458,23 @@ ratio *is* `⟨1/|∇φ|⟩`):
 | 2.0 | −2.023e-05 | −2.093e-05 | 1.034 | 3.960 | 3.828 |
 
 **This promotes §8 from "side finding, do not conflate" to part of the main story.** `delta_order=2`
-exists to apply exactly this correction, and it is **inverted** — it divides where the coarea formula
-multiplies. Confirmed here on a real mesh body in live geometry: enabling it today makes the fish
-**1.218× worse**, not better. Fixing the inversion *and* enabling order 2 removes ~22% of the
-eulerian over-read. (§8's note that it is "not currently active in the zebrafish config" is true and
-is precisely why the +22% is live and uncorrected.)
+exists to apply exactly this correction, and it was **inverted** — it divided where the coarea
+formula multiplies, so enabling it made a mesh body **1.218× worse**, not better.
+
+**FIXED 2026-07-16 (§10.9).** But measuring the fix deflates the estimate in this section's first
+draft (which guessed "~22%" from `⟨1/|∇φ|⟩`; the kernel applies the factor per-cell, and Jensen makes
+those differ). Measured post-fix on the snapshot:
+
+| s/h | order1 (live) | order2 FIXED | o1/lag(0) | **o2/lag(0)** |
+|---|---|---|---|---|
+| 0.0 | −7.923e-06 | −6.903e-06 | 1.551 | **1.351** |
+| 1.0 | −1.592e-05 | −1.495e-05 | 3.117 | 2.925 |
+| 2.0 | −2.023e-05 | −1.965e-05 | 3.960 | **3.846** |
+
+So the coarea factor is worth **13% at s=0 but only 2.9% at the live shift s=2h** — because at
+s=2h the band sits out in the fluid, where the union SDF *is* a clean distance function
+(`|∇φ|≈1`); `|∇φ|` only degrades near and inside the thin body. **The fix is correct and worth
+having, but it does NOT rescue the zebrafish** — the band shift and thinness dominate. Do not oversell it.
 
 **(b) Thinness — the band cannot localise a surface: ×1.173.**
 Isolated on the sphere oracle at the fish's thinness with `eps_body = 2h` (exact analytic sphere, so
@@ -528,12 +540,9 @@ that construction here.)
    asymptotic regime to extrapolate from — the band is wider than the body. The honest fix for thin
    swimmers is the lagrangian readout, or a finer grid (the 1024×256×128 block already commented out
    in the config would put `R/h ≈ 5.7`, `eps/R ≈ 0.35`).
-3. **Fix the `force_delta_order = 2` inversion (§8) and enable order 2 for mesh bodies.** §10.3c
-   promotes this from a side finding: it is worth ~22% of the fish's eulerian over-read, and it is
-   the *only* one of these errors that is a straightforward code bug with a known-correct answer
-   (coarea needs a multiply by `|∇φ|`, the code divides). It is inert on analytical bodies
-   (`|∇φ|=1`), so it costs those nothing. **Do not enable order 2 before fixing the inversion** — as
-   coded it makes mesh bodies 1.2× worse.
+3. **`force_delta_order = 2` inversion: FIXED (§10.9).** It is now safe to enable order 2 for mesh
+   bodies, and it is the only error here with a known-correct answer. But it buys only **2.9%** at
+   the live band shift (§10.3c) — worth taking, not a cure.
 4. Any eulerian fix must still be gated on the §9.5 campaign (cylinder 512²/1024² vs K&L, gazzola
    `U_t`, coquerelle 3D) — but note it can now ALSO be gated on this snapshot in ~15 s.
 
@@ -580,6 +589,35 @@ python -m lilytorch.validation.force_readout_oracle.shift_sweep_3d \
 
 `gen_zfish_snapshot.py` needs a rebuilt native extension (`python setup.py build_ext --inplace`) —
 the op set moved with the refactor chain.
+
+## 10.9 FIX APPLIED: `force_delta_order = 2` now multiplies by |∇φ| (§8 closed)
+
+The coarea identity `∮_{φ=0} f dS = ∫ f δ(φ) |∇φ| dV` needs a **multiply**; every site divided. The
+`Towers (2008)` citation in the comments was misremembered — Towers discretises `∫f δ(φ)|∇φ|`. The
+oracle settles it independently: for `φ = g·(r−R)`, `∫δ_ε(φ)dV = A/g`, so recovering `A` requires
+`×|∇φ|`.
+
+Changed (all five sites, kept single-source):
+- `csrc/cuda/eulerian_forces.cu` — 2-D and 3-D kernels
+- `csrc/ops_2d.cpp`, `csrc/ops_3d.cpp` — the CPU twins
+- `forces.py` — the python 2-D and 3-D paths
+- `solver.py` — the docstring that *specified* the wrong formula (it said "divided by |∇SDF| so that
+  the volume integral gives the correct surface measure")
+
+The `1e-3` min-clamp on `grad_mag` went with it: it existed only to guard the division. Under a
+multiply, `|∇φ|→0` cells *should* contribute ~0 — they are medial-axis, not surface.
+
+**Risk: low.** `delta_order` defaults to **1**, and every edit is inside a `delta_order == 2` branch
+(`sdf_grad_mag` is only even computed `if self.force_delta_order == 2`), so **no current production
+run changes**. It is also inert at `|∇φ| = 1`, so analytical bodies are untouched at any order.
+
+**Verification.** `test_delta_order2_applies_the_coarea_factor` (new) drives a deliberately scaled
+SDF at `|∇φ| = 0.5, 1.0, 2.0` and asserts order 1 reads `exact/|∇φ|` while order 2 recovers `exact` —
+it replaces the test that pinned the inverted behaviour, as that test's docstring instructed. The
+CPU-vs-GPU parity tests at `delta_order=2` still pass, so both twins moved together.
+Full suite: **362 passed, 10 failed** — and the same **10 failures reproduce exactly at the pre-fix
+commit 2246f45** (verified in a separate worktree), i.e. all pre-existing: 2 are §10.6, 3 are
+`test_two_phase` uniform-parity, 5 are `test_whole_step_capture_native`. None are caused by this fix.
 
 ## 10.8 What is still open
 
