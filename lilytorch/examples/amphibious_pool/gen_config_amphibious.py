@@ -86,12 +86,12 @@ class SimConfig(BaseSimConfig):
         # 2624-voxel core plus ~15 satellites that survive body.py's absolute
         # >=8-voxel island filter).  That fragmentation is a MESH/SDF-cleanup bug,
         # not a config choice — fix it in the SDF tabulation, not by convexifying.
-        self.convexify                     = True
+        self.convexify                     = False
         self.force_method                  = "eulerian"
         self.force_submethod               = "deltaH"
         self.zero_pressure_inside          = False
         self.body_velocity_blend_eps_cells = None
-        self.bdim_mu0_projection           = False   # μ₀ from the CC union SDF
+        self.bdim_mu0_projection           = True    # μ₀ in kernel coeff → consistent with BDIM velocity
         self.bdim_body_div_correction      = False   # off: avoids RHS inconsistency near ramp
 
         # self.ground_height = POOL_ZMAX
@@ -109,6 +109,7 @@ class SimConfig(BaseSimConfig):
         # 2. 1guilla — swimming fish, position-controlled
         self.animats_pars = [
             {
+
                 "model_name"     : "1guilla",
                 # Ventral-ballast SDF: identical mass/inertia/geometry to
                 # 1guilla_800.sdf (still uniform rho=800, same weight + BDIM
@@ -122,7 +123,7 @@ class SimConfig(BaseSimConfig):
                 "spawn_mode"     : SpawnMode.FREE,
                 # spawn at the true floating equilibrium (centreline ~1.1 cm
                 # below the waterline) to avoid the initial heave-overshoot.
-                "pose"           : [4.75, 0.1, -0.0, 0, 0, 0.05],
+                "pose"           : [4.75, 0.1, WATERLINE, 0, 0, 0.05],
                 "controller_path": "lilytorch.examples._1guillasim.experiments.controller.PositionController",
                 "control_pars"   : {
                     "file_path": os.path.join(
@@ -203,7 +204,7 @@ class SimConfig(BaseSimConfig):
         self.poisson_max_mgcg_cycles = 10
         self.poisson_precond_vcycles = 1
         self.poisson_warm_start      = True
-        self.poisson_smoother        = "jacobi"
+        self.poisson_smoother        = "rbgs"
         self.poisson_nsmoothing      = 5
         self.poisson_bc_type         = "neumann"
         self.empty_cache_every       = 10**9
@@ -310,12 +311,15 @@ class SimConfig(BaseSimConfig):
             # iteration 15 (mjWARN_BADQACC).  At 80:1 the same pressure error
             # is 66x less amplified and the air velocity saturates (~1.2 m/s).
             # Raise this back to 1.2 only with a Poisson that actually converges.
-            "rho_air"                : 1.5,
+            "rho_air"                : 12.5,
             "nu_water"               : self.nu,
             "nu_air"                 : 1.5e-5,
             "alpha_exclude_body"     : True,
             "alpha_volume_compensate": True,
-            "air_transparent_body"   : False,
+            # Transparency ON: body invisible in air → no coefficient jump
+            # at the ramp surface above the waterline → multigrid converges
+            # cleanly on uniform c=dt/rho_air in the air phase.
+            "air_transparent_body"   : True,
         }
 
         return bdim_ext
@@ -336,67 +340,67 @@ class SimConfig(BaseSimConfig):
             },
         })
 
-        # # Air/water interface visualisation
-        # extensions.append({
-        #     "loader": "lilytorch.integration.flow_iso_gl_viewer.FlowIsoGLViewer",
-        #     "config": {
-        #         "update_every"      : 1,
-        #         "max_vertices"      : 20 * self.Nx * self.Ny,
-        #         "crop_boundary"     : 0,
-        #         "debug_force_visible": False,
-        #         "fields": [
-        #             {
-        #                 "field"     : "interface",
-        #                 "iso_value" : 0.5,
-        #                 "alpha"     : 0.45,
-        #                 "color"     : "#3399FF",
-        #                 "smooth_sigma": 0,
-        #                 "exclude_body": False,
-        #                 "reflective": True,
-        #             },
-        #         ],
-        #     },
-        # })
+        # Air/water interface visualisation
+        extensions.append({
+            "loader": "lilytorch.integration.flow_iso_gl_viewer.FlowIsoGLViewer",
+            "config": {
+                "update_every"      : 1,
+                "max_vertices"      : 20 * self.Nx * self.Ny,
+                "crop_boundary"     : 0,
+                "debug_force_visible": False,
+                "fields": [
+                    {
+                        "field"     : "interface",
+                        "iso_value" : 0.5,
+                        "alpha"     : 0.45,
+                        "color"     : "#3399FF",
+                        "smooth_sigma": 0,
+                        "exclude_body": False,
+                        "reflective": True,
+                    },
+                ],
+            },
+        })
 
-        # # Top-down camera auto-fitted to the pool
-        # cam = top_down_camera_config(
-        #     self.xmin, self.xmax,
-        #     self.ymin, self.ymax,
-        #     self.zmin, self.zmax,
-        #     overshoot=1,
-        #     max_width=3840, max_height=2160,
-        # )
-        # extensions.append({
-        #     "loader": "lilytorch.integration.streaming_camera.StreamingCameraRecording",
-        #     "config": {
-        #         "path"            : os.path.join(output_folder, "output", "video.mp4"),
-        #         "animat_id"       : None,
-        #         "fps"             : 30,
-        #         "speed"           : 1.0,
-        #         "angular_velocity": 0,
-        #         **cam,
-        #     },
-        # })
+        # Top-down camera auto-fitted to the pool
+        cam = top_down_camera_config(
+            self.xmin, self.xmax,
+            self.ymin, self.ymax,
+            self.zmin, self.zmax,
+            overshoot=1,
+            max_width=3840, max_height=2160,
+        )
+        extensions.append({
+            "loader": "lilytorch.integration.streaming_camera.StreamingCameraRecording",
+            "config": {
+                "path"            : os.path.join(output_folder, "output", "video.mp4"),
+                "animat_id"       : None,
+                "fps"             : 30,
+                "speed"           : 1.0,
+                "angular_velocity": 0,
+                **cam,
+            },
+        })
 
-        # # Side camera auto-fitted to the pool
-        # cam_side = side_camera_config(
-        #     self.xmin, self.xmax,
-        #     self.ymin, self.ymax,
-        #     self.zmin, self.zmax,
-        #     overshoot=1,
-        #     max_width=3840, max_height=2160,
-        # )
-        # extensions.append({
-        #     "loader": "lilytorch.integration.streaming_camera.StreamingCameraRecording",
-        #     "config": {
-        #         "path"            : os.path.join(output_folder, "output", "video_side.mp4"),
-        #         "animat_id"       : None,
-        #         "fps"             : 30,
-        #         "speed"           : 1.0,
-        #         "angular_velocity": 0,
-        #         **cam_side,
-        #     },
-        # })
+        # Side camera auto-fitted to the pool
+        cam_side = side_camera_config(
+            self.xmin, self.xmax,
+            self.ymin, self.ymax,
+            self.zmin, self.zmax,
+            overshoot=1,
+            max_width=3840, max_height=2160,
+        )
+        extensions.append({
+            "loader": "lilytorch.integration.streaming_camera.StreamingCameraRecording",
+            "config": {
+                "path"            : os.path.join(output_folder, "output", "video_side.mp4"),
+                "animat_id"       : None,
+                "fps"             : 30,
+                "speed"           : 1.0,
+                "angular_velocity": 0,
+                **cam_side,
+            },
+        })
 
         return extensions
 
