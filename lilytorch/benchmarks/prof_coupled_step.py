@@ -3,7 +3,7 @@
 Measures the reference coupled case (salamander_gamepad 2-D, 1024x512) with
 per-phase sync-attributed + submit-only timings, eager-launch/replay/host-sync
 counters and a torch.profiler CUDA window.  See
-milestones/perf_host_bound_plan.md for baseline numbers and protocol.
+lilytorch/milestones/archive/perf_host_bound_plan.md for baseline numbers and protocol.
 
 Usage:
     python lilytorch/benchmarks/prof_coupled_step.py

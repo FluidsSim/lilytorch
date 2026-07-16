@@ -126,7 +126,7 @@ CL6. `[deepseek-v4, user sign-off per file]` **Tracked artifacts** ✅ (2026-07-
   removed `pleurosim_a0.3.zip` (100 MB), `simulation.hdf5` (35 MB),
   stale Screenshot; added `*.hdf5` to .gitignore.  Working-tree removal +
   gitignore only — NO history rewrite.
-CL7. `[deepseek-v4]` **Milestone-doc pruning**: archive/mark-stale the
+CL7. `[deepseek-v4]` **Milestone-doc pruning** ✅ (2026-07-16): archive/mark-stale the
   Warp-era plans (unified_graph_capture_plan{,2}.md,
   cuda_graph_streaming_forces_spike.md, remove_solver_modes_handoff.md,
   perf_host_bound_plan.md); consolidate the root `/milestones/` dir

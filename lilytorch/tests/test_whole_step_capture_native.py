@@ -1,6 +1,6 @@
 """Tests for ``NativeWholeStepGraphRunner`` (torch.cuda.CUDAGraph backend).
 
-Phase 1.2 of ``milestones/cuda_native_port_plan.md``: verifies the native
+Phase 1.2 of ``lilytorch/milestones/archive/cuda_native_port_plan.md``: verifies the native
 whole-step runner captures a mixed region (native ``TORCH_LIBRARY`` extension
 op + plain torch ops, including an allocation inside the capture) into ONE
 CUDA graph and replays it bit-exactly, with LRU eviction instead of pinning.
