@@ -646,6 +646,80 @@ def test_oracle_readouts_are_not_the_same_device_at_matched_offset():
         "eulerian growth should track the enclosed-volume ratio"
 
 
+def test_oracle_eulerian_thinness_error_at_zero_shift():
+    """Even with NO band shift, the eulerian over-reads on a body comparable to
+    the band half-width — and the error vanishes as R/h grows.
+
+    This isolates pure geometric thinness: exact analytic sphere (|∇φ| = 1, so
+    no coarea factor in play), a single closed triangulation (no joints),
+    uniform ∇·σ, and s = 0 (so no offset-iso-surface inflation).  At the
+    zebrafish's thinness (R/h ≈ 3, eps_body = 2h) this alone is worth ~1.17x,
+    one of the two factors behind the fish's 1.551x s=0 gap (handoff §10.3c).
+
+    The lagrangian is exact at every R/h — it does not care about thinness.
+    """
+    z_ = None
+    ratios = {}
+    for N, key in ((16, "thin"), (64, "fat")):
+        sc = _oracle_scene(N, 2.0)          # eps_body = 2h, as the fish runs
+        z = torch.zeros_like(sc["X"])
+        args = (_ORC_CSH * sc["Y"] ** 2, z.clone(), z.clone(), z.clone())
+        e0 = _oracle_eulerian_shift(sc, *args, 0.0)
+        l0 = _oracle_lagrangian_offset(sc, *args, 0.0)
+        exact = 2 * _ORC_NU * _ORC_RHO * _ORC_CSH * _ORC_V
+        assert l0 == pytest.approx(exact, rel=0.02), \
+            f"lagrangian should be exact regardless of thinness (N={N})"
+        ratios[key] = e0 / l0
+    # R/h ~ 3: a real over-read; R/h ~ 12.6: essentially gone.
+    assert ratios["thin"] > 1.10, f"expected thinness over-read, got {ratios['thin']:.3f}"
+    assert ratios["fat"] < 1.03, f"should converge with R/h, got {ratios['fat']:.3f}"
+    assert ratios["thin"] > ratios["fat"]
+
+
+def test_delta_order2_is_inverted_vs_coarea():
+    """PINS A KNOWN BUG (handoff §8, promoted to §10.3c) — flip this on fix.
+
+    The coarea identity ∮_{φ=0} g dS = ∫ δ(φ) g |∇φ| dV needs a MULTIPLY by
+    |∇φ|; ``solver.py`` says delta_order=2 "divides by |∇SDF| so that the volume
+    integral gives the correct surface measure", and the code does divide.  So
+    order 2 doubles the |∇φ| error instead of removing it.
+
+    Inert at |∇φ| = 1 (which is why analytical-body tests never caught it), so
+    this drives a DELIBERATELY SCALED SDF, φ = g·(r−R), where the true force is
+    unchanged but |∇φ| = g.  Correct behaviour would be order2 ≈ exact for any
+    g; as coded it lands at exact/g² instead.  On the zebrafish's real mesh SDF
+    (|∇φ| ≈ 0.82) this is worth ~1.22x of live over-read.
+    """
+    exact = 2 * _ORC_NU * _ORC_RHO * _ORC_CSH * _ORC_V
+    for g in (0.5, 2.0):
+        sc = _oracle_scene(64, 1.0)
+        # rescale BOTH the union SDF and the body table -> |∇φ| = g, same body
+        sc["sdf_cc"] = sc["sdf_cc"] * g
+        sc["F_flat"] = sc["F_flat"] * g
+        sc["eps"] = sc["eps"] * g          # band must scale with the SDF units
+        z = torch.zeros_like(sc["X"])
+        args = (_ORC_CSH * sc["Y"] ** 2, z.clone(), z.clone(), z.clone())
+        f1 = _oracle_eulerian_shift(sc, *args, 0.0)
+        out = torch.zeros((1, 12), dtype=torch.float64)
+        streaming_sdf_forces_post_3d(
+            sc["F_flat"], sc["F_offsets"], sc["body_shapes"], sc["body_meta"],
+            sc["kin"], sc["aabb_lo"], sc["aabb_dim"],
+            sc["g"], sc["g"], sc["g"], sc["h"], sc["N"] ** 3,
+            sc["sdf_cc"], 0,
+            args[0].ravel().contiguous(), args[1].ravel().contiguous(),
+            args[2].ravel().contiguous(), args[3].ravel().contiguous(),
+            torch.tensor([_ORC_NU * _ORC_RHO], dtype=torch.float64),
+            sc["eps"], 0.0, sc["h"] ** 3, 2, out, 0, 1.5 * sc["h"],
+        )
+        f2 = float(out[0, 0])
+        # order 2 as coded = order 1 / |∇φ|; the coarea fix would MULTIPLY.
+        assert f2 == pytest.approx(f1 / g, rel=0.05), \
+            f"|∇φ|={g}: order2 {f2:.5e} is not order1/|∇φ| ({f1/g:.5e})"
+        # ...so it moves AWAY from the exact answer that order1*|∇φ| recovers.
+        assert f1 * g == pytest.approx(exact, rel=0.06), \
+            f"|∇φ|={g}: order1*|∇φ| should recover exact, got {f1*g:.5e}"
+
+
 def test_oracle_deltaH_viscous_is_ndelta_viscous():
     """deltaH only replaces the PRESSURE readout, so it cannot be a candidate
     fix for the viscous offset above: the two viscous outputs are bit-identical.

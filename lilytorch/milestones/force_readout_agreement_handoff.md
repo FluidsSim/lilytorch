@@ -433,19 +433,65 @@ structural:
 So raising the two knobs together makes them disagree **more**, not less. Matched at s=h they are
 1.17× apart on the sphere and **1.86× apart on the fish** (−1.59e-05 vs −8.56e-06).
 
-**Unexplained residual, and it is the fish-specific part:** on the sphere the two agree at s=0
-(1.005×), but on the fish they do **not** — `eul/lag = 1.551` at s=0. Surface-measure inflation does
-not explain it: the effective band area ratio `A_eff(s)/A_tri` is 0.64→0.74 over s=0..2h (i.e. the
-eulerian integrates over *less* area, yet reads *more* force), while the measured ratio runs
-1.55→2.52. Two candidates, both unmeasured:
-1. `eps_body = 2h` exceeds the fish's inscribed radius (2.86h), so at ANY shift the eulerian band
-   smears through the body and cannot localise a surface. The sphere never sees this (`R/h=12.6`).
-2. **The triangulation carries 1.57× the union surface area** — `Σ tri_area = 2.51e-04 m²` vs the
-   union iso-surface's `1.60e-04 m²` (coarea). Buried joint faces between the 16 links, **live even
-   at `convexify=False`** (the working config's current setting), so the handoff's convexify concern
-   is not the whole of it. Deeply-buried faces should contribute ~0 viscous stress (rigid interior →
-   zero strain) and cancel pairwise in pressure between neighbours — but **only in the total, not
-   per link**, and per-link forces are what drive the multibody solve. Worth a look independently.
+**The s=0 residual — now decomposed (§10.3c).** On the sphere the two agree at s=0 (1.005×); on the
+fish they do **not** (`eul/lag = 1.551`). That gap is fish-specific and is now accounted for.
+
+## 10.3c The fish's s=0 gap = |∇φ|≠1 × thinness. §8 IS part of the zebrafish story.
+
+`eul/lag = 1.551` at s=0 decomposes into two measured factors whose product is **1.428** (8.6%
+residual):
+
+**(a) `|∇φ| ≠ 1` — the coarea factor the readout never applies: ×1.218.**
+The zebrafish is a **mesh body**: its union SDF is 16 tabulated per-link SDFs, interpolated and
+min-combined. Measured in the band, `mean|∇φ| = 0.82` (`0.75` right at the surface) — the medial
+axis of a body only 2.86h thick, plus interpolation smoothing and min-combine kinks. The coarea
+identity `∮_{φ=0} g dS = ∫ δ(φ) g |∇φ| dV` needs a **multiply by `|∇φ|`**; `delta_order = 1` applies
+**none**, so the readout over-reads by `~⟨1/|∇φ|⟩`.
+
+Measured directly on the fish snapshot via the `delta_order` knob (`order2 = order1 / |∇φ|`, so the
+ratio *is* `⟨1/|∇φ|⟩`):
+
+| s/h | order1 | order2 | `order2/order1 = ⟨1/|∇φ|⟩` | `eul/lag(0)` | **corrected** `× ⟨|∇φ|⟩` |
+|---|---|---|---|---|---|
+| 0.0 | −7.923e-06 | −9.648e-06 | **1.218** | 1.551 | **1.273** |
+| 1.0 | −1.592e-05 | −1.726e-05 | 1.084 | 3.117 | 2.875 |
+| 2.0 | −2.023e-05 | −2.093e-05 | 1.034 | 3.960 | 3.828 |
+
+**This promotes §8 from "side finding, do not conflate" to part of the main story.** `delta_order=2`
+exists to apply exactly this correction, and it is **inverted** — it divides where the coarea formula
+multiplies. Confirmed here on a real mesh body in live geometry: enabling it today makes the fish
+**1.218× worse**, not better. Fixing the inversion *and* enabling order 2 removes ~22% of the
+eulerian over-read. (§8's note that it is "not currently active in the zebrafish config" is true and
+is precisely why the +22% is live and uncorrected.)
+
+**(b) Thinness — the band cannot localise a surface: ×1.173.**
+Isolated on the sphere oracle at the fish's thinness with `eps_body = 2h` (exact analytic sphere, so
+`|∇φ| = 1` exactly, single closed triangulation, no joints, `∇·σ` uniform — every other factor
+removed):
+
+| R/h | eul(0)/exact | lag(0)/exact | eul(0)/lag(0) |
+|---|---|---|---|
+| **3.0** | 1.173 | 0.999 | **1.173** |
+| 4.6 | 1.074 | 0.999 | 1.075 |
+| 6.2 | 1.040 | 0.999 | 1.041 |
+| 12.6 | 1.010 | 0.999 | 1.010 |
+
+Pure geometry, and it vanishes as `R/h` grows. **The lagrangian formula stays exact (0.999) at every
+`R/h`** — it does not care that the body is thin. Note this is NOT the δ-weighted volume-average
+effect: that model predicts `⟨V⟩_δ(0)/V(0) = 0.955` for the fish, i.e. ~1.0, so band-smearing through
+a thin body is **not** the mechanism — tested and rejected.
+
+**RETRACTED — there are NO buried triangles.** An earlier version of this section claimed the
+triangulation carried 1.57× the union surface area from buried inter-link faces. **That was wrong**,
+an artifact of estimating the union area by coarea (`∫δ|∇φ|dV`) on a body thinner than the band,
+where `|∇φ|→0` on the medial axis deflates the estimate. The triangulation is clean:
+- `∮ x·n dS / 3 = 5.013e-08 m³` vs the SDF's union volume `5.029e-08 m³` — **ratio 0.997**, so the 16
+  links tile the fish with negligible gap or overlap (the §7 validation, passed).
+- **100% of all 174,436 triangle centroids** sit within 1h of the union surface (`φ/h ∈ [−0.81,
+  0.77]`, median −0.10). Zero are buried.
+
+So `convexify=False` is doing its job here, and the lagrangian's per-link forces are **not** polluted
+by joint caps. Open question #2 (lagrangian noise) needs a different explanation.
 
 ## 10.3b Neither live setting is the truth
 
@@ -482,7 +528,13 @@ that construction here.)
    asymptotic regime to extrapolate from — the band is wider than the body. The honest fix for thin
    swimmers is the lagrangian readout, or a finer grid (the 1024×256×128 block already commented out
    in the config would put `R/h ≈ 5.7`, `eps/R ≈ 0.35`).
-3. Any eulerian fix must still be gated on the §9.5 campaign (cylinder 512²/1024² vs K&L, gazzola
+3. **Fix the `force_delta_order = 2` inversion (§8) and enable order 2 for mesh bodies.** §10.3c
+   promotes this from a side finding: it is worth ~22% of the fish's eulerian over-read, and it is
+   the *only* one of these errors that is a straightforward code bug with a known-correct answer
+   (coarea needs a multiply by `|∇φ|`, the code divides). It is inert on analytical bodies
+   (`|∇φ|=1`), so it costs those nothing. **Do not enable order 2 before fixing the inversion** — as
+   coded it makes mesh bodies 1.2× worse.
+4. Any eulerian fix must still be gated on the §9.5 campaign (cylinder 512²/1024² vs K&L, gazzola
    `U_t`, coquerelle 3D) — but note it can now ALSO be gated on this snapshot in ~15 s.
 
 ## 10.5 Done this session
@@ -535,8 +587,13 @@ the op set moved with the refactor chain.
    `lagrangian_sample_offset = 3.0e-4`, arbiter `verify_energy_balance.py --tmax 0.3`. §10 is one
    frozen field at one step of one gait phase — strong on mechanism, but it is not a swim race.
 2. The §10.6 CPU/GPU divergence (independent bug).
-3. Open question #2: *why* lagrangian is noisier in coupled runs — still unmeasured. §10.3 suggests
-   an angle: `off=0` sits on a steep part of the offset curve, so pose jitter maps straight into
-   force jitter; the `off≈1.5h` peak is stationary and should be quieter. Cheap to test on snapshots
-   from consecutive steps.
-4. §8 side findings (`force_delta_order=2` inversion, `sdf_vals` crash) — untouched.
+3. Open question #2: *why* lagrangian is noisier in coupled runs — still unmeasured, and §10.3c
+   **eliminated** the most attractive hypothesis (buried joint caps sampling unconstrained interior
+   pressure): there are no buried triangles. Remaining angle: `off=0` sits on a steep part of the
+   offset curve, so pose jitter maps straight into force jitter; the `off≈1.5h` peak is stationary
+   and should be quieter. Cheap to test on snapshots from consecutive steps.
+4. **The 8.6% residual** in §10.3c's decomposition (1.428 modelled vs 1.551 measured). Likely the
+   BDIM band, which no oracle here reproduces (the oracle imposes analytic fields — §2 open
+   question #1 is still open in that sense).
+5. §8's `force_delta_order=2` inversion is now a §10.4 action item, not a side finding. The
+   `sdf_vals` crash remains untouched.
