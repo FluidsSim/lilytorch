@@ -23,7 +23,7 @@ from __future__ import annotations
 import torch
 # This module must never import ``solver``, ``two_phase`` or ``facade`` (it sits
 # upstream of them in the import graph).
-from lilytorch.src.interpolation import RegularGridInterpolator
+from lilytorch.src.native import RegularGridInterpolator
 
 from lilytorch.src import native
 

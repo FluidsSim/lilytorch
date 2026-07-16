@@ -5,7 +5,7 @@ Builds all tensors needed by the ``streaming_sdf_stag_3d_*`` / ``bdim_forcing_3d
 grid — no FARMS/MuJoCo dependency.  The 2-D twin is :mod:`scene_2d`.
 
 Extracted from the retired ``benchmarks/bench_viability.py`` (which benchmarked
-the Warp streaming SDF across Warp-only execution designs).
+the streaming SDF across early execution designs).
 """
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ def make_synthetic_scene(
     device: str = "cuda:0",
     seed: int = 42,
 ) -> Dict:
-    """Build all tensors needed by body_update_3d and WarpStreamingSDF.
+    """Build all tensors needed by body_update_3d and the streaming SDF resolver.
 
     Returns a dict with keys:
       F_flat, F_offsets, body_shapes, body_meta,

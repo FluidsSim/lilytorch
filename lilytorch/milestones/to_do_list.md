@@ -105,23 +105,23 @@ CL2. `[deepseek-v4]` **Strip streaming `_direct` ops**: defs ops.cpp:86/99;
   (files STAY — they host live forces_post); wrappers native.py:171/198;
   update tests/test_per_body_buffers.py:219/225. Do NOT touch the regime_b
   files or the forces_post ops.
-CL3. `[deepseek-v4]` **Delete verified-dead body.py members** (exact list in
+CL3. `[deepseek-v4]` **Delete verified-dead body.py members** ✅ (2026-07-16): (exact list in
   answer 7, honoring its explicit KEEP list). Replace the
   `composite_segment_body` branch with an explicit `ValueError`.
 CL4. `[deepseek-v4]` **Dissolve facade.py** per answer 9 (preserve
   `_priv_cache` grow-only semantics + the cost_analysis monkey-patch seam).
-CL5. `[deepseek-v4]` **Repo hygiene batch**: fix-or-delete
-  `lilytorch/src/build.sh` (still cleans the dissolved `src/kernels/` layout;
-  setup.py is the single build entry point); fix dangling
-  `docs/api/diffusion.rst` automodule (module deleted); drop deprecated
-  `solver_method` from base_sim_config.py:225/882 (solver.py:427 warns
-  "deprecated and ignored"); inline the 30-line `src/interpolation.py`
-  re-export shim into its 2 importers (advection.py, body.py); scrub Warp-era
-  docstring mentions in tests (scene_2d/3d.py, test_forces.py:252,
-  test_poisson_driver.py:237, test_two_phase.py:422-476,
-  test_whole_step_capture_native.py:208); triage the bare skip at
-  test_pose_source.py:128; move `milestones/verify_body_update_refactor.py`
-  → tests/ or delete.
+CL5. `[deepseek-v4]` **Repo hygiene batch** ✅ (2026-07-16): fix-or-delete
+  `lilytorch/src/build.sh` (removed stale `src/kernels/` cleanup lines;
+  setup.py is the single build entry point); deleted dangling
+  `docs/api/diffusion.rst` automodule (module deleted); dropped deprecated
+  `solver_method` from base_sim_config.py; inlined the 30-line
+  `src/interpolation.py` re-export shim — all 5 importers now import
+  `RegularGridInterpolator` from `native` directly, file deleted; scrubbed
+  Warp-era docstring mentions in tests (scene_2d/3d.py, test_forces.py,
+  test_poisson_driver.py, test_two_phase.py, test_whole_step_capture_native.py);
+  triaged bare skip at test_pose_source.py:128 (replaced `pass` with
+  explanatory docstring); moved `milestones/verify_body_update_refactor.py`
+  → `tests/`.
 CL6. `[deepseek-v4, user sign-off per file]` **Tracked artifacts**:
   `examples/sdfs/pleurodeles/pleurosim_a0.3.zip` (102 MB, redundant with the
   extracted dir beside it), `examples/pleurodeles/simulation.hdf5` (35 MB),

@@ -26,8 +26,5 @@ touch lilytorch/src/csrc/multigrid_cpu.cpp
 # Clean all old object files for a truly fresh recompile.
 rm -f build/temp.linux-*/lilytorch/src/csrc/cuda/*.o 2>/dev/null || true
 rm -f build/temp.linux-*/lilytorch/src/csrc/*.o 2>/dev/null || true
-# Also clean old kernels/csrc paths for a fresh start
-rm -f build/temp.linux-*/lilytorch/src/kernels/csrc/**/*.o 2>/dev/null || true
-rm -f build/temp.linux-*/lilytorch/src/kernels/csrc/*.o 2>/dev/null || true
 
 "$PYTHON_BIN" setup.py build_ext --inplace

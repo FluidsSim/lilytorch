@@ -205,7 +205,7 @@ if __name__ == "__main__":
 # =====================================================================
 @SKIP_NO_CUDA
 def test_solver_imports_native_runner():
-    """Solver imports NativeWholeStepGraphRunner (not just the Warp class)."""
+    """Solver imports NativeWholeStepGraphRunner."""
     from lilytorch.src.graph_capture import NativeWholeStepGraphRunner
     from lilytorch.src import solver as solver_mod
 

@@ -132,4 +132,12 @@ def assert_gather_data_sources_agree(handler, task, physics, atol=1e-6):
            "verify the two pose sources agree at the start-of-step pose."
 )
 def test_gather_data_physics_matches_sensors_in_farms():
-    pass
+    """Integration gate: requires a live FARMS coupled sim to execute.
+
+    When available, call::
+
+        assert_gather_data_sources_agree(handler, task, physics)
+
+    from within a real coupled run (e.g. a sphere-drop step) to verify
+    that the two pose sources agree at the start-of-step pose.
+    """

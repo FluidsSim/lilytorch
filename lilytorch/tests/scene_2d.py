@@ -1,7 +1,7 @@
-"""Synthetic 2-D scene builder shared by the 2-D Warp tests/benches.
+"""Synthetic 2-D scene builder shared by the 2-D kernel tests/benches.
 
 Builds all tensors needed by the `body_update_2d` / `bdim_forcing_2d` ops AND
-by `streaming_sdf_2d.WarpStreamingSDF2D`, using disc (circle) SDF tables on a
+by the streaming SDF 2-D resolver, using disc (circle) SDF tables on a
 uniform body grid — no FARMS/MuJoCo dependency.
 
 2-D packed layouts (match `streaming_sdf_2d.py`):

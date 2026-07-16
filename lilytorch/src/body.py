@@ -5,7 +5,7 @@ import os
 
 import numpy as np
 import torch
-from lilytorch.src.interpolation import RegularGridInterpolator
+from lilytorch.src.native import RegularGridInterpolator
 
 logger = logging.getLogger(__name__)
 
@@ -713,62 +713,6 @@ def box_3d(x, y, z, xb=20, yb=20, zb=20):
         )
     )
 
-def resample_contour_exact_spacing(x, y, spacing, closed=True):
-    """
-    Resample contour with exactly constant spacing
-    """
-    if closed:
-        if x[0] != x[-1] or y[0] != y[-1]:
-            x = np.r_[x, x[0]]
-            y = np.r_[y, y[0]]
-
-    # Convert to points array
-    points = np.column_stack([x, y])
-    resampled_points = [points[0]]
-
-    # Walk along contour with exact spacing
-    current_position = points[0].copy()
-    segment_idx = 0
-    distance_along_segment = 0.0
-
-    while segment_idx < len(points) - 1:
-        # Current segment
-        segment_start = points[segment_idx]
-        segment_end = points[segment_idx + 1]
-        segment_vector = segment_end - segment_start
-        segment_length = np.linalg.norm(segment_vector)
-
-        # Distance remaining in current segment
-        remaining_in_segment = segment_length - distance_along_segment
-
-        if remaining_in_segment >= spacing:
-            # Place next point within current segment
-            if segment_length > 1e-12:  # Avoid division by zero
-                direction = segment_vector / segment_length
-                current_position = segment_start + (distance_along_segment + spacing) * direction
-                resampled_points.append(current_position.copy())
-                distance_along_segment += spacing
-            else:
-                # Degenerate segment, skip
-                segment_idx += 1
-                distance_along_segment = 0.0
-        else:
-            # Move to next segment
-            segment_idx += 1
-            distance_along_segment = spacing - remaining_in_segment
-
-    resampled_points = np.array(resampled_points)
-
-    # Compute arc-length coordinates
-    if len(resampled_points) > 1:
-        diffs = np.diff(resampled_points, axis=0)
-        distances = np.linalg.norm(diffs, axis=1)
-        s_uniform = np.concatenate(([0], np.cumsum(distances)))
-    else:
-        s_uniform = np.array([0])
-
-    return resampled_points[:, 0], resampled_points[:, 1], s_uniform
-
 def resample_contour(x, y, spacing, closed=True):
         x = np.r_[x, x[0]]
         y = np.r_[y, y[0]]
@@ -783,36 +727,6 @@ def resample_contour(x, y, spacing, closed=True):
         y_new = np.r_[y_new, y_new[0]]
 
         return x_new, y_new, s_uniform
-
-def compute_inertias_2d(sdf_fun, inside_mask, x, y, x_g, y_g, density=1000.0):
-    """
-    Compute the inertial properties of a 2D shape defined by an SDF over a grid
-    sdf_fun: function that takes (N,M,2) array of points and returns (N,M) array of sdf values
-    inside_mask: (N,M) boolean array where True indicates points inside the shape
-    x: (N,) array of x coordinates of the grid
-    y: (M,) array of y coordinates of the grid
-    x_g, y_g: coordinates of the centroid
-    density: material density
-    """
-    dx = x[1]-x[0]
-    dy = y[1]-y[0]
-    xx, yy = np.meshgrid(x, y)
-
-    dA = dx * dy
-    mass = density * np.sum(inside_mask) * dA
-
-
-    # Raw moments about the origin
-    I_x = np.sum((yy[inside_mask]**2) * dA) # around x-axis (horizontal), i.e. y^2 dA
-    I_y = np.sum((xx[inside_mask]**2) * dA) # around y-axis (vertical), i.e. x^2 dA
-    I_xy = np.sum((xx[inside_mask]*yy[inside_mask]) * dA)
-
-    # Shift to centroid using parallel axis theorem
-    I_x_centroid = I_x - mass * y_g**2
-    I_y_centroid = I_y - mass * x_g**2
-    I_xy_centroid = I_xy - mass * x_g * y_g
-
-    return mass, I_x_centroid, I_y_centroid, I_xy_centroid
 
 
 def body_from_yaml(device, x, y, body_pars, eps=0.05, custom_update=None, starting_time=0, z=None, **kwargs):
@@ -931,14 +845,9 @@ def body_from_yaml(device, x, y, body_pars, eps=0.05, custom_update=None, starti
             initial_time    = starting_time,
         )
 
-    elif body_type == "composite_segment_body":
-        sdf_name = body_pars["sdf_name"]
-        sdf_folder = body_pars["sdf_folder"]
-        return CompositeSegmentBody(
-                    device, x, y,
-                    sdf_folder, sdf_name,
-                    eps=eps,
-                )
+    else:
+        raise ValueError(f"Unknown body type: {body_type}")
+
 
 class mesh2sdf():
     """
@@ -1019,61 +928,6 @@ class mesh2sdf():
         else:
             viewer.add_geometry(self._mesh)
         opt = viewer.get_render_option()
-        opt.background_color = np.asarray([0.5, 0.5, 0.5])
-        viewer.run()
-        viewer.destroy_window()
-
-
-class COMPOSITEmesh2sdf():
-
-    def __init__(self, sdf_name, sdf_folder):
-        """
-        sdf_folder = folder of the sdf file
-        sdf_name = name of the sdf file
-        """
-        self.sdf = _import_model_sdf().read(sdf_folder+sdf_name)[0]
-        self.sdfs = []
-        for link in self.sdf.links:
-            mesh_name = link["visuals"][0]["geometry"]["uri"]
-            sdf = mesh2sdf(sdf_folder+mesh_name)
-            # initial translation according to the initial poses in the world reference frame (assumes no initial rotation)
-            # sdf.translate_3d(link.pose[:3])
-            self.sdfs.append(sdf)
-
-    def transform_3d(self, quat_list=[], center_list=[], pos_list=[]):
-        """Apply quaternion rotations and translations to each link mesh.
-
-        .. note::
-           Not yet implemented — the underlying ``mesh2sdf`` class does not
-           expose a ``transform_3d`` method.  Add the required mesh
-           transformation logic to ``mesh2sdf`` first.
-        """
-        raise NotImplementedError(
-            "COMPOSITEmesh2sdf.transform_3d requires mesh2sdf.transform_3d "
-            "which has not been implemented yet."
-        )
-
-
-    def __call__(self, points_in_object_frame: np.array):
-
-        sdfv = []
-        sdfg = []
-        for i, sdf in enumerate(self.sdfs):
-            v, g = sdf(points_in_object_frame)
-            sdfv.append(v)
-            sdfg.append(g)
-        return sdfv, sdfg
-
-
-    def visualize(self):
-        o3d = _import_open3d()
-
-        viewer = o3d.visualization.Visualizer()
-        viewer.create_window()
-        for sdf in self.sdfs:
-            viewer.add_geometry(o3d.geometry.LineSet.create_from_triangle_mesh(sdf._mesh))
-        opt = viewer.get_render_option()
-        opt.show_coordinate_frame = True
         opt.background_color = np.asarray([0.5, 0.5, 0.5])
         viewer.run()
         viewer.destroy_window()
@@ -1189,67 +1043,6 @@ class Body:
 
         normals = tuple(g * inv_norm for g in grads)
         return normals
-
-    def compute_normals_3d_batched(self, sdf_vals_4):
-        """Compute unit normals for 4 stacked SDF grids in one pass.
-
-        Parameters
-        ----------
-        sdf_vals_4 : (4, Nx, Ny, Nz) tensor — the p/u/v/w SDF fields stacked
-                     along dimension 0.
-
-        Returns
-        -------
-        (nx, ny, nz) : each (4, Nx, Ny, Nz) — batched unit normals.
-        """
-        h = self.h
-        gx, gy, gz = torch.gradient(sdf_vals_4, spacing=[h, h, h],
-                                     dim=[1, 2, 3], edge_order=2)
-        norm = torch.sqrt(gx**2 + gy**2 + gz**2)
-        inv_norm = torch.where(norm > 0, norm.reciprocal(), torch.zeros_like(norm))
-        nx = gx * inv_norm
-        ny = gy * inv_norm
-        nz = gz * inv_norm
-        return (nx, ny, nz)
-
-    def mu_funcs_batched(self, d):
-        """Heaviside mu_0 and mu_1 — works on any shape (including batched).
-
-        Narrow-band optimised: sin/cos are only evaluated where ``|d|`` < eps,
-        which is typically < 5 % of the grid, giving a large speedup.
-
-        Parameters
-        ----------
-        d : tensor of any shape (e.g. (3, Nx, Ny) or (4, Nx, Ny, Nz)).
-
-        Returns
-        -------
-        (mu_0, mu_1) : tensors with the same shape as d.
-        """
-        eps = self.eps
-        # Pre-fill: 0 inside body (d<0), 1 in fluid (d>=0);
-        # band values will be overwritten below.
-        mu_0 = (d >= 0).to(d.dtype)
-        mu_1 = torch.zeros_like(d)
-
-        band = (d > -eps) & (d < eps)
-        d_b  = d[band]
-        deps = d_b / eps
-        s = torch.sin(torch.pi * deps)
-        c = torch.cos(torch.pi * deps)
-        mu_0[band] = 0.5 * (1 + deps + s / torch.pi)
-        mu_1[band] = eps * (0.25 - (0.5 * deps)**2
-                            - (s * deps + (1 + c) / torch.pi) / (2 * torch.pi))
-        return (mu_0, mu_1)
-
-    def phi(self,d):
-        # return 0.5+0.5*torch.cos(torch.pi*d.clamp(-1,1))
-        return torch.where(
-            torch.abs(d)<self.eps,
-            ( 1 + torch.cos(torch.pi*d/self.eps) )/( 2*self.eps ),
-            torch.zeros_like(d)
-        )
-
 
     def mu_funcs(self, d):
         """Narrow-band optimised: sin/cos only where ``|d|`` < eps."""
@@ -2120,23 +1913,6 @@ class BodyFishExperimental(Body):
 
         self.initialize()
 
-    def thk_liu(self, s):
-        """
-        fish width
-        """
-
-        s1, s2, s3, s4, w1, w2 = self.s1, self.s2, self.s3, self.s4, self.w1, self.w2
-        s_star                 = s / ( s4 * self.L )
-
-        c0, c1, c2, c3, c4 = 0.2969, -0.1260, -0.3516, 0.2843, -0.1015
-        x0, x1, x2, x3, x4 = s_star**0.5, s_star, s_star**2, s_star**3, s_star**4
-
-        return torch.where(
-            s < s3 * self.L,
-            5 * (s4 * w1) * ( c0*x0 + c1*x1 + c2*x2 + c3*x3 + c4*x4 ),
-            w2
-        )
-
     def thk_gazzola(self,s):
         """
         fish width
@@ -2282,64 +2058,6 @@ class BodyMesh(Body):
         del self.m2s
         self.initialize()
         self.bodies = [self]
-
-
-    def resample_closed_contour(self, points, spacing, keep_duplicate_endpoint=True):
-        """
-        Resample a closed contour for (approximately) uniform spacing.
-
-        - points: (M,2) numpy array of (x,y). Can be closed (first==last) or open; treated as closed.
-        - spacing: desired spacing between resampled points (float > 0).
-        - keep_duplicate_endpoint: if True, return N+1 points with last == first
-          (explicit closure); if False, return N points (no duplicate at end).
-
-        Returns:
-
-        - new_pts: (N+1,2) or (N,2) array of resampled points.
-        - actual_spacing: total_length / N  (the spacing actually used)
-        """
-        pts = np.asarray(points, dtype=float)
-        if pts.ndim != 2 or pts.shape[1] < 2:
-            raise ValueError("points must be an (M,2) array-like")
-
-        if spacing <= 0:
-            raise ValueError("spacing must be positive")
-
-        # If not already closed, append first point for segment math
-        if not np.allclose(pts[0], pts[-1]):
-            pts_closed = np.vstack([pts, pts[0]])
-        else:
-            pts_closed = pts.copy()
-
-        # segment vectors and lengths
-        segs = pts_closed[1:] - pts_closed[:-1]
-        seg_lens = np.hypot(segs[:,0], segs[:,1])
-        total_length = seg_lens.sum()
-        if total_length == 0:
-            raise ValueError("zero-length contour")
-
-        # choose number of equal intervals such that spacing ~ requested spacing
-        N = max(3, int(round(total_length / spacing)))
-        actual_spacing = total_length / N
-
-        # cumulative distances along the closed polyline (start at 0, last = total_length)
-        s = np.concatenate(([0.0], np.cumsum(seg_lens)))
-        # x,y coordinates corresponding to s
-        x = pts_closed[:,0]
-        y = pts_closed[:,1]
-
-        # target sample locations: include the final total_length so last interpolates to first point
-        target_s = np.linspace(0.0, total_length, N+1)
-
-        # np.interp requires strictly increasing x; s is non-decreasing
-        xi = np.interp(target_s, s, x)
-        yi = np.interp(target_s, s, y)
-        new_pts = np.vstack([xi, yi]).T
-
-        if not keep_duplicate_endpoint:
-            return new_pts[:-1], actual_spacing  # return N points
-        return new_pts, actual_spacing      # return N+1 points where last==first
-
 
     def compute_sdfs(self, zpos=0):
         """Compute the SDF from the mesh and build an interpolation function.
@@ -2810,34 +2528,6 @@ class CompositeBodyMesh(Body):
         opt.background_color = np.asarray([0.5, 0.5, 0.5])
         viewer.run()
         viewer.destroy_window()
-
-
-    # Function to create a Gaussian kernel
-    def gaussian_kernel(self, size: int, sigma: float):
-        """Creates a 2D Gaussian kernel."""
-        x_coord = torch.arange(size, dtype=self.dtype, device=self.device)
-        x_grid = x_coord.repeat(size).view(size, size)
-        y_grid = x_grid.t()
-
-        xy_grid = torch.stack([x_grid, y_grid], dim=-1)
-
-        mean = (size - 1) * 0.5
-        variance = sigma * sigma
-
-        two_pi_var = torch.tensor(2.0 * 3.141592653589793 * variance,
-                                  dtype=self.dtype, device=self.device)
-        two_var = torch.tensor(2.0 * variance,
-                               dtype=self.dtype, device=self.device)
-        gaussian_kernel = two_pi_var.reciprocal() * \
-                        torch.exp(
-                            -torch.sum((xy_grid - mean) ** 2., dim=-1) *
-                            two_var.reciprocal()
-                        )
-
-        gaussian_kernel = gaussian_kernel * gaussian_kernel.to(torch.float64).sum().to(self.dtype).reciprocal()
-        return gaussian_kernel
-
-
 
 
 class MultiAnimatBodies(Body):

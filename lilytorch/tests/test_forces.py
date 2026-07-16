@@ -249,7 +249,7 @@ def test_python_eulerian_force_path_cpu_regression():
     (arithmetic-order roundoff, not convergence — each shift was ~1e-9
     relative).
 
-    Re-frozen when the CPU Poisson moved off WarpMG onto the native
+    Re-frozen when the CPU Poisson moved onto the native
     ``poisson_solve_multigrid_*`` C++ driver (the same one CUDA already used):
     the pressure it reads shifts by ~2e-8 relative.  That unification also made
     ``test_python_eulerian_force_path_cpu_eq_gpu`` pass, which had been failing

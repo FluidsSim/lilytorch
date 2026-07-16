@@ -419,9 +419,9 @@ def test_uniform_two_phase_fsi_matches_single_phase_2d():
 # CUDA W&Y sweep kernel (MP10 / T2d) — parity vs the pure-PyTorch oracle
 # ---------------------------------------------------------------------------
 # Pure-PyTorch Weymouth-Yue reference, kept HERE (test-only) as the independent
-# oracle for the single-source Warp ``cvof_sweep`` kernel.  It used to live on
+# oracle for the native ``cvof_sweep`` kernel.  It used to live on
 # ``TwoPhase`` as ``_cvof_sweep_python`` / ``_shift``; moved into the test suite
-# when the production sweep became Warp-only (no source-side duplicate).
+# when the production sweep became native-only (no source-side duplicate).
 from lilytorch.src.advection import _sl as _oracle_sl
 
 
@@ -444,7 +444,7 @@ def _oracle_cvof_sweep_python(a, u_d, d, dt, nd, h):
     MAC convention: ``u_d[k]`` is the face left of cell ``k``.  Face value is
     the W&Y 2nd-order Courant-corrected, van-Leer-limited donor extrapolation
     plus the divergence correction.  Returns a new tensor with the interior
-    updated.  Independent oracle for the Warp kernel."""
+    updated.  Independent oracle for the native kernel."""
     S   = lambda s: _oracle_sl(nd, d, s)
     cfl = dt / h
     C   = u_d * cfl
@@ -473,7 +473,7 @@ def _oracle_cvof_sweep_python(a, u_d, d, dt, nd, h):
 
 
 def _cvof_kernel_vs_python(ndim, dtype, noncontig):
-    """Compare the single-source Warp ``cvof_sweep`` kernel against the
+    """Compare the native ``cvof_sweep`` kernel against the
     pure-PyTorch oracle on identical CUDA inputs (isolates the kernel's
     arithmetic from any CPU/GPU or single/double differences)."""
     dev = torch.device("cuda")

@@ -234,8 +234,8 @@ def test_mgcg_beats_multigrid_stiff(ndim, ratio):
 
 
 # ── 3-D smoother CPU twins == CUDA kernels ───────────────────────────────────
-# Regression gate for the CPU rbgs_sweep_3d bug the Warp removal exposed.  The
-# CPU Poisson used to run on WarpMG, so this twin was never compared to CUDA,
+# Regression gate for a CPU rbgs_sweep_3d parity bug.  The
+# CPU Poisson previously ran on a different MG backend, so this twin was never compared to CUDA,
 # and it was wrong two ways:
 #
 #   * a bogus row-level ``(i+j) & 1`` guard sat on TOP of the correct per-cell

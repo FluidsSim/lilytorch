@@ -8,7 +8,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from lilytorch.src.interpolation import RegularGridInterpolator
+from lilytorch.src.native import RegularGridInterpolator
 from lilytorch.src.native import interp_2d, interp_3d
 
 SKIP_NO_CUDA = pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA")

@@ -219,10 +219,8 @@ class BaseSimConfig:
         self.body_velocity_blend_eps_cells = None
         self.time_integration        = None
         # DEPRECATED and IGNORED: the python/kernel solver modes were
-        # collapsed into the single fused path.  Kept only so existing
-        # gen_configs that set them keep loading (FluidSolver warns on
-        # ``solver_method``; ``use_kernels`` is silently ignored).
-        self.solver_method           = None
+        # collapsed into the single fused path.  The ``use_kernels`` key
+        # is silently ignored when present in legacy configs.
         self.use_kernels             = None
         # Body-SDF sampling method for the streaming kernels:
         #   "trilinear" (default) | "triquadratic"
@@ -879,7 +877,6 @@ class BaseSimConfig:
             ("poisson_warm_start",      self.poisson_warm_start),
             ("poisson_smoother",        self.poisson_smoother),
             ("poisson_bc_type",         self.poisson_bc_type),
-            ("solver_method",           self.solver_method),
             ("dtype",                   self.dtype),
             ("zero_pressure_inside",    self.zero_pressure_inside),
             ("force_method",            self.force_method),
