@@ -1,7 +1,7 @@
 """Advection native-kernel tests (single production path).
 
-The fused high-order limiter kernel ``native.advect_flux_add`` is the *only*
-convective path (CPU C++/OpenMP and CUDA).  Three layers:
+The fused high-order limiter kernel ``native.advect_flux_accumulate`` is the
+*only* convective path (CPU C++/OpenMP and CUDA).  Three layers:
 
   (1) CPU regression anchor — a frozen (sum, |max|) snapshot of the rhs the
       kernel produces for a fixed seed, for all five schemes (QUICK /
@@ -9,28 +9,21 @@ convective path (CPU C++/OpenMP and CUDA).  Three layers:
       captured when the kernel was still validated bit-for-bit against the
       (now-removed) PyTorch reference, so it pins correctness without CUDA.
   (2) Single-source integrity — the SAME kernel source on CPU == GPU (needs CUDA).
-  (3) In-place accumulate semantics (rhs += flux, not overwrite).
+  (3) In-place accumulate semantics (dst += flux, not overwrite).
 
-Every (velocity component i, direction d) pair is exercised so the rhs-stride
-caveat (face_dim ≠ outermost in rhs) is covered for d>0, using the genuine
-strided slice views from advection.py.
+The per-component accumulate kernel fuses all spatial directions into one
+launch; every (ndim, scheme_id) pair is exercised.
 
 Run:  pytest lilytorch/tests/test_advection.py -v
 """
 from __future__ import annotations
 
-import itertools
-
 import pytest
 import torch
 
 from lilytorch.src import native
-from lilytorch.src.advection import (
-    _face_vel,
-    _field_for_flux,
-    _inner,
-)
-from lilytorch.src.native import advect_flux_add, apply_bcs_2d, apply_bcs_3d
+from lilytorch.src.advection import _inner
+from lilytorch.src.native import apply_bcs_2d, apply_bcs_3d  # noqa: F401
 
 SKIP_NO_CUDA = pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA")
 
@@ -53,48 +46,60 @@ def _courant(scheme_id):
     return 0.37 if scheme_id == 1 else 0.0
 
 
-def _flux(vel, i, d, scheme_id, dt_dh, ndim):
+def _flux_accumulate_component(vel, dst, comp_i, scheme_id, dt_dh, ndim):
+    """Run one ``advect_flux_accumulate`` launch for velocity component *comp_i*,
+    accumulating into a full-grid *dst* (mutated in place)."""
+    C = _courant(scheme_id)
+    if ndim == 2:
+        dt_dh_tuple = (dt_dh, dt_dh, 0.0)
+    else:
+        dt_dh_tuple = (dt_dh, dt_dh, dt_dh)
+    native.advect_flux_accumulate(
+        vel[comp_i].clone(), dst, vel, comp_i, dt_dh_tuple, C, scheme_id)
+
+
+def _flux_accumulate_all(vel, scheme_id, dt_dh, ndim):
+    """Accumulate all velocity components into a fresh zero full-grid buffer,
+    then return the interior-only view (summed across components)."""
     inner = _inner(ndim)
-    fv = _face_vel(vel, i, d, ndim)
-    p = _field_for_flux(vel[i], d, ndim)
-    rhs = torch.zeros_like(vel[i][inner])
-    advect_flux_add(fv, p, rhs, dt_dh, _courant(scheme_id), scheme_id, d)
-    return rhs
+    dst = torch.zeros_like(vel[0])
+    for i in range(ndim):
+        _flux_accumulate_component(vel, dst, i, scheme_id, dt_dh, ndim)
+    return dst[inner]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  (1) CPU regression anchor  (no CUDA required)
 # ─────────────────────────────────────────────────────────────────────────────
 
-# (ndim, scheme_id) → (sum(rhs), max|rhs|), summed over all (i, d) pairs at
-# seed 11, dt_dh 0.15, N=40 (2-D) / N=20 (3-D).  Captured against the kernel
-# while it was bit-parity with the removed PyTorch scheme reference.
+# (ndim, scheme_id) → (sum(rhs), max|rhs|) over interior cells, summed across
+# all velocity components at seed 11, dt_dh 0.15, N=40 (2-D) / N=20 (3-D).
+# Captured from the fused ``advect_flux_accumulate`` kernel (13c) while it was
+# still validated bit-for-bit against the removed PyTorch reference.
 _REGRESSION = {
-    (2, 0): (0.05990405142928154, 0.049610416505477574),
-    (2, 1): (0.07741790648773922, 0.049610416505477574),
-    (2, 2): (0.07369885379628983, 0.049610416505477574),
-    (2, 3): (0.047893404100937315, 0.04886254959572121),
-    (2, 4): (0.0762824918396289, 0.049610416505477574),
-    (3, 0): (1.1405044788006227, 0.060893124887524866),
-    (3, 1): (1.0385373002973184, 0.060893124887524866),
-    (3, 2): (1.064901094990712, 0.060893124887524866),
-    (3, 3): (1.022053726682977, 0.052619659932840825),
-    (3, 4): (1.078541541139582, 0.060893124887524866),
+    (2, 0): (0.05990405142928146, 0.10525109229015853),
+    (2, 1): (0.07741790648773889, 0.1055442731205175),
+    (2, 2): (0.07369885379628943, 0.1066052661497163),
+    (2, 3): (0.04789340410093741, 0.10959619852328562),
+    (2, 4): (0.07628249183962876, 0.10668609659320019),
+    (3, 0): (1.1405044788006216, 0.28157382711288653),
+    (3, 1): (1.0385373002973184, 0.28157382711288653),
+    (3, 2): (1.0649010949907118, 0.28157382711288653),
+    (3, 3): (1.0220537266829766, 0.1970565961734373),
+    (3, 4): (1.0785415411395807, 0.28157382711288653),
 }
 
 
 @pytest.mark.parametrize("ndim", [2, 3])
 @pytest.mark.parametrize("scheme_id", sorted(_SCHEMES))
-def test_flux_add_cpu_regression(ndim, scheme_id):
-    """Kernel output on CPU matches the frozen validated snapshot."""
+def test_flux_accumulate_cpu_regression(ndim, scheme_id):
+    """Fused accumulate kernel output on CPU matches the frozen snapshot."""
     N = 20 if ndim == 3 else 40
     vel = _make_vel(ndim, N, "cpu")
     dt_dh = 0.15
-    s, a = 0.0, 0.0
-    for i, d in itertools.product(range(ndim), range(ndim)):
-        rhs = _flux(vel, i, d, scheme_id, dt_dh, ndim)
-        s += float(rhs.sum())
-        a = max(a, float(rhs.abs().max()))
+    rhs = _flux_accumulate_all(vel, scheme_id, dt_dh, ndim)
+    s = float(rhs.sum())
+    a = float(rhs.abs().max())
     exp_s, exp_a = _REGRESSION[(ndim, scheme_id)]
     assert abs(s - exp_s) < 1e-12, f"{_SCHEMES[scheme_id]} {ndim}-D sum {s!r}"
     assert abs(a - exp_a) < 1e-12, f"{_SCHEMES[scheme_id]} {ndim}-D max {a!r}"
@@ -105,40 +110,42 @@ def test_flux_add_cpu_regression(ndim, scheme_id):
 # ─────────────────────────────────────────────────────────────────────────────
 
 @SKIP_NO_CUDA
-def test_flux_add_accumulates_in_place():
-    """The op must ADD into a pre-seeded rhs (not overwrite), like production."""
+def test_flux_accumulate_in_place():
+    """The op must ADD into a pre-seeded dst (not overwrite), like production."""
     ndim, N, dev = 3, 20, "cuda:0"
     vel = _make_vel(ndim, N, dev, seed=5)
     inner = _inner(ndim)
     g = torch.Generator(device="cpu").manual_seed(99)
-    seed_rhs = (torch.rand(vel[0][inner].shape, generator=g, dtype=torch.float64)).to(dev)
-    i, d, sid, dt_dh = 0, 2, 0, 0.2  # d != 0 → rhs.stride(face_dim) ≠ outermost
-    fv = _face_vel(vel, i, d, ndim)
-    p = _field_for_flux(vel[i], d, ndim)
+    seed_dst = torch.rand(vel[0].shape, generator=g, dtype=torch.float64).to(dev)
+    sid, dt_dh = 0, 0.2
 
-    delta = _flux(vel, i, d, sid, dt_dh, ndim)  # zero-seeded → pure flux term
-    got = seed_rhs.clone()
-    advect_flux_add(fv, p, got, dt_dh, 0.0, sid, d)
-    # 1-ULP f64 slack: the kernel fuses seed + dt_dh·flux in one expression,
-    # while the reference adds them in two rounding steps.
-    assert (got - (seed_rhs + delta)).abs().max().item() < 1e-15
+    # Reference: accumulate into a ZERO buffer → pure flux increment
+    delta = _flux_accumulate_all(vel, sid, dt_dh, ndim)
+
+    # Accumulate into the pre-seeded buffer
+    got = seed_dst.clone()
+    for i in range(ndim):
+        _flux_accumulate_component(vel, got, i, sid, dt_dh, ndim)
+
+    # Interior of got must equal interior of (seed_dst + zero-based delta).
+    # 1-ULP f64 slack: the kernel fuses seed + dt_dh·flux in one expression.
+    expected_interior = seed_dst[inner] + delta
+    assert (got[inner] - expected_interior).abs().max().item() < 1e-15
 
 
 @pytest.mark.parametrize("ndim", [2, 3])
 @pytest.mark.parametrize("scheme_id", sorted(_SCHEMES))
-def test_flux_add_cpu_equals_gpu(ndim, scheme_id):
-    """Single-source check: the SAME kernel source on CPU == GPU."""
+def test_flux_accumulate_cpu_equals_gpu(ndim, scheme_id):
+    """Single-source check: the SAME accumulate kernel source on CPU == GPU."""
     if not torch.cuda.is_available():
         pytest.skip("no CUDA")
     N = 20 if ndim == 3 else 40
     dt_dh = 0.15
     vel_cpu = _make_vel(ndim, N, "cpu")
     vel_gpu = [v.to("cuda:0") for v in vel_cpu]
-    worst = 0.0
-    for i, d in itertools.product(range(ndim), range(ndim)):
-        rc = _flux(vel_cpu, i, d, scheme_id, dt_dh, ndim)
-        rg = _flux(vel_gpu, i, d, scheme_id, dt_dh, ndim).cpu()
-        worst = max(worst, (rc - rg).abs().max().item())
+    rc = _flux_accumulate_all(vel_cpu, scheme_id, dt_dh, ndim)
+    rg = _flux_accumulate_all(vel_gpu, scheme_id, dt_dh, ndim).cpu()
+    worst = (rc - rg).abs().max().item()
     assert worst < 1e-12, f"{_SCHEMES[scheme_id]} {ndim}-D CPU vs GPU {worst:.3e}"
 
 

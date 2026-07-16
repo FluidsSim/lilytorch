@@ -9,17 +9,181 @@ Memory vars: `sdf_val_{u,v,w}`, `{u,v,w,p}0`, `n{x,y,z}_{u,v,w}`, `body_{u,v,w}`
 # NEEDS WORK
 # ═══════════════════════════════════════════════════════════
 
-# questions
+# questions — ANSWERED (2026-07-16)
+
+Investigated with file:line evidence; each answer feeds a CLEANUP task below.
+
+1. **advect_flux_add vs advect_flux_accumulate** — `accumulate` is the sole
+   production kernel (`advection.py:407`, fused all-direction, graph-captured).
+   `add` is legacy: the CPU twin's own header says "superseded in production"
+   (`advection_flux_cpu.cpp:218-224`); only callers are
+   `tests/test_advection.py:61,121`. → strip `add` (CL1).
+2. **Fold sl_advect into advection_schemes.h as a scheme?** — **No.** SL is
+   departure-point interpolation (samples u,v,w at off-grid points; different
+   op signature), not a face-flux scheme; forcing it through the flux dispatch
+   would complicate the graph-captured production kernel for zero gain. The
+   real duplication is the *samplers* → dedupe those instead (CL10). Keeping
+   sl_advect.cu as its own file is fine.
+3. **Interpolation duplication** — bilinear/biquadratic/trilinear/triquadratic
+   samplers are re-implemented in ~11 translation units under 3 naming
+   families: `*_sample_off*` (sl_advect.cu + cpu twin), `*_sample_uniform*`
+   (streaming_sdf{,_2d,_direct,_regime_b}.cu + 3 cpu twins), `lf_*`
+   (lagrangian_forces{,_2d}.cu + 2 cpu twins). → one `common/interp.h` (CL10).
+4. **lagrangian_forces_2d.cu → lagrangian_forces.cu** — separate op
+   registrations, copy-paste dimension twins (~300 lines each). File-level
+   merge is cheap (CL9); full dimension-templating not worth it.
+5. **common/ folder** — headers shared by .cpp and .cu today:
+   `advection_schemes.h`, `bc_ops.h`, `strain_rate.h`, `poisson_gauge.h`
+   (`poisson_scratch.h` is CUDA-only). Move to `csrc/common/` (CL8); setup.py
+   globs only .cpp/.cu so no build change.
+6. **Streaming ops** — partially right. Production uses FOUR streaming ops:
+   `streaming_sdf_stag_{2d,3d}_resolve` (facade.py:101/128) **and**
+   `streaming_sdf_forces_post_{2d,3d}` (forces.py:361/618). Dead: the
+   `_direct` pair — `cuda/streaming_sdf_direct.cu` is a whole-file delete, but
+   their CPU impls live *inside* `streaming_sdf_cpu{,_2d}.cpp` which also host
+   the live forces_post ops → per-op surgery, not whole-file (CL2).
+7. **body.py stale methods** — verified-dead (definition-only grep hits,
+   double-checked): `Body.compute_normals_3d_batched` (1193),
+   `Body.mu_funcs_batched` (1215), `Body.phi` (1245),
+   `BodyFishExperimental.thk_liu` (2123), `BodyMesh.resample_closed_contour`
+   (2287), `CompositeBodyMesh.gaussian_kernel` (2816), module fns
+   `resample_contour_exact_spacing` (716), `compute_inertias_2d` (787), whole
+   class `COMPOSITEmesh2sdf` (1027-1079, never instantiated — deleting it also
+   resolves LP10), and the broken `body_type == "composite_segment_body"`
+   branch (934-941: `CompositeSegmentBody` is defined nowhere → latent
+   NameError). **NOT dead despite looking it** (eval/lambda/torch.compile
+   reachable — do NOT delete): `rotate_grid_3d`, `capsule_3d`, `box_3d`,
+   `sdUnevenCapsule`. → CL3.
+8. **eps consistency** — THREE sources: `solver.eps = eps_multiplier*h`
+   (solver.py:187), `comp.eps` (synced at solver.py:543 +
+   two_phase_solver.py:218), and `comp.bodies[i].eps` (constructor default
+   0.05, **never re-synced**). Consumers reading the *per-child* eps:
+   forces.py:317/447/582/755 (δ-width!), two_phase_solver.py:817 (heaviside),
+   BDIMhandler.py:549 (AABB margins). They coincide today only because
+   body_from_yaml is passed eps=self.eps — a coincidence, not an invariant.
+   Fix: solver.eps is the single authority; `Body.eps` becomes a property
+   delegating to one owner (or one `_sync_eps()` iterating children); collapse
+   the dual kernel args (`comp_eps`+`eps_mw`, `eps_body`+`eps_solver`) to one
+   value. → CL11.
+9. **facade.py** — only real content is the grow-only
+   `_priv_cache`/`_regime_b_priv` buffer pool + two dirty-AABB early-out
+   guards; sole production caller is BDIMhandler.py:1718/1733. Move pool +
+   guards into native.py (as `native.body_update_{2,3}d`), update tests
+   (test_forces.py:20, test_per_body_buffers.py:45,241) and keep the
+   monkey-patch seam in `validation/cost_analysis/run_cost_analysis.py:389-407`
+   working (it patches the name imported into BDIMhandler). `USE_REGIME_B_ONLY`
+   is never read; `_native_body_update_*` aliases have no callers. → CL4.
+10. **Force noise** — causes: δ-band force integration on a non-body-fitted
+   grid + 1st-order near-boundary gradients + pressure-band oscillation.
+   Levers, cheapest first: (a) widen BDIM eps (LP3 `eps_cells` 3-4h — smoother
+   δ, slightly diffused boundary); (b) LT4 Hermite smoothstep kernel (kills
+   the d≈±ε cancellation); (c) temporal filtering of the *applied* force —
+   `force_relaxation` already exists in BDIMhandler (0.5 used in the HP5b
+   diag, cycle-mean preserved); (d) `force_method` Lagrangian (marker-based,
+   different noise character); (e) LT3 one-sided near-boundary stress stencils
+   (the real fix, most work). → CL12 benchmarks the levers.
+
+# CLEANUP (repo consolidation — per-task model assignment)
+
+Model policy: `[fable]` (Claude Fable/Opus) = judgment-heavy / fp-parity- or
+correctness-sensitive; `[deepseek-v4]` = mechanical with a precise spec.
+**Every phase gates on:** rebuild ext (`python setup.py build_ext --inplace`) →
+full pytest suite (baseline ~372 pass / 1 skip) → one coupled smoke sim.
+Lesson encoded in CL3/CL10: "dead" python/CUDA duplicates have repeatedly been
+load-bearing — trace eval/lambda/compile reachability before deleting.
+
+## Phase A — dead-code deletion (independent, any order)
+
+CL1. `[deepseek-v4]` **Strip `advect_flux_add`** ✅ (2026-07-16): op def
+  ops.cpp:346, CUDA kernel cuda/advection_flux.cu:87/485, CPU impl in
+  advection_flux_cpu.cpp (+ its "superseded" doc header), wrappers
+  native.py:1200/1219. Rewrite tests/test_advection.py oracles against
+  `advect_flux_accumulate` (keep per-scheme coverage; fix stale docstring).
+CL2. `[deepseek-v4]` **Strip streaming `_direct` ops**: defs ops.cpp:86/99;
+  delete cuda/streaming_sdf_direct.cu (whole file); excise the `_direct`
+  impls from streaming_sdf_cpu.cpp:1044 and streaming_sdf_cpu_2d.cpp:1033
+  (files STAY — they host live forces_post); wrappers native.py:171/198;
+  update tests/test_per_body_buffers.py:219/225. Do NOT touch the regime_b
+  files or the forces_post ops.
+CL3. `[deepseek-v4]` **Delete verified-dead body.py members** (exact list in
+  answer 7, honoring its explicit KEEP list). Replace the
+  `composite_segment_body` branch with an explicit `ValueError`.
+CL4. `[deepseek-v4]` **Dissolve facade.py** per answer 9 (preserve
+  `_priv_cache` grow-only semantics + the cost_analysis monkey-patch seam).
+CL5. `[deepseek-v4]` **Repo hygiene batch**: fix-or-delete
+  `lilytorch/src/build.sh` (still cleans the dissolved `src/kernels/` layout;
+  setup.py is the single build entry point); fix dangling
+  `docs/api/diffusion.rst` automodule (module deleted); drop deprecated
+  `solver_method` from base_sim_config.py:225/882 (solver.py:427 warns
+  "deprecated and ignored"); inline the 30-line `src/interpolation.py`
+  re-export shim into its 2 importers (advection.py, body.py); scrub Warp-era
+  docstring mentions in tests (scene_2d/3d.py, test_forces.py:252,
+  test_poisson_driver.py:237, test_two_phase.py:422-476,
+  test_whole_step_capture_native.py:208); triage the bare skip at
+  test_pose_source.py:128; move `milestones/verify_body_update_refactor.py`
+  → tests/ or delete.
+CL6. `[deepseek-v4, user sign-off per file]` **Tracked artifacts**:
+  `examples/sdfs/pleurodeles/pleurosim_a0.3.zip` (102 MB, redundant with the
+  extracted dir beside it), `examples/pleurodeles/simulation.hdf5` (35 MB),
+  stray screenshots / tracking PNGs (`data_to_save/Screenshot*.png`,
+  `_1guillasim/experiments/robot_data/*_desired_vs_actual.png`); add
+  `*.hdf5` to .gitignore (only `*.h5` is covered). Working-tree removal +
+  gitignore only — NO history rewrite.
+CL7. `[deepseek-v4]` **Milestone-doc pruning**: archive/mark-stale the
+  Warp-era plans (unified_graph_capture_plan{,2}.md,
+  cuda_graph_streaming_forces_spike.md, remove_solver_modes_handoff.md,
+  perf_host_bound_plan.md); consolidate the root `/milestones/` dir
+  (completed handoffs, incl. cuda_native_port_plan.md) into
+  `lilytorch/milestones/archive/`; refresh stale references in this file
+  (e.g. TI1 mentions the dissolved `src/kernels/`).
+
+## Phase B — structure moves (after Phase A merges)
+
+CL8. `[deepseek-v4]` **`csrc/common/`**: move advection_schemes.h, bc_ops.h,
+  strain_rate.h, poisson_gauge.h (+ poisson_scratch.h for tidiness); update
+  includes (.cpp → `"common/x.h"`, .cu → `"../common/x.h"`). No setup.py
+  change (it globs .cpp/.cu only).
+CL9. `[deepseek-v4]` **Merge lagrangian 2D into 3D files**: concatenate
+  cuda/lagrangian_forces_2d.cu → cuda/lagrangian_forces.cu and
+  lagrangian_forces_cpu_2d.cpp → lagrangian_forces_cpu.cpp. Keep BOTH op
+  registrations; rename colliding statics. Pure file merge, no templating.
+
+## Phase C — dedup + correctness (judgment; after Phase B)
+
+CL10. `[fable]` **Shared `csrc/common/interp.h`**: unify the 3 sampler
+  families across ~11 TUs into `__host__ __device__` inline fns; migrate ONE
+  family at a time. **fp-parity-sensitive** — the suite gates at 2 ULP and
+  `--use_fast_math` already proved capable of breaking 9 gates; after each
+  family run the parity tests; any drift >2 ULP → keep that family's local
+  copy and document why.
+CL11. `[fable]` **eps single source of truth** per answer 8. Cross-cutting
+  correctness (forces δ-width, two-phase heaviside, BDIMhandler AABB margins
+  all read child eps); verify bit-identical forces on sphere + 1guilla
+  before/after.
+
+## Phase D — research / independent
+
+CL12. `[fable]` **Force-noise reduction study** per answer 10: benchmark noise
+  spectrum vs {eps_cells 2h/3h/4h} × {sin vs Hermite BDIM kernel} ×
+  {force_relaxation 0/0.3/0.5} × {eulerian vs lagrangian force_method} on the
+  sphere validation case; promote winners to defaults. Implements LP3 + LT4
+  along the way.
+CL13. `[deepseek-v4]` **TI1 promotion — pytest bootstrap**: conftest.py +
+  pytest.ini collecting lilytorch/tests/, GPU tests auto-skip without CUDA,
+  optional GH Actions CPU-parity workflow. Enabler for all phases; can run
+  first.
+CL14. `[deepseek-v4]` **Reconcile pleurodeles full-3D stub (LP11)**: the "not
+  available yet" SDF `pleurosim_v0.3.sdf` now EXISTS in
+  examples/sdfs/pleurodeles/ — wire it into gen_configs_swim_full3d.py and
+  smoke-run, or mark the example experimental.
 
 
-- Instead of doing atomic min operations in between body sdfs, could we do instead a priority body list
-  defined by the robot sdf file (parent - first priority and childer less). So higher priority bodies get access to the sdf?
-  Would that work?
--
 
 
 # HIGH PRIORITY
 
+
+- Review the streaming method used currently. Instead of doing atomic min operations in between body sdfs, could we do instead a priority body list defined by the robot sdf file (parent - first priority and childer less). So higher priority bodies get access to the sdf? Would that work?
 <!-- HP5. **Conservative momentum transport CUDA kernel for two-phase solver** (2026-06-18).
 
   **Motivation (REVISED 2026-06-18).**  The non-conservative two-phase VOF
@@ -295,7 +459,7 @@ PH3. **H3 `diagnostics_every=100` is now default-ON** in `base_sim_config.py` (2
 LP2. Crank-Nicolson diffusion — current explicit limit `dt < h²/(2ν·ndim)` is not a
   bottleneck now, relevant only if dt is pushed aggressively.
 LP3. **eps configurable** — BDIM transition thickness is hardcoded `2h`; add `eps_cells`
-  config key (3h-4h smoother on coarse grids).
+  config key (3h-4h smoother on coarse grids). → implemented as part of **CL12**.
 LP6. **F1 AABB cull force integration** — δ(sdf−ε) is evaluated over the whole domain per
   body but is nonzero only within ε. Slice to each body's AABB+ε. 10-100× for small
   swimmers in big pools.
@@ -318,23 +482,21 @@ LP9. **Adaptive / CFL-limited timestep** (found 2026-06-23) — `dt` is FIXED fo
   lever — recompute `dt = cfl_target·h/|u|max` each step (or every N steps) with a
   config cap. Caveat: checkpoint/restart (LT6) and the Adams-Bashforth flux history
   assume constant dt, so a variable dt touches both. Keep opt-in (default fixed).
-LP10. **`COMPOSITEmesh2sdf.transform_3d` is a `NotImplementedError`** (found 2026-06-23,
-  `body.py:1052`) — blocked on a missing `mesh2sdf.transform_3d`. Latent: any code
-  path that rotates/translates a COMPOSITEmesh2sdf body crashes at runtime. Either
-  implement the underlying mesh transform or assert-guard the call site so the
-  failure is explicit at construction.
+LP10. ~~`COMPOSITEmesh2sdf.transform_3d` NotImplementedError~~ — absorbed by
+  **CL3**: the whole `COMPOSITEmesh2sdf` class is dead (never instantiated)
+  and gets deleted, resolving this item.
 LP11. **Pleurodeles full-3D example is a stub** (found 2026-06-23) —
   `examples/pleurodeles/gen_configs_swim_full3d.py:25` has a placeholder SDF
   filename TODO ("replace once the full-3D SDF is ready"); the example cannot run
-  as-is. Either finish the full-3D SDF + wire it, or mark the file experimental.
+  as-is. UPDATE 2026-07-16: the SDF now exists → tracked as **CL14**.
 
 ---
 
 # TEST INFRA / REPO HYGIENE (found 2026-06-23)
 
 TI1. **No CI, no test aggregation.** There is no `.github/`, no `conftest.py`,
-  `pytest.ini`, or `tox.ini`; the ~26 `test_*.py` files are scattered across
-  `src/`, `src/kernels/`, and `integration/` and are run by hand. Meanwhile the
+  `pytest.ini`, or `tox.ini`; the `test_*.py` files (now centralized in
+  `lilytorch/tests/`) are run by hand. → tracked as **CL13**. Meanwhile the
   SU1 per-step rule MANDATES "validate 2D (`_1guillasim`) + 3D (jellyfish) +
   cost_analysis (<5% regression), rel-err <1e-6" with nothing automating it.
   Add at minimum a `pytest` config that collects the self-tests (the CUDA ones
@@ -524,7 +686,8 @@ LT3. **Near-boundary stress stencils** — velocity gradients use central differ
   degrading to 1st-order near immersed bodies. One-sided / ghost-cell stencils would
   improve force accuracy and reduce oscillations.
 LT4. **5th-order Hermite smoothstep** for the BDIM delta — `0.5*(1+d/ε+sin(πd/ε)/π)` has
-  cancellation at `d≈±ε`; Hermite is more robust and drops sin/cos.
+  cancellation at `d≈±ε`; Hermite is more robust and drops sin/cos. → benchmarked/
+  implemented as part of **CL12**.
 LT5. **2nd-order body coupling** — body SDF/velocity are updated once per step, so Heun's
   corrector uses body state at *t* not *t+dt/2* → coupling is effectively 1st-order.
   Update body to *t+dt* after the predictor and feed the corrector.
@@ -575,674 +738,3 @@ LT11. Refactor: extract `FluidSolver.__init__` (~500 lines) into `_setup_grid/_m
   add type hints.
 
 ---
-
-# ═══════════════════════════════════════════════════════════
-# ✅ DONE
-# ═══════════════════════════════════════════════════════════
-
-## High priority
-
-HP6. ~~**Discretely gauge-invariant two-phase band force** (the live force-readout
-  fix).~~ **DONE — VERIFIED SHIPPED 2026-06-24.** The handoff brief
-  (`milestones/two_phase_force_readout_next_agent.md`, commit `8196127`) was the
-  ACTIVE-WORK seed; the fix landed 3 commits later in `e28f231` ("Two-phase
-  force-readout cleanup, GFM removal, native kernels") — confirmed a descendant of
-  the handoff commit. Shipped as the **`force_submethod="deltaH"`** union-∂H
-  partition readout (`solver.force_submethod`, default `"ndelta"`):
-  * Core native path — `lilytorch/src/solver.py` (`force_submethod` parse + softmin
-    partition temperature) and `lilytorch/src/forces.py:410,632` (`_fsm` deltaH
-    branch), CUDA + CPU, 2-D + 3-D. (Core edit was the authorised native port; the
-    python oracle stays in `two_phase_solver.py`.)
-  * Python oracle — `TwoPhaseSolver._apply_partition_heaviside`
-    (`two_phase_solver.py:717`), parity to the native path at machine precision.
-  * Mechanism: union-∂H force density `f_i=-p·∂_iH_ε(φ_union)` split to links by a
-    softmin partition of unity (seam-free, `Σ_k F_k == union`); removes ~59% of the
-    n·δ overspeed, buoyancy preserved/emergent. See memories
-    `project_deltaH_force_submethod`, `project_two_phase_force_gauge_leak`.
-  * The old to-do entry sat in NEEDS-WORK because the list was never updated after
-    `e28f231` shipped; the handoff brief itself documents the SHIPPED partition-∂H.
-
-HP7. ~~**Stabilise the one-fluid GFM free surface** (handoff 2026-06-17).~~
-  **CANCELLED / REMOVED 2026-06-23.** The one-fluid free-surface method
-  (`free_surface_solver.py`, `poisson_gfm.py`, `validation/free_surface/`,
-  `run_1guilla_fs.py`, the BDIMhandler `solver.free_surface` branch, and the
-  associated docs sections) has been deleted from the codebase as outdated. The
-  GFM moving-interface approach never converged under refinement (see the
-  session log below for the conclusive analysis); quantitative free-surface
-  work uses single-phase underwater, and `TwoPhaseSolver` remains for
-  qualitative free-surface cases. The notes below are retained as a historical
-  record of why the GFM route was abandoned.
-
-  **One-line status.** The two-phase surface model is sound for *qualitative*
-  free-surface work but over-predicts swim speed ~2× from under-resolved wave
-  drag; **single-phase underwater already matches the robot (0.128 m/s)** and is
-  the tool for quantitative speed. The one-fluid free surface is the right
-  structural fix (removes air noise, statics validated exactly) — it just needs
-  the explicit surface mode stabilized, which is this HP7 task.
-
-  **Progress (2026-06-17).** Steps (1)–(3) DONE at proof-of-concept level:
-  * (1) **Implicit free-surface coupling** — hydrostatic-pressure correction
-    (η''(x) term in Poisson RHS) stabilises the standing wave at RES=75:
-    wave oscillates with amplitude ~0.02 m, no blowup (|u|max ~0.67 m/s).
-    Gaussian smoothing of η(x) added to suppress stair-step noise.
-  * (2) **Non-diffusive advection** — self-contained Weymouth–Yue VOF
-    implemented for true staggered MAC grid (interior-only arrays). Works
-    correctly; column-height transport limited by directional-splitting
-    cancellation in divergence-free regions (known WY property).
-  * (3) **3‑D extension** — `poisson_gfm.py` extended to 3‑D
-    (`gfm_solve_cg_3d`, `gfm_grad_3d`, `level_set_height_3d`,
-    `_div_of_faces_3d`).  3‑D hydrostatic validation PASSES (p error ~3.5%
-    from half-cell GFM discretization, |u|~1e-17, air p=0).  **NOT yet
-    wired into `FreeSurfaceSolver.project`** (still uses staircase mask).
-  * Remaining for step (4): period tuning (+22% → goal <5% — root cause is
-    GFM discretization of free-surface BC, not source-term calibration),
-    wire GFM into solver, 3‑D standing wave, surface-pool eel.
-
-  **Progress (2026-06-17, session 2 — period root cause FOUND + halved).**
-  Root cause of the +24% period was located: it is NOT the GFM BC and NOT the
-  η'' source-term scaling. The `ETAXX_SCALE` knob does NOT move the period
-  (1.0→+22%, 1.45→+24%, *worse*), proving the hydrostatic source is not the
-  restoring mechanism. The real cause is the **Weymouth–Yue VOF under-
-  transporting the surface**: with the narrow-band velocity zeroing,
-  `explicit_wy` now goes fully STABLE but the surface FREEZES (h flat,
-  amplitude=0, dα=0) — the WY directional-split flux cancellation in
-  divergence-free columns means the surface barely advances → wave appears
-  slow → long period.
-  * **New `height_function` method** (in `gfm_wave_standalone.py`, selectable
-    via `FS_METHOD=height_function`): single-valued surface advanced by the
-    exact kinematic eq `Dh/Dt = v_surf − u_surf·∂h/∂x` (v_surf interpolated at
-    y=h(x) from the y-faces); alpha/phi rebuilt from h each step. Removes the
-    VOF freeze. Plus: (a) exact volume conservation (uniform shift, closed
-    box) kills the spurious downward drift; (b) biharmonic (∝k⁴)
-    hyperviscosity `h −= (1/16)·∂⁴h/∂x⁴` suppresses the height-function
-    odd-even (2-cell) sawtooth — annihilates the sawtooth in one step yet
-    damps the 75-cell wave only ~0.3% over the run (a per-step Gaussian
-    compounds and kills the wave — rejected).
-  * **RESULT (RES=75):** `height_function` → **T_sim=0.646 vs 0.574, +12.5%**
-    (was +24%), **amplitude retained 73%** (was 65%), stable. Period error
-    HALVED. NOTE: |u|max still slowly creeps 0.26→0.71 over 3 periods — the
-    biharmonic only *contains* a residual instability, doesn't cure it.
-  * **OPEN (user flagged: filters are non-physical).** The 2-cell sawtooth is
-    a genuine odd-even instability of the EXPLICIT height-function coupling
-    (surface advanced by pointwise v_surf then fed back through GFM θ). The
-    physically-clean cure that removes the NEED for any filter is implicit/
-    semi-implicit surface coupling (couple the kinematic + pressure solve so
-    the fast mode can't go odd-even) — proper next step, more work. The
-    biharmonic is the least-intrusive stopgap (k⁴-targeted, ~0.3% on the
-    physical wave). Remaining +12.5% period is then likely the half-cell GFM
-    BC discretization (cf. the 3.5% hydrostatic p error) + the residual
-    surface dissipation.
-  * Diagnostic: period detection now linearly detrends `hs` before zero-
-    crossings (a residual drift otherwise reports nan).
-
-  **Progress (2026-06-17, session 3 — IMPLICIT coupling: FILTER REMOVED).**
-  User flagged the biharmonic as non-physical and chose to build the implicit
-  coupling. DONE: new default method `implicit_robin` in
-  `gfm_wave_standalone.py` (`FS_METHOD=implicit_robin`). The dynamic+kinematic
-  free-surface conditions are coupled INTO the pressure solve, turning the GFM
-  Dirichlet p=0 into a **Robin BC** at each column's surface y-face:
-  `p + g·dt²·∂p/∂z = ρ·g·η_pred`, η_pred = (h−H_ref) + dt·w* (DISPLACEMENT,
-  not absolute height — the first cut blew up because I used absolute h → ~1900
-  Pa source). Implemented as a delta on top of the existing Dirichlet GFM
-  operator (`_apply_A_2d`): extra +diagonal at (i,jt) keeps it SPD, plus a
-  known source moved to the RHS; surface y-face gradient overridden in the
-  velocity correction. Self-contained CG. **No CUDA/solver changes.**
-  * **RESULT (RES=75): STABLE WITH NO FILTER, amp 81% retained** (best of all
-    methods), mean level correct, |u| saturates ~1.75 (bounded, not growing).
-    Period **+62%** (pure form) — restoring under-resolved by the half-cell
-    GFM surface BC (the dynamic-pressure BC carries weaker restoring than a
-    body force; cf. explicit body-force height_function was +12.5%).
-  * **θ-split period tuning** (`FS_GBODY`, default 0): split gravity into an
-    implicit-BC part and an explicit body-force fraction. `FS_GBODY=0.07` →
-    **T+15%, amp 84%, still filter-free**; but the knob is STIFF/nonlinear
-    (0.12 → −55% overshoot, amp 40%), so it is a tuning parameter, not a clean
-    cure. Robust tuning-free default is FS_GBODY=0 (+62%).
-  * **NET:** the artificial filter is GONE — implicit coupling gives filter-
-    free stability with the best amplitude retention (81–84%). Remaining
-    period error (+15% tuned / +62% pure) is now squarely the **half-cell GFM
-    free-surface-BC discretization** (consistent with the 3.5% hydrostatic p
-    error). That — a higher-order/consistent GFM surface gradient — is the
-    real next lever for <5% period, NOT more source/knob calibration.
-  * Comparison table of all methods is in the file's METHOD-selector header.
-
-  **Progress (2026-06-18, session 4 — CONVERGENCE TEST: implicit_robin is
-  resolution-fragile, NOT yet convergent).** Added `FS_RES` env knob and swept
-  the pure `implicit_robin` period vs grid:
-    RES=75  → T+62%, amp 81%   (the earlier "good" point)
-    RES=110 → collapses (amp 7%, period nan)
-    RES=150 → T−69%, amp 23%
-  The period does NOT converge and amplitude DECAYS under refinement → the
-  +62% at RES=75 is **not** a half-cell discretization floor; it sat in a lucky
-  stability window. **Root cause (analysed):** the implicit coupling strength
-  `β = g·dt²/(θh) ∝ h` (because dt ∝ h here) → the implicit ∂p/∂z term
-  VANISHES as the grid refines, so the single-face Robin stops suppressing the
-  column odd-even mode and the restoring reverts to effectively explicit-in-η
-  → decay/instability. The fully-implicit derivation itself is correct
-  (`p + g·dt²·∂p/∂z = ρg·η_pred`, η_pred = η^n + dt·w*, verified by
-  back-substituting w^{n+1}=w*−c∂p/∂z); the FLAW is imposing it at only ONE
-  y-face per column — on a sloped surface the interface-cut **x-faces** still
-  get the Dirichlet p=0 (not p=ρgη), so the implicit BC is incomplete and the
-  scheme is inconsistent at finite slope.
-  **→ CONCRETE NEXT STEP (convergent fix):** generalise the GFM ghost to impose
-  a NONZERO interface pressure p_I = ρg·η_disp(x_interface) on **all**
-  interface-cut faces (both x and y), treated implicitly (each cut face carries
-  its own β and source). For the single-valued height surface η is known per
-  column, so p_I at a y-face = ρg·η_i and at an x-face = ρg·(η_i+η_{i+1})/2.
-  This is the proper 2-D implicit GFM free surface; expect it to converge.
-  Re-run the FS_RES sweep as the acceptance test BEFORE wiring into the solver.
-
-  **Progress (2026-06-18, session 5 — all-cut-faces RULED OUT; true root cause
-  is the coupling ORDER).** Implemented `implicit_robin_full` (method in
-  `gfm_wave_standalone.py`): the implicit Robin p=ρgη is imposed on EVERY
-  interface-cut face (x and y), each with its own θ/β/source (diagonal per cut
-  face → still SPD). FS_RES sweep: RES75 T+82%/amp43%, RES110 −46%/amp5%,
-  RES150 −16%/amp78% — STILL non-convergent. So the slope/x-face Dirichlet
-  leak was NOT the cause.
-  **TRUE ROOT CAUSE (conclusive):** the GFM-Robin couples the surface
-  implicitly only through the FIRST normal derivative `∂p/∂z`, so the
-  stabilising coefficient `β = g·dt²/(θh) ∝ h` (because dt ∝ h here) and the
-  implicit term VANISHES as h→0. A refinement-robust implicit free surface
-  (Casulli-style semi-implicit) instead couples the surface elevation through
-  a HELMHOLTZ / second-derivative term `g·dt²·∇²η`, coefficient `g·dt²/h² ∝
-  const` when dt ∝ h — one order of h STRONGER. No GFM-Robin patch (single-
-  face OR all-faces) can be refinement-robust; the coupling is structurally
-  one order too weak. **Both `implicit_robin` and `implicit_robin_full` are
-  therefore dead-ends for production** (they only "work" in a luck-of-dt window
-  at one resolution).
-  **→ CORRECTED NEXT STEP:** build a Casulli-type semi-implicit free surface —
-  treat the surface-elevation gradient implicitly in momentum AND the velocity
-  divergence implicitly in the kinematic equation, yielding a Helmholtz solve
-  for η^{n+1} (coefficient g·dt², does NOT vanish). For THIS depth (kH≈2.14,
-  not shallow) the depth-AVERAGED Casulli would give the wrong dispersion
-  (ω²=gHk² vs gk·tanh kH), so it must be the FULL 2-D (x–z) version: couple
-  η^{n+1} into the full pressure Poisson via the Helmholtz surface term while
-  keeping the vertical structure (this is how 3-D ocean codes do it). Acceptance
-  test = the FS_RES sweep must show a CONVERGING period. This is real work, not
-  a patch — best started with fresh budget.
-
-  **Progress (2026-06-18, session 6 — CONVERGENT implicit free surface PASSES
-  (linear).** Before reaching for Casulli I did the von-Neumann analysis of the
-  Robin BC on a clean FIXED linear domain: η^{n+1}=η_pred/(1+μ),
-  μ=g·dt²·k·tanh(kH); discrete map |λ|²=1/(1+μ)<1 (stable, decays
-  ~1/√(1+μ)/step), phase→√μ ⇒ ω_num→√(gk·tanh kH) EXACT as μ→0. At RES=75
-  μ≈3e-4 ⇒ near-perfect. **CONCLUSION: the Robin concept was never the problem
-  — the non-convergence was entirely the moving-interface GFM machinery
-  (θ-clamp, narrow-band zeroing, VOF-free kinematic, volume shifts).**
-  * **NEW: `lilytorch/validation/free_surface/linear_wave_robin.py`** — clean
-    LINEARIZED standing wave, fixed domain (water 0..H, surface linearised at
-    z=H), MAC grid, implicit Robin top BC, NO GFM / NO VOF / NO narrow-band /
-    NO filter / NO body-force fudge.
-  * **One real bug found:** the surface cell's continuity RHS must include the
-    PREDICTOR surface-face flux vtop* (`rhs[:,Nz-1] -= vtop*/(c·h)`); it is
-    omitted by the interior-only `_div_of_faces` and is zero only while
-    vtop≈0, so leaving it out blows up *after* the surface starts moving
-    (clean start → accelerating blow-up). With it added: perfect.
-  * **RESULT — FS_RES convergence sweep (acceptance test):**
-      RES=50  T err +0.2%, amp 86%
-      RES=75  T err −0.0%, amp 90%
-      RES=110 T err +0.0%, amp 94%
-      RES=150 T err +0.1%, amp 95%
-    Period EXACT at all resolutions; amplitude retention IMPROVES with
-    refinement (→100% as μ→0) — i.e. it CONVERGES. This is the property both
-    `implicit_robin` and `implicit_robin_full` failed. **The project's
-    load-bearing standalone standing-wave acceptance test now PASSES (linear,
-    filter-free).** No Casulli reformulation needed — the implicit Robin is the
-    correct, convergent scheme; it just has to be applied on a clean MAC grid.
-  ── REMAINING (the implicit core is now proven): port this clean implicit-Robin
-     surface BC onto the MOVING interface — rebuild the moving-interface step
-     using the lesson above (include the predictor surface-flux term; avoid the
-     θ-clamp/narrow-band artifacts that broke the GFM probes), re-pass the
-     FS_RES sweep with a moving interface + finite amplitude; THEN wire into
-     `FreeSurfaceSolver.project` (replace staircase mask), 3-D standing wave,
-     surface-pool eel.
-
-  **Progress (2026-06-18, session 7 — moving-interface port ATTEMPTED,
-  BLOCKED by GFM).**  Two attempts to port the clean Robin BC to the moving
-  interface by weakening/removing the GFM artifacts:
-  * `implicit_robin_clean` (θ floor 0.005, NO narrow-band) → **catastrophic
-    blowup** (|u|→2700 m/s).  The narrow-band zeroing IS load-bearing for
-    the moving-interface case — without it, air cells accumulate unbounded
-    GFM velocities.  Unlike `linear_wave_robin.py` (which has NO air cells),
-    the moving-interface domain has air above the surface that must be
-    controlled.
-  * `implicit_robin_clean` v2 (θ floor 0.005, narrow-band KEPT) → **still
-    blows up** (|u|→4400 m/s).  The milder θ floor increases the Robin
-    diagonal by 63× (β/(1+β))/(θ·h²) ∝ 1/θ², making the operator stiff
-    enough to destabilise the CG + time integration.  The GFM θ-clamp at
-    _TH_MIN=0.05 is load-bearing for the operator conditioning.
-  * **CONCLUSION:** both GFM artifacts (θ-clamp, narrow-band zeroing) are
-    NECESSARY for the moving-interface case.  They cannot be simply
-    "removed" or "weakened."  The convergent Robin BC can only be applied on
-    a clean MAC grid without air cells (as in `linear_wave_robin.py`).
-  * **→ PATH FORWARD:** the moving-interface port needs a FUNDAMENTALLY
-    DIFFERENT air treatment — not GFM ghost cells + narrow-band zeroing, but
-    a one-fluid approach where the air is NOT a computational domain (e.g.
-    cut-cell, embedded boundary, or a level-set method that only solves in
-    Ω_water).  This is more work than a patch; best scoped as a separate
-    milestone with fresh budget.  The LINEAR implicit-Robin acceptance test
-    IS the validated core — it just needs the right moving-interface
-    machinery wrapped around it.
-  * **FS_RES verification re-run (2026-06-18):** linear_wave_robin.py PASSES
-    at all resolutions (RES=50/75/110/150, T err ≤0.2%).
-
-  **Progress (2026-06-18, session 8 — GFM gradient wired into solver).**
-  * `FreeSurfaceSolver.gradient()` overridden to return GFM sub-cell gradient
-    (padded to full-grid shape) when `free_surface.use_gfm_gradient=True`.
-    The level set φ is built from alpha each `project()`.  This gives a more
-    accurate velocity correction at the interface while the pressure solve
-    still uses the staircase `dirichlet_mask` (multigrid/MGCG unchanged).
-    Config key: `free_surface.use_gfm_gradient` (default False).
-  * **GFM pressure solve NOT wired** — the standalone GFM CG solver cannot
-    replace multigrid/MGCG without significant refactoring, and the GFM-based
-    implicit-Robin approaches (`implicit_robin`, `implicit_robin_full`,
-    `implicit_robin_clean`) are all resolution-fragile or unstable on the
-    moving interface.  The GFM machinery (θ-clamp, narrow-band zeroing) is
-    load-bearing for stability but breaks convergence under refinement.
-  * **→ REALISTIC PATH FORWARD:** the convergent implicit-Robin BC is proven
-    on a clean MAC grid (`linear_wave_robin.py`).  Porting it to the moving
-    interface requires a non-GFM air treatment (cut-cell, embedded boundary,
-    or one-fluid solve-in-Ω_water-only).  This is scoped as future work.
-    The GFM gradient override is a pragmatic partial improvement available now.
-
-  **Progress (2026-06-18, session 10 — exhaustive moving-interface attempts
-  CONCLUDE: GFM-based approaches cannot converge).**
-  * `robin_gfm_free` + staircase x-faces: |u|→10^135 (blows up).
-  * `implicit_robin` + physical-distance narrow band: RES=75 T+62%, RES=110
-    collapses, RES=150 T−69% — still non-convergent.
-  * **FINAL ASSESSMENT:** the implicit Robin BC is proven correct and
-    convergent on a clean MAC grid (`linear_wave_robin.py`, T err ≤0.2% at
-    all RES).  ALL GFM-based moving-interface implementations
-    (`implicit_robin`, `implicit_robin_full`, `implicit_robin_clean`,
-    `robin_gfm_free`) fail to converge under refinement.  The GFM machinery
-    (θ-clamp, narrow-band zeroing, GFM gradient at water-air faces) is
-    simultaneously load-bearing for stability AND convergence-breaking.
-  * **→ ONLY VIABLE PATH:** a one-fluid solve-in-Ω_water-only approach
-    (cut-cell, embedded boundary, or σ-coordinate transform) that avoids
-    air cells entirely — analogous to `linear_wave_robin.py` but with a
-    moving top boundary.  This requires a new solver architecture, not a
-    patch on the existing GFM.  Best scoped as a separate milestone with
-    fresh budget.
-  * The GFM gradient override in `FreeSurfaceSolver` (session 8) remains a
-    pragmatic partial improvement for production (better velocity correction
-    at the interface with the existing staircase pressure solve).
-
-  ── GOAL ──
-  A free-surface solver that captures surface WAVES so the surface-swimming
-  eel's wave-making drag is resolved. The two-phase VOF over-predicts swim
-  speed ~2× because that drag is under-resolved/smeared (robot 0.128 m/s vs
-  sim ~0.20–0.26; ruled out viewer, force-readout, air-density). One-fluid
-  (air = constant-p void) ALSO removes the air-force noise structurally.
-
-  ── WHAT EXISTS (the two-phase solver is untouched) ──
-  * `lilytorch/src/free_surface_solver.py` — `FreeSurfaceSolver(TwoPhaseSolver)`:
-    uniform water density, `p=0` in air (staircase mask via the `dirichlet_mask`
-    hook in `poisson_mult.py`), velocity-extend into air, gauge-anchor +
-    air-transparent-body OFF.
-  * `lilytorch/src/poisson_gfm.py` — self-contained ghost-fluid Poisson (2‑D):
-    height level-set `φ = y − h(x)`, θ-scaled ghost gradient placing `p=0` on
-    the *exact* interface, Jacobi-CG, operator `A = div(gfm_grad)`.  NOT yet
-    wired into `FreeSurfaceSolver.project` (that still uses the staircase mask).
-  * `lilytorch/validation/free_surface/run_hydrostatic_fs.py` — **PASSES:**
-    water hydrostatic 0.00%, |u| ~ 1e−7, air p = 0.
-  * `lilytorch/validation/free_surface/gfm_wave_standalone.py` — self-contained
-    2‑D MAC standing-wave probe that **exposes the failure**.
-
-  ── PRECISE FAILURE MODE ──
-  **Statics work. Waves don't.** The explicit free-surface mode is UNSTABLE:
-  * freeze the surface face → stable but amplitude = 0 (no wave);
-  * let the surface move → |u| grows **0.007 → 3 m/s** (three orders of
-    magnitude), surface collapses, smaller dt only delays it.
-  This is the **classic explicit free-surface instability** — the fast
-  gravity-wave mode (ω² = gk tanh kH) is treated explicitly and its CFL
-  constraint is not the advective one but a much tighter surface-gravity one.
-  This is exactly why the old GFM was retired.
-
-  ── ORDERED NEXT STEPS ──
-  **(1) Implicit free-surface coupling** — treat the surface pressure/gravity
-      implicitly so the fast gravity-wave mode can't blow up (the load-bearing
-      fix).  This means the Poisson RHS must include the gravity contribution
-      at the *future* surface position, or equivalently the surface kinematic
-      BC (Dh/Dt = v_surface) must be coupled to the pressure solve.
-  **(2) Non-diffusive interface advection + clean reinitialised level set** —
-      the standalone reuses 1st-order upwind α → φ noisy → noisy θ → noise
-      feeds the instability growth.  Reuse the Weymouth-Yue VOF
-      (`two_phase.py`) or implement a proper level-set method with HJ-WENO
-      advection and Sussman reinitialisation.
-  **(3) 3‑D + BDIM integration** — extend `poisson_gfm.py` to 3‑D, wire the
-      GFM grad/solve into `FreeSurfaceSolver.project` (replacing the current
-      staircase `p=0` mask).  Re-validate hydrostatic first.
-  **(4) Validate standing-wave period then eel** — standalone standing wave
-      (period + amplitude retention) BEFORE any MAC/BDIM integration.  Target:
-      stable oscillation at the analytic period ω² = gk tanh kH with ~100%
-      amplitude over several periods.  Then a surface-pool eel config using
-      `FreeSurfaceSolver` vs two-phase vs robot 0.128 m/s.
-
-  **Validation order is load-bearing:** standalone standing wave MUST pass
-  before any 3‑D or BDIM integration.
-
-HP4. ~~**Wire in `FlowDiagnostics`.**~~ ✅ `FlowDiagnostics` moved to its own module
-  `lilytorch/src/diagnostics.py` (out of solver.py), instantiated in `FluidSolver.__init__`
-  when `diagnostics_every > 0`, called from `finalize_step` on the post-projection field,
-  and saved to `diagnostics.h5` at the end of `run_sim`/`run_from_initial`. Default
-  `diagnostics_every = 100` in `base_sim_config.py` (0 disables). Subsumes the old F4 item.
-
-## Bugs
-
-BG1. ✅ **`_forces_lagrangian_2d_python_ref` undefined variables (2026-06-11)** —
-  `eps_ij`, `nu_rho`, and `nu_rho_const` were used inside the per-body loop but never
-  computed in this function.  The production `forces_lagrangian_2d` computes them before
-  the loop via `_viscous_stress_tensor` + `_compute_nu_rho_for_forces`; the reference was
-  missing the same preamble → silently crashes at runtime when called for tests/debugging.
-  **Fix:** added the preamble (mirror of `forces_lagrangian_2d` lines 1094-1122) before
-  the body loop in `_forces_lagrangian_2d_python_ref`.
-
-BG2. ✅ **ABDQUICKEST hardcoded `C=0.1` (2026-06-11)** — `abdquickest(u, c, d, C=0.1)` used
-  a fixed Courant number regardless of the actual flow CFL.  For CFL > 0.1 the TVD limiter
-  is overly optimistic (less diffusive than it should be), and for CFL→0.5 the scheme is
-  no longer TVD-guaranteed.  `C` should be `|u|·dt/h` (the actual advective Courant).
-  **Fix:** in `AdvDiffSolver._solve_convective`, compute the step's max CFL before the
-  flux loop and pass it as `C` to `abdquickest`.  Stored on `self._scheme_name` to avoid
-  checking at every (i,d) iteration.
-
-BG3. ✅ **Semi-Lagrangian back-tracing upgraded to RK2 (2026-06-11)** — `_solve_semi_lagrangian`
-  used 1st-order Euler back-tracing `x_dep = x − u(x)·dt`.  Replaced with the 2-stage
-  midpoint method: `x_mid = x − 0.5·dt·u(x)`, then `x_dep = x − dt·u(x_mid)`.  This is
-  2nd-order accurate in the Lagrangian path at the cost of one extra interpolation per
-  component per step.  Also removed the spurious `.clone().detach()` calls (unnecessary
-  under `torch.no_grad()`) — now plain `.clone()`.
-
-BG4. ✅ **Dead `_use_legacy_sparse_forces_2d` code removed (2026-06-11)** — the flag was
-  hardcoded `False` since the sparse-AABB force path was unified; the dead AABB-union
-  block (lines 455-476) and the `if/else` cache branch (lines 502-511) were removed from
-  `forces_method2`.
-
-BG5. ✅ **`_vcycle_rbgs_2d/3d`: red/black masks reused between pre-smooth and post-smooth
-  (2026-06-11)** — masks are shape-dependent only so the post-smooth can reuse the ones
-  built for the pre-smooth at the same level; removed the duplicate `_rb_masks_*` call.
-
-BG7. ✅ **`strain_rate_magnitude` cross-derivative stagger fix (2026-06-11)** — `dudy` (at
-  x-faces) and `dvdx` (at y-faces) were at different stagger positions before being summed
-  into S12 = 0.5·(∂u/∂y + ∂v/∂x); this made the Smagorinsky eddy viscosity physically
-  inconsistent in the cross terms.  **Fix:** added `_stag_to_cc` helper in `operations.py`
-  that averages each cross-derivative to cell centres before combining.  Verified: pure
-  shear gives `|S|=1.0`, solid rotation gives `|S|≈0` (machine precision) — previous code
-  gave spurious non-zero for solid rotation.
-
-## Memory / perf
-
-MP10. ~~**T2d — fused CUDA kernel for SCALAR advection**~~ ✅ DONE (2026-06-23,
-  as the W&Y `cvof_sweep` kernel — see below). **The original framing was stale:**
-  it assumed `advection.advect_scalar` carried the two-phase α-transport, but
-  (a) `advect_scalar` has **zero live callers** — its only consumer was the
-  free-surface level-set transport, deleted with HP7; and (b) the actual VOF
-  α-transport is `TwoPhase._cvof_sweep` (`two_phase.py`), the **Weymouth & Yue**
-  conservative scheme, which `advect_flux_add` **cannot** express (W&Y is a
-  sequential operator-split sweep with a divergence-correction term
-  `a_i·(u_R−u_L)` and a bounded donor face value, not a sum-over-d accumulation of
-  QUICK/vanLeer fluxes). So reusing `advect_flux_add` was a dead end; instead a
-  **dedicated W&Y CUDA kernel** was written.
-  * **NEW op `lilytorch_kernels::cvof_sweep`** in
-    `lilytorch/src/kernels/csrc/cuda/cvof_sweep.cu` (schema in `ops.cpp`): one
-    launch per (sweep, direction) replacing the ~8 full-grid temporaries (3
-    edge-clamped shifts, 2 limited slopes, 2 donor faces, the flux tensor) of the
-    Python sweep; computes `out[i] = a[i] + cfl·(F(i)−F(i+1)+a[i]·(u[i+1]−u[i]))`
-    with the W&Y van-Leer-limited Courant-corrected donor face, all in registers.
-    Edge-clamp (Neumann) neighbour reads + explicit strides (velocity components
-    are strided `_vel` row views). 2-D + 3-D.
-  * **Wired** into `TwoPhase._cvof_sweep` (`two_phase.py`): dispatches to the
-    kernel on CUDA when the extension exports the op (cached
-    `_cvof_kernel_available()` probe), else falls back to the renamed
-    `_cvof_sweep_python` oracle (CPU path / un-built extension). **No core-source
-    edits** (confined to `two_phase.py` per `feedback-no-core-source-for-two-phase`).
-  * **Parity** (`test_two_phase.py`, new `test_cvof_sweep_kernel_parity_*`):
-    kernel vs `_cvof_sweep_python` on identical CUDA tensors — **rel 0.0 (2-D
-    f32+f64, contiguous AND strided-velocity)**, 1.1e-16 (3-D f64), 6e-8 (3-D f32,
-    FMA). End-to-end `tp.advect` 100-step boundedness + mass-conservation test on
-    CUDA also passes. **Speedup 4.5–5.6×** at typical sizes (2D-256, 3D-64/128;
-    1.3× at 2D-512), measured incl. the shared clone+pad overhead.
-  * NOTE: `advect_scalar` left in place (harmless dead code; a future passive-
-    scalar/dye/level-set consumer could be CUDA-accelerated via `advect_flux_add`
-    cheaply, but there is none today). The variable-coeff Poisson still dominates
-    the two-phase step at ~75% (see `project_two_phase_poisson_bottleneck`); this
-    removes the α-transport slice of the ~6% Python cost.
-
-MP1. ~~**H1 per-step `torch.cuda.empty_cache()`**~~ ✅ (2026-06-11). Gated to every
-  `empty_cache_every` steps (default 200, config key `empty_cache_every` in
-  `base_sim_config.py`).
-MP2. ~~**H2 per-step host sync in `check_explosion`**~~ ✅ (2026-06-11). Throttled to every
-  `check_explosion_every` steps (default 50, config key `check_explosion_every` in
-  `base_sim_config.py`).
-MP3. ~~**T1a**~~ ✅ Inlined `_tvd_face` into `van_leer`/`abdquickest`/`cubista` in
-  `advection.py`, chaining in-place on the owned `psi` and reusing the live `denom`;
-  `_tvd_face` helper removed. Verified bit-exact (fp32+fp64, incl. denom≈0 branch).
-MP4. ~~**T1b**~~ ✅ `div` is now a local in `solver.py:project()` (was a persistent
-  `self.div`) and is `del`-ed right after each `_poisson_solve` returns, before the
-  gradient/correction allocations. ~0.5 GiB transient + removes a persistent field.
-MP5. ~~**T3a**~~ ✅ (2026-06-11) Eliminated the `div` field on the multigrid/MGCG path:
-  `ops.divergence_interior()` computes the interior-only RHS (no ghost cells) directly
-  in `project()`; for the Python path it is scaled in-place by `h²` before the solve
-  (`pre_scaled=True` kwarg skips the redundant `f_scaled = h²·f` copy inside
-  `solve_multigrid`/`solve_mgcg`).  Kernel path (`use_kernels=True`) is unaffected
-  (native CUDA kernel applies h² internally).  FFT path unchanged (still uses full-grid
-  `div`).  Dead `'div'` entry removed from `_BDIM_FIELD_NAMES`.
-MP7. ~~**T2a**~~ ✅ (2026-06-12) Fused CUDA `advect_flux_add` kernel written in
-  `lilytorch/src/kernels/csrc/cuda/advection_flux.cu` and registered as
-  `torch.ops.lilytorch_kernels.advect_flux_add`. Replaces the Python
-  `_flux → F[:-1]-F[1:] → rhs.add_()` chain (which allocated ~4 full-grid tensors per
-  (i,d) pair) with a single kernel launch that accumulates the flux divergence in
-  registers and writes directly into rhs.  Handles all 5 schemes (QUICK, ABDQUICKEST,
-  vanLeer, CDS, CUBISTA) via compile-time template specialisation.  Handles
-  non-contiguous fv/p views via explicit stride parameters; rhs strides are also passed
-  so face_dim-dependent layout is handled correctly.  Activated automatically in
-  `AdvDiffSolver._solve_convective` on CUDA (skips `_get_step_scheme` sync for
-  ABDQUICKEST).  Measured **3.5–3.9× speedup** on 128³; 260/260 flux parity checks +
-  10/10 full `_solve_convective` parity checks passed at machine precision (fp64 rel_err
-  ≤ 1e-16).
-MP11. ~~**T5 Pipelined / communication-avoiding CG (native Poisson driver)**~~ ✅
-  (2026-06-14) The native `mgcg`/`rmgcg` CG loop did ~4 host `.item()` syncs per iteration
-  (alpha ×2, beta, residual-norm), each a CPU↔GPU pipeline stall (native 2D solves at only
-  ~23% GPU-util). **Fix:** keep `alpha`/`beta` as 0-dim *device* scalars (drop the
-  `.item()` calls) and fuse the axpy updates with `addcmul_`/`mul_` (a 0-dim tensor
-  broadcasts — identical kernel count, no extra temps): `x += α·d` → `x_in.addcmul_(d_in,
-  alpha)`, `r -= α·q` → `r.addcmul_(q, alpha, -1.0)`, `d = β·d + z` → `d_in.mul_(beta)
-  .add_(z_in)`. This removes the alpha/beta D→H syncs, leaving the residual-norm check as
-  the only per-iter host sync (~1/iter, as targeted). Applied to all 4 drivers
-  (mgcg/rmgcg × 2D/3D) in `poisson_solve.cu`. **Measured ~1.13–1.18× wall-clock** on
-  sync-bound small-2D solves (N=32/64/128). Parity: rmgcg(kdef=0) still bit-identical to
-  mgcg (0.00e+00); all 3 Poisson self-tests PASS. NOTE: `addcmul_` is non-FMA (matches the
-  Python `_cg_core` reference formula exactly, vs the old scalar `add_` which used FMA) —
-  this only perturbs the LAST ULPs, visible solely when over-iterating f32 *past its
-  rounding floor* into the chaotic loss-of-orthogonality regime (which the Python path
-  exhibits too); production runs 3 MGCG cycles, far below it. The f32 N=16 parity case in
-  `test_poisson_solve_mgcg_self.py` was retuned to compare in the converged regime
-  (`max_cycles=6`). Follow-on: this was the prerequisite for CUDA-graph capture of the whole
-  solve — now SHIPPED as GU6 (which uses the `tol<0` fixed-cycle mode to be sync-free rather
-  than needing a device-side convergence flag; an early-exit device flag remains an optional
-  enhancement). The plain `multigrid` driver already syncs only once/cycle (residual norm),
-  so it was left unchanged.
-
-## 2D/3D solver unification — kernel parity
-
-SU2. ~~**Step 6 — merge BDIMhandler `_update_2d/_3d` + `_update_*_streaming_multi`**~~
-  ✅ (2026-06-15, branch `optimize_speed_memory`). Both per-dim pairs collapsed
-  into dimension-generic methods driven by `self._sim_axes = range(ndim)`:
-  - **Python path:** `_update_2d`+`_update_3d` → `_update_python` (per-axis field
-    lists for the staggered SDF/velocity union loop; dim-specific only in
-    body-frame compose, rotation helper, rigid-body velocity formula, AABB
-    descriptor, and the Lagrangian/contour tail — factored into
-    `_refresh_lagrangian_contour_2d`, `_refresh_lagrangian_tris_3d`,
-    `_apply_contour_mask_2d`).
-  - **Kernel path (production):** `_update_2d_streaming_multi`+
-    `_update_3d_streaming_multi` → `_update_streaming_multi` + helpers
-    `_stream_kin_static`, `_stream_static_pack` (writes the exact
-    `_kernel_static_{2,3}d` names `forces.py`/`solver.fluid_step` read),
-    `_stream_lagrangian_refresh`. Per-dim packed layouts (kin row D*D+3D+(3|1),
-    body_meta 3D+1, dirty-AABB keys) reproduced exactly; 2-D identity local frame
-    makes the unified compose einsum (`R@I`, `urdf+R@0`) a bit-exact no-op.
-  `_init_update` dispatches the unified methods. The 4 legacy methods are RETAINED
-  as the parity oracles for `test_update_python_parity.py` +
-  `test_update_streaming_parity.py` (both bit-identical, max|Δ|=0, across
-  Eulerian/blend/Lagrangian/contour × 2D/3D, streaming incl. the prev-union dirty
-  branch). Also fixed a pre-existing stale name in `test_update_2d_mirrors_3d.py`
-  (`_body_aabb_indices_2d`→`_body_aabb_local_2d`). **FSI regression:** GPU
-  kernel-mode + CPU python-mode end-to-end A/B on the real 3D multi-link 1guilla
-  (225×75×13, 8 steps, Lagrangian) — per-link drags+torques bit-identical
-  unified-vs-legacy on BOTH paths. (2-D kernel covered by unit parity only — no
-  non-stale 2-D coupled example exists on HEAD.)
-  **Follow-up cleanup ✅ DONE (2026-06-24).** After the gated full-length in-situ
-  validation passed — unit parity re-run bit-identical (max|Δ|=0, both paths);
-  2-D `_1guillasim` pinned kernel-streaming coupled run 1000 steps clean (body
-  undulating, all sensors finite, no explosion); 3-D `_1guillasim` pinned
-  kernel-streaming + Lagrangian coupled run 300 steps clean (isotropic
-  192×48×24, `convexify=False` per `project_convexify_overlap_instability`) —
-  the 4 legacy oracle methods (`_update_2d`, `_update_3d`,
-  `_update_2d_streaming_multi`, `_update_3d_streaming_multi`) were DELETED from
-  `BDIMhandler.py` (**1124 lines removed**) along with the two now-moot parity
-  tests (`test_update_python_parity.py`, `test_update_streaming_parity.py`).
-  `test_update_2d_mirrors_3d.py` KEPT (it pins `_body_aabb_local_2d`, not the
-  deleted methods; docstrings refreshed). Stale comments in `forces.py` /
-  `body.py` repointed to the unified method names. Post-deletion: mirrors test +
-  2-D & 3-D coupled smokes all exit-0. NOTE: the production full-res 3-D config
-  (1024×256×128 + Euler) explodes at iter ~25, but that is a pre-existing fluid
-  instability orthogonal to the update path (unit parity guarantees legacy would
-  explode identically) — not a unification regression. NOTE: the jellyfish 3-D
-  example is STANDALONE (replaces `composite_body`, calls `jelly.update()`
-  directly) and does NOT exercise the BDIMhandler unified path, so 3-D coupled
-  validation uses `_1guillasim` pinned, not jellyfish.
-
-SU3. ~~**K9**~~ ✅ Added `is_cuda` TORCH_CHECK to `apply_bcs_2d_cuda` (mirrors 3D).
-SU4. ~~**K10**~~ ✅ `apply_bcs_2d/3d_kernel` now compute `src_lin` unconditionally
-  (Dirichlet's value is harmlessly discarded), dropping the dead `src_lin = 0` init and
-  the `if (kind != 1)` branch. Rebuilt `_C.so`; CPU↔CUDA parity exact (fp32+fp64).
-
-## GPU utilisation
-
-GU6. ~~**CUDA-graph capture of the native solve**~~ ✅ SHIPPED (2026-06-15). Replays the
-  ~1300-kernel native V-cycle with ~1 host launch on launch-bound small grids. **Enabler**
-  (already done 2026-06-14): the native drivers take `tol < 0` = sync-free fixed-cycle mode
-  (skips the residual-norm `.item()` short-circuit) → host-sync-free → graph-capturable;
-  `tol >= 0` unchanged. **Wired into `PoissonSolver`** (`poisson_mult.py`): `_solve_mgcg_native`
-  / `_solve_multigrid_native` now route through `_graphed_native_solve` when enabled — lazily
-  captures one graph per (method, ndim, input-shape) into static p/f/face buffers, then each
-  step `copy_`s the live RHS + BDIM face coeffs + warm-start guess in, replays, copies p back
-  out (residual cloned). Capture failure → permanent eager fallback. Config:
-  `poisson_cuda_graph` (default False) + `poisson_cuda_graph_max_cells` (interior-cell gate,
-  default 64³) wired through `base_sim_config.py`. **mgcg + multigrid only** (rmgcg's
-  deflation basis changes / fft uses a different solver — both untouched, automatically
-  out of scope). **Verified:** graph vs eager bit-exact (`|dp|=0`, 2D/3D, both methods);
-  gating correct (N=96 skips, N=48 captures); speedup 9.8×/8.1× (2D-N64/128), 4.0× (3D-N48)
-  → 1.04× (3D-N128) — regime-dependent as the POC predicted, hence the size gate;
-  mgcg/rmgcg native self-tests still PASS. Harness `/tmp/verify_gu6.py` + `/tmp/verify_gu6_perf.py`.
-  ⇒ **SMALL-GRID-ONLY win** (launch-bound); net-NEGATIVE on large compute-bound 3D, so the
-  size gate is load-bearing. A full megakernel rewrite would share the large-grid limitation
-  AND hit a cooperative-launch occupancy ceiling (~64³) — graphs, size-gated, are the right
-  tool. RBGS red/black can't be fused (Gauss-Seidel dep).
-  **NOTE on T4 (`--poisson_compile`):** SUBSUMED — no distinct work remains. The literal T4
-  (`torch.compile` the *Python* multigrid path) was built (`14bbbfa`) then deliberately
-  removed (`4de22b2`, "unnecessary via kernel mode"); its surviving reframe ("CUDA-graph
-  capture of the whole native solve") IS this GU6 item, now shipped. The only forward-looking
-  follow-on is an optional device-side convergence flag so the captured graph can early-exit
-  when converged instead of running the fixed cycle budget (GU6 uses `tol<0` fixed cycles).
-
-✅ **All three config options implemented (2026-06-12):** `solver.compile_project`,
-`solver.use_cuda_graphs`, `solver.adv_diff_streams` wired into `FluidSolver.__init__`
-and exposed in `BaseSimConfig` (all default `False`). `compile_project=True` is the
-recommended opt-in for GPU production runs; `torch.compile` has a 30–100 s first-compile
-overhead (amortised over long sims). Benchmark script:
-`lilytorch/validation/cost_analysis/bench_gpu_util.py`.
-
-GU5. ~~**Fuse the per-axis Neumann BC into one launch**~~ ✅ (2026-06-14) The BC mirror
-  (`apply_neumann_bc_2d/3d` in `multigrid_smoothers.cu`) was the single largest launch-count
-  contributor — one kernel **per axis pair** (3 in 3D), called by every smoother half-sweep
-  and residual eval (~1170 launches/solve @ 3D-N96). Fused into ONE launch using
-  `blockIdx.{y,z}` as the axis-pair selector. Safe because the 5-/7-point stencils only read
-  **face** ghosts (each axis pair writes a disjoint interior-face slab → race-free; the
-  never-read edge/corner ghosts are left stale). **Measured:** launches/solve 2101→1321
-  (−37%), wall-clock **−10% (2D-N64) to −25% (3D-N48)**, −17% (3D-N96). multigrid/mgcg/rmgcg
-  self-tests still PASS (BC exercised through the full solve vs Python ref).
-
-## Per-step hot-path overhead
-
-PH1. ~~**H1 per-step `torch.cuda.empty_cache()`**~~ ✅ (2026-06-11) — see MP1.
-PH2. ~~**H2 per-step host sync in `check_explosion`**~~ ✅ (2026-06-11) — see MP2.
-PH5. **TwoPhaseSolver re-introduced the per-step `empty_cache()` (regresses PH1).**
-  `TwoPhaseSolver.finalize_step` (`lilytorch/src/two_phase_solver.py`) overrides the base
-  and calls `torch.cuda.empty_cache()` **unconditionally every step**, bypassing the
-  `empty_cache_every` throttle that fixed PH1 for the base solver — the dominant overhead
-  making the two-phase path (e.g. `gen_config_surface_pool.py`) much slower than the one-way
-  path (`gen_config_full_pool.py`) at identical grid/physics. The override also ran
-  `check_explosion` every step (regressed PH2). **check_explosion FIXED (2026-06-15):** the
-  override now gates it on `check_explosion_every` (default 50) like the base. **empty_cache
-  stopgap (2026-06-15):** gated the flush on `empty_cache_every` in the override + set
-  `empty_cache_every = 10**9` in `gen_config_surface_pool.py` so it never fires. **Remaining
-  proper fix:** delete the `empty_cache()` call from the override entirely (it is cosmetic —
-  only lowers nvidia-smi reserved memory — and unnecessary in a fixed-shape loop; the moving
-  AABB force crops are bounded). Confine to `two_phase_solver.py` (no core-source edits).
-PH4. ~~Delete legacy `adv_diff.py`~~ ✅ (2026-06-11) — repointed the lone importer
-  (`benchmarks/run_compile_advdiff_bench.py`) to `lilytorch.src.advection` (drop-in: identical
-  `AdvDiffSolver` API), removed the file, fixed the "kept on disk as legacy" docstrings.
-
-## Low priority
-
-LP12. ~~**Empty orphan dir `validation/free_surface_2d/`** (found 2026-06-23) — contains
-  only `__pycache__`.~~ ✅ Deleted 2026-06-23 with the rest of the free-surface method.
-
-LP4. ~~**Cache `_compute_union_aabb` across BDIM + coefficient passes**~~ ✅ (2026-06-11).
-  The AABB was computed twice per step on the kernel path: once in `_apply_bdim_all_axes`
-  and once inside `_compute_bdim_coefficients`.  Now computed once in
-  `_fluid_step_kernel_{2,3}d` and reused by both; `_bdim_union_aabb` is reset to `None`
-  only after `_compute_bdim_coefficients` returns.
-LP5. ~~**Harmonic mean for variable viscosity**~~ ✅ (2026-06-11). `diffusion.py:
-  variable_laplacian` now uses the harmonic mean `2·νᵢ·νⱼ/(νᵢ+νⱼ)` for face viscosity
-  instead of the arithmetic mean.  More accurate for strongly varying viscosity
-  (Carreau/Herschel-Bulkley); backward-compatible (identical for constant ν).
-LP7. ~~**F3 cache CC normals**~~ ✅ (2026-06-11). `forces_method1/2/2_3d` now store
-  `self.normal_{x,y,z}` on the first call in a step; `_release_bdim_fields` clears them
-  after the step.  On the python path `_recompute_mu_normals` already sets them, so no
-  change.  On the kernel path and for implicit coupling sub-iterations this avoids a
-  redundant `torch.gradient` call per iteration.
-
-## Test infra / repo hygiene
-
-TI3. ~~**`rho_body` dead solver config key — purged from codebase.**~~ ✅ DONE (2026-06-24).
-  Removed `"rho_body"` from the solver config dict (`base_sim_config.py` builder),
-  from all YAML solver configs (coquerelle/gazzola/two-phase sphere), from all
-  validation scripts that passed it as a FluidSolver kwarg, and from `run_jellyfish_fluid.py`.
-  Also updated README.md and controller.py docs that referenced it as a solver parameter.
-  Note: `self.rho_body` is intentionally retained in `base_sim_config.py` (line 106/470)
-  and all child `gen_configs_*.py` files — it still feeds the FARMS/MuJoCo link
-  `density` field and determines body mass in the rigid-body physics engine.
-
-TI2. ~~**Repo-root clutter / un-ignored diag output.**~~ ✅ DONE (2026-06-23).
-  The scratch dirs/CSV dumps (`_submerged_diag/`, `_flip_diag/`, `_overlap_study/`,
-  root `run_*.py`) were already relocated/dropped in commit `bbdaa4d` ("Repo tidy").
-  Remaining preventative half done: added directory-only `.gitignore` rules
-  `_*_diag/` and `_*_study/` (trailing slash => the `_overlap_diag.py`/`_region_diag.py`
-  harness scripts stay tracked; the in-dir `force_*.csv` dumps are covered without
-  touching the deliberately-commented `# *.csv` rule). Verified with `git check-ignore`.
-
-## Architecture / portability
-
-AP1. [x] ✅ **`RigidBodyBackend` adapter — DONE (2026-06-23).** New module
-      `lilytorch/integration/rigid_body_backend.py`: `RigidBodyBackend` ABC +
-      `FarmsMujocoBackend` impl + relocated `MujocoCheckpoint` (re-exported from
-      BDIMhandler as `_MujocoCheckpoint` for the existing checkpoint test). The
-      adapter surface: `get_body_poses_velocities(source,iteration)`,
-      `get_body_mass_radius`, `apply_xfrc`, `gravity_z`, `set_contact_params`,
-      `checkpoint()`, `bind_step(task,physics)`. ALL MuJoCo/FARMS access (the
-      ~16 `physics.*` + `task.maps`/`task.units` sites: pose/velocity reads both
-      sensors+physics paths, mass/rbound, gravity, contact tuning, xfrc force
-      write, implicit-coupling checkpoint) moved behind it; BDIMhandler keeps the
-      coupling logic (2-D slicing consumers, buoyancy formula, force scaling/
-      relaxation, IQN-ILS loop). Behavior-preserving: net −116 lines in
-      BDIMhandler; `git grep physics.model|physics.data|task.units|task.maps`
-      in BDIMhandler now empty. **Verified:** 21/21 integration regression tests
-      identical to baseline (pose-source, checkpoint, strong/fsi coupling, all
-      update parities); focused bit-identical unit check of apply_xfrc/
-      get_body_mass_radius/gravity/contact vs the original inline formulas;
-      both gather paths confirmed logic-identical to git HEAD by normalized diff.
-      Core source (solver/forces/body) untouched. **Live 3-D coupled smoke RUN
-      (2026-06-23):** 1guilla 3-D pinned, 128×32×16 isotropic, 5 steps, headless
-      via the real FARMS→FluidExtension→BDIMhandler→backend pipeline — exit 0,
-      `FarmsMujocoBackend.apply_xfrc` confirmed invoked per step on the 9-link
-      eel (env-gated probe), no errors. ⇒ unblocks AP2/AP3/AP5.

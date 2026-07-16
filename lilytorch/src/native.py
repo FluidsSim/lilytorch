@@ -42,7 +42,6 @@ __all__ = [
     "poisson_solve_mgcg_3d",
     "poisson_solve_rmgcg_2d",
     "poisson_solve_rmgcg_3d",
-    "advect_flux_add",
     "advect_flux_accumulate",
     "cvof_sweep",
     "RegularGridInterpolator",
@@ -1196,30 +1195,6 @@ def _poisson_solve_rmgcg_3d_abstract(
 # =====================================================================
 # Convective flux-add (advection) + Weymouth-Yue conservative-VOF sweep
 # =====================================================================
-
-def advect_flux_add(
-        fv: Tensor, p: Tensor, rhs: Tensor,
-        dt_dh: float, C_courant: float,
-        scheme_id: int, face_dim: int) -> None:
-    """Accumulate ``rhs[i_fd] += dt_dh * (F_left - F_right)`` in place for one
-    (velocity component, spatial direction) pair.
-
-    Fused high-order flux add (same positional
-    convention).  ``fv`` is the face velocity, ``p`` the transported field,
-    ``rhs`` the in-place accumulator; ``scheme_id`` selects the limiter and
-    ``face_dim`` the flux direction.
-    """
-    return torch.ops.lilytorch_kernels.advect_flux_add.default(
-        fv, p, rhs,
-        float(dt_dh), float(C_courant),
-        int(scheme_id), int(face_dim),
-    )
-
-
-@torch.library.register_fake("lilytorch_kernels::advect_flux_add")
-def _advect_flux_add_abstract(fv, p, rhs, dt_dh, C, scheme_id, face_dim):
-    pass   # rhs is accumulated in place; no new tensors created
-
 
 def advect_flux_accumulate(
         phi_src: Tensor, dst: Tensor, vel, comp_i: int,

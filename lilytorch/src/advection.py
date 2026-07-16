@@ -33,7 +33,7 @@ from lilytorch.src import native
 
 
 
-# Scheme IDs for the fused CUDA ``advect_flux_add`` kernel (T2a).
+# Scheme IDs for the fused ``advect_flux_accumulate`` kernel (13c).
 # Must match the compile-time enum in advection_flux.cu.
 _CUDA_SCHEME_IDS: dict[str, int] = {
     "quick": 0,

@@ -330,25 +330,6 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " int max_line_dim"
         ") -> ()");
 
-    // ---- Fused advection flux kernel (T2a) ----------------------------
-    // advect_flux_add: accumulates dt_dh*(F_left - F_right) into rhs for
-    // one (velocity component, spatial direction) pair.  Replaces the
-    // _flux → F[:-1]-F[1:] → rhs.add_() chain in _solve_convective.
-    //
-    // fv  : face velocities  (Nfd-1, Nt1[, Nt2]) — non-contiguous slice OK
-    // p   : field values     (Nfd,   Nt1[, Nt2]) — non-contiguous slice OK
-    // rhs : accumulator      (Nfd-2, Nt1[, Nt2]) — C-contiguous, mutated
-    // dt_dh      : dt / h_d (scalar)
-    // C          : max Courant number for ABDQUICKEST; ignored by other schemes
-    // scheme_id  : 0=QUICK 1=ABDQUICKEST 2=vanLeer 3=CDS 4=CUBISTA
-    // face_dim   : which tensor dimension the faces lie along (0, 1, or 2)
-    m.def(
-        "advect_flux_add("
-        "Tensor fv, Tensor p, Tensor(a!) rhs,"
-        " float dt_dh, float C,"
-        " int scheme_id, int face_dim"
-        ") -> ()");
-
     // ---- Fused per-cell flux accumulate (13c) --------------------------
     // advect_flux_accumulate: the fused flux-add + interior-accumulate
     // pair.  One launch per velocity component: computes face velocities
