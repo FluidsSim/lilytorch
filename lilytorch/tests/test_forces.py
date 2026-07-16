@@ -426,3 +426,161 @@ def test_forces_3d_graph_replay_eq_eager(dtype, submethod):
     # Phase 0: native readout runs eagerly every step (see the 2-D twin).
     assert fg.eager_calls == 8, f"eager_calls={fg.eager_calls}"
     assert fg.captures == 0 and fg.replays == 0
+
+
+# ─── physical oracle: absolute accuracy, not parity ─────────────────────────
+#
+# Everything above this line compares the readout against ITSELF on another
+# device or against a frozen snapshot.  Such a test passes just as happily when
+# both sides are wrong.  The two cases below impose analytic fields on a sphere
+# whose force integral is known in closed form (divergence theorem), so they
+# measure each readout's real error.  Companion script with the full R/h × eps
+# sweep: validation/force_readout_oracle/oracle_native_three_way.py.
+#
+#   A (pressure):  p = -G·x,     u = 0   ->  F_p = G·V
+#   B (viscous):   u_x = c·y²,   p = 0   ->  F_v = 2·ν·ρ·c·V   (divergence-free)
+#
+# The sphere SDF is an exact distance function (|∇φ| = 1), which keeps
+# force_delta_order out of the picture entirely.
+
+_ORC_R = 0.2                       # sphere radius
+_ORC_C = 0.5                       # sphere centre (all axes)
+_ORC_NU, _ORC_RHO = 1.0e-2, 1000.0
+_ORC_G = 3.0                       # pressure gradient, case A
+_ORC_CSH = 2.0                     # shear coefficient, case B
+_ORC_V = (4.0 / 3.0) * 3.141592653589793 * _ORC_R ** 3
+
+
+def _oracle_scene(N, eps_mult):
+    """Single exact sphere on an N³ unit-cube grid, hand-built for the native op."""
+    h = 1.0 / (N - 1)
+    g = torch.linspace(0.0, (N - 1) * h, N, dtype=torch.float64)
+
+    M, half = 161, 0.4                      # body SDF table (fine local grid)
+    bl = torch.linspace(-half, half, M, dtype=torch.float64)
+    BX, BY, BZ = torch.meshgrid(bl, bl, bl, indexing="ij")
+    F_flat = (torch.sqrt(BX**2 + BY**2 + BZ**2) - _ORC_R).ravel().contiguous()
+    inv_d = 1.0 / float(bl[1] - bl[0])
+    body_meta = torch.tensor(
+        [[float(bl[0])] * 3 + [float(bl[-1])] * 3 + [inv_d] * 3 + [inv_d**3]],
+        dtype=torch.float64)
+
+    X, Y, Z = torch.meshgrid(g, g, g, indexing="ij")
+    sdf_cc = (torch.sqrt((X - _ORC_C)**2 + (Y - _ORC_C)**2 + (Z - _ORC_C)**2)
+              - _ORC_R).ravel().contiguous()
+
+    return dict(
+        h=h, g=g, X=X, Y=Y, N=N, eps=eps_mult * h,
+        F_flat=F_flat, F_offsets=torch.tensor([0], dtype=torch.int64),
+        body_shapes=torch.tensor([[M, M, M]], dtype=torch.int64),
+        body_meta=body_meta, sdf_cc=sdf_cc,
+        # kin: R_T(9) identity + body_pos(3) + com(3) + lin_vel(3) + ang_vel(3)
+        kin=torch.tensor([[1, 0, 0, 0, 1, 0, 0, 0, 1,
+                           _ORC_C, _ORC_C, _ORC_C, _ORC_C, _ORC_C, _ORC_C,
+                           0, 0, 0, 0, 0, 0]], dtype=torch.float64),
+        aabb_lo=torch.zeros((1, 3), dtype=torch.int64),
+        aabb_dim=torch.tensor([[N, N, N]], dtype=torch.int64),
+    )
+
+
+def _oracle_eulerian(sc, submethod, u, v, w, p):
+    """-> (F_visc_x, F_pres_x) from the native eulerian readout."""
+    out = torch.zeros((1, 12), dtype=torch.float64)
+    streaming_sdf_forces_post_3d(
+        sc["F_flat"], sc["F_offsets"], sc["body_shapes"], sc["body_meta"],
+        sc["kin"], sc["aabb_lo"], sc["aabb_dim"],
+        sc["g"], sc["g"], sc["g"], sc["h"], sc["N"] ** 3,
+        sc["sdf_cc"], 0,
+        u.ravel().contiguous(), v.ravel().contiguous(),
+        w.ravel().contiguous(), p.ravel().contiguous(),
+        torch.tensor([_ORC_NU * _ORC_RHO], dtype=torch.float64),
+        sc["eps"], sc["eps"], sc["h"] ** 3, 1, out, submethod, 1.5 * sc["h"],
+    )
+    return float(out[0, 0]), float(out[0, 6])
+
+
+def _oracle_lagrangian(sc, u, v, w, p):
+    """-> (F_visc_x, F_pres_x) from the lagrangian readout, same fields."""
+    from lilytorch.src.forces import _viscous_stress_tensor
+    from lilytorch.tests.test_lagrangian import _build_sphere_tris
+
+    tc, tn, ta = _build_sphere_tris(_ORC_C, _ORC_C, _ORC_C, _ORC_R, 160, 90)
+    e = _viscous_stress_tensor((u, v, w), sc["h"])
+    out = torch.zeros((1, 12), dtype=torch.float64)
+    torch.ops.lilytorch_kernels.lagrangian_forces_3d.default(
+        e[0][0].contiguous(), e[1][1].contiguous(), e[2][2].contiguous(),
+        e[0][1].contiguous(), e[0][2].contiguous(), e[1][2].contiguous(),
+        p.contiguous(), torch.tensor([_ORC_NU * _ORC_RHO], dtype=torch.float64),
+        tc, tn, ta, torch.tensor([0, tc.shape[1]], dtype=torch.int64),
+        torch.tensor([[_ORC_C, _ORC_C, _ORC_C]], dtype=torch.float64),
+        float(sc["g"][0]), float(sc["g"][0]), float(sc["g"][0]),
+        1.0 / sc["h"], 1.0 / sc["h"], 1.0 / sc["h"],
+        sc["N"], sc["N"], sc["N"], 0, 0.0, out,
+    )
+    return float(out[0, 0]), float(out[0, 6])
+
+
+@pytest.mark.parametrize("submethod", [0, 1])
+def test_oracle_eulerian_pressure_matches_exact(submethod):
+    """Case A: the eulerian pressure readout is accurate — both submethods."""
+    sc = _oracle_scene(48, 1.0)
+    z = torch.zeros_like(sc["X"])
+    _, fp = _oracle_eulerian(sc, submethod, z, z.clone(), z.clone(),
+                             -_ORC_G * sc["X"])
+    exact = _ORC_G * _ORC_V
+    assert fp == pytest.approx(exact, rel=0.02), \
+        f"submethod {submethod}: F_p {fp:.6e} vs exact {exact:.6e}"
+
+
+def test_oracle_lagrangian_matches_exact():
+    """The lagrangian formula is exact in both channels (this is the yardstick
+    the eulerian offsets below are measured against)."""
+    sc = _oracle_scene(48, 1.0)
+    z = torch.zeros_like(sc["X"])
+    _, fp = _oracle_lagrangian(sc, z, z.clone(), z.clone(), -_ORC_G * sc["X"])
+    fv, _ = _oracle_lagrangian(sc, _ORC_CSH * sc["Y"] ** 2, z.clone(),
+                               z.clone(), z.clone())
+    assert fp == pytest.approx(_ORC_G * _ORC_V, rel=0.01)
+    assert fv == pytest.approx(2 * _ORC_NU * _ORC_RHO * _ORC_CSH * _ORC_V,
+                               rel=0.01)
+
+
+@pytest.mark.parametrize("submethod", [0, 1])
+def test_oracle_eulerian_viscous_reads_offset_surface(submethod):
+    """PINS A KNOWN DEFECT — this assertion is meant to be flipped by a fix.
+
+    The eulerian viscous band is shifted out by one eps (streaming_sdf.cu:404,
+    streaming_sdf_cpu.cpp:697, forces.py:143) to escape the BDIM band, so it
+    integrates σ·n over {φ = eps} rather than the body surface, with no
+    correction for the offset.  The resulting error is O(eps·∂σ/∂n): its sign is
+    FLOW-DEPENDENT, not a universal multiplicative law.  Here the imposed field
+    u_x = c·y² has stress growing away from the wall, so the readout over-reads,
+    and (this field being quadratic) it lands on the enclosed-volume ratio
+    ((R+eps)/R)³.  In a real boundary layer, shear DECAYS off the wall and the
+    same mechanism under-reads instead — measured ~11% low on cylinder_drag_2d
+    at Re=550 (see milestones/force_readout_agreement_handoff.md §9.1).
+
+    When the readout is corrected to φ=0, this test should assert
+    ``fv ≈ exact`` like the lagrangian one above.
+    """
+    sc = _oracle_scene(48, 1.0)
+    z = torch.zeros_like(sc["X"])
+    fv, _ = _oracle_eulerian(sc, submethod, _ORC_CSH * sc["Y"] ** 2, z.clone(),
+                             z.clone(), z.clone())
+    exact = 2 * _ORC_NU * _ORC_RHO * _ORC_CSH * _ORC_V
+    predicted = exact * ((_ORC_R + sc["eps"]) / _ORC_R) ** 3
+    assert fv == pytest.approx(predicted, rel=0.02), \
+        f"offset-surface model broke: F_v {fv:.6e}, model {predicted:.6e}"
+    assert fv > 1.3 * exact, "over-read vanished — did the band shift change?"
+
+
+def test_oracle_deltaH_viscous_is_ndelta_viscous():
+    """deltaH only replaces the PRESSURE readout, so it cannot be a candidate
+    fix for the viscous offset above: the two viscous outputs are bit-identical.
+    """
+    sc = _oracle_scene(48, 1.0)
+    z = torch.zeros_like(sc["X"])
+    u = _ORC_CSH * sc["Y"] ** 2
+    fv0, _ = _oracle_eulerian(sc, 0, u, z.clone(), z.clone(), z.clone())
+    fv1, _ = _oracle_eulerian(sc, 1, u, z.clone(), z.clone(), z.clone())
+    assert fv0 == fv1

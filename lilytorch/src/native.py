@@ -9,10 +9,8 @@ from lilytorch.src import _C  # noqa: F401
 __all__ = [
     "streaming_sdf_stag_2d_resolve",
     "streaming_sdf_stag_3d_resolve",
-    "bdim_coeff_3d",
     "streaming_sdf_forces_post_3d",
     "apply_bcs_3d",
-    "bdim_coeff_2d",
     "bdim_forcing_2d",
     "bdim_forcing_3d",
     "sl_advect_2d",
@@ -61,47 +59,6 @@ def _mw_dummy_native(u0: torch.Tensor) -> torch.Tensor:
         d = torch.zeros(1, dtype=u0.dtype, device=u0.device)
         _MW_DUMMY_NATIVE[key] = d
     return d
-
-def bdim_coeff_3d(
-        u_prime: Tensor, v_prime: Tensor, w_prime: Tensor,
-        sdf_u: Tensor, sdf_v: Tensor, sdf_w: Tensor,
-        body_u: Tensor, body_v: Tensor, body_w: Tensor,
-        u0: Tensor, v0: Tensor, w0: Tensor,
-        ch: Tensor, cv: Tensor, cw: Tensor,
-        eps: float, rho_f: float, dt: float,
-        h_grid: float,
-        dirty_i0: int, dirty_j0: int, dirty_k0: int,
-        dirty_Ai: int, dirty_Aj: int, dirty_Ak: int,
-        mu0_projection: int = 1) -> None:
-    """Phase-I fused BDIM2 + variable-density Poisson coefficient kernel.
-
-    Reads advdiff outputs (``u_prime/v_prime/w_prime``) plus the Kernel-A
-    face SDFs and rigid-body face velocities.  Writes the persistent
-    velocity fields ``u0/v0/w0`` and Poisson coefficients ``ch/cv/cw``
-    inside the dirty AABB.  ``mu0``, ``mu1`` and the unit normals live
-    only in CUDA thread registers.
-
-    Caller responsibilities:
-      * ``u_prime/v_prime/w_prime`` must be distinct allocations from
-        ``u0/v0/w0`` (otherwise central-difference reads at neighbouring
-        cells race with writes).
-      * Cells outside the dirty AABB are NOT touched.  Caller must
-        ensure ``u0/v0/w0`` already contain the advdiff result there
-        (e.g. via ``u0.copy_(u_prime)`` before this call) and that
-        ``ch/cv/cw`` already hold the outside-body default
-        ``dt / rho_fluid``.
-    """
-    return torch.ops.lilytorch_kernels.bdim_coeff_3d.default(
-        u_prime, v_prime, w_prime,
-        sdf_u, sdf_v, sdf_w,
-        body_u, body_v, body_w,
-        u0, v0, w0, ch, cv, cw,
-        float(eps), float(rho_f), float(dt),
-        float(h_grid),
-        int(dirty_i0), int(dirty_j0), int(dirty_k0),
-        int(dirty_Ai), int(dirty_Aj), int(dirty_Ak),
-        int(mu0_projection),
-    )
 
 def streaming_sdf_forces_post_3d(
         F_flat: Tensor, F_offsets: Tensor,
@@ -246,34 +203,6 @@ def streaming_sdf_stag_3d_resolve(
         float(blend_eps),
     )
 
-
-def bdim_coeff_2d(
-        u_prime: Tensor, v_prime: Tensor,
-        sdf_u: Tensor, sdf_v: Tensor,
-        body_u: Tensor, body_v: Tensor,
-        u0: Tensor, v0: Tensor,
-        ch: Tensor, cv: Tensor,
-        eps: float, rho_f: float, dt: float,
-        h_grid: float,
-        dirty_i0: int, dirty_j0: int,
-        dirty_Ai: int, dirty_Aj: int,
-        mu0_projection: int = 1) -> None:
-    """Phase-I fused BDIM2 + variable-density Poisson coefficient kernel (2-D).
-
-    2-D analogue of :func:`bdim_coeff_3d`.  See that wrapper for the
-    documentation of caller responsibilities.
-    """
-    return torch.ops.lilytorch_kernels.bdim_coeff_2d.default(
-        u_prime, v_prime,
-        sdf_u, sdf_v,
-        body_u, body_v,
-        u0, v0, ch, cv,
-        float(eps), float(rho_f), float(dt),
-        float(h_grid),
-        int(dirty_i0), int(dirty_j0),
-        int(dirty_Ai), int(dirty_Aj),
-        int(mu0_projection),
-    )
 
 def bdim_forcing_3d(
         u_prime, v_prime, w_prime,

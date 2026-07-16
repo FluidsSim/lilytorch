@@ -38,28 +38,17 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
     // the persistent velocity fields u0/v0/w0 and Poisson coefficients
     // ch/cv/cw inside the dirty AABB.  mu0, mu1 and unit normals are
     // computed in CUDA thread registers and never stored globally.
-    m.def(
-        "bdim_coeff_3d("
-        "Tensor u_prime, Tensor v_prime, Tensor w_prime,"
-        " Tensor sdf_u, Tensor sdf_v, Tensor sdf_w,"
-        " Tensor body_u, Tensor body_v, Tensor body_w,"
-        " Tensor(a!) u0, Tensor(b!) v0, Tensor(c!) w0,"
-        " Tensor(d!) ch, Tensor(e!) cv, Tensor(f!) cw,"
-        " float eps, float rho_f, float dt,"
-        " float h_grid,"
-        " int dirty_i0, int dirty_j0, int dirty_k0,"
-        " int dirty_Ai, int dirty_Aj, int dirty_Ak,"
-        " int mu0_projection"
-        ") -> ()");
 
     // NOTE (2.4): the BDIM-σ ops (bdim_coeff_sigma_{2,3}d) were removed with
     // the packed-key union path — their body-id input existed only as the
     // packed-key winner.  If BDIM-σ (Lauber et al. 2022) is revived, have the
     // Regime-B resolve kernel emit a per-cell winner body-id field instead.
+    // NOTE (CL2/CLx): the bdim_coeff_{2,3}d ops were removed — superseded by
+    // bdim_forcing_{2,3}d which adds the Maertens-Weymouth body-divergence
+    // correction.  The live BDIM ops live in bdim_forcing.cu / bdim_forcing_cpu.cpp.
 
     m.def(
         "streaming_sdf_forces_post_3d("
-        "Tensor F_flat, Tensor F_offsets,"
         " Tensor body_shapes, Tensor body_meta, Tensor kin,"
         " Tensor aabb_lo, Tensor aabb_dim,"
         " Tensor gx, Tensor gy, Tensor gz, float h_grid,"
@@ -122,21 +111,6 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " Tensor(h!) priv_sdf_cc, Tensor(i!) priv_sdf_u, Tensor(j!) priv_sdf_v, Tensor(k!) priv_sdf_w,"
         " Tensor(l!) priv_body_u, Tensor(m!) priv_body_v, Tensor(n!) priv_body_w,"
         " float blend_eps"
-        ") -> ()");
-
-    // Phase-I fused BDIM2 + variable-density Poisson coefficient kernel (2-D).
-    m.def(
-        "bdim_coeff_2d("
-        "Tensor u_prime, Tensor v_prime,"
-        " Tensor sdf_u, Tensor sdf_v,"
-        " Tensor body_u, Tensor body_v,"
-        " Tensor(a!) u0, Tensor(b!) v0,"
-        " Tensor(c!) ch, Tensor(d!) cv,"
-        " float eps, float rho_f, float dt,"
-        " float h_grid,"
-        " int dirty_i0, int dirty_j0,"
-        " int dirty_Ai, int dirty_Aj,"
-        " int mu0_projection"
         ") -> ()");
 
     // bdim_forcing_3d: static full-grid BDIM2 velocity + Poisson coefficients

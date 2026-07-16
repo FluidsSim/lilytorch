@@ -53,7 +53,7 @@ extensions:
         nthreads : 16
 
 
-        Nx: 512
+        Nx: 768
         Ny: 4096
         # Nx: 512
         # Ny: 8192
