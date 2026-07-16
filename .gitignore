@@ -15,6 +15,7 @@
 *.MP4
 *.html
 *.h5
+*.hdf5
 *.pickle
 # *.csv
 *.so
