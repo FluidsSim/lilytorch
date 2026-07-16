@@ -49,6 +49,7 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
 
     m.def(
         "streaming_sdf_forces_post_3d("
+        "Tensor F_flat, Tensor F_offsets,"
         " Tensor body_shapes, Tensor body_meta, Tensor kin,"
         " Tensor aabb_lo, Tensor aabb_dim,"
         " Tensor gx, Tensor gy, Tensor gz, float h_grid,"
