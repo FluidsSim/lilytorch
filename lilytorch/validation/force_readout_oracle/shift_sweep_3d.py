@@ -143,6 +143,40 @@ def main(path=DEFAULT_SNAP):
             out = out.cpu()
             print(f"{o:6.2f} | {out[:,0].sum():12.5e} {out[:,6].sum():12.5e}")
 
+        # Matched sampling distance.  The tempting idea is that the two
+        # readouts are the same "sample sigma at distance s" device and should
+        # agree once s == off; they do NOT, and the gap is structural:
+        #   eulerian(s)  = closed integral over the OFFSET ISO-SURFACE {phi=s},
+        #                  whose measure inflates with s;
+        #   lagrangian(o)= closed integral over the TRUE body surface (fixed
+        #                  triangulated area), merely SAMPLING sigma at o.
+        # On the sphere oracle they agree to 0.5% at s=0 and then diverge as
+        # ((R+s)/R)^3 exactly.  See test_forces.py::test_oracle_* and §10.3.
+        print("\n=== matched distance: eulerian shift s vs lagrangian offset s ===")
+        print(f"{'s/h':>5} {'eul Fv_x':>12} {'lag Fv_x':>12} {'eul/lag':>8}")
+        for s in (0.0, 0.5, 1.0, 1.5, 2.0, 3.0):
+            e_ = float(_read(snap, s * h, 0, dev).cpu()[:, 0].sum())
+            l_ = float(_lagrangian(snap, s * h, dev).cpu()[:, 0].sum())
+            print(f"{s:5.2f} {e_:12.5e} {l_:12.5e} {e_/l_:8.3f}")
+
+        # True triangulated area vs the union iso-surface area (coarea, with
+        # the SAME cosine delta the kernel uses).  A ratio well above 1 means
+        # the per-link triangulations carry faces buried inside the union --
+        # they sample interior fields at full area weight.
+        sdf_ = snap["sdf_cc"].double()
+        eb = snap["eps_body"]
+        d_ = sdf_ - 0.0
+        m_ = d_.abs() < eb
+        a_eff = float((((1.0 + torch.cos(3.141592653589793 * d_[m_] / eb))
+                        / (2 * eb)).sum()) * h ** 3)
+        a_tri = float(snap["tri_area"].double().sum())
+        print(f"\n  triangulated area   Sum(tri_area) = {a_tri:.4e} m^2")
+        print(f"  union iso-surface   A(phi=0)      = {a_eff:.4e} m^2"
+              f"   ratio {a_tri/a_eff:.2f}x")
+        if a_tri / a_eff > 1.1:
+            print("  -> the triangulation carries buried (inter-link) faces; "
+                  "they cancel pairwise in the TOTAL but not PER LINK.")
+
         # Net x-force is what sets swim speed: thrust (pressure) minus drag
         # (viscous).  Comparing the two readouts AT THEIR LIVE SETTINGS is the
         # apples-to-apples number behind "eulerian swims slower".

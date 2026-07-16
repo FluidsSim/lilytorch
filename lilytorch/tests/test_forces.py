@@ -574,6 +574,78 @@ def test_oracle_eulerian_viscous_reads_offset_surface(submethod):
     assert fv > 1.3 * exact, "over-read vanished — did the band shift change?"
 
 
+def _oracle_lagrangian_offset(sc, u, v, w, p, sample_offset):
+    """Lagrangian readout with a non-zero sample offset (σ read off the wall)."""
+    from lilytorch.src.forces import _viscous_stress_tensor
+    from lilytorch.tests.test_lagrangian import _build_sphere_tris
+
+    tc, tn, ta = _build_sphere_tris(_ORC_C, _ORC_C, _ORC_C, _ORC_R, 160, 90)
+    e = _viscous_stress_tensor((u, v, w), sc["h"])
+    out = torch.zeros((1, 12), dtype=torch.float64)
+    torch.ops.lilytorch_kernels.lagrangian_forces_3d.default(
+        e[0][0].contiguous(), e[1][1].contiguous(), e[2][2].contiguous(),
+        e[0][1].contiguous(), e[0][2].contiguous(), e[1][2].contiguous(),
+        p.contiguous(), torch.tensor([_ORC_NU * _ORC_RHO], dtype=torch.float64),
+        tc, tn, ta, torch.tensor([0, tc.shape[1]], dtype=torch.int64),
+        torch.tensor([[_ORC_C, _ORC_C, _ORC_C]], dtype=torch.float64),
+        float(sc["g"][0]), float(sc["g"][0]), float(sc["g"][0]),
+        1.0 / sc["h"], 1.0 / sc["h"], 1.0 / sc["h"],
+        sc["N"], sc["N"], sc["N"], 0, float(sample_offset), out,
+    )
+    return float(out[0, 0])
+
+
+def _oracle_eulerian_shift(sc, u, v, w, p, eps_solver):
+    """Eulerian readout at an explicit band shift (eps_body held fixed)."""
+    out = torch.zeros((1, 12), dtype=torch.float64)
+    streaming_sdf_forces_post_3d(
+        sc["F_flat"], sc["F_offsets"], sc["body_shapes"], sc["body_meta"],
+        sc["kin"], sc["aabb_lo"], sc["aabb_dim"],
+        sc["g"], sc["g"], sc["g"], sc["h"], sc["N"] ** 3,
+        sc["sdf_cc"], 0,
+        u.ravel().contiguous(), v.ravel().contiguous(),
+        w.ravel().contiguous(), p.ravel().contiguous(),
+        torch.tensor([_ORC_NU * _ORC_RHO], dtype=torch.float64),
+        sc["eps"], float(eps_solver), sc["h"] ** 3, 1, out, 0, 1.5 * sc["h"],
+    )
+    return float(out[0, 0])
+
+
+def test_oracle_readouts_are_not_the_same_device_at_matched_offset():
+    """The two readouts do NOT agree by matching eps_solver to the lagrangian
+    sample offset — they are structurally different integrals:
+
+        eulerian(s)   = ∮_{φ=s} σ·n dS          -- the OFFSET ISO-SURFACE,
+                                                   whose measure inflates with s
+        lagrangian(o) = ∮_{S_body} σ(x+o·n)·n dS -- the TRUE surface (fixed
+                                                   area), σ merely SAMPLED at o
+
+    So they coincide only at zero, and raising both knobs together makes them
+    diverge, not converge.  Pins the two facts that follow (handoff §10.3):
+    they agree at s=0, and the eulerian's growth IS the volume inflation.
+    """
+    sc = _oracle_scene(64, 1.0)
+    h = sc["h"]
+    z = torch.zeros_like(sc["X"])
+    u = _ORC_CSH * sc["Y"] ** 2
+    args = (u, z.clone(), z.clone(), z.clone())
+
+    # At zero offset both reduce to the true surface integral -> they agree.
+    e0 = _oracle_eulerian_shift(sc, *args, 0.0)
+    l0 = _oracle_lagrangian_offset(sc, *args, 0.0)
+    assert e0 == pytest.approx(l0, rel=0.02), \
+        f"readouts should coincide at zero offset: {e0:.6e} vs {l0:.6e}"
+
+    # Matched at s = 2h they do not: the eulerian has inflated by the enclosed
+    # volume ratio while the lagrangian's surface measure has not moved.
+    e2 = _oracle_eulerian_shift(sc, *args, 2.0 * h)
+    l2 = _oracle_lagrangian_offset(sc, *args, 2.0 * h)
+    assert e2 / l2 > 1.25, \
+        f"expected the readouts to DIVERGE at matched offset, got {e2/l2:.3f}"
+    assert e2 / e0 == pytest.approx(((_ORC_R + 2 * h) / _ORC_R) ** 3, rel=0.03), \
+        "eulerian growth should track the enclosed-volume ratio"
+
+
 def test_oracle_deltaH_viscous_is_ndelta_viscous():
     """deltaH only replaces the PRESSURE readout, so it cannot be a candidate
     fix for the viscous offset above: the two viscous outputs are bit-identical.

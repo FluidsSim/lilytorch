@@ -408,9 +408,48 @@ inflated region, so its error ≈ (volume inflation) × (how `∇·σ` varies ac
   HIGH). §3's predicted 2.4-3.4× for the zebrafish thin dimension was right, for the right reason —
   it just is not a law that survives to fat bodies.
 
-## 10.3 Neither live setting is the truth — and they may bracket it
+## 10.3 The two readouts are NOT the same device — matching the offsets does not make them agree
 
-Both readouts are "sample σ at distance ~s off the wall" devices (§9.1), and on this field:
+**§9.1's "both readouts are just sample-σ-at-distance-s devices" framing is WRONG, and this kills the
+natural idea of reconciling them by setting `lagrangian_sample_offset = eps_solver`.** Tested on the
+sphere oracle (R/h=12.6, exact geometry, no joints, `u_x = c·y²`), sweeping BOTH knobs together:
+
+| s/h | eulerian /exact | lagrangian /exact | eul/lag | `((R+s)/R)³` |
+|---|---|---|---|---|
+| 0.0 | 1.004 | 0.999 | **1.005** | 1.000 |
+| 1.0 | 1.260 | 1.079 | 1.168 | **1.257** |
+| 2.0 | 1.559 | 1.158 | 1.346 | **1.556** |
+| 3.0 | 1.900 | 1.237 | 1.535 | **1.898** |
+
+They agree to **0.5% at s=0** and then diverge monotonically. The eulerian tracks `((R+s)/R)³` to three
+decimals — §10.2's volume-inflation law, confirmed exactly on a clean geometry. The reason is
+structural:
+
+- **eulerian(s)** = `∮_{φ=s} σ·n dS` — integrates over the **offset iso-surface**, whose measure
+  inflates with s.
+- **lagrangian(off)** = `∮_{S_body} σ(x + off·n)·n dS` — integrates over the **true body surface**
+  (fixed area, from the triangulation) and merely *samples* σ further out.
+
+So raising the two knobs together makes them disagree **more**, not less. Matched at s=h they are
+1.17× apart on the sphere and **1.86× apart on the fish** (−1.59e-05 vs −8.56e-06).
+
+**Unexplained residual, and it is the fish-specific part:** on the sphere the two agree at s=0
+(1.005×), but on the fish they do **not** — `eul/lag = 1.551` at s=0. Surface-measure inflation does
+not explain it: the effective band area ratio `A_eff(s)/A_tri` is 0.64→0.74 over s=0..2h (i.e. the
+eulerian integrates over *less* area, yet reads *more* force), while the measured ratio runs
+1.55→2.52. Two candidates, both unmeasured:
+1. `eps_body = 2h` exceeds the fish's inscribed radius (2.86h), so at ANY shift the eulerian band
+   smears through the body and cannot localise a surface. The sphere never sees this (`R/h=12.6`).
+2. **The triangulation carries 1.57× the union surface area** — `Σ tri_area = 2.51e-04 m²` vs the
+   union iso-surface's `1.60e-04 m²` (coarea). Buried joint faces between the 16 links, **live even
+   at `convexify=False`** (the working config's current setting), so the handoff's convexify concern
+   is not the whole of it. Deeply-buried faces should contribute ~0 viscous stress (rigid interior →
+   zero strain) and cancel pairwise in pressure between neighbours — but **only in the total, not
+   per link**, and per-link forces are what drive the multibody solve. Worth a look independently.
+
+## 10.3b Neither live setting is the truth
+
+On the frozen fish field:
 
 | off/h | lagrangian `Fv_x` |  | s/h | eulerian `Fv_x` |
 |---|---|---|---|---|
@@ -429,9 +468,15 @@ that construction here.)
 
 ## 10.4 Recommendation (revises §6 / §9.5 item 2)
 
-1. **The zebrafish should use `lagrangian` with `lagrangian_sample_offset ≈ 1.5h` (≈ 3.0e-4 m).**
-   This is what `solver.py:418`'s own comment already advises (~eps) and it is unset (→ 0.0) today.
-   Worth ~+70% on the viscous readout vs the current default, off the contaminated side of the peak.
+1. **The zebrafish should use `lagrangian`, probably with `lagrangian_sample_offset ≈ 1.5h`
+   (≈ 3.0e-4 m)** — but this is a *compromise, not a clean fix*, and §10.3's oracle tempers it.
+   `solver.py:418`'s own comment advises ~eps and it is unset (→ 0.0) today; the fish's offset curve
+   has a real maximum at 1.5h, worth ~+70% on the viscous readout. **But on the sphere oracle — which
+   has NO BDIM band, since it imposes analytic fields — the lagrangian is exact at off=0 and
+   degrades monotonically with offset (+8% at off=h, +16% at 2h).** So offsetting buys band-escape
+   at the price of an error the oracle can measure and the live run cannot separate. The fish's peak
+   at 1.5h is the balance of those two, and its height is not a guarantee of accuracy. **This one
+   deserves the live `verify_energy_balance.py` arbiter before being adopted** (§10.8 item 1).
 2. **Do not try to rescue the eulerian viscous readout on bodies this thin.** Option C (extrapolate
    σ back to φ=0) is still the principled fix for *resolved* bodies, but at `eps/R ≈ 0.7` there is no
    asymptotic regime to extrapolate from — the band is wider than the body. The honest fix for thin
