@@ -122,12 +122,9 @@ CL5. `[deepseek-v4]` **Repo hygiene batch** ✅ (2026-07-16): fix-or-delete
   triaged bare skip at test_pose_source.py:128 (replaced `pass` with
   explanatory docstring); moved `milestones/verify_body_update_refactor.py`
   → `tests/`.
-CL6. `[deepseek-v4, user sign-off per file]` **Tracked artifacts**:
-  `examples/sdfs/pleurodeles/pleurosim_a0.3.zip` (102 MB, redundant with the
-  extracted dir beside it), `examples/pleurodeles/simulation.hdf5` (35 MB),
-  stray screenshots / tracking PNGs (`data_to_save/Screenshot*.png`,
-  `_1guillasim/experiments/robot_data/*_desired_vs_actual.png`); add
-  `*.hdf5` to .gitignore (only `*.h5` is covered). Working-tree removal +
+CL6. `[deepseek-v4, user sign-off per file]` **Tracked artifacts** ✅ (2026-07-16):
+  removed `pleurosim_a0.3.zip` (100 MB), `simulation.hdf5` (35 MB),
+  stale Screenshot; added `*.hdf5` to .gitignore.  Working-tree removal +
   gitignore only — NO history rewrite.
 CL7. `[deepseek-v4]` **Milestone-doc pruning**: archive/mark-stale the
   Warp-era plans (unified_graph_capture_plan{,2}.md,
