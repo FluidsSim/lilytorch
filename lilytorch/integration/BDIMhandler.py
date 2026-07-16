@@ -1650,16 +1650,17 @@ class BDIMhandler:
     # ==================================================================
     def _body_update_bufs(self, gs):
         """Persistent streaming output buffers for the CUDA-graph fast path
-        (stable pointers; the SDF→FAR / body→0 resets are folded into the
-        captured graph inside the streaming bridge)."""
+        (stable pointers).  Allocated pre-filled to FAR/0 so the per-step
+        reset in :meth:`_launch_body_update` only has to touch the dirty
+        union sub-block — outside it the buffers always hold FAR/0."""
         fs = self.fluid_solver
         c = self._bu_bufs
         if c is None or c['gs'] != gs or c['dtype'] != fs.dtype:
             D = self.ndim
             o = dict(device=fs.device, dtype=fs.dtype)
             c = dict(gs=gs, dtype=fs.dtype,
-                     sdf=[torch.empty(gs, **o) for _ in range(D)],
-                     bvel=[torch.empty(gs, **o) for _ in range(D)])
+                     sdf=[torch.full(gs, 1e4, **o) for _ in range(D)],
+                     bvel=[torch.zeros(gs, **o) for _ in range(D)])
             self._bu_bufs = c
         return c
 
@@ -1699,20 +1700,26 @@ class BDIMhandler:
         if graph_mode:
             c = self._body_update_bufs(gs)
             sdf_stag, bvel = c['sdf'], c['bvel']
-            # The retired bridge folded the SDF→FAR / vel→0 resets into
-            # its captured graph; the native bridge does NOT — the caller owns
-            # the prefill on EVERY path.  Skipping it here left stale
-            # previous-step values in the persistent buffers (ghost body
-            # imprints on the CUDA no-blend path — wrong physics).
+            # The caller owns the SDF→FAR / vel→0 prefill (skipping it left
+            # ghost body imprints — wrong physics), but only the dirty union
+            # sub-block can hold stale previous-step values: it contains the
+            # previous body AABBs by construction, and outside it the
+            # persistent buffers still hold the FAR/0 they were allocated
+            # with (and that every prior step's reset re-established).
+            dsl = tuple(
+                slice(int(kstep[f'dirty_{a}0']),
+                      int(kstep[f'dirty_{a}0']) + int(kstep[f'dirty_A{a}']))
+                for a in ('i', 'j', 'k')[:D])
             for t in sdf_stag:
-                t.fill_(_FAR)
+                t[dsl].fill_(_FAR)
             for t in bvel:
-                t.zero_()
+                t[dsl].zero_()
         else:
             sdf_stag = [torch.full(gs, _FAR, **_opts) for _ in range(D)]
             bvel     = [torch.zeros(gs, **_opts) for _ in range(D)]
-        # The streaming min needs the CC SDF pre-filled to +FAR.
-        comp.sdf_val.fill_(_FAR)
+        # CC SDF needs no refill here: the marshalling step already reset
+        # its dirty union sub-block to +FAR, and it is FAR-initialised at
+        # allocation — the former full-grid fill_ was redundant.
 
         if D == 2:
             body_update_2d(
