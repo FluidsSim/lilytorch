@@ -31,7 +31,8 @@
 
 namespace lilytorch_kernels {
 
-// ---- 2-D samplers (duplicated from streaming_sdf_direct.cu) ---------------
+// ---- 2-D samplers (formerly duplicated from streaming_sdf_direct.cu,
+//     which was deleted in CL2) ---------------------------------------------
 template <typename scalar_t>
 __device__ __forceinline__ scalar_t bilinear_sample_uniform_2d(
     const scalar_t* __restrict__ F, int Mx, int My,

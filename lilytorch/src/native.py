@@ -7,13 +7,11 @@ from torch import Tensor
 from lilytorch.src import _C  # noqa: F401
 
 __all__ = [
-    "streaming_sdf_stag_3d_direct",
     "streaming_sdf_stag_2d_resolve",
     "streaming_sdf_stag_3d_resolve",
     "bdim_coeff_3d",
     "streaming_sdf_forces_post_3d",
     "apply_bcs_3d",
-    "streaming_sdf_stag_2d_direct",
     "bdim_coeff_2d",
     "bdim_forcing_2d",
     "bdim_forcing_3d",
@@ -166,60 +164,6 @@ def apply_bcs_3d(
         shapes, neu_desc, dir_desc, dir_val, ref_desc, ref_val,
         int(max_dim0), int(max_dim1),
     )
-
-def streaming_sdf_stag_2d_direct(
-        F_flat: Tensor, F_offsets: Tensor,
-        body_shapes: Tensor, body_meta: Tensor, kin: Tensor,
-        aabb_lo: Tensor, aabb_dim: Tensor,
-        gx: Tensor, gy: Tensor,
-        h_grid: float, max_vol_per_body: int,
-        sdf_cc: Tensor, sdf_u: Tensor, sdf_v: Tensor,
-        body_u: Tensor, body_v: Tensor,
-        interp_method: int,
-        dirty_i0: int, dirty_j0: int,
-        dirty_Ai: int, dirty_Aj: int) -> None:
-    """2-D direct-write SDF kernel (Regime A: pairwise-disjoint bodies).
-
-    No key packing, no atomics, no decode pass — safe when every pair of body
-    AABBs is disjoint.  Produces bit-identical results with the CPU twin for
-    fp32 (the multi-path packed-key quantisation is not applied)."""
-    return torch.ops.lilytorch_kernels.streaming_sdf_stag_2d_direct.default(
-        F_flat, F_offsets, body_shapes, body_meta, kin,
-        aabb_lo, aabb_dim,
-        gx, gy, float(h_grid), int(max_vol_per_body),
-        sdf_cc, sdf_u, sdf_v, body_u, body_v,
-        int(interp_method),
-        int(dirty_i0), int(dirty_j0),
-        int(dirty_Ai), int(dirty_Aj),
-    )
-
-
-def streaming_sdf_stag_3d_direct(
-        F_flat: Tensor, F_offsets: Tensor,
-        body_shapes: Tensor, body_meta: Tensor, kin: Tensor,
-        aabb_lo: Tensor, aabb_dim: Tensor,
-        gx: Tensor, gy: Tensor, gz: Tensor,
-        h_grid: float, max_vol_per_body: int,
-        sdf_cc: Tensor, sdf_u: Tensor, sdf_v: Tensor, sdf_w: Tensor,
-        body_u: Tensor, body_v: Tensor, body_w: Tensor,
-        interp_method: int,
-        dirty_i0: int, dirty_j0: int, dirty_k0: int,
-        dirty_Ai: int, dirty_Aj: int, dirty_Ak: int) -> None:
-    """3-D direct-write SDF kernel (Regime A: pairwise-disjoint bodies).
-
-    No key packing, no atomics, no decode pass — safe when every pair of body
-    AABBs is disjoint.  Produces bit-identical results with the CPU twin for
-    fp32 (the multi-path packed-key quantisation is not applied)."""
-    return torch.ops.lilytorch_kernels.streaming_sdf_stag_3d_direct.default(
-        F_flat, F_offsets, body_shapes, body_meta, kin,
-        aabb_lo, aabb_dim,
-        gx, gy, gz, float(h_grid), int(max_vol_per_body),
-        sdf_cc, sdf_u, sdf_v, sdf_w, body_u, body_v, body_w,
-        int(interp_method),
-        int(dirty_i0), int(dirty_j0), int(dirty_k0),
-        int(dirty_Ai), int(dirty_Aj), int(dirty_Ak),
-    )
-
 
 # =====================================================================
 #  Regime-B streaming SDF: per-body private buffers + resolve

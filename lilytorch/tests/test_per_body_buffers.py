@@ -1,32 +1,25 @@
 """Phase-2 per-body-buffer parity gates (cuda_native_port plan items 2.1–2.4).
 
-The streaming SDF runs on TWO regimes (the union-AABB packed-key ``_multi``
-path was DELETED in item 2.4):
+The streaming SDF runs on a SINGLE regime (the union-AABB packed-key ``_multi``
+and the ``_direct`` paths were DELETED in items 2.4 and CL2 respectively):
 
-  * **Regime A** — pairwise-disjoint bodies (incl. B=1):
-    ``streaming_sdf_stag_{2,3}d_direct`` writes the winning SDF/velocity
-    straight into the global tensors (single writer per cell, no keys).
-  * **Regime B** — overlapping bodies (multi-link robots):
-    ``streaming_sdf_stag_{2,3}d_resolve`` — per-body PRIVATE buffers (raw
+  * **Regime B** — ``streaming_sdf_stag_{2,3}d_resolve`` — per-body PRIVATE buffers (raw
     fp64, no packed key; single writer per slot) + a one-thread-per-cell
     resolve that picks the PER-STAGGER minimum over the covering bodies
     (mirrors the retired ``_multi``'s independent atomicMin per stagger).
     ``blend_eps > 0`` adds the softmin velocity blend Σwᵢvᵢ/Σwᵢ,
     wᵢ = sigmoid(-sᵢ/eps), accumulated in registers (deterministic).
 
-Durable gate structure (post-2.4 oracle strategy — the ``_multi`` oracle is
-gone; correctness rests on):
+Durable gate structure (post-2.4 + CL2 oracle strategy — the ``_multi`` and
+``_direct`` oracles are gone; correctness rests on):
 
   1. **GPU == CPU twin** on the production facade dispatch, ALL layouts —
      the race detector: a racing GPU path produces nondeterministic output
      that cannot match the serial CPU twin.
-  2. **direct == resolve on disjoint scenes** (both GPU) — the cross-kernel
-     sampler-drift detector: the two kernels implement the same math with
-     separate device code; fp32 must be byte-identical.
-  3. Blend invariants: blend must not touch the SDF; on single-cover cells
+  2. Blend invariants: blend must not touch the SDF; on single-cover cells
      the blend is a velocity no-op (Σwv/Σw = v); on overlap scenes it must
      actually blend; blended GPU == blended CPU.
-  4. The coupled-sim gates (2-D + 3-D salamander, see the plan 2.4 log)
+  3. The coupled-sim gates (2-D + 3-D salamander, see the plan 2.4 log)
      validated resolve == _multi BYTE-IDENTICAL (fp32 SDF) on real
      multi-link geometry before the deletion.
 
@@ -211,26 +204,6 @@ def run_facade(sc, dtype, dev=DEV, blend_eps=0.0):
     return out
 
 
-def run_direct(sc, dtype, dev=DEV):
-    """Op-level Regime-A direct-write path (disjoint layouts only)."""
-    out = _out_buffers(sc, dtype, dev=dev)
-    lo, dim = _dirty(sc)
-    if sc["dim"] == 2:
-        native.streaming_sdf_stag_2d_direct(
-            sc["F_flat"], sc["F_offsets"], sc["body_shapes"], sc["body_meta"], sc["kin"],
-            sc["aabb_lo"], sc["aabb_dim"], sc["gx"], sc["gy"], sc["h"], sc["max_vol"],
-            out["sdf_cc"], out["sdf_u"], out["sdf_v"], out["body_u"], out["body_v"],
-            0, lo[0], lo[1], dim[0], dim[1])
-    else:
-        native.streaming_sdf_stag_3d_direct(
-            sc["F_flat"], sc["F_offsets"], sc["body_shapes"], sc["body_meta"], sc["kin"],
-            sc["aabb_lo"], sc["aabb_dim"], sc["gx"], sc["gy"], sc["gz"], sc["h"], sc["max_vol"],
-            out["sdf_cc"], out["sdf_u"], out["sdf_v"], out["sdf_w"],
-            out["body_u"], out["body_v"], out["body_w"],
-            0, lo[0], lo[1], lo[2], dim[0], dim[1], dim[2])
-    return out
-
-
 def run_resolve(sc, dtype, dev=DEV, blend_eps=0.0):
     """Op-level Regime-B resolve path, forced on ANY layout (incl. disjoint —
     the resolve is regime-agnostic; only its performance motivates the direct
@@ -280,7 +253,7 @@ def test_scene_liveness(dim, layout):
 @pytest.mark.parametrize("dim", [2, 3])
 @pytest.mark.parametrize("layout", ALL_LAYOUTS)
 def test_scene_regime(dim, layout):
-    """separated/single must be disjoint (Regime A); multilink must overlap (B)."""
+    """separated/single must be disjoint; multilink must overlap."""
     cov = _coverage(make_scene(dim, layout, torch.float32))
     n_overlap = int((cov >= 2).sum())
     if layout in DISJOINT:
@@ -289,31 +262,7 @@ def test_scene_regime(dim, layout):
         assert n_overlap > 0, f"{dim}D {layout}: multilink must have overlap cells"
 
 
-# ── layer 2: cross-kernel gate — direct == resolve on disjoint scenes ────────
-
-@SKIP_NO_CUDA
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
-@pytest.mark.parametrize("dim", [2, 3])
-@pytest.mark.parametrize("layout", DISJOINT)
-def test_direct_eq_resolve_disjoint(dim, layout, dtype):
-    """The two kernels implement the same sampler math in separate device
-    code; on disjoint scenes their output must agree — fp32 byte-identical
-    (sampler-drift detector), fp64 ≤ ATOL_F64."""
-    sc = make_scene(dim, layout, dtype)
-    a = run_direct(sc, dtype)
-    b = run_resolve(sc, dtype)
-    for k, v in a.items():
-        if dtype == torch.float32:
-            assert torch.equal(v, b[k]), (
-                f"[direct_eq_resolve/{dim}D/{layout}] {k} not byte-identical "
-                f"(maxdiff={(v - b[k]).abs().max().item():.3e}); the two "
-                f"kernels' samplers have drifted apart")
-        else:
-            md = (v - b[k]).abs().max().item()
-            assert md <= ATOL_F64, f"[direct_eq_resolve/{dim}D/{layout}] {k} maxdiff {md:.3e}"
-
-
-# ── layer 3: durable GPU-vs-CPU twin gates (race detectors) ──────────────────
+# ── layer 2: durable GPU-vs-CPU twin gates (race detectors) ──────────────────
 
 def _assert_gpu_eq_cpu(out_gpu, out_cpu, dtype, label):
     for k in out_gpu:
@@ -325,32 +274,16 @@ def _assert_gpu_eq_cpu(out_gpu, out_cpu, dtype, label):
         assert md <= atol, f"[{label}] {k} maxdiff {md:.3e} > {atol:.1e}"
 
 
-@SKIP_NO_CUDA
-@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
-@pytest.mark.parametrize("dim", [2, 3])
-@pytest.mark.parametrize("layout", DISJOINT)
-def test_direct_gpu_eq_cpu(dim, layout, dtype):
-    """Regime-A direct kernel: GPU output must match the CPU twin."""
-    sc = make_scene(dim, layout, dtype)
-    out_gpu = run_direct(sc, dtype)
-    out_cpu = run_direct(_to_cpu_scene(sc), dtype, dev="cpu")
-    _assert_gpu_eq_cpu(out_gpu, out_cpu, dtype, f"direct_gpu_eq_cpu/{dim}D/{layout}/{dtype}")
-
-
-@SKIP_NO_CUDA
+# ── layer 3: softmin velocity-blend gates ────────────────────────────────────
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 @pytest.mark.parametrize("dim", [2, 3])
 @pytest.mark.parametrize("layout", ALL_LAYOUTS)
 def test_regimeB_gpu_eq_cpu(dim, layout, dtype):
-    """Race detector: the production facade dispatch (Regime A direct for
-    disjoint, Regime B resolve for overlap) must give GPU == CPU.
+    """Race detector: the production facade dispatch must give GPU == CPU.
 
     A passing GPU==CPU twin is what proves there is no data race: a racing GPU
-    path (e.g. the direct kernel run on overlapping bodies) produces a
-    nondeterministic result that will NOT match the serial CPU twin.  Covers all
-    layouts, including `multilink` (overlap → Regime-B resolve).  Do NOT special-
-    case multilink to the direct kernel — that is the race that this gate exists
-    to catch."""
+    path produces a nondeterministic result that will NOT match the serial CPU
+    twin.  Covers all layouts, including ``multilink`` (overlap)."""
     sc = make_scene(dim, layout, dtype)
     out_gpu = run_facade(sc, dtype, dev=DEV)
     out_cpu = run_facade(_to_cpu_scene(sc), dtype, dev="cpu")

@@ -1,12 +1,13 @@
 // =====================================================================
-//  3-D streaming-SDF support kernels (post-2.4: union path removed)
+//  3-D streaming-SDF support kernels (post-2.4: union path removed;
+//  post-CL2: _direct path removed)
 //
 //  The union-AABB packed-key pipeline (init_keys / min_rho_3d_multi /
 //  decode_keys, packed_key.cuh) was deleted in cuda_native_port item 2.4;
-//  the production streaming SDF is streaming_sdf_direct.cu (disjoint
-//  bodies) + streaming_sdf_regime_b.cu (overlapping bodies).  This file
-//  keeps the shared samplers plus: forces-post readout, bdim_coeff, the
-//  fused BC kernel, and scattered-point interp.
+//  the Regime-A _direct path was deleted in CL2.  The sole production
+//  streaming path is streaming_sdf_regime_b.cu (per-body private buffers
+//  + resolve).  This file keeps the shared samplers plus: forces-post
+//  readout, bdim_coeff, the fused BC kernel, and scattered-point interp.
 // =====================================================================
 
 #include <ATen/Operators.h>

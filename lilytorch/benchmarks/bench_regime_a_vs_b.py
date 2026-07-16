@@ -1,18 +1,11 @@
 #!/usr/bin/env python3
-"""cuda_native_port item 2.4 bench — Regime A (direct) vs Regime B (resolve).
+"""cuda_native_port item 2.4 bench — streaming SDF resolve timing.
 
-The union-AABB ``_multi`` path was deleted in item 2.4, so it can no longer be
-an A/B arm; the authoritative ``_multi`` comparison is the in-sim 0.98x recorded
-in the 2.4 gate log.  What this bench prices instead is the **Regime-A
-retirement** (``facade.USE_REGIME_B_ONLY``): resolve is now the sole streaming
-path, so on DISJOINT scenes -- the only scenes where the direct kernel is legal
--- we need to know what taking resolve instead costs.
-
-Result (see the "Phase 2 CLOSED" log): direct is ~12 us/call cheaper where it is
-legal, but *selecting* it required an `_aabbs_are_disjoint` `.item()` sync
-costing ~75 us/step of pipeline drain -- the guard is ~6x more expensive than
-the thing it guards, and for articulated bodies (salamander, eel) adjacent links
-always overlap so the fast path was never taken anyway.
+The union-AABB ``_multi`` path was deleted in item 2.4; the Regime-A
+``_direct`` path was deleted in CL2 (the guard sync cost ~75 us/step
+dominated any kernel savings, and for articulated bodies the fast path was
+never legal anyway).  Resolve is now the sole streaming path.  This bench
+measures resolve-only wall-clock time per layout/dtype/dimension.
 
 Usage::
 
@@ -33,7 +26,7 @@ sys.path.insert(0, REPO_ROOT)
 # bench and the correctness gate cannot drift apart.
 sys.path.insert(0, os.path.join(REPO_ROOT, "lilytorch", "tests"))
 
-from test_per_body_buffers import make_scene, run_direct, run_resolve  # noqa: E402
+from test_per_body_buffers import make_scene, run_resolve  # noqa: E402
 
 
 def timeit(fn, reps=300):
@@ -56,22 +49,15 @@ def main():
     if not torch.cuda.is_available():
         print("no CUDA — nothing to bench")
         return
-    print(f"{'scene':22s} {'dtype':6s} {'direct':>14s} {'resolve':>10s} {'ratio':>8s}")
-    print("-" * 66)
+    print(f"{'scene':22s} {'dtype':6s} {'resolve':>10s}")
+    print("-" * 44)
     for dtype, dname in ((torch.float32, "fp32"), (torch.float64, "fp64")):
         for dim in (2, 3):
             for layout in ("single", "separated", "multilink"):
                 sc = make_scene(dim, layout, dtype)
                 tr = timeit(lambda sc=sc, d=dtype: run_resolve(sc, d))
                 name = f"{dim}d_{layout}"
-                if layout == "multilink":
-                    # Bodies overlap -> the direct kernel would race. Not a legal arm.
-                    print(f"{name:22s} {dname:6s} {'n/a (overlap)':>14s} "
-                          f"{tr * 1e3:9.1f}us {'--':>8s}")
-                    continue
-                td = timeit(lambda sc=sc, d=dtype: run_direct(sc, d))
-                print(f"{name:22s} {dname:6s} {td * 1e3:13.1f}us "
-                      f"{tr * 1e3:9.1f}us {td / tr:7.2f}x")
+                print(f"{name:22s} {dname:6s} {tr * 1e3:9.1f}us")
 
 
 if __name__ == "__main__":

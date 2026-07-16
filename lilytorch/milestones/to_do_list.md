@@ -99,7 +99,7 @@ CL1. `[deepseek-v4]` **Strip `advect_flux_add`** ✅ (2026-07-16): op def
   advection_flux_cpu.cpp (+ its "superseded" doc header), wrappers
   native.py:1200/1219. Rewrite tests/test_advection.py oracles against
   `advect_flux_accumulate` (keep per-scheme coverage; fix stale docstring).
-CL2. `[deepseek-v4]` **Strip streaming `_direct` ops**: defs ops.cpp:86/99;
+CL2. `[deepseek-v4]` **Strip streaming `_direct` ops** ✅ (2026-07-16): defs ops.cpp:86/99;
   delete cuda/streaming_sdf_direct.cu (whole file); excise the `_direct`
   impls from streaming_sdf_cpu.cpp:1044 and streaming_sdf_cpu_2d.cpp:1033
   (files STAY — they host live forces_post); wrappers native.py:171/198;

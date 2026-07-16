@@ -780,122 +780,6 @@ void streaming_sdf_forces_post_2d_cpu(
 //  in streaming_sdf_cpu.cpp; see that file for documentation.
 // =====================================================================
 
-// ---- direct-write (Regime A: disjoint bodies, no keys, no atomics) --------
-void streaming_sdf_stag_2d_direct_cpu(
-    const at::Tensor& F_flat, const at::Tensor& F_offsets,
-    const at::Tensor& body_shapes,
-    const at::Tensor& body_meta,
-    const at::Tensor& kin,
-    const at::Tensor& aabb_lo,
-    const at::Tensor& aabb_dim,
-    const at::Tensor& gx, const at::Tensor& gy,
-    const double h_grid,
-    const int64_t /*max_vol_per_body*/,
-    at::Tensor sdf_cc, at::Tensor sdf_u, at::Tensor sdf_v,
-    at::Tensor body_u, at::Tensor body_v,
-    const int64_t interp_method,
-    const int64_t, const int64_t, const int64_t, const int64_t)
-{
-    const int B = (int)aabb_dim.size(0);
-    if (B <= 0) return;
-    const int Ngy = (int)gy.numel();
-
-    AT_DISPATCH_FLOATING_TYPES(F_flat.scalar_type(), "streaming_sdf_stag_2d_direct_cpu", [&] {
-        const scalar_t* F_ptr   = F_flat.data_ptr<scalar_t>();
-        const int64_t*  F_off   = F_offsets.data_ptr<int64_t>();
-        const int64_t*  shapes  = body_shapes.data_ptr<int64_t>();
-        const scalar_t* meta    = body_meta.data_ptr<scalar_t>();
-        const scalar_t* kin_ptr = kin.data_ptr<scalar_t>();
-        const int64_t*  lo      = aabb_lo.data_ptr<int64_t>();
-        const int64_t*  dim_    = aabb_dim.data_ptr<int64_t>();
-        const scalar_t* gx_ptr  = gx.data_ptr<scalar_t>();
-        const scalar_t* gy_ptr  = gy.data_ptr<scalar_t>();
-
-        scalar_t* sdf_cc_p = sdf_cc.data_ptr<scalar_t>();
-        scalar_t* sdf_u_p  = sdf_u.data_ptr<scalar_t>();
-        scalar_t* sdf_v_p  = sdf_v.data_ptr<scalar_t>();
-        scalar_t* bU_p     = body_u.data_ptr<scalar_t>();
-        scalar_t* bV_p     = body_v.data_ptr<scalar_t>();
-
-        const scalar_t neg_half_h = -(scalar_t)(0.5 * h_grid);
-        const int interp = (int)interp_method;
-
-        for (int b = 0; b < B; ++b) {
-            const int Ai = (int)dim_[b*2 + 0];
-            const int Aj = (int)dim_[b*2 + 1];
-            const int vol = Ai * Aj;
-            if (vol <= 0) continue;
-
-            const int i0_b = (int)lo[b*2 + 0];
-            const int j0_b = (int)lo[b*2 + 1];
-
-            const scalar_t* F_b  = F_ptr + F_off[b];
-            const int Mx = (int)shapes[b*2 + 0];
-            const int My = (int)shapes[b*2 + 1];
-
-            const scalar_t* M = meta + b*7;
-            const scalar_t bx0 = M[0], by0 = M[1];
-            const scalar_t idx_ = M[4], idy_ = M[5];
-
-            const scalar_t* K = kin_ptr + b*11;
-            const scalar_t r00 = K[0], r01 = K[1];
-            const scalar_t r10 = K[2], r11 = K[3];
-            const scalar_t bp_x = K[4], bp_y = K[5];
-            const scalar_t cm_x = K[6], cm_y = K[7];
-            const scalar_t lv_x = K[8], lv_y = K[9];
-            const scalar_t om   = K[10];
-
-            const scalar_t du_x = neg_half_h * r00, du_y = neg_half_h * r10;
-            const scalar_t dv_x = neg_half_h * r01, dv_y = neg_half_h * r11;
-
-            at::parallel_for(0, vol, 1024, [&](int64_t _begin, int64_t _end) {
-            for (int local = (int)_begin; local < (int)_end; ++local) {
-                const int di = local / Aj;
-                const int dj = local - di * Aj;
-                const int i  = i0_b + di;
-                const int j  = j0_b + dj;
-                const std::int64_t g_idx = (std::int64_t)i * Ngy + j;
-
-                const scalar_t xc = gx_ptr[i];
-                const scalar_t yc = gy_ptr[j];
-                const scalar_t dxw = xc - bp_x, dyw = yc - bp_y;
-                const scalar_t bxq = r00 * dxw + r01 * dyw;
-                const scalar_t byq = r10 * dxw + r11 * dyw;
-
-                auto sample = [&](scalar_t xqs, scalar_t yqs) -> scalar_t {
-                    if (interp == 1) {
-                        return biquadratic_sample_uniform_2d<scalar_t>(
-                            F_b, Mx, My, bx0, by0, idx_, idy_, xqs, yqs);
-                    }
-                    return bilinear_sample_uniform_2d<scalar_t>(
-                        F_b, Mx, My, bx0, by0, idx_, idy_, xqs, yqs);
-                };
-
-                // Direct-write: each cell is touched by at most one body
-                // (AABBs are pairwise disjoint).  The < comparison against
-                // the pre-filled FAR sentinel is still used so output matches
-                // the multi-path bit-for-bit in fp32.
-                const scalar_t s_cc = sample(bxq, byq);
-                if (s_cc < sdf_cc_p[g_idx]) sdf_cc_p[g_idx] = s_cc;
-                {
-                    const scalar_t s = sample(bxq + du_x, byq + du_y);
-                    if (s < sdf_u_p[g_idx]) {
-                        sdf_u_p[g_idx] = s;
-                        bU_p[g_idx] = lv_x - om * (yc - cm_y);
-                    }
-                }
-                {
-                    const scalar_t s = sample(bxq + dv_x, byq + dv_y);
-                    if (s < sdf_v_p[g_idx]) {
-                        sdf_v_p[g_idx] = s;
-                        bV_p[g_idx] = lv_y + om * (xc - cm_x);
-                    }
-                }
-            }});
-        }
-    });
-}
-
 template <typename scalar_t>
 static inline void bdim_one_axis_2d_cpu(
     const scalar_t* phi_prime,
@@ -1030,7 +914,6 @@ void bdim_coeff_2d_cpu(
 }
 
 TORCH_LIBRARY_IMPL(lilytorch_kernels, CPU, m) {
-    m.impl("streaming_sdf_stag_2d_direct",        &streaming_sdf_stag_2d_direct_cpu);
     m.impl("bdim_coeff_2d",                       &bdim_coeff_2d_cpu);
     m.impl("streaming_sdf_forces_post_2d",          &streaming_sdf_forces_post_2d_cpu);
     m.impl("apply_bcs_2d",                          &apply_bcs_2d_cpu);

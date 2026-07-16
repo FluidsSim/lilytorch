@@ -1,8 +1,9 @@
 // =====================================================================
 //  streaming_sdf_2d.cu
 //
-//  2-D streaming-SDF support kernels (post-2.4: union path removed —
-//  production streaming is streaming_sdf_direct.cu + streaming_sdf_regime_b.cu).
+//  2-D streaming-SDF support kernels (post-2.4: union path removed;
+//  post-CL2: _direct path removed).  Sole production path is
+//  streaming_sdf_regime_b.cu (per-body private buffers + resolve).
 //  Keeps: forces-post readout, bdim_coeff, fused BCs, scattered interp.
 //  Mirrors ``streaming_sdf.cu`` with the z-axis stripped; see the matching
 //  helpers in ``streaming_sdf_cpu_2d.cpp`` for the algorithmic rationale.
