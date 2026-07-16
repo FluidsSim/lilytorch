@@ -63,9 +63,19 @@ def body_aware_alpha_init(alpha_init, sdf_cc, eps, h, *,
     through the body, and can be shed as spurious blobs by a fast-moving body.
 
     Carve
-        ``alpha *= mu0`` with ``mu0`` the BDIM smoothed Heaviside of the
-        cell-centred union SDF — the same band kernel as the projection, so no
-        sharp 0/1 cut is introduced at the wetted surface.
+        ``alpha *= m`` with ``m`` a smoothed Heaviside of the cell-centred
+        union SDF whose transition band lies strictly INSIDE the body
+        (``m = 1`` for ``sdf >= 0``, smooth over ``(-eps, 0)``, ``m = 0`` for
+        ``sdf <= -eps``).  The wetted outer BDIM band therefore stays fully
+        wet: carving it (the historical ``m = mu0``, band centred ON the
+        surface) stored an alpha deficit in cells whose velocity is only
+        partially body-forced, and any perturbation advected that deficit
+        into open water where it reads as buoyant air — erupting as spurious
+        rising plumes anchored to the wetted hull (the amphibious-ramp "pipe
+        jets"; sharp corners leak first).  Inside the shifted band the
+        velocity is strongly body-forced (``mu0 < 0.5``), so the remaining
+        deficit rides with the body.  The cut is still smooth (no 0/1 jump)
+        and the dryness contract is unchanged: ``alpha[sdf <= -eps] == 0``.
 
     Compensation
         Carving deletes the submerged body volume from the water. With
@@ -93,7 +103,10 @@ def body_aware_alpha_init(alpha_init, sdf_cc, eps, h, *,
     """
     eps = float(eps)
     h = float(h)
-    d = (sdf_cc / eps).clamp(-1.0, 1.0)
+    # Transition band shifted INSIDE the body: half-width eps/2 centred at
+    # sdf = -eps/2, i.e. m(sdf>=0)=1 (wetted band fully wet, nothing for the
+    # flow to advect out) and m(sdf<=-eps)=0 (interior dry) — see docstring.
+    d = (2.0 * sdf_cc / eps + 1.0).clamp(-1.0, 1.0)
     mu0 = 0.5 * (1.0 + d + torch.sin(torch.pi * d) / torch.pi)
 
     def wrapped(*coords):
@@ -424,14 +437,21 @@ class TwoPhaseSolver(FluidSolver):
         dt  = float(timestep)
         rs  = self._rho_solid
         atb = self._air_transparent_body
+        # Fluid-part water fraction: with the alpha_exclude_body carve the raw
+        # alpha under-counts water in the wetted BDIM band (body volume is
+        # missing from it) -> light shell -> spurious buoyant plumes.  Both the
+        # density blend and the transparency mask must see the fluid-part
+        # fraction.  Identity when the carve is off (see _alpha_fluid_cc).
+        a_f = self._alpha_fluid_cc()
+        recip_cc = 1.0 / (a_f * tp.rho_water + (1.0 - a_f) * tp.rho_air)
         out = []
         for d, ax in enumerate(self._bdim_axis_names):       # 'u','v'[,'w']
-            recip_face = tp.recip_density_face(d)            # (1/ρ) water/air blend
+            recip_face = self._face_mean(recip_cc, d)        # (1/ρ) water/air blend
             mu0 = getattr(self, f'mu0_all_{ax}')             # (1−δ^B), fluid fraction
             if atb:
                 # Air-transparent body: mu0_eff = 1 - alpha_face*(1 - mu0)
                 # = alpha_face*mu0 + (1-alpha_face). Body invisible in air.
-                a_face = self._alpha_face(d)
+                a_face = self._face_mean(a_f, d)
                 mu0_t = a_face * mu0 + (1.0 - a_face)
                 if self._alpha_exclude_body:
                     # Carved init: the body interior is alpha=0 (dry), so the
@@ -461,6 +481,33 @@ class TwoPhaseSolver(FluidSolver):
         see :meth:`_face_mean`)."""
         return self._face_mean(self.two_phase.alpha, d)
 
+    def _alpha_fluid_cc(self):
+        """Water fraction of the cell's FLUID part (cell-centred).
+
+        ``alpha`` is the water fraction of the TOTAL cell volume
+        (water + air + body = 1).  With the ``alpha_exclude_body`` carve the
+        BDIM band of a wetted hull holds ``alpha ≈ mu0 < 1`` even though its
+        fluid part is pure water; feeding that raw alpha into the density
+        blend and the air-transparency masks makes the band read as partial
+        AIR — a buoyant ~rho/2 shell pinned along the entire wetted surface,
+        held only by quiescence, that erupts as spurious rising plumes once
+        perturbed (the amphibious-ramp "pipe jets").  Normalising by the BDIM
+        fluid fraction removes the body volume from the phase bookkeeping:
+
+            a_f = clamp(alpha / mu0, 0, 1)
+
+        is 1 in the wetted band, 0 in air, equals alpha away from bodies
+        (mu0 = 1), and the clamp bounds the mu0→0 interior (where the sdf
+        gates / coefficient floor rule anyway).  Identity when the carve is
+        off: alpha is then 0/1 straight through the body, so every existing
+        uncarved case is bit-unchanged.
+        """
+        a = self.two_phase.alpha
+        if not self._alpha_exclude_body:
+            return a
+        mu0 = self._mu0_cc()
+        return (a / mu0.clamp(min=1e-3)).clamp(0.0, 1.0)
+
     # ------------------------------------------------------------------
     #  Override: BDIM velocity imposition — air-transparent body
     # ------------------------------------------------------------------
@@ -477,6 +524,7 @@ class TwoPhaseSolver(FluidSolver):
         if not self._air_transparent_body:
             return super()._apply_bdim_all_axes(vels)
         comp = self.composite_body
+        a_f = self._alpha_fluid_cc()   # fluid-part fraction; see _alpha_fluid_cc
         out = []
         for i, ax in enumerate(self._bdim_axis_names):
             mu0 = getattr(self, f'mu0_all_{ax}')       # read-only; arithmetic
@@ -486,8 +534,8 @@ class TwoPhaseSolver(FluidSolver):
                 getattr(self, f'normal_{n}_{ax}')
                 for n in self._bdim_normal_names
             )
-            # Mask mu0, mu1 by the water fraction on this face grid
-            a_face = self._alpha_face(i)
+            # Mask mu0, mu1 by the fluid-part water fraction on this face grid
+            a_face = self._face_mean(a_f, i)
             # mu0_eff = alpha*mu0 + (1-alpha) → 1 in air, mu0 in water
             mu0_eff = a_face * mu0 + (1.0 - a_face)
             # mu1_eff = alpha*mu1 → 0 in air (no normal-derivative correction)
@@ -597,8 +645,9 @@ class TwoPhaseSolver(FluidSolver):
         if primes is None or not self._air_transparent_body:
             return
         comp = self.composite_body
+        a_f = self._alpha_fluid_cc()   # fluid-part fraction; see _alpha_fluid_cc
         for d, (vel, prime) in enumerate(zip(vels, primes)):
-            w = 1.0 - self._alpha_face(d)          # lerp weight toward u' (air)
+            w = 1.0 - self._face_mean(a_f, d)      # lerp weight toward u' (air)
             if self._alpha_exclude_body:
                 w = w * (self._face_mean(comp.sdf_val, d) >= 0).to(w.dtype)
             vel.lerp_(prime, w)
@@ -618,7 +667,11 @@ class TwoPhaseSolver(FluidSolver):
         tp = self.two_phase
         dt = float(self.dt)
         rs = self._rho_solid
-        q = tp.recip_density_cc()                  # one full-grid 1/rho field
+        # Fluid-part water fraction (identity when the carve is off) — the
+        # density blend and the transparency mask must not count the body
+        # volume as air; see _alpha_fluid_cc.
+        a_f = self._alpha_fluid_cc()
+        q = 1.0 / (a_f * tp.rho_water + (1.0 - a_f) * tp.rho_air)
         comp = self.composite_body
         out = []
         for d, c_kernel in enumerate(coeffs):
@@ -635,7 +688,7 @@ class TwoPhaseSolver(FluidSolver):
             else:
                 mu0 = self._kernel_face_mean(self._mu0_cc(), d)
             if self._air_transparent_body:
-                a = self._kernel_face_mean(tp.alpha, d)
+                a = self._kernel_face_mean(a_f, d)
                 mu0_t = a * mu0 + (1.0 - a)
                 if self._alpha_exclude_body:
                     sdf_face = self._kernel_face_mean(comp.sdf_val, d)

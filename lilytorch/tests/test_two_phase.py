@@ -132,9 +132,12 @@ def test_body_aware_carve_2d():
     assert float(a[sdf < -eps].max()) == 0.0
     far_water = (sdf > 0.1) & (Y < level - h)
     assert torch.allclose(a[far_water], torch.ones_like(a[far_water]))
-    # carved volume deficit ~ submerged (half-disc) volume
+    # carved volume deficit ~ submerged (half-disc) volume of the body ERODED
+    # by eps/2: the carve band lies inside the body (m=1 at sdf>=0, m=0 at
+    # sdf<=-eps), so the wetted BDIM band stays fully wet (carving it stored
+    # an advectable alpha deficit that erupted as spurious buoyant plumes).
+    half_disc = 0.5 * math.pi * (0.15 - 0.5 * 2.0 * h) ** 2
     deficit = float(init(X, Y)[inner].sum() - a[inner].sum()) * h * h
-    half_disc = 0.5 * math.pi * 0.15 ** 2
     assert abs(deficit - half_disc) < 0.15 * half_disc
 
 
@@ -157,11 +160,11 @@ def test_body_aware_volume_compensation_2d():
     # the carved interior)
     assert float(a[sdf < -eps].max()) == 0.0
     # the far-field surface rose by ~ displaced volume / free-surface width
-    # (half-disc 0.0353 over width 0.7 -> ~0.05): the water column away from
-    # the body is now taller than the flat init
+    # (eps/2-eroded half-disc ~0.028 over width 0.7 -> ~0.02, measured 0.023):
+    # the water column away from the body is now taller than the flat init
     col = a[5, 1:-1]                               # far column (x ~ 0.08)
     height = float(col.sum()) * h
-    assert height > level + 0.03
+    assert height > level + 0.015
     # bounded
     assert a.min() >= 0.0 and a.max() <= 1.0
 
