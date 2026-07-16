@@ -12,15 +12,10 @@ Memory vars: `sdf_val_{u,v,w}`, `{u,v,w,p}0`, `n{x,y,z}_{u,v,w}`, `body_{u,v,w}`
 # questions
 
 
-- Simplify code, too many lines
-- I wonder if there is a more efficient strategy for lower grid sizes (GPU is not fully used).
-  For example, stacking velocities,
-- I wonder if the streaming sdf can be optimized, instead of stacking bodies sdfs based on
-the max aabb indices length. An alternative: stack bodies aabb indices and interpolation functions?
-- Is it possible to include poisson solve and force computation to the a single step cuda graph capture?
-
-- The register float32 + float64 specialisations happen sevearl times across the codebase. are these needed?
-- Unify 2d and 3d kernels into unique kernels.
+- Instead of doing atomic min operations in between body sdfs, could we do instead a priority body list
+  defined by the robot sdf file (parent - first priority and childer less). So higher priority bodies get access to the sdf?
+  Would that work?
+-
 
 
 # HIGH PRIORITY

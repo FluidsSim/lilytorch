@@ -645,6 +645,22 @@ class TwoPhaseSolver(FluidSolver):
                 out.append(dt / (mu0 / inv_rho + (1.0 - mu0) * rs))
             else:
                 out.append(dt * mu0 * inv_rho)
+        # ── Prevent singular operator inside large bodies ────────────
+        # μ₀ → 0 inside the body → c = dt·μ₀/ρ → 0 → div(0·grad(p)) is
+        # singular.  Multigrid stalls on large connected zero-coefficient
+        # regions.  Clamp to a tiny floor (1e-4 × dt/ρ_water) so the
+        # operator is stiff but never fully degenerate.  BDIM already
+        # overrides velocities inside the body, so the effect on physics
+        # is zero.
+        import os
+        _floor_str = os.environ.get("LILYTORCH_COEFF_FLOOR")
+        if _floor_str is not None:
+            _floor = float(_floor_str)
+        else:
+            _floor = 1e-6  # = dt/ρ_water — prevents degenerate op inside bodies
+        if _floor > 0.0:
+            out = tuple(torch.clamp(c, min=_floor) if isinstance(c, torch.Tensor) else c
+                        for c in out)
         return tuple(out)
 
     def project(self, *args, ch=None, cv=None, cw=None, ch_cc=None, **kwargs):
@@ -660,6 +676,7 @@ class TwoPhaseSolver(FluidSolver):
                 vels.append(kwargs["w_vel"])
             self._kernel_blend_velocities(vels)
             ch, cv, cw = self._rescale_kernel_coeffs_two_phase((ch, cv, cw))
+
         return super().project(*args, ch=ch, cv=cv, cw=cw, ch_cc=ch_cc, **kwargs)
 
     # ------------------------------------------------------------------

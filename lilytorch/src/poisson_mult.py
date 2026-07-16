@@ -93,7 +93,7 @@ class _MultigridPoissonSolver:
         self.max_vcycles = max_vcycles
         self.nsmoothing  = nsmoothing
         self.verbose     = verbose
-        self.jcap_tol    = 1e-12 # lower value helps to reduce degenerate
+        self.jcap_tol    = 1e-7 # lower value helps to reduce degenerate
         self.n_switch    = 2 ** 16
         self.w           = w   # Jacobi relaxation weight
         self.precond_vcycles = precond_vcycles  # V-cycles per CG preconditioner

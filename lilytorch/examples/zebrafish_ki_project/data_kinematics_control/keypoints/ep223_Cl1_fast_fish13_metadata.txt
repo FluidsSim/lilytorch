@@ -1,0 +1,13 @@
+Episode index      : 223
+Cluster            : 1 (fast)
+Fish number        : 13
+Sampling rate (fs) : 6000 Hz
+Frame interval     : 0.1667 ms
+Fish size tracked  : 67.350 px
+Number of frames   : 2721
+Episode duration   : 453.3 ms
+Tracking points    : 10
+Body segments      : 8
+Units XY           : body lengths (BL)
+Units angles       : degrees (cumulative along body)
+Coordinate system  : raw imaging frame (not rotated)

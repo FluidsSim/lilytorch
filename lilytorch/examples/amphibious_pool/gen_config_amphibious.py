@@ -92,7 +92,7 @@ class SimConfig(BaseSimConfig):
         self.zero_pressure_inside          = False
         self.body_velocity_blend_eps_cells = None
         self.bdim_mu0_projection           = False   # μ₀ from the CC union SDF
-        self.bdim_body_div_correction      = False
+        self.bdim_body_div_correction      = False   # off: avoids RHS inconsistency near ramp
 
         # self.ground_height = POOL_ZMAX
 
@@ -176,7 +176,7 @@ class SimConfig(BaseSimConfig):
         self.rho               = 1000.0
         self.nu                = 1.0e-6
         self.timestep          = 0.001
-        self.convection_method = "abdquickest"
+        self.convection_method = "quick"
         self.n_iterations      = 20001
         self.save_every        = 100
         self.vmin              = -10.0
@@ -296,7 +296,6 @@ class SimConfig(BaseSimConfig):
         # new key mid-run and the re-capture dies with "operation failed due to a
         # previous error during capture" (~iter 200 here).  Run eager until that
         # is fixed; costs speed, not correctness.
-        solver["graph_capture_debug"] = True
 
         solver["gravity"] = [0, 0, -9.81]
         solver["two_phase"] = {
@@ -311,7 +310,7 @@ class SimConfig(BaseSimConfig):
             # iteration 15 (mjWARN_BADQACC).  At 80:1 the same pressure error
             # is 66x less amplified and the air velocity saturates (~1.2 m/s).
             # Raise this back to 1.2 only with a Poisson that actually converges.
-            "rho_air"                : 1.2,
+            "rho_air"                : 1.5,
             "nu_water"               : self.nu,
             "nu_air"                 : 1.5e-5,
             "alpha_exclude_body"     : True,
@@ -337,67 +336,67 @@ class SimConfig(BaseSimConfig):
             },
         })
 
-        # Air/water interface visualisation
-        extensions.append({
-            "loader": "lilytorch.integration.flow_iso_gl_viewer.FlowIsoGLViewer",
-            "config": {
-                "update_every"      : 1,
-                "max_vertices"      : 20 * self.Nx * self.Ny,
-                "crop_boundary"     : 0,
-                "debug_force_visible": False,
-                "fields": [
-                    {
-                        "field"     : "interface",
-                        "iso_value" : 0.5,
-                        "alpha"     : 0.45,
-                        "color"     : "#3399FF",
-                        "smooth_sigma": 0,
-                        "exclude_body": False,
-                        "reflective": True,
-                    },
-                ],
-            },
-        })
+        # # Air/water interface visualisation
+        # extensions.append({
+        #     "loader": "lilytorch.integration.flow_iso_gl_viewer.FlowIsoGLViewer",
+        #     "config": {
+        #         "update_every"      : 1,
+        #         "max_vertices"      : 20 * self.Nx * self.Ny,
+        #         "crop_boundary"     : 0,
+        #         "debug_force_visible": False,
+        #         "fields": [
+        #             {
+        #                 "field"     : "interface",
+        #                 "iso_value" : 0.5,
+        #                 "alpha"     : 0.45,
+        #                 "color"     : "#3399FF",
+        #                 "smooth_sigma": 0,
+        #                 "exclude_body": False,
+        #                 "reflective": True,
+        #             },
+        #         ],
+        #     },
+        # })
 
-        # Top-down camera auto-fitted to the pool
-        cam = top_down_camera_config(
-            self.xmin, self.xmax,
-            self.ymin, self.ymax,
-            self.zmin, self.zmax,
-            overshoot=1,
-            max_width=3840, max_height=2160,
-        )
-        extensions.append({
-            "loader": "lilytorch.integration.streaming_camera.StreamingCameraRecording",
-            "config": {
-                "path"            : os.path.join(output_folder, "output", "video.mp4"),
-                "animat_id"       : None,
-                "fps"             : 30,
-                "speed"           : 1.0,
-                "angular_velocity": 0,
-                **cam,
-            },
-        })
+        # # Top-down camera auto-fitted to the pool
+        # cam = top_down_camera_config(
+        #     self.xmin, self.xmax,
+        #     self.ymin, self.ymax,
+        #     self.zmin, self.zmax,
+        #     overshoot=1,
+        #     max_width=3840, max_height=2160,
+        # )
+        # extensions.append({
+        #     "loader": "lilytorch.integration.streaming_camera.StreamingCameraRecording",
+        #     "config": {
+        #         "path"            : os.path.join(output_folder, "output", "video.mp4"),
+        #         "animat_id"       : None,
+        #         "fps"             : 30,
+        #         "speed"           : 1.0,
+        #         "angular_velocity": 0,
+        #         **cam,
+        #     },
+        # })
 
-        # Side camera auto-fitted to the pool
-        cam_side = side_camera_config(
-            self.xmin, self.xmax,
-            self.ymin, self.ymax,
-            self.zmin, self.zmax,
-            overshoot=1,
-            max_width=3840, max_height=2160,
-        )
-        extensions.append({
-            "loader": "lilytorch.integration.streaming_camera.StreamingCameraRecording",
-            "config": {
-                "path"            : os.path.join(output_folder, "output", "video_side.mp4"),
-                "animat_id"       : None,
-                "fps"             : 30,
-                "speed"           : 1.0,
-                "angular_velocity": 0,
-                **cam_side,
-            },
-        })
+        # # Side camera auto-fitted to the pool
+        # cam_side = side_camera_config(
+        #     self.xmin, self.xmax,
+        #     self.ymin, self.ymax,
+        #     self.zmin, self.zmax,
+        #     overshoot=1,
+        #     max_width=3840, max_height=2160,
+        # )
+        # extensions.append({
+        #     "loader": "lilytorch.integration.streaming_camera.StreamingCameraRecording",
+        #     "config": {
+        #         "path"            : os.path.join(output_folder, "output", "video_side.mp4"),
+        #         "animat_id"       : None,
+        #         "fps"             : 30,
+        #         "speed"           : 1.0,
+        #         "angular_velocity": 0,
+        #         **cam_side,
+        #     },
+        # })
 
         return extensions
 

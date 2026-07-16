@@ -1,33 +1,23 @@
-"""PD position-control config using ep223/ep248 model-angle trajectories.
+"""PD position-control config using ep223 fast model-angle trajectory.
 
-Loads joint-angle trajectories exported from trained network models
-(ep223_Cl1_fast_fish13_model_angles.xlsx / ep248_Cl2_slow_fish13_model_angles.xlsx)
-and drives the zebrafish through PD position control via
-``PositionController``.
+Loads joint-angle trajectories exported from trained network model
+``ep223_Cl1_fast_fish13_model_angles.xlsx`` and drives the zebrafish
+through PD position control via ``PositionController``.
 
 Usage
 -----
-    python gen_configs_pd_3d_ep223_ep248.py              # ep223 fast (default)
-    python gen_configs_pd_3d_ep223_ep248.py --mode ep248_slow
+    python gen_configs_pd_3d_ep223_fast.py
 """
 
 from __future__ import annotations
 
-import argparse
 import csv
 import os
-import sys
 
 from farms_core.model.options import SpawnMode
 from lilytorch.util.paths import lilytorch_repo_root, sdfs_path
 from lilytorch.examples.base_sim_config import BaseSimConfig
 from lilytorch.integration.camera import top_down_camera_config
-
-
-_MODE_FILES = {
-    "ep223_fast": "ep223_Cl1_fast_fish13_model_angles.xlsx",
-    "ep248_slow": "ep248_Cl2_slow_fish13_model_angles.xlsx",
-}
 
 
 def _load_drags_csv(path):
@@ -44,18 +34,12 @@ def _load_drags_csv(path):
 
 class SimConfig(BaseSimConfig):
 
-    def __init__(self, mode: str = "ep223_fast"):
+    def __init__(self):
 
         super().__init__()
 
-        if mode not in _MODE_FILES:
-            raise ValueError(
-                f"Unknown mode {mode!r}.  Choose from: {list(_MODE_FILES)}."
-            )
-        self._mode = mode
-
         self.data_folder = os.path.join(
-            lilytorch_repo_root, 'examples', 'zebrafish_ki_project',
+            lilytorch_repo_root, 'examples', 'zebrafish_ki_project', 'data_kinematics_control',
         )
 
         self.constant_drags = _load_drags_csv(
@@ -66,7 +50,7 @@ class SimConfig(BaseSimConfig):
         self.compute_sdf                   = True
         self.use_gpu                       = True
         self.use_bdim                      = True
-        self.headless                      = False
+        self.headless                      = True
         self.water_buoyancy                = True
         self.sdf_interp_method             = "triquadratic"
         self.force_method                  = "lagrangian"
@@ -91,13 +75,15 @@ class SimConfig(BaseSimConfig):
                 "control_type"   : "position",
                 "controller_path": "lilytorch.examples.zebrafish_ki_project.pd_controller.PositionController",
                 "control_pars"   : {
-                    "data_folder"        : self.data_folder,
-                    "file_path"          : _MODE_FILES[mode],
-                    "kinematics_sampling": 0.00025,
+                    "data_folder"      : self.data_folder,
+                    "file_path"        : "ep223_Cl1_fast_fish13_model_angles.xlsx",
+                    "kinematics_invert": True,
+                    "lowpass_cutoff"   : 30,
+                    "plot_kinematics"  : False,
                 },
                 "gains"     : [0.2, 0.001, 0],
                 "spawn_mode": SpawnMode.TRANSVERSE,
-                "pose"      : [0, 0, 0, 0, 0, 3.141592653589793],
+                "pose"      : [0, 0, 0, 0, 0, 0],
             },
         ]
 
@@ -107,16 +93,16 @@ class SimConfig(BaseSimConfig):
 
         # ── 3-D grid ─────────────────────────────────────────────────
         self.Nx           = 512
-        self.Ny           = 256          # doubled (with the y extent) to keep h isotropic
+        self.Ny           = 256
         self.Nz           = 64
         self.xmin         = -0.02
         self.xmax         = 0.08
-        self.ymin         = -0.025        # doubled lateral tank: fish stays off the walls
+        self.ymin         = -0.025
         self.ymax         = 0.025
         self.zmin         = -0.00625
         self.zmax         = 0.00625
-        self.timestep     = 0.0005
-        self.n_iterations = 2001
+        self.timestep     = 0.000125
+        self.n_iterations = 3628
 
         # ── Physics ───────────────────────────────────────────────────
         self.rho_body          = 1000.0
@@ -124,8 +110,9 @@ class SimConfig(BaseSimConfig):
         self.save_every        = 50
         self.vmin              = -10.0
         self.vmax              = 10.0
-        self.save              = False
+        self.save              = True
         self.save_frames       = False
+        self.diagnostics_every = 2
 
         self.eps_multiplier = 1.0
 
@@ -170,14 +157,13 @@ class SimConfig(BaseSimConfig):
 
         self.wall_alpha   = 0.
         self.water_alpha  = 0.05
-        self.grid_spacing = 0.0125  # lines on background floor
+        self.grid_spacing = 0.0125
 
     # ── Extensions ────────────────────────────────────────────────────
 
     def extra_simulation_extensions(self, output_folder):
         extensions = []
 
-        # Soft, reflection-free lighting for tank recordings
         extensions.append({
             "loader": "lilytorch.integration.light_modifier.LightModifier",
             "config": {
@@ -204,7 +190,6 @@ class SimConfig(BaseSimConfig):
             },
         })
 
-        # Top-down camera auto-fitted to the domain
         cam = top_down_camera_config(
             self.xmin, self.xmax,
             self.ymin, self.ymax,
@@ -225,7 +210,6 @@ class SimConfig(BaseSimConfig):
             },
         })
 
-        # Following camera: tight view locked on fish CoM
         extensions.append({
             "loader": "lilytorch.integration.streaming_camera.StreamingCameraRecording",
             "config": {
@@ -242,8 +226,6 @@ class SimConfig(BaseSimConfig):
             },
         })
 
-        # SkyModifier must be LAST so all CameraRecording renderers already
-        # exist when initialize_episode runs the GPU texture upload.
         extensions.append({
             "loader": "lilytorch.integration.sky_modifier.SkyModifier",
             "config": {"rgb": [0.0, 0.0, 0.0]},
@@ -252,7 +234,6 @@ class SimConfig(BaseSimConfig):
         return extensions
 
     def _extra_run_patch(self):
-        # Replace FARMS starry-night sky with flat black in the subprocess.
         return (
             "_m.night_sky=lambda mjcf_model:mjcf_model.asset.add("
             "'texture',name='skybox',type='skybox',"
@@ -261,14 +242,4 @@ class SimConfig(BaseSimConfig):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="PD position-control simulation with ep223/ep248 model-angle trajectories."
-    )
-    parser.add_argument(
-        "--mode",
-        default="ep223_fast",
-        choices=list(_MODE_FILES),
-        help="Which model-angle trajectory to replay (default: ep223_fast).",
-    )
-    args = parser.parse_args()
-    SimConfig(mode=args.mode).single_run()
+    SimConfig().single_run()

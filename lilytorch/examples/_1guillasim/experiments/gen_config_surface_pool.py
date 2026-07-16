@@ -58,7 +58,7 @@ class SimConfig(BaseSimConfig):
         # pre-projection CUDA-graph capture -> intermittent 'operation failed due
         # to a previous error during capture', crashing after a few steps).  This
         # is auto-applied in the generated run.sh (base_sim_config.gen_sh_config).
-        # self.poisson_method                = "rmgcg"
+        self.poisson_method                = "rmgcg"
         self.poisson_method                = "multigrid"   # conservative fallback
 
         self.headless             = False
