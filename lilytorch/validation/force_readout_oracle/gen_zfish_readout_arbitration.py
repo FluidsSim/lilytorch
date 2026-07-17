@@ -25,12 +25,22 @@ from lilytorch.examples.zebrafish_ki_project.gen_configs_pd_3d_slow_fast import 
     SimConfig as _ProdConfig,
 )
 
-STACK = "zfish_readout_arbitration"
+STACK = os.environ.get("ZFISH_STACK", "zfish_readout_arbitration")
 CASE = os.environ.get("ZFISH_CASE", "lagr_off0")
 FORCE_METHOD = os.environ.get("ZFISH_FORCE_METHOD", "lagrangian")
 LAGR_OFFSET = os.environ.get("ZFISH_LAGR_OFFSET", "")
 DELTA_ORDER = int(os.environ.get("ZFISH_DELTA_ORDER", 1))
 NITER = int(os.environ.get("ZFISH_NITER", 1201))       # dt=5e-4 -> 0.6 s
+
+# Grid refinement for convergence studies.  REFINE=2 halves h in all three
+# directions with the DOMAIN HELD FIXED, and halves dt to keep CFL — so it is a
+# pure resolution change.  (The 1024x256x128 block commented out in the
+# production config also halves the y extent, which would confound resolution
+# with a narrower tank.)  n_iterations scales so the physical time is unchanged.
+REFINE = int(os.environ.get("ZFISH_REFINE", 1))
+# Offset in CELLS, so the recommendation "off ~= h" tracks the grid: an offset
+# fixed in metres would mean a different thing on a finer grid.
+LAGR_OFFSET_CELLS = os.environ.get("ZFISH_LAGR_OFFSET_CELLS", "")
 
 
 class SimConfig(_ProdConfig):
@@ -49,9 +59,21 @@ class SimConfig(_ProdConfig):
         self.save_drags = True         # per-link force records -> drags.h5
         self.force_method = FORCE_METHOD
         self.force_delta_order = DELTA_ORDER
-        if LAGR_OFFSET != "":
-            self.lagrangian_sample_offset = float(LAGR_OFFSET)
         self.n_iterations = NITER
+
+        if REFINE != 1:
+            self.Nx *= REFINE
+            self.Ny *= REFINE
+            self.Nz *= REFINE
+            self.timestep /= REFINE
+            self.bdim_dt = self.timestep
+            self.n_iterations = (self.n_iterations - 1) * REFINE + 1
+
+        h = (self.xmax - self.xmin) / self.Nx
+        if LAGR_OFFSET_CELLS != "":
+            self.lagrangian_sample_offset = float(LAGR_OFFSET_CELLS) * h
+        elif LAGR_OFFSET != "":
+            self.lagrangian_sample_offset = float(LAGR_OFFSET)
         self.bdim_nt = self.n_iterations + 1
         # verify_energy_balance differentiates E_k on the diagnostics grid; the
         # production cadence of 100 leaves too few samples over 0.3 s.
@@ -62,7 +84,12 @@ class SimConfig(_ProdConfig):
 
 
 if __name__ == "__main__":
+    c = SimConfig()
+    h = (c.xmax - c.xmin) / c.Nx
     print(f"[arb] case={CASE} force_method={FORCE_METHOD} "
-          f"lagr_offset={LAGR_OFFSET or 'default(0.0)'} "
-          f"delta_order={DELTA_ORDER} n_iter={NITER}")
-    SimConfig().single_run()
+          f"offset={c.lagrangian_sample_offset} delta_order={DELTA_ORDER}")
+    print(f"[arb] grid {c.Nx}x{c.Ny}x{c.Nz} = {c.Nx*c.Ny*c.Nz/1e6:.1f} M cells  "
+          f"h={h*1e3:.4f} mm  dt={c.timestep}  n_iter={c.n_iterations}  "
+          f"t_end={c.n_iterations*c.timestep:.3f} s  "
+          f"R/h={0.559e-3/h:.2f} (thin direction)")
+    c.single_run()
