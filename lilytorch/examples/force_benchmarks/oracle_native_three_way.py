@@ -76,7 +76,9 @@ def eulerian(sc, submethod, u, v, w, p):
         sc["sdf_cc"], 0,
         u.ravel().contiguous(), v.ravel().contiguous(),
         w.ravel().contiguous(), p.ravel().contiguous(),
-        nu_rho, sc["eps"], sc["eps"], sc["h"] ** 3, 1, out,
+        # (eps_body, off_pres, off_visc): production convention reads p on
+        # the surface and sigma shifted out by eps.
+        nu_rho, sc["eps"], 0.0, sc["eps"], sc["h"] ** 3, 1, out,
         submethod, 1.5 * sc["h"],
     )
     return float(out[0, 0]), float(out[0, 6])      # fv_x, fp_x
@@ -95,7 +97,7 @@ def lagrangian(sc, u, v, w, p):
         torch.tensor([[C, C, C]], dtype=DT),
         float(sc["g"][0]), float(sc["g"][0]), float(sc["g"][0]),
         1.0 / sc["h"], 1.0 / sc["h"], 1.0 / sc["h"],
-        sc["N"], sc["N"], sc["N"], 0, 0.0, out,
+        sc["N"], sc["N"], sc["N"], 0, 0.0, 0.0, out,
     )
     return float(out[0, 0]), float(out[0, 6])
 

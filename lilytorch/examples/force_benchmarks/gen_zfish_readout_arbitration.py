@@ -14,8 +14,21 @@ gait, physics; viewers stripped) into a {stack}/{case} layout, so
   ZFISH_CASE=lagr_off0 ZFISH_FORCE_METHOD=lagrangian ZFISH_LAGR_OFFSET=0.0 \
       python -m lilytorch.examples.force_benchmarks.gen_zfish_readout_arbitration
 
-Env: ZFISH_CASE, ZFISH_FORCE_METHOD, ZFISH_LAGR_OFFSET (metres, or "" for the
-solver default), ZFISH_DELTA_ORDER, ZFISH_NITER.
+Env: ZFISH_CASE, ZFISH_FORCE_METHOD, ZFISH_DELTA_ORDER, ZFISH_NITER.
+
+Sampling location — two families, the split one wins if both are set:
+
+* ``ZFISH_OFF_P_CELLS`` / ``ZFISH_OFF_F_CELLS`` (cells) → the per-channel
+  ``sample_offset_{pressure,friction}_cells``, applied to BOTH readouts.  This
+  is the only way to express Verma et al. 2017's ``(0, 2h)`` — p read at the
+  true surface, sigma on a surface lifted 2h — and hence the only way to pin
+  the two readouts to identical sampling locations.  Either may be set alone.
+* ``ZFISH_LAGR_OFFSET_CELLS`` / ``ZFISH_LAGR_OFFSET`` (cells / metres) → the
+  LEGACY single ``lagrangian_sample_offset``, which moves p and sigma together
+  and touches the lagrangian only.  Kept so the §10 runs stay reproducible.
+
+All unset → every readout keeps its legacy default (eulerian ``(0, eps)``,
+lagrangian ``(0, 0)``).
 """
 from __future__ import annotations
 
@@ -43,6 +56,12 @@ REFINE = float(os.environ.get("ZFISH_REFINE", 1))
 # Offset in CELLS, so the recommendation "off ~= h" tracks the grid: an offset
 # fixed in metres would mean a different thing on a finer grid.
 LAGR_OFFSET_CELLS = os.environ.get("ZFISH_LAGR_OFFSET_CELLS", "")
+# Per-channel offsets in CELLS, applied to BOTH readouts.  These supersede the
+# legacy knob above: they can express (0, 2h) = Verma et al. 2017, which the
+# single knob cannot, and they eliminate sampling location as a free variable
+# in any eulerian-vs-lagrangian comparison.
+OFF_P_CELLS = os.environ.get("ZFISH_OFF_P_CELLS", "")
+OFF_F_CELLS = os.environ.get("ZFISH_OFF_F_CELLS", "")
 
 
 class SimConfig(_ProdConfig):
@@ -76,6 +95,12 @@ class SimConfig(_ProdConfig):
             self.lagrangian_sample_offset = float(LAGR_OFFSET_CELLS) * h
         elif LAGR_OFFSET != "":
             self.lagrangian_sample_offset = float(LAGR_OFFSET)
+        # Per-channel knobs last: they apply to both readouts, so they must win
+        # over the legacy single knob if a run sets both.
+        if OFF_P_CELLS != "":
+            self.sample_offset_pressure_cells = float(OFF_P_CELLS)
+        if OFF_F_CELLS != "":
+            self.sample_offset_friction_cells = float(OFF_F_CELLS)
         self.bdim_nt = self.n_iterations + 1
         # verify_energy_balance differentiates E_k on the diagnostics grid; the
         # production cadence of 100 leaves too few samples over 0.3 s.
@@ -85,11 +110,41 @@ class SimConfig(_ProdConfig):
         return []                      # no viewers/recorders: need a display
 
 
+def _resolved_offsets_cells(c, h):
+    """(off_p, off_f) in cells that the ACTIVE readout will actually use.
+
+    Mirrors FluidSolver.__init__ (solver.py ~446-464).  Printed rather than
+    inferred because "which offset did that run use" has been the single most
+    confounding question in this investigation — every §10 cross-method number
+    is untrustworthy for exactly this reason.
+    """
+    eps_mult = 2.0 if c.eps_multiplier is None else float(c.eps_multiplier)
+    lso_cells = 0.0 if c.lagrangian_sample_offset is None else \
+        float(c.lagrangian_sample_offset) / h
+    if c.sample_offset_pressure_cells is None:
+        off_p = 0.0 if FORCE_METHOD == "eulerian" else lso_cells
+    else:
+        off_p = float(c.sample_offset_pressure_cells)
+    if c.sample_offset_friction_cells is None:
+        off_f = eps_mult if FORCE_METHOD == "eulerian" else lso_cells
+    else:
+        off_f = float(c.sample_offset_friction_cells)
+    return off_p, off_f
+
+
 if __name__ == "__main__":
     c = SimConfig()
     h = (c.xmax - c.xmin) / c.Nx
+    off_p, off_f = _resolved_offsets_cells(c, h)
+    pinned = (c.sample_offset_pressure_cells is not None
+              or c.sample_offset_friction_cells is not None)
     print(f"[arb] case={CASE} force_method={FORCE_METHOD} "
-          f"offset={c.lagrangian_sample_offset} delta_order={DELTA_ORDER}")
+          f"delta_order={DELTA_ORDER}")
+    print(f"[arb] SAMPLING  (off_p, off_f) = ({off_p:g}h, {off_f:g}h)  "
+          f"= ({off_p*h*1e3:.4f}, {off_f*h*1e3:.4f}) mm  "
+          f"[{'split knobs, both readouts pinned' if pinned else 'LEGACY per-readout default'}]"
+          f"{'  <- Verma et al. 2017' if (off_p, off_f) == (0.0, 2.0) else ''}")
+    print(f"[arb] legacy lagrangian_sample_offset={c.lagrangian_sample_offset}")
     print(f"[arb] grid {c.Nx}x{c.Ny}x{c.Nz} = {c.Nx*c.Ny*c.Nz/1e6:.1f} M cells  "
           f"h={h*1e3:.4f} mm  dt={c.timestep}  n_iter={c.n_iterations}  "
           f"t_end={c.n_iterations*c.timestep:.3f} s  "

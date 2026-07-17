@@ -164,7 +164,8 @@ void lagrangian_forces_3d_cpu(
     const double inv_dx, const double inv_dy, const double inv_dz,
     const int64_t Mx, const int64_t My, const int64_t Mz,
     const int64_t interp_method,
-    const double sample_offset,
+    const double sample_offset_pressure,
+    const double sample_offset_friction,
     at::Tensor out)
 {
     const int B = (int)com_pos.size(0);
@@ -223,8 +224,9 @@ void lagrangian_forces_3d_cpu(
         const scalar_t idx = (scalar_t)inv_dx, idy = (scalar_t)inv_dy, idz = (scalar_t)inv_dz;
         const int method = (int)interp_method;
         // See lagrangian_forces.cu — sample fields offset away from the
-        // surface to escape the BDIM band.
-        const scalar_t soff = (scalar_t)sample_offset;
+        // surface to escape the BDIM band, independently per channel.
+        const scalar_t off_pres = (scalar_t)sample_offset_pressure;
+        const scalar_t off_visc = (scalar_t)sample_offset_friction;
 
         at::parallel_for(0, B, 0, [&](int64_t b_start, int64_t b_end) {
             for (int64_t b = b_start; b < b_end; ++b) {
@@ -246,42 +248,47 @@ void lagrangian_forces_3d_cpu(
                     const scalar_t nyv = ny_p[t];
                     const scalar_t nzv = nz_p[t];
                     const scalar_t A   = area[t];
-                    const scalar_t qxs = qx + soff * nxv;
-                    const scalar_t qys = qy + soff * nyv;
-                    const scalar_t qzs = qz + soff * nzv;
+                    const scalar_t qxv = qx + off_visc * nxv;
+                    const scalar_t qyv = qy + off_visc * nyv;
+                    const scalar_t qzv = qz + off_visc * nzv;
 
                     const scalar_t e_xx = lf_sample_3d<scalar_t>(
                         method, exx, iMx, iMy, iMz, bx0s, by0s, bz0s,
-                        idx, idy, idz, qxs, qys, qzs);
+                        idx, idy, idz, qxv, qyv, qzv);
                     const scalar_t e_yy = lf_sample_3d<scalar_t>(
                         method, eyy, iMx, iMy, iMz, bx0s, by0s, bz0s,
-                        idx, idy, idz, qxs, qys, qzs);
+                        idx, idy, idz, qxv, qyv, qzv);
                     const scalar_t e_zz = lf_sample_3d<scalar_t>(
                         method, ezz, iMx, iMy, iMz, bx0s, by0s, bz0s,
-                        idx, idy, idz, qxs, qys, qzs);
+                        idx, idy, idz, qxv, qyv, qzv);
                     const scalar_t e_xy = lf_sample_3d<scalar_t>(
                         method, exy, iMx, iMy, iMz, bx0s, by0s, bz0s,
-                        idx, idy, idz, qxs, qys, qzs);
+                        idx, idy, idz, qxv, qyv, qzv);
                     const scalar_t e_xz = lf_sample_3d<scalar_t>(
                         method, exz, iMx, iMy, iMz, bx0s, by0s, bz0s,
-                        idx, idy, idz, qxs, qys, qzs);
+                        idx, idy, idz, qxv, qyv, qzv);
                     const scalar_t e_yz = lf_sample_3d<scalar_t>(
                         method, eyz, iMx, iMy, iMz, bx0s, by0s, bz0s,
-                        idx, idy, idz, qxs, qys, qzs);
+                        idx, idy, idz, qxv, qyv, qzv);
 
+                    // nu_rho rides with the viscous channel.
                     const scalar_t nu_rho_m = nrho_scalar
                         ? nrho[0]
                         : lf_sample_3d<scalar_t>(
                             method, nrho, iMx, iMy, iMz, bx0s, by0s, bz0s,
-                            idx, idy, idz, qxs, qys, qzs);
+                            idx, idy, idz, qxv, qyv, qzv);
 
                     const scalar_t tvx = nu_rho_m * (e_xx * nxv + e_xy * nyv + e_xz * nzv);
                     const scalar_t tvy = nu_rho_m * (e_xy * nxv + e_yy * nyv + e_yz * nzv);
                     const scalar_t tvz = nu_rho_m * (e_xz * nxv + e_yz * nyv + e_zz * nzv);
 
+                    const scalar_t qxp = qx + off_pres * nxv;
+                    const scalar_t qyp = qy + off_pres * nyv;
+                    const scalar_t qzp = qz + off_pres * nzv;
+
                     const scalar_t p_m = lf_sample_3d<scalar_t>(
                         method, pp, iMx, iMy, iMz, bx0s, by0s, bz0s,
-                        idx, idy, idz, qxs, qys, qzs);
+                        idx, idy, idz, qxp, qyp, qzp);
                     const scalar_t tpx = -p_m * nxv;
                     const scalar_t tpy = -p_m * nyv;
                     const scalar_t tpz = -p_m * nzv;

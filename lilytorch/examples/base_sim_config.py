@@ -208,6 +208,18 @@ class BaseSimConfig:
         # land the sample in a neighbouring link (concave multibody
         # geometry) or off-grid → instability — start small.
         self.lagrangian_sample_offset = None   # None → solver default (0.0)
+        # Per-channel sampling location, in CELLS, applied to BOTH readouts.
+        # ``phi = offset`` is the iso-surface on which each channel is read:
+        # pressure and friction are contaminated differently inside the BDIM
+        # band, and the two readouts disagree about where to sample by
+        # default (eulerian: p at 0, sigma at eps; lagrangian: both at
+        # ``lagrangian_sample_offset``).  That confounds "which readout" with
+        # "sampled where" in any cross-method comparison — set these to pin
+        # both readouts to identical locations before comparing them.
+        # In cells, not metres, so a value survives a change of grid.
+        # None → each readout keeps its legacy default (unchanged results).
+        self.sample_offset_pressure_cells = None
+        self.sample_offset_friction_cells = None
         # Smooth body-velocity blend in the overlap band (width in cells).
         # Overlapping links (e.g. convexify=True) hard-switch the imposed
         # solid velocity at the inter-link seam under the running-min SDF
@@ -883,6 +895,8 @@ class BaseSimConfig:
             ("force_submethod",         self.force_submethod),
             ("force_ph_blend_cells",    self.force_ph_blend_cells),
             ("lagrangian_sample_offset", self.lagrangian_sample_offset),
+            ("sample_offset_pressure_cells", self.sample_offset_pressure_cells),
+            ("sample_offset_friction_cells", self.sample_offset_friction_cells),
             ("body_velocity_blend_eps_cells", self.body_velocity_blend_eps_cells),
             ("time_integration",        self.time_integration),
             ("use_kernels",             self.use_kernels),

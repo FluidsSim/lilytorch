@@ -40,6 +40,8 @@ __all__ = [
     "poisson_solve_rmgcg_3d",
     "advect_flux_accumulate",
     "cvof_sweep",
+    "body_update_2d",
+    "body_update_3d",
     "RegularGridInterpolator",
     "RegularGridInterpolator3D",
     "RegularGridInterpolatorAutomatic",
@@ -70,7 +72,9 @@ def streaming_sdf_forces_post_3d(
         interp_method: int,
         u: Tensor, v: Tensor, w: Tensor, p: Tensor,
         nu_rho_field: Tensor,
-        eps_body: float, eps_solver: float, h3: float,
+        eps_body: float,
+        sample_offset_pressure: float, sample_offset_friction: float,
+        h3: float,
         delta_order: int,
         out: Tensor,
         force_submethod: int = 0, ph_tau: float = 0.0) -> None:
@@ -78,6 +82,14 @@ def streaming_sdf_forces_post_3d(
 
     Reuses the streamed body metadata and current union SDF produced by the
     update stage, but consumes the current post-fluid-step fields.
+
+    ``sample_offset_pressure`` / ``sample_offset_friction``: the iso-surface
+    ``φ = offset`` (metres) on which each channel's smoothed delta is centred.
+    The Maertens & Weymouth convention — and hence the production default —
+    is ``(0, eps_multiplier*h)``: pressure on the body surface, σ shifted out
+    of the BDIM band where ε(u_blend) ≈ μ0·ε(u_fluid) contaminates it.  They
+    are separate arguments because a like-for-like comparison against the
+    lagrangian readout requires pinning both readouts to the same locations.
 
     ``force_submethod``: 0 = n·δ (default), 1 = partial-Heaviside ∂H readout
     (union-∂H pressure force density split to bodies by a softmin partition of
@@ -88,7 +100,9 @@ def streaming_sdf_forces_post_3d(
         gx, gy, gz, float(h_grid), int(max_vol_per_body),
         sdf_cc, int(interp_method),
         u, v, w, p, nu_rho_field,
-        float(eps_body), float(eps_solver), float(h3), int(delta_order),
+        float(eps_body),
+        float(sample_offset_pressure), float(sample_offset_friction),
+        float(h3), int(delta_order),
         int(force_submethod), float(ph_tau), out,
     )
 
@@ -370,7 +384,9 @@ def streaming_sdf_forces_post_2d(
         interp_method: int,
         u_prev: Tensor, v_prev: Tensor, p_prev: Tensor,
         nu_rho_field: Tensor,
-        eps_body: float, eps_solver: float, h2: float,
+        eps_body: float,
+        sample_offset_pressure: float, sample_offset_friction: float,
+        h2: float,
         delta_order: int,
         out: Tensor,
         force_submethod: int = 0, ph_tau: float = 0.0) -> None:
@@ -378,6 +394,9 @@ def streaming_sdf_forces_post_2d(
 
     Reuses the streamed body metadata and current union SDF produced by
     the update stage, but consumes the current post-fluid-step fields.
+
+    ``sample_offset_pressure`` / ``sample_offset_friction``: see
+    ``streaming_sdf_forces_post_3d``.  Production default ``(0, eps)``.
 
     ``force_submethod``: 0 = n·δ (default), 1 = partial-Heaviside ∂H readout
     (union-∂H pressure force density split to bodies by a softmin partition of
@@ -392,7 +411,9 @@ def streaming_sdf_forces_post_2d(
         int(interp_method),
         u_prev, v_prev, p_prev,
         nu_rho_field,
-        float(eps_body), float(eps_solver), float(h2), int(delta_order),
+        float(eps_body),
+        float(sample_offset_pressure), float(sample_offset_friction),
+        float(h2), int(delta_order),
         int(force_submethod), float(ph_tau),
         out,
     )
@@ -501,7 +522,8 @@ def lagrangian_forces_2d(
         inv_dx: float, inv_dy: float,
         Mx: int, My: int,
         method: str = "linear",
-        sample_offset: float = 0.0,
+        sample_offset_pressure: float = 0.0,
+        sample_offset_friction: float = 0.0,
         out: Tensor = None) -> Tensor:
     """Fused 2-D Lagrangian surface-integral forces.
 
@@ -516,6 +538,12 @@ def lagrangian_forces_2d(
 
     ``nu_rho_field`` may be either a 1-element tensor (constant ν·ρ) or
     a full CC field of shape ``(Mx, My)``.
+
+    ``sample_offset_pressure`` / ``sample_offset_friction`` displace the
+    query point for ``p`` and for the strain tensor respectively, along the
+    outward normal (metres).  They are independent so that this readout can
+    be pinned to the same sampling locations as the eulerian one; passing
+    the same value for both is the legacy single-knob behaviour.
     """
     interp_method = _METHOD_MAP.get(method)
     if interp_method is None:
@@ -532,7 +560,7 @@ def lagrangian_forces_2d(
         float(inv_dx), float(inv_dy),
         int(Mx), int(My),
         int(interp_method),
-        float(sample_offset),
+        float(sample_offset_pressure), float(sample_offset_friction),
         out,
     )
     return out
@@ -548,7 +576,8 @@ def lagrangian_forces_3d(
         inv_dx: float, inv_dy: float, inv_dz: float,
         Mx: int, My: int, Mz: int,
         method: str = "linear",
-        sample_offset: float = 0.0,
+        sample_offset_pressure: float = 0.0,
+        sample_offset_friction: float = 0.0,
         out: Tensor = None) -> Tensor:
     """Fused 3-D Lagrangian surface-integral forces.
 
@@ -577,7 +606,7 @@ def lagrangian_forces_3d(
         float(inv_dx), float(inv_dy), float(inv_dz),
         int(Mx), int(My), int(Mz),
         int(interp_method),
-        float(sample_offset),
+        float(sample_offset_pressure), float(sample_offset_friction),
         out,
     )
     return out
@@ -1267,6 +1296,95 @@ class RegularGridInterpolator:
             )
 
         return result.reshape(orig_shape)
+
+
+# =====================================================================
+#  Body-update bridges — streaming SDF dispatch
+# =====================================================================
+
+# Grow-only persistent per-body private-buffer cache for the Regime-B resolve.
+# Keyed on (device, dtype, ndim); reused across steps so the streaming path does
+# NO per-call allocation and NO host sync (the killer was ``total_vol.item()``).
+_priv_cache: dict = {}
+
+
+def _regime_b_priv(B, max_vol, dtype, device, ndim):
+    """Sync-free private buffers + offsets for the Regime-B resolve.
+
+    Uses a UNIFORM per-body stride of ``max_vol`` (host-known: ``B`` from
+    ``aabb_dim.shape[0]``, ``max_vol`` a python int), so:
+      * offsets = arange(B+1)*max_vol — no cumsum, no ``.item()``, no D→H sync;
+      * buffers sized to ``B*max_vol`` (≥ Σ body_vol), grow-only + reused.
+    Body ``b`` owns the disjoint slice ``[b*max_vol, b*max_vol+body_vol[b])``, which
+    is what the min/resolve kernels index via ``priv_offsets[b]+local``.
+    """
+    need = int(B) * int(max_vol)
+    n_bufs = 5 if ndim == 2 else 7
+    key = (device, dtype, ndim)
+    ent = _priv_cache.get(key)
+    if ent is None or ent["cap"] < need:
+        cap = max(need, (ent["cap"] if ent else 0))
+        ent = {"cap": cap,
+               "bufs": [torch.empty(cap, dtype=dtype, device=device)
+                        for _ in range(n_bufs)]}
+        _priv_cache[key] = ent
+    offsets = torch.arange(B + 1, dtype=torch.int64, device=device) * int(max_vol)
+    return offsets, ent["bufs"]
+
+
+def body_update_2d(
+    F_flat, F_offsets, body_shapes, body_meta, kin,
+    aabb_lo, aabb_dim, gx, gy, h, max_vol,
+    sdf_cc, sdf_u, sdf_v, body_u, body_v,
+    interp_method,
+    dirty_i0, dirty_j0, dirty_Ai, dirty_Aj,
+    blend_eps=0.0,
+    use_graph=False,  # ignored — native eager only for now
+):
+    """Native 2-D streaming SDF body update (eager path).
+
+    The caller (BDIMhandler) pre-fills ``sdf_*`` to +FAR and ``body_*`` to 0
+    before every call — the kernels only write body-covered cells."""
+    if int(dirty_Ai) * int(dirty_Aj) <= 0:
+        return
+
+    priv_offsets, pb = _regime_b_priv(
+        body_shapes.size(0), max_vol, sdf_cc.dtype, sdf_cc.device, 2)
+    streaming_sdf_stag_2d_resolve(
+        F_flat, F_offsets, body_shapes, body_meta, kin,
+        aabb_lo, aabb_dim, gx, gy, float(h), int(max_vol),
+        sdf_cc, sdf_u, sdf_v, body_u, body_v, int(interp_method),
+        int(dirty_i0), int(dirty_j0), int(dirty_Ai), int(dirty_Aj),
+        priv_offsets, pb[0], pb[1], pb[2], pb[3], pb[4],
+        blend_eps=float(blend_eps),
+    )
+
+
+def body_update_3d(
+    F_flat, F_offsets, body_shapes, body_meta, kin,
+    aabb_lo, aabb_dim, gx, gy, gz, h, max_vol,
+    sdf_cc, sdf_u, sdf_v, sdf_w, body_u, body_v, body_w,
+    interp_method,
+    dirty_i0, dirty_j0, dirty_k0,
+    dirty_Ai, dirty_Aj, dirty_Ak,
+    blend_eps=0.0,
+    use_graph=False,  # ignored — native eager only for now
+):
+    """Native 3-D streaming SDF body update (eager path).  See 2-D."""
+    if int(dirty_Ai) * int(dirty_Aj) * int(dirty_Ak) <= 0:
+        return
+
+    priv_offsets, pb = _regime_b_priv(
+        body_shapes.size(0), max_vol, sdf_cc.dtype, sdf_cc.device, 3)
+    streaming_sdf_stag_3d_resolve(
+        F_flat, F_offsets, body_shapes, body_meta, kin,
+        aabb_lo, aabb_dim, gx, gy, gz, float(h), int(max_vol),
+        sdf_cc, sdf_u, sdf_v, sdf_w, body_u, body_v, body_w, int(interp_method),
+        int(dirty_i0), int(dirty_j0), int(dirty_k0),
+        int(dirty_Ai), int(dirty_Aj), int(dirty_Ak),
+        priv_offsets, pb[0], pb[1], pb[2], pb[3], pb[4], pb[5], pb[6],
+        blend_eps=float(blend_eps),
+    )
 
 
 # ---------------------------------------------------------------------------

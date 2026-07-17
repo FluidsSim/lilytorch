@@ -52,25 +52,27 @@ comp._kernel_static_2d = None
 
 q = 0.5 * rho * U**2 * D
 h = solver.h
-eps_production = solver.eps
+off_visc_production = solver.eul_sample_offset_friction
 
-print("\n=== eulerian: sweep viscous-band shift eps_solver (delta width eps_body fixed) ===")
+print("\n=== eulerian: sweep viscous-band shift (delta width eps_body fixed) ===")
 print(f"{'s/h':>5} {'Cd_visc':>9} {'Cd_pres':>9}")
 eul = {}
 for s_over_h in (0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0):
-    solver.eps = s_over_h * h
+    solver.eul_sample_offset_friction = s_over_h * h
     solver.forces_method2(u, v, p, 0)
     fv = float(solver.friction_force_lin_x[0]) / q
     fp = float(solver.pressure_force_x[0]) / q
     eul[s_over_h] = (fv, fp)
     print(f"{s_over_h:5.2f} {fv:9.4f} {fp:9.4f}")
-solver.eps = eps_production
+solver.eul_sample_offset_friction = off_visc_production
 
 print("\n=== lagrangian: sweep sample offset ===")
 print(f"{'off/h':>5} {'Cd_visc':>9} {'Cd_pres':>9}")
 lag = {}
 for o_over_h in (0.0, 0.5, 1.0, 1.5, 2.0, 3.0):
-    solver.lagrangian_sample_offset = o_over_h * h
+    # Legacy single-knob semantics: move p and sigma together.
+    solver.lagr_sample_offset_pressure = o_over_h * h
+    solver.lagr_sample_offset_friction = o_over_h * h
     solver.forces_lagrangian_2d(u, v, p, 0)
     fv = float(solver.friction_force_lin_x[0]) / q
     fp = float(solver.pressure_force_x[0]) / q

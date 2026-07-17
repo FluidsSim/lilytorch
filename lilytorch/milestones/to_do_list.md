@@ -108,7 +108,7 @@ CL2. `[deepseek-v4]` **Strip streaming `_direct` ops** ✅ (2026-07-16): defs op
 CL3. `[deepseek-v4]` **Delete verified-dead body.py members** ✅ (2026-07-16): (exact list in
   answer 7, honoring its explicit KEEP list). Replace the
   `composite_segment_body` branch with an explicit `ValueError`.
-CL4. `[deepseek-v4]` **Dissolve facade.py** per answer 9 (preserve
+CL4. `[deepseek-v4]` **Dissolve facade.py** ✅ (2026-07-17): per answer 9 (preserve
   `_priv_cache` grow-only semantics + the cost_analysis monkey-patch seam).
 CL5. `[deepseek-v4]` **Repo hygiene batch** ✅ (2026-07-16): fix-or-delete
   `lilytorch/src/build.sh` (removed stale `src/kernels/` cleanup lines;

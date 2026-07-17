@@ -1,15 +1,17 @@
 
 import csv
 import os
+
+import numpy as np
+
 from farms_core.model.options import SpawnMode
 from lilytorch.util.paths import lilytorch_repo_root, sdfs_path
 from lilytorch.examples.base_sim_config import BaseSimConfig
 from lilytorch.integration.camera import top_down_camera_config, side_camera_config, back_camera_config
 
 
-
 def _load_drags_csv(path):
-    """Load per-link drag coefficients from *path*."""
+    """Load per-link drag coefficients from *path* (CSV)."""
     drags = []
     with open(path, newline="") as f:
         for row in csv.DictReader(f):
@@ -19,9 +21,21 @@ def _load_drags_csv(path):
             ])
     return drags
 
+
+def _load_drags_npy(path):
+    """Load per-link drag coefficients from *path* (NPY).
+
+    Expected shape: (N_links, 6) with columns
+    [lin_x, lin_y, lin_z, quad_x, quad_y, quad_z].
+    """
+    arr = np.asarray(np.load(path), dtype=float)
+    return [[row[:3].tolist(), row[3:].tolist()] for row in arr]
+
 class SimConfig(BaseSimConfig):
 
-    def __init__(self):
+    def __init__(self, drag_source: str = "csv"):
+        """*drag_source*: ``\"csv\"`` (``drag_coefficients.csv``) or
+        ``\"npy\"`` (``drag_4kinematics.npy``)."""
 
         super().__init__()
 
@@ -29,9 +43,14 @@ class SimConfig(BaseSimConfig):
             lilytorch_repo_root, 'examples', 'zebrafish_ki_project',
         )
 
-        self.constant_drags = _load_drags_csv(
-            os.path.join(self.data_folder, "drag_coefficients.csv")
-        )
+        if drag_source == "npy":
+            self.constant_drags = _load_drags_npy(
+                os.path.join(self.data_folder, "drag_4kinematics.npy")
+            )
+        else:
+            self.constant_drags = _load_drags_csv(
+                os.path.join(self.data_folder, "drag_coefficients.csv")
+            )
 
         # ── Hardware ──────────────────────────────────────────────────
         self.save_drags                    = True
@@ -41,15 +60,13 @@ class SimConfig(BaseSimConfig):
         self.headless                      = False
         self.water_buoyancy                = True
         self.sdf_interp_method             = "triquadratic"
-        self.force_method                  = "lagrangian"
-        self.convexify                     = True
+        self.force_method                  = "eulerian"
+        self.convexify                     = False
         self.zero_pressure_inside          = False
         self.body_velocity_blend_eps_cells = 2
         self.bdim_mu0_projection           = False
         self.bdim_body_div_correction      = True
 
-        # self.force_delta_order   = 2
-        # self.solver_method       = "python"
 
         # Wall contact for a milligram-scale larva. The previous direct
         # (-stiffness, -damping) = (-2e4, -3e2) form put 20000 N/m against a
@@ -136,7 +153,7 @@ class SimConfig(BaseSimConfig):
         self.save              = False
         self.save_frames       = False
 
-        self.eps_multiplier = 1.0
+        # self.eps_multiplier = 1.0
 
         # ── Arena ────────────────────────────────────────────────────
         self.wall_thickness = 0.003
@@ -155,8 +172,7 @@ class SimConfig(BaseSimConfig):
         self.poisson_smoother        = "jacobi"
         self.poisson_nsmoothing      = 5
         self.poisson_bc_type         = "neumann"
-        # self.force_delta_order       = 2
-        # self.sdf_interp_method       = "triquadratic"
+        self.force_delta_order       = 2
 
         # ── Boundary conditions (3-D, all Neumann / zero-gradient) ──
         self.bc_type_u   = ["D", "D", "N", "N", "N", "N"]
@@ -228,6 +244,64 @@ class SimConfig(BaseSimConfig):
                 "color_neg"          : "#00FFFF",
             },
         })
+
+
+        # # ForceViewer – draw the fluid force on each body as a scalable arrow.
+        # # force_scale sets the arrow length (m per N); force_width sets the
+        # # circular shaft radius (m). Tune both to taste.
+        # extensions.append({
+        #     "loader": "lilytorch.integration.force_viewer.ForceViewer",
+        #     "config": {
+        #         "force_scale" : 150,          # metres of arrow per Newton
+        #         "force_width" : 0.0001,       # shaft (circular) radius in metres
+        #         "color"       : "#0011FF",
+        #         "update_every": 1,           # null -> solver.save_every cadence
+        #     },
+        # })
+
+
+        #   # VelocityViewer – draw the linear (and optional angular) velocity of
+        #   # each body as an arrow. Anchored at the body CoM, world-frame axes.
+        #   # vel_scale sets arrow length (m per m/s); vel_width sets shaft radius.
+        # extensions.append({
+        #     "loader": "lilytorch.integration.velocity_viewer.VelocityViewer",
+        #     "config": {
+        #         "vel_scale": 0.2,         # metres of arrow per (m/s)
+        #         "vel_width": 0.0001,       # shaft (circular) radius in metres
+        #         "color"    : "#21780C",
+        #                            # "max_length"  : 0.3,      # clamp arrow length (m); null = off
+        #                            # "min_vel"     : 0.0,      # hide arrows below this speed (m/s)
+        #                            # "show_angular": True,     # also draw an ω arrow per body
+        #                            # "ang_scale"   : 0.05,     # m per (rad/s) (default: vel_scale)
+        #                            # "ang_width"   : 0.001,    # shaft radius (default: vel_width)
+        #                            # "ang_color"   : "#FFAA00",
+        #                            # "min_ang"     : 0.0,      # hide ω arrows below this (rad/s)
+        #         "update_every": 1  # null -> solver.save_every cadence
+        #     },
+        # })
+
+
+        # # AccelerationViewer – draw the linear (and optional angular)
+        # # acceleration of each body as an arrow. Anchored at the body CoM,
+        # # world-frame axes. Reads MuJoCo's qacc-derived spatial acceleration
+        # # via mj_objectAcceleration (reflects the previous step's qacc).
+        # extensions.append({
+        #     "loader": "lilytorch.integration.acceleration_viewer.AccelerationViewer",
+        #     "config": {
+        #         "acc_scale": 0.005,        # metres of arrow per (m/s²)
+        #         "acc_width": 0.0001,     # shaft (circular) radius in metres
+        #         "color"    : "#FF00AA",
+        #                            # "max_length"  : 0.3,      # clamp arrow length (m); null = off
+        #                            # "min_acc"     : 0.0,      # hide arrows below this |a| (m/s²)
+        #                            # "show_angular": True,     # also draw an α arrow per body
+        #                            # "ang_scale"   : 0.005,    # m per (rad/s²) (default: acc_scale)
+        #                            # "ang_width"   : 0.001,    # shaft radius (default: acc_width)
+        #                            # "ang_color"   : "#AA00FF",
+        #                            # "min_ang"     : 0.0,      # hide α arrows below this (rad/s²)
+        #         "update_every": 1  # null -> solver.save_every cadence
+        #     },
+        # })
+
 
         # Top-down camera auto-fitted to the domain
         cam = top_down_camera_config(
@@ -327,4 +401,9 @@ class SimConfig(BaseSimConfig):
 
 
 if __name__ == "__main__":
-    SimConfig().single_run()
+    import sys
+    drag_src = sys.argv[1] if len(sys.argv) > 1 else "csv"
+    if drag_src not in ("csv", "npy"):
+        print(f"Usage: {sys.argv[0]} [csv|npy]")
+        sys.exit(1)
+    SimConfig(drag_source=drag_src).single_run()

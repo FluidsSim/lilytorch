@@ -146,10 +146,15 @@ def _args_3d(scalar_nrho, dtype):
     return tensors, geom
 
 
-def _cpu_vs_gpu(fn, tensors, geom, method, offset):
-    wc = fn(*tensors, *geom, method=method, sample_offset=offset)
+def _cpu_vs_gpu(fn, tensors, geom, method, offset, off_pres=None):
+    """``offset`` moves both channels (the legacy single-knob behaviour);
+    pass ``off_pres`` to drive the pressure channel independently."""
+    op = offset if off_pres is None else off_pres
+    kw = dict(method=method,
+              sample_offset_pressure=op, sample_offset_friction=offset)
+    wc = fn(*tensors, *geom, **kw)
     gpu = tuple(t.cuda() for t in tensors)
-    wg = fn(*gpu, *geom, method=method, sample_offset=offset)
+    wg = fn(*gpu, *geom, **kw)
     return wc.cpu(), wg.cpu()
 
 

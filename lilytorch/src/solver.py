@@ -419,8 +419,50 @@ class FluidSolver(PlottingMixin):
         # = sample exactly at the centroid/contour marker (legacy
         # behaviour, biased by BDIM band contamination).  Set to ~eps
         # via config to escape the band.
+        #
+        # DEPRECATED in favour of the per-channel knobs below, which apply to
+        # BOTH readouts.  Kept because it is the single knob every existing
+        # lagrangian config sets, and it moves p and sigma together.
         self.lagrangian_sample_offset = float(
             solver.get("lagrangian_sample_offset", 0.0))
+
+        # ---- per-channel sampling locations, shared by BOTH readouts -----
+        # phi = offset is the iso-surface on which each channel is read.  The
+        # two channels are contaminated differently inside the BDIM band, and
+        # the two readouts have historically disagreed about where to sample:
+        #
+        #   eulerian:   p at phi=0,   sigma at phi=eps   (Maertens & Weymouth)
+        #   lagrangian: both at phi=lagrangian_sample_offset
+        #
+        # so any cross-method comparison confounded "which readout" with
+        # "sampled where".  These knobs exist to eliminate that: setting them
+        # pins both readouts to the same locations.  None → each readout keeps
+        # its own legacy convention, so defaults are bit-for-bit unchanged.
+        #
+        # Given in CELLS, not metres: the right value scales with h, so a
+        # value fixed in metres means a different thing on every grid and a
+        # grid-convergence study would silently change the physics.
+        _h_f = float(self.h)
+        _off_p_cells = solver.get("sample_offset_pressure_cells", None)
+        _off_f_cells = solver.get("sample_offset_friction_cells", None)
+        _lso = self.lagrangian_sample_offset
+
+        if _off_p_cells is None:
+            self.eul_sample_offset_pressure  = 0.0
+            self.lagr_sample_offset_pressure = _lso
+        else:
+            _p = float(_off_p_cells) * _h_f
+            self.eul_sample_offset_pressure  = _p
+            self.lagr_sample_offset_pressure = _p
+
+        if _off_f_cells is None:
+            self.eul_sample_offset_friction  = float(self.eps)
+            self.lagr_sample_offset_friction = _lso
+        else:
+            _f = float(_off_f_cells) * _h_f
+            self.eul_sample_offset_friction  = _f
+            self.lagr_sample_offset_friction = _f
+
         self.zero_pressure_inside = solver.get("zero_pressure_inside", False)
         # Smooth body-velocity blend in the overlap band (kernel path).
         # Width given in grid cells; <=0 / None → legacy hard running-min

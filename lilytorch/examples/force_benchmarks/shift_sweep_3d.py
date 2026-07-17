@@ -26,8 +26,13 @@ from lilytorch.src.native import streaming_sdf_forces_post_3d
 DEFAULT_SNAP = ("/data/andreaferrario/ns_data/zfish_force_snapshot/snap.pt")
 
 
-def _read(snap, eps_solver, submethod, device="cpu"):
-    """Drive the native readout at one band shift -> (B,12) force/torque rows."""
+def _read(snap, off_visc, submethod, device="cpu", off_pres=0.0):
+    """Drive the native readout at one band shift -> (B,12) force/torque rows.
+
+    ``off_pres`` defaults to 0 — the production convention, where only the
+    viscous channel is shifted.  Pass it explicitly to pin this readout to the
+    same sampling locations as the lagrangian one.
+    """
     B = snap["n_bodies"]
     out = torch.zeros((B, 12), dtype=torch.float64, device=device)
     nu_rho = torch.tensor([snap["nu"] * snap["rho"]],
@@ -44,18 +49,22 @@ def _read(snap, eps_solver, submethod, device="cpu"):
         snap["w"].to(device), snap["p"].to(device),
         nu_rho,
         snap["eps_body"],          # delta WIDTH: held fixed across the sweep
-        eps_solver,                # band SHIFT: the swept quantity
+        off_pres,                  # pressure delta centre
+        off_visc,                  # viscous band SHIFT: the swept quantity
         snap["h3"], snap["delta_order"], out,
         submethod, snap["ph_blend_cells"] * snap["h"],
     )
     return out
 
 
-def _lagrangian(snap, sample_offset, device="cpu"):
+def _lagrangian(snap, sample_offset, device="cpu", off_pres=None):
     """Drive the lagrangian readout on the same frozen field -> (B,12).
 
     Only available on snapshots taken from a lagrangian run: the world-frame
     triangulation is built/refreshed by BDIMhandler on that path only.
+
+    ``sample_offset`` moves BOTH channels unless ``off_pres`` is given (the
+    legacy single-knob semantics this sweep was written against).
     """
     from lilytorch.src.forces import _viscous_stress_tensor
 
@@ -80,7 +89,10 @@ def _lagrangian(snap, sample_offset, device="cpu"):
         snap["tri_area"].to(device, dt), snap["tri_offsets"].to(device),
         snap["com_pos"].to(device, dt),
         snap["x0"], snap["y0"], snap["z0"], inv, inv, inv,
-        nx, ny, nz, 0, float(sample_offset), out,
+        nx, ny, nz, 0,
+        float(sample_offset if off_pres is None else off_pres),
+        float(sample_offset),
+        out,
     )
     return out
 

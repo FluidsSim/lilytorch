@@ -25,7 +25,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 from lilytorch.src.solver import FluidSolver
 from lilytorch.src.two_phase_solver import TwoPhaseSolver
-from lilytorch.src.facade import body_update_2d, body_update_3d
+from lilytorch.src.native import body_update_2d, body_update_3d
 from lilytorch.src.body import rotate_grid_2d, _rotate_grid_3d_compiled
 from lilytorch.integration.rigid_body_backend import (
     FarmsMujocoBackend, MujocoCheckpoint)

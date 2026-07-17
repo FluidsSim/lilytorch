@@ -143,7 +143,8 @@ void lagrangian_forces_2d_cpu(
     const double inv_dx, const double inv_dy,
     const int64_t Mx, const int64_t My,
     const int64_t interp_method,
-    const double sample_offset,
+    const double sample_offset_pressure,
+    const double sample_offset_friction,
     at::Tensor out)
 {
     const int B = (int)com_pos.size(0);
@@ -193,8 +194,9 @@ void lagrangian_forces_2d_cpu(
         const scalar_t idx  = (scalar_t)inv_dx, idy = (scalar_t)inv_dy;
         const int method = (int)interp_method;
         // See lagrangian_forces.cu — sample fields offset away from the
-        // surface to escape the BDIM band.
-        const scalar_t soff = (scalar_t)sample_offset;
+        // surface to escape the BDIM band, independently per channel.
+        const scalar_t off_pres = (scalar_t)sample_offset_pressure;
+        const scalar_t off_visc = (scalar_t)sample_offset_friction;
 
         at::parallel_for(0, B, 0, [&](int64_t b_start, int64_t b_end) {
             for (int64_t b = b_start; b < b_end; ++b) {
@@ -234,26 +236,30 @@ void lagrangian_forces_2d_cpu(
                     // CCW outward normal = (+t_y, -t_x)
                     const scalar_t nx =  ty;
                     const scalar_t ny = -tx;
-                    const scalar_t qxs = qx + soff * nx;
-                    const scalar_t qys = qy + soff * ny;
+                    const scalar_t qxv = qx + off_visc * nx;
+                    const scalar_t qyv = qy + off_visc * ny;
 
                     const scalar_t e_xx = lf_sample_2d<scalar_t>(
-                        method, exx, iMx, iMy, bx0s, by0s, idx, idy, qxs, qys);
+                        method, exx, iMx, iMy, bx0s, by0s, idx, idy, qxv, qyv);
                     const scalar_t e_xy = lf_sample_2d<scalar_t>(
-                        method, exy, iMx, iMy, bx0s, by0s, idx, idy, qxs, qys);
+                        method, exy, iMx, iMy, bx0s, by0s, idx, idy, qxv, qyv);
                     const scalar_t e_yy = lf_sample_2d<scalar_t>(
-                        method, eyy, iMx, iMy, bx0s, by0s, idx, idy, qxs, qys);
+                        method, eyy, iMx, iMy, bx0s, by0s, idx, idy, qxv, qyv);
 
+                    // nu_rho rides with the viscous channel.
                     const scalar_t nu_rho_m = nrho_scalar
                         ? nrho[0]
                         : lf_sample_2d<scalar_t>(
-                            method, nrho, iMx, iMy, bx0s, by0s, idx, idy, qxs, qys);
+                            method, nrho, iMx, iMy, bx0s, by0s, idx, idy, qxv, qyv);
 
                     tvx[k] = nu_rho_m * (e_xx * nx + e_xy * ny);
                     tvy[k] = nu_rho_m * (e_xy * nx + e_yy * ny);
 
+                    const scalar_t qxp = qx + off_pres * nx;
+                    const scalar_t qyp = qy + off_pres * ny;
+
                     const scalar_t p_m = lf_sample_2d<scalar_t>(
-                        method, pp, iMx, iMy, bx0s, by0s, idx, idy, qxs, qys);
+                        method, pp, iMx, iMy, bx0s, by0s, idx, idy, qxp, qyp);
                     tpx[k] = -p_m * nx;
                     tpy[k] = -p_m * ny;
                 }

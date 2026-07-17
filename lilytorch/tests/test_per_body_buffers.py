@@ -35,7 +35,6 @@ import pytest
 import torch
 
 from lilytorch.src import native
-from lilytorch.src import facade
 
 DEV = "cuda:0"
 SKIP_NO_CUDA = pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA")
@@ -187,14 +186,14 @@ def run_facade(sc, dtype, dev=DEV, blend_eps=0.0):
     out = _out_buffers(sc, dtype, dev=dev)
     lo, dim = _dirty(sc)
     if sc["dim"] == 2:
-        facade.body_update_2d(
+        native.body_update_2d(
             sc["F_flat"], sc["F_offsets"], sc["body_shapes"], sc["body_meta"], sc["kin"],
             sc["aabb_lo"], sc["aabb_dim"], sc["gx"], sc["gy"], sc["h"], sc["max_vol"],
             out["sdf_cc"], out["sdf_u"], out["sdf_v"], out["body_u"], out["body_v"],
             0, lo[0], lo[1], dim[0], dim[1],
             blend_eps=float(blend_eps))
     else:
-        facade.body_update_3d(
+        native.body_update_3d(
             sc["F_flat"], sc["F_offsets"], sc["body_shapes"], sc["body_meta"], sc["kin"],
             sc["aabb_lo"], sc["aabb_dim"], sc["gx"], sc["gy"], sc["gz"], sc["h"], sc["max_vol"],
             out["sdf_cc"], out["sdf_u"], out["sdf_v"], out["sdf_w"],
@@ -211,7 +210,7 @@ def run_resolve(sc, dtype, dev=DEV, blend_eps=0.0):
     out = _out_buffers(sc, dtype, dev=dev)
     lo, dim = _dirty(sc)
     device = out["sdf_cc"].device
-    priv_offsets, pb = facade._regime_b_priv(
+    priv_offsets, pb = native._regime_b_priv(
         sc["body_shapes"].size(0), sc["max_vol"], dtype, device, sc["dim"])
     if sc["dim"] == 2:
         native.streaming_sdf_stag_2d_resolve(

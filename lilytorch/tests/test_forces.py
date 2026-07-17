@@ -89,7 +89,7 @@ def _run_2d(dev, dtype, submethod, delta_order, scalar_nrho):
         nrho = nrho_f.abs() + 0.05
 
     eps_body = 2.0 * h
-    eps_solver = 0.0
+    off_pres, off_visc = 0.0, 0.0
     h2 = h * h
     B = sc["aabb_dim"].shape[0]
     ph_tau = 0.5 * h if submethod else 0.0
@@ -99,7 +99,7 @@ def _run_2d(dev, dtype, submethod, delta_order, scalar_nrho):
         sc["F_flat"], sc["F_offsets"], sc["body_shapes"], sc["body_meta"],
         sc["kin"], sc["aabb_lo"], sc["aabb_dim"], sc["gx"], sc["gy"],
         h, int(sc["max_vol"]), sdf_cc, 0, u, v, p, nrho,
-        eps_body, eps_solver, h2, delta_order, out_w,
+        eps_body, off_pres, off_visc, h2, delta_order, out_w,
         force_submethod=submethod, ph_tau=ph_tau)
     return out_w.cpu()
 
@@ -175,7 +175,7 @@ def _run_3d(dev, dtype, submethod, delta_order, scalar_nrho):
         nrho = nrho_f.abs() + 0.05
 
     eps_body = 2.0 * h
-    eps_solver = 0.0
+    off_pres, off_visc = 0.0, 0.0
     h3 = h * h * h
     B = sc["aabb_dim"].shape[0]
     ph_tau = 0.5 * h if submethod else 0.0
@@ -185,7 +185,7 @@ def _run_3d(dev, dtype, submethod, delta_order, scalar_nrho):
         sc["F_flat"], sc["F_offsets"], sc["body_shapes"], sc["body_meta"],
         sc["kin"], sc["aabb_lo"], sc["aabb_dim"], sc["gx"], sc["gy"], sc["gz"],
         h, int(sc["max_vol"]), sdf_cc, 0, u, v, w, p, nrho,
-        eps_body, eps_solver, h3, delta_order, out_w,
+        eps_body, off_pres, off_visc, h3, delta_order, out_w,
         force_submethod=submethod, ph_tau=ph_tau)
     return out_w.cpu()
 
@@ -303,7 +303,8 @@ def _graph_steps_2d(dtype, submethod=0):
 
     u, v, p, _ = _rand_fields((Ngx, Ngy), dtype, dev, seed=7)
     nrho = torch.tensor([0.13], dtype=dtype, device=dev)
-    eps_body, eps_solver, h2 = 2.0 * h, 0.0, h * h
+    eps_body, h2 = 2.0 * h, h * h
+    off_pres, off_visc = 0.0, 0.0
     ph_tau = 0.5 * h if submethod else 0.0
     B = sc["aabb_dim"].shape[0]
 
@@ -334,7 +335,7 @@ def _graph_steps_2d(dtype, submethod=0):
         fg.run(sc["F_flat"], sc["F_offsets"], sc["body_shapes"],
                sc["body_meta"], kin, aabb_lo, aabb_dim,
                (sc["gx"], sc["gy"]), h, max_vol, sdf_cc, 0,
-               (u, v), p, nrho, eps_body, eps_solver, h2, 1, out_g,
+               (u, v), p, nrho, eps_body, off_pres, off_visc, h2, 1, out_g,
                force_submethod=submethod, ph_tau=ph_tau)
 
         out_e.zero_()
@@ -342,7 +343,7 @@ def _graph_steps_2d(dtype, submethod=0):
             sc["F_flat"], sc["F_offsets"], sc["body_shapes"], sc["body_meta"],
             kin, aabb_lo, aabb_dim, sc["gx"], sc["gy"],
             h, max_vol, sdf_cc, 0, u, v, p, nrho,
-            eps_body, eps_solver, h2, 1, out_e,
+            eps_body, off_pres, off_visc, h2, 1, out_e,
             force_submethod=submethod, ph_tau=ph_tau)
 
         err = (out_g - out_e).abs().max().item()
@@ -374,7 +375,8 @@ def _graph_steps_3d(dtype, submethod=0):
 
     u, v, w, p, _ = _rand_fields((Ngx, Ngy, Ngz), dtype, dev, seed=11)
     nrho = torch.tensor([0.11], dtype=dtype, device=dev)
-    eps_body, eps_solver, h3 = 2.0 * h, 0.0, h * h * h
+    eps_body, h3 = 2.0 * h, h * h * h
+    off_pres, off_visc = 0.0, 0.0
     ph_tau = 0.5 * h if submethod else 0.0
     B = sc["aabb_dim"].shape[0]
 
@@ -400,7 +402,7 @@ def _graph_steps_3d(dtype, submethod=0):
         fg.run(sc["F_flat"], sc["F_offsets"], sc["body_shapes"],
                sc["body_meta"], kin, aabb_lo, aabb_dim,
                (sc["gx"], sc["gy"], sc["gz"]), h, max_vol, sdf_cc, 0,
-               (u, v, w), p, nrho, eps_body, eps_solver, h3, 1, out_g,
+               (u, v, w), p, nrho, eps_body, off_pres, off_visc, h3, 1, out_g,
                force_submethod=submethod, ph_tau=ph_tau)
 
         out_e.zero_()
@@ -408,7 +410,7 @@ def _graph_steps_3d(dtype, submethod=0):
             sc["F_flat"], sc["F_offsets"], sc["body_shapes"], sc["body_meta"],
             kin, aabb_lo, aabb_dim, sc["gx"], sc["gy"], sc["gz"],
             h, max_vol, sdf_cc, 0, u, v, w, p, nrho,
-            eps_body, eps_solver, h3, 1, out_e,
+            eps_body, off_pres, off_visc, h3, 1, out_e,
             force_submethod=submethod, ph_tau=ph_tau)
 
         err = (out_g - out_e).abs().max().item()
@@ -494,7 +496,10 @@ def _oracle_eulerian(sc, submethod, u, v, w, p):
         u.ravel().contiguous(), v.ravel().contiguous(),
         w.ravel().contiguous(), p.ravel().contiguous(),
         torch.tensor([_ORC_NU * _ORC_RHO], dtype=torch.float64),
-        sc["eps"], sc["eps"], sc["h"] ** 3, 1, out, submethod, 1.5 * sc["h"],
+        # (eps_body, off_pres, off_visc) — the production convention: p read
+        # on the surface, sigma shifted out of the band by eps.
+        sc["eps"], 0.0, sc["eps"], sc["h"] ** 3, 1, out, submethod,
+        1.5 * sc["h"],
     )
     return float(out[0, 0]), float(out[0, 6])
 
@@ -515,9 +520,196 @@ def _oracle_lagrangian(sc, u, v, w, p):
         torch.tensor([[_ORC_C, _ORC_C, _ORC_C]], dtype=torch.float64),
         float(sc["g"][0]), float(sc["g"][0]), float(sc["g"][0]),
         1.0 / sc["h"], 1.0 / sc["h"], 1.0 / sc["h"],
-        sc["N"], sc["N"], sc["N"], 0, 0.0, out,
+        sc["N"], sc["N"], sc["N"], 0, 0.0, 0.0, out,
     )
     return float(out[0, 0]), float(out[0, 6])
+
+
+# ---- split sampling offsets (handoff §B1) -------------------------------
+# The two readouts each carry INDEPENDENT (pressure, friction) offsets.  The
+# helpers below drive both knobs explicitly so a comparison can pin the two
+# readouts to identical sampling locations — the variable that §A of the
+# handoff identified as confounding every previous cross-method number.
+
+def _oracle_eulerian_offsets(sc, u, v, w, p, off_pres, off_visc):
+    """-> (F_visc_x, F_pres_x) from the eulerian readout at explicit offsets."""
+    out = torch.zeros((1, 12), dtype=torch.float64)
+    streaming_sdf_forces_post_3d(
+        sc["F_flat"], sc["F_offsets"], sc["body_shapes"], sc["body_meta"],
+        sc["kin"], sc["aabb_lo"], sc["aabb_dim"],
+        sc["g"], sc["g"], sc["g"], sc["h"], sc["N"] ** 3,
+        sc["sdf_cc"], 0,
+        u.ravel().contiguous(), v.ravel().contiguous(),
+        w.ravel().contiguous(), p.ravel().contiguous(),
+        torch.tensor([_ORC_NU * _ORC_RHO], dtype=torch.float64),
+        sc["eps"], float(off_pres), float(off_visc), sc["h"] ** 3, 1, out,
+        0, 1.5 * sc["h"],
+    )
+    return float(out[0, 0]), float(out[0, 6])
+
+
+def _oracle_lagrangian_offsets(sc, u, v, w, p, off_pres, off_visc):
+    """-> (F_visc_x, F_pres_x) from the lagrangian readout at explicit offsets."""
+    from lilytorch.src.forces import _viscous_stress_tensor
+    from lilytorch.tests.test_lagrangian import _build_sphere_tris
+
+    tc, tn, ta = _build_sphere_tris(_ORC_C, _ORC_C, _ORC_C, _ORC_R, 160, 90)
+    e = _viscous_stress_tensor((u, v, w), sc["h"])
+    out = torch.zeros((1, 12), dtype=torch.float64)
+    torch.ops.lilytorch_kernels.lagrangian_forces_3d.default(
+        e[0][0].contiguous(), e[1][1].contiguous(), e[2][2].contiguous(),
+        e[0][1].contiguous(), e[0][2].contiguous(), e[1][2].contiguous(),
+        p.contiguous(), torch.tensor([_ORC_NU * _ORC_RHO], dtype=torch.float64),
+        tc, tn, ta, torch.tensor([0, tc.shape[1]], dtype=torch.int64),
+        torch.tensor([[_ORC_C, _ORC_C, _ORC_C]], dtype=torch.float64),
+        float(sc["g"][0]), float(sc["g"][0]), float(sc["g"][0]),
+        1.0 / sc["h"], 1.0 / sc["h"], 1.0 / sc["h"],
+        sc["N"], sc["N"], sc["N"], 0,
+        float(off_pres), float(off_visc), out,
+    )
+    return float(out[0, 0]), float(out[0, 6])
+
+
+def _orc_fields(sc):
+    """Case A+B superposed: linear pressure -G·X and quadratic shear in u.
+    Both channels are then simultaneously nonzero and separately exact."""
+    z = torch.zeros_like(sc["X"])
+    return (_ORC_CSH * sc["Y"] ** 2, z.clone(), z.clone(), -_ORC_G * sc["X"])
+
+
+@pytest.mark.parametrize("readout", ["eulerian", "lagrangian"])
+def test_split_offsets_each_channel_moves_only_with_its_own_knob(readout):
+    """The pressure delta must follow ``off_pres`` alone and the viscous delta
+    ``off_visc`` alone, in BOTH readouts.
+
+    This is the invariant that makes a matched-sampling comparison mean
+    anything.  Before the split the eulerian had a single ``eps_solver`` that
+    moved sigma while p stayed pinned at phi=0, and the lagrangian had a
+    single ``sample_offset`` that moved both — so "the same offset" denoted
+    different sampling locations in the two readouts (handoff §A).
+    """
+    sc = _oracle_scene(48, 1.0)
+    fn = (_oracle_eulerian_offsets if readout == "eulerian"
+          else _oracle_lagrangian_offsets)
+    args = _orc_fields(sc)
+    s = 2.0 * sc["h"]
+
+    fv_00, fp_00 = fn(sc, *args, 0.0, 0.0)
+    fv_p0, fp_p0 = fn(sc, *args, s, 0.0)     # move pressure only
+    fv_0f, fp_0f = fn(sc, *args, 0.0, s)     # move friction only
+
+    # Moving the pressure knob must leave the viscous channel untouched...
+    assert fv_p0 == pytest.approx(fv_00, rel=1e-12), \
+        f"{readout}: off_pres leaked into the viscous channel"
+    # ...and vice versa.
+    assert fp_0f == pytest.approx(fp_00, rel=1e-12), \
+        f"{readout}: off_visc leaked into the pressure channel"
+
+    # And each knob must actually do something to its own channel (a no-op
+    # would satisfy the independence assertions above vacuously).
+    assert abs(fp_p0 - fp_00) > 1e-3 * abs(fp_00), \
+        f"{readout}: off_pres did not move the pressure channel"
+    assert abs(fv_0f - fv_00) > 1e-3 * abs(fv_00), \
+        f"{readout}: off_visc did not move the viscous channel"
+
+
+def test_split_offsets_equal_knobs_reproduce_the_legacy_single_knob():
+    """(o, o) == the legacy single ``sample_offset``, which moved p and sigma
+    together to x + o·n.  Pinned against the exact closed form for that
+    sampling, so it is an oracle rather than a self-comparison.
+
+    Both fields are linear in the sampled coordinate (p = -G·X; the shear
+    u = c·Y² has strain ∂u/∂y = 2c·Y), so sampling at x + o·n and integrating
+    over the TRUE sphere gives, using ∮n_i² dS = 4πR²/3:
+
+        ∮ (F + o·n_i) n_i dS = F·V + o·4πR²/3 = (4/3)πR²·(R + o) ≡ A(o)
+
+    for both channels — F_p = G·A(o) and F_v = 2νρc·A(o).  A(0) = V recovers
+    the two exact zero-offset values.  Note this growth is LINEAR in o: the
+    surface is fixed and only the sample point moves.  Contrast the eulerian,
+    whose surface itself moves (cubic) — see the iso-surface test below.
+    """
+    sc = _oracle_scene(48, 1.0)
+    args = _orc_fields(sc)
+    o = 2.0 * sc["h"]
+
+    fv, fp = _oracle_lagrangian_offsets(sc, *args, o, o)
+
+    A = (4.0 / 3.0) * 3.141592653589793 * _ORC_R ** 2 * (_ORC_R + o)
+
+    exact_fp = _ORC_G * A
+    assert fp == pytest.approx(exact_fp, rel=0.02), \
+        f"lagrangian F_p at matched offset {o:.4e}: {fp:.6e} vs {exact_fp:.6e}"
+
+    exact_fv = 2 * _ORC_NU * _ORC_RHO * _ORC_CSH * A
+    assert fv == pytest.approx(exact_fv, rel=0.02), \
+        f"lagrangian F_v at matched offset {o:.4e}: {fv:.6e} vs {exact_fv:.6e}"
+
+
+@pytest.mark.parametrize("s_over_h", [1.0, 2.0])
+def test_split_offsets_eulerian_pressure_reads_the_offset_iso_surface(s_over_h):
+    """The eulerian PRESSURE channel, now that it has a knob, inflates with the
+    enclosed-volume ratio ((R+s)/R)³ — the same defect §10 established for the
+    viscous channel, and previously unmeasurable because p was pinned at φ=0.
+
+    Exact: for p = -G·X, ∮_{φ=s} -p·n dS = G·V(s) = G·(4/3)π(R+s)³.
+
+    Contrast test_split_offsets_equal_knobs_reproduce_the_legacy_single_knob:
+    the lagrangian's pressure grows only LINEARLY in o (fixed surface, shifted
+    sample), the eulerian's CUBICALLY (the surface itself moves).  So pinning
+    both readouts to a common nonzero offset does NOT make them agree — the
+    matched-sampling comparison must be interpreted with that in mind.
+    """
+    sc = _oracle_scene(48, 1.0)
+    args = _orc_fields(sc)
+    s = s_over_h * sc["h"]
+
+    _, fp_0 = _oracle_eulerian_offsets(sc, *args, 0.0, 0.0)
+    _, fp_s = _oracle_eulerian_offsets(sc, *args, s, 0.0)
+
+    assert fp_s / fp_0 == pytest.approx(((_ORC_R + s) / _ORC_R) ** 3, rel=0.03), \
+        (f"eulerian pressure at s={s_over_h}h should track the enclosed-volume "
+         f"ratio, got {fp_s / fp_0:.4f}")
+
+
+@pytest.mark.parametrize("s_over_h", [1.0, 2.0, 4.0])
+def test_split_offsets_readouts_differ_only_by_the_area_jacobian(s_over_h):
+    """At MATCHED sampling the two readouts differ by a purely GEOMETRIC factor.
+
+    The lagrangian does not move its triangulation when the offset is raised:
+    area, normal and moment arm stay on the true surface, only the field lookup
+    moves (lagrangian_forces.cu:194-260).  The eulerian has no mesh, so its
+    shifted delta IS the surface — moving the sample necessarily moves the
+    measure.  Both therefore evaluate the same traction at the same point, and
+    differ only by the Steiner area Jacobian:
+
+        lagrangian(s) = ∮_{S₀} T(x+s·n)       dS₀
+        eulerian(s)   = ∮_{S₀} T(x+s·n)·J     dS₀ ,  J = (1+s·κ₁)(1+s·κ₂)
+
+    On a sphere J = (1+s/R)².  The signature of a purely geometric factor is
+    that the ratio is FIELD-INDEPENDENT — so this pins the pressure and viscous
+    channels giving the SAME ratio, on fields that are otherwise unrelated.
+
+    Consequence (handoff §B1): matched sampling does NOT imply agreement, and
+    a residual at s>0 is NOT "the parity gap" until J is divided out.
+    """
+    sc = _oracle_scene(48, 1.0)
+    args = _orc_fields(sc)
+    s = s_over_h * sc["h"]
+
+    fv_e, fp_e = _oracle_eulerian_offsets(sc, *args, s, s)
+    fv_l, fp_l = _oracle_lagrangian_offsets(sc, *args, s, s)
+
+    jacobian = (1.0 + s / _ORC_R) ** 2
+    assert fp_e / fp_l == pytest.approx(jacobian, rel=0.02), \
+        f"pressure ratio {fp_e/fp_l:.4f} != Steiner J {jacobian:.4f}"
+    assert fv_e / fv_l == pytest.approx(jacobian, rel=0.02), \
+        f"viscous ratio {fv_e/fv_l:.4f} != Steiner J {jacobian:.4f}"
+    # Field-independence is the actual claim: a geometric factor cannot know
+    # which channel it is scaling.
+    assert fv_e / fv_l == pytest.approx(fp_e / fp_l, rel=1e-3), \
+        ("the eul/lag ratio must be field-independent (it is pure geometry); "
+         f"viscous {fv_e/fv_l:.5f} vs pressure {fp_e/fp_l:.5f}")
 
 
 @pytest.mark.parametrize("submethod", [0, 1])
@@ -590,13 +782,16 @@ def _oracle_lagrangian_offset(sc, u, v, w, p, sample_offset):
         torch.tensor([[_ORC_C, _ORC_C, _ORC_C]], dtype=torch.float64),
         float(sc["g"][0]), float(sc["g"][0]), float(sc["g"][0]),
         1.0 / sc["h"], 1.0 / sc["h"], 1.0 / sc["h"],
-        sc["N"], sc["N"], sc["N"], 0, float(sample_offset), out,
+        sc["N"], sc["N"], sc["N"], 0,
+        float(sample_offset), float(sample_offset), out,
     )
     return float(out[0, 0])
 
 
-def _oracle_eulerian_shift(sc, u, v, w, p, eps_solver):
-    """Eulerian readout at an explicit band shift (eps_body held fixed)."""
+def _oracle_eulerian_shift(sc, u, v, w, p, off_visc):
+    """Eulerian readout at an explicit VISCOUS band shift (eps_body held
+    fixed, pressure left on the surface at phi=0 — the production
+    convention)."""
     out = torch.zeros((1, 12), dtype=torch.float64)
     streaming_sdf_forces_post_3d(
         sc["F_flat"], sc["F_offsets"], sc["body_shapes"], sc["body_meta"],
@@ -606,14 +801,15 @@ def _oracle_eulerian_shift(sc, u, v, w, p, eps_solver):
         u.ravel().contiguous(), v.ravel().contiguous(),
         w.ravel().contiguous(), p.ravel().contiguous(),
         torch.tensor([_ORC_NU * _ORC_RHO], dtype=torch.float64),
-        sc["eps"], float(eps_solver), sc["h"] ** 3, 1, out, 0, 1.5 * sc["h"],
+        sc["eps"], 0.0, float(off_visc), sc["h"] ** 3, 1, out, 0, 1.5 * sc["h"],
     )
     return float(out[0, 0])
 
 
 def test_oracle_readouts_are_not_the_same_device_at_matched_offset():
-    """The two readouts do NOT agree by matching eps_solver to the lagrangian
-    sample offset — they are structurally different integrals:
+    """The two readouts do NOT agree by matching the eulerian's viscous band
+    shift to the lagrangian sample offset — they are structurally different
+    integrals:
 
         eulerian(s)   = ∮_{φ=s} σ·n dS          -- the OFFSET ISO-SURFACE,
                                                    whose measure inflates with s
@@ -709,7 +905,9 @@ def test_delta_order2_applies_the_coarea_factor(g):
         args[0].ravel().contiguous(), args[1].ravel().contiguous(),
         args[2].ravel().contiguous(), args[3].ravel().contiguous(),
         torch.tensor([_ORC_NU * _ORC_RHO], dtype=torch.float64),
-        sc["eps"], 0.0, sc["h"] ** 3, 2, out, 0, 1.5 * sc["h"],
+        # (eps_body, off_pres, off_visc): both channels unshifted, so the only
+        # thing under test is the coarea factor.
+        sc["eps"], 0.0, 0.0, sc["h"] ** 3, 2, out, 0, 1.5 * sc["h"],
     )
     f2 = float(out[0, 0])
 

@@ -58,7 +58,9 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " int interp_method,"
         " Tensor u, Tensor v, Tensor w, Tensor p,"
         " Tensor nu_rho_field,"
-        " float eps_body, float eps_solver, float h3,"
+        " float eps_body,"
+        " float sample_offset_pressure, float sample_offset_friction,"
+        " float h3,"
         " int delta_order, int force_submethod, float ph_tau,"
         " Tensor(a!) out"
         ") -> ()");
@@ -216,6 +218,14 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
     //   * ``com_pos`` — per-body COM, shape ``(B, 2)``.
     //   * Grid metadata: ``bx0, by0, inv_dx, inv_dy, Mx, My``.
     //   * ``interp_method`` — 0=bilinear, 1=biquadratic.
+    //   * ``sample_offset_pressure`` / ``sample_offset_friction`` — distance
+    //     (metres) along the outward normal at which ``p`` and the strain
+    //     tensor are respectively sampled.  Independent knobs: the two
+    //     channels are contaminated differently by the BDIM band, and pinning
+    //     them to a common value is what makes an eulerian/lagrangian
+    //     comparison like-for-like.  Both default to 0 at the Python layer
+    //     (sample exactly on the marker).  Passing the same value for both
+    //     reproduces the legacy single ``sample_offset`` knob.
     //   * ``out`` — preallocated ``(B, 6)`` float64; column layout is
     //     ``[fv_x, fv_y, t_v, fp_x, fp_y, t_p]``.  Writes are
     //     accumulated atomically (CUDA) or reduced per-body (CPU).
@@ -229,7 +239,7 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " float inv_dx, float inv_dy,"
         " int Mx, int My,"
         " int interp_method,"
-        " float sample_offset,"
+        " float sample_offset_pressure, float sample_offset_friction,"
         " Tensor(a!) out"
         ") -> ()");
 
@@ -249,7 +259,7 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " float inv_dx, float inv_dy, float inv_dz,"
         " int Mx, int My, int Mz,"
         " int interp_method,"
-        " float sample_offset,"
+        " float sample_offset_pressure, float sample_offset_friction,"
         " Tensor(a!) out"
         ") -> ()");
 
@@ -264,7 +274,9 @@ TORCH_LIBRARY(lilytorch_kernels, m) {
         " int interp_method,"
         " Tensor u_prev, Tensor v_prev, Tensor p_prev,"
         " Tensor nu_rho_field,"
-        " float eps_body, float eps_solver, float h2,"
+        " float eps_body,"
+        " float sample_offset_pressure, float sample_offset_friction,"
+        " float h2,"
         " int delta_order, int force_submethod, float ph_tau,"
         " Tensor(a!) out"
         ") -> ()");

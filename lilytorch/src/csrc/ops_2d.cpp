@@ -391,7 +391,10 @@ void streaming_sdf_forces_post_2d_cpu(
     const int64_t interp_method,
     const at::Tensor& u_prev, const at::Tensor& v_prev, const at::Tensor& p_prev,
     const at::Tensor& nu_rho_field,
-    const double eps_body, const double eps_solver, const double h2,
+    const double eps_body,
+    const double sample_offset_pressure,
+    const double sample_offset_friction,
+    const double h2,
     const int64_t delta_order,
     const int64_t force_submethod,
     const double ph_tau,
@@ -436,14 +439,16 @@ void streaming_sdf_forces_post_2d_cpu(
 
         const scalar_t inv_h_s    = (scalar_t)(1.0 / h_grid);
         const scalar_t eps_b      = (scalar_t)eps_body;
-        const scalar_t eps_s      = (scalar_t)eps_solver;
+        const scalar_t off_pres   = (scalar_t)sample_offset_pressure;
+        const scalar_t off_visc   = (scalar_t)sample_offset_friction;
         const scalar_t pi_v       = (scalar_t)3.141592653589793;
         const scalar_t inv_2eps   = (scalar_t)0.5 / eps_b;
         const scalar_t pi_over_eb = pi_v / eps_b;
         const double   h2_d       = (double)h2;
 
-        const scalar_t band_lo = (eps_s - eps_b) < (-eps_b) ? (eps_s - eps_b) : (-eps_b);
-        const scalar_t band_hi = (eps_s + eps_b) > ( eps_b) ? (eps_s + eps_b) : ( eps_b);
+        // Union of the two delta supports — see eulerian_forces.cu.
+        const scalar_t band_lo = (off_pres < off_visc ? off_pres : off_visc) - eps_b;
+        const scalar_t band_hi = (off_pres > off_visc ? off_pres : off_visc) + eps_b;
 
         std::vector<double> accs(static_cast<size_t>(B) * 6, 0.0);
 
@@ -507,13 +512,16 @@ void streaming_sdf_forces_post_2d_cpu(
                           F_b, Mx, My, bx0, by0, idx_, idy_, bxq, byq);
                 if (sdf <= band_lo || sdf >= band_hi) continue;
 
+                // Viscous delta centred at phi = off_visc, pressure delta at
+                // phi = off_pres.  Legacy = (0, eps_multiplier*h).
                 scalar_t delta_visc = 0;
-                const scalar_t d_visc = sdf - eps_s;
+                const scalar_t d_visc = sdf - off_visc;
                 if (d_visc > -eps_b && d_visc < eps_b)
                     delta_visc = ((scalar_t)1 + std::cos(pi_over_eb * d_visc)) * inv_2eps;
                 scalar_t delta_pres = 0;
-                if (sdf > -eps_b && sdf < eps_b)
-                    delta_pres = ((scalar_t)1 + std::cos(pi_over_eb * sdf)) * inv_2eps;
+                const scalar_t d_pres = sdf - off_pres;
+                if (d_pres > -eps_b && d_pres < eps_b)
+                    delta_pres = ((scalar_t)1 + std::cos(pi_over_eb * d_pres)) * inv_2eps;
                 // deltaH: pressure force/torque come from the union-∂H pass below.
                 if (force_submethod != 0) delta_pres = 0;
                 if (delta_visc == (scalar_t)0 && delta_pres == (scalar_t)0) continue;

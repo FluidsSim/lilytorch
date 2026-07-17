@@ -11,8 +11,8 @@ ADBQUICKEST, CUBISTA, van Leer, CDS; 2-D and 3-D; f32+f64), ``sl_advect_{2,3}d``
 runs on CPU and CUDA.
 
 Dependency rule: this module imports the leaf kernel modules (``native``,
-``interpolation``) but **never** imports ``solver``, ``two_phase`` or
-``facade``.  ``two_phase`` reuses the ``_sl`` slicing helper.
+``interpolation``) but **never** imports ``solver`` or ``two_phase``.
+``two_phase`` reuses the ``_sl`` slicing helper.
 
 Works identically in 2-D ``(x, y)`` and 3-D ``(x, y, z)`` by looping over
 spatial dimensions rather than duplicating code per axis -- inspired by
@@ -21,7 +21,7 @@ WaterLily.jl.
 from __future__ import annotations
 
 import torch
-# This module must never import ``solver``, ``two_phase`` or ``facade`` (it sits
+# This module must never import ``solver`` or ``two_phase`` (it sits
 # upstream of them in the import graph).
 from lilytorch.src.native import RegularGridInterpolator
 

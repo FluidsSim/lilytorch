@@ -120,7 +120,7 @@ def _forces_shared(vels, p, normals, nu_rho, h):
 def _forces_body_integrate_3d(
     xstress, ystress, zstress,
     pforce_x, pforce_y, pforce_z,
-    sdf_i, eps_body, eps_solver,
+    sdf_i, eps_body, off_pres, off_visc,
     com_x, com_y, com_z,
     X, Y, Z, h3,
     sdf_grad_mag=None,
@@ -135,21 +135,25 @@ def _forces_body_integrate_3d(
     sdf_grad_mag : (Ni, Nj, Nk) or None
         |∇SDF| for this body.  When provided (Towers 2nd-order), deltas
         are divided by this to correct for non-unit SDF gradients.
+    off_pres, off_visc : float
+        Iso-surface ``φ = offset`` on which each channel's delta is centred.
+        Legacy / production default is ``(0, eps_multiplier*h)``.
 
     Returns 18 scalars: (fv_x,fv_y,fv_z, tv_x,tv_y,tv_z,
                           fp_x,fp_y,fp_z, tp_x,tp_y,tp_z).
     """
-    # smoothed delta — viscous (shifted by eps_solver)
-    d_visc = sdf_i - eps_solver
+    # smoothed delta — viscous (centred at φ = off_visc)
+    d_visc = sdf_i - off_visc
     delta_visc = torch.where(
         torch.abs(d_visc) < eps_body,
         (1.0 + torch.cos(torch.pi * d_visc / eps_body)) / (2.0 * eps_body),
         0.0,
     )
-    # smoothed delta — pressure
+    # smoothed delta — pressure (centred at φ = off_pres)
+    d_pres = sdf_i - off_pres
     delta_pres = torch.where(
-        torch.abs(sdf_i) < eps_body,
-        (1.0 + torch.cos(torch.pi * sdf_i / eps_body)) / (2.0 * eps_body),
+        torch.abs(d_pres) < eps_body,
+        (1.0 + torch.cos(torch.pi * d_pres / eps_body)) / (2.0 * eps_body),
         0.0,
     )
 
@@ -197,7 +201,7 @@ def _forces_body_integrate_3d(
 
 
 def _forces_body_batch(
-    stresses, pforces, sdf_all, eps_body, eps_solver,
+    stresses, pforces, sdf_all, eps_body, off_pres, off_visc,
     com, grids, h_pow, sdf_grad_mag=None,
 ):
     """Dim-agnostic batched per-body force/torque integration.
@@ -215,16 +219,18 @@ def _forces_body_batch(
     _d = torch.float64
     _dt = stresses[0].dtype
 
-    # smoothed deltas at CC (broadcast over B)
-    d_visc = sdf_all - eps_solver
+    # smoothed deltas at CC (broadcast over B), each centred on its own
+    # iso-surface: viscous at φ = off_visc, pressure at φ = off_pres.
+    d_visc = sdf_all - off_visc
     delta_visc = torch.where(
         torch.abs(d_visc) < eps_body,
         (1.0 + torch.cos(torch.pi * d_visc / eps_body)) / (2.0 * eps_body),
         torch.zeros_like(sdf_all),
     )
+    d_pres = sdf_all - off_pres
     delta_pres = torch.where(
-        torch.abs(sdf_all) < eps_body,
-        (1.0 + torch.cos(torch.pi * sdf_all / eps_body)) / (2.0 * eps_body),
+        torch.abs(d_pres) < eps_body,
+        (1.0 + torch.cos(torch.pi * d_pres / eps_body)) / (2.0 * eps_body),
         torch.zeros_like(sdf_all),
     )
     # Towers (2008) 2nd-order correction: δ_S = δ_ε(φ)·|∇φ|.  Coarea:
@@ -349,7 +355,8 @@ def forces_method2(self, u, v, p, iteration):
                 (self._vel[0], self._vel[1]), p.contiguous(),
                 nu_rho_field,
                 eps_body,
-                self._cached_float('eps', self.eps),
+                self._cached_float('off_p', self.eul_sample_offset_pressure),
+                self._cached_float('off_f', self.eul_sample_offset_friction),
                 self._cached_float('h2', self.h2),
                 self.force_delta_order,
                 out2d,
@@ -369,7 +376,8 @@ def forces_method2(self, u, v, p, iteration):
                 u.contiguous(), v.contiguous(), p.contiguous(),
                 nu_rho_field,
                 eps_body,
-                self._cached_float('eps', self.eps),
+                self._cached_float('off_p', self.eul_sample_offset_pressure),
+                self._cached_float('off_f', self.eul_sample_offset_friction),
                 self._cached_float('h2', self.h2),
                 self.force_delta_order,
                 out2d,
@@ -498,7 +506,8 @@ def forces_method2(self, u, v, p, iteration):
         (xstress, ystress),
         (pforce_x, pforce_y),
         sdf_vals,
-        eps_body, self.eps,
+        eps_body,
+        self.eul_sample_offset_pressure, self.eul_sample_offset_friction,
         (comp.com_pos[:, 0], comp.com_pos[:, 1]),
         (_Xcc, _Ycc), self.h2,
         sdf_grad_mag_2d,
@@ -606,7 +615,8 @@ def forces_method2_3d(self, u, v, w, p, iteration):
                 p.contiguous(),
                 nu_rho_field,
                 eps_body,
-                self._cached_float('eps', self.eps),
+                self._cached_float('off_p', self.eul_sample_offset_pressure),
+                self._cached_float('off_f', self.eul_sample_offset_friction),
                 self._cached_float('h3', self.h3),
                 self.force_delta_order,
                 out,
@@ -626,7 +636,8 @@ def forces_method2_3d(self, u, v, w, p, iteration):
                 u.contiguous(), v.contiguous(), w.contiguous(), p.contiguous(),
                 nu_rho_field,
                 eps_body,
-                self._cached_float('eps', self.eps),
+                self._cached_float('off_p', self.eul_sample_offset_pressure),
+                self._cached_float('off_f', self.eul_sample_offset_friction),
                 self._cached_float('h3', self.h3),
                 self.force_delta_order, out,
                 _fsm, _ph_tau,
@@ -771,7 +782,9 @@ def forces_method2_3d(self, u, v, w, p, iteration):
                  tp_x, tp_y, tp_z) = _forces_body_integrate_3d(
                     xstress[sl], ystress[sl], zstress[sl],
                     pforce_x[sl], pforce_y[sl], pforce_z[sl],
-                    sdf_sub_i, eps_body, self.eps,
+                    sdf_sub_i, eps_body,
+                    self.eul_sample_offset_pressure,
+                    self.eul_sample_offset_friction,
                     body.com_pos[0], body.com_pos[1], body.com_pos[2],
                     X[sl], Y[sl], Z[sl], h3,
                     grad_mag_i,
@@ -790,7 +803,9 @@ def forces_method2_3d(self, u, v, w, p, iteration):
                  tp_x, tp_y, tp_z) = _forces_body_integrate_3d(
                     xstress, ystress, zstress,
                     pforce_x, pforce_y, pforce_z,
-                    sdf_sub_i, eps_body, self.eps,
+                    sdf_sub_i, eps_body,
+                    self.eul_sample_offset_pressure,
+                    self.eul_sample_offset_friction,
                     body.com_pos[0], body.com_pos[1], body.com_pos[2],
                     X, Y, Z, h3,
                     grad_mag_i,
@@ -810,7 +825,9 @@ def forces_method2_3d(self, u, v, w, p, iteration):
              tp_x, tp_y, tp_z) = self._forces_body_compiled(
                 xstress, ystress, zstress,
                 pforce_x, pforce_y, pforce_z,
-                sdf_i, eps_body, self.eps,
+                sdf_i, eps_body,
+                self.eul_sample_offset_pressure,
+                self.eul_sample_offset_friction,
                 body.com_pos[0], body.com_pos[1], body.com_pos[2],
                 X, Y, Z, h3,
                 grad_mag_i,
@@ -956,7 +973,10 @@ def _marker_aabb_slab(coords_flat, axes, sample_offset, inv_h, halo_extra=5):
     axes : tuple of ``D`` 1-D tensors
         Cell-centred coordinate vectors (``comp.x, comp.y[, comp.z]``).
     sample_offset : float
-        Outward normal sampling offset (world units); widens the slab.
+        Largest outward normal sampling offset over all channels (world
+        units); widens the slab.  Callers with independent pressure /
+        friction offsets must pass ``max(|off_p|, |off_f|)`` so the slab
+        still contains every query point.
     inv_h : float
         ``1 / h`` (uniform grid spacing).
     halo_extra : int
@@ -1012,7 +1032,10 @@ def forces_lagrangian_2d(self, u, v, p, iteration):
     B = len(comp.bodies)
     h = self.h
     inv_dx = 1.0 / h; inv_dy = 1.0 / h
-    soff = float(self.lagrangian_sample_offset)
+    off_p = float(self.lagr_sample_offset_pressure)
+    off_f = float(self.lagr_sample_offset_friction)
+    # The slab must cover whichever channel reaches furthest out.
+    soff_max = max(abs(off_p), abs(off_f))
 
     # Pack per-body contours into a single (2, M_total) tensor with int64
     # offsets.  Skip degenerate bodies (M <= 1) by emitting an empty slice
@@ -1043,7 +1066,7 @@ def forces_lagrangian_2d(self, u, v, p, iteration):
     # match the full-grid build exactly (the halo keeps every sampling /
     # strain stencil away from the slab edge), so results are unchanged.
     nu_rho = self._compute_nu_rho_for_forces(u, v)
-    slab = _marker_aabb_slab(cnt_flat, (comp.x, comp.y), soff, inv_dx)
+    slab = _marker_aabb_slab(cnt_flat, (comp.x, comp.y), soff_max, inv_dx)
     if slab is not None:
         (i0, i1), (j0, j1) = slab
         sl = (slice(i0, i1), slice(j0, j1))
@@ -1084,7 +1107,8 @@ def forces_lagrangian_2d(self, u, v, p, iteration):
         cnt_flat, cnt_offsets, com_pos,
         bx0, by0, inv_dx, inv_dy,
         Mx, My, method="linear",
-        sample_offset=soff,
+        sample_offset_pressure=off_p,
+        sample_offset_friction=off_f,
         out=out,
     )
 
@@ -1129,7 +1153,10 @@ def forces_lagrangian_3d(self, u, v, w, p, iteration):
     B = len(comp.bodies)
     h = self.h
     inv_dx = 1.0 / h; inv_dy = 1.0 / h; inv_dz = 1.0 / h
-    soff = float(self.lagrangian_sample_offset)
+    off_p = float(self.lagr_sample_offset_pressure)
+    off_f = float(self.lagr_sample_offset_friction)
+    # The slab must cover whichever channel reaches furthest out.
+    soff_max = max(abs(off_p), abs(off_f))
 
     # Pack per-body triangulation into flat (3, T_total) / (T_total,)
     # tensors with int64 offsets.  Raise the same friendly error as the
@@ -1167,7 +1194,7 @@ def forces_lagrangian_3d(self, u, v, w, p, iteration):
     # slab around the union of all triangulations instead of the full
     # (Nx·Ny·Nz) domain.  This is the dominant 3-D cost (6 gradient fields).
     nu_rho = self._compute_nu_rho_for_forces(u, v, w)
-    slab = _marker_aabb_slab(tri_centroid, (comp.x, comp.y, comp.z), soff, inv_dx)
+    slab = _marker_aabb_slab(tri_centroid, (comp.x, comp.y, comp.z), soff_max, inv_dx)
     if slab is not None:
         (i0, i1), (j0, j1), (k0, k1) = slab
         sl = (slice(i0, i1), slice(j0, j1), slice(k0, k1))
@@ -1208,9 +1235,10 @@ def forces_lagrangian_3d(self, u, v, w, p, iteration):
         tri_offsets, com_pos,
         bx0, by0, bz0, inv_dx, inv_dy, inv_dz,
         Mx, My, Mz, method="linear",
-        # Tunable per config (``lagrangian_sample_offset``).  See the
-        # 2-D path / solver.py docstring.
-        sample_offset=soff,
+        # Tunable per config (``sample_offset_{pressure,friction}_cells``,
+        # or the legacy single ``lagrangian_sample_offset``).  See solver.py.
+        sample_offset_pressure=off_p,
+        sample_offset_friction=off_f,
         out=out,
     )
 
@@ -1364,7 +1392,7 @@ class ForcesPostGraph:
             kin, aabb_lo, aabb_dim, grids,
             h_grid, max_vol, sdf_cc, interp_method,
             fields, p, nu_rho_field,
-            eps_body, eps_solver, cell_vol, delta_order, out,
+            eps_body, off_pres, off_visc, cell_vol, delta_order, out,
             force_submethod=0, ph_tau=0.0):
         """Zero ``out`` and run the native streaming force readout eagerly.
         ``grids`` is (gx, gy[, gz]); ``fields`` is (u, v[, w]).  Covers both
@@ -1386,6 +1414,6 @@ class ForcesPostGraph:
              self._kin_st, self._lo_st, self._dim_st, *grids,
              h_grid, self._max_vol, sdf_cc, interp_method,
              *fields, p, _nu_rho_use,
-             eps_body, eps_solver, cell_vol, delta_order, out,
+             eps_body, off_pres, off_visc, cell_vol, delta_order, out,
              int(force_submethod), float(ph_tau))
         self.eager_calls += 1

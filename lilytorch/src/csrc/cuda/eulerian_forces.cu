@@ -297,7 +297,8 @@ __global__ void streaming_sdf_forces_post_2d_kernel(
     const int64_t   nu_rho_field_size,
     const scalar_t inv_h,
     const scalar_t eps_body,
-    const scalar_t eps_solver,
+    const scalar_t off_pres,
+    const scalar_t off_visc,
     const scalar_t h2,
     const int delta_order,
     const int with_pressure,
@@ -348,10 +349,12 @@ __global__ void streaming_sdf_forces_post_2d_kernel(
         const scalar_t s_cc_body = sdf_sample_dispatch_2d(
             interp_method, F, Mx, My, bx0, by0, idx_, idy_, bxq, byq);
 
-        const scalar_t band_lo = (eps_solver - eps_body) < (-eps_body)
-            ? (eps_solver - eps_body) : (-eps_body);
-        const scalar_t band_hi = (eps_solver + eps_body) > (eps_body)
-            ? (eps_solver + eps_body) : (eps_body);
+        // Cull to the union of the two delta supports:
+        // [off_pres ± eps_body] ∪ [off_visc ± eps_body].
+        const scalar_t off_lo = off_pres < off_visc ? off_pres : off_visc;
+        const scalar_t off_hi = off_pres > off_visc ? off_pres : off_visc;
+        const scalar_t band_lo = off_lo - eps_body;
+        const scalar_t band_hi = off_hi + eps_body;
 
         if (s_cc_body > band_lo && s_cc_body < band_hi) {
             const scalar_t nu_rho_val = (nu_rho_field_size == 1)
@@ -489,13 +492,17 @@ __global__ void streaming_sdf_forces_post_2d_kernel(
             const scalar_t inv_2eps = (scalar_t)0.5 / eps_body;
             const scalar_t pi_ov_eb = pi_v / eps_body;
 
+            // Each channel is read on its own iso-surface: the viscous delta
+            // is centred at phi = off_visc, the pressure delta at
+            // phi = off_pres.  Legacy = (0, eps_multiplier*h).
             scalar_t delta_visc = 0;
             scalar_t delta_pres = 0;
-            const scalar_t d_visc = s_cc_body - eps_solver;
+            const scalar_t d_visc = s_cc_body - off_visc;
+            const scalar_t d_pres = s_cc_body - off_pres;
             if (d_visc > -eps_body && d_visc < eps_body)
                 delta_visc = ((scalar_t)1 + cos(pi_ov_eb * d_visc)) * inv_2eps;
-            if (s_cc_body > -eps_body && s_cc_body < eps_body)
-                delta_pres = ((scalar_t)1 + cos(pi_ov_eb * s_cc_body)) * inv_2eps;
+            if (d_pres > -eps_body && d_pres < eps_body)
+                delta_pres = ((scalar_t)1 + cos(pi_ov_eb * d_pres)) * inv_2eps;
             // deltaH readout supplies the pressure force/torque from a separate
             // union-∂H pass; here we emit only the viscous channels.
             if (!with_pressure) delta_pres = 0;
@@ -677,7 +684,10 @@ void streaming_sdf_forces_post_2d_cuda(
     const int64_t interp_method,
     const at::Tensor& u_prev, const at::Tensor& v_prev, const at::Tensor& p_prev,
     const at::Tensor& nu_rho_field,
-    const double eps_body, const double eps_solver, const double h2,
+    const double eps_body,
+    const double sample_offset_pressure,
+    const double sample_offset_friction,
+    const double h2,
     const int64_t delta_order,
     const int64_t force_submethod,
     const double ph_tau,
@@ -723,7 +733,8 @@ void streaming_sdf_forces_post_2d_cuda(
                     (int64_t)nu_rho_field.numel(),
                     (scalar_t)(1.0 / h_grid),
                     (scalar_t)eps_body,
-                    (scalar_t)eps_solver,
+                    (scalar_t)sample_offset_pressure,
+                    (scalar_t)sample_offset_friction,
                     (scalar_t)h2,
                     (int)delta_order,
                     with_pressure,
@@ -812,7 +823,8 @@ __global__ void streaming_sdf_forces_post_3d_kernel(
     const int64_t   nu_rho_field_size,
     const scalar_t inv_h,
     const scalar_t eps_body,
-    const scalar_t eps_solver,
+    const scalar_t off_pres,
+    const scalar_t off_visc,
     const scalar_t h3,
     const int delta_order,
     const int with_pressure,
@@ -869,10 +881,12 @@ __global__ void streaming_sdf_forces_post_3d_kernel(
             interp_method, F, Mx, My, Mz, bx0, by0, bz0, idx_, idy_, idz_,
             bxq, byq, bzq);
 
-        const scalar_t band_lo = (eps_solver - eps_body) < (-eps_body)
-            ? (eps_solver - eps_body) : (-eps_body);
-        const scalar_t band_hi = (eps_solver + eps_body) > (eps_body)
-            ? (eps_solver + eps_body) : (eps_body);
+        // Cull to the union of the two delta supports:
+        // [off_pres ± eps_body] ∪ [off_visc ± eps_body].
+        const scalar_t off_lo = off_pres < off_visc ? off_pres : off_visc;
+        const scalar_t off_hi = off_pres > off_visc ? off_pres : off_visc;
+        const scalar_t band_lo = off_lo - eps_body;
+        const scalar_t band_hi = off_hi + eps_body;
 
         if (s_cc_body > band_lo && s_cc_body < band_hi) {
             const scalar_t nu_rho_val = (nu_rho_field_size == 1)
@@ -1014,12 +1028,16 @@ __global__ void streaming_sdf_forces_post_3d_kernel(
             const scalar_t pi_v = (scalar_t)3.141592653589793;
             const scalar_t inv_2eps = (scalar_t)0.5 / eps_body;
             const scalar_t pi_ov_eb = pi_v / eps_body;
+            // Each channel is read on its own iso-surface: the viscous delta
+            // is centred at phi = off_visc, the pressure delta at
+            // phi = off_pres.  Legacy = (0, eps_multiplier*h).
             scalar_t delta_visc = 0, delta_pres = 0;
-            const scalar_t d_visc = s_cc_body - eps_solver;
+            const scalar_t d_visc = s_cc_body - off_visc;
+            const scalar_t d_pres = s_cc_body - off_pres;
             if (d_visc > -eps_body && d_visc < eps_body)
                 delta_visc = ((scalar_t)1 + cos(pi_ov_eb * d_visc)) * inv_2eps;
-            if (s_cc_body > -eps_body && s_cc_body < eps_body)
-                delta_pres = ((scalar_t)1 + cos(pi_ov_eb * s_cc_body)) * inv_2eps;
+            if (d_pres > -eps_body && d_pres < eps_body)
+                delta_pres = ((scalar_t)1 + cos(pi_ov_eb * d_pres)) * inv_2eps;
             // deltaH readout supplies the pressure force/torque from a separate
             // union-∂H pass; here we emit only the viscous channels.
             if (!with_pressure) delta_pres = 0;
@@ -1227,7 +1245,8 @@ void streaming_sdf_forces_post_3d_cuda(
     const at::Tensor& w, const at::Tensor& p,
     const at::Tensor& nu_rho_field,
     const double eps_body,
-    const double eps_solver,
+    const double sample_offset_pressure,
+    const double sample_offset_friction,
     const double h3,
     const int64_t delta_order,
     const int64_t force_submethod,
@@ -1268,7 +1287,9 @@ void streaming_sdf_forces_post_3d_cuda(
                     w.data_ptr<scalar_t>(), p.data_ptr<scalar_t>(),
                     nu_rho_field.data_ptr<scalar_t>(), (int64_t)nu_rho_field.numel(),
                     (scalar_t)(1.0 / h_grid), (scalar_t)eps_body,
-                    (scalar_t)eps_solver, (scalar_t)h3, (int)delta_order,
+                    (scalar_t)sample_offset_pressure,
+                    (scalar_t)sample_offset_friction,
+                    (scalar_t)h3, (int)delta_order,
                     with_pressure,
                     out.data_ptr<double>());
         };
