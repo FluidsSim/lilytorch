@@ -675,6 +675,47 @@ reaching the fluid (only ~0.02% of muscle work enters the water), and a position
 tracks the same gait regardless of readout, so P_act cannot see the difference. Use
 `zfish_pbdim_closure.py`.
 
+## 10.11 GRID CONVERGENCE — the resolution diagnosis is confirmed, but neither readout is converged
+
+"Is the discrepancy just resolution?" Yes as a *diagnosis*, no as a *fix*. Measured, not argued:
+same domain, isotropic h halved in all three directions, dt halved, same 0.6 s
+(`ZFISH_REFINE=2`; note the config's commented-out 1024×256×128 block also halves the y extent,
+which would confound resolution with a narrower tank — this does not).
+
+| grid | cells | R/h (thin) | `eul_order2` | `lagr_off1h` | gap eul/lagr |
+|---|---|---|---|---|---|
+| 2h = 391 µm | 1.0 M | 1.43 | **blows up** | **blows up** | — |
+| h = 195 µm | 8.4 M | 2.86 | 42.07 | 79.46 | 0.529 |
+| h/2 = 97.7 µm | 67 M | 5.72 | **47.94** | **74.17** | **0.646** |
+
+**The two readouts converge toward each other from opposite sides** — eulerian +14%, lagrangian
+−6.7% — closing the gap 47% → 35%. That is exactly what §10.2 predicts and is the strongest
+confirmation of the mechanism: the eulerian's error is `O(eps/R)` and refining shrinks `eps` with the
+grid.
+
+**But 16× the compute bought only ~25% of the gap**, and **neither readout is grid-converged**. The
+truth is bracketed in **~48-74 mm/s** and the two runs do not agree on a limit: first-order Richardson
+gives 53.7 from the eulerian side and 68.9 from the lagrangian side. **Inconsistent ⇒ not in the
+asymptotic regime, so do not extrapolate either.** The convergence order could not be measured: a
+third point is unavailable in both directions — 2h explodes (`mjWARN_BADQACC`; at R/h=1.43 the fish is
+~3 cells thick in total, BDIM cannot represent it) and h/4 needs 537 M cells, well past the 16 GB card.
+
+**Ranking still holds, on the evidence that does exist:** the lagrangian moves 2× less under
+refinement (−6.7% vs +14%), so it is nearer its limit; and the oracle shows its *readout* is exact at
+every R/h (0.999 at R/h=3), so its remaining drift is **fluid** resolution, not readout error. The
+eulerian carries both.
+
+**Closure collapses as a discriminator here — a caution for anyone reaching for it.** On the fine grid
+the two readouts' closures are **nearly identical (eul 105.3%, lagr 107.1%)** while their speeds still
+differ by 35%. The eulerian's closure improved a lot with refinement (115.8% → 105.3%) — but a readout
+can close the energy books to 5% and still be 35% wrong on the physics you care about. Closure is a
+screen for gross error, never a scoreboard (§10.10 said this; this is the clean demonstration).
+(`E_diss` also rises with refinement, 0.92e-6 → 1.23e-6 J: more of the boundary layer is resolved.)
+
+**So the honest state of the zebrafish**: at any affordable resolution the lagrangian at `off≈h` is the
+best available readout, but its ~74-79 mm/s is **not** a converged number — plausibly ~10% high. The
+fluid, not the readout, is now the binding constraint, and closing it is not affordable in 3-D.
+
 ## 10.8 What is still open
 
 1. ~~Verify the §10.4 recommendation in a live run.~~ **DONE — §10.10.** What remains: apply

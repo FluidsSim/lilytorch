@@ -37,7 +37,9 @@ NITER = int(os.environ.get("ZFISH_NITER", 1201))       # dt=5e-4 -> 0.6 s
 # pure resolution change.  (The 1024x256x128 block commented out in the
 # production config also halves the y extent, which would confound resolution
 # with a narrower tank.)  n_iterations scales so the physical time is unchanged.
-REFINE = int(os.environ.get("ZFISH_REFINE", 1))
+# Float: 2 halves h, 0.5 doubles it — a 3-point sequence lets the convergence
+# ORDER be measured rather than assumed.
+REFINE = float(os.environ.get("ZFISH_REFINE", 1))
 # Offset in CELLS, so the recommendation "off ~= h" tracks the grid: an offset
 # fixed in metres would mean a different thing on a finer grid.
 LAGR_OFFSET_CELLS = os.environ.get("ZFISH_LAGR_OFFSET_CELLS", "")
@@ -62,12 +64,12 @@ class SimConfig(_ProdConfig):
         self.n_iterations = NITER
 
         if REFINE != 1:
-            self.Nx *= REFINE
-            self.Ny *= REFINE
-            self.Nz *= REFINE
-            self.timestep /= REFINE
+            self.Nx = int(round(self.Nx * REFINE))
+            self.Ny = int(round(self.Ny * REFINE))
+            self.Nz = int(round(self.Nz * REFINE))
+            self.timestep = self.timestep / REFINE
             self.bdim_dt = self.timestep
-            self.n_iterations = (self.n_iterations - 1) * REFINE + 1
+            self.n_iterations = int(round((self.n_iterations - 1) * REFINE)) + 1
 
         h = (self.xmax - self.xmin) / self.Nx
         if LAGR_OFFSET_CELLS != "":
