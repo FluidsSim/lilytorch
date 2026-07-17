@@ -9,7 +9,7 @@ That is the 3-D twin of ``shift_sweep_2d.py``.
 Install from a FARMS run by overriding ``_extra_run_patch`` in the SimConfig::
 
     def _extra_run_patch(self):
-        return ("import lilytorch.validation.force_readout_oracle."
+        return ("import lilytorch.examples.force_benchmarks."
                 "zfish_snapshot_hook as _z; _z.install(step=300, out='/path/snap.pt');")
 
 The hook wraps ``FluidSolver.forces_method2_3d``, so it only fires on the

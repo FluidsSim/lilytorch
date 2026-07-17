@@ -7,7 +7,7 @@ the physics/grid/gait identical to production is the whole point — the snapsho
 must be a scene the real run actually visits.
 
     ZFISH_SNAP_STEP=300 ZFISH_SNAP_OUT=/path/snap.pt \
-        python -m lilytorch.validation.force_readout_oracle.gen_zfish_snapshot
+        python -m lilytorch.examples.force_benchmarks.gen_zfish_snapshot
 
 Then sweep it offline with ``shift_sweep_3d.py``.
 """
@@ -45,7 +45,7 @@ class SimConfig(_ProdConfig):
 
     def _extra_run_patch(self):
         return (
-            "import lilytorch.validation.force_readout_oracle."
+            "import lilytorch.examples.force_benchmarks."
             "zfish_snapshot_hook as _z; "
             f"_z.install(step={SNAP_STEP!r}, out={SNAP_OUT!r}, stop=True);"
         )

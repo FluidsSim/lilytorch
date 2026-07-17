@@ -4,7 +4,7 @@ The symptom that started all of this is "the fish swims markedly slower under
 eulerian", so this measures exactly that: net forward COM displacement and mean
 forward speed over each run in the arbitration stack.
 
-    python -m lilytorch.validation.force_readout_oracle.zfish_swim_speed
+    python -m lilytorch.examples.force_benchmarks.zfish_swim_speed
 
 Forward is -x for this gait (the animat is spawned yaw=pi).
 """

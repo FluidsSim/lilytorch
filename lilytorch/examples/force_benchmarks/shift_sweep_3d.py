@@ -13,7 +13,7 @@ zebrafish is ~2-3 cells thick, where eps_solver = 2h is a LARGE fraction of the
 body radius — if the readout swings O(1) across the sweep here, the offset is
 the zebrafish story; if it is flat, the swim-speed gap is something else.
 
-    python -m lilytorch.validation.force_readout_oracle.shift_sweep_3d [snap.pt]
+    python -m lilytorch.examples.force_benchmarks.shift_sweep_3d [snap.pt]
 """
 from __future__ import annotations
 

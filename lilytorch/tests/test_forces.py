@@ -17,7 +17,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from lilytorch.src.facade import body_update_2d, body_update_3d
+from lilytorch.src.native import body_update_2d, body_update_3d
 from lilytorch.src.forces import (
     streaming_sdf_forces_post_2d,
     streaming_sdf_forces_post_3d,
@@ -435,7 +435,7 @@ def test_forces_3d_graph_replay_eq_eager(dtype, submethod):
 # both sides are wrong.  The two cases below impose analytic fields on a sphere
 # whose force integral is known in closed form (divergence theorem), so they
 # measure each readout's real error.  Companion script with the full R/h × eps
-# sweep: validation/force_readout_oracle/oracle_native_three_way.py.
+# sweep: examples/force_benchmarks/oracle_native_three_way.py.
 #
 #   A (pressure):  p = -G·x,     u = 0   ->  F_p = G·V
 #   B (viscous):   u_x = c·y²,   p = 0   ->  F_v = 2·ν·ρ·c·V   (divergence-free)

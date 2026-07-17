@@ -1,5 +1,25 @@
 # Handoff: make the eulerian and lagrangian force readouts agree — and match published references
 
+> ## ⚠ 2026-07-17 — §10's cross-method comparisons are CONFOUNDED. Read this before using them.
+>
+> The two readouts do not sample in the same places, and §10 varied both at once:
+> the **eulerian** reads pressure at `φ=0` (never shifted) and σ at `φ=eps_solver`; the
+> **lagrangian** reads *both* at `φ=lagrangian_sample_offset` — one knob. So "eulerian at s" vs
+> "lagrangian at off=s" also changes *where pressure is read*.
+>
+> **Still valid:** everything measured against an *exact* answer (the analytic oracles, §10.3's
+> **viscous-only** matched table, the `delta_order=2` fix), and the geometric facts.
+> **Confounded:** the 3.96× live viscous ratio, the 0.41× net thrust, the 45% speed gap *as a readout
+> comparison*, and the mechanism behind the `off≈h` recommendation (`off≈h` is still supported by
+> closure and the speed plateau, but *why* is unknown — it moves both channels).
+> Also: the `eps` shift is the **Maertens & Weymouth** convention, not a bug — what is unvalidated is
+> its behaviour at `eps/R ~ 1`.
+>
+> The fix is to split both readouts into `sample_offset_pressure` / `sample_offset_friction` and
+> redo the comparison at matched sampling. Plan:
+> **`examples/force_benchmarks/HANDOFF_NEXT_AGENT.md`** — start there; all force-comparison tooling
+> now lives in `examples/force_benchmarks/`.
+
 **Branch:** `cuda_native_port`  ·  **Written:** 2026-07-16  ·  **Status:** SUPERSEDED by §9 (session 2)
 and §10 (session 3, same day). **§10 explains the zebrafish and reconciles §1 with §9 — read it first.**
 Phases 0-2 done; the §1 "cubic over-read law" is not a universal law (§9.1) but IS the dominant term
@@ -76,9 +96,9 @@ The error is only **first order in h** at fixed `eps_multiplier`: you would need
 
 Two scripts, added with this handoff:
 
-- `validation/force_readout_oracle/oracle_python_path.py` — python eulerian vs lagrangian via a real
+- `examples/force_benchmarks/oracle_python_path.py` — python eulerian vs lagrangian via a real
   `FluidSolver`.
-- `validation/force_readout_oracle/oracle_native_three_way.py` — ndelta vs deltaH vs lagrangian via
+- `examples/force_benchmarks/oracle_native_three_way.py` — ndelta vs deltaH vs lagrangian via
   the native op with a hand-built single-sphere scene (this is the path production runs).
 
 Both print ratio-to-exact tables. Run them first to confirm the environment reproduces the above.
@@ -334,11 +354,11 @@ if combined with eulerian forces): `salamander/gen_configs_underwater_walking_3d
    s=2ε and Richardson-extrapolate to s=0 (two deltas, one extra pass, no new stencil); reject
    Option A (μ0-division diverges, §6 measurement stands). Gate any fix on: cylinder 512²/1024²
    decomposed vs K&L, gazzola U_t, coquerelle 3D sweep, THEN zebrafish agreement.
-3. **Phase 5 physics test**: promote `validation/force_readout_oracle/oracle_native_three_way.py`
+3. **Phase 5 physics test**: promote `examples/force_benchmarks/oracle_native_three_way.py`
    into `tests/test_forces.py` (analytic sphere fields; assert lagrangian ≈ exact and eulerian
    pressure ≈ exact; pin the current eulerian viscous offset behaviour with a comment so a future fix
    flips the assertion intentionally). Every existing force test is parity-only; this closes that hole.
-4. Commit the session's repairs (9.4) + shift-sweep as a script under `validation/force_readout_oracle/`.
+4. Commit the session's repairs (9.4) + shift-sweep as a script under `examples/force_benchmarks/`.
 5. Re-check `single_sphere_drop_gazzola_low_density` and `coquerelle_3d` after any fix
    (`bdim_mu0_projection: False` for coquerelle, see memory).
 
@@ -554,7 +574,7 @@ that construction here.)
   `((R+eps)/R)³` model with a docstring saying a fix should flip the assertion; and pin
   deltaH-viscous == ndelta-viscous (so deltaH is never mistaken for a candidate fix). Every other
   force test in the repo is parity-or-snapshot only.
-- `validation/force_readout_oracle/`: `zfish_snapshot_hook.py`, `gen_zfish_snapshot.py`,
+- `examples/force_benchmarks/`: `zfish_snapshot_hook.py`, `gen_zfish_snapshot.py`,
   `shift_sweep_3d.py` (+ `shift_sweep_2d.py` from session 2).
 
 ## 10.6 Two PRE-EXISTING failures found, NOT caused by this work or the refactor
@@ -579,11 +599,11 @@ bisect it; it is a different bug from this handoff and is deliberately left unto
 
 ```bash
 python -m pytest lilytorch/tests/test_forces.py -k oracle -q        # ~1 s
-python -m lilytorch.validation.force_readout_oracle.oracle_native_three_way
+python -m lilytorch.examples.force_benchmarks.oracle_native_three_way
 ZFISH_SNAP_FORCE_METHOD=lagrangian \
   ZFISH_SNAP_OUT=/data/andreaferrario/ns_data/zfish_force_snapshot/snap_lagr.pt \
-  python -m lilytorch.validation.force_readout_oracle.gen_zfish_snapshot   # ~15 s
-python -m lilytorch.validation.force_readout_oracle.shift_sweep_3d \
+  python -m lilytorch.examples.force_benchmarks.gen_zfish_snapshot   # ~15 s
+python -m lilytorch.examples.force_benchmarks.shift_sweep_3d \
   /data/andreaferrario/ns_data/zfish_force_snapshot/snap_lagr.pt
 ```
 

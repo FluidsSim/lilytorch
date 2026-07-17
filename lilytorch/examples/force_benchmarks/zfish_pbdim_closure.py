@@ -20,7 +20,7 @@ that reaches the fluid (only ~0.02% of muscle work enters the water), so
 verify_energy_balance.py's residual is dominated by internal body dynamics and
 is identical for every readout.  Use this instead.
 
-    python -m lilytorch.validation.force_readout_oracle.zfish_pbdim_closure
+    python -m lilytorch.examples.force_benchmarks.zfish_pbdim_closure
 """
 from __future__ import annotations
 

@@ -12,7 +12,7 @@ gait, physics; viewers stripped) into a {stack}/{case} layout, so
 ``verify_energy_balance.py --stack ... --case ...`` can read it directly.
 
   ZFISH_CASE=lagr_off0 ZFISH_FORCE_METHOD=lagrangian ZFISH_LAGR_OFFSET=0.0 \
-      python -m lilytorch.validation.force_readout_oracle.gen_zfish_readout_arbitration
+      python -m lilytorch.examples.force_benchmarks.gen_zfish_readout_arbitration
 
 Env: ZFISH_CASE, ZFISH_FORCE_METHOD, ZFISH_LAGR_OFFSET (metres, or "" for the
 solver default), ZFISH_DELTA_ORDER, ZFISH_NITER.
